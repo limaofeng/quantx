@@ -17,7 +17,7 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models import (
   Account,
-  AccountTradingRollout,
+  AccountExecutionControl,
   AuthDeviceSession,
   AuthUser,
   AuthUserAccountAccess,
@@ -932,7 +932,7 @@ async def test_preflight_uses_fresh_quote_account_instrument_and_order_sizer(
     Account.__table__,
     Position.__table__,
     Instrument.__table__,
-    AccountTradingRollout.__table__,
+    AccountExecutionControl.__table__,
   ]
   async with engine.begin() as connection:
     await connection.run_sync(
@@ -971,20 +971,16 @@ async def test_preflight_uses_fresh_quote_account_instrument_and_order_sizer(
           created_at=now,
           updated_at=now,
         ),
-        AccountTradingRollout(
+        AccountExecutionControl(
           account_id="ACCOUNT-1",
-          stage="CANARY",
-          enabled=True,
-          kill_switch=False,
+          authorization_state="ENABLED",
           reconcile_status="READY",
-          policy_version=1,
-          acknowledged_policy_version=1,
           last_snapshot_id="snapshot-1",
-          last_snapshot_hash="snapshot-hash-1",
+          last_snapshot_hash="a" * 64,
           last_snapshot_at=utcnow(),
           controlled_window_active=True,
           controlled_window_snapshot_id="snapshot-1",
-          controlled_window_snapshot_hash="snapshot-hash-1",
+          controlled_window_snapshot_hash="a" * 64,
           created_at=now,
           updated_at=now,
         ),

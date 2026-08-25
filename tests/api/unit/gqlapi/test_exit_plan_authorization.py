@@ -34,7 +34,7 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
+  AccountExecutionControl,
   AgentDevice,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
@@ -159,7 +159,7 @@ async def authorization_database(monkeypatch):
           PendingTradeOrder.__table__,
           TradeCommandOutbox.__table__,
           TradeIntentRecord.__table__,
-          AccountTradingRollout.__table__,
+          AccountExecutionControl.__table__,
           AgentDevice.__table__,
           RuntimeComponentHeartbeat.__table__,
         ],
@@ -239,14 +239,11 @@ async def authorization_database(monkeypatch):
           created_at=shanghai_now,
           updated_at=shanghai_now,
         ),
-        AccountTradingRollout(
+        AccountExecutionControl(
           account_id="ACCOUNT-1",
-          stage="CANARY",
-          enabled=True,
-          kill_switch=False,
+          authorization_state="ENABLED",
+          state_version=2,
           reconcile_status="READY",
-          policy_version=2,
-          acknowledged_policy_version=2,
           last_snapshot_id="snapshot-1",
           last_snapshot_hash="snapshot-hash-1",
           last_snapshot_at=utcnow(),
@@ -799,7 +796,7 @@ async def test_confirmation_fails_closed_when_bound_safety_facts_change(
       position = await db.get(Position, "position-row-1")
       position.can_use_volume = 300
     else:
-      rollout = await db.get(AccountTradingRollout, "ACCOUNT-1")
+      rollout = await db.get(AccountExecutionControl, "ACCOUNT-1")
       rollout.last_snapshot_hash = "snapshot-hash-2"
     await db.commit()
   with pytest.raises(TradeApprovalChallengeError) as rejected:
@@ -819,8 +816,7 @@ async def test_confirmation_fails_closed_when_bound_safety_facts_change(
 @pytest.mark.parametrize(
   ("switch_name", "error_pattern"),
   [
-    ("enable_real_trading", "真实交易总开关|真实交易或做 T 实盘开关"),
-    ("t_trade_live_enabled", "真实交易或做 T 实盘开关"),
+    ("enable_real_trading", "真实交易总开关"),
   ],
 )
 async def test_live_preview_and_atomic_route_fail_when_real_switch_is_off(

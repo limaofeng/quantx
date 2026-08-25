@@ -44,7 +44,7 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
+  AccountExecutionControl,
   PendingTradeOrder,
   StrategyOrderCorrelation,
   StrategyRuntimeEvent,
@@ -415,14 +415,12 @@ class EntryPlanService:
             not bool(dict(rejection or {}).get("success"))
             and self._runtime_manager.get_run(normalized_plan_id) is None
           ):
-            reconciled_zero_intent_id = (
-              await self._terminalize_offline_awaiting_intent(
-                normalized_plan_id,
-                facts.pending_intent_id,
-                account_id=normalized_account_id,
-                instrument_code=loaded.config.instrument_code,
-                reason="ENTRY_PLAN_PAUSED",
-              )
+            reconciled_zero_intent_id = await self._terminalize_offline_awaiting_intent(
+              normalized_plan_id,
+              facts.pending_intent_id,
+              account_id=normalized_account_id,
+              instrument_code=loaded.config.instrument_code,
+              reason="ENTRY_PLAN_PAUSED",
             )
         await self._set_phase(
           normalized_plan_id,
@@ -475,14 +473,12 @@ class EntryPlanService:
           not bool(dict(rejection or {}).get("success"))
           and self._runtime_manager.get_run(normalized_plan_id) is None
         ):
-          reconciled_zero_intent_id = (
-            await self._terminalize_offline_awaiting_intent(
-              normalized_plan_id,
-              facts.pending_intent_id,
-              account_id=normalized_account_id,
-              instrument_code=loaded.config.instrument_code,
-              reason="ENTRY_PLAN_CANCELLED",
-            )
+          reconciled_zero_intent_id = await self._terminalize_offline_awaiting_intent(
+            normalized_plan_id,
+            facts.pending_intent_id,
+            account_id=normalized_account_id,
+            instrument_code=loaded.config.instrument_code,
+            reason="ENTRY_PLAN_CANCELLED",
           )
       facts = await self._facts(normalized_plan_id)
       pending_work = bool(facts.active_intent_id or facts.has_working_order)
@@ -830,7 +826,7 @@ class EntryPlanService:
       )
       instrument = await db.get(Instrument, normalized_code)
       rollout = (
-        await db.get(AccountTradingRollout, normalized_account_id)
+        await db.get(AccountExecutionControl, normalized_account_id)
         if environment == EntryEnvironment.LIVE
         else None
       )
@@ -1032,9 +1028,7 @@ class EntryPlanService:
           try:
             state = ManagedEntryPlanState.from_dict(
               self._mapping(
-                self._mapping(persisted_state.custom_state).get(
-                  MANAGED_ENTRY_STATE_KEY
-                )
+                self._mapping(persisted_state.custom_state).get(MANAGED_ENTRY_STATE_KEY)
               )
             )
           except (TypeError, ValueError):
@@ -1199,8 +1193,7 @@ class EntryPlanService:
         or str(intent.direction or "").upper() != "BUY"
         or str(intent.status or "").upper() != "AWAITING_APPROVAL"
         or str(metadata.get("entry_plan_id") or "") != plan_id
-        or str(metadata.get("execution_mode") or "").upper()
-        != "MANUAL_CONFIRM"
+        or str(metadata.get("execution_mode") or "").upper() != "MANUAL_CONFIRM"
       ):
         return ""
 

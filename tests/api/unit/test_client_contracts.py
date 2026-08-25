@@ -72,6 +72,7 @@ def test_graphql_contract_uses_only_explicit_public_permission_categories():
     for permission in policy["requiredPermissions"]
   }
   assert actual <= {
+    "account-execution:control",
     "agent:manage",
     "assistant:read",
     "assistant:write",
@@ -176,6 +177,8 @@ def test_client_contract_contains_narrow_mobile_control_permissions():
     ("confirmStrategyControl", "strategy:control"),
     ("previewTTradeControl", "t-trade:control"),
     ("confirmTTradeControl", "t-trade:control"),
+    ("previewAccountExecutionControl", "account-execution:control"),
+    ("confirmAccountExecutionControl", "account-execution:control"),
   ):
     assert policies["Mutation"][field_name]["requiredPermissions"] == [
       control_permission,
@@ -185,14 +188,23 @@ def test_client_contract_contains_narrow_mobile_control_permissions():
     "t-trade:control"
   ]
 
-  assert "enum TTradeControlAction" in schema_sdl
-  for action in (
+  account_actions = schema_sdl.split(
+    "enum AccountExecutionControlAction {", 1
+  )[1].split("}", 1)[0]
+  assert set(account_actions.split()) == {
     "BEGIN_CONTROLLED_WINDOW",
+    "ENABLE_RISK_INCREASE",
+    "PAUSE_RISK_INCREASE",
+    "KILL_SWITCH",
+    "CLEAR_KILL_SWITCH",
+  }
+  t_trade_actions = schema_sdl.split("enum TTradeControlAction {", 1)[1].split(
+    "}", 1
+  )[0]
+  assert set(t_trade_actions.split()) == {
     "ACTIVATE_CANARY",
     "ACTIVATE_LIVE",
-    "KILL_SWITCH",
-  ):
-    assert action in schema_sdl
+  }
   assert "previewTTradeControl(input: TTradeControlPreviewInput!)" in schema_sdl
   assert "confirmTTradeControl(input: TTradeControlConfirmationInput!)" in schema_sdl
 

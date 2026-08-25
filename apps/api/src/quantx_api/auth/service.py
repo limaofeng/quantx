@@ -47,6 +47,7 @@ NATIVE_SESSION_SCOPES = frozenset(
     "notification:manage",
     "orders:read",
     "portfolio:read",
+    "account-execution:control",
     "strategy:control",
     "strategy:read",
     "system-status:read",

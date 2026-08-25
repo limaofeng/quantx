@@ -642,26 +642,6 @@ class TTradeMutation:
         operation_status="NOT_CONSUMED",
       )
 
-  @strawberry.mutation(description="基于最新完整快照建立账户实盘窗口")
-  async def begin_t_trade_controlled_window(
-    self,
-    info: strawberry.types.Info,
-    account_id: str,
-    policy_version: int,
-    snapshot_id: str,
-    idempotency_key: str,
-  ) -> TTradeOperationsMutationResult:
-    resolved = authorized_account_id(info, account_id)
-    principal = principal_from_context(info.context)
-    principal.require_permission("trade:approve")
-    return await TTradeResolver.begin_controlled_window(
-      resolved,
-      user_id=principal.user_id,
-      policy_version=policy_version,
-      snapshot_id=snapshot_id,
-      idempotency_key=idempotency_key,
-    )
-
   @strawberry.mutation(description="完成门禁检查并启用 Canary 或开发环境正式 LIVE")
   async def activate_t_trade_live(
     self,
@@ -700,24 +680,6 @@ class TTradeMutation:
       resolved,
       reason,
       user_id=principal.user_id,
-    )
-
-  @strawberry.mutation(description="触发做 T 紧急停止并转人工处置")
-  async def trigger_t_trade_kill_switch(
-    self,
-    info: strawberry.types.Info,
-    account_id: str,
-    reason: str,
-    idempotency_key: str,
-  ) -> TTradeOperationsMutationResult:
-    resolved = authorized_account_id(info, account_id)
-    principal = principal_from_context(info.context)
-    principal.require_permission("trade:approve")
-    return await TTradeResolver.trigger_kill_switch(
-      resolved,
-      reason,
-      user_id=principal.user_id,
-      idempotency_key=idempotency_key,
     )
 
   @strawberry.mutation(description="撤销当前仍可撤的做 T 委托")

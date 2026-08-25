@@ -211,6 +211,7 @@ class Settings(BaseSettings):
       "liquidation:control",
       "notification:manage",
       "strategy:control",
+      "account-execution:control",
       "t-trade:control",
       "watchlist:write",
       "assistant:read",

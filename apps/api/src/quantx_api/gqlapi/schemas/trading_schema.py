@@ -17,11 +17,16 @@ from sqlalchemy import select
 from quantx_api.auth.errors import AuthError
 from quantx_api.auth.service import AuthService
 
+from ..account_execution_control import (
+  AccountExecutionControlChallengeService,
+  normalize_account_execution_control_request,
+)
 from ..manual_order import (
   ManualOrderChallengeService,
   normalize_manual_order_request,
 )
 from ..resolvers.orders import OrderResolver
+from ..resolvers.trading_safety import AccountExecutionSafetyResolver
 from ..security import authorized_account_id, principal_from_context
 from ..trade_approval import TradeApprovalChallengeError
 from ..types import (
@@ -36,6 +41,13 @@ from ..types import (
   OrderInput,
   OrderMutationResult,
   Trade,
+)
+from ..types.trading_safety_types import (
+  AccountExecutionControlConfirmationInput,
+  AccountExecutionControlConfirmationResult,
+  AccountExecutionControlPreview,
+  AccountExecutionControlPreviewInput,
+  AccountExecutionControlPreviewResult,
 )
 from ..types.trading_types import (
   ManualOrderExecutionMode,
@@ -145,19 +157,19 @@ class TradingQuery:
     )
     has_manual_scope = "trade:manual" in principal.permissions
     can_manual_trade = bool(valid_code and instrument_available and has_manual_scope)
-    execution_modes = (
-      [ManualOrderExecutionMode.PAPER] if can_manual_trade else []
-    )
+    execution_modes = [ManualOrderExecutionMode.PAPER] if can_manual_trade else []
     live_ready = False
+    can_live_sell = False
     live_blocked_reasons: List[str] = []
     if can_manual_trade:
       try:
         safety = await AccountExecutionSafetyService().status(resolved_account_id)
         live_blocked_reasons = list(safety.get("blocked_reasons") or [])
         live_ready = bool(safety.get("can_increase_risk"))
+        can_live_sell = bool(safety.get("can_reduce_risk"))
       except Exception:
         live_blocked_reasons = ["实盘安全状态暂不可用"]
-      if live_ready:
+      if live_ready or can_live_sell:
         execution_modes.append(ManualOrderExecutionMode.LIVE)
     elif not has_manual_scope:
       live_blocked_reasons = ["当前设备会话未获授 trade:manual"]
@@ -178,6 +190,8 @@ class TradingQuery:
       execution_modes=execution_modes,
       supported_sides=[ManualOrderSide.BUY, ManualOrderSide.SELL],
       supported_price_types=supported_price_types,
+      can_live_buy=live_ready,
+      can_live_sell=can_live_sell,
       live_ready=live_ready,
       live_blocked_reasons=list(dict.fromkeys(live_blocked_reasons)),
       warnings=[
@@ -256,6 +270,84 @@ class TradingQuery:
 
 @strawberry.type(description="订单交易相关变更")
 class TradingMutation:
+  @strawberry.mutation(description="预览账户级实盘执行控制并签发一次性确认挑战")
+  async def preview_account_execution_control(
+    self,
+    info: strawberry.types.Info,
+    input: AccountExecutionControlPreviewInput,
+  ) -> AccountExecutionControlPreviewResult:
+    try:
+      account_id = await _resolve_account_id(info, input.account_id)
+      request = normalize_account_execution_control_request(
+        account_id=account_id,
+        action=input.action,
+        state_version=input.state_version,
+        snapshot_id=input.snapshot_id,
+        reason=input.reason,
+        idempotency_key=input.idempotency_key,
+      )
+      issued = await AccountExecutionControlChallengeService.issue(
+        principal=principal_from_context(info.context),
+        request=request,
+      )
+      return AccountExecutionControlPreviewResult(
+        success=True,
+        code="PREVIEW_READY",
+        message="请核对账户执行状态和风险提示后确认",
+        preview=AccountExecutionControlPreview(
+          challenge_id=strawberry.ID(issued.challenge_id),
+          confirmation_token=issued.confirmation_token,
+          token_issued=issued.token_issued,
+          account_id=request.account_id,
+          action=request.action,
+          state_version=request.state_version,
+          snapshot_id=request.snapshot_id,
+          reason=request.reason,
+          challenge_expires_at=issued.challenge_expires_at,
+          challenge_status=issued.challenge_status,
+          operation_status=issued.operation_status,
+          safety=AccountExecutionSafetyResolver.from_payload(issued.safety),
+        ),
+      )
+    except TradeApprovalChallengeError as exc:
+      return AccountExecutionControlPreviewResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
+
+  @strawberry.mutation(description="消费一次性挑战并应用账户级实盘执行控制")
+  async def confirm_account_execution_control(
+    self,
+    info: strawberry.types.Info,
+    input: AccountExecutionControlConfirmationInput,
+  ) -> AccountExecutionControlConfirmationResult:
+    try:
+      result = await AccountExecutionControlChallengeService.confirm(
+        principal=principal_from_context(info.context),
+        challenge_id=str(input.challenge_id),
+        confirmation_token=input.confirmation_token,
+      )
+      return AccountExecutionControlConfirmationResult(
+        success=result.operation_status == "APPLIED",
+        code=result.operation_code,
+        message=result.message,
+        challenge_id=strawberry.ID(result.challenge_id),
+        action=result.action,
+        operation_status=result.operation_status,
+        safety=(
+          AccountExecutionSafetyResolver.from_payload(result.safety)
+          if result.safety is not None
+          else None
+        ),
+      )
+    except TradeApprovalChallengeError as exc:
+      return AccountExecutionControlConfirmationResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
+
   @strawberry.mutation(description="预览移动端手动委托并签发一次性确认挑战")
   async def preview_manual_order(
     self,
@@ -352,9 +444,7 @@ class TradingMutation:
       )
 
   @strawberry.mutation(
-    description=(
-      "创建手工交易命令并返回排队状态；成功不表示已报、成交或持仓已变化"
-    )
+    description=("创建手工交易命令并返回排队状态；成功不表示已报、成交或持仓已变化")
   )
   async def place_order(
     self, info: strawberry.types.Info, input: OrderInput
@@ -396,9 +486,7 @@ class TradingMutation:
       )
 
   @strawberry.mutation(
-    description=(
-      "创建撤单命令并返回受理结果；最终撤单状态以 QMT 委托回报收敛结果为准"
-    )
+    description=("创建撤单命令并返回受理结果；最终撤单状态以 QMT 委托回报收敛结果为准")
   )
   async def cancel_order(
     self, info: strawberry.types.Info, input: CancelOrderInput
@@ -474,9 +562,7 @@ class TradingMutation:
             order_id=input.order_id,
             status="REJECTED",
           )
-        execution_mode = str(
-          getattr(pending, "execution_mode", None) or "live"
-        ).lower()
+        execution_mode = str(getattr(pending, "execution_mode", None) or "live").lower()
         queued = await TradeCommandService(db).enqueue_cancel(
           user_id=current.user_id,
           account_id=account_id,

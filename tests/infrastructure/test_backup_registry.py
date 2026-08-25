@@ -24,7 +24,7 @@ class FakeSession:
 
 
 @pytest.mark.asyncio
-async def test_record_backup_requires_the_single_account_rollout(
+async def test_record_backup_requires_the_single_account_execution_control(
   monkeypatch,
   tmp_path,
 ):
@@ -40,7 +40,7 @@ async def test_record_backup_requires_the_single_account_rollout(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rowcount", [0, 2])
-async def test_record_backup_rejects_missing_or_multiple_rollouts(
+async def test_record_backup_rejects_missing_or_multiple_execution_controls(
   monkeypatch,
   tmp_path,
   rowcount,
@@ -50,7 +50,7 @@ async def test_record_backup_rejects_missing_or_multiple_rollouts(
   session = FakeSession(rowcount=rowcount)
   monkeypatch.setattr(registry_module, "AsyncSessionLocal", lambda: session)
 
-  with pytest.raises(RuntimeError, match="exactly one account rollout"):
+  with pytest.raises(RuntimeError, match="exactly one account execution control"):
     await registry_module.record_backup(str(manifest))
 
   assert session.committed is False

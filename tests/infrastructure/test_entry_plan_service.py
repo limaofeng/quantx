@@ -325,7 +325,7 @@ class _BaselineSession:
     self._get_values = {
       "BrokerPositionSnapshot": position_snapshot,
       "Instrument": instrument,
-      "AccountTradingRollout": rollout,
+      "AccountExecutionControl": rollout,
     }
 
   async def __aenter__(self) -> _BaselineSession:

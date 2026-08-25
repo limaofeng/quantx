@@ -34,6 +34,7 @@ async def test_delta_coalescing_preserves_only_persisted_strategy_changes() -> N
   )
   manager._running = True
   manager._state_queue = queue
+  manager._state_sync_strategy = strategy
   manager._state["custom"] = {
     RUNTIME_RECONCILIATION_STATUS_KEY: "RECONCILE_REQUIRED",
     BUCKET_LEDGER_RECONCILE_REQUIRED_KEY: True,
@@ -65,7 +66,9 @@ async def test_delta_coalescing_preserves_only_persisted_strategy_changes() -> N
   assert queue.qsize() == 1
 
   sync_task = asyncio.create_task(manager._state_sync_loop())
+  manager._state_sync_task = sync_task
   await asyncio.wait_for(queue.join(), timeout=1.0)
+  assert await manager.drain_strategy_state_changes()
 
   assert manager.get_custom("signal_window_rewarm") == rewarm
   assert manager.get_custom("signal_sample_windows") == sample_windows
@@ -83,7 +86,12 @@ async def test_delta_coalescing_preserves_only_persisted_strategy_changes() -> N
   explicit_grid = {"revision": 3, "source": "strategy-explicit"}
   strategy.state.set(GRID_BOOK_CUSTOM_STATE_KEY, explicit_grid)
   await asyncio.wait_for(queue.join(), timeout=1.0)
-  assert manager.get_custom(GRID_BOOK_CUSTOM_STATE_KEY) == explicit_grid
+  # Passive source capture cannot overwrite the manager-owned grid-book
+  # authority. Explicit durable callback patches below still may do so.
+  assert manager.get_custom(GRID_BOOK_CUSTOM_STATE_KEY) == {
+    "revision": 2,
+    "source": "api-cas",
+  }
 
   api_grid = {"revision": 4, "source": "newer-api-cas"}
   manager.set_custom(GRID_BOOK_CUSTOM_STATE_KEY, api_grid)

@@ -180,16 +180,12 @@ def normalize_manual_order_request(
   )
   normalized_key = str(idempotency_key or "").strip()
   normalized_execution_mode = (
-    str(getattr(execution_mode, "value", execution_mode) or "")
-    .strip()
-    .upper()
+    str(getattr(execution_mode, "value", execution_mode) or "").strip().upper()
   )
   try:
     normalized_volume = int(volume)
   except (TypeError, ValueError) as exc:
-    raise TradeApprovalChallengeError(
-      "INVALID_VOLUME", "委托数量必须是正整数"
-    ) from exc
+    raise TradeApprovalChallengeError("INVALID_VOLUME", "委托数量必须是正整数") from exc
 
   if not normalized_account_id:
     raise TradeApprovalChallengeError("ACCOUNT_REQUIRED", "必须指定交易账户")
@@ -227,9 +223,7 @@ def normalize_manual_order_request(
         "INVALID_LIMIT_PRICE", "限价必须是有效数字"
       ) from exc
     if not math.isfinite(parsed_price):
-      raise TradeApprovalChallengeError(
-        "INVALID_LIMIT_PRICE", "限价必须是有限数字"
-      )
+      raise TradeApprovalChallengeError("INVALID_LIMIT_PRICE", "限价必须是有限数字")
 
   if normalized_price_type == "LIMIT" and (parsed_price is None or parsed_price <= 0):
     raise TradeApprovalChallengeError(
@@ -314,9 +308,7 @@ def _paper_snapshot_binding(account: Any, position: Any) -> tuple[str, str]:
       int(getattr(position, "volume", 0) or 0) if position is not None else None
     ),
     "position_available_volume": (
-      int(getattr(position, "can_use_volume", 0) or 0)
-      if position is not None
-      else None
+      int(getattr(position, "can_use_volume", 0) or 0) if position is not None else None
     ),
     "position_updated_at": (
       _version_token(getattr(position, "updated_at", None))
@@ -366,9 +358,7 @@ def _quote_fingerprint(
 
 
 def _stable_risk_decision_id(challenge_id: str) -> str:
-  return str(
-    uuid.uuid5(uuid.NAMESPACE_URL, f"quantx:manual-order-risk:{challenge_id}")
-  )
+  return str(uuid.uuid5(uuid.NAMESPACE_URL, f"quantx:manual-order-risk:{challenge_id}"))
 
 
 def _challenge_payload(
@@ -527,8 +517,7 @@ async def _preflight(
     (
       item
       for item in ticks
-      if str(getattr(item, "stock_code", "")).strip().upper()
-      == request.instrument_code
+      if str(getattr(item, "stock_code", "")).strip().upper() == request.instrument_code
     ),
     None,
   )
@@ -541,9 +530,7 @@ async def _preflight(
   quote_timestamp = getattr(tick, "time", None)
   quote_age = _snapshot_age(quote_timestamp, now)
   if quote_age is None or quote_age < timedelta(0) or quote_age > _MAX_QUOTE_AGE:
-    raise TradeApprovalChallengeError(
-      "QUOTE_STALE", "行情已过期，已拒绝生成交易确认"
-    )
+    raise TradeApprovalChallengeError("QUOTE_STALE", "行情已过期，已拒绝生成交易确认")
 
   instrument = await db.get(
     Instrument,
@@ -678,12 +665,16 @@ async def _preflight(
   )
   setattr(
     market,
-    "min_limit_sell_order_volume" if request.side == "SELL" else "min_limit_order_volume",
+    "min_limit_sell_order_volume"
+    if request.side == "SELL"
+    else "min_limit_order_volume",
     min_volume,
   )
   setattr(
     market,
-    "max_limit_sell_order_volume" if request.side == "SELL" else "max_limit_order_volume",
+    "max_limit_sell_order_volume"
+    if request.side == "SELL"
+    else "max_limit_order_volume",
     max_volume,
   )
 
@@ -753,7 +744,7 @@ async def _preflight(
     if rollout is None:
       raise TradeApprovalChallengeError(
         "LIVE_AUTHORIZATION_REJECTED",
-        "实盘灰度快照不存在",
+        "账户执行控制快照不存在",
       )
     snapshot_id = str(rollout.last_snapshot_id or "")
     snapshot_hash = str(rollout.last_snapshot_hash or "")
@@ -951,9 +942,7 @@ class ManualOrderChallengeService:
           instrument_code=request.instrument_code,
           side=request.side,
           order_type=(
-            "FIX_PRICE"
-            if request.price_type == "LIMIT"
-            else "MARKET_PEER_PRICE_FIRST"
+            "FIX_PRICE" if request.price_type == "LIMIT" else "MARKET_PEER_PRICE_FIRST"
           ),
           limit_price=Decimal(str(request.limit_price or 0)),
           volume=preflight.final_volume,

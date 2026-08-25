@@ -47,12 +47,6 @@ def test_paper_mode_requires_an_explicit_account_whitelist() -> None:
 @pytest.mark.parametrize(
   ("environment", "enable_real", "enable_qmt", "expected"),
   [
-    (
-      "production",
-      "true",
-      "true",
-      "production live mode requires T_TRADE_LIVE_ENABLED",
-    ),
     ("development", "true", "true", "ENV=testing"),
     ("testing", "", "true", "ENABLE_REAL_TRADING=true"),
     ("testing", "true", "", "QMT_REAL_TRADING_ENABLED=true"),
@@ -83,13 +77,13 @@ def test_live_mode_accepts_explicit_testing_configuration(
   _require_safe_run_mode("live", {"account-1"})
 
 
-def test_live_mode_accepts_production_only_with_t_trade_gate(
+def test_live_mode_does_not_depend_on_t_trade_feature_gate(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   monkeypatch.setenv("ENV", "production")
   monkeypatch.setenv("ENABLE_REAL_TRADING", "true")
   monkeypatch.setenv("QMT_REAL_TRADING_ENABLED", "true")
-  monkeypatch.setenv("T_TRADE_LIVE_ENABLED", "true")
+  monkeypatch.setenv("T_TRADE_LIVE_ENABLED", "false")
 
   _require_safe_run_mode("live", {"account-1"})
 

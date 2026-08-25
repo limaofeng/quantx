@@ -13,6 +13,7 @@ import type { ReactNode } from 'react';
 import { useQuery } from 'urql';
 
 import { StatusBar } from '@/components/studio-workbench';
+import { useStudioNavigate } from '@/components/studio-workspace';
 import { cn } from '@/utils/cn';
 
 import { AccountExecutionSafetyQuery } from './operations';
@@ -62,6 +63,7 @@ export function TradingSafetyBar({
 }: {
   currentUserLabel: string;
 }) {
+  const navigate = useStudioNavigate();
   const { accountId, blockedReasons } = useTradingSafety();
   const [{ data, fetching }] = useQuery({
     query: AccountExecutionSafetyQuery,
@@ -86,8 +88,18 @@ export function TradingSafetyBar({
     <section
       aria-label="交易安全状态"
       aria-live="polite"
-      className="shrink-0"
+      className="shrink-0 cursor-pointer"
       data-testid="trading-safety-status-bar"
+      role="button"
+      tabIndex={0}
+      title="打开账户交易安全设置"
+      onClick={() => navigate('/settings/trading-safety')}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          navigate('/settings/trading-safety');
+        }
+      }}
     >
       <StatusBar
         variant="workspace"

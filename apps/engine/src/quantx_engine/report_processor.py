@@ -35,8 +35,8 @@ from quantx_infrastructure.database.redis_pubsub import (
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
-  AccountTradingRolloutEvent,
+  AccountExecutionControl,
+  AccountExecutionControlEvent,
   AgentDevice,
   AgentReportInbox,
   OperationalAlert,
@@ -124,10 +124,7 @@ def _snapshot_can_promote_heartbeat(status: Any) -> bool:
   A delayed snapshot must never mask a newer runtime failure such as a lost
   XTTrading or XTData connection.
   """
-  return (
-    str(status or "").strip().upper()
-    in _SNAPSHOT_PROMOTABLE_HEARTBEAT_STATUSES
-  )
+  return str(status or "").strip().upper() in _SNAPSHOT_PROMOTABLE_HEARTBEAT_STATUSES
 
 
 def _body(payload: dict[str, Any], key: str) -> dict[str, Any]:
@@ -147,8 +144,7 @@ def _report_account_ids(payload: dict[str, Any]) -> set[str]:
         and len(account_ids) >= _MAX_SNAPSHOT_ACCOUNT_SCOPE
       ):
         raise RetryableReportError(
-          "Agent snapshot account scope exceeds limit: "
-          f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+          f"Agent snapshot account scope exceeds limit: {_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
         )
       account_ids.add(normalized)
 
@@ -313,8 +309,7 @@ async def _invalidate_t_trade_entry_authority_for_account(
 
   if failures:
     raise RetryableReportError(
-      "T-trade entry authority invalidation failed: "
-      + "; ".join(failures[:20])
+      "T-trade entry authority invalidation failed: " + "; ".join(failures[:20])
     )
 
 
@@ -432,8 +427,7 @@ def _complete_snapshot_account_ids(
   for account_id in covered_accounts:
     sections = section_completeness.get(account_id)
     if not isinstance(sections, dict) or not all(
-      sections.get(section) is True
-      for section in _REQUIRED_SNAPSHOT_SECTIONS
+      sections.get(section) is True for section in _REQUIRED_SNAPSHOT_SECTIONS
     ):
       return None
   return covered_accounts
@@ -448,10 +442,7 @@ def _snapshot_section_is_complete(
   if not isinstance(values, dict):
     return False
   account_values = values.get(account_id)
-  return bool(
-    isinstance(account_values, dict)
-    and account_values.get(section) is True
-  )
+  return bool(isinstance(account_values, dict) and account_values.get(section) is True)
 
 
 def _authoritative_full_snapshot_account_ids(
@@ -467,9 +458,7 @@ def _authoritative_full_snapshot_account_ids(
   snapshot_hash = str(payload.get("snapshot_hash") or "")
   if not snapshot_id or len(snapshot_hash) != 64:
     return None
-  hash_input = {
-    key: value for key, value in payload.items() if key != "snapshot_hash"
-  }
+  hash_input = {key: value for key, value in payload.items() if key != "snapshot_hash"}
   expected_hash = sha256(
     json.dumps(
       hash_input,
@@ -548,13 +537,11 @@ async def _update_pending(
     elif cancel_rejected:
       pending.status_reason = (reason or "cancel rejected")[:256]
     elif cancel_requested and not proposed_terminal:
-      pending.status_reason = (
-        str(pending.status_reason or "cancellation requested")[:256]
-      )
+      pending.status_reason = str(pending.status_reason or "cancellation requested")[
+        :256
+      ]
     elif not transition_allowed:
-      pending.status_reason = (
-        f"ignored non-monotonic status {proposed_status}"
-      )[:256]
+      pending.status_reason = (f"ignored non-monotonic status {proposed_status}")[:256]
     else:
       pending.status_reason = (reason or "")[:256] or None
     correlation = (
@@ -571,9 +558,7 @@ async def _update_pending(
         user_id=str(pending.user_id),
         account_id=str(pending.account_id),
         broker_order_id=str(broker_order_id),
-        idempotency_key=(
-          f"entry-plan-cancel:{client_order_id}:{broker_order_id}"
-        ),
+        idempotency_key=(f"entry-plan-cancel:{client_order_id}:{broker_order_id}"),
         execution_mode=str(pending.execution_mode or "paper").lower(),
         commit_transaction=False,
       )
@@ -605,12 +590,9 @@ async def _update_pending_by_broker(
     proposed_terminal = proposed_status in TERMINAL_ORDER_STATUSES
     sequence = max(0, int(source_sequence or 0))
     stored_sequence = int(pending.last_source_sequence or 0)
-    if (
-      (not sequence or not stored_sequence or sequence >= stored_sequence)
-      and (
-        (cancel_requested and not proposed_terminal)
-        or can_transition_order_status(pending.status, proposed_status)
-      )
+    if (not sequence or not stored_sequence or sequence >= stored_sequence) and (
+      (cancel_requested and not proposed_terminal)
+      or can_transition_order_status(pending.status, proposed_status)
     ):
       pending.status = (
         "CANCEL_REQUESTED"
@@ -663,9 +645,7 @@ async def _process_order_report(payload: dict[str, Any]) -> None:
     str(payload.get("client_order_id") or "") or None,
     status=status,
     broker_order_id=str(broker_order_id),
-    reason=str(
-      order.get("effective_status_reason") or order.get("status_msg") or ""
-    ),
+    reason=str(order.get("effective_status_reason") or order.get("status_msg") or ""),
     source_sequence=int(payload.get("source_sequence") or 0),
     source_event_at=_parse_report_time(payload.get("source_event_at")),
   )
@@ -694,8 +674,7 @@ async def _process_execution_report(payload: dict[str, Any]) -> None:
   trade.setdefault("traded_time", int(time_utils.now().timestamp()))
   trade.setdefault(
     "traded_amount",
-    float(trade.get("traded_price") or 0)
-    * int(trade.get("traded_volume") or 0),
+    float(trade.get("traded_price") or 0) * int(trade.get("traded_volume") or 0),
   )
   if not trade.get("traded_id"):
     raise ValueError("execution_report 缺少 execution id")
@@ -737,14 +716,10 @@ async def _consume_exact_auto_entry_fill(
   client_order_id = str(
     payload.get("client_order_id") or trade.get("client_order_id") or ""
   )
-  broker_order_id = str(
-    trade.get("order_id") or trade.get("broker_order_id") or ""
-  )
+  broker_order_id = str(trade.get("order_id") or trade.get("broker_order_id") or "")
   async with AsyncSessionLocal() as db:
     pending = (
-      await db.get(PendingTradeOrder, client_order_id)
-      if client_order_id
-      else None
+      await db.get(PendingTradeOrder, client_order_id) if client_order_id else None
     )
     if pending is None and broker_order_id:
       pending = (
@@ -764,12 +739,8 @@ async def _consume_exact_auto_entry_fill(
     reported_instrument = str(
       trade.get("stock_code") or trade.get("instrument_code") or ""
     )
-    if (
-      (reported_account_id and reported_account_id != str(pending.account_id))
-      or (
-        reported_instrument
-        and reported_instrument != str(pending.instrument_code)
-      )
+    if (reported_account_id and reported_account_id != str(pending.account_id)) or (
+      reported_instrument and reported_instrument != str(pending.instrument_code)
     ):
       raise ValueError("LIVE 自动买入成交账户或标的与权威命令不匹配")
     metadata = dict(pending.request_metadata or {})
@@ -777,9 +748,8 @@ async def _consume_exact_auto_entry_fill(
     grant_id = str(metadata.get("auto_entry_authorization_grant_id") or "")
     if not plan_id or not grant_id:
       return
-    if (
-      str(pending.strategy_run_id or "") != plan_id
-      or not bool(metadata.get("exact_auto_entry_authorized"))
+    if str(pending.strategy_run_id or "") != plan_id or not bool(
+      metadata.get("exact_auto_entry_authorized")
     ):
       raise ValueError("LIVE 自动买入成交缺少已验证的计划授权关联")
     intent = await db.get(TradeIntentRecord, str(pending.intent_id or ""))
@@ -789,8 +759,7 @@ async def _consume_exact_auto_entry_fill(
       or str(intent.strategy_run_id or "") != plan_id
       or str(intent.direction or "").upper() != "BUY"
       or str(intent_metadata.get("execution_mode") or "").upper() != "AUTO"
-      or str(intent_metadata.get("auto_entry_authorization_grant_id") or "")
-      != grant_id
+      or str(intent_metadata.get("auto_entry_authorization_grant_id") or "") != grant_id
     ):
       raise ValueError("LIVE 自动买入成交与权威意图授权不匹配")
     execution_id = str(
@@ -800,9 +769,7 @@ async def _consume_exact_auto_entry_fill(
     volume = int(trade.get("traded_volume") or trade.get("volume") or 0)
     if not execution_id or not price.is_finite() or price <= 0 or volume <= 0:
       raise ValueError("LIVE 自动买入成交事实无效")
-    filled_at = _parse_report_time(
-      trade.get("traded_time") or trade.get("trade_time")
-    )
+    filled_at = _parse_report_time(trade.get("traded_time") or trade.get("trade_time"))
     await EntryPlanAuthorizationService(db).consume_real_fill(
       grant_id=grant_id,
       trade_business_key=f"qmt-entry:{pending.account_id}:{execution_id}"[:160],
@@ -854,18 +821,13 @@ async def _fail_closed_incomplete_snapshot(
     try:
       override_count = len(account_ids_override)
     except TypeError as exc:
-      raise RetryableReportError(
-        "完整账户快照 override 账户范围不可有界复制"
-      ) from exc
+      raise RetryableReportError("完整账户快照 override 账户范围不可有界复制") from exc
     if override_count > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
       raise RetryableReportError(
-        "完整账户快照 override 账户范围超过限制: "
-        f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+        f"完整账户快照 override 账户范围超过限制: {_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
       )
     account_ids = {
-      str(value).strip()
-      for value in account_ids_override
-      if str(value).strip()
+      str(value).strip() for value in account_ids_override if str(value).strip()
     }
   else:
     try:
@@ -895,18 +857,13 @@ async def _fail_closed_incomplete_snapshot(
         try:
           authorized_count = len(authorized_values)
         except TypeError as exc:
-          raise RetryableReportError(
-            "Agent 授权账户范围不可有界复制"
-          ) from exc
+          raise RetryableReportError("Agent 授权账户范围不可有界复制") from exc
         if authorized_count > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
           raise RetryableReportError(
-            "Agent 授权账户范围超过限制: "
-            f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+            f"Agent 授权账户范围超过限制: {_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
           )
         account_ids = {
-          str(value).strip()
-          for value in list(authorized_values)
-          if str(value).strip()
+          str(value).strip() for value in list(authorized_values) if str(value).strip()
         }
     if not account_ids:
       raise RetryableReportError(
@@ -926,11 +883,7 @@ async def _fail_closed_incomplete_snapshot(
   except TypeError:
     unavailable_count = _MAX_SNAPSHOT_ACCOUNT_SCOPE + 1
   unavailable_accounts = (
-    {
-      str(value).strip()
-      for value in raw_unavailable_accounts
-      if str(value).strip()
-    }
+    {str(value).strip() for value in raw_unavailable_accounts if str(value).strip()}
     if unavailable_count <= _MAX_SNAPSHOT_ACCOUNT_SCOPE
     else set()
   )
@@ -944,8 +897,7 @@ async def _fail_closed_incomplete_snapshot(
       incomplete_sections = [
         section
         for section in _REQUIRED_SNAPSHOT_SECTIONS
-        if not isinstance(raw_sections, dict)
-        or raw_sections.get(section) is not True
+        if not isinstance(raw_sections, dict) or raw_sections.get(section) is not True
       ]
       discrepancy = {
         "kind": failure_kind,
@@ -983,19 +935,19 @@ async def _fail_closed_incomplete_snapshot(
           authority_failures.append(f"{account_id}: {exc}")
 
         rollout = await db.get(
-          AccountTradingRollout,
+          AccountExecutionControl,
           account_id,
           with_for_update=True,
         )
         if rollout is None:
-          rollout = AccountTradingRollout(account_id=account_id)
+          rollout = AccountExecutionControl(account_id=account_id)
           db.add(rollout)
-        previous_stage = str(rollout.stage)
+        previous_state = str(rollout.authorization_state)
         window_was_active = bool(rollout.controlled_window_active)
         rollout.reconcile_status = "RECONCILE_REQUIRED"
-        rollout.enabled = False
-        if not rollout.kill_switch:
-          rollout.stage = "PAUSED"
+        if rollout.authorization_state != "KILLED":
+          rollout.authorization_state = "PAUSED"
+        rollout.state_version = int(rollout.state_version or 0) + 1
         rollout.paused_reason = json.dumps(
           discrepancies,
           ensure_ascii=False,
@@ -1010,12 +962,12 @@ async def _fail_closed_incomplete_snapshot(
           rollout.controlled_window_external_order_ids = []
           rollout.controlled_window_external_trade_ids = []
         db.add(
-          AccountTradingRolloutEvent(
+          AccountExecutionControlEvent(
             event_id=str(uuid.uuid4()),
             account_id=account_id,
             event_type="SNAPSHOT_INCOMPLETE",
-            previous_stage=previous_stage,
-            next_stage=str(rollout.stage),
+            previous_state=previous_state,
+            next_state=str(rollout.authorization_state),
             snapshot_id=snapshot_id,
             details={
               "deviceId": device_id,
@@ -1111,9 +1063,7 @@ async def _process_delta_report(
       await _fail_closed_incomplete_snapshot(
         device_id,
         payload,
-        reported_at=_safe_snapshot_failure_time(
-          payload.get("source_event_at")
-        ),
+        reported_at=_safe_snapshot_failure_time(payload.get("source_event_at")),
         failure_kind="SNAPSHOT_APPLY_FAILED",
         failure_reason="FULL_SNAPSHOT_APPLY_FAILED",
         account_ids_override=failure_accounts,
@@ -1236,9 +1186,7 @@ async def _process_delta_report_inner(
     # sequence is deliberately a no-op: the newer complete snapshot must
     # remain usable and must never be downgraded.
     if not callable(begin_full_snapshot_attempt):
-      raise RetryableReportError(
-        "完整快照缺少持久化 begin attempt 边界"
-      )
+      raise RetryableReportError("完整快照缺少持久化 begin attempt 边界")
     for account_id in sorted(full_snapshot_groups):
       async with t_trade_account_coordination_lock(account_id):
         result = await begin_full_snapshot_attempt(
@@ -1274,13 +1222,7 @@ async def _process_delta_report_inner(
     account_id = str(raw_account_id or "").strip()
     return bool(
       account_id in stale_full_accounts
-      or (
-        not account_id
-        and (
-          unknown_account_is_stale
-          or bool(stale_full_accounts)
-        )
-      )
+      or (not account_id and (unknown_account_is_stale or bool(stale_full_accounts)))
     )
 
   for order in payload.get("orders") or []:
@@ -1334,9 +1276,7 @@ async def _process_delta_report_inner(
       else "REJECTED"
     )
     client_order_id = str(error.get("client_order_id") or "")
-    broker_order_id = str(
-      error.get("order_id") or error.get("broker_order_id") or ""
-    )
+    broker_order_id = str(error.get("order_id") or error.get("broker_order_id") or "")
     if client_order_id:
       await _update_pending(
         client_order_id,
@@ -1391,9 +1331,11 @@ async def _process_delta_report_inner(
         raise ValueError("持仓增量缺少 account_id")
       await _run_account_snapshot_mutation(
         account_id,
-        lambda value=value, account_id=account_id: position_service.apply_position_delta(
-          value,
-          account_id,
+        lambda value=value, account_id=account_id: (
+          position_service.apply_position_delta(
+            value,
+            account_id,
+          )
         ),
         reason="BROKER_POSITION_DELTA_APPLIED",
       )
@@ -1419,17 +1361,19 @@ async def _process_delta_report_inner(
         full_snapshot_results[account_id] = {"reason": "STALE_SEQUENCE"}
         continue
       async with t_trade_account_coordination_lock(account_id):
-        result, is_blocked, summary = (
-          await _reconcile_authoritative_full_account_locked(
-            account_id,
-            payload,
-            snapshot_id=snapshot_id,
-            snapshot_hash=snapshot_hash,
-            reported_at=reported_at,
-            sequence=int(full_snapshot_sequence or 0),
-            positions=full_snapshot_groups.get(account_id, []),
-            position_service=position_service,
-          )
+        (
+          result,
+          is_blocked,
+          summary,
+        ) = await _reconcile_authoritative_full_account_locked(
+          account_id,
+          payload,
+          snapshot_id=snapshot_id,
+          snapshot_hash=snapshot_hash,
+          reported_at=reported_at,
+          sequence=int(full_snapshot_sequence or 0),
+          positions=full_snapshot_groups.get(account_id, []),
+          position_service=position_service,
         )
         full_snapshot_results[account_id] = result
         if result.get("reason") == "STALE_SEQUENCE":
@@ -1473,9 +1417,7 @@ async def _process_delta_report_inner(
         if not stale_full_accounts and _snapshot_can_promote_heartbeat(
           heartbeat.status
         ):
-          next_status = (
-            "READY" if not blocked_accounts else "RECONCILE_REQUIRED"
-          )
+          next_status = "READY" if not blocked_accounts else "RECONCILE_REQUIRED"
           heartbeat.status = next_status
           if next_status == "READY":
             device = await db.get(AgentDevice, device_id)
@@ -1511,15 +1453,13 @@ async def _reconcile_authoritative_full_account_locked(
 
   prepare = getattr(position_service, "prepare_full_snapshot", None)
   if not callable(prepare):
-    raise RetryableReportError(
-      "完整快照缺少持久化 prepare 边界"
-    )
+    raise RetryableReportError("完整快照缺少持久化 prepare 边界")
   result = await prepare(
-      account_id=account_id,
-      positions=list(positions),
-      sequence=sequence,
-      reported_at=reported_at,
-      source="QMT_AGENT",
+    account_id=account_id,
+    positions=list(positions),
+    sequence=sequence,
+    reported_at=reported_at,
+    source="QMT_AGENT",
   )
   result_dict = dict(result) if isinstance(result, dict) else {}
   if result_dict.get("reason") == "STALE_SEQUENCE":
@@ -1529,28 +1469,30 @@ async def _reconcile_authoritative_full_account_locked(
     return result_dict, False, {}
 
   async with AsyncSessionLocal() as db:
-    existing_rollout = await db.get(AccountTradingRollout, account_id)
+    existing_rollout = await db.get(AccountExecutionControl, account_id)
     controlled_window_active = bool(
       existing_rollout and existing_rollout.controlled_window_active
     )
-    acknowledged_external_order_ids = {
-      str(value)
-      for value in list(
-        existing_rollout.controlled_window_external_order_ids or []
-      )
-    } if existing_rollout else set()
-    acknowledged_external_trade_ids = {
-      str(value)
-      for value in list(
-        existing_rollout.controlled_window_external_trade_ids or []
-      )
-    } if existing_rollout else set()
+    acknowledged_external_order_ids = (
+      {
+        str(value)
+        for value in list(existing_rollout.controlled_window_external_order_ids or [])
+      }
+      if existing_rollout
+      else set()
+    )
+    acknowledged_external_trade_ids = (
+      {
+        str(value)
+        for value in list(existing_rollout.controlled_window_external_trade_ids or [])
+      }
+      if existing_rollout
+      else set()
+    )
     allow_external_activity = bool(
       existing_rollout is None
       or (
-        not existing_rollout.enabled
-        and not existing_rollout.kill_switch
-        and str(existing_rollout.stage).upper() in {"SHADOW", "PAUSED"}
+        str(existing_rollout.authorization_state).upper() in {"DISABLED", "PAUSED"}
         and not controlled_window_active
       )
     )
@@ -1564,12 +1506,12 @@ async def _reconcile_authoritative_full_account_locked(
   discrepancies = list(reconciliation["blocking_discrepancies"])
   async with AsyncSessionLocal() as db:
     rollout = await db.get(
-      AccountTradingRollout,
+      AccountExecutionControl,
       account_id,
       with_for_update=True,
     )
     if rollout is None:
-      rollout = AccountTradingRollout(account_id=account_id)
+      rollout = AccountExecutionControl(account_id=account_id)
       db.add(rollout)
     rollout.last_snapshot_id = snapshot_id or None
     rollout.last_snapshot_hash = snapshot_hash or None
@@ -1577,10 +1519,10 @@ async def _reconcile_authoritative_full_account_locked(
     rollout.reconcile_status = "READY" if not discrepancies else "RECONCILE_REQUIRED"
     if discrepancies:
       window_was_active = bool(rollout.controlled_window_active)
-      previous_stage = str(rollout.stage)
-      rollout.enabled = False
-      if not rollout.kill_switch:
-        rollout.stage = "PAUSED"
+      previous_state = str(rollout.authorization_state)
+      if rollout.authorization_state != "KILLED":
+        rollout.authorization_state = "PAUSED"
+      rollout.state_version = int(rollout.state_version or 0) + 1
       rollout.paused_reason = json.dumps(
         discrepancies[:20],
         ensure_ascii=False,
@@ -1595,26 +1537,27 @@ async def _reconcile_authoritative_full_account_locked(
         rollout.controlled_window_external_order_ids = []
         rollout.controlled_window_external_trade_ids = []
         db.add(
-          AccountTradingRolloutEvent(
+          AccountExecutionControlEvent(
             event_id=str(uuid.uuid4()),
             account_id=account_id,
             event_type="CONTROLLED_WINDOW_INVALIDATED",
-            previous_stage=previous_stage,
-            next_stage=str(rollout.stage),
+            previous_state=previous_state,
+            next_state=str(rollout.authorization_state),
             snapshot_id=snapshot_id or None,
             details={"discrepancies": discrepancies[:20]},
             created_at=utcnow(),
           )
         )
     else:
-      if (
-        str(rollout.stage).upper() == "PAUSED"
-        and _was_automatic_reconciliation_pause(rollout.paused_reason)
+      if str(
+        rollout.authorization_state
+      ).upper() == "PAUSED" and _was_automatic_reconciliation_pause(
+        rollout.paused_reason
       ):
         # A recovered automatic pause returns to the read-only preparation
         # stage.  It never silently resumes CANARY/LIVE order authority.
-        rollout.stage = "SHADOW"
-        rollout.enabled = False
+        rollout.authorization_state = "DISABLED"
+        rollout.state_version = int(rollout.state_version or 0) + 1
         rollout.paused_reason = None
     summary = {
       "snapshotId": snapshot_id,
@@ -1624,16 +1567,13 @@ async def _reconcile_authoritative_full_account_locked(
       "externalOrderCount": len(reconciliation["external_orders"]),
       "externalTradeCount": len(reconciliation["external_trades"]),
       "newExternalOrderCount": sum(
-        not bool(item.get("acknowledged"))
-        for item in reconciliation["external_orders"]
+        not bool(item.get("acknowledged")) for item in reconciliation["external_orders"]
       ),
       "newExternalTradeCount": sum(
-        not bool(item.get("acknowledged"))
-        for item in reconciliation["external_trades"]
+        not bool(item.get("acknowledged")) for item in reconciliation["external_trades"]
       ),
       "workingExternalOrderCount": sum(
-        str(item.get("status") or "")
-        in {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
+        str(item.get("status") or "") in {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
         for item in reconciliation["external_orders"]
       ),
       "controlledWindowActive": bool(rollout.controlled_window_active),
@@ -1659,17 +1599,17 @@ async def _reconcile_authoritative_full_account_locked(
       marker_error = exc
     async with AsyncSessionLocal() as db:
       rollout = await db.get(
-        AccountTradingRollout,
+        AccountExecutionControl,
         account_id,
         with_for_update=True,
       )
       if rollout is None:
-        rollout = AccountTradingRollout(account_id=account_id)
+        rollout = AccountExecutionControl(account_id=account_id)
         db.add(rollout)
       rollout.reconcile_status = "RECONCILE_REQUIRED"
-      rollout.enabled = False
-      if not rollout.kill_switch:
-        rollout.stage = "PAUSED"
+      if rollout.authorization_state != "KILLED":
+        rollout.authorization_state = "PAUSED"
+      rollout.state_version = int(rollout.state_version or 0) + 1
       rollout.paused_reason = json.dumps(
         [
           {
@@ -1691,9 +1631,7 @@ async def _reconcile_authoritative_full_account_locked(
   if not discrepancies:
     finalize = getattr(position_service, "finalize_full_snapshot", None)
     if not callable(finalize):
-      raise RetryableReportError(
-        "完整快照缺少持久化 finalize 边界"
-      )
+      raise RetryableReportError("完整快照缺少持久化 finalize 边界")
     finalized = await finalize(
       account_id=account_id,
       sequence=sequence,
@@ -1701,11 +1639,7 @@ async def _reconcile_authoritative_full_account_locked(
       source="QMT_AGENT",
     )
     if not isinstance(finalized, dict) or not finalized.get("applied", False):
-      reason = (
-        finalized.get("reason")
-        if isinstance(finalized, dict)
-        else "UNKNOWN"
-      )
+      reason = finalized.get("reason") if isinstance(finalized, dict) else "UNKNOWN"
       if reason == "STALE_SEQUENCE" and isinstance(finalized, dict):
         # A direct/concurrent durable writer may have advanced or invalidated
         # this generation after prepare. Treat it as a stale duplicate so the
@@ -1741,17 +1675,17 @@ async def _snapshot_discrepancies(
   ]
   async with AsyncSessionLocal() as db:
     pending = (
-      await db.execute(
-        select(PendingTradeOrder).where(
-          PendingTradeOrder.account_id == account_id
+      (
+        await db.execute(
+          select(PendingTradeOrder).where(PendingTradeOrder.account_id == account_id)
         )
       )
-    ).scalars().all()
+      .scalars()
+      .all()
+    )
   by_client = {str(item.client_order_id): item for item in pending}
   by_broker = {
-    str(item.broker_order_id): item
-    for item in pending
-    if item.broker_order_id
+    str(item.broker_order_id): item for item in pending if item.broker_order_id
   }
   discrepancies: list[dict[str, str]] = []
   external_orders: list[dict[str, Any]] = []
@@ -1815,8 +1749,7 @@ async def _snapshot_discrepancies(
   for item in pending:
     if (
       item.broker_order_id
-      and str(item.status).upper()
-      in {"SUBMITTED", "PARTIAL_FILLED", "PENDING"}
+      and str(item.status).upper() in {"SUBMITTED", "PARTIAL_FILLED", "PENDING"}
       and str(item.broker_order_id) not in seen_broker_ids
     ):
       discrepancies.append(
@@ -2033,9 +1966,7 @@ async def _terminal_order_fill_projection(
       "received": received,
       "role": role,
       "reason": str(
-        report.get("effective_status_reason")
-        or report.get("status_msg")
-        or ""
+        report.get("effective_status_reason") or report.get("status_msg") or ""
       ),
     }
     if selected is None or expected > int(selected["expected"]):
@@ -2073,8 +2004,7 @@ def _report_items(report: AgentReportInbox) -> list[tuple[str, dict[str, Any]]]:
           "order_status": terminal_status,
           "status": terminal_status,
           "status_msg": error.get("error_msg") or error.get("reason") or "",
-          "broker_order_id": error.get("broker_order_id")
-          or error.get("order_id"),
+          "broker_order_id": error.get("broker_order_id") or error.get("order_id"),
         }
       )
     return [
@@ -2112,9 +2042,7 @@ def _authoritative_snapshot_identity(
   snapshot_hash = str(payload.get("snapshot_hash") or "").strip().lower()
   if not snapshot_id or len(snapshot_hash) != 64:
     return None
-  hash_input = {
-    key: value for key, value in payload.items() if key != "snapshot_hash"
-  }
+  hash_input = {key: value for key, value in payload.items() if key != "snapshot_hash"}
   expected_hash = sha256(
     json.dumps(
       hash_input,
@@ -2155,9 +2083,7 @@ def _snapshot_has_order_execution_detail(
     if str(trade.get("account_id") or "") != account_id:
       continue
     trade_client_id = str(trade.get("client_order_id") or "")
-    trade_broker_id = str(
-      trade.get("order_id") or trade.get("broker_order_id") or ""
-    )
+    trade_broker_id = str(trade.get("order_id") or trade.get("broker_order_id") or "")
     if trade_client_id == client_order_id or trade_broker_id == broker_order_id:
       return True
     trade_instrument = str(
@@ -2206,7 +2132,7 @@ async def _full_snapshot_zero_fill_items(
     if not normalized_account:
       return False
     if normalized_account not in checkpoint_by_account:
-      rollout = await db.get(AccountTradingRollout, normalized_account)
+      rollout = await db.get(AccountExecutionControl, normalized_account)
       checkpoint_by_account[normalized_account] = bool(
         rollout is not None
         and str(rollout.last_snapshot_id or "") == snapshot_id
@@ -2237,9 +2163,9 @@ async def _full_snapshot_zero_fill_items(
       order.get("order_id") or order.get("broker_order_id") or ""
     ).strip()
     account_id = str(order.get("account_id") or "").strip()
-    instrument_code = str(
-      order.get("stock_code") or order.get("instrument_code") or ""
-    ).strip().upper()
+    instrument_code = (
+      str(order.get("stock_code") or order.get("instrument_code") or "").strip().upper()
+    )
     if (
       not client_order_id
       or not broker_order_id
@@ -2253,7 +2179,7 @@ async def _full_snapshot_zero_fill_items(
     seen_orders.add((client_order_id, broker_order_id))
 
     rollout = await db.get(
-      AccountTradingRollout,
+      AccountExecutionControl,
       account_id,
       with_for_update=True,
     )
@@ -2314,9 +2240,7 @@ async def _full_snapshot_zero_fill_items(
       correlation.intent_id,
       with_for_update=True,
     )
-    intent_metadata = (
-      dict(intent.intent_metadata or {}) if intent is not None else {}
-    )
+    intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
     try:
       executed_volume = int(intent.executed_volume or 0) if intent else -1
       executed_price = Decimal(str(intent.executed_price or 0)) if intent else None
@@ -2367,9 +2291,7 @@ async def _full_snapshot_zero_fill_items(
       if runtime_event.event_type == "TRADE":
         execution_announced = True
         break
-      historical_order = dict(
-        dict(runtime_event.payload or {}).get("report") or {}
-      )
+      historical_order = dict(dict(runtime_event.payload or {}).get("report") or {})
       historical_fill = _reported_cumulative_fill(historical_order)
       if historical_fill is None and any(
         key in historical_order for key in ("traded_volume", "filled_volume")
@@ -2424,9 +2346,7 @@ async def _full_snapshot_zero_fill_items(
         {
           **order,
           "effective_order_status": "RECONCILED_ZERO_FILL",
-          "effective_status_reason": (
-            "QMT_FULL_SNAPSHOT_ZERO_FILL_RECONCILIATION"
-          ),
+          "effective_status_reason": ("QMT_FULL_SNAPSHOT_ZERO_FILL_RECONCILIATION"),
           "traded_volume": 0,
           "filled_volume": 0,
           "zero_fill_reconciliation": audit,
@@ -2462,9 +2382,7 @@ async def _command_expired_entry_zero_fill_reconciliation(
   """Prove an Agent command-expiry error happened before Broker.execute()."""
 
   status = _normalized_order_status(
-    item.get("effective_order_status")
-    or item.get("status")
-    or item.get("order_status")
+    item.get("effective_order_status") or item.get("status") or item.get("order_status")
   )
   reason = str(
     item.get("reason")
@@ -2496,9 +2414,7 @@ async def _command_expired_entry_zero_fill_reconciliation(
   }
   intent_metadata = dict(intent.intent_metadata or {})
   plan_id = str(
-    request_metadata.get("entry_plan_id")
-    or intent_metadata.get("entry_plan_id")
-    or ""
+    request_metadata.get("entry_plan_id") or intent_metadata.get("entry_plan_id") or ""
   ).strip()
   try:
     executed_volume = int(intent.executed_volume or 0)
@@ -2550,9 +2466,7 @@ async def _command_expired_entry_zero_fill_reconciliation(
     prior_fill = _reported_cumulative_fill(prior_report)
     if (
       prior_fill is None
-      and any(
-        key in prior_report for key in ("traded_volume", "filled_volume")
-      )
+      and any(key in prior_report for key in ("traded_volume", "filled_volume"))
     ) or int(prior_fill or 0) > 0:
       return None
 
@@ -2573,9 +2487,7 @@ def _runtime_business_key(
   correlation: StrategyOrderCorrelation,
   item: dict[str, Any],
 ) -> str:
-  broker_order_id = str(
-    item.get("order_id") or item.get("broker_order_id") or ""
-  )
+  broker_order_id = str(item.get("order_id") or item.get("broker_order_id") or "")
   if event_type == "TRADE":
     execution_id = str(item.get("execution_id") or item.get("traded_id") or "")
     if not execution_id:
@@ -2585,9 +2497,7 @@ def _runtime_business_key(
       )
     return f"trade:{correlation.account_id}:{execution_id}"[:192]
   cumulative_fill = _reported_cumulative_fill(item)
-  fill_field_present = any(
-    key in item for key in ("traded_volume", "filled_volume")
-  )
+  fill_field_present = any(key in item for key in ("traded_volume", "filled_volume"))
   fill_component = (
     "INVALID"
     if cumulative_fill is None and fill_field_present
@@ -2622,9 +2532,7 @@ def _event_payload(
   }
   zero_fill_reconciliation = item.get("zero_fill_reconciliation")
   if isinstance(zero_fill_reconciliation, dict):
-    metadata["qmt_zero_fill_reconciliation"] = dict(
-      zero_fill_reconciliation
-    )
+    metadata["qmt_zero_fill_reconciliation"] = dict(zero_fill_reconciliation)
   return {"report": item, "metadata": metadata}
 
 
@@ -2661,8 +2569,7 @@ async def _project_trade_intent_event(
     )
     if historical_projection and (
       projection is None
-      or int(historical_projection["expected"])
-      > int(projection["expected"])
+      or int(historical_projection["expected"]) > int(projection["expected"])
     ):
       projection = historical_projection
     if order_status == "RECONCILED_ZERO_FILL":
@@ -2677,16 +2584,14 @@ async def _project_trade_intent_event(
         item.get("effective_status_reason")
         or "QMT_FULL_SNAPSHOT_ZERO_FILL_RECONCILIATION"
       )
-    elif projection and int(projection["expected"]) > int(
-      projection["received"]
-    ):
+    elif projection and int(projection["expected"]) > int(projection["received"]):
       intent.status = "RECONCILE_REQUIRED"
       intent.notes = _fill_projection_note(projection)
     else:
       intent.status = order_status
-      intent.notes = str(
-        item.get("effective_status_reason") or item.get("status_msg") or ""
-      ) or None
+      intent.notes = (
+        str(item.get("effective_status_reason") or item.get("status_msg") or "") or None
+      )
     return projection
 
   fill_volume = max(0, int(item.get("traded_volume") or item.get("volume") or 0))
@@ -2698,19 +2603,15 @@ async def _project_trade_intent_event(
   total_volume = previous_volume + fill_volume
   intent.executed_volume = total_volume
   intent.executed_price = (
-    (previous_price * previous_volume + fill_price * fill_volume) / total_volume
-  )
+    previous_price * previous_volume + fill_price * fill_volume
+  ) / total_volume
   intent.executed_time = to_naive_utc(
     _parse_report_time(item.get("traded_time") or item.get("trade_time"))
   )
   pending = await db.get(PendingTradeOrder, correlation.client_order_id)
   requested_volume = max(
     0,
-    int(
-      (pending.volume if pending is not None else None)
-      or intent.target_volume
-      or 0
-    ),
+    int((pending.volume if pending is not None else None) or intent.target_volume or 0),
   )
   projection = await _terminal_order_fill_projection(db, correlation, intent)
   if projection and int(projection["expected"]) > int(projection["received"]):
@@ -2746,9 +2647,7 @@ async def _project_t_trade_event(
     int(batch.exit_filled_volume or 0),
     float(batch.exit_avg_price or 0.0),
   )
-  broker_order_id = str(
-    item.get("order_id") or item.get("broker_order_id") or ""
-  )
+  broker_order_id = str(item.get("order_id") or item.get("broker_order_id") or "")
   if event_type == "ORDER":
     status = _normalized_order_status(
       item.get("effective_order_status")
@@ -2781,9 +2680,9 @@ async def _project_t_trade_event(
         "CANCELLED": "ENTRY_REJECTED",
         "EXPIRED": "ENTRY_EXPIRED",
       }.get(status, batch.status)
-      batch.exception_reason = str(
-        item.get("effective_status_reason") or item.get("status_msg") or ""
-      ) or None
+      batch.exception_reason = (
+        str(item.get("effective_status_reason") or item.get("status_msg") or "") or None
+      )
     elif role == "EXIT":
       batch.status = {
         "PENDING": "EXIT_TRIGGERED",
@@ -2796,9 +2695,7 @@ async def _project_t_trade_event(
       }.get(status, batch.status)
       if status in {"REJECTED", "CANCELLED", "EXPIRED"}:
         batch.exception_reason = str(
-          item.get("effective_status_reason")
-          or item.get("status_msg")
-          or status
+          item.get("effective_status_reason") or item.get("status_msg") or status
         )
       else:
         batch.exception_reason = None
@@ -3000,7 +2897,7 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
             # a current account after a mixed-generation replay.
             continue
           if account_id not in checkpoint_by_account:
-            rollout = await db.get(AccountTradingRollout, account_id)
+            rollout = await db.get(AccountExecutionControl, account_id)
             checkpoint_by_account[account_id] = bool(
               rollout is not None
               and str(rollout.last_snapshot_id or "") == snapshot_id
@@ -3013,9 +2910,7 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
       last_staged_at: Optional[datetime] = None
       for event_type, raw_item in runtime_items:
         item = dict(raw_item)
-        broker_order_id = str(
-          item.get("order_id") or item.get("broker_order_id") or ""
-        )
+        broker_order_id = str(item.get("order_id") or item.get("broker_order_id") or "")
         client_order_id = str(
           item.get("client_order_id")
           or report.client_order_id
@@ -3253,9 +3148,7 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
   volume = int(report.get("traded_volume") or report.get("volume") or 0)
   trade = TradeRecord(
     trade_id=str(
-      report.get("execution_id")
-      or report.get("traded_id")
-      or event.business_key
+      report.get("execution_id") or report.get("traded_id") or event.business_key
     ),
     order_id=order_id,
     instrument_code=str(
@@ -3402,21 +3295,15 @@ async def _drain_runtime_events_locked() -> None:
         if event is not None:
           event.application_status = "PENDING"
           event.application_error = str(exc)[:2000]
-          event_metadata = dict(
-            dict(event.payload or {}).get("metadata") or {}
-          )
+          event_metadata = dict(dict(event.payload or {}).get("metadata") or {})
           batch_id = str(
-            event_metadata.get("t_batch_id")
-            or event_metadata.get("batch_id")
-            or ""
+            event_metadata.get("t_batch_id") or event_metadata.get("batch_id") or ""
           )
           if batch_id:
             batch = await db.get(TTradeBatch, batch_id)
             if batch is not None and batch.status != "CLOSED":
               batch.status = "RECONCILE_REQUIRED"
-              batch.exception_reason = (
-                f"策略运行时事件应用失败：{str(exc)[:1000]}"
-              )
+              batch.exception_reason = f"策略运行时事件应用失败：{str(exc)[:1000]}"
           await db.commit()
       blocked_run_ids.add(event_run_id)
       if first_retry_error is None:
@@ -3542,7 +3429,9 @@ async def _supersede_prior_complete_snapshot_failures(
           AgentReportInbox.received_at <= report.received_at,
         )
       )
-    ).scalars().all()
+    )
+    .scalars()
+    .all()
   )
   superseded = [
     item
@@ -3569,9 +3458,7 @@ async def _supersede_prior_complete_snapshot_failures(
       status="RESOLVED",
       resolved_by="SYSTEM_RECONCILIATION",
       resolved_at=resolved_at,
-      resolution=(
-        "后续协议 1.1 完整账户快照已成功收敛；旧失败快照已由权威状态取代"
-      ),
+      resolution=("后续协议 1.1 完整账户快照已成功收敛；旧失败快照已由权威状态取代"),
     )
   )
   return len(superseded)
@@ -3632,9 +3519,7 @@ async def _finish(
           )
       else:
         report.processing_status = "PENDING"
-        report.next_attempt_at = utcnow() + timedelta(
-          seconds=min(60, 2**attempts)
-        )
+        report.next_attempt_at = utcnow() + timedelta(seconds=min(60, 2**attempts))
     await db.commit()
 
 

@@ -17,7 +17,7 @@ from quantx_engine import report_processor
 from quantx_engine.strategy_manager import strategy_manager
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
+  AccountExecutionControl,
   AgentReportInbox,
   PendingTradeOrder,
   StrategyOrderCorrelation,
@@ -130,7 +130,7 @@ async def _database(monkeypatch: pytest.MonkeyPatch):
     PendingTradeOrder.__table__,
     StrategyOrderCorrelation.__table__,
     StrategyRuntimeEvent.__table__,
-    AccountTradingRollout.__table__,
+    AccountExecutionControl.__table__,
     TradeIntentRecord.__table__,
     Order.__table__,
     Trade.__table__,
@@ -226,7 +226,7 @@ async def _seed_managed_order(
       )
     )
     db.add(
-      AccountTradingRollout(
+      AccountExecutionControl(
         account_id="account-1",
         reconcile_status="READY",
         last_snapshot_id=snapshot.payload["snapshot_id"],

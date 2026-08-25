@@ -7,8 +7,8 @@ from quantx_infrastructure.database.relational_base import Base
 # 枚举类型 (用于业务逻辑)
 from .account import Account
 from .agent_runtime import (
-  AccountTradingRollout,
-  AccountTradingRolloutEvent,
+  AccountExecutionControl,
+  AccountExecutionControlEvent,
   AgentDevice,
   AgentEnrollmentCode,
   AgentReportInbox,
@@ -22,6 +22,8 @@ from .agent_runtime import (
   StrategyRuntimeEvent,
   TradeCommandOutbox,
   TTradeBatch,
+  TTradeRollout,
+  TTradeRolloutEvent,
 )
 from .ai_assistant import (
   AiAssistantDeletionAudit,
@@ -52,7 +54,6 @@ from .entry_plan_authorization import (
   EntryPlanAuthorizationEvent,
   EntryPlanAuthorizationGrant,
 )
-from .exit_plan_replay_projection import ExitPlanReplayProjection
 from .enums import (
   AccountType,
   InstrumentType,
@@ -64,6 +65,7 @@ from .enums import (
   StrategyStatus,
 )
 from .execution_metrics import ExecutionMetrics, ExecutionMetricsType
+from .exit_plan_replay_projection import ExitPlanReplayProjection
 from .financial import (
   FinancialBalanceSheet,
   FinancialCapital,
@@ -219,8 +221,8 @@ __all__ = [
   "AiRuntimeSettingsAudit",
   "AiRuntimeSettingsRecord",
   "AgentDevice",
-  "AccountTradingRollout",
-  "AccountTradingRolloutEvent",
+  "AccountExecutionControl",
+  "AccountExecutionControlEvent",
   "AgentEnrollmentCode",
   "AgentReportInbox",
   "EngineCommandOutbox",
@@ -232,6 +234,8 @@ __all__ = [
   "StrategyOrderCorrelation",
   "StrategyRuntimeEvent",
   "TTradeBatch",
+  "TTradeRollout",
+  "TTradeRolloutEvent",
   "TTradeCandidateOutcome",
   "TradeCommandOutbox",
   "Holiday",

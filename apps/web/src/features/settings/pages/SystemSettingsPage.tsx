@@ -5,6 +5,7 @@ import {
   Database,
   Gauge,
   Settings,
+  ShieldCheck,
   type LucideIcon,
 } from 'lucide-react';
 import { useLocation } from 'wouter';
@@ -15,8 +16,9 @@ import { SystemInsightCard } from '@/features/system/components/SystemInsightCar
 import { cn } from '@/utils/cn';
 
 import { AiRuntimeSettingsPanel } from '../components/AiRuntimeSettingsPanel';
+import { TradingSafetySettingsPanel } from '../components/TradingSafetySettingsPanel';
 
-type SettingsSection = 'overview' | 'qmt' | 'ai-runtime';
+type SettingsSection = 'overview' | 'trading-safety' | 'qmt' | 'ai-runtime';
 
 const navigation: Array<{
   id: SettingsSection;
@@ -31,6 +33,13 @@ const navigation: Array<{
     description: '服务健康与快捷入口',
     href: '/settings',
     icon: Gauge,
+  },
+  {
+    id: 'trading-safety',
+    label: '交易安全',
+    description: '账户授权、对账与紧急停止',
+    href: '/settings/trading-safety',
+    icon: ShieldCheck,
   },
   {
     id: 'qmt',
@@ -49,6 +58,7 @@ const navigation: Array<{
 ];
 
 function activeSection(path: string): SettingsSection {
+  if (path.startsWith('/settings/trading-safety')) return 'trading-safety';
   if (path.startsWith('/settings/qmt')) return 'qmt';
   if (path.startsWith('/settings/ai-runtime')) return 'ai-runtime';
   return 'overview';
@@ -60,6 +70,13 @@ function SettingsOverview({
   onNavigate: (path: string) => void;
 }) {
   const cards = [
+    {
+      title: '账户交易安全',
+      description: '独立管理账户级实盘授权、对账窗口和紧急停止。',
+      href: '/settings/trading-safety',
+      icon: ShieldCheck,
+      accent: 'text-sky-300 bg-sky-500/10 border-sky-500/20',
+    },
     {
       title: 'QMT 本机连接',
       description: '查看 MiniQMT 连接链路、行情指标与安全交接状态。',
@@ -211,6 +228,7 @@ export function SystemSettingsPage() {
 
       <main className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-3 sm:p-5 lg:p-6">
         {section === 'overview' && <SettingsOverview onNavigate={navigate} />}
+        {section === 'trading-safety' && <TradingSafetySettingsPanel />}
         {section === 'qmt' && <AgentManagementPanel />}
         {section === 'ai-runtime' && <AiRuntimeSettingsPanel />}
       </main>

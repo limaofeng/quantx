@@ -974,35 +974,6 @@ export const TTradeOperationsQuery = gql(`
   }
 `);
 
-export const BeginTTradeControlledWindowMutation = gql(`
-  mutation Portfolio_BeginTTradeControlledWindow(
-    $accountId: String!
-    $policyVersion: Int!
-    $snapshotId: String!
-    $idempotencyKey: String!
-  ) {
-    beginTTradeControlledWindow(
-      accountId: $accountId
-      policyVersion: $policyVersion
-      snapshotId: $snapshotId
-      idempotencyKey: $idempotencyKey
-    ) {
-      success
-      code
-      message
-      readiness {
-        status
-        stage
-        controlledWindowActive
-        controlledWindowSnapshotId
-        workingExternalOrderCount
-        blockedReasons
-        preparationBlockedReasons
-      }
-    }
-  }
-`);
-
 export const ActivateTTradeLiveMutation = gql(`
   mutation Portfolio_ActivateTTradeLive(
     $accountId: String!
@@ -1041,24 +1012,6 @@ export const ActivateTTradeLiveMutation = gql(`
 export const PauseTTradeEntriesMutation = gql(`
   mutation Portfolio_PauseTTradeEntries($accountId: String!, $reason: String!) {
     pauseTTradeEntries(accountId: $accountId, reason: $reason) {
-      success
-      code
-      message
-    }
-  }
-`);
-
-export const TriggerTTradeKillSwitchMutation = gql(`
-  mutation Portfolio_TriggerTTradeKillSwitch(
-    $accountId: String!
-    $reason: String!
-    $idempotencyKey: String!
-  ) {
-    triggerTTradeKillSwitch(
-      accountId: $accountId
-      reason: $reason
-      idempotencyKey: $idempotencyKey
-    ) {
       success
       code
       message

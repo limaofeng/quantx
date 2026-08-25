@@ -27,7 +27,7 @@ from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
+  AccountExecutionControl,
   AgentDevice,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
@@ -136,40 +136,34 @@ class TradeCommandService:
     *,
     risk_reducing: bool = False,
   ) -> None:
-    if not settings.enable_real_trading or not settings.t_trade_live_enabled:
-      raise AgentUnavailableError("服务端真实交易或做 T 实盘开关未启用")
+    if not settings.enable_real_trading:
+      raise AgentUnavailableError("服务端真实交易总开关未启用")
     if account_id not in set(settings.real_trading_account_allowlist or []):
       raise AgentUnavailableError("账户不在服务端真实交易白名单")
-    rollout = await self.db.get(AccountTradingRollout, account_id)
-    if rollout is None:
-      raise AgentUnavailableError("账户尚未配置做 T 灰度策略")
-    if rollout.kill_switch or rollout.stage == "KILL_SWITCHED":
-      raise AgentUnavailableError("账户做 T kill switch 已触发")
-    if not rollout.enabled or rollout.stage not in {"CANARY", "LIVE"}:
-      paused_exit_allowed = (
-        risk_reducing
-        and rollout.stage == "PAUSED"
-        and rollout.reconcile_status == "READY"
-      )
-      if not paused_exit_allowed:
-        raise AgentUnavailableError("账户尚未进入 CANARY/LIVE 阶段")
-    if rollout.reconcile_status != "READY":
+    control = await self.db.get(AccountExecutionControl, account_id)
+    if control is None:
+      raise AgentUnavailableError("账户尚未配置独立执行控制")
+    state = str(control.authorization_state or "DISABLED").upper()
+    if not risk_reducing and state == "KILLED":
+      raise AgentUnavailableError("账户交易 kill switch 已触发")
+    if not risk_reducing and state != "ENABLED":
+      raise AgentUnavailableError("账户新增风险授权未启用")
+    if control.reconcile_status != "READY":
       raise AgentUnavailableError("账户快照或仓位对账未就绪")
-    if rollout.acknowledged_policy_version < rollout.policy_version:
-      raise AgentUnavailableError("当前自动退出策略版本尚未确认")
 
   async def _require_manual_live_authorization(
     self,
     account_id: str,
     *,
     risk_reducing: bool,
-  ) -> AccountTradingRollout:
+  ) -> AccountExecutionControl:
     """Lock and validate the account gate for a confirmed manual live order.
 
-    The rollout row is the first mutable trading row locked by both this path
-    and ``TTradeOperationsService.kill``.  If enqueue wins, kill subsequently
-    scans and cancels the new pending command; if kill wins, a BUY observes the
-    kill state here and is rejected before any outbox row is created.
+    The account control row is the first mutable trading row locked by both
+    this path and ``AccountExecutionSafetyService.set_authorization_state``.
+    If enqueue wins, a hard kill subsequently scans and cancels the new pending
+    command; if the hard kill wins, a BUY observes the killed state here and is
+    rejected before any outbox row is created.
 
     Risk-reducing SELL orders deliberately do not require an active controlled
     window, CANARY/LIVE enablement, or policy acknowledgement.  This preserves
@@ -181,33 +175,31 @@ class TradeCommandService:
       raise AgentUnavailableError("服务端真实交易总开关未启用")
     if account_id not in set(settings.real_trading_account_allowlist or []):
       raise AgentUnavailableError("账户不在服务端真实交易白名单")
-    rollout = await self.db.get(
-      AccountTradingRollout,
+    control = await self.db.get(
+      AccountExecutionControl,
       account_id,
       with_for_update=True,
     )
-    if rollout is None:
-      raise AgentUnavailableError("账户尚未配置实盘灰度与对账状态")
+    if control is None:
+      raise AgentUnavailableError("账户尚未配置独立执行控制与对账状态")
 
-    if not risk_reducing and (
-      bool(rollout.kill_switch)
-      or str(rollout.stage or "").upper() == "KILL_SWITCHED"
-    ):
+    state = str(control.authorization_state or "DISABLED").upper()
+    if not risk_reducing and state == "KILLED":
       raise AgentUnavailableError("账户交易 kill switch 已触发，禁止新增风险")
-    if str(rollout.reconcile_status or "").upper() != "READY":
+    if not risk_reducing and state != "ENABLED":
+      raise AgentUnavailableError("账户新增风险授权未启用")
+    if str(control.reconcile_status or "").upper() != "READY":
       raise AgentUnavailableError("账户资金、持仓、委托和成交快照尚未完成对账")
 
-    snapshot_id = str(rollout.last_snapshot_id or "")
-    snapshot_hash = str(rollout.last_snapshot_hash or "")
+    snapshot_id = str(control.last_snapshot_id or "")
+    snapshot_hash = str(control.last_snapshot_hash or "")
     snapshot_at = (
-      to_naive_utc(rollout.last_snapshot_at)
-      if rollout.last_snapshot_at is not None
+      to_naive_utc(control.last_snapshot_at)
+      if control.last_snapshot_at is not None
       else None
     )
     snapshot_age = (
-      (utcnow() - snapshot_at).total_seconds()
-      if snapshot_at is not None
-      else None
+      (utcnow() - snapshot_at).total_seconds() if snapshot_at is not None else None
     )
     if (
       not snapshot_id
@@ -219,27 +211,17 @@ class TradeCommandService:
       raise AgentUnavailableError("账户完整对账快照缺失或已超过 90 秒")
 
     if risk_reducing:
-      return rollout
+      return control
 
-    if not bool(rollout.controlled_window_active):
+    if not bool(control.controlled_window_active):
       raise AgentUnavailableError("手动买入需要基于最新快照建立账户实盘窗口")
-    controlled_snapshot_id = str(rollout.controlled_window_snapshot_id or "")
-    controlled_snapshot_hash = str(rollout.controlled_window_snapshot_hash or "")
+    controlled_snapshot_id = str(control.controlled_window_snapshot_id or "")
+    controlled_snapshot_hash = str(control.controlled_window_snapshot_hash or "")
     if (
-      controlled_snapshot_id != snapshot_id
-      or controlled_snapshot_hash != snapshot_hash
+      controlled_snapshot_id != snapshot_id or controlled_snapshot_hash != snapshot_hash
     ):
       raise AgentUnavailableError("账户实盘窗口快照与最新完整快照不一致")
-    if not bool(rollout.enabled) or str(rollout.stage or "").upper() not in {
-      "CANARY",
-      "LIVE",
-    }:
-      raise AgentUnavailableError("手动买入要求账户处于已启用的 CANARY/LIVE 阶段")
-    if int(rollout.acknowledged_policy_version or 0) < int(
-      rollout.policy_version or 0
-    ):
-      raise AgentUnavailableError("当前交易策略版本尚未确认")
-    return rollout
+    return control
 
   @staticmethod
   def _enum_value(value: Any) -> str:
@@ -310,8 +292,7 @@ class TradeCommandService:
       order
       for order in other_orders
       if str(order.strategy_run_id or "") == plan_id
-      or str(dict(order.request_metadata or {}).get("entry_plan_id") or "")
-      == plan_id
+      or str(dict(order.request_metadata or {}).get("entry_plan_id") or "") == plan_id
     ]
     plan_pending_amount = sum(
       (
@@ -337,9 +318,7 @@ class TradeCommandService:
       raise AgentUnavailableError("建仓计划累计成交状态无效")
 
     current_volume = max(0, int(getattr(position, "volume", 0) or 0))
-    current_market_value = Decimal(
-      str(getattr(position, "market_value", 0) or 0)
-    )
+    current_market_value = Decimal(str(getattr(position, "market_value", 0) or 0))
     if current_market_value <= 0 and current_volume > 0:
       current_market_value = requested_price * current_volume
     current_market_value = max(Decimal("0"), current_market_value)
@@ -348,8 +327,7 @@ class TradeCommandService:
     baseline = policy.baseline_snapshot
     external_or_plan_amount = max(
       filled_amount,
-      Decimal(max(0, current_volume - int(baseline.position_volume)))
-      * requested_price,
+      Decimal(max(0, current_volume - int(baseline.position_volume))) * requested_price,
       max(
         Decimal("0"),
         current_market_value - Decimal(str(baseline.market_value_cny)),
@@ -361,9 +339,7 @@ class TradeCommandService:
     )
     plan_budget_remaining = max(
       Decimal("0"),
-      Decimal(str(policy.max_total_amount_cny))
-      - filled_amount
-      - plan_pending_amount,
+      Decimal(str(policy.max_total_amount_cny)) - filled_amount - plan_pending_amount,
     )
     position_cap_remaining = max(
       Decimal("0"),
@@ -402,12 +378,9 @@ class TradeCommandService:
       position_cap_remaining,
       target_remaining_amount,
     )
-    if (
-      requested_amount > amount_capacity
-      or (
-        target_remaining_volume is not None
-        and int(requested_volume) > target_remaining_volume
-      )
+    if requested_amount > amount_capacity or (
+      target_remaining_volume is not None
+      and int(requested_volume) > target_remaining_volume
     ):
       raise AgentUnavailableError("买入委托超过建仓计划当前剩余目标或总预算")
 
@@ -421,8 +394,7 @@ class TradeCommandService:
     )
     return max(
       0,
-      int(order.volume or 0)
-      - max(0, int(executed_volumes.get(order_key, 0) or 0)),
+      int(order.volume or 0) - max(0, int(executed_volumes.get(order_key, 0) or 0)),
     )
 
   async def _executed_volumes_for_orders(
@@ -616,16 +588,14 @@ class TradeCommandService:
       if pending is not None:
         if status_code == int(PersistedOrderStatus.UNKNOWN):
           order_type = self._persisted_order_enum_int(order.type)
-          if (
-            str(order.stock_code or "") == instrument_code
-            or order_type == int(PersistedOrderType.BUY)
+          if str(order.stock_code or "") == instrument_code or order_type == int(
+            PersistedOrderType.BUY
           ):
             represented_unknown.append((order, pending))
         continue
       order_type = self._persisted_order_enum_int(order.type)
-      if (
-        str(order.stock_code or "") == instrument_code
-        or order_type == int(PersistedOrderType.BUY)
+      if str(order.stock_code or "") == instrument_code or order_type == int(
+        PersistedOrderType.BUY
       ):
         uncovered_orders.append(order)
 
@@ -683,15 +653,10 @@ class TradeCommandService:
         for order, is_external in conflicts
         if invalidate_auto_external_buy
         and is_external
-        and self._persisted_order_enum_int(order.type)
-        == int(PersistedOrderType.BUY)
+        and self._persisted_order_enum_int(order.type) == int(PersistedOrderType.BUY)
       ),
       next(
-        (
-          (order, is_external)
-          for order, is_external in conflicts
-          if is_external
-        ),
+        ((order, is_external) for order, is_external in conflicts if is_external),
         conflicts[0],
       ),
     )
@@ -703,9 +668,7 @@ class TradeCommandService:
         reason="ENTRY_EXTERNAL_WORKING_BUY",
         commit=True,
       )
-      raise AgentUnavailableError(
-        "检测到外部或其他策略工作买单，自动授权已失效"
-      )
+      raise AgentUnavailableError("检测到外部或其他策略工作买单，自动授权已失效")
     if external:
       raise AgentUnavailableError(
         "检测到外部、其他策略或方向不明的工作委托，请处理后重新确认"
@@ -788,55 +751,44 @@ class TradeCommandService:
   async def _require_auto_entry_live_snapshot(
     self,
     account_id: str,
-  ) -> AccountTradingRollout:
+  ) -> AccountExecutionControl:
     """Lock the live account gate without requiring a manual trade window."""
 
     if not settings.enable_real_trading:
       raise AgentUnavailableError("服务端真实交易总开关未启用")
     if account_id not in set(settings.real_trading_account_allowlist or []):
       raise AgentUnavailableError("账户不在服务端真实交易白名单")
-    rollout = await self.db.get(
-      AccountTradingRollout,
+    control = await self.db.get(
+      AccountExecutionControl,
       account_id,
       with_for_update=True,
     )
-    if rollout is None:
-      raise AgentUnavailableError("账户尚未配置实盘灰度与对账状态")
-    if (
-      bool(rollout.kill_switch)
-      or str(rollout.stage or "").upper() == "KILL_SWITCHED"
-    ):
+    if control is None:
+      raise AgentUnavailableError("账户尚未配置独立执行控制与对账状态")
+    state = str(control.authorization_state or "DISABLED").upper()
+    if state == "KILLED":
       raise AgentUnavailableError("账户交易 kill switch 已触发，禁止自动买入")
-    if not bool(rollout.enabled) or str(rollout.stage or "").upper() not in {
-      "CANARY",
-      "LIVE",
-    }:
-      raise AgentUnavailableError("自动买入要求账户处于已启用的 CANARY/LIVE 阶段")
-    if str(rollout.reconcile_status or "").upper() != "READY":
+    if state != "ENABLED":
+      raise AgentUnavailableError("账户新增风险授权未启用")
+    if str(control.reconcile_status or "").upper() != "READY":
       raise AgentUnavailableError("账户资金、持仓、委托和成交快照尚未完成对账")
-    if int(rollout.acknowledged_policy_version or 0) < int(
-      rollout.policy_version or 0
-    ):
-      raise AgentUnavailableError("当前交易策略版本尚未确认")
     snapshot_at = (
-      to_naive_utc(rollout.last_snapshot_at)
-      if rollout.last_snapshot_at is not None
+      to_naive_utc(control.last_snapshot_at)
+      if control.last_snapshot_at is not None
       else None
     )
     snapshot_age = (
-      (utcnow() - snapshot_at).total_seconds()
-      if snapshot_at is not None
-      else None
+      (utcnow() - snapshot_at).total_seconds() if snapshot_at is not None else None
     )
     if (
-      not str(rollout.last_snapshot_id or "")
-      or len(str(rollout.last_snapshot_hash or "")) != 64
+      not str(control.last_snapshot_id or "")
+      or len(str(control.last_snapshot_hash or "")) != 64
       or snapshot_age is None
       or snapshot_age < 0
       or snapshot_age > self.MANUAL_RECONCILIATION_MAX_AGE_SECONDS
     ):
       raise AgentUnavailableError("账户完整对账快照缺失或已超过 90 秒")
-    return rollout
+    return control
 
   async def _exact_auto_entry_device(
     self,
@@ -914,10 +866,8 @@ class TradeCommandService:
       or str(intent.status or "").upper() != "PENDING"
       or str(intent_metadata.get("execution_mode") or "").upper() != "AUTO"
       or str(intent_metadata.get("entry_plan_id") or "") != plan_id
-      or int(intent_metadata.get("entry_config_version") or 0)
-      != config.config_version
-      or str(intent_metadata.get("auto_entry_authorization_grant_id") or "")
-      != grant_id
+      or int(intent_metadata.get("entry_config_version") or 0) != config.config_version
+      or str(intent_metadata.get("auto_entry_authorization_grant_id") or "") != grant_id
       or not bool(intent_metadata.get("exact_auto_entry_authorized"))
       or str(intent_metadata.get("auto_entry_plan_fingerprint") or "")
       != scope.plan_fingerprint
@@ -948,9 +898,8 @@ class TradeCommandService:
       raise AgentUnavailableError("自动买入委托价格或金额无效")
     if intent.target_volume is not None and int(volume) > int(intent.target_volume):
       raise AgentUnavailableError("自动买入委托超过意图目标数量")
-    if (
-      intent.target_amount is not None
-      and requested_amount > Decimal(str(intent.target_amount))
+    if intent.target_amount is not None and requested_amount > Decimal(
+      str(intent.target_amount)
     ):
       raise AgentUnavailableError("自动买入委托超过意图目标金额")
 
@@ -976,9 +925,7 @@ class TradeCommandService:
     )
     position_market_value = Decimal(str(getattr(position, "market_value", 0) or 0))
     if position is not None and position_market_value <= 0:
-      position_price = Decimal(
-        str(getattr(position, "last_price", 0) or limit_price)
-      )
+      position_price = Decimal(str(getattr(position, "last_price", 0) or limit_price))
       position_market_value = position_price * int(position.volume or 0)
     active_pending = list(
       (
@@ -1002,7 +949,9 @@ class TradeCommandService:
           )
           .with_for_update()
         )
-      ).scalars().all()
+      )
+      .scalars()
+      .all()
     )
     grant = await self.db.get(
       EntryPlanAuthorizationGrant,
@@ -1064,9 +1013,8 @@ class TradeCommandService:
     available_cash = Decimal(str(account.cash or 0))
     if requested_amount + working_cash_reserve > available_cash:
       raise AgentUnavailableError("自动买入超过当前权威可用资金")
-    cash_buffer = (
-      Decimal(str(account.total_asset))
-      * Decimal(str(config.pacing_policy.cash_buffer_pct))
+    cash_buffer = Decimal(str(account.total_asset)) * Decimal(
+      str(config.pacing_policy.cash_buffer_pct)
     )
     if available_cash - working_cash_reserve - requested_amount < cash_buffer:
       raise AgentUnavailableError("自动买入会突破计划绑定的最低现金缓冲")
@@ -1074,9 +1022,7 @@ class TradeCommandService:
       position_market_value + pending_amount + requested_amount
     ) / Decimal(str(account.total_asset))
 
-    protected_price = Decimal(
-      str(intent_metadata.get("protected_limit_price") or 0)
-    )
+    protected_price = Decimal(str(intent_metadata.get("protected_limit_price") or 0))
     if not protected_price.is_finite() or protected_price <= 0:
       raise AgentUnavailableError("自动买入意图缺少受保护的决策价格")
     proposed_slippage_bps = int(
@@ -1090,9 +1036,7 @@ class TradeCommandService:
         abs(price - protected_price) / protected_price * Decimal("10000")
       ).to_integral_value(rounding=ROUND_CEILING)
     )
-    validation = await EntryPlanAuthorizationService(
-      self.db
-    ).validate_or_invalidate(
+    validation = await EntryPlanAuthorizationService(self.db).validate_or_invalidate(
       plan_id=plan_id,
       current_scope=scope,
       account_id=account_id,
@@ -1108,9 +1052,7 @@ class TradeCommandService:
       or validation.balance is None
       or validation.balance.grant_id != grant_id
     ):
-      raise AgentUnavailableError(
-        f"自动买入精确授权已失效：{validation.code}"
-      )
+      raise AgentUnavailableError(f"自动买入精确授权已失效：{validation.code}")
     await self._require_no_unattributed_buy_trades(
       plan_id=plan_id,
       account_id=account_id,
@@ -1151,9 +1093,7 @@ class TradeCommandService:
       or "live" not in capabilities
       or str(details.get("protocolVersion") or "") != "1.1"
     ):
-      raise AgentUnavailableError(
-        "自动买入要求唯一 READY、live、协议 1.1 的 QMT Agent"
-      )
+      raise AgentUnavailableError("自动买入要求唯一 READY、live、协议 1.1 的 QMT Agent")
     return device
 
   async def _managed_manual_entry_device(
@@ -1220,10 +1160,8 @@ class TradeCommandService:
       or str(intent.direction or "").upper() != "BUY"
       or str(intent.status or "").upper() != "APPROVED"
       or str(intent_metadata.get("entry_plan_id") or "") != strategy_run_id
-      or int(intent_metadata.get("entry_config_version") or 0)
-      != config.config_version
-      or str(intent_metadata.get("execution_mode") or "").upper()
-      != "MANUAL_CONFIRM"
+      or int(intent_metadata.get("entry_config_version") or 0) != config.config_version
+      or str(intent_metadata.get("execution_mode") or "").upper() != "MANUAL_CONFIRM"
     ):
       raise AgentUnavailableError("逐笔确认意图与当前建仓计划不匹配")
     plan_state = (
@@ -1251,9 +1189,8 @@ class TradeCommandService:
       raise AgentUnavailableError("逐笔确认买单超过价格或单笔风险上限")
     if intent.target_volume is not None and int(volume) > int(intent.target_volume):
       raise AgentUnavailableError("逐笔确认买单超过已确认意图数量")
-    if (
-      intent.target_amount is not None
-      and requested_amount > Decimal(str(intent.target_amount))
+    if intent.target_amount is not None and requested_amount > Decimal(
+      str(intent.target_amount)
     ):
       raise AgentUnavailableError("逐笔确认买单超过已确认意图金额")
     account = (
@@ -1328,9 +1265,7 @@ class TradeCommandService:
       )
       .with_for_update()
     )
-    current_market_value = Decimal(
-      str(getattr(position, "market_value", 0) or 0)
-    )
+    current_market_value = Decimal(str(getattr(position, "market_value", 0) or 0))
     if position is not None and current_market_value <= 0:
       current_market_value = price * int(position.volume or 0)
     self._require_managed_entry_capacity(
@@ -1391,8 +1326,7 @@ class TradeCommandService:
     for device in devices:
       allowed = list(device.authorized_account_ids or [])
       capabilities = {
-        str(capability).lower()
-        for capability in list(device.capabilities or [])
+        str(capability).lower() for capability in list(device.capabilities or [])
       }
       if account_id not in allowed or execution_mode not in capabilities:
         continue
@@ -1407,8 +1341,7 @@ class TradeCommandService:
           else {"READY"}
         )
         if (
-          heartbeat is None
-          or str(heartbeat.status).upper() not in acceptable_statuses
+          heartbeat is None or str(heartbeat.status).upper() not in acceptable_statuses
         ):
           continue
         if not self._heartbeat_fresh(heartbeat):
@@ -1434,8 +1367,7 @@ class TradeCommandService:
     )
     for device in result.scalars().all():
       capabilities = {
-        str(capability).lower()
-        for capability in list(device.capabilities or [])
+        str(capability).lower() for capability in list(device.capabilities or [])
       }
       if (
         account_id in list(device.authorized_account_ids or [])
@@ -1499,8 +1431,8 @@ class TradeCommandService:
       raise ValueError("手动实盘授权只能用于 live 交易命令")
     risk_reducing = normalized_role == "EXIT" or side.upper() == "SELL"
     if manual_live:
-      # This lock must precede the outbox lookup/insert to match kill()'s
-      # rollout -> pending/outbox lock order.
+      # This lock must precede the outbox lookup/insert to match the account
+      # hard-kill control -> pending/outbox lock order.
       await self._require_manual_live_authorization(
         account_id,
         risk_reducing=risk_reducing,
@@ -1563,9 +1495,7 @@ class TradeCommandService:
         {
           str(value).strip()
           for value in (
-            list(reason_tags)
-            if reason_tags is not None
-            else ["queued-command"]
+            list(reason_tags) if reason_tags is not None else ["queued-command"]
           )
           if str(value).strip()
         }
@@ -1717,9 +1647,7 @@ class TradeCommandService:
         metadata.get("auto_exit_authorization_fingerprint") or ""
       ).strip()
       if normalized_execution_mode != "live" or str(side or "").upper() != "SELL":
-        raise AgentUnavailableError(
-          "精确自动退出门禁只能用于 LIVE 风险降低卖单"
-        )
+        raise AgentUnavailableError("精确自动退出门禁只能用于 LIVE 风险降低卖单")
       if not str(authorization_user_id or "").strip():
         raise AgentUnavailableError("自动退出授权缺少确认用户绑定")
       if not authorization_plan_id or not authorization_fingerprint:
@@ -1736,8 +1664,7 @@ class TradeCommandService:
         or str(plan.account_id) != str(account_id)
         or str(plan.instrument_code) != str(instrument_code)
         or int(plan.config_version or 0) != int(policy_version or 0)
-        or str(plan.auto_exit_authorization_user_id or "")
-        != str(authorization_user_id)
+        or str(plan.auto_exit_authorization_user_id or "") != str(authorization_user_id)
         or str(plan.auto_exit_authorization_fingerprint or "")
         != authorization_fingerprint
       ):
@@ -1748,17 +1675,13 @@ class TradeCommandService:
         lock_mutable_rows=True,
       )
       if not validation.valid:
-        raise AgentUnavailableError(
-          f"自动退出授权已失效：{validation.code}"
-        )
+        raise AgentUnavailableError(f"自动退出授权已失效：{validation.code}")
       intent = await self.db.get(
         TradeIntentRecord,
         str(intent_id or ""),
         with_for_update=True,
       )
-      intent_metadata = (
-        dict(intent.intent_metadata or {}) if intent is not None else {}
-      )
+      intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
       plan_state = dict(plan.plan_state or {})
       if (
         intent is None
@@ -1871,9 +1794,7 @@ class TradeCommandService:
           intent=persisted_intent,
         )
       else:
-        device = await self._device_for_account(
-          account_id, normalized_execution_mode
-        )
+        device = await self._device_for_account(account_id, normalized_execution_mode)
     return await self.enqueue_order(
       user_id=device.user_id,
       account_id=account_id,
@@ -1911,8 +1832,7 @@ class TradeCommandService:
   ) -> QueuedTradeCommand:
     business_idempotency_key = hashlib.sha256(
       (
-        f"cancel:{user_id}:{account_id}:"
-        f"{idempotency_key.strip() or broker_order_id}"
+        f"cancel:{user_id}:{account_id}:{idempotency_key.strip() or broker_order_id}"
       ).encode("utf-8")
     ).hexdigest()
     existing = (
@@ -2078,9 +1998,7 @@ class TradeCommandService:
           user_id=str(order.user_id),
           account_id=str(order.account_id),
           broker_order_id=broker_order_id,
-          idempotency_key=(
-            f"entry-plan-cancel:{client_order_id}:{broker_order_id}"
-          ),
+          idempotency_key=(f"entry-plan-cancel:{client_order_id}:{broker_order_id}"),
           execution_mode=str(order.execution_mode or "paper").lower(),
           commit_transaction=False,
         )
@@ -2107,23 +2025,18 @@ class TradeCommandService:
               result_request_metadata = intent_metadata
           pending_metadata = dict(order.request_metadata or {})
           has_managed_entry_marker = bool(
-            str(pending_metadata.get("entry_plan_id") or "")
-            == strategy_run_id
-            or str(intent_metadata.get("entry_plan_id") or "")
-            == strategy_run_id
+            str(pending_metadata.get("entry_plan_id") or "") == strategy_run_id
+            or str(intent_metadata.get("entry_plan_id") or "") == strategy_run_id
           )
           is_bound_managed_entry = bool(
             intent is not None
             and str(intent.strategy_run_id or "") == strategy_run_id
             and str(intent.direction or "").upper() == "BUY"
-            and str(intent_metadata.get("entry_plan_id") or "")
-            == strategy_run_id
+            and str(intent_metadata.get("entry_plan_id") or "") == strategy_run_id
           )
           try:
             executed_volume = int(intent.executed_volume or 0) if intent else 0
-            last_source_sequence = int(
-              getattr(order, "last_source_sequence", 0) or 0
-            )
+            last_source_sequence = int(getattr(order, "last_source_sequence", 0) or 0)
             executed_price = (
               Decimal(str(intent.executed_price or 0))
               if intent is not None
@@ -2147,14 +2060,11 @@ class TradeCommandService:
               not in {"FILLED", "PARTIAL_FILLED", "PARTIALLY_FILLED"}
             )
           )
-          if (
-            not proven_zero_fill
-            or (has_managed_entry_marker and not is_bound_managed_entry)
+          if not proven_zero_fill or (
+            has_managed_entry_marker and not is_bound_managed_entry
           ):
             order.status = "RECONCILE_REQUIRED"
-            order.status_reason = (
-              "local cancel could not prove zero broker execution"
-            )
+            order.status_reason = "local cancel could not prove zero broker execution"
           else:
             outbox.delivery_status = "CANCELLED"
             order.status = "CANCELLED"
@@ -2165,9 +2075,7 @@ class TradeCommandService:
               intent.status = "RECONCILED_ZERO_FILL"
               intent.notes = reason_code
               intent_metadata["execution_terminal_reason"] = reason_code
-              intent_metadata["execution_terminal_source"] = (
-                "LOCAL_OUTBOX_CANCEL"
-              )
+              intent_metadata["execution_terminal_source"] = "LOCAL_OUTBOX_CANCEL"
               intent.intent_metadata = intent_metadata
               result_request_metadata = intent_metadata
         elif client_order_id in runtime_event_client_ids:
@@ -2175,9 +2083,9 @@ class TradeCommandService:
           order.status_reason = "durable broker runtime event blocks local cancel"
         else:
           order.status = "CANCEL_REQUESTED"
-          order.status_reason = (
-            str(reason or "waiting for broker order id before cancellation")[:256]
-          )
+          order.status_reason = str(
+            reason or "waiting for broker order id before cancellation"
+          )[:256]
       results.append(
         StrategyOrderCancelRequest(
           client_order_id=client_order_id,

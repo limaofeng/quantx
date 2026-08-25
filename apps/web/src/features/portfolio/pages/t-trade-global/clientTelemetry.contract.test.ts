@@ -112,10 +112,8 @@ describe('T trade V3 client telemetry contract', () => {
       "String(payload.code || '').endsWith('_OUTCOME_UNKNOWN')"
     );
     expect(page).toContain('existingOperation?.uncertain');
-    expect(page).toContain('controlledWindowOperationRef.current');
     expect(page).toContain('idempotencyKey: operation.idempotencyKey');
     expect(page).toContain('activateLiveOperationRef.current');
-    expect(page).toContain('killSwitchOperationRef.current');
   });
 
   it('keeps unknown approval command-pending codes retryable', () => {
@@ -136,9 +134,7 @@ describe('T trade V3 client telemetry contract', () => {
   it('does not let an unknown high-risk operation change identity', () => {
     const page = source('../TTradeGlobalPage.tsx');
     expect(page).toContain('上一笔审批结果未知');
-    expect(page).toContain('上一笔账户窗口结果未知');
     expect(page).toContain('上一笔实盘提升结果未知');
-    expect(page).toContain('上一笔紧急停止结果未知');
     expect(page).toContain('上一笔回放结果未知');
     expect(page).toContain(
       'const operationScope = `activate-live:${accountId}`'
@@ -146,16 +142,10 @@ describe('T trade V3 client telemetry contract', () => {
     expect(page).not.toContain('targetStage,\n      confirmation,');
   });
 
-  it('binds controlled-window and LIVE operations to the confirming snapshot and policy', () => {
+  it('keeps account controls out of T operations and binds LIVE to snapshot and policy', () => {
     const operations = source('../../hooks/useTTradeGlobal.ts');
-    const begin = operations.slice(
-      operations.indexOf('export const BeginTTradeControlledWindowMutation'),
-      operations.indexOf('export const ActivateTTradeLiveMutation')
-    );
-    expect(begin).toContain('$policyVersion: Int!');
-    expect(begin).toContain('policyVersion: $policyVersion');
-    expect(begin).toContain('$snapshotId: String!');
-    expect(begin).toContain('snapshotId: $snapshotId');
+    expect(operations).not.toContain('BeginTTradeControlledWindowMutation');
+    expect(operations).not.toContain('TriggerTTradeKillSwitchMutation');
 
     const activate = operations.slice(
       operations.indexOf('export const ActivateTTradeLiveMutation')
@@ -166,14 +156,9 @@ describe('T trade V3 client telemetry contract', () => {
     expect(activate).toContain('snapshotId: $snapshotId');
 
     const page = source('../TTradeGlobalPage.tsx');
-    const beginHandler = page.slice(
-      page.indexOf('const handleBeginAccountExecutionWindow'),
-      page.indexOf('const handleActivateLive')
-    );
-    expect(
-      beginHandler.match(/snapshotId: readiness\.snapshotId/g)?.length
-    ).toBeGreaterThanOrEqual(2);
-    expect(beginHandler).toContain('policyVersion: readiness.policyVersion');
+    expect(page).not.toContain('handleBeginAccountExecutionWindow');
+    expect(page).not.toContain('handleKillSwitch');
+    expect(page).toContain("openStudioTab('/settings/trading-safety')");
 
     const activation = page.slice(
       page.indexOf('const handleActivateLive'),

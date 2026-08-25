@@ -99,18 +99,8 @@ def _require_safe_run_mode(mode: str, allowed_accounts: set[str]) -> None:
     raise SystemExit("live mode requires ENV=testing or ENV=production")
   if os.environ.get("ENABLE_REAL_TRADING", "").strip().lower() != "true":
     raise SystemExit("live mode requires ENABLE_REAL_TRADING=true")
-  if (
-    os.environ.get("QMT_REAL_TRADING_ENABLED", "").strip().lower()
-    != "true"
-  ):
+  if os.environ.get("QMT_REAL_TRADING_ENABLED", "").strip().lower() != "true":
     raise SystemExit("live mode requires QMT_REAL_TRADING_ENABLED=true")
-  if (
-    environment == "production"
-    and os.environ.get("T_TRADE_LIVE_ENABLED", "").strip().lower() != "true"
-  ):
-    raise SystemExit(
-      "production live mode requires T_TRADE_LIVE_ENABLED=true"
-    )
 
 
 def parse_args() -> argparse.Namespace:

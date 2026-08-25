@@ -66,11 +66,6 @@ def _readiness(*, server_enabled: bool = True):
       "passed": server_enabled,
       "message": "server disabled" if not server_enabled else "",
     },
-    {
-      "code": "T_TRADE_LIVE_ENABLED",
-      "passed": False,
-      "message": "unrelated t-trade gate",
-    },
     {"code": "ENGINE_READY", "passed": True, "message": ""},
     {"code": "LIVE_AGENT_READY", "passed": True, "message": ""},
   ]
@@ -150,12 +145,24 @@ def test_live_resume_and_paper_clone_have_fail_closed_state_machines():
   )
 
 
-def test_strategy_readiness_ignores_only_t_trade_product_gate():
+def test_strategy_readiness_uses_account_checks_and_fails_closed_on_pollution():
   readiness = _readiness()
   _validate_readiness(readiness)
   assert "T_TRADE_LIVE_ENABLED" not in {
     item["code"] for item in _readiness_binding(readiness)["checks"]
   }
+
+  polluted = _readiness()
+  polluted["checks"].append(
+    {
+      "code": "T_TRADE_LIVE_ENABLED",
+      "passed": False,
+      "message": "unrelated t-trade gate",
+    }
+  )
+  with pytest.raises(TradeApprovalChallengeError) as polluted_error:
+    _validate_readiness(polluted)
+  assert polluted_error.value.code == "STRATEGY_LIVE_NOT_READY"
 
   with pytest.raises(TradeApprovalChallengeError) as caught:
     _validate_readiness(_readiness(server_enabled=False))

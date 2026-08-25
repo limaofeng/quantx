@@ -144,6 +144,8 @@ def test_trade_approval_mutations_require_independent_permission(
     ("cancelTTradeOrder", "t-trade:control"),
     ("rejectTTradeEntry", "t-trade:control"),
     ("pauseTTradeEntries", "t-trade:control"),
+    ("previewAccountExecutionControl", "account-execution:control"),
+    ("confirmAccountExecutionControl", "account-execution:control"),
     ("saveLimitUpBoardAssistant", "limit-up:control"),
     ("armLimitUpBoardCandidate", "limit-up:control"),
     ("setFirstBoardCandidatePreference", "limit-up:control"),
@@ -161,9 +163,7 @@ def test_mobile_non_order_mutations_use_narrow_permissions(
   [
     "approveTTradeEntry",
     "approveStrategyTradeIntent",
-    "beginTTradeControlledWindow",
     "activateTTradeLive",
-    "triggerTTradeKillSwitch",
   ],
 )
 def test_legacy_or_not_yet_challenged_risk_writes_use_domain_permissions(

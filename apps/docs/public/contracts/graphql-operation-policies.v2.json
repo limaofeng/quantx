@@ -86,19 +86,6 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
-      "beginTTradeControlledWindow": {
-        "audiences": [
-          "web",
-          "native",
-          "third-party"
-        ],
-        "requiredPermissions": [
-          "strategy:write",
-          "trade:approve"
-        ],
-        "risk": "TRADING_WRITE",
-        "stability": "supported"
-      },
       "bulkSaveHolidays": {
         "audiences": [
           "web",
@@ -267,6 +254,18 @@
         ],
         "requiredPermissions": [
           "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmAccountExecutionControl": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "account-execution:control",
+          "trade:approve"
         ],
         "risk": "TRADING_WRITE",
         "stability": "supported"
@@ -678,6 +677,18 @@
         ],
         "requiredPermissions": [
           "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewAccountExecutionControl": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "account-execution:control",
+          "trade:approve"
         ],
         "risk": "TRADING_WRITE",
         "stability": "supported"
@@ -1366,19 +1377,6 @@
         ],
         "requiredPermissions": [
           "strategy:control",
-          "trade:approve"
-        ],
-        "risk": "TRADING_WRITE",
-        "stability": "supported"
-      },
-      "triggerTTradeKillSwitch": {
-        "audiences": [
-          "web",
-          "native",
-          "third-party"
-        ],
-        "requiredPermissions": [
-          "strategy:write",
           "trade:approve"
         ],
         "risk": "TRADING_WRITE",

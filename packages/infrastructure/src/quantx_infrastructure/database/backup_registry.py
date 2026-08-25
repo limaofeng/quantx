@@ -11,7 +11,7 @@ from quantx_domain.clock import utcnow
 from sqlalchemy import update
 
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
-from quantx_infrastructure.models.agent_runtime import AccountTradingRollout
+from quantx_infrastructure.models.agent_runtime import AccountExecutionControl
 
 
 async def record_backup(manifest_path: str) -> None:
@@ -20,11 +20,11 @@ async def record_backup(manifest_path: str) -> None:
     raise ValueError("backup manifest does not exist")
   async with AsyncSessionLocal() as db:
     result = await db.execute(
-      update(AccountTradingRollout).values(last_backup_at=utcnow())
+      update(AccountExecutionControl).values(last_backup_at=utcnow())
     )
     if result.rowcount != 1:
       raise RuntimeError(
-        "successful backup registration requires exactly one account rollout"
+        "successful backup registration requires exactly one account execution control"
       )
     await db.commit()
   print(json.dumps({"recorded": True, "manifest": str(path)}))

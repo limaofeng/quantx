@@ -26,10 +26,8 @@ class TTradeRolloutTarget(Enum):
 
 @strawberry.enum(description="原生端两阶段做 T 安全控制动作")
 class TTradeControlAction(Enum):
-  BEGIN_CONTROLLED_WINDOW = "BEGIN_CONTROLLED_WINDOW"
   ACTIVATE_CANARY = "ACTIVATE_CANARY"
   ACTIVATE_LIVE = "ACTIVATE_LIVE"
-  KILL_SWITCH = "KILL_SWITCH"
 
 
 @strawberry.enum(description="做 T V3 客户端遥测平台")

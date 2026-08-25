@@ -268,6 +268,7 @@ def _evaluate(
   replay_evidence_truncated_run_ids: tuple[str, ...] = (),
   historical_replay_cutoff_date: date | None = None,
   rollout: SimpleNamespace | None | object = _UNSET,
+  account_control: SimpleNamespace | None = None,
   global_config: SimpleNamespace | None | object = _UNSET,
   live_run: SimpleNamespace | None | object = _UNSET,
   review_events: list[SimpleNamespace] | None = None,
@@ -278,6 +279,7 @@ def _evaluate(
   return TTradeV3RolloutEvidenceEvaluator().evaluate_records(
     account_id="account-1",
     rollout=_rollout() if rollout is _UNSET else rollout,
+    account_control=account_control,
     global_config=_global_config() if global_config is _UNSET else global_config,
     live_run=(
       SimpleNamespace(mode="LIVE", instruments=["600000.SH"])
@@ -1061,7 +1063,10 @@ def test_evaluator_requires_matching_durable_operator_review_event() -> None:
   )
   rollout = _rollout()
   rollout.policy_version = 7
-  rollout.last_snapshot_id = "snapshot-1"
+  account_control = SimpleNamespace(
+    last_snapshot_id="snapshot-1",
+    last_snapshot_hash="a" * 64,
+  )
   base = _evaluate(
     paper_evaluations=paper_evaluations,
     paper_outcomes=paper_outcomes,
@@ -1069,6 +1074,7 @@ def test_evaluator_requires_matching_durable_operator_review_event() -> None:
     replay_evaluations=[replay_evaluation],
     replay_outcomes=[replay_outcome],
     rollout=rollout,
+    account_control=account_control,
   )
   review = base["summary"]["operator_review"]
   event = SimpleNamespace(
@@ -1096,6 +1102,7 @@ def test_evaluator_requires_matching_durable_operator_review_event() -> None:
     replay_evaluations=[replay_evaluation],
     replay_outcomes=[replay_outcome],
     rollout=rollout,
+    account_control=account_control,
     review_events=[event],
   )
 
@@ -1109,8 +1116,10 @@ def test_evaluator_fails_closed_when_review_event_query_is_truncated() -> None:
     paper_evaluations=paper_evaluations,
     paper_outcomes=paper_outcomes,
     paper_calendar=paper_days,
-    rollout=SimpleNamespace(
-      **vars(_rollout()), policy_version=7, last_snapshot_id="snapshot-1"
+    rollout=SimpleNamespace(**vars(_rollout()), policy_version=7),
+    account_control=SimpleNamespace(
+      last_snapshot_id="snapshot-1",
+      last_snapshot_hash="a" * 64,
     ),
     review_events_truncated=True,
   )
@@ -1211,8 +1220,6 @@ async def test_evaluator_uses_bounded_queries_not_one_query_per_run(
 def _cache_rollout(**overrides: object) -> SimpleNamespace:
   values: dict[str, object] = {
     "policy_version": 3,
-    "last_snapshot_id": "snapshot-1",
-    "last_snapshot_hash": "a" * 64,
     "stage": "SHADOW",
     "enabled": False,
     "max_active_batches": 1,
@@ -1221,6 +1228,15 @@ def _cache_rollout(**overrides: object) -> SimpleNamespace:
     "max_total_exposure_pct": 0.02,
     "acknowledged_policy_version": 0,
     "updated_at": None,
+  }
+  values.update(overrides)
+  return SimpleNamespace(**values)
+
+
+def _cache_account_control(**overrides: object) -> SimpleNamespace:
+  values: dict[str, object] = {
+    "last_snapshot_id": "snapshot-1",
+    "last_snapshot_hash": "a" * 64,
   }
   values.update(overrides)
   return SimpleNamespace(**values)
@@ -1278,15 +1294,27 @@ async def test_evaluator_negative_cache_key_changes_with_rollout_revision() -> N
     _cache_result(passed=False),
   )
   rollout = _cache_rollout()
+  account_control = _cache_account_control()
 
-  first = await evaluator.evaluate(object(), account_id="account-1", rollout=rollout)
+  first = await evaluator.evaluate(
+    object(),
+    account_id="account-1",
+    rollout=rollout,
+    account_control=account_control,
+  )
   rollout.policy_version = 4
   policy_changed = await evaluator.evaluate(
-    object(), account_id="account-1", rollout=rollout
+    object(),
+    account_id="account-1",
+    rollout=rollout,
+    account_control=account_control,
   )
-  rollout.last_snapshot_hash = "b" * 64
+  account_control.last_snapshot_hash = "b" * 64
   snapshot_changed = await evaluator.evaluate(
-    object(), account_id="account-1", rollout=rollout
+    object(),
+    account_id="account-1",
+    rollout=rollout,
+    account_control=account_control,
   )
 
   assert evaluator.calls == 3

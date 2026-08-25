@@ -7,8 +7,8 @@
 `data-only`、`paper` 或 `live`。`live` 只允许在 `ENV=testing` 或
 `ENV=production`，且同时显式设置 `ENABLE_REAL_TRADING=true`、
 `QMT_REAL_TRADING_ENABLED=true` 和 `QMT_ACCOUNT_WHITELIST` 时启动。
-production 还必须设置 `T_TRADE_LIVE_ENABLED=true`；服务端账户白名单、
-灰度阶段、快照、对账与策略授权仍会独立阻断不合规命令。普通开发 `up`
+服务端账户白名单、独立账户增仓授权、快照、对账与策略授权仍会阻断不合规命令；
+`T_TRADE_LIVE_ENABLED` 只控制做 T 助手，不参与 QMT Agent 或账户实盘能力判定。普通开发 `up`
 默认提升为 `full/live`；登记与运行时预检通过时才启动 QMT Agent。启动器保持
 服务端为 `development`，只为 QMT Agent 子进程注入 `ENV=testing`、账户白名单
 和实盘开关。预检失败时仍保持期望模式为 `live`，但会在 API/Engine 启动前关闭

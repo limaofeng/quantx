@@ -28,7 +28,7 @@ def test_dev_live_start_registers_a_daily_non_elevated_backup_task():
   assert '$agentMode -eq "live"' in invoke_up
   assert '$env:ENABLE_REAL_TRADING -eq "true"' in invoke_up
   assert '$env:QMT_REAL_TRADING_ENABLED -eq "true"' in invoke_up
-  assert '$env:T_TRADE_LIVE_ENABLED -eq "true"' in invoke_up
+  assert '$env:T_TRADE_LIVE_ENABLED -eq "true"' not in invoke_up
   assert invoke_up.index("if (-not $liveRuntimeReady)") < invoke_up.index(
     "Register-DevBackupMaintenance"
   )

@@ -87,7 +87,6 @@ import {
   CancelTTradeReplayMutation,
   CancelTTradeOrderMutation,
   ActivateTTradeLiveMutation,
-  BeginTTradeControlledWindowMutation,
   ImportTTradeExternalEntryMutation,
   ReconcileTTradeGlobalMonitorMutation,
   PauseTTradeEntriesMutation,
@@ -113,7 +112,6 @@ import {
   TTradeSignalSnapshotFieldsFragment,
   TTradeUpdatesSubscription,
   TTradeSourceOrdersQuery,
-  TriggerTTradeKillSwitchMutation,
 } from '../hooks/useTTradeGlobal';
 
 import {
@@ -262,13 +260,7 @@ function MetricCard({
   icon: React.ElementType;
   label: string;
   tone?:
-    | 'amber'
-    | 'emerald'
-    | 'marketDown'
-    | 'marketUp'
-    | 'red'
-    | 'sky'
-    | 'slate';
+    'amber' | 'emerald' | 'marketDown' | 'marketUp' | 'red' | 'sky' | 'slate';
   value: string | number;
 }) {
   const tones = {
@@ -1283,11 +1275,7 @@ function TTradeReplayPanel({
             </div>
             <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-slate-600">
               <span>{item.runId.slice(0, 8)}</span>
-              <span
-                className={
-                  financialToneClass(item.summary?.tNetProfit)
-                }
-              >
+              <span className={financialToneClass(item.summary?.tNetProfit)}>
                 {item.summary
                   ? `¥${formatNumber(item.summary.tNetProfit)}`
                   : `${formatNumber(item.progressPct, 0)}%`}
@@ -1346,29 +1334,19 @@ export function TTradeGlobalPage() {
   const approveOperationRef = React.useRef(
     new Map<string, ClientOperationRef>()
   );
-  const controlledWindowOperationRef = React.useRef<ClientOperationRef | null>(
-    null
-  );
   const activateLiveOperationRef = React.useRef<ClientOperationRef | null>(
     null
   );
-  const killSwitchOperationRef = React.useRef<ClientOperationRef | null>(null);
   React.useEffect(() => {
     const reconcile = readUncertainOperation(`reconcile:${accountId}`);
     reconcileOperationRef.current = reconcile
       ? { ...reconcile, accountId }
       : null;
     approveOperationRef.current.clear();
-    controlledWindowOperationRef.current = readUncertainOperation(
-      `begin-window:${accountId}`
-    );
     // Keep one account-wide activation scope so a pending CANARY operation
     // also blocks a second LIVE mutation after a refresh or stage change.
     activateLiveOperationRef.current = readUncertainOperation(
       `activate-live:${accountId}`
-    );
-    killSwitchOperationRef.current = readUncertainOperation(
-      `kill-switch:${accountId}`
     );
   }, [accountId]);
   const subscriptionRefreshTimerRef = React.useRef<number | null>(null);
@@ -1699,14 +1677,8 @@ export function TTradeGlobalPage() {
   const [activateLiveResult, activateLive] = useMutation(
     ActivateTTradeLiveMutation
   );
-  const [controlledWindowResult, beginControlledWindow] = useMutation(
-    BeginTTradeControlledWindowMutation
-  );
   const [pauseEntriesResult, pauseEntries] = useMutation(
     PauseTTradeEntriesMutation
-  );
-  const [killSwitchResult, triggerKillSwitch] = useMutation(
-    TriggerTTradeKillSwitchMutation
   );
   const [cancelOrderResult, cancelTTradeOrder] = useMutation(
     CancelTTradeOrderMutation
@@ -2630,111 +2602,8 @@ export function TTradeGlobalPage() {
     refreshSafety();
   }, [refreshSafety, refreshVisibleData]);
 
-  const handleBeginAccountExecutionWindow = async () => {
-    if (!accountId || !readiness?.snapshotId) return;
-    const confirmed = await confirmDialog({
-      title: '建立账户实盘窗口',
-      description: `将以快照 ${readiness.snapshotId} 建立账户级实盘窗口。历史已终结的手工记录会保留审计；之后新增 QMT 手工委托或成交会关闭新增风险能力。`,
-      confirmText: '建立账户窗口',
-      cancelText: '暂不建立',
-      variant: 'warning',
-    });
-    if (!confirmed) return;
-    const identity = JSON.stringify({
-      accountId,
-      snapshotId: readiness.snapshotId,
-      policyVersion: readiness.policyVersion,
-    });
-    const operationScope = `begin-window:${accountId}`;
-    const existingOperation =
-      controlledWindowOperationRef.current ||
-      readUncertainOperation(operationScope);
-    if (existingOperation?.blocked) {
-      toast({
-        title: '账户窗口操作不可恢复',
-        description: '浏览器中的未决窗口记录不可用，请清理后再发起操作。',
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (
-      existingOperation?.uncertain &&
-      existingOperation.identity !== identity
-    ) {
-      toast({
-        title: '上一笔账户窗口结果未知',
-        description: '请先恢复原操作结果，不能用新的快照重复建立窗口。',
-        variant: 'destructive',
-      });
-      return;
-    }
-    const operation =
-      existingOperation?.identity === identity
-        ? existingOperation
-        : {
-            identity,
-            idempotencyKey: replayIdempotencyKey(),
-            uncertain: false,
-          };
-    const pendingOperation = { ...operation, uncertain: true };
-    if (!persistUncertainOperation(operationScope, pendingOperation)) {
-      controlledWindowOperationRef.current = {
-        ...pendingOperation,
-        blocked: true,
-      };
-      toast({
-        title: '无法安全记录账户窗口操作',
-        description: '未写入浏览器未决记录，本次账户窗口未发送。',
-        variant: 'destructive',
-      });
-      return;
-    }
-    controlledWindowOperationRef.current = pendingOperation;
-    let result;
-    try {
-      result = await beginControlledWindow({
-        accountId,
-        policyVersion: readiness.policyVersion,
-        snapshotId: readiness.snapshotId,
-        idempotencyKey: operation.idempotencyKey,
-      });
-    } catch (error) {
-      controlledWindowOperationRef.current = pendingOperation;
-      persistUncertainOperation(operationScope, pendingOperation);
-      toast({
-        title: '账户窗口结果未知',
-        description:
-          error instanceof Error ? error.message : '请求结果未知，请重试原操作',
-        variant: 'destructive',
-      });
-      return;
-    }
-    const payload = result.data?.beginTTradeControlledWindow;
-    const retryable =
-      !payload ||
-      String(payload.code || '').endsWith('_COMMAND_PENDING') ||
-      String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
-    if (retryable) {
-      controlledWindowOperationRef.current = pendingOperation;
-      persistUncertainOperation(operationScope, pendingOperation);
-    } else {
-      controlledWindowOperationRef.current = null;
-      clearPersistedOperation(operationScope);
-    }
-    toast({
-      title: payload?.success ? '账户实盘窗口已建立' : '账户实盘窗口未建立',
-      description: payload?.message || result.error?.message || '请求失败',
-      variant: payload?.success ? 'default' : 'destructive',
-    });
-    refreshOperationalState();
-  };
-
   const handleActivateLive = async (targetStage: TTradeRolloutTarget) => {
-    if (
-      !accountId ||
-      !readiness?.canActivateLive ||
-      !readiness.snapshotId
-    ) {
+    if (!accountId || !readiness?.canActivateLive || !readiness.snapshotId) {
       return;
     }
     let confirmation = '';
@@ -2876,102 +2745,6 @@ export function TTradeGlobalPage() {
     refreshOperationalState();
   };
 
-  const handleKillSwitch = async () => {
-    if (!accountId) return;
-    const confirmed = await confirmDialog({
-      title: '触发紧急停止',
-      description:
-        '系统会立即阻止新订单，并把未完成批次标记为需要人工券商处置。',
-      confirmText: '确认紧急停止',
-      cancelText: '返回',
-      variant: 'destructive',
-    });
-    if (!confirmed) return;
-    const reason = '用户从做 T 工作台触发紧急停止';
-    const identity = JSON.stringify({ accountId, reason });
-    const operationScope = `kill-switch:${accountId}`;
-    const existingOperation =
-      killSwitchOperationRef.current || readUncertainOperation(operationScope);
-    if (existingOperation?.blocked) {
-      toast({
-        title: '紧急停止记录不可恢复',
-        description: '浏览器中的未决停止记录不可用，请保持页面并联系管理员。',
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (
-      existingOperation?.uncertain &&
-      existingOperation.identity !== identity
-    ) {
-      toast({
-        title: '上一笔紧急停止结果未知',
-        description: '请先恢复原紧急停止结果，不能重复发送新的停止命令。',
-        variant: 'destructive',
-      });
-      return;
-    }
-    const operation =
-      existingOperation?.identity === identity
-        ? existingOperation
-        : {
-            identity,
-            idempotencyKey: replayIdempotencyKey(),
-            uncertain: false,
-          };
-    const pendingOperation = { ...operation, uncertain: true };
-    // Kill is risk-reducing: if sessionStorage is unavailable, keep the
-    // in-memory key and still allow the emergency stop to be sent.
-    const journaled = persistUncertainOperation(
-      operationScope,
-      pendingOperation
-    );
-    killSwitchOperationRef.current = pendingOperation;
-    if (!journaled) {
-      toast({
-        title: '紧急停止记录不可持久化',
-        description: '仍将发送紧急停止；如结果未知，请保持当前页面重试。',
-        variant: 'destructive',
-      });
-    }
-    let result;
-    try {
-      result = await triggerKillSwitch({
-        accountId,
-        reason,
-        idempotencyKey: operation.idempotencyKey,
-      });
-    } catch (error) {
-      killSwitchOperationRef.current = pendingOperation;
-      persistUncertainOperation(operationScope, pendingOperation);
-      toast({
-        title: '紧急停止结果未知',
-        description:
-          error instanceof Error ? error.message : '请求结果未知，请重试原操作',
-        variant: 'destructive',
-      });
-      return;
-    }
-    const payload = result.data?.triggerTTradeKillSwitch;
-    const retryable =
-      !payload ||
-      String(payload.code || '').endsWith('_COMMAND_PENDING') ||
-      String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
-    if (retryable) {
-      killSwitchOperationRef.current = pendingOperation;
-      persistUncertainOperation(operationScope, pendingOperation);
-    } else {
-      killSwitchOperationRef.current = null;
-      clearPersistedOperation(operationScope);
-    }
-    toast({
-      title: payload?.success ? '紧急停止已触发' : '紧急停止失败',
-      description: payload?.message || result.error?.message || '请求失败',
-      variant: payload?.success ? 'default' : 'destructive',
-    });
-    refreshOperationalState();
-  };
-
   const handleCancelOrder = async (clientOrderId: string) => {
     if (!accountId || !clientOrderId) return;
     const result = await cancelTTradeOrder({ accountId, clientOrderId });
@@ -2996,10 +2769,8 @@ export function TTradeGlobalPage() {
     rejectResult.fetching ||
     importResult.fetching ||
     syncSourceOrdersResult.fetching ||
-    controlledWindowResult.fetching ||
     activateLiveResult.fetching ||
     pauseEntriesResult.fetching ||
-    killSwitchResult.fetching ||
     cancelOrderResult.fetching ||
     previewPolicyResult.fetching;
   const openBatches = batches.filter(
@@ -3263,19 +3034,12 @@ export function TTradeGlobalPage() {
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={
-                    actionLoading ||
-                    readiness.controlledWindowActive ||
-                    !readiness.preparationReady ||
-                    !readiness.snapshotId ||
-                    readiness.workingExternalOrderCount > 0
-                  }
-                  onClick={handleBeginAccountExecutionWindow}
+                  onClick={() => openStudioTab('/settings/trading-safety')}
                   className="h-8 rounded-sm border-sky-400/20 text-[10px] text-sky-200"
                 >
                   {readiness.controlledWindowActive
-                    ? '账户实盘窗口已建立'
-                    : '建立账户实盘窗口'}
+                    ? '查看账户交易安全'
+                    : '前往建立账户实盘窗口'}
                 </Button>
                 <Button
                   type="button"
@@ -3302,11 +3066,10 @@ export function TTradeGlobalPage() {
               type="button"
               size="sm"
               variant="outline"
-              disabled={actionLoading || readiness.killSwitch}
-              onClick={handleKillSwitch}
+              onClick={() => openStudioTab('/settings/trading-safety')}
               className="h-8 rounded-sm border-rose-400/20 text-[10px] text-rose-200"
             >
-              紧急停止
+              账户紧急停止
             </Button>
           </div>
         </section>

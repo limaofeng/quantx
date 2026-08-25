@@ -37,7 +37,8 @@ Caddy 仍正常启动；使用已持久化历史行情的回测不依赖这个�
 `/health/ready` 可以继续因 QMT 不可用返回非就绪，`status` 必须明确显示
 `liveTrading=DISABLED`，不得报告 QMT `READY`。
 QMT 预检成功的默认 `full/live` 会为 API/Engine 显式开启 `ENABLE_REAL_TRADING` 与
-`T_TRADE_LIVE_ENABLED` 能力门，并注入同一账户白名单。启动器同时在第一个服务
+各功能自己的实盘能力门，并注入同一账户白名单。`T_TRADE_LIVE_ENABLED` 只启用
+做 T 助手，不参与账户或 QMT Agent 的实盘能力判定。启动器同时在第一个服务
 进程创建前固定 `QMT_AGENT_LAUNCH_STARTED_AT`；命令路由、做 T 就绪、历史补数
 设备选择和组件健康只接受不早于该边界的 QMT 心跳，CLI 还要求本次记录的 QMT
 进程 PID/启动时间仍匹配，避免上一次启动遗留的 90 秒新鲜心跳冒充本次就绪。这不会
@@ -102,9 +103,9 @@ fail-closed 降级状态。生产安装与 QMT 服务启用仍保持硬失败。
 `QMT_ACCOUNT_WHITELIST`；`live` 额外要求 QMT Agent 子进程使用 `ENV=testing` 或
 `ENV=production`、`ENABLE_REAL_TRADING=true` 和
 `QMT_REAL_TRADING_ENABLED=true`。production 还要求
-`T_TRADE_LIVE_ENABLED=true`；服务端同时检查
-`REAL_TRADING_ACCOUNT_ALLOWLIST`、账户灰度阶段、Agent READY、快照新鲜度、
-对账状态和自动退出策略授权。
+服务端 `REAL_TRADING_ACCOUNT_ALLOWLIST`、独立账户增仓授权、Agent READY、快照
+新鲜度、对账状态和策略授权全部通过。只有启用做 T 助手时才额外要求
+`T_TRADE_LIVE_ENABLED=true` 及助手自己的灰度证据。
 
 账户级实盘安全状态独立展示健康与能力：账户事实链路正常时为 `HEALTHY`，执行
 权限按 `OBSERVE_ONLY / REDUCE_ONLY / TRADING / KILLED` 展示；具体助手未启用
@@ -114,7 +115,8 @@ fail-closed 降级状态。生产安装与 QMT 服务启用仍保持硬失败。
 
 账户实盘窗口建立后，以当时完整快照中的历史外部委托/成交作为审计基线；只有
 基线之后新增的外部活动才使窗口失效并暂停自动执行。开发环境允许账户从
-`SHADOW` 直接进入 `LIVE`，但必须同时满足新鲜账户实盘窗口、24 小时内成功备份、
+做 T 助手允许从 `SHADOW` 直接进入 `LIVE`，但必须同时满足独立账户增仓授权、
+新鲜账户实盘窗口、24 小时内成功备份、
 全部 readiness 门禁、`trade:approve` 权限，并精确确认
 `LIVE:<账户>`。生产环境仍禁止 `SHADOW` 直升 `LIVE`，继续使用既有 Canary
 流程。建立窗口、启用、暂停和失败尝试均写入追加式审计事件。

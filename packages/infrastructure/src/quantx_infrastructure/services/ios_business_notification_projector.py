@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRolloutEvent,
+  AccountExecutionControlEvent,
   EngineCommandOutbox,
   OperationalAlert,
   PendingTradeOrder,
@@ -45,8 +45,8 @@ _CONNECTION_DATA_TTL = timedelta(hours=6)
 _ROLLOUT_RISK_EVENTS = frozenset(
   {
     "CONTROLLED_WINDOW_INVALIDATED",
-    "ENTRIES_PAUSED",
-    "KILL_SWITCHED",
+    "RISK_INCREASE_PAUSED",
+    "HARD_KILL_ACTIVATED",
   }
 )
 _EXIT_PLAN_RISK_EVENTS = frozenset(
@@ -111,10 +111,14 @@ def _source_event_hmac(signing_key: bytes, source_key: str) -> str:
 
 
 def _not_projected(source_kind: str, source_event_id_column):
-  return ~select(IosBusinessNotificationReceipt.source_event_key_hash).where(
-    IosBusinessNotificationReceipt.source_kind == source_kind,
-    IosBusinessNotificationReceipt.source_event_id == source_event_id_column,
-  ).exists()
+  return (
+    ~select(IosBusinessNotificationReceipt.source_event_key_hash)
+    .where(
+      IosBusinessNotificationReceipt.source_kind == source_kind,
+      IosBusinessNotificationReceipt.source_event_id == source_event_id_column,
+    )
+    .exists()
+  )
 
 
 def _action_expiry(intent: TradeIntentRecord) -> datetime:
@@ -232,15 +236,23 @@ class IosBusinessNotificationProjector:
     self,
     now: datetime,
   ) -> list[BusinessNotificationCandidate]:
-    live_or_paper_plan = select(AutoExitPlanRecord.plan_id).where(
-      AutoExitPlanRecord.plan_id == TradeIntentRecord.owner_id,
-      AutoExitPlanRecord.account_id == TradeIntentRecord.account_id,
-      func.upper(AutoExitPlanRecord.execution_mode).in_(("PAPER", "LIVE")),
-    ).exists()
-    live_or_paper_run = select(StrategyRun.id).where(
-      StrategyRun.id == TradeIntentRecord.strategy_run_id,
-      StrategyRun.mode.in_((StrategyRunMode.PAPER, StrategyRunMode.LIVE)),
-    ).exists()
+    live_or_paper_plan = (
+      select(AutoExitPlanRecord.plan_id)
+      .where(
+        AutoExitPlanRecord.plan_id == TradeIntentRecord.owner_id,
+        AutoExitPlanRecord.account_id == TradeIntentRecord.account_id,
+        func.upper(AutoExitPlanRecord.execution_mode).in_(("PAPER", "LIVE")),
+      )
+      .exists()
+    )
+    live_or_paper_run = (
+      select(StrategyRun.id)
+      .where(
+        StrategyRun.id == TradeIntentRecord.strategy_run_id,
+        StrategyRun.mode.in_((StrategyRunMode.PAPER, StrategyRunMode.LIVE)),
+      )
+      .exists()
+    )
     intents = list(
       (
         await self.db.execute(
@@ -297,8 +309,7 @@ class IosBusinessNotificationProjector:
         select(StrategyRuntimeEvent, PendingTradeOrder)
         .join(
           PendingTradeOrder,
-          PendingTradeOrder.client_order_id
-          == StrategyRuntimeEvent.client_order_id,
+          PendingTradeOrder.client_order_id == StrategyRuntimeEvent.client_order_id,
         )
         .where(
           StrategyRuntimeEvent.application_status == "APPLIED",
@@ -330,8 +341,7 @@ class IosBusinessNotificationProjector:
         expires_at=event.applied_at + _ORDER_TTL,
       )
       for event, order in rows
-      if _normalized_text(order.account_id)
-      and event.applied_at + _ORDER_TTL > now
+      if _normalized_text(order.account_id) and event.applied_at + _ORDER_TTL > now
     ]
 
   async def _risk_safety(
@@ -341,18 +351,18 @@ class IosBusinessNotificationProjector:
     rollout_events = list(
       (
         await self.db.execute(
-          select(AccountTradingRolloutEvent)
+          select(AccountExecutionControlEvent)
           .where(
-            AccountTradingRolloutEvent.event_type.in_(_ROLLOUT_RISK_EVENTS),
-            AccountTradingRolloutEvent.created_at >= now - _RISK_TTL,
+            AccountExecutionControlEvent.event_type.in_(_ROLLOUT_RISK_EVENTS),
+            AccountExecutionControlEvent.created_at >= now - _RISK_TTL,
             _not_projected(
               _SOURCE_ROLLOUT_EVENT,
-              AccountTradingRolloutEvent.event_id,
+              AccountExecutionControlEvent.event_id,
             ),
           )
           .order_by(
-            AccountTradingRolloutEvent.created_at,
-            AccountTradingRolloutEvent.event_id,
+            AccountExecutionControlEvent.created_at,
+            AccountExecutionControlEvent.event_id,
           )
           .limit(self._source_batch_limit)
           .with_for_update(skip_locked=True)
@@ -391,8 +401,7 @@ class IosBusinessNotificationProjector:
         expires_at=event.created_at + _RISK_TTL,
       )
       for event in rollout_events
-      if _normalized_text(event.account_id)
-      and event.created_at + _RISK_TTL > now
+      if _normalized_text(event.account_id) and event.created_at + _RISK_TTL > now
     ]
     candidates.extend(
       BusinessNotificationCandidate(
@@ -405,8 +414,7 @@ class IosBusinessNotificationProjector:
         expires_at=event.created_at + _RISK_TTL,
       )
       for event, plan in exit_plan_rows
-      if _normalized_text(plan.account_id)
-      and event.created_at + _RISK_TTL > now
+      if _normalized_text(plan.account_id) and event.created_at + _RISK_TTL > now
     )
     return candidates
 

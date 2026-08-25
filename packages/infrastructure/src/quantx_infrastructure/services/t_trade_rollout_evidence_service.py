@@ -26,8 +26,9 @@ from sqlalchemy import BigInteger, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
-  AccountTradingRolloutEvent,
+  AccountExecutionControl,
+  TTradeRollout,
+  TTradeRolloutEvent,
 )
 from quantx_infrastructure.models.enums import StrategyRunMode
 from quantx_infrastructure.models.strategy_backtest import StrategyBacktest
@@ -252,21 +253,22 @@ class TTradeV3RolloutEvidenceEvaluator:
   def _cache_key(
     *,
     account_id: str,
-    rollout: AccountTradingRollout | None,
+    rollout: TTradeRollout | None,
+    account_control: AccountExecutionControl | None,
   ) -> tuple[str, ...]:
     """Bind a negative proof to every rollout fact that can make it stale.
 
-    In particular, policy/snapshot/hash/stage changes always select a new
-    key.  ``updated_at`` covers other rollout writes (for example canary
-    limits), while the explicit fields make the safety binding auditable even
-    if an ORM test double has no timestamps.
+    In particular, T policy/stage changes and account snapshot/hash changes
+    always select a new key. ``updated_at`` covers other rollout writes (for
+    example canary limits), while the explicit fields keep the cross-boundary
+    safety binding auditable without storing account facts in the T rollout.
     """
 
     return (
       _text(account_id),
       _text(getattr(rollout, "policy_version", None)),
-      _text(getattr(rollout, "last_snapshot_id", None)),
-      _text(getattr(rollout, "last_snapshot_hash", None)),
+      _text(getattr(account_control, "last_snapshot_id", None)),
+      _text(getattr(account_control, "last_snapshot_hash", None)),
       _text(getattr(rollout, "stage", None)).upper(),
       _text(getattr(rollout, "enabled", None)),
       _text(getattr(rollout, "max_active_batches", None)),
@@ -377,7 +379,8 @@ class TTradeV3RolloutEvidenceEvaluator:
     db: AsyncSession,
     *,
     account_id: str,
-    rollout: AccountTradingRollout | None,
+    rollout: TTradeRollout | None,
+    account_control: AccountExecutionControl | None,
   ) -> dict[str, Any]:
     """Load and evaluate durable facts once, converting query failures."""
 
@@ -386,6 +389,7 @@ class TTradeV3RolloutEvidenceEvaluator:
       return self.evaluate_records(
         account_id=account_id,
         rollout=rollout,
+        account_control=account_control,
         global_config=loaded["global_config"],
         live_run=loaded["live_run"],
         replay_rows=loaded["replays"],
@@ -425,7 +429,8 @@ class TTradeV3RolloutEvidenceEvaluator:
     db: AsyncSession,
     *,
     account_id: str,
-    rollout: AccountTradingRollout | None,
+    rollout: TTradeRollout | None,
+    account_control: AccountExecutionControl | None = None,
     bypass_cache: bool = False,
   ) -> dict[str, Any]:
     """Return stable checks even when evidence is absent or unreadable.
@@ -434,7 +439,11 @@ class TTradeV3RolloutEvidenceEvaluator:
     must therefore produce explicit blocked reasons instead of a generic 500;
     every such result remains fail-closed for CANARY and LIVE activation.
     """
-    key = self._cache_key(account_id=account_id, rollout=rollout)
+    key = self._cache_key(
+      account_id=account_id,
+      rollout=rollout,
+      account_control=account_control,
+    )
     if bypass_cache:
       # The final rollout transition runs under the row lock and must read
       # durable truth, even if a previous status poll cached a blocked result.
@@ -445,6 +454,7 @@ class TTradeV3RolloutEvidenceEvaluator:
           db,
           account_id=account_id,
           rollout=rollout,
+          account_control=account_control,
         ),
         key=key,
         state="bypass",
@@ -505,6 +515,7 @@ class TTradeV3RolloutEvidenceEvaluator:
           db,
           account_id=account_id,
           rollout=rollout,
+          account_control=account_control,
         ),
         key=key,
         state="capacity_bypass",
@@ -517,6 +528,7 @@ class TTradeV3RolloutEvidenceEvaluator:
         db,
         account_id=account_id,
         rollout=rollout,
+        account_control=account_control,
       )
       cached_entry = None
       if self._negative_result(result):
@@ -667,11 +679,11 @@ class TTradeV3RolloutEvidenceEvaluator:
     review_events = list(
       (
         await db.execute(
-          select(AccountTradingRolloutEvent)
-          .where(AccountTradingRolloutEvent.account_id == account_id)
+          select(TTradeRolloutEvent)
+          .where(TTradeRolloutEvent.account_id == account_id)
           .order_by(
-            AccountTradingRolloutEvent.created_at.desc(),
-            AccountTradingRolloutEvent.event_id.desc(),
+            TTradeRolloutEvent.created_at.desc(),
+            TTradeRolloutEvent.event_id.desc(),
           )
           .limit(MAX_REVIEW_EVENT_ROWS + 1)
         )
@@ -1080,9 +1092,9 @@ class TTradeV3RolloutEvidenceEvaluator:
     # timezone when extracting an epoch, which would shift this comparison by
     # eight hours on a UTC connection.  Keep the stored values unchanged and
     # attach their actual wall-clock timezone only for this causal check.
-    evaluated_at_shanghai = TTradeOpportunityEvaluation.evaluated_at.op(
-      "AT TIME ZONE"
-    )(_SHANGHAI_DATABASE_TIME_ZONE)
+    evaluated_at_shanghai = TTradeOpportunityEvaluation.evaluated_at.op("AT TIME ZONE")(
+      _SHANGHAI_DATABASE_TIME_ZONE
+    )
     bucket = func.date_trunc(
       "minute",
       TTradeOpportunityEvaluation.window_started_at,
@@ -1188,6 +1200,7 @@ class TTradeV3RolloutEvidenceEvaluator:
     *,
     account_id: str,
     rollout: Any,
+    account_control: Any = None,
     global_config: Any,
     live_run: Any,
     replay_rows: Sequence[tuple[Any, Any, Any]],
@@ -1253,7 +1266,7 @@ class TTradeV3RolloutEvidenceEvaluator:
         "schema_version": V3_ROLLOUT_EVIDENCE_SCHEMA_VERSION,
         "account_id": account_id,
         "policy_version": _integer(getattr(rollout, "policy_version", None)),
-        "snapshot_id": _text(getattr(rollout, "last_snapshot_id", None)),
+        "snapshot_id": _text(getattr(account_control, "last_snapshot_id", None)),
         "replay": replay,
         "paper": paper,
         "canary": canary,
@@ -1262,6 +1275,7 @@ class TTradeV3RolloutEvidenceEvaluator:
     )
     operator_review = self._operator_review_summary(
       rollout=rollout,
+      account_control=account_control,
       review_inputs=review_inputs,
       review_evidence_fingerprint=review_evidence_fingerprint,
       review_events=review_events,
@@ -2147,7 +2161,7 @@ class TTradeV3RolloutEvidenceEvaluator:
     live_run: Any,
   ) -> dict[str, Any]:
     if rollout is None:
-      return {"passed": False, "message": "账户灰度限制配置不存在"}
+      return {"passed": False, "message": "做 T 助手灰度限制配置不存在"}
     if global_config is None:
       return {"passed": False, "message": "做 T 全局配置不存在，无法验证有限标的"}
     settings = _mapping(getattr(global_config, "settings", None))
@@ -2231,6 +2245,7 @@ class TTradeV3RolloutEvidenceEvaluator:
   def _operator_review_summary(
     *,
     rollout: Any,
+    account_control: Any,
     review_inputs: Mapping[str, Any],
     review_evidence_fingerprint: str,
     review_events: Sequence[Any],
@@ -2246,7 +2261,7 @@ class TTradeV3RolloutEvidenceEvaluator:
     """
 
     policy_version = _integer(getattr(rollout, "policy_version", None))
-    snapshot_id = _text(getattr(rollout, "last_snapshot_id", None))
+    snapshot_id = _text(getattr(account_control, "last_snapshot_id", None))
     base = {
       "confirmed": False,
       "message": (

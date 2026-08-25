@@ -1627,8 +1627,7 @@ function Invoke-Up {
   }
   $script:RuntimeLiveTradingEnabled = (
     $env:ENABLE_REAL_TRADING -eq "true" -and
-    $env:QMT_REAL_TRADING_ENABLED -eq "true" -and
-    $env:T_TRADE_LIVE_ENABLED -eq "true"
+    $env:QMT_REAL_TRADING_ENABLED -eq "true"
   )
   $env:QMT_AGENT_LAUNCH_STATE = $script:RuntimeQmtLaunchState
   $env:QMT_AGENT_LAUNCH_REASON = $script:RuntimeQmtReasonCode
@@ -1823,8 +1822,7 @@ function Invoke-Up {
     $Profile -eq "full" -and
     $agentMode -eq "live" -and
     $env:ENABLE_REAL_TRADING -eq "true" -and
-    $env:QMT_REAL_TRADING_ENABLED -eq "true" -and
-    $env:T_TRADE_LIVE_ENABLED -eq "true"
+    $env:QMT_REAL_TRADING_ENABLED -eq "true"
   ) {
     $null = Register-DevBackupMaintenance
   }

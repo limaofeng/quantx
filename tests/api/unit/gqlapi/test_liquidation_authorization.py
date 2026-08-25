@@ -77,10 +77,12 @@ async def test_confirm_liquidation_explicitly_requires_trade_approve():
     context_value=_native_context("liquidation:control"),
   )
 
-  assert result.errors is None
-  assert result.data == {
-    "confirmLiquidation": {"success": False, "code": "FORBIDDEN"}
-  }
+  assert result.data is None
+  assert result.errors
+  error = result.errors[0]
+  assert error.path == ["confirmLiquidation"]
+  assert error.extensions["code"] == "FORBIDDEN"
+  assert "trade:approve" in error.message
 
 
 def test_liquidation_contract_requires_account_and_defaults_to_paper():

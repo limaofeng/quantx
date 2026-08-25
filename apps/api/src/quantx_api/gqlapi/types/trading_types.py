@@ -44,9 +44,13 @@ class Order:
   id: str = strawberry.field(description="订单编号")
   sysid: str = strawberry.field(description="柜台合同编号")
   stock_code: str = strawberry.field(description="股票代码")
+
   @strawberry.field(description="股票名称")
   def stock_name(self) -> str:
-    return getattr(self, "instrument_name", "") or getattr(self, "stock_name", "Unknown")
+    return getattr(self, "instrument_name", "") or getattr(
+      self, "stock_name", "Unknown"
+    )
+
   type: OrderType = strawberry.field(description="委托类型")
   volume: int = strawberry.field(description="委托数量")
   price_type: OrderPriceType = strawberry.field(description="报价类型")
@@ -56,15 +60,15 @@ class Order:
   status: OrderStatus = strawberry.field(description="订单状态")
   status_msg: Optional[str] = strawberry.field(description="状态信息")
   strategy_name: Optional[str] = strawberry.field(description="策略名称")
+
   @strawberry.field(description="订单备注")
   def order_remark(self) -> Optional[str]:
     return getattr(self, "remark", "") or getattr(self, "order_remark", "")
+
   time: datetime = strawberry.field(description="报单时间")
 
   @strawberry.field(description="成交明细列表")
-  async def trades(
-    self, account_id: Optional[str] = None
-  ) -> List["Trade"]:
+  async def trades(self, account_id: Optional[str] = None) -> List["Trade"]:
     """懒加载成交明细 - 只在前端请求时查询"""
     from quantx_infrastructure.services.trade_service import TradeService
 
@@ -151,7 +155,7 @@ class ManualOrderPreviewInput:
   volume: int = strawberry.field(description="请求委托数量")
   idempotency_key: str = strawberry.field(description="调用方生成的业务幂等键")
   execution_mode: ManualOrderExecutionMode = strawberry.field(
-    description="默认 PAPER；LIVE 额外要求实盘灰度、对账和唯一 Agent 就绪",
+    description="默认 PAPER；LIVE 额外要求账户增仓授权、对账和唯一 Agent 就绪",
     default=ManualOrderExecutionMode.PAPER,
   )
   limit_price: Optional[float] = strawberry.field(
@@ -221,6 +225,8 @@ class OrderEntryCapabilities:
   execution_modes: List[ManualOrderExecutionMode]
   supported_sides: List[ManualOrderSide]
   supported_price_types: List[ManualOrderPriceType]
+  can_live_buy: bool
+  can_live_sell: bool
   live_ready: bool
   live_blocked_reasons: List[str]
   warnings: List[str]

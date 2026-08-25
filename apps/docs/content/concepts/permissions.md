@@ -16,7 +16,8 @@ QuantX 对 GraphQL 根字段采用默认拒绝。每个字段必须在服务端 
 | `strategy:read` | 策略实例、运行状态、审计与做 T 监控 |
 | `strategy:write` | 修改策略、回测、做 T 与助手状态 |
 | `strategy:control` | 原生会话控制策略生命周期与安全参数 |
-| `t-trade:control` | 原生会话控制做 T 配置、启停与熔断 |
+| `account-execution:control` | 独立控制账户增仓授权、受控窗口与账户紧急停止 |
+| `t-trade:control` | 原生会话控制做 T 配置、启停与助手内暂停 |
 | `limit-up:control` | 原生会话控制打板配置、候选偏好与布防 |
 | `orders:read` | 委托、成交、清仓记录和交易事件订阅 |
 | `orders:write` | 创建交易命令、退出计划、清仓与撤单 |
@@ -28,7 +29,7 @@ QuantX 对 GraphQL 根字段采用默认拒绝。每个字段必须在服务端 
 | `agent:manage` | 创建/取消安全交接与撤销 Agent |
 | `system-config:write` | 修改 AI Runtime 等全局非敏感系统配置 |
 | `assistant:read` / `assistant:write` | AI 对话、运行和非交易工具审批 |
-| `trade:approve` | 高风险交易确认和实盘灰度操作的附加授权 |
+| `trade:approve` | 高风险交易、账户执行控制与功能灰度操作的附加确认授权 |
 
 每个字段的当前映射见
 [v2 operation policy](/contracts/graphql-operation-policies.v2.json)。旧的
@@ -45,8 +46,9 @@ QuantX 对 GraphQL 根字段采用默认拒绝。每个字段必须在服务端 
 系统配置权限也不被其他写权限自动替代。
 
 `trade:approve` 不替代领域或控制权限。例如退出意图确认同时要求
-`orders:write` 和 `trade:approve`，做 T 实盘激活同时要求 `strategy:write` 和
-`trade:approve`。
+`orders:write` 和 `trade:approve`，账户增仓授权同时要求
+`account-execution:control` 和 `trade:approve`，做 T 实盘激活同时要求
+`strategy:write` 和 `trade:approve`。
 
 旧 `mutation:write` 已停用。升级迁移会为原先拥有它的用户补齐领域写权限和
 已发布的控制权限并移除旧值；`trade:manual` 与 `trade:approve` 仍需显式授予。
@@ -64,7 +66,8 @@ iOS 的产品目标是个人 A 股量化控制中心。原生会话按设备收�
 | `trade:approve` | 设备绑定的策略/助手/退出意图确认和实盘授权 |
 | `liquidation:control` | 清仓与退出计划配置、预览和控制 |
 | `strategy:control` | 策略生命周期和移动安全参数 |
-| `t-trade:control` | 做 T 配置、启停、忽略列表与熔断 |
+| `account-execution:control` | 账户增仓授权、受控窗口与账户紧急停止 |
+| `t-trade:control` | 做 T 配置、启停、忽略列表与助手内暂停 |
 | `limit-up:control` | 打板配置、候选偏好与布防 |
 | `notification:manage` | 当前设备 APNs Token 与通知偏好 |
 

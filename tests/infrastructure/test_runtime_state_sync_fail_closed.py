@@ -41,10 +41,13 @@ async def test_state_sync_apply_error_blocks_checkpoint_and_final_snapshot(
     manager._running = True
     queue: asyncio.Queue = asyncio.Queue()
     manager._state_queue = queue
+    manager._state_sync_strategy = SimpleNamespace(
+        state=SimpleNamespace(to_dict=lambda: {})
+    )
     monkeypatch.setattr(
         manager,
-        "update_strategy_custom_state",
-        MagicMock(side_effect=RuntimeError("cannot apply delta")),
+        "_stage_strategy_state_delta",
+        MagicMock(side_effect=RuntimeError("cannot stage delta")),
     )
     manager.save_snapshot = AsyncMock(return_value=True)
     manager._state_sync_task = asyncio.create_task(manager._state_sync_loop())

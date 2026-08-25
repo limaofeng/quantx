@@ -43,6 +43,8 @@ _AUTHORIZATION_SCHEMA = strawberry.Schema(
     "confirmStrategyControl",
     "previewTTradeControl",
     "confirmTTradeControl",
+    "previewAccountExecutionControl",
+    "confirmAccountExecutionControl",
   ],
 )
 def test_trade_approval_mutations_require_independent_permission(
@@ -64,9 +66,7 @@ def test_t_trade_risk_reduction_uses_narrow_control_permission():
   [
     "approveTTradeEntry",
     "approveStrategyTradeIntent",
-    "beginTTradeControlledWindow",
     "activateTTradeLive",
-    "triggerTTradeKillSwitch",
   ],
 )
 def test_legacy_or_unchallenged_risk_writes_use_domain_permission(

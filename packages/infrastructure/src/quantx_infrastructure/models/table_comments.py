@@ -5,8 +5,10 @@ from __future__ import annotations
 from sqlalchemy import MetaData
 
 TABLE_COMMENTS: dict[str, str] = {
-  "account_trading_rollouts": "证券账户实盘灰度与熔断状态",
-  "account_trading_rollout_events": "证券账户实盘灰度操作审计事件",
+  "account_execution_controls": "账户级实盘执行授权、对账事实与紧急停止状态",
+  "account_execution_control_events": "账户级实盘执行控制审计事件",
+  "account_trading_rollouts": "做 T 助手独立灰度与策略确认状态",
+  "account_trading_rollout_events": "做 T 助手灰度操作审计事件",
   "accounts": "证券账户资产信息",
   "agent_devices": "QMT Agent 设备注册信息",
   "agent_enrollment_codes": "QMT Agent 设备登记码",

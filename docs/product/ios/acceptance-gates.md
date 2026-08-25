@@ -64,15 +64,16 @@ G1 未通过时，相应客户端入口必须编译期或服务端 capability �
 窗口时执行：
 
 1. 运行环境满足 `ENV=testing`（危险测试）或受控 production、
-   `ENABLE_REAL_TRADING=true`、`QMT_REAL_TRADING_ENABLED=true`、必要的
-   `T_TRADE_LIVE_ENABLED=true` 和双侧账户白名单。
+   `ENABLE_REAL_TRADING=true`、`QMT_REAL_TRADING_ENABLED=true` 和双侧账户
+   白名单。`T_TRADE_LIVE_ENABLED` 不参与账户实盘门禁。
 2. 唯一 Agent ready、协议 1.1、账户快照小于 90 秒、对账正常、无不可解释外部
    活动、Kill Switch 关闭，且账户实盘窗口/灰度状态允许操作。
 3. 先以单标的 100 股执行一笔手动限价买入和对应受控卖出，人工核对每一状态与
    QMT 回报；不为了制造测试强求部分成交。
 4. 撤单、批量/条件清仓、做 T 和打板分别在自然满足条件、最大新增风险 100 股的
-   Canary 中验收。若自然信号未出现，相关实盘 capability 保持关闭，不能用模拟
-   结果宣告该实盘能力完成。
+   Canary 中验收；只有做 T 助手自己的 Canary 额外要求
+   `T_TRADE_LIVE_ENABLED=true`。若自然信号未出现，相关实盘 capability 保持
+   关闭，不能用模拟结果宣告该实盘能力完成。
 5. 任一重复命令、超可卖量、T+1 违规、未授权自动退出、状态假推进或无法解释的
    对账差异立即触发 Kill Switch，停止灰度并按 P0 处理。
 

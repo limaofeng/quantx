@@ -16,8 +16,8 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import TradeConfirmationChallenge
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
-  AccountTradingRolloutEvent,
+  TTradeRollout,
+  TTradeRolloutEvent,
 )
 from quantx_infrastructure.services.t_trade_operations_service import (
   TTradeOperationIdempotencyError,
@@ -58,7 +58,8 @@ _PREPARATION_GATE_CODES = frozenset(
     "LIVE_AGENT_READY",
     "AGENT_MODE_LIVE",
     "PROTOCOL_1_1",
-    "ROLLOUT_CONFIGURED",
+    "EXECUTION_CONTROL_CONFIGURED",
+    "T_TRADE_ROLLOUT_CONFIGURED",
     "SNAPSHOT_RECONCILED",
     "SNAPSHOT_FRESH",
     "SNAPSHOT_ACTIVITY_CLASSIFIED",
@@ -66,27 +67,28 @@ _PREPARATION_GATE_CODES = frozenset(
     "NO_CRITICAL_ALERTS",
     "NO_DEAD_LETTERS",
     "KILL_SWITCH_CLEAR",
+    "ACCOUNT_RISK_INCREASE_AUTHORIZED",
   }
 )
-_ACTIVATION_GATE_CODES = _PREPARATION_GATE_CODES | frozenset(
-  {
-    "CONTROLLED_WINDOW_ACTIVE",
-    "NO_EXTERNAL_BROKER_ACTIVITY",
-  }
-) | V3_ROLLOUT_GATE_CODES
+_ACTIVATION_GATE_CODES = (
+  _PREPARATION_GATE_CODES
+  | frozenset(
+    {
+      "CONTROLLED_WINDOW_ACTIVE",
+      "NO_EXTERNAL_BROKER_ACTIVITY",
+    }
+  )
+  | V3_ROLLOUT_GATE_CODES
+)
 
 _CONTROL_EVENT_TYPES = {
-  TTradeControlAction.BEGIN_CONTROLLED_WINDOW: "CONTROLLED_WINDOW_STARTED",
   TTradeControlAction.ACTIVATE_CANARY: "CANARY_ACTIVATED",
   TTradeControlAction.ACTIVATE_LIVE: "LIVE_ACTIVATED",
-  TTradeControlAction.KILL_SWITCH: "KILL_SWITCHED",
 }
 
 _CONTROL_APPLIED_CODES = {
-  TTradeControlAction.BEGIN_CONTROLLED_WINDOW: "CONTROLLED_WINDOW_APPLIED",
   TTradeControlAction.ACTIVATE_CANARY: "CANARY_ACTIVATION_APPLIED",
   TTradeControlAction.ACTIVATE_LIVE: "LIVE_ACTIVATION_APPLIED",
-  TTradeControlAction.KILL_SWITCH: "KILL_SWITCH_APPLIED",
 }
 
 
@@ -190,7 +192,7 @@ def normalize_t_trade_control_request(
   normalized_snapshot = str(snapshot_id or "").strip()
   if len(normalized_snapshot) > 128:
     raise TradeApprovalChallengeError("INVALID_SNAPSHOT_ID", "安全快照标识无效")
-  if normalized_action != TTradeControlAction.KILL_SWITCH and not normalized_snapshot:
+  if not normalized_snapshot:
     raise TradeApprovalChallengeError(
       "SNAPSHOT_REQUIRED",
       "该做 T 控制动作必须绑定当前完整快照",
@@ -224,14 +226,12 @@ def normalize_t_trade_control_request(
     )
 
   default_reasons = {
-    TTradeControlAction.BEGIN_CONTROLLED_WINDOW: "begin controlled window",
     TTradeControlAction.ACTIVATE_CANARY: "activate canary",
     TTradeControlAction.ACTIVATE_LIVE: "activate live",
-    TTradeControlAction.KILL_SWITCH: "",
   }
   normalized_reason = _clean_reason(
     reason,
-    required=normalized_action == TTradeControlAction.KILL_SWITCH,
+    required=False,
     default=default_reasons[normalized_action],
   )
   normalized_key = str(idempotency_key or "").strip()
@@ -321,19 +321,12 @@ async def _operation_marker_exists(
   challenge_id: str,
   request: TTradeControlRequestData,
 ) -> bool:
-  event = await db.get(AccountTradingRolloutEvent, challenge_id)
+  event = await db.get(TTradeRolloutEvent, challenge_id)
   if event is None:
     return False
   details = dict(event.details or {})
   context_matches = str(details.get("operationId") or "") == challenge_id
-  if request.action == TTradeControlAction.BEGIN_CONTROLLED_WINDOW:
-    context_matches = (
-      context_matches
-      and str(event.snapshot_id or "") == request.snapshot_id
-      and str(details.get("policyVersion") or "")
-      == str(request.policy_version)
-    )
-  elif request.action in {
+  if request.action in {
     TTradeControlAction.ACTIVATE_CANARY,
     TTradeControlAction.ACTIVATE_LIVE,
   }:
@@ -343,11 +336,6 @@ async def _operation_marker_exists(
       and str(details.get("targetStage") or "")
       == (request.target_stage.value if request.target_stage else "")
       and int(details.get("policyVersion") or 0) == request.policy_version
-    )
-  else:
-    context_matches = (
-      context_matches
-      and str(details.get("reason") or "") == request.reason
     )
   if (
     str(event.account_id) != request.account_id
@@ -391,26 +379,14 @@ def _request_from_payload(payload: dict[str, Any]) -> TTradeControlRequestData:
   )
 
 
-def _rollout_binding(rollout: Optional[AccountTradingRollout]) -> dict[str, Any]:
+def _rollout_binding(rollout: Optional[TTradeRollout]) -> dict[str, Any]:
   return {
     "exists": rollout is not None,
     "stage": str(rollout.stage if rollout else "SHADOW").upper(),
     "enabled": bool(rollout and rollout.enabled),
-    "kill_switch": bool(rollout and rollout.kill_switch),
-    "reconcile_status": str(rollout.reconcile_status if rollout else "UNKNOWN").upper(),
     "policy_version": int(rollout.policy_version if rollout else 1),
     "acknowledged_policy_version": int(
       rollout.acknowledged_policy_version if rollout else 0
-    ),
-    "snapshot_id": str(rollout.last_snapshot_id if rollout else ""),
-    "snapshot_hash": str(rollout.last_snapshot_hash if rollout else ""),
-    "snapshot_at": _json_safe(rollout.last_snapshot_at) if rollout else None,
-    "controlled_window_active": bool(rollout and rollout.controlled_window_active),
-    "controlled_window_snapshot_id": str(
-      rollout.controlled_window_snapshot_id if rollout else ""
-    ),
-    "controlled_window_snapshot_hash": str(
-      rollout.controlled_window_snapshot_hash if rollout else ""
     ),
   }
 
@@ -461,9 +437,7 @@ def _readiness_binding(readiness: dict[str, Any]) -> dict[str, Any]:
     # Bind the exact durable-evidence summary into the device challenge.  A
     # CANARY/LIVE confirmation cannot reuse a preview after the V3 evidence
     # changed, even if generic runtime checks happen to remain green.
-    "v3_rollout_evidence": _json_safe(
-      dict(readiness.get("v3_rollout_evidence") or {})
-    ),
+    "v3_rollout_evidence": _json_safe(dict(readiness.get("v3_rollout_evidence") or {})),
     "checks": checks,
   }
 
@@ -483,29 +457,6 @@ def _readiness_preview(readiness: dict[str, Any]) -> dict[str, Any]:
       ],
     }
   )
-
-
-def _kill_preview(
-  account_id: str,
-  rollout: Optional[AccountTradingRollout],
-) -> dict[str, Any]:
-  """Return display-only state without consulting ordinary live readiness.
-
-  A kill switch is a risk-reducing action.  It must remain confirmable when the
-  Agent, Engine, snapshot, allowlist, or real-trading gates are unavailable.
-  """
-
-  binding = _rollout_binding(rollout)
-  return {
-    "account_id": account_id,
-    "status": "RISK_REDUCTION_READY",
-    "stage": str(binding["stage"]),
-    "preparation_ready": False,
-    "automation_ready": False,
-    "policy_version": int(binding["policy_version"]),
-    "kill_switch": bool(binding["kill_switch"]),
-    "checks": [],
-  }
 
 
 def _gate_failure(
@@ -530,13 +481,11 @@ def _gate_failure(
 def _validate_action_readiness(
   request: TTradeControlRequestData,
   readiness: dict[str, Any],
-  rollout: Optional[AccountTradingRollout],
+  rollout: Optional[TTradeRollout],
   *,
   allow_pending_operator_review: bool = False,
 ) -> None:
   binding = _rollout_binding(rollout)
-  if request.action == TTradeControlAction.KILL_SWITCH:
-    return
   if request.policy_version != int(binding["policy_version"]):
     raise TradeApprovalChallengeError(
       "POLICY_VERSION_CONFLICT",
@@ -545,7 +494,7 @@ def _validate_action_readiness(
   if rollout is None:
     raise TradeApprovalChallengeError(
       "ROLLOUT_NOT_CONFIGURED",
-      "账户尚未创建实盘灰度配置",
+      "账户尚未创建做 T 助手灰度配置",
     )
   if request.snapshot_id != str(readiness.get("snapshot_id") or "") or not str(
     readiness.get("snapshot_hash") or ""
@@ -554,25 +503,17 @@ def _validate_action_readiness(
       "SNAPSHOT_CHANGED",
       "完整安全快照已变化，请刷新后重新预览",
     )
-  required = (
-    _PREPARATION_GATE_CODES
-    if request.action == TTradeControlAction.BEGIN_CONTROLLED_WINDOW
-    else _ACTIVATION_GATE_CODES
-  )
+  required = _ACTIVATION_GATE_CODES
   # This device-bound route may create the §19.5 acknowledgement together
   # with activation.  Let it proceed when, and only when, that single
   # acknowledgement is pending; all replay, PAPER, trace, quality, runtime,
   # and finite-exposure gates remain required.  The operations service
   # re-evaluates durable evidence under the rollout lock before persisting the
   # acknowledgement with activation.
-  if (
-    allow_pending_operator_review
-    and request.action
-    in {
-      TTradeControlAction.ACTIVATE_CANARY,
-      TTradeControlAction.ACTIVATE_LIVE,
-    }
-  ):
+  if allow_pending_operator_review and request.action in {
+    TTradeControlAction.ACTIVATE_CANARY,
+    TTradeControlAction.ACTIVATE_LIVE,
+  }:
     required = required - {"V3_OPERATOR_REVIEW_CONFIRMED"}
   failure = _gate_failure(readiness, required)
   if failure:
@@ -588,22 +529,10 @@ def _validate_action_readiness(
       "T_TRADE_CONTROL_NOT_READY",
       "Agent、对账或账户安全状态不满足实盘控制要求",
     )
-  if request.action == TTradeControlAction.BEGIN_CONTROLLED_WINDOW:
-    if (
-      str(binding["stage"]) not in {"SHADOW", "PAUSED"}
-      or bool(binding["enabled"])
-      or bool(binding["kill_switch"])
-      or bool(binding["controlled_window_active"])
-    ):
-      raise TradeApprovalChallengeError(
-        "ROLLOUT_STATE_CONFLICT",
-        "当前灰度状态不允许建立新的账户实盘窗口",
-      )
-    return
   if (
-    str(binding["stage"]) != "SHADOW"
-    or not bool(binding["controlled_window_active"])
-    or str(binding["controlled_window_snapshot_id"]) != request.snapshot_id
+    str(binding["stage"]) not in {"SHADOW", "PAUSED"}
+    or not bool(readiness.get("controlled_window_active"))
+    or str(readiness.get("controlled_window_snapshot_id") or "") != request.snapshot_id
   ):
     raise TradeApprovalChallengeError(
       "ROLLOUT_STATE_CONFLICT",
@@ -643,7 +572,9 @@ def _require_native_control_principal(
     principal.require_account(account_id)
   except AuthError as exc:
     raise TradeApprovalChallengeError(exc.code, exc.message) from exc
-  if not principal.is_native_session or principal.authorized_account_ids != (account_id,):
+  if not principal.is_native_session or principal.authorized_account_ids != (
+    account_id,
+  ):
     raise TradeApprovalChallengeError(
       "NATIVE_SESSION_ACCOUNT_REQUIRED",
       "做 T 原生控制只能作用于当前设备会话的唯一主账户",
@@ -787,15 +718,11 @@ class TTradeControlChallengeService:
           )
 
         rollout = await db.get(
-          AccountTradingRollout,
+          TTradeRollout,
           request.account_id,
           with_for_update=True,
         )
-        readiness = (
-          _kill_preview(request.account_id, rollout)
-          if request.action == TTradeControlAction.KILL_SWITCH
-          else await cls.operations_service.readiness(request.account_id)
-        )
+        readiness = await cls.operations_service.readiness(request.account_id)
         _validate_action_readiness(
           request,
           readiness,
@@ -922,8 +849,9 @@ class TTradeControlChallengeService:
         # all token/binding checks below use that authoritative row.
         routing_challenge = (
           await db.execute(
-            select(TradeConfirmationChallenge)
-            .where(TradeConfirmationChallenge.id == normalized_id)
+            select(TradeConfirmationChallenge).where(
+              TradeConfirmationChallenge.id == normalized_id
+            )
           )
         ).scalar_one_or_none()
         if routing_challenge is None:
@@ -931,9 +859,7 @@ class TTradeControlChallengeService:
             "CONFIRMATION_NOT_FOUND",
             "确认挑战不存在或已失效",
           )
-        routing_request = _request_from_payload(
-          dict(routing_challenge.payload or {})
-        )
+        routing_request = _request_from_payload(dict(routing_challenge.payload or {}))
         current = await cls._lock_current_principal(
           db,
           principal,
@@ -1001,42 +927,35 @@ class TTradeControlChallengeService:
             )
 
         rollout = await db.get(
-          AccountTradingRollout,
+          TTradeRollout,
           request.account_id,
           with_for_update=True,
         )
         gate_error: Optional[TradeApprovalChallengeError] = None
-        if request.action != TTradeControlAction.KILL_SWITCH:
-          readiness = await cls.operations_service.readiness(request.account_id)
-          try:
-            _validate_action_readiness(
-              request,
-              readiness,
-              rollout,
-              allow_pending_operator_review=(
-                request.action
-                in {
-                  TTradeControlAction.ACTIVATE_CANARY,
-                  TTradeControlAction.ACTIVATE_LIVE,
-                }
-              ),
+        readiness = await cls.operations_service.readiness(request.account_id)
+        try:
+          _validate_action_readiness(
+            request,
+            readiness,
+            rollout,
+            allow_pending_operator_review=True,
+          )
+          if _rollout_binding(rollout) != dict(payload.get("rollout_binding") or {}):
+            raise TradeApprovalChallengeError(
+              "ROLLOUT_CHANGED",
+              "做 T 灰度状态已变化，请重新预览",
             )
-            if _rollout_binding(rollout) != dict(payload.get("rollout_binding") or {}):
-              raise TradeApprovalChallengeError(
-                "ROLLOUT_CHANGED",
-                "做 T 灰度状态已变化，请重新预览",
-              )
-            current_fingerprint = _canonical_hash(_readiness_binding(readiness))
-            if not hmac.compare_digest(
-              current_fingerprint,
-              str(payload.get("readiness_fingerprint") or ""),
-            ):
-              raise TradeApprovalChallengeError(
-                "READINESS_CHANGED",
-                "做 T 实盘安全快照已变化，请重新预览",
-              )
-          except TradeApprovalChallengeError as exc:
-            gate_error = exc
+          current_fingerprint = _canonical_hash(_readiness_binding(readiness))
+          if not hmac.compare_digest(
+            current_fingerprint,
+            str(payload.get("readiness_fingerprint") or ""),
+          ):
+            raise TradeApprovalChallengeError(
+              "READINESS_CHANGED",
+              "做 T 实盘安全快照已变化，请重新预览",
+            )
+        except TradeApprovalChallengeError as exc:
+          gate_error = exc
         now = time_utils.now()
         if challenge.consumed_at is None:
           challenge.consumed_at = now
@@ -1079,16 +998,7 @@ class TTradeControlChallengeService:
     user_id: str,
   ) -> TTradeControlConfirmationData:
     try:
-      if request.action == TTradeControlAction.BEGIN_CONTROLLED_WINDOW:
-        readiness = await cls.operations_service.begin_controlled_window(
-          request.account_id,
-          user_id=user_id,
-          snapshot_id=request.snapshot_id,
-          expected_policy_version=request.policy_version,
-          operation_id=challenge_id,
-        )
-        code = "CONTROLLED_WINDOW_APPLIED"
-      elif request.action in {
+      if request.action in {
         TTradeControlAction.ACTIVATE_CANARY,
         TTradeControlAction.ACTIVATE_LIVE,
       }:
@@ -1108,13 +1018,7 @@ class TTradeControlChallengeService:
         )
         code = f"{target}_ACTIVATION_APPLIED"
       else:
-        readiness = await cls.operations_service.kill(
-          request.account_id,
-          request.reason,
-          user_id=user_id,
-          operation_id=challenge_id,
-        )
-        code = "KILL_SWITCH_APPLIED"
+        raise ValueError("做 T 灰度控制动作无效")
     except Exception as exc:
       async with AsyncSessionLocal() as db:
         applied = await _operation_marker_exists(

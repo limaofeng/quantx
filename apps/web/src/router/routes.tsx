@@ -339,6 +339,15 @@ export const appRoutes: AppRouteConfig[] = [
     },
   }),
   route({
+    path: '/settings/trading-safety',
+    title: '交易安全',
+    importer: toDefaultExport(
+      () => import('@/features/settings'),
+      'SystemSettingsPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
     path: '/settings/qmt',
     title: '系统设置',
     importer: toDefaultExport(

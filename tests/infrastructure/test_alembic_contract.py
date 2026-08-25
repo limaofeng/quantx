@@ -125,7 +125,12 @@ def test_table_comment_revision_covers_metadata_and_refuses_downgrade(
   assert len(statements) == len(revision.OPTIONAL_TABLE_COMMENTS)
   assert "divid_factors" in statements[0]
   assert revision.OPTIONAL_TABLE_COMMENTS["divid_factors"] in statements[0]
+  # The T-assistant rollout table is relabelled by revision 0033 after its
+  # account-wide execution fields are moved to a dedicated table.
+  later_comment_overrides = {"account_trading_rollouts"}
   for table_name, comment in revision.TABLE_COMMENTS.items():
+    if table_name in later_comment_overrides:
+      continue
     assert Base.metadata.tables[table_name].comment == comment
     assert re.search(r"[\u4e00-\u9fff]", comment)
   with pytest.raises(RuntimeError, match="downgrades"):

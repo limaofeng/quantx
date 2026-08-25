@@ -17,8 +17,8 @@ from quantx_infrastructure.models.enums import StrategyRunMode, StrategyRunStatu
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
 )
-from quantx_infrastructure.services.t_trade_operations_service import (
-  TTradeOperationsService,
+from quantx_infrastructure.services.account_execution_safety_service import (
+  AccountExecutionSafetyService,
 )
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -40,7 +40,6 @@ STRATEGY_CONTROL_CHALLENGE = "STRATEGY_CONTROL"
 _CHALLENGE_LIFETIME = timedelta(seconds=60)
 _MAX_TOKEN_LENGTH = 256
 _MAX_IDEMPOTENCY_KEY_LENGTH = 128
-_IGNORED_READINESS_CHECKS = frozenset({"T_TRADE_LIVE_ENABLED"})
 
 
 @dataclass(frozen=True)
@@ -86,7 +85,9 @@ def normalize_strategy_control_request(
   normalized_key = str(idempotency_key or "").strip()
   try:
     normalized_action = (
-      action if isinstance(action, StrategyControlAction) else StrategyControlAction(str(action))
+      action
+      if isinstance(action, StrategyControlAction)
+      else StrategyControlAction(str(action))
     )
   except ValueError as exc:
     raise TradeApprovalChallengeError(
@@ -167,11 +168,11 @@ def _readiness_binding(readiness: dict[str, Any]) -> dict[str, Any]:
       "passed": bool(item.get("passed")),
     }
     for item in list(readiness.get("checks") or [])
-    if str(item.get("code") or "") not in _IGNORED_READINESS_CHECKS
   ]
   return {
-    "status": str(readiness.get("status") or ""),
-    "stage": str(readiness.get("stage") or ""),
+    "health_status": str(readiness.get("health_status") or ""),
+    "authorization_state": str(readiness.get("authorization_state") or ""),
+    "state_version": int(readiness.get("state_version") or 0),
     "engine_status": str(readiness.get("engine_status") or ""),
     "agent_status": str(readiness.get("agent_status") or ""),
     "agent_device_id": str(readiness.get("agent_device_id") or ""),
@@ -180,11 +181,10 @@ def _readiness_binding(readiness: dict[str, Any]) -> dict[str, Any]:
     "protocol_version": str(readiness.get("protocol_version") or ""),
     "reconcile_status": str(readiness.get("reconcile_status") or ""),
     "kill_switch": bool(readiness.get("kill_switch")),
-    "policy_version": int(readiness.get("policy_version") or 0),
     "snapshot_id": str(readiness.get("snapshot_id") or ""),
     "snapshot_hash": str(readiness.get("snapshot_hash") or ""),
     "snapshot_at": str(readiness.get("snapshot_at") or ""),
-    "controlled_window_active": bool(readiness.get("controlled_window_active")),
+    "controlled_window_active": bool(readiness.get("execution_window_active")),
     "controlled_window_snapshot_id": str(
       readiness.get("controlled_window_snapshot_id") or ""
     ),
@@ -199,10 +199,7 @@ def _readiness_binding(readiness: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_readiness(readiness: dict[str, Any]) -> None:
   failed = [
-    item
-    for item in list(readiness.get("checks") or [])
-    if str(item.get("code") or "") not in _IGNORED_READINESS_CHECKS
-    and not bool(item.get("passed"))
+    item for item in list(readiness.get("checks") or []) if not bool(item.get("passed"))
   ]
   if failed:
     reason = str(failed[0].get("message") or failed[0].get("code") or "实盘未就绪")
@@ -244,8 +241,7 @@ def _validate_action_state(run: Any, request: StrategyControlRequestData) -> Non
     }
   elif request.action == StrategyControlAction.RESUME_LIVE:
     valid = (
-      mode == StrategyRunMode.LIVE.value
-      and status == StrategyRunStatus.PAUSED.value
+      mode == StrategyRunMode.LIVE.value and status == StrategyRunStatus.PAUSED.value
     )
   else:
     valid = mode == StrategyRunMode.PAPER.value and status in {
@@ -325,7 +321,7 @@ class StrategyControlChallengeService:
       _validate_action_state(run, request)
       run_binding = _run_binding(run)
 
-    readiness = await TTradeOperationsService().readiness(request.account_id)
+    readiness = await AccountExecutionSafetyService().status(request.account_id)
     _validate_readiness(readiness)
     target_instance_id = (
       str(uuid.uuid4())
@@ -476,7 +472,7 @@ class StrategyControlChallengeService:
         await db.rollback()
         raise
 
-    readiness = await TTradeOperationsService().readiness(request.account_id)
+    readiness = await AccountExecutionSafetyService().status(request.account_id)
     _validate_readiness(readiness)
     if _readiness_binding(readiness) != dict(payload.get("readiness_binding") or {}):
       await StrategyControlChallengeService._record_result(

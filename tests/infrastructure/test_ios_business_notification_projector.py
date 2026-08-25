@@ -6,7 +6,7 @@ import pytest
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRolloutEvent,
+  AccountExecutionControlEvent,
   EngineCommandOutbox,
   OperationalAlert,
   PendingTradeOrder,
@@ -51,7 +51,7 @@ async def projection_database():
     TradeIntentRecord.__table__,
     PendingTradeOrder.__table__,
     StrategyRuntimeEvent.__table__,
-    AccountTradingRolloutEvent.__table__,
+    AccountExecutionControlEvent.__table__,
     EngineCommandOutbox.__table__,
     OperationalAlert.__table__,
     IosPushRegistration.__table__,
@@ -277,10 +277,10 @@ async def test_projects_all_categories_from_durable_sources(
     db.add(_pending_order(now))
     db.add(_runtime_event(now))
     db.add(
-      AccountTradingRolloutEvent(
+      AccountExecutionControlEvent(
         event_id="rollout-event-1",
         account_id=ACCOUNT_ID,
-        event_type="KILL_SWITCHED",
+        event_type="HARD_KILL_ACTIVATED",
         details={"reason": "sensitive"},
         created_at=now,
       )
@@ -477,10 +477,10 @@ async def test_receipt_filter_prevents_batch_starvation(projection_database) -> 
   async with projection_database() as db:
     await _seed_registration(db, now=now)
     db.add_all(
-      AccountTradingRolloutEvent(
+      AccountExecutionControlEvent(
         event_id=f"rollout-{index:03d}",
         account_id=ACCOUNT_ID,
-        event_type="ENTRIES_PAUSED",
+        event_type="RISK_INCREASE_PAUSED",
         details={},
         created_at=now + timedelta(milliseconds=index),
       )

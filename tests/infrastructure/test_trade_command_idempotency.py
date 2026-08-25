@@ -7,7 +7,7 @@ import pytest
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
+  AccountExecutionControl,
   AgentDevice,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
@@ -34,20 +34,16 @@ TABLES = [
 ]
 
 
-def _ready_rollout(**overrides):
+def _ready_control(**overrides):
   values = {
-    "kill_switch": False,
-    "stage": "CANARY",
-    "enabled": True,
+    "authorization_state": "ENABLED",
     "reconcile_status": "READY",
-    "policy_version": 3,
-    "acknowledged_policy_version": 3,
     "last_snapshot_id": "snapshot-1",
-    "last_snapshot_hash": "snapshot-hash-1",
+    "last_snapshot_hash": "a" * 64,
     "last_snapshot_at": utcnow(),
     "controlled_window_active": True,
     "controlled_window_snapshot_id": "snapshot-1",
-    "controlled_window_snapshot_hash": "snapshot-hash-1",
+    "controlled_window_snapshot_hash": "a" * 64,
   }
   values.update(overrides)
   return SimpleNamespace(**values)
@@ -85,11 +81,8 @@ async def test_manual_live_authorization_requires_global_gate_and_allowlist(
 async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
   monkeypatch,
 ) -> None:
-  rollout = _ready_rollout(
-    kill_switch=True,
-    stage="KILL_SWITCHED",
-    enabled=False,
-    acknowledged_policy_version=0,
+  rollout = _ready_control(
+    authorization_state="KILLED",
     controlled_window_active=False,
   )
   db = SimpleNamespace(get=AsyncMock(return_value=rollout))
@@ -112,7 +105,7 @@ async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
     risk_reducing=True,
   )
   db.get.assert_awaited_with(
-    AccountTradingRollout,
+    AccountExecutionControl,
     "account-1",
     with_for_update=True,
   )
@@ -123,19 +116,17 @@ async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
   ("rollout", "message"),
   [
     (None, "尚未配置"),
-    (_ready_rollout(reconcile_status="PENDING"), "尚未完成对账"),
+    (_ready_control(reconcile_status="PENDING"), "尚未完成对账"),
     (
-      _ready_rollout(last_snapshot_at=utcnow() - timedelta(minutes=3)),
+      _ready_control(last_snapshot_at=utcnow() - timedelta(minutes=3)),
       "超过 90 秒",
     ),
-    (_ready_rollout(controlled_window_active=False), "账户实盘窗口"),
+    (_ready_control(controlled_window_active=False), "账户实盘窗口"),
     (
-      _ready_rollout(controlled_window_snapshot_hash="different"),
+      _ready_control(controlled_window_snapshot_hash="different"),
       "与最新完整快照不一致",
     ),
-    (_ready_rollout(stage="SHADOW"), "CANARY/LIVE"),
-    (_ready_rollout(enabled=False), "CANARY/LIVE"),
-    (_ready_rollout(acknowledged_policy_version=2), "尚未确认"),
+    (_ready_control(authorization_state="DISABLED"), "新增风险授权"),
   ],
 )
 async def test_manual_buy_requires_every_rollout_and_snapshot_gate(
@@ -161,12 +152,9 @@ async def test_manual_buy_requires_every_rollout_and_snapshot_gate(
 
 @pytest.mark.asyncio
 async def test_manual_sell_still_rejects_stale_reconciliation(monkeypatch) -> None:
-  rollout = _ready_rollout(
-    kill_switch=True,
-    stage="KILL_SWITCHED",
-    enabled=False,
+  rollout = _ready_control(
+    authorization_state="KILLED",
     last_snapshot_at=utcnow() - timedelta(minutes=3),
-    acknowledged_policy_version=0,
     controlled_window_active=False,
   )
   db = SimpleNamespace(get=AsyncMock(return_value=rollout))
@@ -194,7 +182,7 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
   async def get(_model, _key, **kwargs):
     assert kwargs == {"with_for_update": True}
     events.append("rollout-lock")
-    return _ready_rollout()
+    return _ready_control()
 
   class Result:
     @staticmethod

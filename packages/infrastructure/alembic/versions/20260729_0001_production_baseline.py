@@ -13,7 +13,9 @@ import quantx_infrastructure.models  # noqa: F401
 from alembic import op
 from quantx_infrastructure.database.relational_base import Base
 from sqlalchemy import (
+  Boolean,
   CheckConstraint,
+  DateTime,
   Column,
   ForeignKeyConstraint,
   MetaData,
@@ -34,6 +36,8 @@ EXPECTED_METADATA_SHA256 = (
 # Models added by revisions after this immutable baseline must not affect its
 # fingerprint or be created early when bootstrapping an empty database.
 POST_BASELINE_TABLES = {
+  "account_execution_control_events",
+  "account_execution_controls",
   "account_trading_rollout_events",
   "ai_assistant_deletion_audits",
   "ai_assistant_events",
@@ -89,15 +93,6 @@ POST_BASELINE_COLUMNS = {
   "auth_device_sessions": {
     "granted_permissions",
   },
-  "account_trading_rollouts": {
-    "controlled_window_active",
-    "controlled_window_external_order_ids",
-    "controlled_window_external_trade_ids",
-    "controlled_window_snapshot_hash",
-    "controlled_window_snapshot_id",
-    "controlled_window_started_at",
-    "controlled_window_started_by_user_id",
-  },
   "conditional_liquidation_orders": {
     "auto_exit_authorized",
     "dynamic_policy",
@@ -133,6 +128,41 @@ def _baseline_metadata() -> MetaData:
     if table.key not in POST_BASELINE_TABLES:
       table.to_metadata(metadata)
 
+  # The live model now stores account-wide facts in
+  # ``account_execution_controls``. Reconstruct the columns that were part of
+  # this locked baseline so the historical fingerprint and empty-database
+  # migration path remain immutable.
+  rollout = metadata.tables["account_trading_rollouts"]
+  historical_columns = [
+    Column("kill_switch", Boolean(), nullable=False),
+    Column("reconcile_status", String(length=32), nullable=False),
+    Column("last_snapshot_id", String(length=128), nullable=True),
+    Column("last_snapshot_hash", String(length=64), nullable=True),
+    Column("last_snapshot_at", DateTime(), nullable=True),
+    Column("last_backup_at", DateTime(), nullable=True),
+  ]
+  for column in historical_columns:
+    rollout.append_column(column)
+  columns = rollout._columns._collection
+  for name in ("kill_switch", "reconcile_status"):
+    entry = next(value for value in columns if value[0] == name)
+    columns.remove(entry)
+    max_batches_index = next(
+      index for index, value in enumerate(columns) if value[0] == "max_active_batches"
+    )
+    columns.insert(max_batches_index, entry)
+  for name in (
+    "last_snapshot_id",
+    "last_snapshot_hash",
+    "last_snapshot_at",
+    "last_backup_at",
+  ):
+    entry = next(value for value in columns if value[0] == name)
+    columns.remove(entry)
+    created_at_index = next(
+      index for index, value in enumerate(columns) if value[0] == "created_at"
+    )
+    columns.insert(created_at_index, entry)
   for table_key, column_names in POST_BASELINE_COLUMNS.items():
     table = metadata.tables[table_key]
     for index in list(table.indexes):

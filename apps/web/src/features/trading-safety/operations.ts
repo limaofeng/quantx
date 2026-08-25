@@ -4,10 +4,13 @@ export const AccountExecutionSafetyQuery = gql(`
   query TradingSafety_AccountExecutionSafety($accountId: String!) {
     accountExecutionSafety(accountId: $accountId) {
       accountId
+      authorizationState
+      stateVersion
       healthStatus
       executionMode
       canIncreaseRisk
       canReduceRisk
+      canActivateAutomation
       summary
       engineStatus
       agentStatus
@@ -17,6 +20,8 @@ export const AccountExecutionSafetyQuery = gql(`
       killSwitch
       blockedReasons
       executionWindowActive
+      snapshotId
+      snapshotHash
       snapshotAt
       reconciliationAgeSeconds
       queuedCommandCount
@@ -35,6 +40,70 @@ export const AccountExecutionSafetyQuery = gql(`
         passed
         message
         scope
+      }
+    }
+  }
+`);
+
+export const PreviewAccountExecutionControlMutation = gql(`
+  mutation TradingSafety_PreviewAccountExecutionControl(
+    $input: AccountExecutionControlPreviewInput!
+  ) {
+    previewAccountExecutionControl(input: $input) {
+      success
+      code
+      message
+      preview {
+        challengeId
+        confirmationToken
+        tokenIssued
+        accountId
+        action
+        stateVersion
+        snapshotId
+        reason
+        challengeExpiresAt
+        challengeStatus
+        operationStatus
+        safety {
+          accountId
+          authorizationState
+          stateVersion
+          healthStatus
+          executionMode
+          canIncreaseRisk
+          canReduceRisk
+          canActivateAutomation
+          summary
+          blockedReasons
+        }
+      }
+    }
+  }
+`);
+
+export const ConfirmAccountExecutionControlMutation = gql(`
+  mutation TradingSafety_ConfirmAccountExecutionControl(
+    $input: AccountExecutionControlConfirmationInput!
+  ) {
+    confirmAccountExecutionControl(input: $input) {
+      success
+      code
+      message
+      challengeId
+      action
+      operationStatus
+      safety {
+        accountId
+        authorizationState
+        stateVersion
+        healthStatus
+        executionMode
+        canIncreaseRisk
+        canReduceRisk
+        canActivateAutomation
+        summary
+        blockedReasons
       }
     }
   }

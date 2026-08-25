@@ -10,7 +10,7 @@ from quantx_domain.clock import utcnow
 from quantx_domain.trading.entry_plan import ManagedEntryPlanConfig
 from quantx_engine import report_processor
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
+  AccountExecutionControl,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
 )
@@ -96,12 +96,8 @@ class _Result:
 
 def _ready_rollout() -> SimpleNamespace:
   return SimpleNamespace(
-    kill_switch=False,
-    stage="CANARY",
-    enabled=True,
+    authorization_state="ENABLED",
     reconcile_status="READY",
-    policy_version=3,
-    acknowledged_policy_version=3,
     last_snapshot_id="snapshot-7",
     last_snapshot_hash="a" * 64,
     last_snapshot_at=utcnow(),
@@ -212,7 +208,7 @@ async def test_managed_auto_entry_fails_closed_when_durable_plan_is_disabled(
   strategy = SimpleNamespace(class_name="AshareManagedEntryPlanStrategy")
 
   async def get(model, _key, **_kwargs):
-    if model is AccountTradingRollout:
+    if model is AccountExecutionControl:
       return _ready_rollout()
     if model is TradeIntentRecord:
       return persisted_intent
@@ -286,7 +282,7 @@ async def test_managed_auto_entry_rejects_missing_authoritative_plan_state(
   )
 
   async def get(model, _key, **_kwargs):
-    if model is AccountTradingRollout:
+    if model is AccountExecutionControl:
       return _ready_rollout()
     if model is TradeIntentRecord:
       return intent
@@ -904,12 +900,8 @@ async def test_second_gate_rechecks_authoritative_plan_snapshot_and_position(
   parameters = _managed_entry_parameters()
   scope = scope_from_managed_entry_config(plan_id="run-1", config=parameters)
   rollout = SimpleNamespace(
-    kill_switch=False,
-    stage="CANARY",
-    enabled=True,
+    authorization_state="ENABLED",
     reconcile_status="READY",
-    policy_version=3,
-    acknowledged_policy_version=3,
     last_snapshot_id="snapshot-7",
     last_snapshot_hash="a" * 64,
     last_snapshot_at=utcnow(),
@@ -992,7 +984,7 @@ async def test_second_gate_rechecks_authoritative_plan_snapshot_and_position(
   )
 
   async def get(model, _key, **_kwargs):
-    if model is AccountTradingRollout:
+    if model is AccountExecutionControl:
       return rollout
     if model is TradeIntentRecord:
       return intent

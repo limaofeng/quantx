@@ -277,24 +277,17 @@ class TTradeBatch(Base, TimestampMixin):
   version = Column(Integer, nullable=False, default=1)
 
 
-class AccountTradingRollout(Base, TimestampMixin):
-  """Server-side rollout and kill-switch state for one account."""
+class AccountExecutionControl(Base, TimestampMixin):
+  """Account-wide live execution authorization and observed broker facts."""
 
-  __tablename__ = "account_trading_rollouts"
+  __tablename__ = "account_execution_controls"
 
   account_id = Column(String(50), primary_key=True)
-  stage = Column(String(24), nullable=False, default="SHADOW")
-  enabled = Column(Boolean, nullable=False, default=False)
-  kill_switch = Column(Boolean, nullable=False, default=False)
+  authorization_state = Column(String(24), nullable=False, default="DISABLED")
+  state_version = Column(Integer, nullable=False, default=1)
   reconcile_status = Column(String(32), nullable=False, default="UNKNOWN")
-  max_active_batches = Column(Integer, nullable=False, default=1)
-  max_batch_volume = Column(Integer, nullable=False, default=100)
-  max_order_amount = Column(Float, nullable=False, default=20000.0)
-  max_total_exposure_pct = Column(Float, nullable=False, default=0.02)
-  policy_version = Column(Integer, nullable=False, default=1)
-  acknowledged_policy_version = Column(Integer, nullable=False, default=0)
-  activated_by_user_id = Column(String(36), nullable=True)
-  activated_at = Column(DateTime, nullable=True)
+  authorized_by_user_id = Column(String(36), nullable=True)
+  authorized_at = Column(DateTime, nullable=True)
   paused_reason = Column(Text, nullable=True)
   last_snapshot_id = Column(String(128), nullable=True)
   last_snapshot_hash = Column(String(64), nullable=True)
@@ -309,8 +302,50 @@ class AccountTradingRollout(Base, TimestampMixin):
   controlled_window_external_trade_ids = Column(JSON, nullable=False, default=list)
 
 
-class AccountTradingRolloutEvent(Base):
-  """Append-only audit event for account rollout state changes."""
+class AccountExecutionControlEvent(Base):
+  """Append-only audit event for account execution authorization changes."""
+
+  __tablename__ = "account_execution_control_events"
+  __table_args__ = (
+    Index(
+      "ix_account_execution_control_event_account_created",
+      "account_id",
+      "created_at",
+    ),
+  )
+
+  event_id = Column(String(128), primary_key=True)
+  account_id = Column(String(50), nullable=False, index=True)
+  event_type = Column(String(64), nullable=False)
+  actor_user_id = Column(String(36), nullable=True)
+  previous_state = Column(String(24), nullable=True)
+  next_state = Column(String(24), nullable=True)
+  snapshot_id = Column(String(128), nullable=True)
+  details = Column(JSON, nullable=False, default=dict)
+  created_at = Column(DateTime, nullable=False)
+
+
+class TTradeRollout(Base, TimestampMixin):
+  """Feature-local rollout state for the existing-position T assistant."""
+
+  __tablename__ = "account_trading_rollouts"
+
+  account_id = Column(String(50), primary_key=True)
+  stage = Column(String(24), nullable=False, default="SHADOW")
+  enabled = Column(Boolean, nullable=False, default=False)
+  max_active_batches = Column(Integer, nullable=False, default=1)
+  max_batch_volume = Column(Integer, nullable=False, default=100)
+  max_order_amount = Column(Float, nullable=False, default=20000.0)
+  max_total_exposure_pct = Column(Float, nullable=False, default=0.02)
+  policy_version = Column(Integer, nullable=False, default=1)
+  acknowledged_policy_version = Column(Integer, nullable=False, default=0)
+  activated_by_user_id = Column(String(36), nullable=True)
+  activated_at = Column(DateTime, nullable=True)
+  paused_reason = Column(Text, nullable=True)
+
+
+class TTradeRolloutEvent(Base):
+  """Append-only audit event for T-assistant rollout state changes."""
 
   __tablename__ = "account_trading_rollout_events"
   __table_args__ = (

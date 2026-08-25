@@ -282,7 +282,6 @@ _register(
     "approveStrategyTradeIntent",
     "approveTTradeEntry",
     "archiveStrategyInstance",
-    "beginTTradeControlledWindow",
     "cancelLimitUpBoardReplay",
     "cloneStrategy",
     "cloneStrategyInstance",
@@ -304,7 +303,6 @@ _register(
     "stopStrategy",
     "stopStrategyRun",
     "syncTTradeSourceOrders",
-    "triggerTTradeKillSwitch",
     "updateStrategyGridBook",
     "updateStrategyRun",
   },
@@ -325,6 +323,16 @@ _register(
   "Mutation",
   "trade:manual",
   {"cancelOrder", "confirmManualOrder", "previewManualOrder"},
+  audiences=WEB_AND_NATIVE,
+  risk="TRADING_WRITE",
+)
+_register(
+  "Mutation",
+  "account-execution:control",
+  {
+    "confirmAccountExecutionControl",
+    "previewAccountExecutionControl",
+  },
   audiences=WEB_AND_NATIVE,
   risk="TRADING_WRITE",
 )
@@ -461,10 +469,10 @@ _register(
 )
 
 _TRADE_APPROVAL_FIELDS = {
+  "confirmAccountExecutionControl",
   "activateTTradeLive",
   "approveStrategyTradeIntent",
   "approveTTradeEntry",
-  "beginTTradeControlledWindow",
   "confirmExitIntent",
   "confirmExitPlanAuthorization",
   "confirmEntryIntent",
@@ -475,12 +483,12 @@ _TRADE_APPROVAL_FIELDS = {
   "confirmTTradeControl",
   "confirmTTradeEntryApproval",
   "previewExitIntent",
+  "previewAccountExecutionControl",
   "previewEntryIntent",
   "previewStrategyControl",
   "previewStrategyTradeIntentApproval",
   "previewTTradeControl",
   "previewTTradeEntryApproval",
-  "triggerTTradeKillSwitch",
   "triggerEntryPlanManualRule",
 }
 for _field in _TRADE_APPROVAL_FIELDS:

@@ -14,7 +14,12 @@ from ..types.trading_safety_types import (
 )
 
 
-def _aware(value: datetime | None) -> datetime | None:
+def _aware(value: datetime | str | None) -> datetime | None:
+  if isinstance(value, str):
+    normalized = value.strip().replace("Z", "+00:00")
+    if not normalized:
+      return None
+    value = datetime.fromisoformat(normalized)
   if value is None or value.tzinfo is not None:
     return value
   return value.replace(tzinfo=timezone.utc)
@@ -26,12 +31,19 @@ class AccountExecutionSafetyResolver:
   @classmethod
   async def status(cls, account_id: str) -> AccountExecutionSafety:
     payload = await cls.service.status(account_id)
+    return cls.from_payload(payload)
+
+  @classmethod
+  def from_payload(cls, payload: dict) -> AccountExecutionSafety:
     return AccountExecutionSafety(
       account_id=str(payload["account_id"]),
+      authorization_state=str(payload["authorization_state"]),
+      state_version=int(payload["state_version"]),
       health_status=str(payload["health_status"]),
       execution_mode=str(payload["execution_mode"]),
       can_increase_risk=bool(payload["can_increase_risk"]),
       can_reduce_risk=bool(payload["can_reduce_risk"]),
+      can_activate_automation=bool(payload["can_activate_automation"]),
       summary=str(payload["summary"]),
       blocked_reasons=list(payload.get("blocked_reasons") or []),
       checks=[
@@ -50,6 +62,8 @@ class AccountExecutionSafetyResolver:
       reconcile_status=str(payload.get("reconcile_status") or "UNKNOWN"),
       kill_switch=bool(payload.get("kill_switch")),
       execution_window_active=bool(payload.get("execution_window_active")),
+      snapshot_id=payload.get("snapshot_id"),
+      snapshot_hash=payload.get("snapshot_hash"),
       snapshot_at=_aware(payload.get("snapshot_at")),
       reconciliation_age_seconds=payload.get("reconciliation_age_seconds"),
       queued_command_count=int(payload.get("queued_command_count") or 0),

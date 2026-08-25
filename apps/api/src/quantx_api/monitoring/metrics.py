@@ -171,9 +171,7 @@ _T_TRADE_V3_RUNTIME_SCHEMA_VERSION = 2
 _T_TRADE_V3_MAX_RUNTIME_SERIES = 1_024
 _T_TRADE_V3_MAX_ACTIVE_STREAMS = 4_096
 _T_TRADE_V3_MAX_EXACT_COUNTER = (1 << 53) - 1
-_T_TRADE_V3_PATHS = frozenset(
-  {"NONE", "PULLBACK_REBOUND", "MOMENTUM_ACCELERATION"}
-)
+_T_TRADE_V3_PATHS = frozenset({"NONE", "PULLBACK_REBOUND", "MOMENTUM_ACCELERATION"})
 _T_TRADE_V3_HEALTH = frozenset(
   {
     "WARMING",
@@ -267,9 +265,7 @@ def _set_latency(phase: str, values: list[float]) -> None:
   DELIVERY_LATENCY.labels(phase=phase, statistic="average").set(
     sum(values) / len(values) if values else 0
   )
-  DELIVERY_LATENCY.labels(phase=phase, statistic="maximum").set(
-    max(values, default=0)
-  )
+  DELIVERY_LATENCY.labels(phase=phase, statistic="maximum").set(max(values, default=0))
 
 
 def _bounded_metric_label(value: object, *, fallback: str = "UNKNOWN") -> str:
@@ -277,8 +273,7 @@ def _bounded_metric_label(value: object, *, fallback: str = "UNKNOWN") -> str:
   if not normalized:
     return fallback
   if len(normalized) > 80 or any(
-    not (char.isalnum() or char in {"_", "-", ".", ":", ">"})
-    for char in normalized
+    not (char.isalnum() or char in {"_", "-", ".", ":", ">"}) for char in normalized
   ):
     return "OTHER"
   return normalized
@@ -419,9 +414,7 @@ def _set_t_trade_v3_engine_metrics(heartbeat: object | None) -> None:
     _validated_t_trade_v3_runtime(runtime) if isinstance(runtime, dict) else None
   )
   validated_projection = (
-    _validated_t_trade_projection(projection)
-    if isinstance(projection, dict)
-    else None
+    _validated_t_trade_projection(projection) if isinstance(projection, dict) else None
   )
   rejected = validated_runtime is None or validated_projection is None
   T_TRADE_V3_ACCUMULATOR_STATE.labels(
@@ -471,7 +464,7 @@ async def update_operational_metrics() -> None:
     _inspect_schema,
   )
   from quantx_infrastructure.models.agent_runtime import (
-    AccountTradingRollout,
+    AccountExecutionControl,
     AgentReportInbox,
     OperationalAlert,
     RuntimeComponentHeartbeat,
@@ -525,8 +518,7 @@ async def update_operational_metrics() -> None:
     _set_latency(
       "command_delivery",
       [
-        _age_seconds(created_at, delivered_at)
-        for created_at, delivered_at in delivered
+        _age_seconds(created_at, delivered_at) for created_at, delivered_at in delivered
       ],
     )
     processed = (
@@ -551,9 +543,7 @@ async def update_operational_metrics() -> None:
       ],
     )
 
-    rollouts = (
-      await db.execute(select(AccountTradingRollout))
-    ).scalars().all()
+    rollouts = (await db.execute(select(AccountExecutionControl))).scalars().all()
     for rollout in rollouts:
       account_id = str(rollout.account_id)
       RECONCILIATION_AGE.labels(account_id=account_id).set(
@@ -563,16 +553,20 @@ async def update_operational_metrics() -> None:
         _age_seconds(rollout.last_backup_at, now)
       )
       KILL_SWITCH_STATE.labels(account_id=account_id).set(
-        1 if rollout.kill_switch else 0
+        1 if str(rollout.authorization_state).upper() == "KILLED" else 0
       )
 
     heartbeats = (
-      await db.execute(
-        select(RuntimeComponentHeartbeat).where(
-          RuntimeComponentHeartbeat.component.like("qmt-agent:%")
+      (
+        await db.execute(
+          select(RuntimeComponentHeartbeat).where(
+            RuntimeComponentHeartbeat.component.like("qmt-agent:%")
+          )
         )
       )
-    ).scalars().all()
+      .scalars()
+      .all()
+    )
     for heartbeat in heartbeats:
       details = dict(heartbeat.details or {})
       device_id = str(heartbeat.instance_id)

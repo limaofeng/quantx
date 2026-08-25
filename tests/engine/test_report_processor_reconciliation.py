@@ -11,8 +11,8 @@ from quantx_domain.clock import utcnow
 from quantx_engine import report_processor
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
-  AccountTradingRolloutEvent,
+  AccountExecutionControl,
+  AccountExecutionControlEvent,
   AgentDevice,
   AgentReportInbox,
   OperationalAlert,
@@ -165,8 +165,8 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
 ) -> None:
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   tables = [
-    AccountTradingRollout.__table__,
-    AccountTradingRolloutEvent.__table__,
+    AccountExecutionControl.__table__,
+    AccountExecutionControlEvent.__table__,
     RuntimeComponentHeartbeat.__table__,
   ]
   async with engine.begin() as connection:
@@ -232,10 +232,9 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
 
   async with sessions() as db:
     db.add(
-      AccountTradingRollout(
+      AccountExecutionControl(
         account_id="account-1",
-        stage="LIVE",
-        enabled=True,
+        authorization_state="ENABLED",
         reconcile_status="READY",
         last_snapshot_id="snapshot-previous",
         last_snapshot_hash="b" * 64,
@@ -306,10 +305,9 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
     acknowledged_external_trade_ids={"old-trade"},
   )
   async with sessions() as db:
-    rollout = await db.get(AccountTradingRollout, "account-1")
+    rollout = await db.get(AccountExecutionControl, "account-1")
     assert rollout is not None
-    assert rollout.stage == "PAUSED"
-    assert rollout.enabled is False
+    assert rollout.authorization_state == "PAUSED"
     assert rollout.reconcile_status == "RECONCILE_REQUIRED"
     assert rollout.controlled_window_active is False
     assert rollout.controlled_window_snapshot_id is None
@@ -318,12 +316,12 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
     assert "UNKNOWN_BROKER_ORDER" in str(rollout.paused_reason)
 
     events = (
-      await db.execute(select(AccountTradingRolloutEvent))
+      await db.execute(select(AccountExecutionControlEvent))
     ).scalars().all()
     assert len(events) == 1
     assert events[0].event_type == "CONTROLLED_WINDOW_INVALIDATED"
-    assert events[0].previous_stage == "LIVE"
-    assert events[0].next_stage == "PAUSED"
+    assert events[0].previous_state == "ENABLED"
+    assert events[0].next_state == "PAUSED"
     assert events[0].snapshot_id == "snapshot-2"
 
     heartbeat = await db.get(
@@ -351,8 +349,8 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
   tables = [
     AuthUser.__table__,
     AgentDevice.__table__,
-    AccountTradingRollout.__table__,
-    AccountTradingRolloutEvent.__table__,
+    AccountExecutionControl.__table__,
+    AccountExecutionControlEvent.__table__,
     RuntimeComponentHeartbeat.__table__,
   ]
   async with engine.begin() as connection:
@@ -538,8 +536,8 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
 ) -> None:
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   tables = [
-    AccountTradingRollout.__table__,
-    AccountTradingRolloutEvent.__table__,
+    AccountExecutionControl.__table__,
+    AccountExecutionControlEvent.__table__,
     RuntimeComponentHeartbeat.__table__,
   ]
   async with engine.begin() as connection:
@@ -575,7 +573,7 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
 
   async def observe_gate_before_order(_payload) -> None:
     async with sessions() as db:
-      rollout = await db.get(AccountTradingRollout, "account-1")
+      rollout = await db.get(AccountExecutionControl, "account-1")
       observed_gate_statuses.append(str(rollout.reconcile_status))
 
   monkeypatch.setattr(
@@ -586,10 +584,9 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
 
   async with sessions() as db:
     db.add(
-      AccountTradingRollout(
+      AccountExecutionControl(
         account_id="account-1",
-        stage="LIVE",
-        enabled=True,
+        authorization_state="ENABLED",
         reconcile_status="READY",
         last_snapshot_id="snapshot-previous",
         last_snapshot_hash="b" * 64,
@@ -675,11 +672,10 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
   authority_invalidation.assert_awaited_once()
   report_processor._upsert_account.assert_not_awaited()
   async with sessions() as db:
-    rollout = await db.get(AccountTradingRollout, "account-1")
+    rollout = await db.get(AccountExecutionControl, "account-1")
     assert rollout is not None
     assert rollout.reconcile_status == "RECONCILE_REQUIRED"
-    assert rollout.enabled is False
-    assert rollout.stage == "PAUSED"
+    assert rollout.authorization_state == "PAUSED"
     assert rollout.controlled_window_active is False
     assert rollout.last_snapshot_id == "snapshot-previous"
     pause = json.loads(rollout.paused_reason)
@@ -691,7 +687,7 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
     )
     assert heartbeat.status == "RECONCILE_REQUIRED"
     events = list(
-      (await db.execute(select(AccountTradingRolloutEvent))).scalars().all()
+      (await db.execute(select(AccountExecutionControlEvent))).scalars().all()
     )
     assert [event.event_type for event in events] == ["SNAPSHOT_INCOMPLETE"]
     discrepancy = events[0].details["discrepancies"][0]

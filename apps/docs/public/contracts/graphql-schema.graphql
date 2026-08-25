@@ -34,13 +34,76 @@ type Account {
   updateTime: DateTime!
 }
 
+"""账户级两阶段执行控制动作"""
+enum AccountExecutionControlAction {
+  BEGIN_CONTROLLED_WINDOW
+  ENABLE_RISK_INCREASE
+  PAUSE_RISK_INCREASE
+  KILL_SWITCH
+  CLEAR_KILL_SWITCH
+}
+
+"""确认账户级执行控制"""
+input AccountExecutionControlConfirmationInput {
+  challengeId: ID!
+  confirmationToken: String!
+}
+
+"""账户级执行控制确认结果"""
+type AccountExecutionControlConfirmationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  challengeId: ID
+  action: AccountExecutionControlAction
+  operationStatus: String!
+  safety: AccountExecutionSafety
+}
+
+"""账户级执行控制预览"""
+type AccountExecutionControlPreview {
+  challengeId: ID!
+  confirmationToken: String
+  tokenIssued: Boolean!
+  accountId: String!
+  action: AccountExecutionControlAction!
+  stateVersion: Int!
+  snapshotId: String!
+  reason: String!
+  challengeExpiresAt: DateTime!
+  challengeStatus: String!
+  operationStatus: String!
+  safety: AccountExecutionSafety!
+}
+
+"""预览账户级执行控制"""
+input AccountExecutionControlPreviewInput {
+  accountId: String!
+  action: AccountExecutionControlAction!
+  stateVersion: Int!
+  idempotencyKey: String!
+  snapshotId: String! = ""
+  reason: String! = ""
+}
+
+"""账户级执行控制预览结果"""
+type AccountExecutionControlPreviewResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  preview: AccountExecutionControlPreview
+}
+
 """账户级实盘执行能力，不包含具体助手的灰度策略"""
 type AccountExecutionSafety {
   accountId: String!
+  authorizationState: String!
+  stateVersion: Int!
   healthStatus: String!
   executionMode: String!
   canIncreaseRisk: Boolean!
   canReduceRisk: Boolean!
+  canActivateAutomation: Boolean!
   summary: String!
   blockedReasons: [String!]!
   checks: [AccountExecutionSafetyCheck!]!
@@ -51,6 +114,8 @@ type AccountExecutionSafety {
   reconcileStatus: String!
   killSwitch: Boolean!
   executionWindowActive: Boolean!
+  snapshotId: String
+  snapshotHash: String
   snapshotAt: DateTime
   reconciliationAgeSeconds: Float
   queuedCommandCount: Int!
@@ -3430,7 +3495,7 @@ input ManualOrderPreviewInput {
   """调用方生成的业务幂等键"""
   idempotencyKey: String!
 
-  """默认 PAPER；LIVE 额外要求实盘灰度、对账和唯一 Agent 就绪"""
+  """默认 PAPER；LIVE 额外要求账户增仓授权、对账和唯一 Agent 就绪"""
   executionMode: ManualOrderExecutionMode! = PAPER
 
   """LIMIT 必填；BEST 必须为空"""
@@ -3563,6 +3628,12 @@ type Mutation {
 
   """拒绝本次买入意图，不取消整个计划"""
   rejectEntryIntent(planId: ID!, intentId: ID!): EntryPlanMutationResult!
+
+  """预览账户级实盘执行控制并签发一次性确认挑战"""
+  previewAccountExecutionControl(input: AccountExecutionControlPreviewInput!): AccountExecutionControlPreviewResult!
+
+  """消费一次性挑战并应用账户级实盘执行控制"""
+  confirmAccountExecutionControl(input: AccountExecutionControlConfirmationInput!): AccountExecutionControlConfirmationResult!
 
   """预览移动端手动委托并签发一次性确认挑战"""
   previewManualOrder(input: ManualOrderPreviewInput!): ManualOrderPreviewResult!
@@ -3837,17 +3908,11 @@ type Mutation {
   """消费一次性凭据并重新校验门禁后应用做 T 控制"""
   confirmTTradeControl(input: TTradeControlConfirmationInput!): TTradeControlConfirmationResult!
 
-  """基于最新完整快照建立账户实盘窗口"""
-  beginTTradeControlledWindow(accountId: String!, policyVersion: Int!, snapshotId: String!, idempotencyKey: String!): TTradeOperationsMutationResult!
-
   """完成门禁检查并启用 Canary 或开发环境正式 LIVE"""
   activateTTradeLive(accountId: String!, policyVersion: Int!, snapshotId: String!, idempotencyKey: String!, targetStage: TTradeRolloutTarget! = CANARY, confirmation: String! = ""): TTradeOperationsMutationResult!
 
   """停止做 T 新买入，继续保护已有批次"""
   pauseTTradeEntries(accountId: String!, reason: String! = "manual pause"): TTradeOperationsMutationResult!
-
-  """触发做 T 紧急停止并转人工处置"""
-  triggerTTradeKillSwitch(accountId: String!, reason: String!, idempotencyKey: String!): TTradeOperationsMutationResult!
 
   """撤销当前仍可撤的做 T 委托"""
   cancelTTradeOrder(accountId: String!, clientOrderId: String!): TTradeOperationsMutationResult!
@@ -3997,6 +4062,8 @@ type OrderEntryCapabilities {
   executionModes: [ManualOrderExecutionMode!]!
   supportedSides: [ManualOrderSide!]!
   supportedPriceTypes: [ManualOrderPriceType!]!
+  canLiveBuy: Boolean!
+  canLiveSell: Boolean!
   liveReady: Boolean!
   liveBlockedReasons: [String!]!
   warnings: [String!]!
@@ -6733,10 +6800,8 @@ enum TTradeClientTelemetrySurface {
 
 """原生端两阶段做 T 安全控制动作"""
 enum TTradeControlAction {
-  BEGIN_CONTROLLED_WINDOW
   ACTIVATE_CANARY
   ACTIVATE_LIVE
-  KILL_SWITCH
 }
 
 """消费原生端做 T 安全控制确认凭据"""

@@ -3,35 +3,26 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from quantx_domain.clock import to_naive_utc, utcnow
-from sqlalchemy import and_, func, literal, or_, select
-from sqlalchemy.orm import aliased
+from quantx_domain.clock import utcnow
+from sqlalchemy import and_, or_, select
 
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import (
-  AccountTradingRollout,
-  AccountTradingRolloutEvent,
-  AgentDevice,
-  AgentReportInbox,
-  OperationalAlert,
+  AccountExecutionControl,
   PendingTradeOrder,
-  RuntimeComponentHeartbeat,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
   TTradeBatch,
+  TTradeRollout,
+  TTradeRolloutEvent,
 )
-from quantx_infrastructure.services.operational_alert_service import (
-  OperationalAlertService,
-)
-from quantx_infrastructure.services.qmt_launch_guard import (
-  qmt_agent_launch_block_reason,
-  qmt_heartbeat_matches_current_launch,
+from quantx_infrastructure.services.account_execution_safety_service import (
+  AccountExecutionSafetyService,
 )
 from quantx_infrastructure.services.t_trade_rollout_evidence_service import (
   V3_OPERATOR_REVIEW_CONFIRMATION,
@@ -56,7 +47,7 @@ class TTradeOperationsService:
 
   @staticmethod
   def _assert_operation_event_binding(
-    event: AccountTradingRolloutEvent,
+    event: TTradeRolloutEvent,
     *,
     account_id: str,
     operation_id: str,
@@ -118,7 +109,7 @@ class TTradeOperationsService:
     case that remains an ordinary validation failure.
     """
     async with AsyncSessionLocal() as db:
-      event = await db.get(AccountTradingRolloutEvent, operation_id)
+      event = await db.get(TTradeRolloutEvent, operation_id)
       if event is None:
         await db.rollback()
         return False
@@ -138,43 +129,6 @@ class TTradeOperationsService:
       return True
 
   @staticmethod
-  def _normalized_broker_order_status(value: Any) -> str:
-    names = {
-      48: "PENDING",
-      49: "SUBMITTED",
-      50: "SUBMITTED",
-      51: "SUBMITTED",
-      52: "PARTIAL_FILLED",
-      53: "CANCELLED",
-      54: "CANCELLED",
-      55: "PARTIAL_FILLED",
-      56: "FILLED",
-      57: "REJECTED",
-      255: "PENDING",
-    }
-    try:
-      return names[int(value)]
-    except (TypeError, ValueError, KeyError):
-      text = str(value or "").strip().upper()
-      aliases = {
-        "REPORTED": "SUBMITTED",
-        "ACCEPTED": "SUBMITTED",
-        "PARTIALLY_FILLED": "PARTIAL_FILLED",
-        "CANCELED": "CANCELLED",
-      }
-      return aliases.get(text, text or "PENDING")
-
-  @staticmethod
-  def _invalidate_controlled_window(rollout: AccountTradingRollout) -> None:
-    rollout.controlled_window_active = False
-    rollout.controlled_window_snapshot_id = None
-    rollout.controlled_window_snapshot_hash = None
-    rollout.controlled_window_started_at = None
-    rollout.controlled_window_started_by_user_id = None
-    rollout.controlled_window_external_order_ids = []
-    rollout.controlled_window_external_trade_ids = []
-
-  @staticmethod
   def _append_rollout_event(
     db,
     *,
@@ -188,7 +142,7 @@ class TTradeOperationsService:
     details: dict[str, Any] | None = None,
   ) -> None:
     db.add(
-      AccountTradingRolloutEvent(
+      TTradeRolloutEvent(
         event_id=event_id or str(uuid.uuid4()),
         account_id=account_id,
         event_type=event_type,
@@ -218,114 +172,6 @@ class TTradeOperationsService:
         details=details,
       )
       await db.commit()
-
-  async def _latest_full_snapshot(
-    self,
-    db,
-    *,
-    account_id: str,
-    snapshot_id: str,
-  ) -> dict[str, Any]:
-    reports = (
-      (
-        await db.execute(
-          select(AgentReportInbox)
-          .where(
-            AgentReportInbox.message_type == "delta_report",
-            AgentReportInbox.protocol_version == "1.1",
-          )
-          .order_by(AgentReportInbox.received_at.desc())
-          .limit(100)
-        )
-      )
-      .scalars()
-      .all()
-    )
-    for report in reports:
-      payload = dict(report.payload or {})
-      if (
-        bool(payload.get("is_complete"))
-        and str(payload.get("snapshot_id") or "") == snapshot_id
-        and account_id
-        in {str(item.get("account_id") or "") for item in payload.get("accounts") or []}
-      ):
-        return payload
-    raise ValueError("最新权威账户快照原文不可用，请等待 Agent 再次完整上报")
-
-  async def _external_snapshot_activity(
-    self,
-    db,
-    *,
-    account_id: str,
-    payload: dict[str, Any],
-  ) -> dict[str, list[dict[str, str]]]:
-    pending = (
-      (
-        await db.execute(
-          select(PendingTradeOrder).where(PendingTradeOrder.account_id == account_id)
-        )
-      )
-      .scalars()
-      .all()
-    )
-    by_client = {str(item.client_order_id) for item in pending}
-    by_broker = {str(item.broker_order_id) for item in pending if item.broker_order_id}
-    external_orders: list[dict[str, str]] = []
-    for raw in payload.get("orders") or []:
-      item = dict(raw)
-      if str(item.get("account_id") or "") != account_id:
-        continue
-      client_id = str(item.get("client_order_id") or "")
-      broker_id = str(item.get("order_id") or item.get("broker_order_id") or "")
-      if client_id in by_client or broker_id in by_broker:
-        continue
-      business_id = broker_id or client_id
-      if not business_id:
-        raise ValueError("最新快照包含无法建立审计身份的外部委托")
-      external_orders.append(
-        {
-          "business_id": business_id,
-          "status": self._normalized_broker_order_status(
-            item.get("effective_order_status")
-            or item.get("order_status", item.get("status"))
-          ),
-          "raw_status": self._normalized_broker_order_status(
-            item.get("order_status", item.get("status"))
-          ),
-          "status_reason": str(item.get("effective_status_reason") or ""),
-        }
-      )
-    external_trades: list[dict[str, str]] = []
-    for raw in payload.get("trades") or []:
-      item = dict(raw)
-      if str(item.get("account_id") or "") != account_id:
-        continue
-      client_id = str(item.get("client_order_id") or "")
-      broker_id = str(item.get("order_id") or item.get("broker_order_id") or "")
-      if client_id in by_client or broker_id in by_broker:
-        continue
-      business_id = str(
-        item.get("execution_id")
-        or item.get("traded_id")
-        or item.get("trade_id")
-        or broker_id
-        or client_id
-        or ""
-      )
-      if not business_id:
-        raise ValueError("最新快照包含无法建立审计身份的外部成交")
-      external_trades.append({"business_id": business_id, "status": "FILLED"})
-    return {"orders": external_orders, "trades": external_trades}
-
-  @staticmethod
-  def _fresh(heartbeat: RuntimeComponentHeartbeat | None) -> bool:
-    if heartbeat is None:
-      return False
-    updated_at = to_naive_utc(heartbeat.updated_at)
-    return bool(
-      str(heartbeat.status).upper() == "READY"
-      and updated_at >= utcnow() - timedelta(seconds=90)
-    )
 
   @staticmethod
   def _activation_readiness_failures(
@@ -405,516 +251,134 @@ class TTradeOperationsService:
     return summary, bool(checks["V3_OPERATOR_REVIEW_CONFIRMED"].get("passed"))
 
   @classmethod
-  def _agent_fresh(
-    cls,
-    heartbeat: RuntimeComponentHeartbeat | None,
-  ) -> bool:
-    return bool(
-      cls._fresh(heartbeat)
-      and heartbeat is not None
-      and qmt_heartbeat_matches_current_launch(heartbeat.updated_at)
-    )
-
-  @classmethod
-  def _agent_candidate_rank(
-    cls,
-    heartbeat: RuntimeComponentHeartbeat | None,
-  ) -> tuple[bool, datetime]:
-    """Prefer a current READY session over stale registrations."""
-    updated_at = (
-      to_naive_utc(heartbeat.updated_at) if heartbeat is not None else datetime.min
-    )
-    return cls._agent_fresh(heartbeat), updated_at
-
-  async def _readiness_snapshot(self, db, account_id: str):
-    """Load rollout, heartbeats, devices, and counters in one round trip."""
-    anchor = select(literal(account_id).label("account_id")).subquery()
-    engine_heartbeat = aliased(RuntimeComponentHeartbeat)
-    agent_heartbeat = aliased(RuntimeComponentHeartbeat)
-    queued_count = (
-      select(func.count(TradeCommandOutbox.message_id))
-      .where(
-        TradeCommandOutbox.account_id == account_id,
-        TradeCommandOutbox.delivery_status.in_(("QUEUED", "DELIVERED")),
-      )
-      .scalar_subquery()
-    )
-    oldest_queued_at = (
-      select(func.min(TradeCommandOutbox.created_at))
-      .where(
-        TradeCommandOutbox.account_id == account_id,
-        TradeCommandOutbox.delivery_status.in_(("QUEUED", "DELIVERED")),
-      )
-      .scalar_subquery()
-    )
-    dead_letter_count = (
-      select(func.count(OperationalAlert.id))
-      .where(
-        OperationalAlert.status != "RESOLVED",
-        OperationalAlert.code == "AGENT_REPORT_DEAD_LETTER",
-        (
-          (OperationalAlert.account_id == account_id)
-          | (OperationalAlert.account_id.is_(None))
-        ),
-      )
-      .scalar_subquery()
-    )
-    unresolved_critical_alert_count = (
-      select(func.count(OperationalAlert.id))
-      .where(
-        OperationalAlert.status != "RESOLVED",
-        OperationalAlert.severity.in_(("SEV1", "SEV2")),
-        OperationalAlert.code != "AGENT_REPORT_DEAD_LETTER",
-        (
-          (OperationalAlert.account_id == account_id)
-          | (OperationalAlert.account_id.is_(None))
-        ),
-      )
-      .scalar_subquery()
-    )
-    return (
-      await db.execute(
-        select(
-          AccountTradingRollout,
-          engine_heartbeat,
-          AgentDevice,
-          agent_heartbeat,
-          queued_count,
-          oldest_queued_at,
-          dead_letter_count,
-          unresolved_critical_alert_count,
-        )
-        .select_from(anchor)
-        .outerjoin(
-          AccountTradingRollout,
-          AccountTradingRollout.account_id == anchor.c.account_id,
-        )
-        .outerjoin(
-          engine_heartbeat,
-          engine_heartbeat.component == "engine",
-        )
-        .outerjoin(
-          AgentDevice,
-          AgentDevice.revoked_at.is_(None),
-        )
-        .outerjoin(
-          agent_heartbeat,
-          agent_heartbeat.component == literal("qmt-agent:").concat(AgentDevice.id),
-        )
-      )
-    ).all()
-
   async def readiness(self, account_id: str) -> dict[str, Any]:
+    account_safety = await AccountExecutionSafetyService().status(account_id)
     async with AsyncSessionLocal() as db:
-      rows = await self._readiness_snapshot(db, account_id)
-      if not rows:
-        raise RuntimeError("实盘安全状态数据库查询未返回结果")
-      (
-        rollout,
-        engine,
-        _,
-        _,
-        queued_count,
-        oldest_queued_at,
-        dead_letter_count,
-        unresolved_critical_alert_count,
-      ) = rows[0]
-      device = None
-      agent = None
-      live_agent_candidates = []
-      for row in rows:
-        candidate_device = row[2]
-        if candidate_device is None:
-          continue
-        if account_id in list(
-          candidate_device.authorized_account_ids or []
-        ) and "live" in {
-          str(value).lower() for value in list(candidate_device.capabilities or [])
-        }:
-          candidate_agent = row[3]
-          live_agent_candidates.append((candidate_device, candidate_agent))
-          if device is None or self._agent_candidate_rank(
-            candidate_agent
-          ) > self._agent_candidate_rank(agent):
-            device = candidate_device
-            agent = candidate_agent
-      agent_details = dict(agent.details or {}) if agent else {}
-      capabilities = {
-        str(value).lower() for value in list(agent_details.get("capabilities") or [])
-      }
-      reported_agent_mode = next(
-        (value for value in ("live", "paper", "data-only") if value in capabilities),
-        "offline",
-      )
-      reported_protocol_version = str(agent_details.get("protocolVersion") or "")
-      account_reconciliation = dict(agent_details.get("accountReconciliation") or {})
-      reconciliation_summary = dict(account_reconciliation.get(account_id) or {})
-      current_snapshot_id = str(
-        rollout.last_snapshot_id if rollout and rollout.last_snapshot_id else ""
-      )
-      activity_classification_current = bool(
-        current_snapshot_id
-        and str(reconciliation_summary.get("snapshotId") or "") == current_snapshot_id
-      )
-      external_order_count = max(
-        0,
-        int(reconciliation_summary.get("externalOrderCount") or 0),
-      )
-      external_trade_count = max(
-        0,
-        int(reconciliation_summary.get("externalTradeCount") or 0),
-      )
-      controlled_window_active = bool(
-        rollout and getattr(rollout, "controlled_window_active", False)
-      )
-      controlled_window_snapshot_id = str(
-        getattr(rollout, "controlled_window_snapshot_id", None)
-        if rollout and getattr(rollout, "controlled_window_snapshot_id", None)
-        else ""
-      )
-      current_reconciliation_snapshot_id = str(
-        reconciliation_summary.get("snapshotId") or ""
-      )
-      if (
-        controlled_window_active
-        and controlled_window_snapshot_id
-        and current_reconciliation_snapshot_id == controlled_window_snapshot_id
-      ):
-        new_external_order_count = 0
-        new_external_trade_count = 0
-        working_external_order_count = 0
-      else:
-        new_external_order_count = max(
-          0,
-          int(
-            reconciliation_summary.get("newExternalOrderCount", external_order_count)
-            or 0
-          ),
-        )
-        new_external_trade_count = max(
-          0,
-          int(
-            reconciliation_summary.get("newExternalTradeCount", external_trade_count)
-            or 0
-          ),
-        )
-        working_external_order_count = max(
-          0,
-          int(reconciliation_summary.get("workingExternalOrderCount") or 0),
-        )
-      manual_coexistence = bool(
-        reconciliation_summary.get("manualCoexistence")
-        if activity_classification_current
-        else (
-          rollout
-          and not rollout.enabled
-          and str(rollout.stage).upper() in {"SHADOW", "PAUSED"}
-        )
-      )
-      snapshot_at = (
-        to_naive_utc(rollout.last_snapshot_at)
-        if rollout and rollout.last_snapshot_at
-        else None
-      )
-      backup_at = (
-        to_naive_utc(rollout.last_backup_at)
-        if rollout and rollout.last_backup_at
-        else None
-      )
-      now = utcnow()
-      ready_live_agents = [
-        (candidate_device, candidate_agent)
-        for candidate_device, candidate_agent in live_agent_candidates
-        if self._agent_fresh(candidate_agent)
-      ]
-      multiple_ready_live_agents = len(ready_live_agents) > 1
-      if len(ready_live_agents) == 1:
-        device, agent = ready_live_agents[0]
-        agent_details = dict(agent.details or {})
-        capabilities = {
-          str(value).lower() for value in list(agent_details.get("capabilities") or [])
-        }
-        reported_agent_mode = next(
-          (value for value in ("live", "paper", "data-only") if value in capabilities),
-          "offline",
-        )
-        reported_protocol_version = str(agent_details.get("protocolVersion") or "")
-      agent_heartbeat_fresh = bool(
-        agent
-        and to_naive_utc(agent.updated_at) >= now - timedelta(seconds=90)
-        and qmt_heartbeat_matches_current_launch(agent.updated_at)
-      )
-      live_agent_ready = bool(
-        not multiple_ready_live_agents
-        and len(ready_live_agents) == 1
-        and agent_heartbeat_fresh
-        and str(agent.status).upper() == "READY"
-      )
-      if multiple_ready_live_agents:
-        live_agent_blocked_reason = (
-          "同一账户检测到多个就绪 live QMT Agent，必须先恢复唯一会话"
-        )
-      elif device is None:
-        live_agent_blocked_reason = "没有绑定该账户且具备 live 能力的已登记 QMT Agent"
-      elif agent is None:
-        live_agent_blocked_reason = "对应账户的 live Agent 尚未上报心跳"
-      elif not agent_heartbeat_fresh:
-        live_agent_blocked_reason = "对应账户的 live Agent 已离线或心跳超过 90 秒"
-      else:
-        live_agent_blocked_reason = "对应账户的 live Agent 当前未就绪"
-      agent_mode = reported_agent_mode if agent_heartbeat_fresh else "offline"
-      protocol_version = reported_protocol_version if agent_heartbeat_fresh else ""
-      agent_status = str(agent.status) if agent_heartbeat_fresh and agent else "OFFLINE"
-      qmt_launch_reason_code = qmt_agent_launch_block_reason()
-      requested_agent_mode = (
-        os.environ.get("QMT_AGENT_MODE", "").strip().lower() or "unknown"
-      )
-      if qmt_launch_reason_code is not None:
-        # The launcher state is authoritative for this process lifetime. Do
-        # not let a <=90s database heartbeat from the previous Agent process
-        # make live controls look ready after a fail-closed restart.
-        ready_live_agents = []
-        multiple_ready_live_agents = False
-        live_agent_ready = False
-        agent_heartbeat_fresh = False
-        reported_agent_mode = "offline"
-        reported_protocol_version = ""
-        agent_mode = "offline"
-        protocol_version = ""
-        agent_status = "BLOCKED"
-        live_agent_blocked_reason = (
-          f"QMT Agent 本地启动被阻断，实盘能力已关闭（{qmt_launch_reason_code}）"
-        )
-      snapshot_age = (
-        max(0.0, (now - snapshot_at).total_seconds()) if snapshot_at else None
-      )
-      backup_age = max(0.0, (now - backup_at).total_seconds()) if backup_at else None
-      dead_letter_count = int(dead_letter_count or 0)
-      unresolved_critical_alert_count = int(unresolved_critical_alert_count or 0)
-      queue_delay = (
-        max(
-          0.0,
-          (now - to_naive_utc(oldest_queued_at)).total_seconds(),
-        )
-        if oldest_queued_at
-        else 0.0
-      )
-      # V3 promotion evidence is deliberately derived from durable replay,
-      # opportunity, candidate-outcome, and intent facts.  The evaluator
-      # converts absent/corrupt evidence into failed checks, never a 500.
+      rollout = await db.get(TTradeRollout, account_id)
+      account_control = await db.get(AccountExecutionControl, account_id)
       v3_rollout_evidence = await self.rollout_evidence_evaluator.evaluate(
         db,
         account_id=account_id,
         rollout=rollout,
+        account_control=account_control,
       )
-      checks = [
-        (
-          "SERVER_REAL_TRADING_ENABLED",
-          bool(settings.enable_real_trading),
-          "服务端 ENABLE_REAL_TRADING 未启用",
-          "AUTOMATION",
-        ),
-        (
-          "T_TRADE_LIVE_ENABLED",
-          bool(settings.t_trade_live_enabled),
-          "服务端 T_TRADE_LIVE_ENABLED 未启用",
-          "AUTOMATION",
-        ),
-        (
-          "ACCOUNT_ALLOWLISTED",
-          account_id in set(settings.real_trading_account_allowlist or []),
-          "账户不在 REAL_TRADING_ACCOUNT_ALLOWLIST",
-          "AUTOMATION",
-        ),
-        (
-          "ENGINE_READY",
-          self._fresh(engine),
-          "Engine 心跳缺失或已过期",
-          "PREPARATION",
-        ),
-        (
-          "LIVE_AGENT_READY",
-          live_agent_ready,
-          live_agent_blocked_reason,
-          "PREPARATION",
-        ),
-        (
-          "AGENT_MODE_LIVE",
-          reported_agent_mode == "live",
-          "QMT Agent 尚未明确切换到 live 模式",
-          "PREPARATION",
-        ),
-        (
-          "PROTOCOL_1_1",
-          reported_protocol_version == "1.1",
-          "账户观察与真实下单均要求 Agent 协议 1.1",
-          "PREPARATION",
-        ),
-        (
-          "ROLLOUT_CONFIGURED",
-          rollout is not None,
-          "账户尚未创建实盘灰度配置",
-          "PREPARATION",
-        ),
-        (
-          "SNAPSHOT_RECONCILED",
-          bool(rollout and rollout.reconcile_status == "READY"),
-          "资金、持仓、委托和成交快照尚未完成对账",
-          "PREPARATION",
-        ),
-        (
-          "SNAPSHOT_FRESH",
-          snapshot_age is not None and snapshot_age <= 90,
-          "账户完整快照缺失或已超过 90 秒",
-          "PREPARATION",
-        ),
-        (
-          "SNAPSHOT_ACTIVITY_CLASSIFIED",
-          activity_classification_current,
-          "最新完整快照尚未完成手工/外部交易分类",
-          "PREPARATION",
-        ),
-        (
-          "RECENT_BACKUP",
-          backup_age is not None and backup_age < 24 * 60 * 60,
-          "最近成功备份缺失或已超过 24 小时",
-          "AUTOMATION",
-        ),
-        (
-          "NO_CRITICAL_ALERTS",
-          unresolved_critical_alert_count == 0,
-          "存在尚未解决的 Sev-1/Sev-2 运行告警",
-          "PREPARATION",
-        ),
-        (
-          "NO_DEAD_LETTERS",
-          dead_letter_count == 0,
-          "存在尚未被后续权威快照取代的 Agent 报告死信",
-          "PREPARATION",
-        ),
-        (
-          "CONTROLLED_WINDOW_ACTIVE",
-          controlled_window_active,
-          "尚未基于最新完整快照建立账户实盘窗口",
-          "AUTOMATION",
-        ),
-        (
-          "NO_EXTERNAL_BROKER_ACTIVITY",
-          new_external_order_count == 0
-          and new_external_trade_count == 0
-          and working_external_order_count == 0,
-          "账户实盘窗口后出现新的 QMT 手工/外部交易或仍有活动委托",
-          "AUTOMATION",
-        ),
-        (
-          "KILL_SWITCH_CLEAR",
-          bool(rollout and not rollout.kill_switch),
-          "账户 kill switch 已触发",
-          "PREPARATION",
-        ),
-      ]
-      checks.extend(
-        (
-          str(item.get("code") or "V3_EVIDENCE_QUERY_AVAILABLE"),
-          bool(item.get("passed")),
-          str(item.get("message") or "V3 上线证据未通过"),
-          str(item.get("scope") or "AUTOMATION"),
-        )
-        for item in list(v3_rollout_evidence.get("checks") or [])
-      )
-      items = [
-        {
-          "code": code,
-          "passed": passed,
-          "message": "" if passed else message,
-          "scope": scope,
-        }
-        for code, passed, message, scope in checks
-      ]
-      preparation_blocked = [
-        item["message"]
-        for item in items
-        if item["scope"] == "PREPARATION" and not item["passed"]
-      ]
-      blocked = [item["message"] for item in items if not item["passed"]]
-      preparation_ready = not preparation_blocked
-      automation_ready = not blocked
-      status = (
-        "HARD_KILL"
-        if rollout and rollout.kill_switch
-        else (
-          "READY"
-          if automation_ready
-          else "PREPARING"
-          if preparation_ready
-          else "BLOCKED"
-        )
-      )
-      return {
-        "account_id": account_id,
-        # Backward-compatible alias: ``ready`` still means order automation.
-        "ready": automation_ready,
-        "status": status,
-        "preparation_ready": preparation_ready,
-        "automation_ready": automation_ready,
-        "rollout_enabled": bool(rollout and rollout.enabled),
-        "stage": str(rollout.stage if rollout else "SHADOW"),
-        "engine_status": str(engine.status if engine else "OFFLINE"),
-        "agent_status": agent_status,
-        "agent_device_id": str(device.id) if device else None,
-        "ready_live_agent_count": len(ready_live_agents),
-        "agent_mode": agent_mode,
-        "requested_agent_mode": requested_agent_mode,
-        "qmt_launch_state": ("BLOCKED" if qmt_launch_reason_code is not None else ""),
-        "qmt_launch_reason_code": qmt_launch_reason_code or "",
-        "protocol_version": protocol_version,
-        "reconcile_status": str(rollout.reconcile_status if rollout else "UNKNOWN"),
-        "kill_switch": bool(rollout and rollout.kill_switch),
-        "policy_version": int(rollout.policy_version if rollout else 1),
-        "can_approve": bool(
-          rollout
-          and rollout.enabled
-          and rollout.stage in {"CANARY", "LIVE"}
-          and automation_ready
-        ),
-        "can_activate_live": automation_ready,
-        "blocked_reasons": blocked,
-        "preparation_blocked_reasons": preparation_blocked,
-        "checks": items,
-        "v3_rollout_evidence": dict(v3_rollout_evidence.get("summary") or {}),
-        "snapshot_id": rollout.last_snapshot_id if rollout else None,
-        "snapshot_hash": rollout.last_snapshot_hash if rollout else None,
-        "snapshot_at": snapshot_at,
-        "reconciliation_age_seconds": snapshot_age,
-        "queued_command_count": int(queued_count or 0),
-        "queue_delay_seconds": queue_delay,
-        "dead_letter_count": dead_letter_count,
-        "unresolved_critical_alert_count": unresolved_critical_alert_count,
-        "manual_coexistence": manual_coexistence,
-        "external_order_count": external_order_count,
-        "external_trade_count": external_trade_count,
-        "controlled_window_active": controlled_window_active,
-        "controlled_window_snapshot_id": (controlled_window_snapshot_id or None),
-        "controlled_window_started_at": (
-          to_naive_utc(getattr(rollout, "controlled_window_started_at"))
-          if rollout and getattr(rollout, "controlled_window_started_at", None)
-          else None
-        ),
-        "new_external_order_count": new_external_order_count,
-        "new_external_trade_count": new_external_trade_count,
-        "working_external_order_count": working_external_order_count,
-        "journal_integrity": str(agent_details.get("journalIntegrity") or "unknown"),
-        "journal_size_bytes": int(agent_details.get("journalSizeBytes") or 0),
-        "journal_pending_reports": int(agent_details.get("journalPendingReports") or 0),
-        "last_backup_at": backup_at,
-        "checked_at": now,
+    feature_checks = [
+      {
+        "code": "T_TRADE_LIVE_ENABLED",
+        "passed": bool(settings.t_trade_live_enabled),
+        "message": ""
+        if settings.t_trade_live_enabled
+        else "服务端 T_TRADE_LIVE_ENABLED 未启用",
+        "scope": "AUTOMATION",
+      },
+      {
+        "code": "T_TRADE_ROLLOUT_CONFIGURED",
+        "passed": rollout is not None,
+        "message": "" if rollout is not None else "做 T 尚未创建独立灰度配置",
+        "scope": "AUTOMATION",
+      },
+    ]
+    feature_checks.extend(
+      {
+        "code": str(item.get("code") or "V3_EVIDENCE_QUERY_AVAILABLE"),
+        "passed": bool(item.get("passed")),
+        "message": ""
+        if bool(item.get("passed"))
+        else str(item.get("message") or "V3 上线证据未通过"),
+        "scope": str(item.get("scope") or "AUTOMATION"),
       }
+      for item in list(v3_rollout_evidence.get("checks") or [])
+    )
+    account_checks = [dict(item) for item in list(account_safety.get("checks") or [])]
+    checks = account_checks + feature_checks
+    blocked = [
+      str(item.get("message") or item.get("code"))
+      for item in checks
+      if not bool(item.get("passed"))
+    ]
+    feature_ready = not any(not bool(item.get("passed")) for item in feature_checks)
+    account_ready = bool(account_safety.get("can_increase_risk"))
+    automation_ready = account_ready and feature_ready
+    stage = str(rollout.stage if rollout else "SHADOW")
+    feature_enabled = bool(rollout and rollout.enabled and stage in {"CANARY", "LIVE"})
+    status = (
+      "READY"
+      if automation_ready
+      else "PREPARING"
+      if account_safety.get("health_status") == "HEALTHY"
+      else "BLOCKED"
+    )
+    if bool(account_safety.get("kill_switch")):
+      status = "HARD_KILL"
+    return {
+      "account_id": account_id,
+      "ready": automation_ready,
+      "status": status,
+      "preparation_ready": bool(account_safety.get("can_reduce_risk")),
+      "automation_ready": automation_ready,
+      "rollout_enabled": feature_enabled,
+      "stage": stage,
+      "engine_status": account_safety.get("engine_status", "OFFLINE"),
+      "agent_status": account_safety.get("agent_status", "OFFLINE"),
+      "agent_device_id": account_safety.get("agent_device_id"),
+      "agent_mode": account_safety.get("agent_mode", "offline"),
+      "requested_agent_mode": account_safety.get("requested_agent_mode", "unknown"),
+      "qmt_launch_reason_code": account_safety.get("qmt_launch_reason_code", ""),
+      "protocol_version": account_safety.get("protocol_version", ""),
+      "reconcile_status": account_safety.get("reconcile_status", "UNKNOWN"),
+      "kill_switch": bool(account_safety.get("kill_switch")),
+      "policy_version": int(rollout.policy_version if rollout else 1),
+      "can_approve": feature_enabled and automation_ready,
+      "can_activate_live": automation_ready,
+      "blocked_reasons": blocked,
+      "preparation_blocked_reasons": list(account_safety.get("blocked_reasons") or []),
+      "checks": checks,
+      "feature_checks": feature_checks,
+      "account_safety": account_safety,
+      "v3_rollout_evidence": dict(v3_rollout_evidence.get("summary") or {}),
+      "snapshot_id": account_safety.get("snapshot_id"),
+      "snapshot_hash": account_safety.get("snapshot_hash"),
+      "snapshot_at": account_safety.get("snapshot_at"),
+      "reconciliation_age_seconds": account_safety.get("reconciliation_age_seconds"),
+      "queued_command_count": int(account_safety.get("queued_command_count") or 0),
+      "queue_delay_seconds": float(account_safety.get("queue_delay_seconds") or 0),
+      "dead_letter_count": int(account_safety.get("dead_letter_count") or 0),
+      "unresolved_critical_alert_count": int(
+        account_safety.get("unresolved_critical_alert_count") or 0
+      ),
+      "manual_coexistence": bool(account_safety.get("manual_coexistence")),
+      "external_order_count": int(account_safety.get("external_order_count") or 0),
+      "external_trade_count": int(account_safety.get("external_trade_count") or 0),
+      "controlled_window_active": bool(account_safety.get("execution_window_active")),
+      "controlled_window_snapshot_id": account_safety.get(
+        "controlled_window_snapshot_id"
+      ),
+      "controlled_window_started_at": account_safety.get(
+        "controlled_window_started_at"
+      ),
+      "new_external_order_count": int(
+        account_safety.get("new_external_order_count") or 0
+      ),
+      "new_external_trade_count": int(
+        account_safety.get("new_external_trade_count") or 0
+      ),
+      "working_external_order_count": int(
+        account_safety.get("working_external_order_count") or 0
+      ),
+      "journal_integrity": account_safety.get("journal_integrity", "unknown"),
+      "journal_size_bytes": int(account_safety.get("journal_size_bytes") or 0),
+      "journal_pending_reports": int(
+        account_safety.get("journal_pending_reports") or 0
+      ),
+      "last_backup_at": account_safety.get("last_backup_at"),
+      "checked_at": account_safety.get("checked_at") or utcnow(),
+    }
 
-  async def ensure_rollout(self, account_id: str) -> AccountTradingRollout:
+  async def ensure_rollout(self, account_id: str) -> TTradeRollout:
     async with AsyncSessionLocal() as db:
-      rollout = await db.get(AccountTradingRollout, account_id)
+      rollout = await db.get(TTradeRollout, account_id)
       if rollout is None:
-        rollout = AccountTradingRollout(account_id=account_id)
+        rollout = TTradeRollout(account_id=account_id)
         db.add(rollout)
         await db.commit()
         await db.refresh(rollout)
@@ -927,186 +391,11 @@ class TTradeOperationsService:
     ready: bool,
     reason: str = "",
   ) -> None:
-    async with AsyncSessionLocal() as db:
-      rollout = await db.get(
-        AccountTradingRollout,
-        account_id,
-        with_for_update=True,
-      )
-      if rollout is None:
-        rollout = AccountTradingRollout(account_id=account_id)
-        db.add(rollout)
-      rollout.reconcile_status = "READY" if ready else "RECONCILE_REQUIRED"
-      rollout.paused_reason = None if ready else reason[:2000]
-      await db.commit()
-
-  async def begin_controlled_window(
-    self,
-    account_id: str,
-    *,
-    user_id: str,
-    snapshot_id: str,
-    expected_policy_version: int | None = None,
-    operation_id: str | None = None,
-  ) -> dict[str, Any]:
-    await self.ensure_rollout(account_id)
-    if expected_policy_version is not None and expected_policy_version < 1:
-      raise ValueError("确认的自动退出策略版本无效")
-    # A completed operation is authoritative even when readiness has since
-    # changed.  Keep this marker lookup in its own short transaction: the
-    # readiness query below uses another session and must never run while a
-    # rollout row lock is held.
-    if operation_id:
-      replay = False
-      async with AsyncSessionLocal() as db:
-        applied = await db.get(AccountTradingRolloutEvent, operation_id)
-        if applied is not None:
-          self._assert_operation_event_binding(
-            applied,
-            account_id=account_id,
-            operation_id=operation_id,
-            event_types={"CONTROLLED_WINDOW_STARTED"},
-            actor_user_id=user_id,
-            snapshot_id=snapshot_id,
-            policy_version=expected_policy_version,
-          )
-          replay = True
-        await db.rollback()
-      if replay:
-        return await self.readiness(account_id)
-
-    readiness = await self.readiness(account_id)
-    required_codes = {
-      "ENGINE_READY",
-      "LIVE_AGENT_READY",
-      "AGENT_MODE_LIVE",
-      "PROTOCOL_1_1",
-      "SNAPSHOT_RECONCILED",
-      "SNAPSHOT_FRESH",
-      "SNAPSHOT_ACTIVITY_CLASSIFIED",
-      "KILL_SWITCH_CLEAR",
-    }
-    failures = [
-      item["message"]
-      for item in readiness["checks"]
-      if item["code"] in required_codes and not item["passed"]
-    ]
-    if failures:
-      raise ValueError("；".join(failures))
-    if str(readiness.get("snapshot_id") or "") != snapshot_id:
-      raise ValueError("完整快照已经更新，请刷新页面后重新确认账户实盘窗口")
-    bound_policy_version = expected_policy_version
-    if bound_policy_version is None:
-      bound_policy_version = int(readiness.get("policy_version") or 0)
-    if (
-      bound_policy_version < 1
-      or int(readiness.get("policy_version") or 0) != bound_policy_version
-    ):
-      raise ValueError("确认的自动退出策略版本已过期")
-
-    # C: serialize the state transition and repeat the marker lookup after
-    # acquiring the row lock.  A concurrent first request may have committed
-    # between A and C; that request wins and this one becomes a replay.
-    replay = False
-    async with AsyncSessionLocal() as db:
-      rollout = await db.get(
-        AccountTradingRollout,
-        account_id,
-        with_for_update=True,
-      )
-      if rollout is None:
-        raise ValueError("账户灰度配置不存在")
-      if operation_id:
-        applied = await db.get(AccountTradingRolloutEvent, operation_id)
-        if applied is not None:
-          self._assert_operation_event_binding(
-            applied,
-            account_id=account_id,
-            operation_id=operation_id,
-            event_types={"CONTROLLED_WINDOW_STARTED"},
-            actor_user_id=user_id,
-            snapshot_id=snapshot_id,
-            policy_version=expected_policy_version,
-          )
-          replay = True
-
-      if replay:
-        await db.rollback()
-      else:
-        # Re-check all rollout fields that can change while readiness was
-        # being read.  The captured readiness remains valid only if the
-        # locked row still describes the same account snapshot and policy.
-        if str(rollout.last_snapshot_id or "") != snapshot_id:
-          raise ValueError("完整快照已经更新，请刷新页面后重新确认账户实盘窗口")
-        if str(readiness.get("snapshot_hash") or "") != str(
-          getattr(rollout, "last_snapshot_hash", None) or ""
-        ):
-          raise ValueError("完整快照已经更新，请刷新页面后重新确认账户实盘窗口")
-        if int(rollout.policy_version or 0) != bound_policy_version:
-          raise ValueError("确认的自动退出策略版本已过期")
-        if str(rollout.stage).upper() not in {"SHADOW", "PAUSED"}:
-          raise ValueError("只能在 SHADOW 或 PAUSED 阶段建立账户实盘窗口")
-        if rollout.enabled:
-          raise ValueError("自动执行已启用，必须先暂停后再建立账户实盘窗口")
-        if rollout.kill_switch:
-          raise ValueError("账户 kill switch 已触发")
-        if str(rollout.reconcile_status).upper() != "READY":
-          raise ValueError("资金、持仓、委托和成交快照尚未完成对账")
-        payload = await self._latest_full_snapshot(
-          db,
-          account_id=account_id,
-          snapshot_id=snapshot_id,
-        )
-        activity = await self._external_snapshot_activity(
-          db,
-          account_id=account_id,
-          payload=payload,
-        )
-        active_orders = [
-          item
-          for item in activity["orders"]
-          if item["status"] in self.ACTIVE_BROKER_ORDER_STATUSES
-        ]
-        if active_orders:
-          raise ValueError(
-            f"当前仍有 {len(active_orders)} 笔 QMT 手工委托可能成交，请先在 MiniQMT 撤单"
-          )
-        previous_stage = str(rollout.stage)
-        rollout.controlled_window_active = True
-        rollout.controlled_window_snapshot_id = snapshot_id
-        rollout.controlled_window_snapshot_hash = (
-          str(readiness.get("snapshot_hash") or "") or None
-        )
-        rollout.controlled_window_started_at = utcnow()
-        rollout.controlled_window_started_by_user_id = user_id
-        rollout.controlled_window_external_order_ids = sorted(
-          {item["business_id"] for item in activity["orders"]}
-        )
-        rollout.controlled_window_external_trade_ids = sorted(
-          {item["business_id"] for item in activity["trades"]}
-        )
-        if previous_stage == "PAUSED" and not rollout.kill_switch:
-          rollout.stage = "SHADOW"
-          rollout.enabled = False
-          rollout.paused_reason = None
-        self._append_rollout_event(
-          db,
-          event_id=operation_id,
-          account_id=account_id,
-          event_type="CONTROLLED_WINDOW_STARTED",
-          actor_user_id=user_id,
-          previous_stage=previous_stage,
-          next_stage=str(rollout.stage),
-          snapshot_id=snapshot_id,
-          details={
-            **({"operationId": operation_id} if operation_id else {}),
-            "policyVersion": bound_policy_version,
-            "acknowledgedExternalOrderCount": len(activity["orders"]),
-            "acknowledgedExternalTradeCount": len(activity["trades"]),
-          },
-        )
-        await db.commit()
-    return await self.readiness(account_id)
+    await AccountExecutionSafetyService().mark_reconciled(
+      account_id,
+      ready=ready,
+      reason=reason,
+    )
 
   async def activate_rollout(
     self,
@@ -1132,7 +421,7 @@ class TTradeOperationsService:
     if operation_id:
       replay = False
       async with AsyncSessionLocal() as db:
-        applied = await db.get(AccountTradingRolloutEvent, operation_id)
+        applied = await db.get(TTradeRolloutEvent, operation_id)
         if applied is not None:
           self._assert_operation_event_binding(
             applied,
@@ -1177,15 +466,20 @@ class TTradeOperationsService:
     # recheck the marker to close the A/B -> C race.
     replay = False
     async with AsyncSessionLocal() as db:
+      account_control = await db.get(
+        AccountExecutionControl,
+        account_id,
+        with_for_update=True,
+      )
       rollout = await db.get(
-        AccountTradingRollout,
+        TTradeRollout,
         account_id,
         with_for_update=True,
       )
       if rollout is None:
-        raise ValueError("账户灰度配置不存在")
+        raise ValueError("做 T 助手灰度配置不存在")
       if operation_id:
-        applied = await db.get(AccountTradingRolloutEvent, operation_id)
+        applied = await db.get(TTradeRolloutEvent, operation_id)
         if applied is not None:
           self._assert_operation_event_binding(
             applied,
@@ -1216,16 +510,16 @@ class TTradeOperationsService:
             raise ValueError(f"正式 LIVE 需要精确确认 LIVE:{account_id}")
           if not readiness.get("controlled_window_active"):
             raise ValueError("正式 LIVE 需要先建立账户实盘窗口")
-        if rollout.kill_switch:
-          raise ValueError("账户 kill switch 已触发")
-        if str(rollout.reconcile_status).upper() != "READY":
-          raise ValueError("资金、持仓、委托和成交快照尚未完成对账")
-        if not rollout.controlled_window_active:
-          raise ValueError("实盘启用需要先建立账户实盘窗口")
-        if str(rollout.last_snapshot_id or "") != str(bound_snapshot_id):
+        if account_control is None:
+          raise ValueError("账户执行控制配置不存在")
+        if str(account_control.authorization_state).upper() != "ENABLED":
+          raise ValueError("账户新增风险授权未启用")
+        if not account_control.controlled_window_active:
+          raise ValueError("账户实盘窗口尚未建立")
+        if str(account_control.last_snapshot_id or "") != str(bound_snapshot_id):
           raise ValueError("完整快照已经更新，请刷新后重新检查实盘门禁")
         if str(readiness.get("snapshot_hash") or "") != str(
-          getattr(rollout, "last_snapshot_hash", None) or ""
+          account_control.last_snapshot_hash or ""
         ):
           raise ValueError("完整快照已经更新，请刷新后重新检查实盘门禁")
         if acknowledged_policy_version != rollout.policy_version:
@@ -1239,6 +533,7 @@ class TTradeOperationsService:
           db,
           account_id=account_id,
           rollout=rollout,
+          account_control=account_control,
           bypass_cache=True,
         )
         locked_v3_summary, review_already_confirmed = (
@@ -1266,7 +561,6 @@ class TTradeOperationsService:
         )
         rollout.stage = next_stage
         rollout.enabled = True
-        rollout.kill_switch = False
         rollout.acknowledged_policy_version = acknowledged_policy_version
         rollout.activated_by_user_id = user_id
         rollout.activated_at = utcnow()
@@ -1325,7 +619,7 @@ class TTradeOperationsService:
     await self.ensure_rollout(account_id)
     async with AsyncSessionLocal() as db:
       rollout = await db.get(
-        AccountTradingRollout,
+        TTradeRollout,
         account_id,
         with_for_update=True,
       )
@@ -1333,7 +627,6 @@ class TTradeOperationsService:
       rollout.enabled = False
       rollout.stage = "PAUSED"
       rollout.paused_reason = reason[:2000] or "manual pause"
-      self._invalidate_controlled_window(rollout)
       self._append_rollout_event(
         db,
         account_id=account_id,
@@ -1355,52 +648,44 @@ class TTradeOperationsService:
     operation_id: str | None = None,
   ) -> dict[str, Any]:
     await self.ensure_rollout(account_id)
+    normalized_reason = reason[:2000] or "manual T-trade stop"
     async with AsyncSessionLocal() as db:
-      rollout = await db.get(
-        AccountTradingRollout,
-        account_id,
-        with_for_update=True,
-      )
+      rollout = await db.get(TTradeRollout, account_id, with_for_update=True)
       if rollout is None:
-        raise ValueError("账户灰度配置不存在")
+        raise ValueError("做 T 灰度配置不存在")
       if operation_id:
-        applied = await db.get(AccountTradingRolloutEvent, operation_id)
+        applied = await db.get(TTradeRolloutEvent, operation_id)
         if applied is not None:
           details = dict(applied.details or {})
           if (
             str(applied.account_id) != account_id
-            or str(applied.event_type) != "KILL_SWITCHED"
+            or str(applied.event_type) != "T_TRADE_STOPPED"
             or str(details.get("operationId") or "") != operation_id
-            or str(details.get("reason") or "")
-            != (reason[:2000] or "manual kill switch")
+            or str(details.get("reason") or "") != normalized_reason
             or str(applied.actor_user_id or "") != str(user_id or "")
           ):
             raise TTradeOperationIdempotencyError("做 T 控制幂等标识已绑定其他操作")
           await db.rollback()
           return await self.readiness(account_id)
-      was_killed = bool(rollout.kill_switch)
       previous_stage = str(rollout.stage)
-      kill_event_id = operation_id or str(uuid.uuid4())
-      now = utcnow()
+      stop_event_id = operation_id or str(uuid.uuid4())
       rollout.enabled = False
-      rollout.kill_switch = True
-      rollout.stage = "KILL_SWITCHED"
-      rollout.paused_reason = reason[:2000] or "manual kill switch"
-      self._invalidate_controlled_window(rollout)
+      rollout.stage = "PAUSED"
+      rollout.paused_reason = normalized_reason
       self._append_rollout_event(
         db,
         event_id=operation_id,
         account_id=account_id,
-        event_type="KILL_SWITCHED",
+        event_type="T_TRADE_STOPPED",
         actor_user_id=user_id,
         previous_stage=previous_stage,
-        next_stage="KILL_SWITCHED",
+        next_stage="PAUSED",
         details={
           **({"operationId": operation_id} if operation_id else {}),
-          "reason": rollout.paused_reason,
+          "reason": normalized_reason,
         },
       )
-      rows = (
+      batches = (
         (
           await db.execute(
             select(TTradeBatch).where(
@@ -1412,82 +697,59 @@ class TTradeOperationsService:
         .scalars()
         .all()
       )
-      for batch in rows:
-        batch.status = "KILL_SWITCHED"
-        batch.exception_reason = rollout.paused_reason
-      pending_orders = (
-        (
-          await db.execute(
-            select(PendingTradeOrder).where(
-              PendingTradeOrder.account_id == account_id,
-              PendingTradeOrder.status.in_(
-                ("QUEUED", "PENDING", "SUBMITTED", "PARTIAL_FILLED")
-              ),
+      t_client_order_ids = {
+        value
+        for batch in batches
+        for value in (batch.entry_client_order_id, batch.exit_client_order_id)
+        if value
+      }
+      pending_orders = []
+      if t_client_order_ids:
+        pending_orders = (
+          (
+            await db.execute(
+              select(PendingTradeOrder).where(
+                PendingTradeOrder.account_id == account_id,
+                PendingTradeOrder.client_order_id.in_(t_client_order_ids),
+                PendingTradeOrder.status.in_(
+                  ("QUEUED", "PENDING", "SUBMITTED", "PARTIAL_FILLED")
+                ),
+              )
             )
           )
+          .scalars()
+          .all()
         )
-        .scalars()
-        .all()
-      )
       source_commands = (
         (
           await db.execute(
             select(TradeCommandOutbox).where(
-              TradeCommandOutbox.account_id == account_id
+              TradeCommandOutbox.account_id == account_id,
+              TradeCommandOutbox.client_order_id.in_(t_client_order_ids),
             )
           )
         )
         .scalars()
         .all()
+        if t_client_order_ids
+        else []
       )
       command_by_client = {
         row.client_order_id: row
         for row in source_commands
         if row.payload.get("command_kind") == "PLACE_ORDER"
       }
-      device_ids: set[str] = set()
-      for command in source_commands:
-        if command.payload.get("command_kind") != "PLACE_ORDER":
-          continue
-        if command.delivery_status in {"QUEUED", "DELIVERED"}:
+      for command in command_by_client.values():
+        if command.delivery_status == "QUEUED":
           command.delivery_status = "CANCELLED_KILL"
-          command.last_error = "hard_kill_before_broker_confirmation"
-        device_ids.add(str(command.device_id))
-
-      if not was_killed:
-        for device_id in sorted(device_ids):
-          client_order_id = f"emergency:{uuid.uuid4()}"
-          expires_at = now + timedelta(minutes=10)
-          db.add(
-            TradeCommandOutbox(
-              message_id=str(uuid.uuid4()),
-              client_order_id=client_order_id,
-              idempotency_key=hashlib.sha256(
-                (f"hard-kill-stop:{account_id}:{device_id}:{kill_event_id}").encode(
-                  "utf-8"
-                )
-              ).hexdigest(),
-              device_id=device_id,
-              account_id=account_id,
-              payload={
-                "command_kind": "EMERGENCY_STOP",
-                "client_order_id": client_order_id,
-                "account_id": account_id,
-                "reason": rollout.paused_reason,
-                "expires_at": expires_at.isoformat() + "Z",
-              },
-              delivery_status="QUEUED",
-              expires_at=expires_at,
-              attempts=0,
-            )
-          )
-
+          command.last_error = "T-trade stopped before command delivery"
+      now = utcnow()
       cancellation_keys: set[str] = set()
       for pending in pending_orders:
         if not pending.broker_order_id:
           if pending.status in {"QUEUED", "PENDING"}:
-            pending.status = "KILL_SWITCHED"
-            pending.status_reason = "hard kill before broker order id"
+            pending.status = "CANCELLED"
+            pending.status_reason = "T-trade stopped before broker order id"
           continue
         source = command_by_client.get(pending.client_order_id)
         if source is None:
@@ -1503,7 +765,7 @@ class TTradeOperationsService:
             message_id=str(uuid.uuid4()),
             client_order_id=client_order_id,
             idempotency_key=hashlib.sha256(
-              (f"hard-kill-cancel:{account_id}:{cancel_key}:{kill_event_id}").encode(
+              (f"t-trade-stop-cancel:{account_id}:{cancel_key}:{stop_event_id}").encode(
                 "utf-8"
               )
             ).hexdigest(),
@@ -1515,7 +777,7 @@ class TTradeOperationsService:
               "account_id": account_id,
               "execution_mode": pending.execution_mode,
               "broker_order_id": str(pending.broker_order_id),
-              "trace_id": kill_event_id,
+              "trace_id": stop_event_id,
               "expires_at": expires_at.isoformat() + "Z",
             },
             delivery_status="QUEUED",
@@ -1523,20 +785,6 @@ class TTradeOperationsService:
             attempts=0,
           )
         )
-      await OperationalAlertService(db).raise_alert(
-        severity="SEV1",
-        source="API",
-        code="HARD_KILL_ACTIVATED",
-        account_id=account_id,
-        business_id=kill_event_id,
-        message=f"账户 {account_id} 已触发 hard kill",
-        details={
-          "reason": rollout.paused_reason,
-          "cancel_commands": len(cancellation_keys),
-          "device_commands": 0 if was_killed else len(device_ids),
-        },
-        commit=False,
-      )
       await db.commit()
     return await self.readiness(account_id)
 

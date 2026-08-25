@@ -245,27 +245,6 @@ def _ensure_compat_columns(connection):
           "ADD COLUMN protocol_version VARCHAR(16) NOT NULL DEFAULT '1.0'"
         )
       )
-  if "account_trading_rollouts" in tables:
-    rollout_columns = {
-      column["name"]
-      for column in inspector.get_columns("account_trading_rollouts")
-    }
-    rollout_additions = {
-      "last_snapshot_id": "VARCHAR(128)",
-      "last_snapshot_hash": "VARCHAR(64)",
-      "last_snapshot_at": "TIMESTAMP",
-      "last_backup_at": "TIMESTAMP",
-    }
-    for column_name, definition in rollout_additions.items():
-      if column_name not in rollout_columns:
-        connection.execute(
-          text(
-            f"ALTER TABLE account_trading_rollouts "
-            f"ADD COLUMN {column_name} {definition}"
-          )
-        )
-
-
 async def create_tables():
   """创建表"""
   import quantx_infrastructure.models  # noqa: F401  # 确保所有模型注册到 Base.metadata

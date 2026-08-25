@@ -243,12 +243,10 @@ async def _live_readiness_binding(
 
   return {
     "account_updated_at": account.updated_at.isoformat(timespec="microseconds"),
-    "rollout_stage": str(rollout.stage or "").upper(),
-    "rollout_enabled": bool(rollout.enabled),
-    "kill_switch": bool(rollout.kill_switch),
+    "authorization_state": str(rollout.authorization_state or "").upper(),
+    "state_version": int(rollout.state_version or 0),
+    "kill_switch": str(rollout.authorization_state or "").upper() == "KILLED",
     "reconcile_status": str(rollout.reconcile_status or "").upper(),
-    "policy_version": int(rollout.policy_version or 0),
-    "acknowledged_policy_version": int(rollout.acknowledged_policy_version or 0),
     "snapshot_id": str(rollout.last_snapshot_id or ""),
     "snapshot_hash": str(rollout.last_snapshot_hash or ""),
     "snapshot_at": (

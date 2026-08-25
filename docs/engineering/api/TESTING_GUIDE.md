@@ -87,9 +87,9 @@ Invoke-RestMethod http://127.0.0.1:8080/health/components
 1. `ENV=testing`（危险测试）或 `ENV=production`（受控灰度）
 2. `ENABLE_REAL_TRADING=true`
 3. `QMT_REAL_TRADING_ENABLED=true`
-4. `T_TRADE_LIVE_ENABLED=true`（production 必需）
-5. Agent 与服务端账户白名单均包含目标账户
-6. 账户通过灰度、快照、对账、Agent READY 和策略授权门禁
+4. Agent 与服务端账户白名单均包含目标账户
+5. 账户通过独立增仓授权、快照、对账、Agent READY 和策略授权门禁
+6. 仅测试做 T 助手时额外设置 `T_TRADE_LIVE_ENABLED=true` 并通过其功能灰度
 
 production 默认仍拒绝，只有完整门禁通过才允许 Canary/Live。开发 `full`
 启动 live Agent 仅用于账户观察和手工交易共存，账户级自动命令仍由
