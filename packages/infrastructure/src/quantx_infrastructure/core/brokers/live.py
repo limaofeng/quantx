@@ -33,7 +33,7 @@ class LiveBroker(BrokerBase):
     max_order_amount: float = 100000.0,  # 单笔最大金额
     max_position_value: float = 500000.0,  # 单个标的最大持仓
   ):
-    super().__init__(account_id, initial_capital)
+    super().__init__(account_id, float(initial_capital))
 
     # 风控参数
     self.enable_risk_control = enable_risk_control
@@ -297,14 +297,15 @@ class LiveBroker(BrokerBase):
 
       # 获取持仓
       positions = await self.get_position()
+      total_asset = float(account.total_asset or 0.0)
 
       return AccountInfo(
         account_id=account.account_id,
-        total_asset=account.total_asset,
-        cash=account.cash,
-        frozen_cash=account.frozen_cash,
-        market_value=account.market_value,
-        total_pnl=account.total_asset - self.initial_capital,
+        total_asset=total_asset,
+        cash=float(account.cash or 0.0),
+        frozen_cash=float(account.frozen_cash or 0.0),
+        market_value=float(account.market_value or 0.0),
+        total_pnl=total_asset - self.initial_capital,
         daily_pnl=0,  # 需要额外计算
         positions=positions,
         last_update_time=time_utils.now(),

@@ -259,6 +259,28 @@ async def test_outbound_buffer_reserves_ack_capacity_and_deduplicates_work() -> 
 
 
 @pytest.mark.asyncio
+async def test_inbound_buffer_coalesces_report_retries_until_processing_completes() -> None:
+  inbound = agent_api._AgentInboundBuffer()
+  envelope = report_envelope("00000000-0000-4000-8000-000000000005")
+
+  def item() -> agent_api._AgentInboundItem:
+    return agent_api._AgentInboundItem(
+      envelope=envelope,
+      received_at=agent_api.utcnow(),
+      received_monotonic=agent_api.time.monotonic(),
+      frame_bytes=1,
+      dedup_key=envelope.message_id,
+    )
+
+  assert await inbound.put(item())
+  processing = await inbound.get()
+  assert not await inbound.put(item())
+
+  await inbound.complete(processing)
+  assert await inbound.put(item())
+
+
+@pytest.mark.asyncio
 async def test_stale_inbound_message_fails_closed() -> None:
   inbound = agent_api._AgentInboundBuffer()
   outbound = agent_api._AgentOutboundBuffer()

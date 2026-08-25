@@ -171,6 +171,7 @@ class _AgentInboundItem:
   received_at: datetime
   received_monotonic: float
   frame_bytes: int
+  dedup_key: str = ""
 
 
 @dataclass(order=True)
@@ -196,12 +197,15 @@ class _AgentInboundBuffer:
     self._max_bytes = max_bytes
     self._items: deque[_AgentInboundItem] = deque()
     self._retained_bytes = 0
+    self._pending_keys: set[str] = set()
     self._condition = asyncio.Condition()
 
-  async def put(self, item: _AgentInboundItem) -> None:
+  async def put(self, item: _AgentInboundItem) -> bool:
     if item.frame_bytes > self._max_bytes:
       raise _AgentControlPipelineError("inbound_frame_too_large", close_code=1009)
     async with self._condition:
+      if item.dedup_key and item.dedup_key in self._pending_keys:
+        return False
       await self._condition.wait_for(
         lambda: (
           len(self._items) < self._capacity
@@ -210,7 +214,10 @@ class _AgentInboundBuffer:
       )
       self._items.append(item)
       self._retained_bytes += item.frame_bytes
+      if item.dedup_key:
+        self._pending_keys.add(item.dedup_key)
       self._condition.notify_all()
+      return True
 
   async def get(self) -> _AgentInboundItem:
     async with self._condition:
@@ -219,6 +226,13 @@ class _AgentInboundBuffer:
       self._retained_bytes -= item.frame_bytes
       self._condition.notify_all()
       return item
+
+  async def complete(self, item: _AgentInboundItem) -> None:
+    if not item.dedup_key:
+      return
+    async with self._condition:
+      self._pending_keys.discard(item.dedup_key)
+      self._condition.notify_all()
 
   def qsize(self) -> int:
     return len(self._items)
@@ -2042,9 +2056,12 @@ async def _receive_agent_control_messages(
       received_at=received_at,
       received_monotonic=received_monotonic,
       frame_bytes=len(raw.encode("utf-8")),
+      dedup_key=(
+        envelope.message_id if envelope.message_type in REPORT_TYPES else ""
+      ),
     )
     try:
-      await asyncio.wait_for(
+      queued = await asyncio.wait_for(
         inbound.put(item),
         timeout=AGENT_CONTROL_QUEUE_PUT_TIMEOUT_SECONDS,
       )
@@ -2054,6 +2071,11 @@ async def _receive_agent_control_messages(
         reason="inbound_queue_full",
       ).inc()
       raise _AgentControlPipelineError("inbound_queue_full") from exc
+    if not queued:
+      AGENT_CONTROL_EVENTS.labels(
+        event="deduplicate",
+        reason="inbound_report_pending",
+      ).inc()
     _set_agent_control_queue_metrics(device_id, "inbound", inbound)
 
 
@@ -2105,6 +2127,7 @@ async def _process_agent_control_messages(
     )
     if reply is not None:
       await _enqueue_agent_outbound(device_id, outbound, reply)
+    await inbound.complete(item)
 
 
 async def _send_agent_control_messages(
