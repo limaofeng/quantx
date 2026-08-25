@@ -81,8 +81,8 @@ export const accountExecutionGatePresentation = {
     passedDescription: '账户紧急停止当前未触发。',
   },
   ACCOUNT_RISK_INCREASE_AUTHORIZED: {
-    label: '新增风险授权',
-    passedDescription: '账户已授权策略新增风险。',
+    label: '买入权限',
+    passedDescription: 'QuantX 已获准买入或增加仓位。',
   },
 } as const satisfies Record<string, AccountExecutionGatePresentation>;
 

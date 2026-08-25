@@ -94,7 +94,7 @@ async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
     ["account-1"],
   )
 
-  with pytest.raises(AgentUnavailableError, match="禁止新增风险"):
+  with pytest.raises(AgentUnavailableError, match="禁止买入或加仓"):
     await service._require_manual_live_authorization(
       "account-1",
       risk_reducing=False,
@@ -126,7 +126,7 @@ async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
       _ready_control(controlled_window_snapshot_hash="different"),
       "与最新完整快照不一致",
     ),
-    (_ready_control(authorization_state="DISABLED"), "新增风险授权"),
+    (_ready_control(authorization_state="DISABLED"), "买入权限"),
   ],
 )
 async def test_manual_buy_requires_every_rollout_and_snapshot_gate(

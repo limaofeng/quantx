@@ -513,7 +513,7 @@ class TTradeOperationsService:
         if account_control is None:
           raise ValueError("账户执行控制配置不存在")
         if str(account_control.authorization_state).upper() != "ENABLED":
-          raise ValueError("账户新增风险授权未启用")
+          raise ValueError("账户买入权限未启用")
         if not account_control.controlled_window_active:
           raise ValueError("账户实盘窗口尚未建立")
         if str(account_control.last_snapshot_id or "") != str(bound_snapshot_id):

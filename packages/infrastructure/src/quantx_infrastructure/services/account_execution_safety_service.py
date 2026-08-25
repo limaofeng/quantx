@@ -137,11 +137,11 @@ def project_account_execution_safety(readiness: dict[str, Any]) -> dict[str, Any
       else "账户紧急停止已触发；实盘执行已关闭"
     )
   elif can_increase_risk:
-    summary = "账户事实与新增风险门禁均已通过"
+    summary = "账户状态与买入条件均已通过"
   elif can_reduce_risk:
     summary = "账户事实已收敛；当前仅允许减仓"
   elif not observation_failures:
-    summary = "账户观察与对账正常；新增风险授权保持关闭"
+    summary = "账户观察与对账正常；买入权限保持关闭"
   else:
     summary = blocked_reasons[0] if blocked_reasons else "账户安全状态未就绪"
 
@@ -641,7 +641,7 @@ class AccountExecutionSafetyService:
         (
           _AUTHORIZATION_CHECK,
           authorization_state == "ENABLED",
-          "账户新增风险授权未启用",
+          "账户买入权限未启用",
           "INCREASE_RISK",
         ),
       ]

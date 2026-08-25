@@ -147,7 +147,7 @@ class TradeCommandService:
     if not risk_reducing and state == "KILLED":
       raise AgentUnavailableError("账户交易 kill switch 已触发")
     if not risk_reducing and state != "ENABLED":
-      raise AgentUnavailableError("账户新增风险授权未启用")
+      raise AgentUnavailableError("账户买入权限未启用")
     if control.reconcile_status != "READY":
       raise AgentUnavailableError("账户快照或仓位对账未就绪")
 
@@ -185,9 +185,9 @@ class TradeCommandService:
 
     state = str(control.authorization_state or "DISABLED").upper()
     if not risk_reducing and state == "KILLED":
-      raise AgentUnavailableError("账户交易 kill switch 已触发，禁止新增风险")
+      raise AgentUnavailableError("账户交易 kill switch 已触发，禁止买入或加仓")
     if not risk_reducing and state != "ENABLED":
-      raise AgentUnavailableError("账户新增风险授权未启用")
+      raise AgentUnavailableError("账户买入权限未启用")
     if str(control.reconcile_status or "").upper() != "READY":
       raise AgentUnavailableError("账户资金、持仓、委托和成交快照尚未完成对账")
 
@@ -775,7 +775,7 @@ class TradeCommandService:
     if state == "KILLED":
       raise AgentUnavailableError("账户交易 kill switch 已触发，禁止自动买入")
     if state != "ENABLED":
-      raise AgentUnavailableError("账户新增风险授权未启用")
+      raise AgentUnavailableError("账户买入权限未启用")
     if str(control.reconcile_status or "").upper() != "READY":
       raise AgentUnavailableError("账户资金、持仓、委托和成交快照尚未完成对账")
     snapshot_at = (

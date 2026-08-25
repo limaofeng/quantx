@@ -27,6 +27,15 @@ describe('account execution gate presentation', () => {
     });
   });
 
+  it('describes account risk authorization as buy permission', () => {
+    expect(
+      accountExecutionGatePresentation.ACCOUNT_RISK_INCREASE_AUTHORIZED
+    ).toEqual({
+      label: '买入权限',
+      passedDescription: 'QuantX 已获准买入或增加仓位。',
+    });
+  });
+
   it('counts down snapshot freshness from the server check time', () => {
     const now = Date.parse('2026-08-25T12:00:05Z');
 

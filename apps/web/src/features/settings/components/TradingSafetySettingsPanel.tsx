@@ -28,8 +28,8 @@ import {
 
 const actionLabels: Record<AccountExecutionControlAction, string> = {
   [AccountExecutionControlAction.BeginControlledWindow]: '建立账户实盘窗口',
-  [AccountExecutionControlAction.EnableRiskIncrease]: '启用新增风险',
-  [AccountExecutionControlAction.PauseRiskIncrease]: '暂停新增风险',
+  [AccountExecutionControlAction.EnableRiskIncrease]: '允许买入',
+  [AccountExecutionControlAction.PauseRiskIncrease]: '暂停买入权限',
   [AccountExecutionControlAction.KillSwitch]: '账户紧急停止',
   [AccountExecutionControlAction.ClearKillSwitch]: '清除紧急停止',
 };
@@ -306,7 +306,7 @@ export function TradingSafetySettingsPanel() {
                 }
                 className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-40"
               >
-                <CheckCircle2 className="h-4 w-4" /> 启用新增风险
+                <CheckCircle2 className="h-4 w-4" /> 允许买入
               </button>
             )}
           {safety?.authorizationState === 'ENABLED' && (
@@ -318,7 +318,7 @@ export function TradingSafetySettingsPanel() {
               }
               className="inline-flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-xs font-medium text-foreground disabled:opacity-40"
             >
-              <PauseCircle className="h-4 w-4" /> 暂停新增风险
+              <PauseCircle className="h-4 w-4" /> 暂停买入权限
             </button>
           )}
           {safety?.authorizationState !== 'KILLED' ? (
@@ -393,7 +393,7 @@ export function TradingSafetySettingsPanel() {
               账户实盘准入检查
             </h2>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              逐项确认账户是否具备实盘观察、风险控制和新增风险条件。
+              逐项确认账户是否具备实盘观察、风险控制和买入条件。
             </p>
           </div>
           <div className="flex items-center gap-2">

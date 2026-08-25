@@ -229,7 +229,7 @@ def _validate_action(
       )
   elif request.action == AccountExecutionControlAction.ENABLE_RISK_INCREASE:
     if not bool(safety.get("can_activate_automation")):
-      reason = next(iter(safety.get("blocked_reasons") or []), "账户新增风险门禁未就绪")
+      reason = next(iter(safety.get("blocked_reasons") or []), "账户买入条件未就绪")
       raise TradeApprovalChallengeError("ACCOUNT_EXECUTION_NOT_READY", str(reason))
   elif request.action == AccountExecutionControlAction.PAUSE_RISK_INCREASE:
     if state == "KILLED":
