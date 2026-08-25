@@ -8,6 +8,7 @@ import {
   Trash2,
   Wifi,
   WifiOff,
+  Search,
 } from 'lucide-react';
 import {
   useCallback,
@@ -24,6 +25,14 @@ import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useGraphqlWsStatus } from '@/core/graphql/ws-status';
 import type {
   StrategyExecutionLogsQuery as StrategyExecutionLogsQueryData,
@@ -43,6 +52,13 @@ const ROW_HEIGHT = 24;
 const OVERSCAN_ROWS = 12;
 const MIN_LOG_VIEWPORT_HEIGHT = 120;
 const LOG_VIEWPORT_BOTTOM_GAP = 12;
+const LOG_LEVELS: StrategyLogEntry['level'][] = [
+  'DEBUG',
+  'INFO',
+  'SUCCESS',
+  'WARNING',
+  'ERROR',
+];
 
 interface StrategyLogsTabProps {
   /** 策略运行实例ID (用于订阅日志) */
@@ -59,6 +75,8 @@ interface StrategyLogsTabProps {
   backtestVersion?: number | null;
   /** 是否填满父容器，避免页面和终端出现双滚动条 */
   fillAvailable?: boolean;
+  /** 是否显示级别、来源和全文筛选 */
+  showAdvancedFilters?: boolean;
   /** 运行实例状态 (可选,用于更精细的控制) */
   status?:
     | 'RUNNING'
@@ -160,6 +178,7 @@ export default function StrategyLogsTab({
   backtestId,
   backtestVersion,
   fillAvailable = false,
+  showAdvancedFilters = false,
   status,
 }: StrategyLogsTabProps) {
   const client = useClient();
@@ -171,6 +190,11 @@ export default function StrategyLogsTab({
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(350);
   const [autoFollow, setAutoFollow] = useState(true);
+  const [levelFilter, setLevelFilter] = useState<
+    'ALL' | StrategyLogEntry['level']
+  >('ALL');
+  const [sourceFilter, setSourceFilter] = useState('ALL');
+  const [searchQuery, setSearchQuery] = useState('');
   const logContainerRef = useRef<HTMLDivElement>(null);
   const autoFollowRef = useRef(true);
   const pageInfoRef = useRef<LoadedStrategyLogPage | null>(null);
@@ -259,6 +283,9 @@ export default function StrategyLogsTab({
     lastLiveLogKeyRef.current = null;
     previousWsStatusRef.current = 'idle';
     pendingScrollAdjustRef.current = 0;
+    setLevelFilter('ALL');
+    setSourceFilter('ALL');
+    setSearchQuery('');
   }, [runId, resolvedBacktestId, resolvedBacktestVersion]);
 
   useEffect(() => {
@@ -521,21 +548,43 @@ export default function StrategyLogsTab({
     [loadOlderLogs]
   );
 
+  const logSources = useMemo(
+    () => Array.from(new Set(logs.map(log => log.source))).sort(),
+    [logs]
+  );
+  const filteredLogs = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    return logs.filter(log => {
+      if (levelFilter !== 'ALL' && log.level !== levelFilter) return false;
+      if (sourceFilter !== 'ALL' && log.source !== sourceFilter) return false;
+      if (!query) return true;
+      return `${log.timestamp} ${log.level} ${log.source} ${log.message}`
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [levelFilter, logs, searchQuery, sourceFilter]);
+
+  useEffect(() => {
+    const container = logContainerRef.current;
+    if (container) container.scrollTop = 0;
+    setScrollTop(0);
+  }, [levelFilter, searchQuery, sourceFilter]);
+
   const visibleRange = useMemo(() => {
     const start = Math.max(
       0,
       Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN_ROWS
     );
     const end = Math.min(
-      logs.length,
+      filteredLogs.length,
       Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN_ROWS
     );
     return { start, end };
-  }, [logs.length, scrollTop, viewportHeight]);
+  }, [filteredLogs.length, scrollTop, viewportHeight]);
 
   const visibleLogs = useMemo(
-    () => logs.slice(visibleRange.start, visibleRange.end),
-    [logs, visibleRange.end, visibleRange.start]
+    () => filteredLogs.slice(visibleRange.start, visibleRange.end),
+    [filteredLogs, visibleRange.end, visibleRange.start]
   );
 
   const getLevelColor = (level: StrategyLogEntry['level']) => {
@@ -565,13 +614,13 @@ export default function StrategyLogsTab({
   };
 
   const loadedSummary = pageInfo
-    ? `${logs.length}/${Math.max(logs.length, pageInfo.totalLines)} 行 · ${formatBytes(pageInfo.fileSizeBytes)}`
+    ? `${showAdvancedFilters ? `筛选 ${filteredLogs.length} · 已载 ` : ''}${logs.length}/${Math.max(logs.length, pageInfo.totalLines)} 行 · ${formatBytes(pageInfo.fileSizeBytes)}`
     : isFileFetching
       ? '加载中'
       : '未找到日志文件';
 
   const buildLoadedText = () =>
-    logs
+    filteredLogs
       .map(
         l =>
           `${formatTimestamp(l.timestamp)} [${l.level}] [${l.source}] ${l.message}`
@@ -663,6 +712,7 @@ export default function StrategyLogsTab({
 
           <div className="flex items-center gap-2">
             <Button
+              aria-label={isPaused ? '继续实时日志' : '暂停实时日志'}
               variant="ghost"
               size="icon"
               className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
@@ -671,6 +721,7 @@ export default function StrategyLogsTab({
               {isPaused ? <Play size={14} /> : <Pause size={14} />}
             </Button>
             <Button
+              aria-label="复制当前筛选日志"
               variant="ghost"
               size="icon"
               className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
@@ -679,6 +730,7 @@ export default function StrategyLogsTab({
               <Copy size={14} />
             </Button>
             <Button
+              aria-label="下载当前筛选日志"
               variant="ghost"
               size="icon"
               className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
@@ -687,6 +739,7 @@ export default function StrategyLogsTab({
               <Download size={14} />
             </Button>
             <Button
+              aria-label="清空当前已加载日志"
               variant="ghost"
               size="icon"
               className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-rose-400"
@@ -713,6 +766,62 @@ export default function StrategyLogsTab({
           </div>
         </div>
 
+        {showAdvancedFilters && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950 px-4 py-2">
+            <span className="text-[9px] font-bold text-slate-600">级别</span>
+            <button
+              type="button"
+              className={cn(
+                'h-7 border px-2.5 font-mono text-[9px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                levelFilter === 'ALL'
+                  ? 'border-blue-400/30 bg-blue-500/15 text-blue-200'
+                  : 'border-white/10 text-slate-500 hover:text-slate-200'
+              )}
+              onClick={() => setLevelFilter('ALL')}
+            >
+              全部
+            </button>
+            {LOG_LEVELS.map(level => (
+              <button
+                key={level}
+                type="button"
+                className={cn(
+                  'h-7 border px-2 font-mono text-[9px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                  levelFilter === level
+                    ? 'border-blue-400/30 bg-blue-500/15 text-blue-200'
+                    : 'border-white/10 text-slate-500 hover:text-slate-200'
+                )}
+                onClick={() => setLevelFilter(level)}
+              >
+                {level}
+              </button>
+            ))}
+            <Select value={sourceFilter} onValueChange={setSourceFilter}>
+              <SelectTrigger className="h-7 w-40 rounded-none border-white/10 bg-slate-950 font-mono text-[9px] text-slate-300">
+                <SelectValue placeholder="全部来源" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">全部来源</SelectItem>
+                {logSources.map(source => (
+                  <SelectItem key={source} value={source}>
+                    {source}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="relative min-w-48 flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" />
+              <Input
+                aria-label="搜索原始技术日志"
+                value={searchQuery}
+                onChange={event => setSearchQuery(event.target.value)}
+                placeholder="搜索原文、来源或时间"
+                className="h-7 rounded-none border-white/10 bg-slate-950 pl-8 font-mono text-[9px] focus-visible:ring-blue-400/70"
+              />
+            </div>
+          </div>
+        )}
+
         <div
           ref={logContainerRef}
           className={cn(
@@ -726,12 +835,20 @@ export default function StrategyLogsTab({
             <div className="py-12 text-center text-slate-600">
               请选择一个运行中的策略实例
             </div>
+          ) : logs.length === 0 && isFileFetching ? (
+            <div className="py-12 text-center text-slate-600" role="status">
+              正在读取原始技术日志…
+            </div>
           ) : logs.length === 0 && !isFileFetching ? (
             <div className="py-12 text-center text-slate-600">暂无日志记录</div>
+          ) : filteredLogs.length === 0 ? (
+            <div className="py-12 text-center text-slate-600">
+              没有匹配当前筛选条件的日志
+            </div>
           ) : (
             <div
               className="relative min-w-max"
-              style={{ height: `${logs.length * ROW_HEIGHT}px` }}
+              style={{ height: `${filteredLogs.length * ROW_HEIGHT}px` }}
             >
               {isLoadingOlder && (
                 <div className="absolute left-2 top-0 z-10 text-slate-500">

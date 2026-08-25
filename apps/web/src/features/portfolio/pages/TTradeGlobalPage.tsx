@@ -74,6 +74,7 @@ import { useFragment as readFragment } from '@/generated/gql';
 import {
   TTradeReplayPortfolioSource,
   TTradeRolloutTarget,
+  TTradeSignalEvaluationKind,
   TTradeTimeExitMode,
   type TTradeBatch,
   type TTradeBatchEvent,
@@ -117,6 +118,7 @@ import {
   TTradeSourceOrdersQuery,
 } from '../hooks/useTTradeGlobal';
 
+import type { ActivitySignalEvaluation } from './t-trade-global/activity';
 import {
   createRollingDiagnosticRange,
   hasCandidateTraceIdentity,
@@ -155,6 +157,7 @@ import {
   signalPolicyInput,
   type SignalPolicyLike,
 } from './t-trade-global/signalPolicy';
+import { TTradeActivityView } from './t-trade-global/TTradeActivityView';
 import {
   TTradeHealthConsole,
   TTradeLiveBoard,
@@ -196,7 +199,7 @@ const tTradeModes: StudioMode[] = [
   { id: 'SIGNALS', icon: Activity, label: '信号' },
   { id: 'DIAGNOSTICS', icon: BarChart3, label: '诊断' },
   { id: 'POSITIONS', icon: WalletCards, label: '做T仓位' },
-  { id: 'EVENTS', icon: ListChecks, label: '订单事件' },
+  { id: 'EVENTS', icon: ListChecks, label: '运行动态' },
   { id: 'SETTINGS', icon: Settings2, label: '参数' },
 ];
 
@@ -1877,18 +1880,29 @@ export function TTradeGlobalPage() {
   const [batchAfter, setBatchAfter] = React.useState<string | null>(null);
   const [eventAfter, setEventAfter] = React.useState<string | null>(null);
   const [signalAfter, setSignalAfter] = React.useState<string | null>(null);
+  const [activitySignalAfter, setActivitySignalAfter] = React.useState<
+    string | null
+  >(null);
+  const [includeActivityDiagnostics, setIncludeActivityDiagnostics] =
+    React.useState(false);
   const [selectedTrace, setSelectedTrace] =
     React.useState<CandidateTraceSelection | null>(null);
+  const [focusedSignalStockCode, setFocusedSignalStockCode] = React.useState<
+    string | null
+  >(null);
   const selectedTraceForCurrentAccount =
     selectedTrace?.accountId === accountId ? selectedTrace : null;
   React.useEffect(() => {
     setSelectedTrace(null);
+    setFocusedSignalStockCode(null);
   }, [accountId]);
   const [batches, setBatches] = React.useState<TTradeBatch[]>([]);
   const [batchEvents, setBatchEvents] = React.useState<TTradeBatchEvent[]>([]);
   const [signalEvaluations, setSignalEvaluations] = React.useState<
     SignalEvaluationLike[]
   >([]);
+  const [activitySignalEvaluations, setActivitySignalEvaluations] =
+    React.useState<ActivitySignalEvaluation[]>([]);
   const accountBoundSignalEvaluations = signalEvaluations.filter(
     item => item.accountId === accountId
   );
@@ -1904,7 +1918,9 @@ export function TTradeGlobalPage() {
       after: batchAfter,
     },
     pause:
-      !accountId || workspaceMode !== 'REALTIME' || activeMode !== 'POSITIONS',
+      !accountId ||
+      workspaceMode !== 'REALTIME' ||
+      !['POSITIONS', 'EVENTS'].includes(activeMode),
     requestPolicy: 'network-only',
   });
   const [batchEventsResult, refreshBatchEvents] = useQuery({
@@ -1929,6 +1945,27 @@ export function TTradeGlobalPage() {
       !accountId ||
       workspaceMode !== 'REALTIME' ||
       !['MONITOR', 'SIGNALS', 'DIAGNOSTICS'].includes(activeMode),
+    requestPolicy: 'network-only',
+  });
+  const activityDayStart = `${getShanghaiDateKey(new Date())}T00:00:00+08:00`;
+  const [activitySignalsResult, refreshActivitySignals] = useQuery({
+    query: TTradeSignalEvaluationsQuery,
+    variables: {
+      accountId,
+      stockCode: null,
+      eventKinds: includeActivityDiagnostics
+        ? [
+            TTradeSignalEvaluationKind.Material,
+            TTradeSignalEvaluationKind.CoalescedDiagnostic,
+          ]
+        : [TTradeSignalEvaluationKind.Material],
+      startTime: activityDayStart,
+      endTime: null,
+      first: 100,
+      after: activitySignalAfter,
+    },
+    pause:
+      !accountId || workspaceMode !== 'REALTIME' || activeMode !== 'EVENTS',
     requestPolicy: 'network-only',
   });
   const [signalDiagnosticsResult, refreshSignalDiagnostics] = useQuery({
@@ -1967,6 +2004,13 @@ export function TTradeGlobalPage() {
     }
     return page;
   }, [accountId, signalEvaluationsResult.data?.tTradeSignalEvaluations]);
+  const activitySignalsPage = React.useMemo(() => {
+    const page = activitySignalsResult.data?.tTradeSignalEvaluations;
+    if (!page || page.items.some(item => item.accountId !== accountId)) {
+      return undefined;
+    }
+    return page;
+  }, [accountId, activitySignalsResult.data?.tTradeSignalEvaluations]);
   const diagnosticsPayload =
     signalDiagnosticsResult.data?.tTradeSignalDiagnostics;
   const diagnosticsForCurrentAccount =
@@ -2082,9 +2126,11 @@ export function TTradeGlobalPage() {
     setBatchAfter(null);
     setEventAfter(null);
     setSignalAfter(null);
+    setActivitySignalAfter(null);
     setBatches([]);
     setBatchEvents([]);
     setSignalEvaluations([]);
+    setActivitySignalEvaluations([]);
     setDiagnosticRange(createRollingDiagnosticRange());
     signalRefreshTelemetryRef.current = null;
   }, [accountId]);
@@ -2144,6 +2190,33 @@ export function TTradeGlobalPage() {
     signalEvaluationsResult.data?.tTradeSignalEvaluations,
   ]);
 
+  React.useEffect(() => {
+    const page = activitySignalsResult.data?.tTradeSignalEvaluations;
+    if (!page) return;
+    if (page.items.some(item => item.accountId !== accountId)) {
+      setActivitySignalEvaluations([]);
+      return;
+    }
+    const items: ActivitySignalEvaluation[] = page.items.map(item => ({
+      ...item,
+      id: String(item.id),
+      signalSnapshot: readFragment(
+        TTradeSignalSnapshotFieldsFragment,
+        item.signalSnapshot
+      ),
+    }));
+    setActivitySignalEvaluations(previous => {
+      if (!activitySignalAfter) return items;
+      const byId = new Map(previous.map(item => [item.id, item]));
+      for (const item of items) byId.set(item.id, item);
+      return Array.from(byId.values());
+    });
+  }, [
+    accountId,
+    activitySignalAfter,
+    activitySignalsResult.data?.tTradeSignalEvaluations,
+  ]);
+
   const finishSignalRefreshTelemetry = React.useCallback(() => {
     const cycle = signalRefreshTelemetryRef.current;
     if (!cycle || cycle.evaluationsPending || cycle.diagnosticsPending) {
@@ -2196,6 +2269,10 @@ export function TTradeGlobalPage() {
     if (activeMode === 'EVENTS') {
       if (eventAfter) setEventAfter(null);
       else refreshBatchEvents({ requestPolicy: 'network-only' });
+      if (batchAfter) setBatchAfter(null);
+      else refreshBatches({ requestPolicy: 'network-only' });
+      if (activitySignalAfter) setActivitySignalAfter(null);
+      else refreshActivitySignals({ requestPolicy: 'network-only' });
     }
     if (['MONITOR', 'SIGNALS', 'DIAGNOSTICS'].includes(activeMode)) {
       const includeDiagnostics = activeMode === 'DIAGNOSTICS';
@@ -2218,8 +2295,10 @@ export function TTradeGlobalPage() {
     }
   }, [
     activeMode,
+    activitySignalAfter,
     batchAfter,
     eventAfter,
+    refreshActivitySignals,
     refreshBatchEvents,
     refreshBatches,
     refreshCandidateTrace,
@@ -3936,149 +4015,67 @@ export function TTradeGlobalPage() {
   );
 
   const eventsView = (
-    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
-      {batchEventsResult.error && (
-        <div
-          role="alert"
-          className="flex shrink-0 items-start justify-between gap-3 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
-        >
-          <span>订单事件读取失败；仍显示上次成功读取的事件。</span>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="h-6 shrink-0 px-2 text-[9px] text-rose-100"
-            onClick={() =>
-              refreshBatchEvents({ requestPolicy: 'network-only' })
-            }
-          >
-            重试
-          </Button>
-        </div>
+    <TTradeActivityView
+      batchError={batchesResult.error?.message}
+      batches={batches}
+      eventError={batchEventsResult.error?.message}
+      events={batchEvents}
+      evaluations={activitySignalEvaluations}
+      hasMoreEvents={Boolean(
+        batchEventsResult.data?.tTradeBatchEventsPage.pageInfo.hasNextPage
       )}
-      {!batchEventsResult.error &&
-        batchEventsResult.fetching &&
-        batchEvents.length > 0 && (
-          <div
-            role="status"
-            aria-busy="true"
-            className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
-          >
-            <Loader2
-              className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
-              aria-hidden="true"
-            />
-            正在刷新订单事件，暂保留上次结果…
-          </div>
-        )}
-      <div className="shrink-0 border-b border-white/[0.05] px-4 py-3">
-        <h2 className="text-sm font-black text-slate-100">
-          真实委托与成交事件
-        </h2>
-        <p className="mt-1 text-[10px] text-slate-600">
-          仅展示已持久化事件；命令确认不会被当作券商成交。
-        </p>
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
-        <table className="w-full min-w-[900px] text-left text-xs">
-          <thead className="sticky top-0 bg-[#0b1628] text-[10px] font-black uppercase tracking-[0.08em] text-slate-600">
-            <tr>
-              <th className="px-4 py-2.5">时间</th>
-              <th className="px-3 py-2.5">批次</th>
-              <th className="px-3 py-2.5">事件</th>
-              <th className="px-3 py-2.5">应用状态</th>
-              <th className="px-3 py-2.5">Client Order</th>
-              <th className="px-4 py-2.5">Broker Order / 异常</th>
-            </tr>
-          </thead>
-          <tbody>
-            {batchEventsResult.fetching && batchEvents.length === 0 ? (
-              <tr>
-                <td
-                  colSpan={6}
-                  className="px-4 py-12 text-center text-slate-600"
-                  role="status"
-                >
-                  <Loader2
-                    className="mr-2 inline-block h-4 w-4 animate-spin motion-reduce:animate-none"
-                    aria-hidden="true"
-                  />
-                  正在读取订单事件…
-                </td>
-              </tr>
-            ) : batchEvents.length === 0 ? (
-              <tr>
-                <td
-                  colSpan={6}
-                  className="px-4 py-12 text-center text-slate-600"
-                >
-                  尚无持久化做 T 委托或成交事件
-                </td>
-              </tr>
-            ) : (
-              batchEvents.map(event => (
-                <tr
-                  key={event.eventId}
-                  className="border-b border-white/[0.04] hover:bg-white/[0.025]"
-                >
-                  <td className="px-4 py-3 font-mono text-[10px] text-slate-400">
-                    {formatTime(event.createdAt)}
-                  </td>
-                  <td className="px-3 py-3 font-mono text-[10px] text-slate-400">
-                    {event.batchId?.slice(0, 12) || '--'}
-                  </td>
-                  <td className="px-3 py-3 font-black text-slate-200">
-                    {event.eventType === 'TRADE' ? '真实成交' : '委托状态'}
-                  </td>
-                  <td className="px-3 py-3">
-                    <span
-                      className={cn(
-                        'border px-2 py-1 text-[9px] font-black',
-                        event.status === 'APPLIED'
-                          ? 'border-emerald-400/20 text-emerald-200'
-                          : 'border-amber-400/20 text-amber-200'
-                      )}
-                    >
-                      {event.status}
-                    </span>
-                  </td>
-                  <td className="px-3 py-3 font-mono text-[10px] text-slate-500">
-                    {event.clientOrderId}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-[10px] text-slate-500">
-                    {event.brokerOrderId || '--'}
-                    {event.error && (
-                      <div className="mt-1 text-rose-300">{event.error}</div>
-                    )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-      {batchEventsResult.data?.tTradeBatchEventsPage.pageInfo.hasNextPage && (
-        <div className="shrink-0 border-t border-white/[0.05] p-2 text-center">
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={batchEventsResult.fetching}
-            onClick={() =>
-              setEventAfter(
-                batchEventsResult.data?.tTradeBatchEventsPage.pageInfo
-                  .endCursor ?? null
-              )
-            }
-            className="h-8 text-[10px] text-slate-400"
-          >
-            {batchEventsResult.fetching ? '加载中…' : '加载更多事件'}
-          </Button>
-        </div>
-      )}
-    </div>
+      hasMoreSignals={Boolean(activitySignalsPage?.pageInfo.hasNextPage)}
+      includeDiagnostics={includeActivityDiagnostics}
+      instrumentNames={positionNamesByCode}
+      isRunning={Boolean(monitor?.enabled && monitor.strategyRunId)}
+      loading={
+        batchesResult.fetching ||
+        batchEventsResult.fetching ||
+        activitySignalsResult.fetching
+      }
+      loadingMore={
+        Boolean(batchAfter || eventAfter || activitySignalAfter) &&
+        (batchesResult.fetching ||
+          batchEventsResult.fetching ||
+          activitySignalsResult.fetching)
+      }
+      onIncludeDiagnosticsChange={value => {
+        setIncludeActivityDiagnostics(value);
+        setActivitySignalAfter(null);
+        setActivitySignalEvaluations([]);
+      }}
+      onLoadMore={() => {
+        if (
+          batchEventsResult.data?.tTradeBatchEventsPage.pageInfo.hasNextPage
+        ) {
+          setEventAfter(
+            batchEventsResult.data.tTradeBatchEventsPage.pageInfo.endCursor ??
+              null
+          );
+        }
+        if (activitySignalsPage?.pageInfo.hasNextPage) {
+          setActivitySignalAfter(
+            activitySignalsPage.pageInfo.endCursor ?? null
+          );
+        }
+        if (batchesResult.data?.tTradeBatchesPage.pageInfo.hasNextPage) {
+          setBatchAfter(
+            batchesResult.data.tTradeBatchesPage.pageInfo.endCursor ?? null
+          );
+        }
+      }}
+      onRefresh={requestAuthoritativeRefresh}
+      onViewBatch={() => setActiveMode('POSITIONS')}
+      onViewCurrent={stockCode => {
+        setFocusedSignalStockCode(stockCode);
+        setActiveMode('SIGNALS');
+      }}
+      runId={monitor?.strategyRunId}
+      runMode={monitor?.mode}
+      signalError={activitySignalsResult.error?.message}
+      wsStatus={graphqlWsStatus}
+    />
   );
-
   const signalsView = (
     <TTradeSignalsView
       actionLoading={actionLoading}
@@ -4096,6 +4093,7 @@ export function TTradeGlobalPage() {
       dataTrusted={signalSnapshotTrusted}
       evaluations={accountBoundSignalEvaluations}
       evaluationsError={signalEvaluationsResult.error?.message}
+      focusStockCode={focusedSignalStockCode}
       historyByCode={quoteHistoryByCode}
       hasMoreEvaluations={Boolean(signalEvaluationsPage?.pageInfo.hasNextPage)}
       loadingEvaluations={signalEvaluationsResult.fetching}
@@ -4113,6 +4111,7 @@ export function TTradeGlobalPage() {
       onLoadMoreEvaluations={() =>
         setSignalAfter(signalEvaluationsPage?.pageInfo.endCursor ?? null)
       }
+      onFocusHandled={() => setFocusedSignalStockCode(null)}
       onRequestCandidateTrace={setSelectedTrace}
       onReject={(session, snapshot) =>
         void handleSignal(

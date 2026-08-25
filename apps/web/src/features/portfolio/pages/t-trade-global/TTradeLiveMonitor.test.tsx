@@ -1,5 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import * as React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { LiveMarketQuote } from '../../hooks/useRealTimeHoldings';
@@ -258,6 +259,33 @@ describe('TTradeLiveBoard V3 inspector', () => {
       '正在刷新服务端快照'
     );
     expect(screen.getByRole('button', { name: '检查 测试股票' })).toBeInTheDocument();
+  });
+
+  it('opens the requested current-stock inspector from a historical event link', async () => {
+    const onFocusHandled = vi.fn();
+    function FocusHarness() {
+      const [focusStockCode, setFocusStockCode] = React.useState<string | null>(
+        '600000.SH'
+      );
+      return (
+        <TTradeLiveBoard
+          focusStockCode={focusStockCode}
+          loading={false}
+          monitor={monitor}
+          onFocusHandled={() => {
+            onFocusHandled();
+            setFocusStockCode(null);
+          }}
+          quotes={quotes}
+        />
+      );
+    }
+    render(<FocusHarness />);
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent(
+      '600000.SH · V3 服务端信号检查器'
+    );
+    await waitFor(() => expect(onFocusHandled).toHaveBeenCalledOnce());
   });
 
   it('renders server score, preserves a real zero, and returns row focus on Escape', async () => {

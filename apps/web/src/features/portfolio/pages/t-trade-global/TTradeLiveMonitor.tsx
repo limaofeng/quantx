@@ -1300,26 +1300,48 @@ function SnapshotInspector({
 
 export function TTradeLiveBoard({
   evaluations = [],
+  focusStockCode,
   historyByCode = new Map(),
   loading,
   monitor,
+  onFocusHandled,
   onIgnore,
   quotes,
 }: {
   evaluations?: readonly SignalEvaluationLike[];
+  focusStockCode?: string | null;
   historyByCode?: QuoteHistoryByCode;
   loading: boolean;
   monitor?: TTradeMonitorLike;
+  onFocusHandled?: () => void;
   onIgnore?: (stockCode: string, ignored: boolean) => void;
   quotes: ReadonlyMap<string, LiveMarketQuote>;
 }) {
   const [selectedCode, setSelectedCode] = React.useState<string | null>(null);
   const rowButtonRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const lastSelectedCodeRef = React.useRef<string | null>(null);
+  const handledFocusCodeRef = React.useRef<string | null>(null);
   const rows = monitor
     ? buildAttentionRows(monitor.holdings, monitor.sessions, quotes)
     : [];
   const selected = rows.find(row => row.holding.stockCode === selectedCode);
+
+  React.useEffect(() => {
+    if (!focusStockCode) {
+      handledFocusCodeRef.current = null;
+      return;
+    }
+    if (handledFocusCodeRef.current === focusStockCode || !monitor) return;
+    if (
+      !monitor.holdings.some(holding => holding.stockCode === focusStockCode)
+    ) {
+      return;
+    }
+    handledFocusCodeRef.current = focusStockCode;
+    lastSelectedCodeRef.current = focusStockCode;
+    setSelectedCode(focusStockCode);
+    onFocusHandled?.();
+  }, [focusStockCode, monitor, onFocusHandled]);
 
   if (loading && !monitor) {
     return (

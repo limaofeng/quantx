@@ -371,6 +371,7 @@ export function TTradeSignalsView({
   dataTrusted,
   evaluations,
   evaluationsError,
+  focusStockCode,
   historyByCode,
   hasMoreEvaluations,
   loadingEvaluations,
@@ -378,6 +379,7 @@ export function TTradeSignalsView({
   monitorError,
   monitor,
   onApprove,
+  onFocusHandled,
   onLoadMoreEvaluations,
   onRequestCandidateTrace,
   onReject,
@@ -393,6 +395,7 @@ export function TTradeSignalsView({
   dataTrusted: boolean;
   evaluations: readonly SignalEvaluationLike[];
   evaluationsError?: string | null;
+  focusStockCode?: string | null;
   historyByCode?: QuoteHistoryByCode;
   hasMoreEvaluations: boolean;
   loadingEvaluations: boolean;
@@ -400,6 +403,7 @@ export function TTradeSignalsView({
   monitorError?: string | null;
   monitor?: TTradeMonitorLike;
   onApprove: (session: MonitorSession, snapshot: SignalSnapshot) => void;
+  onFocusHandled?: () => void;
   onLoadMoreEvaluations: () => void;
   onRequestCandidateTrace?: (selection: CandidateTraceSelection | null) => void;
   onReject: (session: MonitorSession, snapshot: SignalSnapshot) => void;
@@ -597,9 +601,11 @@ export function TTradeSignalsView({
           </div>
           <TTradeLiveBoard
             evaluations={evaluations}
+            focusStockCode={focusStockCode}
             historyByCode={historyByCode}
             loading={loadingMonitor}
             monitor={monitor}
+            onFocusHandled={onFocusHandled}
             quotes={quotes}
           />
         </section>

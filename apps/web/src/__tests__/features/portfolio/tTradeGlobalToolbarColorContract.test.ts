@@ -62,7 +62,7 @@ describe('TTradeGlobalPage toolbar color contract', () => {
       '信号',
       '诊断',
       '做T仓位',
-      '订单事件',
+      '运行动态',
       '参数',
     ]) {
       expect(source).toContain(`label: '${label}'`);
