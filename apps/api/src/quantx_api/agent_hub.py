@@ -28,6 +28,7 @@ class _Session:
   capabilities: set[str]
   queue: asyncio.Queue[AgentEnvelope]
   lease_id: str
+  revoked: asyncio.Event
 
 
 class AgentConnectionHub:
@@ -88,7 +89,7 @@ class AgentConnectionHub:
       (
         session
         for session in self._sessions.values()
-        if "market-data" in session.capabilities
+        if "market-data" in session.capabilities and not session.revoked.is_set()
       ),
       key=lambda value: value.device_id,
     )
@@ -100,8 +101,17 @@ class AgentConnectionHub:
     capabilities: set[str],
   ) -> asyncio.Queue[AgentEnvelope]:
     queue: asyncio.Queue[AgentEnvelope] = asyncio.Queue()
-    session = _Session(device_id, set(capabilities), queue, str(uuid.uuid4()))
+    session = _Session(
+      device_id,
+      set(capabilities),
+      queue,
+      str(uuid.uuid4()),
+      asyncio.Event(),
+    )
     async with self._lock:
+      previous = self._sessions.get(device_id)
+      if previous is not None:
+        previous.revoked.set()
       self._sessions[device_id] = session
       await self._load_active_controls()
       if self._market_device_id not in self._sessions:
@@ -122,6 +132,46 @@ class AgentConnectionHub:
       await self._publish_market_lease(selected)
     return queue
 
+  async def revoke(self, device_id: str) -> bool:
+    """Wake the registered control-session guard after durable revocation."""
+    async with self._lock:
+      session = self._sessions.get(device_id)
+      if session is None:
+        return False
+      session.revoked.set()
+      if self._market_device_id == device_id:
+        selected = self._select_market_session()
+        self._market_device_id = selected.device_id if selected else None
+        if selected is not None:
+          self._queue_snapshot(selected)
+        await self._publish_market_lease(selected)
+      return True
+
+  async def wait_until_revoked(
+    self,
+    device_id: str,
+    queue: asyncio.Queue[AgentEnvelope],
+    *,
+    timeout_seconds: float,
+  ) -> bool:
+    """Wait without touching PostgreSQL; ``True`` also covers replacement."""
+    async with self._lock:
+      session = self._sessions.get(device_id)
+      if session is None or session.queue is not queue:
+        return True
+      revoked = session.revoked
+    try:
+      await asyncio.wait_for(revoked.wait(), timeout=max(0.0, timeout_seconds))
+    except asyncio.TimeoutError:
+      return False
+    return True
+
+  async def is_connected(self, device_id: str) -> bool:
+    """Return in-process session state without polling PostgreSQL."""
+    async with self._lock:
+      session = self._sessions.get(device_id)
+      return session is not None and not session.revoked.is_set()
+
   async def unregister(
     self,
     device_id: str,
@@ -131,6 +181,7 @@ class AgentConnectionHub:
       current = self._sessions.get(device_id)
       if current is None or current.queue is not queue:
         return
+      current.revoked.set()
       self._sessions.pop(device_id, None)
       if self._market_device_id != device_id:
         return

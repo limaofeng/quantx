@@ -66,6 +66,30 @@ class Settings(BaseSettings):
     default="sqlite:///./quantx.db", description="关系型数据库连接URL"
   )
   database_echo: bool = Field(default=False, description="是否输出SQL日志")
+  database_process_role: str = Field(
+    default="tooling",
+    description="当前进程的数据库连接预算角色",
+  )
+  database_pool_size: Optional[int] = Field(
+    default=None,
+    ge=1,
+    description="覆盖当前进程角色的常驻连接池大小",
+  )
+  database_max_overflow: Optional[int] = Field(
+    default=None,
+    ge=0,
+    description="覆盖当前进程角色的突发连接额度",
+  )
+  database_pool_timeout_seconds: float = Field(
+    default=3.0,
+    gt=0,
+    description="等待数据库连接的最长秒数",
+  )
+  database_pool_recycle_seconds: int = Field(
+    default=1800,
+    ge=60,
+    description="数据库连接回收周期",
+  )
 
   # 时间序列数据库配置（InfluxDB 3.x）
   influxdb_host: str = Field(default="", description="InfluxDB 3.x主机地址")

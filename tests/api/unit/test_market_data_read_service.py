@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from quantx_api import market_data_read_service as module
 from quantx_infrastructure.models.kline import KLine
@@ -345,3 +347,63 @@ async def test_api_latest_price_reads_engine_quote_cache_without_influx(
   monkeypatch.setattr(module.latest_market_quote_cache, "get_ticks", get_ticks)
 
   assert await service.get_latest_price("600000.SH") is tick
+
+
+@pytest.mark.asyncio
+async def test_market_index_snapshots_batch_cache_and_daily_reads_once(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  tick = Tick(
+    stock_code="000001.SH",
+    period="tick",
+    time=datetime(2026, 8, 26, 1, 30, tzinfo=timezone.utc),
+    last_price=3888.0,
+  )
+  cache_calls = []
+
+  async def get_ticks(codes):
+    cache_calls.append(tuple(codes))
+    return [tick]
+
+  class FakeKlineRepository:
+    def __init__(self) -> None:
+      self.calls = []
+
+    def find_daily_batch(self, stock_codes, start, end, *, use_cache):
+      self.calls.append((tuple(stock_codes), start, end, use_cache))
+      return {
+        "000001.SH": pd.DataFrame(
+          [
+            {
+              "stock_code": "000001.SH",
+              "period": "1d",
+              "time": datetime(2026, 8, 25, tzinfo=timezone.utc),
+              "open": 3800.0,
+              "high": 3900.0,
+              "low": 3790.0,
+              "close": 3880.0,
+              "pre_close": 3810.0,
+              "volume": 100.0,
+              "amount": 1_000.0,
+            }
+          ]
+        )
+      }
+
+  repository = FakeKlineRepository()
+  service = module.ApiMarketDataReadService()
+  service.historical = SimpleNamespace(kline_repo=repository)
+  monkeypatch.setattr(module.latest_market_quote_cache, "get_ticks", get_ticks)
+
+  rows = await service.get_market_index_snapshots(
+    ["000001.sh", "399001.SZ", "000001.SH"]
+  )
+
+  assert cache_calls == [("000001.SH", "399001.SZ")]
+  assert len(repository.calls) == 1
+  assert repository.calls[0][0] == ("000001.SH", "399001.SZ")
+  assert repository.calls[0][3] is False
+  assert rows[0][0] == "000001.SH"
+  assert rows[0][1] is tick
+  assert rows[0][2] is not None and rows[0][2].close == 3880.0
+  assert rows[1] == ("399001.SZ", None, None)

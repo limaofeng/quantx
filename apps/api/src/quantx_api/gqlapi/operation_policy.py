@@ -166,6 +166,7 @@ _register(
     "klines",
     "klinesPage",
     "latestMarketQuotes",
+    "marketIndexSnapshots",
     "limitUpLifecycle",
     "limitUpRadar",
     "orderEntryCapabilities",

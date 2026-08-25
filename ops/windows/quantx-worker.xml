@@ -6,6 +6,7 @@
   <arguments>-m prefect worker start --pool {{PREFECT_WORKER_POOL}} --type process</arguments>
   <workingdirectory>{{ROOT}}</workingdirectory>
   <env name="PREFECT_API_URL" value="{{PREFECT_API_URL}}" />
+  <env name="DATABASE_PROCESS_ROLE" value="worker" />
   <env name="PREFECT_WORKER_POOL" value="{{PREFECT_WORKER_POOL}}" />
   <env name="PREFECT_HOME" value="{{RUNTIME}}\prefect" />
   <env name="PYTHONUTF8" value="1" />

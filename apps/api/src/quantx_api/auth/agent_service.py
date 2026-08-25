@@ -49,6 +49,12 @@ class AgentAccessGrant:
 
 
 @dataclass(frozen=True)
+class AgentHandoverCancellation:
+  deleted_enrollment_count: int
+  revoked_device_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AuthenticatedAgentSession:
   device: AgentDevice
   expires_at: object
@@ -185,7 +191,7 @@ class AgentAuthService:
 
     return max(devices, key=key)
 
-  async def cancel_handover(self, *, user_id: str) -> int:
+  async def cancel_handover(self, *, user_id: str) -> AgentHandoverCancellation:
     now = utcnow()
     deleted = await self.db.execute(
       delete(AgentEnrollmentCode).where(
@@ -194,6 +200,7 @@ class AgentAuthService:
       )
     )
     current = await self.current_device(user_id=user_id)
+    revoked_device_ids: list[str] = []
     if current is not None:
       candidates = (
         await self.db.execute(
@@ -206,8 +213,12 @@ class AgentAuthService:
       ).scalars()
       for candidate in candidates:
         candidate.revoked_at = now
+        revoked_device_ids.append(str(candidate.id))
     await self.db.commit()
-    return int(deleted.rowcount or 0)
+    return AgentHandoverCancellation(
+      deleted_enrollment_count=int(deleted.rowcount or 0),
+      revoked_device_ids=tuple(revoked_device_ids),
+    )
 
   async def converge_ready_device(
     self,

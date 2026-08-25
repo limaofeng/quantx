@@ -106,6 +106,24 @@ METRICS_COLLECTION_FAILURES = Counter(
   "Best-effort metric collection failures",
   ["collector"],
 )
+DATABASE_POOL_CONNECTIONS = Gauge(
+  "quantx_database_pool_connections",
+  "Process-local SQLAlchemy pool connections by state",
+  ["role", "state"],
+)
+GRAPHQL_QUERY_ADMISSION_ACTIVE = Gauge(
+  "quantx_graphql_query_admission_active",
+  "GraphQL query requests currently admitted",
+)
+GRAPHQL_QUERY_ADMISSION_WAIT = Histogram(
+  "quantx_graphql_query_admission_wait_seconds",
+  "Time spent waiting for a GraphQL query admission slot",
+)
+GRAPHQL_QUERY_ADMISSION_REJECTIONS = Counter(
+  "quantx_graphql_query_admission_rejections_total",
+  "GraphQL query requests rejected before execution",
+  ["reason"],
+)
 MARKET_STREAM_CONNECTIONS = Gauge(
   "quantx_market_stream_connections",
   "Active dedicated QMT Agent market connections",
@@ -155,6 +173,11 @@ AGENT_CONTROL_EVENTS = Counter(
   "quantx_agent_control_events_total",
   "QMT Agent control pipeline failures and lifecycle events",
   ["event", "reason"],
+)
+AGENT_CONTROL_DATABASE_STATE = Gauge(
+  "quantx_agent_control_database_state",
+  "QMT Agent control-session database health",
+  ["device_id", "measure"],
 )
 T_TRADE_V3_RUNTIME_VALUE = Gauge(
   "quantx_t_trade_v3_runtime_value",
@@ -278,6 +301,19 @@ def _age_seconds(value: datetime | None, now: datetime) -> float:
   if now.tzinfo is not None:
     now = now.astimezone(timezone.utc).replace(tzinfo=None)
   return max(0.0, (now - value).total_seconds())
+
+
+def update_database_pool_metrics() -> None:
+  from quantx_infrastructure.database.relational_connection import (
+    database_pool_snapshot,
+  )
+
+  snapshot = database_pool_snapshot()
+  role = str(snapshot["role"])
+  for state in ("size", "checked_in", "checked_out", "overflow", "maximum"):
+    DATABASE_POOL_CONNECTIONS.labels(role=role, state=state).set(
+      int(snapshot[state])
+    )
 
 
 def _set_latency(phase: str, values: list[float]) -> None:
@@ -639,6 +675,14 @@ async def get_prometheus_metrics() -> Response:
     except Exception as exc:
       METRICS_COLLECTION_FAILURES.labels(collector="system").inc()
       logger.warning("System metric collection degraded: %s", exc.__class__.__name__)
+    try:
+      update_database_pool_metrics()
+    except Exception as exc:
+      METRICS_COLLECTION_FAILURES.labels(collector="database_pool").inc()
+      logger.warning(
+        "Database pool metric collection degraded: %s",
+        exc.__class__.__name__,
+      )
     try:
       await update_operational_metrics()
     except Exception as exc:

@@ -151,6 +151,9 @@ async def test_cancel_handover_invalidates_pending_code(db):
     authorized_account_ids=["account-1"],
   )
 
-  assert await service.cancel_handover(user_id="user-1") == 1
+  cancelled = await service.cancel_handover(user_id="user-1")
+
+  assert cancelled.deleted_enrollment_count == 1
+  assert cancelled.revoked_device_ids == ()
   with pytest.raises(AuthError):
     await service.exchange_enrollment(enrollment.code)

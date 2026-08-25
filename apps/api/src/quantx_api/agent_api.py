@@ -67,7 +67,8 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import market_data_staging as _market_data_staging
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.websockets import WebSocketState
 
 from quantx_api.agent_hub import (
@@ -78,6 +79,7 @@ from quantx_api.auth.agent_service import AgentAuthService
 from quantx_api.auth.errors import AuthError
 from quantx_api.auth.tokens import utcnow
 from quantx_api.monitoring.metrics import (
+  AGENT_CONTROL_DATABASE_STATE,
   AGENT_CONTROL_EVENTS,
   AGENT_CONTROL_QUEUE_DEPTH,
   AGENT_CONTROL_QUEUE_OLDEST_AGE,
@@ -142,6 +144,7 @@ AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS = 5.0
 AGENT_CONTROL_SEND_TIMEOUT_SECONDS = 5.0
 AGENT_CONTROL_POLL_INTERVAL_SECONDS = 1.0
 AGENT_CONTROL_SLOW_STAGE_SECONDS = 1.0
+AGENT_CONTROL_HEARTBEAT_STALE_SECONDS = 90.0
 
 _MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset(
   {"QUEUED", "DELIVERED", "RECEIVING"}
@@ -163,6 +166,50 @@ class _AgentControlPipelineError(RuntimeError):
     super().__init__(reason)
     self.reason = reason
     self.close_code = close_code
+
+
+_TRANSIENT_DATABASE_ERRORS = (SQLAlchemyTimeoutError, DBAPIError)
+
+
+@dataclass
+class _AgentDatabaseState:
+  device_id: str
+  ready: asyncio.Event = field(default_factory=asyncio.Event)
+  last_heartbeat_success_monotonic: float = field(default_factory=time.monotonic)
+  consecutive_failures: int = 0
+
+  def __post_init__(self) -> None:
+    self.ready.set()
+    self._update_metrics()
+
+  def mark_success(self, *, heartbeat: bool = False) -> None:
+    self.ready.set()
+    self.consecutive_failures = 0
+    if heartbeat:
+      self.last_heartbeat_success_monotonic = time.monotonic()
+    self._update_metrics()
+
+  def mark_failure(self) -> None:
+    self.ready.clear()
+    self.consecutive_failures += 1
+    self._update_metrics()
+
+  def heartbeat_age(self) -> float:
+    return max(0.0, time.monotonic() - self.last_heartbeat_success_monotonic)
+
+  def _update_metrics(self) -> None:
+    AGENT_CONTROL_DATABASE_STATE.labels(
+      device_id=self.device_id,
+      measure="ready",
+    ).set(1 if self.ready.is_set() else 0)
+    AGENT_CONTROL_DATABASE_STATE.labels(
+      device_id=self.device_id,
+      measure="consecutive_failures",
+    ).set(self.consecutive_failures)
+    AGENT_CONTROL_DATABASE_STATE.labels(
+      device_id=self.device_id,
+      measure="heartbeat_age_seconds",
+    ).set(self.heartbeat_age())
 
 
 @dataclass(frozen=True)
@@ -563,6 +610,7 @@ async def _authenticate(envelope: AgentEnvelope):
 
 async def _record_heartbeat(device_id: str, payload: dict[str, Any]) -> None:
   now = utcnow()
+  revoked_ids: list[str] = []
   async with AsyncSessionLocal() as db:
     agent = await db.get(AgentDevice, device_id)
     if agent is None or agent.revoked_at is not None:
@@ -650,13 +698,21 @@ async def _record_heartbeat(device_id: str, payload: dict[str, Any]) -> None:
         }
         heartbeat.details = details
     await db.commit()
+  for revoked_device_id in revoked_ids:
+    await agent_connection_hub.revoke(revoked_device_id)
 
 
 async def _ensure_device_active(device_id: str) -> None:
-  async with AsyncSessionLocal() as db:
-    device = await db.get(AgentDevice, device_id)
-    if device is None or device.revoked_at is not None:
-      raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销")
+  """Validate the market Agent through its cross-process Redis lease.
+
+  The whole-market WebSocket is hosted by ``market-gateway`` while the
+  control session lives in the API process, so process-local hub state cannot
+  be used here.  The API publishes and refreshes this short lease from the
+  event-driven control-session lifecycle; this low-frequency read observes
+  revocation without returning to PostgreSQL polling.
+  """
+  if not await agent_connection_hub.is_market_device(device_id):
+    raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销或控制会话已断开")
 
 
 _PRE_EXECUTION_REJECTION_REASONS = frozenset(
@@ -2085,6 +2141,7 @@ async def _process_agent_control_messages(
   protocol_version: str,
   inbound: _AgentInboundBuffer,
   outbound: _AgentOutboundBuffer,
+  database_state: _AgentDatabaseState,
 ) -> None:
   while True:
     item = await inbound.get()
@@ -2101,24 +2158,38 @@ async def _process_agent_control_messages(
         event="backpressure",
         reason="inbound_queue_stale",
       ).inc()
-      raise _AgentControlPipelineError("inbound_queue_stale")
+      logger.warning(
+        "Agent inbound message waited %.3fs; processing retained durable message: device_id=%s message_type=%s",
+        queue_age,
+        device_id,
+        item.envelope.message_type.value,
+      )
     processing_started = time.monotonic()
     try:
-      reply = await asyncio.wait_for(
-        _process_message(
-          device_id,
-          item.envelope,
-          received_at=item.received_at,
-          protocol_version=protocol_version,
-        ),
-        timeout=AGENT_CONTROL_INBOUND_PROCESSING_TIMEOUT_SECONDS,
+      reply = await _process_message(
+        device_id,
+        item.envelope,
+        received_at=item.received_at,
+        protocol_version=protocol_version,
       )
-    except asyncio.TimeoutError as exc:
+    except _TRANSIENT_DATABASE_ERRORS as exc:
+      database_state.mark_failure()
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",
-        reason="inbound_processing",
+        reason="inbound_database",
       ).inc()
-      raise _AgentControlPipelineError("inbound_processing_timeout") from exc
+      logger.warning(
+        "Agent message persistence deferred: device_id=%s message_type=%s error=%s",
+        device_id,
+        item.envelope.message_type.value,
+        exc.__class__.__name__,
+      )
+      await inbound.complete(item)
+      continue
+    else:
+      database_state.mark_success(
+        heartbeat=item.envelope.message_type is AgentMessageType.HEARTBEAT
+      )
     _observe_agent_control_stage(
       stage="inbound_processing",
       envelope=item.envelope,
@@ -2172,20 +2243,23 @@ async def _poll_agent_trade_commands(
   device_id: str,
   protocol_version: str,
   outbound: _AgentOutboundBuffer,
+  database_state: _AgentDatabaseState,
 ) -> None:
   while True:
+    if not database_state.ready.is_set():
+      await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
+      continue
     try:
-      command = await asyncio.wait_for(
-        _next_command(device_id, protocol_version=protocol_version),
-        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
-      )
-    except asyncio.TimeoutError:
+      command = await _next_command(device_id, protocol_version=protocol_version)
+    except _TRANSIENT_DATABASE_ERRORS:
+      database_state.mark_failure()
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",
         reason="trade_command_poll",
       ).inc()
       logger.warning("Agent trade-command poll timed out: device_id=%s", device_id)
     else:
+      database_state.mark_success()
       if command is not None:
         await _enqueue_agent_outbound(
           device_id,
@@ -2201,20 +2275,26 @@ async def _poll_agent_market_requests(
   device_id: str,
   protocol_version: str,
   outbound: _AgentOutboundBuffer,
+  database_state: _AgentDatabaseState,
 ) -> None:
   while True:
+    if not database_state.ready.is_set():
+      await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
+      continue
     try:
-      request = await asyncio.wait_for(
-        _next_market_data_request(device_id, protocol_version=protocol_version),
-        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
+      request = await _next_market_data_request(
+        device_id,
+        protocol_version=protocol_version,
       )
-    except asyncio.TimeoutError:
+    except _TRANSIENT_DATABASE_ERRORS:
+      database_state.mark_failure()
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",
         reason="market_request_poll",
       ).inc()
       logger.warning("Agent market-request poll timed out: device_id=%s", device_id)
     else:
+      database_state.mark_success()
       if request is not None:
         await _enqueue_agent_outbound(
           device_id,
@@ -2245,22 +2325,33 @@ async def _guard_agent_control_session(
   *,
   device_id: str,
   expires_at: datetime,
+  control_queue: asyncio.Queue[AgentEnvelope],
+  database_state: _AgentDatabaseState,
 ) -> None:
   while True:
-    if utcnow() >= expires_at:
+    now = utcnow()
+    if now >= expires_at:
       raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
-    try:
-      await asyncio.wait_for(
-        _ensure_device_active(device_id),
-        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
-      )
-    except asyncio.TimeoutError as exc:
+    heartbeat_age = database_state.heartbeat_age()
+    database_state._update_metrics()
+    if heartbeat_age >= AGENT_CONTROL_HEARTBEAT_STALE_SECONDS:
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",
-        reason="device_validation",
+        reason="heartbeat_persistence_stale",
       ).inc()
-      raise _AgentControlPipelineError("device_validation_timeout") from exc
-    await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
+      raise _AgentControlPipelineError("heartbeat_persistence_stale")
+    timeout_seconds = min(
+      5.0,
+      max(0.0, (expires_at - now).total_seconds()),
+      max(0.0, AGENT_CONTROL_HEARTBEAT_STALE_SECONDS - heartbeat_age),
+    )
+    revoked = await agent_connection_hub.wait_until_revoked(
+      device_id,
+      control_queue,
+      timeout_seconds=timeout_seconds,
+    )
+    if revoked:
+      raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销")
 
 
 async def _refresh_agent_market_lease(
@@ -2293,6 +2384,7 @@ async def _run_agent_control_pipeline(
 ) -> None:
   inbound = _AgentInboundBuffer()
   outbound = _AgentOutboundBuffer()
+  database_state = _AgentDatabaseState(device_id=device_id)
   tasks = {
     asyncio.create_task(
       _receive_agent_control_messages(
@@ -2309,6 +2401,7 @@ async def _run_agent_control_pipeline(
         protocol_version=protocol_version,
         inbound=inbound,
         outbound=outbound,
+        database_state=database_state,
       ),
       name=f"agent-control-processor:{device_id}",
     ),
@@ -2325,6 +2418,7 @@ async def _run_agent_control_pipeline(
         device_id=device_id,
         protocol_version=protocol_version,
         outbound=outbound,
+        database_state=database_state,
       ),
       name=f"agent-command-poller:{device_id}",
     ),
@@ -2333,6 +2427,7 @@ async def _run_agent_control_pipeline(
         device_id=device_id,
         protocol_version=protocol_version,
         outbound=outbound,
+        database_state=database_state,
       ),
       name=f"agent-market-request-poller:{device_id}",
     ),
@@ -2349,6 +2444,8 @@ async def _run_agent_control_pipeline(
       _guard_agent_control_session(
         device_id=device_id,
         expires_at=session_expires_at,
+        control_queue=control_queue,
+        database_state=database_state,
       ),
       name=f"agent-control-guard:{device_id}",
     ),

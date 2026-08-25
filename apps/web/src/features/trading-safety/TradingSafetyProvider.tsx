@@ -23,11 +23,17 @@ export function TradingSafetyProvider({
 
   useEffect(() => {
     if (!accountId) return undefined;
-    const timer = window.setInterval(
-      () => refresh({ requestPolicy: 'network-only' }),
-      15_000
-    );
-    return () => window.clearInterval(timer);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        refresh({ requestPolicy: 'network-only' });
+      }
+    };
+    const timer = window.setInterval(refreshWhenVisible, 15_000);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
   }, [accountId, refresh]);
 
   const safety = data?.accountExecutionSafety;
@@ -48,9 +54,11 @@ export function TradingSafetyProvider({
       canIncreaseRisk: Boolean(safety?.canIncreaseRisk) && !error,
       canReduceRisk: Boolean(safety?.canReduceRisk) && !error,
       blockedReasons,
+      error,
       executionMode: safety?.executionMode || 'OBSERVE_ONLY',
       fetching,
       refreshSafety,
+      safety: safety ?? null,
     }),
     [
       accountId,
@@ -58,9 +66,7 @@ export function TradingSafetyProvider({
       error,
       fetching,
       refreshSafety,
-      safety?.canIncreaseRisk,
-      safety?.canReduceRisk,
-      safety?.executionMode,
+      safety,
     ]
   );
 

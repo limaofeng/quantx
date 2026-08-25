@@ -849,20 +849,33 @@ function Start-ManagedProcess {
     [string]$Name,
     [string]$Executable,
     [string[]]$Arguments,
-    [string]$WorkingDirectory
+    [string]$WorkingDirectory,
+    [AllowEmptyString()][string]$DatabaseProcessRole = ""
   )
 
   Ensure-RuntimeDirectories
   $stdout = Join-Path $LogDirectory "$Name.stdout.log"
   $stderr = Join-Path $LogDirectory "$Name.stderr.log"
-  $process = Start-Process `
-    -FilePath $Executable `
-    -ArgumentList $Arguments `
-    -WorkingDirectory $WorkingDirectory `
-    -RedirectStandardOutput $stdout `
-    -RedirectStandardError $stderr `
-    -WindowStyle Hidden `
-    -PassThru
+  $previousDatabaseProcessRole = $env:DATABASE_PROCESS_ROLE
+  try {
+    if ($DatabaseProcessRole) {
+      $env:DATABASE_PROCESS_ROLE = $DatabaseProcessRole
+    }
+    $process = Start-Process `
+      -FilePath $Executable `
+      -ArgumentList $Arguments `
+      -WorkingDirectory $WorkingDirectory `
+      -RedirectStandardOutput $stdout `
+      -RedirectStandardError $stderr `
+      -WindowStyle Hidden `
+      -PassThru
+  } finally {
+    if ($null -eq $previousDatabaseProcessRole) {
+      Remove-Item Env:DATABASE_PROCESS_ROLE -ErrorAction SilentlyContinue
+    } else {
+      $env:DATABASE_PROCESS_ROLE = $previousDatabaseProcessRole
+    }
+  }
   Start-Sleep -Milliseconds 350
   if ($process.HasExited) {
     $message = if (Test-Path -LiteralPath $stderr) {
@@ -1677,7 +1690,8 @@ function Invoke-Up {
         "--ws-ping-interval", "20",
         "--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds
       ) `
-      -WorkingDirectory $Root
+      -WorkingDirectory $Root `
+      -DatabaseProcessRole "market-gateway"
     Wait-HttpReady `
       -Name "Market Gateway" `
       -Url "http://127.0.0.1:$MarketGatewayPort/health/ready"
@@ -1693,7 +1707,8 @@ function Invoke-Up {
         "--ws-ping-interval", "20",
         "--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds
       ) `
-      -WorkingDirectory $Root
+      -WorkingDirectory $Root `
+      -DatabaseProcessRole "api"
     Wait-HttpReady `
       -Name "API" `
       -Url "http://127.0.0.1:$ApiPort/health/live"
@@ -1702,13 +1717,15 @@ function Invoke-Up {
       -Name "engine" `
       -Executable $python `
       -Arguments @("-m", "quantx_engine.main") `
-      -WorkingDirectory $Root
+      -WorkingDirectory $Root `
+      -DatabaseProcessRole "engine"
 
     Start-ManagedProcess `
       -Name "ai-runtime" `
       -Executable $aiRuntimePython `
       -Arguments @("-m", "quantx_ai_runtime.main") `
-      -WorkingDirectory $Root
+      -WorkingDirectory $Root `
+      -DatabaseProcessRole "ai-runtime"
 
     Start-ManagedProcess `
       -Name "web" `
@@ -1748,7 +1765,8 @@ function Invoke-Up {
           "-m", "prefect", "worker", "start",
           "--pool", $poolName
         ) `
-        -WorkingDirectory $Root
+        -WorkingDirectory $Root `
+        -DatabaseProcessRole "worker"
 
       if ($qmtAgentLaunchAllowed) {
         $workspacePythonPath = $env:PYTHONPATH

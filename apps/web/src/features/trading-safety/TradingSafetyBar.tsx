@@ -10,13 +10,11 @@ import {
   UserRound,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { useQuery } from 'urql';
 
 import { StatusBar } from '@/components/studio-workbench';
 import { useStudioNavigate } from '@/components/studio-workspace';
 import { cn } from '@/utils/cn';
 
-import { AccountExecutionSafetyQuery } from './operations';
 import {
   accountExecutionModeLabel,
   accountHealthLabel,
@@ -64,14 +62,7 @@ export function TradingSafetyBar({
   currentUserLabel: string;
 }) {
   const navigate = useStudioNavigate();
-  const { accountId, blockedReasons } = useTradingSafety();
-  const [{ data, fetching }] = useQuery({
-    query: AccountExecutionSafetyQuery,
-    variables: { accountId },
-    pause: !accountId,
-    requestPolicy: 'cache-only',
-  });
-  const safety = data?.accountExecutionSafety;
+  const { accountId, blockedReasons, fetching, safety } = useTradingSafety();
   const healthStatus = fetching
     ? 'CHECKING'
     : safety?.healthStatus || 'BLOCKED';

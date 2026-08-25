@@ -2262,40 +2262,43 @@ export function TTradeGlobalPage() {
     signalDiagnosticsResult.fetching,
   ]);
 
-  const refreshVisibleData = React.useCallback(() => {
-    refreshMonitor({ requestPolicy: 'network-only' });
-    if (activeMode === 'POSITIONS') {
-      if (batchAfter) setBatchAfter(null);
-      else refreshBatches({ requestPolicy: 'network-only' });
-    }
-    if (activeMode === 'EVENTS') {
-      if (eventAfter) setEventAfter(null);
-      else refreshBatchEvents({ requestPolicy: 'network-only' });
-      if (batchAfter) setBatchAfter(null);
-      else refreshBatches({ requestPolicy: 'network-only' });
-      if (activitySignalAfter) setActivitySignalAfter(null);
-      else refreshActivitySignals({ requestPolicy: 'network-only' });
-    }
-    if (['MONITOR', 'SIGNALS', 'DIAGNOSTICS'].includes(activeMode)) {
-      const includeDiagnostics = activeMode === 'DIAGNOSTICS';
-      signalRefreshTelemetryRef.current = {
-        evaluationsPending: true,
-        evaluationsStarted: signalEvaluationsResult.fetching,
-        diagnosticsPending: includeDiagnostics,
-        diagnosticsStarted:
-          includeDiagnostics && signalDiagnosticsResult.fetching,
-        failed: false,
-      };
-      if (signalAfter) setSignalAfter(null);
-      else refreshSignalEvaluations({ requestPolicy: 'network-only' });
-      if (includeDiagnostics) {
-        refreshSignalDiagnostics({ requestPolicy: 'network-only' });
+  const refreshVisibleData = React.useCallback(
+    (options: { includeMonitor?: boolean } = {}) => {
+      if (options.includeMonitor !== false) {
+        refreshMonitor({ requestPolicy: 'network-only' });
       }
-      if (activeMode === 'SIGNALS' && selectedTraceForCurrentAccount) {
-        refreshCandidateTrace({ requestPolicy: 'network-only' });
+      if (activeMode === 'POSITIONS') {
+        if (batchAfter) setBatchAfter(null);
+        else refreshBatches({ requestPolicy: 'network-only' });
       }
-    }
-  }, [
+      if (activeMode === 'EVENTS') {
+        if (eventAfter) setEventAfter(null);
+        else refreshBatchEvents({ requestPolicy: 'network-only' });
+        if (batchAfter) setBatchAfter(null);
+        else refreshBatches({ requestPolicy: 'network-only' });
+        if (activitySignalAfter) setActivitySignalAfter(null);
+        else refreshActivitySignals({ requestPolicy: 'network-only' });
+      }
+      if (['MONITOR', 'SIGNALS', 'DIAGNOSTICS'].includes(activeMode)) {
+        const includeDiagnostics = activeMode === 'DIAGNOSTICS';
+        signalRefreshTelemetryRef.current = {
+          evaluationsPending: true,
+          evaluationsStarted: signalEvaluationsResult.fetching,
+          diagnosticsPending: includeDiagnostics,
+          diagnosticsStarted:
+            includeDiagnostics && signalDiagnosticsResult.fetching,
+          failed: false,
+        };
+        if (signalAfter) setSignalAfter(null);
+        else refreshSignalEvaluations({ requestPolicy: 'network-only' });
+        if (includeDiagnostics) {
+          refreshSignalDiagnostics({ requestPolicy: 'network-only' });
+        }
+        if (activeMode === 'SIGNALS' && selectedTraceForCurrentAccount) {
+          refreshCandidateTrace({ requestPolicy: 'network-only' });
+        }
+      }
+    }, [
     activeMode,
     activitySignalAfter,
     batchAfter,
@@ -2318,7 +2321,7 @@ export function TTradeGlobalPage() {
     const epoch = signalSnapshotRefreshCoordinator.beginEpoch(accountId);
     setTrustedSignalSnapshotEpoch(null);
     serverTruthRefreshPolicy.noteNetworkRequest(accountId, Date.now());
-    refreshVisibleData();
+    refreshVisibleData({ includeMonitor: false });
     runMonitorEpochRefresh(epoch, accountId);
   }, [
     accountId,

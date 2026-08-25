@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -124,3 +125,58 @@ async def test_market_event_only_publishes_from_assigned_agent(
       "device-1",
       {"kind": "whole", "data": {}},
     )
+
+
+@pytest.mark.asyncio
+async def test_market_stream_revalidation_uses_cross_process_lease(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  checked: list[str] = []
+
+  async def is_market_device(device_id: str) -> bool:
+    checked.append(device_id)
+    return device_id == "device-1"
+
+  async def is_connected(_device_id: str) -> bool:
+    raise AssertionError("market-gateway must not inspect API process state")
+
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "is_market_device",
+    is_market_device,
+  )
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "is_connected",
+    is_connected,
+  )
+
+  await agent_api._ensure_device_active("device-1")
+  with pytest.raises(Exception, match="控制会话已断开"):
+    await agent_api._ensure_device_active("device-2")
+
+  assert checked == ["device-1", "device-2"]
+
+
+@pytest.mark.asyncio
+async def test_hub_revocation_wakes_control_guard_and_fails_over_market_agent(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  fake_redis = FakeRedis()
+
+  async def get_redis():
+    return fake_redis
+
+  monkeypatch.setattr(agent_hub.redis_pubsub, "get_redis", get_redis)
+  hub = agent_hub.AgentConnectionHub()
+  first = await hub.register("device-1", {"market-data"})
+  standby = await hub.register("device-2", {"market-data"})
+
+  waiter = asyncio.create_task(
+    hub.wait_until_revoked("device-1", first, timeout_seconds=1)
+  )
+  assert await hub.revoke("device-1")
+
+  assert await waiter
+  assert await hub.is_market_device("device-2")
+  assert standby.qsize() >= 2

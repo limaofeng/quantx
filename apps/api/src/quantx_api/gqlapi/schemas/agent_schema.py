@@ -19,6 +19,7 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from sqlalchemy import select
 
+from quantx_api.agent_hub import agent_connection_hub
 from quantx_api.auth.agent_service import AgentAuthService
 from quantx_api.auth.tokens import utcnow
 
@@ -355,7 +356,11 @@ class AgentMutation:
   ) -> AgentHandoverMutationResult:
     principal = principal_from_context(info.context)
     async with AsyncSessionLocal() as db:
-      await AgentAuthService(db).cancel_handover(user_id=principal.user_id)
+      cancelled = await AgentAuthService(db).cancel_handover(
+        user_id=principal.user_id
+      )
+    for device_id in cancelled.revoked_device_ids:
+      await agent_connection_hub.revoke(device_id)
     return AgentHandoverMutationResult(
       success=True,
       message="已取消安全交接",
@@ -373,6 +378,8 @@ class AgentMutation:
         device_id=device_id,
         user_id=principal.user_id,
       )
+    if revoked:
+      await agent_connection_hub.revoke(device_id)
     return AgentDeviceMutationResult(
       success=revoked,
       message="设备已撤销" if revoked else "设备不存在",

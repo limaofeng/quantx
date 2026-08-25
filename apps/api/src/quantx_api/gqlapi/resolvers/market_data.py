@@ -20,6 +20,7 @@ from ..types import (
   IntradayWarmCacheStatus,
   KLineData,
   KLinePage,
+  MarketIndexSnapshot,
   PageDirection,
   PageInfo,
   StockQuote,
@@ -37,6 +38,20 @@ class MarketDataResolver:
   async def get_latest_market_quotes(stock_codes: List[str]) -> List[StockQuote]:
     ticks = await latest_market_quote_cache.get_ticks(stock_codes)
     return [StockQuote.from_tick(tick) for tick in ticks]
+
+  @staticmethod
+  async def get_market_index_snapshots(
+    stock_codes: List[str],
+  ) -> List[MarketIndexSnapshot]:
+    rows = await market_data_service.get_market_index_snapshots(stock_codes)
+    return [
+      MarketIndexSnapshot(
+        stock_code=stock_code,
+        quote=StockQuote.from_tick(tick) if tick is not None else None,
+        daily_kline=KLineData.from_kline(kline) if kline is not None else None,
+      )
+      for stock_code, tick, kline in rows
+    ]
 
   @staticmethod
   def _normalize_for_compare(

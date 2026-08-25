@@ -80,6 +80,23 @@ describe('web session store', () => {
     expect(getAccessToken()).toBe('access-2');
   });
 
+  it('uses the browser refresh lock when Web Locks is available', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(grant('locked-access')));
+    const request = vi.fn(
+      async (_name: string, callback: () => Promise<boolean>) => callback()
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('navigator', { locks: { request } });
+
+    await expect(refreshWebSession()).resolves.toBe(true);
+
+    expect(request).toHaveBeenCalledWith(
+      'quantx-web-session-refresh',
+      expect.any(Function)
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('creates a database-backed development session after refresh misses', async () => {
     const fetchMock = vi
       .fn()
@@ -162,5 +179,39 @@ describe('web session store', () => {
 
     await expect(logoutWebSession()).rejects.toThrow('network unavailable');
     expect(getAccessToken()).toBe('access-5');
+  });
+
+  it('keeps a newer cross-tab grant when an older refresh returns 401', async () => {
+    let completeRefresh: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>(resolve => {
+            completeRefresh = resolve;
+          })
+      )
+    );
+
+    const remoteChannel = new window.BroadcastChannel('quantx-web-session');
+    const refreshing = refreshWebSession();
+    remoteChannel.postMessage({
+      type: 'grant',
+      source: 'another-tab',
+      grant: grant('newer-cross-tab-access'),
+    });
+    await vi.waitFor(() =>
+      expect(getAccessToken()).toBe('newer-cross-tab-access')
+    );
+    completeRefresh?.(
+      jsonResponse(
+        { detail: { code: 'UNAUTHENTICATED', message: 'rotated' } },
+        401
+      )
+    );
+
+    await expect(refreshing).resolves.toBe(true);
+    expect(getAccessToken()).toBe('newer-cross-tab-access');
+    remoteChannel.close();
   });
 });

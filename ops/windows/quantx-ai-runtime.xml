@@ -6,6 +6,7 @@
   <arguments>-m quantx_ai_runtime.main</arguments>
   <workingdirectory>{{ROOT}}</workingdirectory>
   <env name="ENV" value="production" />
+  <env name="DATABASE_PROCESS_ROLE" value="ai-runtime" />
   <env name="QUANTX_ROOT" value="{{ROOT}}" />
   <env name="QUANTX_ENV_FILE" value="{{RUNTIME}}\config\.env.production" />
   <env name="PYTHONUTF8" value="1" />

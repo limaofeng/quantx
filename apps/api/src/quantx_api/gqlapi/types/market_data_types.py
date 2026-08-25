@@ -299,6 +299,19 @@ class StockQuote:
     )
 
 
+@strawberry.type(description="市场指数最新行情与日线回退快照")
+class MarketIndexSnapshot:
+  stock_code: str = strawberry.field(description="指数代码")
+  quote: Optional[StockQuote] = strawberry.field(
+    default=None,
+    description="Redis 最新行情快照",
+  )
+  daily_kline: Optional[KLineData] = strawberry.field(
+    default=None,
+    description="最新持久化日线",
+  )
+
+
 @strawberry.type(description="策略状态信息")
 class StrategyStatusInfo:
   strategy_id: int = strawberry.field(description="策略ID")

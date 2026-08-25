@@ -18,6 +18,7 @@ import {
 } from '@/core/auth';
 import { logger } from '@/core/errors/logger';
 import { env } from '@/shared/utils/env';
+import { createClientId } from '@/utils/clientId';
 
 import {
   isNormalWebSocketClose,
@@ -56,6 +57,7 @@ interface RestartableSocket {
 }
 
 let activeSocket: RestartableSocket | null = null;
+const graphqlClientInstanceId = createClientId('graphql');
 
 function createGraphqlWsClient() {
   return createWSClient({
@@ -134,7 +136,14 @@ export const urqlClient = new Client({
   // Strawberry's public GraphQL endpoint is intentionally POST-only.
   // URQL 5 defaults short queries to GET unless this is disabled.
   preferGetMethod: false,
-  fetchOptions: { credentials: 'same-origin' },
+  fetchOptions: () => ({
+    credentials: 'same-origin',
+    headers: {
+      'X-QuantX-Client-Instance': graphqlClientInstanceId,
+      'X-QuantX-Client-Route':
+        typeof window === 'undefined' ? 'server' : window.location.pathname,
+    },
+  }),
   exchanges: [
     cacheExchange,
     authExchange(async utils => ({

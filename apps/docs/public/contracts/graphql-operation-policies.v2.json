@@ -2211,6 +2211,18 @@
         "risk": "READ",
         "stability": "web-internal"
       },
+      "marketIndexSnapshots": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "notificationEventRoute": {
         "audiences": [
           "web",

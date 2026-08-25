@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from quantx_infrastructure.core.data.tick_identity import merge_ticks_losslessly
@@ -157,6 +157,42 @@ class ApiMarketDataReadService:
       return {}
     ticks = await latest_market_quote_cache.get_ticks(stock_codes)
     return {str(tick.stock_code): tick for tick in ticks}
+
+  async def get_market_index_snapshots(
+    self,
+    stock_codes: list[str],
+  ) -> list[tuple[str, Tick | None, KLine | None]]:
+    """Read all dashboard index fallbacks with two backend round trips."""
+    symbols = list(
+      dict.fromkeys(
+        str(code or "").strip().upper() for code in stock_codes if code
+      )
+    )
+    if not symbols:
+      return []
+    end = time_utils.now()
+    start = end - timedelta(days=45)
+    ticks, daily_frames = await asyncio.gather(
+      latest_market_quote_cache.get_ticks(symbols),
+      asyncio.to_thread(
+        self.historical.kline_repo.find_daily_batch,
+        symbols,
+        start,
+        end,
+        use_cache=False,
+      ),
+    )
+    tick_by_symbol = {str(tick.stock_code).upper(): tick for tick in ticks}
+    daily_by_symbol: dict[str, KLine] = {}
+    for symbol, frame in daily_frames.items():
+      if frame.empty:
+        continue
+      latest = frame.sort_values("time").iloc[-1].to_dict()
+      daily_by_symbol[str(symbol).upper()] = _model(KLine, latest)
+    return [
+      (symbol, tick_by_symbol.get(symbol), daily_by_symbol.get(symbol))
+      for symbol in symbols
+    ]
 
   async def get_latest_price(self, stock_code: str) -> Tick | None:
     return (await self.get_latest_prices([stock_code])).get(stock_code)

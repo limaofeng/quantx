@@ -32,6 +32,11 @@ from quantx_api.agent_hub import agent_connection_hub
 from quantx_api.auth.router import auth_router
 from quantx_api.auth.service import AuthService
 from quantx_api.gqlapi import setup_graphql
+from quantx_api.gqlapi.admission import (
+  GRAPHQL_SLOW_REQUEST_SECONDS,
+  graphql_query_admission,
+  graphql_request_identity,
+)
 from quantx_api.monitoring import get_prometheus_metrics
 from quantx_api.monitoring.metrics import REQUEST_COUNT, REQUEST_DURATION
 from quantx_api.runtime_status import component_status, readiness_status
@@ -423,6 +428,44 @@ async def request_id_middleware(request: Request, call_next):
   response = await call_next(request)
   response.headers["X-Request-ID"] = incoming
   return response
+
+
+@app.middleware("http")
+async def graphql_query_admission_middleware(request: Request, call_next):
+  if request.method != "POST" or request.url.path != "/graphql":
+    return await call_next(request)
+  identity = graphql_request_identity(await request.body())
+  if not identity.is_query:
+    return await call_next(request)
+  waited = await graphql_query_admission.acquire()
+  if waited is None:
+    return JSONResponse(
+      status_code=503,
+      headers={"Retry-After": "1"},
+      content={
+        "errors": [
+          {
+            "message": "GraphQL query capacity is temporarily exhausted",
+            "extensions": {"code": "SERVICE_BUSY", "retryable": True},
+          }
+        ]
+      },
+    )
+  started = time.monotonic()
+  try:
+    return await call_next(request)
+  finally:
+    duration = max(0.0, time.monotonic() - started)
+    graphql_query_admission.release()
+    if duration >= GRAPHQL_SLOW_REQUEST_SECONDS:
+      logger.warning(
+        "Slow GraphQL query: operation=%s duration=%.3fs admission_wait=%.3fs client_instance=%s route=%s",
+        identity.operation_name,
+        duration,
+        waited,
+        request.headers.get("x-quantx-client-instance", "")[:80],
+        request.headers.get("x-quantx-client-route", "")[:160],
+      )
 
 
 if settings.metrics_enabled:

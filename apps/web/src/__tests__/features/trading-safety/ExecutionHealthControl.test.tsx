@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ContextType, ReactNode } from 'react';
+import { CombinedError } from 'urql';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ExecutionHealthControl } from '@/features/trading-safety';
@@ -8,12 +9,6 @@ import { TradingSafetyContext } from '@/features/trading-safety/trading-safety-c
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
-  reexecute: vi.fn(),
-  useQuery: vi.fn(),
-}));
-
-vi.mock('urql', () => ({
-  useQuery: mocks.useQuery,
 }));
 
 vi.mock('@/components/studio-workspace', () => ({
@@ -69,9 +64,13 @@ function renderControl(
         blockedReasons: [],
         canIncreaseRisk: true,
         canReduceRisk: true,
+        error: undefined,
         executionMode: 'TRADING',
         fetching: false,
         refreshSafety: vi.fn(),
+        safety: safetySnapshot() as ContextType<
+          typeof TradingSafetyContext
+        >['safety'],
         ...contextOverrides,
       }}
     >
@@ -83,14 +82,6 @@ function renderControl(
 describe('ExecutionHealthControl', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.useQuery.mockReturnValue([
-      {
-        data: { accountExecutionSafety: safetySnapshot() },
-        error: undefined,
-        fetching: false,
-      },
-      mocks.reexecute,
-    ]);
   });
 
   it('opens the buy health drawer with account truth and plan diagnostics', async () => {
@@ -131,19 +122,6 @@ describe('ExecutionHealthControl', () => {
 
   it('treats reduce-only as a usable sell capability instead of unhealthy', async () => {
     const user = userEvent.setup();
-    mocks.useQuery.mockReturnValue([
-      {
-        data: {
-          accountExecutionSafety: safetySnapshot({
-            canIncreaseRisk: false,
-            executionMode: 'REDUCE_ONLY',
-          }),
-        },
-        error: undefined,
-        fetching: false,
-      },
-      mocks.reexecute,
-    ]);
     renderControl(
       <ExecutionHealthControl
         details={{
@@ -162,7 +140,14 @@ describe('ExecutionHealthControl', () => {
         }}
         scope="SELL"
       />,
-      { canIncreaseRisk: false, executionMode: 'REDUCE_ONLY' }
+      {
+        canIncreaseRisk: false,
+        executionMode: 'REDUCE_ONLY',
+        safety: safetySnapshot({
+          canIncreaseRisk: false,
+          executionMode: 'REDUCE_ONLY',
+        }) as ContextType<typeof TradingSafetyContext>['safety'],
+      }
     );
 
     await user.click(screen.getByRole('button', { name: '执行健康 · 仅减仓' }));
@@ -178,22 +163,22 @@ describe('ExecutionHealthControl', () => {
 
   it('keeps a returned snapshot visible but closes execution on query error', async () => {
     const user = userEvent.setup();
-    mocks.useQuery.mockReturnValue([
-      {
-        data: { accountExecutionSafety: safetySnapshot() },
-        error: new Error('network unavailable'),
-        fetching: false,
-      },
-      mocks.reexecute,
-    ]);
     renderControl(
       <ExecutionHealthControl
         details={{ automationPaused: false, pendingIntentCount: 0 }}
         scope="BUY"
-      />
+      />,
+      {
+        canIncreaseRisk: false,
+        error: new CombinedError({
+          networkError: new Error('network unavailable'),
+        }),
+      }
     );
 
-    await user.click(screen.getByRole('button', { name: '执行健康 · 可增仓' }));
+    await user.click(
+      screen.getByRole('button', { name: '执行健康 · 安全关闭' })
+    );
 
     expect(screen.getByText('状态未知')).toBeVisible();
     expect(screen.getByText('交易权限：安全关闭')).toBeVisible();

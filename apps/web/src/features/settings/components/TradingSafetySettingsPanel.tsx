@@ -8,11 +8,10 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { useMutation, useQuery } from 'urql';
+import { useMutation } from 'urql';
 
 import { Input } from '@/components/ui/input';
 import {
-  AccountExecutionSafetyQuery,
   ConfirmAccountExecutionControlMutation,
   PreviewAccountExecutionControlMutation,
   useTradingSafety,
@@ -130,13 +129,7 @@ function GateStatusMark({
 
 export function TradingSafetySettingsPanel() {
   const now = useNow();
-  const { accountId, refreshSafety } = useTradingSafety();
-  const [{ data, fetching }, refresh] = useQuery({
-    query: AccountExecutionSafetyQuery,
-    variables: { accountId },
-    pause: !accountId,
-    requestPolicy: 'network-only',
-  });
+  const { accountId, fetching, refreshSafety, safety } = useTradingSafety();
   const [, previewControl] = useMutation(
     PreviewAccountExecutionControlMutation
   );
@@ -152,7 +145,6 @@ export function TradingSafetySettingsPanel() {
     challengeId: string;
     confirmationToken: string;
   } | null>(null);
-  const safety = data?.accountExecutionSafety;
   const failedChecks = useMemo(
     () => safety?.checks.filter(check => !check.passed) ?? [],
     [safety?.checks]
@@ -160,7 +152,6 @@ export function TradingSafetySettingsPanel() {
   const passedCheckCount = (safety?.checks.length ?? 0) - failedChecks.length;
 
   const reload = () => {
-    refresh({ requestPolicy: 'network-only' });
     refreshSafety();
   };
 

@@ -13,7 +13,6 @@ import {
   TimerReset,
 } from 'lucide-react';
 import * as React from 'react';
-import { useQuery } from 'urql';
 
 import { useStudioNavigate } from '@/components/studio-workspace';
 import { Button } from '@/components/ui/button';
@@ -29,7 +28,6 @@ import type { TradingSafety_AccountExecutionSafetyQuery } from '@/generated/gql/
 import { cn } from '@/utils/cn';
 import { formatCurrency } from '@/utils/transform/data';
 
-import { AccountExecutionSafetyQuery } from './operations';
 import { accountExecutionModeLabel, accountHealthLabel } from './presentation';
 import { ageSecondsLabel } from './time';
 import { useTradingSafety } from './trading-safety-context';
@@ -404,16 +402,15 @@ type ExecutionHealthPanelProps =
 function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
   const { onRefresh, scope } = props;
   const navigate = useStudioNavigate();
-  const { accountId, refreshSafety } = useTradingSafety();
+  const {
+    accountId,
+    error,
+    fetching,
+    refreshSafety,
+    safety: currentSafety,
+  } = useTradingSafety();
   const [lastGoodSafety, setLastGoodSafety] =
     React.useState<SafetySnapshot | null>(null);
-  const [{ data, error, fetching }, reexecute] = useQuery({
-    query: AccountExecutionSafetyQuery,
-    variables: { accountId },
-    pause: !accountId,
-    requestPolicy: 'cache-and-network',
-  });
-  const currentSafety = data?.accountExecutionSafety ?? null;
 
   React.useEffect(() => {
     if (currentSafety) setLastGoodSafety(currentSafety);
@@ -440,7 +437,6 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
 
   function handleRefresh() {
     refreshSafety();
-    reexecute({ requestPolicy: 'network-only' });
     void Promise.resolve(onRefresh?.()).catch(() => undefined);
   }
 

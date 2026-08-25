@@ -10,6 +10,8 @@ from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.relational_connection import get_async_db
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from quantx_api.agent_hub import agent_connection_hub
+
 from .agent_service import AgentAuthService
 from .errors import AuthError
 from .principal import Principal
@@ -557,3 +559,4 @@ async def revoke_agent_device(
   )
   if not revoked:
     raise HTTPException(status_code=404, detail="Agent device not found")
+  await agent_connection_hub.revoke(device_id)

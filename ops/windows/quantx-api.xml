@@ -6,6 +6,7 @@
   <arguments>-m uvicorn quantx_api.main:app --host 127.0.0.1 --port 18081 --ws-ping-interval 20 --ws-ping-timeout 960</arguments>
   <workingdirectory>{{ROOT}}</workingdirectory>
   <env name="ENV" value="production" />
+  <env name="DATABASE_PROCESS_ROLE" value="api" />
   <env name="RUNTIME_PROFILE" value="full" />
   <env name="PREFECT_ENABLED" value="true" />
   <env name="PREFECT_API_URL" value="{{PREFECT_API_URL}}" />

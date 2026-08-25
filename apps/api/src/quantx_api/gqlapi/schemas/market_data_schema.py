@@ -11,6 +11,7 @@ from ..types import (
   KLinePage,
   KLinePageInput,
   KLinePeriod,
+  MarketIndexSnapshot,
   StockQuote,
   TickData,
 )
@@ -18,6 +19,15 @@ from ..types import (
 
 @strawberry.type(description="市场数据相关查询")
 class MarketDataQuery:
+  @strawberry.field(description="批量读取市场指数行情与日线回退快照")
+  async def market_index_snapshots(
+    self,
+    stock_list: List[str],
+  ) -> List[MarketIndexSnapshot]:
+    if len(stock_list) > 100:
+      raise ValueError("单次最多查询 100 个指数代码")
+    return await MarketDataResolver.get_market_index_snapshots(stock_list)
+
   @strawberry.field(description="批量读取 Engine 热缓存中的最新行情")
   async def latest_market_quotes(
     self,

@@ -3546,6 +3546,18 @@ type MarketDepthLevel {
   volume: Int!
 }
 
+"""市场指数最新行情与日线回退快照"""
+type MarketIndexSnapshot {
+  """指数代码"""
+  stockCode: String!
+
+  """Redis 最新行情快照"""
+  quote: StockQuote
+
+  """最新持久化日线"""
+  dailyKline: KLineData
+}
+
 """消息响应"""
 type MessageResponse {
   """操作是否成功"""
@@ -4629,6 +4641,9 @@ type Query {
 
   """获取金融工具列表（光标分页）"""
   instrumentsConnection(first: Int! = 20, last: Int! = 20, after: String = null, before: String = null, where: InstrumentWhereInput = null, orderBy: InstrumentOrder = null): InstrumentConnection!
+
+  """批量读取市场指数行情与日线回退快照"""
+  marketIndexSnapshots(stockList: [String!]!): [MarketIndexSnapshot!]!
 
   """批量读取 Engine 热缓存中的最新行情"""
   latestMarketQuotes(stockList: [String!]!): [StockQuote!]!

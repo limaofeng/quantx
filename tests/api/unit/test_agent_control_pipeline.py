@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 from quantx_api import agent_api
 from quantx_contracts import AgentEnvelope, AgentMessageType, ReportAckPayload
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 
 class FakeWebSocket:
@@ -93,8 +94,9 @@ async def test_database_pollers_do_not_block_report_reception(
       ).model_dump(mode="json"),
     )
 
-  async def ensure_device(_device_id):
-    return None
+  async def wait_until_revoked(*_args, **_kwargs):
+    await asyncio.sleep(60)
+    return False
 
   async def refresh_lease(_device_id, _queue):
     return None
@@ -102,7 +104,11 @@ async def test_database_pollers_do_not_block_report_reception(
   monkeypatch.setattr(agent_api, "_next_command", hanging_command)
   monkeypatch.setattr(agent_api, "_next_market_data_request", hanging_market_request)
   monkeypatch.setattr(agent_api, "_process_message", process_message)
-  monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device)
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "wait_until_revoked",
+    wait_until_revoked,
+  )
   monkeypatch.setattr(
     agent_api.agent_connection_hub,
     "refresh_market_device",
@@ -154,6 +160,7 @@ async def test_report_ack_waits_for_durable_recording(
       protocol_version="1.1",
       inbound=inbound,
       outbound=outbound,
+      database_state=agent_api._AgentDatabaseState("device-1"),
     )
   )
   writer = asyncio.create_task(
@@ -281,10 +288,19 @@ async def test_inbound_buffer_coalesces_report_retries_until_processing_complete
 
 
 @pytest.mark.asyncio
-async def test_stale_inbound_message_fails_closed() -> None:
+async def test_stale_inbound_message_is_processed_without_disconnect(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
   inbound = agent_api._AgentInboundBuffer()
   outbound = agent_api._AgentOutboundBuffer()
+  processed = asyncio.Event()
   envelope = report_envelope("00000000-0000-4000-8000-000000000005")
+
+  async def process_message(*_args, **_kwargs):
+    processed.set()
+    return None
+
+  monkeypatch.setattr(agent_api, "_process_message", process_message)
   await inbound.put(
     agent_api._AgentInboundItem(
       envelope=envelope,
@@ -296,11 +312,60 @@ async def test_stale_inbound_message_fails_closed() -> None:
     )
   )
 
-  with pytest.raises(agent_api._AgentControlPipelineError) as error:
-    await agent_api._process_agent_control_messages(
+  processor = asyncio.create_task(
+    agent_api._process_agent_control_messages(
       device_id="device-1",
       protocol_version="1.1",
       inbound=inbound,
       outbound=outbound,
+      database_state=agent_api._AgentDatabaseState("device-1"),
     )
-  assert error.value.reason == "inbound_queue_stale"
+  )
+  await asyncio.wait_for(processed.wait(), timeout=0.5)
+  processor.cancel()
+  await asyncio.gather(processor, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_transient_database_timeout_sends_no_ack_and_pauses_pollers(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  inbound = agent_api._AgentInboundBuffer()
+  outbound = agent_api._AgentOutboundBuffer()
+  failed = asyncio.Event()
+  state = agent_api._AgentDatabaseState("device-1")
+  envelope = report_envelope("00000000-0000-4000-8000-000000000006")
+
+  async def process_message(*_args, **_kwargs):
+    failed.set()
+    raise SQLAlchemyTimeoutError("pool exhausted")
+
+  monkeypatch.setattr(agent_api, "_process_message", process_message)
+  await inbound.put(
+    agent_api._AgentInboundItem(
+      envelope=envelope,
+      received_at=agent_api.utcnow(),
+      received_monotonic=agent_api.time.monotonic(),
+      frame_bytes=1,
+      dedup_key=envelope.message_id,
+    )
+  )
+
+  processor = asyncio.create_task(
+    agent_api._process_agent_control_messages(
+      device_id="device-1",
+      protocol_version="1.1",
+      inbound=inbound,
+      outbound=outbound,
+      database_state=state,
+    )
+  )
+  await asyncio.wait_for(failed.wait(), timeout=0.5)
+  while state.ready.is_set():
+    await asyncio.sleep(0)
+
+  assert outbound.qsize() == 0
+  assert state.consecutive_failures == 1
+  assert not state.ready.is_set()
+  processor.cancel()
+  await asyncio.gather(processor, return_exceptions=True)

@@ -6,6 +6,7 @@
   <arguments>"{{ROOT}}\ops\supervise_process.py" --name market-gateway --state-dir "{{RUNTIME}}\state" -- "{{PYTHON}}" -m uvicorn quantx_api.market_gateway:app --host 127.0.0.1 --port 18082 --ws-max-size 67108864 --ws-ping-interval 20 --ws-ping-timeout 960</arguments>
   <workingdirectory>{{ROOT}}</workingdirectory>
   <env name="ENV" value="production" />
+  <env name="DATABASE_PROCESS_ROLE" value="market-gateway" />
   <env name="QUANTX_ROOT" value="{{ROOT}}" />
   <env name="QUANTX_RUNTIME_DIR" value="{{RUNTIME}}" />
   <env name="QUANTX_ENV_FILE" value="{{RUNTIME}}\config\.env.production" />

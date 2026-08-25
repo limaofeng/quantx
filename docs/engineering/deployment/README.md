@@ -68,6 +68,41 @@ Market Gateway 的 `/health/live` 只表示进程与事件循环存活；
 `/health/ready` 会实际执行 Redis `PING`。统一启动器和 API 组件状态均以后者
 作为网关就绪依据，因此 Redis 断开时不会把网关误报为 `ready`。
 
+## PostgreSQL 连接预算与慢查询诊断
+
+QuantX 在同一操作系统进程内只创建一个 SQLAlchemy 连接池，业务模块统一复用；
+不同进程无法共享 Python 数据库连接，因此按进程角色设置容量，而不是在 API 内
+再拆 Agent 专用池。默认预算为 API `8 + 4`、Market Gateway `1 + 1`、
+Engine `4 + 2`、Worker `4 + 2`、AI Runtime `2 + 1`，合计最多 29 条连接。统一启动器通过
+`DATABASE_PROCESS_ROLE` 注入角色；`DATABASE_POOL_SIZE` 与
+`DATABASE_MAX_OVERFLOW` 仅用于经过容量评审后的临时覆盖。所有池使用 3 秒获取
+超时、30 分钟回收、连接预检和 LIFO 复用；API 查询另有 15 秒 statement
+timeout，避免慢查询长期占住连接。
+
+`/metrics` 中的 `quantx_database_pool_connections` 按 `role/state` 展示池大小、
+借出、空闲、overflow 与最大预算；GraphQL 查询准入的活动数、等待时间和拒绝数
+分别由 `quantx_graphql_query_admission_active`、
+`quantx_graphql_query_admission_wait_seconds` 与
+`quantx_graphql_query_admission_rejections_total` 展示。排查连接耗尽时先按
+`application_name` 观察占用，再查 `pg_stat_statements`，不要先放大超时：
+
+```sql
+SELECT application_name, state, count(*)
+FROM pg_stat_activity
+WHERE datname = current_database()
+GROUP BY application_name, state
+ORDER BY application_name, state;
+
+SELECT queryid, calls, mean_exec_time, max_exec_time, rows,
+       left(query, 160) AS query_sample
+FROM pg_stat_statements
+ORDER BY max_exec_time DESC
+LIMIT 20;
+```
+
+若第二条查询提示视图不存在，应由 PostgreSQL 管理侧评估并启用
+`pg_stat_statements`；QuantX 启动器不会修改外部数据库实例配置。
+
 Prefect Worker 的本机 CLI 状态位于 `.runtime/prefect`，CLI 和 Worker 固定
 使用 UTF-8。不要把该运行时目录提交到仓库。
 

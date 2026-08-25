@@ -24,10 +24,10 @@ const MARKET_SNAPSHOT_REFRESH_INTERVAL_MS = 15_000;
 
 const MarketIndexSnapshotsQuery = Dashboard_MarketIndexSnapshotsDocument;
 
-type DailyCloseRow =
-  Dashboard_MarketIndexSnapshotsQuery['shanghaiIndex'][number];
-type PersistedTickRow =
-  Dashboard_MarketIndexSnapshotsQuery['shanghaiTick'][number];
+type MarketIndexSnapshotRow =
+  Dashboard_MarketIndexSnapshotsQuery['marketIndexSnapshots'][number];
+type DailyCloseRow = MarketIndexSnapshotRow['dailyKline'];
+type PersistedTickRow = MarketIndexSnapshotRow['quote'];
 
 const toClosingQuote = (
   definition: MarketIndexDefinition,
@@ -99,56 +99,36 @@ export function useMarketWorkbench({
   const quoteState = useLatestMarketQuotes({ stockCodes: indexCodes });
   const [snapshotResult, refreshSnapshots] = useQuery({
     query: MarketIndexSnapshotsQuery,
+    variables: { stockList: indexCodes },
+    pause: indexCodes.length === 0,
     requestPolicy: 'cache-and-network',
   });
   const closingQuotes = useMemo(() => {
-    const data = snapshotResult.data;
-    const candidates: Array<DailyCloseRow | null | undefined> = [
-      data?.shanghaiIndex[0],
-      data?.shenzhenComponent[0],
-      data?.chinextIndex[0],
-      data?.kechuangComposite[0],
-      data?.kechuang50[0],
-      data?.csiA500[0],
-      data?.csi300[0],
-      data?.csi1000[0],
-      data?.shanghai50[0],
-      data?.shenzhen100[0],
-      data?.csi500[0],
-      data?.chinext50[0],
-      data?.kechuang100[0],
-    ];
     const quotes = new Map<string, MarketQuoteSnapshot>();
-    CORE_MARKET_INDICES.forEach((definition, index) => {
-      const quote = toClosingQuote(definition, candidates[index]);
+    const definitions = new Map(
+      indexDefinitions.map(definition => [definition.code, definition])
+    );
+    snapshotResult.data?.marketIndexSnapshots.forEach(row => {
+      const definition = definitions.get(row.stockCode);
+      if (!definition) return;
+      const quote = toClosingQuote(definition, row.dailyKline);
       if (quote) quotes.set(definition.code, quote);
     });
     return quotes;
-  }, [snapshotResult.data]);
+  }, [indexDefinitions, snapshotResult.data]);
   const persistedTickQuotes = useMemo(() => {
-    const data = snapshotResult.data;
-    const candidates: Array<PersistedTickRow | null | undefined> = [
-      data?.shanghaiTick[0],
-      data?.shenzhenTick[0],
-      data?.chinextTick[0],
-      data?.kechuangCompositeTick[0],
-      data?.kechuang50Tick[0],
-      data?.csiA500Tick[0],
-      data?.csi300Tick[0],
-      data?.csi1000Tick[0],
-      data?.shanghai50Tick[0],
-      data?.shenzhen100Tick[0],
-      data?.csi500Tick[0],
-      data?.chinext50Tick[0],
-      data?.kechuang100Tick[0],
-    ];
     const quotes = new Map<string, MarketQuoteSnapshot>();
-    CORE_MARKET_INDICES.forEach((definition, index) => {
-      const quote = toPersistedTickQuote(definition, candidates[index]);
+    const definitions = new Map(
+      indexDefinitions.map(definition => [definition.code, definition])
+    );
+    snapshotResult.data?.marketIndexSnapshots.forEach(row => {
+      const definition = definitions.get(row.stockCode);
+      if (!definition) return;
+      const quote = toPersistedTickQuote(definition, row.quote);
       if (quote) quotes.set(definition.code, quote);
     });
     return quotes;
-  }, [snapshotResult.data]);
+  }, [indexDefinitions, snapshotResult.data]);
   const effectiveQuotes = useMemo(() => {
     const quotes = new Map<string, MarketQuoteSnapshot>();
     indexDefinitions.forEach(definition => {
