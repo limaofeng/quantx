@@ -61,7 +61,10 @@ function makeStock(): Stock {
   };
 }
 
-function setupTradingCard(position = makePosition()) {
+function setupTradingCard(
+  position = makePosition(),
+  portfolioSummary = { cash: 487300 }
+) {
   const selectedStock = makeStock();
 
   mocks.useStockSearch.mockReturnValue({
@@ -74,7 +77,7 @@ function setupTradingCard(position = makePosition()) {
   });
 
   render(
-    <TradingCard holdings={[position]} portfolioSummary={{ cash: 487300 }} />
+    <TradingCard holdings={[position]} portfolioSummary={portfolioSummary} />
   );
 }
 
@@ -92,6 +95,52 @@ describe('TradingCard', () => {
 
     expect(screen.getByPlaceholderText('100')).toHaveValue(420);
     expect(screen.getByText('420')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '全仓' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+  });
+
+  it('fills valid board-lot quantities from buy shortcuts', () => {
+    setupTradingCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '1/4' }));
+
+    expect(screen.getByPlaceholderText('100')).toHaveValue(2500);
+    expect(screen.getByRole('button', { name: '1/4' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '1W' }));
+
+    expect(screen.getByPlaceholderText('100')).toHaveValue(200);
+    expect(screen.getByRole('button', { name: '1W' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+  });
+
+  it('disables shortcuts with an explicit reason when no quantity is available', () => {
+    setupTradingCard(makePosition(), { cash: 0 });
+
+    for (const label of ['1/4', '1/2', '全仓', '1W']) {
+      expect(screen.getByRole('button', { name: label })).toBeDisabled();
+      expect(screen.getByRole('button', { name: label })).toHaveAttribute(
+        'title',
+        '可用资金不足，无法填写委托数量'
+      );
+    }
+  });
+
+  it('clears a quantity when switching trading direction', () => {
+    setupTradingCard();
+
+    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+    fireEvent.click(screen.getByRole('button', { name: '全仓' }));
+    fireEvent.click(screen.getByRole('button', { name: '买入' }));
+
+    expect(screen.getByPlaceholderText('100')).toHaveValue(null);
   });
 
   it('clamps manual close quantity to sellable canUseVolume', () => {

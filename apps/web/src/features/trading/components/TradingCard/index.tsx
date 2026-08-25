@@ -66,10 +66,53 @@ const toNonNegativeInteger = (value: unknown) => {
   return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
 };
 
+const BUY_LOT_SIZE = 100;
+
+const QUICK_QUANTITY_PRESETS = [
+  { label: '1/4', value: 0.25, type: 'percent' },
+  { label: '1/2', value: 0.5, type: 'percent' },
+  { label: '全仓', value: 1, type: 'percent' },
+  { label: '1W', value: 10000, type: 'amount' },
+] as const;
+
+type QuickQuantityPreset = (typeof QUICK_QUANTITY_PRESETS)[number];
+
 const clampQuantity = (value: number, maxQuantity: number) => {
   const quantity = toNonNegativeInteger(value);
   if (quantity <= 0) return 0;
   return maxQuantity > 0 ? Math.min(quantity, maxQuantity) : quantity;
+};
+
+const toBuyLotQuantity = (value: number) =>
+  Math.floor(toNonNegativeInteger(value) / BUY_LOT_SIZE) * BUY_LOT_SIZE;
+
+const resolveQuickQuantity = ({
+  availableQuantity,
+  currentOrderPrice,
+  preset,
+  tradeType,
+}: {
+  availableQuantity: number;
+  currentOrderPrice: number;
+  preset: QuickQuantityPreset;
+  tradeType: 'buy' | 'sell';
+}) => {
+  if (availableQuantity <= 0) return 0;
+
+  const requestedQuantity =
+    preset.type === 'amount'
+      ? currentOrderPrice > 0
+        ? preset.value / currentOrderPrice
+        : 0
+      : availableQuantity * preset.value;
+  const boundedQuantity = Math.min(
+    toNonNegativeInteger(requestedQuantity),
+    availableQuantity
+  );
+
+  return tradeType === 'buy'
+    ? toBuyLotQuantity(boundedQuantity)
+    : boundedQuantity;
 };
 
 const stockFromHolding = (holding: HoldingLike, stockCode: string) => ({
@@ -227,10 +270,11 @@ export function TradingCard({
     );
   }, [price, selectedStock?.currentPrice, selectedStock?.quote?.lastPrice]);
 
-  const buyAvailableQuantity =
+  const buyAvailableQuantity = toBuyLotQuantity(
     currentOrderPrice > 0
       ? toNonNegativeInteger((portfolioSummary?.cash ?? 0) / currentOrderPrice)
-      : 0;
+      : 0
+  );
   const sellAvailableQuantity = toNonNegativeInteger(
     selectedHolding?.canUseVolume
   );
@@ -252,7 +296,10 @@ export function TradingCard({
   const canSubmitQuantity =
     quantityNumber > 0 &&
     (tradeType === 'buy'
-      ? buyAvailableQuantity > 0 && quantityNumber <= buyAvailableQuantity
+      ? buyAvailableQuantity > 0 &&
+        quantityNumber >= BUY_LOT_SIZE &&
+        quantityNumber % BUY_LOT_SIZE === 0 &&
+        quantityNumber <= buyAvailableQuantity
       : sellAvailableQuantity > 0 && quantityNumber <= sellAvailableQuantity);
 
   React.useEffect(() => {
@@ -306,22 +353,10 @@ export function TradingCard({
     setQuantity(clampQuantity(parsedQuantity, availableQuantity).toString());
   };
 
-  const handlePercentClick = (percent: number) => {
-    const nextQuantity = clampQuantity(
-      availableQuantity * percent,
-      availableQuantity
-    );
-    setQuantity(nextQuantity > 0 ? nextQuantity.toString() : '');
-  };
-
-  const handleAmountClick = (amount: number) => {
-    if (currentOrderPrice > 0) {
-      const nextQuantity = clampQuantity(
-        Math.floor(amount / currentOrderPrice),
-        availableQuantity
-      );
-      setQuantity(nextQuantity > 0 ? nextQuantity.toString() : '');
-    }
+  const handleTradeTypeChange = (nextTradeType: 'buy' | 'sell') => {
+    if (nextTradeType === tradeType) return;
+    setTradeType(nextTradeType);
+    setQuantity('');
   };
 
   return (
@@ -352,7 +387,7 @@ export function TradingCard({
           />
           <button
             type="button"
-            onClick={() => setTradeType('buy')}
+            onClick={() => handleTradeTypeChange('buy')}
             className={cn(
               'flex-1 relative z-10 py-1.5 text-[10px] font-black uppercase tracking-widest transition-colors duration-300',
               tradeType === 'buy'
@@ -364,7 +399,7 @@ export function TradingCard({
           </button>
           <button
             type="button"
-            onClick={() => setTradeType('sell')}
+            onClick={() => handleTradeTypeChange('sell')}
             className={cn(
               'flex-1 relative z-10 py-1.5 text-[10px] font-black uppercase tracking-widest transition-colors duration-300',
               tradeType === 'sell'
@@ -539,31 +574,47 @@ export function TradingCard({
               </div>
 
               <div className="grid grid-cols-4 gap-1.5">
-                {[
-                  { label: '1/4', value: 0.25, type: 'percent' },
-                  { label: '1/2', value: 0.5, type: 'percent' },
-                  { label: '全仓', value: 1, type: 'percent' },
-                  { label: '1W', value: 10000, type: 'amount' },
-                ].map(btn => (
-                  <Button
-                    key={btn.label}
-                    type="button"
-                    variant="outline"
-                    className={cn(
-                      'h-6 text-[9px] p-0 font-black rounded-md transition-all border-slate-200/40 dark:border-slate-800/40 hover:border-primary/40',
-                      btn.type === 'amount'
-                        ? 'bg-primary/10 text-primary border-primary/20 hover:bg-primary/20'
-                        : 'bg-muted/10 text-muted-foreground hover:bg-muted/30'
-                    )}
-                    onClick={() =>
-                      btn.type === 'amount'
-                        ? handleAmountClick(btn.value)
-                        : handlePercentClick(btn.value)
-                    }
-                  >
-                    {btn.label}
-                  </Button>
-                ))}
+                {QUICK_QUANTITY_PRESETS.map(preset => {
+                  const quickQuantity = resolveQuickQuantity({
+                    availableQuantity,
+                    currentOrderPrice,
+                    preset,
+                    tradeType,
+                  });
+                  const isActive =
+                    quickQuantity > 0 && quantityNumber === quickQuantity;
+                  const isDisabled = quickQuantity <= 0;
+                  const unavailableReason =
+                    availableQuantity <= 0
+                      ? tradeType === 'buy'
+                        ? '可用资金不足，无法填写委托数量'
+                        : '当前没有可卖数量'
+                      : '该快捷额度不足以形成有效委托数量';
+
+                  return (
+                    <Button
+                      key={preset.label}
+                      type="button"
+                      variant="outline"
+                      aria-pressed={isActive}
+                      disabled={isDisabled}
+                      title={
+                        isDisabled
+                          ? unavailableReason
+                          : `填入 ${quickQuantity.toLocaleString()} 股`
+                      }
+                      className={cn(
+                        'h-6 rounded-md border-slate-200/40 p-0 text-[9px] font-black text-muted-foreground transition-colors dark:border-slate-800/40',
+                        isActive
+                          ? 'border-primary/20 bg-primary/10 text-primary hover:border-primary/40 hover:bg-primary/20'
+                          : 'bg-muted/10 hover:border-primary/40 hover:bg-muted/30'
+                      )}
+                      onClick={() => setQuantity(quickQuantity.toString())}
+                    >
+                      {preset.label}
+                    </Button>
+                  );
+                })}
               </div>
             </div>
           </div>
