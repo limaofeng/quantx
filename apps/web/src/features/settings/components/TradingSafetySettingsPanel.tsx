@@ -51,28 +51,16 @@ function FreshnessIndicator({
   const compactLabel = freshness.countdownLabel.replace('距过期 ', '剩 ');
   return (
     <div
-      className="w-24 shrink-0"
+      className="flex w-28 shrink-0 items-center gap-1.5"
       aria-label={`新鲜度：${freshness.countdownLabel}`}
     >
-      <span
-        className={cn(
-          'block text-right font-mono text-[10px] font-medium leading-3 tabular-nums',
-          freshness.tone === 'fresh'
-            ? 'text-emerald-300'
-            : freshness.tone === 'warning'
-              ? 'text-warning'
-              : 'text-rose-300'
-        )}
-      >
-        {compactLabel}
-      </span>
       <div
         role="progressbar"
         aria-label="剩余有效时间"
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(freshness.progressPercent)}
-        className="mt-1 h-1 overflow-hidden rounded-full bg-slate-800"
+        className="h-1 min-w-8 flex-1 overflow-hidden rounded-full bg-slate-950/70 ring-1 ring-inset ring-white/5"
       >
         <div
           className={cn(
@@ -86,7 +74,55 @@ function FreshnessIndicator({
           style={{ width: `${freshness.progressPercent}%` }}
         />
       </div>
+      <span
+        className={cn(
+          'shrink-0 font-mono text-[10px] font-medium leading-3 tabular-nums',
+          freshness.tone === 'fresh'
+            ? 'text-emerald-300'
+            : freshness.tone === 'warning'
+              ? 'text-warning'
+              : 'text-rose-300'
+        )}
+      >
+        {compactLabel}
+      </span>
     </div>
+  );
+}
+
+type GateVisualTone = 'success' | 'warning' | 'danger';
+
+function GateStatusMark({
+  temporal,
+  tone,
+}: {
+  temporal: boolean;
+  tone: GateVisualTone;
+}) {
+  const StatusIcon = temporal
+    ? Clock3
+    : tone === 'success'
+      ? CheckCircle2
+      : AlertTriangle;
+  return (
+    <span
+      className={cn(
+        'flex h-7 w-7 shrink-0 items-center justify-center rounded-md border',
+        tone === 'success'
+          ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'
+          : tone === 'warning'
+            ? 'border-warning/25 bg-warning/10 text-warning'
+            : 'border-rose-400/25 bg-rose-400/10 text-rose-300'
+      )}
+      aria-hidden="true"
+    >
+      <StatusIcon
+        className={cn(
+          'h-3.5 w-3.5',
+          temporal && tone === 'warning' && 'motion-safe:animate-pulse'
+        )}
+      />
+    </span>
   );
 }
 
@@ -362,7 +398,19 @@ export function TradingSafetySettingsPanel() {
           </div>
           <div className="flex items-center gap-2">
             {safety && (
-              <span className="rounded-full border border-border bg-muted px-2.5 py-1 text-xs text-slate-300">
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium',
+                  failedChecks.length
+                    ? 'border-warning/20 bg-warning/10 text-amber-200'
+                    : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
+                )}
+              >
+                {failedChecks.length ? (
+                  <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+                ) : (
+                  <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                )}
                 {passedCheckCount}/{safety.checks.length} 已通过
               </span>
             )}
@@ -394,71 +442,66 @@ export function TradingSafetySettingsPanel() {
                 : check.code === 'RECENT_BACKUP'
                   ? getBackupFreshness(safety?.lastBackupAt, now)
                   : null;
+            const temporal =
+              check.code === 'SNAPSHOT_FRESH' || check.code === 'RECENT_BACKUP';
+            const tone: GateVisualTone =
+              freshness?.tone === 'expired' ||
+              (!check.passed && check.code === 'KILL_SWITCH_CLEAR')
+                ? 'danger'
+                : !check.passed || freshness?.tone === 'warning'
+                  ? 'warning'
+                  : 'success';
+            const statusLabel =
+              freshness?.tone === 'expired'
+                ? '已过期'
+                : freshness?.tone === 'warning' && check.passed
+                  ? '即将过期'
+                  : check.passed
+                    ? '已通过'
+                    : '需处理';
             return (
-              <div
+              <article
                 key={check.code}
                 data-execution-gate={check.code}
+                data-gate-tone={tone}
+                aria-label={`${presentation.label}：${statusLabel}`}
                 className={cn(
-                  'flex h-[72px] items-start gap-3 overflow-hidden rounded-lg border px-3 py-2',
-                  freshness?.tone === 'expired'
-                    ? 'border-rose-400/30 bg-rose-400/5'
-                    : !check.passed || freshness?.tone === 'warning'
+                  'flex h-[72px] items-center gap-3 overflow-hidden rounded-lg border px-3 py-2',
+                  tone === 'success'
+                    ? 'border-slate-700/50 bg-slate-900/35'
+                    : tone === 'warning'
                       ? 'border-warning/30 bg-warning/5'
-                      : 'border-border bg-muted'
+                      : 'border-rose-400/30 bg-rose-400/5'
                 )}
               >
-                {freshness ? (
-                  <Clock3
-                    aria-hidden="true"
-                    className={cn(
-                      'mt-0.5 h-4 w-4 shrink-0',
-                      freshness.tone === 'fresh'
-                        ? 'text-emerald-400'
-                        : freshness.tone === 'warning'
-                          ? 'text-warning motion-safe:animate-pulse'
-                          : 'text-rose-400'
-                    )}
-                  />
-                ) : check.passed ? (
-                  <CheckCircle2
-                    aria-hidden="true"
-                    className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400"
-                  />
-                ) : (
-                  <AlertTriangle
-                    aria-hidden="true"
-                    className="mt-0.5 h-4 w-4 shrink-0 text-warning"
-                  />
-                )}
+                <GateStatusMark temporal={temporal} tone={tone} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between gap-3">
-                    <p className="text-sm font-medium leading-4 text-slate-200">
+                    <h3 className="text-sm font-medium leading-4 text-slate-100">
                       {presentation.label}
-                    </p>
+                    </h3>
                     <span
                       className={cn(
-                        'shrink-0 text-[11px] font-medium',
-                        freshness?.tone === 'expired'
-                          ? 'text-rose-300'
-                          : !check.passed || freshness?.tone === 'warning'
-                            ? 'text-warning'
-                            : 'text-emerald-300'
+                        'shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-3',
+                        tone === 'success'
+                          ? 'border-emerald-400/15 bg-emerald-400/10 text-emerald-300'
+                          : tone === 'warning'
+                            ? 'border-warning/20 bg-warning/10 text-warning'
+                            : 'border-rose-400/20 bg-rose-400/10 text-rose-300'
                       )}
                     >
-                      {freshness?.tone === 'expired' && check.passed
-                        ? '等待刷新'
-                        : freshness?.tone === 'warning' && check.passed
-                          ? '即将过期'
-                          : check.passed
-                            ? '已通过'
-                            : '需处理'}
+                      {statusLabel}
                     </span>
                   </div>
                   <div className="mt-1 flex min-w-0 items-start gap-3">
                     <p
                       className={cn(
                         'min-w-0 flex-1 text-xs leading-4',
-                        check.passed ? 'text-slate-500' : 'text-amber-200/80'
+                        tone === 'success'
+                          ? 'text-slate-400'
+                          : tone === 'warning'
+                            ? 'text-amber-200/80'
+                            : 'text-rose-200/80'
                       )}
                     >
                       {check.passed
@@ -476,7 +519,7 @@ export function TradingSafetySettingsPanel() {
                     </code>
                   )}
                 </div>
-              </div>
+              </article>
             );
           })}
         </div>
