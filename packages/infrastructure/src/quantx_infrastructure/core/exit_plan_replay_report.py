@@ -56,7 +56,7 @@ def write_exit_plan_replay_report(
   return {
     "status": "READY",
     "schema_version": 1,
-    "generated_at": datetime.now(),
+    "generated_at": datetime.now().isoformat(),
     "conclusion_code": str(summary.get("conclusion_code") or ""),
     "conclusion": str(summary.get("conclusion") or ""),
     "html_artifact": str(html_path),

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -74,6 +75,9 @@ def test_exit_plan_replay_metrics_compare_three_paths_without_forced_close() -> 
   assert all(
     event["reason"] != "BACKTEST_END_FORCE_CLOSE" for event in result["events"]
   )
+  assert result["events"][0]["timestamp"] == "2026-08-04T09:30:00"
+  assert result["curve"][0]["timestamp"] == "2026-08-03T09:30:00"
+  json.dumps(result)
 
 
 def test_exit_plan_replay_metrics_mark_remaining_position_to_market() -> None:

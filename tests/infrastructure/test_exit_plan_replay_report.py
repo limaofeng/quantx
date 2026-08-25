@@ -29,6 +29,8 @@ def test_exit_plan_replay_report_writes_json_and_html(tmp_path) -> None:
   )
 
   assert report["status"] == "READY"
+  assert isinstance(report["generated_at"], str)
+  json.dumps(report)
   json_payload = json.loads(
     (result_path.parent / "exit-plan-replay-report.json").read_text("utf-8")
   )

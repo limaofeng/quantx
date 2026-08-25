@@ -24,8 +24,16 @@ def _value(value: Any) -> str:
   return str(getattr(value, "value", value) or "")
 
 
-def _timestamp(value: Any) -> Any:
-  return value.isoformat() if isinstance(value, datetime) else value
+def _json_value(value: Any) -> Any:
+  """Convert replay evidence into values accepted by PostgreSQL JSON."""
+
+  if isinstance(value, (date, datetime)):
+    return value.isoformat()
+  if isinstance(value, Mapping):
+    return {str(key): _json_value(item) for key, item in value.items()}
+  if isinstance(value, (list, tuple)):
+    return [_json_value(item) for item in value]
+  return value
 
 
 def _return_pct(value: float, initial: float) -> float:
@@ -208,7 +216,7 @@ def build_exit_plan_replay_metrics(runtime: Any) -> Dict[str, Any]:
       or "历史 Tick 不完整"
     )
   )
-  return {
+  return _json_value({
     "schema_version": 1,
     "data_quality": data_quality,
     "data_quality_message": data_quality_message,
@@ -239,4 +247,4 @@ def build_exit_plan_replay_metrics(runtime: Any) -> Dict[str, Any]:
     "post_exit_horizons": _horizon_results(
       curve, exit_time=exit_time, exit_price=exit_price
     ),
-  }
+  })
