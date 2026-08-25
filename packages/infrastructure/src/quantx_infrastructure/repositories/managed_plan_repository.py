@@ -154,4 +154,3 @@ class ManagedPlanRepository:
     plan.status = str(status or "PAUSED").upper()
     await self.db.flush()
     return plan
-

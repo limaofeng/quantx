@@ -58,4 +58,3 @@ class ManagedPlanConfigRevision(Base):
   run_id = Column(String(36), nullable=True)
   created_by_user_id = Column(String(50), nullable=True)
   created_at = Column(DateTime, nullable=False)
-
