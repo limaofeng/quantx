@@ -357,16 +357,24 @@ async def _authorization_session_valid(
     or not bool(user.is_active)
   ):
     return False
-  session_scopes = {
-    str(value).strip()
-    for value in list(session.granted_permissions or [])
-    if isinstance(value, str) and value.strip()
-  }
   user_scopes = {
     str(value).strip()
     for value in list(user.permissions or [])
     if isinstance(value, str) and value.strip()
   }
+  granted_permissions = session.granted_permissions
+  if granted_permissions is None:
+    # Web sessions inherit the user's current permissions. Native sessions
+    # persist an explicit, purpose-limited scope list instead.
+    session_scopes = set(user_scopes)
+  elif isinstance(granted_permissions, list):
+    session_scopes = {
+      str(value).strip()
+      for value in granted_permissions
+      if isinstance(value, str) and value.strip()
+    }
+  else:
+    return False
   if not REQUIRED_AUTO_EXIT_SCOPES <= (session_scopes & user_scopes):
     return False
   access_stmt = select(AuthUserAccountAccess).where(

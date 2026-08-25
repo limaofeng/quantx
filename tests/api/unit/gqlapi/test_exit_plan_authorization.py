@@ -68,6 +68,7 @@ from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanSe
 from quantx_infrastructure.services.engine_command_service import EngineCommandReceipt
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   AutoExitAuthorizationGuard,
+  validate_exact_auto_exit_authorization,
 )
 from quantx_infrastructure.services.liquidation_service import (
   LiquidationError,
@@ -636,6 +637,9 @@ async def test_browser_session_can_grant_exact_authorization(
     record = await db.get(AutoExitPlanRecord, "plan-1")
     assert record.auto_exit_authorized
     assert record.auto_exit_authorization_device_session_id == "session-1"
+    validation = await validate_exact_auto_exit_authorization(db, record)
+    assert validation.valid
+    assert validation.code == "AUTHORIZED"
 
 
 @pytest.mark.asyncio
