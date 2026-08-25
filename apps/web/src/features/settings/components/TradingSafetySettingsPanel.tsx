@@ -17,6 +17,7 @@ import {
   useTradingSafety,
 } from '@/features/trading-safety';
 import { AccountExecutionControlAction } from '@/generated/gql/graphql';
+import { createClientId } from '@/utils/clientId';
 import { cn } from '@/utils/cn';
 
 import {
@@ -180,7 +181,7 @@ export function TradingSafetySettingsPanel() {
           action === AccountExecutionControlAction.KillSwitch
             ? reason.trim()
             : '',
-        idempotencyKey: `account-execution:${crypto.randomUUID()}`,
+        idempotencyKey: `account-execution:${createClientId()}`,
       },
     });
     const payload = result.data?.previewAccountExecutionControl;
