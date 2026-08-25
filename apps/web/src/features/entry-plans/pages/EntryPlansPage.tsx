@@ -10,6 +10,7 @@ import * as React from 'react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { ExecutionHealthControl } from '@/features/trading-safety';
 
 import { EntryPlanCard } from '../components/EntryPlanCards';
 import { EntryPlanEditor } from '../components/EntryPlanEditor';
@@ -135,6 +136,32 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <ExecutionHealthControl
+              details={{
+                automationPaused: view.globalAutoEntryPaused,
+                pendingIntentCount: view.pendingIntents.length,
+                plan: selectedPlan
+                  ? {
+                      authorizationLabel: selectedPlan.authorizationLabel,
+                      blockedReasons: selectedPlan.blockedReasons,
+                      dailyRemainingAmountCny:
+                        selectedPlan.dailyRemainingAmountCny,
+                      hasWorkingOrder: selectedPlan.hasWorkingOrder,
+                      instrumentCode: selectedPlan.instrumentCode,
+                      instrumentName: selectedPlan.instrumentName,
+                      lastDecision: selectedPlan.lastDecision,
+                      maxBuyPrice: selectedPlan.maxBuyPrice,
+                      remainingBudgetCny: Math.max(
+                        0,
+                        selectedPlan.maxTotalAmountCny -
+                          selectedPlan.filledAmountCny
+                      ),
+                    }
+                  : null,
+              }}
+              onRefresh={controller.refresh}
+              scope="BUY"
+            />
             <Button
               className="min-h-11"
               type="button"

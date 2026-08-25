@@ -93,6 +93,7 @@ export interface EntryPlanView {
   maxBuyPrice: number;
   executionScenario?: EntryExecutionScenario;
   authorizationLabel: string;
+  blockedReasons?: string[];
   lastDecision: string;
   nextEvaluationAt: string | null;
   expiresAt: string | null;

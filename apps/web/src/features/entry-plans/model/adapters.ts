@@ -107,6 +107,7 @@ export interface EntryPlanProjection {
   entryEnabled?: boolean;
   note?: string;
   lastReasonCode: string;
+  blockedReasons?: string[] | null;
   pendingIntentId: string;
   hasWorkingOrder: boolean;
   nextEligibleAt?: number | null;
@@ -417,6 +418,9 @@ export function mapEntryPlanWorkspace(
       maxBuyPrice: numberValue(plan.maxBuyPrice),
       executionScenario: resolvedExecutionScenario,
       authorizationLabel: authorizationLabel(plan),
+      blockedReasons: (plan.blockedReasons ?? []).map(
+        reason => reasonLabels[reason] || reason
+      ),
       lastDecision:
         reasonLabels[plan.lastReasonCode] ||
         plan.lastReasonCode ||

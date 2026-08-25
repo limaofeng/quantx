@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { TradingHoldingsSidebar } from '@/features/trading/components/TradingHoldingsSidebar';
+import { ExecutionHealthControl } from '@/features/trading-safety';
 import type { ConditionalLiquidationOrdersQuery as ConditionalLiquidationOrdersQueryData } from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
 import { financialToneClass } from '@/shared/utils/financialColors';
@@ -791,6 +792,62 @@ export function LiquidationPage() {
         : null,
     [conditionalOrders, selectedStockCode]
   );
+  const healthHolding = React.useMemo(() => {
+    if (!selectedHolding) return null;
+    const totalVolume = Math.max(
+      0,
+      Math.trunc(toFiniteNumber(selectedHolding.volume) ?? 0)
+    );
+    const yesterdayVolume = Math.max(
+      0,
+      Math.trunc(toFiniteNumber(selectedHolding.yesterdayVolume) ?? 0)
+    );
+    return {
+      availableVolume: getSellableVolume(selectedHolding),
+      frozenVolume: Math.max(
+        0,
+        Math.trunc(toFiniteNumber(selectedHolding.frozenVolume) ?? 0)
+      ),
+      instrumentCode: normalizeStockCode(selectedHolding.stockCode),
+      instrumentName:
+        selectedHolding.instrumentName ||
+        normalizeStockCode(selectedHolding.stockCode),
+      onRoadVolume: Math.max(
+        0,
+        Math.trunc(toFiniteNumber(selectedHolding.onRoadVolume) ?? 0)
+      ),
+      t1UnavailableVolume: Math.max(0, totalVolume - yesterdayVolume),
+      totalVolume,
+      yesterdayVolume,
+    };
+  }, [selectedHolding]);
+  const workingSellOrderCount = React.useMemo(
+    () =>
+      relatedOrders.filter(order => {
+        const status = String(order.status).toUpperCase();
+        return (
+          String(order.type).toUpperCase() === 'SELL' &&
+          ![
+            'CANCELED',
+            'JUNK',
+            'PARTSUCC_CANCEL',
+            'PART_CANCEL',
+            'SUCCEEDED',
+          ].includes(status)
+        );
+      }).length,
+    [relatedOrders]
+  );
+  const activeExitPlanCount = React.useMemo(
+    () =>
+      conditionalOrders.filter(order => {
+        if (String(order.status).toUpperCase() === 'CANCELLED') return false;
+        return selectedStockCode
+          ? stockCodeMatches(order.stockCode, selectedStockCode)
+          : true;
+      }).length,
+    [conditionalOrders, selectedStockCode]
+  );
   const accountName = portfolioSummary?.accountName || accountId || '当前账户';
   const totalAsset = portfolioSummary?.totalAsset;
   const [activeMode, setActiveMode] = React.useState<LiquidationStudioMode>(
@@ -1102,6 +1159,15 @@ export function LiquidationPage() {
             全部卖出计划
           </button>
         ) : null}
+        <ExecutionHealthControl
+          details={{
+            activeExitPlanCount,
+            holding: healthHolding,
+            workingSellOrderCount,
+          }}
+          onRefresh={handleRefresh}
+          scope="SELL"
+        />
         <button
           type="button"
           onClick={handleRefresh}
