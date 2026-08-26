@@ -1863,15 +1863,74 @@ async def test_confirmed_trading_session_silence_rebuilds_subscription(
     await runtime._shutdown_whole_market_capture()
 
 
-def test_stable_ready_resets_market_stream_backoff() -> None:
+def test_authenticated_control_session_resets_reconnect_backoff() -> None:
+  assert AgentRuntime._control_reconnect_delay(
+    16.0,
+    authenticated=False,
+  ) == (16.0, 32.0)
+  assert AgentRuntime._control_reconnect_delay(
+    16.0,
+    authenticated=True,
+  ) == (1.0, 2.0)
+
+
+def test_ready_market_stream_resets_backoff_immediately() -> None:
   assert AgentRuntime._market_stream_retry_delay(
     16.0,
-    ready_seconds=29.9,
+    ready_seconds=0.0,
   ) == (16.0, 30.0)
   assert AgentRuntime._market_stream_retry_delay(
     16.0,
-    ready_seconds=30.0,
+    ready_seconds=0.001,
   ) == (1.0, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_repeated_market_token_refreshes_wait_for_each_replacement() -> None:
+  class Capture:
+    def begin_syncing(self) -> None:
+      return None
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._access_token = "old-token"
+  runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+  runtime._access_token_ready = asyncio.Event()
+  runtime._access_token_ready.set()
+  runtime._whole_market_capture = Capture()
+  runtime._market_stream_resyncs = 0
+  runtime._market_stream_status = "READY"
+  runtime._market_stream_ready_since_monotonic = 100.0
+  replacement_started = asyncio.Event()
+
+  async def stream() -> None:
+    if runtime._market_stream_resyncs < 2:
+      raise runtime_module._PlannedMarketTokenRefresh(runtime._access_token)
+    replacement_started.set()
+    await asyncio.Event().wait()
+
+  runtime._run_whole_market_stream = stream
+  supervisor = asyncio.create_task(runtime._whole_market_stream_supervisor())
+  try:
+    await asyncio.sleep(0)
+    assert runtime._market_stream_resyncs == 1
+    assert not replacement_started.is_set()
+
+    runtime._access_token = "new-token-1"
+    runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    runtime._access_token_ready.set()
+    await _wait_until(lambda: runtime._market_stream_resyncs == 2)
+    assert not replacement_started.is_set()
+
+    runtime._access_token = "new-token-2"
+    runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    runtime._access_token_ready.set()
+    await asyncio.wait_for(replacement_started.wait(), timeout=1)
+  finally:
+    supervisor.cancel()
+    await asyncio.gather(supervisor, return_exceptions=True)
+
+  assert runtime._market_stream_status == "OFFLINE"
+  assert runtime._market_stream_ready_since_monotonic == 0.0
 
 
 @pytest.mark.asyncio

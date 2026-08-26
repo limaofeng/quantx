@@ -791,6 +791,61 @@ async def test_session_supervision_closes_on_heartbeat_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_supervision_treats_repeated_token_renewals_as_planned() -> None:
+  all_closed: list[tuple[int, str]] = []
+
+  class Socket:
+    def __init__(self) -> None:
+      self.closed: list[tuple[int, str]] = []
+      self.closed_event = asyncio.Event()
+
+    async def close(self, *, code: int, reason: str) -> None:
+      self.closed.append((code, reason))
+      all_closed.append((code, reason))
+      self.closed_event.set()
+      await asyncio.sleep(0)
+
+  async def receiver() -> None:
+    await socket.closed_event.wait()
+    raise RuntimeError("planned close surfaced through receiver")
+
+  runtime = object.__new__(AgentRuntime)
+  for _ in range(2):
+    socket = Socket()
+    planned_close_requested = asyncio.Event()
+
+    async def renew_token() -> None:
+      planned_close_requested.set()
+      await socket.close(code=4001, reason="refreshing Agent access token")
+
+    receiver_task = asyncio.create_task(receiver())
+    renewal_task = asyncio.create_task(renew_token())
+    try:
+      await asyncio.wait_for(
+        runtime._supervise_session_tasks(
+          socket,
+          {
+            "receiver": receiver_task,
+            "renewal": renewal_task,
+          },
+          planned_close_requested=planned_close_requested,
+        ),
+        timeout=1,
+      )
+      assert receiver_task.done()
+    finally:
+      receiver_task.cancel()
+      await asyncio.gather(receiver_task, return_exceptions=True)
+
+    assert socket.closed == [(4001, "refreshing Agent access token")]
+
+  assert all_closed == [
+    (4001, "refreshing Agent access token"),
+    (4001, "refreshing Agent access token"),
+  ]
+
+
+@pytest.mark.asyncio
 async def test_market_worker_heartbeats_before_dequeuing_next_request(
   monkeypatch,
 ) -> None:
