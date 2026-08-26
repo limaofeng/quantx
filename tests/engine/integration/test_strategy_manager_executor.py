@@ -180,6 +180,11 @@ class TestStrategyManagerExecutorIntegration:
       patch('quantx_engine.strategy_manager.StrategyRunRepository') as MockRepo,
       patch('quantx_infrastructure.repositories.backtest_repository.BacktestRepository') as MockBacktestRepo,
       patch.object(StrategyManager, '_ensure_backtest_data_available', new_callable=AsyncMock),
+      patch.object(
+        StrategyExecutor,
+        '_runtime_state_persistence_enabled',
+        new=staticmethod(lambda _runtime: False),
+      ),
     ):
       # 配置 mock 数据适配器
       mock_data_adapter = AsyncMock()
@@ -559,6 +564,10 @@ class TestStrategyExecutorStandalone:
       executor,
       "_setup_broker_and_data",
       side_effect=fake_setup_broker_and_data,
+    ), patch.object(
+      StrategyExecutor,
+      "_runtime_state_persistence_enabled",
+      new=staticmethod(lambda _runtime: False),
     ):
       yield executor
 

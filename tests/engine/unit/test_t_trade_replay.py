@@ -88,6 +88,11 @@ async def test_replay_initial_cash_reaches_order_sizer_and_risk_before_broker(
     AsyncMock(),
   )
   executor = StrategyExecutor()
+  monkeypatch.setattr(
+    StrategyExecutor,
+    "_runtime_state_persistence_enabled",
+    staticmethod(lambda _runtime: False),
+  )
 
   async def keep_running(_runtime: StrategyRuntime) -> None:
     await asyncio.Event().wait()
@@ -128,6 +133,7 @@ async def test_replay_initial_cash_reaches_order_sizer_and_risk_before_broker(
     instruments=["000001.SZ"],
     parameters={
       "t_trade_replay": True,
+      "account_id": "account-1",
       "initial_cash": 2_383.96,
       "initial_total_asset": 40_000.0,
       "initial_portfolio_metadata": metadata,
@@ -364,7 +370,7 @@ async def test_ordinary_backtest_keeps_immediate_market_order_semantics(
 
 
 @pytest.mark.asyncio
-async def test_replay_progress_projection_is_throttled_but_forced_at_window_boundary(
+async def test_replay_progress_projection_writes_only_at_forced_day_boundary(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   executor = StrategyExecutor()
@@ -385,8 +391,6 @@ async def test_replay_progress_projection_is_throttled_but_forced_at_window_boun
     context=context,
   )
   update = AsyncMock()
-  clock = iter((100.0, 100.5, 100.6))
-  monkeypatch.setattr(strategy_executor_module, "monotonic", lambda: next(clock))
   monkeypatch.setattr(
     strategy_executor_module.t_trade_replay_projection_service,
     "update",
@@ -402,12 +406,10 @@ async def test_replay_progress_projection_is_throttled_but_forced_at_window_boun
     force=True,
   )
 
-  assert update.await_count == 2
-  first_call = update.await_args_list[0].kwargs
-  second_call = update.await_args_list[1].kwargs
-  assert first_call["progress_pct"] == pytest.approx(50.0)
-  assert second_call["progress_pct"] > first_call["progress_pct"]
-  assert second_call["processed_until"] == datetime(2024, 1, 2, 14, 0)
+  update.assert_awaited_once()
+  call = update.await_args.kwargs
+  assert call["progress_pct"] > 50.0
+  assert call["processed_until"] == datetime(2024, 1, 2, 14, 0)
 
 
 @pytest.mark.asyncio

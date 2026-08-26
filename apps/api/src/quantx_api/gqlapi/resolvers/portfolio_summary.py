@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional
 
 from quantx_infrastructure.core.utils import time_utils
@@ -15,24 +16,28 @@ class PortfolioSummaryResolver:
   async def get_portfolio_summary(account_id: Optional[str] = None) -> PortfolioSummary:
     """获取持仓表现汇总信息"""
     try:
+      account_info: Optional[Account]
       if account_id is None:
-        current_account = await AccountResolver.get_current_account_async()
-        if current_account is None:
+        account_info = await AccountResolver.get_current_account_async()
+        if account_info is None:
           raise ValueError("当前未连接资金账户")
-        account_id = current_account.id
-
-      account_info = await AccountResolver.get_account_async(account_id)
-      if account_info is None:
-        raise Exception(f"无法获取账户 {account_id} 的信息")
-
-      positions = await PositionResolver.get_positions(account_id)
+        account_id = account_info.id
+        positions, latest_snapshot = await asyncio.gather(
+          PositionResolver.get_positions(account_id),
+          DailyAssetSnapshotService().get_latest_account_snapshot(account_id),
+        )
+      else:
+        account_info, positions, latest_snapshot = await asyncio.gather(
+          AccountResolver.get_account_async(account_id),
+          PositionResolver.get_positions(account_id),
+          DailyAssetSnapshotService().get_latest_account_snapshot(account_id),
+        )
+        if account_info is None:
+          raise ValueError(f"无法获取账户 {account_id} 的信息")
 
       # 计算汇总数据
       summary_data = PortfolioSummaryResolver._calculate_summary(
         account_id, account_info, positions
-      )
-      latest_snapshot = await DailyAssetSnapshotService().get_latest_account_snapshot(
-        account_id
       )
       if latest_snapshot is not None:
         summary_data["today_profit_loss"] = (

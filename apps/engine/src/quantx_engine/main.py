@@ -47,6 +47,7 @@ ENGINE_LEASE_ACQUIRE_TIMEOUT_SECONDS = 90.0
 ENGINE_LEASE_RETRY_SECONDS = 2.0
 ENGINE_LEASE_IDLE_TIMEOUT_SECONDS = 60
 ENGINE_DATABASE_OPERATION_TIMEOUT_SECONDS = 10.0
+ENGINE_HEARTBEAT_RETRY_SECONDS = 1.0
 ENGINE_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 ENGINE_RESTART_MAX_DELAY_SECONDS = 30.0
 
@@ -80,12 +81,23 @@ async def _write_heartbeat_once(instance_id: str) -> None:
 
 async def _heartbeat(stopped: asyncio.Event, instance_id: str) -> None:
   while not stopped.is_set():
-    await asyncio.wait_for(
-      _write_heartbeat_once(instance_id),
-      timeout=ENGINE_DATABASE_OPERATION_TIMEOUT_SECONDS,
-    )
+    retry_delay = 15.0
     try:
-      await asyncio.wait_for(stopped.wait(), timeout=15.0)
+      await asyncio.wait_for(
+        _write_heartbeat_once(instance_id),
+        timeout=ENGINE_DATABASE_OPERATION_TIMEOUT_SECONDS,
+      )
+    except Exception as exc:
+      # The advisory-lease watchdog is the Engine liveness authority.  A
+      # transient observability write must not cancel active strategy runs or
+      # force a supervised restart while that independent lease is healthy.
+      logger.warning(
+        "Engine heartbeat write failed; retrying without restarting: %s",
+        exc,
+      )
+      retry_delay = ENGINE_HEARTBEAT_RETRY_SECONDS
+    try:
+      await asyncio.wait_for(stopped.wait(), timeout=retry_delay)
     except asyncio.TimeoutError:
       pass
 

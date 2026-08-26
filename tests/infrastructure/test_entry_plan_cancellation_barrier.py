@@ -373,6 +373,8 @@ async def test_local_cancel_notifies_strategy_as_reconciled_zero_fill(
   )
   runtime = SimpleNamespace(
     approval_lock=asyncio.Lock(),
+    context=SimpleNamespace(parameters={}),
+    run_id="plan-1",
     state_manager=state_manager,
   )
   monkeypatch.setattr(

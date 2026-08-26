@@ -1435,8 +1435,14 @@ class TestStrategyManager:
       call.args == ("backtest-1", runtime.error_message)
       for call in mark_backtest.await_args_list
     )
-    update_projection.assert_awaited_once()
-    assert update_projection.await_args.kwargs["status"] == "ERROR"
+    assert update_projection.await_count == 5
+    assert [
+      call.kwargs["phase"]
+      for call in update_projection.await_args_list[:-1]
+    ] == ["CHECKING_DATA", "DOWNLOADING_DATA", "VERIFYING_DATA", "FAILED"]
+    final_projection = update_projection.await_args_list[-1].kwargs
+    assert final_projection["status"] == "ERROR"
+    assert final_projection["kind"].value == "RESULT_READY"
     assert runtime.context.parameters["replay_data_preparation"]["missing_after"] == [
       "688552.SH"
     ]

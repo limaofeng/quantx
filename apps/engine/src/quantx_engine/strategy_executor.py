@@ -197,6 +197,7 @@ _T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS = 30.0
 # durability boundaries below.
 RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH = "DAY_BATCH"
 RUNTIME_STATE_CHECKPOINT_POLICY_SESSION_BOUNDARY = "SESSION_BOUNDARY"
+BACKTEST_COOPERATIVE_YIELD_INTERVAL = 128
 _SESSION_CHECKPOINT_MAX_RETRIES = 60
 _SESSION_CHECKPOINT_RETRY_SECONDS = 5.0
 _SESSION_CHECKPOINT_SPECS = (
@@ -6743,7 +6744,10 @@ class StrategyExecutor:
           events.sort(key=lambda item: (item[2], item[1], item[3], item[4]))
         else:
           events.sort(key=lambda item: (item[0], item[1], item[3], item[4]))
-        for _, event_type, _, code, period, event in events:
+        for event_index, (_, event_type, _, code, period, event) in enumerate(
+          events,
+          start=1,
+        ):
           if runtime.status != ExecutionStatus.RUNNING:
             break
           if event_type == 0:
@@ -6754,6 +6758,12 @@ class StrategyExecutor:
             await self._process_kline(runtime, event)
             last_kline_time[(code, period)] = event.time
             totals["kline"] += 1
+          if event_index % BACKTEST_COOPERATIVE_YIELD_INTERVAL == 0:
+            # Strategy and broker coroutines can complete synchronously for a
+            # long run of replay events.  Yield explicitly so Engine heartbeat,
+            # lease watchdog, and command consumers remain schedulable without
+            # changing the canonical event order.
+            await asyncio.sleep(0)
         self._runtime_log(
           runtime,
           "INFO",
@@ -7795,6 +7805,7 @@ class StrategyExecutor:
             kline_indices[p] < len(all_klines[p]) for p in periods if p in all_klines
           )
 
+        processed_events = 0
         while has_more_data():
           if runtime.status != ExecutionStatus.RUNNING:
             break
@@ -7804,6 +7815,10 @@ class StrategyExecutor:
             await self._process_tick(runtime, tick)
             if tick.time and (last_tick_time is None or tick.time > last_tick_time):
               last_tick_time = tick.time
+            tick_idx += 1
+            processed_events += 1
+            if processed_events % BACKTEST_COOPERATIVE_YIELD_INTERVAL == 0:
+              await asyncio.sleep(0)
 
             # tick 驱动 K 线触发（可能跨越多根K线）
             for period in periods:
@@ -7826,10 +7841,12 @@ class StrategyExecutor:
                   kline_end_times[period] = self._get_kline_end_time(
                     klines[kline_idx], period, alignment=kline_time_alignment
                   )
+                processed_events += 1
+                if processed_events % BACKTEST_COOPERATIVE_YIELD_INTERVAL == 0:
+                  await asyncio.sleep(0)
 
               kline_indices[period] = kline_idx
 
-            tick_idx += 1
             continue
 
           # 无 tick 时，按时间顺序处理剩余K线
@@ -7861,6 +7878,9 @@ class StrategyExecutor:
               next_period,
               alignment=kline_time_alignment,
             )
+          processed_events += 1
+          if processed_events % BACKTEST_COOPERATIVE_YIELD_INTERVAL == 0:
+            await asyncio.sleep(0)
 
         total_ticks += tick_idx
         for period in periods:

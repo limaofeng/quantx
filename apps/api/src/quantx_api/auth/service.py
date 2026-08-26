@@ -710,8 +710,8 @@ class AuthService:
       )
     )
     account_ids: Tuple[str, ...] = tuple(access_result.scalars().all())
-    permissions, effective_account_ids, is_native_session = (
-      self._session_authorization(session, user.permissions, account_ids)
+    permissions, effective_account_ids, is_native_session = self._session_authorization(
+      session, user.permissions, account_ids
     )
     return Principal(
       user_id=user.id,
@@ -786,14 +786,10 @@ class AuthService:
         raise unauthenticated("访问令牌与设备会话不匹配")
       return
     persisted_permissions = session.granted_permissions
-    if (
-      not isinstance(persisted_permissions, list)
-      or claims.scopes
-      != frozenset(
-        value.strip()
-        for value in persisted_permissions
-        if isinstance(value, str) and value.strip()
-      )
+    if not isinstance(persisted_permissions, list) or claims.scopes != frozenset(
+      value.strip()
+      for value in persisted_permissions
+      if isinstance(value, str) and value.strip()
     ):
       raise unauthenticated("访问令牌与设备会话不匹配")
 

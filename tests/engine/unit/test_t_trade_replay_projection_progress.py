@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,7 +14,7 @@ from quantx_infrastructure.models.enums import StrategyRunMode
 
 
 @pytest.mark.asyncio
-async def test_replay_progress_projection_is_throttled_but_forced_at_boundary(
+async def test_backtest_replay_progress_writes_only_at_forced_day_boundary(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   executor = StrategyExecutor()
@@ -34,8 +35,6 @@ async def test_replay_progress_projection_is_throttled_but_forced_at_boundary(
     context=context,
   )
   update = AsyncMock()
-  clock = iter((100.0, 100.5, 100.6))
-  monkeypatch.setattr(strategy_executor_module, "monotonic", lambda: next(clock))
   monkeypatch.setattr(
     strategy_executor_module.t_trade_replay_projection_service,
     "update",
@@ -51,12 +50,10 @@ async def test_replay_progress_projection_is_throttled_but_forced_at_boundary(
     force=True,
   )
 
-  assert update.await_count == 2
-  first_call = update.await_args_list[0].kwargs
-  second_call = update.await_args_list[1].kwargs
-  assert first_call["progress_pct"] == pytest.approx(50.0)
-  assert second_call["progress_pct"] > first_call["progress_pct"]
-  assert second_call["processed_until"] == datetime(2024, 1, 2, 14, 0)
+  update.assert_awaited_once()
+  call = update.await_args.kwargs
+  assert call["progress_pct"] > 50.0
+  assert call["processed_until"] == datetime(2024, 1, 2, 14, 0)
 
 
 @pytest.mark.asyncio
@@ -118,3 +115,156 @@ async def test_multi_instrument_replay_marks_empty_window_processed(
     processed_until=end_time,
     force=True,
   )
+
+
+@pytest.mark.asyncio
+async def test_multi_instrument_replay_yields_engine_loop_in_fixed_batches(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class FakeHistoricalDataAdapter:
+    pass
+
+  class FakeTradingDateHelper:
+    async def get_trading_calendar(self, **_kwargs):
+      return [datetime(2024, 1, 2).date()]
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "HistoricalDataAdapter",
+    FakeHistoricalDataAdapter,
+  )
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "TradingDateHelper",
+    FakeTradingDateHelper,
+  )
+  cooperative_sleep = AsyncMock()
+  monkeypatch.setattr(strategy_executor_module.asyncio, "sleep", cooperative_sleep)
+
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  ticks = [
+    SimpleNamespace(
+      stock_code="000001.SZ",
+      time=start_time + timedelta(milliseconds=index),
+      continuity_generation=1,
+      source_time_ms=int(
+        (start_time + timedelta(milliseconds=index)).timestamp() * 1000
+      ),
+      tick_ordinal=index,
+    )
+    for index in range(1, 130)
+  ]
+  executor = StrategyExecutor()
+  executor._run_backtest_warmup_klines = AsyncMock()
+  executor._load_backtest_ticks = AsyncMock(return_value=ticks)
+  executor._process_tick = AsyncMock()
+  executor._report_t_trade_replay_progress = AsyncMock()
+  executor._runtime_log = lambda *_args, **_kwargs: None
+  context = StrategyContext(
+    run_id="replay-cooperative-yield",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"t_trade_replay": True, "account_id": "account-1"},
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+    data_adapter=FakeHistoricalDataAdapter(),
+    status=ExecutionStatus.RUNNING,
+  )
+
+  await executor._run_backtest_multi_instrument_timeline(
+    runtime,
+    context.instruments,
+    [],
+    start_time,
+    end_time,
+    use_tick_data=True,
+  )
+
+  assert executor._process_tick.await_count == 129
+  cooperative_sleep.assert_awaited_once_with(0)
+
+
+@pytest.mark.asyncio
+async def test_tick_driven_klines_count_toward_cooperative_yield(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class FakeHistoricalDataAdapter:
+    async def get_klines(self, **_kwargs):
+      return klines
+
+  class FakeTradingDateHelper:
+    async def get_trading_calendar(self, **_kwargs):
+      return [datetime(2024, 1, 2).date()]
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "HistoricalDataAdapter",
+    FakeHistoricalDataAdapter,
+  )
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "TradingDateHelper",
+    FakeTradingDateHelper,
+  )
+  cooperative_sleep = AsyncMock()
+  monkeypatch.setattr(strategy_executor_module.asyncio, "sleep", cooperative_sleep)
+
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  ticks = [
+    SimpleNamespace(
+      stock_code="000001.SZ",
+      time=end_time,
+    )
+  ]
+  klines = [
+    SimpleNamespace(
+      stock_code="000001.SZ",
+      time=start_time + timedelta(seconds=index),
+    )
+    for index in range(127)
+  ]
+  executor = StrategyExecutor()
+  executor._run_backtest_warmup_klines = AsyncMock()
+  executor._load_backtest_ticks = AsyncMock(return_value=ticks)
+  executor._process_tick = AsyncMock()
+  executor._process_kline = AsyncMock()
+  executor._report_t_trade_replay_progress = AsyncMock()
+  executor._runtime_log = lambda *_args, **_kwargs: None
+  context = StrategyContext(
+    run_id="tick-driven-kline-cooperative-yield",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"account_id": "account-1"},
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+    data_adapter=FakeHistoricalDataAdapter(),
+    status=ExecutionStatus.RUNNING,
+  )
+
+  await executor._run_backtest_timeline_with_ticks(
+    runtime,
+    "000001.SZ",
+    ["1d"],
+    start_time,
+    end_time,
+  )
+
+  executor._process_tick.assert_awaited_once()
+  assert executor._process_kline.await_count == 127
+  cooperative_sleep.assert_awaited_once_with(0)

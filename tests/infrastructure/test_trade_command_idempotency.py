@@ -113,27 +113,35 @@ async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-  ("rollout", "message"),
+  ("control_overrides", "message"),
   [
     (None, "尚未配置"),
-    (_ready_control(reconcile_status="PENDING"), "尚未完成对账"),
+    ({"reconcile_status": "PENDING"}, "尚未完成对账"),
     (
-      _ready_control(last_snapshot_at=utcnow() - timedelta(minutes=3)),
+      {"last_snapshot_age": timedelta(minutes=3)},
       "超过 90 秒",
     ),
-    (_ready_control(controlled_window_active=False), "账户实盘窗口"),
+    ({"controlled_window_active": False}, "账户实盘窗口"),
     (
-      _ready_control(controlled_window_snapshot_hash="different"),
+      {"controlled_window_snapshot_hash": "different"},
       "与最新完整快照不一致",
     ),
-    (_ready_control(authorization_state="DISABLED"), "买入权限"),
+    ({"authorization_state": "DISABLED"}, "买入权限"),
   ],
 )
 async def test_manual_buy_requires_every_rollout_and_snapshot_gate(
   monkeypatch,
-  rollout,
+  control_overrides,
   message,
 ) -> None:
+  if control_overrides is None:
+    rollout = None
+  else:
+    overrides = dict(control_overrides)
+    snapshot_age = overrides.pop("last_snapshot_age", None)
+    if snapshot_age is not None:
+      overrides["last_snapshot_at"] = utcnow() - snapshot_age
+    rollout = _ready_control(**overrides)
   db = SimpleNamespace(get=AsyncMock(return_value=rollout))
   service = TradeCommandService(db)
   monkeypatch.setattr(command_module.settings, "enable_real_trading", True)

@@ -1436,6 +1436,9 @@ async def test_durable_checkpoint_failure_retries_without_reapplying_callback(
   async def marker_not_yet_committed(_event_key):
     return False
 
+  async def skip_unrelated_session_checkpoint(_runtime):
+    return None
+
   monkeypatch.setattr(strategy, "on_trade", count_trade)
   monkeypatch.setattr(state_manager, "save_snapshot", fail_then_save)
   monkeypatch.setattr(
@@ -1444,6 +1447,11 @@ async def test_durable_checkpoint_failure_retries_without_reapplying_callback(
     marker_not_yet_committed,
   )
   monkeypatch.setattr(executor, "_process_tick", count_tick)
+  monkeypatch.setattr(
+    executor,
+    "_maybe_coordinate_session_checkpoints",
+    skip_unrelated_session_checkpoint,
+  )
   later_event = StrategyRuntimeEvent(
     event_id="runtime-event-after-barrier",
     business_key="order:client-after-barrier::SUBMITTED:0",
