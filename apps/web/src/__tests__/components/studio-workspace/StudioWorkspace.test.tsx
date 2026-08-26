@@ -106,10 +106,7 @@ function WorkspaceTabLauncher() {
   }, [workspace]);
 
   return (
-    <button
-      type="button"
-      onClick={() => workspace?.openStudioTab('/holdings')}
-    >
+    <button type="button" onClick={() => workspace?.openStudioTab('/holdings')}>
       打开持仓标签
     </button>
   );

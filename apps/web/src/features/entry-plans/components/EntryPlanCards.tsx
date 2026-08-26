@@ -38,7 +38,7 @@ const statusPresentation: Record<
 > = {
   ACCUMULATING: {
     label: '继续加仓',
-    className: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100',
+    className: 'border-market-up/25 bg-market-up/10 text-market-up',
     icon: Play,
   },
   ARMED: {
@@ -137,30 +137,30 @@ export function EntryPlanCard({
       className={cn(
         'rounded-lg border p-3 transition-colors duration-200',
         selected
-          ? 'border-emerald-400/40 bg-emerald-400/[0.06]'
+          ? 'border-primary/40 bg-primary/[0.06]'
           : 'border-white/10 bg-[#0b1120]/80'
       )}
       data-testid={`entry-plan-card-${plan.id}`}
     >
       <button
         aria-pressed={selected}
-        className="min-h-11 w-full cursor-pointer rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+        className="min-h-11 w-full cursor-pointer rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         onClick={() => onSelect(plan.id)}
         type="button"
       >
         <span className="flex items-start justify-between gap-2">
           <span className="min-w-0">
-            <span className="block truncate text-sm font-black text-slate-100">
+            <span className="block truncate text-ui-body font-black text-slate-100">
               {plan.instrumentName}
             </span>
-            <span className="mt-0.5 block font-mono text-[10px] text-slate-500">
+            <span className="mt-0.5 block font-mono text-ui-caption text-slate-500">
               {plan.instrumentCode} ·{' '}
               {plan.bucket === 'core' ? '核心仓' : '活跃仓'}
             </span>
           </span>
           <span
             className={cn(
-              'inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-[10px] font-black',
+              'inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-ui-caption font-black',
               status.className
             )}
           >
@@ -170,7 +170,7 @@ export function EntryPlanCard({
         </span>
       </button>
 
-      <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+      <div className="mt-3 grid grid-cols-2 gap-2 text-ui-caption">
         <div className="rounded bg-white/[0.035] p-2">
           <div className="text-slate-500">当前 / 目标</div>
           <div className="mt-1 font-mono font-bold text-slate-200">
@@ -196,12 +196,12 @@ export function EntryPlanCard({
         aria-valuenow={Math.round(progress)}
       >
         <div
-          className="h-full rounded-full bg-emerald-400 transition-[width] motion-reduce:transition-none"
+          className="h-full rounded-full bg-market-up transition-[width] motion-reduce:transition-none"
           style={{ width: `${progress}%` }}
         />
       </div>
 
-      <div className="mt-3 space-y-1 text-[11px] leading-4 text-slate-400">
+      <div className="mt-3 space-y-1 text-ui-caption leading-4 text-slate-400">
         <p>策略：{strategyLabels[plan.strategy]}</p>
         <p>最近判断：{plan.lastDecision}</p>
         <p>下次检查：{formatEntryDateTime(plan.nextEvaluationAt)}</p>
@@ -315,12 +315,12 @@ export function EntryPlanCard({
         </AlertDialog>
       </div>
       {locked ? (
-        <p className="mt-2 text-[11px] text-blue-200">
+        <p className="mt-2 text-ui-caption text-blue-200">
           当前委托或回报尚未收敛，结构编辑已锁定。
         </p>
       ) : null}
       {actionError ? (
-        <p className="mt-2 text-[11px] text-rose-300" role="alert">
+        <p className="mt-2 text-ui-caption text-rose-300" role="alert">
           {actionError}
         </p>
       ) : null}

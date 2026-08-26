@@ -86,10 +86,10 @@ export function EntryStrategyPicker({
           <button
             aria-checked={selected}
             className={cn(
-              'min-h-11 cursor-pointer rounded-lg border p-3 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400',
+              'min-h-11 cursor-pointer rounded-lg border p-3 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
               selected
-                ? 'border-emerald-400/50 bg-emerald-400/[0.08]'
-                : 'border-white/10 bg-white/[0.025] hover:border-emerald-400/30 hover:bg-white/[0.045]'
+                ? 'border-primary/50 bg-primary/[0.08]'
+                : 'border-white/10 bg-white/[0.025] hover:border-primary/30 hover:bg-white/[0.045]'
             )}
             key={strategy.code}
             onClick={() => onChange(strategy.code)}
@@ -115,18 +115,18 @@ export function EntryStrategyPicker({
                 <Icon aria-hidden="true" className="h-4 w-4" />
               </span>
               <span className="min-w-0">
-                <span className="flex flex-wrap items-center gap-2 text-sm font-black text-slate-100">
+                <span className="flex flex-wrap items-center gap-2 text-ui-body font-black text-slate-100">
                   {capability?.label ?? strategy.title}
                   {strategy.recommended ? (
-                    <span className="rounded border border-cyan-400/25 bg-cyan-400/10 px-1.5 py-0.5 text-[10px] text-cyan-100">
+                    <span className="rounded border border-cyan-400/25 bg-cyan-400/10 px-1.5 py-0.5 text-ui-caption text-cyan-100">
                       推荐
                     </span>
                   ) : null}
                 </span>
-                <span className="mt-1 block text-xs leading-5 text-slate-300">
+                <span className="mt-1 block text-ui-label leading-5 text-slate-300">
                   {capability?.description ?? strategy.description}
                 </span>
-                <span className="mt-2 grid gap-1 text-[11px] leading-4 text-slate-400 sm:grid-cols-2">
+                <span className="mt-2 grid gap-1 text-ui-caption leading-4 text-slate-400 sm:grid-cols-2">
                   <span>
                     适合：{capability?.suitableFor ?? strategy.suitableFor}
                   </span>

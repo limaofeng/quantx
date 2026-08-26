@@ -25,6 +25,10 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/__tests__/setup.ts'],
     css: true,
+    // Full-suite jsdom and user-event tests share CPU with 100+ transformed
+    // files. Keep a bounded margin above their isolated 2-3 second runtime so
+    // scheduler contention does not turn successful interactions into flakes.
+    testTimeout: 10_000,
     reporters: ['verbose', 'html'],
     coverage: {
       reporter: ['text', 'json', 'html'],

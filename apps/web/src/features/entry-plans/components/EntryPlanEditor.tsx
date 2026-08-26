@@ -81,7 +81,7 @@ function Field({
   return (
     <div className="min-w-0">
       <label
-        className="mb-1.5 block text-xs font-bold text-slate-300"
+        className="mb-1.5 block text-ui-label font-bold text-slate-300"
         htmlFor={htmlFor}
       >
         {label}
@@ -90,7 +90,9 @@ function Field({
         ) : null}
       </label>
       {children}
-      {error ? <p className="mt-1 text-[11px] text-rose-300">{error}</p> : null}
+      {error ? (
+        <p className="mt-1 text-ui-caption text-rose-300">{error}</p>
+      ) : null}
     </div>
   );
 }
@@ -105,9 +107,9 @@ function Section({
   title: string;
 }) {
   return (
-    <section className="rounded-lg border border-white/10 bg-[#0b1120]/75 p-4">
-      <h2 className="mb-4 flex items-center gap-2 text-sm font-black text-slate-100">
-        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-400/10 font-mono text-[11px] text-emerald-200">
+    <section className="rounded-lg border border-white/10 bg-[#0b1120]/75 p-ui-section">
+      <h2 className="mb-4 flex items-center gap-2 text-ui-body font-black text-slate-100">
+        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 font-mono text-ui-caption text-primary">
           {number}
         </span>
         {title}
@@ -292,11 +294,11 @@ export function EntryPlanEditor({
   return (
     <form className="space-y-3" onSubmit={event => event.preventDefault()}>
       <div
-        className="rounded-lg border border-emerald-400/15 bg-[#080d18] p-4 lg:hidden"
+        className="rounded-lg border border-emerald-400/15 bg-[#080d18] p-ui-section lg:hidden"
         aria-live="polite"
       >
-        <h2 className="text-sm font-black text-slate-100">计划摘要</h2>
-        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+        <h2 className="text-ui-body font-black text-slate-100">计划摘要</h2>
+        <div className="mt-3 grid grid-cols-2 gap-2 text-ui-label">
           <span className="text-slate-500">目标方式</span>
           <span className="text-right text-slate-200">
             {visibleTargetModes.find(item => item.value === targetMode)?.title}
@@ -352,9 +354,9 @@ export function EntryPlanEditor({
                     <button
                       aria-checked={field.value === value}
                       className={cn(
-                        'min-h-11 cursor-pointer rounded-lg border px-3 text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400',
+                        'min-h-11 cursor-pointer rounded-lg border px-3 text-ui-label font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
                         field.value === value
-                          ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-100'
+                          ? 'border-primary/40 bg-primary/10 text-primary'
                           : 'border-white/10 bg-white/[0.025] text-slate-400 hover:border-white/20'
                       )}
                       disabled={editingExistingPlan}
@@ -371,14 +373,14 @@ export function EntryPlanEditor({
               )}
             />
             {editingExistingPlan ? (
-              <p className="mt-1 text-[10px] leading-4 text-slate-600">
+              <p className="mt-1 text-ui-caption leading-4 text-slate-600">
                 已有计划的归因仓不可原地变更；如需换仓，请取消后重新创建。
               </p>
             ) : null}
           </Field>
         </div>
         {selectedSecurity ? (
-          <p className="mt-3 text-xs text-slate-400">
+          <p className="mt-3 text-ui-label text-slate-400">
             {selectedSecurity.instrumentName} · 当前持仓{' '}
             {selectedSecurity.heldVolume.toLocaleString('zh-CN')} 股 · 最新价{' '}
             {selectedSecurity.latestPrice
@@ -402,20 +404,20 @@ export function EntryPlanEditor({
                 <button
                   aria-checked={field.value === option.value}
                   className={cn(
-                    'min-h-11 cursor-pointer rounded-lg border p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400',
+                    'min-h-11 cursor-pointer rounded-lg border p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
                     field.value === option.value
-                      ? 'border-emerald-400/40 bg-emerald-400/10'
-                      : 'border-white/10 bg-white/[0.025] hover:border-emerald-400/25'
+                      ? 'border-primary/40 bg-primary/10'
+                      : 'border-white/10 bg-white/[0.025] hover:border-primary/25'
                   )}
                   key={option.value}
                   onClick={() => field.onChange(option.value)}
                   role="radio"
                   type="button"
                 >
-                  <span className="block text-xs font-black text-slate-100">
+                  <span className="block text-ui-label font-black text-slate-100">
                     {option.title}
                   </span>
-                  <span className="mt-1 block text-[10px] leading-4 text-slate-500">
+                  <span className="mt-1 block text-ui-caption leading-4 text-slate-500">
                     {option.description}
                   </span>
                 </button>
@@ -423,7 +425,9 @@ export function EntryPlanEditor({
             </div>
           )}
         />
-        <p className="mt-2 text-[11px] text-slate-500">{targetDescription}</p>
+        <p className="mt-2 text-ui-caption text-slate-500">
+          {targetDescription}
+        </p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {targetMode === 'TARGET_POSITION_PCT' ? (
             <Field
@@ -528,10 +532,10 @@ export function EntryPlanEditor({
               <button
                 aria-pressed={draft.preset === preset.presetId}
                 className={cn(
-                  'min-h-11 cursor-pointer rounded-lg border px-3 py-2 text-left text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400',
+                  'min-h-11 cursor-pointer rounded-lg border px-3 py-2 text-left text-ui-label focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
                   draft.preset === preset.presetId
-                    ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-100'
-                    : 'border-white/10 bg-white/[0.025] text-slate-300 hover:border-emerald-400/25'
+                    ? 'border-primary/40 bg-primary/10 text-primary'
+                    : 'border-white/10 bg-white/[0.025] text-slate-300 hover:border-primary/25'
                 )}
                 key={preset.presetId}
                 onClick={() => applyPreset(preset.presetId, preset.parameters)}
@@ -539,7 +543,7 @@ export function EntryPlanEditor({
               >
                 <span className="block font-bold">{preset.label}</span>
                 {preset.summary ? (
-                  <span className="mt-1 block text-[10px] leading-4 text-slate-500">
+                  <span className="mt-1 block text-ui-caption leading-4 text-slate-500">
                     {preset.summary}
                   </span>
                 ) : null}
@@ -551,10 +555,10 @@ export function EntryPlanEditor({
           <div className="mt-3 rounded-lg border border-cyan-400/15 bg-cyan-400/[0.035] p-3">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
-                <h3 className="text-xs font-black text-slate-100">
+                <h3 className="text-ui-label font-black text-slate-100">
                   {capabilityField('levels')?.label ?? '可见价格档位'}
                 </h3>
-                <p className="mt-1 text-[11px] leading-4 text-slate-500">
+                <p className="mt-1 text-ui-caption leading-4 text-slate-500">
                   {capabilityField('levels')?.helpText ??
                     '到价后一次只处理一档；每档真实成交后才会累计，连续行情不会重复计为成交。'}
                 </p>
@@ -628,9 +632,9 @@ export function EntryPlanEditor({
                           <button
                             aria-checked={modeField.value === value}
                             className={cn(
-                              'min-h-10 rounded px-2 text-[11px] font-bold',
+                              'min-h-10 rounded px-2 text-ui-caption font-bold',
                               modeField.value === value
-                                ? 'bg-emerald-400/10 text-emerald-100'
+                                ? 'bg-primary/10 text-primary'
                                 : 'text-slate-500'
                             )}
                             key={value}
@@ -698,21 +702,21 @@ export function EntryPlanEditor({
               ))}
             </div>
             {errors.priceLadderLevels?.message ? (
-              <p className="mt-2 text-[11px] text-rose-300">
+              <p className="mt-2 text-ui-caption text-rose-300">
                 {errors.priceLadderLevels.message}
               </p>
             ) : null}
           </div>
         ) : strategy === 'TREND_PULLBACK_CONFIRMATION' ? (
           <details className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3">
-            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between text-xs font-black text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between text-ui-label font-black text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
               专业参数 · {capabilities?.version ?? '等待能力契约'}
               <ChevronDown
                 aria-hidden="true"
                 className="h-4 w-4 text-slate-500"
               />
             </summary>
-            <p className="mb-3 text-[11px] leading-4 text-slate-500">
+            <p className="mb-3 text-ui-caption leading-4 text-slate-500">
               字段含义和取值范围来自服务端能力契约；预设也会同步填写这些参数。
             </p>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -771,7 +775,7 @@ export function EntryPlanEditor({
                       />
                     </Field>
                     {metadata?.helpText ? (
-                      <p className="mt-1 text-[10px] leading-4 text-slate-600">
+                      <p className="mt-1 text-ui-caption leading-4 text-slate-600">
                         {metadata.helpText}
                       </p>
                     ) : null}
@@ -781,7 +785,7 @@ export function EntryPlanEditor({
             </div>
           </details>
         ) : (
-          <p className="mt-3 rounded-md border border-white/10 bg-white/[0.02] p-3 text-[11px] leading-5 text-slate-500">
+          <p className="mt-3 rounded-md border border-white/10 bg-white/[0.02] p-3 text-ui-caption leading-5 text-slate-500">
             人工触发不会绕过风控。点击“立即检查”只会提出本批意图；实盘模式仍按所选授权方式处理。
           </p>
         )}
@@ -863,22 +867,22 @@ export function EntryPlanEditor({
             {...register('exitProtectionEnabled')}
           />
           <span>
-            <span className="block text-xs font-black text-slate-100">
+            <span className="block text-ui-label font-black text-slate-100">
               成交后创建独立卖出保护计划
             </span>
-            <span className="mt-1 block text-[11px] leading-4 text-slate-500">
+            <span className="mt-1 block text-ui-caption leading-4 text-slate-500">
               每个真实买入批次独立保护；取消买入计划不会卖出已买股份，也不会取消已激活保护。
             </span>
           </span>
         </label>
         {errors.exitProtectionEnabled?.message ? (
-          <p className="mt-2 text-[11px] text-rose-300">
+          <p className="mt-2 text-ui-caption text-rose-300">
             {errors.exitProtectionEnabled.message}
           </p>
         ) : null}
         {exitProtectionEnabled ? (
           <div className="mt-3">
-            <p className="mb-3 text-[11px] leading-5 text-slate-500">
+            <p className="mb-3 text-ui-caption leading-5 text-slate-500">
               至少填写一项。保护计划只在真实买入成交后按实际成交批次创建；下单回执和委托已报不会创建保护数量。
             </p>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -971,20 +975,20 @@ export function EntryPlanEditor({
                 <button
                   aria-checked={field.value === option.value}
                   className={cn(
-                    'min-h-11 cursor-pointer rounded-lg border p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400',
+                    'min-h-11 cursor-pointer rounded-lg border p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
                     field.value === option.value
-                      ? 'border-emerald-400/40 bg-emerald-400/10'
-                      : 'border-white/10 bg-white/[0.025] hover:border-emerald-400/25'
+                      ? 'border-primary/40 bg-primary/10'
+                      : 'border-white/10 bg-white/[0.025] hover:border-primary/25'
                   )}
                   key={option.value}
                   onClick={() => field.onChange(option.value)}
                   role="radio"
                   type="button"
                 >
-                  <span className="block text-xs font-black text-slate-100">
+                  <span className="block text-ui-label font-black text-slate-100">
                     {option.title}
                   </span>
-                  <span className="mt-1 block text-[10px] leading-4 text-slate-500">
+                  <span className="mt-1 block text-ui-caption leading-4 text-slate-500">
                     {option.description}
                   </span>
                 </button>
@@ -996,7 +1000,7 @@ export function EntryPlanEditor({
 
       {Object.keys(errors).length > 0 ? (
         <div
-          className="flex items-start gap-2 rounded-lg border border-rose-400/25 bg-rose-400/10 p-3 text-xs text-rose-100"
+          className="flex items-start gap-2 rounded-lg border border-rose-400/25 bg-rose-400/10 p-3 text-ui-label text-rose-100"
           role="alert"
         >
           <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1004,19 +1008,19 @@ export function EntryPlanEditor({
         </div>
       ) : null}
       {submitError ? (
-        <p className="text-xs text-rose-300" role="alert">
+        <p className="text-ui-label text-rose-300" role="alert">
           {submitError}
         </p>
       ) : null}
       {submitMessage ? (
-        <p className="text-xs text-emerald-200" aria-live="polite">
+        <p className="text-ui-label text-emerald-200" aria-live="polite">
           {submitMessage}
         </p>
       ) : null}
 
       <div className="flex flex-col-reverse gap-2 border-t border-white/10 pt-4 sm:flex-row sm:justify-end">
         <Button
-          className="min-h-11"
+          className="min-h-control-large"
           disabled={saving}
           type="button"
           variant="outline"
@@ -1025,7 +1029,7 @@ export function EntryPlanEditor({
           保存并保持暂停
         </Button>
         <Button
-          className="min-h-11"
+          className="min-h-control-large"
           disabled={saving}
           type="button"
           variant="success"

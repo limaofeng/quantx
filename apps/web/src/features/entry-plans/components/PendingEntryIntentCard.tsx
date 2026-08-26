@@ -50,19 +50,19 @@ export function PendingEntryIntentCard({
   }
 
   return (
-    <article className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] p-4">
+    <article className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] p-ui-section">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-black text-slate-100">
+          <h3 className="text-ui-body font-black text-slate-100">
             {intent.instrumentName}
           </h3>
-          <p className="mt-1 font-mono text-[11px] text-slate-500">
+          <p className="mt-1 font-mono text-ui-caption text-slate-500">
             {intent.instrumentCode} ·{' '}
             {intent.bucket === 'core' ? '核心仓' : '活跃仓'} ·{' '}
             {strategyLabels[intent.strategy]}
           </p>
         </div>
-        <span className="inline-flex items-center gap-1 rounded border border-amber-400/25 bg-amber-400/10 px-2 py-1 text-[11px] font-bold text-amber-100">
+        <span className="inline-flex items-center gap-1 rounded border border-amber-400/25 bg-amber-400/10 px-2 py-1 text-ui-caption font-bold text-amber-100">
           <Clock3 aria-hidden="true" className="h-3.5 w-3.5" />
           {expired
             ? '确认已过期'
@@ -70,7 +70,7 @@ export function PendingEntryIntentCard({
         </span>
       </div>
 
-      <dl className="mt-4 grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-4">
+      <dl className="mt-4 grid gap-2 text-ui-label sm:grid-cols-2 xl:grid-cols-4">
         {[
           [
             '参考价 / 当前卖一',
@@ -96,14 +96,16 @@ export function PendingEntryIntentCard({
             className="rounded-md border border-white/5 bg-[#080d18]/70 p-2.5"
             key={label}
           >
-            <dt className="text-[10px] font-bold text-slate-500">{label}</dt>
+            <dt className="text-ui-caption font-bold text-slate-500">
+              {label}
+            </dt>
             <dd className="mt-1 font-mono font-bold text-slate-200">{value}</dd>
           </div>
         ))}
       </dl>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/5 pt-3">
-        <p className="inline-flex items-center gap-1.5 text-[11px] text-slate-400">
+        <p className="inline-flex items-center gap-1.5 text-ui-caption text-slate-400">
           <ShieldAlert
             aria-hidden="true"
             className="h-3.5 w-3.5 text-amber-200"
@@ -130,13 +132,14 @@ export function PendingEntryIntentCard({
             onClick={() =>
               void runAction(() => controller.previewPendingIntent(intent.id))
             }
+            className="bg-market-buy-cta text-white hover:bg-market-buy-cta/90"
           >
             确认并重新风控
           </Button>
         </div>
       </div>
       {actionError ? (
-        <p className="mt-2 text-[11px] text-rose-300" role="alert">
+        <p className="mt-2 text-ui-caption text-rose-300" role="alert">
           {actionError}
         </p>
       ) : null}

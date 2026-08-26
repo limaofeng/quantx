@@ -125,13 +125,13 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
       className="studio-workspace-surface min-h-full min-w-0 overflow-x-hidden text-slate-100"
       data-testid="entry-plans-page"
     >
-      <header className="studio-workspace-surface border-b border-white/10 px-3 py-3 sm:px-4 lg:px-5">
+      <header className="studio-workspace-surface border-b border-white/10 px-3 py-3 sm:px-ui-section lg:px-ui-section">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-base font-black tracking-tight sm:text-lg">
+            <h1 className="text-ui-title font-black tracking-tight sm:text-ui-heading">
               买入管理
             </h1>
-            <p className="mt-1 text-xs leading-5 text-slate-400">
+            <p className="mt-1 text-ui-label leading-5 text-slate-400">
               托管固定标的的分批建仓与加仓。程序识别趋势，硬预算与最高买价始终由你决定。
             </p>
           </div>
@@ -163,7 +163,7 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
               scope="BUY"
             />
             <Button
-              className="min-h-11"
+              className="min-h-control-large"
               type="button"
               variant={view.globalAutoEntryPaused ? 'success' : 'destructive'}
               onClick={() =>
@@ -181,7 +181,7 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
             </Button>
             <Button
               aria-label="刷新买入管理数据"
-              className="min-h-11"
+              className="min-h-control-large"
               type="button"
               variant="outline"
               onClick={() => runAction(controller.refresh)}
@@ -202,8 +202,10 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
               className="rounded-md border border-white/5 bg-white/[0.03] px-3 py-2"
               key={label}
             >
-              <dt className="text-[10px] font-bold text-slate-500">{label}</dt>
-              <dd className="mt-1 truncate font-mono text-xs font-black text-slate-100">
+              <dt className="text-ui-caption font-bold text-slate-500">
+                {label}
+              </dt>
+              <dd className="mt-1 truncate font-mono text-ui-label font-black text-slate-100">
                 {value}
               </dd>
             </div>
@@ -211,7 +213,7 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
         </dl>
         {view.globalAutoEntryPaused ? (
           <p
-            className="mt-3 flex items-start gap-2 rounded-md border border-amber-400/20 bg-amber-400/10 p-2.5 text-xs text-amber-100"
+            className="mt-3 flex items-start gap-2 rounded-md border border-amber-400/20 bg-amber-400/10 p-2.5 text-ui-label text-amber-100"
             role="status"
           >
             <ShieldAlert
@@ -222,7 +224,7 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
           </p>
         ) : null}
         {actionError ? (
-          <p className="mt-3 text-xs text-rose-300" role="alert">
+          <p className="mt-3 text-ui-label text-rose-300" role="alert">
             {actionError}
           </p>
         ) : null}
@@ -231,10 +233,10 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
       <div className="grid min-w-0 xl:grid-cols-[280px_minmax(0,1fr)]">
         <aside className="min-w-0 border-b border-white/10 bg-[#07111f]/70 p-3 xl:min-h-[calc(100vh-184px)] xl:border-b-0 xl:border-r">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-xs font-black uppercase tracking-wider text-slate-400">
+            <h2 className="text-ui-label font-black uppercase tracking-wider text-slate-400">
               标的与计划
             </h2>
-            <span className="font-mono text-[10px] text-slate-600">
+            <span className="font-mono text-ui-caption text-slate-600">
               {view.plans.length} 个
             </span>
           </div>
@@ -247,19 +249,19 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
               className="absolute left-3 top-3 h-4 w-4 text-slate-500"
             />
             <Input
-              className="min-h-11 pl-9"
+              className="min-h-control-large pl-9"
               id="entry-security-search"
               onChange={event => setSearchQuery(event.target.value)}
               placeholder="代码或名称，例如 605499"
               value={searchQuery}
             />
           </div>
-          <p className="mt-1.5 text-[10px] leading-4 text-slate-600">
+          <p className="mt-1.5 text-ui-caption leading-4 text-slate-600">
             可搜索未持有股票；结果来自证券主数据，不能直接输入任意代码授权实盘。
           </p>
 
           {searching ? (
-            <p className="mt-3 text-xs text-slate-500" aria-live="polite">
+            <p className="mt-3 text-ui-label text-slate-500" aria-live="polite">
               正在搜索证券主数据…
             </p>
           ) : searchResults.length > 0 ? (
@@ -270,7 +272,7 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
               {searchResults.map(security => (
                 <li key={security.instrumentCode}>
                   <button
-                    className="flex min-h-11 w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2 text-left hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                    className="flex min-h-11 w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2 text-left hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                     onClick={() => {
                       setSelectedSecurity(security);
                       setCreatingNew(true);
@@ -282,14 +284,14 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
                     type="button"
                   >
                     <span>
-                      <span className="block text-xs font-black text-slate-100">
+                      <span className="block text-ui-label font-black text-slate-100">
                         {security.instrumentName}
                       </span>
-                      <span className="font-mono text-[10px] text-slate-500">
+                      <span className="font-mono text-ui-caption text-slate-500">
                         {security.instrumentCode}
                       </span>
                     </span>
-                    <span className="text-right text-[10px] text-slate-500">
+                    <span className="text-right text-ui-caption text-slate-500">
                       {security.heldVolume > 0
                         ? `持有 ${security.heldVolume} 股`
                         : '未持有'}
@@ -316,13 +318,15 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
               />
             ))}
             {view.plans.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-white/10 p-4 text-center">
+              <div className="rounded-lg border border-dashed border-white/10 p-ui-section text-center">
                 <Plus
                   aria-hidden="true"
-                  className="mx-auto h-5 w-5 text-emerald-300"
+                  className="mx-auto h-5 w-5 text-market-up"
                 />
-                <p className="mt-2 text-xs text-slate-400">暂无买入计划</p>
-                <p className="mt-1 text-[10px] leading-4 text-slate-600">
+                <p className="mt-2 text-ui-label text-slate-400">
+                  暂无买入计划
+                </p>
+                <p className="mt-1 text-ui-caption leading-4 text-slate-600">
                   从上方搜索股票创建第一个暂停计划。
                 </p>
               </div>
@@ -330,7 +334,7 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
           </div>
         </aside>
 
-        <section className="min-w-0 p-3 sm:p-4 lg:p-5">
+        <section className="min-w-0 p-3 sm:p-ui-section lg:p-ui-section">
           <div className="overflow-x-auto border-b border-white/10 pb-3">
             <EntryPlanModeTabs
               activeTab={activeTab}
@@ -346,7 +350,7 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
             role="tabpanel"
           >
             {activeTab === 'PLANS' ? (
-              <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_280px] 2xl:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="grid min-w-0 gap-ui-section lg:grid-cols-[minmax(0,1fr)_280px] 2xl:grid-cols-[minmax(0,1fr)_320px]">
                 <EntryPlanEditor
                   capabilities={view.capabilities}
                   controller={controller}
@@ -372,18 +376,18 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
                   }
                 />
                 <aside
-                  className="hidden self-start rounded-lg border border-emerald-400/15 bg-[#0b1120]/90 p-4 lg:sticky lg:top-4 lg:block"
+                  className="hidden self-start rounded-lg border border-primary/15 bg-[#0b1120]/90 p-ui-section lg:sticky lg:top-4 lg:block"
                   aria-live="polite"
                 >
-                  <h2 className="flex items-center gap-2 text-sm font-black text-slate-100">
+                  <h2 className="flex items-center gap-2 text-ui-body font-black text-slate-100">
                     <Wallet
                       aria-hidden="true"
-                      className="h-4 w-4 text-emerald-300"
+                      className="h-4 w-4 text-primary"
                     />
                     计划摘要
                   </h2>
                   {selectedPlan ? (
-                    <dl className="mt-4 space-y-3 text-xs">
+                    <dl className="mt-4 space-y-3 text-ui-label">
                       {[
                         [
                           '计划语义',
@@ -439,11 +443,11 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
                       ))}
                     </dl>
                   ) : (
-                    <p className="mt-3 text-xs leading-5 text-slate-500">
+                    <p className="mt-3 text-ui-label leading-5 text-slate-500">
                       选择已有计划查看权威摘要，或从左侧搜索未持有标的创建新计划。
                     </p>
                   )}
-                  <p className="mt-4 rounded-md border border-cyan-400/15 bg-cyan-400/[0.06] p-2.5 text-[11px] leading-4 text-cyan-100">
+                  <p className="mt-4 rounded-md border border-cyan-400/15 bg-cyan-400/[0.06] p-2.5 text-ui-caption leading-4 text-cyan-100">
                     目标仓位只补真实持仓与在途买单后的剩余缺口；ACK
                     和已报委托不会计为真实已买。
                   </p>
@@ -459,7 +463,7 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
                   />
                 ))}
                 {view.pendingIntents.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-white/10 px-4 py-12 text-center text-xs text-slate-500">
+                  <div className="rounded-lg border border-dashed border-white/10 px-ui-section py-ui-empty text-center text-ui-label text-slate-500">
                     暂无待确认买入。实盘逐笔确认计划命中规则后会显示在这里。
                   </div>
                 ) : null}

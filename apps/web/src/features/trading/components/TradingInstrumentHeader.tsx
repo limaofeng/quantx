@@ -17,6 +17,7 @@ import type {
 } from '@/features/portfolio/types';
 import { useWatchlistWorkspace } from '@/features/watchlist/hooks';
 import type { Stock } from '@/shared/types';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 interface TradingInstrumentHeaderProps {
@@ -227,12 +228,12 @@ function HeaderMetric({
 }) {
   return (
     <div className="flex min-w-[68px] items-baseline gap-2" title={title}>
-      <span className="shrink-0 text-[12px] font-black text-slate-500">
+      <span className="shrink-0 text-ui-label font-black text-slate-500">
         {label}
       </span>
       <span
         className={cn(
-          'min-w-0 truncate font-mono text-[15px] font-black text-slate-200 tabular-nums',
+          'min-w-0 truncate font-mono text-ui-heading font-black text-slate-200 tabular-nums',
           tone
         )}
       >
@@ -309,9 +310,7 @@ export function TradingInstrumentHeader({
   const tone =
     changePercent === null
       ? 'text-slate-300'
-      : changePercent >= 0
-        ? 'text-red-400'
-        : 'text-emerald-400';
+      : financialToneClass(changePercent);
   const cash = firstNumber(accountCash, portfolioSummary?.cash);
   const availableToBuy =
     cash !== null && lastPrice !== null && lastPrice > 0
@@ -478,10 +477,10 @@ export function TradingInstrumentHeader({
 
   return (
     <div className="studio-workspace-surface shrink-0 border-b border-white/5 px-3 py-2">
-      <div className="flex min-h-[86px] min-w-0 items-center gap-4">
+      <div className="flex min-h-[86px] min-w-0 items-center gap-ui-section">
         <div className="min-w-[190px] shrink-0">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-black text-slate-100">
+            <span className="truncate text-ui-body font-black text-slate-100">
               {stockName}
             </span>
             {normalizedStockCode && (
@@ -495,7 +494,7 @@ export function TradingInstrumentHeader({
                         : '未自选'
                     }
                     className={cn(
-                      'inline-flex h-7 shrink-0 items-center gap-1 rounded border px-2 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                      'inline-flex h-7 shrink-0 items-center gap-1 rounded border px-2 text-ui-caption font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                       watchlistItem
                         ? 'border-amber-400/35 bg-amber-400/10 text-amber-200 hover:bg-amber-400/15'
                         : 'border-white/10 text-slate-500 hover:border-amber-400/35 hover:text-amber-200'
@@ -519,14 +518,14 @@ export function TradingInstrumentHeader({
                 </PopoverTrigger>
                 <PopoverContent
                   align="start"
-                  className="w-[300px] border-[#263b53] bg-[#0b1627] p-3 text-slate-200 shadow-2xl shadow-black/50"
+                  className="w-[300px] border-[#263b53] bg-[#0b1627] p-3 text-slate-200 shadow-none"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="text-xs font-black text-slate-100">
+                      <div className="text-ui-label font-black text-slate-100">
                         自选分组
                       </div>
-                      <div className="mt-1 text-[10px] text-slate-500">
+                      <div className="mt-1 text-ui-caption text-slate-500">
                         {watchlistItem
                           ? `已自选 · ${watchlistItem.groups.length}组`
                           : '未自选 · 保存后加入总自选'}
@@ -534,7 +533,7 @@ export function TradingInstrumentHeader({
                     </div>
                     <Link
                       href={`/watchlist?collection=all&symbol=${encodeURIComponent(normalizedStockCode)}`}
-                      className="text-[10px] font-bold text-blue-300 hover:text-blue-100"
+                      className="text-ui-caption font-bold text-blue-300 hover:text-blue-100"
                       onClick={() => setPickerOpen(false)}
                     >
                       查看自选
@@ -543,7 +542,7 @@ export function TradingInstrumentHeader({
 
                   <div className="mt-3 max-h-44 space-y-1 overflow-y-auto pr-1 custom-scrollbar">
                     {watchlist.groups.length === 0 ? (
-                      <div className="border border-dashed border-white/10 px-3 py-4 text-center text-[10px] text-slate-500">
+                      <div className="border border-dashed border-white/10 px-3 py-ui-section text-center text-ui-caption text-slate-500">
                         暂无自定义分组
                       </div>
                     ) : (
@@ -552,7 +551,7 @@ export function TradingInstrumentHeader({
                         return (
                           <label
                             key={group.id}
-                            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[11px] text-slate-300 hover:bg-white/5"
+                            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-ui-caption text-slate-300 hover:bg-white/5"
                           >
                             <Checkbox
                               checked={checked}
@@ -562,7 +561,7 @@ export function TradingInstrumentHeader({
                             <span className="min-w-0 flex-1 truncate">
                               {group.name}
                             </span>
-                            <span className="font-mono text-[10px] text-slate-600">
+                            <span className="font-mono text-ui-caption text-slate-600">
                               {group.itemCount}
                             </span>
                           </label>
@@ -580,7 +579,7 @@ export function TradingInstrumentHeader({
                       }}
                       placeholder="新建分组并加入"
                       maxLength={80}
-                      className="h-7 border-white/10 bg-white/[0.03] text-[10px]"
+                      className="h-7 border-white/10 bg-white/[0.03] text-ui-caption"
                       aria-label="新建分组名称"
                     />
                     <button
@@ -596,7 +595,7 @@ export function TradingInstrumentHeader({
 
                   {pickerMessage && (
                     <div
-                      className="mt-2 text-[10px] text-amber-200"
+                      className="mt-2 text-ui-caption text-amber-200"
                       role="status"
                       aria-live="polite"
                     >
@@ -610,13 +609,13 @@ export function TradingInstrumentHeader({
                         type="button"
                         onClick={() => void removeFromWatchlist()}
                         disabled={pickerSaving}
-                        className="inline-flex h-7 items-center gap-1 rounded border border-rose-400/25 px-2 text-[10px] font-bold text-rose-300 hover:bg-rose-400/10 disabled:opacity-40"
+                        className="inline-flex h-7 items-center gap-1 rounded border border-rose-400/25 px-2 text-ui-caption font-bold text-rose-300 hover:bg-rose-400/10 disabled:opacity-40"
                       >
                         <Trash2 className="h-3 w-3" />
                         移出总自选
                       </button>
                     ) : (
-                      <span className="text-[10px] text-slate-600">
+                      <span className="text-ui-caption text-slate-600">
                         保存空分组也会加入总自选
                       </span>
                     )}
@@ -624,7 +623,7 @@ export function TradingInstrumentHeader({
                       type="button"
                       onClick={() => void saveWatchlistSelection()}
                       disabled={pickerSaving}
-                      className="inline-flex h-7 items-center gap-1 rounded bg-blue-600 px-2.5 text-[10px] font-black text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-7 items-center gap-1 rounded bg-blue-600 px-2.5 text-ui-caption font-black text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {pickerSaving ? (
                         <LoaderCircle className="h-3 w-3 animate-spin" />
@@ -637,11 +636,11 @@ export function TradingInstrumentHeader({
                 </PopoverContent>
               </Popover>
             )}
-            <span className="rounded border border-red-500/25 bg-red-500/10 px-1.5 py-0.5 text-[9px] font-black text-red-300">
+            <span className="rounded border border-red-500/25 bg-red-500/10 px-1.5 py-0.5 text-ui-micro font-black text-red-300">
               {marketType}
             </span>
           </div>
-          <div className="mt-1 truncate font-mono text-[10px] font-bold text-slate-500">
+          <div className="mt-1 truncate font-mono text-ui-caption font-bold text-slate-500">
             {normalizedStockCode || '--'} · {formatTime(tick?.time)}
           </div>
         </div>
@@ -649,13 +648,13 @@ export function TradingInstrumentHeader({
         <div className="w-[160px] shrink-0">
           <div
             className={cn(
-              'font-mono text-[34px] font-black leading-none',
+              'font-mono text-ui-display-xl font-black leading-none',
               tone
             )}
           >
             {formatPrice(lastPrice)}
           </div>
-          <div className={cn('mt-1 font-mono text-sm font-black', tone)}>
+          <div className={cn('mt-1 font-mono text-ui-body font-black', tone)}>
             {formatSignedPrice(change)} {formatSignedPercent(changePercent)}
           </div>
         </div>
@@ -712,10 +711,10 @@ export function TradingInstrumentHeader({
         <div className="hidden min-w-[180px] shrink-0 grid-cols-2 gap-x-3 gap-y-1.5 border-l border-white/5 pl-4 2xl:grid">
           <HeaderMetric
             label="跌停"
-            tone="text-emerald-400"
+            tone="text-market-down"
             value={limitDown}
           />
-          <HeaderMetric label="涨停" tone="text-red-400" value={limitUp} />
+          <HeaderMetric label="涨停" tone="text-market-up" value={limitUp} />
           <HeaderMetric
             label="可买"
             value={

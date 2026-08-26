@@ -96,6 +96,10 @@ export default defineConfig(({ mode }) => {
       },
       // 压缩配置
       minify: 'terser',
+      // Tailwind's single global stylesheet is dominated by repeated utility
+      // declarations. Lightning CSS safely merges those declarations against
+      // the same browser target and keeps the enforced CSS budget meaningful.
+      cssMinify: 'lightningcss',
       terserOptions: {
         compress: {
           // 移除 console

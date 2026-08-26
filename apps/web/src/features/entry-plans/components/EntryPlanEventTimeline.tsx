@@ -31,7 +31,7 @@ export function EntryPlanEventTimeline({
 }) {
   if (events.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-white/10 px-4 py-10 text-center text-xs text-slate-500">
+      <div className="rounded-lg border border-dashed border-white/10 px-ui-section py-ui-empty text-center text-ui-label text-slate-500">
         暂无买入计划事件。评估不会被伪装成成交，真实买入只显示券商成交回报。
       </div>
     );
@@ -55,22 +55,22 @@ export function EntryPlanEventTimeline({
             <article className="mb-4 rounded-lg border border-white/10 bg-white/[0.025] p-3">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
-                  <h3 className="text-xs font-black text-slate-100">
+                  <h3 className="text-ui-label font-black text-slate-100">
                     {event.title}
                   </h3>
-                  <p className="mt-1 text-[11px] text-slate-500">
+                  <p className="mt-1 text-ui-caption text-slate-500">
                     {event.instrumentName} · {event.instrumentCode}
                   </p>
                 </div>
-                <time className="font-mono text-[10px] text-slate-500">
+                <time className="font-mono text-ui-caption text-slate-500">
                   {formatEntryDateTime(event.occurredAt)}
                 </time>
               </div>
-              <p className="mt-2 text-xs leading-5 text-slate-300">
+              <p className="mt-2 text-ui-label leading-5 text-slate-300">
                 {event.description}
               </p>
               {event.amountCny || event.volume ? (
-                <p className="mt-2 font-mono text-[11px] text-emerald-200">
+                <p className="mt-2 font-mono text-ui-caption text-market-up">
                   {event.amountCny
                     ? formatEntryCurrency(event.amountCny)
                     : null}
@@ -79,7 +79,7 @@ export function EntryPlanEventTimeline({
                 </p>
               ) : null}
               {event.traceId ? (
-                <p className="mt-2 font-mono text-[10px] text-slate-600">
+                <p className="mt-2 font-mono text-ui-caption text-slate-600">
                   决策追踪 {event.traceId}
                 </p>
               ) : null}

@@ -8,6 +8,7 @@ import { type ScreeningCriteria } from '@/features/screening/types';
 
 vi.mock('@/features/watchlist/hooks', () => ({
   useWatchlistWorkspace: () => ({
+    items: [],
     saveItem: vi.fn().mockResolvedValue({ success: true, message: 'ok' }),
   }),
 }));

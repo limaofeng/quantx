@@ -40,9 +40,9 @@ export function EntryPlanModeTabs({
           aria-controls={`entry-plan-panel-${tab.id}`}
           aria-selected={activeTab === tab.id}
           className={cn(
-            'min-h-11 cursor-pointer rounded-lg border px-3 text-xs font-black transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400',
+            'min-h-11 cursor-pointer rounded-lg border px-3 text-ui-label font-black transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
             activeTab === tab.id
-              ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-100'
+              ? 'border-primary/40 bg-primary/10 text-primary'
               : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.04] hover:text-slate-100'
           )}
           id={`entry-plan-tab-${tab.id}`}
@@ -67,7 +67,7 @@ export function EntryPlanModeTabs({
         >
           {tab.label}
           {tab.id === 'PENDING' && pendingCount > 0 ? (
-            <span className="ml-2 rounded-full bg-amber-400/20 px-1.5 py-0.5 font-mono text-[10px] text-amber-100">
+            <span className="ml-2 rounded-full bg-amber-400/20 px-1.5 py-0.5 font-mono text-ui-caption text-amber-100">
               {pendingCount}
             </span>
           ) : null}

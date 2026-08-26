@@ -68,7 +68,7 @@ export function EntryAuthorizationConfirmationDialog({
     >
       <DialogContent className="max-h-[90vh] overflow-y-auto border-amber-400/25 bg-[#0b1120] text-slate-100 sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-base">
+          <DialogTitle className="flex items-center gap-2 text-ui-title">
             <ShieldAlert
               aria-hidden="true"
               className="h-5 w-5 text-amber-300"
@@ -82,10 +82,10 @@ export function EntryAuthorizationConfirmationDialog({
         </DialogHeader>
         {challenge ? (
           <div className="space-y-3">
-            <p className="rounded-md border border-amber-400/20 bg-amber-400/[0.08] p-3 text-sm leading-6 text-amber-50">
+            <p className="rounded-md border border-amber-400/20 bg-amber-400/[0.08] p-3 text-ui-body leading-6 text-amber-50">
               {challenge.summary}
             </p>
-            <dl className="grid gap-2 text-xs sm:grid-cols-2">
+            <dl className="grid gap-2 text-ui-label sm:grid-cols-2">
               {riskEnvelopeFields.map(([key, label]) => (
                 <div
                   className="rounded-md border border-white/10 bg-white/[0.025] p-2.5"
@@ -98,7 +98,7 @@ export function EntryAuthorizationConfirmationDialog({
                 </div>
               ))}
             </dl>
-            <div className="rounded-md border border-white/10 p-3 text-[11px] leading-5 text-slate-400">
+            <div className="rounded-md border border-white/10 p-3 text-ui-caption leading-5 text-slate-400">
               <p>
                 挑战有效至：{formatEntryDateTime(challenge.challengeExpiresAt)}
               </p>
@@ -110,18 +110,18 @@ export function EntryAuthorizationConfirmationDialog({
                 授权指纹：{challenge.authorizationFingerprint}
               </p>
             </div>
-            <p className="text-[11px] leading-5 text-slate-500">
+            <p className="text-ui-caption leading-5 text-slate-500">
               确认不代表成交。每笔订单仍受账户资金、仓位、交易时段、涨跌停、整手和实时价格风控约束；只有券商成交回报会累计真实已买金额。
             </p>
             {challengeExpired ? (
-              <p className="text-xs text-rose-300" role="alert">
+              <p className="text-ui-label text-rose-300" role="alert">
                 本次授权挑战已过期，请关闭后重新请求预览。
               </p>
             ) : null}
           </div>
         ) : null}
         {error ? (
-          <p className="text-xs text-rose-300" role="alert">
+          <p className="text-ui-label text-rose-300" role="alert">
             {error}
           </p>
         ) : null}
@@ -138,6 +138,7 @@ export function EntryAuthorizationConfirmationDialog({
             disabled={busy || !challenge || challengeExpired}
             type="button"
             onClick={onConfirm}
+            className="bg-market-buy-cta text-white hover:bg-market-buy-cta/90"
           >
             <ShieldCheck />
             {busy ? '正在确认…' : '确认授权并启动'}
@@ -176,7 +177,7 @@ export function EntryIntentConfirmationDialog({
     >
       <DialogContent className="border-cyan-400/20 bg-[#0b1120] text-slate-100 sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle className="text-base">确认本次买入</DialogTitle>
+          <DialogTitle className="text-ui-title">确认本次买入</DialogTitle>
           <DialogDescription className="text-left leading-5 text-slate-400">
             以下数量与价格来自刚刚执行的最新行情、计划版本、资金和 A
             股订单风控。
@@ -184,7 +185,7 @@ export function EntryIntentConfirmationDialog({
         </DialogHeader>
         {preview ? (
           <div className="space-y-3">
-            <dl className="grid grid-cols-2 gap-2 text-xs">
+            <dl className="grid grid-cols-2 gap-2 text-ui-label">
               {[
                 ['固定标的', preview.instrumentCode],
                 [
@@ -226,8 +227,8 @@ export function EntryIntentConfirmationDialog({
             <p
               className={
                 preview.valid
-                  ? 'rounded-md border border-emerald-400/20 bg-emerald-400/[0.07] p-3 text-xs text-emerald-100'
-                  : 'rounded-md border border-rose-400/20 bg-rose-400/[0.07] p-3 text-xs text-rose-100'
+                  ? 'rounded-md border border-emerald-400/20 bg-emerald-400/[0.07] p-3 text-ui-label text-emerald-100'
+                  : 'rounded-md border border-rose-400/20 bg-rose-400/[0.07] p-3 text-ui-label text-rose-100'
               }
               role="status"
             >
@@ -237,18 +238,18 @@ export function EntryIntentConfirmationDialog({
             {preview.warnings.length > 0 ? (
               <ul
                 aria-label="本次买入确认警告"
-                className="space-y-1 rounded-md border border-amber-400/20 bg-amber-400/[0.06] p-3 text-[11px] leading-5 text-amber-100"
+                className="space-y-1 rounded-md border border-amber-400/20 bg-amber-400/[0.06] p-3 text-ui-caption leading-5 text-amber-100"
               >
                 {preview.warnings.map(warning => (
                   <li key={warning}>• {warning}</li>
                 ))}
               </ul>
             ) : null}
-            <p className="text-[11px] leading-5 text-slate-500">
+            <p className="text-ui-caption leading-5 text-slate-500">
               本次确认令牌只绑定当前设备、账户、计划和意图，且只能使用一次。确认成功只会进入统一实时复核和下单链路，券商成交回报才是成交事实。
             </p>
             {challengeExpired || intentExpired ? (
-              <p className="text-xs text-rose-300" role="alert">
+              <p className="text-ui-label text-rose-300" role="alert">
                 {intentExpired
                   ? '原买入意图已过期，请等待计划重新评估。'
                   : '本次设备确认挑战已过期，请重新获取最新风控预览。'}
@@ -257,7 +258,7 @@ export function EntryIntentConfirmationDialog({
           </div>
         ) : null}
         {error ? (
-          <p className="text-xs text-rose-300" role="alert">
+          <p className="text-ui-label text-rose-300" role="alert">
             {error}
           </p>
         ) : null}
@@ -276,6 +277,7 @@ export function EntryIntentConfirmationDialog({
             }
             type="button"
             onClick={onConfirm}
+            className="bg-market-buy-cta text-white hover:bg-market-buy-cta/90"
           >
             {busy ? '正在提交…' : '确认提交买入'}
           </Button>

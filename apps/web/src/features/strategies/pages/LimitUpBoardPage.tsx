@@ -55,6 +55,7 @@ import {
 import { useAMarketSession } from '@/features/dashboard/hooks/useAMarketSession';
 import { useCurrentAccount } from '@/features/dashboard/hooks/useDashboard';
 import { useToast } from '@/hooks/use-toast';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import { LimitUpBoardHealthConsole } from '../components/LimitUpBoardHealthConsole';

@@ -32,6 +32,7 @@ import {
 } from '@/features/watchlist/hooks';
 import { mergeWatchlistGroupIds } from '@/features/watchlist/utils';
 import { useToast } from '@/hooks/use-toast';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import {
@@ -429,11 +430,7 @@ export function ScreeningResults({
   const formatPercent = (val: number, bold = false) => {
     const isPositive = val > 0;
     const isNegative = val < 0;
-    const colorClass = isPositive
-      ? 'text-red-400'
-      : isNegative
-        ? 'text-emerald-400'
-        : 'text-slate-500';
+    const colorClass = financialToneClass(val);
 
     return (
       <span
@@ -484,9 +481,7 @@ export function ScreeningResults({
     if (value === null || value === undefined || !Number.isFinite(value)) {
       return 'text-slate-700';
     }
-    if (value > 0) return 'text-red-400';
-    if (value < 0) return 'text-emerald-400';
-    return 'text-slate-500';
+    return financialToneClass(value);
   };
 
   const getFinancialTitle = (stock: StockScreeningResult) => {
@@ -630,7 +625,7 @@ export function ScreeningResults({
               key={`${s}-${idx}`}
               variant="outline"
               className={cn(
-                'h-4 shrink-0 whitespace-nowrap px-1.5 text-[10px] font-normal leading-none',
+                'h-4 shrink-0 whitespace-nowrap px-1.5 text-ui-caption font-normal leading-none',
                 getSignalBadgeClass(s)
               )}
             >
@@ -669,23 +664,23 @@ export function ScreeningResults({
               <button
                 type="button"
                 onClick={() => setLocation(`/stock/${stock.code}`)}
-                className="min-w-0 flex-1 truncate text-left text-sm font-semibold leading-4 text-slate-200 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                className="min-w-0 flex-1 truncate text-left text-ui-body font-semibold leading-4 text-slate-200 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                 aria-label={`${stock.name} ${stock.code} 详情`}
               >
                 {stock.name}
               </button>
-              <span className="shrink-0 font-mono text-[10px] leading-4 text-slate-500">
+              <span className="shrink-0 font-mono text-ui-caption leading-4 text-slate-500">
                 {stock.code}
               </span>
               <span
                 className={cn(
-                  'inline-flex shrink-0 items-center rounded-sm border px-1.5 py-0 text-[10px] leading-4',
+                  'inline-flex shrink-0 items-center rounded-sm border px-1.5 py-0 text-ui-caption leading-4',
                   getInstrumentTypeClass(stock.instrumentType)
                 )}
               >
                 {getInstrumentTypeLabel(stock.instrumentType)}
               </span>
-              <span className="inline-flex max-w-[72px] shrink-0 items-center truncate rounded-sm border border-slate-800 px-1.5 py-0 text-[10px] leading-4 text-slate-600">
+              <span className="inline-flex max-w-[72px] shrink-0 items-center truncate rounded-sm border border-slate-800 px-1.5 py-0 text-ui-caption leading-4 text-slate-600">
                 {stock.industry}
               </span>
             </div>
@@ -748,7 +743,7 @@ export function ScreeningResults({
               table.getFrozenClass(column, backgroundClass)
             )}
           >
-            <div className="flex items-center justify-center gap-3 text-[11px]">
+            <div className="flex items-center justify-center gap-3 text-ui-caption">
               <span className={cn('leading-none', getKDJColor(stock.k))}>
                 {stock.k.toFixed(0)}
               </span>
@@ -780,7 +775,7 @@ export function ScreeningResults({
               table.getFrozenClass(column, backgroundClass)
             )}
           >
-            <div className="flex items-center justify-center gap-2 text-[11px]">
+            <div className="flex items-center justify-center gap-2 text-ui-caption">
               <span className={getRSIColor(stock.rsi6)}>
                 {stock.rsi6.toFixed(0)}
               </span>
@@ -972,9 +967,9 @@ export function ScreeningResults({
               className={cn(
                 'font-medium',
                 (stock.depthImbalance5 ?? 0) > 0.2
-                  ? 'text-red-300'
+                  ? 'text-market-up'
                   : (stock.depthImbalance5 ?? 0) < -0.2
-                    ? 'text-emerald-300'
+                    ? 'text-market-down'
                     : 'text-slate-500'
               )}
             >
@@ -1010,7 +1005,7 @@ export function ScreeningResults({
           >
             <span
               className={cn(
-                'inline-flex items-center gap-1.5 text-xs',
+                'inline-flex items-center gap-1.5 text-ui-label',
                 stock.isStale ? 'text-amber-300' : 'text-cyan-300'
               )}
             >
@@ -1033,7 +1028,7 @@ export function ScreeningResults({
             <span
               className={cn(
                 'font-medium',
-                stock.priceDropPct < -20 ? 'text-emerald-400' : 'text-slate-300'
+                stock.priceDropPct < -20 ? 'text-market-down' : 'text-slate-300'
               )}
             >
               {stock.priceDropPct.toFixed(1)}%
@@ -1087,7 +1082,7 @@ export function ScreeningResults({
                 <Badge
                   variant="outline"
                   className={cn(
-                    'h-4 px-1 text-[10px] font-normal',
+                    'h-4 px-1 text-ui-caption font-normal',
                     qualityBadge[roeQualityStatus]?.[1]
                   )}
                 >
@@ -1153,7 +1148,7 @@ export function ScreeningResults({
               <button
                 type="button"
                 onClick={() => setLocation(`/stock/${stock.code}`)}
-                className="rounded px-1.5 py-1 text-xs font-semibold text-blue-300 transition-colors hover:bg-blue-500/10 hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                className="rounded px-1.5 py-1 text-ui-label font-semibold text-blue-300 transition-colors hover:bg-blue-500/10 hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                 aria-label={`${stock.name} 详情`}
               >
                 详情
@@ -1161,7 +1156,7 @@ export function ScreeningResults({
               <button
                 type="button"
                 onClick={event => openRowMenuFromElement(event, stock)}
-                className="inline-flex h-6 w-6 items-center justify-center rounded-[4px] text-slate-600 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                className="inline-flex h-6 w-6 items-center justify-center rounded-sm text-slate-600 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                 aria-label={`${stock.name} 操作`}
                 title={`${stock.name} 操作`}
               >
@@ -1187,7 +1182,7 @@ export function ScreeningResults({
           <tr>
             <td
               colSpan={columns.length}
-              className="h-[400px] border-b border-white/5 px-6 text-center"
+              className="h-[400px] border-b border-white/5 px-ui-panel text-center"
             >
               <div className="flex flex-col items-center justify-center space-y-3 text-slate-500">
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800/50">
@@ -1197,7 +1192,7 @@ export function ScreeningResults({
                   <p className="font-bold text-slate-300">
                     未找到符合条件的股票
                   </p>
-                  <p className="text-xs">
+                  <p className="text-ui-label">
                     请尝试放宽筛选条件，或减少选定的信号策略
                   </p>
                 </div>
@@ -1216,7 +1211,7 @@ export function ScreeningResults({
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-slate-950/45 backdrop-blur-[1px]">
             <div className="flex flex-col items-center">
               <div className="mb-2 h-8 w-8 animate-spin rounded-full border-2 border-slate-700 border-t-cyan-400 motion-reduce:animate-none" />
-              <p className="flex items-center gap-2 font-mono text-xs text-slate-400">
+              <p className="flex items-center gap-2 font-mono text-ui-label text-slate-400">
                 <Zap className="h-3 w-3" /> 正在执行筛选...
               </p>
             </div>
@@ -1225,7 +1220,7 @@ export function ScreeningResults({
       }
       notice={
         hasNotice ? (
-          <div className="space-y-2 border-b border-amber-500/20 bg-amber-500/[0.08] px-4 py-3 text-xs text-amber-100">
+          <div className="space-y-2 border-b border-amber-500/20 bg-amber-500/[0.08] px-ui-section py-3 text-ui-label text-amber-100">
             {error && (
               <div
                 role="alert"
@@ -1237,7 +1232,7 @@ export function ScreeningResults({
                   <button
                     type="button"
                     onClick={onRetry}
-                    className="ml-auto shrink-0 rounded border border-rose-300/30 px-2 py-1 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                    className="ml-auto shrink-0 rounded border border-rose-300/30 px-2 py-1 text-ui-caption font-semibold text-rose-200 hover:bg-rose-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                   >
                     重试
                   </button>
@@ -1257,7 +1252,7 @@ export function ScreeningResults({
                     <button
                       type="button"
                       onClick={() => setWarningsExpanded(value => !value)}
-                      className="mt-1 text-[11px] font-semibold text-amber-300 underline decoration-amber-300/50 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                      className="mt-1 text-ui-caption font-semibold text-amber-300 underline decoration-amber-300/50 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                     >
                       {warningsExpanded
                         ? '收起警告'
@@ -1348,9 +1343,9 @@ export function ScreeningResults({
                 icon:
                   sortMenu?.payload &&
                   table.isFrozenColumn(sortMenu.payload) ? (
-                    <PinOff className="h-3.5 w-3.5 text-emerald-300" />
+                    <PinOff className="h-3.5 w-3.5 text-primary" />
                   ) : (
-                    <Pin className="h-3.5 w-3.5 text-emerald-300" />
+                    <Pin className="h-3.5 w-3.5 text-primary" />
                   ),
                 id: 'toggle-frozen',
                 label: sortMenu?.payload?.alwaysFrozen
@@ -1448,7 +1443,7 @@ export function ScreeningResults({
           <Badge
             variant="outline"
             aria-live="polite"
-            className="font-mono text-[11px] font-normal text-slate-300"
+            className="font-mono text-ui-caption font-normal text-slate-300"
           >
             已加载 {loadedCount} / 共 {meta?.total ?? loadedCount}
           </Badge>
@@ -1457,7 +1452,7 @@ export function ScreeningResults({
               <Badge
                 variant="outline"
                 className={cn(
-                  'font-mono text-[11px] font-normal',
+                  'font-mono text-ui-caption font-normal',
                   meta?.intradayScannerRunning
                     ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-200'
                     : 'border-amber-400/30 bg-amber-500/10 text-amber-200'
@@ -1467,13 +1462,13 @@ export function ScreeningResults({
               </Badge>
               <Badge
                 variant="outline"
-                className="font-mono text-[11px] font-normal text-slate-400"
+                className="font-mono text-ui-caption font-normal text-slate-400"
               >
                 5 秒自动刷新
               </Badge>
               <Badge
                 variant="outline"
-                className="font-mono text-[11px] font-normal text-slate-400"
+                className="font-mono text-ui-caption font-normal text-slate-400"
               >
                 更新{' '}
                 {formatUpdateTime(
@@ -1483,7 +1478,7 @@ export function ScreeningResults({
               <Badge
                 variant="outline"
                 className={cn(
-                  'font-mono text-[11px] font-normal',
+                  'font-mono text-ui-caption font-normal',
                   intradayStaleRowCount > 0
                     ? 'border-amber-400/30 bg-amber-500/10 text-amber-200'
                     : 'text-slate-400'
@@ -1497,7 +1492,7 @@ export function ScreeningResults({
               <Badge
                 variant="outline"
                 className={cn(
-                  'font-mono text-[11px] font-normal',
+                  'font-mono text-ui-caption font-normal',
                   meta?.hasStaleData
                     ? 'border-amber-400/30 bg-amber-500/10 text-amber-200'
                     : 'text-slate-400'
@@ -1509,7 +1504,7 @@ export function ScreeningResults({
               <Badge
                 variant="outline"
                 className={cn(
-                  'font-mono text-[11px] font-normal',
+                  'font-mono text-ui-caption font-normal',
                   (meta?.missingSnapshotDates.length ?? 0) > 0
                     ? 'border-amber-400/30 bg-amber-500/10 text-amber-200'
                     : 'text-slate-400'
@@ -1521,7 +1516,7 @@ export function ScreeningResults({
                 <Badge
                   variant="outline"
                   className={cn(
-                    'font-mono text-[11px] font-normal',
+                    'font-mono text-ui-caption font-normal',
                     meta.financialHealth.status === 'SUCCESS'
                       ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
                       : 'border-orange-500/30 bg-orange-500/10 text-orange-300'
