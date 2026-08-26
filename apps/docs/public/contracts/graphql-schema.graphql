@@ -994,6 +994,7 @@ type EntryIntentPreview {
 """建仓/加仓托管计划投影"""
 type EntryPlan {
   planId: ID!
+  runId: ID!
   configVersion: Int!
   accountId: String!
   instrumentCode: String!
@@ -7181,6 +7182,9 @@ type TTradeReplay {
   accountId: String!
   status: String!
   progressPct: Float!
+  phase: TTradeReplayPhase!
+  phaseProgressPct: Float!
+  phaseMessage: String!
   revision: String!
   processedUntil: DateTime
   startTime: DateTime!
@@ -7192,6 +7196,8 @@ type TTradeReplay {
   errorMessage: String
   dataQuality: String!
   dataQualityMessage: String!
+  dataPreparation: TTradeReplayDataPreparation!
+  initialPortfolio: TTradeReplayInitialPortfolio!
   skippedStockCodes: [String!]!
   summary: TTradeReplaySummary
   instruments: [TTradeReplayInstrumentResult!]!
@@ -7243,6 +7249,30 @@ type TTradeReplayCyclePage {
   items: [TTradeReplayCycle!]!
 }
 
+"""做 T 回放历史行情准备进度"""
+type TTradeReplayDataPreparation {
+  status: String!
+  requiredInstruments: [String!]!
+  requiredPeriods: [String!]!
+  totalWindows: Int!
+  completedWindows: Int!
+  currentInstrument: String
+  currentPeriods: [String!]!
+  currentStartDate: String
+  currentEndDate: String
+  missingInstruments: [String!]!
+}
+
+"""做 T 回放最终采用的不可变初始组合"""
+type TTradeReplayInitialPortfolio {
+  source: TTradeReplayPortfolioSource!
+  asOf: DateTime!
+  snapshotId: String
+  cashAvailable: Float!
+  totalAsset: Float!
+  positions: [TTradeReplayPosition!]!
+}
+
 """做 T 回放单标的结果"""
 type TTradeReplayInstrumentResult {
   stockCode: String!
@@ -7268,6 +7298,34 @@ type TTradeReplayMutationResult {
   replay: TTradeReplay
 }
 
+"""做 T 历史回放当前执行阶段"""
+enum TTradeReplayPhase {
+  VALIDATING_PORTFOLIO
+  CHECKING_DATA
+  DOWNLOADING_DATA
+  VERIFYING_DATA
+  REPLAYING
+  FINALIZING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+"""做 T 历史回放的不可变初始组合"""
+input TTradeReplayPortfolioInput {
+  source: TTradeReplayPortfolioSource!
+  asOf: DateTime!
+  snapshotId: String = null
+  cashAvailable: Float = null
+  positions: [TTradeReplayPositionInput!]!
+}
+
+"""做 T 历史回放初始组合来源"""
+enum TTradeReplayPortfolioSource {
+  SNAPSHOT
+  MANUAL
+}
+
 """历史回放初始持仓"""
 type TTradeReplayPosition {
   stockCode: String!
@@ -7283,11 +7341,7 @@ type TTradeReplayPosition {
 input TTradeReplayPositionInput {
   stockCode: String!
   volume: Int!
-  availableVolume: Int!
-  instrumentName: String! = ""
-  avgPrice: Float! = 0
-  lastPrice: Float! = 0
-  marketValue: Float! = 0
+  avgPrice: Float!
 }
 
 """做 T 历史回放准备信息"""
@@ -7322,10 +7376,7 @@ input TTradeReplayStartInput {
   startTime: DateTime!
   endTime: DateTime!
   signalPolicy: TTradeSignalPolicyInput!
-  initialPortfolioAsOf: DateTime = null
-  initialCash: Float = null
-  initialTotalAsset: Float = null
-  initialPositions: [TTradeReplayPositionInput!]!
+  portfolio: TTradeReplayPortfolioInput!
   targetTradeAmount: Float! = 10000
   maxTradeAmount: Float! = 12000
   maxConcurrentBatches: Int! = 3
