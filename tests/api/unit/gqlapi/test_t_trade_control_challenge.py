@@ -29,7 +29,7 @@ def _request(
       if action == TTradeControlAction.ACTIVATE_CANARY
       else TTradeRolloutTarget.LIVE
     ),
-    reason="operator reviewed rollout evidence",
+    reason="enable T-trade automation",
     idempotency_key=f"activate-{action.value.lower()}",
   )
 
@@ -112,6 +112,11 @@ def test_t_feature_switch_blocks_t_activation() -> None:
       _readiness(failed={"T_TRADE_LIVE_ENABLED"}),
       _rollout(),
     )
+
+
+def test_activation_has_no_history_or_release_evidence_gate() -> None:
+  assert all(not code.startswith("V3_") for code in _ACTIVATION_GATE_CODES)
+  _validate_action_readiness(_request(), _readiness(), _rollout())
 
 
 def test_account_gate_still_blocks_t_activation_composition() -> None:

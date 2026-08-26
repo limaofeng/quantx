@@ -42,6 +42,7 @@ def _account_safety() -> dict:
     ],
     "engine_status": "READY",
     "agent_status": "READY",
+    "ready_live_agent_count": 1,
     "agent_mode": "live",
     "protocol_version": "1.1",
     "reconcile_status": "READY",
@@ -61,6 +62,10 @@ class _ReadinessDb:
         enabled=False,
         policy_version=3,
         acknowledged_policy_version=0,
+        max_active_batches=1,
+        max_batch_volume=100,
+        max_order_amount=20000.0,
+        max_total_exposure_pct=0.02,
       )
     assert model is AccountExecutionControl
     return SimpleNamespace(
@@ -84,9 +89,6 @@ async def test_t_switch_is_feature_local_in_composed_readiness(monkeypatch) -> N
   monkeypatch.setattr(operations_module, "AsyncSessionLocal", sessions)
   monkeypatch.setattr(operations_module.settings, "t_trade_live_enabled", False)
   service = TTradeOperationsService()
-  service.rollout_evidence_evaluator = SimpleNamespace(
-    evaluate=AsyncMock(return_value={"checks": [], "summary": {}})
-  )
 
   readiness = await service.readiness("account-1")
 
@@ -98,6 +100,32 @@ async def test_t_switch_is_feature_local_in_composed_readiness(monkeypatch) -> N
     item["code"] != "T_TRADE_LIVE_ENABLED"
     for item in readiness["account_safety"]["checks"]
   )
+
+
+@pytest.mark.asyncio
+async def test_current_safety_and_rollout_limits_are_sufficient_for_activation(
+  monkeypatch,
+) -> None:
+  class AccountSafety:
+    async def status(self, account_id):
+      assert account_id == "account-1"
+      return _account_safety()
+
+  @asynccontextmanager
+  async def sessions():
+    yield _ReadinessDb()
+
+  monkeypatch.setattr(operations_module, "AccountExecutionSafetyService", AccountSafety)
+  monkeypatch.setattr(operations_module, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(operations_module.settings, "t_trade_live_enabled", True)
+
+  readiness = await TTradeOperationsService().readiness("account-1")
+
+  assert readiness["automation_ready"] is True
+  assert readiness["can_activate_live"] is True
+  assert readiness["ready_live_agent_count"] == 1
+  assert all(not item["code"].startswith("V3_") for item in readiness["checks"])
+  assert "v3_rollout_evidence" not in readiness
 
 
 @pytest.fixture
@@ -207,6 +235,49 @@ async def test_pause_changes_only_t_rollout(rollout_database) -> None:
     assert account.controlled_window_active is True
     assert rollout.stage == "PAUSED"
     assert rollout.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_canary_activation_uses_current_safety_without_replay_evidence(
+  rollout_database,
+) -> None:
+  async with rollout_database() as db:
+    rollout = await db.get(TTradeRollout, "account-1")
+    rollout.stage = "SHADOW"
+    rollout.enabled = False
+    await db.commit()
+
+  service = TTradeOperationsService()
+  service.readiness = AsyncMock(
+    return_value={
+      "automation_ready": True,
+      "controlled_window_active": True,
+      "snapshot_id": "snapshot-1",
+      "snapshot_hash": "a" * 64,
+      "checks": [],
+    }
+  )
+
+  await service.activate_rollout(
+    "account-1",
+    user_id="user-1",
+    acknowledged_policy_version=3,
+    target_stage="CANARY",
+    expected_snapshot_id="snapshot-1",
+    operation_id="activate-canary-1",
+  )
+
+  async with rollout_database() as db:
+    rollout = await db.get(TTradeRollout, "account-1")
+    event = await db.get(TTradeRolloutEvent, "activate-canary-1")
+    assert rollout.stage == "CANARY"
+    assert rollout.enabled is True
+    assert event.details == {
+      "operationId": "activate-canary-1",
+      "policyVersion": 3,
+      "confirmation": "",
+      "targetStage": "CANARY",
+    }
 
 
 @pytest.mark.asyncio

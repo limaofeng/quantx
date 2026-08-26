@@ -13,7 +13,6 @@ from quantx_contracts import (
   HistoricalBarSummary,
   historical_bar_key,
 )
-from quantx_infrastructure.services import canonical_tick_preparation
 from quantx_infrastructure.services import (
   market_data_persistence_verification as persistence_verification,
 )
@@ -73,15 +72,6 @@ def _payload(
     "periods": periods or ["tick"],
     "start_time": "20231115",
     "end_time": "20231115",
-  }
-
-
-def _canonical_payload(*, verification_pass: int = 1) -> dict:
-  return {
-    **_payload(),
-    "destination": "canonical_tick_archive",
-    "canonical_preparation_id": "a" * 64,
-    "canonical_verification_pass": verification_pass,
   }
 
 
@@ -291,88 +281,6 @@ class AtomicRequestStore:
   async def market_data_transfers(self, request_id: str):
     assert request_id == "request-1"
     return []
-
-
-@pytest.mark.asyncio
-async def test_canonical_destination_streams_deterministic_verified_tick_file(
-  monkeypatch: pytest.MonkeyPatch,
-  tmp_path: Path,
-) -> None:
-  preparation_root = tmp_path / "canonical-preparation"
-  monkeypatch.setenv(
-    "QUANTX_CANONICAL_TICK_PREPARATION_DIR",
-    str(preparation_root),
-  )
-  first = _tick_row()
-  second = _tick_row(time=first["time"] + 1)
-  records = [first, second, _summary([first, second])]
-  store = ManifestStore(
-    payload=_canonical_payload(),
-    manifest=[_write_chunk(tmp_path, records)],
-  )
-
-  result = await ingestion.ingest_uploaded_market_data_request(store, "request-1")
-
-  assert result["destination"] == "canonical_tick_archive"
-  assert result["records_saved"] == 2
-  assert result["records_verified"] == 2
-  assert len(result["canonical_tick_files"]) == 1
-  evidence = result["canonical_tick_files"][0]
-  target = Path(evidence["path"])
-  assert target.is_file()
-  assert evidence["record_count"] == 2
-  assert evidence["content_sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
-  rows = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
-  assert [row["source_time_ms"] for row in rows] == [first["time"], second["time"]]
-  assert [row["tick_ordinal"] for row in rows] == [0, 0]
-  assert [row["market_stream_sequence"] for row in rows] == [1, 2]
-  assert [row["market_stream_reset"] for row in rows] == [True, False]
-
-  repeated = await ingestion.ingest_uploaded_market_data_request(store, "request-1")
-  assert repeated["canonical_tick_files"] == result["canonical_tick_files"]
-
-
-@pytest.mark.asyncio
-async def test_canonical_destination_rejects_conflicting_same_pass_content(
-  monkeypatch: pytest.MonkeyPatch,
-  tmp_path: Path,
-) -> None:
-  monkeypatch.setenv(
-    "QUANTX_CANONICAL_TICK_PREPARATION_DIR",
-    str(tmp_path / "canonical-preparation"),
-  )
-  original = _tick_row(last_price=10.0)
-  original_store = ManifestStore(
-    payload=_canonical_payload(),
-    manifest=[_write_chunk(tmp_path, [original, _summary([original])], index=0)],
-  )
-  await canonical_tick_preparation.ingest_uploaded_canonical_tick_request(
-    original_store,
-    "request-1",
-  )
-
-  changed = _tick_row(last_price=10.1)
-  changed_directory = tmp_path / "changed"
-  changed_directory.mkdir()
-  changed_store = ManifestStore(
-    payload=_canonical_payload(),
-    manifest=[
-      _write_chunk(
-        changed_directory,
-        [changed, _summary([changed])],
-        index=0,
-      )
-    ],
-  )
-
-  with pytest.raises(
-    ingestion.MarketDataValidationError,
-    match="conflicting content",
-  ):
-    await canonical_tick_preparation.ingest_uploaded_canonical_tick_request(
-      changed_store,
-      "request-1",
-    )
 
 
 def test_tick_preprocessing_preserves_source_key_and_optional_limit_fields() -> None:

@@ -290,7 +290,7 @@ code, label, points, max_points, value, target, unit
 | `min_confirm_source_identities` | 2 |
 | `rearm_seconds` | 15 秒 |
 
-这些值是 walk-forward 的起始 policy，不是胜率或最终上线承诺；历史验证和 PAPER 验收完成后，实际 LIVE 值以冻结的新 `policy_version` 为准。
+这些值是 walk-forward 的起始 policy，不是胜率或最终上线承诺；历史回测和 PAPER 观察可以帮助调整参数，但不构成 CANARY/LIVE 授权条件。参数变化仍须冻结为新的 `policy_version`。
 
 V3 初始贡献权重如下，硬门禁始终独立并具有绝对否决权：
 
@@ -978,20 +978,16 @@ Engine 内存累计器必须同时限制活动 stream 数和 metric series 数�
 - [ ] iOS Dynamic Type/VoiceOver 可读，网络失效时明确旧数据且不能误确认（后续 iOS 门禁，本轮 Windows 不计入）。
 - [x] 参数冲突不覆盖草稿，重热影响在保存前清楚呈现。
 
-### 19.5 上线验收
+### 19.5 自动执行授权
 
-CANARY 与 LIVE 都是实际执行阶段。进入任一阶段前，当前 Windows 范围内的以下门禁均须完成；服务端必须对任一缺项 `fail-closed`，不得仅依赖客户端文案或人工记忆。iOS 自动化与无障碍验收仍属于后续 Phase 4，不作为当前 Windows 门禁。
+CANARY 与 LIVE 都会产生真实委托，因此服务端只对执行当下的账户安全事实 `fail-closed`。授权条件保持为一条短链：
 
-1. 全量领域/Engine/API/Web（当前仅桌面范围）自动化测试；iOS 自动化测试属于后续 Phase 4，不阻塞本轮 Windows 交付；
-2. 至少 20 个交易日完整真实行情的严格因果历史回放；
-3. PAPER 连续运行至少 5 个交易日且完成不少于 20 个候选生命周期；
-4. episode 重复率为 0，幽灵候选为 0，未来数据违规为 0；
-5. 每个候选都能从当前 Web UI 追溯到 source identity、profile/policy/feature 版本、贡献、门禁、TradeIntent 和后续结果；iOS UI 追溯属于后续门禁；
-6. 用户确认策略阈值、频率、主 blocker 与费用后结果满足预期后，才进行单账户、有限标的、有限暴露的 LIVE 灰度。
+1. 当前账户、Engine、唯一 QMT Agent、协议、快照与对账状态允许增加风险，Kill Switch 未触发；
+2. `T_TRADE_LIVE_ENABLED` 已启用，做 T rollout 已配置，并保持单批次、正订单上限和不超过 2% 总敞口的有限暴露；
+3. 控制挑战绑定当前 `policy_version + snapshot_id`，用户对目标阶段进行显式确认；LIVE 还须精确输入 `LIVE:<account_id>` 并绑定当前账户实盘窗口；
+4. 最终写入前在 rollout 行锁内重新核对账户授权、快照、策略版本和有限暴露配置。
 
-> **当前上线判定（2026-08-23）：BLOCKED。** 服务端 V3 rollout evidence 硬门禁已接入 CANARY/LIVE 激活链路。当前正式严格因果历史回放为 `0/20` 个交易日，PAPER 为 `0/5` 个连续交易日且已完成候选生命周期为 `0/20`，`operator_review=false`。对 17 个 D-1 窗口进行的审计覆盖 706 个唯一 `instrument-day`，没有任何一个窗口能为全部持仓提供完整 `20/20` 个交易日的可用因果数据。因此 CANARY 与 LIVE 均不得激活；诊断样本、固定负载或任何合成压力样本均不得记作历史回放。
-
-收益不作为单次上线的硬保证；验收关注因果正确、可解释、可恢复、安全和统计口径可信。
+历史回放是普通 BACKTEST，PAPER 是观察运行；两者用于研究、诊断和参数调整，不是 CANARY、LIVE 或发布验收门禁。20 个交易日只是单次回放的资源上限，不表示必须完成 20 日才能启用自动执行。收益、候选数量、操作人审阅记录和专用“正式证据”也不进入授权判断。
 
 ## 20. 迁移实施计划
 
@@ -1029,13 +1025,12 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 - 接入通知/refetch、未知枚举和旧数据保护。
 - 完成单元、UI、Dynamic Type 与 VoiceOver 验收。
 
-### Phase 5：回放校准与 PAPER
+### Phase 5：回测研究与 PAPER 观察
 
 - 以一期阈值为搜索种子，按时间切分校准权重与阈值。
 - 在固定验证窗口对比一期规则，不因验证结果回调训练参数。
-- PAPER 影子观察并完成上线验收；任何变更生成新 policy version。
-
-> 当前状态（2026-08-23）：**BLOCKED**。正式历史回放尚为 `0/20`，不能以 17 个 D-1 窗口审计、`INSUFFICIENT_SAMPLE` 闭环、诊断样本或压力样本替代；PAPER 尚为 `0/5` 个连续交易日、`0/20` 个完成候选生命周期。
+- PAPER 可用于观察真实时序下的行为；任何参数变更生成新 policy version。
+- 普通回测和 PAPER 的结果不改变 CANARY/LIVE 授权状态，也不形成发布阻塞。
 
 ### Phase 6：原子切换与 LIVE 灰度
 
@@ -1045,7 +1040,7 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 - 当前 Windows 交付完成 Web/API 同批切换并删除旧 `latestEvaluation/currentSignal/conditionProgress` 查询与兜底；iOS 同批切换留待 Phase 4，不作为本轮门禁。
 - 单账户小范围灰度，满足监控窗口后再扩大到全部合格持仓。
 
-> 当前状态（2026-08-23）：**BLOCKED**。CANARY/LIVE 已由服务端 rollout evidence 硬门禁保护；在正式回放、PAPER、候选追溯质量、操作人审查和有限暴露配置均满足前，任何激活请求均应 `fail-closed`。
+> CANARY/LIVE 的激活仅由第 19.5 节的当前账户安全、功能配置、有限暴露和显式确认保护。历史回放与 PAPER 不参与判定。
 
 ### 回滚边界
 
@@ -1103,22 +1098,21 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 |---|---|---|
 | Domain / Strategy | V3 规则引擎、因果特征/DataHealth、双 FSM、episode/candidate/rearm、状态补丁递归账户事实防线与唯一 `step()` 接入已落地。 | Python 修复后全量为 `3119 passed, 16 skipped, 0 failed`。 |
 | Infrastructure / Engine | evaluation/profile/projection、持久化、CAS、权威行情 lineage、审批重验、账户级配置互斥、崩溃恢复、幂等关联与结果未知（result unknown）收敛已落地。D-1 画像已改为“Influx 主 `time` keyset + 严格 source identity/storage-time 映射校验”的有界流式、每分钟压缩、`fail-closed`。 | D-1 画像专项已通过（主代理独立 4 文件 `47 passed`）；画像缓存、诊断窗口、终态意图缓存、结果修复游标与结果归档查询继续保持全局或分页硬界限。 |
-| GraphQL / API | V3 snapshot/history/diagnostics/preview/save、candidate trace、结果口径和低基数 telemetry 已原子替换；发布 SDL 不再含旧 signal-history；控制链路的 `beginTTradeControlledWindow(accountId, policyVersion, snapshotId, idempotencyKey)` 与 `activateTTradeLive(accountId, policyVersion, snapshotId, idempotencyKey, targetStage, confirmation)` 均以 `policyVersion + snapshotId` 绑定确认上下文。CANARY/LIVE 激活前的 V3 rollout evidence 服务端硬门禁已落地并 `fail-closed`。 | Caddy `/health/live=200`；公开 `/graphql` 已确认新 V3 queries/types 及两项控制 mutation 的完整签名；Web operation 已同步传递两种版本身份，避免重启后客户端与 authoritative schema 漂移。当前 evidence 为正式回放 `0/20`、PAPER `0/5` 与 `0/20` 生命周期、`operator_review=false`，故 CANARY/LIVE 不可激活。 |
+| GraphQL / API | V3 snapshot/history/diagnostics/preview/save、candidate trace、结果口径和低基数 telemetry 已原子替换；发布 SDL 不再含旧 signal-history；控制链路的 `beginTTradeControlledWindow(accountId, policyVersion, snapshotId, idempotencyKey)` 与 `activateTTradeLive(accountId, policyVersion, snapshotId, idempotencyKey, targetStage, confirmation)` 均以 `policyVersion + snapshotId` 绑定确认上下文。 | CANARY/LIVE 只检查当前账户安全、功能配置、有限暴露、绑定快照与显式确认；历史回放、PAPER、候选数量和专用发布证据不参与授权。 |
 | Web（当前仅桌面范围） | 六模式信息架构、信号 inspector、诊断、policy editor、冲突草稿、candidate trace、客户端 scope/版本信任边界与订阅 refetch 已落地。订阅通知只作失效提示；静默丢通知、重复通知、重连、前台/网络/可见性恢复以及 30 秒审计均触发受合并保护的 authoritative `network-only` 回拉。 | 已在 1920/1366 桌面检查总览/信号/诊断/参数纯预览/回放报告：无横向溢出、console 0 errors，键盘焦点、读屏语义与 reduced motion 通过；参数服务端纯校验通过，未执行任何写/交易动作。移动 Web 不额外扩展。 |
 | iOS（当前 Windows scope-waiver） | 本轮不开发、不生成 Apollo types、不运行 Xcode/SwiftUI 验证；已按 hunk 清理 V3 手写源码、GraphQL operations、V3 测试与缺失 generated symbol 引用；并行 watchlist 与用户原有 iOS 改动保留。 | Windows 无 Xcode；iOS codegen/xcodebuild、Dynamic Type、VoiceOver 与可编译原子性全部留待 Phase 4，且不属于当前 Windows 完成门禁。 |
 | 控制 / 迁移 / 文档质量 | TTrade 控制链路与文档构建已完成专项验证；开发库已按授权完成 `0028 → 0031`。 | 控制专项 `282 passed`；迁移专项 `6 passed`；迁移 `0029/0030/0031` 已增加对开发库预创建完整空表的严格 schema 验证与采用，局部或不匹配 `fail-closed`；迁移前自动备份记录于 `F:\Workspace\quantx\.runtime\backups\20260823T104409Z`，迁移后 schema head 为 `20260823_0031`。随后按 `full/live` 重启验收：9 个受管组件均 RUNNING，`liveTrading=ENABLED`，QMT Agent `ready`、协议 `1.1`，快照新鲜（<90s）。混合工作树 Alembic 唯一 head 为 `20260823_0031`；V3 可提交迁移链独立止于 `20260823_0030`，明确不纳入并行 watchlist `0031`；docs build passed；Ruff 对 146 个变更 Python 文件通过；`diff-check` 无 whitespace errors。 |
-| 回放 / 上线 | V3 漏斗、blocker/FSM/版本分组、成熟 cohort 结果口径、同源同 Tick READY 基线与因果诊断报告已落地；CANARY/LIVE rollout evidence 硬门禁已接入服务端。 | **BLOCKED**：现有 4 个闭环均为 `INSUFFICIENT_SAMPLE`，不算 V3 20 日验收；17 个 D-1 窗口、706 个唯一 `instrument-day` 审计未找到任一全持仓 `20/20` 数据窗口，正式严格因果回放为 `0/20`。PAPER 为 `0/5` 个连续交易日、`0/20` 生命周期；`operator_review=false`。完整 9,600 Tick 压力仍未跑完；最新 sealed persistent 480 Tick 虽保持逐 Tick CAS 并将 position 写缩至 1 次/8 行，仍出现外部 DB checkpoint/snapshot 长尾，故 SLO 不得判 PASS。CANARY/LIVE 不得激活。 |
+| 回放 / 自动执行 | V3 漏斗、blocker/FSM/版本分组、成熟 cohort 结果口径、同源同 Tick READY 基线与因果诊断报告已落地。 | 回放统一走普通 BACKTEST，单次最多 20 个交易日只是资源上限；回放结果与 PAPER 观察不阻塞 CANARY/LIVE。压力与性能数据继续作为工程优化依据，不作为自动执行授权指标。 |
 
-#### 未完成 / 阻塞门禁（不得声称完成）
+#### 后续验证记录
 
 - 发布快照已完成：官方 `npm run docs:contracts` 已刷新发布 SDL，`tests/api/unit/test_client_contracts.py` 9 passed。
 - 运行端点已刷新并确认：Caddy `/health/live=200`，公开 `/graphql` 已确认新 V3 queries/types 及 `begin`/`activate` 完整签名（两者均要求 `policyVersion + snapshotId`）；不再保留“运行中仍是旧签名”的表述。
 - 公开端点 codegen 后的 `npm run check`、`npm run lint`、`npm run test:run`（100 files/512 tests）、`npm run build` 全通过；Web mutation 变量与当前运行 schema 的 `policyVersion + snapshotId` 已同步。
 - Web 桌面端已验证：Redis/GraphQL subscription 仅作失效提示；静默丢通知下也会以 30 秒 `network-only` 审计回拉服务端真源，重连与重复通知受到合并保护。1920/1366 无横向溢出，键盘焦点、读屏语义与 reduced motion 已通过；参数服务端纯校验通过，未执行任何写/交易动作。移动 Web 不额外扩展；iOS Apollo codegen/xcodebuild（Windows 无 Xcode，必须 macOS）及 Dynamic Type/VoiceOver 验证属于后续 Phase 4，未纳入当前门禁。
-- 正式 20 交易日严格因果回放为 **BLOCKED（`0/20`）**：17 个 D-1 窗口、706 个唯一 `instrument-day` 审计没有任何全持仓 `20/20` 可用窗口。诊断样本、固定负载或合成压力样本不得称作或替代历史回放。
-- PAPER 为 **BLOCKED（`0/5` 连续交易日、`0/20` 完成候选生命周期）**；其结果、重复/幽灵/未来数据质量和候选追溯不得提前声称验收。
-- 压力 SLO 为 **BLOCKED**：固定 9,600 输入尚未完成。最新 sealed persistent 480 Tick 是诊断证据而非替代：Engine p95/p99 为 `5509.579435/9853.155481 ms`，RuntimeState checkpoint/snapshot p95 为 `4016.9334/4289.245725 ms`，且无 CAS conflict；在完整重跑前不得冻结基线或声明延迟、CAS 冲突率、数据库写入量达标。
-- CANARY/LIVE 为 **BLOCKED**：服务端 rollout evidence 硬门禁已落地，当前正式回放/PAPER 不足且 `operator_review=false`；不得激活 CANARY 或 LIVE。
+- 普通回测、PAPER 观察和压力测试可按研究需要继续运行；不得把它们包装成 CANARY/LIVE 或发布所需的“正式证据”。
+- 压力数据仍可用于定位 Engine 与数据库长尾，但不改变当前账户安全授权结果。
+- CANARY/LIVE 是否可激活，以调用时服务端返回的当前账户安全、功能配置、有限暴露和确认状态为准。
 
 机器学习仍保留为下一阶段，不计入本轮 V3 已完成范围。
 

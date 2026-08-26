@@ -215,45 +215,6 @@ async def test_uploaded_bars_are_validated_and_saved(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_canonical_bar_destination_uses_declared_ingestion_route(
-  tmp_path,
-  monkeypatch,
-):
-  rows = [_tick_record(time=1_699_977_600_000)]
-  request = _bars_request(stock_list=["601318.SH"], periods=["tick"])
-  request["request_payload"].update(
-    {
-      "destination": "canonical_tick_archive",
-      "canonical_preparation_id": "a" * 64,
-      "canonical_verification_pass": 1,
-    }
-  )
-  store = FakeStore(
-    request=request,
-    manifest=[
-      _transfer(
-        tmp_path,
-        [*rows, _bar_summary(code="601318.SH", period="tick", rows=rows)],
-      )
-    ],
-  )
-  routed = AsyncMock(return_value={"destination": "canonical_tick_archive"})
-  save = AsyncMock()
-  monkeypatch.setattr(
-    durable_agent_flows,
-    "ingest_uploaded_market_data_request",
-    routed,
-  )
-  monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
-
-  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
-
-  assert result == {"destination": "canonical_tick_archive"}
-  routed.assert_awaited_once_with(store, "request-1")
-  save.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_missing_requested_code_summary_is_rejected_before_any_write(
   tmp_path,
   monkeypatch,

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -8,34 +8,6 @@ from quantx_infrastructure.services.t_trade_replay_service import (
   RUNTIME_STATE_CHECKPOINT_POLICY_KEY,
   TTradeReplayService,
 )
-
-
-def test_formal_archive_request_is_persisted_only_with_exact_scope() -> None:
-  trading_dates = [date(2026, 7, 1) + timedelta(days=index) for index in range(20)]
-  archive = {
-    "schema_version": 1,
-    "archive_root": "F:\\verified\\canonical-ticks",
-    "cutover_token": "canonical-tick-v1-" + "a" * 64,
-    "manifest_fingerprint": "b" * 64,
-    "source_manifest_sha256": "c" * 64,
-    "formal_scope_fingerprint": "d" * 64,
-    "snapshot_date": "2026-06-30",
-    "instrument_codes": ["000001.SZ", "600000.SH"],
-    "trading_dates": [item.isoformat() for item in trading_dates],
-  }
-
-  normalized = TTradeReplayService._normalize_canonical_tick_archive_request(
-    archive,
-    trading_dates=trading_dates,
-  )
-
-  assert normalized == archive
-  archive["trading_dates"] = archive["trading_dates"][:-1]
-  with pytest.raises(ValueError, match="精确覆盖正式 20 日范围"):
-    TTradeReplayService._normalize_canonical_tick_archive_request(
-      archive,
-      trading_dates=trading_dates,
-    )
 
 
 @pytest.mark.asyncio
@@ -93,7 +65,7 @@ async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> 
         "avg_price": 1.0,
         "last_price": 1.0,
         "market_value": 100.0,
-      }
+      },
     ],
   }
 
@@ -174,12 +146,11 @@ async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> 
     }
   ]
   assert run_kwargs["instruments"] == ["600887.SH"]
-  assert run_kwargs["parameters"]["initial_portfolio_as_of"] == (
-    "2026-08-18T15:00:00"
+  assert run_kwargs["parameters"]["initial_portfolio_as_of"] == ("2026-08-18T15:00:00")
+  assert (
+    "MANUAL_HISTORICAL_PORTFOLIO"
+    in run_kwargs["parameters"]["initial_asset_reconciliation"]["quality_flags"]
   )
-  assert "MANUAL_HISTORICAL_PORTFOLIO" in run_kwargs["parameters"][
-    "initial_asset_reconciliation"
-  ]["quality_flags"]
 
 
 @pytest.mark.asyncio
@@ -292,9 +263,7 @@ async def test_cancel_running_replay_forces_past_simulated_exit_plan_guard() -> 
   manager = SimpleNamespace(
     get_run=lambda _run_id: runtime,
     cancel_deferred_start=AsyncMock(return_value=True),
-    stop_strategy=AsyncMock(
-      side_effect=lambda _run_id, *, force=False: bool(force)
-    ),
+    stop_strategy=AsyncMock(side_effect=lambda _run_id, *, force=False: bool(force)),
   )
   service = TTradeReplayService(manager)
   service._load_run_and_backtest = AsyncMock(
@@ -309,9 +278,7 @@ async def test_cancel_running_replay_forces_past_simulated_exit_plan_guard() -> 
       None,
     )
   )
-  service.get = AsyncMock(
-    return_value={"run_id": "replay-1", "status": "CANCELLED"}
-  )
+  service.get = AsyncMock(return_value={"run_id": "replay-1", "status": "CANCELLED"})
 
   with (
     patch(
@@ -343,19 +310,3 @@ async def test_cancel_running_replay_forces_past_simulated_exit_plan_guard() -> 
   manager.stop_strategy.assert_awaited_once_with("replay-1", force=True)
   update_projection.assert_awaited_once()
   assert update_projection.await_args.kwargs["status"] == "CANCELLED"
-
-
-def test_formal_v3_replay_metadata_requires_an_exact_window() -> None:
-  dates = [date(2026, 7, 1) + timedelta(days=index) for index in range(20)]
-
-  normalized = TTradeReplayService._normalize_rollout_evidence_request(
-    {"replay_acceptance": "V3_CAUSAL_20D"},
-    trading_dates=dates,
-  )
-
-  assert normalized == {"replay_acceptance": "V3_CAUSAL_20D"}
-  with pytest.raises(ValueError, match="恰好覆盖 20 个交易日"):
-    TTradeReplayService._normalize_rollout_evidence_request(
-      {"replay_acceptance": "V3_CAUSAL_20D"},
-      trading_dates=dates[:-1],
-    )

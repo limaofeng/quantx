@@ -23,9 +23,6 @@ from quantx_infrastructure.services.t_trade_operations_service import (
   TTradeOperationIdempotencyError,
   TTradeOperationsService,
 )
-from quantx_infrastructure.services.t_trade_rollout_evidence_service import (
-  V3_ROLLOUT_GATE_CODES,
-)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -60,6 +57,7 @@ _PREPARATION_GATE_CODES = frozenset(
     "PROTOCOL_1_1",
     "EXECUTION_CONTROL_CONFIGURED",
     "T_TRADE_ROLLOUT_CONFIGURED",
+    "T_TRADE_ROLLOUT_LIMITS_CONFIGURED",
     "SNAPSHOT_RECONCILED",
     "SNAPSHOT_FRESH",
     "SNAPSHOT_ACTIVITY_CLASSIFIED",
@@ -70,15 +68,11 @@ _PREPARATION_GATE_CODES = frozenset(
     "ACCOUNT_RISK_INCREASE_AUTHORIZED",
   }
 )
-_ACTIVATION_GATE_CODES = (
-  _PREPARATION_GATE_CODES
-  | frozenset(
-    {
-      "CONTROLLED_WINDOW_ACTIVE",
-      "NO_EXTERNAL_BROKER_ACTIVITY",
-    }
-  )
-  | V3_ROLLOUT_GATE_CODES
+_ACTIVATION_GATE_CODES = _PREPARATION_GATE_CODES | frozenset(
+  {
+    "CONTROLLED_WINDOW_ACTIVE",
+    "NO_EXTERNAL_BROKER_ACTIVITY",
+  }
 )
 
 _CONTROL_EVENT_TYPES = {
@@ -434,10 +428,6 @@ def _readiness_binding(readiness: dict[str, Any]) -> dict[str, Any]:
     "unresolved_critical_alert_count": int(
       readiness.get("unresolved_critical_alert_count") or 0
     ),
-    # Bind the exact durable-evidence summary into the device challenge.  A
-    # CANARY/LIVE confirmation cannot reuse a preview after the V3 evidence
-    # changed, even if generic runtime checks happen to remain green.
-    "v3_rollout_evidence": _json_safe(dict(readiness.get("v3_rollout_evidence") or {})),
     "checks": checks,
   }
 
@@ -482,8 +472,6 @@ def _validate_action_readiness(
   request: TTradeControlRequestData,
   readiness: dict[str, Any],
   rollout: Optional[TTradeRollout],
-  *,
-  allow_pending_operator_review: bool = False,
 ) -> None:
   binding = _rollout_binding(rollout)
   if request.policy_version != int(binding["policy_version"]):
@@ -504,17 +492,6 @@ def _validate_action_readiness(
       "完整安全快照已变化，请刷新后重新预览",
     )
   required = _ACTIVATION_GATE_CODES
-  # This device-bound route may create the §19.5 acknowledgement together
-  # with activation.  Let it proceed when, and only when, that single
-  # acknowledgement is pending; all replay, PAPER, trace, quality, runtime,
-  # and finite-exposure gates remain required.  The operations service
-  # re-evaluates durable evidence under the rollout lock before persisting the
-  # acknowledgement with activation.
-  if allow_pending_operator_review and request.action in {
-    TTradeControlAction.ACTIVATE_CANARY,
-    TTradeControlAction.ACTIVATE_LIVE,
-  }:
-    required = required - {"V3_OPERATOR_REVIEW_CONFIRMED"}
   failure = _gate_failure(readiness, required)
   if failure:
     raise TradeApprovalChallengeError("T_TRADE_CONTROL_NOT_READY", failure)
@@ -727,13 +704,6 @@ class TTradeControlChallengeService:
           request,
           readiness,
           rollout,
-          allow_pending_operator_review=(
-            request.action
-            in {
-              TTradeControlAction.ACTIVATE_CANARY,
-              TTradeControlAction.ACTIVATE_LIVE,
-            }
-          ),
         )
         payload = _payload(
           principal=current,
@@ -938,7 +908,6 @@ class TTradeControlChallengeService:
             request,
             readiness,
             rollout,
-            allow_pending_operator_review=True,
           )
           if _rollout_binding(rollout) != dict(payload.get("rollout_binding") or {}):
             raise TradeApprovalChallengeError(

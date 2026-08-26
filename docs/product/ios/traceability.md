@@ -100,9 +100,9 @@
 | `IOS-QNT-002` | PAPER pause/resume 与 LIVE pause/start/resume/clone 控制已接入；显式 stop、DRAINING 及退出保护联动仍是产品缺口。 | pause/resume + live control APIs；`strategy:control` | `T-STRATEGY,T-AUTHZ` / 局部 `E-AUTO`；缺 `E-PAPER` | `PARTIAL` |
 | `IOS-QNT-003` | 移动参数 allowlist、类型/范围与 `expectedVersion` 已有针对性测试；冲突后保留草稿、展示差异和安全重提正在最终集成验证。 | `strategyInstanceMobileParameters`、update parameters；`strategy:read`,`strategy:control` | `T-STRATEGY,T-AUTHZ` / 局部 `E-AUTO` | `PARTIAL` |
 | `IOS-QNT-004` | LIVE start/resume/clone 使用服务端 readiness 预览、逐次生物确认和精确 challenge；未做实盘。 | `preview/confirmStrategyControl`；`strategy:control`,`trade:approve` | `T-STRATEGY,T-SECURITY` / `E-AUTO`；缺 `E-LIVE` | `IMPLEMENTED_AUTO` |
-| `IOS-TTR-001` | 服务端与 iOS 已有 monitor/readiness、BEGIN/CANARY/LIVE 控制和停止新增入场；安全参数、范围、忽略列表等完整移动设置仍缺。 | `tTradeGlobalMonitor`、control APIs；`strategy:read`,`t-trade:control` | `T-TTRADE,T-AUTHZ` / 局部 `E-AUTO`；缺 `E-PAPER` | `PARTIAL` |
-| `IOS-TTR-002` | 做 T 待确认信号沿用服务端预览、短时挑战和逐次生物确认；未取得 20 个 paper 或受控实盘证据。 | TTrade approval APIs；`strategy:read`,`trade:approve` | `T-TTRADE,T-SECURITY` / `E-AUTO`；缺 `E-PAPER,E-LIVE` | `IMPLEMENTED_AUTO` |
-| `IOS-TTR-003` | 批次/事件投影与设备绑定 Kill Switch 契约已实现；Kill 可在普通 readiness 改变后继续降险，账户/会话/原因改变则拒绝。完整 DRAINING/退出 UI 与 paper 链路未完成。 | batch/event Queries、TTrade controls；`strategy:read`,`t-trade:control`,`trade:approve` | `T-TTRADE,T-RECOVERY` / 局部 `E-AUTO`；缺 `E-PAPER,E-LIVE` | `PARTIAL` |
+| `IOS-TTR-001` | 服务端与 iOS 已有 monitor/readiness、BEGIN/CANARY/LIVE 控制和停止新增入场；安全参数、范围、忽略列表等完整移动设置仍缺。 | `tTradeGlobalMonitor`、control APIs；`strategy:read`,`t-trade:control` | `T-TTRADE,T-AUTHZ` / 局部 `E-AUTO` | `PARTIAL` |
+| `IOS-TTR-002` | 做 T 待确认信号沿用服务端预览、短时挑战和逐次生物确认；尚未执行受控实盘。普通回测/PAPER 观察不作为控制授权证据。 | TTrade approval APIs；`strategy:read`,`trade:approve` | `T-TTRADE,T-SECURITY` / `E-AUTO`；缺 `E-LIVE` | `IMPLEMENTED_AUTO` |
+| `IOS-TTR-003` | 批次/事件投影与设备绑定 Kill Switch 契约已实现；Kill 可在普通 readiness 改变后继续降险，账户/会话/原因改变则拒绝。完整 DRAINING/退出 UI 仍未完成。 | batch/event Queries、TTrade controls；`strategy:read`,`t-trade:control`,`trade:approve` | `T-TTRADE,T-RECOVERY` / 局部 `E-AUTO`；缺 `E-LIVE` | `PARTIAL` |
 | `IOS-LUB-001` | 已有候选/助手投影和基础控制读取；完整候选阶段、预算、布防/取消移动工作区与 paper 证据未完成。 | radar/assistant Queries、arm/disarm；`strategy:read`,`market:read`,`limit-up:control` | `T-LIMITUP,T-AUTHZ` / 局部 `E-AUTO` | `PARTIAL` |
 | `IOS-LUB-002` | 已有助手意图预览和生物确认基础；完整打板专用风险展示、paper 20 闭环和实盘均缺。 | strategy intent approval；`strategy:read`,`trade:approve` | `T-LIMITUP,T-SECURITY` / 局部 `E-AUTO` | `PARTIAL` |
 | `IOS-LUB-003` | 服务端已有 T+1/退出计划事实，移动端仅部分投影；部分退出、失败、readiness 的完整闭环未验收。 | strategy ExitPlan/assistant projection；`strategy:read`,`orders:read` | `T-LIMITUP,T-LIQ` / 局部 `E-AUTO` | `PARTIAL` |
@@ -137,7 +137,7 @@
 | `IOS-REL-003` | Keychain、隐私遮罩、内存挑战和最小通知内容已实现；完整日志/崩溃/后台截图/诊断包扫描未完成。 | Keychain、OSLog、privacy shield；本地/会话 | `T-SECURITY,T-A11Y` / 局部 `E-AUTO,E-SEC` | `PARTIAL` |
 | `IOS-RLS-001` | 公共 SDL/权限、iOS 生成物和远端 Caddy Web codegen 已验证且无生成 diff；完整 pytest/Ruff 仍未全绿。 | SDL、permission JSON、Apollo/Web；构建权限 | `T-RELEASE` / 双端 codegen `E-AUTO`；其余见 RC 报告阻断 | `BLOCKED` |
 | `IOS-RLS-002` | 尚未生成可签署的 TestFlight 候选，也未开始连续五个 A 股交易日观察。 | Release candidate + production-like services；设备 scope | `T-RELEASE,T-RECOVERY` / 缺 `E-TF5` | `PENDING` |
-| `IOS-RLS-003` | 全功能 paper、做 T/打板各 20 闭环均未提供；受控 100 股实盘因前置门禁未满足而禁止执行。 | 全交易链路与安全门禁；显式实盘权限 | `T-RELEASE,T-SECURITY` / 缺 `E-PAPER,E-LIVE` | `BLOCKED` |
+| `IOS-RLS-003` | 完整 iOS 产品测试与打板专项验证仍未收口，受控实盘尚未执行；做 T 普通回测/PAPER 不作为发布或实盘授权门禁。 | 全交易链路与安全门禁；显式实盘权限 | `T-RELEASE,T-SECURITY` / 缺 `E-LIVE` | `BLOCKED` |
 
 ## 8. 当前门禁摘要
 

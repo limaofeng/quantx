@@ -91,18 +91,15 @@ python -m quantx_qmt_agent.main emergency-clear `
 
 ## 上线节奏
 
-影子/准备阶段连续 10 个交易日：账户级 rollout 保持 `SHADOW`，真实行情和
-账户只读，不由 QuantX 提交委托。用户仍可在 QMT 客户端手工交易；所有这类
-委托与成交必须被分类为外部活动并完整入账。要求零未分类活动、零无法解释的
-账实差异、零重复业务键、终态零回退；期间至少完成一次主机重启与恢复演练。
-此阶段 readiness 显示 `PREPARING` 是正常结果。
+`SHADOW` 用于按需观察真实行情和账户只读行为，不提交委托，也不要求固定运行
+天数。历史回测和 PAPER 观察不影响 readiness，不是 CANARY/LIVE 的前置验收。
 
-CANARY 连续 5 个交易日：
+启用 CANARY 时保持有限暴露：
 
 - 仅一个白名单账户和一个标的；
 - 同时仅一个批次；
 - 每单固定 100 股，单笔不超过 20,000 元；
-- 每日收盘人工核对券商、PostgreSQL、Agent journal、告警和备份。
+- 可按需核对券商、PostgreSQL、Agent journal、告警和备份；
 - 选择不再从 QMT 客户端手工下单的账户实盘窗口；若出现外部活动，QuantX 自动
   退回暂停/准备状态并重新对账。
 

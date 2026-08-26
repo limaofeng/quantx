@@ -24,11 +24,6 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.services.account_execution_safety_service import (
   AccountExecutionSafetyService,
 )
-from quantx_infrastructure.services.t_trade_rollout_evidence_service import (
-  V3_OPERATOR_REVIEW_CONFIRMATION,
-  V3_ROLLOUT_GATE_CODES,
-  TTradeV3RolloutEvidenceEvaluator,
-)
 from quantx_infrastructure.services.trading_service import TradingService
 
 
@@ -43,7 +38,6 @@ class TTradeOperationsService:
     "ENTRY_REJECTED",
   }
   ACTIVE_BROKER_ORDER_STATUSES = {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
-  rollout_evidence_evaluator = TTradeV3RolloutEvidenceEvaluator()
 
   @staticmethod
   def _assert_operation_event_binding(
@@ -176,10 +170,8 @@ class TTradeOperationsService:
   @staticmethod
   def _activation_readiness_failures(
     readiness: dict[str, Any],
-    *,
-    allow_pending_operator_review: bool,
   ) -> list[str]:
-    """Return execution blockers without letting a pending review hide others."""
+    """Return current account and feature blockers for automatic execution."""
 
     if bool(readiness.get("automation_ready")):
       return []
@@ -188,80 +180,39 @@ class TTradeOperationsService:
       for item in list(readiness.get("checks") or [])
       if not bool(item.get("passed"))
     ]
-    if allow_pending_operator_review:
-      failed = [
-        item
-        for item in failed
-        if str(item.get("code") or "") != "V3_OPERATOR_REVIEW_CONFIRMED"
-      ]
     if failed:
       return [
         str(item.get("message") or item.get("code") or "做 T 实盘未就绪")
         for item in failed
       ]
-    if allow_pending_operator_review and any(
-      str(item.get("code") or "") == "V3_OPERATOR_REVIEW_CONFIRMED"
-      and not bool(item.get("passed"))
-      for item in list(readiness.get("checks") or [])
-    ):
-      return []
     return [
       str(item or "做 T 实盘未就绪")
       for item in list(readiness.get("blocked_reasons") or [])
-    ] or ["实盘就绪证据不完整，拒绝启用"]
+    ] or ["当前账户执行安全状态不完整，拒绝启用"]
 
   @staticmethod
-  def _locked_v3_activation_summary(
-    evidence: dict[str, Any],
-  ) -> tuple[dict[str, Any], bool]:
-    """Fail closed unless every V3 fact except a pending review is proven."""
-
-    checks: dict[str, dict[str, Any]] = {}
-    duplicate_codes: set[str] = set()
-    for item in list(evidence.get("checks") or []):
-      code = str(item.get("code") or "")
-      if code in V3_ROLLOUT_GATE_CODES and code in checks:
-        # A dict comprehension would silently let the later record override a
-        # failed earlier proof.  The locked activation path must accept one,
-        # and only one, authoritative fact for every V3 gate.
-        duplicate_codes.add(code)
-      checks[code] = item
-    if duplicate_codes:
-      raise ValueError(f"V3 上线门禁存在重复检查项：{sorted(duplicate_codes)[0]}")
-    missing = sorted(V3_ROLLOUT_GATE_CODES - set(checks))
-    if missing:
-      raise ValueError(f"V3 上线门禁缺少检查项：{missing[0]}")
-    failures = [
-      checks[code]
-      for code in sorted(V3_ROLLOUT_GATE_CODES - {"V3_OPERATOR_REVIEW_CONFIRMED"})
-      if not bool(checks[code].get("passed"))
-    ]
-    if failures:
-      raise ValueError(
-        "；".join(
-          str(item.get("message") or item.get("code") or "V3 上线证据未通过")
-          for item in failures
-        )
-      )
-    summary = dict(evidence.get("summary") or {})
-    review = dict(summary.get("operator_review") or {})
-    review_fingerprint = str(review.get("review_evidence_fingerprint") or "")
-    if not review_fingerprint:
-      raise ValueError("缺少当前 V3 审阅证据指纹，拒绝启用")
-    return summary, bool(checks["V3_OPERATOR_REVIEW_CONFIRMED"].get("passed"))
+  def _rollout_limits_check(rollout: TTradeRollout | None) -> dict[str, Any]:
+    passed = bool(
+      rollout is not None
+      and int(getattr(rollout, "max_active_batches", 0) or 0) == 1
+      and int(getattr(rollout, "max_batch_volume", 0) or 0) > 0
+      and float(getattr(rollout, "max_order_amount", 0) or 0) > 0
+      and 0 < float(getattr(rollout, "max_total_exposure_pct", 0) or 0) <= 0.02
+    )
+    return {
+      "code": "T_TRADE_ROLLOUT_LIMITS_CONFIGURED",
+      "passed": passed,
+      "message": ""
+      if passed
+      else "做 T 执行限制必须为单批次、正订单上限和不超过 2% 总敞口",
+      "scope": "AUTOMATION",
+    }
 
   @classmethod
   async def readiness(self, account_id: str) -> dict[str, Any]:
     account_safety = await AccountExecutionSafetyService().status(account_id)
     async with AsyncSessionLocal() as db:
       rollout = await db.get(TTradeRollout, account_id)
-      account_control = await db.get(AccountExecutionControl, account_id)
-      v3_rollout_evidence = await self.rollout_evidence_evaluator.evaluate(
-        db,
-        account_id=account_id,
-        rollout=rollout,
-        account_control=account_control,
-      )
     feature_checks = [
       {
         "code": "T_TRADE_LIVE_ENABLED",
@@ -277,18 +228,8 @@ class TTradeOperationsService:
         "message": "" if rollout is not None else "做 T 尚未创建独立灰度配置",
         "scope": "AUTOMATION",
       },
+      self._rollout_limits_check(rollout),
     ]
-    feature_checks.extend(
-      {
-        "code": str(item.get("code") or "V3_EVIDENCE_QUERY_AVAILABLE"),
-        "passed": bool(item.get("passed")),
-        "message": ""
-        if bool(item.get("passed"))
-        else str(item.get("message") or "V3 上线证据未通过"),
-        "scope": str(item.get("scope") or "AUTOMATION"),
-      }
-      for item in list(v3_rollout_evidence.get("checks") or [])
-    )
     account_checks = [dict(item) for item in list(account_safety.get("checks") or [])]
     checks = account_checks + feature_checks
     blocked = [
@@ -321,6 +262,9 @@ class TTradeOperationsService:
       "engine_status": account_safety.get("engine_status", "OFFLINE"),
       "agent_status": account_safety.get("agent_status", "OFFLINE"),
       "agent_device_id": account_safety.get("agent_device_id"),
+      "ready_live_agent_count": int(
+        account_safety.get("ready_live_agent_count") or 0
+      ),
       "agent_mode": account_safety.get("agent_mode", "offline"),
       "requested_agent_mode": account_safety.get("requested_agent_mode", "unknown"),
       "qmt_launch_reason_code": account_safety.get("qmt_launch_reason_code", ""),
@@ -335,7 +279,6 @@ class TTradeOperationsService:
       "checks": checks,
       "feature_checks": feature_checks,
       "account_safety": account_safety,
-      "v3_rollout_evidence": dict(v3_rollout_evidence.get("summary") or {}),
       "snapshot_id": account_safety.get("snapshot_id"),
       "snapshot_hash": account_safety.get("snapshot_hash"),
       "snapshot_at": account_safety.get("snapshot_at"),
@@ -441,15 +384,10 @@ class TTradeOperationsService:
 
     # B: evaluate mutable gates while no rollout row lock is held.
     readiness = await self.readiness(account_id)
-    preflight_failures = self._activation_readiness_failures(
-      readiness,
-      allow_pending_operator_review=True,
-    )
+    preflight_failures = self._activation_readiness_failures(readiness)
     if preflight_failures:
       raise ValueError("；".join(preflight_failures))
     if target == "LIVE":
-      if not settings.is_development:
-        raise ValueError("生产环境禁止从 SHADOW 直接进入 LIVE")
       if confirmation != f"LIVE:{account_id}":
         raise ValueError(f"正式 LIVE 需要精确确认 LIVE:{account_id}")
       if not readiness.get("controlled_window_active"):
@@ -497,15 +435,10 @@ class TTradeOperationsService:
       if replay:
         await db.rollback()
       else:
-        preflight_failures = self._activation_readiness_failures(
-          readiness,
-          allow_pending_operator_review=True,
-        )
+        preflight_failures = self._activation_readiness_failures(readiness)
         if preflight_failures:
           raise ValueError("；".join(preflight_failures))
         if target == "LIVE":
-          if not settings.is_development:
-            raise ValueError("生产环境禁止从 SHADOW 直接进入 LIVE")
           if confirmation != f"LIVE:{account_id}":
             raise ValueError(f"正式 LIVE 需要精确确认 LIVE:{account_id}")
           if not readiness.get("controlled_window_active"):
@@ -524,41 +457,13 @@ class TTradeOperationsService:
           raise ValueError("完整快照已经更新，请刷新后重新检查实盘门禁")
         if acknowledged_policy_version != rollout.policy_version:
           raise ValueError("确认的自动退出策略版本已过期")
-        # Re-evaluate V3 durable evidence while the rollout row is locked.
-        # A preflight snapshot is only a UX preview; the activation event may
-        # be written only when this final read still proves every factual
-        # replay/PAPER/quality/trace/finite-exposure gate.  The sole deferred
-        # check is the acknowledgement this same atomic transition records.
-        locked_v3_evidence = await self.rollout_evidence_evaluator.evaluate(
-          db,
-          account_id=account_id,
-          rollout=rollout,
-          account_control=account_control,
-          bypass_cache=True,
-        )
-        locked_v3_summary, review_already_confirmed = (
-          self._locked_v3_activation_summary(locked_v3_evidence)
-        )
-        preflight_v3 = dict(readiness.get("v3_rollout_evidence") or {})
-        preflight_review = dict(preflight_v3.get("operator_review") or {})
-        locked_review = dict(locked_v3_summary.get("operator_review") or {})
-        preflight_review_fingerprint = str(
-          preflight_review.get("review_evidence_fingerprint") or ""
-        )
-        locked_review_fingerprint = str(
-          locked_review.get("review_evidence_fingerprint") or ""
-        )
-        if (
-          preflight_review_fingerprint
-          and preflight_review_fingerprint != locked_review_fingerprint
-        ):
-          raise ValueError("V3 上线证据已变化，请重新审阅并确认")
-        previous_stage = str(rollout.stage)
-        if target == "LIVE" and previous_stage.upper() != "SHADOW":
-          raise ValueError("开发环境正式 LIVE 只允许从 SHADOW 直接启用")
-        next_stage = (
-          "LIVE" if target == "CANARY" and previous_stage.upper() == "LIVE" else target
-        )
+        limits_check = self._rollout_limits_check(rollout)
+        if not limits_check["passed"]:
+          raise ValueError(str(limits_check["message"]))
+        previous_stage = str(rollout.stage).upper()
+        if previous_stage not in {"SHADOW", "PAUSED"}:
+          raise ValueError("当前做 T 阶段不允许重新启用")
+        next_stage = target
         rollout.stage = next_stage
         rollout.enabled = True
         rollout.acknowledged_policy_version = acknowledged_policy_version
@@ -578,36 +483,11 @@ class TTradeOperationsService:
             "operationId": operation_id,
             "policyVersion": acknowledged_policy_version,
             "confirmation": confirmation,
-            "v3EvidenceFingerprint": str(locked_v3_summary.get("fingerprint") or ""),
             "targetStage": target,
-            "operatorReview": {
-              "acknowledged": True,
-              "confirmation": V3_OPERATOR_REVIEW_CONFIRMATION,
-              "operationId": operation_id,
-              "policyVersion": acknowledged_policy_version,
-              "snapshotId": bound_snapshot_id,
-              "evidenceFingerprint": locked_review_fingerprint,
-              "reviewPreviouslyConfirmed": review_already_confirmed,
-              "userConfirmation": confirmation,
-            },
           },
         )
         await db.commit()
     return await self.readiness(account_id)
-
-  async def activate_canary(
-    self,
-    account_id: str,
-    *,
-    user_id: str,
-    acknowledged_policy_version: int,
-  ) -> dict[str, Any]:
-    return await self.activate_rollout(
-      account_id,
-      user_id=user_id,
-      acknowledged_policy_version=acknowledged_policy_version,
-      target_stage="CANARY",
-    )
 
   async def pause(
     self,

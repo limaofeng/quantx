@@ -1139,12 +1139,6 @@ async def ingest_uploaded_market_data_request(
   destination = str(payload.get("destination") or "influxdb").strip().lower()
   if destination == "influxdb":
     return await ingest_uploaded_bar_request(store, request_id)
-  if destination == "canonical_tick_archive":
-    from quantx_infrastructure.services.canonical_tick_preparation import (
-      ingest_uploaded_canonical_tick_request,
-    )
-
-    return await ingest_uploaded_canonical_tick_request(store, request_id)
   raise _validation_error("market-data request destination is unsupported")
 
 

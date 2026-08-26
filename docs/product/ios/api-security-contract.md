@@ -433,7 +433,7 @@ REST `detail` 和 GraphQL `errors[].extensions` 至少包含稳定 `code`、
 | 手工订单已使用 capability 与两阶段挑战 | 尚缺 paper 全场景和受控实盘证据 | 默认 PAPER；G3/G5 未通过前不放行实盘 |
 | 清仓组和退出计划精确授权契约已落地 | 条件计划完整编辑体验与真机证据仍需收口 | 不调用兼容 `liquidate*` 直写接口 |
 | 策略移动参数 allowlist、版本、冲突恢复和实盘挑战已通过 iOS 自动化 | 尚缺 stop/DRAINING、真机、paper 与受控实盘证据 | 未完成端到端证据前保持 capability 关闭 |
-| 做 T 入场及账户级窗口/激活/熔断均有设备绑定挑战，iOS 控制已通过目标自动化 | 尚缺完整设置、真机、paper 闭环与受控实盘证据 | 原生只调用两阶段接口；旧单步 Mutation 继续兼容 Web |
+| 做 T 入场及账户级窗口/激活/熔断均有设备绑定挑战，iOS 控制已通过目标自动化 | 尚缺完整设置、真机与受控实盘观察 | 原生只调用两阶段接口；回测/PAPER 不参与授权，激活以当前安全状态和显式确认为准 |
 | APNs 注册、投影、发送器和最小 payload 已落地 | 无真实 APNs 凭据/真机送达/TestFlight 证据 | 发送器默认关闭，G4 保持阻断 |
 
 接口落地后，必须刷新 SDL、权限 JSON、Client OpenAPI、在线文档和 Apollo Swift

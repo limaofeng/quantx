@@ -55,51 +55,6 @@ def _datetime(value: Any) -> Optional[datetime]:
   return None
 
 
-def _rollout_evidence(
-  parameters: Mapping[str, Any],
-  *,
-  trading_dates: Iterable[Any],
-  data_quality: str,
-  tick_read_audit: Mapping[str, Any],
-  skipped_instruments: Iterable[Any],
-) -> Dict[str, Any]:
-  """Return immutable replay facts consumed by the V3 execution gate.
-
-  The payload is intentionally derived only from the completed runtime's
-  persisted parameters and replay curve.  A generic replay cannot label
-  itself formal evidence: the replay service accepts ``V3_CAUSAL_20D`` only
-  for an exact SH 20-day window.
-  Missing or malformed facts remain present as explicit ``False`` values so
-  older results fail closed instead of being reinterpreted as acceptance.
-  """
-
-  actual_dates = sorted(
-    {
-      item.isoformat()
-      for item in trading_dates
-      if hasattr(item, "isoformat") and len(str(item.isoformat())) == 10
-    }
-  )
-  acceptance = str(parameters.get("replay_acceptance") or "").strip().upper()
-  issues = list(tick_read_audit.get("issues") or [])
-  strict_causal = (
-    acceptance == "V3_CAUSAL_20D"
-    and len(actual_dates) == 20
-    and str(data_quality).upper() == "OK"
-    and _integer(tick_read_audit.get("verified_windows")) > 0
-    and not issues
-    and not list(skipped_instruments)
-  )
-  return {
-    "schema_version": 1,
-    "strict_causal": strict_causal,
-    "trading_dates": actual_dates,
-    "replay_acceptance": acceptance or None,
-    "tick_read_issues": len(issues),
-    "skipped_instrument_count": len(list(skipped_instruments)),
-  }
-
-
 def _opportunity_diagnostics_unavailable(
   reason: str,
   *,
@@ -959,20 +914,12 @@ def build_t_trade_replay_metrics(
   if source_quality_flags:
     quality_messages.append("初始资产快照质量标记：" + "、".join(source_quality_flags))
   data_quality = "PARTIAL" if quality_messages else "OK"
-  rollout_evidence = _rollout_evidence(
-    params,
-    trading_dates=trading_dates,
-    data_quality=data_quality,
-    tick_read_audit=tick_read_audit,
-    skipped_instruments=skipped,
-  )
   metrics = {
     "data_quality": data_quality,
     "data_quality_message": "；".join(quality_messages)
     if quality_messages
     else "历史回放与期末清算完整",
     "skipped_stock_codes": [str(item.get("stock_code", "") or "") for item in skipped],
-    "rollout_evidence": rollout_evidence,
     "methodology": {
       "forced_liquidation": "回放结束时仅清算回放新增的 T 批次；合法性校验失败时不伪造成交",
       "capital_utilization": (

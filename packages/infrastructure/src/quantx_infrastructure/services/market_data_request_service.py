@@ -15,7 +15,6 @@ _MAX_FAILED_REQUEST_RETRY_HOPS = 32
 # v2 separates replay supplements from completed v1 transfers created before
 # the corrected QMT intraday download boundary was deployed.
 _T_TRADE_REPLAY_SUPPLEMENT_SCOPE = "t-trade-replay-supplement-v2"
-_CANONICAL_TICK_PREPARATION_DESTINATION = "canonical_tick_archive"
 
 
 def _failed_request_retry_scope(request_id: str) -> str:
@@ -143,39 +142,6 @@ async def request_market_data_sync(
     "end_time": end_time,
     "periods": periods,
   }
-  return await request_agent_market_data(
-    payload=payload,
-    timeout_seconds=timeout_seconds,
-    idempotency_scope=idempotency_scope,
-  )
-
-
-async def request_canonical_tick_sync(
-  *,
-  stock_code: str,
-  start_time: str,
-  end_time: str,
-  preparation_id: str,
-  verification_pass: int,
-  timeout_seconds: float = 600,
-) -> dict[str, Any]:
-  """Acquire one bounded real-Tick transfer for immutable formal preparation."""
-
-  payload = {
-    "operation": "bars",
-    "download": True,
-    "stock_list": [stock_code],
-    "start_time": start_time,
-    "end_time": end_time,
-    "periods": ["tick"],
-    "destination": _CANONICAL_TICK_PREPARATION_DESTINATION,
-    "canonical_preparation_id": preparation_id,
-    "canonical_verification_pass": verification_pass,
-  }
-  idempotency_scope = (
-    "canonical-tick-preparation:"
-    f"{preparation_id}:{verification_pass}:{stock_code}:{start_time}:{end_time}"
-  )
   return await request_agent_market_data(
     payload=payload,
     timeout_seconds=timeout_seconds,
