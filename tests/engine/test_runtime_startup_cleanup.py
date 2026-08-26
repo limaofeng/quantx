@@ -869,6 +869,79 @@ async def test_stop_state_sync_failure_retains_broker_and_adapter_ownership(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_aborts_unprovable_terminal_checkpoint_and_releases_ownership(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  executor = StrategyExecutor(max_workers=1)
+  runtime = _create_runtime(
+    executor,
+    "shutdown-continuity-unproven",
+    mode=StrategyRunMode.PAPER,
+  )
+  runtime.status = ExecutionStatus.RUNNING
+  runtime.strategy = LifecycleStrategy(runtime.context)
+  await runtime.strategy.initialize()
+  await runtime.strategy.start()
+
+  state_manager = SimpleNamespace(
+    _running=True,
+    _snapshot_task=None,
+    _state_sync_task=None,
+    _state_queue=None,
+    stop_state_sync=AsyncMock(),
+    stop=AsyncMock(),
+  )
+
+  async def abort_without_final_snapshot(_strategy) -> None:
+    state_manager._running = False
+    state_manager._snapshot_task = None
+    state_manager._state_sync_task = None
+    state_manager._state_queue = None
+
+  state_manager.abort_without_final_snapshot = AsyncMock(
+    side_effect=abort_without_final_snapshot
+  )
+  runtime.state_manager = state_manager
+  runtime._checkpoint_diagnostic_summaries = {
+    "600000.SH": {"evaluation_count": 1}
+  }
+  runtime._checkpoint_processed_watermark = {
+    "stream_id": "whole-quote",
+    "generation": 1,
+    "sequence": 10,
+    "source_time_ms": 1_700_000_000_000,
+  }
+  runtime._market_fail_closed_codes = {
+    "600000.SH": "MARKET_EVENT_QUEUE_OVERFLOW"
+  }
+
+  broker = FakeBroker()
+  broker.is_connected = True
+  runtime.broker = broker
+  runtime.data_adapter = FakeAdapter()
+  runtime._adapter_ref_acquired = True
+  release_adapter = AsyncMock()
+  monkeypatch.setattr(
+    executor_module.adapter_manager,
+    "release_adapter_for_mode",
+    release_adapter,
+  )
+
+  await executor.shutdown()
+
+  assert runtime.status == ExecutionStatus.ERROR
+  assert runtime._terminal_cleanup_complete is True
+  state_manager.abort_without_final_snapshot.assert_awaited_once_with(
+    runtime.strategy
+  )
+  state_manager.stop.assert_not_awaited()
+  assert broker.disconnect_calls == 1
+  assert broker.is_connected is False
+  assert runtime._adapter_ref_acquired is False
+  release_adapter.assert_awaited_once_with("paper")
+
+
+@pytest.mark.asyncio
 async def test_external_stop_cleanup_never_treats_live_producer_as_owner(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -5,10 +5,33 @@ import quantx_engine.main as engine_main
 from quantx_engine.main import (
   ENGINE_LEASE_IDLE_TIMEOUT_SECONDS,
   _acquire_engine_lease,
+  _detach_engine_lease_connection,
   _lease_watchdog,
   _wait_for_stop_or_failure,
 )
 from quantx_infrastructure.database import relational_connection
+
+
+def test_engine_lease_connection_is_detached_from_workload_pool() -> None:
+  class SyncConnection:
+    detached = False
+
+    def detach(self) -> None:
+      self.detached = True
+
+  class LeaseConnection:
+    sync_connection = SyncConnection()
+
+  connection = LeaseConnection()
+
+  _detach_engine_lease_connection(connection)
+
+  assert connection.sync_connection.detached is True
+
+
+def test_engine_lease_detach_requires_initialized_connection() -> None:
+  with pytest.raises(RuntimeError, match="not initialized"):
+    _detach_engine_lease_connection(object())
 
 
 @pytest.mark.asyncio

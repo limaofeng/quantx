@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Optional
@@ -35,6 +36,7 @@ from quantx_infrastructure.services.t_trade_service import (
   TTradeService,
 )
 from sqlalchemy import select, update
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from quantx_engine.strategy_manager import strategy_manager
 from quantx_engine.warm_cache import (
@@ -46,6 +48,53 @@ from .exit_plan_monitor import exit_plan_monitor
 from .limit_up_board_replay_service import LimitUpBoardReplayService
 from .limit_up_board_runtime import limit_up_board_assistant
 from .t_trade_runtime import t_trade_global_monitor
+
+logger = logging.getLogger(__name__)
+
+_DATABASE_CONTENTION_RETRY_SECONDS = 0.25
+_DATABASE_CONTENTION_MAX_RETRY_SECONDS = 2.0
+
+
+async def _wait_for_database_retry(
+  stopped: asyncio.Event,
+  *,
+  delay: float,
+) -> bool:
+  """Return true when shutdown was requested while waiting to retry."""
+
+  try:
+    await asyncio.wait_for(stopped.wait(), timeout=delay)
+  except asyncio.TimeoutError:
+    return False
+  return True
+
+
+async def _complete_with_database_retry(
+  stopped: asyncio.Event,
+  message_id: str,
+  *,
+  result: Optional[dict[str, Any]] = None,
+  error: Optional[str] = None,
+) -> bool:
+  """Persist one terminal command result without crashing on pool contention."""
+
+  delay = _DATABASE_CONTENTION_RETRY_SECONDS
+  while not stopped.is_set():
+    try:
+      await _complete(message_id, result=result, error=error)
+      return True
+    except SQLAlchemyTimeoutError as exc:
+      logger.warning(
+        "Engine command completion deferred by database pool contention: "
+        "message_id=%s retry_in=%.2fs error=%s",
+        message_id,
+        delay,
+        exc,
+      )
+      if await _wait_for_database_retry(stopped, delay=delay):
+        return False
+      delay = min(delay * 2, _DATABASE_CONTENTION_MAX_RETRY_SECONDS)
+  return False
 
 
 def _json_value(value: Any) -> Any:
@@ -547,9 +596,44 @@ async def _complete(
 
 
 async def run_command_consumer(stopped: asyncio.Event) -> None:
-  await _recover_processing_commands()
+  retry_delay = _DATABASE_CONTENTION_RETRY_SECONDS
   while not stopped.is_set():
-    claimed = await _claim_next()
+    try:
+      await _recover_processing_commands()
+      break
+    except SQLAlchemyTimeoutError as exc:
+      logger.warning(
+        "Engine command recovery deferred by database pool contention: "
+        "retry_in=%.2fs error=%s",
+        retry_delay,
+        exc,
+      )
+      if await _wait_for_database_retry(stopped, delay=retry_delay):
+        return
+      retry_delay = min(
+        retry_delay * 2,
+        _DATABASE_CONTENTION_MAX_RETRY_SECONDS,
+      )
+
+  retry_delay = _DATABASE_CONTENTION_RETRY_SECONDS
+  while not stopped.is_set():
+    try:
+      claimed = await _claim_next()
+    except SQLAlchemyTimeoutError as exc:
+      logger.warning(
+        "Engine command claim deferred by database pool contention: "
+        "retry_in=%.2fs error=%s",
+        retry_delay,
+        exc,
+      )
+      if await _wait_for_database_retry(stopped, delay=retry_delay):
+        return
+      retry_delay = min(
+        retry_delay * 2,
+        _DATABASE_CONTENTION_MAX_RETRY_SECONDS,
+      )
+      continue
+    retry_delay = _DATABASE_CONTENTION_RETRY_SECONDS
     if claimed is None:
       try:
         await asyncio.wait_for(stopped.wait(), timeout=0.25)
@@ -560,6 +644,6 @@ async def run_command_consumer(stopped: asyncio.Event) -> None:
     try:
       result = await _dispatch(command_type, payload, command_id=message_id)
     except Exception as exc:
-      await _complete(message_id, error=str(exc))
+      await _complete_with_database_retry(stopped, message_id, error=str(exc))
     else:
-      await _complete(message_id, result=result)
+      await _complete_with_database_retry(stopped, message_id, result=result)

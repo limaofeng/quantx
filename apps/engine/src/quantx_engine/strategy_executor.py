@@ -1841,6 +1841,10 @@ class ExecutionContextSnapshot:
   parameters: Dict[str, Any]
 
 
+class TerminalCheckpointContinuityUnproven(RuntimeError):
+  """The terminal generation must preserve its last authoritative snapshot."""
+
+
 class StrategyExecutor:
   """
   策略执行器 - 专注于策略运行的并发执行和资源管理
@@ -3255,7 +3259,9 @@ class StrategyExecutor:
       "fail_closed": sorted(runtime._market_fail_closed_codes),
     }
     if any(continuity_failures.values()):
-      raise RuntimeError("TERMINAL_SESSION_CHECKPOINT_CONTINUITY_UNPROVEN")
+      raise TerminalCheckpointContinuityUnproven(
+        "TERMINAL_SESSION_CHECKPOINT_CONTINUITY_UNPROVEN"
+      )
     try:
       boundary = self._checkpoint_local_time(
         datetime.fromtimestamp(source_time_ms / 1000.0, tz=timezone.utc)
@@ -4904,6 +4910,7 @@ class StrategyExecutor:
       runtime.status = ExecutionStatus.ERROR
       cleanup_errors: List[str] = []
       final_snapshot_ready = True
+      terminal_checkpoint_aborted = False
 
       # An approval that passed the RUNNING gate owns this lock through its
       # durable status transition and routing attempt. Let it converge before
@@ -4948,6 +4955,17 @@ class StrategyExecutor:
           cause="ERROR",
         )
         await self._flush_t_trade_opportunity_diagnostics(runtime)
+      except TerminalCheckpointContinuityUnproven as exc:
+        # Producers and subscriptions are already quiesced. Continuity cannot
+        # be reconstructed after that boundary, so retrying this generation
+        # can never produce a truthful terminal checkpoint. Preserve the last
+        # authoritative snapshot and release ownership for a clean restart.
+        terminal_checkpoint_aborted = True
+        self.logger.warning(
+          "异常终止时行情连续性无法证明，保留最后权威快照: %s, %s",
+          runtime.run_id,
+          exc,
+        )
       except Exception as exc:
         cleanup_errors.append("t_trade_opportunity_diagnostics")
         # Do not release the runtime or let a later generic final snapshot
@@ -4978,7 +4996,24 @@ class StrategyExecutor:
       final_snapshot_saved = bool(
         final_snapshot_ready and runtime.state_manager is None
       )
-      if final_snapshot_ready and runtime.state_manager:
+      if (
+        final_snapshot_ready
+        and terminal_checkpoint_aborted
+        and runtime.state_manager
+      ):
+        try:
+          await runtime.state_manager.abort_without_final_snapshot(
+            runtime.strategy
+          )
+          final_snapshot_saved = True
+        except Exception as exc:
+          cleanup_errors.append("state_manager_abort")
+          self.logger.error(
+            "异常终止保留最后权威快照失败: %s, %s",
+            runtime.run_id,
+            exc,
+          )
+      elif final_snapshot_ready and runtime.state_manager:
         try:
           await runtime.state_manager.stop()
           final_snapshot_saved = True

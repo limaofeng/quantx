@@ -67,6 +67,7 @@ from quantx_infrastructure.services.trade_command_service import TradeCommandSer
 from quantx_infrastructure.services.trade_service import TradeService
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import aliased
 
 from .t_trade_coordination import t_trade_account_coordination_lock
@@ -75,6 +76,9 @@ _MAX_TRADE_RUNTIME_AUTHORITY_SCAN = 4096
 _MAX_SNAPSHOT_ACCOUNT_SCOPE = 4096
 
 logger = logging.getLogger(__name__)
+
+_DATABASE_CONTENTION_RETRY_SECONDS = 0.25
+_DATABASE_CONTENTION_MAX_RETRY_SECONDS = 2.0
 
 # Production owns a single Engine report consumer, while this lock also makes
 # direct/test drain calls obey the same invariant. Recovery of PROCESSING rows
@@ -2036,7 +2040,14 @@ def _authoritative_snapshot_identity(
     if _complete_snapshot_account_ids(payload) is None:
       return None
     _parse_authoritative_snapshot_sequence(payload)
-  except (RetryableReportError, TypeError, ValueError, OverflowError):
+    _parse_authoritative_snapshot_time(payload.get("source_event_at"))
+  except (
+    RetryableReportError,
+    TypeError,
+    ValueError,
+    OverflowError,
+    OSError,
+  ):
     return None
   snapshot_id = str(payload.get("snapshot_id") or "").strip()
   snapshot_hash = str(payload.get("snapshot_hash") or "").strip().lower()
@@ -3341,29 +3352,104 @@ def _broker_order_ids(report: AgentReportInbox) -> list[int]:
   return order_ids
 
 
+async def _supersede_obsolete_pending_full_snapshots(
+  db,
+  oldest: AgentReportInbox,
+) -> int:
+  """Coalesce queued full snapshots while preserving interleaved deltas.
+
+  A newer structurally verified full snapshot subsumes older full snapshots
+  from the same personal-account Agent. Only full snapshots are superseded;
+  order, execution, and position deltas retain FIFO processing before the
+  newer snapshot is claimed.
+  """
+
+  payload = dict(oldest.payload or {})
+  if (
+    oldest.message_type != "delta_report"
+    or str(oldest.protocol_version or "") != "1.1"
+    or payload.get("is_complete") is not True
+  ):
+    return 0
+
+  newer = await db.scalar(
+    select(AgentReportInbox)
+    .where(
+      AgentReportInbox.device_id == oldest.device_id,
+      AgentReportInbox.message_type == "delta_report",
+      AgentReportInbox.protocol_version == "1.1",
+      AgentReportInbox.processing_status == "PENDING",
+      AgentReportInbox.received_at > oldest.received_at,
+      or_(
+        AgentReportInbox.next_attempt_at.is_(None),
+        AgentReportInbox.next_attempt_at <= utcnow(),
+      ),
+      AgentReportInbox.payload["is_complete"].as_boolean().is_(True),
+    )
+    .order_by(AgentReportInbox.received_at.desc())
+    .limit(1)
+  )
+  if newer is None or _authoritative_snapshot_identity(newer) is None:
+    return 0
+
+  superseded_at = utcnow()
+  result = await db.execute(
+    update(AgentReportInbox)
+    .where(
+      AgentReportInbox.device_id == oldest.device_id,
+      AgentReportInbox.message_type == "delta_report",
+      AgentReportInbox.protocol_version == "1.1",
+      AgentReportInbox.processing_status == "PENDING",
+      AgentReportInbox.received_at < newer.received_at,
+      AgentReportInbox.payload["is_complete"].as_boolean().is_(True),
+    )
+    .values(
+      processing_status="SUPERSEDED",
+      processing_error="superseded by newer verified complete snapshot",
+      processed_at=superseded_at,
+      next_attempt_at=None,
+    )
+  )
+  superseded_count = int(result.rowcount or 0)
+  if superseded_count:
+    await db.commit()
+    logger.info(
+      "Coalesced obsolete Agent full snapshots: device_id=%s count=%s "
+      "newest_message_id=%s",
+      oldest.device_id,
+      superseded_count,
+      newer.message_id,
+    )
+  return superseded_count
+
+
 async def _claim() -> Optional[str]:
   now = utcnow()
   async with AsyncSessionLocal() as db:
-    result = await db.execute(
-      select(AgentReportInbox)
-      .where(
-        AgentReportInbox.processing_status == "PENDING",
-        or_(
-          AgentReportInbox.next_attempt_at.is_(None),
-          AgentReportInbox.next_attempt_at <= now,
-        ),
+    while True:
+      result = await db.execute(
+        select(AgentReportInbox)
+        .where(
+          AgentReportInbox.processing_status == "PENDING",
+          or_(
+            AgentReportInbox.next_attempt_at.is_(None),
+            AgentReportInbox.next_attempt_at <= now,
+          ),
+        )
+        .order_by(AgentReportInbox.received_at)
+        .limit(1)
+        .with_for_update(skip_locked=True)
       )
-      .order_by(AgentReportInbox.received_at)
-      .limit(1)
-      .with_for_update(skip_locked=True)
-    )
-    report = result.scalar_one_or_none()
-    if report is None:
-      return None
-    report.processing_status = "PROCESSING"
-    report.processing_attempts = (report.processing_attempts or 0) + 1
-    await db.commit()
-    return report.message_id
+      report = result.scalar_one_or_none()
+      if report is None:
+        return None
+      if await _supersede_obsolete_pending_full_snapshots(db, report):
+        now = utcnow()
+        continue
+      report.processing_status = "PROCESSING"
+      report.processing_attempts = (report.processing_attempts or 0) + 1
+      await db.commit()
+      return report.message_id
 
 
 async def _recover_stuck_reports() -> None:
@@ -3525,6 +3611,69 @@ async def _finish(
     await db.commit()
 
 
+async def _wait_for_database_retry(
+  stopped: asyncio.Event,
+  *,
+  delay: float,
+) -> bool:
+  """Return true when shutdown was requested while waiting to retry."""
+
+  try:
+    await asyncio.wait_for(stopped.wait(), timeout=delay)
+  except asyncio.TimeoutError:
+    return False
+  return True
+
+
+async def _recover_consumer_state(stopped: asyncio.Event) -> bool:
+  """Recover interrupted inbox work without exiting on pool contention."""
+
+  delay = _DATABASE_CONTENTION_RETRY_SECONDS
+  while not stopped.is_set():
+    try:
+      await _recover_stuck_reports()
+      await _recover_stuck_runtime_events()
+      return True
+    except SQLAlchemyTimeoutError as exc:
+      logger.warning(
+        "Engine report recovery deferred by database pool contention: "
+        "retry_in=%.2fs error=%s",
+        delay,
+        exc,
+      )
+      if await _wait_for_database_retry(stopped, delay=delay):
+        return False
+      delay = min(delay * 2, _DATABASE_CONTENTION_MAX_RETRY_SECONDS)
+  return False
+
+
+async def _finish_with_database_retry(
+  stopped: asyncio.Event,
+  message_id: str,
+  *,
+  error: Optional[Exception] = None,
+) -> bool:
+  """Persist report completion without crashing on a busy shared pool."""
+
+  delay = _DATABASE_CONTENTION_RETRY_SECONDS
+  while not stopped.is_set():
+    try:
+      await _finish(message_id, error=error)
+      return True
+    except SQLAlchemyTimeoutError as exc:
+      logger.warning(
+        "Engine report completion deferred by database pool contention: "
+        "message_id=%s retry_in=%.2fs error=%s",
+        message_id,
+        delay,
+        exc,
+      )
+      if await _wait_for_database_retry(stopped, delay=delay):
+        return False
+      delay = min(delay * 2, _DATABASE_CONTENTION_MAX_RETRY_SECONDS)
+  return False
+
+
 async def _open_wakeup_subscription() -> Optional[RedisChannelSubscription]:
   try:
     return await redis_pubsub.open_subscription(AGENT_REPORT_WAKE_CHANNEL)
@@ -3574,12 +3723,29 @@ async def _refresh_runtime_event_barriers() -> None:
 
 
 async def run_report_consumer(stopped: asyncio.Event) -> None:
-  await _recover_stuck_reports()
-  await _recover_stuck_runtime_events()
+  if not await _recover_consumer_state(stopped):
+    return
   subscription = await _open_wakeup_subscription()
+  retry_delay = _DATABASE_CONTENTION_RETRY_SECONDS
   try:
     while not stopped.is_set():
-      message_id = await _claim()
+      try:
+        message_id = await _claim()
+      except SQLAlchemyTimeoutError as exc:
+        logger.warning(
+          "Engine report claim deferred by database pool contention: "
+          "retry_in=%.2fs error=%s",
+          retry_delay,
+          exc,
+        )
+        if await _wait_for_database_retry(stopped, delay=retry_delay):
+          return
+        retry_delay = min(
+          retry_delay * 2,
+          _DATABASE_CONTENTION_MAX_RETRY_SECONDS,
+        )
+        continue
+      retry_delay = _DATABASE_CONTENTION_RETRY_SECONDS
       if message_id is None:
         try:
           await _refresh_runtime_event_barriers()
@@ -3597,31 +3763,57 @@ async def run_report_consumer(stopped: asyncio.Event) -> None:
           report = await db.get(AgentReportInbox, message_id)
           if report is None:
             continue
-          await _process(report)
-          await _stage_runtime_events(report)
-          await _drain_runtime_events()
-          events = [
-            {
-              "message_id": report.message_id,
-              "message_type": report.message_type,
-              "client_order_id": report.client_order_id,
-              "broker_order_id": order_id,
-            }
-            for order_id in _broker_order_ids(report)
-          ]
-        await _finish(message_id)
+          db.expunge(report)
+        # Do not pin an inbox read transaction while projections perform their
+        # own database work. The detached row contains only eagerly loaded
+        # scalar columns and is immutable for this processing attempt.
+        await _process(report)
+        await _stage_runtime_events(report)
+        await _drain_runtime_events()
+        events = [
+          {
+            "message_id": report.message_id,
+            "message_type": report.message_type,
+            "client_order_id": report.client_order_id,
+            "broker_order_id": order_id,
+          }
+          for order_id in _broker_order_ids(report)
+        ]
+        if not await _finish_with_database_retry(stopped, message_id):
+          return
         for event in events:
           try:
             await redis_pubsub.publish(TRADING_EVENT_CHANNEL, event)
           except Exception as exc:
             logger.debug("Redis wake-up failed: %s", exc.__class__.__name__)
+      except SQLAlchemyTimeoutError as exc:
+        retryable_error = RetryableReportError(
+          f"database pool contention while applying Agent report: {exc}"
+        )
+        logger.warning(
+          "Agent report deferred by database pool contention: "
+          "message_id=%s error=%s",
+          message_id,
+          exc,
+        )
+        if not await _finish_with_database_retry(
+          stopped,
+          message_id,
+          error=retryable_error,
+        ):
+          return
       except Exception as exc:
         logger.warning(
           "Agent report processing failed: message_id=%s error=%s",
           message_id,
           exc,
         )
-        await _finish(message_id, error=exc)
+        if not await _finish_with_database_retry(
+          stopped,
+          message_id,
+          error=exc,
+        ):
+          return
   finally:
     if subscription is not None:
       try:

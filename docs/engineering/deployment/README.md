@@ -73,11 +73,17 @@ Market Gateway 的 `/health/live` 只表示进程与事件循环存活；
 QuantX 在同一操作系统进程内只创建一个 SQLAlchemy 连接池，业务模块统一复用；
 不同进程无法共享 Python 数据库连接，因此按进程角色设置容量，而不是在 API 内
 再拆 Agent 专用池。默认预算为 API `8 + 4`、Market Gateway `1 + 1`、
-Engine `4 + 2`、Worker `4 + 2`、AI Runtime `2 + 1`，合计最多 29 条连接。统一启动器通过
+Engine `6 + 2`、Worker `4 + 2`、AI Runtime `2 + 1`，合计最多 31 条池连接。
+Engine 单实例数据库租约另用 1 条从共享池脱离的专用物理连接，因此进程总预算
+最多 32 条；它不是第二个连接池，关闭 Engine 时直接关闭。这样报告投影、命令消费、
+心跳、监控器和策略状态持久化可共用完整的 8 条 Engine 工作池容量。统一启动器通过
 `DATABASE_PROCESS_ROLE` 注入角色；`DATABASE_POOL_SIZE` 与
 `DATABASE_MAX_OVERFLOW` 仅用于经过容量评审后的临时覆盖。所有池使用 3 秒获取
 超时、30 分钟回收、连接预检和 LIFO 复用；API 查询另有 15 秒 statement
-timeout，避免慢查询长期占住连接。
+timeout，避免慢查询长期占住连接。Engine 心跳的 `details.databasePool` 同时
+暴露当前池容量、借出和溢出连接数，便于区分数据库慢查询与进程内连接占用。
+Engine 恢复报告积压时，仅合并同一 Agent 已由更新且结构校验通过的完整快照；
+夹在快照之间的委托、成交和持仓增量仍严格按接收顺序收敛。
 
 `/metrics` 中的 `quantx_database_pool_connections` 按 `role/state` 展示池大小、
 借出、空闲、overflow 与最大预算；GraphQL 查询准入的活动数、等待时间和拒绝数

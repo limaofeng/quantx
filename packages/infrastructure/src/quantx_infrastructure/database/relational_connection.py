@@ -27,7 +27,9 @@ _DATABASE_POOL_PROFILES = {
   "market-gateway": DatabasePoolProfile(
     "market-gateway", pool_size=1, max_overflow=1, statement_timeout_ms=15_000
   ),
-  "engine": DatabasePoolProfile("engine", pool_size=4, max_overflow=2),
+  # The Engine singleton lease is detached as a dedicated physical connection,
+  # so all pooled capacity remains available to business workloads.
+  "engine": DatabasePoolProfile("engine", pool_size=6, max_overflow=2),
   "worker": DatabasePoolProfile("worker", pool_size=4, max_overflow=2),
   "ai-runtime": DatabasePoolProfile("ai-runtime", pool_size=2, max_overflow=1),
   "tooling": DatabasePoolProfile("tooling", pool_size=2, max_overflow=1),
@@ -81,6 +83,7 @@ engine = create_async_engine(
   pool_use_lifo=True,
   connect_args={"server_settings": server_settings},
 )
+
 AsyncSessionLocal = async_sessionmaker(
   bind=engine, class_=AsyncSession, expire_on_commit=False
 )

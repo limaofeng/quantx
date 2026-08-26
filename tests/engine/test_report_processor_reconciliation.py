@@ -846,3 +846,136 @@ async def test_new_authoritative_snapshot_supersedes_old_snapshot_dead_letter(
     assert alert.status == "RESOLVED"
     assert alert.resolved_by == "SYSTEM_RECONCILIATION"
   await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_claim_coalesces_old_full_snapshots_without_skipping_deltas(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AuthUser.__table__,
+    AgentDevice.__table__,
+    AgentReportInbox.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  now = utcnow()
+
+  def full_snapshot(snapshot_id: str, sequence: int) -> dict:
+    payload = {
+      "snapshot_id": snapshot_id,
+      "is_complete": True,
+      "source_sequence": sequence,
+      "source_event_at": now.isoformat(),
+      "accounts": [{"account_id": "account-1"}],
+      "positions_by_account": {"account-1": []},
+      "section_completeness_by_account": {
+        "account-1": {
+          "account": True,
+          "positions": True,
+          "orders": True,
+          "trades": True,
+        }
+      },
+      "unavailable_accounts": [],
+      "orders": [],
+      "trades": [],
+    }
+    payload["snapshot_hash"] = sha256(
+      json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+      ).encode("utf-8")
+    ).hexdigest()
+    return payload
+
+  old_id = "00000000-0000-4000-8000-000000000011"
+  delta_id = "00000000-0000-4000-8000-000000000012"
+  newest_id = "00000000-0000-4000-8000-000000000013"
+  async with sessions() as db:
+    db.add(
+      AuthUser(
+        id="user-claim",
+        username="claim-test",
+        display_name="Claim Test",
+        password_hash="unused",
+        permissions=[],
+      )
+    )
+    db.add(
+      AgentDevice(
+        id="device-claim",
+        user_id="user-claim",
+        name="live-agent",
+        secret_hash="x" * 64,
+        authorized_account_ids=["account-1"],
+        capabilities=["live"],
+      )
+    )
+    db.add_all(
+      [
+        AgentReportInbox(
+          message_id=old_id,
+          device_id="device-claim",
+          message_type="delta_report",
+          protocol_version="1.1",
+          raw_payload_hash="a" * 64,
+          business_idempotency_key="old-full",
+          payload=full_snapshot(old_id, 1),
+          received_at=now - timedelta(seconds=3),
+          processing_status="PENDING",
+          processing_attempts=0,
+        ),
+        AgentReportInbox(
+          message_id=delta_id,
+          device_id="device-claim",
+          message_type="delta_report",
+          protocol_version="1.1",
+          raw_payload_hash="b" * 64,
+          business_idempotency_key="interleaved-delta",
+          payload={"account_id": "account-1", "position_deltas": []},
+          received_at=now - timedelta(seconds=2),
+          processing_status="PENDING",
+          processing_attempts=0,
+        ),
+        AgentReportInbox(
+          message_id=newest_id,
+          device_id="device-claim",
+          message_type="delta_report",
+          protocol_version="1.1",
+          raw_payload_hash="c" * 64,
+          business_idempotency_key="newest-full",
+          payload=full_snapshot(newest_id, 2),
+          received_at=now - timedelta(seconds=1),
+          processing_status="PENDING",
+          processing_attempts=0,
+        ),
+      ]
+    )
+    await db.commit()
+
+  assert await report_processor._claim() == delta_id
+  assert await report_processor._claim() == newest_id
+
+  async with sessions() as db:
+    old_report = await db.get(AgentReportInbox, old_id)
+    delta_report = await db.get(AgentReportInbox, delta_id)
+    newest_report = await db.get(AgentReportInbox, newest_id)
+    assert old_report is not None
+    assert old_report.processing_status == "SUPERSEDED"
+    assert old_report.processing_attempts == 0
+    assert delta_report is not None
+    assert delta_report.processing_status == "PROCESSING"
+    assert newest_report is not None
+    assert newest_report.processing_status == "PROCESSING"
+  await engine.dispose()

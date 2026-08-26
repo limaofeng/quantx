@@ -16,13 +16,13 @@ def test_relational_pool_profiles_keep_single_account_runtime_bounded() -> None:
     market_gateway.max_overflow,
     market_gateway.maximum_connections,
   ) == (1, 1, 2)
-  assert (engine.pool_size, engine.max_overflow) == (4, 2)
+  assert (engine.pool_size, engine.max_overflow) == (6, 2)
   assert (worker.pool_size, worker.max_overflow) == (4, 2)
   assert (ai_runtime.pool_size, ai_runtime.max_overflow) == (2, 1)
   assert sum(
     profile.maximum_connections
     for profile in (api, market_gateway, engine, worker, ai_runtime)
-  ) == 29
+  ) == 31
 
 
 def test_relational_pool_profile_supports_explicit_process_override() -> None:

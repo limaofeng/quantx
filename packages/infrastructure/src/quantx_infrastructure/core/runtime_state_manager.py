@@ -414,11 +414,11 @@ class RuntimeStateManager:
         self.logger.info(f"状态管理器已停止: {self.run_id}")
 
     async def abort_without_final_snapshot(self, strategy=None) -> None:
-        """Cancel startup-owned tasks without persisting partial state.
+        """Cancel owned tasks without persisting non-authoritative state.
 
-        A runtime that never reached RUNNING has no authoritative final state to
-        publish. In particular, this path must not call ``save_snapshot`` and
-        overwrite the durable state that was restored at startup.
+        This covers both a runtime that never reached RUNNING and a terminal
+        generation whose market continuity cannot be proven. This path must not
+        call ``save_snapshot`` and overwrite the last authoritative state.
         """
 
         self._running = False
@@ -443,7 +443,7 @@ class RuntimeStateManager:
         if queue is not None and source and hasattr(source, "unsubscribe_state"):
             source.unsubscribe_state(queue)
         self._clear_state_sync_source()
-        self.logger.info("状态管理器启动已中止（未保存快照）: %s", self.run_id)
+        self.logger.info("状态管理器已中止（未保存最终快照）: %s", self.run_id)
 
     async def start_state_sync(self, strategy) -> None:
         """启动策略状态同步任务（通过订阅事件持久化）"""

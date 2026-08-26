@@ -17,6 +17,7 @@ from quantx_infrastructure.core.data.whole_quote_hub import whole_quote_hub
 from quantx_infrastructure.database.manager import db_manager
 from quantx_infrastructure.database.relational_connection import (
   AsyncSessionLocal,
+  database_pool_snapshot,
   engine,
 )
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
@@ -53,11 +54,15 @@ ENGINE_RESTART_MAX_DELAY_SECONDS = 30.0
 
 
 async def _write_heartbeat_once(instance_id: str) -> None:
+  # Capture before opening the heartbeat session so the metric describes the
+  # workload pool instead of counting the observer itself.
+  pool_snapshot = database_pool_snapshot()
   async with AsyncSessionLocal() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "engine")
     details = {
       "pid": os.getpid(),
       "host": socket.gethostname(),
+      "databasePool": pool_snapshot,
       "tTradeV3": t_trade_runtime_observability.snapshot(),
       "tTradeProjection": t_trade_monitor_projection_service.metrics_snapshot(),
     }
@@ -124,6 +129,15 @@ async def _lease_watchdog(stopped: asyncio.Event, lock_connection) -> None:
       raise RuntimeError("Engine database lease connection was lost") from exc
 
 
+def _detach_engine_lease_connection(lock_connection) -> None:
+  """Reserve the singleton lease connection without consuming a pool slot."""
+
+  sync_connection = getattr(lock_connection, "sync_connection", None)
+  if sync_connection is None:
+    raise RuntimeError("Engine database lease connection is not initialized")
+  sync_connection.detach()
+
+
 async def _acquire_engine_lease(
   lock_connection,
   *,
@@ -135,6 +149,7 @@ async def _acquire_engine_lease(
     text(
       """
       SELECT
+        set_config('application_name', 'quantx-engine-lease', false),
         set_config('idle_session_timeout', :idle_timeout, false),
         set_config('tcp_keepalives_idle', :keepalive_idle, false),
         set_config('tcp_keepalives_interval', :keepalive_interval, false),
@@ -281,6 +296,10 @@ async def run_engine() -> None:
   await db_manager.initialize()
   lock_connection = await engine.connect()
   try:
+    # The advisory lease is a process-lifetime dedicated connection, not
+    # workload. Detaching keeps one shared QueuePool for Engine business work
+    # while the detached connection is physically closed during shutdown.
+    _detach_engine_lease_connection(lock_connection)
     await _acquire_engine_lease(lock_connection)
   except Exception:
     await lock_connection.close()
