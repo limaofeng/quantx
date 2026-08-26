@@ -20,9 +20,7 @@ from quantx_infrastructure.database.relational_base import Base, TimestampMixin
 
 class AgentDevice(Base, TimestampMixin):
   __tablename__ = "agent_devices"
-  __table_args__ = (
-    Index("ix_agent_devices_user_revoked", "user_id", "revoked_at"),
-  )
+  __table_args__ = (Index("ix_agent_devices_user_revoked", "user_id", "revoked_at"),)
 
   id = Column(String(36), primary_key=True)
   user_id = Column(
@@ -47,9 +45,7 @@ class AgentDevice(Base, TimestampMixin):
 
 class AgentEnrollmentCode(Base):
   __tablename__ = "agent_enrollment_codes"
-  __table_args__ = (
-    Index("ix_agent_enrollment_expiry", "expires_at"),
-  )
+  __table_args__ = (Index("ix_agent_enrollment_expiry", "expires_at"),)
 
   code_hash = Column(String(64), primary_key=True)
   user_id = Column(

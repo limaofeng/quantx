@@ -116,6 +116,80 @@ def _seed_runtime(inspector: _Inspector, revision, *, event_id_length: int) -> N
     }
   ]
   inspector.indexes[revision._RUNTIME_EVENTS_TABLE] = []
+
+
+def _seed_watchlist(inspector: _Inspector, revision, *, legacy: bool = True) -> None:
+  inspector.tables.add(revision._ITEM_TABLE)
+  inspector.columns[revision._ITEM_TABLE] = [
+    {"name": "id", "type": sa.String(length=32), "nullable": False}
+  ]
+  if legacy:
+    inspector.columns[revision._ITEM_TABLE].append(
+      {"name": "group_name", "type": sa.String(length=80), "nullable": True}
+    )
+
+
+def _seed_0031_groups(inspector: _Inspector, revision) -> None:
+  _seed_columns(
+    inspector,
+    revision,
+    revision._GROUP_TABLE,
+    revision._expected_columns(revision._GROUP_TABLE),
+  )
+  inspector.primary_keys[revision._GROUP_TABLE] = {"constrained_columns": ["id"]}
+  inspector.indexes[revision._GROUP_TABLE] = [
+    {
+      "name": "ix_watchlist_group_account_order",
+      "column_names": ["account_id", "display_order"],
+      "unique": False,
+    },
+    {
+      "name": "uq_watchlist_group_account_name_ci",
+      "column_names": ["account_id", None],
+      "expressions": ["account_id", "lower(name::text)"],
+      "unique": True,
+    },
+  ]
+
+
+def _seed_0031_memberships(inspector: _Inspector, revision) -> None:
+  _seed_columns(
+    inspector,
+    revision,
+    revision._MEMBERSHIP_TABLE,
+    revision._expected_columns(revision._MEMBERSHIP_TABLE),
+  )
+  inspector.primary_keys[revision._MEMBERSHIP_TABLE] = {
+    "constrained_columns": ["group_id", "watchlist_item_id"]
+  }
+  inspector.foreign_keys[revision._MEMBERSHIP_TABLE] = [
+    {
+      "constrained_columns": ["group_id"],
+      "referred_table": revision._GROUP_TABLE,
+      "referred_columns": ["id"],
+      "options": {"ondelete": "CASCADE"},
+    },
+    {
+      "constrained_columns": ["watchlist_item_id"],
+      "referred_table": revision._ITEM_TABLE,
+      "referred_columns": ["id"],
+      "options": {"ondelete": "CASCADE"},
+    },
+  ]
+  inspector.indexes[revision._MEMBERSHIP_TABLE] = [
+    {
+      "name": "ix_watchlist_group_membership_group_order",
+      "column_names": ["group_id", "display_order"],
+      "unique": False,
+    },
+    {
+      "name": "ix_watchlist_group_membership_item",
+      "column_names": ["watchlist_item_id"],
+      "unique": False,
+    },
+  ]
+
+
 def test_0029_adopts_complete_precreated_schema_without_create_ddl(monkeypatch):
   revision = _load("20260823_0029_t_trade_opportunity_intelligence.py")
   inspector = _Inspector()
@@ -258,3 +332,130 @@ def test_0030_mismatched_precreated_candidate_constraint_fails_closed():
 
   with pytest.raises(RuntimeError, match="constraint"):
     revision.upgrade()
+
+
+def test_0031_adopts_precreated_groups_and_backfills_legacy_column(monkeypatch):
+  revision = _load("20260823_0031_watchlist_groups.py")
+  inspector = _Inspector()
+  _seed_watchlist(inspector, revision, legacy=True)
+  _seed_0031_groups(inspector, revision)
+  _seed_0031_memberships(inspector, revision)
+  monkeypatch.setattr(revision, "_get_inspector", lambda: inspector)
+  operations = []
+  monkeypatch.setattr(
+    revision.op,
+    "create_table",
+    lambda *_args, **_kwargs: pytest.fail("complete groups must be adopted"),
+  )
+  monkeypatch.setattr(
+    revision.op,
+    "execute",
+    lambda statement: operations.append(("execute", str(statement))),
+  )
+  monkeypatch.setattr(
+    revision.op,
+    "drop_column",
+    lambda *args, **kwargs: operations.append(("drop_column", args, kwargs)),
+  )
+
+  revision.upgrade()
+
+  assert sum(operation[0] == "execute" for operation in operations) == 2
+  assert operations[-1][0] == "drop_column"
+  assert "ON CONFLICT" in operations[0][1]
+  assert "ON CONFLICT" in operations[1][1]
+
+
+def test_0031_fresh_create_backfills_and_drops_legacy_column(monkeypatch):
+  revision = _load("20260823_0031_watchlist_groups.py")
+  inspector = _Inspector()
+  _seed_watchlist(inspector, revision, legacy=True)
+  monkeypatch.setattr(revision, "_get_inspector", lambda: inspector)
+  created_tables = []
+  operations = []
+  monkeypatch.setattr(
+    revision.op,
+    "create_table",
+    lambda name, *_args, **_kwargs: created_tables.append(name),
+  )
+  monkeypatch.setattr(
+    revision.op,
+    "create_index",
+    lambda *_args, **_kwargs: operations.append(("create_index",)),
+  )
+  monkeypatch.setattr(
+    revision.op,
+    "execute",
+    lambda statement: operations.append(("execute", str(statement))),
+  )
+  monkeypatch.setattr(
+    revision.op,
+    "drop_column",
+    lambda *args, **kwargs: operations.append(("drop_column", args, kwargs)),
+  )
+
+  revision.upgrade()
+
+  assert created_tables == [revision._GROUP_TABLE, revision._MEMBERSHIP_TABLE]
+  assert sum(operation[0] == "execute" for operation in operations) == 3
+  assert operations[-1][0] == "drop_column"
+
+
+def test_0031_missing_target_tables_and_legacy_column_fails_closed():
+  revision = _load("20260823_0031_watchlist_groups.py")
+  inspector = _Inspector()
+  _seed_watchlist(inspector, revision, legacy=False)
+  revision._get_inspector = lambda: inspector
+
+  with pytest.raises(RuntimeError, match="legacy.*group_name"):
+    revision.upgrade()
+
+
+@pytest.mark.parametrize(
+  "mutate",
+  [
+    lambda inspector, revision: inspector.tables.remove(revision._MEMBERSHIP_TABLE),
+    lambda inspector, revision: inspector.indexes[revision._GROUP_TABLE][1].update(
+      column_names=["account_id", "name"]
+    ),
+    lambda inspector, revision: inspector.indexes[revision._GROUP_TABLE][1].update(
+      expressions=["account_id", "upper(name)"]
+    ),
+  ],
+)
+def test_0031_partial_or_mismatched_precreated_schema_fails_closed(
+  mutate,
+):
+  revision = _load("20260823_0031_watchlist_groups.py")
+  inspector = _Inspector()
+  _seed_watchlist(inspector, revision, legacy=True)
+  _seed_0031_groups(inspector, revision)
+  _seed_0031_memberships(inspector, revision)
+  mutate(inspector, revision)
+  revision._get_inspector = lambda: inspector
+
+  with pytest.raises(RuntimeError, match="schema"):
+    revision.upgrade()
+
+
+def test_0031_adopts_already_migrated_watchlist_without_replaying_backfill(
+  monkeypatch,
+):
+  revision = _load("20260823_0031_watchlist_groups.py")
+  inspector = _Inspector()
+  _seed_watchlist(inspector, revision, legacy=False)
+  _seed_0031_groups(inspector, revision)
+  _seed_0031_memberships(inspector, revision)
+  monkeypatch.setattr(revision, "_get_inspector", lambda: inspector)
+  monkeypatch.setattr(
+    revision.op,
+    "execute",
+    lambda *_args, **_kwargs: pytest.fail("legacy backfill must not repeat"),
+  )
+  monkeypatch.setattr(
+    revision.op,
+    "drop_column",
+    lambda *_args, **_kwargs: pytest.fail("legacy column is already gone"),
+  )
+
+  revision.upgrade()

@@ -30,7 +30,7 @@ branch_labels = None
 depends_on = None
 
 EXPECTED_METADATA_SHA256 = (
-  "ce1600fbb992cdd47fd945d7c8c2fe87a045c56c8223ede3e42c98deeaa339a5"
+  "1fd3acd15bc9592ba3f972786261c3dc3a49da1b0b04dad65b63fbc49ce56cd5"
 )
 
 # Models added by revisions after this immutable baseline must not affect its
@@ -81,8 +81,18 @@ POST_BASELINE_TABLES = {
   "t_trade_candidate_outcomes",
   "t_trade_opportunity_evaluations",
   "t_trade_replay_projections",
+  # Added by 20260823_0031; a fresh database must not create these before
+  # their owning revision runs.
+  "watchlist_groups",
+  "watchlist_group_memberships",
 }
 POST_BASELINE_COLUMNS = {
+  "agent_devices": {
+    "replaces_device_id",
+  },
+  "agent_enrollment_codes": {
+    "replaces_device_id",
+  },
   "market_data_request": {
     "ingestion_result",
     "processing_claim_token",
@@ -163,6 +173,7 @@ def _baseline_metadata() -> MetaData:
       index for index, value in enumerate(columns) if value[0] == "created_at"
     )
     columns.insert(created_at_index, entry)
+
   for table_key, column_names in POST_BASELINE_COLUMNS.items():
     table = metadata.tables[table_key]
     for index in list(table.indexes):
