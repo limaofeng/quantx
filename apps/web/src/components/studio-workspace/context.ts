@@ -18,6 +18,7 @@ export interface StudioWorkspaceContextValue {
   activeTabId: string | null;
   clearWorkspaceSidebar: (ownerId: string) => void;
   isWorkspaceHosted: boolean;
+  openAssistant: (draft?: string) => void;
   openStudioTab: (path: string) => void;
   setWorkspaceSidebar: (config: StudioWorkspaceSidebarConfig) => void;
   tabBar?: ReactNode;

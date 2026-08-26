@@ -53,9 +53,19 @@ vi.mock('@/components/studio-workbench', async () => {
 });
 
 vi.mock('@/features/ai-assistant', () => ({
-  AssistantDrawer: ({ onClose }: { onClose: () => void }) => (
+  AssistantDrawer: ({
+    draftRequest,
+    onClose,
+  }: {
+    draftRequest?: { id: number; text: string } | null;
+    onClose: () => void;
+  }) => (
     <aside aria-label="AI 助手" data-testid="mock-assistant-drawer">
-      <input aria-label="AI 助手输入框" />
+      <input
+        aria-label="AI 助手输入框"
+        readOnly
+        value={draftRequest?.text || ''}
+      />
       <button type="button" onClick={onClose}>
         关闭 AI 助手
       </button>
@@ -108,6 +118,19 @@ function WorkspaceTabLauncher() {
   return (
     <button type="button" onClick={() => workspace?.openStudioTab('/holdings')}>
       打开持仓标签
+    </button>
+  );
+}
+
+function WorkspaceAssistantLauncher() {
+  const workspace = useStudioWorkspaceContext();
+
+  return (
+    <button
+      type="button"
+      onClick={() => workspace?.openAssistant('审计当前网格参数')}
+    >
+      审计网格参数
     </button>
   );
 }
@@ -493,6 +516,23 @@ describe('StudioWorkspace', () => {
       screen.queryByTestId('studio-assistant-panel')
     ).not.toBeInTheDocument();
     expect(launcherTrigger).toHaveFocus();
+  });
+
+  it('opens the AI assistant with a page-provided draft', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <StudioWorkspace>
+        <WorkspaceAssistantLauncher />
+      </StudioWorkspace>
+    );
+
+    await user.click(screen.getByRole('button', { name: '审计网格参数' }));
+
+    expect(await screen.findByTestId('studio-assistant-panel')).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'AI 助手输入框' })).toHaveValue(
+      '审计当前网格参数'
+    );
   });
 
   it('resizes and persists the AI assistant panel from its left edge', async () => {

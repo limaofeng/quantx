@@ -116,6 +116,7 @@ const workspaceContext: StudioWorkspaceContextValue = {
   activeTabId: 'page:/limit-up-board',
   clearWorkspaceSidebar: mocks.clearWorkspaceSidebar,
   isWorkspaceHosted: true,
+  openAssistant: vi.fn(),
   openStudioTab: vi.fn(),
   setWorkspaceSidebar: mocks.setWorkspaceSidebar,
   updateActiveTab: vi.fn(),

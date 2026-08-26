@@ -16,6 +16,7 @@ describe('StudioWorkbench', () => {
           activeTabId: 'page:/hosted',
           clearWorkspaceSidebar,
           isWorkspaceHosted: true,
+          openAssistant: vi.fn(),
           openStudioTab: vi.fn(),
           setWorkspaceSidebar,
           tabBar: <div data-testid="workspace-tabbar">Workspace tabs</div>,

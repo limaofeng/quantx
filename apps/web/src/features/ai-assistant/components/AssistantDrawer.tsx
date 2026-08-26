@@ -9,7 +9,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
@@ -37,9 +37,11 @@ function messageText(content: AiAssistantMessageFieldsFragment['content']) {
 
 export function AssistantDrawer({
   currentPath,
+  draftRequest,
   onClose,
 }: {
   currentPath: string;
+  draftRequest?: { id: number; text: string } | null;
   onClose: () => void;
 }) {
   const { toast } = useToast();
@@ -47,6 +49,11 @@ export function AssistantDrawer({
   const [draft, setDraft] = useState('');
   const [attachAccount, setAttachAccount] = useState(false);
   const assistant = useAiAssistant(currentPath);
+
+  useEffect(() => {
+    if (draftRequest?.text) setDraft(draftRequest.text);
+  }, [draftRequest]);
+
   const isRunning =
     assistant.activeRun?.status === AiAssistantRunStatus.Queued ||
     assistant.activeRun?.status === AiAssistantRunStatus.Running ||

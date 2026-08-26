@@ -444,11 +444,13 @@ function StudioWorkspaceSidebarDock({
 }
 
 function StudioAssistantDock({
+  draftRequest,
   currentPath,
   isOpen,
   onClose,
   onKeyDown,
 }: {
+  draftRequest: { id: number; text: string } | null;
   currentPath: string;
   isOpen: boolean;
   onClose: () => void;
@@ -520,7 +522,11 @@ function StudioAssistantDock({
           <aside className="h-full w-full min-w-0 border-l border-white/10 bg-[#080e1b]" />
         }
       >
-        <AssistantDrawer currentPath={currentPath} onClose={onClose} />
+        <AssistantDrawer
+          currentPath={currentPath}
+          draftRequest={draftRequest}
+          onClose={onClose}
+        />
       </Suspense>
     </div>
   );
@@ -666,6 +672,11 @@ export function StudioWorkspace({
   const [workspaceSidebar, setWorkspaceSidebarState] =
     useState<StudioWorkspaceSidebarConfig | null>(null);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
+  const [assistantDraftRequest, setAssistantDraftRequest] = useState<{
+    id: number;
+    text: string;
+  } | null>(null);
+  const assistantDraftRequestIdRef = useRef(0);
   const assistantTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -791,7 +802,20 @@ export function StudioWorkspace({
 
   const closeAssistant = useCallback(() => {
     setIsAssistantOpen(false);
+    setAssistantDraftRequest(null);
     assistantTriggerRef.current?.focus();
+  }, []);
+
+  const openAssistant = useCallback((draft?: string) => {
+    const text = draft?.trim();
+    if (text) {
+      assistantDraftRequestIdRef.current += 1;
+      setAssistantDraftRequest({
+        id: assistantDraftRequestIdRef.current,
+        text,
+      });
+    }
+    setIsAssistantOpen(true);
   }, []);
 
   const toggleAssistant = useCallback(() => {
@@ -799,8 +823,8 @@ export function StudioWorkspace({
       closeAssistant();
       return;
     }
-    setIsAssistantOpen(true);
-  }, [closeAssistant, isAssistantOpen]);
+    openAssistant();
+  }, [closeAssistant, isAssistantOpen, openAssistant]);
 
   const handleAssistantKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLElement>) => {
@@ -874,6 +898,7 @@ export function StudioWorkspace({
       activeTabId,
       clearWorkspaceSidebar,
       isWorkspaceHosted: true,
+      openAssistant,
       openStudioTab,
       setWorkspaceSidebar,
       tabBar: workspaceTabBar,
@@ -882,6 +907,7 @@ export function StudioWorkspace({
     [
       activeTabId,
       clearWorkspaceSidebar,
+      openAssistant,
       openStudioTab,
       setWorkspaceSidebar,
       updateActiveTab,
@@ -1015,6 +1041,7 @@ export function StudioWorkspace({
               </div>
               <StudioAssistantDock
                 currentPath={currentPath}
+                draftRequest={assistantDraftRequest}
                 isOpen={isAssistantOpen}
                 onClose={closeAssistant}
                 onKeyDown={handleAssistantKeyDown}
