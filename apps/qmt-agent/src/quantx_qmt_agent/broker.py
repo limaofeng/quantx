@@ -1268,6 +1268,10 @@ class LiveBroker:
     self._trading_registry = registry
     self._trading_journal = journal
     self._trading_access_lock = threading.RLock()
+    self._trading_generation_lock = threading.Lock()
+    self._trading_connection_generation = 0
+    self._trading_reconciled_generation = -1
+    self._registry_trading_generations: dict[str, int] = {}
     self.data_manager = XTDataManagerRegistry().get_manager()
     self._xtdata_access_lock = threading.RLock()
     self.market_streamer = _LocalMarketStreamer(
@@ -1277,6 +1281,9 @@ class LiveBroker:
     self.agents = {}
     for account_id in allowed_accounts:
       manager = registry.get_manager(account_id)
+      self._registry_trading_generations[account_id] = (
+        self._registry_connection_generation(account_id)
+      )
       agent = MiniQmtLocalAgent(
         manager,
         market_data_manager=self.data_manager,
@@ -1300,18 +1307,105 @@ class LiveBroker:
     """Reconnect dead XTTrading sessions and rebind their report sinks."""
     with self._trading_access_lock:
       for account_id, agent in self.agents.items():
+        previous_manager = agent.trading_manager
+        was_connected = bool(
+          getattr(previous_manager, "is_connected", False)
+        )
+        observed_generations = getattr(
+          self,
+          "_registry_trading_generations",
+          {},
+        )
+        self._registry_trading_generations = observed_generations
+        previous_registry_generation = int(
+          observed_generations.get(account_id, 0)
+        )
         manager = self._trading_registry.get_manager(
           account_id,
           reconnect=True,
         )
-        if manager is not agent.trading_manager:
+        registry_generation = self._registry_connection_generation(account_id)
+        observed_generations[account_id] = registry_generation
+        if manager is not previous_manager:
           agent.trading_manager = manager
           manager.trading_service = _LiveReportSink(
             account_id,
             self._trading_journal,
             on_report=agent.mark_report_received,
           )
+        reconnect_count = max(
+          0,
+          registry_generation - previous_registry_generation,
+        )
+        if reconnect_count == 0 and (
+          manager is not previous_manager
+          or (
+            not was_connected
+            and bool(getattr(manager, "is_connected", False))
+          )
+        ):
+          # Registry doubles used by tests and alternate manager providers may
+          # not expose their own generation.  Manager replacement or an
+          # observable disconnected -> connected edge is still a reconnect.
+          reconnect_count = 1
+        if reconnect_count:
+          with self._generation_lock():
+            self._trading_connection_generation = (
+              int(getattr(self, "_trading_connection_generation", 0))
+              + reconnect_count
+            )
       return self.is_trading_ready()
+
+  def _registry_connection_generation(self, account_id: str) -> int:
+    reader = getattr(self._trading_registry, "connection_generation", None)
+    if not callable(reader):
+      return 0
+    try:
+      return max(0, int(reader(account_id)))
+    except Exception as exc:
+      logger.warning(
+        "XTTrading registry generation check failed: account=%s error=%s: %s",
+        account_id,
+        exc.__class__.__name__,
+        exc,
+      )
+      return 0
+
+  def trading_connection_generation(self) -> int:
+    """Monotonically identify a native XTTrading reconnect for Runtime."""
+    # This dedicated lock is never held around native calls, so Runtime can
+    # inspect the generation without waiting behind a stuck XTTrading query.
+    with self._generation_lock():
+      return int(getattr(self, "_trading_connection_generation", 0))
+
+  def trading_requires_reconciliation(self) -> bool:
+    with self._generation_lock():
+      return int(getattr(self, "_trading_reconciled_generation", -1)) != int(
+        getattr(self, "_trading_connection_generation", 0)
+      )
+
+  def require_trading_reconciliation(self) -> None:
+    """Close the local new-order gate until Runtime acknowledges a snapshot."""
+    with self._generation_lock():
+      self._trading_reconciled_generation = -1
+
+  def mark_trading_reconciled(self, connection_generation: int) -> bool:
+    """Open the local order gate only for the snapshotted generation."""
+    generation = max(0, int(connection_generation))
+    with self._generation_lock():
+      if generation != int(
+        getattr(self, "_trading_connection_generation", 0)
+      ):
+        return False
+      self._trading_reconciled_generation = generation
+      return True
+
+  def _generation_lock(self) -> threading.Lock:
+    lock = getattr(self, "_trading_generation_lock", None)
+    if lock is None:
+      lock = threading.Lock()
+      self._trading_generation_lock = lock
+    return lock
 
   def is_market_data_ready(self) -> bool:
     """Return cached readiness without invoking the native SDK."""
@@ -1377,6 +1471,11 @@ class LiveBroker:
           and all(section_completeness.values())
         )
         if not snapshot_complete:
+          # ``is_connected`` only records the last native callback.  A failed
+          # account/positions/orders/trades query after miniQMT restarts makes
+          # that cached flag untrustworthy, so force the registry through its
+          # bounded reconnect path before another snapshot can be authoritative.
+          agent.trading_manager.is_connected = False
           unavailable_accounts.append(account_id)
         else:
           agent.mark_report_received()
@@ -1410,38 +1509,55 @@ class LiveBroker:
       "mode": "live",
     }
 
+  def capture_full_snapshot(self) -> tuple[dict[str, Any], int]:
+    """Capture snapshot data and its native generation under one broker lock."""
+    with self._trading_access_lock:
+      snapshot = self.full_snapshot()
+      return snapshot, self.trading_connection_generation()
+
   def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
     account_id = str(payload["account_id"])
-    if not self.ensure_trading_ready():
-      logger.warning(
-        "拒绝交易命令：XTTrading 尚未连接: account=%s",
-        account_id,
-      )
-      return {
-        "accepted": False,
-        "reason": "miniQMT trading connection unavailable",
-        "reports": [],
-      }
-    agent = self.agents[account_id]
-    if payload.get("command_kind") == "CANCEL_ORDER":
-      result = agent.cancel_order(payload.get("broker_order_id"))
+    with self._trading_access_lock:
+      if not self.ensure_trading_ready():
+        logger.warning(
+          "拒绝交易命令：XTTrading 尚未连接: account=%s",
+          account_id,
+        )
+        return {
+          "accepted": False,
+          "reason": "miniQMT trading connection unavailable",
+          "reports": [],
+        }
+      agent = self.agents[account_id]
+      if payload.get("command_kind") == "CANCEL_ORDER":
+        result = agent.cancel_order(payload.get("broker_order_id"))
+        return {
+          "accepted": bool(result.get("success")),
+          "reason": str(result.get("message") or ""),
+          "reports": [],
+        }
+      if self.trading_requires_reconciliation():
+        logger.warning(
+          "拒绝新增委托：XTTrading 重连后尚未完成权威对账: account=%s",
+          account_id,
+        )
+        return {
+          "accepted": False,
+          "reason": "local_reconciliation_required",
+          "reports": [],
+        }
+      command = dict(payload)
+      command["order_type"] = payload.get("side")
+      command["price_type"] = payload.get("order_type")
+      command["price"] = float(payload.get("limit_price") or 0)
+      command["order_remark"] = f"qx:{str(payload['client_order_id'])[:20]}"
+      result = agent.place_order(command)
       return {
         "accepted": bool(result.get("success")),
         "reason": str(result.get("message") or ""),
         "reports": [],
+        "broker_order_id": result.get("order_id"),
       }
-    command = dict(payload)
-    command["order_type"] = payload.get("side")
-    command["price_type"] = payload.get("order_type")
-    command["price"] = float(payload.get("limit_price") or 0)
-    command["order_remark"] = f"qx:{str(payload['client_order_id'])[:20]}"
-    result = agent.place_order(command)
-    return {
-      "accepted": bool(result.get("success")),
-      "reason": str(result.get("message") or ""),
-      "reports": [],
-      "broker_order_id": result.get("order_id"),
-    }
 
   def market_data(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
     return list(self.iter_market_data(payload))

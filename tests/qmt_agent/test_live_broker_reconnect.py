@@ -39,6 +39,49 @@ def test_registry_reuses_native_manager_during_reconnect():
   assert result is manager
   assert registry._managers["account-1"] is manager
   assert reconnect_calls == 1
+  assert registry.connection_generation("account-1") == 1
+
+
+def test_live_broker_observes_same_manager_health_probe_reconnect():
+  registry = object.__new__(XTTradingManagerRegistry)
+  health_checks = 0
+  reconnect_calls = 0
+
+  class Manager:
+    is_connected = True
+
+    def is_account_status_ok(self) -> bool:
+      nonlocal health_checks
+      health_checks += 1
+      return False
+
+    def reconnect(self) -> bool:
+      nonlocal reconnect_calls
+      reconnect_calls += 1
+      self.is_connected = True
+      return True
+
+  manager = Manager()
+  registry._managers = {"account-1": manager}
+  registry._last_reconnect_attempts = {}
+  registry._connection_generations = {}
+  registry._reconnect_interval = 0.0
+
+  broker = object.__new__(LiveBroker)
+  broker.agents = {"account-1": FakeAgent(manager)}
+  broker._trading_registry = registry
+  broker._trading_journal = SimpleNamespace()
+  broker._trading_access_lock = threading.RLock()
+  broker._trading_generation_lock = threading.Lock()
+  broker._trading_connection_generation = 0
+  broker._trading_reconciled_generation = 0
+  broker._registry_trading_generations = {"account-1": 0}
+
+  assert broker.ensure_trading_ready() is True
+  assert health_checks == 1
+  assert reconnect_calls == 1
+  assert broker.trading_connection_generation() == 1
+  assert broker.trading_requires_reconciliation() is True
 
 
 def test_trading_manager_reconnect_does_not_restart_native_client():
@@ -78,6 +121,81 @@ def test_live_broker_rebinds_reconnected_manager():
   assert broker.ensure_trading_ready() is True
   assert agent.trading_manager is new_manager
   assert isinstance(new_manager.trading_service, _LiveReportSink)
+  assert broker.trading_connection_generation() == 1
+
+
+def test_live_broker_rejects_new_orders_until_generation_is_reconciled():
+  placed_orders: list[dict] = []
+  cancelled_orders: list[str] = []
+
+  class Agent:
+    trading_manager = SimpleNamespace(is_connected=True)
+
+    @staticmethod
+    def mark_report_received() -> None:
+      return None
+
+    @staticmethod
+    def place_order(command):
+      placed_orders.append(command)
+      return {"success": True, "message": "", "order_id": "order-1"}
+
+    @staticmethod
+    def cancel_order(order_id):
+      cancelled_orders.append(order_id)
+      return {"success": True, "message": ""}
+
+  broker = object.__new__(LiveBroker)
+  broker.agents = {"account-1": Agent()}
+  broker._trading_access_lock = threading.RLock()
+  broker._trading_generation_lock = threading.Lock()
+  broker._trading_connection_generation = 1
+  broker._trading_reconciled_generation = 0
+  broker.ensure_trading_ready = lambda: True
+
+  rejected = broker.execute(
+    {
+      "account_id": "account-1",
+      "client_order_id": "client-1",
+      "command_kind": "PLACE_ORDER",
+      "side": "BUY",
+      "order_type": "LIMIT",
+      "limit_price": 10,
+    }
+  )
+  cancelled = broker.execute(
+    {
+      "account_id": "account-1",
+      "command_kind": "CANCEL_ORDER",
+      "broker_order_id": "order-previous",
+    }
+  )
+
+  assert rejected == {
+    "accepted": False,
+    "reason": "local_reconciliation_required",
+    "reports": [],
+  }
+  assert placed_orders == []
+  assert cancelled["accepted"] is True
+  assert cancelled_orders == ["order-previous"]
+  assert broker.mark_trading_reconciled(0) is False
+  assert broker.mark_trading_reconciled(1) is True
+
+  accepted = broker.execute(
+    {
+      "account_id": "account-1",
+      "client_order_id": "client-2",
+      "command_kind": "PLACE_ORDER",
+      "side": "BUY",
+      "order_type": "LIMIT",
+      "limit_price": 10,
+    }
+  )
+
+  assert accepted["accepted"] is True
+  assert accepted["broker_order_id"] == "order-1"
+  assert len(placed_orders) == 1
 
 
 def test_disconnected_live_snapshot_is_never_complete():

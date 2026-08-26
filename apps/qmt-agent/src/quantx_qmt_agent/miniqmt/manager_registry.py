@@ -186,6 +186,7 @@ class XTTradingManagerRegistry:
           cls._instance._reconnect_interval = 5.0
           cls._instance._max_reconnect_attempts = 3
           cls._instance._connection_timeout = 30.0
+          cls._instance._connection_generations = {}
     return cls._instance
 
   def get_manager(
@@ -227,14 +228,25 @@ class XTTradingManagerRegistry:
         bool: 是否健康
     """
     try:
-      # 基本连接状态检查
+      # A cached callback flag is not proof that miniQMT still owns the native
+      # session.  Verify it with the manager's cheap broker-side status probe
+      # when available; a local miniQMT restart can otherwise leave a dead
+      # session permanently reported as connected.
       if not getattr(manager, "is_connected", False):
         return False
 
-      # 检查会话是否仍然有效（可以通过简单的查询来验证）
-      return True
+      probe = getattr(manager, "is_connection_healthy", None)
+      if not callable(probe):
+        probe = getattr(manager, "is_account_status_ok", None)
+      if not callable(probe):
+        return True
+      if bool(probe()):
+        return True
+      manager.is_connected = False
+      return False
 
     except Exception:
+      manager.is_connected = False
       return False
 
   def _reconnect_manager(
@@ -264,6 +276,11 @@ class XTTradingManagerRegistry:
         reconnect = getattr(manager, "reconnect", None)
         if not callable(reconnect) or not reconnect():
           return manager
+        generations = getattr(self, "_connection_generations", None)
+        if not isinstance(generations, dict):
+          generations = {}
+          self._connection_generations = generations
+        generations[account_id] = int(generations.get(account_id, 0)) + 1
         self._last_reconnect_attempts.pop(account_id, None)
         logger.info("XTQuant交易连接已自动恢复: account=%s", account_id)
         return manager
@@ -275,6 +292,12 @@ class XTTradingManagerRegistry:
           exc,
         )
         return manager
+
+  def connection_generation(self, account_id: str) -> int:
+    """Return the monotonic reconnect generation for one native account."""
+    with self._lock:
+      generations = getattr(self, "_connection_generations", {})
+      return max(0, int(generations.get(account_id, 0)))
 
   def clear_manager(self, account_id: str) -> None:
     """

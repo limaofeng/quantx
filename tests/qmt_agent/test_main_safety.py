@@ -7,7 +7,10 @@ import pytest
 from quantx_qmt_agent import main as main_module
 from quantx_qmt_agent.emergency import EmergencyStopStore
 from quantx_qmt_agent.main import _require_safe_run_mode
-from quantx_qmt_agent.runtime import _FatalMarketDataPreparationError
+from quantx_qmt_agent.runtime import (
+  _FatalMarketDataPreparationError,
+  _FatalTradingRecoveryError,
+)
 
 
 class _FakeProcessWatchdog:
@@ -135,6 +138,35 @@ def test_fatal_market_data_runtime_uses_process_level_fail_stop(
   with pytest.raises(
     _FatalMarketDataPreparationError,
     match="native XTData is stuck",
+  ):
+    main_module._run_runtime(Runtime(), watchdog)
+
+  assert exit_codes == [main_module.FATAL_MARKET_DATA_EXIT_CODE]
+  assert watchdog.start_count == 1
+  assert watchdog.close_count == 1
+
+
+def test_fatal_trading_runtime_uses_process_level_fail_stop(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  exit_codes: list[int] = []
+
+  class Runtime:
+    @staticmethod
+    async def run_forever() -> None:
+      raise _FatalTradingRecoveryError("native XTTrading is stuck")
+
+  monkeypatch.setattr(
+    main_module,
+    "_hard_exit_for_fatal_market_data",
+    exit_codes.append,
+  )
+  watchdog = _FakeProcessWatchdog()
+  watchdog.start()
+
+  with pytest.raises(
+    _FatalTradingRecoveryError,
+    match="native XTTrading is stuck",
   ):
     main_module._run_runtime(Runtime(), watchdog)
 

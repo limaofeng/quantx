@@ -73,6 +73,11 @@ XTDATA_CONTROL_TIMEOUT_SECONDS = 60
 XTDATA_READINESS_RETRY_SECONDS = 5
 XTTRADING_READINESS_RETRY_SECONDS = 5
 XTTRADING_RECONNECT_TIMEOUT_SECONDS = 30
+XTTRADING_SNAPSHOT_TIMEOUT_SECONDS = 30
+# A stale native session is unsafe to keep alive indefinitely.  The outer
+# process supervisor owns the only safe reinitialization boundary once this
+# bounded recovery window expires.
+XTTRADING_RECOVERY_MAX_SECONDS = 90
 WEBSOCKET_PING_INTERVAL_SECONDS = 20
 WEBSOCKET_PING_TIMEOUT_SECONDS = 16 * 60
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 30
@@ -239,6 +244,10 @@ class _MarketDataRequestAlreadyCompleted(RuntimeError):
 
 class _FatalMarketDataPreparationError(RuntimeError):
   """A hung native request requires the supervised Agent process to restart."""
+
+
+class _FatalTradingRecoveryError(RuntimeError):
+  """A stale XTTrading session did not recover within its bounded window."""
 
 
 class _PlannedMarketTokenRefresh(RuntimeError):
@@ -665,6 +674,19 @@ class AgentRuntime:
     self._xtdata_access_lock = asyncio.Lock()
     self._websocket_send_lock = asyncio.Lock()
     self._heartbeat_checkpoint_lock = asyncio.Lock()
+    self._full_snapshot_lock = asyncio.Lock()
+    # A live control connection starts in reconciliation and cannot advertise
+    # READY again until this connection's fresh, complete snapshot was durably
+    # accepted by the API.  The Engine retains the final authority to promote
+    # that RECONCILING heartbeat after it applies the snapshot.
+    self._trading_reconciliation_required = False
+    self._trading_reconciliation_snapshot_id: str | None = None
+    self._trading_reconciliation_snapshot_generation: int | None = None
+    self._trading_recovery_started_monotonic: float | None = None
+    self._trading_recovery_reason = ""
+    self._trading_readiness_failed = False
+    self._trading_ready_cache = mode != "live"
+    self._trading_connection_generation_cache = 0
     self._control_session_authenticated = False
     self._market_upload_clock = time.monotonic
     self._fatal_market_data_error: (
@@ -701,6 +723,8 @@ class AgentRuntime:
           if not await self._run_session_until_fatal():
             break
           delay = 1
+        except _FatalTradingRecoveryError:
+          raise
         except asyncio.CancelledError:
           raise
         except Exception as exc:
@@ -808,6 +832,103 @@ class AgentRuntime:
     expires_at = _parse_expiry(expires_value)
     return token, expires_at
 
+  def _requires_trading_reconciliation(self) -> bool:
+    return bool(
+      self.mode == "live"
+      and getattr(self, "_trading_reconciliation_required", False)
+    )
+
+  def _begin_trading_reconciliation(
+    self,
+    reason: str,
+  ) -> None:
+    """Fail closed until a newly generated complete snapshot is acknowledged."""
+    if self.mode != "live":
+      return
+    already_reconciling = self._requires_trading_reconciliation()
+    self._trading_reconciliation_required = True
+    self._trading_reconciliation_snapshot_id = None
+    self._trading_reconciliation_snapshot_generation = None
+    self._trading_recovery_reason = reason[:128]
+    if (
+      not already_reconciling
+      or self._trading_recovery_started_monotonic is None
+    ):
+      self._trading_recovery_started_monotonic = time.monotonic()
+    require_reconciliation = getattr(
+      getattr(self, "broker", None),
+      "require_trading_reconciliation",
+      None,
+    )
+    if callable(require_reconciliation):
+      try:
+        require_reconciliation()
+      except Exception as exc:
+        logger.warning(
+          "Could not close the local XTTrading order gate: %s: %s",
+          exc.__class__.__name__,
+          exc,
+        )
+
+  def _acknowledge_trading_reconciliation_snapshot(
+    self,
+    report_message_id: str,
+  ) -> bool:
+    if (
+      self.mode != "live"
+      or not self._requires_trading_reconciliation()
+      or report_message_id != self._trading_reconciliation_snapshot_id
+    ):
+      return False
+    snapshot_generation = self._trading_reconciliation_snapshot_generation
+    if snapshot_generation is None:
+      self._begin_trading_reconciliation("snapshot_generation_missing")
+      return False
+    mark_reconciled = getattr(self.broker, "mark_trading_reconciled", None)
+    try:
+      generation_is_current = (
+        bool(mark_reconciled(snapshot_generation))
+        if callable(mark_reconciled)
+        else snapshot_generation == self._trading_connection_generation()
+      )
+    except Exception as exc:
+      logger.warning(
+        "Could not open the local XTTrading order gate: %s: %s",
+        exc.__class__.__name__,
+        exc,
+      )
+      generation_is_current = False
+    if not generation_is_current:
+      self._begin_trading_reconciliation("snapshot_generation_stale")
+      return False
+    self._trading_reconciliation_required = False
+    self._trading_reconciliation_snapshot_id = None
+    self._trading_reconciliation_snapshot_generation = None
+    self._trading_recovery_started_monotonic = None
+    self._trading_recovery_reason = ""
+    self._trading_readiness_failed = False
+    logger.info(
+      "XTTrading reconciliation snapshot acknowledged; awaiting Engine promotion"
+    )
+    return True
+
+  def _heartbeat_status(self) -> str:
+    return "RECONCILING" if self._requires_trading_reconciliation() else "READY"
+
+  def _raise_if_trading_recovery_expired(self) -> None:
+    if not self._requires_trading_reconciliation():
+      return
+    started = self._trading_recovery_started_monotonic
+    if started is None:
+      return
+    elapsed = time.monotonic() - started
+    if elapsed < XTTRADING_RECOVERY_MAX_SECONDS:
+      return
+    raise _FatalTradingRecoveryError(
+      "XTTrading recovery did not obtain an acknowledged complete snapshot "
+      f"within {XTTRADING_RECOVERY_MAX_SECONDS}s"
+    )
+
   async def _run_session(self) -> None:
     self._control_session_authenticated = False
     access_token, expires_at = await self._issue_token()
@@ -848,10 +969,16 @@ class AgentRuntime:
       )
       self._queued_market_data_requests = {}
       self._market_event_overflow = asyncio.Event()
-      control_token_refresh_requested = asyncio.Event()
+      self._begin_trading_reconciliation(
+        "control_session_connected",
+      )
       await self._ensure_trading_ready()
-      await self._queue_full_snapshot()
-      await self._heartbeat_checkpoint(socket, status="RECONCILING")
+      await self._queue_full_snapshot(reconciliation=self.mode == "live")
+      await self._heartbeat_checkpoint(
+        socket,
+        status=(self._heartbeat_status() if self.mode == "live" else "RECONCILING"),
+      )
+      control_token_refresh_requested = asyncio.Event()
       session_tasks = {
         "receiver": asyncio.create_task(
           self._receive_session_messages(socket),
@@ -885,7 +1012,7 @@ class AgentRuntime:
           name="qmt-agent-market-readiness",
         ),
         "trading-readiness": asyncio.create_task(
-          self._trading_readiness_loop(),
+          self._trading_readiness_loop(socket),
           name="qmt-agent-trading-readiness",
         ),
       }
@@ -961,43 +1088,181 @@ class AgentRuntime:
         await receiver
         return
 
-  async def _queue_full_snapshot(self) -> None:
-    snapshot = await asyncio.to_thread(self.broker.full_snapshot)
-    snapshot_message_id = str(uuid.uuid4())
-    correlations = self.journal.broker_order_client_ids()
-    for collection_name in ("orders", "trades"):
-      for item in snapshot.get(collection_name) or []:
-        if not isinstance(item, dict):
-          continue
-        broker_order_id = item.get("order_id") or item.get("broker_order_id")
-        client_order_id = correlations.get(str(broker_order_id))
-        if not client_order_id:
-          client_order_id = self.journal.client_order_id_for_report(
-            broker_order_id=broker_order_id,
-            order_remark=str(item.get("order_remark") or ""),
-          )
-        if client_order_id:
-          item["client_order_id"] = client_order_id
-          self.journal.reconcile_processing_order(
-            client_order_id=client_order_id,
-            broker_order_id=broker_order_id,
-          )
-    snapshot["snapshot_id"] = snapshot_message_id
-    snapshot["report_id"] = snapshot_message_id
-    snapshot = enrich_report_payload(AgentMessageType.DELTA_REPORT, snapshot)
-    envelope = AgentEnvelope(
-      message_id=snapshot_message_id,
-      message_type=AgentMessageType.DELTA_REPORT,
-      payload=snapshot,
+  async def _run_native_xttrading(
+    self,
+    operation: str,
+    function,
+    *args,
+    timeout: float,
+  ) -> Any:
+    """Run one native trading call on a daemon thread with a fail-stop bound."""
+    loop = asyncio.get_running_loop()
+    outcome = loop.create_future()
+    abandoned = threading.Event()
+
+    def deliver_result(result: Any) -> None:
+      if not outcome.done() and not abandoned.is_set():
+        outcome.set_result(result)
+
+    def deliver_error(exc: BaseException) -> None:
+      if not outcome.done() and not abandoned.is_set():
+        outcome.set_exception(exc)
+
+    def worker() -> None:
+      try:
+        result = function(*args)
+      except BaseException as exc:
+        try:
+          loop.call_soon_threadsafe(deliver_error, exc)
+        except RuntimeError:
+          pass
+        return
+      if abandoned.is_set():
+        return
+      try:
+        loop.call_soon_threadsafe(deliver_result, result)
+      except RuntimeError:
+        pass
+
+    threading.Thread(
+      target=worker,
+      name=f"qmt-xttrading:{operation[:28]}",
+      daemon=True,
+    ).start()
+    try:
+      return await asyncio.wait_for(
+        asyncio.shield(outcome),
+        timeout=timeout,
+      )
+    except asyncio.TimeoutError as exc:
+      abandoned.set()
+      outcome.cancel()
+      self._trading_ready_cache = False
+      self._trading_readiness_failed = True
+      self._begin_trading_reconciliation(f"{operation}_timed_out")
+      raise _FatalTradingRecoveryError(
+        f"XTTrading {operation} timed out; Agent restart required"
+      ) from exc
+    except asyncio.CancelledError:
+      abandoned.set()
+      outcome.cancel()
+      raise
+
+  def _read_broker_trading_generation(self) -> int:
+    generation_reader = getattr(
+      self.broker,
+      "trading_connection_generation",
+      None,
     )
-    # An identical snapshot still proves reconciliation for this connection.
-    # Give every generated full snapshot its own durable business identity while
-    # keeping retries of the same journaled envelope idempotent.
-    # A newer complete snapshot supersedes older unacknowledged complete
-    # snapshots. Incremental order, execution, and position reports remain
-    # pending and retain their original delivery order.
-    self.journal.retire_pending_full_snapshots()
-    self.journal.add_report(envelope.message_id, envelope.model_dump_json())
+    if not callable(generation_reader):
+      return 0
+    try:
+      return max(0, int(generation_reader()))
+    except Exception as exc:
+      logger.warning(
+        "XTTrading connection generation check failed: %s: %s",
+        exc.__class__.__name__,
+        exc,
+      )
+      return 0
+
+  async def _capture_full_snapshot(self) -> tuple[dict[str, Any], int | None]:
+    if self.mode != "live":
+      return await asyncio.to_thread(self.broker.full_snapshot), None
+
+    capture = getattr(self.broker, "capture_full_snapshot", None)
+    if callable(capture):
+      captured = await self._run_native_xttrading(
+        "full-snapshot",
+        capture,
+        timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
+      )
+    else:
+      def capture_with_generation() -> tuple[dict[str, Any], int]:
+        return self.broker.full_snapshot(), self._read_broker_trading_generation()
+
+      captured = await self._run_native_xttrading(
+        "full-snapshot",
+        capture_with_generation,
+        timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
+      )
+    if not isinstance(captured, tuple) or len(captured) != 2:
+      raise RuntimeError("XTTrading full snapshot did not return its generation")
+    snapshot, generation = captured
+    if not isinstance(snapshot, dict):
+      raise RuntimeError("XTTrading full snapshot payload must be an object")
+    normalized_generation = max(0, int(generation))
+    self._trading_connection_generation_cache = normalized_generation
+    return snapshot, normalized_generation
+
+  async def _queue_full_snapshot(
+    self,
+    *,
+    reconciliation: bool = False,
+  ) -> str:
+    """Journal one broker snapshot and bind recovery only to a complete one."""
+    async with self._full_snapshot_lock:
+      if reconciliation:
+        self._begin_trading_reconciliation("fresh_snapshot_requested")
+      try:
+        snapshot, snapshot_generation = await self._capture_full_snapshot()
+      except _FatalTradingRecoveryError:
+        raise
+      except Exception:
+        self._begin_trading_reconciliation("snapshot_query_failed")
+        if self.mode == "live":
+          self._trading_ready_cache = False
+          self._trading_readiness_failed = True
+        raise
+      snapshot_message_id = str(uuid.uuid4())
+      correlations = self.journal.broker_order_client_ids()
+      for collection_name in ("orders", "trades"):
+        for item in snapshot.get(collection_name) or []:
+          if not isinstance(item, dict):
+            continue
+          broker_order_id = item.get("order_id") or item.get("broker_order_id")
+          client_order_id = correlations.get(str(broker_order_id))
+          if not client_order_id:
+            client_order_id = self.journal.client_order_id_for_report(
+              broker_order_id=broker_order_id,
+              order_remark=str(item.get("order_remark") or ""),
+            )
+          if client_order_id:
+            item["client_order_id"] = client_order_id
+            self.journal.reconcile_processing_order(
+              client_order_id=client_order_id,
+              broker_order_id=broker_order_id,
+            )
+      snapshot["snapshot_id"] = snapshot_message_id
+      snapshot["report_id"] = snapshot_message_id
+      snapshot = enrich_report_payload(AgentMessageType.DELTA_REPORT, snapshot)
+      is_complete = snapshot.get("is_complete") is True
+      if self.mode == "live":
+        if not is_complete:
+          # LiveBroker marks the native session unhealthy as well.  Never let
+          # an incomplete report serve as recovery evidence.
+          self._begin_trading_reconciliation("snapshot_incomplete")
+          self._trading_ready_cache = False
+          self._trading_readiness_failed = True
+        elif reconciliation or self._requires_trading_reconciliation():
+          self._trading_reconciliation_snapshot_id = snapshot_message_id
+          self._trading_reconciliation_snapshot_generation = (
+            snapshot_generation
+          )
+      envelope = AgentEnvelope(
+        message_id=snapshot_message_id,
+        message_type=AgentMessageType.DELTA_REPORT,
+        payload=snapshot,
+      )
+      # An identical snapshot still proves reconciliation for this connection.
+      # Give every generated full snapshot its own durable business identity while
+      # keeping retries of the same journaled envelope idempotent.
+      # A newer complete snapshot supersedes older unacknowledged complete
+      # snapshots. Incremental order, execution, and position reports remain
+      # pending and retain their original delivery order.
+      self.journal.retire_pending_full_snapshots()
+      self.journal.add_report(envelope.message_id, envelope.model_dump_json())
+      return snapshot_message_id
 
   async def _flush_reports(self, socket) -> None:
     for serialized in self.journal.pending_reports():
@@ -1008,10 +1273,16 @@ class AgentRuntime:
     while True:
       await asyncio.sleep(30)
       cycles += 1
-      heartbeat_status = "READY"
       if cycles % 2 == 0:
-        await self._queue_full_snapshot()
-        heartbeat_status = "RECONCILING"
+        await self._queue_full_snapshot(reconciliation=self.mode == "live")
+      self._raise_if_trading_recovery_expired()
+      heartbeat_status = (
+        self._heartbeat_status()
+        if self.mode == "live"
+        else "RECONCILING"
+        if cycles % 2 == 0
+        else "READY"
+      )
       await self._heartbeat_checkpoint(socket, status=heartbeat_status)
 
   def _is_market_data_ready(self) -> bool:
@@ -1063,6 +1334,10 @@ class AgentRuntime:
   def _is_trading_ready(self) -> bool:
     if self.mode != "live":
       return True
+    if hasattr(self, "_trading_ready_cache"):
+      return bool(self._trading_ready_cache)
+    # Unit-level Runtime doubles created without __init__ retain the legacy
+    # direct probe.  Production instances always use the event-loop-safe cache.
     readiness = getattr(self.broker, "is_trading_ready", None)
     if not callable(readiness):
       return False
@@ -1076,37 +1351,85 @@ class AgentRuntime:
       )
       return False
 
+  def _trading_connection_generation(self) -> int:
+    if hasattr(self, "_trading_connection_generation_cache"):
+      return max(0, int(self._trading_connection_generation_cache))
+    return self._read_broker_trading_generation()
+
   async def _ensure_trading_ready(self) -> bool:
     if self.mode != "live":
       return True
     ensure_ready = getattr(self.broker, "ensure_trading_ready", None)
     if not callable(ensure_ready):
+      self._trading_ready_cache = False
+      self._trading_readiness_failed = True
       return False
+
+    def ensure_with_generation() -> tuple[bool, int]:
+      ready = bool(ensure_ready())
+      return ready, self._read_broker_trading_generation()
+
     try:
-      return bool(
-        await asyncio.wait_for(
-          asyncio.to_thread(ensure_ready),
-          timeout=XTTRADING_RECONNECT_TIMEOUT_SECONDS,
-        )
+      ready, generation = await self._run_native_xttrading(
+        "readiness",
+        ensure_with_generation,
+        timeout=XTTRADING_RECONNECT_TIMEOUT_SECONDS,
       )
-    except asyncio.TimeoutError:
-      logger.warning("XTTrading reconnect timed out")
+      self._trading_connection_generation_cache = max(0, int(generation))
+      self._trading_ready_cache = bool(ready)
+      self._trading_readiness_failed = not ready
+      return bool(ready)
+    except _FatalTradingRecoveryError:
+      raise
     except Exception as exc:
       logger.warning(
         "XTTrading readiness retry failed: %s: %s",
         exc.__class__.__name__,
         exc,
       )
+    self._trading_ready_cache = False
+    self._trading_readiness_failed = True
     return False
 
-  async def _trading_readiness_loop(self) -> None:
+  async def _trading_readiness_loop(self, socket) -> None:
     previous = self._is_trading_ready()
+    previous_generation = self._trading_connection_generation()
     while True:
-      await self._ensure_trading_ready()
-      current = self._is_trading_ready()
-      if current != previous:
+      ensured = await self._ensure_trading_ready()
+      current = bool(ensured)
+      current_generation = self._trading_connection_generation()
+      reconnect_observed = current_generation != previous_generation
+      if current != previous or reconnect_observed:
         logger.info("XTTrading readiness changed: ready=%s", current)
+        if not current:
+          self._begin_trading_reconciliation(
+            "xttrading_unavailable",
+          )
+        else:
+          self._begin_trading_reconciliation(
+            "xttrading_reconnected",
+          )
+          await self._queue_full_snapshot(reconciliation=True)
+        await self._heartbeat_checkpoint(
+          socket,
+          status=self._heartbeat_status(),
+        )
+      elif (
+        current
+        and self._requires_trading_reconciliation()
+        and self._trading_reconciliation_snapshot_id is None
+      ):
+        # A failed/incomplete snapshot invalidates the cached native session.
+        # Once the registry reconnects it, obtain a new authoritative snapshot
+        # rather than waiting for the periodic heartbeat cadence.
+        await self._queue_full_snapshot(reconciliation=True)
+        await self._heartbeat_checkpoint(
+          socket,
+          status=self._heartbeat_status(),
+        )
       previous = current
+      previous_generation = current_generation
+      self._raise_if_trading_recovery_expired()
       await asyncio.sleep(XTTRADING_READINESS_RETRY_SECONDS)
 
   async def _broker_report_loop(self, socket) -> None:
@@ -2208,7 +2531,12 @@ class AgentRuntime:
   async def _send_heartbeat(self, socket, *, status: str) -> None:
     self._ensure_market_upload_state()
     market_data_ready = self._is_market_data_ready()
-    trading_ready = self._is_trading_ready()
+    trading_ready = bool(
+      self._is_trading_ready()
+      and not getattr(self, "_trading_readiness_failed", False)
+    )
+    if self._requires_trading_reconciliation():
+      status = "RECONCILING"
     if not market_data_ready:
       status = "XTDATA_UNAVAILABLE"
     if not trading_ready:
@@ -2285,10 +2613,20 @@ class AgentRuntime:
     }:
       return
     if envelope.message_type is AgentMessageType.REPORT_ACK:
-      if envelope.payload.get("accepted"):
-        self.journal.acknowledge_report(
-          str(envelope.payload.get("report_message_id", ""))
-        )
+      report_message_id = str(envelope.payload.get("report_message_id", ""))
+      accepted = bool(envelope.payload.get("accepted"))
+      if accepted:
+        self.journal.acknowledge_report(report_message_id)
+        if self._acknowledge_trading_reconciliation_snapshot(
+          report_message_id
+        ) and socket is not None:
+          # The API keeps RECONCILING until Engine applies the durable report;
+          # this READY request is therefore harmless before promotion and lets
+          # the first post-Engine heartbeat converge without another 30s wait.
+          await self._heartbeat_checkpoint(
+            socket,
+            status=self._heartbeat_status(),
+          )
       return
     if envelope.message_type in {
       AgentMessageType.COMMAND,
@@ -2578,6 +2916,12 @@ class AgentRuntime:
       ):
         rejection = "execution_mode_mismatch"
       elif (
+        not emergency_command
+        and envelope.message_type is not AgentMessageType.CANCEL_COMMAND
+        and self._requires_trading_reconciliation()
+      ):
+        rejection = "local_reconciliation_required"
+      elif (
         envelope.message_type is not AgentMessageType.CANCEL_COMMAND
         and self.emergency_stop
         and self.emergency_stop.status()["active"]
@@ -2633,14 +2977,26 @@ class AgentRuntime:
         }
     else:
       result = (
-        await self._run_xtdata_control(
-          "live-command-market-preflight",
+        await self._run_native_xttrading(
+          "execute-command",
           self.broker.execute,
           payload,
+          timeout=XTTRADING_RECONNECT_TIMEOUT_SECONDS,
         )
         if self.mode == "live"
         else await asyncio.to_thread(self.broker.execute, payload)
       )
+      if (
+        self.mode == "live"
+        and str(result.get("reason") or "")
+        == "local_reconciliation_required"
+      ):
+        self._trading_connection_generation_cache = (
+          self._read_broker_trading_generation()
+        )
+        self._begin_trading_reconciliation(
+          "broker_rejected_unreconciled_generation"
+        )
     self.journal.complete_command(envelope.message_id, result)
 
     for message_type, report_payload in result.get("reports") or []:

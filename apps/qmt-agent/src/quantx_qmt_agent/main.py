@@ -18,7 +18,11 @@ from .credentials import DeviceCredentialStore, state_directory
 from .emergency import EmergencyStopStore
 from .journal import LocalJournal
 from .process_watchdog import AgentProcessWatchdog
-from .runtime import AgentRuntime, _FatalMarketDataPreparationError
+from .runtime import (
+  AgentRuntime,
+  _FatalMarketDataPreparationError,
+  _FatalTradingRecoveryError,
+)
 
 FATAL_MARKET_DATA_EXIT_CODE = 70
 
@@ -67,9 +71,9 @@ def _run_runtime(
   try:
     try:
       asyncio.run(_run_runtime_guarded(runtime, owned_watchdog))
-    except _FatalMarketDataPreparationError:
+    except (_FatalMarketDataPreparationError, _FatalTradingRecoveryError):
       logging.getLogger(__name__).critical(
-        "Fatal XTData state requires a supervised process restart",
+        "Fatal native QMT state requires a supervised process restart",
         exc_info=True,
       )
       _hard_exit_for_fatal_market_data(FATAL_MARKET_DATA_EXIT_CODE)
@@ -155,9 +159,7 @@ def _enroll(api_url: str, code: str) -> None:
   response.raise_for_status()
   payload = response.json()
   device_id = str(payload.get("deviceId") or payload.get("device_id") or "")
-  device_secret = str(
-    payload.get("deviceSecret") or payload.get("device_secret") or ""
-  )
+  device_secret = str(payload.get("deviceSecret") or payload.get("device_secret") or "")
   if not device_id or not device_secret:
     raise RuntimeError("设备登记响应不完整")
   DeviceCredentialStore().save(
@@ -193,9 +195,7 @@ def _run(mode: str) -> None:
       allowed_accounts=allowed_accounts,
       broker=broker,
       journal=journal,
-      emergency_stop=EmergencyStopStore(
-        state_directory() / "emergency-stop.json"
-      ),
+      emergency_stop=EmergencyStopStore(state_directory() / "emergency-stop.json"),
     )
   except BaseException:
     watchdog.close()
@@ -215,8 +215,7 @@ def main() -> None:
     except RuntimeError as exc:
       raise SystemExit(str(exc)) from None
     print(
-      f"registered device_id={configuration.device_id} "
-      f"api_url={configuration.api_url}"
+      f"registered device_id={configuration.device_id} api_url={configuration.api_url}"
     )
   elif args.command == "emergency-stop":
     print(
