@@ -320,14 +320,3 @@ class StrategyStatusInfo:
   time: datetime = strawberry.field(description="状态更新时间")
   message: Optional[str] = strawberry.field(description="状态消息")
   performance: Optional[float] = strawberry.field(description="收益率")
-
-
-@strawberry.type(description="系统告警")
-class SystemAlert:
-  alert_id: str = strawberry.field(description="告警ID")
-  severity: str = strawberry.field(description="告警级别")
-  title: str = strawberry.field(description="告警标题")
-  message: str = strawberry.field(description="告警消息")
-  time: datetime = strawberry.field(description="告警时间")
-  source: str = strawberry.field(description="告警源")
-  resolved: bool = strawberry.field(description="是否已解决")

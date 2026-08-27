@@ -21,6 +21,11 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 唯一沪深行情连接使用 `/ws/agent/market` 和 `quantx.market.v1`。统一开发者中心覆盖 Web、原生客户端与
 第三方 API。
 
+交易页面的高频行情水位读取使用 `/health/runtime/market-data`，只计算 API 已有的
+行情心跳语义，不触发数据库、Prefect 或 Market Gateway 的全量健康探测。长期
+可用性、延迟和事故历史不在 API 内实现，由独立 `quantx-monitor` 通过
+`/monitor/*` 提供；它不参与 API readiness 或交易门禁。
+
 ## 代码边界
 
 - API mutation 只创建应用命令或持久化消息，不同步宣称成交。

@@ -8,6 +8,7 @@
 - `apps/docs/`：VitePress 客户端开发文档与发布契约。
 - `apps/web/`：Vite + React + TypeScript。
 - `apps/engine/`：策略、做 T、条件清仓、热缓存与订单回报收敛。
+- `apps/monitor/`：独立可用性、延迟、事故历史与状态页只读 API。
 - `apps/worker/`：Prefect flows、tasks、部署入口。
 - `apps/qmt-agent/`：唯一允许访问 XTData/XTTrading 的出站 Agent。
 - `packages/contracts/`：版本化 Agent 协议、DTO 和公共枚举。
@@ -19,7 +20,7 @@
 
 Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 `quantx_application`、`quantx_infrastructure`、`quantx_engine`、
-`quantx_worker` 和 `quantx_qmt_agent`。
+`quantx_monitor`、`quantx_worker` 和 `quantx_qmt_agent`。
 
 ## 设计与维护准则
 
@@ -45,6 +46,8 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 .\ops\quantx.ps1 status
 .\ops\quantx.ps1 logs
 .\ops\quantx.ps1 down
+.\ops\quantx.ps1 up -Environment dev -Component monitor
+.\ops\quantx.ps1 status -Environment dev -Component monitor
 ```
 
 标准 Dev 实盘重启顺序：
@@ -58,6 +61,8 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 - 普通开发 `up`（包括未显式指定模式的 `-Profile web`）统一提升为
   `full/live`，启动 Caddy、API、Engine、Vite、VitePress 和 Prefect Worker；
   QMT Agent 在本机登记与运行时预检通过后启动。Prefect Server 使用外部服务。
+- Monitor 使用独立状态文件、SQLite 历史库和生命周期；普通 `up/down` 不启停它，
+  以保证主服务离线期间仍能观测。开发时用 `-Component monitor` 单独管理。
 - `live` 优先使用 `-AccountId`，未传时从本机环境中的唯一账户配置自动解析。
   `-Mode data-only` 是唯一的显式非实盘入口，并同时关闭服务端实盘能力门。
   数据库、Redis 和 InfluxDB 继续复用开发配置，不为实盘另装一套。

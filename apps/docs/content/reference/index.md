@@ -19,6 +19,7 @@ Client OpenAPI 包含：
 - `GET /auth/session`
 - `DELETE /auth/session`
 - `/health`、`/health/live`、`/health/ready`、`/health/components`
+- `/health/runtime/market-data`
 
 Web OpenAPI 另包含 `/auth/web/session`、刷新、登出和开发自动登录；后者明确标为
 development-only。两份契约都排除 QMT Agent 密钥交换、metrics 和内部管理接口。

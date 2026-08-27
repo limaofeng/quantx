@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 OPS = ROOT / "ops" / "quantx.ps1"
 
@@ -42,7 +41,26 @@ def test_backup_registration_failure_is_not_reported_as_success():
   )[0]
 
   assert "successful backup was not recorded" in backup
-  assert "Write-Warning \"Backup completed but database backup age" not in backup
+  assert 'Write-Warning "Backup completed but database backup age' not in backup
+
+
+def test_backup_and_restore_verify_include_monitor_history_when_present():
+  script = OPS.read_text(encoding="utf-8")
+  backup = script.split("function Invoke-Backup", 1)[1].split(
+    "function Test-RestoreVerificationScratchDatabaseName",
+    1,
+  )[0]
+  restore = script.split("function Invoke-RestoreVerify", 1)[1].split(
+    "function Invoke-MigrateAtRoot",
+    1,
+  )[0]
+
+  assert "quantx_monitor.main backup" in backup
+  assert '"monitor\\quantx-monitor.sqlite3"' in backup
+  assert "QuantX Monitor history backup failed" in backup
+  assert 'Join-Path $source "monitor\\quantx-monitor.sqlite3"' in restore
+  assert "PRAGMA integrity_check" in restore
+  assert "QuantX Monitor history integrity validation failed" in restore
 
 
 def test_production_backup_schedule_matches_the_24_hour_gate():

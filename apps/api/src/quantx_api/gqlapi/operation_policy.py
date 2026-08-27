@@ -527,7 +527,7 @@ _register(
 _register(
   "Subscription",
   "system-status:read",
-  {"deploymentStatus", "flowRunLogs", "systemAlerts", "systemStrategies"},
+  {"deploymentStatus", "flowRunLogs", "systemStrategies"},
   audiences=WEB_ONLY,
   stability="web-internal",
 )

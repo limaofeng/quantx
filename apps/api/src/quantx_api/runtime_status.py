@@ -455,6 +455,13 @@ async def component_status() -> dict[str, dict[str, Any]]:
   }
 
 
+async def market_data_runtime_status() -> dict[str, Any]:
+  """Return only API-owned market-data semantics for frequent trading UI reads."""
+  heartbeats = await _component_heartbeats()
+  heartbeats = _apply_qmt_launch_override(heartbeats)
+  return heartbeats.get("market-data", {"status": "offline"})
+
+
 def required_components() -> tuple[str, ...]:
   profile = getattr(settings, "runtime_profile", "web").lower()
   if profile == "full":

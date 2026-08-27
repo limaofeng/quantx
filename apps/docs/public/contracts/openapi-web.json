@@ -352,6 +352,23 @@
         "summary": "Health Ready",
         "x-quantx-stability": "web-internal"
       }
+    },
+    "/health/runtime/market-data": {
+      "get": {
+        "operationId": "health_runtime_market_data_health_runtime_market_data_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Runtime Market Data",
+        "x-quantx-stability": "web-internal"
+      }
     }
   }
 }

@@ -339,6 +339,15 @@ export const appRoutes: AppRouteConfig[] = [
     },
   }),
   route({
+    path: '/settings/status',
+    title: '服务状态',
+    importer: toDefaultExport(
+      () => import('@/features/settings'),
+      'SystemSettingsPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
     path: '/settings/trading-safety',
     title: '交易安全',
     importer: toDefaultExport(
@@ -549,6 +558,7 @@ export function isNavigationItemActive(
   if (normalizedHref === '/settings') {
     return [
       '/settings',
+      '/settings/status',
       '/settings/qmt',
       '/settings/ai-runtime',
       '/settings/agents',

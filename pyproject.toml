@@ -6,6 +6,7 @@ dependencies = [
   "quantx-api",
   "quantx-ai-runtime",
   "quantx-engine",
+  "quantx-monitor",
   "quantx-research",
   "quantx-worker",
   "quantx-qmt-agent",
@@ -32,6 +33,7 @@ package = false
 quantx-api = { workspace = true }
 quantx-ai-runtime = { workspace = true }
 quantx-engine = { workspace = true }
+quantx-monitor = { workspace = true }
 quantx-research = { workspace = true }
 quantx-worker = { workspace = true }
 quantx-qmt-agent = { workspace = true }
@@ -45,6 +47,7 @@ members = [
   "apps/api",
   "apps/ai-runtime",
   "apps/engine",
+  "apps/monitor",
   "apps/qmt-agent",
   "apps/research",
   "apps/worker",
@@ -61,6 +64,7 @@ pythonpath = [
   "apps/api/src",
   "apps/ai-runtime/src",
   "apps/engine/src",
+  "apps/monitor/src",
   "apps/worker/src",
   "apps/qmt-agent/src",
   "apps/research/src",

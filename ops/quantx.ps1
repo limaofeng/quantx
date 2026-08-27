@@ -104,6 +104,9 @@ $CurrentReleaseLink = Join-Path $Runtime "current"
 $ReleaseStateFile = Join-Path $Runtime "release-state.json"
 $ProductionConfigFile = Join-Path $Runtime "config\.env.production"
 $AgentModeFile = Join-Path $StateDirectory "qmt-agent-mode.json"
+$MonitorRuntime = Join-Path $Runtime "monitor"
+$MonitorStateFile = Join-Path $MonitorRuntime "dev-process.json"
+$MonitorPort = 18083
 $DefaultPrefectApiUrl = "http://192.168.101.4:30420/api"
 $DefaultPrefectWorkerPool = "quantx-pool"
 $ApiPort = 18081
@@ -125,6 +128,7 @@ function Ensure-RuntimeDirectories {
     $ToolsDirectory,
     $BackupDirectory,
     $ReleaseDirectory,
+    $MonitorRuntime,
     (Split-Path -Parent $ProductionConfigFile)
   )) {
     if (-not (Test-Path -LiteralPath $path)) {
@@ -283,6 +287,7 @@ function Get-WorkspacePythonPath {
     (Join-Path $Root "apps\api\src"),
     (Join-Path $Root "apps\ai-runtime\src"),
     (Join-Path $Root "apps\engine\src"),
+    (Join-Path $Root "apps\monitor\src"),
     (Join-Path $Root "apps\worker\src"),
     (Join-Path $Root "packages\contracts\src"),
     (Join-Path $Root "packages\domain\src"),
@@ -587,6 +592,44 @@ function Write-State {
     }
     if (Test-Path -LiteralPath $replacementBackupFile -PathType Leaf) {
       Remove-Item -LiteralPath $replacementBackupFile -Force
+    }
+  }
+}
+
+function Read-MonitorState {
+  if (-not (Test-Path -LiteralPath $MonitorStateFile -PathType Leaf)) {
+    return $null
+  }
+  $raw = Get-Content -LiteralPath $MonitorStateFile -Raw
+  if (-not $raw.Trim()) {
+    return $null
+  }
+  return ConvertFrom-Json -InputObject $raw
+}
+
+function Write-MonitorState {
+  param([AllowNull()][object]$Entry)
+
+  Ensure-RuntimeDirectories
+  if ($null -eq $Entry) {
+    if (Test-Path -LiteralPath $MonitorStateFile -PathType Leaf) {
+      Remove-Item -LiteralPath $MonitorStateFile -Force
+    }
+    return
+  }
+  $temporary = Join-Path $MonitorRuntime (
+    "dev-process.{0}.{1}.tmp" -f $PID, [guid]::NewGuid().ToString("N")
+  )
+  try {
+    [IO.File]::WriteAllText(
+      $temporary,
+      (ConvertTo-Json -InputObject $Entry -Depth 4),
+      [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::Move($temporary, $MonitorStateFile, $true)
+  } finally {
+    if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+      Remove-Item -LiteralPath $temporary -Force
     }
   }
 }
@@ -1550,8 +1593,12 @@ function Invoke-Up {
     throw "Use install for local production services; up supports dev only."
   }
   if ($Component) {
+    if ($Component -eq "monitor") {
+      Invoke-MonitorUp
+      return
+    }
     if ($Component -ne "caddy") {
-      throw "up -Component only supports fail-closed Caddy recovery."
+      throw "up -Component only supports caddy or monitor."
     }
     Invoke-CaddyRecovery
     return
@@ -1579,7 +1626,6 @@ function Invoke-Up {
   Assert-PortsAvailable -Ports @(8080, $ApiPort, $MarketGatewayPort, 5250, 5251)
   $python = Resolve-Python
   $aiRuntimePython = Resolve-AiRuntimePython
-  Show-ExternalDependencies -Python $python
   $node = Resolve-Node
   $qmtPython = $null
   $agentMode = Set-DevTradingModeEnvironment
@@ -1846,7 +1892,82 @@ function Invoke-Up {
   }
 }
 
+function Invoke-MonitorUp {
+  Import-QuantXEnvironment
+  Initialize-PythonEnvironment
+  $existing = Read-MonitorState
+  if ($existing -and (Get-TrackedProcess -Entry $existing)) {
+    throw "QuantX Monitor is already running."
+  }
+  Assert-PortsAvailable -Ports @($MonitorPort)
+  $python = Resolve-Python
+  $stdout = Join-Path $LogDirectory "monitor.stdout.log"
+  $stderr = Join-Path $LogDirectory "monitor.stderr.log"
+  $env:ENV = "development"
+  $env:PYTHONPATH = Get-WorkspacePythonPath
+  $env:MONITOR_DATABASE_PATH = Join-Path $MonitorRuntime "quantx-monitor.sqlite3"
+  $process = Start-Process `
+    -FilePath $python `
+    -ArgumentList @("-m", "quantx_monitor.main") `
+    -WorkingDirectory $Root `
+    -RedirectStandardOutput $stdout `
+    -RedirectStandardError $stderr `
+    -WindowStyle Hidden `
+    -PassThru
+  Start-Sleep -Milliseconds 350
+  if ($process.HasExited) {
+    $message = if (Test-Path -LiteralPath $stderr -PathType Leaf) {
+      (Get-Content -LiteralPath $stderr -Tail 30) -join [Environment]::NewLine
+    } else {
+      "No stderr was captured."
+    }
+    throw "QuantX Monitor exited during startup: $message"
+  }
+  $entry = [pscustomobject]@{
+    name = "monitor"
+    pid = $process.Id
+    startedAt = $process.StartTime.ToUniversalTime().ToString("o")
+    executable = $python
+    arguments = @("-m", "quantx_monitor.main")
+    workingDirectory = $Root
+    stdout = $stdout
+    stderr = $stderr
+  }
+  Write-MonitorState -Entry $entry
+  try {
+    Wait-HttpReady -Name "QuantX Monitor" -Url "http://127.0.0.1:$MonitorPort/monitor/health/ready"
+  } catch {
+    $tracked = Get-TrackedProcess -Entry $entry
+    if ($tracked) {
+      $tracked.Kill()
+      $tracked.WaitForExit(10000)
+    }
+    Write-MonitorState -Entry $null
+    throw
+  }
+  Write-Host (
+    "QuantX Monitor is running independently on 127.0.0.1:$MonitorPort."
+  ) -ForegroundColor Cyan
+}
+
 function Invoke-Down {
+  if ($Component -eq "monitor") {
+    $entry = Read-MonitorState
+    if (-not $entry) {
+      Write-Host "No managed QuantX Monitor process was recorded."
+      return
+    }
+    $process = Get-TrackedProcess -Entry $entry
+    if ($process) {
+      $process.Kill()
+      if (-not $process.WaitForExit(10000)) {
+        throw "QuantX Monitor did not stop within 10 seconds."
+      }
+    }
+    Write-MonitorState -Entry $null
+    Write-Host "Stopped QuantX Monitor." -ForegroundColor Green
+    return
+  }
   $entries = @(Read-State)
   if ($entries.Count -eq 0) {
     Write-Host "No managed QuantX development processes were recorded."
@@ -1884,6 +2005,29 @@ function ConvertTo-LocalStatusTimestamp {
 }
 
 function Invoke-Status {
+  if ($Component -eq "monitor") {
+    $entry = Read-MonitorState
+    if (-not $entry) {
+      Write-Host "No managed QuantX Monitor process was recorded."
+      return
+    }
+    $process = Get-TrackedProcess -Entry $entry
+    [pscustomobject]@{
+      Component = "monitor"
+      PID = $entry.pid
+      State = if ($process) { "RUNNING" } else { "STALE" }
+      StartedAt = ConvertTo-LocalStatusTimestamp -Value $entry.startedAt
+    } | Format-Table -AutoSize
+    if ($process) {
+      try {
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$MonitorPort/monitor/health/ready" -TimeoutSec 3
+        Write-Host "Monitor readiness=$($health.status)" -ForegroundColor Green
+      } catch {
+        Write-Warning "Monitor process is running but readiness is unavailable."
+      }
+    }
+    return
+  }
   Import-QuantXEnvironment
   $entries = @(Read-State)
   $qmtHealthQueryAllowed = $true
@@ -1928,7 +2072,14 @@ function Invoke-Status {
       )
     }
   }
-  foreach ($port in @(8080, $ApiPort, $MarketGatewayPort, 5250, 5251)) {
+  foreach ($port in @(
+    8080,
+    $ApiPort,
+    $MarketGatewayPort,
+    $MonitorPort,
+    5250,
+    5251
+  )) {
     $owner = Get-PortOwner -Port $port
     if ($owner) {
       Write-Host (
@@ -1939,13 +2090,6 @@ function Invoke-Status {
       )
     }
   }
-  $python = $null
-  try {
-    $python = Resolve-Python
-  } catch {
-    Write-Verbose "Python unavailable for dependency version checks."
-  }
-  Show-ExternalDependencies -Python $python
   if ($qmtHealthQueryAllowed) {
     Show-QmtAgentRuntimeHealth
   } else {
@@ -1957,6 +2101,20 @@ function Invoke-Status {
 }
 
 function Invoke-Logs {
+  if ($Component -eq "monitor") {
+    $entry = Read-MonitorState
+    if (-not $entry) {
+      throw "No managed QuantX Monitor logs were found."
+    }
+    foreach ($stream in @("stdout", "stderr")) {
+      $path = [string]$entry.$stream
+      if (Test-Path -LiteralPath $path -PathType Leaf) {
+        Write-Host "[monitor $stream] $path" -ForegroundColor Cyan
+        Get-Content -LiteralPath $path -Tail $Tail
+      }
+    }
+    return
+  }
   $entries = @(Read-State)
   [array]$selected = @(
     if ($Component) {
@@ -2073,6 +2231,7 @@ function Invoke-Bootstrap {
     "apps\api",
     "apps\ai-runtime",
     "apps\engine",
+    "apps\monitor",
     "apps\worker"
   )
   foreach ($project in $editableProjects) {
@@ -2230,6 +2389,7 @@ function Get-ServiceConfigurationNames {
     "quantx-api.xml",
     "quantx-market-gateway.xml",
     "quantx-engine.xml",
+    "quantx-monitor.xml",
     "quantx-ai-runtime.xml",
     "quantx-worker.xml",
     "quantx-caddy.xml",
@@ -2478,6 +2638,7 @@ function Install-ReleasePythonEnvironments {
       "quantx-api",
       "quantx-ai-runtime",
       "quantx-engine",
+      "quantx-monitor",
       "quantx-worker",
       "quantx-application",
       "quantx-contracts",
@@ -2825,6 +2986,7 @@ function Invoke-Uninstall {
     "quantx-qmt-agent.xml",
     "quantx-caddy.xml",
     "quantx-market-gateway.xml",
+    "quantx-monitor.xml",
     "quantx-worker.xml",
     "quantx-prefect-server.xml",
     "quantx-ai-runtime.xml",
@@ -3050,6 +3212,36 @@ function Invoke-Backup {
     }
   } finally {
     $env:PYTHONPATH = $previousPythonPath
+  }
+
+  $monitorDatabase = if ($env:MONITOR_DATABASE_PATH) {
+    [System.IO.Path]::GetFullPath($env:MONITOR_DATABASE_PATH)
+  } else {
+    Join-Path $MonitorRuntime "quantx-monitor.sqlite3"
+  }
+  if (Test-Path -LiteralPath $monitorDatabase -PathType Leaf) {
+    $monitorDestination = Join-Path `
+      $destination `
+      "monitor\quantx-monitor.sqlite3"
+    $previousMonitorDatabase = $env:MONITOR_DATABASE_PATH
+    $previousPythonPath = $env:PYTHONPATH
+    try {
+      $env:MONITOR_DATABASE_PATH = $monitorDatabase
+      $env:PYTHONPATH = Get-WorkspacePythonPath
+      & $python -m quantx_monitor.main backup `
+        --destination $monitorDestination
+      if ($LASTEXITCODE -ne 0) {
+        throw "QuantX Monitor history backup failed."
+      }
+    } finally {
+      $env:MONITOR_DATABASE_PATH = $previousMonitorDatabase
+      $env:PYTHONPATH = $previousPythonPath
+    }
+  } else {
+    Write-Warning (
+      "QuantX Monitor database does not exist yet; no monitor history " +
+      "was included in this backup."
+    )
   }
 
   $files = @(
@@ -3353,6 +3545,21 @@ function Invoke-RestoreVerify {
   } finally {
     $env:PYTHONPATH = $previousPythonPath
   }
+
+  $monitorDatabase = Join-Path $source "monitor\quantx-monitor.sqlite3"
+  if (Test-Path -LiteralPath $monitorDatabase -PathType Leaf) {
+    & $python -c (
+      "import sqlite3,sys;" +
+      "connection=sqlite3.connect(sys.argv[1]);" +
+      "result=connection.execute('PRAGMA integrity_check').fetchone()[0];" +
+      "connection.close();" +
+      "assert result == 'ok', result;" +
+      "print('monitor=valid')"
+    ) $monitorDatabase
+    if ($LASTEXITCODE -ne 0) {
+      throw "QuantX Monitor history integrity validation failed."
+    }
+  }
   Write-Host (
     "Backup restored in isolation and verified: $source"
   ) -ForegroundColor Green
@@ -3624,8 +3831,14 @@ function Invoke-AgentMode {
 }
 
 Ensure-RuntimeDirectories
-if ($Component -and $Command -notin @("up", "logs")) {
-  throw "-Component is only supported by up and logs."
+if ($Component -and $Command -notin @("up", "down", "status", "logs")) {
+  throw "-Component is only supported by up, down, status, and logs."
+}
+if ($Component -and $Component -notin @("caddy", "monitor")) {
+  throw "-Component only supports caddy or monitor."
+}
+if ($Component -eq "caddy" -and $Command -ne "up") {
+  throw "The caddy component is only supported by up recovery."
 }
 switch ($Command) {
   "up" { Invoke-Up }

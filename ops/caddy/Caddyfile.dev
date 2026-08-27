@@ -12,6 +12,9 @@ http://:8080 {
 		@market_gateway path /ws/agent/market
 		reverse_proxy @market_gateway 127.0.0.1:18082
 
+		@monitor path /monitor/*
+		reverse_proxy @monitor 127.0.0.1:18083
+
 		@api path /graphql* /auth* /health* /metrics* /ws/agent* /agent/*
 		reverse_proxy @api 127.0.0.1:18081
 

@@ -22,6 +22,7 @@ CLIENT_OPENAPI_PATHS = frozenset(
     "/health/live",
     "/health/ready",
     "/health/components",
+    "/health/runtime/market-data",
   }
 )
 WEB_OPENAPI_PATHS = frozenset(
@@ -33,6 +34,7 @@ WEB_OPENAPI_PATHS = frozenset(
     "/health/live",
     "/health/ready",
     "/health/components",
+    "/health/runtime/market-data",
   }
 )
 ROOT_OPERATION_TYPES = ("Query", "Mutation", "Subscription")

@@ -39,7 +39,11 @@ from quantx_api.gqlapi.admission import (
 )
 from quantx_api.monitoring import get_prometheus_metrics
 from quantx_api.monitoring.metrics import REQUEST_COUNT, REQUEST_DURATION
-from quantx_api.runtime_status import component_status, readiness_status
+from quantx_api.runtime_status import (
+  component_status,
+  market_data_runtime_status,
+  readiness_status,
+)
 
 # 创建日志目录
 create_log_directory()
@@ -589,6 +593,11 @@ async def health_live():
 @app.get("/health/components")
 async def health_components():
   return {"components": await component_status()}
+
+
+@app.get("/health/runtime/market-data")
+async def health_runtime_market_data():
+  return {"marketData": await market_data_runtime_status()}
 
 
 @app.get("/health/ready")

@@ -143,7 +143,6 @@ from .market_data_types import (
   RealTimePrice,
   StockQuote,
   StrategyStatusInfo,
-  SystemAlert,
   TickData,
 )
 from .portfolio_types import (
@@ -367,7 +366,6 @@ __all__ = [
   "MarketIndexSnapshot",
   "StockQuote",
   "StrategyStatusInfo",
-  "SystemAlert",
   "FlowRun",
   "DeploymentFlowRun",
   "DeploymentRunInput",

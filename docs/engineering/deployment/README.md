@@ -9,6 +9,10 @@
 .\ops\quantx.ps1 status
 .\ops\quantx.ps1 logs
 .\ops\quantx.ps1 down
+.\ops\quantx.ps1 up -Environment dev -Component monitor
+.\ops\quantx.ps1 status -Environment dev -Component monitor
+.\ops\quantx.ps1 logs -Environment dev -Component monitor
+.\ops\quantx.ps1 down -Environment dev -Component monitor
 ```
 
 普通开发 `up`（包括未显式指定模式的 `-Profile web`）会提升为 `full/live`，
@@ -47,6 +51,13 @@ QMT 预检成功的默认 `full/live` 会为 API/Engine 显式开启 `ENABLE_REA
 隐式兜底模式。
 `down` 仅停止状态文件记录且启动时间匹配的进程。
 
+`quantx-monitor` 是独立观测进程。普通 `up/down` 不拥有它的生命周期，开发环境
+通过 `-Component monitor` 单独启停；生产环境由 `QuantXMonitor` WinSW 服务自动
+启动。它每 30 秒检查固定目标，把原始样本写入独立 SQLite 90 天，并保留 1 年
+小时汇总。状态页位于 `/settings/status`，只读数据通过 Caddy 的 `/monitor/*`
+公开。Monitor 只记录事实，不参与 `/health/ready`、账户执行能力或交易门禁。
+完整目标、状态机和 API 见 [Monitor 工程指南](../monitor/README.md)。
+
 启动器会在读取 `.runtime` 状态或创建子进程前，将仓库根目录的 Junction / 符号
 链接解析为真实物理路径。即使从工作区目录联接调用 `ops/quantx.ps1`，Vite、API、
 Engine、Worker、QMT Agent 与 Caddy 也会统一使用同一个真实根路径，避免 Windows
@@ -55,7 +66,7 @@ Engine、Worker、QMT Agent 与 Caddy 也会统一使用同一个真实根路径
 公开端口只有开发 Caddy 的 `8080`，它监听所有本机 IPv4 接口；本机使用
 `http://127.0.0.1:8080`，局域网设备使用
 `http://<开发机局域网 IP>:8080`。API 使用 `18081`、Market Gateway 使用
-`18082`、Vite 使用 `5250`、
+`18082`、Monitor 使用 `18083`、Vite 使用 `5250`、
 VitePress 使用 `5251`，这些后端端口仍只绑定 `127.0.0.1`。Prefect API
 通过 `PREFECT_API_URL` 连接外部服务，默认
 `http://192.168.101.4:30420/api`，Worker 使用 `quantx-pool`。在线客户端文档
@@ -121,7 +132,7 @@ Prefect Worker 的本机 CLI 状态位于 `.runtime/prefect`，CLI 和 Worker �
 
 WinSW 2.12 使用 bundled mode：每个服务目录内都放置同名的 XML 与 wrapper，
 例如 `quantx-api.xml` 对应 `quantx-api.exe`。Caddy、API、Market Gateway、
-Engine、Worker 和 QMT Agent 因而可以独立安装、重启和滚动日志，不共享 wrapper
+Monitor、Engine、Worker 和 QMT Agent 因而可以独立安装、重启和滚动日志，不共享 wrapper
 进程。Market Gateway 与 QMT Agent 的 WinSW 入口均通过统一监督器启动，异常退出
 按 1/2/5/10/30 秒退避重启，并使用 Windows Job Object 回收残留子进程。
 

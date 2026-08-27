@@ -11,13 +11,11 @@ describe('useMarketDataHealth', () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        components: {
-          marketData: {
-            status: 'ready',
-            sequence: 42,
-            engineSequence: 42,
-            engineAgeSeconds: 0.125,
-          },
+        marketData: {
+          status: 'ready',
+          sequence: 42,
+          engineSequence: 42,
+          engineAgeSeconds: 0.125,
         },
       }),
     });
@@ -29,7 +27,7 @@ describe('useMarketDataHealth', () => {
     expect(result.current.engineSequence).toBe(42);
     expect(result.current.engineAgeSeconds).toBe(0.125);
     expect(fetchMock).toHaveBeenCalledWith(
-      '/health/components',
+      '/health/runtime/market-data',
       expect.objectContaining({ cache: 'no-store' })
     );
   });

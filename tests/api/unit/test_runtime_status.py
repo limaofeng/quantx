@@ -157,8 +157,7 @@ async def test_prefect_worker_health_uses_canonical_api_and_ignores_proxies(
   assert calls["client_kwargs"] == {"timeout": 5.0, "trust_env": False}
   assert calls["health_url"] == "http://192.168.101.4:30420/api/health"
   assert calls["workers_url"] == (
-    "http://192.168.101.4:30420/api/work_pools/"
-    "quantx-pool/workers/filter"
+    "http://192.168.101.4:30420/api/work_pools/quantx-pool/workers/filter"
   )
   assert calls["workers_body"] == {}
   assert status["status"] == "ready"
@@ -311,6 +310,36 @@ async def test_component_status_overrides_stale_ready_agent_when_launch_is_block
 
 
 @pytest.mark.asyncio
+async def test_market_data_runtime_status_uses_only_heartbeat_snapshot(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  snapshot = {
+    "market-data": {
+      "status": "ready",
+      "sequence": 42,
+      "engineSequence": 42,
+      "engineAgeSeconds": 0.125,
+    }
+  }
+
+  async def fake_component_heartbeats():
+    return snapshot
+
+  monkeypatch.setattr(
+    runtime_status,
+    "_component_heartbeats",
+    fake_component_heartbeats,
+  )
+  monkeypatch.setattr(
+    runtime_status,
+    "_apply_qmt_launch_override",
+    lambda value: value,
+  )
+
+  assert await runtime_status.market_data_runtime_status() == snapshot["market-data"]
+
+
+@pytest.mark.asyncio
 async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -450,9 +479,7 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
   assert components["qmt-agent"]["status"] == "ready"
   assert components["qmt-agent"]["readyDevices"] == 1
   assert components["qmt-agent"]["latestReadyHeartbeatAt"] == (
-    current_heartbeat_at.replace(tzinfo=timezone.utc)
-    .isoformat()
-    .replace("+00:00", "Z")
+    current_heartbeat_at.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
   )
 
   async def state_without_freshness():

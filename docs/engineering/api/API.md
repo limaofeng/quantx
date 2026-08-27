@@ -15,6 +15,7 @@ API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部�
 - `/graphql`
 - `/auth/*`
 - `/health`、`/health/live`、`/health/ready`、`/health/components`
+- `/health/runtime/market-data`
 - `/metrics`
 - `/ws/agent`
 - `/agent/market-data/*`
@@ -26,6 +27,7 @@ API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部�
 | `/health/live` | 只证明 API 事件循环可响应 |
 | `/health/ready` | 按 `web/full` profile 检查必要组件 |
 | `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、行情和 AI Runtime 分项状态 |
+| `/health/runtime/market-data` | 高频交易 UI 使用的行情水位与新鲜度；不执行全量依赖探测 |
 | `/health` | `/health/ready` 的兼容别名 |
 
 `full` profile 中，Prefect Worker、QMT Agent 连接和行情 capability 也必须
@@ -52,6 +54,11 @@ GraphQL `accountExecutionSafety` 是账户级实盘执行能力真源，以
 AI Runtime 在组件健康中仅返回脱敏状态、心跳年龄和已应用配置版本。它是可选
 组件，即使处于 `disabled`、`unconfigured`、`offline` 或 `unavailable`，也不会
 改变 QuantX 必需组件的 readiness。
+
+长期状态历史由独立 `quantx-monitor` 记录。Caddy 公开的
+`/monitor/api/v1/summary`、目标 history 和 incidents 仅返回固定目标 ID、状态、
+延迟统计和稳定原因码，不返回连接串、凭据、内部地址或原始异常。该服务是观测面，
+不反向控制 API readiness、QMT 状态或交易能力。
 
 ## 用户认证
 

@@ -3165,16 +3165,6 @@
         "risk": "READ",
         "stability": "supported"
       },
-      "systemAlerts": {
-        "audiences": [
-          "web"
-        ],
-        "requiredPermissions": [
-          "system-status:read"
-        ],
-        "risk": "READ",
-        "stability": "web-internal"
-      },
       "systemStrategies": {
         "audiences": [
           "web"

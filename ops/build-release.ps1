@@ -230,6 +230,7 @@ try {
       --package quantx-api `
       --package quantx-ai-runtime `
       --package quantx-engine `
+      --package quantx-monitor `
       --package quantx-worker `
       --output-file $serverRequirements
   }

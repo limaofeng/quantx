@@ -3,33 +3,79 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SystemInsightCard } from '@/features/system/components/SystemInsightCard';
 
+vi.mock('@/components/studio-workspace', () => ({
+  useStudioNavigate: () => vi.fn(),
+}));
+
 describe('SystemInsightCard', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it('groups platform and runtime health including the market gateway', async () => {
+  it('summarizes the independent monitor status', async () => {
+    const now = new Date().toISOString();
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        components: {
-          api: { status: 'ready' },
-          database: { status: 'ready', version: '16.11' },
-          engine: { status: 'ready' },
-          worker: { status: 'ready', onlineWorkers: 1 },
-          prefect: { status: 'ready' },
-          marketGateway: {
-            status: 'ready',
-            dependencies: { redis: 'ready' },
+        generatedAt: now,
+        lastCycleAt: now,
+        window: '24h',
+        checkIntervalSeconds: 30,
+        overallStatus: 'healthy',
+        groups: [
+          {
+            id: 'external_dependency',
+            name: '外部依赖',
+            status: 'healthy',
+            targetIds: ['postgresql'],
           },
-          marketData: { status: 'ready', connectedDevices: 1 },
-          qmtAgent: {
-            status: 'ready',
-            connectedDevices: 1,
-            readyDevices: 1,
+          {
+            id: 'quantx_runtime',
+            name: 'QuantX 运行组件',
+            status: 'healthy',
+            targetIds: ['api-public'],
           },
-          aiRuntime: { status: 'ready', configVersion: 4 },
-        },
+        ],
+        targets: [
+          {
+            id: 'postgresql',
+            name: 'PostgreSQL',
+            group: 'external_dependency',
+            optional: false,
+            derived: false,
+            status: 'healthy',
+            checkedAt: now,
+            lastSuccessAt: now,
+            latencyMs: 2.5,
+            reasonCode: null,
+            availabilityPct: 100,
+            healthyPct: 100,
+            coveragePct: 100,
+            latencyP50Ms: 2.1,
+            latencyP95Ms: 3.2,
+            sampleCount: 120,
+            activeIncident: false,
+          },
+          {
+            id: 'api-public',
+            name: 'API 公共入口',
+            group: 'quantx_runtime',
+            optional: false,
+            derived: false,
+            status: 'healthy',
+            checkedAt: now,
+            lastSuccessAt: now,
+            latencyMs: 8.5,
+            reasonCode: null,
+            availabilityPct: 100,
+            healthyPct: 100,
+            coveragePct: 100,
+            latencyP50Ms: 7.1,
+            latencyP95Ms: 9.2,
+            sampleCount: 120,
+            activeIncident: false,
+          },
+        ],
       }),
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -37,21 +83,19 @@ describe('SystemInsightCard', () => {
     render(<SystemInsightCard />);
 
     await waitFor(() => {
-      expect(screen.getByText('系统运行正常')).toBeInTheDocument();
+      expect(screen.getByText('系统观测状态：正常')).toBeInTheDocument();
     });
+    expect(screen.getByText('外部依赖 · 正常')).toBeInTheDocument();
+    expect(screen.getByText('QuantX 运行组件 · 正常')).toBeInTheDocument();
     expect(
-      screen.getByRole('heading', { name: '平台服务' })
+      screen.getByRole('button', { name: '查看历史' })
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole('heading', { name: '执行与运行时' })
-    ).toBeInTheDocument();
-    expect(screen.getByText('Market Gateway')).toBeInTheDocument();
-    expect(screen.getByText('Redis Ready')).toBeInTheDocument();
-    expect(
-      screen.getByLabelText('Market Gateway: healthy')
-    ).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith('/health/components', {
-      cache: 'no-store',
-    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/monitor/api/v1/summary?window=24h',
+      {
+        cache: 'no-store',
+        signal: undefined,
+      }
+    );
   });
 });

@@ -22,6 +22,7 @@ members = [
     "quantx-domain",
     "quantx-engine",
     "quantx-infrastructure",
+    "quantx-monitor",
     "quantx-qmt-agent",
     "quantx-research",
     "quantx-worker",
@@ -3094,6 +3095,31 @@ requires-dist = [
 ]
 
 [[package]]
+name = "quantx-monitor"
+version = "0.1.0"
+source = { editable = "apps/monitor" }
+dependencies = [
+    { name = "aiosqlite" },
+    { name = "asyncpg" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "pydantic-settings" },
+    { name = "redis" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.20.0" },
+    { name = "asyncpg", specifier = ">=0.29.0" },
+    { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "httpx", specifier = ">=0.24.0" },
+    { name = "pydantic-settings", specifier = ">=2.0.0" },
+    { name = "redis", specifier = ">=4.0.0" },
+    { name = "uvicorn", specifier = ">=0.30.0" },
+]
+
+[[package]]
 name = "quantx-qmt-agent"
 version = "0.1.0"
 source = { editable = "apps/qmt-agent" }
@@ -3165,6 +3191,7 @@ dependencies = [
     { name = "quantx-ai-runtime" },
     { name = "quantx-api" },
     { name = "quantx-engine" },
+    { name = "quantx-monitor" },
     { name = "quantx-qmt-agent" },
     { name = "quantx-research" },
     { name = "quantx-worker" },
@@ -3189,6 +3216,7 @@ requires-dist = [
     { name = "quantx-ai-runtime", editable = "apps/ai-runtime" },
     { name = "quantx-api", editable = "apps/api" },
     { name = "quantx-engine", editable = "apps/engine" },
+    { name = "quantx-monitor", editable = "apps/monitor" },
     { name = "quantx-qmt-agent", editable = "apps/qmt-agent" },
     { name = "quantx-research", editable = "apps/research" },
     { name = "quantx-worker", editable = "apps/worker" },

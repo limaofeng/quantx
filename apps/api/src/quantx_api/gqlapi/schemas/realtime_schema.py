@@ -50,7 +50,6 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeReplayUpdateNotice,
   TTradeUpdateNotice,
 )
-from quantx_api.runtime_status import component_status, required_components
 
 from ..security import principal_from_context
 from ..types import (
@@ -62,7 +61,6 @@ from ..types import (
   OrderEvent,
   RealTimePrice,
   StrategyStatusInfo,
-  SystemAlert,
   TickData,
   TradingEventType,
 )
@@ -827,46 +825,6 @@ class RealtimeSubscription:
         await asyncio.sleep(2)
     except Exception as exc:
       logger.error("策略状态订阅出错: %s", exc)
-      raise
-
-  @strawberry.subscription(description="订阅系统告警流")
-  async def system_alerts(
-    self, severity_level: Optional[str] = None
-  ) -> AsyncIterator[SystemAlert]:
-    """Emit component degradation and recovery alerts from real health state."""
-    previous: dict[str, str] = {}
-    try:
-      while True:
-        components = await component_status()
-        now = time_utils.now()
-        for name in required_components():
-          status = str(components[name].get("status") or "unknown").lower()
-          old_status = previous.get(name)
-          previous[name] = status
-          if old_status == status or (old_status is None and status == "ready"):
-            continue
-          resolved = status == "ready"
-          severity = (
-            "info"
-            if resolved
-            else "critical"
-            if name in {"database", "engine"}
-            else "error"
-          )
-          if severity_level and severity != severity_level.lower():
-            continue
-          yield SystemAlert(
-            alert_id=f"component:{name}:{status}:{int(now.timestamp())}",
-            severity=severity,
-            title=f"{name} {'已恢复' if resolved else '状态异常'}",
-            message=f"组件 {name} 状态从 {old_status or 'unknown'} 变为 {status}",
-            time=now,
-            source=name,
-            resolved=resolved,
-          )
-        await asyncio.sleep(5)
-    except Exception as exc:
-      logger.error("系统告警订阅出错: %s", exc)
       raise
 
   @strawberry.subscription(description="订阅部署状态流")

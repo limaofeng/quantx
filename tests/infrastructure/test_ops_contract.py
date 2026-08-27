@@ -25,9 +25,7 @@ def test_legacy_layout_and_root_launchers_are_removed() -> None:
 def test_active_guidance_does_not_reference_legacy_layout() -> None:
   documents = [ROOT / "README.md", ROOT / "AGENTS.md"]
   documents.extend(
-    path
-    for path in (ROOT / "docs").rglob("*.md")
-    if "archive" not in path.parts
+    path for path in (ROOT / "docs").rglob("*.md") if "archive" not in path.parts
   )
   forbidden = (
     "backend/",
@@ -92,10 +90,13 @@ def test_physical_directory_resolver_follows_windows_junction(
   tmp_path: Path,
 ) -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  resolver = "function Resolve-PhysicalDirectoryPath" + script.split(
-    "function Resolve-PhysicalDirectoryPath",
-    1,
-  )[1].split("$InvokedScriptRoot", 1)[0]
+  resolver = (
+    "function Resolve-PhysicalDirectoryPath"
+    + script.split(
+      "function Resolve-PhysicalDirectoryPath",
+      1,
+    )[1].split("$InvokedScriptRoot", 1)[0]
+  )
   powershell = shutil.which("pwsh") or shutil.which("powershell")
   assert powershell is not None
 
@@ -138,6 +139,8 @@ def test_caddy_is_the_only_public_http_entrypoint() -> None:
 
   for config in (development, production):
     assert "reverse_proxy @api 127.0.0.1:18081" in config
+    assert "@monitor path /monitor/*" in config
+    assert "reverse_proxy @monitor 127.0.0.1:18083" in config
     for path in (
       "/graphql*",
       "/auth*",
@@ -184,6 +187,7 @@ def test_windows_services_are_independently_supervised() -> None:
     "quantx-caddy.xml",
     "quantx-engine.xml",
     "quantx-market-gateway.xml",
+    "quantx-monitor.xml",
     "quantx-qmt-agent.xml",
     "quantx-worker.xml",
   }
@@ -198,17 +202,17 @@ def test_windows_services_are_independently_supervised() -> None:
     assert root.findall("onfailure")
     assert root.findtext("logpath")
 
-  qmt_arguments = ElementTree.parse(
-    templates["quantx-qmt-agent.xml"]
-  ).getroot().findtext("arguments")
+  qmt_arguments = (
+    ElementTree.parse(templates["quantx-qmt-agent.xml"]).getroot().findtext("arguments")
+  )
   assert qmt_arguments is not None
   assert "--mode {{QMT_AGENT_MODE}}" in qmt_arguments
   assert "--mode live" not in qmt_arguments
   qmt_environment = {
     node.attrib["name"]: node.attrib["value"]
-    for node in ElementTree.parse(
-      templates["quantx-qmt-agent.xml"]
-    ).getroot().findall("env")
+    for node in ElementTree.parse(templates["quantx-qmt-agent.xml"])
+    .getroot()
+    .findall("env")
   }
   assert qmt_environment["PYTHONPATH"] == "{{QMT_PYTHONPATH}}"
   assert qmt_environment["SSL_CERT_FILE"] == "{{CADDY_ROOT_CERT}}"
@@ -216,25 +220,19 @@ def test_windows_services_are_independently_supervised() -> None:
 
   api_environment = {
     node.attrib["name"]: node.attrib["value"]
-    for node in ElementTree.parse(
-      templates["quantx-api.xml"]
-    ).getroot().findall("env")
+    for node in ElementTree.parse(templates["quantx-api.xml"]).getroot().findall("env")
   }
   assert api_environment["RUNTIME_PROFILE"] == "full"
   assert api_environment["PREFECT_ENABLED"] == "true"
 
   caddy_environment = {
     node.attrib["name"]: node.attrib["value"]
-    for node in ElementTree.parse(
-      templates["quantx-caddy.xml"]
-    ).getroot().findall("env")
+    for node in ElementTree.parse(templates["quantx-caddy.xml"])
+    .getroot()
+    .findall("env")
   }
-  assert caddy_environment["XDG_CONFIG_HOME"] == (
-    r"{{RUNTIME}}\caddy-config"
-  )
-  assert caddy_environment["XDG_DATA_HOME"] == (
-    r"{{RUNTIME}}\caddy-data"
-  )
+  assert caddy_environment["XDG_CONFIG_HOME"] == (r"{{RUNTIME}}\caddy-config")
+  assert caddy_environment["XDG_DATA_HOME"] == (r"{{RUNTIME}}\caddy-data")
 
 
 def test_winsw_212_uses_adjacent_same_name_wrappers() -> None:
@@ -255,7 +253,7 @@ def test_dev_runtime_defaults_to_full_profile() -> None:
   assert "function Resolve-AiRuntimePython" in script
   assert '"QUANTX_AI_RUNTIME_PYTHON_EXE"' in script
   assert 'Join-Path $Root ".venv\\Scripts\\python.exe"' in script
-  assert '-Executable $aiRuntimePython' in script
+  assert "-Executable $aiRuntimePython" in script
 
 
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell dev launch matrix")
@@ -264,14 +262,20 @@ def test_dev_launch_profile_mode_and_allowlist_matrix() -> None:
   powershell = shutil.which("pwsh") or shutil.which("powershell")
   assert powershell is not None
 
-  list_setting = "function ConvertFrom-ListSetting" + script.split(
-    "function ConvertFrom-ListSetting",
-    1,
-  )[1].split("function Assert-QmtAgentEnrollment", 1)[0]
-  launch_functions = "function Resolve-DevLaunchProfile" + script.split(
-    "function Resolve-DevLaunchProfile",
-    1,
-  )[1].split("function Invoke-Up", 1)[0]
+  list_setting = (
+    "function ConvertFrom-ListSetting"
+    + script.split(
+      "function ConvertFrom-ListSetting",
+      1,
+    )[1].split("function Assert-QmtAgentEnrollment", 1)[0]
+  )
+  launch_functions = (
+    "function Resolve-DevLaunchProfile"
+    + script.split(
+      "function Resolve-DevLaunchProfile",
+      1,
+    )[1].split("function Invoke-Up", 1)[0]
+  )
   command = f"""
 $ErrorActionPreference = "Stop"
 {list_setting}
@@ -444,9 +448,7 @@ try {{
     "tTrade": "false",
   }
   assert "only non-live entry" in payload["paperModeError"]
-  assert "Multiple development trading accounts" in payload[
-    "multipleAccountError"
-  ]
+  assert "Multiple development trading accounts" in payload["multipleAccountError"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell runtime metadata")
@@ -455,10 +457,13 @@ def test_degraded_full_state_preserves_requested_live_mode() -> None:
   powershell = shutil.which("pwsh") or shutil.which("powershell")
   assert powershell is not None
 
-  runtime_configuration = "function Get-DevRuntimeConfiguration" + script.split(
-    "function Get-DevRuntimeConfiguration",
-    1,
-  )[1].split("function Get-TrackedProcess", 1)[0]
+  runtime_configuration = (
+    "function Get-DevRuntimeConfiguration"
+    + script.split(
+      "function Get-DevRuntimeConfiguration",
+      1,
+    )[1].split("function Get-TrackedProcess", 1)[0]
+  )
   command = f"""
 $ErrorActionPreference = "Stop"
 {runtime_configuration}
@@ -535,10 +540,13 @@ def test_status_formats_managed_process_start_time_in_local_timezone() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
   powershell = shutil.which("pwsh") or shutil.which("powershell")
   assert powershell is not None
-  formatter = "function ConvertTo-LocalStatusTimestamp" + script.split(
-    "function ConvertTo-LocalStatusTimestamp",
-    1,
-  )[1].split("function Invoke-Status", 1)[0]
+  formatter = (
+    "function ConvertTo-LocalStatusTimestamp"
+    + script.split(
+      "function ConvertTo-LocalStatusTimestamp",
+      1,
+    )[1].split("function Invoke-Status", 1)[0]
+  )
   command = f"""
 $ErrorActionPreference = "Stop"
 {formatter}
@@ -575,14 +583,20 @@ def test_degraded_status_does_not_query_stale_qmt_health() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
   powershell = shutil.which("pwsh") or shutil.which("powershell")
   assert powershell is not None
-  formatter_function = "function ConvertTo-LocalStatusTimestamp" + script.split(
-    "function ConvertTo-LocalStatusTimestamp",
-    1,
-  )[1].split("function Invoke-Status", 1)[0]
-  status_function = "function Invoke-Status" + script.split(
-    "function Invoke-Status",
-    1,
-  )[1].split("function Invoke-Logs", 1)[0]
+  formatter_function = (
+    "function ConvertTo-LocalStatusTimestamp"
+    + script.split(
+      "function ConvertTo-LocalStatusTimestamp",
+      1,
+    )[1].split("function Invoke-Status", 1)[0]
+  )
+  status_function = (
+    "function Invoke-Status"
+    + script.split(
+      "function Invoke-Status",
+      1,
+    )[1].split("function Invoke-Logs", 1)[0]
+  )
   command = f"""
 $ErrorActionPreference = "Stop"
 $ApiPort = 18081
@@ -635,10 +649,13 @@ def test_qmt_ready_wait_requires_live_process_and_current_launch_heartbeat() -> 
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
   powershell = shutil.which("pwsh") or shutil.which("powershell")
   assert powershell is not None
-  wait_function = "function Wait-QmtAgentRuntimeReady" + script.split(
-    "function Wait-QmtAgentRuntimeReady",
-    1,
-  )[1].split("function Invoke-CaddyRecovery", 1)[0]
+  wait_function = (
+    "function Wait-QmtAgentRuntimeReady"
+    + script.split(
+      "function Wait-QmtAgentRuntimeReady",
+      1,
+    )[1].split("function Invoke-CaddyRecovery", 1)[0]
+  )
   command = f"""
 $ErrorActionPreference = "Stop"
 $WarningPreference = "SilentlyContinue"
@@ -730,16 +747,11 @@ $current = Wait-QmtAgentRuntimeReady `
 
 def test_agent_websocket_timeout_exceeds_native_watchdog() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  api_service = (OPS / "windows" / "quantx-api.xml").read_text(
-    encoding="utf-8"
-  )
+  api_service = (OPS / "windows" / "quantx-api.xml").read_text(encoding="utf-8")
 
   assert "$AgentWebSocketPingTimeoutSeconds = 960" in script
   assert '"--ws-ping-interval", "20"' in script
-  assert (
-    '"--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds'
-    in script
-  )
+  assert '"--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds' in script
   assert "--ws-ping-interval 20 --ws-ping-timeout 960" in api_service
 
 
@@ -754,11 +766,11 @@ def test_server_runtime_path_excludes_qmt_agent_source() -> None:
     1,
   )[1].split("function Import-QuantXEnvironment", 1)[0]
 
-  assert 'apps\\qmt-agent\\src' not in workspace_path
-  assert 'apps\\ai-runtime\\src' in workspace_path
-  assert 'apps\\qmt-agent\\src' in qmt_path
-  assert 'packages\\contracts\\src' in qmt_path
-  assert 'packages\\infrastructure\\src' not in qmt_path
+  assert "apps\\qmt-agent\\src" not in workspace_path
+  assert "apps\\ai-runtime\\src" in workspace_path
+  assert "apps\\qmt-agent\\src" in qmt_path
+  assert "packages\\contracts\\src" in qmt_path
+  assert "packages\\infrastructure\\src" not in qmt_path
 
 
 def test_down_only_targets_pid_and_start_time_from_state() -> None:
@@ -781,14 +793,16 @@ def test_down_only_targets_pid_and_start_time_from_state() -> None:
   assert "$ApiPort = 18081" in script
   assert "127.0.0.1:$ApiPort/_dev/shutdown" in script
   assert 'stop --address "127.0.0.1:2019"' in script
-  assert "$gracefulWaitMilliseconds = if ($shutdownRequested) { 10000 } else { 0 }" in script
+  assert (
+    "$gracefulWaitMilliseconds = if ($shutdownRequested) { 10000 } else { 0 }" in script
+  )
   assert "has no graceful dev stop channel" in script
   assert "did not exit after the graceful stop window" in script
   assert "$process.Kill()" in stop_tracked
   assert "Stop-Process -Id $process.Id" not in stop_tracked
 
 
-def test_dev_up_only_self_heals_a_missing_or_stale_managed_caddy() -> None:
+def test_dev_components_keep_caddy_recovery_and_monitor_lifecycle_separate() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
   recovery = script.split("function Invoke-CaddyRecovery", 1)[1].split(
     "function Invoke-BoundedCliCommand",
@@ -799,10 +813,13 @@ def test_dev_up_only_self_heals_a_missing_or_stale_managed_caddy() -> None:
     1,
   )[0]
 
+  assert 'if ($Component -eq "monitor")' in invoke_up
+  assert "Invoke-MonitorUp" in invoke_up
   assert 'if ($Component -ne "caddy")' in invoke_up
   assert "Invoke-CaddyRecovery" in invoke_up
-  assert '$Command -notin @("up", "logs")' in script
-  assert "-Component is only supported by up and logs." in script
+  assert '$Command -notin @("up", "down", "status", "logs")' in script
+  assert "-Component is only supported by up, down, status, and logs." in script
+  assert '$Component -notin @("caddy", "monitor")' in script
   assert "Caddy component recovery is limited to the dev/full profile." in recovery
   for component in (
     "api",
@@ -834,7 +851,7 @@ def test_dev_caddy_start_and_readiness_are_shared_and_state_is_atomic() -> None:
     1,
   )[0]
   writer = script.split("function Write-State", 1)[1].split(
-    "function Get-DevRuntimeConfiguration",
+    "function Read-MonitorState",
     1,
   )[0]
   ordinary_up = script.split("function Invoke-Up", 1)[1].split(
@@ -868,16 +885,16 @@ def test_dev_caddy_start_and_readiness_are_shared_and_state_is_atomic() -> None:
 
 def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  dev_mode = script.split(
-    "function Set-DevTradingModeEnvironment", 1
-  )[1].split("function Invoke-Up", 1)[0]
+  dev_mode = script.split("function Set-DevTradingModeEnvironment", 1)[1].split(
+    "function Invoke-Up", 1
+  )[0]
 
   assert "function Test-QmtAgentEnrollment" in script
   assert "function Assert-QmtAgentEnrollment" in script
   assert "Test-QmtAgentEnrollment -Python $qmtPython" in script
   assert "function Set-DevTradingModeEnvironment" in script
   assert "function Disable-DevLiveTradingCapability" in script
-  assert '$agentMode = Set-DevTradingModeEnvironment' in script
+  assert "$agentMode = Set-DevTradingModeEnvironment" in script
   assert (
     '$script:ModeWasExplicitlySpecified = $PSBoundParameters.ContainsKey("Mode")'
     in script
@@ -887,10 +904,10 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert '"QMT_ACCOUNT_WHITELIST"' in dev_mode
   assert "ConfirmLive" not in dev_mode
   assert "Live mode requires -ConfirmLive '$expected'." in script
-  assert '$env:QMT_ACCOUNT_WHITELIST = if' in script
-  assert '$env:REAL_TRADING_ACCOUNT_ALLOWLIST = ConvertTo-Json' in script
+  assert "$env:QMT_ACCOUNT_WHITELIST = if" in script
+  assert "$env:REAL_TRADING_ACCOUNT_ALLOWLIST = ConvertTo-Json" in script
   assert '$env:ENV = "testing"' in script
-  assert '$env:ENV = $serverEnvironment' in script
+  assert "$env:ENV = $serverEnvironment" in script
   assert '$DefaultPrefectApiUrl = "http://192.168.101.4:30420/api"' in script
   assert '$DefaultPrefectWorkerPool = "quantx-pool"' in script
   assert "PREFECT_SERVER_UI_STATIC_DIRECTORY" not in script
@@ -903,12 +920,12 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert "-TimeoutSeconds 180" in script
   assert "timed out after $TimeoutSeconds seconds" in script
 
-  invoke_up = script.split("function Invoke-Up", 1)[1].split(
-    "function Invoke-Down", 1
-  )[0]
+  invoke_up = script.split("function Invoke-Up", 1)[1].split("function Invoke-Down", 1)[
+    0
+  ]
   assert "function Enable-DevServerTrading" not in script
-  assert "$env:ENABLE_REAL_TRADING = \"true\"" in script
-  assert "$env:T_TRADE_LIVE_ENABLED = \"true\"" in script
+  assert '$env:ENABLE_REAL_TRADING = "true"' in script
+  assert '$env:T_TRADE_LIVE_ENABLED = "true"' in script
   assert "Resolve-DevLaunchProfile" in invoke_up
   assert "-ModeExplicitlySpecified $script:ModeWasExplicitlySpecified" in invoke_up
   assert "-RequestedMode $Mode" in invoke_up
@@ -919,20 +936,12 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert '"QMT_ENROLLMENT_REQUIRED"' in invoke_up
   assert '"QMT_RUNTIME_UNAVAILABLE"' in invoke_up
   assert '"persisted history will continue to start.' in invoke_up
-  assert '$script:RuntimeAgentMode = $agentMode' in invoke_up
-  assert '$script:RuntimeQmtLaunchState = if' in invoke_up
+  assert "$script:RuntimeAgentMode = $agentMode" in invoke_up
+  assert "$script:RuntimeQmtLaunchState = if" in invoke_up
+  assert "$env:QMT_AGENT_LAUNCH_STATE = $script:RuntimeQmtLaunchState" in invoke_up
+  assert "$env:QMT_AGENT_LAUNCH_REASON = $script:RuntimeQmtReasonCode" in invoke_up
   assert (
-    '$env:QMT_AGENT_LAUNCH_STATE = $script:RuntimeQmtLaunchState'
-    in invoke_up
-  )
-  assert (
-    '$env:QMT_AGENT_LAUNCH_REASON = $script:RuntimeQmtReasonCode'
-    in invoke_up
-  )
-  assert (
-    "$env:QMT_AGENT_LAUNCH_STARTED_AT = "
-    "$script:RuntimeQmtLaunchStartedAt"
-    in invoke_up
+    "$env:QMT_AGENT_LAUNCH_STARTED_AT = $script:RuntimeQmtLaunchStartedAt" in invoke_up
   )
   assert invoke_up.index("$env:QMT_AGENT_LAUNCH_STATE") < invoke_up.index(
     "Start-ManagedProcess"
@@ -940,10 +949,10 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert invoke_up.index("$env:QMT_AGENT_LAUNCH_REASON") < invoke_up.index(
     "Start-ManagedProcess"
   )
-  assert invoke_up.index(
-    "$env:QMT_AGENT_LAUNCH_STARTED_AT"
-  ) < invoke_up.index("Start-ManagedProcess")
-  qmt_launch = invoke_up.index('$qmtProcessLaunchStartedAt = [datetime]::UtcNow')
+  assert invoke_up.index("$env:QMT_AGENT_LAUNCH_STARTED_AT") < invoke_up.index(
+    "Start-ManagedProcess"
+  )
+  qmt_launch = invoke_up.index("$qmtProcessLaunchStartedAt = [datetime]::UtcNow")
   qmt_process = invoke_up.index('-Name "qmt-agent"')
   assert qmt_launch < qmt_process
   assert "-ProcessEntry $qmtProcessEntry" in invoke_up
@@ -954,8 +963,7 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
 
   prefect = ElementTree.parse(OPS / "windows" / "quantx-worker.xml").getroot()
   environment = {
-    node.attrib["name"]: node.attrib["value"]
-    for node in prefect.findall("env")
+    node.attrib["name"]: node.attrib["value"] for node in prefect.findall("env")
   }
   assert environment["PREFECT_HOME"] == r"{{RUNTIME}}\prefect"
   assert environment["PREFECT_API_URL"] == "{{PREFECT_API_URL}}"
@@ -971,9 +979,9 @@ def test_dev_guidance_forbids_silent_data_only_fallback() -> None:
   examples = (ROOT / "docs" / "engineering" / "api" / "EXAMPLES.md").read_text(
     encoding="utf-8"
   )
-  deployment = (
-    ROOT / "docs" / "engineering" / "deployment" / "README.md"
-  ).read_text(encoding="utf-8")
+  deployment = (ROOT / "docs" / "engineering" / "deployment" / "README.md").read_text(
+    encoding="utf-8"
+  )
 
   for document in (agents, readme, examples, deployment):
     assert "full/live" in document
@@ -1002,8 +1010,7 @@ def test_all_python_processes_force_utf8_logs() -> None:
   ):
     service = ElementTree.parse(OPS / "windows" / filename).getroot()
     environment = {
-      node.attrib["name"]: node.attrib["value"]
-      for node in service.findall("env")
+      node.attrib["name"]: node.attrib["value"] for node in service.findall("env")
     }
     assert environment["PYTHONUTF8"] == "1", filename
     assert environment["PYTHONIOENCODING"] == "utf-8", filename
@@ -1019,9 +1026,9 @@ def test_public_caddy_origins_are_allowed_for_web_sessions() -> None:
     / "config"
     / "settings.py"
   ).read_text(encoding="utf-8")
-  environment_examples = (
-    ROOT / "apps" / "api" / ".env.example"
-  ).read_text(encoding="utf-8")
+  environment_examples = (ROOT / "apps" / "api" / ".env.example").read_text(
+    encoding="utf-8"
+  )
 
   for origin in ("http://127.0.0.1:8080", "http://localhost:8080"):
     assert origin in settings_source
@@ -1048,7 +1055,7 @@ def test_environment_precedence_keeps_process_values_and_later_files_win() -> No
   assert '$Environment -eq "dev"' in importer
   assert '"development"' in importer
   assert importer.index(r'apps\api\.env"') < importer.index(
-    r'apps\api\.env.$environmentName'
+    r"apps\api\.env.$environmentName"
   )
   assert "$processOverrides.Contains($name)" in importer
   assert "$files += $ProductionConfigFile" in importer
@@ -1100,19 +1107,17 @@ def test_every_prefect_deployment_targets_the_external_process_pool() -> None:
 
   deployments = configuration["deployments"]
   assert deployments
-  assert {
-    deployment["work_pool"]["name"] for deployment in deployments
-  } == {"quantx-pool"}
-  assert {
-    deployment["work_pool"]["work_queue_name"] for deployment in deployments
-  } == {"default"}
+  assert {deployment["work_pool"]["name"] for deployment in deployments} == {
+    "quantx-pool"
+  }
+  assert {deployment["work_pool"]["work_queue_name"] for deployment in deployments} == {
+    "default"
+  }
 
 
 def test_web_ci_uses_the_root_workspace_lockfile() -> None:
   runtime = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
-    encoding="utf-8"
-  )
+  release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
   checks = (ROOT / ".github" / "workflows" / "pr-checks.yml").read_text(
     encoding="utf-8"
   )
@@ -1121,9 +1126,9 @@ def test_web_ci_uses_the_root_workspace_lockfile() -> None:
   assert "apps/web/package-lock.json" not in release
   assert "apps/web/package-lock.json" not in checks
   assert "root package-lock.json" in checks
-  assert r'node_modules\vite\bin\vite.js' in runtime
-  assert r'node_modules\vitepress\bin\vitepress.js' in runtime
-  assert r'apps\web\node_modules\vite\bin\vite.js' not in runtime
+  assert r"node_modules\vite\bin\vite.js" in runtime
+  assert r"node_modules\vitepress\bin\vitepress.js" in runtime
+  assert r"apps\web\node_modules\vite\bin\vite.js" not in runtime
 
 
 def test_web_package_metadata_targets_the_monorepo() -> None:
@@ -1138,17 +1143,14 @@ def test_web_package_metadata_targets_the_monorepo() -> None:
   assert web_package["repository"]["directory"] == "apps/web"
   assert web_package["repository"]["url"].endswith("/quantx.git")
   assert all(
-    "quantx-frontend" not in command
-    for command in root_package["scripts"].values()
+    "quantx-frontend" not in command for command in root_package["scripts"].values()
   )
   assert "QuantFrontend" not in lockfile
   assert "quantx-frontend" not in lockfile
 
 
 def test_monorepo_ci_enforces_root_python_lint_gate() -> None:
-  workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
-    encoding="utf-8"
-  )
+  workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
   assert "uv run ruff check apps packages tests" in workflow
   assert "npm run lint:strict" in workflow
@@ -1158,9 +1160,7 @@ def test_monorepo_ci_enforces_root_python_lint_gate() -> None:
 
 
 def test_monorepo_ci_result_cannot_hide_failed_or_cancelled_prerequisites() -> None:
-  workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
-    encoding="utf-8"
-  )
+  workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
   result_job = workflow.split("  result:", 1)[1]
 
   for prerequisite in (
@@ -1189,7 +1189,7 @@ def test_external_dependencies_are_checked_without_lifecycle_ownership() -> None
   ).read_text(encoding="utf-8")
 
   assert "quantx_infrastructure.diagnostics.external_dependencies" in script
-  assert 'version={3} (externally managed)' in script
+  assert "version={3} (externally managed)" in script
   assert '"SHOW server_version"' in diagnostic
   assert 'client.info("server")' in diagnostic
   assert 'client.get(f"{host}/health")' in diagnostic
@@ -1222,3 +1222,38 @@ def test_release_bundle_is_versioned_offline_and_checksum_verified() -> None:
   assert "--ignore-installed" in install
   assert "New-Item -ItemType Junction" in install
   assert "automatic database downgrade is forbidden" in install
+  assert "--package quantx-monitor" in build
+  assert '"quantx-monitor"' in install
+
+
+def test_monitor_has_an_independent_dev_state_file_and_production_service() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  service = (OPS / "windows" / "quantx-monitor.xml").read_text(encoding="utf-8")
+  ordinary_up = script.split("function Invoke-Up", 1)[1].split(
+    "function Invoke-MonitorUp",
+    1,
+  )[0]
+  monitor_up = script.split("function Invoke-MonitorUp", 1)[1].split(
+    "function Invoke-Down",
+    1,
+  )[0]
+
+  assert '$MonitorStateFile = Join-Path $MonitorRuntime "dev-process.json"' in script
+  assert "Start-Process" in monitor_up
+  assert '"quantx_monitor.main"' in monitor_up
+  assert "Write-MonitorState -Entry $entry" in monitor_up
+  assert (
+    "$MonitorStateFile"
+    in script.split("function Read-MonitorState", 1)[1].split(
+      "function Get-DevRuntimeConfiguration",
+      1,
+    )[0]
+  )
+  assert (
+    "Assert-PortsAvailable -Ports @(8080, $ApiPort, $MarketGatewayPort, 5250, 5251)"
+    in ordinary_up
+  )
+  assert "QuantXMonitor" in service
+  assert "quantx_monitor.main" in service
+  assert "MONITOR_DATABASE_PATH" in service
+  assert "<startmode>Automatic</startmode>" in service

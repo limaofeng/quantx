@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Database,
   Gauge,
+  HeartPulse,
   Settings,
   ShieldCheck,
   type LucideIcon,
@@ -20,9 +21,11 @@ import { SystemInsightCard } from '@/features/system/components/SystemInsightCar
 import { cn } from '@/utils/cn';
 
 import { AiRuntimeSettingsPanel } from '../components/AiRuntimeSettingsPanel';
+import { ServiceStatusPanel } from '../components/ServiceStatusPanel';
 import { TradingSafetySettingsPanel } from '../components/TradingSafetySettingsPanel';
 
-type SettingsSection = 'overview' | 'trading-safety' | 'qmt' | 'ai-runtime';
+type SettingsSection =
+  'overview' | 'status' | 'trading-safety' | 'qmt' | 'ai-runtime';
 
 const navigation: Array<{
   id: SettingsSection;
@@ -37,6 +40,13 @@ const navigation: Array<{
     description: '服务健康与快捷入口',
     href: '/settings',
     icon: Gauge,
+  },
+  {
+    id: 'status',
+    label: '服务状态',
+    description: '可用性、延迟与事故历史',
+    href: '/settings/status',
+    icon: HeartPulse,
   },
   {
     id: 'trading-safety',
@@ -62,6 +72,7 @@ const navigation: Array<{
 ];
 
 function activeSection(path: string): SettingsSection {
+  if (path.startsWith('/settings/status')) return 'status';
   if (path.startsWith('/settings/trading-safety')) return 'trading-safety';
   if (path.startsWith('/settings/qmt')) return 'qmt';
   if (path.startsWith('/settings/ai-runtime')) return 'ai-runtime';
@@ -74,6 +85,13 @@ function SettingsOverview({
   onNavigate: (path: string) => void;
 }) {
   const cards = [
+    {
+      title: '服务状态',
+      description: '查看外部依赖与运行组件的长期可用性、延迟和事故历史。',
+      href: '/settings/status',
+      icon: HeartPulse,
+      accent: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/20',
+    },
     {
       title: '账户交易安全',
       description: '独立管理账户级实盘授权、对账窗口和紧急停止。',
@@ -235,6 +253,7 @@ export function SystemSettingsPage() {
       <main className="min-h-0 flex-1 overflow-hidden">
         <StudioPageFrame>
           {section === 'overview' && <SettingsOverview onNavigate={navigate} />}
+          {section === 'status' && <ServiceStatusPanel />}
           {section === 'trading-safety' && <TradingSafetySettingsPanel />}
           {section === 'qmt' && <AgentManagementPanel />}
           {section === 'ai-runtime' && <AiRuntimeSettingsPanel />}

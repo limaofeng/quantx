@@ -15,9 +15,7 @@ export type MarketDataHealth = {
 };
 
 type HealthResponse = {
-  components?: {
-    marketData?: MarketDataHealth;
-  };
+  marketData?: MarketDataHealth;
 };
 
 const CHECK_INTERVAL_MS = 3000;
@@ -35,16 +33,19 @@ export function useMarketDataHealth() {
     const load = async () => {
       controller = new AbortController();
       try {
-        const response = await fetch(`${API_ENDPOINTS.HEALTH}/components`, {
-          cache: 'no-store',
-          signal: controller.signal,
-        });
+        const response = await fetch(
+          `${API_ENDPOINTS.HEALTH}/runtime/market-data`,
+          {
+            cache: 'no-store',
+            signal: controller.signal,
+          }
+        );
         if (!response.ok) {
           throw new Error(`Health check failed: ${response.status}`);
         }
         const payload = (await response.json()) as HealthResponse;
         if (!cancelled) {
-          setHealth(payload.components?.marketData ?? { status: 'offline' });
+          setHealth(payload.marketData ?? { status: 'offline' });
         }
       } catch (error) {
         if (
