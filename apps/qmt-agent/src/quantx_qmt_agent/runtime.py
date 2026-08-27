@@ -48,7 +48,7 @@ from .broker import (
 )
 from .credentials import DeviceConfiguration, state_directory
 from .emergency import EmergencyStopStore
-from .endpoints import websocket_url
+from .endpoints import configured_tls_context, httpx_verify, websocket_url
 from .journal import LocalJournal
 from .whole_market_capture import (
   MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
@@ -576,6 +576,10 @@ def _websocket_url(api_url: str, path: str = "/ws/agent") -> str:
 
 
 def _connect_websocket(uri: str, **kwargs):
+  if uri.startswith("wss://") and "ssl" not in kwargs:
+    tls_context = configured_tls_context()
+    if tls_context is not None:
+      kwargs["ssl"] = tls_context
   connection = websockets.connect(uri, proxy=None, **kwargs)
   # The configured API root is an enrolled trust boundary. Following a server
   # redirect could move the subsequent AUTH frame to another authority.
@@ -802,6 +806,7 @@ class AgentRuntime:
       timeout=10.0,
       follow_redirects=False,
       trust_env=False,
+      verify=httpx_verify(self.configuration.api_url),
     ) as client:
       response = await client.post(
         f"{self.configuration.api_url}/auth/agent/token",
@@ -3008,6 +3013,7 @@ class AgentRuntime:
       timeout=60.0,
       follow_redirects=False,
       trust_env=False,
+      verify=httpx_verify(self.configuration.api_url),
     ) as client:
       for index, chunk in enumerate(chunks):
         self._touch_market_upload(request_id)
@@ -3504,6 +3510,7 @@ class AgentRuntime:
       timeout=10.0,
       follow_redirects=False,
       trust_env=False,
+      verify=httpx_verify(self.configuration.api_url),
     ) as client:
       response = await client.post(
         (f"{self.configuration.api_url}/agent/market-data/{request_id}/fail"),
@@ -3519,6 +3526,7 @@ class AgentRuntime:
       timeout=10.0,
       follow_redirects=False,
       trust_env=False,
+      verify=httpx_verify(self.configuration.api_url),
     ) as client:
       response = await client.post(
         (f"{self.configuration.api_url}/agent/market-data/{request_id}/fail"),

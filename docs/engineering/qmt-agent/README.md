@@ -13,6 +13,11 @@ HTTPS 证书失败不会降级为 HTTP。
 HTTP 会让登记交换、设备认证、控制/行情和历史上传流量在网络中明文传输，只应在
 用户明确接受风险的受控私有局域网使用；HTTPS 仍是推荐形态。
 
+使用 Caddy 私有 CA 的 HTTPS 地址时，把 Mac Caddy 根证书路径显式配置为
+`SSL_CERT_FILE`。Agent 会直接用该证书构造 HTTP 与 WSS 的 TLS context，同时继续
+设置 `trust_env=false` 和 `proxy=None`，因此不会为了读取 CA 而启用系统代理，也不会
+接受重定向或降级到 HTTP。
+
 Windows QMT 运行时复用改造前既有的 `xtquant-demo` Conda 环境，不创建独立 QMT
 Agent venv，也不使用服务端 Python 兜底。统一启动器优先采用显式配置的
 `QUANTX_QMT_PYTHON_EXE`；未配置时固定解析 `xtquant-demo`，解析失败即阻断 Agent，

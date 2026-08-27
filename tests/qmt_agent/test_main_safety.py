@@ -138,6 +138,7 @@ def test_enroll_accepts_http_without_redirects_or_system_proxy(
 
   assert client_options["follow_redirects"] is False
   assert client_options["trust_env"] is False
+  assert client_options["verify"] is True
   assert request == {
     "url": "http://api.test:8080/auth/agent/enrollments/exchange",
     "json": {"enrollmentCode": "one-time-code"},
@@ -151,6 +152,22 @@ def test_enroll_accepts_http_without_redirects_or_system_proxy(
   assert "one-time-code" not in output
   assert "device-secret" not in output
   assert "device-12345678" not in output
+
+
+def test_enroll_rejects_missing_https_ca_before_network(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing-root.crt"))
+
+  class Client:
+    def __init__(self, **_kwargs: object) -> None:
+      raise AssertionError("network client must not be created")
+
+  monkeypatch.setattr(main_module.httpx, "Client", Client)
+
+  with pytest.raises(SystemExit, match="SSL_CERT_FILE"):
+    main_module._enroll("https://api.test:8080", "one-time-code")
 
 
 def test_live_run_accepts_explicit_http_endpoint(

@@ -6,6 +6,8 @@ import pytest
 from quantx_contracts import AgentEnvelope, AgentMessageType
 from quantx_qmt_agent.credentials import DeviceConfiguration
 from quantx_qmt_agent.endpoints import (
+  configured_tls_context,
+  httpx_verify,
   masked_account_id,
   normalize_api_url,
   websocket_url,
@@ -56,6 +58,41 @@ def test_api_url_derives_websockets_from_the_exact_same_scheme_and_authority(
   assert (
     websocket_url(api_url, "/ws/agent/market") == f"{websocket_root}/ws/agent/market"
   )
+
+
+def test_https_uses_explicit_ca_without_enabling_environment_proxy(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  certificate = tmp_path / "macos-caddy-root.crt"
+  certificate.write_text("test certificate", encoding="utf-8")
+  observed: dict[str, object] = {}
+  tls_context = object()
+
+  def create_default_context(*, cafile: str):
+    observed["cafile"] = cafile
+    return tls_context
+
+  monkeypatch.setenv("SSL_CERT_FILE", str(certificate))
+  monkeypatch.setattr(
+    "quantx_qmt_agent.endpoints.ssl.create_default_context",
+    create_default_context,
+  )
+
+  assert configured_tls_context() is tls_context
+  assert httpx_verify("https://api.example.test") is tls_context
+  assert httpx_verify("http://api.example.test") is True
+  assert observed["cafile"] == str(certificate)
+
+
+def test_invalid_explicit_ca_file_fails_closed(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing-root.crt"))
+
+  with pytest.raises(ValueError, match="SSL_CERT_FILE"):
+    configured_tls_context()
 
 
 @pytest.mark.parametrize(
@@ -136,6 +173,11 @@ async def test_native_broker_initializes_only_after_control_authentication(
     return connection
 
   monkeypatch.setattr(runtime, "_issue_token", issue_token)
+  tls_context = object()
+  monkeypatch.setattr(
+    "quantx_qmt_agent.runtime.configured_tls_context",
+    lambda: tls_context,
+  )
   monkeypatch.setattr(
     "quantx_qmt_agent.runtime.websockets.connect",
     connect,
@@ -159,6 +201,7 @@ async def test_native_broker_initializes_only_after_control_authentication(
     "data-only",
   ]
   assert connect_kwargs["proxy"] is None
+  assert connect_kwargs["ssl"] is tls_context
   redirect = RuntimeError("redirect")
   assert connections[0].process_redirect(redirect) is redirect
   runtime._whole_market_encode_executor.shutdown(wait=False, cancel_futures=True)

@@ -101,6 +101,7 @@ def test_websocket_ping_timeout_exceeds_native_preparation_watchdog() -> None:
 async def test_market_data_failure_report_does_not_expose_native_error_text(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+  monkeypatch.delenv("SSL_CERT_FILE", raising=False)
   captured: dict[str, object] = {}
 
   class Response:
@@ -132,6 +133,8 @@ async def test_market_data_failure_report_does_not_expose_native_error_text(
   )
 
   assert captured["json"] == {"reason": "RuntimeError"}
+  assert captured["client"]["trust_env"] is False
+  assert captured["client"]["verify"] is True
 
 
 async def _read_http_content(content) -> bytes:

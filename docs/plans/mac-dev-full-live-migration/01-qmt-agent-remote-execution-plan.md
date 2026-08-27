@@ -70,6 +70,8 @@ python -m quantx_qmt_agent.main enroll `
 - `full/live` 最终验收接受明确登记的 HTTP 或 HTTPS 根地址；HTTP 固定派生 WS，
   HTTPS 固定派生 WSS，控制、市场和上传端点必须保持同一 authority。
 - HTTP 仅用于用户明确接受明文风险的受控私有局域网；HTTPS 仍为推荐形态。
+- HTTPS 使用私有 CA 时通过 `SSL_CERT_FILE` 显式加载根证书，但仍禁用系统代理、
+  重定向和跨 scheme 降级。
 - 设备密钥继续写入 Windows Credential Manager。
 - 修改服务器地址或 scheme 必须重新执行受控登记或显式配置迁移，不能静默接受
   服务端重定向。

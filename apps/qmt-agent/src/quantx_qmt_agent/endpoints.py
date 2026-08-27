@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import ssl
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -31,6 +34,26 @@ def normalize_api_url(value: str) -> str:
     host = f"[{host}]"
   netloc = f"{host}:{port}" if port is not None else host
   return urlunsplit((scheme, netloc, "", "", ""))
+
+
+def configured_tls_context() -> ssl.SSLContext | None:
+  configured = os.environ.get("SSL_CERT_FILE", "").strip()
+  if not configured:
+    return None
+  certificate = Path(configured).expanduser()
+  if not certificate.is_file():
+    raise ValueError("SSL_CERT_FILE 未指向可读取的 CA 证书文件")
+  try:
+    return ssl.create_default_context(cafile=str(certificate))
+  except (OSError, ssl.SSLError) as exc:
+    raise ValueError("SSL_CERT_FILE 中的 CA 证书无法加载") from exc
+
+
+def httpx_verify(api_url: str) -> bool | ssl.SSLContext:
+  normalized = normalize_api_url(api_url)
+  if urlsplit(normalized).scheme != "https":
+    return True
+  return configured_tls_context() or True
 
 
 def websocket_url(api_url: str, path: str = "/ws/agent") -> str:

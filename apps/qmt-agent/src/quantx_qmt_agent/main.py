@@ -16,7 +16,7 @@ import httpx
 from .broker import LiveBroker, QmtDataBroker
 from .credentials import DeviceCredentialStore, state_directory
 from .emergency import EmergencyStopStore
-from .endpoints import masked_device_id, normalize_api_url
+from .endpoints import httpx_verify, masked_device_id, normalize_api_url
 from .journal import LocalJournal
 from .process_watchdog import AgentProcessWatchdog
 from .runtime import (
@@ -159,12 +159,14 @@ def parse_args() -> argparse.Namespace:
 def _enroll(api_url: str, code: str) -> None:
   try:
     api_url = normalize_api_url(api_url)
+    verify = httpx_verify(api_url)
   except ValueError as exc:
     raise SystemExit(str(exc)) from None
   with httpx.Client(
     timeout=10.0,
     follow_redirects=False,
     trust_env=False,
+    verify=verify,
   ) as client:
     response = client.post(
       f"{api_url}/auth/agent/enrollments/exchange",
