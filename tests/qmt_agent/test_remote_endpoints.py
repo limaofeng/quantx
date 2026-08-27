@@ -8,7 +8,6 @@ from quantx_qmt_agent.credentials import DeviceConfiguration
 from quantx_qmt_agent.endpoints import (
   masked_account_id,
   normalize_api_url,
-  require_secure_api_url,
   websocket_url,
 )
 from quantx_qmt_agent.journal import LocalJournal
@@ -20,7 +19,9 @@ from quantx_qmt_agent.runtime import AgentRuntime
   (
     "ftp://api.example.test",
     "https://user@api.example.test",
+    "http://user@api.example.test",
     "https://api.example.test/graphql",
+    "http://api.example.test/graphql",
     "https://api.example.test?fallback=http://local",
     "https://api.example.test/#fragment",
   ),
@@ -30,19 +31,31 @@ def test_api_url_rejects_noncanonical_or_fallback_endpoints(value: str) -> None:
     normalize_api_url(value)
 
 
-def test_secure_api_url_derives_wss_from_the_same_authority() -> None:
-  assert require_secure_api_url("HTTPS://API.Example.Test:8443/") == (
-    "https://api.example.test:8443"
-  )
-  assert (
-    websocket_url(
+@pytest.mark.parametrize(
+  ("value", "api_url", "websocket_root"),
+  (
+    (
+      "HTTPS://API.Example.Test:8443/",
       "https://api.example.test:8443",
-      "/ws/agent/market",
-    )
-    == "wss://api.example.test:8443/ws/agent/market"
+      "wss://api.example.test:8443",
+    ),
+    (
+      "HTTP://API.Example.Test:8080/",
+      "http://api.example.test:8080",
+      "ws://api.example.test:8080",
+    ),
+  ),
+)
+def test_api_url_derives_websockets_from_the_exact_same_scheme_and_authority(
+  value: str,
+  api_url: str,
+  websocket_root: str,
+) -> None:
+  assert normalize_api_url(value) == api_url
+  assert websocket_url(api_url) == f"{websocket_root}/ws/agent"
+  assert (
+    websocket_url(api_url, "/ws/agent/market") == f"{websocket_root}/ws/agent/market"
   )
-  with pytest.raises(ValueError, match="https"):
-    require_secure_api_url("http://api.example.test")
 
 
 @pytest.mark.parametrize(

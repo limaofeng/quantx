@@ -1,13 +1,22 @@
 # QuantX QMT Agent
 
-`apps/qmt-agent` 是唯一允许导入 `xtquant` 的应用。它只建立出站 HTTPS/WSS，
+`apps/qmt-agent` 是唯一允许导入 `xtquant` 的应用。它只建立出站 HTTP(S)/WS(S)，
 不开放局域网监听端口，也不导入服务端 ORM、Repository 或策略实现。
 
 QMT Agent 是独立的 Windows 远程执行进程，不依赖 API 所在主机的启动器、PID
 或进程启动时间。它只从登记的服务根地址派生 token、控制 WebSocket、行情
-WebSocket 和历史上传地址。登记地址必须是无凭据、无路径、无查询参数的
-`https://` 根地址；HTTP 重定向、系统代理和 TLS 失败均不会触发地址迁移或明文
-降级，控制与行情连接固定使用同一 authority 的 WSS。
+WebSocket 和历史上传地址。登记地址必须是无凭据、无路径、无查询参数的 `http://`
+或 `https://` 根地址。Agent 严格保留登记 scheme 和 authority：HTTP 派生 HTTP/WS，
+HTTPS 派生 HTTPS/WSS；任何重定向、系统代理、自动换址或跨 scheme 回退均被禁止，
+HTTPS 证书失败不会降级为 HTTP。
+
+HTTP 会让登记交换、设备认证、控制/行情和历史上传流量在网络中明文传输，只应在
+用户明确接受风险的受控私有局域网使用；HTTPS 仍是推荐形态。
+
+Windows QMT 运行时复用改造前既有的 `xtquant-demo` Conda 环境，不创建独立 QMT
+Agent venv，也不使用服务端 Python 兜底。统一启动器优先采用显式配置的
+`QUANTX_QMT_PYTHON_EXE`；未配置时固定解析 `xtquant-demo`，解析失败即阻断 Agent，
+不得静默换用当前 shell 的 Python。
 
 设备密钥保存在 Windows Credential Manager，服务端只保存哈希；QMT 配置、
 SQLite journal 和历史上传 spool 也只留在 Windows。运行模式为 `data-only`、
@@ -18,7 +27,7 @@ SQLite journal 和历史上传 spool 也只留在 Windows。运行模式为 `dat
 不参与 QMT Agent 或账户实盘能力判定。
 
 启动顺序固定为：加载凭据与安全配置、校验 live 环境、校验 journal 完整性、获取
-短期 token、完成控制 WSS 认证，然后才初始化 XTData/XTTrading。每次新控制会话
+短期 token、完成控制 WebSocket 认证，然后才初始化 XTData/XTTrading。每次新控制会话
 都必须重放未确认报告并重新上报完整账户快照；Engine 对账完成前，Agent heartbeat
 不能自行把状态提升为 `READY`，服务端也不会向该 live 会话发放全市场行情租约。
 Windows 单实例锁和长期进程监督由 Windows 启动器方案负责，不能通过手工并行启动
@@ -148,7 +157,7 @@ JSON 报告保存在 `.runtime/reports/market-stream-load-test/`，不提交仓�
 
 ```powershell
 python -m quantx_qmt_agent.main enroll `
-  --api-url <MAC_DEV_PUBLIC_URL_HTTPS> `
+  --api-url <MAC_DEV_PUBLIC_URL> `
   --code <一次性登记码>
 python -m quantx_qmt_agent.main status
 ```

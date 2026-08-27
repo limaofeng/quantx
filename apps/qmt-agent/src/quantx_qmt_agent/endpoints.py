@@ -33,13 +33,6 @@ def normalize_api_url(value: str) -> str:
   return urlunsplit((scheme, netloc, "", "", ""))
 
 
-def require_secure_api_url(value: str) -> str:
-  normalized = normalize_api_url(value)
-  if urlsplit(normalized).scheme != "https":
-    raise ValueError("远程 QMT Agent 必须使用 https:// API 地址")
-  return normalized
-
-
 def websocket_url(api_url: str, path: str = "/ws/agent") -> str:
   normalized = normalize_api_url(api_url)
   parsed = urlsplit(normalized)

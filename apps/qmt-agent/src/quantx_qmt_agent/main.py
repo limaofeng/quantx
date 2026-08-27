@@ -16,7 +16,7 @@ import httpx
 from .broker import LiveBroker, QmtDataBroker
 from .credentials import DeviceCredentialStore, state_directory
 from .emergency import EmergencyStopStore
-from .endpoints import masked_device_id, require_secure_api_url
+from .endpoints import masked_device_id, normalize_api_url
 from .journal import LocalJournal
 from .process_watchdog import AgentProcessWatchdog
 from .runtime import (
@@ -158,7 +158,7 @@ def parse_args() -> argparse.Namespace:
 
 def _enroll(api_url: str, code: str) -> None:
   try:
-    api_url = require_secure_api_url(api_url)
+    api_url = normalize_api_url(api_url)
   except ValueError as exc:
     raise SystemExit(str(exc)) from None
   with httpx.Client(
@@ -196,11 +196,6 @@ def _run(mode: str) -> None:
       configuration, secret = DeviceCredentialStore().load()
     except RuntimeError as exc:
       raise SystemExit(str(exc)) from None
-    if mode == "live":
-      try:
-        require_secure_api_url(configuration.api_url)
-      except ValueError as exc:
-        raise SystemExit(str(exc)) from None
     journal = LocalJournal(state_directory() / "idempotency.sqlite3")
     integrity = journal.integrity_check()
     if integrity.lower() != "ok":

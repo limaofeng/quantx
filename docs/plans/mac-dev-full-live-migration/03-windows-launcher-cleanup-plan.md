@@ -27,7 +27,7 @@ Mac 迁移后，如果继续让该脚本保留 Windows Dev 全栈能力，会形
 
 Windows Dev 节点最终只拥有：
 
-- QMT 安装与 Python 运行时预检。
+- QMT 安装与改造前 `xtquant-demo` Conda 运行时预检。
 - 设备登记状态检查。
 - 唯一账户解析和 live 环境安全门。
 - QMT Agent 单实例启动、停止、状态、日志和重启。
@@ -111,10 +111,12 @@ ops/quantx-agent.ps1
 
 1. 操作系统是受支持的 Windows。
 2. QMT 客户端、userdata 目录和 XTData/XTTrading 运行时可用。
-3. QMT Agent 专用 Python 可执行文件存在。
+3. QMT Agent 默认解析到改造前的 `xtquant-demo` Conda Python，且可导入 `xtquant`；
+   `QUANTX_QMT_PYTHON_EXE` 仅作为显式路径覆盖，不得回退到服务端 Python 或另建 venv。
 4. 设备已登记且 Credential Manager 项可读取。
 5. 登记的 `api_url` 等于批准的 `<MAC_DEV_PUBLIC_URL>`。
-6. TLS 证书链可信，token 端点和控制/市场 WS 可达。
+6. token 端点和控制/市场 WS 按登记 scheme 可达；HTTPS 的证书链必须可信，HTTP
+   必须是已批准地址，且两者都禁止重定向或跨 scheme 回退。
 7. `ENV=testing`、`ENABLE_REAL_TRADING=true`、
    `QMT_REAL_TRADING_ENABLED=true` 和唯一 `QMT_ACCOUNT_WHITELIST` 满足 live 条件。
 8. journal 完整性通过，没有无法解释的冲突命令。
@@ -229,7 +231,7 @@ lastBackupAt=<时间或 unknown>
 ### 5.2 远程配置
 
 - [ ] 检查 Credential Manager 中保存的 Mac `api_url`。
-- [ ] 验证 HTTPS CA、token、控制 WS 和市场 WS。
+- [ ] 验证登记的 HTTP(S) scheme、token、控制 WS 和市场 WS；使用 HTTPS 时验证 CA。
 - [ ] 日志中隐藏 token、设备密钥和敏感账户信息。
 - [ ] Agent 配置中不出现数据库 ORM 或 Mac 本地路径。
 
@@ -326,7 +328,7 @@ quantx_monitor
 
 - 基线和最终提交 SHA。
 - 新命令帮助输出、退出码和状态 schema。
-- Windows/QMT/Python 版本及 Mac CA 信任说明。
+- Windows/QMT/原 `xtquant-demo` Conda Python 版本及适用时的 Mac CA 信任说明。
 - 旧 `ops/quantx.ps1` 删除的 Dev 职责清单。
 - production 回归测试结果。
 - 联合备份 manifest 的脱敏样例及恢复验证结果。

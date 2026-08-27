@@ -109,6 +109,7 @@ $MonitorStateFile = Join-Path $MonitorRuntime "dev-process.json"
 $MonitorPort = 18083
 $DefaultPrefectApiUrl = "http://192.168.101.4:30420/api"
 $DefaultPrefectWorkerPool = "quantx-pool"
+$DefaultQmtCondaEnvironment = "xtquant-demo"
 $ApiPort = 18081
 $MarketGatewayPort = 18082
 $AgentWebSocketPingTimeoutSeconds = 960
@@ -163,17 +164,11 @@ function Resolve-Python {
     }
     return [System.IO.Path]::GetFullPath($releasePython)
   }
-  if ($Qmt) {
-    $sharedPython = [Environment]::GetEnvironmentVariable("QUANTX_PYTHON_EXE")
-    if ($sharedPython) {
-      $resolved = [System.IO.Path]::GetFullPath($sharedPython)
-      if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
-        throw "Configured Python executable does not exist: $resolved"
-      }
-      return $resolved
-    }
+  $condaEnvironment = if ($Qmt) {
+    $DefaultQmtCondaEnvironment
+  } else {
+    [Environment]::GetEnvironmentVariable("CONDA_ENV_NAME")
   }
-  $condaEnvironment = [Environment]::GetEnvironmentVariable("CONDA_ENV_NAME")
   if ($condaEnvironment) {
     $environmentCandidates = @()
     $activeCondaPrefix = [Environment]::GetEnvironmentVariable("CONDA_PREFIX")
@@ -239,9 +234,14 @@ function Resolve-Python {
         )
       }
     }
+    $explicitInterpreter = if ($Qmt) {
+      "QUANTX_QMT_PYTHON_EXE"
+    } else {
+      "QUANTX_PYTHON_EXE"
+    }
     throw (
       "Configured Conda environment '$condaEnvironment' was not found. " +
-      "Set QUANTX_PYTHON_EXE to an explicit interpreter."
+      "Set $explicitInterpreter to an explicit interpreter."
     )
   }
   $python = Get-Command python -ErrorAction SilentlyContinue

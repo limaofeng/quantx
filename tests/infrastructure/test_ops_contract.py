@@ -1044,6 +1044,59 @@ def test_conda_resolution_supports_powershell_hook_commands() -> None:
   assert '"CONDA_EXE"' in script
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Conda runtime resolution")
+def test_qmt_runtime_defaults_to_original_xtquant_conda_environment(
+  tmp_path: Path,
+) -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  assert '$DefaultQmtCondaEnvironment = "xtquant-demo"' in script
+  resolver = (
+    "function Resolve-Python"
+    + script.split(
+      "function Resolve-Python",
+      1,
+    )[1].split("function Resolve-AiRuntimePython", 1)[0]
+  )
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+
+  profile = tmp_path / "profile"
+  qmt_python = profile / "miniconda3" / "envs" / "xtquant-demo" / "python.exe"
+  shared_python = tmp_path / "workspace-python.exe"
+  qmt_python.parent.mkdir(parents=True)
+  qmt_python.touch()
+  shared_python.touch()
+
+  def quote(path: Path) -> str:
+    return str(path).replace("'", "''")
+
+  command = f"""
+$ErrorActionPreference = "Stop"
+$Environment = "dev"
+$CurrentReleaseLink = ""
+$DefaultQmtCondaEnvironment = "xtquant-demo"
+$env:QUANTX_QMT_PYTHON_EXE = ""
+$env:QUANTX_PYTHON_EXE = '{quote(shared_python)}'
+$env:CONDA_ENV_NAME = ""
+$env:CONDA_PREFIX = ""
+$env:CONDA_EXE = ""
+$env:USERPROFILE = '{quote(profile)}'
+{resolver}
+Resolve-Python -Qmt
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert Path(result.stdout.strip()).resolve() == qmt_python.resolve()
+
+
 def test_environment_precedence_keeps_process_values_and_later_files_win() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
   importer = script.split(

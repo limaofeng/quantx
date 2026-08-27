@@ -187,14 +187,15 @@ liveTrading=ENABLED
 建议由本方案独占 `pyproject.toml`、`uv.lock` 和工具锁的相关修改，避免方案一在
 另一服务器同时编辑这些共享文件。
 
-### 4.6 Caddy、TLS 和网络
+### 4.6 Caddy、传输和网络
 
 - 增加目标 Mac 架构的 Caddy 版本、下载地址和 SHA-256 锁定信息。
 - Caddy 是唯一监听非回环地址的进程。
 - API、Market Gateway、Monitor、Vite 和 VitePress 继续绑定 `127.0.0.1`。
 - 公共地址必须稳定；Windows Credential Manager 中保存的 `api_url` 不应随 DHCP
   频繁变化。
-- 最终 `full/live` 使用 HTTPS/WSS，并验证 Windows 证书信任链。
+- 最终 `full/live` 接受明确登记的 HTTP/WS 或 HTTPS/WSS；HTTP 仅用于用户明确接受
+  明文风险的受控私有局域网，HTTPS 使用时必须验证 Windows 证书信任链。
 - Caddy 保持现有大 WebSocket 和行情上传所需的连接、超时和请求体预算。
 - 从 Windows 实测控制 WS、市场 WS、token 获取和行情分块上传，不能只在 Mac
   本机 `curl`。
@@ -341,7 +342,8 @@ Mac 启动器与跨平台契约测试
 
 - 基线和最终提交 SHA。
 - 目标 Mac 架构、OS、Python、Node/npm、Caddy 版本。
-- `<MAC_DEV_PUBLIC_URL>` 和 CA 安装说明，不包含私钥。
+- `<MAC_DEV_PUBLIC_URL>`、传输 scheme 与 HTTP 风险确认，或适用时的 CA 安装说明；
+  不包含私钥。
 - 权威 Mac 命令和退出码。
 - 状态文件 schema、组件依赖图和端口表。
 - 自动测试、无 Agent full/live 和跨主机验收结果。

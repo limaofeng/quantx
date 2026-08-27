@@ -1,7 +1,7 @@
 # QuantX Mac 开发环境 full/live 迁移总说明
 
 > 文档状态：实施规格草案  
-> 版本：1.0  
+> 版本：1.1
 > 基线日期：2026-08-27  
 > 适用范围：开发环境迁移；生产部署、K8s、Dev/Prod 并行运行均不在本轮范围内
 
@@ -27,11 +27,12 @@
 Windows QMT 执行节点
 ├── QMT 客户端 / XTData / XTTrading
 ├── quantx-qmt-agent（唯一允许导入 xtquant 的进程）
+├── 改造前既有的 `xtquant-demo` Conda 环境
 ├── Windows Credential Manager
 ├── 本地命令与回报 journal
 └── 开发实盘联合备份协调器
                │
-               │ 仅出站 HTTPS / WSS
+               │ 仅出站 HTTP(S) / WS(S)
                ▼
 Mac 开发服务节点
 ├── Caddy（唯一对外入口）
@@ -114,7 +115,7 @@ QMT Agent 上报的委托与成交回报。
 ```text
 BASE_COMMIT=<相同的完整 Git SHA>
 PLAN_BRANCH=<本方案工作分支>
-MAC_DEV_PUBLIC_URL=<不含凭据的稳定 HTTPS 地址>
+MAC_DEV_PUBLIC_URL=<不含凭据的稳定 HTTP 或 HTTPS 根地址>
 TARGET_ACCOUNT_ID=<只记录在安全运行配置，不写入公开文档>
 ```
 
@@ -129,7 +130,7 @@ Mac 只暴露 Caddy。内部服务继续绑定回环地址：
 
 | 服务 | 目标监听 | 对 Windows 可见 |
 | --- | --- | --- |
-| Caddy | Mac 的稳定私网地址；目标为 HTTPS | 是，唯一入口 |
+| Caddy | Mac 的稳定私网 HTTP 或 HTTPS 地址 | 是，唯一入口 |
 | API | `127.0.0.1:18081` | 否 |
 | Market Gateway | `127.0.0.1:18082` | 否 |
 | Monitor | `127.0.0.1:18083` | 否，只经 Caddy `/monitor/*` |
@@ -147,13 +148,15 @@ Windows Agent 保存一个稳定的 `<MAC_DEV_PUBLIC_URL>`，所有通信均从�
 无法表达必要语义，否则本轮不升级协议版本；服务端生成的连接身份保留在服务端
 状态和 heartbeat details 中，不要求 Agent 回传可信的会话 ID。
 
-局域网明文 HTTP 不能作为 `full/live` 的最终运行形态。应使用以下任一方式：
+`full/live` 最终验收接受设备登记时明确写入的 `http://` 或 `https://` 根地址。
+Agent 必须严格保留登记 scheme 和 authority：HTTP 固定派生 HTTP/WS，HTTPS 固定
+派生 HTTPS/WSS；禁止重定向、自动换址、HTTPS 失败后降级到 HTTP，修改地址或 scheme
+必须重新受控登记。
 
-- 稳定私有 DNS 加 Caddy TLS，并在 Windows 信任对应 CA；或
-- 两端位于受控 VPN，仍通过受信任 HTTPS/WSS 地址访问。
-
-Windows 防火墙不为 Agent 开放入站服务。Mac 防火墙只允许需要访问 Caddy 的可信
-来源，不公开内部端口。
+HTTP 会让登记交换、设备认证、控制/行情和历史上传流量在网络中明文传输，只能用于
+用户明确接受该风险的受控私有局域网；HTTPS 仍是推荐形态，使用时必须由 Windows
+信任其证书链。Windows 防火墙不为 Agent 开放入站服务。Mac 防火墙只允许需要访问
+Caddy 的可信来源，不公开内部端口。
 
 ### 4.2 模式与能力契约
 

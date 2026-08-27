@@ -91,11 +91,74 @@ def test_live_mode_rejects_multiple_accounts(
     _require_safe_run_mode("live", {"account-1", "account-2"})
 
 
-def test_live_run_rejects_http_endpoint_before_native_initialization(
+def test_enroll_accepts_http_without_redirects_or_system_proxy(
+  monkeypatch: pytest.MonkeyPatch,
+  capsys: pytest.CaptureFixture[str],
+) -> None:
+  client_options: dict[str, object] = {}
+  request: dict[str, object] = {}
+  saved: dict[str, str] = {}
+
+  class Response:
+    @staticmethod
+    def raise_for_status() -> None:
+      return None
+
+    @staticmethod
+    def json() -> dict[str, str]:
+      return {
+        "deviceId": "device-12345678",
+        "deviceSecret": "device-secret",
+      }
+
+  class Client:
+    def __init__(self, **kwargs: object) -> None:
+      client_options.update(kwargs)
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args: object) -> None:
+      return None
+
+    @staticmethod
+    def post(url: str, *, json: dict[str, str]) -> Response:
+      request.update(url=url, json=json)
+      return Response()
+
+  class CredentialStore:
+    @staticmethod
+    def save(**kwargs: str) -> None:
+      saved.update(kwargs)
+
+  monkeypatch.setattr(main_module.httpx, "Client", Client)
+  monkeypatch.setattr(main_module, "DeviceCredentialStore", CredentialStore)
+
+  main_module._enroll("HTTP://API.TEST:8080/", "one-time-code")
+
+  assert client_options["follow_redirects"] is False
+  assert client_options["trust_env"] is False
+  assert request == {
+    "url": "http://api.test:8080/auth/agent/enrollments/exchange",
+    "json": {"enrollmentCode": "one-time-code"},
+  }
+  assert saved == {
+    "api_url": "http://api.test:8080",
+    "device_id": "device-12345678",
+    "device_secret": "device-secret",
+  }
+  output = capsys.readouterr().out
+  assert "one-time-code" not in output
+  assert "device-secret" not in output
+  assert "device-12345678" not in output
+
+
+def test_live_run_accepts_explicit_http_endpoint(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path,
 ) -> None:
   watchdog = _FakeProcessWatchdog()
+  runtime_kwargs: dict[str, object] = {}
 
   class CredentialStore:
     @staticmethod
@@ -104,6 +167,15 @@ def test_live_run_rejects_http_endpoint_before_native_initialization(
         SimpleNamespace(device_id="device-1", api_url="http://api.test"),
         "secret",
       )
+
+  class Runtime:
+    @staticmethod
+    async def run_forever() -> None:
+      return None
+
+  def create_runtime(**kwargs):
+    runtime_kwargs.update(kwargs)
+    return Runtime()
 
   monkeypatch.setenv("ENV", "testing")
   monkeypatch.setenv("ENABLE_REAL_TRADING", "true")
@@ -116,12 +188,20 @@ def test_live_run_rejects_http_endpoint_before_native_initialization(
     lambda _base_directory: watchdog,
   )
   monkeypatch.setattr(main_module, "DeviceCredentialStore", CredentialStore)
+  monkeypatch.setattr(
+    main_module,
+    "LocalJournal",
+    lambda _path: SimpleNamespace(integrity_check=lambda: "ok"),
+  )
+  monkeypatch.setattr(main_module, "EmergencyStopStore", lambda _path: object())
+  monkeypatch.setattr(main_module, "AgentRuntime", create_runtime)
 
-  with pytest.raises(SystemExit, match="https"):
-    main_module._run("live")
+  main_module._run("live")
 
   assert watchdog.start_count == 1
   assert watchdog.close_count == 1
+  assert runtime_kwargs["configuration"].api_url == "http://api.test"
+  assert runtime_kwargs["mode"] == "live"
 
 
 def test_live_mode_does_not_depend_on_t_trade_feature_gate(

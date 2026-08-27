@@ -18,7 +18,7 @@
   `QMT_AGENT_LAUNCH_STARTED_AT` 和本机 PID 判断本轮 Agent。
 - Windows 启动器同时拥有服务端与 Agent 生命周期。
 - API 重启后，数据库中上一轮仍不足 90 秒的心跳可能被误认为本轮执行端。
-- 本机 HTTP 地址、同主机时钟和本机预检不再适用于 Mac/Windows 两个节点。
+- 本机固定地址、同主机时钟和本机预检不再适用于 Mac/Windows 两个节点。
 - Agent 的完整实盘能力需要在远程网络中验证，而不只是验证能建立 WebSocket。
 
 ## 2. 目标边界
@@ -27,7 +27,9 @@
 
 - 仍然是唯一允许导入 `xtquant` 的应用。
 - 仍然只依赖 `quantx_contracts`，不依赖 ORM、Repository、Engine 或策略。
-- 只建立出站 HTTPS/WSS，不监听任何局域网端口。
+- 复用改造前已经可用的 `xtquant-demo` Conda 环境，不新建独立 QMT Agent venv，
+  也不回退到服务端 Python。
+- 只建立出站 HTTP(S)/WS(S)，不监听任何局域网端口。
 - 在 Windows 本地保存设备密钥、QMT 配置、journal 和行情上传 spool。
 - 独立启动、停止、重连和恢复，不依赖 Mac 启动器。
 - 接收 Mac 的实盘命令并把 QMT 真实回报可靠收敛回服务端。
@@ -65,9 +67,12 @@ python -m quantx_qmt_agent.main enroll `
 目标要求：
 
 - `api_url` 必须规范化并去除末尾 `/`。
-- `full/live` 最终验收必须使用受信任 HTTPS 地址。
+- `full/live` 最终验收接受明确登记的 HTTP 或 HTTPS 根地址；HTTP 固定派生 WS，
+  HTTPS 固定派生 WSS，控制、市场和上传端点必须保持同一 authority。
+- HTTP 仅用于用户明确接受明文风险的受控私有局域网；HTTPS 仍为推荐形态。
 - 设备密钥继续写入 Windows Credential Manager。
-- 修改服务器地址必须重新执行受控登记或显式配置迁移，不能静默接受服务端重定向。
+- 修改服务器地址或 scheme 必须重新执行受控登记或显式配置迁移，不能静默接受
+  服务端重定向。
 - 日志只显示地址和 `device_id` 的安全摘要，不显示令牌或设备密钥。
 
 ### 4.2 服务端可信会话
@@ -168,8 +173,8 @@ KILLED` 权威状态，不在 Agent 内另造策略。
 - `REMOTE_AGENT_NOT_RECONCILED`
 - `REMOTE_AGENT_ACCOUNT_MISMATCH`
 
-具体时钟、TLS 或 journal 错误放入安全的 details 和日志；它们只有在客户端确实要
-做稳定分支时才提升为公共原因码。
+具体时钟、传输/TLS 或 journal 错误放入安全的 details 和日志；它们只有在客户端
+确实要做稳定分支时才提升为公共原因码。
 
 ## 5. 实施任务
 
@@ -177,7 +182,8 @@ KILLED` 权威状态，不在 Agent 内另造策略。
 
 - [ ] 确认所有控制、市场和上传 URL 都从登记的 `api_url` 派生。
 - [ ] 移除仍假设 `127.0.0.1`、同主机或 Windows 服务端路径的代码。
-- [ ] 验证 TLS 证书错误会 fail-closed，禁止自动退回 HTTP。
+- [ ] 验证严格使用登记 scheme；HTTPS 证书错误 fail-closed 且禁止自动退回 HTTP，
+  明确登记的 HTTP 始终保持 HTTP/WS。
 - [ ] 确认代理、超时、最大帧和上传大小适合跨主机局域网。
 - [ ] 验证日志和异常不会泄露 token、设备密钥或账户敏感配置。
 
@@ -239,7 +245,8 @@ packages/infrastructure/.../account_execution_safety_service.py（Agent 门部�
 - 旧报告重放保持 `message_id`，同命令重投保持 `command_id` 幂等。
 - 完整快照缺失、过期或未对账时拒绝实盘。
 - 市场 readiness-confirm 未完成时不报告市场 READY。
-- HTTP 地址不能通过最终 `full/live` TLS 验收。
+- 明确登记的 HTTP 与 HTTPS 均可通过 `full/live` 传输验收，并分别严格派生 WS/WSS；
+  不允许重定向、自动换址或跨 scheme 回退。
 
 执行相关单元和集成测试后，还要运行根边界测试：
 
@@ -268,7 +275,8 @@ python -m pytest tests/
 向集成负责人和另外两个执行方案交付：
 
 - 基线和最终提交 SHA。
-- Agent 所需的公共 URL、TLS 信任要求和非敏感配置字段清单。
+- Agent 所需的公共 URL、传输 scheme 与风险确认、适用时的 TLS 信任要求，以及
+  非敏感配置字段清单。
 - 服务端 heartbeat details 的最终结构和稳定原因码。
 - 自动测试结果和跨主机未完成项。
 - Agent `status` 的脱敏样例。
@@ -291,4 +299,3 @@ python -m pytest tests/
 只有当远程 Windows Agent 通过 Mac 公共入口提供全部行情、历史数据、账户快照、
 下单、撤单、回报、重放和恢复能力，并且服务端能可靠区分当前会话与历史心跳时，
 本方案才算完成。WebSocket 连接成功或 `data-only/paper` 通过不算完成。
-
