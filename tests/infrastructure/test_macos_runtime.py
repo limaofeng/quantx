@@ -770,6 +770,79 @@ def test_status_distinguishes_process_liveness_from_service_readiness(
   assert "System=DEGRADED" in output
 
 
+def test_status_reuses_one_health_snapshot_for_engine_and_worker(
+  tmp_path: Path,
+  monkeypatch: pytest.MonkeyPatch,
+  capsys: pytest.CaptureFixture[str],
+) -> None:
+  paths = _paths(tmp_path)
+  paths.ensure_runtime_directories()
+  runtime.atomic_write_json(
+    paths.state_file,
+    {
+      "schemaVersion": runtime.STATE_SCHEMA_VERSION,
+      "root": str(paths.root),
+      "profile": "full",
+      "agentMode": "live",
+      "configuredLive": True,
+      "configuredAccount": "account-1",
+      "components": [
+        {
+          "name": "engine",
+          "pid": 123,
+          "processGroupId": 123,
+          "startedAt": "2026-08-27T00:00:00Z",
+          "readiness": {
+            "kind": "api-component",
+            "target": "engine",
+            "expected_instance_id": "mac-engine",
+          },
+        },
+        {
+          "name": "worker",
+          "pid": 124,
+          "processGroupId": 124,
+          "startedAt": "2026-08-27T00:00:00Z",
+          "readiness": {
+            "kind": "api-worker",
+            "target": "quantx-macos-dev",
+          },
+        },
+      ],
+    },
+  )
+  health_calls = 0
+
+  def health_snapshot():
+    nonlocal health_calls
+    health_calls += 1
+    return {
+      "engine": {"status": "ready", "instanceId": "mac-engine"},
+      "worker": {
+        "status": "ready",
+        "workers": [{"name": "quantx-macos-dev", "status": "ONLINE"}],
+      },
+      "qmtAgent": {"status": "offline", "connectedDevices": 0},
+    }
+
+  monkeypatch.setattr(runtime, "managed_component_state", lambda _entry: "RUNNING")
+  monkeypatch.setattr(runtime, "safe_runtime_health", health_snapshot)
+  monkeypatch.setattr(runtime, "safe_live_trading_health", lambda: {})
+  monkeypatch.setattr(
+    runtime,
+    "http_json",
+    lambda *args, **kwargs: pytest.fail("status must reuse its health snapshot"),
+  )
+
+  args = runtime.argparse.Namespace(environment="dev", component="")
+  assert runtime.invoke_status(args, paths) == 0
+
+  output = capsys.readouterr().out
+  assert health_calls == 1
+  assert "Component=engine" in output and "Readiness=READY" in output
+  assert "Component=worker" in output and output.count("Readiness=READY") == 2
+
+
 def test_repeated_up_is_rejected_before_preflight(
   tmp_path: Path,
   monkeypatch: pytest.MonkeyPatch,

@@ -1843,6 +1843,7 @@ def component_readiness_state(
   state: Mapping[str, Any],
   entry: Mapping[str, Any],
   process_state: str,
+  runtime_health: Mapping[str, Any] | None = None,
 ) -> str:
   """Evaluate one stored readiness contract without changing runtime state."""
 
@@ -1864,11 +1865,16 @@ def component_readiness_state(
       status, _ = http_json(probe.target, timeout=1.0)
       ready = 200 <= status < 300
     elif probe.kind == "api-component":
-      status, payload = http_json(
-        f"http://127.0.0.1:{API_PORT}/health/components",
-        timeout=1.0,
-      )
-      component = dict(dict(payload.get("components") or {}).get(probe.target) or {})
+      if runtime_health is None:
+        status, payload = http_json(
+          f"http://127.0.0.1:{API_PORT}/health/components",
+          timeout=5.0,
+        )
+        components = dict(payload.get("components") or {})
+      else:
+        status = 200 if runtime_health else 503
+        components = dict(runtime_health)
+      component = dict(components.get(probe.target) or {})
       ready = bool(
         200 <= status < 300
         and component.get("status") == "ready"
@@ -1878,11 +1884,16 @@ def component_readiness_state(
         )
       )
     elif probe.kind == "api-worker":
-      status, payload = http_json(
-        f"http://127.0.0.1:{API_PORT}/health/components",
-        timeout=1.0,
-      )
-      worker = dict(dict(payload.get("components") or {}).get("worker") or {})
+      if runtime_health is None:
+        status, payload = http_json(
+          f"http://127.0.0.1:{API_PORT}/health/components",
+          timeout=5.0,
+        )
+        components = dict(payload.get("components") or {})
+      else:
+        status = 200 if runtime_health else 503
+        components = dict(runtime_health)
+      worker = dict(components.get("worker") or {})
       online_names = {
         str(item.get("name") or "") for item in list(worker.get("workers") or [])
       }
@@ -1976,6 +1987,7 @@ def invoke_status(args: argparse.Namespace, paths: RuntimePaths) -> int:
       )
       print("Next step=inspect ./ops/quantx logs, correct the cause, then retry up")
     return 0
+  runtime_health = {} if args.component else safe_runtime_health()
   readiness_states: list[str] = []
   for entry in components:
     process_state = managed_component_state(entry)
@@ -1984,6 +1996,7 @@ def invoke_status(args: argparse.Namespace, paths: RuntimePaths) -> int:
       state,
       entry,
       process_state,
+      runtime_health,
     )
     readiness_states.append(readiness_state)
     print(
@@ -2005,7 +2018,6 @@ def invoke_status(args: argparse.Namespace, paths: RuntimePaths) -> int:
     return 0
 
   live_health = safe_live_trading_health()
-  runtime_health = safe_runtime_health()
   qmt = dict(runtime_health.get("qmtAgent") or {})
   market_data = dict(runtime_health.get("marketData") or {})
   engine = dict(runtime_health.get("engine") or {})
