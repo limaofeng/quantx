@@ -84,7 +84,7 @@ API 为每个进程和控制连接分别生成 `apiInstanceId` 与 `agentSession
 
 交易控制、心跳与订单回报走协议 `1.1` 的 `/ws/agent`；沪深实时行情独占
 `/ws/agent/market`，子协议固定为 `quantx.market.v2`。该端点由独立的 Market
-Gateway 进程承载，控制面 API 重启不会中断行情提交。Agent 只建立一个
+Data Service 进程承载，控制面 API 重启不会中断行情提交。Agent 只建立一个
 原生 `subscribe_whole_quote(a股代码列表 + 沪深指数代码列表)`。显式代码表来自
 “沪深A股”和“沪深指数”的去重并集，约 5,800 个代码仍是一次 whole-quote
 调用的一个参数；ETF、债券等其他 SH/SZ 合约不会进入 SDK 解码与下游链路。

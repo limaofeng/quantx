@@ -26,7 +26,7 @@ function summary(
         id: 'quantx_runtime' as const,
         name: 'QuantX 运行组件',
         status: qmtStatus,
-        targetIds: ['qmt-agent', 'engine'],
+        targetIds: ['qmt-agent', 'market-data-service', 'engine'],
       },
     ],
     targets: [
@@ -49,6 +49,25 @@ function summary(
         latencyP95Ms: 18.8,
         sampleCount: 120,
         activeIncident: qmtStatus === 'unavailable',
+      },
+      {
+        id: 'market-data-service',
+        name: '行情服务',
+        group: 'quantx_runtime' as const,
+        optional: false,
+        probeKind: 'direct' as const,
+        status: 'healthy' as const,
+        checkedAt: now,
+        lastSuccessAt: now,
+        latencyMs: 4.2,
+        reasonCode: null,
+        availabilityPct: 100,
+        healthyPct: 100,
+        coveragePct: 100,
+        latencyP50Ms: 3.8,
+        latencyP95Ms: 5.1,
+        sampleCount: 10,
+        activeIncident: false,
       },
       {
         id: 'engine',
@@ -155,5 +174,26 @@ describe('ServiceStatusPanel', () => {
 
     expect(await screen.findByText('延迟 15.60 ms')).toBeInTheDocument();
     expect(screen.getAllByText('不可用').length).toBeGreaterThan(0);
+  });
+
+  it('shows direct latency for the independent market data service', async () => {
+    monitorMocks.getMonitorSummary.mockResolvedValue(summary());
+    monitorMocks.getMonitorHistory.mockResolvedValue({
+      target: { id: 'market-data-service', name: '行情服务' },
+      range: '24h',
+      bucketSeconds: 60,
+      points: [],
+    });
+    monitorMocks.getMonitorIncidents.mockResolvedValue([]);
+
+    render(<ServiceStatusPanel />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /行情服务/ }));
+
+    await waitFor(() =>
+      expect(screen.getByText('P50 3.80 ms · P95 5.10 ms')).toBeInTheDocument()
+    );
+    expect(screen.getByText('P50 3.80 ms · P95 5.10 ms')).toBeInTheDocument();
+    expect(screen.getByText('延迟 4.20 ms')).toBeInTheDocument();
   });
 });

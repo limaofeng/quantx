@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @pytest.mark.asyncio
-async def test_market_gateway_status_uses_readiness_endpoint(
+async def test_market_data_service_status_uses_readiness_endpoint(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   calls: dict[str, object] = {}
@@ -48,12 +48,12 @@ async def test_market_gateway_status_uses_readiness_endpoint(
 
   monkeypatch.setattr(
     runtime_status.settings,
-    "market_gateway_url",
+    "market_data_service_url",
     "http://127.0.0.1:18082",
   )
   monkeypatch.setattr(runtime_status.httpx, "AsyncClient", FakeClient)
 
-  status = await runtime_status._market_gateway_status()
+  status = await runtime_status._market_data_service_status()
 
   assert calls["client_kwargs"] == {"timeout": 1.0, "trust_env": False}
   assert calls["url"] == "http://127.0.0.1:18082/health/ready"
@@ -65,7 +65,7 @@ async def test_market_gateway_status_uses_readiness_endpoint(
 
 
 @pytest.mark.asyncio
-async def test_market_gateway_status_rejects_non_ready_payload(
+async def test_market_data_service_status_rejects_non_ready_payload(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   class FakeResponse:
@@ -94,7 +94,7 @@ async def test_market_gateway_status_rejects_non_ready_payload(
 
   monkeypatch.setattr(runtime_status.httpx, "AsyncClient", FakeClient)
 
-  status = await runtime_status._market_gateway_status()
+  status = await runtime_status._market_data_service_status()
 
   assert status == {
     "status": "unavailable",

@@ -26,17 +26,19 @@
 默认每 30 秒运行一次检测，最多并发 8 个。目标分两组：
 
 - 外部依赖：PostgreSQL、Redis、InfluxDB、Prefect Server；
-- QuantX 组件：Web 入口、文档、API 公共入口、API 进程、Market Gateway、
-  Engine、Worker、QMT Agent、行情链路和可选 AI Runtime。
+- QuantX 组件：Web 入口、文档、API 公共入口、API 进程、独立行情服务、
+  Engine、Worker、QMT Agent 和可选 AI Runtime。
 
 前一类使用独立协议或 HTTP probe；后一类的进程级入口直接探测，Engine、Worker、
-行情和 AI Runtime 从一次脱敏的 `/health/components` 快照派生，避免同一轮重复触发
-主服务的完整健康计算。QMT Agent 是组合目标：Monitor 直接请求 Windows
+AI Runtime 从一次脱敏的 `/health/components` 快照派生，避免同一轮重复触发主服务
+的完整健康计算。Monitor 直接请求行情服务的 `/health/ready`，因此行情服务拥有真实
+HTTP RTT，不再从 API 快照派生或显示 `N/A`。QMT Agent 是组合目标：Monitor 直接请求 Windows
 `/health/ready` 取得本地状态和真实 HTTP RTT，再与同轮 API 会话、心跳、完整快照和
 对账语义取较差结果；每轮只持久化一条 QMT Agent 样本。纯派生目标不伪造独立延迟。
+首次完整探测在 Monitor 对外就绪前完成，状态页不会先暴露一轮占位 `unknown`。
 
 固定目标来源使用 `probeKind=direct | derived | composite`。QMT Agent 为
-`composite`；Engine、Worker、行情服务和 AI Runtime 为 `derived`；其余为
+`composite`；Engine、Worker 和 AI Runtime 为 `derived`；其余为
 `direct`。Windows 连接或协议失败时 QMT Agent 立即为 unavailable 且延迟为空；合法
 HTTP 200/503 都生成 RTT 样本。原因优先级固定为健康端点传输/协议错误、API 服务端
 语义原因、Windows 本地 readiness 原因。
@@ -86,7 +88,7 @@ journal 的既有备份。
 - `MONITOR_CHECK_INTERVAL_SECONDS`、`MONITOR_MAX_CONCURRENCY`；
 - `MONITOR_RAW_RETENTION_DAYS`、`MONITOR_ROLLUP_RETENTION_DAYS`；
 - `MONITOR_PUBLIC_BASE_URL`、`MONITOR_API_URL`、
-  `MONITOR_MARKET_GATEWAY_URL`；
+  `MONITOR_MARKET_DATA_SERVICE_URL`；
 - `MONITOR_QMT_AGENT_HEALTH_URL=http://<windows-host>:18084`，必须是无凭据、
   无路径、无查询和 fragment 的绝对 HTTP(S) 根地址，不接受重定向。
 

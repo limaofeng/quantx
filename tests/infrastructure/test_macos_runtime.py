@@ -389,7 +389,7 @@ def test_component_graph_has_all_non_qmt_services_and_fixed_order(
 
   assert [spec.name for spec in graph] == [
     "sleep-guard",
-    "market-gateway",
+    "market-data-service",
     "api",
     "engine",
     "ai-runtime",

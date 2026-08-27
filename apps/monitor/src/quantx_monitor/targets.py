@@ -13,7 +13,7 @@ TARGETS: tuple[TargetDefinition, ...] = (
   TargetDefinition("docs", "开发文档", TargetGroup.RUNTIME),
   TargetDefinition("api-public", "API 公共链路", TargetGroup.RUNTIME),
   TargetDefinition("api-process", "API 进程", TargetGroup.RUNTIME),
-  TargetDefinition("market-gateway", "Market Gateway", TargetGroup.RUNTIME),
+  TargetDefinition("market-data-service", "行情服务", TargetGroup.RUNTIME),
   TargetDefinition(
     "engine",
     "策略引擎",
@@ -31,12 +31,6 @@ TARGETS: tuple[TargetDefinition, ...] = (
     "QMT Agent",
     TargetGroup.RUNTIME,
     probe_kind=ProbeKind.COMPOSITE,
-  ),
-  TargetDefinition(
-    "market-data",
-    "行情服务",
-    TargetGroup.RUNTIME,
-    probe_kind=ProbeKind.DERIVED,
   ),
   TargetDefinition(
     "ai-runtime",

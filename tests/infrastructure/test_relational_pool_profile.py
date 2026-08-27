@@ -5,23 +5,23 @@ from quantx_infrastructure.database.relational_connection import (
 
 def test_relational_pool_profiles_keep_single_account_runtime_bounded() -> None:
   api = database_pool_profile("api")
-  market_gateway = database_pool_profile("market-gateway")
+  market_data_service = database_pool_profile("market-data-service")
   engine = database_pool_profile("engine")
   worker = database_pool_profile("worker")
   ai_runtime = database_pool_profile("ai-runtime")
 
   assert (api.pool_size, api.max_overflow, api.maximum_connections) == (8, 4, 12)
   assert (
-    market_gateway.pool_size,
-    market_gateway.max_overflow,
-    market_gateway.maximum_connections,
+    market_data_service.pool_size,
+    market_data_service.max_overflow,
+    market_data_service.maximum_connections,
   ) == (1, 1, 2)
   assert (engine.pool_size, engine.max_overflow) == (6, 2)
   assert (worker.pool_size, worker.max_overflow) == (4, 2)
   assert (ai_runtime.pool_size, ai_runtime.max_overflow) == (2, 1)
   assert sum(
     profile.maximum_connections
-    for profile in (api, market_gateway, engine, worker, ai_runtime)
+    for profile in (api, market_data_service, engine, worker, ai_runtime)
   ) == 31
 
 

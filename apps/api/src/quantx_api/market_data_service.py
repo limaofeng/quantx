@@ -1,4 +1,4 @@
-"""Dedicated ASGI process for the QMT whole-market WebSocket."""
+"""Dedicated ASGI process for the QMT whole-market data plane."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from quantx_infrastructure.core.data.market_stream_transport import (
 
 from quantx_api.agent_api import market_agent_router
 
-MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS = 1.0
+MARKET_DATA_SERVICE_READINESS_TIMEOUT_SECONDS = 1.0
 
 
 @asynccontextmanager
@@ -26,7 +26,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-  title="QuantX Market Gateway",
+  title="QuantX Market Data Service",
   docs_url=None,
   redoc_url=None,
   openapi_url=None,
@@ -37,7 +37,7 @@ app.include_router(market_agent_router)
 
 @app.get("/health/live")
 async def health_live() -> dict[str, str]:
-  return {"status": "alive", "component": "market-gateway"}
+  return {"status": "alive", "component": "market-data-service"}
 
 
 @app.get("/health/ready")
@@ -46,7 +46,7 @@ async def health_ready() -> JSONResponse:
     redis = await market_stream_store.redis()
     redis_ready = await asyncio.wait_for(
       redis.ping(),
-      timeout=MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS,
+      timeout=MARKET_DATA_SERVICE_READINESS_TIMEOUT_SECONDS,
     )
     if not redis_ready:
       raise RuntimeError("Redis PING returned a false response")
@@ -55,7 +55,7 @@ async def health_ready() -> JSONResponse:
       status_code=503,
       content={
         "status": "not_ready",
-        "component": "market-gateway",
+        "component": "market-data-service",
         "dependencies": {"redis": "unavailable"},
         "error": exc.__class__.__name__,
       },
@@ -64,7 +64,7 @@ async def health_ready() -> JSONResponse:
     status_code=200,
     content={
       "status": "ready",
-      "component": "market-gateway",
+      "component": "market-data-service",
       "dependencies": {"redis": "ready"},
     },
   )

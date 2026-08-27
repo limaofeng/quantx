@@ -26,7 +26,7 @@ API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部�
 | --- | --- |
 | `/health/live` | 只证明 API 事件循环可响应 |
 | `/health/ready` | 按 `web/full` profile 检查必要组件 |
-| `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、行情和 AI Runtime 分项状态 |
+| `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、独立行情服务、行情链路和 AI Runtime 分项状态 |
 | `/health/runtime/market-data` | 高频交易 UI 使用的行情水位与新鲜度；不执行全量依赖探测 |
 | `/health` | `/health/ready` 的兼容别名 |
 

@@ -4,6 +4,11 @@
 GraphQL、Agent WebSocket Hub、认证、数据库连接和订阅桥接，不拥有策略
 Engine、Prefect Worker 或 QMT SDK 生命周期。
 
+Market Data Service 使用同一后端发布制品中的独立 ASGI 入口
+`quantx_api.market_data_service:app`，但拥有单独的操作系统进程、端口、健康检查、
+数据库连接预算和监督生命周期。它不运行在主 API 进程内；开发环境仍由统一
+`quantx up` 编排两者。
+
 ## 本地运行
 
 从仓库根目录统一启动：
@@ -18,11 +23,11 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 `/health/ready`、`/health/components` 和 `/ws/agent`。原生客户端在线
 文档位于 `/docs/`；FastAPI 开发 Swagger 只在内部 API 端口的
 `/_dev/api-docs` 提供，生产环境关闭。QMT Agent 的交易连接使用 `/ws/agent`，
-唯一沪深行情连接使用 `/ws/agent/market` 和 `quantx.market.v1`。统一开发者中心覆盖 Web、原生客户端与
+唯一沪深行情连接使用 `/ws/agent/market` 和 `quantx.market.v2`。统一开发者中心覆盖 Web、原生客户端与
 第三方 API。
 
 交易页面的高频行情水位读取使用 `/health/runtime/market-data`，只计算 API 已有的
-行情心跳语义，不触发数据库、Prefect 或 Market Gateway 的全量健康探测。长期
+行情心跳语义，不触发数据库、Prefect 或独立行情服务的全量健康探测。长期
 可用性、延迟和事故历史不在 API 内实现，由独立 `quantx-monitor` 通过
 `/monitor/*` 提供；它不参与 API readiness 或交易门禁。
 
