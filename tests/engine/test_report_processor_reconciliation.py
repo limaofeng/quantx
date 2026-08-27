@@ -19,6 +19,8 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
 )
 from quantx_infrastructure.models.auth import AuthUser
+from quantx_infrastructure.services import trade_command_service as command_module
+from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -337,6 +339,138 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
     assert account_summary["newExternalOrderCount"] == 1
     assert account_summary["workingExternalOrderCount"] == 1
     assert account_summary["controlledWindowActive"] is False
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_clean_snapshot_rolls_controlled_window_binding_and_keeps_buy_gate(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AccountExecutionControl.__table__,
+    AccountExecutionControlEvent.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  authority_invalidation = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "_invalidate_t_trade_entry_authority_for_account",
+    authority_invalidation,
+  )
+  snapshot_discrepancies = AsyncMock(
+    return_value={
+      "blocking_discrepancies": [],
+      "external_orders": [],
+      "external_trades": [],
+    }
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_snapshot_discrepancies",
+    snapshot_discrepancies,
+  )
+  position_service = SimpleNamespace(
+    prepare_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "PREPARED"}
+    ),
+    finalize_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "APPLIED"}
+    ),
+    mark_snapshot_failure=AsyncMock(),
+  )
+  started_at = utcnow() - timedelta(minutes=5)
+  async with sessions() as db:
+    db.add(
+      AccountExecutionControl(
+        account_id="account-1",
+        authorization_state="ENABLED",
+        state_version=7,
+        reconcile_status="READY",
+        last_snapshot_id="snapshot-1",
+        last_snapshot_hash="a" * 64,
+        last_snapshot_at=utcnow(),
+        controlled_window_active=True,
+        controlled_window_snapshot_id="snapshot-1",
+        controlled_window_snapshot_hash="a" * 64,
+        controlled_window_started_at=started_at,
+        controlled_window_started_by_user_id="user-1",
+        controlled_window_external_order_ids=["baseline-order"],
+        controlled_window_external_trade_ids=["baseline-trade"],
+      )
+    )
+    await db.commit()
+
+  reported_at = utcnow()
+  snapshot_hash = "b" * 64
+  (
+    result,
+    blocked,
+    summary,
+  ) = await report_processor._reconcile_authoritative_full_account_locked(
+    "account-1",
+    {"orders": [], "trades": []},
+    snapshot_id="snapshot-2",
+    snapshot_hash=snapshot_hash,
+    reported_at=reported_at,
+    sequence=2,
+    positions=[],
+    position_service=position_service,
+  )
+
+  assert result == {"applied": True, "reason": "APPLIED"}
+  assert blocked is False
+  assert summary["controlledWindowActive"] is True
+  snapshot_discrepancies.assert_awaited_once_with(
+    "account-1",
+    {"orders": [], "trades": []},
+    allow_external_activity=False,
+    acknowledged_external_order_ids={"baseline-order"},
+    acknowledged_external_trade_ids={"baseline-trade"},
+  )
+  authority_invalidation.assert_awaited_once_with(
+    "account-1",
+    reason="BROKER_POSITION_SNAPSHOT_UPDATED",
+  )
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(
+    command_module.settings,
+    "real_trading_account_allowlist",
+    ["account-1"],
+  )
+  async with sessions() as db:
+    rollout = await db.get(AccountExecutionControl, "account-1")
+    assert rollout is not None
+    assert rollout.authorization_state == "ENABLED"
+    assert rollout.state_version == 7
+    assert rollout.reconcile_status == "READY"
+    assert rollout.last_snapshot_id == "snapshot-2"
+    assert rollout.last_snapshot_hash == snapshot_hash
+    assert rollout.last_snapshot_at == reported_at
+    assert rollout.controlled_window_active is True
+    assert rollout.controlled_window_snapshot_id == "snapshot-2"
+    assert rollout.controlled_window_snapshot_hash == snapshot_hash
+    assert rollout.controlled_window_started_at == started_at
+    assert rollout.controlled_window_started_by_user_id == "user-1"
+    assert rollout.controlled_window_external_order_ids == ["baseline-order"]
+    assert rollout.controlled_window_external_trade_ids == ["baseline-trade"]
+    events = (await db.execute(select(AccountExecutionControlEvent))).scalars().all()
+    assert events == []
+
+    authorized = await TradeCommandService(db)._require_manual_live_authorization(
+      "account-1",
+      risk_reducing=False,
+    )
+    assert authorized is rollout
 
   await engine.dispose()
 

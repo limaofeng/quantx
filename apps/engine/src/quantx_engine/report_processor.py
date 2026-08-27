@@ -1553,6 +1553,9 @@ async def _reconcile_authoritative_full_account_locked(
           )
         )
     else:
+      if bool(rollout.controlled_window_active):
+        rollout.controlled_window_snapshot_id = snapshot_id or None
+        rollout.controlled_window_snapshot_hash = snapshot_hash or None
       if str(
         rollout.authorization_state
       ).upper() == "PAUSED" and _was_automatic_reconciliation_pause(
