@@ -54,15 +54,16 @@ from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.strategy_run_state import StrategyRunState
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.services.agent_session_guard import (
+  API_HEARTBEAT_COMPONENT,
+  evaluate_agent_session,
+)
 from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationService,
   scope_from_managed_entry_config,
 )
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   validate_exact_auto_exit_authorization,
-)
-from quantx_infrastructure.services.qmt_launch_guard import (
-  qmt_heartbeat_matches_current_launch,
 )
 
 
@@ -123,12 +124,18 @@ class TradeCommandService:
     ).hexdigest()
 
   @staticmethod
-  def _heartbeat_fresh(heartbeat: RuntimeComponentHeartbeat) -> bool:
-    updated_at = to_naive_utc(heartbeat.updated_at)
-    return bool(
-      (utcnow() - updated_at).total_seconds() <= 90
-      and qmt_heartbeat_matches_current_launch(updated_at)
-    )
+  def _heartbeat_fresh(
+    heartbeat: RuntimeComponentHeartbeat,
+    api_heartbeat: RuntimeComponentHeartbeat | None,
+    *,
+    acceptable_statuses: set[str] | None = None,
+  ) -> bool:
+    return evaluate_agent_session(
+      heartbeat,
+      api_heartbeat,
+      now=utcnow(),
+      acceptable_statuses=acceptable_statuses or {"READY"},
+    ).current
 
   async def _require_live_authorization(
     self,
@@ -150,6 +157,15 @@ class TradeCommandService:
       raise AgentUnavailableError("账户买入权限未启用")
     if control.reconcile_status != "READY":
       raise AgentUnavailableError("账户快照或仓位对账未就绪")
+
+  async def _require_live_market_stream_ready(self, device: AgentDevice) -> None:
+    heartbeat = await self.db.get(
+      RuntimeComponentHeartbeat,
+      f"qmt-agent:{device.id}",
+    )
+    details = dict(heartbeat.details or {}) if heartbeat is not None else {}
+    if str(details.get("marketStreamStatus") or "").upper() != "READY":
+      raise AgentUnavailableError("全市场行情尚未完成远程三阶段同步")
 
   async def _require_manual_live_authorization(
     self,
@@ -1350,6 +1366,14 @@ class TradeCommandService:
       )
     )
     devices = result.scalars().all()
+    api_heartbeat = (
+      await self.db.get(
+        RuntimeComponentHeartbeat,
+        API_HEARTBEAT_COMPONENT,
+      )
+      if execution_mode == "live"
+      else None
+    )
     eligible: list[AgentDevice] = []
     for device in devices:
       allowed = list(device.authorized_account_ids or [])
@@ -1372,7 +1396,11 @@ class TradeCommandService:
           heartbeat is None or str(heartbeat.status).upper() not in acceptable_statuses
         ):
           continue
-        if not self._heartbeat_fresh(heartbeat):
+        if not self._heartbeat_fresh(
+          heartbeat,
+          api_heartbeat,
+          acceptable_statuses=acceptable_statuses,
+        ):
           continue
       eligible.append(device)
     if execution_mode == "live" and len(eligible) > 1:
@@ -1393,6 +1421,15 @@ class TradeCommandService:
     result = await self.db.execute(
       select(AgentDevice).where(AgentDevice.revoked_at.is_(None))
     )
+    api_heartbeat = (
+      await self.db.get(
+        RuntimeComponentHeartbeat,
+        API_HEARTBEAT_COMPONENT,
+      )
+      if execution_mode == "live"
+      else None
+    )
+    eligible: list[AgentDevice] = []
     for device in result.scalars().all():
       capabilities = {
         str(capability).lower() for capability in list(device.capabilities or [])
@@ -1409,10 +1446,16 @@ class TradeCommandService:
           if (
             heartbeat is None
             or str(heartbeat.status).upper() != "READY"
-            or not self._heartbeat_fresh(heartbeat)
+            or not self._heartbeat_fresh(heartbeat, api_heartbeat)
           ):
             continue
-        return device
+        eligible.append(device)
+    if execution_mode == "live" and len(eligible) > 1:
+      raise AgentUnavailableError(
+        "同一账户检测到多个就绪 live QMT Agent，已拒绝路由交易命令"
+      )
+    if eligible:
+      return eligible[0]
     raise AgentUnavailableError(
       f"没有已登记、就绪且具备交易能力（{execution_mode}）的 QMT Agent"
     )
@@ -1499,6 +1542,8 @@ class TradeCommandService:
       account_id=account_id,
       execution_mode=normalized_mode,
     )
+    if normalized_mode == "live" and not risk_reducing:
+      await self._require_live_market_stream_ready(device)
     now = utcnow()
     client_order_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())

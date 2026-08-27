@@ -1,31 +1,45 @@
 # QuantX QMT Agent
 
-`apps/qmt-agent` 是唯一允许导入 `xtquant` 的应用。它只建立出站 WebSocket，
+`apps/qmt-agent` 是唯一允许导入 `xtquant` 的应用。它只建立出站 HTTPS/WSS，
 不开放局域网监听端口，也不导入服务端 ORM、Repository 或策略实现。
 
-设备密钥保存在 Windows Credential Manager，服务端只保存哈希。运行模式为
-`data-only`、`paper` 或 `live`。`live` 只允许在 `ENV=testing` 或
-`ENV=production`，且同时显式设置 `ENABLE_REAL_TRADING=true`、
-`QMT_REAL_TRADING_ENABLED=true` 和 `QMT_ACCOUNT_WHITELIST` 时启动。
-服务端账户白名单、独立账户增仓授权、快照、对账与策略授权仍会阻断不合规命令；
-`T_TRADE_LIVE_ENABLED` 只控制做 T 助手，不参与 QMT Agent 或账户实盘能力判定。普通开发 `up`
-默认提升为 `full/live`；登记与运行时预检通过时才启动 QMT Agent。启动器保持
-服务端为 `development`，只为 QMT Agent 子进程注入 `ENV=testing`、账户白名单
-和实盘开关。预检失败时仍保持期望模式为 `live`，但会在 API/Engine 启动前关闭
-全部实盘能力门、清空实盘账户允许列表并把 QMT 标记为 `BLOCKED`，让非 QMT
-服务和基于已持久化历史行情的回测独立运行；这不是 `data-only`，也不代表 Agent
-已经 `READY`。预检通过时，API/Engine 只消费不早于本次
-`QMT_AGENT_LAUNCH_STARTED_AT` 的 Agent 心跳，启动验收还要求受管 QMT 进程的
-PID 与进程启动时间持续匹配；上一轮残留的 90 秒新鲜心跳不能恢复实盘能力。
-账户可显式传入，
-也可由本机环境中的唯一账户配置自动解析：
+QMT Agent 是独立的 Windows 远程执行进程，不依赖 API 所在主机的启动器、PID
+或进程启动时间。它只从登记的服务根地址派生 token、控制 WebSocket、行情
+WebSocket 和历史上传地址。登记地址必须是无凭据、无路径、无查询参数的
+`https://` 根地址；HTTP 重定向、系统代理和 TLS 失败均不会触发地址迁移或明文
+降级，控制与行情连接固定使用同一 authority 的 WSS。
 
-```powershell
-.\ops\quantx.ps1 up -Environment dev -Profile web -AccountId <账户>
-```
+设备密钥保存在 Windows Credential Manager，服务端只保存哈希；QMT 配置、
+SQLite journal 和历史上传 spool 也只留在 Windows。运行模式为 `data-only`、
+`paper` 或 `live`。`live` 只允许在 `ENV=testing` 或 `ENV=production`，且同时
+显式设置 `ENABLE_REAL_TRADING=true`、`QMT_REAL_TRADING_ENABLED=true` 和唯一
+账户 `QMT_ACCOUNT_WHITELIST` 时启动。服务端账户白名单、账户增仓授权、完整快照、
+对账和策略授权仍会阻断不合规命令；`T_TRADE_LIVE_ENABLED` 只控制做 T 助手，
+不参与 QMT Agent 或账户实盘能力判定。
 
-需要纯行情通道时显式传入 `-Mode data-only`。生产环境的模式切换仍要求精确
-确认和独立配置的实盘开关。
+启动顺序固定为：加载凭据与安全配置、校验 live 环境、校验 journal 完整性、获取
+短期 token、完成控制 WSS 认证，然后才初始化 XTData/XTTrading。每次新控制会话
+都必须重放未确认报告并重新上报完整账户快照；Engine 对账完成前，Agent heartbeat
+不能自行把状态提升为 `READY`。Windows 单实例锁和长期进程监督由 Windows 启动器
+方案负责，不能通过手工并行启动两个 Agent 绕过。
+
+新增或增仓命令还要求 `marketStreamStatus=READY`。API 在入队与实际写入控制
+WebSocket 前都会检查三阶段行情同步，Windows Agent 在调用 Broker 前再次检查；
+撤单与明确的风险降低型卖出保留故障逃生路径。
+
+API 为每个进程和控制连接分别生成 `apiInstanceId` 与 `agentSessionId`，并用服务端
+接收时间计算 90 秒 TTL。Agent 断线、撤销、同设备重复连接或 API 实例切换会立即
+使旧会话失去命令和行情资格；旧报告仍按原消息 ID 幂等收敛，但不能提升新会话。
+账户安全门不再读取本机 `QMT_AGENT_LAUNCH_*` 或 PID 状态。
+行情租约还绑定当前控制连接所用短期 token 的单向指纹；Redis 只允许较新的 API
+启动代际覆盖租约，旧 API 只能清理自己的租约，不能删除或回写新代际。服务端不
+持久化或输出 token 本身。
+
+服务端控制的 Agent heartbeat details 字段为：`apiInstanceId`、
+`agentSessionId`、`serverConnectedAt`、`serverReceivedAt`、`agentSentAt`、
+`remoteAddressSummary`、`sessionActive` 和 `reasonCode`。Agent 自报同名值不会覆盖
+这些字段。API 持久化报告时还会注入只在服务端使用的会话元数据和认证时冻结的
+`authorizedAccountIds`；该元数据不改变线协议，也不参与 Agent 原始 payload hash。
 
 交易控制、心跳与订单回报走协议 `1.1` 的 `/ws/agent`；沪深实时行情独占
 `/ws/agent/market`，子协议固定为 `quantx.market.v2`。该端点由独立的 Market
@@ -81,12 +95,12 @@ QMT 回调只做快速捕获；READY 捕获入口以 64 MiB 保守估算字节�
 `timetag`；缺失、非有限或非法值会精确使当前行情 stream 失效并重新同步，不得
 回退到本机墙钟时间，也不得把单个 stream 的数据错误升级为整个 Agent 进程故障。
 `time` 只接受 epoch 秒或毫秒，`timetag` 按上海时区解析并保留亚秒；Agent、API
-Store 与 Engine Hub 共用 contracts 中的唯一解析器。个人单账户部署要求三者使用
-同一台已校时主机的 UTC 时钟：来源时间或 `captured_at` 超前 API ingress 5 秒即
-拒绝；Store 在实际 commit 时再按 10 秒 freshness 窗口检查 `captured_at`，因此
-排队积压不能刷新一个过期的 `READY` lease。Engine 在交易时段同样按 10 秒
-`captured_at` age fail-closed；非交易时段允许保留昨日快照，但未来超过 5 秒仍
-无条件拒绝。
+Store 与 Engine Hub 共用 contracts 中的唯一解析器。跨主机部署要求 Windows
+Agent 与 API 主机都使用可靠的 UTC 时间同步：来源时间或 `captured_at` 超前 API
+ingress 5 秒即拒绝；Store 在实际 commit 时再按 10 秒 freshness 窗口检查
+`captured_at`，因此排队积压不能刷新一个过期的 `READY` lease。Engine 在交易
+时段同样按 10 秒 `captured_at` age fail-closed；非交易时段允许保留昨日快照，
+但未来超过 5 秒仍无条件拒绝。
 
 历史 `tick` 上传保留 XTData 的原始毫秒时间戳 `time`，并为同一
 `code + time` 下的每条快照生成从 0 开始且连续的 `tick_ordinal`，
@@ -132,12 +146,35 @@ JSON 报告保存在 `.runtime/reports/market-stream-load-test/`，不提交仓�
 
 ```powershell
 python -m quantx_qmt_agent.main enroll `
-  --api-url http://127.0.0.1:8080 `
+  --api-url <MAC_DEV_PUBLIC_URL_HTTPS> `
   --code <一次性登记码>
 python -m quantx_qmt_agent.main status
 ```
 
-更换本机 Agent 时使用同一页面发起“安全交接”：旧 Agent 在新 Agent 建立
+`status` 只显示规范化地址和脱敏后的设备 ID，例如
+`device_id=1234…abcd`。API `/health/components` 只输出聚合后的远程地址摘要、协议、
+模式、快照年龄、脱敏账户摘要和阻断原因，不返回每台设备的原始 heartbeat details。
+稳定阻断原因只有：
+
+- `REMOTE_AGENT_OFFLINE`
+- `REMOTE_AGENT_SESSION_STALE`
+- `REMOTE_AGENT_NOT_RECONCILED`
+- `REMOTE_AGENT_ACCOUNT_MISMATCH`
+
+完成登记后，以独立 Windows 进程启动 live Agent：
+
+```powershell
+$env:ENV = "testing"
+$env:ENABLE_REAL_TRADING = "true"
+$env:QMT_REAL_TRADING_ENABLED = "true"
+$env:QMT_ACCOUNT_WHITELIST = "<唯一账户>"
+python -m quantx_qmt_agent.main run --mode live
+```
+
+这些开关只允许 Agent 建立真实 QMT 能力，不等于授权任何订单。未完成跨主机完整
+快照、对账、行情 readiness-confirm 和账户级授权时，服务端仍保持 fail-closed。
+
+更换远程 Windows Agent 时使用同一页面发起“安全交接”：旧 Agent 在新 Agent 建立
 WebSocket、上传完整账户快照并由 Engine 确认 `READY` 前继续保持有效；完成后
 服务端原子撤销旧凭据。取消交接只撤销候选 Agent 和未使用登记码，不影响当前
 Agent。页面可查看 XTData、XTTrading、行情序列/队列/ACK/重同步和 journal

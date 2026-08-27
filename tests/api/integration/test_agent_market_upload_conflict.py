@@ -1,4 +1,6 @@
+import asyncio
 import hashlib
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -55,7 +57,21 @@ async def _market_data_database():
       text(
         """
         CREATE TABLE agent_devices (
-          id VARCHAR(36) PRIMARY KEY
+          id VARCHAR(36) PRIMARY KEY,
+          revoked_at DATETIME
+        )
+        """
+      )
+    )
+    await connection.execute(
+      text(
+        """
+        CREATE TABLE runtime_component_heartbeats (
+          component VARCHAR(48) PRIMARY KEY,
+          instance_id VARCHAR(64) NOT NULL,
+          status VARCHAR(32) NOT NULL,
+          details JSON NOT NULL,
+          updated_at DATETIME NOT NULL
         )
         """
       )
@@ -215,11 +231,49 @@ async def test_dispatch_keeps_one_active_market_request_per_device(
   async with _market_data_database() as (_, sessions):
     monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
     async with sessions() as db:
+      session_now = agent_api.utcnow()
       await db.execute(
         text("INSERT INTO agent_devices (id) VALUES (:id)"),
         {"id": DEVICE_ID},
       )
+      await db.execute(
+        text(
+          """
+          INSERT INTO runtime_component_heartbeats
+            (component, instance_id, status, details, updated_at)
+          VALUES
+            ('api', 'api-instance-1', 'READY', :api_details, :updated_at),
+            (:agent_component, :device_id, 'READY', :agent_details, :updated_at)
+          """
+        ),
+        {
+          "api_details": '{"apiInstanceId":"api-instance-1"}',
+          "agent_component": f"qmt-agent:{DEVICE_ID}",
+          "device_id": DEVICE_ID,
+          "agent_details": json.dumps(
+            {
+              "apiInstanceId": "api-instance-1",
+              "agentSessionId": "agent-session-1",
+              "serverReceivedAt": session_now.isoformat(),
+              "agentSentAt": session_now.isoformat(),
+              "sessionActive": True,
+            }
+          ),
+          "updated_at": session_now,
+        },
+      )
       await db.commit()
+    control_session = agent_api.AgentControlSession(
+      device_id=DEVICE_ID,
+      capabilities={"market-data"},
+      authorized_account_ids=frozenset(),
+      queue=asyncio.Queue(),
+      api_instance_id="api-instance-1",
+      agent_session_id="agent-session-1",
+      server_connected_at=session_now,
+      remote_address_summary="10.0.0.*",
+      revoked=asyncio.Event(),
+    )
     await _seed_dispatch_request(
       sessions,
       request_id=active_request_id,
@@ -233,7 +287,7 @@ async def test_dispatch_keeps_one_active_market_request_per_device(
       now=now + timedelta(seconds=1),
     )
 
-    assert await agent_api._next_market_data_request(DEVICE_ID) is None
+    assert await agent_api._next_market_data_request(control_session) is None
     async with sessions() as db:
       queued = await db.get(MarketDataRequest, queued_request_id)
       active = await db.get(MarketDataRequest, active_request_id)
@@ -243,7 +297,7 @@ async def test_dispatch_keeps_one_active_market_request_per_device(
       active.completed_at = now
       await db.commit()
 
-    dispatched = await agent_api._next_market_data_request(DEVICE_ID)
+    dispatched = await agent_api._next_market_data_request(control_session)
     assert dispatched is not None
     assert dispatched.message_id == queued_request_id
     async with sessions() as db:
@@ -403,9 +457,7 @@ async def test_checksum_conflict_returns_409_and_atomically_fails_request(
     assert error.value.detail == "重复批次内容不一致"
     async with sessions() as db:
       request = await db.get(MarketDataRequest, REQUEST_ID)
-      transfers = (
-        await db.execute(select(MarketDataTransfer))
-      ).scalars().all()
+      transfers = (await db.execute(select(MarketDataTransfer))).scalars().all()
     assert request is not None
     assert request.status == "FAILED"
     assert request.processing_error == "chunk 0 checksum mismatch"
@@ -450,9 +502,7 @@ async def test_total_chunks_conflict_fails_request_without_losing_audit_chunks(
     assert retry_error.value.status_code == 409
     async with sessions() as db:
       request = await db.get(MarketDataRequest, REQUEST_ID)
-      transfers = (
-        await db.execute(select(MarketDataTransfer))
-      ).scalars().all()
+      transfers = (await db.execute(select(MarketDataTransfer))).scalars().all()
     assert request is not None
     assert request.status == "FAILED"
     assert request.processing_error == "chunk 1 total_chunks mismatch"
@@ -1016,9 +1066,7 @@ async def test_staging_sweep_retains_active_and_recent_failed_data(
     recent = await agent_api.sweep_market_data_staging_once(now=started)
     expired = await agent_api.sweep_market_data_staging_once(
       now=started
-      + timedelta(
-        seconds=agent_api.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS + 1
-      )
+      + timedelta(seconds=agent_api.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS + 1)
     )
 
     assert recent["directories"] == 0
@@ -1063,9 +1111,7 @@ async def test_staging_sweep_never_removes_nonterminal_request_data(
 
     removed = await agent_api.sweep_market_data_staging_once(
       now=started
-      + timedelta(
-        seconds=agent_api.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS * 2
-      )
+      + timedelta(seconds=agent_api.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS * 2)
     )
 
     assert removed["directories"] == 0

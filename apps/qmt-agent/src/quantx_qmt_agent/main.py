@@ -16,6 +16,7 @@ import httpx
 from .broker import LiveBroker, QmtDataBroker
 from .credentials import DeviceCredentialStore, state_directory
 from .emergency import EmergencyStopStore
+from .endpoints import masked_device_id, require_secure_api_url
 from .journal import LocalJournal
 from .process_watchdog import AgentProcessWatchdog
 from .runtime import (
@@ -97,6 +98,8 @@ def _require_safe_run_mode(mode: str, allowed_accounts: set[str]) -> None:
     raise SystemExit("paper/live mode requires QMT_ACCOUNT_WHITELIST")
   if mode != "live":
     return
+  if len(allowed_accounts) != 1:
+    raise SystemExit("live mode requires exactly one QMT account")
 
   environment = os.environ.get("ENV", "").strip().lower()
   if environment not in {"testing", "production"}:
@@ -117,7 +120,10 @@ def parse_args() -> argparse.Namespace:
     default=os.environ.get("QMT_AGENT_MODE", "data-only"),
   )
   enroll = subparsers.add_parser("enroll", help="用一次性登记码绑定设备")
-  enroll.add_argument("--api-url", default="http://127.0.0.1:8080")
+  enroll.add_argument(
+    "--api-url",
+    default=os.environ.get("QUANTX_AGENT_API_URL", ""),
+  )
   enroll.add_argument("--code", required=True)
   subparsers.add_parser("status", help="显示本机登记状态")
   emergency_stop = subparsers.add_parser(
@@ -151,11 +157,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def _enroll(api_url: str, code: str) -> None:
-  response = httpx.post(
-    f"{api_url.rstrip('/')}/auth/agent/enrollments/exchange",
-    json={"enrollmentCode": code},
+  try:
+    api_url = require_secure_api_url(api_url)
+  except ValueError as exc:
+    raise SystemExit(str(exc)) from None
+  with httpx.Client(
     timeout=10.0,
-  )
+    follow_redirects=False,
+    trust_env=False,
+  ) as client:
+    response = client.post(
+      f"{api_url}/auth/agent/enrollments/exchange",
+      json={"enrollmentCode": code},
+    )
   response.raise_for_status()
   payload = response.json()
   device_id = str(payload.get("deviceId") or payload.get("device_id") or "")
@@ -167,7 +181,7 @@ def _enroll(api_url: str, code: str) -> None:
     device_id=device_id,
     device_secret=device_secret,
   )
-  print(f"QMT Agent 已登记，device_id={device_id}")
+  print(f"QMT Agent 已登记，device_id={masked_device_id(device_id)}")
 
 
 def _run(mode: str) -> None:
@@ -182,18 +196,27 @@ def _run(mode: str) -> None:
       configuration, secret = DeviceCredentialStore().load()
     except RuntimeError as exc:
       raise SystemExit(str(exc)) from None
+    if mode == "live":
+      try:
+        require_secure_api_url(configuration.api_url)
+      except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     journal = LocalJournal(state_directory() / "idempotency.sqlite3")
-    broker = (
-      LiveBroker(allowed_accounts, journal=journal)
-      if mode == "live"
-      else QmtDataBroker(allowed_accounts, data_only=mode == "data-only")
-    )
+    integrity = journal.integrity_check()
+    if integrity.lower() != "ok":
+      raise SystemExit(f"QMT Agent journal 完整性检查失败: {integrity}")
+
+    def broker_factory():
+      if mode == "live":
+        return LiveBroker(allowed_accounts, journal=journal)
+      return QmtDataBroker(allowed_accounts, data_only=mode == "data-only")
+
     runtime = AgentRuntime(
       configuration=configuration,
       device_secret=secret,
       mode=mode,
       allowed_accounts=allowed_accounts,
-      broker=broker,
+      broker_factory=broker_factory,
       journal=journal,
       emergency_stop=EmergencyStopStore(state_directory() / "emergency-stop.json"),
     )
@@ -215,7 +238,9 @@ def main() -> None:
     except RuntimeError as exc:
       raise SystemExit(str(exc)) from None
     print(
-      f"registered device_id={configuration.device_id} api_url={configuration.api_url}"
+      "registered device_id="
+      f"{masked_device_id(configuration.device_id)} "
+      f"api_url={configuration.api_url}"
     )
   elif args.command == "emergency-stop":
     print(

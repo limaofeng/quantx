@@ -100,6 +100,13 @@ async def test_qmt_connection_keeps_ready_incumbent_during_handover(
       candidate,
       history,
       RuntimeComponentHeartbeat(
+        component="api",
+        instance_id="api-instance-1",
+        status="READY",
+        details={"apiInstanceId": "api-instance-1"},
+        updated_at=now - timedelta(seconds=2),
+      ),
+      RuntimeComponentHeartbeat(
         component=f"qmt-agent:{incumbent.id}",
         instance_id=incumbent.id,
         status="READY",
@@ -115,6 +122,11 @@ async def test_qmt_connection_keeps_ready_incumbent_during_handover(
           "marketStreamQueueDepth": 0,
           "marketStreamResyncs": 0,
           "marketStreamAckLatencyMs": 186.4,
+          "apiInstanceId": "api-instance-1",
+          "agentSessionId": "session-current",
+          "serverReceivedAt": (now - timedelta(seconds=12)).isoformat(),
+          "agentSentAt": (now - timedelta(seconds=12)).isoformat(),
+          "sessionActive": True,
         },
         updated_at=now - timedelta(seconds=12),
       ),
@@ -125,6 +137,11 @@ async def test_qmt_connection_keeps_ready_incumbent_during_handover(
         details={
           "xtdataStatus": "CONNECTED",
           "xttradingStatus": "CONNECTED",
+          "apiInstanceId": "api-instance-1",
+          "agentSessionId": "session-candidate",
+          "serverReceivedAt": (now - timedelta(seconds=12)).isoformat(),
+          "agentSentAt": (now - timedelta(seconds=12)).isoformat(),
+          "sessionActive": True,
         },
         updated_at=now - timedelta(seconds=12),
       ),
@@ -146,6 +163,15 @@ async def test_qmt_connection_keeps_ready_incumbent_during_handover(
 
   monkeypatch.setattr(agent_schema, "utcnow", lambda: now)
   monkeypatch.setattr(agent_schema.market_stream_store, "state", stream_state)
+
+  async def is_connected(_device_id, *, agent_session_id=""):
+    return bool(agent_session_id)
+
+  monkeypatch.setattr(
+    agent_schema.agent_connection_hub,
+    "is_connected",
+    is_connected,
+  )
 
   result = await agent_schema.resolve_qmt_agent_connection(
     db,
@@ -176,6 +202,31 @@ async def test_qmt_connection_keeps_ready_incumbent_during_handover(
 def test_qmt_connection_rejects_non_singular_account_scope(account_ids):
   with pytest.raises(ValueError, match="只授权一个账户"):
     agent_schema._single_account_id(account_ids)
+
+
+def test_api_restart_keeps_handover_incumbent_when_both_sessions_are_offline():
+  now = datetime(2026, 8, 22, 10, 30, tzinfo=timezone.utc)
+  incumbent = _device(
+    device_id="agent-current",
+    now=now,
+    name="incumbent",
+  )
+  candidate = _device(
+    device_id="agent-candidate",
+    now=now,
+    name="candidate",
+    replaces_device_id=incumbent.id,
+  )
+  candidate.created_at = now - timedelta(minutes=1)
+  candidate.last_seen_at = now
+
+  selected = agent_schema._select_current(
+    [incumbent, candidate],
+    {incumbent.id: "OFFLINE", candidate.id: "OFFLINE"},
+    now,
+  )
+
+  assert selected is incumbent
 
 
 @pytest.mark.parametrize(

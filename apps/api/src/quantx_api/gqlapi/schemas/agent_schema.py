@@ -17,6 +17,12 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentEnrollmentCode,
   RuntimeComponentHeartbeat,
 )
+from quantx_infrastructure.services.agent_session_guard import (
+  API_HEARTBEAT_COMPONENT,
+  REMOTE_AGENT_ACCOUNT_MISMATCH,
+  evaluate_agent_session,
+  parse_utc_timestamp,
+)
 from sqlalchemy import select
 
 from quantx_api.agent_hub import agent_connection_hub
@@ -52,21 +58,36 @@ def _age_seconds(value: datetime | None, now: datetime) -> float | None:
   return round(max(0.0, (reference - normalized).total_seconds()), 3)
 
 
-def _is_online(device: AgentDeviceModel, now: datetime) -> bool:
-  age = _age_seconds(device.last_seen_at, now)
-  return device.revoked_at is None and age is not None and age <= 90
-
-
 def _device_status(
   device: AgentDeviceModel,
   heartbeat: RuntimeComponentHeartbeat | None,
+  api_heartbeat: RuntimeComponentHeartbeat | None,
   now: datetime,
+  hub_connected: bool,
 ) -> str:
   if device.revoked_at is not None:
     return "REVOKED"
-  if not _is_online(device, now):
+  heartbeat_status = str(heartbeat.status if heartbeat is not None else "").upper()
+  if hub_connected and heartbeat_status == REMOTE_AGENT_ACCOUNT_MISMATCH:
+    return REMOTE_AGENT_ACCOUNT_MISMATCH
+  if (
+    not hub_connected
+    or not evaluate_agent_session(
+      heartbeat,
+      api_heartbeat,
+      now=now,
+      acceptable_statuses={
+        "READY",
+        "RECONCILING",
+        "RECONCILE_REQUIRED",
+        "TRADING_UNAVAILABLE",
+        "XTDATA_UNAVAILABLE",
+        "EMERGENCY_STOP",
+      },
+    ).current
+  ):
     return "OFFLINE"
-  return str(heartbeat.status if heartbeat is not None else "ONLINE").upper()
+  return heartbeat_status or "OFFLINE"
 
 
 def _mode(capabilities: list[str]) -> str:
@@ -103,22 +124,26 @@ async def _heartbeat_map(
 
 def _select_current(
   devices: list[AgentDeviceModel],
-  heartbeats: dict[str, RuntimeComponentHeartbeat],
+  statuses: dict[str, str],
   now: datetime,
 ) -> AgentDeviceModel | None:
   active = [device for device in devices if device.revoked_at is None]
   if not active:
     return None
+  replacement_target_ids = {
+    str(device.replaces_device_id) for device in active if device.replaces_device_id
+  }
 
   def timestamp(value: datetime | None) -> float:
     normalized = _aware(value)
     return normalized.timestamp() if normalized is not None else 0.0
 
-  def score(device: AgentDeviceModel) -> tuple[int, int, float, float]:
-    status = _device_status(device, heartbeats.get(str(device.id)), now)
+  def score(device: AgentDeviceModel) -> tuple[int, int, int, float, float]:
+    status = statuses.get(str(device.id), "OFFLINE")
     return (
       int(status == "READY"),
-      int(_is_online(device, now)),
+      int(status not in {"OFFLINE", "REVOKED"}),
+      int(str(device.id) in replacement_target_ids),
       timestamp(device.last_seen_at),
       timestamp(device.created_at),
     )
@@ -150,9 +175,10 @@ async def _current_connection(
   *,
   account_id: str,
   now: datetime,
+  status: str,
 ) -> QmtCurrentConnection:
   details = dict(heartbeat.details or {}) if heartbeat is not None else {}
-  status = _device_status(device, heartbeat, now)
+  server_received_at = parse_utc_timestamp(details.get("serverReceivedAt"))
   try:
     stream_state = await market_stream_store.state()
   except Exception:
@@ -169,14 +195,16 @@ async def _current_connection(
     status=status,
     account_id=account_id,
     mode=_mode(list(device.capabilities or [])),
-    websocket_status="CONNECTED" if _is_online(device, now) else "OFFLINE",
+    websocket_status=(
+      "CONNECTED" if status not in {"OFFLINE", "REVOKED"} else "OFFLINE"
+    ),
     xtdata_status=str(details.get("xtdataStatus") or "UNKNOWN").upper(),
     xtdata_reason=str(details.get("xtdataReason") or ""),
     xttrading_status=str(details.get("xttradingStatus") or "UNKNOWN").upper(),
     xttrading_reason=str(details.get("xttradingReason") or ""),
     reconciliation_status=_reconciliation_status(status, details, account_id),
     last_seen_at=_aware(device.last_seen_at),
-    heartbeat_age_seconds=_age_seconds(device.last_seen_at, now),
+    heartbeat_age_seconds=_age_seconds(server_received_at, now),
     market_stream=QmtMarketStreamMetrics(
       status=stream_status.upper(),
       sequence=int(details.get("marketStreamSequence") or 0),
@@ -203,9 +231,7 @@ async def _current_connection(
       journal_integrity=str(details.get("journalIntegrity") or "unknown"),
       journal_size_bytes=int(details.get("journalSizeBytes") or 0),
       journal_pending_reports=int(details.get("journalPendingReports") or 0),
-      journal_processing_commands=int(
-        details.get("journalProcessingCommands") or 0
-      ),
+      journal_processing_commands=int(details.get("journalProcessingCommands") or 0),
     ),
   )
 
@@ -225,13 +251,34 @@ async def resolve_qmt_agent_connection(
     ).scalars()
   )
   heartbeats = await _heartbeat_map(db, devices)
-  current_device = _select_current(devices, heartbeats, now)
+  api_heartbeat = await db.get(RuntimeComponentHeartbeat, API_HEARTBEAT_COMPONENT)
+  statuses: dict[str, str] = {}
+  for device in devices:
+    heartbeat = heartbeats.get(str(device.id))
+    details = dict(heartbeat.details or {}) if heartbeat is not None else {}
+    agent_session_id = str(details.get("agentSessionId") or "")
+    hub_connected = bool(
+      agent_session_id
+      and await agent_connection_hub.is_connected(
+        str(device.id),
+        agent_session_id=agent_session_id,
+      )
+    )
+    statuses[str(device.id)] = _device_status(
+      device,
+      heartbeat,
+      api_heartbeat,
+      now,
+      hub_connected,
+    )
+  current_device = _select_current(devices, statuses, now)
   current = (
     await _current_connection(
       current_device,
       heartbeats.get(str(current_device.id)),
       account_id=account_id,
       now=now,
+      status=statuses.get(str(current_device.id), "OFFLINE"),
     )
     if current_device is not None
     else None
@@ -264,9 +311,7 @@ async def resolve_qmt_agent_connection(
     )
   ).scalar_one_or_none()
   candidate_status = (
-    _device_status(candidate, heartbeats.get(str(candidate.id)), now)
-    if candidate is not None
-    else None
+    statuses.get(str(candidate.id), "OFFLINE") if candidate is not None else None
   )
   if candidate is not None:
     handover_status = (
@@ -281,22 +326,21 @@ async def resolve_qmt_agent_connection(
   else:
     handover_status = "IDLE"
   excluded = {
-    str(device.id)
-    for device in (current_device, candidate)
-    if device is not None
+    str(device.id) for device in (current_device, candidate) if device is not None
   }
   history = [
     QmtAgentHistoryEntry(
       id=str(device.id),
       name=str(device.name),
-      status=_device_status(device, heartbeats.get(str(device.id)), now),
+      status=statuses.get(str(device.id), "OFFLINE"),
       last_seen_at=_aware(device.last_seen_at),
       revoked_at=_aware(device.revoked_at),
     )
     for device in sorted(
       (device for device in devices if str(device.id) not in excluded),
-      key=lambda value: _aware(value.created_at)
-      or datetime.min.replace(tzinfo=timezone.utc),
+      key=lambda value: (
+        _aware(value.created_at) or datetime.min.replace(tzinfo=timezone.utc)
+      ),
       reverse=True,
     )
   ]
@@ -304,9 +348,7 @@ async def resolve_qmt_agent_connection(
     current=current,
     handover_status=handover_status,
     handover_device_status=candidate_status,
-    pending_enrollment_expires_at=(
-      _aware(pending.expires_at) if pending else None
-    ),
+    pending_enrollment_expires_at=(_aware(pending.expires_at) if pending else None),
     history=history,
   )
 
@@ -356,9 +398,7 @@ class AgentMutation:
   ) -> AgentHandoverMutationResult:
     principal = principal_from_context(info.context)
     async with AsyncSessionLocal() as db:
-      cancelled = await AgentAuthService(db).cancel_handover(
-        user_id=principal.user_id
-      )
+      cancelled = await AgentAuthService(db).cancel_handover(user_id=principal.user_id)
     for device_id in cancelled.revoked_device_ids:
       await agent_connection_hub.revoke(device_id)
     return AgentHandoverMutationResult(

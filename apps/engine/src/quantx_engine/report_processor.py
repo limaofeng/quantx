@@ -51,6 +51,12 @@ from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.account_repository import AccountRepository
 from quantx_infrastructure.services.agent_handover import converge_ready_agent
+from quantx_infrastructure.services.agent_session_guard import (
+  AGENT_SERVER_SESSION_PAYLOAD_KEY,
+  API_HEARTBEAT_COMPONENT,
+  REMOTE_AGENT_ACCOUNT_MISMATCH,
+  report_belongs_to_current_session,
+)
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationService,
@@ -134,6 +140,14 @@ def _snapshot_can_promote_heartbeat(status: Any) -> bool:
 def _body(payload: dict[str, Any], key: str) -> dict[str, Any]:
   nested = payload.get(key)
   return dict(nested) if isinstance(nested, dict) else dict(payload)
+
+
+def _snapshot_hash_input(payload: dict[str, Any]) -> dict[str, Any]:
+  return {
+    key: value
+    for key, value in payload.items()
+    if key not in {"snapshot_hash", AGENT_SERVER_SESSION_PAYLOAD_KEY}
+  }
 
 
 def _report_account_ids(payload: dict[str, Any]) -> set[str]:
@@ -462,7 +476,7 @@ def _authoritative_full_snapshot_account_ids(
   snapshot_hash = str(payload.get("snapshot_hash") or "")
   if not snapshot_id or len(snapshot_hash) != 64:
     return None
-  hash_input = {key: value for key, value in payload.items() if key != "snapshot_hash"}
+  hash_input = _snapshot_hash_input(payload)
   expected_hash = sha256(
     json.dumps(
       hash_input,
@@ -993,7 +1007,16 @@ async def _fail_closed_incomplete_snapshot(
       RuntimeComponentHeartbeat,
       f"qmt-agent:{device_id}",
     )
-    if heartbeat is not None:
+    api_heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      API_HEARTBEAT_COMPONENT,
+    )
+    if heartbeat is not None and report_belongs_to_current_session(
+      payload,
+      heartbeat,
+      api_heartbeat,
+      now=utcnow(),
+    ):
       details = dict(heartbeat.details or {})
       details["incompleteSnapshotAccounts"] = blocked_accounts
       details["incompleteSnapshotAt"] = reported_at.isoformat()
@@ -1058,8 +1081,11 @@ async def _process_delta_report(
         # reports still take the authenticated-device fail-close path.
         scope_validation_failed = True
     stale_accounts = set(full_attempt_state.get("stale_accounts") or set())
+    already_failed_accounts = set(
+      full_attempt_state.get("already_failed_accounts") or set()
+    )
     failure_accounts = (
-      authoritative_accounts - stale_accounts
+      authoritative_accounts - stale_accounts - already_failed_accounts
       if authoritative_accounts is not None
       else set()
     )
@@ -1102,9 +1128,7 @@ async def _process_delta_report_inner(
     if not snapshot_id or len(snapshot_hash) != 64:
       snapshot_identity_error = "完整账户快照缺少协议 1.1 身份"
     else:
-      hash_input = {
-        key: value for key, value in payload.items() if key != "snapshot_hash"
-      }
+      hash_input = _snapshot_hash_input(payload)
       expected_hash = sha256(
         json.dumps(
           hash_input,
@@ -1136,6 +1160,62 @@ async def _process_delta_report_inner(
   full_snapshot_sequence: Optional[int] = None
   full_snapshot_groups: dict[str, list[Any]] = {}
   if authoritative:
+    server_session = payload.get(AGENT_SERVER_SESSION_PAYLOAD_KEY)
+    raw_authorized_account_ids = (
+      server_session.get("authorizedAccountIds")
+      if isinstance(server_session, dict)
+      else None
+    )
+    authorized_account_ids = (
+      {str(value).strip() for value in raw_authorized_account_ids if str(value).strip()}
+      if isinstance(raw_authorized_account_ids, list)
+      else None
+    )
+    reported_account_ids = set(complete_account_ids or set())
+    if (
+      authorized_account_ids is not None
+      and reported_account_ids != authorized_account_ids
+    ):
+      full_attempt_state["already_failed_accounts"] = (
+        set(authorized_account_ids) | reported_account_ids
+      )
+      await _fail_closed_incomplete_snapshot(
+        device_id,
+        payload,
+        reported_at=reported_at,
+        failure_kind="SNAPSHOT_ACCOUNT_MISMATCH",
+        failure_reason=REMOTE_AGENT_ACCOUNT_MISMATCH,
+        account_ids_override=set(authorized_account_ids),
+      )
+      async with AsyncSessionLocal() as mismatch_db:
+        heartbeat = await mismatch_db.get(
+          RuntimeComponentHeartbeat,
+          f"qmt-agent:{device_id}",
+          with_for_update=True,
+        )
+        api_heartbeat = await mismatch_db.get(
+          RuntimeComponentHeartbeat,
+          API_HEARTBEAT_COMPONENT,
+        )
+        if heartbeat is not None and report_belongs_to_current_session(
+          payload,
+          heartbeat,
+          api_heartbeat,
+          now=utcnow(),
+        ):
+          details = dict(heartbeat.details or {})
+          details.update(
+            {
+              "reasonCode": REMOTE_AGENT_ACCOUNT_MISMATCH,
+              "reportedAccountCount": len(reported_account_ids),
+              "authorizedAccountCount": len(authorized_account_ids),
+            }
+          )
+          heartbeat.status = REMOTE_AGENT_ACCOUNT_MISMATCH
+          heartbeat.details = details
+          heartbeat.updated_at = utcnow()
+          await mismatch_db.commit()
+      raise ValueError(REMOTE_AGENT_ACCOUNT_MISMATCH)
     # Parse and snapshot the account groups before any order/trade convergence.
     # A malformed sequence is an authoritative full-attempt failure and is
     # handled by the outer fail-closed boundary.
@@ -1397,7 +1477,16 @@ async def _process_delta_report_inner(
         RuntimeComponentHeartbeat,
         f"qmt-agent:{device_id}",
       )
-      if heartbeat is not None:
+      api_heartbeat = await db.get(
+        RuntimeComponentHeartbeat,
+        API_HEARTBEAT_COMPONENT,
+      )
+      if heartbeat is not None and report_belongs_to_current_session(
+        payload,
+        heartbeat,
+        api_heartbeat,
+        now=utcnow(),
+      ):
         details = dict(heartbeat.details or {})
         account_details = dict(details.get("accountReconciliation") or {})
         account_details.update(reconciliation_accounts)
@@ -2056,7 +2145,7 @@ def _authoritative_snapshot_identity(
   snapshot_hash = str(payload.get("snapshot_hash") or "").strip().lower()
   if not snapshot_id or len(snapshot_hash) != 64:
     return None
-  hash_input = {key: value for key, value in payload.items() if key != "snapshot_hash"}
+  hash_input = _snapshot_hash_input(payload)
   expected_hash = sha256(
     json.dumps(
       hash_input,
@@ -3794,8 +3883,7 @@ async def run_report_consumer(stopped: asyncio.Event) -> None:
           f"database pool contention while applying Agent report: {exc}"
         )
         logger.warning(
-          "Agent report deferred by database pool contention: "
-          "message_id=%s error=%s",
+          "Agent report deferred by database pool contention: message_id=%s error=%s",
           message_id,
           exc,
         )

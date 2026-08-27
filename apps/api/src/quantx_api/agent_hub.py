@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from quantx_contracts import AgentEnvelope, AgentMessageType
@@ -16,40 +17,122 @@ from quantx_infrastructure.core.data.remote_market_data import (
 )
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
 
+from quantx_api.api_runtime import API_INSTANCE_ID, API_STARTED_AT
+
 logger = logging.getLogger(__name__)
 MARKET_DEVICE_LEASE_KEY = "agent:market-device:v2"
 MARKET_DEVICE_LEASE_TTL_SECONDS = 30
 MARKET_DEVICE_LEASE_REFRESH_SECONDS = 10
+_MARKET_LEASE_UPDATE_SCRIPT = """
+local current = redis.call('GET', KEYS[1])
+local operation = ARGV[1]
+local api_instance_id = ARGV[2]
+local api_started_at = tonumber(ARGV[3]) or 0
+
+if operation == 'delete' then
+  if not current then
+    return 0
+  end
+  local decoded_ok, decoded = pcall(cjson.decode, current)
+  if decoded_ok and decoded['api_instance_id'] == api_instance_id then
+    return redis.call('DEL', KEYS[1])
+  end
+  return 0
+end
+
+if current then
+  local decoded_ok, decoded = pcall(cjson.decode, current)
+  if decoded_ok then
+    local current_instance_id = tostring(decoded['api_instance_id'] or '')
+    local current_started_at = tonumber(decoded['api_started_at_micros']) or 0
+    if current_instance_id ~= api_instance_id and current_started_at > api_started_at then
+      return 0
+    end
+  end
+end
+
+redis.call('SET', KEYS[1], ARGV[4], 'EX', tonumber(ARGV[5]))
+return 1
+"""
+
+
+@dataclass(frozen=True)
+class MarketSessionLease:
+  device_id: str
+  api_instance_id: str
+  agent_session_id: str
+  access_token_fingerprint: str = ""
 
 
 @dataclass
-class _Session:
+class AgentControlSession:
   device_id: str
   capabilities: set[str]
+  authorized_account_ids: frozenset[str]
   queue: asyncio.Queue[AgentEnvelope]
-  lease_id: str
+  api_instance_id: str
+  agent_session_id: str
+  server_connected_at: datetime
+  remote_address_summary: str
   revoked: asyncio.Event
+  access_token_fingerprint: str = ""
 
 
 class AgentConnectionHub:
-  def __init__(self) -> None:
-    self._sessions: dict[str, _Session] = {}
+  def __init__(
+    self,
+    *,
+    api_instance_id: str = API_INSTANCE_ID,
+    api_started_at: datetime = API_STARTED_AT,
+  ) -> None:
+    self.api_instance_id = api_instance_id
+    normalized_started_at = api_started_at
+    if normalized_started_at.tzinfo is None:
+      normalized_started_at = normalized_started_at.replace(tzinfo=timezone.utc)
+    else:
+      normalized_started_at = normalized_started_at.astimezone(timezone.utc)
+    self.api_started_at_micros = int(normalized_started_at.timestamp() * 1_000_000)
+    self._sessions: dict[str, AgentControlSession] = {}
     self._active_controls: dict[str, dict[str, Any]] = {}
     self._market_device_id: str | None = None
     self._lock = asyncio.Lock()
 
-  async def _publish_market_lease(self, session: _Session | None) -> None:
+  async def _publish_market_lease(
+    self,
+    session: AgentControlSession | None,
+  ) -> None:
     redis = await redis_pubsub.get_redis()
     if session is None:
-      await redis.delete(MARKET_DEVICE_LEASE_KEY)
+      await redis.eval(
+        _MARKET_LEASE_UPDATE_SCRIPT,
+        1,
+        MARKET_DEVICE_LEASE_KEY,
+        "delete",
+        self.api_instance_id,
+        self.api_started_at_micros,
+        "",
+        MARKET_DEVICE_LEASE_TTL_SECONDS,
+      )
       return
-    await redis.set(
+    serialized = json.dumps(
+      {
+        "device_id": session.device_id,
+        "api_instance_id": session.api_instance_id,
+        "api_started_at_micros": self.api_started_at_micros,
+        "agent_session_id": session.agent_session_id,
+        "access_token_fingerprint": session.access_token_fingerprint,
+      },
+      separators=(",", ":"),
+    )
+    await redis.eval(
+      _MARKET_LEASE_UPDATE_SCRIPT,
+      1,
       MARKET_DEVICE_LEASE_KEY,
-      json.dumps(
-        {"device_id": session.device_id, "lease_id": session.lease_id},
-        separators=(",", ":"),
-      ),
-      ex=MARKET_DEVICE_LEASE_TTL_SECONDS,
+      "set",
+      self.api_instance_id,
+      self.api_started_at_micros,
+      serialized,
+      MARKET_DEVICE_LEASE_TTL_SECONDS,
     )
 
   async def _load_active_controls(self) -> None:
@@ -74,7 +157,7 @@ class AgentConnectionHub:
     )
     return AgentEnvelope(message_type=message_type, payload=control)
 
-  def _queue_snapshot(self, session: _Session) -> None:
+  def _queue_snapshot(self, session: AgentControlSession) -> None:
     session.queue.put_nowait(
       AgentEnvelope(
         message_type=AgentMessageType.MARKET_RESET,
@@ -84,7 +167,7 @@ class AgentConnectionHub:
     for control in self._active_controls.values():
       session.queue.put_nowait(self._control_envelope(control))
 
-  def _select_market_session(self) -> _Session | None:
+  def _select_market_session(self) -> AgentControlSession | None:
     eligible = sorted(
       (
         session
@@ -99,14 +182,27 @@ class AgentConnectionHub:
     self,
     device_id: str,
     capabilities: set[str],
-  ) -> asyncio.Queue[AgentEnvelope]:
+    *,
+    authorized_account_ids: set[str],
+    connected_at: datetime,
+    remote_address_summary: str,
+    access_token_fingerprint: str = "",
+  ) -> AgentControlSession:
     queue: asyncio.Queue[AgentEnvelope] = asyncio.Queue()
-    session = _Session(
-      device_id,
-      set(capabilities),
-      queue,
-      str(uuid.uuid4()),
-      asyncio.Event(),
+    normalized_capabilities = {
+      str(value).strip().lower() for value in capabilities if str(value).strip()
+    }
+    session = AgentControlSession(
+      device_id=device_id,
+      capabilities=normalized_capabilities,
+      authorized_account_ids=frozenset(authorized_account_ids),
+      queue=queue,
+      api_instance_id=self.api_instance_id,
+      agent_session_id=str(uuid.uuid4()),
+      server_connected_at=connected_at,
+      remote_address_summary=remote_address_summary,
+      revoked=asyncio.Event(),
+      access_token_fingerprint=access_token_fingerprint,
     )
     async with self._lock:
       previous = self._sessions.get(device_id)
@@ -130,7 +226,7 @@ class AgentConnectionHub:
         )
       selected = self._sessions.get(self._market_device_id or "")
       await self._publish_market_lease(selected)
-    return queue
+    return session
 
   async def revoke(self, device_id: str) -> bool:
     """Wake the registered control-session guard after durable revocation."""
@@ -149,70 +245,102 @@ class AgentConnectionHub:
 
   async def wait_until_revoked(
     self,
-    device_id: str,
-    queue: asyncio.Queue[AgentEnvelope],
+    session: AgentControlSession,
     *,
     timeout_seconds: float,
   ) -> bool:
     """Wait without touching PostgreSQL; ``True`` also covers replacement."""
     async with self._lock:
-      session = self._sessions.get(device_id)
-      if session is None or session.queue is not queue:
+      current = self._sessions.get(session.device_id)
+      if current is not session:
         return True
-      revoked = session.revoked
+      revoked = current.revoked
     try:
       await asyncio.wait_for(revoked.wait(), timeout=max(0.0, timeout_seconds))
     except asyncio.TimeoutError:
       return False
     return True
 
-  async def is_connected(self, device_id: str) -> bool:
+  async def is_connected(
+    self,
+    device_id: str,
+    *,
+    agent_session_id: str = "",
+  ) -> bool:
     """Return in-process session state without polling PostgreSQL."""
     async with self._lock:
       session = self._sessions.get(device_id)
-      return session is not None and not session.revoked.is_set()
+      return bool(
+        session is not None
+        and not session.revoked.is_set()
+        and (not agent_session_id or session.agent_session_id == agent_session_id)
+      )
+
+  async def current_session(self, device_id: str) -> AgentControlSession | None:
+    async with self._lock:
+      session = self._sessions.get(device_id)
+      if session is None or session.revoked.is_set():
+        return None
+      return session
 
   async def unregister(
     self,
-    device_id: str,
-    queue: asyncio.Queue[AgentEnvelope],
-  ) -> None:
+    session: AgentControlSession,
+  ) -> bool:
     async with self._lock:
-      current = self._sessions.get(device_id)
-      if current is None or current.queue is not queue:
-        return
+      current = self._sessions.get(session.device_id)
+      if current is not session:
+        return False
       current.revoked.set()
-      self._sessions.pop(device_id, None)
-      if self._market_device_id != device_id:
-        return
+      self._sessions.pop(session.device_id, None)
+      if self._market_device_id != session.device_id:
+        return True
       selected = self._select_market_session()
       self._market_device_id = selected.device_id if selected else None
       if selected is not None:
         self._queue_snapshot(selected)
       await self._publish_market_lease(selected)
+      return True
 
-  async def is_market_device(self, device_id: str) -> bool:
+  async def market_lease(self, device_id: str) -> MarketSessionLease | None:
     redis = await redis_pubsub.get_redis()
     raw = await redis.get(MARKET_DEVICE_LEASE_KEY)
     if not raw:
-      return False
+      return None
     try:
       lease = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
-      return False
-    return str(lease.get("device_id") or "") == device_id
+      return None
+    parsed = MarketSessionLease(
+      device_id=str(lease.get("device_id") or ""),
+      api_instance_id=str(lease.get("api_instance_id") or ""),
+      agent_session_id=str(lease.get("agent_session_id") or ""),
+      access_token_fingerprint=str(lease.get("access_token_fingerprint") or ""),
+    )
+    if (
+      parsed.device_id != device_id
+      or not parsed.api_instance_id
+      or not parsed.agent_session_id
+    ):
+      return None
+    return parsed
+
+  async def is_market_device(self, device_id: str) -> bool:
+    return await self.market_lease(device_id) is not None
+
+  async def is_market_session(self, lease: MarketSessionLease) -> bool:
+    current = await self.market_lease(lease.device_id)
+    return current == lease
 
   async def refresh_market_device(
     self,
-    device_id: str,
-    queue: asyncio.Queue[AgentEnvelope],
+    control_session: AgentControlSession,
   ) -> None:
     async with self._lock:
-      session = self._sessions.get(device_id)
+      session = self._sessions.get(control_session.device_id)
       if (
-        session is None
-        or session.queue is not queue
-        or self._market_device_id != device_id
+        session is not control_session
+        or self._market_device_id != control_session.device_id
       ):
         return
       await self._publish_market_lease(session)
@@ -243,9 +371,7 @@ class AgentConnectionHub:
     while not stopped.is_set():
       subscription = None
       try:
-        subscription = await redis_pubsub.open_subscription(
-          MARKET_DATA_CONTROL_CHANNEL
-        )
+        subscription = await redis_pubsub.open_subscription(MARKET_DATA_CONTROL_CHANNEL)
         # The Redis hash closes the subscribe-before-listen race and lets an
         # API or Agent restart reconstruct Engine-owned live subscriptions.
         await self._reconcile_selected_session()

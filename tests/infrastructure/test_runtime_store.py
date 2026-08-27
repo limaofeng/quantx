@@ -192,9 +192,7 @@ class _ConcurrentBoundDeviceConnection(_BoundDeviceConnection):
 @pytest.mark.asyncio
 async def test_market_data_request_binds_an_explicit_capable_device() -> None:
   connection = _BoundDeviceConnection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   request_id = await store.create_market_data_request(
@@ -206,7 +204,8 @@ async def test_market_data_request_binds_an_explicit_capable_device() -> None:
   device_lookup = next(
     call for call in connection.calls if "FROM agent_devices" in call[0]
   )
-  assert device_lookup[1] == {"device_id": "device-data-only"}
+  assert device_lookup[1]["device_id"] == "device-data-only"
+  assert isinstance(device_lookup[1]["cutoff"], datetime)
   insert = next(
     call for call in connection.calls if "INSERT INTO market_data_request" in call[0]
   )
@@ -219,9 +218,7 @@ async def test_market_data_request_binds_an_explicit_capable_device() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_idempotent_market_data_requests_converge_atomically() -> None:
   connection = _ConcurrentBoundDeviceConnection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
   payload = {"operation": "bars", "stock_list": ["600000.SH"]}
 
@@ -233,28 +230,29 @@ async def test_concurrent_idempotent_market_data_requests_converge_atomically() 
   assert request_ids == [connection.persisted_request_id] * 2
   assert connection.lookup_count == 2
   assert connection.upsert_attempts == 2
-  assert sum(
-    "ON CONFLICT (idempotency_key)" in statement
-    for statement, _ in connection.calls
-  ) == 2
+  assert (
+    sum(
+      "ON CONFLICT (idempotency_key)" in statement for statement, _ in connection.calls
+    )
+    == 2
+  )
 
 
 @pytest.mark.asyncio
-async def test_blocked_agent_launch_state_overrides_stale_heartbeat(monkeypatch) -> None:
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
-  store.engine = _UnexpectedConnectEngine()
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+async def test_market_device_query_requires_current_api_session() -> None:
+  connection = _AvailabilityConnection([])
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store.engine = _ConnectEngine(connection)
 
   assert await store.available_market_data_device() is None
+  sql = connection.calls[0][0]
+  assert "heartbeat.details ->> 'apiInstanceId' = api.instance_id" in sql
+  assert "heartbeat.details ->> 'sessionActive' = 'true'" in sql
+  assert "serverReceivedAt" in sql
 
 
 @pytest.mark.asyncio
-async def test_available_market_data_device_accepts_fresh_data_only_agent(
-  monkeypatch,
-) -> None:
-  monkeypatch.delenv("QMT_AGENT_LAUNCH_STATE", raising=False)
+async def test_available_market_data_device_accepts_fresh_data_only_agent() -> None:
   connection = _AvailabilityConnection(
     [
       {
@@ -264,9 +262,7 @@ async def test_available_market_data_device_accepts_fresh_data_only_agent(
       }
     ]
   )
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _ConnectEngine(connection)
 
   assert await store.available_market_data_device() == "device-data-only"
@@ -276,48 +272,12 @@ async def test_available_market_data_device_accepts_fresh_data_only_agent(
 
 
 @pytest.mark.asyncio
-async def test_available_market_data_device_requires_current_launch_heartbeat(
-  monkeypatch,
-) -> None:
-  launch_started_at = datetime(2026, 8, 20, 4, 0, tzinfo=timezone.utc)
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
-  monkeypatch.setenv(
-    "QMT_AGENT_LAUNCH_STARTED_AT",
-    launch_started_at.isoformat(),
-  )
-  old_row = {
-    "id": "device-old",
-    "capabilities": ["market-data", "live"],
-    "heartbeat_updated_at": (
-      launch_started_at - timedelta(seconds=1)
-    ).replace(tzinfo=None),
-  }
-  current_row = {
-    "id": "device-current",
-    "capabilities": ["market-data", "live"],
-    "heartbeat_updated_at": (
-      launch_started_at + timedelta(seconds=1)
-    ).replace(tzinfo=None),
-  }
-  connection = _AvailabilityConnection([old_row, current_row])
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
-  store.engine = _ConnectEngine(connection)
-
-  assert await store.available_market_data_device() == "device-current"
-
-  old_only = _AvailabilityConnection([old_row])
-  store.engine = _ConnectEngine(old_only)
-  assert await store.available_market_data_device() is None
-
-
 @pytest.mark.asyncio
-async def test_market_data_request_scopes_repair_attempt_without_changing_payload() -> None:
+async def test_market_data_request_scopes_repair_attempt_without_changing_payload() -> (
+  None
+):
   connection = _BoundDeviceConnection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
   payload = {"operation": "bars", "stock_list": ["000001.SH"]}
   scope = "core-index-intraday-repair:v1:2026-08-17:attempt-1"
@@ -335,9 +295,7 @@ async def test_market_data_request_scopes_repair_attempt_without_changing_payloa
     default=str,
   )
   expected_key = hashlib.sha256(f"{scope}\0{encoded}".encode()).hexdigest()
-  lookup = next(
-    call for call in connection.calls if "WHERE idempotency_key" in call[0]
-  )
+  lookup = next(call for call in connection.calls if "WHERE idempotency_key" in call[0])
   insert = next(
     call for call in connection.calls if "INSERT INTO market_data_request" in call[0]
   )
@@ -346,8 +304,9 @@ async def test_market_data_request_scopes_repair_attempt_without_changing_payloa
 
 
 @pytest.mark.asyncio
-async def test_completed_tick_coverage_query_requires_dual_empty_proof_and_rejects_multiday_daily_rows(
-) -> None:
+async def test_completed_tick_coverage_query_requires_dual_empty_proof_and_rejects_multiday_daily_rows() -> (
+  None
+):
   class CoverageRows:
     def mappings(self):
       return [
@@ -376,9 +335,7 @@ async def test_completed_tick_coverage_query_requires_dual_empty_proof_and_rejec
       yield self.connection
 
   connection = CoverageConnection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = CoverageEngine(connection)
 
   result = await store.completed_tick_day_coverage(
@@ -399,28 +356,18 @@ async def test_completed_tick_coverage_query_requires_dual_empty_proof_and_rejec
   assert "tick_coverage.value ->> 'point_count' = '0'" in sql
   assert "tick_request.request_payload ->> 'start_time'" in sql
   assert "tick_request.request_payload ->> 'end_time'" in sql
-  assert (
-    "REPLACE(tick_coverage.value ->> 'trading_date', '-', '')"
-    in sql
-  )
+  assert "REPLACE(tick_coverage.value ->> 'trading_date', '-', '')" in sql
   assert "tick_summary.value ->> 'row_count' = '0'" in sql
-  assert (
-    "tick_summary.value ->> 'no_data_reason' = 'XT_DATA_NO_ROWS'"
-    in sql
-  )
+  assert "tick_summary.value ->> 'no_data_reason' = 'XT_DATA_NO_ROWS'" in sql
   assert "persistence_verification' ->> 'status' = 'verified'" in sql
   assert "FROM market_data_request AS daily_request" in sql
   assert "daily_request.status = 'COMPLETED'" in sql
   assert "daily_coverage.value ->> 'point_count' = '0'" in sql
   assert (
-    "daily_coverage.value ->> 'trading_date' = "
-    "tick_coverage.value ->> 'trading_date'"
+    "daily_coverage.value ->> 'trading_date' = tick_coverage.value ->> 'trading_date'"
   ) in sql
   assert "daily_summary.value ->> 'row_count' = '0'" in sql
-  assert (
-    "daily_summary.value ->> 'no_data_reason' = 'XT_DATA_NO_ROWS'"
-    in sql
-  )
+  assert "daily_summary.value ->> 'no_data_reason' = 'XT_DATA_NO_ROWS'" in sql
   assert "AND NOT EXISTS" in sql
   assert "FROM market_data_request AS daily_nonempty_request" in sql
   assert "daily_nonempty_request.status = 'COMPLETED'" in sql
@@ -462,9 +409,7 @@ async def test_completed_tick_coverage_query_requires_dual_empty_proof_and_rejec
 @pytest.mark.asyncio
 async def test_market_data_request_requires_financial_protocol_capability() -> None:
   connection = _BoundDeviceConnection(["market-data", "data-only"])
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   with pytest.raises(RuntimeError, match="financial-data-v1"):
@@ -483,9 +428,7 @@ async def test_claim_market_data_request_uses_precomputed_stale_cutoff(
   monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
   monkeypatch.setattr(runtime_store.uuid, "uuid4", lambda: "claim-token-1")
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   claimed = await store.claim_market_data_request("request-1")
@@ -525,9 +468,7 @@ async def test_recoverable_market_data_requests_include_uploaded_and_stale_proce
       return Result()
 
   connection = Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _ConnectEngine(connection)
 
   recovered = await store.recoverable_market_data_request_ids(limit=2)
@@ -564,9 +505,7 @@ async def test_expired_delivery_leases_are_requeued_with_a_bounded_row_lock(
       return Result()
 
   connection = Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   requeued = await store.requeue_expired_market_data_delivery_leases(limit=2)
@@ -587,9 +526,7 @@ async def test_stale_market_data_takeover_rotates_claim_token(monkeypatch) -> No
   tokens = iter(("claim-token-1", "claim-token-2"))
   monkeypatch.setattr(runtime_store.uuid, "uuid4", lambda: next(tokens))
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   first = await store.claim_market_data_request("request-1")
@@ -608,9 +545,7 @@ async def test_market_data_processing_claim_can_be_renewed_and_released(
   now = datetime(2026, 8, 21, 8, 6, 11)
   monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   assert (
@@ -628,11 +563,14 @@ async def test_market_data_processing_claim_can_be_renewed_and_released(
     "updated_at": now,
   }
 
-  assert await store.release_market_data_request_claim(
-    "request-1",
-    claim_token="claim-token-1",
-    error="Influx unavailable",
-  ) is True
+  assert (
+    await store.release_market_data_request_claim(
+      "request-1",
+      claim_token="claim-token-1",
+      error="Influx unavailable",
+    )
+    is True
+  )
   assert "SET status = 'UPLOADED'" in connection.statement
   assert "processing_claim_token = NULL" in connection.statement
   assert connection.parameters == {
@@ -650,9 +588,7 @@ async def test_finish_market_data_request_writes_unambiguous_terminal_state(
   now = datetime(2026, 7, 29, 8, 7, 17)
   monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   await store.finish_market_data_request(
@@ -682,9 +618,7 @@ async def test_completed_market_data_request_persists_its_ingestion_audit(
   now = datetime(2026, 8, 21, 8, 7, 17)
   monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
   audit = {
     "records_received": 2,
@@ -708,9 +642,7 @@ async def test_completed_market_data_request_persists_its_ingestion_audit(
 @pytest.mark.asyncio
 async def test_stale_market_data_claim_cannot_renew_release_or_finish() -> None:
   renew_connection = _SequenceConnection([None])
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(renew_connection)
 
   assert (
@@ -743,17 +675,16 @@ async def test_stale_market_data_claim_cannot_renew_release_or_finish() -> None:
       ingestion_result={"records_received": 1, "records_saved": 1},
       claim_token="stale-token",
     )
-  assert "processing_claim_token = CAST(:claim_token AS TEXT)" in (
-    finish_connection.calls[0][0]
+  assert (
+    "processing_claim_token = CAST(:claim_token AS TEXT)"
+    in (finish_connection.calls[0][0])
   )
 
 
 @pytest.mark.asyncio
 async def test_finish_market_data_request_reports_terminal_state_conflict() -> None:
   connection = _SequenceConnection([None, "FAILED"])
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   with pytest.raises(
@@ -774,9 +705,7 @@ async def test_finish_market_data_request_reports_terminal_state_conflict() -> N
 @pytest.mark.asyncio
 async def test_finish_market_data_request_rejects_missing_request() -> None:
   connection = _SequenceConnection([None, None])
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   with pytest.raises(RuntimeError, match="disappeared before terminal"):
@@ -804,9 +733,7 @@ async def test_reopen_failed_market_data_request_returns_atomic_evidence(
       "manifest_records": 825,
     }
   )
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   evidence = await store.reopen_failed_market_data_request("request-1")
@@ -837,9 +764,7 @@ async def test_reopen_failed_market_data_request_returns_atomic_evidence(
 @pytest.mark.asyncio
 async def test_reopen_failed_market_data_request_fails_closed() -> None:
   connection = _MappingConnection(None)
-  store = runtime_store.DurableRuntimeStore.__new__(
-    runtime_store.DurableRuntimeStore
-  )
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _Engine(connection)
 
   with pytest.raises(RuntimeError, match="not safely reopenable"):
@@ -855,7 +780,6 @@ async def test_reopen_failed_market_data_request_fails_closed() -> None:
     "                    market_request.received_chunks"
   ) in statement
   assert (
-    "candidate.manifest_count =\n"
-    "                    candidate.expected_chunks"
+    "candidate.manifest_count =\n                    candidate.expected_chunks"
   ) in statement
   assert "candidate.manifest_records > 0" in statement

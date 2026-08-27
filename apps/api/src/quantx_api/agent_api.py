@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import heapq
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -66,6 +67,17 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import market_data_staging as _market_data_staging
+from quantx_infrastructure.services.agent_session_guard import (
+  AGENT_SERVER_SESSION_PAYLOAD_KEY,
+  API_HEARTBEAT_COMPONENT,
+  REMOTE_AGENT_ACCOUNT_MISMATCH,
+  REMOTE_AGENT_OFFLINE,
+  api_instance_is_current,
+  evaluate_agent_session,
+  parse_utc_timestamp,
+  to_naive_utc,
+  utc_iso,
+)
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
@@ -73,6 +85,8 @@ from starlette.websockets import WebSocketState
 
 from quantx_api.agent_hub import (
   MARKET_DEVICE_LEASE_REFRESH_SECONDS,
+  AgentControlSession,
+  MarketSessionLease,
   agent_connection_hub,
 )
 from quantx_api.auth.agent_service import AgentAuthService
@@ -146,9 +160,7 @@ AGENT_CONTROL_POLL_INTERVAL_SECONDS = 1.0
 AGENT_CONTROL_SLOW_STAGE_SECONDS = 1.0
 AGENT_CONTROL_HEARTBEAT_STALE_SECONDS = 90.0
 
-_MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset(
-  {"QUEUED", "DELIVERED", "RECEIVING"}
-)
+_MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset({"QUEUED", "DELIVERED", "RECEIVING"})
 _MARKET_DATA_FROZEN_MANIFEST_STATUSES = frozenset(
   {"UPLOADED", "PROCESSING", "COMPLETED"}
 )
@@ -482,9 +494,9 @@ class _MarketCommitBuffer:
     self._buffered_batches = 0
     self._buffered_bytes = 0
     self._condition = asyncio.Condition()
-    self._queue: asyncio.Queue[
-      _MarketCommitItem | _MarketCommitQueueClosed
-    ] = asyncio.Queue(maxsize=capacity)
+    self._queue: asyncio.Queue[_MarketCommitItem | _MarketCommitQueueClosed] = (
+      asyncio.Queue(maxsize=capacity)
+    )
 
   @property
   def buffered_batches(self) -> int:
@@ -496,9 +508,7 @@ class _MarketCommitBuffer:
 
   async def reserve(self) -> None:
     async with self._condition:
-      await self._condition.wait_for(
-        lambda: self._buffered_batches < self._capacity
-      )
+      await self._condition.wait_for(lambda: self._buffered_batches < self._capacity)
       self._buffered_batches += 1
 
   async def put_reserved(self, item: _MarketCommitItem) -> None:
@@ -563,11 +573,18 @@ class _MarketCommitBuffer:
 
 
 async def _publish_market_event(
-  device_id: str,
+  control_session: AgentControlSession,
   payload: dict[str, Any],
 ) -> None:
-  if not await agent_connection_hub.is_market_device(device_id):
+  lease = MarketSessionLease(
+    device_id=control_session.device_id,
+    api_instance_id=control_session.api_instance_id,
+    agent_session_id=control_session.agent_session_id,
+    access_token_fingerprint=control_session.access_token_fingerprint,
+  )
+  if not await agent_connection_hub.is_market_session(lease):
     raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
+  await _ensure_device_active(control_session.device_id, lease=lease)
   kind = str(payload.get("kind") or "")
   stock_code = str(payload.get("stock_code") or "")
   period = str(payload.get("period") or "tick")
@@ -594,6 +611,34 @@ def _auth_result(
   )
 
 
+def _remote_address_summary(websocket: WebSocket) -> str:
+  host = str(websocket.client.host if websocket.client else "").strip()
+  if not host:
+    return "unknown"
+  try:
+    address = ipaddress.ip_address(host.split("%", 1)[0])
+  except ValueError:
+    return "unknown"
+  mapped = getattr(address, "ipv4_mapped", None)
+  if mapped is not None:
+    address = mapped
+  if isinstance(address, ipaddress.IPv4Address):
+    octets = str(address).split(".")
+    return ".".join((*octets[:3], "*"))
+  groups = address.exploded.split(":")
+  return ":".join((*groups[:3], "*"))
+
+
+def _normalized_agent_capabilities(values: Any) -> set[str]:
+  capabilities = {
+    str(value).strip().lower() for value in values or [] if str(value).strip()
+  }
+  execution_modes = capabilities & {"live", "paper", "data-only"}
+  if len(execution_modes) != 1:
+    raise AuthError("FORBIDDEN", "Agent 必须声明唯一运行模式")
+  return capabilities
+
+
 async def _authenticate(envelope: AgentEnvelope):
   if envelope.message_type is not AgentMessageType.AUTH:
     raise AuthError("UNAUTHENTICATED", "首条 Agent 消息必须是 auth")
@@ -608,74 +653,119 @@ async def _authenticate(envelope: AgentEnvelope):
     )
 
 
-async def _record_heartbeat(device_id: str, payload: dict[str, Any]) -> None:
+async def _record_heartbeat(
+  session: AgentControlSession,
+  payload: dict[str, Any],
+  *,
+  sent_at: datetime | None = None,
+  establish: bool = False,
+) -> None:
   now = utcnow()
+  if (
+    establish
+    and await agent_connection_hub.current_session(session.device_id) is not session
+  ):
+    raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
   revoked_ids: list[str] = []
   async with AsyncSessionLocal() as db:
-    agent = await db.get(AgentDevice, device_id)
+    agent = await db.get(AgentDevice, session.device_id)
     if agent is None or agent.revoked_at is not None:
       raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销")
     agent.last_seen_at = now
-    agent.capabilities = list(payload.get("capabilities") or [])
-    heartbeat = await db.get(RuntimeComponentHeartbeat, f"qmt-agent:{device_id}")
-    requested_status = str(payload.get("status", "READY"))[:32].upper()
-    status = requested_status
+    heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      f"qmt-agent:{session.device_id}",
+      with_for_update=True,
+    )
+    previous_details = dict(heartbeat.details or {}) if heartbeat is not None else {}
+    previous_connected_at = parse_utc_timestamp(
+      previous_details.get("serverConnectedAt")
+    )
+    session_connected_at = to_naive_utc(session.server_connected_at)
     if (
+      establish
+      and str(previous_details.get("apiInstanceId") or "") == session.api_instance_id
+      and previous_connected_at is not None
+      and session_connected_at is not None
+      and previous_connected_at > session_connected_at
+    ):
+      raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被更新连接替换")
+    if not establish and (
+      str(previous_details.get("apiInstanceId") or "") != session.api_instance_id
+      or str(previous_details.get("agentSessionId") or "") != session.agent_session_id
+    ):
+      raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
+    frozen_capabilities = sorted(session.capabilities)
+    agent.capabilities = frozen_capabilities
+    requested_status = str(payload.get("status", "READY"))[:32].upper()
+    status = "RECONCILING" if establish else requested_status
+    preserve_server_status = bool(
       heartbeat is not None
       and str(heartbeat.status or "").upper()
-      in {"RECONCILING", "RECONCILE_REQUIRED"}
+      in {
+        "RECONCILING",
+        "RECONCILE_REQUIRED",
+        REMOTE_AGENT_ACCOUNT_MISMATCH,
+      }
       and requested_status == "READY"
-    ):
+    )
+    if preserve_server_status:
       # Only Engine may promote a reconnecting Agent after the durable full
       # snapshot has been applied. A heartbeat is not reconciliation proof.
       status = str(heartbeat.status).upper()
-    details = dict(heartbeat.details or {}) if heartbeat is not None else {}
+    details = previous_details
+    if establish:
+      for key in (
+        "readyAccounts",
+        "blockedAccounts",
+        "accountReconciliation",
+        "snapshotId",
+        "snapshotHash",
+        "snapshotAt",
+      ):
+        details.pop(key, None)
     details.update(
       {
         "agentVersion": str(payload.get("agent_version", ""))[:64],
         "protocolVersion": str(payload.get("protocol_version", ""))[:16],
-        "capabilities": agent.capabilities,
-        "xtdataStatus": str(
-          payload.get("xtdata_status") or "UNKNOWN"
-        )[:32],
+        "capabilities": frozen_capabilities,
+        "xtdataStatus": str(payload.get("xtdata_status") or "UNKNOWN")[:32],
         "xtdataReason": str(payload.get("xtdata_reason") or "")[:64],
-        "xttradingStatus": str(
-          payload.get("xttrading_status") or "UNKNOWN"
-        )[:32],
-        "xttradingReason": str(
-          payload.get("xttrading_reason") or ""
-        )[:64],
-        "journalIntegrity": str(
-          payload.get("journal_integrity", "")
-        )[:32],
+        "xttradingStatus": str(payload.get("xttrading_status") or "UNKNOWN")[:32],
+        "xttradingReason": str(payload.get("xttrading_reason") or "")[:64],
+        "journalIntegrity": str(payload.get("journal_integrity", ""))[:32],
         "journalSizeBytes": int(payload.get("journal_size_bytes") or 0),
-        "journalPendingReports": int(
-          payload.get("journal_pending_reports") or 0
-        ),
+        "journalPendingReports": int(payload.get("journal_pending_reports") or 0),
         "journalProcessingCommands": int(
           payload.get("journal_processing_commands") or 0
         ),
-        "marketStreamStatus": str(
-          payload.get("market_stream_status") or "OFFLINE"
-        )[:32],
-        "marketStreamSequence": int(
-          payload.get("market_stream_sequence") or 0
-        ),
-        "marketStreamQueueDepth": int(
-          payload.get("market_stream_queue_depth") or 0
-        ),
-        "marketStreamResyncs": int(
-          payload.get("market_stream_resyncs") or 0
-        ),
+        "marketStreamStatus": str(payload.get("market_stream_status") or "OFFLINE")[
+          :32
+        ],
+        "marketStreamSequence": int(payload.get("market_stream_sequence") or 0),
+        "marketStreamQueueDepth": int(payload.get("market_stream_queue_depth") or 0),
+        "marketStreamResyncs": int(payload.get("market_stream_resyncs") or 0),
         "marketStreamAckLatencyMs": float(
           payload.get("market_stream_ack_latency_ms") or 0.0
+        ),
+        "apiInstanceId": session.api_instance_id,
+        "agentSessionId": session.agent_session_id,
+        "serverConnectedAt": utc_iso(session.server_connected_at),
+        "serverReceivedAt": utc_iso(now),
+        "agentSentAt": utc_iso(sent_at) if sent_at is not None else None,
+        "remoteAddressSummary": session.remote_address_summary,
+        "sessionActive": True,
+        "reasonCode": (
+          str(previous_details.get("reasonCode") or "")[:64]
+          if preserve_server_status
+          else ""
         ),
       }
     )
     if heartbeat is None:
       heartbeat = RuntimeComponentHeartbeat(
-        component=f"qmt-agent:{device_id}",
-        instance_id=device_id,
+        component=f"qmt-agent:{session.device_id}",
+        instance_id=session.device_id,
         status=status,
         details=details,
         updated_at=now,
@@ -702,16 +792,64 @@ async def _record_heartbeat(device_id: str, payload: dict[str, Any]) -> None:
     await agent_connection_hub.revoke(revoked_device_id)
 
 
-async def _ensure_device_active(device_id: str) -> None:
-  """Validate the market Agent through its cross-process Redis lease.
+async def _mark_session_offline(session: AgentControlSession) -> None:
+  """Persist disconnect only when this is still the authoritative generation."""
+  now = utcnow()
+  async with AsyncSessionLocal() as db:
+    heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      f"qmt-agent:{session.device_id}",
+      with_for_update=True,
+    )
+    if heartbeat is None:
+      return
+    details = dict(heartbeat.details or {})
+    if (
+      str(details.get("apiInstanceId") or "") != session.api_instance_id
+      or str(details.get("agentSessionId") or "") != session.agent_session_id
+    ):
+      return
+    details.update(
+      {
+        "sessionActive": False,
+        "serverReceivedAt": utc_iso(now),
+        "reasonCode": REMOTE_AGENT_OFFLINE,
+      }
+    )
+    heartbeat.status = "OFFLINE"
+    heartbeat.details = details
+    heartbeat.updated_at = now
+    await db.commit()
 
-  The whole-market WebSocket is hosted by ``market-gateway`` while the
-  control session lives in the API process, so process-local hub state cannot
-  be used here.  The API publishes and refreshes this short lease from the
-  event-driven control-session lifecycle; this low-frequency read observes
-  revocation without returning to PostgreSQL polling.
-  """
-  if not await agent_connection_hub.is_market_device(device_id):
+
+async def _ensure_device_active(
+  device_id: str,
+  *,
+  lease: MarketSessionLease | None = None,
+) -> None:
+  """Validate a market lease against Redis and the current API generation."""
+
+  active_lease = lease or await agent_connection_hub.market_lease(device_id)
+  active = bool(
+    active_lease is not None
+    and await agent_connection_hub.is_market_session(active_lease)
+  )
+  if not active or active_lease is None:
+    raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销或控制会话已断开")
+  now = utcnow()
+  async with AsyncSessionLocal() as db:
+    device = await db.get(AgentDevice, device_id)
+    api_heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      API_HEARTBEAT_COMPONENT,
+    )
+  if (
+    device is None
+    or device.revoked_at is not None
+    or active_lease.api_instance_id
+    != str(getattr(api_heartbeat, "instance_id", "") or "")
+    or not api_instance_is_current(api_heartbeat, now=now)
+  ):
     raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销或控制会话已断开")
 
 
@@ -739,6 +877,7 @@ _PRE_EXECUTION_REJECTION_REASONS = frozenset(
     "insufficient available volume",
     "live market metadata unavailable",
     "live quote or instrument metadata unavailable",
+    "market_stream_not_ready",
     "instrument suspended",
     "quote timestamp unavailable",
     "stale live quote",
@@ -888,9 +1027,7 @@ async def _transition_place_order_command(
   correlation = (
     await db.execute(
       select(StrategyOrderCorrelation)
-      .where(
-        StrategyOrderCorrelation.client_order_id == command.client_order_id
-      )
+      .where(StrategyOrderCorrelation.client_order_id == command.client_order_id)
       .with_for_update()
     )
   ).scalar_one_or_none()
@@ -964,10 +1101,7 @@ async def _transition_place_order_command(
       and (not pending.batch_id or batch is not None)
       and batch_fill_volume == 0
       and batch_pre_execution_state
-      and (
-        not pending.intent_id
-        or (intent is not None and intent_zero_execution)
-      )
+      and (not pending.intent_id or (intent is not None and intent_zero_execution))
     )
   )
   if normalized_status in {"EXPIRED", "REJECTED"} and not safe_pre_execution_state:
@@ -976,17 +1110,11 @@ async def _transition_place_order_command(
 
   request_metadata = {
     **(dict(pending.request_metadata or {}) if pending is not None else {}),
-    **(
-      dict(correlation.request_metadata or {})
-      if correlation is not None
-      else {}
-    ),
+    **(dict(correlation.request_metadata or {}) if correlation is not None else {}),
   }
   intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
   entry_plan_id = str(
-    request_metadata.get("entry_plan_id")
-    or intent_metadata.get("entry_plan_id")
-    or ""
+    request_metadata.get("entry_plan_id") or intent_metadata.get("entry_plan_id") or ""
   ).strip()
   managed_entry_zero_fill = bool(
     normalized_status == "EXPIRED"
@@ -997,17 +1125,14 @@ async def _transition_place_order_command(
     and intent is not None
     and str(pending.side or "").upper() == "BUY"
     and bool(str(pending.strategy_run_id or ""))
-    and str(correlation.strategy_run_id or "")
-    == str(pending.strategy_run_id or "")
+    and str(correlation.strategy_run_id or "") == str(pending.strategy_run_id or "")
     and str(intent.strategy_run_id or "") == str(pending.strategy_run_id or "")
     and str(intent.direction or "").upper() == "BUY"
     and str(intent_metadata.get("entry_plan_id") or "") == entry_plan_id
     and intent_zero_execution
   )
   strategy_status = (
-    "RECONCILED_ZERO_FILL"
-    if managed_entry_zero_fill
-    else normalized_status
+    "RECONCILED_ZERO_FILL" if managed_entry_zero_fill else normalized_status
   )
 
   if normalized_status == "RECONCILE_REQUIRED":
@@ -1092,12 +1217,16 @@ async def _expire_trade_commands_in_session(
   if device_id:
     query = query.where(TradeCommandOutbox.device_id == device_id)
   expired_commands = (
-    await db.execute(
-      query.order_by(TradeCommandOutbox.expires_at, TradeCommandOutbox.created_at)
-      .limit(max(1, int(batch_size)))
-      .with_for_update(skip_locked=True)
+    (
+      await db.execute(
+        query.order_by(TradeCommandOutbox.expires_at, TradeCommandOutbox.created_at)
+        .limit(max(1, int(batch_size)))
+        .with_for_update(skip_locked=True)
+      )
     )
-  ).scalars().all()
+    .scalars()
+    .all()
+  )
 
   staged_runtime_event = False
   for expired in expired_commands:
@@ -1218,9 +1347,7 @@ async def _record_command_ack(device_id: str, payload: dict[str, Any]) -> None:
         command.last_error = reason[:256] or None
       else:
         command.delivery_status = "RECONCILE_REQUIRED"
-        command.last_error = (
-          reason or "indeterminate_cancel_command_rejection"
-        )[:256]
+        command.last_error = (reason or "indeterminate_cancel_command_rejection")[:256]
     elif accepted and previous_status == "ACKNOWLEDGED":
       # Idempotent replay of the Agent journal result.
       command.last_error = reason[:256] or None
@@ -1250,15 +1377,12 @@ async def _record_command_ack(device_id: str, payload: dict[str, Any]) -> None:
         now=now,
         pre_execution_proven=False,
       )
-    elif (
-      previous_status in {"REJECTED", "EXPIRED"}
-      and (
-        (previous_status == "EXPIRED" and reason == "command_expired")
-        or (
-          previous_status == "REJECTED"
-          and reason in _PRE_EXECUTION_REJECTION_REASONS
-          and reason != "command_expired"
-        )
+    elif previous_status in {"REJECTED", "EXPIRED"} and (
+      (previous_status == "EXPIRED" and reason == "command_expired")
+      or (
+        previous_status == "REJECTED"
+        and reason in _PRE_EXECUTION_REJECTION_REASONS
+        and reason != "command_expired"
       )
     ):
       # The same deterministic rejection may be replayed after reconnect.
@@ -1288,19 +1412,21 @@ async def _record_command_ack(device_id: str, payload: dict[str, Any]) -> None:
 
 
 async def _record_report(
-  device_id: str,
+  session: AgentControlSession,
   envelope: AgentEnvelope,
   *,
   received_at: datetime,
 ) -> ReportAckPayload:
-  payload = envelope.payload
+  wire_payload = envelope.payload
+  if AGENT_SERVER_SESSION_PAYLOAD_KEY in wire_payload:
+    raise ValueError("Agent report contains a reserved server field")
   if envelope.protocol_version == PROTOCOL_VERSION:
     envelope.validate_payload()
   payload_hash = hashlib.sha256(
     json.dumps(
       {
         "message_type": envelope.message_type.value,
-        "payload": payload,
+        "payload": wire_payload,
       },
       sort_keys=True,
       separators=(",", ":"),
@@ -1310,16 +1436,26 @@ async def _record_report(
   body = _body_for_report_idempotency(envelope)
   business_idempotency_key = hashlib.sha256(
     (
-      f"{device_id}:{envelope.message_type.value}:"
+      f"{session.device_id}:{envelope.message_type.value}:"
       f"{json.dumps(body, sort_keys=True, separators=(',', ':'), default=str)}"
     ).encode("utf-8")
   ).hexdigest()
+  payload = {
+    **wire_payload,
+    AGENT_SERVER_SESSION_PAYLOAD_KEY: {
+      "apiInstanceId": session.api_instance_id,
+      "agentSessionId": session.agent_session_id,
+      "serverConnectedAt": utc_iso(session.server_connected_at),
+      "serverReceivedAt": utc_iso(received_at),
+      "authorizedAccountIds": sorted(session.authorized_account_ids),
+    },
+  }
   report = AgentReportInbox(
     message_id=envelope.message_id,
-    device_id=device_id,
+    device_id=session.device_id,
     message_type=envelope.message_type.value,
     protocol_version=envelope.protocol_version,
-    client_order_id=str(payload.get("client_order_id", "")) or None,
+    client_order_id=str(wire_payload.get("client_order_id", "")) or None,
     raw_payload_hash=payload_hash,
     business_idempotency_key=business_idempotency_key,
     payload=payload,
@@ -1341,13 +1477,8 @@ async def _record_report(
       existing = (
         await db.execute(
           select(AgentReportInbox).where(
-            (
-              AgentReportInbox.message_id == envelope.message_id
-            )
-            | (
-              AgentReportInbox.business_idempotency_key
-              == business_idempotency_key
-            )
+            (AgentReportInbox.message_id == envelope.message_id)
+            | (AgentReportInbox.business_idempotency_key == business_idempotency_key)
           )
         )
       ).scalar_one_or_none()
@@ -1362,7 +1493,7 @@ async def _record_report(
     stage="report_persist",
     envelope=envelope,
     duration=time.monotonic() - persist_started,
-    device_id=device_id,
+    device_id=session.device_id,
   )
   if ack.accepted:
     try:
@@ -1427,10 +1558,11 @@ def _body_for_report_idempotency(
 
 
 async def _next_command(
-  device_id: str,
+  control_session: AgentControlSession,
   *,
   protocol_version: str = PROTOCOL_VERSION,
 ) -> Optional[AgentEnvelope]:
+  device_id = control_session.device_id
   now = utcnow()
   async with AsyncSessionLocal() as db:
     expired_count, staged_runtime_event = await _expire_trade_commands_in_session(
@@ -1459,6 +1591,10 @@ async def _next_command(
     if command is None:
       await db.commit()
       return None
+    device = await db.get(AgentDevice, device_id)
+    if device is None or device.revoked_at is not None:
+      await db.commit()
+      return None
     heartbeat = await db.get(
       RuntimeComponentHeartbeat,
       f"qmt-agent:{device_id}",
@@ -1469,14 +1605,20 @@ async def _next_command(
       if command_kind == "CANCEL_ORDER"
       else {"READY"}
     )
-    heartbeat_stale = bool(
-      heartbeat
-      and heartbeat.updated_at < now - timedelta(seconds=90)
+    api_heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      API_HEARTBEAT_COMPONENT,
+    )
+    session_state = evaluate_agent_session(
+      heartbeat,
+      api_heartbeat,
+      now=now,
+      acceptable_statuses=acceptable_statuses,
     )
     if (
-      heartbeat is None
-      or heartbeat_stale
-      or str(heartbeat.status or "").upper() not in acceptable_statuses
+      not session_state.current
+      or session_state.api_instance_id != control_session.api_instance_id
+      or session_state.agent_session_id != control_session.agent_session_id
     ):
       await db.commit()
       return None
@@ -1501,20 +1643,54 @@ async def _next_command(
 
 
 async def _next_market_data_request(
-  device_id: str,
+  control_session: AgentControlSession,
   *,
   protocol_version: str = PROTOCOL_VERSION,
 ) -> Optional[AgentEnvelope]:
+  device_id = control_session.device_id
+  if "market-data" not in {
+    str(capability).strip().lower() for capability in control_session.capabilities
+  }:
+    return None
   async with AsyncSessionLocal() as db:
     # Lock the device row before inspecting or dispatching requests. Locking only
     # a QUEUED row lets two concurrent websocket loops each observe no active
     # delivery and dispatch separate rows for the same serial QMT worker.
     device = await db.scalar(
       select(AgentDevice.id)
-      .where(AgentDevice.id == device_id)
+      .where(
+        AgentDevice.id == device_id,
+        AgentDevice.revoked_at.is_(None),
+      )
       .with_for_update()
     )
     if device is None:
+      return None
+    heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      f"qmt-agent:{device_id}",
+    )
+    api_heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      API_HEARTBEAT_COMPONENT,
+    )
+    session_state = evaluate_agent_session(
+      heartbeat,
+      api_heartbeat,
+      now=utcnow(),
+      acceptable_statuses={
+        "READY",
+        "RECONCILING",
+        "RECONCILE_REQUIRED",
+        "TRADING_UNAVAILABLE",
+        "EMERGENCY_STOP",
+      },
+    )
+    if (
+      not session_state.current
+      or session_state.api_instance_id != control_session.api_instance_id
+      or session_state.agent_session_id != control_session.agent_session_id
+    ):
       return None
     active_request_id = await db.scalar(
       select(MarketDataRequest.request_id)
@@ -1568,9 +1744,7 @@ async def _requeue_incomplete_market_requests(
   """
 
   reference_time = now or utcnow()
-  stale_before = reference_time - timedelta(
-    seconds=MARKET_DATA_RECONNECT_STALE_SECONDS
-  )
+  stale_before = reference_time - timedelta(seconds=MARKET_DATA_RECONNECT_STALE_SECONDS)
   async with AsyncSessionLocal() as db:
     await db.execute(
       update(MarketDataRequest)
@@ -1585,16 +1759,26 @@ async def _requeue_incomplete_market_requests(
 
 
 async def _process_message(
-  device_id: str,
+  session: AgentControlSession,
   envelope: AgentEnvelope,
   *,
   received_at: datetime,
   protocol_version: str = PROTOCOL_VERSION,
 ) -> AgentEnvelope | None:
+  device_id = session.device_id
+  if not await agent_connection_hub.is_connected(
+    device_id,
+    agent_session_id=session.agent_session_id,
+  ):
+    raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
   if envelope.message_type is AgentMessageType.HEARTBEAT:
     if str(envelope.payload.get("device_id", "")) != device_id:
       raise AuthError("UNAUTHENTICATED", "heartbeat 设备不匹配")
-    await _record_heartbeat(device_id, envelope.payload)
+    await _record_heartbeat(
+      session,
+      envelope.payload,
+      sent_at=envelope.sent_at,
+    )
     return AgentEnvelope(
       protocol_version=protocol_version,
       message_type=AgentMessageType.HEARTBEAT_ACK,
@@ -1605,7 +1789,7 @@ async def _process_message(
     return None
   if envelope.message_type in REPORT_TYPES:
     ack = await _record_report(
-      device_id,
+      session,
       envelope,
       received_at=received_at,
     )
@@ -1615,7 +1799,7 @@ async def _process_message(
       payload=ack.model_dump(mode="json"),
     )
   if envelope.message_type is AgentMessageType.MARKET_EVENT:
-    await _publish_market_event(device_id, envelope.payload)
+    await _publish_market_event(session, envelope.payload)
     return None
   raise ValueError(f"不支持的 Agent 消息类型: {envelope.message_type.value}")
 
@@ -1624,8 +1808,7 @@ async def _send_market_text(websocket: WebSocket, payload: str) -> None:
   def disconnected() -> bool:
     return (
       getattr(websocket, "client_state", None) is WebSocketState.DISCONNECTED
-      or getattr(websocket, "application_state", None)
-      is WebSocketState.DISCONNECTED
+      or getattr(websocket, "application_state", None) is WebSocketState.DISCONNECTED
     )
 
   if disconnected():
@@ -1649,18 +1832,18 @@ async def _send_market_text(websocket: WebSocket, payload: str) -> None:
     raise
 
 
-async def _wait_for_active_market_device(device_id: str) -> None:
+async def _wait_for_active_market_device(
+  device_id: str,
+) -> MarketSessionLease:
   """Bridge the short race between control and market WebSocket startup."""
-  deadline = (
-    time.monotonic() + MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS
-  )
+  deadline = time.monotonic() + MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS
   while True:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
       raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
     try:
-      is_active = await asyncio.wait_for(
-        agent_connection_hub.is_market_device(device_id),
+      lease = await asyncio.wait_for(
+        agent_connection_hub.market_lease(device_id),
         timeout=remaining,
       )
     except asyncio.TimeoutError as exc:
@@ -1668,14 +1851,12 @@ async def _wait_for_active_market_device(device_id: str) -> None:
         "FORBIDDEN",
         "当前设备不是活动行情 Agent",
       ) from exc
-    if is_active:
-      return
+    if lease is not None:
+      return lease
     remaining = deadline - time.monotonic()
     if remaining <= 0:
       raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
-    await asyncio.sleep(
-      min(MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS, remaining)
-    )
+    await asyncio.sleep(min(MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS, remaining))
 
 
 async def _request_market_resync(
@@ -1738,9 +1919,7 @@ async def _receive_market_batches(
       now = time.monotonic()
       if now >= next_device_check:
         await device_validator(device_id)
-        next_device_check = (
-          time.monotonic() + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
-        )
+        next_device_check = time.monotonic() + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
 
       payload = message.get("bytes")
       if not isinstance(payload, bytes):
@@ -1773,15 +1952,10 @@ async def _receive_market_batches(
           "market stream sequence gap: "
           f"expected={expected_sequence} actual={batch.sequence}"
         )
-      if (
-        expected_sequence == 1
-        and batch.kind is not MarketBatchKind.SNAPSHOT
-      ):
+      if expected_sequence == 1 and batch.kind is not MarketBatchKind.SNAPSHOT:
         raise ValueError("first market stream batch must be SNAPSHOT")
       if expected_sequence > 1 and batch.kind is MarketBatchKind.SNAPSHOT:
-        raise ValueError(
-          "market stream SNAPSHOT is only valid as the first batch"
-        )
+        raise ValueError("market stream SNAPSHOT is only valid as the first batch")
       await buffer.put_pre_reserved(
         _MarketCommitItem(
           batch=batch,
@@ -1795,9 +1969,7 @@ async def _receive_market_batches(
       expected_sequence += 1
     except BaseException:
       if reserved:
-        await buffer.cancel_reservation(
-          payload_bytes=reserved_payload_bytes
-        )
+        await buffer.cancel_reservation(payload_bytes=reserved_payload_bytes)
       raise
 
 
@@ -1820,8 +1992,7 @@ async def _commit_market_batches(
       queue_age = time.monotonic() - queued.received_monotonic
       if queue_age > MARKET_STREAM_MAX_QUEUE_AGE_SECONDS:
         raise TimeoutError(
-          "market stream commit queue exceeded maximum age: "
-          f"age={queue_age:.3f}s"
+          f"market stream commit queue exceeded maximum age: age={queue_age:.3f}s"
         )
       state = await asyncio.wait_for(
         active_store.write_batch(
@@ -1831,9 +2002,7 @@ async def _commit_market_batches(
         ),
         timeout=MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
       )
-      MARKET_STREAM_PROCESSING.observe(
-        time.monotonic() - queued.received_monotonic
-      )
+      MARKET_STREAM_PROCESSING.observe(time.monotonic() - queued.received_monotonic)
       MARKET_STREAM_FRAMES.labels(kind=queued.batch.kind.value).inc()
       MARKET_STREAM_FRAME_BYTES.set(len(queued.payload))
       MARKET_STREAM_INSTRUMENTS.set(queued.batch.instrument_count)
@@ -1912,12 +2081,21 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
     first = AgentEnvelope.model_validate_json(await websocket.receive_text())
     session = await _authenticate(first)
     device = session.device
-    capabilities = {
-      str(value).lower() for value in first.payload.get("capabilities", [])
-    }
+    capabilities = _normalized_agent_capabilities(first.payload.get("capabilities", []))
     if "market-data" not in capabilities:
       raise AuthError("FORBIDDEN", "Agent 未声明 market-data 能力")
-    await _wait_for_active_market_device(device.id)
+    market_lease = await _wait_for_active_market_device(device.id)
+    token_fingerprint = str(getattr(session, "access_token_fingerprint", "") or "")
+    if (
+      not market_lease.access_token_fingerprint
+      or not token_fingerprint
+      or not hmac.compare_digest(
+        market_lease.access_token_fingerprint,
+        token_fingerprint,
+      )
+    ):
+      raise AuthError("UNAUTHENTICATED", "行情连接与当前控制会话不匹配")
+    await _ensure_device_active(device.id, lease=market_lease)
     connection_id = await _market_connections.register() or ""
     if not connection_id:
       raise AuthError("CONFLICT", "已存在活动行情连接")
@@ -1959,6 +2137,10 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
       device_id=device.id,
       session_expires_at=session.expires_at,
       commit_state=commit_state,
+      validate_device=lambda checked_device_id: _ensure_device_active(
+        checked_device_id,
+        lease=market_lease,
+      ),
     )
   except WebSocketDisconnect:
     disconnect_reason = "market websocket disconnected"
@@ -2112,9 +2294,7 @@ async def _receive_agent_control_messages(
       received_at=received_at,
       received_monotonic=received_monotonic,
       frame_bytes=len(raw.encode("utf-8")),
-      dedup_key=(
-        envelope.message_id if envelope.message_type in REPORT_TYPES else ""
-      ),
+      dedup_key=(envelope.message_id if envelope.message_type in REPORT_TYPES else ""),
     )
     try:
       queued = await asyncio.wait_for(
@@ -2137,12 +2317,13 @@ async def _receive_agent_control_messages(
 
 async def _process_agent_control_messages(
   *,
-  device_id: str,
+  control_session: AgentControlSession,
   protocol_version: str,
   inbound: _AgentInboundBuffer,
   outbound: _AgentOutboundBuffer,
   database_state: _AgentDatabaseState,
 ) -> None:
+  device_id = control_session.device_id
   while True:
     item = await inbound.get()
     _set_agent_control_queue_metrics(device_id, "inbound", inbound)
@@ -2167,7 +2348,7 @@ async def _process_agent_control_messages(
     processing_started = time.monotonic()
     try:
       reply = await _process_message(
-        device_id,
+        control_session,
         item.envelope,
         received_at=item.received_at,
         protocol_version=protocol_version,
@@ -2204,9 +2385,10 @@ async def _process_agent_control_messages(
 async def _send_agent_control_messages(
   websocket: WebSocket,
   *,
-  device_id: str,
+  control_session: AgentControlSession,
   outbound: _AgentOutboundBuffer,
 ) -> None:
+  device_id = control_session.device_id
   while True:
     item = await outbound.get()
     _set_agent_control_queue_metrics(device_id, "outbound", outbound)
@@ -2218,6 +2400,16 @@ async def _send_agent_control_messages(
       device_id=device_id,
     )
     send_started = time.monotonic()
+    if not await agent_connection_hub.is_connected(
+      device_id,
+      agent_session_id=control_session.agent_session_id,
+    ):
+      raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
+    if item.envelope.message_type in {
+      AgentMessageType.COMMAND,
+      AgentMessageType.CANCEL_COMMAND,
+    }:
+      await _assert_trade_delivery_session(control_session, item.envelope)
     try:
       await asyncio.wait_for(
         websocket.send_text(item.envelope.model_dump_json()),
@@ -2238,19 +2430,84 @@ async def _send_agent_control_messages(
     )
 
 
+async def _assert_trade_delivery_session(
+  control_session: AgentControlSession,
+  envelope: AgentEnvelope,
+) -> None:
+  """Revalidate durable authority immediately before a trade frame is sent."""
+
+  now = utcnow()
+  async with AsyncSessionLocal() as db:
+    device = await db.get(AgentDevice, control_session.device_id)
+    heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      f"qmt-agent:{control_session.device_id}",
+    )
+    api_heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      API_HEARTBEAT_COMPONENT,
+    )
+
+  acceptable_statuses = (
+    {"READY", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
+    if envelope.message_type is AgentMessageType.CANCEL_COMMAND
+    else {"READY"}
+  )
+  session_state = evaluate_agent_session(
+    heartbeat,
+    api_heartbeat,
+    now=now,
+    acceptable_statuses=acceptable_statuses,
+  )
+  account_id = str(envelope.payload.get("account_id") or "").strip()
+  execution_mode = str(envelope.payload.get("execution_mode") or "").strip().lower()
+  risk_increasing = bool(
+    envelope.message_type is AgentMessageType.COMMAND
+    and str(envelope.payload.get("command_kind") or "").upper() == "PLACE_ORDER"
+    and str(envelope.payload.get("side") or "").upper() != "SELL"
+    and str(envelope.payload.get("t_trade_role") or "").upper() != "EXIT"
+  )
+  market_stream_ready = bool(
+    str(dict(getattr(heartbeat, "details", None) or {}).get("marketStreamStatus") or "")
+    .strip()
+    .upper()
+    == "READY"
+  )
+  capabilities = {
+    str(value).strip().lower()
+    for value in control_session.capabilities
+    if str(value).strip()
+  }
+  if (
+    device is None
+    or device.revoked_at is not None
+    or not session_state.current
+    or session_state.api_instance_id != control_session.api_instance_id
+    or session_state.agent_session_id != control_session.agent_session_id
+    or account_id not in control_session.authorized_account_ids
+    or (execution_mode and execution_mode not in capabilities)
+    or (risk_increasing and execution_mode == "live" and not market_stream_ready)
+  ):
+    raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效")
+
+
 async def _poll_agent_trade_commands(
   *,
-  device_id: str,
+  control_session: AgentControlSession,
   protocol_version: str,
   outbound: _AgentOutboundBuffer,
   database_state: _AgentDatabaseState,
 ) -> None:
+  device_id = control_session.device_id
   while True:
     if not database_state.ready.is_set():
       await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
       continue
     try:
-      command = await _next_command(device_id, protocol_version=protocol_version)
+      command = await _next_command(
+        control_session,
+        protocol_version=protocol_version,
+      )
     except _TRANSIENT_DATABASE_ERRORS:
       database_state.mark_failure()
       AGENT_CONTROL_EVENTS.labels(
@@ -2272,18 +2529,19 @@ async def _poll_agent_trade_commands(
 
 async def _poll_agent_market_requests(
   *,
-  device_id: str,
+  control_session: AgentControlSession,
   protocol_version: str,
   outbound: _AgentOutboundBuffer,
   database_state: _AgentDatabaseState,
 ) -> None:
+  device_id = control_session.device_id
   while True:
     if not database_state.ready.is_set():
       await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
       continue
     try:
       request = await _next_market_data_request(
-        device_id,
+        control_session,
         protocol_version=protocol_version,
       )
     except _TRANSIENT_DATABASE_ERRORS:
@@ -2307,13 +2565,13 @@ async def _poll_agent_market_requests(
 
 async def _relay_agent_hub_controls(
   *,
-  device_id: str,
+  control_session: AgentControlSession,
   protocol_version: str,
-  control_queue: asyncio.Queue[AgentEnvelope],
   outbound: _AgentOutboundBuffer,
 ) -> None:
+  device_id = control_session.device_id
   while True:
-    control = await control_queue.get()
+    control = await control_session.queue.get()
     await _enqueue_agent_outbound(
       device_id,
       outbound,
@@ -2323,11 +2581,11 @@ async def _relay_agent_hub_controls(
 
 async def _guard_agent_control_session(
   *,
-  device_id: str,
+  control_session: AgentControlSession,
   expires_at: datetime,
-  control_queue: asyncio.Queue[AgentEnvelope],
   database_state: _AgentDatabaseState,
 ) -> None:
+  device_id = control_session.device_id
   while True:
     now = utcnow()
     if now >= expires_at:
@@ -2346,23 +2604,42 @@ async def _guard_agent_control_session(
       max(0.0, AGENT_CONTROL_HEARTBEAT_STALE_SECONDS - heartbeat_age),
     )
     revoked = await agent_connection_hub.wait_until_revoked(
-      device_id,
-      control_queue,
+      control_session,
       timeout_seconds=timeout_seconds,
     )
     if revoked:
       raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销")
+    async with AsyncSessionLocal() as db:
+      device = await db.get(AgentDevice, device_id)
+      heartbeat = await db.get(
+        RuntimeComponentHeartbeat,
+        f"qmt-agent:{device_id}",
+      )
+      api_heartbeat = await db.get(
+        RuntimeComponentHeartbeat,
+        API_HEARTBEAT_COMPONENT,
+      )
+    details = dict(heartbeat.details or {}) if heartbeat is not None else {}
+    if (
+      device is None
+      or device.revoked_at is not None
+      or str(getattr(api_heartbeat, "instance_id", "") or "")
+      != control_session.api_instance_id
+      or not api_instance_is_current(api_heartbeat, now=now)
+      or str(details.get("apiInstanceId") or "") != control_session.api_instance_id
+      or str(details.get("agentSessionId") or "") != control_session.agent_session_id
+    ):
+      raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销或控制会话已被替换")
 
 
 async def _refresh_agent_market_lease(
   *,
-  device_id: str,
-  control_queue: asyncio.Queue[AgentEnvelope],
+  control_session: AgentControlSession,
 ) -> None:
   while True:
     try:
       await asyncio.wait_for(
-        agent_connection_hub.refresh_market_device(device_id, control_queue),
+        agent_connection_hub.refresh_market_device(control_session),
         timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
       )
     except asyncio.TimeoutError as exc:
@@ -2377,11 +2654,11 @@ async def _refresh_agent_market_lease(
 async def _run_agent_control_pipeline(
   websocket: WebSocket,
   *,
-  device_id: str,
+  control_session: AgentControlSession,
   protocol_version: str,
   session_expires_at: datetime,
-  control_queue: asyncio.Queue[AgentEnvelope],
 ) -> None:
+  device_id = control_session.device_id
   inbound = _AgentInboundBuffer()
   outbound = _AgentOutboundBuffer()
   database_state = _AgentDatabaseState(device_id=device_id)
@@ -2397,7 +2674,7 @@ async def _run_agent_control_pipeline(
     ),
     asyncio.create_task(
       _process_agent_control_messages(
-        device_id=device_id,
+        control_session=control_session,
         protocol_version=protocol_version,
         inbound=inbound,
         outbound=outbound,
@@ -2408,14 +2685,14 @@ async def _run_agent_control_pipeline(
     asyncio.create_task(
       _send_agent_control_messages(
         websocket,
-        device_id=device_id,
+        control_session=control_session,
         outbound=outbound,
       ),
       name=f"agent-control-writer:{device_id}",
     ),
     asyncio.create_task(
       _poll_agent_trade_commands(
-        device_id=device_id,
+        control_session=control_session,
         protocol_version=protocol_version,
         outbound=outbound,
         database_state=database_state,
@@ -2424,7 +2701,7 @@ async def _run_agent_control_pipeline(
     ),
     asyncio.create_task(
       _poll_agent_market_requests(
-        device_id=device_id,
+        control_session=control_session,
         protocol_version=protocol_version,
         outbound=outbound,
         database_state=database_state,
@@ -2433,26 +2710,23 @@ async def _run_agent_control_pipeline(
     ),
     asyncio.create_task(
       _relay_agent_hub_controls(
-        device_id=device_id,
+        control_session=control_session,
         protocol_version=protocol_version,
-        control_queue=control_queue,
         outbound=outbound,
       ),
       name=f"agent-control-relay:{device_id}",
     ),
     asyncio.create_task(
       _guard_agent_control_session(
-        device_id=device_id,
+        control_session=control_session,
         expires_at=session_expires_at,
-        control_queue=control_queue,
         database_state=database_state,
       ),
       name=f"agent-control-guard:{device_id}",
     ),
     asyncio.create_task(
       _refresh_agent_market_lease(
-        device_id=device_id,
-        control_queue=control_queue,
+        control_session=control_session,
       ),
       name=f"agent-market-lease:{device_id}",
     ),
@@ -2494,29 +2768,37 @@ async def agent_websocket(websocket: WebSocket) -> None:
     first = AgentEnvelope.model_validate_json(await websocket.receive_text())
     session = await _authenticate(first)
     device = session.device
-    capabilities = {
-      str(value).lower() for value in first.payload.get("capabilities", [])
-    }
+    capabilities = _normalized_agent_capabilities(first.payload.get("capabilities", []))
     if "live" in capabilities and first.protocol_version != PROTOCOL_VERSION:
       raise AuthError(
         "PROTOCOL_UPGRADE_REQUIRED",
         f"真实交易 Agent 必须使用协议 {PROTOCOL_VERSION}",
       )
     connection_protocol = first.protocol_version
-    await _record_heartbeat(
+    control_session = await agent_connection_hub.register(
       device.id,
+      capabilities,
+      authorized_account_ids={
+        str(value).strip()
+        for value in list(device.authorized_account_ids or [])
+        if str(value).strip()
+      },
+      connected_at=utcnow(),
+      remote_address_summary=_remote_address_summary(websocket),
+      access_token_fingerprint=session.access_token_fingerprint,
+    )
+    await _record_heartbeat(
+      control_session,
       {
         "agent_version": first.payload.get("agent_version", ""),
         "protocol_version": connection_protocol,
         "capabilities": first.payload.get("capabilities", []),
         "status": "RECONCILING",
       },
+      sent_at=first.sent_at,
+      establish=True,
     )
     await _requeue_incomplete_market_requests(device.id)
-    control_queue = await agent_connection_hub.register(
-      device.id,
-      set(first.payload.get("capabilities") or []),
-    )
     await websocket.send_text(
       _auth_result(
         accepted=True,
@@ -2525,10 +2807,9 @@ async def agent_websocket(websocket: WebSocket) -> None:
     )
     await _run_agent_control_pipeline(
       websocket,
-      device_id=device.id,
+      control_session=control_session,
       protocol_version=connection_protocol,
       session_expires_at=session.expires_at,
-      control_queue=control_queue,
     )
   except WebSocketDisconnect:
     AGENT_CONTROL_EVENTS.labels(event="close", reason="disconnect").inc()
@@ -2566,8 +2847,16 @@ async def agent_websocket(websocket: WebSocket) -> None:
     except Exception:
       pass
   finally:
-    if "control_queue" in locals() and "device" in locals():
-      await agent_connection_hub.unregister(device.id, control_queue)
+    if "control_session" in locals():
+      if await agent_connection_hub.unregister(control_session):
+        try:
+          await _mark_session_offline(control_session)
+        except Exception as exc:
+          logger.warning(
+            "无法持久化 Agent 离线状态: device=%s error=%s",
+            control_session.device_id,
+            exc.__class__.__name__,
+          )
 
 
 def _bearer(request: Request) -> str:
@@ -2742,10 +3031,7 @@ async def sweep_market_data_staging_once(
           ).where(MarketDataRequest.request_id.in_(tuple(candidates)))
         )
       ).all()
-    requests = {
-      str(row.request_id): row
-      for row in rows
-    }
+    requests = {str(row.request_id): row for row in rows}
     orphan_cutoff = current - timedelta(
       seconds=MARKET_DATA_STAGING_ORPHAN_GRACE_SECONDS
     )
@@ -2778,9 +3064,7 @@ async def sweep_market_data_staging_once(
               if locked_status == "COMPLETED":
                 remove = True
               elif locked_status == "FAILED":
-                terminal_at = _as_aware_utc(
-                  locked.completed_at or locked.updated_at
-                )
+                terminal_at = _as_aware_utc(locked.completed_at or locked.updated_at)
                 remove = terminal_at is not None and terminal_at <= failed_cutoff
                 if remove:
                   # Retiring the durable manifest before deleting its files
@@ -2885,7 +3169,9 @@ async def _requeue_busy_market_data_request(
       )
       .with_for_update()
     )
-    if market_request is None or str(market_request.status or "").upper() != "DELIVERED":
+    if (
+      market_request is None or str(market_request.status or "").upper() != "DELIVERED"
+    ):
       return False
     market_request.status = "QUEUED"
     market_request.processing_error = "Agent busy: market-data request queue full"
@@ -2910,9 +3196,7 @@ async def fail_market_data_request(
 
   async with AsyncSessionLocal() as db:
     try:
-      device = await AgentAuthService(db).authenticate_agent(
-        token=_bearer(request)
-      )
+      device = await AgentAuthService(db).authenticate_agent(token=_bearer(request))
       authenticated_device_id = device.id
     except AuthError as exc:
       raise HTTPException(
@@ -2979,9 +3263,7 @@ async def upload_market_data_chunk(
 
   async with AsyncSessionLocal() as db:
     try:
-      device = await AgentAuthService(db).authenticate_agent(
-        token=_bearer(request)
-      )
+      device = await AgentAuthService(db).authenticate_agent(token=_bearer(request))
       authenticated_device_id = device.id
     except AuthError as exc:
       raise HTTPException(
@@ -3013,10 +3295,7 @@ async def upload_market_data_chunk(
       .where(MarketDataRequest.request_id == normalized_request_id)
       .with_for_update()
     )
-    if (
-      market_request is None
-      or market_request.device_id != authenticated_device_id
-    ):
+    if market_request is None or market_request.device_id != authenticated_device_id:
       raise HTTPException(status_code=404, detail="行情数据请求不存在")
     status = str(market_request.status or "").upper()
     if status == "FAILED":
@@ -3079,8 +3358,9 @@ async def upload_market_data_chunk(
 
       request_compressed_bytes = int(
         await db.scalar(
-          select(func.coalesce(func.sum(MarketDataTransfer.compressed_bytes), 0))
-          .where(MarketDataTransfer.request_id == normalized_request_id)
+          select(func.coalesce(func.sum(MarketDataTransfer.compressed_bytes), 0)).where(
+            MarketDataTransfer.request_id == normalized_request_id
+          )
         )
         or 0
       )

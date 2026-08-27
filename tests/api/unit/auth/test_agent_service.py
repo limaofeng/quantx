@@ -1,3 +1,5 @@
+import hashlib
+
 import pytest
 from quantx_api.auth.agent_service import AgentAuthService
 from quantx_api.auth.errors import AuthError
@@ -85,6 +87,10 @@ async def test_agent_access_session_tracks_expiry_and_revoke_is_immediate(db):
 
   assert session.device.id == credential.device_id
   assert session.expires_at == grant.expires_at
+  assert (
+    session.access_token_fingerprint
+    == hashlib.sha256(grant.access_token.encode("utf-8")).hexdigest()
+  )
   assert await service.revoke(device_id=credential.device_id, user_id="user-1")
 
   with pytest.raises(AuthError):
@@ -124,10 +130,13 @@ async def test_new_ready_agent_atomically_replaces_previous_device(db):
   replacement = await db.get(AgentDevice, replacement_credential.device_id)
 
   assert replacement.replaces_device_id == first.id
-  assert await service.converge_ready_device(
-    device=first,
-    observed_at=utcnow(),
-  ) == []
+  assert (
+    await service.converge_ready_device(
+      device=first,
+      observed_at=utcnow(),
+    )
+    == []
+  )
   assert first.revoked_at is None
 
   revoked = await service.converge_ready_device(
@@ -157,3 +166,34 @@ async def test_cancel_handover_invalidates_pending_code(db):
   assert cancelled.revoked_device_ids == ()
   with pytest.raises(AuthError):
     await service.exchange_enrollment(enrollment.code)
+
+
+@pytest.mark.asyncio
+async def test_cancel_handover_revokes_candidate_when_api_generation_changed(db):
+  service = AgentAuthService(db, _settings())
+  first_enrollment = await service.create_enrollment(
+    user_id="user-1",
+    name="current",
+    authorized_account_ids=["account-1"],
+  )
+  first_credential = await service.exchange_enrollment(first_enrollment.code)
+  replacement_enrollment = await service.create_enrollment(
+    user_id="user-1",
+    name="replacement",
+    authorized_account_ids=["account-1"],
+  )
+  replacement_credential = await service.exchange_enrollment(
+    replacement_enrollment.code
+  )
+
+  replacement = await db.get(AgentDevice, replacement_credential.device_id)
+  replacement.last_seen_at = utcnow()
+  await db.commit()
+
+  cancelled = await service.cancel_handover(user_id="user-1")
+
+  current = await db.get(AgentDevice, first_credential.device_id)
+  replacement = await db.get(AgentDevice, replacement_credential.device_id)
+  assert cancelled.revoked_device_ids == (replacement_credential.device_id,)
+  assert current.revoked_at is None
+  assert replacement.revoked_at is not None

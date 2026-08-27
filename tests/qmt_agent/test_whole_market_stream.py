@@ -133,10 +133,7 @@ class SocketContext:
 class PassthroughWholeMarketBroker:
   @staticmethod
   def prepare_whole_market_data(data):
-    return {
-      code: {"time": 1_000, **tick}
-      for code, tick in data.items()
-    }
+    return {code: {"time": 1_000, **tick} for code, tick in data.items()}
 
 
 def _stream_runtime(*, max_ready_callbacks: int) -> AgentRuntime:
@@ -157,9 +154,7 @@ def _stream_runtime(*, max_ready_callbacks: int) -> AgentRuntime:
   runtime._whole_market_subscription_ready.set()
   runtime._whole_market_native_reset = asyncio.Event()
   runtime._access_token = "token-1"
-  runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(
-    hours=1
-  )
+  runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
   runtime._access_token_ready = asyncio.Event()
   runtime._control_hub_registered_once = asyncio.Event()
   runtime._control_hub_registered_once.set()
@@ -240,7 +235,9 @@ async def test_market_handshake_times_out_when_start_never_arrives(
 
 
 @pytest.mark.asyncio
-async def test_empty_delta_encodes_as_ready_barrier_but_snapshot_cannot_be_empty() -> None:
+async def test_empty_delta_encodes_as_ready_barrier_but_snapshot_cannot_be_empty() -> (
+  None
+):
   class Broker:
     @staticmethod
     def prepare_whole_market_data(data):
@@ -354,10 +351,7 @@ async def test_ready_barrier_carries_sync_delta_before_ready_and_does_not_repeat
   class Broker:
     @staticmethod
     def prepare_whole_market_data(data):
-      return {
-        code: {"time": 1_000, **tick}
-        for code, tick in data.items()
-      }
+      return {code: {"time": 1_000, **tick} for code, tick in data.items()}
 
   class Socket:
     def __init__(self) -> None:
@@ -429,9 +423,7 @@ async def test_ready_barrier_carries_sync_delta_before_ready_and_does_not_repeat
   runtime._whole_market_subscription_ready.set()
   runtime._whole_market_native_reset = asyncio.Event()
   runtime._access_token = "token-1"
-  runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(
-    hours=1
-  )
+  runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
   runtime._access_token_ready = asyncio.Event()
   runtime._control_hub_registered_once = asyncio.Event()
   runtime._control_hub_registered_once.set()
@@ -441,9 +433,7 @@ async def test_ready_barrier_carries_sync_delta_before_ready_and_does_not_repeat
 
   async def build_snapshot(_trading_date):
     watermark = runtime._whole_market_capture.capture_sequence
-    runtime._whole_market_capture.capture(
-      {"600000.SH": {"lastPrice": 11.0}}
-    )
+    runtime._whole_market_capture.capture({"600000.SH": {"lastPrice": 11.0}})
     return (
       {"600000.SH": {"lastPrice": 10.0}},
       watermark,
@@ -466,9 +456,7 @@ async def test_ready_barrier_carries_sync_delta_before_ready_and_does_not_repeat
 
     # This callback is newer than the barrier cut and must be the only seq3
     # value. The seq2 convergence update must not be replayed.
-    runtime._whole_market_capture.capture(
-      {"600000.SH": {"lastPrice": 12.0}}
-    )
+    runtime._whole_market_capture.capture({"600000.SH": {"lastPrice": 12.0}})
     await socket.controls.put(
       MarketStreamControl(
         type=MarketControlType.ACK,
@@ -480,9 +468,7 @@ async def test_ready_barrier_carries_sync_delta_before_ready_and_does_not_repeat
     assert runtime._market_stream_status == "SYNCING"
     assert runtime._market_stream_ready_since_monotonic == 0.0
     assert [batch.sequence for batch in socket.batches] == [1, 2, 3]
-    assert socket.batches[2].data == {
-      "600000.SH": {"time": 1_000, "lastPrice": 12.0}
-    }
+    assert socket.batches[2].data == {"600000.SH": {"time": 1_000, "lastPrice": 12.0}}
     await socket.controls.put(
       MarketStreamControl(
         type=MarketControlType.ACK,
@@ -521,12 +507,8 @@ async def test_empty_sequence_three_is_mandatory_readiness_confirmation(
     assert runtime._market_stream_status == "SYNCING"
 
     await socket.acknowledge(2)
-    await _wait_until(
-      lambda: any(batch.sequence == 3 for batch in socket.batches)
-    )
-    confirmation = next(
-      batch for batch in socket.batches if batch.sequence == 3
-    )
+    await _wait_until(lambda: any(batch.sequence == 3 for batch in socket.batches))
+    confirmation = next(batch for batch in socket.batches if batch.sequence == 3)
     assert confirmation.kind is MarketBatchKind.DELTA
     assert confirmation.data == {}
     assert confirmation.instrument_count == 0
@@ -570,9 +552,7 @@ async def test_slow_ready_ack_converges_full_market_callbacks_without_resync(
     # one-callback READY cap is intentionally irrelevant here: twenty complete
     # native callbacks collapse to the latest value for each instrument.
     for offset in range(20):
-      runtime._whole_market_capture.capture(
-        full_market(10.1 + offset / 10)
-      )
+      runtime._whole_market_capture.capture(full_market(10.1 + offset / 10))
     assert runtime._whole_market_capture.queue_depth == 0
     assert runtime._whole_market_capture.invalidation_reason == ""
     assert runtime._market_stream_outbound_depth == 0
@@ -585,9 +565,7 @@ async def test_slow_ready_ack_converges_full_market_callbacks_without_resync(
       timeout=3,
     )
     assert runtime._market_stream_status == "SYNCING"
-    sequence_three = next(
-      batch for batch in socket.batches if batch.sequence == 3
-    )
+    sequence_three = next(batch for batch in socket.batches if batch.sequence == 3)
     assert sequence_three.instrument_count == 5_146
     assert sequence_three.data[codes[0]]["lastPrice"] == pytest.approx(12.0)
 
@@ -652,27 +630,18 @@ async def test_ready_barrier_overflow_propagates_exact_reason_and_stays_closed(
   try:
     await asyncio.wait_for(socket.barrier_sent.wait(), timeout=1)
     await socket.acknowledge(2)
-    await _wait_until(
-      lambda: any(batch.sequence == 3 for batch in socket.batches)
-    )
+    await _wait_until(lambda: any(batch.sequence == 3 for batch in socket.batches))
     assert runtime._market_stream_status == "SYNCING"
 
     # Once READY, do not yield to the producer: the second callback exceeds
     # the explicit one-callback ingress cap and must invalidate rather than
     # merge or drop.
-    runtime._whole_market_capture.capture(
-      {"600000.SH": {"lastPrice": 10.1}}
-    )
-    runtime._whole_market_capture.capture(
-      {"600000.SH": {"lastPrice": 10.2}}
-    )
+    runtime._whole_market_capture.capture({"600000.SH": {"lastPrice": 10.1}})
+    runtime._whole_market_capture.capture({"600000.SH": {"lastPrice": 10.2}})
 
     with pytest.raises(
       WholeMarketCaptureOverflow,
-      match=(
-        "whole-market READY ingress overflow: depth=1 .*"
-        "max_callbacks=1"
-      ),
+      match=("whole-market READY ingress overflow: depth=1 .*max_callbacks=1"),
     ):
       await asyncio.wait_for(stream, timeout=1)
 
@@ -696,16 +665,11 @@ def test_native_reset_gate_rejects_every_snapshot_publication_stage() -> None:
   )
 
   runtime._require_native_whole_market_sync("snapshot-build")
-  runtime._whole_market_capture.force_resync(
-    "XTData source generation changed: 1->2"
-  )
+  runtime._whole_market_capture.force_resync("XTData source generation changed: 1->2")
   runtime._whole_market_native_reset.set()
   with pytest.raises(
     RuntimeError,
-    match=(
-      "stage=snapshot-encode reason="
-      "XTData source generation changed: 1->2"
-    ),
+    match=("stage=snapshot-encode reason=XTData source generation changed: 1->2"),
   ):
     runtime._require_native_whole_market_sync("snapshot-encode")
 
@@ -808,9 +772,7 @@ async def test_native_source_reset_cannot_publish_old_complete_snapshot(
     max_ready_estimated_bytes=1024 * 1024,
   )
   runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
-  runtime._whole_market_capture.capture(
-    {"600000.SH": {"lastPrice": 10.0}}
-  )
+  runtime._whole_market_capture.capture({"600000.SH": {"lastPrice": 10.0}})
   runtime._whole_market_capture.reset_source("native continuity lost")
   monkeypatch.setattr(
     runtime_module,
@@ -824,9 +786,7 @@ async def test_native_source_reset_cannot_publish_old_complete_snapshot(
 
   runtime._run_xtdata_control = direct_control
   with pytest.raises(RuntimeError, match="callback coverage is insufficient"):
-    await runtime._build_whole_market_snapshot(
-      datetime.now().astimezone().date()
-    )
+    await runtime._build_whole_market_snapshot(datetime.now().astimezone().date())
 
   assert runtime.broker.fallbacks == 0
 
@@ -862,9 +822,7 @@ async def test_snapshot_is_built_only_from_whole_quote_callbacks(
     max_ready_estimated_bytes=1024 * 1024,
   )
   runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
-  runtime._whole_market_capture.capture(
-    {code: {"lastPrice": 1.0} for code in codes}
-  )
+  runtime._whole_market_capture.capture({code: {"lastPrice": 1.0} for code in codes})
   operations: list[str] = []
   monkeypatch.setattr(
     runtime_module,
@@ -1023,9 +981,7 @@ async def test_snapshot_never_calls_point_query_fallback(
     max_ready_estimated_bytes=1024 * 1024,
   )
   runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
-  runtime._whole_market_capture.capture(
-    {code: {"lastPrice": 1.0} for code in codes}
-  )
+  runtime._whole_market_capture.capture({code: {"lastPrice": 1.0} for code in codes})
   monkeypatch.setattr(
     runtime_module,
     "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
@@ -1051,9 +1007,7 @@ async def test_market_stream_waits_for_first_control_hub_registration() -> None:
   runtime = AgentRuntime.__new__(AgentRuntime)
   runtime._ensure_whole_market_state()
 
-  waiter = asyncio.create_task(
-    runtime._wait_for_initial_control_hub_registration()
-  )
+  waiter = asyncio.create_task(runtime._wait_for_initial_control_hub_registration())
   await asyncio.sleep(0)
   assert not waiter.done()
 
@@ -1089,9 +1043,7 @@ async def test_ready_overflow_enters_state_only_and_keeps_latest() -> None:
 
   with pytest.raises(
     WholeMarketCaptureOverflow,
-    match=(
-      "whole-market READY ingress overflow: depth=1 .*max_callbacks=1"
-    ),
+    match=("whole-market READY ingress overflow: depth=1 .*max_callbacks=1"),
   ):
     await capture.next_ready_event()
   latest = capture.latest_snapshot(trading_date=None)
@@ -1102,8 +1054,7 @@ async def test_ready_overflow_enters_state_only_and_keeps_latest() -> None:
 
 def test_production_ready_ingress_is_governed_by_64_mib_byte_budget() -> None:
   assert MARKET_STREAM_READY_INGRESS_CALLBACKS == (
-    MARKET_STREAM_READY_INGRESS_BYTES
-    // MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES
+    MARKET_STREAM_READY_INGRESS_BYTES // MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES
   )
   assert MARKET_STREAM_READY_INGRESS_CALLBACKS > 8
   capture = WholeMarketCapture(
@@ -1112,13 +1063,8 @@ def test_production_ready_ingress_is_governed_by_64_mib_byte_budget() -> None:
     estimated_tick_bytes=MARKET_STREAM_READY_ESTIMATED_TICK_BYTES,
   )
   capture.activate_ready(after_sequence=0, trading_date=None)
-  callback = {
-    f"{index:06d}.SH": {"lastPrice": 10.0}
-    for index in range(5_000)
-  }
-  estimated_callback_bytes = (
-    len(callback) * MARKET_STREAM_READY_ESTIMATED_TICK_BYTES
-  )
+  callback = {f"{index:06d}.SH": {"lastPrice": 10.0} for index in range(5_000)}
+  estimated_callback_bytes = len(callback) * MARKET_STREAM_READY_ESTIMATED_TICK_BYTES
   retained_callbacks = MARKET_STREAM_READY_INGRESS_BYTES // estimated_callback_bytes
 
   for _ in range(retained_callbacks):
@@ -1150,9 +1096,7 @@ def test_production_ready_ingress_is_governed_by_64_mib_byte_budget() -> None:
 
 @pytest.mark.asyncio
 async def test_burst_over_eight_callbacks_drains_through_bounded_ack_pipeline() -> None:
-  runtime = _stream_runtime(
-    max_ready_callbacks=MARKET_STREAM_READY_INGRESS_CALLBACKS
-  )
+  runtime = _stream_runtime(max_ready_callbacks=MARKET_STREAM_READY_INGRESS_CALLBACKS)
   runtime._market_stream_status = "READY"
   runtime._market_stream_sequence = 3
   runtime._market_stream_ack_latency_ms = 0.0
@@ -1165,10 +1109,7 @@ async def test_burst_over_eight_callbacks_drains_through_bounded_ack_pipeline() 
   codes = tuple(f"{index:06d}.SH" for index in range(256))
   for offset in range(32):
     runtime._whole_market_capture.capture(
-      {
-        code: {"lastPrice": 10.0 + offset / 100}
-        for code in codes
-      }
+      {code: {"lastPrice": 10.0 + offset / 100} for code in codes}
     )
 
   assert runtime._whole_market_capture.queue_depth == 32
@@ -1222,8 +1163,7 @@ async def test_burst_over_eight_callbacks_drains_through_bounded_ack_pipeline() 
       timeout=3,
     )
     assert [
-      MarketStreamBatch.from_bytes(payload).sequence
-      for payload in socket.sent
+      MarketStreamBatch.from_bytes(payload).sequence for payload in socket.sent
     ] == list(range(4, 36))
     assert runtime._whole_market_capture.queue_depth == 0
     assert runtime._whole_market_capture.invalidation_reason == ""
@@ -1365,10 +1305,7 @@ async def test_microbatch_seals_before_duplicate_instrument() -> None:
   class Broker:
     @staticmethod
     def prepare_whole_market_data(data):
-      return {
-        code: {"time": 1_000, **tick}
-        for code, tick in data.items()
-      }
+      return {code: {"time": 1_000, **tick} for code, tick in data.items()}
 
   runtime = AgentRuntime.__new__(AgentRuntime)
   runtime.broker = Broker()
@@ -1387,12 +1324,8 @@ async def test_microbatch_seals_before_duplicate_instrument() -> None:
     after_sequence=watermark,
     trading_date=None,
   )
-  runtime._whole_market_capture.capture(
-    {"600000.SH": {"lastPrice": 10.1}}
-  )
-  runtime._whole_market_capture.capture(
-    {"600000.SH": {"lastPrice": 10.2}}
-  )
+  runtime._whole_market_capture.capture({"600000.SH": {"lastPrice": 10.1}})
+  runtime._whole_market_capture.capture({"600000.SH": {"lastPrice": 10.2}})
   outbound = _BoundedMarketBatchBuffer(max_batches=8, max_bytes=1024 * 1024)
   producer = asyncio.create_task(
     runtime._whole_market_batch_producer(
@@ -1516,9 +1449,7 @@ async def test_rejected_native_subscription_clears_failed_source_capture() -> No
       timeout=2,
     )
     assert runtime.broker.subscriptions == 2
-    assert runtime._whole_market_capture.latest_snapshot(
-      trading_date=None
-    ).data == {}
+    assert runtime._whole_market_capture.latest_snapshot(trading_date=None).data == {}
   finally:
     runtime._stopped.set()
     await supervisor
@@ -1948,6 +1879,8 @@ async def test_control_reconnect_does_not_restart_process_market_stream() -> Non
 
   runtime = AgentRuntime.__new__(AgentRuntime)
   runtime._stopped = asyncio.Event()
+  runtime._broker_ready = asyncio.Event()
+  runtime._broker_ready.set()
   runtime._fatal_market_data_error = None
   runtime._whole_market_capture = Capture()
   runtime._whole_market_encode_executor = Executor()

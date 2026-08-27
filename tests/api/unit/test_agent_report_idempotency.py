@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from quantx_api import agent_api
 from quantx_contracts import AgentEnvelope, AgentMessageType
@@ -38,8 +40,19 @@ async def test_same_execution_with_new_message_id_is_acknowledged_once(
       "traded_price": 10,
     },
   }
+  session = agent_api.AgentControlSession(
+    device_id="device-1",
+    capabilities={"live"},
+    authorized_account_ids=frozenset({"account-1"}),
+    queue=asyncio.Queue(),
+    api_instance_id="api-instance-1",
+    agent_session_id="agent-session-1",
+    server_connected_at=agent_api.utcnow(),
+    remote_address_summary="10.0.0.*",
+    revoked=asyncio.Event(),
+  )
   first = await agent_api._record_report(
-    "device-1",
+    session,
     AgentEnvelope(
       message_id="00000000-0000-4000-8000-000000000001",
       message_type=AgentMessageType.EXECUTION_REPORT,
@@ -48,7 +61,7 @@ async def test_same_execution_with_new_message_id_is_acknowledged_once(
     received_at=agent_api.utcnow(),
   )
   duplicate = await agent_api._record_report(
-    "device-1",
+    session,
     AgentEnvelope(
       message_id="00000000-0000-4000-8000-000000000002",
       message_type=AgentMessageType.EXECUTION_REPORT,

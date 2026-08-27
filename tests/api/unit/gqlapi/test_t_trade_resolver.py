@@ -204,13 +204,23 @@ def test_global_monitor_projects_graphql_scalar_types():
   assert monitor.rapid_reversal_confirm_ticks == 2
 
 
-def test_global_monitor_masks_stale_ready_projection_when_qmt_launch_is_blocked(
+@pytest.mark.asyncio
+async def test_global_monitor_masks_stale_ready_projection_when_session_is_offline(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_ENROLLMENT_REQUIRED")
-  projected = TTradeResolver._apply_qmt_launch_block_to_monitor(
+  monkeypatch.setattr(
+    resolver_module.AccountExecutionSafetyService,
+    "status",
+    AsyncMock(
+      return_value={
+        "agent_status": "OFFLINE",
+        "qmt_launch_reason_code": "REMOTE_AGENT_SESSION_STALE",
+      }
+    ),
+  )
+  projected = await TTradeResolver._apply_agent_session_block_to_monitor(
     {
+      "account_id": "account-1",
       "agent_status": "READY",
       "can_approve": True,
       "can_activate_live": True,
@@ -254,20 +264,28 @@ def test_global_monitor_masks_stale_ready_projection_when_qmt_launch_is_blocked(
   assert readiness["protocol_version"] == ""
   assert readiness["can_approve"] is False
   assert readiness["can_activate_live"] is False
-  assert "QMT_ENROLLMENT_REQUIRED" in readiness["blocked_reasons"][-1]
+  assert "REMOTE_AGENT_SESSION_STALE" in readiness["blocked_reasons"][-1]
   checks = {item["code"]: item for item in readiness["checks"]}
   assert checks["LIVE_AGENT_READY"]["passed"] is False
-  assert checks["QMT_AGENT_LAUNCH_ALLOWED"]["passed"] is False
 
 
-def test_global_monitor_block_override_preserves_missing_nested_readiness(
+@pytest.mark.asyncio
+async def test_global_monitor_block_override_preserves_missing_nested_readiness(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_RUNTIME_UNAVAILABLE")
-
-  projected = TTradeResolver._apply_qmt_launch_block_to_monitor(
+  monkeypatch.setattr(
+    resolver_module.AccountExecutionSafetyService,
+    "status",
+    AsyncMock(
+      return_value={
+        "agent_status": "OFFLINE",
+        "qmt_launch_reason_code": "REMOTE_AGENT_OFFLINE",
+      }
+    ),
+  )
+  projected = await TTradeResolver._apply_agent_session_block_to_monitor(
     {
+      "account_id": "account-1",
       "agent_status": "READY",
       "can_approve": True,
       "can_activate_live": True,
@@ -280,15 +298,22 @@ def test_global_monitor_block_override_preserves_missing_nested_readiness(
   assert "readiness" not in projected
 
 
-def test_global_monitor_masks_projection_from_before_current_qmt_launch(
+@pytest.mark.asyncio
+async def test_global_monitor_masks_projection_after_api_restart(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
-  monkeypatch.setenv(
-    "QMT_AGENT_LAUNCH_STARTED_AT",
-    "2026-08-20T04:00:00Z",
+  monkeypatch.setattr(
+    resolver_module.AccountExecutionSafetyService,
+    "status",
+    AsyncMock(
+      return_value={
+        "agent_status": "OFFLINE",
+        "qmt_launch_reason_code": "REMOTE_AGENT_SESSION_STALE",
+      }
+    ),
   )
   stale = {
+    "account_id": "account-1",
     "agent_status": "READY",
     "can_approve": True,
     "can_activate_live": True,
@@ -301,22 +326,29 @@ def test_global_monitor_masks_projection_from_before_current_qmt_launch(
     },
   }
 
-  projected = TTradeResolver._apply_qmt_launch_block_to_monitor(stale)
+  projected = await TTradeResolver._apply_agent_session_block_to_monitor(stale)
 
   assert projected["agent_status"] == "BLOCKED"
   assert projected["readiness"]["status"] == "BLOCKED"
-  assert "QMT_LAUNCH_PENDING_CURRENT_HEARTBEAT" in projected["blocked_reasons"][-1]
+  assert "REMOTE_AGENT_SESSION_STALE" in projected["blocked_reasons"][-1]
 
 
-def test_global_monitor_accepts_projection_from_current_qmt_launch(
+@pytest.mark.asyncio
+async def test_global_monitor_accepts_projection_from_current_session(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
-  monkeypatch.setenv(
-    "QMT_AGENT_LAUNCH_STARTED_AT",
-    "2026-08-20T04:00:00Z",
+  monkeypatch.setattr(
+    resolver_module.AccountExecutionSafetyService,
+    "status",
+    AsyncMock(
+      return_value={
+        "agent_status": "READY",
+        "checks": [{"code": "MARKET_STREAM_READY", "passed": True}],
+      }
+    ),
   )
   current = {
+    "account_id": "account-1",
     "agent_status": "READY",
     "can_approve": True,
     "can_activate_live": True,
@@ -327,7 +359,7 @@ def test_global_monitor_accepts_projection_from_current_qmt_launch(
     },
   }
 
-  assert TTradeResolver._apply_qmt_launch_block_to_monitor(current) is current
+  assert await TTradeResolver._apply_agent_session_block_to_monitor(current) is current
 
 
 def test_graphql_projection_keeps_known_fields_and_drops_internal_fields():
@@ -702,9 +734,7 @@ async def test_live_activation_readback_failure_converges_from_committed_marker(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   service = SimpleNamespace(
-    activate_rollout=AsyncMock(
-      side_effect=ValueError("readiness JSON 暂时无法验证")
-    ),
+    activate_rollout=AsyncMock(side_effect=ValueError("readiness JSON 暂时无法验证")),
     operation_marker_exists=AsyncMock(return_value=True),
     record_event=AsyncMock(),
   )

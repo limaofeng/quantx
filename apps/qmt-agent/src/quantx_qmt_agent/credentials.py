@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .endpoints import normalize_api_url
+
 KEYRING_SERVICE = "QuantX QMT Agent"
 
 
@@ -37,7 +39,7 @@ class DeviceCredentialStore:
     keyring.set_password(KEYRING_SERVICE, device_id, device_secret)
     self.config_path.write_text(
       json.dumps(
-        {"api_url": api_url.rstrip("/"), "device_id": device_id},
+        {"api_url": normalize_api_url(api_url), "device_id": device_id},
         indent=2,
       ),
       encoding="utf-8",
@@ -50,7 +52,7 @@ class DeviceCredentialStore:
       raise RuntimeError("QMT Agent 尚未登记，请先运行 enroll")
     raw = json.loads(self.config_path.read_text(encoding="utf-8"))
     configuration = DeviceConfiguration(
-      api_url=str(raw["api_url"]).rstrip("/"),
+      api_url=normalize_api_url(str(raw["api_url"])),
       device_id=str(raw["device_id"]),
     )
     secret = keyring.get_password(KEYRING_SERVICE, configuration.device_id)

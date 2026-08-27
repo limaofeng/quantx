@@ -14,11 +14,6 @@ from dotenv import load_dotenv
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from quantx_infrastructure.services.qmt_launch_guard import (
-  qmt_agent_launch_state,
-  qmt_heartbeat_matches_current_launch,
-)
-
 
 def resolve_database_url() -> str:
   root_value = os.environ.get("QUANTX_ROOT", "").strip()
@@ -28,7 +23,9 @@ def resolve_database_url() -> str:
     else Path(__file__).resolve().parents[4]
   )
   load_dotenv(root / "apps" / "api" / ".env", override=False)
-  load_dotenv(root / "apps" / "api" / f".env.{os.getenv('ENV', 'development')}", override=False)
+  load_dotenv(
+    root / "apps" / "api" / f".env.{os.getenv('ENV', 'development')}", override=False
+  )
   value = os.environ.get("DATABASE_URL", "").strip()
   if not value or "asyncpg" not in value:
     raise RuntimeError("DATABASE_URL must be an async PostgreSQL URL")
@@ -95,8 +92,6 @@ class DurableRuntimeStore:
     trading-unavailable Agents may still provide XTData history.
     """
 
-    if qmt_agent_launch_state() in {"BLOCKED", "NOT_REQUESTED"}:
-      return None
     cutoff = _utcnow() - timedelta(seconds=max(1.0, float(max_age_seconds)))
     connected_statuses = (
       "READY",
@@ -112,16 +107,25 @@ class DurableRuntimeStore:
             """
             SELECT
               device.id,
-              device.capabilities,
-              heartbeat.updated_at AS heartbeat_updated_at
+              device.capabilities
             FROM agent_devices AS device
             JOIN runtime_component_heartbeats AS heartbeat
               ON heartbeat.component = 'qmt-agent:' || device.id
+            JOIN runtime_component_heartbeats AS api
+              ON api.component = 'api'
             WHERE device.revoked_at IS NULL
               AND device.last_seen_at >= :cutoff
-              AND heartbeat.updated_at >= :cutoff
+              AND api.updated_at >= :cutoff
+              AND UPPER(api.status) = 'READY'
+              AND heartbeat.details ->> 'apiInstanceId' = api.instance_id
+              AND heartbeat.details ->> 'sessionActive' = 'true'
+              AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
+              AND CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ)
+                >= :cutoff
               AND UPPER(heartbeat.status) IN :connected_statuses
-            ORDER BY heartbeat.updated_at DESC, device.last_seen_at DESC
+            ORDER BY
+              CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ) DESC,
+              device.last_seen_at DESC
             """
           ).bindparams(bindparam("connected_statuses", expanding=True)),
           {
@@ -131,10 +135,6 @@ class DurableRuntimeStore:
         )
       ).mappings()
       for row in rows:
-        if not qmt_heartbeat_matches_current_launch(
-          row["heartbeat_updated_at"]
-        ):
-          continue
         capabilities = row["capabilities"]
         if isinstance(capabilities, str):
           capabilities = json.loads(capabilities)
@@ -152,9 +152,10 @@ class DurableRuntimeStore:
 
     async with self.engine.connect() as connection:
       row = (
-        await connection.execute(
-          text(
-            """
+        (
+          await connection.execute(
+            text(
+              """
             SELECT request_id, status, processing_error, updated_at
             FROM market_data_request
             WHERE device_id = :device_id
@@ -163,10 +164,13 @@ class DurableRuntimeStore:
             ORDER BY created_at
             LIMIT 1
             """
-          ),
-          {"device_id": device_id},
+            ),
+            {"device_id": device_id},
+          )
         )
-      ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+      )
     return dict(row) if row is not None else None
 
   async def create_market_data_request(
@@ -189,9 +193,7 @@ class DurableRuntimeStore:
     idempotency_material = (
       encoded if not normalized_scope else f"{normalized_scope}\0{encoded}"
     )
-    idempotency_key = hashlib.sha256(
-      idempotency_material.encode("utf-8")
-    ).hexdigest()
+    idempotency_key = hashlib.sha256(idempotency_material.encode("utf-8")).hexdigest()
     async with self.engine.begin() as connection:
       existing = (
         await connection.execute(
@@ -209,37 +211,74 @@ class DurableRuntimeStore:
         return str(existing)
       if device_id:
         selected = (
-          await connection.execute(
-            text(
+          (
+            await connection.execute(
+              text(
+                """
+              SELECT device.id, device.capabilities
+              FROM agent_devices AS device
+              JOIN runtime_component_heartbeats AS heartbeat
+                ON heartbeat.component = 'qmt-agent:' || device.id
+              JOIN runtime_component_heartbeats AS api
+                ON api.component = 'api'
+              WHERE device.id = :device_id
+                AND device.revoked_at IS NULL
+                AND api.updated_at >= :cutoff
+                AND UPPER(api.status) = 'READY'
+                AND heartbeat.details ->> 'apiInstanceId' = api.instance_id
+                AND heartbeat.details ->> 'sessionActive' = 'true'
+                AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
+                AND CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ)
+                  >= :cutoff
+                AND UPPER(heartbeat.status) IN (
+                  'READY', 'RECONCILING', 'RECONCILE_REQUIRED',
+                  'TRADING_UNAVAILABLE', 'EMERGENCY_STOP'
+                )
               """
-              SELECT id, capabilities
-              FROM agent_devices
-              WHERE id = :device_id
-                AND revoked_at IS NULL
-              """
-            ),
-            {"device_id": device_id},
+              ),
+              {
+                "device_id": device_id,
+                "cutoff": _utcnow() - timedelta(seconds=90),
+              },
+            )
           )
-        ).mappings().one_or_none()
+          .mappings()
+          .one_or_none()
+        )
         rows = [selected] if selected is not None else []
       else:
         rows = (
           await connection.execute(
             text(
               """
-              SELECT id, capabilities
-              FROM agent_devices
-              WHERE revoked_at IS NULL
-              ORDER BY last_seen_at DESC NULLS LAST
+              SELECT device.id, device.capabilities
+              FROM agent_devices AS device
+              JOIN runtime_component_heartbeats AS heartbeat
+                ON heartbeat.component = 'qmt-agent:' || device.id
+              JOIN runtime_component_heartbeats AS api
+                ON api.component = 'api'
+              WHERE device.revoked_at IS NULL
+                AND api.updated_at >= :cutoff
+                AND UPPER(api.status) = 'READY'
+                AND heartbeat.details ->> 'apiInstanceId' = api.instance_id
+                AND heartbeat.details ->> 'sessionActive' = 'true'
+                AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
+                AND CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ)
+                  >= :cutoff
+                AND UPPER(heartbeat.status) IN (
+                  'READY', 'RECONCILING', 'RECONCILE_REQUIRED',
+                  'TRADING_UNAVAILABLE', 'EMERGENCY_STOP'
+                )
+              ORDER BY
+                CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ) DESC
               """
-            )
+            ),
+            {"cutoff": _utcnow() - timedelta(seconds=90)},
           )
         ).mappings()
       required = {"market-data"}
       required.update(
-        str(item).strip()
-        for item in required_capabilities or []
-        if str(item).strip()
+        str(item).strip() for item in required_capabilities or [] if str(item).strip()
       )
       selected_device_id = ""
       for row in rows:
@@ -258,8 +297,7 @@ class DurableRuntimeStore:
             f"capabilities: {requirement}"
           )
         raise RuntimeError(
-          "No registered QMT Agent is available with capabilities: "
-          f"{requirement}"
+          f"No registered QMT Agent is available with capabilities: {requirement}"
         )
       request_id = str(uuid.uuid4())
       inserted_request_id = (
@@ -333,18 +371,22 @@ class DurableRuntimeStore:
   ) -> Optional[dict[str, Any]]:
     async with self.engine.connect() as connection:
       value = (
-        await connection.execute(
-          text(
-            """
+        (
+          await connection.execute(
+            text(
+              """
             SELECT request_id, request_payload, status, expected_chunks,
                    received_chunks, processing_error, ingestion_result
             FROM market_data_request
             WHERE request_id = :request_id
             """
-          ),
-          {"request_id": request_id},
+            ),
+            {"request_id": request_id},
+          )
         )
-      ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+      )
     return dict(value) if value else None
 
   async def market_data_transfers(
@@ -701,17 +743,21 @@ class DurableRuntimeStore:
       if updated_status is not None:
         return
       existing_status = (
-        await connection.execute(
-          text(
-            """
+        (
+          await connection.execute(
+            text(
+              """
             SELECT status, ingestion_result, processing_claim_token
             FROM market_data_request
             WHERE request_id = :request_id
             """
-          ),
-          {"request_id": request_id},
+            ),
+            {"request_id": request_id},
+          )
         )
-      ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+      )
       if existing_status is None:
         raise RuntimeError("market-data request disappeared before terminal transition")
       if str(existing_status["status"]) == "PROCESSING" or (
@@ -739,9 +785,10 @@ class DurableRuntimeStore:
     reopened_at = _utcnow()
     async with self.engine.begin() as connection:
       evidence = (
-        await connection.execute(
-          text(
-            """
+        (
+          await connection.execute(
+            text(
+              """
             WITH candidate AS MATERIALIZED (
               SELECT
                 market_request.request_id,
@@ -798,13 +845,16 @@ class DurableRuntimeStore:
             FROM reopened
             JOIN candidate ON candidate.request_id = reopened.request_id
             """
-          ),
-          {
-            "request_id": request_id,
-            "reopened_at": reopened_at,
-          },
+            ),
+            {
+              "request_id": request_id,
+              "reopened_at": reopened_at,
+            },
+          )
         )
-      ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+      )
       if evidence is None:
         raise RuntimeError(
           "market-data request is not safely reopenable: "
@@ -951,9 +1001,7 @@ class DurableRuntimeStore:
     *,
     instrument_type: Optional[str] = None,
   ) -> list[str]:
-    normalized_type = (
-      str(instrument_type).strip().upper() if instrument_type else None
-    )
+    normalized_type = str(instrument_type).strip().upper() if instrument_type else None
     async with self.engine.connect() as connection:
       values = (
         await connection.execute(

@@ -26,6 +26,25 @@ from quantx_qmt_agent.runtime import AgentRuntime
 from quantx_qmt_agent.whole_market_capture import WholeMarketCapture
 from starlette.websockets import WebSocketState
 
+TOKEN_FINGERPRINT = "f" * 64
+
+
+def _market_lease(device_id: str = "device-1") -> agent_api.MarketSessionLease:
+  return agent_api.MarketSessionLease(
+    device_id=device_id,
+    api_instance_id="api-instance-1",
+    agent_session_id="agent-session-1",
+    access_token_fingerprint=TOKEN_FINGERPRINT,
+  )
+
+
+def _authenticated_session() -> SimpleNamespace:
+  return SimpleNamespace(
+    device=SimpleNamespace(id="device-1"),
+    expires_at=agent_api.utcnow() + timedelta(minutes=5),
+    access_token_fingerprint=TOKEN_FINGERPRINT,
+  )
+
 
 class InMemorySubscription:
   def __init__(self) -> None:
@@ -171,7 +190,7 @@ class PipelineWebSocket:
       payload={
         "device_id": "device-1",
         "access_token": "token",
-        "capabilities": ["market-data"],
+        "capabilities": ["market-data", "data-only"],
       },
     ).model_dump_json()
 
@@ -370,21 +389,19 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
   websocket = PipelineWebSocket(batches)
 
   async def authenticate(_envelope):
-    return SimpleNamespace(
-      device=SimpleNamespace(id="device-1"),
-      expires_at=agent_api.utcnow() + timedelta(minutes=5),
-    )
+    return _authenticated_session()
 
-  async def allowed(_device_id):
-    return True
+  async def market_lease(device_id):
+    return _market_lease(device_id)
 
-  async def active(_device_id):
+  async def active(_device_id, *, lease=None):
+    assert lease == _market_lease(_device_id)
     return None
 
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "is_market_device", allowed)
+  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(
     agent_api,
@@ -456,9 +473,7 @@ async def test_delayed_sequence_two_ack_keeps_engine_closed_until_sequence_three
   runtime._whole_market_subscription_ready.set()
   runtime._whole_market_native_reset = asyncio.Event()
   runtime._access_token = "token-1"
-  runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(
-    hours=1
-  )
+  runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
   runtime._access_token_ready = asyncio.Event()
   runtime._control_hub_registered_once = asyncio.Event()
   runtime._control_hub_registered_once.set()
@@ -475,21 +490,19 @@ async def test_delayed_sequence_two_ack_keeps_engine_closed_until_sequence_three
   runtime._build_whole_market_snapshot = build_snapshot
 
   async def authenticate(_envelope):
-    return SimpleNamespace(
-      device=SimpleNamespace(id="device-1"),
-      expires_at=agent_api.utcnow() + timedelta(minutes=5),
-    )
+    return _authenticated_session()
 
-  async def allowed(_device_id):
-    return True
+  async def market_lease(device_id):
+    return _market_lease(device_id)
 
-  async def active(_device_id):
+  async def active(_device_id, *, lease=None):
+    assert lease == _market_lease(_device_id)
     return None
 
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "is_market_device", allowed)
+  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(
     agent_api,
@@ -507,8 +520,7 @@ async def test_delayed_sequence_two_ack_keeps_engine_closed_until_sequence_three
   agent_task = asyncio.create_task(runtime._run_whole_market_stream())
   try:
     await _wait_until(
-      lambda: store.api_state is not None
-      and store.api_state.sequence == 2
+      lambda: store.api_state is not None and store.api_state.sequence == 2
     )
     assert store.api_state.status == "SYNCING"
     assert not hub.is_ready
@@ -522,10 +534,12 @@ async def test_delayed_sequence_two_ack_keeps_engine_closed_until_sequence_three
 
     duplex.release_sequence_two_ack.set()
     await _wait_until(
-      lambda: store.api_state is not None
-      and store.api_state.status == "READY"
-      and store.api_state.sequence == 3
-      and hub.is_ready
+      lambda: (
+        store.api_state is not None
+        and store.api_state.status == "READY"
+        and store.api_state.sequence == 3
+        and hub.is_ready
+      )
     )
     assert store.latest["600000.SH"]["lastPrice"] == 10.3
     assert hub.latest("600000.SH")["lastPrice"] == 10.3
@@ -540,9 +554,11 @@ async def test_delayed_sequence_two_ack_keeps_engine_closed_until_sequence_three
       {"600000.SH": {"lastPrice": 10.4, "time": 10_400}}
     )
     await _wait_until(
-      lambda: store.api_state is not None
-      and store.api_state.sequence == 4
-      and hub.sequence == 4
+      lambda: (
+        store.api_state is not None
+        and store.api_state.sequence == 4
+        and hub.sequence == 4
+      )
     )
     assert hub.latest("600000.SH")["lastPrice"] == 10.4
   finally:
@@ -600,21 +616,19 @@ async def test_sequence_three_commit_failure_never_makes_store_ready(
   websocket = PipelineWebSocket(batches)
 
   async def authenticate(_envelope):
-    return SimpleNamespace(
-      device=SimpleNamespace(id="device-1"),
-      expires_at=agent_api.utcnow() + timedelta(minutes=5),
-    )
+    return _authenticated_session()
 
-  async def allowed(_device_id):
-    return True
+  async def market_lease(device_id):
+    return _market_lease(device_id)
 
-  async def active(_device_id):
+  async def active(_device_id, *, lease=None):
+    assert lease == _market_lease(_device_id)
     return None
 
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "is_market_device", allowed)
+  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(
     agent_api,
@@ -656,21 +670,19 @@ async def test_untrusted_websocket_tick_without_source_time_fails_closed(
   websocket = PipelineWebSocket([invalid_snapshot])
 
   async def authenticate(_envelope):
-    return SimpleNamespace(
-      device=SimpleNamespace(id="device-1"),
-      expires_at=agent_api.utcnow() + timedelta(minutes=5),
-    )
+    return _authenticated_session()
 
-  async def allowed(_device_id):
-    return True
+  async def market_lease(device_id):
+    return _market_lease(device_id)
 
-  async def active(_device_id):
+  async def active(_device_id, *, lease=None):
+    assert lease == _market_lease(_device_id)
     return None
 
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "is_market_device", allowed)
+  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(
     agent_api,
@@ -726,15 +738,13 @@ async def test_disconnect_before_sequence_three_never_makes_store_ready(
   websocket = PipelineWebSocket(batches)
 
   async def authenticate(_envelope):
-    return SimpleNamespace(
-      device=SimpleNamespace(id="device-1"),
-      expires_at=agent_api.utcnow() + timedelta(minutes=5),
-    )
+    return _authenticated_session()
 
-  async def allowed(_device_id):
-    return True
+  async def market_lease(device_id):
+    return _market_lease(device_id)
 
-  async def active(_device_id):
+  async def active(_device_id, *, lease=None):
+    assert lease == _market_lease(_device_id)
     return None
 
   original_registry = agent_api._market_connections
@@ -742,8 +752,8 @@ async def test_disconnect_before_sequence_three_never_makes_store_ready(
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
   monkeypatch.setattr(
     agent_api.agent_connection_hub,
-    "is_market_device",
-    allowed,
+    "market_lease",
+    market_lease,
   )
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(

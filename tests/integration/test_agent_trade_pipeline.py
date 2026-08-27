@@ -71,6 +71,23 @@ TABLES = [
   Trade.__table__,
 ]
 
+API_INSTANCE_ID = "api-instance-1"
+AGENT_SESSION_ID = "agent-session-1"
+
+
+def _control_session() -> agent_api.AgentControlSession:
+  return agent_api.AgentControlSession(
+    device_id="device-1",
+    capabilities={"paper"},
+    authorized_account_ids=frozenset({"account-1"}),
+    queue=asyncio.Queue(),
+    api_instance_id=API_INSTANCE_ID,
+    agent_session_id=AGENT_SESSION_ID,
+    server_connected_at=utcnow(),
+    remote_address_summary="test-client",
+    revoked=asyncio.Event(),
+  )
+
 
 class CapturingSocket:
   def __init__(self) -> None:
@@ -125,6 +142,8 @@ async def _database(
   monkeypatch.setattr(order_service, "get_async_db", get_test_db)
   monkeypatch.setattr(trade_service, "get_async_db", get_test_db)
   async with session_factory() as db:
+    observed_at = utcnow()
+    observed_at_iso = agent_api.utc_iso(observed_at)
     db.add(
       AuthUser(
         id="user-1",
@@ -146,11 +165,26 @@ async def _database(
     )
     db.add(
       RuntimeComponentHeartbeat(
+        component="api",
+        instance_id=API_INSTANCE_ID,
+        status="READY",
+        details={"startedAt": observed_at_iso},
+        updated_at=observed_at,
+      )
+    )
+    db.add(
+      RuntimeComponentHeartbeat(
         component="qmt-agent:device-1",
         instance_id="device-1",
         status="READY",
-        details={},
-        updated_at=utcnow(),
+        details={
+          "apiInstanceId": API_INSTANCE_ID,
+          "agentSessionId": AGENT_SESSION_ID,
+          "serverReceivedAt": observed_at_iso,
+          "agentSentAt": observed_at_iso,
+          "sessionActive": True,
+        },
+        updated_at=observed_at,
       )
     )
     await db.commit()
@@ -203,11 +237,7 @@ async def _enqueue_strategy_order(
         instrument_code="600000.SH",
         direction="BUY",
         bucket="core" if managed_entry else "swing",
-        reason=(
-          "MANAGED_ENTRY"
-          if managed_entry
-          else "T_TRADE_PULLBACK_REBOUND_ENTRY"
-        ),
+        reason=("MANAGED_ENTRY" if managed_entry else "T_TRADE_PULLBACK_REBOUND_ENTRY"),
         status="PENDING",
         target_volume=100,
         limit_price_hint=10.5,
@@ -259,9 +289,7 @@ def _runtime(
     ),
     device_secret="unused",
     mode="paper",
-    allowed_accounts=(
-      {"account-1"} if allowed_accounts is None else allowed_accounts
-    ),
+    allowed_accounts=({"account-1"} if allowed_accounts is None else allowed_accounts),
     broker=broker,
     journal=LocalJournal(journal_path),
   )
@@ -275,7 +303,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
   session_factory, engine = await _database(monkeypatch)
   queued = await _enqueue_order(session_factory)
 
-  command = await agent_api._next_command("device-1")
+  command = await agent_api._next_command(_control_session())
   assert command is not None
   assert command.message_id == queued.message_id
   assert command.sent_at.tzinfo is not None
@@ -290,9 +318,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
     AgentEnvelope.model_validate_json(serialized) for serialized in socket.sent
   ]
   command_ack = next(
-    item
-    for item in outbound
-    if item.message_type is AgentMessageType.COMMAND_ACK
+    item for item in outbound if item.message_type is AgentMessageType.COMMAND_ACK
   )
   reports = [
     item
@@ -311,7 +337,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
   await agent_api._record_command_ack("device-1", command_ack.payload)
   acknowledgements = [
     await agent_api._record_report(
-      "device-1",
+      _control_session(),
       report,
       received_at=agent_api.utcnow(),
     )
@@ -321,7 +347,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
 
   execution_report = reports[1]
   duplicate = await agent_api._record_report(
-    "device-1",
+    _control_session(),
     execution_report.model_copy(
       update={"message_id": "00000000-0000-4000-8000-000000000099"}
     ),
@@ -332,17 +358,19 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
-    inbox_count = await db.scalar(
-      select(func.count()).select_from(AgentReportInbox)
-    )
+    inbox_count = await db.scalar(select(func.count()).select_from(AgentReportInbox))
     assert outbox is not None and outbox.delivery_status == "ACKNOWLEDGED"
     assert pending is not None and pending.status == "QUEUED"
     assert inbox_count == 2
     stored = (
-      await db.execute(
-        select(AgentReportInbox).order_by(AgentReportInbox.received_at)
+      (
+        await db.execute(
+          select(AgentReportInbox).order_by(AgentReportInbox.received_at)
+        )
       )
-    ).scalars().all()
+      .scalars()
+      .all()
+    )
   order_inbox = next(item for item in stored if item.message_type == "order_report")
   execution_inbox = next(
     item for item in stored if item.message_type == "execution_report"
@@ -353,9 +381,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
     await report_processor._process(execution_inbox)
   await report_processor._finish(
     execution_inbox.message_id,
-    error=report_processor.RetryableReportError(
-      "对应 order_report 尚未收敛"
-    ),
+    error=report_processor.RetryableReportError("对应 order_report 尚未收敛"),
   )
   async with session_factory() as db:
     retry = await db.get(AgentReportInbox, execution_inbox.message_id)
@@ -377,13 +403,112 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
     ).scalar_one()
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
     processed = (
-      await db.execute(select(AgentReportInbox.processing_status))
-    ).scalars().all()
+      (await db.execute(select(AgentReportInbox.processing_status))).scalars().all()
+    )
     assert persisted_trade.order_id == persisted_order.id
     assert persisted_trade.volume == 100
     assert pending is not None and pending.status == "FILLED"
     assert processed == ["PROCESSED", "PROCESSED"]
 
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_trade_frame_is_blocked_when_device_is_revoked_after_poll(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  await _enqueue_order(session_factory)
+  command = await agent_api._next_command(_control_session())
+  assert command is not None
+
+  async with session_factory() as db:
+    device = await db.get(AgentDevice, "device-1")
+    assert device is not None
+    device.revoked_at = utcnow()
+    await db.commit()
+
+  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+    await agent_api._assert_trade_delivery_session(_control_session(), command)
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_buy_frame_is_blocked_until_market_stream_is_ready(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  session = _control_session()
+  session.capabilities = {"live"}
+  command = AgentEnvelope(
+    message_type=AgentMessageType.COMMAND,
+    payload={
+      "command_kind": "PLACE_ORDER",
+      "account_id": "account-1",
+      "execution_mode": "live",
+      "side": "BUY",
+    },
+  )
+
+  async with session_factory() as db:
+    heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
+    assert heartbeat is not None
+    heartbeat.details = {
+      **dict(heartbeat.details or {}),
+      "marketStreamStatus": "SYNCING",
+    }
+    await db.commit()
+
+  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+    await agent_api._assert_trade_delivery_session(session, command)
+
+  async with session_factory() as db:
+    heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
+    assert heartbeat is not None
+    heartbeat.details = {
+      **dict(heartbeat.details or {}),
+      "marketStreamStatus": "READY",
+    }
+    await db.commit()
+
+  await agent_api._assert_trade_delivery_session(session, command)
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_agent_rejects_buy_before_market_readiness(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  class BrokerSpy:
+    execute_calls = 0
+
+    def execute(self, _payload):
+      self.execute_calls += 1
+      raise AssertionError("an unready market stream must block broker execution")
+
+  session_factory, engine = await _database(monkeypatch)
+  await _enqueue_order(session_factory)
+  command = await agent_api._next_command(_control_session())
+  assert command is not None
+  command.payload["execution_mode"] = "live"
+  broker = BrokerSpy()
+  runtime = _runtime(tmp_path / "market-gate.sqlite3", broker)
+  runtime.mode = "live"
+  runtime._market_stream_status = "SYNCING"
+  socket = CapturingSocket()
+
+  await runtime._handle_command(socket, command)
+
+  messages = [AgentEnvelope.model_validate_json(item) for item in socket.sent]
+  ack = next(
+    item for item in messages if item.message_type is AgentMessageType.COMMAND_ACK
+  )
+  assert ack.payload["accepted"] is False
+  assert ack.payload["reason"] == "market_stream_not_ready"
+  assert broker.execute_calls == 0
+  runtime._whole_market_encode_executor.shutdown(wait=False, cancel_futures=True)
   await engine.dispose()
 
 
@@ -431,7 +556,7 @@ async def test_partial_fill_converges_before_final_fill(
 
   session_factory, engine = await _database(monkeypatch)
   queued = await _enqueue_order(session_factory)
-  command = await agent_api._next_command("device-1")
+  command = await agent_api._next_command(_control_session())
   assert command is not None
   socket = CapturingSocket()
   await _runtime(
@@ -442,9 +567,7 @@ async def test_partial_fill_converges_before_final_fill(
     AgentEnvelope.model_validate_json(serialized) for serialized in socket.sent
   ]
   ack = next(
-    item
-    for item in outbound
-    if item.message_type is AgentMessageType.COMMAND_ACK
+    item for item in outbound if item.message_type is AgentMessageType.COMMAND_ACK
   )
   reports = [
     item
@@ -459,7 +582,7 @@ async def test_partial_fill_converges_before_final_fill(
   for report in reports:
     assert (
       await agent_api._record_report(
-        "device-1",
+        _control_session(),
         report,
         received_at=agent_api.utcnow(),
       )
@@ -509,7 +632,7 @@ async def test_pre_execution_rejection_closes_pending_order_and_cancel_ack_is_de
 
   session_factory, engine = await _database(monkeypatch)
   queued = await _enqueue_order(session_factory)
-  command = await agent_api._next_command("device-1")
+  command = await agent_api._next_command(_control_session())
   assert command is not None
   broker = BrokerSpy()
   rejected_socket = CapturingSocket()
@@ -544,7 +667,7 @@ async def test_pre_execution_rejection_closes_pending_order_and_cancel_ack_is_de
     assert pending.status_reason == "account_not_whitelisted"
   assert broker.execute_calls == 0
 
-  cancel_command = await agent_api._next_command("device-1")
+  cancel_command = await agent_api._next_command(_control_session())
   assert cancel_command is not None
   assert cancel_command.message_type is AgentMessageType.CANCEL_COMMAND
   cancel_socket = CapturingSocket()
@@ -562,7 +685,8 @@ async def test_pre_execution_rejection_closes_pending_order_and_cancel_ack_is_de
   )
   await agent_api._record_command_ack("device-1", cancel_ack.payload)
   assert not any(
-    item.message_type in {
+    item.message_type
+    in {
       AgentMessageType.ORDER_REPORT,
       AgentMessageType.EXECUTION_REPORT,
     }
@@ -589,7 +713,7 @@ async def test_expired_command_is_closed_without_delivery(
     outbox.expires_at = utcnow() - timedelta(seconds=1)
     await db.commit()
 
-  assert await agent_api._next_command("device-1") is None
+  assert await agent_api._next_command(_control_session()) is None
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
@@ -660,9 +784,7 @@ async def test_managed_entry_queued_expiry_proves_zero_fill(
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
     intent = await db.get(TradeIntentRecord, intent_id)
-    [event] = list(
-      (await db.execute(select(StrategyRuntimeEvent))).scalars().all()
-    )
+    [event] = list((await db.execute(select(StrategyRuntimeEvent))).scalars().all())
     assert outbox is not None and outbox.delivery_status == "EXPIRED"
     assert outbox.last_error == "command_expired_before_delivery"
     assert pending is not None and pending.status == "EXPIRED"
@@ -685,7 +807,7 @@ async def test_managed_entry_agent_expiry_ack_and_error_report_replay_one_zero_f
     idempotency_key="managed-entry-agent-expiry",
     managed_entry=True,
   )
-  assert await agent_api._next_command("device-1") is not None
+  assert await agent_api._next_command(_control_session()) is not None
   ack = {
     "command_message_id": queued.message_id,
     "client_order_id": queued.client_order_id,
@@ -712,7 +834,7 @@ async def test_managed_entry_agent_expiry_ack_and_error_report_replay_one_zero_f
   )
   assert (
     await agent_api._record_report(
-      "device-1",
+      _control_session(),
       error_report,
       received_at=agent_api.utcnow(),
     )
@@ -728,9 +850,7 @@ async def test_managed_entry_agent_expiry_ack_and_error_report_replay_one_zero_f
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
     intent = await db.get(TradeIntentRecord, intent_id)
-    events = list(
-      (await db.execute(select(StrategyRuntimeEvent))).scalars().all()
-    )
+    events = list((await db.execute(select(StrategyRuntimeEvent))).scalars().all())
     assert outbox is not None and outbox.delivery_status == "EXPIRED"
     assert outbox.last_error == "command_expired"
     assert pending is not None and pending.status == "EXPIRED"
@@ -739,9 +859,7 @@ async def test_managed_entry_agent_expiry_ack_and_error_report_replay_one_zero_f
     assert events[0].business_key == (
       f"order:{queued.client_order_id}::RECONCILED_ZERO_FILL:0"
     )
-    assert (
-      events[0].payload["report"]["status"] == "RECONCILED_ZERO_FILL"
-    )
+    assert events[0].payload["report"]["status"] == "RECONCILED_ZERO_FILL"
   await engine.dispose()
 
 
@@ -755,7 +873,7 @@ async def test_managed_entry_reconnect_expiry_closes_prior_reconcile_gate(
     idempotency_key="managed-entry-reconnect-expiry",
     managed_entry=True,
   )
-  assert await agent_api._next_command("device-1") is not None
+  assert await agent_api._next_command(_control_session()) is not None
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     assert outbox is not None and outbox.delivery_status == "DELIVERED"
@@ -795,7 +913,7 @@ async def test_managed_entry_reconnect_expiry_closes_prior_reconcile_gate(
   )
   assert (
     await agent_api._record_report(
-      "device-1",
+      _control_session(),
       error_report,
       received_at=agent_api.utcnow(),
     )
@@ -825,9 +943,10 @@ async def test_managed_entry_reconnect_expiry_closes_prior_reconcile_gate(
     assert outbox is not None and outbox.delivery_status == "EXPIRED"
     assert pending is not None and pending.status == "EXPIRED"
     assert intent is not None and intent.status == "RECONCILED_ZERO_FILL"
-    assert [
-      event.payload["report"]["status"] for event in events
-    ] == ["RECONCILE_REQUIRED", "RECONCILED_ZERO_FILL"]
+    assert [event.payload["report"]["status"] for event in events] == [
+      "RECONCILE_REQUIRED",
+      "RECONCILED_ZERO_FILL",
+    ]
   await engine.dispose()
 
 
@@ -906,8 +1025,8 @@ async def test_expired_queued_strategy_command_atomically_closes_gate_and_callba
     outbox.expires_at = utcnow() - timedelta(seconds=1)
     await db.commit()
 
-  assert await agent_api._next_command("device-1") is None
-  assert await agent_api._next_command("device-1") is None
+  assert await agent_api._next_command(_control_session()) is None
+  assert await agent_api._next_command(_control_session()) is None
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
@@ -919,9 +1038,7 @@ async def test_expired_queued_strategy_command_atomically_closes_gate_and_callba
     assert intent is not None and intent.status == "EXPIRED"
     assert batch is not None and batch.status == "ENTRY_EXPIRED"
     assert len(events) == 1
-    assert events[0].business_key == (
-      f"order:{queued.client_order_id}::EXPIRED:0"
-    )
+    assert events[0].business_key == (f"order:{queued.client_order_id}::EXPIRED:0")
     assert events[0].payload["metadata"]["runtime_event_key"] == (
       events[0].business_key
     )
@@ -996,14 +1113,14 @@ async def test_expired_delivered_strategy_command_fails_closed_for_reconciliatio
     session_factory,
     idempotency_key="delivered-expiry",
   )
-  assert await agent_api._next_command("device-1") is not None
+  assert await agent_api._next_command(_control_session()) is not None
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     assert outbox is not None and outbox.delivery_status == "DELIVERED"
     outbox.expires_at = utcnow() - timedelta(seconds=1)
     await db.commit()
 
-  assert await agent_api._next_command("device-1") is None
+  assert await agent_api._next_command(_control_session()) is None
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
@@ -1057,7 +1174,7 @@ async def test_queued_expiry_with_broker_evidence_cannot_be_declared_unexecuted(
     correlation.broker_order_id = "broker-contradiction"
     await db.commit()
 
-  assert await agent_api._next_command("device-1") is None
+  assert await agent_api._next_command(_control_session()) is None
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
@@ -1097,7 +1214,7 @@ async def test_missing_durable_command_link_never_clears_strategy_gate(
       await db.delete(pending)
     await db.commit()
 
-  assert await agent_api._next_command("device-1") is None
+  assert await agent_api._next_command(_control_session()) is None
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
@@ -1127,6 +1244,7 @@ async def test_missing_durable_command_link_never_clears_strategy_gate(
   [
     ("precheck", "account_not_whitelisted", "REJECTED"),
     ("expired", "command_expired", "EXPIRED"),
+    ("market-not-ready", "market_stream_not_ready", "REJECTED"),
     ("local-gap", "local_reconciliation_required", "RECONCILE_REQUIRED"),
     ("broker-gap", "下单异常: connection reset", "RECONCILE_REQUIRED"),
   ],
@@ -1146,7 +1264,7 @@ async def test_rejected_ack_classification_is_fail_closed_and_idempotent(
     session_factory,
     idempotency_key=f"ack-{case_id}",
   )
-  assert await agent_api._next_command("device-1") is not None
+  assert await agent_api._next_command(_control_session()) is not None
   ack = {
     "command_message_id": queued.message_id,
     "client_order_id": queued.client_order_id,
@@ -1182,7 +1300,7 @@ async def test_real_broker_reports_override_reconcile_gate_and_restore_monitorin
     session_factory,
     idempotency_key="reconcile-then-report",
   )
-  command = await agent_api._next_command("device-1")
+  command = await agent_api._next_command(_control_session())
   assert command is not None
   await agent_api._record_command_ack(
     "device-1",
@@ -1194,9 +1312,7 @@ async def test_real_broker_reports_override_reconcile_gate_and_restore_monitorin
     },
   )
 
-  simulated = SimulatorBroker({"account-1"}, data_only=False).execute(
-    command.payload
-  )
+  simulated = SimulatorBroker({"account-1"}, data_only=False).execute(command.payload)
   for message_type, report_payload in simulated["reports"]:
     envelope = AgentEnvelope(
       message_type=AgentMessageType(message_type),
@@ -1204,7 +1320,7 @@ async def test_real_broker_reports_override_reconcile_gate_and_restore_monitorin
     )
     assert (
       await agent_api._record_report(
-        "device-1",
+        _control_session(),
         envelope,
         received_at=agent_api.utcnow(),
       )
@@ -1225,7 +1341,7 @@ async def test_real_broker_reports_override_reconcile_gate_and_restore_monitorin
   )
   assert (
     await agent_api._record_report(
-      "device-1",
+      _control_session(),
       final_order,
       received_at=agent_api.utcnow(),
     )
@@ -1319,7 +1435,7 @@ async def test_command_waits_for_reconnect_snapshot_convergence(
     heartbeat.status = "RECONCILING"
     await db.commit()
 
-  assert await agent_api._next_command("device-1") is None
+  assert await agent_api._next_command(_control_session()) is None
 
   async with session_factory() as db:
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
@@ -1333,7 +1449,7 @@ async def test_command_waits_for_reconnect_snapshot_convergence(
     heartbeat.status = "READY"
     await db.commit()
 
-  assert await agent_api._next_command("device-1") is not None
+  assert await agent_api._next_command(_control_session()) is not None
   await engine.dispose()
 
 
@@ -1404,7 +1520,6 @@ async def test_reconnect_snapshot_and_rejected_command_are_replay_safe(
   assert duplicate_ack.payload["accepted"] is False
   assert duplicate_ack.payload["reason"] == "command_expired"
   assert any(
-    item.message_type is AgentMessageType.DELTA_REPORT
-    for item in second_messages
+    item.message_type is AgentMessageType.DELTA_REPORT for item in second_messages
   )
   assert broker.execute_calls == 0

@@ -1,4 +1,4 @@
-from datetime import timedelta, timezone
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -208,9 +208,8 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
     flush=AsyncMock(),
   )
   service = TradeCommandService(db)
-  service._device_for = AsyncMock(
-    return_value=SimpleNamespace(id="device-1")
-  )
+  service._device_for = AsyncMock(return_value=SimpleNamespace(id="device-1"))
+  service._require_live_market_stream_ready = AsyncMock()
   monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
   monkeypatch.setattr(
     command_module.settings,
@@ -236,6 +235,19 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
 
 
 @pytest.mark.asyncio
+async def test_live_buy_requires_ready_market_stream() -> None:
+  heartbeat = SimpleNamespace(details={"marketStreamStatus": "SYNCING"})
+  db = SimpleNamespace(get=AsyncMock(return_value=heartbeat))
+  service = TradeCommandService(db)
+
+  with pytest.raises(AgentUnavailableError, match="三阶段同步"):
+    await service._require_live_market_stream_ready(SimpleNamespace(id="device-1"))
+
+  heartbeat.details["marketStreamStatus"] = "READY"
+  await service._require_live_market_stream_ready(SimpleNamespace(id="device-1"))
+
+
+@pytest.mark.asyncio
 async def test_multiple_ready_live_agents_fail_closed() -> None:
   devices = [
     SimpleNamespace(
@@ -256,10 +268,30 @@ async def test_multiple_ready_live_agents_fail_closed() -> None:
     def scalars():
       return Scalars()
 
-  heartbeat = SimpleNamespace(status="READY", updated_at=utcnow())
+  now = utcnow()
+  api_heartbeat = SimpleNamespace(
+    instance_id="api-instance-1",
+    status="READY",
+    updated_at=now,
+  )
+  heartbeat = SimpleNamespace(
+    status="READY",
+    updated_at=now,
+    details={
+      "apiInstanceId": "api-instance-1",
+      "agentSessionId": "agent-session-1",
+      "serverReceivedAt": now.isoformat(),
+      "agentSentAt": now.isoformat(),
+      "sessionActive": True,
+    },
+  )
+
+  async def get(_model, key):
+    return api_heartbeat if key == "api" else heartbeat
+
   db = SimpleNamespace(
     execute=AsyncMock(return_value=Result()),
-    get=AsyncMock(return_value=heartbeat),
+    get=AsyncMock(side_effect=get),
   )
 
   with pytest.raises(AgentUnavailableError, match="多个就绪 live"):
@@ -269,17 +301,22 @@ async def test_multiple_ready_live_agents_fail_closed() -> None:
       execution_mode="live",
     )
 
-  assert db.get.await_count == 2
+  assert db.get.await_count == 3
   assert all(
-    call.args[0] is RuntimeComponentHeartbeat
-    for call in db.get.await_args_list
+    call.args[0] is RuntimeComponentHeartbeat for call in db.get.await_args_list
   )
+
+  db.get.reset_mock()
+  with pytest.raises(AgentUnavailableError, match="多个就绪 live"):
+    await TradeCommandService(db)._device_for_account(
+      account_id="account-1",
+      execution_mode="live",
+    )
+  assert db.get.await_count == 3
 
 
 @pytest.mark.asyncio
-async def test_live_device_requires_heartbeat_from_current_managed_launch(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_live_device_requires_heartbeat_from_current_api_session() -> None:
   device = SimpleNamespace(
     id="device-1",
     authorized_account_ids=["account-1"],
@@ -296,19 +333,30 @@ async def test_live_device_requires_heartbeat_from_current_managed_launch(
     def scalars():
       return Scalars()
 
-  launch_started_at = utcnow() - timedelta(seconds=10)
+  now = utcnow()
+  api_heartbeat = SimpleNamespace(
+    instance_id="api-instance-new",
+    status="READY",
+    updated_at=now,
+  )
   heartbeat = SimpleNamespace(
     status="READY",
-    updated_at=launch_started_at - timedelta(seconds=1),
+    updated_at=now,
+    details={
+      "apiInstanceId": "api-instance-old",
+      "agentSessionId": "agent-session-1",
+      "serverReceivedAt": now.isoformat(),
+      "agentSentAt": now.isoformat(),
+      "sessionActive": True,
+    },
   )
+
+  async def get(_model, key):
+    return api_heartbeat if key == "api" else heartbeat
+
   db = SimpleNamespace(
     execute=AsyncMock(return_value=Result()),
-    get=AsyncMock(return_value=heartbeat),
-  )
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
-  monkeypatch.setenv(
-    "QMT_AGENT_LAUNCH_STARTED_AT",
-    launch_started_at.replace(tzinfo=timezone.utc).isoformat(),
+    get=AsyncMock(side_effect=get),
   )
   service = TradeCommandService(db)
 
@@ -319,7 +367,7 @@ async def test_live_device_requires_heartbeat_from_current_managed_launch(
       execution_mode="live",
     )
 
-  heartbeat.updated_at = launch_started_at + timedelta(seconds=1)
+  heartbeat.details["apiInstanceId"] = "api-instance-new"
 
   assert (
     await service._device_for(
@@ -376,14 +424,8 @@ async def test_trade_command_business_key_is_deduplicated() -> None:
     )
 
     assert second == first
-    assert (
-      await db.scalar(select(func.count()).select_from(TradeCommandOutbox))
-      == 1
-    )
-    assert (
-      await db.scalar(select(func.count()).select_from(PendingTradeOrder))
-      == 1
-    )
+    assert await db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 1
+    assert await db.scalar(select(func.count()).select_from(PendingTradeOrder)) == 1
   await engine.dispose()
 
 
@@ -423,10 +465,7 @@ async def test_cancel_command_business_key_is_deduplicated() -> None:
     )
 
     assert second == first
-    assert (
-      await db.scalar(select(func.count()).select_from(TradeCommandOutbox))
-      == 1
-    )
+    assert await db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 1
   await engine.dispose()
 
 

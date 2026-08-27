@@ -80,6 +80,50 @@ def test_live_mode_accepts_explicit_testing_configuration(
   _require_safe_run_mode("live", {"account-1"})
 
 
+def test_live_mode_rejects_multiple_accounts(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("ENV", "testing")
+  monkeypatch.setenv("ENABLE_REAL_TRADING", "true")
+  monkeypatch.setenv("QMT_REAL_TRADING_ENABLED", "true")
+
+  with pytest.raises(SystemExit, match="exactly one"):
+    _require_safe_run_mode("live", {"account-1", "account-2"})
+
+
+def test_live_run_rejects_http_endpoint_before_native_initialization(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  watchdog = _FakeProcessWatchdog()
+
+  class CredentialStore:
+    @staticmethod
+    def load():
+      return (
+        SimpleNamespace(device_id="device-1", api_url="http://api.test"),
+        "secret",
+      )
+
+  monkeypatch.setenv("ENV", "testing")
+  monkeypatch.setenv("ENABLE_REAL_TRADING", "true")
+  monkeypatch.setenv("QMT_REAL_TRADING_ENABLED", "true")
+  monkeypatch.setattr(main_module, "_accounts", lambda: {"account-1"})
+  monkeypatch.setattr(main_module, "state_directory", lambda: tmp_path)
+  monkeypatch.setattr(
+    main_module.AgentProcessWatchdog,
+    "create",
+    lambda _base_directory: watchdog,
+  )
+  monkeypatch.setattr(main_module, "DeviceCredentialStore", CredentialStore)
+
+  with pytest.raises(SystemExit, match="https"):
+    main_module._run("live")
+
+  assert watchdog.start_count == 1
+  assert watchdog.close_count == 1
+
+
 def test_live_mode_does_not_depend_on_t_trade_feature_gate(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -251,7 +295,11 @@ def test_run_transfers_one_started_watchdog_to_runtime_once(
     lambda _base_directory: watchdog,
   )
   monkeypatch.setattr(main_module, "DeviceCredentialStore", CredentialStore)
-  monkeypatch.setattr(main_module, "LocalJournal", lambda _path: object())
+  monkeypatch.setattr(
+    main_module,
+    "LocalJournal",
+    lambda _path: SimpleNamespace(integrity_check=lambda: "ok"),
+  )
   monkeypatch.setattr(
     main_module,
     "QmtDataBroker",
@@ -297,5 +345,48 @@ def test_run_closes_started_watchdog_once_when_setup_fails(
   with pytest.raises(ValueError, match="journal setup failed"):
     main_module._run("data-only")
 
+  assert watchdog.start_count == 1
+  assert watchdog.close_count == 1
+
+
+def test_corrupt_journal_blocks_runtime_before_native_or_network_initialization(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  watchdog = _FakeProcessWatchdog()
+  runtime_created = False
+
+  class CredentialStore:
+    @staticmethod
+    def load():
+      return (
+        SimpleNamespace(device_id="device-1", api_url="http://api.test"),
+        "secret",
+      )
+
+  def create_runtime(**_kwargs):
+    nonlocal runtime_created
+    runtime_created = True
+    raise AssertionError("runtime must not be initialized with a corrupt journal")
+
+  monkeypatch.setattr(main_module, "_accounts", lambda: set())
+  monkeypatch.setattr(main_module, "state_directory", lambda: tmp_path)
+  monkeypatch.setattr(
+    main_module.AgentProcessWatchdog,
+    "create",
+    lambda _base_directory: watchdog,
+  )
+  monkeypatch.setattr(main_module, "DeviceCredentialStore", CredentialStore)
+  monkeypatch.setattr(
+    main_module,
+    "LocalJournal",
+    lambda _path: SimpleNamespace(integrity_check=lambda: "corrupt"),
+  )
+  monkeypatch.setattr(main_module, "AgentRuntime", create_runtime)
+
+  with pytest.raises(SystemExit, match="journal 完整性检查失败"):
+    main_module._run("data-only")
+
+  assert runtime_created is False
   assert watchdog.start_count == 1
   assert watchdog.close_count == 1

@@ -48,6 +48,7 @@ from .broker import (
 )
 from .credentials import DeviceConfiguration, state_directory
 from .emergency import EmergencyStopStore
+from .endpoints import websocket_url
 from .journal import LocalJournal
 from .whole_market_capture import (
   MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
@@ -88,8 +89,7 @@ MARKET_STREAM_READY_INGRESS_BYTES = 64 * 1024 * 1024
 # the structural ceiling from the same budget so it cannot reject a valid burst
 # before the 64 MiB retained-memory authority does.
 MARKET_STREAM_READY_INGRESS_CALLBACKS = (
-  MARKET_STREAM_READY_INGRESS_BYTES
-  // MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES
+  MARKET_STREAM_READY_INGRESS_BYTES // MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES
 )
 # The callback path deliberately avoids JSON serialization.  Charge every tick
 # a conservative retained-memory estimate; the outbound cap below uses exact
@@ -100,9 +100,7 @@ MARKET_STREAM_OUTBOUND_BYTES = 64 * 1024 * 1024
 MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES = 2
 MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS = 5.0
 MARKET_STREAM_MIN_INITIAL_COVERAGE = 0.99
-MARKET_STREAM_REQUIRED_INDEX_CODES = frozenset(
-  {"000001.SH", "399001.SZ", "399006.SZ"}
-)
+MARKET_STREAM_REQUIRED_INDEX_CODES = frozenset({"000001.SH", "399001.SZ", "399006.SZ"})
 MARKET_STREAM_MICROBATCH_SECONDS = 0.010
 # A native whole-quote callback normally contains the entire Shanghai/Shenzhen
 # universe.  Splitting that callback into fixed 512-instrument fragments can
@@ -113,8 +111,7 @@ MARKET_STREAM_MICROBATCH_SECONDS = 0.010
 # pathological payload is larger than the wire limit.
 MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES = MAX_MARKET_STREAM_FRAME_BYTES
 MARKET_STREAM_MICROBATCH_INSTRUMENTS = (
-  MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES
-  // MARKET_STREAM_READY_ESTIMATED_TICK_BYTES
+  MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES // MARKET_STREAM_READY_ESTIMATED_TICK_BYTES
 )
 MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS = 5.0
 MARKET_STREAM_NATIVE_SILENCE_SECONDS = 10.0
@@ -186,9 +183,7 @@ class _BoundedMarketBatchBuffer:
   """Bound queued and unacknowledged batches by their actual wire bytes."""
 
   def __init__(self, *, max_batches: int, max_bytes: int) -> None:
-    self._queue: asyncio.Queue[_EncodedMarketBatch] = asyncio.Queue(
-      maxsize=max_batches
-    )
+    self._queue: asyncio.Queue[_EncodedMarketBatch] = asyncio.Queue(maxsize=max_batches)
     self._max_batches = max_batches
     self._max_bytes = max_bytes
     self._reserved_batches = 0
@@ -308,17 +303,12 @@ def _cleanup_legacy_market_data_spools(temp_directory: Path) -> None:
     if not child.name.startswith(LEGACY_MARKET_DATA_SPOOL_PREFIX):
       continue
     try:
-      attributes = int(
-        getattr(child.lstat(), "st_file_attributes", 0)
-      )
+      attributes = int(getattr(child.lstat(), "st_file_attributes", 0))
       if child.is_symlink() or attributes & reparse_flag:
         logger.warning("Skipped unsafe legacy market-data spool: %s", child)
         continue
       resolved_child = child.resolve()
-      if (
-        resolved_child.parent != resolved_temp
-        or not resolved_child.is_dir()
-      ):
+      if resolved_child.parent != resolved_temp or not resolved_child.is_dir():
         logger.warning("Skipped unsafe legacy market-data spool: %s", child)
         continue
       shutil.rmtree(resolved_child)
@@ -346,16 +336,11 @@ def _initialize_market_data_spool_root(
   device_id: str,
 ) -> Path:
   owner_key = _market_data_spool_owner_key(device_id)
-  managed_root = (
-    base_directory.resolve() / MARKET_DATA_SPOOL_DIRECTORY_NAME
-  )
+  managed_root = base_directory.resolve() / MARKET_DATA_SPOOL_DIRECTORY_NAME
   managed_root.mkdir(parents=True, exist_ok=True)
   owner_root = managed_root / owner_key
   owner_root.mkdir(parents=False, exist_ok=True)
-  if (
-    owner_root.is_symlink()
-    or owner_root.resolve().parent != managed_root.resolve()
-  ):
+  if owner_root.is_symlink() or owner_root.resolve().parent != managed_root.resolve():
     raise RuntimeError("unsafe market-data spool owner root")
   marker = owner_root / MARKET_DATA_SPOOL_OWNER_MARKER
   if marker.exists():
@@ -436,9 +421,7 @@ def _iter_encoded_market_data_chunks(
   max_records: int = MAX_MARKET_DATA_CHUNK_RECORDS,
   max_uncompressed_bytes: int = MAX_MARKET_DATA_CHUNK_UNCOMPRESSED_BYTES,
   max_total_records: int = MAX_MARKET_DATA_REQUEST_RECORDS,
-  max_record_uncompressed_bytes: int = (
-    MAX_MARKET_DATA_RECORD_UNCOMPRESSED_BYTES
-  ),
+  max_record_uncompressed_bytes: int = (MAX_MARKET_DATA_RECORD_UNCOMPRESSED_BYTES),
   max_total_uncompressed_bytes: int = MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES,
 ) -> Iterator[tuple[bytearray, int]]:
   """Yield one bounded raw JSON chunk at a time without materializing input."""
@@ -474,8 +457,7 @@ def _iter_encoded_market_data_chunks(
     separator_size = 1 if current_records > 0 else 0
     if current_records > 0 and (
       current_records >= max_records
-      or len(current) + separator_size + len(encoded) + 1
-      > max_uncompressed_bytes
+      or len(current) + separator_size + len(encoded) + 1 > max_uncompressed_bytes
     ):
       current.extend(b"]")
       total_size += len(current)
@@ -590,11 +572,15 @@ def _market_data_payload_fingerprint(payload: dict[str, Any]) -> str:
 
 
 def _websocket_url(api_url: str, path: str = "/ws/agent") -> str:
-  if api_url.startswith("https://"):
-    return f"wss://{api_url[8:].rstrip('/')}{path}"
-  if api_url.startswith("http://"):
-    return f"ws://{api_url[7:].rstrip('/')}{path}"
-  raise ValueError("api_url 必须以 http:// 或 https:// 开头")
+  return websocket_url(api_url, path)
+
+
+def _connect_websocket(uri: str, **kwargs):
+  connection = websockets.connect(uri, proxy=None, **kwargs)
+  # The configured API root is an enrolled trust boundary. Following a server
+  # redirect could move the subsequent AUTH frame to another authority.
+  connection.process_redirect = lambda exc: exc
+  return connection
 
 
 def _parse_expiry(value: Any) -> datetime:
@@ -614,7 +600,8 @@ class AgentRuntime:
     device_secret: str,
     mode: str,
     allowed_accounts: set[str],
-    broker,
+    broker=None,
+    broker_factory=None,
     journal: LocalJournal,
     emergency_stop: EmergencyStopStore | None = None,
     market_spool_base_directory: Path | None = None,
@@ -624,6 +611,12 @@ class AgentRuntime:
     self.mode = mode
     self.allowed_accounts = allowed_accounts
     self.broker = broker
+    self._broker_factory = broker_factory
+    if self.broker is None and self._broker_factory is None:
+      raise ValueError("AgentRuntime requires broker or broker_factory")
+    self._broker_ready = asyncio.Event()
+    if self.broker is not None:
+      self._broker_ready.set()
     self.journal = journal
     self.emergency_stop = emergency_stop
     self._stopped = asyncio.Event()
@@ -635,9 +628,7 @@ class AgentRuntime:
     # reconnects must never tear down an already READY market stream.
     self._control_hub_registered_once = asyncio.Event()
     self._session_loop: asyncio.AbstractEventLoop | None = None
-    self._market_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
-      maxsize=10_000
-    )
+    self._market_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10_000)
     self._market_event_overflow = asyncio.Event()
     self._whole_market_capture = WholeMarketCapture(
       max_ready_callbacks=MARKET_STREAM_READY_INGRESS_CALLBACKS,
@@ -666,9 +657,7 @@ class AgentRuntime:
     # compressed bytes for in-flight requests so a redelivery reuses the same
     # chunk checksums instead of re-querying a still-changing XTData cache.
     self._market_upload_cache: dict[str, _MarketUploadCacheEntry] = {}
-    self._market_upload_tombstones: dict[
-      str, _MarketUploadTombstone
-    ] = {}
+    self._market_upload_tombstones: dict[str, _MarketUploadTombstone] = {}
     self._market_upload_tasks: dict[str, _MarketUploadTaskEntry] = {}
     self._market_upload_cache_bytes = 0
     self._xtdata_access_lock = asyncio.Lock()
@@ -689,9 +678,7 @@ class AgentRuntime:
     self._trading_connection_generation_cache = 0
     self._control_session_authenticated = False
     self._market_upload_clock = time.monotonic
-    self._fatal_market_data_error: (
-      _FatalMarketDataPreparationError | None
-    ) = None
+    self._fatal_market_data_error: _FatalMarketDataPreparationError | None = None
     self._fatal_market_data_event = asyncio.Event()
     _cleanup_legacy_market_data_spools(Path(tempfile.gettempdir()))
     self._market_spool_root = _initialize_market_data_spool_root(
@@ -709,11 +696,11 @@ class AgentRuntime:
       name="market-data-cache-sweeper",
     )
     capture_supervisor = asyncio.create_task(
-      self._whole_market_capture_supervisor(),
+      self._run_after_broker_ready(self._whole_market_capture_supervisor),
       name="whole-market-capture-supervisor",
     )
     market_stream_supervisor = asyncio.create_task(
-      self._whole_market_stream_supervisor(),
+      self._run_after_broker_ready(self._whole_market_stream_supervisor),
       name="whole-market-stream-supervisor",
     )
     try:
@@ -766,7 +753,9 @@ class AgentRuntime:
       raise self._fatal_market_data_error
 
   @staticmethod
-  def _control_reconnect_delay(current_delay: float, *, authenticated: bool) -> tuple[float, float]:
+  def _control_reconnect_delay(
+    current_delay: float, *, authenticated: bool
+  ) -> tuple[float, float]:
     if authenticated:
       current_delay = 1.0
     return current_delay, min(current_delay * 2, 300.0)
@@ -810,7 +799,11 @@ class AgentRuntime:
         self._cleanup_expired_market_uploads()
 
   async def _issue_token(self) -> tuple[str, datetime]:
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(
+      timeout=10.0,
+      follow_redirects=False,
+      trust_env=False,
+    ) as client:
       response = await client.post(
         f"{self.configuration.api_url}/auth/agent/token",
         json={
@@ -832,10 +825,23 @@ class AgentRuntime:
     expires_at = _parse_expiry(expires_value)
     return token, expires_at
 
+  async def _run_after_broker_ready(self, operation) -> None:
+    await self._broker_ready.wait()
+    await operation()
+
+  async def _ensure_broker_initialized(self) -> None:
+    if self.broker is not None:
+      self._broker_ready.set()
+      return
+    factory = self._broker_factory
+    if factory is None:  # pragma: no cover - constructor enforces this
+      raise RuntimeError("QMT broker factory is unavailable")
+    self.broker = await asyncio.to_thread(factory)
+    self._broker_ready.set()
+
   def _requires_trading_reconciliation(self) -> bool:
     return bool(
-      self.mode == "live"
-      and getattr(self, "_trading_reconciliation_required", False)
+      self.mode == "live" and getattr(self, "_trading_reconciliation_required", False)
     )
 
   def _begin_trading_reconciliation(
@@ -850,10 +856,7 @@ class AgentRuntime:
     self._trading_reconciliation_snapshot_id = None
     self._trading_reconciliation_snapshot_generation = None
     self._trading_recovery_reason = reason[:128]
-    if (
-      not already_reconciling
-      or self._trading_recovery_started_monotonic is None
-    ):
+    if not already_reconciling or self._trading_recovery_started_monotonic is None:
       self._trading_recovery_started_monotonic = time.monotonic()
     require_reconciliation = getattr(
       getattr(self, "broker", None),
@@ -935,7 +938,7 @@ class AgentRuntime:
     self._access_token = access_token
     self._access_token_expires_at = expires_at
     self._access_token_ready.set()
-    async with websockets.connect(
+    async with _connect_websocket(
       _websocket_url(self.configuration.api_url),
       max_size=8 * 1024 * 1024,
       ping_interval=WEBSOCKET_PING_INTERVAL_SECONDS,
@@ -960,13 +963,12 @@ class AgentRuntime:
         or not auth_result.payload.get("accepted")
       ):
         raise RuntimeError("QMT Agent authentication rejected")
+      await self._ensure_broker_initialized()
       self._control_session_authenticated = True
       self._control_hub_registered_once.set()
 
       self._session_loop = asyncio.get_running_loop()
-      self._market_requests = asyncio.Queue(
-        maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS
-      )
+      self._market_requests = asyncio.Queue(maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS)
       self._queued_market_data_requests = {}
       self._market_event_overflow = asyncio.Event()
       self._begin_trading_reconciliation(
@@ -1052,7 +1054,9 @@ class AgentRuntime:
         or (planned_close_requested is not None and planned_close_requested.is_set())
       ):
         await renewal
-        logger.info("QMT Agent access token refresh closed the control session; reconnecting immediately")
+        logger.info(
+          "QMT Agent access token refresh closed the control session; reconnecting immediately"
+        )
         return
       if receiver in done:
         await receiver
@@ -1076,9 +1080,7 @@ class AgentRuntime:
           )
           raise
         if role != "market-request":
-          error = RuntimeError(
-            f"QMT Agent session task stopped unexpectedly: {role}"
-          )
+          error = RuntimeError(f"QMT Agent session task stopped unexpectedly: {role}")
           logger.error("%s", error)
           await socket.close(
             code=1011,
@@ -1178,6 +1180,7 @@ class AgentRuntime:
         timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
       )
     else:
+
       def capture_with_generation() -> tuple[dict[str, Any], int]:
         return self.broker.full_snapshot(), self._read_broker_trading_generation()
 
@@ -1246,9 +1249,7 @@ class AgentRuntime:
           self._trading_readiness_failed = True
         elif reconciliation or self._requires_trading_reconciliation():
           self._trading_reconciliation_snapshot_id = snapshot_message_id
-          self._trading_reconciliation_snapshot_generation = (
-            snapshot_generation
-          )
+          self._trading_reconciliation_snapshot_generation = snapshot_generation
       envelope = AgentEnvelope(
         message_id=snapshot_message_id,
         message_type=AgentMessageType.DELTA_REPORT,
@@ -1539,10 +1540,7 @@ class AgentRuntime:
           current_generation = int(
             generation_reader() if callable(generation_reader) else 0
           )
-          if (
-            subscribed_generation > 0
-            and current_generation != subscribed_generation
-          ):
+          if subscribed_generation > 0 and current_generation != subscribed_generation:
             reset_reason = (
               "XTData source generation changed: "
               f"{subscribed_generation}->{current_generation}"
@@ -1553,12 +1551,16 @@ class AgentRuntime:
           connected = bool(readiness()) if callable(readiness) else True
           if not connected:
             try:
-              connected = bool(
-                await self._run_xtdata_control(
-                  "whole-market-readiness",
-                  ensure_ready,
+              connected = (
+                bool(
+                  await self._run_xtdata_control(
+                    "whole-market-readiness",
+                    ensure_ready,
+                  )
                 )
-              ) if callable(ensure_ready) else False
+                if callable(ensure_ready)
+                else False
+              )
             except Exception as exc:
               logger.warning(
                 "QMT whole-market readiness probe failed: error=%s",
@@ -1601,10 +1603,7 @@ class AgentRuntime:
             silence_confirmations += 1
           else:
             silence_confirmations = 0
-          if (
-            silence_confirmations
-            >= MARKET_STREAM_NATIVE_SILENCE_CONFIRMATIONS
-          ):
+          if silence_confirmations >= MARKET_STREAM_NATIVE_SILENCE_CONFIRMATIONS:
             reset_reason = (
               "XTData callback silence confirmed during trading session: "
               f"seconds={silence_seconds:.3f}"
@@ -1644,8 +1643,7 @@ class AgentRuntime:
         if not self._whole_market_subscription_active:
           self._whole_market_subscription_ready.clear()
           self._whole_market_capture.reset_source(
-            "whole-market native subscription attempt failed: "
-            f"{exc.__class__.__name__}"
+            f"whole-market native subscription attempt failed: {exc.__class__.__name__}"
           )
         logger.warning(
           "QMT whole-market subscription retry: error=%s: %s",
@@ -1684,7 +1682,9 @@ class AgentRuntime:
       return 1.0, 1.0
     return current_delay, min(current_delay * 2, 30.0)
 
-  async def _wait_for_fresh_access_token(self, *, previous_token: str | None = None) -> None:
+  async def _wait_for_fresh_access_token(
+    self, *, previous_token: str | None = None
+  ) -> None:
     while True:
       if (
         self._access_token
@@ -1723,14 +1723,15 @@ class AgentRuntime:
         self._market_stream_status = "SYNCING"
         self._market_stream_ready_since_monotonic = 0.0
         delay = 1.0
-        logger.info("QMT whole-market access token refresh requested: resyncs=%s; waiting for replacement token", self._market_stream_resyncs)
+        logger.info(
+          "QMT whole-market access token refresh requested: resyncs=%s; waiting for replacement token",
+          self._market_stream_resyncs,
+        )
         await self._wait_for_fresh_access_token(previous_token=exc.access_token)
       except Exception as exc:
         ready_since = self._market_stream_ready_since_monotonic
         ready_seconds = (
-          max(0.0, time.monotonic() - ready_since)
-          if ready_since > 0
-          else 0.0
+          max(0.0, time.monotonic() - ready_since) if ready_since > 0 else 0.0
         )
         sleep_delay, delay = self._market_stream_retry_delay(
           delay,
@@ -1808,7 +1809,7 @@ class AgentRuntime:
     await self._whole_market_subscription_ready.wait()
     self._whole_market_native_reset.clear()
     self._whole_market_capture.begin_syncing()
-    async with websockets.connect(
+    async with _connect_websocket(
       _websocket_url(self.configuration.api_url, "/ws/agent/market"),
       subprotocols=[MARKET_STREAM_SUBPROTOCOL],
       max_size=MAX_MARKET_STREAM_FRAME_BYTES,
@@ -1821,9 +1822,11 @@ class AgentRuntime:
         access_token=market_access_token,
       )
       stream_trading_date = datetime.now(SHANGHAI_ZONE).date()
-      snapshot_raw, snapshot_watermark, universe_codes = (
-        await self._build_whole_market_snapshot(stream_trading_date)
-      )
+      (
+        snapshot_raw,
+        snapshot_watermark,
+        universe_codes,
+      ) = await self._build_whole_market_snapshot(stream_trading_date)
       self._require_native_whole_market_sync("snapshot-build")
       snapshot = await self._prepare_encoded_market_batch(
         stream_id=start.stream_id,
@@ -1882,9 +1885,7 @@ class AgentRuntime:
           self._send_encoded_market_batch_and_wait_ack(socket, ready_barrier),
           name="whole-market-ready-barrier-ack",
         )
-        barrier_tasks.extend(
-          [native_reset, capture_invalidated, barrier_ack]
-        )
+        barrier_tasks.extend([native_reset, capture_invalidated, barrier_ack])
         done, _ = await asyncio.wait(
           {native_reset, capture_invalidated, barrier_ack},
           return_when=asyncio.FIRST_COMPLETED,
@@ -2035,9 +2036,7 @@ class AgentRuntime:
       or not self._whole_market_subscription_ready.is_set()
     ):
       capture = getattr(self, "_whole_market_capture", None)
-      reason = (
-        capture.invalidation_reason if capture is not None else ""
-      )
+      reason = capture.invalidation_reason if capture is not None else ""
       reason_suffix = f" reason={reason}" if reason else ""
       raise RuntimeError(
         "native whole-market subscription changed during sync: "
@@ -2075,15 +2074,10 @@ class AgentRuntime:
     def snapshot_ready(data: dict[str, Any]) -> bool:
       coverage = len(expected_codes.intersection(data)) / len(expected_codes)
       required = MARKET_STREAM_REQUIRED_INDEX_CODES.intersection(expected_codes)
-      return (
-        coverage >= MARKET_STREAM_MIN_INITIAL_COVERAGE
-        and required <= data.keys()
-      )
+      return coverage >= MARKET_STREAM_MIN_INITIAL_COVERAGE and required <= data.keys()
 
     deadline = time.monotonic() + MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS
-    latest = self._whole_market_capture.latest_snapshot(
-      trading_date=trading_date
-    )
+    latest = self._whole_market_capture.latest_snapshot(trading_date=trading_date)
     while not snapshot_ready(latest.data):
       remaining = deadline - time.monotonic()
       if remaining <= 0:
@@ -2095,15 +2089,14 @@ class AgentRuntime:
         )
       except asyncio.TimeoutError:
         break
-      latest = self._whole_market_capture.latest_snapshot(
-        trading_date=trading_date
-      )
+      latest = self._whole_market_capture.latest_snapshot(trading_date=trading_date)
     if not snapshot_ready(latest.data):
       available = len(expected_codes.intersection(latest.data))
       coverage = available / len(expected_codes)
       missing_required = sorted(
-        MARKET_STREAM_REQUIRED_INDEX_CODES.intersection(expected_codes)
-        .difference(latest.data)
+        MARKET_STREAM_REQUIRED_INDEX_CODES.intersection(expected_codes).difference(
+          latest.data
+        )
       )
       raise RuntimeError(
         "QMT initial whole-quote callback coverage is insufficient: "
@@ -2147,9 +2140,7 @@ class AgentRuntime:
     def prepare() -> _EncodedMarketBatch:
       validation_reference_at = datetime.now(timezone.utc)
       data = self.broker.prepare_whole_market_data(raw_data)
-      if not isinstance(data, dict) or (
-        kind is MarketBatchKind.SNAPSHOT and not data
-      ):
+      if not isinstance(data, dict) or (kind is MarketBatchKind.SNAPSHOT and not data):
         raise RuntimeError("XTData returned an empty whole-market batch")
       missing_source_time = [
         code
@@ -2236,16 +2227,10 @@ class AgentRuntime:
           len(items),
           MARKET_STREAM_MICROBATCH_INSTRUMENTS,
         ):
-          values = dict(
-            items[offset : offset + MARKET_STREAM_MICROBATCH_INSTRUMENTS]
-          )
+          values = dict(items[offset : offset + MARKET_STREAM_MICROBATCH_INSTRUMENTS])
           fragment_estimated_bytes = max(
             1024,
-            (
-              event.estimated_bytes * len(values)
-              + max(1, len(items))
-              - 1
-            )
+            (event.estimated_bytes * len(values) + max(1, len(items)) - 1)
             // max(1, len(items)),
           )
           fragments.append(
@@ -2283,15 +2268,11 @@ class AgentRuntime:
           )
         except asyncio.TimeoutError:
           break
-        if (
-          candidate.captured_at.astimezone(SHANGHAI_ZONE).date()
-          != trading_date
-        ):
+        if candidate.captured_at.astimezone(SHANGHAI_ZONE).date() != trading_date:
           raise RuntimeError("trading day changed; full snapshot required")
         if (
           codes.intersection(candidate.data)
-          or len(raw_data) + len(candidate.data)
-          > MARKET_STREAM_MICROBATCH_INSTRUMENTS
+          or len(raw_data) + len(candidate.data) > MARKET_STREAM_MICROBATCH_INSTRUMENTS
           or estimated_bytes + candidate.estimated_bytes
           > MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES
         ):
@@ -2347,10 +2328,7 @@ class AgentRuntime:
     get_task: asyncio.Task[_EncodedMarketBatch] | None = None
     try:
       while True:
-        if (
-          len(pending) < MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES
-          and get_task is None
-        ):
+        if len(pending) < MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES and get_task is None:
           get_task = asyncio.create_task(outbound.get())
         waiters: set[asyncio.Task[Any]] = {receive_task}
         if get_task is not None:
@@ -2368,9 +2346,7 @@ class AgentRuntime:
           return_when=asyncio.FIRST_COMPLETED,
         )
         if not done:
-          expected_sequence = (
-            pending[0].encoded.batch.sequence if pending else 0
-          )
+          expected_sequence = pending[0].encoded.batch.sequence if pending else 0
           raise asyncio.TimeoutError(
             "market stream ACK timed out: "
             f"stream_id={stream_id} sequence={expected_sequence} "
@@ -2398,9 +2374,7 @@ class AgentRuntime:
               f"actual_stream_id={control.stream_id} "
               f"actual_sequence={control.sequence}"
             )
-          latency_ms = (
-            time.monotonic() - expected.sent_monotonic
-          ) * 1000
+          latency_ms = (time.monotonic() - expected.sent_monotonic) * 1000
           await outbound.acknowledge(expected.encoded)
           self._market_stream_sequence = expected.encoded.batch.sequence
           self._market_stream_ack_latency_ms = latency_ms
@@ -2505,9 +2479,7 @@ class AgentRuntime:
       (time.monotonic() - started) * 1000,
     )
     self._market_stream_sequence = encoded.batch.sequence
-    self._market_stream_ack_latency_ms = (
-      time.monotonic() - started
-    ) * 1000
+    self._market_stream_ack_latency_ms = (time.monotonic() - started) * 1000
 
   async def _close_before_token_expiry(
     self,
@@ -2516,9 +2488,7 @@ class AgentRuntime:
     expires_at: datetime | None = None,
     close_requested: asyncio.Event | None = None,
   ) -> None:
-    renew_at = (
-      expires_at or self._access_token_expires_at
-    ) - timedelta(minutes=2)
+    renew_at = (expires_at or self._access_token_expires_at) - timedelta(minutes=2)
     delay = max(
       1.0,
       (renew_at - datetime.now(timezone.utc)).total_seconds(),
@@ -2532,8 +2502,7 @@ class AgentRuntime:
     self._ensure_market_upload_state()
     market_data_ready = self._is_market_data_ready()
     trading_ready = bool(
-      self._is_trading_ready()
-      and not getattr(self, "_trading_readiness_failed", False)
+      self._is_trading_ready() and not getattr(self, "_trading_readiness_failed", False)
     )
     if self._requires_trading_reconciliation():
       status = "RECONCILING"
@@ -2573,14 +2542,11 @@ class AgentRuntime:
       journal_integrity=str(journal_stats["integrity"]),
       journal_size_bytes=int(journal_stats["size_bytes"]),
       journal_pending_reports=int(journal_stats["pending_reports"]),
-      journal_processing_commands=int(
-        journal_stats["processing_commands"]
-      ),
+      journal_processing_commands=int(journal_stats["processing_commands"]),
       market_stream_status=self._market_stream_status,
       market_stream_sequence=self._market_stream_sequence,
       market_stream_queue_depth=(
-        self._whole_market_capture.queue_depth
-        + self._market_stream_outbound_depth
+        self._whole_market_capture.queue_depth + self._market_stream_outbound_depth
       ),
       market_stream_resyncs=self._market_stream_resyncs,
       market_stream_ack_latency_ms=self._market_stream_ack_latency_ms,
@@ -2617,9 +2583,10 @@ class AgentRuntime:
       accepted = bool(envelope.payload.get("accepted"))
       if accepted:
         self.journal.acknowledge_report(report_message_id)
-        if self._acknowledge_trading_reconciliation_snapshot(
-          report_message_id
-        ) and socket is not None:
+        if (
+          self._acknowledge_trading_reconciliation_snapshot(report_message_id)
+          and socket is not None
+        ):
           # The API keeps RECONCILING until Engine applies the durable report;
           # this READY request is therefore harmless before promotion and lets
           # the first post-Engine heartbeat converge without another 30s wait.
@@ -2689,8 +2656,7 @@ class AgentRuntime:
           await self._report_market_data_busy(request_id)
         except Exception as report_exc:
           logger.warning(
-            "Could not report QMT market-data backpressure: request_id=%s "
-            "error=%s: %s",
+            "Could not report QMT market-data backpressure: request_id=%s error=%s: %s",
             request_id,
             report_exc.__class__.__name__,
             report_exc,
@@ -2922,6 +2888,14 @@ class AgentRuntime:
       ):
         rejection = "local_reconciliation_required"
       elif (
+        self.mode == "live"
+        and envelope.message_type is not AgentMessageType.CANCEL_COMMAND
+        and str(payload.get("side") or "").upper() != "SELL"
+        and str(payload.get("t_trade_role") or "").upper() != "EXIT"
+        and self._market_stream_status != "READY"
+      ):
+        rejection = "market_stream_not_ready"
+      elif (
         envelope.message_type is not AgentMessageType.CANCEL_COMMAND
         and self.emergency_stop
         and self.emergency_stop.status()["active"]
@@ -2953,9 +2927,7 @@ class AgentRuntime:
                   "error_msg": rejection,
                 }
               ],
-              "sequence": int(
-                datetime.now(timezone.utc).timestamp() * 1_000_000
-              ),
+              "sequence": int(datetime.now(timezone.utc).timestamp() * 1_000_000),
               "is_complete": False,
             },
           )
@@ -2988,15 +2960,12 @@ class AgentRuntime:
       )
       if (
         self.mode == "live"
-        and str(result.get("reason") or "")
-        == "local_reconciliation_required"
+        and str(result.get("reason") or "") == "local_reconciliation_required"
       ):
         self._trading_connection_generation_cache = (
           self._read_broker_trading_generation()
         )
-        self._begin_trading_reconciliation(
-          "broker_rejected_unreconciled_generation"
-        )
+        self._begin_trading_reconciliation("broker_rejected_unreconciled_generation")
     self.journal.complete_command(envelope.message_id, result)
 
     for message_type, report_payload in result.get("reports") or []:
@@ -3030,7 +2999,11 @@ class AgentRuntime:
       # The server derives completion from its durable chunks. A duplicate
       # delivery after every PUT succeeded needs neither XTData nor another PUT.
       return
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(
+      timeout=60.0,
+      follow_redirects=False,
+      trust_env=False,
+    ) as client:
       for index, chunk in enumerate(chunks):
         self._touch_market_upload(request_id)
         response = await client.put(
@@ -3078,9 +3051,7 @@ class AgentRuntime:
     if tombstone is not None:
       tombstone.last_access_at = now
       if tombstone.fingerprint != payload_fingerprint:
-        raise RuntimeError(
-          "同一 market-data request_id 的重投参数不一致"
-        )
+        raise RuntimeError("同一 market-data request_id 的重投参数不一致")
       raise _MarketDataRequestAlreadyCompleted(
         "market-data request was already uploaded"
       )
@@ -3089,9 +3060,7 @@ class AgentRuntime:
     if cached is not None:
       cached.last_access_at = now
       if cached.fingerprint != payload_fingerprint:
-        raise RuntimeError(
-          "同一 market-data request_id 的重投参数不一致"
-        )
+        raise RuntimeError("同一 market-data request_id 的重投参数不一致")
       task = cached.task
       if task is None:
         raise RuntimeError("market-data preparation state is incomplete")
@@ -3133,14 +3102,9 @@ class AgentRuntime:
           _managed_market_data_spool_bytes,
           self._market_spool_root,
         )
-        remaining_cache_bytes = (
-          MAX_MARKET_DATA_UPLOAD_CACHE_BYTES
-          - managed_spool_bytes
-        )
+        remaining_cache_bytes = MAX_MARKET_DATA_UPLOAD_CACHE_BYTES - managed_spool_bytes
         if remaining_cache_bytes <= 0:
-          raise RuntimeError(
-            "market-data upload cache byte limit exceeded"
-          )
+          raise RuntimeError("market-data upload cache byte limit exceeded")
         compressed_budget = min(
           MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES,
           remaining_cache_bytes,
@@ -3149,30 +3113,23 @@ class AgentRuntime:
           prepared = await self._run_market_data_preparation_daemon(
             request_id,
             payload,
-            max_total_uncompressed_bytes=(
-              MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES
-            ),
+            max_total_uncompressed_bytes=(MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES),
             max_total_compressed_bytes=compressed_budget,
           )
         except ValueError as exc:
           if (
             compressed_budget == remaining_cache_bytes
-            and remaining_cache_bytes
-            < MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES
+            and remaining_cache_bytes < MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES
             and "compressed byte limit" in str(exc)
           ):
-            raise RuntimeError(
-              "market-data upload cache byte limit exceeded"
-            ) from exc
+            raise RuntimeError("market-data upload cache byte limit exceeded") from exc
           raise
 
       cached = self._market_upload_cache.get(request_id)
       if cached is not entry:
         self._remove_prepared_market_data(prepared)
         raise RuntimeError("market-data preparation was retired")
-      next_cache_bytes = (
-        self._market_upload_cache_bytes + prepared.compressed_bytes
-      )
+      next_cache_bytes = self._market_upload_cache_bytes + prepared.compressed_bytes
       if next_cache_bytes > MAX_MARKET_DATA_UPLOAD_CACHE_BYTES:
         self._remove_prepared_market_data(prepared)
         raise RuntimeError("market-data upload cache byte limit exceeded")
@@ -3292,9 +3249,7 @@ class AgentRuntime:
     if not hasattr(self, "_fatal_market_data_event"):
       self._fatal_market_data_event = asyncio.Event()
     if not hasattr(self, "_market_spool_root"):
-      ephemeral_base = Path(
-        tempfile.mkdtemp(prefix="quantx-qmt-agent-test-")
-      )
+      ephemeral_base = Path(tempfile.mkdtemp(prefix="quantx-qmt-agent-test-"))
       self._market_spool_root = _initialize_market_data_spool_root(
         ephemeral_base,
         f"test-{uuid.uuid4()}",
@@ -3377,8 +3332,7 @@ class AgentRuntime:
       if (
         entry.task is not None
         and entry.task.done()
-        and current - entry.last_access_at
-        >= MARKET_DATA_UPLOAD_CACHE_TTL_SECONDS
+        and current - entry.last_access_at >= MARKET_DATA_UPLOAD_CACHE_TTL_SECONDS
       )
     ]
     for request_id in expired_request_ids:
@@ -3387,10 +3341,7 @@ class AgentRuntime:
     expired_tombstones = [
       request_id
       for request_id, tombstone in self._market_upload_tombstones.items()
-      if (
-        current - tombstone.last_access_at
-        >= MARKET_DATA_UPLOAD_CACHE_TTL_SECONDS
-      )
+      if (current - tombstone.last_access_at >= MARKET_DATA_UPLOAD_CACHE_TTL_SECONDS)
     ]
     for request_id in expired_tombstones:
       self._market_upload_tombstones.pop(request_id, None)
@@ -3411,11 +3362,7 @@ class AgentRuntime:
     )
     if cancel and entry.task is not None and not entry.task.done():
       entry.task.cancel()
-    elif (
-      remove_prepared
-      and entry.task is not None
-      and entry.task.done()
-    ):
+    elif remove_prepared and entry.task is not None and entry.task.done():
       try:
         prepared = entry.task.result()
       except BaseException:
@@ -3465,9 +3412,7 @@ class AgentRuntime:
       if not upload.task.done()
     ]
     if active_uploads:
-      raise RuntimeError(
-        "market-data uploads must stop before clearing their spool"
-      )
+      raise RuntimeError("market-data uploads must stop before clearing their spool")
     self._market_upload_tasks.clear()
     self._queued_market_data_requests.clear()
     for request_id in list(self._market_upload_cache):
@@ -3480,9 +3425,7 @@ class AgentRuntime:
 
   async def _cancel_market_upload_tasks(self) -> None:
     self._ensure_market_upload_state()
-    tasks = [
-      upload.task for upload in self._market_upload_tasks.values()
-    ]
+    tasks = [upload.task for upload in self._market_upload_tasks.values()]
     for task in tasks:
       if not task.done():
         task.cancel()
@@ -3534,8 +3477,7 @@ class AgentRuntime:
             await self._report_market_data_failure(request_id, exc)
           except Exception as report_exc:
             logger.warning(
-              "Could not report QMT market data failure: request_id=%s "
-              "error=%s: %s",
+              "Could not report QMT market data failure: request_id=%s error=%s: %s",
               request_id,
               report_exc.__class__.__name__,
               report_exc,
@@ -3556,12 +3498,13 @@ class AgentRuntime:
     error: Exception,
   ) -> None:
     reason = f"{error.__class__.__name__}: {error}"[:900]
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(
+      timeout=10.0,
+      follow_redirects=False,
+      trust_env=False,
+    ) as client:
       response = await client.post(
-        (
-          f"{self.configuration.api_url}/agent/market-data/"
-          f"{request_id}/fail"
-        ),
+        (f"{self.configuration.api_url}/agent/market-data/{request_id}/fail"),
         headers={"Authorization": f"Bearer {self._access_token}"},
         json={"reason": reason},
       )
@@ -3570,12 +3513,13 @@ class AgentRuntime:
   async def _report_market_data_busy(self, request_id: str) -> None:
     """Use the existing per-request failure endpoint for retryable backpressure."""
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(
+      timeout=10.0,
+      follow_redirects=False,
+      trust_env=False,
+    ) as client:
       response = await client.post(
-        (
-          f"{self.configuration.api_url}/agent/market-data/"
-          f"{request_id}/fail"
-        ),
+        (f"{self.configuration.api_url}/agent/market-data/{request_id}/fail"),
         headers={"Authorization": f"Bearer {self._access_token}"},
         json={"reason": "MARKET_DATA_AGENT_BUSY"},
       )
@@ -3591,9 +3535,7 @@ class AgentRuntime:
     existing = self._market_upload_tasks.get(request_id)
     if existing is not None:
       if existing.fingerprint != fingerprint:
-        raise RuntimeError(
-          "同一 market-data request_id 的重投参数不一致"
-        )
+        raise RuntimeError("同一 market-data request_id 的重投参数不一致")
       logger.info(
         "QMT market-data redelivery joined active upload: request_id=%s",
         request_id,
@@ -3635,8 +3577,5 @@ class AgentRuntime:
     for upload in self._market_upload_tasks.values():
       if not upload.task.done():
         upload.task.cancel()
-    if not any(
-      not upload.task.done()
-      for upload in self._market_upload_tasks.values()
-    ):
+    if not any(not upload.task.done() for upload in self._market_upload_tasks.values()):
       self._clear_market_upload_state()

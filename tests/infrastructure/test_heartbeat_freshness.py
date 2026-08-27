@@ -14,16 +14,6 @@ from quantx_infrastructure.services.account_execution_safety_service import (
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 
 
-@pytest.fixture(autouse=True)
-def clear_qmt_launch_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-  for name in (
-    "QMT_AGENT_LAUNCH_STATE",
-    "QMT_AGENT_LAUNCH_REASON",
-    "QMT_AGENT_LAUNCH_STARTED_AT",
-  ):
-    monkeypatch.delenv(name, raising=False)
-
-
 @pytest.fixture
 def fixed_utcnow(monkeypatch: pytest.MonkeyPatch) -> datetime:
   value = datetime(2026, 7, 28, 10, 30)
@@ -34,11 +24,7 @@ def fixed_utcnow(monkeypatch: pytest.MonkeyPatch) -> datetime:
 
 @pytest.mark.parametrize(
   "freshness_check",
-  (
-    AccountExecutionSafetyService._fresh,
-    AccountExecutionSafetyService._agent_fresh,
-    TradeCommandService._heartbeat_fresh,
-  ),
+  (AccountExecutionSafetyService._fresh,),
 )
 def test_heartbeat_freshness_accepts_naive_and_aware_utc(
   freshness_check,
@@ -78,15 +64,34 @@ def test_account_freshness_rejects_stale_or_degraded_heartbeat(
   assert not AccountExecutionSafetyService._fresh(degraded)
 
 
-def test_current_launch_boundary_fails_closed(
-  fixed_utcnow: datetime,
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  heartbeat = SimpleNamespace(status="READY", updated_at=fixed_utcnow)
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STARTED_AT", "not-a-timestamp")
+def _api(now: datetime, *, instance_id: str = "api-instance-1"):
+  return SimpleNamespace(
+    instance_id=instance_id,
+    status="READY",
+    updated_at=now,
+    details={"apiInstanceId": instance_id},
+  )
 
-  assert not AccountExecutionSafetyService._agent_fresh(heartbeat)
+
+def test_remote_session_freshness_accepts_naive_and_aware_utc(
+  fixed_utcnow: datetime,
+) -> None:
+  heartbeat = _agent(fixed_utcnow)
+  api = _api(fixed_utcnow)
+
+  assert AccountExecutionSafetyService._agent_fresh(heartbeat, api)
+  assert TradeCommandService._heartbeat_fresh(heartbeat, api)
+
+
+def test_api_restart_boundary_fails_closed(
+  fixed_utcnow: datetime,
+) -> None:
+  heartbeat = _agent(fixed_utcnow, api_instance_id="api-instance-old")
+
+  assert not AccountExecutionSafetyService._agent_fresh(
+    heartbeat,
+    _api(fixed_utcnow, instance_id="api-instance-new"),
+  )
 
 
 def _control(now: datetime):
@@ -113,13 +118,25 @@ def _device(value: str):
   )
 
 
-def _agent(now: datetime, *, age_seconds: int = 0):
+def _agent(
+  now: datetime,
+  *,
+  age_seconds: int = 0,
+  api_instance_id: str = "api-instance-1",
+):
+  received_at = now - timedelta(seconds=age_seconds)
   return SimpleNamespace(
     status="READY",
     updated_at=now - timedelta(seconds=age_seconds),
     details={
       "capabilities": ["live"],
       "protocolVersion": "1.1",
+      "apiInstanceId": api_instance_id,
+      "agentSessionId": "agent-session-1",
+      "serverReceivedAt": received_at.isoformat(),
+      "agentSentAt": received_at.isoformat(),
+      "sessionActive": True,
+      "marketStreamStatus": "READY",
       "accountReconciliation": {
         "TEST-ACCOUNT": {
           "snapshotId": "snapshot-1",
@@ -170,6 +187,7 @@ async def test_account_status_prefers_the_single_fresh_live_agent(
       engine,
       _device("device-stale"),
       _agent(fixed_utcnow, age_seconds=180),
+      _api(fixed_utcnow),
       0,
       None,
       0,
@@ -180,6 +198,7 @@ async def test_account_status_prefers_the_single_fresh_live_agent(
       engine,
       _device("device-fresh"),
       _agent(fixed_utcnow),
+      _api(fixed_utcnow),
       0,
       None,
       0,
@@ -196,6 +215,35 @@ async def test_account_status_prefers_the_single_fresh_live_agent(
 
 
 @pytest.mark.asyncio
+async def test_account_status_blocks_increase_until_market_stream_is_ready(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+) -> None:
+  agent = _agent(fixed_utcnow)
+  agent.details["marketStreamStatus"] = "SYNCING"
+  rows = [
+    (
+      _control(fixed_utcnow),
+      SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+      _device("device-1"),
+      agent,
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+    )
+  ]
+
+  result = await _status(monkeypatch, rows)
+  checks = {item["code"]: item for item in result["checks"]}
+
+  assert result["can_increase_risk"] is False
+  assert checks["MARKET_STREAM_READY"]["passed"] is False
+  assert "三阶段同步" in checks["MARKET_STREAM_READY"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_account_status_fails_closed_for_multiple_ready_live_agents(
   monkeypatch: pytest.MonkeyPatch,
   fixed_utcnow: datetime,
@@ -203,8 +251,28 @@ async def test_account_status_fails_closed_for_multiple_ready_live_agents(
   control = _control(fixed_utcnow)
   engine = SimpleNamespace(status="READY", updated_at=fixed_utcnow)
   rows = [
-    (control, engine, _device("device-1"), _agent(fixed_utcnow), 0, None, 0, 0),
-    (control, engine, _device("device-2"), _agent(fixed_utcnow), 0, None, 0, 0),
+    (
+      control,
+      engine,
+      _device("device-1"),
+      _agent(fixed_utcnow),
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+    ),
+    (
+      control,
+      engine,
+      _device("device-2"),
+      _agent(fixed_utcnow),
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+    ),
   ]
 
   result = await _status(monkeypatch, rows)
@@ -217,19 +285,17 @@ async def test_account_status_fails_closed_for_multiple_ready_live_agents(
 
 
 @pytest.mark.asyncio
-async def test_blocked_launch_overrides_a_fresh_persisted_heartbeat(
+async def test_api_restart_overrides_a_fresh_persisted_heartbeat(
   monkeypatch: pytest.MonkeyPatch,
   fixed_utcnow: datetime,
 ) -> None:
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
-  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_ENROLLMENT_REQUIRED")
-  monkeypatch.setenv("QMT_AGENT_MODE", "live")
   rows = [
     (
       _control(fixed_utcnow),
       SimpleNamespace(status="READY", updated_at=fixed_utcnow),
       _device("device-1"),
-      _agent(fixed_utcnow),
+      _agent(fixed_utcnow, api_instance_id="api-instance-old"),
+      _api(fixed_utcnow, instance_id="api-instance-new"),
       0,
       None,
       0,
@@ -239,8 +305,7 @@ async def test_blocked_launch_overrides_a_fresh_persisted_heartbeat(
 
   result = await _status(monkeypatch, rows)
 
-  assert result["agent_status"] == "BLOCKED"
+  assert result["agent_status"] == "OFFLINE"
   assert result["agent_mode"] == "offline"
-  assert result["requested_agent_mode"] == "live"
-  assert result["qmt_launch_reason_code"] == "QMT_ENROLLMENT_REQUIRED"
+  assert result["qmt_launch_reason_code"] == "REMOTE_AGENT_SESSION_STALE"
   assert result["can_increase_risk"] is False

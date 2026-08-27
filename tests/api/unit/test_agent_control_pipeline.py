@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import suppress
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from quantx_api import agent_api
@@ -36,6 +37,47 @@ def report_envelope(message_id: str) -> AgentEnvelope:
     message_type=AgentMessageType.DELTA_REPORT,
     payload={"sequence": 1, "is_complete": False},
   )
+
+
+def control_session(device_id: str = "device-1") -> agent_api.AgentControlSession:
+  return agent_api.AgentControlSession(
+    device_id=device_id,
+    capabilities={"market-data", "live"},
+    authorized_account_ids=frozenset({"account-1"}),
+    queue=asyncio.Queue(),
+    api_instance_id="api-instance-1",
+    agent_session_id="agent-session-1",
+    server_connected_at=agent_api.utcnow(),
+    remote_address_summary="10.0.0.*",
+    revoked=asyncio.Event(),
+  )
+
+
+@pytest.mark.parametrize(
+  ("host", "expected"),
+  (
+    ("10.20.30.40", "10.20.30.*"),
+    ("::ffff:10.20.30.40", "10.20.30.*"),
+    ("2001:db8:1234:5678::1", "2001:0db8:1234:*"),
+    ("untrusted-hostname.example", "unknown"),
+  ),
+)
+def test_remote_address_summary_is_masked(host: str, expected: str) -> None:
+  websocket = SimpleNamespace(client=SimpleNamespace(host=host))
+
+  assert agent_api._remote_address_summary(websocket) == expected
+
+
+def test_agent_capabilities_are_normalized_and_require_one_mode() -> None:
+  assert agent_api._normalized_agent_capabilities([" MARKET-DATA ", "LIVE"]) == {
+    "market-data",
+    "live",
+  }
+
+  with pytest.raises(agent_api.AuthError, match="唯一运行模式"):
+    agent_api._normalized_agent_capabilities(["market-data"])
+  with pytest.raises(agent_api.AuthError, match="唯一运行模式"):
+    agent_api._normalized_agent_capabilities(["live", "paper"])
 
 
 def test_source_to_receive_accepts_naive_persisted_utc(
@@ -82,8 +124,8 @@ async def test_database_pollers_do_not_block_report_reception(
     await release_pollers.wait()
     return None
 
-  async def process_message(device_id, envelope, **_kwargs):
-    assert device_id == "device-1"
+  async def process_message(session, envelope, **_kwargs):
+    assert session.device_id == "device-1"
     assert envelope.message_type is AgentMessageType.DELTA_REPORT
     processed.set()
     return AgentEnvelope(
@@ -98,7 +140,7 @@ async def test_database_pollers_do_not_block_report_reception(
     await asyncio.sleep(60)
     return False
 
-  async def refresh_lease(_device_id, _queue):
+  async def refresh_lease(_session):
     return None
 
   monkeypatch.setattr(agent_api, "_next_command", hanging_command)
@@ -115,13 +157,21 @@ async def test_database_pollers_do_not_block_report_reception(
     refresh_lease,
   )
 
+  async def is_connected(*_args, **_kwargs):
+    return True
+
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "is_connected",
+    is_connected,
+  )
+
   pipeline = asyncio.create_task(
     agent_api._run_agent_control_pipeline(
       websocket,
-      device_id="device-1",
+      control_session=control_session(),
       protocol_version="1.1",
       session_expires_at=agent_api.utcnow() + timedelta(minutes=5),
-      control_queue=asyncio.Queue(),
     )
   )
   await websocket.received.put(
@@ -145,8 +195,8 @@ async def test_report_ack_waits_for_durable_recording(
   allow_persist = asyncio.Event()
   envelope = report_envelope("00000000-0000-4000-8000-000000000002")
 
-  async def record_report(device_id, value, *, received_at):
-    assert device_id == "device-1"
+  async def record_report(session, value, *, received_at):
+    assert session.device_id == "device-1"
     assert value is envelope
     assert received_at is not None
     persist_started.set()
@@ -154,9 +204,18 @@ async def test_report_ack_waits_for_durable_recording(
     return ReportAckPayload(report_message_id=value.message_id, accepted=True)
 
   monkeypatch.setattr(agent_api, "_record_report", record_report)
+
+  async def is_connected(*_args, **_kwargs):
+    return True
+
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "is_connected",
+    is_connected,
+  )
   processor = asyncio.create_task(
     agent_api._process_agent_control_messages(
-      device_id="device-1",
+      control_session=control_session(),
       protocol_version="1.1",
       inbound=inbound,
       outbound=outbound,
@@ -166,7 +225,7 @@ async def test_report_ack_waits_for_durable_recording(
   writer = asyncio.create_task(
     agent_api._send_agent_control_messages(
       websocket,
-      device_id="device-1",
+      control_session=control_session(),
       outbound=outbound,
     )
   )
@@ -184,8 +243,7 @@ async def test_report_ack_waits_for_durable_recording(
   assert websocket.sent == []
 
   allow_persist.set()
-  while not websocket.sent:
-    await asyncio.sleep(0)
+  await asyncio.wait_for(_wait_for_sent(websocket, 1), timeout=0.5)
   assert websocket.sent[0].message_type is AgentMessageType.REPORT_ACK
 
   processor.cancel()
@@ -193,8 +251,15 @@ async def test_report_ack_waits_for_durable_recording(
   await asyncio.gather(processor, writer, return_exceptions=True)
 
 
+async def _wait_for_sent(websocket: FakeWebSocket, count: int) -> None:
+  while len(websocket.sent) < count:
+    await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
-async def test_single_writer_prioritizes_ack_and_serializes_sends() -> None:
+async def test_single_writer_prioritizes_ack_and_serializes_sends(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
   outbound = agent_api._AgentOutboundBuffer()
   websocket = FakeWebSocket(send_delay=0.01)
   command = AgentEnvelope(
@@ -212,10 +277,28 @@ async def test_single_writer_prioritizes_ack_and_serializes_sends() -> None:
   await agent_api._enqueue_agent_outbound("device-1", outbound, command)
   await agent_api._enqueue_agent_outbound("device-1", outbound, ack)
 
+  async def is_connected(*_args, **_kwargs):
+    return True
+
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "is_connected",
+    is_connected,
+  )
+
+  async def assert_trade_delivery_session(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(
+    agent_api,
+    "_assert_trade_delivery_session",
+    assert_trade_delivery_session,
+  )
+
   writer = asyncio.create_task(
     agent_api._send_agent_control_messages(
       websocket,
-      device_id="device-1",
+      control_session=control_session(),
       outbound=outbound,
     )
   )
@@ -266,7 +349,9 @@ async def test_outbound_buffer_reserves_ack_capacity_and_deduplicates_work() -> 
 
 
 @pytest.mark.asyncio
-async def test_inbound_buffer_coalesces_report_retries_until_processing_completes() -> None:
+async def test_inbound_buffer_coalesces_report_retries_until_processing_completes() -> (
+  None
+):
   inbound = agent_api._AgentInboundBuffer()
   envelope = report_envelope("00000000-0000-4000-8000-000000000005")
 
@@ -314,7 +399,7 @@ async def test_stale_inbound_message_is_processed_without_disconnect(
 
   processor = asyncio.create_task(
     agent_api._process_agent_control_messages(
-      device_id="device-1",
+      control_session=control_session(),
       protocol_version="1.1",
       inbound=inbound,
       outbound=outbound,
@@ -353,7 +438,7 @@ async def test_transient_database_timeout_sends_no_ack_and_pauses_pollers(
 
   processor = asyncio.create_task(
     agent_api._process_agent_control_messages(
-      device_id="device-1",
+      control_session=control_session(),
       protocol_version="1.1",
       inbound=inbound,
       outbound=outbound,

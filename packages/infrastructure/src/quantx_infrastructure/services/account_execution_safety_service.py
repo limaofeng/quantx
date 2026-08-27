@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -24,12 +23,13 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
   TradeCommandOutbox,
 )
+from quantx_infrastructure.services.agent_session_guard import (
+  API_HEARTBEAT_COMPONENT,
+  REMOTE_AGENT_NOT_RECONCILED,
+  evaluate_agent_session,
+)
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
-)
-from quantx_infrastructure.services.qmt_launch_guard import (
-  qmt_agent_launch_block_reason,
-  qmt_heartbeat_matches_current_launch,
 )
 
 ACCOUNT_EXECUTION_ALERT_CODES = frozenset(
@@ -46,6 +46,7 @@ ACCOUNT_EXECUTION_CHECK_CODES = frozenset(
     "ENGINE_READY",
     "LIVE_AGENT_READY",
     "AGENT_MODE_LIVE",
+    "MARKET_STREAM_READY",
     "PROTOCOL_1_1",
     "EXECUTION_CONTROL_CONFIGURED",
     "SNAPSHOT_RECONCILED",
@@ -170,23 +171,28 @@ class AccountExecutionSafetyService:
       and to_naive_utc(heartbeat.updated_at) >= utcnow() - timedelta(seconds=90)
     )
 
-  @classmethod
-  def _agent_fresh(cls, heartbeat: RuntimeComponentHeartbeat | None) -> bool:
-    return bool(
-      cls._fresh(heartbeat)
-      and heartbeat is not None
-      and qmt_heartbeat_matches_current_launch(heartbeat.updated_at)
-    )
+  @staticmethod
+  def _agent_fresh(
+    heartbeat: RuntimeComponentHeartbeat | None,
+    api_heartbeat: RuntimeComponentHeartbeat | None,
+  ) -> bool:
+    return evaluate_agent_session(
+      heartbeat,
+      api_heartbeat,
+      now=utcnow(),
+      acceptable_statuses={"READY"},
+    ).current
 
   @classmethod
   def _agent_candidate_rank(
     cls,
     heartbeat: RuntimeComponentHeartbeat | None,
+    api_heartbeat: RuntimeComponentHeartbeat | None,
   ) -> tuple[bool, datetime]:
     updated_at = (
       to_naive_utc(heartbeat.updated_at) if heartbeat is not None else datetime.min
     )
-    return cls._agent_fresh(heartbeat), updated_at
+    return cls._agent_fresh(heartbeat, api_heartbeat), updated_at
 
   @staticmethod
   def _normalized_broker_order_status(value: Any) -> str:
@@ -321,6 +327,7 @@ class AccountExecutionSafetyService:
     anchor = select(literal(account_id).label("account_id")).subquery()
     engine_heartbeat = aliased(RuntimeComponentHeartbeat)
     agent_heartbeat = aliased(RuntimeComponentHeartbeat)
+    api_heartbeat = aliased(RuntimeComponentHeartbeat)
     queued_count = (
       select(func.count(TradeCommandOutbox.message_id))
       .where(
@@ -365,6 +372,7 @@ class AccountExecutionSafetyService:
           engine_heartbeat,
           AgentDevice,
           agent_heartbeat,
+          api_heartbeat,
           queued_count,
           oldest_queued_at,
           dead_letter_count,
@@ -376,6 +384,7 @@ class AccountExecutionSafetyService:
           AccountExecutionControl.account_id == anchor.c.account_id,
         )
         .outerjoin(engine_heartbeat, engine_heartbeat.component == "engine")
+        .outerjoin(api_heartbeat, api_heartbeat.component == API_HEARTBEAT_COMPONENT)
         .outerjoin(AgentDevice, AgentDevice.revoked_at.is_(None))
         .outerjoin(
           agent_heartbeat,
@@ -394,6 +403,7 @@ class AccountExecutionSafetyService:
         engine,
         _,
         _,
+        api_heartbeat,
         queued_count,
         oldest_queued_at,
         dead_letter_count,
@@ -413,8 +423,9 @@ class AccountExecutionSafetyService:
           candidate_agent = row[3]
           live_agent_candidates.append((candidate_device, candidate_agent))
           if device is None or self._agent_candidate_rank(
-            candidate_agent
-          ) > self._agent_candidate_rank(agent):
+            candidate_agent,
+            api_heartbeat,
+          ) > self._agent_candidate_rank(agent, api_heartbeat):
             device = candidate_device
             agent = candidate_agent
 
@@ -422,7 +433,7 @@ class AccountExecutionSafetyService:
       ready_live_agents = [
         (candidate_device, candidate_agent)
         for candidate_device, candidate_agent in live_agent_candidates
-        if self._agent_fresh(candidate_agent)
+        if self._agent_fresh(candidate_agent, api_heartbeat)
       ]
       multiple_ready_live_agents = len(ready_live_agents) > 1
       if len(ready_live_agents) == 1:
@@ -436,11 +447,13 @@ class AccountExecutionSafetyService:
         "offline",
       )
       reported_protocol_version = str(agent_details.get("protocolVersion") or "")
-      agent_heartbeat_fresh = bool(
-        agent
-        and to_naive_utc(agent.updated_at) >= now - timedelta(seconds=90)
-        and qmt_heartbeat_matches_current_launch(agent.updated_at)
+      agent_session = evaluate_agent_session(
+        agent,
+        api_heartbeat,
+        now=now,
+        acceptable_statuses={"READY"},
       )
+      agent_heartbeat_fresh = agent_session.current
       live_agent_ready = bool(
         not multiple_ready_live_agents
         and len(ready_live_agents) == 1
@@ -460,14 +473,12 @@ class AccountExecutionSafetyService:
       else:
         live_agent_blocked_reason = "对应账户的 live Agent 当前未就绪"
 
-      qmt_launch_reason_code = qmt_agent_launch_block_reason()
-      if qmt_launch_reason_code is not None:
-        live_agent_ready = False
-        agent_heartbeat_fresh = False
-        reported_agent_mode = "offline"
-        reported_protocol_version = ""
+      agent_reason_code = agent_session.reason_code or (
+        "" if live_agent_ready else REMOTE_AGENT_NOT_RECONCILED
+      )
+      if not multiple_ready_live_agents and not live_agent_ready and agent_reason_code:
         live_agent_blocked_reason = (
-          f"QMT Agent 本地启动被阻断，实盘能力已关闭（{qmt_launch_reason_code}）"
+          f"远程 QMT Agent 会话不可用于实盘（{agent_reason_code}）"
         )
 
       account_reconciliation = dict(agent_details.get("accountReconciliation") or {})
@@ -569,6 +580,12 @@ class AccountExecutionSafetyService:
           reported_agent_mode == "live",
           "QMT Agent 尚未明确切换到 live 模式",
           "OBSERVATION",
+        ),
+        (
+          "MARKET_STREAM_READY",
+          str(agent_details.get("marketStreamStatus") or "").upper() == "READY",
+          "全市场行情尚未完成远程三阶段同步",
+          "INCREASE_RISK",
         ),
         (
           "PROTOCOL_1_1",
@@ -673,13 +690,12 @@ class AccountExecutionSafetyService:
         "engine_status": str(engine.status if engine else "OFFLINE"),
         "agent_status": str(agent.status)
         if agent_heartbeat_fresh and agent
-        else ("BLOCKED" if qmt_launch_reason_code else "OFFLINE"),
+        else "OFFLINE",
         "agent_device_id": str(device.id) if device else None,
         "ready_live_agent_count": len(ready_live_agents),
         "agent_mode": reported_agent_mode if agent_heartbeat_fresh else "offline",
-        "requested_agent_mode": os.environ.get("QMT_AGENT_MODE", "").strip().lower()
-        or "unknown",
-        "qmt_launch_reason_code": qmt_launch_reason_code or "",
+        "requested_agent_mode": reported_agent_mode or "unknown",
+        "qmt_launch_reason_code": agent_reason_code,
         "protocol_version": reported_protocol_version if agent_heartbeat_fresh else "",
         "reconcile_status": str(control.reconcile_status if control else "UNKNOWN"),
         "kill_switch": authorization_state == "KILLED",

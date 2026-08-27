@@ -133,11 +133,15 @@ def _plan_state(*, auto_exit_authorized: bool = False) -> dict:
     config_version=1,
     auto_exit_authorized=auto_exit_authorized,
   )
-  return ExitPlanBook().register_entry_fill(
-    template,
-    volume=300,
-    price=10.0,
-  ).to_dict()
+  return (
+    ExitPlanBook()
+    .register_entry_fill(
+      template,
+      volume=300,
+      price=10.0,
+    )
+    .to_dict()
+  )
 
 
 @pytest.fixture
@@ -167,6 +171,8 @@ async def authorization_database(monkeypatch):
     )
   factory = async_sessionmaker(engine, expire_on_commit=False)
   shanghai_now = time_utils.now()
+  observed_at = utcnow()
+  observed_at_iso = observed_at.isoformat().replace("+00:00", "Z")
   async with factory() as db:
     db.add_all(
       [
@@ -263,11 +269,27 @@ async def authorization_database(monkeypatch):
           updated_at=shanghai_now,
         ),
         RuntimeComponentHeartbeat(
+          component="api",
+          instance_id="api-instance-1",
+          status="READY",
+          details={"startedAt": observed_at_iso},
+          updated_at=observed_at,
+        ),
+        RuntimeComponentHeartbeat(
           component="qmt-agent:agent-1",
           instance_id="qmt-agent",
           status="READY",
-          details={"capabilities": ["live"], "protocolVersion": "1.1"},
-          updated_at=utcnow(),
+          details={
+            "apiInstanceId": "api-instance-1",
+            "agentSessionId": "agent-session-1",
+            "serverReceivedAt": observed_at_iso,
+            "agentSentAt": observed_at_iso,
+            "sessionActive": True,
+            "marketStreamStatus": "READY",
+            "capabilities": ["live"],
+            "protocolVersion": "1.1",
+          },
+          updated_at=observed_at,
         ),
       ]
     )
@@ -355,9 +377,7 @@ async def test_legacy_boolean_cannot_mint_automatic_exit_authority() -> None:
     protected_volume=100,
     rules=[],
     idempotency_key="legacy-create-1",
-    cost_basis=ExitPlanCostBasisInput(
-      mode="MANUAL_UNIT_COST", unit_cost_cny=10.0
-    ),
+    cost_basis=ExitPlanCostBasisInput(mode="MANUAL_UNIT_COST", unit_cost_cny=10.0),
     account_id="ACCOUNT-1",
     execution_mode="live",
     auto_exit_authorized=True,
@@ -395,17 +415,14 @@ async def test_legacy_boolean_cannot_mint_automatic_exit_authority() -> None:
       conditional_input,
       "ACCOUNT-1",
     )
-  assert (
-    conditional_error.value.code
-    == "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE"
-  )
+  assert conditional_error.value.code == "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE"
 
   with pytest.raises(ValueError, match="REQUIRES_CHALLENGE"):
-    await AutoExitPlanService().create_manual_exit_plan(
-      {"auto_exit_authorized": True}
-    )
+    await AutoExitPlanService().create_manual_exit_plan({"auto_exit_authorized": True})
   with pytest.raises(LiquidationError, match="REQUIRES_CHALLENGE"):
-    await LiquidationService(account_id="ACCOUNT-1").upsert_conditional_liquidation_order(
+    await LiquidationService(
+      account_id="ACCOUNT-1"
+    ).upsert_conditional_liquidation_order(
       stock_code="600000.SH",
       target_price=12,
       execution_mode="live",
@@ -512,9 +529,7 @@ async def test_manual_plan_create_uses_caller_idempotency_key(
     protected_volume=100,
     rules=[],
     idempotency_key="ios-create-1",
-    cost_basis=ExitPlanCostBasisInput(
-      mode="MANUAL_UNIT_COST", unit_cost_cny=10.0
-    ),
+    cost_basis=ExitPlanCostBasisInput(mode="MANUAL_UNIT_COST", unit_cost_cny=10.0),
     account_id="ACCOUNT-1",
   )
 
@@ -536,9 +551,7 @@ async def test_manual_plan_create_rejects_blank_idempotency_key() -> None:
     protected_volume=100,
     rules=[],
     idempotency_key="   ",
-    cost_basis=ExitPlanCostBasisInput(
-      mode="MANUAL_UNIT_COST", unit_cost_cny=10.0
-    ),
+    cost_basis=ExitPlanCostBasisInput(mode="MANUAL_UNIT_COST", unit_cost_cny=10.0),
     account_id="ACCOUNT-1",
   )
 
@@ -1048,9 +1061,7 @@ async def test_engine_revokes_expired_or_withdrawn_authorization_without_disabli
   async with authorization_database() as db:
     if revocation == "expiry":
       plan = await db.get(AutoExitPlanRecord, "plan-1")
-      plan.auto_exit_authorization_expires_at = time_utils.now() - timedelta(
-        seconds=1
-      )
+      plan.auto_exit_authorization_expires_at = time_utils.now() - timedelta(seconds=1)
     elif revocation == "session":
       session = await db.get(AuthDeviceSession, "session-1")
       session.revoked_at = utcnow()
@@ -1072,8 +1083,7 @@ async def test_engine_revokes_expired_or_withdrawn_authorization_without_disabli
       (
         await db.execute(
           select(AutoExitPlanEvent).where(
-            AutoExitPlanEvent.event_type
-            == "AUTO_EXIT_AUTHORIZATION_INVALIDATED"
+            AutoExitPlanEvent.event_type == "AUTO_EXIT_AUTHORIZATION_INVALIDATED"
           )
         )
       ).scalars()

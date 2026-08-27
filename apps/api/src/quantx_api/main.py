@@ -29,6 +29,7 @@ from quantx_api.agent_api import (
   run_trade_command_expiry_sweeper,
 )
 from quantx_api.agent_hub import agent_connection_hub
+from quantx_api.api_runtime import record_api_heartbeat, run_api_heartbeat
 from quantx_api.auth.router import auth_router
 from quantx_api.auth.service import AuthService
 from quantx_api.gqlapi import setup_graphql
@@ -90,9 +91,7 @@ def _format_live_threads() -> str:
   for thread in threading.enumerate():
     if thread is current_thread or not thread.is_alive():
       continue
-    threads.append(
-      f"{thread.name}(daemon={thread.daemon}, ident={thread.ident})"
-    )
+    threads.append(f"{thread.name}(daemon={thread.daemon}, ident={thread.ident})")
   return ", ".join(threads) if threads else "none"
 
 
@@ -367,6 +366,12 @@ async def lifespan(app: FastAPI):
       exc.__class__.__name__,
     )
 
+  await record_api_heartbeat()
+  api_heartbeat_stopped = asyncio.Event()
+  api_heartbeat_task = asyncio.create_task(
+    run_api_heartbeat(api_heartbeat_stopped),
+    name="api-runtime-heartbeat",
+  )
   agent_hub_stopped = asyncio.Event()
   agent_hub_task = asyncio.create_task(
     agent_connection_hub.run_control_relay(agent_hub_stopped)
@@ -382,18 +387,25 @@ async def lifespan(app: FastAPI):
     name="market-data-staging-sweeper",
   )
   yield
+  api_heartbeat_stopped.set()
   agent_hub_stopped.set()
   command_expiry_stopped.set()
   market_staging_stopped.set()
+  api_heartbeat_task.cancel()
   agent_hub_task.cancel()
   command_expiry_task.cancel()
   market_staging_task.cancel()
   await asyncio.gather(
+    api_heartbeat_task,
     agent_hub_task,
     command_expiry_task,
     market_staging_task,
     return_exceptions=True,
   )
+  try:
+    await record_api_heartbeat(status="STOPPED")
+  except Exception as exc:
+    logger.warning("无法持久化 API 停止状态: %s", exc.__class__.__name__)
   try:
     await asyncio.wait_for(db_manager.shutdown(), timeout=3.0)
   except asyncio.TimeoutError:
@@ -495,13 +507,12 @@ if settings.metrics_enabled:
       return response
 
     except Exception:
-      REQUEST_COUNT.labels(
-        method=method, endpoint=endpoint, status_code="500"
-      ).inc()
+      REQUEST_COUNT.labels(method=method, endpoint=endpoint, status_code="500").inc()
       REQUEST_DURATION.labels(method=method, endpoint=endpoint).observe(
         time.time() - start_time
       )
       raise
+
 
 if settings.environment != "production" or settings.debug:
 
@@ -524,6 +535,7 @@ if settings.environment != "production" or settings.debug:
       )
       raise
 
+
 @app.middleware("http")
 async def error_handler_middleware(request: Request, call_next):
   try:
@@ -538,7 +550,9 @@ async def error_handler_middleware(request: Request, call_next):
 
   except Exception as exc:
     error_id = f"error_{int(time.time())}"
-    logger.error(f"Unhandled exception [{error_id}]: {str(exc)} - {request.method} {request.url.path}")
+    logger.error(
+      f"Unhandled exception [{error_id}]: {str(exc)} - {request.method} {request.url.path}"
+    )
     return JSONResponse(
       status_code=500,
       content={
@@ -565,9 +579,7 @@ async def root():
     "environment": settings.environment,
     "graphql_endpoint": "/graphql",
     "docs_url": "/docs/",
-    "internal_api_docs_url": (
-      "/_dev/api-docs" if settings.is_development else None
-    ),
+    "internal_api_docs_url": ("/_dev/api-docs" if settings.is_development else None),
   }
 
 

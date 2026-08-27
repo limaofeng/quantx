@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -16,6 +17,11 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.services.agent_handover import (
   converge_ready_agent,
+)
+from quantx_infrastructure.services.agent_session_guard import (
+  API_HEARTBEAT_COMPONENT,
+  REMOTE_AGENT_OFFLINE,
+  evaluate_agent_session,
 )
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +64,7 @@ class AgentHandoverCancellation:
 class AuthenticatedAgentSession:
   device: AgentDevice
   expires_at: object
+  access_token_fingerprint: str
 
 
 class AgentAuthService:
@@ -161,18 +168,27 @@ class AgentAuthService:
     )
     if not devices:
       return None
-    heartbeat_rows = (
-      await self.db.execute(
-        select(RuntimeComponentHeartbeat).where(
-          RuntimeComponentHeartbeat.component.in_(
-            [f"qmt-agent:{device.id}" for device in devices]
+    heartbeat_rows = list(
+      (
+        await self.db.execute(
+          select(RuntimeComponentHeartbeat).where(
+            RuntimeComponentHeartbeat.component.in_(
+              [f"qmt-agent:{device.id}" for device in devices]
+            )
           )
         )
-      )
-    ).scalars()
-    heartbeat_status = {
-      str(row.instance_id): str(row.status or "").upper()
-      for row in heartbeat_rows
+      ).scalars()
+    )
+    heartbeat_by_device_id = {
+      str(row.component).removeprefix("qmt-agent:"): row for row in heartbeat_rows
+    }
+    api_heartbeat = await self.db.get(
+      RuntimeComponentHeartbeat,
+      API_HEARTBEAT_COMPONENT,
+    )
+    observed_at = utcnow()
+    replacement_target_ids = {
+      str(device.replaces_device_id) for device in devices if device.replaces_device_id
     }
 
     def timestamp(value: datetime | None) -> float:
@@ -182,9 +198,16 @@ class AgentAuthService:
         value = value.replace(tzinfo=utcnow().tzinfo)
       return value.timestamp()
 
-    def key(device: AgentDevice) -> tuple[int, float, float]:
+    def key(device: AgentDevice) -> tuple[int, int, float, float]:
+      session_state = evaluate_agent_session(
+        heartbeat_by_device_id.get(str(device.id)),
+        api_heartbeat,
+        now=observed_at,
+        acceptable_statuses={"READY"},
+      )
       return (
-        int(heartbeat_status.get(str(device.id)) == "READY"),
+        int(session_state.current),
+        int(str(device.id) in replacement_target_ids),
         timestamp(device.last_seen_at),
         timestamp(device.created_at),
       )
@@ -213,6 +236,21 @@ class AgentAuthService:
       ).scalars()
       for candidate in candidates:
         candidate.revoked_at = now
+        heartbeat = await self.db.get(
+          RuntimeComponentHeartbeat,
+          f"qmt-agent:{candidate.id}",
+        )
+        if heartbeat is not None:
+          details = dict(heartbeat.details or {})
+          details.update(
+            {
+              "sessionActive": False,
+              "reasonCode": REMOTE_AGENT_OFFLINE,
+            }
+          )
+          heartbeat.status = "REVOKED"
+          heartbeat.details = details
+          heartbeat.updated_at = now
         revoked_device_ids.append(str(candidate.id))
     await self.db.commit()
     return AgentHandoverCancellation(
@@ -297,6 +335,7 @@ class AgentAuthService:
     return AuthenticatedAgentSession(
       device=device,
       expires_at=claims.expires_at,
+      access_token_fingerprint=hashlib.sha256(token.encode("utf-8")).hexdigest(),
     )
 
   async def revoke(self, *, device_id: str, user_id: str) -> bool:
@@ -309,6 +348,23 @@ class AgentAuthService:
     if device is None:
       return False
     if device.revoked_at is None:
-      device.revoked_at = utcnow()
+      now = utcnow()
+      device.revoked_at = now
+      heartbeat = await self.db.get(
+        RuntimeComponentHeartbeat,
+        f"qmt-agent:{device_id}",
+        with_for_update=True,
+      )
+      if heartbeat is not None:
+        details = dict(heartbeat.details or {})
+        details.update(
+          {
+            "sessionActive": False,
+            "reasonCode": REMOTE_AGENT_OFFLINE,
+          }
+        )
+        heartbeat.status = "REVOKED"
+        heartbeat.details = details
+        heartbeat.updated_at = now
       await self.db.commit()
     return True

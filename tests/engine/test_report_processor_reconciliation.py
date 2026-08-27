@@ -20,9 +20,50 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.models.auth import AuthUser
 from quantx_infrastructure.services import trade_command_service as command_module
+from quantx_infrastructure.services.agent_session_guard import (
+  AGENT_SERVER_SESSION_PAYLOAD_KEY,
+  REMOTE_AGENT_ACCOUNT_MISMATCH,
+)
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+def _session_details(
+  session_id: str,
+  observed_at=None,
+) -> dict[str, object]:
+  received_at = observed_at or utcnow()
+  return {
+    "apiInstanceId": "api-instance-1",
+    "agentSessionId": session_id,
+    "serverReceivedAt": received_at.isoformat(),
+    "agentSentAt": received_at.isoformat(),
+    "sessionActive": True,
+  }
+
+
+def _api_heartbeat(observed_at=None) -> RuntimeComponentHeartbeat:
+  return RuntimeComponentHeartbeat(
+    component="api",
+    instance_id="api-instance-1",
+    status="READY",
+    details={},
+    updated_at=observed_at or utcnow(),
+  )
+
+
+def _bind_report_session(
+  payload: dict,
+  session_id: str,
+  *,
+  accounts: list[str] | None = None,
+) -> None:
+  payload[AGENT_SERVER_SESSION_PAYLOAD_KEY] = {
+    "apiInstanceId": "api-instance-1",
+    "agentSessionId": session_id,
+    "authorizedAccountIds": accounts or ["account-1"],
+  }
 
 
 def _session_with_pending(pending):
@@ -152,10 +193,7 @@ async def test_controlled_reconciliation_accepts_only_acknowledged_baseline(
   assert result["external_orders"][0]["acknowledged"] is True
   assert result["external_orders"][0]["status"] == "EXPIRED"
   assert result["external_orders"][0]["raw_status"] == "SUBMITTED"
-  assert (
-    result["external_orders"][0]["status_reason"]
-    == "MARKET_SESSION_CLOSED"
-  )
+  assert result["external_orders"][0]["status_reason"] == "MARKET_SESSION_CLOSED"
   assert result["external_orders"][1]["acknowledged"] is False
   assert result["external_orders"][1]["status"] == "SUBMITTED"
   assert result["external_trades"][0]["acknowledged"] is True
@@ -233,6 +271,7 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
   )
 
   async with sessions() as db:
+    db.add(_api_heartbeat())
     db.add(
       AccountExecutionControl(
         account_id="account-1",
@@ -253,7 +292,10 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
         component="qmt-agent:device-1",
         instance_id="device-1",
         status="READY",
-        details={"accountReconciliation": {}},
+        details={
+          **_session_details("agent-session-1"),
+          "accountReconciliation": {},
+        },
         updated_at=utcnow(),
       )
     )
@@ -292,6 +334,7 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
       default=str,
     ).encode("utf-8")
   ).hexdigest()
+  _bind_report_session(payload, "agent-session-1")
 
   await report_processor._process_delta_report(
     "device-1",
@@ -317,9 +360,7 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
     assert rollout.controlled_window_external_trade_ids == []
     assert "UNKNOWN_BROKER_ORDER" in str(rollout.paused_reason)
 
-    events = (
-      await db.execute(select(AccountExecutionControlEvent))
-    ).scalars().all()
+    events = (await db.execute(select(AccountExecutionControlEvent))).scalars().all()
     assert len(events) == 1
     assert events[0].event_type == "CONTROLLED_WINDOW_INVALIDATED"
     assert events[0].previous_state == "ENABLED"
@@ -535,6 +576,7 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
   )
   now = utcnow()
   async with sessions() as db:
+    db.add(_api_heartbeat(now))
     db.add(
       AuthUser(
         id="user-handover",
@@ -569,14 +611,14 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
           component="qmt-agent:device-old",
           instance_id="device-old",
           status="READY",
-          details={},
+          details=_session_details("old-session"),
           updated_at=now,
         ),
         RuntimeComponentHeartbeat(
           component="qmt-agent:device-new",
           instance_id="device-new",
           status="RECONCILING",
-          details={},
+          details=_session_details("new-session"),
           updated_at=now,
         ),
       ]
@@ -610,6 +652,7 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
       default=str,
     ).encode("utf-8")
   ).hexdigest()
+  _bind_report_session(payload, "new-session")
 
   await report_processor._process_delta_report(
     "device-new",
@@ -630,9 +673,7 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
     assert old is not None and old.revoked_at is not None
     assert replacement_heartbeat is not None
     assert replacement_heartbeat.status == "READY"
-    assert replacement_heartbeat.details["completedHandoverDeviceIds"] == [
-      "device-old"
-    ]
+    assert replacement_heartbeat.details["completedHandoverDeviceIds"] == ["device-old"]
     assert old_heartbeat is not None and old_heartbeat.status == "REVOKED"
 
   await engine.dispose()
@@ -717,6 +758,7 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
   )
 
   async with sessions() as db:
+    db.add(_api_heartbeat())
     db.add(
       AccountExecutionControl(
         account_id="account-1",
@@ -735,7 +777,7 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
         component="qmt-agent:device-1",
         instance_id="device-1",
         status="READY",
-        details={},
+        details=_session_details("agent-session-invalid"),
         updated_at=utcnow(),
       )
     )
@@ -778,6 +820,7 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
   ).hexdigest()
   if corrupt_hash:
     payload["snapshot_hash"] = "0" * 64
+  _bind_report_session(payload, "agent-session-invalid")
 
   if corrupt_hash:
     with pytest.raises(ValueError, match="哈希校验失败"):
@@ -793,9 +836,7 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
       protocol_version="1.1",
     )
 
-  assert observed_gate_statuses == (
-    [] if corrupt_hash else ["RECONCILE_REQUIRED"]
-  )
+  assert observed_gate_statuses == ([] if corrupt_hash else ["RECONCILE_REQUIRED"])
   position_service.prepare_full_snapshot.assert_not_awaited()
   position_service.finalize_full_snapshot.assert_not_awaited()
   position_service.apply_position_delta.assert_not_awaited()
@@ -828,6 +869,131 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
     assert discrepancy["kind"] == expected_kind
     assert discrepancy["reason"] == expected_reason
     assert payload["snapshot_hash"] not in json.dumps(events[0].details)
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_authoritative_snapshot_account_mismatch_fails_closed_once(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AccountExecutionControl.__table__,
+    AccountExecutionControlEvent.__table__,
+    RuntimeComponentHeartbeat.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(
+    report_processor,
+    "_invalidate_t_trade_entry_authority_for_account",
+    AsyncMock(),
+  )
+  monkeypatch.setattr(report_processor, "_process_order_report", AsyncMock())
+  monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
+  position_service = SimpleNamespace(
+    apply_position_delta=AsyncMock(),
+    get_snapshot_status=AsyncMock(return_value=None),
+    mark_snapshot_failure=AsyncMock(),
+    begin_full_snapshot_attempt=AsyncMock(),
+    prepare_full_snapshot=AsyncMock(),
+    finalize_full_snapshot=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "PositionService",
+    lambda: position_service,
+  )
+
+  now = utcnow()
+  async with sessions() as db:
+    db.add(_api_heartbeat(now))
+    db.add(
+      AccountExecutionControl(
+        account_id="account-2",
+        authorization_state="ENABLED",
+        reconcile_status="READY",
+        controlled_window_active=True,
+      )
+    )
+    db.add(
+      RuntimeComponentHeartbeat(
+        component="qmt-agent:device-1",
+        instance_id="device-1",
+        status="RECONCILING",
+        details=_session_details("mismatch-session"),
+        updated_at=now,
+      )
+    )
+    await db.commit()
+
+  payload = {
+    "snapshot_id": "snapshot-account-mismatch",
+    "is_complete": True,
+    "source_sequence": 1,
+    "source_event_at": now.isoformat(),
+    "accounts": [{"account_id": "account-1", "cash": 0}],
+    "positions_by_account": {"account-1": []},
+    "section_completeness_by_account": {
+      "account-1": {
+        "account": True,
+        "positions": True,
+        "orders": True,
+        "trades": True,
+      }
+    },
+    "unavailable_accounts": [],
+    "orders": [],
+    "trades": [],
+  }
+  payload["snapshot_hash"] = sha256(
+    json.dumps(
+      payload,
+      sort_keys=True,
+      separators=(",", ":"),
+      default=str,
+    ).encode("utf-8")
+  ).hexdigest()
+  _bind_report_session(
+    payload,
+    "mismatch-session",
+    accounts=["account-2"],
+  )
+
+  with pytest.raises(ValueError, match=REMOTE_AGENT_ACCOUNT_MISMATCH):
+    await report_processor._process_delta_report(
+      "device-1",
+      payload,
+      protocol_version="1.1",
+    )
+
+  position_service.mark_snapshot_failure.assert_awaited_once_with(
+    "account-2",
+    f"SNAPSHOT_ACCOUNT_MISMATCH:{REMOTE_AGENT_ACCOUNT_MISMATCH}",
+  )
+  position_service.prepare_full_snapshot.assert_not_awaited()
+  report_processor._upsert_account.assert_not_awaited()
+  report_processor._process_order_report.assert_not_awaited()
+  async with sessions() as db:
+    rollout = await db.get(AccountExecutionControl, "account-2")
+    heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      "qmt-agent:device-1",
+    )
+    assert rollout is not None
+    assert rollout.authorization_state == "PAUSED"
+    assert rollout.reconcile_status == "RECONCILE_REQUIRED"
+    assert heartbeat is not None
+    assert heartbeat.status == REMOTE_AGENT_ACCOUNT_MISMATCH
+    assert heartbeat.details["reasonCode"] == REMOTE_AGENT_ACCOUNT_MISMATCH
 
   await engine.dispose()
 

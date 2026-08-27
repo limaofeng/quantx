@@ -25,17 +25,15 @@ from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
 from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
   TTradeOpportunityEvaluationRepository,
 )
+from quantx_infrastructure.services.account_execution_safety_service import (
+  AccountExecutionSafetyService,
+)
 from quantx_infrastructure.services.engine_command_service import (
   EngineCommandIdempotencyError,
   engine_command_service,
 )
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
-)
-from quantx_infrastructure.services.qmt_launch_guard import (
-  qmt_agent_launch_block_reason,
-  qmt_agent_launch_started_at,
-  qmt_agent_launch_state,
 )
 from quantx_infrastructure.services.t_trade_candidate_trace_service import (
   TTradeCandidateTraceService,
@@ -188,8 +186,7 @@ class EngineCommandPendingError(RuntimeError):
     self.receipt = receipt
     self.command_type = str(command_type or getattr(receipt, "command_type", ""))
     super().__init__(
-      "Engine 命令仍在处理中，尚不知是否已提交: "
-      f"{getattr(receipt, 'message_id', '')}"
+      f"Engine 命令仍在处理中，尚不知是否已提交: {getattr(receipt, 'message_id', '')}"
     )
 
 
@@ -228,9 +225,7 @@ def _validated_client_idempotency_key(value: Any) -> str:
     raise ValueError("idempotency_key must not be blank")
   if len(normalized) > 128:
     raise ValueError("idempotency_key must be at most 128 characters")
-  if any(
-    ord(character) < 0x20 or ord(character) == 0x7F for character in normalized
-  ):
+  if any(ord(character) < 0x20 or ord(character) == 0x7F for character in normalized):
     raise ValueError("idempotency_key must not contain control characters")
   return normalized
 
@@ -700,11 +695,7 @@ class TTradeResolver:
       if any(value is not None and not 0 <= value <= 100 for value in scores):
         raise ValueError("signal scores must be between 0 and 100")
       if not (
-        0 <= thresholds[3]
-        < thresholds[0]
-        < thresholds[2]
-        < thresholds[1]
-        <= 100
+        0 <= thresholds[3] < thresholds[0] < thresholds[2] < thresholds[1] <= 100
       ):
         raise ValueError("signal thresholds are not strictly ordered")
       if coverage is not None and coverage < 0:
@@ -882,9 +873,7 @@ class TTradeResolver:
     )
     initial_portfolio["as_of"] = cls._datetime(initial_portfolio.get("as_of"))
     initial_portfolio["positions"] = [
-      TTradeReplayPosition(
-        **cls._graphql_kwargs(TTradeReplayPosition, item)
-      )
+      TTradeReplayPosition(**cls._graphql_kwargs(TTradeReplayPosition, item))
       for item in initial_portfolio.get("positions", [])
     ]
     payload["initial_portfolio"] = TTradeReplayInitialPortfolio(
@@ -947,34 +936,27 @@ class TTradeResolver:
     return TTradeGlobalMonitor(**cls._graphql_kwargs(TTradeGlobalMonitor, payload))
 
   @classmethod
-  def _apply_qmt_launch_block_to_monitor(cls, data: dict) -> dict:
-    """Mask stale live readiness in a persisted monitor projection."""
+  async def _apply_agent_session_block_to_monitor(cls, data: dict) -> dict:
+    """Mask a persisted projection with the current remote session authority."""
 
-    reason_code = qmt_agent_launch_block_reason()
-    if reason_code is None and qmt_agent_launch_state() == "LAUNCH_ALLOWED":
-      launch_started_at = qmt_agent_launch_started_at()
-      readiness = data.get("readiness")
-      try:
-        checked_at = (
-          cls._datetime(readiness.get("checked_at"))
-          if isinstance(readiness, dict) and readiness.get("checked_at")
-          else None
-        )
-      except (TypeError, ValueError):
-        checked_at = None
-      if checked_at is not None and checked_at.tzinfo is not None:
-        checked_at = checked_at.astimezone(timezone.utc).replace(tzinfo=None)
-      if (
-        launch_started_at is None
-        or checked_at is None
-        or checked_at < launch_started_at
-      ):
-        reason_code = "QMT_LAUNCH_PENDING_CURRENT_HEARTBEAT"
-    if reason_code is None:
+    account_id = str(data.get("account_id") or "").strip()
+    if not account_id:
       return data
+    current = await AccountExecutionSafetyService().status(account_id)
+    current_checks = {
+      str(item.get("code") or ""): bool(item.get("passed"))
+      for item in list(current.get("checks") or [])
+    }
+    if str(current.get("agent_status") or "").upper() == "READY" and current_checks.get(
+      "MARKET_STREAM_READY", False
+    ):
+      return data
+    reason_code = str(
+      current.get("qmt_launch_reason_code") or "REMOTE_AGENT_NOT_RECONCILED"
+    )
 
     payload = dict(data)
-    message = f"QMT Agent 本地启动被阻断，实盘能力已关闭（{reason_code}）"
+    message = f"远程 QMT Agent 会话不可用，实盘能力已关闭（{reason_code}）"
     payload.update(
       {
         "agent_status": "BLOCKED",
@@ -1016,12 +998,11 @@ class TTradeResolver:
       )
     )
     checks = []
-    launch_check_seen = False
+    session_check_seen = False
     for raw_check in list(readiness.get("checks") or []):
       check = dict(raw_check)
       code = str(check.get("code") or "")
       if code in {
-        "QMT_AGENT_LAUNCH_ALLOWED",
         "LIVE_AGENT_READY",
         "AGENT_MODE_LIVE",
         "PROTOCOL_1_1",
@@ -1033,13 +1014,13 @@ class TTradeResolver:
             "scope": "PREPARATION",
           }
         )
-      if code == "QMT_AGENT_LAUNCH_ALLOWED":
-        launch_check_seen = True
+      if code == "LIVE_AGENT_READY":
+        session_check_seen = True
       checks.append(check)
-    if not launch_check_seen:
+    if not session_check_seen:
       checks.append(
         {
-          "code": "QMT_AGENT_LAUNCH_ALLOWED",
+          "code": "LIVE_AGENT_READY",
           "passed": False,
           "message": message,
           "scope": "PREPARATION",
@@ -1170,7 +1151,7 @@ class TTradeResolver:
       stale_key = _cold_global_get_keys.get(account_id)
       if stale_key is not None:
         await _release_cold_global_get_key(account_id, stale_key)
-    monitor = cls._apply_qmt_launch_block_to_monitor(monitor)
+    monitor = await cls._apply_agent_session_block_to_monitor(monitor)
     return cls._global_monitor_type(monitor)
 
   @classmethod
@@ -1198,8 +1179,10 @@ class TTradeResolver:
       except (TypeError, ValueError, OverflowError):
         committed_version = None
 
-      pending = bool(last_error) or apply_status == "PENDING" or bool(
-        apply_code == _T_TRADE_GLOBAL_SAVE_PENDING_CODE
+      pending = (
+        bool(last_error)
+        or apply_status == "PENDING"
+        or bool(apply_code == _T_TRADE_GLOBAL_SAVE_PENDING_CODE)
       )
       if pending:
         # The Engine command row is intentionally immutable.  A retry of a
@@ -1834,9 +1817,7 @@ class TTradeResolver:
         or performance_net_mae is not None
         or raw_fixed_returns
       ):
-        raise ValueError(
-          "不可用的做 T 成交后表现不得携带样本、收益或固定窗口数据"
-        )
+        raise ValueError("不可用的做 T 成交后表现不得携带样本、收益或固定窗口数据")
       if performance_available and (
         performance_sample_count <= 0
         or performance_reason_code is not None
@@ -2669,9 +2650,7 @@ class TTradeResolver:
         account_id,
         operation_id,
         event_types={
-          "LIVE_ACTIVATED"
-          if target == "LIVE"
-          else "CANARY_ACTIVATED",
+          "LIVE_ACTIVATED" if target == "LIVE" else "CANARY_ACTIVATED",
           "LIVE_ACTIVATED",
         },
         actor_user_id=user_id,
@@ -2699,7 +2678,6 @@ class TTradeResolver:
         code="LIVE_NOT_READY",
         message=str(exc),
       )
-
 
   @classmethod
   async def begin_controlled_window(
@@ -2939,9 +2917,7 @@ class TTradeResolver:
       return TTradeReplayMutationResult(
         success=False,
         code=_T_TRADE_REPLAY_START_OUTCOME_UNKNOWN_CODE,
-        message=(
-          "做 T 历史回放请求提交结果尚不知是否已提交，请继续使用原操作键重试"
-        ),
+        message=("做 T 历史回放请求提交结果尚不知是否已提交，请继续使用原操作键重试"),
       )
     if receipt.status == "FAILED":
       return TTradeReplayMutationResult(

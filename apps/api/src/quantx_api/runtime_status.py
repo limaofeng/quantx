@@ -17,19 +17,22 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   RuntimeComponentHeartbeat,
 )
-from quantx_infrastructure.services.qmt_launch_guard import (
-  qmt_agent_launch_block_reason,
-  qmt_heartbeat_matches_current_launch,
+from quantx_infrastructure.services.agent_session_guard import (
+  API_HEARTBEAT_COMPONENT,
+  REMOTE_AGENT_ACCOUNT_MISMATCH,
+  REMOTE_AGENT_NOT_RECONCILED,
+  REMOTE_AGENT_OFFLINE,
+  REMOTE_AGENT_SESSION_STALE,
+  evaluate_agent_session,
 )
 from quantx_infrastructure.services.trading_time_service import TradingTimeService
 from sqlalchemy import select, text
 
+from quantx_api.agent_hub import agent_connection_hub
 from quantx_api.auth.tokens import utcnow
 
 HEARTBEAT_TTL = timedelta(seconds=90)
-RECONCILING_AGENT_STATUSES = frozenset(
-  {"RECONCILING", "RECONCILE_REQUIRED"}
-)
+RECONCILING_AGENT_STATUSES = frozenset({"RECONCILING", "RECONCILE_REQUIRED"})
 CONNECTED_AGENT_STATUSES = frozenset(
   {
     "READY",
@@ -39,40 +42,13 @@ CONNECTED_AGENT_STATUSES = frozenset(
     "EMERGENCY_STOP",
   }
 )
-def _apply_qmt_launch_override(
-  components: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-  reason = qmt_agent_launch_block_reason()
-  if reason is None:
-    return components
-  overridden = dict(components)
-  previous_qmt = dict(components.get("qmt-agent") or {})
-  overridden["qmt-agent"] = {
-    "status": "blocked",
-    "connectedDevices": 0,
-    "readyDevices": 0,
-    "onlineDevices": 0,
-    "reconcilingDevices": 0,
-    "degradedDevices": 0,
-    "registeredDevices": int(previous_qmt.get("registeredDevices") or 0),
-    "modes": [],
-    "protocolVersions": [],
-    "accountIds": [],
-    "latestSnapshotAgeSeconds": None,
-    "latestReadyHeartbeatAt": None,
-    "launchState": "BLOCKED",
-    "reasonCode": reason,
-    "liveTradingEnabled": False,
-  }
-  overridden["market-data"] = {
-    "status": "blocked",
-    "connectedDevices": 0,
-    "protocol": "quantx.market.v2",
-    "launchState": "BLOCKED",
-    "reasonCode": reason,
-    "liveTradingEnabled": False,
-  }
-  return overridden
+
+
+def _masked_account_id(value: str) -> str:
+  normalized = str(value or "").strip()
+  if len(normalized) <= 4:
+    return "*" * len(normalized)
+  return f"***{normalized[-4:]}"
 
 
 def _snapshot_age_seconds(value: Any, now: datetime) -> float | None:
@@ -131,16 +107,18 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "status": "unavailable",
       "error": exc.__class__.__name__,
     }
-    return _apply_qmt_launch_override({
+    return {
       "qmt-agent": {**unavailable, "connectedDevices": 0},
       "market-data": {**unavailable, "connectedDevices": 0},
-    })
+    }
 
   components: dict[str, dict[str, Any]] = {}
-  heartbeat_by_component = {
-    heartbeat.component: heartbeat for heartbeat in heartbeats
-  }
+  heartbeat_by_component = {heartbeat.component: heartbeat for heartbeat in heartbeats}
   for heartbeat in heartbeats:
+    if heartbeat.component.startswith("qmt-agent:"):
+      # Per-device details contain account-scoped reconciliation metadata.
+      # Only the masked aggregate below is part of the public status contract.
+      continue
     age = max(0.0, (now - heartbeat.updated_at).total_seconds())
     components[heartbeat.component] = {
       "status": (
@@ -153,33 +131,31 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "details": heartbeat.details or {},
     }
 
-  if qmt_agent_launch_block_reason() is not None:
-    components["qmt-agent"] = {"registeredDevices": len(agents)}
-    return _apply_qmt_launch_override(components)
-
-  online_agents = [
-    agent
-    for agent in agents
-    if agent.last_seen_at is not None
-    and now - agent.last_seen_at <= HEARTBEAT_TTL
-    and qmt_heartbeat_matches_current_launch(agent.last_seen_at)
-  ]
+  api_heartbeat = heartbeat_by_component.get(API_HEARTBEAT_COMPONENT)
+  online_agents: list[AgentDevice] = []
   connected_agents: list[tuple[AgentDevice, str]] = []
-  for agent in online_agents:
+  agent_reason_codes: list[str] = []
+  for agent in agents:
     heartbeat = heartbeat_by_component.get(f"qmt-agent:{agent.id}")
-    if heartbeat is None:
-      continue
-    heartbeat_age = max(0.0, (now - heartbeat.updated_at).total_seconds())
-    heartbeat_status = str(heartbeat.status or "").upper()
-    if (
-      heartbeat_age <= HEARTBEAT_TTL.total_seconds()
-      and heartbeat_status in CONNECTED_AGENT_STATUSES
-      and qmt_heartbeat_matches_current_launch(heartbeat.updated_at)
-    ):
+    heartbeat_status = str(heartbeat.status or "").upper() if heartbeat else ""
+    evaluation = evaluate_agent_session(
+      heartbeat,
+      api_heartbeat,
+      now=now,
+      acceptable_statuses=CONNECTED_AGENT_STATUSES,
+    )
+    agent_reason_codes.append(evaluation.reason_code)
+    hub_connected = bool(
+      evaluation.current
+      and await agent_connection_hub.is_connected(
+        str(agent.id),
+        agent_session_id=evaluation.agent_session_id,
+      )
+    )
+    if hub_connected:
+      online_agents.append(agent)
       connected_agents.append((agent, heartbeat_status))
-  ready_agents = [
-    agent for agent, status in connected_agents if status == "READY"
-  ]
+  ready_agents = [agent for agent, status in connected_agents if status == "READY"]
   latest_ready_heartbeat_at = max(
     (
       heartbeat_by_component[f"qmt-agent:{agent.id}"].updated_at
@@ -209,7 +185,8 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     if protocol_version:
       protocol_versions.add(protocol_version)
     account_ids.update(
-      str(value) for value in list(agent.authorized_account_ids or [])
+      _masked_account_id(str(value))
+      for value in list(agent.authorized_account_ids or [])
     )
     direct_age = _snapshot_age_seconds(details.get("snapshotAt"), now)
     if direct_age is not None:
@@ -219,9 +196,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       if age is not None:
         snapshot_ages.append(age)
   reconciling_agents = [
-    agent
-    for agent, status in connected_agents
-    if status in RECONCILING_AGENT_STATUSES
+    agent for agent, status in connected_agents if status in RECONCILING_AGENT_STATUSES
   ]
   components["qmt-agent"] = {
     "status": "ready" if connected_agents else "offline",
@@ -240,6 +215,38 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       round(min(snapshot_ages), 3) if snapshot_ages else None
     ),
     "latestReadyHeartbeatAt": _iso_utc_timestamp(latest_ready_heartbeat_at),
+    "apiInstanceId": str(api_heartbeat.instance_id if api_heartbeat else ""),
+    "remoteAddressSummaries": sorted(
+      {
+        str(
+          dict(heartbeat_by_component[f"qmt-agent:{agent.id}"].details or {}).get(
+            "remoteAddressSummary"
+          )
+          or "unknown"
+        )
+        for agent, _ in connected_agents
+      }
+    ),
+    "reasonCode": (
+      ""
+      if ready_agents
+      else (
+        REMOTE_AGENT_NOT_RECONCILED
+        if connected_agents
+        else next(
+          (
+            reason
+            for reason in (
+              REMOTE_AGENT_ACCOUNT_MISMATCH,
+              REMOTE_AGENT_SESSION_STALE,
+              REMOTE_AGENT_OFFLINE,
+            )
+            if reason in agent_reason_codes
+          ),
+          REMOTE_AGENT_OFFLINE,
+        )
+      )
+    ),
   }
   market_data_agents = [
     agent
@@ -252,9 +259,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
   for agent in market_data_agents:
     heartbeat = heartbeat_by_component.get(f"qmt-agent:{agent.id}")
     details = dict(heartbeat.details or {}) if heartbeat else {}
-    market_stream_status = str(
-      details.get("marketStreamStatus") or "OFFLINE"
-    ).upper()
+    market_stream_status = str(details.get("marketStreamStatus") or "OFFLINE").upper()
     if market_stream_status != "OFFLINE":
       market_stream_agents.append(agent)
     if market_stream_status == "READY":
@@ -330,9 +335,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "instrumentCount": (
         engine_state.instrument_count if engine_state is not None else 0
       ),
-      "universeCount": (
-        stream_state.universe_count if stream_state is not None else 0
-      ),
+      "universeCount": (stream_state.universe_count if stream_state is not None else 0),
       "missingCount": (
         max(0, stream_state.universe_count - stream_state.instrument_count)
         if stream_state is not None
@@ -363,9 +366,7 @@ async def _prefect_status() -> dict[str, Any]:
     api_url += "/api"
   health_url = f"{api_url}/health"
   worker_pool = settings.prefect_worker_pool.strip() or "quantx-pool"
-  workers_url = (
-    f"{api_url}/work_pools/{worker_pool}/workers/filter"
-  )
+  workers_url = f"{api_url}/work_pools/{worker_pool}/workers/filter"
   try:
     async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
       response = await client.get(health_url)
@@ -375,9 +376,7 @@ async def _prefect_status() -> dict[str, Any]:
       )
     workers = workers_response.json() if workers_response.is_success else []
     online_workers = [
-      worker
-      for worker in workers
-      if str(worker.get("status", "")).upper() == "ONLINE"
+      worker for worker in workers if str(worker.get("status", "")).upper() == "ONLINE"
     ]
     return {
       "status": "ready" if response.is_success else "unavailable",
@@ -427,7 +426,6 @@ async def component_status() -> dict[str, dict[str, Any]]:
     _prefect_status(),
     _market_gateway_status(),
   )
-  heartbeats = _apply_qmt_launch_override(heartbeats)
   raw_ai_runtime = heartbeats.get("ai-runtime", {"status": "offline"})
   ai_runtime = {
     "status": raw_ai_runtime.get("status", "offline"),
@@ -437,7 +435,7 @@ async def component_status() -> dict[str, dict[str, Any]]:
   if details.get("configVersion") is not None:
     ai_runtime["configVersion"] = details.get("configVersion")
   return {
-    "api": {"status": "ready"},
+    "api": heartbeats.get("api", {"status": "offline"}),
     "database": database,
     "engine": heartbeats.get("engine", {"status": "offline"}),
     "worker": {
@@ -458,7 +456,6 @@ async def component_status() -> dict[str, dict[str, Any]]:
 async def market_data_runtime_status() -> dict[str, Any]:
   """Return only API-owned market-data semantics for frequent trading UI reads."""
   heartbeats = await _component_heartbeats()
-  heartbeats = _apply_qmt_launch_override(heartbeats)
   return heartbeats.get("market-data", {"status": "offline"})
 
 
