@@ -250,12 +250,12 @@ liveTrading=ENABLED
 
 ### 5.4 接入完整服务
 
-- [ ] 启动 API、Market Gateway、Engine、Worker、Web、Docs 和 Caddy。
+- [x] 启动 API、Market Gateway、Engine、Worker、Web、Docs 和 Caddy。
 - [x] 保持 Monitor 独立启停。
-- [ ] 通过 Caddy 验证 GraphQL HTTP/WS、Agent WS、市场 WS 和 `/monitor/*`。
+- [x] 通过 Caddy 验证 GraphQL HTTP/WS、Agent WS、市场 WS 和 `/monitor/*`。
 - [ ] 接入方案一的远程 Agent 动态安全门。
-- [ ] 确认 Engine PostgreSQL 租约始终只有一个持有者。
-- [ ] 确认 Worker 使用外部 `PREFECT_API_URL` 和 `quantx-pool`。
+- [x] 确认 Engine PostgreSQL 租约始终只有一个持有者。
+- [x] 确认 Worker 使用外部 `PREFECT_API_URL` 和 `quantx-pool`。
 
 ### 5.5 状态和操作体验
 

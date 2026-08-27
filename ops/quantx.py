@@ -35,6 +35,16 @@ STATE_SCHEMA_VERSION = 1
 DEFAULT_PREFECT_API_URL = "http://192.168.5.6:30420/api"
 DEFAULT_PREFECT_WORKER_POOL = "quantx-pool"
 MACOS_PREFECT_WORKER_NAME = "quantx-macos-dev"
+DIRECT_NETWORK_ENVIRONMENT = {
+  "HTTP_PROXY": "",
+  "HTTPS_PROXY": "",
+  "ALL_PROXY": "",
+  "http_proxy": "",
+  "https_proxy": "",
+  "all_proxy": "",
+  "NO_PROXY": "*",
+  "no_proxy": "*",
+}
 API_PORT = 18081
 MARKET_GATEWAY_PORT = 18082
 MONITOR_PORT = 18083
@@ -454,6 +464,41 @@ def normalized_prefect_api_url(raw: str | None) -> str:
   return value if value.endswith("/api") else f"{value}/api"
 
 
+def configure_dependency_proxy_bypass(environment: dict[str, str]) -> None:
+  entries: list[str] = []
+  seen: set[str] = set()
+
+  def add(value: str) -> None:
+    normalized = value.strip()
+    key = normalized.lower()
+    if normalized and key not in seen:
+      entries.append(normalized)
+      seen.add(key)
+
+  for name in ("NO_PROXY", "no_proxy"):
+    for item in environment.get(name, "").split(","):
+      add(item)
+  for host in ("localhost", "127.0.0.1", "::1"):
+    add(host)
+  for name in (
+    "DATABASE_URL",
+    "REDIS_URL",
+    "INFLUXDB_HOST",
+    "PREFECT_API_URL",
+    "PUBLIC_URL",
+  ):
+    value = environment.get(name, "").strip()
+    if not value:
+      continue
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.hostname:
+      add(parsed.hostname)
+
+  bypass = ",".join(entries)
+  environment["NO_PROXY"] = bypass
+  environment["no_proxy"] = bypass
+
+
 def resolve_runtime_configuration(
   *,
   paths: RuntimePaths,
@@ -483,6 +528,7 @@ def resolve_runtime_configuration(
   process_environment["PREFECT_API_URL"] = normalized_prefect_api_url(
     process_environment.get("PREFECT_API_URL")
   )
+  configure_dependency_proxy_bypass(process_environment)
   worker_pool = process_environment.get(
     "PREFECT_WORKER_POOL", DEFAULT_PREFECT_WORKER_POOL
   ).strip()
@@ -1195,6 +1241,7 @@ def component_graph(
         (str(python), "-m", "quantx_worker.main"),
         paths.root,
         {
+          **DIRECT_NETWORK_ENVIRONMENT,
           "DATABASE_PROCESS_ROLE": "worker",
           "PREFECT_WORKER_NAME": MACOS_PREFECT_WORKER_NAME,
         },

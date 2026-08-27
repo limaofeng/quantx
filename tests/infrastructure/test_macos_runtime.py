@@ -72,6 +72,46 @@ def test_default_web_launch_promotes_to_static_full_live(
   )
 
 
+def test_runtime_bypasses_process_proxy_for_quantx_dependency_hosts(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  paths = _paths(tmp_path)
+  monkeypatch.setattr(runtime, "local_ipv4_addresses", lambda: ("127.0.0.1/32",))
+  environment = {
+    **_live_environment(),
+    "ALL_PROXY": "socks5h://127.0.0.1:6153",
+    "NO_PROXY": "existing.internal,localhost",
+    "DATABASE_URL": "postgresql+asyncpg://user:secret@db.internal:32432/quantx",
+    "REDIS_URL": "redis://redis.internal:30179/0",
+    "INFLUXDB_HOST": "http://influx.internal:30081",
+  }
+
+  configuration = runtime.resolve_runtime_configuration(
+    paths=paths,
+    requested_profile="web",
+    requested_mode=None,
+    requested_account="account-1",
+    environment=environment,
+  )
+
+  bypass = configuration.process_environment["NO_PROXY"].split(",")
+  assert bypass == [
+    "existing.internal",
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "db.internal",
+    "redis.internal",
+    "influx.internal",
+    "prefect.internal",
+    "quantx-dev.internal",
+  ]
+  assert configuration.process_environment["no_proxy"] == ",".join(bypass)
+  assert configuration.process_environment["ALL_PROXY"] == (
+    "socks5h://127.0.0.1:6153"
+  )
+
+
 def test_explicit_data_only_keeps_web_profile_and_closes_every_live_gate(
   tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -351,6 +391,12 @@ def test_component_graph_has_all_non_qmt_services_and_fixed_order(
     engine.readiness.expected_instance_id
     == engine.environment["QUANTX_ENGINE_INSTANCE_ID"]
   )
+  worker = next(spec for spec in graph if spec.name == "worker")
+  assert worker.environment == {
+    **runtime.DIRECT_NETWORK_ENVIRONMENT,
+    "DATABASE_PROCESS_ROLE": "worker",
+    "PREFECT_WORKER_NAME": "quantx-macos-dev",
+  }
 
 
 def test_engine_readiness_rejects_another_hosts_ready_heartbeat(
