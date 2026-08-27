@@ -76,7 +76,7 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
   使用 `http://<开发机局域网 IP>:8080`。
 - API 只监听 `127.0.0.1:18081`，Vite 使用 `5250`，VitePress 使用
   `5251`。Prefect API 固定通过 `PREFECT_API_URL` 连接外部服务，默认
-  `http://192.168.101.4:30420/api`，Worker 使用 `quantx-pool`。
+  `http://192.168.5.6:30420/api`，Worker 使用 `quantx-pool`。
 - PostgreSQL、InfluxDB、Redis、Prefect Server 是外部服务，只检查，
   不自动启停。
 - 不得绕过统一入口单独手工启动 QMT Agent，否则同一设备的重复 Agent 会争用

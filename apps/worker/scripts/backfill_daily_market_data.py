@@ -43,7 +43,7 @@ from sqlalchemy import func, select, text
 SCHEMA_VERSION = 3
 VERIFICATION_VERSION = 2
 DEFAULT_DEPLOYMENT_NAME = "daily-market-data-sync"
-DEFAULT_PREFECT_API_URL = "http://192.168.101.4:30420/api"
+DEFAULT_PREFECT_API_URL = "http://192.168.5.6:30420/api"
 EXPECTED_FLOW_NAME = "每日市场数据同步"
 EXPECTED_ENTRYPOINT = (
   "apps/worker/src/quantx_worker/prefector/flows/"

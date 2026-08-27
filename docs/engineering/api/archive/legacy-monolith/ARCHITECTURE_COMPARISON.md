@@ -297,7 +297,7 @@ ORDER BY o.created_at DESC;
 
 ```bash
 # 开始 3 步切换
-psql -h 192.168.101.4 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
+psql -h 192.168.5.6 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
 python scripts/migrate_divid_factors_to_pg.py
 python scripts/switch_service.py --postgresql --async
 ```

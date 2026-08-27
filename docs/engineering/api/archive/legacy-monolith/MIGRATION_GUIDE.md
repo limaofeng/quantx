@@ -10,7 +10,7 @@
 
 ```bash
 # 方式1: 使用 psql 命令
-psql -h 192.168.101.4 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
+psql -h 192.168.5.6 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
 
 # 方式2: 使用 Docker（如果 PostgreSQL 在容器中）
 docker exec -it postgresql-container psql -U postgres -d quantx -f /path/to/create_divid_factors_table.sql
@@ -147,7 +147,7 @@ python tests/performance/full_test.py
 from influxdb_client import InfluxDBClient3
 
 client = InfluxDBClient3(
-    host="http://192.168.101.4:30081",
+    host="http://192.168.5.6:30081",
     token="your_token",
     database="quantx"
 )
@@ -219,10 +219,9 @@ client.query("DELETE FROM divid_factors WHERE time > '1970-01-01'")
 
 ```bash
 # 第一步：创建表
-psql -h 192.168.101.4 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
+psql -h 192.168.5.6 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
 
 # 第二步：运行迁移
 conda activate <your-quantx-env>
 python scripts/migrate_divid_factors_to_pg.py
 ```
-

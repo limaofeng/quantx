@@ -147,7 +147,7 @@ async def test_prefect_worker_health_uses_canonical_api_and_ignores_proxies(
   monkeypatch.setattr(
     runtime_status.settings,
     "prefect_api_url",
-    "http://192.168.101.4:30420",
+    "http://192.168.5.6:30420",
   )
   monkeypatch.setattr(
     runtime_status.settings,
@@ -159,9 +159,9 @@ async def test_prefect_worker_health_uses_canonical_api_and_ignores_proxies(
   status = await runtime_status._prefect_status()
 
   assert calls["client_kwargs"] == {"timeout": 5.0, "trust_env": False}
-  assert calls["health_url"] == "http://192.168.101.4:30420/api/health"
+  assert calls["health_url"] == "http://192.168.5.6:30420/api/health"
   assert calls["workers_url"] == (
-    "http://192.168.101.4:30420/api/work_pools/quantx-pool/workers/filter"
+    "http://192.168.5.6:30420/api/work_pools/quantx-pool/workers/filter"
   )
   assert calls["workers_body"] == {}
   assert status["status"] == "ready"

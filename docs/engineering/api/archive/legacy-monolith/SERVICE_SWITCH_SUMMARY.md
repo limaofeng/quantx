@@ -47,7 +47,7 @@
 
 ```bash
 # 1.1 创建表
-psql -h 192.168.101.4 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
+psql -h 192.168.5.6 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
 
 # 1.2 迁移数据
 conda activate <your-quantx-env>
@@ -254,7 +254,7 @@ python scripts/switch_service.py --influxdb --sync
 
 ```bash
 # 1. 数据迁移
-psql -h 192.168.101.4 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
+psql -h 192.168.5.6 -p 32432 -U postgres -d quantx -f migrations/create_divid_factors_table.sql
 python scripts/migrate_divid_factors_to_pg.py
 
 # 2. 代码切换
@@ -273,4 +273,3 @@ python tests/test_service_switch.py
 ---
 
 **准备好了吗？开始切换吧！** 🚀
-

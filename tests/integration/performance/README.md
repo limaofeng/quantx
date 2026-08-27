@@ -27,7 +27,7 @@ conda activate quantx
 编辑 `apps/api/.env` 确认以下配置正确：
 
 ```bash
-INFLUXDB_HOST=http://192.168.101.4:30081
+INFLUXDB_HOST=http://192.168.5.6:30081
 INFLUXDB_TOKEN=your_token_here
 INFLUXDB_DATABASE=quantx
 ```

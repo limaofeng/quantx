@@ -10,7 +10,7 @@
 版本或本机默认配置改变执行目标。
 
 Prefect API 由 `PREFECT_API_URL` 指定，默认使用
-`http://192.168.101.4:30420/api`；池名由 `PREFECT_WORKER_POOL` 指定，默认
+`http://192.168.5.6:30420/api`；池名由 `PREFECT_WORKER_POOL` 指定，默认
 `quantx-pool`。Windows 运行时固定使用 UTF-8，并将 Worker 的 Prefect home
 放在仓库忽略提交的 `.runtime/prefect`，隔离本机全局配置。
 

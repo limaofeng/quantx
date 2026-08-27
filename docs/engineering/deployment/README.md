@@ -69,7 +69,7 @@ Engine、Worker、QMT Agent 与 Caddy 也会统一使用同一个真实根路径
 `18082`、Monitor 使用 `18083`、Vite 使用 `5250`、
 VitePress 使用 `5251`，这些后端端口仍只绑定 `127.0.0.1`。Prefect API
 通过 `PREFECT_API_URL` 连接外部服务，默认
-`http://192.168.101.4:30420/api`，Worker 使用 `quantx-pool`。在线客户端文档
+`http://192.168.5.6:30420/api`，Worker 使用 `quantx-pool`。在线客户端文档
 位于统一入口 `/docs/`，生产环境由 Caddy
 直接提供静态文件，不运行 Node 文档进程。PostgreSQL、InfluxDB、Redis 和
 Prefect Server 只检查，不由 QuantX 安装或启停。首次从其他设备访问时，需在 Windows

@@ -988,7 +988,7 @@ async def test_store_url_connection_preserves_separate_redis_password(
 
   monkeypatch.setattr(
     "quantx_infrastructure.core.data.market_stream_transport.settings.redis_url",
-    "redis://192.168.101.4:30179/0",
+    "redis://192.168.5.6:30179/0",
   )
   monkeypatch.setattr(
     "quantx_infrastructure.core.data.market_stream_transport.settings.redis_password",
@@ -1002,5 +1002,5 @@ async def test_store_url_connection_preserves_separate_redis_password(
   client = await MarketStreamStore().redis()
 
   assert client is expected_client
-  assert captured["url"] == "redis://192.168.101.4:30179/0"
+  assert captured["url"] == "redis://192.168.5.6:30179/0"
   assert captured["password"] == "configured-secret"

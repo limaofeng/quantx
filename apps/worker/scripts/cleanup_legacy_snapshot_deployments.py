@@ -43,7 +43,7 @@ def cleanup_legacy_deployments(api_url: str) -> list[str]:
 
 def main() -> int:
   api_url = os.environ.get(
-    "PREFECT_API_URL", "http://192.168.101.4:30420/api"
+    "PREFECT_API_URL", "http://192.168.5.6:30420/api"
   )
   deleted_ids = cleanup_legacy_deployments(api_url)
   if deleted_ids:

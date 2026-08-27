@@ -361,7 +361,7 @@ class Settings(BaseSettings):
   # Prefect 任务调度配置 - 外部服务模式
   prefect_enabled: bool = Field(default=True, description="是否启用Prefect任务调度")
   prefect_api_url: str = Field(
-    default="http://192.168.101.4:30420/api", description="外部Prefect服务器URL"
+    default="http://192.168.5.6:30420/api", description="外部Prefect服务器URL"
   )
   prefect_worker_pool: str = Field(
     default="quantx-pool", description="Prefect Worker连接的工作池名称"

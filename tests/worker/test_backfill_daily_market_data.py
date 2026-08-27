@@ -1142,5 +1142,5 @@ def test_cli_default_prefect_api_ignores_dotenv_pollution(
 
   args = module.parse_args()
 
-  assert args.prefect_api_url == "http://192.168.101.4:30420/api"
+  assert args.prefect_api_url == "http://192.168.5.6:30420/api"
   assert args.retry_failed_ingestion is False
