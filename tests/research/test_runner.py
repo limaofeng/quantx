@@ -193,7 +193,11 @@ def _write_config(path: Path, output_root: Path, *, minimum_events: int) -> Path
       "minimum_total_events": minimum_events,
       "exclude_corporate_action_windows_without_adjustment": True,
     },
-    "runtime": {"batch_size": 300, "output_root": str(output_root)},
+    "runtime": {
+      "batch_size": 300,
+      "minimum_available_memory_gib": 1,
+      "output_root": str(output_root),
+    },
   }
   path.write_text(
     yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),

@@ -225,33 +225,33 @@ liveTrading=ENABLED
 
 ### 5.1 建立启动器骨架
 
-- [ ] 新增 `ops/quantx` 和 `ops/quantx.py`。
-- [ ] 固定命令、退出码、状态文件 schema 和日志目录。
-- [ ] 实现物理仓库根解析和运行目录初始化。
-- [ ] 实现外部依赖只读检查。
-- [ ] 实现组件依赖图、启动等待和反向停止。
-- [ ] 实现端口所有者报告，不自动结束未知进程。
+- [x] 新增 `ops/quantx` 和 `ops/quantx.py`。
+- [x] 固定命令、退出码、状态文件 schema 和日志目录。
+- [x] 实现物理仓库根解析和运行目录初始化。
+- [x] 实现外部依赖只读检查。
+- [x] 实现组件依赖图、启动等待和反向停止。
+- [x] 实现端口所有者报告，不自动结束未知进程。
 
 ### 5.2 完成 Unix 进程管理
 
-- [ ] 为 supervisor 增加 Unix 文件锁和单实例。
-- [ ] 记录并验证 PID、进程组和启动标识。
-- [ ] 实现 SIGTERM/SIGKILL 有界退出。
-- [ ] 验证崩溃退避、日志追加和 supervisor 自身退出后的子进程回收。
-- [ ] 验证符号链接工作区不会产生两份 runtime。
+- [x] 为 supervisor 增加 Unix 文件锁和单实例。
+- [x] 记录并验证 PID、进程组和启动标识。
+- [x] 实现 SIGTERM/SIGKILL 有界退出。
+- [x] 验证崩溃退避、日志追加和 supervisor 自身退出后的子进程回收。
+- [x] 验证符号链接工作区不会产生两份 runtime。
 
 ### 5.3 适配依赖和工具
 
-- [ ] 固定目标 Python、Node/npm 和 Caddy 版本。
-- [ ] 添加 Darwin Caddy 工具锁和校验安装。
-- [ ] 建立不需要 QMT SDK 的服务端安装选择。
-- [ ] 审计所有 Windows 路径、`.exe`、PowerShell 和 Win32 分支。
-- [ ] 完成 Apple Silicon 或目标 Intel Mac 的原生依赖验证。
+- [x] 固定目标 Python、Node/npm 和 Caddy 版本。
+- [x] 添加 Darwin Caddy 工具锁和校验安装。
+- [x] 建立不需要 QMT SDK 的服务端安装选择。
+- [x] 审计所有 Windows 路径、`.exe`、PowerShell 和 Win32 分支。
+- [x] 完成 Apple Silicon 或目标 Intel Mac 的原生依赖验证。
 
 ### 5.4 接入完整服务
 
 - [ ] 启动 API、Market Gateway、Engine、Worker、Web、Docs 和 Caddy。
-- [ ] 保持 Monitor 独立启停。
+- [x] 保持 Monitor 独立启停。
 - [ ] 通过 Caddy 验证 GraphQL HTTP/WS、Agent WS、市场 WS 和 `/monitor/*`。
 - [ ] 接入方案一的远程 Agent 动态安全门。
 - [ ] 确认 Engine PostgreSQL 租约始终只有一个持有者。
@@ -259,11 +259,11 @@ liveTrading=ENABLED
 
 ### 5.5 状态和操作体验
 
-- [ ] `status` 同时显示配置模式、有效实盘能力和远程 Agent 状态。
-- [ ] `logs` 支持全部主组件和单个 component，不读取 Windows 日志。
-- [ ] `down` 不联系或停止 Windows Agent。
-- [ ] 部分组件失败时显示稳定原因和下一步，不伪装整体 READY。
-- [ ] 普通 `up/down` 不影响 Monitor。
+- [x] `status` 同时显示配置模式、有效实盘能力和远程 Agent 状态。
+- [x] `logs` 支持全部主组件和单个 component，不读取 Windows 日志。
+- [x] `down` 不联系或停止 Windows Agent。
+- [x] 部分组件失败时显示稳定原因和下一步，不伪装整体 READY。
+- [x] 普通 `up/down` 不影响 Monitor。
 
 ## 6. 建议文件范围
 
@@ -340,6 +340,8 @@ Mac 启动器与跨平台契约测试
 
 向集成负责人和其他方案交付：
 
+- 实际命令、配置、TLS、状态 schema、退出码和剩余跨主机验收见
+  [macOS Dev full/live 运行手册](../../engineering/deployment/MACOS_DEV_RUNTIME.md)。
 - 基线和最终提交 SHA。
 - 目标 Mac 架构、OS、Python、Node/npm、Caddy 版本。
 - `<MAC_DEV_PUBLIC_URL>`、传输 scheme 与 HTTP 风险确认，或适用时的 CA 安装说明；

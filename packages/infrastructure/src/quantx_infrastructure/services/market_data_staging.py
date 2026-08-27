@@ -78,6 +78,8 @@ def safe_market_data_staging_file(
     root / normalized_request_id,
   )
   candidate = Path(storage_reference)
+  if not candidate.is_absolute():
+    candidate = root / candidate
   if candidate.is_symlink() or is_reparse_point(candidate):
     raise RuntimeError("unsafe market-data staging file reparse point")
   if candidate.parent.is_symlink() or is_reparse_point(candidate.parent):
@@ -89,6 +91,30 @@ def safe_market_data_staging_file(
   if resolved.parent != request_directory:
     raise RuntimeError("market-data staging file escaped its request directory")
   return resolved
+
+
+def relative_market_data_storage_reference(*, root: Path, candidate: Path) -> str:
+  """Return the portable database reference for one verified staging file."""
+
+  resolved_root = root.resolve(strict=True)
+  resolved_candidate = candidate.resolve(strict=True)
+  try:
+    relative = resolved_candidate.relative_to(resolved_root)
+  except ValueError as exc:
+    raise RuntimeError("market-data staging file escaped its root") from exc
+  if len(relative.parts) != 2:
+    raise RuntimeError("market-data staging reference has an invalid shape")
+  try:
+    normalized_request_id = str(uuid.UUID(relative.parts[0]))
+  except ValueError as exc:
+    raise RuntimeError("market-data staging reference has an invalid request id") from exc
+  if normalized_request_id != relative.parts[0]:
+    raise RuntimeError("market-data staging reference has a non-canonical request id")
+  if resolved_candidate.is_symlink() or is_reparse_point(resolved_candidate):
+    raise RuntimeError("market-data staging reference points to a reparse point")
+  if not stat.S_ISREG(resolved_candidate.lstat().st_mode):
+    raise RuntimeError("market-data staging reference is not a regular file")
+  return relative.as_posix()
 
 
 def market_data_request_staging_usage_bytes(

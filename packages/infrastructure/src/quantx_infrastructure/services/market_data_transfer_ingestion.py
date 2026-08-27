@@ -814,6 +814,30 @@ async def load_uploaded_request_manifest(
     indices.append(chunk_index)
   if indices != list(range(expected)):
     raise _validation_error("market-data transfer has missing or unordered chunks")
+  from quantx_infrastructure.services.market_data_staging import (
+    market_data_staging_root,
+    safe_market_data_staging_file,
+  )
+
+  staging_root = market_data_staging_root()
+  resolved_manifest: list[dict[str, Any]] = []
+  for item in manifest:
+    storage_reference = item.get("storage_reference")
+    resolved_path = Path(str(storage_reference or ""))
+    if not resolved_path.is_absolute():
+      try:
+        resolved_path = safe_market_data_staging_file(
+          root=staging_root,
+          request_id=request_id,
+          storage_reference=str(storage_reference or ""),
+        )
+      except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise _validation_error(
+          "market-data manifest has an unsafe storage reference"
+        ) from exc
+    resolved_item = dict(item)
+    resolved_item["storage_reference"] = str(resolved_path)
+    resolved_manifest.append(resolved_item)
   payload = request.get("request_payload") or {}
   if isinstance(payload, str):
     try:
@@ -822,7 +846,7 @@ async def load_uploaded_request_manifest(
       raise _validation_error("market-data request payload is invalid JSON") from exc
   if not isinstance(payload, dict):
     raise _validation_error("market-data request payload is not an object")
-  return request, payload, manifest
+  return request, payload, resolved_manifest
 
 
 async def load_uploaded_request_records(

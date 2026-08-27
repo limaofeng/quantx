@@ -21,6 +21,7 @@ def main() -> None:
   pool = os.environ.get("PREFECT_WORKER_POOL", DEFAULT_POOL).strip()
   if not pool:
     raise SystemExit("PREFECT_WORKER_POOL must not be empty")
+  worker_name = os.environ.get("PREFECT_WORKER_NAME", "").strip()
   prefect_file = Path(__file__).resolve().parents[2] / "prefect.yaml"
   exists = (
     run(
@@ -44,7 +45,18 @@ def main() -> None:
       "--all",
     ]
   )
-  run([sys.executable, "-m", "prefect", "worker", "start", "--pool", pool])
+  worker_command = [
+    sys.executable,
+    "-m",
+    "prefect",
+    "worker",
+    "start",
+    "--pool",
+    pool,
+  ]
+  if worker_name:
+    worker_command.extend(["--name", worker_name])
+  run(worker_command)
 
 
 if __name__ == "__main__":

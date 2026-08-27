@@ -182,7 +182,7 @@ def codec_benchmark(instruments: int, batches: int) -> dict[str, Any]:
 
 
 def effective_redis_url() -> str:
-  """Apply the same dev external-host routing used by ops/quantx.ps1."""
+  """Apply the platform runtime's external-host routing without owning Redis."""
   host_override = os.environ.get("QUANTX_DEV_EXTERNAL_DEPENDENCY_HOST", "").strip()
   if not host_override:
     environment_file = ROOT / "apps" / "api" / ".env.development"
@@ -195,6 +195,11 @@ def effective_redis_url() -> str:
   if not host_override:
     return settings.redis_url
   if host_override.lower() == "wsl":
+    if os.name != "nt":
+      raise SafetyPreflightError(
+        "QUANTX_DEV_EXTERNAL_DEPENDENCY_HOST=wsl is Windows-only; "
+        "configure the external service host explicitly on macOS"
+      )
     output = subprocess.check_output(
       ["wsl.exe", "-e", "sh", "-lc", "ip -4 -o addr show dev eth0"],
       text=True,

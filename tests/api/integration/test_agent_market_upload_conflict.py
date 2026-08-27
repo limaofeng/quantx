@@ -867,6 +867,7 @@ async def test_new_chunk_persists_compressed_bytes_and_freezes_complete_manifest
     assert market_request.received_chunks == 2
     assert transfer is not None
     assert transfer.compressed_bytes == len(second)
+    assert transfer.storage_reference == f"{REQUEST_ID}/00000001.json.gz"
     assert (market_data_root / REQUEST_ID / "00000001.json.gz").read_bytes() == second
 
 

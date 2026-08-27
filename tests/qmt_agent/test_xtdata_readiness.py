@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -54,7 +54,7 @@ def test_xtitclient_endpoint_requires_matching_broker_config_and_listener(
 
   assert endpoint.host == "127.0.0.1"
   assert endpoint.port == 58600
-  assert endpoint.source.endswith("config\\broker.ini")
+  assert PureWindowsPath(endpoint.source).parts[-2:] == ("config", "broker.ini")
 
 
 def test_xtdata_discovery_fails_closed_on_multiple_verified_instances(
@@ -122,10 +122,10 @@ def test_miniqmt_endpoint_requires_parent_config_and_listener(
 
   endpoint = connection_discovery.discover_xtdata_endpoint({})
 
-  assert endpoint == XTDataEndpoint(
-    "127.0.0.1",
-    58610,
-    "F:\\QMT\\config\\xtminiquote.lua",
+  assert endpoint.host == "127.0.0.1"
+  assert endpoint.port == 58610
+  assert PureWindowsPath(endpoint.source) == PureWindowsPath(
+    "F:/QMT/config/xtminiquote.lua"
   )
 
 

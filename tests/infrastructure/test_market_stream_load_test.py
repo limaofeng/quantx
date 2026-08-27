@@ -189,3 +189,17 @@ def test_production_keyspace_never_uses_a_load_stream_id(load_test_module) -> No
     load_stream_ids=load_streams,
     run_id="run-1",
   )
+
+
+def test_macos_rejects_legacy_wsl_dependency_routing(
+  load_test_module,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(load_test_module.os, "name", "posix")
+  monkeypatch.setenv("QUANTX_DEV_EXTERNAL_DEPENDENCY_HOST", "wsl")
+
+  with pytest.raises(
+    load_test_module.SafetyPreflightError,
+    match="Windows-only",
+  ):
+    load_test_module.effective_redis_url()

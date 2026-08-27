@@ -53,6 +53,15 @@ ENGINE_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 ENGINE_RESTART_MAX_DELAY_SECONDS = 30.0
 
 
+def _engine_instance_id() -> str:
+  configured = os.environ.get("QUANTX_ENGINE_INSTANCE_ID", "").strip()
+  if not configured:
+    return str(uuid.uuid4())
+  if len(configured) > 64:
+    raise RuntimeError("QUANTX_ENGINE_INSTANCE_ID exceeds the heartbeat schema limit")
+  return configured
+
+
 async def _write_heartbeat_once(instance_id: str) -> None:
   # Capture before opening the heartbeat session so the metric describes the
   # workload pool instead of counting the observer itself.
@@ -306,7 +315,7 @@ async def run_engine() -> None:
     await db_manager.shutdown()
     raise
 
-  instance_id = str(uuid.uuid4())
+  instance_id = _engine_instance_id()
   tasks: list[asyncio.Task] = []
   try:
     set_intraday_warm_cache(intraday_warm_cache)

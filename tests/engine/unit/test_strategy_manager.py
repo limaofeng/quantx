@@ -1402,6 +1402,7 @@ class TestStrategyManager:
     update_status = AsyncMock()
     mark_backtest = AsyncMock()
     update_projection = AsyncMock()
+    get_projection = AsyncMock(return_value={"status": "PENDING"})
     broker_start = AsyncMock()
     monkeypatch.setattr(manager, "_update_runtime_status", update_status)
     monkeypatch.setattr(manager, "_mark_backtest_error_safely", mark_backtest)
@@ -1409,6 +1410,10 @@ class TestStrategyManager:
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.t_trade_replay_projection_service.update",
       update_projection,
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.t_trade_replay_projection_service.get",
+      get_projection,
     )
 
     assert await manager.defer_start_strategy(runtime.run_id) is True
@@ -1436,6 +1441,7 @@ class TestStrategyManager:
       for call in mark_backtest.await_args_list
     )
     assert update_projection.await_count == 5
+    assert get_projection.await_count == 4
     assert [
       call.kwargs["phase"]
       for call in update_projection.await_args_list[:-1]

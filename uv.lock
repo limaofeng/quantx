@@ -3192,9 +3192,13 @@ dependencies = [
     { name = "quantx-api" },
     { name = "quantx-engine" },
     { name = "quantx-monitor" },
-    { name = "quantx-qmt-agent" },
     { name = "quantx-research" },
     { name = "quantx-worker" },
+]
+
+[package.optional-dependencies]
+qmt-agent = [
+    { name = "quantx-qmt-agent" },
 ]
 
 [package.dev-dependencies]
@@ -3217,10 +3221,11 @@ requires-dist = [
     { name = "quantx-api", editable = "apps/api" },
     { name = "quantx-engine", editable = "apps/engine" },
     { name = "quantx-monitor", editable = "apps/monitor" },
-    { name = "quantx-qmt-agent", editable = "apps/qmt-agent" },
+    { name = "quantx-qmt-agent", marker = "extra == 'qmt-agent'", editable = "apps/qmt-agent" },
     { name = "quantx-research", editable = "apps/research" },
     { name = "quantx-worker", editable = "apps/worker" },
 ]
+provides-extras = ["qmt-agent"]
 
 [package.metadata.requires-dev]
 dev = [

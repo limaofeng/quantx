@@ -121,6 +121,9 @@ _market_data_request_staging_usage_bytes = (
 _safe_market_data_request_directory = (
   _market_data_staging.safe_market_data_request_directory
 )
+_relative_market_data_storage_reference = (
+  _market_data_staging.relative_market_data_storage_reference
+)
 REPORT_TYPES = {
   AgentMessageType.ORDER_REPORT,
   AgentMessageType.EXECUTION_REPORT,
@@ -3454,7 +3457,10 @@ async def upload_market_data_chunk(
             record_count=x_record_count,
             compressed_bytes=len(raw),
             compressed=True,
-            storage_reference=str(destination),
+            storage_reference=_relative_market_data_storage_reference(
+              root=MARKET_DATA_ROOT,
+              candidate=destination,
+            ),
             received_at=utcnow(),
           )
         )

@@ -15,6 +15,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from quantx_infrastructure.config.settings import settings
 
+WINDOWS_ABSOLUTE_PATH_PATTERN = r"^(?:[A-Za-z]:[\\/]|\\\\)"
+ENGINE_LOCK_NAME = "quantx-engine-singleton-v1"
+WINDOWS_PATH_AUDIT_COLUMNS = (
+  ("strategies", "file_path"),
+  ("strategy_backtests", "result_path"),
+  ("strategy_grid_book_snapshots", "source_path"),
+)
+
 
 def _failure(exc: Exception) -> dict[str, Any]:
   return {
@@ -28,16 +36,96 @@ async def _postgresql() -> dict[str, Any]:
   endpoint = f"{url.host or 'localhost'}:{url.port or 5432}"
   engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 
-  async def query_version() -> Any:
+  async def query_version_and_paths() -> tuple[
+    Any,
+    dict[str, int],
+    dict[str, int],
+    bool,
+  ]:
     async with engine.connect() as connection:
-      return (await connection.execute(text("SHOW server_version"))).scalar_one()
+      version = (await connection.execute(text("SHOW server_version"))).scalar_one()
+      path_audit: dict[str, int] = {}
+      for table_name, column_name in WINDOWS_PATH_AUDIT_COLUMNS:
+        count = (
+          await connection.execute(
+            text(
+              f'SELECT count(*) FROM "{table_name}" '
+              f'WHERE "{column_name}" ~ :windows_path_pattern'
+            ),
+            {"windows_path_pattern": WINDOWS_ABSOLUTE_PATH_PATTERN},
+          )
+        ).scalar_one()
+        path_audit[f"{table_name}.{column_name}"] = int(count or 0)
+      active_market_data_count = (
+        await connection.execute(
+          text(
+            "SELECT count(*) FROM market_data_transfer AS transfer "
+            "JOIN market_data_request AS request "
+            "ON request.request_id = transfer.request_id "
+            "WHERE transfer.storage_reference ~ :windows_path_pattern "
+            "AND upper(request.status) NOT IN ('COMPLETED', 'FAILED')"
+          ),
+          {
+            "windows_path_pattern": WINDOWS_ABSOLUTE_PATH_PATTERN,
+          },
+        )
+      ).scalar_one()
+      terminal_market_data_count = (
+        await connection.execute(
+          text(
+            "SELECT count(*) FROM market_data_transfer AS transfer "
+            "JOIN market_data_request AS request "
+            "ON request.request_id = transfer.request_id "
+            "WHERE transfer.storage_reference ~ :windows_path_pattern "
+            "AND upper(request.status) IN ('COMPLETED', 'FAILED')"
+          ),
+          {
+            "windows_path_pattern": WINDOWS_ABSOLUTE_PATH_PATTERN,
+          },
+        )
+      ).scalar_one()
+      path_audit["market_data_transfer.storage_reference"] = int(
+        active_market_data_count or 0
+      )
+      historical_path_audit = {
+        "market_data_transfer.storage_reference": int(
+          terminal_market_data_count or 0
+        )
+      }
+      engine_lease_held = bool(
+        (
+          await connection.execute(
+            text(
+              "WITH engine_key AS ("
+              "SELECT hashtext(:lock_name)::bigint AS value"
+              ") "
+              "SELECT EXISTS ("
+              "SELECT 1 FROM pg_locks, engine_key "
+              "WHERE locktype = 'advisory' "
+              "AND classid = ((engine_key.value >> 32) & 4294967295) "
+              "AND objid = (engine_key.value & 4294967295) "
+              "AND objsubid = 1 AND granted"
+              ")"
+            ),
+            {"lock_name": ENGINE_LOCK_NAME},
+          )
+        ).scalar_one()
+      )
+      return version, path_audit, historical_path_audit, engine_lease_held
 
   try:
-    version = await asyncio.wait_for(query_version(), timeout=8.0)
+    version, path_audit, historical_path_audit, engine_lease_held = await asyncio.wait_for(
+      query_version_and_paths(), timeout=8.0
+    )
     return {
       "status": "reachable",
       "endpoint": endpoint,
       "version": str(version),
+      "windowsAbsolutePaths": path_audit,
+      "windowsAbsolutePathCount": sum(path_audit.values()),
+      "historicalWindowsAbsolutePaths": historical_path_audit,
+      "historicalWindowsAbsolutePathCount": sum(historical_path_audit.values()),
+      "engineLeaseHeld": engine_lease_held,
     }
   except Exception as exc:
     return {"endpoint": endpoint, **_failure(exc)}

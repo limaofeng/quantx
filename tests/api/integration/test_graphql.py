@@ -3,7 +3,10 @@
 使用requests测试查询功能，展示订阅功能的使用方法
 """
 
+import pytest
 import requests
+
+pytestmark = [pytest.mark.integration, pytest.mark.e2e]
 
 
 def test_basic_queries():

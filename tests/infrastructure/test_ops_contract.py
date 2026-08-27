@@ -153,8 +153,10 @@ def test_caddy_is_the_only_public_http_entrypoint() -> None:
   assert "reverse_proxy 127.0.0.1:5250" in development
   assert "reverse_proxy @docs 127.0.0.1:5251" in development
   assert "redir @docs_root /docs/ 308" in development
-  assert "http://:8080" in development
-  assert "bind 0.0.0.0" in development
+  assert "{$QUANTX_CADDY_SITE_ADDRESS:http://:8080}" in development
+  assert "bind {$QUANTX_CADDY_BIND:0.0.0.0}" in development
+  assert "import {$QUANTX_CADDY_TLS_SNIPPET:tls_disabled}" in development
+  assert "@trusted remote_ip {$QUANTX_CADDY_TRUSTED_IPS:0.0.0.0/0}" in development
   assert "admin 127.0.0.1:2019" in development
   assert "bind 127.0.0.1" in production
   assert "admin off" in production
@@ -170,13 +172,16 @@ def test_caddy_is_the_only_public_http_entrypoint() -> None:
 def test_locked_tool_versions_and_hashes_are_complete() -> None:
   lock = json.loads((OPS / "tools.lock.json").read_text(encoding="utf-8"))
   caddy = lock["tools"]["caddy"]
+  macos_caddy = lock["tools"]["caddy-macos-arm64"]
   winsw = lock["tools"]["winsw"]
 
   assert caddy["version"] == "2.11.4"
+  assert macos_caddy["version"] == "2.11.4"
   assert winsw["version"] == "2.12.0"
-  for tool in (caddy, winsw):
+  for tool in (caddy, macos_caddy, winsw):
     assert len(tool["sha256"]) == 64
   assert len(caddy["installedSha256"]) == 64
+  assert len(macos_caddy["installedSha256"]) == 64
 
 
 def test_windows_services_are_independently_supervised() -> None:
@@ -897,7 +902,7 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert '$env:REAL_TRADING_ACCOUNT_ALLOWLIST = ConvertTo-Json' in script
   assert '$env:ENV = "testing"' in script
   assert '$env:ENV = $serverEnvironment' in script
-  assert '$DefaultPrefectApiUrl = "http://192.168.101.4:30420/api"' in script
+  assert '$DefaultPrefectApiUrl = "http://192.168.5.6:30420/api"' in script
   assert '$DefaultPrefectWorkerPool = "quantx-pool"' in script
   assert "PREFECT_SERVER_UI_STATIC_DIRECTORY" not in script
   assert '$env:PYTHONUTF8 = "1"' in script
@@ -1248,6 +1253,16 @@ def test_external_dependencies_are_checked_without_lifecycle_ownership() -> None
   ).read_text(encoding="utf-8")
 
   assert "quantx_infrastructure.diagnostics.external_dependencies" in script
+  mac_script = (OPS / "quantx.py").read_text(encoding="utf-8")
+  assert "quantx_infrastructure.diagnostics.external_dependencies" in mac_script
+  assert "windowsAbsolutePathCount" in mac_script
+
+  diagnostics = (
+    ROOT
+    / "packages/infrastructure/src/quantx_infrastructure/diagnostics/external_dependencies.py"
+  ).read_text(encoding="utf-8")
+  assert "market_data_transfer" in diagnostics
+  assert "strategy_backtests" in diagnostics
   assert 'version={3} (externally managed)' in script
   assert '"SHOW server_version"' in diagnostic
   assert 'client.info("server")' in diagnostic

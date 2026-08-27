@@ -1,26 +1,40 @@
 {
-	auto_https off
 	admin 127.0.0.1:2019
+	auto_https disable_redirects
 }
 
-http://:8080 {
-	bind 0.0.0.0
-	route {
-		@docs_root path /docs
-		redir @docs_root /docs/ 308
+(tls_disabled) {
+}
 
-		@market_gateway path /ws/agent/market
-		reverse_proxy @market_gateway 127.0.0.1:18082
+(tls_internal) {
+	tls internal
+}
 
-		@monitor path /monitor/*
-		reverse_proxy @monitor 127.0.0.1:18083
+{$QUANTX_CADDY_SITE_ADDRESS:http://:8080} {
+	bind {$QUANTX_CADDY_BIND:0.0.0.0}
+	import {$QUANTX_CADDY_TLS_SNIPPET:tls_disabled}
 
-		@api path /graphql* /auth* /health* /metrics* /ws/agent* /agent/*
-		reverse_proxy @api 127.0.0.1:18081
+	@trusted remote_ip {$QUANTX_CADDY_TRUSTED_IPS:0.0.0.0/0}
+	handle @trusted {
+		route {
+			@docs_root path /docs
+			redir @docs_root /docs/ 308
 
-		@docs path /docs/*
-		reverse_proxy @docs 127.0.0.1:5251
+			@market_gateway path /ws/agent/market
+			reverse_proxy @market_gateway 127.0.0.1:18082
 
-		reverse_proxy 127.0.0.1:5250
+			@monitor path /monitor/*
+			reverse_proxy @monitor 127.0.0.1:18083
+
+			@api path /graphql* /auth* /health* /metrics* /ws/agent* /agent/*
+			reverse_proxy @api 127.0.0.1:18081
+
+			@docs path /docs/*
+			reverse_proxy @docs 127.0.0.1:5251
+
+			reverse_proxy 127.0.0.1:5250
+		}
 	}
+
+	respond "Forbidden" 403
 }

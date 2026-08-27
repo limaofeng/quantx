@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 from quantx_qmt_agent.process_watchdog import (
@@ -160,7 +161,19 @@ def test_watchdog_spawns_hidden_secret_free_child_and_cleans_up(tmp_path) -> Non
   assert not heartbeat.exists()
 
 
-def test_real_watchdog_child_monitors_current_parent_without_exiting(tmp_path) -> None:
+def test_real_watchdog_child_monitors_current_parent_without_exiting(
+  tmp_path: Path,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  root = Path(__file__).resolve().parents[2]
+  source_root = root / "apps/qmt-agent/src"
+  existing_pythonpath = os.environ.get("PYTHONPATH", "").strip()
+  monkeypatch.setenv(
+    "PYTHONPATH",
+    os.pathsep.join(
+      value for value in (str(source_root), existing_pythonpath) if value
+    ),
+  )
   watchdog = AgentProcessWatchdog(
     tmp_path / "real-child.heartbeat",
   )

@@ -5,6 +5,23 @@ import pytest
 import quantx_engine.main as engine_main
 
 
+def test_configured_engine_instance_id_is_authoritative(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QUANTX_ENGINE_INSTANCE_ID", "mac-runtime-engine")
+
+  assert engine_main._engine_instance_id() == "mac-runtime-engine"
+
+
+def test_engine_instance_id_rejects_oversized_value(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QUANTX_ENGINE_INSTANCE_ID", "x" * 65)
+
+  with pytest.raises(RuntimeError, match="heartbeat schema limit"):
+    engine_main._engine_instance_id()
+
+
 @pytest.mark.asyncio
 async def test_transient_heartbeat_timeout_retries_without_failing_engine(
   monkeypatch: pytest.MonkeyPatch,

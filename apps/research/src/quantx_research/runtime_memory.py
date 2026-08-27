@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import psutil
+
 _GIB = 1024**3
 
 
@@ -357,20 +359,10 @@ def _proc_memory_snapshot() -> MemorySnapshot | None:
 
 
 def _portable_memory_snapshot() -> MemorySnapshot:
-  page_size = int(os.sysconf("SC_PAGE_SIZE"))
-  total = int(os.sysconf("SC_PHYS_PAGES")) * page_size
-  available = int(os.sysconf("SC_AVPHYS_PAGES")) * page_size
-  try:
-    import resource
-
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    rss = int(usage.ru_maxrss)
-    if rss < _GIB:
-      rss *= 1024
-  except (ImportError, OSError, ValueError):
-    rss = 0
+  memory = psutil.virtual_memory()
+  process = psutil.Process()
   return MemorySnapshot(
-    total_physical_bytes=total,
-    available_physical_bytes=available,
-    process_rss_bytes=rss,
+    total_physical_bytes=int(memory.total),
+    available_physical_bytes=int(memory.available),
+    process_rss_bytes=int(process.memory_info().rss),
   )

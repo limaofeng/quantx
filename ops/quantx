@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+python_executable=${QUANTX_PYTHON_EXE:-"$repository_root/.venv/bin/python"}
+case "$python_executable" in
+  /*) ;;
+  *) python_executable="$repository_root/$python_executable" ;;
+esac
+
+if [ ! -x "$python_executable" ]; then
+  echo "quantx: Python runtime is missing: $python_executable" >&2
+  echo "Run 'uv sync --locked --group dev' from the repository root." >&2
+  exit 69
+fi
+
+exec "$python_executable" "$repository_root/ops/quantx.py" "$@"

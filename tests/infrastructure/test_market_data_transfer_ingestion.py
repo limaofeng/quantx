@@ -1051,3 +1051,61 @@ def test_market_data_staging_root_prefers_explicit_runtime_directory(
   assert staging.market_data_staging_root() == (
     runtime_root.resolve() / "market-data"
   )
+
+
+def test_market_data_storage_reference_is_portable_and_root_bound(
+  tmp_path: Path,
+) -> None:
+  request_id = "44444444-4444-4444-8444-444444444444"
+  root = tmp_path / "market-data"
+  candidate = root / request_id / "00000000.json.gz"
+  candidate.parent.mkdir(parents=True)
+  candidate.write_bytes(b"chunk")
+
+  reference = staging.relative_market_data_storage_reference(
+    root=root,
+    candidate=candidate,
+  )
+
+  assert reference == f"{request_id}/00000000.json.gz"
+  assert staging.safe_market_data_staging_file(
+    root=root,
+    request_id=request_id,
+    storage_reference=reference,
+  ) == candidate.resolve()
+
+
+@pytest.mark.asyncio
+async def test_uploaded_manifest_resolves_portable_reference_inside_runtime_root(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  request_id = "55555555-5555-4555-8555-555555555555"
+  runtime_root = tmp_path / "runtime"
+  request_directory = runtime_root / "market-data" / request_id
+  request_directory.mkdir(parents=True)
+  item = _write_chunk(request_directory, [])
+  item["storage_reference"] = f"{request_id}/00000000.json.gz"
+  monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(runtime_root))
+
+  class PortableManifestStore:
+    async def market_data_request(self, selected_request_id: str):
+      assert selected_request_id == request_id
+      return {
+        "expected_chunks": 1,
+        "received_chunks": 1,
+        "request_payload": _payload(),
+      }
+
+    async def market_data_transfers(self, selected_request_id: str):
+      assert selected_request_id == request_id
+      return [item]
+
+  _, _, manifest = await ingestion.load_uploaded_request_manifest(
+    PortableManifestStore(),
+    request_id,
+  )
+
+  assert manifest[0]["storage_reference"] == str(
+    request_directory / "00000000.json.gz"
+  )

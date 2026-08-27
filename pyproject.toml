@@ -9,8 +9,10 @@ dependencies = [
   "quantx-monitor",
   "quantx-research",
   "quantx-worker",
-  "quantx-qmt-agent",
 ]
+
+[project.optional-dependencies]
+qmt-agent = ["quantx-qmt-agent"]
 
 [dependency-groups]
 dev = [

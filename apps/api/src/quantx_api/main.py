@@ -38,6 +38,7 @@ from quantx_api.gqlapi.admission import (
   graphql_query_admission,
   graphql_request_identity,
 )
+from quantx_api.live_runtime_status import live_trading_runtime_status
 from quantx_api.monitoring import get_prometheus_metrics
 from quantx_api.monitoring.metrics import REQUEST_COUNT, REQUEST_DURATION
 from quantx_api.runtime_status import (
@@ -610,6 +611,11 @@ async def health_components():
 @app.get("/health/runtime/market-data")
 async def health_runtime_market_data():
   return {"marketData": await market_data_runtime_status()}
+
+
+@app.get("/health/runtime/live-trading")
+async def health_runtime_live_trading():
+  return {"liveTrading": await live_trading_runtime_status()}
 
 
 @app.get("/health/ready")
