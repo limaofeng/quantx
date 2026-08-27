@@ -99,6 +99,7 @@ quantx_service_runner.bat
 .codex/skills/**/*.py[cod]
 
 # Generated test and diagnostic reports
+/tmp_pytest_*/
 /docs/reports/t-trade-v3-pressure-*
 /docs/reports/t-trade-v3-recent-completed-diagnostic-*
 
