@@ -8,6 +8,13 @@ from typing import List, Optional
 import strawberry
 
 
+@strawberry.enum(description="账户事实链路健康状态；不包含查询或检查过程")
+class AccountExecutionHealthStatus(Enum):
+  HEALTHY = "HEALTHY"
+  BLOCKED = "BLOCKED"
+  KILLED = "KILLED"
+
+
 @strawberry.type(description="账户执行安全检查项")
 class AccountExecutionSafetyCheck:
   code: str
@@ -21,7 +28,7 @@ class AccountExecutionSafety:
   account_id: str
   authorization_state: str
   state_version: int
-  health_status: str
+  health_status: AccountExecutionHealthStatus
   execution_mode: str
   can_increase_risk: bool
   can_reduce_risk: bool

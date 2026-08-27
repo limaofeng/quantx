@@ -9,6 +9,7 @@ from quantx_infrastructure.services.account_execution_safety_service import (
 )
 
 from ..types.trading_safety_types import (
+  AccountExecutionHealthStatus,
   AccountExecutionSafety,
   AccountExecutionSafetyCheck,
 )
@@ -39,7 +40,7 @@ class AccountExecutionSafetyResolver:
       account_id=str(payload["account_id"]),
       authorization_state=str(payload["authorization_state"]),
       state_version=int(payload["state_version"]),
-      health_status=str(payload["health_status"]),
+      health_status=AccountExecutionHealthStatus(str(payload["health_status"])),
       execution_mode=str(payload["execution_mode"]),
       can_increase_risk=bool(payload["can_increase_risk"]),
       can_reduce_risk=bool(payload["can_reduce_risk"]),

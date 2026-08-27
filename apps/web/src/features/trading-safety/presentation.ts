@@ -1,13 +1,13 @@
-export function accountHealthLabel(status?: string | null) {
-  switch (String(status || '').toUpperCase()) {
-    case 'HEALTHY':
+import { AccountExecutionHealthStatus } from '@/generated/gql/graphql';
+
+export function accountHealthLabel(status: AccountExecutionHealthStatus) {
+  switch (status) {
+    case AccountExecutionHealthStatus.Healthy:
       return '正常';
-    case 'KILLED':
+    case AccountExecutionHealthStatus.Killed:
       return '紧急停止';
-    case 'BLOCKED':
+    case AccountExecutionHealthStatus.Blocked:
       return '阻断';
-    default:
-      return '检查中';
   }
 }
 

@@ -3,9 +3,10 @@ import { vi } from 'vitest';
 
 import { TradingSafetyContext } from '@/features/trading-safety/trading-safety-context';
 import { TradingSafetyBar } from '@/features/trading-safety/TradingSafetyBar';
+import { AccountExecutionHealthStatus } from '@/generated/gql/graphql';
 
 describe('TradingSafetyBar', () => {
-  it('uses the success color for a healthy and available safety service', () => {
+  it('retains the healthy state while refreshing an available safety snapshot', () => {
     render(
       <TradingSafetyContext.Provider
         value={{
@@ -15,7 +16,7 @@ describe('TradingSafetyBar', () => {
           canReduceRisk: true,
           error: undefined,
           executionMode: 'REDUCE_ONLY',
-          fetching: false,
+          fetching: true,
           refreshSafety: vi.fn(),
           safety: {
             accountId: '300000013250',
@@ -34,7 +35,7 @@ describe('TradingSafetyBar', () => {
             executionWindowActive: true,
             externalOrderCount: 0,
             externalTradeCount: 0,
-            healthStatus: 'HEALTHY',
+            healthStatus: AccountExecutionHealthStatus.Healthy,
             killSwitch: false,
             newExternalOrderCount: 0,
             newExternalTradeCount: 0,

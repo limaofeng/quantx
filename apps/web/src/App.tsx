@@ -15,6 +15,7 @@ import { AuthProvider, useAuth } from '@/core/auth';
 import { urqlClient } from '@/core/graphql';
 import { LoginPage, safeInternalPath } from '@/features/auth';
 import {
+  accountActivityStatus,
   TradingSafetyBar,
   TradingSafetyProvider,
   useTradingSafety,
@@ -35,36 +36,18 @@ function renderTradingSafetyStatusBar(currentUserLabel: string) {
 }
 
 function TradingStudioRouter() {
-  const { canIncreaseRisk, canReduceRisk, executionMode, fetching } =
-    useTradingSafety();
-  const activityTone = fetching
-    ? 'checking'
-    : canIncreaseRisk
-      ? 'ready'
-      : canReduceRisk
-        ? 'reduce-only'
-        : 'blocked';
-  const activityLabel = fetching
-    ? 'CHECK'
-    : canIncreaseRisk
-      ? 'READY'
-      : canReduceRisk
-        ? 'REDUCE'
-        : 'BLOCK';
-  const activityDetail =
-    executionMode === 'TRADING'
-      ? '实盘'
-      : executionMode === 'REDUCE_ONLY'
-        ? '仅减'
-        : '观察';
+  const tradingSafety = useTradingSafety();
+  const activityStatus = accountActivityStatus({
+    canIncreaseRisk: tradingSafety.canIncreaseRisk,
+    canReduceRisk: tradingSafety.canReduceRisk,
+    executionMode: tradingSafety.executionMode,
+    fetching: tradingSafety.fetching,
+    hasSnapshot: Boolean(tradingSafety.safety),
+  });
 
   return (
     <StudioWorkspace
-      activityStatus={{
-        detail: activityDetail,
-        label: activityLabel,
-        tone: activityTone,
-      }}
+      activityStatus={activityStatus}
       renderStatusBar={renderTradingSafetyStatusBar}
     >
       <Switch>

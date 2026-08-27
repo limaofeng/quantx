@@ -94,12 +94,19 @@ type AccountExecutionControlPreviewResult {
   preview: AccountExecutionControlPreview
 }
 
+"""账户事实链路健康状态；不包含查询或检查过程"""
+enum AccountExecutionHealthStatus {
+  HEALTHY
+  BLOCKED
+  KILLED
+}
+
 """账户级实盘执行能力，不包含具体助手的灰度策略"""
 type AccountExecutionSafety {
   accountId: String!
   authorizationState: String!
   stateVersion: Int!
-  healthStatus: String!
+  healthStatus: AccountExecutionHealthStatus!
   executionMode: String!
   canIncreaseRisk: Boolean!
   canReduceRisk: Boolean!

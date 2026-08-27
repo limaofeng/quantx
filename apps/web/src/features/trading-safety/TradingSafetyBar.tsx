@@ -13,6 +13,7 @@ import type { ReactNode } from 'react';
 
 import { StatusBar } from '@/components/studio-workbench';
 import { useStudioNavigate } from '@/components/studio-workspace';
+import { AccountExecutionHealthStatus } from '@/generated/gql/graphql';
 import { cn } from '@/utils/cn';
 
 import {
@@ -63,16 +64,16 @@ export function TradingSafetyBar({
 }) {
   const navigate = useStudioNavigate();
   const { accountId, blockedReasons, fetching, safety } = useTradingSafety();
-  const healthStatus = fetching
-    ? 'CHECKING'
-    : safety?.healthStatus || 'BLOCKED';
-  const healthLabel = accountHealthLabel(healthStatus);
+  const loading = fetching && !safety;
+  const healthStatus =
+    safety?.healthStatus ?? AccountExecutionHealthStatus.Blocked;
+  const healthLabel = loading ? '加载中' : accountHealthLabel(healthStatus);
   const executionLabel = accountExecutionModeLabel(safety?.executionMode);
   const summary = safety
     ? accountSafetySummary(safety)
     : blockedReasons[0] || '账户安全状态尚未加载';
-  const isHealthy = healthStatus === 'HEALTHY';
-  const isKilled = healthStatus === 'KILLED';
+  const isHealthy = healthStatus === AccountExecutionHealthStatus.Healthy;
+  const isKilled = healthStatus === AccountExecutionHealthStatus.Killed;
   const canIncreaseRisk = Boolean(safety?.canIncreaseRisk);
 
   return (

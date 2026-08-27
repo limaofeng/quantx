@@ -421,9 +421,9 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
   const unknown = Boolean(error) || (!fetching && !safety);
   const healthLabel = unknown
     ? '状态未知'
-    : fetching && !safety
-      ? '检查中'
-      : accountHealthLabel(safety?.healthStatus);
+    : !safety
+      ? '加载中'
+      : accountHealthLabel(safety.healthStatus);
   const executionLabel = unknown
     ? '安全关闭'
     : accountExecutionModeLabel(safety?.executionMode);

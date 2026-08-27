@@ -1,3 +1,7 @@
+export {
+  accountActivityStatus,
+  type AccountActivityStatus,
+} from './accountActivityStatus';
 export { ExecutionHealthControl } from './ExecutionHealthControl';
 export type {
   BuyExecutionHealthDetails,
