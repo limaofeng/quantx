@@ -28,6 +28,9 @@ from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_reposit
 from quantx_infrastructure.services.account_execution_safety_service import (
   AccountExecutionSafetyService,
 )
+from quantx_infrastructure.services.agent_session_guard import (
+  REMOTE_AGENT_SESSION_STALE,
+)
 from quantx_infrastructure.services.engine_command_service import (
   EngineCommandIdempotencyError,
   engine_command_service,
@@ -942,7 +945,17 @@ class TTradeResolver:
     account_id = str(data.get("account_id") or "").strip()
     if not account_id:
       return data
-    current = await AccountExecutionSafetyService().status(account_id)
+    try:
+      current = await AccountExecutionSafetyService().status(account_id)
+    except Exception as exc:
+      logger.warning(
+        "无法验证远程 QMT Agent 当前会话: error=%s",
+        exc.__class__.__name__,
+      )
+      current = {
+        "agent_status": "OFFLINE",
+        "qmt_launch_reason_code": REMOTE_AGENT_SESSION_STALE,
+      }
     current_checks = {
       str(item.get("code") or ""): bool(item.get("passed"))
       for item in list(current.get("checks") or [])

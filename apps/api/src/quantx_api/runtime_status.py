@@ -155,12 +155,31 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     if hub_connected:
       online_agents.append(agent)
       connected_agents.append((agent, heartbeat_status))
-  ready_agents = [agent for agent, status in connected_agents if status == "READY"]
+  require_live_agent = bool(settings.enable_real_trading)
+
+  def capabilities_for(agent: AgentDevice) -> set[str]:
+    heartbeat = heartbeat_by_component.get(f"qmt-agent:{agent.id}")
+    details = dict(heartbeat.details or {}) if heartbeat else {}
+    return {
+      str(value).lower()
+      for value in [
+        *list(agent.capabilities or []),
+        *list(details.get("capabilities") or []),
+      ]
+    }
+
+  ready_agents = [
+    agent
+    for agent, status in connected_agents
+    if status == "READY"
+    and (not require_live_agent or "live" in capabilities_for(agent))
+  ]
+  ready_agent_ids = {str(agent.id) for agent in ready_agents}
   latest_ready_heartbeat_at = max(
     (
       heartbeat_by_component[f"qmt-agent:{agent.id}"].updated_at
-      for agent, status in connected_agents
-      if status == "READY"
+      for agent, _ in connected_agents
+      if str(agent.id) in ready_agent_ids
     ),
     default=None,
   )
@@ -171,13 +190,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
   for agent, _ in connected_agents:
     heartbeat = heartbeat_by_component.get(f"qmt-agent:{agent.id}")
     details = dict(heartbeat.details or {}) if heartbeat else {}
-    capabilities = {
-      str(value).lower()
-      for value in [
-        *list(agent.capabilities or []),
-        *list(details.get("capabilities") or []),
-      ]
-    }
+    capabilities = capabilities_for(agent)
     agent_modes.update(
       value for value in ("live", "paper", "data-only") if value in capabilities
     )
@@ -199,7 +212,9 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     agent for agent, status in connected_agents if status in RECONCILING_AGENT_STATUSES
   ]
   components["qmt-agent"] = {
-    "status": "ready" if connected_agents else "offline",
+    "status": (
+      "ready" if ready_agents else "degraded" if connected_agents else "offline"
+    ),
     "connectedDevices": len(connected_agents),
     "readyDevices": len(ready_agents),
     "onlineDevices": len(online_agents),

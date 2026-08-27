@@ -720,9 +720,8 @@ class AgentRuntime:
             authenticated=getattr(self, "_control_session_authenticated", False),
           )
           logger.warning(
-            "QMT Agent disconnected: %s: %s",
+            "QMT Agent disconnected: error=%s",
             exc.__class__.__name__,
-            exc,
           )
           try:
             await asyncio.wait_for(self._stopped.wait(), timeout=sleep_delay)
@@ -844,6 +843,21 @@ class AgentRuntime:
       self.mode == "live" and getattr(self, "_trading_reconciliation_required", False)
     )
 
+  def _advertised_capabilities(self) -> list[str]:
+    """Return the immutable capability set for every socket and heartbeat.
+
+    The API freezes capabilities from the authenticated control frame.  Using
+    one source here prevents a later heartbeat from appearing to add a feature
+    that the durable request router can never select for this session.
+    """
+
+    return [
+      "market-data",
+      "divid-factors",
+      "financial-data-v1",
+      self.mode,
+    ]
+
   def _begin_trading_reconciliation(
     self,
     reason: str,
@@ -868,9 +882,8 @@ class AgentRuntime:
         require_reconciliation()
       except Exception as exc:
         logger.warning(
-          "Could not close the local XTTrading order gate: %s: %s",
+          "Could not close the local XTTrading order gate: error=%s",
           exc.__class__.__name__,
-          exc,
         )
 
   def _acknowledge_trading_reconciliation_snapshot(
@@ -896,9 +909,8 @@ class AgentRuntime:
       )
     except Exception as exc:
       logger.warning(
-        "Could not open the local XTTrading order gate: %s: %s",
+        "Could not open the local XTTrading order gate: error=%s",
         exc.__class__.__name__,
-        exc,
       )
       generation_is_current = False
     if not generation_is_current:
@@ -953,7 +965,7 @@ class AgentRuntime:
           "device_id": self.configuration.device_id,
           "access_token": self._access_token,
           "agent_version": "0.1.0",
-          "capabilities": ["market-data", "divid-factors", self.mode],
+          "capabilities": self._advertised_capabilities(),
         },
       )
       await self._send_socket_text(socket, auth.model_dump_json())
@@ -1162,9 +1174,8 @@ class AgentRuntime:
       return max(0, int(generation_reader()))
     except Exception as exc:
       logger.warning(
-        "XTTrading connection generation check failed: %s: %s",
+        "XTTrading connection generation check failed: error=%s",
         exc.__class__.__name__,
-        exc,
       )
       return 0
 
@@ -1297,9 +1308,8 @@ class AgentRuntime:
       return bool(readiness())
     except Exception as exc:
       logger.warning(
-        "QMT broker readiness check failed: %s: %s",
+        "QMT broker readiness check failed: error=%s",
         exc.__class__.__name__,
-        exc,
       )
       return False
 
@@ -1319,9 +1329,8 @@ class AgentRuntime:
         raise
       except Exception as exc:
         logger.warning(
-          "XTData readiness retry failed: %s: %s",
+          "XTData readiness retry failed: error=%s",
           exc.__class__.__name__,
-          exc,
         )
       current = self._is_market_data_ready()
       if current != previous:
@@ -1346,9 +1355,8 @@ class AgentRuntime:
       return bool(readiness())
     except Exception as exc:
       logger.warning(
-        "QMT trading readiness check failed: %s: %s",
+        "QMT trading readiness check failed: error=%s",
         exc.__class__.__name__,
-        exc,
       )
       return False
 
@@ -1384,9 +1392,8 @@ class AgentRuntime:
       raise
     except Exception as exc:
       logger.warning(
-        "XTTrading readiness retry failed: %s: %s",
+        "XTTrading readiness retry failed: error=%s",
         exc.__class__.__name__,
-        exc,
       )
     self._trading_ready_cache = False
     self._trading_readiness_failed = True
@@ -1646,9 +1653,8 @@ class AgentRuntime:
             f"whole-market native subscription attempt failed: {exc.__class__.__name__}"
           )
         logger.warning(
-          "QMT whole-market subscription retry: error=%s: %s",
+          "QMT whole-market subscription retry: error=%s",
           exc.__class__.__name__,
-          exc,
         )
         try:
           await asyncio.wait_for(self._stopped.wait(), timeout=delay)
@@ -1742,11 +1748,10 @@ class AgentRuntime:
         self._market_stream_ready_since_monotonic = 0.0
         logger.warning(
           "QMT whole-market stream reconnecting: resyncs=%s "
-          "ready_seconds=%.3f error=%s: %s",
+          "ready_seconds=%.3f error=%s",
           self._market_stream_resyncs,
           ready_seconds,
           exc.__class__.__name__,
-          exc,
         )
         await asyncio.sleep(
           sleep_delay + random.uniform(0.0, min(1.0, sleep_delay * 0.2))
@@ -1764,7 +1769,7 @@ class AgentRuntime:
         "device_id": self.configuration.device_id,
         "access_token": access_token,
         "agent_version": "0.1.0",
-        "capabilities": ["market-data", self.mode],
+        "capabilities": self._advertised_capabilities(),
       },
     )
     await asyncio.wait_for(
@@ -2179,11 +2184,19 @@ class AgentRuntime:
       try:
         payload = batch.to_bytes()
       except ValueError as exc:
+        # Preserve the stable protocol-limit diagnostic without relaying an
+        # arbitrary serialization error that could contain native payload data.
+        error_detail = (
+          "payload exceeds 64 MiB"
+          if "exceeds 64 MiB" in str(exc)
+          else f"error={exc.__class__.__name__}"
+        )
         raise RuntimeError(
           "whole-market batch encoding failed: "
           f"stream_id={stream_id} sequence={sequence} "
-          f"kind={kind.value} instruments={len(data)} error={exc}"
-        ) from exc
+          f"kind={kind.value} instruments={len(data)} "
+          f"{error_detail}"
+        ) from None
       return _EncodedMarketBatch(batch=batch, payload=payload)
 
     loop = asyncio.get_running_loop()
@@ -2516,12 +2529,7 @@ class AgentRuntime:
     payload = HeartbeatPayload(
       device_id=self.configuration.device_id,
       agent_version="0.1.0",
-      capabilities=[
-        "market-data",
-        "divid-factors",
-        "financial-data-v1",
-        self.mode,
-      ],
+      capabilities=self._advertised_capabilities(),
       status=status,
       xtdata_status="CONNECTED" if market_data_ready else "DISCONNECTED",
       xtdata_reason="" if market_data_ready else "XTDATA_UNAVAILABLE",
@@ -2633,10 +2641,9 @@ class AgentRuntime:
           except Exception as report_exc:
             logger.warning(
               "Could not report conflicting QMT market-data redelivery: "
-              "request_id=%s error=%s: %s",
+              "request_id=%s error=%s",
               request_id,
               report_exc.__class__.__name__,
-              report_exc,
             )
           return
         logger.info(
@@ -2656,10 +2663,9 @@ class AgentRuntime:
           await self._report_market_data_busy(request_id)
         except Exception as report_exc:
           logger.warning(
-            "Could not report QMT market-data backpressure: request_id=%s error=%s: %s",
+            "Could not report QMT market-data backpressure: request_id=%s error=%s",
             request_id,
             report_exc.__class__.__name__,
-            report_exc,
           )
       return
     if envelope.message_type is AgentMessageType.MARKET_RESET:
@@ -2687,10 +2693,9 @@ class AgentRuntime:
       except Exception as exc:
         logger.warning(
           "XTData subscription failed without closing Agent session: "
-          "subscription_id=%s error=%s: %s",
+          "subscription_id=%s error=%s",
           envelope.payload.get("subscription_id"),
           exc.__class__.__name__,
-          exc,
         )
         return
       if not accepted:
@@ -3457,10 +3462,9 @@ class AgentRuntime:
           if not _is_deterministic_market_data_request_error(exc):
             logger.warning(
               "QMT market-data upload will resume after session reconnect: "
-              "request_id=%s error=%s: %s",
+              "request_id=%s error=%s",
               request_id,
               exc.__class__.__name__,
-              exc,
             )
             await socket.close(
               code=1012,
@@ -3468,19 +3472,17 @@ class AgentRuntime:
             )
             return
           logger.warning(
-            "QMT market data request rejected: request_id=%s error=%s: %s",
+            "QMT market data request rejected: request_id=%s error=%s",
             request_id,
             exc.__class__.__name__,
-            exc,
           )
           try:
             await self._report_market_data_failure(request_id, exc)
           except Exception as report_exc:
             logger.warning(
-              "Could not report QMT market data failure: request_id=%s error=%s: %s",
+              "Could not report QMT market data failure: request_id=%s error=%s",
               request_id,
               report_exc.__class__.__name__,
-              report_exc,
             )
           continue
 
@@ -3497,7 +3499,7 @@ class AgentRuntime:
     request_id: str,
     error: Exception,
   ) -> None:
-    reason = f"{error.__class__.__name__}: {error}"[:900]
+    reason = error.__class__.__name__
     async with httpx.AsyncClient(
       timeout=10.0,
       follow_redirects=False,

@@ -67,6 +67,9 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import market_data_staging as _market_data_staging
+from quantx_infrastructure.services.account_execution_safety_service import (
+  AccountExecutionSafetyService,
+)
 from quantx_infrastructure.services.agent_session_guard import (
   AGENT_SERVER_SESSION_PAYLOAD_KEY,
   API_HEARTBEAT_COMPONENT,
@@ -790,6 +793,18 @@ async def _record_heartbeat(
     await db.commit()
   for revoked_device_id in revoked_ids:
     await agent_connection_hub.revoke(revoked_device_id)
+  if status == "READY" and "market-data" in session.capabilities:
+    try:
+      await agent_connection_hub.authorize_market_after_reconciliation(session)
+    except Exception as exc:
+      # Heartbeat durability is already committed. The independent lease
+      # refresher retries Redis publication and will fail the socket closed if
+      # the lease store remains unavailable.
+      logger.warning(
+        "无法在账户对账后启用 Agent 行情租约: device=%s error=%s",
+        session.device_id,
+        exc.__class__.__name__,
+      )
 
 
 async def _mark_session_offline(session: AgentControlSession) -> None:
@@ -2473,6 +2488,7 @@ async def _assert_trade_delivery_session(
     .upper()
     == "READY"
   )
+  live_risk_increase = risk_increasing and execution_mode == "live"
   capabilities = {
     str(value).strip().lower()
     for value in control_session.capabilities
@@ -2486,9 +2502,16 @@ async def _assert_trade_delivery_session(
     or session_state.agent_session_id != control_session.agent_session_id
     or account_id not in control_session.authorized_account_ids
     or (execution_mode and execution_mode not in capabilities)
-    or (risk_increasing and execution_mode == "live" and not market_stream_ready)
+    or (live_risk_increase and not market_stream_ready)
   ):
     raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效")
+  if live_risk_increase:
+    try:
+      safety_status = await AccountExecutionSafetyService().status(account_id)
+    except Exception as exc:
+      raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效") from exc
+    if not bool(safety_status.get("can_increase_risk")):
+      raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效")
 
 
 async def _poll_agent_trade_commands(

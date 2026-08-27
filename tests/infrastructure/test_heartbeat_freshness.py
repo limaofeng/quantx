@@ -64,6 +64,76 @@ def test_account_freshness_rejects_stale_or_degraded_heartbeat(
   assert not AccountExecutionSafetyService._fresh(degraded)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("target", "value"),
+  [
+    ("stream.status", "SYNCING"),
+    ("stream.commit_phase", "APPLYING"),
+    ("stream.sequence", 2),
+    ("freshness.stream_id", "stream-other"),
+    ("freshness.sequence", 2),
+    ("engine.status", "SYNCING"),
+    ("engine.stream_id", "stream-other"),
+    ("engine.sequence", 2),
+  ],
+)
+async def test_authoritative_market_readiness_requires_exact_committed_watermarks(
+  monkeypatch: pytest.MonkeyPatch,
+  target: str,
+  value: object,
+) -> None:
+  stream = SimpleNamespace(
+    status="READY",
+    commit_phase="IDLE",
+    sequence=3,
+    stream_id="stream-1",
+  )
+  freshness = SimpleNamespace(stream_id="stream-1", sequence=3)
+  engine = SimpleNamespace(status="READY", stream_id="stream-1", sequence=3)
+  owner, attribute = target.split(".", maxsplit=1)
+  setattr(
+    {"stream": stream, "freshness": freshness, "engine": engine}[owner],
+    attribute,
+    value,
+  )
+  monkeypatch.setattr(
+    safety_module.market_stream_store,
+    "state_with_freshness",
+    AsyncMock(return_value=(stream, freshness)),
+  )
+  monkeypatch.setattr(
+    safety_module.market_stream_store,
+    "engine_state",
+    AsyncMock(return_value=engine),
+  )
+
+  assert not await safety_module.authoritative_market_stream_ready()
+
+
+@pytest.mark.asyncio
+async def test_authoritative_market_readiness_accepts_exact_watermarks_and_fails_closed(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  stream = SimpleNamespace(
+    status="READY",
+    commit_phase="IDLE",
+    sequence=3,
+    stream_id="stream-1",
+  )
+  freshness = SimpleNamespace(stream_id="stream-1", sequence=3)
+  engine = SimpleNamespace(status="READY", stream_id="stream-1", sequence=3)
+  state = AsyncMock(return_value=(stream, freshness))
+  engine_state = AsyncMock(return_value=engine)
+  monkeypatch.setattr(safety_module.market_stream_store, "state_with_freshness", state)
+  monkeypatch.setattr(safety_module.market_stream_store, "engine_state", engine_state)
+
+  assert await safety_module.authoritative_market_stream_ready()
+
+  state.side_effect = RuntimeError("redis unavailable")
+  assert not await safety_module.authoritative_market_stream_ready()
+
+
 def _api(now: datetime, *, instance_id: str = "api-instance-1"):
   return SimpleNamespace(
     instance_id=instance_id,
@@ -155,6 +225,8 @@ def _agent(
 async def _status(
   monkeypatch: pytest.MonkeyPatch,
   rows: list[tuple],
+  *,
+  authoritative_market_ready: bool = True,
 ) -> dict:
   @asynccontextmanager
   async def session():
@@ -168,6 +240,11 @@ async def _status(
     safety_module.settings,
     "real_trading_account_allowlist",
     ["TEST-ACCOUNT"],
+  )
+  monkeypatch.setattr(
+    safety_module,
+    "authoritative_market_stream_ready",
+    AsyncMock(return_value=authoritative_market_ready),
   )
   result = await AccountExecutionSafetyService().status("TEST-ACCOUNT")
   snapshot.assert_awaited_once()
@@ -241,6 +318,36 @@ async def test_account_status_blocks_increase_until_market_stream_is_ready(
   assert result["can_increase_risk"] is False
   assert checks["MARKET_STREAM_READY"]["passed"] is False
   assert "三阶段同步" in checks["MARKET_STREAM_READY"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_account_status_rejects_agent_ready_claim_without_server_watermark(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+) -> None:
+  rows = [
+    (
+      _control(fixed_utcnow),
+      SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+      _device("device-1"),
+      _agent(fixed_utcnow),
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+    )
+  ]
+
+  result = await _status(
+    monkeypatch,
+    rows,
+    authoritative_market_ready=False,
+  )
+  checks = {item["code"]: item for item in result["checks"]}
+
+  assert result["can_increase_risk"] is False
+  assert checks["MARKET_STREAM_READY"]["passed"] is False
 
 
 @pytest.mark.asyncio

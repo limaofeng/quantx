@@ -53,3 +53,10 @@ def masked_device_id(value: str) -> str:
   if len(normalized) <= 8:
     return "*" * len(normalized)
   return f"{normalized[:4]}…{normalized[-4:]}"
+
+
+def masked_account_id(value: str) -> str:
+  normalized = str(value or "").strip()
+  if len(normalized) <= 4:
+    return "*" * len(normalized)
+  return f"***{normalized[-4:]}"

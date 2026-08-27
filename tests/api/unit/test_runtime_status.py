@@ -308,9 +308,10 @@ async def test_market_data_runtime_status_uses_only_heartbeat_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
+async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+  monkeypatch.setattr(runtime_status.settings, "enable_real_trading", True)
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   async with engine.begin() as connection:
     await connection.run_sync(
@@ -375,10 +376,10 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
       AgentDevice(
         id="device-1",
         user_id="user-1",
-        name="paper",
+        name="live",
         secret_hash="x" * 64,
         authorized_account_ids=["account-1"],
-        capabilities=["paper", "market-data"],
+        capabilities=["live", "market-data"],
         last_seen_at=now,
       )
     )
@@ -414,14 +415,14 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
 
   components = await runtime_status._component_heartbeats()
   assert components["qmt-agent"] == {
-    "status": "ready",
+    "status": "degraded",
     "connectedDevices": 1,
     "readyDevices": 0,
     "onlineDevices": 1,
     "reconcilingDevices": 1,
     "degradedDevices": 0,
     "registeredDevices": 1,
-    "modes": ["paper"],
+    "modes": ["live"],
     "protocolVersions": ["1.1"],
     "accountIds": ["***nt-1"],
     "latestSnapshotAgeSeconds": None,
@@ -503,7 +504,7 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
     await db.commit()
 
   components = await runtime_status._component_heartbeats()
-  assert components["qmt-agent"]["status"] == "ready"
+  assert components["qmt-agent"]["status"] == "degraded"
   assert components["qmt-agent"]["degradedDevices"] == 1
   assert components["market-data"]["status"] == "offline"
   await engine.dispose()

@@ -299,6 +299,32 @@ async def test_global_monitor_block_override_preserves_missing_nested_readiness(
 
 
 @pytest.mark.asyncio
+async def test_global_monitor_fails_closed_when_current_session_check_is_unavailable(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(
+    resolver_module.AccountExecutionSafetyService,
+    "status",
+    AsyncMock(side_effect=RuntimeError("database unavailable")),
+  )
+
+  projected = await TTradeResolver._apply_agent_session_block_to_monitor(
+    {
+      "account_id": "account-1",
+      "agent_status": "READY",
+      "can_approve": True,
+      "can_activate_live": True,
+      "blocked_reasons": [],
+    }
+  )
+
+  assert projected["agent_status"] == "BLOCKED"
+  assert projected["can_approve"] is False
+  assert projected["can_activate_live"] is False
+  assert "REMOTE_AGENT_SESSION_STALE" in projected["blocked_reasons"][-1]
+
+
+@pytest.mark.asyncio
 async def test_global_monitor_masks_projection_after_api_restart(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

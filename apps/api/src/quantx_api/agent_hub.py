@@ -45,7 +45,7 @@ if current then
   if decoded_ok then
     local current_instance_id = tostring(decoded['api_instance_id'] or '')
     local current_started_at = tonumber(decoded['api_started_at_micros']) or 0
-    if current_instance_id ~= api_instance_id and current_started_at > api_started_at then
+    if current_instance_id ~= api_instance_id and current_started_at >= api_started_at then
       return 0
     end
   end
@@ -76,6 +76,7 @@ class AgentControlSession:
   remote_address_summary: str
   revoked: asyncio.Event
   access_token_fingerprint: str = ""
+  market_reconciliation_ready: bool = False
 
 
 class AgentConnectionHub:
@@ -172,11 +173,26 @@ class AgentConnectionHub:
       (
         session
         for session in self._sessions.values()
-        if "market-data" in session.capabilities and not session.revoked.is_set()
+        if (
+          "market-data" in session.capabilities
+          and session.market_reconciliation_ready
+          and not session.revoked.is_set()
+        )
       ),
       key=lambda value: value.device_id,
     )
     return eligible[0] if eligible else None
+
+  def _current_market_session(self) -> AgentControlSession | None:
+    session = self._sessions.get(self._market_device_id or "")
+    if (
+      session is None
+      or session.revoked.is_set()
+      or "market-data" not in session.capabilities
+      or not session.market_reconciliation_ready
+    ):
+      return None
+    return session
 
   async def register(
     self,
@@ -203,6 +219,11 @@ class AgentConnectionHub:
       remote_address_summary=remote_address_summary,
       revoked=asyncio.Event(),
       access_token_fingerprint=access_token_fingerprint,
+      # Data-only and paper sessions do not have a live account snapshot to
+      # reconcile. A live session becomes market-eligible only after Engine
+      # has applied its new complete snapshot and a subsequent heartbeat keeps
+      # the server-owned status at READY.
+      market_reconciliation_ready="live" not in normalized_capabilities,
     )
     async with self._lock:
       previous = self._sessions.get(device_id)
@@ -210,7 +231,7 @@ class AgentConnectionHub:
         previous.revoked.set()
       self._sessions[device_id] = session
       await self._load_active_controls()
-      if self._market_device_id not in self._sessions:
+      if self._current_market_session() is None:
         self._market_device_id = None
       if self._market_device_id is None:
         selected = self._select_market_session()
@@ -224,9 +245,33 @@ class AgentConnectionHub:
             payload={"reason": "standby_agent"},
           )
         )
-      selected = self._sessions.get(self._market_device_id or "")
+      selected = self._current_market_session()
       await self._publish_market_lease(selected)
     return session
+
+  async def authorize_market_after_reconciliation(
+    self,
+    control_session: AgentControlSession,
+  ) -> bool:
+    """Make the current live session eligible only after durable reconciliation."""
+
+    async with self._lock:
+      session = self._sessions.get(control_session.device_id)
+      if (
+        session is not control_session
+        or session.revoked.is_set()
+        or "market-data" not in session.capabilities
+      ):
+        return False
+      session.market_reconciliation_ready = True
+      selected = self._current_market_session()
+      if selected is None:
+        selected = self._select_market_session()
+        self._market_device_id = selected.device_id if selected else None
+        if selected is not None:
+          self._queue_snapshot(selected)
+      await self._publish_market_lease(selected)
+      return selected is session
 
   async def revoke(self, device_id: str) -> bool:
     """Wake the registered control-session guard after durable revocation."""
@@ -341,6 +386,7 @@ class AgentConnectionHub:
       if (
         session is not control_session
         or self._market_device_id != control_session.device_id
+        or not session.market_reconciliation_ready
       ):
         return
       await self._publish_market_lease(session)
@@ -356,14 +402,14 @@ class AgentConnectionHub:
         self._active_controls[subscription_id] = dict(control)
       else:
         self._active_controls.pop(subscription_id, None)
-      session = self._sessions.get(self._market_device_id or "")
+      session = self._current_market_session()
       if session is not None:
         session.queue.put_nowait(self._control_envelope(control))
 
   async def _reconcile_selected_session(self) -> None:
     async with self._lock:
       await self._load_active_controls()
-      session = self._sessions.get(self._market_device_id or "")
+      session = self._current_market_session()
       if session is not None:
         self._queue_snapshot(session)
 

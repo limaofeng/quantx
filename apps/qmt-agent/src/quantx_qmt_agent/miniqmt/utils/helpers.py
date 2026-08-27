@@ -88,9 +88,9 @@ def format_timestamp(timestamp: Union[str, int, float, datetime]) -> str:
   elif isinstance(timestamp, (int, float)):
     if timestamp > 1e10:  # 毫秒时间戳
       timestamp = timestamp / 1000
-    return clock.to_shanghai(
-      datetime.fromtimestamp(timestamp, timezone.utc)
-    ).strftime("%Y-%m-%d %H:%M:%S")
+    return clock.to_shanghai(datetime.fromtimestamp(timestamp, timezone.utc)).strftime(
+      "%Y-%m-%d %H:%M:%S"
+    )
   else:
     return str(timestamp)
 
@@ -113,8 +113,8 @@ def calculate_trading_days(start_date: str, end_date: str) -> int:
     # 生成日期范围
     date_range = pd.date_range(start=start, end=end, freq="B")  # B表示工作日
     return len(date_range)
-  except Exception as e:
-    logger.error(f"计算交易日失败: {e}")
+  except Exception as exc:
+    logger.error("计算交易日失败: error=%s", exc.__class__.__name__)
     return 0
 
 
@@ -257,8 +257,8 @@ def resample_data(
 
     return df.resample(freq).agg(agg_dict).dropna()
 
-  except Exception as e:
-    logger.error(f"重采样数据失败: {e}")
+  except Exception as exc:
+    logger.error("重采样数据失败: error=%s", exc.__class__.__name__)
     return df
 
 
@@ -328,13 +328,20 @@ def retry_on_exception(max_retries: int = 3, delay: float = 1.0):
       for attempt in range(max_retries + 1):
         try:
           return func(*args, **kwargs)
-        except Exception as e:
+        except Exception as exc:
           if attempt == max_retries:
-            logger.error(f"函数 {func.__name__} 执行失败，已达到最大重试次数: {e}")
+            logger.error(
+              "函数 %s 执行失败，已达到最大重试次数: error=%s",
+              func.__name__,
+              exc.__class__.__name__,
+            )
             raise
           else:
             logger.warning(
-              f"函数 {func.__name__} 执行失败，第 {attempt + 1} 次重试: {e}"
+              "函数 %s 执行失败，第 %s 次重试: error=%s",
+              func.__name__,
+              attempt + 1,
+              exc.__class__.__name__,
             )
             time.sleep(delay)
       return None

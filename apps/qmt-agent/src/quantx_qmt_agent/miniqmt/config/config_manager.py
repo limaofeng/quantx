@@ -75,8 +75,8 @@ class XTQuantConfig:
           # 合并默认配置
           default_config.update(config)
           return default_config
-      except Exception as e:
-        logger.error(f"加载配置文件失败: {e}")
+      except Exception as exc:
+        logger.error("加载配置文件失败: error=%s", exc.__class__.__name__)
         return default_config
     else:
       # 创建默认配置文件
@@ -89,9 +89,9 @@ class XTQuantConfig:
       os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
       with open(self.config_file, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
-      logger.info(f"配置文件已保存: {self.config_file}")
-    except Exception as e:
-      logger.error(f"保存配置文件失败: {e}")
+      logger.info("配置文件已保存")
+    except Exception as exc:
+      logger.error("保存配置文件失败: error=%s", exc.__class__.__name__)
 
   def get(self, key: str, default=None) -> Any:
     """获取配置值"""
@@ -210,8 +210,8 @@ class XTQuantConfig:
 
       return True
 
-    except Exception as e:
-      logger.error(f"配置验证失败: {e}")
+    except Exception as exc:
+      logger.error("配置验证失败: error=%s", exc.__class__.__name__)
       return False
 
 

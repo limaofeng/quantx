@@ -6,6 +6,7 @@ import pytest
 from quantx_contracts import AgentEnvelope, AgentMessageType
 from quantx_qmt_agent.credentials import DeviceConfiguration
 from quantx_qmt_agent.endpoints import (
+  masked_account_id,
   normalize_api_url,
   require_secure_api_url,
   websocket_url,
@@ -44,6 +45,22 @@ def test_secure_api_url_derives_wss_from_the_same_authority() -> None:
     require_secure_api_url("http://api.example.test")
 
 
+@pytest.mark.parametrize(
+  ("account_id", "masked"),
+  (
+    ("1", "*"),
+    ("1234", "****"),
+    ("12345", "***2345"),
+    ("broker-account-5678", "***5678"),
+  ),
+)
+def test_account_id_mask_never_exposes_more_than_the_last_four_characters(
+  account_id: str,
+  masked: str,
+) -> None:
+  assert masked_account_id(account_id) == masked
+
+
 @pytest.mark.asyncio
 async def test_native_broker_initializes_only_after_control_authentication(
   monkeypatch: pytest.MonkeyPatch,
@@ -52,6 +69,7 @@ async def test_native_broker_initializes_only_after_control_authentication(
   events: list[str] = []
   connect_kwargs: dict[str, object] = {}
   connections = []
+  sent_envelopes: list[AgentEnvelope] = []
 
   class Broker:
     pass
@@ -80,8 +98,9 @@ async def test_native_broker_initializes_only_after_control_authentication(
     return "access-token", datetime.now(timezone.utc) + timedelta(minutes=10)
 
   class Socket:
-    async def send(self, _value):
+    async def send(self, value):
       events.append("auth-send")
+      sent_envelopes.append(AgentEnvelope.model_validate_json(value))
 
     async def recv(self):
       events.append("auth-result")
@@ -120,6 +139,12 @@ async def test_native_broker_initializes_only_after_control_authentication(
   await runtime._run_session()
 
   assert events[:4] == ["token", "auth-send", "auth-result", "broker"]
+  assert sent_envelopes[0].payload["capabilities"] == [
+    "market-data",
+    "divid-factors",
+    "financial-data-v1",
+    "data-only",
+  ]
   assert connect_kwargs["proxy"] is None
   redirect = RuntimeError("redirect")
   assert connections[0].process_redirect(redirect) is redirect

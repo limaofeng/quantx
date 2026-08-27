@@ -435,10 +435,21 @@ async def test_trade_frame_is_blocked_when_device_is_revoked_after_poll(
 
 
 @pytest.mark.asyncio
-async def test_live_buy_frame_is_blocked_until_market_stream_is_ready(
+async def test_live_buy_frame_revalidates_market_and_account_safety_before_send(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   session_factory, engine = await _database(monkeypatch)
+  account_gate_ready = True
+
+  async def account_safety_status(_service, account_id: str) -> dict:
+    assert account_id == "account-1"
+    return {"can_increase_risk": account_gate_ready}
+
+  monkeypatch.setattr(
+    agent_api.AccountExecutionSafetyService,
+    "status",
+    account_safety_status,
+  )
   session = _control_session()
   session.capabilities = {"live"}
   command = AgentEnvelope(
@@ -472,6 +483,11 @@ async def test_live_buy_frame_is_blocked_until_market_stream_is_ready(
     }
     await db.commit()
 
+  account_gate_ready = False
+  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+    await agent_api._assert_trade_delivery_session(session, command)
+
+  account_gate_ready = True
   await agent_api._assert_trade_delivery_session(session, command)
   await engine.dispose()
 

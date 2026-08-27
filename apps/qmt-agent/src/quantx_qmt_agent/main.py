@@ -72,10 +72,10 @@ def _run_runtime(
   try:
     try:
       asyncio.run(_run_runtime_guarded(runtime, owned_watchdog))
-    except (_FatalMarketDataPreparationError, _FatalTradingRecoveryError):
+    except (_FatalMarketDataPreparationError, _FatalTradingRecoveryError) as exc:
       logging.getLogger(__name__).critical(
-        "Fatal native QMT state requires a supervised process restart",
-        exc_info=True,
+        "Fatal native QMT state requires a supervised process restart: error=%s",
+        exc.__class__.__name__,
       )
       _hard_exit_for_fatal_market_data(FATAL_MARKET_DATA_EXIT_CODE)
       # The production implementation never returns. Keep the exception path

@@ -46,7 +46,7 @@ class FakeRedis:
     if (
       current
       and current.get("api_instance_id") != api_instance_id
-      and int(current.get("api_started_at_micros") or 0) > int(api_started_at)
+      and int(current.get("api_started_at_micros") or 0) >= int(api_started_at)
     ):
       return 0
     self.values[key] = payload
@@ -322,6 +322,8 @@ async def test_duplicate_device_connection_replaces_exact_session_generation(
     "device-1",
     agent_session_id=first.agent_session_id,
   )
+  assert await hub.market_lease("device-1") is None
+  assert await hub.authorize_market_after_reconciliation(replacement)
   assert await hub.market_lease("device-1") == agent_hub.MarketSessionLease(
     device_id="device-1",
     api_instance_id="api-instance-1",
@@ -348,6 +350,10 @@ async def test_superseded_api_cannot_overwrite_or_delete_new_market_lease(
     api_instance_id="api-new",
     api_started_at=started_at + timedelta(seconds=1),
   )
+  equal_generation_hub = agent_hub.AgentConnectionHub(
+    api_instance_id="api-peer",
+    api_started_at=started_at + timedelta(seconds=1),
+  )
   old_session = await old_hub.register(
     "device-old",
     {"market-data"},
@@ -364,10 +370,19 @@ async def test_superseded_api_cannot_overwrite_or_delete_new_market_lease(
     remote_address_summary="10.0.0.*",
     access_token_fingerprint="b" * 64,
   )
+  await equal_generation_hub.register(
+    "device-peer",
+    {"market-data"},
+    authorized_account_ids={"account-1"},
+    connected_at=started_at + timedelta(seconds=1),
+    remote_address_summary="10.0.0.*",
+    access_token_fingerprint="c" * 64,
+  )
 
   assert (await new_hub.market_lease("device-new")).agent_session_id == (
     new_session.agent_session_id
   )
+  assert await equal_generation_hub.market_lease("device-peer") is None
 
   await old_hub.refresh_market_device(old_session)
   await old_hub.unregister(old_session)

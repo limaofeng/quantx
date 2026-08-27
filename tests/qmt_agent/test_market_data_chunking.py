@@ -97,6 +97,43 @@ def test_websocket_ping_timeout_exceeds_native_preparation_watchdog() -> None:
   )
 
 
+@pytest.mark.asyncio
+async def test_market_data_failure_report_does_not_expose_native_error_text(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  captured: dict[str, object] = {}
+
+  class Response:
+    def raise_for_status(self) -> None:
+      return None
+
+  class Client:
+    def __init__(self, **kwargs) -> None:
+      captured["client"] = kwargs
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return False
+
+    async def post(self, url, *, headers, json):
+      captured.update(url=url, headers=headers, json=json)
+      return Response()
+
+  monkeypatch.setattr(runtime_module.httpx, "AsyncClient", Client)
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.configuration = SimpleNamespace(api_url="https://api.example.test")
+  runtime._access_token = "access-token"
+
+  await runtime._report_market_data_failure(
+    "request-1",
+    RuntimeError("native message contains broker configuration"),
+  )
+
+  assert captured["json"] == {"reason": "RuntimeError"}
+
+
 async def _read_http_content(content) -> bytes:
   if isinstance(content, bytes):
     return content
@@ -1555,7 +1592,9 @@ async def test_full_market_request_queue_reports_busy_without_closing_socket() -
 
 
 @pytest.mark.asyncio
-async def test_duplicate_market_request_joins_queued_work_without_consuming_capacity() -> None:
+async def test_duplicate_market_request_joins_queued_work_without_consuming_capacity() -> (
+  None
+):
   runtime = object.__new__(AgentRuntime)
   runtime._ensure_market_upload_state()
   runtime._market_requests = asyncio.Queue(maxsize=1)
@@ -1952,9 +1991,7 @@ def test_intraday_response_accepts_inclusive_day_end_and_rejects_next_day() -> N
   class InclusiveEndManager:
     def get_market_data(self, **_kwargs):
       return {
-        "600000.SH": pd.DataFrame(
-          [{"time": last_millisecond, "lastPrice": 10.0}]
-        )
+        "600000.SH": pd.DataFrame([{"time": last_millisecond, "lastPrice": 10.0}])
       }
 
   records = _market_data_records(InclusiveEndManager(), payload)
@@ -1963,11 +2000,7 @@ def test_intraday_response_accepts_inclusive_day_end_and_rejects_next_day() -> N
 
   class NextDayManager:
     def get_market_data(self, **_kwargs):
-      return {
-        "600000.SH": pd.DataFrame(
-          [{"time": next_day_start, "lastPrice": 10.0}]
-        )
-      }
+      return {"600000.SH": pd.DataFrame([{"time": next_day_start, "lastPrice": 10.0}])}
 
   with pytest.raises(ValueError, match="outside requested range"):
     _market_data_records(NextDayManager(), payload)
@@ -2180,8 +2213,7 @@ def test_missing_requested_code_emits_explicit_empty_summary() -> None:
 
   assert [record["code"] for record in _bar_rows(records)] == ["600000.SH"]
   summaries = {
-    (summary["code"], summary["period"]): summary
-    for summary in _bar_summaries(records)
+    (summary["code"], summary["period"]): summary for summary in _bar_summaries(records)
   }
   assert set(summaries) == {("000001.SZ", "1d"), ("600000.SH", "1d")}
   empty = summaries[("000001.SZ", "1d")]
@@ -2285,9 +2317,7 @@ def test_tick_records_preserve_same_millisecond_with_stable_ordinals() -> None:
 
   def ordinal_by_snapshot(records):
     return {
-      (record["time"], tuple(record["bidVol"])): record[
-        HISTORICAL_TICK_ORDINAL_FIELD
-      ]
+      (record["time"], tuple(record["bidVol"])): record[HISTORICAL_TICK_ORDINAL_FIELD]
       for record in records
     }
 
@@ -2304,7 +2334,9 @@ def test_tick_records_preserve_same_millisecond_with_stable_ordinals() -> None:
 
 
 @pytest.mark.asyncio
-async def test_historical_tick_projection_drops_vendor_fields_before_durable_ingestion() -> None:
+async def test_historical_tick_projection_drops_vendor_fields_before_durable_ingestion() -> (
+  None
+):
   source_time = _normalize_market_timestamp(datetime(2025, 1, 2, 9, 30))
   payload = {
     "operation": "bars",
@@ -2360,9 +2392,7 @@ async def test_historical_tick_projection_drops_vendor_fields_before_durable_ing
   assert all(set(row) == set(HISTORICAL_TICK_TRANSFER_FIELDS) for row in rows)
   assert all("pe" not in row and "vendor_extra" not in row for row in rows)
   assert all(
-    field in row
-    for row in rows
-    for field in HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS
+    field in row for row in rows for field in HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS
   )
   assert [row[HISTORICAL_TICK_ORDINAL_FIELD] for row in rows] == [0, 1]
   assert _bar_summaries(records)[0]["row_count"] == 2

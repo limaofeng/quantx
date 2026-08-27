@@ -92,8 +92,7 @@ class XTDataManager:
       now = time.monotonic()
       if (
         not force
-        and now - self._last_connection_attempt
-        < XTDATA_RECONNECT_INTERVAL_SECONDS
+        and now - self._last_connection_attempt < XTDATA_RECONNECT_INTERVAL_SECONDS
       ):
         return False
       self._last_connection_attempt = now
@@ -111,26 +110,15 @@ class XTDataManager:
         self._connected_endpoint = endpoint
         self._last_connection_error = ""
         self.is_connected = True
-        logger.info(
-          "XTData connected: endpoint=%s:%s source=%s",
-          endpoint.host,
-          endpoint.port,
-          endpoint.source,
-        )
+        logger.info("XTData connected")
         return True
       except Exception as exc:
         self._client = None
         self._connected_endpoint = None
         self.is_connected = False
-        endpoint_text = (
-          f"{endpoint.host}:{endpoint.port}" if endpoint is not None else "none"
-        )
-        self._last_connection_error = (
-          f"{exc.__class__.__name__}: {exc}"
-        )
+        self._last_connection_error = exc.__class__.__name__
         logger.warning(
-          "XTData connection failed: endpoint=%s error=%s",
-          endpoint_text,
+          "XTData connection failed: error=%s",
           self._last_connection_error,
         )
         return False
@@ -144,7 +132,7 @@ class XTDataManager:
   def _mark_operation_failed(self, operation: str, exc: Exception) -> None:
     self._ensure_connection_state()
     self.is_connected = False
-    self._last_connection_error = f"{exc.__class__.__name__}: {exc}"
+    self._last_connection_error = exc.__class__.__name__
     logger.warning(
       "XTData %s failed: %s",
       operation,
@@ -164,7 +152,7 @@ class XTDataManager:
     except Exception as exc:
       self._mark_operation_failed(operation, exc)
       raise XTDataUnavailableError(
-        f"XTData {operation} failed: {exc.__class__.__name__}: {exc}"
+        f"XTData {operation} failed: {exc.__class__.__name__}"
       ) from exc
 
   def get_market_data(
@@ -195,7 +183,7 @@ class XTDataManager:
     except Exception as exc:
       self._mark_operation_failed("market-data query", exc)
       raise XTDataUnavailableError(
-        f"XTData market-data query failed: {exc.__class__.__name__}: {exc}"
+        f"XTData market-data query failed: {exc.__class__.__name__}"
       ) from exc
 
   def download_market_data(
@@ -220,7 +208,7 @@ class XTDataManager:
     except Exception as exc:
       self._mark_operation_failed("history download", exc)
       raise XTDataUnavailableError(
-        f"XTData history download failed: {exc.__class__.__name__}: {exc}"
+        f"XTData history download failed: {exc.__class__.__name__}"
       ) from exc
 
   def subscribe_quote(
@@ -252,8 +240,7 @@ class XTDataManager:
     except Exception as exc:
       self._mark_operation_failed("quote subscription", exc)
       raise XTDataUnavailableError(
-        "XTData quote subscription failed: "
-        f"{exc.__class__.__name__}: {exc}"
+        f"XTData quote subscription failed: {exc.__class__.__name__}"
       ) from exc
     self._subscription_ids.update(item for item in ids if item > 0)
     return ids[0] if len(ids) == 1 else ids
@@ -272,8 +259,7 @@ class XTDataManager:
     except Exception as exc:
       self._mark_operation_failed("whole-quote subscription", exc)
       raise XTDataUnavailableError(
-        "XTData whole-quote subscription failed: "
-        f"{exc.__class__.__name__}: {exc}"
+        f"XTData whole-quote subscription failed: {exc.__class__.__name__}"
       ) from exc
     if subscription_id > 0:
       self._subscription_ids.add(subscription_id)
@@ -441,15 +427,18 @@ class XTDataManager:
     for subscription_id in list(self._subscription_ids):
       try:
         xtdata.unsubscribe_quote(subscription_id)
-      except Exception:
-        logger.debug("XTData unsubscribe failed during close", exc_info=True)
+      except Exception as exc:
+        logger.debug(
+          "XTData unsubscribe failed during close: error=%s",
+          exc.__class__.__name__,
+        )
     self._subscription_ids.clear()
     disconnect = getattr(xtdata, "disconnect", None)
     if callable(disconnect):
       try:
         disconnect()
-      except Exception:
-        logger.debug("XTData disconnect failed", exc_info=True)
+      except Exception as exc:
+        logger.debug("XTData disconnect failed: error=%s", exc.__class__.__name__)
     self.is_connected = False
     self._client = None
     self._connected_endpoint = None

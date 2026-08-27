@@ -13,9 +13,7 @@ from quantx_qmt_agent.miniqmt.data.connection_discovery import (
 
 
 def test_explicit_xtdata_port_is_loopback_and_authoritative() -> None:
-  endpoint = connection_discovery.discover_xtdata_endpoint(
-    {"QMT_XTDATA_PORT": "58600"}
-  )
+  endpoint = connection_discovery.discover_xtdata_endpoint({"QMT_XTDATA_PORT": "58600"})
 
   assert endpoint == XTDataEndpoint(
     host="127.0.0.1",
@@ -169,10 +167,7 @@ def test_miniquote_port_parser_tolerates_non_utf8_config(tmp_path: Path) -> None
   config_directory = tmp_path / "config"
   config_directory.mkdir()
   (config_directory / "xtminiquote.lua").write_bytes(
-    b"\x81\x82-- vendor comment\r\n"
-    b"service = {\r\n"
-    b'  address = "0.0.0.0:58610",\r\n'
-    b"}\r\n"
+    b'\x81\x82-- vendor comment\r\nservice = {\r\n  address = "0.0.0.0:58610",\r\n}\r\n'
   )
 
   assert connection_discovery._miniquote_port(executable) == 58610
@@ -320,14 +315,12 @@ def test_xtdata_manager_connection_failure_is_not_a_legal_empty_result(
 
   with pytest.raises(
     module.XTDataUnavailableError,
-    match="service refused connection",
+    match="RuntimeError",
   ):
     manager.get_market_data(["600000.SH"])
 
   assert manager.is_connected is False
-  assert "RuntimeError: service refused connection" == (
-    manager.last_connection_error
-  )
+  assert manager.last_connection_error == "RuntimeError"
 
 
 def test_xtdata_manager_preserves_a_legitimate_empty_sdk_result(

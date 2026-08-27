@@ -20,12 +20,14 @@ SQLite journal 和历史上传 spool 也只留在 Windows。运行模式为 `dat
 启动顺序固定为：加载凭据与安全配置、校验 live 环境、校验 journal 完整性、获取
 短期 token、完成控制 WSS 认证，然后才初始化 XTData/XTTrading。每次新控制会话
 都必须重放未确认报告并重新上报完整账户快照；Engine 对账完成前，Agent heartbeat
-不能自行把状态提升为 `READY`。Windows 单实例锁和长期进程监督由 Windows 启动器
-方案负责，不能通过手工并行启动两个 Agent 绕过。
+不能自行把状态提升为 `READY`，服务端也不会向该 live 会话发放全市场行情租约。
+Windows 单实例锁和长期进程监督由 Windows 启动器方案负责，不能通过手工并行启动
+两个 Agent 绕过。
 
 新增或增仓命令还要求 `marketStreamStatus=READY`。API 在入队与实际写入控制
-WebSocket 前都会检查三阶段行情同步，Windows Agent 在调用 Broker 前再次检查；
-撤单与明确的风险降低型卖出保留故障逃生路径。
+WebSocket 前都会检查 Agent 声明、API 已提交 watermark 与 Engine 已应用 watermark
+完全一致，并在发送前重新计算账户级增仓安全状态；Windows Agent 在调用 Broker 前
+再次检查。撤单与明确的风险降低型卖出保留故障逃生路径。
 
 API 为每个进程和控制连接分别生成 `apiInstanceId` 与 `agentSessionId`，并用服务端
 接收时间计算 90 秒 TTL。Agent 断线、撤销、同设备重复连接或 API 实例切换会立即

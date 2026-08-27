@@ -2,11 +2,18 @@
 XTQuant API 封装主模块
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # 优先导入配置和工具函数
 try:
   from .config.config_manager import XTQuantConfig, xt_config
-except ImportError as e:
-  print(f"Warning: Failed to import config manager: {e}")
+except ImportError as exc:
+  logger.warning(
+    "Failed to import config manager: error=%s",
+    exc.__class__.__name__,
+  )
   XTQuantConfig = None
   xt_config = None
 
@@ -29,12 +36,17 @@ try:
     retry_on_exception,
     validate_stock_code,
   )
-except ImportError as e:
-  print(f"Warning: Failed to import utils: {e}")
+except ImportError as exc:
+  logger.warning("Failed to import utils: error=%s", exc.__class__.__name__)
 
-from .data.data_manager import XTDataManager
-from .manager_registry import XTDataManagerRegistry, XTTradingManagerRegistry
-from .trading.trading_manager import (
+# These mandatory imports intentionally follow the optional compatibility
+# imports above so the package can expose the legacy helper surface when present.
+from .data.data_manager import XTDataManager  # noqa: E402
+from .manager_registry import (  # noqa: E402
+  XTDataManagerRegistry,
+  XTTradingManagerRegistry,
+)
+from .trading.trading_manager import (  # noqa: E402
   OrderPriceType,
   OrderType,
   XTTradingManager,

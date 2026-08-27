@@ -30,6 +30,8 @@ from quantx_contracts import (
   historical_bar_transfer_fields,
 )
 
+from .endpoints import masked_account_id
+
 logger = logging.getLogger(__name__)
 
 MAX_MARKET_DATA_RECORDS = 500_000
@@ -695,9 +697,7 @@ class _LocalMarketStreamer:
           or detail.get("lowerLimit")
         )
         price_tick = self._positive_number(
-          detail.get("PriceTick")
-          or detail.get("price_tick")
-          or detail.get("priceTick")
+          detail.get("PriceTick") or detail.get("price_tick") or detail.get("priceTick")
         )
         values: dict[str, float] = {}
         if upper_limit > 0:
@@ -804,10 +804,7 @@ class _LocalMarketStreamer:
     today = datetime.now(SHANGHAI_TIMEZONE).date()
     now_monotonic = time.monotonic()
     with self._lock:
-      newest = (
-        self._whole_quote_pending_universe
-        or self._whole_quote_active_universe
-      )
+      newest = self._whole_quote_pending_universe or self._whole_quote_active_universe
       if (
         (newest is not None and newest.trading_date == today)
         or self._whole_quote_metadata_refreshing
@@ -839,23 +836,35 @@ class _LocalMarketStreamer:
       values = metadata.get(str(code).strip().upper())
       if not values:
         continue
-      if self._positive_number(
-        raw_tick.get("upperLimit")
-        or raw_tick.get("UpStopPrice")
-        or raw_tick.get("up_stop_price")
-      ) <= 0 and values.get("upperLimit", 0) > 0:
+      if (
+        self._positive_number(
+          raw_tick.get("upperLimit")
+          or raw_tick.get("UpStopPrice")
+          or raw_tick.get("up_stop_price")
+        )
+        <= 0
+        and values.get("upperLimit", 0) > 0
+      ):
         raw_tick["upperLimit"] = values["upperLimit"]
-      if self._positive_number(
-        raw_tick.get("lowerLimit")
-        or raw_tick.get("DownStopPrice")
-        or raw_tick.get("down_stop_price")
-      ) <= 0 and values.get("lowerLimit", 0) > 0:
+      if (
+        self._positive_number(
+          raw_tick.get("lowerLimit")
+          or raw_tick.get("DownStopPrice")
+          or raw_tick.get("down_stop_price")
+        )
+        <= 0
+        and values.get("lowerLimit", 0) > 0
+      ):
         raw_tick["lowerLimit"] = values["lowerLimit"]
-      if self._positive_number(
-        raw_tick.get("priceTick")
-        or raw_tick.get("PriceTick")
-        or raw_tick.get("price_tick")
-      ) <= 0 and values.get("priceTick", 0) > 0:
+      if (
+        self._positive_number(
+          raw_tick.get("priceTick")
+          or raw_tick.get("PriceTick")
+          or raw_tick.get("price_tick")
+        )
+        <= 0
+        and values.get("priceTick", 0) > 0
+      ):
         raw_tick["priceTick"] = values["priceTick"]
     return data
 
@@ -999,12 +1008,8 @@ class _LocalMarketStreamer:
     today = datetime.now(SHANGHAI_TIMEZONE).date()
     with self._lock:
       active = self._whole_quote_active_universe
-      needs_refresh = (
-        active is None
-        or (
-          self._whole_quote_subscription is None
-          and active.trading_date != today
-        )
+      needs_refresh = active is None or (
+        self._whole_quote_subscription is None and active.trading_date != today
       )
     if needs_refresh:
       self._refresh_whole_quote_metadata(["SH", "SZ"])
@@ -1043,8 +1048,7 @@ class _LocalMarketStreamer:
         values = reader("SH", today, today)
       today_text = today.strftime("%Y%m%d")
       is_trading_date = any(
-        str(value).replace("-", "")[:8] == today_text
-        for value in (values or [])
+        str(value).replace("-", "")[:8] == today_text for value in (values or [])
       )
     except Exception as exc:
       logger.warning(
@@ -1106,9 +1110,7 @@ class _LocalMarketStreamer:
     filtered = self._filter_whole_quote_data(data)
     selected = {
       code: {
-        field: raw_tick[field]
-        for field in WHOLE_QUOTE_TICK_FIELDS
-        if field in raw_tick
+        field: raw_tick[field] for field in WHOLE_QUOTE_TICK_FIELDS if field in raw_tick
       }
       for code, raw_tick in filtered.items()
       if isinstance(raw_tick, dict)
@@ -1308,18 +1310,14 @@ class LiveBroker:
     with self._trading_access_lock:
       for account_id, agent in self.agents.items():
         previous_manager = agent.trading_manager
-        was_connected = bool(
-          getattr(previous_manager, "is_connected", False)
-        )
+        was_connected = bool(getattr(previous_manager, "is_connected", False))
         observed_generations = getattr(
           self,
           "_registry_trading_generations",
           {},
         )
         self._registry_trading_generations = observed_generations
-        previous_registry_generation = int(
-          observed_generations.get(account_id, 0)
-        )
+        previous_registry_generation = int(observed_generations.get(account_id, 0))
         manager = self._trading_registry.get_manager(
           account_id,
           reconnect=True,
@@ -1339,10 +1337,7 @@ class LiveBroker:
         )
         if reconnect_count == 0 and (
           manager is not previous_manager
-          or (
-            not was_connected
-            and bool(getattr(manager, "is_connected", False))
-          )
+          or (not was_connected and bool(getattr(manager, "is_connected", False)))
         ):
           # Registry doubles used by tests and alternate manager providers may
           # not expose their own generation.  Manager replacement or an
@@ -1351,8 +1346,7 @@ class LiveBroker:
         if reconnect_count:
           with self._generation_lock():
             self._trading_connection_generation = (
-              int(getattr(self, "_trading_connection_generation", 0))
-              + reconnect_count
+              int(getattr(self, "_trading_connection_generation", 0)) + reconnect_count
             )
       return self.is_trading_ready()
 
@@ -1364,10 +1358,9 @@ class LiveBroker:
       return max(0, int(reader(account_id)))
     except Exception as exc:
       logger.warning(
-        "XTTrading registry generation check failed: account=%s error=%s: %s",
-        account_id,
+        "XTTrading registry generation check failed: account=%s error=%s",
+        masked_account_id(account_id),
         exc.__class__.__name__,
-        exc,
       )
       return 0
 
@@ -1393,9 +1386,7 @@ class LiveBroker:
     """Open the local order gate only for the snapshotted generation."""
     generation = max(0, int(connection_generation))
     with self._generation_lock():
-      if generation != int(
-        getattr(self, "_trading_connection_generation", 0)
-      ):
+      if generation != int(getattr(self, "_trading_connection_generation", 0)):
         return False
       self._trading_reconciled_generation = generation
       return True
@@ -1450,9 +1441,7 @@ class LiveBroker:
             for section in required_sections
           }
         else:
-          section_completeness = {
-            section: False for section in required_sections
-          }
+          section_completeness = {section: False for section in required_sections}
         section_completeness_by_account[account_id] = section_completeness
         account = dict(snapshot.get("account") or {})
         if not snapshot.get("connected") or not account:
@@ -1467,8 +1456,7 @@ class LiveBroker:
           positions[account_id] = []
           continue
         snapshot_complete = bool(
-          snapshot.get("is_complete") is True
-          and all(section_completeness.values())
+          snapshot.get("is_complete") is True and all(section_completeness.values())
         )
         if not snapshot_complete:
           # ``is_connected`` only records the last native callback.  A failed
@@ -1521,7 +1509,7 @@ class LiveBroker:
       if not self.ensure_trading_ready():
         logger.warning(
           "拒绝交易命令：XTTrading 尚未连接: account=%s",
-          account_id,
+          masked_account_id(account_id),
         )
         return {
           "accepted": False,
@@ -1539,7 +1527,7 @@ class LiveBroker:
       if self.trading_requires_reconciliation():
         logger.warning(
           "拒绝新增委托：XTTrading 重连后尚未完成权威对账: account=%s",
-          account_id,
+          masked_account_id(account_id),
         )
         return {
           "accepted": False,
@@ -1638,12 +1626,8 @@ def _observe_market_data_connection(owner: Any) -> tuple[bool, int]:
   ready = bool(getattr(manager, "is_connected", False))
   client = getattr(manager, "_client", None)
   identity = id(client) if client is not None else id(manager)
-  previous_ready = bool(
-    getattr(owner, "_observed_market_data_ready", False)
-  )
-  previous_identity = int(
-    getattr(owner, "_observed_market_data_identity", 0)
-  )
+  previous_ready = bool(getattr(owner, "_observed_market_data_ready", False))
+  previous_identity = int(getattr(owner, "_observed_market_data_identity", 0))
   generation = int(getattr(owner, "_market_data_generation", 0))
   if ready and (not previous_ready or identity != previous_identity):
     generation += 1
@@ -1786,9 +1770,7 @@ def _iter_market_data_records_unbounded(
       if "time" not in normalized.columns and len(normalized.columns) > 0:
         normalized = normalized.rename(columns={normalized.columns[0]: "time"})
       if "time" not in normalized.columns:
-        raise ValueError(
-          f"market data frame for {normalized_code} has no time column"
-        )
+        raise ValueError(f"market data frame for {normalized_code} has no time column")
       reserved_columns = _RESERVED_HISTORICAL_BAR_COLUMNS.intersection(
         str(column) for column in normalized.columns
       )
@@ -1832,8 +1814,7 @@ def _iter_market_data_records_unbounded(
           timestamp = int(records[group_start]["time"])
           group_end = group_start + 1
           while (
-            group_end < len(records)
-            and int(records[group_end]["time"]) == timestamp
+            group_end < len(records) and int(records[group_end]["time"]) == timestamp
           ):
             group_end += 1
           group = records[group_start:group_end]
@@ -1873,9 +1854,7 @@ def _iter_market_data_records_unbounded(
             period=period,
             time_ms=int(record["time"]),
             tick_ordinal=(
-              int(record[HISTORICAL_TICK_ORDINAL_FIELD])
-              if period == "tick"
-              else None
+              int(record[HISTORICAL_TICK_ORDINAL_FIELD]) if period == "tick" else None
             ),
           ).encode("utf-8")
         )
@@ -1896,8 +1875,7 @@ def _validate_bars_request(payload: dict[str, Any]) -> _ValidatedBarsRequest:
   if not isinstance(raw_codes, list) or not raw_codes:
     raise ValueError("bars request requires a non-empty stock_list")
   if any(
-    not isinstance(code, str) or code != code.strip().upper()
-    for code in raw_codes
+    not isinstance(code, str) or code != code.strip().upper() for code in raw_codes
   ):
     raise ValueError("bars request stock_list must use canonical instrument codes")
   codes = tuple(raw_codes)

@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any, Dict
 
+from ..endpoints import masked_account_id
 from .data.data_manager import XTDataManager
 from .trading.trading_manager import XTTradingManager
 
@@ -106,8 +107,12 @@ class XTDataManagerRegistry:
           self._managers["default"] = new_mgr
           return
 
-        except Exception as e:
-          print(f"Data manager reconnection attempt {attempt + 1} failed: {e}")
+        except Exception as exc:
+          logger.warning(
+            "Data manager reconnection attempt %s failed: error=%s",
+            attempt + 1,
+            exc.__class__.__name__,
+          )
           if attempt < self._max_reconnect_attempts - 1:
             time.sleep(self._reconnect_interval)
 
@@ -126,8 +131,11 @@ class XTDataManagerRegistry:
       if callable(close_fn):
         try:
           close_fn()
-        except Exception as e:
-          print(f"Error closing data manager connection: {e}")
+        except Exception as exc:
+          logger.warning(
+            "Error closing data manager connection: error=%s",
+            exc.__class__.__name__,
+          )
 
   def clear_all_managers(self) -> None:
     """清除所有数据管理器"""
@@ -145,8 +153,11 @@ class XTDataManagerRegistry:
       if callable(close_fn):
         try:
           close_fn()
-        except Exception as e:
-          print(f"Error closing data manager connection: {e}")
+        except Exception as exc:
+          logger.warning(
+            "Error closing data manager connection: error=%s",
+            exc.__class__.__name__,
+          )
 
   def get_stats(self) -> Dict[str, int]:
     """
@@ -189,9 +200,7 @@ class XTTradingManagerRegistry:
           cls._instance._connection_generations = {}
     return cls._instance
 
-  def get_manager(
-    self, account_id: str, reconnect: bool = True
-  ) -> XTTradingManager:
+  def get_manager(self, account_id: str, reconnect: bool = True) -> XTTradingManager:
     """
     获取或创建交易管理器实例
 
@@ -265,9 +274,7 @@ class XTTradingManagerRegistry:
       if not hasattr(self, "_last_reconnect_attempts"):
         self._last_reconnect_attempts = {}
       now = time.monotonic()
-      last_attempt = float(
-        self._last_reconnect_attempts.get(account_id, 0.0)
-      )
+      last_attempt = float(self._last_reconnect_attempts.get(account_id, 0.0))
       if now - last_attempt < self._reconnect_interval:
         return manager
       self._last_reconnect_attempts[account_id] = now
@@ -282,14 +289,16 @@ class XTTradingManagerRegistry:
           self._connection_generations = generations
         generations[account_id] = int(generations.get(account_id, 0)) + 1
         self._last_reconnect_attempts.pop(account_id, None)
-        logger.info("XTQuant交易连接已自动恢复: account=%s", account_id)
+        logger.info(
+          "XTQuant交易连接已自动恢复: account=%s",
+          masked_account_id(account_id),
+        )
         return manager
       except Exception as exc:
         logger.warning(
-          "XTQuant交易重连失败: account=%s error=%s: %s",
-          account_id,
+          "XTQuant交易重连失败: account=%s error=%s",
+          masked_account_id(account_id),
           exc.__class__.__name__,
-          exc,
         )
         return manager
 
@@ -317,8 +326,12 @@ class XTTradingManagerRegistry:
       if callable(close_fn):
         try:
           close_fn()
-        except Exception as e:
-          print(f"Error closing connection for account {account_id}: {e}")
+        except Exception as exc:
+          logger.warning(
+            "Error closing trading connection: account=%s error=%s",
+            masked_account_id(account_id),
+            exc.__class__.__name__,
+          )
 
   def clear_all_managers(self) -> None:
     """清除所有交易管理器"""

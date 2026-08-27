@@ -13,8 +13,8 @@ from xtquant import xtconstant
 from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount, XtAsset, XtOrder, XtPosition, XtTrade
 
-from quantx_qmt_agent import clock
 from quantx_qmt_agent.credentials import state_directory
+from quantx_qmt_agent.endpoints import masked_account_id
 from quantx_qmt_agent.qmt_types import (
   AccountType,
   OrderPriceType,
@@ -78,8 +78,8 @@ class XTTradingManager:
       )
       self.event_loop_thread.start()
       logger.info("事件循环初始化成功")
-    except Exception as e:
-      logger.error(f"初始化事件循环失败: {e}")
+    except Exception as exc:
+      logger.error("初始化事件循环失败: error=%s", exc.__class__.__name__)
       self.event_loop = None
 
   def _init_connection(self):
@@ -97,8 +97,8 @@ class XTTradingManager:
       self._native_started = True
       if not self.reconnect():
         logger.error("XTQuant交易连接失败")
-    except Exception as e:
-      logger.exception("XTQuant交易连接失败: %s", e)
+    except Exception as exc:
+      logger.error("XTQuant交易连接失败: error=%s", exc.__class__.__name__)
       self.is_connected = False
 
   def reconnect(self) -> bool:
@@ -117,19 +117,17 @@ class XTTradingManager:
       connect_result = trader.connect()
     except Exception as exc:
       logger.warning(
-        "XTQuant交易重连失败: account=%s error=%s: %s",
-        self.account_id,
+        "XTQuant交易重连失败: account=%s error=%s",
+        masked_account_id(self.account_id),
         exc.__class__.__name__,
-        exc,
       )
       self.is_connected = False
       return False
     self.is_connected = connect_result == 0
     if self.is_connected:
       logger.info(
-        "XTQuant交易连接成功, account=%s session_id=%s",
-        self.account_id,
-        self.session_id,
+        "XTQuant交易连接成功, account=%s",
+        masked_account_id(self.account_id),
       )
     return self.is_connected
 
@@ -190,14 +188,14 @@ class XTTradingManager:
           "order_id": order_id,
           "message": "下单成功",
         }
-        logger.info(f"下单成功: {result}")
+        logger.info("下单请求已被 XTTrading 接受")
         return result
       else:
         return {"success": False, "message": f"下单失败, order_id: {order_id}"}
 
-    except Exception as e:
-      logger.error(f"下单失败: {e}")
-      return {"success": False, "message": f"下单异常: {str(e)}"}
+    except Exception as exc:
+      logger.error("下单失败: error=%s", exc.__class__.__name__)
+      return {"success": False, "message": f"下单异常: {exc.__class__.__name__}"}
 
   def wait_for_order_completion(
     self,
@@ -230,12 +228,12 @@ class XTTradingManager:
 
       latest_status = OrderStatus(order.order_status)
       if latest_status in wait_statuses:
-        logger.info(f"订单 {order_id} 已完成，状态: {latest_status.name}")
+        logger.info("委托已完成: status=%s", latest_status.name)
         return latest_status
-      logger.info(f"订单 {order_id} 状态: {latest_status.name}, 等待中...")
+      logger.info("委托仍在处理中: status=%s", latest_status.name)
       time.sleep(1)
 
-    logger.warning(f"等待订单 {order_id} 完成超时, 当前状态: {latest_status.name}")
+    logger.warning("等待委托完成超时: status=%s", latest_status.name)
     raise TimeoutError(f"等待订单 {order_id} 完成超时, 当前状态: {latest_status.name}")
 
   def cancel_order(self, order_id: int) -> bool:
@@ -255,8 +253,8 @@ class XTTradingManager:
       result = self.xttrader.cancel_order_stock(self.acc, order_id)
       return result == 0
 
-    except Exception as e:
-      logger.error(f"撤单失败: {e}")
+    except Exception as exc:
+      logger.error("撤单失败: error=%s", exc.__class__.__name__)
       return False
 
   def get_positions(self) -> List[XtPosition]:
@@ -272,8 +270,8 @@ class XTTradingManager:
 
       return self.xttrader.query_stock_positions(self.acc)
 
-    except Exception as e:
-      logger.error(f"获取持仓失败: {e}")
+    except Exception as exc:
+      logger.error("获取持仓失败: error=%s", exc.__class__.__name__)
       return []
 
   def query_positions_snapshot(self) -> List[XtPosition]:
@@ -302,8 +300,8 @@ class XTTradingManager:
       position = self.xttrader.query_stock_position(self.acc, stock_code)
       return position
 
-    except Exception as e:
-      logger.error(f"获取持仓失败: {e}")
+    except Exception as exc:
+      logger.error("获取持仓失败: error=%s", exc.__class__.__name__)
       return None
 
   def get_orders(self, cancelable_only=False) -> List[XtOrder]:
@@ -319,9 +317,9 @@ class XTTradingManager:
 
       return self.xttrader.query_stock_orders(self.acc, cancelable_only)
 
-    except Exception as e:
-      logger.error(f"获取订单失败: {e}")
-      raise e
+    except Exception as exc:
+      logger.error("获取订单失败: error=%s", exc.__class__.__name__)
+      raise
 
   def get_order(self, order_id: int) -> Optional[XtOrder]:
     """
@@ -339,9 +337,9 @@ class XTTradingManager:
 
       return self.xttrader.query_stock_order(self.acc, order_id)
 
-    except Exception as e:
-      logger.error(f"获取订单失败: {e}")
-      raise e
+    except Exception as exc:
+      logger.error("获取订单失败: error=%s", exc.__class__.__name__)
+      raise
 
   def download_history_orders(
     self, start_date: str = None, end_date: str = None, file_path: str = None
@@ -364,25 +362,21 @@ class XTTradingManager:
       if file_path is None:
         export_directory = state_directory() / "exports"
         export_directory.mkdir(parents=True, exist_ok=True)
-        file_path = str(
-          export_directory / f"history_orders_{self.account_id}.csv"
-        )
+        file_path = str(export_directory / f"history_orders_{self.account_id}.csv")
 
       result = self.xttrader.export_data(
         self.acc, file_path, "orders", "20250601", None, {}
       )
 
-      print(result)
-
       if result.get("code") == 0:
-        logger.info(f"历史订单下载成功, 文件路径: {file_path}")
+        logger.info("历史订单下载成功")
         return True
       else:
-        logger.error(f"历史订单下载失败, 错误信息: {result.get('message')}")
+        logger.error("历史订单下载失败")
         return False
 
-    except Exception as e:
-      logger.error(f"下载历史订单失败: {e}")
+    except Exception as exc:
+      logger.error("下载历史订单失败: error=%s", exc.__class__.__name__)
       return False
 
   def get_history_orders(self, start_date: str, end_date: str) -> pd.DataFrame:
@@ -395,8 +389,8 @@ class XTTradingManager:
 
       return self.xttrader.query_data(self.acc, start_date, end_date)
 
-    except Exception as e:
-      logger.error(f"获取历史订单失败: {e}")
+    except Exception as exc:
+      logger.error("获取历史订单失败: error=%s", exc.__class__.__name__)
       return pd.DataFrame()
 
   def get_trades(self) -> List[XtTrade]:
@@ -413,9 +407,9 @@ class XTTradingManager:
       trades = self.xttrader.query_stock_trades(self.acc)
       return trades
 
-    except Exception as e:
-      logger.error(f"获取成交失败: {e}")
-      raise e
+    except Exception as exc:
+      logger.error("获取成交失败: error=%s", exc.__class__.__name__)
+      raise
 
   def get_account_info(self) -> Dict[str, Any]:
     """
@@ -441,8 +435,8 @@ class XTTradingManager:
 
       return {}
 
-    except Exception as e:
-      logger.error(f"获取账户信息失败: {e}")
+    except Exception as exc:
+      logger.error("获取账户信息失败: error=%s", exc.__class__.__name__)
       return {}
 
   def is_account_status_ok(self) -> bool:
@@ -464,8 +458,8 @@ class XTTradingManager:
 
       return False
 
-    except Exception as e:
-      logger.error(f"检查账户状态失败: {e}")
+    except Exception as exc:
+      logger.error("检查账户状态失败: error=%s", exc.__class__.__name__)
       return False
 
   def buy_stock(
@@ -513,8 +507,8 @@ class XTTradingManager:
           close_method()
         else:
           logger.warning("XTQuant交易对象缺少可用的关闭方法")
-    except Exception as e:
-      logger.error(f"关闭XTQuant交易连接失败: {e}")
+    except Exception as exc:
+      logger.error("关闭XTQuant交易连接失败: error=%s", exc.__class__.__name__)
     finally:
       self.is_connected = False
       self.session_id = None
@@ -527,16 +521,13 @@ class XTTradingManager:
           self.event_loop.call_soon_threadsafe(self.event_loop.stop)
           if self.event_loop_thread and self.event_loop_thread.is_alive():
             self.event_loop_thread.join(timeout=2)
-          if (
-            not self.event_loop.is_running()
-            and not self.event_loop.is_closed()
-          ):
+          if not self.event_loop.is_running() and not self.event_loop.is_closed():
             self.event_loop.close()
           self.event_loop = None
           self.event_loop_thread = None
           logger.info("事件循环已停止")
       except Exception as exc:
-        logger.error("停止XTQuant事件循环失败: %s", exc)
+        logger.error("停止XTQuant事件循环失败: error=%s", exc.__class__.__name__)
 
   # ==================== 回调事件处理方法 ====================
 
@@ -545,16 +536,16 @@ class XTTradingManager:
     try:
       self.is_connected = connected
       logger.info(f"连接状态更新: {'已连接' if connected else '已断开'}")
-    except Exception as e:
-      logger.error(f"处理连接事件失败: {e}")
+    except Exception as exc:
+      logger.error("处理连接事件失败: error=%s", exc.__class__.__name__)
 
   async def handle_account_status_event(self, status):
     """处理账户状态变更事件"""
     try:
-      logger.info(f"账户状态更新: {status}")
+      logger.info("账户状态更新: event=%s", status.__class__.__name__)
       # TODO: 可以在此发布事件到事件管理器
-    except Exception as e:
-      logger.error(f"处理账户状态事件失败: {e}")
+    except Exception as exc:
+      logger.error("处理账户状态事件失败: error=%s", exc.__class__.__name__)
 
   async def handle_asset_update_event(self, asset):
     """
@@ -564,15 +555,12 @@ class XTTradingManager:
       asset: XtAsset 对象
     """
     try:
-      logger.info(
-        f"资产更新 - 总资产: {asset.total_asset}, "
-        f"现金: {asset.cash}, 市值: {asset.market_value}"
-      )
+      logger.info("资产更新已接收")
       # 委托给 TradingService 处理
       if hasattr(self, "trading_service") and self.trading_service:
         await self.trading_service.handle_asset_update(asset)
-    except Exception as e:
-      logger.error(f"处理资产变动事件失败: {e}")
+    except Exception as exc:
+      logger.error("处理资产变动事件失败: error=%s", exc.__class__.__name__)
 
   async def handle_position_update_event(self, position):
     """
@@ -582,15 +570,12 @@ class XTTradingManager:
       position: XtPosition 对象
     """
     try:
-      logger.info(
-        f"持仓更新 - {position.stock_code}: "
-        f"数量={position.volume}, 可用={position.can_use_volume}"
-      )
+      logger.info("持仓更新已接收: instrument=%s", position.stock_code)
       # 委托给 TradingService 处理
       if hasattr(self, "trading_service") and self.trading_service:
         await self.trading_service.handle_position_update(position)
-    except Exception as e:
-      logger.error(f"处理持仓变动事件失败: {e}")
+    except Exception as exc:
+      logger.error("处理持仓变动事件失败: error=%s", exc.__class__.__name__)
 
   async def handle_order_event(self, order):
     """
@@ -600,12 +585,12 @@ class XTTradingManager:
       order: XtOrder 对象
     """
     try:
-      logger.info(f"委托更新 - 订单ID: {order.order_id}, 状态: {order.order_status}")
+      logger.info("委托更新已接收: status=%s", order.order_status)
       # 委托给 TradingService 处理
       if hasattr(self, "trading_service") and self.trading_service:
         await self.trading_service.handle_order_callback(order)
-    except Exception as e:
-      logger.error(f"处理委托事件失败: {e}")
+    except Exception as exc:
+      logger.error("处理委托事件失败: error=%s", exc.__class__.__name__)
 
   async def handle_trade_event(self, trade):
     """
@@ -615,15 +600,12 @@ class XTTradingManager:
       trade: XtTrade 对象
     """
     try:
-      logger.info(
-        f"成交更新 - 订单ID: {trade.order_id}, "
-        f"成交价: {trade.traded_price}, 成交量: {trade.traded_volume}"
-      )
+      logger.info("成交更新已接收")
       # 委托给 TradingService 处理
       if hasattr(self, "trading_service") and self.trading_service:
         await self.trading_service.handle_trade_callback(trade)
-    except Exception as e:
-      logger.error(f"处理成交事件失败: {e}")
+    except Exception as exc:
+      logger.error("处理成交事件失败: error=%s", exc.__class__.__name__)
 
   async def handle_order_error_event(self, order_error):
     """
@@ -634,13 +616,14 @@ class XTTradingManager:
     """
     try:
       logger.error(
-        f"委托失败 - 订单ID: {order_error.order_id}, 错误: {order_error.error_msg}"
+        "委托失败事件已接收: error_code=%s",
+        getattr(order_error, "error_id", "UNKNOWN"),
       )
       # 委托给 TradingService 处理
       if hasattr(self, "trading_service") and self.trading_service:
         await self.trading_service.handle_order_error_callback(order_error)
-    except Exception as e:
-      logger.error(f"处理委托失败事件失败: {e}")
+    except Exception as exc:
+      logger.error("处理委托失败事件失败: error=%s", exc.__class__.__name__)
 
   async def handle_cancel_error_event(self, cancel_error):
     """
@@ -650,13 +633,11 @@ class XTTradingManager:
       cancel_error: XtCancelError 对象
     """
     try:
-      logger.error(
-        f"撤单失败 - 订单ID: {cancel_error.order_id}, 错误: {cancel_error.error_msg}"
-      )
+      logger.error("撤单失败事件已接收")
       if hasattr(self, "trading_service") and self.trading_service:
         await self.trading_service.handle_cancel_error_callback(cancel_error)
-    except Exception as e:
-      logger.error(f"处理撤单失败事件失败: {e}")
+    except Exception as exc:
+      logger.error("处理撤单失败事件失败: error=%s", exc.__class__.__name__)
 
   async def handle_async_order_response(self, response):
     """
@@ -666,10 +647,10 @@ class XTTradingManager:
       response: XtOrderResponse 对象
     """
     try:
-      logger.info(f"异步委托响应 - 序列号: {response.seq}, 订单ID: {response.order_id}")
+      logger.info("异步委托响应已接收")
       # TODO: 更新订单状态
-    except Exception as e:
-      logger.error(f"处理异步委托响应失败: {e}")
+    except Exception as exc:
+      logger.error("处理异步委托响应失败: error=%s", exc.__class__.__name__)
 
   async def handle_async_cancel_response(self, response):
     """
@@ -679,11 +660,11 @@ class XTTradingManager:
       response: XtCancelOrderResponse 对象
     """
     try:
-      logger.info(f"异步撤单响应 - 订单ID: {response.order_id}")
+      logger.info("异步撤单响应已接收")
       # TODO: 更新订单状态
-    except Exception as e:
-      logger.error(f"处理异步撤单响应失败: {e}")
-      
+    except Exception as exc:
+      logger.error("处理异步撤单响应失败: error=%s", exc.__class__.__name__)
+
   async def query_bank_info(self):
     """
     查询银行账户信息
@@ -695,8 +676,8 @@ class XTTradingManager:
       bank_info = self.xttrader.query_bank_info(self.acc)
       return bank_info
 
-    except Exception as e:
-      logger.error(f"获取银行账户信息失败: {e}")
+    except Exception as exc:
+      logger.error("获取银行账户信息失败: error=%s", exc.__class__.__name__)
       return None
 
 
@@ -735,8 +716,8 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
         close = getattr(coro, "close", None)
         if callable(close):
           close()
-    except Exception as e:
-      logger.error(f"提交异步任务失败: {e}")
+    except Exception as exc:
+      logger.error("提交异步任务失败: error=%s", exc.__class__.__name__)
       close = getattr(coro, "close", None)
       if callable(close):
         close()
@@ -745,14 +726,14 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
 
   def on_connected(self):
     """连接成功回调"""
-    logger.info(f"{clock.now()} 交易连接已建立")
+    logger.info("交易连接已建立")
     self._submit_async_task(
       self.trading_manager.handle_connection_event(connected=True)
     )
 
   def on_disconnected(self):
     """连接断开回调"""
-    logger.warning(f"{clock.now()} 交易连接已断开")
+    logger.warning("交易连接已断开")
     self._submit_async_task(
       self.trading_manager.handle_connection_event(connected=False)
     )
@@ -764,7 +745,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       status: XtAccountStatus 对象
     """
-    logger.info(f"{clock.now()} 账户状态变更: {status}")
+    logger.info("账户状态变更: event=%s", status.__class__.__name__)
     self._submit_async_task(self.trading_manager.handle_account_status_event(status))
 
   # ==================== 资产和持仓回调 ====================
@@ -776,10 +757,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       asset: XtAsset 对象
     """
-    logger.info(
-      f"{clock.now()} 资产变动 - 总资产: {asset.total_asset}, "
-      f"现金: {asset.cash}, 市值: {asset.market_value}"
-    )
+    logger.info("资产变动已接收")
     self._submit_async_task(self.trading_manager.handle_asset_update_event(asset))
 
   def on_stock_position(self, position):
@@ -789,10 +767,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       position: XtPosition 对象
     """
-    logger.info(
-      f"{clock.now()} 持仓变动 - {position.stock_code}: "
-      f"数量={position.volume}, 可用={position.can_use_volume}"
-    )
+    logger.info("持仓变动已接收: instrument=%s", position.stock_code)
     self._submit_async_task(self.trading_manager.handle_position_update_event(position))
 
   # ==================== 订单和成交回调 ====================
@@ -804,10 +779,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       order: XtOrder 对象
     """
-    logger.info(
-      f"{clock.now()} 委托回调 - 订单ID: {order.order_id}, "
-      f"备注: {order.order_remark}, 状态: {order.order_status}"
-    )
+    logger.info("委托回调已接收: status=%s", order.order_status)
     self._submit_async_task(self.trading_manager.handle_order_event(order))
 
   def on_stock_trade(self, trade):
@@ -817,11 +789,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       trade: XtTrade 对象
     """
-    logger.info(
-      f"{clock.now()} 成交回调 - 订单ID: {trade.order_id}, "
-      f"成交价: {trade.traded_price}, 成交量: {trade.traded_volume}, "
-      f"备注: {trade.order_remark}"
-    )
+    logger.info("成交回调已接收")
     self._submit_async_task(self.trading_manager.handle_trade_event(trade))
 
   # ==================== 错误处理回调 ====================
@@ -834,9 +802,8 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       order_error: XtOrderError 对象
     """
     logger.error(
-      f"{clock.now()} 委托失败 - 订单ID: {order_error.order_id}, "
-      f"错误代码: {order_error.error_id}, 错误信息: {order_error.error_msg}, "
-      f"备注: {order_error.order_remark}"
+      "委托失败回调已接收: error_code=%s",
+      getattr(order_error, "error_id", "UNKNOWN"),
     )
     self._submit_async_task(self.trading_manager.handle_order_error_event(order_error))
 
@@ -847,10 +814,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       cancel_error: XtCancelError 对象
     """
-    logger.error(
-      f"{clock.now()} 撤单失败 - 订单ID: {cancel_error.order_id}, "
-      f"错误信息: {cancel_error.error_msg}"
-    )
+    logger.error("撤单失败回调已接收")
     self._submit_async_task(
       self.trading_manager.handle_cancel_error_event(cancel_error)
     )
@@ -864,10 +828,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       response: XtOrderResponse 对象
     """
-    logger.info(
-      f"{clock.now()} 异步委托回调 - 序列号: {response.seq}, "
-      f"订单ID: {response.order_id}, 备注: {response.order_remark}"
-    )
+    logger.info("异步委托回调已接收")
     self._submit_async_task(self.trading_manager.handle_async_order_response(response))
 
   def on_cancel_order_stock_async_response(self, response):
@@ -877,7 +838,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       response: XtCancelOrderResponse 对象
     """
-    logger.info(f"{clock.now()} 异步撤单回调 - 订单ID: {response.order_id}")
+    logger.info("异步撤单回调已接收")
     self._submit_async_task(self.trading_manager.handle_async_cancel_response(response))
 
   # ==================== 扩展功能回调 (融资融券/转账) ====================
@@ -889,7 +850,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       response: XtSmtAppointmentResponse 对象
     """
-    logger.info(f"{clock.now()} 约券回报: {response}")
+    logger.info("约券回报已接收")
     # 暂不实现,预留接口
 
   def on_bank_transfer_async_response(self, response):
@@ -899,7 +860,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       response: XtBankTransferResponse 对象
     """
-    logger.info(f"{clock.now()} 银证转账回报: {response}")
+    logger.info("银证转账回报已接收")
     # 暂不实现,预留接口
 
   def on_ctp_internal_transfer_async_response(self, response):
@@ -909,5 +870,5 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     Args:
       response: XtBankTransferResponse 对象
     """
-    logger.info(f"{clock.now()} CTP内部转账回报: {response}")
+    logger.info("CTP内部转账回报已接收")
     # 暂不实现,预留接口

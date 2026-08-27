@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ from sqlalchemy import func, literal, select
 from sqlalchemy.orm import aliased
 
 from quantx_infrastructure.config.settings import settings
+from quantx_infrastructure.core.data.market_stream_transport import market_stream_store
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
@@ -75,6 +77,38 @@ _RISK_REDUCTION_CHECKS = frozenset(
   }
 )
 _AUTHORIZATION_CHECK = "ACCOUNT_RISK_INCREASE_AUTHORIZED"
+_MARKET_STREAM_AUTHORITY_TIMEOUT_SECONDS = 2.0
+
+
+async def authoritative_market_stream_ready() -> bool:
+  """Verify the committed API and Engine watermarks, not an Agent self-report."""
+
+  async def read_authority():
+    return await asyncio.gather(
+      market_stream_store.state_with_freshness(),
+      market_stream_store.engine_state(),
+    )
+
+  try:
+    (stream_state, freshness), engine_state = await asyncio.wait_for(
+      read_authority(),
+      timeout=_MARKET_STREAM_AUTHORITY_TIMEOUT_SECONDS,
+    )
+  except Exception:
+    return False
+  return bool(
+    stream_state is not None
+    and stream_state.status == "READY"
+    and stream_state.commit_phase == "IDLE"
+    and stream_state.sequence >= 3
+    and freshness is not None
+    and freshness.stream_id == stream_state.stream_id
+    and freshness.sequence == stream_state.sequence
+    and engine_state is not None
+    and engine_state.status == "READY"
+    and engine_state.stream_id == stream_state.stream_id
+    and engine_state.sequence == stream_state.sequence
+  )
 
 
 class AccountExecutionControlIdempotencyError(ValueError):
@@ -460,6 +494,13 @@ class AccountExecutionSafetyService:
         and agent_heartbeat_fresh
         and str(agent.status).upper() == "READY"
       )
+      agent_market_stream_ready = bool(
+        live_agent_ready
+        and str(agent_details.get("marketStreamStatus") or "").upper() == "READY"
+      )
+      server_market_stream_ready = bool(
+        agent_market_stream_ready and await authoritative_market_stream_ready()
+      )
       if multiple_ready_live_agents:
         live_agent_blocked_reason = (
           "同一账户检测到多个就绪 live QMT Agent，必须先恢复唯一会话"
@@ -583,8 +624,8 @@ class AccountExecutionSafetyService:
         ),
         (
           "MARKET_STREAM_READY",
-          str(agent_details.get("marketStreamStatus") or "").upper() == "READY",
-          "全市场行情尚未完成远程三阶段同步",
+          server_market_stream_ready,
+          "全市场行情尚未完成 Agent、API 与 Engine 的权威三阶段同步",
           "INCREASE_RISK",
         ),
         (
