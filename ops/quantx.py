@@ -599,12 +599,6 @@ def resolve_runtime_configuration(
     raise RuntimeCommandError(
       "PUBLIC_URL must be an absolute credential-free URL on port 8080 with no path"
     )
-  if configured_live and parsed_public_url.scheme != "https":
-    raise RuntimeCommandError(
-      "Dev full/live requires a stable HTTPS PUBLIC_URL; plain HTTP is allowed "
-      "only for explicit data-only diagnostics"
-    )
-
   configured_trusted_ips = parse_trusted_ips(
     process_environment.get("QUANTX_CADDY_TRUSTED_IPS")
   )
@@ -619,7 +613,7 @@ def resolve_runtime_configuration(
     "0.0.0.0" if configured_live else "127.0.0.1"
   )
   process_environment["QUANTX_CADDY_TLS_SNIPPET"] = (
-    "tls_internal" if configured_live else "tls_disabled"
+    "tls_internal" if parsed_public_url.scheme == "https" else "tls_disabled"
   )
   process_environment["QUANTX_CADDY_TRUSTED_IPS"] = " ".join(trusted_ips)
   process_environment["XDG_CONFIG_HOME"] = str(paths.caddy_config_dir)

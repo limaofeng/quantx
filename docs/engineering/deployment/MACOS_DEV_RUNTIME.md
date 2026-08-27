@@ -45,7 +45,7 @@ Mac 执行完整 monorepo 测试（包括 QMT Agent 的模拟器和边界测试�
 根 `.env`：
 
 ```dotenv
-PUBLIC_URL=https://quantx-dev.internal:8080
+PUBLIC_URL=http://quantx-dev.internal:8080
 QUANTX_CADDY_TRUSTED_IPS=192.168.50.20/32
 DATABASE_URL=postgresql+asyncpg://<服务端数据库连接>
 REDIS_URL=redis://<外部 Redis>/0
@@ -70,7 +70,9 @@ REAL_TRADING_ACCOUNT_ALLOWLIST=<唯一账户>
 为该地址；启动器仍分别保留原 URL 的协议、端口、路径和凭据。任一服务未监听或健康
 检查失败时，`up` 在创建 Mac 子进程前以退出码 `69` 终止。
 
-`PUBLIC_URL` 必须是不含凭据和路径、显式使用 `8080` 端口的稳定 HTTPS 地址。
+`PUBLIC_URL` 必须是不含凭据和路径、显式使用 `8080` 端口的稳定 HTTP(S) 地址。
+当前本地 Dev 在受控私有局域网内统一使用 HTTP，避免分发和维护开发 CA；只有需要
+模拟 TLS 的专项验收才显式配置 HTTPS。
 `QUANTX_CADDY_TRUSTED_IPS` 必须至少包含 Windows Agent 的固定私网地址或受控私网
 网段。启动器还会自动加入 Mac 自身 IPv4 地址和回环地址，其他来源由 Caddy 返回
 `403`。内部 API、Market Gateway、Vite 和 VitePress 始终只监听 `127.0.0.1`。
@@ -95,23 +97,32 @@ Mac 文件，也不阻断启动。需要保留的历史回测产物应先复制�
 保存 `<request-id>/<chunk-name>`，API 和 Worker 在同一个
 `QUANTX_RUNTIME_DIR/market-data` 根下解析并再次验证边界。
 
-### TLS 信任
+### Dev 传输
 
-Mac full/live 使用 Caddy 本地 CA 签发开发证书。首次成功启动后，只把以下公钥证书
-复制到可信 Windows 执行节点：
+当前 Mac 与 Windows QMT 节点位于受控私有局域网，Dev 使用 HTTP/WS，不需要安装
+Caddy 根证书，也不设置 `SSL_CERT_FILE`。Caddy 仍是唯一公开入口，并通过
+`QUANTX_CADDY_TRUSTED_IPS` 限制来源；API、Market Gateway 和其他服务继续只绑定
+回环地址。
 
-```text
-.runtime/caddy-data/caddy/pki/authorities/local/root.crt
-```
+如果专项测试显式把 `PUBLIC_URL` 改为 HTTPS，Windows 节点仍必须信任 Mac Caddy
+根证书，并把公钥证书保存为
+`F:\Workspace\quantx\.runtime\certs\mac-dev-root.crt`。Agent 会严格使用登记的
+scheme，不会在 TLS 失败后自动降级到 HTTP。
 
-不得复制同目录的私钥。由 Windows 管理员审核后，可在管理员 PowerShell 中导入：
+Mac 服务全部 READY 后，Windows 只通过 Agent 专用入口接入：
 
 ```powershell
-certutil -addstore -f Root .\root.crt
+.\ops\quantx-agent.ps1 doctor -Environment dev
+.\ops\quantx-agent.ps1 up -Environment dev
+.\ops\quantx-agent.ps1 status -Environment dev
+.\ops\quantx-agent.ps1 logs -Environment dev
+.\ops\quantx-agent.ps1 down -Environment dev
 ```
 
-随后从 Windows 验证 `<PUBLIC_URL>/auth/agent/token`、`/ws/agent`、
-`/ws/agent/market` 和行情分块上传；Mac 本机 `curl` 通过不能替代这一步。
+`up` 使用当前 Windows 交互用户的计划任务启动 supervisor，使 Credential Manager
+仍可读取设备密钥；任务本身只启动一个 `xtquant-demo` QMT Agent，不拥有 Mac 服务、
+数据库、Redis、Prefect 或 Caddy 的生命周期。当前登记根地址固定为
+`http://192.168.5.16:8080`，所有 token、控制、市场和上传地址都由它派生。
 
 ## 3. 权威命令
 
@@ -228,13 +239,16 @@ full/live 预检要求 macOS 网络时间服务运行；本轮运行期间由受
 密钥链策略不会让后台开发进程失去服务端配置读取权限。网络或登录环境发生切换时按
 网络分区处理，先确认动态实盘能力已关闭，再进行恢复与重新对账。
 
-## 6. 仍需跨方案完成的验收
+## 6. 跨主机验收边界
 
-本地自动验证不能替代以下集成证据：
+当前迁移已经验证 Windows Agent 经 Mac HTTP/WS 完成控制连接、完整账户快照、
+三阶段市场同步和 Engine watermark 追平；Agent 断开会立即关闭动态实盘能力，
+Market Gateway 子进程重启后会从 `OFFLINE/SYNCING` 恢复，并且只有所有安全门同时
+通过时才短暂显示 `liveTrading=ENABLED`。非交易时段没有新 tick 后，行情 freshness
+租约按设计过期并再次 fail-closed，不应被误判为迁移失败。
 
-- 方案一的 `api_instance_id`、`agent_session_id` 和活动 Hub 连接可信度已合并。
-- Windows Agent 经 Mac HTTPS/WSS 完成控制连接、市场连接、完整快照和对账。
-- Agent 离线、首次接入、API/Market Gateway/Engine/Agent 重启和网络分区场景。
+下列事项仍需要独立授权或更长观察窗口，不能由本轮运维联调替代：
+
 - 一个完整交易时段的 SHADOW 观察和全市场非交易压测。
 - 用户明确授权后的 CANARY 委托、撤单或成交全生命周期。
 

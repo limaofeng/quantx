@@ -35,7 +35,7 @@ def _paths(tmp_path: Path):
 
 def _live_environment() -> dict[str, str]:
   return {
-    "PUBLIC_URL": "https://quantx-dev.internal:8080",
+    "PUBLIC_URL": "http://quantx-dev.internal:8080",
     "QUANTX_CADDY_TRUSTED_IPS": "192.168.50.20/32",
     "PREFECT_API_URL": "http://prefect.internal:4200/api",
   }
@@ -62,6 +62,12 @@ def test_default_web_launch_promotes_to_static_full_live(
   assert configuration.process_environment["ENABLE_REAL_TRADING"] == "true"
   assert configuration.process_environment["QMT_REAL_TRADING_ENABLED"] == "true"
   assert configuration.process_environment["QMT_AGENT_LAUNCH_STATE"] == "REMOTE"
+  assert configuration.process_environment["QUANTX_CADDY_SITE_ADDRESS"] == (
+    "http://quantx-dev.internal:8080"
+  )
+  assert configuration.process_environment["QUANTX_CADDY_TLS_SNIPPET"] == (
+    "tls_disabled"
+  )
   assert configuration.process_environment["REAL_TRADING_ACCOUNT_ALLOWLIST"] == (
     '["account-1"]'
   )
@@ -139,39 +145,44 @@ def test_explicit_data_only_keeps_web_profile_and_closes_every_live_gate(
   assert configuration.process_environment["QUANTX_CADDY_BIND"] == "127.0.0.1"
 
 
-@pytest.mark.parametrize(
-  ("environment", "message"),
-  [
-    (
-      {
-        "PUBLIC_URL": "http://quantx-dev.internal:8080",
-        "QUANTX_CADDY_TRUSTED_IPS": "192.168.50.20/32",
-      },
-      "stable HTTPS PUBLIC_URL",
-    ),
-    (
-      {"PUBLIC_URL": "https://quantx-dev.internal:8080"},
-      "QUANTX_CADDY_TRUSTED_IPS",
-    ),
-  ],
-)
-def test_live_runtime_rejects_insecure_public_configuration(
+def test_live_runtime_rejects_missing_trusted_ip_configuration(
   tmp_path: Path,
   monkeypatch: pytest.MonkeyPatch,
-  environment: dict[str, str],
-  message: str,
 ) -> None:
   paths = _paths(tmp_path)
   monkeypatch.setattr(runtime, "local_ipv4_addresses", lambda: ("127.0.0.1/32",))
 
-  with pytest.raises(runtime.RuntimeCommandError, match=message):
+  with pytest.raises(runtime.RuntimeCommandError, match="QUANTX_CADDY_TRUSTED_IPS"):
     runtime.resolve_runtime_configuration(
       paths=paths,
       requested_profile="full",
       requested_mode="live",
       requested_account="account-1",
-      environment=environment,
+      environment={"PUBLIC_URL": "http://quantx-dev.internal:8080"},
     )
+
+
+def test_explicit_https_dev_url_enables_internal_tls(
+  tmp_path: Path,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  paths = _paths(tmp_path)
+  monkeypatch.setattr(runtime, "local_ipv4_addresses", lambda: ("127.0.0.1/32",))
+
+  configuration = runtime.resolve_runtime_configuration(
+    paths=paths,
+    requested_profile="full",
+    requested_mode="live",
+    requested_account="account-1",
+    environment={
+      "PUBLIC_URL": "https://quantx-dev.internal:8080",
+      "QUANTX_CADDY_TRUSTED_IPS": "192.168.50.20/32",
+    },
+  )
+
+  assert configuration.process_environment["QUANTX_CADDY_TLS_SNIPPET"] == (
+    "tls_internal"
+  )
 
 
 def test_runtime_root_and_state_use_the_physical_workspace(
@@ -492,7 +503,7 @@ def test_external_dependency_preflight_blocks_unsafe_database_state(
     agent_mode="live",
     configured_account="account-1",
     configured_live=True,
-    public_url="https://quantx-dev.internal:8080",
+    public_url="http://quantx-dev.internal:8080",
     trusted_ips=("127.0.0.1/32",),
     process_environment={"PREFECT_API_URL": "http://prefect.internal/api"},
   )
@@ -542,7 +553,7 @@ def test_external_dependency_preflight_reports_terminal_history_without_blocking
     agent_mode="live",
     configured_account="account-1",
     configured_live=True,
-    public_url="https://quantx-dev.internal:8080",
+    public_url="http://quantx-dev.internal:8080",
     trusted_ips=("127.0.0.1/32",),
     process_environment={"PREFECT_API_URL": "http://prefect.internal/api"},
   )

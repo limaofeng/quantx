@@ -211,10 +211,6 @@ function Set-AgentLiveEnvironment {
   $env:PYTHONUTF8 = "1"
   $env:PYTHONIOENCODING = "utf-8"
   $env:QUANTX_AGENT_STATE_DIR = $AgentStateDirectory
-  if (Test-Path -LiteralPath $DefaultCaFile -PathType Leaf) {
-    $env:QUANTX_AGENT_CA_FILE = $DefaultCaFile
-    $env:SSL_CERT_FILE = $DefaultCaFile
-  }
 }
 
 function Mask-Identifier {
@@ -351,6 +347,8 @@ function Assert-AgentTransportTrust {
 
   $uri = [uri]$BaseUrl
   if ($uri.Scheme -ne "https") {
+    Remove-Item Env:QUANTX_AGENT_CA_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:SSL_CERT_FILE -ErrorAction SilentlyContinue
     return
   }
   if (-not (Test-Path -LiteralPath $DefaultCaFile -PathType Leaf)) {

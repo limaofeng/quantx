@@ -1102,6 +1102,79 @@ Resolve-Python -Qmt
   assert Path(result.stdout.strip()).resolve() == qmt_python.resolve()
 
 
+def test_windows_agent_launcher_is_the_agent_only_dev_boundary() -> None:
+  script = (OPS / "quantx-agent.ps1").read_text(encoding="utf-8")
+
+  for command in (
+    '"up"',
+    '"down"',
+    '"status"',
+    '"logs"',
+    '"restart"',
+    '"doctor"',
+    '"enroll"',
+    '"internal-run"',
+  ):
+    assert command in script
+  assert '[ValidateSet("dev")]' in script
+  assert '$DefaultQmtCondaEnvironment = "xtquant-demo"' in script
+  assert '"quantx_qmt_agent.main"' in script
+  assert '"supervise_process.py"' in script
+  assert '$TaskName = "QuantX-Dev-QmtAgent"' in script
+  assert "New-ScheduledTaskPrincipal" in script
+  assert "-LogonType Interactive" in script
+  assert "-RunLevel Limited" in script
+  assert "Register-ScheduledTask" in script
+  assert "Start-ScheduledTask" in script
+  assert '$DefaultCaFile = Join-Path $CertificateDirectory "mac-dev-root.crt"' in script
+  assert "$env:SSL_CERT_FILE = $DefaultCaFile" in script
+  assert "Remove-Item Env:SSL_CERT_FILE" in script
+  assert "$env:QMT_AGENT_MODE = \"live\"" in script
+  assert "$env:QMT_ACCOUNT_WHITELIST = $LiveAccount" in script
+  assert "$env:ENABLE_REAL_TRADING = \"true\"" in script
+  assert "$env:QMT_REAL_TRADING_ENABLED = \"true\"" in script
+
+  for forbidden in (
+    "quantx_api.main",
+    "quantx_engine.main",
+    "quantx_worker.main",
+    "quantx_ai_runtime.main",
+    "Caddyfile.dev",
+    "prefect worker",
+  ):
+    assert forbidden not in script
+
+
+def test_windows_agent_launcher_has_valid_powershell_syntax() -> None:
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  if powershell is None:
+    pytest.skip("PowerShell parser is unavailable")
+  path = str(OPS / "quantx-agent.ps1").replace("'", "''")
+  command = f"""
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseFile(
+  '{path}',
+  [ref]$tokens,
+  [ref]$errors
+) | Out-Null
+if ($errors.Count -gt 0) {{
+  $errors | ForEach-Object {{ Write-Error $_.Message }}
+  exit 1
+}}
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+
+
 def test_environment_precedence_keeps_process_values_and_later_files_win() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
   importer = script.split(
