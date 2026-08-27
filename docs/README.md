@@ -15,6 +15,8 @@
 - [A 股交易域数据结构与状态机](trading/contracts/A股交易域数据结构与状态机.md)
 - [A 股动态天平双仓策略实施计划](plans/A股动态天平双仓策略实现落地规格与迁移计划.md)
 - [离线量价事件研究与 Web 查阅方案](plans/离线量价事件研究应用实现方案.md)
+- [Mac 开发环境 full/live 迁移总说明](plans/mac-dev-full-live-migration/README.md)：
+  QMT Agent 远程化、Mac 完整运行环境与 Windows 启动器清理的跨服务器实施入口。
 - [进化研究](research/进化文档.md)
 
 ```text
