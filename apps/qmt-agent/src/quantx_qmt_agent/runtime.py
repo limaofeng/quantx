@@ -82,7 +82,11 @@ XTTRADING_RECOVERY_MAX_SECONDS = 90
 WEBSOCKET_PING_INTERVAL_SECONDS = 20
 WEBSOCKET_PING_TIMEOUT_SECONDS = 16 * 60
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 30
-MARKET_STREAM_ACK_TIMEOUT_SECONDS = 15.0
+# The initial snapshot is roughly 3 MiB and its Redis publish may cross a
+# forwarded development Redis endpoint.  Keep this above the API's dedicated
+# 60-second snapshot commit budget; normal deltas are still bounded by the
+# server's short commit timeout.
+MARKET_STREAM_ACK_TIMEOUT_SECONDS = 75.0
 MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS = 10
 MARKET_STREAM_READY_INGRESS_BYTES = 64 * 1024 * 1024
 # Every retained callback is charged at least this many estimated bytes.  Set
