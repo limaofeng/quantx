@@ -962,6 +962,18 @@ def test_conda_resolution_supports_powershell_hook_commands() -> None:
   assert '"CONDA_EXE"' in script
 
 
+def test_node_resolution_supports_an_explicit_noninteractive_runtime() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  resolver = script.split("function Resolve-Node", 1)[1].split(
+    "function Get-WorkspacePythonPath",
+    1,
+  )[0]
+
+  assert 'GetEnvironmentVariable("QUANTX_NODE_EXE")' in resolver
+  assert "Configured Node.js executable does not exist" in resolver
+  assert "Set QUANTX_NODE_EXE or add it to PATH" in resolver
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows Conda runtime resolution")
 def test_qmt_runtime_defaults_to_original_xtquant_conda_environment(
   tmp_path: Path,

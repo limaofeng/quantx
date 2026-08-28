@@ -241,9 +241,17 @@ function Resolve-AiRuntimePython {
 }
 
 function Resolve-Node {
+  $configured = [Environment]::GetEnvironmentVariable("QUANTX_NODE_EXE")
+  if ($configured) {
+    $resolved = [System.IO.Path]::GetFullPath($configured)
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+      throw "Configured Node.js executable does not exist: $resolved"
+    }
+    return $resolved
+  }
   $node = Get-Command node -ErrorAction SilentlyContinue
   if (-not $node) {
-    throw "Node.js was not found in PATH."
+    throw "Node.js was not found. Set QUANTX_NODE_EXE or add it to PATH."
   }
   return $node.Source
 }

@@ -33,6 +33,8 @@ Monitor 保持独立生命周期：
 
 `ops/quantx.ps1` 只接受 `-Environment dev`，不提供 install、uninstall、rollback
 或 agent-mode 命令。不得绕过统一入口单独启动 QMT Agent，以免重复会话争用。
+Windows 需要 Node 20；若 nvm 的 PATH 在非交互 Shell 中不可见，可在
+`apps/api/.env.development` 设置 `QUANTX_NODE_EXE` 为对应 `node.exe` 的绝对路径。
 
 ## 地址与端口
 
