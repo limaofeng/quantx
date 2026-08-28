@@ -37,8 +37,7 @@ API 不启动或停止 Engine、Prefect、Worker 或 QMT Agent。任一组件重
 ## 部署
 
 - 开发：`ops/quantx.ps1 up -Environment dev -Profile web|full`
-- 正式环境：Kubernetes 分别监管 Gateway、API、Market Data Service、Monitor、
-  Engine、Worker 和 AI Runtime；Windows 只运行集群外 QMT Agent。
+- 本机生产：WinSW 分别监管 Caddy、API、Engine、Worker、QMT Agent。
 - PostgreSQL、InfluxDB、Redis、Prefect Server 由外部管理，只做连接和版本检查。
 
 更完整的系统边界见 [../../architecture/系统架构设计.md](../../architecture/系统架构设计.md)。

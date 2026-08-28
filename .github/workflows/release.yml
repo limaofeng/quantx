@@ -1,4 +1,4 @@
-name: Kubernetes Production Release
+name: Windows Production Release
 
 on:
   push:
@@ -6,11 +6,10 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,63 +40,20 @@ jobs:
         env:
           QUANTX_DOCS_VERSION: ${{ github.ref_name }}
           VITE_APP_ENV: production
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - name: Build and push server image
-        id: server-image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ops/containers/server.Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/limaofeng/quantx-server:${{ github.ref_name }}
-            ghcr.io/limaofeng/quantx-server:sha-${{ github.sha }}
-          cache-from: type=gha,scope=server
-          cache-to: type=gha,mode=max,scope=server
-      - name: Build and push gateway image
-        id: gateway-image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ops/containers/gateway.Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            QUANTX_DOCS_VERSION=${{ github.ref_name }}
-            VITE_APP_ENV=production
-          tags: |
-            ghcr.io/limaofeng/quantx-gateway:${{ github.ref_name }}
-            ghcr.io/limaofeng/quantx-gateway:sha-${{ github.sha }}
-          cache-from: type=gha,scope=gateway
-          cache-to: type=gha,mode=max,scope=gateway
-      - uses: azure/setup-kubectl@v4
-      - name: Render digest-pinned Kubernetes manifests
-        env:
-          SERVER_DIGEST: ${{ steps.server-image.outputs.digest }}
-          GATEWAY_DIGEST: ${{ steps.gateway-image.outputs.digest }}
-        run: |
-          kubectl kustomize ops/k8s/base \
-            | sed \
-              -e "s|ghcr.io/limaofeng/quantx-server:replace-me|ghcr.io/limaofeng/quantx-server@${SERVER_DIGEST}|g" \
-              -e "s|ghcr.io/limaofeng/quantx-gateway:replace-me|ghcr.io/limaofeng/quantx-gateway@${GATEWAY_DIGEST}|g" \
-            > /tmp/quantx-k8s.yaml
-          if grep -q "replace-me" /tmp/quantx-k8s.yaml; then
-            echo "Rendered manifest still contains replacement markers." >&2
-            exit 1
-          fi
+      - name: Build versioned production bundle
+        shell: pwsh
+        run: >-
+          .\ops\build-release.ps1
+          -Version "${{ github.ref_name }}"
+          -OutputDirectory ".runtime\release-artifacts"
       - uses: actions/upload-artifact@v4
         with:
-          name: quantx-${{ github.ref_name }}-k8s
-          path: /tmp/quantx-k8s.yaml
+          name: quantx-${{ github.ref_name }}-windows-x64
+          path: |
+            .runtime/release-artifacts/quantx-${{ github.ref_name }}-windows-x64.zip
+            .runtime/release-artifacts/quantx-${{ github.ref_name }}-windows-x64.zip.sha256
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
-          files: /tmp/quantx-k8s.yaml
+          files: |
+            .runtime/release-artifacts/quantx-${{ github.ref_name }}-windows-x64.zip
+            .runtime/release-artifacts/quantx-${{ github.ref_name }}-windows-x64.zip.sha256

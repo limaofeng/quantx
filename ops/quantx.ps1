@@ -7,15 +7,19 @@ param(
     "status",
     "logs",
     "bootstrap",
+    "install",
+    "uninstall",
     "doctor",
     "backup",
     "restore-verify",
     "migrate",
-    "verify"
+    "verify",
+    "rollback",
+    "agent-mode"
   )]
   [string]$Command = "status",
 
-  [ValidateSet("dev")]
+  [ValidateSet("dev", "production")]
   [string]$Environment = "dev",
 
   [ValidateSet("web", "full")]
@@ -31,7 +35,13 @@ param(
 
   [string]$AccountId = "",
 
+  [string]$ConfirmLive = "",
+
+  [string]$Reason = "",
+
   [string]$BackupPath = "",
+
+  [string]$ReleasePath = "",
 
   [switch]$SkipExternal,
 
@@ -87,10 +97,19 @@ $StateDirectory = Join-Path $Runtime "state"
 $LogDirectory = Join-Path $Runtime "logs"
 $StateFile = Join-Path $StateDirectory "dev-processes.json"
 $ToolsDirectory = Join-Path $Runtime "tools"
+$ServiceDirectory = Join-Path $Runtime "services"
 $BackupDirectory = Join-Path $Runtime "backups"
+$ReleaseDirectory = Join-Path $Runtime "releases"
+$CurrentReleaseLink = Join-Path $Runtime "current"
+$ReleaseStateFile = Join-Path $Runtime "release-state.json"
+$ProductionConfigFile = Join-Path $Runtime "config\.env.production"
+$AgentModeFile = Join-Path $StateDirectory "qmt-agent-mode.json"
 $MonitorRuntime = Join-Path $Runtime "monitor"
 $MonitorStateFile = Join-Path $MonitorRuntime "dev-process.json"
 $MonitorPort = 18083
+$QmtAgentHealthHost = "0.0.0.0"
+$QmtAgentHealthPort = 18084
+$QmtAgentHealthFirewallRule = "QuantX-QMT-Agent-Health-18084"
 $DefaultPrefectApiUrl = "http://192.168.5.6:30420/api"
 $DefaultPrefectWorkerPool = "quantx-pool"
 $DefaultQmtCondaEnvironment = "xtquant-demo"
@@ -112,7 +131,9 @@ function Ensure-RuntimeDirectories {
     $LogDirectory,
     $ToolsDirectory,
     $BackupDirectory,
-    $MonitorRuntime
+    $ReleaseDirectory,
+    $MonitorRuntime,
+    (Split-Path -Parent $ProductionConfigFile)
   )) {
     if (-not (Test-Path -LiteralPath $path)) {
       New-Item -ItemType Directory -Path $path -Force | Out-Null
@@ -134,6 +155,17 @@ function Resolve-Python {
       throw "Configured Python executable does not exist: $resolved"
     }
     return $resolved
+  }
+  if (
+    -not $Qmt -and
+    $Environment -eq "production" -and
+    (Test-Path -LiteralPath $CurrentReleaseLink -PathType Container)
+  ) {
+    $releasePython = Join-Path $CurrentReleaseLink ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $releasePython -PathType Leaf)) {
+      throw "The current production release has no server virtual environment."
+    }
+    return [System.IO.Path]::GetFullPath($releasePython)
   }
   $condaEnvironment = if ($Qmt) {
     $DefaultQmtCondaEnvironment
@@ -233,9 +265,11 @@ function Resolve-AiRuntimePython {
     }
     return $resolved
   }
-  $workspacePython = Join-Path $Root ".venv\Scripts\python.exe"
-  if (Test-Path -LiteralPath $workspacePython -PathType Leaf) {
-    return [System.IO.Path]::GetFullPath($workspacePython)
+  if ($Environment -ne "production") {
+    $workspacePython = Join-Path $Root ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $workspacePython -PathType Leaf) {
+      return [System.IO.Path]::GetFullPath($workspacePython)
+    }
   }
   return Resolve-Python
 }
@@ -249,6 +283,9 @@ function Resolve-Node {
 }
 
 function Get-WorkspacePythonPath {
+  if ($Environment -eq "production") {
+    return ""
+  }
   $entries = @(
     (Join-Path $Root "apps\api\src"),
     (Join-Path $Root "apps\ai-runtime\src"),
@@ -264,6 +301,18 @@ function Get-WorkspacePythonPath {
 }
 
 function Get-QmtAgentPythonPath {
+  param([string]$ServiceRoot = "")
+
+  if ($Environment -eq "production") {
+    $releaseRoot = if ($ServiceRoot.Trim()) {
+      $ServiceRoot
+    } elseif (Test-Path -LiteralPath $CurrentReleaseLink -PathType Container) {
+      $CurrentReleaseLink
+    } else {
+      $Root
+    }
+    return (Join-Path $releaseRoot "qmt-site-packages")
+  }
   $entries = @(
     (Join-Path $Root "apps\qmt-agent\src"),
     (Join-Path $Root "packages\contracts\src")
@@ -358,11 +407,14 @@ function ConvertFrom-ListSetting {
 }
 
 function Test-QmtAgentEnrollment {
-  param([string]$Python)
+  param(
+    [string]$Python,
+    [string]$ServiceRoot = ""
+  )
 
   $workspacePythonPath = $env:PYTHONPATH
   try {
-    $env:PYTHONPATH = Get-QmtAgentPythonPath
+    $env:PYTHONPATH = Get-QmtAgentPythonPath -ServiceRoot $ServiceRoot
     & $Python -m quantx_qmt_agent.main status *> $null
     return $LASTEXITCODE -eq 0
   } catch {
@@ -373,9 +425,12 @@ function Test-QmtAgentEnrollment {
 }
 
 function Assert-QmtAgentEnrollment {
-  param([string]$Python)
+  param(
+    [string]$Python,
+    [string]$ServiceRoot = ""
+  )
 
-  if (-not (Test-QmtAgentEnrollment -Python $Python)) {
+  if (-not (Test-QmtAgentEnrollment -Python $Python -ServiceRoot $ServiceRoot)) {
     throw (
       "QMT Agent is not enrolled. Create a one-time code in the UI, then run " +
       "'python -m quantx_qmt_agent.main enroll --code <code>' with the QMT " +
@@ -393,12 +448,29 @@ function Import-QuantXEnvironment {
   )) {
     $null = $processOverrides.Add([string]$existingName)
   }
-  $environmentName = "development"
-  $configurationRoot = $Root
+  $environmentName = if ($Environment -eq "dev") {
+    "development"
+  } else {
+    $Environment
+  }
+  $configurationRoot = if (
+    $Environment -eq "production" -and
+    (Test-Path -LiteralPath $CurrentReleaseLink -PathType Container)
+  ) {
+    $CurrentReleaseLink
+  } else {
+    $Root
+  }
   $files = @(
     (Join-Path $configurationRoot "apps\api\.env"),
     (Join-Path $configurationRoot "apps\api\.env.$environmentName")
   )
+  if ($Environment -eq "production") {
+    $files += $ProductionConfigFile
+    $env:QUANTX_ENV_FILE = $ProductionConfigFile
+    $env:QUANTX_ROOT = $configurationRoot
+    $env:QUANTX_AGENT_STATE_DIR = Join-Path $Runtime "qmt-agent"
+  }
   foreach ($file in $files) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
       continue
@@ -1521,7 +1593,7 @@ function Resolve-DevTradingAccountId {
 
 function Invoke-Up {
   if ($Environment -ne "dev") {
-    throw "quantx up is the development launcher; production runs on Kubernetes."
+    throw "Use install for local production services; up supports dev only."
   }
   if ($Component) {
     if ($Component -eq "monitor") {
@@ -2149,6 +2221,7 @@ function Invoke-Bootstrap {
     -Raw |
     ConvertFrom-Json
   Install-LockedTool -Name "caddy" -Spec $lock.tools.caddy
+  Install-LockedTool -Name "winsw" -Spec $lock.tools.winsw
 
   $python = Resolve-Python
   & $python -c "import _cffi_backend"
@@ -2196,6 +2269,612 @@ function Invoke-Bootstrap {
     throw "Failed to install the QMT Agent environment."
   }
   Write-Host "Bootstrap completed." -ForegroundColor Green
+}
+
+function Assert-Administrator {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+  if (-not $principal.IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+  )) {
+    throw "Windows service installation requires an Administrator shell."
+  }
+}
+
+function New-ServiceConfigurations {
+  param(
+    [string]$Python,
+    [string]$QmtPython,
+    [string]$ServiceRoot = $Root
+  )
+
+  New-Item -ItemType Directory -Path $ServiceDirectory -Force | Out-Null
+  $winsw = Join-Path $ToolsDirectory "winsw\WinSW-x64.exe"
+  if (-not (Test-Path -LiteralPath $winsw -PathType Leaf)) {
+    throw "WinSW is missing. Run bootstrap first."
+  }
+  $pythonPath = Get-WorkspacePythonPath
+  $qmtPythonPath = Get-QmtAgentPythonPath -ServiceRoot $ServiceRoot
+  $agentMode = "data-only"
+  $agentAccountWhitelist = ""
+  if (Test-Path -LiteralPath $AgentModeFile -PathType Leaf) {
+    $agentModeState = Get-Content -LiteralPath $AgentModeFile -Raw |
+      ConvertFrom-Json
+    $agentMode = [string]$agentModeState.mode
+    $agentAccountWhitelist = [string]$agentModeState.accountId
+  }
+  $realTradingEnabled = if ($env:ENABLE_REAL_TRADING) {
+    $env:ENABLE_REAL_TRADING
+  } else {
+    "false"
+  }
+  $qmtRealTradingEnabled = if ($env:QMT_REAL_TRADING_ENABLED) {
+    $env:QMT_REAL_TRADING_ENABLED
+  } else {
+    "false"
+  }
+  $tTradeLiveEnabled = if ($env:T_TRADE_LIVE_ENABLED) {
+    $env:T_TRADE_LIVE_ENABLED
+  } else {
+    "false"
+  }
+  $qmtUserdataPath = if ($env:QMT_USERDATA_PATH) {
+    $env:QMT_USERDATA_PATH
+  } else {
+    ""
+  }
+  $caddyRootCertificate = Join-Path `
+    $Runtime `
+    "caddy-data\caddy\pki\authorities\local\root.crt"
+  $templateDirectory = Join-Path $ServiceRoot "ops\windows"
+  foreach ($template in Get-ChildItem `
+    -LiteralPath $templateDirectory `
+    -Filter "*.xml") {
+    $content = Get-Content -LiteralPath $template.FullName -Raw
+    $content = $content.
+      Replace("{{ROOT}}", [Security.SecurityElement]::Escape($ServiceRoot)).
+      Replace("{{RUNTIME}}", [Security.SecurityElement]::Escape($Runtime)).
+      Replace("{{PYTHON}}", [Security.SecurityElement]::Escape($Python)).
+      Replace("{{QMT_PYTHON}}", [Security.SecurityElement]::Escape($QmtPython)).
+      Replace(
+        "{{PYTHONPATH}}",
+        [Security.SecurityElement]::Escape($pythonPath)
+      ).
+      Replace(
+        "{{QMT_PYTHONPATH}}",
+        [Security.SecurityElement]::Escape($qmtPythonPath)
+      ).
+      Replace(
+        "{{PREFECT_API_URL}}",
+        [Security.SecurityElement]::Escape((Get-PrefectApiUrl))
+      ).
+      Replace(
+        "{{PREFECT_WORKER_POOL}}",
+        [Security.SecurityElement]::Escape((Get-PrefectWorkerPool))
+      ).
+      Replace(
+        "{{QMT_AGENT_MODE}}",
+        [Security.SecurityElement]::Escape($agentMode)
+      ).
+      Replace(
+        "{{QMT_AGENT_HEALTH_HOST}}",
+        [Security.SecurityElement]::Escape($QmtAgentHealthHost)
+      ).
+      Replace(
+        "{{QMT_AGENT_HEALTH_PORT}}",
+        [Security.SecurityElement]::Escape(
+          $QmtAgentHealthPort.ToString([Globalization.CultureInfo]::InvariantCulture)
+        )
+      ).
+      Replace(
+        "{{QMT_ACCOUNT_WHITELIST}}",
+        [Security.SecurityElement]::Escape($agentAccountWhitelist)
+      ).
+      Replace(
+        "{{QMT_USERDATA_PATH}}",
+        [Security.SecurityElement]::Escape($qmtUserdataPath)
+      ).
+      Replace(
+        "{{CADDY_ROOT_CERT}}",
+        [Security.SecurityElement]::Escape($caddyRootCertificate)
+      ).
+      Replace(
+        "{{ENABLE_REAL_TRADING}}",
+        [Security.SecurityElement]::Escape($realTradingEnabled)
+      ).
+      Replace(
+        "{{QMT_REAL_TRADING_ENABLED}}",
+        [Security.SecurityElement]::Escape($qmtRealTradingEnabled)
+      ).
+      Replace(
+        "{{T_TRADE_LIVE_ENABLED}}",
+        [Security.SecurityElement]::Escape($tTradeLiveEnabled)
+      )
+    Set-Content `
+      -LiteralPath (Join-Path $ServiceDirectory $template.Name) `
+      -Value $content `
+      -Encoding utf8
+    # WinSW 2.12 uses bundled mode: the wrapper executable and configuration
+    # must be adjacent and share the same base name.
+    Copy-Item `
+      -LiteralPath $winsw `
+      -Destination (Join-Path $ServiceDirectory "$($template.BaseName).exe") `
+      -Force
+  }
+}
+
+function Get-ServiceConfigurationNames {
+  return @(
+    "quantx-api.xml",
+    "quantx-market-data-service.xml",
+    "quantx-engine.xml",
+    "quantx-monitor.xml",
+    "quantx-ai-runtime.xml",
+    "quantx-worker.xml",
+    "quantx-caddy.xml",
+    "quantx-qmt-agent.xml"
+  )
+}
+
+function Test-ReleaseContents {
+  param([Parameter(Mandatory = $true)][string]$Directory)
+
+  $root = [System.IO.Path]::GetFullPath($Directory)
+  $manifestPath = Join-Path $root "manifest.json"
+  $checksumsPath = Join-Path $root "checksums.json"
+  if (
+    -not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $checksumsPath -PathType Leaf)
+  ) {
+    throw "Release manifest or checksum ledger is missing."
+  }
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  if (
+    [string]$manifest.product -cne "QuantX" -or
+    [string]$manifest.version -notmatch
+      "^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$"
+  ) {
+    throw "Release manifest identity is invalid."
+  }
+  foreach ($requiredFile in @(
+    "apps\web\dist\index.html",
+    "apps\docs\dist\index.html",
+    "apps\docs\dist\contracts\graphql-schema.graphql",
+    "apps\docs\dist\contracts\graphql-permissions.json",
+    "apps\docs\dist\contracts\openapi-client.json"
+  )) {
+    if (-not (
+      Test-Path -LiteralPath (Join-Path $root $requiredFile) -PathType Leaf
+    )) {
+      throw "Release content is missing: $requiredFile"
+    }
+  }
+  foreach ($entry in @(
+    Get-Content -LiteralPath $checksumsPath -Raw | ConvertFrom-Json
+  )) {
+    $relative = ([string]$entry.path).Replace("/", "\")
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $root $relative))
+    if (
+      -not $candidate.StartsWith(
+        $root + [System.IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+      ) -or
+      -not (Test-Path -LiteralPath $candidate -PathType Leaf)
+    ) {
+      throw "Release checksum path is invalid: $relative"
+    }
+    $file = Get-Item -LiteralPath $candidate
+    $hash = (
+      Get-FileHash -LiteralPath $candidate -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if (
+      $file.Length -ne [long]$entry.size -or
+      $hash -cne ([string]$entry.sha256).ToLowerInvariant()
+    ) {
+      throw "Release checksum mismatch: $relative"
+    }
+  }
+  return $manifest
+}
+
+function Install-WorkspaceWheels {
+  param(
+    [Parameter(Mandatory = $true)][string]$Python,
+    [Parameter(Mandatory = $true)][string]$WheelDirectory,
+    [Parameter(Mandatory = $true)][string[]]$PackageNames,
+    [string]$Target = "",
+    [string]$LogPath = ""
+  )
+
+  $selected = @()
+  foreach ($packageName in $PackageNames) {
+    $normalized = $packageName.Replace("-", "_")
+    $matches = @(
+      Get-ChildItem -LiteralPath $WheelDirectory -Filter "$normalized-*.whl"
+    )
+    if ($matches.Count -ne 1) {
+      throw "Expected exactly one wheel for $packageName."
+    }
+    $selected += $matches[0].FullName
+  }
+  $installArguments = @("-m", "pip", "install", "--no-index", "--no-deps")
+  if ($Target.Trim()) {
+    New-Item -ItemType Directory -Path $Target -Force | Out-Null
+    $installArguments += @(
+      "--target",
+      $Target,
+      "--upgrade",
+      "--ignore-installed"
+    )
+  }
+  $installArguments += $selected
+  if ($LogPath.Trim()) {
+    & $Python @installArguments *>> $LogPath
+  } else {
+    & $Python @installArguments
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "QuantX workspace wheel installation failed."
+  }
+}
+
+function Expand-ReleaseBundle {
+  if (-not $ReleasePath.Trim()) {
+    throw "Production install requires -ReleasePath <release.zip>."
+  }
+  $archive = [System.IO.Path]::GetFullPath($ReleasePath)
+  if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+    throw "Release archive does not exist: $archive"
+  }
+  $outerChecksum = "$archive.sha256"
+  if (Test-Path -LiteralPath $outerChecksum -PathType Leaf) {
+    $expected = (
+      (Get-Content -LiteralPath $outerChecksum -Raw).Trim() -split "\s+"
+    )[0]
+    $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+    if ($actual -cne $expected) {
+      throw "Release archive SHA256 verification failed."
+    }
+  } else {
+    throw "Release archive companion SHA256 file is missing."
+  }
+
+  $temporary = [System.IO.Path]::GetFullPath(
+    (Join-Path $ReleaseDirectory ".extract-$([guid]::NewGuid().ToString('N'))")
+  )
+  if (-not $temporary.StartsWith(
+    [System.IO.Path]::GetFullPath($ReleaseDirectory) +
+      [System.IO.Path]::DirectorySeparatorChar,
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+    throw "Temporary release path escaped the release directory."
+  }
+  New-Item -ItemType Directory -Path $temporary -Force | Out-Null
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
+    try {
+      foreach ($entry in $zip.Entries) {
+        $candidate = [System.IO.Path]::GetFullPath(
+          (Join-Path $temporary $entry.FullName)
+        )
+        if (-not (
+          $candidate -eq $temporary -or
+          $candidate.StartsWith(
+            $temporary + [System.IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase
+          )
+        )) {
+          throw "Release archive contains an unsafe path."
+        }
+      }
+    } finally {
+      $zip.Dispose()
+    }
+    Expand-Archive -LiteralPath $archive -DestinationPath $temporary -Force
+    $manifest = Test-ReleaseContents -Directory $temporary
+    $version = [string]$manifest.version
+    $target = [System.IO.Path]::GetFullPath(
+      (Join-Path $ReleaseDirectory $version)
+    )
+    if (-not $target.StartsWith(
+      [System.IO.Path]::GetFullPath($ReleaseDirectory) +
+        [System.IO.Path]::DirectorySeparatorChar,
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+      throw "Release version resolved outside the release directory."
+    }
+    if (Test-Path -LiteralPath $target) {
+      $installedManifest = Test-ReleaseContents -Directory $target
+      if ([string]$installedManifest.version -cne $version) {
+        throw "Installed release version identity is inconsistent."
+      }
+      return [pscustomobject]@{
+        Root = $target
+        Manifest = $installedManifest
+      }
+    }
+
+    if (-not (Test-Path -LiteralPath $ProductionConfigFile -PathType Leaf)) {
+      Copy-Item `
+        -LiteralPath (Join-Path $temporary "apps\api\.env.production") `
+        -Destination $ProductionConfigFile `
+        -Force
+      throw (
+        "Created the persistent production configuration at " +
+        "$ProductionConfigFile. Fill required secrets and endpoints, then " +
+        "run install again."
+      )
+    }
+    Move-Item -LiteralPath $temporary -Destination $target
+    return [pscustomobject]@{
+      Root = $target
+      Manifest = $manifest
+    }
+  } finally {
+    if (Test-Path -LiteralPath $temporary) {
+      Remove-Item -LiteralPath $temporary -Recurse -Force
+    }
+  }
+}
+
+function Install-ReleasePythonEnvironments {
+  param(
+    [Parameter(Mandatory = $true)][string]$ReleaseRoot,
+    [Parameter(Mandatory = $true)][string]$BasePython,
+    [Parameter(Mandatory = $true)][string]$QmtPython
+  )
+
+  foreach ($runtime in @($BasePython, $QmtPython)) {
+    $runtimeVersion = & $runtime -c "import platform; print(platform.python_version())"
+    if (
+      $LASTEXITCODE -ne 0 -or
+      [version]$runtimeVersion -ne [version]"3.13.9"
+    ) {
+      throw "Production server and QMT runtimes must both be Python 3.13.9."
+    }
+  }
+  $dependencyLog = Join-Path $ReleaseRoot "install-dependencies.log"
+  Set-Content -LiteralPath $dependencyLog -Value "" -Encoding utf8
+  $serverPython = Join-Path $ReleaseRoot ".venv\Scripts\python.exe"
+  & $BasePython -m venv (Join-Path $ReleaseRoot ".venv")
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to create the production server virtual environment."
+  }
+  $serverRequirements = Join-Path $ReleaseRoot "requirements\server.lock"
+  $serverWheelhouse = Join-Path $ReleaseRoot "wheelhouse\server"
+  & $serverPython -m pip install `
+    --no-index `
+    --find-links $serverWheelhouse `
+    --requirement $serverRequirements *>> $dependencyLog
+  if ($LASTEXITCODE -ne 0) {
+    throw "Offline server dependency installation failed."
+  }
+  Install-WorkspaceWheels `
+    -Python $serverPython `
+    -WheelDirectory (Join-Path $ReleaseRoot "wheels") `
+    -PackageNames @(
+      "quantx-api",
+      "quantx-ai-runtime",
+      "quantx-engine",
+      "quantx-monitor",
+      "quantx-worker",
+      "quantx-application",
+      "quantx-contracts",
+      "quantx-domain",
+      "quantx-infrastructure"
+    ) `
+    -LogPath $dependencyLog
+
+  $qmtTarget = Join-Path $ReleaseRoot "qmt-site-packages"
+  New-Item -ItemType Directory -Path $qmtTarget -Force | Out-Null
+  $qmtInstallerRoot = Join-Path $ReleaseRoot ".qmt-installer"
+  $qmtInstallerPython = Join-Path $qmtInstallerRoot "Scripts\python.exe"
+  & $BasePython -m venv $qmtInstallerRoot
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to create the isolated QMT dependency installer."
+  }
+  try {
+    & $qmtInstallerPython -m pip install `
+      --no-index `
+      --find-links (Join-Path $ReleaseRoot "wheelhouse\qmt") `
+      --requirement (Join-Path $ReleaseRoot "requirements\qmt-agent.lock") `
+      --target $qmtTarget `
+      --upgrade `
+      --ignore-installed *>> $dependencyLog
+    if ($LASTEXITCODE -ne 0) {
+      throw "Offline QMT Agent dependency installation failed."
+    }
+    Install-WorkspaceWheels `
+      -Python $qmtInstallerPython `
+      -WheelDirectory (Join-Path $ReleaseRoot "wheels") `
+      -PackageNames @("quantx-contracts", "quantx-qmt-agent") `
+      -Target $qmtTarget `
+      -LogPath $dependencyLog
+  } finally {
+    if (Test-Path -LiteralPath $qmtInstallerRoot -PathType Container) {
+      Remove-Item -LiteralPath $qmtInstallerRoot -Recurse -Force
+    }
+  }
+  return $serverPython
+}
+
+function Install-ReleaseTools {
+  param([Parameter(Mandatory = $true)][string]$ReleaseRoot)
+
+  foreach ($name in @("caddy", "winsw")) {
+    $source = Join-Path $ReleaseRoot "tools\$name"
+    $destination = Join-Path $ToolsDirectory $name
+    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+    Copy-Item -Path (Join-Path $source "*") -Destination $destination `
+      -Recurse -Force
+  }
+}
+
+function Set-CurrentRelease {
+  param(
+    [Parameter(Mandatory = $true)][string]$ReleaseRoot,
+    [Parameter(Mandatory = $true)][string]$Version
+  )
+
+  $previousVersion = ""
+  if (Test-Path -LiteralPath $ReleaseStateFile -PathType Leaf) {
+    $oldState = Get-Content -LiteralPath $ReleaseStateFile -Raw |
+      ConvertFrom-Json
+    $previousVersion = [string]$oldState.current
+  }
+  if (Test-Path -LiteralPath $CurrentReleaseLink) {
+    $item = Get-Item -LiteralPath $CurrentReleaseLink -Force
+    if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      throw "Refusing to replace a non-link current path."
+    }
+    Remove-Item -LiteralPath $CurrentReleaseLink -Force
+  }
+  New-Item -ItemType Junction -Path $CurrentReleaseLink -Target $ReleaseRoot |
+    Out-Null
+  [pscustomobject]@{
+    current = $Version
+    previous = $previousVersion
+    activatedAt = [datetime]::UtcNow.ToString("o")
+  } | ConvertTo-Json | Set-Content -LiteralPath $ReleaseStateFile -Encoding utf8
+}
+
+function Install-AndStartServices {
+  param(
+    [Parameter(Mandatory = $true)][string]$Python,
+    [Parameter(Mandatory = $true)][string]$QmtPython,
+    [Parameter(Mandatory = $true)][string]$ServiceRoot
+  )
+
+  New-ServiceConfigurations `
+    -Python $Python `
+    -QmtPython $QmtPython `
+    -ServiceRoot $ServiceRoot
+  Install-QmtAgentHealthFirewallRule
+  $configs = Get-ServiceConfigurationNames
+  $configs = @(
+    $configs
+  )
+  $installed = @()
+  try {
+    foreach ($config in $configs) {
+      $wrapper = Join-Path `
+        $ServiceDirectory `
+        "$([System.IO.Path]::GetFileNameWithoutExtension($config)).exe"
+      & $wrapper install
+      if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install service config $config."
+      }
+      $installed += $wrapper
+    }
+  } catch {
+    [array]::Reverse($installed)
+    foreach ($wrapper in $installed) {
+      & $wrapper uninstall
+    }
+    Remove-QmtAgentHealthFirewallRule
+    throw
+  }
+  $started = @()
+  try {
+    Initialize-PrefectEnvironment
+    Wait-HttpReady `
+      -Name "External Prefect Server" `
+      -Url "$env:PREFECT_API_URL/health" `
+      -TimeoutSeconds 90
+    Invoke-PrefectPreparation `
+      -Python $Python `
+      -ApplicationRoot $ServiceRoot
+    foreach ($config in $configs) {
+      $wrapper = Join-Path `
+        $ServiceDirectory `
+        "$([System.IO.Path]::GetFileNameWithoutExtension($config)).exe"
+      & $wrapper start
+      if ($LASTEXITCODE -ne 0) {
+        throw "Failed to start service config $config."
+      }
+      $started += $wrapper
+    }
+  } catch {
+    [array]::Reverse($started)
+    foreach ($wrapper in $started) {
+      & $wrapper stop
+    }
+    [array]::Reverse($installed)
+    foreach ($wrapper in $installed) {
+      & $wrapper uninstall
+    }
+    Remove-QmtAgentHealthFirewallRule
+    throw
+  }
+  Write-Host "QuantX WinSW services were installed." -ForegroundColor Green
+}
+
+function Install-QmtAgentHealthFirewallRule {
+  $existing = Get-NetFirewallRule `
+    -Name $QmtAgentHealthFirewallRule `
+    -ErrorAction SilentlyContinue
+  if ($existing) {
+    Remove-NetFirewallRule -Name $QmtAgentHealthFirewallRule
+  }
+  New-NetFirewallRule `
+    -Name $QmtAgentHealthFirewallRule `
+    -DisplayName "QuantX QMT Agent read-only health" `
+    -Description "Allow the read-only QMT Agent health listener on Private networks." `
+    -Enabled True `
+    -Profile Private `
+    -Direction Inbound `
+    -Action Allow `
+    -Protocol TCP `
+    -LocalPort $QmtAgentHealthPort |
+    Out-Null
+}
+
+function Remove-QmtAgentHealthFirewallRule {
+  $existing = Get-NetFirewallRule `
+    -Name $QmtAgentHealthFirewallRule `
+    -ErrorAction SilentlyContinue
+  if ($existing) {
+    Remove-NetFirewallRule -Name $QmtAgentHealthFirewallRule
+  }
+}
+
+function Register-ProductionMaintenance {
+  $scheduledTaskCommand = Get-Command Register-ScheduledTask `
+    -ErrorAction SilentlyContinue
+  if (-not $scheduledTaskCommand) {
+    Write-Warning "ScheduledTasks module is unavailable; register backup manually."
+    return
+  }
+  $powerShellCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+  if ($powerShellCommand) {
+    $powerShell = $powerShellCommand.Source
+  } else {
+    $powerShell = (Get-Command powershell -ErrorAction Stop).Source
+  }
+  $arguments = (
+    '-NoProfile -ExecutionPolicy Bypass -File "{0}" backup ' +
+    '-Environment production'
+  ) -f $PSCommandPath
+  $action = New-ScheduledTaskAction `
+    -Execute $powerShell `
+    -Argument $arguments `
+    -WorkingDirectory $Root
+  $trigger = New-ScheduledTaskTrigger `
+    -Daily `
+    -At "16:30"
+  $settings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+  Register-ScheduledTask `
+    -TaskName "QuantX-Daily-Backup" `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -RunLevel Highest `
+    -Force |
+    Out-Null
 }
 
 function Register-DevBackupMaintenance {
@@ -2251,6 +2930,137 @@ function Register-DevBackupMaintenance {
   }
 }
 
+function Install-CaddyRootCertificate {
+  $certificate = Join-Path `
+    $Runtime `
+    "caddy-data\caddy\pki\authorities\local\root.crt"
+  $deadline = [datetime]::UtcNow.AddSeconds(60)
+  while (
+    -not (Test-Path -LiteralPath $certificate -PathType Leaf) -and
+    [datetime]::UtcNow -lt $deadline
+  ) {
+    Start-Sleep -Seconds 1
+  }
+  if (-not (Test-Path -LiteralPath $certificate -PathType Leaf)) {
+    throw "Caddy local CA root was not generated in time."
+  }
+  $importCommand = Get-Command Import-Certificate -ErrorAction SilentlyContinue
+  if ($importCommand) {
+    Import-Certificate `
+      -FilePath $certificate `
+      -CertStoreLocation "Cert:\LocalMachine\Root" |
+      Out-Null
+  } else {
+    & certutil.exe -addstore -f Root $certificate *> $null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Caddy local CA trust installation failed."
+    }
+  }
+}
+
+function Invoke-Install {
+  if ($Environment -ne "production") {
+    throw "WinSW release installation requires -Environment production."
+  }
+  Assert-Administrator
+  Import-QuantXEnvironment
+  if (Test-Path -LiteralPath $AgentModeFile -PathType Leaf) {
+    $agentState = Get-Content -LiteralPath $AgentModeFile -Raw |
+      ConvertFrom-Json
+    if ([string]$agentState.mode -eq "live") {
+      throw "Set agent-mode to data-only before installing a release."
+    }
+  }
+  $release = Expand-ReleaseBundle
+  $releaseRoot = [string]$release.Root
+  try {
+    $basePython = Resolve-Python
+    $qmtPython = Resolve-Python -Qmt
+    $serverPython = Install-ReleasePythonEnvironments `
+      -ReleaseRoot $releaseRoot `
+      -BasePython $basePython `
+      -QmtPython $qmtPython
+    Install-ReleaseTools -ReleaseRoot $releaseRoot
+
+    $env:QUANTX_ROOT = $releaseRoot
+    $env:QUANTX_ENV_FILE = $ProductionConfigFile
+    $env:QUANTX_AGENT_STATE_DIR = Join-Path $Runtime "qmt-agent"
+    & $serverPython -c (
+      "from quantx_infrastructure.config.settings import settings; " +
+      "settings.validate_production(); print('configuration=valid')"
+    )
+    if ($LASTEXITCODE -ne 0) {
+      throw "Production configuration validation failed."
+    }
+    Assert-QmtAgentEnrollment `
+      -Python $qmtPython `
+      -ServiceRoot $releaseRoot
+    Invoke-MigrateAtRoot -Python $serverPython -ApplicationRoot $releaseRoot
+
+    if (Test-Path -LiteralPath (
+      Join-Path $ServiceDirectory "quantx-api.exe"
+    )) {
+      Invoke-Uninstall
+    }
+    Set-CurrentRelease `
+      -ReleaseRoot $releaseRoot `
+      -Version ([string]$release.Manifest.version)
+    Initialize-PrefectEnvironment
+    Install-AndStartServices `
+      -Python $serverPython `
+      -QmtPython $qmtPython `
+      -ServiceRoot $CurrentReleaseLink
+
+    Wait-TcpReady -Name "Caddy HTTPS" -Port 8080 -TimeoutSeconds 60
+    Install-CaddyRootCertificate
+    Invoke-Verify
+    Register-ProductionMaintenance
+  } catch {
+    Write-Warning (
+      "Release files were retained for diagnosis, but activation did not " +
+      "complete: $($_.Exception.Message)"
+    )
+    throw
+  }
+  Write-Host (
+    "QuantX release $($release.Manifest.version) is installed and verified."
+  ) -ForegroundColor Green
+}
+
+function Invoke-Uninstall {
+  Assert-Administrator
+  $winswSource = Join-Path $ToolsDirectory "winsw\WinSW-x64.exe"
+  if (-not (Test-Path -LiteralPath $winswSource -PathType Leaf)) {
+    throw "WinSW is missing. Run bootstrap first."
+  }
+  $configs = @(
+    "quantx-qmt-agent.xml",
+    "quantx-caddy.xml",
+    "quantx-market-data-service.xml",
+    "quantx-monitor.xml",
+    "quantx-worker.xml",
+    "quantx-prefect-server.xml",
+    "quantx-ai-runtime.xml",
+    "quantx-engine.xml",
+    "quantx-api.xml"
+  )
+  foreach ($config in $configs) {
+    $path = Join-Path $ServiceDirectory $config
+    $wrapper = Join-Path `
+      $ServiceDirectory `
+      "$([System.IO.Path]::GetFileNameWithoutExtension($config)).exe"
+    if (
+      (Test-Path -LiteralPath $path -PathType Leaf) -and
+      (Test-Path -LiteralPath $wrapper -PathType Leaf)
+    ) {
+      & $wrapper stop
+      & $wrapper uninstall
+    }
+  }
+  Remove-QmtAgentHealthFirewallRule
+  Write-Host "QuantX WinSW services were uninstalled." -ForegroundColor Green
+}
+
 function Invoke-Doctor {
   Import-QuantXEnvironment
   $python = Resolve-Python
@@ -2262,16 +3072,40 @@ function Invoke-Doctor {
   if ($parsed -lt [version]"3.11" -or $parsed -ge [version]"3.14") {
     throw "Python $version is unsupported; expected >=3.11,<3.14."
   }
-  $node = Resolve-Node
-  $nodeVersion = (& $node --version).TrimStart("v")
-  if (([version]$nodeVersion).Major -ne 20) {
-    Write-Warning "Node 20.x is the supported build runtime; found $nodeVersion."
+  if ($Environment -eq "production" -and $parsed -ne [version]"3.13.9") {
+    throw "Production requires the validated Python 3.13.9 runtime."
   }
-  foreach ($required in @("pyproject.toml", "uv.lock", "package-lock.json")) {
-    if (-not (
-      Test-Path -LiteralPath (Join-Path $Root $required) -PathType Leaf
-    )) {
-      throw "Required locked workspace file is missing: $required"
+
+  $nodeVersion = ""
+  if ($Environment -eq "production") {
+    if (-not (Test-Path -LiteralPath $CurrentReleaseLink -PathType Container)) {
+      throw "No current versioned production release is active."
+    }
+    $manifest = Test-ReleaseContents -Directory $CurrentReleaseLink
+    try {
+      $releaseNodeVersion = [version][string]$manifest.node
+    } catch {
+      throw "Release build runtime manifest contains an invalid Node version."
+    }
+    if (
+      [string]$manifest.python -cne "3.13.9" -or
+      $releaseNodeVersion.Major -ne 20
+    ) {
+      throw "Release build runtime manifest is not production-approved."
+    }
+    $nodeVersion = "packaged-$($releaseNodeVersion.ToString())"
+  } else {
+    $node = Resolve-Node
+    $nodeVersion = (& $node --version).TrimStart("v")
+    if (([version]$nodeVersion).Major -ne 20) {
+      Write-Warning "Node 20.x is the supported build runtime; found $nodeVersion."
+    }
+    foreach ($required in @("pyproject.toml", "uv.lock", "package-lock.json")) {
+      if (-not (
+        Test-Path -LiteralPath (Join-Path $Root $required) -PathType Leaf
+      )) {
+        throw "Required locked workspace file is missing: $required"
+      }
     }
   }
 
@@ -2663,7 +3497,14 @@ function Invoke-RestoreVerify {
     throw "Generated restore verification database name is unsafe."
   }
   $python = Resolve-Python
-  $applicationRoot = $Root
+  $applicationRoot = if (
+    $Environment -eq "production" -and
+    (Test-Path -LiteralPath $CurrentReleaseLink -PathType Container)
+  ) {
+    $CurrentReleaseLink
+  } else {
+    $Root
+  }
   $previousPassword = $env:PGPASSWORD
   $previousDatabaseUrl = $env:DATABASE_URL
   $previousPythonPath = $env:PYTHONPATH
@@ -2715,7 +3556,11 @@ function Invoke-RestoreVerify {
       $connection.Port,
       $scratchDatabase
     )
-    $env:PYTHONPATH = Get-WorkspacePythonPath
+    $env:PYTHONPATH = if ($Environment -eq "production") {
+      ""
+    } else {
+      Get-WorkspacePythonPath
+    }
     $env:QUANTX_ROOT = $applicationRoot
     Invoke-RestoreVerificationSchemaGate `
       -Python $python `
@@ -2781,7 +3626,11 @@ function Invoke-MigrateAtRoot {
   $previousPythonPath = $env:PYTHONPATH
   $previousRoot = $env:QUANTX_ROOT
   try {
-    $env:PYTHONPATH = Get-WorkspacePythonPath
+    $env:PYTHONPATH = if ($Environment -eq "production") {
+      ""
+    } else {
+      Get-WorkspacePythonPath
+    }
     $env:QUANTX_ROOT = $ApplicationRoot
     $statusText = & $Python -m `
       quantx_infrastructure.database.schema_control status
@@ -2841,14 +3690,26 @@ function Invoke-MigrateAtRoot {
 function Invoke-Migrate {
   Import-QuantXEnvironment
   $python = Resolve-Python
+  $applicationRoot = if (
+    $Environment -eq "production" -and
+    (Test-Path -LiteralPath $CurrentReleaseLink -PathType Container)
+  ) {
+    $CurrentReleaseLink
+  } else {
+    $Root
+  }
   Invoke-MigrateAtRoot `
     -Python $python `
-    -ApplicationRoot $Root
+    -ApplicationRoot $applicationRoot
 }
 
 function Invoke-Verify {
   Import-QuantXEnvironment
-  $baseUrl = "http://127.0.0.1:8080"
+  $baseUrl = if ($Environment -eq "production") {
+    "https://127.0.0.1:8080"
+  } else {
+    "http://127.0.0.1:8080"
+  }
   foreach ($endpoint in @("/health/live", "/health/ready")) {
     $response = Invoke-WebRequest `
       -Uri "$baseUrl$endpoint" `
@@ -2869,7 +3730,156 @@ function Invoke-Verify {
   if ($graphql.StatusCode -ne 200) {
     throw "GraphQL gateway verification failed."
   }
+  if ($Environment -eq "production") {
+    $python = Resolve-Python
+    $previousPythonPath = $env:PYTHONPATH
+    try {
+      $env:PYTHONPATH = Get-WorkspacePythonPath
+      & $python -m quantx_infrastructure.database.schema_control check
+      if ($LASTEXITCODE -ne 0) {
+        throw "Production database revision verification failed."
+      }
+    } finally {
+      $env:PYTHONPATH = $previousPythonPath
+    }
+  }
   Write-Host "Gateway and schema verification passed." -ForegroundColor Green
+}
+
+function Invoke-Rollback {
+  if ($Environment -ne "production") {
+    throw "Rollback requires -Environment production."
+  }
+  Assert-Administrator
+  if (-not (Test-Path -LiteralPath $ReleaseStateFile -PathType Leaf)) {
+    throw "No versioned release state exists; rollback is unavailable."
+  }
+  if (Test-Path -LiteralPath $AgentModeFile -PathType Leaf) {
+    $agentState = Get-Content -LiteralPath $AgentModeFile -Raw |
+      ConvertFrom-Json
+    if ([string]$agentState.mode -eq "live") {
+      throw "Set agent-mode to data-only before rollback."
+    }
+  }
+  $state = Get-Content -LiteralPath $ReleaseStateFile -Raw | ConvertFrom-Json
+  if (-not $state.previous) {
+    throw "No previous release is retained."
+  }
+  $previous = [System.IO.Path]::GetFullPath(
+    (Join-Path $ReleaseDirectory ([string]$state.previous))
+  )
+  $releaseRoot = [System.IO.Path]::GetFullPath($ReleaseDirectory)
+  if (
+    -not $previous.StartsWith(
+      $releaseRoot + [System.IO.Path]::DirectorySeparatorChar,
+      [StringComparison]::OrdinalIgnoreCase
+    ) -or
+    -not (Test-Path -LiteralPath $previous -PathType Container)
+  ) {
+    throw "Previous release target is invalid."
+  }
+  $manifest = Test-ReleaseContents -Directory $previous
+  $previousPython = Join-Path $previous ".venv\Scripts\python.exe"
+  if (-not (Test-Path -LiteralPath $previousPython -PathType Leaf)) {
+    throw "Previous release server environment is missing."
+  }
+  Import-QuantXEnvironment
+  $oldRoot = $env:QUANTX_ROOT
+  try {
+    $env:QUANTX_ROOT = $previous
+    & $previousPython -m quantx_infrastructure.database.schema_control check
+    if ($LASTEXITCODE -ne 0) {
+      throw (
+        "Previous release is not compatible with the current database " +
+        "revision; automatic database downgrade is forbidden."
+      )
+    }
+  } finally {
+    $env:QUANTX_ROOT = $oldRoot
+  }
+
+  Invoke-Uninstall
+  Set-CurrentRelease `
+    -ReleaseRoot $previous `
+    -Version ([string]$manifest.version)
+  $qmtPython = Resolve-Python -Qmt
+  Install-AndStartServices `
+    -Python (Join-Path $CurrentReleaseLink ".venv\Scripts\python.exe") `
+    -QmtPython $qmtPython `
+    -ServiceRoot $CurrentReleaseLink
+  Invoke-Verify
+  Write-Host "Release rolled back and verified: $($state.previous)" `
+    -ForegroundColor Green
+}
+
+function Invoke-AgentMode {
+  Import-QuantXEnvironment
+  if ($Mode -ne "data-only" -and -not $AccountId.Trim()) {
+    throw "$Mode mode requires -AccountId."
+  }
+  if ($Mode -eq "live") {
+    if ($Environment -ne "production") {
+      throw "Managed live mode requires -Environment production."
+    }
+    $expected = "LIVE:$($AccountId.Trim())"
+    if ($ConfirmLive -cne $expected) {
+      throw "Live mode requires -ConfirmLive '$expected'."
+    }
+    foreach ($name in @(
+      "ENABLE_REAL_TRADING",
+      "QMT_REAL_TRADING_ENABLED",
+      "T_TRADE_LIVE_ENABLED"
+    )) {
+      $flag = [Environment]::GetEnvironmentVariable($name)
+      if (-not $flag -or $flag.Trim().ToLowerInvariant() -ne "true") {
+        throw "$name=true is required for managed live mode."
+      }
+    }
+    $allowlist = @(
+      ConvertFrom-ListSetting -Value (
+        [Environment]::GetEnvironmentVariable(
+          "REAL_TRADING_ACCOUNT_ALLOWLIST"
+        )
+      )
+    )
+    if ($AccountId.Trim() -notin $allowlist) {
+      throw "Account is not present in REAL_TRADING_ACCOUNT_ALLOWLIST."
+    }
+    Invoke-Doctor
+  }
+
+  Ensure-RuntimeDirectories
+  [pscustomobject]@{
+    mode = $Mode
+    accountId = if ($Mode -eq "data-only") { "" } else { $AccountId.Trim() }
+    changedAt = [datetime]::UtcNow.ToString("o")
+    reason = $Reason.Trim()
+  } | ConvertTo-Json | Set-Content -LiteralPath $AgentModeFile -Encoding utf8
+
+  $qmtWrapper = Join-Path $ServiceDirectory "quantx-qmt-agent.exe"
+  if (Test-Path -LiteralPath $qmtWrapper -PathType Leaf) {
+    Assert-Administrator
+    & $qmtWrapper stop
+    $python = Resolve-Python
+    $qmtPython = Resolve-Python -Qmt
+    $serviceRoot = if (
+      $Environment -eq "production" -and
+      (Test-Path -LiteralPath $CurrentReleaseLink -PathType Container)
+    ) {
+      $CurrentReleaseLink
+    } else {
+      $Root
+    }
+    New-ServiceConfigurations `
+      -Python $python `
+      -QmtPython $qmtPython `
+      -ServiceRoot $serviceRoot
+    & $qmtWrapper start
+    if ($LASTEXITCODE -ne 0) {
+      throw "QMT Agent service failed to restart in $Mode mode."
+    }
+  }
+  Write-Host "QMT Agent mode configured as $Mode." -ForegroundColor Green
 }
 
 Ensure-RuntimeDirectories
@@ -2888,9 +3898,13 @@ switch ($Command) {
   "status" { Invoke-Status }
   "logs" { Invoke-Logs }
   "bootstrap" { Invoke-Bootstrap }
+  "install" { Invoke-Install }
+  "uninstall" { Invoke-Uninstall }
   "doctor" { Invoke-Doctor }
+  "agent-mode" { Invoke-AgentMode }
   "backup" { Invoke-Backup }
   "restore-verify" { Invoke-RestoreVerify }
   "migrate" { Invoke-Migrate }
   "verify" { Invoke-Verify }
+  "rollback" { Invoke-Rollback }
 }

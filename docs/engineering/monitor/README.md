@@ -17,9 +17,9 @@
 
 普通 QuantX `up/down` 不启停 Monitor。开发进程状态写入
 `.runtime/monitor/dev-process.json`，历史库默认位于
-`.runtime/monitor/quantx-monitor.sqlite3`。生产环境使用独立单副本 StatefulSet
-和专属 PVC，不能与主服务共享生命周期。开发内部端口为 `127.0.0.1:18083`；
-生产只公开 ClusterIP，统一入口通过 Gateway 的 `/monitor/*` 转发。
+`.runtime/monitor/quantx-monitor.sqlite3`。生产发布安装 `QuantXMonitor` WinSW
+自动服务，使用相同的持久化运行目录。内部端口为 `127.0.0.1:18083`；唯一公共
+入口仍是 Caddy `8080` 下的 `/monitor/*`。
 
 ## 检测模型
 
@@ -58,7 +58,7 @@ SQLite 使用 WAL、事务写入和版本化 schema：
 - 每次检测保存观测状态、去抖后的有效状态、耗时、HTTP 状态码和稳定原因码；
 - 活动事故与关闭时间持久化，Monitor 重启后继续沿用连续计数和事故状态。
 
-开发环境统一 `backup` 在历史库存在时通过 SQLite online backup API 写入
+统一 `backup` 在历史库存在时通过 SQLite online backup API 写入
 `monitor/quantx-monitor.sqlite3`，`restore-verify` 会校验清单、哈希和
 `PRAGMA integrity_check`。历史库尚未产生时，备份明确告警但不阻塞数据库和 QMT
 journal 的既有备份。

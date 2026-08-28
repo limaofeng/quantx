@@ -13,7 +13,7 @@ param(
   )]
   [string]$Command = "status",
 
-  [ValidateSet("dev", "production")]
+  [ValidateSet("dev")]
   [string]$Environment = "dev",
 
   [string]$AccountId = "",
@@ -38,21 +38,13 @@ $Runtime = Join-Path $Root ".runtime"
 $StateDirectory = Join-Path $Runtime "state"
 $LogDirectory = Join-Path $Runtime "logs"
 $AgentStateDirectory = Join-Path $Runtime "qmt-agent"
-$AgentProductionConfigFile = Join-Path $AgentStateDirectory ".env.production"
 $CertificateDirectory = Join-Path $Runtime "certs"
 $DefaultCaFile = Join-Path $CertificateDirectory "mac-dev-root.crt"
 $ManagedStateFile = Join-Path $StateDirectory "qmt-agent.json"
 $SupervisorStateFile = Join-Path $StateDirectory "qmt-agent-supervisor.json"
 $LaunchLogFile = Join-Path $LogDirectory "qmt-agent-launch.log"
-$TaskName = if ($Environment -eq "production") {
-  "QuantX-Production-QmtAgent"
-} else {
-  "QuantX-Dev-QmtAgent"
-}
+$TaskName = "QuantX-Dev-QmtAgent"
 $DefaultQmtCondaEnvironment = "xtquant-demo"
-$QmtAgentHealthHost = "0.0.0.0"
-$QmtAgentHealthPort = 18084
-$QmtAgentHealthFirewallRule = "QuantX-QMT-Agent-Health-18084"
 
 function Ensure-AgentDirectories {
   foreach ($path in @(
@@ -102,15 +94,10 @@ function Import-AgentEnvironment {
   )) {
     $null = $processOverrides.Add([string]$existingName)
   }
-  $environmentFiles = if ($Environment -eq "production") {
-    @($AgentProductionConfigFile)
-  } else {
-    @(
-      (Join-Path $Root "apps\api\.env"),
-      (Join-Path $Root "apps\api\.env.development")
-    )
-  }
-  foreach ($file in $environmentFiles) {
+  foreach ($file in @(
+    (Join-Path $Root "apps\api\.env"),
+    (Join-Path $Root "apps\api\.env.development")
+  )) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
       continue
     }
@@ -215,7 +202,7 @@ function Resolve-LiveAccount {
 function Set-AgentLiveEnvironment {
   param([Parameter(Mandatory = $true)][string]$LiveAccount)
 
-  $env:ENV = if ($Environment -eq "production") { "production" } else { "testing" }
+  $env:ENV = "testing"
   $env:QMT_AGENT_MODE = "live"
   $env:QMT_ACCOUNT_WHITELIST = $LiveAccount
   $env:ENABLE_REAL_TRADING = "true"
@@ -224,80 +211,6 @@ function Set-AgentLiveEnvironment {
   $env:PYTHONUTF8 = "1"
   $env:PYTHONIOENCODING = "utf-8"
   $env:QUANTX_AGENT_STATE_DIR = $AgentStateDirectory
-  $env:QMT_AGENT_HEALTH_HOST = $QmtAgentHealthHost
-  $env:QMT_AGENT_HEALTH_PORT = $QmtAgentHealthPort.ToString(
-    [Globalization.CultureInfo]::InvariantCulture
-  )
-}
-
-function Test-IsAdministrator {
-  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-  $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-  return $principal.IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator
-  )
-}
-
-function Test-QmtAgentHealthFirewallRule {
-  $rules = @(
-    Get-NetFirewallRule `
-      -Name $QmtAgentHealthFirewallRule `
-      -ErrorAction SilentlyContinue
-  )
-  if ($rules.Count -ne 1) {
-    return $false
-  }
-
-  $rule = $rules[0]
-  $portFilters = @($rule | Get-NetFirewallPortFilter)
-  $addressFilters = @($rule | Get-NetFirewallAddressFilter)
-  if ($portFilters.Count -ne 1 -or $addressFilters.Count -ne 1) {
-    return $false
-  }
-
-  $portFilter = $portFilters[0]
-  $addressFilter = $addressFilters[0]
-  return (
-    [string]$rule.Enabled -eq "True" -and
-    [string]$rule.Profile -eq "Private" -and
-    [string]$rule.Direction -eq "Inbound" -and
-    [string]$rule.Action -eq "Allow" -and
-    [string]$portFilter.Protocol -in @("TCP", "6") -and
-    [string]$portFilter.LocalPort -eq [string]$QmtAgentHealthPort -and
-    [string]$addressFilter.RemoteAddress -eq "Any"
-  )
-}
-
-function Install-QmtAgentHealthFirewallRule {
-  if (Test-QmtAgentHealthFirewallRule) {
-    return
-  }
-  if (-not (Test-IsAdministrator)) {
-    throw (
-      "QMT Agent health requires an inbound Private-network firewall rule. " +
-      "Run this command once from an elevated PowerShell terminal; later " +
-      "starts do not require elevation while the rule remains unchanged."
-    )
-  }
-
-  $existing = Get-NetFirewallRule `
-    -Name $QmtAgentHealthFirewallRule `
-    -ErrorAction SilentlyContinue
-  if ($existing) {
-    Remove-NetFirewallRule -Name $QmtAgentHealthFirewallRule
-  }
-  New-NetFirewallRule `
-    -Name $QmtAgentHealthFirewallRule `
-    -DisplayName "QuantX QMT Agent read-only health" `
-    -Description "Allow the read-only QMT Agent health listener on Private networks." `
-    -Enabled True `
-    -Profile Private `
-    -Direction Inbound `
-    -Action Allow `
-    -Protocol TCP `
-    -LocalPort $QmtAgentHealthPort `
-    -RemoteAddress Any |
-    Out-Null
 }
 
 function Mask-Identifier {
@@ -371,20 +284,6 @@ function Read-JsonState {
   }
 }
 
-function Get-ManagedEnvironment {
-  param([AllowNull()][object]$ManagedState)
-
-  if ($null -eq $ManagedState) {
-    return ""
-  }
-  $environmentProperty = $ManagedState.PSObject.Properties["environment"]
-  if ($environmentProperty -and ([string]$environmentProperty.Value).Trim()) {
-    return ([string]$environmentProperty.Value).Trim()
-  }
-  # State written before the production edge-node mode existed was dev-only.
-  return "dev"
-}
-
 function Get-SupervisorProcess {
   param([object]$ManagedState)
 
@@ -448,7 +347,7 @@ function Test-PublicApi {
     -UseBasicParsing `
     -TimeoutSec 8
   if ($response.StatusCode -ne 200) {
-    throw "QuantX public API is not live: HTTP $($response.StatusCode)"
+    throw "Mac public API is not live: HTTP $($response.StatusCode)"
   }
 }
 
@@ -461,16 +360,9 @@ function Assert-AgentTransportTrust {
     Remove-Item Env:SSL_CERT_FILE -ErrorAction SilentlyContinue
     return
   }
-  if ($Environment -eq "production") {
-    # Production ingress must use a certificate trusted by the Windows host.
-    # Do not copy a Kubernetes-internal or development CA onto the execution node.
-    Remove-Item Env:QUANTX_AGENT_CA_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:SSL_CERT_FILE -ErrorAction SilentlyContinue
-    return
-  }
   if (-not (Test-Path -LiteralPath $DefaultCaFile -PathType Leaf)) {
     throw (
-      "Development HTTPS registration requires the Caddy root CA at " +
+      "HTTPS Agent registration requires the Mac Caddy public root CA at " +
       "$DefaultCaFile."
     )
   }
@@ -493,7 +385,7 @@ function Test-QmtPythonApi {
     "response.raise_for_status();client.close()"
   ) ($BaseUrl.TrimEnd("/"))
   if ($LASTEXITCODE -ne 0) {
-    throw "QMT Python cannot verify or reach the QuantX public API."
+    throw "QMT Python cannot verify or reach the Mac public API."
   }
 }
 
@@ -567,7 +459,7 @@ function Register-AgentTask {
   }
   $arguments = (
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-    '-File "{0}" internal-run -Environment {1}' -f $PSCommandPath, $Environment
+    '-File "{0}" internal-run -Environment dev' -f $PSCommandPath
   )
   if ($AccountId.Trim()) {
     $arguments += ' -AccountId "{0}"' -f $AccountId.Trim()
@@ -599,7 +491,6 @@ function Invoke-Up {
   Ensure-AgentDirectories
   Import-AgentEnvironment
   $liveAccount = Resolve-LiveAccount -RequestedAccountId $AccountId
-  Install-QmtAgentHealthFirewallRule
   $device = Get-DeviceMetadata
   if ($ApiUrl.Trim() -and $device.ApiUrl -ne $ApiUrl.Trim().TrimEnd("/")) {
     throw (
@@ -609,37 +500,11 @@ function Invoke-Up {
   }
   $existingState = Read-JsonState -Path $ManagedStateFile
   $existingProcess = Get-SupervisorProcess -ManagedState $existingState
-  $existingEnvironment = Get-ManagedEnvironment -ManagedState $existingState
   $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-  $otherTaskName = if ($Environment -eq "production") {
-    "QuantX-Dev-QmtAgent"
-  } else {
-    "QuantX-Production-QmtAgent"
-  }
-  $otherTask = Get-ScheduledTask `
-    -TaskName $otherTaskName `
-    -ErrorAction SilentlyContinue
-  if ($otherTask -and $otherTask.State -eq "Running") {
-    throw (
-      "Another QMT Agent task is already running: $otherTaskName. " +
-      "Stop that environment before starting $Environment."
-    )
-  }
-  if (
-    $existingProcess -and
-    $existingEnvironment -eq $Environment -and
-    $task -and
-    $task.State -eq "Running"
-  ) {
+  if ($existingProcess -and $task -and $task.State -eq "Running") {
     Write-Host "QMT Agent is already running under the managed task."
     Invoke-Status
     return
-  }
-  if ($existingProcess) {
-    throw (
-      "A managed QMT Agent is already running for environment " +
-      "'$existingEnvironment'. Stop it before starting '$Environment'."
-    )
   }
   if ($task -and $task.State -eq "Running") {
     throw "The QMT Agent task is running but its supervisor identity is unknown."
@@ -672,9 +537,8 @@ function Invoke-Up {
         -ErrorAction SilentlyContinue
       if ($process) {
         $state = [pscustomobject]@{
-          schemaVersion = 2
+          schemaVersion = 1
           status = "RUNNING"
-          environment = $Environment
           supervisorPid = $process.Id
           supervisorStartedAt = $process.StartTime.ToUniversalTime().ToString("o")
           taskName = $TaskName
@@ -711,13 +575,6 @@ function Invoke-Down {
   $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   $state = Read-JsonState -Path $ManagedStateFile
   $process = Get-SupervisorProcess -ManagedState $state
-  $managedEnvironment = Get-ManagedEnvironment -ManagedState $state
-  if ($process -and $managedEnvironment -ne $Environment) {
-    throw (
-      "The running QMT Agent belongs to environment '$managedEnvironment'. " +
-      "Use -Environment $managedEnvironment to stop it."
-    )
-  }
   if ($task -and $task.State -eq "Running") {
     Stop-ScheduledTask -TaskName $TaskName
   }
@@ -730,7 +587,7 @@ function Invoke-Down {
     Stop-Process -Id $process.Id -Force
     $process.WaitForExit(5000) | Out-Null
   }
-  if ($state -and $managedEnvironment -eq $Environment) {
+  if ($state) {
     $state.status = "STOPPED"
     $state | Add-Member `
       -NotePropertyName stoppedAt `
@@ -747,7 +604,6 @@ function Invoke-Status {
   $state = Read-JsonState -Path $ManagedStateFile
   $supervisor = Read-JsonState -Path $SupervisorStateFile
   $process = Get-SupervisorProcess -ManagedState $state
-  $managedEnvironment = Get-ManagedEnvironment -ManagedState $state
   $taskState = if ($task) { [string]$task.State } else { "NotRegistered" }
   $processState = if ($process) { "RUNNING" } else { "STOPPED" }
   $childPid = if ($supervisor -and $supervisor.childPid) {
@@ -762,8 +618,7 @@ function Invoke-Status {
     Write-Warning $_.Exception.Message
   }
   Write-Host (
-    "Environment=$Environment Task=$taskState Supervisor=$processState " +
-    "ManagedEnvironment=$(if ($managedEnvironment) { $managedEnvironment } else { '-' }) " +
+    "Task=$taskState Supervisor=$processState " +
     "PID=$(if ($process) { $process.Id } else { 0 }) ChildPID=$childPid"
   )
   if ($device) {
@@ -781,7 +636,7 @@ function Invoke-Status {
         "marketStream=$($runtime.liveTrading.marketStreamStatus)"
       )
     } catch {
-      Write-Warning "QuantX runtime status is unavailable: $($_.Exception.Message)"
+      Write-Warning "Mac runtime status is unavailable: $($_.Exception.Message)"
     }
   }
 }

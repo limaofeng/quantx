@@ -1,35 +1,31 @@
 {
 	admin off
-	auto_https off
 }
 
-:8080 {
-	encode zstd gzip
-
+https://127.0.0.1:8080 {
+	bind 127.0.0.1
+	tls internal
 	route {
-		@self_health path /_gateway/health/live
-		respond @self_health 200
-
 		@docs_root path /docs
 		redir @docs_root /docs/ 308
 
 		@market_data_service path /ws/agent/market
-		reverse_proxy @market_data_service market-data-service:18082
+		reverse_proxy @market_data_service 127.0.0.1:18082
 
 		@monitor path /monitor/*
-		reverse_proxy @monitor monitor:18083
+		reverse_proxy @monitor 127.0.0.1:18083
 
 		@api path /graphql* /auth* /health* /metrics* /ws/agent* /agent/*
-		reverse_proxy @api api:18081
+		reverse_proxy @api 127.0.0.1:18081
 
 		handle_path /docs/* {
-			root * /srv/docs
+			root * {$QUANTX_ROOT}/apps/docs/dist
 			try_files {path} {path}.html {path}/index.html /404.html
 			file_server
 		}
 
 		handle {
-			root * /srv/web
+			root * {$QUANTX_ROOT}/apps/web/dist
 			try_files {path} /index.html
 			file_server
 		}

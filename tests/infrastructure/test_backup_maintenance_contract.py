@@ -7,7 +7,7 @@ OPS = ROOT / "ops" / "quantx.ps1"
 def test_dev_live_start_registers_a_daily_non_elevated_backup_task():
   script = OPS.read_text(encoding="utf-8")
   function = script.split("function Register-DevBackupMaintenance", 1)[1].split(
-    "function Invoke-Doctor",
+    "function Install-CaddyRootCertificate",
     1,
   )[0]
   invoke_up = script.split("function Invoke-Up", 1)[1].split(
@@ -63,12 +63,13 @@ def test_backup_and_restore_verify_include_monitor_history_when_present():
   assert "QuantX Monitor history integrity validation failed" in restore
 
 
-def test_production_backup_is_owned_by_the_kubernetes_platform():
+def test_production_backup_schedule_matches_the_24_hour_gate():
   script = OPS.read_text(encoding="utf-8")
-  runbook = (
-    ROOT / "docs" / "engineering" / "deployment" / "PRODUCTION_RUNBOOK.md"
-  ).read_text(encoding="utf-8")
+  function = script.split("function Register-ProductionMaintenance", 1)[1].split(
+    "function Register-DevBackupMaintenance",
+    1,
+  )[0]
 
-  assert "Register-ProductionMaintenance" not in script
-  assert "数据库平台创建可恢复备份" in runbook
-  assert "Monitor PVC 已纳入 CSI 快照或文件级备份" in runbook
+  assert "-Daily" in function
+  assert "-DaysOfWeek" not in function
+  assert "-MultipleInstances IgnoreNew" in function

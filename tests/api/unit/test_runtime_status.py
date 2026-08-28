@@ -19,42 +19,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @pytest.mark.asyncio
-async def test_service_readiness_only_requires_database(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  async def ready_database():
-    return {"status": "ready", "latencyMs": 1.2}
-
-  monkeypatch.setattr(runtime_status, "_database_status", ready_database)
-
-  ready, payload = await runtime_status.service_readiness_status()
-
-  assert ready is True
-  assert payload == {
-    "status": "ready",
-    "component": "api",
-    "dependencies": {
-      "database": {"status": "ready", "latencyMs": 1.2},
-    },
-  }
-
-
-@pytest.mark.asyncio
-async def test_service_readiness_fails_when_database_is_unavailable(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  async def unavailable_database():
-    return {"status": "unavailable", "error": "TimeoutError"}
-
-  monkeypatch.setattr(runtime_status, "_database_status", unavailable_database)
-
-  ready, payload = await runtime_status.service_readiness_status()
-
-  assert ready is False
-  assert payload["status"] == "not_ready"
-
-
-@pytest.mark.asyncio
 async def test_market_data_service_status_uses_readiness_endpoint(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

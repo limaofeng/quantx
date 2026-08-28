@@ -369,23 +369,6 @@
         "summary": "Health Runtime Market Data",
         "x-quantx-stability": "web-internal"
       }
-    },
-    "/health/service-ready": {
-      "get": {
-        "operationId": "health_service_ready_health_service_ready_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Health Service Ready",
-        "x-quantx-stability": "web-internal"
-      }
     }
   }
 }

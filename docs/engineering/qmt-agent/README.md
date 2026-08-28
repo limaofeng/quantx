@@ -46,10 +46,8 @@ Windows 单实例锁和长期进程监督由 Windows 启动器方案负责，不
 
 ## 独立健康监听
 
-健康运行时代码默认监听 `0.0.0.0:18084`，并校验 `QMT_AGENT_HEALTH_HOST` 和
-`QMT_AGENT_HEALTH_PORT`。权威 Windows 入口 `quantx-agent.ps1` 会把托管 Agent
-固定到该地址与端口，并维护完全匹配的防火墙规则；正式托管运行不得另行覆盖。
-监听器只提供：
+Agent 默认监听 `0.0.0.0:18084`，可用 `QMT_AGENT_HEALTH_HOST` 和
+`QMT_AGENT_HEALTH_PORT` 显式覆盖。监听器只提供：
 
 - `GET /health/live`：只证明主事件循环能响应，固定返回脱敏的 v1 存活契约；
 - `GET /health/ready`：返回本地控制连接、对账、XTData、按模式解释的 XTTrading、
@@ -64,9 +62,8 @@ XTTrading、数据库或网络。`data-only` 和 `paper` 的 XTTrading 状态固
 
 健康 server、Agent runtime 与进程 watchdog heartbeat 位于同一结构化并发边界。
 端口绑定失败或 server 意外退出会结束 Agent 主进程并由 supervisor 重启；正常关闭
-会同步停止 Uvicorn，不留下孤立监听任务。`quantx-agent.ps1 up` 只在 `Private`
-网络配置文件为 TCP `18084` 幂等维护入站规则，远端地址为 `Any`，不限制单一
-Monitor IP；创建或修复规则需要管理员 PowerShell，规则正确时普通重启无需提升权限。
+会同步停止 Uvicorn，不留下孤立监听任务。Windows 安装器只在 `Private` 网络配置文件
+为 TCP `18084` 创建入站规则，不限制单一 Monitor IP。
 
 独立 Monitor 会把 `/health/ready` 的真实 HTTP RTT 与 API 对 WebSocket 会话、心跳、
 完整账户快照和对账的权威语义取较差结果。这个观测结果永远不回写交易门禁。

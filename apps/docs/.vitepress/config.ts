@@ -2,7 +2,6 @@ import path from 'node:path';
 import { defineConfig } from 'vitepress';
 
 const docsVersion = process.env.QUANTX_DOCS_VERSION?.trim() || 'development';
-const useGitLastUpdated = process.env.QUANTX_DOCS_DISABLE_GIT !== 'true';
 
 export default defineConfig({
   base: '/docs/',
@@ -16,7 +15,7 @@ export default defineConfig({
   // Keep all documentation links strict and exempt only this generated asset.
   ignoreDeadLinks: ['/contracts/graphql-schema.graphql'],
   lang: 'zh-CN',
-  lastUpdated: useGitLastUpdated,
+  lastUpdated: true,
   outDir: 'dist',
   srcDir: 'content',
   title: 'QuantX Developer',
@@ -33,7 +32,7 @@ export default defineConfig({
     externalLinkIcon: true,
     footer: {
       copyright: `当前部署文档版本：${docsVersion}`,
-      message: 'QuantX 客户端契约与当前 Kubernetes 部署版本保持一致',
+      message: 'QuantX 客户端契约与当前 Windows 服务版本保持一致',
     },
     lastUpdated: {
       text: '最后更新',

@@ -1,9 +1,8 @@
 # QuantX
 
 QuantX 是面向 A 股策略研究、回测和本机 QMT 执行的 Monorepo。系统采用
-“开发统一启动、生产 Kubernetes 独立工作负载”的结构：Gateway 是唯一公开入口，
-API、行情服务、Monitor、Engine、Prefect Worker、AI Runtime 和 QMT Agent
-各自拥有清晰的生命周期。
+“统一启动与监管、独立进程运行”的结构：Caddy 是唯一公开入口，API、
+Engine、Prefect Worker 和 QMT Agent 各自拥有清晰的生命周期。
 
 ## 工作区
 
@@ -12,7 +11,6 @@ apps/
   api/          FastAPI、GraphQL、认证与 Agent WebSocket Hub
   docs/         VitePress 原生客户端文档与发布契约
   web/          Vite + React
-  monitor/      独立可用性、延迟与事故历史服务
   engine/       策略运行、条件清仓、全局做 T 与回报收敛
   worker/       Prefect flows、tasks 与部署入口
   qmt-agent/    XTData/XTTrading、本地保护与回报采集
@@ -22,7 +20,7 @@ packages/
   application/  用例、端口接口与状态推进
   infrastructure/
                 ORM、Repository、数据库适配与持久化消息箱
-ops/            开发启动器、容器镜像和 Kubernetes 正式部署清单
+ops/            Caddy、WinSW 与统一运维脚本
 tests/          按架构边界组织的 Python 测试
 ```
 
@@ -52,7 +50,7 @@ API 自身仍只监听 `127.0.0.1:18081`。
 [`http://127.0.0.1:8080/docs/`](http://127.0.0.1:8080/docs/) 提供，
 不直接访问 API 内部端口。
 
-首次准备固定版本的开发 Caddy：
+首次准备固定版本的 Caddy 和 WinSW：
 
 ```powershell
 .\ops\quantx.ps1 bootstrap
@@ -61,13 +59,6 @@ API 自身仍只监听 `127.0.0.1:18081`。
 PostgreSQL、InfluxDB 和 Redis 是外部持久化服务；脚本只检查它们，不会
 安装、启动或停止它们。端口冲突时，`up` 只报告占用者，绝不会终止未受
 QuantX 状态文件跟踪的进程。
-
-## 正式部署
-
-正式服务端只部署到 Kubernetes，入口位于 `ops/k8s/base`，镜像定义位于
-`ops/containers`。Windows 不作为正式服务端宿主；只有必须访问 XTQuant 的 QMT
-Agent 作为集群外 Windows 执行节点保留，并只向集群公共 HTTPS/WSS 地址出站连接。
-`quantx up` 仅用于开发环境，不能作为生产部署入口。
 
 ## 验证
 

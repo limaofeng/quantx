@@ -1,16 +1,5 @@
 # QuantX 部署与运维
 
-部署标准只有两种形态：
-
-- **开发环境**：在 macOS 或 Windows 工作区使用 `ops/quantx` / `ops/quantx.ps1`
-  统一启动；
-- **正式环境**：服务端只使用 Linux 容器和 Kubernetes，不在 Windows 上安装
-  Caddy、API、行情服务、Monitor、Engine、Worker 或 AI Runtime 系统服务。
-
-QMT Agent 因 XTQuant 限制仍运行在 Windows，但它是集群外的交易执行边缘节点，
-交易控制、行情、历史上传和报告链路只向 Kubernetes 公共入口建立出站连接；
-同一进程另提供固定只读健康监听，不属于服务端生产宿主环境。
-
 开发环境唯一入口：
 
 ```powershell
@@ -63,8 +52,8 @@ QMT 预检成功的默认 `full/live` 会为 API/Engine 显式开启 `ENABLE_REA
 `down` 仅停止状态文件记录且启动时间匹配的进程。
 
 `quantx-monitor` 是独立观测进程。普通 `up/down` 不拥有它的生命周期，开发环境
-通过 `-Component monitor` 单独启停；生产环境使用独立的单副本 StatefulSet 和
-PVC。它每 30 秒检查固定目标，把原始样本写入独立 SQLite 90 天，并保留 1 年
+通过 `-Component monitor` 单独启停；生产环境由 `QuantXMonitor` WinSW 服务自动
+启动。它每 30 秒检查固定目标，把原始样本写入独立 SQLite 90 天，并保留 1 年
 小时汇总。状态页位于 `/settings/status`，只读数据通过 Caddy 的 `/monitor/*`
 公开。启动 Monitor 前必须设置
 `MONITOR_QMT_AGENT_HEALTH_URL=http://<稳定 Windows 主机>:18084`。Monitor 直连该
@@ -77,7 +66,7 @@ PVC。它每 30 秒检查固定目标，把原始样本写入独立 SQLite 90 �
 Engine、Worker、QMT Agent 与 Caddy 也会统一使用同一个真实根路径，避免 Windows
 下因联接路径与依赖真实路径不一致而跳过 TSX 转译并出现白屏。
 
-开发环境公开端口只有 Caddy 的 `8080`，它监听所有本机 IPv4 接口；本机使用
+公开端口只有开发 Caddy 的 `8080`，它监听所有本机 IPv4 接口；本机使用
 `http://127.0.0.1:8080`，局域网设备使用
 `http://<开发机局域网 IP>:8080`。API 使用 `18081`、Market Data Service 使用
 `18082`、Monitor 使用 `18083`、Vite 使用 `5250`、
@@ -85,43 +74,20 @@ VitePress 使用 `5251`，这些后端端口仍只绑定 `127.0.0.1`。Windows Q
 的只读健康监听单独使用 `0.0.0.0:18084`，供 Monitor 跨主机直连。Prefect API
 通过 `PREFECT_API_URL` 连接外部服务，默认
 `http://192.168.5.6:30420/api`，Worker 使用 `quantx-pool`。在线客户端文档
-位于统一入口 `/docs/`。正式环境由 Gateway 容器直接提供 Web 与 Docs 静态文件，
-不运行 Node 进程；Ingress 或外部负载均衡器负责 TLS。PostgreSQL、InfluxDB、Redis
-和 Prefect Server 均为外部依赖，不由开发启动器或 Kubernetes 工作负载安装。
+位于统一入口 `/docs/`，生产环境由 Caddy
+直接提供静态文件，不运行 Node 文档进程。PostgreSQL、InfluxDB、Redis 和
+Prefect Server 只检查，不由 QuantX 安装或启停。首次从其他设备访问时，需在 Windows
+防火墙提示中允许 Caddy 通过专用网络。
 
 QMT Agent 的交易、行情和报告链路仍只出站；`18084` 只接受固定健康 GET。生产
-`quantx-agent.ps1 up` 会校验并幂等维护名为
-`QuantX-QMT-Agent-Health-18084` 的 Windows 防火墙规则，仅对 `Private` profile
-开放 TCP `18084`，远端地址为 `Any`，不绑定单一 Monitor IP。创建或修复规则需要
-管理员 PowerShell；规则正确时普通重启不需要提升权限。若主机当前网络不是
-Private，应先修正网络分类，不能扩大到 Public/Domain 规则。
+`install` 会幂等创建名为 `QuantX-QMT-Agent-Health-18084` 的 Windows 防火墙规则，
+仅对 `Private` profile 开放 TCP `18084`，不设置 `RemoteAddress`。若主机当前网络
+不是 Private，应先修正网络分类，不能扩大到 Public/Domain 规则。卸载会删除该精确
+规则。普通代码验证不得运行 `install`。
 
 Market Data Service 的 `/health/live` 只表示进程与事件循环存活；
 `/health/ready` 会实际执行 Redis `PING`。统一启动器和 API 组件状态均以后者
 作为服务就绪依据，因此 Redis 断开时不会把行情服务误报为 `ready`。
-API 的 `/health/service-ready` 是 Kubernetes Service 路由门禁，只检查 API 与
-PostgreSQL；强业务门禁 `/health/ready` 继续检查 Engine、Worker、QMT Agent、
-行情服务和行情新鲜度。二者不得互换，否则 QMT 断线时会把用于恢复连接的 API
-Pod 一并摘除。
-
-## Kubernetes 正式环境
-
-生产基线位于 [`ops/k8s/base`](../../../ops/k8s/base)，容器入口位于
-[`ops/containers`](../../../ops/containers)。同一版本发布两个不可变镜像：
-
-- `quantx-server`：API、Market Data Service、Engine、Worker、AI Runtime 和
-  Monitor 共用代码镜像，但分别作为独立工作负载启动；
-- `quantx-gateway`：只包含 Caddy、Web `dist` 和 Docs `dist`。
-
-API、行情服务、Engine、Worker 和 AI Runtime 使用单副本 `Deployment`；Monitor
-使用单副本 `StatefulSet` 与独立 PVC；Gateway 使用两个副本。个人单账户系统不做
-无依据的水平扩容，Engine 仍由 PostgreSQL 租约保证唯一所有者。配置通过
-`quantx-runtime-config` 注入，密钥必须通过集群 Secret 管理方案注入
-`quantx-runtime-secrets`，不得把填充值提交到仓库。
-
-Kubernetes 只管理 QuantX 工作负载。PostgreSQL、Redis、InfluxDB 和 Prefect
-Server 的高可用、备份与恢复由各自的平台服务负责。发布、迁移、回滚和验收步骤见
-[生产运行手册](./PRODUCTION_RUNBOOK.md)。`quantx up` 永远不是生产部署入口。
 
 ## PostgreSQL 连接预算与慢查询诊断
 
@@ -167,12 +133,18 @@ LIMIT 20;
 Prefect Worker 的本机 CLI 状态位于 `.runtime/prefect`，CLI 和 Worker 固定
 使用 UTF-8。不要把该运行时目录提交到仓库。
 
-生产部署不使用工作区源码或本机 Python 环境。完整镜像发布、迁移、备份、回滚、
-紧急停止与影子/CANARY 步骤见
+生产部署不使用可编辑源码。完整发布、版本化安装、迁移、备份、回滚、紧急停止
+与影子/CANARY 步骤见
 [PRODUCTION_RUNBOOK.md](./PRODUCTION_RUNBOOK.md)。`bootstrap` 仅供开发环境；
-正式版本以镜像 digest 和 Git tag 唯一标识。
+生产 `install` 必须提供带校验和的 release zip。
 升级到 `20260815_0016` 会 fail-closed 撤销无法区分的旧 native/Web 会话，
 不删除会话或审计记录；发布前必须按运行手册预告用户重新登录。
+
+WinSW 2.12 使用 bundled mode：每个服务目录内都放置同名的 XML 与 wrapper，
+例如 `quantx-api.xml` 对应 `quantx-api.exe`。Caddy、API、Market Data Service、
+Monitor、Engine、Worker 和 QMT Agent 因而可以独立安装、重启和滚动日志，不共享 wrapper
+进程。Market Data Service 与 QMT Agent 的 WinSW 入口均通过统一监督器启动，异常退出
+按 1/2/5/10/30 秒退避重启，并使用 Windows Job Object 回收残留子进程。
 
 ## QMT Agent 登记前置条件
 
@@ -188,9 +160,7 @@ python -m quantx_qmt_agent.main status
 
 设备密钥写入 Windows Credential Manager。开发 `full/live` 未登记时不会尝试
 未认证连接，也不会改写为 `data-only`；统一启动器会跳过 QMT 子进程并进入上述
-fail-closed 降级状态。正式环境在 Windows 执行节点使用
-`ops/quantx-agent.ps1 -Environment production` 管理 Agent；集群内不运行 QMT
-容器，也不挂载券商目录或设备凭证。
+fail-closed 降级状态。生产安装与 QMT 服务启用仍保持硬失败。
 `paper` 和 `live` 还要求设置
 `QMT_ACCOUNT_WHITELIST`；`live` 额外要求 QMT Agent 子进程使用 `ENV=testing` 或
 `ENV=production`、`ENABLE_REAL_TRADING=true` 和
@@ -239,15 +209,9 @@ keyspace。报告位于 `.runtime/reports/market-stream-load-test/`。
 ```powershell
 .\.runtime\tools\caddy\caddy.exe validate `
   --config .\ops\caddy\Caddyfile.dev --adapter caddyfile
+.\.runtime\tools\caddy\caddy.exe validate `
+  --config .\ops\caddy\Caddyfile.prod --adapter caddyfile
 python -m pytest tests/infrastructure/test_ops_contract.py
-```
-
-正式清单验收：
-
-```bash
-kubectl kustomize ops/k8s/base >/tmp/quantx-k8s.yaml
-docker build -f ops/containers/server.Dockerfile .
-docker build -f ops/containers/gateway.Dockerfile .
 ```
 
 GraphQL 契约验收必须在 `web` profile 已经就绪后，通过
