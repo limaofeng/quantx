@@ -33,48 +33,59 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 
 ## 统一运行方式
 
-### Windows QMT 节点硬边界
+当前权威开发基线（2026-08-14）：**Dev 默认即个人单账户实盘**。不要为普通
+开发启动显式传 `-Mode`；以下第一条命令必须解析为 `profile=full`、
+`agentMode=live`。只有明确需要禁用实盘时，才允许使用
+`-Mode data-only`。
 
-Windows 环境只负责 QMT Agent，不负责 API、Engine、Worker、Web、Docs、Caddy、
-Monitor 或任何 Mac 服务。Codex、自动化脚本和人工运维在 Windows 上处理 QMT
-Agent 启动、重启或验收时，必须遵守以下规则：
-
-- 只允许从仓库根目录使用 `ops/quantx-agent.ps1` 管理 QMT Agent；不得运行
-  `ops/quantx.ps1 up/down` 启停主服务栈，也不得绕过统一入口手工启动 Agent。
-- 不得通过 SSH、远程命令、脚本或其他方式检查、启动、停止或重启 Mac 服务。
-  Mac 或远端 API 的状态不属于 Windows QMT Agent 启动任务的交付范围；只有用户
-  明确扩大任务范围时才能操作。
-- Windows 启动成功只要求本机计划任务、Supervisor 和唯一 Agent 子进程正常，
-  `0.0.0.0:18084` 由该 Agent 监听，且 `/health/live` 返回 HTTP 200。必须同时确认
-  没有旧版或重复 Agent 进程。
-- `/health/ready`、控制连接、对账、行情流和服务端实盘能力门依赖远端服务。
-  它们不可用时应如实报告，但不得据此把本机启动判为失败、反复重启 Agent，
-  或转而处理 Mac 服务。
-- Windows 节点不得启动 Monitor；Monitor 及其他服务端组件由各自服务主机独立
-  管理。
-
-权威 Windows 命令如下：
+开发环境只从仓库根目录运行：
 
 ```powershell
-.\ops\quantx-agent.ps1 doctor -Environment dev
-.\ops\quantx-agent.ps1 up -Environment dev
-.\ops\quantx-agent.ps1 restart -Environment dev
-.\ops\quantx-agent.ps1 status -Environment dev
-.\ops\quantx-agent.ps1 logs -Environment dev
-.\ops\quantx-agent.ps1 down -Environment dev
+.\ops\quantx.ps1 up -Environment dev -Profile web
+.\ops\quantx.ps1 up -Environment dev -Profile web -Mode data-only
+.\ops\quantx.ps1 status
+.\ops\quantx.ps1 logs
+.\ops\quantx.ps1 down
+.\ops\quantx.ps1 up -Environment dev -Component monitor
+.\ops\quantx.ps1 status -Environment dev -Component monitor
 ```
 
-标准 Windows QMT Agent 重启与验收顺序：
+标准 Dev 实盘重启顺序：
 
 ```powershell
-.\ops\quantx-agent.ps1 restart -Environment dev
-.\ops\quantx-agent.ps1 status -Environment dev
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18084/health/live
+.\ops\quantx.ps1 down
+.\ops\quantx.ps1 up -Environment dev -Profile web
+.\ops\quantx.ps1 status
 ```
 
-QMT Agent 默认按本机登记的个人单账户 `live` 配置启动。显式 `-AccountId` 只用于
-登记或切换已确认的唯一账户；不得为了通过检查静默降级模式。券商凭据、设备密钥
-和 XTQuant 运行时继续只保留在 Windows 本机。
+- 普通开发 `up`（包括未显式指定模式的 `-Profile web`）统一提升为
+  `full/live`，启动 Caddy、API、Engine、Vite、VitePress 和 Prefect Worker；
+  QMT Agent 在本机登记与运行时预检通过后启动。Prefect Server 使用外部服务。
+- Monitor 使用独立状态文件、SQLite 历史库和生命周期；普通 `up/down` 不启停它，
+  以保证主服务离线期间仍能观测。开发时用 `-Component monitor` 单独管理。
+- `live` 优先使用 `-AccountId`，未传时从本机环境中的唯一账户配置自动解析。
+  `-Mode data-only` 是唯一的显式非实盘入口，并同时关闭服务端实盘能力门。
+  数据库、Redis 和 InfluxDB 继续复用开发配置，不为实盘另装一套。
+- 除非用户明确要求纯行情模式，否则 Codex、自动化脚本和人工运维不得把普通
+  dev 启动、恢复或验收静默降级为 `-Mode data-only`。若 QMT 登记或本地运行时
+  预检失败，启动器必须保持 `profile=full`、`agentMode=live`，在 API/Engine
+  启动前关闭全部服务端与 Agent 实盘能力门并清空实盘账户允许列表，跳过 QMT
+  子进程，以显式 `DEGRADED / BLOCKED` 状态继续启动非 QMT 服务。该状态允许使用
+  已持久化历史行情做回测，但不得伪装成 QMT `ready`；恢复 QMT 后必须整体重启。
+- 开发 Caddy 是唯一公开入口，监听所有本机 IPv4 接口的 `8080`；局域网设备
+  使用 `http://<开发机局域网 IP>:8080`。
+- API 只监听 `127.0.0.1:18081`，Vite 使用 `5250`，VitePress 使用
+  `5251`。Prefect API 固定通过 `PREFECT_API_URL` 连接外部服务，默认
+  `http://192.168.5.6:30420/api`，Worker 使用 `quantx-pool`。
+- PostgreSQL、InfluxDB、Redis、Prefect Server 是外部服务，只检查，
+  不自动启停。
+- 不得绕过统一入口单独手工启动 QMT Agent，否则同一设备的重复 Agent 会争用
+  会话并可能触发行情分片冲突。完整 Dev 实盘验收的 `status` 必须显示
+  `Runtime profile=full`、`agentMode=live`、唯一账户、`liveTrading=ENABLED`、
+  QMT Agent `ready`、协议 `1.1` 和小于 90 秒的新鲜快照；降级启动则必须显示
+  `DEGRADED`、QMT `BLOCKED` 与 `liveTrading=DISABLED`。
+- 不得恢复根目录旧启动脚本或 API 内的子进程管理。
+- 不运行 `ops/quantx.ps1 install` 做普通验证。
 
 ## 进程和依赖边界
 
