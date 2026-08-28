@@ -75,6 +75,12 @@ describe('workspace page surface contract', () => {
         /export function TTradeActivityView[\s\S]*?return \(\s*<div className="([^"]+)"/,
     },
     {
+      label: 'TTradePositionsView',
+      path: '../../../features/portfolio/pages/t-trade-global/TTradePositionsView.tsx',
+      pattern:
+        /export function TTradePositionsView[\s\S]*?return \(\s*<div className="([^"]+)"/,
+    },
+    {
       label: 'LimitUpBoardHealthConsole',
       path: '../../../features/strategies/components/LimitUpBoardHealthConsole.tsx',
       pattern:
@@ -113,7 +119,7 @@ describe('workspace page surface contract', () => {
     expect(rootClassName).not.toMatch(HARDCODED_CANVAS_BACKGROUND);
   });
 
-  it.each(['monitorView', 'positionsView', 'settingsView'])(
+  it.each(['monitorView', 'settingsView'])(
     'uses the workspace surface token for TTradeGlobalPage %s',
     viewName => {
       const source = readSource(

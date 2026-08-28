@@ -84,7 +84,7 @@ describe('TTradeGlobalPage toolbar color contract', () => {
       '      </nav>'
     );
 
-    for (const label of ['总览', '信号', '日志']) {
+    for (const label of ['总览', '信号', '做T仓位', '运行动态']) {
       expect(replaySubviews).toContain(`'${label}'`);
     }
     expect(replaySubviews).toContain('focus-visible:ring-cyan-400/60');

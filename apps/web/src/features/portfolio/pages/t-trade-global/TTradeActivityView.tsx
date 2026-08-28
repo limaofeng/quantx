@@ -640,15 +640,18 @@ function FactRow({
 function ExecutionEventSnapshot({
   item,
   onViewBatch,
+  sourceMode,
 }: {
   item: TTradeActivityItem;
   onViewBatch: (batchId: string) => void;
+  sourceMode: 'LIVE' | 'REPLAY';
 }) {
   const event = item.batchEvent;
   const snapshot = item.executionSnapshot;
   if (!event || !snapshot) return null;
   const batch = item.batch;
   const isTrade = item.kind === 'TRADE';
+  const isReplay = sourceMode === 'REPLAY';
   const directionLabel =
     snapshot.direction === 'BUY'
       ? '买入'
@@ -686,7 +689,7 @@ function ExecutionEventSnapshot({
           </Badge>
           {isTrade && (
             <Badge className="rounded-sm border border-white/10 bg-white/[0.035] px-2 py-0.5 text-ui-micro text-slate-300">
-              真实成交真源
+              {isReplay ? '模拟成交真源' : '真实成交真源'}
             </Badge>
           )}
           <span className="font-mono text-ui-micro text-slate-500">
@@ -730,7 +733,8 @@ function ExecutionEventSnapshot({
       <div className="mt-2 grid gap-2 lg:grid-cols-2 xl:grid-cols-3">
         <section className="border border-white/[0.06] bg-[#081321] p-3">
           <h4 className="text-ui-caption font-black text-slate-200">
-            券商{isTrade ? '成交' : '委托'}事实
+            {isReplay ? '回测 Broker' : '券商'}
+            {isTrade ? '成交' : '委托'}事实
           </h4>
           <div className="mt-3 space-y-2">
             <FactRow label="证券" value={snapshot.stockCode || '--'} />
@@ -852,7 +856,8 @@ function ExecutionEventSnapshot({
           </div>
           <div className="mt-4 flex items-start gap-2 border border-blue-400/15 bg-blue-400/[0.04] p-2.5 text-ui-micro leading-4 text-blue-100">
             <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            命令确认不代表成交；本记录来自已持久化的券商
+            命令确认不代表成交；本记录来自已持久化的
+            {isReplay ? '回测 Broker 模拟' : '券商'}
             {isTrade ? '成交' : '委托'}回报。
           </div>
           {event.error && (
@@ -900,6 +905,7 @@ function ActivityRow({
   onToggle,
   onViewBatch,
   onViewCurrent,
+  sourceMode,
 }: {
   expanded: boolean;
   item: TTradeActivityItem;
@@ -907,6 +913,7 @@ function ActivityRow({
   onToggle: () => void;
   onViewBatch: (batchId: string) => void;
   onViewCurrent: (stockCode: string) => void;
+  sourceMode: 'LIVE' | 'REPLAY';
 }) {
   const Icon = activityIcon(item.kind);
   const tone = toneStyles[item.tone];
@@ -969,13 +976,18 @@ function ActivityRow({
         <HistoricalSignalSnapshot item={item} onViewCurrent={onViewCurrent} />
       )}
       {expanded && item.batchEvent && (
-        <ExecutionEventSnapshot item={item} onViewBatch={onViewBatch} />
+        <ExecutionEventSnapshot
+          item={item}
+          onViewBatch={onViewBatch}
+          sourceMode={sourceMode}
+        />
       )}
     </article>
   );
 }
 
 export function TTradeActivityView({
+  backtestId,
   batchError,
   batches,
   eventError,
@@ -996,8 +1008,10 @@ export function TTradeActivityView({
   runId,
   runMode,
   signalError,
+  supplementalItems = [],
   wsStatus,
 }: {
+  backtestId?: string | null;
   batchError?: string | null;
   batches: readonly ActivityBatch[];
   eventError?: string | null;
@@ -1018,6 +1032,7 @@ export function TTradeActivityView({
   runId?: string | null;
   runMode?: string | null;
   signalError?: string | null;
+  supplementalItems?: readonly TTradeActivityItem[];
   wsStatus: GraphqlWsStatus;
 }) {
   const [surface, setSurface] = React.useState<ActivitySurface>('BUSINESS');
@@ -1030,10 +1045,22 @@ export function TTradeActivityView({
   const atTopRef = React.useRef(true);
   const previousNewestIdRef = React.useRef<string | null>(null);
 
-  const items = React.useMemo(
-    () => buildTTradeActivityItems(evaluations, events, batches),
-    [batches, evaluations, events]
-  );
+  const sourceMode =
+    String(runMode || '').toUpperCase() === 'BACKTEST' ? 'REPLAY' : 'LIVE';
+  const isReplay = sourceMode === 'REPLAY';
+  const items = React.useMemo(() => {
+    const projected = buildTTradeActivityItems(
+      evaluations,
+      events,
+      batches,
+      sourceMode
+    );
+    return [...projected, ...supplementalItems].sort((left, right) => {
+      const leftTime = Date.parse(left.occurredAt) || 0;
+      const rightTime = Date.parse(right.occurredAt) || 0;
+      return rightTime - leftTime || right.id.localeCompare(left.id);
+    });
+  }, [batches, evaluations, events, sourceMode, supplementalItems]);
   const filteredItems = React.useMemo(
     () =>
       filterTTradeActivityItems(items, {
@@ -1098,15 +1125,17 @@ export function TTradeActivityView({
               <span
                 className={cn(
                   'inline-flex items-center gap-1.5 text-ui-micro font-bold',
-                  connected ? 'text-emerald-300' : 'text-amber-200'
+                  isReplay || connected ? 'text-emerald-300' : 'text-amber-200'
                 )}
               >
                 <Radio className="h-3 w-3" aria-hidden="true" />
-                {connected ? '实时连接' : '等待重连'}
+                {isReplay ? '隔离回放' : connected ? '实时连接' : '等待重连'}
               </span>
             </div>
             <p className="mt-1 text-ui-micro text-slate-600">
-              关键业务事件可原位展开事件时刻快照；历史事实不代表当前状态。
+              {isReplay
+                ? '模拟委托、模拟成交与报告结论均绑定当前回放；不读取实盘运行状态。'
+                : '关键业务事件可原位展开事件时刻快照；历史事实不代表当前状态。'}
             </p>
           </div>
           <Button
@@ -1117,7 +1146,7 @@ export function TTradeActivityView({
             onClick={onRefresh}
           >
             <Radio className="mr-1.5 h-3 w-3" />
-            刷新真源
+            {isReplay ? '刷新回放' : '刷新真源'}
           </Button>
         </div>
         <div className="mt-3 inline-flex border border-white/10 bg-[#07111f] p-0.5">
@@ -1149,17 +1178,22 @@ export function TTradeActivityView({
         <div className="flex min-h-0 flex-1 flex-col p-3">
           <div className="mb-2 flex shrink-0 items-start gap-2 border border-blue-400/15 bg-blue-400/[0.04] px-3 py-2 text-ui-micro leading-4 text-blue-100">
             <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            原始技术日志用于专业排障；委托与成交事实以运行动态中的持久化券商回报为准。
+            {isReplay
+              ? '原始技术日志用于专业排障；模拟委托与成交事实以当前回放的 BACKTEST_BROKER 投影为准。'
+              : '原始技术日志用于专业排障；委托与成交事实以运行动态中的持久化券商回报为准。'}
           </div>
           <div className="min-h-0 flex-1">
             <StrategyLogsTab
+              backtestId={backtestId}
               fillAvailable
               isRunning={isRunning}
               runId={runId}
               runMode={runMode}
               showAdvancedFilters
               status={isRunning ? 'RUNNING' : 'STOPPED'}
-              strategyName="做 T 助手 · 原始技术日志"
+              strategyName={
+                isReplay ? '做 T 历史回放' : '做 T 助手 · 原始技术日志'
+              }
             />
           </div>
         </div>
@@ -1233,7 +1267,9 @@ export function TTradeActivityView({
               className="flex shrink-0 items-start gap-2 border-b border-amber-400/20 bg-amber-400/[0.05] px-ui-section py-2 text-ui-micro leading-4 text-amber-100"
             >
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              部分真源刷新失败，仍保留上次可信记录：
+              {isReplay
+                ? '部分回放事实读取失败，且未回退到实盘数据：'
+                : '部分真源刷新失败，仍保留上次可信记录：'}
               {errorMessages.join('；')}
             </div>
           )}
@@ -1273,7 +1309,7 @@ export function TTradeActivityView({
                 className="flex h-full min-h-64 items-center justify-center text-ui-label text-slate-600"
               >
                 <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-                正在读取持久化运行动态…
+                正在读取{isReplay ? '回放' : '持久化'}运行动态…
               </div>
             ) : filteredItems.length === 0 ? (
               <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
@@ -1308,6 +1344,7 @@ export function TTradeActivityView({
                     }
                     onViewBatch={onViewBatch}
                     onViewCurrent={onViewCurrent}
+                    sourceMode={sourceMode}
                   />
                 ))}
               </div>

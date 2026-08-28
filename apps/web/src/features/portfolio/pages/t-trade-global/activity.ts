@@ -10,6 +10,8 @@ export type ActivitySignalEvaluation = {
   evaluatedAt: string;
   coalescedCount: number;
   policyVersion: string;
+  title?: string | null;
+  summary?: string | null;
   signalSnapshot?: SignalSnapshot | null;
 };
 
@@ -232,6 +234,7 @@ function formatCompactNumber(value: number | null, digits = 2) {
 }
 
 function signalSummary(evaluation: ActivitySignalEvaluation): string {
+  if (evaluation.summary) return evaluation.summary;
   const snapshot = evaluation.signalSnapshot;
   if (!snapshot) return evaluation.eventType;
   const score =
@@ -312,7 +315,8 @@ function epoch(value: string): number {
 export function buildTTradeActivityItems(
   evaluations: readonly ActivitySignalEvaluation[],
   events: readonly ActivityBatchEvent[],
-  batches: readonly ActivityBatch[]
+  batches: readonly ActivityBatch[],
+  executionSource: 'LIVE' | 'REPLAY' = 'LIVE'
 ): TTradeActivityItem[] {
   const batchById = new Map(batches.map(batch => [batch.batchId, batch]));
   const sortedEvaluations = [...evaluations].sort(
@@ -337,6 +341,7 @@ export function buildTTradeActivityItems(
     evaluation => {
       const kind = signalKind(evaluation);
       const title =
+        evaluation.title ||
         signalTitles[evaluation.eventType] ||
         (kind === 'DIAGNOSTIC' ? '诊断观测' : evaluation.eventType);
       const summary = signalSummary(evaluation);
@@ -373,7 +378,9 @@ export function buildTTradeActivityItems(
     const kind = executionKind(event);
     const title =
       kind === 'TRADE'
-        ? '真实成交'
+        ? executionSource === 'REPLAY'
+          ? '模拟成交'
+          : '真实成交'
         : kind === 'ERROR'
           ? '执行事件异常'
           : '委托状态';

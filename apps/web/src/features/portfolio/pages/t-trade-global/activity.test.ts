@@ -162,6 +162,45 @@ describe('buildTTradeActivityItems', () => {
 
     expect(newest.previousSignalSnapshot).toBeNull();
   });
+
+  it('labels backtest broker fills as simulated and keeps replay summaries', () => {
+    const replayEvaluation: ActivitySignalEvaluation = {
+      ...evaluation('replay-decision', '2026-08-25T09:45:00+08:00'),
+      signalSnapshot: null,
+      title: '回放决策',
+      summary: '准备时长不足，未产生 TradeIntent',
+    };
+    const replayTrade: ActivityBatchEvent = {
+      eventId: 'replay-trade',
+      batchId: batch.batchId,
+      eventType: 'TRADE',
+      status: 'APPLIED',
+      clientOrderId: 'backtest-order',
+      createdAt: '2026-08-25T09:46:00+08:00',
+      payload: {
+        report: {
+          instrument_code: batch.stockCode,
+          direction: 'BUY',
+          filled_volume: 100,
+          filled_price: 10.12,
+        },
+        metadata: { role: 'ENTRY' },
+      },
+    };
+
+    const items = buildTTradeActivityItems(
+      [replayEvaluation],
+      [replayTrade],
+      [batch],
+      'REPLAY'
+    );
+
+    expect(items[0].title).toBe('模拟成交');
+    expect(items[1]).toMatchObject({
+      title: '回放决策',
+      summary: '准备时长不足，未产生 TradeIntent',
+    });
+  });
 });
 
 describe('filterTTradeActivityItems', () => {
