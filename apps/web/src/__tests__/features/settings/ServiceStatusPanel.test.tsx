@@ -40,8 +40,7 @@ function summary(
         checkedAt: now,
         lastSuccessAt: now,
         latencyMs: qmtStatus === 'healthy' ? 12.4 : 15.6,
-        reasonCode:
-          qmtStatus === 'healthy' ? null : 'QMT_AGENT_NOT_RECONCILED',
+        reasonCode: qmtStatus === 'healthy' ? null : 'QMT_AGENT_NOT_RECONCILED',
         availabilityPct: 99.5,
         healthyPct: 98.5,
         coveragePct: 100,
@@ -128,7 +127,18 @@ describe('ServiceStatusPanel', () => {
     expect(await screen.findByText('延迟 12.40 ms')).toBeInTheDocument();
     expect(
       await screen.findByText(/状态综合 Windows 健康端点与服务端会话\/对账语义/)
-    ).toHaveTextContent('P50 11.20 ms · P95 18.80 ms');
+    ).toBeInTheDocument();
+    expect(screen.getByText('11.20 ms')).toBeInTheDocument();
+    expect(screen.getByText('18.80 ms')).toBeInTheDocument();
+    expect(
+      await screen.findByRole('img', {
+        name: /QMT Agent 历史状态：2 个时间段，正常 2/,
+      })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /QMT Agent/ })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    );
     expect(screen.queryByText('延迟 0.00 ms')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /策略引擎/ }));
@@ -138,6 +148,10 @@ describe('ServiceStatusPanel', () => {
         screen.getByText('该组件来自语义快照，不生成虚假的独立延迟。')
       ).toBeInTheDocument();
     });
+    expect(screen.getByRole('button', { name: /策略引擎/ })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    );
     expect(screen.getByText('延迟 N/A')).toBeInTheDocument();
   });
 
@@ -155,5 +169,29 @@ describe('ServiceStatusPanel', () => {
 
     expect(await screen.findByText('延迟 15.60 ms')).toBeInTheDocument();
     expect(screen.getAllByText('不可用').length).toBeGreaterThan(0);
+  });
+
+  it('announces an initial monitor failure and offers a retry', async () => {
+    monitorMocks.getMonitorSummary.mockRejectedValue(
+      new Error('monitor unavailable')
+    );
+
+    render(<ServiceStatusPanel />);
+
+    expect(await screen.findByText('Monitor 当前不可访问')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Monitor 当前不可访问');
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument();
+  });
+
+  it('shows the empty state when the monitor has no targets', async () => {
+    const emptySummary = summary();
+    emptySummary.groups = [];
+    emptySummary.targets = [];
+    monitorMocks.getMonitorSummary.mockResolvedValue(emptySummary);
+
+    render(<ServiceStatusPanel />);
+
+    expect(await screen.findByText('尚未配置监测目标')).toBeInTheDocument();
+    expect(monitorMocks.getMonitorHistory).not.toHaveBeenCalled();
   });
 });

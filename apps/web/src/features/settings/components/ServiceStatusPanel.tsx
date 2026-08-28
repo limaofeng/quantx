@@ -2,14 +2,16 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  CircleOff,
   Clock3,
-  Database,
   Gauge,
+  HelpCircle,
   RefreshCw,
-  Server,
   XCircle,
+  type LucideIcon,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CartesianGrid,
   Line,
@@ -25,6 +27,7 @@ import {
   getMonitorIncidents,
   getMonitorSummary,
   type MonitorHistory,
+  type MonitorHistoryPoint,
   type MonitorIncident,
   type MonitorRange,
   type MonitorStatus,
@@ -49,14 +52,23 @@ const statusLabel: Record<MonitorStatus, string> = {
   disabled: '未启用',
 };
 
-function statusTone(status: MonitorStatus) {
-  if (status === 'healthy') return 'text-emerald-300 bg-emerald-500/10';
-  if (status === 'degraded' || status === 'unknown') {
-    return 'text-amber-300 bg-amber-500/10';
-  }
-  if (status === 'disabled') return 'text-slate-400 bg-white/5';
-  return 'text-rose-300 bg-rose-500/10';
-}
+const statusPriority: Record<MonitorStatus, number> = {
+  healthy: 1,
+  disabled: 2,
+  unknown: 3,
+  degraded: 4,
+  unavailable: 5,
+};
+
+const historyTone: Record<MonitorStatus, string> = {
+  healthy: 'bg-emerald-400',
+  degraded: 'bg-amber-400',
+  unavailable: 'bg-rose-400',
+  unknown: 'bg-amber-300/60',
+  disabled: 'bg-slate-600/70',
+};
+
+const placeholderBars = Array.from({ length: 28 }, (_, index) => index);
 
 function metric(value: number | null, suffix = '') {
   return value === null ? 'N/A' : `${value.toFixed(2)}${suffix}`;
@@ -67,60 +79,531 @@ function formatTime(value: string | null) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
-function TargetCard({
+function detailId(targetId: string) {
+  return `service-status-${targetId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+}
+
+function compressHistory(points: MonitorHistoryPoint[], limit = 84) {
+  if (points.length <= limit) return points;
+
+  const compressed: MonitorHistoryPoint[] = [];
+  const chunkSize = Math.ceil(points.length / limit);
+  for (let index = 0; index < points.length; index += chunkSize) {
+    const chunk = points.slice(index, index + chunkSize);
+    const worst = chunk.reduce((current, point) =>
+      statusPriority[point.status] > statusPriority[current.status]
+        ? point
+        : current
+    );
+    compressed.push(worst);
+  }
+  return compressed;
+}
+
+function StatusIcon({
+  status,
+  className,
+}: {
+  status: MonitorStatus;
+  className?: string;
+}) {
+  let Icon: LucideIcon = CheckCircle2;
+  let tone = 'text-emerald-300';
+
+  if (status === 'degraded') {
+    Icon = AlertTriangle;
+    tone = 'text-amber-300';
+  } else if (status === 'unavailable') {
+    Icon = XCircle;
+    tone = 'text-rose-300';
+  } else if (status === 'unknown') {
+    Icon = HelpCircle;
+    tone = 'text-amber-300';
+  } else if (status === 'disabled') {
+    Icon = CircleOff;
+    tone = 'text-slate-500';
+  }
+
+  return (
+    <span className={cn('shrink-0', tone, className)}>
+      <Icon className="h-full w-full" aria-hidden="true" />
+      <span className="sr-only">{statusLabel[status]}</span>
+    </span>
+  );
+}
+
+function HistoryStrip({
   target,
-  selected,
-  onSelect,
+  history,
+  loading,
+  error,
 }: {
   target: MonitorTargetSummary;
-  selected: boolean;
-  onSelect: () => void;
+  history: MonitorHistory | undefined;
+  loading: boolean;
+  error: boolean;
 }) {
-  const Icon = target.group === 'external_dependency' ? Database : Server;
+  const points = useMemo(
+    () => compressHistory(history?.points ?? []),
+    [history]
+  );
+  const counts = useMemo(
+    () =>
+      (history?.points ?? []).reduce<Record<MonitorStatus, number>>(
+        (result, point) => ({
+          ...result,
+          [point.status]: result[point.status] + 1,
+        }),
+        { healthy: 0, degraded: 0, unavailable: 0, unknown: 0, disabled: 0 }
+      ),
+    [history]
+  );
+  const description =
+    points.length === 0
+      ? `${target.name} 当前范围没有历史样本`
+      : `${target.name} 历史状态：${history?.points.length ?? 0} 个时间段，正常 ${counts.healthy}，降级 ${counts.degraded}，不可用 ${counts.unavailable}，未知 ${counts.unknown}，未启用 ${counts.disabled}`;
+
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-2">
+      <div
+        role="img"
+        aria-label={description}
+        aria-busy={loading}
+        className={cn(
+          'flex h-6 min-w-0 flex-1 items-stretch gap-px overflow-hidden rounded-sm',
+          loading && points.length === 0 && 'motion-safe:animate-pulse',
+          error && 'opacity-60'
+        )}
+      >
+        {points.length > 0
+          ? points.map((point, index) => (
+              <span
+                key={`${point.start}-${index}`}
+                aria-hidden="true"
+                title={`${formatTime(point.start)} · ${statusLabel[point.status]}`}
+                className={cn(
+                  'min-w-0 flex-1 rounded-sm',
+                  historyTone[point.status]
+                )}
+              />
+            ))
+          : placeholderBars.map(index => (
+              <span
+                key={index}
+                aria-hidden="true"
+                className={cn(
+                  'min-w-0 flex-1 rounded-sm',
+                  error ? 'bg-rose-500/20' : 'bg-slate-800/80'
+                )}
+              />
+            ))}
+      </div>
+      {error && (
+        <span
+          aria-label={`${target.name} 历史更新失败`}
+          title="历史更新失败"
+          className="shrink-0 text-amber-300"
+        >
+          <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+        </span>
+      )}
+    </div>
+  );
+}
+
+function TargetRow({
+  target,
+  history,
+  historyLoading,
+  historyError,
+  selected,
+  onToggle,
+}: {
+  target: MonitorTargetSummary;
+  history: MonitorHistory | undefined;
+  historyLoading: boolean;
+  historyError: boolean;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  const availability = metric(target.availabilityPct, '%');
+
   return (
     <button
       type="button"
-      aria-pressed={selected}
-      onClick={onSelect}
+      aria-expanded={selected}
+      aria-controls={detailId(target.id)}
+      onClick={onToggle}
       className={cn(
-        'cursor-pointer rounded-panel border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/70',
+        'flex w-full cursor-pointer flex-col gap-2 px-3 py-2.5 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400/70 lg:flex-row lg:items-center',
         selected
-          ? 'border-sky-400/40 bg-sky-500/10'
-          : 'border-white/5 bg-slate-950/35 hover:border-white/15 hover:bg-slate-900/60'
+          ? 'bg-sky-500/10 ring-1 ring-inset ring-sky-400/60'
+          : 'hover:bg-sky-500/5'
       )}
     >
-      <div className="flex items-start justify-between gap-3">
-        <span className="flex min-w-0 items-center gap-2">
-          <Icon className="h-4 w-4 shrink-0 text-slate-500" />
-          <span className="truncate text-ui-label font-medium text-slate-200">
+      <span className="flex w-full min-w-0 items-center gap-2 lg:w-72 lg:shrink-0">
+        <StatusIcon status={target.status} className="h-5 w-5" />
+        <span className="min-w-0 flex-1 lg:flex lg:items-center lg:justify-between lg:gap-3">
+          <span className="block truncate text-ui-body font-medium text-slate-100">
             {target.name}
           </span>
+          <span className="block shrink-0 font-mono text-ui-caption text-slate-500">
+            延迟 {metric(target.latencyMs, ' ms')}
+          </span>
         </span>
-        <span
+        <span className="ml-auto shrink-0 text-right lg:hidden">
+          <span className="block font-mono text-ui-label text-slate-300">
+            {availability}
+          </span>
+          <span className="block text-ui-caption text-slate-600">可用</span>
+        </span>
+        <ChevronDown
           className={cn(
-            'shrink-0 rounded-full px-2 py-0.5 text-ui-caption font-medium',
-            statusTone(target.status)
+            'h-4 w-4 shrink-0 text-slate-500 transition-transform duration-200 motion-reduce:transition-none lg:hidden',
+            selected && 'rotate-180'
           )}
-        >
-          {statusLabel[target.status]}
+          aria-hidden="true"
+        />
+      </span>
+
+      <HistoryStrip
+        target={target}
+        history={history}
+        loading={historyLoading}
+        error={historyError}
+      />
+
+      <span className="hidden w-28 shrink-0 text-right lg:block">
+        <span className="block font-mono text-ui-label text-slate-300">
+          {availability}
         </span>
-      </div>
-      <div className="mt-3 grid grid-cols-2 gap-2 font-mono text-ui-caption text-slate-500">
-        <span>延迟 {metric(target.latencyMs, ' ms')}</span>
-        <span>可用 {metric(target.availabilityPct, '%')}</span>
-      </div>
+        <span className="block text-ui-caption text-slate-600">可用</span>
+      </span>
+      <ChevronDown
+        className={cn(
+          'hidden h-4 w-4 shrink-0 text-slate-500 transition-transform duration-200 motion-reduce:transition-none lg:block',
+          selected && 'rotate-180'
+        )}
+        aria-hidden="true"
+      />
     </button>
   );
+}
+
+function TargetDetails({
+  target,
+  history,
+  historyLoading,
+  historyError,
+  incidents,
+  incidentsLoading,
+  incidentsError,
+}: {
+  target: MonitorTargetSummary;
+  history: MonitorHistory | undefined;
+  historyLoading: boolean;
+  historyError: boolean;
+  incidents: MonitorIncident[];
+  incidentsLoading: boolean;
+  incidentsError: boolean;
+}) {
+  const chartData = useMemo(
+    () =>
+      (history?.points ?? []).map(point => ({
+        time: new Date(point.start).toLocaleString('zh-CN', {
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        }),
+        p50: point.latencyP50Ms,
+        p95: point.latencyP95Ms,
+      })),
+    [history]
+  );
+  const hasLatency = chartData.some(
+    point => point.p50 !== null || point.p95 !== null
+  );
+  const explanation =
+    target.probeKind === 'derived'
+      ? '该组件来自语义快照，不生成虚假的独立延迟。'
+      : target.probeKind === 'composite'
+        ? '状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。'
+        : '延迟来自 Monitor 到目标服务的主动健康探测。';
+
+  return (
+    <div
+      id={detailId(target.id)}
+      className="grid gap-3 border-t border-sky-400/20 bg-slate-950/45 p-3 xl:grid-cols-[minmax(0,1fr)_18rem]"
+    >
+      <section aria-labelledby={`${detailId(target.id)}-latency`}>
+        <div className="flex flex-col gap-3 border-b border-white/5 pb-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h3
+              id={`${detailId(target.id)}-latency`}
+              className="text-ui-title font-semibold text-slate-100"
+            >
+              延迟趋势
+            </h3>
+            <p className="mt-1 max-w-3xl text-ui-caption leading-5 text-slate-500">
+              {explanation}
+            </p>
+            {target.reasonCode && (
+              <p className="mt-1 font-mono text-ui-caption text-amber-300">
+                {target.reasonCode}
+              </p>
+            )}
+          </div>
+          <div className="flex shrink-0 gap-ui-section font-mono text-ui-caption text-slate-500">
+            <span>覆盖 {metric(target.coveragePct, '%')}</span>
+            <span>健康 {metric(target.healthyPct, '%')}</span>
+          </div>
+        </div>
+
+        <div className="mt-3 grid min-h-44 gap-3 md:grid-cols-[8rem_minmax(0,1fr)]">
+          <dl className="grid grid-cols-2 gap-2 rounded-lg border border-white/5 bg-white/[0.025] p-3 md:grid-cols-1 md:content-center">
+            <div>
+              <dt className="text-ui-caption text-slate-500">P50</dt>
+              <dd className="mt-1 font-mono text-ui-heading text-emerald-300">
+                {metric(target.latencyP50Ms, ' ms')}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-ui-caption text-slate-500">P95</dt>
+              <dd className="mt-1 font-mono text-ui-heading text-amber-300">
+                {metric(target.latencyP95Ms, ' ms')}
+              </dd>
+            </div>
+          </dl>
+
+          <div className="h-48 min-w-0 md:h-44">
+            {historyLoading && !history ? (
+              <div
+                role="status"
+                className="flex h-full items-center justify-center rounded-lg border border-white/5 text-ui-label text-slate-500"
+              >
+                正在加载历史数据…
+              </div>
+            ) : historyError && !history ? (
+              <div
+                role="alert"
+                className="flex h-full items-center justify-center rounded-lg border border-amber-500/20 text-ui-label text-amber-300"
+              >
+                历史数据暂时不可访问
+              </div>
+            ) : hasLatency ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData}>
+                  <CartesianGrid
+                    stroke="var(--studio-border)"
+                    vertical={false}
+                  />
+                  <XAxis
+                    dataKey="time"
+                    stroke="var(--studio-text-subtle)"
+                    tick={{ fontSize: 11 }}
+                    minTickGap={36}
+                  />
+                  <YAxis
+                    stroke="var(--studio-text-subtle)"
+                    tick={{ fontSize: 11 }}
+                    unit=" ms"
+                    width={64}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      background: 'var(--studio-panel-muted)',
+                      border: '1px solid var(--studio-border)',
+                      borderRadius: 8,
+                      color: 'var(--studio-text-secondary)',
+                      fontSize: 12,
+                    }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="p50"
+                    name="P50"
+                    stroke="var(--studio-success)"
+                    dot={false}
+                    strokeWidth={2}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="p95"
+                    name="P95"
+                    stroke="var(--studio-warning)"
+                    dot={false}
+                    strokeWidth={1.5}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center rounded-lg border border-dashed border-white/10 text-slate-600">
+                <Gauge className="h-7 w-7" aria-hidden="true" />
+                <p className="mt-2 text-ui-label">当前范围没有独立延迟样本</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <aside
+        aria-labelledby={`${detailId(target.id)}-incidents`}
+        className="rounded-lg border border-white/5 bg-white/[0.025] p-3"
+      >
+        <div className="flex items-center gap-2">
+          <Clock3 className="h-4 w-4 text-slate-500" aria-hidden="true" />
+          <h3
+            id={`${detailId(target.id)}-incidents`}
+            className="text-ui-title font-semibold text-slate-100"
+          >
+            最近事故
+          </h3>
+        </div>
+        <div className="mt-3 space-y-2">
+          {incidentsLoading ? (
+            <div
+              role="status"
+              className="py-ui-empty text-center text-ui-label text-slate-500"
+            >
+              正在加载事故记录…
+            </div>
+          ) : incidentsError ? (
+            <div
+              role="alert"
+              className="rounded-lg border border-amber-500/20 p-3 text-center text-ui-label text-amber-300"
+            >
+              事故记录暂时不可访问
+            </div>
+          ) : incidents.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-white/10 px-3 py-ui-empty text-center">
+              <Activity
+                className="mx-auto h-6 w-6 text-slate-600"
+                aria-hidden="true"
+              />
+              <p className="mt-2 text-ui-label text-slate-500">
+                当前范围没有事故记录
+              </p>
+            </div>
+          ) : (
+            incidents.map(incident => (
+              <article
+                key={incident.id}
+                className="rounded-lg border border-white/5 bg-slate-950/35 p-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span
+                    className={cn(
+                      'rounded px-1.5 py-0.5 text-ui-caption',
+                      incident.active
+                        ? 'bg-rose-500/10 text-rose-300'
+                        : 'bg-emerald-500/10 text-emerald-300'
+                    )}
+                  >
+                    {incident.active ? '进行中' : '已恢复'}
+                  </span>
+                  <span className="font-mono text-ui-caption text-slate-600">
+                    #{incident.id}
+                  </span>
+                </div>
+                <p className="mt-2 break-all font-mono text-ui-label text-slate-300">
+                  {incident.reasonCode ?? 'DEPENDENCY_NOT_READY'}
+                </p>
+                <p className="mt-2 text-ui-caption text-slate-600">
+                  开始 {formatTime(incident.openedAt)}
+                </p>
+                {incident.resolvedAt && (
+                  <p className="mt-1 text-ui-caption text-slate-600">
+                    恢复 {formatTime(incident.resolvedAt)}
+                  </p>
+                )}
+              </article>
+            ))
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function overallPresentation({
+  error,
+  stale,
+  status,
+}: {
+  error: boolean;
+  stale: boolean;
+  status: MonitorStatus | undefined;
+}) {
+  if (error) {
+    return {
+      label: 'Monitor 当前不可访问',
+      tone: 'border-amber-500/30 bg-amber-500/5',
+      status: 'unknown' as const,
+    };
+  }
+  if (stale) {
+    return {
+      label: '监测数据已经陈旧',
+      tone: 'border-amber-500/30 bg-amber-500/5',
+      status: 'unknown' as const,
+    };
+  }
+  if (status === 'unavailable') {
+    return {
+      label: '检测到服务不可用',
+      tone: 'border-rose-500/30 bg-rose-500/5',
+      status,
+    };
+  }
+  if (status === 'degraded') {
+    return {
+      label: '部分服务处于降级状态',
+      tone: 'border-amber-500/30 bg-amber-500/5',
+      status,
+    };
+  }
+  if (status === 'unknown') {
+    return {
+      label: '部分服务状态未知',
+      tone: 'border-amber-500/30 bg-amber-500/5',
+      status,
+    };
+  }
+  if (status === 'disabled') {
+    return {
+      label: '监测服务尚未启用',
+      tone: 'border-white/10 bg-white/[0.025]',
+      status,
+    };
+  }
+  return {
+    label: '所有系统运行正常',
+    tone: 'border-emerald-500/20 bg-emerald-500/5',
+    status: 'healthy' as const,
+  };
 }
 
 export function ServiceStatusPanel() {
   const [range, setRange] = useState<MonitorRange>('24h');
   const [summary, setSummary] = useState<MonitorSummary | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [history, setHistory] = useState<MonitorHistory | null>(null);
+  const [histories, setHistories] = useState<
+    Record<string, MonitorHistory | undefined>
+  >({});
+  const [historyLoadingIds, setHistoryLoadingIds] = useState<Set<string>>(
+    new Set()
+  );
+  const [historyErrorIds, setHistoryErrorIds] = useState<Set<string>>(
+    new Set()
+  );
   const [incidents, setIncidents] = useState<MonitorIncident[]>([]);
+  const [incidentsLoading, setIncidentsLoading] = useState(false);
+  const [incidentsError, setIncidentsError] = useState(false);
   const [error, setError] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshing, setRefreshing] = useState(true);
+  const selectionInitialized = useRef(false);
 
   const loadSummary = useCallback(async () => {
     setRefreshing(true);
@@ -129,7 +612,20 @@ export function ServiceStatusPanel() {
         range === '24h' || range === '7d' || range === '30d' ? range : '30d'
       );
       setSummary(payload);
-      setSelectedId(current => current ?? payload.targets[0]?.id ?? null);
+      setSelectedId(current => {
+        if (current && payload.targets.some(target => target.id === current)) {
+          return current;
+        }
+        if (!selectionInitialized.current) {
+          selectionInitialized.current = true;
+          return (
+            payload.targets.find(target => target.id === 'qmt-agent')?.id ??
+            payload.targets[0]?.id ??
+            null
+          );
+        }
+        return null;
+      });
       setError(false);
     } catch {
       setError(true);
@@ -145,56 +641,101 @@ export function ServiceStatusPanel() {
   }, [loadSummary]);
 
   useEffect(() => {
-    if (!selectedId) return;
+    const targetIds = summary?.targets.map(target => target.id) ?? [];
+    if (targetIds.length === 0) {
+      setHistories({});
+      setHistoryLoadingIds(new Set());
+      setHistoryErrorIds(new Set());
+      return;
+    }
+
     const controller = new AbortController();
-    void Promise.all([
-      getMonitorHistory(selectedId, range, controller.signal),
-      getMonitorIncidents(range, selectedId, controller.signal),
-    ])
-      .then(([nextHistory, nextIncidents]) => {
-        setHistory(nextHistory);
+    setHistoryLoadingIds(new Set(targetIds));
+    void Promise.allSettled(
+      targetIds.map(targetId =>
+        getMonitorHistory(targetId, range, controller.signal)
+      )
+    ).then(results => {
+      if (controller.signal.aborted) return;
+
+      const failed = new Set<string>();
+      setHistories(current => {
+        const next = { ...current };
+        results.forEach((result, index) => {
+          const targetId = targetIds[index];
+          if (result.status === 'fulfilled') {
+            next[targetId] = result.value;
+          } else {
+            failed.add(targetId);
+          }
+        });
+        return next;
+      });
+      setHistoryErrorIds(failed);
+      setHistoryLoadingIds(new Set());
+    });
+
+    return () => controller.abort();
+  }, [range, summary]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setIncidents([]);
+      setIncidentsLoading(false);
+      setIncidentsError(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIncidentsLoading(true);
+    setIncidentsError(false);
+    void getMonitorIncidents(range, selectedId, controller.signal)
+      .then(nextIncidents => {
         setIncidents(nextIncidents);
       })
       .catch(errorValue => {
         if (!(
           errorValue instanceof DOMException && errorValue.name === 'AbortError'
         )) {
-          setHistory(null);
           setIncidents([]);
+          setIncidentsError(true);
         }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setIncidentsLoading(false);
       });
     return () => controller.abort();
   }, [range, selectedId]);
 
-  const selected = summary?.targets.find(target => target.id === selectedId);
-  const stale =
-    !summary?.lastCycleAt ||
-    Date.now() - new Date(summary.lastCycleAt).getTime() > 90000;
-  const chartData = useMemo(
-    () =>
-      (history?.points ?? []).map(point => ({
-        time: new Date(point.start).toLocaleString('zh-CN', {
-          month: '2-digit',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        }),
-        p50: point.latencyP50Ms,
-        p95: point.latencyP95Ms,
-        status: point.status,
-      })),
-    [history]
+  const stale = Boolean(
+    summary &&
+    (!summary.lastCycleAt ||
+      Date.now() - new Date(summary.lastCycleAt).getTime() > 90000)
   );
+  const displayedStatus =
+    summary?.targets.length === 0
+      ? 'disabled'
+      : summary?.groups.reduce(
+          (current, group) =>
+            statusPriority[group.status] > statusPriority[current]
+              ? group.status
+              : current,
+          summary.overallStatus
+        );
+  const overall = overallPresentation({
+    error,
+    stale,
+    status: displayedStatus,
+  });
+  const activeIncidents =
+    summary?.targets.filter(target => target.activeIncident).length ?? 0;
+  const initialLoading = !summary && refreshing && !error;
 
   return (
     <div className="space-y-ui-section">
-      <header className="flex flex-col gap-ui-section lg:flex-row lg:items-end lg:justify-between">
+      <header className="flex flex-col gap-ui-section xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <p className="text-ui-label font-medium uppercase tracking-[0.22em] text-sky-400">
-            Independent observability
-          </p>
-          <h1 className="mt-2 text-ui-page-title font-semibold text-slate-100">
+          <h1 className="text-ui-page-title font-semibold text-slate-100">
             服务状态
           </h1>
           <p className="mt-2 max-w-3xl text-ui-body leading-6 text-slate-400">
@@ -202,251 +743,199 @@ export function ServiceStatusPanel() {
             运行组件的可用性、延迟与事故历史；这些观测不会参与交易门禁。
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {ranges.map(item => (
-            <button
-              key={item.value}
-              type="button"
-              aria-pressed={range === item.value}
-              onClick={() => setRange(item.value)}
-              className={cn(
-                'cursor-pointer rounded-lg px-3 py-1.5 text-ui-label font-medium transition-colors',
-                range === item.value
-                  ? 'bg-sky-500/15 text-sky-200'
-                  : 'text-slate-500 hover:bg-white/5 hover:text-slate-200'
-              )}
-            >
-              {item.label}
-            </button>
-          ))}
+        <div className="flex min-w-0 items-center gap-2">
+          <div
+            role="group"
+            aria-label="状态历史范围"
+            className="no-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-lg border border-white/5 bg-slate-950/35 p-1 xl:flex-none"
+          >
+            {ranges.map(item => (
+              <button
+                key={item.value}
+                type="button"
+                aria-pressed={range === item.value}
+                onClick={() => setRange(item.value)}
+                className={cn(
+                  'h-8 shrink-0 cursor-pointer rounded-md px-3 text-ui-label font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70',
+                  range === item.value
+                    ? 'bg-sky-500/15 text-sky-200'
+                    : 'text-slate-500 hover:bg-white/5 hover:text-slate-200'
+                )}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             aria-label="刷新服务状态"
             onClick={() => void loadSummary()}
             disabled={refreshing}
-            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-white/5 hover:text-slate-100 disabled:cursor-not-allowed"
+            className="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-400 transition-colors duration-200 hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <RefreshCw
-              className={cn('h-4 w-4', refreshing && 'animate-spin')}
+              className={cn(
+                'h-4 w-4 motion-reduce:animate-none',
+                refreshing && 'animate-spin'
+              )}
             />
           </button>
         </div>
       </header>
 
-      <section
-        className={cn(
-          'rounded-panel border p-ui-section',
-          error || stale
-            ? 'border-amber-500/30 bg-amber-500/5'
-            : summary?.overallStatus === 'unavailable'
-              ? 'border-rose-500/30 bg-rose-500/5'
-              : 'border-emerald-500/20 bg-emerald-500/5'
-        )}
-      >
-        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div className="flex items-center gap-3">
-            {error || stale ? (
-              <AlertTriangle className="h-7 w-7 text-amber-300" />
-            ) : summary?.overallStatus === 'unavailable' ? (
-              <XCircle className="h-7 w-7 text-rose-300" />
-            ) : (
-              <CheckCircle2 className="h-7 w-7 text-emerald-300" />
-            )}
-            <div>
-              <h2 className="text-ui-heading font-semibold text-slate-100">
-                {error
-                  ? 'Monitor 当前不可访问'
-                  : stale
-                    ? '监测数据已经陈旧'
-                    : summary?.overallStatus === 'unavailable'
-                      ? '检测到服务不可用'
-                      : '监测链路正常'}
-              </h2>
-              <p className="mt-1 text-ui-label text-slate-500">
-                最近采样：{formatTime(summary?.lastCycleAt ?? null)}
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-ui-section font-mono text-ui-label text-slate-400">
-            <span>{summary?.targets.length ?? 0} 个目标</span>
-            <span>
-              {summary?.targets.filter(target => target.activeIncident)
-                .length ?? 0}{' '}
-              个活动事故
-            </span>
-          </div>
-        </div>
-      </section>
-
-      {(summary?.groups ?? []).map(group => (
-        <section key={group.id}>
-          <div className="mb-3 flex items-end justify-between gap-3">
-            <div>
-              <h2 className="text-ui-heading font-semibold text-slate-100">
-                {group.name}
-              </h2>
-              <p className="mt-1 text-ui-label text-slate-500">
-                {group.id === 'external_dependency'
-                  ? '主动探测连接、协议响应和端到端延迟'
-                  : 'HTTP 链路与服务端语义状态快照'}
-              </p>
-            </div>
-            <span
-              className={cn(
-                'rounded-full px-2 py-1 text-ui-caption',
-                statusTone(group.status)
-              )}
-            >
-              {statusLabel[group.status]}
-            </span>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            {summary?.targets
-              .filter(target => target.group === group.id)
-              .map(target => (
-                <TargetCard
-                  key={target.id}
-                  target={target}
-                  selected={target.id === selectedId}
-                  onSelect={() => setSelectedId(target.id)}
-                />
-              ))}
-          </div>
+      {initialLoading ? (
+        <section
+          role="status"
+          className="flex min-h-20 items-center gap-3 rounded-panel border border-white/10 bg-white/[0.025] p-ui-section text-ui-body text-slate-400"
+        >
+          <RefreshCw
+            className="h-6 w-6 animate-spin text-sky-300 motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+          正在加载服务状态…
         </section>
-      ))}
-
-      {selected && (
-        <section className="grid gap-ui-section xl:grid-cols-[minmax(0,1fr)_320px]">
-          <div className="rounded-panel border border-white/5 bg-slate-950/35 p-ui-section">
-            <div className="flex flex-col gap-3 border-b border-white/5 pb-4 md:flex-row md:items-end md:justify-between">
+      ) : (
+        <section
+          role={error ? 'alert' : 'status'}
+          aria-live="polite"
+          className={cn('rounded-panel border p-ui-section', overall.tone)}
+        >
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-center gap-3">
+              <StatusIcon status={overall.status} className="h-7 w-7" />
               <div>
                 <h2 className="text-ui-heading font-semibold text-slate-100">
-                  {selected.name} 延迟趋势
+                  {overall.label}
                 </h2>
                 <p className="mt-1 text-ui-label text-slate-500">
-                  {selected.probeKind === 'derived'
-                    ? '该组件来自语义快照，不生成虚假的独立延迟。'
-                    : selected.probeKind === 'composite'
-                      ? `状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。P50 ${metric(selected.latencyP50Ms, ' ms')} · P95 ${metric(selected.latencyP95Ms, ' ms')}`
-                      : `P50 ${metric(selected.latencyP50Ms, ' ms')} · P95 ${metric(selected.latencyP95Ms, ' ms')}`}
+                  最近采样：{formatTime(summary?.lastCycleAt ?? null)}
                 </p>
               </div>
-              <div className="flex gap-ui-section font-mono text-ui-caption text-slate-500">
-                <span>覆盖 {metric(selected.coveragePct, '%')}</span>
-                <span>健康 {metric(selected.healthyPct, '%')}</span>
-              </div>
             </div>
-            <div className="mt-4 h-72">
-              {chartData.some(
-                point => point.p50 !== null || point.p95 !== null
-              ) ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData}>
-                    <CartesianGrid
-                      stroke="rgba(148,163,184,0.08)"
-                      vertical={false}
-                    />
-                    <XAxis
-                      dataKey="time"
-                      stroke="#64748b"
-                      tick={{ fontSize: 10 }}
-                      minTickGap={36}
-                    />
-                    <YAxis
-                      stroke="#64748b"
-                      tick={{ fontSize: 10 }}
-                      unit=" ms"
-                      width={64}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        background: '#0f172a',
-                        border: '1px solid rgba(148,163,184,0.18)',
-                        borderRadius: 8,
-                        fontSize: 12,
-                      }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="p50"
-                      name="P50"
-                      stroke="#38bdf8"
-                      dot={false}
-                      strokeWidth={2}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="p95"
-                      name="P95"
-                      stroke="#f59e0b"
-                      dot={false}
-                      strokeWidth={1.5}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="flex h-full flex-col items-center justify-center text-slate-600">
-                  <Gauge className="h-8 w-8" />
-                  <p className="mt-3 text-ui-label">当前范围没有独立延迟样本</p>
-                </div>
+            <div className="flex items-center gap-ui-section">
+              <div className="flex gap-ui-section font-mono text-ui-label text-slate-400">
+                <span>{summary?.targets.length ?? 0} 个目标</span>
+                <span>{activeIncidents} 个活动事故</span>
+              </div>
+              {error && (
+                <button
+                  type="button"
+                  onClick={() => void loadSummary()}
+                  className="h-8 cursor-pointer rounded-md border border-amber-500/20 px-3 text-ui-label font-medium text-amber-200 transition-colors duration-200 hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70"
+                >
+                  重试
+                </button>
               )}
             </div>
           </div>
-
-          <aside className="rounded-panel border border-white/5 bg-slate-950/35 p-ui-section">
-            <div className="flex items-center gap-2">
-              <Clock3 className="h-4 w-4 text-slate-500" />
-              <h2 className="text-ui-heading font-semibold text-slate-100">
-                最近事故
-              </h2>
-            </div>
-            <div className="mt-4 space-y-3">
-              {incidents.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-white/10 p-ui-section text-center">
-                  <Activity className="mx-auto h-6 w-6 text-slate-600" />
-                  <p className="mt-2 text-ui-label text-slate-500">
-                    当前范围没有事故记录
-                  </p>
-                </div>
-              ) : (
-                incidents.map(incident => (
-                  <article
-                    key={incident.id}
-                    className="rounded-lg border border-white/5 bg-white/[0.025] p-3"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span
-                        className={cn(
-                          'rounded px-1.5 py-0.5 text-ui-caption',
-                          incident.active
-                            ? 'bg-rose-500/10 text-rose-300'
-                            : 'bg-emerald-500/10 text-emerald-300'
-                        )}
-                      >
-                        {incident.active ? '进行中' : '已恢复'}
-                      </span>
-                      <span className="font-mono text-ui-caption text-slate-600">
-                        #{incident.id}
-                      </span>
-                    </div>
-                    <p className="mt-2 font-mono text-ui-label text-slate-300">
-                      {incident.reasonCode ?? 'DEPENDENCY_NOT_READY'}
-                    </p>
-                    <p className="mt-2 text-ui-caption text-slate-600">
-                      开始 {formatTime(incident.openedAt)}
-                    </p>
-                    {incident.resolvedAt && (
-                      <p className="mt-1 text-ui-caption text-slate-600">
-                        恢复 {formatTime(incident.resolvedAt)}
-                      </p>
-                    )}
-                  </article>
-                ))
-              )}
-            </div>
-          </aside>
         </section>
       )}
+
+      {summary && summary.targets.length > 0 ? (
+        <section
+          aria-label="服务连续状态"
+          className="overflow-hidden rounded-panel border border-white/10 bg-slate-950/20"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 bg-white/[0.025] px-3 py-2 text-ui-caption text-slate-500">
+            <span>连续状态</span>
+            <span
+              className="flex flex-wrap items-center gap-3"
+              aria-label="状态图例"
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-sm bg-emerald-400" />
+                正常
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-sm bg-amber-400" />
+                降级 / 未知
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-sm bg-rose-400" />
+                不可用
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-sm bg-slate-600" />
+                未启用
+              </span>
+            </span>
+          </div>
+
+          {(summary.groups ?? []).map((group, groupIndex) => {
+            const targets = summary.targets.filter(
+              target => target.group === group.id
+            );
+            return (
+              <section
+                key={group.id}
+                aria-labelledby={`service-group-${group.id}`}
+                className={cn(groupIndex > 0 && 'border-t border-white/10')}
+              >
+                <div className="flex items-center justify-between gap-3 border-b border-white/5 bg-slate-900/35 px-3 py-2.5">
+                  <h2
+                    id={`service-group-${group.id}`}
+                    className="text-ui-title font-semibold text-slate-100"
+                  >
+                    {group.name}
+                    <span className="ml-2 text-ui-label font-normal text-slate-500">
+                      · {targets.length} 个组件
+                    </span>
+                  </h2>
+                  <span className="flex items-center gap-1.5 text-ui-caption text-slate-500">
+                    <StatusIcon status={group.status} className="h-4 w-4" />
+                    {statusLabel[group.status]}
+                  </span>
+                </div>
+                <div className="divide-y divide-white/5">
+                  {targets.map(target => {
+                    const targetSelected = selectedId === target.id;
+                    return (
+                      <article key={target.id}>
+                        <TargetRow
+                          target={target}
+                          history={histories[target.id]}
+                          historyLoading={historyLoadingIds.has(target.id)}
+                          historyError={historyErrorIds.has(target.id)}
+                          selected={targetSelected}
+                          onToggle={() =>
+                            setSelectedId(current =>
+                              current === target.id ? null : target.id
+                            )
+                          }
+                        />
+                        {targetSelected && (
+                          <TargetDetails
+                            target={target}
+                            history={histories[target.id]}
+                            historyLoading={historyLoadingIds.has(target.id)}
+                            historyError={historyErrorIds.has(target.id)}
+                            incidents={incidents}
+                            incidentsLoading={incidentsLoading}
+                            incidentsError={incidentsError}
+                          />
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            );
+          })}
+        </section>
+      ) : summary && !error ? (
+        <section className="rounded-panel border border-dashed border-white/10 px-ui-section py-ui-empty text-center">
+          <Activity
+            className="mx-auto h-7 w-7 text-slate-600"
+            aria-hidden="true"
+          />
+          <h2 className="mt-3 text-ui-title font-medium text-slate-300">
+            尚未配置监测目标
+          </h2>
+          <p className="mt-1 text-ui-label text-slate-500">
+            Monitor 返回了有效摘要，但当前没有可展示的服务。
+          </p>
+        </section>
+      ) : null}
     </div>
   );
 }
