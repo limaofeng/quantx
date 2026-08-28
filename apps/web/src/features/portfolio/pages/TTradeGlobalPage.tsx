@@ -1,4 +1,3 @@
-import type { DocumentNode } from 'graphql';
 import {
   Activity,
   AlertTriangle,
@@ -43,7 +42,6 @@ import {
   useMutation,
   useQuery,
   useSubscription,
-  type OperationContext,
 } from 'urql';
 
 import {
@@ -1716,7 +1714,6 @@ export function TTradeGlobalPage() {
   const previousWsStatusRef = React.useRef<GraphqlWsStatus | null>(null);
   const wsStatusRef = React.useRef(graphqlWsStatus);
   wsStatusRef.current = graphqlWsStatus;
-  const monitorRefreshSequenceRef = React.useRef(0);
   const [signalSnapshotRefreshCoordinator] = React.useState(
     createSignalSnapshotRefreshCoordinator
   );
@@ -1780,17 +1777,12 @@ export function TTradeGlobalPage() {
     (epoch: number, expectedAccountId: string) => {
       void signalSnapshotRefreshCoordinator
         .refresh(epoch, expectedAccountId, async () => {
-          const requestInstance =
-            ++monitorRefreshSequenceRef.current as OperationContext['_instance'];
           const result = await client
             .query(
-              TTradeGlobalMonitorQuery as DocumentNode,
+              TTradeGlobalMonitorQuery,
               { accountId: expectedAccountId },
               {
                 requestPolicy: 'network-only',
-                // URQL uses this internal identity to keep this epoch's
-                // promise from observing an older same-key result.
-                _instance: requestInstance,
               }
             )
             .toPromise();

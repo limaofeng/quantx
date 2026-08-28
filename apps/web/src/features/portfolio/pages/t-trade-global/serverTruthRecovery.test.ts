@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -6,6 +9,20 @@ import {
 } from './serverTruthRecovery';
 
 describe('T-trade server-truth recovery policy', () => {
+  it('keeps the authoritative query on the active URQL query instance', () => {
+    const page = readFileSync(
+      resolve(__dirname, '../TTradeGlobalPage.tsx'),
+      'utf8'
+    );
+    const refreshBlock = page
+      .split('const runMonitorEpochRefresh = React.useCallback', 2)[1]
+      .split('const [lastTrustedMonitor', 2)[0];
+
+    expect(refreshBlock).toContain("requestPolicy: 'network-only'");
+    expect(refreshBlock).not.toContain('_instance');
+    expect(page).not.toContain('monitorRefreshSequenceRef');
+  });
+
   it('coalesces duplicate subscription versions but accepts a replay after reconnect', () => {
     const policy = createTTradeServerTruthRefreshPolicy();
 
