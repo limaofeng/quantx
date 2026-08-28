@@ -74,4 +74,21 @@ describe('TTradeGlobalPage toolbar color contract', () => {
       /(?:text|after:bg|focus-visible:ring)-red-/
     );
   });
+
+  it('keeps replay subviews in the shared toolbar instead of a nested content nav', () => {
+    const source = readFileSync(new URL(SOURCE_PATH, import.meta.url), 'utf8');
+    const toolbar = readToolbarSource();
+    const replaySubviews = sourceSection(
+      toolbar,
+      "{workspaceMode === 'REPLAY' && (",
+      '      </nav>'
+    );
+
+    for (const label of ['总览', '信号', '日志']) {
+      expect(replaySubviews).toContain(`'${label}'`);
+    }
+    expect(replaySubviews).toContain('focus-visible:ring-cyan-400/60');
+    expect(replaySubviews).toContain("? 'text-cyan-200 after:bg-cyan-400'");
+    expect(source).not.toContain('aria-label="回放内容"');
+  });
 });

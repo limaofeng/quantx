@@ -794,11 +794,15 @@ function TTradeReplaySignals({
 
 function TTradeReplayPanel({
   accountId,
+  activeView,
   form,
+  onActiveViewChange,
   onSidebarContextChange,
 }: {
   accountId: string;
+  activeView: ReplayWorkspaceView;
   form: SettingsForm;
+  onActiveViewChange: (view: ReplayWorkspaceView) => void;
   onSidebarContextChange: (context: ReplaySidebarContext | null) => void;
 }) {
   const { toast } = useToast();
@@ -809,8 +813,6 @@ function TTradeReplayPanel({
   const [endDate, setEndDate] = React.useState(initialRange.end);
   const appliedTradingCalendarRef = React.useRef(false);
   const [activeRunId, setActiveRunId] = React.useState('');
-  const [activeView, setActiveView] =
-    React.useState<ReplayWorkspaceView>('OVERVIEW');
   const [portfolioSource, setPortfolioSource] = React.useState<
     'SNAPSHOT' | 'MANUAL'
   >('SNAPSHOT');
@@ -1441,7 +1443,7 @@ function TTradeReplayPanel({
         );
       }
       setActiveRunId(nextRunId);
-      if (!nextRunId) setActiveView('OVERVIEW');
+      if (!nextRunId) onActiveViewChange('OVERVIEW');
       toast({ title: '回放已删除', description: payload.message });
       refreshHistory({ requestPolicy: 'network-only' });
     } catch (error) {
@@ -1469,43 +1471,6 @@ function TTradeReplayPanel({
   return (
     <div className="studio-workspace-surface grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px]">
       <div className="flex min-h-0 flex-col">
-        <nav
-          aria-label="回放内容"
-          className="flex h-10 shrink-0 items-stretch border-b border-white/[0.06] bg-[#081421] px-2"
-        >
-          {(
-            [
-              ['OVERVIEW', BarChart3, '总览'],
-              ['SIGNALS', ClipboardList, '信号'],
-              ['LOGS', Terminal, '日志'],
-            ] as const
-          ).map(([view, Icon, label]) => {
-            const active = activeView === view;
-            const disabled = view !== 'OVERVIEW' && !activeRunId;
-            return (
-              <button
-                key={view}
-                type="button"
-                disabled={disabled}
-                onClick={() => setActiveView(view)}
-                className={cn(
-                  'relative flex cursor-pointer items-center gap-1.5 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35',
-                  active
-                    ? 'text-cyan-200 after:bg-cyan-400'
-                    : 'text-slate-600 hover:text-slate-200'
-                )}
-              >
-                <Icon className="h-3.5 w-3.5" />
-                {label}
-              </button>
-            );
-          })}
-          <div className="ml-auto flex items-center gap-1.5 px-2 text-ui-caption font-bold text-cyan-200">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            隔离回测
-          </div>
-        </nav>
-
         {activeView === 'OVERVIEW' ? (
           <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
             <section className="border-b border-white/[0.06] bg-[#0a1728] p-ui-section">
@@ -2342,7 +2307,7 @@ function TTradeReplayPanel({
               type="button"
               onClick={() => {
                 setActiveRunId('');
-                setActiveView('OVERVIEW');
+                onActiveViewChange('OVERVIEW');
               }}
               className={cn(
                 'flex h-control-compact cursor-pointer items-center gap-1 border px-2 text-ui-caption font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
@@ -2439,6 +2404,8 @@ export function TTradeGlobalPage() {
   const [workspaceMode, setWorkspaceMode] = React.useState<
     'REALTIME' | 'REPLAY'
   >('REALTIME');
+  const [activeReplayView, setActiveReplayView] =
+    React.useState<ReplayWorkspaceView>('OVERVIEW');
   const [replaySidebarContext, setReplaySidebarContext] =
     React.useState<ReplaySidebarContext | null>(null);
   const { tradingDays } = useTradingDays('SH', 3);
@@ -4091,6 +4058,35 @@ export function TTradeGlobalPage() {
             })}
           </>
         )}
+        {workspaceMode === 'REPLAY' && (
+          <>
+            <span className="mx-2 my-3 w-px bg-white/[0.08]" />
+            {(
+              [
+                ['OVERVIEW', '总览'],
+                ['SIGNALS', '信号'],
+                ['LOGS', '日志'],
+              ] as const
+            ).map(([view, label]) => {
+              const active = activeReplayView === view;
+              return (
+                <button
+                  key={view}
+                  type="button"
+                  onClick={() => setActiveReplayView(view)}
+                  className={cn(
+                    'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
+                    active
+                      ? 'text-cyan-200 after:bg-cyan-400'
+                      : 'text-slate-500 hover:text-slate-200'
+                  )}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </>
+        )}
       </nav>
 
       <div className="flex shrink-0 items-center gap-2">
@@ -5446,7 +5442,9 @@ export function TTradeGlobalPage() {
         {workspaceMode === 'REPLAY' ? (
           <TTradeReplayPanel
             accountId={accountId}
+            activeView={activeReplayView}
             form={form}
+            onActiveViewChange={setActiveReplayView}
             onSidebarContextChange={setReplaySidebarContext}
           />
         ) : activeMode === 'MONITOR' ? (
