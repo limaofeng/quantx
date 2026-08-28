@@ -369,7 +369,7 @@ async def test_global_monitor_accepts_projection_from_current_session(
     AsyncMock(
       return_value={
         "agent_status": "READY",
-        "checks": [{"code": "MARKET_STREAM_READY", "status": "PASSED"}],
+        "checks": [{"code": "MARKET_STREAM_READY", "passed": True}],
       }
     ),
   )

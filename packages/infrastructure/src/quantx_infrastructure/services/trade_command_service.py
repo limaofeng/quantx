@@ -54,6 +54,9 @@ from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.strategy_run_state import StrategyRunState
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.services.account_execution_safety_service import (
+  authoritative_market_stream_ready,
+)
 from quantx_infrastructure.services.agent_session_guard import (
   evaluate_agent_session,
 )

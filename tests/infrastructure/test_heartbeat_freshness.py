@@ -153,25 +153,21 @@ def _api(now: datetime, *, instance_id: str = "api-instance-1"):
   )
 
 
-def test_remote_session_freshness_accepts_naive_and_aware_utc(
+def test_local_agent_freshness_accepts_server_heartbeat(
   fixed_utcnow: datetime,
 ) -> None:
   heartbeat = _agent(fixed_utcnow)
-  api = _api(fixed_utcnow)
 
-  assert AccountExecutionSafetyService._agent_fresh(heartbeat, api)
-  assert TradeCommandService._heartbeat_fresh(heartbeat, api)
+  assert AccountExecutionSafetyService._agent_fresh(heartbeat)
+  assert TradeCommandService._heartbeat_fresh(heartbeat)
 
 
-def test_api_restart_boundary_fails_closed(
+def test_api_generation_is_not_an_account_health_gate(
   fixed_utcnow: datetime,
 ) -> None:
   heartbeat = _agent(fixed_utcnow, api_instance_id="api-instance-old")
 
-  assert not AccountExecutionSafetyService._agent_fresh(
-    heartbeat,
-    _api(fixed_utcnow, instance_id="api-instance-new"),
-  )
+  assert AccountExecutionSafetyService._agent_fresh(heartbeat)
 
 
 def _control(now: datetime):
@@ -242,7 +238,8 @@ async def _status(
   async def session():
     yield SimpleNamespace()
 
-  snapshot = AsyncMock(return_value=rows)
+  normalized_rows = [row[:4] + row[5:] if len(row) == 9 else row for row in rows]
+  snapshot = AsyncMock(return_value=normalized_rows)
   monkeypatch.setattr(safety_module, "AsyncSessionLocal", session)
   monkeypatch.setattr(AccountExecutionSafetyService, "_readiness_snapshot", snapshot)
   monkeypatch.setattr(safety_module.settings, "enable_real_trading", True)
@@ -402,7 +399,7 @@ async def test_account_status_fails_closed_for_multiple_ready_live_agents(
 
 
 @pytest.mark.asyncio
-async def test_api_restart_overrides_a_fresh_persisted_heartbeat(
+async def test_account_status_ignores_api_generation_after_local_heartbeat(
   monkeypatch: pytest.MonkeyPatch,
   fixed_utcnow: datetime,
 ) -> None:
@@ -422,7 +419,36 @@ async def test_api_restart_overrides_a_fresh_persisted_heartbeat(
 
   result = await _status(monkeypatch, rows)
 
-  assert result["agent_status"] == "OFFLINE"
+  assert result["agent_status"] == "READY"
+  assert result["agent_mode"] == "live"
+  assert result["qmt_launch_reason_code"] == ""
+  assert result["can_increase_risk"] is True
+
+
+@pytest.mark.asyncio
+async def test_blocked_windows_launch_overrides_persisted_account_heartbeat(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_ENROLLMENT_REQUIRED")
+  rows = [
+    (
+      _control(fixed_utcnow),
+      SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+      _device("device-1"),
+      _agent(fixed_utcnow),
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+    )
+  ]
+
+  result = await _status(monkeypatch, rows)
+
+  assert result["agent_status"] == "BLOCKED"
   assert result["agent_mode"] == "offline"
-  assert result["qmt_launch_reason_code"] == "REMOTE_AGENT_SESSION_STALE"
+  assert result["qmt_launch_reason_code"] == "QMT_ENROLLMENT_REQUIRED"
   assert result["can_increase_risk"] is False

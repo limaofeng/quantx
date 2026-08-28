@@ -26,12 +26,14 @@ from quantx_infrastructure.models.agent_runtime import (
   TradeCommandOutbox,
 )
 from quantx_infrastructure.services.agent_session_guard import (
-  API_HEARTBEAT_COMPONENT,
-  REMOTE_AGENT_NOT_RECONCILED,
+  QMT_AGENT_NOT_RECONCILED,
   evaluate_agent_session,
 )
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
+)
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_agent_launch_block_reason,
 )
 
 ACCOUNT_EXECUTION_ALERT_CODES = frozenset(
@@ -208,11 +210,9 @@ class AccountExecutionSafetyService:
   @staticmethod
   def _agent_fresh(
     heartbeat: RuntimeComponentHeartbeat | None,
-    api_heartbeat: RuntimeComponentHeartbeat | None,
   ) -> bool:
     return evaluate_agent_session(
       heartbeat,
-      api_heartbeat,
       now=utcnow(),
       acceptable_statuses={"READY"},
     ).current
@@ -221,12 +221,11 @@ class AccountExecutionSafetyService:
   def _agent_candidate_rank(
     cls,
     heartbeat: RuntimeComponentHeartbeat | None,
-    api_heartbeat: RuntimeComponentHeartbeat | None,
   ) -> tuple[bool, datetime]:
     updated_at = (
       to_naive_utc(heartbeat.updated_at) if heartbeat is not None else datetime.min
     )
-    return cls._agent_fresh(heartbeat, api_heartbeat), updated_at
+    return cls._agent_fresh(heartbeat), updated_at
 
   @staticmethod
   def _normalized_broker_order_status(value: Any) -> str:
@@ -361,7 +360,6 @@ class AccountExecutionSafetyService:
     anchor = select(literal(account_id).label("account_id")).subquery()
     engine_heartbeat = aliased(RuntimeComponentHeartbeat)
     agent_heartbeat = aliased(RuntimeComponentHeartbeat)
-    api_heartbeat = aliased(RuntimeComponentHeartbeat)
     queued_count = (
       select(func.count(TradeCommandOutbox.message_id))
       .where(
@@ -406,7 +404,6 @@ class AccountExecutionSafetyService:
           engine_heartbeat,
           AgentDevice,
           agent_heartbeat,
-          api_heartbeat,
           queued_count,
           oldest_queued_at,
           dead_letter_count,
@@ -418,7 +415,6 @@ class AccountExecutionSafetyService:
           AccountExecutionControl.account_id == anchor.c.account_id,
         )
         .outerjoin(engine_heartbeat, engine_heartbeat.component == "engine")
-        .outerjoin(api_heartbeat, api_heartbeat.component == API_HEARTBEAT_COMPONENT)
         .outerjoin(AgentDevice, AgentDevice.revoked_at.is_(None))
         .outerjoin(
           agent_heartbeat,
@@ -437,7 +433,6 @@ class AccountExecutionSafetyService:
         engine,
         _,
         _,
-        api_heartbeat,
         queued_count,
         oldest_queued_at,
         dead_letter_count,
@@ -458,8 +453,7 @@ class AccountExecutionSafetyService:
           live_agent_candidates.append((candidate_device, candidate_agent))
           if device is None or self._agent_candidate_rank(
             candidate_agent,
-            api_heartbeat,
-          ) > self._agent_candidate_rank(agent, api_heartbeat):
+          ) > self._agent_candidate_rank(agent):
             device = candidate_device
             agent = candidate_agent
 
@@ -467,7 +461,7 @@ class AccountExecutionSafetyService:
       ready_live_agents = [
         (candidate_device, candidate_agent)
         for candidate_device, candidate_agent in live_agent_candidates
-        if self._agent_fresh(candidate_agent, api_heartbeat)
+        if self._agent_fresh(candidate_agent)
       ]
       multiple_ready_live_agents = len(ready_live_agents) > 1
       if len(ready_live_agents) == 1:
@@ -483,7 +477,6 @@ class AccountExecutionSafetyService:
       reported_protocol_version = str(agent_details.get("protocolVersion") or "")
       agent_session = evaluate_agent_session(
         agent,
-        api_heartbeat,
         now=now,
         acceptable_statuses={"READY"},
       )
@@ -515,11 +508,12 @@ class AccountExecutionSafetyService:
         live_agent_blocked_reason = "对应账户的 live Agent 当前未就绪"
 
       agent_reason_code = agent_session.reason_code or (
-        "" if live_agent_ready else REMOTE_AGENT_NOT_RECONCILED
+        "" if live_agent_ready else QMT_AGENT_NOT_RECONCILED
       )
+      launch_block_reason = qmt_agent_launch_block_reason()
       if not multiple_ready_live_agents and not live_agent_ready and agent_reason_code:
         live_agent_blocked_reason = (
-          f"远程 QMT Agent 会话不可用于实盘（{agent_reason_code}）"
+          f"本机 QMT Agent 当前不可用于实盘（{agent_reason_code}）"
         )
 
       account_reconciliation = dict(agent_details.get("accountReconciliation") or {})
@@ -729,12 +723,20 @@ class AccountExecutionSafetyService:
         "blocked_reasons": projection["blocked_reasons"],
         "checks": projection["checks"],
         "engine_status": str(engine.status if engine else "OFFLINE"),
-        "agent_status": str(agent.status)
-        if agent_heartbeat_fresh and agent
-        else "OFFLINE",
+        "agent_status": (
+          "BLOCKED"
+          if launch_block_reason
+          else str(agent.status)
+          if agent_heartbeat_fresh and agent
+          else "OFFLINE"
+        ),
         "agent_device_id": str(device.id) if device else None,
         "ready_live_agent_count": len(ready_live_agents),
-        "agent_mode": reported_agent_mode if agent_heartbeat_fresh else "offline",
+        "agent_mode": (
+          reported_agent_mode
+          if agent_heartbeat_fresh and not launch_block_reason
+          else "offline"
+        ),
         "requested_agent_mode": reported_agent_mode or "unknown",
         "qmt_launch_reason_code": agent_reason_code,
         "protocol_version": reported_protocol_version if agent_heartbeat_fresh else "",

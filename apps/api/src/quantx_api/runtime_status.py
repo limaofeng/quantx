@@ -24,6 +24,9 @@ from quantx_infrastructure.services.agent_session_guard import (
   QMT_AGENT_STALE,
   evaluate_agent_session,
 )
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_agent_launch_block_reason,
+)
 from quantx_infrastructure.services.trading_time_service import TradingTimeService
 from sqlalchemy import select, text
 
@@ -211,7 +214,13 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
   ]
   components["qmt-agent"] = {
     "status": (
-      "ready" if ready_agents else "degraded" if connected_agents else "offline"
+      "blocked"
+      if launch_block_reason
+      else "ready"
+      if ready_agents
+      else "degraded"
+      if connected_agents
+      else "offline"
     ),
     "connectedDevices": len(connected_agents),
     "readyDevices": len(ready_agents),
@@ -228,35 +237,25 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       round(min(snapshot_ages), 3) if snapshot_ages else None
     ),
     "latestReadyHeartbeatAt": _iso_utc_timestamp(latest_ready_heartbeat_at),
-    "apiInstanceId": str(api_heartbeat.instance_id if api_heartbeat else ""),
-    "remoteAddressSummaries": sorted(
-      {
-        str(
-          dict(heartbeat_by_component[f"qmt-agent:{agent.id}"].details or {}).get(
-            "remoteAddressSummary"
-          )
-          or "unknown"
-        )
-        for agent, _ in connected_agents
-      }
-    ),
     "reasonCode": (
-      ""
+      launch_block_reason
+      if launch_block_reason
+      else ""
       if ready_agents
       else (
-        REMOTE_AGENT_NOT_RECONCILED
+        QMT_AGENT_NOT_RECONCILED
         if connected_agents
         else next(
           (
             reason
             for reason in (
-              REMOTE_AGENT_ACCOUNT_MISMATCH,
-              REMOTE_AGENT_SESSION_STALE,
-              REMOTE_AGENT_OFFLINE,
+              QMT_ACCOUNT_MISMATCH,
+              QMT_AGENT_STALE,
+              QMT_AGENT_OFFLINE,
             )
             if reason in agent_reason_codes
           ),
-          REMOTE_AGENT_OFFLINE,
+          QMT_AGENT_OFFLINE,
         )
       )
     ),

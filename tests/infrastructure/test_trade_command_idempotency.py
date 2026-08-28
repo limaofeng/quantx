@@ -314,7 +314,7 @@ async def test_multiple_ready_live_agents_fail_closed() -> None:
       execution_mode="live",
     )
 
-  assert db.get.await_count == 3
+  assert db.get.await_count == 2
   assert all(
     call.args[0] is RuntimeComponentHeartbeat for call in db.get.await_args_list
   )
@@ -325,11 +325,11 @@ async def test_multiple_ready_live_agents_fail_closed() -> None:
       account_id="account-1",
       execution_mode="live",
     )
-  assert db.get.await_count == 3
+  assert db.get.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_live_device_requires_heartbeat_from_current_api_session() -> None:
+async def test_live_device_uses_local_heartbeat_not_api_generation() -> None:
   device = SimpleNamespace(
     id="device-1",
     authorized_account_ids=["account-1"],
@@ -347,11 +347,6 @@ async def test_live_device_requires_heartbeat_from_current_api_session() -> None
       return Scalars()
 
   now = utcnow()
-  api_heartbeat = SimpleNamespace(
-    instance_id="api-instance-new",
-    status="READY",
-    updated_at=now,
-  )
   heartbeat = SimpleNamespace(
     status="READY",
     updated_at=now,
@@ -365,22 +360,13 @@ async def test_live_device_requires_heartbeat_from_current_api_session() -> None
   )
 
   async def get(_model, key):
-    return api_heartbeat if key == "api" else heartbeat
+    return heartbeat
 
   db = SimpleNamespace(
     execute=AsyncMock(return_value=Result()),
     get=AsyncMock(side_effect=get),
   )
   service = TradeCommandService(db)
-
-  with pytest.raises(AgentUnavailableError, match="具备交易能力"):
-    await service._device_for(
-      user_id="user-1",
-      account_id="account-1",
-      execution_mode="live",
-    )
-
-  heartbeat.details["apiInstanceId"] = "api-instance-new"
 
   assert (
     await service._device_for(
