@@ -460,15 +460,33 @@ class Settings(BaseSettings):
 
     errors: List[str] = []
     parsed_public_url = urlparse(self.public_url)
-    allowed_loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+    try:
+      parsed_public_url.port
+      invalid_public_port = False
+    except ValueError:
+      invalid_public_port = True
+    forbidden_public_hosts = {
+      "*",
+      "0.0.0.0",
+      "127.0.0.1",
+      "localhost",
+      "::",
+      "::1",
+    }
     if (
       parsed_public_url.scheme != "https"
-      or parsed_public_url.hostname not in allowed_loopback_hosts
-      or parsed_public_url.port != 8080
+      or not parsed_public_url.hostname
+      or parsed_public_url.hostname.lower() in forbidden_public_hosts
+      or parsed_public_url.username is not None
+      or parsed_public_url.password is not None
+      or parsed_public_url.path not in {"", "/"}
+      or parsed_public_url.query
+      or parsed_public_url.fragment
+      or invalid_public_port
     ):
-      errors.append("PUBLIC_URL must be the loopback HTTPS gateway on port 8080")
-    if self.host not in {"127.0.0.1", "localhost"} or self.port != 18081:
-      errors.append("production API must listen on 127.0.0.1:18081")
+      errors.append("PUBLIC_URL must be the external HTTPS service origin")
+    if self.host != "0.0.0.0" or self.port != 18081:
+      errors.append("production API must listen on the pod interface 0.0.0.0:18081")
     if not self.database_url.lower().startswith("postgresql+asyncpg://"):
       errors.append("DATABASE_URL must use PostgreSQL with asyncpg")
     if self.debug or self.graphql_debug:
@@ -500,8 +518,8 @@ class Settings(BaseSettings):
       )
     if not self.redis_url.lower().startswith(("redis://", "rediss://")):
       errors.append("REDIS_URL must be configured")
-    if not self.influxdb_host or not self.influxdb_database:
-      errors.append("InfluxDB host and database must be configured")
+    if not self.influxdb_host or not self.influxdb_token or not self.influxdb_database:
+      errors.append("InfluxDB host, token, and database must be configured")
     if self.enable_real_trading and not self.real_trading_account_allowlist:
       errors.append(
         "REAL_TRADING_ACCOUNT_ALLOWLIST is required when live trading is enabled"
@@ -550,13 +568,6 @@ class Settings(BaseSettings):
           "class": "logging.StreamHandler",
           "stream": "ext://sys.stdout",
         },
-        "file": {
-          "formatter": "default",
-          "class": "logging.FileHandler",
-          "filename": self.log_file,
-          "mode": "a",
-          "encoding": "utf-8",
-        },
       },
       "loggers": {
         "httpx": {
@@ -582,6 +593,14 @@ class Settings(BaseSettings):
         "handlers": ["default", "file"] if self.log_file else ["default"],
       },
     }
+    if self.log_file:
+      config["handlers"]["file"] = {
+        "formatter": "default",
+        "class": "logging.FileHandler",
+        "filename": self.log_file,
+        "mode": "a",
+        "encoding": "utf-8",
+      }
 
     # 如果支持彩色日志，添加彩色格式化器
     if use_color:

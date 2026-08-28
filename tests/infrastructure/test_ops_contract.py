@@ -3,7 +3,6 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from xml.etree import ElementTree
 
 import pytest
 import yaml
@@ -134,12 +133,15 @@ try {{
 
 def test_caddy_is_the_only_public_http_entrypoint() -> None:
   development = (OPS / "caddy" / "Caddyfile.dev").read_text(encoding="utf-8")
-  production = (OPS / "caddy" / "Caddyfile.prod").read_text(encoding="utf-8")
+  production = (OPS / "caddy" / "Caddyfile.k8s").read_text(encoding="utf-8")
 
-  for config in (development, production):
-    assert "reverse_proxy @api 127.0.0.1:18081" in config
+  for config, api_target, monitor_target in (
+    (development, "127.0.0.1:18081", "127.0.0.1:18083"),
+    (production, "api:18081", "monitor:18083"),
+  ):
+    assert f"reverse_proxy @api {api_target}" in config
     assert "@monitor path /monitor/*" in config
-    assert "reverse_proxy @monitor 127.0.0.1:18083" in config
+    assert f"reverse_proxy @monitor {monitor_target}" in config
     for path in (
       "/graphql*",
       "/auth*",
@@ -158,12 +160,12 @@ def test_caddy_is_the_only_public_http_entrypoint() -> None:
   assert "import {$QUANTX_CADDY_TLS_SNIPPET:tls_disabled}" in development
   assert "@trusted remote_ip {$QUANTX_CADDY_TRUSTED_IPS:0.0.0.0/0}" in development
   assert "admin 127.0.0.1:2019" in development
-  assert "bind 127.0.0.1" in production
   assert "admin off" in production
-  assert "https://127.0.0.1:8080" in production
-  assert "tls internal" in production
-  assert "apps/web/dist" in production
-  assert "apps/docs/dist" in production
+  assert "auto_https off" in production
+  assert "reverse_proxy @market_data_service market-data-service:18082" in production
+  assert "root * /srv/web" in production
+  assert "root * /srv/docs" in production
+  assert "/_gateway/health/live" in production
   assert "handle_path /docs/*" in production
   assert "try_files {path} {path}.html {path}/index.html /404.html" in production
   assert "try_files {path} /index.html" in production
@@ -173,95 +175,106 @@ def test_locked_tool_versions_and_hashes_are_complete() -> None:
   lock = json.loads((OPS / "tools.lock.json").read_text(encoding="utf-8"))
   caddy = lock["tools"]["caddy"]
   macos_caddy = lock["tools"]["caddy-macos-arm64"]
-  winsw = lock["tools"]["winsw"]
 
   assert caddy["version"] == "2.11.4"
   assert macos_caddy["version"] == "2.11.4"
-  assert winsw["version"] == "2.12.0"
-  for tool in (caddy, macos_caddy, winsw):
+  assert set(lock["tools"]) == {"caddy", "caddy-macos-arm64"}
+  for tool in (caddy, macos_caddy):
     assert len(tool["sha256"]) == 64
   assert len(caddy["installedSha256"]) == 64
   assert len(macos_caddy["installedSha256"]) == 64
 
 
-def test_windows_services_are_independently_supervised() -> None:
-  expected = {
-    "quantx-ai-runtime.xml",
-    "quantx-api.xml",
-    "quantx-caddy.xml",
-    "quantx-engine.xml",
-    "quantx-market-data-service.xml",
-    "quantx-monitor.xml",
-    "quantx-qmt-agent.xml",
-    "quantx-worker.xml",
-  }
-  templates = {path.name: path for path in (OPS / "windows").glob("*.xml")}
-  assert set(templates) == expected
-
-  for path in templates.values():
-    root = ElementTree.fromstring(path.read_text(encoding="utf-8"))
-    assert root.findtext("id")
-    assert root.findtext("executable")
-    assert root.findtext("startmode") == "Automatic"
-    assert root.findall("onfailure")
-    assert root.findtext("logpath")
-
-  qmt_arguments = ElementTree.parse(
-    templates["quantx-qmt-agent.xml"]
-  ).getroot().findtext("arguments")
-  assert qmt_arguments is not None
-  assert "--mode {{QMT_AGENT_MODE}}" in qmt_arguments
-  assert "--mode live" not in qmt_arguments
-  qmt_environment = {
-    node.attrib["name"]: node.attrib["value"]
-    for node in ElementTree.parse(
-      templates["quantx-qmt-agent.xml"]
-    ).getroot().findall("env")
-  }
-  assert qmt_environment["PYTHONPATH"] == "{{QMT_PYTHONPATH}}"
-  assert qmt_environment["SSL_CERT_FILE"] == "{{CADDY_ROOT_CERT}}"
-  assert qmt_environment["QMT_USERDATA_PATH"] == "{{QMT_USERDATA_PATH}}"
-  assert qmt_environment["QMT_AGENT_HEALTH_HOST"] == "{{QMT_AGENT_HEALTH_HOST}}"
-  assert qmt_environment["QMT_AGENT_HEALTH_PORT"] == "{{QMT_AGENT_HEALTH_PORT}}"
-
-  operations = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  assert "New-NetFirewallRule" in operations
-  assert '-Profile Private' in operations
-  assert '-LocalPort $QmtAgentHealthPort' in operations
-  assert "RemoteAddress" not in operations
-
-  api_environment = {
-    node.attrib["name"]: node.attrib["value"]
-    for node in ElementTree.parse(
-      templates["quantx-api.xml"]
-    ).getroot().findall("env")
-  }
-  assert api_environment["RUNTIME_PROFILE"] == "full"
-  assert api_environment["PREFECT_ENABLED"] == "true"
-
-  caddy_environment = {
-    node.attrib["name"]: node.attrib["value"]
-    for node in ElementTree.parse(
-      templates["quantx-caddy.xml"]
-    ).getroot().findall("env")
-  }
-  assert caddy_environment["XDG_CONFIG_HOME"] == (
-    r"{{RUNTIME}}\caddy-config"
+def test_kubernetes_services_are_independent_workloads() -> None:
+  base = OPS / "k8s" / "base"
+  kustomization = yaml.safe_load(
+    (base / "kustomization.yaml").read_text(encoding="utf-8")
   )
-  assert caddy_environment["XDG_DATA_HOME"] == (
-    r"{{RUNTIME}}\caddy-data"
-  )
+  assert set(kustomization["resources"]) >= {
+    "api.yaml",
+    "market-data-service.yaml",
+    "engine.yaml",
+    "worker.yaml",
+    "ai-runtime.yaml",
+    "monitor.yaml",
+    "gateway.yaml",
+  }
+  assert {image["newTag"] for image in kustomization["images"]} == {"replace-me"}
+
+  workloads = {}
+  for filename in kustomization["resources"]:
+    path = base / filename
+    for document in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+      if document and document["kind"] in {"Deployment", "StatefulSet"}:
+        workloads[document["metadata"]["name"]] = document
+
+  assert set(workloads) == {
+    "api",
+    "market-data-service",
+    "engine",
+    "worker",
+    "ai-runtime",
+    "monitor",
+    "gateway",
+  }
+  assert workloads["monitor"]["kind"] == "StatefulSet"
+  assert workloads["monitor"]["spec"]["replicas"] == 1
+  assert workloads["monitor"]["spec"]["volumeClaimTemplates"]
+  assert workloads["gateway"]["spec"]["replicas"] == 2
+  for name in ("api", "market-data-service", "engine", "worker", "ai-runtime"):
+    assert workloads[name]["spec"]["replicas"] == 1
 
 
-def test_winsw_212_uses_adjacent_same_name_wrappers() -> None:
+def test_windows_server_services_and_production_installer_are_removed() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  command_contract = script.split("[string]$Command", 1)[0]
 
-  assert '"$($template.BaseName).exe"' in script
-  assert "& $wrapper install" in script
-  assert "& $wrapper uninstall" in script
-  assert "& $winsw install" not in script
-  assert "function Get-QmtAgentPythonPath" in script
-  assert '"{{QMT_PYTHONPATH}}"' in script
+  assert not list((OPS / "windows").glob("*.xml"))
+  assert not (OPS / "build-release.ps1").exists()
+  assert '"install"' not in command_contract
+  assert '"uninstall"' not in command_contract
+  assert '"rollback"' not in command_contract
+  assert '[ValidateSet("dev")]' in script
+  assert 'Install-LockedTool -Name "winsw"' not in script
+
+
+def test_windows_agent_owns_read_only_health_firewall_rule() -> None:
+  script = (OPS / "quantx-agent.ps1").read_text(encoding="utf-8")
+  production_environment = (
+    OPS / "config" / "qmt-agent.production.env.example"
+  ).read_text(encoding="utf-8")
+  kubernetes_environment = (
+    OPS / "k8s" / "production" / "runtime-config.example.yaml"
+  ).read_text(encoding="utf-8")
+
+  assert '$QmtAgentHealthHost = "0.0.0.0"' in script
+  assert "$QmtAgentHealthPort = 18084" in script
+  assert (
+    '$QmtAgentHealthFirewallRule = "QuantX-QMT-Agent-Health-18084"'
+    in script
+  )
+  assert "$env:QMT_AGENT_HEALTH_HOST = $QmtAgentHealthHost" in script
+  assert "$env:QMT_AGENT_HEALTH_PORT = $QmtAgentHealthPort.ToString(" in script
+  assert "Get-NetFirewallAddressFilter" in script
+  assert '[string]$addressFilter.RemoteAddress -eq "Any"' in script
+  for setting in (
+    "-Enabled True",
+    "-Profile Private",
+    "-Direction Inbound",
+    "-Action Allow",
+    "-Protocol TCP",
+    "-LocalPort $QmtAgentHealthPort",
+    "-RemoteAddress Any",
+  ):
+    assert setting in script
+  assert "QMT_AGENT_HEALTH_ALLOWED_CIDRS" not in script
+
+  assert "QMT_AGENT_HEALTH_HOST=0.0.0.0" in production_environment
+  assert "QMT_AGENT_HEALTH_PORT=18084" in production_environment
+  assert (
+    "MONITOR_QMT_AGENT_HEALTH_URL: http://windows-qmt.internal:18084"
+    in kubernetes_environment
+  )
 
 
 def test_dev_runtime_defaults_to_full_profile() -> None:
@@ -746,9 +759,13 @@ $current = Wait-QmtAgentRuntimeReady `
 
 def test_agent_websocket_timeout_exceeds_native_watchdog() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  api_service = (OPS / "windows" / "quantx-api.xml").read_text(
-    encoding="utf-8"
+  api_resources = list(
+    yaml.safe_load_all(
+      (OPS / "k8s" / "base" / "api.yaml").read_text(encoding="utf-8")
+    )
   )
+  api_workload = next(item for item in api_resources if item["kind"] == "Deployment")
+  api_args = api_workload["spec"]["template"]["spec"]["containers"][0]["args"]
 
   assert "$AgentWebSocketPingTimeoutSeconds = 960" in script
   assert '"--ws-ping-interval", "20"' in script
@@ -756,7 +773,9 @@ def test_agent_websocket_timeout_exceeds_native_watchdog() -> None:
     '"--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds'
     in script
   )
-  assert "--ws-ping-interval 20 --ws-ping-timeout 960" in api_service
+  timeout_index = api_args.index("--ws-ping-timeout")
+  assert api_args[timeout_index - 2 : timeout_index] == ["--ws-ping-interval", "20"]
+  assert api_args[timeout_index + 1] == "960"
 
 
 def test_server_runtime_path_excludes_qmt_agent_source() -> None:
@@ -905,7 +924,7 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert "function Resolve-DevTradingAccountId" in dev_mode
   assert '"QMT_ACCOUNT_WHITELIST"' in dev_mode
   assert "ConfirmLive" not in dev_mode
-  assert "Live mode requires -ConfirmLive '$expected'." in script
+  assert "ConfirmLive" not in script
   assert '$env:QMT_ACCOUNT_WHITELIST = if' in script
   assert '$env:REAL_TRADING_ACCOUNT_ALLOWLIST = ConvertTo-Json' in script
   assert '$env:ENV = "testing"' in script
@@ -971,17 +990,15 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert '$protocols -contains "1.1"' in script
   assert "[int]$qmt.readyDevices -ge 1" in script
 
-  prefect = ElementTree.parse(OPS / "windows" / "quantx-worker.xml").getroot()
-  environment = {
-    node.attrib["name"]: node.attrib["value"]
-    for node in prefect.findall("env")
-  }
-  assert environment["PREFECT_HOME"] == r"{{RUNTIME}}\prefect"
-  assert environment["PREFECT_API_URL"] == "{{PREFECT_API_URL}}"
-  assert environment["PREFECT_WORKER_POOL"] == "{{PREFECT_WORKER_POOL}}"
-  assert environment["PYTHONUTF8"] == "1"
-  assert environment["PYTHONIOENCODING"] == "utf-8"
-  assert prefect.find("depend") is None
+  platform = yaml.safe_load(
+    (OPS / "k8s" / "base" / "platform-config.yaml").read_text(encoding="utf-8")
+  )["data"]
+  worker = (OPS / "k8s" / "base" / "worker.yaml").read_text(encoding="utf-8")
+  assert platform["PREFECT_HOME"] == "/var/lib/quantx/prefect"
+  assert platform["PYTHONUTF8"] == "1"
+  assert platform["PYTHONIOENCODING"] == "utf-8"
+  assert "PREFECT_WORKER_NAME" in worker
+  assert "quantx_worker.main" in worker
 
 
 def test_dev_guidance_forbids_silent_data_only_fallback() -> None:
@@ -1011,21 +1028,12 @@ def test_all_python_processes_force_utf8_logs() -> None:
     1,
   )[0]
   assert "Initialize-PythonEnvironment" in invoke_up
-
-  for filename in (
-    "quantx-ai-runtime.xml",
-    "quantx-api.xml",
-    "quantx-engine.xml",
-    "quantx-worker.xml",
-    "quantx-qmt-agent.xml",
-  ):
-    service = ElementTree.parse(OPS / "windows" / filename).getroot()
-    environment = {
-      node.attrib["name"]: node.attrib["value"]
-      for node in service.findall("env")
-    }
-    assert environment["PYTHONUTF8"] == "1", filename
-    assert environment["PYTHONIOENCODING"] == "utf-8", filename
+  platform = yaml.safe_load(
+    (OPS / "k8s" / "base" / "platform-config.yaml").read_text(encoding="utf-8")
+  )["data"]
+  assert platform["PYTHONUTF8"] == "1"
+  assert platform["PYTHONIOENCODING"] == "utf-8"
+  assert platform["LOG_FILE"] == ""
 
 
 def test_public_caddy_origins_are_allowed_for_web_sessions() -> None:
@@ -1110,7 +1118,7 @@ Resolve-Python -Qmt
   assert Path(result.stdout.strip()).resolve() == qmt_python.resolve()
 
 
-def test_windows_agent_launcher_is_the_agent_only_dev_boundary() -> None:
+def test_windows_agent_launcher_is_the_only_windows_production_boundary() -> None:
   script = (OPS / "quantx-agent.ps1").read_text(encoding="utf-8")
 
   for command in (
@@ -1124,21 +1132,17 @@ def test_windows_agent_launcher_is_the_agent_only_dev_boundary() -> None:
     '"internal-run"',
   ):
     assert command in script
-  assert '[ValidateSet("dev")]' in script
+  assert '[ValidateSet("dev", "production")]' in script
   assert '$DefaultQmtCondaEnvironment = "xtquant-demo"' in script
   assert '"quantx_qmt_agent.main"' in script
   assert '"supervise_process.py"' in script
-  assert '$TaskName = "QuantX-Dev-QmtAgent"' in script
+  assert '"QuantX-Production-QmtAgent"' in script
+  assert '"QuantX-Dev-QmtAgent"' in script
   assert "New-ScheduledTaskPrincipal" in script
   assert "-LogonType Interactive" in script
   assert "-RunLevel Limited" in script
   assert "Register-ScheduledTask" in script
   assert "Start-ScheduledTask" in script
-  assert "$ManagedState.supervisorStartedAt -is [datetime]" in script
-  assert "([datetime]$ManagedState.supervisorStartedAt).ToUniversalTime()" in script
-  assert "if (-not $task -or $AccountId.Trim())" in script
-  assert "Remove-Item -LiteralPath $SupervisorStateFile" in script
-  assert 'import httpx, uvicorn, websockets, xtquant' in script
   assert '$DefaultCaFile = Join-Path $CertificateDirectory "mac-dev-root.crt"' in script
   assert "$env:SSL_CERT_FILE = $DefaultCaFile" in script
   assert "Remove-Item Env:SSL_CERT_FILE" in script
@@ -1146,6 +1150,12 @@ def test_windows_agent_launcher_is_the_agent_only_dev_boundary() -> None:
   assert "$env:QMT_ACCOUNT_WHITELIST = $LiveAccount" in script
   assert "$env:ENABLE_REAL_TRADING = \"true\"" in script
   assert "$env:QMT_REAL_TRADING_ENABLED = \"true\"" in script
+  assert '$env:ENV = if ($Environment -eq "production")' in script
+  assert "Production ingress must use a certificate trusted by the Windows host" in script
+  assert "function Get-ManagedEnvironment" in script
+  assert "Another QMT Agent task is already running" in script
+  assert "Stop that environment before starting" in script
+  assert "environment = $Environment" in script
 
   for forbidden in (
     "quantx_api.main",
@@ -1195,13 +1205,12 @@ def test_environment_precedence_keeps_process_values_and_later_files_win() -> No
     1,
   )[1].split("function Read-State", 1)[0]
 
-  assert '$Environment -eq "dev"' in importer
-  assert '"development"' in importer
+  assert '$environmentName = "development"' in importer
   assert importer.index(r'apps\api\.env"') < importer.index(
     r'apps\api\.env.$environmentName'
   )
   assert "$processOverrides.Contains($name)" in importer
-  assert "$files += $ProductionConfigFile" in importer
+  assert "ProductionConfigFile" not in importer
 
 
 def test_process_state_reader_flattens_json_arrays_before_pid_checks() -> None:
@@ -1228,19 +1237,15 @@ def test_port_owner_lookup_is_safe_on_windows_powershell_51() -> None:
   assert "$processInfo.CommandLine" not in lookup
 
 
-def test_winsw_install_starts_services_and_rolls_back_partial_failure() -> None:
+def test_powershell_entrypoint_exposes_development_lifecycle_only() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  install = script.split("function Install-AndStartServices", 1)[1].split(
-    "function Register-ProductionMaintenance",
-    1,
-  )[0]
+  command_contract = script.split("[string]$Command", 1)[0]
 
-  assert "$installed += $wrapper" in install
-  assert "$started += $wrapper" in install
-  assert "& $wrapper start" in install
-  assert "[array]::Reverse($started)" in install
-  assert "[array]::Reverse($installed)" in install
-  assert "& $wrapper uninstall" in install
+  for command in ("up", "down", "status", "logs", "bootstrap"):
+    assert f'"{command}"' in command_contract
+  for command in ("install", "uninstall", "rollback", "agent-mode"):
+    assert f'"{command}"' not in command_contract
+  assert '[ValidateSet("dev")]' in script
 
 
 def test_every_prefect_deployment_targets_the_external_process_pool() -> None:
@@ -1356,39 +1361,43 @@ def test_external_dependencies_are_checked_without_lifecycle_ownership() -> None
   assert "subprocess" not in diagnostic
 
 
-def test_release_bundle_is_versioned_offline_and_checksum_verified() -> None:
-  build = (OPS / "build-release.ps1").read_text(encoding="utf-8")
-  install = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+def test_release_builds_versioned_kubernetes_images() -> None:
+  workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+    encoding="utf-8"
+  )
+  server = (OPS / "containers" / "server.Dockerfile").read_text(encoding="utf-8")
+  gateway = (OPS / "containers" / "gateway.Dockerfile").read_text(
+    encoding="utf-8"
+  )
+  dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
 
-  assert "Production release must be built with Node 20.x" in build
-  assert "node = $nodeVersion" in build
-  assert "docsVersion = $Version" in build
-  assert '"apps\\docs\\dist"' in build
-  assert '"apps\\docs\\dist\\index.html"' in install
-  assert "$releaseNodeVersion.Major -ne 20" in install
-  assert "uv build --quiet --all-packages --wheel" in build
-  assert "--no-emit-workspace" in build
-  assert "--no-hashes" in build
-  assert "pip wheel" in build
-  assert '"wheelhouse\\server"' in build
-  assert '"wheelhouse\\qmt"' in build
-  assert "Remove-PythonBuildArtifacts -Root $staging" in build
-  assert '"__pycache__"' in build
-  assert '@(".pyc", ".pyo")' in build
-  assert "checksums.json" in build
-  assert "Test-ReleaseContents" in install
-  assert "--no-index" in install
-  assert "--target $qmtTarget" in install
-  assert "--ignore-installed" in install
-  assert "New-Item -ItemType Junction" in install
-  assert "automatic database downgrade is forbidden" in install
-  assert "--package quantx-monitor" in build
-  assert '"quantx-monitor"' in install
+  assert "Kubernetes Production Release" in workflow
+  assert "runs-on: ubuntu-latest" in workflow
+  assert "docker/build-push-action@v6" in workflow
+  assert "ghcr.io/limaofeng/quantx-server:${{ github.ref_name }}" in workflow
+  assert "ghcr.io/limaofeng/quantx-gateway:${{ github.ref_name }}" in workflow
+  assert "kubectl kustomize ops/k8s/base" in workflow
+  assert "platforms: linux/amd64,linux/arm64" in workflow
+  assert "steps.server-image.outputs.digest" in workflow
+  assert "steps.gateway-image.outputs.digest" in workflow
+  assert "Render digest-pinned Kubernetes manifests" in workflow
+  assert "python:3.13.9-slim-bookworm" in server
+  assert "uv sync --frozen --no-dev" in server
+  assert "USER 10001:10001" in server
+  assert "node:20.20.2-bookworm-slim" in gateway
+  assert "caddy:2.11.4-alpine" in gateway
+  assert "**/.env" in dockerignore
+  assert "apps/ios" in dockerignore
 
 
-def test_monitor_has_an_independent_dev_state_file_and_production_service() -> None:
+def test_monitor_has_independent_dev_state_and_production_statefulset() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  service = (OPS / "windows" / "quantx-monitor.xml").read_text(encoding="utf-8")
+  resources = list(
+    yaml.safe_load_all(
+      (OPS / "k8s" / "base" / "monitor.yaml").read_text(encoding="utf-8")
+    )
+  )
+  statefulset = next(item for item in resources if item["kind"] == "StatefulSet")
   ordinary_up = script.split("function Invoke-Up", 1)[1].split(
     "function Invoke-MonitorUp",
     1,
@@ -1408,7 +1417,9 @@ def test_monitor_has_an_independent_dev_state_file_and_production_service() -> N
   assert "Write-MonitorState -Entry $entry" in monitor_up
   assert "$MonitorStateFile" in monitor_state
   assert "$MarketDataServicePort" in ordinary_up
-  assert "QuantXMonitor" in service
-  assert "quantx_monitor.main" in service
-  assert "MONITOR_DATABASE_PATH" in service
-  assert "<startmode>Automatic</startmode>" in service
+  assert statefulset["metadata"]["name"] == "monitor"
+  assert statefulset["spec"]["replicas"] == 1
+  assert statefulset["spec"]["volumeClaimTemplates"][0]["metadata"]["name"] == "history"
+  container = statefulset["spec"]["template"]["spec"]["containers"][0]
+  assert "quantx_monitor.main" in container["command"]
+  assert container["readinessProbe"]["httpGet"]["path"] == "/monitor/health/ready"

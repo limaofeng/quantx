@@ -216,7 +216,7 @@ Monitor 使用独立状态：
 即使本轮组件已全部安全清理，后续 `status` 也不会隐藏最后一次失败。
 
 Mac 日志位于 `.runtime/logs/macos/`，Monitor 日志位于
-`.runtime/monitor/logs/`；`logs` 不读取 Windows WinSW 日志。
+`.runtime/monitor/logs/`；`logs` 不读取 Kubernetes Pod 日志。
 
 主要退出码：
 

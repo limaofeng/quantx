@@ -14,15 +14,15 @@
 | XTData/XTTrading、`miniqmt` | `apps/qmt-agent/src/quantx_qmt_agent` | QMT 模拟器测试 |
 | Agent DTO、协议和状态枚举 | `packages/contracts/src/quantx_contracts` | contracts 测试 |
 | 旧 Web 单体 | `apps/web` | codegen、check、strict lint、test、build |
-| 根目录及 API 子进程启动脚本 | `ops/quantx.ps1`、WinSW、Caddy | ops contract 与 Windows CI |
+| 根目录及 API 子进程启动脚本 | 开发 `ops/quantx.ps1`；生产 `ops/k8s` | ops contract 与容器清单校验 |
 
 ## 可审查检查点
 
 1. 基础包与契约：`contracts`、`domain`、`application`、`infrastructure`。
 2. 服务端：API、Engine、Worker；服务间只经数据库消息箱、Redis 唤醒和版本化
    协议协作。
-3. QMT 与运维：QMT Agent 是唯一券商出站边界；`ops/quantx.ps1` 是唯一运维
-   入口。
+3. QMT 与运维：QMT Agent 是唯一券商出站边界；开发使用 `ops/quantx.ps1`，
+   正式环境使用 `ops/k8s`。
 4. Web 与文档：前端只通过 Caddy 的同源 `/graphql`，生成类型与 schema 同步。
 
 每个检查点都应记录 `git diff --stat`、删除/新增映射和相应测试结果。当前工作

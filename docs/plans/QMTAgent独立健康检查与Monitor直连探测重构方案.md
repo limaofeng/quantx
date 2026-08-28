@@ -211,8 +211,9 @@ apps/qmt-agent/src/quantx_qmt_agent/health_server.py
 
 - 使用最小 ASGI 应用；QMT Agent 只需增加 `uvicorn` 运行依赖，不必引入完整
   FastAPI 应用层。
-- 默认监听 `0.0.0.0:18084`，允许通过 `QMT_AGENT_HEALTH_HOST` 和
-  `QMT_AGENT_HEALTH_PORT` 显式覆盖。
+- 健康运行时代码默认监听 `0.0.0.0:18084`，并从 `QMT_AGENT_HEALTH_HOST` 和
+  `QMT_AGENT_HEALTH_PORT` 读取及校验配置；权威 Windows 托管入口固定写入这两个
+  值，以保证监听地址与防火墙契约一致。
 - 不读取系统代理，不发起任何外部请求。
 - 禁用访问日志中的查询内容；正常健康采样不得每 30 秒污染 Agent 日志。
 - 监听器绑定失败、任务意外退出或端口被占用时，使 Agent 主进程退出，由现有
@@ -223,14 +224,14 @@ apps/qmt-agent/src/quantx_qmt_agent/health_server.py
 server 纳入同一结构化并发边界。任一关键任务意外结束都应取消其余任务并回到统一
 监督器，不得创建后台悬空 task。
 
-### 6.3 CLI 与 Windows 服务配置
+### 6.3 CLI 与 Windows 执行节点配置
 
 需要修改：
 
 - `apps/qmt-agent/src/quantx_qmt_agent/main.py`
 - `apps/qmt-agent/pyproject.toml`
-- `ops/windows/quantx-qmt-agent.xml`
-- Windows 安装/模板渲染所在的 `ops/quantx.ps1`
+- `ops/quantx-agent.ps1`
+- `ops/config/qmt-agent.production.env.example`
 
 新增运行配置：
 
@@ -239,10 +240,11 @@ QMT_AGENT_HEALTH_HOST=0.0.0.0
 QMT_AGENT_HEALTH_PORT=18084
 ```
 
-WinSW 服务描述不再使用绝对的 `Outbound-only`，应改成“交易与行情只出站，另有
-只读健康监听”。安装逻辑为 Windows `Private` 网络配置文件开放 TCP `18084`，
-不增加 RemoteAddress/Mac IP 限制。不能在普通代码验证中执行
-`ops/quantx.ps1 install`。
+Windows QMT 执行节点的说明不再使用绝对的 `Outbound-only`，应改成“交易与行情
+只出站，另有只读健康监听”。`quantx-agent.ps1` 管理的计划任务必须继承上述配置；
+启动器幂等维护 Windows `Private` 网络配置文件的 TCP `18084` 入站规则，远端地址
+为 `Any`，不增加 Mac IP 限制。创建或修复规则需要管理员 PowerShell，规则正确时
+普通重启无需提升权限。Windows 不承载正式服务端，也不恢复 WinSW 服务定义。
 
 ## 7. Monitor 实现计划
 
@@ -497,7 +499,8 @@ npm run build
 2. **Monitor 组合探测**：配置、直接 probe、状态组合、唯一持久化样本、API 契约和
    Monitor 测试。
 3. **Web 状态页**：`probeKind` 原子切换、QMT RTT 与趋势、组件测试。
-4. **Windows 运维与文档**：WinSW、端口、防火墙、QMT/Monitor/部署工程文档。
+4. **Windows 运维与文档**：QMT Agent 计划任务、端口、防火墙、
+   QMT/Monitor/部署工程文档。
 5. **跨主机验收**：受控部署、两个采样周期、事故演练、完整 Dev 实盘状态检查。
 
 建议提交边界与上述实现拆分一致。任何阶段都不得引入旧 `derived` 与新
@@ -520,7 +523,8 @@ Windows 上接手此任务的 Agent 在修改代码前必须：
 4. 核对当前分支和方案基线；如主线已有后续提交，先确认相关文件是否已变化，不要
    机械套用旧行号。
 5. 先完成纯单元测试，不连接 XTQuant、不启动第二个 Agent、不运行真实交易。
-6. 只有在实现、审核和自动化验证完成后，才申请进行 Windows 服务和跨主机联调。
+6. 只有在实现、审核和自动化验证完成后，才申请进行 Windows QMT 执行节点和
+   跨主机联调。
 
 任务完成后必须同步更新：
 
@@ -536,12 +540,15 @@ Windows 上接手此任务的 Agent 在修改代码前必须：
 
 2026-08-28 已完成共享 v1 DTO、事件循环只读健康投影、同进程最小 ASGI server、
 结构化生命周期、Monitor 直连和组合函数、唯一样本持久化、`probeKind` 公共契约、
-Web RTT/P50/P95/趋势展示、WinSW 环境与 Private-profile 防火墙安装逻辑，以及权威
-工程文档同步。旧 `derived` 公共字段已原子删除，没有伪延迟或直接探测失败回退。
+Web RTT/P50/P95/趋势展示、Windows Agent 环境与 Private-profile 防火墙管理逻辑，以及权威
+工程文档同步。后续 Kubernetes 正式部署重构已把 Windows 运维收敛到独立
+`quantx-agent.ps1`，健康环境与 Private-profile 防火墙规则随之迁入该入口，没有
+恢复 WinSW 服务端路径。旧 `derived` 公共字段已原子删除，没有伪延迟或直接探测
+失败回退。
 
 自动化证据：根 `tests/` 为 3457 passed、24 skipped；最终 QMT Agent 与 Contracts
 复验为 345 passed；API unit 为 777 passed、2 skipped；Web 为 111 files、556 tests
 passed。`npm run check`、`npm run lint`、`npm run build`、Python Ruff、PowerShell
 解析和运维契约测试也全部通过。GraphQL 未变更，因此未运行 codegen。
-未执行真实交易、第二个 QMT Agent、`ops/quantx.ps1 install` 或跨主机故障演练。
+未执行真实交易、第二个 QMT Agent 或跨主机故障演练。
 第 11 节 Windows/Mac 实机步骤仍需用户明确授权部署后执行，不能由代码测试替代。

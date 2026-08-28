@@ -16,13 +16,6 @@
       "installedSha256": "e9ebf99dfd4b72259debe1830c83e86c63fb89a88e28b4e7c5e78a35fa76c92d",
       "archive": true,
       "executable": "caddy"
-    },
-    "winsw": {
-      "version": "2.12.0",
-      "url": "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
-      "sha256": "05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da",
-      "archive": false,
-      "executable": "WinSW-x64.exe"
     }
   }
 }

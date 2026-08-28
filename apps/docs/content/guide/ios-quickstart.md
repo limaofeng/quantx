@@ -8,18 +8,18 @@ QuantX 原生 iOS 是个人 A 股量化移动控制中心，面向本人单一�
 
 ## 基线
 
-| 项目 | 要求 |
-| --- | --- |
-| UI | SwiftUI，五 Tab：今日/行情/交易/量化/资产 |
-| 语言 | Swift 6 |
-| 最低系统 | iOS 17 |
-| GraphQL | Apollo iOS 2.x，仓库锁定版本为准 |
-| 传输 | Staging/Release 仅允许 HTTPS/WSS |
-| 网络 | TestFlight 经 VPN/私网，不直接暴露 Windows 8080 到公网 |
-| 账户 | 会话唯一解析的单一主账户 |
+| 项目     | 要求                                                               |
+| -------- | ------------------------------------------------------------------ |
+| UI       | SwiftUI，五 Tab：今日/行情/交易/量化/资产                          |
+| 语言     | Swift 6                                                            |
+| 最低系统 | iOS 17                                                             |
+| GraphQL  | Apollo iOS 2.x，仓库锁定版本为准                                   |
+| 传输     | Staging/Release 仅允许 HTTPS/WSS                                   |
+| 网络     | TestFlight 经 VPN/零信任入口访问 Kubernetes，不暴露 ClusterIP 端口 |
+| 账户     | 会话唯一解析的单一主账户                                           |
 
-服务端只运行在 Windows。Caddy 是唯一公开入口，API 内部端口 `18081` 不是
-客户端稳定地址。
+正式服务端运行在 Kubernetes。Ingress/Gateway 是唯一公开入口，API 内部端口
+`18081` 不是客户端稳定地址；Windows 只运行集群外的 QMT Agent。
 
 ## 1. 配置环境地址
 

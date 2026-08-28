@@ -1,14 +1,14 @@
 # 契约下载
 
-以下文件随当前 Windows 发布包生成，不依赖生产环境的 Swagger、GraphiQL
+以下文件随当前版本的 Gateway 容器发布，不依赖生产环境的 Swagger、GraphiQL
 或 GraphQL 内省。
 
-| 契约 | 用途 | 下载 |
-| --- | --- | --- |
-| GraphQL SDL | 各平台 codegen 和 Schema diff | [graphql-schema.graphql](/contracts/graphql-schema.graphql) |
-| GraphQL operation policy v2 | 权限组合、受众、稳定性与风险 | [graphql-operation-policies.v2.json](/contracts/graphql-operation-policies.v2.json) |
-| Client OpenAPI | 原生/第三方会话与健康检查 | [openapi-client.json](/contracts/openapi-client.json) |
-| Web OpenAPI | Web Cookie 会话与健康检查 | [openapi-web.json](/contracts/openapi-web.json) |
+| 契约                        | 用途                          | 下载                                                                                |
+| --------------------------- | ----------------------------- | ----------------------------------------------------------------------------------- |
+| GraphQL SDL                 | 各平台 codegen 和 Schema diff | [graphql-schema.graphql](/contracts/graphql-schema.graphql)                         |
+| GraphQL operation policy v2 | 权限组合、受众、稳定性与风险  | [graphql-operation-policies.v2.json](/contracts/graphql-operation-policies.v2.json) |
+| Client OpenAPI              | 原生/第三方会话与健康检查     | [openapi-client.json](/contracts/openapi-client.json)                               |
+| Web OpenAPI                 | Web Cookie 会话与健康检查     | [openapi-web.json](/contracts/openapi-web.json)                                     |
 
 ## REST 契约范围
 
@@ -18,7 +18,8 @@ Client OpenAPI 包含：
 - `POST /auth/session/refresh`
 - `GET /auth/session`
 - `DELETE /auth/session`
-- `/health`、`/health/live`、`/health/ready`、`/health/components`
+- `/health`、`/health/live`、`/health/service-ready`、`/health/ready`、
+  `/health/components`
 - `/health/runtime/market-data`
 
 Web OpenAPI 另包含 `/auth/web/session`、刷新、登出和开发自动登录；后者明确标为

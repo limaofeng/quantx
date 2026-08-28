@@ -147,9 +147,9 @@ class MonitorScheduler:
         ),
         HttpProbe(
           "api-process",
-          f"{self.settings.api_url.rstrip('/')}/health/live",
+          f"{self.settings.api_url.rstrip('/')}/health/service-ready",
           timeout_seconds=self.settings.http_timeout_seconds,
-          evaluator=json_status("alive"),
+          evaluator=json_status("ready"),
         ),
         HttpProbe(
           "market-data-service",

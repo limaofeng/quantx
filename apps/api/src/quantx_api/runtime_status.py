@@ -500,3 +500,21 @@ async def readiness_status() -> tuple[bool, dict[str, Any]]:
     "requiredComponents": list(required),
     "components": components,
   }
+
+
+async def service_readiness_status() -> tuple[bool, dict[str, Any]]:
+  """Report whether the API pod can serve baseline database-backed traffic.
+
+  This deliberately excludes QMT, Prefect, Engine, and market freshness. Those
+  remain part of the stronger trading readiness gate exposed by
+  ``/health/ready`` and must not remove the API endpoint needed for recovery
+  from Kubernetes service routing.
+  """
+
+  database = await _database_status()
+  ready = database["status"] == "ready"
+  return ready, {
+    "status": "ready" if ready else "not_ready",
+    "component": "api",
+    "dependencies": {"database": database},
+  }

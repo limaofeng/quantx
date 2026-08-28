@@ -9,6 +9,18 @@
     "apps/web",
     "apps/docs"
   ],
+  "optionalDependencies": {
+    "@esbuild/linux-arm64": "0.21.5",
+    "@esbuild/linux-x64": "0.21.5",
+    "@rollup/rollup-linux-arm64-gnu": "4.62.3",
+    "@rollup/rollup-linux-x64-gnu": "4.62.3",
+    "@tailwindcss/oxide-linux-arm64-gnu": "4.3.3",
+    "@tailwindcss/oxide-linux-x64-gnu": "4.3.3",
+    "@unrs/resolver-binding-linux-arm64-gnu": "1.12.2",
+    "@unrs/resolver-binding-linux-x64-gnu": "1.12.2",
+    "lightningcss-linux-arm64-gnu": "1.32.0",
+    "lightningcss-linux-x64-gnu": "1.32.0"
+  },
   "scripts": {
     "dev": "npm run dev --workspace @quantx/web",
     "build": "npm run build:web && npm run build:docs",

@@ -115,9 +115,9 @@ packages/
     └── services/ai_assistant_event_bus.py
 
 ops/
-├── windows/quantx-ai-runtime.xml        # 独立 WinSW 服务
 ├── quantx.ps1                           # dev/full/live 统一生命周期
-└── build-release.ps1                    # release wheel
+├── containers/server.Dockerfile         # 正式服务镜像
+└── k8s/base/ai-runtime.yaml             # 独立 Kubernetes 工作负载
 ```
 
 允许的依赖方向：
@@ -552,7 +552,7 @@ Runtime 周期性写 `RuntimeComponentHeartbeat(component="ai-runtime")`。API �
 | 表现 | 检查 | 行为 |
 |---|---|---|
 | capabilities 为 `unconfigured` | key 是否只注入服务端、enabled 是否打开 | 配置 key 后重启 Runtime；不要降级交易栈 |
-| capabilities 为 `unavailable` | WinSW/开发进程、heartbeat、DB | 恢复 Runtime；历史聊天仍可读 |
+| capabilities 为 `unavailable` | Kubernetes Pod/开发进程、heartbeat、DB | 恢复 Runtime；历史聊天仍可读 |
 | run 长期 `QUEUED` | Runtime 日志、DB 租约、provider 配额 | 修复后消费者自动领取 |
 | run `WAITING_APPROVAL` | 是否还有多个 pending call | 逐个批准/拒绝或取消 run |
 | 订阅断线 | Caddy websocket、最后 sequence | 用 `afterSequence` 重连并从 DB 回放 |

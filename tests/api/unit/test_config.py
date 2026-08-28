@@ -74,9 +74,9 @@ def _production_settings(**overrides):
 
     values = {
         "ENV": "production",
-        "host": "127.0.0.1",
+        "host": "0.0.0.0",
         "port": 18081,
-        "public_url": "https://127.0.0.1:8080",
+        "public_url": "https://quantx.example.com",
         "database_url": "postgresql+asyncpg://user:password@127.0.0.1/quantx",
         "debug": False,
         "graphql_debug": False,
@@ -85,10 +85,11 @@ def _production_settings(**overrides):
         "mock_data_enabled": False,
         "secret_key": "s" * 64,
         "auth_web_cookie_secure": True,
-        "cors_origins": ["https://127.0.0.1:8080"],
-        "auth_web_allowed_origins": ["https://127.0.0.1:8080"],
+        "cors_origins": ["https://quantx.example.com"],
+        "auth_web_allowed_origins": ["https://quantx.example.com"],
         "redis_url": "redis://127.0.0.1:6379/0",
         "influxdb_host": "http://127.0.0.1:8086",
+        "influxdb_token": "test-token",
         "influxdb_database": "quantx_market_data",
     }
     values.update(overrides)
@@ -97,6 +98,45 @@ def _production_settings(**overrides):
 
 def test_safe_production_configuration_passes_fail_closed_validator():
     _production_settings().validate_production()
+
+
+def test_empty_log_file_uses_stdout_without_configuring_a_file_handler():
+    configured = _production_settings(log_file="")
+
+    logging_config = configured.get_log_config()
+
+    assert logging_config["root"]["handlers"] == ["default"]
+    assert "file" not in logging_config["handlers"]
+
+
+@pytest.mark.parametrize(
+    "public_url",
+    (
+        "http://quantx.example.com",
+        "https://*",
+        "https://0.0.0.0",
+        "https://127.0.0.1:8080",
+        "https://user:password@quantx.example.com",
+        "https://quantx.example.com:notaport",
+        "https://quantx.example.com/deployment",
+    ),
+)
+def test_production_rejects_non_public_service_origins(public_url):
+    configured = _production_settings(
+        public_url=public_url,
+        cors_origins=[public_url],
+        auth_web_allowed_origins=[public_url],
+    )
+
+    with pytest.raises(RuntimeError, match="external HTTPS service origin"):
+        configured.validate_production()
+
+
+def test_production_rejects_loopback_api_binding():
+    configured = _production_settings(host="127.0.0.1")
+
+    with pytest.raises(RuntimeError, match="pod interface 0.0.0.0:18081"):
+        configured.validate_production()
 
 
 def test_manual_trade_permission_is_never_granted_by_default():

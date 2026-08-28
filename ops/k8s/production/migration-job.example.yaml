@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quantx-migrate-replace-version
+  namespace: quantx
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: quantx-migrate
+        app.kubernetes.io/part-of: quantx
+    spec:
+      restartPolicy: Never
+      serviceAccountName: quantx-runtime
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/limaofeng/quantx-server@sha256:replace-digest
+          command: ['python', '-m', 'alembic']
+          args: ['-c', '/app/alembic.ini', 'upgrade', 'head']
+          envFrom:
+            - configMapRef:
+                name: quantx-platform-config
+            - configMapRef:
+                name: quantx-runtime-config
+            - secretRef:
+                name: quantx-runtime-secrets
+          env:
+            - name: DATABASE_PROCESS_ROLE
+              value: tooling
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: '1'
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

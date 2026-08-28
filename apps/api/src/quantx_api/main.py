@@ -45,6 +45,7 @@ from quantx_api.runtime_status import (
   component_status,
   market_data_runtime_status,
   readiness_status,
+  service_readiness_status,
 )
 
 # 创建日志目录
@@ -606,6 +607,12 @@ async def health_live():
 @app.get("/health/components")
 async def health_components():
   return {"components": await component_status()}
+
+
+@app.get("/health/service-ready")
+async def health_service_ready():
+  ready, payload = await service_readiness_status()
+  return JSONResponse(status_code=200 if ready else 503, content=payload)
 
 
 @app.get("/health/runtime/market-data")
