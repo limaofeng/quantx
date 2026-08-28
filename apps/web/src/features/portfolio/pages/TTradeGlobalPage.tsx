@@ -64,7 +64,6 @@ import {
   useGraphqlWsStatus,
   type GraphqlWsStatus,
 } from '@/core/graphql/ws-status';
-import { StrategyInstrumentSelector } from '@/features/strategies/components/StrategyInstrumentSelector';
 import StrategyLogsTab from '@/features/strategies/components/StrategyLogsTab';
 import {
   mapExecutionTraceView,
@@ -109,7 +108,6 @@ import {
   StartTTradeReplayMutation,
   SyncTTradeSourceOrdersMutation,
   TTradeGlobalMonitorQuery,
-  TTradeInstrumentNameQuery,
   TTradeBatchesPageQuery,
   TTradeBatchEventsPageQuery,
   TTradeReplayCyclesQuery,
@@ -175,6 +173,10 @@ import {
   TTradeLiveBoard,
   type SignalEvaluationLike,
 } from './t-trade-global/TTradeLiveMonitor';
+import type {
+  ReplayManualPositionDraft,
+  ReplaySidebarContext,
+} from './t-trade-global/TTradeReplaySidebar';
 import { TTradeSignalDiagnosticsPanel } from './t-trade-global/TTradeSignalDiagnostics';
 import {
   TTradeSignalPolicyEditor,
@@ -245,30 +247,6 @@ const defaultForm: SettingsForm = {
   maxHoldingTradingDays: '5',
   cooldownSeconds: '300',
 };
-
-function InstrumentNameLabel({
-  className,
-  knownName,
-  stockCode,
-}: {
-  className?: string;
-  knownName?: string | null;
-  stockCode: string;
-}) {
-  const needsLookup = !hasInstrumentName(stockCode, knownName);
-  const [result] = useQuery({
-    query: TTradeInstrumentNameQuery,
-    variables: { stockCode },
-    pause: !needsLookup,
-    requestPolicy: 'cache-first',
-  });
-  const instrumentName = resolveInstrumentName(
-    stockCode,
-    result.data?.instrument?.name,
-    knownName
-  );
-  return <div className={className}>{instrumentName}</div>;
-}
 
 function MetricCard({
   icon: Icon,
@@ -353,159 +331,6 @@ function useStableValueByKey<T>(
 }
 
 type ReplayWorkspaceView = 'OVERVIEW' | 'SIGNALS' | 'LOGS';
-
-interface ReplayPortfolioPositionContext {
-  avgPrice: number;
-  availableVolume: number;
-  instrumentName: string;
-  marketValue: number;
-  stockCode: string;
-  volume: number;
-}
-
-interface ReplaySidebarContext {
-  accountId: string;
-  asOf: string;
-  cashAvailable: number;
-  frozen: boolean;
-  loading: boolean;
-  message: string;
-  positions: ReplayPortfolioPositionContext[];
-  source: 'MANUAL' | 'SNAPSHOT';
-  totalAsset: number;
-}
-
-function TTradeReplaySidebar({
-  accountId,
-  context,
-}: {
-  accountId: string;
-  context: ReplaySidebarContext | null;
-}) {
-  const positions = context?.positions || [];
-
-  return (
-    <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
-      <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section">
-        <div>
-          <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-cyan-300">
-            Replay Lab
-          </div>
-          <h1 className="mt-1 text-ui-title font-black text-slate-100">
-            {context?.frozen ? '冻结初始账户' : '初始回测账户'}
-          </h1>
-        </div>
-        {context && !context.loading && (
-          <span className="border border-blue-400/20 bg-blue-500/[0.07] px-1.5 py-0.5 text-ui-micro font-black text-blue-200">
-            {context.source === 'SNAPSHOT' ? 'D-1 快照' : '手工组合'}
-          </span>
-        )}
-      </div>
-
-      <div className="shrink-0 border-b border-white/[0.05] p-ui-section">
-        {context?.loading ? (
-          <div
-            aria-label="正在读取初始回测账户"
-            className="flex items-center gap-2 text-ui-caption text-slate-500"
-          >
-            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-            正在读取初始账户…
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <div>
-              <div className="text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
-                账户
-              </div>
-              <div className="mt-1 font-mono text-ui-label text-slate-300">
-                {context?.accountId || accountId || '--'}
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="text-ui-micro text-slate-600">组合时点</div>
-                <div className="mt-1 font-mono text-ui-caption text-slate-300">
-                  {context?.asOf || '--'}
-                </div>
-              </div>
-              <div>
-                <div className="text-ui-micro text-slate-600">持仓</div>
-                <div className="mt-1 font-mono text-ui-caption text-slate-300">
-                  {positions.length} 只
-                </div>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3 border-t border-white/[0.05] pt-3">
-              <div>
-                <div className="text-ui-micro text-slate-600">可用资金</div>
-                <div className="mt-1 font-mono text-ui-label font-bold text-slate-200">
-                  ¥{formatNumber(context?.cashAvailable || 0)}
-                </div>
-              </div>
-              <div>
-                <div className="text-ui-micro text-slate-600">总资产</div>
-                <div className="mt-1 font-mono text-ui-label font-bold text-slate-200">
-                  ¥{formatNumber(context?.totalAsset || 0)}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section">
-          <span className="text-ui-caption font-black text-slate-300">
-            持仓明细
-          </span>
-          <span className="font-mono text-ui-micro text-slate-600">
-            {positions.length} 只
-          </span>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
-          {positions.map(position => (
-            <div
-              key={position.stockCode}
-              className="border-b border-white/[0.05] px-ui-section py-2.5"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <InstrumentNameLabel
-                    className="truncate text-ui-caption font-bold text-slate-200"
-                    knownName={position.instrumentName}
-                    stockCode={position.stockCode}
-                  />
-                  <div className="font-mono text-ui-micro text-slate-600">
-                    {position.stockCode}
-                  </div>
-                </div>
-                <div className="shrink-0 text-right font-mono text-ui-caption">
-                  <div className="text-slate-300">{position.volume} 股</div>
-                  <div className="mt-0.5 text-slate-600">
-                    成本 {formatNumber(position.avgPrice, 3)}
-                  </div>
-                </div>
-              </div>
-              <div className="mt-2 flex justify-between font-mono text-ui-micro text-slate-600">
-                <span>可用 {position.availableVolume}</span>
-                <span>市值 ¥{formatNumber(position.marketValue)}</span>
-              </div>
-            </div>
-          ))}
-          {!context?.loading && positions.length === 0 && (
-            <div className="px-ui-section py-ui-empty text-center text-ui-caption text-slate-600">
-              当前初始账户没有持仓明细
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="shrink-0 border-t border-white/[0.06] bg-[#091322] p-3 text-ui-caption leading-5 text-slate-500">
-        {context?.message || '选择日期后读取开始日前的账户日结快照。'}
-      </div>
-    </aside>
-  );
-}
 
 function replaySignalValue(value: unknown) {
   if (value === null || value === undefined || value === '') return '--';
@@ -819,12 +644,7 @@ function TTradeReplayPanel({
   const [portfolioDirty, setPortfolioDirty] = React.useState(false);
   const [manualCash, setManualCash] = React.useState('');
   const [manualPositions, setManualPositions] = React.useState<
-    Array<{
-      stockCode: string;
-      instrumentName: string;
-      volume: string;
-      avgPrice: string;
-    }>
+    ReplayManualPositionDraft[]
   >([]);
   const startTime = `${startDate}T09:30:00`;
   const endTime = `${endDate}T15:00:00`;
@@ -966,6 +786,57 @@ function TTradeReplayPanel({
     history.some(item =>
       ['PENDING', 'RUNNING', 'STARTING'].includes(item.status.toUpperCase())
     );
+  const handleReplayPortfolioSourceChange = React.useCallback(
+    (source: 'MANUAL' | 'SNAPSHOT') => {
+      setPortfolioSource(source);
+      setPortfolioDirty(true);
+    },
+    []
+  );
+  const handleReplayCashChange = React.useCallback((value: string) => {
+    setManualCash(value);
+    setPortfolioDirty(true);
+  }, []);
+  const handleReplayPositionChange = React.useCallback(
+    (index: number, field: 'avgPrice' | 'volume', value: string) => {
+      setManualPositions(rows =>
+        rows.map((row, rowIndex) =>
+          rowIndex === index ? { ...row, [field]: value } : row
+        )
+      );
+      setPortfolioDirty(true);
+    },
+    []
+  );
+  const handleReplayPositionRemove = React.useCallback((index: number) => {
+    setManualPositions(rows =>
+      rows.filter((_, rowIndex) => rowIndex !== index)
+    );
+    setPortfolioDirty(true);
+  }, []);
+  const handleReplayPositionAdd = React.useCallback(
+    (stockCode: string, instrumentName: string, avgPrice: string) => {
+      if (manualPositions.some(item => item.stockCode === stockCode)) {
+        toast({
+          title: '股票已经存在',
+          description: `${stockCode} 已在初始组合中。`,
+          variant: 'destructive',
+        });
+        return;
+      }
+      setManualPositions(rows => [
+        ...rows,
+        {
+          stockCode,
+          instrumentName,
+          volume: '100',
+          avgPrice,
+        },
+      ]);
+      setPortfolioDirty(true);
+    },
+    [manualPositions, toast]
+  );
   const replaySidebarContext = React.useMemo<ReplaySidebarContext>(() => {
     if (activeRunId) {
       if (!replay) {
@@ -973,9 +844,11 @@ function TTradeReplayPanel({
           accountId,
           asOf: '',
           cashAvailable: 0,
+          editor: null,
           frozen: true,
           loading: true,
           message: '正在读取该次回放冻结的初始账户…',
+          mode: 'VIEW',
           positions: [],
           source: 'SNAPSHOT',
           totalAsset: 0,
@@ -985,10 +858,12 @@ function TTradeReplayPanel({
         accountId: replay.accountId,
         asOf: String(replay.initialPortfolio.asOf || '').slice(0, 10),
         cashAvailable: replay.initialPortfolio.cashAvailable,
+        editor: null,
         frozen: true,
         loading: false,
         message:
           '该组合已随回放冻结，只用于复核本次结果，不会跟随当前实盘账户变化。',
+        mode: 'VIEW',
         positions: replay.initialPortfolio.positions.map(item => ({
           avgPrice: item.avgPrice,
           availableVolume: item.availableVolume,
@@ -1025,9 +900,24 @@ function TTradeReplayPanel({
         accountId,
         asOf: previousTradingDate,
         cashAvailable,
+        editor: {
+          manualCash,
+          manualPositions,
+          onAddPosition: handleReplayPositionAdd,
+          onCashChange: handleReplayCashChange,
+          onPositionChange: handleReplayPositionChange,
+          onPositionRemove: handleReplayPositionRemove,
+          onSourceChange: handleReplayPortfolioSourceChange,
+          previousTradingDate,
+          requiresManualPortfolio: Boolean(
+            preparation?.requiresManualPortfolio
+          ),
+          snapshotAvailable: snapshotPortfolioValid,
+        },
         frozen: false,
         loading: false,
         message: '手工组合会在启动时冻结；不足 100 股的持仓只计入账户权益。',
+        mode: 'CREATE',
         positions,
         source: 'MANUAL',
         totalAsset:
@@ -1040,9 +930,22 @@ function TTradeReplayPanel({
       accountId,
       asOf: preparation?.snapshotDate || '',
       cashAvailable: preparation?.initialCash || 0,
+      editor: {
+        manualCash,
+        manualPositions,
+        onAddPosition: handleReplayPositionAdd,
+        onCashChange: handleReplayCashChange,
+        onPositionChange: handleReplayPositionChange,
+        onPositionRemove: handleReplayPositionRemove,
+        onSourceChange: handleReplayPortfolioSourceChange,
+        previousTradingDate,
+        requiresManualPortfolio: Boolean(preparation?.requiresManualPortfolio),
+        snapshotAvailable: snapshotPortfolioValid,
+      },
       frozen: false,
       loading: preparationResult.fetching && !preparation,
       message: preparation?.message || '选择日期后读取开始日前的账户日结快照。',
+      mode: 'CREATE',
       positions: (preparation?.positions || []).map(item => ({
         avgPrice: item.avgPrice,
         availableVolume: item.availableVolume,
@@ -1057,6 +960,12 @@ function TTradeReplayPanel({
   }, [
     accountId,
     activeRunId,
+    handleReplayCashChange,
+    handleReplayPortfolioSourceChange,
+    handleReplayPositionAdd,
+    handleReplayPositionChange,
+    handleReplayPositionRemove,
+    manualCash,
     manualCashNumber,
     manualPositions,
     portfolioSource,
@@ -1064,6 +973,7 @@ function TTradeReplayPanel({
     preparationResult.fetching,
     previousTradingDate,
     replay,
+    snapshotPortfolioValid,
   ]);
 
   React.useEffect(() => {
@@ -1600,242 +1510,6 @@ function TTradeReplayPanel({
                   )}
                 </span>
               </div>
-
-              <div className="mt-3 border border-white/[0.08] bg-[#07111f] p-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="text-ui-caption font-black text-slate-100">
-                      初始回测账户
-                    </p>
-                    <p className="mt-0.5 text-ui-caption text-slate-500">
-                      组合冻结后，系统只为其中的股票准备历史行情。
-                    </p>
-                  </div>
-                  <div className="flex h-8 overflow-hidden border border-white/10">
-                    <button
-                      type="button"
-                      disabled={!snapshotPortfolioValid}
-                      onClick={() => {
-                        setPortfolioSource('SNAPSHOT');
-                        setPortfolioDirty(true);
-                      }}
-                      className={cn(
-                        'cursor-pointer px-3 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35',
-                        portfolioSource === 'SNAPSHOT'
-                          ? 'bg-blue-500/15 text-blue-200'
-                          : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
-                      )}
-                    >
-                      D-1 快照
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPortfolioSource('MANUAL');
-                        setPortfolioDirty(true);
-                      }}
-                      className={cn(
-                        'cursor-pointer border-l border-white/10 px-3 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
-                        portfolioSource === 'MANUAL'
-                          ? 'bg-blue-500/15 text-blue-200'
-                          : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
-                      )}
-                    >
-                      手工组合
-                    </button>
-                  </div>
-                </div>
-
-                {portfolioSource === 'SNAPSHOT' ? (
-                  <div className="mt-3 grid gap-3 lg:grid-cols-[180px_1fr_auto] lg:items-end">
-                    <div>
-                      <Label className="text-ui-micro text-slate-500">
-                        可用资金
-                      </Label>
-                      <div className="mt-1 font-mono text-ui-body font-black text-slate-100">
-                        ¥{formatNumber(preparation?.initialCash || 0)}
-                      </div>
-                    </div>
-                    <div className="text-ui-caption leading-5 text-slate-500">
-                      快照 {preparation?.snapshotDate || '--'} ·{' '}
-                      {preparation?.positions.length || 0} 只持仓 · 可做 T{' '}
-                      {preparation?.positions.filter(item => item.volume >= 100)
-                        .length || 0}{' '}
-                      只
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setPortfolioSource('MANUAL');
-                        setPortfolioDirty(true);
-                      }}
-                      className="h-8 rounded-sm border-blue-400/25 text-ui-caption text-blue-200 hover:bg-blue-500/10"
-                    >
-                      导入并编辑
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="mt-3 space-y-3">
-                    <div className="grid gap-3 md:grid-cols-[180px_1fr] md:items-end">
-                      <div>
-                        <Label
-                          htmlFor="replay-cash"
-                          className="text-ui-micro text-slate-500"
-                        >
-                          可用资金
-                        </Label>
-                        <Input
-                          id="replay-cash"
-                          type="number"
-                          min="0"
-                          value={manualCash}
-                          onChange={event => {
-                            setManualCash(event.target.value);
-                            setPortfolioDirty(true);
-                          }}
-                          className="mt-1 h-8 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-label focus-visible:ring-blue-400/70"
-                        />
-                      </div>
-                      <div className="text-ui-caption leading-5 text-slate-500">
-                        组合时点 {previousTradingDate || '--'}{' '}
-                        收盘；开盘前持仓全部按已结算库存处理。
-                      </div>
-                    </div>
-
-                    <div className="overflow-hidden border border-white/[0.07]">
-                      <div className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] gap-2 border-b border-white/[0.07] bg-white/[0.025] px-2 py-1.5 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600">
-                        <span>股票</span>
-                        <span>持仓股数</span>
-                        <span>平均成本</span>
-                        <span />
-                      </div>
-                      {manualPositions.map((item, index) => (
-                        <div
-                          key={item.stockCode}
-                          className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] items-center gap-2 border-b border-white/[0.05] px-2 py-1.5 last:border-b-0"
-                        >
-                          <div className="min-w-0">
-                            <div className="truncate text-ui-caption font-bold text-slate-200">
-                              {item.instrumentName || item.stockCode}
-                            </div>
-                            <div className="font-mono text-ui-micro text-slate-600">
-                              {item.stockCode}
-                            </div>
-                          </div>
-                          <Input
-                            aria-label={`${item.stockCode} 持仓股数`}
-                            type="number"
-                            min="1"
-                            step="1"
-                            value={item.volume}
-                            onChange={event => {
-                              const value = event.target.value;
-                              setManualPositions(rows =>
-                                rows.map((row, rowIndex) =>
-                                  rowIndex === index
-                                    ? { ...row, volume: value }
-                                    : row
-                                )
-                              );
-                              setPortfolioDirty(true);
-                            }}
-                            className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-caption focus-visible:ring-blue-400/70"
-                          />
-                          <Input
-                            aria-label={`${item.stockCode} 平均成本`}
-                            type="number"
-                            min="0.001"
-                            step="0.001"
-                            value={item.avgPrice}
-                            onChange={event => {
-                              const value = event.target.value;
-                              setManualPositions(rows =>
-                                rows.map((row, rowIndex) =>
-                                  rowIndex === index
-                                    ? { ...row, avgPrice: value }
-                                    : row
-                                )
-                              );
-                              setPortfolioDirty(true);
-                            }}
-                            className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-caption focus-visible:ring-blue-400/70"
-                          />
-                          <button
-                            type="button"
-                            aria-label={`删除 ${item.stockCode}`}
-                            onClick={() => {
-                              setManualPositions(rows =>
-                                rows.filter((_, rowIndex) => rowIndex !== index)
-                              );
-                              setPortfolioDirty(true);
-                            }}
-                            className="flex h-7 w-7 cursor-pointer items-center justify-center text-slate-600 hover:bg-rose-500/10 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ))}
-                      <div className="p-2">
-                        <StrategyInstrumentSelector
-                          value=""
-                          onChange={(stockCode, stock) => {
-                            if (!stockCode) return;
-                            if (
-                              manualPositions.some(
-                                item => item.stockCode === stockCode
-                              )
-                            ) {
-                              toast({
-                                title: '股票已经存在',
-                                description: `${stockCode} 已在初始组合中。`,
-                                variant: 'destructive',
-                              });
-                              return;
-                            }
-                            setManualPositions(rows => [
-                              ...rows,
-                              {
-                                stockCode,
-                                instrumentName: stock?.name || stockCode,
-                                volume: '100',
-                                avgPrice: String(stock?.quote?.lastPrice || ''),
-                              },
-                            ]);
-                            setPortfolioDirty(true);
-                          }}
-                          inputClassName="h-8 rounded-sm border-white/10 bg-[#050b16] text-ui-caption"
-                          placeholder="搜索股票代码或名称并加入持仓"
-                        />
-                      </div>
-                    </div>
-                    <div className="text-ui-caption text-slate-500">
-                      {manualPositions.length} 只持仓 ·{' '}
-                      {
-                        manualPositions.filter(
-                          item => Number(item.volume) >= 100
-                        ).length
-                      }{' '}
-                      只可做 T；不足 100 股的持仓仅计入账户权益。
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {preparation?.requiresManualPortfolio && (
-                <div className="mt-2 border border-amber-400/15 bg-amber-400/[0.035] px-3 py-2">
-                  <div>
-                    <p className="text-ui-caption font-bold text-amber-100">
-                      缺少可审计的历史初始组合
-                    </p>
-                    <p className="mt-0.5 text-ui-caption text-amber-200/55">
-                      当前没有可采用的 D-1
-                      日结快照，请使用上方手工组合配置回测账户。
-                    </p>
-                  </div>
-                </div>
-              )}
             </section>
 
             {replay ? (
@@ -4004,7 +3678,29 @@ export function TTradeGlobalPage() {
   );
 
   const replaySidebar = (
-    <TTradeReplaySidebar accountId={accountId} context={replaySidebarContext} />
+    <React.Suspense
+      fallback={
+        <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
+          <div className="h-[68px] shrink-0 border-b border-white/[0.05] px-ui-section py-3">
+            <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-cyan-300">
+              Replay Lab
+            </div>
+            <div className="mt-1 text-ui-title font-black text-slate-100">
+              回测账户
+            </div>
+          </div>
+          <div className="flex items-center gap-2 p-ui-section text-ui-caption text-slate-500">
+            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+            正在载入回测账户…
+          </div>
+        </aside>
+      }
+    >
+      <TTradeReplaySidebar
+        accountId={accountId}
+        context={replaySidebarContext}
+      />
+    </React.Suspense>
   );
 
   const toolbar = (
@@ -5552,3 +5248,8 @@ export function TTradeGlobalPage() {
     />
   );
 }
+const TTradeReplaySidebar = React.lazy(() =>
+  import('./t-trade-global/TTradeReplaySidebar').then(module => ({
+    default: module.TTradeReplaySidebar,
+  }))
+);
