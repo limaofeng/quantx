@@ -74,8 +74,8 @@ from quantx_infrastructure.services.account_execution_safety_service import (
 from quantx_infrastructure.services.agent_session_guard import (
   AGENT_SERVER_SESSION_PAYLOAD_KEY,
   API_HEARTBEAT_COMPONENT,
-  REMOTE_AGENT_ACCOUNT_MISMATCH,
-  REMOTE_AGENT_OFFLINE,
+  QMT_ACCOUNT_MISMATCH,
+  QMT_AGENT_OFFLINE,
   api_instance_is_current,
   evaluate_agent_session,
   parse_utc_timestamp,
@@ -678,6 +678,12 @@ async def _record_heartbeat(
   establish: bool = False,
 ) -> None:
   now = utcnow()
+  normalized_sent_at = to_naive_utc(sent_at)
+  heartbeat_delay_seconds = (
+    round(max(0.0, (now - normalized_sent_at).total_seconds()), 3)
+    if normalized_sent_at is not None
+    else None
+  )
   if (
     establish
     and await agent_connection_hub.current_session(session.device_id) is not session
@@ -722,7 +728,7 @@ async def _record_heartbeat(
       in {
         "RECONCILING",
         "RECONCILE_REQUIRED",
-        REMOTE_AGENT_ACCOUNT_MISMATCH,
+        QMT_ACCOUNT_MISMATCH,
       }
       and requested_status == "READY"
     )
@@ -731,6 +737,7 @@ async def _record_heartbeat(
       # snapshot has been applied. A heartbeat is not reconciliation proof.
       status = str(heartbeat.status).upper()
     details = previous_details
+    details.pop("remoteAddressSummary", None)
     if establish:
       for key in (
         "readyAccounts",
@@ -770,7 +777,10 @@ async def _record_heartbeat(
         "serverConnectedAt": utc_iso(session.server_connected_at),
         "serverReceivedAt": utc_iso(now),
         "agentSentAt": utc_iso(sent_at) if sent_at is not None else None,
-        "remoteAddressSummary": session.remote_address_summary,
+        "heartbeatDelaySeconds": heartbeat_delay_seconds,
+        "heartbeatDelayWarning": bool(
+          heartbeat_delay_seconds is not None and heartbeat_delay_seconds > 5.0
+        ),
         "sessionActive": True,
         "reasonCode": (
           str(previous_details.get("reasonCode") or "")[:64]
@@ -842,7 +852,7 @@ async def _mark_session_offline(session: AgentControlSession) -> None:
       {
         "sessionActive": False,
         "serverReceivedAt": utc_iso(now),
-        "reasonCode": REMOTE_AGENT_OFFLINE,
+        "reasonCode": QMT_AGENT_OFFLINE,
       }
     )
     heartbeat.status = "OFFLINE"
@@ -1634,13 +1644,8 @@ async def _next_command(
       if command_kind == "CANCEL_ORDER"
       else {"READY"}
     )
-    api_heartbeat = await db.get(
-      RuntimeComponentHeartbeat,
-      API_HEARTBEAT_COMPONENT,
-    )
     session_state = evaluate_agent_session(
       heartbeat,
-      api_heartbeat,
       now=now,
       acceptable_statuses=acceptable_statuses,
     )
@@ -1699,13 +1704,8 @@ async def _next_market_data_request(
       RuntimeComponentHeartbeat,
       f"qmt-agent:{device_id}",
     )
-    api_heartbeat = await db.get(
-      RuntimeComponentHeartbeat,
-      API_HEARTBEAT_COMPONENT,
-    )
     session_state = evaluate_agent_session(
       heartbeat,
-      api_heartbeat,
       now=utcnow(),
       acceptable_statuses={
         "READY",
@@ -2518,10 +2518,6 @@ async def _assert_trade_delivery_session(
       RuntimeComponentHeartbeat,
       f"qmt-agent:{control_session.device_id}",
     )
-    api_heartbeat = await db.get(
-      RuntimeComponentHeartbeat,
-      API_HEARTBEAT_COMPONENT,
-    )
 
   acceptable_statuses = (
     {"READY", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
@@ -2530,7 +2526,6 @@ async def _assert_trade_delivery_session(
   )
   session_state = evaluate_agent_session(
     heartbeat,
-    api_heartbeat,
     now=now,
     acceptable_statuses=acceptable_statuses,
   )

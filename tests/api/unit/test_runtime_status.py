@@ -13,7 +13,7 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
 )
 from quantx_infrastructure.services.agent_session_guard import (
-  REMOTE_AGENT_ACCOUNT_MISMATCH,
+  QMT_ACCOUNT_MISMATCH,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -239,7 +239,7 @@ async def test_component_status_exposes_worker_registration_counts(
 
 
 @pytest.mark.asyncio
-async def test_component_status_does_not_consume_local_launch_environment(
+async def test_component_status_uses_aggregated_runtime_snapshot(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   async def fake_database_status():
@@ -427,9 +427,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     "accountIds": ["***nt-1"],
     "latestSnapshotAgeSeconds": None,
     "latestReadyHeartbeatAt": None,
-    "apiInstanceId": "api-instance-1",
-    "remoteAddressSummaries": ["10.0.0.*"],
-    "reasonCode": "REMOTE_AGENT_NOT_RECONCILED",
+    "reasonCode": "QMT_AGENT_NOT_RECONCILED",
   }
   assert "qmt-agent:device-1" not in components
   assert components["market-data"]["status"] == "ready"
@@ -459,10 +457,10 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     await db.commit()
 
   components = await runtime_status._component_heartbeats()
-  assert components["qmt-agent"]["status"] == "offline"
-  assert components["qmt-agent"]["connectedDevices"] == 0
-  assert components["qmt-agent"]["readyDevices"] == 0
-  assert components["qmt-agent"]["latestReadyHeartbeatAt"] is None
+  assert components["qmt-agent"]["status"] == "ready"
+  assert components["qmt-agent"]["connectedDevices"] == 1
+  assert components["qmt-agent"]["readyDevices"] == 1
+  assert components["qmt-agent"]["latestReadyHeartbeatAt"] is not None
 
   current_heartbeat_at = now + timedelta(seconds=2)
   async with session_factory() as db:
@@ -507,13 +505,21 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   assert components["qmt-agent"]["status"] == "degraded"
   assert components["qmt-agent"]["degradedDevices"] == 1
   assert components["market-data"]["status"] == "offline"
+
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_RUNTIME_UNAVAILABLE")
+  components = await runtime_status._component_heartbeats()
+  assert components["qmt-agent"]["status"] == "blocked"
+  assert components["qmt-agent"]["connectedDevices"] == 0
+  assert components["qmt-agent"]["readyDevices"] == 0
+  assert components["qmt-agent"]["reasonCode"] == "QMT_RUNTIME_UNAVAILABLE"
   await engine.dispose()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
   "server_status",
-  ["RECONCILE_REQUIRED", REMOTE_AGENT_ACCOUNT_MISMATCH],
+  ["RECONCILE_REQUIRED", QMT_ACCOUNT_MISMATCH],
 )
 async def test_ready_heartbeat_cannot_clear_engine_reconciliation_requirement(
   monkeypatch: pytest.MonkeyPatch,
@@ -633,7 +639,7 @@ async def test_ready_heartbeat_cannot_clear_engine_reconciliation_requirement(
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
     assert heartbeat.status == "OFFLINE"
     assert heartbeat.details["sessionActive"] is False
-    assert heartbeat.details["reasonCode"] == "REMOTE_AGENT_OFFLINE"
+    assert heartbeat.details["reasonCode"] == "QMT_AGENT_OFFLINE"
   await engine.dispose()
 
 

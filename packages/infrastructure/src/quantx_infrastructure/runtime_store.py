@@ -14,6 +14,11 @@ from dotenv import load_dotenv
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_agent_launch_started_at,
+  qmt_agent_launch_state,
+)
+
 
 def resolve_database_url() -> str:
   root_value = os.environ.get("QUANTX_ROOT", "").strip()
@@ -34,6 +39,21 @@ def resolve_database_url() -> str:
 
 def _utcnow() -> datetime:
   return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _qmt_runtime_cutoff(max_age_seconds: float) -> datetime | None:
+  """Return the server-time cutoff for the current managed Windows launch."""
+
+  state = qmt_agent_launch_state()
+  if state in {"BLOCKED", "NOT_REQUESTED"}:
+    return None
+  cutoff = _utcnow() - timedelta(seconds=max(1.0, float(max_age_seconds)))
+  if state != "LAUNCH_ALLOWED":
+    return cutoff
+  launch_started_at = qmt_agent_launch_started_at()
+  if launch_started_at is None:
+    return None
+  return max(cutoff, launch_started_at)
 
 
 class DurableRuntimeStore:
@@ -92,7 +112,9 @@ class DurableRuntimeStore:
     trading-unavailable Agents may still provide XTData history.
     """
 
-    cutoff = _utcnow() - timedelta(seconds=max(1.0, float(max_age_seconds)))
+    cutoff = _qmt_runtime_cutoff(max_age_seconds)
+    if cutoff is None:
+      return None
     connected_statuses = (
       "READY",
       "RECONCILING",
@@ -111,20 +133,14 @@ class DurableRuntimeStore:
             FROM agent_devices AS device
             JOIN runtime_component_heartbeats AS heartbeat
               ON heartbeat.component = 'qmt-agent:' || device.id
-            JOIN runtime_component_heartbeats AS api
-              ON api.component = 'api'
             WHERE device.revoked_at IS NULL
               AND device.last_seen_at >= :cutoff
-              AND api.updated_at >= :cutoff
-              AND UPPER(api.status) = 'READY'
-              AND heartbeat.details ->> 'apiInstanceId' = api.instance_id
               AND heartbeat.details ->> 'sessionActive' = 'true'
               AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
-              AND CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ)
-                >= :cutoff
+              AND heartbeat.updated_at >= :cutoff
               AND UPPER(heartbeat.status) IN :connected_statuses
             ORDER BY
-              CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ) DESC,
+              heartbeat.updated_at DESC,
               device.last_seen_at DESC
             """
           ).bindparams(bindparam("connected_statuses", expanding=True)),
@@ -194,6 +210,7 @@ class DurableRuntimeStore:
       encoded if not normalized_scope else f"{normalized_scope}\0{encoded}"
     )
     idempotency_key = hashlib.sha256(idempotency_material.encode("utf-8")).hexdigest()
+    runtime_cutoff = _qmt_runtime_cutoff(90)
     async with self.engine.begin() as connection:
       existing = (
         await connection.execute(
@@ -209,7 +226,9 @@ class DurableRuntimeStore:
       ).scalar_one_or_none()
       if existing:
         return str(existing)
-      if device_id:
+      if runtime_cutoff is None:
+        rows = []
+      elif device_id:
         selected = (
           (
             await connection.execute(
@@ -219,17 +238,11 @@ class DurableRuntimeStore:
               FROM agent_devices AS device
               JOIN runtime_component_heartbeats AS heartbeat
                 ON heartbeat.component = 'qmt-agent:' || device.id
-              JOIN runtime_component_heartbeats AS api
-                ON api.component = 'api'
               WHERE device.id = :device_id
                 AND device.revoked_at IS NULL
-                AND api.updated_at >= :cutoff
-                AND UPPER(api.status) = 'READY'
-                AND heartbeat.details ->> 'apiInstanceId' = api.instance_id
                 AND heartbeat.details ->> 'sessionActive' = 'true'
                 AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
-                AND CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ)
-                  >= :cutoff
+                AND heartbeat.updated_at >= :cutoff
                 AND UPPER(heartbeat.status) IN (
                   'READY', 'RECONCILING', 'RECONCILE_REQUIRED',
                   'TRADING_UNAVAILABLE', 'EMERGENCY_STOP'
@@ -238,7 +251,7 @@ class DurableRuntimeStore:
               ),
               {
                 "device_id": device_id,
-                "cutoff": _utcnow() - timedelta(seconds=90),
+                "cutoff": runtime_cutoff,
               },
             )
           )
@@ -255,25 +268,19 @@ class DurableRuntimeStore:
               FROM agent_devices AS device
               JOIN runtime_component_heartbeats AS heartbeat
                 ON heartbeat.component = 'qmt-agent:' || device.id
-              JOIN runtime_component_heartbeats AS api
-                ON api.component = 'api'
               WHERE device.revoked_at IS NULL
-                AND api.updated_at >= :cutoff
-                AND UPPER(api.status) = 'READY'
-                AND heartbeat.details ->> 'apiInstanceId' = api.instance_id
                 AND heartbeat.details ->> 'sessionActive' = 'true'
                 AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
-                AND CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ)
-                  >= :cutoff
+                AND heartbeat.updated_at >= :cutoff
                 AND UPPER(heartbeat.status) IN (
                   'READY', 'RECONCILING', 'RECONCILE_REQUIRED',
                   'TRADING_UNAVAILABLE', 'EMERGENCY_STOP'
                 )
               ORDER BY
-                CAST(heartbeat.details ->> 'serverReceivedAt' AS TIMESTAMPTZ) DESC
+                heartbeat.updated_at DESC
               """
             ),
-            {"cutoff": _utcnow() - timedelta(seconds=90)},
+            {"cutoff": runtime_cutoff},
           )
         ).mappings()
       required = {"market-data"}

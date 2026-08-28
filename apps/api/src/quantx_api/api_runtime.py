@@ -11,9 +11,11 @@ from quantx_infrastructure.database.relational_connection import AsyncSessionLoc
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
 from quantx_infrastructure.services.agent_session_guard import (
   API_HEARTBEAT_COMPONENT,
+  QMT_AGENT_OFFLINE,
   parse_utc_timestamp,
   utc_iso,
 )
+from sqlalchemy import select
 
 from quantx_api.auth.tokens import utcnow
 
@@ -34,6 +36,10 @@ async def record_api_heartbeat(*, status: str = "READY") -> None:
       RuntimeComponentHeartbeat,
       API_HEARTBEAT_COMPONENT,
       with_for_update=True,
+    )
+    replacing_generation = bool(
+      status == "READY"
+      and (heartbeat is None or heartbeat.instance_id != API_INSTANCE_ID)
     )
     if heartbeat is None:
       heartbeat = RuntimeComponentHeartbeat(
@@ -60,6 +66,32 @@ async def record_api_heartbeat(*, status: str = "READY") -> None:
       heartbeat.status = status
       heartbeat.details = details
       heartbeat.updated_at = now
+    if replacing_generation:
+      agent_heartbeats = list(
+        (
+          await db.execute(
+            select(RuntimeComponentHeartbeat)
+            .where(RuntimeComponentHeartbeat.component.like("qmt-agent:%"))
+            .with_for_update()
+          )
+        ).scalars()
+      )
+      for agent_heartbeat in agent_heartbeats:
+        agent_details = dict(agent_heartbeat.details or {})
+        if (
+          bool(agent_details.get("sessionActive"))
+          and str(agent_details.get("apiInstanceId") or "") != API_INSTANCE_ID
+        ):
+          agent_details.update(
+            {
+              "sessionActive": False,
+              "serverReceivedAt": utc_iso(now),
+              "reasonCode": QMT_AGENT_OFFLINE,
+            }
+          )
+          agent_heartbeat.status = "OFFLINE"
+          agent_heartbeat.details = agent_details
+          agent_heartbeat.updated_at = now
     await db.commit()
 
 

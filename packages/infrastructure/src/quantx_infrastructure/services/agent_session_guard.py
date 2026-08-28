@@ -1,4 +1,4 @@
-"""Fail-closed identity checks for remote QMT Agent control sessions."""
+"""Windows-local QMT runtime health and control-session isolation."""
 
 from __future__ import annotations
 
@@ -6,14 +6,19 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Collection
 
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_agent_launch_block_reason,
+  qmt_heartbeat_matches_current_launch,
+)
+
 API_HEARTBEAT_COMPONENT = "api"
 AGENT_HEARTBEAT_PREFIX = "qmt-agent:"
 AGENT_SERVER_SESSION_PAYLOAD_KEY = "_quantx_server_session"
 
-REMOTE_AGENT_OFFLINE = "REMOTE_AGENT_OFFLINE"
-REMOTE_AGENT_SESSION_STALE = "REMOTE_AGENT_SESSION_STALE"
-REMOTE_AGENT_NOT_RECONCILED = "REMOTE_AGENT_NOT_RECONCILED"
-REMOTE_AGENT_ACCOUNT_MISMATCH = "REMOTE_AGENT_ACCOUNT_MISMATCH"
+QMT_AGENT_OFFLINE = "QMT_AGENT_OFFLINE"
+QMT_AGENT_STALE = "QMT_AGENT_STALE"
+QMT_AGENT_NOT_RECONCILED = "QMT_AGENT_NOT_RECONCILED"
+QMT_ACCOUNT_MISMATCH = "QMT_ACCOUNT_MISMATCH"
 
 DEFAULT_SESSION_TTL_SECONDS = 90.0
 MAX_AGENT_CLOCK_SKEW_SECONDS = 5.0
@@ -80,46 +85,45 @@ def api_instance_is_current(
 
 def evaluate_agent_session(
   agent_heartbeat: Any,
-  api_heartbeat: Any,
   *,
   now: datetime,
   acceptable_statuses: Collection[str] | None = None,
   ttl_seconds: float = DEFAULT_SESSION_TTL_SECONDS,
 ) -> AgentSessionEvaluation:
-  """Evaluate a session using server receive time and the current API generation."""
+  """Evaluate the managed local Agent using server-owned timestamps.
+
+  API and Agent generation IDs deliberately do not decide account readiness.
+  They remain transport-only identities used when replacing a connection,
+  delivering a command, leasing the market stream, or promoting a report.
+  """
+
+  launch_reason = qmt_agent_launch_block_reason()
+  if launch_reason is not None:
+    return AgentSessionEvaluation(False, launch_reason)
 
   if agent_heartbeat is None:
-    return AgentSessionEvaluation(False, REMOTE_AGENT_OFFLINE)
+    return AgentSessionEvaluation(False, QMT_AGENT_OFFLINE)
   details = dict(getattr(agent_heartbeat, "details", None) or {})
   status = str(getattr(agent_heartbeat, "status", "")).upper()
   if (
-    status == REMOTE_AGENT_ACCOUNT_MISMATCH
-    or str(details.get("reasonCode") or "").upper() == REMOTE_AGENT_ACCOUNT_MISMATCH
+    status == QMT_ACCOUNT_MISMATCH
+    or str(details.get("reasonCode") or "").upper() == QMT_ACCOUNT_MISMATCH
   ):
-    return AgentSessionEvaluation(False, REMOTE_AGENT_ACCOUNT_MISMATCH)
+    return AgentSessionEvaluation(False, QMT_ACCOUNT_MISMATCH)
 
-  api_instance_id = str(getattr(api_heartbeat, "instance_id", "") or "")
   agent_api_instance_id = str(details.get("apiInstanceId") or "")
   agent_session_id = str(details.get("agentSessionId") or "")
   server_received_at = parse_utc_timestamp(details.get("serverReceivedAt"))
   current_time = to_naive_utc(now)
+  heartbeat_updated_at = to_naive_utc(getattr(agent_heartbeat, "updated_at", None))
   if (
     current_time is None
-    or not api_instance_is_current(
-      api_heartbeat,
-      now=current_time,
-      ttl_seconds=ttl_seconds,
-    )
     or not bool(details.get("sessionActive"))
     or not agent_session_id
-    or not api_instance_id
-    or agent_api_instance_id != api_instance_id
-    or server_received_at is None
+    or heartbeat_updated_at is None
   ):
     reason = (
-      REMOTE_AGENT_OFFLINE
-      if not bool(details.get("sessionActive"))
-      else REMOTE_AGENT_SESSION_STALE
+      QMT_AGENT_OFFLINE if not bool(details.get("sessionActive")) else QMT_AGENT_STALE
     )
     return AgentSessionEvaluation(
       False,
@@ -129,18 +133,13 @@ def evaluate_agent_session(
       server_received_at=server_received_at,
     )
 
-  age = current_time - server_received_at
-  sent_at = parse_utc_timestamp(details.get("agentSentAt"))
-  if (
-    age < -timedelta(seconds=MAX_AGENT_CLOCK_SKEW_SECONDS)
-    or age > timedelta(seconds=max(1.0, ttl_seconds))
-    or sent_at is None
-    or abs((sent_at - server_received_at).total_seconds())
-    > MAX_AGENT_CLOCK_SKEW_SECONDS
-  ):
+  age = current_time - heartbeat_updated_at
+  if age > timedelta(
+    seconds=max(1.0, ttl_seconds)
+  ) or not qmt_heartbeat_matches_current_launch(heartbeat_updated_at):
     return AgentSessionEvaluation(
       False,
-      REMOTE_AGENT_SESSION_STALE,
+      QMT_AGENT_STALE,
       api_instance_id=agent_api_instance_id,
       agent_session_id=agent_session_id,
       server_received_at=server_received_at,
@@ -151,7 +150,7 @@ def evaluate_agent_session(
     if status not in allowed:
       return AgentSessionEvaluation(
         False,
-        REMOTE_AGENT_NOT_RECONCILED,
+        QMT_AGENT_NOT_RECONCILED,
         api_instance_id=agent_api_instance_id,
         agent_session_id=agent_session_id,
         server_received_at=server_received_at,
@@ -168,7 +167,6 @@ def evaluate_agent_session(
 def report_belongs_to_current_session(
   payload: dict[str, Any],
   heartbeat: Any,
-  api_heartbeat: Any,
   *,
   now: datetime,
 ) -> bool:
@@ -178,7 +176,6 @@ def report_belongs_to_current_session(
   details = dict(getattr(heartbeat, "details", None) or {})
   session = evaluate_agent_session(
     heartbeat,
-    api_heartbeat,
     now=now,
   )
   return bool(
@@ -187,7 +184,4 @@ def report_belongs_to_current_session(
     and metadata.get("agentSessionId")
     and str(metadata.get("apiInstanceId")) == str(details.get("apiInstanceId") or "")
     and str(metadata.get("agentSessionId")) == str(details.get("agentSessionId") or "")
-    and str(metadata.get("apiInstanceId"))
-    == str(getattr(api_heartbeat, "instance_id", "") or "")
-    and api_instance_is_current(api_heartbeat, now=now)
   )

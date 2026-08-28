@@ -37,7 +37,7 @@ async def test_runtime_snapshot_uses_one_request_for_all_derived_targets():
           "worker": {"status": "stale"},
           "qmtAgent": {
             "status": "blocked",
-            "reasonCode": "REMOTE_AGENT_SESSION_STALE",
+            "reasonCode": "QMT_AGENT_STALE",
           },
           "marketData": {"status": "syncing"},
           "aiRuntime": {"status": "disabled"},
@@ -61,4 +61,4 @@ async def test_runtime_snapshot_uses_one_request_for_all_derived_targets():
   }
   assert all(result.latency_ms is None for result in results)
   qmt = next(result for result in results if result.target_id == "qmt-agent")
-  assert qmt.reason_code == "REMOTE_AGENT_SESSION_STALE"
+  assert qmt.reason_code == "QMT_AGENT_STALE"

@@ -239,16 +239,40 @@ async def test_concurrent_idempotent_market_data_requests_converge_atomically() 
 
 
 @pytest.mark.asyncio
-async def test_market_device_query_requires_current_api_session() -> None:
+async def test_market_device_query_uses_local_server_heartbeat() -> None:
   connection = _AvailabilityConnection([])
   store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
   store.engine = _ConnectEngine(connection)
 
   assert await store.available_market_data_device() is None
   sql = connection.calls[0][0]
-  assert "heartbeat.details ->> 'apiInstanceId' = api.instance_id" in sql
+  assert "JOIN runtime_component_heartbeats AS api" not in sql
   assert "heartbeat.details ->> 'sessionActive' = 'true'" in sql
-  assert "serverReceivedAt" in sql
+  assert "heartbeat.updated_at >= :cutoff" in sql
+
+
+@pytest.mark.asyncio
+async def test_market_device_query_skips_blocked_windows_launch(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_RUNTIME_UNAVAILABLE")
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store.engine = _UnexpectedConnectEngine()
+
+  assert await store.available_market_data_device() is None
+
+
+@pytest.mark.asyncio
+async def test_market_device_query_requires_valid_windows_launch_boundary(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STARTED_AT", "invalid")
+  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store.engine = _UnexpectedConnectEngine()
+
+  assert await store.available_market_data_device() is None
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,16 @@ from quantx_infrastructure.services.account_execution_safety_service import (
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 
 
+@pytest.fixture(autouse=True)
+def clear_qmt_launch_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+  for name in (
+    "QMT_AGENT_LAUNCH_STATE",
+    "QMT_AGENT_LAUNCH_REASON",
+    "QMT_AGENT_LAUNCH_STARTED_AT",
+  ):
+    monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def fixed_utcnow(monkeypatch: pytest.MonkeyPatch) -> datetime:
   value = datetime(2026, 7, 28, 10, 30)

@@ -18,11 +18,10 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
 )
 from quantx_infrastructure.services.agent_session_guard import (
-  API_HEARTBEAT_COMPONENT,
-  REMOTE_AGENT_ACCOUNT_MISMATCH,
-  REMOTE_AGENT_NOT_RECONCILED,
-  REMOTE_AGENT_OFFLINE,
-  REMOTE_AGENT_SESSION_STALE,
+  QMT_ACCOUNT_MISMATCH,
+  QMT_AGENT_NOT_RECONCILED,
+  QMT_AGENT_OFFLINE,
+  QMT_AGENT_STALE,
   evaluate_agent_session,
 )
 from quantx_infrastructure.services.trading_time_service import TradingTimeService
@@ -131,7 +130,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "details": heartbeat.details or {},
     }
 
-  api_heartbeat = heartbeat_by_component.get(API_HEARTBEAT_COMPONENT)
+  launch_block_reason = qmt_agent_launch_block_reason()
   online_agents: list[AgentDevice] = []
   connected_agents: list[tuple[AgentDevice, str]] = []
   agent_reason_codes: list[str] = []
@@ -140,7 +139,6 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     heartbeat_status = str(heartbeat.status or "").upper() if heartbeat else ""
     evaluation = evaluate_agent_session(
       heartbeat,
-      api_heartbeat,
       now=now,
       acceptable_statuses=CONNECTED_AGENT_STATUSES,
     )

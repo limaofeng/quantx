@@ -29,7 +29,8 @@ from quantx_infrastructure.services.account_execution_safety_service import (
   AccountExecutionSafetyService,
 )
 from quantx_infrastructure.services.agent_session_guard import (
-  REMOTE_AGENT_SESSION_STALE,
+  QMT_AGENT_NOT_RECONCILED,
+  QMT_AGENT_STALE,
 )
 from quantx_infrastructure.services.engine_command_service import (
   EngineCommandIdempotencyError,
@@ -940,7 +941,7 @@ class TTradeResolver:
 
   @classmethod
   async def _apply_agent_session_block_to_monitor(cls, data: dict) -> dict:
-    """Mask a persisted projection with the current remote session authority."""
+    """Mask a persisted projection with current local QMT authority."""
 
     account_id = str(data.get("account_id") or "").strip()
     if not account_id:
@@ -949,12 +950,12 @@ class TTradeResolver:
       current = await AccountExecutionSafetyService().status(account_id)
     except Exception as exc:
       logger.warning(
-        "无法验证远程 QMT Agent 当前会话: error=%s",
+        "无法验证本机 QMT Agent 当前状态: error=%s",
         exc.__class__.__name__,
       )
       current = {
         "agent_status": "OFFLINE",
-        "qmt_launch_reason_code": REMOTE_AGENT_SESSION_STALE,
+        "qmt_launch_reason_code": QMT_AGENT_STALE,
       }
     current_checks = {
       str(item.get("code") or ""): bool(item.get("passed"))
@@ -964,12 +965,10 @@ class TTradeResolver:
       "MARKET_STREAM_READY", False
     ):
       return data
-    reason_code = str(
-      current.get("qmt_launch_reason_code") or "REMOTE_AGENT_NOT_RECONCILED"
-    )
+    reason_code = str(current.get("qmt_launch_reason_code") or QMT_AGENT_NOT_RECONCILED)
 
     payload = dict(data)
-    message = f"远程 QMT Agent 会话不可用，实盘能力已关闭（{reason_code}）"
+    message = f"本机 QMT Agent 不可用，实盘能力已关闭（{reason_code}）"
     payload.update(
       {
         "agent_status": "BLOCKED",

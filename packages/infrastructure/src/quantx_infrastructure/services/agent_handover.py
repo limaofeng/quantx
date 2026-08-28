@@ -9,7 +9,7 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   RuntimeComponentHeartbeat,
 )
-from quantx_infrastructure.services.agent_session_guard import REMOTE_AGENT_OFFLINE
+from quantx_infrastructure.services.agent_session_guard import QMT_AGENT_OFFLINE
 
 
 async def converge_ready_agent(
@@ -46,7 +46,7 @@ async def converge_ready_agent(
       details.update(
         {
           "sessionActive": False,
-          "reasonCode": REMOTE_AGENT_OFFLINE,
+          "reasonCode": QMT_AGENT_OFFLINE,
         }
       )
       heartbeat.status = "REVOKED"

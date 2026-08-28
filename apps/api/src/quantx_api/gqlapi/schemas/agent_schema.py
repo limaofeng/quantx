@@ -18,8 +18,7 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
 )
 from quantx_infrastructure.services.agent_session_guard import (
-  API_HEARTBEAT_COMPONENT,
-  REMOTE_AGENT_ACCOUNT_MISMATCH,
+  QMT_ACCOUNT_MISMATCH,
   evaluate_agent_session,
   parse_utc_timestamp,
 )
@@ -61,20 +60,18 @@ def _age_seconds(value: datetime | None, now: datetime) -> float | None:
 def _device_status(
   device: AgentDeviceModel,
   heartbeat: RuntimeComponentHeartbeat | None,
-  api_heartbeat: RuntimeComponentHeartbeat | None,
   now: datetime,
   hub_connected: bool,
 ) -> str:
   if device.revoked_at is not None:
     return "REVOKED"
   heartbeat_status = str(heartbeat.status if heartbeat is not None else "").upper()
-  if hub_connected and heartbeat_status == REMOTE_AGENT_ACCOUNT_MISMATCH:
-    return REMOTE_AGENT_ACCOUNT_MISMATCH
+  if hub_connected and heartbeat_status == QMT_ACCOUNT_MISMATCH:
+    return QMT_ACCOUNT_MISMATCH
   if (
     not hub_connected
     or not evaluate_agent_session(
       heartbeat,
-      api_heartbeat,
       now=now,
       acceptable_statuses={
         "READY",
@@ -251,7 +248,6 @@ async def resolve_qmt_agent_connection(
     ).scalars()
   )
   heartbeats = await _heartbeat_map(db, devices)
-  api_heartbeat = await db.get(RuntimeComponentHeartbeat, API_HEARTBEAT_COMPONENT)
   statuses: dict[str, str] = {}
   for device in devices:
     heartbeat = heartbeats.get(str(device.id))
@@ -267,7 +263,6 @@ async def resolve_qmt_agent_connection(
     statuses[str(device.id)] = _device_status(
       device,
       heartbeat,
-      api_heartbeat,
       now,
       hub_connected,
     )

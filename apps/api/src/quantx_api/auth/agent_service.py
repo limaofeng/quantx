@@ -18,8 +18,7 @@ from quantx_infrastructure.services.agent_handover import (
   converge_ready_agent,
 )
 from quantx_infrastructure.services.agent_session_guard import (
-  API_HEARTBEAT_COMPONENT,
-  REMOTE_AGENT_OFFLINE,
+  QMT_AGENT_OFFLINE,
   evaluate_agent_session,
 )
 from sqlalchemy import delete, select
@@ -180,10 +179,6 @@ class AgentAuthService:
     heartbeat_by_device_id = {
       str(row.component).removeprefix("qmt-agent:"): row for row in heartbeat_rows
     }
-    api_heartbeat = await self.db.get(
-      RuntimeComponentHeartbeat,
-      API_HEARTBEAT_COMPONENT,
-    )
     observed_at = utcnow()
     replacement_target_ids = {
       str(device.replaces_device_id) for device in devices if device.replaces_device_id
@@ -199,7 +194,6 @@ class AgentAuthService:
     def key(device: AgentDevice) -> tuple[int, int, float, float]:
       session_state = evaluate_agent_session(
         heartbeat_by_device_id.get(str(device.id)),
-        api_heartbeat,
         now=observed_at,
         acceptable_statuses={"READY"},
       )
@@ -243,7 +237,7 @@ class AgentAuthService:
           details.update(
             {
               "sessionActive": False,
-              "reasonCode": REMOTE_AGENT_OFFLINE,
+              "reasonCode": QMT_AGENT_OFFLINE,
             }
           )
           heartbeat.status = "REVOKED"
@@ -357,7 +351,7 @@ class AgentAuthService:
         details.update(
           {
             "sessionActive": False,
-            "reasonCode": REMOTE_AGENT_OFFLINE,
+            "reasonCode": QMT_AGENT_OFFLINE,
           }
         )
         heartbeat.status = "REVOKED"

@@ -41,7 +41,7 @@ function summary(
         lastSuccessAt: now,
         latencyMs: qmtStatus === 'healthy' ? 12.4 : 15.6,
         reasonCode:
-          qmtStatus === 'healthy' ? null : 'REMOTE_AGENT_NOT_RECONCILED',
+          qmtStatus === 'healthy' ? null : 'QMT_AGENT_NOT_RECONCILED',
         availabilityPct: 99.5,
         healthyPct: 98.5,
         coveragePct: 100,

@@ -53,8 +53,7 @@ from quantx_infrastructure.repositories.account_repository import AccountReposit
 from quantx_infrastructure.services.agent_handover import converge_ready_agent
 from quantx_infrastructure.services.agent_session_guard import (
   AGENT_SERVER_SESSION_PAYLOAD_KEY,
-  API_HEARTBEAT_COMPONENT,
-  REMOTE_AGENT_ACCOUNT_MISMATCH,
+  QMT_ACCOUNT_MISMATCH,
   report_belongs_to_current_session,
 )
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
@@ -1007,14 +1006,9 @@ async def _fail_closed_incomplete_snapshot(
       RuntimeComponentHeartbeat,
       f"qmt-agent:{device_id}",
     )
-    api_heartbeat = await db.get(
-      RuntimeComponentHeartbeat,
-      API_HEARTBEAT_COMPONENT,
-    )
     if heartbeat is not None and report_belongs_to_current_session(
       payload,
       heartbeat,
-      api_heartbeat,
       now=utcnow(),
     ):
       details = dict(heartbeat.details or {})
@@ -1184,7 +1178,7 @@ async def _process_delta_report_inner(
         payload,
         reported_at=reported_at,
         failure_kind="SNAPSHOT_ACCOUNT_MISMATCH",
-        failure_reason=REMOTE_AGENT_ACCOUNT_MISMATCH,
+        failure_reason=QMT_ACCOUNT_MISMATCH,
         account_ids_override=set(authorized_account_ids),
       )
       async with AsyncSessionLocal() as mismatch_db:
@@ -1193,29 +1187,24 @@ async def _process_delta_report_inner(
           f"qmt-agent:{device_id}",
           with_for_update=True,
         )
-        api_heartbeat = await mismatch_db.get(
-          RuntimeComponentHeartbeat,
-          API_HEARTBEAT_COMPONENT,
-        )
         if heartbeat is not None and report_belongs_to_current_session(
           payload,
           heartbeat,
-          api_heartbeat,
           now=utcnow(),
         ):
           details = dict(heartbeat.details or {})
           details.update(
             {
-              "reasonCode": REMOTE_AGENT_ACCOUNT_MISMATCH,
+              "reasonCode": QMT_ACCOUNT_MISMATCH,
               "reportedAccountCount": len(reported_account_ids),
               "authorizedAccountCount": len(authorized_account_ids),
             }
           )
-          heartbeat.status = REMOTE_AGENT_ACCOUNT_MISMATCH
+          heartbeat.status = QMT_ACCOUNT_MISMATCH
           heartbeat.details = details
           heartbeat.updated_at = utcnow()
           await mismatch_db.commit()
-      raise ValueError(REMOTE_AGENT_ACCOUNT_MISMATCH)
+      raise ValueError(QMT_ACCOUNT_MISMATCH)
     # Parse and snapshot the account groups before any order/trade convergence.
     # A malformed sequence is an authoritative full-attempt failure and is
     # handled by the outer fail-closed boundary.
@@ -1477,14 +1466,9 @@ async def _process_delta_report_inner(
         RuntimeComponentHeartbeat,
         f"qmt-agent:{device_id}",
       )
-      api_heartbeat = await db.get(
-        RuntimeComponentHeartbeat,
-        API_HEARTBEAT_COMPONENT,
-      )
       if heartbeat is not None and report_belongs_to_current_session(
         payload,
         heartbeat,
-        api_heartbeat,
         now=utcnow(),
       ):
         details = dict(heartbeat.details or {})

@@ -213,7 +213,7 @@ def probe_result(
       probe_result(
         MonitorStatus.DEGRADED,
         latency_ms=None,
-        reason_code="REMOTE_AGENT_NOT_RECONCILED",
+        reason_code="QMT_AGENT_NOT_RECONCILED",
       ),
       MonitorStatus.DEGRADED,
       8.5,
@@ -223,7 +223,7 @@ def probe_result(
       probe_result(
         MonitorStatus.UNAVAILABLE,
         latency_ms=None,
-        reason_code="REMOTE_AGENT_SESSION_STALE",
+        reason_code="QMT_AGENT_STALE",
       ),
       MonitorStatus.UNAVAILABLE,
       8.5,
@@ -264,7 +264,7 @@ def test_qmt_probe_reason_priority_is_transport_then_semantic_then_local() -> No
     probe_result(
       MonitorStatus.UNAVAILABLE,
       latency_ms=None,
-      reason_code="REMOTE_AGENT_OFFLINE",
+      reason_code="QMT_AGENT_OFFLINE",
     ),
   )
   semantic = combine_qmt_agent_probe(
@@ -275,12 +275,12 @@ def test_qmt_probe_reason_priority_is_transport_then_semantic_then_local() -> No
     probe_result(
       MonitorStatus.DEGRADED,
       latency_ms=None,
-      reason_code="REMOTE_AGENT_NOT_RECONCILED",
+      reason_code="QMT_AGENT_NOT_RECONCILED",
     ),
   )
 
   assert transport.reason_code == QMT_HEALTH_TIMEOUT
-  assert semantic.reason_code == "REMOTE_AGENT_NOT_RECONCILED"
+  assert semantic.reason_code == "QMT_AGENT_NOT_RECONCILED"
 
 
 @pytest.mark.parametrize(

@@ -54,11 +54,7 @@ from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.strategy_run_state import StrategyRunState
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
-from quantx_infrastructure.services.account_execution_safety_service import (
-  authoritative_market_stream_ready,
-)
 from quantx_infrastructure.services.agent_session_guard import (
-  API_HEARTBEAT_COMPONENT,
   evaluate_agent_session,
 )
 from quantx_infrastructure.services.entry_plan_authorization_service import (
@@ -129,13 +125,11 @@ class TradeCommandService:
   @staticmethod
   def _heartbeat_fresh(
     heartbeat: RuntimeComponentHeartbeat,
-    api_heartbeat: RuntimeComponentHeartbeat | None,
     *,
     acceptable_statuses: set[str] | None = None,
   ) -> bool:
     return evaluate_agent_session(
       heartbeat,
-      api_heartbeat,
       now=utcnow(),
       acceptable_statuses=acceptable_statuses or {"READY"},
     ).current
@@ -1372,14 +1366,6 @@ class TradeCommandService:
       )
     )
     devices = result.scalars().all()
-    api_heartbeat = (
-      await self.db.get(
-        RuntimeComponentHeartbeat,
-        API_HEARTBEAT_COMPONENT,
-      )
-      if execution_mode == "live"
-      else None
-    )
     eligible: list[AgentDevice] = []
     for device in devices:
       allowed = list(device.authorized_account_ids or [])
@@ -1404,7 +1390,6 @@ class TradeCommandService:
           continue
         if not self._heartbeat_fresh(
           heartbeat,
-          api_heartbeat,
           acceptable_statuses=acceptable_statuses,
         ):
           continue
@@ -1427,14 +1412,6 @@ class TradeCommandService:
     result = await self.db.execute(
       select(AgentDevice).where(AgentDevice.revoked_at.is_(None))
     )
-    api_heartbeat = (
-      await self.db.get(
-        RuntimeComponentHeartbeat,
-        API_HEARTBEAT_COMPONENT,
-      )
-      if execution_mode == "live"
-      else None
-    )
     eligible: list[AgentDevice] = []
     for device in result.scalars().all():
       capabilities = {
@@ -1452,7 +1429,7 @@ class TradeCommandService:
           if (
             heartbeat is None
             or str(heartbeat.status).upper() != "READY"
-            or not self._heartbeat_fresh(heartbeat, api_heartbeat)
+            or not self._heartbeat_fresh(heartbeat)
           ):
             continue
         eligible.append(device)

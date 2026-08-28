@@ -58,8 +58,8 @@ XTTrading、数据库或网络。`data-only` 和 `paper` 的 XTTrading 状态固
 
 健康 server、Agent runtime 与进程 watchdog heartbeat 位于同一结构化并发边界。
 端口绑定失败或 server 意外退出会结束 Agent 主进程并由 supervisor 重启；正常关闭
-会同步停止 Uvicorn，不留下孤立监听任务。Windows 安装器只在 `Private` 网络配置文件
-为 TCP `18084` 创建入站规则，不限制单一 Monitor IP。
+会同步停止 Uvicorn，不留下孤立监听任务。统一启动器不安装 Windows 服务，也不修改
+防火墙；`18084` 只供同机独立 Monitor 进行只读探测。
 
 独立 Monitor 会把 `/health/ready` 的真实 HTTP RTT 与 API 对 WebSocket 会话、心跳、
 完整账户快照和对账的权威语义取较差结果。这个观测结果永远不回写交易门禁。
@@ -69,10 +69,16 @@ WebSocket 前都会检查 Agent 声明、API 已提交 watermark 与 Engine 已�
 完全一致，并在发送前重新计算账户级增仓安全状态；Windows Agent 在调用 Broker 前
 再次检查。撤单与明确的风险降低型卖出保留故障逃生路径。
 
-API 为每个进程和控制连接分别生成 `apiInstanceId` 与 `agentSessionId`，并用服务端
-接收时间计算 90 秒 TTL。Agent 断线、撤销、同设备重复连接或 API 实例切换会立即
-使旧会话失去命令和行情资格；旧报告仍按原消息 ID 幂等收敛，但不能提升新会话。
-账户安全门不再读取本机 `QMT_AGENT_LAUNCH_*` 或 PID 状态。
+本机 QMT 健康以统一启动器的 `QMT_AGENT_LAUNCH_*`、本次进程启动边界和服务端写入
+的 heartbeat `updated_at` 为真源，TTL 为 90 秒。Agent 自报时间与服务端处理时间的
+差值只记录为 `heartbeatDelaySeconds/heartbeatDelayWarning` 诊断信息，不参与账户或
+交易硬门禁，避免数据库背压把正常的同机 Agent 误判为失效。
+
+API 仍为每个进程和控制连接生成 `apiInstanceId` 与 `agentSessionId`，但二者只用于
+传输层连接替换、发送前复核、行情租约和报告归属，不作为账户级健康证明。Agent
+断线或撤销会立即持久化为离线；API 启动新代际时会主动关闭数据库中的旧活动会话。
+旧报告仍按原消息 ID 幂等收敛，但只有匹配当前 `apiInstanceId + agentSessionId` 的
+报告才允许提升当前会话。
 行情租约绑定当前控制连接的 `apiInstanceId + agentSessionId + deviceId`。行情连接
 自身仍必须用有效短期 token 完成握手，但 token 续期不会改变已认证控制会话身份。
 Redis 只允许较新的 API 启动代际覆盖租约，旧 API 只能清理自己的租约，不能删除或
@@ -80,8 +86,9 @@ Redis 只允许较新的 API 启动代际覆盖租约，旧 API 只能清理自�
 
 服务端控制的 Agent heartbeat details 字段为：`apiInstanceId`、
 `agentSessionId`、`serverConnectedAt`、`serverReceivedAt`、`agentSentAt`、
-`remoteAddressSummary`、`sessionActive` 和 `reasonCode`。Agent 自报同名值不会覆盖
-这些字段。API 持久化报告时还会注入只在服务端使用的会话元数据和认证时冻结的
+`heartbeatDelaySeconds`、`heartbeatDelayWarning`、`sessionActive` 和
+`reasonCode`。Agent 自报同名值不会覆盖这些字段。API 持久化报告时还会注入只在
+服务端使用的会话元数据和认证时冻结的
 `authorizedAccountIds`；该元数据不改变线协议，也不参与 Agent 原始 payload hash。
 
 交易控制、心跳与订单回报走协议 `1.1` 的 `/ws/agent`；沪深实时行情独占
@@ -140,8 +147,8 @@ QMT 回调只做快速捕获；READY 捕获入口以 64 MiB 保守估算字节�
 `timetag`；缺失、非有限或非法值会精确使当前行情 stream 失效并重新同步，不得
 回退到本机墙钟时间，也不得把单个 stream 的数据错误升级为整个 Agent 进程故障。
 `time` 只接受 epoch 秒或毫秒，`timetag` 按上海时区解析并保留亚秒；Agent、API
-Store 与 Engine Hub 共用 contracts 中的唯一解析器。跨主机部署要求 Windows
-Agent 与 API 主机都使用可靠的 UTC 时间同步：来源时间或 `captured_at` 超前 API
+Store 与 Engine Hub 共用 contracts 中的唯一解析器。Windows 主机保持可靠的 UTC
+时间同步：来源时间或 `captured_at` 超前 API
 ingress 5 秒即拒绝；Store 在实际 commit 时再按 10 秒 freshness 窗口检查
 `captured_at`，因此排队积压不能刷新一个过期的 `READY` lease。Engine 在交易
 时段同样按 10 秒 `captured_at` age fail-closed；非交易时段允许保留昨日快照，
@@ -191,39 +198,36 @@ JSON 报告保存在 `.runtime/reports/market-stream-load-test/`，不提交仓�
 
 ```powershell
 python -m quantx_qmt_agent.main enroll `
-  --api-url <MAC_DEV_PUBLIC_URL> `
   --code <一次性登记码>
-python -m quantx_qmt_agent.main status
 ```
 
-`status` 只显示规范化地址和脱敏后的设备 ID，例如
-`device_id=1234…abcd`。API `/health/components` 只输出聚合后的远程地址摘要、协议、
-模式、快照年龄、脱敏账户摘要和阻断原因，不返回每台设备的原始 heartbeat details。
+登记只写入 Windows Credential Manager，不启动 Agent。完成后必须回到仓库根目录，
+通过 `ops/quantx.ps1` 整体启动或重启；不得手工执行 `main run`。API
+`/health/components` 只输出聚合协议、模式、快照年龄、脱敏账户摘要和阻断原因，
+不返回 API/Agent 会话 ID、远端地址或每台设备的原始 heartbeat details。
 稳定阻断原因只有：
 
-- `REMOTE_AGENT_OFFLINE`
-- `REMOTE_AGENT_SESSION_STALE`
-- `REMOTE_AGENT_NOT_RECONCILED`
-- `REMOTE_AGENT_ACCOUNT_MISMATCH`
+- `QMT_AGENT_OFFLINE`
+- `QMT_AGENT_STALE`
+- `QMT_AGENT_NOT_RECONCILED`
+- `QMT_ACCOUNT_MISMATCH`
+- `QMT_ENROLLMENT_REQUIRED`
+- `QMT_RUNTIME_UNAVAILABLE`
 
-完成登记后，以独立 Windows 进程启动 live Agent：
+完成登记后的标准实盘重启为：
 
 ```powershell
-$env:ENV = "testing"
-$env:ENABLE_REAL_TRADING = "true"
-$env:QMT_REAL_TRADING_ENABLED = "true"
-$env:QMT_ACCOUNT_WHITELIST = "<唯一账户>"
-python -m quantx_qmt_agent.main run --mode live
+.\ops\quantx.ps1 down
+.\ops\quantx.ps1 up -Environment dev -Profile web
+.\ops\quantx.ps1 status
 ```
 
-这些开关只允许 Agent 建立真实 QMT 能力，不等于授权任何订单。未完成跨主机完整
+启动器配置的实盘开关只允许 Agent 建立真实 QMT 能力，不等于授权任何订单。未完成
 快照、对账、行情 readiness-confirm 和账户级授权时，服务端仍保持 fail-closed。
 
-更换远程 Windows Agent 时使用同一页面发起“安全交接”：旧 Agent 在新 Agent 建立
-WebSocket、上传完整账户快照并由 Engine 确认 `READY` 前继续保持有效；完成后
-服务端原子撤销旧凭据。取消交接只撤销候选 Agent 和未使用登记码，不影响当前
-Agent。页面可查看 XTData、XTTrading、行情序列/队列/ACK/重同步和 journal
-摘要，但不会接收 QMT 路径、端口或原始异常详情。
+更换本机登记凭据时使用同一页面发起安全交接。新凭据建立 WebSocket、上传完整账户
+快照并由 Engine 确认 `READY` 后，服务端原子撤销旧凭据。统一启动器和账户门禁仍
+要求同一账户只有一个就绪 live Agent；页面不会接收 QMT 路径、端口或原始异常详情。
 
 本地 SQLite journal 持久化命令幂等记录和待确认回报。相同消息 ID 与不同
 载荷会被拒绝；已完成命令在重连后只重放原确认与未确认回报，不重复调用

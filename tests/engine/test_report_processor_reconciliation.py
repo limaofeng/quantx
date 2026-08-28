@@ -22,7 +22,7 @@ from quantx_infrastructure.models.auth import AuthUser
 from quantx_infrastructure.services import trade_command_service as command_module
 from quantx_infrastructure.services.agent_session_guard import (
   AGENT_SERVER_SESSION_PAYLOAD_KEY,
-  REMOTE_AGENT_ACCOUNT_MISMATCH,
+  QMT_ACCOUNT_MISMATCH,
 )
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from sqlalchemy import select
@@ -968,7 +968,7 @@ async def test_authoritative_snapshot_account_mismatch_fails_closed_once(
     accounts=["account-2"],
   )
 
-  with pytest.raises(ValueError, match=REMOTE_AGENT_ACCOUNT_MISMATCH):
+  with pytest.raises(ValueError, match=QMT_ACCOUNT_MISMATCH):
     await report_processor._process_delta_report(
       "device-1",
       payload,
@@ -977,7 +977,7 @@ async def test_authoritative_snapshot_account_mismatch_fails_closed_once(
 
   position_service.mark_snapshot_failure.assert_awaited_once_with(
     "account-2",
-    f"SNAPSHOT_ACCOUNT_MISMATCH:{REMOTE_AGENT_ACCOUNT_MISMATCH}",
+    f"SNAPSHOT_ACCOUNT_MISMATCH:{QMT_ACCOUNT_MISMATCH}",
   )
   position_service.prepare_full_snapshot.assert_not_awaited()
   report_processor._upsert_account.assert_not_awaited()
@@ -992,8 +992,8 @@ async def test_authoritative_snapshot_account_mismatch_fails_closed_once(
     assert rollout.authorization_state == "PAUSED"
     assert rollout.reconcile_status == "RECONCILE_REQUIRED"
     assert heartbeat is not None
-    assert heartbeat.status == REMOTE_AGENT_ACCOUNT_MISMATCH
-    assert heartbeat.details["reasonCode"] == REMOTE_AGENT_ACCOUNT_MISMATCH
+    assert heartbeat.status == QMT_ACCOUNT_MISMATCH
+    assert heartbeat.details["reasonCode"] == QMT_ACCOUNT_MISMATCH
 
   await engine.dispose()
 

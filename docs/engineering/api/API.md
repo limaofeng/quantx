@@ -110,7 +110,7 @@ Agent 凭据。`revokeAgentDevice` 仍用于显式撤销当前连接。
 
 XTData/XTTrading 心跳只上传 `CONNECTED / DISCONNECTED / DISABLED` 和受控
 原因码，不上传 QMT 路径、端口、设备密钥或原始异常堆栈。该 Web 页面不提供
-远程启动、重连或 MiniQMT 控制能力。
+本机进程启动、重连或 MiniQMT 控制能力。
 
 ## 系统设置 GraphQL
 

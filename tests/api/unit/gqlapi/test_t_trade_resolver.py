@@ -214,7 +214,7 @@ async def test_global_monitor_masks_stale_ready_projection_when_session_is_offli
     AsyncMock(
       return_value={
         "agent_status": "OFFLINE",
-        "qmt_launch_reason_code": "REMOTE_AGENT_SESSION_STALE",
+        "qmt_launch_reason_code": "QMT_AGENT_STALE",
       }
     ),
   )
@@ -264,7 +264,7 @@ async def test_global_monitor_masks_stale_ready_projection_when_session_is_offli
   assert readiness["protocol_version"] == ""
   assert readiness["can_approve"] is False
   assert readiness["can_activate_live"] is False
-  assert "REMOTE_AGENT_SESSION_STALE" in readiness["blocked_reasons"][-1]
+  assert "QMT_AGENT_STALE" in readiness["blocked_reasons"][-1]
   checks = {item["code"]: item for item in readiness["checks"]}
   assert checks["LIVE_AGENT_READY"]["passed"] is False
 
@@ -279,7 +279,7 @@ async def test_global_monitor_block_override_preserves_missing_nested_readiness(
     AsyncMock(
       return_value={
         "agent_status": "OFFLINE",
-        "qmt_launch_reason_code": "REMOTE_AGENT_OFFLINE",
+        "qmt_launch_reason_code": "QMT_AGENT_OFFLINE",
       }
     ),
   )
@@ -321,7 +321,7 @@ async def test_global_monitor_fails_closed_when_current_session_check_is_unavail
   assert projected["agent_status"] == "BLOCKED"
   assert projected["can_approve"] is False
   assert projected["can_activate_live"] is False
-  assert "REMOTE_AGENT_SESSION_STALE" in projected["blocked_reasons"][-1]
+  assert "QMT_AGENT_STALE" in projected["blocked_reasons"][-1]
 
 
 @pytest.mark.asyncio
@@ -334,7 +334,7 @@ async def test_global_monitor_masks_projection_after_api_restart(
     AsyncMock(
       return_value={
         "agent_status": "OFFLINE",
-        "qmt_launch_reason_code": "REMOTE_AGENT_SESSION_STALE",
+        "qmt_launch_reason_code": "QMT_AGENT_STALE",
       }
     ),
   )
@@ -356,7 +356,7 @@ async def test_global_monitor_masks_projection_after_api_restart(
 
   assert projected["agent_status"] == "BLOCKED"
   assert projected["readiness"]["status"] == "BLOCKED"
-  assert "REMOTE_AGENT_SESSION_STALE" in projected["blocked_reasons"][-1]
+  assert "QMT_AGENT_STALE" in projected["blocked_reasons"][-1]
 
 
 @pytest.mark.asyncio
@@ -369,7 +369,7 @@ async def test_global_monitor_accepts_projection_from_current_session(
     AsyncMock(
       return_value={
         "agent_status": "READY",
-        "checks": [{"code": "MARKET_STREAM_READY", "passed": True}],
+        "checks": [{"code": "MARKET_STREAM_READY", "status": "PASSED"}],
       }
     ),
   )

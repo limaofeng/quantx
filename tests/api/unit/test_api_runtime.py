@@ -62,6 +62,21 @@ async def test_superseded_api_process_cannot_overwrite_newer_generation(
   monkeypatch.setattr(api_runtime, "API_INSTANCE_ID", "api-old")
   monkeypatch.setattr(api_runtime, "API_STARTED_AT", original_started_at)
   await api_runtime.record_api_heartbeat()
+  async with sessions() as db:
+    db.add(
+      RuntimeComponentHeartbeat(
+        component="qmt-agent:device-1",
+        instance_id="device-1",
+        status="READY",
+        details={
+          "apiInstanceId": "api-old",
+          "agentSessionId": "session-old",
+          "sessionActive": True,
+        },
+        updated_at=original_started_at,
+      )
+    )
+    await db.commit()
 
   monkeypatch.setattr(api_runtime, "API_INSTANCE_ID", "api-new")
   monkeypatch.setattr(
@@ -81,5 +96,10 @@ async def test_superseded_api_process_cannot_overwrite_newer_generation(
     assert heartbeat is not None
     assert heartbeat.instance_id == "api-new"
     assert heartbeat.status == "READY"
+    agent_heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
+    assert agent_heartbeat is not None
+    assert agent_heartbeat.status == "OFFLINE"
+    assert agent_heartbeat.details["sessionActive"] is False
+    assert agent_heartbeat.details["reasonCode"] == "QMT_AGENT_OFFLINE"
 
   await engine.dispose()
