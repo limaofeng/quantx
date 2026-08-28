@@ -14,6 +14,9 @@ from quantx_domain.grid_book import GRID_BOOK_CUSTOM_STATE_KEY
 from quantx_infrastructure.core.assistant_strategy_policy import (
   LIMIT_UP_BOARD_STRATEGY_CLASS_NAME,
 )
+from quantx_infrastructure.core.backtest_artifact_cleanup import (
+  delete_backtest_artifacts,
+)
 from quantx_infrastructure.core.strategy_registry import strategy_registry
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
@@ -21,6 +24,7 @@ from quantx_infrastructure.models.enums import StrategyRunMode
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   AutoExitPlanRepository,
 )
+from quantx_infrastructure.repositories.backtest_repository import BacktestRepository
 from quantx_infrastructure.repositories.strategy_repository import StrategyRepository
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
@@ -195,7 +199,11 @@ async def _delete_strategy(run_id: str) -> dict[str, Any]:
   if strategy_manager.get_run(run_id) is not None:
     await strategy_manager.executor.delete(run_id)
   async with AsyncSessionLocal() as db:
+    backtests = await BacktestRepository(db).get_backtests_by_run(run_id)
     deleted = await StrategyRunRepository(db).delete_run(run_id)
+  if deleted:
+    for backtest in backtests:
+      delete_backtest_artifacts(str(backtest.id), backtest.result_path)
   return {"success": bool(deleted)}
 
 

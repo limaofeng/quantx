@@ -5,6 +5,7 @@ import {
   CalendarDays,
   Check,
   CircleDollarSign,
+  ClipboardList,
   Clock3,
   FileCheck2,
   FlaskConical,
@@ -22,6 +23,8 @@ import {
   ShieldCheck,
   ShieldAlert,
   Square,
+  Terminal,
+  Trash2,
   TrendingUp,
   WalletCards,
   X,
@@ -37,12 +40,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import {
-  useClient,
-  useMutation,
-  useQuery,
-  useSubscription,
-} from 'urql';
+import { useClient, useMutation, useQuery, useSubscription } from 'urql';
 
 import {
   StudioWorkbench,
@@ -67,6 +65,18 @@ import {
   type GraphqlWsStatus,
 } from '@/core/graphql/ws-status';
 import { StrategyInstrumentSelector } from '@/features/strategies/components/StrategyInstrumentSelector';
+import StrategyLogsTab from '@/features/strategies/components/StrategyLogsTab';
+import {
+  mapExecutionTraceView,
+  mapStrategyDecisionView,
+  type ExecutionTraceView,
+  type StrategyDecision,
+} from '@/features/strategies/domain';
+import {
+  DeleteStrategyRunMutation,
+  StrategyDecisionHistoryQuery,
+  StrategyExecutionTraceQuery,
+} from '@/features/strategies/hooks/strategyInstanceOperations';
 import { useTradingSafety } from '@/features/trading-safety';
 import { useFragment as readFragment } from '@/generated/gql';
 import {
@@ -140,6 +150,10 @@ import {
   replayNoticeRefreshTargets,
   stableValueByKey,
 } from './t-trade-global/replaySync';
+import {
+  canDeleteReplay,
+  replayStatusAfterDelete,
+} from './t-trade-global/replayWorkspace';
 import {
   isAppliedTTradeGlobalSave,
   tTradeGlobalSaveToastTitle,
@@ -338,20 +352,465 @@ function useStableValueByKey<T>(
   return stableValueByKey(cache.current, key, value, valueKey);
 }
 
+type ReplayWorkspaceView = 'OVERVIEW' | 'SIGNALS' | 'LOGS';
+
+interface ReplayPortfolioPositionContext {
+  avgPrice: number;
+  availableVolume: number;
+  instrumentName: string;
+  marketValue: number;
+  stockCode: string;
+  volume: number;
+}
+
+interface ReplaySidebarContext {
+  accountId: string;
+  asOf: string;
+  cashAvailable: number;
+  frozen: boolean;
+  loading: boolean;
+  message: string;
+  positions: ReplayPortfolioPositionContext[];
+  source: 'MANUAL' | 'SNAPSHOT';
+  totalAsset: number;
+}
+
+function TTradeReplaySidebar({
+  accountId,
+  context,
+}: {
+  accountId: string;
+  context: ReplaySidebarContext | null;
+}) {
+  const positions = context?.positions || [];
+
+  return (
+    <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
+      <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section">
+        <div>
+          <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-cyan-300">
+            Replay Lab
+          </div>
+          <h1 className="mt-1 text-ui-title font-black text-slate-100">
+            {context?.frozen ? '冻结初始账户' : '初始回测账户'}
+          </h1>
+        </div>
+        {context && !context.loading && (
+          <span className="border border-blue-400/20 bg-blue-500/[0.07] px-1.5 py-0.5 text-ui-micro font-black text-blue-200">
+            {context.source === 'SNAPSHOT' ? 'D-1 快照' : '手工组合'}
+          </span>
+        )}
+      </div>
+
+      <div className="shrink-0 border-b border-white/[0.05] p-ui-section">
+        {context?.loading ? (
+          <div
+            aria-label="正在读取初始回测账户"
+            className="flex items-center gap-2 text-ui-caption text-slate-500"
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+            正在读取初始账户…
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <div className="text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
+                账户
+              </div>
+              <div className="mt-1 font-mono text-ui-label text-slate-300">
+                {context?.accountId || accountId || '--'}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="text-ui-micro text-slate-600">组合时点</div>
+                <div className="mt-1 font-mono text-ui-caption text-slate-300">
+                  {context?.asOf || '--'}
+                </div>
+              </div>
+              <div>
+                <div className="text-ui-micro text-slate-600">持仓</div>
+                <div className="mt-1 font-mono text-ui-caption text-slate-300">
+                  {positions.length} 只
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 border-t border-white/[0.05] pt-3">
+              <div>
+                <div className="text-ui-micro text-slate-600">可用资金</div>
+                <div className="mt-1 font-mono text-ui-label font-bold text-slate-200">
+                  ¥{formatNumber(context?.cashAvailable || 0)}
+                </div>
+              </div>
+              <div>
+                <div className="text-ui-micro text-slate-600">总资产</div>
+                <div className="mt-1 font-mono text-ui-label font-bold text-slate-200">
+                  ¥{formatNumber(context?.totalAsset || 0)}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section">
+          <span className="text-ui-caption font-black text-slate-300">
+            持仓明细
+          </span>
+          <span className="font-mono text-ui-micro text-slate-600">
+            {positions.length} 只
+          </span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+          {positions.map(position => (
+            <div
+              key={position.stockCode}
+              className="border-b border-white/[0.05] px-ui-section py-2.5"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <InstrumentNameLabel
+                    className="truncate text-ui-caption font-bold text-slate-200"
+                    knownName={position.instrumentName}
+                    stockCode={position.stockCode}
+                  />
+                  <div className="font-mono text-ui-micro text-slate-600">
+                    {position.stockCode}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right font-mono text-ui-caption">
+                  <div className="text-slate-300">{position.volume} 股</div>
+                  <div className="mt-0.5 text-slate-600">
+                    成本 {formatNumber(position.avgPrice, 3)}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 flex justify-between font-mono text-ui-micro text-slate-600">
+                <span>可用 {position.availableVolume}</span>
+                <span>市值 ¥{formatNumber(position.marketValue)}</span>
+              </div>
+            </div>
+          ))}
+          {!context?.loading && positions.length === 0 && (
+            <div className="px-ui-section py-ui-empty text-center text-ui-caption text-slate-600">
+              当前初始账户没有持仓明细
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="shrink-0 border-t border-white/[0.06] bg-[#091322] p-3 text-ui-caption leading-5 text-slate-500">
+        {context?.message || '选择日期后读取开始日前的账户日结快照。'}
+      </div>
+    </aside>
+  );
+}
+
+function replaySignalValue(value: unknown) {
+  if (value === null || value === undefined || value === '') return '--';
+  if (typeof value === 'number') return formatNumber(value, 4);
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function ReplaySignalSummary({
+  title,
+  values,
+}: {
+  title: string;
+  values: Record<string, unknown>;
+}) {
+  const entries = Object.entries(values).slice(0, 8);
+  return (
+    <section className="border border-white/[0.06] bg-white/[0.02]">
+      <div className="border-b border-white/[0.05] px-3 py-2 text-ui-caption font-black text-slate-300">
+        {title}
+      </div>
+      <div className="grid gap-x-4 sm:grid-cols-2">
+        {entries.map(([key, value]) => (
+          <div
+            key={key}
+            className="flex min-w-0 items-center justify-between gap-3 border-b border-white/[0.04] px-3 py-2 text-ui-caption"
+          >
+            <span className="truncate text-slate-600">{key}</span>
+            <span className="max-w-[60%] truncate font-mono text-slate-300">
+              {replaySignalValue(value)}
+            </span>
+          </div>
+        ))}
+        {entries.length === 0 && (
+          <div className="p-ui-section text-ui-caption text-slate-600">
+            暂无摘要字段
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TTradeReplaySignals({
+  decisions,
+  error,
+  executions,
+  fetching,
+  hasReplay,
+}: {
+  decisions: StrategyDecision[];
+  error?: Error;
+  executions: ExecutionTraceView[];
+  fetching: boolean;
+  hasReplay: boolean;
+}) {
+  const [selectedId, setSelectedId] = React.useState('');
+  const selectedDecision =
+    decisions.find(item => item.id === selectedId) || decisions[0];
+
+  React.useEffect(() => {
+    if (
+      decisions.length > 0 &&
+      !decisions.some(item => item.id === selectedId)
+    ) {
+      setSelectedId(decisions[0].id);
+    }
+  }, [decisions, selectedId]);
+
+  if (!hasReplay) {
+    return (
+      <div className="flex h-full min-h-[360px] flex-col items-center justify-center px-ui-panel text-center">
+        <ClipboardList className="h-9 w-9 text-slate-700" />
+        <h2 className="mt-3 text-ui-body font-black text-slate-300">
+          请先选择一条回放记录
+        </h2>
+        <p className="mt-1.5 text-ui-caption text-slate-600">
+          信号页展示该次回放持久化的 DecisionTrace 与 TradeIntent。
+        </p>
+      </div>
+    );
+  }
+
+  if (fetching && decisions.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center gap-2 text-ui-caption text-slate-500">
+        <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+        正在读取回放信号…
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div
+        role="alert"
+        className="m-ui-section flex items-start gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-ui-caption text-rose-100"
+      >
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        {error.message}
+      </div>
+    );
+  }
+
+  if (decisions.length === 0) {
+    return (
+      <div className="flex h-full min-h-[360px] flex-col items-center justify-center px-ui-panel text-center">
+        <ClipboardList className="h-9 w-9 text-slate-700" />
+        <h2 className="mt-3 text-ui-body font-black text-slate-300">
+          这次回放没有产生可展示的信号
+        </h2>
+        <p className="mt-1.5 text-ui-caption text-slate-600">
+          未买入、少买、拒绝和熔断原因仍会在存在决策审计时显示。
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid h-full min-h-0 grid-cols-[280px_minmax(0,1fr)]">
+      <aside className="min-h-0 overflow-y-auto border-r border-white/[0.06] bg-[#091523] custom-scrollbar">
+        <div className="sticky top-0 z-10 flex h-10 items-center justify-between border-b border-white/[0.06] bg-[#091523] px-3">
+          <span className="text-ui-caption font-black text-slate-300">
+            决策信号
+          </span>
+          <span className="font-mono text-ui-micro text-slate-600">
+            {decisions.length} 条
+          </span>
+        </div>
+        {decisions.map(decision => (
+          <button
+            key={decision.id}
+            type="button"
+            onClick={() => setSelectedId(decision.id)}
+            className={cn(
+              'block w-full cursor-pointer border-b border-white/[0.05] px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+              selectedDecision?.id === decision.id
+                ? 'bg-blue-500/[0.09]'
+                : 'hover:bg-white/[0.025]'
+            )}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-ui-caption text-slate-300">
+                {formatTime(decision.decidedAt)}
+              </span>
+              <span className="text-ui-micro font-black text-blue-200">
+                {decision.tradeIntents.length} 意图
+              </span>
+            </div>
+            <div className="mt-1 truncate text-ui-caption text-slate-600">
+              {decision.decisionTrace[0] || '策略完成本次决策评估'}
+            </div>
+          </button>
+        ))}
+      </aside>
+
+      <div className="min-h-0 overflow-y-auto p-ui-section custom-scrollbar">
+        {selectedDecision && (
+          <div className="space-y-3">
+            <header className="flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] pb-3">
+              <div>
+                <h3 className="text-ui-label font-black text-slate-100">
+                  决策审计 · {formatTime(selectedDecision.decidedAt)}
+                </h3>
+                <p className="mt-1 font-mono text-ui-micro text-slate-600">
+                  {selectedDecision.id}
+                </p>
+              </div>
+              <span className="border border-blue-400/20 bg-blue-500/[0.07] px-1.5 py-0.5 text-ui-micro font-black text-blue-200">
+                TradeIntent {selectedDecision.tradeIntents.length}
+              </span>
+            </header>
+
+            <div className="grid gap-3 xl:grid-cols-2">
+              <ReplaySignalSummary
+                title="策略输入"
+                values={selectedDecision.inputSummary}
+              />
+              <ReplaySignalSummary
+                title="策略输出"
+                values={selectedDecision.outputSummary}
+              />
+            </div>
+
+            <section className="border border-white/[0.06] bg-white/[0.02]">
+              <div className="border-b border-white/[0.05] px-3 py-2 text-ui-caption font-black text-slate-300">
+                原因链
+              </div>
+              <div className="space-y-1.5 p-3">
+                {selectedDecision.decisionTrace.map((item, index) => (
+                  <div
+                    key={`${index}-${item}`}
+                    className="flex items-start gap-2 text-ui-caption text-slate-400"
+                  >
+                    <span className="mt-0.5 font-mono text-ui-micro text-blue-300">
+                      {String(index + 1).padStart(2, '0')}
+                    </span>
+                    <span>{item}</span>
+                  </div>
+                ))}
+                {selectedDecision.decisionTrace.length === 0 && (
+                  <div className="text-ui-caption text-slate-600">
+                    本次决策没有返回额外原因链。
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="overflow-hidden border border-white/[0.06]">
+              <div className="border-b border-white/[0.05] bg-white/[0.02] px-3 py-2 text-ui-caption font-black text-slate-300">
+                交易意图与执行结果
+              </div>
+              <div className="overflow-x-auto custom-scrollbar">
+                <table className="w-full min-w-[760px] text-ui-caption">
+                  <thead className="bg-white/[0.02] text-left text-ui-micro font-black uppercase tracking-[0.08em] text-slate-600">
+                    <tr>
+                      <th className="px-3 py-2">标的 / 方向</th>
+                      <th className="px-3 py-2">目标数量</th>
+                      <th className="px-3 py-2">风控 / 订单</th>
+                      <th className="px-3 py-2">成交</th>
+                      <th className="px-3 py-2">原因</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedDecision.tradeIntents.map(intent => {
+                      const execution = executions.find(
+                        item => item.intentId === intent.id
+                      );
+                      return (
+                        <tr
+                          key={intent.id}
+                          className="border-t border-white/[0.05] text-slate-400"
+                        >
+                          <td className="px-3 py-2">
+                            <div className="font-mono font-bold text-slate-200">
+                              {intent.instrumentCode}
+                            </div>
+                            <div className="mt-0.5 text-ui-micro text-slate-600">
+                              {intent.side}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 font-mono">
+                            {replaySignalValue(intent.quantityIntent)}
+                          </td>
+                          <td className="px-3 py-2">
+                            {execution?.riskDecision || '--'} /{' '}
+                            {execution?.orderStatus || intent.status || '--'}
+                          </td>
+                          <td className="px-3 py-2 font-mono">
+                            {execution?.executedVolume
+                              ? `${execution.executedVolume} @ ${formatNumber(
+                                  execution.executedPrice || 0,
+                                  3
+                                )}`
+                              : '--'}
+                          </td>
+                          <td className="max-w-xs px-3 py-2">
+                            <div className="truncate">
+                              {execution?.reason || intent.reason || '--'}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {selectedDecision.tradeIntents.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan={5}
+                          className="p-ui-section text-center text-slate-600"
+                        >
+                          本次决策没有产生交易意图
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TTradeReplayPanel({
   accountId,
   form,
+  onSidebarContextChange,
 }: {
   accountId: string;
   form: SettingsForm;
+  onSidebarContextChange: (context: ReplaySidebarContext | null) => void;
 }) {
   const { toast } = useToast();
+  const { confirm: confirmDialog } = useAppDialog();
   const { tradingDays: replayTradingDays } = useTradingDays('SH', 60);
   const initialRange = React.useMemo(() => replayDatePreset(5), []);
   const [startDate, setStartDate] = React.useState(initialRange.start);
   const [endDate, setEndDate] = React.useState(initialRange.end);
   const appliedTradingCalendarRef = React.useRef(false);
   const [activeRunId, setActiveRunId] = React.useState('');
+  const [activeView, setActiveView] =
+    React.useState<ReplayWorkspaceView>('OVERVIEW');
   const [portfolioSource, setPortfolioSource] = React.useState<
     'SNAPSHOT' | 'MANUAL'
   >('SNAPSHOT');
@@ -394,6 +853,9 @@ function TTradeReplayPanel({
   });
   const [startResult, startReplay] = useMutation(StartTTradeReplayMutation);
   const [cancelResult, cancelReplay] = useMutation(CancelTTradeReplayMutation);
+  const [deleteResult, deleteStrategyRun] = useMutation(
+    DeleteStrategyRunMutation
+  );
   const replayOperationRef = React.useRef<ClientOperationRef | null>(null);
   React.useEffect(() => {
     replayOperationRef.current = readUncertainOperation(`replay:${accountId}`);
@@ -416,6 +878,43 @@ function TTradeReplayPanel({
     activeRunId,
     replayValue,
     replayValue?.runId
+  );
+  const [decisionResult] = useQuery({
+    query: StrategyDecisionHistoryQuery,
+    variables: {
+      instanceId: activeRunId,
+      cursor: null,
+      limit: 200,
+      backtestId: replay?.backtestId || null,
+    },
+    pause: activeView !== 'SIGNALS' || !activeRunId || !replay?.backtestId,
+    requestPolicy: 'cache-and-network',
+  });
+  const [executionResult] = useQuery({
+    query: StrategyExecutionTraceQuery,
+    variables: {
+      instanceId: activeRunId,
+      decisionId: null,
+      backtestId: replay?.backtestId || null,
+      cursor: null,
+      limit: 200,
+    },
+    pause: activeView !== 'SIGNALS' || !activeRunId || !replay?.backtestId,
+    requestPolicy: 'cache-and-network',
+  });
+  const replayDecisions = React.useMemo(
+    () =>
+      ((decisionResult.data?.strategyDecisionHistory || []) as unknown[]).map(
+        mapStrategyDecisionView
+      ),
+    [decisionResult.data]
+  );
+  const replayExecutions = React.useMemo(
+    () =>
+      ((executionResult.data?.strategyExecutionTrace || []) as unknown[]).map(
+        mapExecutionTraceView
+      ),
+    [executionResult.data]
   );
   const preparationValue = preparationResult.data?.tTradeReplayPreparation;
   const preparation = useStableValueByKey(
@@ -465,6 +964,115 @@ function TTradeReplayPanel({
     history.some(item =>
       ['PENDING', 'RUNNING', 'STARTING'].includes(item.status.toUpperCase())
     );
+  const replaySidebarContext = React.useMemo<ReplaySidebarContext>(() => {
+    if (activeRunId) {
+      if (!replay) {
+        return {
+          accountId,
+          asOf: '',
+          cashAvailable: 0,
+          frozen: true,
+          loading: true,
+          message: '正在读取该次回放冻结的初始账户…',
+          positions: [],
+          source: 'SNAPSHOT',
+          totalAsset: 0,
+        };
+      }
+      return {
+        accountId: replay.accountId,
+        asOf: String(replay.initialPortfolio.asOf || '').slice(0, 10),
+        cashAvailable: replay.initialPortfolio.cashAvailable,
+        frozen: true,
+        loading: false,
+        message:
+          '该组合已随回放冻结，只用于复核本次结果，不会跟随当前实盘账户变化。',
+        positions: replay.initialPortfolio.positions.map(item => ({
+          avgPrice: item.avgPrice,
+          availableVolume: item.availableVolume,
+          instrumentName: item.instrumentName,
+          marketValue: item.marketValue,
+          stockCode: item.stockCode,
+          volume: item.volume,
+        })),
+        source:
+          String(replay.initialPortfolio.source).toUpperCase() === 'MANUAL'
+            ? 'MANUAL'
+            : 'SNAPSHOT',
+        totalAsset: replay.initialPortfolio.totalAsset,
+      };
+    }
+
+    if (portfolioSource === 'MANUAL') {
+      const positions = manualPositions.map(item => {
+        const volume = Number(item.volume) || 0;
+        const avgPrice = Number(item.avgPrice) || 0;
+        return {
+          avgPrice,
+          availableVolume: volume,
+          instrumentName: item.instrumentName,
+          marketValue: volume * avgPrice,
+          stockCode: item.stockCode,
+          volume,
+        };
+      });
+      const cashAvailable = Number.isFinite(manualCashNumber)
+        ? manualCashNumber
+        : 0;
+      return {
+        accountId,
+        asOf: previousTradingDate,
+        cashAvailable,
+        frozen: false,
+        loading: false,
+        message: '手工组合会在启动时冻结；不足 100 股的持仓只计入账户权益。',
+        positions,
+        source: 'MANUAL',
+        totalAsset:
+          cashAvailable +
+          positions.reduce((total, item) => total + item.marketValue, 0),
+      };
+    }
+
+    return {
+      accountId,
+      asOf: preparation?.snapshotDate || '',
+      cashAvailable: preparation?.initialCash || 0,
+      frozen: false,
+      loading: preparationResult.fetching && !preparation,
+      message: preparation?.message || '选择日期后读取开始日前的账户日结快照。',
+      positions: (preparation?.positions || []).map(item => ({
+        avgPrice: item.avgPrice,
+        availableVolume: item.availableVolume,
+        instrumentName: item.instrumentName,
+        marketValue: item.marketValue,
+        stockCode: item.stockCode,
+        volume: item.volume,
+      })),
+      source: 'SNAPSHOT',
+      totalAsset: preparation?.initialTotalAsset || 0,
+    };
+  }, [
+    accountId,
+    activeRunId,
+    manualCashNumber,
+    manualPositions,
+    portfolioSource,
+    preparation,
+    preparationResult.fetching,
+    previousTradingDate,
+    replay,
+  ]);
+
+  React.useEffect(() => {
+    onSidebarContextChange(replaySidebarContext);
+  }, [onSidebarContextChange, replaySidebarContext]);
+
+  React.useEffect(
+    () => () => onSidebarContextChange(null),
+    [onSidebarContextChange]
+  );
+
   const fallbackPollInterval = replayFallbackPollInterval(
     graphqlWsStatus,
     hasActiveReplay
@@ -510,10 +1118,6 @@ function TTradeReplayPanel({
   React.useEffect(() => {
     setPortfolioDirty(false);
   }, [startDate]);
-
-  React.useEffect(() => {
-    if (!activeRunId && history.length > 0) setActiveRunId(history[0].runId);
-  }, [activeRunId, history]);
 
   const scheduleRefresh = React.useCallback(
     (targets: { history: boolean; replay: boolean; cycles: boolean }) => {
@@ -800,6 +1404,55 @@ function TTradeReplayPanel({
     }
   };
 
+  const handleDelete = async (item: (typeof history)[number]) => {
+    if (!canDeleteReplay(item.status)) {
+      toast({
+        title: '当前回放不能删除',
+        description: '仅已完成、失败、已取消或已停止的回放可以删除。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const confirmed = await confirmDialog({
+      title: '删除这次回放？',
+      description: `将同时删除 ${String(item.startTime).slice(0, 10)} 至 ${String(
+        item.endTime
+      ).slice(
+        0,
+        10
+      )} 的回放记录、关联回测运行、回测版本、审计轨迹与结果文件。共享策略模板不会被删除。此操作不可撤销。`,
+      confirmText: '删除回放及关联数据',
+      cancelText: '取消',
+      variant: 'destructive',
+    });
+    if (!confirmed) return;
+
+    const nextRunId = replayStatusAfterDelete(
+      history.map(historyItem => historyItem.runId),
+      item.runId,
+      activeRunId
+    );
+    try {
+      const result = await deleteStrategyRun({ runId: item.runId });
+      const payload = result.data?.deleteStrategyRun;
+      if (!payload?.success) {
+        throw new Error(
+          payload?.message || result.error?.message || '删除回放失败'
+        );
+      }
+      setActiveRunId(nextRunId);
+      if (!nextRunId) setActiveView('OVERVIEW');
+      toast({ title: '回放已删除', description: payload.message });
+      refreshHistory({ requestPolicy: 'network-only' });
+    } catch (error) {
+      toast({
+        title: '无法删除回放',
+        description: error instanceof Error ? error.message : '请求失败',
+        variant: 'destructive',
+      });
+    }
+  };
+
   const chartData = (replay?.curve || []).map(point => ({
     time: new Date(point.timestamp).toLocaleString('zh-CN', {
       hour: '2-digit',
@@ -815,775 +1468,863 @@ function TTradeReplayPanel({
 
   return (
     <div className="studio-workspace-surface grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px]">
-      <div className="min-h-0 overflow-y-auto custom-scrollbar">
-        <section className="border-b border-white/[0.06] bg-[#0a1728] p-ui-section">
-          <div className="flex flex-wrap items-end justify-between gap-ui-section">
-            <div>
-              <div className="flex items-center gap-2 text-ui-body font-black text-slate-100">
-                <FlaskConical className="h-4 w-4 text-cyan-300" />
-                历史回放测试
-                <span
-                  aria-live="polite"
-                  className={cn(
-                    'border px-1.5 py-0.5 text-ui-micro font-bold',
-                    graphqlWsStatus === 'connected'
-                      ? 'border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300'
-                      : 'border-amber-400/20 bg-amber-400/[0.06] text-amber-300'
-                  )}
-                >
-                  {graphqlWsStatus === 'connected' ? '实时推送' : '轮询恢复'}
-                </span>
-              </div>
-              <p className="mt-1 text-ui-caption text-slate-500">
-                使用同一做 T
-                策略和交易风控；测试信号自动确认，不会提交实盘委托。
-              </p>
-            </div>
-            <div className="flex flex-wrap items-end gap-2">
-              <div>
-                <Label
-                  htmlFor="replay-start"
-                  className="text-ui-caption text-slate-500"
-                >
-                  开始日期
-                </Label>
-                <Input
-                  id="replay-start"
-                  type="date"
-                  value={startDate}
-                  max={endDate}
-                  onChange={event => setStartDate(event.target.value)}
-                  className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
-                />
-              </div>
-              <div>
-                <Label
-                  htmlFor="replay-end"
-                  className="text-ui-caption text-slate-500"
-                >
-                  结束日期
-                </Label>
-                <Input
-                  id="replay-end"
-                  type="date"
-                  value={endDate}
-                  min={startDate}
-                  onChange={event => setEndDate(event.target.value)}
-                  className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
-                />
-              </div>
-              <div className="flex h-8 overflow-hidden border border-white/10">
-                {([1, 5, 20] as const).map(days => (
-                  <button
-                    key={days}
-                    type="button"
-                    onClick={() => setPreset(days)}
-                    className="cursor-pointer border-r border-white/10 px-2.5 text-ui-caption font-bold text-slate-400 transition-colors last:border-r-0 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
-                  >
-                    {days}日
-                  </button>
-                ))}
-              </div>
-              <Button
+      <div className="flex min-h-0 flex-col">
+        <nav
+          aria-label="回放内容"
+          className="flex h-10 shrink-0 items-stretch border-b border-white/[0.06] bg-[#081421] px-2"
+        >
+          {(
+            [
+              ['OVERVIEW', BarChart3, '总览'],
+              ['SIGNALS', ClipboardList, '信号'],
+              ['LOGS', Terminal, '日志'],
+            ] as const
+          ).map(([view, Icon, label]) => {
+            const active = activeView === view;
+            const disabled = view !== 'OVERVIEW' && !activeRunId;
+            return (
+              <button
+                key={view}
                 type="button"
-                size="sm"
-                onClick={handleStart}
-                disabled={
-                  !accountId ||
-                  !preparation ||
-                  (portfolioSource === 'SNAPSHOT'
-                    ? !snapshotPortfolioValid
-                    : !manualPortfolioValid) ||
-                  startResult.fetching ||
-                  history.some(item =>
-                    ['PENDING', 'RUNNING', 'STARTING'].includes(item.status)
-                  )
-                }
-                className="h-8 rounded-sm bg-cyan-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-cyan-400"
-              >
-                {startResult.fetching ? (
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-                ) : (
-                  <Play className="mr-1.5 h-3.5 w-3.5" />
+                disabled={disabled}
+                onClick={() => setActiveView(view)}
+                className={cn(
+                  'relative flex cursor-pointer items-center gap-1.5 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35',
+                  active
+                    ? 'text-cyan-200 after:bg-cyan-400'
+                    : 'text-slate-600 hover:text-slate-200'
                 )}
-                启动回放
-              </Button>
-            </div>
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+            );
+          })}
+          <div className="ml-auto flex items-center gap-1.5 px-2 text-ui-caption font-bold text-cyan-200">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            隔离回测
           </div>
+        </nav>
 
-          <div
-            className={cn(
-              'mt-3 flex items-start gap-2 border px-3 py-2 text-ui-caption',
-              preparation?.requiresManualPortfolio || preparationResult.error
-                ? 'border-amber-400/20 bg-amber-400/[0.06] text-amber-100'
-                : 'border-cyan-400/15 bg-cyan-400/[0.04] text-cyan-100'
-            )}
-          >
-            {preparationResult.fetching ? (
-              <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
-            ) : preparation?.requiresManualPortfolio ||
-              preparationResult.error ? (
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            ) : (
-              <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            )}
-            <span>
-              {preparationResult.error?.message ||
-                preparation?.message ||
-                '正在读取回放开始日前的账户快照…'}
-              {preparation?.snapshotDate && (
-                <span className="ml-2 font-mono text-slate-400">
-                  快照 {preparation.snapshotDate} ·{' '}
-                  {preparation.positions.length} 只持仓 · 总资产 ¥
-                  {formatNumber(preparation.initialTotalAsset)}
-                </span>
-              )}
-            </span>
-          </div>
-
-          <div className="mt-3 border border-white/[0.08] bg-[#07111f] p-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-ui-caption font-black text-slate-100">
-                  初始回测账户
-                </p>
-                <p className="mt-0.5 text-ui-caption text-slate-500">
-                  组合冻结后，系统只为其中的股票准备历史行情。
-                </p>
-              </div>
-              <div className="flex h-8 overflow-hidden border border-white/10">
-                <button
-                  type="button"
-                  disabled={!snapshotPortfolioValid}
-                  onClick={() => {
-                    setPortfolioSource('SNAPSHOT');
-                    setPortfolioDirty(true);
-                  }}
-                  className={cn(
-                    'cursor-pointer px-3 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35',
-                    portfolioSource === 'SNAPSHOT'
-                      ? 'bg-blue-500/15 text-blue-200'
-                      : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
-                  )}
-                >
-                  D-1 快照
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPortfolioSource('MANUAL');
-                    setPortfolioDirty(true);
-                  }}
-                  className={cn(
-                    'cursor-pointer border-l border-white/10 px-3 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
-                    portfolioSource === 'MANUAL'
-                      ? 'bg-blue-500/15 text-blue-200'
-                      : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
-                  )}
-                >
-                  手工组合
-                </button>
-              </div>
-            </div>
-
-            {portfolioSource === 'SNAPSHOT' ? (
-              <div className="mt-3 grid gap-3 lg:grid-cols-[180px_1fr_auto] lg:items-end">
+        {activeView === 'OVERVIEW' ? (
+          <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+            <section className="border-b border-white/[0.06] bg-[#0a1728] p-ui-section">
+              <div className="flex flex-wrap items-end justify-between gap-ui-section">
                 <div>
-                  <Label className="text-ui-micro text-slate-500">
-                    可用资金
-                  </Label>
-                  <div className="mt-1 font-mono text-ui-body font-black text-slate-100">
-                    ¥{formatNumber(preparation?.initialCash || 0)}
+                  <div className="flex items-center gap-2 text-ui-body font-black text-slate-100">
+                    <FlaskConical className="h-4 w-4 text-cyan-300" />
+                    历史回放测试
+                    <span
+                      aria-live="polite"
+                      className={cn(
+                        'border px-1.5 py-0.5 text-ui-micro font-bold',
+                        graphqlWsStatus === 'connected'
+                          ? 'border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300'
+                          : 'border-amber-400/20 bg-amber-400/[0.06] text-amber-300'
+                      )}
+                    >
+                      {graphqlWsStatus === 'connected'
+                        ? '实时推送'
+                        : '轮询恢复'}
+                    </span>
                   </div>
+                  <p className="mt-1 text-ui-caption text-slate-500">
+                    使用同一做 T
+                    策略和交易风控；测试信号自动确认，不会提交实盘委托。
+                  </p>
                 </div>
-                <div className="text-ui-caption leading-5 text-slate-500">
-                  快照 {preparation?.snapshotDate || '--'} ·{' '}
-                  {preparation?.positions.length || 0} 只持仓 · 可做 T{' '}
-                  {preparation?.positions.filter(item => item.volume >= 100)
-                    .length || 0}{' '}
-                  只
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setPortfolioSource('MANUAL');
-                    setPortfolioDirty(true);
-                  }}
-                  className="h-8 rounded-sm border-blue-400/25 text-ui-caption text-blue-200 hover:bg-blue-500/10"
-                >
-                  导入并编辑
-                </Button>
-              </div>
-            ) : (
-              <div className="mt-3 space-y-3">
-                <div className="grid gap-3 md:grid-cols-[180px_1fr] md:items-end">
+                <div className="flex flex-wrap items-end gap-2">
                   <div>
                     <Label
-                      htmlFor="replay-cash"
-                      className="text-ui-micro text-slate-500"
+                      htmlFor="replay-start"
+                      className="text-ui-caption text-slate-500"
                     >
-                      可用资金
+                      开始日期
                     </Label>
                     <Input
-                      id="replay-cash"
-                      type="number"
-                      min="0"
-                      value={manualCash}
-                      onChange={event => {
-                        setManualCash(event.target.value);
-                        setPortfolioDirty(true);
-                      }}
-                      className="mt-1 h-8 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-label focus-visible:ring-blue-400/70"
+                      id="replay-start"
+                      type="date"
+                      value={startDate}
+                      max={endDate}
+                      onChange={event => setStartDate(event.target.value)}
+                      className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
                     />
                   </div>
-                  <div className="text-ui-caption leading-5 text-slate-500">
-                    组合时点 {previousTradingDate || '--'}{' '}
-                    收盘；开盘前持仓全部按已结算库存处理。
-                  </div>
-                </div>
-
-                <div className="overflow-hidden border border-white/[0.07]">
-                  <div className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] gap-2 border-b border-white/[0.07] bg-white/[0.025] px-2 py-1.5 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600">
-                    <span>股票</span>
-                    <span>持仓股数</span>
-                    <span>平均成本</span>
-                    <span />
-                  </div>
-                  {manualPositions.map((item, index) => (
-                    <div
-                      key={item.stockCode}
-                      className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] items-center gap-2 border-b border-white/[0.05] px-2 py-1.5 last:border-b-0"
+                  <div>
+                    <Label
+                      htmlFor="replay-end"
+                      className="text-ui-caption text-slate-500"
                     >
-                      <div className="min-w-0">
-                        <div className="truncate text-ui-caption font-bold text-slate-200">
-                          {item.instrumentName || item.stockCode}
-                        </div>
-                        <div className="font-mono text-ui-micro text-slate-600">
-                          {item.stockCode}
-                        </div>
-                      </div>
-                      <Input
-                        aria-label={`${item.stockCode} 持仓股数`}
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={item.volume}
-                        onChange={event => {
-                          const value = event.target.value;
-                          setManualPositions(rows =>
-                            rows.map((row, rowIndex) =>
-                              rowIndex === index
-                                ? { ...row, volume: value }
-                                : row
-                            )
-                          );
-                          setPortfolioDirty(true);
-                        }}
-                        className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-caption focus-visible:ring-blue-400/70"
-                      />
-                      <Input
-                        aria-label={`${item.stockCode} 平均成本`}
-                        type="number"
-                        min="0.001"
-                        step="0.001"
-                        value={item.avgPrice}
-                        onChange={event => {
-                          const value = event.target.value;
-                          setManualPositions(rows =>
-                            rows.map((row, rowIndex) =>
-                              rowIndex === index
-                                ? { ...row, avgPrice: value }
-                                : row
-                            )
-                          );
-                          setPortfolioDirty(true);
-                        }}
-                        className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-caption focus-visible:ring-blue-400/70"
-                      />
-                      <button
-                        type="button"
-                        aria-label={`删除 ${item.stockCode}`}
-                        onClick={() => {
-                          setManualPositions(rows =>
-                            rows.filter((_, rowIndex) => rowIndex !== index)
-                          );
-                          setPortfolioDirty(true);
-                        }}
-                        className="flex h-7 w-7 cursor-pointer items-center justify-center text-slate-600 hover:bg-rose-500/10 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  ))}
-                  <div className="p-2">
-                    <StrategyInstrumentSelector
-                      value=""
-                      onChange={(stockCode, stock) => {
-                        if (!stockCode) return;
-                        if (
-                          manualPositions.some(
-                            item => item.stockCode === stockCode
-                          )
-                        ) {
-                          toast({
-                            title: '股票已经存在',
-                            description: `${stockCode} 已在初始组合中。`,
-                            variant: 'destructive',
-                          });
-                          return;
-                        }
-                        setManualPositions(rows => [
-                          ...rows,
-                          {
-                            stockCode,
-                            instrumentName: stock?.name || stockCode,
-                            volume: '100',
-                            avgPrice: String(stock?.quote?.lastPrice || ''),
-                          },
-                        ]);
-                        setPortfolioDirty(true);
-                      }}
-                      inputClassName="h-8 rounded-sm border-white/10 bg-[#050b16] text-ui-caption"
-                      placeholder="搜索股票代码或名称并加入持仓"
+                      结束日期
+                    </Label>
+                    <Input
+                      id="replay-end"
+                      type="date"
+                      value={endDate}
+                      min={startDate}
+                      onChange={event => setEndDate(event.target.value)}
+                      className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
                     />
                   </div>
-                </div>
-                <div className="text-ui-caption text-slate-500">
-                  {manualPositions.length} 只持仓 ·{' '}
-                  {
-                    manualPositions.filter(item => Number(item.volume) >= 100)
-                      .length
-                  }{' '}
-                  只可做 T；不足 100 股的持仓仅计入账户权益。
-                </div>
-              </div>
-            )}
-          </div>
-
-          {preparation?.requiresManualPortfolio && (
-            <div className="mt-2 border border-amber-400/15 bg-amber-400/[0.035] px-3 py-2">
-              <div>
-                <p className="text-ui-caption font-bold text-amber-100">
-                  缺少可审计的历史初始组合
-                </p>
-                <p className="mt-0.5 text-ui-caption text-amber-200/55">
-                  当前没有可采用的 D-1
-                  日结快照，请使用上方手工组合配置回测账户。
-                </p>
-              </div>
-            </div>
-          )}
-        </section>
-
-        {replay ? (
-          <>
-            <section className="border-b border-white/[0.06] p-ui-section">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <span
-                    className={cn(
-                      'border px-2 py-1 text-ui-caption font-black',
-                      replay.status === 'COMPLETED'
-                        ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
-                        : replay.status === 'ERROR'
-                          ? 'border-rose-400/25 bg-rose-400/10 text-rose-200'
-                          : 'border-cyan-400/25 bg-cyan-400/10 text-cyan-200'
-                    )}
-                  >
-                    {replayStatusLabel(replay.status)}
-                  </span>
-                  <span className="font-mono text-ui-caption text-slate-500">
-                    {replay.runId.slice(0, 8)} ·{' '}
-                    {formatNumber(replay.progressPct, 1)}%
-                  </span>
-                  {replay.processedUntil && (
-                    <span className="font-mono text-ui-caption text-slate-600">
-                      已处理 {formatTime(replay.processedUntil)}
-                    </span>
-                  )}
-                  <span className="text-ui-caption text-slate-600">
-                    {replay.dataQualityMessage}
-                  </span>
-                </div>
-                {isRunning && (
+                  <div className="flex h-8 overflow-hidden border border-white/10">
+                    {([1, 5, 20] as const).map(days => (
+                      <button
+                        key={days}
+                        type="button"
+                        onClick={() => setPreset(days)}
+                        className="cursor-pointer border-r border-white/10 px-2.5 text-ui-caption font-bold text-slate-400 transition-colors last:border-r-0 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
+                      >
+                        {days}日
+                      </button>
+                    ))}
+                  </div>
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
-                    disabled={cancelResult.fetching}
-                    onClick={handleCancel}
-                    className="h-control-compact rounded-sm border-rose-400/20 bg-rose-400/[0.04] text-ui-caption text-rose-200 hover:bg-rose-400/10"
+                    onClick={handleStart}
+                    disabled={
+                      !accountId ||
+                      !preparation ||
+                      (portfolioSource === 'SNAPSHOT'
+                        ? !snapshotPortfolioValid
+                        : !manualPortfolioValid) ||
+                      startResult.fetching ||
+                      history.some(item =>
+                        ['PENDING', 'RUNNING', 'STARTING'].includes(item.status)
+                      )
+                    }
+                    className="h-8 rounded-sm bg-cyan-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-cyan-400"
                   >
-                    {cancelResult.fetching ? (
+                    {startResult.fetching ? (
                       <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                     ) : (
-                      <Square className="mr-1.5 h-3 w-3" />
+                      <Play className="mr-1.5 h-3.5 w-3.5" />
                     )}
-                    取消回放
+                    启动回放
                   </Button>
-                )}
+                </div>
               </div>
-              {replay.phase && (
-                <div className="mt-3 border border-cyan-400/15 bg-cyan-400/[0.035] px-3 py-2.5">
-                  <div className="flex items-center justify-between gap-3 text-ui-caption">
-                    <span className="font-black text-cyan-100">
-                      {replayPhaseLabel(replay.phase)}
-                    </span>
-                    <span className="font-mono text-cyan-200/65">
-                      {formatNumber(replay.phaseProgressPct, 0)}%
-                    </span>
-                  </div>
-                  <Progress
-                    value={replay.phaseProgressPct}
-                    className="mt-2 h-1 bg-white/[0.06]"
-                  />
-                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-ui-caption text-slate-500">
-                    <span>{replay.phaseMessage || '正在准备回测任务'}</span>
-                    {replay.dataPreparation?.currentInstrument && (
-                      <span className="font-mono text-slate-600">
-                        {replay.dataPreparation.currentInstrument}
-                        {replay.dataPreparation.currentStartDate
-                          ? ` · ${replay.dataPreparation.currentStartDate}~${
-                              replay.dataPreparation.currentEndDate ||
-                              replay.dataPreparation.currentStartDate
-                            }`
-                          : ''}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-              {replay.errorMessage && (
-                <div className="mt-3 flex items-center gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-ui-caption text-rose-100">
-                  <AlertTriangle className="h-3.5 w-3.5" />
-                  {replay.errorMessage}
-                </div>
-              )}
-            </section>
 
-            <section className="grid gap-2 border-b border-white/[0.06] p-ui-section sm:grid-cols-2 xl:grid-cols-4">
-              <MetricCard
-                icon={CircleDollarSign}
-                label="做 T 税费后增量"
-                tone={
-                  (replay.summary?.tNetProfit || 0) >= 0
-                    ? 'marketUp'
-                    : 'marketDown'
-                }
-                value={
-                  replay.summary
-                    ? `¥${formatNumber(replay.summary.tNetProfit)}`
-                    : '--'
-                }
-              />
-              <MetricCard
-                icon={TrendingUp}
-                label="相对不做 T 超额"
-                tone={
-                  (replay.summary?.excessReturnPct || 0) >= 0
-                    ? 'marketUp'
-                    : 'marketDown'
-                }
-                value={
-                  replay.summary
-                    ? `${formatNumber(replay.summary.excessReturnPct)}%`
-                    : '--'
-                }
-              />
-              <MetricCard
-                icon={Check}
-                label="完成批次 / 胜率"
-                tone="slate"
-                value={
-                  replay.summary
-                    ? `${replay.summary.completedCycles} / ${
-                        replay.summary.completedCycles > 0
-                          ? `${formatNumber(replay.summary.winRatePct, 1)}%`
-                          : '无样本'
-                      }`
-                    : '--'
-                }
-              />
-              <MetricCard
-                icon={WalletCards}
-                label="交易税费"
-                tone="amber"
-                value={
-                  replay.summary
-                    ? `¥${formatNumber(replay.summary.totalFees)}`
-                    : '--'
-                }
-              />
-            </section>
+              <div
+                className={cn(
+                  'mt-3 flex items-start gap-2 border px-3 py-2 text-ui-caption',
+                  preparation?.requiresManualPortfolio ||
+                    preparationResult.error
+                    ? 'border-amber-400/20 bg-amber-400/[0.06] text-amber-100'
+                    : 'border-cyan-400/15 bg-cyan-400/[0.04] text-cyan-100'
+                )}
+              >
+                {preparationResult.fetching ? (
+                  <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+                ) : preparation?.requiresManualPortfolio ||
+                  preparationResult.error ? (
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                )}
+                <span>
+                  {preparationResult.error?.message ||
+                    preparation?.message ||
+                    '正在读取回放开始日前的账户快照…'}
+                  {preparation?.snapshotDate && (
+                    <span className="ml-2 font-mono text-slate-400">
+                      快照 {preparation.snapshotDate} ·{' '}
+                      {preparation.positions.length} 只持仓 · 总资产 ¥
+                      {formatNumber(preparation.initialTotalAsset)}
+                    </span>
+                  )}
+                </span>
+              </div>
 
-            {replay.summary && (
-              <section className="border-b border-white/[0.06] p-ui-section">
-                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+              <div className="mt-3 border border-white/[0.08] bg-[#07111f] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h3 className="flex items-center gap-2 text-ui-label font-black text-slate-200">
-                      <Gauge className="h-4 w-4 text-cyan-300" />
-                      资金效率与期末清算
-                    </h3>
-                    <p className="mt-1 text-ui-caption text-slate-600">
-                      资金利用率按 4
-                      小时交易日折算并按实际买入资金加权；卖出等待越久，利用率越低。
+                    <p className="text-ui-caption font-black text-slate-100">
+                      初始回测账户
+                    </p>
+                    <p className="mt-0.5 text-ui-caption text-slate-500">
+                      组合冻结后，系统只为其中的股票准备历史行情。
                     </p>
                   </div>
-                  <span
-                    className={cn(
-                      'border px-2 py-1 text-ui-caption font-black',
-                      replay.summary.liquidationFailedCycles > 0
-                        ? 'border-rose-400/25 bg-rose-400/10 text-rose-200'
-                        : 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
-                    )}
-                  >
-                    期末清算 {replay.summary.forcedExitCycles} 批 · 失败{' '}
-                    {replay.summary.liquidationFailedCycles} 批
-                  </span>
+                  <div className="flex h-8 overflow-hidden border border-white/10">
+                    <button
+                      type="button"
+                      disabled={!snapshotPortfolioValid}
+                      onClick={() => {
+                        setPortfolioSource('SNAPSHOT');
+                        setPortfolioDirty(true);
+                      }}
+                      className={cn(
+                        'cursor-pointer px-3 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35',
+                        portfolioSource === 'SNAPSHOT'
+                          ? 'bg-blue-500/15 text-blue-200'
+                          : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
+                      )}
+                    >
+                      D-1 快照
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPortfolioSource('MANUAL');
+                        setPortfolioDirty(true);
+                      }}
+                      className={cn(
+                        'cursor-pointer border-l border-white/10 px-3 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+                        portfolioSource === 'MANUAL'
+                          ? 'bg-blue-500/15 text-blue-200'
+                          : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
+                      )}
+                    >
+                      手工组合
+                    </button>
+                  </div>
                 </div>
-                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+
+                {portfolioSource === 'SNAPSHOT' ? (
+                  <div className="mt-3 grid gap-3 lg:grid-cols-[180px_1fr_auto] lg:items-end">
+                    <div>
+                      <Label className="text-ui-micro text-slate-500">
+                        可用资金
+                      </Label>
+                      <div className="mt-1 font-mono text-ui-body font-black text-slate-100">
+                        ¥{formatNumber(preparation?.initialCash || 0)}
+                      </div>
+                    </div>
+                    <div className="text-ui-caption leading-5 text-slate-500">
+                      快照 {preparation?.snapshotDate || '--'} ·{' '}
+                      {preparation?.positions.length || 0} 只持仓 · 可做 T{' '}
+                      {preparation?.positions.filter(item => item.volume >= 100)
+                        .length || 0}{' '}
+                      只
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setPortfolioSource('MANUAL');
+                        setPortfolioDirty(true);
+                      }}
+                      className="h-8 rounded-sm border-blue-400/25 text-ui-caption text-blue-200 hover:bg-blue-500/10"
+                    >
+                      导入并编辑
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    <div className="grid gap-3 md:grid-cols-[180px_1fr] md:items-end">
+                      <div>
+                        <Label
+                          htmlFor="replay-cash"
+                          className="text-ui-micro text-slate-500"
+                        >
+                          可用资金
+                        </Label>
+                        <Input
+                          id="replay-cash"
+                          type="number"
+                          min="0"
+                          value={manualCash}
+                          onChange={event => {
+                            setManualCash(event.target.value);
+                            setPortfolioDirty(true);
+                          }}
+                          className="mt-1 h-8 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-label focus-visible:ring-blue-400/70"
+                        />
+                      </div>
+                      <div className="text-ui-caption leading-5 text-slate-500">
+                        组合时点 {previousTradingDate || '--'}{' '}
+                        收盘；开盘前持仓全部按已结算库存处理。
+                      </div>
+                    </div>
+
+                    <div className="overflow-hidden border border-white/[0.07]">
+                      <div className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] gap-2 border-b border-white/[0.07] bg-white/[0.025] px-2 py-1.5 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600">
+                        <span>股票</span>
+                        <span>持仓股数</span>
+                        <span>平均成本</span>
+                        <span />
+                      </div>
+                      {manualPositions.map((item, index) => (
+                        <div
+                          key={item.stockCode}
+                          className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] items-center gap-2 border-b border-white/[0.05] px-2 py-1.5 last:border-b-0"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate text-ui-caption font-bold text-slate-200">
+                              {item.instrumentName || item.stockCode}
+                            </div>
+                            <div className="font-mono text-ui-micro text-slate-600">
+                              {item.stockCode}
+                            </div>
+                          </div>
+                          <Input
+                            aria-label={`${item.stockCode} 持仓股数`}
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={item.volume}
+                            onChange={event => {
+                              const value = event.target.value;
+                              setManualPositions(rows =>
+                                rows.map((row, rowIndex) =>
+                                  rowIndex === index
+                                    ? { ...row, volume: value }
+                                    : row
+                                )
+                              );
+                              setPortfolioDirty(true);
+                            }}
+                            className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-caption focus-visible:ring-blue-400/70"
+                          />
+                          <Input
+                            aria-label={`${item.stockCode} 平均成本`}
+                            type="number"
+                            min="0.001"
+                            step="0.001"
+                            value={item.avgPrice}
+                            onChange={event => {
+                              const value = event.target.value;
+                              setManualPositions(rows =>
+                                rows.map((row, rowIndex) =>
+                                  rowIndex === index
+                                    ? { ...row, avgPrice: value }
+                                    : row
+                                )
+                              );
+                              setPortfolioDirty(true);
+                            }}
+                            className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-caption focus-visible:ring-blue-400/70"
+                          />
+                          <button
+                            type="button"
+                            aria-label={`删除 ${item.stockCode}`}
+                            onClick={() => {
+                              setManualPositions(rows =>
+                                rows.filter((_, rowIndex) => rowIndex !== index)
+                              );
+                              setPortfolioDirty(true);
+                            }}
+                            className="flex h-7 w-7 cursor-pointer items-center justify-center text-slate-600 hover:bg-rose-500/10 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                      <div className="p-2">
+                        <StrategyInstrumentSelector
+                          value=""
+                          onChange={(stockCode, stock) => {
+                            if (!stockCode) return;
+                            if (
+                              manualPositions.some(
+                                item => item.stockCode === stockCode
+                              )
+                            ) {
+                              toast({
+                                title: '股票已经存在',
+                                description: `${stockCode} 已在初始组合中。`,
+                                variant: 'destructive',
+                              });
+                              return;
+                            }
+                            setManualPositions(rows => [
+                              ...rows,
+                              {
+                                stockCode,
+                                instrumentName: stock?.name || stockCode,
+                                volume: '100',
+                                avgPrice: String(stock?.quote?.lastPrice || ''),
+                              },
+                            ]);
+                            setPortfolioDirty(true);
+                          }}
+                          inputClassName="h-8 rounded-sm border-white/10 bg-[#050b16] text-ui-caption"
+                          placeholder="搜索股票代码或名称并加入持仓"
+                        />
+                      </div>
+                    </div>
+                    <div className="text-ui-caption text-slate-500">
+                      {manualPositions.length} 只持仓 ·{' '}
+                      {
+                        manualPositions.filter(
+                          item => Number(item.volume) >= 100
+                        ).length
+                      }{' '}
+                      只可做 T；不足 100 股的持仓仅计入账户权益。
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {preparation?.requiresManualPortfolio && (
+                <div className="mt-2 border border-amber-400/15 bg-amber-400/[0.035] px-3 py-2">
+                  <div>
+                    <p className="text-ui-caption font-bold text-amber-100">
+                      缺少可审计的历史初始组合
+                    </p>
+                    <p className="mt-0.5 text-ui-caption text-amber-200/55">
+                      当前没有可采用的 D-1
+                      日结快照，请使用上方手工组合配置回测账户。
+                    </p>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {replay ? (
+              <>
+                <section className="border-b border-white/[0.06] p-ui-section">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={cn(
+                          'border px-2 py-1 text-ui-caption font-black',
+                          replay.status === 'COMPLETED'
+                            ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
+                            : replay.status === 'ERROR'
+                              ? 'border-rose-400/25 bg-rose-400/10 text-rose-200'
+                              : 'border-cyan-400/25 bg-cyan-400/10 text-cyan-200'
+                        )}
+                      >
+                        {replayStatusLabel(replay.status)}
+                      </span>
+                      <span className="font-mono text-ui-caption text-slate-500">
+                        {replay.runId.slice(0, 8)} ·{' '}
+                        {formatNumber(replay.progressPct, 1)}%
+                      </span>
+                      {replay.processedUntil && (
+                        <span className="font-mono text-ui-caption text-slate-600">
+                          已处理 {formatTime(replay.processedUntil)}
+                        </span>
+                      )}
+                      <span className="text-ui-caption text-slate-600">
+                        {replay.dataQualityMessage}
+                      </span>
+                    </div>
+                    {isRunning && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={cancelResult.fetching}
+                        onClick={handleCancel}
+                        className="h-control-compact rounded-sm border-rose-400/20 bg-rose-400/[0.04] text-ui-caption text-rose-200 hover:bg-rose-400/10"
+                      >
+                        {cancelResult.fetching ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                        ) : (
+                          <Square className="mr-1.5 h-3 w-3" />
+                        )}
+                        取消回放
+                      </Button>
+                    )}
+                  </div>
+                  {replay.phase && (
+                    <div className="mt-3 border border-cyan-400/15 bg-cyan-400/[0.035] px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-3 text-ui-caption">
+                        <span className="font-black text-cyan-100">
+                          {replayPhaseLabel(replay.phase)}
+                        </span>
+                        <span className="font-mono text-cyan-200/65">
+                          {formatNumber(replay.phaseProgressPct, 0)}%
+                        </span>
+                      </div>
+                      <Progress
+                        value={replay.phaseProgressPct}
+                        className="mt-2 h-1 bg-white/[0.06]"
+                      />
+                      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-ui-caption text-slate-500">
+                        <span>{replay.phaseMessage || '正在准备回测任务'}</span>
+                        {replay.dataPreparation?.currentInstrument && (
+                          <span className="font-mono text-slate-600">
+                            {replay.dataPreparation.currentInstrument}
+                            {replay.dataPreparation.currentStartDate
+                              ? ` · ${replay.dataPreparation.currentStartDate}~${
+                                  replay.dataPreparation.currentEndDate ||
+                                  replay.dataPreparation.currentStartDate
+                                }`
+                              : ''}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {replay.errorMessage && (
+                    <div className="mt-3 flex items-center gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-ui-caption text-rose-100">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      {replay.errorMessage}
+                    </div>
+                  )}
+                </section>
+
+                <section className="grid gap-2 border-b border-white/[0.06] p-ui-section sm:grid-cols-2 xl:grid-cols-4">
                   <MetricCard
-                    icon={Gauge}
-                    label="等待折损后利用率"
-                    tone="sky"
-                    value={`${formatNumber(replay.summary.capitalUtilizationPct, 1)}%`}
+                    icon={CircleDollarSign}
+                    label="做 T 税费后增量"
+                    tone={
+                      (replay.summary?.tNetProfit || 0) >= 0
+                        ? 'marketUp'
+                        : 'marketDown'
+                    }
+                    value={
+                      replay.summary
+                        ? `¥${formatNumber(replay.summary.tNetProfit)}`
+                        : '--'
+                    }
+                  />
+                  <MetricCard
+                    icon={TrendingUp}
+                    label="相对不做 T 超额"
+                    tone={
+                      (replay.summary?.excessReturnPct || 0) >= 0
+                        ? 'marketUp'
+                        : 'marketDown'
+                    }
+                    value={
+                      replay.summary
+                        ? `${formatNumber(replay.summary.excessReturnPct)}%`
+                        : '--'
+                    }
+                  />
+                  <MetricCard
+                    icon={Check}
+                    label="完成批次 / 胜率"
+                    tone="slate"
+                    value={
+                      replay.summary
+                        ? `${replay.summary.completedCycles} / ${
+                            replay.summary.completedCycles > 0
+                              ? `${formatNumber(replay.summary.winRatePct, 1)}%`
+                              : '无样本'
+                          }`
+                        : '--'
+                    }
                   />
                   <MetricCard
                     icon={WalletCards}
-                    label="平均占用 / 可用率"
-                    tone="slate"
-                    value={`¥${formatNumber(replay.summary.averageOccupiedCapital)} / ${formatNumber(replay.summary.capitalAvailabilityPct, 1)}%`}
-                  />
-                  <MetricCard
-                    icon={RefreshCw}
-                    label="累计 / 日均周转"
-                    tone="emerald"
-                    value={`${formatNumber(replay.summary.capitalTurnoverTimes)}× / ${formatNumber(replay.summary.capitalTurnoverPerTradingDay)}×`}
-                  />
-                  <MetricCard
-                    icon={Hourglass}
-                    label="平均 / 最长等待"
+                    label="交易税费"
                     tone="amber"
-                    value={`${formatNumber(replay.summary.averageHoldingHours, 1)}h / ${formatNumber(replay.summary.maxHoldingHours, 1)}h`}
+                    value={
+                      replay.summary
+                        ? `¥${formatNumber(replay.summary.totalFees)}`
+                        : '--'
+                    }
                   />
-                </div>
-              </section>
-            )}
+                </section>
 
-            {replay.report && (
-              <section className="border-b border-white/[0.06] bg-cyan-400/[0.025] p-ui-section">
-                <div className="flex items-start gap-3">
-                  <FileCheck2 className="mt-0.5 h-5 w-5 shrink-0 text-cyan-300" />
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="text-ui-label font-black text-slate-100">
-                        回放报告 · {replay.report.conclusionCode}
-                      </h3>
-                      <span className="border border-cyan-400/20 bg-cyan-400/[0.08] px-1.5 py-0.5 text-ui-micro font-black text-cyan-200">
-                        {replay.report.status === 'GENERATED'
-                          ? 'HTML / JSON 已生成'
-                          : '报告生成失败'}
+                {replay.summary && (
+                  <section className="border-b border-white/[0.06] p-ui-section">
+                    <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="flex items-center gap-2 text-ui-label font-black text-slate-200">
+                          <Gauge className="h-4 w-4 text-cyan-300" />
+                          资金效率与期末清算
+                        </h3>
+                        <p className="mt-1 text-ui-caption text-slate-600">
+                          资金利用率按 4
+                          小时交易日折算并按实际买入资金加权；卖出等待越久，利用率越低。
+                        </p>
+                      </div>
+                      <span
+                        className={cn(
+                          'border px-2 py-1 text-ui-caption font-black',
+                          replay.summary.liquidationFailedCycles > 0
+                            ? 'border-rose-400/25 bg-rose-400/10 text-rose-200'
+                            : 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
+                        )}
+                      >
+                        期末清算 {replay.summary.forcedExitCycles} 批 · 失败{' '}
+                        {replay.summary.liquidationFailedCycles} 批
                       </span>
                     </div>
-                    <p className="mt-1.5 text-ui-caption leading-5 text-slate-400">
-                      {replay.report.conclusion}
-                    </p>
-                    <p className="mt-1 font-mono text-ui-micro text-slate-700">
-                      {replay.report.generatedAt
-                        ? formatTime(replay.report.generatedAt)
-                        : '--'}{' '}
-                      · {replay.report.htmlArtifact || '--'} ·{' '}
-                      {replay.report.jsonArtifact || '--'}
-                    </p>
-                  </div>
-                </div>
-              </section>
-            )}
-
-            <section className="border-b border-white/[0.06] p-ui-section">
-              <div className="mb-3 flex items-center justify-between">
-                <div>
-                  <h3 className="flex items-center gap-2 text-ui-label font-black text-slate-200">
-                    <BarChart3 className="h-4 w-4 text-cyan-300" />
-                    账户收益与不做 T 基准
-                  </h3>
-                  <p className="mt-1 text-ui-caption text-slate-600">
-                    同一初始现金和持仓按历史价格估值，差值为做 T 税费后增量。
-                  </p>
-                </div>
-              </div>
-              <div className="h-64 border border-white/[0.06] bg-[#07111f] p-2">
-                {chartData.length > 1 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={chartData}>
-                      <CartesianGrid
-                        stroke="rgba(148,163,184,0.08)"
-                        vertical={false}
+                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                      <MetricCard
+                        icon={Gauge}
+                        label="等待折损后利用率"
+                        tone="sky"
+                        value={`${formatNumber(replay.summary.capitalUtilizationPct, 1)}%`}
                       />
-                      <XAxis
-                        dataKey="time"
-                        minTickGap={40}
-                        tick={{ fill: '#64748b', fontSize: 9 }}
-                        axisLine={{ stroke: 'rgba(148,163,184,0.12)' }}
-                        tickLine={false}
+                      <MetricCard
+                        icon={WalletCards}
+                        label="平均占用 / 可用率"
+                        tone="slate"
+                        value={`¥${formatNumber(replay.summary.averageOccupiedCapital)} / ${formatNumber(replay.summary.capitalAvailabilityPct, 1)}%`}
                       />
-                      <YAxis
-                        width={48}
-                        tickFormatter={value => `${value}%`}
-                        tick={{ fill: '#64748b', fontSize: 9 }}
-                        axisLine={false}
-                        tickLine={false}
+                      <MetricCard
+                        icon={RefreshCw}
+                        label="累计 / 日均周转"
+                        tone="emerald"
+                        value={`${formatNumber(replay.summary.capitalTurnoverTimes)}× / ${formatNumber(replay.summary.capitalTurnoverPerTradingDay)}×`}
                       />
-                      <Tooltip
-                        contentStyle={{
-                          background: '#0b1628',
-                          border: '1px solid rgba(148,163,184,0.18)',
-                          borderRadius: 2,
-                          fontSize: 11,
-                        }}
-                        formatter={value =>
-                          `${formatNumber(Number(value), 3)}%`
-                        }
+                      <MetricCard
+                        icon={Hourglass}
+                        label="平均 / 最长等待"
+                        tone="amber"
+                        value={`${formatNumber(replay.summary.averageHoldingHours, 1)}h / ${formatNumber(replay.summary.maxHoldingHours, 1)}h`}
                       />
-                      <Legend wrapperStyle={{ fontSize: 10 }} />
-                      <Line
-                        type="monotone"
-                        dataKey="账户收益"
-                        stroke="#22d3ee"
-                        dot={false}
-                        strokeWidth={1.5}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="不做T基准"
-                        stroke="#94a3b8"
-                        dot={false}
-                        strokeWidth={1.2}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="做T增量"
-                        stroke="#fb7185"
-                        dot={false}
-                        strokeWidth={1.4}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="flex h-full flex-col items-center justify-center text-center text-ui-caption text-slate-600">
-                    <History className="mb-2 h-6 w-6 text-slate-700" />
-                    回放产生数据后显示收益曲线
-                  </div>
+                    </div>
+                  </section>
                 )}
-              </div>
-            </section>
 
-            <section className="p-ui-section">
-              <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-ui-label font-black text-slate-200">
-                  T 批次明细
-                </h3>
-                <span className="font-mono text-ui-caption text-slate-600">
-                  {cyclesPage?.total || 0} 批
-                </span>
-              </div>
-              <div className="overflow-x-auto border border-white/[0.06]">
-                <table className="w-full min-w-[1080px] text-left text-ui-caption">
-                  <thead className="bg-white/[0.025] text-slate-500">
-                    <tr>
-                      <th className="px-3 py-2">标的 / 批次</th>
-                      <th className="px-3 py-2">状态</th>
-                      <th className="px-3 py-2 text-right">买入</th>
-                      <th className="px-3 py-2 text-right">卖出</th>
-                      <th className="px-3 py-2 text-right">税费</th>
-                      <th className="px-3 py-2 text-right">
-                        等待 / 资金利用率
-                      </th>
-                      <th className="px-3 py-2 text-right">净增量</th>
-                      <th className="px-3 py-2">退出原因</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {cycles.map(cycle => (
-                      <tr
-                        key={cycle.batchId}
-                        className="border-t border-white/[0.05] text-slate-400"
-                      >
-                        <td className="px-3 py-2">
-                          <div className="font-mono font-bold text-slate-200">
-                            {cycle.stockCode}
-                          </div>
-                          <div className="mt-0.5 font-mono text-ui-micro text-slate-700">
-                            {cycle.batchId.slice(0, 12)}
-                          </div>
-                        </td>
-                        <td className="px-3 py-2">
-                          {cycle.status === 'COMPLETED'
-                            ? '已完成'
-                            : `未平 ${cycle.openVolume} 股`}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {cycle.entryVolume} @{' '}
-                          {formatNumber(cycle.entryAvgPrice, 3)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {cycle.exitVolume} @{' '}
-                          {formatNumber(cycle.exitAvgPrice, 3)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          ¥{formatNumber(cycle.totalFees)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {formatNumber(cycle.holdingHours, 1)}h /{' '}
-                          {formatNumber(cycle.capitalUtilizationPct, 1)}%
-                        </td>
-                        <td
-                          className={cn(
-                            'px-3 py-2 text-right font-mono font-bold',
-                            financialToneClass(cycle.netProfit)
-                          )}
-                        >
-                          ¥{formatNumber(cycle.netProfit)}
-                        </td>
-                        <td className="px-3 py-2">
-                          {cycle.exitReason || '--'}
-                          {cycle.forcedExit && (
-                            <span className="ml-1.5 border border-amber-400/20 bg-amber-400/[0.06] px-1 py-0.5 text-ui-micro text-amber-200">
-                              期末清算
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                    {cycles.length === 0 && (
-                      <tr>
-                        <td
-                          colSpan={8}
-                          className="px-3 py-ui-panel text-center text-slate-600"
-                        >
-                          {cyclesResult.fetching
-                            ? '正在读取成交批次…'
-                            : '暂无成交批次'}
-                        </td>
-                      </tr>
+                {replay.report && (
+                  <section className="border-b border-white/[0.06] bg-cyan-400/[0.025] p-ui-section">
+                    <div className="flex items-start gap-3">
+                      <FileCheck2 className="mt-0.5 h-5 w-5 shrink-0 text-cyan-300" />
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="text-ui-label font-black text-slate-100">
+                            回放报告 · {replay.report.conclusionCode}
+                          </h3>
+                          <span className="border border-cyan-400/20 bg-cyan-400/[0.08] px-1.5 py-0.5 text-ui-micro font-black text-cyan-200">
+                            {replay.report.status === 'GENERATED'
+                              ? 'HTML / JSON 已生成'
+                              : '报告生成失败'}
+                          </span>
+                        </div>
+                        <p className="mt-1.5 text-ui-caption leading-5 text-slate-400">
+                          {replay.report.conclusion}
+                        </p>
+                        <p className="mt-1 font-mono text-ui-micro text-slate-700">
+                          {replay.report.generatedAt
+                            ? formatTime(replay.report.generatedAt)
+                            : '--'}{' '}
+                          · {replay.report.htmlArtifact || '--'} ·{' '}
+                          {replay.report.jsonArtifact || '--'}
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+                <section className="border-b border-white/[0.06] p-ui-section">
+                  <div className="mb-3 flex items-center justify-between">
+                    <div>
+                      <h3 className="flex items-center gap-2 text-ui-label font-black text-slate-200">
+                        <BarChart3 className="h-4 w-4 text-cyan-300" />
+                        账户收益与不做 T 基准
+                      </h3>
+                      <p className="mt-1 text-ui-caption text-slate-600">
+                        同一初始现金和持仓按历史价格估值，差值为做 T
+                        税费后增量。
+                      </p>
+                    </div>
+                  </div>
+                  <div className="h-64 border border-white/[0.06] bg-[#07111f] p-2">
+                    {chartData.length > 1 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={chartData}>
+                          <CartesianGrid
+                            stroke="rgba(148,163,184,0.08)"
+                            vertical={false}
+                          />
+                          <XAxis
+                            dataKey="time"
+                            minTickGap={40}
+                            tick={{ fill: '#64748b', fontSize: 9 }}
+                            axisLine={{ stroke: 'rgba(148,163,184,0.12)' }}
+                            tickLine={false}
+                          />
+                          <YAxis
+                            width={48}
+                            tickFormatter={value => `${value}%`}
+                            tick={{ fill: '#64748b', fontSize: 9 }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              background: '#0b1628',
+                              border: '1px solid rgba(148,163,184,0.18)',
+                              borderRadius: 2,
+                              fontSize: 11,
+                            }}
+                            formatter={value =>
+                              `${formatNumber(Number(value), 3)}%`
+                            }
+                          />
+                          <Legend wrapperStyle={{ fontSize: 10 }} />
+                          <Line
+                            type="monotone"
+                            dataKey="账户收益"
+                            stroke="#22d3ee"
+                            dot={false}
+                            strokeWidth={1.5}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="不做T基准"
+                            stroke="#94a3b8"
+                            dot={false}
+                            strokeWidth={1.2}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="做T增量"
+                            stroke="#fb7185"
+                            dot={false}
+                            strokeWidth={1.4}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="flex h-full flex-col items-center justify-center text-center text-ui-caption text-slate-600">
+                        <History className="mb-2 h-6 w-6 text-slate-700" />
+                        回放产生数据后显示收益曲线
+                      </div>
                     )}
-                  </tbody>
-                </table>
+                  </div>
+                </section>
+
+                <section className="p-ui-section">
+                  <div className="mb-3 flex items-center justify-between">
+                    <h3 className="text-ui-label font-black text-slate-200">
+                      T 批次明细
+                    </h3>
+                    <span className="font-mono text-ui-caption text-slate-600">
+                      {cyclesPage?.total || 0} 批
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto border border-white/[0.06]">
+                    <table className="w-full min-w-[1080px] text-left text-ui-caption">
+                      <thead className="bg-white/[0.025] text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2">标的 / 批次</th>
+                          <th className="px-3 py-2">状态</th>
+                          <th className="px-3 py-2 text-right">买入</th>
+                          <th className="px-3 py-2 text-right">卖出</th>
+                          <th className="px-3 py-2 text-right">税费</th>
+                          <th className="px-3 py-2 text-right">
+                            等待 / 资金利用率
+                          </th>
+                          <th className="px-3 py-2 text-right">净增量</th>
+                          <th className="px-3 py-2">退出原因</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cycles.map(cycle => (
+                          <tr
+                            key={cycle.batchId}
+                            className="border-t border-white/[0.05] text-slate-400"
+                          >
+                            <td className="px-3 py-2">
+                              <div className="font-mono font-bold text-slate-200">
+                                {cycle.stockCode}
+                              </div>
+                              <div className="mt-0.5 font-mono text-ui-micro text-slate-700">
+                                {cycle.batchId.slice(0, 12)}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2">
+                              {cycle.status === 'COMPLETED'
+                                ? '已完成'
+                                : `未平 ${cycle.openVolume} 股`}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono">
+                              {cycle.entryVolume} @{' '}
+                              {formatNumber(cycle.entryAvgPrice, 3)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono">
+                              {cycle.exitVolume} @{' '}
+                              {formatNumber(cycle.exitAvgPrice, 3)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono">
+                              ¥{formatNumber(cycle.totalFees)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono">
+                              {formatNumber(cycle.holdingHours, 1)}h /{' '}
+                              {formatNumber(cycle.capitalUtilizationPct, 1)}%
+                            </td>
+                            <td
+                              className={cn(
+                                'px-3 py-2 text-right font-mono font-bold',
+                                financialToneClass(cycle.netProfit)
+                              )}
+                            >
+                              ¥{formatNumber(cycle.netProfit)}
+                            </td>
+                            <td className="px-3 py-2">
+                              {cycle.exitReason || '--'}
+                              {cycle.forcedExit && (
+                                <span className="ml-1.5 border border-amber-400/20 bg-amber-400/[0.06] px-1 py-0.5 text-ui-micro text-amber-200">
+                                  期末清算
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                        {cycles.length === 0 && (
+                          <tr>
+                            <td
+                              colSpan={8}
+                              className="px-3 py-ui-panel text-center text-slate-600"
+                            >
+                              {cyclesResult.fetching
+                                ? '正在读取成交批次…'
+                                : '暂无成交批次'}
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            ) : (
+              <div className="flex min-h-[360px] flex-col items-center justify-center px-ui-panel text-center">
+                <FlaskConical className="h-10 w-10 text-slate-700" />
+                <h2 className="mt-4 text-ui-body font-black text-slate-300">
+                  选择日期并启动第一次回放
+                </h2>
+                <p className="mt-2 max-w-md text-ui-caption leading-5 text-slate-600">
+                  系统将读取开始日前最近的账户日结快照，并用历史 Tick
+                  数据按时间顺序重放全部合格持仓。
+                </p>
               </div>
-            </section>
-          </>
+            )}
+          </div>
+        ) : activeView === 'SIGNALS' ? (
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <TTradeReplaySignals
+              decisions={replayDecisions}
+              error={
+                decisionResult.error || executionResult.error
+                  ? new Error(
+                      decisionResult.error?.message ||
+                        executionResult.error?.message ||
+                        '读取回放信号失败'
+                    )
+                  : undefined
+              }
+              executions={replayExecutions}
+              fetching={decisionResult.fetching || executionResult.fetching}
+              hasReplay={Boolean(activeRunId && replay?.backtestId)}
+            />
+          </div>
         ) : (
-          <div className="flex min-h-[360px] flex-col items-center justify-center px-ui-panel text-center">
-            <FlaskConical className="h-10 w-10 text-slate-700" />
-            <h2 className="mt-4 text-ui-body font-black text-slate-300">
-              选择日期并启动第一次回放
-            </h2>
-            <p className="mt-2 max-w-md text-ui-caption leading-5 text-slate-600">
-              系统将读取开始日前最近的账户日结快照，并用历史 Tick
-              数据按时间顺序重放全部合格持仓。
-            </p>
+          <div className="min-h-0 flex-1 overflow-hidden p-ui-section">
+            {activeRunId && replay?.backtestId ? (
+              <StrategyLogsTab
+                backtestId={replay.backtestId}
+                fillAvailable
+                isRunning={isRunning}
+                runId={activeRunId}
+                runMode="BACKTEST"
+                showAdvancedFilters
+                strategyName="做 T 历史回放"
+              />
+            ) : (
+              <div className="flex h-full min-h-[360px] flex-col items-center justify-center text-center">
+                <Terminal className="h-9 w-9 text-slate-700" />
+                <h2 className="mt-3 text-ui-body font-black text-slate-300">
+                  请先选择一条回放记录
+                </h2>
+                <p className="mt-1.5 text-ui-caption text-slate-600">
+                  日志页读取该次 BACKTEST 的持久化执行日志。
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1596,51 +2337,88 @@ function TTradeReplayPanel({
           <span className="text-ui-caption font-black uppercase tracking-[0.14em] text-slate-500">
             回放记录
           </span>
-          <button
-            type="button"
-            aria-label="刷新历史回放记录"
-            onClick={() => refreshHistory({ requestPolicy: 'network-only' })}
-            className="cursor-pointer text-slate-600 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-          >
-            <RefreshCw
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveRunId('');
+                setActiveView('OVERVIEW');
+              }}
               className={cn(
-                'h-3.5 w-3.5',
-                historyResult.fetching &&
-                  'animate-spin motion-reduce:animate-none'
+                'flex h-control-compact cursor-pointer items-center gap-1 border px-2 text-ui-caption font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                !activeRunId
+                  ? 'border-blue-400/25 bg-blue-500/10 text-blue-200'
+                  : 'border-white/[0.08] text-slate-500 hover:bg-white/[0.04] hover:text-slate-200'
               )}
-            />
-          </button>
+            >
+              <Plus className="h-3.5 w-3.5" />
+              新建
+            </button>
+            <button
+              type="button"
+              aria-label="刷新历史回放记录"
+              onClick={() => refreshHistory({ requestPolicy: 'network-only' })}
+              className="flex h-control-compact w-control-compact cursor-pointer items-center justify-center text-slate-600 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+            >
+              <RefreshCw
+                className={cn(
+                  'h-3.5 w-3.5',
+                  historyResult.fetching &&
+                    'animate-spin motion-reduce:animate-none'
+                )}
+              />
+            </button>
+          </div>
         </div>
         {history.map(item => (
-          <button
+          <div
             key={item.runId}
-            type="button"
-            onClick={() => setActiveRunId(item.runId)}
-            className={cn(
-              'block w-full cursor-pointer border-b border-white/[0.05] px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
-              activeRunId === item.runId
-                ? 'bg-cyan-400/[0.07]'
-                : 'hover:bg-white/[0.025]'
-            )}
+            className="group relative border-b border-white/[0.05]"
           >
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-300">
-                <CalendarDays className="h-3.5 w-3.5 text-slate-600" />
-                {String(item.startTime).slice(0, 10)}
-              </span>
-              <span className="text-ui-micro font-black text-cyan-300">
-                {replayStatusLabel(item.status)}
-              </span>
-            </div>
-            <div className="mt-2 flex items-center justify-between font-mono text-ui-caption text-slate-600">
-              <span>{item.runId.slice(0, 8)}</span>
-              <span className={financialToneClass(item.summary?.tNetProfit)}>
-                {item.summary
-                  ? `¥${formatNumber(item.summary.tNetProfit)}`
-                  : `${formatNumber(item.progressPct, 0)}%`}
-              </span>
-            </div>
-          </button>
+            <button
+              type="button"
+              onClick={() => setActiveRunId(item.runId)}
+              className={cn(
+                'block w-full cursor-pointer px-3 py-3 pr-10 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
+                activeRunId === item.runId
+                  ? 'bg-cyan-400/[0.07]'
+                  : 'hover:bg-white/[0.025]'
+              )}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-300">
+                  <CalendarDays className="h-3.5 w-3.5 text-slate-600" />
+                  {String(item.startTime).slice(0, 10)}
+                </span>
+                <span className="text-ui-micro font-black text-cyan-300">
+                  {replayStatusLabel(item.status)}
+                </span>
+              </div>
+              <div className="mt-2 flex items-center justify-between font-mono text-ui-caption text-slate-600">
+                <span>{item.runId.slice(0, 8)}</span>
+                <span className={financialToneClass(item.summary?.tNetProfit)}>
+                  {item.summary
+                    ? `¥${formatNumber(item.summary.tNetProfit)}`
+                    : `${formatNumber(item.progressPct, 0)}%`}
+                </span>
+              </div>
+            </button>
+            {canDeleteReplay(item.status) && (
+              <button
+                type="button"
+                aria-label={`删除 ${String(item.startTime).slice(0, 10)} 回放`}
+                disabled={deleteResult.fetching}
+                onClick={() => void handleDelete(item)}
+                className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 cursor-pointer items-center justify-center text-slate-700 opacity-0 transition-colors hover:bg-rose-500/10 hover:text-rose-300 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35 group-hover:opacity-100"
+              >
+                {deleteResult.fetching ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5" />
+                )}
+              </button>
+            )}
+          </div>
         ))}
         {history.length === 0 && (
           <div className="px-ui-section py-ui-empty text-center text-ui-caption text-slate-600">
@@ -1661,6 +2439,8 @@ export function TTradeGlobalPage() {
   const [workspaceMode, setWorkspaceMode] = React.useState<
     'REALTIME' | 'REPLAY'
   >('REALTIME');
+  const [replaySidebarContext, setReplaySidebarContext] =
+    React.useState<ReplaySidebarContext | null>(null);
   const { tradingDays } = useTradingDays('SH', 3);
   const currentShanghaiDate = getShanghaiDateKey(new Date());
   const isCurrentTradingDay = tradingDays.length
@@ -2290,23 +3070,25 @@ export function TTradeGlobalPage() {
           refreshCandidateTrace({ requestPolicy: 'network-only' });
         }
       }
-    }, [
-    activeMode,
-    activitySignalAfter,
-    batchAfter,
-    eventAfter,
-    refreshActivitySignals,
-    refreshBatchEvents,
-    refreshBatches,
-    refreshCandidateTrace,
-    refreshMonitor,
-    refreshSignalDiagnostics,
-    refreshSignalEvaluations,
-    signalAfter,
-    signalDiagnosticsResult.fetching,
-    signalEvaluationsResult.fetching,
-    selectedTraceForCurrentAccount,
-  ]);
+    },
+    [
+      activeMode,
+      activitySignalAfter,
+      batchAfter,
+      eventAfter,
+      refreshActivitySignals,
+      refreshBatchEvents,
+      refreshBatches,
+      refreshCandidateTrace,
+      refreshMonitor,
+      refreshSignalDiagnostics,
+      refreshSignalEvaluations,
+      signalAfter,
+      signalDiagnosticsResult.fetching,
+      signalEvaluationsResult.fetching,
+      selectedTraceForCurrentAccount,
+    ]
+  );
 
   const requestAuthoritativeMonitorRefresh = React.useCallback(() => {
     if (!accountId || workspaceMode !== 'REALTIME') return;
@@ -3247,50 +4029,7 @@ export function TTradeGlobalPage() {
   );
 
   const replaySidebar = (
-    <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
-      <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.05] px-ui-section">
-        <div>
-          <div className="text-ui-caption font-black uppercase tracking-[0.24em] text-cyan-300">
-            Replay Lab
-          </div>
-          <h1 className="mt-1 text-ui-title font-black text-slate-100">
-            回放测试
-          </h1>
-        </div>
-      </div>
-      <div className="border-b border-white/[0.05] p-ui-section">
-        <div className="flex items-center gap-2 text-ui-label font-black text-cyan-100">
-          <ShieldCheck className="h-4 w-4 text-cyan-300" />
-          隔离回测环境
-        </div>
-        <p className="mt-2 text-ui-caption leading-5 text-slate-600">
-          回放使用 BACKTEST
-          Broker，测试信号自动确认；实时监控保持原状态，不会提交实盘委托。
-        </p>
-      </div>
-      <div className="space-y-3 p-ui-section text-ui-caption text-slate-500">
-        <div className="flex items-start gap-2">
-          <History className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-600" />
-          以开始日前最近日结快照作为初始现金和持仓。
-        </div>
-        <div className="flex items-start gap-2">
-          <BarChart3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-600" />
-          同时计算账户曲线与不做 T 被动基准。
-        </div>
-        <div className="flex items-start gap-2">
-          <CircleDollarSign className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-600" />
-          收益已扣佣金、过户费、卖出印花税与滑点。
-        </div>
-      </div>
-      <div className="mt-auto shrink-0 border-t border-white/[0.06] bg-[#091322] p-3">
-        <div className="mb-1.5 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-600">
-          默认回放账户
-        </div>
-        <div className="flex h-10 items-center border border-white/[0.08] bg-white/[0.025] px-3 font-mono text-ui-label text-slate-300">
-          {accountId || '未配置'}
-        </div>
-      </div>
-    </aside>
+    <TTradeReplaySidebar accountId={accountId} context={replaySidebarContext} />
   );
 
   const toolbar = (
@@ -4705,7 +5444,11 @@ export function TTradeGlobalPage() {
       {toolbar}
       <div className="min-h-0 flex-1">
         {workspaceMode === 'REPLAY' ? (
-          <TTradeReplayPanel accountId={accountId} form={form} />
+          <TTradeReplayPanel
+            accountId={accountId}
+            form={form}
+            onSidebarContextChange={setReplaySidebarContext}
+          />
         ) : activeMode === 'MONITOR' ? (
           monitorView
         ) : activeMode === 'SIGNALS' ? (

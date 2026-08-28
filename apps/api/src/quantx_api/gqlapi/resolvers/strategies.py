@@ -377,48 +377,11 @@ class StrategyResolver:
     result_path: Optional[str],
   ) -> List[str]:
     """Delete file artifacts for one backtest while staying under data/backtests."""
-    from quantx_infrastructure.core.backtest_result_storage import BacktestResultStorage
+    from quantx_infrastructure.core.backtest_artifact_cleanup import (
+      delete_backtest_artifacts,
+    )
 
-    data_root = os.path.abspath(os.path.join("data", "backtests"))
-    candidates = set(StrategyResolver._backtest_result_path_candidates(result_path or ""))
-    candidates.add(
-      os.path.join("data", "backtests", "performance", f"{backtest_id}.json")
-    )
-    candidates.add(
-      os.path.join(
-        "data",
-        "backtests",
-        "performance",
-        str(backtest_id),
-        "manifest.json",
-      )
-    )
-    for candidate in list(candidates):
-      manifest = BacktestResultStorage.load_manifest(candidate)
-      if not manifest:
-        continue
-      for artifact in dict(manifest.get("artifacts") or {}).values():
-        artifact_path = artifact.get("path") if isinstance(artifact, dict) else artifact
-        if artifact_path:
-          candidates.add(os.path.join(os.path.dirname(candidate), str(artifact_path)))
-    deleted: List[str] = []
-    for candidate in candidates:
-      if not candidate:
-        continue
-      abs_path = os.path.abspath(candidate)
-      try:
-        if os.path.commonpath([data_root, abs_path]) != data_root:
-          continue
-      except ValueError:
-        continue
-      if not os.path.isfile(abs_path):
-        continue
-      try:
-        os.remove(abs_path)
-        deleted.append(abs_path)
-      except OSError as exc:
-        logger.warning("删除回测文件失败: %s (%s)", abs_path, exc)
-    return deleted
+    return delete_backtest_artifacts(backtest_id, result_path)
 
   @staticmethod
   async def _resolve_backtest_for_details(

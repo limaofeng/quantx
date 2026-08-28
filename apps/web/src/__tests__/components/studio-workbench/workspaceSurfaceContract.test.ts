@@ -88,7 +88,8 @@ describe('workspace page surface contract', () => {
     {
       label: 'TTradeGlobalPage replay sidebar',
       path: '../../../features/portfolio/pages/TTradeGlobalPage.tsx',
-      pattern: /const replaySidebar = \(\s*<aside className="([^"]+)"/,
+      pattern:
+        /function TTradeReplaySidebar[\s\S]*?return \(\s*<aside className="([^"]+)"/,
     },
     {
       label: 'LimitUpBoardPage replay sidebar',
