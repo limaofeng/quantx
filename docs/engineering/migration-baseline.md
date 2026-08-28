@@ -14,7 +14,7 @@
 | XTData/XTTrading、`miniqmt` | `apps/qmt-agent/src/quantx_qmt_agent` | QMT 模拟器测试 |
 | Agent DTO、协议和状态枚举 | `packages/contracts/src/quantx_contracts` | contracts 测试 |
 | 旧 Web 单体 | `apps/web` | codegen、check、strict lint、test、build |
-| 根目录及 API 子进程启动脚本 | `ops/quantx.ps1`、WinSW、Caddy | ops contract 与 Windows CI |
+| 根目录及 API 子进程启动脚本 | `ops/quantx.ps1`、Caddy | ops contract 与 Windows CI |
 
 ## 可审查检查点
 

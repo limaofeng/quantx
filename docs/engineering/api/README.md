@@ -13,11 +13,11 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 ```
 
 开发公开入口为 Caddy 的 `8080`：本机使用 `http://127.0.0.1:8080`，局域网
-设备使用 `http://<开发机局域网 IP>:8080`。API 内部只监听
+设备统一使用 `http://192.168.5.6:8080`。API 内部只监听
 `127.0.0.1:18081`。常用端点包括 `/graphql`、`/health/live`、
 `/health/ready`、`/health/components` 和 `/ws/agent`。原生客户端在线
 文档位于 `/docs/`；FastAPI 开发 Swagger 只在内部 API 端口的
-`/_dev/api-docs` 提供，生产环境关闭。QMT Agent 的交易连接使用 `/ws/agent`，
+`/_dev/api-docs` 提供。QMT Agent 的交易连接使用 `/ws/agent`，
 唯一沪深行情连接使用 `/ws/agent/market` 和 `quantx.market.v1`。统一开发者中心覆盖 Web、原生客户端与
 第三方 API。
 
@@ -53,8 +53,8 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 ## 开发认证与交易审批
 
 开发自动登录用户在 API 启动时会与 `AUTH_BOOTSTRAP_PERMISSIONS` 做一次仅增量的
-权限同步；同步只在 `development` 生效，不删除人工授予的权限，也绝不在生产
-环境执行。权限实际发生变化时会追加 `DEVELOPMENT_PERMISSION_SYNC` 认证审计
+权限同步；同步只在 `development` 生效，不删除人工授予的权限。权限实际发生
+变化时会追加 `DEVELOPMENT_PERMISSION_SYNC` 认证审计
 事件。开发环境可通过该配置授予 `trade:approve`，但 GraphQL 的账户实盘窗口和
 实盘启用 mutation 仍会逐次校验该权限，不能用较宽松的自动化就绪状态替代。
 

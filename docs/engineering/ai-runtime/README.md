@@ -115,9 +115,7 @@ packages/
     └── services/ai_assistant_event_bus.py
 
 ops/
-├── windows/quantx-ai-runtime.xml        # 独立 WinSW 服务
-├── quantx.ps1                           # dev/full/live 统一生命周期
-└── build-release.ps1                    # release wheel
+└── quantx.ps1                           # Windows dev/full/live 统一生命周期
 ```
 
 允许的依赖方向：
@@ -464,7 +462,7 @@ capabilities、日志或异常。无 key 时 Runtime 仍上报 `unconfigured` �
 
 开发环境的 AI Runtime 优先使用 `uv sync` 生成的仓库 `.venv`，避免把模型 SDK
 依赖混入 QMT Conda 环境；必要时可显式设置
-`QUANTX_AI_RUNTIME_PYTHON_EXE`。生产环境继续使用当前 release 的统一 `.venv`。
+`QUANTX_AI_RUNTIME_PYTHON_EXE`。
 如果依赖暂时不可用，Runtime 上报 `unavailable`，不会阻止 API、Engine、Worker
 和 QMT Agent 启动。
 
@@ -478,8 +476,8 @@ assistant:read
 assistant:write
 ```
 
-开发自动登录用户会按 bootstrap 配置增量获得这两个权限；生产环境不会覆盖既有
-用户权限，发布时必须通过现有用户权限管理流程显式授予。
+开发自动登录用户会按 bootstrap 配置增量获得这两个权限；既有用户权限仍通过
+当前权限管理流程显式授予。
 
 工具仍分别检查 `market:read`、`portfolio:read`、`strategy:read` 等原有权限。
 
@@ -552,7 +550,7 @@ Runtime 周期性写 `RuntimeComponentHeartbeat(component="ai-runtime")`。API �
 | 表现 | 检查 | 行为 |
 |---|---|---|
 | capabilities 为 `unconfigured` | key 是否只注入服务端、enabled 是否打开 | 配置 key 后重启 Runtime；不要降级交易栈 |
-| capabilities 为 `unavailable` | WinSW/开发进程、heartbeat、DB | 恢复 Runtime；历史聊天仍可读 |
+| capabilities 为 `unavailable` | Dev 进程、heartbeat、DB | 恢复 Runtime；历史聊天仍可读 |
 | run 长期 `QUEUED` | Runtime 日志、DB 租约、provider 配额 | 修复后消费者自动领取 |
 | run `WAITING_APPROVAL` | 是否还有多个 pending call | 逐个批准/拒绝或取消 run |
 | 订阅断线 | Caddy websocket、最后 sequence | 用 `afterSequence` 重连并从 DB 回放 |

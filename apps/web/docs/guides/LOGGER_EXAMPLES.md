@@ -415,13 +415,10 @@ handleMetric(metric: Metric): void {
     delta: performanceMetric.delta,
   });
 
-  if (import.meta.env.PROD) {
-    // ✅ 生产环境上报
-    logger.info('性能指标已上报', {
-      metric: performanceMetric.name,
-      value: performanceMetric.value
-    });
-  }
+  logger.info('性能指标已记录', {
+    metric: performanceMetric.name,
+    value: performanceMetric.value
+  });
 }
 ```
 
@@ -462,9 +459,6 @@ function logError(error: StandardError): void {
       context: error.context,
       stack: error.originalError.stack,
     });
-  } else {
-    // 生产环境：发送到错误监控服务
-    // sendToErrorService(error);
   }
 }
 ```

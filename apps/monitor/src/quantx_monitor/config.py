@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 def _environment_files() -> tuple[str, ...]:
   configured = os.environ.get("QUANTX_ENV_FILE", "").strip()
   candidates = [configured] if configured else []
-  candidates.extend([".env.production", ".env"])
+  candidates.extend([".env.development", ".env"])
   return tuple(value for value in candidates if value)
 
 

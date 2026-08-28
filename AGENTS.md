@@ -15,7 +15,7 @@
 - `packages/domain/`：纯交易域、策略、风控、仓位和回测 broker。
 - `packages/application/`：用例、端口接口、命令路由和状态推进。
 - `packages/infrastructure/`：数据库、Repository、行情适配和持久化消息箱。
-- `ops/`：Caddy、WinSW 和统一运维入口。
+- `ops/`：Windows Dev Caddy 和统一运维入口。
 - `docs/engineering/`：按 API、Engine、Worker、QMT Agent、部署组织的工程文档。
 
 Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
@@ -33,7 +33,8 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 
 ## 统一运行方式
 
-当前权威开发基线（2026-08-14）：**Dev 默认即个人单账户实盘**。不要为普通
+当前权威运行基线（2026-08-28）：**只支持 Windows Dev，Dev 默认即个人单账户
+实盘**。不要为普通
 开发启动显式传 `-Mode`；以下第一条命令必须解析为 `profile=full`、
 `agentMode=live`。只有明确需要禁用实盘时，才允许使用
 `-Mode data-only`。
@@ -72,8 +73,8 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
   启动前关闭全部服务端与 Agent 实盘能力门并清空实盘账户允许列表，跳过 QMT
   子进程，以显式 `DEGRADED / BLOCKED` 状态继续启动非 QMT 服务。该状态允许使用
   已持久化历史行情做回测，但不得伪装成 QMT `ready`；恢复 QMT 后必须整体重启。
-- 开发 Caddy 是唯一公开入口，监听所有本机 IPv4 接口的 `8080`；局域网设备
-  使用 `http://<开发机局域网 IP>:8080`。
+- 开发 Caddy 是唯一公开入口，监听所有本机 IPv4 接口的 `8080`；本机使用
+  `http://127.0.0.1:8080`，局域网统一使用 `http://192.168.5.6:8080`。
 - API 只监听 `127.0.0.1:18081`，Vite 使用 `5250`，VitePress 使用
   `5251`。Prefect API 固定通过 `PREFECT_API_URL` 连接外部服务，默认
   `http://192.168.5.6:30420/api`，Worker 使用 `quantx-pool`。
@@ -84,8 +85,9 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
   `Runtime profile=full`、`agentMode=live`、唯一账户、`liveTrading=ENABLED`、
   QMT Agent `ready`、协议 `1.1` 和小于 90 秒的新鲜快照；降级启动则必须显示
   `DEGRADED`、QMT `BLOCKED` 与 `liveTrading=DISABLED`。
-- 不得恢复根目录旧启动脚本或 API 内的子进程管理。
-- 不运行 `ops/quantx.ps1 install` 做普通验证。
+- 不得恢复 macOS 启动器、独立 QMT Agent 启动器、production 环境、WinSW、
+  Kubernetes、release 安装/回滚或 API 内的子进程管理。个人项目只有当前
+  Windows 工作区的 `dev` 运行形态。
 
 ## 进程和依赖边界
 
@@ -131,7 +133,7 @@ python -m pytest tests/api/integration/
 
 单元测试优先，集成测试谨慎。E2E/真实交易测试默认禁止。真实交易必须同时
 显式满足 `ENV=testing`、`ENABLE_REAL_TRADING=true`、账户白名单和
-`QMT_REAL_TRADING_ENABLED=true`，且不得在 production 运行。
+`QMT_REAL_TRADING_ENABLED=true`。项目只在 `ENV=testing` 的 Dev 实盘门禁下运行。
 
 Codex 生成的截图、trace 和 video 放在根目录 `.codex_screenshots/`，默认不
 提交。

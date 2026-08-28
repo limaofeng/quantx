@@ -181,7 +181,7 @@ const index = [
   frontmatter('GraphQL Schema 参考'),
   '# GraphQL Schema 参考',
   '',
-  '该参考由发布包中的 SDL 和 operation policy 自动生成，不依赖生产环境内省。',
+  '该参考由工作区 SDL 和 operation policy 自动生成，不依赖运行时内省。',
   '',
   '| 操作 | 字段数 | 参考 |',
   '| --- | ---: | --- |',

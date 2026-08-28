@@ -24,7 +24,7 @@ Invoke-RestMethod http://127.0.0.1:8080/health/components
 - **前端契约错误**：经 Caddy 重跑 codegen、TypeScript、lint、test 和
   build。
 
-真实交易默认关闭。testing 危险测试和 production 灰度都必须通过 Agent
-本地开关与账户白名单；production 还必须通过服务端开关、账户白名单、
+真实交易默认关闭。Dev 实盘必须使用 `ENV=testing`，并通过 Agent 本地开关、
+服务端开关、账户白名单、
 Agent READY、Engine 租约、完整新鲜快照、无未知委托、对账、策略授权和
 kill switch 检查。

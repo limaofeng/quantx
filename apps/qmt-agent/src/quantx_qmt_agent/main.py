@@ -93,7 +93,7 @@ def _run_runtime(
         exc.__class__.__name__,
       )
       _hard_exit_for_fatal_market_data(FATAL_MARKET_DATA_EXIT_CODE)
-      # The production implementation never returns. Keep the exception path
+      # The real implementation never returns. Keep the exception path
       # explicit so tests can monkeypatch the hard-exit boundary safely.
       raise
   finally:
@@ -117,8 +117,8 @@ def _require_safe_run_mode(mode: str, allowed_accounts: set[str]) -> None:
     raise SystemExit("live mode requires exactly one QMT account")
 
   environment = os.environ.get("ENV", "").strip().lower()
-  if environment not in {"testing", "production"}:
-    raise SystemExit("live mode requires ENV=testing or ENV=production")
+  if environment != "testing":
+    raise SystemExit("live mode requires ENV=testing")
   if os.environ.get("ENABLE_REAL_TRADING", "").strip().lower() != "true":
     raise SystemExit("live mode requires ENABLE_REAL_TRADING=true")
   if os.environ.get("QMT_REAL_TRADING_ENABLED", "").strip().lower() != "true":

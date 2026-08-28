@@ -2,7 +2,8 @@
 
 ## 简介
 
-QuantX 项目使用结构化日志系统(`@/core/errors/logger`)替代原始的 `console` 调用。这个系统提供了更好的可追溯性、可维护性和生产环境支持。
+QuantX 项目使用结构化日志系统 (`@/core/errors/logger`) 替代原始的 `console`
+调用，以提高 Dev 环境中的可追溯性和可维护性。
 
 ## 为什么使用 Logger?
 
@@ -190,24 +191,6 @@ const csvLogs = logger.exportLogsAsCSV();
 downloadFile(csvLogs, 'logs.csv');
 ```
 
-### 5. 生产环境上报
-
-Logger 支持生产环境远程日志上报(需配置):
-
-```typescript
-// 在 logger.ts 中的 sendToRemoteLogger 方法
-private async sendToRemoteLogger(logEntry: LogEntry): Promise<void> {
-  if (import.meta.env.PROD) {
-    // 发送到你的日志服务
-    await fetch('/api/logs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(logEntry)
-    });
-  }
-}
-```
-
 ## 开发环境调试
 
 ### 在浏览器控制台查看日志
@@ -378,24 +361,14 @@ private outputToConsole(logEntry: LogEntry): void {
 
 ### Q: Logger 会影响性能吗?
 
-A: Logger 设计为轻量级,对性能影响很小。生产环境可以配置只上报 WARN 和 ERROR 级别的日志。
-
-### Q: 如何在生产环境禁用 DEBUG 日志?
-
-A: 在 logger.ts 中添加级别过滤逻辑:
-
-```typescript
-if (level === LogLevel.DEBUG && import.meta.env.PROD) {
-  return; // 生产环境跳过 DEBUG 日志
-}
-```
+A: Logger 设计为轻量级，对性能影响很小。
 
 ### Q: 日志太多怎么办?
 
-A: 可以调整 `maxLogs` 参数,或在生产环境只记录 ERROR:
+A: 可以调整 `maxLogs` 参数：
 
 ```typescript
-private maxLogs: number = import.meta.env.PROD ? 100 : 1000;
+private maxLogs: number = 1000;
 ```
 
 ### Q: 如何查看历史日志?

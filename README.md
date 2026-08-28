@@ -20,7 +20,7 @@ packages/
   application/  用例、端口接口与状态推进
   infrastructure/
                 ORM、Repository、数据库适配与持久化消息箱
-ops/            Caddy、WinSW 与统一运维脚本
+ops/            Windows Dev Caddy 与统一运维脚本
 tests/          按架构边界组织的 Python 测试
 ```
 
@@ -43,14 +43,14 @@ data-only。QMT 登记或运行时不可用时，统一入口保持 `full/live`�
 能力门并清空实盘账户允许列表，再以显式 `DEGRADED / BLOCKED` 状态启动非 QMT
 服务；已持久化历史行情的回测继续可用，但该状态绝不代表 QMT `ready`。
 开发 Caddy 在所有本机 IPv4 接口的 `8080` 端口提供统一入口。本机可访问
-`http://127.0.0.1:8080`，局域网设备使用 `http://<开发机局域网 IP>:8080`；
+`http://127.0.0.1:8080`，局域网设备统一使用 `http://192.168.5.6:8080`；
 API 自身仍只监听 `127.0.0.1:18081`。
 
 开发者文档通过统一入口
 [`http://127.0.0.1:8080/docs/`](http://127.0.0.1:8080/docs/) 提供，
 不直接访问 API 内部端口。
 
-首次准备固定版本的 Caddy 和 WinSW：
+首次准备 Caddy：
 
 ```powershell
 .\ops\quantx.ps1 bootstrap
@@ -59,6 +59,9 @@ API 自身仍只监听 `127.0.0.1:18081`。
 PostgreSQL、InfluxDB 和 Redis 是外部持久化服务；脚本只检查它们，不会
 安装、启动或停止它们。端口冲突时，`up` 只报告占用者，绝不会终止未受
 QuantX 状态文件跟踪的进程。
+
+项目不再维护 production、WinSW、Kubernetes、release 安装或 macOS 运行路径；
+个人使用只通过当前 Windows 工作区的 `dev` 启动器运行。
 
 ## 验证
 

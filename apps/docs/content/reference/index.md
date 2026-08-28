@@ -1,7 +1,7 @@
 # 契约下载
 
-以下文件随当前 Windows 发布包生成，不依赖生产环境的 Swagger、GraphiQL
-或 GraphQL 内省。
+以下文件从当前 Windows Dev 工作区生成，不依赖运行时 Swagger、GraphiQL 或
+GraphQL 内省。
 
 | 契约 | 用途 | 下载 |
 | --- | --- | --- |

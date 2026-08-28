@@ -263,11 +263,9 @@ Husky 会在提交前自动运行代码检查和格式化。
 
 ## 🌍 环境配置
 
-项目支持多环境配置：
+项目只维护 Dev 配置：
 
 - `.env.development` - 开发环境
-- `.env.staging` - 测试环境
-- `.env.production` - 生产环境
 
 ### 主要环境变量
 

@@ -17,8 +17,7 @@
 
 普通 QuantX `up/down` 不启停 Monitor。开发进程状态写入
 `.runtime/monitor/dev-process.json`，历史库默认位于
-`.runtime/monitor/quantx-monitor.sqlite3`。生产发布安装 `QuantXMonitor` WinSW
-自动服务，使用相同的持久化运行目录。内部端口为 `127.0.0.1:18083`；唯一公共
+`.runtime/monitor/quantx-monitor.sqlite3`。内部端口为 `127.0.0.1:18083`；唯一公共
 入口仍是 Caddy `8080` 下的 `/monitor/*`。
 
 ## 检测模型

@@ -51,6 +51,7 @@ def test_paper_mode_requires_an_explicit_account_whitelist() -> None:
   ("environment", "enable_real", "enable_qmt", "expected"),
   [
     ("development", "true", "true", "ENV=testing"),
+    ("production", "true", "true", "ENV=testing"),
     ("testing", "", "true", "ENABLE_REAL_TRADING=true"),
     ("testing", "true", "", "QMT_REAL_TRADING_ENABLED=true"),
   ],
@@ -224,7 +225,7 @@ def test_live_run_accepts_explicit_http_endpoint(
 def test_live_mode_does_not_depend_on_t_trade_feature_gate(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  monkeypatch.setenv("ENV", "production")
+  monkeypatch.setenv("ENV", "testing")
   monkeypatch.setenv("ENABLE_REAL_TRADING", "true")
   monkeypatch.setenv("QMT_REAL_TRADING_ENABLED", "true")
   monkeypatch.setenv("T_TRADE_LIVE_ENABLED", "false")

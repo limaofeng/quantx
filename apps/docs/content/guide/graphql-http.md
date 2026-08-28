@@ -1,7 +1,7 @@
 # GraphQL HTTP
 
-QuantX GraphQL 公共端点固定为同源 `/graphql`，只接受 POST。生产环境关闭
-GraphiQL 与内省，客户端应使用发布包中的 SDL 进行 codegen。
+QuantX GraphQL 公共端点固定为同源 `/graphql`，只接受 POST。客户端通过当前
+Windows Dev 工作区生成的 SDL 执行 codegen。
 
 ## 请求
 

@@ -7,10 +7,7 @@
 import logging
 from typing import Dict
 
-from quantx_infrastructure.config.settings import settings
-
 from .relational import create_tables
-from .schema_control import assert_schema_current
 from .timeseries import (
   get_timeseries_connection,
   init_timeseries,
@@ -30,12 +27,8 @@ class DatabaseManager:
     """初始化数据库连接"""
     # 创建关系型数据库表
     try:
-      if settings.environment == "production":
-        await assert_schema_current()
-        logger.info("生产数据库 Alembic revision 校验成功")
-      else:
-        await create_tables()
-        logger.info("开发/测试关系型数据库表创建成功")
+      await create_tables()
+      logger.info("Dev/测试关系型数据库表创建成功")
     except Exception as e:
       logger.error(f"关系型数据库表创建失败: {e}")
       raise
@@ -68,6 +61,7 @@ class DatabaseManager:
 
     # 关闭关系型数据库
     from .relational_connection import close_database
+
     await close_database()
 
 

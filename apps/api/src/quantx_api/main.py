@@ -334,7 +334,6 @@ def _quantx_reload_supervisor(base_cls):
 async def lifespan(app: FastAPI):
   """Manage API-owned resources only; other processes are independently supervised."""
   _install_asyncio_client_disconnect_filter()
-  settings.validate_production()
   logger.info("启动 QuantX API 服务器...")
   logger.info(f"环境: {settings.environment}")
   logger.info(f"调试模式: {settings.debug}")

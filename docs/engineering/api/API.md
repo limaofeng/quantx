@@ -162,8 +162,7 @@ npm run docs:contracts
 ```
 
 发布文件位于 `/docs/contracts/`，包括 GraphQL SDL、v2 operation policy、
-Client OpenAPI 与 Web OpenAPI。生产环境关闭运行时 OpenAPI、Swagger、
-ReDoc、GraphiQL 和 GraphQL 内省。
+Client OpenAPI 与 Web OpenAPI。运行时只在 Dev 内部端口提供调试文档。
 
 ## 卖出管理 GraphQL
 

@@ -7,7 +7,6 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Union
-from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -191,7 +190,7 @@ class Settings(BaseSettings):
   )
   auth_web_cookie_secure: Optional[bool] = Field(
     default=None,
-    description="Web 刷新令牌 Cookie 是否仅通过 HTTPS 发送；为空时生产环境自动启用",
+    description="Web 刷新令牌 Cookie 是否仅通过 HTTPS 发送；HTTP Dev 默认为 False",
   )
   auth_web_allowed_origins: Union[List[str], str] = Field(
     default_factory=list,
@@ -241,7 +240,7 @@ class Settings(BaseSettings):
       "assistant:read",
       "assistant:write",
     ],
-    description="首次启动用户权限；生产环境不会覆盖既有用户权限",
+    description="首次启动 Dev 用户权限",
   )
   auth_login_rate_limit_attempts: int = Field(
     default=5, description="登录失败窗口内最大尝试次数"
@@ -293,8 +292,8 @@ class Settings(BaseSettings):
 
   model_config = {
     # Pydantic gives process environment variables priority over dotenv files.
-    # Later dotenv files override earlier ones, so the persistent production
-    # configuration is: process > QUANTX_ENV_FILE > .env.production > .env.
+    # Later dotenv files override earlier ones. Dev precedence is:
+    # process > QUANTX_ENV_FILE > .env.development > .env.
     "env_file": SETTINGS_ENV_FILES,
     "env_file_encoding": "utf-8",
     "case_sensitive": False,
@@ -440,11 +439,6 @@ class Settings(BaseSettings):
     """是否为开发环境"""
     return self.environment.lower() == "development"
 
-  @property
-  def is_production(self) -> bool:
-    """是否为生产环境"""
-    return self.environment.lower() == "production"
-
   def get_trading_sessions(self) -> Dict[str, List[str]]:
     """获取交易时段配置"""
     return self.trading_sessions
@@ -452,78 +446,6 @@ class Settings(BaseSettings):
   def is_trading_time_management_enabled(self) -> bool:
     """检查是否启用交易时间管理"""
     return self.subscription_scheduler_enabled and bool(self.trading_sessions)
-
-  def production_validation_errors(self) -> List[str]:
-    """Return fail-closed production configuration violations without secrets."""
-    if not self.is_production:
-      return []
-
-    errors: List[str] = []
-    parsed_public_url = urlparse(self.public_url)
-    allowed_loopback_hosts = {"127.0.0.1", "localhost", "::1"}
-    if (
-      parsed_public_url.scheme != "https"
-      or parsed_public_url.hostname not in allowed_loopback_hosts
-      or parsed_public_url.port != 8080
-    ):
-      errors.append("PUBLIC_URL must be the loopback HTTPS gateway on port 8080")
-    if self.host not in {"127.0.0.1", "localhost"} or self.port != 18081:
-      errors.append("production API must listen on 127.0.0.1:18081")
-    if not self.database_url.lower().startswith("postgresql+asyncpg://"):
-      errors.append("DATABASE_URL must use PostgreSQL with asyncpg")
-    if self.debug or self.graphql_debug:
-      errors.append("debug and GraphQL debug must be disabled")
-    if self.graphql_introspection or self.graphql_playground:
-      errors.append("GraphQL introspection and playground must be disabled")
-    if self.mock_data_enabled:
-      errors.append("mock data must be disabled")
-    if (
-      len(self.secret_key.strip()) < 48
-      or self.secret_key.strip() == "change-this-secret-key"
-    ):
-      errors.append("SECRET_KEY must be a non-default value of at least 48 chars")
-    if self.auth_web_cookie_secure is False:
-      errors.append("AUTH_WEB_COOKIE_SECURE must not be disabled")
-
-    public_origin = (
-      f"{parsed_public_url.scheme}://{parsed_public_url.netloc}"
-      if parsed_public_url.scheme and parsed_public_url.netloc
-      else ""
-    )
-    cors_origins = {str(value).rstrip("/") for value in self.cors_origins}
-    auth_origins = {str(value).rstrip("/") for value in self.auth_web_allowed_origins}
-    if cors_origins != {public_origin.rstrip("/")}:
-      errors.append("CORS_ORIGINS must contain only PUBLIC_URL in production")
-    if auth_origins != {public_origin.rstrip("/")}:
-      errors.append(
-        "AUTH_WEB_ALLOWED_ORIGINS must contain only PUBLIC_URL in production"
-      )
-    if not self.redis_url.lower().startswith(("redis://", "rediss://")):
-      errors.append("REDIS_URL must be configured")
-    if not self.influxdb_host or not self.influxdb_database:
-      errors.append("InfluxDB host and database must be configured")
-    if self.enable_real_trading and not self.real_trading_account_allowlist:
-      errors.append(
-        "REAL_TRADING_ACCOUNT_ALLOWLIST is required when live trading is enabled"
-      )
-    if self.apns_delivery_enabled:
-      if not all(
-        value.strip()
-        for value in (self.apns_team_id, self.apns_key_id, self.apns_topic)
-      ):
-        errors.append("APNs team, key and topic identifiers must be configured")
-      private_key_path = Path(self.apns_private_key_file).expanduser()
-      if not self.apns_private_key_file or not private_key_path.is_file():
-        errors.append("APNS_PRIVATE_KEY_FILE must reference a readable .p8 file")
-      if self.apns_lease_seconds < (2 * self.apns_timeout_seconds) + 15:
-        errors.append("APNS_LEASE_SECONDS must exceed two provider timeouts")
-    return errors
-
-  def validate_production(self) -> None:
-    """Refuse unsafe production startup with a secret-free error message."""
-    errors = self.production_validation_errors()
-    if errors:
-      raise RuntimeError("Unsafe production configuration: " + "; ".join(errors))
 
   def get_log_config(self) -> dict:
     """获取日志配置"""

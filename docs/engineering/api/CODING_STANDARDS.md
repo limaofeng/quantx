@@ -41,4 +41,4 @@ npm run test:run
 npm run build
 ```
 
-真实交易测试默认禁止，且不得在 production 环境运行。
+真实交易测试默认禁止；个人 Dev 仅在显式 `ENV=testing` 安全门下运行。

@@ -203,14 +203,7 @@ def _disable_session_caching(response: Response) -> None:
 
 def _web_cookie_secure() -> bool:
   configured = settings.auth_web_cookie_secure
-  secure = settings.is_production if configured is None else configured
-  if settings.is_production and not secure:
-    raise AuthError(
-      "AUTH_NOT_CONFIGURED",
-      "生产环境必须启用安全的 Web 会话 Cookie",
-      status_code=503,
-    )
-  return secure
+  return False if configured is None else configured
 
 
 def _is_same_origin_development_request(request: Request, origin: str) -> bool:
