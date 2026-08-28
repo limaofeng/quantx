@@ -54,13 +54,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Progress } from '@/components/ui/progress';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
   useGraphqlWsStatus,
   type GraphqlWsStatus,
 } from '@/core/graphql/ws-status';
@@ -168,6 +161,7 @@ import {
   type SignalPolicyLike,
 } from './t-trade-global/signalPolicy';
 import { TTradeActivityView } from './t-trade-global/TTradeActivityView';
+import { TTradeExecutionSettingsPanel } from './t-trade-global/TTradeExecutionSettingsPanel';
 import {
   TTradeHealthConsole,
   TTradeLiveBoard,
@@ -4604,9 +4598,19 @@ export function TTradeGlobalPage() {
       )}
       <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section py-3">
         <div>
-          <h2 className="text-ui-body font-black text-slate-100">
-            全局策略参数
-          </h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-ui-body font-black text-slate-100">
+              全局策略参数
+            </h2>
+            {draftDirty && (
+              <span
+                role="status"
+                className="rounded-sm border border-primary/20 bg-primary/10 px-1.5 py-0.5 text-ui-micro font-semibold text-blue-200"
+              >
+                已修改
+              </span>
+            )}
+          </div>
           <p className="mt-0.5 text-ui-caption text-slate-600">
             对账户内所有未忽略的合格持仓统一生效
           </p>
@@ -4618,375 +4622,7 @@ export function TTradeGlobalPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
         <div className="grid gap-px bg-white/[0.05] xl:grid-cols-2">
-          <section className="bg-[#0a1424] p-ui-section xl:col-span-2">
-            <div className="mb-4 border-b border-white/[0.05] pb-3">
-              <div className="text-ui-label font-black text-slate-200">
-                运行与资金约束
-              </div>
-              <div className="mt-1 text-ui-caption text-slate-600">
-                控制单次金额、全局并发与账户总暴露
-              </div>
-            </div>
-            <div className="space-y-ui-section">
-              <div className="space-y-1.5">
-                <Label
-                  htmlFor="t-trade-mode"
-                  className="text-ui-label font-bold text-slate-400"
-                >
-                  运行模式
-                </Label>
-                <Select
-                  value={form.mode}
-                  onValueChange={value =>
-                    setField('mode', value === 'live' ? 'live' : 'paper')
-                  }
-                >
-                  <SelectTrigger
-                    id="t-trade-mode"
-                    className="h-control-default rounded-sm border-white/10 bg-[#07111f] text-ui-label focus:ring-red-500/60"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="paper">
-                      模拟观察（推荐先验证）
-                    </SelectItem>
-                    <SelectItem value="live">实盘执行</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4">
-                <NumericField
-                  id="t-trade-target-amount"
-                  label="目标单次金额"
-                  suffix="元"
-                  value={form.targetTradeAmount}
-                  onChange={value => setField('targetTradeAmount', value)}
-                />
-                <NumericField
-                  id="t-trade-max-amount"
-                  label="单次金额硬上限"
-                  suffix="元"
-                  value={form.maxTradeAmount}
-                  onChange={value => setField('maxTradeAmount', value)}
-                />
-                <NumericField
-                  id="t-trade-concurrency"
-                  label="账户并发批次"
-                  suffix="批"
-                  value={form.maxConcurrentBatches}
-                  onChange={value => setField('maxConcurrentBatches', value)}
-                />
-                <NumericField
-                  id="t-trade-total-exposure"
-                  label="账户总 T 暴露"
-                  suffix="%"
-                  value={form.maxTotalTExposurePct}
-                  onChange={value => setField('maxTotalTExposurePct', value)}
-                />
-              </div>
-
-              <div className="border-t border-white/[0.05] pt-4">
-                <div className="mb-3 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-600">
-                  动态退出
-                </div>
-                <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4">
-                  <NumericField
-                    id="t-trade-target"
-                    label="收益武装线"
-                    suffix="%"
-                    value={form.targetProfitPct}
-                    onChange={value => setField('targetProfitPct', value)}
-                  />
-                  <NumericField
-                    id="t-trade-floor"
-                    label="初始保护线"
-                    suffix="%"
-                    value={form.baseFloorPct}
-                    onChange={value => setField('baseFloorPct', value)}
-                  />
-                  <NumericField
-                    id="t-trade-max-gap"
-                    label="最大回撤宽度"
-                    suffix="%"
-                    value={form.maxGapPct}
-                    onChange={value => setField('maxGapPct', value)}
-                  />
-                  <NumericField
-                    id="t-trade-initial-gap"
-                    label="初始回撤宽度"
-                    suffix="%"
-                    value={form.initialGapPct}
-                    onChange={value => setField('initialGapPct', value)}
-                  />
-                  <NumericField
-                    id="t-trade-gap-slope"
-                    label="放宽斜率"
-                    value={form.trailingGapSlope}
-                    onChange={value => setField('trailingGapSlope', value)}
-                  />
-                </div>
-              </div>
-
-              <div className="border border-emerald-400/15 bg-emerald-400/[0.03] p-3">
-                <div className="flex items-center justify-between gap-ui-section">
-                  <div>
-                    <Label
-                      htmlFor="t-trade-high-profit-lock-enabled"
-                      className="text-ui-label font-bold text-slate-300"
-                    >
-                      高利润保护
-                    </Label>
-                    <p className="mt-1 text-ui-caption text-slate-600">
-                      按可执行买一计算峰值；进入高利润区后限制最大利润回吐
-                    </p>
-                  </div>
-                  <input
-                    id="t-trade-high-profit-lock-enabled"
-                    type="checkbox"
-                    checked={form.highProfitLockEnabled}
-                    onChange={event =>
-                      setField('highProfitLockEnabled', event.target.checked)
-                    }
-                    className="h-4 w-4 cursor-pointer accent-emerald-500 focus-visible:ring-2 focus-visible:ring-emerald-500/60"
-                  />
-                </div>
-                {form.highProfitLockEnabled && (
-                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-white/[0.05] pt-3">
-                    <NumericField
-                      id="t-trade-high-profit-arm"
-                      label="高利润武装线"
-                      suffix="%"
-                      value={form.highProfitArmPct}
-                      onChange={value => setField('highProfitArmPct', value)}
-                    />
-                    <NumericField
-                      id="t-trade-high-profit-drawdown"
-                      label="峰值最大回吐"
-                      suffix="%"
-                      value={form.highProfitMaxDrawdownPct}
-                      onChange={value =>
-                        setField('highProfitMaxDrawdownPct', value)
-                      }
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div className="border border-amber-400/15 bg-amber-400/[0.03] p-3">
-                <div className="flex items-center justify-between gap-ui-section">
-                  <div>
-                    <Label
-                      htmlFor="t-trade-rapid-reversal-enabled"
-                      className="text-ui-label font-bold text-slate-300"
-                    >
-                      极速反转退出
-                    </Label>
-                    <p className="mt-1 text-ui-caption text-slate-600">
-                      高利润峰值形成后，短时间内连续确认买一收益快速回落即紧急退出
-                    </p>
-                  </div>
-                  <input
-                    id="t-trade-rapid-reversal-enabled"
-                    type="checkbox"
-                    checked={form.rapidReversalEnabled}
-                    onChange={event =>
-                      setField('rapidReversalEnabled', event.target.checked)
-                    }
-                    className="h-4 w-4 cursor-pointer accent-amber-500 focus-visible:ring-2 focus-visible:ring-amber-500/60"
-                  />
-                </div>
-                {form.rapidReversalEnabled && (
-                  <div className="mt-3 grid grid-cols-3 gap-3 border-t border-white/[0.05] pt-3">
-                    <NumericField
-                      id="t-trade-rapid-reversal-window"
-                      label="反转窗口"
-                      suffix="秒"
-                      value={form.rapidReversalWindowSeconds}
-                      onChange={value =>
-                        setField('rapidReversalWindowSeconds', value)
-                      }
-                    />
-                    <NumericField
-                      id="t-trade-rapid-reversal-drawdown"
-                      label="回吐阈值"
-                      suffix="%"
-                      value={form.rapidReversalDrawdownPct}
-                      onChange={value =>
-                        setField('rapidReversalDrawdownPct', value)
-                      }
-                    />
-                    <NumericField
-                      id="t-trade-rapid-reversal-confirm"
-                      label="连续确认"
-                      suffix="Tick"
-                      value={form.rapidReversalConfirmTicks}
-                      onChange={value =>
-                        setField('rapidReversalConfirmTicks', value)
-                      }
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div className="border border-white/[0.07] bg-[#07111f]/60 p-3">
-                <div className="flex items-center justify-between gap-ui-section">
-                  <div>
-                    <Label
-                      htmlFor="t-trade-limit-up-touch-enabled"
-                      className="text-ui-label font-bold text-slate-300"
-                    >
-                      涨停触达退出
-                    </Label>
-                    <p className="mt-1 text-ui-caption text-slate-600">
-                      活跃 T
-                      批次的可执行买一达到涨停价时，用昨日老仓完成等量退出
-                    </p>
-                  </div>
-                  <input
-                    id="t-trade-limit-up-touch-enabled"
-                    type="checkbox"
-                    checked={form.limitUpTouchExitEnabled}
-                    onChange={event =>
-                      setField('limitUpTouchExitEnabled', event.target.checked)
-                    }
-                    className="h-4 w-4 cursor-pointer accent-red-500 focus-visible:ring-2 focus-visible:ring-red-500/60"
-                  />
-                </div>
-                {form.limitUpTouchExitEnabled && (
-                  <div className="mt-3 max-w-48 border-t border-white/[0.05] pt-3">
-                    <NumericField
-                      id="t-trade-limit-up-touch-tolerance"
-                      label="涨停容差"
-                      suffix="Tick"
-                      value={form.limitUpTouchToleranceTicks}
-                      onChange={value =>
-                        setField('limitUpTouchToleranceTicks', value)
-                      }
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div className="border border-white/[0.07] bg-[#07111f]/60 p-3">
-                <div className="flex items-center justify-between gap-ui-section">
-                  <div>
-                    <Label
-                      htmlFor="t-trade-hard-stop-enabled"
-                      className="text-ui-label font-bold text-slate-300"
-                    >
-                      硬止损保护
-                    </Label>
-                    <p className="mt-1 text-ui-caption text-slate-600">
-                      可选风险底线；关闭后不会因亏损比例自动卖出
-                    </p>
-                  </div>
-                  <input
-                    id="t-trade-hard-stop-enabled"
-                    type="checkbox"
-                    checked={form.hardStopEnabled}
-                    onChange={event =>
-                      setField('hardStopEnabled', event.target.checked)
-                    }
-                    className="h-4 w-4 cursor-pointer accent-red-500 focus-visible:ring-2 focus-visible:ring-red-500/60"
-                  />
-                </div>
-                {form.hardStopEnabled && (
-                  <div className="mt-3 max-w-48 border-t border-white/[0.05] pt-3">
-                    <NumericField
-                      id="t-trade-hard-stop"
-                      label="硬止损线"
-                      suffix="%"
-                      value={form.hardStopPct}
-                      onChange={value => setField('hardStopPct', value)}
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div className="border border-white/[0.07] bg-[#07111f]/60 p-3">
-                <Label
-                  htmlFor="t-trade-time-exit-mode"
-                  className="text-ui-label font-bold text-slate-300"
-                >
-                  时间退出策略
-                </Label>
-                <p className="mt-1 text-ui-caption text-slate-600">
-                  默认无限期保护，仅在明确选择后按时间自动卖出
-                </p>
-                <Select
-                  value={form.timeExitMode}
-                  onValueChange={value =>
-                    setField(
-                      'timeExitMode',
-                      value as SettingsForm['timeExitMode']
-                    )
-                  }
-                >
-                  <SelectTrigger
-                    id="t-trade-time-exit-mode"
-                    className="mt-3 h-control-default rounded-sm border-white/10 bg-[#07111f] text-ui-label focus:ring-primary/60"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={TTradeTimeExitMode.Unlimited}>
-                      无限期保护
-                    </SelectItem>
-                    <SelectItem value={TTradeTimeExitMode.EndOfDay}>
-                      当日收盘前退出
-                    </SelectItem>
-                    <SelectItem value={TTradeTimeExitMode.MaxHoldingDays}>
-                      持有 N 个交易日退出
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-
-                {form.timeExitMode !== TTradeTimeExitMode.Unlimited && (
-                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-white/[0.05] pt-3">
-                    {form.timeExitMode ===
-                      TTradeTimeExitMode.MaxHoldingDays && (
-                      <NumericField
-                        id="t-trade-max-holding-days"
-                        label="最长持有"
-                        suffix="交易日"
-                        value={form.maxHoldingTradingDays}
-                        onChange={value =>
-                          setField('maxHoldingTradingDays', value)
-                        }
-                      />
-                    )}
-                    <div className="space-y-1.5">
-                      <Label
-                        htmlFor="t-trade-time-exit-time"
-                        className="text-ui-label font-bold text-slate-400"
-                      >
-                        退出时刻
-                      </Label>
-                      <Input
-                        id="t-trade-time-exit-time"
-                        type="time"
-                        value={form.timeExitTime}
-                        onChange={event =>
-                          setField('timeExitTime', event.target.value)
-                        }
-                        className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-ui-label focus-visible:ring-primary/60"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {!form.hardStopEnabled &&
-                  form.timeExitMode === TTradeTimeExitMode.Unlimited && (
-                    <div className="mt-3 flex items-start gap-2 border-t border-amber-400/10 pt-3 text-ui-caption leading-4 text-amber-200/80">
-                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      未达到收益武装线的批次可能长期持有，仍可通过人工操作结束。
-                    </div>
-                  )}
-              </div>
-            </div>
-          </section>
-
+          <TTradeExecutionSettingsPanel form={form} onFieldChange={setField} />
           <section className="bg-[#0a1424] p-ui-section xl:col-span-2">
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.05] pb-3">
               <div>
@@ -5112,7 +4748,7 @@ export function TTradeGlobalPage() {
         </div>
         <Button
           type="button"
-          className="h-control-default rounded-sm bg-red-500 px-ui-section text-ui-label text-white hover:bg-red-400"
+          className="h-control-default rounded-sm bg-primary px-ui-section text-ui-label text-primary-foreground hover:bg-primary/90"
           disabled={
             !accountId ||
             !monitor ||
