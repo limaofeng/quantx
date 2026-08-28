@@ -17,6 +17,8 @@ from .broker import LiveBroker, QmtDataBroker
 from .credentials import DeviceCredentialStore, state_directory
 from .emergency import EmergencyStopStore
 from .endpoints import httpx_verify, masked_device_id, normalize_api_url
+from .health import AgentHealthState
+from .health_server import QmtAgentHealthServer, health_server_address
 from .journal import LocalJournal
 from .process_watchdog import AgentProcessWatchdog
 from .runtime import (
@@ -36,34 +38,47 @@ def _hard_exit_for_fatal_market_data(exit_code: int) -> NoReturn:
 async def _run_runtime_guarded(
   runtime: AgentRuntime,
   watchdog: AgentProcessWatchdog,
+  health_server: QmtAgentHealthServer | None = None,
 ) -> None:
-  runtime_task = asyncio.create_task(
-    runtime.run_forever(),
-    name="qmt-agent-runtime",
-  )
-  heartbeat_task = asyncio.create_task(
-    watchdog.heartbeat_loop(),
-    name="qmt-agent-process-watchdog-heartbeat",
-  )
+  tasks = {
+    "runtime": asyncio.create_task(
+      runtime.run_forever(),
+      name="qmt-agent-runtime",
+    ),
+    "watchdog": asyncio.create_task(
+      watchdog.heartbeat_loop(),
+      name="qmt-agent-process-watchdog-heartbeat",
+    ),
+  }
+  if health_server is not None:
+    tasks["health-server"] = asyncio.create_task(
+      health_server.run(),
+      name="qmt-agent-health-server",
+    )
   try:
     done, _ = await asyncio.wait(
-      {runtime_task, heartbeat_task},
+      set(tasks.values()),
       return_when=asyncio.FIRST_COMPLETED,
     )
-    if heartbeat_task in done:
-      await heartbeat_task
+    if tasks["watchdog"] in done:
+      await tasks["watchdog"]
       raise RuntimeError("Agent process watchdog stopped unexpectedly")
-    await runtime_task
+    health_task = tasks.get("health-server")
+    if health_task is not None and health_task in done:
+      await health_task
+      raise RuntimeError("QMT Agent health server stopped unexpectedly")
+    await tasks["runtime"]
   finally:
-    for task in (runtime_task, heartbeat_task):
+    for task in tasks.values():
       if not task.done():
         task.cancel()
-    await asyncio.gather(runtime_task, heartbeat_task, return_exceptions=True)
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
 
 
 def _run_runtime(
   runtime: AgentRuntime,
   watchdog: AgentProcessWatchdog | None = None,
+  health_server: QmtAgentHealthServer | None = None,
 ) -> None:
   owned_watchdog = watchdog
   if owned_watchdog is None:
@@ -71,7 +86,7 @@ def _run_runtime(
     owned_watchdog.start()
   try:
     try:
-      asyncio.run(_run_runtime_guarded(runtime, owned_watchdog))
+      asyncio.run(_run_runtime_guarded(runtime, owned_watchdog, health_server))
     except (_FatalMarketDataPreparationError, _FatalTradingRecoveryError) as exc:
       logging.getLogger(__name__).critical(
         "Fatal native QMT state requires a supervised process restart: error=%s",
@@ -208,6 +223,8 @@ def _run(mode: str) -> None:
         return LiveBroker(allowed_accounts, journal=journal)
       return QmtDataBroker(allowed_accounts, data_only=mode == "data-only")
 
+    health_state = AgentHealthState(mode)
+    health_host, health_port = health_server_address()
     runtime = AgentRuntime(
       configuration=configuration,
       device_secret=secret,
@@ -216,11 +233,17 @@ def _run(mode: str) -> None:
       broker_factory=broker_factory,
       journal=journal,
       emergency_stop=EmergencyStopStore(state_directory() / "emergency-stop.json"),
+      health_state=health_state,
+    )
+    health_server = QmtAgentHealthServer(
+      health_state,
+      health_host,
+      health_port,
     )
   except BaseException:
     watchdog.close()
     raise
-  _run_runtime(runtime, watchdog)
+  _run_runtime(runtime, watchdog, health_server)
 
 
 def main() -> None:

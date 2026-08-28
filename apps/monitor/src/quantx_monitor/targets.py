@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .models import TargetDefinition, TargetGroup
+from .models import ProbeKind, TargetDefinition, TargetGroup
 
 TARGETS: tuple[TargetDefinition, ...] = (
   TargetDefinition("postgresql", "PostgreSQL", TargetGroup.EXTERNAL),
@@ -14,16 +14,36 @@ TARGETS: tuple[TargetDefinition, ...] = (
   TargetDefinition("api-public", "API 公共链路", TargetGroup.RUNTIME),
   TargetDefinition("api-process", "API 进程", TargetGroup.RUNTIME),
   TargetDefinition("market-gateway", "Market Gateway", TargetGroup.RUNTIME),
-  TargetDefinition("engine", "策略引擎", TargetGroup.RUNTIME, derived=True),
-  TargetDefinition("worker", "Prefect Worker", TargetGroup.RUNTIME, derived=True),
-  TargetDefinition("qmt-agent", "QMT Agent", TargetGroup.RUNTIME, derived=True),
-  TargetDefinition("market-data", "行情服务", TargetGroup.RUNTIME, derived=True),
+  TargetDefinition(
+    "engine",
+    "策略引擎",
+    TargetGroup.RUNTIME,
+    probe_kind=ProbeKind.DERIVED,
+  ),
+  TargetDefinition(
+    "worker",
+    "Prefect Worker",
+    TargetGroup.RUNTIME,
+    probe_kind=ProbeKind.DERIVED,
+  ),
+  TargetDefinition(
+    "qmt-agent",
+    "QMT Agent",
+    TargetGroup.RUNTIME,
+    probe_kind=ProbeKind.COMPOSITE,
+  ),
+  TargetDefinition(
+    "market-data",
+    "行情服务",
+    TargetGroup.RUNTIME,
+    probe_kind=ProbeKind.DERIVED,
+  ),
   TargetDefinition(
     "ai-runtime",
     "AI Runtime",
     TargetGroup.RUNTIME,
     optional=True,
-    derived=True,
+    probe_kind=ProbeKind.DERIVED,
   ),
 )
 

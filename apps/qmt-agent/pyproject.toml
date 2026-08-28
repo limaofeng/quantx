@@ -11,6 +11,7 @@ dependencies = [
   "keyring>=25.0",
   "orjson>=3.10.0",
   "quantx-contracts",
+  "uvicorn>=0.30.0",
   "websockets>=11.0",
 ]
 

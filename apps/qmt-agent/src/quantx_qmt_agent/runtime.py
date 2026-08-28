@@ -49,6 +49,7 @@ from .broker import (
 from .credentials import DeviceConfiguration, state_directory
 from .emergency import EmergencyStopStore
 from .endpoints import configured_tls_context, httpx_verify, websocket_url
+from .health import AGENT_VERSION, AgentHealthState
 from .journal import LocalJournal
 from .whole_market_capture import (
   MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
@@ -613,6 +614,7 @@ class AgentRuntime:
     journal: LocalJournal,
     emergency_stop: EmergencyStopStore | None = None,
     market_spool_base_directory: Path | None = None,
+    health_state: AgentHealthState | None = None,
   ) -> None:
     self.configuration = configuration
     self.device_secret = device_secret
@@ -627,6 +629,7 @@ class AgentRuntime:
       self._broker_ready.set()
     self.journal = journal
     self.emergency_stop = emergency_stop
+    self.health_state = health_state or AgentHealthState(mode)
     self._stopped = asyncio.Event()
     self._access_token = ""
     self._access_token_expires_at = datetime.now(timezone.utc)
@@ -790,6 +793,7 @@ class AgentRuntime:
       await session
       return True
     finally:
+      self._health_state().set_control_connected(False)
       for task in (session, fatal):
         if not task.done():
           task.cancel()
@@ -840,12 +844,31 @@ class AgentRuntime:
   async def _ensure_broker_initialized(self) -> None:
     if self.broker is not None:
       self._broker_ready.set()
+      self._health_state().set_xtdata_connected(self._is_market_data_ready())
+      self._health_state().set_xttrading_connected(self._is_trading_ready())
       return
     factory = self._broker_factory
     if factory is None:  # pragma: no cover - constructor enforces this
       raise RuntimeError("QMT broker factory is unavailable")
     self.broker = await asyncio.to_thread(factory)
     self._broker_ready.set()
+    self._health_state().set_xtdata_connected(self._is_market_data_ready())
+    self._health_state().set_xttrading_connected(self._is_trading_ready())
+
+  def _health_state(self) -> AgentHealthState:
+    state = getattr(self, "health_state", None)
+    if state is None:
+      state = AgentHealthState(getattr(self, "mode", "data-only"))
+      self.health_state = state
+    return state
+
+  def _set_market_stream_status(self, status: str) -> None:
+    self._market_stream_status = status
+    self._health_state().set_market_stream_status(status)
+
+  def _set_trading_ready(self, ready: bool) -> None:
+    self._trading_ready_cache = bool(ready)
+    self._health_state().set_xttrading_connected(bool(ready))
 
   def _requires_trading_reconciliation(self) -> bool:
     return bool(
@@ -876,6 +899,7 @@ class AgentRuntime:
       return
     already_reconciling = self._requires_trading_reconciliation()
     self._trading_reconciliation_required = True
+    self._health_state().set_reconciliation_ready(False)
     self._trading_reconciliation_snapshot_id = None
     self._trading_reconciliation_snapshot_generation = None
     self._trading_recovery_reason = reason[:128]
@@ -926,6 +950,7 @@ class AgentRuntime:
       self._begin_trading_reconciliation("snapshot_generation_stale")
       return False
     self._trading_reconciliation_required = False
+    self._health_state().set_reconciliation_ready(True)
     self._trading_reconciliation_snapshot_id = None
     self._trading_reconciliation_snapshot_generation = None
     self._trading_recovery_started_monotonic = None
@@ -973,7 +998,7 @@ class AgentRuntime:
         payload={
           "device_id": self.configuration.device_id,
           "access_token": self._access_token,
-          "agent_version": "0.1.0",
+          "agent_version": AGENT_VERSION,
           "capabilities": self._advertised_capabilities(),
         },
       )
@@ -986,6 +1011,7 @@ class AgentRuntime:
         raise RuntimeError("QMT Agent authentication rejected")
       await self._ensure_broker_initialized()
       self._control_session_authenticated = True
+      self._health_state().set_control_connected(True)
       self._control_hub_registered_once.set()
 
       self._session_loop = asyncio.get_running_loop()
@@ -1160,7 +1186,7 @@ class AgentRuntime:
     except asyncio.TimeoutError as exc:
       abandoned.set()
       outcome.cancel()
-      self._trading_ready_cache = False
+      self._set_trading_ready(False)
       self._trading_readiness_failed = True
       self._begin_trading_reconciliation(f"{operation}_timed_out")
       raise _FatalTradingRecoveryError(
@@ -1234,7 +1260,7 @@ class AgentRuntime:
       except Exception:
         self._begin_trading_reconciliation("snapshot_query_failed")
         if self.mode == "live":
-          self._trading_ready_cache = False
+          self._set_trading_ready(False)
           self._trading_readiness_failed = True
         raise
       snapshot_message_id = str(uuid.uuid4())
@@ -1265,7 +1291,7 @@ class AgentRuntime:
           # LiveBroker marks the native session unhealthy as well.  Never let
           # an incomplete report serve as recovery evidence.
           self._begin_trading_reconciliation("snapshot_incomplete")
-          self._trading_ready_cache = False
+          self._set_trading_ready(False)
           self._trading_readiness_failed = True
         elif reconciliation or self._requires_trading_reconciliation():
           self._trading_reconciliation_snapshot_id = snapshot_message_id
@@ -1325,9 +1351,11 @@ class AgentRuntime:
   async def _market_data_readiness_loop(self) -> None:
     ensure_ready = getattr(self.broker, "ensure_market_data_ready", None)
     if not callable(ensure_ready):
+      self._health_state().set_xtdata_connected(self._is_market_data_ready())
       while True:
         await asyncio.sleep(XTDATA_READINESS_RETRY_SECONDS)
     previous = self._is_market_data_ready()
+    self._health_state().set_xtdata_connected(previous)
     while True:
       try:
         await self._run_xtdata_control(
@@ -1342,6 +1370,7 @@ class AgentRuntime:
           exc.__class__.__name__,
         )
       current = self._is_market_data_ready()
+      self._health_state().set_xtdata_connected(current)
       if current != previous:
         logger.info(
           "XTData readiness changed: ready=%s",
@@ -1379,7 +1408,7 @@ class AgentRuntime:
       return True
     ensure_ready = getattr(self.broker, "ensure_trading_ready", None)
     if not callable(ensure_ready):
-      self._trading_ready_cache = False
+      self._set_trading_ready(False)
       self._trading_readiness_failed = True
       return False
 
@@ -1394,7 +1423,7 @@ class AgentRuntime:
         timeout=XTTRADING_RECONNECT_TIMEOUT_SECONDS,
       )
       self._trading_connection_generation_cache = max(0, int(generation))
-      self._trading_ready_cache = bool(ready)
+      self._set_trading_ready(bool(ready))
       self._trading_readiness_failed = not ready
       return bool(ready)
     except _FatalTradingRecoveryError:
@@ -1404,7 +1433,7 @@ class AgentRuntime:
         "XTTrading readiness retry failed: error=%s",
         exc.__class__.__name__,
       )
-    self._trading_ready_cache = False
+    self._set_trading_ready(False)
     self._trading_readiness_failed = True
     return False
 
@@ -1521,6 +1550,7 @@ class AgentRuntime:
           raise RuntimeError("XTData rejected whole-market subscription")
         self._whole_market_subscription_active = True
         self._whole_market_subscription_ready.set()
+        self._health_state().set_xtdata_connected(True)
         generation_reader = getattr(
           self.broker,
           "market_data_connection_generation",
@@ -1566,6 +1596,7 @@ class AgentRuntime:
           readiness = getattr(self.broker, "is_market_data_ready", None)
           connected = bool(readiness()) if callable(readiness) else True
           if not connected:
+            self._health_state().set_xtdata_connected(False)
             try:
               connected = (
                 bool(
@@ -1584,6 +1615,7 @@ class AgentRuntime:
               )
               continue
             if connected:
+              self._health_state().set_xtdata_connected(True)
               reset_reason = "XTData connection recovered after disconnect"
               break
 
@@ -1629,7 +1661,7 @@ class AgentRuntime:
         if not reset_reason:
           return
         logger.error("QMT whole-market native subscription reset: %s", reset_reason)
-        self._market_stream_status = "STALE"
+        self._set_market_stream_status("STALE")
         # Publish the exact continuity-loss reason before waking the stream
         # task.  Otherwise the event can win the scheduling race and the
         # stream supervisor can only report a generic native-reset error.
@@ -1657,6 +1689,7 @@ class AgentRuntime:
         raise
       except Exception as exc:
         if not self._whole_market_subscription_active:
+          self._health_state().set_xtdata_connected(False)
           self._whole_market_subscription_ready.clear()
           self._whole_market_capture.reset_source(
             f"whole-market native subscription attempt failed: {exc.__class__.__name__}"
@@ -1730,12 +1763,12 @@ class AgentRuntime:
         raise RuntimeError("whole-market stream stopped unexpectedly")
       except asyncio.CancelledError:
         self._whole_market_capture.begin_syncing()
-        self._market_stream_status = "OFFLINE"
+        self._set_market_stream_status("OFFLINE")
         self._market_stream_ready_since_monotonic = 0.0
         raise
       except _PlannedMarketTokenRefresh as exc:
         self._market_stream_resyncs += 1
-        self._market_stream_status = "SYNCING"
+        self._set_market_stream_status("SYNCING")
         self._market_stream_ready_since_monotonic = 0.0
         delay = 1.0
         logger.info(
@@ -1753,7 +1786,7 @@ class AgentRuntime:
           ready_seconds=ready_seconds,
         )
         self._market_stream_resyncs += 1
-        self._market_stream_status = "SYNCING"
+        self._set_market_stream_status("SYNCING")
         self._market_stream_ready_since_monotonic = 0.0
         logger.warning(
           "QMT whole-market stream reconnecting: resyncs=%s "
@@ -1777,7 +1810,7 @@ class AgentRuntime:
       payload={
         "device_id": self.configuration.device_id,
         "access_token": access_token,
-        "agent_version": "0.1.0",
+        "agent_version": AGENT_VERSION,
         "capabilities": self._advertised_capabilities(),
       },
     )
@@ -1815,7 +1848,7 @@ class AgentRuntime:
     await self._wait_for_initial_control_hub_registration()
     market_access_token = self._access_token
     market_token_expires_at = self._access_token_expires_at
-    self._market_stream_status = "SYNCING"
+    self._set_market_stream_status("SYNCING")
     self._market_stream_sequence = 0
     self._market_stream_ready_since_monotonic = 0.0
     self._market_stream_outbound_depth = 0
@@ -2042,7 +2075,7 @@ class AgentRuntime:
         if pipeline_tasks:
           await asyncio.gather(*pipeline_tasks, return_exceptions=True)
         self._whole_market_capture.begin_syncing()
-        self._market_stream_status = "SYNCING"
+        self._set_market_stream_status("SYNCING")
 
   def _require_native_whole_market_sync(self, stage: str) -> None:
     if (
@@ -2407,7 +2440,7 @@ class AgentRuntime:
             # the post-barrier convergence batch and acknowledged it.  The
             # capture is already ordered at this point, but the Agent's public
             # stream status must remain fail-closed until this ACK arrives.
-            self._market_stream_status = "READY"
+            self._set_market_stream_status("READY")
             self._market_stream_ready_since_monotonic = time.monotonic()
             logger.info(
               "QMT whole-market stream ready: stream_id=%s sequence=3",
@@ -2526,6 +2559,8 @@ class AgentRuntime:
     trading_ready = bool(
       self._is_trading_ready() and not getattr(self, "_trading_readiness_failed", False)
     )
+    self._health_state().set_xtdata_connected(market_data_ready)
+    self._health_state().set_xttrading_connected(trading_ready)
     if self._requires_trading_reconciliation():
       status = "RECONCILING"
     if not market_data_ready:
@@ -2537,7 +2572,7 @@ class AgentRuntime:
     journal_stats = self.journal.stats()
     payload = HeartbeatPayload(
       device_id=self.configuration.device_id,
-      agent_version="0.1.0",
+      agent_version=AGENT_VERSION,
       capabilities=self._advertised_capabilities(),
       status=status,
       xtdata_status="CONNECTED" if market_data_ready else "DISCONNECTED",
@@ -3241,6 +3276,8 @@ class AgentRuntime:
   ) -> None:
     if self._fatal_market_data_error is None:
       self._fatal_market_data_error = error
+    self._health_state().set_xtdata_connected(False)
+    self._set_market_stream_status("OFFLINE")
     self._fatal_market_data_event.set()
     self._stopped.set()
 
@@ -3298,7 +3335,7 @@ class AgentRuntime:
     if not hasattr(self, "_market_stream_resyncs"):
       self._market_stream_resyncs = 0
     if not hasattr(self, "_market_stream_status"):
-      self._market_stream_status = "OFFLINE"
+      self._set_market_stream_status("OFFLINE")
     if not hasattr(self, "_market_stream_sequence"):
       self._market_stream_sequence = 0
     if not hasattr(self, "_market_stream_ack_latency_ms"):

@@ -1,7 +1,7 @@
 <service>
   <id>QuantXQmtAgent</id>
   <name>QuantX QMT Agent</name>
-  <description>Outbound-only XTData and XTTrading Agent for QuantX.</description>
+  <description>Outbound XTData/XTTrading Agent with a read-only health listener for QuantX.</description>
   <executable>{{QMT_PYTHON}}</executable>
   <arguments>"{{ROOT}}\ops\supervise_process.py" --name qmt-agent --state-dir "{{RUNTIME}}\state" -- "{{QMT_PYTHON}}" -m quantx_qmt_agent.main run --mode {{QMT_AGENT_MODE}}</arguments>
   <workingdirectory>{{ROOT}}</workingdirectory>
@@ -12,6 +12,8 @@
   <env name="ENV" value="production" />
   <env name="QUANTX_AGENT_STATE_DIR" value="{{RUNTIME}}\qmt-agent" />
   <env name="QMT_AGENT_MODE" value="{{QMT_AGENT_MODE}}" />
+  <env name="QMT_AGENT_HEALTH_HOST" value="{{QMT_AGENT_HEALTH_HOST}}" />
+  <env name="QMT_AGENT_HEALTH_PORT" value="{{QMT_AGENT_HEALTH_PORT}}" />
   <env name="QMT_ACCOUNT_WHITELIST" value="{{QMT_ACCOUNT_WHITELIST}}" />
   <env name="QMT_USERDATA_PATH" value="{{QMT_USERDATA_PATH}}" />
   <env name="ENABLE_REAL_TRADING" value="{{ENABLE_REAL_TRADING}}" />

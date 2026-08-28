@@ -183,6 +183,16 @@ sleep-guard。先关闭唯一公开入口，避免停止期间继续接收新命
 该进程组发送 `SIGTERM`；超出有界优雅窗口后才发送 `SIGKILL`。`down` 不读取、不
 联系、不停止 Windows Agent。普通 `up/down` 也不拥有 Monitor 生命周期。
 
+启动独立 Monitor 前，在 Mac Dev 环境文件中设置稳定 Windows QMT 主机的健康根
+地址，例如：
+
+```bash
+MONITOR_QMT_AGENT_HEALTH_URL=http://windows-qmt-host:18084
+```
+
+该值不从 WebSocket remote address 推测，不能包含凭据、路径、查询或 fragment。
+Monitor 不跟随重定向，也不会把完整内部 URL 写入公共 API、日志或异常文本。
+
 ## 5. 状态、日志与退出码
 
 主运行状态位于：

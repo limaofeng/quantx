@@ -131,3 +131,63 @@ async def test_history_and_window_metrics_persist_latency(tmp_path):
     assert history[0]["latencyP95Ms"] == 29.0
   finally:
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_valid_unavailable_http_rtt_contributes_to_latency_metrics(tmp_path):
+  storage = MonitorStorage(tmp_path / "monitor.sqlite3")
+  await storage.open(["qmt-agent"])
+  checked_at = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
+  try:
+    await storage.record_results(
+      [
+        ProbeResult(
+          target_id="qmt-agent",
+          checked_at=checked_at,
+          observed_status=MonitorStatus.UNAVAILABLE,
+          latency_ms=42.0,
+          status_code=503,
+          reason_code="XTDATA_UNAVAILABLE",
+        )
+      ]
+    )
+    metrics = await storage.window_metrics(
+      since=checked_at.timestamp(),
+      now=checked_at.timestamp() + 30,
+      interval_seconds=30,
+    )
+
+    assert metrics["qmt-agent"]["latencyP50Ms"] == 42.0
+    assert metrics["qmt-agent"]["latencyP95Ms"] == 42.0
+  finally:
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_latency_exception_is_scoped_to_qmt_agent(tmp_path):
+  storage = MonitorStorage(tmp_path / "monitor.sqlite3")
+  await storage.open(["api-public"])
+  checked_at = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
+  try:
+    await storage.record_results(
+      [
+        ProbeResult(
+          target_id="api-public",
+          checked_at=checked_at,
+          observed_status=MonitorStatus.UNAVAILABLE,
+          latency_ms=42.0,
+          status_code=503,
+          reason_code="HTTP_STATUS",
+        )
+      ]
+    )
+    metrics = await storage.window_metrics(
+      since=checked_at.timestamp(),
+      now=checked_at.timestamp() + 30,
+      interval_seconds=30,
+    )
+
+    assert metrics["api-public"]["latencyP50Ms"] is None
+    assert metrics["api-public"]["latencyP95Ms"] is None
+  finally:
+    await storage.close()

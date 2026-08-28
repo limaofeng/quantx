@@ -1,1 +1,1 @@
-"""Outbound-only miniQMT execution and market-data agent."""
+"""QMT execution Agent with outbound trading/data and read-only health."""

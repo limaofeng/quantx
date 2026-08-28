@@ -292,7 +292,10 @@ class MonitorStorage:
         SELECT target_id, latency_ms
         FROM check_samples
         WHERE checked_at >= ? AND latency_ms IS NOT NULL
-          AND observed_status IN ('healthy', 'degraded')
+          AND (
+            observed_status IN ('healthy', 'degraded')
+            OR target_id = 'qmt-agent'
+          )
         ORDER BY target_id, latency_ms
         """,
         (since,),

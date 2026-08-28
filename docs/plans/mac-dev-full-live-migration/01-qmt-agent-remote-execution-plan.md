@@ -29,7 +29,9 @@
 - 仍然只依赖 `quantx_contracts`，不依赖 ORM、Repository、Engine 或策略。
 - 复用改造前已经可用的 `xtquant-demo` Conda 环境，不新建独立 QMT Agent venv，
   也不回退到服务端 Python。
-- 只建立出站 HTTP(S)/WS(S)，不监听任何局域网端口。
+- 交易控制、行情、历史上传和报告只建立出站 HTTP(S)/WS(S)；后续观测重构允许
+  同一进程提供固定只读健康监听，详见
+  [QMT Agent 独立健康检查与 Monitor 直连探测重构方案](../QMTAgent独立健康检查与Monitor直连探测重构方案.md)。
 - 在 Windows 本地保存设备密钥、QMT 配置、journal 和行情上传 spool。
 - 独立启动、停止、重连和恢复，不依赖 Mac 启动器。
 - 接收 Mac 的实盘命令并把 QMT 真实回报可靠收敛回服务端。

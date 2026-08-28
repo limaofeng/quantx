@@ -11,7 +11,14 @@ import httpx
 
 from .config import MonitorSettings
 from .models import ProbeResult, utc_now
-from .probes import HttpProbe, PostgreSQLProbe, RedisProbe, RuntimeSnapshotProbe
+from .probes import (
+  HttpProbe,
+  PostgreSQLProbe,
+  QmtAgentHealthProbe,
+  RedisProbe,
+  RuntimeSnapshotProbe,
+  combine_qmt_agent_probe,
+)
 from .probes.http import json_status
 from .storage import MonitorStorage
 
@@ -143,6 +150,11 @@ class MonitorScheduler:
       direct.extend(
         [lambda probe=probe: probe.run(self._client) for probe in http_probes]
       )
+      qmt_agent_probe = QmtAgentHealthProbe(
+        self.settings.qmt_agent_health_url,
+        self.settings.http_timeout_seconds,
+      )
+      direct.append(lambda: qmt_agent_probe.run(self._client))
 
       async def guarded(action: Callable[[], Awaitable[ProbeResult]]) -> ProbeResult:
         async with semaphore:
@@ -157,7 +169,18 @@ class MonitorScheduler:
       )
       async with semaphore:
         derived_results = await snapshot.run(self._client)
-      results = [*direct_results, *derived_results]
+      qmt_direct = next(
+        result for result in direct_results if result.target_id == "qmt-agent"
+      )
+      qmt_semantic = next(
+        result for result in derived_results if result.target_id == "qmt-agent"
+      )
+      qmt_result = combine_qmt_agent_probe(qmt_direct, qmt_semantic)
+      results = [
+        *(result for result in direct_results if result.target_id != "qmt-agent"),
+        *(result for result in derived_results if result.target_id != "qmt-agent"),
+        qmt_result,
+      ]
       try:
         await self.storage.record_results(results)
         self.last_cycle_at = utc_now().timestamp()

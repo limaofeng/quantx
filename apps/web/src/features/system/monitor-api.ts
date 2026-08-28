@@ -3,13 +3,14 @@ export type MonitorStatus =
 
 export type MonitorWindow = '24h' | '7d' | '30d';
 export type MonitorRange = MonitorWindow | '90d' | '1y';
+export type MonitorProbeKind = 'direct' | 'derived' | 'composite';
 
 export interface MonitorTargetSummary {
   id: string;
   name: string;
   group: 'external_dependency' | 'quantx_runtime';
   optional: boolean;
-  derived: boolean;
+  probeKind: MonitorProbeKind;
   status: MonitorStatus;
   checkedAt: string | null;
   lastSuccessAt: string | null;

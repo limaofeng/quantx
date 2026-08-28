@@ -21,13 +21,19 @@ class TargetGroup(StrEnum):
   RUNTIME = "quantx_runtime"
 
 
+class ProbeKind(StrEnum):
+  DIRECT = "direct"
+  DERIVED = "derived"
+  COMPOSITE = "composite"
+
+
 @dataclass(frozen=True)
 class TargetDefinition:
   target_id: str
   name: str
   group: TargetGroup
   optional: bool = False
-  derived: bool = False
+  probe_kind: ProbeKind = ProbeKind.DIRECT
 
 
 @dataclass(frozen=True)

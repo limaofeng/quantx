@@ -1,6 +1,6 @@
 # QMT Agent 独立健康检查与 Monitor 直连探测重构方案
 
-> 状态：待实现
+> 状态：已实现（自动化验证完成；跨主机实机验收待用户授权）
 >
 > 编写日期：2026-08-28
 >
@@ -531,3 +531,17 @@ Windows 上接手此任务的 Agent 在修改代码前必须：
 - 相关 Windows 运维说明
 
 本方案在实现完成后应更新状态和验收记录；它不能替代上述长期权威工程文档。
+
+## 15. 实现与自动化验收记录
+
+2026-08-28 已完成共享 v1 DTO、事件循环只读健康投影、同进程最小 ASGI server、
+结构化生命周期、Monitor 直连和组合函数、唯一样本持久化、`probeKind` 公共契约、
+Web RTT/P50/P95/趋势展示、WinSW 环境与 Private-profile 防火墙安装逻辑，以及权威
+工程文档同步。旧 `derived` 公共字段已原子删除，没有伪延迟或直接探测失败回退。
+
+自动化证据：根 `tests/` 为 3457 passed、24 skipped；最终 QMT Agent 与 Contracts
+复验为 345 passed；API unit 为 777 passed、2 skipped；Web 为 111 files、556 tests
+passed。`npm run check`、`npm run lint`、`npm run build`、Python Ruff、PowerShell
+解析和运维契约测试也全部通过。GraphQL 未变更，因此未运行 codegen。
+未执行真实交易、第二个 QMT Agent、`ops/quantx.ps1 install` 或跨主机故障演练。
+第 11 节 Windows/Mac 实机步骤仍需用户明确授权部署后执行，不能由代码测试替代。

@@ -62,11 +62,16 @@ async def test_public_api_is_sanitized_and_rejects_unknown_targets(tmp_path):
     )
     assert postgresql["latencyMs"] == 3.25
     assert postgresql["status"] == "healthy"
+    assert postgresql["probeKind"] == "direct"
+    assert "derived" not in postgresql
+    qmt = next(target for target in payload["targets"] if target["id"] == "qmt-agent")
+    assert qmt["probeKind"] == "composite"
     assert unknown.status_code == 404
     serialized = summary.text
     assert "secret-user" not in serialized
     assert "secret-password" not in serialized
     assert "redis-secret" not in serialized
     assert "postgresql+asyncpg" not in serialized
+    assert settings.qmt_agent_health_url not in serialized
   finally:
     await storage.close()

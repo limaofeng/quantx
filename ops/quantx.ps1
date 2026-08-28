@@ -107,6 +107,9 @@ $AgentModeFile = Join-Path $StateDirectory "qmt-agent-mode.json"
 $MonitorRuntime = Join-Path $Runtime "monitor"
 $MonitorStateFile = Join-Path $MonitorRuntime "dev-process.json"
 $MonitorPort = 18083
+$QmtAgentHealthHost = "0.0.0.0"
+$QmtAgentHealthPort = 18084
+$QmtAgentHealthFirewallRule = "QuantX-QMT-Agent-Health-18084"
 $DefaultPrefectApiUrl = "http://192.168.5.6:30420/api"
 $DefaultPrefectWorkerPool = "quantx-pool"
 $DefaultQmtCondaEnvironment = "xtquant-demo"
@@ -2348,6 +2351,16 @@ function New-ServiceConfigurations {
         [Security.SecurityElement]::Escape($agentMode)
       ).
       Replace(
+        "{{QMT_AGENT_HEALTH_HOST}}",
+        [Security.SecurityElement]::Escape($QmtAgentHealthHost)
+      ).
+      Replace(
+        "{{QMT_AGENT_HEALTH_PORT}}",
+        [Security.SecurityElement]::Escape(
+          $QmtAgentHealthPort.ToString([Globalization.CultureInfo]::InvariantCulture)
+        )
+      ).
+      Replace(
         "{{QMT_ACCOUNT_WHITELIST}}",
         [Security.SecurityElement]::Escape($agentAccountWhitelist)
       ).
@@ -2731,6 +2744,7 @@ function Install-AndStartServices {
     -Python $Python `
     -QmtPython $QmtPython `
     -ServiceRoot $ServiceRoot
+  Install-QmtAgentHealthFirewallRule
   $configs = Get-ServiceConfigurationNames
   $configs = @(
     $configs
@@ -2752,6 +2766,7 @@ function Install-AndStartServices {
     foreach ($wrapper in $installed) {
       & $wrapper uninstall
     }
+    Remove-QmtAgentHealthFirewallRule
     throw
   }
   $started = @()
@@ -2783,9 +2798,39 @@ function Install-AndStartServices {
     foreach ($wrapper in $installed) {
       & $wrapper uninstall
     }
+    Remove-QmtAgentHealthFirewallRule
     throw
   }
   Write-Host "QuantX WinSW services were installed." -ForegroundColor Green
+}
+
+function Install-QmtAgentHealthFirewallRule {
+  $existing = Get-NetFirewallRule `
+    -Name $QmtAgentHealthFirewallRule `
+    -ErrorAction SilentlyContinue
+  if ($existing) {
+    Remove-NetFirewallRule -Name $QmtAgentHealthFirewallRule
+  }
+  New-NetFirewallRule `
+    -Name $QmtAgentHealthFirewallRule `
+    -DisplayName "QuantX QMT Agent read-only health" `
+    -Description "Allow the read-only QMT Agent health listener on Private networks." `
+    -Enabled True `
+    -Profile Private `
+    -Direction Inbound `
+    -Action Allow `
+    -Protocol TCP `
+    -LocalPort $QmtAgentHealthPort |
+    Out-Null
+}
+
+function Remove-QmtAgentHealthFirewallRule {
+  $existing = Get-NetFirewallRule `
+    -Name $QmtAgentHealthFirewallRule `
+    -ErrorAction SilentlyContinue
+  if ($existing) {
+    Remove-NetFirewallRule -Name $QmtAgentHealthFirewallRule
+  }
 }
 
 function Register-ProductionMaintenance {
@@ -3006,6 +3051,7 @@ function Invoke-Uninstall {
       & $wrapper uninstall
     }
   }
+  Remove-QmtAgentHealthFirewallRule
   Write-Host "QuantX WinSW services were uninstalled." -ForegroundColor Green
 }
 

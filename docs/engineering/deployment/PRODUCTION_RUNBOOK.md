@@ -32,16 +32,23 @@ npm run build
 ```
 
 首次运行会生成 `.runtime/config/.env.production` 并失败关闭。填写强密钥、
-PostgreSQL、Redis、InfluxDB 和精确的 loopback HTTPS 配置后重试。安装器会：
+PostgreSQL、Redis、InfluxDB、精确的 loopback HTTPS 配置以及
+`MONITOR_QMT_AGENT_HEALTH_URL=http://<稳定 Windows 主机>:18084` 后重试。安装器会：
 
 1. 校验外层及包内 SHA256，拒绝路径穿越；
 2. 创建版本专属 server venv，以 `--no-index` 安装锁定 wheel；
 3. 用一次性干净 venv 把 QMT Agent、contracts 和非厂商依赖安装到版本目录的
    `qmt-site-packages`；不读取、不修改 XTQuant 厂商 site-packages；
 4. 在服务启动前执行 schema doctor、备份和显式 Alembic 升级；
-5. 原子切换 `current`、安装 WinSW、信任 Caddy 本地 CA并验证 HTTPS；
-6. 注册每天（含周末）16:30 的收盘后备份任务；严格 24 小时门禁要求周末与
+5. 原子切换 `current`、安装 WinSW，并仅对 Windows `Private` 网络配置文件开放
+   QMT Agent 只读健康端口 TCP `18084`，不限制单一远端 IP；
+6. 信任 Caddy 本地 CA 并验证 HTTPS；
+7. 注册每天（含周末）16:30 的收盘后备份任务；严格 24 小时门禁要求周末与
    长假期间也持续保留新鲜恢复点。
+
+安装前确认 Windows 当前网络配置文件为 `Private` 且 `18084` 未被其他进程占用。
+安装后在本机分别请求 `http://127.0.0.1:18084/health/live` 和
+`http://127.0.0.1:18084/health/ready`；端点只读，不得用于下单、重连或进程管理。
 
 生产启动本身只检查 Alembic revision，不执行 DDL。手工操作入口：
 

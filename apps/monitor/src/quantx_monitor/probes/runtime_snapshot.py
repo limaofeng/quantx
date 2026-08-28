@@ -71,8 +71,15 @@ class RuntimeSnapshotProbe:
         else MonitorStatus.UNKNOWN
       )
       reason = None
+      component_reason = (
+        str(component.get("reasonCode") or "").strip()
+        if isinstance(component, dict)
+        else ""
+      )
       if status == MonitorStatus.UNAVAILABLE:
-        reason = "DEPENDENCY_NOT_READY"
+        reason = component_reason or "DEPENDENCY_NOT_READY"
+      elif status == MonitorStatus.DEGRADED:
+        reason = component_reason or "DEPENDENCY_NOT_READY"
       elif status == MonitorStatus.UNKNOWN:
         reason = "SNAPSHOT_UNAVAILABLE"
       results.append(

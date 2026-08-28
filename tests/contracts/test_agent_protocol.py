@@ -9,10 +9,109 @@ from quantx_contracts import (
   AgentMessageType,
   CancelCommandPayload,
   OrderReportPayload,
+  QmtAgentControlConnectionStatus,
+  QmtAgentDependencyStatus,
+  QmtAgentHealthReason,
+  QmtAgentHealthSnapshot,
+  QmtAgentHealthStatus,
+  QmtAgentLiveResponse,
+  QmtAgentMarketStreamStatus,
+  QmtAgentMode,
+  QmtAgentReconciliationStatus,
   ReconciliationResultPayload,
   TradeCommandPayload,
   can_transition_order_status,
 )
+
+
+def _ready_agent_health(**overrides) -> QmtAgentHealthSnapshot:
+  values = {
+    "status": QmtAgentHealthStatus.READY,
+    "reason_code": None,
+    "agent_version": "0.1.0",
+    "protocol_version": "1.1",
+    "mode": QmtAgentMode.LIVE,
+    "uptime_seconds": 1234.5,
+    "control_connection_status": QmtAgentControlConnectionStatus.CONNECTED,
+    "reconciliation_status": QmtAgentReconciliationStatus.READY,
+    "xtdata_status": QmtAgentDependencyStatus.CONNECTED,
+    "xttrading_status": QmtAgentDependencyStatus.CONNECTED,
+    "market_stream_status": QmtAgentMarketStreamStatus.READY,
+    "observed_at": datetime.now(timezone.utc),
+  }
+  values.update(overrides)
+  return QmtAgentHealthSnapshot(**values)
+
+
+def test_qmt_agent_health_v1_round_trip_is_sanitized() -> None:
+  snapshot = _ready_agent_health()
+  restored = QmtAgentHealthSnapshot.model_validate_json(snapshot.model_dump_json())
+
+  assert restored == snapshot
+  assert restored.schema_version == 1
+  serialized = snapshot.model_dump_json().lower()
+  for forbidden in (
+    "account",
+    "credential",
+    "device",
+    "remote_address",
+    "userdata",
+    "exception",
+    "traceback",
+  ):
+    assert forbidden not in serialized
+
+
+def test_qmt_agent_live_response_has_only_fixed_fields() -> None:
+  response = QmtAgentLiveResponse(observed_at=datetime.now(timezone.utc))
+
+  assert set(response.model_dump()) == {
+    "schema_version",
+    "status",
+    "component",
+    "observed_at",
+  }
+
+
+@pytest.mark.parametrize(
+  "overrides",
+  [
+    {"schema_version": 2},
+    {"status": "invalid"},
+    {"uptime_seconds": -1},
+    {"uptime_seconds": float("nan")},
+    {"observed_at": datetime.now()},
+    {"status": "ready", "reason_code": "MARKET_STREAM_NOT_READY"},
+    {"status": "degraded", "reason_code": None},
+    {
+      "status": "unavailable",
+      "reason_code": "XTDATA_UNAVAILABLE",
+      "xtdata_status": "connected",
+    },
+    {"xtdata_status": "unknown"},
+  ],
+)
+def test_qmt_agent_health_rejects_invalid_contract(overrides) -> None:
+  with pytest.raises(ValidationError):
+    _ready_agent_health(**overrides)
+
+
+def test_qmt_agent_health_applies_mode_specific_trading_requirement() -> None:
+  data_only = _ready_agent_health(
+    mode=QmtAgentMode.DATA_ONLY,
+    xttrading_status=QmtAgentDependencyStatus.DISABLED,
+  )
+  assert data_only.xttrading_status is QmtAgentDependencyStatus.DISABLED
+
+  with pytest.raises(ValidationError, match="live health snapshot cannot disable"):
+    _ready_agent_health(xttrading_status=QmtAgentDependencyStatus.DISABLED)
+
+  degraded = _ready_agent_health(
+    status=QmtAgentHealthStatus.DEGRADED,
+    reason_code=QmtAgentHealthReason.TRADING_RECONCILING,
+    reconciliation_status=QmtAgentReconciliationStatus.RECONCILING,
+  )
+  assert degraded.reason_code is QmtAgentHealthReason.TRADING_RECONCILING
 
 
 def test_protocol_rejects_unknown_version() -> None:

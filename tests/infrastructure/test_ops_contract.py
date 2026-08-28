@@ -221,6 +221,14 @@ def test_windows_services_are_independently_supervised() -> None:
   assert qmt_environment["PYTHONPATH"] == "{{QMT_PYTHONPATH}}"
   assert qmt_environment["SSL_CERT_FILE"] == "{{CADDY_ROOT_CERT}}"
   assert qmt_environment["QMT_USERDATA_PATH"] == "{{QMT_USERDATA_PATH}}"
+  assert qmt_environment["QMT_AGENT_HEALTH_HOST"] == "{{QMT_AGENT_HEALTH_HOST}}"
+  assert qmt_environment["QMT_AGENT_HEALTH_PORT"] == "{{QMT_AGENT_HEALTH_PORT}}"
+
+  operations = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  assert "New-NetFirewallRule" in operations
+  assert '-Profile Private' in operations
+  assert '-LocalPort $QmtAgentHealthPort' in operations
+  assert "RemoteAddress" not in operations
 
   api_environment = {
     node.attrib["name"]: node.attrib["value"]

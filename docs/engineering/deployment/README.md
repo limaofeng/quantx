@@ -55,7 +55,10 @@ QMT 预检成功的默认 `full/live` 会为 API/Engine 显式开启 `ENABLE_REA
 通过 `-Component monitor` 单独启停；生产环境由 `QuantXMonitor` WinSW 服务自动
 启动。它每 30 秒检查固定目标，把原始样本写入独立 SQLite 90 天，并保留 1 年
 小时汇总。状态页位于 `/settings/status`，只读数据通过 Caddy 的 `/monitor/*`
-公开。Monitor 只记录事实，不参与 `/health/ready`、账户执行能力或交易门禁。
+公开。启动 Monitor 前必须设置
+`MONITOR_QMT_AGENT_HEALTH_URL=http://<稳定 Windows 主机>:18084`。Monitor 直连该
+只读端点采集真实 RTT，并与 API 会话/对账语义组合；它只记录事实，不参与
+`/health/ready`、账户执行能力或交易门禁。
 完整目标、状态机和 API 见 [Monitor 工程指南](../monitor/README.md)。
 
 启动器会在读取 `.runtime` 状态或创建子进程前，将仓库根目录的 Junction / 符号
@@ -66,14 +69,21 @@ Engine、Worker、QMT Agent 与 Caddy 也会统一使用同一个真实根路径
 公开端口只有开发 Caddy 的 `8080`，它监听所有本机 IPv4 接口；本机使用
 `http://127.0.0.1:8080`，局域网设备使用
 `http://<开发机局域网 IP>:8080`。API 使用 `18081`、Market Gateway 使用
-`18082`、Monitor 使用 `18083`、Vite 使用 `5250`、
-VitePress 使用 `5251`，这些后端端口仍只绑定 `127.0.0.1`。Prefect API
+`18082`、Monitor 使用 `18083`、Vite 使用 `5250`、VitePress 使用 `5251`，这些
+后端端口仍只绑定 `127.0.0.1`。Windows QMT Agent 的只读健康监听单独使用
+`0.0.0.0:18084`，供 Monitor 跨主机直连。Prefect API
 通过 `PREFECT_API_URL` 连接外部服务，默认
 `http://192.168.5.6:30420/api`，Worker 使用 `quantx-pool`。在线客户端文档
 位于统一入口 `/docs/`，生产环境由 Caddy
 直接提供静态文件，不运行 Node 文档进程。PostgreSQL、InfluxDB、Redis 和
 Prefect Server 只检查，不由 QuantX 安装或启停。首次从其他设备访问时，需在 Windows
 防火墙提示中允许 Caddy 通过专用网络。
+
+QMT Agent 的交易、行情和报告链路仍只出站；`18084` 只接受固定健康 GET。生产
+`install` 会幂等创建名为 `QuantX-QMT-Agent-Health-18084` 的 Windows 防火墙规则，
+仅对 `Private` profile 开放 TCP `18084`，不设置 `RemoteAddress`。若主机当前网络
+不是 Private，应先修正网络分类，不能扩大到 Public/Domain 规则。卸载会删除该精确
+规则。普通代码验证不得运行 `install`。
 
 Market Gateway 的 `/health/live` 只表示进程与事件循环存活；
 `/health/ready` 会实际执行 Redis `PING`。统一启动器和 API 组件状态均以后者

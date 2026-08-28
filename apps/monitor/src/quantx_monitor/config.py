@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -80,6 +81,11 @@ class MonitorSettings(BaseSettings):
     default="http://127.0.0.1:18082",
     validation_alias="MONITOR_MARKET_GATEWAY_URL",
   )
+  qmt_agent_health_url: str = Field(
+    default="http://127.0.0.1:18084",
+    validation_alias="MONITOR_QMT_AGENT_HEALTH_URL",
+    repr=False,
+  )
   database_url: str = Field(default="", validation_alias="DATABASE_URL")
   redis_host: str = Field(default="127.0.0.1", validation_alias="REDIS_HOST")
   redis_port: int = Field(default=6379, validation_alias="REDIS_PORT")
@@ -102,7 +108,30 @@ class MonitorSettings(BaseSettings):
     env_file_encoding="utf-8",
     case_sensitive=False,
     extra="ignore",
+    hide_input_in_errors=True,
   )
+
+  @field_validator("qmt_agent_health_url")
+  @classmethod
+  def validate_qmt_agent_health_url(cls, value: str) -> str:
+    raw = value.strip()
+    try:
+      parsed = urlsplit(raw)
+      port = parsed.port
+    except ValueError:
+      raise ValueError("QMT Agent health URL is invalid") from None
+    if (
+      parsed.scheme.lower() not in {"http", "https"}
+      or not parsed.hostname
+      or parsed.username is not None
+      or parsed.password is not None
+      or parsed.path not in {"", "/"}
+      or parsed.query
+      or parsed.fragment
+      or port is None
+    ):
+      raise ValueError("QMT Agent health URL must be an absolute HTTP(S) root")
+    return f"{parsed.scheme.lower()}://{parsed.netloc}"
 
 
 settings = MonitorSettings()

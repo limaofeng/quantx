@@ -324,9 +324,11 @@ export function ServiceStatusPanel() {
                   {selected.name} 延迟趋势
                 </h2>
                 <p className="mt-1 text-ui-label text-slate-500">
-                  {selected.derived
+                  {selected.probeKind === 'derived'
                     ? '该组件来自语义快照，不生成虚假的独立延迟。'
-                    : `P50 ${metric(selected.latencyP50Ms, ' ms')} · P95 ${metric(selected.latencyP95Ms, ' ms')}`}
+                    : selected.probeKind === 'composite'
+                      ? `状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。P50 ${metric(selected.latencyP50Ms, ' ms')} · P95 ${metric(selected.latencyP95Ms, ' ms')}`
+                      : `P50 ${metric(selected.latencyP50Ms, ' ms')} · P95 ${metric(selected.latencyP95Ms, ' ms')}`}
                 </p>
               </div>
               <div className="flex gap-ui-section font-mono text-ui-caption text-slate-500">
@@ -371,7 +373,6 @@ export function ServiceStatusPanel() {
                       stroke="#38bdf8"
                       dot={false}
                       strokeWidth={2}
-                      connectNulls
                     />
                     <Line
                       type="monotone"
@@ -380,7 +381,6 @@ export function ServiceStatusPanel() {
                       stroke="#f59e0b"
                       dot={false}
                       strokeWidth={1.5}
-                      connectNulls
                     />
                   </LineChart>
                 </ResponsiveContainer>

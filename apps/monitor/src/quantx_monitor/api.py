@@ -106,7 +106,7 @@ def build_router(runtime: RuntimeView) -> APIRouter:
           "name": definition.name,
           "group": definition.group.value,
           "optional": definition.optional,
-          "derived": definition.derived,
+          "probeKind": definition.probe_kind.value,
           "status": str(state.get("effective_status") or MonitorStatus.UNKNOWN.value),
           "checkedAt": iso_timestamp(state.get("checked_at")),
           "lastSuccessAt": iso_timestamp(state.get("last_success_at")),

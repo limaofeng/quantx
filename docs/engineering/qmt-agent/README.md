@@ -1,7 +1,8 @@
 # QuantX QMT Agent
 
-`apps/qmt-agent` 是唯一允许导入 `xtquant` 的应用。它只建立出站 HTTP(S)/WS(S)，
-不开放局域网监听端口，也不导入服务端 ORM、Repository 或策略实现。
+`apps/qmt-agent` 是唯一允许导入 `xtquant` 的应用。交易控制、行情、历史上传与报告
+只建立出站 HTTP(S)/WS(S)；同一 Agent 进程另提供固定只读健康监听，不导入服务端
+ORM、Repository 或策略实现。
 
 QMT Agent 是独立的 Windows 远程执行进程，不依赖 API 所在主机的启动器、PID
 或进程启动时间。它只从登记的服务根地址派生 token、控制 WebSocket、行情
@@ -37,6 +38,30 @@ SQLite journal 和历史上传 spool 也只留在 Windows。运行模式为 `dat
 不能自行把状态提升为 `READY`，服务端也不会向该 live 会话发放全市场行情租约。
 Windows 单实例锁和长期进程监督由 Windows 启动器方案负责，不能通过手工并行启动
 两个 Agent 绕过。
+
+## 独立健康监听
+
+Agent 默认监听 `0.0.0.0:18084`，可用 `QMT_AGENT_HEALTH_HOST` 和
+`QMT_AGENT_HEALTH_PORT` 显式覆盖。监听器只提供：
+
+- `GET /health/live`：只证明主事件循环能响应，固定返回脱敏的 v1 存活契约；
+- `GET /health/ready`：返回本地控制连接、对账、XTData、按模式解释的 XTTrading、
+  行情流状态、版本与运行时间；本地 ready 为 HTTP 200，degraded/unavailable 为
+  HTTP 503。
+
+响应不包含账户、设备 ID、远端地址、QMT 路径、凭据、日志、异常文本或调用栈。
+handler 只读取一次不可变的 `AgentHealthState`，不会调用 broker、XTData、
+XTTrading、数据库或网络。`data-only` 和 `paper` 的 XTTrading 状态固定为
+`disabled`，不会因此失败；`live` 必须实际连接 XTTrading。emergency stop、账户增仓
+授权和 kill switch 仍由既有安全入口裁决，不单独改变本地健康状态。
+
+健康 server、Agent runtime 与进程 watchdog heartbeat 位于同一结构化并发边界。
+端口绑定失败或 server 意外退出会结束 Agent 主进程并由 supervisor 重启；正常关闭
+会同步停止 Uvicorn，不留下孤立监听任务。Windows 安装器只在 `Private` 网络配置文件
+为 TCP `18084` 创建入站规则，不限制单一 Monitor IP。
+
+独立 Monitor 会把 `/health/ready` 的真实 HTTP RTT 与 API 对 WebSocket 会话、心跳、
+完整账户快照和对账的权威语义取较差结果。这个观测结果永远不回写交易门禁。
 
 新增或增仓命令还要求 `marketStreamStatus=READY`。API 在入队与实际写入控制
 WebSocket 前都会检查 Agent 声明、API 已提交 watermark 与 Engine 已应用 watermark
