@@ -4830,10 +4830,8 @@ export function TTradeGlobalPage() {
       evaluations={accountBoundSignalEvaluations}
       evaluationsError={signalEvaluationsResult.error?.message}
       focusStockCode={focusedSignalStockCode}
-      historyByCode={quoteHistoryByCode}
       hasMoreEvaluations={Boolean(signalEvaluationsPage?.pageInfo.hasNextPage)}
       loadingEvaluations={signalEvaluationsResult.fetching}
-      loadingMonitor={monitorResult.fetching}
       monitorError={monitorResult.error?.message || monitor?.lastError}
       monitor={monitor}
       onApprove={(session, snapshot) =>
@@ -4857,7 +4855,6 @@ export function TTradeGlobalPage() {
           snapshot
         )
       }
-      quotes={realTimeQuotesByCode}
       selectedTrace={selectedTraceForCurrentAccount}
     />
   );

@@ -2,7 +2,10 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { SignalSnapshot } from './monitoring';
-import type { TTradeMonitorLike } from './TTradeLiveMonitor';
+import type {
+  SignalEvaluationLike,
+  TTradeMonitorLike,
+} from './TTradeLiveMonitor';
 import {
   TTradeSignalsView,
   type CandidateTraceLike,
@@ -129,6 +132,25 @@ function monitor(signalSnapshot: SignalSnapshot): TTradeMonitorLike {
   };
 }
 
+function evaluation(
+  signalSnapshot: SignalSnapshot,
+  overrides: Partial<SignalEvaluationLike> = {}
+): SignalEvaluationLike {
+  return {
+    id: 'evaluation-1',
+    accountId: 'account-1',
+    runId: 'run-1',
+    stockCode: '600000.SH',
+    eventKind: 'MATERIAL',
+    eventType: 'CANDIDATE_LATCHED',
+    evaluatedAt: '2026-08-23T01:30:00Z',
+    coalescedCount: 1,
+    policyVersion: 'policy-v3',
+    signalSnapshot,
+    ...overrides,
+  };
+}
+
 function trace(
   overrides: Partial<CandidateTraceLike> = {}
 ): CandidateTraceLike {
@@ -185,7 +207,7 @@ function trace(
 }
 
 describe('TTradeSignalsView approval safety', () => {
-  it('shows monitor loading before the first snapshot instead of an empty board', () => {
+  it('shows signal loading before the first evaluation instead of a holdings board', () => {
     render(
       <TTradeSignalsView
         accountId="account-1"
@@ -195,18 +217,81 @@ describe('TTradeSignalsView approval safety', () => {
         evaluations={[]}
         hasMoreEvaluations={false}
         loadingEvaluations
-        loadingMonitor
         monitor={undefined}
         onApprove={vi.fn()}
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
-        quotes={new Map()}
       />
     );
-    expect(screen.getByRole('status')).toHaveTextContent(
-      '读取服务端信号快照'
+    expect(screen.getByRole('status')).toHaveTextContent('读取真实信号');
+    expect(screen.queryByText('测试股票')).not.toBeInTheDocument();
+  });
+
+  it('renders real signal facts and never substitutes ordinary holdings', () => {
+    const noCandidate = snapshot({
+      candidateId: null,
+      candidateStatus: 'NONE',
+      pendingEntryIntentId: null,
+    });
+    render(
+      <TTradeSignalsView
+        accountId="account-1"
+        actionLoading={false}
+        canApproveAccount
+        dataTrusted
+        evaluations={[
+          evaluation(snapshot()),
+          evaluation(noCandidate, {
+            id: 'continuity-1',
+            eventType: 'CONTINUITY_GENERATION_CHANGED',
+          }),
+        ]}
+        hasMoreEvaluations={false}
+        loadingEvaluations={false}
+        monitor={monitor(noCandidate)}
+        onApprove={vi.fn()}
+        onLoadMoreEvaluations={vi.fn()}
+        onReject={vi.fn()}
+      />
     );
-    expect(screen.queryByText('暂无可展示持仓')).not.toBeInTheDocument();
+
+    expect(screen.getByRole('region', { name: '真实信号列表' })).toHaveTextContent(
+      '候选已锁存'
+    );
+    expect(screen.getByRole('region', { name: '真实信号列表' })).not.toHaveTextContent(
+      '行情连续代际变更'
+    );
+    expect(screen.queryByText('持仓 1,000')).not.toBeInTheDocument();
+  });
+
+  it('shows a truthful empty state when holdings exist but no signal fact exists', () => {
+    const noCandidate = snapshot({
+      candidateId: null,
+      candidateStatus: 'NONE',
+      pendingEntryIntentId: null,
+    });
+    render(
+      <TTradeSignalsView
+        accountId="account-1"
+        actionLoading={false}
+        canApproveAccount
+        dataTrusted
+        evaluations={[
+          evaluation(noCandidate, {
+            eventType: 'CONTINUITY_GENERATION_CHANGED',
+          }),
+        ]}
+        hasMoreEvaluations={false}
+        loadingEvaluations={false}
+        monitor={monitor(noCandidate)}
+        onApprove={vi.fn()}
+        onLoadMoreEvaluations={vi.fn()}
+        onReject={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('暂无真实信号')).toBeInTheDocument();
+    expect(screen.queryByText('测试股票')).not.toBeInTheDocument();
   });
 
   it('marks evaluation evidence as failed while retaining the last result', () => {
@@ -224,14 +309,13 @@ describe('TTradeSignalsView approval safety', () => {
         onApprove={vi.fn()}
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
-        quotes={new Map()}
       />
     );
     expect(screen.getByRole('alert')).toHaveTextContent(
-      'MATERIAL 评估证据读取失败'
+      '真实信号读取失败'
     );
     expect(screen.getByRole('alert')).toHaveTextContent(
-      '当前没有可展示的历史证据'
+      '当前没有可展示的信号记录'
     );
   });
 
@@ -250,7 +334,6 @@ describe('TTradeSignalsView approval safety', () => {
         onApprove={vi.fn()}
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
-        quotes={new Map()}
       />
     );
     expect(screen.getByRole('alert')).toHaveTextContent('账户监控服务返回异常');
@@ -271,7 +354,6 @@ describe('TTradeSignalsView approval safety', () => {
         onApprove={vi.fn()}
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
-        quotes={new Map()}
       />
     );
     expect(screen.getByText(/最后一个可信快照/)).toBeInTheDocument();
@@ -293,7 +375,6 @@ describe('TTradeSignalsView approval safety', () => {
         onApprove={vi.fn()}
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
-        quotes={new Map()}
       />
     );
     expect(
@@ -304,26 +385,14 @@ describe('TTradeSignalsView approval safety', () => {
   it('opens a durable candidate trace from MATERIAL evidence and distinguishes integrity', () => {
     const onRequestCandidateTrace = vi.fn();
     const signal = snapshot();
+    const evaluations = [evaluation(signal)];
     const { rerender } = render(
       <TTradeSignalsView
         accountId="account-1"
         actionLoading={false}
         canApproveAccount
         dataTrusted
-        evaluations={[
-          {
-            id: 'evaluation-1',
-            accountId: 'account-1',
-            runId: 'run-1',
-            stockCode: '600000.SH',
-            eventKind: 'MATERIAL',
-            eventType: 'CANDIDATE_CREATED',
-            evaluatedAt: '2026-08-23T01:30:00Z',
-            coalescedCount: 1,
-            policyVersion: 'policy-v3',
-            signalSnapshot: signal,
-          },
-        ]}
+        evaluations={evaluations}
         hasMoreEvaluations={false}
         loadingEvaluations={false}
         monitor={monitor(signal)}
@@ -331,7 +400,6 @@ describe('TTradeSignalsView approval safety', () => {
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
         onRequestCandidateTrace={onRequestCandidateTrace}
-        quotes={new Map()}
       />
     );
 
@@ -351,7 +419,7 @@ describe('TTradeSignalsView approval safety', () => {
         canApproveAccount
         candidateTrace={trace()}
         dataTrusted
-        evaluations={[]}
+        evaluations={evaluations}
         hasMoreEvaluations={false}
         loadingEvaluations={false}
         monitor={monitor(signal)}
@@ -359,7 +427,6 @@ describe('TTradeSignalsView approval safety', () => {
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
         onRequestCandidateTrace={onRequestCandidateTrace}
-        quotes={new Map()}
         selectedTrace={{
           accountId: 'account-1',
           strategyRunId: 'run-1',
@@ -373,7 +440,7 @@ describe('TTradeSignalsView approval safety', () => {
     expect(
       screen.getByText(/机会评估 · CANDIDATE_CREATED/)
     ).toBeInTheDocument();
-    expect(screen.getByText(/policy policy-v3/)).toBeInTheDocument();
+    expect(screen.getAllByText(/policy policy-v3/).length).toBeGreaterThan(0);
     expect(screen.getByText('intent-1')).toBeInTheDocument();
     expect(screen.getByText(/candidate_id · candidate-1/)).toBeInTheDocument();
 
@@ -384,7 +451,7 @@ describe('TTradeSignalsView approval safety', () => {
         canApproveAccount
         candidateTrace={trace({ accountId: 'account-2' })}
         dataTrusted
-        evaluations={[]}
+        evaluations={evaluations}
         hasMoreEvaluations={false}
         loadingEvaluations={false}
         monitor={monitor(signal)}
@@ -392,7 +459,6 @@ describe('TTradeSignalsView approval safety', () => {
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
         onRequestCandidateTrace={onRequestCandidateTrace}
-        quotes={new Map()}
         selectedTrace={{
           accountId: 'account-1',
           strategyRunId: 'run-1',
