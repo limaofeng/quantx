@@ -1134,6 +1134,11 @@ def test_windows_agent_launcher_is_the_agent_only_dev_boundary() -> None:
   assert "-RunLevel Limited" in script
   assert "Register-ScheduledTask" in script
   assert "Start-ScheduledTask" in script
+  assert "$ManagedState.supervisorStartedAt -is [datetime]" in script
+  assert "([datetime]$ManagedState.supervisorStartedAt).ToUniversalTime()" in script
+  assert "if (-not $task -or $AccountId.Trim())" in script
+  assert "Remove-Item -LiteralPath $SupervisorStateFile" in script
+  assert 'import httpx, uvicorn, websockets, xtquant' in script
   assert '$DefaultCaFile = Join-Path $CertificateDirectory "mac-dev-root.crt"' in script
   assert "$env:SSL_CERT_FILE = $DefaultCaFile" in script
   assert "Remove-Item Env:SSL_CERT_FILE" in script

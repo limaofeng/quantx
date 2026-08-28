@@ -298,9 +298,15 @@ function Get-SupervisorProcess {
   if (-not $process) {
     return $null
   }
-  $expectedStartedAt = [datetime]::Parse(
-    [string]$ManagedState.supervisorStartedAt
-  ).ToUniversalTime()
+  $expectedStartedAt = if (
+    $ManagedState.supervisorStartedAt -is [datetime]
+  ) {
+    ([datetime]$ManagedState.supervisorStartedAt).ToUniversalTime()
+  } else {
+    [datetime]::Parse(
+      [string]$ManagedState.supervisorStartedAt
+    ).ToUniversalTime()
+  }
   if (
     [math]::Abs(
       ($process.StartTime.ToUniversalTime() - $expectedStartedAt).TotalSeconds
@@ -324,9 +330,12 @@ function Get-SupervisorProcess {
 function Assert-QmtRuntimeImports {
   param([Parameter(Mandatory = $true)][string]$Python)
 
-  & $Python -c "import httpx, websockets, xtquant"
+  & $Python -c "import httpx, uvicorn, websockets, xtquant"
   if ($LASTEXITCODE -ne 0) {
-    throw "The QMT Python runtime cannot import httpx, websockets, and xtquant."
+    throw (
+      "The QMT Python runtime cannot import httpx, uvicorn, websockets, " +
+      "and xtquant."
+    )
   }
 }
 
@@ -512,7 +521,11 @@ function Invoke-Up {
   Test-PublicApi -BaseUrl $device.ApiUrl
   Assert-AgentTransportTrust -BaseUrl $device.ApiUrl
   Test-QmtPythonApi -Python $python -BaseUrl $device.ApiUrl
-  Register-AgentTask
+  if (-not $task -or $AccountId.Trim()) {
+    Register-AgentTask
+  }
+  Remove-Item -LiteralPath $SupervisorStateFile -Force `
+    -ErrorAction SilentlyContinue
   Start-ScheduledTask -TaskName $TaskName
 
   $deadline = [datetime]::UtcNow.AddSeconds(45)
