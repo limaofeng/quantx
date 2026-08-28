@@ -6,10 +6,11 @@ import asyncio
 import copy
 import logging
 from collections import Counter
+from collections.abc import Mapping
 from datetime import date, datetime
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
@@ -17,9 +18,51 @@ from quantx_infrastructure.database.redis_pubsub import redis_pubsub
 from quantx_infrastructure.models.t_trade_global_monitor_projection import (
   TTradeGlobalMonitorProjection,
 )
+from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
+  TTradeOpportunityEvaluation,
+)
 
 logger = logging.getLogger(__name__)
 T_TRADE_UPDATE_CHANNEL_PREFIX = "t-trade:update:"
+_SIGNAL_SNAPSHOT_REQUIRED_KEYS = frozenset(
+  {
+    "instrument_code",
+    "trade_date",
+    "evaluated_at_ms",
+    "source_time_ms",
+    "tick_ordinal",
+    "continuity_generation",
+    "data_health",
+    "features",
+    "pullback",
+    "momentum",
+    "selected_path",
+    "preview_threshold",
+    "candidate_threshold",
+    "revalidate_threshold",
+    "rearm_threshold",
+    "signal_version",
+    "candidate_state_version",
+    "policy_version",
+    "config_version",
+    "feature_schema_version",
+  }
+)
+_SIGNAL_SNAPSHOT_IDENTITY_KEYS = (
+  "instrument_code",
+  "trade_date",
+  "source_time_ms",
+  "tick_ordinal",
+  "continuity_generation",
+  "signal_version",
+  "candidate_state_version",
+  "policy_version",
+  "config_version",
+  "feature_schema_version",
+)
+_NOTIFICATION_VOLATILE_KEYS = frozenset(
+  {"checked_at", "last_reconciled_at", "updated_at"}
+)
 
 
 def t_trade_update_channel(account_id: str) -> str:
@@ -34,6 +77,156 @@ def _json_value(value: Any) -> Any:
   if isinstance(value, (list, tuple)):
     return [_json_value(item) for item in value]
   return value
+
+
+def _is_complete_signal_snapshot(value: Any) -> bool:
+  if not isinstance(value, Mapping):
+    return False
+  if not _SIGNAL_SNAPSHOT_REQUIRED_KEYS.issubset(value):
+    return False
+  return all(isinstance(value.get(key), Mapping) for key in ("features", "pullback", "momentum"))
+
+
+def _signal_snapshot_identity(value: Any) -> Optional[tuple[tuple[str, str], ...]]:
+  if not isinstance(value, Mapping):
+    return None
+  identity: list[tuple[str, str]] = []
+  for key in _SIGNAL_SNAPSHOT_IDENTITY_KEYS:
+    raw = value.get(key)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+      return None
+    normalized = str(raw).strip()
+    if key == "instrument_code":
+      normalized = normalized.upper()
+    identity.append((key, normalized))
+  return tuple(identity)
+
+
+def _session_key(value: Any) -> Optional[tuple[str, str]]:
+  if not isinstance(value, Mapping):
+    return None
+  run_id = str(value.get("run_id") or "").strip()
+  stock_code = str(value.get("stock_code") or "").strip().upper()
+  if not run_id or not stock_code:
+    return None
+  return run_id, stock_code
+
+
+def _notification_semantics(value: Any) -> Any:
+  """Strip projection clocks that must not wake every connected browser."""
+
+  if isinstance(value, Mapping):
+    return {
+      str(key): _notification_semantics(item)
+      for key, item in value.items()
+      if str(key) not in _NOTIFICATION_VOLATILE_KEYS
+      and not str(key).endswith("_age_seconds")
+    }
+  if isinstance(value, (list, tuple)):
+    return [_notification_semantics(item) for item in value]
+  return value
+
+
+def _resolve_signal_snapshot(
+  incoming: Any,
+  previous: Any,
+  recovered: Any,
+) -> Optional[Dict[str, Any]]:
+  if _is_complete_signal_snapshot(incoming):
+    return copy.deepcopy(dict(incoming))
+  incoming_identity = _signal_snapshot_identity(incoming)
+  if incoming_identity is None:
+    return None
+  for candidate in (previous, recovered):
+    if (
+      _is_complete_signal_snapshot(candidate)
+      and _signal_snapshot_identity(candidate) == incoming_identity
+    ):
+      return copy.deepcopy(dict(candidate))
+  return None
+
+
+def _merge_complete_signal_snapshots(
+  incoming: Dict[str, Any],
+  previous: Dict[str, Any],
+  recovered: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> Dict[str, Any]:
+  """Keep the public read model complete while runtime checkpoints stay compact."""
+
+  merged = copy.deepcopy(incoming)
+  previous_sessions = {
+    key: dict(session)
+    for session in list(previous.get("sessions") or [])
+    if isinstance(session, Mapping) and (key := _session_key(session)) is not None
+  }
+  canonical_snapshots: Dict[tuple[str, str], Optional[Dict[str, Any]]] = {}
+  sessions: list[Dict[str, Any]] = []
+  for raw_session in list(merged.get("sessions") or []):
+    if not isinstance(raw_session, Mapping):
+      continue
+    session = dict(raw_session)
+    key = _session_key(session)
+    previous_session = previous_sessions.get(key, {}) if key is not None else {}
+    snapshot = _resolve_signal_snapshot(
+      session.get("signal_snapshot"),
+      previous_session.get("signal_snapshot"),
+      recovered.get(key) if key is not None else None,
+    )
+    session["signal_snapshot"] = snapshot
+    if key is not None:
+      canonical_snapshots[key] = snapshot
+    sessions.append(session)
+  merged["sessions"] = sessions
+
+  previous_holdings = {
+    str(holding.get("stock_code") or "").strip().upper(): dict(holding)
+    for holding in list(previous.get("holdings") or [])
+    if isinstance(holding, Mapping)
+  }
+  holdings: list[Dict[str, Any]] = []
+  for raw_holding in list(merged.get("holdings") or []):
+    if not isinstance(raw_holding, Mapping):
+      continue
+    holding = dict(raw_holding)
+    raw_session = holding.get("session")
+    if isinstance(raw_session, Mapping):
+      session = dict(raw_session)
+      key = _session_key(session)
+      if key in canonical_snapshots:
+        session["signal_snapshot"] = copy.deepcopy(canonical_snapshots[key])
+      else:
+        previous_holding = previous_holdings.get(
+          str(holding.get("stock_code") or "").strip().upper(),
+          {},
+        )
+        previous_session = previous_holding.get("session")
+        session["signal_snapshot"] = _resolve_signal_snapshot(
+          session.get("signal_snapshot"),
+          (
+            previous_session.get("signal_snapshot")
+            if isinstance(previous_session, Mapping)
+            else None
+          ),
+          recovered.get(key) if key is not None else None,
+        )
+      holding["session"] = session
+    holdings.append(holding)
+  merged["holdings"] = holdings
+  return merged
+
+
+def _legacy_incomplete_session_keys(
+  payload: Mapping[str, Any],
+) -> tuple[tuple[str, str], ...]:
+  keys: set[tuple[str, str]] = set()
+  for raw_session in list(payload.get("sessions") or []):
+    key = _session_key(raw_session)
+    snapshot = (
+      raw_session.get("signal_snapshot") if isinstance(raw_session, Mapping) else None
+    )
+    if key is not None and isinstance(snapshot, Mapping) and not _is_complete_signal_snapshot(snapshot):
+      keys.add(key)
+  return tuple(sorted(keys))
 
 
 class TTradeMonitorProjectionService:
@@ -88,6 +281,7 @@ class TTradeMonitorProjectionService:
     )
     generated_at = time_utils.now()
     changed = False
+    should_publish = False
     version = 0
     async for db in get_async_db():
       result = await db.execute(
@@ -96,6 +290,18 @@ class TTradeMonitorProjectionService:
         .with_for_update()
       )
       row = result.scalar_one_or_none()
+      previous = copy.deepcopy(dict(row.payload or {})) if row is not None else {}
+      legacy_keys = _legacy_incomplete_session_keys(previous)
+      recovered = (
+        await self._load_latest_complete_signal_snapshots(
+          db,
+          account_id=normalized_account_id,
+          session_keys=legacy_keys,
+        )
+        if legacy_keys
+        else {}
+      )
+      normalized = _merge_complete_signal_snapshots(normalized, previous, recovered)
       if row is None:
         row = TTradeGlobalMonitorProjection(
           account_id=normalized_account_id,
@@ -105,11 +311,15 @@ class TTradeMonitorProjectionService:
         )
         db.add(row)
         changed = True
-      elif dict(row.payload or {}) != normalized:
+        should_publish = True
+      elif previous != normalized:
         row.version = int(row.version or 0) + 1
         row.payload = normalized
         row.generated_at = generated_at
         changed = True
+        should_publish = _notification_semantics(previous) != _notification_semantics(
+          normalized
+        )
       version = int(row.version or 0)
       await db.commit()
       if not changed:
@@ -121,7 +331,7 @@ class TTradeMonitorProjectionService:
       "projection_version": str(version),
       "projection_generated_at": generated_at,
     }
-    if changed:
+    if changed and should_publish:
       try:
         await redis_pubsub.publish(
           t_trade_update_channel(normalized_account_id),
@@ -138,6 +348,68 @@ class TTradeMonitorProjectionService:
           exc,
         )
     return result
+
+  @staticmethod
+  async def _load_latest_complete_signal_snapshots(
+    db: Any,
+    *,
+    account_id: str,
+    session_keys: Sequence[tuple[str, str]],
+  ) -> Dict[tuple[str, str], Dict[str, Any]]:
+    """Repair a legacy compact projection from immutable evaluation evidence once."""
+
+    if not session_keys:
+      return {}
+    filters = [
+      and_(
+        TTradeOpportunityEvaluation.strategy_run_id == run_id,
+        TTradeOpportunityEvaluation.instrument_code == instrument_code,
+      )
+      for run_id, instrument_code in session_keys
+    ]
+    rank = func.row_number().over(
+      partition_by=(
+        TTradeOpportunityEvaluation.strategy_run_id,
+        TTradeOpportunityEvaluation.instrument_code,
+      ),
+      order_by=(
+        TTradeOpportunityEvaluation.evaluated_at.desc(),
+        TTradeOpportunityEvaluation.id.desc(),
+      ),
+    )
+    ranked = (
+      select(
+        TTradeOpportunityEvaluation.strategy_run_id.label("run_id"),
+        TTradeOpportunityEvaluation.instrument_code.label("instrument_code"),
+        TTradeOpportunityEvaluation.payload.label("payload"),
+        rank.label("row_number"),
+      )
+      .where(
+        TTradeOpportunityEvaluation.account_id == account_id,
+        or_(*filters),
+      )
+      .subquery()
+    )
+    rows = await db.execute(
+      select(
+        ranked.c.run_id,
+        ranked.c.instrument_code,
+        ranked.c.payload,
+      ).where(ranked.c.row_number == 1)
+    )
+    recovered: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for row in rows:
+      evidence = row.payload if isinstance(row.payload, Mapping) else {}
+      snapshot = evidence.get("signal_snapshot")
+      if not _is_complete_signal_snapshot(snapshot):
+        continue
+      recovered[
+        (
+          str(row.run_id or "").strip(),
+          str(row.instrument_code or "").strip().upper(),
+        )
+      ] = dict(snapshot)
+    return recovered
 
   async def subscribe(self, account_id: str) -> AsyncIterator[Dict[str, Any]]:
     channel = t_trade_update_channel(account_id)

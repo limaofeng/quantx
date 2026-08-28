@@ -21,6 +21,230 @@ def _session_patch(version: int) -> dict[str, object]:
   }
 
 
+def _full_signal_snapshot(version: int) -> dict[str, object]:
+  return {
+    "instrument_code": "600000.SH",
+    "trade_date": "2026-08-28",
+    "evaluated_at_ms": 1_777_000_000_250,
+    "source_time_ms": 1_777_000_000_000,
+    "tick_ordinal": 7,
+    "continuity_generation": 3,
+    "data_health": "READY",
+    "features": {"sample_count": 12},
+    "pullback": {"phase": "BASELINING"},
+    "momentum": {"phase": "BASELINING"},
+    "selected_path": "NONE",
+    "preview_threshold": 55.0,
+    "candidate_threshold": 72.0,
+    "revalidate_threshold": 60.0,
+    "rearm_threshold": 45.0,
+    "signal_version": version,
+    "candidate_state_version": version,
+    "policy_version": "policy-v3",
+    "config_version": 9,
+    "feature_schema_version": "1",
+  }
+
+
+def _compact_signal_snapshot(version: int) -> dict[str, object]:
+  snapshot = _full_signal_snapshot(version)
+  return {
+    key: snapshot[key]
+    for key in (
+      "instrument_code",
+      "trade_date",
+      "evaluated_at_ms",
+      "source_time_ms",
+      "tick_ordinal",
+      "continuity_generation",
+      "data_health",
+      "selected_path",
+      "signal_version",
+      "candidate_state_version",
+      "policy_version",
+      "config_version",
+      "feature_schema_version",
+    )
+  }
+
+
+def _monitor_payload(snapshot: dict[str, object], *, checked_at: str) -> dict:
+  session = {
+    "run_id": "run-1",
+    "stock_code": "600000.SH",
+    "signal_snapshot": snapshot,
+    "updated_at": checked_at,
+  }
+  return {
+    "account_id": "account-1",
+    "sessions": [dict(session)],
+    "holdings": [
+      {
+        "stock_code": "600000.SH",
+        "session": dict(session),
+      }
+    ],
+    "last_reconciled_at": checked_at,
+    "readiness": {
+      "stage": "SHADOW",
+      "checked_at": checked_at,
+      "account_safety": {
+        "checked_at": checked_at,
+        "reconciliation_age_seconds": 10.0,
+      },
+    },
+  }
+
+
+class _ProjectionResult:
+  def __init__(self, row):
+    self._row = row
+
+  def scalar_one_or_none(self):
+    return self._row
+
+
+class _ProjectionDb:
+  def __init__(self, row):
+    self.row = row
+    self.committed = False
+
+  async def execute(self, _statement):
+    return _ProjectionResult(self.row)
+
+  async def commit(self):
+    self.committed = True
+
+
+def _projection_sessions(db):
+  async def _sessions():
+    yield db
+
+  return _sessions
+
+
+@pytest.mark.asyncio
+async def test_periodic_save_preserves_complete_snapshot_without_clock_wakeup(
+  monkeypatch,
+):
+  full_snapshot = _full_signal_snapshot(7)
+  row = SimpleNamespace(
+    account_id="account-1",
+    version=8,
+    payload=_monitor_payload(full_snapshot, checked_at="2026-08-28T10:00:00Z"),
+    generated_at=None,
+  )
+  db = _ProjectionDb(row)
+  publish = AsyncMock(return_value=1)
+  monkeypatch.setattr(module, "get_async_db", _projection_sessions(db))
+  monkeypatch.setattr(module.redis_pubsub, "publish", publish)
+
+  result = await TTradeMonitorProjectionService().save(
+    "account-1",
+    _monitor_payload(
+      _compact_signal_snapshot(7),
+      checked_at="2026-08-28T10:00:10Z",
+    ),
+  )
+
+  assert db.committed is True
+  assert row.version == 9
+  assert result["sessions"][0]["signal_snapshot"] == full_snapshot
+  assert result["holdings"][0]["session"]["signal_snapshot"] == full_snapshot
+  assert result["last_reconciled_at"] == "2026-08-28T10:00:10Z"
+  publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_periodic_save_repairs_legacy_compact_snapshot_from_evidence(
+  monkeypatch,
+):
+  compact_snapshot = _compact_signal_snapshot(7)
+  full_snapshot = _full_signal_snapshot(7)
+  row = SimpleNamespace(
+    account_id="account-1",
+    version=8,
+    payload=_monitor_payload(compact_snapshot, checked_at="2026-08-28T10:00:00Z"),
+    generated_at=None,
+  )
+  db = _ProjectionDb(row)
+  publish = AsyncMock(return_value=1)
+  service = TTradeMonitorProjectionService()
+  service._load_latest_complete_signal_snapshots = AsyncMock(
+    return_value={("run-1", "600000.SH"): full_snapshot}
+  )
+  monkeypatch.setattr(module, "get_async_db", _projection_sessions(db))
+  monkeypatch.setattr(module.redis_pubsub, "publish", publish)
+
+  result = await service.save(
+    "account-1",
+    _monitor_payload(compact_snapshot, checked_at="2026-08-28T10:00:10Z"),
+  )
+
+  assert result["sessions"][0]["signal_snapshot"] == full_snapshot
+  service._load_latest_complete_signal_snapshots.assert_awaited_once()
+  publish.assert_awaited_once()
+  assert publish.await_args.args[1]["version"] == "9"
+
+
+@pytest.mark.asyncio
+async def test_periodic_save_clears_snapshot_when_checkpoint_identity_changes(
+  monkeypatch,
+):
+  row = SimpleNamespace(
+    account_id="account-1",
+    version=8,
+    payload=_monitor_payload(
+      _full_signal_snapshot(7),
+      checked_at="2026-08-28T10:00:00Z",
+    ),
+    generated_at=None,
+  )
+  db = _ProjectionDb(row)
+  publish = AsyncMock(return_value=1)
+  monkeypatch.setattr(module, "get_async_db", _projection_sessions(db))
+  monkeypatch.setattr(module.redis_pubsub, "publish", publish)
+
+  result = await TTradeMonitorProjectionService().save(
+    "account-1",
+    _monitor_payload(
+      _compact_signal_snapshot(8),
+      checked_at="2026-08-28T10:00:10Z",
+    ),
+  )
+
+  assert result["sessions"][0]["signal_snapshot"] is None
+  assert result["holdings"][0]["session"]["signal_snapshot"] is None
+  publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_repair_loader_returns_only_complete_latest_evidence():
+  complete = _full_signal_snapshot(7)
+  rows = [
+    SimpleNamespace(
+      run_id="run-1",
+      instrument_code="600000.sh",
+      payload={"signal_snapshot": complete},
+    ),
+    SimpleNamespace(
+      run_id="run-1",
+      instrument_code="000001.SZ",
+      payload={"signal_snapshot": _compact_signal_snapshot(7)},
+    ),
+  ]
+  db = SimpleNamespace(execute=AsyncMock(return_value=rows))
+
+  result = await TTradeMonitorProjectionService._load_latest_complete_signal_snapshots(
+    db,
+    account_id="account-1",
+    session_keys=(("run-1", "600000.SH"), ("run-1", "000001.SZ")),
+  )
+
+  assert result == {("run-1", "600000.SH"): complete}
+  db.execute.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_diagnostic_opportunity_notices_are_trailing_coalesced(monkeypatch):
   publish = AsyncMock(return_value=1)

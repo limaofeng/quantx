@@ -23,6 +23,26 @@ describe('T-trade server-truth recovery policy', () => {
     expect(page).not.toContain('monitorRefreshSequenceRef');
   });
 
+  it('keeps subscription and audit recovery scoped to the monitor projection', () => {
+    const page = readFileSync(
+      resolve(__dirname, '../TTradeGlobalPage.tsx'),
+      'utf8'
+    );
+    const subscriptionBlock = page
+      .split('const version = tTradeUpdateResult.data?.tTradeUpdates.version', 2)[1]
+      .split('const errorKey = tTradeUpdateResult.error?.message', 2)[0];
+    const auditBlock = page
+      .split('const auditServerTruth = () =>', 2)[1]
+      .split('const timer = window.setInterval', 2)[0];
+
+    expect(subscriptionBlock).toContain(
+      'requestAuthoritativeMonitorRefresh()'
+    );
+    expect(subscriptionBlock).not.toContain('requestAuthoritativeRefresh()');
+    expect(auditBlock).toContain('requestAuthoritativeMonitorRefresh()');
+    expect(auditBlock).not.toContain('requestAuthoritativeRefresh()');
+  });
+
   it('coalesces duplicate subscription versions but accepts a replay after reconnect', () => {
     const policy = createTTradeServerTruthRefreshPolicy();
 

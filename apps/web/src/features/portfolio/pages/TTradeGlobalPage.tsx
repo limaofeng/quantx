@@ -2308,21 +2308,23 @@ export function TTradeGlobalPage() {
     selectedTraceForCurrentAccount,
   ]);
 
-  const requestAuthoritativeRefresh = React.useCallback(() => {
+  const requestAuthoritativeMonitorRefresh = React.useCallback(() => {
     if (!accountId || workspaceMode !== 'REALTIME') return;
     const epoch = signalSnapshotRefreshCoordinator.beginEpoch(accountId);
     setTrustedSignalSnapshotEpoch(null);
     serverTruthRefreshPolicy.noteNetworkRequest(accountId, Date.now());
-    refreshVisibleData({ includeMonitor: false });
     runMonitorEpochRefresh(epoch, accountId);
   }, [
     accountId,
-    refreshVisibleData,
     runMonitorEpochRefresh,
     serverTruthRefreshPolicy,
     signalSnapshotRefreshCoordinator,
     workspaceMode,
   ]);
+  const requestAuthoritativeRefresh = React.useCallback(() => {
+    refreshVisibleData({ includeMonitor: false });
+    requestAuthoritativeMonitorRefresh();
+  }, [refreshVisibleData, requestAuthoritativeMonitorRefresh]);
 
   const handleSourceOrdersRefresh = React.useCallback(
     async (showSuccessToast = true) => {
@@ -2379,7 +2381,7 @@ export function TTradeGlobalPage() {
     }
     subscriptionRefreshTimerRef.current = window.setTimeout(() => {
       subscriptionRefreshTimerRef.current = null;
-      requestAuthoritativeRefresh();
+      requestAuthoritativeMonitorRefresh();
     }, 250);
     return () => {
       if (subscriptionRefreshTimerRef.current != null) {
@@ -2389,7 +2391,7 @@ export function TTradeGlobalPage() {
     };
   }, [
     accountId,
-    requestAuthoritativeRefresh,
+    requestAuthoritativeMonitorRefresh,
     serverTruthRefreshPolicy,
     tTradeUpdateResult.data?.tTradeUpdates.version,
   ]);
@@ -2406,11 +2408,11 @@ export function TTradeGlobalPage() {
         errorKey
       )
     ) {
-      requestAuthoritativeRefresh();
+      requestAuthoritativeMonitorRefresh();
     }
   }, [
     accountId,
-    requestAuthoritativeRefresh,
+    requestAuthoritativeMonitorRefresh,
     serverTruthRefreshPolicy,
     tTradeUpdateResult.error?.message,
   ]);
@@ -2458,7 +2460,7 @@ export function TTradeGlobalPage() {
           Date.now()
         )
       ) {
-        requestAuthoritativeRefresh();
+        requestAuthoritativeMonitorRefresh();
       }
     };
     const timer = window.setInterval(
@@ -2469,7 +2471,7 @@ export function TTradeGlobalPage() {
   }, [
     accountId,
     graphqlWsStatus,
-    requestAuthoritativeRefresh,
+    requestAuthoritativeMonitorRefresh,
     serverTruthRefreshPolicy,
     workspaceMode,
   ]);
