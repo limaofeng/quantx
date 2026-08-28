@@ -16,8 +16,8 @@
 ```
 
 普通开发 `up`（包括未显式指定模式的 `-Profile web`）会提升为 `full/live`，
-启动 Caddy、API、Market Data Service、Engine、Vite、VitePress 和 Prefect
-Worker，并在登记与运行时预检通过后启动 QMT Agent。
+启动 Caddy、API、Engine、Vite、VitePress 和 Prefect Worker，并在登记与运行时
+预检通过后启动 QMT Agent。
 QMT 预检通过、实盘能力门已开启且完整启动 `dev/full/live` 后，会幂等注册当前用户的
 `QuantX-Dev-Daily-Backup` 任务，每天（含周末）16:30 备份 PostgreSQL 与
 QMT Agent journal；错过触发时间时会在主机恢复可用后补跑。该任务不会提升权限，
@@ -68,10 +68,10 @@ Engine、Worker、QMT Agent 与 Caddy 也会统一使用同一个真实根路径
 
 公开端口只有开发 Caddy 的 `8080`，它监听所有本机 IPv4 接口；本机使用
 `http://127.0.0.1:8080`，局域网设备使用
-`http://<开发机局域网 IP>:8080`。API 使用 `18081`、Market Data Service 使用
-`18082`、Monitor 使用 `18083`、Vite 使用 `5250`、
-VitePress 使用 `5251`，这些后端端口仍只绑定 `127.0.0.1`。Windows QMT Agent
-的只读健康监听单独使用 `0.0.0.0:18084`，供 Monitor 跨主机直连。Prefect API
+`http://<开发机局域网 IP>:8080`。API 使用 `18081`、Market Gateway 使用
+`18082`、Monitor 使用 `18083`、Vite 使用 `5250`、VitePress 使用 `5251`，这些
+后端端口仍只绑定 `127.0.0.1`。Windows QMT Agent 的只读健康监听单独使用
+`0.0.0.0:18084`，供 Monitor 跨主机直连。Prefect API
 通过 `PREFECT_API_URL` 连接外部服务，默认
 `http://192.168.5.6:30420/api`，Worker 使用 `quantx-pool`。在线客户端文档
 位于统一入口 `/docs/`，生产环境由 Caddy
@@ -85,15 +85,15 @@ QMT Agent 的交易、行情和报告链路仍只出站；`18084` 只接受固�
 不是 Private，应先修正网络分类，不能扩大到 Public/Domain 规则。卸载会删除该精确
 规则。普通代码验证不得运行 `install`。
 
-Market Data Service 的 `/health/live` 只表示进程与事件循环存活；
+Market Gateway 的 `/health/live` 只表示进程与事件循环存活；
 `/health/ready` 会实际执行 Redis `PING`。统一启动器和 API 组件状态均以后者
-作为服务就绪依据，因此 Redis 断开时不会把行情服务误报为 `ready`。
+作为网关就绪依据，因此 Redis 断开时不会把网关误报为 `ready`。
 
 ## PostgreSQL 连接预算与慢查询诊断
 
 QuantX 在同一操作系统进程内只创建一个 SQLAlchemy 连接池，业务模块统一复用；
 不同进程无法共享 Python 数据库连接，因此按进程角色设置容量，而不是在 API 内
-再拆 Agent 专用池。默认预算为 API `8 + 4`、Market Data Service `1 + 1`、
+再拆 Agent 专用池。默认预算为 API `8 + 4`、Market Gateway `1 + 1`、
 Engine `6 + 2`、Worker `4 + 2`、AI Runtime `2 + 1`，合计最多 31 条池连接。
 Engine 单实例数据库租约另用 1 条从共享池脱离的专用物理连接，因此进程总预算
 最多 32 条；它不是第二个连接池，关闭 Engine 时直接关闭。这样报告投影、命令消费、
@@ -141,9 +141,9 @@ Prefect Worker 的本机 CLI 状态位于 `.runtime/prefect`，CLI 和 Worker �
 不删除会话或审计记录；发布前必须按运行手册预告用户重新登录。
 
 WinSW 2.12 使用 bundled mode：每个服务目录内都放置同名的 XML 与 wrapper，
-例如 `quantx-api.xml` 对应 `quantx-api.exe`。Caddy、API、Market Data Service、
+例如 `quantx-api.xml` 对应 `quantx-api.exe`。Caddy、API、Market Gateway、
 Monitor、Engine、Worker 和 QMT Agent 因而可以独立安装、重启和滚动日志，不共享 wrapper
-进程。Market Data Service 与 QMT Agent 的 WinSW 入口均通过统一监督器启动，异常退出
+进程。Market Gateway 与 QMT Agent 的 WinSW 入口均通过统一监督器启动，异常退出
 按 1/2/5/10/30 秒退避重启，并使用 Windows Job Object 回收残留子进程。
 
 ## QMT Agent 登记前置条件

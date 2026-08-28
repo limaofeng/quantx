@@ -46,7 +46,7 @@ DIRECT_NETWORK_ENVIRONMENT = {
   "no_proxy": "*",
 }
 API_PORT = 18081
-MARKET_DATA_SERVICE_PORT = 18082
+MARKET_GATEWAY_PORT = 18082
 MONITOR_PORT = 18083
 WEB_PORT = 5250
 DOCS_PORT = 5251
@@ -62,7 +62,7 @@ EXIT_ALREADY_RUNNING = 73
 EXIT_STOP_INCOMPLETE = 74
 START_ORDER = (
   "sleep-guard",
-  "market-data-service",
+  "market-gateway",
   "api",
   "engine",
   "ai-runtime",
@@ -79,7 +79,7 @@ STOP_ORDER = (
   "worker",
   "ai-runtime",
   "api",
-  "market-data-service",
+  "market-gateway",
   "sleep-guard",
 )
 SERVER_PYTHON_PATHS = (
@@ -1152,16 +1152,16 @@ def component_graph(
       ReadinessProbe("process", timeout_seconds=5),
     ),
     ComponentSpec(
-      "market-data-service",
+      "market-gateway",
       (
         str(python),
         "-m",
         "uvicorn",
-        "quantx_api.market_data_service:app",
+        "quantx_api.market_gateway:app",
         "--host",
         "127.0.0.1",
         "--port",
-        str(MARKET_DATA_SERVICE_PORT),
+        str(MARKET_GATEWAY_PORT),
         "--ws-max-size",
         "67108864",
         "--ws-ping-interval",
@@ -1170,9 +1170,9 @@ def component_graph(
         str(AGENT_WEBSOCKET_PING_TIMEOUT_SECONDS),
       ),
       paths.root,
-      {"DATABASE_PROCESS_ROLE": "market-data-service"},
+      {"DATABASE_PROCESS_ROLE": "market-gateway"},
       ReadinessProbe(
-        "http", f"http://127.0.0.1:{MARKET_DATA_SERVICE_PORT}/health/ready", 60
+        "http", f"http://127.0.0.1:{MARKET_GATEWAY_PORT}/health/ready", 60
       ),
     ),
     ComponentSpec(
@@ -1629,14 +1629,7 @@ def invoke_up(args: argparse.Namespace, paths: RuntimePaths) -> int:
   caddy = verify_locked_caddy(paths)
   validate_caddy_configuration(paths, caddy, configuration.process_environment)
   assert_ports_available(
-    (
-      CADDY_PORT,
-      CADDY_ADMIN_PORT,
-      API_PORT,
-      MARKET_DATA_SERVICE_PORT,
-      WEB_PORT,
-      DOCS_PORT,
-    )
+    (CADDY_PORT, CADDY_ADMIN_PORT, API_PORT, MARKET_GATEWAY_PORT, WEB_PORT, DOCS_PORT)
   )
   check_external_dependencies(paths, python, configuration)
   generate_docs_contracts(paths, node, configuration.process_environment)

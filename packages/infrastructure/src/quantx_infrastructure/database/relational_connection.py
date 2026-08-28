@@ -24,8 +24,8 @@ class DatabasePoolProfile:
 
 _DATABASE_POOL_PROFILES = {
   "api": DatabasePoolProfile("api", pool_size=8, max_overflow=4, statement_timeout_ms=15_000),
-  "market-data-service": DatabasePoolProfile(
-    "market-data-service", pool_size=1, max_overflow=1, statement_timeout_ms=15_000
+  "market-gateway": DatabasePoolProfile(
+    "market-gateway", pool_size=1, max_overflow=1, statement_timeout_ms=15_000
   ),
   # The Engine singleton lease is detached as a dedicated physical connection,
   # so all pooled capacity remains available to business workloads.

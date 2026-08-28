@@ -20,8 +20,8 @@
 			@docs_root path /docs
 			redir @docs_root /docs/ 308
 
-			@market_data_service path /ws/agent/market
-			reverse_proxy @market_data_service 127.0.0.1:18082
+			@market_gateway path /ws/agent/market
+			reverse_proxy @market_gateway 127.0.0.1:18082
 
 			@monitor path /monitor/*
 			reverse_proxy @monitor 127.0.0.1:18083

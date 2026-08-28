@@ -190,7 +190,7 @@ def test_windows_services_are_independently_supervised() -> None:
     "quantx-api.xml",
     "quantx-caddy.xml",
     "quantx-engine.xml",
-    "quantx-market-data-service.xml",
+    "quantx-market-gateway.xml",
     "quantx-monitor.xml",
     "quantx-qmt-agent.xml",
     "quantx-worker.xml",
@@ -1407,7 +1407,11 @@ def test_monitor_has_an_independent_dev_state_file_and_production_service() -> N
   assert '"quantx_monitor.main"' in monitor_up
   assert "Write-MonitorState -Entry $entry" in monitor_up
   assert "$MonitorStateFile" in monitor_state
-  assert "$MarketDataServicePort" in ordinary_up
+  assert (
+    "Assert-PortsAvailable -Ports "
+    "@(8080, $ApiPort, $MarketGatewayPort, 5250, 5251)"
+    in ordinary_up
+  )
   assert "QuantXMonitor" in service
   assert "quantx_monitor.main" in service
   assert "MONITOR_DATABASE_PATH" in service

@@ -114,7 +114,7 @@ $DefaultPrefectApiUrl = "http://192.168.5.6:30420/api"
 $DefaultPrefectWorkerPool = "quantx-pool"
 $DefaultQmtCondaEnvironment = "xtquant-demo"
 $ApiPort = 18081
-$MarketDataServicePort = 18082
+$MarketGatewayPort = 18082
 $AgentWebSocketPingTimeoutSeconds = 960
 $script:RuntimeProfile = ""
 $script:RuntimeAgentMode = ""
@@ -1274,7 +1274,7 @@ function Invoke-CaddyRecovery {
   $qmtLaunchBlocked = $runtimeConfiguration.qmtLaunchState -eq "BLOCKED"
   $requiredNames = @(
     "api",
-    "market-data-service",
+    "market-gateway",
     "ai-runtime",
     "engine",
     "web",
@@ -1626,13 +1626,7 @@ function Invoke-Up {
     throw "QuantX already has managed development processes. Run status or down."
   }
   Write-State -Processes @()
-  Assert-PortsAvailable -Ports @(
-    8080,
-    $ApiPort,
-    $MarketDataServicePort,
-    5250,
-    5251
-  )
+  Assert-PortsAvailable -Ports @(8080, $ApiPort, $MarketGatewayPort, 5250, 5251)
   $python = Resolve-Python
   $aiRuntimePython = Resolve-AiRuntimePython
   $node = Resolve-Node
@@ -1730,26 +1724,26 @@ function Invoke-Up {
   $qmtProcessLaunchStartedAt = $null
   try {
     Start-ManagedProcess `
-      -Name "market-data-service" `
+      -Name "market-gateway" `
       -Executable $python `
       -Arguments @(
         $processSupervisor,
-        "--name", "market-data-service",
+        "--name", "market-gateway",
         "--state-dir", $StateDirectory,
         "--",
         $python,
-        "-m", "uvicorn", "quantx_api.market_data_service:app",
+        "-m", "uvicorn", "quantx_api.market_gateway:app",
         "--host", "127.0.0.1",
-        "--port", [string]$MarketDataServicePort,
+        "--port", [string]$MarketGatewayPort,
         "--ws-max-size", "67108864",
         "--ws-ping-interval", "20",
         "--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds
       ) `
       -WorkingDirectory $Root `
-      -DatabaseProcessRole "market-data-service"
+      -DatabaseProcessRole "market-gateway"
     Wait-HttpReady `
-      -Name "Market Data Service" `
-      -Url "http://127.0.0.1:$MarketDataServicePort/health/ready"
+      -Name "Market Gateway" `
+      -Url "http://127.0.0.1:$MarketGatewayPort/health/ready"
 
     Start-ManagedProcess `
       -Name "api" `
@@ -2084,7 +2078,7 @@ function Invoke-Status {
   foreach ($port in @(
     8080,
     $ApiPort,
-    $MarketDataServicePort,
+    $MarketGatewayPort,
     $MonitorPort,
     5250,
     5251
@@ -2406,7 +2400,7 @@ function New-ServiceConfigurations {
 function Get-ServiceConfigurationNames {
   return @(
     "quantx-api.xml",
-    "quantx-market-data-service.xml",
+    "quantx-market-gateway.xml",
     "quantx-engine.xml",
     "quantx-monitor.xml",
     "quantx-ai-runtime.xml",
@@ -3036,7 +3030,7 @@ function Invoke-Uninstall {
   $configs = @(
     "quantx-qmt-agent.xml",
     "quantx-caddy.xml",
-    "quantx-market-data-service.xml",
+    "quantx-market-gateway.xml",
     "quantx-monitor.xml",
     "quantx-worker.xml",
     "quantx-prefect-server.xml",

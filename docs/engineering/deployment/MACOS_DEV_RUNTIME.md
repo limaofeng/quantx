@@ -75,7 +75,7 @@ REAL_TRADING_ACCOUNT_ALLOWLIST=<唯一账户>
 模拟 TLS 的专项验收才显式配置 HTTPS。
 `QUANTX_CADDY_TRUSTED_IPS` 必须至少包含 Windows Agent 的固定私网地址或受控私网
 网段。启动器还会自动加入 Mac 自身 IPv4 地址和回环地址，其他来源由 Caddy 返回
-`403`。内部 API、Market Data Service、Vite 和 VitePress 始终只监听 `127.0.0.1`。
+`403`。内部 API、Market Gateway、Vite 和 VitePress 始终只监听 `127.0.0.1`。
 
 启动器不会读取或保存 Windows 设备密钥、券商凭据、QMT 路径或 QMT journal。
 `T_TRADE_LIVE_ENABLED` 继续是独立功能开关；未显式配置时保持关闭，不影响账户级
@@ -101,7 +101,7 @@ Mac 文件，也不阻断启动。需要保留的历史回测产物应先复制�
 
 当前 Mac 与 Windows QMT 节点位于受控私有局域网，Dev 使用 HTTP/WS，不需要安装
 Caddy 根证书，也不设置 `SSL_CERT_FILE`。Caddy 仍是唯一公开入口，并通过
-`QUANTX_CADDY_TRUSTED_IPS` 限制来源；API、Market Data Service 和其他服务继续只绑定
+`QUANTX_CADDY_TRUSTED_IPS` 限制来源；API、Market Gateway 和其他服务继续只绑定
 回环地址。
 
 如果专项测试显式把 `PUBLIC_URL` 改为 HTTPS，Windows 节点仍必须信任 Mac Caddy
@@ -158,7 +158,7 @@ WinRM 或其他方式联系 Windows。Agent 离线不会使静态配置降为 `d
 ```text
 外部依赖检查
   -> sleep-guard
-  -> Market Data Service
+  -> Market Gateway
   -> API
   -> Engine
   -> AI Runtime（功能开启时）
@@ -177,7 +177,7 @@ Mac 启动器为 Engine 注入本轮唯一实例 ID；readiness 必须同时匹�
 启动前还会只读检查 PostgreSQL `pg_locks`；若旧运行仍持有
 `quantx-engine-singleton-v1`，`up` 在创建任何 Mac 子进程前以退出码 `69` 阻断。
 
-停止顺序固定为 Caddy、Web/Docs、Engine、Worker、AI Runtime、API、Market Data Service、
+停止顺序固定为 Caddy、Web/Docs、Engine、Worker、AI Runtime、API、Market Gateway、
 sleep-guard。先关闭唯一公开入口，避免停止期间继续接收新命令；启动器只有在 PID、
 创建时间、进程组和命令摘要全部匹配时，才向
 该进程组发送 `SIGTERM`；超出有界优雅窗口后才发送 `SIGKILL`。`down` 不读取、不
@@ -253,7 +253,7 @@ full/live 预检要求 macOS 网络时间服务运行；本轮运行期间由受
 
 当前迁移已经验证 Windows Agent 经 Mac HTTP/WS 完成控制连接、完整账户快照、
 三阶段市场同步和 Engine watermark 追平；Agent 断开会立即关闭动态实盘能力，
-Market Data Service 子进程重启后会从 `OFFLINE/SYNCING` 恢复，并且只有所有安全门同时
+Market Gateway 子进程重启后会从 `OFFLINE/SYNCING` 恢复，并且只有所有安全门同时
 通过时才短暂显示 `liveTrading=ENABLED`。非交易时段没有新 tick 后，行情 freshness
 租约按设计过期并再次 fail-closed，不应被误判为迁移失败。
 

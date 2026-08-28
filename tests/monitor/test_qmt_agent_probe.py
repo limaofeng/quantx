@@ -368,7 +368,7 @@ async def test_scheduler_persists_exactly_one_composite_qmt_sample(
     MonitorSettings(MONITOR_DATABASE_PATH=tmp_path / "monitor.sqlite3"),
     Storage(),
   )
-  scheduler._client = httpx.AsyncClient(trust_env=False)
+  scheduler._client = httpx.AsyncClient()
   try:
     await scheduler.run_cycle()
   finally:

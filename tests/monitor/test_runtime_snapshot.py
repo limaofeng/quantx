@@ -39,6 +39,7 @@ async def test_runtime_snapshot_uses_one_request_for_all_derived_targets():
             "status": "blocked",
             "reasonCode": "REMOTE_AGENT_SESSION_STALE",
           },
+          "marketData": {"status": "syncing"},
           "aiRuntime": {"status": "disabled"},
         }
       },
@@ -55,6 +56,7 @@ async def test_runtime_snapshot_uses_one_request_for_all_derived_targets():
     "engine": MonitorStatus.HEALTHY,
     "worker": MonitorStatus.DEGRADED,
     "qmt-agent": MonitorStatus.UNAVAILABLE,
+    "market-data": MonitorStatus.DEGRADED,
     "ai-runtime": MonitorStatus.DISABLED,
   }
   assert all(result.latency_ms is None for result in results)

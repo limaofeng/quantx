@@ -43,15 +43,6 @@ class MonitorScheduler:
   async def start(self) -> None:
     self._stop.clear()
     self._client = httpx.AsyncClient(trust_env=False)
-    try:
-      # Do not expose a ready Monitor with placeholder target states. The first
-      # complete sample is part of startup, so direct services immediately have
-      # a real status and latency instead of an initial unknown/N/A window.
-      await self.run_cycle()
-    except BaseException:
-      await self._client.aclose()
-      self._client = None
-      raise
     self._tasks = [
       asyncio.create_task(self._run_cycles(), name="monitor-probe-cycles"),
       asyncio.create_task(self._run_maintenance(), name="monitor-retention"),
@@ -68,13 +59,7 @@ class MonitorScheduler:
       self._client = None
 
   async def _run_cycles(self) -> None:
-    delay = self.settings.check_interval_seconds
     while not self._stop.is_set():
-      try:
-        await asyncio.wait_for(self._stop.wait(), timeout=delay)
-        return
-      except TimeoutError:
-        pass
       started = monotonic()
       try:
         await self.run_cycle()
@@ -84,6 +69,10 @@ class MonitorScheduler:
         logger.exception("monitor probe cycle failed")
       elapsed = monotonic() - started
       delay = max(0.1, self.settings.check_interval_seconds - elapsed)
+      try:
+        await asyncio.wait_for(self._stop.wait(), timeout=delay)
+      except TimeoutError:
+        pass
 
   async def run_cycle(self) -> None:
     if self._cycle_lock.locked():
@@ -152,8 +141,8 @@ class MonitorScheduler:
           evaluator=json_status("alive"),
         ),
         HttpProbe(
-          "market-data-service",
-          f"{self.settings.market_data_service_url.rstrip('/')}/health/ready",
+          "market-gateway",
+          f"{self.settings.market_gateway_url.rstrip('/')}/health/ready",
           timeout_seconds=self.settings.http_timeout_seconds,
           evaluator=json_status("ready"),
         ),
@@ -171,19 +160,15 @@ class MonitorScheduler:
         async with semaphore:
           return await action()
 
+      direct_results = await asyncio.gather(
+        *(guarded(action) for action in direct),
+      )
       snapshot = RuntimeSnapshotProbe(
         f"{self.settings.api_url.rstrip('/')}/health/components",
         self.settings.http_timeout_seconds,
       )
-
-      async def derived() -> list[ProbeResult]:
-        async with semaphore:
-          return await snapshot.run(self._client)
-
-      direct_results, derived_results = await asyncio.gather(
-        asyncio.gather(*(guarded(action) for action in direct)),
-        derived(),
-      )
+      async with semaphore:
+        derived_results = await snapshot.run(self._client)
       qmt_direct = next(
         result for result in direct_results if result.target_id == "qmt-agent"
       )

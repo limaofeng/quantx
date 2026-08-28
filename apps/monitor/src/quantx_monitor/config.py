@@ -77,9 +77,9 @@ class MonitorSettings(BaseSettings):
     default="http://127.0.0.1:18081",
     validation_alias="MONITOR_API_URL",
   )
-  market_data_service_url: str = Field(
+  market_gateway_url: str = Field(
     default="http://127.0.0.1:18082",
-    validation_alias="MONITOR_MARKET_DATA_SERVICE_URL",
+    validation_alias="MONITOR_MARKET_GATEWAY_URL",
   )
   qmt_agent_health_url: str = Field(
     default="http://127.0.0.1:18084",

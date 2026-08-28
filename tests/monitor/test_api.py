@@ -23,13 +23,7 @@ async def test_public_api_is_sanitized_and_rejects_unknown_targets(tmp_path):
         checked_at=now,
         observed_status=MonitorStatus.HEALTHY,
         latency_ms=3.25,
-      ),
-      ProbeResult(
-        target_id="market-data-service",
-        checked_at=now,
-        observed_status=MonitorStatus.HEALTHY,
-        latency_ms=4.5,
-      ),
+      )
     ]
   )
   settings = MonitorSettings(
@@ -72,12 +66,6 @@ async def test_public_api_is_sanitized_and_rejects_unknown_targets(tmp_path):
     assert "derived" not in postgresql
     qmt = next(target for target in payload["targets"] if target["id"] == "qmt-agent")
     assert qmt["probeKind"] == "composite"
-    market_data_service = next(
-      target for target in payload["targets"] if target["id"] == "market-data-service"
-    )
-    assert market_data_service["probeKind"] == "direct"
-    assert market_data_service["latencyMs"] == 4.5
-    assert market_data_service["status"] == "healthy"
     assert unknown.status_code == 404
     serialized = summary.text
     assert "secret-user" not in serialized
