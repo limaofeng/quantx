@@ -1185,6 +1185,9 @@ def test_monitor_has_an_independent_dev_state_file() -> None:
   assert '"quantx_monitor.main"' in monitor_up
   assert "Write-MonitorState -Entry $entry" in monitor_up
   assert "$MonitorStateFile" in monitor_state
+  assert "[IO.File]::Replace(" in monitor_state
+  assert "[IO.File]::Move($temporary, $MonitorStateFile)" in monitor_state
+  assert "[IO.File]::Move($temporary, $MonitorStateFile, $true)" not in monitor_state
   for port in ("8080", "$ApiPort", "$MarketGatewayPort", "5250", "5251"):
     assert (
       port

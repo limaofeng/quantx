@@ -559,16 +559,33 @@ function Write-MonitorState {
   $temporary = Join-Path $MonitorRuntime (
     "dev-process.{0}.{1}.tmp" -f $PID, [guid]::NewGuid().ToString("N")
   )
+  $replacementBackup = Join-Path $MonitorRuntime (
+    "dev-process.{0}.{1}.replace-backup.tmp" -f
+      $PID,
+      [guid]::NewGuid().ToString("N")
+  )
   try {
     [IO.File]::WriteAllText(
       $temporary,
       (ConvertTo-Json -InputObject $Entry -Depth 4),
       [Text.UTF8Encoding]::new($false)
     )
-    [IO.File]::Move($temporary, $MonitorStateFile, $true)
+    if (Test-Path -LiteralPath $MonitorStateFile -PathType Leaf) {
+      [IO.File]::Replace(
+        $temporary,
+        $MonitorStateFile,
+        $replacementBackup,
+        $true
+      )
+    } else {
+      [IO.File]::Move($temporary, $MonitorStateFile)
+    }
   } finally {
     if (Test-Path -LiteralPath $temporary -PathType Leaf) {
       Remove-Item -LiteralPath $temporary -Force
+    }
+    if (Test-Path -LiteralPath $replacementBackup -PathType Leaf) {
+      Remove-Item -LiteralPath $replacementBackup -Force
     }
   }
 }
