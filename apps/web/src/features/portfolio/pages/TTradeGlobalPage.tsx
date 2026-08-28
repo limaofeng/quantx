@@ -2547,6 +2547,10 @@ export function TTradeGlobalPage() {
             signalSnapshotRefreshCoordinator.isTrusted(expectedAccountId)
           ) {
             setTrustedSignalSnapshotEpoch(epoch);
+          } else if (
+            signalSnapshotRefreshCoordinator.isCurrent(epoch, expectedAccountId)
+          ) {
+            setTrustedSignalSnapshotEpoch(null);
           }
         });
     },
@@ -3059,8 +3063,12 @@ export function TTradeGlobalPage() {
 
   const requestAuthoritativeMonitorRefresh = React.useCallback(() => {
     if (!accountId || workspaceMode !== 'REALTIME') return;
-    const epoch = signalSnapshotRefreshCoordinator.beginEpoch(accountId);
-    setTrustedSignalSnapshotEpoch(null);
+    const epoch = signalSnapshotRefreshCoordinator.beginEpoch(accountId, {
+      preserveTrust: true,
+    });
+    setTrustedSignalSnapshotEpoch(
+      signalSnapshotRefreshCoordinator.isTrusted(accountId) ? epoch : null
+    );
     serverTruthRefreshPolicy.noteNetworkRequest(accountId, Date.now());
     runMonitorEpochRefresh(epoch, accountId);
   }, [

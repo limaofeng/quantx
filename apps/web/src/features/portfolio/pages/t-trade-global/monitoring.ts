@@ -89,10 +89,20 @@ export function createSignalSnapshotRefreshCoordinator() {
   let trustedEpoch: number | null = null;
   let inFlight: Promise<boolean> | null = null;
 
-  const beginEpoch = (accountId: string | null | undefined) => {
+  const beginEpoch = (
+    accountId: string | null | undefined,
+    options: { preserveTrust?: boolean } = {}
+  ) => {
+    const normalizedAccountId = accountId || null;
+    const preserveCurrentTrust = Boolean(
+      options.preserveTrust &&
+      normalizedAccountId &&
+      normalizedAccountId === currentAccountId &&
+      trustedEpoch === currentEpoch
+    );
     currentEpoch += 1;
-    currentAccountId = accountId || null;
-    trustedEpoch = null;
+    currentAccountId = normalizedAccountId;
+    trustedEpoch = preserveCurrentTrust ? currentEpoch : null;
     return currentEpoch;
   };
 
@@ -123,10 +133,15 @@ export function createSignalSnapshotRefreshCoordinator() {
     inFlight = requestPromise;
     try {
       const succeeded = await requestPromise;
-      if (!succeeded || !isCurrent(epoch, accountId)) return false;
+      if (!isCurrent(epoch, accountId)) return false;
+      if (!succeeded) {
+        trustedEpoch = null;
+        return false;
+      }
       trustedEpoch = epoch;
       return true;
     } catch {
+      if (isCurrent(epoch, accountId)) trustedEpoch = null;
       return false;
     } finally {
       if (inFlight === requestPromise) inFlight = null;

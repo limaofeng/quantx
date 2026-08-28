@@ -143,22 +143,22 @@ describe('T trade V3 monitoring helpers', () => {
     expect(
       isKnownSignalSnapshot(snapshot({ dominantPhase: 'FUTURE_PHASE' }))
     ).toBe(false);
-    expect(
-      isKnownSignalSnapshot(snapshot({ dominantPhase: undefined }))
-    ).toBe(false);
+    expect(isKnownSignalSnapshot(snapshot({ dominantPhase: undefined }))).toBe(
+      false
+    );
   });
 
   it('requires the exact V3 state and feature schema versions', () => {
     expect(isKnownSignalSnapshot(snapshot())).toBe(true);
-    expect(
-      isKnownSignalSnapshot(snapshot({ stateSchemaVersion: '2' }))
-    ).toBe(false);
+    expect(isKnownSignalSnapshot(snapshot({ stateSchemaVersion: '2' }))).toBe(
+      false
+    );
     expect(
       isKnownSignalSnapshot(snapshot({ featureSchemaVersion: 'features-v3' }))
     ).toBe(false);
-    expect(
-      isKnownSignalSnapshot(snapshot({ stateSchemaVersion: '' }))
-    ).toBe(false);
+    expect(isKnownSignalSnapshot(snapshot({ stateSchemaVersion: '' }))).toBe(
+      false
+    );
     expect(
       isKnownSignalSnapshot(snapshot({ featureSchemaVersion: undefined }))
     ).toBe(false);
@@ -177,7 +177,9 @@ describe('T trade V3 monitoring helpers', () => {
           hardGates: [
             { code: 'DATA_READY', label: '数据', passed: false, detail: '' },
           ],
-          topBlockers: [{ code: 'PAUSED', label: '暂停', detail: '服务端提示' }],
+          topBlockers: [
+            { code: 'PAUSED', label: '暂停', detail: '服务端提示' },
+          ],
         }),
         now
       )
@@ -318,14 +320,10 @@ describe('T trade V3 monitoring helpers', () => {
     const secondRequest = new Promise<boolean>(resolve => {
       resolveSecond = resolve;
     });
-    const secondRefresh = coordinator.refresh(
-      secondEpoch,
-      'account-1',
-      () => {
-        secondStarted = true;
-        return secondRequest;
-      }
-    );
+    const secondRefresh = coordinator.refresh(secondEpoch, 'account-1', () => {
+      secondStarted = true;
+      return secondRequest;
+    });
 
     resolveFirst(true);
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -368,6 +366,64 @@ describe('T trade V3 monitoring helpers', () => {
       await coordinator.refresh(rejectedEpoch, 'account-1', async () => {
         throw new Error('network unavailable');
       })
+    ).toBe(false);
+    expect(coordinator.isTrusted('account-1')).toBe(false);
+  });
+
+  it('preserves a trusted snapshot during a same-account background refresh', async () => {
+    const coordinator = createSignalSnapshotRefreshCoordinator();
+    const initialEpoch = coordinator.beginEpoch('account-1');
+    expect(
+      await coordinator.refresh(initialEpoch, 'account-1', async () => true)
+    ).toBe(true);
+
+    let resolveRefresh!: (value: boolean) => void;
+    const pendingRefresh = new Promise<boolean>(resolve => {
+      resolveRefresh = resolve;
+    });
+    const backgroundEpoch = coordinator.beginEpoch('account-1', {
+      preserveTrust: true,
+    });
+    const refresh = coordinator.refresh(
+      backgroundEpoch,
+      'account-1',
+      () => pendingRefresh
+    );
+
+    expect(coordinator.isTrusted('account-1')).toBe(true);
+    resolveRefresh(true);
+    expect(await refresh).toBe(true);
+    expect(coordinator.isTrusted('account-1')).toBe(true);
+  });
+
+  it('invalidates an existing trusted snapshot for a strict disconnect or account epoch', async () => {
+    const coordinator = createSignalSnapshotRefreshCoordinator();
+    const initialEpoch = coordinator.beginEpoch('account-1');
+    await coordinator.refresh(initialEpoch, 'account-1', async () => true);
+    expect(coordinator.isTrusted('account-1')).toBe(true);
+
+    coordinator.beginEpoch('account-1');
+    expect(coordinator.isTrusted('account-1')).toBe(false);
+
+    const recoveredEpoch = coordinator.beginEpoch('account-1');
+    await coordinator.refresh(recoveredEpoch, 'account-1', async () => true);
+    coordinator.beginEpoch('account-2', { preserveTrust: true });
+    expect(coordinator.isTrusted('account-1')).toBe(false);
+    expect(coordinator.isTrusted('account-2')).toBe(false);
+  });
+
+  it('revokes preserved trust when the background refresh actually fails', async () => {
+    const coordinator = createSignalSnapshotRefreshCoordinator();
+    const initialEpoch = coordinator.beginEpoch('account-1');
+    await coordinator.refresh(initialEpoch, 'account-1', async () => true);
+
+    const backgroundEpoch = coordinator.beginEpoch('account-1', {
+      preserveTrust: true,
+    });
+    expect(coordinator.isTrusted('account-1')).toBe(true);
+
+    expect(
+      await coordinator.refresh(backgroundEpoch, 'account-1', async () => false)
     ).toBe(false);
     expect(coordinator.isTrusted('account-1')).toBe(false);
   });
