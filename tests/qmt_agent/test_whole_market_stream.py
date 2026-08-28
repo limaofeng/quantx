@@ -1805,6 +1805,25 @@ def test_authenticated_control_session_resets_reconnect_backoff() -> None:
   ) == (1.0, 2.0)
 
 
+def test_websocket_close_code_prefers_received_close_frame() -> None:
+  received = type("CloseFrame", (), {"code": 4401})()
+  sent = type("CloseFrame", (), {"code": 1011})()
+  exc = type(
+    "ClosedConnection",
+    (Exception,),
+    {"rcvd": received, "sent": sent},
+  )()
+
+  assert runtime_module._websocket_close_code(exc) == 4401
+
+
+def test_websocket_close_code_supports_legacy_exception_code() -> None:
+  exc = type("ClosedConnection", (Exception,), {"code": 1006})()
+
+  assert runtime_module._websocket_close_code(exc) == 1006
+  assert runtime_module._websocket_close_code(RuntimeError()) is None
+
+
 def test_ready_market_stream_resets_backoff_immediately() -> None:
   assert AgentRuntime._market_stream_retry_delay(
     16.0,

@@ -592,6 +592,16 @@ def _connect_websocket(uri: str, **kwargs):
   return connection
 
 
+def _websocket_close_code(exc: BaseException) -> int | None:
+  for direction in ("rcvd", "sent"):
+    close_frame = getattr(exc, direction, None)
+    code = getattr(close_frame, "code", None)
+    if isinstance(code, int):
+      return code
+  code = getattr(exc, "code", None)
+  return code if isinstance(code, int) else None
+
+
 def _parse_expiry(value: Any) -> datetime:
   if not isinstance(value, str):
     raise ValueError("命令缺少 expires_at")
@@ -731,8 +741,9 @@ class AgentRuntime:
             authenticated=getattr(self, "_control_session_authenticated", False),
           )
           logger.warning(
-            "QMT Agent disconnected: error=%s",
+            "QMT Agent disconnected: error=%s close_code=%s",
             exc.__class__.__name__,
+            _websocket_close_code(exc),
           )
           try:
             await asyncio.wait_for(self._stopped.wait(), timeout=sleep_delay)
