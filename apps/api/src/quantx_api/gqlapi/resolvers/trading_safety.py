@@ -12,6 +12,7 @@ from ..types.trading_safety_types import (
   AccountExecutionHealthStatus,
   AccountExecutionSafety,
   AccountExecutionSafetyCheck,
+  AccountExecutionSafetyCheckStatus,
 )
 
 
@@ -50,7 +51,9 @@ class AccountExecutionSafetyResolver:
       checks=[
         AccountExecutionSafetyCheck(
           code=str(item.get("code") or ""),
-          passed=bool(item.get("passed")),
+          status=AccountExecutionSafetyCheckStatus(
+            str(item.get("status") or "FAILED").upper()
+          ),
           message=str(item.get("message") or ""),
           scope=str(item.get("scope") or "INCREASE_RISK"),
         )

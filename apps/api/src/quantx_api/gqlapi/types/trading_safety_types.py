@@ -15,10 +15,17 @@ class AccountExecutionHealthStatus(Enum):
   KILLED = "KILLED"
 
 
+@strawberry.enum(description="账户执行安全检查状态")
+class AccountExecutionSafetyCheckStatus(Enum):
+  PASSED = "PASSED"
+  STANDBY = "STANDBY"
+  FAILED = "FAILED"
+
+
 @strawberry.type(description="账户执行安全检查项")
 class AccountExecutionSafetyCheck:
   code: str
-  passed: bool
+  status: AccountExecutionSafetyCheckStatus
   message: str
   scope: str
 

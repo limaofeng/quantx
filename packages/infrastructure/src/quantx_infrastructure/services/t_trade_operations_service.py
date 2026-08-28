@@ -230,7 +230,15 @@ class TTradeOperationsService:
       },
       self._rollout_limits_check(rollout),
     ]
-    account_checks = [dict(item) for item in list(account_safety.get("checks") or [])]
+    account_checks = [
+      {
+        "code": str(item.get("code") or ""),
+        "passed": str(item.get("status") or "FAILED").upper() != "FAILED",
+        "message": str(item.get("message") or ""),
+        "scope": str(item.get("scope") or "INCREASE_RISK"),
+      }
+      for item in list(account_safety.get("checks") or [])
+    ]
     checks = account_checks + feature_checks
     blocked = [
       str(item.get("message") or item.get("code"))

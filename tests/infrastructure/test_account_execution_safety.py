@@ -6,9 +6,11 @@ from quantx_infrastructure.services.account_execution_safety_service import (
 def _readiness(
   *,
   failed: set[str] | None = None,
+  standby: set[str] | None = None,
   authorization_state: str = "ENABLED",
 ):
   failed = failed or set()
+  standby = standby or set()
   checks = [
     ("SERVER_REAL_TRADING_ENABLED", "AUTOMATION"),
     ("T_TRADE_LIVE_ENABLED", "AUTOMATION"),
@@ -16,6 +18,7 @@ def _readiness(
     ("ENGINE_READY", "OBSERVATION"),
     ("LIVE_AGENT_READY", "OBSERVATION"),
     ("AGENT_MODE_LIVE", "OBSERVATION"),
+    ("MARKET_STREAM_READY", "INCREASE_RISK"),
     ("PROTOCOL_1_1", "OBSERVATION"),
     ("EXECUTION_CONTROL_CONFIGURED", "OBSERVATION"),
     ("SNAPSHOT_RECONCILED", "OBSERVATION"),
@@ -37,8 +40,16 @@ def _readiness(
     "checks": [
       {
         "code": code,
-        "passed": code not in failed,
-        "message": "" if code not in failed else f"{code} failed",
+        "status": (
+          "FAILED" if code in failed else "STANDBY" if code in standby else "PASSED"
+        ),
+        "message": (
+          f"{code} failed"
+          if code in failed
+          else f"{code} standby"
+          if code in standby
+          else ""
+        ),
         "scope": scope,
       }
       for code, scope in checks
@@ -65,6 +76,18 @@ def test_missing_account_window_is_a_healthy_reduce_only_state() -> None:
   assert status["can_reduce_risk"] is True
   assert status["can_increase_risk"] is False
   assert status["summary"] == "账户事实已收敛；当前仅允许减仓"
+
+
+def test_closed_market_standby_is_healthy_and_non_blocking() -> None:
+  status = project_account_execution_safety(
+    _readiness(standby={"MARKET_STREAM_READY"})
+  )
+
+  assert status["health_status"] == "HEALTHY"
+  assert status["execution_mode"] == "TRADING"
+  assert status["can_increase_risk"] is True
+  assert status["blocked_reasons"] == []
+  assert status["summary"] == "账户状态与买入条件正常；当前休市待机"
 
 
 def test_stale_snapshot_blocks_both_execution_capabilities() -> None:

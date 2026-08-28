@@ -244,16 +244,16 @@ async def test_live_buy_requires_authoritative_ready_market_stream(
   authoritative_ready = AsyncMock(return_value=False)
   monkeypatch.setattr(
     command_module,
-    "authoritative_market_stream_ready",
+    "authoritative_market_stream_tradable",
     authoritative_ready,
   )
 
-  with pytest.raises(AgentUnavailableError, match="三阶段同步"):
+  with pytest.raises(AgentUnavailableError, match="权威全市场行情"):
     await service._require_live_market_stream_ready(SimpleNamespace(id="device-1"))
   authoritative_ready.assert_not_awaited()
 
   heartbeat.details["marketStreamStatus"] = "READY"
-  with pytest.raises(AgentUnavailableError, match="三阶段同步"):
+  with pytest.raises(AgentUnavailableError, match="权威全市场行情"):
     await service._require_live_market_stream_ready(SimpleNamespace(id="device-1"))
 
   authoritative_ready.return_value = True

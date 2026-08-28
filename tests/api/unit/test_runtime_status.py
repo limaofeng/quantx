@@ -495,6 +495,20 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   )
   components = await runtime_status._component_heartbeats()
   assert components["market-data"]["status"] == "stale"
+  assert components["market-data"]["readinessStatus"] == "failed"
+
+  async def outside_session(*_args):
+    return False
+
+  monkeypatch.setattr(
+    runtime_status.TradingTimeService,
+    "is_trading_hours",
+    outside_session,
+  )
+  components = await runtime_status._component_heartbeats()
+  assert components["market-data"]["status"] == "ready"
+  assert components["market-data"]["readinessStatus"] == "standby"
+  assert "休市" in components["market-data"]["readinessMessage"]
 
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")

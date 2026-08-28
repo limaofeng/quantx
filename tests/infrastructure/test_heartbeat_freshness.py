@@ -11,6 +11,11 @@ import quantx_infrastructure.services.trade_command_service as trade_command_mod
 from quantx_infrastructure.services.account_execution_safety_service import (
   AccountExecutionSafetyService,
 )
+from quantx_infrastructure.services.market_stream_readiness import (
+  MarketStreamReadiness,
+  MarketStreamReadinessStatus,
+  classify_authoritative_market_stream_readiness,
+)
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 
 
@@ -74,7 +79,6 @@ def test_account_freshness_rejects_stale_or_degraded_heartbeat(
   assert not AccountExecutionSafetyService._fresh(degraded)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
   ("target", "value"),
   [
@@ -88,8 +92,7 @@ def test_account_freshness_rejects_stale_or_degraded_heartbeat(
     ("engine.sequence", 2),
   ],
 )
-async def test_authoritative_market_readiness_requires_exact_committed_watermarks(
-  monkeypatch: pytest.MonkeyPatch,
+def test_authoritative_market_readiness_requires_exact_committed_watermarks(
   target: str,
   value: object,
 ) -> None:
@@ -107,24 +110,18 @@ async def test_authoritative_market_readiness_requires_exact_committed_watermark
     attribute,
     value,
   )
-  monkeypatch.setattr(
-    safety_module.market_stream_store,
-    "state_with_freshness",
-    AsyncMock(return_value=(stream, freshness)),
-  )
-  monkeypatch.setattr(
-    safety_module.market_stream_store,
-    "engine_state",
-    AsyncMock(return_value=engine),
+  readiness = classify_authoritative_market_stream_readiness(
+    stream_state=stream,
+    freshness_lease=freshness,
+    engine_state=engine,
+    trading_session=True,
   )
 
-  assert not await safety_module.authoritative_market_stream_ready()
+  assert readiness.status is MarketStreamReadinessStatus.FAILED
+  assert not readiness.tradable_now
 
 
-@pytest.mark.asyncio
-async def test_authoritative_market_readiness_accepts_exact_watermarks_and_fails_closed(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_authoritative_market_readiness_is_passed_only_during_a_fresh_session() -> None:
   stream = SimpleNamespace(
     status="READY",
     commit_phase="IDLE",
@@ -133,15 +130,37 @@ async def test_authoritative_market_readiness_accepts_exact_watermarks_and_fails
   )
   freshness = SimpleNamespace(stream_id="stream-1", sequence=3)
   engine = SimpleNamespace(status="READY", stream_id="stream-1", sequence=3)
-  state = AsyncMock(return_value=(stream, freshness))
-  engine_state = AsyncMock(return_value=engine)
-  monkeypatch.setattr(safety_module.market_stream_store, "state_with_freshness", state)
-  monkeypatch.setattr(safety_module.market_stream_store, "engine_state", engine_state)
+  readiness = classify_authoritative_market_stream_readiness(
+    stream_state=stream,
+    freshness_lease=freshness,
+    engine_state=engine,
+    trading_session=True,
+  )
 
-  assert await safety_module.authoritative_market_stream_ready()
+  assert readiness.status is MarketStreamReadinessStatus.PASSED
+  assert readiness.tradable_now
 
-  state.side_effect = RuntimeError("redis unavailable")
-  assert not await safety_module.authoritative_market_stream_ready()
+
+def test_authoritative_market_readiness_is_standby_while_market_is_closed() -> None:
+  stream = SimpleNamespace(
+    status="READY",
+    commit_phase="IDLE",
+    sequence=3,
+    stream_id="stream-1",
+  )
+  engine = SimpleNamespace(status="READY", stream_id="stream-1", sequence=3)
+
+  readiness = classify_authoritative_market_stream_readiness(
+    stream_state=stream,
+    freshness_lease=None,
+    engine_state=engine,
+    trading_session=False,
+  )
+
+  assert readiness.status is MarketStreamReadinessStatus.STANDBY
+  assert readiness.converged
+  assert not readiness.tradable_now
+  assert "休市" in readiness.message
 
 
 def _api(now: datetime, *, instance_id: str = "api-instance-1"):
@@ -232,7 +251,7 @@ async def _status(
   monkeypatch: pytest.MonkeyPatch,
   rows: list[tuple],
   *,
-  authoritative_market_ready: bool = True,
+  market_status: MarketStreamReadinessStatus = MarketStreamReadinessStatus.PASSED,
 ) -> dict:
   @asynccontextmanager
   async def session():
@@ -250,8 +269,22 @@ async def _status(
   )
   monkeypatch.setattr(
     safety_module,
-    "authoritative_market_stream_ready",
-    AsyncMock(return_value=authoritative_market_ready),
+    "authoritative_market_stream_readiness",
+    AsyncMock(
+      return_value=MarketStreamReadiness(
+        status=market_status,
+        message=(
+          "当前休市，权威水位已收敛"
+          if market_status is MarketStreamReadinessStatus.STANDBY
+          else "全市场行情未就绪"
+          if market_status is MarketStreamReadinessStatus.FAILED
+          else ""
+        ),
+        converged=market_status is not MarketStreamReadinessStatus.FAILED,
+        freshness_current=market_status is MarketStreamReadinessStatus.PASSED,
+        trading_session=market_status is MarketStreamReadinessStatus.PASSED,
+      )
+    ),
   )
   result = await AccountExecutionSafetyService().status("TEST-ACCOUNT")
   snapshot.assert_awaited_once()
@@ -323,8 +356,8 @@ async def test_account_status_blocks_increase_until_market_stream_is_ready(
   checks = {item["code"]: item for item in result["checks"]}
 
   assert result["can_increase_risk"] is False
-  assert checks["MARKET_STREAM_READY"]["passed"] is False
-  assert "三阶段同步" in checks["MARKET_STREAM_READY"]["message"]
+  assert checks["MARKET_STREAM_READY"]["status"] == "FAILED"
+  assert "QMT Agent" in checks["MARKET_STREAM_READY"]["message"]
 
 
 @pytest.mark.asyncio
@@ -349,12 +382,46 @@ async def test_account_status_rejects_agent_ready_claim_without_server_watermark
   result = await _status(
     monkeypatch,
     rows,
-    authoritative_market_ready=False,
+    market_status=MarketStreamReadinessStatus.FAILED,
   )
   checks = {item["code"]: item for item in result["checks"]}
 
   assert result["can_increase_risk"] is False
-  assert checks["MARKET_STREAM_READY"]["passed"] is False
+  assert checks["MARKET_STREAM_READY"]["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_account_status_treats_closed_market_as_healthy_standby(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+) -> None:
+  rows = [
+    (
+      _control(fixed_utcnow),
+      SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+      _device("device-1"),
+      _agent(fixed_utcnow),
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+    )
+  ]
+
+  result = await _status(
+    monkeypatch,
+    rows,
+    market_status=MarketStreamReadinessStatus.STANDBY,
+  )
+  checks = {item["code"]: item for item in result["checks"]}
+
+  assert checks["MARKET_STREAM_READY"]["status"] == "STANDBY"
+  assert result["health_status"] == "HEALTHY"
+  assert result["execution_mode"] == "TRADING"
+  assert result["can_increase_risk"] is True
+  assert result["blocked_reasons"] == []
+  assert "休市待机" in result["summary"]
 
 
 @pytest.mark.asyncio
@@ -394,7 +461,7 @@ async def test_account_status_fails_closed_for_multiple_ready_live_agents(
 
   assert result["ready_live_agent_count"] == 2
   assert result["can_increase_risk"] is False
-  assert checks["LIVE_AGENT_READY"]["passed"] is False
+  assert checks["LIVE_AGENT_READY"]["status"] == "FAILED"
   assert "多个就绪 live QMT Agent" in checks["LIVE_AGENT_READY"]["message"]
 
 

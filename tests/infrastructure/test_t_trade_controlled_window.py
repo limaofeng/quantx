@@ -35,7 +35,7 @@ def _account_safety() -> dict:
     "checks": [
       {
         "code": "ACCOUNT_RISK_INCREASE_AUTHORIZED",
-        "passed": True,
+        "status": "PASSED",
         "message": "",
         "scope": "INCREASE_RISK",
       }

@@ -24,7 +24,10 @@ import {
   SheetTitle,
   SheetTrigger,
 } from '@/components/ui/sheet';
-import type { TradingSafety_AccountExecutionSafetyQuery } from '@/generated/gql/graphql';
+import {
+  AccountExecutionSafetyCheckStatus,
+  type TradingSafety_AccountExecutionSafetyQuery,
+} from '@/generated/gql/graphql';
 import { cn } from '@/utils/cn';
 import { formatCurrency } from '@/utils/transform/data';
 
@@ -427,7 +430,10 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
   const executionLabel = unknown
     ? '安全关闭'
     : accountExecutionModeLabel(safety?.executionMode);
-  const failedChecks = safety?.checks.filter(check => !check.passed) ?? [];
+  const failedChecks =
+    safety?.checks.filter(
+      check => check.status === AccountExecutionSafetyCheckStatus.Failed
+    ) ?? [];
   const blockedReason = safety?.blockedReasons[0] || failedChecks[0]?.message;
   const orderChainHealthy = Boolean(
     safety &&

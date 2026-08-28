@@ -4,6 +4,7 @@ from quantx_api.gqlapi.resolvers.trading_safety import (
 )
 from quantx_api.gqlapi.types.trading_safety_types import (
   AccountExecutionHealthStatus,
+  AccountExecutionSafetyCheckStatus,
 )
 
 
@@ -18,6 +19,14 @@ def _payload(health_status: str) -> dict:
     "can_reduce_risk": True,
     "can_activate_automation": True,
     "summary": "账户状态与买入条件均已通过",
+    "checks": [
+      {
+        "code": "MARKET_STREAM_READY",
+        "status": "STANDBY",
+        "message": "当前休市",
+        "scope": "INCREASE_RISK",
+      }
+    ],
   }
 
 
@@ -30,6 +39,7 @@ def test_account_execution_health_status_is_a_closed_business_enum():
     "BLOCKED",
     "KILLED",
   }
+  assert safety.checks[0].status is AccountExecutionSafetyCheckStatus.STANDBY
 
 
 @pytest.mark.parametrize("transient_status", ["CHECK", "CHECKING"])

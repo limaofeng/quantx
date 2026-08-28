@@ -24,6 +24,10 @@ from quantx_infrastructure.services.agent_session_guard import (
   QMT_AGENT_STALE,
   evaluate_agent_session,
 )
+from quantx_infrastructure.services.market_stream_readiness import (
+  MarketStreamReadinessStatus,
+  classify_authoritative_market_stream_readiness,
+)
 from quantx_infrastructure.services.qmt_launch_guard import (
   qmt_agent_launch_block_reason,
 )
@@ -294,30 +298,15 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       engine_state.updated_at if engine_state is not None else None,
       now,
     )
-    watermarks_match = bool(
-      stream_state is not None
-      and engine_state is not None
-      and stream_state.stream_id == engine_state.stream_id
-      and stream_state.sequence == engine_state.sequence
-    )
-    fresh = bool(
-      not trading_session
-      or (
-        stream_state is not None
-        and freshness_lease is not None
-        and freshness_lease.stream_id == stream_state.stream_id
-        and freshness_lease.sequence == stream_state.sequence
-      )
+    market_readiness = classify_authoritative_market_stream_readiness(
+      stream_state=stream_state,
+      freshness_lease=freshness_lease,
+      engine_state=engine_state,
+      trading_session=trading_session,
     )
     ready = bool(
       ready_market_stream_agents
-      and stream_state is not None
-      and stream_state.status == "READY"
-      and stream_state.commit_phase == "IDLE"
-      and engine_state is not None
-      and engine_state.status == "READY"
-      and watermarks_match
-      and fresh
+      and market_readiness.status is not MarketStreamReadinessStatus.FAILED
     )
     if ready:
       effective_status = "ready"
@@ -327,9 +316,11 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       effective_status = "syncing"
     elif stream_state.status != "READY":
       effective_status = str(stream_state.status).lower()
-    elif engine_state.status != "READY" or not fresh:
+    elif engine_state.status != "READY" or (
+      trading_session and not market_readiness.freshness_current
+    ):
       effective_status = "stale"
-    elif not watermarks_match:
+    elif not market_readiness.converged:
       effective_status = "syncing"
     else:
       effective_status = "syncing"
@@ -356,6 +347,8 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "commitPhase": (
         stream_state.commit_phase if stream_state is not None else "IDLE"
       ),
+      "readinessStatus": market_readiness.status.value.lower(),
+      "readinessMessage": market_readiness.message,
       "streamAgeSeconds": round(stream_age, 3) if stream_age is not None else None,
       "engineAgeSeconds": round(engine_age, 3) if engine_age is not None else None,
       "tradingSession": trading_session,

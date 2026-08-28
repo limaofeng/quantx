@@ -63,11 +63,11 @@ def _readiness(*, server_enabled: bool = True):
   checks = [
     {
       "code": "SERVER_REAL_TRADING_ENABLED",
-      "passed": server_enabled,
+      "status": "PASSED" if server_enabled else "FAILED",
       "message": "server disabled" if not server_enabled else "",
     },
-    {"code": "ENGINE_READY", "passed": True, "message": ""},
-    {"code": "LIVE_AGENT_READY", "passed": True, "message": ""},
+    {"code": "ENGINE_READY", "status": "PASSED", "message": ""},
+    {"code": "LIVE_AGENT_READY", "status": "PASSED", "message": ""},
   ]
   return {
     "status": "READY",
@@ -156,7 +156,7 @@ def test_strategy_readiness_uses_account_checks_and_fails_closed_on_pollution():
   polluted["checks"].append(
     {
       "code": "T_TRADE_LIVE_ENABLED",
-      "passed": False,
+      "status": "FAILED",
       "message": "unrelated t-trade gate",
     }
   )

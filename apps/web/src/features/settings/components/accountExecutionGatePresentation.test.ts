@@ -9,7 +9,7 @@ import {
 
 describe('account execution gate presentation', () => {
   it('provides a user-facing label and explanation for every known gate', () => {
-    expect(Object.keys(accountExecutionGatePresentation)).toHaveLength(17);
+    expect(Object.keys(accountExecutionGatePresentation)).toHaveLength(18);
 
     Object.entries(accountExecutionGatePresentation).forEach(
       ([code, presentation]) => {

@@ -54,9 +54,6 @@ from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.strategy_run_state import StrategyRunState
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
-from quantx_infrastructure.services.account_execution_safety_service import (
-  authoritative_market_stream_ready,
-)
 from quantx_infrastructure.services.agent_session_guard import (
   evaluate_agent_session,
 )
@@ -66,6 +63,9 @@ from quantx_infrastructure.services.entry_plan_authorization_service import (
 )
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   validate_exact_auto_exit_authorization,
+)
+from quantx_infrastructure.services.market_stream_readiness import (
+  authoritative_market_stream_tradable,
 )
 
 
@@ -166,9 +166,9 @@ class TradeCommandService:
     details = dict(heartbeat.details or {}) if heartbeat is not None else {}
     if (
       str(details.get("marketStreamStatus") or "").upper() != "READY"
-      or not await authoritative_market_stream_ready()
+      or not await authoritative_market_stream_tradable()
     ):
-      raise AgentUnavailableError("全市场行情尚未完成远程三阶段同步")
+      raise AgentUnavailableError("当前不具备交易时段内的新鲜权威全市场行情")
 
   async def _require_manual_live_authorization(
     self,

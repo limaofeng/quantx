@@ -16,7 +16,10 @@ import {
   PreviewAccountExecutionControlMutation,
   useTradingSafety,
 } from '@/features/trading-safety';
-import { AccountExecutionControlAction } from '@/generated/gql/graphql';
+import {
+  AccountExecutionControlAction,
+  AccountExecutionSafetyCheckStatus,
+} from '@/generated/gql/graphql';
 import { createClientId } from '@/utils/clientId';
 import { cn } from '@/utils/cn';
 
@@ -91,7 +94,7 @@ function FreshnessIndicator({
   );
 }
 
-type GateVisualTone = 'success' | 'warning' | 'danger';
+type GateVisualTone = 'success' | 'standby' | 'warning' | 'danger';
 
 function GateStatusMark({
   temporal,
@@ -100,20 +103,25 @@ function GateStatusMark({
   temporal: boolean;
   tone: GateVisualTone;
 }) {
-  const StatusIcon = temporal
-    ? Clock3
-    : tone === 'success'
-      ? CheckCircle2
-      : AlertTriangle;
+  const StatusIcon =
+    tone === 'standby'
+      ? Clock3
+      : temporal
+        ? Clock3
+        : tone === 'success'
+          ? CheckCircle2
+          : AlertTriangle;
   return (
     <span
       className={cn(
         'flex h-7 w-7 shrink-0 items-center justify-center rounded-md border',
         tone === 'success'
           ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'
-          : tone === 'warning'
-            ? 'border-warning/25 bg-warning/10 text-warning'
-            : 'border-rose-400/25 bg-rose-400/10 text-rose-300'
+          : tone === 'standby'
+            ? 'border-primary/25 bg-primary/10 text-primary'
+            : tone === 'warning'
+              ? 'border-warning/25 bg-warning/10 text-warning'
+              : 'border-rose-400/25 bg-rose-400/10 text-rose-300'
       )}
       aria-hidden="true"
     >
@@ -146,10 +154,21 @@ export function TradingSafetySettingsPanel() {
     confirmationToken: string;
   } | null>(null);
   const failedChecks = useMemo(
-    () => safety?.checks.filter(check => !check.passed) ?? [],
+    () =>
+      safety?.checks.filter(
+        check => check.status === AccountExecutionSafetyCheckStatus.Failed
+      ) ?? [],
     [safety?.checks]
   );
-  const passedCheckCount = (safety?.checks.length ?? 0) - failedChecks.length;
+  const standbyChecks = useMemo(
+    () =>
+      safety?.checks.filter(
+        check => check.status === AccountExecutionSafetyCheckStatus.Standby
+      ) ?? [],
+    [safety?.checks]
+  );
+  const passedCheckCount =
+    (safety?.checks.length ?? 0) - failedChecks.length - standbyChecks.length;
 
   const reload = () => {
     refreshSafety();
@@ -400,15 +419,21 @@ export function TradingSafetySettingsPanel() {
                   'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-ui-label font-medium',
                   failedChecks.length
                     ? 'border-warning/20 bg-warning/10 text-amber-200'
-                    : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
+                    : standbyChecks.length
+                      ? 'border-primary/20 bg-primary/10 text-blue-200'
+                      : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
                 )}
               >
                 {failedChecks.length ? (
                   <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+                ) : standbyChecks.length ? (
+                  <Clock3 className="h-3 w-3" aria-hidden="true" />
                 ) : (
                   <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
                 )}
-                {passedCheckCount}/{safety.checks.length} 已通过
+                {standbyChecks.length && !failedChecks.length
+                  ? `${passedCheckCount} 项通过 · ${standbyChecks.length} 项休市待机`
+                  : `${passedCheckCount}/${safety.checks.length} 已通过`}
               </span>
             )}
             <button
@@ -441,19 +466,26 @@ export function TradingSafetySettingsPanel() {
                   : null;
             const temporal =
               check.code === 'SNAPSHOT_FRESH' || check.code === 'RECENT_BACKUP';
+            const failed =
+              check.status === AccountExecutionSafetyCheckStatus.Failed;
+            const standby =
+              check.status === AccountExecutionSafetyCheckStatus.Standby;
             const tone: GateVisualTone =
               freshness?.tone === 'expired' ||
-              (!check.passed && check.code === 'KILL_SWITCH_CLEAR')
+              (failed && check.code === 'KILL_SWITCH_CLEAR')
                 ? 'danger'
-                : !check.passed || freshness?.tone === 'warning'
-                  ? 'warning'
-                  : 'success';
-            const statusLabel =
-              freshness?.tone === 'expired'
+                : standby
+                  ? 'standby'
+                  : failed || freshness?.tone === 'warning'
+                    ? 'warning'
+                    : 'success';
+            const statusLabel = standby
+              ? '休市待机'
+              : freshness?.tone === 'expired'
                 ? '已过期'
-                : freshness?.tone === 'warning' && check.passed
+                : freshness?.tone === 'warning' && !failed
                   ? '即将过期'
-                  : check.passed
+                  : !failed
                     ? '已通过'
                     : '需处理';
             return (
@@ -466,9 +498,11 @@ export function TradingSafetySettingsPanel() {
                   'flex h-[72px] items-center gap-3 overflow-hidden rounded-lg border px-3 py-2',
                   tone === 'success'
                     ? 'border-slate-700/50 bg-slate-900/35'
-                    : tone === 'warning'
-                      ? 'border-warning/30 bg-warning/5'
-                      : 'border-rose-400/30 bg-rose-400/5'
+                    : tone === 'standby'
+                      ? 'border-primary/25 bg-primary/5'
+                      : tone === 'warning'
+                        ? 'border-warning/30 bg-warning/5'
+                        : 'border-rose-400/30 bg-rose-400/5'
                 )}
               >
                 <GateStatusMark temporal={temporal} tone={tone} />
@@ -482,9 +516,11 @@ export function TradingSafetySettingsPanel() {
                         'shrink-0 rounded-full border px-1.5 py-0.5 text-ui-caption font-medium leading-3',
                         tone === 'success'
                           ? 'border-emerald-400/15 bg-emerald-400/10 text-emerald-300'
-                          : tone === 'warning'
-                            ? 'border-warning/20 bg-warning/10 text-warning'
-                            : 'border-rose-400/20 bg-rose-400/10 text-rose-300'
+                          : tone === 'standby'
+                            ? 'border-primary/20 bg-primary/10 text-primary'
+                            : tone === 'warning'
+                              ? 'border-warning/20 bg-warning/10 text-warning'
+                              : 'border-rose-400/20 bg-rose-400/10 text-rose-300'
                       )}
                     >
                       {statusLabel}
@@ -496,14 +532,19 @@ export function TradingSafetySettingsPanel() {
                         'min-w-0 flex-1 text-ui-label leading-4',
                         tone === 'success'
                           ? 'text-slate-400'
-                          : tone === 'warning'
-                            ? 'text-amber-200/80'
-                            : 'text-rose-200/80'
+                          : tone === 'standby'
+                            ? 'text-blue-200/80'
+                            : tone === 'warning'
+                              ? 'text-amber-200/80'
+                              : 'text-rose-200/80'
                       )}
                     >
-                      {check.passed
-                        ? presentation.passedDescription
-                        : check.message}
+                      {failed || standby
+                        ? check.message
+                        : check.status ===
+                            AccountExecutionSafetyCheckStatus.Passed
+                          ? presentation.passedDescription
+                          : check.message}
                     </p>
                     {freshness && <FreshnessIndicator freshness={freshness} />}
                   </div>
@@ -522,7 +563,9 @@ export function TradingSafetySettingsPanel() {
         </div>
         {safety && !failedChecks.length && (
           <p className="mt-3 text-ui-label text-emerald-300">
-            所有账户事实门禁均已通过。
+            {standbyChecks.length
+              ? '账户事实门禁正常；当前休市待机。'
+              : '所有账户事实门禁均已通过。'}
           </p>
         )}
       </section>

@@ -440,15 +440,24 @@ async def test_live_buy_frame_revalidates_market_and_account_safety_before_send(
 ) -> None:
   session_factory, engine = await _database(monkeypatch)
   account_gate_ready = True
+  market_tradable = True
 
   async def account_safety_status(_service, account_id: str) -> dict:
     assert account_id == "account-1"
     return {"can_increase_risk": account_gate_ready}
 
+  async def market_stream_tradable() -> bool:
+    return market_tradable
+
   monkeypatch.setattr(
     agent_api.AccountExecutionSafetyService,
     "status",
     account_safety_status,
+  )
+  monkeypatch.setattr(
+    agent_api,
+    "authoritative_market_stream_tradable",
+    market_stream_tradable,
   )
   session = _control_session()
   session.capabilities = {"live"}
@@ -488,6 +497,11 @@ async def test_live_buy_frame_revalidates_market_and_account_safety_before_send(
     await agent_api._assert_trade_delivery_session(session, command)
 
   account_gate_ready = True
+  market_tradable = False
+  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+    await agent_api._assert_trade_delivery_session(session, command)
+
+  market_tradable = True
   await agent_api._assert_trade_delivery_session(session, command)
   await engine.dispose()
 

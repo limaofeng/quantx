@@ -37,7 +37,7 @@ export const AccountExecutionSafetyQuery = gql(`
       checkedAt
       checks {
         code
-        passed
+        status
         message
         scope
       }

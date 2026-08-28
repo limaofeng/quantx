@@ -958,7 +958,8 @@ class TTradeResolver:
         "qmt_launch_reason_code": QMT_AGENT_STALE,
       }
     current_checks = {
-      str(item.get("code") or ""): bool(item.get("passed"))
+      str(item.get("code") or ""): str(item.get("status") or "FAILED").upper()
+      != "FAILED"
       for item in list(current.get("checks") or [])
     }
     if str(current.get("agent_status") or "").upper() == "READY" and current_checks.get(

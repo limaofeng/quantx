@@ -46,9 +46,11 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
   ACK，并通过 `RESYNC` 使 stream 失效。Redis 最新 Hash 还按源时间拒绝旧 tick
   回退；不提供旧 whole JSON 双读、双写或不可靠直通降级。
 - 每次批次 CAS commit 同时原子刷新 10 秒 Redis freshness lease；`SYNCING`、
-  `OFFLINE` 会删除租约。`marketData=ready` 同时要求活动 Agent 行情连接、API
-  完整快照、Engine 水位与 lease 的 stream/sequence 一致；交易时段租约过期立即
-  关闭实时交易门禁。
+  `OFFLINE` 会删除租约。交易时段的 `marketData=ready` 同时要求活动 Agent 行情
+  连接、API 完整快照、Engine 水位与 lease 的 stream/sequence 一致，租约过期立即
+  关闭实时交易门禁。休市时只要 Agent、API 与 Engine 的 sequence 3 权威水位已经
+  收敛，组件健康保持 `ready`，账户检查显示 `STANDBY`，不得把自然过期的租约报告
+  为运行异常；任何水位不一致、提交未完成或 Agent 离线仍保持失败。
 
 ## 开发认证与交易审批
 

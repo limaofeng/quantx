@@ -36,6 +36,10 @@ export const accountExecutionGatePresentation = {
     label: '代理运行模式',
     passedDescription: 'QMT 代理已明确运行在实盘模式。',
   },
+  MARKET_STREAM_READY: {
+    label: '全市场行情链路',
+    passedDescription: 'Agent、API 与 Engine 已完成权威三阶段同步。',
+  },
   PROTOCOL_1_1: {
     label: '通信协议版本',
     passedDescription: 'QMT 代理使用兼容的 1.1 协议。',

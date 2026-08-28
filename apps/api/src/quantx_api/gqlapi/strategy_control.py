@@ -165,7 +165,7 @@ def _readiness_binding(readiness: dict[str, Any]) -> dict[str, Any]:
   checks = [
     {
       "code": str(item.get("code") or ""),
-      "passed": bool(item.get("passed")),
+      "status": str(item.get("status") or "FAILED").upper(),
     }
     for item in list(readiness.get("checks") or [])
   ]
@@ -199,7 +199,9 @@ def _readiness_binding(readiness: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_readiness(readiness: dict[str, Any]) -> None:
   failed = [
-    item for item in list(readiness.get("checks") or []) if not bool(item.get("passed"))
+    item
+    for item in list(readiness.get("checks") or [])
+    if str(item.get("status") or "FAILED").upper() == "FAILED"
   ]
   if failed:
     reason = str(failed[0].get("message") or failed[0].get("code") or "实盘未就绪")

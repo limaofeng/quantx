@@ -458,7 +458,7 @@ class StrategyMutation:
       checks = [
         StrategyControlReadinessCheck(
           code=str(item.get("code") or ""),
-          passed=bool(item.get("passed")),
+          passed=str(item.get("status") or "FAILED").upper() != "FAILED",
           message=str(item.get("message") or ""),
         )
         for item in list(issued.readiness.get("checks") or [])

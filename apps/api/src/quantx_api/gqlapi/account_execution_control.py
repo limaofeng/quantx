@@ -186,7 +186,7 @@ def _safety_binding(safety: dict[str, Any]) -> dict[str, Any]:
       [
         {
           "code": str(item.get("code") or ""),
-          "passed": bool(item.get("passed")),
+          "status": str(item.get("status") or "FAILED").upper(),
         }
         for item in list(safety.get("checks") or [])
       ],

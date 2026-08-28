@@ -82,6 +82,9 @@ from quantx_infrastructure.services.agent_session_guard import (
   to_naive_utc,
   utc_iso,
 )
+from quantx_infrastructure.services.market_stream_readiness import (
+  authoritative_market_stream_tradable,
+)
 from redis.exceptions import RedisError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -2562,10 +2565,13 @@ async def _assert_trade_delivery_session(
     raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效")
   if live_risk_increase:
     try:
-      safety_status = await AccountExecutionSafetyService().status(account_id)
+      safety_status, market_stream_tradable = await asyncio.gather(
+        AccountExecutionSafetyService().status(account_id),
+        authoritative_market_stream_tradable(),
+      )
     except Exception as exc:
       raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效") from exc
-    if not bool(safety_status.get("can_increase_risk")):
+    if not bool(safety_status.get("can_increase_risk")) or not market_stream_tradable:
       raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效")
 
 

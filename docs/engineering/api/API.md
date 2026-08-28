@@ -43,6 +43,10 @@ GraphQL `accountExecutionSafety` 是账户级实盘执行能力真源，以
 `executionMode=OBSERVE_ONLY/REDUCE_ONLY/TRADING/KILLED` 表示当前可执行动作，
 并分别返回 `canIncreaseRisk` 与 `canReduceRisk`。该状态不消费
 `T_TRADE_LIVE_ENABLED`，不得因某个助手未启用而把账户健康误报为故障。
+每个账户检查使用 `status=PASSED/STANDBY/FAILED`：`STANDBY` 只表示休市期间
+权威行情水位已收敛但无需维持 10 秒新鲜度租约，不计入失败项；交易时段缺少
+新鲜租约、任意时段水位不一致或 Agent 离线仍为 `FAILED`。风险增加命令在入队、
+实际投递和 Agent 执行前继续要求交易时段内的新鲜权威行情。
 `healthStatus` 是只包含上述三值的封闭枚举；查询、轮询或检查过程不得进入该枚举。
 `validateTTradeLiveReadiness` 只负责做 T 的 `SHADOW/CANARY/LIVE` 灰度、助手开关
 和自动确认能力；其 `PREPARING` 不再作为全局状态栏文案。

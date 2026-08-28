@@ -65,7 +65,7 @@ async def test_live_status_requires_account_safety_and_ready_market_stream(
         "checked_at": now,
         "last_backup_at": now - timedelta(seconds=45),
         "checks": [
-          {"code": "ACCOUNT_RISK_INCREASE_AUTHORIZED", "passed": False}
+          {"code": "ACCOUNT_RISK_INCREASE_AUTHORIZED", "status": "FAILED"}
         ],
       }
 
@@ -118,7 +118,7 @@ async def test_live_status_is_enabled_only_when_all_effective_gates_pass(
         "reconciliation_age_seconds": 3.0,
         "checked_at": now,
         "last_backup_at": now - timedelta(seconds=30),
-        "checks": [{"code": "LIVE_AGENT_READY", "passed": True}],
+        "checks": [{"code": "LIVE_AGENT_READY", "status": "PASSED"}],
       }
 
   async def ready_market_status():
@@ -145,6 +145,48 @@ async def test_live_status_is_enabled_only_when_all_effective_gates_pass(
   assert result["reconciliationStatus"] == "RECONCILED"
   assert result["marketStreamStatus"] == "READY"
   assert result["backupAgeSeconds"] == 30.0
+  assert result["blockedChecks"] == []
+
+
+@pytest.mark.asyncio
+async def test_live_status_does_not_treat_closed_market_standby_as_blocked(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  _configure_live(monkeypatch)
+  now = datetime(2026, 8, 27, 10, 0, tzinfo=timezone.utc)
+
+  class FakeSafetyService:
+    async def status(self, _account_id: str):
+      return {
+        "execution_mode": "TRADING",
+        "can_increase_risk": True,
+        "agent_status": "READY",
+        "agent_mode": "live",
+        "protocol_version": "1.1",
+        "reconcile_status": "READY",
+        "checked_at": now,
+        "last_backup_at": now,
+        "checks": [{"code": "MARKET_STREAM_READY", "status": "STANDBY"}],
+      }
+
+  async def ready_market_status():
+    return {"status": "ready", "readinessStatus": "standby"}
+
+  monkeypatch.setattr(
+    live_runtime_status,
+    "account_execution_safety_service",
+    FakeSafetyService(),
+  )
+  monkeypatch.setattr(
+    live_runtime_status,
+    "market_data_runtime_status",
+    ready_market_status,
+  )
+
+  result = await live_runtime_status.live_trading_runtime_status()
+
+  assert result["status"] == "ENABLED"
+  assert result["executionMode"] == "TRADING"
   assert result["blockedChecks"] == []
 
 

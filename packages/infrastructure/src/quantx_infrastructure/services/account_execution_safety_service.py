@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import uuid
 from datetime import datetime, timedelta
@@ -13,7 +12,6 @@ from sqlalchemy import func, literal, select
 from sqlalchemy.orm import aliased
 
 from quantx_infrastructure.config.settings import settings
-from quantx_infrastructure.core.data.market_stream_transport import market_stream_store
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
@@ -28,6 +26,10 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.services.agent_session_guard import (
   QMT_AGENT_NOT_RECONCILED,
   evaluate_agent_session,
+)
+from quantx_infrastructure.services.market_stream_readiness import (
+  MarketStreamReadinessStatus,
+  authoritative_market_stream_readiness,
 )
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
@@ -79,38 +81,6 @@ _RISK_REDUCTION_CHECKS = frozenset(
   }
 )
 _AUTHORIZATION_CHECK = "ACCOUNT_RISK_INCREASE_AUTHORIZED"
-_MARKET_STREAM_AUTHORITY_TIMEOUT_SECONDS = 2.0
-
-
-async def authoritative_market_stream_ready() -> bool:
-  """Verify the committed API and Engine watermarks, not an Agent self-report."""
-
-  async def read_authority():
-    return await asyncio.gather(
-      market_stream_store.state_with_freshness(),
-      market_stream_store.engine_state(),
-    )
-
-  try:
-    (stream_state, freshness), engine_state = await asyncio.wait_for(
-      read_authority(),
-      timeout=_MARKET_STREAM_AUTHORITY_TIMEOUT_SECONDS,
-    )
-  except Exception:
-    return False
-  return bool(
-    stream_state is not None
-    and stream_state.status == "READY"
-    and stream_state.commit_phase == "IDLE"
-    and stream_state.sequence >= 3
-    and freshness is not None
-    and freshness.stream_id == stream_state.stream_id
-    and freshness.sequence == stream_state.sequence
-    and engine_state is not None
-    and engine_state.status == "READY"
-    and engine_state.stream_id == stream_state.stream_id
-    and engine_state.sequence == stream_state.sequence
-  )
 
 
 class AccountExecutionControlIdempotencyError(ValueError):
@@ -121,6 +91,13 @@ def _unique_messages(values: list[str]) -> list[str]:
   return list(dict.fromkeys(value for value in values if value))
 
 
+def _normalized_check_status(value: object) -> str:
+  normalized = str(value or "").upper()
+  if normalized in {status.value for status in MarketStreamReadinessStatus}:
+    return normalized
+  return MarketStreamReadinessStatus.FAILED.value
+
+
 def project_account_execution_safety(readiness: dict[str, Any]) -> dict[str, Any]:
   """Project capabilities from account-owned checks only.
 
@@ -128,12 +105,23 @@ def project_account_execution_safety(readiness: dict[str, Any]) -> dict[str, Any
   cannot inject one of its own rollout checks into account-wide authorization.
   """
 
-  checks = [
-    dict(item)
-    for item in list(readiness.get("checks") or [])
-    if str(item.get("code") or "") in ACCOUNT_EXECUTION_CHECK_CODES
+  checks = []
+  for raw in list(readiness.get("checks") or []):
+    if str(raw.get("code") or "") not in ACCOUNT_EXECUTION_CHECK_CODES:
+      continue
+    item = dict(raw)
+    item["status"] = _normalized_check_status(item.get("status"))
+    checks.append(item)
+  failed_checks = [
+    item
+    for item in checks
+    if item["status"] == MarketStreamReadinessStatus.FAILED.value
   ]
-  failed_checks = [item for item in checks if not bool(item.get("passed"))]
+  standby_checks = [
+    item
+    for item in checks
+    if item["status"] == MarketStreamReadinessStatus.STANDBY.value
+  ]
   authorization_state = str(readiness.get("authorization_state") or "DISABLED").upper()
   activation_failures = [
     item for item in failed_checks if item.get("code") != _AUTHORIZATION_CHECK
@@ -173,6 +161,8 @@ def project_account_execution_safety(readiness: dict[str, Any]) -> dict[str, Any
       if can_reduce_risk
       else "账户紧急停止已触发；实盘执行已关闭"
     )
+  elif can_increase_risk and standby_checks:
+    summary = "账户状态与买入条件正常；当前休市待机"
   elif can_increase_risk:
     summary = "账户状态与买入条件均已通过"
   elif can_reduce_risk:
@@ -491,8 +481,20 @@ class AccountExecutionSafetyService:
         live_agent_ready
         and str(agent_details.get("marketStreamStatus") or "").upper() == "READY"
       )
-      server_market_stream_ready = bool(
-        agent_market_stream_ready and await authoritative_market_stream_ready()
+      market_stream_readiness = (
+        await authoritative_market_stream_readiness()
+        if agent_market_stream_ready
+        else None
+      )
+      market_stream_check_status = (
+        market_stream_readiness.status.value
+        if market_stream_readiness is not None
+        else MarketStreamReadinessStatus.FAILED.value
+      )
+      market_stream_check_message = (
+        market_stream_readiness.message
+        if market_stream_readiness is not None
+        else "QMT Agent 全市场行情流尚未进入 READY"
       )
       if multiple_ready_live_agents:
         live_agent_blocked_reason = (
@@ -590,7 +592,7 @@ class AccountExecutionSafetyService:
         control.authorization_state if control else "DISABLED"
       ).upper()
 
-      checks = [
+      binary_checks = [
         (
           "SERVER_REAL_TRADING_ENABLED",
           bool(settings.enable_real_trading),
@@ -615,12 +617,6 @@ class AccountExecutionSafetyService:
           reported_agent_mode == "live",
           "QMT Agent 尚未明确切换到 live 模式",
           "OBSERVATION",
-        ),
-        (
-          "MARKET_STREAM_READY",
-          server_market_stream_ready,
-          "全市场行情尚未完成 Agent、API 与 Engine 的权威三阶段同步",
-          "INCREASE_RISK",
         ),
         (
           "PROTOCOL_1_1",
@@ -700,12 +696,25 @@ class AccountExecutionSafetyService:
       items = [
         {
           "code": code,
-          "passed": passed,
+          "status": (
+            MarketStreamReadinessStatus.PASSED.value
+            if passed
+            else MarketStreamReadinessStatus.FAILED.value
+          ),
           "message": "" if passed else message,
           "scope": scope,
         }
-        for code, passed, message, scope in checks
+        for code, passed, message, scope in binary_checks
       ]
+      items.insert(
+        5,
+        {
+          "code": "MARKET_STREAM_READY",
+          "status": market_stream_check_status,
+          "message": market_stream_check_message,
+          "scope": "INCREASE_RISK",
+        },
+      )
       projection = project_account_execution_safety(
         {"authorization_state": authorization_state, "checks": items}
       )
@@ -893,7 +902,8 @@ class AccountExecutionSafetyService:
     failures = [
       item["message"]
       for item in readiness["checks"]
-      if item["code"] in required_codes and not item["passed"]
+      if item["code"] in required_codes
+      and item["status"] == MarketStreamReadinessStatus.FAILED.value
     ]
     if failures:
       raise ValueError("；".join(failures))
@@ -992,7 +1002,8 @@ class AccountExecutionSafetyService:
       failures = [
         item["message"]
         for item in readiness["checks"]
-        if item["code"] != _AUTHORIZATION_CHECK and not item["passed"]
+        if item["code"] != _AUTHORIZATION_CHECK
+        and item["status"] == MarketStreamReadinessStatus.FAILED.value
       ]
       if failures:
         raise ValueError("；".join(failures))

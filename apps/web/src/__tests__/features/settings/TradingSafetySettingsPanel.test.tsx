@@ -41,7 +41,12 @@ const mocks = vi.hoisted(() => ({
     workingExternalOrderCount: 0,
     lastBackupAt: '2026-08-25T04:00:00Z',
     checkedAt: '2026-08-25T06:00:10Z',
-    checks: [],
+    checks: [] as Array<{
+      code: string;
+      status: 'PASSED' | 'STANDBY' | 'FAILED';
+      message: string;
+      scope: string;
+    }>,
   },
 }));
 
@@ -83,7 +88,27 @@ describe('TradingSafetySettingsPanel', () => {
   });
 
   afterEach(() => {
+    mocks.safety.checks = [];
     vi.unstubAllGlobals();
+  });
+
+  it('presents a closed market as standby instead of an error', () => {
+    mocks.safety.checks = [
+      {
+        code: 'MARKET_STREAM_READY',
+        status: 'STANDBY',
+        message: '当前休市，Agent、API 与 Engine 权威水位已收敛',
+        scope: 'INCREASE_RISK',
+      },
+    ];
+
+    render(<TradingSafetySettingsPanel />);
+
+    expect(
+      screen.getByRole('article', { name: '全市场行情链路：休市待机' })
+    ).toBeInTheDocument();
+    expect(screen.getByText('0 项通过 · 1 项休市待机')).toBeInTheDocument();
+    expect(screen.queryByText('需处理')).not.toBeInTheDocument();
   });
 
   it('creates a preview on an insecure LAN origin without Web Crypto', async () => {

@@ -141,9 +141,16 @@ type AccountExecutionSafety {
 """账户执行安全检查项"""
 type AccountExecutionSafetyCheck {
   code: String!
-  passed: Boolean!
+  status: AccountExecutionSafetyCheckStatus!
   message: String!
   scope: String!
+}
+
+"""账户执行安全检查状态"""
+enum AccountExecutionSafetyCheckStatus {
+  PASSED
+  STANDBY
+  FAILED
 }
 
 """QMT Agent 设备操作结果"""
