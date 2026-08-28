@@ -185,6 +185,7 @@ def test_explicit_https_dev_url_enables_internal_tls(
   )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS symlink contract")
 def test_runtime_root_and_state_use_the_physical_workspace(
   tmp_path: Path,
 ) -> None:
@@ -219,6 +220,7 @@ def test_corrupt_state_is_reported_without_being_replaced(tmp_path: Path) -> Non
   assert paths.state_file.read_text(encoding="utf-8") == "{broken"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Unix process-group contract")
 def test_process_identity_rejects_pid_reuse_metadata() -> None:
   process = psutil.Process(os.getpid())
   entry = {
@@ -233,6 +235,7 @@ def test_process_identity_rejects_pid_reuse_metadata() -> None:
   assert runtime.process_matches_entry(entry) is False
 
 
+@pytest.mark.skipif(os.name == "nt", reason="macOS symlink contract")
 def test_python_resolution_preserves_virtual_environment_symlink(
   tmp_path: Path,
   monkeypatch: pytest.MonkeyPatch,
