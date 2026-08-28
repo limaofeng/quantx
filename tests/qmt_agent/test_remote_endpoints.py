@@ -156,7 +156,7 @@ async def test_native_broker_initializes_only_after_control_authentication(
       events.append("auth-result")
       return AgentEnvelope(
         message_type=AgentMessageType.AUTH_RESULT,
-        payload={"accepted": True},
+        payload={"accepted": True, "agent_session_id": "agent-session-1"},
       ).model_dump_json()
 
   class Connection:

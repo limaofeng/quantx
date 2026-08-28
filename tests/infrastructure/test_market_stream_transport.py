@@ -298,7 +298,9 @@ def make_batch(
 
 
 @pytest.mark.asyncio
-async def test_partial_snapshot_accepts_later_universe_tick_and_filters_duplicate() -> None:
+async def test_partial_snapshot_accepts_later_universe_tick_and_filters_duplicate() -> (
+  None
+):
   redis = FakeRedis()
   store = MarketStreamStore(redis)
   await store.mark_syncing("stream-1")
@@ -357,9 +359,7 @@ async def test_store_requires_snapshot_then_commits_before_binary_publish() -> N
     sequence=1,
   )
   assert await store.load_snapshot() is None
-  assert redis.published == [
-    (MARKET_STREAM_BATCH_CHANNEL, snapshot.to_bytes())
-  ]
+  assert redis.published == [(MARKET_STREAM_BATCH_CHANNEL, snapshot.to_bytes())]
   assert len(redis.hashes[MARKET_STREAM_LATEST_KEY]) == 1
   assert (
     redis.expirations[MARKET_STREAM_FRESHNESS_KEY]
@@ -439,9 +439,7 @@ async def test_snapshot_disconnect_never_becomes_ready() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_is_chunked_in_staging_then_atomically_replaced() -> None:
   redis = FakeRedis()
-  redis.hashes[MARKET_STREAM_LATEST_KEY] = {
-    b"old.SH": b'{"lastPrice":1.0}'
-  }
+  redis.hashes[MARKET_STREAM_LATEST_KEY] = {b"old.SH": b'{"lastPrice":1.0}'}
   store = MarketStreamStore(redis)
   await store.mark_syncing("stream-1")
 
@@ -457,8 +455,7 @@ async def test_snapshot_is_chunked_in_staging_then_atomically_replaced() -> None
 
   assert len(redis.hashes[MARKET_STREAM_LATEST_KEY]) == len(data)
   assert not any(
-    str(key).startswith(MARKET_STREAM_STAGING_PREFIX)
-    for key in redis.hashes
+    str(key).startswith(MARKET_STREAM_STAGING_PREFIX) for key in redis.hashes
   )
   assert redis.pipeline_modes[-2:] == [False, False]
 
@@ -521,12 +518,18 @@ async def test_snapshot_plus_known_delta_can_be_loaded_after_store_restart() -> 
 
 
 def test_store_source_time_accepts_valid_time_and_timetag() -> None:
-  assert market_stream_transport._tick_source_time(
-    {"time": 1_700_000_000_000},
-  ) == 1_700_000_000
-  assert market_stream_transport._tick_source_time(
-    {"timetag": "20260819 09:30:00"},
-  ) == datetime(2026, 8, 19, 1, 30, tzinfo=timezone.utc).timestamp()
+  assert (
+    market_stream_transport._tick_source_time(
+      {"time": 1_700_000_000_000},
+    )
+    == 1_700_000_000
+  )
+  assert (
+    market_stream_transport._tick_source_time(
+      {"timetag": "20260819 09:30:00"},
+    )
+    == datetime(2026, 8, 19, 1, 30, tzinfo=timezone.utc).timestamp()
+  )
 
 
 @pytest.mark.asyncio
@@ -844,9 +847,7 @@ async def test_late_old_mark_syncing_cannot_overwrite_new_ready_generation() -> 
 @pytest.mark.asyncio
 async def test_stale_snapshot_writer_cannot_replace_new_stream_state_or_hash() -> None:
   redis = FakeRedis()
-  redis.hashes[MARKET_STREAM_LATEST_KEY] = {
-    b"seed.SH": b'{"lastPrice":1.0}'
-  }
+  redis.hashes[MARKET_STREAM_LATEST_KEY] = {b"seed.SH": b'{"lastPrice":1.0}'}
   store = MarketStreamStore(redis)
   await store.mark_syncing("old-stream")
 
@@ -866,9 +867,7 @@ async def test_stale_snapshot_writer_cannot_replace_new_stream_state_or_hash() -
   state = await store.state()
   assert state.status == "SYNCING"
   assert state.stream_id == "new-stream"
-  assert redis.hashes[MARKET_STREAM_LATEST_KEY] == {
-    b"seed.SH": b'{"lastPrice":1.0}'
-  }
+  assert redis.hashes[MARKET_STREAM_LATEST_KEY] == {b"seed.SH": b'{"lastPrice":1.0}'}
   old_staging = f"{MARKET_STREAM_STAGING_PREFIX}:old-stream"
   assert old_staging not in redis.hashes
   assert old_staging not in redis.expirations
@@ -877,7 +876,9 @@ async def test_stale_snapshot_writer_cannot_replace_new_stream_state_or_hash() -
 
 
 @pytest.mark.asyncio
-async def test_stale_delta_writer_cannot_modify_new_stream_state_hash_or_publish() -> None:
+async def test_stale_delta_writer_cannot_modify_new_stream_state_hash_or_publish() -> (
+  None
+):
   redis = FakeRedis()
   store = MarketStreamStore(redis)
   await store.mark_syncing("old-stream")
@@ -972,6 +973,34 @@ async def test_store_redis_failure_prevents_publish_and_ready_state() -> None:
 
   assert redis.published == []
   assert (await store.state()).status == "SYNCING"
+
+
+@pytest.mark.asyncio
+async def test_uncertain_retry_accepts_only_explicit_retained_batch() -> None:
+  redis = FakeRedis()
+  store = MarketStreamStore(redis)
+  await store.mark_syncing("stream-1")
+  snapshot = make_batch(
+    1,
+    MarketBatchKind.SNAPSHOT,
+    {"600000.SH": {"lastPrice": 10.0, "time": 100}},
+  )
+  committed = await store.write_batch(snapshot, snapshot.to_bytes())
+
+  retry = await store.write_batch(
+    snapshot,
+    snapshot.to_bytes(),
+    allow_uncertain_retry=True,
+  )
+  assert retry == committed
+
+  conflicting = make_batch(
+    1,
+    MarketBatchKind.SNAPSHOT,
+    {"600000.SH": {"lastPrice": 10.1, "time": 101}},
+  )
+  with pytest.raises(ValueError, match="sequence gap"):
+    await store.write_batch(conflicting, conflicting.to_bytes())
 
 
 @pytest.mark.asyncio

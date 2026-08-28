@@ -26,15 +26,12 @@ from quantx_qmt_agent.runtime import AgentRuntime
 from quantx_qmt_agent.whole_market_capture import WholeMarketCapture
 from starlette.websockets import WebSocketState
 
-TOKEN_FINGERPRINT = "f" * 64
-
 
 def _market_lease(device_id: str = "device-1") -> agent_api.MarketSessionLease:
   return agent_api.MarketSessionLease(
     device_id=device_id,
     api_instance_id="api-instance-1",
     agent_session_id="agent-session-1",
-    access_token_fingerprint=TOKEN_FINGERPRINT,
   )
 
 
@@ -42,7 +39,6 @@ def _authenticated_session() -> SimpleNamespace:
   return SimpleNamespace(
     device=SimpleNamespace(id="device-1"),
     expires_at=agent_api.utcnow() + timedelta(minutes=5),
-    access_token_fingerprint=TOKEN_FINGERPRINT,
   )
 
 
@@ -191,6 +187,7 @@ class PipelineWebSocket:
         "device_id": "device-1",
         "access_token": "token",
         "capabilities": ["market-data", "data-only"],
+        "agent_session_id": "agent-session-1",
       },
     ).model_dump_json()
 
@@ -475,6 +472,7 @@ async def test_delayed_sequence_two_ack_keeps_engine_closed_until_sequence_three
   runtime._access_token = "token-1"
   runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
   runtime._access_token_ready = asyncio.Event()
+  runtime._control_agent_session_id = "agent-session-1"
   runtime._control_hub_registered_once = asyncio.Event()
   runtime._control_hub_registered_once.set()
   runtime._whole_market_encode_executor = ThreadPoolExecutor(max_workers=1)
@@ -576,7 +574,14 @@ async def test_sequence_three_commit_failure_never_makes_store_ready(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   class FailConfirmationStore(InMemoryMarketStore):
-    async def write_batch(self, batch, payload, *, received_at):
+    async def write_batch(
+      self,
+      batch,
+      payload,
+      *,
+      received_at,
+      allow_uncertain_retry=False,
+    ):
       if batch.sequence == 3:
         raise ConnectionError("sequence-three Redis failure")
       return await super().write_batch(
@@ -614,6 +619,7 @@ async def test_sequence_three_commit_failure_never_makes_store_ready(
   ]
   store = FailConfirmationStore()
   websocket = PipelineWebSocket(batches)
+  monkeypatch.setattr(agent_api, "MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS", 0.05)
 
   async def authenticate(_envelope):
     return _authenticated_session()

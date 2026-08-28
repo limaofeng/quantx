@@ -39,6 +39,11 @@ SQLite journal 和历史上传 spool 也只留在 Windows。运行模式为 `dat
 Windows 单实例锁和长期进程监督由 Windows 启动器方案负责，不能通过手工并行启动
 两个 Agent 绕过。
 
+短期 token 只用于新连接握手。运行中的 Agent 在后台更新未来重连凭据，续期失败按
+退避重试但不拆除已经认证的控制/行情连接；设备撤销、会话替换和传输心跳仍由服务端
+独立校验。普通每分钟完整账户快照只用于收敛外部账户事实，不进入 `RECONCILING`；
+只有真实控制重连、XTTrading 连接代际变化或显式恢复请求才重新打开对账门。
+
 ## 独立健康监听
 
 健康运行时代码默认监听 `0.0.0.0:18084`，并校验 `QMT_AGENT_HEALTH_HOST` 和
@@ -75,9 +80,10 @@ API 为每个进程和控制连接分别生成 `apiInstanceId` 与 `agentSession
 接收时间计算 90 秒 TTL。Agent 断线、撤销、同设备重复连接或 API 实例切换会立即
 使旧会话失去命令和行情资格；旧报告仍按原消息 ID 幂等收敛，但不能提升新会话。
 账户安全门不再读取本机 `QMT_AGENT_LAUNCH_*` 或 PID 状态。
-行情租约还绑定当前控制连接所用短期 token 的单向指纹；Redis 只允许较新的 API
-启动代际覆盖租约，旧 API 只能清理自己的租约，不能删除或回写新代际。服务端不
-持久化或输出 token 本身。
+行情租约绑定当前控制连接的 `apiInstanceId + agentSessionId + deviceId`。行情连接
+自身仍必须用有效短期 token 完成握手，但 token 续期不会改变已认证控制会话身份。
+Redis 只允许较新的 API 启动代际覆盖租约，旧 API 只能清理自己的租约，不能删除或
+回写新代际。服务端不持久化或输出 token 本身。
 
 服务端控制的 Agent heartbeat details 字段为：`apiInstanceId`、
 `agentSessionId`、`serverConnectedAt`、`serverReceivedAt`、`agentSentAt`、
@@ -97,8 +103,10 @@ K 线仍由主连接控制 `subscribe_quote`，不得从 tick 合成。
 主控制连接的 API receiver 不执行命令或行情数据库轮询；收到的帧先进入按字节和
 条数限制的队列，再按连接顺序持久化。API 使用唯一 writer 发送 ACK、交易命令和
 行情控制，并为 `report_ack` 保留高优先级容量。只有 `agent_report_inbox` 提交成功
-才会确认报告；API 超时、断线或背压关闭连接时，未确认报告继续保留在本地 SQLite
-journal，并在重连后用原消息 ID 重放。
+才会确认报告。PostgreSQL 暂时不可用时，API 保留当前报告原地重试、暂停命令轮询，
+并让有界接收队列对 socket 形成自然背压，不主动关闭控制连接；未确认报告继续保留在
+本地 SQLite journal。只有协议/鉴权失败、真实传输失活或发送失败才重连并用原消息 ID
+重放。
 
 原生 whole-quote 采集与行情 WebSocket sink 生命周期分离：API 断线、ACK 超时、
 RESYNC 或下游 Redis 故障只会令 sink 进入 `SYNCING/STALE`，采集器继续维护每个
@@ -235,6 +243,9 @@ live Agent，live 命令也不会降级为模拟成交。
 QMT 客户端手工交易，Agent 每分钟完整上报这些外部委托、成交与持仓，服务端
 完成分类和事实收敛。切入 `CANARY / LIVE` 前必须基于没有手工/外部活动的完整
 快照建立账户实盘窗口；窗口内再次出现外部活动会自动暂停 QuantX 执行。
+
+上述每分钟完整快照是观察刷新，不是恢复握手；快照提交和 Engine 收敛期间不得把已
+就绪的 Agent 周期性降为 `RECONCILING`。
 
 Agent 在完整快照中同时保留 QMT 的原始 `order_status` 和派生的
 `effective_order_status`。A 股当日委托在收盘后仍被 QMT 报为已报/待成交且

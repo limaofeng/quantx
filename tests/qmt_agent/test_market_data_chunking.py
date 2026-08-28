@@ -3,7 +3,7 @@ import gzip
 import hashlib
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -831,58 +831,39 @@ async def test_session_supervision_closes_on_heartbeat_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_supervision_treats_repeated_token_renewals_as_planned() -> None:
-  all_closed: list[tuple[int, str]] = []
-
-  class Socket:
-    def __init__(self) -> None:
-      self.closed: list[tuple[int, str]] = []
-      self.closed_event = asyncio.Event()
-
-    async def close(self, *, code: int, reason: str) -> None:
-      self.closed.append((code, reason))
-      all_closed.append((code, reason))
-      self.closed_event.set()
-      await asyncio.sleep(0)
-
-  async def receiver() -> None:
-    await socket.closed_event.wait()
-    raise RuntimeError("planned close surfaced through receiver")
-
+async def test_access_token_refresh_updates_future_credentials_without_socket_close(
+  monkeypatch,
+) -> None:
   runtime = object.__new__(AgentRuntime)
-  for _ in range(2):
-    socket = Socket()
-    planned_close_requested = asyncio.Event()
+  runtime._access_token = "old-token"
+  runtime._access_token_expires_at = datetime.now(timezone.utc)
+  runtime._access_token_ready = asyncio.Event()
+  refreshed = asyncio.Event()
+  block_next_cycle = asyncio.Event()
+  sleep_calls = 0
+  original_sleep = asyncio.sleep
 
-    async def renew_token() -> None:
-      planned_close_requested.set()
-      await socket.close(code=4001, reason="refreshing Agent access token")
+  async def controlled_sleep(_seconds: float) -> None:
+    nonlocal sleep_calls
+    sleep_calls += 1
+    if sleep_calls > 1:
+      await block_next_cycle.wait()
 
-    receiver_task = asyncio.create_task(receiver())
-    renewal_task = asyncio.create_task(renew_token())
-    try:
-      await asyncio.wait_for(
-        runtime._supervise_session_tasks(
-          socket,
-          {
-            "receiver": receiver_task,
-            "renewal": renewal_task,
-          },
-          planned_close_requested=planned_close_requested,
-        ),
-        timeout=1,
-      )
-      assert receiver_task.done()
-    finally:
-      receiver_task.cancel()
-      await asyncio.gather(receiver_task, return_exceptions=True)
+  async def issue_token():
+    refreshed.set()
+    return "new-token", datetime.now(timezone.utc) + timedelta(hours=1)
 
-    assert socket.closed == [(4001, "refreshing Agent access token")]
-
-  assert all_closed == [
-    (4001, "refreshing Agent access token"),
-    (4001, "refreshing Agent access token"),
-  ]
+  monkeypatch.setattr(runtime_module.asyncio, "sleep", controlled_sleep)
+  runtime._issue_token = issue_token
+  task = asyncio.create_task(runtime._refresh_access_token_loop())
+  try:
+    await asyncio.wait_for(refreshed.wait(), timeout=1)
+    await original_sleep(0)
+    assert runtime._access_token == "new-token"
+    assert runtime._access_token_ready.is_set()
+  finally:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

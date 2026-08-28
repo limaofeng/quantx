@@ -1,5 +1,3 @@
-import hashlib
-
 import pytest
 from quantx_api.auth.agent_service import AgentAuthService
 from quantx_api.auth.errors import AuthError
@@ -87,10 +85,6 @@ async def test_agent_access_session_tracks_expiry_and_revoke_is_immediate(db):
 
   assert session.device.id == credential.device_id
   assert session.expires_at == grant.expires_at
-  assert (
-    session.access_token_fingerprint
-    == hashlib.sha256(grant.access_token.encode("utf-8")).hexdigest()
-  )
   assert await service.revoke(device_id=credential.device_id, user_id="user-1")
 
   with pytest.raises(AuthError):

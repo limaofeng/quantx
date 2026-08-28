@@ -360,7 +360,6 @@ async def test_superseded_api_cannot_overwrite_or_delete_new_market_lease(
     authorized_account_ids={"account-1"},
     connected_at=started_at,
     remote_address_summary="10.0.0.*",
-    access_token_fingerprint="a" * 64,
   )
   new_session = await new_hub.register(
     "device-new",
@@ -368,7 +367,6 @@ async def test_superseded_api_cannot_overwrite_or_delete_new_market_lease(
     authorized_account_ids={"account-1"},
     connected_at=started_at + timedelta(seconds=1),
     remote_address_summary="10.0.0.*",
-    access_token_fingerprint="b" * 64,
   )
   await equal_generation_hub.register(
     "device-peer",
@@ -376,7 +374,6 @@ async def test_superseded_api_cannot_overwrite_or_delete_new_market_lease(
     authorized_account_ids={"account-1"},
     connected_at=started_at + timedelta(seconds=1),
     remote_address_summary="10.0.0.*",
-    access_token_fingerprint="c" * 64,
   )
 
   assert (await new_hub.market_lease("device-new")).agent_session_id == (

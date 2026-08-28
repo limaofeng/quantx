@@ -61,7 +61,6 @@ class MarketSessionLease:
   device_id: str
   api_instance_id: str
   agent_session_id: str
-  access_token_fingerprint: str = ""
 
 
 @dataclass
@@ -75,7 +74,6 @@ class AgentControlSession:
   server_connected_at: datetime
   remote_address_summary: str
   revoked: asyncio.Event
-  access_token_fingerprint: str = ""
   market_reconciliation_ready: bool = False
 
 
@@ -121,7 +119,6 @@ class AgentConnectionHub:
         "api_instance_id": session.api_instance_id,
         "api_started_at_micros": self.api_started_at_micros,
         "agent_session_id": session.agent_session_id,
-        "access_token_fingerprint": session.access_token_fingerprint,
       },
       separators=(",", ":"),
     )
@@ -202,7 +199,6 @@ class AgentConnectionHub:
     authorized_account_ids: set[str],
     connected_at: datetime,
     remote_address_summary: str,
-    access_token_fingerprint: str = "",
   ) -> AgentControlSession:
     queue: asyncio.Queue[AgentEnvelope] = asyncio.Queue()
     normalized_capabilities = {
@@ -218,7 +214,6 @@ class AgentConnectionHub:
       server_connected_at=connected_at,
       remote_address_summary=remote_address_summary,
       revoked=asyncio.Event(),
-      access_token_fingerprint=access_token_fingerprint,
       # Data-only and paper sessions do not have a live account snapshot to
       # reconcile. A live session becomes market-eligible only after Engine
       # has applied its new complete snapshot and a subsequent heartbeat keeps
@@ -360,7 +355,6 @@ class AgentConnectionHub:
       device_id=str(lease.get("device_id") or ""),
       api_instance_id=str(lease.get("api_instance_id") or ""),
       agent_session_id=str(lease.get("agent_session_id") or ""),
-      access_token_fingerprint=str(lease.get("access_token_fingerprint") or ""),
     )
     if (
       parsed.device_id != device_id

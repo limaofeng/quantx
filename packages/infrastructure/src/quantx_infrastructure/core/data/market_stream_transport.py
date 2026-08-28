@@ -33,7 +33,9 @@ class MarketStreamKeyspace:
   def __post_init__(self) -> None:
     normalized = self.prefix.strip().rstrip(":")
     if not normalized or any(char.isspace() for char in normalized):
-      raise ValueError("market stream keyspace prefix must be non-empty and whitespace-free")
+      raise ValueError(
+        "market stream keyspace prefix must be non-empty and whitespace-free"
+      )
     object.__setattr__(self, "prefix", normalized)
 
   @property
@@ -309,9 +311,7 @@ def _require_commit_success(result: object, *, kind: MarketBatchKind) -> None:
     else str(result)
   )
   if decoded != "OK":
-    raise ValueError(
-      f"market stream Redis {kind.value} CAS rejected: {decoded}"
-    )
+    raise ValueError(f"market stream Redis {kind.value} CAS rejected: {decoded}")
 
 
 def _result_text(result: object) -> str:
@@ -365,7 +365,9 @@ class MarketStreamState:
       if not value:
         return None
       parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-      return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+      return (
+        parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+      )
 
     return cls(
       status=str(raw.get("status") or "OFFLINE").upper(),
@@ -389,9 +391,7 @@ class MarketStreamFreshnessLease:
   sequence: int
 
   def to_bytes(self) -> bytes:
-    return orjson.dumps(
-      {"stream_id": self.stream_id, "sequence": self.sequence}
-    )
+    return orjson.dumps({"stream_id": self.stream_id, "sequence": self.sequence})
 
   @classmethod
   def from_bytes(
@@ -486,9 +486,7 @@ class MarketStreamStore:
 
   async def engine_state(self) -> MarketStreamState | None:
     redis = await self.redis()
-    return MarketStreamState.from_bytes(
-      await redis.get(self.keyspace.engine_state_key)
-    )
+    return MarketStreamState.from_bytes(await redis.get(self.keyspace.engine_state_key))
 
   async def write_engine_state(
     self,
@@ -577,6 +575,7 @@ class MarketStreamStore:
     payload: bytes,
     *,
     received_at: datetime | None = None,
+    allow_uncertain_retry: bool = False,
   ) -> MarketStreamState:
     observed_at = received_at or _utcnow()
     # Future skew is judged against the instant the API received the frame;
@@ -599,7 +598,24 @@ class MarketStreamStore:
       or current.status not in {"SYNCING", "READY"}
     ):
       raise ValueError("market stream is not active")
-    if current.commit_phase != "IDLE":
+    if (
+      allow_uncertain_retry
+      and current.sequence == batch.sequence
+      and current.commit_phase == "IDLE"
+    ):
+      # A Redis command may have committed atomically while its response was
+      # lost to a client-side timeout. The API committer retries only the same
+      # retained frame, so recover that uncertain result as an idempotent ACK
+      # instead of forcing a full stream resync.
+      self._remember_committed_batch(batch, received_at=observed_at)
+      return current
+    resuming_delta = bool(
+      allow_uncertain_retry
+      and batch.kind is MarketBatchKind.DELTA
+      and current.commit_phase == "APPLYING"
+      and current.pending_sequence == batch.sequence
+    )
+    if current.commit_phase != "IDLE" and not resuming_delta:
       raise ValueError("market stream commit is already in progress")
     expected = 1 if current.sequence == 0 else current.sequence + 1
     if batch.sequence != expected:
@@ -657,9 +673,7 @@ class MarketStreamStore:
       sequence=batch.sequence,
       captured_at=batch.captured_at,
       updated_at=_utcnow(),
-      instrument_count=(
-        len(materialized_codes)
-      ),
+      instrument_count=(len(materialized_codes)),
       universe_count=universe_count,
       universe_hash=universe_hash,
       commit_phase="IDLE",
@@ -722,17 +736,13 @@ class MarketStreamStore:
           continue
         accepted[code] = tick
         accepted_source_times[code] = source_time
-      encoded_accepted = {
-        code: orjson.dumps(tick) for code, tick in accepted.items()
-      }
+      encoded_accepted = {code: orjson.dumps(tick) for code, tick in accepted.items()}
       changed = {
         code: accepted[code]
         for code, encoded in encoded_accepted.items()
         if self._encoded_ticks.get(code) != encoded
       }
-      encoded_ticks = {
-        code.encode("utf-8"): encoded_accepted[code] for code in changed
-      }
+      encoded_ticks = {code.encode("utf-8"): encoded_accepted[code] for code in changed}
       committed_batch = batch.model_copy(
         update={"instrument_count": len(changed), "data": changed}
       )
@@ -751,15 +761,16 @@ class MarketStreamStore:
         pending_sequence=batch.sequence,
         reason=current.reason,
       )
-      begin_result = await redis.eval(
-        _MARKET_STREAM_BEGIN_DELTA_SCRIPT,
-        1,
-        self.keyspace.state_key,
-        batch.stream_id,
-        str(batch.sequence - 1),
-        applying_state.to_bytes(),
-      )
-      _require_commit_success(begin_result, kind=batch.kind)
+      if not resuming_delta:
+        begin_result = await redis.eval(
+          _MARKET_STREAM_BEGIN_DELTA_SCRIPT,
+          1,
+          self.keyspace.state_key,
+          batch.stream_id,
+          str(batch.sequence - 1),
+          applying_state.to_bytes(),
+        )
+        _require_commit_success(begin_result, kind=batch.kind)
       entries = iter(encoded_ticks.items())
       while chunk := list(islice(entries, MARKET_STREAM_DELTA_CHUNK_SIZE)):
         await redis.hset(self.keyspace.latest_key, mapping=dict(chunk))
@@ -784,6 +795,32 @@ class MarketStreamStore:
           {code.decode("utf-8"): tick for code, tick in encoded_ticks.items()}
         )
     return state
+
+  def _remember_committed_batch(
+    self,
+    batch: MarketStreamBatch,
+    *,
+    received_at: datetime,
+  ) -> None:
+    """Repair process-local watermarks after an uncertain Redis response."""
+
+    if self._active_stream_id != batch.stream_id:
+      return
+    source_times = _batch_source_times(batch, received_at=received_at)
+    encoded_ticks = {code: orjson.dumps(tick) for code, tick in batch.data.items()}
+    if batch.kind is MarketBatchKind.SNAPSHOT:
+      self._active_codes = frozenset(batch.universe_codes)
+      self._materialized_codes = set(batch.data)
+      self._source_times = source_times
+      self._encoded_ticks = encoded_ticks
+      return
+    for code, source_time in source_times.items():
+      previous = self._source_times.get(code)
+      if previous is not None and source_time < previous:
+        continue
+      self._source_times[code] = source_time
+      self._materialized_codes.add(code)
+      self._encoded_ticks[code] = encoded_ticks[code]
 
   async def mark_offline(self, stream_id: str, *, reason: str) -> bool:
     redis = await self.redis()
@@ -837,11 +874,7 @@ class MarketStreamStore:
     redis = await self.redis()
     for _ in range(max(1, attempts)):
       before = await self.state()
-      if (
-        before is None
-        or before.status != "READY"
-        or before.commit_phase != "IDLE"
-      ):
+      if before is None or before.status != "READY" or before.commit_phase != "IDLE":
         return None
       raw_ticks = await redis.hgetall(self.keyspace.latest_key)
       after = await self.state()
@@ -854,8 +887,7 @@ class MarketStreamStore:
       ):
         continue
       ticks = {
-        code.decode("utf-8"): orjson.loads(tick)
-        for code, tick in raw_ticks.items()
+        code.decode("utf-8"): orjson.loads(tick) for code, tick in raw_ticks.items()
       }
       if after.instrument_count and len(ticks) != after.instrument_count:
         continue

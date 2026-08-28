@@ -250,14 +250,6 @@ class _FatalTradingRecoveryError(RuntimeError):
   """A stale XTTrading session did not recover within its bounded window."""
 
 
-class _PlannedMarketTokenRefresh(RuntimeError):
-  """The market stream closed intentionally to adopt a replacement token."""
-
-  def __init__(self, access_token: str) -> None:
-    super().__init__("whole-market access token refresh requested")
-    self.access_token = access_token
-
-
 class _FatalMarketDataUploadConflict(_FatalMarketDataPreparationError):
   """A server-side chunk identity conflict forbids further mixed uploads."""
 
@@ -644,6 +636,7 @@ class AgentRuntime:
     self._access_token = ""
     self._access_token_expires_at = datetime.now(timezone.utc)
     self._access_token_ready = asyncio.Event()
+    self._control_agent_session_id = ""
     # Sticky process-lifetime gate. The market socket must not race ahead of
     # the first successful control-hub registration, but later control socket
     # reconnects must never tear down an already READY market stream.
@@ -674,9 +667,9 @@ class AgentRuntime:
       maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS
     )
     self._queued_market_data_requests: dict[str, str] = {}
-    # A token refresh intentionally reconnects the WebSocket. Keep the exact
-    # compressed bytes for in-flight requests so a redelivery reuses the same
-    # chunk checksums instead of re-querying a still-changing XTData cache.
+    # Keep the exact compressed bytes for in-flight requests so any transport
+    # redelivery reuses the same checksums instead of re-querying a changing
+    # XTData cache.
     self._market_upload_cache: dict[str, _MarketUploadCacheEntry] = {}
     self._market_upload_tombstones: dict[str, _MarketUploadTombstone] = {}
     self._market_upload_tasks: dict[str, _MarketUploadTaskEntry] = {}
@@ -848,6 +841,40 @@ class AgentRuntime:
     expires_at = _parse_expiry(expires_value)
     return token, expires_at
 
+  def _install_access_token(self, token: str, expires_at: datetime) -> None:
+    self._access_token = token
+    self._access_token_expires_at = expires_at
+    self._access_token_ready.set()
+
+  async def _refresh_access_token_loop(self) -> None:
+    """Refresh future handshake credentials without rebuilding live sockets."""
+
+    retry_delay = 1.0
+    while True:
+      renew_at = self._access_token_expires_at - timedelta(minutes=2)
+      delay = max(
+        1.0,
+        (renew_at - datetime.now(timezone.utc)).total_seconds(),
+      )
+      await asyncio.sleep(delay)
+      try:
+        token, expires_at = await self._issue_token()
+      except asyncio.CancelledError:
+        raise
+      except Exception as exc:
+        logger.warning(
+          "QMT Agent access token refresh deferred without reconnect: "
+          "error=%s retry_seconds=%.0f",
+          exc.__class__.__name__,
+          retry_delay,
+        )
+        await asyncio.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, 30.0)
+        continue
+      self._install_access_token(token, expires_at)
+      retry_delay = 1.0
+      logger.info("QMT Agent access token refreshed without reconnect")
+
   async def _run_after_broker_ready(self, operation) -> None:
     await self._broker_ready.wait()
     await operation()
@@ -992,9 +1019,7 @@ class AgentRuntime:
   async def _run_session(self) -> None:
     self._control_session_authenticated = False
     access_token, expires_at = await self._issue_token()
-    self._access_token = access_token
-    self._access_token_expires_at = expires_at
-    self._access_token_ready.set()
+    self._install_access_token(access_token, expires_at)
     async with _connect_websocket(
       _websocket_url(self.configuration.api_url),
       max_size=8 * 1024 * 1024,
@@ -1020,6 +1045,12 @@ class AgentRuntime:
         or not auth_result.payload.get("accepted")
       ):
         raise RuntimeError("QMT Agent authentication rejected")
+      control_agent_session_id = str(
+        auth_result.payload.get("agent_session_id") or ""
+      ).strip()
+      if not control_agent_session_id:
+        raise RuntimeError("QMT Agent authentication missing control session id")
+      self._control_agent_session_id = control_agent_session_id
       await self._ensure_broker_initialized()
       self._control_session_authenticated = True
       self._health_state().set_control_connected(True)
@@ -1038,7 +1069,6 @@ class AgentRuntime:
         socket,
         status=(self._heartbeat_status() if self.mode == "live" else "RECONCILING"),
       )
-      control_token_refresh_requested = asyncio.Event()
       session_tasks = {
         "receiver": asyncio.create_task(
           self._receive_session_messages(socket),
@@ -1048,12 +1078,9 @@ class AgentRuntime:
           self._heartbeat_loop(socket),
           name="qmt-agent-heartbeat",
         ),
-        "renewal": asyncio.create_task(
-          self._close_before_token_expiry(
-            socket,
-            close_requested=control_token_refresh_requested,
-          ),
-          name="qmt-agent-token-renewal",
+        "token-refresh": asyncio.create_task(
+          self._refresh_access_token_loop(),
+          name="qmt-agent-token-refresh",
         ),
         "report-sender": asyncio.create_task(
           self._broker_report_loop(socket),
@@ -1080,7 +1107,6 @@ class AgentRuntime:
         await self._supervise_session_tasks(
           socket,
           session_tasks,
-          planned_close_requested=control_token_refresh_requested,
         )
       finally:
         for task in session_tasks.values():
@@ -1097,8 +1123,6 @@ class AgentRuntime:
     self,
     socket,
     tasks: dict[str, asyncio.Task[None]],
-    *,
-    planned_close_requested: asyncio.Event | None = None,
   ) -> None:
     receiver = tasks["receiver"]
     while True:
@@ -1106,16 +1130,6 @@ class AgentRuntime:
         set(tasks.values()),
         return_when=asyncio.FIRST_COMPLETED,
       )
-      renewal = tasks.get("renewal")
-      if renewal is not None and (
-        renewal in done
-        or (planned_close_requested is not None and planned_close_requested.is_set())
-      ):
-        await renewal
-        logger.info(
-          "QMT Agent access token refresh closed the control session; reconnecting immediately"
-        )
-        return
       if receiver in done:
         await receiver
         return
@@ -1332,7 +1346,9 @@ class AgentRuntime:
       await asyncio.sleep(30)
       cycles += 1
       if cycles % 2 == 0:
-        await self._queue_full_snapshot(reconciliation=self.mode == "live")
+        # Periodic account observation is not a recovery event. Only an actual
+        # control/XTTrading generation change may close the reconciliation gate.
+        await self._queue_full_snapshot(reconciliation=False)
       self._raise_if_trading_recovery_expired()
       heartbeat_status = (
         self._heartbeat_status()
@@ -1777,16 +1793,6 @@ class AgentRuntime:
         self._set_market_stream_status("OFFLINE")
         self._market_stream_ready_since_monotonic = 0.0
         raise
-      except _PlannedMarketTokenRefresh as exc:
-        self._market_stream_resyncs += 1
-        self._set_market_stream_status("SYNCING")
-        self._market_stream_ready_since_monotonic = 0.0
-        delay = 1.0
-        logger.info(
-          "QMT whole-market access token refresh requested: resyncs=%s; waiting for replacement token",
-          self._market_stream_resyncs,
-        )
-        await self._wait_for_fresh_access_token(previous_token=exc.access_token)
       except Exception as exc:
         ready_since = self._market_stream_ready_since_monotonic
         ready_seconds = (
@@ -1823,6 +1829,7 @@ class AgentRuntime:
         "access_token": access_token,
         "agent_version": AGENT_VERSION,
         "capabilities": self._advertised_capabilities(),
+        "agent_session_id": getattr(self, "_control_agent_session_id", ""),
       },
     )
     await asyncio.wait_for(
@@ -1858,7 +1865,6 @@ class AgentRuntime:
     await self._wait_for_fresh_access_token()
     await self._wait_for_initial_control_hub_registration()
     market_access_token = self._access_token
-    market_token_expires_at = self._access_token_expires_at
     self._set_market_stream_status("SYNCING")
     self._market_stream_sequence = 0
     self._market_stream_ready_since_monotonic = 0.0
@@ -2029,15 +2035,6 @@ class AgentRuntime:
           ),
           name="whole-market-batch-transport",
         )
-        market_token_refresh_requested = asyncio.Event()
-        renewal = asyncio.create_task(
-          self._close_before_token_expiry(
-            socket,
-            expires_at=market_token_expires_at,
-            close_requested=market_token_refresh_requested,
-          ),
-          name="whole-market-token-renewal",
-        )
         native_reset = asyncio.create_task(
           self._whole_market_native_reset.wait(),
           name="whole-market-native-reset",
@@ -2046,14 +2043,11 @@ class AgentRuntime:
           self._whole_market_capture.wait_until_invalidated(),
           name="whole-market-capture-invalidated",
         )
-        pipeline_tasks.extend(
-          [producer, transport, renewal, native_reset, capture_invalidated]
-        )
+        pipeline_tasks.extend([producer, transport, native_reset, capture_invalidated])
         done, _ = await asyncio.wait(
           {
             producer,
             transport,
-            renewal,
             native_reset,
             capture_invalidated,
           },
@@ -2069,9 +2063,6 @@ class AgentRuntime:
           raise RuntimeError(
             "native whole-market subscription reset without a recorded reason"
           )
-        if renewal in done or market_token_refresh_requested.is_set():
-          await renewal
-          raise _PlannedMarketTokenRefresh(market_access_token)
         if producer in done:
           await producer
           raise RuntimeError("whole-market batch producer stopped unexpectedly")
@@ -2546,23 +2537,6 @@ class AgentRuntime:
     )
     self._market_stream_sequence = encoded.batch.sequence
     self._market_stream_ack_latency_ms = (time.monotonic() - started) * 1000
-
-  async def _close_before_token_expiry(
-    self,
-    socket,
-    *,
-    expires_at: datetime | None = None,
-    close_requested: asyncio.Event | None = None,
-  ) -> None:
-    renew_at = (expires_at or self._access_token_expires_at) - timedelta(minutes=2)
-    delay = max(
-      1.0,
-      (renew_at - datetime.now(timezone.utc)).total_seconds(),
-    )
-    await asyncio.sleep(delay)
-    if close_requested is not None:
-      close_requested.set()
-    await socket.close(code=4001, reason="refreshing Agent access token")
 
   async def _send_heartbeat(self, socket, *, status: str) -> None:
     self._ensure_market_upload_state()
@@ -3374,6 +3348,8 @@ class AgentRuntime:
       self._access_token = ""
     if not hasattr(self, "_access_token_expires_at"):
       self._access_token_expires_at = datetime.now(timezone.utc)
+    if not hasattr(self, "_control_agent_session_id"):
+      self._control_agent_session_id = ""
     if not hasattr(self, "_whole_market_encode_executor"):
       self._whole_market_encode_executor = ThreadPoolExecutor(
         max_workers=1,

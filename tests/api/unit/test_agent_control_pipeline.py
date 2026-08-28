@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import suppress
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -171,7 +171,6 @@ async def test_database_pollers_do_not_block_report_reception(
       websocket,
       control_session=control_session(),
       protocol_version="1.1",
-      session_expires_at=agent_api.utcnow() + timedelta(minutes=5),
     )
   )
   await websocket.received.put(
@@ -454,3 +453,92 @@ async def test_transient_database_timeout_sends_no_ack_and_pauses_pollers(
   assert not state.ready.is_set()
   processor.cancel()
   await asyncio.gather(processor, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_transient_database_timeout_retries_same_report_without_disconnect(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  inbound = agent_api._AgentInboundBuffer()
+  outbound = agent_api._AgentOutboundBuffer()
+  state = agent_api._AgentDatabaseState("device-1")
+  envelope = report_envelope("00000000-0000-4000-8000-000000000007")
+  attempts = 0
+
+  async def process_message(*_args, **_kwargs):
+    nonlocal attempts
+    attempts += 1
+    if attempts == 1:
+      raise SQLAlchemyTimeoutError("pool exhausted")
+    return AgentEnvelope(
+      message_type=AgentMessageType.REPORT_ACK,
+      payload=ReportAckPayload(
+        report_message_id=envelope.message_id,
+        accepted=True,
+      ).model_dump(mode="json"),
+    )
+
+  monkeypatch.setattr(agent_api, "_process_message", process_message)
+  monkeypatch.setattr(agent_api, "AGENT_CONTROL_DEPENDENCY_RETRY_SECONDS", 0.001)
+  await inbound.put(
+    agent_api._AgentInboundItem(
+      envelope=envelope,
+      received_at=agent_api.utcnow(),
+      received_monotonic=agent_api.time.monotonic(),
+      frame_bytes=1,
+      dedup_key=envelope.message_id,
+    )
+  )
+
+  processor = asyncio.create_task(
+    agent_api._process_agent_control_messages(
+      control_session=control_session(),
+      protocol_version="1.1",
+      inbound=inbound,
+      outbound=outbound,
+      database_state=state,
+    )
+  )
+  try:
+    while outbound.qsize() == 0:
+      await asyncio.sleep(0)
+    assert attempts == 2
+    assert state.ready.is_set()
+    assert state.consecutive_failures == 0
+  finally:
+    processor.cancel()
+    await asyncio.gather(processor, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_market_lease_refresh_retries_without_closing_control_session(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  calls = 0
+  recovered = asyncio.Event()
+
+  async def refresh_market_device(_session):
+    nonlocal calls
+    calls += 1
+    if calls == 1:
+      raise agent_api.RedisError("redis reconnecting")
+    recovered.set()
+
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "refresh_market_device",
+    refresh_market_device,
+  )
+  monkeypatch.setattr(agent_api, "AGENT_CONTROL_DEPENDENCY_RETRY_SECONDS", 0.001)
+  task = asyncio.create_task(
+    agent_api._refresh_agent_market_lease(
+      control_session=control_session(),
+    )
+  )
+  try:
+    await asyncio.wait_for(recovered.wait(), timeout=1)
+    assert calls == 2
+    assert not task.done()
+  finally:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)

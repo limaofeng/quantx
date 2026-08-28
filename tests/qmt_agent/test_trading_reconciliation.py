@@ -71,9 +71,7 @@ def test_stale_snapshot_ack_keeps_local_reconciliation_gate_closed() -> None:
   runtime._trading_reconciliation_snapshot_generation = 1
   runtime._trading_recovery_started_monotonic = 10.0
 
-  assert runtime._acknowledge_trading_reconciliation_snapshot(
-    "snapshot-1"
-  ) is False
+  assert runtime._acknowledge_trading_reconciliation_snapshot("snapshot-1") is False
   assert runtime._requires_trading_reconciliation() is True
   assert runtime._trading_reconciliation_snapshot_id is None
   assert runtime._trading_reconciliation_snapshot_generation is None
@@ -185,7 +183,7 @@ async def test_native_trading_timeout_is_fatal_without_event_loop_block(
 
 
 @pytest.mark.asyncio
-async def test_periodic_live_snapshot_enters_reconciliation(
+async def test_periodic_live_snapshot_preserves_ready_reconciliation(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   class StopHeartbeat(Exception):
@@ -215,5 +213,5 @@ async def test_periodic_live_snapshot_enters_reconciliation(
   with pytest.raises(StopHeartbeat):
     await runtime._heartbeat_loop(SimpleNamespace())
 
-  assert snapshot_modes == [True]
-  assert heartbeat_statuses == ["READY", "RECONCILING"]
+  assert snapshot_modes == [False]
+  assert heartbeat_statuses == ["READY", "READY"]

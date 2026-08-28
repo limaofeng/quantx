@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -64,7 +63,6 @@ class AgentHandoverCancellation:
 class AuthenticatedAgentSession:
   device: AgentDevice
   expires_at: object
-  access_token_fingerprint: str
 
 
 class AgentAuthService:
@@ -335,7 +333,6 @@ class AgentAuthService:
     return AuthenticatedAgentSession(
       device=device,
       expires_at=claims.expires_at,
-      access_token_fingerprint=hashlib.sha256(token.encode("utf-8")).hexdigest(),
     )
 
   async def revoke(self, *, device_id: str, user_id: str) -> bool:

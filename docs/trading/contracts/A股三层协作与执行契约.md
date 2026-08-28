@@ -323,6 +323,10 @@ CLOSED`。委托回报本身不得被当作成交事件。
 6. 必要时触发 KILL_SWITCH，等待人工确认。
 ```
 
+每分钟完整账户快照是账户事实刷新，不自动等同于对账动作。只有真实控制连接重建、
+XTTrading 连接代际变化、订单事实无法解释或显式恢复请求才把已经 `READY` 的账户重新
+置为 `RECONCILING`；短期认证 token 的后台续期不得触发对账。
+
 对账必须识别订单来源。在只读的 `SHADOW` 准备阶段，券商快照中没有 QuantX
 `PendingTradeOrder / client_order_id` 的委托与成交应分类为 `EXTERNAL_BROKER_*`，
 作为 QMT 客户端手工交易正常入账，而不是直接形成阻断。以下情况仍属于阻断：

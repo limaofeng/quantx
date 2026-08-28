@@ -15,15 +15,12 @@ from quantx_contracts import (
 )
 from starlette.websockets import WebSocketState
 
-TOKEN_FINGERPRINT = "f" * 64
-
 
 def _market_lease(device_id: str = "device-1") -> agent_api.MarketSessionLease:
   return agent_api.MarketSessionLease(
     device_id=device_id,
     api_instance_id="api-instance-1",
     agent_session_id="agent-session-1",
-    access_token_fingerprint=TOKEN_FINGERPRINT,
   )
 
 
@@ -31,7 +28,6 @@ def _authenticated_session() -> SimpleNamespace:
   return SimpleNamespace(
     device=SimpleNamespace(id="device-1"),
     expires_at=agent_api.utcnow() + timedelta(minutes=5),
-    access_token_fingerprint=TOKEN_FINGERPRINT,
   )
 
 
@@ -54,6 +50,7 @@ class FakeWebSocket:
         "device_id": "device-1",
         "access_token": "token",
         "capabilities": ["market-data", "data-only"],
+        "agent_session_id": "agent-session-1",
       },
     ).model_dump_json()
 
@@ -85,7 +82,15 @@ class FailingStore:
     del generation, reason
     self.stream_id = stream_id
 
-  async def write_batch(self, _batch, _payload, *, received_at):
+  async def write_batch(
+    self,
+    _batch,
+    _payload,
+    *,
+    received_at,
+    allow_uncertain_retry=False,
+  ):
+    del allow_uncertain_retry
     del received_at
     raise ConnectionError("redis unavailable")
 
@@ -95,7 +100,15 @@ class FailingStore:
 
 
 class HangingStore(FailingStore):
-  async def write_batch(self, _batch, _payload, *, received_at):
+  async def write_batch(
+    self,
+    _batch,
+    _payload,
+    *,
+    received_at,
+    allow_uncertain_retry=False,
+  ):
+    del allow_uncertain_retry
     del received_at
     await asyncio.Event().wait()
 
@@ -191,7 +204,7 @@ async def test_market_auth_rejects_device_that_never_becomes_active(
 
 
 @pytest.mark.asyncio
-async def test_market_auth_rejects_token_from_another_control_session(
+async def test_market_auth_accepts_valid_device_token_without_control_token_coupling(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   batch = MarketStreamBatch(
@@ -206,15 +219,16 @@ async def test_market_auth_rejects_token_from_another_control_session(
   websocket = FakeWebSocket(batch)
 
   async def authenticate(_envelope):
-    session = _authenticated_session()
-    session.access_token_fingerprint = "e" * 64
-    return session
+    return _authenticated_session()
 
   async def market_lease(device_id: str):
     return _market_lease(device_id)
 
-  async def unexpected_device_check(*_args, **_kwargs):
-    raise AssertionError("mismatched token must fail before device validation")
+  device_checked = asyncio.Event()
+
+  async def ensure_device_active(*_args, **_kwargs):
+    device_checked.set()
+    raise agent_api.AuthError("UNAUTHENTICATED", "controlled stop")
 
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(
@@ -225,8 +239,52 @@ async def test_market_auth_rejects_token_from_another_control_session(
   monkeypatch.setattr(
     agent_api,
     "_ensure_device_active",
-    unexpected_device_check,
+    ensure_device_active,
   )
+
+  await agent_api.agent_market_websocket(websocket)
+
+  assert device_checked.is_set()
+  result = AgentEnvelope.model_validate_json(websocket.sent_text[0])
+  assert result.message_type is AgentMessageType.AUTH_RESULT
+  assert result.payload["reason"] == "controlled stop"
+  assert websocket.closed[-1][0] == 4401
+
+
+@pytest.mark.asyncio
+async def test_market_auth_rejects_another_control_session_id(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  batch = MarketStreamBatch(
+    stream_id="placeholder",
+    sequence=1,
+    kind=MarketBatchKind.SNAPSHOT,
+    captured_at=datetime.now(timezone.utc),
+    instrument_count=1,
+    universe_codes=("600000.SH",),
+    data={"600000.SH": {"lastPrice": 10.0}},
+  )
+
+  class MismatchedSessionWebSocket(FakeWebSocket):
+    async def receive_text(self):
+      envelope = AgentEnvelope.model_validate_json(await super().receive_text())
+      envelope.payload["agent_session_id"] = "another-session"
+      return envelope.model_dump_json()
+
+  websocket = MismatchedSessionWebSocket(batch)
+
+  async def authenticate(_envelope):
+    return _authenticated_session()
+
+  async def market_lease(device_id: str):
+    return _market_lease(device_id)
+
+  async def unexpected_device_check(*_args, **_kwargs):
+    raise AssertionError("session mismatch must fail before device validation")
+
+  monkeypatch.setattr(agent_api, "_authenticate", authenticate)
+  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
+  monkeypatch.setattr(agent_api, "_ensure_device_active", unexpected_device_check)
 
   await agent_api.agent_market_websocket(websocket)
 
@@ -271,6 +329,7 @@ async def test_redis_failure_sends_resync_without_ack(
     market_lease,
   )
   monkeypatch.setattr(agent_api, "market_stream_store", store)
+  monkeypatch.setattr(agent_api, "MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS", 0.05)
   monkeypatch.setattr(
     agent_api,
     "_market_connections",
@@ -344,6 +403,7 @@ async def test_redis_black_hole_times_out_and_releases_single_connection(
     "MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS",
     0.01,
   )
+  monkeypatch.setattr(agent_api, "MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS", 0.05)
   monkeypatch.setattr(
     agent_api,
     "MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS",
@@ -546,7 +606,6 @@ async def test_large_market_frame_decode_keeps_event_loop_schedulable(
       LargeFrameWebSocket(),
       stream_id="stream-1",
       device_id="device-1",
-      session_expires_at=agent_api.utcnow() + timedelta(minutes=5),
       buffer=buffer,
     )
   )
@@ -601,7 +660,6 @@ async def test_large_market_frame_decode_failure_releases_reservations(
       InvalidLargeFrameWebSocket(),
       stream_id="stream-1",
       device_id="device-1",
-      session_expires_at=agent_api.utcnow() + timedelta(minutes=5),
       buffer=buffer,
     )
 
@@ -659,7 +717,6 @@ async def test_market_pipeline_receives_two_frames_but_acks_only_after_commit(
       websocket,
       stream_id="stream-1",
       device_id="device-1",
-      session_expires_at=agent_api.utcnow() + timedelta(minutes=5),
       commit_state=agent_api._MarketCommitState(),
     )
   )
@@ -675,6 +732,57 @@ async def test_market_pipeline_receives_two_frames_but_acks_only_after_commit(
   ]
   assert [control.sequence for control in controls] == [1, 2]
   assert all(control.type is MarketControlType.ACK for control in controls)
+
+
+@pytest.mark.asyncio
+async def test_market_committer_retries_transient_redis_failure_in_place(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  item = _commit_item(1, b"payload")
+  buffer = agent_api._MarketCommitBuffer()
+  await buffer.put(item)
+  ack_sent = asyncio.Event()
+
+  class WebSocket:
+    async def send_text(self, _payload):
+      ack_sent.set()
+
+  class FlakyStore:
+    def __init__(self) -> None:
+      self.calls = 0
+
+    async def write_batch(
+      self,
+      batch,
+      _payload,
+      *,
+      received_at,
+      allow_uncertain_retry=False,
+    ):
+      del allow_uncertain_retry
+      del received_at
+      self.calls += 1
+      if self.calls == 1:
+        raise ConnectionError("redis reconnecting")
+      return SimpleNamespace(sequence=batch.sequence)
+
+  store = FlakyStore()
+  monkeypatch.setattr(agent_api, "MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS", 0.1)
+  committer = asyncio.create_task(
+    agent_api._commit_market_batches(
+      WebSocket(),
+      stream_id="stream-1",
+      buffer=buffer,
+      commit_state=agent_api._MarketCommitState(),
+      store=store,
+    )
+  )
+  try:
+    await asyncio.wait_for(ack_sent.wait(), timeout=1)
+    assert store.calls == 2
+  finally:
+    committer.cancel()
+    await asyncio.gather(committer, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -726,19 +834,21 @@ async def test_market_send_classifies_disconnect_racing_with_ack_write() -> None
 
 
 @pytest.mark.asyncio
-async def test_idle_frame_crossing_session_expiry_is_not_committed_or_acked(
+async def test_established_market_session_outlives_handshake_token(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  started_at = datetime(2026, 8, 19, tzinfo=timezone.utc)
-  observed_times = iter([started_at, started_at + timedelta(seconds=2)])
   batch = _commit_item(1, b"").batch
 
   class IdleWebSocket:
     def __init__(self) -> None:
       self.sent_text = []
+      self.receive_count = 0
 
     async def receive(self):
       await asyncio.sleep(0)
+      self.receive_count += 1
+      if self.receive_count > 1:
+        return {"type": "websocket.disconnect", "code": 1000}
       return {"type": "websocket.receive", "bytes": batch.to_bytes()}
 
     async def send_text(self, payload):
@@ -758,22 +868,21 @@ async def test_idle_frame_crossing_session_expiry_is_not_committed_or_acked(
 
   store = RecordingStore()
   websocket = IdleWebSocket()
-  monkeypatch.setattr(agent_api, "utcnow", lambda: next(observed_times))
   monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
 
-  with pytest.raises(agent_api.AuthError) as error:
+  with pytest.raises(agent_api.WebSocketDisconnect):
     await agent_api._run_market_commit_pipeline(
       websocket,
       stream_id="stream-1",
       device_id="device-1",
-      session_expires_at=started_at + timedelta(seconds=1),
       commit_state=agent_api._MarketCommitState(),
     )
 
-  assert error.value.code == "UNAUTHENTICATED"
-  assert store.calls == 0
-  assert websocket.sent_text == []
+  assert store.calls == 1
+  ack = MarketStreamControl.model_validate_json(websocket.sent_text[0])
+  assert ack.type is MarketControlType.ACK
+  assert ack.sequence == 1
 
 
 @pytest.mark.asyncio
@@ -827,7 +936,6 @@ async def test_idle_frame_after_device_revocation_is_not_committed(
       websocket,
       stream_id="stream-1",
       device_id="device-1",
-      session_expires_at=agent_api.utcnow() + timedelta(minutes=5),
       commit_state=agent_api._MarketCommitState(),
     )
 

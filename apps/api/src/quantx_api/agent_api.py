@@ -32,6 +32,7 @@ from fastapi import (
 )
 from quantx_contracts import (
   MARKET_STREAM_MARKETS,
+  MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
   MARKET_STREAM_SUBPROTOCOL,
   MAX_MARKET_STREAM_FRAME_BYTES,
   PROTOCOL_VERSION,
@@ -81,6 +82,7 @@ from quantx_infrastructure.services.agent_session_guard import (
   to_naive_utc,
   utc_iso,
 )
+from redis.exceptions import RedisError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
@@ -146,7 +148,6 @@ MARKET_STREAM_COMMIT_QUEUE_MAX_BYTES = MAX_MARKET_STREAM_FRAME_BYTES
 MARKET_STREAM_DECODE_OFFLOAD_BYTES = 256 * 1024
 MARKET_STREAM_DEVICE_REVALIDATE_SECONDS = 5.0
 MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS = 5.0
-MARKET_STREAM_MAX_QUEUE_AGE_SECONDS = 2.0
 MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
@@ -157,10 +158,10 @@ AGENT_CONTROL_INBOUND_QUEUE_CAPACITY = 32
 AGENT_CONTROL_INBOUND_QUEUE_MAX_BYTES = 32 * 1024 * 1024
 AGENT_CONTROL_OUTBOUND_QUEUE_CAPACITY = 64
 AGENT_CONTROL_OUTBOUND_ACK_RESERVE = 16
-AGENT_CONTROL_QUEUE_PUT_TIMEOUT_SECONDS = 2.0
 AGENT_CONTROL_MAX_QUEUE_AGE_SECONDS = 5.0
 AGENT_CONTROL_INBOUND_PROCESSING_TIMEOUT_SECONDS = 10.0
 AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS = 5.0
+AGENT_CONTROL_DEPENDENCY_RETRY_SECONDS = 0.5
 AGENT_CONTROL_SEND_TIMEOUT_SECONDS = 5.0
 AGENT_CONTROL_POLL_INTERVAL_SECONDS = 1.0
 AGENT_CONTROL_SLOW_STAGE_SECONDS = 1.0
@@ -187,24 +188,31 @@ class _AgentControlPipelineError(RuntimeError):
 
 
 _TRANSIENT_DATABASE_ERRORS = (SQLAlchemyTimeoutError, DBAPIError)
+_TRANSIENT_DEPENDENCY_ERRORS = _TRANSIENT_DATABASE_ERRORS + (
+  ConnectionError,
+  asyncio.TimeoutError,
+  RedisError,
+)
 
 
 @dataclass
 class _AgentDatabaseState:
   device_id: str
   ready: asyncio.Event = field(default_factory=asyncio.Event)
-  last_heartbeat_success_monotonic: float = field(default_factory=time.monotonic)
+  last_heartbeat_received_monotonic: float = field(default_factory=time.monotonic)
   consecutive_failures: int = 0
 
   def __post_init__(self) -> None:
     self.ready.set()
     self._update_metrics()
 
-  def mark_success(self, *, heartbeat: bool = False) -> None:
+  def mark_success(self) -> None:
     self.ready.set()
     self.consecutive_failures = 0
-    if heartbeat:
-      self.last_heartbeat_success_monotonic = time.monotonic()
+    self._update_metrics()
+
+  def mark_heartbeat_received(self) -> None:
+    self.last_heartbeat_received_monotonic = time.monotonic()
     self._update_metrics()
 
   def mark_failure(self) -> None:
@@ -213,7 +221,7 @@ class _AgentDatabaseState:
     self._update_metrics()
 
   def heartbeat_age(self) -> float:
-    return max(0.0, time.monotonic() - self.last_heartbeat_success_monotonic)
+    return max(0.0, time.monotonic() - self.last_heartbeat_received_monotonic)
 
   def _update_metrics(self) -> None:
     AGENT_CONTROL_DATABASE_STATE.labels(
@@ -586,7 +594,6 @@ async def _publish_market_event(
     device_id=control_session.device_id,
     api_instance_id=control_session.api_instance_id,
     agent_session_id=control_session.agent_session_id,
-    access_token_fingerprint=control_session.access_token_fingerprint,
   )
   if not await agent_connection_hub.is_market_session(lease):
     raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
@@ -609,11 +616,15 @@ def _auth_result(
   accepted: bool,
   reason: str = "",
   protocol_version: str = PROTOCOL_VERSION,
+  agent_session_id: str = "",
 ) -> AgentEnvelope:
+  payload = {"accepted": accepted, "reason": reason}
+  if agent_session_id:
+    payload["agent_session_id"] = agent_session_id
   return AgentEnvelope(
     protocol_version=protocol_version,
     message_type=AgentMessageType.AUTH_RESULT,
-    payload={"accepted": accepted, "reason": reason},
+    payload=payload,
   )
 
 
@@ -801,8 +812,8 @@ async def _record_heartbeat(
       await agent_connection_hub.authorize_market_after_reconciliation(session)
     except Exception as exc:
       # Heartbeat durability is already committed. The independent lease
-      # refresher retries Redis publication and will fail the socket closed if
-      # the lease store remains unavailable.
+      # refresher retries Redis publication without rebuilding the control
+      # session. The short freshness lease keeps market trading fail-closed.
       logger.warning(
         "无法在账户对账后启用 Agent 行情租约: device=%s error=%s",
         session.device_id,
@@ -1903,7 +1914,6 @@ async def _receive_market_batches(
   *,
   stream_id: str,
   device_id: str,
-  session_expires_at: datetime,
   buffer: _MarketCommitBuffer,
   validate_device: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
@@ -1911,11 +1921,19 @@ async def _receive_market_batches(
   expected_sequence = 1
   next_device_check = 0.0
   while True:
-    if utcnow() >= session_expires_at:
-      raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
     now = time.monotonic()
     if now >= next_device_check:
-      await device_validator(device_id)
+      try:
+        await device_validator(device_id)
+      except _TRANSIENT_DEPENDENCY_ERRORS:
+        AGENT_CONTROL_EVENTS.labels(
+          event="dependency",
+          reason="market_session_revalidation_deferred",
+        ).inc()
+        logger.warning(
+          "Market session revalidation deferred without disconnect: device_id=%s",
+          device_id,
+        )
       next_device_check = now + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
 
     await buffer.reserve()
@@ -1929,14 +1947,23 @@ async def _receive_market_batches(
         await buffer.close(WebSocketDisconnect(message.get("code", 1000)))
         return
 
-      # A quiet socket can remain blocked across token expiry or device
-      # revocation. Revalidate before parsing or exposing its first frame to
-      # the Redis committer so that frame can never be persisted or ACKed.
-      if utcnow() >= session_expires_at:
-        raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
+      # Revalidate after an idle receive so a revoked device cannot commit its
+      # first post-revocation frame. A transient dependency failure retains the
+      # established transport; the Redis freshness lease still expires and
+      # keeps trading fail-closed until authority can be proved again.
       now = time.monotonic()
       if now >= next_device_check:
-        await device_validator(device_id)
+        try:
+          await device_validator(device_id)
+        except _TRANSIENT_DEPENDENCY_ERRORS:
+          AGENT_CONTROL_EVENTS.labels(
+            event="dependency",
+            reason="market_session_revalidation_deferred",
+          ).inc()
+          logger.warning(
+            "Market session revalidation deferred without disconnect: device_id=%s",
+            device_id,
+          )
         next_device_check = time.monotonic() + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
 
       payload = message.get("bytes")
@@ -2007,19 +2034,60 @@ async def _commit_market_batches(
       raise queued.disconnect
 
     try:
-      queue_age = time.monotonic() - queued.received_monotonic
-      if queue_age > MARKET_STREAM_MAX_QUEUE_AGE_SECONDS:
-        raise TimeoutError(
-          f"market stream commit queue exceeded maximum age: age={queue_age:.3f}s"
+      retry_delay = 0.05
+      allow_uncertain_retry = False
+      while True:
+        capture_age = max(
+          0.0,
+          (
+            datetime.now(timezone.utc)
+            - queued.batch.captured_at.astimezone(timezone.utc)
+          ).total_seconds(),
         )
-      state = await asyncio.wait_for(
-        active_store.write_batch(
-          queued.batch,
-          queued.payload,
-          received_at=queued.received_at,
-        ),
-        timeout=MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
-      )
+        remaining_freshness = MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS - capture_age
+        if remaining_freshness <= 0:
+          raise TimeoutError(
+            "market stream capture expired while waiting for Redis: "
+            f"age={capture_age:.3f}s"
+          )
+        try:
+          write_options: dict[str, Any] = {
+            "received_at": queued.received_at,
+          }
+          if allow_uncertain_retry:
+            write_options["allow_uncertain_retry"] = True
+          state = await asyncio.wait_for(
+            active_store.write_batch(
+              queued.batch,
+              queued.payload,
+              **write_options,
+            ),
+            timeout=min(
+              MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
+              remaining_freshness,
+            ),
+          )
+          break
+        except (ConnectionError, asyncio.TimeoutError, RedisError) as exc:
+          allow_uncertain_retry = True
+          AGENT_CONTROL_EVENTS.labels(
+            event="dependency",
+            reason="market_redis_commit_retry",
+          ).inc()
+          capture_age = max(
+            0.0,
+            (
+              datetime.now(timezone.utc)
+              - queued.batch.captured_at.astimezone(timezone.utc)
+            ).total_seconds(),
+          )
+          remaining_freshness = MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS - capture_age
+          if remaining_freshness <= retry_delay:
+            raise TimeoutError(
+              "market stream Redis commit did not recover before capture expiry"
+            ) from exc
+          await asyncio.sleep(min(retry_delay, remaining_freshness))
+          retry_delay = min(retry_delay * 2, 0.5)
       MARKET_STREAM_PROCESSING.observe(time.monotonic() - queued.received_monotonic)
       MARKET_STREAM_FRAMES.labels(kind=queued.batch.kind.value).inc()
       MARKET_STREAM_FRAME_BYTES.set(len(queued.payload))
@@ -2047,7 +2115,6 @@ async def _run_market_commit_pipeline(
   *,
   stream_id: str,
   device_id: str,
-  session_expires_at: datetime,
   commit_state: _MarketCommitState,
   store: MarketStreamStore | None = None,
   validate_device: Callable[[str], Awaitable[None]] | None = None,
@@ -2058,7 +2125,6 @@ async def _run_market_commit_pipeline(
       websocket,
       stream_id=stream_id,
       device_id=device_id,
-      session_expires_at=session_expires_at,
       buffer=buffer,
       validate_device=validate_device,
     ),
@@ -2103,14 +2169,12 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
     if "market-data" not in capabilities:
       raise AuthError("FORBIDDEN", "Agent 未声明 market-data 能力")
     market_lease = await _wait_for_active_market_device(device.id)
-    token_fingerprint = str(getattr(session, "access_token_fingerprint", "") or "")
+    requested_control_session_id = str(
+      first.payload.get("agent_session_id") or ""
+    ).strip()
     if (
-      not market_lease.access_token_fingerprint
-      or not token_fingerprint
-      or not hmac.compare_digest(
-        market_lease.access_token_fingerprint,
-        token_fingerprint,
-      )
+      not requested_control_session_id
+      or requested_control_session_id != market_lease.agent_session_id
     ):
       raise AuthError("UNAUTHENTICATED", "行情连接与当前控制会话不匹配")
     await _ensure_device_active(device.id, lease=market_lease)
@@ -2153,7 +2217,6 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
       websocket,
       stream_id=stream_id,
       device_id=device.id,
-      session_expires_at=session.expires_at,
       commit_state=commit_state,
       validate_device=lambda checked_device_id: _ensure_device_active(
         checked_device_id,
@@ -2272,22 +2335,12 @@ async def _enqueue_agent_outbound(
 ) -> bool:
   priority, protocol_reply = _outbound_priority(envelope)
   dedup_key = envelope.message_id if deduplicate else ""
-  try:
-    queued = await asyncio.wait_for(
-      buffer.put(
-        envelope,
-        priority=priority,
-        protocol_reply=protocol_reply,
-        dedup_key=dedup_key,
-      ),
-      timeout=AGENT_CONTROL_QUEUE_PUT_TIMEOUT_SECONDS,
-    )
-  except asyncio.TimeoutError as exc:
-    AGENT_CONTROL_EVENTS.labels(
-      event="backpressure",
-      reason="outbound_queue_full",
-    ).inc()
-    raise _AgentControlPipelineError("outbound_queue_full") from exc
+  queued = await buffer.put(
+    envelope,
+    priority=priority,
+    protocol_reply=protocol_reply,
+    dedup_key=dedup_key,
+  )
   _set_agent_control_queue_metrics(device_id, "outbound", buffer)
   return queued
 
@@ -2298,6 +2351,7 @@ async def _receive_agent_control_messages(
   device_id: str,
   protocol_version: str,
   inbound: _AgentInboundBuffer,
+  database_state: _AgentDatabaseState,
 ) -> None:
   while True:
     raw = await websocket.receive_text()
@@ -2306,6 +2360,10 @@ async def _receive_agent_control_messages(
     envelope = AgentEnvelope.model_validate_json(raw)
     if envelope.protocol_version != protocol_version:
       raise ValueError("Agent connection changed protocol version")
+    if envelope.message_type is AgentMessageType.HEARTBEAT:
+      # Liveness is a transport fact. Database persistence can lag without
+      # turning a healthy socket into a reconnect/reconciliation storm.
+      database_state.mark_heartbeat_received()
     _observe_source_to_receive(device_id, envelope, received_at)
     item = _AgentInboundItem(
       envelope=envelope,
@@ -2314,17 +2372,7 @@ async def _receive_agent_control_messages(
       frame_bytes=len(raw.encode("utf-8")),
       dedup_key=(envelope.message_id if envelope.message_type in REPORT_TYPES else ""),
     )
-    try:
-      queued = await asyncio.wait_for(
-        inbound.put(item),
-        timeout=AGENT_CONTROL_QUEUE_PUT_TIMEOUT_SECONDS,
-      )
-    except asyncio.TimeoutError as exc:
-      AGENT_CONTROL_EVENTS.labels(
-        event="backpressure",
-        reason="inbound_queue_full",
-      ).inc()
-      raise _AgentControlPipelineError("inbound_queue_full") from exc
+    queued = await inbound.put(item)
     if not queued:
       AGENT_CONTROL_EVENTS.labels(
         event="deduplicate",
@@ -2364,31 +2412,40 @@ async def _process_agent_control_messages(
         item.envelope.message_type.value,
       )
     processing_started = time.monotonic()
-    try:
-      reply = await _process_message(
-        control_session,
-        item.envelope,
-        received_at=item.received_at,
-        protocol_version=protocol_version,
-      )
-    except _TRANSIENT_DATABASE_ERRORS as exc:
-      database_state.mark_failure()
-      AGENT_CONTROL_EVENTS.labels(
-        event="timeout",
-        reason="inbound_database",
-      ).inc()
-      logger.warning(
-        "Agent message persistence deferred: device_id=%s message_type=%s error=%s",
-        device_id,
-        item.envelope.message_type.value,
-        exc.__class__.__name__,
-      )
-      await inbound.complete(item)
-      continue
-    else:
-      database_state.mark_success(
-        heartbeat=item.envelope.message_type is AgentMessageType.HEARTBEAT
-      )
+    retry_delay = AGENT_CONTROL_DEPENDENCY_RETRY_SECONDS
+    while True:
+      try:
+        reply = await asyncio.wait_for(
+          _process_message(
+            control_session,
+            item.envelope,
+            received_at=item.received_at,
+            protocol_version=protocol_version,
+          ),
+          timeout=AGENT_CONTROL_INBOUND_PROCESSING_TIMEOUT_SECONDS,
+        )
+      except _TRANSIENT_DEPENDENCY_ERRORS as exc:
+        database_state.mark_failure()
+        AGENT_CONTROL_EVENTS.labels(
+          event="dependency",
+          reason="inbound_processing_retry",
+        ).inc()
+        logger.warning(
+          "Agent message persistence deferred without disconnect: "
+          "device_id=%s message_type=%s error=%s retry_seconds=%.1f",
+          device_id,
+          item.envelope.message_type.value,
+          exc.__class__.__name__,
+          retry_delay,
+        )
+        await asyncio.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, 5.0)
+        continue
+      if (
+        item.envelope.message_type is AgentMessageType.HEARTBEAT or inbound.qsize() == 0
+      ):
+        database_state.mark_success()
+      break
     _observe_agent_control_stage(
       stage="inbound_processing",
       envelope=item.envelope,
@@ -2530,11 +2587,14 @@ async def _poll_agent_trade_commands(
       await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
       continue
     try:
-      command = await _next_command(
-        control_session,
-        protocol_version=protocol_version,
+      command = await asyncio.wait_for(
+        _next_command(
+          control_session,
+          protocol_version=protocol_version,
+        ),
+        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
       )
-    except _TRANSIENT_DATABASE_ERRORS:
+    except _TRANSIENT_DEPENDENCY_ERRORS:
       database_state.mark_failure()
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",
@@ -2542,7 +2602,6 @@ async def _poll_agent_trade_commands(
       ).inc()
       logger.warning("Agent trade-command poll timed out: device_id=%s", device_id)
     else:
-      database_state.mark_success()
       if command is not None:
         await _enqueue_agent_outbound(
           device_id,
@@ -2566,11 +2625,14 @@ async def _poll_agent_market_requests(
       await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
       continue
     try:
-      request = await _next_market_data_request(
-        control_session,
-        protocol_version=protocol_version,
+      request = await asyncio.wait_for(
+        _next_market_data_request(
+          control_session,
+          protocol_version=protocol_version,
+        ),
+        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
       )
-    except _TRANSIENT_DATABASE_ERRORS:
+    except _TRANSIENT_DEPENDENCY_ERRORS:
       database_state.mark_failure()
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",
@@ -2578,7 +2640,6 @@ async def _poll_agent_market_requests(
       ).inc()
       logger.warning("Agent market-request poll timed out: device_id=%s", device_id)
     else:
-      database_state.mark_success()
       if request is not None:
         await _enqueue_agent_outbound(
           device_id,
@@ -2608,43 +2669,65 @@ async def _relay_agent_hub_controls(
 async def _guard_agent_control_session(
   *,
   control_session: AgentControlSession,
-  expires_at: datetime,
+  inbound: _AgentInboundBuffer,
   database_state: _AgentDatabaseState,
 ) -> None:
   device_id = control_session.device_id
   while True:
     now = utcnow()
-    if now >= expires_at:
-      raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
     heartbeat_age = database_state.heartbeat_age()
     database_state._update_metrics()
-    if heartbeat_age >= AGENT_CONTROL_HEARTBEAT_STALE_SECONDS:
+    if (
+      heartbeat_age >= AGENT_CONTROL_HEARTBEAT_STALE_SECONDS
+      and database_state.ready.is_set()
+      and inbound.qsize() == 0
+    ):
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",
-        reason="heartbeat_persistence_stale",
+        reason="heartbeat_transport_stale",
       ).inc()
-      raise _AgentControlPipelineError("heartbeat_persistence_stale")
-    timeout_seconds = min(
-      5.0,
-      max(0.0, (expires_at - now).total_seconds()),
-      max(0.0, AGENT_CONTROL_HEARTBEAT_STALE_SECONDS - heartbeat_age),
-    )
+      raise _AgentControlPipelineError("heartbeat_transport_stale")
+    heartbeat_remaining = AGENT_CONTROL_HEARTBEAT_STALE_SECONDS - heartbeat_age
+    timeout_seconds = 5.0 if heartbeat_remaining <= 0 else min(5.0, heartbeat_remaining)
     revoked = await agent_connection_hub.wait_until_revoked(
       control_session,
       timeout_seconds=timeout_seconds,
     )
     if revoked:
       raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销")
-    async with AsyncSessionLocal() as db:
-      device = await db.get(AgentDevice, device_id)
-      heartbeat = await db.get(
-        RuntimeComponentHeartbeat,
-        f"qmt-agent:{device_id}",
+
+    async def load_authority():
+      async with AsyncSessionLocal() as db:
+        return (
+          await db.get(AgentDevice, device_id),
+          await db.get(
+            RuntimeComponentHeartbeat,
+            f"qmt-agent:{device_id}",
+          ),
+          await db.get(
+            RuntimeComponentHeartbeat,
+            API_HEARTBEAT_COMPONENT,
+          ),
+        )
+
+    try:
+      device, heartbeat, api_heartbeat = await asyncio.wait_for(
+        load_authority(),
+        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
       )
-      api_heartbeat = await db.get(
-        RuntimeComponentHeartbeat,
-        API_HEARTBEAT_COMPONENT,
+    except _TRANSIENT_DEPENDENCY_ERRORS as exc:
+      database_state.mark_failure()
+      AGENT_CONTROL_EVENTS.labels(
+        event="dependency",
+        reason="session_authority_revalidation_deferred",
+      ).inc()
+      logger.warning(
+        "Agent session authority revalidation deferred without disconnect: "
+        "device_id=%s error=%s",
+        device_id,
+        exc.__class__.__name__,
       )
+      continue
     details = dict(heartbeat.details or {}) if heartbeat is not None else {}
     if (
       device is None
@@ -2668,12 +2751,21 @@ async def _refresh_agent_market_lease(
         agent_connection_hub.refresh_market_device(control_session),
         timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
       )
-    except asyncio.TimeoutError as exc:
+    except asyncio.CancelledError:
+      raise
+    except _TRANSIENT_DEPENDENCY_ERRORS as exc:
       AGENT_CONTROL_EVENTS.labels(
-        event="timeout",
-        reason="market_lease_refresh",
+        event="dependency",
+        reason="market_lease_refresh_deferred",
       ).inc()
-      raise _AgentControlPipelineError("market_lease_refresh_timeout") from exc
+      logger.warning(
+        "Agent market lease refresh deferred without closing control session: "
+        "device_id=%s error=%s",
+        control_session.device_id,
+        exc.__class__.__name__,
+      )
+      await asyncio.sleep(AGENT_CONTROL_DEPENDENCY_RETRY_SECONDS)
+      continue
     await asyncio.sleep(MARKET_DEVICE_LEASE_REFRESH_SECONDS)
 
 
@@ -2682,7 +2774,6 @@ async def _run_agent_control_pipeline(
   *,
   control_session: AgentControlSession,
   protocol_version: str,
-  session_expires_at: datetime,
 ) -> None:
   device_id = control_session.device_id
   inbound = _AgentInboundBuffer()
@@ -2695,6 +2786,7 @@ async def _run_agent_control_pipeline(
         device_id=device_id,
         protocol_version=protocol_version,
         inbound=inbound,
+        database_state=database_state,
       ),
       name=f"agent-control-receiver:{device_id}",
     ),
@@ -2745,7 +2837,7 @@ async def _run_agent_control_pipeline(
     asyncio.create_task(
       _guard_agent_control_session(
         control_session=control_session,
-        expires_at=session_expires_at,
+        inbound=inbound,
         database_state=database_state,
       ),
       name=f"agent-control-guard:{device_id}",
@@ -2811,7 +2903,6 @@ async def agent_websocket(websocket: WebSocket) -> None:
       },
       connected_at=utcnow(),
       remote_address_summary=_remote_address_summary(websocket),
-      access_token_fingerprint=session.access_token_fingerprint,
     )
     await _record_heartbeat(
       control_session,
@@ -2829,13 +2920,13 @@ async def agent_websocket(websocket: WebSocket) -> None:
       _auth_result(
         accepted=True,
         protocol_version=connection_protocol,
+        agent_session_id=control_session.agent_session_id,
       ).model_dump_json()
     )
     await _run_agent_control_pipeline(
       websocket,
       control_session=control_session,
       protocol_version=connection_protocol,
-      session_expires_at=session.expires_at,
     )
   except WebSocketDisconnect:
     AGENT_CONTROL_EVENTS.labels(event="close", reason="disconnect").inc()
