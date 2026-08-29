@@ -30,13 +30,21 @@ function createContext(
 ): ReplaySidebarContext {
   return {
     accountId: '300000013250',
+    activeRunId: '',
     asOf: '2026-08-21',
     cashAvailable: 50000,
+    deletingHistory: false,
     editor: null,
     frozen: false,
+    history: [],
+    historyLoading: false,
     loading: false,
     message: '开始回放后，初始账户将冻结。',
     mode: 'VIEW',
+    onCreate: vi.fn(),
+    onDelete: vi.fn(),
+    onHistoryRefresh: vi.fn(),
+    onSelectRun: vi.fn(),
     positions: [],
     source: 'SNAPSHOT',
     totalAsset: 50000,
@@ -45,6 +53,43 @@ function createContext(
 }
 
 describe('TTradeReplaySidebar', () => {
+  it('maintains replay records below the replay account', () => {
+    const onCreate = vi.fn();
+    const onDelete = vi.fn();
+    const onSelectRun = vi.fn();
+    const historyItem = {
+      progressPct: 100,
+      runId: 'run-20260803',
+      startTime: '2026-08-03T09:30:00+08:00',
+      status: 'COMPLETED',
+      tNetProfit: 110.38,
+    };
+
+    render(
+      <TTradeReplaySidebar
+        accountId="300000013250"
+        context={createContext({
+          activeRunId: historyItem.runId,
+          history: [historyItem],
+          onCreate,
+          onDelete,
+          onSelectRun,
+        })}
+      />
+    );
+
+    expect(screen.getByText('回测记录')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '新增' }));
+    fireEvent.click(screen.getByRole('button', { name: /^2026-08-03已完成/ }));
+    fireEvent.click(
+      screen.getByRole('button', { name: '删除 2026-08-03 回测' })
+    );
+
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onSelectRun).toHaveBeenCalledWith(historyItem.runId);
+    expect(onDelete).toHaveBeenCalledWith(historyItem);
+  });
+
   it('keeps new replay account maintenance in the left sidebar', () => {
     const onSourceChange = vi.fn();
     const context = createContext({
@@ -68,7 +113,7 @@ describe('TTradeReplaySidebar', () => {
     expect(
       screen.getByRole('heading', { name: '新增回测账户' })
     ).toBeInTheDocument();
-    expect(screen.getByText('新增')).toBeInTheDocument();
+    expect(screen.getAllByText('新增')).toHaveLength(2);
     expect(
       screen.getByRole('group', { name: '回测账户来源' })
     ).toBeInTheDocument();

@@ -2,8 +2,8 @@
 
 > 状态：实施权威规格；Windows 当前交付已明确 iOS scope-waiver
 > 版本：V3
-> 最后更新：2026-08-23
-> 适用范围：账户持仓做 T 助手的入场机会识别、人工确认前候选管理、诊断与客户端展示
+> 最后更新：2026-08-29
+> 适用范围：账户持仓做 T 助手的入场机会识别、候选确认与执行分级、诊断与客户端展示
 
 > **当前 Windows 交付边界（2026-08-23）**：本轮交付按 Windows 主机范围验收，Web 只按桌面体验验收；移动 Web、手机断点、触控 ergonomics 与 phone-browser compatibility 不额外扩展。iOS V3 本轮暂不开发、不生成 Apollo types、不运行 Xcode/SwiftUI/Dynamic Type/VoiceOver 验证，也不作为当前完成门禁。§16、§18.6 与 Phase 4 保留为后续 iOS 计划；`apps/ios` 只保留并行 watchlist 与用户原有改动。
 
@@ -21,14 +21,14 @@
 6. 回测、PAPER、LIVE 的一致性、测试、验收和迁移。
 7. 机器学习作为 V3 稳定后的后续阶段，不参与本轮实盘决策。
 
-本规格不重写持仓同步、人工确认、订单风控、成交收敛、T+1 库存置换和自动退出。它们继续服从以下通用权威契约：
+本规格不重写持仓同步、TradeIntent 审批、订单风控、成交收敛、T+1 库存置换和自动退出。CANARY 逐笔人工确认、正式 LIVE 系统自动确认都复用同一审批与服务端重验契约，并继续服从以下通用权威契约：
 
 - [A 股动态天平双仓策略实现落地规格与迁移计划](A股动态天平双仓策略实现落地规格与迁移计划.md)
 - [A 股三层协作与执行契约](../trading/contracts/A股三层协作与执行契约.md)
 - [A 股交易域数据结构与状态机](../trading/contracts/A股交易域数据结构与状态机.md)
 - [A 股自动退出计划与卖出策略契约](../trading/contracts/A股自动退出计划与卖出策略契约.md)
 
-与 [持仓做 T 助手一期实现规格](持仓做T助手一期实现规格.md) 的关系：一期文档保留全局监控、持仓 universe、人工确认、批次执行和退出规则的历史实施背景；其中“固定 AND 条件即生成信号”、客户端信号进度和旧信号展示结构由本规格完整替代。若两者冲突，以本规格及上述通用交易契约为准。
+与 [持仓做 T 助手一期实现规格](持仓做T助手一期实现规格.md) 的关系：一期文档保留全局监控、持仓 universe、早期人工确认、批次执行和退出规则的历史实施背景；其中“固定 AND 条件即生成信号”、固定人工确认、客户端信号进度和旧信号展示结构由本规格完整替代。若两者冲突，以本规格及上述通用交易契约为准。
 
 ## 2. 核心结论
 
@@ -40,7 +40,7 @@ V3 继续采用规则引擎，但从“当前 Tick 同时满足若干条件”�
 - 哪个硬门禁阻止了候选或意图；
 - 同一段行情是否已经发过一次候选；
 - 重启、断流、配置变化后是否仍能安全恢复；
-- 用户看到的信号、人工确认意图、交易批次分别由什么事实驱动。
+- 用户看到的信号、阶段化确认、交易批次分别由什么事实驱动。
 
 规则引擎仍是首选，是因为它能在现有数据量下提供确定性、可回放、可审计和安全迁移。机器学习只有在 V3 累积足够完整的正负样本与结果标签后才进入影子评估。
 
@@ -50,7 +50,7 @@ V3 继续采用规则引擎，但从“当前 Tick 同时满足若干条件”�
 |---|---|---|
 | 信号 | `opportunity` | 一次可解释的入场机会判断，不等于订单或成交 |
 | 信号路径 | `OpportunityPath` | `PULLBACK_REBOUND` 回撤反弹或 `MOMENTUM_ACCELERATION` 早期动量 |
-| 待确认信号 | `OpportunityCandidate` + 待确认 `TradeIntent` | 候选已通过外部发意图门禁，并产生人工确认意图 |
+| 待确认信号 | `OpportunityCandidate` + 待确认 `TradeIntent` | 候选已通过外部发意图门禁并产生持久化意图；CANARY 等待人工确认，LIVE 授权变化时保留为降级待确认 |
 | 机会分 | `opportunity_score` | 0～100 的规则质量分，不是上涨概率或收益承诺 |
 | 机会片段 | `OpportunityEpisode` | 同一标的、交易日、路径和形态起点对应的一段行情 |
 | 信号评估 | `OpportunityEvaluation` | 一次可审计的状态、特征、分数、门禁和阻断原因快照 |
@@ -68,7 +68,7 @@ GraphQL 允许在产品边界使用 `Signal` 命名，便于客户端理解；Gr
 4. `RuntimeState` 只保存算法状态；不得保存真实现金、真实持仓、可卖量、冻结资金或最终合法订单数量。
 5. Universe/运行资格由全局监控器和执行层提供，是 `TradeIntent` 发射前的外部门禁，不属于信号域内部三层状态。
 6. OrderSizer、订单风控、交易日历、A 股整手/T+1/涨跌停/停牌/资金/可卖量检查仍在策略之后执行；机会引擎不得复制这些计算。
-7. 人工确认只批准一个尚有效的 `TradeIntent`，不代表成交；成交唯一真源仍是 QMT Agent 上报并持久化的委托与成交回报。
+7. CANARY 人工确认或正式 LIVE 系统自动确认都只批准一个尚有效的 `TradeIntent`，不代表成交；成交唯一真源仍是 QMT Agent 上报并持久化的委托与成交回报。
 8. 入场真实成交后使用共享 `ExitPlanBook` 管理退出；V3 不新建自定义 SELL FSM，也不把退出状态塞入机会 FSM。
 9. 所有特征严格因果。任何画像、基线和结果标签都必须满足 `as_of <= evaluation_time`，不得读取未来数据。
 10. 缺失、陈旧、断流或不确定数据必须保守阻断新候选；`null` 与真实数值 `0` 不得互换。
@@ -95,7 +95,7 @@ Engine CAS 持久化 RuntimeState
         ├─ 物化 MATERIAL / COALESCED_DIAGNOSTIC 评估事件
         ├─ 重建 t_trade_global_monitor_projections
         ├─ 发布 tTradeUpdates 刷新通知
-        └─ TradeIntent → 人工确认 → OrderSizer/Risk/Broker → QMT 回报
+        └─ TradeIntent → CANARY 人工确认 / LIVE 系统自动确认 → OrderSizer/Risk/Broker → QMT 回报
 ```
 
 执行顺序必须保持：市场数据与上下文风控 → 仓位调节 → `StrategyBase.step()` → `TradeIntent` → OrderSizer → 订单风控 → Broker → 回报收敛 → RuntimeState/BucketLedger/ExitPlan。机会引擎只负责图中 `step()` 内的入场判断。
@@ -227,13 +227,13 @@ NONE | LATCHED | AWAITING_APPROVAL | SUPPRESSED | REARMING
 |---|---|
 | `NONE` | 当前无锁存候选，两个 FSM 可继续形成 episode |
 | `LATCHED` | 形态、分数、确认时间和机会硬门禁均满足，候选身份已原子锁存；尚未通过外部发意图门禁 |
-| `AWAITING_APPROVAL` | 已为候选创建唯一 `TradeIntent`，等待人工确认、取消或 TTL 到期 |
+| `AWAITING_APPROVAL` | 已为候选创建唯一 `TradeIntent`；CANARY 等待人工确认，正式 LIVE 由 Engine 触发同一审批链；授权或事实变化时保持待人工确认，直到取消或 TTL 到期 |
 | `SUPPRESSED` | 候选因重复、数据/策略变化、TTL、外部门禁或审批拒绝而不可继续发射 |
 | `REARMING` | 已结束一次候选，等待机会分持续低于再武装阈值后允许新 episode |
 
 候选状态不表示下单、已报、部分成交、已成交或退出。对应 `TradeIntent` 创建后，待确认事实以 `pending_entry_intent_id` 和 TradeIntent 持久化记录为准；确认后的委托与成交以订单/回报状态机为准；做 T 批次继续使用现有 `TTradeStatus`。
 
-候选从 `LATCHED` 到 `AWAITING_APPROVAL` 的唯一动作是成功持久化一个带候选 fingerprint 的人工确认 `TradeIntent`。Universe/运行资格、账户并发批次、总 T 暴露和已有待处理意图由 Engine 提供为外部发意图门禁；失败时记录结构化 blocker，不得把真实账户数值写入 RuntimeState。
+候选从 `LATCHED` 到 `AWAITING_APPROVAL` 的唯一动作是成功持久化一个带候选 fingerprint 的 `MANUAL_CONFIRM TradeIntent`。该执行模式代表必须经过审批契约，不限定审批主体：CANARY 由用户逐笔批准，正式 LIVE 由 Engine 在持久化完成后自动调用相同审批入口。Universe/运行资格、账户并发批次、总 T 暴露和已有待处理意图由 Engine 提供为外部发意图门禁；失败时记录结构化 blocker，不得把真实账户数值写入 RuntimeState。
 
 ## 8. 特征、评分与门禁
 
@@ -273,7 +273,7 @@ code, label, points, max_points, value, target, unit
 
 - `preview_threshold`：进入 UI 重点观察区，仅影响展示和诊断采样，不产生候选。
 - `candidate_threshold`：与分支确认时长、硬门禁和 episode 约束共同决定候选锁存。
-- `revalidate_score`：人工确认时对尚未过期候选执行服务端重验；允许候选锁存后的正常小幅回落，但低于该值必须拒绝确认并抑制候选。
+- `revalidate_score`：CANARY 人工确认或 LIVE 系统自动确认时，对尚未过期候选执行服务端重验；允许候选锁存后的正常小幅回落，但低于该值必须拒绝确认并抑制候选。
 - `rearm_score`：候选结束后必须持续低于该值 `rearm_seconds` 才允许新 episode，形成迟滞，避免阈值附近反复触发。
 
 分数等于阈值时按“达到”处理。阈值、确认秒数、最少确认 source identity 数、再武装秒数和候选 TTL 都进入策略版本与候选审计。
@@ -688,7 +688,7 @@ tTradeSignalDiagnostics(
 - `previewTTradeSignalPolicy`：纯校验与规范化。
 - `saveTTradeGlobalMonitor(input)`：要求 `expectedConfigVersion`，成功返回新 monitor/version。
 - `CONFIG_VERSION_CONFLICT`：返回最新服务端配置，绝不自动合并交易参数。
-- 人工确认继续复用 TradeIntent 审批契约；确认时服务端重验 candidate TTL、fingerprint、policy/config version、最新分数不低于 `revalidate_score` 和最新外部门禁。
+- CANARY 人工确认与 LIVE 系统自动确认继续复用同一个 TradeIntent 审批契约；确认时服务端重验 candidate TTL、fingerprint、policy/config version、最新分数不低于 `revalidate_score` 和最新外部门禁。
 
 ### 14.4 实时刷新
 
@@ -723,7 +723,7 @@ tTradeSignalDiagnostics(
 ```
 
 - **总览**：全局运行状态、数据健康分布、待确认信号、活动批次、关键风险。
-- **信号**：所有持仓的当前最新机会快照与单标的 inspector。
+- **信号**：只展示持久化机会评估，不混入普通持仓行；采用全宽业务动态行，点击后在原行下展开候选、评分、阻断、追溯与确认详情。
 - **诊断**：漏斗、blocker、分数分布、FSM 停留和历史评估。
 - **做 T 仓位**：已有批次/库存置换/退出计划，继续使用执行事实，不混入候选状态。
 - **订单事件**：TradeIntent、委托、成交与拒绝审计。
@@ -746,7 +746,7 @@ tTradeSignalDiagnostics(
 
 状态必须同时使用文字、图标和颜色，例如“数据陈旧 · 12 秒”“回撤 · 反弹确认”“机会分 72/78”；不得只用红绿圆点。机会分组件标注“规则机会分，不是概率”。
 
-### 15.4 单标的 inspector
+### 15.4 行内信号详情
 
 建议按下列顺序展示：
 
@@ -757,7 +757,7 @@ tTradeSignalDiagnostics(
 5. **硬门禁**：passed/failed、观测值、要求值和说明。
 6. **分数贡献**：points/max points、原始值与目标；合计与服务端机会分一致。
 7. **数据健康**：代际、source age、覆盖秒数、样本数、profile 版本和 reasons。
-8. **候选与执行**：episode、candidate fingerprint、TTL、pending TradeIntent、人工确认、批次/ExitPlan 链接。
+8. **候选与执行**：episode、candidate fingerprint、TTL、pending TradeIntent、当前确认主体、批次/ExitPlan 链接。CANARY 显示确认/忽略操作；LIVE 显示自动重验、风控、委托路由与自动退出链，只有降级待确认时恢复人工操作。
 9. **审计历史**：MATERIAL 事件优先，可展开 COALESCED_DIAGNOSTIC。
 
 前端只做数值格式化、筛选和视图状态，不做分数求和来替代服务端总分；若贡献合计与总分因四舍五入不同，显示服务端总分。
@@ -981,6 +981,11 @@ Engine 内存累计器必须同时限制活动 stream 数和 metric series 数�
 ### 19.5 自动执行授权
 
 CANARY 与 LIVE 都会产生真实委托，因此服务端只对执行当下的账户安全事实 `fail-closed`。授权条件保持为一条短链：
+
+- `CANARY`：每个入场信号必须由用户逐笔人工确认；确认后仍走完整服务端重验、OrderSizer、订单风控和 Broker 路由。
+- `LIVE`：候选、评估和 TradeIntent 全部持久化成功后，Engine 自动调用同一审批入口；不得绕过 TTL、fingerprint、policy/config version、最新分数、账户事实、有限暴露、OrderSizer 或订单风控。
+- LIVE 自动确认前会在审批互斥区重新读取权威 rollout 与账户安全快照。若阶段、Kill Switch、权限、自动化就绪或账户事实已变化，系统不得生成 Broker 命令，原意图保持 `AWAITING_APPROVAL` 并标记为“降级待确认”。
+- 自动退出不因 CANARY/LIVE 的入场确认主体不同而改变；已授权的退出继续由冻结 ExitPlan 和现有风控链自动执行。
 
 1. 当前账户、Engine、唯一 QMT Agent、协议、快照与对账状态允许增加风险，Kill Switch 未触发；
 2. `T_TRADE_LIVE_ENABLED` 已启用，做 T rollout 已配置，并保持单批次、正订单上限和不超过 2% 总敞口的有限暴露；

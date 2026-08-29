@@ -255,12 +255,12 @@ describe('TTradeSignalsView approval safety', () => {
       />
     );
 
-    expect(screen.getByRole('region', { name: '真实信号列表' })).toHaveTextContent(
-      '候选已锁存'
-    );
-    expect(screen.getByRole('region', { name: '真实信号列表' })).not.toHaveTextContent(
-      '行情连续代际变更'
-    );
+    expect(
+      screen.getByRole('region', { name: '真实信号列表' })
+    ).toHaveTextContent('候选已锁存');
+    expect(
+      screen.getByRole('region', { name: '真实信号列表' })
+    ).not.toHaveTextContent('行情连续代际变更');
     expect(screen.queryByText('持仓 1,000')).not.toBeInTheDocument();
   });
 
@@ -311,9 +311,7 @@ describe('TTradeSignalsView approval safety', () => {
         onReject={vi.fn()}
       />
     );
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      '真实信号读取失败'
-    );
+    expect(screen.getByRole('alert')).toHaveTextContent('真实信号读取失败');
     expect(screen.getByRole('alert')).toHaveTextContent(
       '当前没有可展示的信号记录'
     );
@@ -337,7 +335,9 @@ describe('TTradeSignalsView approval safety', () => {
       />
     );
     expect(screen.getByRole('alert')).toHaveTextContent('账户监控服务返回异常');
-    expect(screen.getByRole('button', { name: '确认买入' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '确认买入' })
+    ).toBeInTheDocument();
   });
 
   it('keeps the last snapshot visible but disables approval when refetch trust is lost', () => {
@@ -403,6 +403,7 @@ describe('TTradeSignalsView approval safety', () => {
       />
     );
 
+    fireEvent.click(screen.getByRole('button', { name: /查看信号 测试股票/ }));
     fireEvent.click(
       screen.getByRole('button', { name: /追溯候选 candidate-1/ })
     );
@@ -468,5 +469,59 @@ describe('TTradeSignalsView approval safety', () => {
     );
     expect(screen.getByRole('alert')).toHaveTextContent('不一致');
     expect(screen.queryByText('intent-1')).not.toBeInTheDocument();
+  });
+
+  it('expands CANARY signals inline and keeps per-signal confirmation', () => {
+    const signal = snapshot();
+    render(
+      <TTradeSignalsView
+        accountId="account-1"
+        actionLoading={false}
+        canApproveAccount
+        dataTrusted
+        evaluations={[evaluation(signal)]}
+        hasMoreEvaluations={false}
+        loadingEvaluations={false}
+        monitor={{ ...monitor(signal), rolloutStage: 'CANARY' }}
+        onApprove={vi.fn()}
+        onLoadMoreEvaluations={vi.fn()}
+        onReject={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('CANARY · 人工确认')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /查看信号 测试股票/ }));
+    expect(screen.getByText(/CANARY 仅允许逐笔人工确认/)).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '确认并提交' })
+    ).toBeInTheDocument();
+  });
+
+  it('shows the LIVE automatic execution chain without manual actions', () => {
+    const executed = snapshot({
+      candidateStatus: 'SUPPRESSED',
+      pendingEntryIntentId: null,
+    });
+    render(
+      <TTradeSignalsView
+        accountId="account-1"
+        actionLoading={false}
+        canApproveAccount
+        dataTrusted
+        evaluations={[evaluation(executed)]}
+        hasMoreEvaluations={false}
+        loadingEvaluations={false}
+        monitor={{ ...monitor(executed), rolloutStage: 'LIVE' }}
+        onApprove={vi.fn()}
+        onLoadMoreEvaluations={vi.fn()}
+        onReject={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('LIVE · 自动执行')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /查看信号 测试股票/ }));
+    expect(screen.getByText('自动重验')).toBeInTheDocument();
+    expect(screen.getByText('订单风控')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '确认并提交' })).toBeNull();
   });
 });

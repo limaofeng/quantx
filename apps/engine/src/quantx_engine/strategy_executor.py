@@ -154,6 +154,9 @@ from quantx_infrastructure.services.t_trade_monitor_projection_service import (
   TTradeMonitorProjectionService,
   t_trade_monitor_projection_service,
 )
+from quantx_infrastructure.services.t_trade_operations_service import (
+  TTradeOperationsService,
+)
 from quantx_infrastructure.services.t_trade_opportunity_runtime_service import (
   T_TRADE_OPPORTUNITY_EVALUATION_EVENT,
   TTradeOpportunityRuntimeService,
@@ -11768,6 +11771,134 @@ class StrategyExecutor:
       and schema_version >= 3
     )
 
+  async def _dispatch_v3_t_trade_entry_after_persistence(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+  ) -> None:
+    """Route one durable V3 candidate according to the active rollout stage.
+
+    CANARY intentionally leaves the intent in the normal per-signal approval
+    queue. Formal LIVE reuses that exact approval path internally, so candidate
+    identity, TTL, durable configuration, account exposure, quote freshness,
+    sizing and order risk are still revalidated before any broker command is
+    created. If the LIVE authority is no longer current, the already durable
+    intent remains visible for manual confirmation.
+    """
+
+    expectation = self._v3_t_trade_expectation_from_intent(intent)
+    if (
+      runtime.context.mode == StrategyRunMode.BACKTEST
+      and runtime.context.parameters.get("auto_approve_manual_intents")
+      and not runtime.context.parameters.get("limit_up_board_replay")
+    ):
+      result = await self.approve_trade_intent(
+        runtime.run_id,
+        intent.intent_id,
+        approval_expectation=expectation,
+        approval_mode="BACKTEST_AUTO",
+      )
+      self._runtime_log(
+        runtime,
+        "INFO" if result.get("success") else "WARNING",
+        "回放测试自动确认 V3 做 T 候选: "
+        f"intent_id={intent.intent_id}, result={result.get('code')}",
+      )
+      return
+
+    if runtime.context.mode != StrategyRunMode.LIVE:
+      self._runtime_log(
+        runtime,
+        "INFO",
+        "V3 做 T 候选已完成状态、评估和意图持久化，等待人工确认: "
+        f"instrument={intent.instrument_code} intent_id={intent.intent_id}",
+      )
+      return
+
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    try:
+      readiness = (
+        await TTradeOperationsService().readiness(account_id) if account_id else {}
+      )
+    except Exception as exc:
+      readiness = {}
+      self._runtime_log(
+        runtime,
+        "WARNING",
+        "正式 LIVE 自动确认无法读取权威授权，已降级为人工确认: "
+        f"intent_id={intent.intent_id} error={exc}",
+      )
+
+    stage = str(readiness.get("stage") or "SHADOW").strip().upper()
+    auto_authorized = bool(
+      account_id
+      and stage == "LIVE"
+      and readiness.get("rollout_enabled")
+      and readiness.get("automation_ready")
+      and readiness.get("can_approve")
+      and not readiness.get("kill_switch")
+    )
+    if not auto_authorized:
+      if stage == "LIVE":
+        fallback_metadata = {
+          **dict(intent.metadata or {}),
+          "approval_mode": "MANUAL_FALLBACK",
+          "rollout_stage": stage,
+          "live_auto_downgrade_code": "LIVE_AUTO_AUTHORITY_NOT_READY",
+        }
+        intent.metadata.update(fallback_metadata)
+        updater = getattr(
+          runtime.state_manager,
+          "update_trade_intent_status",
+          None,
+        )
+        if callable(updater):
+          try:
+            await updater(
+              intent.intent_id,
+              "AWAITING_APPROVAL",
+              metadata=fallback_metadata,
+              notes="LIVE_AUTO_AUTHORITY_NOT_READY",
+            )
+          except Exception as exc:
+            self._runtime_log(
+              runtime,
+              "WARNING",
+              "LIVE 自动确认降级原因暂未写入意图元数据，意图仍保持待确认: "
+              f"intent_id={intent.intent_id} error={exc}",
+            )
+      self._runtime_log(
+        runtime,
+        "WARNING" if stage == "LIVE" else "INFO",
+        (
+          "正式 LIVE 自动确认授权已失效，候选降级为人工确认: "
+          if stage == "LIVE"
+          else "当前灰度阶段要求逐笔人工确认: "
+        )
+        + f"stage={stage} intent_id={intent.intent_id}",
+      )
+      return
+
+    intent.metadata.update(
+      {
+        "approval_mode": "LIVE_AUTO",
+        "rollout_stage": "LIVE",
+        "live_auto_snapshot_id": str(readiness.get("snapshot_id") or ""),
+      }
+    )
+    result = await self.approve_trade_intent(
+      runtime.run_id,
+      intent.intent_id,
+      approval_expectation=expectation,
+      approval_mode="LIVE_AUTO",
+    )
+    self._runtime_log(
+      runtime,
+      "INFO" if result.get("success") else "WARNING",
+      "正式 LIVE 自动确认 V3 做 T 候选: "
+      f"intent_id={intent.intent_id}, result={result.get('code')}",
+    )
+
   async def _process_t_trade_opportunity_output(
     self,
     runtime: StrategyRuntime,
@@ -12194,29 +12325,7 @@ class StrategyExecutor:
       v3_ids = {intent.intent_id for intent in v3_manual_intents}
       for intent in intents:
         if intent.intent_id in v3_ids:
-          if (
-            runtime.context.mode == StrategyRunMode.BACKTEST
-            and runtime.context.parameters.get("auto_approve_manual_intents")
-            and not runtime.context.parameters.get("limit_up_board_replay")
-          ):
-            result = await self.approve_trade_intent(
-              runtime.run_id,
-              intent.intent_id,
-              approval_expectation=self._v3_t_trade_expectation_from_intent(intent),
-            )
-            self._runtime_log(
-              runtime,
-              "INFO" if result.get("success") else "WARNING",
-              "回放测试自动确认 V3 做 T 候选: "
-              f"intent_id={intent.intent_id}, result={result.get('code')}",
-            )
-          else:
-            self._runtime_log(
-              runtime,
-              "INFO",
-              "V3 做 T 候选已完成状态、评估和意图持久化，等待人工确认: "
-              f"instrument={intent.instrument_code} intent_id={intent.intent_id}",
-            )
+          await self._dispatch_v3_t_trade_entry_after_persistence(runtime, intent)
           continue
         if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM:
           runtime.pending_approvals[intent.intent_id] = intent
@@ -12440,29 +12549,7 @@ class StrategyExecutor:
     )
     for intent in intents:
       if intent.intent_id in v3_ids:
-        if (
-          runtime.context.mode == StrategyRunMode.BACKTEST
-          and runtime.context.parameters.get("auto_approve_manual_intents")
-          and not runtime.context.parameters.get("limit_up_board_replay")
-        ):
-          result = await self.approve_trade_intent(
-            runtime.run_id,
-            intent.intent_id,
-            approval_expectation=self._v3_t_trade_expectation_from_intent(intent),
-          )
-          self._runtime_log(
-            runtime,
-            "INFO" if result.get("success") else "WARNING",
-            "回放测试自动确认 V3 做 T 候选: "
-            f"intent_id={intent.intent_id}, result={result.get('code')}",
-          )
-          continue
-        self._runtime_log(
-          runtime,
-          "INFO",
-          "V3 做 T 候选已完成状态、评估和意图持久化，等待人工确认: "
-          f"instrument={intent.instrument_code} intent_id={intent.intent_id}",
-        )
+        await self._dispatch_v3_t_trade_entry_after_persistence(runtime, intent)
         continue
       if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM:
         runtime.pending_approvals[intent.intent_id] = intent
@@ -13025,8 +13112,9 @@ class StrategyExecutor:
     *,
     approval_expectation: Optional[Mapping[str, Any]] = None,
     approval_audit: Optional[Mapping[str, Any]] = None,
+    approval_mode: str = "MANUAL",
   ) -> Dict[str, Any]:
-    """Approve one manual-confirm intent after an in-lock fail-closed recheck."""
+    """Approve one intent after an in-lock fail-closed recheck."""
 
     runtime = self.runs.get(run_id)
     if runtime is None:
@@ -13052,6 +13140,62 @@ class StrategyExecutor:
           "code": "INTENT_NOT_AWAITING_APPROVAL",
           "message": "信号不存在、已处理或已过期",
         }
+      normalized_approval_mode = str(approval_mode or "MANUAL").strip().upper()
+      if normalized_approval_mode == "LIVE_AUTO":
+        account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+        try:
+          readiness = (
+            await TTradeOperationsService().readiness(account_id) if account_id else {}
+          )
+        except Exception:
+          readiness = {}
+        if not (
+          runtime.context.mode == StrategyRunMode.LIVE
+          and str(readiness.get("stage") or "").upper() == "LIVE"
+          and readiness.get("rollout_enabled")
+          and readiness.get("automation_ready")
+          and readiness.get("can_approve")
+          and not readiness.get("kill_switch")
+        ):
+          fallback_metadata = {
+            **dict(intent.metadata or {}),
+            "approval_mode": "MANUAL_FALLBACK",
+            "rollout_stage": str(readiness.get("stage") or "LIVE").upper(),
+            "live_auto_downgrade_code": "LIVE_AUTO_AUTHORITY_NOT_READY",
+          }
+          intent.metadata.update(fallback_metadata)
+          updater = getattr(
+            runtime.state_manager,
+            "update_trade_intent_status",
+            None,
+          )
+          if callable(updater):
+            try:
+              await updater(
+                intent.intent_id,
+                "AWAITING_APPROVAL",
+                metadata=fallback_metadata,
+                notes="LIVE_AUTO_AUTHORITY_NOT_READY",
+              )
+            except Exception as exc:
+              self._runtime_log(
+                runtime,
+                "WARNING",
+                "LIVE 自动确认二次授权失败且降级原因暂未持久化，意图仍保持待确认: "
+                f"intent_id={intent.intent_id} error={exc}",
+              )
+          return {
+            "success": False,
+            "code": "LIVE_AUTO_AUTHORITY_NOT_READY",
+            "message": "正式 LIVE 自动执行授权或账户安全事实已变化，信号保持待人工确认",
+          }
+        intent.metadata.update(
+          {
+            "approval_mode": "LIVE_AUTO",
+            "rollout_stage": "LIVE",
+            "live_auto_snapshot_id": str(readiness.get("snapshot_id") or ""),
+          }
+        )
       challenge_failure = await self._managed_entry_approval_challenge_failure(
         runtime,
         intent,
@@ -13163,7 +13307,14 @@ class StrategyExecutor:
           await strict_status_update(
             intent_id,
             "APPROVED",
-            notes="MANUAL_APPROVAL_ACCEPTED",
+            metadata=dict(intent.metadata or {}),
+            notes=(
+              "LIVE_AUTO_APPROVAL_ACCEPTED"
+              if normalized_approval_mode == "LIVE_AUTO"
+              else "BACKTEST_AUTO_APPROVAL_ACCEPTED"
+              if normalized_approval_mode == "BACKTEST_AUTO"
+              else "MANUAL_APPROVAL_ACCEPTED"
+            ),
           )
         except Exception as exc:
           if runtime.metrics:
@@ -13240,6 +13391,7 @@ class StrategyExecutor:
             **dict(intent.metadata or {}),
             "intent_id": intent.intent_id,
             "instrument_code": intent.instrument_code,
+            "approval_mode": normalized_approval_mode,
           },
         ),
       )
@@ -13247,7 +13399,11 @@ class StrategyExecutor:
       return {
         "success": True,
         "code": "APPROVED",
-        "message": "信号已确认并进入下单风控",
+        "message": (
+          "正式 LIVE 信号已自动确认并进入下单风控"
+          if normalized_approval_mode == "LIVE_AUTO"
+          else "信号已确认并进入下单风控"
+        ),
       }
 
   async def _managed_entry_approval_challenge_failure(

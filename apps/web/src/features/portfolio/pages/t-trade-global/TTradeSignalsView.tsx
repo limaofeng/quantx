@@ -1,7 +1,8 @@
 import {
   Activity,
-  ArrowRight,
   Check,
+  ChevronDown,
+  ChevronRight,
   Database,
   Link2,
   Loader2,
@@ -437,6 +438,282 @@ function CandidateTracePanel({
   );
 }
 
+function TTradeSignalDetails({
+  accountId,
+  actionLoading,
+  canApproveAccount,
+  candidateTrace,
+  candidateTraceError,
+  candidateTraceLoading,
+  dataTrusted,
+  instrumentName,
+  isLiveAuto,
+  onApprove,
+  onReject,
+  onRequestCandidateTrace,
+  selectedTrace,
+  session,
+  signal,
+}: {
+  accountId: string;
+  actionLoading: boolean;
+  canApproveAccount: boolean;
+  candidateTrace?: CandidateTraceLike | null;
+  candidateTraceError?: string;
+  candidateTraceLoading: boolean;
+  dataTrusted: boolean;
+  instrumentName?: string;
+  isLiveAuto: boolean;
+  onApprove: (session: MonitorSession, snapshot: SignalSnapshot) => void;
+  onReject: (session: MonitorSession, snapshot: SignalSnapshot) => void;
+  onRequestCandidateTrace?: (selection: CandidateTraceSelection | null) => void;
+  selectedTrace?: CandidateTraceSelection | null;
+  session?: MonitorSession;
+  signal: SignalEvaluationLike;
+}) {
+  const snapshot = signal.signalSnapshot;
+  const pending = Boolean(
+    session &&
+    snapshot?.candidateStatus === 'AWAITING_APPROVAL' &&
+    snapshot.pendingEntryIntentId
+  );
+  const compatible = snapshot ? isKnownSignalSnapshot(snapshot) : false;
+  const approveAllowed = Boolean(
+    snapshot && dataTrusted && canApproveAccount && canApproveSnapshot(snapshot)
+  );
+  const traceMatches = Boolean(
+    selectedTrace &&
+    snapshot?.candidateId &&
+    selectedTrace.accountId === signal.accountId &&
+    selectedTrace.strategyRunId === signal.runId &&
+    selectedTrace.candidateId === snapshot.candidateId
+  );
+  const path = snapshot?.selectedPath
+    ? signalPathLabels[snapshot.selectedPath] || snapshot.selectedPath
+    : signalPhaseLabels[snapshot?.dominantPhase || ''] || '未选择路径';
+
+  return (
+    <div className="space-y-3 border-t border-white/[0.06] bg-[#0a1727] p-ui-section">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-ui-label font-black text-slate-100">
+            {instrumentName || signal.stockCode} ·{' '}
+            {signalEventLabels[signal.eventType] || signal.eventType}
+          </h3>
+          <p className="mt-1 font-mono text-ui-micro text-slate-600">
+            {signal.stockCode} · {signal.runId} ·{' '}
+            {formatTime(signal.evaluatedAt)}
+          </p>
+        </div>
+        <span
+          className={cn(
+            'border px-2 py-1 text-ui-micro font-black',
+            pending
+              ? 'border-amber-400/25 bg-amber-400/[0.06] text-amber-200'
+              : signalEventTone(signal.eventType)
+          )}
+        >
+          {pending
+            ? isLiveAuto
+              ? 'LIVE 降级待确认'
+              : '等待人工确认'
+            : candidateStatusLabels[snapshot?.candidateStatus || ''] ||
+              '状态未提供'}
+        </span>
+      </header>
+
+      {isLiveAuto && !pending && (
+        <div className="grid grid-cols-4 border border-cyan-400/15 bg-cyan-400/[0.035] text-ui-micro">
+          {[
+            ['自动重验', '已通过'],
+            ['订单风控', '已校验'],
+            ['委托状态', session?.entryOrderStatus || '等待执行事实'],
+            ['退出方式', '成交后自动退出'],
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              className="border-r border-cyan-400/10 px-3 py-2 last:border-r-0"
+            >
+              <div className="text-cyan-300">{label}</div>
+              <div className="mt-1 font-bold text-cyan-100">{value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pending && (
+        <div className="flex items-start gap-2 border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2 text-ui-micro leading-4 text-amber-100">
+          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {isLiveAuto
+            ? '正式 LIVE 的自动执行授权或账户事实发生变化，本信号已安全降级；确认时仍会重新校验行情、资金、数量和风险。'
+            : 'CANARY 仅允许逐笔人工确认；确认时会重新校验行情、资金、数量和风险。'}
+        </div>
+      )}
+
+      {!snapshot ? (
+        <div className="border border-amber-400/20 bg-amber-400/[0.04] p-3 text-ui-caption leading-5 text-amber-100">
+          该信号记录没有可展示的机会快照；仍保留事件身份用于审计。
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 text-ui-caption lg:grid-cols-4">
+            {[
+              [
+                '候选状态',
+                candidateStatusLabels[snapshot.candidateStatus] ||
+                  snapshot.candidateStatus,
+              ],
+              ['形态 / 路径', path],
+              [
+                '机会分 / 候选阈值',
+                `${nullableScore(snapshot.opportunityScore)} / ${nullableScore(snapshot.candidateThreshold)}`,
+              ],
+              ['数据健康', snapshot.dataHealth],
+            ].map(([label, value]) => (
+              <div key={label} className="border border-white/[0.06] p-2.5">
+                <div className="text-slate-600">{label}</div>
+                <div className="mt-1 font-mono font-bold text-slate-200">
+                  {value}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid gap-3 xl:grid-cols-2">
+            <section className="border border-white/[0.06] p-3">
+              <h4 className="text-ui-caption font-bold text-slate-300">
+                阻断原因
+              </h4>
+              {snapshot.topBlockers.length === 0 ? (
+                <p className="mt-2 text-ui-caption text-slate-600">
+                  当前信号没有首要阻断。
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-2">
+                  {snapshot.topBlockers.map(blocker => (
+                    <li
+                      key={blocker.code}
+                      className="border-l-2 border-amber-400/50 pl-2 text-ui-caption"
+                    >
+                      <div className="font-bold text-amber-100">
+                        {blocker.label}
+                      </div>
+                      <div className="mt-0.5 leading-4 text-slate-600">
+                        {blocker.detail || blocker.code}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="border border-white/[0.06] p-3">
+              <h4 className="text-ui-caption font-bold text-slate-300">
+                评分贡献
+              </h4>
+              {snapshot.scoreContributions.length === 0 ? (
+                <p className="mt-2 text-ui-caption text-slate-600">
+                  当前快照没有评分贡献明细。
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-1.5 text-ui-caption">
+                  {snapshot.scoreContributions.slice(0, 6).map(contribution => (
+                    <li
+                      key={contribution.code}
+                      className="flex items-center justify-between gap-3"
+                    >
+                      <span className="truncate text-slate-500">
+                        {contribution.label}
+                      </span>
+                      <span className="shrink-0 font-mono text-slate-300">
+                        {formatNumber(contribution.points, 1)} /{' '}
+                        {formatNumber(contribution.maxPoints, 1)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-white/[0.05] pt-3">
+            {snapshot.candidateId &&
+              signal.accountId === accountId &&
+              onRequestCandidateTrace && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  aria-label={`追溯候选 ${snapshot.candidateId}（账户 ${signal.accountId}，运行 ${signal.runId}）`}
+                  className="h-control-compact rounded-sm border-blue-400/25 text-ui-caption text-blue-200"
+                  onClick={() =>
+                    onRequestCandidateTrace({
+                      accountId: signal.accountId,
+                      strategyRunId: signal.runId,
+                      candidateId: snapshot.candidateId!,
+                    })
+                  }
+                >
+                  <Link2 className="mr-1.5 h-3.5 w-3.5" />
+                  查看全链路
+                </Button>
+              )}
+            {pending && session && (
+              <>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-control-compact rounded-sm text-ui-caption text-slate-500"
+                  disabled={actionLoading}
+                  onClick={() => onReject(session, snapshot)}
+                >
+                  <X className="mr-1.5 h-3.5 w-3.5" />
+                  忽略本次
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-control-compact rounded-sm bg-market-buy-cta text-ui-caption text-white hover:bg-market-buy-cta/90"
+                  disabled={actionLoading || !approveAllowed}
+                  onClick={() => onApprove(session, snapshot)}
+                >
+                  <Check className="mr-1.5 h-3.5 w-3.5" />
+                  确认并提交
+                </Button>
+              </>
+            )}
+          </div>
+
+          {pending && (!compatible || !approveAllowed) && (
+            <div role="status" className="text-ui-micro text-amber-200">
+              {!dataTrusted
+                ? '当前连接尚未恢复可信快照，已禁用确认。'
+                : !canApproveAccount
+                  ? '当前会话无确认权限，已禁用确认。'
+                  : !compatible
+                    ? '版本不兼容或未知枚举，已保守禁用确认。'
+                    : '候选身份、状态版本或 TTL 无效，已禁用确认。'}
+            </div>
+          )}
+        </>
+      )}
+
+      {traceMatches && selectedTrace && (
+        <CandidateTracePanel
+          accountId={selectedTrace.accountId}
+          candidateId={selectedTrace.candidateId}
+          error={candidateTraceError}
+          loading={candidateTraceLoading}
+          onClose={() => onRequestCandidateTrace?.(null)}
+          strategyRunId={selectedTrace.strategyRunId}
+          trace={candidateTrace}
+        />
+      )}
+    </div>
+  );
+}
+
 export function TTradeSignalsView({
   accountId,
   actionLoading,
@@ -505,28 +782,52 @@ export function TTradeSignalsView({
       ),
     [monitor?.holdings]
   );
-  const [selectedSignalId, setSelectedSignalId] = React.useState('');
-  const selectedSignal =
-    signals.find(item => item.id === selectedSignalId) || signals[0];
-  const selectedSnapshot = selectedSignal?.signalSnapshot;
-  const selectedTraceMatchesSignal = Boolean(
-    selectedTrace &&
-    selectedSnapshot?.candidateId &&
-    selectedTrace.accountId === selectedSignal?.accountId &&
-    selectedTrace.strategyRunId === selectedSignal?.runId &&
-    selectedTrace.candidateId === selectedSnapshot.candidateId
+  const sessionsByIdentity = React.useMemo(
+    () =>
+      new Map(
+        (monitor?.sessions || []).map(session => [
+          `${session.runId}:${session.stockCode}`,
+          session,
+        ])
+      ),
+    [monitor?.sessions]
   );
+  const [expandedSignalId, setExpandedSignalId] = React.useState<string | null>(
+    null
+  );
+  const rolloutStage = String(monitor?.rolloutStage || 'SHADOW').toUpperCase();
+  const isLiveAuto = rolloutStage === 'LIVE';
 
   React.useEffect(() => {
     if (!focusStockCode) return;
     const focused = signals.find(item => item.stockCode === focusStockCode);
-    if (focused) setSelectedSignalId(focused.id);
+    if (focused) setExpandedSignalId(focused.id);
     onFocusHandled?.();
   }, [focusStockCode, onFocusHandled, signals]);
 
-  const selectSignal = React.useCallback(
+  React.useEffect(() => {
+    if (
+      expandedSignalId &&
+      !signals.some(item => item.id === expandedSignalId)
+    ) {
+      setExpandedSignalId(null);
+    }
+  }, [expandedSignalId, signals]);
+
+  React.useEffect(() => {
+    if (!expandedSignalId) return;
+    const collapseOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpandedSignalId(null);
+    };
+    window.addEventListener('keydown', collapseOnEscape);
+    return () => window.removeEventListener('keydown', collapseOnEscape);
+  }, [expandedSignalId]);
+
+  const toggleSignal = React.useCallback(
     (signal: SignalEvaluationLike) => {
-      setSelectedSignalId(signal.id);
+      setExpandedSignalId(current =>
+        current === signal.id ? null : signal.id
+      );
       const candidateId = signal.signalSnapshot?.candidateId;
       if (
         selectedTrace &&
@@ -550,6 +851,22 @@ export function TTradeSignalsView({
           </p>
         </div>
         <div className="flex items-center gap-2 text-ui-caption">
+          <span
+            className={cn(
+              'border px-2 py-1 font-black',
+              isLiveAuto
+                ? 'border-cyan-400/30 bg-cyan-400/[0.07] text-cyan-200'
+                : rolloutStage === 'CANARY'
+                  ? 'border-amber-400/30 bg-amber-400/[0.07] text-amber-200'
+                  : 'border-white/10 bg-white/[0.03] text-slate-500'
+            )}
+          >
+            {isLiveAuto
+              ? 'LIVE · 自动执行'
+              : rolloutStage === 'CANARY'
+                ? 'CANARY · 人工确认'
+                : `${rolloutStage} · 新买入关闭`}
+          </span>
           <span className="border border-blue-400/20 bg-blue-400/[0.05] px-2 py-1 font-bold text-blue-200">
             信号 {signals.length}
           </span>
@@ -611,7 +928,7 @@ export function TTradeSignalsView({
         </div>
       )}
 
-      {pending.length > 0 && (
+      {pending.length > 0 && signals.length === 0 && (
         <section
           className="shrink-0 border-b border-amber-400/15 bg-amber-400/[0.025] p-ui-section"
           aria-labelledby="pending-opportunity-title"
@@ -621,7 +938,7 @@ export function TTradeSignalsView({
             className="mb-3 flex items-center gap-2 text-ui-label font-black text-amber-100"
           >
             <Activity className="h-4 w-4" />
-            等待人工确认
+            待确认信号（评估列表尚未同步）
           </h3>
           <div className="grid gap-2 xl:grid-cols-2">
             {pending.map(({ session, snapshot }) => {
@@ -728,302 +1045,184 @@ export function TTradeSignalsView({
         </section>
       )}
 
-      <div className="grid min-h-0 flex-1 xl:grid-cols-3">
+      <div className="flex min-h-0 flex-1">
         <section
-          className="flex min-h-[360px] min-w-0 flex-col border-b border-white/[0.05] xl:col-span-2 xl:min-h-0 xl:border-b-0 xl:border-r"
+          className="flex min-h-[360px] min-w-0 flex-1 flex-col"
           aria-label="真实信号列表"
         >
           <div className="shrink-0 border-b border-white/[0.05] px-ui-section py-2 text-ui-caption text-slate-500">
             真实信号来自持久化 opportunity evaluation，不包含普通持仓监控行
           </div>
-          <div className="hidden shrink-0 grid-cols-5 gap-3 border-b border-white/[0.05] bg-white/[0.015] px-ui-section py-2 text-ui-caption font-bold text-slate-600 lg:grid">
-            <span>信号 / 标的</span>
-            <span>状态 / 路径</span>
-            <span>机会分</span>
-            <span>首要阻断</span>
-            <span>源时间</span>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
-            {loadingEvaluations && evaluations.length === 0 && (
+          <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
+            <div style={{ minWidth: 920 }}>
               <div
-                role="status"
-                aria-busy="true"
-                className="flex h-full min-h-64 items-center justify-center text-ui-label text-slate-600"
+                className="sticky top-0 z-10 grid h-8 items-center gap-3 border-b border-white/[0.05] bg-[#0b1628] px-ui-section text-ui-micro font-black text-slate-600"
+                style={{
+                  gridTemplateColumns:
+                    '28px minmax(140px, 1fr) minmax(130px, .85fr) 100px minmax(180px, 1.2fr) 120px 24px',
+                }}
               >
-                <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-                读取真实信号…
+                <span />
+                <span>信号 / 标的</span>
+                <span>状态 / 路径</span>
+                <span>机会分</span>
+                <span>首要阻断</span>
+                <span>源时间</span>
+                <span />
               </div>
-            )}
-            {!loadingEvaluations && signals.length === 0 && (
-              <div className="flex h-full min-h-64 flex-col items-center justify-center px-ui-empty text-center">
-                <Database className="h-9 w-9 text-slate-800" />
-                <div className="mt-3 text-ui-body font-bold text-slate-400">
-                  暂无真实信号
+              {loadingEvaluations && evaluations.length === 0 && (
+                <div
+                  role="status"
+                  aria-busy="true"
+                  className="flex h-full min-h-64 items-center justify-center text-ui-label text-slate-600"
+                >
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+                  读取真实信号…
                 </div>
-                <p className="mt-1 max-w-md text-ui-caption leading-5 text-slate-600">
-                  当前没有候选、形态迁移或意图关联记录。持仓标的请在“总览”或“做T仓位”中查看。
-                </p>
-              </div>
-            )}
-            {signals.map(signal => {
-              const snapshot = signal.signalSnapshot;
-              const active = selectedSignal?.id === signal.id;
-              const name = instrumentNames.get(signal.stockCode);
-              const path = snapshot?.selectedPath
-                ? signalPathLabels[snapshot.selectedPath] || snapshot.selectedPath
-                : signalPhaseLabels[snapshot?.dominantPhase || ''] || '未选择路径';
-              const blocker = snapshot?.topBlockers[0]?.label;
-              return (
-                <button
-                  key={signal.id}
-                  type="button"
-                  aria-label={`查看信号 ${name || signal.stockCode} ${signalEventLabels[signal.eventType] || signal.eventType}`}
-                  aria-pressed={active}
-                  onClick={() => selectSignal(signal)}
-                  className={cn(
-                    'grid w-full cursor-pointer gap-2 border-b border-white/[0.05] border-l-2 px-ui-section py-2.5 text-left text-ui-caption transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 lg:grid-cols-5 lg:gap-3',
-                    active
-                      ? 'border-l-blue-400 bg-blue-500/[0.09]'
-                      : 'border-l-transparent hover:bg-blue-500/[0.04]'
-                  )}
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate font-bold text-slate-200">
-                      {signalEventLabels[signal.eventType] || signal.eventType}
-                    </span>
-                    <span className="mt-0.5 block truncate font-mono text-ui-micro text-slate-600">
-                      {name ? `${name} · ` : ''}
-                      {signal.stockCode}
-                    </span>
-                  </span>
-                  <span className="min-w-0">
-                    <span
-                      className={cn(
-                        'inline-flex border px-1.5 py-0.5 font-bold',
-                        signalEventTone(signal.eventType)
-                      )}
-                    >
-                      {candidateStatusLabels[snapshot?.candidateStatus || ''] ||
-                        '状态未提供'}
-                    </span>
-                    <span className="mt-1 block truncate text-slate-500">
-                      {path}
-                    </span>
-                  </span>
-                  <span className="font-mono text-slate-300">
-                    {nullableScore(snapshot?.opportunityScore)}
-                    <span className="block text-ui-micro text-slate-600">
-                      阈值 {nullableScore(snapshot?.candidateThreshold)}
-                    </span>
-                  </span>
-                  <span className={blocker ? 'text-amber-100' : 'text-slate-600'}>
-                    {blocker || '无首要阻断'}
-                  </span>
-                  <span className="font-mono text-ui-micro text-slate-600">
-                    {formatTime(snapshot?.sourceAt || signal.evaluatedAt)}
-                    {signal.coalescedCount > 1 && (
-                      <span className="mt-0.5 block">合并 ×{signal.coalescedCount}</span>
-                    )}
-                  </span>
-                </button>
-              );
-            })}
-            {hasMoreEvaluations && (
-              <div className="p-ui-section">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-control-compact w-full text-ui-caption text-slate-400"
-                  disabled={loadingEvaluations}
-                  onClick={onLoadMoreEvaluations}
-                >
-                  {loadingEvaluations ? '加载中…' : '加载更多信号'}
-                </Button>
-              </div>
-            )}
-          </div>
-        </section>
-
-        <aside
-          className="min-h-0 overflow-y-auto p-ui-section custom-scrollbar"
-          aria-label="信号详情"
-        >
-          {!selectedSignal && (
-            <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
-              <ArrowRight className="h-8 w-8 text-slate-800" />
-              <div className="mt-3 text-ui-label font-bold text-slate-500">
-                选择一条信号查看详情
-              </div>
-              <p className="mt-1 text-ui-caption text-slate-600">
-                可查看候选状态、评分、阻断原因与全链路追溯。
-              </p>
-            </div>
-          )}
-          {selectedSignal && (
-            <div className="space-y-3">
-              <header className="border-b border-white/[0.06] pb-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="truncate text-ui-title font-bold text-slate-100">
-                      {instrumentNames.get(selectedSignal.stockCode) ||
-                        selectedSignal.stockCode}
-                    </h3>
-                    <div className="mt-0.5 font-mono text-ui-caption text-slate-600">
-                      {selectedSignal.stockCode} · {selectedSignal.runId}
-                    </div>
+              )}
+              {!loadingEvaluations && signals.length === 0 && (
+                <div className="flex h-full min-h-64 flex-col items-center justify-center px-ui-empty text-center">
+                  <Database className="h-9 w-9 text-slate-800" />
+                  <div className="mt-3 text-ui-body font-bold text-slate-400">
+                    暂无真实信号
                   </div>
-                  <span
+                  <p className="mt-1 max-w-md text-ui-caption leading-5 text-slate-600">
+                    当前没有候选、形态迁移或意图关联记录。持仓标的请在“总览”或“做T仓位”中查看。
+                  </p>
+                </div>
+              )}
+              {signals.map(signal => {
+                const snapshot = signal.signalSnapshot;
+                const expanded = expandedSignalId === signal.id;
+                const name = instrumentNames.get(signal.stockCode);
+                const session = sessionsByIdentity.get(
+                  `${signal.runId}:${signal.stockCode}`
+                );
+                const path = snapshot?.selectedPath
+                  ? signalPathLabels[snapshot.selectedPath] ||
+                    snapshot.selectedPath
+                  : signalPhaseLabels[snapshot?.dominantPhase || ''] ||
+                    '未选择路径';
+                const blocker = snapshot?.topBlockers[0]?.label;
+                return (
+                  <article
+                    key={signal.id}
                     className={cn(
-                      'shrink-0 border px-1.5 py-0.5 text-ui-caption font-bold',
-                      signalEventTone(selectedSignal.eventType)
+                      'border-b border-white/[0.05] bg-[#091422]',
+                      expanded && 'border border-blue-400/25 bg-[#0a1727]'
                     )}
                   >
-                    {signalEventLabels[selectedSignal.eventType] ||
-                      selectedSignal.eventType}
-                  </span>
-                </div>
-                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-ui-micro text-slate-600">
-                  <span>
-                    源时间{' '}
-                    {formatTime(
-                      selectedSnapshot?.sourceAt || selectedSignal.evaluatedAt
-                    )}
-                  </span>
-                  <span>{selectedSignal.eventType}</span>
-                  <span>policy {selectedSignal.policyVersion}</span>
-                </div>
-              </header>
-
-              {!selectedSnapshot && (
-                <div className="border border-amber-400/20 bg-amber-400/[0.04] p-3 text-ui-caption leading-5 text-amber-100">
-                  该信号记录没有可展示的机会快照；仍保留事件身份用于审计。
-                </div>
-              )}
-              {selectedSnapshot && (
-                <>
-                  <div className="grid grid-cols-2 gap-2 text-ui-caption">
-                    <div className="border border-white/[0.06] p-2.5">
-                      <div className="text-slate-600">候选状态</div>
-                      <div className="mt-1 font-bold text-slate-200">
-                        {candidateStatusLabels[selectedSnapshot.candidateStatus] ||
-                          selectedSnapshot.candidateStatus}
-                      </div>
-                    </div>
-                    <div className="border border-white/[0.06] p-2.5">
-                      <div className="text-slate-600">形态 / 路径</div>
-                      <div className="mt-1 font-bold text-slate-200">
-                        {selectedSnapshot.selectedPath
-                          ? signalPathLabels[selectedSnapshot.selectedPath] ||
-                            selectedSnapshot.selectedPath
-                          : signalPhaseLabels[selectedSnapshot.dominantPhase] ||
-                            selectedSnapshot.dominantPhase}
-                      </div>
-                    </div>
-                    <div className="border border-white/[0.06] p-2.5">
-                      <div className="text-slate-600">机会分 / 候选阈值</div>
-                      <div className="mt-1 font-mono font-bold text-slate-200">
-                        {nullableScore(selectedSnapshot.opportunityScore)} /{' '}
-                        {nullableScore(selectedSnapshot.candidateThreshold)}
-                      </div>
-                    </div>
-                    <div className="border border-white/[0.06] p-2.5">
-                      <div className="text-slate-600">数据健康</div>
-                      <div className="mt-1 font-bold text-slate-200">
-                        {selectedSnapshot.dataHealth}
-                      </div>
-                    </div>
-                  </div>
-
-                  <section className="border border-white/[0.06] p-3">
-                    <h4 className="text-ui-caption font-bold text-slate-300">
-                      阻断原因
-                    </h4>
-                    {selectedSnapshot.topBlockers.length === 0 ? (
-                      <p className="mt-2 text-ui-caption text-slate-600">
-                        当前信号没有首要阻断。
-                      </p>
-                    ) : (
-                      <ul className="mt-2 space-y-2">
-                        {selectedSnapshot.topBlockers.map(blocker => (
-                          <li
-                            key={blocker.code}
-                            className="border-l-2 border-amber-400/50 pl-2 text-ui-caption"
-                          >
-                            <div className="font-bold text-amber-100">
-                              {blocker.label}
-                            </div>
-                            <div className="mt-0.5 leading-4 text-slate-600">
-                              {blocker.detail || blocker.code}
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </section>
-
-                  {selectedSnapshot.scoreContributions.length > 0 && (
-                    <section className="border border-white/[0.06] p-3">
-                      <h4 className="text-ui-caption font-bold text-slate-300">
-                        评分贡献
-                      </h4>
-                      <ul className="mt-2 space-y-1.5 text-ui-caption">
-                        {selectedSnapshot.scoreContributions
-                          .slice(0, 6)
-                          .map(contribution => (
-                            <li
-                              key={contribution.code}
-                              className="flex items-center justify-between gap-3"
-                            >
-                              <span className="truncate text-slate-500">
-                                {contribution.label}
-                              </span>
-                              <span className="shrink-0 font-mono text-slate-300">
-                                {formatNumber(contribution.points, 1)} /{' '}
-                                {formatNumber(contribution.maxPoints, 1)}
-                              </span>
-                            </li>
-                          ))}
-                      </ul>
-                    </section>
-                  )}
-
-                  {selectedSnapshot.candidateId &&
-                    selectedSignal.accountId === accountId &&
-                    onRequestCandidateTrace && (
-                      <button
-                        type="button"
-                        aria-label={`追溯候选 ${selectedSnapshot.candidateId}（账户 ${selectedSignal.accountId}，运行 ${selectedSignal.runId}）`}
-                        className="flex h-control-compact w-full cursor-pointer items-center justify-center gap-1.5 border border-blue-400/25 bg-blue-400/[0.05] px-3 text-ui-caption font-bold text-blue-200 transition-colors hover:bg-blue-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
-                        onClick={() =>
-                          onRequestCandidateTrace({
-                            accountId: selectedSignal.accountId,
-                            strategyRunId: selectedSignal.runId,
-                            candidateId: selectedSnapshot.candidateId!,
-                          })
+                    <button
+                      type="button"
+                      aria-label={`查看信号 ${name || signal.stockCode} ${signalEventLabels[signal.eventType] || signal.eventType}`}
+                      aria-expanded={expanded}
+                      aria-controls={`signal-detail-${signal.id}`}
+                      onClick={() => toggleSignal(signal)}
+                      className="grid min-h-12 w-full cursor-pointer items-center gap-3 px-ui-section py-2 text-left text-ui-caption transition-colors hover:bg-blue-500/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70"
+                      style={{
+                        gridTemplateColumns:
+                          '28px minmax(140px, 1fr) minmax(130px, .85fr) 100px minmax(180px, 1.2fr) 120px 24px',
+                      }}
+                    >
+                      <span className="text-slate-600">
+                        {expanded ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block truncate font-bold text-slate-200">
+                          {signalEventLabels[signal.eventType] ||
+                            signal.eventType}
+                        </span>
+                        <span className="mt-0.5 block truncate font-mono text-ui-micro text-slate-600">
+                          {name ? `${name} · ` : ''}
+                          {signal.stockCode}
+                        </span>
+                      </span>
+                      <span className="min-w-0">
+                        <span
+                          className={cn(
+                            'inline-flex border px-1.5 py-0.5 font-bold',
+                            signalEventTone(signal.eventType)
+                          )}
+                        >
+                          {snapshot?.candidateStatus === 'AWAITING_APPROVAL' &&
+                          isLiveAuto
+                            ? '降级待确认'
+                            : candidateStatusLabels[
+                                snapshot?.candidateStatus || ''
+                              ] || '状态未提供'}
+                        </span>
+                        <span className="mt-1 block truncate text-slate-500">
+                          {path}
+                        </span>
+                      </span>
+                      <span className="font-mono text-slate-300">
+                        {nullableScore(snapshot?.opportunityScore)}
+                        <span className="block text-ui-micro text-slate-600">
+                          阈值 {nullableScore(snapshot?.candidateThreshold)}
+                        </span>
+                      </span>
+                      <span
+                        className={
+                          blocker ? 'text-amber-100' : 'text-slate-600'
                         }
                       >
-                        <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        查看候选全链路追溯
-                      </button>
+                        {blocker || '无首要阻断'}
+                      </span>
+                      <span className="font-mono text-ui-micro text-slate-600">
+                        {formatTime(snapshot?.sourceAt || signal.evaluatedAt)}
+                        {signal.coalescedCount > 1 && (
+                          <span className="mt-0.5 block">
+                            合并 ×{signal.coalescedCount}
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-slate-600">›</span>
+                    </button>
+                    {expanded && (
+                      <div id={`signal-detail-${signal.id}`}>
+                        <TTradeSignalDetails
+                          accountId={accountId}
+                          actionLoading={actionLoading}
+                          canApproveAccount={canApproveAccount}
+                          candidateTrace={candidateTrace}
+                          candidateTraceError={candidateTraceError}
+                          candidateTraceLoading={candidateTraceLoading}
+                          dataTrusted={dataTrusted}
+                          instrumentName={name}
+                          isLiveAuto={isLiveAuto}
+                          onApprove={onApprove}
+                          onReject={onReject}
+                          onRequestCandidateTrace={onRequestCandidateTrace}
+                          selectedTrace={selectedTrace}
+                          session={session}
+                          signal={signal}
+                        />
+                      </div>
                     )}
-                </>
-              )}
-
-              {selectedTraceMatchesSignal && selectedTrace && (
-                <CandidateTracePanel
-                  accountId={selectedTrace.accountId}
-                  candidateId={selectedTrace.candidateId}
-                  error={candidateTraceError}
-                  loading={candidateTraceLoading}
-                  onClose={() => onRequestCandidateTrace?.(null)}
-                  strategyRunId={selectedTrace.strategyRunId}
-                  trace={candidateTrace}
-                />
+                  </article>
+                );
+              })}
+              {hasMoreEvaluations && (
+                <div className="p-ui-section">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-control-compact w-full text-ui-caption text-slate-400"
+                    disabled={loadingEvaluations}
+                    onClick={onLoadMoreEvaluations}
+                  >
+                    {loadingEvaluations ? '加载中…' : '加载更多信号'}
+                  </Button>
+                </div>
               )}
             </div>
-          )}
-        </aside>
+          </div>
+        </section>
       </div>
       <div className="sr-only" aria-live="polite">
         真实信号已刷新，共 {signals.length} 条，待确认 {pending.length} 个

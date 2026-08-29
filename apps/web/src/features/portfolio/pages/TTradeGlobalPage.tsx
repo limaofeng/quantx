@@ -2,7 +2,6 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
-  CalendarDays,
   Check,
   CircleDollarSign,
   ClipboardList,
@@ -23,7 +22,6 @@ import {
   ShieldCheck,
   ShieldAlert,
   Square,
-  Trash2,
   TrendingUp,
   WalletCards,
   X,
@@ -180,10 +178,7 @@ import {
   TTradeSignalPolicyEditor,
   type SignalPolicyPreviewLike,
 } from './t-trade-global/TTradeSignalPolicyEditor';
-import {
-  type CandidateTraceSelection,
-  TTradeSignalsView,
-} from './t-trade-global/TTradeSignalsView';
+import type { CandidateTraceSelection } from './t-trade-global/TTradeSignalsView';
 import type {
   SettingsForm,
   SignalPolicyForm,
@@ -220,6 +215,18 @@ const tTradePositionsFallback = (
     />
     正在加载做 T 仓位…
   </div>
+);
+
+const TTradeReplaySidebar = React.lazy(() =>
+  import('./t-trade-global/TTradeReplaySidebar').then(module => ({
+    default: module.TTradeReplaySidebar,
+  }))
+);
+
+const TTradeSignalsView = React.lazy(() =>
+  import('./t-trade-global/TTradeSignalsView').then(module => ({
+    default: module.TTradeSignalsView,
+  }))
 );
 
 const tTradeModes: StudioMode[] = [
@@ -402,18 +409,22 @@ function TTradeReplaySignals({
   fetching: boolean;
   hasReplay: boolean;
 }) {
-  const [selectedId, setSelectedId] = React.useState('');
-  const selectedDecision =
-    decisions.find(item => item.id === selectedId) || decisions[0];
+  const [expandedId, setExpandedId] = React.useState<string | null>(null);
 
   React.useEffect(() => {
-    if (
-      decisions.length > 0 &&
-      !decisions.some(item => item.id === selectedId)
-    ) {
-      setSelectedId(decisions[0].id);
+    if (expandedId && !decisions.some(item => item.id === expandedId)) {
+      setExpandedId(null);
     }
-  }, [decisions, selectedId]);
+  }, [decisions, expandedId]);
+
+  React.useEffect(() => {
+    if (!expandedId) return;
+    const collapseOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpandedId(null);
+    };
+    window.addEventListener('keydown', collapseOnEscape);
+    return () => window.removeEventListener('keydown', collapseOnEscape);
+  }, [expandedId]);
 
   if (!hasReplay) {
     return (
@@ -465,167 +476,215 @@ function TTradeReplaySignals({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[280px_minmax(0,1fr)]">
-      <aside className="min-h-0 overflow-y-auto border-r border-white/[0.06] bg-[#091523] custom-scrollbar">
-        <div className="sticky top-0 z-10 flex h-10 items-center justify-between border-b border-white/[0.06] bg-[#091523] px-3">
-          <span className="text-ui-caption font-black text-slate-300">
-            决策信号
-          </span>
-          <span className="font-mono text-ui-micro text-slate-600">
-            {decisions.length} 条
-          </span>
+    <div className="flex h-full min-h-0 flex-col bg-[#07111f]">
+      <header className="flex shrink-0 items-center justify-between border-b border-white/[0.06] bg-[#091422] px-ui-section py-2.5">
+        <div>
+          <h2 className="text-ui-label font-black text-slate-200">决策信号</h2>
+          <p className="mt-0.5 text-ui-micro text-slate-600">
+            回放信号按业务动态排列；展开后查看策略输入、原因链与模拟执行结果。
+          </p>
         </div>
-        {decisions.map(decision => (
-          <button
-            key={decision.id}
-            type="button"
-            onClick={() => setSelectedId(decision.id)}
-            className={cn(
-              'block w-full cursor-pointer border-b border-white/[0.05] px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
-              selectedDecision?.id === decision.id
-                ? 'bg-blue-500/[0.09]'
-                : 'hover:bg-white/[0.025]'
-            )}
+        <span className="border border-cyan-400/20 bg-cyan-400/[0.04] px-2 py-1 font-mono text-ui-micro font-bold text-cyan-200">
+          {decisions.length} 条
+        </span>
+      </header>
+      <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
+        <div style={{ minWidth: 880 }}>
+          <div
+            className="sticky top-0 z-10 grid h-8 items-center gap-2 border-b border-white/[0.06] bg-[#0b1628] px-ui-section text-ui-micro font-black text-slate-600"
+            style={{
+              gridTemplateColumns:
+                '28px 120px minmax(130px, .8fr) minmax(120px, .7fr) minmax(120px, .7fr) minmax(220px, 1.4fr) 24px',
+            }}
           >
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-mono text-ui-caption text-slate-300">
-                {formatTime(decision.decidedAt)}
-              </span>
-              <span className="text-ui-micro font-black text-blue-200">
-                {decision.tradeIntents.length} 意图
-              </span>
-            </div>
-            <div className="mt-1 truncate text-ui-caption text-slate-600">
-              {decision.decisionTrace[0] || '策略完成本次决策评估'}
-            </div>
-          </button>
-        ))}
-      </aside>
-
-      <div className="min-h-0 overflow-y-auto p-ui-section custom-scrollbar">
-        {selectedDecision && (
-          <div className="space-y-3">
-            <header className="flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] pb-3">
-              <div>
-                <h3 className="text-ui-label font-black text-slate-100">
-                  决策审计 · {formatTime(selectedDecision.decidedAt)}
-                </h3>
-                <p className="mt-1 font-mono text-ui-micro text-slate-600">
-                  {selectedDecision.id}
-                </p>
-              </div>
-              <span className="border border-blue-400/20 bg-blue-500/[0.07] px-1.5 py-0.5 text-ui-micro font-black text-blue-200">
-                TradeIntent {selectedDecision.tradeIntents.length}
-              </span>
-            </header>
-
-            <div className="grid gap-3 xl:grid-cols-2">
-              <ReplaySignalSummary
-                title="策略输入"
-                values={selectedDecision.inputSummary}
-              />
-              <ReplaySignalSummary
-                title="策略输出"
-                values={selectedDecision.outputSummary}
-              />
-            </div>
-
-            <section className="border border-white/[0.06] bg-white/[0.02]">
-              <div className="border-b border-white/[0.05] px-3 py-2 text-ui-caption font-black text-slate-300">
-                原因链
-              </div>
-              <div className="space-y-1.5 p-3">
-                {selectedDecision.decisionTrace.map((item, index) => (
+            <span />
+            <span>时间</span>
+            <span>标的</span>
+            <span>方向 / 数量</span>
+            <span>决策状态</span>
+            <span>原因 / 阻断</span>
+            <span />
+          </div>
+          {decisions.map(decision => {
+            const expanded = expandedId === decision.id;
+            const primaryIntent = decision.tradeIntents[0];
+            const primaryExecution = primaryIntent
+              ? executions.find(item => item.intentId === primaryIntent.id)
+              : undefined;
+            const detailId = `replay-signal-${decision.id}`;
+            const status =
+              primaryExecution?.orderStatus ||
+              primaryIntent?.status ||
+              (primaryIntent ? '意图已生成' : '仅评估');
+            return (
+              <article
+                key={decision.id}
+                className={cn(
+                  'border-b border-white/[0.05] bg-[#091422]',
+                  expanded && 'border border-cyan-400/25 bg-[#0a1727]'
+                )}
+              >
+                <button
+                  type="button"
+                  aria-expanded={expanded}
+                  aria-controls={detailId}
+                  onClick={() =>
+                    setExpandedId(current =>
+                      current === decision.id ? null : decision.id
+                    )
+                  }
+                  className="grid min-h-11 w-full cursor-pointer items-center gap-2 px-ui-section text-left text-ui-caption transition-colors hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
+                  style={{
+                    gridTemplateColumns:
+                      '28px 120px minmax(130px, .8fr) minmax(120px, .7fr) minmax(120px, .7fr) minmax(220px, 1.4fr) 24px',
+                  }}
+                >
+                  <span className="font-mono text-slate-600">
+                    {expanded ? '−' : '+'}
+                  </span>
+                  <span className="font-mono text-slate-400">
+                    {formatTime(decision.decidedAt)}
+                  </span>
+                  <span className="min-w-0 truncate font-mono font-bold text-slate-200">
+                    {primaryIntent?.instrumentCode || '--'}
+                  </span>
+                  <span className="font-mono text-slate-300">
+                    {primaryIntent
+                      ? `${primaryIntent.side} ${replaySignalValue(primaryIntent.quantityIntent)}`
+                      : '--'}
+                  </span>
+                  <span className="text-cyan-200">{status}</span>
+                  <span className="truncate text-slate-500">
+                    {primaryExecution?.reason ||
+                      primaryIntent?.reason ||
+                      decision.decisionTrace[0] ||
+                      '策略完成本次决策评估'}
+                  </span>
+                  <span className="text-slate-600">›</span>
+                </button>
+                {expanded && (
                   <div
-                    key={`${index}-${item}`}
-                    className="flex items-start gap-2 text-ui-caption text-slate-400"
+                    id={detailId}
+                    className="space-y-3 border-t border-white/[0.06] p-ui-section"
                   >
-                    <span className="mt-0.5 font-mono text-ui-micro text-blue-300">
-                      {String(index + 1).padStart(2, '0')}
-                    </span>
-                    <span>{item}</span>
-                  </div>
-                ))}
-                {selectedDecision.decisionTrace.length === 0 && (
-                  <div className="text-ui-caption text-slate-600">
-                    本次决策没有返回额外原因链。
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-ui-label font-black text-slate-100">
+                          决策审计 · {formatTime(decision.decidedAt)}
+                        </h3>
+                        <p className="mt-1 font-mono text-ui-micro text-slate-600">
+                          {decision.id}
+                        </p>
+                      </div>
+                      <span className="border border-cyan-400/20 bg-cyan-400/[0.06] px-2 py-1 text-ui-micro font-black text-cyan-200">
+                        TradeIntent {decision.tradeIntents.length}
+                      </span>
+                    </div>
+                    <div className="grid gap-3 xl:grid-cols-2">
+                      <ReplaySignalSummary
+                        title="策略输入"
+                        values={decision.inputSummary}
+                      />
+                      <ReplaySignalSummary
+                        title="策略输出"
+                        values={decision.outputSummary}
+                      />
+                    </div>
+                    <section className="border border-white/[0.06] bg-white/[0.02]">
+                      <div className="border-b border-white/[0.05] px-3 py-2 text-ui-caption font-black text-slate-300">
+                        原因链
+                      </div>
+                      <div className="space-y-1.5 p-3">
+                        {decision.decisionTrace.map((item, index) => (
+                          <div
+                            key={`${index}-${item}`}
+                            className="flex items-start gap-2 text-ui-caption text-slate-400"
+                          >
+                            <span className="mt-0.5 font-mono text-ui-micro text-cyan-300">
+                              {String(index + 1).padStart(2, '0')}
+                            </span>
+                            <span>{item}</span>
+                          </div>
+                        ))}
+                        {decision.decisionTrace.length === 0 && (
+                          <div className="text-ui-caption text-slate-600">
+                            本次决策没有返回额外原因链。
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                    <section className="overflow-hidden border border-white/[0.06]">
+                      <div className="border-b border-white/[0.05] bg-white/[0.02] px-3 py-2 text-ui-caption font-black text-slate-300">
+                        交易意图与执行结果
+                      </div>
+                      <div className="overflow-x-auto custom-scrollbar">
+                        <table className="w-full min-w-[760px] text-ui-caption">
+                          <thead className="bg-white/[0.02] text-left text-ui-micro font-black text-slate-600">
+                            <tr>
+                              <th className="px-3 py-2">标的 / 方向</th>
+                              <th className="px-3 py-2">目标数量</th>
+                              <th className="px-3 py-2">风控 / 订单</th>
+                              <th className="px-3 py-2">成交</th>
+                              <th className="px-3 py-2">原因</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {decision.tradeIntents.map(intent => {
+                              const execution = executions.find(
+                                item => item.intentId === intent.id
+                              );
+                              return (
+                                <tr
+                                  key={intent.id}
+                                  className="border-t border-white/[0.05] text-slate-400"
+                                >
+                                  <td className="px-3 py-2 font-mono text-slate-200">
+                                    {intent.instrumentCode} · {intent.side}
+                                  </td>
+                                  <td className="px-3 py-2 font-mono">
+                                    {replaySignalValue(intent.quantityIntent)}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    {execution?.riskDecision || '--'} /{' '}
+                                    {execution?.orderStatus ||
+                                      intent.status ||
+                                      '--'}
+                                  </td>
+                                  <td className="px-3 py-2 font-mono">
+                                    {execution?.executedVolume
+                                      ? `${execution.executedVolume} @ ${formatNumber(execution.executedPrice || 0, 3)}`
+                                      : '--'}
+                                  </td>
+                                  <td className="max-w-xs px-3 py-2">
+                                    <div className="truncate">
+                                      {execution?.reason ||
+                                        intent.reason ||
+                                        '--'}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                            {decision.tradeIntents.length === 0 && (
+                              <tr>
+                                <td
+                                  colSpan={5}
+                                  className="p-ui-section text-center text-slate-600"
+                                >
+                                  本次决策没有产生交易意图
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </section>
                   </div>
                 )}
-              </div>
-            </section>
-
-            <section className="overflow-hidden border border-white/[0.06]">
-              <div className="border-b border-white/[0.05] bg-white/[0.02] px-3 py-2 text-ui-caption font-black text-slate-300">
-                交易意图与执行结果
-              </div>
-              <div className="overflow-x-auto custom-scrollbar">
-                <table className="w-full min-w-[760px] text-ui-caption">
-                  <thead className="bg-white/[0.02] text-left text-ui-micro font-black uppercase tracking-[0.08em] text-slate-600">
-                    <tr>
-                      <th className="px-3 py-2">标的 / 方向</th>
-                      <th className="px-3 py-2">目标数量</th>
-                      <th className="px-3 py-2">风控 / 订单</th>
-                      <th className="px-3 py-2">成交</th>
-                      <th className="px-3 py-2">原因</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {selectedDecision.tradeIntents.map(intent => {
-                      const execution = executions.find(
-                        item => item.intentId === intent.id
-                      );
-                      return (
-                        <tr
-                          key={intent.id}
-                          className="border-t border-white/[0.05] text-slate-400"
-                        >
-                          <td className="px-3 py-2">
-                            <div className="font-mono font-bold text-slate-200">
-                              {intent.instrumentCode}
-                            </div>
-                            <div className="mt-0.5 text-ui-micro text-slate-600">
-                              {intent.side}
-                            </div>
-                          </td>
-                          <td className="px-3 py-2 font-mono">
-                            {replaySignalValue(intent.quantityIntent)}
-                          </td>
-                          <td className="px-3 py-2">
-                            {execution?.riskDecision || '--'} /{' '}
-                            {execution?.orderStatus || intent.status || '--'}
-                          </td>
-                          <td className="px-3 py-2 font-mono">
-                            {execution?.executedVolume
-                              ? `${execution.executedVolume} @ ${formatNumber(
-                                  execution.executedPrice || 0,
-                                  3
-                                )}`
-                              : '--'}
-                          </td>
-                          <td className="max-w-xs px-3 py-2">
-                            <div className="truncate">
-                              {execution?.reason || intent.reason || '--'}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    {selectedDecision.tradeIntents.length === 0 && (
-                      <tr>
-                        <td
-                          colSpan={5}
-                          className="p-ui-section text-center text-slate-600"
-                        >
-                          本次决策没有产生交易意图
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </div>
-        )}
+              </article>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -930,10 +989,93 @@ function TTradeReplayPanel({
     },
     [manualPositions, toast]
   );
+  const handleDelete = React.useCallback(
+    async (item: (typeof history)[number]) => {
+      if (!canDeleteReplay(item.status)) {
+        toast({
+          title: '当前回放不能删除',
+          description: '仅已完成、失败、已取消或已停止的回放可以删除。',
+          variant: 'destructive',
+        });
+        return;
+      }
+      const confirmed = await confirmDialog({
+        title: '删除这次回放？',
+        description: `将同时删除 ${String(item.startTime).slice(0, 10)} 至 ${String(
+          item.endTime
+        ).slice(
+          0,
+          10
+        )} 的回放记录、关联回测运行、回测版本、审计轨迹与结果文件。共享策略模板不会被删除。此操作不可撤销。`,
+        confirmText: '删除回放及关联数据',
+        cancelText: '取消',
+        variant: 'destructive',
+      });
+      if (!confirmed) return;
+
+      const nextRunId = replayStatusAfterDelete(
+        history.map(historyItem => historyItem.runId),
+        item.runId,
+        activeRunId
+      );
+      try {
+        const result = await deleteStrategyRun({ runId: item.runId });
+        const payload = result.data?.deleteStrategyRun;
+        if (!payload?.success) {
+          throw new Error(
+            payload?.message || result.error?.message || '删除回放失败'
+          );
+        }
+        setActiveRunId(nextRunId);
+        if (!nextRunId) onActiveViewChange('OVERVIEW');
+        toast({ title: '回放已删除', description: payload.message });
+        refreshHistory({ requestPolicy: 'network-only' });
+      } catch (error) {
+        toast({
+          title: '无法删除回放',
+          description: error instanceof Error ? error.message : '请求失败',
+          variant: 'destructive',
+        });
+      }
+    },
+    [
+      activeRunId,
+      confirmDialog,
+      deleteStrategyRun,
+      history,
+      onActiveViewChange,
+      refreshHistory,
+      toast,
+    ]
+  );
   const replaySidebarContext = React.useMemo<ReplaySidebarContext>(() => {
+    const sidebarHistory = history.map(item => ({
+      progressPct: item.progressPct,
+      runId: item.runId,
+      startTime: String(item.startTime),
+      status: item.status,
+      tNetProfit: item.summary?.tNetProfit ?? null,
+    }));
+    const historyControls = {
+      activeRunId,
+      deletingHistory: deleteResult.fetching,
+      history: sidebarHistory,
+      historyLoading: historyResult.fetching,
+      onCreate: () => {
+        setActiveRunId('');
+        onActiveViewChange('OVERVIEW');
+      },
+      onDelete: (item: (typeof sidebarHistory)[number]) => {
+        const target = history.find(row => row.runId === item.runId);
+        if (target) void handleDelete(target);
+      },
+      onHistoryRefresh: () => refreshHistory({ requestPolicy: 'network-only' }),
+      onSelectRun: (runId: string) => setActiveRunId(runId),
+    };
     if (activeRunId) {
       if (!replay) {
         return {
+          ...historyControls,
           accountId,
           asOf: '',
           cashAvailable: 0,
@@ -948,6 +1090,7 @@ function TTradeReplayPanel({
         };
       }
       return {
+        ...historyControls,
         accountId: replay.accountId,
         asOf: String(replay.initialPortfolio.asOf || '').slice(0, 10),
         cashAvailable: replay.initialPortfolio.cashAvailable,
@@ -990,6 +1133,7 @@ function TTradeReplayPanel({
         ? manualCashNumber
         : 0;
       return {
+        ...historyControls,
         accountId,
         asOf: previousTradingDate,
         cashAvailable,
@@ -1020,6 +1164,7 @@ function TTradeReplayPanel({
     }
 
     return {
+      ...historyControls,
       accountId,
       asOf: preparation?.snapshotDate || '',
       cashAvailable: preparation?.initialCash || 0,
@@ -1053,7 +1198,9 @@ function TTradeReplayPanel({
   }, [
     accountId,
     activeRunId,
+    deleteResult.fetching,
     handleReplayCashChange,
+    handleDelete,
     handleReplayPortfolioSourceChange,
     handleReplayPositionAdd,
     handleReplayPositionChange,
@@ -1061,11 +1208,15 @@ function TTradeReplayPanel({
     manualCash,
     manualCashNumber,
     manualPositions,
+    history,
+    historyResult.fetching,
+    onActiveViewChange,
     portfolioSource,
     preparation,
     preparationResult.fetching,
     previousTradingDate,
     replay,
+    refreshHistory,
     snapshotPortfolioValid,
   ]);
 
@@ -1409,55 +1560,6 @@ function TTradeReplayPanel({
     }
   };
 
-  const handleDelete = async (item: (typeof history)[number]) => {
-    if (!canDeleteReplay(item.status)) {
-      toast({
-        title: '当前回放不能删除',
-        description: '仅已完成、失败、已取消或已停止的回放可以删除。',
-        variant: 'destructive',
-      });
-      return;
-    }
-    const confirmed = await confirmDialog({
-      title: '删除这次回放？',
-      description: `将同时删除 ${String(item.startTime).slice(0, 10)} 至 ${String(
-        item.endTime
-      ).slice(
-        0,
-        10
-      )} 的回放记录、关联回测运行、回测版本、审计轨迹与结果文件。共享策略模板不会被删除。此操作不可撤销。`,
-      confirmText: '删除回放及关联数据',
-      cancelText: '取消',
-      variant: 'destructive',
-    });
-    if (!confirmed) return;
-
-    const nextRunId = replayStatusAfterDelete(
-      history.map(historyItem => historyItem.runId),
-      item.runId,
-      activeRunId
-    );
-    try {
-      const result = await deleteStrategyRun({ runId: item.runId });
-      const payload = result.data?.deleteStrategyRun;
-      if (!payload?.success) {
-        throw new Error(
-          payload?.message || result.error?.message || '删除回放失败'
-        );
-      }
-      setActiveRunId(nextRunId);
-      if (!nextRunId) onActiveViewChange('OVERVIEW');
-      toast({ title: '回放已删除', description: payload.message });
-      refreshHistory({ requestPolicy: 'network-only' });
-    } catch (error) {
-      toast({
-        title: '无法删除回放',
-        description: error instanceof Error ? error.message : '请求失败',
-        variant: 'destructive',
-      });
-    }
-  };
-
   const chartData = (replay?.curve || []).map(point => ({
     time: new Date(point.timestamp).toLocaleString('zh-CN', {
       hour: '2-digit',
@@ -1472,8 +1574,8 @@ function TTradeReplayPanel({
   }));
 
   return (
-    <div className="studio-workspace-surface grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px]">
-      <div className="flex min-h-0 flex-col">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col">
         {activeView === 'OVERVIEW' ? (
           <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
             <section className="border-b border-white/[0.06] bg-[#0a1728] p-ui-section">
@@ -2082,104 +2184,6 @@ function TTradeReplayPanel({
           </div>
         )}
       </div>
-
-      <aside
-        aria-busy={historyResult.fetching}
-        className="min-h-0 overflow-y-auto border-l border-white/[0.06] bg-[#091523] custom-scrollbar"
-      >
-        <div className="flex h-11 items-center justify-between border-b border-white/[0.06] px-3">
-          <span className="text-ui-caption font-black uppercase tracking-[0.14em] text-slate-500">
-            回放记录
-          </span>
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => {
-                setActiveRunId('');
-                onActiveViewChange('OVERVIEW');
-              }}
-              className={cn(
-                'flex h-control-compact cursor-pointer items-center gap-1 border px-2 text-ui-caption font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
-                !activeRunId
-                  ? 'border-blue-400/25 bg-blue-500/10 text-blue-200'
-                  : 'border-white/[0.08] text-slate-500 hover:bg-white/[0.04] hover:text-slate-200'
-              )}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              新建
-            </button>
-            <button
-              type="button"
-              aria-label="刷新历史回放记录"
-              onClick={() => refreshHistory({ requestPolicy: 'network-only' })}
-              className="flex h-control-compact w-control-compact cursor-pointer items-center justify-center text-slate-600 transition-colors hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-            >
-              <RefreshCw
-                className={cn(
-                  'h-3.5 w-3.5',
-                  historyResult.fetching &&
-                    'animate-spin motion-reduce:animate-none'
-                )}
-              />
-            </button>
-          </div>
-        </div>
-        {history.map(item => (
-          <div
-            key={item.runId}
-            className="group relative border-b border-white/[0.05]"
-          >
-            <button
-              type="button"
-              onClick={() => setActiveRunId(item.runId)}
-              className={cn(
-                'block w-full cursor-pointer px-3 py-3 pr-10 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
-                activeRunId === item.runId
-                  ? 'bg-cyan-400/[0.07]'
-                  : 'hover:bg-white/[0.025]'
-              )}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-300">
-                  <CalendarDays className="h-3.5 w-3.5 text-slate-600" />
-                  {String(item.startTime).slice(0, 10)}
-                </span>
-                <span className="text-ui-micro font-black text-cyan-300">
-                  {replayStatusLabel(item.status)}
-                </span>
-              </div>
-              <div className="mt-2 flex items-center justify-between font-mono text-ui-caption text-slate-600">
-                <span>{item.runId.slice(0, 8)}</span>
-                <span className={financialToneClass(item.summary?.tNetProfit)}>
-                  {item.summary
-                    ? `¥${formatNumber(item.summary.tNetProfit)}`
-                    : `${formatNumber(item.progressPct, 0)}%`}
-                </span>
-              </div>
-            </button>
-            {canDeleteReplay(item.status) && (
-              <button
-                type="button"
-                aria-label={`删除 ${String(item.startTime).slice(0, 10)} 回放`}
-                disabled={deleteResult.fetching}
-                onClick={() => void handleDelete(item)}
-                className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 cursor-pointer items-center justify-center text-slate-700 opacity-0 transition-colors hover:bg-rose-500/10 hover:text-rose-300 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35 group-hover:opacity-100"
-              >
-                {deleteResult.fetching ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-                ) : (
-                  <Trash2 className="h-3.5 w-3.5" />
-                )}
-              </button>
-            )}
-          </div>
-        ))}
-        {history.length === 0 && (
-          <div className="px-ui-section py-ui-empty text-center text-ui-caption text-slate-600">
-            {historyResult.fetching ? '正在读取历史回放…' : '暂无历史回放'}
-          </div>
-        )}
-      </aside>
     </div>
   );
 }
@@ -3914,6 +3918,34 @@ export function TTradeGlobalPage() {
           <>
             <span
               className={cn(
+                'hidden border px-2 py-1 text-ui-micro font-black lg:inline-flex',
+                (readiness?.stage || monitor?.rolloutStage) === 'LIVE'
+                  ? 'border-cyan-400/25 bg-cyan-400/[0.06] text-cyan-200'
+                  : (readiness?.stage || monitor?.rolloutStage) === 'CANARY'
+                    ? 'border-amber-400/25 bg-amber-400/[0.06] text-amber-200'
+                    : 'border-white/[0.08] bg-white/[0.025] text-slate-500'
+              )}
+            >
+              {(readiness?.stage || monitor?.rolloutStage) === 'LIVE'
+                ? 'LIVE · 自动执行'
+                : (readiness?.stage || monitor?.rolloutStage) === 'CANARY'
+                  ? 'CANARY · 人工确认'
+                  : `${readiness?.stage || monitor?.rolloutStage || 'SHADOW'} · 新买入关闭`}
+            </span>
+            {(readiness?.stage || monitor?.rolloutStage) === 'LIVE' && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={actionLoading}
+                onClick={handlePauseEntries}
+                className="hidden h-control-compact rounded-sm border-amber-400/20 px-2 text-ui-caption text-amber-200 xl:inline-flex"
+              >
+                暂停自动执行
+              </Button>
+            )}
+            <span
+              className={cn(
                 'hidden items-center gap-1.5 text-ui-caption font-bold md:inline-flex',
                 monitor?.enabled ? 'text-emerald-300' : 'text-slate-600'
               )}
@@ -4407,50 +4439,67 @@ export function TTradeGlobalPage() {
     />
   );
   const signalsView = (
-    <TTradeSignalsView
-      actionLoading={actionLoading}
-      accountId={accountId}
-      canApproveAccount={Boolean(readiness?.canApprove)}
-      candidateTrace={candidateTraceForUi}
-      candidateTraceError={
-        candidateTraceIdentityMismatch
-          ? '候选追溯响应身份不一致，已阻止展示'
-          : candidateTraceResult.error
-            ? '候选追溯暂不可用，请稍后重试'
-            : undefined
+    <React.Suspense
+      fallback={
+        <div
+          className="studio-workspace-surface flex h-full min-h-0 items-center justify-center text-ui-label text-slate-500"
+          role="status"
+        >
+          <Loader2
+            className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+          正在加载真实信号…
+        </div>
       }
-      candidateTraceLoading={candidateTraceResult.fetching}
-      dataTrusted={signalSnapshotTrusted}
-      evaluations={accountBoundSignalEvaluations}
-      evaluationsError={signalEvaluationsResult.error?.message}
-      focusStockCode={focusedSignalStockCode}
-      hasMoreEvaluations={Boolean(signalEvaluationsPage?.pageInfo.hasNextPage)}
-      loadingEvaluations={signalEvaluationsResult.fetching}
-      monitorError={monitorResult.error?.message || monitor?.lastError}
-      monitor={monitor}
-      onApprove={(session, snapshot) =>
-        void handleSignal(
-          'approve',
-          session.runId,
-          snapshot.pendingEntryIntentId!,
-          snapshot
-        )
-      }
-      onLoadMoreEvaluations={() =>
-        setSignalAfter(signalEvaluationsPage?.pageInfo.endCursor ?? null)
-      }
-      onFocusHandled={() => setFocusedSignalStockCode(null)}
-      onRequestCandidateTrace={setSelectedTrace}
-      onReject={(session, snapshot) =>
-        void handleSignal(
-          'reject',
-          session.runId,
-          snapshot.pendingEntryIntentId!,
-          snapshot
-        )
-      }
-      selectedTrace={selectedTraceForCurrentAccount}
-    />
+    >
+      <TTradeSignalsView
+        actionLoading={actionLoading}
+        accountId={accountId}
+        canApproveAccount={Boolean(readiness?.canApprove)}
+        candidateTrace={candidateTraceForUi}
+        candidateTraceError={
+          candidateTraceIdentityMismatch
+            ? '候选追溯响应身份不一致，已阻止展示'
+            : candidateTraceResult.error
+              ? '候选追溯暂不可用，请稍后重试'
+              : undefined
+        }
+        candidateTraceLoading={candidateTraceResult.fetching}
+        dataTrusted={signalSnapshotTrusted}
+        evaluations={accountBoundSignalEvaluations}
+        evaluationsError={signalEvaluationsResult.error?.message}
+        focusStockCode={focusedSignalStockCode}
+        hasMoreEvaluations={Boolean(
+          signalEvaluationsPage?.pageInfo.hasNextPage
+        )}
+        loadingEvaluations={signalEvaluationsResult.fetching}
+        monitorError={monitorResult.error?.message || monitor?.lastError}
+        monitor={monitor}
+        onApprove={(session, snapshot) =>
+          void handleSignal(
+            'approve',
+            session.runId,
+            snapshot.pendingEntryIntentId!,
+            snapshot
+          )
+        }
+        onLoadMoreEvaluations={() =>
+          setSignalAfter(signalEvaluationsPage?.pageInfo.endCursor ?? null)
+        }
+        onFocusHandled={() => setFocusedSignalStockCode(null)}
+        onRequestCandidateTrace={setSelectedTrace}
+        onReject={(session, snapshot) =>
+          void handleSignal(
+            'reject',
+            session.runId,
+            snapshot.pendingEntryIntentId!,
+            snapshot
+          )
+        }
+        selectedTrace={selectedTraceForCurrentAccount}
+      />
+    </React.Suspense>
   );
 
   const diagnosticsView = (
@@ -4780,8 +4829,3 @@ export function TTradeGlobalPage() {
     />
   );
 }
-const TTradeReplaySidebar = React.lazy(() =>
-  import('./t-trade-global/TTradeReplaySidebar').then(module => ({
-    default: module.TTradeReplaySidebar,
-  }))
-);

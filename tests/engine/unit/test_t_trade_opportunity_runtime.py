@@ -552,6 +552,114 @@ async def test_candidate_is_exposed_only_after_checkpoint_evaluation_intent_and_
 
 
 @pytest.mark.asyncio
+async def test_formal_live_auto_confirms_durable_candidate(monkeypatch):
+  calls: list[str] = []
+  executor = _executor(SimpleNamespace(materialize_evaluation=AsyncMock()))
+  runtime = _runtime(calls)
+  runtime.context.mode = StrategyRunMode.LIVE
+  intent = _intent()
+  runtime.pending_approvals[intent.intent_id] = intent
+  approve = AsyncMock(
+    return_value={"success": True, "code": "APPROVED", "message": "ok"}
+  )
+  monkeypatch.setattr(executor, "approve_trade_intent", approve)
+  monkeypatch.setattr(
+    strategy_executor_module.TTradeOperationsService,
+    "readiness",
+    AsyncMock(
+      return_value={
+        "stage": "LIVE",
+        "rollout_enabled": True,
+        "automation_ready": True,
+        "can_approve": True,
+        "kill_switch": False,
+        "snapshot_id": "snapshot-1",
+      }
+    ),
+  )
+
+  await executor._dispatch_v3_t_trade_entry_after_persistence(runtime, intent)
+
+  approve.assert_awaited_once_with(
+    runtime.run_id,
+    intent.intent_id,
+    approval_expectation=executor._v3_t_trade_expectation_from_intent(intent),
+    approval_mode="LIVE_AUTO",
+  )
+  assert intent.metadata["approval_mode"] == "LIVE_AUTO"
+  assert intent.metadata["live_auto_snapshot_id"] == "snapshot-1"
+
+
+@pytest.mark.asyncio
+async def test_canary_keeps_candidate_for_manual_confirmation(monkeypatch):
+  calls: list[str] = []
+  executor = _executor(SimpleNamespace(materialize_evaluation=AsyncMock()))
+  runtime = _runtime(calls)
+  runtime.context.mode = StrategyRunMode.LIVE
+  intent = _intent()
+  runtime.pending_approvals[intent.intent_id] = intent
+  approve = AsyncMock()
+  monkeypatch.setattr(executor, "approve_trade_intent", approve)
+  monkeypatch.setattr(
+    strategy_executor_module.TTradeOperationsService,
+    "readiness",
+    AsyncMock(
+      return_value={
+        "stage": "CANARY",
+        "rollout_enabled": True,
+        "automation_ready": True,
+        "can_approve": True,
+        "kill_switch": False,
+      }
+    ),
+  )
+
+  await executor._dispatch_v3_t_trade_entry_after_persistence(runtime, intent)
+
+  approve.assert_not_awaited()
+  assert runtime.pending_approvals[intent.intent_id] is intent
+  assert "approval_mode" not in intent.metadata
+
+
+@pytest.mark.asyncio
+async def test_live_authority_change_downgrades_to_manual_confirmation(monkeypatch):
+  calls: list[str] = []
+  executor = _executor(SimpleNamespace(materialize_evaluation=AsyncMock()))
+  runtime = _runtime(calls)
+  runtime.context.mode = StrategyRunMode.LIVE
+  intent = _intent()
+  runtime.pending_approvals[intent.intent_id] = intent
+  approve = AsyncMock()
+  monkeypatch.setattr(executor, "approve_trade_intent", approve)
+  monkeypatch.setattr(
+    strategy_executor_module.TTradeOperationsService,
+    "readiness",
+    AsyncMock(
+      return_value={
+        "stage": "LIVE",
+        "rollout_enabled": True,
+        "automation_ready": False,
+        "can_approve": False,
+        "kill_switch": False,
+      }
+    ),
+  )
+
+  await executor._dispatch_v3_t_trade_entry_after_persistence(runtime, intent)
+
+  approve.assert_not_awaited()
+  assert runtime.pending_approvals[intent.intent_id] is intent
+  assert intent.metadata["approval_mode"] == "MANUAL_FALLBACK"
+  assert intent.metadata["live_auto_downgrade_code"] == (
+    "LIVE_AUTO_AUTHORITY_NOT_READY"
+  )
+  assert runtime.state_manager.status_updates[-1] == (
+    intent.intent_id,
+    "AWAITING_APPROVAL",
+  )
+
+
+@pytest.mark.asyncio
 async def test_account_coordination_in_progress_suppresses_before_strict_recorder():
   calls: list[str] = []
   executor = _executor(SimpleNamespace(materialize_evaluation=AsyncMock()))

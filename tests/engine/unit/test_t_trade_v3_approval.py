@@ -238,6 +238,51 @@ async def test_v3_approval_rejects_stale_client_token_without_invalidating_candi
 
 
 @pytest.mark.asyncio
+async def test_live_auto_authority_change_keeps_durable_manual_fallback(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  executor, runtime, intent = _runtime_and_intent()
+  runtime.context.mode = StrategyRunMode.LIVE
+  monkeypatch.setattr(
+    executor_module.TTradeOperationsService,
+    "readiness",
+    AsyncMock(
+      return_value={
+        "stage": "LIVE",
+        "rollout_enabled": True,
+        "automation_ready": False,
+        "can_approve": False,
+        "kill_switch": False,
+      }
+    ),
+  )
+
+  result = await executor.approve_trade_intent(
+    runtime.run_id,
+    intent.intent_id,
+    approval_expectation=_expectation(),
+    approval_mode="LIVE_AUTO",
+  )
+
+  assert result == {
+    "success": False,
+    "code": "LIVE_AUTO_AUTHORITY_NOT_READY",
+    "message": "正式 LIVE 自动执行授权或账户安全事实已变化，信号保持待人工确认",
+  }
+  assert runtime.pending_approvals[intent.intent_id] is intent
+  assert intent.metadata["approval_mode"] == "MANUAL_FALLBACK"
+  assert runtime.state_manager.updates[-1] == (
+    intent.intent_id,
+    "AWAITING_APPROVAL",
+    {
+      "metadata": intent.metadata,
+      "notes": "LIVE_AUTO_AUTHORITY_NOT_READY",
+    },
+  )
+  executor._process_trade_intent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_v3_approval_persistence_failure_keeps_pending_and_never_routes():
   executor, runtime, intent = _runtime_and_intent()
   runtime.state_manager.strict_error = RuntimeError("database unavailable")
