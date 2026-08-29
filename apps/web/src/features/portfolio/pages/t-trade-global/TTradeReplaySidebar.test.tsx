@@ -2,7 +2,10 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { type ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { TTradeReplaySidebar } from './TTradeReplaySidebar';
+import {
+  TTradeReplayAccountPanel,
+  TTradeReplaySidebar,
+} from './TTradeReplaySidebar';
 
 vi.mock('urql', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('urql');
@@ -53,7 +56,7 @@ function createContext(
 }
 
 describe('TTradeReplaySidebar', () => {
-  it('maintains replay records below the replay account', () => {
+  it('uses the sidebar exclusively for replay records', () => {
     const onCreate = vi.fn();
     const onDelete = vi.fn();
     const onSelectRun = vi.fn();
@@ -67,7 +70,6 @@ describe('TTradeReplaySidebar', () => {
 
     render(
       <TTradeReplaySidebar
-        accountId="300000013250"
         context={createContext({
           activeRunId: historyItem.runId,
           history: [historyItem],
@@ -79,6 +81,8 @@ describe('TTradeReplaySidebar', () => {
     );
 
     expect(screen.getByText('回测记录')).toBeInTheDocument();
+    expect(screen.queryByText('冻结初始账户')).not.toBeInTheDocument();
+    expect(screen.queryByText('持仓明细')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '新增' }));
     fireEvent.click(screen.getByRole('button', { name: /^2026-08-03已完成/ }));
     fireEvent.click(
@@ -90,7 +94,7 @@ describe('TTradeReplaySidebar', () => {
     expect(onDelete).toHaveBeenCalledWith(historyItem);
   });
 
-  it('keeps new replay account maintenance in the left sidebar', () => {
+  it('renders new replay account maintenance in the main account panel', () => {
     const onSourceChange = vi.fn();
     const context = createContext({
       editor: {
@@ -108,12 +112,12 @@ describe('TTradeReplaySidebar', () => {
       mode: 'CREATE',
     });
 
-    render(<TTradeReplaySidebar accountId="300000013250" context={context} />);
+    render(<TTradeReplayAccountPanel context={context} />);
 
     expect(
-      screen.getByRole('heading', { name: '新增回测账户' })
+      screen.getByRole('heading', { name: '配置初始回测账户' })
     ).toBeInTheDocument();
-    expect(screen.getAllByText('新增')).toHaveLength(2);
+    expect(screen.getByText('新建')).toBeInTheDocument();
     expect(
       screen.getByRole('group', { name: '回测账户来源' })
     ).toBeInTheDocument();
@@ -142,7 +146,7 @@ describe('TTradeReplaySidebar', () => {
       totalAsset: 22200,
     });
 
-    render(<TTradeReplaySidebar accountId="300000013250" context={context} />);
+    render(<TTradeReplayAccountPanel context={context} />);
 
     expect(
       screen.getByRole('heading', { name: '冻结初始账户' })
@@ -194,7 +198,7 @@ describe('TTradeReplaySidebar', () => {
       source: 'MANUAL',
     });
 
-    render(<TTradeReplaySidebar accountId="300000013250" context={context} />);
+    render(<TTradeReplayAccountPanel context={context} />);
 
     fireEvent.change(screen.getByLabelText('可用资金'), {
       target: { value: '60000' },

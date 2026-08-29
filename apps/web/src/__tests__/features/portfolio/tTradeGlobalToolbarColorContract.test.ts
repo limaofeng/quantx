@@ -75,18 +75,21 @@ describe('TTradeGlobalPage toolbar color contract', () => {
     );
   });
 
-  it('keeps replay subviews in the shared toolbar instead of a nested content nav', () => {
+  it('shows replay detail subviews only after a record is selected', () => {
     const source = readFileSync(new URL(SOURCE_PATH, import.meta.url), 'utf8');
     const toolbar = readToolbarSource();
     const replaySubviews = sourceSection(
       toolbar,
-      "{workspaceMode === 'REPLAY' && (",
+      "{workspaceMode === 'REPLAY' &&",
       '      </nav>'
     );
 
-    for (const label of ['总览', '信号', '做T仓位', '运行动态']) {
+    for (const label of ['总览', '信号', '做T仓位', '运行动态', '账户']) {
       expect(replaySubviews).toContain(`'${label}'`);
     }
+    expect(replaySubviews).toContain(
+      'Boolean(replaySidebarContext?.activeRunId)'
+    );
     expect(replaySubviews).toContain('focus-visible:ring-cyan-400/60');
     expect(replaySubviews).toContain("? 'text-cyan-200 after:bg-cyan-400'");
     expect(source).not.toContain('aria-label="回放内容"');

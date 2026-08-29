@@ -223,6 +223,22 @@ const TTradeReplaySidebar = React.lazy(() =>
   }))
 );
 
+const TTradeReplayAccountPanel = React.lazy(() =>
+  import('./t-trade-global/TTradeReplaySidebar').then(module => ({
+    default: module.TTradeReplayAccountPanel,
+  }))
+);
+
+const tTradeReplayAccountFallback = (
+  <div
+    className="flex min-h-64 items-center justify-center text-ui-label text-slate-500"
+    role="status"
+  >
+    <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+    正在加载回测账户…
+  </div>
+);
+
 const TTradeSignalsView = React.lazy(() =>
   import('./t-trade-global/TTradeSignalsView').then(module => ({
     default: module.TTradeSignalsView,
@@ -351,7 +367,8 @@ function useStableValueByKey<T>(
   return stableValueByKey(cache.current, key, value, valueKey);
 }
 
-type ReplayWorkspaceView = 'OVERVIEW' | 'SIGNALS' | 'POSITIONS' | 'EVENTS';
+type ReplayWorkspaceView =
+  'OVERVIEW' | 'SIGNALS' | 'POSITIONS' | 'EVENTS' | 'ACCOUNT';
 
 function replaySignalValue(value: unknown) {
   if (value === null || value === undefined || value === '') return '--';
@@ -1070,7 +1087,10 @@ function TTradeReplayPanel({
         if (target) void handleDelete(target);
       },
       onHistoryRefresh: () => refreshHistory({ requestPolicy: 'network-only' }),
-      onSelectRun: (runId: string) => setActiveRunId(runId),
+      onSelectRun: (runId: string) => {
+        setActiveRunId(runId);
+        onActiveViewChange('OVERVIEW');
+      },
     };
     if (activeRunId) {
       if (!replay) {
@@ -1578,136 +1598,140 @@ function TTradeReplayPanel({
       <div className="flex min-h-0 flex-1 flex-col">
         {activeView === 'OVERVIEW' ? (
           <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
-            <section className="border-b border-white/[0.06] bg-[#0a1728] p-ui-section">
-              <div className="flex flex-wrap items-end justify-between gap-ui-section">
-                <div>
-                  <div className="flex items-center gap-2 text-ui-body font-black text-slate-100">
-                    <FlaskConical className="h-4 w-4 text-cyan-300" />
-                    历史回放测试
-                    <span
-                      aria-live="polite"
-                      className={cn(
-                        'border px-1.5 py-0.5 text-ui-micro font-bold',
-                        graphqlWsStatus === 'connected'
-                          ? 'border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300'
-                          : 'border-amber-400/20 bg-amber-400/[0.06] text-amber-300'
-                      )}
-                    >
-                      {graphqlWsStatus === 'connected'
-                        ? '实时推送'
-                        : '轮询恢复'}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-ui-caption text-slate-500">
-                    使用同一做 T
-                    策略和交易风控；测试信号自动确认，不会提交实盘委托。
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-end gap-2">
+            {!activeRunId && (
+              <section className="border-b border-white/[0.06] bg-[#0a1728] p-ui-section">
+                <div className="flex flex-wrap items-end justify-between gap-ui-section">
                   <div>
-                    <Label
-                      htmlFor="replay-start"
-                      className="text-ui-caption text-slate-500"
-                    >
-                      开始日期
-                    </Label>
-                    <Input
-                      id="replay-start"
-                      type="date"
-                      value={startDate}
-                      max={endDate}
-                      onChange={event => setStartDate(event.target.value)}
-                      className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
-                    />
-                  </div>
-                  <div>
-                    <Label
-                      htmlFor="replay-end"
-                      className="text-ui-caption text-slate-500"
-                    >
-                      结束日期
-                    </Label>
-                    <Input
-                      id="replay-end"
-                      type="date"
-                      value={endDate}
-                      min={startDate}
-                      onChange={event => setEndDate(event.target.value)}
-                      className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
-                    />
-                  </div>
-                  <div className="flex h-8 overflow-hidden border border-white/10">
-                    {([1, 5, 20] as const).map(days => (
-                      <button
-                        key={days}
-                        type="button"
-                        onClick={() => setPreset(days)}
-                        className="cursor-pointer border-r border-white/10 px-2.5 text-ui-caption font-bold text-slate-400 transition-colors last:border-r-0 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
+                    <div className="flex items-center gap-2 text-ui-body font-black text-slate-100">
+                      <FlaskConical className="h-4 w-4 text-cyan-300" />
+                      历史回放测试
+                      <span
+                        aria-live="polite"
+                        className={cn(
+                          'border px-1.5 py-0.5 text-ui-micro font-bold',
+                          graphqlWsStatus === 'connected'
+                            ? 'border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300'
+                            : 'border-amber-400/20 bg-amber-400/[0.06] text-amber-300'
+                        )}
                       >
-                        {days}日
-                      </button>
-                    ))}
+                        {graphqlWsStatus === 'connected'
+                          ? '实时推送'
+                          : '轮询恢复'}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-ui-caption text-slate-500">
+                      使用同一做 T
+                      策略和交易风控；测试信号自动确认，不会提交实盘委托。
+                    </p>
                   </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={handleStart}
-                    disabled={
-                      !accountId ||
-                      !preparation ||
-                      (portfolioSource === 'SNAPSHOT'
-                        ? !snapshotPortfolioValid
-                        : !manualPortfolioValid) ||
-                      startResult.fetching ||
-                      history.some(item =>
-                        ['PENDING', 'RUNNING', 'STARTING'].includes(item.status)
-                      )
-                    }
-                    className="h-8 rounded-sm bg-cyan-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-cyan-400"
-                  >
-                    {startResult.fetching ? (
-                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-                    ) : (
-                      <Play className="mr-1.5 h-3.5 w-3.5" />
-                    )}
-                    启动回放
-                  </Button>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div>
+                      <Label
+                        htmlFor="replay-start"
+                        className="text-ui-caption text-slate-500"
+                      >
+                        开始日期
+                      </Label>
+                      <Input
+                        id="replay-start"
+                        type="date"
+                        value={startDate}
+                        max={endDate}
+                        onChange={event => setStartDate(event.target.value)}
+                        className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
+                      />
+                    </div>
+                    <div>
+                      <Label
+                        htmlFor="replay-end"
+                        className="text-ui-caption text-slate-500"
+                      >
+                        结束日期
+                      </Label>
+                      <Input
+                        id="replay-end"
+                        type="date"
+                        value={endDate}
+                        min={startDate}
+                        onChange={event => setEndDate(event.target.value)}
+                        className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
+                      />
+                    </div>
+                    <div className="flex h-8 overflow-hidden border border-white/10">
+                      {([1, 5, 20] as const).map(days => (
+                        <button
+                          key={days}
+                          type="button"
+                          onClick={() => setPreset(days)}
+                          className="cursor-pointer border-r border-white/10 px-2.5 text-ui-caption font-bold text-slate-400 transition-colors last:border-r-0 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
+                        >
+                          {days}日
+                        </button>
+                      ))}
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={handleStart}
+                      disabled={
+                        !accountId ||
+                        !preparation ||
+                        (portfolioSource === 'SNAPSHOT'
+                          ? !snapshotPortfolioValid
+                          : !manualPortfolioValid) ||
+                        startResult.fetching ||
+                        history.some(item =>
+                          ['PENDING', 'RUNNING', 'STARTING'].includes(
+                            item.status
+                          )
+                        )
+                      }
+                      className="h-8 rounded-sm bg-cyan-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-cyan-400"
+                    >
+                      {startResult.fetching ? (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                      ) : (
+                        <Play className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      启动回放
+                    </Button>
+                  </div>
                 </div>
-              </div>
 
-              <div
-                className={cn(
-                  'mt-3 flex items-start gap-2 border px-3 py-2 text-ui-caption',
-                  preparation?.requiresManualPortfolio ||
-                    preparationResult.error
-                    ? 'border-amber-400/20 bg-amber-400/[0.06] text-amber-100'
-                    : 'border-cyan-400/15 bg-cyan-400/[0.04] text-cyan-100'
-                )}
-              >
-                {preparationResult.fetching ? (
-                  <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
-                ) : preparation?.requiresManualPortfolio ||
-                  preparationResult.error ? (
-                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                )}
-                <span>
-                  {preparationResult.error?.message ||
-                    preparation?.message ||
-                    '正在读取回放开始日前的账户快照…'}
-                  {preparation?.snapshotDate && (
-                    <span className="ml-2 font-mono text-slate-400">
-                      快照 {preparation.snapshotDate} ·{' '}
-                      {preparation.positions.length} 只持仓 · 总资产 ¥
-                      {formatNumber(preparation.initialTotalAsset)}
-                    </span>
+                <div
+                  className={cn(
+                    'mt-3 flex items-start gap-2 border px-3 py-2 text-ui-caption',
+                    preparation?.requiresManualPortfolio ||
+                      preparationResult.error
+                      ? 'border-amber-400/20 bg-amber-400/[0.06] text-amber-100'
+                      : 'border-cyan-400/15 bg-cyan-400/[0.04] text-cyan-100'
                   )}
-                </span>
-              </div>
-            </section>
+                >
+                  {preparationResult.fetching ? (
+                    <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+                  ) : preparation?.requiresManualPortfolio ||
+                    preparationResult.error ? (
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  ) : (
+                    <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  )}
+                  <span>
+                    {preparationResult.error?.message ||
+                      preparation?.message ||
+                      '正在读取回放开始日前的账户快照…'}
+                    {preparation?.snapshotDate && (
+                      <span className="ml-2 font-mono text-slate-400">
+                        快照 {preparation.snapshotDate} ·{' '}
+                        {preparation.positions.length} 只持仓 · 总资产 ¥
+                        {formatNumber(preparation.initialTotalAsset)}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              </section>
+            )}
 
-            {replay ? (
+            {activeRunId && replay ? (
               <>
                 <section className="border-b border-white/[0.06] p-ui-section">
                   <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2105,18 +2129,27 @@ function TTradeReplayPanel({
                   </div>
                 </section>
               </>
+            ) : activeRunId ? (
+              <div
+                role="status"
+                className="flex min-h-[360px] items-center justify-center text-ui-label text-slate-500"
+              >
+                <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+                正在读取回放详情…
+              </div>
             ) : (
-              <div className="flex min-h-[360px] flex-col items-center justify-center px-ui-panel text-center">
-                <FlaskConical className="h-10 w-10 text-slate-700" />
-                <h2 className="mt-4 text-ui-body font-black text-slate-300">
-                  选择日期并启动第一次回放
-                </h2>
-                <p className="mt-2 max-w-md text-ui-caption leading-5 text-slate-600">
-                  系统将读取开始日前最近的账户日结快照，并用历史 Tick
-                  数据按时间顺序重放全部合格持仓。
-                </p>
+              <div className="p-ui-section">
+                <React.Suspense fallback={tTradeReplayAccountFallback}>
+                  <TTradeReplayAccountPanel context={replaySidebarContext} />
+                </React.Suspense>
               </div>
             )}
+          </div>
+        ) : activeView === 'ACCOUNT' ? (
+          <div className="min-h-0 flex-1 overflow-y-auto p-ui-section custom-scrollbar">
+            <React.Suspense fallback={tTradeReplayAccountFallback}>
+              <TTradeReplayAccountPanel context={replaySidebarContext} />
+            </React.Suspense>
           </div>
         ) : activeView === 'SIGNALS' ? (
           <div className="min-h-0 flex-1 overflow-hidden">
@@ -3789,20 +3822,17 @@ export function TTradeGlobalPage() {
               Replay Lab
             </div>
             <div className="mt-1 text-ui-title font-black text-slate-100">
-              回测账户
+              回测记录
             </div>
           </div>
           <div className="flex items-center gap-2 p-ui-section text-ui-caption text-slate-500">
             <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-            正在载入回测账户…
+            正在载入回测记录…
           </div>
         </aside>
       }
     >
-      <TTradeReplaySidebar
-        accountId={accountId}
-        context={replaySidebarContext}
-      />
+      <TTradeReplaySidebar context={replaySidebarContext} />
     </React.Suspense>
   );
 
@@ -3818,7 +3848,10 @@ export function TTradeGlobalPage() {
             <button
               key={mode}
               type="button"
-              onClick={() => setWorkspaceMode(mode)}
+              onClick={() => {
+                setWorkspaceMode(mode);
+                if (mode === 'REPLAY') setActiveReplayView('OVERVIEW');
+              }}
               className={cn(
                 'relative flex h-full shrink-0 cursor-pointer items-center gap-1.5 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
                 active
@@ -3865,36 +3898,38 @@ export function TTradeGlobalPage() {
             })}
           </>
         )}
-        {workspaceMode === 'REPLAY' && (
-          <>
-            <span className="mx-2 my-3 w-px bg-white/[0.08]" />
-            {(
-              [
-                ['OVERVIEW', '总览'],
-                ['SIGNALS', '信号'],
-                ['POSITIONS', '做T仓位'],
-                ['EVENTS', '运行动态'],
-              ] as const
-            ).map(([view, label]) => {
-              const active = activeReplayView === view;
-              return (
-                <button
-                  key={view}
-                  type="button"
-                  onClick={() => setActiveReplayView(view)}
-                  className={cn(
-                    'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
-                    active
-                      ? 'text-cyan-200 after:bg-cyan-400'
-                      : 'text-slate-500 hover:text-slate-200'
-                  )}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </>
-        )}
+        {workspaceMode === 'REPLAY' &&
+          Boolean(replaySidebarContext?.activeRunId) && (
+            <>
+              <span className="mx-2 my-3 w-px bg-white/[0.08]" />
+              {(
+                [
+                  ['OVERVIEW', '总览'],
+                  ['SIGNALS', '信号'],
+                  ['POSITIONS', '做T仓位'],
+                  ['EVENTS', '运行动态'],
+                  ['ACCOUNT', '账户'],
+                ] as const
+              ).map(([view, label]) => {
+                const active = activeReplayView === view;
+                return (
+                  <button
+                    key={view}
+                    type="button"
+                    onClick={() => setActiveReplayView(view)}
+                    className={cn(
+                      'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
+                      active
+                        ? 'text-cyan-200 after:bg-cyan-400'
+                        : 'text-slate-500 hover:text-slate-200'
+                    )}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </>
+          )}
       </nav>
 
       <div className="flex shrink-0 items-center gap-2">

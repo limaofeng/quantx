@@ -137,7 +137,7 @@ function ReplayPositionList({
   positions: ReplayPortfolioPositionContext[];
 }) {
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+    <div className="min-h-0">
       {positions.map(position => (
         <div
           key={position.stockCode}
@@ -188,8 +188,8 @@ function ReplayAccountEditor({
   ).length;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+    <div className="min-h-0">
+      <div className="min-h-0">
         <section className="border-b border-white/[0.05] p-ui-section">
           <div className="grid grid-cols-2 gap-3">
             <div className="col-span-2">
@@ -458,17 +458,12 @@ function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
   return (
     <section
       aria-busy={context.historyLoading}
-      className="flex min-h-0 flex-col border-t border-white/[0.06] bg-[#081321]"
+      className="flex min-h-0 flex-1 flex-col bg-[#081321]"
       aria-label="回测记录"
     >
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/[0.06] px-ui-section">
-        <div>
-          <div className="text-ui-caption font-black text-slate-300">
-            回测记录
-          </div>
-          <div className="font-mono text-ui-micro text-slate-700">
-            {context.history.length} 条
-          </div>
+        <div className="text-ui-caption text-slate-600">
+          {context.activeRunId ? '当前已进入记录详情' : '选择记录查看详情'}
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -582,138 +577,114 @@ function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
 }
 
 export function TTradeReplaySidebar({
-  accountId,
   context,
 }: {
-  accountId: string;
   context: ReplaySidebarContext | null;
 }) {
-  const positions = context?.positions || [];
-  const creating = context?.mode === 'CREATE';
+  return (
+    <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
+      <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section">
+        <div>
+          <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-cyan-300">
+            Replay Lab
+          </div>
+          <h1 className="mt-1 text-ui-title font-black text-slate-100">
+            回测记录
+          </h1>
+        </div>
+        <span className="font-mono text-ui-micro text-slate-600">
+          {context?.history.length || 0} 条
+        </span>
+      </div>
+      {context ? (
+        <ReplayHistorySection context={context} />
+      ) : (
+        <div className="flex items-center gap-2 p-ui-section text-ui-caption text-slate-500">
+          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+          正在读取回测记录…
+        </div>
+      )}
+    </aside>
+  );
+}
+
+export function TTradeReplayAccountPanel({
+  context,
+}: {
+  context: ReplaySidebarContext;
+}) {
+  const positions = context.positions || [];
+  const creating = context.mode === 'CREATE';
 
   return (
-    <aside className="studio-workspace-surface h-full min-h-0">
-      <div
-        className="grid h-full min-h-0"
-        style={{
-          gridTemplateRows: context
-            ? 'minmax(0, 3fr) minmax(180px, 2fr)'
-            : 'minmax(0, 1fr)',
-        }}
-      >
-        <div className="flex min-h-0 flex-col">
-          <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section">
-            <div>
-              <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-cyan-300">
-                Replay Lab
+    <section className="min-h-0 border border-white/[0.06] bg-[#081321]">
+      <div className="flex h-12 items-center justify-between border-b border-white/[0.05] px-ui-section">
+        <div>
+          <div className="text-ui-micro font-bold uppercase tracking-[0.12em] text-slate-600">
+            回测账户
+          </div>
+          <h2 className="mt-0.5 text-ui-label font-bold text-slate-200">
+            {creating ? '配置初始回测账户' : '冻结初始账户'}
+          </h2>
+        </div>
+        <span className="border border-blue-400/20 bg-blue-500/[0.07] px-1.5 py-0.5 text-ui-micro font-bold text-blue-200">
+          {creating
+            ? '新建'
+            : context.source === 'SNAPSHOT'
+              ? 'D-1 快照'
+              : '手工组合'}
+        </span>
+      </div>
+
+      {creating && context.editor ? (
+        <ReplayAccountEditor context={context} editor={context.editor} />
+      ) : (
+        <>
+          <div className="border-b border-white/[0.05] p-ui-section">
+            {context.loading ? (
+              <div
+                aria-label="正在读取初始回测账户"
+                className="flex items-center gap-2 text-ui-caption text-slate-500"
+              >
+                <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                正在读取初始账户…
               </div>
-              <h1 className="mt-1 text-ui-title font-black text-slate-100">
-                {creating
-                  ? '新增回测账户'
-                  : context?.frozen
-                    ? '冻结初始账户'
-                    : '初始回测账户'}
-              </h1>
-            </div>
-            {context && (
-              <span className="border border-blue-400/20 bg-blue-500/[0.07] px-1.5 py-0.5 text-ui-micro font-black text-blue-200">
-                {creating
-                  ? '新增'
-                  : context.source === 'SNAPSHOT'
-                    ? 'D-1 快照'
-                    : '手工组合'}
-              </span>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                {[
+                  ['账户', context.accountId || '--'],
+                  ['组合时点', context.asOf || '--'],
+                  ['可用资金', `¥${formatNumber(context.cashAvailable)}`],
+                  ['总资产', `¥${formatNumber(context.totalAsset)}`],
+                ].map(([label, value]) => (
+                  <div key={label} className="border border-white/[0.05] p-3">
+                    <div className="text-ui-micro text-slate-600">{label}</div>
+                    <div className="mt-1 font-mono text-ui-label font-bold text-slate-200">
+                      {value}
+                    </div>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
+          <div className="flex h-10 items-center justify-between border-b border-white/[0.05] px-ui-section">
+            <span className="text-ui-caption font-bold text-slate-300">
+              持仓明细
+            </span>
+            <span className="font-mono text-ui-micro text-slate-600">
+              {positions.length} 只
+            </span>
+          </div>
+          <ReplayPositionList
+            emptyLabel="当前初始账户没有持仓明细"
+            positions={positions}
+          />
+        </>
+      )}
 
-          {creating && context?.editor ? (
-            <ReplayAccountEditor context={context} editor={context.editor} />
-          ) : (
-            <>
-              <div className="shrink-0 border-b border-white/[0.05] p-ui-section">
-                {context?.loading ? (
-                  <div
-                    aria-label="正在读取初始回测账户"
-                    className="flex items-center gap-2 text-ui-caption text-slate-500"
-                  >
-                    <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-                    正在读取初始账户…
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    <div>
-                      <div className="text-ui-micro font-bold uppercase tracking-[0.12em] text-slate-600">
-                        账户
-                      </div>
-                      <div className="mt-1 font-mono text-ui-label text-slate-300">
-                        {context?.accountId || accountId || '--'}
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <div className="text-ui-micro text-slate-600">
-                          组合时点
-                        </div>
-                        <div className="mt-1 font-mono text-ui-caption text-slate-300">
-                          {context?.asOf || '--'}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-ui-micro text-slate-600">持仓</div>
-                        <div className="mt-1 font-mono text-ui-caption text-slate-300">
-                          {positions.length} 只
-                        </div>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 border-t border-white/[0.05] pt-3">
-                      <div>
-                        <div className="text-ui-micro text-slate-600">
-                          可用资金
-                        </div>
-                        <div className="mt-1 font-mono text-ui-label font-bold text-slate-200">
-                          ¥{formatNumber(context?.cashAvailable || 0)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-ui-micro text-slate-600">
-                          总资产
-                        </div>
-                        <div className="mt-1 font-mono text-ui-label font-bold text-slate-200">
-                          ¥{formatNumber(context?.totalAsset || 0)}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col">
-                <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section">
-                  <span className="text-ui-caption font-bold text-slate-300">
-                    持仓明细
-                  </span>
-                  <span className="font-mono text-ui-micro text-slate-600">
-                    {positions.length} 只
-                  </span>
-                </div>
-                <ReplayPositionList
-                  emptyLabel="当前初始账户没有持仓明细"
-                  positions={positions}
-                />
-              </div>
-              <div className="shrink-0 border-t border-white/[0.06] bg-[#091322] p-3 text-ui-caption leading-5 text-slate-500">
-                {context?.message || '选择日期后读取开始日前的账户日结快照。'}
-              </div>
-            </>
-          )}
-
-          {creating && (
-            <div className="shrink-0 border-t border-white/[0.06] bg-[#091322] p-3 text-ui-caption leading-5 text-slate-500">
-              {context?.message || '选择日期后读取开始日前的账户日结快照。'}
-            </div>
-          )}
-        </div>
-        {context && <ReplayHistorySection context={context} />}
+      <div className="border-t border-white/[0.06] bg-[#091322] p-3 text-ui-caption leading-5 text-slate-500">
+        {context.message || '选择日期后读取开始日前的账户日结快照。'}
       </div>
-    </aside>
+    </section>
   );
 }
