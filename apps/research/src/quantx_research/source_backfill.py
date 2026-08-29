@@ -47,7 +47,7 @@ _ACTIVE_REQUEST_STATES = {
   "PROCESSING",
 }
 _ARCHIVABLE_REQUEST_STATES = {"UPLOADED", "COMPLETED", "FAILED"}
-_DATA_ONLY_READY_STATUSES = {"READY", "RECONCILING"}
+_MARKET_DATA_READY_STATUSES = {"READY", "RECONCILING"}
 _CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ)$")
 _SOURCE_ONLY_TERMINAL_PREFIX = "SOURCE_ONLY_ARCHIVED_NO_INFLUX"
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -967,7 +967,7 @@ async def _active_requests(
     ]
 
 
-async def _data_only_agent(
+async def _market_data_agent(
   store: DurableRuntimeStore,
   *,
   max_age_seconds: float,
@@ -976,14 +976,16 @@ async def _data_only_agent(
   now = datetime.now(timezone.utc)
   candidates: list[tuple[datetime, str]] = []
   for item in statuses:
-    if str(item.get("status") or "") not in _DATA_ONLY_READY_STATUSES:
+    if str(item.get("status") or "") not in _MARKET_DATA_READY_STATUSES:
       continue
     details = item.get("details") or {}
     capabilities = {
       str(value).strip().lower()
       for value in details.get("capabilities") or []
     }
-    if not {"market-data", "data-only"}.issubset(capabilities):
+    if "market-data" not in capabilities or not capabilities.intersection(
+      {"live", "data-only"}
+    ):
       continue
     updated_at = item.get("updated_at")
     if not isinstance(updated_at, datetime):
@@ -998,7 +1000,7 @@ async def _data_only_agent(
       candidates.append((updated_at, device_id))
   if not candidates:
     raise SourceBackfillError(
-      "没有新鲜且具备 data-only/market-data 能力的 QMT Agent"
+      "没有新鲜且具备 market-data 与 live/data-only 运行能力的 QMT Agent"
     )
   return max(candidates)[1]
 
@@ -1149,7 +1151,7 @@ async def _process_job(
       poll_seconds=poll_seconds,
       timeout_seconds=queue_timeout_seconds,
     )
-    device_id = await _data_only_agent(
+    device_id = await _market_data_agent(
       store,
       max_age_seconds=agent_max_age_seconds,
     )

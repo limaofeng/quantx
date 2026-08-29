@@ -7,8 +7,10 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import multiprocessing
 import os
+import queue
 import random
 import shutil
 import stat
@@ -45,6 +47,7 @@ from quantx_contracts import (
 )
 
 from .broker import (
+  LIVE_FULL_SNAPSHOT_PARTITIONS,
   MAX_MARKET_DATA_RECORDS,
   HistoricalMarketDataFieldError,
   enrich_report_payload,
@@ -76,7 +79,11 @@ MAX_MARKET_DATA_UPLOAD_CACHE_BYTES = 512 * 1024 * 1024
 MAX_CACHED_MARKET_DATA_REQUESTS = 4
 MAX_QUEUED_MARKET_DATA_REQUESTS = 4
 MAX_QUEUED_TRADE_COMMANDS = 256
+MAX_ACTIVE_NORMAL_TRADE_COMMANDS = 32
+MAX_ACTIVE_PRIORITY_TRADE_COMMANDS = 16
 MAX_CONCURRENT_HISTORY_UPLOADS = 2
+HISTORY_UPLOAD_BYTES_PER_SECOND = 8 * 1024 * 1024
+HISTORY_UPLOAD_BURST_BYTES = 1024 * 1024
 MAX_MARKET_DATA_TOMBSTONES = 1024
 MARKET_DATA_UPLOAD_CACHE_TTL_SECONDS = 60 * 60
 MARKET_DATA_UPLOAD_CACHE_SWEEP_SECONDS = 60
@@ -89,16 +96,39 @@ HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS = 5.0
 XTDATA_CONTROL_TIMEOUT_SECONDS = 60
 XTDATA_READINESS_RETRY_SECONDS = 5
 XTTRADING_READINESS_RETRY_SECONDS = 5
+XTTRADING_INITIALIZATION_TIMEOUT_SECONDS = 60
 XTTRADING_RECONNECT_TIMEOUT_SECONDS = 30
 XTTRADING_SNAPSHOT_TIMEOUT_SECONDS = 30
+XTTRADING_SNAPSHOT_MUTATION_RETRIES = 3
+XTTRADING_PRIORITY_CANCEL = 0
+XTTRADING_PRIORITY_ORDER = 10
+XTTRADING_PRIORITY_READINESS = 20
+XTTRADING_PRIORITY_SNAPSHOT = 30
+XTTRADING_PRIORITY_PERIODIC_SNAPSHOT = 40
+JOURNAL_PRIORITY_CANCEL = 0
+JOURNAL_PRIORITY_REPORT_ACK = 5
+JOURNAL_PRIORITY_COMMAND = 10
+JOURNAL_PRIORITY_REPORT_SCAN = 15
+JOURNAL_PRIORITY_SNAPSHOT = 20
 # A stale native session is unsafe to keep alive indefinitely.  The outer
 # process supervisor owns the only safe reinitialization boundary once this
 # bounded recovery window expires.
 XTTRADING_RECOVERY_MAX_SECONDS = 90
 WEBSOCKET_PING_INTERVAL_SECONDS = 20
 WEBSOCKET_PING_TIMEOUT_SECONDS = 60
-WEBSOCKET_SEND_TIMEOUT_SECONDS = 30
+WEBSOCKET_SEND_TIMEOUT_SECONDS = 5
+MARKET_EVENT_SEND_TIMEOUT_SECONDS = 0.25
 CONTROL_HEARTBEAT_INTERVAL_SECONDS = 15.0
+ACCOUNT_SNAPSHOT_INTERVAL_SECONDS = 30.0
+REPORT_SEND_WINDOW = 16
+REPORT_SEND_SCAN_LIMIT = REPORT_SEND_WINDOW * 2
+REPORT_ACK_QUEUE_CAPACITY = REPORT_SEND_WINDOW * 4
+REPORT_RETRY_BASE_SECONDS = 0.25
+REPORT_RETRY_MAX_SECONDS = 5.0
+MAX_QUEUED_MARKET_CONTROLS = 256
+CONTROL_SEND_HIGH_CAPACITY = 256
+CONTROL_SEND_REPORT_CAPACITY = 1024
+CONTROL_SEND_LOW_CAPACITY = 256
 # The initial snapshot is roughly 3 MiB and its Redis publish may cross a
 # forwarded development Redis endpoint.  Keep this above the API's dedicated
 # 60-second snapshot commit budget; normal deltas are still bounded by the
@@ -137,10 +167,14 @@ MARKET_STREAM_MICROBATCH_INSTRUMENTS = (
 MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS = 5.0
 MARKET_STREAM_NATIVE_SILENCE_SECONDS = 10.0
 MARKET_STREAM_NATIVE_SILENCE_CONFIRMATIONS = 2
-MARKET_DATA_UPLOAD_READ_BYTES = 256 * 1024
+MARKET_DATA_UPLOAD_READ_BYTES = 64 * 1024
 MARKET_DATA_SPOOL_DIRECTORY_NAME = "market-data-spool"
 MARKET_DATA_SPOOL_REQUEST_PREFIX = "request-"
 MARKET_DATA_SPOOL_OWNER_MARKER = ".owner.json"
+MARKET_DATA_SPOOL_MANIFEST = "manifest.json"
+MARKET_DATA_SPOOL_TERMINAL_MARKER = "terminal.json"
+MARKET_DATA_SPOOL_TERMINAL_MARKER_MAX_BYTES = 16 * 1024
+MARKET_DATA_SPOOL_MANIFEST_VERSION = 1
 LEGACY_MARKET_DATA_SPOOL_PREFIX = "quantx-market-data-spool-"
 SHANGHAI_ZONE = ZoneInfo("Asia/Shanghai")
 _MARKET_DATA_CHUNK_BOUNDARY = object()
@@ -201,6 +235,247 @@ class _PendingMarketAck:
   sent_monotonic: float
 
 
+@dataclass(slots=True)
+class _ControlSocketFrame:
+  serialized: str
+  completion: asyncio.Future[bool]
+
+
+class _CommandDispatchQueue:
+  """Bounded command lanes with capacity reserved for cancellations."""
+
+  def __init__(self) -> None:
+    self.high: asyncio.Queue[tuple[int, int, AgentEnvelope]] = asyncio.Queue(
+      maxsize=MAX_ACTIVE_PRIORITY_TRADE_COMMANDS
+    )
+    self.normal: asyncio.Queue[tuple[int, int, AgentEnvelope]] = asyncio.Queue(
+      maxsize=MAX_QUEUED_TRADE_COMMANDS - MAX_ACTIVE_PRIORITY_TRADE_COMMANDS
+    )
+
+  def put_nowait(self, item: tuple[int, int, AgentEnvelope]) -> None:
+    priority, _, _ = item
+    (self.high if priority == 0 else self.normal).put_nowait(item)
+
+  async def get_high(self) -> tuple[int, int, AgentEnvelope]:
+    return await self.high.get()
+
+  async def get_normal(self) -> tuple[int, int, AgentEnvelope]:
+    return await self.normal.get()
+
+  def task_done(self, priority: int) -> None:
+    (self.high if priority == 0 else self.normal).task_done()
+
+  async def join(self) -> None:
+    await asyncio.gather(self.high.join(), self.normal.join())
+
+  def empty(self) -> bool:
+    return self.high.empty() and self.normal.empty()
+
+  def qsize(self) -> int:
+    return self.high.qsize() + self.normal.qsize()
+
+
+@dataclass(slots=True)
+class _JournalCall:
+  loop: asyncio.AbstractEventLoop
+  function: Callable[..., Any]
+  args: tuple[Any, ...]
+  kwargs: dict[str, Any]
+  outcome: asyncio.Future[Any]
+
+
+class _JournalPriorityWorker:
+  """Serialize SQLite work while reserving queue priority for cancellations."""
+
+  def __init__(self) -> None:
+    self._queue: queue.PriorityQueue[tuple[int, int, _JournalCall | None]] = (
+      queue.PriorityQueue()
+    )
+    self._lock = threading.Lock()
+    self._sequence = 0
+    self._thread: threading.Thread | None = None
+    self._closed = False
+
+  async def execute(
+    self,
+    function: Callable[..., Any],
+    *args: Any,
+    priority: int,
+    **kwargs: Any,
+  ) -> Any:
+    loop = asyncio.get_running_loop()
+    outcome = loop.create_future()
+    outcome.add_done_callback(self._consume_abandoned_outcome)
+    call = _JournalCall(loop, function, args, kwargs, outcome)
+    with self._lock:
+      if self._closed:
+        raise RuntimeError("journal worker is closed")
+      self._sequence += 1
+      self._queue.put_nowait((int(priority), self._sequence, call))
+      self._ensure_thread_locked()
+    return await asyncio.shield(outcome)
+
+  def close(self) -> None:
+    with self._lock:
+      if self._closed:
+        return
+      self._closed = True
+      self._sequence += 1
+      self._queue.put_nowait((10_000, self._sequence, None))
+
+  def _ensure_thread_locked(self) -> None:
+    if self._thread is not None and self._thread.is_alive():
+      return
+    self._thread = threading.Thread(
+      target=self._run,
+      name="qmt-journal-priority",
+      daemon=True,
+    )
+    self._thread.start()
+
+  def _run(self) -> None:
+    while True:
+      _, _, call = self._queue.get()
+      if call is None:
+        return
+      try:
+        result = call.function(*call.args, **call.kwargs)
+      except BaseException as exc:
+        self._schedule(call, error=exc)
+      else:
+        self._schedule(call, result=result)
+
+  @staticmethod
+  def _schedule(
+    call: _JournalCall,
+    *,
+    result: Any = None,
+    error: BaseException | None = None,
+  ) -> None:
+    try:
+      call.loop.call_soon_threadsafe(
+        _JournalPriorityWorker._finish,
+        call,
+        result,
+        error,
+      )
+    except RuntimeError:
+      pass
+
+  @staticmethod
+  def _finish(
+    call: _JournalCall,
+    result: Any,
+    error: BaseException | None,
+  ) -> None:
+    if call.outcome.done():
+      return
+    if error is None:
+      call.outcome.set_result(result)
+    else:
+      call.outcome.set_exception(error)
+
+  @staticmethod
+  def _consume_abandoned_outcome(outcome: asyncio.Future[Any]) -> None:
+    if not outcome.cancelled():
+      outcome.exception()
+
+
+class _PriorityControlSocketWriter:
+  """Serialize physical sends while reserving capacity for control traffic."""
+
+  def __init__(self, socket) -> None:
+    self.socket = socket
+    self.high: asyncio.Queue[_ControlSocketFrame] = asyncio.Queue(
+      maxsize=CONTROL_SEND_HIGH_CAPACITY
+    )
+    self.reports: asyncio.Queue[_ControlSocketFrame] = asyncio.Queue(
+      maxsize=CONTROL_SEND_REPORT_CAPACITY
+    )
+    self.low: asyncio.Queue[_ControlSocketFrame] = asyncio.Queue(
+      maxsize=CONTROL_SEND_LOW_CAPACITY
+    )
+    self.wakeup = asyncio.Event()
+    self.closed = False
+
+  async def send(self, serialized: str, *, priority: int) -> bool:
+    if self.closed:
+      raise RuntimeError("control WebSocket writer is closed")
+    loop = asyncio.get_running_loop()
+    completion: asyncio.Future[bool] = loop.create_future()
+    completion.add_done_callback(self._consume_abandoned_completion)
+    frame = _ControlSocketFrame(serialized=serialized, completion=completion)
+    target = self.high if priority == 0 else self.reports if priority == 1 else self.low
+    try:
+      target.put_nowait(frame)
+    except asyncio.QueueFull:
+      if priority >= 2:
+        completion.cancel()
+        logger.warning("Dropped low-priority control frame under backpressure")
+        return False
+      raise RuntimeError("priority control WebSocket queue is full")
+    self.wakeup.set()
+    if priority >= 2:
+      # Single-instrument quotes are transient. Their producer must never wait
+      # behind a physical WebSocket send and starve heartbeat/report handling.
+      return True
+    return await asyncio.shield(completion)
+
+  async def run(self) -> None:
+    try:
+      while True:
+        frame, source = self._take_next()
+        if frame is None:
+          self.wakeup.clear()
+          frame, source = self._take_next()
+          if frame is None:
+            await self.wakeup.wait()
+            continue
+        try:
+          await asyncio.wait_for(
+            self.socket.send(frame.serialized),
+            timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+          )
+        except BaseException as exc:
+          if not frame.completion.done():
+            frame.completion.set_exception(exc)
+          raise
+        else:
+          if not frame.completion.done():
+            frame.completion.set_result(True)
+        finally:
+          source.task_done()
+    finally:
+      self.closed = True
+      self._fail_pending(RuntimeError("control WebSocket writer stopped"))
+
+  def _take_next(
+    self,
+  ) -> tuple[_ControlSocketFrame | None, asyncio.Queue[_ControlSocketFrame] | None]:
+    for source in (self.high, self.reports, self.low):
+      try:
+        return source.get_nowait(), source
+      except asyncio.QueueEmpty:
+        continue
+    return None, None
+
+  def _fail_pending(self, error: BaseException) -> None:
+    for source in (self.high, self.reports, self.low):
+      while True:
+        try:
+          frame = source.get_nowait()
+        except asyncio.QueueEmpty:
+          break
+        if not frame.completion.done():
+          frame.completion.set_exception(error)
+        source.task_done()
+
+  @staticmethod
+  def _consume_abandoned_completion(future: asyncio.Future[bool]) -> None:
+    if not future.cancelled():
+      future.exception()
+
+
 class _BoundedMarketBatchBuffer:
   """Bound queued and unacknowledged batches by their actual wire bytes."""
 
@@ -259,6 +534,10 @@ class _MarketDataRequestAlreadyCompleted(RuntimeError):
   """The server redelivered a request that this runtime fully uploaded."""
 
 
+class _MarketDataSpoolCleanupPending(RuntimeError):
+  """Historical spool quarantine is retryable and must not stop live trading."""
+
+
 class _FatalMarketDataPreparationError(RuntimeError):
   """A hung native request requires the supervised Agent process to restart."""
 
@@ -267,8 +546,238 @@ class _FatalTradingRecoveryError(RuntimeError):
   """A stale XTTrading session did not recover within its bounded window."""
 
 
-class _FatalMarketDataUploadConflict(_FatalMarketDataPreparationError):
-  """A server-side chunk identity conflict forbids further mixed uploads."""
+class _StaleTradingSnapshotError(RuntimeError):
+  """Trading state changed while a partitioned snapshot was being captured."""
+
+
+@dataclass(slots=True)
+class _XTTradingWaiter:
+  loop: asyncio.AbstractEventLoop
+  started: asyncio.Future[None]
+  outcome: asyncio.Future[Any]
+
+
+@dataclass(slots=True)
+class _XTTradingCall:
+  operation: str
+  function: Callable[..., Any]
+  args: tuple[Any, ...]
+  timeout: float
+  coalesce_key: str | None
+  waiters: list[_XTTradingWaiter]
+  started: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _XTTradingSubmission:
+  call: _XTTradingCall
+  waiter: _XTTradingWaiter
+
+
+class _XTTradingPriorityWorker:
+  """Own the process's one serialized XTTrading native execution lane."""
+
+  def __init__(
+    self,
+    *,
+    on_timeout: Callable[[BaseException, str], None] | None = None,
+  ) -> None:
+    self._queue: queue.PriorityQueue[tuple[int, int, _XTTradingCall | None]] = (
+      queue.PriorityQueue()
+    )
+    self._lock = threading.Lock()
+    self._pending: dict[str, _XTTradingCall] = {}
+    self._calls: dict[int, _XTTradingCall] = {}
+    self._sequence = 0
+    self._thread: threading.Thread | None = None
+    self._closed = False
+    self._poisoned: BaseException | None = None
+    self._on_timeout = on_timeout
+
+  def submit(
+    self,
+    *,
+    operation: str,
+    function: Callable[..., Any],
+    args: tuple[Any, ...],
+    timeout: float,
+    priority: int,
+    coalesce_key: str | None,
+  ) -> _XTTradingSubmission:
+    loop = asyncio.get_running_loop()
+    waiter = _XTTradingWaiter(
+      loop=loop,
+      started=loop.create_future(),
+      outcome=loop.create_future(),
+    )
+    with self._lock:
+      if self._closed:
+        raise RuntimeError("XTTrading worker is closed")
+      if self._poisoned is not None:
+        raise self._poisoned
+      call = self._pending.get(coalesce_key) if coalesce_key else None
+      if call is not None:
+        call.waiters.append(waiter)
+        if call.started:
+          waiter.started.set_result(None)
+        return _XTTradingSubmission(call=call, waiter=waiter)
+      call = _XTTradingCall(
+        operation=operation,
+        function=function,
+        args=args,
+        timeout=max(0.001, float(timeout)),
+        coalesce_key=coalesce_key,
+        waiters=[waiter],
+      )
+      if coalesce_key:
+        self._pending[coalesce_key] = call
+      self._calls[id(call)] = call
+      self._sequence += 1
+      self._queue.put_nowait((int(priority), self._sequence, call))
+      self._ensure_thread_locked()
+    return _XTTradingSubmission(call=call, waiter=waiter)
+
+  @property
+  def queued_calls(self) -> int:
+    return self._queue.qsize()
+
+  def abandon(self, submission: _XTTradingSubmission) -> None:
+    with self._lock:
+      try:
+        submission.call.waiters.remove(submission.waiter)
+      except ValueError:
+        pass
+    for future in (submission.waiter.started, submission.waiter.outcome):
+      if not future.done():
+        future.cancel()
+
+  def poison(self, error: BaseException) -> None:
+    with self._lock:
+      if self._poisoned is None:
+        self._poisoned = error
+      calls = list(self._calls.values())
+    for call in calls:
+      self._deliver(call, error=error)
+
+  def close(self) -> None:
+    error = RuntimeError("XTTrading worker is closed")
+    with self._lock:
+      if self._closed:
+        return
+      self._closed = True
+      self._sequence += 1
+      self._queue.put_nowait((10_000, self._sequence, None))
+      calls = list(self._calls.values())
+    for call in calls:
+      self._deliver(call, error=error)
+
+  def _ensure_thread_locked(self) -> None:
+    if self._thread is not None and self._thread.is_alive():
+      return
+    self._thread = threading.Thread(
+      target=self._run,
+      name="qmt-xttrading-priority",
+      daemon=True,
+    )
+    self._thread.start()
+
+  def _run(self) -> None:
+    while True:
+      _, _, call = self._queue.get()
+      if call is None:
+        return
+      with self._lock:
+        poisoned = self._poisoned
+        closed = self._closed
+        call.started = True
+        waiters = tuple(call.waiters)
+      if poisoned is not None or closed:
+        self._deliver(
+          call,
+          error=poisoned or RuntimeError("XTTrading worker is closed"),
+        )
+        continue
+      for waiter in waiters:
+        self._schedule(waiter.loop, self._mark_started, waiter)
+      watchdog = threading.Timer(
+        call.timeout,
+        self._execution_timed_out,
+        args=(call,),
+      )
+      watchdog.name = f"qmt-xttrading-watchdog:{call.operation[:24]}"
+      watchdog.daemon = True
+      watchdog.start()
+      try:
+        result = call.function(*call.args)
+      except BaseException as exc:
+        watchdog.cancel()
+        self._deliver(call, error=exc)
+      else:
+        watchdog.cancel()
+        self._deliver(call, result=result)
+
+  def _execution_timed_out(self, call: _XTTradingCall) -> None:
+    with self._lock:
+      if id(call) not in self._calls or self._poisoned is not None:
+        return
+    error = _FatalTradingRecoveryError(
+      f"XTTrading {call.operation} timed out; Agent restart required"
+    )
+    self.poison(error)
+    if self._on_timeout is not None:
+      try:
+        self._on_timeout(error, call.operation)
+      except Exception:
+        logger.exception("XTTrading timeout callback failed")
+
+  def _deliver(
+    self,
+    call: _XTTradingCall,
+    *,
+    result: Any = None,
+    error: BaseException | None = None,
+  ) -> None:
+    with self._lock:
+      if call.coalesce_key and self._pending.get(call.coalesce_key) is call:
+        self._pending.pop(call.coalesce_key, None)
+      self._calls.pop(id(call), None)
+      waiters = tuple(call.waiters)
+      call.waiters.clear()
+    for waiter in waiters:
+      self._schedule(
+        waiter.loop,
+        self._finish_waiter,
+        waiter,
+        result,
+        error,
+      )
+
+  @staticmethod
+  def _schedule(loop: asyncio.AbstractEventLoop, callback, *args: Any) -> None:
+    try:
+      loop.call_soon_threadsafe(callback, *args)
+    except RuntimeError:
+      pass
+
+  @staticmethod
+  def _mark_started(waiter: _XTTradingWaiter) -> None:
+    if not waiter.started.done():
+      waiter.started.set_result(None)
+
+  @staticmethod
+  def _finish_waiter(
+    waiter: _XTTradingWaiter,
+    result: Any,
+    error: BaseException | None,
+  ) -> None:
+    if not waiter.started.done():
+      waiter.started.set_result(None)
+    if waiter.outcome.done():
+      return
+    if error is not None:
+      waiter.outcome.set_exception(error)
+    else:
+      waiter.outcome.set_result(result)
 
 
 class _IsolatedMarketDataWorkerError(ValueError):
@@ -342,6 +851,12 @@ def _cleanup_legacy_market_data_spools(temp_directory: Path) -> None:
       shutil.rmtree(resolved_child)
     except FileNotFoundError:
       continue
+    except OSError as exc:
+      logger.warning(
+        "Deferred legacy market-data spool cleanup: directory=%s error=%s",
+        child.name,
+        exc.__class__.__name__,
+      )
 
 
 def _safe_market_data_spool_request(
@@ -357,6 +872,368 @@ def _safe_market_data_spool_request(
   ):
     raise RuntimeError("unsafe market-data spool path")
   return resolved
+
+
+def _market_data_spool_request_directory(root: Path, request_id: str) -> Path:
+  normalized_request_id = str(request_id or "").strip()
+  if not normalized_request_id:
+    raise ValueError("market-data request_id is required")
+  digest = hashlib.sha256(normalized_request_id.encode("utf-8")).hexdigest()[:32]
+  return _safe_market_data_spool_request(
+    root,
+    root / f"{MARKET_DATA_SPOOL_REQUEST_PREFIX}{digest}",
+  )
+
+
+def _market_data_file_digest(path: Path) -> str:
+  digest = hashlib.sha256()
+  with path.open("rb") as source:
+    while block := source.read(MARKET_DATA_UPLOAD_READ_BYTES):
+      digest.update(block)
+  return digest.hexdigest()
+
+
+def _reset_market_data_spool_directory(root: Path, request_id: str) -> Path:
+  spool_directory = _market_data_spool_request_directory(root, request_id)
+  if spool_directory.exists():
+    if spool_directory.is_symlink() or not spool_directory.is_dir():
+      raise RuntimeError("unsafe market-data spool request path")
+    shutil.rmtree(spool_directory)
+  spool_directory.mkdir(parents=False, exist_ok=False)
+  return spool_directory
+
+
+def _write_market_data_spool_manifest(
+  prepared: _PreparedMarketData,
+  *,
+  request_id: str,
+  fingerprint: str,
+) -> None:
+  resolved_spool = prepared.spool_directory.resolve()
+  expected_spool = _market_data_spool_request_directory(
+    resolved_spool.parent,
+    request_id,
+  )
+  if resolved_spool != expected_spool or prepared.spool_directory.is_symlink():
+    raise RuntimeError("unsafe market-data spool manifest target")
+  chunks: list[dict[str, Any]] = []
+  for chunk in prepared.chunks:
+    resolved_chunk = chunk.path.resolve()
+    if (
+      resolved_chunk.parent != resolved_spool
+      or chunk.path.is_symlink()
+      or not chunk.path.is_file()
+    ):
+      raise RuntimeError("unsafe market-data spool chunk")
+    chunks.append(
+      {
+        "name": chunk.path.name,
+        "record_count": chunk.record_count,
+        "digest": chunk.digest,
+        "compressed_bytes": chunk.compressed_bytes,
+      }
+    )
+  payload = {
+    "version": MARKET_DATA_SPOOL_MANIFEST_VERSION,
+    "request_id": request_id,
+    "fingerprint": fingerprint,
+    "created_at": time.time(),
+    "chunks": chunks,
+    "compressed_bytes": prepared.compressed_bytes,
+    "uncompressed_bytes": prepared.uncompressed_bytes,
+    "record_count": prepared.record_count,
+  }
+  manifest = resolved_spool / MARKET_DATA_SPOOL_MANIFEST
+  temporary = resolved_spool / f"{MARKET_DATA_SPOOL_MANIFEST}.tmp"
+  with temporary.open("w", encoding="utf-8", newline="\n") as output:
+    json.dump(payload, output, sort_keys=True, separators=(",", ":"))
+    output.flush()
+    os.fsync(output.fileno())
+  temporary.replace(manifest)
+
+
+def _write_market_data_spool_terminal_marker(
+  prepared: _PreparedMarketData,
+  *,
+  request_id: str,
+  fingerprint: str,
+  terminal_status: str,
+) -> None:
+  if terminal_status not in {"COMPLETED", "FAILED"}:
+    raise ValueError("invalid market-data terminal status")
+  if (
+    len(fingerprint) != 64
+    or any(character not in "0123456789abcdef" for character in fingerprint)
+  ):
+    raise ValueError("invalid market-data terminal fingerprint")
+  resolved_spool = prepared.spool_directory.resolve()
+  expected_spool = _market_data_spool_request_directory(
+    resolved_spool.parent,
+    request_id,
+  )
+  if resolved_spool != expected_spool or prepared.spool_directory.is_symlink():
+    raise RuntimeError("unsafe market-data terminal marker target")
+  payload = {
+    "request_id": request_id,
+    "fingerprint": fingerprint,
+    "terminal_status": terminal_status,
+    "recorded_at": time.time(),
+  }
+  marker = resolved_spool / MARKET_DATA_SPOOL_TERMINAL_MARKER
+  temporary = resolved_spool / f"{MARKET_DATA_SPOOL_TERMINAL_MARKER}.tmp"
+  with temporary.open("w", encoding="utf-8", newline="\n") as output:
+    json.dump(payload, output, sort_keys=True, separators=(",", ":"))
+    output.flush()
+    os.fsync(output.fileno())
+  temporary.replace(marker)
+
+
+def _read_market_data_spool_manifest(
+  spool_directory: Path,
+  *,
+  expected_request_id: str | None = None,
+  expected_fingerprint: str | None = None,
+  verify_digests: bool = True,
+) -> tuple[_PreparedMarketData, str, str, float]:
+  if spool_directory.is_symlink() or not spool_directory.is_dir():
+    raise RuntimeError("unsafe market-data spool directory")
+  manifest_path = spool_directory / MARKET_DATA_SPOOL_MANIFEST
+  if manifest_path.is_symlink() or not manifest_path.is_file():
+    raise FileNotFoundError("market-data spool manifest is missing")
+  if manifest_path.stat().st_size > 1024 * 1024:
+    raise RuntimeError("market-data spool manifest is too large")
+  try:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+  except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise RuntimeError("invalid market-data spool manifest") from exc
+  if not isinstance(payload, dict) or int(payload.get("version") or 0) != (
+    MARKET_DATA_SPOOL_MANIFEST_VERSION
+  ):
+    raise RuntimeError("unsupported market-data spool manifest")
+  request_id = str(payload.get("request_id") or "")
+  fingerprint = str(payload.get("fingerprint") or "")
+  created_at = float(payload.get("created_at") or 0.0)
+  if (
+    not request_id
+    or len(fingerprint) != 64
+    or any(character not in "0123456789abcdef" for character in fingerprint)
+    or not math.isfinite(created_at)
+    or created_at <= 0
+    or created_at > time.time() + 300.0
+  ):
+    raise RuntimeError("invalid market-data spool identity")
+  if expected_request_id is not None and request_id != expected_request_id:
+    raise RuntimeError("market-data spool request identity mismatch")
+  if expected_fingerprint is not None and fingerprint != expected_fingerprint:
+    raise RuntimeError("同一 market-data request_id 的重投参数不一致")
+  expected_directory = _market_data_spool_request_directory(
+    spool_directory.resolve().parent,
+    request_id,
+  )
+  if expected_directory != spool_directory.resolve():
+    raise RuntimeError("market-data spool directory identity mismatch")
+  raw_chunks = payload.get("chunks")
+  if not isinstance(raw_chunks, list) or not raw_chunks:
+    raise RuntimeError("market-data spool manifest has no chunks")
+  chunks: list[_MarketDataSpoolChunk] = []
+  seen: set[str] = set()
+  for raw_chunk in raw_chunks:
+    if not isinstance(raw_chunk, dict):
+      raise RuntimeError("invalid market-data spool chunk manifest")
+    name = str(raw_chunk.get("name") or "")
+    if not name or name in seen or Path(name).name != name:
+      raise RuntimeError("invalid market-data spool chunk name")
+    seen.add(name)
+    chunk_path = spool_directory / name
+    compressed_bytes = int(raw_chunk.get("compressed_bytes") or 0)
+    record_count = int(raw_chunk.get("record_count") or 0)
+    digest = str(raw_chunk.get("digest") or "")
+    if (
+      chunk_path.is_symlink()
+      or not chunk_path.is_file()
+      or chunk_path.resolve().parent != spool_directory.resolve()
+      or compressed_bytes <= 0
+      or chunk_path.stat().st_size != compressed_bytes
+      or record_count < 0
+      or len(digest) != 64
+      or any(character not in "0123456789abcdef" for character in digest)
+      or (verify_digests and _market_data_file_digest(chunk_path) != digest)
+    ):
+      raise RuntimeError("market-data spool chunk validation failed")
+    chunks.append(
+      _MarketDataSpoolChunk(
+        path=chunk_path,
+        record_count=record_count,
+        digest=digest,
+        compressed_bytes=compressed_bytes,
+      )
+    )
+  prepared = _PreparedMarketData(
+    spool_directory=spool_directory,
+    chunks=tuple(chunks),
+    compressed_bytes=int(payload.get("compressed_bytes") or 0),
+    uncompressed_bytes=int(payload.get("uncompressed_bytes") or 0),
+    record_count=int(payload.get("record_count") or 0),
+  )
+  if (
+    prepared.compressed_bytes < 0
+    or prepared.uncompressed_bytes < 0
+    or prepared.record_count < 0
+    or prepared.compressed_bytes != sum(chunk.compressed_bytes for chunk in chunks)
+    or prepared.record_count != sum(chunk.record_count for chunk in chunks)
+    or prepared.compressed_bytes > MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES
+    or prepared.uncompressed_bytes > MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES
+    or prepared.record_count > MAX_MARKET_DATA_REQUEST_RECORDS
+  ):
+    raise RuntimeError("market-data spool totals are invalid")
+  return (
+    prepared,
+    request_id,
+    fingerprint,
+    created_at,
+  )
+
+
+def _read_market_data_spool_terminal_marker(
+  spool_directory: Path,
+  *,
+  expected_request_id: str,
+  expected_fingerprint: str,
+) -> dict[str, Any]:
+  marker = spool_directory / MARKET_DATA_SPOOL_TERMINAL_MARKER
+  if marker.is_symlink() or not marker.is_file():
+    raise FileNotFoundError("market-data terminal marker is missing")
+  if marker.stat().st_size > MARKET_DATA_SPOOL_TERMINAL_MARKER_MAX_BYTES:
+    raise RuntimeError("market-data terminal marker is too large")
+  try:
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+  except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise RuntimeError("invalid market-data terminal marker") from exc
+  if not isinstance(payload, dict) or set(payload) != {
+    "request_id",
+    "fingerprint",
+    "terminal_status",
+    "recorded_at",
+  }:
+    raise RuntimeError("invalid market-data terminal marker")
+  recorded_at = payload.get("recorded_at")
+  if (
+    str(payload.get("request_id") or "") != expected_request_id
+    or str(payload.get("fingerprint") or "") != expected_fingerprint
+    or str(payload.get("terminal_status") or "") not in {"COMPLETED", "FAILED"}
+    or isinstance(recorded_at, bool)
+    or not isinstance(recorded_at, (int, float))
+    or not math.isfinite(float(recorded_at))
+    or float(recorded_at) <= 0
+    or float(recorded_at) > time.time() + 300.0
+  ):
+    raise RuntimeError("invalid market-data terminal marker")
+  return payload
+
+
+def _remove_market_data_spool_best_effort(spool_directory: Path) -> bool:
+  try:
+    shutil.rmtree(spool_directory)
+  except FileNotFoundError:
+    return True
+  except OSError as exc:
+    logger.warning(
+      "Deferred market-data spool cleanup: directory=%s error=%s",
+      spool_directory.name,
+      exc.__class__.__name__,
+    )
+    return False
+  return True
+
+
+def _sweep_market_data_spool_cleanup(
+  root: Path,
+  *,
+  protected_directory_names: frozenset[str] = frozenset(),
+) -> bool:
+  """Best-effort history-only cleanup; return whether dispatch must pause."""
+
+  cleanup_pending = False
+  try:
+    children = list(root.iterdir())
+  except OSError as exc:
+    logger.warning(
+      "Market-data spool scan deferred without stopping Agent: error=%s",
+      exc.__class__.__name__,
+    )
+    return True
+  for child in children:
+    if not child.name.startswith(MARKET_DATA_SPOOL_REQUEST_PREFIX):
+      continue
+    if child.name in protected_directory_names:
+      continue
+    try:
+      safe_child = _safe_market_data_spool_request(root, child)
+    except (OSError, RuntimeError) as exc:
+      cleanup_pending = True
+      logger.warning(
+        "Quarantined unsafe market-data spool: directory=%s error=%s",
+        child.name,
+        exc.__class__.__name__,
+      )
+      continue
+    terminal_marker = safe_child / MARKET_DATA_SPOOL_TERMINAL_MARKER
+    try:
+      _, request_id, fingerprint, _ = _read_market_data_spool_manifest(
+        safe_child,
+        verify_digests=False,
+      )
+    except Exception as exc:
+      try:
+        terminal_marker_present = terminal_marker.exists()
+      except OSError:
+        terminal_marker_present = True
+      if terminal_marker_present:
+        cleanup_pending = True
+        logger.warning(
+          "Quarantined market-data spool with unverifiable terminal state: "
+          "directory=%s error=%s",
+          child.name,
+          exc.__class__.__name__,
+        )
+        continue
+      if not safe_child.is_dir() or safe_child.is_symlink():
+        cleanup_pending = True
+        continue
+      if not _remove_market_data_spool_best_effort(safe_child):
+        cleanup_pending = True
+      continue
+    try:
+      terminal_marker_present = terminal_marker.exists()
+    except OSError as exc:
+      cleanup_pending = True
+      logger.warning(
+        "Quarantined unreadable market-data terminal marker: "
+        "directory=%s error=%s",
+        child.name,
+        exc.__class__.__name__,
+      )
+      continue
+    if not terminal_marker_present:
+      continue
+    try:
+      _read_market_data_spool_terminal_marker(
+        safe_child,
+        expected_request_id=request_id,
+        expected_fingerprint=fingerprint,
+      )
+    except Exception as exc:
+      cleanup_pending = True
+      logger.warning(
+        "Quarantined invalid market-data terminal marker: "
+        "directory=%s error=%s",
+        child.name,
+        exc.__class__.__name__,
+      )
+      continue
+    if not _remove_market_data_spool_best_effort(safe_child):
+      cleanup_pending = True
+  return cleanup_pending
 
 
 def _initialize_market_data_spool_root(
@@ -389,14 +1266,10 @@ def _initialize_market_data_spool_root(
     )
     temporary.replace(marker)
 
-  for child in list(owner_root.iterdir()):
-    if child.name == MARKET_DATA_SPOOL_OWNER_MARKER:
-      continue
-    if not child.name.startswith(MARKET_DATA_SPOOL_REQUEST_PREFIX):
-      continue
-    safe_child = _safe_market_data_spool_request(owner_root, child)
-    if safe_child.is_dir():
-      shutil.rmtree(safe_child)
+  if _sweep_market_data_spool_cleanup(owner_root):
+    logger.warning(
+      "Historical market-data dispatch paused for spool quarantine cleanup"
+    )
   return owner_root
 
 
@@ -414,14 +1287,21 @@ def _managed_market_data_spool_bytes(root: Path) -> int:
       if path.is_file():
         total += path.stat().st_size
         if total > MAX_MARKET_DATA_UPLOAD_CACHE_BYTES:
-          raise RuntimeError("market-data spool byte limit exceeded")
+          raise RuntimeError("market-data upload cache byte limit exceeded")
   return total
 
 
 class _LimitedHashingWriter:
-  def __init__(self, raw: BinaryIO, *, max_bytes: int) -> None:
+  def __init__(
+    self,
+    raw: BinaryIO,
+    *,
+    max_bytes: int,
+    reserve_bytes: Callable[[int], None] | None = None,
+  ) -> None:
     self.raw = raw
     self.max_bytes = max_bytes
+    self.reserve_bytes = reserve_bytes
     self.bytes_written = 0
     self.digest = hashlib.sha256()
 
@@ -429,6 +1309,8 @@ class _LimitedHashingWriter:
     next_size = self.bytes_written + len(data)
     if next_size > self.max_bytes:
       raise ValueError("market data request exceeds compressed byte limit")
+    if self.reserve_bytes is not None:
+      self.reserve_bytes(len(data))
     written = self.raw.write(data)
     if written != len(data):
       raise OSError("short write while spooling market data")
@@ -553,6 +1435,7 @@ def _prepare_market_data_records_spool_sync(
   max_total_uncompressed_bytes: int,
   max_total_compressed_bytes: int,
   on_chunk: Callable[[int, _MarketDataSpoolChunk], None] | None = None,
+  reserve_compressed_bytes: Callable[[int], None] | None = None,
 ) -> _PreparedMarketData:
   """Stream normalized records into atomically published gzip spool files."""
 
@@ -573,7 +1456,11 @@ def _prepare_market_data_records_spool_sync(
       if remaining <= 0:
         raise ValueError("market data request exceeds compressed byte limit")
       with temporary.open("xb") as file_handle:
-        writer = _LimitedHashingWriter(file_handle, max_bytes=remaining)
+        writer = _LimitedHashingWriter(
+          file_handle,
+          max_bytes=remaining,
+          reserve_bytes=reserve_compressed_bytes,
+        )
         with gzip.GzipFile(
           filename="",
           mode="wb",
@@ -775,19 +1662,86 @@ def _decode_isolated_spool_chunk(
   return index, chunk
 
 
-async def _stream_spool_chunk(path: Path) -> AsyncIterator[bytes]:
-  file_handle = await asyncio.to_thread(path.open, "rb")
+class _HistoryUploadBandwidthLimiter:
+  """Process-wide token bucket for low-priority historical HTTP traffic."""
+
+  def __init__(
+    self,
+    *,
+    bytes_per_second: int = HISTORY_UPLOAD_BYTES_PER_SECOND,
+    burst_bytes: int = HISTORY_UPLOAD_BURST_BYTES,
+  ) -> None:
+    if bytes_per_second <= 0 or burst_bytes <= 0:
+      raise ValueError("history upload bandwidth limits must be positive")
+    self._bytes_per_second = float(bytes_per_second)
+    self._capacity = float(burst_bytes)
+    self._tokens = float(burst_bytes)
+    self._updated_at = time.monotonic()
+    self._lock = asyncio.Lock()
+
+  async def consume(self, byte_count: int) -> None:
+    if byte_count <= 0:
+      return
+    if byte_count > self._capacity:
+      raise ValueError("history upload block exceeds token bucket capacity")
+    while True:
+      async with self._lock:
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._updated_at)
+        self._tokens = min(
+          self._capacity,
+          self._tokens + elapsed * self._bytes_per_second,
+        )
+        self._updated_at = now
+        if self._tokens >= byte_count:
+          self._tokens -= byte_count
+          return
+        delay = (byte_count - self._tokens) / self._bytes_per_second
+      await asyncio.sleep(delay)
+
+
+async def _stream_spool_chunk(
+  path: Path,
+  *,
+  limiter: _HistoryUploadBandwidthLimiter | None = None,
+  executor: ThreadPoolExecutor | None = None,
+) -> AsyncIterator[bytes]:
+  loop = asyncio.get_running_loop()
+  file_handle = await loop.run_in_executor(executor, path.open, "rb")
   try:
     while True:
-      block = await asyncio.to_thread(
+      block = await loop.run_in_executor(
+        executor,
         file_handle.read,
         MARKET_DATA_UPLOAD_READ_BYTES,
       )
       if not block:
         break
+      if limiter is not None:
+        await limiter.consume(len(block))
       yield block
   finally:
-    await asyncio.to_thread(file_handle.close)
+    await loop.run_in_executor(executor, file_handle.close)
+
+
+def _set_low_thread_priority() -> None:
+  """Keep historical disk/IPC helpers below live trading threads on Windows."""
+  if os.name != "nt":
+    return
+  import ctypes
+  from ctypes import wintypes
+
+  thread_priority_below_normal = -1
+  kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+  kernel32.GetCurrentThread.argtypes = []
+  kernel32.GetCurrentThread.restype = wintypes.HANDLE
+  kernel32.SetThreadPriority.argtypes = [wintypes.HANDLE, ctypes.c_int]
+  kernel32.SetThreadPriority.restype = wintypes.BOOL
+  if not kernel32.SetThreadPriority(
+    kernel32.GetCurrentThread(),
+    thread_priority_below_normal,
+  ):
+    logger.warning("Could not lower historical helper thread priority")
 
 
 def _market_data_payload_fingerprint(payload: dict[str, Any]) -> str:
@@ -878,7 +1832,7 @@ class AgentRuntime:
     self._control_hub_registered_once = asyncio.Event()
     self._session_loop: asyncio.AbstractEventLoop | None = None
     self._market_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10_000)
-    self._market_event_overflow = asyncio.Event()
+    self._market_event_drops = 0
     self._whole_market_capture = WholeMarketCapture(
       max_ready_callbacks=MARKET_STREAM_READY_INGRESS_CALLBACKS,
       max_ready_estimated_bytes=MARKET_STREAM_READY_INGRESS_BYTES,
@@ -902,11 +1856,12 @@ class AgentRuntime:
     self._market_requests: asyncio.Queue[AgentEnvelope] = asyncio.Queue(
       maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS
     )
-    self._command_requests: asyncio.PriorityQueue[
-      tuple[int, int, AgentEnvelope]
-    ] = asyncio.PriorityQueue(maxsize=MAX_QUEUED_TRADE_COMMANDS)
+    self._command_requests = _CommandDispatchQueue()
     self._command_request_sequence = 0
     self._active_command_count = 0
+    self._market_control_requests: asyncio.Queue[AgentEnvelope] = asyncio.Queue(
+      maxsize=MAX_QUEUED_MARKET_CONTROLS
+    )
     self._queued_market_data_requests: dict[str, str] = {}
     # Keep the exact compressed bytes for in-flight requests so any transport
     # redelivery reuses the same checksums instead of re-querying a changing
@@ -914,21 +1869,49 @@ class AgentRuntime:
     self._market_upload_cache: dict[str, _MarketUploadCacheEntry] = {}
     self._market_upload_tombstones: dict[str, _MarketUploadTombstone] = {}
     self._market_upload_tasks: dict[str, _MarketUploadTaskEntry] = {}
+    self._market_data_http_client: httpx.AsyncClient | None = None
+    self._history_upload_slots = asyncio.Semaphore(MAX_CONCURRENT_HISTORY_UPLOADS)
+    self._history_upload_limiter = _HistoryUploadBandwidthLimiter()
+    self._history_upload_io_executor = ThreadPoolExecutor(
+      max_workers=1,
+      thread_name_prefix="qmt-history-upload-io",
+      initializer=_set_low_thread_priority,
+    )
+    self._historical_ipc_executor = ThreadPoolExecutor(
+      max_workers=1,
+      thread_name_prefix="qmt-history-ipc",
+      initializer=_set_low_thread_priority,
+    )
     self._streamed_market_uploads: set[str] = set()
     self._provisional_market_uploads: set[str] = set()
     self._market_upload_cache_bytes = 0
     self._xtdata_access_lock = asyncio.Lock()
     self._historical_worker_lock = asyncio.Lock()
     self._websocket_send_lock = asyncio.Lock()
+    self._control_socket_writer: _PriorityControlSocketWriter | None = None
     self._heartbeat_checkpoint_lock = asyncio.Lock()
     self._report_flush_lock = asyncio.Lock()
+    self._report_wakeup = asyncio.Event()
+    self._reports_inflight: set[str] = set()
+    self._report_retry_attempts: dict[str, int] = {}
+    self._report_retry_not_before: dict[str, float] = {}
+    self._report_ack_requests: asyncio.Queue[str] = asyncio.Queue(
+      maxsize=REPORT_ACK_QUEUE_CAPACITY
+    )
+    self._report_ack_pending: set[str] = set()
     self._full_snapshot_lock = asyncio.Lock()
+    self._initial_reconciliation_complete = asyncio.Event()
     self._heartbeat_wakeup = asyncio.Event()
     self._heartbeat_sent_monotonic: dict[str, float] = {}
     self._control_heartbeat_ack_latency_seconds = 0.0
     self._last_complete_account_snapshot_monotonic = 0.0
     self._history_workload = "idle"
     self._history_workload_reason = ""
+    self._emergency_stop_status_cache = (
+      emergency_stop.status()
+      if emergency_stop is not None
+      else {"active": False, "reason": "", "activated_at": None}
+    )
     self._historical_worker_process: Any | None = None
     self._historical_worker_connection: Any | None = None
     self._historical_worker_kind = ""
@@ -939,10 +1922,13 @@ class AgentRuntime:
     self._trading_reconciliation_required = False
     self._trading_reconciliation_snapshot_id: str | None = None
     self._trading_reconciliation_snapshot_generation: int | None = None
+    self._trading_reconciliation_snapshot_callback_failure_generation: (
+      int | None
+    ) = None
     self._trading_recovery_started_monotonic: float | None = None
     self._trading_recovery_reason = ""
     self._trading_readiness_failed = False
-    self._market_data_ready_cache = broker is None
+    self._market_data_ready_cache = False
     if broker is not None and not callable(
       getattr(broker, "ensure_market_data_ready", None)
     ):
@@ -955,6 +1941,15 @@ class AgentRuntime:
         self._market_data_ready_cache = False
     self._trading_ready_cache = mode != "live"
     self._trading_connection_generation_cache = 0
+    self._journal_worker = _JournalPriorityWorker()
+    self._xttrading_worker = (
+      _XTTradingPriorityWorker(on_timeout=self._on_xttrading_timeout)
+      if mode == "live"
+      else None
+    )
+    self._runtime_loop: asyncio.AbstractEventLoop | None = None
+    self._fatal_trading_error: _FatalTradingRecoveryError | None = None
+    self._fatal_trading_event = asyncio.Event()
     self._control_session_authenticated = False
     self._market_upload_clock = time.monotonic
     self._fatal_market_data_error: _FatalMarketDataPreparationError | None = None
@@ -964,9 +1959,35 @@ class AgentRuntime:
       market_spool_base_directory or state_directory(),
       configuration.device_id,
     )
+    self._market_spool_cleanup_pending = _sweep_market_data_spool_cleanup(
+      self._market_spool_root
+    )
+    self._market_spool_cleanup_lock = asyncio.Lock()
     self._market_spool_ephemeral_base: Path | None = None
 
+  async def _run_journal_call(
+    self,
+    function: Callable[..., Any],
+    *args: Any,
+    priority: int,
+    **kwargs: Any,
+  ) -> Any:
+    """Run all runtime-owned SQLite work on its one priority-aware lane."""
+    worker = getattr(self, "_journal_worker", None)
+    if worker is None:
+      # A few focused test doubles construct AgentRuntime with ``__new__``.
+      # Production always creates this lane in ``__init__``.
+      worker = _JournalPriorityWorker()
+      self._journal_worker = worker
+    return await worker.execute(
+      function,
+      *args,
+      priority=priority,
+      **kwargs,
+    )
+
   async def run_forever(self) -> None:
+    self._runtime_loop = asyncio.get_running_loop()
     self._ensure_market_upload_state()
     self._ensure_whole_market_state()
     self._whole_market_capture.bind_loop(asyncio.get_running_loop())
@@ -1037,7 +2058,35 @@ class AgentRuntime:
       )
       await self._cancel_market_upload_tasks()
       await self._shutdown_historical_worker()
+      await self._close_market_data_upload_client()
+      historical_ipc_executor = getattr(
+        self,
+        "_historical_ipc_executor",
+        None,
+      )
+      if historical_ipc_executor is not None:
+        historical_ipc_executor.shutdown(
+          wait=False,
+          cancel_futures=True,
+        )
+      history_upload_io_executor = getattr(
+        self,
+        "_history_upload_io_executor",
+        None,
+      )
+      if history_upload_io_executor is not None:
+        history_upload_io_executor.shutdown(
+          wait=False,
+          cancel_futures=True,
+        )
+      xttrading_worker = getattr(self, "_xttrading_worker", None)
+      if xttrading_worker is not None:
+        xttrading_worker.close()
+      journal_worker = getattr(self, "_journal_worker", None)
+      if journal_worker is not None:
+        journal_worker.close()
       self._clear_market_upload_state()
+      self._runtime_loop = None
     if self._fatal_market_data_error is not None:
       raise self._fatal_market_data_error
 
@@ -1054,29 +2103,45 @@ class AgentRuntime:
       self._run_session(),
       name="qmt-agent-session",
     )
-    fatal = asyncio.create_task(
+    market_fatal = asyncio.create_task(
       self._fatal_market_data_event.wait(),
-      name="qmt-agent-fatal-wait",
+      name="qmt-agent-market-fatal-wait",
+    )
+    trading_fatal = asyncio.create_task(
+      self._fatal_trading_event.wait(),
+      name="qmt-agent-trading-fatal-wait",
     )
     try:
       done, _ = await asyncio.wait(
-        {session, fatal},
+        {session, market_fatal, trading_fatal},
         return_when=asyncio.FIRST_COMPLETED,
       )
-      if fatal in done and self._fatal_market_data_event.is_set():
+      if trading_fatal in done and self._fatal_trading_event.is_set():
+        session.cancel()
+        await asyncio.gather(session, return_exceptions=True)
+        raise self._fatal_trading_error or _FatalTradingRecoveryError(
+          "XTTrading worker failed; Agent restart required"
+        )
+      if market_fatal in done and self._fatal_market_data_event.is_set():
         session.cancel()
         await asyncio.gather(session, return_exceptions=True)
         return False
-      fatal.cancel()
-      await asyncio.gather(fatal, return_exceptions=True)
+      for task in (market_fatal, trading_fatal):
+        task.cancel()
+      await asyncio.gather(market_fatal, trading_fatal, return_exceptions=True)
       await session
       return True
     finally:
       self._health_state().set_control_connected(False)
-      for task in (session, fatal):
+      for task in (session, market_fatal, trading_fatal):
         if not task.done():
           task.cancel()
-      await asyncio.gather(session, fatal, return_exceptions=True)
+      await asyncio.gather(
+        session,
+        market_fatal,
+        trading_fatal,
+        return_exceptions=True,
+      )
 
   async def _market_upload_cache_sweeper(self) -> None:
     while not self._stopped.is_set():
@@ -1086,7 +2151,14 @@ class AgentRuntime:
           timeout=MARKET_DATA_UPLOAD_CACHE_SWEEP_SECONDS,
         )
       except asyncio.TimeoutError:
-        self._cleanup_expired_market_uploads()
+        expired = self._cleanup_expired_market_uploads(remove_prepared=False)
+        if expired:
+          await asyncio.gather(
+            *(
+              asyncio.to_thread(self._remove_prepared_market_data, prepared)
+              for prepared in expired
+            )
+          )
 
   async def _issue_token(self) -> tuple[str, datetime]:
     async with httpx.AsyncClient(
@@ -1165,7 +2237,17 @@ class AgentRuntime:
     factory = self._broker_factory
     if factory is None:  # pragma: no cover - constructor enforces this
       raise RuntimeError("QMT broker factory is unavailable")
-    self.broker = await asyncio.to_thread(factory)
+    self.broker = (
+      await self._run_native_xttrading(
+        "broker-initialize",
+        factory,
+        timeout=XTTRADING_INITIALIZATION_TIMEOUT_SECONDS,
+        priority=XTTRADING_PRIORITY_READINESS,
+        coalesce_key="broker-initialize",
+      )
+      if self.mode == "live"
+      else await asyncio.to_thread(factory)
+    )
     self._broker_ready.set()
     self._set_market_data_ready(
       await asyncio.to_thread(self._read_broker_market_data_ready)
@@ -1223,6 +2305,7 @@ class AgentRuntime:
     self._health_state().set_reconciliation_ready(False)
     self._trading_reconciliation_snapshot_id = None
     self._trading_reconciliation_snapshot_generation = None
+    self._trading_reconciliation_snapshot_callback_failure_generation = None
     self._trading_recovery_reason = reason[:128]
     if not already_reconciling or self._trading_recovery_started_monotonic is None:
       self._trading_recovery_started_monotonic = time.monotonic()
@@ -1254,12 +2337,45 @@ class AgentRuntime:
     if snapshot_generation is None:
       self._begin_trading_reconciliation("snapshot_generation_missing")
       return False
+    callback_failure_generation = (
+      self._trading_reconciliation_snapshot_callback_failure_generation
+    )
+    if callback_failure_generation is None:
+      self._begin_trading_reconciliation(
+        "snapshot_callback_failure_generation_missing"
+      )
+      return False
+    journal = getattr(self, "journal", None)
+    processing_commands = (
+      int(journal.stats()["processing_commands"]) if journal is not None else 0
+    )
+    if processing_commands > 0:
+      # A complete broker snapshot can prove a PLACE_ORDER or a terminal
+      # CANCEL, but it cannot make an unknown native outcome disappear. Keep
+      # new orders fail-closed while still allowing later cancellations.
+      self._trading_recovery_reason = "journal_indeterminate_commands"
+      self._trading_recovery_started_monotonic = None
+      logger.error(
+        "XTTrading reconciliation retained local order gate: "
+        "processing_commands=%s",
+        processing_commands,
+      )
+      return False
     mark_reconciled = getattr(self.broker, "mark_trading_reconciled", None)
     try:
       generation_is_current = (
-        bool(mark_reconciled(snapshot_generation))
+        bool(
+          mark_reconciled(
+            snapshot_generation,
+            callback_failure_generation,
+          )
+        )
         if callable(mark_reconciled)
-        else snapshot_generation == self._trading_connection_generation()
+        else (
+          snapshot_generation == self._trading_connection_generation()
+          and callback_failure_generation
+          == self._read_broker_callback_failure_generation()
+        )
       )
     except Exception as exc:
       logger.warning(
@@ -1274,6 +2390,7 @@ class AgentRuntime:
     self._health_state().set_reconciliation_ready(True)
     self._trading_reconciliation_snapshot_id = None
     self._trading_reconciliation_snapshot_generation = None
+    self._trading_reconciliation_snapshot_callback_failure_generation = None
     self._trading_recovery_started_monotonic = None
     self._trading_recovery_reason = ""
     self._trading_readiness_failed = False
@@ -1287,6 +2404,8 @@ class AgentRuntime:
 
   def _raise_if_trading_recovery_expired(self) -> None:
     if not self._requires_trading_reconciliation():
+      return
+    if self._trading_recovery_reason == "journal_indeterminate_commands":
       return
     started = self._trading_recovery_started_monotonic
     if started is None:
@@ -1333,7 +2452,7 @@ class AgentRuntime:
       if not control_agent_session_id:
         raise RuntimeError("QMT Agent authentication missing control session id")
       self._control_agent_session_id = control_agent_session_id
-      await self._ensure_broker_initialized()
+      self._control_socket_writer = _PriorityControlSocketWriter(socket)
       self._control_session_authenticated = True
       self._health_state().set_control_connected(True)
       self._control_hub_registered_once.set()
@@ -1341,24 +2460,32 @@ class AgentRuntime:
       self._session_loop = asyncio.get_running_loop()
       self._market_requests = asyncio.Queue(maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS)
       self._queued_market_data_requests = {}
-      self._command_requests = asyncio.PriorityQueue(
-        maxsize=MAX_QUEUED_TRADE_COMMANDS
+      self._command_requests = _CommandDispatchQueue()
+      self._market_control_requests = asyncio.Queue(
+        maxsize=MAX_QUEUED_MARKET_CONTROLS
       )
       self._command_request_sequence = 0
       self._active_command_count = 0
+      self._reports_inflight = set()
+      self._report_retry_attempts = {}
+      self._report_retry_not_before = {}
+      self._report_ack_requests = asyncio.Queue(
+        maxsize=REPORT_ACK_QUEUE_CAPACITY
+      )
+      self._report_ack_pending = set()
+      self._report_wakeup = asyncio.Event()
+      self._initial_reconciliation_complete = asyncio.Event()
       self._heartbeat_sent_monotonic.clear()
       self._control_heartbeat_ack_latency_seconds = 0.0
-      self._market_event_overflow = asyncio.Event()
+      self._market_event_drops = 0
       self._begin_trading_reconciliation(
         "control_session_connected",
       )
-      await self._ensure_trading_ready()
-      await self._queue_full_snapshot(reconciliation=self.mode == "live")
-      await self._heartbeat_checkpoint(
-        socket,
-        status=(self._heartbeat_status() if self.mode == "live" else "RECONCILING"),
-      )
       session_tasks = {
+        "socket-writer": asyncio.create_task(
+          self._control_socket_writer.run(),
+          name="qmt-agent-control-writer",
+        ),
         "receiver": asyncio.create_task(
           self._receive_session_messages(socket),
           name="qmt-agent-receiver",
@@ -1366,6 +2493,10 @@ class AgentRuntime:
         "heartbeat": asyncio.create_task(
           self._heartbeat_loop(socket),
           name="qmt-agent-heartbeat",
+        ),
+        "initialization": asyncio.create_task(
+          self._initialize_authenticated_session(),
+          name="qmt-agent-initial-reconciliation",
         ),
         "token-refresh": asyncio.create_task(
           self._refresh_access_token_loop(),
@@ -1375,13 +2506,21 @@ class AgentRuntime:
           self._broker_report_loop(socket),
           name="qmt-agent-report-sender",
         ),
-        "market-sender": asyncio.create_task(
-          self._market_event_loop(socket),
-          name="qmt-agent-market-sender",
+        "report-ack-writer": asyncio.create_task(
+          self._report_ack_loop(socket),
+          name="qmt-agent-report-ack-writer",
+        ),
+        "emergency-refresh": asyncio.create_task(
+          self._emergency_stop_refresh_loop(),
+          name="qmt-agent-emergency-refresh",
         ),
         "market-request": asyncio.create_task(
           self._market_request_loop(socket),
           name="qmt-agent-market-request",
+        ),
+        "market-control": asyncio.create_task(
+          self._market_control_loop(),
+          name="qmt-agent-market-control",
         ),
         "command-worker": asyncio.create_task(
           self._command_request_loop(socket),
@@ -1395,7 +2534,12 @@ class AgentRuntime:
           self._trading_readiness_loop(socket),
           name="qmt-agent-trading-readiness",
         ),
+        "account-snapshot": asyncio.create_task(
+          self._account_snapshot_loop(),
+          name="qmt-agent-account-snapshot",
+        ),
       }
+      self._heartbeat_wakeup.set()
       try:
         await self._supervise_session_tasks(
           socket,
@@ -1406,7 +2550,17 @@ class AgentRuntime:
           if not task.done():
             task.cancel()
         await asyncio.gather(*session_tasks.values(), return_exceptions=True)
+        self._control_socket_writer = None
         self._session_loop = None
+
+  async def _initialize_authenticated_session(self) -> None:
+    await self._ensure_broker_initialized()
+    if self.mode == "live":
+      await self._ensure_trading_ready()
+    await self._queue_full_snapshot(reconciliation=self.mode == "live")
+    self._initial_reconciliation_complete.set()
+    self._report_wakeup.set()
+    self._heartbeat_wakeup.set()
 
   async def _receive_session_messages(self, socket) -> None:
     async for raw_message in socket:
@@ -1426,7 +2580,7 @@ class AgentRuntime:
       if receiver in done:
         await receiver
         return
-      for role, task in tasks.items():
+      for role, task in list(tasks.items()):
         if role == "receiver" or task not in done:
           continue
         try:
@@ -1444,6 +2598,9 @@ class AgentRuntime:
             reason=f"session task failed: {role}",
           )
           raise
+        if role == "initialization":
+          tasks.pop(role, None)
+          continue
         if role != "market-request":
           error = RuntimeError(f"QMT Agent session task stopped unexpectedly: {role}")
           logger.error("%s", error)
@@ -1461,59 +2618,73 @@ class AgentRuntime:
     function,
     *args,
     timeout: float,
+    priority: int = XTTRADING_PRIORITY_ORDER,
+    coalesce_key: str | None = None,
   ) -> Any:
-    """Run one native trading call on a daemon thread with a fail-stop bound."""
-    loop = asyncio.get_running_loop()
-    outcome = loop.create_future()
-    abandoned = threading.Event()
-
-    def deliver_result(result: Any) -> None:
-      if not outcome.done() and not abandoned.is_set():
-        outcome.set_result(result)
-
-    def deliver_error(exc: BaseException) -> None:
-      if not outcome.done() and not abandoned.is_set():
-        outcome.set_exception(exc)
-
-    def worker() -> None:
-      try:
-        result = function(*args)
-      except BaseException as exc:
-        try:
-          loop.call_soon_threadsafe(deliver_error, exc)
-        except RuntimeError:
-          pass
-        return
-      if abandoned.is_set():
-        return
-      try:
-        loop.call_soon_threadsafe(deliver_result, result)
-      except RuntimeError:
-        pass
-
-    threading.Thread(
-      target=worker,
-      name=f"qmt-xttrading:{operation[:28]}",
-      daemon=True,
-    ).start()
+    """Run one prioritized native call; timeout starts only after execution."""
+    worker = self._ensure_xttrading_worker()
+    submission = worker.submit(
+      operation=operation,
+      function=function,
+      args=args,
+      timeout=timeout,
+      priority=priority,
+      coalesce_key=coalesce_key,
+    )
     try:
-      return await asyncio.wait_for(
-        asyncio.shield(outcome),
-        timeout=timeout,
-      )
-    except asyncio.TimeoutError as exc:
-      abandoned.set()
-      outcome.cancel()
-      self._set_trading_ready(False)
-      self._trading_readiness_failed = True
-      self._begin_trading_reconciliation(f"{operation}_timed_out")
-      raise _FatalTradingRecoveryError(
-        f"XTTrading {operation} timed out; Agent restart required"
-      ) from exc
-    except asyncio.CancelledError:
-      abandoned.set()
-      outcome.cancel()
+      # A queued cancel may wait for the one already-running native call, but a
+      # low-priority snapshot ahead of it cannot consume the cancel's native
+      # execution budget.  The dedicated worker also prevents session
+      # cancellation from accidentally starting a second native call.
+      await asyncio.shield(submission.waiter.started)
+      return await asyncio.shield(submission.waiter.outcome)
+    except _FatalTradingRecoveryError as exc:
+      self._trip_trading_fatal(exc, operation)
       raise
+    except asyncio.CancelledError:
+      worker.abandon(submission)
+      raise
+
+  def _ensure_xttrading_worker(self) -> _XTTradingPriorityWorker:
+    worker = getattr(self, "_xttrading_worker", None)
+    if worker is None:
+      worker = _XTTradingPriorityWorker(on_timeout=self._on_xttrading_timeout)
+      self._xttrading_worker = worker
+    return worker
+
+  def _on_xttrading_timeout(self, error: BaseException, operation: str) -> None:
+    fatal = (
+      error
+      if isinstance(error, _FatalTradingRecoveryError)
+      else _FatalTradingRecoveryError(
+        f"XTTrading {operation} failed; Agent restart required"
+      )
+    )
+    loop = getattr(self, "_runtime_loop", None) or getattr(
+      self,
+      "_session_loop",
+      None,
+    )
+    if loop is None or loop.is_closed():
+      return
+    try:
+      loop.call_soon_threadsafe(self._trip_trading_fatal, fatal, operation)
+    except RuntimeError:
+      pass
+
+  def _trip_trading_fatal(
+    self,
+    error: _FatalTradingRecoveryError,
+    operation: str,
+  ) -> None:
+    if getattr(self, "_fatal_trading_error", None) is None:
+      self._fatal_trading_error = error
+    self._set_trading_ready(False)
+    self._trading_readiness_failed = True
+    self._begin_trading_reconciliation(f"{operation}_timed_out")
+    fatal_event = getattr(self, "_fatal_trading_event", None)
+    if fatal_event is not None:
+      fatal_event.set()
 
   def _read_broker_trading_generation(self) -> int:
     generation_reader = getattr(
@@ -1532,27 +2703,168 @@ class AgentRuntime:
       )
       return 0
 
-  async def _capture_full_snapshot(self) -> tuple[dict[str, Any], int | None]:
+  def _read_broker_trading_mutation_generation(self) -> int | None:
+    generation_reader = getattr(
+      self.broker,
+      "trading_mutation_generation",
+      None,
+    )
+    if not callable(generation_reader):
+      return None
+    try:
+      return max(0, int(generation_reader()))
+    except Exception as exc:
+      logger.warning(
+        "XTTrading mutation generation check failed: error=%s",
+        exc.__class__.__name__,
+      )
+      raise RuntimeError("XTTrading mutation generation is unavailable") from exc
+
+  def _read_broker_callback_failure_generation(self) -> int:
+    generation_reader = getattr(
+      self.broker,
+      "trading_callback_failure_generation",
+      None,
+    )
+    if not callable(generation_reader):
+      return 0
+    try:
+      return max(0, int(generation_reader()))
+    except Exception as exc:
+      logger.warning(
+        "XTTrading callback failure generation check failed: error=%s",
+        exc.__class__.__name__,
+      )
+      raise RuntimeError(
+        "XTTrading callback failure generation is unavailable"
+      ) from exc
+
+  def _assert_trading_mutation_generation(
+    self,
+    expected_generation: int | None,
+  ) -> None:
+    if expected_generation is None:
+      return
+    if self._read_broker_trading_mutation_generation() != expected_generation:
+      raise _StaleTradingSnapshotError(
+        "XTTrading state changed during full snapshot"
+      )
+
+  def _assert_callback_failure_generation(
+    self,
+    expected_generation: int,
+  ) -> None:
+    if self._read_broker_callback_failure_generation() != expected_generation:
+      raise _StaleTradingSnapshotError(
+        "XTTrading callback gap changed during full snapshot"
+      )
+
+  async def _capture_full_snapshot(
+    self,
+    *,
+    reconciliation: bool,
+  ) -> tuple[dict[str, Any], int | None, int | None, int | None]:
     if self.mode != "live":
-      return await asyncio.to_thread(self.broker.full_snapshot), None
+      return await asyncio.to_thread(self.broker.full_snapshot), None, None, None
 
-    capture = getattr(self.broker, "capture_full_snapshot", None)
-    if callable(capture):
-      captured = await self._run_native_xttrading(
-        "full-snapshot",
-        capture,
-        timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
+    priority = (
+      XTTRADING_PRIORITY_SNAPSHOT
+      if reconciliation
+      else XTTRADING_PRIORITY_PERIODIC_SNAPSHOT
+    )
+    snapshot_kind = "reconciliation" if reconciliation else "periodic"
+    capture_partition = getattr(
+      self.broker,
+      "capture_full_snapshot_partition",
+      None,
+    )
+    assemble_partitions = getattr(
+      self.broker,
+      "assemble_full_snapshot_partitions",
+      None,
+    )
+    if callable(capture_partition) and callable(assemble_partitions):
+      partitions: dict[str, dict[str, dict[str, Any]]] = {}
+      snapshot_generation: int | None = None
+      mutation_generation = self._read_broker_trading_mutation_generation()
+      callback_failure_generation = (
+        self._read_broker_callback_failure_generation()
       )
+      for partition in LIVE_FULL_SNAPSHOT_PARTITIONS:
+        captured_partition = await self._run_native_xttrading(
+          f"full-snapshot-{partition.replace('_', '-')}",
+          capture_partition,
+          partition,
+          timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
+          priority=priority,
+          coalesce_key=f"{snapshot_kind}-snapshot-{partition}",
+        )
+        if (
+          not isinstance(captured_partition, tuple)
+          or len(captured_partition) != 2
+        ):
+          raise RuntimeError(
+            "XTTrading snapshot partition did not return its generation"
+          )
+        section, generation = captured_partition
+        if not isinstance(section, dict):
+          raise RuntimeError("XTTrading snapshot partition must be an object")
+        normalized_generation = max(0, int(generation))
+        if snapshot_generation is None:
+          snapshot_generation = normalized_generation
+        elif snapshot_generation != normalized_generation:
+          raise RuntimeError(
+            "XTTrading connection generation changed between snapshot partitions"
+          )
+        self._assert_trading_mutation_generation(mutation_generation)
+        self._assert_callback_failure_generation(callback_failure_generation)
+        partitions[partition] = section
+      captured = await self._run_native_xttrading(
+        "full-snapshot-assemble",
+        assemble_partitions,
+        partitions,
+        snapshot_generation if snapshot_generation is not None else 0,
+        timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
+        priority=priority,
+        coalesce_key=f"{snapshot_kind}-snapshot-assemble",
+      )
+      if (
+        snapshot_generation is not None
+        and self._read_broker_trading_generation() != snapshot_generation
+      ):
+        raise RuntimeError(
+          "XTTrading connection generation changed after full snapshot"
+        )
+      self._assert_trading_mutation_generation(mutation_generation)
+      self._assert_callback_failure_generation(callback_failure_generation)
     else:
-
-      def capture_with_generation() -> tuple[dict[str, Any], int]:
-        return self.broker.full_snapshot(), self._read_broker_trading_generation()
-
-      captured = await self._run_native_xttrading(
-        "full-snapshot",
-        capture_with_generation,
-        timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
+      mutation_generation = self._read_broker_trading_mutation_generation()
+      callback_failure_generation = (
+        self._read_broker_callback_failure_generation()
       )
+      capture = getattr(self.broker, "capture_full_snapshot", None)
+      if callable(capture):
+        captured = await self._run_native_xttrading(
+          "full-snapshot",
+          capture,
+          timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
+          priority=priority,
+          coalesce_key=f"{snapshot_kind}-snapshot",
+        )
+      else:
+
+        def capture_with_generation() -> tuple[dict[str, Any], int]:
+          return self.broker.full_snapshot(), self._read_broker_trading_generation()
+
+        captured = await self._run_native_xttrading(
+          "full-snapshot",
+          capture_with_generation,
+          timeout=XTTRADING_SNAPSHOT_TIMEOUT_SECONDS,
+          priority=priority,
+          coalesce_key=f"{snapshot_kind}-snapshot",
+        )
+      self._assert_trading_mutation_generation(mutation_generation)
+      self._assert_callback_failure_generation(callback_failure_generation)
     if not isinstance(captured, tuple) or len(captured) != 2:
       raise RuntimeError("XTTrading full snapshot did not return its generation")
     snapshot, generation = captured
@@ -1560,7 +2872,12 @@ class AgentRuntime:
       raise RuntimeError("XTTrading full snapshot payload must be an object")
     normalized_generation = max(0, int(generation))
     self._trading_connection_generation_cache = normalized_generation
-    return snapshot, normalized_generation
+    return (
+      snapshot,
+      normalized_generation,
+      mutation_generation,
+      callback_failure_generation,
+    )
 
   async def _queue_full_snapshot(
     self,
@@ -1571,76 +2888,185 @@ class AgentRuntime:
     async with self._full_snapshot_lock:
       if reconciliation:
         self._begin_trading_reconciliation("fresh_snapshot_requested")
-      try:
-        snapshot, snapshot_generation = await self._capture_full_snapshot()
-      except _FatalTradingRecoveryError:
-        raise
-      except Exception:
-        self._begin_trading_reconciliation("snapshot_query_failed")
-        if self.mode == "live":
-          self._set_trading_ready(False)
-          self._trading_readiness_failed = True
-        raise
-      snapshot_message_id = str(uuid.uuid4())
-      correlations = self.journal.broker_order_client_ids()
-      for collection_name in ("orders", "trades"):
-        for item in snapshot.get(collection_name) or []:
-          if not isinstance(item, dict):
+      for attempt in range(XTTRADING_SNAPSHOT_MUTATION_RETRIES):
+        try:
+          (
+            snapshot,
+            snapshot_generation,
+            mutation_generation,
+            callback_failure_generation,
+          ) = (
+            await self._capture_full_snapshot(
+              reconciliation=reconciliation,
+            )
+          )
+          snapshot_message_id = str(uuid.uuid4())
+          snapshot = await self._run_journal_call(
+            self._persist_captured_full_snapshot,
+            snapshot,
+            snapshot_message_id,
+            snapshot_generation,
+            mutation_generation,
+            callback_failure_generation,
+            priority=JOURNAL_PRIORITY_SNAPSHOT,
+          )
+        except _StaleTradingSnapshotError:
+          if attempt + 1 < XTTRADING_SNAPSHOT_MUTATION_RETRIES:
+            logger.info(
+              "XTTrading state changed during snapshot; retrying: attempt=%s",
+              attempt + 1,
+            )
+            await asyncio.sleep(0)
             continue
-          broker_order_id = item.get("order_id") or item.get("broker_order_id")
-          client_order_id = correlations.get(str(broker_order_id))
-          if not client_order_id:
-            client_order_id = self.journal.client_order_id_for_report(
-              broker_order_id=broker_order_id,
-              order_remark=str(item.get("order_remark") or ""),
+          if reconciliation or self._requires_trading_reconciliation():
+            self._begin_trading_reconciliation("snapshot_state_unstable")
+          raise
+        except _FatalTradingRecoveryError:
+          raise
+        except Exception:
+          self._begin_trading_reconciliation("snapshot_query_failed")
+          if self.mode == "live":
+            self._set_trading_ready(False)
+            self._trading_readiness_failed = True
+          raise
+
+        is_complete = snapshot.get("is_complete") is True
+        if is_complete:
+          self._last_complete_account_snapshot_monotonic = time.monotonic()
+        if self.mode == "live":
+          if not is_complete:
+            # LiveBroker marks the native session unhealthy as well.  Never let
+            # an incomplete report serve as recovery evidence.
+            self._begin_trading_reconciliation("snapshot_incomplete")
+            self._set_trading_ready(False)
+            self._trading_readiness_failed = True
+          elif reconciliation or self._requires_trading_reconciliation():
+            self._trading_reconciliation_snapshot_id = snapshot_message_id
+            self._trading_reconciliation_snapshot_generation = snapshot_generation
+            self._trading_reconciliation_snapshot_callback_failure_generation = (
+              callback_failure_generation
             )
-          if client_order_id:
-            item["client_order_id"] = client_order_id
-            self.journal.reconcile_processing_order(
-              client_order_id=client_order_id,
-              broker_order_id=broker_order_id,
-            )
-      snapshot["snapshot_id"] = snapshot_message_id
-      snapshot["report_id"] = snapshot_message_id
-      snapshot = enrich_report_payload(AgentMessageType.DELTA_REPORT, snapshot)
-      is_complete = snapshot.get("is_complete") is True
-      if is_complete:
-        self._last_complete_account_snapshot_monotonic = time.monotonic()
-      if self.mode == "live":
-        if not is_complete:
-          # LiveBroker marks the native session unhealthy as well.  Never let
-          # an incomplete report serve as recovery evidence.
-          self._begin_trading_reconciliation("snapshot_incomplete")
-          self._set_trading_ready(False)
-          self._trading_readiness_failed = True
-        elif reconciliation or self._requires_trading_reconciliation():
-          self._trading_reconciliation_snapshot_id = snapshot_message_id
-          self._trading_reconciliation_snapshot_generation = snapshot_generation
+        return snapshot_message_id
+      raise AssertionError("snapshot retry loop exited unexpectedly")
+
+  def _persist_captured_full_snapshot(
+    self,
+    snapshot: dict[str, Any],
+    message_id: str,
+    connection_generation: int | None,
+    mutation_generation: int | None,
+    callback_failure_generation: int | None,
+  ) -> dict[str, Any]:
+    """Correlate and journal a snapshot under the broker's mutation fence."""
+
+    def persist() -> dict[str, Any]:
+      self._reconcile_snapshot_correlations(snapshot)
+      snapshot["snapshot_id"] = message_id
+      snapshot["report_id"] = message_id
+      enriched = enrich_report_payload(AgentMessageType.DELTA_REPORT, snapshot)
       envelope = AgentEnvelope(
-        message_id=snapshot_message_id,
+        message_id=message_id,
         message_type=AgentMessageType.DELTA_REPORT,
-        payload=snapshot,
+        payload=enriched,
       )
-      # An identical snapshot still proves reconciliation for this connection.
-      # Give every generated full snapshot its own durable business identity while
-      # keeping retries of the same journaled envelope idempotent.
-      # A newer complete snapshot supersedes older unacknowledged complete
-      # snapshots. Incremental order, execution, and position reports remain
-      # pending and retain their original delivery order.
-      self.journal.retire_pending_full_snapshots()
-      self.journal.add_report(envelope.message_id, envelope.model_dump_json())
-      return snapshot_message_id
+      # A newer full snapshot only supersedes older full snapshots. Incremental
+      # callbacks retain their journal order around this guarded commit.
+      self._persist_full_snapshot_report(
+        envelope.message_id,
+        envelope.model_dump_json(),
+      )
+      return enriched
+
+    if (
+      self.mode != "live"
+      or mutation_generation is None
+      or callback_failure_generation is None
+    ):
+      return persist()
+    state_is_current = getattr(self.broker, "trading_state_is_current", None)
+    if not callable(state_is_current):
+      raise RuntimeError("Live broker cannot fence a full snapshot commit")
+    # Durable callback writes take this same RLock. A callback already fenced
+    # at enqueue invalidates the snapshot here; one arriving after this check
+    # is journaled after the snapshot and therefore cannot be overwritten by it.
+    with self.journal.lock:
+      if not state_is_current(
+        connection_generation if connection_generation is not None else 0,
+        mutation_generation,
+        callback_failure_generation,
+      ):
+        raise _StaleTradingSnapshotError(
+          "XTTrading state changed before full snapshot persistence"
+        )
+      persisted = persist()
+    if not isinstance(persisted, dict):
+      raise RuntimeError("Full snapshot persistence returned no payload")
+    return persisted
+
+  def _reconcile_snapshot_correlations(self, snapshot: dict[str, Any]) -> None:
+    correlations = self.journal.broker_order_client_ids()
+    for collection_name in ("orders", "trades"):
+      for item in snapshot.get(collection_name) or []:
+        if not isinstance(item, dict):
+          continue
+        broker_order_id = item.get("order_id") or item.get("broker_order_id")
+        self.journal.reconcile_processing_cancel(
+          broker_order_id=broker_order_id,
+          order_status=str(
+            item.get("effective_order_status")
+            or item.get("order_status")
+            or item.get("status")
+            or ""
+          ),
+        )
+        client_order_id = correlations.get(str(broker_order_id))
+        if not client_order_id:
+          client_order_id = self.journal.client_order_id_for_report(
+            broker_order_id=broker_order_id,
+            order_remark=str(item.get("order_remark") or ""),
+          )
+        if client_order_id:
+          item["client_order_id"] = client_order_id
+          self.journal.reconcile_processing_order(
+            client_order_id=client_order_id,
+            broker_order_id=broker_order_id,
+          )
+
+  def _persist_full_snapshot_report(
+    self,
+    message_id: str,
+    serialized: str,
+  ) -> None:
+    self.journal.retire_pending_full_snapshots()
+    self.journal.add_report(message_id, serialized)
 
   async def _flush_reports(self, socket) -> None:
-    # Heartbeat, readiness, and command tasks may all request a flush.  One
-    # flusher prevents duplicate Journal frames from forming a lock convoy.
     async with self._report_flush_lock:
-      for serialized in self.journal.pending_reports():
+      available = REPORT_SEND_WINDOW - len(self._reports_inflight)
+      if available <= 0:
+        return
+      serialized_reports = await self._run_journal_call(
+        self.journal.pending_reports,
+        priority=JOURNAL_PRIORITY_REPORT_SCAN,
+        limit=REPORT_SEND_SCAN_LIMIT,
+      )
+      now = time.monotonic()
+      for serialized in serialized_reports:
+        message_id = str(orjson.loads(serialized).get("message_id") or "")
+        if (
+          not message_id
+          or message_id in self._reports_inflight
+          or self._report_retry_not_before.get(message_id, 0.0) > now
+        ):
+          continue
         await self._send_socket_text(socket, serialized)
+        self._reports_inflight.add(message_id)
+        available -= 1
+        if available <= 0:
+          break
 
   async def _heartbeat_loop(self, socket) -> None:
     self._ensure_market_upload_state()
-    cycles = 0
     while True:
       try:
         await asyncio.wait_for(
@@ -1650,25 +3076,32 @@ class AgentRuntime:
       except asyncio.TimeoutError:
         pass
       self._heartbeat_wakeup.clear()
-      cycles += 1
-      if cycles % 2 == 0:
-        # Periodic account observation is not a recovery event. Only an actual
-        # control/XTTrading generation change may close the reconciliation gate.
-        await self._queue_full_snapshot(reconciliation=False)
       self._raise_if_trading_recovery_expired()
       heartbeat_status = (
-        self._heartbeat_status()
-        if self.mode == "live"
-        else "RECONCILING"
-        if cycles % 2 == 0
-        else "READY"
+        self._heartbeat_status() if self.mode == "live" else "READY"
       )
       await self._heartbeat_checkpoint(socket, status=heartbeat_status)
+
+  async def _account_snapshot_loop(self) -> None:
+    await self._initial_reconciliation_complete.wait()
+    while True:
+      await asyncio.sleep(ACCOUNT_SNAPSHOT_INTERVAL_SECONDS)
+      try:
+        await self._queue_full_snapshot(reconciliation=False)
+      except _FatalTradingRecoveryError:
+        raise
+      except Exception as exc:
+        logger.warning(
+          "Periodic account snapshot failed: error=%s",
+          exc.__class__.__name__,
+        )
+      self._report_wakeup.set()
+      self._heartbeat_wakeup.set()
 
   def _is_market_data_ready(self) -> bool:
     broker = getattr(self, "broker", None)
     if broker is None:
-      return True
+      return bool(getattr(self, "_market_data_ready_cache", False))
     if hasattr(self, "_market_data_ready_cache"):
       return bool(self._market_data_ready_cache)
     # Focused Runtime doubles created without __init__ retain a direct probe.
@@ -1692,6 +3125,7 @@ class AgentRuntime:
       return False
 
   async def _market_data_readiness_loop(self) -> None:
+    await self._broker_ready.wait()
     ensure_ready = getattr(self.broker, "ensure_market_data_ready", None)
     if not callable(ensure_ready):
       ensure_ready = getattr(self.broker, "is_market_data_ready", None)
@@ -1768,6 +3202,8 @@ class AgentRuntime:
         "readiness",
         ensure_with_generation,
         timeout=XTTRADING_RECONNECT_TIMEOUT_SECONDS,
+        priority=XTTRADING_PRIORITY_READINESS,
+        coalesce_key="readiness",
       )
       self._trading_connection_generation_cache = max(0, int(generation))
       self._set_trading_ready(bool(ready))
@@ -1785,6 +3221,8 @@ class AgentRuntime:
     return False
 
   async def _trading_readiness_loop(self, socket) -> None:
+    await self._broker_ready.wait()
+    await self._initial_reconciliation_complete.wait()
     previous = self._is_trading_ready()
     previous_generation = self._trading_connection_generation()
     while True:
@@ -1792,6 +3230,19 @@ class AgentRuntime:
       current = bool(ensured)
       current_generation = self._trading_connection_generation()
       reconnect_observed = current_generation != previous_generation
+      self._refresh_journal_reconciliation_gate()
+      broker_reconciliation = getattr(
+        self.broker,
+        "trading_requires_reconciliation",
+        None,
+      )
+      if (
+        current
+        and callable(broker_reconciliation)
+        and bool(broker_reconciliation())
+        and not self._requires_trading_reconciliation()
+      ):
+        self._begin_trading_reconciliation("report_pipeline_unhealthy")
       if current != previous or reconnect_observed:
         logger.info("XTTrading readiness changed: ready=%s", current)
         if not current:
@@ -1825,51 +3276,114 @@ class AgentRuntime:
       self._raise_if_trading_recovery_expired()
       await asyncio.sleep(XTTRADING_READINESS_RETRY_SECONDS)
 
+  def _refresh_journal_reconciliation_gate(self) -> None:
+    journal = getattr(self, "journal", None)
+    if (
+      self._trading_recovery_reason != "journal_indeterminate_commands"
+      or journal is None
+      or int(journal.stats()["processing_commands"]) > 0
+    ):
+      return
+    # The previously ACKed snapshot stayed bound to an unresolved command.
+    # Once that command gains durable evidence, require one new generation-
+    # current snapshot rather than opening the gate from stale evidence.
+    self._trading_reconciliation_snapshot_id = None
+    self._trading_reconciliation_snapshot_generation = None
+    self._trading_reconciliation_snapshot_callback_failure_generation = None
+    self._trading_recovery_reason = "journal_commands_resolved"
+    self._trading_recovery_started_monotonic = time.monotonic()
+
   async def _broker_report_loop(self, socket) -> None:
     """Flush callbacks already persisted by LiveBroker without snapshot delay."""
     while True:
-      await asyncio.sleep(1)
+      try:
+        await asyncio.wait_for(self._report_wakeup.wait(), timeout=1.0)
+      except asyncio.TimeoutError:
+        pass
+      self._report_wakeup.clear()
       await self._flush_reports(socket)
 
+  async def _report_ack_loop(self, socket) -> None:
+    """Persist report ACKs in bounded batches away from the socket receiver."""
+    while True:
+      first = await self._report_ack_requests.get()
+      message_ids = [first]
+      while len(message_ids) < REPORT_SEND_SCAN_LIMIT:
+        try:
+          message_ids.append(self._report_ack_requests.get_nowait())
+        except asyncio.QueueEmpty:
+          break
+      try:
+        await self._run_journal_call(
+          self.journal.acknowledge_reports,
+          message_ids,
+          priority=JOURNAL_PRIORITY_REPORT_ACK,
+        )
+      except BaseException:
+        for message_id in message_ids:
+          self._report_ack_pending.discard(message_id)
+        raise
+      else:
+        wake_heartbeat = False
+        for message_id in message_ids:
+          self._report_ack_pending.discard(message_id)
+          self._reports_inflight.discard(message_id)
+          self._report_retry_attempts.pop(message_id, None)
+          self._report_retry_not_before.pop(message_id, None)
+          wake_heartbeat = (
+            self._acknowledge_trading_reconciliation_snapshot(message_id)
+            or wake_heartbeat
+          )
+        if wake_heartbeat and socket is not None:
+          self._heartbeat_wakeup.set()
+        self._wake_report_sender()
+      finally:
+        for _ in message_ids:
+          self._report_ack_requests.task_done()
+
+  async def _emergency_stop_refresh_loop(self) -> None:
+    """Refresh external emergency-stop changes without touching heartbeat IO."""
+    while True:
+      store = getattr(self, "emergency_stop", None)
+      if store is not None:
+        self._emergency_stop_status_cache = await asyncio.to_thread(store.status)
+      await asyncio.sleep(1.0)
+
+  def _emergency_stop_active(self) -> bool:
+    if getattr(self, "emergency_stop", None) is None:
+      return False
+    status = getattr(self, "_emergency_stop_status_cache", None)
+    # A runtime constructed without the normal initializer cannot prove the
+    # local safety file is clear, so retain the fail-closed behavior.
+    return True if status is None else bool(status.get("active"))
+
   def _enqueue_market_event(self, payload: dict[str, Any]) -> None:
-    loop = self._session_loop
+    # Single-instrument quotes now belong to the process-lifetime market
+    # transport. Do not couple their callback bridge to a transient control
+    # WebSocket session.
+    loop = getattr(self, "_runtime_loop", None) or self._session_loop
     if loop is None or loop.is_closed():
       return
 
     def enqueue() -> None:
       if self._market_events.full():
-        logger.error("QMT single-quote event queue overflow")
-        self._market_event_overflow.set()
-        return
+        # Quotes are transient state. Keep the newest observation and retire
+        # the oldest queued observation without failing the control session.
+        try:
+          self._market_events.get_nowait()
+        except asyncio.QueueEmpty:
+          pass
+        else:
+          self._market_events.task_done()
+          self._market_event_drops += 1
+          if self._market_event_drops == 1 or self._market_event_drops % 1024 == 0:
+            logger.warning(
+              "Dropped stale single-quote events under backpressure: count=%s",
+              self._market_event_drops,
+            )
       self._market_events.put_nowait(payload)
 
     loop.call_soon_threadsafe(enqueue)
-
-  async def _market_event_loop(self, socket) -> None:
-    while True:
-      queued = asyncio.create_task(self._market_events.get())
-      overflow = asyncio.create_task(self._market_event_overflow.wait())
-      try:
-        done, _ = await asyncio.wait(
-          {queued, overflow},
-          return_when=asyncio.FIRST_COMPLETED,
-        )
-        if overflow in done and self._market_event_overflow.is_set():
-          raise RuntimeError("single-quote event queue overflow")
-        payload = queued.result()
-        await self._send_socket_text(
-          socket,
-          AgentEnvelope(
-            message_type=AgentMessageType.MARKET_EVENT,
-            payload=payload,
-          ).model_dump_json(),
-        )
-        self._market_events.task_done()
-      finally:
-        for task in (queued, overflow):
-          if not task.done():
-            task.cancel()
-        await asyncio.gather(queued, overflow, return_exceptions=True)
 
   def _enqueue_whole_market_event(self, data: Any) -> None:
     self._ensure_whole_market_state()
@@ -2700,16 +4214,24 @@ class AgentRuntime:
     *,
     stream_id: str,
   ) -> None:
+    self._ensure_whole_market_state()
     pending: deque[_PendingMarketAck] = deque()
     receive_task = asyncio.create_task(socket.recv())
     get_task: asyncio.Task[_EncodedMarketBatch] | None = None
+    market_event_task: asyncio.Task[dict[str, Any]] | None = None
     try:
       while True:
         if len(pending) < MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES and get_task is None:
           get_task = asyncio.create_task(outbound.get())
+        if market_event_task is None:
+          market_event_task = asyncio.create_task(self._market_events.get())
         waiters: set[asyncio.Task[Any]] = {receive_task}
         if get_task is not None:
           waiters.add(get_task)
+        # Never start a replaceable text send while a binary ACK is pending.
+        # This keeps the ACK deadline and whole-market send window authoritative.
+        if not pending:
+          waiters.add(market_event_task)
         timeout = None
         if pending:
           timeout = max(
@@ -2781,6 +4303,9 @@ class AgentRuntime:
             outbound.depth,
           )
           receive_task = asyncio.create_task(socket.recv())
+          # Processing an ACK may have opened a binary send slot. Re-enter
+          # selection so a queued batch is considered before any text event.
+          continue
 
         if get_task is not None and get_task in done:
           encoded = get_task.result()
@@ -2800,11 +4325,64 @@ class AgentRuntime:
           )
           if len(pending) == 1:
             self._market_stream_pending_ack_monotonic = started
+          # A ready binary frame always wins over a queued single-instrument
+          # event. Re-enter the scheduler before considering the low lane so
+          # a burst of whole-market frames cannot be interleaved behind text.
+          continue
+
+        if market_event_task in done:
+          payload = market_event_task.result()
+          market_event_task = None
+          try:
+            # The task may have been held while binary ACKs were outstanding.
+            # Coalesce that replaceable observation to the newest queued state
+            # before using the market socket's one low-priority send turn.
+            while True:
+              try:
+                newer_payload = self._market_events.get_nowait()
+              except asyncio.QueueEmpty:
+                break
+              self._market_events.task_done()
+              self._market_event_drops += 1
+              payload = newer_payload
+            serialized = AgentEnvelope(
+              message_type=AgentMessageType.MARKET_EVENT,
+              payload=payload,
+            ).model_dump_json()
+            try:
+              await asyncio.wait_for(
+                socket.send(serialized),
+                timeout=MARKET_EVENT_SEND_TIMEOUT_SECONDS,
+              )
+            except asyncio.TimeoutError as exc:
+              # wait_for() cancels the in-flight websocket send. Reusing that
+              # websocket after a cancelled send is not a supported transport
+              # state, so fail this market-only session and let its supervisor
+              # reconnect. The independent control connection remains intact.
+              self._market_event_drops += 1
+              if self._market_event_drops == 1 or self._market_event_drops % 1024 == 0:
+                logger.warning(
+                  "Resetting market socket after single-quote send timeout: "
+                  "count=%s",
+                  self._market_event_drops,
+                )
+              raise RuntimeError(
+                "market socket send timed out; reconnect required"
+              ) from exc
+          finally:
+            self._market_events.task_done()
     finally:
       self._market_stream_pending_ack_monotonic = 0.0
+      if market_event_task is not None and market_event_task.done():
+        if not market_event_task.cancelled():
+          market_event_task.result()
+          self._market_events.task_done()
+        market_event_task = None
       tasks = [receive_task]
       if get_task is not None:
         tasks.append(get_task)
+      if market_event_task is not None:
+        tasks.append(market_event_task)
       for task in tasks:
         if not task.done():
           task.cancel()
@@ -2882,7 +4460,7 @@ class AgentRuntime:
       status = "XTDATA_UNAVAILABLE"
     if not trading_ready:
       status = "TRADING_UNAVAILABLE"
-    if self.emergency_stop and self.emergency_stop.status()["active"]:
+    if self._emergency_stop_active():
       status = "EMERGENCY_STOP"
     journal_stats = self.journal.stats()
     payload = HeartbeatPayload(
@@ -2934,19 +4512,45 @@ class AgentRuntime:
   async def _heartbeat_checkpoint(self, socket, *, status: str) -> None:
     async with self._heartbeat_checkpoint_lock:
       await self._send_heartbeat(socket, status=status)
-    # Do not retain the heartbeat-priority lock while an arbitrary number of
-    # durable reports drain. A later heartbeat can queue behind at most the
-    # single WebSocket frame currently being written.
-    await self._flush_reports(socket)
+    self._wake_report_sender()
+
+  def _wake_report_sender(self) -> None:
+    wakeup = getattr(self, "_report_wakeup", None)
+    if wakeup is None:
+      wakeup = asyncio.Event()
+      self._report_wakeup = wakeup
+    wakeup.set()
 
   async def _send_socket_text(self, socket, serialized: str) -> None:
+    writer = getattr(self, "_control_socket_writer", None)
+    if writer is not None and writer.socket is socket:
+      await writer.send(
+        serialized,
+        priority=self._control_frame_priority(serialized),
+      )
+      return
     async with self._websocket_send_lock:
       await asyncio.wait_for(
         socket.send(serialized),
         timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
       )
 
+  @staticmethod
+  def _control_frame_priority(serialized: str) -> int:
+    try:
+      message_type = str(orjson.loads(serialized).get("message_type") or "")
+    except (TypeError, ValueError, orjson.JSONDecodeError):
+      return 1
+    if message_type in {
+      AgentMessageType.AUTH.value,
+      AgentMessageType.HEARTBEAT.value,
+      AgentMessageType.COMMAND_ACK.value,
+    }:
+      return 0
+    return 1
+
   async def _handle_message(self, socket, raw_message: str) -> None:
+    self._ensure_market_upload_state()
     envelope = AgentEnvelope.model_validate_json(raw_message)
     if envelope.message_type is AgentMessageType.HEARTBEAT_ACK:
       heartbeat_message_id = str(
@@ -2972,17 +4576,25 @@ class AgentRuntime:
       report_message_id = str(envelope.payload.get("report_message_id", ""))
       accepted = bool(envelope.payload.get("accepted"))
       if accepted:
-        self.journal.acknowledge_report(report_message_id)
-        if (
-          self._acknowledge_trading_reconciliation_snapshot(report_message_id)
-          and socket is not None
-        ):
-          # The API keeps RECONCILING until Engine applies the durable report;
-          # this READY request is therefore harmless before promotion and lets
-          # the first post-Engine heartbeat converge without another 30s wait.
-          # Wake the independent heartbeat task instead of retaining the sole
-          # WebSocket receiver behind report backlog or a socket send.
-          self._heartbeat_wakeup.set()
+        if report_message_id and report_message_id not in self._report_ack_pending:
+          self._report_ack_pending.add(report_message_id)
+          try:
+            self._report_ack_requests.put_nowait(report_message_id)
+          except asyncio.QueueFull as exc:
+            self._report_ack_pending.discard(report_message_id)
+            raise RuntimeError("report ACK journal queue is full") from exc
+      else:
+        self._reports_inflight.discard(report_message_id)
+        attempts = self._report_retry_attempts.get(report_message_id, 0) + 1
+        self._report_retry_attempts[report_message_id] = attempts
+        retry_delay = min(
+          REPORT_RETRY_MAX_SECONDS,
+          REPORT_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 8)),
+        )
+        self._report_retry_not_before[report_message_id] = (
+          time.monotonic() + retry_delay
+        )
+        self._wake_report_sender()
       return
     if envelope.message_type in {
       AgentMessageType.COMMAND,
@@ -3064,6 +4676,44 @@ class AgentRuntime:
             report_exc.__class__.__name__,
           )
       return
+    if envelope.message_type in {
+      AgentMessageType.MARKET_RESET,
+      AgentMessageType.MARKET_SUBSCRIBE,
+      AgentMessageType.MARKET_UNSUBSCRIBE,
+    }:
+      if envelope.message_type is AgentMessageType.MARKET_RESET:
+        while True:
+          try:
+            self._market_control_requests.get_nowait()
+          except asyncio.QueueEmpty:
+            break
+          else:
+            self._market_control_requests.task_done()
+      try:
+        self._market_control_requests.put_nowait(envelope)
+      except asyncio.QueueFull:
+        logger.warning(
+          "Dropped low-priority market control under backpressure: type=%s",
+          envelope.message_type.value,
+        )
+      return
+    logger.warning("Unsupported Agent message: %s", envelope.message_type.value)
+
+  async def _market_control_loop(self) -> None:
+    if getattr(self, "broker", None) is None and getattr(
+      self,
+      "_broker_factory",
+      None,
+    ) is not None:
+      await self._broker_ready.wait()
+    while True:
+      envelope = await self._market_control_requests.get()
+      try:
+        await self._handle_market_control(envelope)
+      finally:
+        self._market_control_requests.task_done()
+
+  async def _handle_market_control(self, envelope: AgentEnvelope) -> None:
     if envelope.message_type is AgentMessageType.MARKET_RESET:
       await self._run_xtdata_control(
         "reset-market-subscriptions",
@@ -3100,14 +4750,11 @@ class AgentRuntime:
           envelope.payload.get("subscription_id"),
         )
       return
-    if envelope.message_type is AgentMessageType.MARKET_UNSUBSCRIBE:
-      await self._run_xtdata_control(
-        "unsubscribe-market",
-        self.broker.unsubscribe_market,
-        str(envelope.payload.get("subscription_id") or ""),
-      )
-      return
-    logger.warning("Unsupported Agent message: %s", envelope.message_type.value)
+    await self._run_xtdata_control(
+      "unsubscribe-market",
+      self.broker.unsubscribe_market,
+      str(envelope.payload.get("subscription_id") or ""),
+    )
 
   async def _run_xtdata_control(
     self,
@@ -3203,16 +4850,79 @@ class AgentRuntime:
       task.exception()
 
   async def _command_request_loop(self, socket) -> None:
-    """Serialize broker commands without blocking the WebSocket receiver."""
+    """Submit bounded command lanes to the sole native priority worker."""
 
-    while True:
-      _, _, envelope = await self._command_requests.get()
-      self._active_command_count += 1
-      try:
-        await self._handle_command(socket, envelope)
-      finally:
-        self._active_command_count = max(0, self._active_command_count - 1)
-        self._command_requests.task_done()
+    if getattr(self, "broker", None) is None and getattr(
+      self,
+      "_broker_factory",
+      None,
+    ) is not None:
+      await self._broker_ready.wait()
+    active: dict[asyncio.Task[None], int] = {}
+    getters: dict[asyncio.Task[tuple[int, int, AgentEnvelope]], int] = {}
+    try:
+      while True:
+        active_high = sum(priority == 0 for priority in active.values())
+        active_normal = len(active) - active_high
+        if (
+          active_high < MAX_ACTIVE_PRIORITY_TRADE_COMMANDS
+          and 0 not in getters.values()
+        ):
+          task = asyncio.create_task(
+            self._command_requests.get_high(),
+            name="qmt-command-priority-dequeue",
+          )
+          getters[task] = 0
+        if (
+          active_normal < MAX_ACTIVE_NORMAL_TRADE_COMMANDS
+          and 1 not in getters.values()
+        ):
+          task = asyncio.create_task(
+            self._command_requests.get_normal(),
+            name="qmt-command-normal-dequeue",
+          )
+          getters[task] = 1
+
+        done, _ = await asyncio.wait(
+          {*active, *getters},
+          return_when=asyncio.FIRST_COMPLETED,
+        )
+        completed_commands = [task for task in done if task in active]
+        for task in completed_commands:
+          active.pop(task)
+          await task
+
+        for getter in [task for task in done if task in getters]:
+          lane_priority = getters.pop(getter)
+          priority, _, envelope = getter.result()
+          command = asyncio.create_task(
+            self._dispatch_command(socket, envelope, priority=priority),
+            name=(
+              "qmt-command-priority"
+              if lane_priority == 0
+              else "qmt-command-normal"
+            ),
+          )
+          active[command] = priority
+    finally:
+      for task in (*getters, *active):
+        if not task.done():
+          task.cancel()
+      await asyncio.gather(*getters, *active, return_exceptions=True)
+
+  async def _dispatch_command(
+    self,
+    socket,
+    envelope: AgentEnvelope,
+    *,
+    priority: int,
+  ) -> None:
+    self._active_command_count += 1
+    try:
+      await self._handle_command(socket, envelope)
+    finally:
+      self._active_command_count = max(0, self._active_command_count - 1)
+      self._command_requests.task_done(priority)
 
   async def _command_ack(
     self,
@@ -3235,11 +4945,52 @@ class AgentRuntime:
       ).model_dump_json(),
     )
 
+  @staticmethod
+  def _command_rejection_result(
+    payload: dict[str, Any],
+    *,
+    reason: str,
+    cancel: bool,
+  ) -> dict[str, Any]:
+    error_key = "cancel_errors" if cancel else "order_errors"
+    return {
+      "accepted": False,
+      "reason": reason,
+      "reports": [
+        (
+          AgentMessageType.DELTA_REPORT.value,
+          {
+            error_key: [
+              {
+                "client_order_id": payload.get("client_order_id"),
+                "account_id": str(payload.get("account_id") or ""),
+                "reason": reason,
+                "error_msg": reason,
+              }
+            ],
+            "sequence": int(datetime.now(timezone.utc).timestamp() * 1_000_000),
+            "is_complete": False,
+          },
+        )
+      ],
+    }
+
   async def _handle_command(self, socket, envelope: AgentEnvelope) -> None:
     payload = envelope.payload
-    state, previous = self.journal.begin_command(
+    emergency_command = (
+      str(payload.get("command_kind") or "").upper() == "EMERGENCY_STOP"
+    )
+    command_priority = (
+      JOURNAL_PRIORITY_CANCEL
+      if envelope.message_type is AgentMessageType.CANCEL_COMMAND
+      or emergency_command
+      else JOURNAL_PRIORITY_COMMAND
+    )
+    state, previous = await self._run_journal_call(
+      self.journal.begin_command,
       envelope.message_id,
       payload,
+      priority=command_priority,
     )
     if state == "MISMATCH":
       await self._command_ack(
@@ -3254,7 +5005,7 @@ class AgentRuntime:
         socket,
         envelope,
         accepted=False,
-        reason="local_reconciliation_required",
+        reason="command_processing",
       )
       return
     if state == "DUPLICATE":
@@ -3302,6 +5053,7 @@ class AgentRuntime:
         rejection = "local_reconciliation_required"
       elif (
         self.mode == "live"
+        and not emergency_command
         and envelope.message_type is not AgentMessageType.CANCEL_COMMAND
         and str(payload.get("side") or "").upper() != "SELL"
         and str(payload.get("t_trade_role") or "").upper() != "EXIT"
@@ -3310,8 +5062,7 @@ class AgentRuntime:
         rejection = "market_stream_not_ready"
       elif (
         envelope.message_type is not AgentMessageType.CANCEL_COMMAND
-        and self.emergency_stop
-        and self.emergency_stop.status()["active"]
+        and self._emergency_stop_active()
       ):
         rejection = "local_emergency_stop"
     except ValidationError:
@@ -3320,32 +5071,11 @@ class AgentRuntime:
       rejection = "invalid_command_expiry"
 
     if rejection:
-      error_key = (
-        "cancel_errors"
-        if envelope.message_type is AgentMessageType.CANCEL_COMMAND
-        else "order_errors"
+      result = self._command_rejection_result(
+        payload,
+        reason=rejection,
+        cancel=envelope.message_type is AgentMessageType.CANCEL_COMMAND,
       )
-      result = {
-        "accepted": False,
-        "reason": rejection,
-        "reports": [
-          (
-            AgentMessageType.DELTA_REPORT.value,
-            {
-              error_key: [
-                {
-                  "client_order_id": payload.get("client_order_id"),
-                  "account_id": account_id,
-                  "reason": rejection,
-                  "error_msg": rejection,
-                }
-              ],
-              "sequence": int(datetime.now(timezone.utc).timestamp() * 1_000_000),
-              "is_complete": False,
-            },
-          )
-        ],
-      }
     elif emergency_command:
       if self.emergency_stop is None:
         result = {
@@ -3354,19 +5084,36 @@ class AgentRuntime:
           "reports": [],
         }
       else:
-        self.emergency_stop.activate(str(payload.get("reason") or ""))
+        self._emergency_stop_status_cache = await self._run_journal_call(
+          self.emergency_stop.activate,
+          str(payload.get("reason") or ""),
+          priority=JOURNAL_PRIORITY_CANCEL,
+        )
         result = {
           "accepted": True,
           "reason": "local_emergency_stop_activated",
           "reports": [],
         }
     else:
+      def execute_if_current() -> dict[str, Any]:
+        if _parse_expiry(payload.get("expires_at")) <= datetime.now(timezone.utc):
+          return self._command_rejection_result(
+            payload,
+            reason="command_expired",
+            cancel=envelope.message_type is AgentMessageType.CANCEL_COMMAND,
+          )
+        return self.broker.execute(payload)
+
       result = (
         await self._run_native_xttrading(
           "execute-command",
-          self.broker.execute,
-          payload,
+          execute_if_current,
           timeout=XTTRADING_RECONNECT_TIMEOUT_SECONDS,
+          priority=(
+            XTTRADING_PRIORITY_CANCEL
+            if envelope.message_type is AgentMessageType.CANCEL_COMMAND
+            else XTTRADING_PRIORITY_ORDER
+          ),
         )
         if self.mode == "live"
         else await asyncio.to_thread(self.broker.execute, payload)
@@ -3379,8 +5126,7 @@ class AgentRuntime:
           self._read_broker_trading_generation()
         )
         self._begin_trading_reconciliation("broker_rejected_unreconciled_generation")
-    self.journal.complete_command(envelope.message_id, result)
-
+    reports: list[tuple[str, str]] = []
     for message_type, report_payload in result.get("reports") or []:
       report = AgentEnvelope(
         message_type=AgentMessageType(message_type),
@@ -3389,7 +5135,16 @@ class AgentRuntime:
           report_payload,
         ),
       )
-      self.journal.add_report(report.message_id, report.model_dump_json())
+      reports.append((report.message_id, report.model_dump_json()))
+    await self._run_journal_call(
+      self._persist_command_outcome,
+      envelope.message_id,
+      result,
+      reports,
+      priority=command_priority,
+    )
+    if self.mode == "live":
+      self._refresh_journal_reconciliation_gate()
     await self._command_ack(
       socket,
       envelope,
@@ -3397,6 +5152,16 @@ class AgentRuntime:
       reason=str(result.get("reason", "")),
     )
     await self._flush_reports(socket)
+
+  def _persist_command_outcome(
+    self,
+    message_id: str,
+    result: dict[str, Any],
+    reports: list[tuple[str, str]],
+  ) -> None:
+    self.journal.complete_command(message_id, result)
+    for report_message_id, serialized in reports:
+      self.journal.add_report(report_message_id, serialized)
 
   async def _handle_market_data_request(
     self,
@@ -3417,37 +5182,51 @@ class AgentRuntime:
       self._provisional_market_uploads.discard(request_id)
       await self._complete_market_upload(request_id)
       return
-    async with self._market_data_upload_client() as client:
-      for index, chunk in enumerate(chunks):
-        self._touch_market_upload(request_id)
-        await self._put_market_data_chunk(
-          client,
-          request_id=request_id,
-          chunk_index=index,
-          chunk=chunk,
-          total_chunks=len(chunks),
-        )
-        self._touch_market_upload(request_id)
-      if request_id in self._provisional_market_uploads:
-        await self._finalize_market_data_upload(
-          request_id,
-          len(chunks),
-          client=client,
-        )
-        self._provisional_market_uploads.discard(request_id)
+    client = self._market_data_upload_client()
+    for index, chunk in enumerate(chunks):
+      self._touch_market_upload(request_id)
+      await self._put_market_data_chunk(
+        client,
+        request_id=request_id,
+        chunk_index=index,
+        chunk=chunk,
+        total_chunks=len(chunks),
+      )
+      self._touch_market_upload(request_id)
+    if request_id in self._provisional_market_uploads:
+      await self._finalize_market_data_upload(
+        request_id,
+        len(chunks),
+        client=client,
+      )
+      self._provisional_market_uploads.discard(request_id)
     await self._complete_market_upload(request_id)
 
   def _market_data_upload_client(self) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-      timeout=60.0,
-      follow_redirects=False,
-      trust_env=False,
-      verify=httpx_verify(self.configuration.api_url),
-      limits=httpx.Limits(
-        max_connections=MAX_CONCURRENT_HISTORY_UPLOADS,
-        max_keepalive_connections=MAX_CONCURRENT_HISTORY_UPLOADS,
-      ),
-    )
+    self._ensure_market_upload_state()
+    client = self._market_data_http_client
+    if client is None:
+      client = httpx.AsyncClient(
+        timeout=60.0,
+        follow_redirects=False,
+        trust_env=False,
+        verify=httpx_verify(self.configuration.api_url),
+        limits=httpx.Limits(
+          max_connections=MAX_CONCURRENT_HISTORY_UPLOADS,
+          max_keepalive_connections=MAX_CONCURRENT_HISTORY_UPLOADS,
+        ),
+      )
+      self._market_data_http_client = client
+    return client
+
+  async def _close_market_data_upload_client(self) -> None:
+    client = getattr(self, "_market_data_http_client", None)
+    self._market_data_http_client = None
+    if client is None:
+      return
+    close = getattr(client, "aclose", None)
+    if close is not None:
+      await close()
 
   async def _put_market_data_chunk(
     self,
@@ -3458,31 +5237,35 @@ class AgentRuntime:
     chunk: _MarketDataSpoolChunk,
     total_chunks: int,
   ) -> None:
-    response = await client.put(
-      (
-        f"{self.configuration.api_url}/agent/market-data/"
-        f"{request_id}/chunks/{chunk_index}"
-      ),
-      content=_stream_spool_chunk(chunk.path),
-      headers={
-        "Authorization": f"Bearer {self._access_token}",
-        "Content-Type": "application/json",
-        "Content-Encoding": "gzip",
-        "Content-Length": str(chunk.compressed_bytes),
-        "X-Content-SHA256": chunk.digest,
-        "X-Record-Count": str(chunk.record_count),
-        "X-Total-Chunks": str(total_chunks),
-      },
-    )
+    self._ensure_market_upload_state()
+    async with self._history_upload_slots:
+      response = await client.put(
+        (
+          f"{self.configuration.api_url}/agent/market-data/"
+          f"{request_id}/chunks/{chunk_index}"
+        ),
+        content=_stream_spool_chunk(
+          chunk.path,
+          limiter=self._history_upload_limiter,
+          executor=self._history_upload_io_executor,
+        ),
+        headers={
+          "Authorization": f"Bearer {self._access_token}",
+          "Content-Type": "application/json",
+          "Content-Encoding": "gzip",
+          "Content-Length": str(chunk.compressed_bytes),
+          "X-Content-SHA256": chunk.digest,
+          "X-Record-Count": str(chunk.record_count),
+          "X-Total-Chunks": str(total_chunks),
+        },
+      )
     try:
       response.raise_for_status()
     except httpx.HTTPStatusError as exc:
       if exc.response.status_code == 409:
-        fatal = _FatalMarketDataUploadConflict(
-          "market-data chunk identity conflict; Agent restart required"
-        )
-        self._trip_market_data_fatal(fatal)
-        raise fatal from exc
+        raise _IsolatedMarketDataWorkerError(
+          "MARKET_DATA_UPLOAD_CONFLICT"
+        ) from exc
       raise
 
   async def _upload_provisional_market_data_chunk(
@@ -3508,30 +5291,29 @@ class AgentRuntime:
     client: httpx.AsyncClient | None = None,
   ) -> None:
     if client is None:
-      async with self._market_data_upload_client() as owned_client:
-        await self._finalize_market_data_upload(
-          request_id,
-          total_chunks,
-          client=owned_client,
-        )
+      await self._finalize_market_data_upload(
+        request_id,
+        total_chunks,
+        client=self._market_data_upload_client(),
+      )
       return
-    response = await client.post(
-      f"{self.configuration.api_url}/agent/market-data/{request_id}/complete",
-      headers={
-        "Authorization": f"Bearer {self._access_token}",
-        "X-Total-Chunks": str(total_chunks),
-      },
-      timeout=10.0,
-    )
+    self._ensure_market_upload_state()
+    async with self._history_upload_slots:
+      response = await client.post(
+        f"{self.configuration.api_url}/agent/market-data/{request_id}/complete",
+        headers={
+          "Authorization": f"Bearer {self._access_token}",
+          "X-Total-Chunks": str(total_chunks),
+        },
+        timeout=10.0,
+      )
     try:
       response.raise_for_status()
     except httpx.HTTPStatusError as exc:
       if exc.response.status_code == 409:
-        fatal = _FatalMarketDataUploadConflict(
-          "market-data manifest conflict; Agent restart required"
-        )
-        self._trip_market_data_fatal(fatal)
-        raise fatal from exc
+        raise _IsolatedMarketDataWorkerError(
+          "MARKET_DATA_UPLOAD_CONFLICT"
+        ) from exc
       raise
 
   async def _prepared_market_data_chunks(
@@ -3542,9 +5324,38 @@ class AgentRuntime:
     self._ensure_market_upload_state()
     if self._fatal_market_data_error is not None:
       raise self._fatal_market_data_error
+    if self._market_spool_cleanup_pending:
+      async with self._market_spool_cleanup_lock:
+        if self._market_spool_cleanup_pending:
+          protected_directory_names = frozenset(
+            _market_data_spool_request_directory(
+              self._market_spool_root,
+              cached_request_id,
+            ).name
+            for cached_request_id in self._market_upload_cache
+          )
+          self._market_spool_cleanup_pending = await asyncio.to_thread(
+            _sweep_market_data_spool_cleanup,
+            self._market_spool_root,
+            protected_directory_names=protected_directory_names,
+          )
+      if self._market_spool_cleanup_pending:
+        raise _MarketDataSpoolCleanupPending(
+          "market-data spool cleanup is pending"
+        )
     payload_fingerprint = _market_data_payload_fingerprint(payload)
     now = self._market_upload_clock()
-    self._cleanup_expired_market_uploads(now)
+    expired = self._cleanup_expired_market_uploads(
+      now,
+      remove_prepared=False,
+    )
+    if expired:
+      await asyncio.gather(
+        *(
+          asyncio.to_thread(self._remove_prepared_market_data, prepared)
+          for prepared in expired
+        )
+      )
 
     tombstone = self._market_upload_tombstones.get(request_id)
     if tombstone is not None:
@@ -3564,6 +5375,58 @@ class AgentRuntime:
       if task is None:
         raise RuntimeError("market-data preparation state is incomplete")
       return (await asyncio.shield(task)).chunks
+
+    spool_directory = _market_data_spool_request_directory(
+      self._market_spool_root,
+      request_id,
+    )
+    if spool_directory.exists():
+      try:
+        recovered, _, _, _ = await asyncio.to_thread(
+          _read_market_data_spool_manifest,
+          spool_directory,
+          expected_request_id=request_id,
+          expected_fingerprint=payload_fingerprint,
+        )
+      except RuntimeError as exc:
+        if "重投参数不一致" in str(exc):
+          raise
+        logger.warning(
+          "Discarded unusable market-data recovery spool: request_id=%s error=%s",
+          request_id,
+          exc.__class__.__name__,
+        )
+        await asyncio.to_thread(shutil.rmtree, spool_directory, True)
+      else:
+        next_cache_bytes = self._market_upload_cache_bytes + (
+          recovered.compressed_bytes
+        )
+        if next_cache_bytes > MAX_MARKET_DATA_UPLOAD_CACHE_BYTES:
+          raise RuntimeError("market-data upload cache byte limit exceeded")
+        entry = _MarketUploadCacheEntry(
+          payload_fingerprint,
+          created_at=now,
+          last_access_at=now,
+          compressed_bytes=recovered.compressed_bytes,
+        )
+
+        async def recovered_result() -> _PreparedMarketData:
+          return recovered
+
+        task = asyncio.create_task(
+          recovered_result(),
+          name=f"market-data-recovered:{request_id}",
+        )
+        entry.task = task
+        self._market_upload_cache[request_id] = entry
+        self._market_upload_cache_bytes = next_cache_bytes
+        task.add_done_callback(self._consume_market_preparation_result)
+        logger.info(
+          "Recovered durable market-data spool: request_id=%s chunks=%s",
+          request_id,
+          len(recovered.chunks),
+        )
+        return (await asyncio.shield(task)).chunks
 
     if len(self._market_upload_cache) >= MAX_CACHED_MARKET_DATA_REQUESTS:
       raise RuntimeError("market-data upload cache request limit exceeded")
@@ -3595,6 +5458,7 @@ class AgentRuntime:
     # A session cancellation must never cancel this task. Historical work owns
     # a separate spawned XTData client, so this lock serializes only that child
     # and never blocks the parent process's real-time XTData control path.
+    prepared: _PreparedMarketData | None = None
     try:
       async with self._market_data_preparation_lock():
         managed_spool_bytes = await asyncio.to_thread(
@@ -3614,8 +5478,16 @@ class AgentRuntime:
             payload,
             max_total_uncompressed_bytes=(MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES),
             max_total_compressed_bytes=compressed_budget,
+            max_spool_bytes=remaining_cache_bytes,
           )
         except ValueError as exc:
+          if (
+            "spool disk byte limit" in str(exc)
+            or "spool byte limit" in str(exc)
+          ):
+            raise RuntimeError(
+              "market-data upload cache byte limit exceeded"
+            ) from exc
           if (
             compressed_budget == remaining_cache_bytes
             and remaining_cache_bytes < MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES
@@ -3624,13 +5496,20 @@ class AgentRuntime:
             raise RuntimeError("market-data upload cache byte limit exceeded") from exc
           raise
 
+      await asyncio.to_thread(
+        _write_market_data_spool_manifest,
+        prepared,
+        request_id=request_id,
+        fingerprint=entry.fingerprint,
+      )
+
       cached = self._market_upload_cache.get(request_id)
       if cached is not entry:
-        self._remove_prepared_market_data(prepared)
+        await asyncio.to_thread(self._remove_prepared_market_data, prepared)
         raise RuntimeError("market-data preparation was retired")
       next_cache_bytes = self._market_upload_cache_bytes + prepared.compressed_bytes
       if next_cache_bytes > MAX_MARKET_DATA_UPLOAD_CACHE_BYTES:
-        self._remove_prepared_market_data(prepared)
+        await asyncio.to_thread(self._remove_prepared_market_data, prepared)
         raise RuntimeError("market-data upload cache byte limit exceeded")
       entry.compressed_bytes = prepared.compressed_bytes
       entry.last_access_at = self._market_upload_clock()
@@ -3639,6 +5518,8 @@ class AgentRuntime:
     except BaseException:
       if self._market_upload_cache.get(request_id) is entry:
         self._drop_market_upload_cache_entry(request_id)
+      if prepared is not None and prepared.spool_directory.exists():
+        await asyncio.to_thread(self._remove_prepared_market_data, prepared)
       raise
 
   def _market_data_preparation_lock(self) -> asyncio.Lock:
@@ -3661,6 +5542,7 @@ class AgentRuntime:
     *,
     max_total_uncompressed_bytes: int,
     max_total_compressed_bytes: int,
+    max_spool_bytes: int = MAX_MARKET_DATA_UPLOAD_CACHE_BYTES,
   ) -> _PreparedMarketData:
     """Run historical preparation outside the control Agent when supported."""
 
@@ -3683,6 +5565,7 @@ class AgentRuntime:
         worker_kind=str(worker_kind),
         max_total_uncompressed_bytes=max_total_uncompressed_bytes,
         max_total_compressed_bytes=max_total_compressed_bytes,
+        max_spool_bytes=max_spool_bytes,
       )
     return await self._run_market_data_preparation_thread(
       request_id,
@@ -3699,17 +5582,17 @@ class AgentRuntime:
     worker_kind: str,
     max_total_uncompressed_bytes: int,
     max_total_compressed_bytes: int,
+    max_spool_bytes: int = MAX_MARKET_DATA_UPLOAD_CACHE_BYTES,
   ) -> _PreparedMarketData:
     if worker_kind != XTDATA_HISTORICAL_WORKER_KIND:
       raise _IsolatedMarketDataWorkerError(
         "MARKET_DATA_PREPARATION_WORKER_UNSUPPORTED"
       )
     await self._wait_for_history_dispatch()
-    spool_directory = Path(
-      tempfile.mkdtemp(
-        prefix=MARKET_DATA_SPOOL_REQUEST_PREFIX,
-        dir=self._market_spool_root,
-      )
+    spool_directory = await asyncio.to_thread(
+      _reset_market_data_spool_directory,
+      self._market_spool_root,
+      request_id,
     )
     self._history_workload = "running"
     self._history_workload_reason = ""
@@ -3758,15 +5641,19 @@ class AgentRuntime:
           "spool_directory": str(spool_directory),
           "max_total_uncompressed_bytes": max_total_uncompressed_bytes,
           "max_total_compressed_bytes": max_total_compressed_bytes,
+          "max_spool_bytes": max_spool_bytes,
         },
       )
       if provisional_uploads_enabled:
         upload_client = self._market_data_upload_client()
     except Exception as exc:
-      shutil.rmtree(spool_directory, ignore_errors=True)
-      await self._shutdown_historical_worker(graceful=False)
+      await asyncio.to_thread(shutil.rmtree, spool_directory, True)
       self._history_workload = "idle"
       self._history_workload_reason = ""
+      if isinstance(exc, _FatalMarketDataPreparationError):
+        self._trip_market_data_fatal(exc)
+        raise
+      await self._shutdown_historical_worker(graceful=False)
       if isinstance(exc, _IsolatedMarketDataWorkerError):
         raise
       raise _IsolatedMarketDataWorkerError(
@@ -3895,7 +5782,16 @@ class AgentRuntime:
       if upload_tasks:
         await asyncio.gather(*upload_tasks, return_exceptions=True)
       await asyncio.shield(self._shutdown_historical_worker(graceful=False))
-      shutil.rmtree(spool_directory, ignore_errors=True)
+      await asyncio.to_thread(shutil.rmtree, spool_directory, True)
+      raise
+    except _FatalMarketDataPreparationError:
+      self._streamed_market_uploads.discard(request_id)
+      self._provisional_market_uploads.discard(request_id)
+      for task in upload_tasks:
+        task.cancel()
+      if upload_tasks:
+        await asyncio.gather(*upload_tasks, return_exceptions=True)
+      await asyncio.to_thread(shutil.rmtree, spool_directory, True)
       raise
     except Exception:
       self._streamed_market_uploads.discard(request_id)
@@ -3905,11 +5801,9 @@ class AgentRuntime:
       if upload_tasks:
         await asyncio.gather(*upload_tasks, return_exceptions=True)
       await self._shutdown_historical_worker(graceful=False)
-      shutil.rmtree(spool_directory, ignore_errors=True)
+      await asyncio.to_thread(shutil.rmtree, spool_directory, True)
       raise
     finally:
-      if upload_client is not None:
-        await upload_client.aclose()
       if self._history_workload != "idle":
         self._history_workload = "idle"
         self._history_workload_reason = ""
@@ -3951,18 +5845,21 @@ class AgentRuntime:
     *,
     request_id: str,
   ) -> Any:
-    receive_task = asyncio.create_task(
-      asyncio.to_thread(connection.recv),
-      name=f"market-data-worker-result:{request_id}",
-    )
+    del request_id
+
+    def poll_and_receive() -> Any:
+      poll = getattr(connection, "poll", None)
+      if callable(poll) and not poll(HISTORICAL_WORK_UNIT_TIMEOUT_SECONDS):
+        raise TimeoutError("historical worker response timed out")
+      return connection.recv()
+
     try:
-      return await asyncio.wait_for(
-        asyncio.shield(receive_task),
-        timeout=HISTORICAL_WORK_UNIT_TIMEOUT_SECONDS,
+      return await asyncio.get_running_loop().run_in_executor(
+        self._historical_ipc_executor,
+        poll_and_receive,
       )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
       await self._shutdown_historical_worker(graceful=False)
-      await asyncio.gather(receive_task, return_exceptions=True)
       raise _IsolatedMarketDataWorkerError(
         "MARKET_DATA_PREPARATION_TIMEOUT"
       ) from exc
@@ -3971,23 +5868,20 @@ class AgentRuntime:
       raise _IsolatedMarketDataWorkerError(
         "MARKET_DATA_PREPARATION_CRASH"
       ) from exc
-    finally:
-      if not process.is_alive() and not receive_task.done():
-        receive_task.cancel()
-        await asyncio.gather(receive_task, return_exceptions=True)
 
   async def _shutdown_historical_worker(self, *, graceful: bool = True) -> None:
-    await asyncio.to_thread(
-      self._shutdown_historical_worker_sync,
-      graceful=graceful,
-    )
+    try:
+      await asyncio.to_thread(
+        self._shutdown_historical_worker_sync,
+        graceful=graceful,
+      )
+    except _FatalMarketDataPreparationError as error:
+      self._trip_market_data_fatal(error)
+      raise
 
   def _shutdown_historical_worker_sync(self, *, graceful: bool = True) -> None:
     process = getattr(self, "_historical_worker_process", None)
     connection = getattr(self, "_historical_worker_connection", None)
-    self._historical_worker_process = None
-    self._historical_worker_connection = None
-    self._historical_worker_kind = ""
     if connection is not None:
       if graceful and process is not None and process.is_alive():
         try:
@@ -3999,6 +5893,9 @@ class AgentRuntime:
       except OSError:
         pass
     if process is None:
+      self._historical_worker_process = None
+      self._historical_worker_connection = None
+      self._historical_worker_kind = ""
       return
     if graceful:
       process.join(5.0)
@@ -4006,11 +5903,39 @@ class AgentRuntime:
       _terminate_market_data_process(process)
     else:
       process.join()
+    if process.is_alive():
+      # Never clear this reference or spawn a second native XTData caller while
+      # the old process may still own MiniQMT resources.
+      raise _FatalMarketDataPreparationError(
+        "historical XTData worker could not be terminated; Agent restart required"
+      )
+    self._historical_worker_process = None
+    self._historical_worker_connection = None
+    self._historical_worker_kind = ""
+    close_process = getattr(process, "close", None)
+    if callable(close_process):
+      close_process()
 
   def _history_qos_block_reason(self) -> str:
+    if not getattr(self, "_control_session_authenticated", False):
+      return "CONTROL_CONNECTION_UNHEALTHY"
+    if str(getattr(self, "_market_stream_status", "OFFLINE")).upper() != "READY":
+      return "MARKET_STREAM_NOT_READY"
+    native_reset = getattr(self, "_whole_market_native_reset", None)
+    if native_reset is not None and native_reset.is_set():
+      return "MARKET_STREAM_NATIVE_RESET"
+    subscription_ready = getattr(self, "_whole_market_subscription_ready", None)
+    if subscription_ready is not None and not subscription_ready.is_set():
+      return "MARKET_STREAM_SUBSCRIPTION_PENDING"
+    if (
+      hasattr(self, "_whole_market_subscription_active")
+      and not self._whole_market_subscription_active
+    ):
+      return "MARKET_STREAM_SUBSCRIPTION_PENDING"
+    xtdata_control_lock = getattr(self, "_xtdata_access_lock", None)
+    if xtdata_control_lock is not None and xtdata_control_lock.locked():
+      return "XTDATA_CONTROL_PENDING"
     if getattr(self, "mode", "data-only") == "live":
-      if not getattr(self, "_control_session_authenticated", False):
-        return "CONTROL_CONNECTION_UNHEALTHY"
       if self._requires_trading_reconciliation():
         return "TRADING_RECONCILING"
       if (
@@ -4124,13 +6049,11 @@ class AgentRuntime:
         outcome.set_exception(exc)
 
     def worker() -> None:
-      spool_directory = Path(
-        tempfile.mkdtemp(
-          prefix=MARKET_DATA_SPOOL_REQUEST_PREFIX,
-          dir=self._market_spool_root,
-        )
-      )
       try:
+        spool_directory = _reset_market_data_spool_directory(
+          self._market_spool_root,
+          request_id,
+        )
         prepared = _prepare_market_data_spool_sync(
           self.broker,
           payload,
@@ -4205,6 +6128,16 @@ class AgentRuntime:
       self._fatal_market_data_error = None
     if not hasattr(self, "_fatal_market_data_event"):
       self._fatal_market_data_event = asyncio.Event()
+    if not hasattr(self, "_fatal_trading_error"):
+      self._fatal_trading_error = None
+    if not hasattr(self, "_fatal_trading_event"):
+      self._fatal_trading_event = asyncio.Event()
+    if not hasattr(self, "_runtime_loop"):
+      self._runtime_loop = None
+    if not hasattr(self, "_broker_ready"):
+      self._broker_ready = asyncio.Event()
+      if getattr(self, "broker", None) is not None:
+        self._broker_ready.set()
     if not hasattr(self, "_market_spool_root"):
       ephemeral_base = Path(tempfile.mkdtemp(prefix="quantx-qmt-agent-test-"))
       self._market_spool_root = _initialize_market_data_spool_root(
@@ -4214,12 +6147,36 @@ class AgentRuntime:
       self._market_spool_ephemeral_base = ephemeral_base
     elif not hasattr(self, "_market_spool_ephemeral_base"):
       self._market_spool_ephemeral_base = None
+    if not hasattr(self, "_market_spool_cleanup_pending"):
+      self._market_spool_cleanup_pending = _sweep_market_data_spool_cleanup(
+        self._market_spool_root
+      )
+    if not hasattr(self, "_market_spool_cleanup_lock"):
+      self._market_spool_cleanup_lock = asyncio.Lock()
     if not hasattr(self, "_market_upload_cache"):
       self._market_upload_cache = {}
     if not hasattr(self, "_market_upload_tombstones"):
       self._market_upload_tombstones = {}
     if not hasattr(self, "_market_upload_tasks"):
       self._market_upload_tasks = {}
+    if not hasattr(self, "_market_data_http_client"):
+      self._market_data_http_client = None
+    if not hasattr(self, "_history_upload_slots"):
+      self._history_upload_slots = asyncio.Semaphore(MAX_CONCURRENT_HISTORY_UPLOADS)
+    if not hasattr(self, "_history_upload_limiter"):
+      self._history_upload_limiter = _HistoryUploadBandwidthLimiter()
+    if not hasattr(self, "_history_upload_io_executor"):
+      self._history_upload_io_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="qmt-history-upload-io",
+        initializer=_set_low_thread_priority,
+      )
+    if not hasattr(self, "_historical_ipc_executor"):
+      self._historical_ipc_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="qmt-history-ipc",
+        initializer=_set_low_thread_priority,
+      )
     if not hasattr(self, "_streamed_market_uploads"):
       self._streamed_market_uploads = set()
     if not hasattr(self, "_provisional_market_uploads"):
@@ -4234,12 +6191,32 @@ class AgentRuntime:
       self._historical_worker_lock = asyncio.Lock()
     if not hasattr(self, "_websocket_send_lock"):
       self._websocket_send_lock = asyncio.Lock()
+    if not hasattr(self, "_control_socket_writer"):
+      self._control_socket_writer = None
     if not hasattr(self, "_heartbeat_checkpoint_lock"):
       self._heartbeat_checkpoint_lock = asyncio.Lock()
     if not hasattr(self, "_report_flush_lock"):
       self._report_flush_lock = asyncio.Lock()
+    if not hasattr(self, "_report_wakeup"):
+      self._report_wakeup = asyncio.Event()
+    if not hasattr(self, "_reports_inflight"):
+      self._reports_inflight = set()
+    if not hasattr(self, "_report_retry_attempts"):
+      self._report_retry_attempts = {}
+    if not hasattr(self, "_report_retry_not_before"):
+      self._report_retry_not_before = {}
+    if not hasattr(self, "_report_ack_requests"):
+      self._report_ack_requests = asyncio.Queue(
+        maxsize=REPORT_ACK_QUEUE_CAPACITY
+      )
+    if not hasattr(self, "_report_ack_pending"):
+      self._report_ack_pending = set()
     if not hasattr(self, "_full_snapshot_lock"):
       self._full_snapshot_lock = asyncio.Lock()
+    if not hasattr(self, "_initial_reconciliation_complete"):
+      self._initial_reconciliation_complete = asyncio.Event()
+      if getattr(self, "broker", None) is not None:
+        self._initial_reconciliation_complete.set()
     if not hasattr(self, "_heartbeat_wakeup"):
       self._heartbeat_wakeup = asyncio.Event()
     if not hasattr(self, "_heartbeat_sent_monotonic"):
@@ -4252,6 +6229,8 @@ class AgentRuntime:
       self._history_workload = "idle"
     if not hasattr(self, "_history_workload_reason"):
       self._history_workload_reason = ""
+    if not hasattr(self, "_emergency_stop_status_cache"):
+      self._emergency_stop_status_cache = None
     if not hasattr(self, "_historical_worker_process"):
       self._historical_worker_process = None
     if not hasattr(self, "_historical_worker_connection"):
@@ -4259,19 +6238,25 @@ class AgentRuntime:
     if not hasattr(self, "_historical_worker_kind"):
       self._historical_worker_kind = ""
     if not hasattr(self, "_command_requests"):
-      self._command_requests = asyncio.PriorityQueue(
-        maxsize=MAX_QUEUED_TRADE_COMMANDS
-      )
+      self._command_requests = _CommandDispatchQueue()
     if not hasattr(self, "_command_request_sequence"):
       self._command_request_sequence = 0
     if not hasattr(self, "_active_command_count"):
       self._active_command_count = 0
+    if not hasattr(self, "_market_control_requests"):
+      self._market_control_requests = asyncio.Queue(
+        maxsize=MAX_QUEUED_MARKET_CONTROLS
+      )
+    if not hasattr(self, "_xttrading_worker"):
+      self._xttrading_worker = None
+    if not hasattr(self, "_journal_worker"):
+      self._journal_worker = _JournalPriorityWorker()
     if not hasattr(self, "_market_upload_clock"):
       self._market_upload_clock = time.monotonic
     if not hasattr(self, "_session_loop"):
       self._session_loop = None
-    if not hasattr(self, "_market_event_overflow"):
-      self._market_event_overflow = asyncio.Event()
+    if not hasattr(self, "_market_event_drops"):
+      self._market_event_drops = 0
     self._ensure_whole_market_state()
     if not hasattr(self, "_market_stream_resyncs"):
       self._market_stream_resyncs = 0
@@ -4286,6 +6271,10 @@ class AgentRuntime:
 
   def _ensure_whole_market_state(self) -> None:
     """Initialize capture state for focused harnesses using ``__new__``."""
+    if not hasattr(self, "_market_events"):
+      self._market_events = asyncio.Queue(maxsize=10_000)
+    if not hasattr(self, "_market_event_drops"):
+      self._market_event_drops = 0
     if not hasattr(self, "_whole_market_capture"):
       self._whole_market_capture = WholeMarketCapture(
         max_ready_callbacks=MARKET_STREAM_READY_INGRESS_CALLBACKS,
@@ -4320,9 +6309,16 @@ class AgentRuntime:
     if not hasattr(self, "_market_stream_outbound_bytes"):
       self._market_stream_outbound_bytes = 0
 
-  def _cleanup_expired_market_uploads(self, now: float | None = None) -> None:
+  def _cleanup_expired_market_uploads(
+    self,
+    now: float | None = None,
+    *,
+    remove_prepared: bool = True,
+  ) -> list[_PreparedMarketData]:
     self._ensure_market_upload_state()
+    _ = remove_prepared  # Retained for compatibility with focused harnesses.
     current = self._market_upload_clock() if now is None else now
+    retired: list[_PreparedMarketData] = []
     expired_request_ids = [
       request_id
       for request_id, entry in self._market_upload_cache.items()
@@ -4333,8 +6329,12 @@ class AgentRuntime:
       )
     ]
     for request_id in expired_request_ids:
-      self._drop_market_upload_cache_entry(request_id)
-
+      # Retire only the in-memory projection. A completed spool is the durable
+      # retry authority and remains until the server confirms terminal upload.
+      self._drop_market_upload_cache_entry(
+        request_id,
+        remove_prepared=False,
+      )
     expired_tombstones = [
       request_id
       for request_id, tombstone in self._market_upload_tombstones.items()
@@ -4342,6 +6342,7 @@ class AgentRuntime:
     ]
     for request_id in expired_tombstones:
       self._market_upload_tombstones.pop(request_id, None)
+    return retired
 
   def _drop_market_upload_cache_entry(
     self,
@@ -4377,29 +6378,80 @@ class AgentRuntime:
     if entry is not None:
       entry.last_access_at = self._market_upload_clock()
 
-  async def _complete_market_upload(self, request_id: str) -> None:
-    self._ensure_market_upload_state()
+  def _record_market_upload_tombstone(
+    self,
+    request_id: str,
+    fingerprint: str,
+  ) -> None:
     now = self._market_upload_clock()
-    entry = self._drop_market_upload_cache_entry(
-      request_id,
-      remove_prepared=False,
-    )
-    if entry is None:
-      return
     self._market_upload_tombstones[request_id] = _MarketUploadTombstone(
-      fingerprint=entry.fingerprint,
+      fingerprint=fingerprint,
       completed_at=now,
       last_access_at=now,
     )
     while len(self._market_upload_tombstones) > MAX_MARKET_DATA_TOMBSTONES:
       oldest_request_id = next(iter(self._market_upload_tombstones))
       self._market_upload_tombstones.pop(oldest_request_id, None)
-    if entry.task is not None and entry.task.done():
+
+  async def _retire_terminal_market_upload(
+    self,
+    request_id: str,
+    *,
+    fingerprint: str = "",
+    terminal_status: str,
+  ) -> None:
+    self._ensure_market_upload_state()
+    self._streamed_market_uploads.discard(request_id)
+    self._provisional_market_uploads.discard(request_id)
+    entry = self._market_upload_cache.get(request_id)
+    authoritative_fingerprint = entry.fingerprint if entry is not None else fingerprint
+    prepared: _PreparedMarketData | None = None
+    if entry is not None and entry.task is not None and entry.task.done():
       try:
         prepared = entry.task.result()
       except BaseException:
-        return
+        prepared = None
+    if prepared is not None:
+      try:
+        await asyncio.to_thread(
+          _write_market_data_spool_terminal_marker,
+          prepared,
+          request_id=request_id,
+          fingerprint=authoritative_fingerprint,
+          terminal_status=terminal_status,
+        )
+      except Exception as exc:
+        # Removal still proceeds. If Windows has a transient file handle, a
+        # successfully written marker lets startup finish cleanup safely.
+        logger.warning(
+          "Could not persist market-data terminal spool marker: "
+          "request_id=%s error=%s",
+          request_id,
+          exc.__class__.__name__,
+        )
+    self._drop_market_upload_cache_entry(
+      request_id,
+      remove_prepared=False,
+    )
+    if authoritative_fingerprint:
+      self._record_market_upload_tombstone(
+        request_id,
+        authoritative_fingerprint,
+      )
+    if prepared is not None:
       await asyncio.to_thread(self._remove_prepared_market_data, prepared)
+      try:
+        cleanup_pending = prepared.spool_directory.exists()
+      except OSError:
+        cleanup_pending = True
+      if cleanup_pending:
+        self._market_spool_cleanup_pending = True
+
+  async def _complete_market_upload(self, request_id: str) -> None:
+    await self._retire_terminal_market_upload(
+      request_id,
+      terminal_status="COMPLETED",
+    )
 
   def _clear_market_upload_state(self) -> None:
     self._ensure_market_upload_state()
@@ -4414,8 +6466,13 @@ class AgentRuntime:
     self._streamed_market_uploads.clear()
     self._provisional_market_uploads.clear()
     self._queued_market_data_requests.clear()
+    remove_persisted_spool = self._market_spool_ephemeral_base is not None
     for request_id in list(self._market_upload_cache):
-      self._drop_market_upload_cache_entry(request_id, cancel=True)
+      self._drop_market_upload_cache_entry(
+        request_id,
+        cancel=True,
+        remove_prepared=remove_persisted_spool,
+      )
     self._market_upload_cache_bytes = 0
     self._market_upload_tombstones.clear()
     if self._market_spool_ephemeral_base is not None:
@@ -4433,6 +6490,12 @@ class AgentRuntime:
     self._market_upload_tasks.clear()
 
   async def _market_request_loop(self, socket) -> None:
+    if getattr(self, "broker", None) is None and getattr(
+      self,
+      "_broker_factory",
+      None,
+    ) is not None:
+      await self._broker_ready.wait()
     while True:
       envelope = await self._market_requests.get()
       request_id = str(envelope.payload.get("request_id") or "")
@@ -4440,8 +6503,21 @@ class AgentRuntime:
       upload_task: asyncio.Task[None] | None = None
       try:
         try:
-          upload_task = self._market_upload_task(envelope)
-          await asyncio.shield(upload_task)
+          while True:
+            upload_task = self._market_upload_task(envelope)
+            try:
+              await asyncio.shield(upload_task)
+            except _MarketDataSpoolCleanupPending:
+              self._history_workload = "paused"
+              self._history_workload_reason = "SPOOL_CLEANUP_PENDING"
+              logger.warning(
+                "Historical market-data request paused for spool cleanup: "
+                "request_id=%s",
+                request_id,
+              )
+              await asyncio.sleep(HISTORY_QOS_CHECK_SECONDS)
+              continue
+            break
         except asyncio.CancelledError:
           if upload_task is not None and not upload_task.done():
             logger.info(
@@ -4477,6 +6553,12 @@ class AgentRuntime:
               "Could not report QMT market data failure: request_id=%s error=%s",
               request_id,
               report_exc.__class__.__name__,
+            )
+          else:
+            await self._retire_terminal_market_upload(
+              request_id,
+              fingerprint=_market_data_payload_fingerprint(envelope.payload),
+              terminal_status="FAILED",
             )
           continue
 
@@ -4572,6 +6654,12 @@ class AgentRuntime:
   def stop(self) -> None:
     self._ensure_market_upload_state()
     self._stopped.set()
+    worker = getattr(self, "_xttrading_worker", None)
+    if worker is not None:
+      worker.close()
+    journal_worker = getattr(self, "_journal_worker", None)
+    if journal_worker is not None:
+      journal_worker.close()
     for upload in self._market_upload_tasks.values():
       if not upload.task.done():
         upload.task.cancel()

@@ -13,6 +13,7 @@ from sqlalchemy import (
   String,
   Text,
   UniqueConstraint,
+  func,
 )
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
@@ -104,6 +105,20 @@ class TradeCommandOutbox(Base, TimestampMixin):
     UniqueConstraint("client_order_id", name="uq_trade_command_client_order"),
     UniqueConstraint("idempotency_key", name="uq_trade_command_idempotency"),
     Index("ix_trade_command_delivery", "device_id", "delivery_status", "created_at"),
+    Index(
+      "ix_trade_command_device_status_expiry_created",
+      "device_id",
+      "delivery_status",
+      "expires_at",
+      "created_at",
+    ),
+    Index(
+      "ix_trade_command_device_status_delivery_expiry",
+      "device_id",
+      "delivery_status",
+      "delivered_at",
+      "expires_at",
+    ),
   )
 
   message_id = Column(String(36), primary_key=True)
@@ -122,6 +137,15 @@ class TradeCommandOutbox(Base, TimestampMixin):
   expires_at = Column(DateTime, nullable=False)
   attempts = Column(Integer, nullable=False, default=0)
   last_error = Column(String(256), nullable=True)
+
+
+Index(
+  "ix_trade_command_device_status_kind_created",
+  TradeCommandOutbox.device_id,
+  TradeCommandOutbox.delivery_status,
+  func.upper(TradeCommandOutbox.payload.op("->>")("command_kind")),
+  TradeCommandOutbox.created_at,
+)
 
 
 class PendingTradeOrder(Base, TimestampMixin):
@@ -459,6 +483,12 @@ class MarketDataRequest(Base, TimestampMixin):
   __table_args__ = (
     UniqueConstraint("idempotency_key", name="uq_market_data_request_idempotency"),
     Index("ix_market_data_request_status", "status", "created_at"),
+    Index(
+      "ix_market_data_request_device_status_created",
+      "device_id",
+      "status",
+      "created_at",
+    ),
   )
 
   request_id = Column(String(36), primary_key=True)

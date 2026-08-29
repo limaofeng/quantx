@@ -27,7 +27,7 @@ def _load_module():
   return module
 
 
-def _agent_store(status: str):
+def _agent_store(status: str, capabilities: list[str] | None = None):
   class Store:
     async def component_status(self, prefix):
       assert prefix == "qmt-agent:"
@@ -37,11 +37,8 @@ def _agent_store(status: str):
           "instance_id": "device-1",
           "updated_at": datetime.now(timezone.utc),
           "details": {
-            "capabilities": [
-              "market-data",
-              "divid-factors",
-              "data-only",
-            ],
+            "capabilities": capabilities
+            or ["market-data", "divid-factors", "live"],
           },
         }
       ]
@@ -54,7 +51,7 @@ def _agent_store(status: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["READY", "RECONCILING"])
-async def test_factor_readiness_accepts_fresh_data_only_status(
+async def test_factor_readiness_accepts_fresh_status(
   monkeypatch,
   status,
 ):
@@ -78,6 +75,19 @@ async def test_factor_readiness_rejects_unavailable_or_stopped_agent(
 
   with pytest.raises(RuntimeError, match="没有新鲜"):
     await module.ensure_factor_agent_ready()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["live", "data-only"])
+async def test_factor_readiness_accepts_either_agent_mode(monkeypatch, mode):
+  module = _load_module()
+  monkeypatch.setattr(
+    module,
+    "DurableRuntimeStore",
+    _agent_store("READY", ["market-data", "divid-factors", mode]),
+  )
+
+  assert await module.ensure_factor_agent_ready() == "device-1"
 
 
 def test_build_jobs_is_sorted_deduplicated_and_bounded():

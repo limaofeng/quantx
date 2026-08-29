@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from datetime import time
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from prefect import flow, get_run_logger
+from prefect.runtime import flow_run as flow_run_runtime
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.enums import InstrumentType
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
@@ -23,6 +26,7 @@ from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
 DEFAULT_MARKET_SECTORS = ["沪深A股", "沪深ETF", "沪深指数"]
 SUPPORTED_PERIODS = {"tick", "1m", "1d"}
 MARKET_DATA_REQUEST_BATCH_SIZE = 300
+MARKET_DATA_REQUEST_CONCURRENCY = 2
 MAX_MARKET_DATA_REQUEST_RECORDS = 500_000
 ESTIMATED_MARKET_RECORDS_PER_DAY = {
   "tick": 20_000,
@@ -91,6 +95,165 @@ async def _resolve_market_time_range(
   return compact, compact
 
 
+def _market_data_sync_idempotency_scope(explicit_scope: str) -> str:
+  """Return one retry-stable scope for this logical Prefect flow run."""
+
+  normalized = str(explicit_scope or "").strip()
+  if not normalized:
+    run_id = str(flow_run_runtime.id or "").strip() or str(uuid.uuid4())
+    normalized = f"daily-market-data-sync-v1:{run_id}"
+  if len(normalized) > 180:
+    raise ValueError("行情同步 idempotency_scope 不能超过 180 个字符")
+  return normalized
+
+
+def _validate_market_data_transfer(
+  transfer: dict[str, Any],
+  *,
+  batch_index: int,
+  total_batches: int,
+) -> None:
+  if transfer.get("status") != "completed":
+    raise RuntimeError(
+      "QMT Agent 行情请求失败: "
+      f"batch={batch_index}/{total_batches} "
+      f"request_id={transfer.get('request_id')} "
+      f"status={transfer.get('status')} "
+      f"reason={transfer.get('reason') or 'unknown'}"
+    )
+  received = int(transfer.get("records_received") or 0)
+  saved = int(transfer.get("records_saved") or 0)
+  if received <= 0:
+    raise RuntimeError(
+      "QMT Agent 未返回任何行情: "
+      f"batch={batch_index}/{total_batches} "
+      f"request_id={transfer.get('request_id')}"
+    )
+  if saved < received:
+    raise RuntimeError(
+      "行情数据未完整入库: "
+      f"batch={batch_index}/{total_batches} "
+      f"request_id={transfer.get('request_id')} "
+      f"received={received} saved={saved}"
+    )
+
+
+async def _request_market_data_batch(
+  *,
+  code_batch: list[str],
+  batch_index: int,
+  total_batches: int,
+  periods: list[str],
+  start_time: str,
+  end_time: str,
+  agent_device_id: str,
+  idempotency_scope: str,
+) -> tuple[int, dict[str, Any]]:
+  request_payload = {
+    "operation": "bars",
+    "download": True,
+    "stock_list": code_batch,
+    "periods": periods,
+    "start_time": start_time,
+    "end_time": end_time,
+  }
+  request_kwargs: dict[str, Any] = {
+    "idempotency_scope": (
+      f"{idempotency_scope}:batch:{batch_index:04d}"
+    )
+  }
+  if agent_device_id:
+    request_kwargs["agent_device_id"] = agent_device_id
+  transfer = await _request_and_wait(request_payload, **request_kwargs)
+  _validate_market_data_transfer(
+    transfer,
+    batch_index=batch_index,
+    total_batches=total_batches,
+  )
+  return batch_index - 1, transfer
+
+
+async def _request_market_data_batches(
+  *,
+  code_batches: list[list[str]],
+  periods: list[str],
+  start_time: str,
+  end_time: str,
+  agent_device_id: str,
+  idempotency_scope: str,
+  logger: Any,
+) -> list[dict[str, Any]]:
+  """Run a bounded rolling pipeline and retain deterministic batch order."""
+
+  total_batches = len(code_batches)
+  results: list[Optional[dict[str, Any]]] = [None] * total_batches
+  active: dict[asyncio.Task[tuple[int, dict[str, Any]]], int] = {}
+  next_index = 0
+
+  def launch(batch_offset: int) -> None:
+    batch_index = batch_offset + 1
+    task = asyncio.create_task(
+      _request_market_data_batch(
+        code_batch=code_batches[batch_offset],
+        batch_index=batch_index,
+        total_batches=total_batches,
+        periods=periods,
+        start_time=start_time,
+        end_time=end_time,
+        agent_device_id=agent_device_id,
+        idempotency_scope=idempotency_scope,
+      ),
+      name=f"market-data-batch-{batch_index}",
+    )
+    active[task] = batch_offset
+
+  while next_index < min(MARKET_DATA_REQUEST_CONCURRENCY, total_batches):
+    launch(next_index)
+    next_index += 1
+
+  completed: list[asyncio.Task[tuple[int, dict[str, Any]]]] = []
+  try:
+    while active:
+      done, _ = await asyncio.wait(
+        active,
+        return_when=asyncio.FIRST_COMPLETED,
+      )
+      completed = sorted(done, key=lambda task: active[task])
+      for task in completed:
+        active.pop(task)
+      for task in completed:
+        batch_offset, transfer = task.result()
+        results[batch_offset] = transfer
+        logger.info(
+          "Agent 行情批次 %s/%s 完成: codes=%s request_id=%s "
+          "status=%s received=%s saved=%s",
+          batch_offset + 1,
+          total_batches,
+          len(code_batches[batch_offset]),
+          transfer.get("request_id"),
+          transfer.get("status"),
+          transfer.get("records_received"),
+          transfer.get("records_saved"),
+        )
+      while (
+        next_index < total_batches
+        and len(active) < MARKET_DATA_REQUEST_CONCURRENCY
+      ):
+        launch(next_index)
+        next_index += 1
+  except BaseException:
+    abandoned = [*active, *completed]
+    for task in active:
+      task.cancel()
+    if abandoned:
+      await asyncio.gather(*abandoned, return_exceptions=True)
+    raise
+
+  if any(item is None for item in results):
+    raise RuntimeError("行情批次流水线未生成完整结果")
+  return cast(list[dict[str, Any]], results)
+
+
 @flow(
   name="每日市场数据同步",
   description="经持久化消息箱请求 QMT Agent，入库后按需计算日级快照",
@@ -106,6 +269,7 @@ async def daily_market_data_sync_flow(
   skip_download: bool = False,
   compute_daily_signals: bool = False,
   agent_device_id: str = "",
+  idempotency_scope: str = "",
 ) -> dict[str, Any]:
   logger = get_run_logger()
   normalized_periods = _validate_periods(periods or ["1d"])
@@ -150,69 +314,23 @@ async def daily_market_data_sync_flow(
 
   transfer: Optional[dict[str, Any]] = None
   if not skip_download:
-    transfers: list[dict[str, Any]] = []
     request_batch_size = _market_data_request_batch_size(
       periods=normalized_periods,
       start_time=resolved_start,
       end_time=resolved_end,
     )
-    total_batches = (
-      len(codes) + request_batch_size - 1
-    ) // request_batch_size
-    for batch_index, code_batch in enumerate(
-      _chunks(codes, request_batch_size),
-      start=1,
-    ):
-      request_payload = {
-        "operation": "bars",
-        "download": True,
-        "stock_list": code_batch,
-        "periods": normalized_periods,
-        "start_time": resolved_start,
-        "end_time": resolved_end,
-      }
-      if agent_device_id:
-        batch_transfer = await _request_and_wait(
-          request_payload,
-          agent_device_id=str(agent_device_id).strip(),
-        )
-      else:
-        batch_transfer = await _request_and_wait(request_payload)
-      logger.info(
-        "Agent 行情批次 %s/%s 完成: codes=%s request_id=%s "
-        "status=%s received=%s saved=%s",
-        batch_index,
-        total_batches,
-        len(code_batch),
-        batch_transfer.get("request_id"),
-        batch_transfer.get("status"),
-        batch_transfer.get("records_received"),
-        batch_transfer.get("records_saved"),
-      )
-      if batch_transfer.get("status") != "completed":
-        raise RuntimeError(
-          "QMT Agent 行情请求失败: "
-          f"batch={batch_index}/{total_batches} "
-          f"request_id={batch_transfer.get('request_id')} "
-          f"status={batch_transfer.get('status')} "
-          f"reason={batch_transfer.get('reason') or 'unknown'}"
-        )
-      received = int(batch_transfer.get("records_received") or 0)
-      saved = int(batch_transfer.get("records_saved") or 0)
-      if received <= 0:
-        raise RuntimeError(
-          "QMT Agent 未返回任何行情: "
-          f"batch={batch_index}/{total_batches} "
-          f"request_id={batch_transfer.get('request_id')}"
-        )
-      if saved < received:
-        raise RuntimeError(
-          "行情数据未完整入库: "
-          f"batch={batch_index}/{total_batches} "
-          f"request_id={batch_transfer.get('request_id')} "
-          f"received={received} saved={saved}"
-        )
-      transfers.append(batch_transfer)
+    code_batches = list(_chunks(codes, request_batch_size))
+    transfers = await _request_market_data_batches(
+      code_batches=code_batches,
+      periods=normalized_periods,
+      start_time=resolved_start,
+      end_time=resolved_end,
+      agent_device_id=str(agent_device_id).strip(),
+      idempotency_scope=_market_data_sync_idempotency_scope(
+        idempotency_scope
+      ),
+      logger=logger,
+    )
 
     transfer = {
       "status": "completed",

@@ -186,10 +186,17 @@ async def test_native_broker_initializes_only_after_control_authentication(
   async def no_op(*_args, **_kwargs):
     return None
 
+  async def finish_initialization(_socket, tasks):
+    await tasks["initialization"]
+
   monkeypatch.setattr(runtime, "_ensure_trading_ready", no_op)
   monkeypatch.setattr(runtime, "_queue_full_snapshot", no_op)
   monkeypatch.setattr(runtime, "_heartbeat_checkpoint", no_op)
-  monkeypatch.setattr(runtime, "_supervise_session_tasks", no_op)
+  monkeypatch.setattr(
+    runtime,
+    "_supervise_session_tasks",
+    finish_initialization,
+  )
 
   await runtime._run_session()
 

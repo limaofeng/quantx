@@ -33,7 +33,7 @@ def _load_module():
   return module
 
 
-def _agent_store(status: str):
+def _agent_store(status: str, capabilities: list[str] | None = None):
   class Store:
     async def component_status(self, prefix):
       assert prefix == "qmt-agent:"
@@ -43,7 +43,7 @@ def _agent_store(status: str):
           "instance_id": "device-1",
           "updated_at": datetime.now(timezone.utc),
           "details": {
-            "capabilities": ["market-data", "data-only"],
+            "capabilities": capabilities or ["market-data", "live"],
           },
         }
       ]
@@ -56,14 +56,14 @@ def _agent_store(status: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["READY", "RECONCILING"])
-async def test_data_only_readiness_accepts_fresh_market_data_status(
+async def test_market_data_readiness_accepts_fresh_status(
   monkeypatch,
   status,
 ):
   module = _load_module()
   monkeypatch.setattr(module, "DurableRuntimeStore", _agent_store(status))
 
-  assert await module.ensure_data_only_agent_ready() == "device-1"
+  assert await module.ensure_market_data_agent_ready() == "device-1"
 
 
 @pytest.mark.asyncio
@@ -71,7 +71,7 @@ async def test_data_only_readiness_accepts_fresh_market_data_status(
   "status",
   ["XTDATA_UNAVAILABLE", "EMERGENCY_STOP"],
 )
-async def test_data_only_readiness_rejects_unavailable_or_stopped_agent(
+async def test_market_data_readiness_rejects_unavailable_or_stopped_agent(
   monkeypatch,
   status,
 ):
@@ -79,7 +79,23 @@ async def test_data_only_readiness_rejects_unavailable_or_stopped_agent(
   monkeypatch.setattr(module, "DurableRuntimeStore", _agent_store(status))
 
   with pytest.raises(RuntimeError, match="没有新鲜"):
-    await module.ensure_data_only_agent_ready()
+    await module.ensure_market_data_agent_ready()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["live", "data-only"])
+async def test_market_data_readiness_accepts_either_agent_mode(
+  monkeypatch,
+  mode,
+):
+  module = _load_module()
+  monkeypatch.setattr(
+    module,
+    "DurableRuntimeStore",
+    _agent_store("READY", ["market-data", mode]),
+  )
+
+  assert await module.ensure_market_data_agent_ready() == "device-1"
 
 
 def test_annual_windows_are_inclusive_and_non_overlapping():
@@ -124,6 +140,62 @@ def test_build_jobs_batches_stocks_and_separates_benchmark():
   assert jobs[2]["codes"] == ["000300.SH"]
   assert jobs[3]["start_date"] == "20260101"
   assert jobs[5]["end_date"] == "20260102"
+
+
+def test_build_jobs_caps_each_outer_batch_at_one_durable_request():
+  module = _load_module()
+  codes = [f"{index:06d}.SZ" for index in range(1, 7553)]
+
+  jobs = module.build_jobs(
+    codes=codes,
+    start=date(2025, 1, 1),
+    end=date(2025, 12, 31),
+    batch_size=300,
+  )
+
+  stock_jobs = [job for job in jobs if job["kind"] == "stocks"]
+  assert [len(job["codes"]) for job in stock_jobs] == [300] * 25 + [52]
+  assert len(stock_jobs) == 26
+  request_scopes = []
+  for job in stock_jobs:
+    job["idempotency_scope"] = f"campaign:{job['id']}"
+    request_scopes.append(module._job_request_idempotency_scope(job))
+    parameters = module.flow_parameters(
+      job,
+      agent_device_id="device-1",
+      idempotency_scope=job["idempotency_scope"],
+    )
+    assert len(parameters["stock_list"]) <= 300
+  assert len(set(request_scopes)) == 26
+  assert all(scope.endswith(":batch:0001") for scope in request_scopes)
+
+
+def test_outer_batch_larger_than_one_durable_request_is_rejected():
+  module = _load_module()
+
+  with pytest.raises(ValueError, match="durable request"):
+    module.build_jobs(
+      codes=["000001.SZ"],
+      start=date(2025, 1, 1),
+      end=date(2025, 12, 31),
+      batch_size=301,
+    )
+
+  oversized_job = {
+    "id": "oversized",
+    "codes": [f"{index:06d}.SZ" for index in range(301)],
+    "start_date": "20250101",
+    "end_date": "20251231",
+    "idempotency_scope": "campaign:oversized",
+  }
+  with pytest.raises(RuntimeError, match="durable request"):
+    module._job_request_idempotency_scope(oversized_job)
+  with pytest.raises(RuntimeError, match="durable request"):
+    module.flow_parameters(
+      oversized_job,
+      agent_device_id="device-1",
+      idempotency_scope="campaign:oversized",
+    )
 
 
 def test_build_jobs_excludes_pre_listing_and_post_expiry_windows():
@@ -211,6 +283,13 @@ def test_request_idempotency_key_ignores_mapping_order():
   assert module.request_idempotency_key(first) == (
     module.request_idempotency_key(second)
   )
+  assert module.request_idempotency_key(
+    first,
+    idempotency_scope="campaign-1",
+  ) != module.request_idempotency_key(
+    first,
+    idempotency_scope="campaign-2",
+  )
 
 
 def test_prefect_client_recovers_flow_run_by_idempotency_key():
@@ -284,6 +363,7 @@ def test_prefect_submit_confirms_provisional_id_by_idempotency_key():
             "skip_download": False,
             "compute_daily_signals": False,
             "agent_device_id": "device-1",
+            "idempotency_scope": "campaign:job",
           },
         }
       ],
@@ -683,6 +763,7 @@ def test_explicit_failed_ingestion_retry_records_proof_before_reopen(
   state_path = tmp_path / "state.json"
   job = {
     "id": "stocks-20250101-20250131-test",
+    "idempotency_scope": "campaign:job",
     "kind": "stocks",
     "codes": ["000001.SZ"],
     "start_date": "20250101",
@@ -823,6 +904,7 @@ def test_failed_ingestion_retry_resumes_verification_after_request_completed(
   state_path = tmp_path / "state.json"
   job = {
     "id": "stocks-20250101-20250131-test",
+    "idempotency_scope": "campaign:job",
     "kind": "stocks",
     "codes": ["000001.SZ"],
     "start_date": "20250101",
@@ -923,6 +1005,7 @@ def test_failed_ingestion_retry_rejects_unproven_completed_request(
   module = _load_module()
   job = {
     "id": "stocks-20250101-20250131-test",
+    "idempotency_scope": "campaign:job",
     "codes": ["000001.SZ"],
     "start_date": "20250101",
     "end_date": "20250131",
@@ -995,6 +1078,7 @@ def test_failed_ingestion_retry_rejects_incomplete_transfer(
   module = _load_module()
   job = {
     "id": "stocks-20250101-20250131-test",
+    "idempotency_scope": "campaign:job",
     "codes": ["000001.SZ"],
     "start_date": "20250101",
     "end_date": "20250131",
@@ -1047,6 +1131,7 @@ def test_failed_ingestion_retry_rejects_payload_mismatch(
   module = _load_module()
   job = {
     "id": "stocks-20250101-20250131-test",
+    "idempotency_scope": "campaign:job",
     "codes": ["000001.SZ"],
     "start_date": "20250101",
     "end_date": "20250131",
@@ -1144,3 +1229,32 @@ def test_cli_default_prefect_api_ignores_dotenv_pollution(
 
   assert args.prefect_api_url == "http://192.168.5.6:30420/api"
   assert args.retry_failed_ingestion is False
+
+
+def test_cli_rejects_batch_size_above_single_request_limit(
+  monkeypatch,
+  tmp_path,
+  capsys,
+):
+  module = _load_module()
+  monkeypatch.setattr(
+    sys,
+    "argv",
+    [
+      "backfill_daily_market_data.py",
+      "--start-date",
+      "20250101",
+      "--end-date",
+      "20250131",
+      "--batch-size",
+      "301",
+      "--state-file",
+      str(tmp_path / "state.json"),
+    ],
+  )
+
+  with pytest.raises(SystemExit) as exc_info:
+    module.parse_args()
+
+  assert exc_info.value.code == 2
+  assert "durable request" in capsys.readouterr().err

@@ -47,12 +47,40 @@ HISTORICAL_WORK_UNIT_WINDOW_DAYS = {
 class _HistoricalStagingBudget:
   max_bytes: int
   bytes_written: int = 0
+  retained_bytes: int = 0
+  disk_budget: _HistoricalDiskBudget | None = None
 
   def reserve(self, size: int) -> None:
     next_size = self.bytes_written + size
     if next_size > self.max_bytes:
       raise ValueError("market data request exceeds uncompressed byte limit")
+    if self.disk_budget is not None:
+      self.disk_budget.reserve(size)
     self.bytes_written = next_size
+    self.retained_bytes += size
+
+  def release(self, size: int) -> None:
+    released = min(max(0, int(size)), self.retained_bytes)
+    self.retained_bytes -= released
+    if self.disk_budget is not None:
+      self.disk_budget.release(released)
+
+
+@dataclass
+class _HistoricalDiskBudget:
+  """Track staging and published gzip bytes against one physical quota."""
+
+  max_bytes: int
+  retained_bytes: int = 0
+
+  def reserve(self, size: int) -> None:
+    next_size = self.retained_bytes + max(0, int(size))
+    if next_size > self.max_bytes:
+      raise ValueError("market data request exceeds spool disk byte limit")
+    self.retained_bytes = next_size
+
+  def release(self, size: int) -> None:
+    self.retained_bytes = max(0, self.retained_bytes - max(0, int(size)))
 
 
 @dataclass
@@ -68,6 +96,7 @@ class _HistoricalSeriesSpool:
   last_tick_ordinal: int | None = None
   key_digest: Any = field(default_factory=hashlib.sha256)
   handle: Any = None
+  disk_bytes: int = 0
 
   def append(self, record: dict[str, Any]) -> None:
     source_time = int(record["time"])
@@ -92,7 +121,9 @@ class _HistoricalSeriesSpool:
     ).encode("utf-8")
     if len(encoded) > self.max_record_uncompressed_bytes:
       raise ValueError("single market data record exceeds record byte limit")
-    self.staging_budget.reserve(len(encoded) + 1)
+    retained_size = len(encoded) + 1
+    self.staging_budget.reserve(retained_size)
+    self.disk_bytes += retained_size
     if self.row_count:
       self.key_digest.update(b"\n")
     self.key_digest.update(key.encode("utf-8"))
@@ -126,9 +157,14 @@ class _HistoricalSeriesSpool:
     if self.handle is None:
       return
     self.handle.flush()
-    os.fsync(self.handle.fileno())
     self.handle.close()
     self.handle = None
+
+  def unlink(self) -> None:
+    self.close()
+    self.path.unlink(missing_ok=True)
+    self.staging_budget.release(self.disk_bytes)
+    self.disk_bytes = 0
 
   def summary(self) -> dict[str, Any]:
     return HistoricalBarSummary(
@@ -287,6 +323,7 @@ def _set_low_process_priority() -> None:
   import ctypes
   from ctypes import wintypes
 
+  process_mode_background_begin = 0x00100000
   below_normal_priority_class = 0x00004000
   kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
   kernel32.GetCurrentProcess.argtypes = []
@@ -294,6 +331,11 @@ def _set_low_process_priority() -> None:
   kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
   kernel32.SetPriorityClass.restype = wintypes.BOOL
   process_handle = kernel32.GetCurrentProcess()
+  if kernel32.SetPriorityClass(
+    process_handle,
+    process_mode_background_begin,
+  ):
+    return
   if not kernel32.SetPriorityClass(process_handle, below_normal_priority_class):
     raise OSError(
       ctypes.get_last_error(),
@@ -324,6 +366,7 @@ def _iter_request_records(
   *,
   max_staging_uncompressed_bytes: int,
   max_record_uncompressed_bytes: int,
+  disk_budget: _HistoricalDiskBudget | None = None,
 ) -> Iterator[Any]:
   units = historical_work_units(payload)
   connection.send(
@@ -353,6 +396,7 @@ def _iter_request_records(
   group_start = 0
   staging_budget = _HistoricalStagingBudget(
     max_bytes=max_staging_uncompressed_bytes,
+    disk_budget=disk_budget,
   )
   while group_start < len(units):
     first = units[group_start]
@@ -432,11 +476,10 @@ def _iter_request_records(
             for line in source:
               yield json.loads(line)
         yield item.summary()
-        item.path.unlink(missing_ok=True)
+        item.unlink()
     finally:
       for item in series.values():
-        item.close()
-        item.path.unlink(missing_ok=True)
+        item.unlink()
 
     if completed_units < len(units):
       # Publish the complete canonical instrument batch before granting the
@@ -487,6 +530,13 @@ def _prepare_request(
       }
     )
 
+  disk_budget = _HistoricalDiskBudget(
+    max_bytes=int(
+      message.get("max_spool_bytes")
+      or int(message["max_total_uncompressed_bytes"])
+      + int(message["max_total_compressed_bytes"])
+    ),
+  )
   prepared = _prepare_market_data_records_spool_sync(
     _iter_request_records(
       broker,
@@ -499,11 +549,13 @@ def _prepare_request(
         message["max_total_uncompressed_bytes"]
       ),
       max_record_uncompressed_bytes=MAX_MARKET_DATA_RECORD_UNCOMPRESSED_BYTES,
+      disk_budget=disk_budget,
     ),
     Path(spool_directory),
     max_total_uncompressed_bytes=int(message["max_total_uncompressed_bytes"]),
     max_total_compressed_bytes=int(message["max_total_compressed_bytes"]),
     on_chunk=publish_chunk,
+    reserve_compressed_bytes=disk_budget.reserve,
   )
   connection.send(
     {

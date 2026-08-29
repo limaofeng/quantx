@@ -735,6 +735,98 @@ async def test_market_pipeline_receives_two_frames_but_acks_only_after_commit(
 
 
 @pytest.mark.asyncio
+async def test_slow_single_symbol_publish_does_not_block_binary_ack(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  batch = _commit_item(1, b"").batch
+  event = AgentEnvelope(
+    message_type=AgentMessageType.MARKET_EVENT,
+    payload={
+      "kind": "quote",
+      "stock_code": "600000.SH",
+      "period": "tick",
+      "data": {"lastPrice": 10.0},
+    },
+  )
+  publish_started = asyncio.Event()
+  release_publish = asyncio.Event()
+  ack_sent = asyncio.Event()
+
+  class MixedFrameWebSocket:
+    def __init__(self) -> None:
+      self.receive_count = 0
+      self.sent_text: list[str] = []
+
+    async def receive(self):
+      self.receive_count += 1
+      if self.receive_count == 1:
+        return {"type": "websocket.receive", "text": event.model_dump_json()}
+      if self.receive_count == 2:
+        return {"type": "websocket.receive", "bytes": batch.to_bytes()}
+      await ack_sent.wait()
+      return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send_text(self, payload):
+      self.sent_text.append(payload)
+      ack_sent.set()
+
+  class Store:
+    async def write_batch(self, committed, _payload, *, received_at):
+      assert received_at.tzinfo is not None
+      return SimpleNamespace(sequence=committed.sequence)
+
+  async def publish(_lease, _payload) -> None:
+    publish_started.set()
+    await release_publish.wait()
+
+  async def ensure_device_active(_device_id) -> None:
+    return None
+
+  monkeypatch.setattr(agent_api, "_publish_market_event", publish)
+  websocket = MixedFrameWebSocket()
+  task = asyncio.create_task(
+    agent_api._run_market_commit_pipeline(
+      websocket,
+      stream_id="stream-1",
+      device_id="device-1",
+      commit_state=agent_api._MarketCommitState(),
+      store=Store(),
+      market_lease=_market_lease(),
+      validate_device=ensure_device_active,
+    )
+  )
+  try:
+    await asyncio.wait_for(publish_started.wait(), timeout=0.2)
+    await asyncio.wait_for(ack_sent.wait(), timeout=0.2)
+    control = MarketStreamControl.model_validate_json(websocket.sent_text[0])
+    assert control.type is MarketControlType.ACK
+    assert control.sequence == 1
+  finally:
+    release_publish.set()
+  with pytest.raises(agent_api.WebSocketDisconnect):
+    await asyncio.wait_for(task, timeout=1)
+
+
+def test_market_event_ingress_keeps_latest_with_count_and_byte_bounds() -> None:
+  buffer = agent_api._MarketEventIngressBuffer(capacity=2, max_bytes=12)
+
+  def item(index: int, frame_bytes: int) -> agent_api._MarketEventIngressItem:
+    return agent_api._MarketEventIngressItem(
+      envelope=AgentEnvelope(
+        message_type=AgentMessageType.MARKET_EVENT,
+        payload={"sequence": index},
+      ),
+      frame_bytes=frame_bytes,
+    )
+
+  assert buffer.put_latest(item(1, 6))
+  assert buffer.put_latest(item(2, 6))
+  assert buffer.put_latest(item(3, 6))
+  assert buffer.qsize == 2
+  assert buffer.retained_bytes == 12
+
+
+@pytest.mark.asyncio
 async def test_market_committer_retries_transient_redis_failure_in_place(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

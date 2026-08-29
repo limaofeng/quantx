@@ -123,11 +123,17 @@ POST_BASELINE_COLUMNS = {
   },
 }
 POST_BASELINE_INDEXES = {
+  "market_data_request": {"ix_market_data_request_device_status_created"},
   "orders": {"ix_orders_exit_plan_cost_basis"},
   # Added by 20260823_0030 for the candidate-outcome repair cursor.  Keep it
   # out of the immutable baseline so a fresh database does not create the
   # index before the revision that owns it runs.
   "strategy_runtime_events": {"ix_strategy_runtime_event_run_created"},
+  "trade_command_outbox": {
+    "ix_trade_command_device_status_delivery_expiry",
+    "ix_trade_command_device_status_expiry_created",
+    "ix_trade_command_device_status_kind_created",
+  },
 }
 
 

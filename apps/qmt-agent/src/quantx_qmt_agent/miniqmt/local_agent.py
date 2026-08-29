@@ -166,6 +166,14 @@ class DeltaReport:
 class MiniQmtLocalAgent:
   """Wrap XTTradingManager with conservative live-trading semantics."""
 
+  FULL_SNAPSHOT_PARTITIONS = (
+    "account",
+    "positions",
+    "orders",
+    "cancelable_orders",
+    "trades",
+  )
+
   def __init__(
     self,
     trading_manager: Any,
@@ -410,7 +418,7 @@ class MiniQmtLocalAgent:
     return {"ok": True, "status": LocalAgentStatus.READY.value, "reason": ""}
 
   def cancel_order(self, order_id: Any) -> Dict[str, Any]:
-    preflight = self.preflight_check()
+    preflight = self.cancel_preflight_check(order_id)
     if not preflight.get("ok"):
       return {"success": False, "preflight": preflight, "message": preflight.get("reason")}
     normalized_order_id = _normalize_order_id(order_id)
@@ -421,6 +429,30 @@ class MiniQmtLocalAgent:
       default=False,
     )
     return {"success": bool(success), "order_id": normalized_order_id, "preflight": preflight}
+
+  def cancel_preflight_check(self, order_id: Any) -> Dict[str, Any]:
+    """Keep risk-reducing cancels available while account state reconciles."""
+    if not bool(getattr(self.trading_manager, "is_connected", False)):
+      self.status = LocalAgentStatus.DISCONNECTED
+      return {
+        "ok": False,
+        "status": self.status.value,
+        "reason": "miniQMT disconnected",
+      }
+    normalized_order_id = _normalize_order_id(order_id)
+    if (
+      isinstance(normalized_order_id, bool)
+      or not isinstance(normalized_order_id, int)
+      or normalized_order_id <= 0
+    ):
+      return {
+        "ok": False,
+        "status": self.status.value,
+        "reason": "invalid broker order id",
+      }
+    # Snapshot completeness, report age, quote state, and the emergency stop
+    # protect new exposure.  They must not prevent a broker-authoritative cancel.
+    return {"ok": True, "status": self.status.value, "reason": ""}
 
   def query_account(self) -> Dict[str, Any]:
     return dict(_safe_call(self.trading_manager, "get_account_info", default={}) or {})
@@ -442,13 +474,10 @@ class MiniQmtLocalAgent:
 
   def query_cancelable_orders(self) -> Optional[List[Dict[str, Any]]]:
     """Return MiniQMT's authoritative cancelable set, or unknown on failure."""
-    try:
-      orders = self.trading_manager.get_orders(True)
-    except (AttributeError, TypeError):
+    section = self.capture_full_snapshot_partition("cancelable_orders")
+    if section.get("is_complete") is not True:
       return None
-    except Exception:
-      return None
-    return [_to_dict(item) for item in orders]
+    return list(section.get("value") or [])
 
   def query_trades(self) -> List[Dict[str, Any]]:
     return [
@@ -526,64 +555,118 @@ class MiniQmtLocalAgent:
   def build_full_reconcile_report(self, expected_snapshot: Dict[str, Any]) -> DeltaReport:
     return self.reconcile_snapshots(expected_snapshot, self.full_snapshot())
 
-  def full_snapshot(self) -> Dict[str, Any]:
-    observed_at = clock.now_aware()
-    account, account_complete = _snapshot_query(
-      self.trading_manager,
-      "get_account_info",
-      default={},
-    )
-    positions, positions_complete = _snapshot_query(
-      self.trading_manager,
-      "query_positions_snapshot",
-      fallback_method_name="get_positions",
-      default=[],
-    )
-    try:
-      orders = self.trading_manager.get_orders(False)
-      orders_complete = orders is not None
-    except TypeError:
-      orders, orders_complete = _snapshot_query(
+  def capture_full_snapshot_partition(self, partition: str) -> Dict[str, Any]:
+    """Capture exactly one native XTTrading snapshot section."""
+
+    if partition == "account":
+      value, complete = _snapshot_query(
         self.trading_manager,
-        "get_orders",
+        "get_account_info",
+        default={},
+      )
+      try:
+        normalized = dict(value or {})
+      except Exception:
+        normalized = {}
+        complete = False
+      complete = bool(complete and normalized)
+    elif partition == "positions":
+      value, complete = _snapshot_query(
+        self.trading_manager,
+        "query_positions_snapshot",
+        fallback_method_name="get_positions",
         default=[],
       )
-    except Exception:
-      orders = []
-      orders_complete = False
-    trades, trades_complete = _snapshot_query(
-      self.trading_manager,
-      "get_trades",
-      default=[],
-    )
-    try:
-      normalized_account = dict(account or {})
-      normalized_positions = [_to_dict(item) for item in positions or []]
-      normalized_orders = [_to_dict(item) for item in orders or []]
-      normalized_trades = [_to_dict(item) for item in trades or []]
-    except Exception:
-      # A malformed section is not an authoritative empty section.
-      normalized_account = {}
-      normalized_positions = []
-      normalized_orders = []
-      normalized_trades = []
-      account_complete = False
-      positions_complete = False
-      orders_complete = False
-      trades_complete = False
-    account_complete = bool(account_complete and normalized_account)
-    section_completeness = {
-      "account": account_complete,
-      "positions": bool(positions_complete),
-      "orders": bool(orders_complete),
-      "trades": bool(trades_complete),
+      try:
+        normalized = [_to_dict(item) for item in value or []]
+      except Exception:
+        normalized = []
+        complete = False
+    elif partition == "orders":
+      try:
+        value = self.trading_manager.get_orders(False)
+        complete = value is not None
+      except TypeError:
+        value, complete = _snapshot_query(
+          self.trading_manager,
+          "get_orders",
+          default=[],
+        )
+      except Exception:
+        value = []
+        complete = False
+      try:
+        normalized = [_to_dict(item) for item in value or []]
+      except Exception:
+        normalized = []
+        complete = False
+    elif partition == "cancelable_orders":
+      try:
+        value = self.trading_manager.get_orders(True)
+        complete = value is not None
+      except (AttributeError, TypeError):
+        value = []
+        complete = False
+      except Exception:
+        value = []
+        complete = False
+      try:
+        normalized = [_to_dict(item) for item in value or []]
+      except Exception:
+        normalized = []
+        complete = False
+    elif partition == "trades":
+      value, complete = _snapshot_query(
+        self.trading_manager,
+        "get_trades",
+        default=[],
+      )
+      try:
+        normalized = [_to_dict(item) for item in value or []]
+      except Exception:
+        normalized = []
+        complete = False
+    else:
+      raise ValueError(f"unsupported full snapshot partition: {partition}")
+    return {
+      "value": normalized,
+      "is_complete": bool(complete),
     }
-    cancelable_orders = self.query_cancelable_orders()
-    cancelable_order_ids = (
-      {_order_identity(item) for item in cancelable_orders if _order_identity(item)}
-      if cancelable_orders is not None
-      else None
-    )
+
+  def assemble_full_snapshot_partitions(
+    self,
+    partitions: Dict[str, Dict[str, Any]],
+  ) -> Dict[str, Any]:
+    """Normalize captured sections and fail closed on any missing partition."""
+
+    observed_at = clock.now_aware()
+    normalized_values: Dict[str, Any] = {}
+    section_completeness: Dict[str, bool] = {}
+    for partition in self.FULL_SNAPSHOT_PARTITIONS:
+      section = partitions.get(partition)
+      complete = bool(
+        isinstance(section, dict) and section.get("is_complete") is True
+      )
+      raw_value = section.get("value") if isinstance(section, dict) else None
+      try:
+        normalized = (
+          dict(raw_value or {})
+          if partition == "account"
+          else [_to_dict(item) for item in raw_value or []]
+        )
+      except Exception:
+        normalized = {} if partition == "account" else []
+        complete = False
+      if partition == "account" and not normalized:
+        complete = False
+      normalized_values[partition] = normalized
+      section_completeness[partition] = complete
+
+    cancelable_order_ids = {
+      identity
+      for item in normalized_values["cancelable_orders"]
+      if (identity := _order_identity(item))
+    }
     connected = bool(getattr(self.trading_manager, "is_connected", False))
     snapshot_complete = bool(connected and all(section_completeness.values()))
     self._snapshot_reconcile_required = not snapshot_complete
@@ -597,21 +680,28 @@ class MiniQmtLocalAgent:
       )
     )
     return {
-      "account": normalized_account,
-      "positions": normalized_positions,
+      "account": normalized_values["account"],
+      "positions": normalized_values["positions"],
       "orders": [
         _with_effective_order_status(
           order,
           observed_at=observed_at,
           cancelable_order_ids=cancelable_order_ids,
         )
-        for order in normalized_orders
+        for order in normalized_values["orders"]
       ],
-      "trades": normalized_trades,
+      "trades": normalized_values["trades"],
       "connected": connected,
       "section_completeness": section_completeness,
       "is_complete": snapshot_complete,
     }
+
+  def full_snapshot(self) -> Dict[str, Any]:
+    partitions = {
+      partition: self.capture_full_snapshot_partition(partition)
+      for partition in self.FULL_SNAPSHOT_PARTITIONS
+    }
+    return self.assemble_full_snapshot_partitions(partitions)
 
   def should_kill_switch(self, now: Optional[datetime] = None) -> bool:
     if self.last_report_time is None:

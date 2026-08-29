@@ -1,9 +1,10 @@
-"""Run a resumable, strictly serial QMT daily-bar history backfill.
+"""Run a resumable QMT daily-bar history backfill on the one active Agent.
 
 This is an operational orchestrator around the existing
-``daily-market-data-sync`` Prefect deployment.  It deliberately keeps each
-QMT request small because the Agent and Worker materialize one request in
-memory before and after upload.
+``daily-market-data-sync`` Prefect deployment.  Each durable campaign job has
+its own retry-stable idempotency scope and is capped at one durable request;
+the deployment owns bounded request parallelism while the controller owns
+recovery and end-to-end verification.
 """
 
 from __future__ import annotations
@@ -35,12 +36,15 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.models.enums import InstrumentType
 from quantx_infrastructure.models.instrument import Instrument
 from quantx_infrastructure.repositories.kline_repository import KLineRepository
+from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
+  MARKET_DATA_REQUEST_BATCH_SIZE,
+)
 from quantx_worker.prefector.flows.durable_agent_flows import (
   reprocess_uploaded_market_data_request,
 )
 from sqlalchemy import func, select, text
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 VERIFICATION_VERSION = 2
 DEFAULT_DEPLOYMENT_NAME = "daily-market-data-sync"
 DEFAULT_PREFECT_API_URL = "http://192.168.5.6:30420/api"
@@ -59,6 +63,7 @@ EXPECTED_PARAMETER_NAMES = {
   "skip_download",
   "compute_daily_signals",
   "agent_device_id",
+  "idempotency_scope",
 }
 BENCHMARK_CODE = "000300.SH"
 TERMINAL_FLOW_STATES = {
@@ -75,7 +80,7 @@ ACTIVE_REQUEST_STATES = {
   "UPLOADED",
   "PROCESSING",
 }
-DATA_ONLY_READY_STATUSES = {"READY", "RECONCILING"}
+MARKET_DATA_READY_STATUSES = {"READY", "RECONCILING"}
 CAMPAIGN_LOCK_KEY = int.from_bytes(
   hashlib.sha256(b"quantx:qmt-daily-history-backfill").digest()[:8],
   byteorder="big",
@@ -177,6 +182,30 @@ def _job_id(start: date, end: date, codes: list[str], kind: str) -> str:
   return f"{kind}-{_compact(start)}-{_compact(end)}-{digest}"
 
 
+def _job_idempotency_scope(run_key: str, job: dict[str, Any]) -> str:
+  scope = f"{str(run_key).strip()}:{str(job['id']).strip()}"
+  if len(scope) > 160:
+    raise RuntimeError("回填任务 idempotency_scope 超过安全长度")
+  return scope
+
+
+def _assert_single_durable_request_job(job: dict[str, Any]) -> None:
+  code_count = len(list(job.get("codes") or []))
+  if code_count > MARKET_DATA_REQUEST_BATCH_SIZE:
+    raise RuntimeError(
+      "回填外层批次超过单个 durable request 的标的上限: "
+      f"codes={code_count} limit={MARKET_DATA_REQUEST_BATCH_SIZE}"
+    )
+
+
+def _job_request_idempotency_scope(job: dict[str, Any]) -> str:
+  _assert_single_durable_request_job(job)
+  scope = str(job.get("idempotency_scope") or "").strip()
+  if not scope:
+    raise RuntimeError(f"回填任务缺少 idempotency_scope: {job.get('id')}")
+  return f"{scope}:batch:0001"
+
+
 def build_jobs(
   *,
   codes: list[str] | None = None,
@@ -189,6 +218,11 @@ def build_jobs(
   """Build deterministic stock batches plus one benchmark batch per year."""
   if batch_size <= 0:
     raise ValueError("batch_size 必须大于 0")
+  if batch_size > MARKET_DATA_REQUEST_BATCH_SIZE:
+    raise ValueError(
+      "batch_size 不能超过单个 durable request 的标的上限 "
+      f"{MARKET_DATA_REQUEST_BATCH_SIZE}"
+    )
   if instruments is None:
     instruments = [{"code": code} for code in (codes or [])]
   normalized_instruments = sorted(
@@ -298,22 +332,30 @@ def request_payload(job: dict[str, Any]) -> dict[str, Any]:
   }
 
 
-def request_idempotency_key(payload: dict[str, Any]) -> str:
+def request_idempotency_key(
+  payload: dict[str, Any],
+  *,
+  idempotency_scope: str = "",
+) -> str:
   encoded = json.dumps(
     payload,
     sort_keys=True,
     separators=(",", ":"),
     default=str,
   )
-  return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+  normalized_scope = str(idempotency_scope or "").strip()
+  material = encoded if not normalized_scope else f"{normalized_scope}\0{encoded}"
+  return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def flow_parameters(
   job: dict[str, Any],
   *,
   agent_device_id: str,
+  idempotency_scope: str,
 ) -> dict[str, Any]:
   """Build the exact Prefect parameters used for submission and recovery."""
+  _assert_single_durable_request_job(job)
   return {
     "stock_list": sorted(job["codes"]),
     "sectors": [],
@@ -323,6 +365,7 @@ def flow_parameters(
     "skip_download": False,
     "compute_daily_signals": False,
     "agent_device_id": agent_device_id,
+    "idempotency_scope": idempotency_scope,
   }
 
 
@@ -401,7 +444,7 @@ async def load_universe(
   return instruments, metadata
 
 
-async def ensure_data_only_agent_ready(max_age_seconds: int = 90) -> str:
+async def ensure_market_data_agent_ready(max_age_seconds: int = 90) -> str:
   store = DurableRuntimeStore()
   try:
     statuses = await store.component_status("qmt-agent:")
@@ -410,7 +453,7 @@ async def ensure_data_only_agent_ready(max_age_seconds: int = 90) -> str:
   now = datetime.now().astimezone()
   ready: list[tuple[datetime, dict[str, Any]]] = []
   for item in statuses:
-    if item.get("status") not in DATA_ONLY_READY_STATUSES:
+    if item.get("status") not in MARKET_DATA_READY_STATUSES:
       continue
     details = item.get("details") or {}
     capabilities = set(details.get("capabilities") or [])
@@ -423,12 +466,13 @@ async def ensure_data_only_agent_ready(max_age_seconds: int = 90) -> str:
     if (
       age <= max_age_seconds
       and "market-data" in capabilities
-      and "data-only" in capabilities
+      and bool({"live", "data-only"}.intersection(capabilities))
     ):
       ready.append((updated_at, item))
   if not ready:
     raise RuntimeError(
-      "没有新鲜且处于 data-only/market-data READY 或 RECONCILING 的 QMT Agent"
+      "没有新鲜且处于 market-data READY 或 RECONCILING、"
+      "模式为 live/data-only 的 QMT Agent"
     )
   _, selected = max(ready, key=lambda value: value[0])
   device_id = str(selected.get("instance_id") or "").strip()
@@ -462,8 +506,15 @@ async def active_market_data_requests() -> list[dict[str, Any]]:
     ]
 
 
-async def request_audit(payload: dict[str, Any]) -> dict[str, Any]:
-  key = request_idempotency_key(payload)
+async def request_audit(
+  payload: dict[str, Any],
+  *,
+  idempotency_scope: str = "",
+) -> dict[str, Any]:
+  key = request_idempotency_key(
+    payload,
+    idempotency_scope=idempotency_scope,
+  )
   async with AsyncSessionLocal() as db:
     request = (
       await db.execute(
@@ -809,7 +860,11 @@ class PrefectClient:
     agent_device_id: str,
     idempotency_key: str,
   ) -> str:
-    parameters = flow_parameters(job, agent_device_id=agent_device_id)
+    parameters = flow_parameters(
+      job,
+      agent_device_id=agent_device_id,
+      idempotency_scope=idempotency_key,
+    )
     response = self.client.post(
       f"/deployments/{self.deployment_id}/create_flow_run",
       json={
@@ -921,6 +976,8 @@ def _initial_state(
       f"{_compact(end)}:{batch_size}:{BENCHMARK_CODE}"
     ).encode("utf-8")
   ).hexdigest()[:24]
+  for job in jobs:
+    job["idempotency_scope"] = _job_idempotency_scope(run_key, job)
   return {
     "schema_version": SCHEMA_VERSION,
     "run_key": run_key,
@@ -985,6 +1042,11 @@ def _append_split_children(
   if len(state["jobs"]) + len(children) > max_total_jobs:
     return False
   existing_ids = {str(item["id"]) for item in state["jobs"]}
+  for child in children:
+    child["idempotency_scope"] = _job_idempotency_scope(
+      str(state["run_key"]),
+      child,
+    )
   job["children"] = [child["id"] for child in children]
   state["jobs"].extend(
     child for child in children if child["id"] not in existing_ids
@@ -1068,7 +1130,10 @@ async def _load_or_create_state(
 
 
 async def _audit_and_verify_job(job: dict[str, Any]) -> bool:
-  audit = await request_audit(request_payload(job))
+  audit = await request_audit(
+    request_payload(job),
+    idempotency_scope=_job_request_idempotency_scope(job),
+  )
   job["request_audit"] = audit
   if not audit.get("ok"):
     job["influx_verification"] = {
@@ -1183,7 +1248,10 @@ async def _retry_failed_ingestion_job(
     raise RuntimeError(
       "--retry-failed-ingestion 只允许恢复 bars/1d 请求"
     )
-  audit = await request_audit(payload)
+  audit = await request_audit(
+    payload,
+    idempotency_scope=_job_request_idempotency_scope(job),
+  )
   request_id = str(audit.get("request_id") or "")
   request_status = str(audit.get("status") or "")
   if not request_id or request_status not in {
@@ -1542,7 +1610,10 @@ async def run(args: argparse.Namespace) -> int:
       if job["status"] in {"pending", "verification_pending"}:
         verification_only = bool(job.get("verification_only"))
         payload = request_payload(job)
-        existing = await request_audit(payload)
+        existing = await request_audit(
+          payload,
+          idempotency_scope=_job_request_idempotency_scope(job),
+        )
         if existing.get("request_id"):
           if existing.get("ok"):
             verified = await _audit_and_verify_job(job)
@@ -1646,7 +1717,7 @@ async def run(args: argparse.Namespace) -> int:
           return 3
 
         try:
-          agent_device_id = await ensure_data_only_agent_ready()
+          agent_device_id = await ensure_market_data_agent_ready()
         except RuntimeError as exc:
           if agent_wait_started is None:
             agent_wait_started = time.monotonic()
@@ -1664,7 +1735,7 @@ async def run(args: argparse.Namespace) -> int:
           print(
             json.dumps(
               {
-                "event": "waiting_for_data_only_agent",
+                "event": "waiting_for_market_data_agent",
                 "reason": str(exc),
               },
               ensure_ascii=False,
@@ -1778,6 +1849,7 @@ async def run(args: argparse.Namespace) -> int:
               parameters=flow_parameters(
                 job,
                 agent_device_id=str(job.get("agent_device_id") or ""),
+                idempotency_scope=idempotency_key,
               ),
             )
             stale_run_id = str(job["prefect_run_id"])
@@ -1826,7 +1898,10 @@ async def run(args: argparse.Namespace) -> int:
             await asyncio.sleep(args.poll_seconds)
             continue
 
-          audit = await request_audit(request_payload(job))
+          audit = await request_audit(
+            request_payload(job),
+            idempotency_scope=_job_request_idempotency_scope(job),
+          )
           if audit.get("request_id"):
             job["request_audit"] = audit
             if audit.get("ok") and await _audit_and_verify_job(job):
@@ -2029,7 +2104,7 @@ async def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(
-    description="通过 QMT Agent 串行、可恢复地回填全市场日线",
+    description="通过唯一活动 QMT Agent 可恢复地回填全市场日线",
   )
   parser.add_argument("--start-date", type=_date, required=True)
   parser.add_argument("--end-date", type=_date, required=True)
@@ -2063,6 +2138,11 @@ def parse_args() -> argparse.Namespace:
   args = parser.parse_args()
   if args.batch_size <= 0:
     parser.error("--batch-size 必须大于 0")
+  if args.batch_size > MARKET_DATA_REQUEST_BATCH_SIZE:
+    parser.error(
+      "--batch-size 不能超过单个 durable request 的标的上限 "
+      f"{MARKET_DATA_REQUEST_BATCH_SIZE}"
+    )
   if args.code_limit is not None and args.code_limit <= 0:
     parser.error("--code-limit 必须大于 0")
   if args.max_jobs is not None and args.max_jobs <= 0:

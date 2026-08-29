@@ -1,7 +1,8 @@
 """Resumable full-universe QMT dividend-factor backfill.
 
 This operational script only creates durable ``market_data_request`` rows.
-XTData remains isolated in the outbound, data-only QMT Agent.
+XTData remains isolated in the outbound QMT Agent's low-priority
+historical worker process.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ ACTIVE_REQUEST_STATES = {
   "UPLOADED",
   "PROCESSING",
 }
-DATA_ONLY_READY_STATUSES = {"READY", "RECONCILING"}
+MARKET_DATA_READY_STATUSES = {"READY", "RECONCILING"}
 # Intentionally shared with backfill_daily_market_data.py. A factor campaign
 # cannot race the daily-bar campaign for the one serial XTData request worker.
 CAMPAIGN_LOCK_KEY = int.from_bytes(
@@ -234,11 +235,13 @@ async def ensure_factor_agent_ready(max_age_seconds: int = 90) -> str:
   now = datetime.now(timezone.utc)
   candidates: list[tuple[datetime, str]] = []
   for item in statuses:
-    if item.get("status") not in DATA_ONLY_READY_STATUSES:
+    if item.get("status") not in MARKET_DATA_READY_STATUSES:
       continue
     details = item.get("details") or {}
     capabilities = set(details.get("capabilities") or [])
-    if not {"market-data", "divid-factors", "data-only"}.issubset(capabilities):
+    if not {"market-data", "divid-factors"}.issubset(
+      capabilities
+    ) or not capabilities.intersection({"live", "data-only"}):
       continue
     updated_at = item.get("updated_at")
     if not isinstance(updated_at, datetime):
@@ -255,7 +258,7 @@ async def ensure_factor_agent_ready(max_age_seconds: int = 90) -> str:
   if not candidates:
     raise RuntimeError(
       "没有新鲜且处于 READY 或 RECONCILING、并声明 "
-      "data-only/market-data/divid-factors 的 QMT Agent；"
+      "market-data/divid-factors 与 live/data-only 模式的 QMT Agent；"
       "部署新 operation 后需重启 Agent"
     )
   return max(candidates, key=lambda item: item[0])[1]
@@ -787,7 +790,7 @@ async def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(
-    description="通过 data-only QMT Agent 可恢复回填沪深股票复权因子"
+    description="通过唯一活动 QMT Agent 可恢复回填沪深股票复权因子"
   )
   parser.add_argument("--start-date", required=True, type=_date)
   parser.add_argument("--end-date", required=True, type=_date)

@@ -1386,7 +1386,7 @@ class TradeCommandService:
           f"qmt-agent:{device.id}",
         )
         acceptable_statuses = (
-          {"READY", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
+          {"READY", "RECONCILING", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
           if allow_degraded_cancel
           else {"READY"}
         )

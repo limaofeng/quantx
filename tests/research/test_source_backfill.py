@@ -3,7 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,6 +16,42 @@ from quantx_research.data.qmt_archive_source import (
 REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 CODE = "000001.SZ"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("capabilities", "accepted"),
+  [
+    (["market-data", "live"], True),
+    (["market-data", "data-only"], True),
+    (["market-data"], False),
+  ],
+)
+async def test_source_backfill_accepts_either_agent_mode(
+  capabilities: list[str],
+  accepted: bool,
+) -> None:
+  class Store:
+    @staticmethod
+    async def component_status(_prefix):
+      return [
+        {
+          "status": "READY",
+          "instance_id": "device-1",
+          "updated_at": datetime.now(timezone.utc),
+          "details": {"capabilities": capabilities},
+        }
+      ]
+
+  if accepted:
+    assert await source_backfill._market_data_agent(
+      Store(), max_age_seconds=90
+    ) == (
+      "device-1"
+    )
+  else:
+    with pytest.raises(source_backfill.SourceBackfillError, match="live/data-only"):
+      await source_backfill._market_data_agent(Store(), max_age_seconds=90)
 
 
 def _time_ms(year: int, month: int, day: int) -> int:
@@ -494,7 +530,7 @@ async def test_reconcile_uploaded_archive_finishes_failed_without_influx(
 
 
 @pytest.mark.asyncio
-async def test_process_job_creates_data_only_request_then_archives(
+async def test_process_job_creates_live_request_then_archives(
   tmp_path: Path,
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -538,8 +574,8 @@ async def test_process_job_creates_data_only_request_then_archives(
   async def no_queue(*args, **kwargs):
     return None
 
-  async def data_only(store, *, max_age_seconds):
-    return "data-only-device"
+  async def market_data_agent(store, *, max_age_seconds):
+    return "market-data-device"
 
   monkeypatch.setattr(
     source_backfill,
@@ -551,7 +587,11 @@ async def test_process_job_creates_data_only_request_then_archives(
     "_wait_for_unrelated_queue",
     no_queue,
   )
-  monkeypatch.setattr(source_backfill, "_data_only_agent", data_only)
+  monkeypatch.setattr(
+    source_backfill,
+    "_market_data_agent",
+    market_data_agent,
+  )
 
   store = Store()
   outcome = await source_backfill._process_job(
@@ -570,7 +610,7 @@ async def test_process_job_creates_data_only_request_then_archives(
 
   assert outcome == "archived"
   assert store.created is not None
-  assert store.created[1] == "data-only-device"
+  assert store.created[1] == "market-data-device"
   assert store.finish_call is not None
   assert store.finish_call[1] == "FAILED"
   assert ledger["status"] == "completed"

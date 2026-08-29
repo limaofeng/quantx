@@ -3,8 +3,11 @@ XTQuant 交易接口封装
 提供统一的交易下单接口
 """
 
+import asyncio
 import logging
 import os
+import queue
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +29,10 @@ from quantx_qmt_agent.qmt_types import (
 logger = logging.getLogger(__name__)
 
 path = os.environ.get("QMT_USERDATA_PATH", "").strip()
+MAX_DURABLE_CALLBACK_BACKLOG = 4096
+MAX_CONTROL_CALLBACK_TASKS = 128
+CALLBACK_DRAIN_TIMEOUT_SECONDS = 2.0
+_CALLBACK_WRITER_SENTINEL = object()
 
 
 class TradingConnectionError(Exception):
@@ -53,6 +60,30 @@ class XTTradingManager:
     self.xttrader = None
     self.acc = StockAccount(self.account_id, self.account_type.value)
     self._native_started = False
+    self.trading_service = None
+    self._callback_queue: queue.Queue[Any] = queue.Queue(
+      maxsize=MAX_DURABLE_CALLBACK_BACKLOG
+    )
+    self._callback_state_lock = threading.Lock()
+    self._callback_pipeline_healthy = True
+    self._callback_pipeline_error = ""
+    self._callback_failure_generation = 0
+    self._callback_recovery_pending = False
+    self._callback_recovery_generation: int | None = None
+    self._callback_write_inflight = False
+    self._callback_accepting = True
+    self._callback_close_lock = threading.Lock()
+    self._callback_writer_sentinel_enqueued = False
+    self._callback_writer_stopped = threading.Event()
+    self._callback_writer_thread = threading.Thread(
+      target=self._durable_callback_writer,
+      daemon=True,
+      name="XTTradingCallbackWriter",
+    )
+    self._callback_writer_thread.start()
+    self._control_callback_slots = threading.BoundedSemaphore(
+      MAX_CONTROL_CALLBACK_TASKS
+    )
     # 初始化事件循环 (用于处理异步回调)
     self.event_loop = None
     self.event_loop_thread = None
@@ -62,9 +93,6 @@ class XTTradingManager:
   def _init_event_loop(self):
     """初始化事件循环 (在独立线程中运行)"""
     try:
-      import asyncio
-      import threading
-
       def run_event_loop(loop):
         asyncio.set_event_loop(loop)
         loop.run_forever()
@@ -131,6 +159,209 @@ class XTTradingManager:
       )
     return self.is_connected
 
+  def callback_pipeline_healthy(self) -> bool:
+    with self._callback_state_lock:
+      return self._callback_pipeline_healthy
+
+  def callback_pipeline_error(self) -> str:
+    with self._callback_state_lock:
+      return self._callback_pipeline_error
+
+  def callback_failure_generation(self) -> int:
+    """Return the monotonic generation of observed callback durability gaps."""
+
+    with self._callback_state_lock:
+      return max(0, int(getattr(self, "_callback_failure_generation", 0)))
+
+  def enqueue_durable_callback(self, kind: str, value: Any) -> bool:
+    with self._callback_state_lock:
+      if not self._callback_accepting:
+        self._mark_callback_pipeline_failed_locked("REPORT_CALLBACK_AFTER_CLOSE")
+        return False
+    service = self.trading_service
+    if service is None:
+      self._mark_callback_pipeline_failed("REPORT_SINK_UNAVAILABLE")
+      return False
+    mark_observed = getattr(service, "mark_callback_observed", None)
+    if callable(mark_observed):
+      try:
+        mark_observed()
+      except Exception:
+        self._mark_callback_pipeline_failed("REPORT_MUTATION_FENCE_FAILED")
+        logger.exception("XTTrading callback mutation fence failed")
+        return False
+    try:
+      prepared = service.prepare_callback(kind, value)
+    except Exception:
+      self._mark_callback_pipeline_failed("REPORT_NORMALIZATION_FAILED")
+      logger.exception(
+        "XTTrading callback normalization failed: kind=%s",
+        kind,
+      )
+      return False
+    with self._callback_state_lock:
+      # Native shutdown can race normalization. Only callbacks inserted before
+      # accepting flips false belong ahead of the drain sentinel.
+      if not self._callback_accepting:
+        self._mark_callback_pipeline_failed_locked("REPORT_CALLBACK_AFTER_CLOSE")
+        return False
+      try:
+        self._callback_queue.put_nowait((service, prepared))
+      except queue.Full:
+        self._mark_callback_pipeline_failed_locked("REPORT_QUEUE_OVERFLOW")
+        logger.error(
+          "XTTrading durable callback queue overflow: capacity=%s",
+          MAX_DURABLE_CALLBACK_BACKLOG,
+        )
+        return False
+    return True
+
+  def mark_callback_pipeline_reconciled(
+    self,
+    expected_failure_generation: int,
+  ) -> bool:
+    """Clear only the callback gap covered by an acknowledged snapshot."""
+
+    expected_generation = max(0, int(expected_failure_generation))
+    with self._callback_state_lock:
+      current_generation = max(
+        0,
+        int(getattr(self, "_callback_failure_generation", 0)),
+      )
+      if expected_generation != current_generation:
+        return False
+      if self._callback_pipeline_healthy:
+        return True
+      if self._callback_backlog_empty_locked():
+        self._callback_pipeline_healthy = True
+        self._callback_pipeline_error = ""
+        self._callback_recovery_pending = False
+        self._callback_recovery_generation = None
+        return True
+      self._callback_recovery_pending = True
+      self._callback_recovery_generation = expected_generation
+      return False
+
+  def _mark_callback_pipeline_failed(self, reason: str) -> None:
+    with self._callback_state_lock:
+      self._mark_callback_pipeline_failed_locked(reason)
+
+  def _mark_callback_pipeline_failed_locked(self, reason: str) -> None:
+    self._callback_failure_generation = (
+      max(0, int(getattr(self, "_callback_failure_generation", 0))) + 1
+    )
+    self._callback_pipeline_healthy = False
+    self._callback_pipeline_error = reason[:128]
+    self._callback_recovery_pending = False
+    self._callback_recovery_generation = None
+
+  def _callback_backlog_empty_locked(self) -> bool:
+    with self._callback_queue.mutex:
+      unfinished = self._callback_queue.unfinished_tasks
+    return unfinished == 0 and not self._callback_write_inflight
+
+  def _durable_callback_writer(self) -> None:
+    try:
+      while True:
+        item = self._callback_queue.get()
+        if item is _CALLBACK_WRITER_SENTINEL:
+          self._callback_queue.task_done()
+          self._recover_callback_pipeline_if_drained()
+          return
+        service, prepared = item
+        retry_delay = 0.05
+        with self._callback_state_lock:
+          self._callback_write_inflight = True
+        while True:
+          try:
+            service.persist_prepared_callback(prepared)
+          except Exception:
+            self._mark_callback_pipeline_failed("REPORT_PERSISTENCE_FAILED")
+            logger.exception("XTTrading durable callback persistence failed")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 2.0)
+            continue
+          break
+        with self._callback_state_lock:
+          self._callback_write_inflight = False
+        # Only durable success retires an accepted callback. Shutdown timeout
+        # and persistence failures intentionally leave unfinished_tasks set.
+        self._callback_queue.task_done()
+        self._recover_callback_pipeline_if_drained()
+    finally:
+      self._callback_writer_stopped.set()
+
+  def _recover_callback_pipeline_if_drained(self) -> None:
+    with self._callback_state_lock:
+      recovery_generation = getattr(
+        self,
+        "_callback_recovery_generation",
+        None,
+      )
+      if (
+        self._callback_recovery_pending
+        and recovery_generation
+        == max(0, int(getattr(self, "_callback_failure_generation", 0)))
+        and self._callback_backlog_empty_locked()
+      ):
+        self._callback_pipeline_healthy = True
+        self._callback_pipeline_error = ""
+        self._callback_recovery_pending = False
+        self._callback_recovery_generation = None
+
+  def _stop_durable_callback_writer(
+    self,
+    *,
+    timeout: float = CALLBACK_DRAIN_TIMEOUT_SECONDS,
+  ) -> bool:
+    """Stop accepting callbacks and durably drain every accepted envelope."""
+
+    # Focused legacy harnesses can construct a manager without running
+    # __init__. Production managers always own the complete callback pipeline.
+    if not hasattr(self, "_callback_queue") or not hasattr(
+      self, "_callback_state_lock"
+    ):
+      return True
+    close_lock = getattr(self, "_callback_close_lock", None)
+    if close_lock is None:
+      close_lock = threading.Lock()
+      self._callback_close_lock = close_lock
+    deadline = time.monotonic() + max(0.0, timeout)
+    with close_lock:
+      with self._callback_state_lock:
+        self._callback_accepting = False
+        sentinel_enqueued = self._callback_writer_sentinel_enqueued
+      writer = getattr(self, "_callback_writer_thread", None)
+      if writer is None or not writer.is_alive():
+        with self._callback_state_lock:
+          drained = self._callback_backlog_empty_locked()
+        if not drained:
+          self._mark_callback_pipeline_failed("REPORT_DRAIN_TIMEOUT")
+        return drained
+
+      if not sentinel_enqueued:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+          self._callback_queue.put(
+            _CALLBACK_WRITER_SENTINEL,
+            timeout=remaining,
+          )
+        except queue.Full:
+          self._mark_callback_pipeline_failed("REPORT_DRAIN_TIMEOUT")
+          return False
+        with self._callback_state_lock:
+          self._callback_writer_sentinel_enqueued = True
+
+      writer.join(timeout=max(0.0, deadline - time.monotonic()))
+      if writer.is_alive():
+        self._mark_callback_pipeline_failed("REPORT_DRAIN_TIMEOUT")
+        return False
+      with self._callback_state_lock:
+        drained = self._callback_backlog_empty_locked()
+      if not drained:
+        self._mark_callback_pipeline_failed("REPORT_DRAIN_TIMEOUT")
+      return drained
+
   def query_new_purchase_limit(self) -> Dict[str, Any]:
     """
     查询新股申购额度
@@ -166,7 +397,9 @@ class XTTradingManager:
 
       inside_price_type = price_type.value
       if price_type == PriceType.MARKET_CONVERT_5_LIMIT:
-        if stock_code.endswith(".SH"):
+        # MiniQMT uses the Shanghai constant for both Shanghai and Beijing
+        # stock-market five-level IOC orders.
+        if stock_code.endswith((".SH", ".BJ")):
           inside_price_type = xtconstant.MARKET_SH_CONVERT_5_CANCEL
         elif stock_code.endswith(".SZ"):
           inside_price_type = xtconstant.MARKET_SZ_CONVERT_5_CANCEL
@@ -515,6 +748,12 @@ class XTTradingManager:
       self._native_started = False
       logger.info("XTQuant交易连接已关闭")
 
+      # Native callbacks must be stopped before the sentinel is appended.
+      # Anything accepted before this point is durably persisted in FIFO order;
+      # a timeout leaves the callback gap latched for full reconciliation.
+      if not self._stop_durable_callback_writer(timeout=CALLBACK_DRAIN_TIMEOUT_SECONDS):
+        logger.error("XTTrading durable callback drain did not complete")
+
       # 停止事件循环 even when the native client reports a shutdown error.
       try:
         if self.event_loop:
@@ -533,11 +772,8 @@ class XTTradingManager:
 
   async def handle_connection_event(self, connected: bool):
     """处理连接状态变更事件"""
-    try:
-      self.is_connected = connected
-      logger.info(f"连接状态更新: {'已连接' if connected else '已断开'}")
-    except Exception as exc:
-      logger.error("处理连接事件失败: error=%s", exc.__class__.__name__)
+    self.is_connected = connected
+    logger.info("连接状态更新: connected=%s", connected)
 
   async def handle_account_status_event(self, status):
     """处理账户状态变更事件"""
@@ -554,13 +790,9 @@ class XTTradingManager:
     Args:
       asset: XtAsset 对象
     """
-    try:
-      logger.info("资产更新已接收")
-      # 委托给 TradingService 处理
-      if hasattr(self, "trading_service") and self.trading_service:
-        await self.trading_service.handle_asset_update(asset)
-    except Exception as exc:
-      logger.error("处理资产变动事件失败: error=%s", exc.__class__.__name__)
+    logger.info("资产更新已接收")
+    if self.trading_service:
+      await self.trading_service.handle_asset_update(asset)
 
   async def handle_position_update_event(self, position):
     """
@@ -569,13 +801,9 @@ class XTTradingManager:
     Args:
       position: XtPosition 对象
     """
-    try:
-      logger.info("持仓更新已接收: instrument=%s", position.stock_code)
-      # 委托给 TradingService 处理
-      if hasattr(self, "trading_service") and self.trading_service:
-        await self.trading_service.handle_position_update(position)
-    except Exception as exc:
-      logger.error("处理持仓变动事件失败: error=%s", exc.__class__.__name__)
+    logger.info("持仓更新已接收: instrument=%s", position.stock_code)
+    if self.trading_service:
+      await self.trading_service.handle_position_update(position)
 
   async def handle_order_event(self, order):
     """
@@ -584,13 +812,9 @@ class XTTradingManager:
     Args:
       order: XtOrder 对象
     """
-    try:
-      logger.info("委托更新已接收: status=%s", order.order_status)
-      # 委托给 TradingService 处理
-      if hasattr(self, "trading_service") and self.trading_service:
-        await self.trading_service.handle_order_callback(order)
-    except Exception as exc:
-      logger.error("处理委托事件失败: error=%s", exc.__class__.__name__)
+    logger.info("委托更新已接收: status=%s", order.order_status)
+    if self.trading_service:
+      await self.trading_service.handle_order_callback(order)
 
   async def handle_trade_event(self, trade):
     """
@@ -599,13 +823,9 @@ class XTTradingManager:
     Args:
       trade: XtTrade 对象
     """
-    try:
-      logger.info("成交更新已接收")
-      # 委托给 TradingService 处理
-      if hasattr(self, "trading_service") and self.trading_service:
-        await self.trading_service.handle_trade_callback(trade)
-    except Exception as exc:
-      logger.error("处理成交事件失败: error=%s", exc.__class__.__name__)
+    logger.info("成交更新已接收")
+    if self.trading_service:
+      await self.trading_service.handle_trade_callback(trade)
 
   async def handle_order_error_event(self, order_error):
     """
@@ -614,16 +834,12 @@ class XTTradingManager:
     Args:
       order_error: XtOrderError 对象
     """
-    try:
-      logger.error(
-        "委托失败事件已接收: error_code=%s",
-        getattr(order_error, "error_id", "UNKNOWN"),
-      )
-      # 委托给 TradingService 处理
-      if hasattr(self, "trading_service") and self.trading_service:
-        await self.trading_service.handle_order_error_callback(order_error)
-    except Exception as exc:
-      logger.error("处理委托失败事件失败: error=%s", exc.__class__.__name__)
+    logger.error(
+      "委托失败事件已接收: error_code=%s",
+      getattr(order_error, "error_id", "UNKNOWN"),
+    )
+    if self.trading_service:
+      await self.trading_service.handle_order_error_callback(order_error)
 
   async def handle_cancel_error_event(self, cancel_error):
     """
@@ -632,12 +848,9 @@ class XTTradingManager:
     Args:
       cancel_error: XtCancelError 对象
     """
-    try:
-      logger.error("撤单失败事件已接收")
-      if hasattr(self, "trading_service") and self.trading_service:
-        await self.trading_service.handle_cancel_error_callback(cancel_error)
-    except Exception as exc:
-      logger.error("处理撤单失败事件失败: error=%s", exc.__class__.__name__)
+    logger.error("撤单失败事件已接收")
+    if self.trading_service:
+      await self.trading_service.handle_cancel_error_callback(cancel_error)
 
   async def handle_async_order_response(self, response):
     """
@@ -708,9 +921,32 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     try:
       loop = getattr(self.trading_manager, "event_loop", None)
       if loop and loop.is_running() and not loop.is_closed():
-        import asyncio
+        slots = getattr(self.trading_manager, "_control_callback_slots", None)
+        if slots is None:
+          slots = threading.BoundedSemaphore(MAX_CONTROL_CALLBACK_TASKS)
+          self.trading_manager._control_callback_slots = slots
+        if not slots.acquire(blocking=False):
+          self.trading_manager._mark_callback_pipeline_failed(
+            "CONTROL_CALLBACK_OVERFLOW"
+          )
+          close = getattr(coro, "close", None)
+          if callable(close):
+            close()
+          return
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
 
-        asyncio.run_coroutine_threadsafe(coro, loop)
+        def completed(result) -> None:
+          try:
+            result.result()
+          except Exception:
+            self.trading_manager._mark_callback_pipeline_failed(
+              "CONTROL_CALLBACK_FAILED"
+            )
+            logger.exception("XTTrading control callback failed")
+          finally:
+            slots.release()
+
+        future.add_done_callback(completed)
       else:
         logger.warning("事件循环未初始化,无法提交异步任务")
         close = getattr(coro, "close", None)
@@ -722,11 +958,15 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       if callable(close):
         close()
 
+  def _submit_durable_callback(self, kind: str, value: Any) -> None:
+    self.trading_manager.enqueue_durable_callback(kind, value)
+
   # ==================== 连接状态回调 ====================
 
   def on_connected(self):
     """连接成功回调"""
     logger.info("交易连接已建立")
+    self.trading_manager.is_connected = True
     self._submit_async_task(
       self.trading_manager.handle_connection_event(connected=True)
     )
@@ -734,6 +974,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
   def on_disconnected(self):
     """连接断开回调"""
     logger.warning("交易连接已断开")
+    self.trading_manager.is_connected = False
     self._submit_async_task(
       self.trading_manager.handle_connection_event(connected=False)
     )
@@ -758,7 +999,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       asset: XtAsset 对象
     """
     logger.info("资产变动已接收")
-    self._submit_async_task(self.trading_manager.handle_asset_update_event(asset))
+    self._submit_durable_callback("asset", asset)
 
   def on_stock_position(self, position):
     """
@@ -768,7 +1009,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       position: XtPosition 对象
     """
     logger.info("持仓变动已接收: instrument=%s", position.stock_code)
-    self._submit_async_task(self.trading_manager.handle_position_update_event(position))
+    self._submit_durable_callback("position", position)
 
   # ==================== 订单和成交回调 ====================
 
@@ -780,7 +1021,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       order: XtOrder 对象
     """
     logger.info("委托回调已接收: status=%s", order.order_status)
-    self._submit_async_task(self.trading_manager.handle_order_event(order))
+    self._submit_durable_callback("order", order)
 
   def on_stock_trade(self, trade):
     """
@@ -790,7 +1031,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       trade: XtTrade 对象
     """
     logger.info("成交回调已接收")
-    self._submit_async_task(self.trading_manager.handle_trade_event(trade))
+    self._submit_durable_callback("trade", trade)
 
   # ==================== 错误处理回调 ====================
 
@@ -805,7 +1046,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       "委托失败回调已接收: error_code=%s",
       getattr(order_error, "error_id", "UNKNOWN"),
     )
-    self._submit_async_task(self.trading_manager.handle_order_error_event(order_error))
+    self._submit_durable_callback("order_error", order_error)
 
   def on_cancel_error(self, cancel_error):
     """
@@ -815,9 +1056,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       cancel_error: XtCancelError 对象
     """
     logger.error("撤单失败回调已接收")
-    self._submit_async_task(
-      self.trading_manager.handle_cancel_error_event(cancel_error)
-    )
+    self._submit_durable_callback("cancel_error", cancel_error)
 
   # ==================== 异步响应回调 ====================
 

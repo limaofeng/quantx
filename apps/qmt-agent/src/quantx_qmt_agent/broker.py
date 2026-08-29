@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
 from numbers import Integral, Real
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from zoneinfo import ZoneInfo
 
 from quantx_contracts import (
@@ -40,6 +40,13 @@ MAX_MARKET_DATA_RECORDS = 500_000
 MAX_MARKET_DATA_FRAME_RECORDS = 100_000
 MAX_MARKET_DATA_CODES = 300
 MAX_FINANCIAL_DATA_CODES = 100
+LIVE_FULL_SNAPSHOT_PARTITIONS = (
+  "account",
+  "positions",
+  "orders",
+  "cancelable_orders",
+  "trades",
+)
 WHOLE_QUOTE_INSTRUMENT_DETAIL_BATCH_SIZE = 500
 WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE = 256
 WHOLE_QUOTE_METADATA_REFRESH_RETRY_SECONDS = 60.0
@@ -429,6 +436,12 @@ ASSET_FIELDS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedLiveReport:
+  message_id: str
+  envelope_json: str
+
+
 class _LiveReportSink:
   """Persist miniQMT callbacks immediately into the Agent's local outbox."""
 
@@ -438,10 +451,12 @@ class _LiveReportSink:
     journal: Any,
     *,
     on_report=None,
+    on_callback_observed: Callable[[], Any] | None = None,
   ) -> None:
     self.account_id = account_id
     self.journal = journal
     self.on_report = on_report
+    self.on_callback_observed = on_callback_observed
 
   def _client_order_id(self, value: dict[str, Any]) -> str | None:
     return self.journal.client_order_id_for_report(
@@ -449,23 +464,50 @@ class _LiveReportSink:
       order_remark=str(value.get("order_remark") or ""),
     )
 
-  def _persist(
+  def _prepare(
     self,
     message_type: AgentMessageType,
     payload: dict[str, Any],
-  ) -> None:
+  ) -> _PreparedLiveReport:
     envelope = AgentEnvelope(
       message_type=message_type,
       payload=enrich_report_payload(message_type, payload),
     )
-    self.journal.add_report(envelope.message_id, envelope.model_dump_json())
+    return _PreparedLiveReport(
+      message_id=envelope.message_id,
+      envelope_json=envelope.model_dump_json(),
+    )
+
+  def persist_prepared_callback(self, prepared: _PreparedLiveReport) -> None:
+    self.journal.add_report(prepared.message_id, prepared.envelope_json)
     if self.on_report is not None:
       self.on_report()
 
-  async def handle_order_callback(self, order: Any) -> None:
+  def mark_callback_observed(self) -> None:
+    """Fence the native state change before normalization or queueing can lag."""
+
+    if self.on_callback_observed is not None:
+      self.on_callback_observed()
+
+  def prepare_callback(self, kind: str, callback_value: Any) -> _PreparedLiveReport:
+    if kind == "order":
+      return self._prepare_order(callback_value)
+    if kind == "trade":
+      return self._prepare_trade(callback_value)
+    if kind == "asset":
+      return self._prepare_asset(callback_value)
+    if kind == "position":
+      return self._prepare_position(callback_value)
+    if kind == "order_error":
+      return self._prepare_order_error(callback_value)
+    if kind == "cancel_error":
+      return self._prepare_cancel_error(callback_value)
+    raise ValueError("unsupported XTTrading durable callback kind")
+
+  def _prepare_order(self, order: Any) -> _PreparedLiveReport:
     value = _object_payload(order, ORDER_FIELDS)
     value["account_id"] = str(value.get("account_id") or self.account_id)
-    self._persist(
+    return self._prepare(
       AgentMessageType.ORDER_REPORT,
       {
         "client_order_id": self._client_order_id(value),
@@ -473,24 +515,26 @@ class _LiveReportSink:
       },
     )
 
-  async def handle_trade_callback(self, trade: Any) -> None:
+  def _prepare_trade(self, trade: Any) -> _PreparedLiveReport:
     value = _object_payload(trade, EXECUTION_FIELDS)
     value["account_id"] = str(value.get("account_id") or self.account_id)
     if not value.get("execution_id") and value.get("traded_id"):
       value["execution_id"] = value["traded_id"]
-    self._persist(
+    return self._prepare(
       AgentMessageType.EXECUTION_REPORT,
       {
         "client_order_id": self._client_order_id(value),
-        "order_status": "FILLED",
+        # A miniQMT trade callback proves one execution only.  The separate
+        # order callback is the sole authority for FILLED/CANCELLED/REJECTED.
+        "order_status": "PARTIAL_FILLED",
         "execution": value,
       },
     )
 
-  async def handle_asset_update(self, asset: Any) -> None:
+  def _prepare_asset(self, asset: Any) -> _PreparedLiveReport:
     value = _object_payload(asset, ASSET_FIELDS)
     value["account_id"] = str(value.get("account_id") or self.account_id)
-    self._persist(
+    return self._prepare(
       AgentMessageType.DELTA_REPORT,
       {
         "accounts": [value],
@@ -499,10 +543,10 @@ class _LiveReportSink:
       },
     )
 
-  async def handle_position_update(self, position: Any) -> None:
+  def _prepare_position(self, position: Any) -> _PreparedLiveReport:
     value = _object_payload(position, POSITION_FIELDS)
     value["account_id"] = str(value.get("account_id") or self.account_id)
-    self._persist(
+    return self._prepare(
       AgentMessageType.DELTA_REPORT,
       {
         "account_id": self.account_id,
@@ -512,14 +556,14 @@ class _LiveReportSink:
       },
     )
 
-  async def handle_order_error_callback(self, error: Any) -> None:
+  def _prepare_order_error(self, error: Any) -> _PreparedLiveReport:
     value = _object_payload(
       error,
       ("account_id", "order_id", "error_id", "error_msg", "order_remark"),
     )
     value["account_id"] = str(value.get("account_id") or self.account_id)
     value["client_order_id"] = self._client_order_id(value)
-    self._persist(
+    return self._prepare(
       AgentMessageType.DELTA_REPORT,
       {
         "order_errors": [value],
@@ -528,14 +572,14 @@ class _LiveReportSink:
       },
     )
 
-  async def handle_cancel_error_callback(self, error: Any) -> None:
+  def _prepare_cancel_error(self, error: Any) -> _PreparedLiveReport:
     value = _object_payload(
       error,
       ("account_id", "order_id", "error_id", "error_msg"),
     )
     value["account_id"] = str(value.get("account_id") or self.account_id)
     value["client_order_id"] = self._client_order_id(value)
-    self._persist(
+    return self._prepare(
       AgentMessageType.DELTA_REPORT,
       {
         "cancel_errors": [value],
@@ -543,6 +587,24 @@ class _LiveReportSink:
         "is_complete": False,
       },
     )
+
+  async def handle_order_callback(self, order: Any) -> None:
+    self.persist_prepared_callback(self._prepare_order(order))
+
+  async def handle_trade_callback(self, trade: Any) -> None:
+    self.persist_prepared_callback(self._prepare_trade(trade))
+
+  async def handle_asset_update(self, asset: Any) -> None:
+    self.persist_prepared_callback(self._prepare_asset(asset))
+
+  async def handle_position_update(self, position: Any) -> None:
+    self.persist_prepared_callback(self._prepare_position(position))
+
+  async def handle_order_error_callback(self, error: Any) -> None:
+    self.persist_prepared_callback(self._prepare_order_error(error))
+
+  async def handle_cancel_error_callback(self, error: Any) -> None:
+    self.persist_prepared_callback(self._prepare_cancel_error(error))
 
 
 class SimulatorBroker:
@@ -612,7 +674,7 @@ class SimulatorBroker:
     }
     execution = {
       "client_order_id": client_order_id,
-      "order_status": "FILLED",
+      "order_status": "PARTIAL_FILLED",
       "execution": {
         "execution_id": f"sim-{broker_id}",
         "order_id": broker_id,
@@ -628,12 +690,23 @@ class SimulatorBroker:
         "order_remark": payload.get("order_remark", ""),
       },
     }
+    terminal_order = {
+      "client_order_id": client_order_id,
+      "order": {
+        **order["order"],
+        "traded_volume": volume,
+        "traded_price": price,
+        "order_status": 56,
+        "status_msg": "simulator filled",
+      },
+    }
     return {
       "accepted": True,
       "reason": "",
       "reports": [
         ("order_report", order),
         ("execution_report", execution),
+        ("order_report", terminal_order),
       ],
     }
 
@@ -1364,6 +1437,7 @@ class LiveBroker:
     self._trading_access_lock = threading.RLock()
     self._trading_generation_lock = threading.Lock()
     self._trading_connection_generation = 0
+    self._trading_mutation_generation = 0
     self._trading_reconciled_generation = -1
     self._registry_trading_generations: dict[str, int] = {}
     self.data_manager = XTDataManagerRegistry().get_manager()
@@ -1386,6 +1460,7 @@ class LiveBroker:
         account_id,
         journal,
         on_report=agent.mark_report_received,
+        on_callback_observed=self._advance_trading_mutation,
       )
       self.agents[account_id] = agent
 
@@ -1422,6 +1497,7 @@ class LiveBroker:
             account_id,
             self._trading_journal,
             on_report=agent.mark_report_received,
+            on_callback_observed=self._advance_trading_mutation,
           )
         reconnect_count = max(
           0,
@@ -1463,20 +1539,129 @@ class LiveBroker:
     with self._generation_lock():
       return int(getattr(self, "_trading_connection_generation", 0))
 
+  def trading_mutation_generation(self) -> int:
+    """Return the durable/local trading-state generation for snapshot fencing."""
+
+    with self._generation_lock():
+      return int(getattr(self, "_trading_mutation_generation", 0))
+
+  def trading_callback_failure_generation(self) -> int:
+    """Aggregate callback gap generations for reconciliation snapshots."""
+
+    generation = 0
+    for agent in self.agents.values():
+      generation_reader = getattr(
+        agent.trading_manager,
+        "callback_failure_generation",
+        None,
+      )
+      if callable(generation_reader):
+        generation += max(0, int(generation_reader()))
+    return generation
+
+  def _advance_trading_mutation(self) -> int:
+    """Fence a native order/cancel before it can change MiniQMT state."""
+
+    with self._generation_lock():
+      generation = int(getattr(self, "_trading_mutation_generation", 0)) + 1
+      self._trading_mutation_generation = generation
+      return generation
+
+  def trading_state_is_current(
+    self,
+    connection_generation: int,
+    mutation_generation: int,
+    callback_failure_generation: int,
+  ) -> bool:
+    """Atomically compare the connection and trading-state snapshot fences."""
+
+    expected_connection = max(0, int(connection_generation))
+    expected_mutation = max(0, int(mutation_generation))
+    with self._generation_lock():
+      if (
+        expected_connection
+        != int(getattr(self, "_trading_connection_generation", 0))
+        or expected_mutation
+        != int(getattr(self, "_trading_mutation_generation", 0))
+      ):
+        return False
+    return (
+      max(0, int(callback_failure_generation))
+      == self.trading_callback_failure_generation()
+    )
+
   def trading_requires_reconciliation(self) -> bool:
     with self._generation_lock():
-      return int(getattr(self, "_trading_reconciled_generation", -1)) != int(
+      generation_mismatch = int(
+        getattr(self, "_trading_reconciled_generation", -1)
+      ) != int(
         getattr(self, "_trading_connection_generation", 0)
       )
+    callback_gap = any(
+      not bool(manager_health())
+      for agent in self.agents.values()
+      if callable(
+        manager_health := getattr(
+          agent.trading_manager,
+          "callback_pipeline_healthy",
+          None,
+        )
+      )
+    )
+    return generation_mismatch or callback_gap
 
   def require_trading_reconciliation(self) -> None:
     """Close the local new-order gate until Runtime acknowledges a snapshot."""
     with self._generation_lock():
       self._trading_reconciled_generation = -1
 
-  def mark_trading_reconciled(self, connection_generation: int) -> bool:
+  def mark_trading_reconciled(
+    self,
+    connection_generation: int,
+    callback_failure_generation: int,
+  ) -> bool:
     """Open the local order gate only for the snapshotted generation."""
     generation = max(0, int(connection_generation))
+    expected_callback_generation = max(0, int(callback_failure_generation))
+    with self._generation_lock():
+      if generation != int(getattr(self, "_trading_connection_generation", 0)):
+        return False
+    pipelines: list[tuple[Any, int]] = []
+    observed_callback_generation = 0
+    for agent in self.agents.values():
+      manager = agent.trading_manager
+      mark_reconciled = getattr(
+        manager,
+        "mark_callback_pipeline_reconciled",
+        None,
+      )
+      if not callable(mark_reconciled):
+        continue
+      generation_reader = getattr(
+        manager,
+        "callback_failure_generation",
+        None,
+      )
+      manager_generation = (
+        max(0, int(generation_reader()))
+        if callable(generation_reader)
+        else 0
+      )
+      pipelines.append((mark_reconciled, manager_generation))
+      observed_callback_generation += manager_generation
+    if observed_callback_generation != expected_callback_generation:
+      return False
+    pipeline_recovered = all(
+      bool(mark_reconciled(manager_generation))
+      for mark_reconciled, manager_generation in pipelines
+    )
+    if not pipeline_recovered:
+      return False
+    if (
+      self.trading_callback_failure_generation()
+      != expected_callback_generation
+    ):
+      return False
     with self._generation_lock():
       if generation != int(getattr(self, "_trading_connection_generation", 0)):
         return False
@@ -1507,41 +1692,143 @@ class LiveBroker:
       _observe_market_data_connection(self)
       return ready
 
-  def full_snapshot(self) -> dict[str, Any]:
+  @staticmethod
+  def _empty_full_snapshot_partition(partition: str) -> Any:
+    return {} if partition == "account" else []
+
+  def capture_full_snapshot_partition(
+    self,
+    partition: str,
+  ) -> tuple[dict[str, dict[str, Any]], int]:
+    """Capture one account section and bind it to the connection generation."""
+
+    if partition not in LIVE_FULL_SNAPSHOT_PARTITIONS:
+      raise ValueError(f"unsupported full snapshot partition: {partition}")
+    with self._trading_access_lock:
+      generation = self.trading_connection_generation()
+      captured: dict[str, dict[str, Any]] = {}
+      for account_id, agent in self.agents.items():
+        connected_before = bool(
+          getattr(agent.trading_manager, "is_connected", False)
+        )
+        if connected_before:
+          capture = getattr(agent, "capture_full_snapshot_partition", None)
+          if callable(capture):
+            try:
+              section = capture(partition)
+            except Exception as exc:
+              logger.warning(
+                "XTTrading snapshot partition failed: account=%s partition=%s error=%s",
+                masked_account_id(account_id),
+                partition,
+                exc.__class__.__name__,
+              )
+              section = None
+          else:
+            section = None
+        else:
+          section = None
+        connected_after = bool(
+          getattr(agent.trading_manager, "is_connected", False)
+        )
+        valid_section = isinstance(section, dict)
+        captured[account_id] = {
+          "value": (
+            section.get("value")
+            if valid_section
+            else self._empty_full_snapshot_partition(partition)
+          ),
+          "is_complete": bool(
+            connected_before
+            and connected_after
+            and valid_section
+            and section.get("is_complete") is True
+          ),
+          "connected": bool(connected_before and connected_after),
+        }
+      if generation != self.trading_connection_generation():
+        raise RuntimeError(
+          "XTTrading connection generation changed during snapshot partition"
+        )
+      return captured, generation
+
+  def assemble_full_snapshot_partitions(
+    self,
+    partitions: dict[str, dict[str, dict[str, Any]]],
+    connection_generation: int,
+  ) -> tuple[dict[str, Any], int]:
+    """Build one full snapshot only from complete, same-generation sections."""
+
     accounts = []
     positions = {}
     orders = []
     trades = []
     unavailable_accounts = []
     section_completeness_by_account: dict[str, dict[str, bool]] = {}
-    required_sections = ("account", "positions", "orders", "trades")
+    expected_generation = max(0, int(connection_generation))
     with self._trading_access_lock:
+      if expected_generation != self.trading_connection_generation():
+        raise RuntimeError(
+          "XTTrading connection generation changed during full snapshot"
+        )
       for account_id, agent in self.agents.items():
-        if not bool(getattr(agent.trading_manager, "is_connected", False)):
-          unavailable_accounts.append(account_id)
-          section_completeness_by_account[account_id] = {
-            section: False for section in required_sections
-          }
-          accounts.append(
-            {
-              "account_id": account_id,
-              "connection_status": "DISCONNECTED",
-            }
+        local_partitions: dict[str, dict[str, Any]] = {}
+        captured_connected = True
+        for partition in LIVE_FULL_SNAPSHOT_PARTITIONS:
+          account_sections = partitions.get(partition)
+          section = (
+            account_sections.get(account_id)
+            if isinstance(account_sections, dict)
+            else None
           )
-          positions[account_id] = []
-          continue
-        snapshot = agent.full_snapshot()
+          valid_section = isinstance(section, dict)
+          captured_connected = bool(
+            captured_connected
+            and valid_section
+            and section.get("connected") is True
+          )
+          local_partitions[partition] = {
+            "value": (
+              section.get("value")
+              if valid_section
+              else self._empty_full_snapshot_partition(partition)
+            ),
+            "is_complete": bool(
+              valid_section and section.get("is_complete") is True
+            ),
+          }
+        assembler = getattr(agent, "assemble_full_snapshot_partitions", None)
+        if callable(assembler):
+          snapshot = assembler(local_partitions)
+        else:
+          snapshot = {
+            "account": {},
+            "positions": [],
+            "orders": [],
+            "trades": [],
+            "connected": False,
+            "section_completeness": {
+              section: False for section in LIVE_FULL_SNAPSHOT_PARTITIONS
+            },
+            "is_complete": False,
+          }
         raw_section_completeness = snapshot.get("section_completeness")
         if isinstance(raw_section_completeness, dict):
           section_completeness = {
             section: raw_section_completeness.get(section) is True
-            for section in required_sections
+            for section in LIVE_FULL_SNAPSHOT_PARTITIONS
           }
         else:
-          section_completeness = {section: False for section in required_sections}
+          section_completeness = {
+            section: False for section in LIVE_FULL_SNAPSHOT_PARTITIONS
+          }
         section_completeness_by_account[account_id] = section_completeness
         account = dict(snapshot.get("account") or {})
-        if not snapshot.get("connected") or not account:
+        if (
+          not captured_connected
+          or not snapshot.get("connected")
+          or not account
+        ):
           agent.trading_manager.is_connected = False
           unavailable_accounts.append(account_id)
           accounts.append(
@@ -1553,7 +1840,9 @@ class LiveBroker:
           positions[account_id] = []
           continue
         snapshot_complete = bool(
-          snapshot.get("is_complete") is True and all(section_completeness.values())
+          captured_connected
+          and snapshot.get("is_complete") is True
+          and all(section_completeness.values())
         )
         if not snapshot_complete:
           # ``is_connected`` only records the last native callback.  A failed
@@ -1582,23 +1871,55 @@ class LiveBroker:
           }
           for trade in snapshot.get("trades") or []
         )
-    return {
-      "accounts": accounts,
-      "positions_by_account": positions,
-      "orders": orders,
-      "trades": trades,
-      "sequence": int(time.time() * 1_000_000),
-      "is_complete": not unavailable_accounts,
-      "unavailable_accounts": unavailable_accounts,
-      "section_completeness_by_account": section_completeness_by_account,
-      "mode": "live",
-    }
+      if expected_generation != self.trading_connection_generation():
+        raise RuntimeError(
+          "XTTrading connection generation changed while assembling full snapshot"
+        )
+      return (
+        {
+          "accounts": accounts,
+          "positions_by_account": positions,
+          "orders": orders,
+          "trades": trades,
+          "sequence": int(time.time() * 1_000_000),
+          "is_complete": not unavailable_accounts,
+          "unavailable_accounts": unavailable_accounts,
+          "section_completeness_by_account": section_completeness_by_account,
+          "mode": "live",
+        },
+        expected_generation,
+      )
+
+  def full_snapshot(self) -> dict[str, Any]:
+    snapshot, _ = self.capture_full_snapshot()
+    return snapshot
 
   def capture_full_snapshot(self) -> tuple[dict[str, Any], int]:
-    """Capture snapshot data and its native generation under one broker lock."""
-    with self._trading_access_lock:
-      snapshot = self.full_snapshot()
-      return snapshot, self.trading_connection_generation()
+    """Synchronously capture every bounded section for non-Runtime callers."""
+
+    partitions: dict[str, dict[str, dict[str, Any]]] = {}
+    connection_generation: int | None = None
+    mutation_generation = self.trading_mutation_generation()
+    for partition in LIVE_FULL_SNAPSHOT_PARTITIONS:
+      captured, generation = self.capture_full_snapshot_partition(partition)
+      if connection_generation is None:
+        connection_generation = generation
+      elif connection_generation != generation:
+        raise RuntimeError(
+          "XTTrading connection generation changed between snapshot partitions"
+        )
+      if mutation_generation != self.trading_mutation_generation():
+        raise RuntimeError(
+          "XTTrading state changed between snapshot partitions"
+        )
+      partitions[partition] = captured
+    assembled = self.assemble_full_snapshot_partitions(
+      partitions,
+      connection_generation if connection_generation is not None else 0,
+    )
+    if mutation_generation != self.trading_mutation_generation():
+      raise RuntimeError("XTTrading state changed while assembling full snapshot")
+    return assembled
 
   def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
     account_id = str(payload["account_id"])
@@ -1615,6 +1936,7 @@ class LiveBroker:
         }
       agent = self.agents[account_id]
       if payload.get("command_kind") == "CANCEL_ORDER":
+        self._advance_trading_mutation()
         result = agent.cancel_order(payload.get("broker_order_id"))
         return {
           "accepted": bool(result.get("success")),
@@ -1636,6 +1958,7 @@ class LiveBroker:
       command["price_type"] = payload.get("order_type")
       command["price"] = float(payload.get("limit_price") or 0)
       command["order_remark"] = f"qx:{str(payload['client_order_id'])[:20]}"
+      self._advance_trading_mutation()
       result = agent.place_order(command)
       return {
         "accepted": bool(result.get("success")),

@@ -68,7 +68,11 @@ def test_snapshot_reconciles_interrupted_order_without_resubmission(
 ) -> None:
   journal = LocalJournal(tmp_path / "journal.sqlite3")
   client_order_id = "client-order-1234567890-unique"
-  payload = {"client_order_id": client_order_id, "volume": 100}
+  payload = {
+    "command_kind": "PLACE_ORDER",
+    "client_order_id": client_order_id,
+    "volume": 100,
+  }
   journal.begin_command("message-1", payload)
 
   assert journal.reconcile_processing_order(
@@ -187,6 +191,7 @@ async def test_market_request_does_not_block_report_ack_processing(
 
   socket = Socket()
   worker = asyncio.create_task(runtime._market_request_loop(socket))
+  ack_writer = asyncio.create_task(runtime._report_ack_loop(socket))
   market_request = AgentEnvelope(
     message_type=AgentMessageType.MARKET_DATA_REQUEST,
     payload={"request_id": "request-1"},
@@ -205,6 +210,7 @@ async def test_market_request_does_not_block_report_ack_processing(
     runtime._handle_message(None, report_ack.model_dump_json()),
     timeout=1,
   )
+  await asyncio.wait_for(runtime._report_ack_requests.join(), timeout=1)
 
   assert journal.pending_reports() == []
   release_request.set()
@@ -220,7 +226,8 @@ async def test_market_request_does_not_block_report_ack_processing(
   )
   assert socket.closed == []
   worker.cancel()
-  await asyncio.gather(worker, return_exceptions=True)
+  ack_writer.cancel()
+  await asyncio.gather(worker, ack_writer, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -289,9 +296,33 @@ async def test_live_callback_sink_persists_reports_before_websocket_send(
   ]
   assert reports[0].payload["client_order_id"] == client_order_id
   assert reports[1].payload["client_order_id"] == client_order_id
+  assert reports[1].payload["order_status"] == "PARTIAL_FILLED"
   assert reports[2].payload["is_complete"] is False
   assert reports[2].payload["position_deltas"][0]["account_id"] == "account-1"
   assert callbacks == ["persisted", "persisted", "persisted"]
+
+
+def test_simulator_execution_is_partial_until_authoritative_filled_order() -> None:
+  result = SimulatorBroker({"account-1"}, data_only=False).execute(
+    {
+      "client_order_id": "sim-order-1",
+      "account_id": "account-1",
+      "instrument_code": "600000.SH",
+      "side": "SELL",
+      "volume": 400,
+      "limit_price": 10.5,
+    }
+  )
+
+  assert [kind for kind, _payload in result["reports"]] == [
+    "order_report",
+    "execution_report",
+    "order_report",
+  ]
+  assert result["reports"][1][1]["order_status"] == "PARTIAL_FILLED"
+  terminal = result["reports"][2][1]["order"]
+  assert terminal["order_status"] == 56
+  assert terminal["traded_volume"] == 400
 
 
 def test_local_market_streamer_is_idempotent_and_resets() -> None:

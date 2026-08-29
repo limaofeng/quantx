@@ -1255,6 +1255,69 @@ async def test_transport_allows_two_unacknowledged_batches() -> None:
 
 
 @pytest.mark.asyncio
+async def test_market_transport_sends_binary_batches_before_text_events() -> None:
+  class PrioritySocket:
+    def __init__(self) -> None:
+      self.sent: list[bytes | str] = []
+      self.controls: asyncio.Queue[str] = asyncio.Queue()
+
+    async def send(self, payload: bytes | str) -> None:
+      self.sent.append(payload)
+      if isinstance(payload, bytes):
+        batch = MarketStreamBatch.from_bytes(payload)
+        await self.controls.put(
+          MarketStreamControl(
+            type=MarketControlType.ACK,
+            stream_id=batch.stream_id,
+            sequence=batch.sequence,
+          ).model_dump_json()
+        )
+
+    async def recv(self) -> str:
+      return await self.controls.get()
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._ensure_whole_market_state()
+  runtime._market_stream_sequence = 1
+  runtime._market_stream_ack_latency_ms = 0.0
+  runtime._market_stream_outbound_depth = 0
+  runtime._market_stream_outbound_bytes = 0
+  runtime._market_stream_status = "SYNCING"
+  runtime._market_stream_ready_since_monotonic = 0.0
+  await runtime._market_events.put(
+    {
+      "kind": "quote",
+      "stock_code": "600000.SH",
+      "period": "tick",
+      "data": {"lastPrice": 10.0},
+    }
+  )
+  outbound = _BoundedMarketBatchBuffer(max_batches=8, max_bytes=1024 * 1024)
+  await outbound.put(_encoded(2))
+  await outbound.put(_encoded(3))
+  socket = PrioritySocket()
+  transport = asyncio.create_task(
+    runtime._transmit_market_batches(
+      socket,
+      outbound,
+      stream_id="stream-1",
+    )
+  )
+  try:
+    await _wait_until(lambda: len(socket.sent) == 3)
+    assert [isinstance(payload, bytes) for payload in socket.sent] == [
+      True,
+      True,
+      False,
+    ]
+    event = AgentEnvelope.model_validate_json(socket.sent[-1])
+    assert event.message_type is AgentMessageType.MARKET_EVENT
+  finally:
+    transport.cancel()
+    await asyncio.gather(transport, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_outbound_backpressure_drains_more_than_eight_microbatches() -> None:
   runtime = AgentRuntime.__new__(AgentRuntime)
   runtime._market_stream_sequence = 1

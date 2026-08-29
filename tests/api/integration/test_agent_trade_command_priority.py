@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 from quantx_api import agent_api
+from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_contracts import AgentMessageType
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
@@ -187,6 +188,59 @@ async def test_cancel_dispatch_bypasses_fresh_unacknowledged_order(
 
     redelivered = await agent_api._next_command(session)
     assert redelivered is not None and redelivered.message_id == old_order_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_cancel_is_created_selected_and_revalidated_while_reconciling(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  now = agent_api.utcnow()
+  async with _trade_command_database() as sessions:
+    monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
+    async with sessions() as db:
+      db.add_all(
+        [
+          AgentDevice(
+            id=DEVICE_ID,
+            user_id="user-1",
+            name="reconciling-agent",
+            secret_hash="0" * 64,
+            authorized_account_ids=["account-1"],
+            capabilities=["live", "market-data"],
+            created_at=now,
+            updated_at=now,
+          ),
+          RuntimeComponentHeartbeat(
+            component=f"qmt-agent:{DEVICE_ID}",
+            instance_id=DEVICE_ID,
+            status="RECONCILING",
+            details={
+              "apiInstanceId": "api-instance-1",
+              "agentSessionId": "agent-session-1",
+              "serverReceivedAt": now.isoformat(),
+              "agentSentAt": now.isoformat(),
+              "sessionActive": True,
+            },
+            updated_at=now,
+          ),
+        ]
+      )
+      await db.commit()
+      queued = await TradeCommandService(db).enqueue_cancel(
+        user_id="user-1",
+        account_id="account-1",
+        broker_order_id="broker-order-1",
+        execution_mode="live",
+      )
+
+    session = _control_session(now)
+    envelope = await agent_api._next_command(session)
+
+    assert envelope is not None
+    assert envelope.message_id == queued.message_id
+    assert envelope.message_type is AgentMessageType.CANCEL_COMMAND
+    await agent_api._assert_trade_delivery_session(session, envelope)
 
 
 def test_emergency_command_has_cancel_level_outbound_priority() -> None:

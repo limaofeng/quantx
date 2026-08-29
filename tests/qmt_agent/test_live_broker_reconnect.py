@@ -1,6 +1,9 @@
 import threading
+from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
+from quantx_qmt_agent import clock
 from quantx_qmt_agent.broker import LiveBroker, _LiveReportSink
 from quantx_qmt_agent.miniqmt.local_agent import MiniQmtLocalAgent
 from quantx_qmt_agent.miniqmt.manager_registry import XTTradingManagerRegistry
@@ -179,8 +182,8 @@ def test_live_broker_rejects_new_orders_until_generation_is_reconciled():
   assert placed_orders == []
   assert cancelled["accepted"] is True
   assert cancelled_orders == ["order-previous"]
-  assert broker.mark_trading_reconciled(0) is False
-  assert broker.mark_trading_reconciled(1) is True
+  assert broker.mark_trading_reconciled(0, 0) is False
+  assert broker.mark_trading_reconciled(1, 0) is True
 
   accepted = broker.execute(
     {
@@ -235,6 +238,7 @@ def test_trade_query_failure_marks_live_snapshot_sections_incomplete():
     "account": True,
     "positions": True,
     "orders": True,
+    "cancelable_orders": True,
     "trades": False,
   }
   assert local_snapshot["is_complete"] is False
@@ -252,6 +256,47 @@ def test_trade_query_failure_marks_live_snapshot_sections_incomplete():
     "trades"
   ] is False
   assert agent.last_report_time is None
+
+
+def test_cancel_remains_available_while_snapshot_reconciliation_is_required():
+  cancelled: list[int] = []
+
+  class Manager:
+    is_connected = True
+
+    @staticmethod
+    def cancel_order(order_id: int) -> bool:
+      cancelled.append(order_id)
+      return True
+
+  agent = MiniQmtLocalAgent(Manager())
+  agent._snapshot_reconcile_required = True
+  agent.last_report_time = clock.now() - timedelta(minutes=10)
+
+  result = agent.cancel_order("12345")
+
+  assert result["success"] is True
+  assert cancelled == [12345]
+  assert agent.preflight_check()["ok"] is False
+
+
+@pytest.mark.parametrize("order_id", [None, "", "abc", 0, -1, True])
+def test_cancel_rejects_invalid_broker_order_id(order_id):
+  cancelled = []
+
+  class Manager:
+    is_connected = True
+
+    @staticmethod
+    def cancel_order(value):
+      cancelled.append(value)
+      return True
+
+  result = MiniQmtLocalAgent(Manager()).cancel_order(order_id)
+
+  assert result["success"] is False
+  assert result["message"] == "invalid broker order id"
+  assert cancelled == []
 
 
 def test_native_position_query_failure_cannot_become_authoritative_empty():

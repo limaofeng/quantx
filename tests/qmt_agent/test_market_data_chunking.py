@@ -2,7 +2,6 @@ import asyncio
 import gzip
 import hashlib
 import json
-import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +32,8 @@ from quantx_qmt_agent.broker import (
   _normalize_market_timestamp,
   _validate_bars_request,
 )
+from quantx_qmt_agent.credentials import DeviceConfiguration
+from quantx_qmt_agent.journal import LocalJournal
 from quantx_qmt_agent.runtime import (
   AgentRuntime,
   _cleanup_legacy_market_data_spools,
@@ -40,6 +41,7 @@ from quantx_qmt_agent.runtime import (
   _iter_encoded_market_data_chunks,
   _managed_market_data_spool_bytes,
   _prepare_market_data_spool_sync,
+  _sweep_market_data_spool_cleanup,
 )
 
 
@@ -102,37 +104,29 @@ def test_websocket_ping_timeout_is_bounded_after_process_isolation() -> None:
 async def test_heartbeat_checkpoint_is_not_blocked_by_report_backlog() -> None:
   runtime = object.__new__(AgentRuntime)
   runtime._heartbeat_checkpoint_lock = asyncio.Lock()
+  runtime._report_wakeup = asyncio.Event()
   heartbeats: list[str] = []
-  first_flush_started = asyncio.Event()
-  release_first_flush = asyncio.Event()
-  flush_calls = 0
 
   async def send_heartbeat(_socket, *, status: str) -> None:
     heartbeats.append(status)
 
   async def flush_reports(_socket) -> None:
-    nonlocal flush_calls
-    flush_calls += 1
-    if flush_calls == 1:
-      first_flush_started.set()
-      await release_first_flush.wait()
+    raise AssertionError("heartbeat attempted to flush report backlog")
 
   runtime._send_heartbeat = send_heartbeat
   runtime._flush_reports = flush_reports
-  first = asyncio.create_task(
-    runtime._heartbeat_checkpoint(SimpleNamespace(), status="RECONCILING")
+  await asyncio.wait_for(
+    asyncio.gather(
+      runtime._heartbeat_checkpoint(
+        SimpleNamespace(),
+        status="RECONCILING",
+      ),
+      runtime._heartbeat_checkpoint(SimpleNamespace(), status="READY"),
+    ),
+    timeout=0.2,
   )
-  await asyncio.wait_for(first_flush_started.wait(), timeout=0.2)
-  second = asyncio.create_task(
-    runtime._heartbeat_checkpoint(SimpleNamespace(), status="READY")
-  )
-
-  while len(heartbeats) < 2:
-    await asyncio.sleep(0)
   assert heartbeats == ["RECONCILING", "READY"]
-
-  release_first_flush.set()
-  await asyncio.gather(first, second)
+  assert runtime._report_wakeup.is_set()
 
 
 @pytest.mark.asyncio
@@ -399,6 +393,49 @@ def test_managed_spool_cleans_only_owned_request_directories(
   assert not stale.exists()
   assert unrelated.exists()
   assert (root / runtime_module.MARKET_DATA_SPOOL_OWNER_MARKER).exists()
+
+
+def test_spool_startup_defers_content_hashing_until_request_recovery(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  request_id = "request-lazy-digest"
+  payload = {"request_id": request_id, "operation": "bars"}
+  root = _initialize_market_data_spool_root(tmp_path, "device-lazy-digest")
+  spool = runtime_module._reset_market_data_spool_directory(root, request_id)
+  prepared = _prepare_market_data_spool_sync(
+    SimpleNamespace(iter_market_data=lambda _payload: _records(1)),
+    payload,
+    spool,
+    max_total_uncompressed_bytes=1_000_000,
+    max_total_compressed_bytes=1_000_000,
+  )
+  runtime_module._write_market_data_spool_manifest(
+    prepared,
+    request_id=request_id,
+    fingerprint=runtime_module._market_data_payload_fingerprint(payload),
+  )
+  digest_calls = 0
+
+  def digest(path: Path) -> str:
+    nonlocal digest_calls
+    digest_calls += 1
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+  monkeypatch.setattr(runtime_module, "_market_data_file_digest", digest)
+
+  assert _initialize_market_data_spool_root(
+    tmp_path,
+    "device-lazy-digest",
+  ) == root
+  assert digest_calls == 0
+
+  runtime_module._read_market_data_spool_manifest(
+    spool,
+    expected_request_id=request_id,
+    expected_fingerprint=runtime_module._market_data_payload_fingerprint(payload),
+  )
+  assert digest_calls == 1
 
 
 def test_legacy_spool_cleanup_is_limited_to_exact_temp_prefix(
@@ -1082,6 +1119,7 @@ async def test_invalid_market_request_is_failed_without_closing_session(
 
   assert handled == ["invalid-request", "valid-request"]
   assert failures == [("invalid-request", failure_reason)]
+  assert "invalid-request" in runtime._market_upload_tombstones
   worker.cancel()
   await asyncio.gather(worker, return_exceptions=True)
   runtime.stop()
@@ -1402,7 +1440,7 @@ async def test_live_heartbeat_reports_trading_unavailable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chunk_identity_conflict_trips_fatal_stop(monkeypatch) -> None:
+async def test_chunk_identity_conflict_isolated_to_one_request(monkeypatch) -> None:
   class Broker:
     def iter_market_data(self, _payload):
       return _records(1)
@@ -1435,10 +1473,13 @@ async def test_chunk_identity_conflict_trips_fatal_stop(monkeypatch) -> None:
     payload={"request_id": "request-conflict", "operation": "bars"}
   )
 
-  with pytest.raises(runtime_module._FatalMarketDataUploadConflict):
+  with pytest.raises(
+    runtime_module._IsolatedMarketDataWorkerError,
+    match="MARKET_DATA_UPLOAD_CONFLICT",
+  ):
     await runtime._handle_market_data_request(envelope)
-  assert runtime._stopped.is_set()
-  assert runtime._fatal_market_data_event.is_set()
+  assert runtime._stopped.is_set() is False
+  assert runtime._fatal_market_data_event.is_set() is False
   runtime.stop()
 
 
@@ -1625,6 +1666,387 @@ async def test_history_and_subscription_share_one_xtdata_gate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_failure_retires_cache_and_startup_removes_marked_spool(
+  monkeypatch,
+  tmp_path: Path,
+) -> None:
+  class Broker:
+    @staticmethod
+    def iter_market_data(_payload):
+      return _records(1)
+
+  request_id = "request-terminal-failure"
+  payload = {"request_id": request_id, "operation": "bars"}
+  fingerprint = runtime_module._market_data_payload_fingerprint(payload)
+  root = _initialize_market_data_spool_root(tmp_path, "device-1")
+  spool_directory = runtime_module._reset_market_data_spool_directory(
+    root,
+    request_id,
+  )
+  prepared = _prepare_market_data_spool_sync(
+    Broker(),
+    payload,
+    spool_directory,
+    max_total_uncompressed_bytes=10_000_000,
+    max_total_compressed_bytes=10_000_000,
+  )
+  runtime_module._write_market_data_spool_manifest(
+    prepared,
+    request_id=request_id,
+    fingerprint=fingerprint,
+  )
+
+  async def prepared_result():
+    return prepared
+
+  prepared_task = asyncio.create_task(prepared_result())
+  await prepared_task
+  runtime = object.__new__(AgentRuntime)
+  runtime._market_spool_root = root
+  runtime._market_spool_ephemeral_base = None
+  runtime._ensure_market_upload_state()
+  runtime._market_upload_cache[request_id] = runtime_module._MarketUploadCacheEntry(
+    fingerprint=fingerprint,
+    created_at=0.0,
+    last_access_at=0.0,
+    task=prepared_task,
+    compressed_bytes=prepared.compressed_bytes,
+  )
+  runtime._market_upload_cache_bytes = prepared.compressed_bytes
+  # Emulate a process crash after the durable marker replace and before rmtree.
+  monkeypatch.setattr(runtime, "_remove_prepared_market_data", lambda _value: None)
+
+  await runtime._retire_terminal_market_upload(
+    request_id,
+    fingerprint=fingerprint,
+    terminal_status="FAILED",
+  )
+
+  assert request_id not in runtime._market_upload_cache
+  assert runtime._market_upload_cache_bytes == 0
+  assert request_id in runtime._market_upload_tombstones
+  marker = spool_directory / runtime_module.MARKET_DATA_SPOOL_TERMINAL_MARKER
+  assert marker.is_file()
+
+  _initialize_market_data_spool_root(tmp_path, "device-1")
+  assert spool_directory.exists() is False
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_locked_terminal_spool_pauses_only_history_until_cleanup_retries(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  class Broker:
+    block_queries = False
+    queried = False
+
+    @classmethod
+    def iter_market_data(cls, _payload):
+      if not cls.block_queries:
+        return _records(1)
+      cls.queried = True
+      raise AssertionError("quarantined history spool reached XTData")
+
+  request_id = "request-terminal-locked"
+  payload = {"request_id": request_id, "operation": "bars"}
+  fingerprint = runtime_module._market_data_payload_fingerprint(payload)
+  root = _initialize_market_data_spool_root(tmp_path, "device-locked")
+  spool_directory = runtime_module._reset_market_data_spool_directory(
+    root,
+    request_id,
+  )
+  prepared = _prepare_market_data_spool_sync(
+    Broker(),
+    payload,
+    spool_directory,
+    max_total_uncompressed_bytes=10_000_000,
+    max_total_compressed_bytes=10_000_000,
+  )
+  Broker.block_queries = True
+  Broker.queried = False
+  runtime_module._write_market_data_spool_manifest(
+    prepared,
+    request_id=request_id,
+    fingerprint=fingerprint,
+  )
+  runtime_module._write_market_data_spool_terminal_marker(
+    prepared,
+    request_id=request_id,
+    fingerprint=fingerprint,
+    terminal_status="FAILED",
+  )
+  original_rmtree = runtime_module.shutil.rmtree
+
+  def deny_spool_cleanup(path, *args, **kwargs):
+    if Path(path).resolve() == spool_directory.resolve():
+      raise PermissionError("simulated Windows file handle")
+    return original_rmtree(path, *args, **kwargs)
+
+  monkeypatch.setattr(runtime_module.shutil, "rmtree", deny_spool_cleanup)
+
+  assert _initialize_market_data_spool_root(tmp_path, "device-locked") == root
+  assert spool_directory.is_dir()
+  assert _sweep_market_data_spool_cleanup(root) is True
+
+  runtime = object.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._market_spool_root = root
+  with pytest.raises(RuntimeError, match="spool cleanup is pending"):
+    await runtime._prepared_market_data_chunks(request_id, payload)
+  assert Broker.queried is False
+
+  monkeypatch.setattr(runtime_module.shutil, "rmtree", original_rmtree)
+  assert _sweep_market_data_spool_cleanup(root) is False
+  assert spool_directory.exists() is False
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_locked_terminal_spool_retries_without_closing_market_socket(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  class Broker:
+    calls = 0
+
+    @classmethod
+    def iter_market_data(cls, _payload):
+      cls.calls += 1
+      return _records(1)
+
+  request_id = "request-terminal-market-loop"
+  payload = {"request_id": request_id, "operation": "bars"}
+  fingerprint = runtime_module._market_data_payload_fingerprint(payload)
+  root = _initialize_market_data_spool_root(tmp_path, "device-market-loop")
+  spool_directory = runtime_module._reset_market_data_spool_directory(
+    root,
+    request_id,
+  )
+  prepared = _prepare_market_data_spool_sync(
+    Broker(),
+    payload,
+    spool_directory,
+    max_total_uncompressed_bytes=10_000_000,
+    max_total_compressed_bytes=10_000_000,
+  )
+  runtime_module._write_market_data_spool_manifest(
+    prepared,
+    request_id=request_id,
+    fingerprint=fingerprint,
+  )
+  runtime_module._write_market_data_spool_terminal_marker(
+    prepared,
+    request_id=request_id,
+    fingerprint=fingerprint,
+    terminal_status="FAILED",
+  )
+  Broker.calls = 0
+  original_rmtree = runtime_module.shutil.rmtree
+
+  def deny_spool_cleanup(path, *args, **kwargs):
+    if Path(path).resolve() == spool_directory.resolve():
+      raise PermissionError("simulated Windows file handle")
+    return original_rmtree(path, *args, **kwargs)
+
+  monkeypatch.setattr(runtime_module.shutil, "rmtree", deny_spool_cleanup)
+  monkeypatch.setattr(runtime_module, "HISTORY_QOS_CHECK_SECONDS", 0.01)
+
+  runtime = object.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._market_spool_root = root
+  runtime._market_spool_ephemeral_base = None
+  runtime._ensure_market_upload_state()
+  completed = asyncio.Event()
+
+  async def prepare_only(envelope: AgentEnvelope) -> None:
+    await runtime._prepared_market_data_chunks(
+      request_id,
+      envelope.payload,
+    )
+    completed.set()
+
+  async def checkpoint(_socket, *, status: str) -> None:
+    assert status == "READY"
+
+  class Socket:
+    def __init__(self) -> None:
+      self.closed: list[tuple[int, str]] = []
+
+    async def close(self, *, code: int, reason: str) -> None:
+      self.closed.append((code, reason))
+
+  runtime._handle_market_data_request = prepare_only
+  runtime._heartbeat_checkpoint = checkpoint
+  runtime._market_requests = asyncio.Queue()
+  await runtime._market_requests.put(
+    AgentEnvelope(
+      message_type=AgentMessageType.MARKET_DATA_REQUEST,
+      payload=payload,
+    )
+  )
+  socket = Socket()
+  worker = asyncio.create_task(runtime._market_request_loop(socket))
+
+  async def cleanup_is_pending() -> bool:
+    for _ in range(100):
+      if runtime._history_workload_reason == "SPOOL_CLEANUP_PENDING":
+        return True
+      await asyncio.sleep(0.01)
+    return False
+
+  try:
+    assert await cleanup_is_pending()
+    assert Broker.calls == 0
+    assert socket.closed == []
+    assert worker.done() is False
+
+    monkeypatch.setattr(runtime_module.shutil, "rmtree", original_rmtree)
+    await asyncio.wait_for(completed.wait(), timeout=2)
+    await asyncio.wait_for(runtime._market_requests.join(), timeout=2)
+
+    assert Broker.calls == 1
+    assert socket.closed == []
+    assert worker.done() is False
+  finally:
+    monkeypatch.setattr(runtime_module.shutil, "rmtree", original_rmtree)
+    worker.cancel()
+    await asyncio.gather(worker, return_exceptions=True)
+    runtime.stop()
+
+
+def test_invalid_terminal_marker_quarantines_without_deleting_valid_spool(
+  tmp_path: Path,
+) -> None:
+  class Broker:
+    @staticmethod
+    def iter_market_data(_payload):
+      return _records(1)
+
+  request_id = "request-invalid-terminal-marker"
+  payload = {"request_id": request_id, "operation": "bars"}
+  fingerprint = runtime_module._market_data_payload_fingerprint(payload)
+  root = _initialize_market_data_spool_root(tmp_path, "device-invalid-terminal")
+  spool_directory = runtime_module._reset_market_data_spool_directory(
+    root,
+    request_id,
+  )
+  prepared = _prepare_market_data_spool_sync(
+    Broker(),
+    payload,
+    spool_directory,
+    max_total_uncompressed_bytes=10_000_000,
+    max_total_compressed_bytes=10_000_000,
+  )
+  runtime_module._write_market_data_spool_manifest(
+    prepared,
+    request_id=request_id,
+    fingerprint=fingerprint,
+  )
+  marker = spool_directory / runtime_module.MARKET_DATA_SPOOL_TERMINAL_MARKER
+  marker.write_text("{}", encoding="utf-8")
+  chunk_paths = [chunk.path for chunk in prepared.chunks]
+
+  assert _initialize_market_data_spool_root(
+    tmp_path,
+    "device-invalid-terminal",
+  ) == root
+  assert _sweep_market_data_spool_cleanup(root) is True
+  assert spool_directory.is_dir()
+  assert marker.is_file()
+  assert all(path.is_file() for path in chunk_paths)
+
+
+@pytest.mark.asyncio
+async def test_manifest_conflict_isolated_to_one_request() -> None:
+  class Client:
+    async def post(self, url, **_kwargs):
+      return httpx.Response(409, request=httpx.Request("POST", url))
+
+  runtime = object.__new__(AgentRuntime)
+  runtime.configuration = SimpleNamespace(api_url="http://127.0.0.1:8080")
+  runtime._access_token = "token"
+  runtime._ensure_market_upload_state()
+
+  with pytest.raises(
+    runtime_module._IsolatedMarketDataWorkerError,
+    match="MARKET_DATA_UPLOAD_CONFLICT",
+  ):
+    await runtime._finalize_market_data_upload(
+      "request-conflict",
+      1,
+      client=Client(),
+    )
+
+  assert runtime._stopped.is_set() is False
+  assert runtime._fatal_market_data_event.is_set() is False
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_completed_spool_recovers_across_runtime_restart(tmp_path) -> None:
+  payload = {
+    "request_id": "request-cold-restart",
+    "operation": "bars",
+  }
+  first_calls = 0
+
+  class FirstBroker:
+    def iter_market_data(self, _payload):
+      nonlocal first_calls
+      first_calls += 1
+      return _records(3)
+
+  configuration = DeviceConfiguration(
+    api_url="http://127.0.0.1:8080",
+    device_id="cold-restart-device",
+  )
+  first = AgentRuntime(
+    configuration=configuration,
+    device_secret="unused",
+    mode="data-only",
+    allowed_accounts=set(),
+    broker=FirstBroker(),
+    journal=LocalJournal(tmp_path / "journal-first.sqlite3"),
+    market_spool_base_directory=tmp_path,
+  )
+  original = await first._prepared_market_data_chunks(
+    payload["request_id"],
+    payload,
+  )
+  original_bytes = [chunk.path.read_bytes() for chunk in original]
+  spool_directory = original[0].path.parent
+  assert (spool_directory / runtime_module.MARKET_DATA_SPOOL_MANIFEST).is_file()
+  first.stop()
+
+  class RecoveryBroker:
+    @staticmethod
+    def iter_market_data(_payload):
+      raise AssertionError("cold restart queried XTData instead of spool")
+
+  second = AgentRuntime(
+    configuration=configuration,
+    device_secret="unused",
+    mode="data-only",
+    allowed_accounts=set(),
+    broker=RecoveryBroker(),
+    journal=LocalJournal(tmp_path / "journal-second.sqlite3"),
+    market_spool_base_directory=tmp_path,
+  )
+  recovered = await second._prepared_market_data_chunks(
+    payload["request_id"],
+    payload,
+  )
+
+  assert first_calls == 1
+  assert [chunk.path.read_bytes() for chunk in recovered] == original_bytes
+  await second._complete_market_upload(payload["request_id"])
+  assert spool_directory.exists() is False
+  second.stop()
+
+
+@pytest.mark.asyncio
 async def test_isolated_history_does_not_hold_realtime_xtdata_gate() -> None:
   history_started = asyncio.Event()
   history_release = asyncio.Event()
@@ -1650,11 +2072,9 @@ async def test_isolated_history_does_not_hold_realtime_xtdata_gate() -> None:
     return _prepare_market_data_spool_sync(
       SimpleNamespace(iter_market_data=lambda _payload: _records(1)),
       {},
-      Path(
-        tempfile.mkdtemp(
-          prefix=runtime_module.MARKET_DATA_SPOOL_REQUEST_PREFIX,
-          dir=runtime._market_spool_root,
-        )
+      runtime_module._reset_market_data_spool_directory(
+        runtime._market_spool_root,
+        "request-isolated-history",
       ),
       max_total_uncompressed_bytes=1_000_000,
       max_total_compressed_bytes=1_000_000,
@@ -1787,9 +2207,12 @@ async def test_run_forever_propagates_fatal_for_supervisor_restart() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cache_budget_ttl_and_terminal_cleanup(monkeypatch) -> None:
+async def test_cache_ttl_retires_memory_but_preserves_durable_spool(monkeypatch) -> None:
   class Broker:
+    calls = 0
+
     def iter_market_data(self, _payload):
+      self.calls += 1
       return _records(1)
 
   runtime = object.__new__(AgentRuntime)
@@ -1808,7 +2231,14 @@ async def test_cache_budget_ttl_and_terminal_cleanup(monkeypatch) -> None:
   runtime._cleanup_expired_market_uploads()
   assert runtime._market_upload_cache == {}
   assert runtime._market_upload_cache_bytes == 0
-  assert not any(path.exists() for path in paths)
+  assert all(path.exists() for path in paths)
+
+  recovered = await runtime._prepared_market_data_chunks(
+    "request-ttl",
+    {"request_id": "request-ttl", "operation": "bars"},
+  )
+  assert [chunk.path for chunk in recovered] == paths
+  assert runtime.broker.calls == 1
 
   monkeypatch.setattr(
     runtime_module,
@@ -1820,8 +2250,8 @@ async def test_cache_budget_ttl_and_terminal_cleanup(monkeypatch) -> None:
       "request-too-large",
       {"request_id": "request-too-large", "operation": "bars"},
     )
-  assert runtime._market_upload_cache == {}
-  assert runtime._market_upload_cache_bytes == 0
+  assert set(runtime._market_upload_cache) == {"request-ttl"}
+  assert runtime._market_upload_cache_bytes == cached_bytes
 
 
 @pytest.mark.asyncio
@@ -1854,6 +2284,7 @@ async def test_partial_spool_files_count_against_runtime_quota(
       {"request_id": "request-over-quota", "operation": "bars"},
     )
   assert runtime.broker.calls == 0
+  assert _managed_market_data_spool_bytes(runtime._market_spool_root) == 64
   runtime.stop()
 
 

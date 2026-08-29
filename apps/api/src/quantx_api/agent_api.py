@@ -15,6 +15,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from math import isfinite
@@ -75,6 +76,7 @@ from quantx_infrastructure.services.agent_session_guard import (
   AGENT_SERVER_SESSION_PAYLOAD_KEY,
   API_HEARTBEAT_COMPONENT,
   QMT_ACCOUNT_MISMATCH,
+  QMT_AGENT_NOT_RECONCILED,
   QMT_AGENT_OFFLINE,
   api_instance_is_current,
   evaluate_agent_session,
@@ -155,6 +157,10 @@ MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS = 0.025
+MARKET_STREAM_EVENT_QUEUE_CAPACITY = 512
+MARKET_STREAM_EVENT_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+MARKET_STREAM_EVENT_MAX_FRAME_BYTES = 64 * 1024
+MARKET_STREAM_EVENT_PROCESSING_TIMEOUT_SECONDS = 2.0
 TRADE_COMMAND_EXPIRY_SWEEP_INTERVAL_SECONDS = 1.0
 TRADE_COMMAND_EXPIRY_SWEEP_BATCH_SIZE = 100
 TRADE_COMMAND_REDELIVERY_SECONDS = 10.0
@@ -165,11 +171,19 @@ AGENT_CONTROL_OUTBOUND_ACK_RESERVE = 16
 AGENT_CONTROL_MAX_QUEUE_AGE_SECONDS = 5.0
 AGENT_CONTROL_INBOUND_PROCESSING_TIMEOUT_SECONDS = 10.0
 AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS = 5.0
+AGENT_CONTROL_TRADE_VALIDATION_TIMEOUT_SECONDS = 5.0
+AGENT_CONTROL_TRADE_VALIDATION_HIGH_CAPACITY = 16
+AGENT_CONTROL_TRADE_VALIDATION_NORMAL_CAPACITY = 32
+AGENT_CONTROL_TRADE_VALIDATION_HIGH_WORKERS = 2
+AGENT_CONTROL_TRADE_VALIDATION_NORMAL_WORKERS = 2
 AGENT_CONTROL_DEPENDENCY_RETRY_SECONDS = 0.5
 AGENT_CONTROL_SEND_TIMEOUT_SECONDS = 5.0
 AGENT_CONTROL_POLL_INTERVAL_SECONDS = 1.0
 AGENT_CONTROL_SLOW_STAGE_SECONDS = 1.0
 AGENT_CONTROL_HEARTBEAT_STALE_SECONDS = 90.0
+AGENT_CONTROL_CPU_OFFLOAD_CHARS = 64 * 1024
+AGENT_CONTROL_CPU_OFFLOAD_BYTES = 256 * 1024
+AGENT_CONTROL_CPU_WORKERS = 2
 
 _MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset({"QUEUED", "DELIVERED", "RECEIVING"})
 _MARKET_DATA_FROZEN_MANIFEST_STATUSES = frozenset(
@@ -182,6 +196,10 @@ MARKET_DATA_RECONNECT_STALE_SECONDS = 5 * 60
 _MARKET_DATA_AGENT_BUSY_REASON = "MARKET_DATA_AGENT_BUSY"
 _market_data_staging_lock = asyncio.Lock()
 _market_data_staging_sweep_lock = asyncio.Lock()
+_agent_control_cpu_executor = ThreadPoolExecutor(
+  max_workers=AGENT_CONTROL_CPU_WORKERS,
+  thread_name_prefix="agent-control-cpu",
+)
 
 
 class _AgentControlPipelineError(RuntimeError):
@@ -189,6 +207,14 @@ class _AgentControlPipelineError(RuntimeError):
     super().__init__(reason)
     self.reason = reason
     self.close_code = close_code
+
+
+class _TradeCommandDeliveryDeferred(RuntimeError):
+  """The command remains durable but its current delivery gate is closed."""
+
+  def __init__(self, reason: str) -> None:
+    super().__init__(reason)
+    self.reason = reason
 
 
 _TRANSIENT_DATABASE_ERRORS = (SQLAlchemyTimeoutError, DBAPIError)
@@ -251,6 +277,12 @@ class _AgentInboundItem:
   dedup_key: str = ""
 
 
+@dataclass(frozen=True)
+class _PreparedReportPersistence:
+  payload_hash: str
+  business_idempotency_key: str
+
+
 @dataclass(order=True)
 class _AgentOutboundItem:
   priority: int
@@ -261,8 +293,100 @@ class _AgentOutboundItem:
   dedup_key: str = field(compare=False, default="")
 
 
+@dataclass(frozen=True)
+class _TradeCommandValidationItem:
+  envelope: AgentEnvelope
+  queued_monotonic: float
+
+
+_TRADE_VALIDATION_HIGH_LANE = "high"
+_TRADE_VALIDATION_NORMAL_LANE = "normal"
+
+
+def _trade_validation_lane(envelope: AgentEnvelope) -> str:
+  if envelope.message_type is AgentMessageType.CANCEL_COMMAND or (
+    envelope.message_type is AgentMessageType.COMMAND
+    and str(envelope.payload.get("command_kind") or "").upper()
+    == "EMERGENCY_STOP"
+  ):
+    return _TRADE_VALIDATION_HIGH_LANE
+  return _TRADE_VALIDATION_NORMAL_LANE
+
+
+class _TradeCommandValidationBuffer:
+  """Bound validation work while reserving workers and capacity for exits."""
+
+  def __init__(
+    self,
+    *,
+    high_capacity: int = AGENT_CONTROL_TRADE_VALIDATION_HIGH_CAPACITY,
+    normal_capacity: int = AGENT_CONTROL_TRADE_VALIDATION_NORMAL_CAPACITY,
+  ) -> None:
+    if high_capacity <= 0 or normal_capacity <= 0:
+      raise ValueError("trade validation capacities must be positive")
+    self._capacity = {
+      _TRADE_VALIDATION_HIGH_LANE: high_capacity,
+      _TRADE_VALIDATION_NORMAL_LANE: normal_capacity,
+    }
+    self._items: dict[str, deque[_TradeCommandValidationItem]] = {
+      _TRADE_VALIDATION_HIGH_LANE: deque(),
+      _TRADE_VALIDATION_NORMAL_LANE: deque(),
+    }
+    self._pending_message_ids: set[str] = set()
+    self._condition = asyncio.Condition()
+
+  async def put(self, envelope: AgentEnvelope) -> bool:
+    lane = _trade_validation_lane(envelope)
+    async with self._condition:
+      if envelope.message_id in self._pending_message_ids:
+        return False
+      if len(self._items[lane]) >= self._capacity[lane]:
+        return False
+      self._items[lane].append(
+        _TradeCommandValidationItem(
+          envelope=envelope,
+          queued_monotonic=time.monotonic(),
+        )
+      )
+      self._pending_message_ids.add(envelope.message_id)
+      self._condition.notify_all()
+      return True
+
+  async def get(self, lane: str) -> _TradeCommandValidationItem:
+    if lane not in self._items:
+      raise ValueError("unknown trade validation lane")
+    async with self._condition:
+      await self._condition.wait_for(lambda: bool(self._items[lane]))
+      return self._items[lane].popleft()
+
+  async def complete(self, item: _TradeCommandValidationItem) -> None:
+    async with self._condition:
+      self._pending_message_ids.discard(item.envelope.message_id)
+      self._condition.notify_all()
+
+  def qsize(self, lane: str | None = None) -> int:
+    if lane is not None:
+      if lane not in self._items:
+        raise ValueError("unknown trade validation lane")
+      return len(self._items[lane])
+    return sum(len(items) for items in self._items.values())
+
+
+_INBOUND_HEARTBEAT_LANE = "heartbeat"
+_INBOUND_COMMAND_ACK_LANE = "command-ack"
+_INBOUND_DURABLE_LANE = "durable"
+
+
+def _inbound_lane(envelope: AgentEnvelope) -> str:
+  if envelope.message_type is AgentMessageType.HEARTBEAT:
+    return _INBOUND_HEARTBEAT_LANE
+  if envelope.message_type is AgentMessageType.COMMAND_ACK:
+    return _INBOUND_COMMAND_ACK_LANE
+  return _INBOUND_DURABLE_LANE
+
+
 class _AgentInboundBuffer:
-  """Bound accepted control frames by count and retained encoded bytes."""
+  """Bound each control lane independently so durable work cannot block liveness."""
 
   def __init__(
     self,
@@ -270,37 +394,70 @@ class _AgentInboundBuffer:
     capacity: int = AGENT_CONTROL_INBOUND_QUEUE_CAPACITY,
     max_bytes: int = AGENT_CONTROL_INBOUND_QUEUE_MAX_BYTES,
   ) -> None:
-    self._capacity = capacity
-    self._max_bytes = max_bytes
-    self._items: deque[_AgentInboundItem] = deque()
-    self._retained_bytes = 0
+    if capacity <= 0 or max_bytes <= 0:
+      raise ValueError("Agent inbound buffer limits must be positive")
+    self._durable_capacity = capacity
+    self._command_ack_capacity = max(16, capacity // 4)
+    self._durable_max_bytes = max_bytes
+    self._command_ack_max_bytes = max(1024, max_bytes // 8)
+    self._items: dict[str, deque[_AgentInboundItem]] = {
+      _INBOUND_HEARTBEAT_LANE: deque(),
+      _INBOUND_COMMAND_ACK_LANE: deque(),
+      _INBOUND_DURABLE_LANE: deque(),
+    }
+    self._retained_bytes = {
+      _INBOUND_HEARTBEAT_LANE: 0,
+      _INBOUND_COMMAND_ACK_LANE: 0,
+      _INBOUND_DURABLE_LANE: 0,
+    }
     self._pending_keys: set[str] = set()
     self._condition = asyncio.Condition()
 
   async def put(self, item: _AgentInboundItem) -> bool:
-    if item.frame_bytes > self._max_bytes:
+    if item.frame_bytes > self._durable_max_bytes:
       raise _AgentControlPipelineError("inbound_frame_too_large", close_code=1009)
     async with self._condition:
-      if item.dedup_key and item.dedup_key in self._pending_keys:
+      lane = _inbound_lane(item.envelope)
+      lane_items = self._items[lane]
+      if lane == _INBOUND_HEARTBEAT_LANE:
+        # Only the freshest queued heartbeat matters. Keep this one-slot lane
+        # independent from durable reports, including while one heartbeat is
+        # already being persisted by its processor.
+        if lane_items:
+          retired = lane_items.popleft()
+          self._retained_bytes[lane] -= retired.frame_bytes
+          if retired.dedup_key:
+            self._pending_keys.discard(retired.dedup_key)
+      elif item.dedup_key and item.dedup_key in self._pending_keys:
         return False
-      await self._condition.wait_for(
-        lambda: (
-          len(self._items) < self._capacity
-          and self._retained_bytes + item.frame_bytes <= self._max_bytes
-        )
-      )
-      self._items.append(item)
-      self._retained_bytes += item.frame_bytes
+      elif lane == _INBOUND_COMMAND_ACK_LANE:
+        if (
+          len(lane_items) >= self._command_ack_capacity
+          or self._retained_bytes[lane] + item.frame_bytes
+          > self._command_ack_max_bytes
+        ):
+          return False
+      elif lane == _INBOUND_DURABLE_LANE:
+        if (
+          len(lane_items) >= self._durable_capacity
+          or self._retained_bytes[lane] + item.frame_bytes
+          > self._durable_max_bytes
+        ):
+          return False
+      self._items[lane].append(item)
+      self._retained_bytes[lane] += item.frame_bytes
       if item.dedup_key:
         self._pending_keys.add(item.dedup_key)
       self._condition.notify_all()
       return True
 
-  async def get(self) -> _AgentInboundItem:
+  async def get(self, lane: str = _INBOUND_DURABLE_LANE) -> _AgentInboundItem:
+    if lane not in self._items:
+      raise ValueError("unknown Agent inbound lane")
     async with self._condition:
-      await self._condition.wait_for(lambda: bool(self._items))
-      item = self._items.popleft()
-      self._retained_bytes -= item.frame_bytes
+      await self._condition.wait_for(lambda: bool(self._items[lane]))
+      item = self._items[lane].popleft()
+      self._retained_bytes[lane] -= item.frame_bytes
       self._condition.notify_all()
       return item
 
@@ -311,13 +468,22 @@ class _AgentInboundBuffer:
       self._pending_keys.discard(item.dedup_key)
       self._condition.notify_all()
 
-  def qsize(self) -> int:
-    return len(self._items)
+  def has_pending(self, dedup_key: str) -> bool:
+    return bool(dedup_key and dedup_key in self._pending_keys)
+
+  def qsize(self, lane: str | None = None) -> int:
+    if lane is not None:
+      if lane not in self._items:
+        raise ValueError("unknown Agent inbound lane")
+      return len(self._items[lane])
+    return sum(len(items) for items in self._items.values())
 
   def oldest_age(self) -> float:
-    if not self._items:
+    heads = [items[0] for items in self._items.values() if items]
+    if not heads:
       return 0.0
-    return max(0.0, time.monotonic() - self._items[0].received_monotonic)
+    oldest = min(item.received_monotonic for item in heads)
+    return max(0.0, time.monotonic() - oldest)
 
 
 class _AgentOutboundBuffer:
@@ -500,6 +666,67 @@ class _MarketCommitState:
   last_sequence: int = 0
 
 
+@dataclass(frozen=True)
+class _MarketEventIngressItem:
+  envelope: AgentEnvelope
+  frame_bytes: int
+
+
+class _MarketEventIngressBuffer:
+  """Bound replaceable single-instrument events outside the binary ACK lane."""
+
+  def __init__(
+    self,
+    *,
+    capacity: int = MARKET_STREAM_EVENT_QUEUE_CAPACITY,
+    max_bytes: int = MARKET_STREAM_EVENT_QUEUE_MAX_BYTES,
+  ) -> None:
+    if capacity <= 0 or max_bytes <= 0:
+      raise ValueError("market event ingress limits must be positive")
+    self._capacity = capacity
+    self._max_bytes = max_bytes
+    self._retained_bytes = 0
+    self._queue: asyncio.Queue[_MarketEventIngressItem] = asyncio.Queue(
+      maxsize=capacity
+    )
+
+  def put_latest(self, item: _MarketEventIngressItem) -> bool:
+    if (
+      item.frame_bytes <= 0
+      or item.frame_bytes > MARKET_STREAM_EVENT_MAX_FRAME_BYTES
+      or item.frame_bytes > self._max_bytes
+    ):
+      return False
+    # Quotes are current state, not a durable event log. Retire stale queued
+    # observations until the newest one fits both hard bounds.
+    while self._queue.full() or self._retained_bytes + item.frame_bytes > self._max_bytes:
+      try:
+        retired = self._queue.get_nowait()
+      except asyncio.QueueEmpty:
+        return False
+      self._retained_bytes -= retired.frame_bytes
+      self._queue.task_done()
+    self._queue.put_nowait(item)
+    self._retained_bytes += item.frame_bytes
+    return True
+
+  async def get(self) -> _MarketEventIngressItem:
+    item = await self._queue.get()
+    self._retained_bytes -= item.frame_bytes
+    return item
+
+  def complete(self) -> None:
+    self._queue.task_done()
+
+  @property
+  def qsize(self) -> int:
+    return self._queue.qsize()
+
+  @property
+  def retained_bytes(self) -> int:
+    return self._retained_bytes
+
+
 class _MarketCommitBuffer:
   """Bound Redis work without silently dropping an accepted market frame."""
 
@@ -595,7 +822,7 @@ class _MarketCommitBuffer:
 
 
 async def _publish_market_event(
-  control_session: AgentControlSession,
+  control_session: AgentControlSession | MarketSessionLease,
   payload: dict[str, Any],
 ) -> None:
   lease = MarketSessionLease(
@@ -1462,35 +1689,78 @@ async def _record_command_ack(device_id: str, payload: dict[str, Any]) -> None:
     await _wake_runtime_event_consumer()
 
 
+def _prepare_report_persistence(
+  device_id: str,
+  envelope: AgentEnvelope,
+) -> _PreparedReportPersistence:
+  wire_payload = envelope.payload
+  if envelope.protocol_version == PROTOCOL_VERSION:
+    envelope.validate_payload()
+  canonical_payload = json.dumps(
+    wire_payload,
+    sort_keys=True,
+    separators=(",", ":"),
+    default=str,
+  )
+  canonical_message_type = json.dumps(
+    envelope.message_type.value,
+    separators=(",", ":"),
+  )
+  payload_hash = hashlib.sha256(
+    (
+      '{"message_type":'
+      f"{canonical_message_type},"
+      f'"payload":{canonical_payload}'
+      "}"
+    ).encode("utf-8")
+  ).hexdigest()
+  body = _body_for_report_idempotency(
+    envelope,
+    canonical_payload=canonical_payload,
+  )
+  business_idempotency_key = hashlib.sha256(
+    (
+      f"{device_id}:{envelope.message_type.value}:"
+      f"{json.dumps(body, sort_keys=True, separators=(',', ':'), default=str)}"
+    ).encode("utf-8")
+  ).hexdigest()
+  return _PreparedReportPersistence(
+    payload_hash=payload_hash,
+    business_idempotency_key=business_idempotency_key,
+  )
+
+
+async def _prepare_report_persistence_async(
+  device_id: str,
+  envelope: AgentEnvelope,
+  *,
+  frame_bytes: int,
+) -> _PreparedReportPersistence:
+  if frame_bytes < AGENT_CONTROL_CPU_OFFLOAD_BYTES:
+    return _prepare_report_persistence(device_id, envelope)
+  return await asyncio.get_running_loop().run_in_executor(
+    _agent_control_cpu_executor,
+    _prepare_report_persistence,
+    device_id,
+    envelope,
+  )
+
+
 async def _record_report(
   session: AgentControlSession,
   envelope: AgentEnvelope,
   *,
   received_at: datetime,
+  frame_bytes: int = 0,
 ) -> ReportAckPayload:
   wire_payload = envelope.payload
   if AGENT_SERVER_SESSION_PAYLOAD_KEY in wire_payload:
     raise ValueError("Agent report contains a reserved server field")
-  if envelope.protocol_version == PROTOCOL_VERSION:
-    envelope.validate_payload()
-  payload_hash = hashlib.sha256(
-    json.dumps(
-      {
-        "message_type": envelope.message_type.value,
-        "payload": wire_payload,
-      },
-      sort_keys=True,
-      separators=(",", ":"),
-      default=str,
-    ).encode("utf-8")
-  ).hexdigest()
-  body = _body_for_report_idempotency(envelope)
-  business_idempotency_key = hashlib.sha256(
-    (
-      f"{session.device_id}:{envelope.message_type.value}:"
-      f"{json.dumps(body, sort_keys=True, separators=(',', ':'), default=str)}"
-    ).encode("utf-8")
-  ).hexdigest()
+  prepared = await _prepare_report_persistence_async(
+    session.device_id,
+    envelope,
+    frame_bytes=frame_bytes,
+  )
   payload = {
     **wire_payload,
     AGENT_SERVER_SESSION_PAYLOAD_KEY: {
@@ -1529,11 +1799,17 @@ async def _record_report(
         await db.execute(
           select(AgentReportInbox).where(
             (AgentReportInbox.message_id == envelope.message_id)
-            | (AgentReportInbox.business_idempotency_key == business_idempotency_key)
+            | (
+              AgentReportInbox.business_idempotency_key
+              == prepared.business_idempotency_key
+            )
           )
         )
       ).scalar_one_or_none()
-      same = existing is not None and existing.raw_payload_hash == payload_hash
+      same = (
+        existing is not None
+        and existing.raw_payload_hash == prepared.payload_hash
+      )
       ack = ReportAckPayload(
         report_message_id=envelope.message_id,
         accepted=same,
@@ -1565,6 +1841,8 @@ async def _record_report(
 
 def _body_for_report_idempotency(
   envelope: AgentEnvelope,
+  *,
+  canonical_payload: str | None = None,
 ) -> dict[str, Any]:
   payload = envelope.payload
   if envelope.message_type is AgentMessageType.EXECUTION_REPORT:
@@ -1598,11 +1876,15 @@ def _body_for_report_idempotency(
     "report_id": payload.get("report_id"),
     "sequence": payload.get("sequence"),
     "snapshot_hash": hashlib.sha256(
-      json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
+      (
+        canonical_payload
+        if canonical_payload is not None
+        else json.dumps(
+          payload,
+          sort_keys=True,
+          separators=(",", ":"),
+          default=str,
+        )
       ).encode("utf-8")
     ).hexdigest(),
   }
@@ -1629,7 +1911,7 @@ async def _next_command(
       if staged_runtime_event:
         await _wake_runtime_event_consumer()
     command_kind_expression = func.upper(
-      TradeCommandOutbox.payload["command_kind"].as_string()
+      TradeCommandOutbox.payload.op("->>")("command_kind")
     )
     high_priority_kinds = ("CANCEL_ORDER", "EMERGENCY_STOP")
     eligible_delivery = or_(
@@ -1698,7 +1980,7 @@ async def _next_command(
     command_kind = str(command.payload.get("command_kind") or "").upper()
     high_priority_command = command_kind in {"CANCEL_ORDER", "EMERGENCY_STOP"}
     acceptable_statuses = (
-      {"READY", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
+      {"READY", "RECONCILING", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
       if high_priority_command
       else {"READY"}
     )
@@ -1854,6 +2136,7 @@ async def _process_message(
   envelope: AgentEnvelope,
   *,
   received_at: datetime,
+  frame_bytes: int = 0,
   protocol_version: str = PROTOCOL_VERSION,
 ) -> AgentEnvelope | None:
   device_id = session.device_id
@@ -1883,15 +2166,13 @@ async def _process_message(
       session,
       envelope,
       received_at=received_at,
+      frame_bytes=frame_bytes,
     )
     return AgentEnvelope(
       protocol_version=protocol_version,
       message_type=AgentMessageType.REPORT_ACK,
       payload=ack.model_dump(mode="json"),
     )
-  if envelope.message_type is AgentMessageType.MARKET_EVENT:
-    await _publish_market_event(session, envelope.payload)
-    return None
   raise ValueError(f"不支持的 Agent 消息类型: {envelope.message_type.value}")
 
 
@@ -1977,6 +2258,8 @@ async def _receive_market_batches(
   stream_id: str,
   device_id: str,
   buffer: _MarketCommitBuffer,
+  market_events: _MarketEventIngressBuffer | None = None,
+  protocol_version: str = PROTOCOL_VERSION,
   validate_device: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
   device_validator = validate_device or _ensure_device_active
@@ -2028,9 +2311,40 @@ async def _receive_market_batches(
           )
         next_device_check = time.monotonic() + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
 
+      text_payload = message.get("text")
+      if isinstance(text_payload, str):
+        await buffer.cancel_reservation()
+        reserved = False
+        if market_events is None:
+          raise ValueError("market text event processor is not configured")
+        frame_bytes = len(text_payload.encode("utf-8"))
+        if frame_bytes > MARKET_STREAM_EVENT_MAX_FRAME_BYTES:
+          AGENT_CONTROL_EVENTS.labels(
+            event="backpressure",
+            reason="market_stream_event_frame_too_large",
+          ).inc()
+          continue
+        envelope = AgentEnvelope.model_validate_json(text_payload)
+        if envelope.protocol_version != protocol_version:
+          raise ValueError("market connection changed protocol version")
+        if envelope.message_type is not AgentMessageType.MARKET_EVENT:
+          raise ValueError("market stream text frame must be MARKET_EVENT")
+        accepted = market_events.put_latest(
+          _MarketEventIngressItem(
+            envelope=envelope,
+            frame_bytes=frame_bytes,
+          )
+        )
+        if not accepted:
+          AGENT_CONTROL_EVENTS.labels(
+            event="backpressure",
+            reason="market_stream_event_dropped",
+          ).inc()
+        continue
+
       payload = message.get("bytes")
       if not isinstance(payload, bytes):
-        raise ValueError("market stream only accepts binary data frames")
+        raise ValueError("market stream frame must be binary or MARKET_EVENT text")
       payload_bytes = len(payload)
       if payload_bytes > MAX_MARKET_STREAM_FRAME_BYTES:
         raise ValueError("market stream frame exceeds 64 MiB")
@@ -2172,6 +2486,38 @@ async def _commit_market_batches(
     )
 
 
+async def _process_market_stream_events(
+  market_lease: MarketSessionLease,
+  market_events: _MarketEventIngressBuffer,
+) -> None:
+  """Publish lossy single-symbol events without delaying binary receive/ACK."""
+
+  while True:
+    item = await market_events.get()
+    try:
+      try:
+        await asyncio.wait_for(
+          _publish_market_event(market_lease, item.envelope.payload),
+          timeout=MARKET_STREAM_EVENT_PROCESSING_TIMEOUT_SECONDS,
+        )
+      except _TRANSIENT_DEPENDENCY_ERRORS as exc:
+        # The whole-market stream remains authoritative for current quotes.
+        # This auxiliary event is replaceable, so retire it instead of holding
+        # the binary ACK path or reconnecting the market transport.
+        AGENT_CONTROL_EVENTS.labels(
+          event="dependency",
+          reason="market_stream_event_dropped",
+        ).inc()
+        logger.warning(
+          "Single-instrument market event dropped without stream reconnect: "
+          "device_id=%s error=%s",
+          market_lease.device_id,
+          exc.__class__.__name__,
+        )
+    finally:
+      market_events.complete()
+
+
 async def _run_market_commit_pipeline(
   websocket: WebSocket,
   *,
@@ -2179,15 +2525,20 @@ async def _run_market_commit_pipeline(
   device_id: str,
   commit_state: _MarketCommitState,
   store: MarketStreamStore | None = None,
+  market_lease: MarketSessionLease | None = None,
+  protocol_version: str = PROTOCOL_VERSION,
   validate_device: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
   buffer = _MarketCommitBuffer()
+  market_events = _MarketEventIngressBuffer() if market_lease is not None else None
   receiver = asyncio.create_task(
     _receive_market_batches(
       websocket,
       stream_id=stream_id,
       device_id=device_id,
       buffer=buffer,
+      market_events=market_events,
+      protocol_version=protocol_version,
       validate_device=validate_device,
     ),
     name=f"market-receiver:{stream_id}",
@@ -2202,13 +2553,27 @@ async def _run_market_commit_pipeline(
     ),
     name=f"market-redis-committer:{stream_id}",
   )
+  event_processor = (
+    asyncio.create_task(
+      _process_market_stream_events(
+        market_lease,
+        market_events,
+      ),
+      name=f"market-event-processor:{stream_id}",
+    )
+    if market_lease is not None and market_events is not None
+    else None
+  )
+  tasks = [receiver, committer]
+  if event_processor is not None:
+    tasks.append(event_processor)
   try:
-    await asyncio.gather(receiver, committer)
+    await asyncio.gather(*tasks)
   finally:
-    for task in (receiver, committer):
+    for task in tasks:
       if not task.done():
         task.cancel()
-    await asyncio.gather(receiver, committer, return_exceptions=True)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @market_agent_router.websocket("/ws/agent/market")
@@ -2280,6 +2645,8 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
       stream_id=stream_id,
       device_id=device.id,
       commit_state=commit_state,
+      market_lease=market_lease,
+      protocol_version=first.protocol_version,
       validate_device=lambda checked_device_id: _ensure_device_active(
         checked_device_id,
         lease=market_lease,
@@ -2407,21 +2774,41 @@ async def _enqueue_agent_outbound(
   return queued
 
 
+def _parse_agent_control_frame(raw: str) -> tuple[AgentEnvelope, int]:
+  frame_bytes = len(raw.encode("utf-8"))
+  return AgentEnvelope.model_validate_json(raw), frame_bytes
+
+
+async def _parse_agent_control_frame_async(
+  raw: str,
+) -> tuple[AgentEnvelope, int]:
+  if len(raw) < AGENT_CONTROL_CPU_OFFLOAD_CHARS:
+    return _parse_agent_control_frame(raw)
+  return await asyncio.get_running_loop().run_in_executor(
+    _agent_control_cpu_executor,
+    _parse_agent_control_frame,
+    raw,
+  )
+
+
 async def _receive_agent_control_messages(
   websocket: WebSocket,
   *,
   device_id: str,
   protocol_version: str,
   inbound: _AgentInboundBuffer,
+  outbound: _AgentOutboundBuffer,
   database_state: _AgentDatabaseState,
 ) -> None:
   while True:
     raw = await websocket.receive_text()
     received_monotonic = time.monotonic()
     received_at = utcnow()
-    envelope = AgentEnvelope.model_validate_json(raw)
+    envelope, frame_bytes = await _parse_agent_control_frame_async(raw)
     if envelope.protocol_version != protocol_version:
       raise ValueError("Agent connection changed protocol version")
+    if envelope.message_type is AgentMessageType.MARKET_EVENT:
+      raise ValueError("MARKET_EVENT must use /ws/agent/market")
     if envelope.message_type is AgentMessageType.HEARTBEAT:
       # Liveness is a transport fact. Database persistence can lag without
       # turning a healthy socket into a reconnect/reconciliation storm.
@@ -2431,15 +2818,47 @@ async def _receive_agent_control_messages(
       envelope=envelope,
       received_at=received_at,
       received_monotonic=received_monotonic,
-      frame_bytes=len(raw.encode("utf-8")),
-      dedup_key=(envelope.message_id if envelope.message_type in REPORT_TYPES else ""),
+      frame_bytes=frame_bytes,
+      dedup_key=(
+        envelope.message_id
+        if envelope.message_type in REPORT_TYPES
+        else "command-ack:"
+        + str(envelope.payload.get("command_message_id") or "")
+        if envelope.message_type is AgentMessageType.COMMAND_ACK
+        else "latest-heartbeat"
+        if envelope.message_type is AgentMessageType.HEARTBEAT
+        else ""
+      ),
     )
+    already_pending = inbound.has_pending(item.dedup_key)
     queued = await inbound.put(item)
     if not queued:
+      durable_backpressure = not already_pending
       AGENT_CONTROL_EVENTS.labels(
-        event="deduplicate",
-        reason="inbound_report_pending",
+        event="backpressure" if durable_backpressure else "deduplicate",
+        reason=(
+          "inbound_durable_retry_requested"
+          if durable_backpressure
+          else "inbound_message_pending"
+        ),
       ).inc()
+      if durable_backpressure and envelope.message_type in REPORT_TYPES:
+        # The Agent retains the report in its local journal. An explicit NACK
+        # retires the in-flight slot immediately so it can retry without a
+        # control-socket reconnect or a permanently lost send window.
+        await _enqueue_agent_outbound(
+          device_id,
+          outbound,
+          AgentEnvelope(
+            message_type=AgentMessageType.REPORT_ACK,
+            payload={
+              "report_message_id": envelope.message_id,
+              "accepted": False,
+              "duplicate": False,
+              "reason": "inbound_backpressure_retry",
+            },
+          ),
+        )
     _set_agent_control_queue_metrics(device_id, "inbound", inbound)
 
 
@@ -2450,10 +2869,11 @@ async def _process_agent_control_messages(
   inbound: _AgentInboundBuffer,
   outbound: _AgentOutboundBuffer,
   database_state: _AgentDatabaseState,
+  lane: str = _INBOUND_DURABLE_LANE,
 ) -> None:
   device_id = control_session.device_id
   while True:
-    item = await inbound.get()
+    item = await inbound.get(lane)
     _set_agent_control_queue_metrics(device_id, "inbound", inbound)
     queue_age = max(0.0, time.monotonic() - item.received_monotonic)
     _observe_agent_control_stage(
@@ -2482,6 +2902,7 @@ async def _process_agent_control_messages(
             control_session,
             item.envelope,
             received_at=item.received_at,
+            frame_bytes=item.frame_bytes,
             protocol_version=protocol_version,
           ),
           timeout=AGENT_CONTROL_INBOUND_PROCESSING_TIMEOUT_SECONDS,
@@ -2504,7 +2925,8 @@ async def _process_agent_control_messages(
         retry_delay = min(retry_delay * 2, 5.0)
         continue
       if (
-        item.envelope.message_type is AgentMessageType.HEARTBEAT or inbound.qsize() == 0
+        item.envelope.message_type is AgentMessageType.HEARTBEAT
+        or inbound.qsize(lane) == 0
       ):
         database_state.mark_success()
       break
@@ -2574,16 +2996,21 @@ async def _assert_trade_delivery_session(
   """Revalidate durable authority immediately before a trade frame is sent."""
 
   now = utcnow()
-  async with AsyncSessionLocal() as db:
-    device = await db.get(AgentDevice, control_session.device_id)
-    heartbeat = await db.get(
-      RuntimeComponentHeartbeat,
-      f"qmt-agent:{control_session.device_id}",
-    )
+  try:
+    async with AsyncSessionLocal() as db:
+      device = await db.get(AgentDevice, control_session.device_id)
+      heartbeat = await db.get(
+        RuntimeComponentHeartbeat,
+        f"qmt-agent:{control_session.device_id}",
+      )
+  except _TRANSIENT_DEPENDENCY_ERRORS as exc:
+    raise _TradeCommandDeliveryDeferred(
+      "delivery_authority_dependency_unavailable"
+    ) from exc
 
   command_kind = str(envelope.payload.get("command_kind") or "").upper()
   acceptable_statuses = (
-    {"READY", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
+    {"READY", "RECONCILING", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
     if envelope.message_type is AgentMessageType.CANCEL_COMMAND
     or command_kind == "EMERGENCY_STOP"
     else {"READY"}
@@ -2616,31 +3043,110 @@ async def _assert_trade_delivery_session(
   if (
     device is None
     or device.revoked_at is not None
-    or not session_state.current
+    or (
+      not session_state.current
+      and session_state.reason_code != QMT_AGENT_NOT_RECONCILED
+    )
     or session_state.api_instance_id != control_session.api_instance_id
     or session_state.agent_session_id != control_session.agent_session_id
     or account_id not in control_session.authorized_account_ids
     or (execution_mode and execution_mode not in capabilities)
-    or (live_risk_increase and not market_stream_ready)
   ):
     raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效")
+  if session_state.reason_code == QMT_AGENT_NOT_RECONCILED:
+    raise _TradeCommandDeliveryDeferred("agent_not_ready_for_command")
+  if live_risk_increase and not market_stream_ready:
+    raise _TradeCommandDeliveryDeferred("market_stream_not_ready")
   if live_risk_increase:
     try:
       safety_status, market_stream_tradable = await asyncio.gather(
         AccountExecutionSafetyService().status(account_id),
         authoritative_market_stream_tradable(),
       )
-    except Exception as exc:
-      raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效") from exc
+    except _TRANSIENT_DEPENDENCY_ERRORS as exc:
+      raise _TradeCommandDeliveryDeferred(
+        "risk_gate_dependency_unavailable"
+      ) from exc
     if not bool(safety_status.get("can_increase_risk")) or not market_stream_tradable:
-      raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效")
+      raise _TradeCommandDeliveryDeferred("risk_increase_gate_closed")
+
+
+async def _enqueue_validated_trade_command(
+  *,
+  control_session: AgentControlSession,
+  outbound: _AgentOutboundBuffer,
+  envelope: AgentEnvelope,
+) -> None:
+  """Run slow delivery authority checks outside the physical WS writer."""
+  await asyncio.wait_for(
+    _assert_trade_delivery_session(control_session, envelope),
+    timeout=AGENT_CONTROL_TRADE_VALIDATION_TIMEOUT_SECONDS,
+  )
+  await _enqueue_agent_outbound(
+    control_session.device_id,
+    outbound,
+    envelope,
+    deduplicate=True,
+  )
+
+
+async def _process_trade_command_validations(
+  *,
+  control_session: AgentControlSession,
+  outbound: _AgentOutboundBuffer,
+  validations: _TradeCommandValidationBuffer,
+  database_state: _AgentDatabaseState,
+  lane: str,
+) -> None:
+  device_id = control_session.device_id
+  while True:
+    item = await validations.get(lane)
+    _observe_agent_control_stage(
+      stage=f"trade_validation_{lane}_queue_wait",
+      envelope=item.envelope,
+      duration=time.monotonic() - item.queued_monotonic,
+      device_id=device_id,
+    )
+    try:
+      await _enqueue_validated_trade_command(
+        control_session=control_session,
+        outbound=outbound,
+        envelope=item.envelope,
+      )
+    except _TradeCommandDeliveryDeferred as exc:
+      AGENT_CONTROL_EVENTS.labels(
+        event="delivery",
+        reason=f"trade_command_deferred_{exc.reason}",
+      ).inc()
+      logger.info(
+        "Agent %s-priority trade-command delivery deferred: "
+        "device_id=%s message_id=%s reason=%s redelivery_seconds=%.1f",
+        lane,
+        device_id,
+        item.envelope.message_id,
+        exc.reason,
+        TRADE_COMMAND_REDELIVERY_SECONDS,
+      )
+    except asyncio.TimeoutError:
+      database_state.mark_failure()
+      AGENT_CONTROL_EVENTS.labels(
+        event="timeout",
+        reason=f"trade_command_validation_{lane}",
+      ).inc()
+      logger.warning(
+        "Agent %s-priority trade-command validation timed out: device_id=%s",
+        lane,
+        device_id,
+      )
+    finally:
+      await validations.complete(item)
 
 
 async def _poll_agent_trade_commands(
   *,
   control_session: AgentControlSession,
   protocol_version: str,
-  outbound: _AgentOutboundBuffer,
+  validations: _TradeCommandValidationBuffer,
   database_state: _AgentDatabaseState,
 ) -> None:
   device_id = control_session.device_id
@@ -2665,12 +3171,20 @@ async def _poll_agent_trade_commands(
       logger.warning("Agent trade-command poll timed out: device_id=%s", device_id)
     else:
       if command is not None:
-        await _enqueue_agent_outbound(
-          device_id,
-          outbound,
-          command,
-          deduplicate=True,
-        )
+        queued = await validations.put(command)
+        if not queued:
+          lane = _trade_validation_lane(command)
+          AGENT_CONTROL_EVENTS.labels(
+            event="backpressure",
+            reason=f"trade_command_validation_{lane}_full_or_duplicate",
+          ).inc()
+          logger.warning(
+            "Agent %s-priority trade-command validation deferred: "
+            "device_id=%s message_id=%s",
+            lane,
+            device_id,
+            command.message_id,
+          )
     await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
 
 
@@ -2840,6 +3354,7 @@ async def _run_agent_control_pipeline(
   device_id = control_session.device_id
   inbound = _AgentInboundBuffer()
   outbound = _AgentOutboundBuffer()
+  validations = _TradeCommandValidationBuffer()
   database_state = _AgentDatabaseState(device_id=device_id)
   tasks = {
     asyncio.create_task(
@@ -2848,6 +3363,7 @@ async def _run_agent_control_pipeline(
         device_id=device_id,
         protocol_version=protocol_version,
         inbound=inbound,
+        outbound=outbound,
         database_state=database_state,
       ),
       name=f"agent-control-receiver:{device_id}",
@@ -2859,8 +3375,31 @@ async def _run_agent_control_pipeline(
         inbound=inbound,
         outbound=outbound,
         database_state=database_state,
+        lane=_INBOUND_DURABLE_LANE,
       ),
-      name=f"agent-control-processor:{device_id}",
+      name=f"agent-control-durable-processor:{device_id}",
+    ),
+    asyncio.create_task(
+      _process_agent_control_messages(
+        control_session=control_session,
+        protocol_version=protocol_version,
+        inbound=inbound,
+        outbound=outbound,
+        database_state=database_state,
+        lane=_INBOUND_COMMAND_ACK_LANE,
+      ),
+      name=f"agent-control-command-ack-processor:{device_id}",
+    ),
+    asyncio.create_task(
+      _process_agent_control_messages(
+        control_session=control_session,
+        protocol_version=protocol_version,
+        inbound=inbound,
+        outbound=outbound,
+        database_state=database_state,
+        lane=_INBOUND_HEARTBEAT_LANE,
+      ),
+      name=f"agent-control-heartbeat-processor:{device_id}",
     ),
     asyncio.create_task(
       _send_agent_control_messages(
@@ -2874,10 +3413,36 @@ async def _run_agent_control_pipeline(
       _poll_agent_trade_commands(
         control_session=control_session,
         protocol_version=protocol_version,
-        outbound=outbound,
+        validations=validations,
         database_state=database_state,
       ),
       name=f"agent-command-poller:{device_id}",
+    ),
+    *(
+      asyncio.create_task(
+        _process_trade_command_validations(
+          control_session=control_session,
+          outbound=outbound,
+          validations=validations,
+          database_state=database_state,
+          lane=_TRADE_VALIDATION_HIGH_LANE,
+        ),
+        name=f"agent-command-high-validator-{index}:{device_id}",
+      )
+      for index in range(AGENT_CONTROL_TRADE_VALIDATION_HIGH_WORKERS)
+    ),
+    *(
+      asyncio.create_task(
+        _process_trade_command_validations(
+          control_session=control_session,
+          outbound=outbound,
+          validations=validations,
+          database_state=database_state,
+          lane=_TRADE_VALIDATION_NORMAL_LANE,
+        ),
+        name=f"agent-command-normal-validator-{index}:{device_id}",
+      )
+      for index in range(AGENT_CONTROL_TRADE_VALIDATION_NORMAL_WORKERS)
     ),
     asyncio.create_task(
       _poll_agent_market_requests(

@@ -3,11 +3,20 @@
 import logging
 from dataclasses import dataclass
 
+import orjson
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from quantx_infrastructure.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_json(value: object) -> str:
+  """Use the C/Rust serializer before asyncpg binds large JSONB payloads."""
+  return orjson.dumps(
+    value,
+    option=orjson.OPT_NON_STR_KEYS,
+  ).decode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -82,6 +91,7 @@ engine = create_async_engine(
   pool_pre_ping=True,
   pool_use_lifo=True,
   connect_args={"server_settings": server_settings},
+  json_serializer=_serialize_json,
 )
 
 AsyncSessionLocal = async_sessionmaker(

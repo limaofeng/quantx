@@ -108,6 +108,15 @@ class _Connection:
     self.closed = True
 
 
+def _enable_history_dispatch(runtime: AgentRuntime) -> None:
+  runtime._control_session_authenticated = True
+  runtime._set_market_stream_status("READY")
+  runtime._whole_market_subscription_active = True
+  runtime._whole_market_subscription_ready.set()
+  runtime._whole_market_native_reset.clear()
+  runtime._set_market_data_ready(True)
+
+
 def test_xtdata_worker_prepares_spool_and_closes_its_own_client(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path,
@@ -377,6 +386,22 @@ def test_windowed_staging_obeys_request_byte_budget(tmp_path) -> None:
   assert not list(tmp_path.glob(".series-*.jsonl"))
 
 
+def test_staging_and_published_chunks_share_one_disk_budget() -> None:
+  disk = historical_worker._HistoricalDiskBudget(max_bytes=100)
+  staging = historical_worker._HistoricalStagingBudget(
+    max_bytes=1_000,
+    disk_budget=disk,
+  )
+  staging.reserve(60)
+
+  with pytest.raises(ValueError, match="spool disk byte limit"):
+    disk.reserve(41)
+
+  staging.release(60)
+  disk.reserve(41)
+  assert disk.retained_bytes == 41
+
+
 def test_worker_reuses_one_xtdata_client_for_multiple_requests(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path,
@@ -494,6 +519,7 @@ async def test_runtime_selects_isolated_worker_for_production_broker() -> None:
       "worker_kind": historical_worker.XTDATA_HISTORICAL_WORKER_KIND,
       "max_total_uncompressed_bytes": 100,
       "max_total_compressed_bytes": 50,
+      "max_spool_bytes": runtime_module.MAX_MARKET_DATA_UPLOAD_CACHE_BYTES,
     }
   ]
 
@@ -557,6 +583,7 @@ async def test_runtime_reuses_spawned_worker_across_checkpointed_requests(
     journal=LocalJournal(tmp_path / "journal.sqlite3"),
     market_spool_base_directory=tmp_path,
   )
+  _enable_history_dispatch(runtime)
 
   first = await runtime._run_isolated_market_data_preparation(
     "request-spawn-1",
@@ -608,6 +635,7 @@ async def test_runtime_uploads_completed_spool_while_next_native_unit_runs(
     journal=LocalJournal(tmp_path / "journal-upload-pipeline.sqlite3"),
     market_spool_base_directory=tmp_path,
   )
+  _enable_history_dispatch(runtime)
   runtime._access_token = "agent-token"
   upload_started = asyncio.Event()
   allow_upload = asyncio.Event()
@@ -695,6 +723,7 @@ async def test_worker_timeout_rebuilds_child_without_stopping_agent(
     journal=LocalJournal(tmp_path / "journal-timeout.sqlite3"),
     market_spool_base_directory=tmp_path,
   )
+  _enable_history_dispatch(runtime)
 
   with pytest.raises(
     runtime_module._IsolatedMarketDataWorkerError,
@@ -721,3 +750,58 @@ async def test_worker_timeout_rebuilds_child_without_stopping_agent(
   assert recovered.record_count == 1
   assert runtime._historical_worker_process.is_alive()
   await runtime._shutdown_historical_worker()
+
+
+@pytest.mark.asyncio
+async def test_unterminated_worker_blocks_replacement_and_trips_agent_fatal(
+  tmp_path,
+) -> None:
+  class UnkillableProcess:
+    terminate_calls = 0
+    kill_calls = 0
+
+    @staticmethod
+    def is_alive() -> bool:
+      return True
+
+    def terminate(self) -> None:
+      self.terminate_calls += 1
+
+    def kill(self) -> None:
+      self.kill_calls += 1
+
+    @staticmethod
+    def join(_timeout=None) -> None:
+      return None
+
+  runtime = AgentRuntime(
+    configuration=DeviceConfiguration(
+      api_url="http://127.0.0.1:8080",
+      device_id="spawn-worker-unkillable-test",
+    ),
+    device_secret="unused",
+    mode="data-only",
+    allowed_accounts=set(),
+    broker=SimpleNamespace(is_market_data_ready=lambda: True),
+    journal=LocalJournal(tmp_path / "journal-unkillable.sqlite3"),
+    market_spool_base_directory=tmp_path,
+  )
+  process = UnkillableProcess()
+  connection = _Connection([])
+  runtime._historical_worker_process = process
+  runtime._historical_worker_connection = connection
+  runtime._historical_worker_kind = "xtdata"
+
+  with pytest.raises(
+    runtime_module._FatalMarketDataPreparationError,
+    match="could not be terminated",
+  ):
+    await runtime._shutdown_historical_worker(graceful=False)
+
+  assert connection.closed is True
+  assert process.terminate_calls == 1
+  assert process.kill_calls == 1
+  assert runtime._historical_worker_process is process
+  assert runtime._historical_worker_kind == "xtdata"
+  assert runtime._fatal_market_data_event.is_set()
+  assert runtime._stopped.is_set()

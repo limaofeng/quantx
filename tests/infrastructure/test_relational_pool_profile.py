@@ -1,6 +1,19 @@
+import pytest
 from quantx_infrastructure.database.relational_connection import (
+  _serialize_json,
   database_pool_profile,
 )
+
+
+def test_database_json_serializer_handles_report_payload_types() -> None:
+  assert _serialize_json({"code": "000001.SZ", "levels": {1: 10.5}}) == (
+    '{"code":"000001.SZ","levels":{"1":10.5}}'
+  )
+
+
+def test_database_json_serializer_rejects_unsupported_objects() -> None:
+  with pytest.raises(TypeError):
+    _serialize_json({"invalid": object()})
 
 
 def test_relational_pool_profiles_keep_single_account_runtime_bounded() -> None:

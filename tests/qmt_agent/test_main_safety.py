@@ -32,6 +32,11 @@ class _FakeProcessWatchdog:
       raise AssertionError("watchdog closed more than once")
 
 
+class _FakeHealthServer:
+  async def run(self) -> None:
+    await asyncio.Event().wait()
+
+
 def test_data_only_mode_does_not_require_an_account_whitelist(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -213,6 +218,11 @@ def test_live_run_accepts_explicit_http_endpoint(
   )
   monkeypatch.setattr(main_module, "EmergencyStopStore", lambda _path: object())
   monkeypatch.setattr(main_module, "AgentRuntime", create_runtime)
+  monkeypatch.setattr(
+    main_module,
+    "QmtAgentHealthServer",
+    lambda *_args, **_kwargs: _FakeHealthServer(),
+  )
 
   main_module._run("live")
 
@@ -405,6 +415,11 @@ def test_run_transfers_one_started_watchdog_to_runtime_once(
   )
   monkeypatch.setattr(main_module, "EmergencyStopStore", lambda _path: object())
   monkeypatch.setattr(main_module, "AgentRuntime", lambda **_kwargs: Runtime())
+  monkeypatch.setattr(
+    main_module,
+    "QmtAgentHealthServer",
+    lambda *_args, **_kwargs: _FakeHealthServer(),
+  )
 
   main_module._run("data-only")
 

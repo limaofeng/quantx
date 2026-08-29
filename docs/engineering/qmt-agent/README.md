@@ -98,11 +98,17 @@ Gateway 进程承载，控制面 API 重启不会中断行情提交。Agent 只�
 “沪深A股”和“沪深指数”的去重并集，约 5,800 个代码仍是一次 whole-quote
 调用的一个参数；ETF、债券等其他 SH/SZ 合约不会进入 SDK 解码与下游链路。
 回调入口继续按同一 active universe 做防御性过滤。单标的 `1m/5m/1d` 等 QMT
-K 线仍由主连接控制 `subscribe_quote`，不得从 tick 合成。
+K 线仍由主连接下发 `subscribe_quote` 控制，不得从 tick 合成；其可丢弃的
+`market_event` 返回帧只走 `/ws/agent/market` 的有界低优先文本 lane，不再进入
+交易控制 WebSocket。二进制 whole-market 批次和 ACK 始终先于该 lane，单标的
+发布或 Redis 抖动只能丢弃旧行情，不能阻塞控制心跳、命令确认或 broker 回报。
+低优先文本发送一旦超时，Agent 必须废弃并重连该行情 WebSocket，禁止在取消中的
+send 后复用连接；独立控制 WebSocket 不受影响。
 
-主控制连接的 API receiver 不执行命令或行情数据库轮询；收到的帧先进入按字节和
-条数限制的队列，再按连接顺序持久化。API 使用唯一 writer 发送 ACK、交易命令和
-行情控制，并为 `report_ack` 保留高优先级容量。只有 `agent_report_inbox` 提交成功
+主控制连接的 API receiver 不执行命令或行情数据库轮询；收到的帧先进入相互独立、
+按字节和条数限制的 heartbeat、command-ack 和 durable report lane，慢完整快照
+不能占用心跳或命令确认容量。API 使用唯一 writer 发送 ACK、交易命令和行情控制，
+并为协议 ACK 与撤单/emergency 预留高优先级容量。只有 `agent_report_inbox` 提交成功
 才会确认报告。PostgreSQL 暂时不可用时，API 保留当前报告原地重试、暂停命令轮询，
 并让有界接收队列对 socket 形成自然背压，不主动关闭控制连接；未确认报告继续保留在
 本地 SQLite journal。只有协议/鉴权失败、真实传输失活或发送失败才重连并用原消息 ID
@@ -128,8 +134,10 @@ metadata，不重订。
 指数齐全才开始同步。覆盖不足时失败重连，禁止调用 `get_full_tick` 回补，因为
 点查询与全推回调混合会放大 XTData GIL 阻塞并破坏一致水位。批量历史查询不在
 该常驻 XTData 客户端上执行；主进程使用 Windows `spawn` 维护一个受监督、长驻的
-XTData-only 子进程，并把该进程设置为 Windows `BELOW_NORMAL` 优先级。主进程先按
-完整请求校验 500,000 条记录预算，再由子进程复用自身只读 XTData 客户端，把请求拆为
+XTData-only 子进程，并把该进程设置为 Windows `BELOW_NORMAL` 优先级。历史调度只
+要求同一活动 Agent 具备 `market-data` 能力，对 `live` 与显式 `data-only` 模式
+一视同仁；运行模式不再承担历史负载隔离职责。主进程先按完整请求校验 500,000 条
+记录预算，再由子进程复用自身只读 XTData 客户端，把请求拆为
 单周期、tick 每批最多 10 个标的、分钟线/日线每批最多 20 个标的的小工作单元；tick
 和分钟线按单日窗口、日线按最多 31 日窗口调用原生 XTData。跨窗口结果先写入有界的
 每代码临时 spool；临时文件与最终 gzip 共用请求级字节预算和单记录上限，再按
@@ -137,8 +145,14 @@ XTData-only 子进程，并把该进程设置为 Windows `BELOW_NORMAL` 优先�
 gzip spool。IPC 只
 传请求参数、spool 限额、调度 checkpoint 和规范化 manifest，不传 DataFrame、broker
 或账户对象。子进程不包含 XTTrading、设备凭据、控制/行情 WebSocket 或订阅状态；
-单元超时会终止并重建该 worker，超时和崩溃只失败当前 durable 请求，不终止主
-Agent。每个原子 spool 完成后立即由主进程的有界异步上传器使用同一请求级 HTTP
+单元超时会终止并确认旧 worker 已退出后再重建；若 terminate/kill 后仍存活则
+fail-stop 整个受监督 Agent，禁止清空引用并启动第二个 XTData 原生调用。正常超时和
+崩溃只失败当前 durable 请求，不终止主 Agent。启动时只校验持久 spool 的所有权、
+manifest 边界和文件大小；Windows 杀毒、索引器或残留句柄导致历史目录暂时无法清理
+时，只隔离并暂停历史调度，由后续请求低优先重试清理，绝不阻止 live Agent、控制连接
+或 XTTrading 启动。终态标记必须与 manifest 的 request ID、fingerprint 和允许状态一致，
+损坏标记只隔离历史目录，不得据此删除有效 spool。按 request ID 恢复前才在低优先线程重算 SHA256，避免同步
+重哈希最多 512 MiB 阻塞控制 Agent 启动。每个原子 spool 完成后立即由主进程的有界异步上传器使用同一请求级 HTTP
 连接池传输（最多两批
 并发），不等待整个请求也不占用后续 XTData 调用窗口；所有批次到达后再单独
 冻结 manifest。网络失败保留同一份 spool，由幂等重传和断点续传收敛。后续 DELTA 可补齐
@@ -163,17 +177,25 @@ QMT 回调只做快速捕获；READY 捕获入口以 64 MiB 保守估算字节�
 XTTrading 连接代际变化或显式异常恢复才触发完整快照对账。控制 WebSocket 的
 心跳先于 durable report backlog 刷新；报告刷新全局串行，积压不会让多个 producer
 重复发送同一批 Journal 帧，也不会把后续心跳锁在整批报告之后。
-每个历史工作单元之后都回到实时优先调度点：正在对账、账户快照年龄超过 30 秒、
-控制 heartbeat 或行情 ACK 延迟超过 5 秒、存在委托/撤单或 broker 回报积压、
-XTData/XTTrading 不稳定时停止派发后续单元；连续两个 1 秒健康周期后自动恢复。
+每个历史工作单元之后都回到实时优先调度点：任一模式的控制会话断开、实时行情
+不是 `READY`、native subscription/reset/control 正在恢复、正在对账、账户快照年龄
+超过 30 秒、控制 heartbeat 或行情 ACK 延迟超过 5 秒、存在委托/撤单或 broker 回报
+积压、XTData/XTTrading 不稳定时停止派发后续单元；连续两个 1 秒健康周期后自动恢复。
 `historyWorkload=running/paused/idle` 仅用于诊断，绝不改变 `xttradingStatus`。
 heartbeat 和历史 QoS 只读取由独立 readiness worker 更新的 XTData 缓存状态，禁止在
 事件循环获取原生 XTData 锁；较新的 heartbeat ACK 会收敛此前丢失的旧 ACK，当前
 未完成的行情 ACK 年龄也直接参与暂停判定。
 交易命令进入独立的有界优先队列（撤单和 emergency 优先），由串行 XTTrading worker
-执行；API durable outbox 同样优先选择撤单和 emergency，并用 10 秒投递租约避免一个
+执行；完整账户快照按 account、positions、orders/cancelable-orders、trades 拆成
+可组合原生分区，撤单可在分区边界抢占，分区前后连接代际不一致即拒绝该快照。
+本地 SQLite journal 同样使用唯一优先 worker，callback writer 有界、先持久化再确认
+队列完成；任何 callback gap 或无法 drain 都保持对账门关闭。API durable outbox 同样
+优先选择撤单和 emergency，并用 10 秒投递租约避免一个
 等待本地 ACK 的旧委托阻塞后续命令。控制 WebSocket receiver 只校验和入队，因此
 一个原生交易调用不会阻塞后续命令、heartbeat 或 report ACK 的接收。
+`RECONCILING` 只关闭普通委托门：撤单和 emergency 仍允许从服务端创建、选择、
+发送前重验并在 Agent 执行；emergency 不依赖实时行情 `READY`，确保行情故障与
+对账期间仍可立即激活本地急停。
 每条 whole-quote tick 在线路编码前必须带有可比较的合法来源时间 `time` 或
 `timetag`；缺失、非有限或非法值会精确使当前行情 stream 失效并重新同步，不得
 回退到本机墙钟时间，也不得把单个 stream 的数据错误升级为整个 Agent 进程故障。
