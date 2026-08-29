@@ -540,6 +540,7 @@ async def test_expired_delivery_leases_are_requeued_with_a_bounded_row_lock(
   assert "SET status = 'QUEUED'" in connection.statement
   assert connection.parameters == {
     "stale_before": now - timedelta(minutes=5),
+    "future_after": now + timedelta(minutes=5),
     "requeued_at": now,
     "limit": 2,
   }

@@ -63,7 +63,8 @@ async def _resolve_market_time_range(
 @flow(
   name="每日市场数据同步",
   description="经持久化消息箱请求 QMT Agent，入库后按需计算日级快照",
-  retries=0,
+  retries=2,
+  retry_delay_seconds=60,
 )
 async def daily_market_data_sync_flow(
   sectors: Optional[list[str]] = None,

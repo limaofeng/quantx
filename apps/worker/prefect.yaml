@@ -103,7 +103,7 @@ deployments:
           sectors: ["沪深A股", "沪深ETF", "沪深指数"]
           skip_download: false
           compute_daily_signals: true
-    version: "0.2.0"
+    version: "0.2.1"
   - name: market-data-ingestion-recovery
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:recover_market_data_ingestion_flow
     work_pool: *quantx_process_pool

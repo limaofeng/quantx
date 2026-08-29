@@ -310,6 +310,7 @@ async def test_dispatch_keeps_one_active_market_request_per_device(
 async def test_reconnect_requeues_only_expired_delivery_leases(monkeypatch) -> None:
   stale_delivered = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
   fresh_receiving = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  future_receiving = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
   uploaded = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
   processing = "ffffffff-ffff-4fff-8fff-ffffffffffff"
   now = datetime(2026, 8, 24, 8, 0, 0)
@@ -329,6 +330,12 @@ async def test_reconnect_requeues_only_expired_delivery_leases(monkeypatch) -> N
     )
     await _seed_dispatch_request(
       sessions,
+      request_id=future_receiving,
+      status="RECEIVING",
+      now=now + timedelta(hours=8),
+    )
+    await _seed_dispatch_request(
+      sessions,
       request_id=uploaded,
       status="UPLOADED",
       now=now - timedelta(days=1),
@@ -345,11 +352,18 @@ async def test_reconnect_requeues_only_expired_delivery_leases(monkeypatch) -> N
     async with sessions() as db:
       statuses = {
         request_id: (await db.get(MarketDataRequest, request_id)).status
-        for request_id in (stale_delivered, fresh_receiving, uploaded, processing)
+        for request_id in (
+          stale_delivered,
+          fresh_receiving,
+          future_receiving,
+          uploaded,
+          processing,
+        )
       }
     assert statuses == {
       stale_delivered: "QUEUED",
       fresh_receiving: "RECEIVING",
+      future_receiving: "QUEUED",
       uploaded: "UPLOADED",
       processing: "PROCESSING",
     }
@@ -404,6 +418,81 @@ async def test_duplicate_chunk_with_same_digest_is_idempotent(
     assert request.status == "RECEIVING"
     assert request.processing_error is None
     assert transfer_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_provisional_chunks_are_frozen_only_after_manifest_completion(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  body = b"provisional chunk"
+  now = datetime.now(timezone.utc).replace(tzinfo=None)
+  async with _market_data_database() as (_, sessions):
+    await _seed_dispatch_request(
+      sessions,
+      request_id=REQUEST_ID,
+      status="RECEIVING",
+      now=now,
+    )
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+
+    upload_result = await _upload(body, total_chunks=0)
+
+    async with sessions() as db:
+      receiving = await db.get(MarketDataRequest, REQUEST_ID)
+    assert upload_result == {"accepted": True, "duplicate": False}
+    assert receiving is not None
+    assert receiving.status == "RECEIVING"
+    assert receiving.expected_chunks is None
+    assert receiving.received_chunks == 1
+
+    completion_result = await agent_api.complete_market_data_upload(
+      request_id=REQUEST_ID,
+      request=_Request(b""),
+      x_total_chunks=1,
+    )
+
+    assert completion_result == {"accepted": True, "duplicate": False}
+    async with sessions() as db:
+      completed = await db.get(MarketDataRequest, REQUEST_ID)
+    assert completed is not None
+    assert completed.status == "UPLOADED"
+    assert completed.expected_chunks == 1
+    assert completed.received_chunks == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_manifest_completion_keeps_incomplete_provisional_upload_retryable(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  now = datetime.now(timezone.utc).replace(tzinfo=None)
+  async with _market_data_database() as (_, sessions):
+    await _seed_dispatch_request(
+      sessions,
+      request_id=REQUEST_ID,
+      status="RECEIVING",
+      now=now,
+    )
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+
+    with pytest.raises(HTTPException) as error:
+      await agent_api.complete_market_data_upload(
+        request_id=REQUEST_ID,
+        request=_Request(b""),
+        x_total_chunks=2,
+      )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "行情 manifest 仍有缺失批次"
+    async with sessions() as db:
+      request = await db.get(MarketDataRequest, REQUEST_ID)
+    assert request is not None
+    assert request.status == "RECEIVING"
+    assert request.expected_chunks is None
+    assert request.completed_at is None
 
 
 @pytest.mark.asyncio
@@ -845,6 +934,7 @@ async def test_new_chunk_persists_compressed_bytes_and_freezes_complete_manifest
 ) -> None:
   first = b"first chunk"
   second = b"second chunk"
+  accepted_at = datetime(2026, 8, 29, 5, 0, 0)
   market_data_root = tmp_path / "market-data"
   async with _market_data_database() as (_, sessions):
     await _seed_request(
@@ -853,6 +943,7 @@ async def test_new_chunk_persists_compressed_bytes_and_freezes_complete_manifest
       compressed_bytes=len(first),
     )
     _configure_api(monkeypatch, sessions, market_data_root)
+    monkeypatch.setattr(agent_api, "utcnow", lambda: accepted_at)
 
     result = await _upload(second, chunk_index=1)
 
@@ -865,7 +956,9 @@ async def test_new_chunk_persists_compressed_bytes_and_freezes_complete_manifest
     assert market_request is not None
     assert market_request.status == "UPLOADED"
     assert market_request.received_chunks == 2
+    assert market_request.updated_at == accepted_at
     assert transfer is not None
+    assert transfer.received_at == accepted_at
     assert transfer.compressed_bytes == len(second)
     assert transfer.storage_reference == f"{REQUEST_ID}/00000001.json.gz"
     assert (market_data_root / REQUEST_ID / "00000001.json.gz").read_bytes() == second

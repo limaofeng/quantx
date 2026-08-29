@@ -34,11 +34,12 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
   load_uploaded_request_manifest,
   load_uploaded_request_records,
 )
+from quantx_infrastructure.services.market_data_transfer_ingestion import (
+  save_market_data_period as save_market_data,
+)
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 from sqlalchemy import and_, select
-
-from quantx_worker.prefector.tasks.market_data_tasks import save_market_data
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,6 @@ _FINANCIAL_BATCH_SIZE = 100
 _FINANCIAL_LOOKBACK_DAYS = 1095
 _ARCHIVE_SNAPSHOT_MAX_AGE_SECONDS = 90.0
 _ARCHIVE_REQUEST_TIMEOUT_SECONDS = 30 * 60
-_ARCHIVE_FAILED_RETRY_HOPS = 3
 _MARKET_DATA_INGESTION_RECOVERY_BATCH_SIZE = 20
 
 
@@ -221,12 +221,6 @@ async def _request_and_wait(
           **ingestion_result,
         }
       if status == "FAILED":
-        if retry_hops >= _ARCHIVE_FAILED_RETRY_HOPS:
-          return {
-            "status": "failed",
-            "request_id": request_id,
-            "reason": request.get("processing_error"),
-          }
         recovery = await recover_failed_market_data_request(
           store,
           payload=payload,

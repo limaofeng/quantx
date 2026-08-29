@@ -126,7 +126,16 @@ metadata，不重订。
 初始 `SNAPSHOT` 只允许来自同一条 whole-quote 回调状态，协议同时携带完整
 `universe_codes` 和当前已物化 tick；覆盖率至少 99% 且上证、深证、创业板关键
 指数齐全才开始同步。覆盖不足时失败重连，禁止调用 `get_full_tick` 回补，因为
-点查询与全推回调混合会放大 XTData GIL 阻塞并破坏一致水位。后续 DELTA 可补齐
+点查询与全推回调混合会放大 XTData GIL 阻塞并破坏一致水位。批量历史查询不在
+该常驻 XTData 客户端上执行；主进程使用 Windows `spawn` 维护一个受监督、长驻的
+XTData-only 子进程。它复用自身只读 XTData 客户端，把每个请求拆为单周期、每批
+10–30 个标的的小工作单元，并直接原子写入 Agent 管理的不可变 gzip spool。IPC 只
+传请求参数、spool 限额、调度 checkpoint 和规范化 manifest，不传 DataFrame、broker
+或账户对象。子进程不包含 XTTrading、设备凭据、控制/行情 WebSocket 或订阅状态；
+单元超时会终止并重建该 worker，超时和崩溃只失败当前 durable 请求，不终止主
+Agent。每个原子 spool 完成后立即由主进程的有界异步上传器传输（最多两批
+并发），不等待整个请求也不占用后续 XTData 调用窗口；所有批次到达后再单独
+冻结 manifest。网络失败保留同一份 spool，由幂等重传和断点续传收敛。后续 DELTA 可补齐
 快照时尚未物化、但已在 universe 中的代码。独立 Python 子进程每 5 秒检查 Agent
 心跳；即使原生 SDK 持有 GIL 令进程内超时无法运行，连续 90 秒无心跳也会强制
 终止父进程。不可恢复的 XTData
@@ -142,7 +151,19 @@ QMT 回调只做快速捕获；READY 捕获入口以 64 MiB 保守估算字节�
 状态同步阶段允许按标的合并为最新值，`READY` 阶段同标的更新必须有序且不得静默
 覆盖。任何容量/字节上限、ACK 超时或序号异常都会显式使 stream 失效并从全量
 快照收敛，但不得拖垮交易连接、心跳或成交回报。批量历史行情仍按请求 ID、批次
-序号、压缩和 SHA256 通过 HTTP 上传；交易连接重连后先上报完整账户快照。
+序号、压缩和 SHA256 通过 HTTP 上传。历史修复与 live 行情、XTTrading 和账户对账
+属于正常并发业务；历史请求不得关闭本地下单门、伪造 `XTTRADING_UNAVAILABLE`、
+进入 `RECONCILING` 或暂停真实 XTTrading 恢复时钟。只有控制会话重建、真实
+XTTrading 连接代际变化或显式异常恢复才触发完整快照对账。控制 WebSocket 的
+心跳先于 durable report backlog 刷新；报告刷新全局串行，积压不会让多个 producer
+重复发送同一批 Journal 帧，也不会把后续心跳锁在整批报告之后。
+每个历史工作单元之后都回到实时优先调度点：正在对账、账户快照年龄超过 30 秒、
+控制 heartbeat 或行情 ACK 延迟超过 5 秒、存在委托/撤单或 broker 回报积压、
+XTData/XTTrading 不稳定时停止派发后续单元；连续两个 1 秒健康周期后自动恢复。
+`historyWorkload=running/paused/idle` 仅用于诊断，绝不改变 `xttradingStatus`。
+交易命令进入独立的有界优先队列（撤单和 emergency 优先），由串行 XTTrading worker
+执行；控制 WebSocket receiver 只校验和入队，因此一个原生交易调用不会阻塞后续
+heartbeat/report ACK 的接收。
 每条 whole-quote tick 在线路编码前必须带有可比较的合法来源时间 `time` 或
 `timetag`；缺失、非有限或非法值会精确使当前行情 stream 失效并重新同步，不得
 回退到本机墙钟时间，也不得把单个 stream 的数据错误升级为整个 Agent 进程故障。
@@ -163,6 +184,11 @@ ingress 5 秒即拒绝；Store 在实际 commit 时再按 10 秒 freshness 窗�
 新增字段（例如 `pe`）。服务端对同一清单继续严格校验，未知字段、缺失必填字段
 或试图上传仅存储字段 `source_time_ms` 都 fail-closed；`source_time_ms` 仅由
 Worker 从原始 `time` 写入持久层。
+线路 JSON 禁止 `NaN` 和无穷值。可选字段或同义字段取值非有限时直接省略；K 线一行
+的 `open/high/low/close` 全部不可用且成交量、成交额均为零时，按 XTData 的停牌/无
+成交占位跳过，并由最终零行摘要显式证明无数据。只要仍有部分必填价格、存在成交
+活动或其他必填字段不可用，就按
+`code/period/time/field` 精确拒绝，不能填 0 或伪造价格。
 `tick` 的唯一键为
 `(code, period, time, tick_ordinal)`；非 `tick` 周期不携带该序号，
 仍要求 `(code, period, time)` 唯一。`tick_ordinal` 是根据稳定快照字段生成的

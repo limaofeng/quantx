@@ -87,11 +87,15 @@ async def test_requeue_uses_expired_delivery_lease_to_preserve_active_uploads(
   assert "market_data_request.device_id =" in sql
   assert "market_data_request.status IN" in sql
   assert "market_data_request.updated_at <" in sql
+  assert "market_data_request.updated_at >" in sql
   assert "QUEUED" in parameters.values()
   assert "device-1" in parameters.values()
   assert ["DELIVERED", "RECEIVING"] in parameters.values()
   assert now in parameters.values()
   assert (
     now - timedelta(seconds=agent_api.MARKET_DATA_RECONNECT_STALE_SECONDS)
+  ) in parameters.values()
+  assert (
+    now + timedelta(seconds=agent_api.MARKET_DATA_RECONNECT_STALE_SECONDS)
   ) in parameters.values()
   assert session.committed is True

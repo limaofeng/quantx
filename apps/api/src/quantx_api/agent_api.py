@@ -86,7 +86,7 @@ from quantx_infrastructure.services.market_stream_readiness import (
   authoritative_market_stream_tradable,
 )
 from redis.exceptions import RedisError
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.websockets import WebSocketState
@@ -775,6 +775,10 @@ async def _record_heartbeat(
         "marketStreamAckLatencyMs": float(
           payload.get("market_stream_ack_latency_ms") or 0.0
         ),
+        "historyWorkload": str(payload.get("history_workload") or "idle")[:16],
+        "historyWorkloadReason": str(
+          payload.get("history_workload_reason") or ""
+        )[:64],
         "apiInstanceId": session.api_instance_id,
         "agentSessionId": session.agent_session_id,
         "serverConnectedAt": utc_iso(session.server_connected_at),
@@ -1777,13 +1781,17 @@ async def _requeue_incomplete_market_requests(
 
   reference_time = now or utcnow()
   stale_before = reference_time - timedelta(seconds=MARKET_DATA_RECONNECT_STALE_SECONDS)
+  future_after = reference_time + timedelta(seconds=MARKET_DATA_RECONNECT_STALE_SECONDS)
   async with AsyncSessionLocal() as db:
     await db.execute(
       update(MarketDataRequest)
       .where(
         MarketDataRequest.device_id == device_id,
         MarketDataRequest.status.in_(("DELIVERED", "RECEIVING")),
-        MarketDataRequest.updated_at < stale_before,
+        or_(
+          MarketDataRequest.updated_at < stale_before,
+          MarketDataRequest.updated_at > future_after,
+        ),
       )
       .values(status="QUEUED", updated_at=reference_time)
     )
@@ -3369,9 +3377,14 @@ async def upload_market_data_chunk(
     raise HTTPException(status_code=400, detail="request_id 无效") from exc
   if (
     chunk_index < 0
-    or x_total_chunks <= 0
+    or x_total_chunks < 0
     or x_total_chunks > MAX_MARKET_DATA_CHUNKS
-    or chunk_index >= x_total_chunks
+    or (
+      x_total_chunks > 0 and chunk_index >= x_total_chunks
+    )
+    or (
+      x_total_chunks == 0 and chunk_index >= MAX_MARKET_DATA_CHUNKS
+    )
   ):
     raise HTTPException(status_code=400, detail="行情批次序号无效")
   if x_record_count < 0 or x_record_count > MAX_MARKET_DATA_CHUNK_RECORDS:
@@ -3420,6 +3433,26 @@ async def upload_market_data_chunk(
       raise HTTPException(status_code=409, detail="行情数据请求已经结束")
     if (
       market_request.expected_chunks is not None
+      and x_total_chunks == 0
+    ):
+      existing = (
+        await db.execute(
+          select(MarketDataTransfer).where(
+            MarketDataTransfer.request_id == normalized_request_id,
+            MarketDataTransfer.chunk_index == chunk_index,
+          )
+        )
+      ).scalar_one_or_none()
+      if (
+        existing is not None
+        and existing.checksum_sha256 == digest
+        and int(existing.record_count) == x_record_count
+      ):
+        return {"accepted": True, "duplicate": True}
+      raise HTTPException(status_code=409, detail="行情 manifest 已声明")
+    if (
+      market_request.expected_chunks is not None
+      and x_total_chunks > 0
       and int(market_request.expected_chunks) != x_total_chunks
     ):
       await _fail_mutable_market_data_request(
@@ -3556,7 +3589,8 @@ async def upload_market_data_chunk(
             received_at=utcnow(),
           )
         )
-        market_request.expected_chunks = x_total_chunks
+        if x_total_chunks > 0:
+          market_request.expected_chunks = x_total_chunks
         await db.flush()
         market_request.received_chunks = int(
           await db.scalar(
@@ -3568,9 +3602,11 @@ async def upload_market_data_chunk(
         )
         market_request.status = (
           "UPLOADED"
-          if market_request.received_chunks == x_total_chunks
+          if x_total_chunks > 0
+          and market_request.received_chunks == x_total_chunks
           else "RECEIVING"
         )
+        market_request.updated_at = utcnow()
         commit_started = True
         await db.commit()
         committed = True
@@ -3581,4 +3617,77 @@ async def upload_market_data_chunk(
         # the orphan sweeper removes it only when no durable request references it.
         if destination_written and not committed and not commit_started:
           destination.unlink(missing_ok=True)
+  return {"accepted": True, "duplicate": False}
+
+
+@agent_router.post(
+  "/agent/market-data/{request_id}/complete",
+  status_code=202,
+)
+async def complete_market_data_upload(
+  request_id: str,
+  request: Request,
+  x_total_chunks: int = Header(alias="X-Total-Chunks"),
+):
+  """Freeze a provisionally uploaded manifest after every spool chunk exists."""
+  try:
+    normalized_request_id = str(uuid.UUID(request_id))
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail="request_id 无效") from exc
+  if x_total_chunks <= 0 or x_total_chunks > MAX_MARKET_DATA_CHUNKS:
+    raise HTTPException(status_code=400, detail="行情批次总数无效")
+
+  async with AsyncSessionLocal() as db:
+    try:
+      device = await AgentAuthService(db).authenticate_agent(token=_bearer(request))
+      authenticated_device_id = device.id
+    except AuthError as exc:
+      raise HTTPException(
+        status_code=exc.status_code,
+        detail=exc.message,
+      ) from exc
+
+    market_request = await db.scalar(
+      select(MarketDataRequest)
+      .where(MarketDataRequest.request_id == normalized_request_id)
+      .with_for_update()
+    )
+    if market_request is None or market_request.device_id != authenticated_device_id:
+      raise HTTPException(status_code=404, detail="行情数据请求不存在")
+
+    status = str(market_request.status or "").upper()
+    if status == "FAILED":
+      raise HTTPException(status_code=409, detail="行情数据请求已经结束")
+    if (
+      market_request.expected_chunks is not None
+      and int(market_request.expected_chunks) != x_total_chunks
+    ):
+      await _fail_mutable_market_data_request(
+        db,
+        market_request,
+        reason="market-data manifest total_chunks mismatch",
+      )
+      raise HTTPException(status_code=409, detail="行情 manifest 总数不一致")
+    if status in _MARKET_DATA_FROZEN_MANIFEST_STATUSES:
+      return {"accepted": True, "duplicate": True}
+    if status not in _MARKET_DATA_MUTABLE_UPLOAD_STATUSES:
+      raise HTTPException(status_code=409, detail="行情数据请求已经结束")
+
+    chunk_indices = list(
+      (
+        await db.execute(
+          select(MarketDataTransfer.chunk_index)
+          .where(MarketDataTransfer.request_id == normalized_request_id)
+          .order_by(MarketDataTransfer.chunk_index)
+        )
+      ).scalars()
+    )
+    if chunk_indices != list(range(x_total_chunks)):
+      raise HTTPException(status_code=409, detail="行情 manifest 仍有缺失批次")
+
+    market_request.expected_chunks = x_total_chunks
+    market_request.received_chunks = len(chunk_indices)
+    market_request.status = "UPLOADED"
+    market_request.updated_at = utcnow()
+    await db.commit()
   return {"accepted": True, "duplicate": False}

@@ -987,37 +987,42 @@ async def _persist_validated_records(
       current_day += timedelta(days=1)
   batch: list[dict[str, Any]] = []
   batch_bytes = 0
-  batch_group: tuple[str, str] | None = None
+  batch_period: str | None = None
   accepted = 0
 
   async def flush() -> None:
-    nonlocal batch, batch_bytes, batch_group, accepted
-    if not batch or batch_group is None:
+    nonlocal batch, batch_bytes, batch_period, accepted
+    if not batch or batch_period is None:
       return
-    period, code = batch_group
-    frame = pd.DataFrame(
-      [
-        {key: value for key, value in record.items() if key not in {"code", "period"}}
-        for record in batch
-      ]
-    )
-    result = await save_period(period=period, market_data={code: frame})
+    rows_by_code: dict[str, list[dict[str, Any]]] = {}
+    for record in batch:
+      code = str(record["code"])
+      rows_by_code.setdefault(code, []).append(
+        {
+          key: value
+          for key, value in record.items()
+          if key not in {"code", "period"}
+        }
+      )
+    market_data = {
+      code: pd.DataFrame(rows) for code, rows in rows_by_code.items()
+    }
+    result = await save_period(period=batch_period, market_data=market_data)
     saved_count = int(result.get("saved_count", 0))
     if result.get("status") != "success" or saved_count != len(batch):
       raise RuntimeError(
-        f"{code}/{period} market-data write was not fully accepted: "
+        f"{batch_period} market-data write was not fully accepted: "
         f"expected={len(batch)} accepted={saved_count}"
       )
     accepted += saved_count
     batch = []
     batch_bytes = 0
-    batch_group = None
+    batch_period = None
 
   async for chunk in _iterate_record_chunks(record_chunks):
     for record in chunk:
       validator.consume(record)
       if "record_type" in record:
-        await flush()
         continue
       record_day = datetime.fromtimestamp(
         int(record["time"]) / 1000,
@@ -1025,20 +1030,20 @@ async def _persist_validated_records(
       ).date()
       coverage_key = (str(record["code"]), str(record["period"]), record_day)
       daily_counts[coverage_key] = daily_counts.get(coverage_key, 0) + 1
-      group = (str(record["period"]), str(record["code"]))
+      period = str(record["period"])
       encoded_size = _encoded_record_size(record)
       if encoded_size > MARKET_DATA_WRITE_BATCH_BYTES:
         raise MarketDataValidationError(
           "market-data record exceeds persistence batch byte limit"
         )
       if batch and (
-        batch_group != group
+        batch_period != period
         or len(batch) >= MARKET_DATA_WRITE_BATCH_RECORDS
         or batch_bytes + encoded_size > MARKET_DATA_WRITE_BATCH_BYTES
       ):
         await flush()
-      if batch_group is None:
-        batch_group = group
+      if batch_period is None:
+        batch_period = period
       batch.append(record)
       batch_bytes += encoded_size
   await flush()

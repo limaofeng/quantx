@@ -653,6 +653,7 @@ class DurableRuntimeStore:
     bounded_limit = max(1, min(int(limit), 100))
     requeued_at = _utcnow()
     stale_before = requeued_at - timedelta(minutes=5)
+    future_after = requeued_at + timedelta(minutes=5)
     async with self.engine.begin() as connection:
       values = (
         await connection.execute(
@@ -662,7 +663,10 @@ class DurableRuntimeStore:
               SELECT request_id
               FROM market_data_request
               WHERE status IN ('DELIVERED', 'RECEIVING')
-                AND updated_at < :stale_before
+                AND (
+                  updated_at < :stale_before
+                  OR updated_at > :future_after
+                )
               ORDER BY updated_at ASC, created_at ASC
               LIMIT :limit
               FOR UPDATE SKIP LOCKED
@@ -677,6 +681,7 @@ class DurableRuntimeStore:
           ),
           {
             "stale_before": stale_before,
+            "future_after": future_after,
             "requeued_at": requeued_at,
             "limit": bounded_limit,
           },

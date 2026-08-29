@@ -20,9 +20,11 @@ from zoneinfo import ZoneInfo
 from quantx_contracts import (
   HISTORICAL_BAR_NO_DATA_REASON,
   HISTORICAL_BAR_TRANSFER_PERIODS,
+  HISTORICAL_KLINE_TRANSFER_VARIANT_FIELDS,
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
+  HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS,
   AgentEnvelope,
   AgentMessageType,
   HistoricalBarSummary,
@@ -97,6 +99,36 @@ _RESERVED_HISTORICAL_BAR_COLUMNS = frozenset(
     *HistoricalBarSummary.model_fields,
   }
 )
+_OMITTABLE_HISTORICAL_BAR_FIELDS = frozenset(
+  {
+    *HISTORICAL_KLINE_TRANSFER_VARIANT_FIELDS,
+    *HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS,
+  }
+)
+_HISTORICAL_KLINE_PRICE_FIELDS = ("open", "high", "low", "close")
+_HISTORICAL_KLINE_ACTIVITY_FIELDS = ("volume", "amount")
+_UNAVAILABLE_HISTORICAL_BAR_VALUE = object()
+
+
+class HistoricalMarketDataFieldError(ValueError):
+  """A safe, structured vendor-field rejection suitable for remote reporting."""
+
+  def __init__(
+    self,
+    *,
+    code: str,
+    period: str,
+    source_time_ms: int,
+    field: str,
+  ) -> None:
+    self.code = code
+    self.period = period
+    self.source_time_ms = source_time_ms
+    self.field = field
+    super().__init__(
+      "XTData returned a non-finite historical bar field: "
+      f"{code}/{period}/{source_time_ms}/{field}"
+    )
 
 
 @dataclass(frozen=True)
@@ -270,8 +302,63 @@ def _project_historical_bar_record(
   }
   for field in historical_bar_transfer_fields(period):
     if field not in agent_managed and field in row:
-      record[field] = row[field]
+      value = _historical_bar_wire_value(row[field])
+      if value is _UNAVAILABLE_HISTORICAL_BAR_VALUE:
+        if field in _OMITTABLE_HISTORICAL_BAR_FIELDS:
+          continue
+        raise HistoricalMarketDataFieldError(
+          code=code,
+          period=period,
+          source_time_ms=source_time_ms,
+          field=field,
+        )
+      record[field] = value
   return record
+
+
+def _historical_bar_wire_value(value: Any) -> Any:
+  """Normalize one vendor value without emitting non-standard JSON numbers."""
+
+  normalized = _json_safe(value)
+  if normalized is None:
+    return _UNAVAILABLE_HISTORICAL_BAR_VALUE
+  if isinstance(normalized, Real) and not isinstance(normalized, bool):
+    try:
+      if not math.isfinite(float(normalized)):
+        return _UNAVAILABLE_HISTORICAL_BAR_VALUE
+    except (TypeError, ValueError, OverflowError):
+      return _UNAVAILABLE_HISTORICAL_BAR_VALUE
+    if isinstance(normalized, Integral):
+      return int(normalized)
+    return float(normalized)
+  if isinstance(normalized, list):
+    values: list[Any] = []
+    for item in normalized:
+      safe_item = _historical_bar_wire_value(item)
+      if safe_item is _UNAVAILABLE_HISTORICAL_BAR_VALUE:
+        return _UNAVAILABLE_HISTORICAL_BAR_VALUE
+      values.append(safe_item)
+    return values
+  return normalized
+
+
+def _is_empty_historical_kline_row(row: dict[str, Any], *, period: str) -> bool:
+  """Identify XTData's suspended/no-trade placeholder without inventing prices."""
+
+  if period == "tick" or not all(
+    field in row
+    and _historical_bar_wire_value(row[field])
+    is _UNAVAILABLE_HISTORICAL_BAR_VALUE
+    for field in _HISTORICAL_KLINE_PRICE_FIELDS
+  ):
+    return False
+  return all(
+    field in row
+    and isinstance((value := _historical_bar_wire_value(row[field])), Real)
+    and not isinstance(value, bool)
+    and float(value) == 0.0
+    for field in _HISTORICAL_KLINE_ACTIVITY_FIELDS
+  )
 
 
 def _object_payload(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -1188,6 +1275,11 @@ class QmtDataBroker(SimulatorBroker):
       ready, _ = _observe_market_data_connection(self)
       return ready
 
+  def historical_market_data_worker_kind(self) -> str:
+    """Select the XTData-only child process for historical preparation."""
+
+    return "xtdata"
+
   def ensure_market_data_ready(self) -> bool:
     with self._xtdata_access_lock:
       ready = _ensure_market_data_manager_connected(self.data_manager)
@@ -1403,6 +1495,11 @@ class LiveBroker:
     with self._xtdata_access_lock:
       ready, _ = _observe_market_data_connection(self)
       return ready
+
+  def historical_market_data_worker_kind(self) -> str:
+    """Keep historical XTData work outside the live trading process."""
+
+    return "xtdata"
 
   def ensure_market_data_ready(self) -> bool:
     with self._xtdata_access_lock:
@@ -1795,6 +1892,8 @@ def _iter_market_data_records_unbounded(
       records: list[dict[str, Any]] = []
       for values_tuple in normalized.itertuples(index=False, name=None):
         row = dict(zip(columns, values_tuple, strict=True))
+        if _is_empty_historical_kline_row(row, period=period):
+          continue
         record = _project_historical_bar_record(
           row,
           code=normalized_code,

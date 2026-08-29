@@ -582,6 +582,32 @@ async def test_pass_two_never_exceeds_2000_rows_per_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pass_two_batches_multiple_codes_in_one_period_write() -> None:
+  first = _tick_row(code="000001.SZ")
+  second = _tick_row(code="600000.SH")
+  calls: list[tuple[str, set[str], int]] = []
+
+  async def save_period(*, period, market_data):
+    count = sum(len(frame) for frame in market_data.values())
+    calls.append((period, set(market_data), count))
+    return {"status": "success", "saved_count": count}
+
+  result = await ingestion.persist_bar_records(
+    [
+      first,
+      _summary([first], code="000001.SZ"),
+      second,
+      _summary([second], code="600000.SH"),
+    ],
+    payload=_payload(stock_list=["000001.SZ", "600000.SH"]),
+    save_period=save_period,
+  )
+
+  assert calls == [("tick", {"000001.SZ", "600000.SH"}, 2)]
+  assert result["records_saved"] == 2
+
+
+@pytest.mark.asyncio
 async def test_pass_two_honors_byte_limit_before_appending_next_record(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

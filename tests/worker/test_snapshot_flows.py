@@ -34,6 +34,11 @@ class FakeTradingDates:
     return result
 
 
+def test_daily_market_sync_retries_durable_batches() -> None:
+  assert market_flow.daily_market_data_sync_flow.retries == 2
+  assert market_flow.daily_market_data_sync_flow.retry_delay_seconds == 60
+
+
 @pytest.mark.asyncio
 async def test_expected_snapshot_date_changes_at_1535():
   helper = FakeTradingDates()

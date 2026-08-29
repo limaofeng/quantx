@@ -365,6 +365,33 @@ async def test_interrupted_market_ingestion_is_reclaimed(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bar_ingestion_uses_direct_durable_persistence(monkeypatch) -> None:
+  store = SimpleNamespace()
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "load_uploaded_request_manifest",
+    AsyncMock(
+      return_value=(
+        {},
+        {"operation": "bars", "destination": "influxdb"},
+        [],
+      )
+    ),
+  )
+  ingest = AsyncMock(return_value={"records_received": 2, "records_saved": 2})
+  monkeypatch.setattr(durable_agent_flows, "ingest_uploaded_bar_request", ingest)
+
+  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+  assert result == {"records_received": 2, "records_saved": 2}
+  ingest.assert_awaited_once_with(
+    store,
+    "request-1",
+    save_period=durable_agent_flows.save_market_data,
+  )
+
+
+@pytest.mark.asyncio
 async def test_market_data_wait_timeout_keeps_durable_status(monkeypatch) -> None:
   class FakeStore:
     async def create_market_data_request(self, payload):
@@ -391,6 +418,70 @@ async def test_market_data_wait_timeout_keeps_durable_status(monkeypatch) -> Non
     "request_id": "request-timeout",
     "durable_status": "QUEUED",
     "reason": "wait attempt expired; durable request remains open",
+  }
+
+
+@pytest.mark.asyncio
+async def test_market_data_wait_crosses_preexisting_failed_retry_chain(
+  monkeypatch,
+) -> None:
+  class FakeStore:
+    async def create_market_data_request(self, payload):
+      assert payload == {"operation": "bars"}
+      return "request-0"
+
+    async def market_data_request(self, request_id):
+      hop = int(request_id.rsplit("-", maxsplit=1)[1])
+      if hop < 4:
+        return {"status": "FAILED", "processing_error": f"old failure {hop}"}
+      return {
+        "status": "COMPLETED",
+        "ingestion_result": {"records_received": 1, "records_saved": 1},
+      }
+
+    async def close(self):
+      return None
+
+  recovery_hops: list[int] = []
+
+  async def recover(
+    _store,
+    *,
+    payload,
+    request_id,
+    reopen_attempted,
+    retry_hops,
+    device_id,
+  ):
+    assert payload == {"operation": "bars"}
+    assert request_id == f"request-{retry_hops}"
+    assert device_id is None
+    recovery_hops.append(retry_hops)
+    next_hop = retry_hops + 1
+    return f"request-{next_hop}", next_hop, True
+
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "DurableRuntimeStore",
+    FakeStore,
+  )
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "recover_failed_market_data_request",
+    recover,
+  )
+
+  result = await durable_agent_flows._request_and_wait(
+    {"operation": "bars"},
+    timeout_seconds=1,
+  )
+
+  assert recovery_hops == [0, 1, 2, 3]
+  assert result == {
+    "status": "completed",
+    "request_id": "request-4",
+    "records_received": 1,
+    "records_saved": 1,
   }
 
 

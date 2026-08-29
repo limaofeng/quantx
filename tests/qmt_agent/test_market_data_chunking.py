@@ -2,6 +2,7 @@ import asyncio
 import gzip
 import hashlib
 import json
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -88,13 +89,50 @@ def _spool_bytes(prepared) -> list[bytes]:
   return [chunk.path.read_bytes() for chunk in prepared.chunks]
 
 
-def test_websocket_ping_timeout_exceeds_native_preparation_watchdog() -> None:
+def test_websocket_ping_timeout_is_bounded_after_process_isolation() -> None:
   assert runtime_module.WEBSOCKET_PING_INTERVAL_SECONDS == 20
-  assert runtime_module.WEBSOCKET_PING_TIMEOUT_SECONDS == 960
+  assert runtime_module.WEBSOCKET_PING_TIMEOUT_SECONDS == 60
   assert (
     runtime_module.WEBSOCKET_PING_TIMEOUT_SECONDS
-    > runtime_module.MARKET_DATA_PREPARATION_TIMEOUT_SECONDS
+    < runtime_module.MARKET_DATA_PREPARATION_TIMEOUT_SECONDS
   )
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_checkpoint_is_not_blocked_by_report_backlog() -> None:
+  runtime = object.__new__(AgentRuntime)
+  runtime._heartbeat_checkpoint_lock = asyncio.Lock()
+  heartbeats: list[str] = []
+  first_flush_started = asyncio.Event()
+  release_first_flush = asyncio.Event()
+  flush_calls = 0
+
+  async def send_heartbeat(_socket, *, status: str) -> None:
+    heartbeats.append(status)
+
+  async def flush_reports(_socket) -> None:
+    nonlocal flush_calls
+    flush_calls += 1
+    if flush_calls == 1:
+      first_flush_started.set()
+      await release_first_flush.wait()
+
+  runtime._send_heartbeat = send_heartbeat
+  runtime._flush_reports = flush_reports
+  first = asyncio.create_task(
+    runtime._heartbeat_checkpoint(SimpleNamespace(), status="RECONCILING")
+  )
+  await asyncio.wait_for(first_flush_started.wait(), timeout=0.2)
+  second = asyncio.create_task(
+    runtime._heartbeat_checkpoint(SimpleNamespace(), status="READY")
+  )
+
+  while len(heartbeats) < 2:
+    await asyncio.sleep(0)
+  assert heartbeats == ["RECONCILING", "READY"]
+
+  release_first_flush.set()
+  await asyncio.gather(first, second)
 
 
 @pytest.mark.asyncio
@@ -137,6 +175,53 @@ async def test_market_data_failure_report_does_not_expose_native_error_text(
   assert captured["client"]["verify"] is True
 
 
+@pytest.mark.asyncio
+async def test_market_data_failure_report_includes_safe_historical_field_path(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  captured: dict[str, object] = {}
+
+  class Response:
+    def raise_for_status(self) -> None:
+      return None
+
+  class Client:
+    def __init__(self, **_kwargs) -> None:
+      return None
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return False
+
+    async def post(self, _url, *, headers, json):
+      captured.update(headers=headers, json=json)
+      return Response()
+
+  monkeypatch.setattr(runtime_module.httpx, "AsyncClient", Client)
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.configuration = SimpleNamespace(api_url="https://api.example.test")
+  runtime._access_token = "access-token"
+
+  await runtime._report_market_data_failure(
+    "request-1",
+    broker_module.HistoricalMarketDataFieldError(
+      code="000001.SH",
+      period="1m",
+      source_time_ms=1787552400000,
+      field="open",
+    ),
+  )
+
+  assert captured["json"] == {
+    "reason": (
+      "ValueError: XTData returned a non-finite historical bar field: "
+      "000001.SH/1m/1787552400000/open"
+    )
+  }
+
+
 async def _read_http_content(content) -> bytes:
   if isinstance(content, bytes):
     return content
@@ -175,6 +260,11 @@ def test_chunk_encoder_streams_and_respects_limits() -> None:
   assert all(len(raw) <= 170 for raw, _ in chunks)
   restored = [record for raw, _ in chunks for record in json.loads(raw.decode("utf-8"))]
   assert restored == records
+
+
+def test_chunk_encoder_rejects_non_finite_json_numbers() -> None:
+  with pytest.raises(ValueError, match="non-finite JSON number"):
+    list(_iter_encoded_market_data_chunks([{"close": float("nan")}]))
 
 
 def test_chunk_encoder_fails_at_record_and_byte_boundaries() -> None:
@@ -935,8 +1025,22 @@ async def test_market_worker_heartbeats_before_dequeuing_next_request(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("request_error", "failure_reason"),
+  [
+    (ValueError("instrument count limit"), "instrument count limit"),
+    (
+      runtime_module._IsolatedMarketDataWorkerError(
+        "MARKET_DATA_PREPARATION_TIMEOUT"
+      ),
+      "MARKET_DATA_PREPARATION_TIMEOUT",
+    ),
+  ],
+)
 async def test_invalid_market_request_is_failed_without_closing_session(
   monkeypatch,
+  request_error: Exception,
+  failure_reason: str,
 ) -> None:
   handled: list[str] = []
   failures: list[tuple[str, str]] = []
@@ -946,7 +1050,7 @@ async def test_invalid_market_request_is_failed_without_closing_session(
     request_id = str(envelope.payload["request_id"])
     handled.append(request_id)
     if request_id == "invalid-request":
-      raise ValueError("instrument count limit")
+      raise request_error
     second_handled.set()
 
   async def report_failure(request_id: str, error: Exception) -> None:
@@ -977,7 +1081,7 @@ async def test_invalid_market_request_is_failed_without_closing_session(
   await asyncio.wait_for(runtime._market_requests.join(), timeout=1)
 
   assert handled == ["invalid-request", "valid-request"]
-  assert failures == [("invalid-request", "instrument count limit")]
+  assert failures == [("invalid-request", failure_reason)]
   worker.cancel()
   await asyncio.gather(worker, return_exceptions=True)
   runtime.stop()
@@ -1517,6 +1621,68 @@ async def test_history_and_subscription_share_one_xtdata_gate() -> None:
   await asyncio.wait_for(history, timeout=1)
   assert await asyncio.to_thread(subscribe_started.wait, 1)
   assert await asyncio.wait_for(subscription, timeout=1) is True
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_isolated_history_does_not_hold_realtime_xtdata_gate() -> None:
+  history_started = asyncio.Event()
+  history_release = asyncio.Event()
+  subscribe_started = threading.Event()
+
+  class Broker:
+    @staticmethod
+    def historical_market_data_worker_kind() -> str:
+      return "xtdata"
+
+    @staticmethod
+    def subscribe_market(_payload, _callback):
+      subscribe_started.set()
+      return True
+
+  runtime = object.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._ensure_market_upload_state()
+
+  async def isolated(*_args, **_kwargs):
+    history_started.set()
+    await history_release.wait()
+    return _prepare_market_data_spool_sync(
+      SimpleNamespace(iter_market_data=lambda _payload: _records(1)),
+      {},
+      Path(
+        tempfile.mkdtemp(
+          prefix=runtime_module.MARKET_DATA_SPOOL_REQUEST_PREFIX,
+          dir=runtime._market_spool_root,
+        )
+      ),
+      max_total_uncompressed_bytes=1_000_000,
+      max_total_compressed_bytes=1_000_000,
+    )
+
+  runtime._run_isolated_market_data_preparation = isolated
+  history = asyncio.create_task(
+    runtime._prepared_market_data_chunks(
+      "request-isolated-history",
+      {"request_id": "request-isolated-history", "operation": "bars"},
+    )
+  )
+  await asyncio.wait_for(history_started.wait(), timeout=0.2)
+
+  subscription = asyncio.create_task(
+    runtime._run_xtdata_control(
+      "subscribe-market",
+      runtime.broker.subscribe_market,
+      {},
+      lambda _payload: None,
+    )
+  )
+  assert await asyncio.to_thread(subscribe_started.wait, 0.2)
+  assert await asyncio.wait_for(subscription, timeout=0.2) is True
+  assert history.done() is False
+
+  history_release.set()
+  await asyncio.wait_for(history, timeout=1)
   runtime.stop()
 
 
@@ -2502,6 +2668,174 @@ def test_non_tick_records_still_reject_duplicate_normalized_time(
         "periods": [period],
         "start_time": "20250102",
         "end_time": "20250102",
+        "download": False,
+      },
+    )
+
+
+def test_kline_projection_omits_non_finite_variant_aliases() -> None:
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "601318.SH": pd.DataFrame(
+          [
+            {
+              "time": 20250102,
+              "open": 10.0,
+              "high": 10.5,
+              "low": 9.8,
+              "close": 10.2,
+              "preClose": 9.9,
+              "volume": 100.0,
+              "amount": 1_020.0,
+              "suspendFlag": 0,
+              "settelementPrice": float("nan"),
+              "settlementPrice": 0.0,
+              "openInterest": 0.0,
+              "openInt": float("nan"),
+            }
+          ]
+        )
+      }
+
+  rows = _bar_rows(
+    _market_data_records(
+      Manager(),
+      {
+        "operation": "bars",
+        "stock_list": ["601318.SH"],
+        "periods": ["1d"],
+        "start_time": "20250102",
+        "end_time": "20250102",
+        "download": False,
+      },
+    )
+  )
+
+  assert len(rows) == 1
+  assert rows[0]["settlementPrice"] == 0.0
+  assert rows[0]["openInterest"] == 0.0
+  assert "settelementPrice" not in rows[0]
+  assert "openInt" not in rows[0]
+  json.dumps(rows, allow_nan=False)
+  ingestion._validate_bar_schema(rows[0], period="1d")
+
+
+def test_kline_projection_rejects_non_finite_required_fields() -> None:
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "601318.SH": pd.DataFrame(
+          [
+            {
+              "time": 20250102,
+              "close": float("nan"),
+            }
+          ]
+        )
+      }
+
+  with pytest.raises(
+    ValueError,
+    match=r"601318\.SH/1d/1735747200000/close",
+  ):
+    _market_data_records(
+      Manager(),
+      {
+        "operation": "bars",
+        "stock_list": ["601318.SH"],
+        "periods": ["1d"],
+        "start_time": "20250102",
+        "end_time": "20250102",
+        "download": False,
+      },
+    )
+
+
+def test_kline_projection_omits_suspended_no_trade_placeholder() -> None:
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "000004.SZ": pd.DataFrame(
+          [
+            {
+              "time": _normalize_market_timestamp(datetime(2026, 8, 25, 9, 30)),
+              "open": float("nan"),
+              "high": float("nan"),
+              "low": float("nan"),
+              "close": float("nan"),
+              "preClose": 15.43,
+              "volume": 0.0,
+              "amount": 0.0,
+              "suspendFlag": 1,
+              "settelementPrice": float("nan"),
+              "openInterest": float("nan"),
+            }
+          ]
+        )
+      }
+
+  records = _market_data_records(
+    Manager(),
+    {
+      "operation": "bars",
+      "stock_list": ["000004.SZ"],
+      "periods": ["1m"],
+      "start_time": "20260825",
+      "end_time": "20260825",
+      "download": False,
+    },
+  )
+
+  assert _bar_rows(records) == []
+  assert _bar_summaries(records) == [
+    {
+      "record_type": "bar_summary",
+      "schema_version": 1,
+      "code": "000004.SZ",
+      "period": "1m",
+      "row_count": 0,
+      "min_time": None,
+      "max_time": None,
+      "key_sha256": hashlib.sha256(b"").hexdigest(),
+      "no_data_reason": HISTORICAL_BAR_NO_DATA_REASON,
+    }
+  ]
+
+
+def test_kline_projection_does_not_hide_non_finite_prices_with_activity() -> None:
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "000004.SZ": pd.DataFrame(
+          [
+            {
+              "time": _normalize_market_timestamp(datetime(2026, 8, 25, 9, 30)),
+              "open": float("nan"),
+              "high": float("nan"),
+              "low": float("nan"),
+              "close": float("nan"),
+              "preClose": 15.43,
+              "volume": 100.0,
+              "amount": 1_543.0,
+              "suspendFlag": 0,
+            }
+          ]
+        )
+      }
+
+  with pytest.raises(
+    ValueError,
+    match=r"000004\.SZ/1m/1787621400000/open",
+  ):
+    _market_data_records(
+      Manager(),
+      {
+        "operation": "bars",
+        "stock_list": ["000004.SZ"],
+        "periods": ["1m"],
+        "start_time": "20260825",
+        "end_time": "20260825",
         "download": False,
       },
     )

@@ -7,6 +7,8 @@ import gzip
 import hashlib
 import json
 import logging
+import multiprocessing
+import os
 import random
 import shutil
 import stat
@@ -19,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, BinaryIO, Iterable, Iterator
+from typing import Any, AsyncIterator, BinaryIO, Callable, Iterable, Iterator
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -44,12 +46,17 @@ from quantx_contracts import (
 
 from .broker import (
   MAX_MARKET_DATA_RECORDS,
+  HistoricalMarketDataFieldError,
   enrich_report_payload,
 )
 from .credentials import DeviceConfiguration, state_directory
 from .emergency import EmergencyStopStore
 from .endpoints import configured_tls_context, httpx_verify, websocket_url
 from .health import AGENT_VERSION, AgentHealthState
+from .historical_worker import (
+  XTDATA_HISTORICAL_WORKER_KIND,
+  run_historical_market_data_worker,
+)
 from .journal import LocalJournal
 from .whole_market_capture import (
   MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
@@ -67,10 +74,17 @@ MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES = 256 * 1024 * 1024
 MAX_MARKET_DATA_UPLOAD_CACHE_BYTES = 512 * 1024 * 1024
 MAX_CACHED_MARKET_DATA_REQUESTS = 4
 MAX_QUEUED_MARKET_DATA_REQUESTS = 4
+MAX_QUEUED_TRADE_COMMANDS = 256
+MAX_CONCURRENT_HISTORY_UPLOADS = 2
 MAX_MARKET_DATA_TOMBSTONES = 1024
 MARKET_DATA_UPLOAD_CACHE_TTL_SECONDS = 60 * 60
 MARKET_DATA_UPLOAD_CACHE_SWEEP_SECONDS = 60
 MARKET_DATA_PREPARATION_TIMEOUT_SECONDS = 15 * 60
+HISTORICAL_WORK_UNIT_TIMEOUT_SECONDS = 30
+HISTORY_QOS_CHECK_SECONDS = 1.0
+HISTORY_QOS_HEALTHY_CYCLES = 2
+HISTORY_QOS_MAX_SNAPSHOT_AGE_SECONDS = 30.0
+HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS = 5.0
 XTDATA_CONTROL_TIMEOUT_SECONDS = 60
 XTDATA_READINESS_RETRY_SECONDS = 5
 XTTRADING_READINESS_RETRY_SECONDS = 5
@@ -81,8 +95,9 @@ XTTRADING_SNAPSHOT_TIMEOUT_SECONDS = 30
 # bounded recovery window expires.
 XTTRADING_RECOVERY_MAX_SECONDS = 90
 WEBSOCKET_PING_INTERVAL_SECONDS = 20
-WEBSOCKET_PING_TIMEOUT_SECONDS = 16 * 60
+WEBSOCKET_PING_TIMEOUT_SECONDS = 60
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 30
+CONTROL_HEARTBEAT_INTERVAL_SECONDS = 15.0
 # The initial snapshot is roughly 3 MiB and its Redis publish may cross a
 # forwarded development Redis endpoint.  Keep this above the API's dedicated
 # 60-second snapshot commit budget; normal deltas are still bounded by the
@@ -127,6 +142,7 @@ MARKET_DATA_SPOOL_REQUEST_PREFIX = "request-"
 MARKET_DATA_SPOOL_OWNER_MARKER = ".owner.json"
 LEGACY_MARKET_DATA_SPOOL_PREFIX = "quantx-market-data-spool-"
 SHANGHAI_ZONE = ZoneInfo("Asia/Shanghai")
+_MARKET_DATA_CHUNK_BOUNDARY = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +270,10 @@ class _FatalMarketDataUploadConflict(_FatalMarketDataPreparationError):
   """A server-side chunk identity conflict forbids further mixed uploads."""
 
 
+class _IsolatedMarketDataWorkerError(ValueError):
+  """One isolated historical request failed without poisoning the Agent."""
+
+
 _RETRYABLE_MARKET_DATA_HTTP_STATUSES = frozenset(
   {
     401,
@@ -284,6 +304,16 @@ def _is_deterministic_market_data_request_error(error: Exception) -> bool:
     error,
     (AttributeError, ValueError, TypeError, OverflowError, UnicodeError),
   )
+
+
+def _market_data_failure_reason(error: Exception) -> str:
+  """Return a bounded reason without exposing arbitrary native exception text."""
+
+  if isinstance(error, HistoricalMarketDataFieldError):
+    return f"ValueError: {error}"
+  if isinstance(error, _IsolatedMarketDataWorkerError):
+    return str(error)
+  return error.__class__.__name__
 
 
 def _market_data_spool_owner_key(device_id: str) -> str:
@@ -413,7 +443,7 @@ class _LimitedHashingWriter:
 
 
 def _iter_encoded_market_data_chunks(
-  records: Iterable[dict[str, Any]],
+  records: Iterable[Any],
   *,
   max_records: int = MAX_MARKET_DATA_CHUNK_RECORDS,
   max_uncompressed_bytes: int = MAX_MARKET_DATA_CHUNK_UNCOMPRESSED_BYTES,
@@ -437,16 +467,30 @@ def _iter_encoded_market_data_chunks(
   total_records = 0
 
   for record in records:
+    if record is _MARKET_DATA_CHUNK_BOUNDARY:
+      if current_records:
+        current.extend(b"]")
+        total_size += len(current)
+        if total_size > max_total_uncompressed_bytes:
+          raise ValueError("market data request exceeds uncompressed byte limit")
+        yield current, current_records
+        current = bytearray(b"[")
+        current_records = 0
+      continue
     total_records += 1
     if total_records > max_total_records:
       raise ValueError("market data request exceeds record count limit")
-    encoded = json.dumps(
-      record,
-      ensure_ascii=False,
-      separators=(",", ":"),
-      sort_keys=True,
-      default=str,
-    ).encode("utf-8")
+    try:
+      encoded = json.dumps(
+        record,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
+        allow_nan=False,
+      ).encode("utf-8")
+    except ValueError as exc:
+      raise ValueError("market data record contains a non-finite JSON number") from exc
     if len(encoded) > max_record_uncompressed_bytes:
       raise ValueError("single market data record exceeds record byte limit")
     if len(encoded) + 2 > max_uncompressed_bytes:
@@ -493,6 +537,24 @@ def _prepare_market_data_spool_sync(
     if callable(iterator_factory)
     else iter(broker.market_data(payload))
   )
+  return _prepare_market_data_records_spool_sync(
+    records,
+    spool_directory,
+    max_total_uncompressed_bytes=max_total_uncompressed_bytes,
+    max_total_compressed_bytes=max_total_compressed_bytes,
+  )
+
+
+def _prepare_market_data_records_spool_sync(
+  records: Iterable[Any],
+  spool_directory: Path,
+  *,
+  max_total_uncompressed_bytes: int,
+  max_total_compressed_bytes: int,
+  on_chunk: Callable[[int, _MarketDataSpoolChunk], None] | None = None,
+) -> _PreparedMarketData:
+  """Stream normalized records into atomically published gzip spool files."""
+
   chunks: list[_MarketDataSpoolChunk] = []
   uncompressed_bytes = 0
   compressed_bytes = 0
@@ -505,10 +567,11 @@ def _prepare_market_data_spool_sync(
       )
     ):
       path = spool_directory / f"chunk-{chunk_index:06d}.json.gz"
+      temporary = path.with_suffix(f"{path.suffix}.tmp")
       remaining = max_total_compressed_bytes - compressed_bytes
       if remaining <= 0:
         raise ValueError("market data request exceeds compressed byte limit")
-      with path.open("xb") as file_handle:
+      with temporary.open("xb") as file_handle:
         writer = _LimitedHashingWriter(file_handle, max_bytes=remaining)
         with gzip.GzipFile(
           filename="",
@@ -517,14 +580,18 @@ def _prepare_market_data_spool_sync(
           mtime=0,
         ) as compressor:
           compressor.write(raw)
-      chunks.append(
-        _MarketDataSpoolChunk(
-          path=path,
-          record_count=record_count,
-          digest=writer.digest.hexdigest(),
-          compressed_bytes=writer.bytes_written,
-        )
+        file_handle.flush()
+        os.fsync(file_handle.fileno())
+      temporary.replace(path)
+      chunk = _MarketDataSpoolChunk(
+        path=path,
+        record_count=record_count,
+        digest=writer.digest.hexdigest(),
+        compressed_bytes=writer.bytes_written,
       )
+      chunks.append(chunk)
+      if on_chunk is not None:
+        on_chunk(chunk_index, chunk)
       uncompressed_bytes += len(raw)
       compressed_bytes += writer.bytes_written
       record_count_total += record_count
@@ -538,6 +605,173 @@ def _prepare_market_data_spool_sync(
   except BaseException:
     shutil.rmtree(spool_directory, ignore_errors=True)
     raise
+
+
+def _terminate_market_data_process(process: Any) -> None:
+  """Bounded cleanup for one spawned historical-data process."""
+
+  if process.is_alive():
+    process.terminate()
+  process.join(5.0)
+  if process.is_alive():
+    kill = getattr(process, "kill", None)
+    if callable(kill):
+      kill()
+    process.join(5.0)
+
+
+def _decode_isolated_market_data_result(
+  message: Any,
+  *,
+  request_id: str,
+  spool_directory: Path,
+) -> _PreparedMarketData:
+  """Validate the small trusted-child result before using spool paths."""
+
+  if (
+    not isinstance(message, dict)
+    or str(message.get("request_id") or "") != request_id
+  ):
+    raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_PROTOCOL_ERROR")
+  status = message.get("type")
+  if status == "error":
+    payload = message.get("error")
+    if not isinstance(payload, dict):
+      raise _IsolatedMarketDataWorkerError(
+        "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+      )
+    kind = payload.get("kind")
+    if kind == "historical_field":
+      raise HistoricalMarketDataFieldError(
+        code=str(payload.get("code") or ""),
+        period=str(payload.get("period") or ""),
+        source_time_ms=int(payload.get("source_time_ms") or 0),
+        field=str(payload.get("field") or ""),
+      )
+    if kind == "deterministic":
+      message_text = str(payload.get("message") or "")[:1024]
+      error_type = str(payload.get("error_type") or "")
+      error_class = {
+        "AttributeError": AttributeError,
+        "OverflowError": OverflowError,
+        "TypeError": TypeError,
+        "ValueError": ValueError,
+      }.get(error_type, ValueError)
+      raise error_class(message_text)
+    reason = str(payload.get("reason") or "")
+    if reason not in {
+      "MARKET_DATA_PREPARATION_FAILED",
+      "XTDATA_UNAVAILABLE",
+    }:
+      reason = "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+    raise _IsolatedMarketDataWorkerError(reason)
+  manifest = message.get("manifest")
+  if status != "ok" or not isinstance(manifest, dict):
+    raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_PROTOCOL_ERROR")
+
+  resolved_spool = spool_directory.resolve()
+  manifest_spool = Path(str(manifest.get("spool_directory") or ""))
+  if manifest_spool.resolve() != resolved_spool:
+    raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_PROTOCOL_ERROR")
+  if spool_directory.is_symlink() or not spool_directory.is_dir():
+    raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_PROTOCOL_ERROR")
+  raw_chunks = manifest.get("chunks")
+  if not isinstance(raw_chunks, list) or not raw_chunks:
+    raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_PROTOCOL_ERROR")
+  chunks: list[_MarketDataSpoolChunk] = []
+  try:
+    for raw_chunk in raw_chunks:
+      if not isinstance(raw_chunk, dict):
+        raise ValueError
+      chunks.append(
+        _MarketDataSpoolChunk(
+          path=Path(str(raw_chunk["path"])),
+          record_count=int(raw_chunk["record_count"]),
+          digest=str(raw_chunk["digest"]),
+          compressed_bytes=int(raw_chunk["compressed_bytes"]),
+        )
+      )
+    payload = _PreparedMarketData(
+      spool_directory=manifest_spool,
+      chunks=tuple(chunks),
+      compressed_bytes=int(manifest["compressed_bytes"]),
+      uncompressed_bytes=int(manifest["uncompressed_bytes"]),
+      record_count=int(manifest["record_count"]),
+    )
+  except (KeyError, TypeError, ValueError) as exc:
+    raise _IsolatedMarketDataWorkerError(
+      "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+    ) from exc
+  if (
+    payload.compressed_bytes < 0
+    or payload.uncompressed_bytes < 0
+    or payload.record_count < 0
+    or payload.compressed_bytes
+    != sum(chunk.compressed_bytes for chunk in payload.chunks)
+    or payload.record_count != sum(chunk.record_count for chunk in payload.chunks)
+  ):
+    raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_PROTOCOL_ERROR")
+  seen_paths: set[Path] = set()
+  for chunk in payload.chunks:
+    resolved_chunk = chunk.path.resolve()
+    if (
+      resolved_chunk.parent != resolved_spool
+      or resolved_chunk in seen_paths
+      or chunk.record_count < 0
+      or chunk.compressed_bytes <= 0
+      or chunk.path.is_symlink()
+      or not chunk.path.is_file()
+      or chunk.path.stat().st_size != chunk.compressed_bytes
+      or len(chunk.digest) != 64
+      or any(character not in "0123456789abcdef" for character in chunk.digest)
+    ):
+      raise _IsolatedMarketDataWorkerError(
+        "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+      )
+    seen_paths.add(resolved_chunk)
+  return payload
+
+
+def _decode_isolated_spool_chunk(
+  message: dict[str, Any],
+  *,
+  request_id: str,
+  spool_directory: Path,
+) -> tuple[int, _MarketDataSpoolChunk]:
+  if (
+    message.get("type") != "chunk"
+    or str(message.get("request_id") or "") != request_id
+    or not isinstance(message.get("chunk"), dict)
+  ):
+    raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_PROTOCOL_ERROR")
+  try:
+    index = int(message["chunk_index"])
+    raw_chunk = message["chunk"]
+    chunk = _MarketDataSpoolChunk(
+      path=Path(str(raw_chunk["path"])),
+      record_count=int(raw_chunk["record_count"]),
+      digest=str(raw_chunk["digest"]),
+      compressed_bytes=int(raw_chunk["compressed_bytes"]),
+    )
+  except (KeyError, TypeError, ValueError) as exc:
+    raise _IsolatedMarketDataWorkerError(
+      "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+    ) from exc
+  resolved_spool = spool_directory.resolve()
+  resolved_chunk = chunk.path.resolve()
+  if (
+    index < 0
+    or resolved_chunk.parent != resolved_spool
+    or chunk.record_count < 0
+    or chunk.compressed_bytes <= 0
+    or chunk.path.is_symlink()
+    or not chunk.path.is_file()
+    or chunk.path.stat().st_size != chunk.compressed_bytes
+    or len(chunk.digest) != 64
+    or any(character not in "0123456789abcdef" for character in chunk.digest)
+  ):
+    raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_PROTOCOL_ERROR")
+  return index, chunk
 
 
 async def _stream_spool_chunk(path: Path) -> AsyncIterator[bytes]:
@@ -666,6 +900,11 @@ class AgentRuntime:
     self._market_requests: asyncio.Queue[AgentEnvelope] = asyncio.Queue(
       maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS
     )
+    self._command_requests: asyncio.PriorityQueue[
+      tuple[int, int, AgentEnvelope]
+    ] = asyncio.PriorityQueue(maxsize=MAX_QUEUED_TRADE_COMMANDS)
+    self._command_request_sequence = 0
+    self._active_command_count = 0
     self._queued_market_data_requests: dict[str, str] = {}
     # Keep the exact compressed bytes for in-flight requests so any transport
     # redelivery reuses the same checksums instead of re-querying a changing
@@ -673,11 +912,24 @@ class AgentRuntime:
     self._market_upload_cache: dict[str, _MarketUploadCacheEntry] = {}
     self._market_upload_tombstones: dict[str, _MarketUploadTombstone] = {}
     self._market_upload_tasks: dict[str, _MarketUploadTaskEntry] = {}
+    self._streamed_market_uploads: set[str] = set()
+    self._provisional_market_uploads: set[str] = set()
     self._market_upload_cache_bytes = 0
     self._xtdata_access_lock = asyncio.Lock()
+    self._historical_worker_lock = asyncio.Lock()
     self._websocket_send_lock = asyncio.Lock()
     self._heartbeat_checkpoint_lock = asyncio.Lock()
+    self._report_flush_lock = asyncio.Lock()
     self._full_snapshot_lock = asyncio.Lock()
+    self._heartbeat_wakeup = asyncio.Event()
+    self._heartbeat_sent_monotonic: dict[str, float] = {}
+    self._control_heartbeat_ack_latency_seconds = 0.0
+    self._last_complete_account_snapshot_monotonic = 0.0
+    self._history_workload = "idle"
+    self._history_workload_reason = ""
+    self._historical_worker_process: Any | None = None
+    self._historical_worker_connection: Any | None = None
+    self._historical_worker_kind = ""
     # A live control connection starts in reconciliation and cannot advertise
     # READY again until this connection's fresh, complete snapshot was durably
     # accepted by the API.  The Engine retains the final authority to promote
@@ -729,10 +981,19 @@ class AgentRuntime:
         except asyncio.CancelledError:
           raise
         except Exception as exc:
+          session_was_authenticated = getattr(
+            self,
+            "_control_session_authenticated",
+            False,
+          )
           sleep_delay, delay = self._control_reconnect_delay(
             delay,
-            authenticated=getattr(self, "_control_session_authenticated", False),
+            authenticated=session_was_authenticated,
           )
+          # A disconnected control socket immediately pauses new historical
+          # native units. Preserve the prior value only long enough to choose
+          # the reconnect backoff for the session that just ended.
+          self._control_session_authenticated = False
           logger.warning(
             "QMT Agent disconnected: error=%s close_code=%s",
             exc.__class__.__name__,
@@ -762,6 +1023,7 @@ class AgentRuntime:
         cancel_futures=True,
       )
       await self._cancel_market_upload_tasks()
+      await self._shutdown_historical_worker()
       self._clear_market_upload_state()
     if self._fatal_market_data_error is not None:
       raise self._fatal_market_data_error
@@ -1024,9 +1286,8 @@ class AgentRuntime:
       _websocket_url(self.configuration.api_url),
       max_size=8 * 1024 * 1024,
       ping_interval=WEBSOCKET_PING_INTERVAL_SECONDS,
-      # XTData is guarded by a 15-minute fail-stop watchdog, but a native call
-      # can hold the GIL until that watchdog fires. Keep the transport alive
-      # slightly longer; application heartbeats still expose stale Agents.
+      # Historical XTData work is process-isolated.  Keep a normal bounded
+      # transport timeout so a genuinely stale control connection is rebuilt.
       ping_timeout=WEBSOCKET_PING_TIMEOUT_SECONDS,
     ) as socket:
       auth = AgentEnvelope(
@@ -1059,6 +1320,13 @@ class AgentRuntime:
       self._session_loop = asyncio.get_running_loop()
       self._market_requests = asyncio.Queue(maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS)
       self._queued_market_data_requests = {}
+      self._command_requests = asyncio.PriorityQueue(
+        maxsize=MAX_QUEUED_TRADE_COMMANDS
+      )
+      self._command_request_sequence = 0
+      self._active_command_count = 0
+      self._heartbeat_sent_monotonic.clear()
+      self._control_heartbeat_ack_latency_seconds = 0.0
       self._market_event_overflow = asyncio.Event()
       self._begin_trading_reconciliation(
         "control_session_connected",
@@ -1093,6 +1361,10 @@ class AgentRuntime:
         "market-request": asyncio.create_task(
           self._market_request_loop(socket),
           name="qmt-agent-market-request",
+        ),
+        "command-worker": asyncio.create_task(
+          self._command_request_loop(socket),
+          name="qmt-agent-command-worker",
         ),
         "market-readiness": asyncio.create_task(
           self._market_data_readiness_loop(),
@@ -1311,6 +1583,8 @@ class AgentRuntime:
       snapshot["report_id"] = snapshot_message_id
       snapshot = enrich_report_payload(AgentMessageType.DELTA_REPORT, snapshot)
       is_complete = snapshot.get("is_complete") is True
+      if is_complete:
+        self._last_complete_account_snapshot_monotonic = time.monotonic()
       if self.mode == "live":
         if not is_complete:
           # LiveBroker marks the native session unhealthy as well.  Never let
@@ -1337,13 +1611,24 @@ class AgentRuntime:
       return snapshot_message_id
 
   async def _flush_reports(self, socket) -> None:
-    for serialized in self.journal.pending_reports():
-      await self._send_socket_text(socket, serialized)
+    # Heartbeat, readiness, and command tasks may all request a flush.  One
+    # flusher prevents duplicate Journal frames from forming a lock convoy.
+    async with self._report_flush_lock:
+      for serialized in self.journal.pending_reports():
+        await self._send_socket_text(socket, serialized)
 
   async def _heartbeat_loop(self, socket) -> None:
+    self._ensure_market_upload_state()
     cycles = 0
     while True:
-      await asyncio.sleep(30)
+      try:
+        await asyncio.wait_for(
+          self._heartbeat_wakeup.wait(),
+          timeout=CONTROL_HEARTBEAT_INTERVAL_SECONDS,
+        )
+      except asyncio.TimeoutError:
+        pass
+      self._heartbeat_wakeup.clear()
       cycles += 1
       if cycles % 2 == 0:
         # Periodic account observation is not a recovery event. Only an actual
@@ -2587,19 +2872,27 @@ class AgentRuntime:
       ),
       market_stream_resyncs=self._market_stream_resyncs,
       market_stream_ack_latency_ms=self._market_stream_ack_latency_ms,
+      history_workload=self._history_workload,
+      history_workload_reason=self._history_workload_reason,
     )
-    await self._send_socket_text(
-      socket,
-      AgentEnvelope(
-        message_type=AgentMessageType.HEARTBEAT,
-        payload=payload.model_dump(mode="json"),
-      ).model_dump_json(),
+    envelope = AgentEnvelope(
+      message_type=AgentMessageType.HEARTBEAT,
+      payload=payload.model_dump(mode="json"),
     )
+    self._heartbeat_sent_monotonic[envelope.message_id] = time.monotonic()
+    try:
+      await self._send_socket_text(socket, envelope.model_dump_json())
+    except BaseException:
+      self._heartbeat_sent_monotonic.pop(envelope.message_id, None)
+      raise
 
   async def _heartbeat_checkpoint(self, socket, *, status: str) -> None:
     async with self._heartbeat_checkpoint_lock:
       await self._send_heartbeat(socket, status=status)
-      await self._flush_reports(socket)
+    # Do not retain the heartbeat-priority lock while an arbitrary number of
+    # durable reports drain. A later heartbeat can queue behind at most the
+    # single WebSocket frame currently being written.
+    await self._flush_reports(socket)
 
   async def _send_socket_text(self, socket, serialized: str) -> None:
     async with self._websocket_send_lock:
@@ -2610,10 +2903,18 @@ class AgentRuntime:
 
   async def _handle_message(self, socket, raw_message: str) -> None:
     envelope = AgentEnvelope.model_validate_json(raw_message)
-    if envelope.message_type in {
-      AgentMessageType.HEARTBEAT_ACK,
-      AgentMessageType.AUTH_RESULT,
-    }:
+    if envelope.message_type is AgentMessageType.HEARTBEAT_ACK:
+      heartbeat_message_id = str(
+        envelope.payload.get("heartbeat_message_id") or ""
+      )
+      sent = self._heartbeat_sent_monotonic.pop(heartbeat_message_id, None)
+      if sent is not None:
+        self._control_heartbeat_ack_latency_seconds = max(
+          0.0,
+          time.monotonic() - sent,
+        )
+      return
+    if envelope.message_type is AgentMessageType.AUTH_RESULT:
       return
     if envelope.message_type is AgentMessageType.REPORT_ACK:
       report_message_id = str(envelope.payload.get("report_message_id", ""))
@@ -2627,16 +2928,30 @@ class AgentRuntime:
           # The API keeps RECONCILING until Engine applies the durable report;
           # this READY request is therefore harmless before promotion and lets
           # the first post-Engine heartbeat converge without another 30s wait.
-          await self._heartbeat_checkpoint(
-            socket,
-            status=self._heartbeat_status(),
-          )
+          # Wake the independent heartbeat task instead of retaining the sole
+          # WebSocket receiver behind report backlog or a socket send.
+          self._heartbeat_wakeup.set()
       return
     if envelope.message_type in {
       AgentMessageType.COMMAND,
       AgentMessageType.CANCEL_COMMAND,
     }:
-      await self._handle_command(socket, envelope)
+      priority = (
+        0
+        if envelope.message_type is AgentMessageType.CANCEL_COMMAND
+        or str(envelope.payload.get("command_kind") or "").upper()
+        == "EMERGENCY_STOP"
+        else 1
+      )
+      self._command_request_sequence += 1
+      try:
+        self._command_requests.put_nowait(
+          (priority, self._command_request_sequence, envelope)
+        )
+      except asyncio.QueueFull as exc:
+        if socket is not None:
+          await socket.close(code=1013, reason="trade command queue full")
+        raise RuntimeError("trade command queue is full") from exc
       return
     if envelope.message_type is AgentMessageType.MARKET_DATA_REQUEST:
       self._ensure_market_upload_state()
@@ -2834,6 +3149,18 @@ class AgentRuntime:
   def _consume_xtdata_control_result(task: asyncio.Task[Any]) -> None:
     if not task.cancelled():
       task.exception()
+
+  async def _command_request_loop(self, socket) -> None:
+    """Serialize broker commands without blocking the WebSocket receiver."""
+
+    while True:
+      _, _, envelope = await self._command_requests.get()
+      self._active_command_count += 1
+      try:
+        await self._handle_command(socket, envelope)
+      finally:
+        self._active_command_count = max(0, self._active_command_count - 1)
+        self._command_requests.task_done()
 
   async def _command_ack(
     self,
@@ -3033,6 +3360,11 @@ class AgentRuntime:
       # The server derives completion from its durable chunks. A duplicate
       # delivery after every PUT succeeded needs neither XTData nor another PUT.
       return
+    if request_id in self._streamed_market_uploads:
+      self._streamed_market_uploads.discard(request_id)
+      self._provisional_market_uploads.discard(request_id)
+      await self._complete_market_upload(request_id)
+      return
     async with httpx.AsyncClient(
       timeout=60.0,
       follow_redirects=False,
@@ -3041,34 +3373,103 @@ class AgentRuntime:
     ) as client:
       for index, chunk in enumerate(chunks):
         self._touch_market_upload(request_id)
-        response = await client.put(
-          (
-            f"{self.configuration.api_url}/agent/market-data/"
-            f"{request_id}/chunks/{index}"
-          ),
-          content=_stream_spool_chunk(chunk.path),
-          headers={
-            "Authorization": f"Bearer {self._access_token}",
-            "Content-Type": "application/json",
-            "Content-Encoding": "gzip",
-            "Content-Length": str(chunk.compressed_bytes),
-            "X-Content-SHA256": chunk.digest,
-            "X-Record-Count": str(chunk.record_count),
-            "X-Total-Chunks": str(len(chunks)),
-          },
+        await self._put_market_data_chunk(
+          client,
+          request_id=request_id,
+          chunk_index=index,
+          chunk=chunk,
+          total_chunks=len(chunks),
         )
-        try:
-          response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-          if exc.response.status_code == 409:
-            fatal = _FatalMarketDataUploadConflict(
-              "market-data chunk identity conflict; Agent restart required"
-            )
-            self._trip_market_data_fatal(fatal)
-            raise fatal from exc
-          raise
         self._touch_market_upload(request_id)
+      if request_id in self._provisional_market_uploads:
+        await self._finalize_market_data_upload(request_id, len(chunks))
+        self._provisional_market_uploads.discard(request_id)
     await self._complete_market_upload(request_id)
+
+  async def _put_market_data_chunk(
+    self,
+    client: httpx.AsyncClient,
+    *,
+    request_id: str,
+    chunk_index: int,
+    chunk: _MarketDataSpoolChunk,
+    total_chunks: int,
+  ) -> None:
+    response = await client.put(
+      (
+        f"{self.configuration.api_url}/agent/market-data/"
+        f"{request_id}/chunks/{chunk_index}"
+      ),
+      content=_stream_spool_chunk(chunk.path),
+      headers={
+        "Authorization": f"Bearer {self._access_token}",
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+        "Content-Length": str(chunk.compressed_bytes),
+        "X-Content-SHA256": chunk.digest,
+        "X-Record-Count": str(chunk.record_count),
+        "X-Total-Chunks": str(total_chunks),
+      },
+    )
+    try:
+      response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+      if exc.response.status_code == 409:
+        fatal = _FatalMarketDataUploadConflict(
+          "market-data chunk identity conflict; Agent restart required"
+        )
+        self._trip_market_data_fatal(fatal)
+        raise fatal from exc
+      raise
+
+  async def _upload_provisional_market_data_chunk(
+    self,
+    request_id: str,
+    chunk_index: int,
+    chunk: _MarketDataSpoolChunk,
+  ) -> None:
+    async with httpx.AsyncClient(
+      timeout=60.0,
+      follow_redirects=False,
+      trust_env=False,
+      verify=httpx_verify(self.configuration.api_url),
+    ) as client:
+      await self._put_market_data_chunk(
+        client,
+        request_id=request_id,
+        chunk_index=chunk_index,
+        chunk=chunk,
+        total_chunks=0,
+      )
+
+  async def _finalize_market_data_upload(
+    self,
+    request_id: str,
+    total_chunks: int,
+  ) -> None:
+    async with httpx.AsyncClient(
+      timeout=10.0,
+      follow_redirects=False,
+      trust_env=False,
+      verify=httpx_verify(self.configuration.api_url),
+    ) as client:
+      response = await client.post(
+        f"{self.configuration.api_url}/agent/market-data/{request_id}/complete",
+        headers={
+          "Authorization": f"Bearer {self._access_token}",
+          "X-Total-Chunks": str(total_chunks),
+        },
+      )
+      try:
+        response.raise_for_status()
+      except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409:
+          fatal = _FatalMarketDataUploadConflict(
+            "market-data manifest conflict; Agent restart required"
+          )
+          self._trip_market_data_fatal(fatal)
+          raise fatal from exc
+        raise
 
   async def _prepared_market_data_chunks(
     self,
@@ -3128,11 +3529,11 @@ class AgentRuntime:
     entry: _MarketUploadCacheEntry,
     payload: dict[str, Any],
   ) -> _PreparedMarketData:
-    # A session cancellation must never cancel this task. The lock also keeps
-    # a lingering XTData call from overlapping a different request after a
-    # reconnect because XTData's cache mutation is not thread-safe.
+    # A session cancellation must never cancel this task. Historical work owns
+    # a separate spawned XTData client, so this lock serializes only that child
+    # and never blocks the parent process's real-time XTData control path.
     try:
-      async with self._xtdata_access_lock:
+      async with self._market_data_preparation_lock():
         managed_spool_bytes = await asyncio.to_thread(
           _managed_market_data_spool_bytes,
           self._market_spool_root,
@@ -3177,6 +3578,19 @@ class AgentRuntime:
         self._drop_market_upload_cache_entry(request_id)
       raise
 
+  def _market_data_preparation_lock(self) -> asyncio.Lock:
+    worker_kind_reader = getattr(
+      self.broker,
+      "historical_market_data_worker_kind",
+      None,
+    )
+    worker_kind = worker_kind_reader() if callable(worker_kind_reader) else None
+    return (
+      self._historical_worker_lock
+      if worker_kind is not None
+      else self._xtdata_access_lock
+    )
+
   async def _run_market_data_preparation_daemon(
     self,
     request_id: str,
@@ -3185,7 +3599,422 @@ class AgentRuntime:
     max_total_uncompressed_bytes: int,
     max_total_compressed_bytes: int,
   ) -> _PreparedMarketData:
-    """Run native XTData + bounded spooling in a fail-stop daemon thread."""
+    """Run historical preparation outside the control Agent when supported."""
+
+    worker_kind_reader = getattr(
+      self.broker,
+      "historical_market_data_worker_kind",
+      None,
+    )
+    worker_kind = worker_kind_reader() if callable(worker_kind_reader) else None
+    if worker_kind is not None:
+      return await self._run_isolated_market_data_preparation(
+        request_id,
+        payload,
+        worker_kind=str(worker_kind),
+        max_total_uncompressed_bytes=max_total_uncompressed_bytes,
+        max_total_compressed_bytes=max_total_compressed_bytes,
+      )
+    return await self._run_market_data_preparation_thread(
+      request_id,
+      payload,
+      max_total_uncompressed_bytes=max_total_uncompressed_bytes,
+      max_total_compressed_bytes=max_total_compressed_bytes,
+    )
+
+  async def _run_isolated_market_data_preparation(
+    self,
+    request_id: str,
+    payload: dict[str, Any],
+    *,
+    worker_kind: str,
+    max_total_uncompressed_bytes: int,
+    max_total_compressed_bytes: int,
+  ) -> _PreparedMarketData:
+    if worker_kind != XTDATA_HISTORICAL_WORKER_KIND:
+      raise _IsolatedMarketDataWorkerError(
+        "MARKET_DATA_PREPARATION_WORKER_UNSUPPORTED"
+      )
+    await self._wait_for_history_dispatch()
+    spool_directory = Path(
+      tempfile.mkdtemp(
+        prefix=MARKET_DATA_SPOOL_REQUEST_PREFIX,
+        dir=self._market_spool_root,
+      )
+    )
+    self._history_workload = "running"
+    self._history_workload_reason = ""
+    provisional_uploads_enabled = bool(getattr(self, "_access_token", ""))
+    upload_tasks: set[asyncio.Task[None]] = set()
+    uploaded_chunk_indices: set[int] = set()
+    provisional_upload_failed = False
+
+    async def observe_uploads(
+      tasks: set[asyncio.Task[None]],
+    ) -> bool:
+      failed = False
+      for task in tasks:
+        try:
+          await task
+        except _FatalMarketDataPreparationError:
+          raise
+        except Exception as exc:
+          failed = True
+          logger.warning(
+            "Provisional market-data upload will fall back after preparation: "
+            "request_id=%s error=%s",
+            request_id,
+            exc.__class__.__name__,
+          )
+      return failed
+
+    try:
+      await asyncio.to_thread(
+        self._ensure_historical_worker_sync,
+        worker_kind,
+      )
+      connection = self._historical_worker_connection
+      process = self._historical_worker_process
+      if connection is None or process is None:
+        raise _IsolatedMarketDataWorkerError(
+          "MARKET_DATA_PREPARATION_START_FAILED"
+        )
+      await asyncio.to_thread(
+        connection.send,
+        {
+          "type": "prepare",
+          "request_id": request_id,
+          "payload": payload,
+          "spool_directory": str(spool_directory),
+          "max_total_uncompressed_bytes": max_total_uncompressed_bytes,
+          "max_total_compressed_bytes": max_total_compressed_bytes,
+        },
+      )
+    except Exception as exc:
+      shutil.rmtree(spool_directory, ignore_errors=True)
+      await self._shutdown_historical_worker(graceful=False)
+      if isinstance(exc, _IsolatedMarketDataWorkerError):
+        raise
+      raise _IsolatedMarketDataWorkerError(
+        "MARKET_DATA_PREPARATION_START_FAILED"
+      ) from exc
+    try:
+      while True:
+        message = await self._receive_historical_worker_message(
+          connection,
+          process,
+          request_id=request_id,
+        )
+        message_type = message.get("type") if isinstance(message, dict) else None
+        message_request_id = (
+          str(message.get("request_id") or "")
+          if isinstance(message, dict)
+          else ""
+        )
+        if message_request_id != request_id:
+          raise _IsolatedMarketDataWorkerError(
+            "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+          )
+        if message_type == "chunk":
+          chunk_index, chunk = _decode_isolated_spool_chunk(
+            message,
+            request_id=request_id,
+            spool_directory=spool_directory,
+          )
+          if chunk_index in uploaded_chunk_indices:
+            raise _IsolatedMarketDataWorkerError(
+              "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+            )
+          uploaded_chunk_indices.add(chunk_index)
+          if provisional_uploads_enabled:
+            self._provisional_market_uploads.add(request_id)
+            while len(upload_tasks) >= MAX_CONCURRENT_HISTORY_UPLOADS:
+              done, upload_tasks = await asyncio.wait(
+                upload_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+              )
+              provisional_upload_failed = (
+                await observe_uploads(done) or provisional_upload_failed
+              )
+            upload_tasks.add(
+              asyncio.create_task(
+                self._upload_provisional_market_data_chunk(
+                  request_id,
+                  chunk_index,
+                  chunk,
+                ),
+                name=f"market-data-provisional-upload:{request_id}:{chunk_index}",
+              )
+            )
+          continue
+        if message_type == "started":
+          total_units = int(message.get("total_units") or 0)
+          if total_units <= 0:
+            raise _IsolatedMarketDataWorkerError(
+              "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+            )
+          continue
+        if message_type == "checkpoint":
+          completed_units = int(message.get("completed_units") or 0)
+          total_units = int(message.get("total_units") or 0)
+          if completed_units <= 0 or completed_units >= total_units:
+            raise _IsolatedMarketDataWorkerError(
+              "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+            )
+          await self._wait_for_history_dispatch()
+          await asyncio.to_thread(
+            connection.send,
+            {"type": "continue", "request_id": request_id},
+          )
+          continue
+        prepared = _decode_isolated_market_data_result(
+          message,
+          request_id=request_id,
+          spool_directory=spool_directory,
+        )
+        if upload_tasks:
+          provisional_upload_failed = (
+            await observe_uploads(upload_tasks) or provisional_upload_failed
+          )
+          upload_tasks.clear()
+        if uploaded_chunk_indices and uploaded_chunk_indices != set(
+          range(len(prepared.chunks))
+        ):
+          raise _IsolatedMarketDataWorkerError(
+            "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
+          )
+        if (
+          provisional_uploads_enabled
+          and uploaded_chunk_indices
+          and not provisional_upload_failed
+        ):
+          try:
+            await self._finalize_market_data_upload(
+              request_id,
+              len(prepared.chunks),
+            )
+          except _FatalMarketDataPreparationError:
+            raise
+          except Exception as exc:
+            logger.warning(
+              "Provisional market-data manifest finalize will fall back: "
+              "request_id=%s error=%s",
+              request_id,
+              exc.__class__.__name__,
+            )
+          else:
+            self._streamed_market_uploads.add(request_id)
+        self._history_workload = "idle"
+        self._history_workload_reason = ""
+        return prepared
+    except asyncio.CancelledError:
+      self._streamed_market_uploads.discard(request_id)
+      self._provisional_market_uploads.discard(request_id)
+      for task in upload_tasks:
+        task.cancel()
+      if upload_tasks:
+        await asyncio.gather(*upload_tasks, return_exceptions=True)
+      await asyncio.shield(self._shutdown_historical_worker(graceful=False))
+      shutil.rmtree(spool_directory, ignore_errors=True)
+      raise
+    except Exception:
+      self._streamed_market_uploads.discard(request_id)
+      self._provisional_market_uploads.discard(request_id)
+      for task in upload_tasks:
+        task.cancel()
+      if upload_tasks:
+        await asyncio.gather(*upload_tasks, return_exceptions=True)
+      await self._shutdown_historical_worker(graceful=False)
+      shutil.rmtree(spool_directory, ignore_errors=True)
+      raise
+    finally:
+      if self._history_workload != "idle":
+        self._history_workload = "idle"
+        self._history_workload_reason = ""
+
+  def _ensure_historical_worker_sync(self, worker_kind: str) -> None:
+    process = self._historical_worker_process
+    connection = self._historical_worker_connection
+    if (
+      process is not None
+      and connection is not None
+      and process.is_alive()
+      and self._historical_worker_kind == worker_kind
+    ):
+      return
+    self._shutdown_historical_worker_sync(graceful=False)
+    context = multiprocessing.get_context("spawn")
+    parent_connection, child_connection = context.Pipe(duplex=True)
+    process = context.Process(
+      target=run_historical_market_data_worker,
+      args=(child_connection, worker_kind),
+      name="qmt-xtdata-history",
+      daemon=True,
+    )
+    try:
+      process.start()
+    except Exception:
+      parent_connection.close()
+      child_connection.close()
+      raise
+    child_connection.close()
+    self._historical_worker_process = process
+    self._historical_worker_connection = parent_connection
+    self._historical_worker_kind = worker_kind
+
+  async def _receive_historical_worker_message(
+    self,
+    connection: Any,
+    process: Any,
+    *,
+    request_id: str,
+  ) -> Any:
+    receive_task = asyncio.create_task(
+      asyncio.to_thread(connection.recv),
+      name=f"market-data-worker-result:{request_id}",
+    )
+    try:
+      return await asyncio.wait_for(
+        asyncio.shield(receive_task),
+        timeout=HISTORICAL_WORK_UNIT_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      await self._shutdown_historical_worker(graceful=False)
+      await asyncio.gather(receive_task, return_exceptions=True)
+      raise _IsolatedMarketDataWorkerError(
+        "MARKET_DATA_PREPARATION_TIMEOUT"
+      ) from exc
+    except (EOFError, OSError) as exc:
+      await self._shutdown_historical_worker(graceful=False)
+      raise _IsolatedMarketDataWorkerError(
+        "MARKET_DATA_PREPARATION_CRASH"
+      ) from exc
+    finally:
+      if not process.is_alive() and not receive_task.done():
+        receive_task.cancel()
+        await asyncio.gather(receive_task, return_exceptions=True)
+
+  async def _shutdown_historical_worker(self, *, graceful: bool = True) -> None:
+    await asyncio.to_thread(
+      self._shutdown_historical_worker_sync,
+      graceful=graceful,
+    )
+
+  def _shutdown_historical_worker_sync(self, *, graceful: bool = True) -> None:
+    process = getattr(self, "_historical_worker_process", None)
+    connection = getattr(self, "_historical_worker_connection", None)
+    self._historical_worker_process = None
+    self._historical_worker_connection = None
+    self._historical_worker_kind = ""
+    if connection is not None:
+      if graceful and process is not None and process.is_alive():
+        try:
+          connection.send({"type": "shutdown"})
+        except (BrokenPipeError, EOFError, OSError):
+          pass
+      try:
+        connection.close()
+      except OSError:
+        pass
+    if process is None:
+      return
+    if graceful:
+      process.join(5.0)
+    if process.is_alive():
+      _terminate_market_data_process(process)
+    else:
+      process.join()
+
+  def _history_qos_block_reason(self) -> str:
+    if getattr(self, "mode", "data-only") == "live":
+      if not getattr(self, "_control_session_authenticated", False):
+        return "CONTROL_CONNECTION_UNHEALTHY"
+      if self._requires_trading_reconciliation():
+        return "TRADING_RECONCILING"
+      if (
+        not self._is_trading_ready()
+        or getattr(self, "_trading_readiness_failed", False)
+      ):
+        return "XTTRADING_UNSTABLE"
+      if getattr(self, "_full_snapshot_lock", None) is not None and (
+        self._full_snapshot_lock.locked()
+      ):
+        return "ACCOUNT_SNAPSHOT_RUNNING"
+      snapshot_at = getattr(
+        self,
+        "_last_complete_account_snapshot_monotonic",
+        0.0,
+      )
+      if snapshot_at <= 0 or time.monotonic() - snapshot_at > (
+        HISTORY_QOS_MAX_SNAPSHOT_AGE_SECONDS
+      ):
+        return "ACCOUNT_SNAPSHOT_STALE"
+    if not self._is_market_data_ready():
+      return "XTDATA_UNSTABLE"
+    command_queue = getattr(self, "_command_requests", None)
+    if (
+      getattr(self, "_active_command_count", 0) > 0
+      or (command_queue is not None and not command_queue.empty())
+    ):
+      return "TRADE_COMMAND_PENDING"
+    journal = getattr(self, "journal", None)
+    if journal is None:
+      journal_stats = {}
+    else:
+      try:
+        journal_stats = journal.stats()
+      except Exception:
+        return "JOURNAL_HEALTH_UNKNOWN"
+    if int(journal_stats.get("processing_commands") or 0) > 0:
+      return "TRADE_COMMAND_PENDING"
+    if int(journal_stats.get("pending_reports") or 0) > 0:
+      return "BROKER_REPORT_PENDING"
+    now = time.monotonic()
+    heartbeat_sent = getattr(self, "_heartbeat_sent_monotonic", {})
+    if heartbeat_sent and now - min(heartbeat_sent.values()) > (
+      HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS
+    ):
+      return "CONTROL_HEARTBEAT_DELAYED"
+    if getattr(self, "_control_heartbeat_ack_latency_seconds", 0.0) > (
+      HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS
+    ):
+      return "CONTROL_HEARTBEAT_DELAYED"
+    if getattr(self, "_market_stream_ack_latency_ms", 0.0) > (
+      HISTORY_QOS_MAX_HEARTBEAT_ACK_SECONDS * 1000
+    ):
+      return "MARKET_STREAM_DELAYED"
+    return ""
+
+  async def _wait_for_history_dispatch(self) -> None:
+    reason = self._history_qos_block_reason()
+    if not reason:
+      self._history_workload = "running"
+      self._history_workload_reason = ""
+      return
+    self._history_workload = "paused"
+    self._history_workload_reason = reason
+    healthy_cycles = 0
+    while healthy_cycles < HISTORY_QOS_HEALTHY_CYCLES:
+      await asyncio.sleep(HISTORY_QOS_CHECK_SECONDS)
+      reason = self._history_qos_block_reason()
+      if reason:
+        healthy_cycles = 0
+        self._history_workload_reason = reason
+        continue
+      healthy_cycles += 1
+    self._history_workload = "running"
+    self._history_workload_reason = ""
+
+  async def _run_market_data_preparation_thread(
+    self,
+    request_id: str,
+    payload: dict[str, Any],
+    *,
+    max_total_uncompressed_bytes: int,
+    max_total_compressed_bytes: int,
+  ) -> _PreparedMarketData:
+    """Fallback for injected test brokers without a child-process backend."""
+
     loop = asyncio.get_running_loop()
     outcome: asyncio.Future[_PreparedMarketData] = loop.create_future()
     abandoned = threading.Event()
@@ -3300,16 +4129,52 @@ class AgentRuntime:
       self._market_upload_tombstones = {}
     if not hasattr(self, "_market_upload_tasks"):
       self._market_upload_tasks = {}
+    if not hasattr(self, "_streamed_market_uploads"):
+      self._streamed_market_uploads = set()
+    if not hasattr(self, "_provisional_market_uploads"):
+      self._provisional_market_uploads = set()
     if not hasattr(self, "_queued_market_data_requests"):
       self._queued_market_data_requests = {}
     if not hasattr(self, "_market_upload_cache_bytes"):
       self._market_upload_cache_bytes = 0
     if not hasattr(self, "_xtdata_access_lock"):
       self._xtdata_access_lock = asyncio.Lock()
+    if not hasattr(self, "_historical_worker_lock"):
+      self._historical_worker_lock = asyncio.Lock()
     if not hasattr(self, "_websocket_send_lock"):
       self._websocket_send_lock = asyncio.Lock()
     if not hasattr(self, "_heartbeat_checkpoint_lock"):
       self._heartbeat_checkpoint_lock = asyncio.Lock()
+    if not hasattr(self, "_report_flush_lock"):
+      self._report_flush_lock = asyncio.Lock()
+    if not hasattr(self, "_full_snapshot_lock"):
+      self._full_snapshot_lock = asyncio.Lock()
+    if not hasattr(self, "_heartbeat_wakeup"):
+      self._heartbeat_wakeup = asyncio.Event()
+    if not hasattr(self, "_heartbeat_sent_monotonic"):
+      self._heartbeat_sent_monotonic = {}
+    if not hasattr(self, "_control_heartbeat_ack_latency_seconds"):
+      self._control_heartbeat_ack_latency_seconds = 0.0
+    if not hasattr(self, "_last_complete_account_snapshot_monotonic"):
+      self._last_complete_account_snapshot_monotonic = 0.0
+    if not hasattr(self, "_history_workload"):
+      self._history_workload = "idle"
+    if not hasattr(self, "_history_workload_reason"):
+      self._history_workload_reason = ""
+    if not hasattr(self, "_historical_worker_process"):
+      self._historical_worker_process = None
+    if not hasattr(self, "_historical_worker_connection"):
+      self._historical_worker_connection = None
+    if not hasattr(self, "_historical_worker_kind"):
+      self._historical_worker_kind = ""
+    if not hasattr(self, "_command_requests"):
+      self._command_requests = asyncio.PriorityQueue(
+        maxsize=MAX_QUEUED_TRADE_COMMANDS
+      )
+    if not hasattr(self, "_command_request_sequence"):
+      self._command_request_sequence = 0
+    if not hasattr(self, "_active_command_count"):
+      self._active_command_count = 0
     if not hasattr(self, "_market_upload_clock"):
       self._market_upload_clock = time.monotonic
     if not hasattr(self, "_session_loop"):
@@ -3453,6 +4318,8 @@ class AgentRuntime:
     if active_uploads:
       raise RuntimeError("market-data uploads must stop before clearing their spool")
     self._market_upload_tasks.clear()
+    self._streamed_market_uploads.clear()
+    self._provisional_market_uploads.clear()
     self._queued_market_data_requests.clear()
     for request_id in list(self._market_upload_cache):
       self._drop_market_upload_cache_entry(request_id, cancel=True)
@@ -3508,7 +4375,7 @@ class AgentRuntime:
           logger.warning(
             "QMT market data request rejected: request_id=%s error=%s",
             request_id,
-            exc.__class__.__name__,
+            _market_data_failure_reason(exc),
           )
           try:
             await self._report_market_data_failure(request_id, exc)
@@ -3533,7 +4400,7 @@ class AgentRuntime:
     request_id: str,
     error: Exception,
   ) -> None:
-    reason = error.__class__.__name__
+    reason = _market_data_failure_reason(error)
     async with httpx.AsyncClient(
       timeout=10.0,
       follow_redirects=False,

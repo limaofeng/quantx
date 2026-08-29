@@ -312,6 +312,8 @@ class HeartbeatPayload(BaseModel):
   market_stream_queue_depth: int = Field(default=0, ge=0)
   market_stream_resyncs: int = Field(default=0, ge=0)
   market_stream_ack_latency_ms: float = Field(default=0.0, ge=0)
+  history_workload: Literal["idle", "running", "paused"] = "idle"
+  history_workload_reason: str = Field(default="", max_length=64)
 
 
 class ReportAckPayload(BaseModel):
