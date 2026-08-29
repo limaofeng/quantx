@@ -207,7 +207,10 @@ async def test_manual_order_challenge_is_bound_consumed_once_and_queues_once(
   assert queued_calls[0]["risk_decision_id"] == manual_order._stable_risk_decision_id(
     preview.challenge_id
   )
-  assert queued_calls[0]["reason_tags"] == ["MOBILE_MANUAL_ORDER", "OK"]
+  assert queued_calls[0]["strategy_name"] == "manual-order"
+  assert queued_calls[0]["order_remark"] == "QuantX 手动委托"
+  assert queued_calls[0]["reason_tags"] == ["MANUAL_ORDER", "OK"]
+  assert queued_calls[0]["request_metadata"]["origin"] == "MANUAL_ORDER"
   assert queued_calls[0]["idempotency_key"] == (
     f"manual-order:{preview.challenge_id}:ios-order-1"
   )

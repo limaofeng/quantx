@@ -2,12 +2,17 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useTradingSubmit } from '@/features/trading/components/TradingCard/hooks/useTradingSubmit';
+import {
+  ManualOrderExecutionMode,
+  ManualOrderPriceType,
+  ManualOrderSide,
+} from '@/generated/gql/graphql';
 import type { Stock } from '@/shared/types';
 
 const mocks = vi.hoisted(() => ({
-  createOrder: vi.fn(),
-  onSuccess: vi.fn(),
-  resetForm: vi.fn(),
+  confirmManualOrder: vi.fn(),
+  onQueued: vi.fn(),
+  previewManualOrder: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -24,8 +29,36 @@ vi.mock('@/features/dashboard/hooks', () => ({
 }));
 
 vi.mock('@/features/trading/hooks', () => ({
-  useCreateOrder: () => ({
-    createOrder: mocks.createOrder,
+  useConfirmManualOrder: () => ({
+    execute: mocks.confirmManualOrder,
+    loading: false,
+  }),
+  useManualOrderCapabilities: () => ({
+    capabilities: {
+      accountId: '300000013250',
+      canLiveBuy: true,
+      canLiveSell: true,
+      canManualTrade: true,
+      defaultExecutionMode: ManualOrderExecutionMode.Paper,
+      executionModes: [
+        ManualOrderExecutionMode.Paper,
+        ManualOrderExecutionMode.Live,
+      ],
+      instrumentCode: '688577.SH',
+      liveBlockedReasons: [],
+      liveReady: true,
+      supportedPriceTypes: [
+        ManualOrderPriceType.Limit,
+        ManualOrderPriceType.Best,
+      ],
+      supportedSides: [ManualOrderSide.Buy, ManualOrderSide.Sell],
+      warnings: [],
+    },
+    error: null,
+    loading: false,
+  }),
+  usePreviewManualOrder: () => ({
+    execute: mocks.previewManualOrder,
     loading: false,
   }),
 }));
@@ -48,92 +81,181 @@ function makeStock(): Stock {
   };
 }
 
-function SubmitHarness() {
-  const { handleSubmit } = useTradingSubmit('demo-user', mocks.onSuccess);
+function previewPayload() {
+  return {
+    accountId: '300000013250',
+    availableCash: 100000,
+    availableVolume: 420,
+    challengeExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    challengeId: 'challenge-1',
+    confirmationToken: 'one-time-token',
+    estimatedAmount: 20479.2,
+    estimatedFees: 10.24,
+    executionMode: 'PAPER',
+    finalVolume: 420,
+    idempotencyKey: 'manual-order-test',
+    instrumentCode: '688577.SH',
+    limitPrice: 48.76,
+    priceType: ManualOrderPriceType.Limit,
+    quoteTimestamp: new Date().toISOString(),
+    referencePrice: 48.7,
+    requestedVolume: 420,
+    riskAction: 'ALLOW',
+    riskDecisionId: 'risk-1',
+    riskReasonCode: 'OK',
+    riskReasonDetail: '统一风控允许',
+    side: ManualOrderSide.Sell,
+    warnings: [],
+  };
+}
+
+function SubmitHarness({
+  orderType = 'limit',
+}: {
+  orderType?: 'best' | 'limit';
+}) {
+  const submission = useTradingSubmit('688577.SH', mocks.onQueued);
 
   return (
-    <button
-      type="button"
-      onClick={event =>
-        handleSubmit(
-          event,
-          'sell',
-          'limit',
-          makeStock(),
-          '420',
-          '48.76',
-          mocks.resetForm
-        )
-      }
-    >
-      submit
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={event =>
+          submission.handleSubmit(event, {
+            executionMode: ManualOrderExecutionMode.Paper,
+            orderType,
+            price: orderType === 'best' ? '' : '48.76',
+            quantity: '420',
+            selectedStock: makeStock(),
+            tradeType: 'sell',
+          })
+        }
+      >
+        preview
+      </button>
+      {submission.preview && (
+        <button type="button" onClick={() => void submission.confirmPreview()}>
+          confirm
+        </button>
+      )}
+    </>
   );
 }
 
 describe('useTradingSubmit', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.createOrder.mockResolvedValue({
+    mocks.previewManualOrder.mockResolvedValue({
       data: {
-        placeOrder: {
-          message: '订单已提交',
+        previewManualOrder: {
+          code: 'PREVIEW_READY',
+          message: '请核对后确认',
+          preview: previewPayload(),
+          success: true,
+        },
+      },
+    });
+    mocks.confirmManualOrder.mockResolvedValue({
+      data: {
+        confirmManualOrder: {
+          challengeId: 'challenge-1',
+          clientOrderId: 'client-order-1',
+          code: 'MANUAL_ORDER_QUEUED',
+          message: '交易命令已排队；请等待 QMT Agent 券商回报',
+          status: 'QUEUED',
           success: true,
         },
       },
     });
   });
 
-  it('includes manual trade metadata required by OrderInput', async () => {
+  it('generates a server preview with an independent idempotency key', async () => {
     render(<SubmitHarness />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'submit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'preview' }));
 
-    await waitFor(() => expect(mocks.createOrder).toHaveBeenCalledTimes(1));
-    expect(mocks.createOrder).toHaveBeenCalledWith({
-      accountId: '300000013250',
-      orderRemark: '交易控制台平仓: 688577.SH',
-      price: 48.76,
-      priceType: 'LIMIT',
-      stockCode: '688577.SH',
-      strategyName: '手动交易',
-      type: 'SELL',
-      volume: 420,
+    await waitFor(() =>
+      expect(mocks.previewManualOrder).toHaveBeenCalledTimes(1)
+    );
+    expect(mocks.previewManualOrder).toHaveBeenCalledWith({
+      input: {
+        accountId: '300000013250',
+        executionMode: ManualOrderExecutionMode.Paper,
+        idempotencyKey: expect.any(String),
+        instrumentCode: '688577.SH',
+        limitPrice: 48.76,
+        priceType: ManualOrderPriceType.Limit,
+        side: ManualOrderSide.Sell,
+        volume: 420,
+      },
     });
+    expect(mocks.confirmManualOrder).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole('button', { name: 'confirm' })
+    ).toBeVisible();
   });
 
-  it('shows a failure toast when placeOrder returns success false', async () => {
-    mocks.createOrder.mockResolvedValue({
+  it('only queues after consuming the preview confirmation challenge', async () => {
+    render(<SubmitHarness />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'preview' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'confirm' }));
+
+    await waitFor(() =>
+      expect(mocks.confirmManualOrder).toHaveBeenCalledWith({
+        input: {
+          challengeId: 'challenge-1',
+          confirmationToken: 'one-time-token',
+        },
+      })
+    );
+    expect(mocks.onQueued).toHaveBeenCalledTimes(1);
+    expect(mocks.toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: '交易命令已排队；请等待 QMT Agent 券商回报',
+        title: '委托命令已排队',
+      })
+    );
+  });
+
+  it('does not open confirmation when the server rejects preview', async () => {
+    mocks.previewManualOrder.mockResolvedValue({
       data: {
-        placeOrder: {
+        previewManualOrder: {
+          code: 'RISK_REJECTED',
           message: '可用持仓不足',
+          preview: null,
           success: false,
         },
       },
     });
 
     render(<SubmitHarness />);
-
-    fireEvent.click(screen.getByRole('button', { name: 'submit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'preview' }));
 
     await waitFor(() =>
       expect(mocks.toast).toHaveBeenCalledWith(
         expect.objectContaining({
           description: '可用持仓不足',
-          title: '交易失败',
+          title: '无法生成安全预览',
           variant: 'destructive',
         })
       )
     );
-    expect(mocks.onSuccess).not.toHaveBeenCalled();
-    expect(mocks.resetForm).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'confirm' })).toBeNull();
   });
 
-  it('does not apply the live execution gate to the PAPER order card', async () => {
-    render(<SubmitHarness />);
+  it('omits the limit price for a BEST quote preview', async () => {
+    render(<SubmitHarness orderType="best" />);
+    fireEvent.click(screen.getByRole('button', { name: 'preview' }));
 
-    fireEvent.click(screen.getByRole('button', { name: 'submit' }));
-
-    await waitFor(() => expect(mocks.createOrder).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mocks.previewManualOrder).toHaveBeenCalledWith({
+        input: expect.objectContaining({
+          limitPrice: undefined,
+          priceType: ManualOrderPriceType.Best,
+        }),
+      })
+    );
   });
 });

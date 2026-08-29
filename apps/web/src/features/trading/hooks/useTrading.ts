@@ -5,6 +5,12 @@ import type { RequestPolicy } from 'urql';
 import { gql } from '@/generated/gql';
 import { KLinePeriod, PageDirection } from '@/generated/gql/graphql';
 
+import {
+  ConfirmManualOrderMutation,
+  ManualOrderCapabilitiesQuery,
+  PreviewManualOrderMutation,
+} from '../manualOrderOperations';
+
 function resolveKLinePeriod(period: string): KLinePeriod | undefined {
   return Object.values(KLinePeriod).find(value => value === period);
 }
@@ -131,26 +137,6 @@ export const GetKLinesQuery = gql(`
       preClose
       volume
       amount
-    }
-  }
-`);
-
-/**
- * 创建订单
- */
-export const PlaceOrderMutation = gql(`
-  mutation Trading_PlaceOrder($input: OrderInput!) {
-    placeOrder(input: $input) {
-      success
-      message
-      orderId
-      clientOrderId
-      status
-      order {
-        id
-        stockCode
-        status
-      }
     }
   }
 `);
@@ -312,36 +298,67 @@ export function useCancelOrder() {
   );
 }
 
-/**
- * 创建订单 Hook
- */
-export function useCreateOrder() {
-  const [result, executeMutation] = useMutation(PlaceOrderMutation);
-
-  const createOrder = useCallback(
-    async (input: {
-      stockCode: string;
-      price: number;
-      volume: number;
-      type: string;
-      priceType: string;
-      accountId?: string;
-      orderRemark?: string;
-      strategyName?: string;
-    }) => {
-      return executeMutation({ input });
+export function useManualOrderCapabilities(
+  accountId: string | undefined,
+  instrumentCode: string
+) {
+  const normalizedCode = instrumentCode.trim().toUpperCase();
+  const canQuery =
+    Boolean(accountId) && /^\d{6}\.(SH|SZ|BJ)$/.test(normalizedCode);
+  const [result, reexecuteQuery] = useQuery({
+    query: ManualOrderCapabilitiesQuery,
+    variables: {
+      accountId: accountId || '',
+      instrumentCode: normalizedCode,
     },
-    [executeMutation]
-  );
+    pause: !canQuery,
+    requestPolicy: 'cache-and-network',
+  });
+
+  const refresh = useCallback(() => {
+    if (!canQuery) return;
+    reexecuteQuery({ requestPolicy: 'network-only' });
+  }, [canQuery, reexecuteQuery]);
+
+  const capabilities = result.data?.orderEntryCapabilities;
+  const currentCapabilities =
+    capabilities?.accountId === accountId &&
+    capabilities?.instrumentCode === normalizedCode
+      ? capabilities
+      : null;
 
   return useMemo(
     () => ({
-      createOrder,
-      loading: result.fetching,
+      capabilities: currentCapabilities,
       error: result.error,
-      data: result.data,
+      loading: result.fetching,
+      refresh,
     }),
-    [createOrder, result.fetching, result.error, result.data]
+    [currentCapabilities, refresh, result.error, result.fetching]
+  );
+}
+
+export function usePreviewManualOrder() {
+  const [result, executeMutation] = useMutation(PreviewManualOrderMutation);
+
+  return useMemo(
+    () => ({
+      execute: executeMutation,
+      loading: result.fetching,
+    }),
+    [executeMutation, result.fetching]
+  );
+}
+
+export function useConfirmManualOrder() {
+  const [result, executeMutation] = useMutation(ConfirmManualOrderMutation);
+
+  return useMemo(
+    () => ({
+      execute: executeMutation,
+      loading: result.fetching,
+    }),
+    [executeMutation, result.fetching]
   );
 }
 

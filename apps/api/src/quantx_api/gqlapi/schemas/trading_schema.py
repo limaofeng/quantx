@@ -133,7 +133,7 @@ async def _fetch_order(order_id: int, account_id: str) -> Optional[Order]:
 
 @strawberry.type(description="订单交易相关查询")
 class TradingQuery:
-  @strawberry.field(description="查询当前账户与标的的移动端下单能力")
+  @strawberry.field(description="查询当前账户与标的的手工下单能力")
   async def order_entry_capabilities(
     self,
     info: strawberry.types.Info,
@@ -172,7 +172,7 @@ class TradingQuery:
       if live_ready or can_live_sell:
         execution_modes.append(ManualOrderExecutionMode.LIVE)
     elif not has_manual_scope:
-      live_blocked_reasons = ["当前设备会话未获授 trade:manual"]
+      live_blocked_reasons = ["当前会话未获授 trade:manual"]
     elif not valid_code:
       live_blocked_reasons = ["证券代码格式无效"]
     else:
@@ -348,7 +348,7 @@ class TradingMutation:
         message=exc.message,
       )
 
-  @strawberry.mutation(description="预览移动端手动委托并签发一次性确认挑战")
+  @strawberry.mutation(description="预览手动委托并签发一次性确认挑战")
   async def preview_manual_order(
     self,
     info: strawberry.types.Info,
@@ -374,7 +374,7 @@ class TradingMutation:
       return ManualOrderPreviewResult(
         success=True,
         code="PREVIEW_READY",
-        message="请核对委托、行情时间和风险提示后进行本机生物确认",
+        message="请核对委托、行情时间和风险提示后确认",
         preview=ManualOrderPreview(
           challenge_id=issued.challenge_id,
           confirmation_token=issued.confirmation_token,
@@ -410,7 +410,7 @@ class TradingMutation:
         preview=None,
       )
 
-  @strawberry.mutation(description="消费一次性挑战并排队移动端手动委托")
+  @strawberry.mutation(description="消费一次性挑战并排队手动委托")
   async def confirm_manual_order(
     self,
     info: strawberry.types.Info,

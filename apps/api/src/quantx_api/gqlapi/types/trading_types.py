@@ -21,19 +21,19 @@ class TradingEventType(str, Enum):
   ORDER_REJECTED = "ORDER_REJECTED"  # 订单被拒绝
 
 
-@strawberry.enum(description="移动端手动委托方向")
+@strawberry.enum(description="手动委托方向")
 class ManualOrderSide(str, Enum):
   BUY = "BUY"
   SELL = "SELL"
 
 
-@strawberry.enum(description="移动端手动委托报价类型")
+@strawberry.enum(description="手动委托报价类型")
 class ManualOrderPriceType(str, Enum):
   LIMIT = "LIMIT"
   BEST = "BEST"
 
 
-@strawberry.enum(description="移动端手动委托执行模式")
+@strawberry.enum(description="手动委托执行模式")
 class ManualOrderExecutionMode(str, Enum):
   PAPER = "PAPER"
   LIVE = "LIVE"
@@ -146,7 +146,7 @@ class OrderInput:
   )
 
 
-@strawberry.input(description="移动端手动委托预览输入")
+@strawberry.input(description="手动委托预览输入")
 class ManualOrderPreviewInput:
   account_id: str = strawberry.field(description="必填资金账号")
   instrument_code: str = strawberry.field(description="带市场后缀的证券代码")
@@ -164,13 +164,13 @@ class ManualOrderPreviewInput:
   )
 
 
-@strawberry.input(description="移动端手动委托确认输入")
+@strawberry.input(description="手动委托确认输入")
 class ManualOrderConfirmationInput:
   challenge_id: str = strawberry.field(description="预览返回的确认挑战 ID")
   confirmation_token: str = strawberry.field(description="预览返回的一次性确认凭据")
 
 
-@strawberry.type(description="移动端手动委托服务器预览")
+@strawberry.type(description="手动委托服务器预览")
 class ManualOrderPreview:
   challenge_id: str
   confirmation_token: str
@@ -198,7 +198,7 @@ class ManualOrderPreview:
   warnings: List[str]
 
 
-@strawberry.type(description="移动端手动委托预览结果")
+@strawberry.type(description="手动委托预览结果")
 class ManualOrderPreviewResult:
   success: bool
   code: str
@@ -206,7 +206,7 @@ class ManualOrderPreviewResult:
   preview: Optional[ManualOrderPreview] = None
 
 
-@strawberry.type(description="移动端手动委托确认结果；成功只表示命令已排队")
+@strawberry.type(description="手动委托确认结果；成功只表示命令已排队")
 class ManualOrderConfirmationResult:
   success: bool
   code: str
@@ -216,7 +216,7 @@ class ManualOrderConfirmationResult:
   status: Optional[str] = None
 
 
-@strawberry.type(description="服务端计算的移动端手动委托能力")
+@strawberry.type(description="服务端计算的手动委托能力")
 class OrderEntryCapabilities:
   account_id: str
   instrument_code: str

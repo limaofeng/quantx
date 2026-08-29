@@ -1,4 +1,4 @@
-"""Fail-closed two-phase contract for authenticated mobile manual orders."""
+"""Fail-closed two-phase contract for authenticated manual orders."""
 
 from __future__ import annotations
 
@@ -613,12 +613,12 @@ async def _preflight(
   domain_side = DomainOrderType(request.side)
   available_volume = int(getattr(position, "can_use_volume", 0) or 0)
   intent = TradeIntent(
-    strategy_id="manual-mobile",
-    run_id="manual-mobile",
+    strategy_id="manual-order",
+    run_id="manual-order",
     instrument_code=request.instrument_code,
     direction=TradeIntentDirection(request.side),
     bucket="manual",
-    reason="MOBILE_MANUAL_ORDER",
+    reason="MANUAL_ORDER",
     target_volume=request.volume,
   )
   draft = OrderSizer(rules).draft_intent(
@@ -642,7 +642,7 @@ async def _preflight(
     price_type=domain_price_type,
     volume=draft.sized_volume,
     price=price,
-    metadata={"bucket": "manual", "origin": "IOS_MANUAL"},
+    metadata={"bucket": "manual", "origin": "MANUAL_ORDER"},
   )
 
   min_volume = (
@@ -946,18 +946,18 @@ class ManualOrderChallengeService:
           ),
           limit_price=Decimal(str(request.limit_price or 0)),
           volume=preflight.final_volume,
-          strategy_name="manual-mobile",
-          order_remark="QuantX iOS 手动委托",
+          strategy_name="manual-order",
+          order_remark="QuantX 手动委托",
           trace_id=challenge.id,
           idempotency_key=_command_idempotency_key(challenge.id, request),
           execution_mode=request.execution_mode.lower(),
           bucket="manual",
           manual_live=request.execution_mode == "LIVE",
           risk_decision_id=risk_decision_id,
-          reason_tags=["MOBILE_MANUAL_ORDER", preflight.risk_reason_code],
+          reason_tags=["MANUAL_ORDER", preflight.risk_reason_code],
           commit_transaction=False,
           request_metadata={
-            "origin": "IOS_MANUAL",
+            "origin": "MANUAL_ORDER",
             "challenge_id": challenge.id,
             "payload_fingerprint": challenge.payload_fingerprint,
             "quote_timestamp": preflight.quote_timestamp.isoformat(),

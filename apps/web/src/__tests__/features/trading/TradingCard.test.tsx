@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Position } from '@/features/portfolio/types';
@@ -7,6 +7,7 @@ import type { Stock } from '@/shared/types';
 
 const mocks = vi.hoisted(() => ({
   handleSubmit: vi.fn(),
+  onQueued: vi.fn(),
   useStockSearch: vi.fn(),
 }));
 
@@ -17,10 +18,34 @@ vi.mock('@/hooks/useStockSearch', () => ({
 vi.mock(
   '@/features/trading/components/TradingCard/hooks/useTradingSubmit',
   () => ({
-    useTradingSubmit: () => ({
-      handleSubmit: mocks.handleSubmit,
-      isSubmitting: false,
-    }),
+    useTradingSubmit: (_instrumentCode: string, onQueued?: () => void) => {
+      mocks.onQueued.mockImplementation(() => onQueued?.());
+      return {
+        capabilities: {
+          accountId: '300000013250',
+          canLiveBuy: true,
+          canLiveSell: true,
+          canManualTrade: true,
+          defaultExecutionMode: 'PAPER',
+          executionModes: ['PAPER', 'LIVE'],
+          instrumentCode: '688577.SH',
+          liveBlockedReasons: [],
+          liveReady: true,
+          supportedPriceTypes: ['LIMIT', 'BEST'],
+          supportedSides: ['BUY', 'SELL'],
+          warnings: [],
+        },
+        capabilitiesError: null,
+        capabilitiesLoading: false,
+        confirmationError: '',
+        confirmPreview: vi.fn(),
+        dismissPreview: vi.fn(),
+        handleSubmit: mocks.handleSubmit,
+        isConfirming: false,
+        isPreviewing: false,
+        preview: null,
+      };
+    },
   })
 );
 
@@ -143,7 +168,7 @@ describe('TradingCard', () => {
     expect(screen.getByPlaceholderText('100')).toHaveValue(null);
   });
 
-  it('clamps manual close quantity to sellable canUseVolume', () => {
+  it('leaves manual quantity normalization to the server preview', () => {
     setupTradingCard();
 
     fireEvent.click(screen.getByRole('button', { name: '平仓' }));
@@ -151,22 +176,81 @@ describe('TradingCard', () => {
       target: { value: '10000' },
     });
 
-    expect(screen.getByPlaceholderText('100')).toHaveValue(420);
+    expect(screen.getByPlaceholderText('100')).toHaveValue(10000);
   });
 
   it('uses the financial buy and sell action colors', () => {
     setupTradingCard();
 
-    expect(screen.getByRole('button', { name: '确认买入' })).toHaveClass(
+    expect(screen.getByRole('button', { name: '获取买入预览' })).toHaveClass(
       'bg-market-buy-cta',
       'text-white'
     );
 
     fireEvent.click(screen.getByRole('button', { name: '平仓' }));
 
-    expect(screen.getByRole('button', { name: '确认平仓' })).toHaveClass(
+    expect(screen.getByRole('button', { name: '获取平仓预览' })).toHaveClass(
       'bg-market-down',
       'text-white'
+    );
+  });
+
+  it('defaults to PAPER and only selects LIVE through an explicit action', () => {
+    setupTradingCard();
+
+    expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'LIVE 实盘' }));
+
+    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    expect(screen.getByText(/高风险：确认后进入实盘执行链/)).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+
+    expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'LIVE 实盘' }));
+    act(() => mocks.onQueued());
+
+    expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+  });
+
+  it('submits a preview request instead of placing an order directly', () => {
+    setupTradingCard();
+
+    fireEvent.change(screen.getByPlaceholderText('0.00'), {
+      target: { value: '48.76' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('100'), {
+      target: { value: '420' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '获取买入预览' }));
+
+    expect(mocks.handleSubmit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        executionMode: 'PAPER',
+        orderType: 'limit',
+        price: '48.76',
+        quantity: '420',
+        tradeType: 'buy',
+      })
     );
   });
 

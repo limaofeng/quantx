@@ -1,131 +1,268 @@
 import type React from 'react';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { useCurrentAccount } from '@/features/dashboard/hooks';
+import type { ManualOrderType } from '@/features/trading/components/TradingCard/hooks/useFormState';
+import {
+  useConfirmManualOrder,
+  useManualOrderCapabilities,
+  usePreviewManualOrder,
+} from '@/features/trading/hooks';
+import {
+  ManualOrderExecutionMode,
+  ManualOrderPriceType,
+  ManualOrderSide,
+  type Trading_PreviewManualOrderMutation,
+} from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
 import type { Stock } from '@/shared/types';
+import { createClientId } from '@/utils/clientId';
 
-import { useCurrentAccount } from '../../../../dashboard/hooks';
-import { useCreateOrder } from '../../../hooks';
+export type ManualOrderPreviewTicket = NonNullable<
+  Trading_PreviewManualOrderMutation['previewManualOrder']['preview']
+>;
 
-function getSelectedStockCode(stock: Stock) {
-  return stock.code || stock.stockCode || stock.id || '';
+export interface TradingSubmitRequest {
+  executionMode: ManualOrderExecutionMode;
+  orderType: ManualOrderType;
+  price: string;
+  quantity: string;
+  selectedStock: Stock | null;
+  tradeType: 'buy' | 'sell';
 }
 
-function getOrderRemark(tradeType: 'buy' | 'sell', stockCode: string) {
-  return `交易控制台${tradeType === 'buy' ? '买入' : '平仓'}: ${stockCode}`;
+function getSelectedStockCode(stock: Stock) {
+  return String(stock.stockCode || stock.id || stock.code || '')
+    .trim()
+    .toUpperCase();
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = String(error.message || '').trim();
+    if (message) return message;
+  }
+  return fallback;
 }
 
 /**
- * 交易提交逻辑
+ * Web 手工委托的两阶段提交逻辑：先生成服务器预览，再消费一次性挑战排队。
  */
 export function useTradingSubmit(
-  onSuccessOrLegacyUserId?: (() => void) | string,
-  legacyOnSuccess?: () => void
+  instrumentCode: string,
+  onQueued?: () => void
 ) {
-  const onSuccess =
-    typeof onSuccessOrLegacyUserId === 'function'
-      ? onSuccessOrLegacyUserId
-      : legacyOnSuccess;
   const { toast } = useToast();
-  const { loading: isSubmitting, createOrder } = useCreateOrder();
   const { data: accountData } = useCurrentAccount();
   const accountId = accountData?.currentAccount?.id;
+  const {
+    capabilities,
+    error: capabilitiesError,
+    loading: capabilitiesLoading,
+  } = useManualOrderCapabilities(accountId, instrumentCode);
+  const { execute: executePreview, loading: previewLoading } =
+    usePreviewManualOrder();
+  const { execute: executeConfirm, loading: confirmLoading } =
+    useConfirmManualOrder();
+  const [preview, setPreview] = useState<ManualOrderPreviewTicket | null>(null);
+  const [confirmationError, setConfirmationError] = useState('');
+  const processingRef = useRef(false);
+
+  useEffect(() => {
+    setPreview(null);
+    setConfirmationError('');
+  }, [accountId, instrumentCode]);
 
   const handleSubmit = useCallback(
-    async (
-      e: React.SyntheticEvent,
-      tradeType: 'buy' | 'sell',
-      orderType: string,
-      selectedStock: Stock | null,
-      quantity: string,
-      price: string,
-      resetForm: () => void
-    ) => {
-      e.preventDefault();
+    async (event: React.SyntheticEvent, request: TradingSubmitRequest) => {
+      event.preventDefault();
+      if (processingRef.current) return;
 
       if (!accountId) {
         toast({
           title: '账户不可用',
-          description: '未连接资金账户，无法提交委托',
+          description: '未连接唯一资金账户，无法生成委托预览',
           variant: 'destructive',
         });
         return;
       }
 
-      if (!selectedStock || !quantity || !price) {
+      const stockCode = request.selectedStock
+        ? getSelectedStockCode(request.selectedStock)
+        : '';
+      const quantity = Number(request.quantity);
+      const limitPrice = Number(request.price);
+      const side =
+        request.tradeType === 'buy'
+          ? ManualOrderSide.Buy
+          : ManualOrderSide.Sell;
+      const priceType =
+        request.orderType === 'best'
+          ? ManualOrderPriceType.Best
+          : ManualOrderPriceType.Limit;
+
+      if (!/^\d{6}\.(SH|SZ|BJ)$/.test(stockCode)) {
         toast({
-          title: '信息不完整',
-          description: '请填写完整的交易信息',
+          title: '证券代码无效',
+          description: '请选择带 SH、SZ 或 BJ 市场后缀的证券',
           variant: 'destructive',
         });
         return;
       }
-
-      const stockCode = getSelectedStockCode(selectedStock);
-      const quantityNum = parseInt(quantity, 10);
-      const priceNum = parseFloat(price);
-
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        toast({
+          title: '委托数量无效',
+          description: '请输入有效的正整数委托数量',
+          variant: 'destructive',
+        });
+        return;
+      }
       if (
-        !stockCode ||
-        !Number.isFinite(quantityNum) ||
-        quantityNum <= 0 ||
-        !Number.isFinite(priceNum) ||
-        priceNum <= 0
+        priceType === ManualOrderPriceType.Limit &&
+        (!Number.isFinite(limitPrice) || limitPrice <= 0)
       ) {
         toast({
-          title: '交易参数无效',
-          description: '请检查证券代码、价格和委托数量',
+          title: '委托价格无效',
+          description: '限价委托必须填写大于 0 的有效价格',
+          variant: 'destructive',
+        });
+        return;
+      }
+      if (
+        !capabilities ||
+        capabilities.accountId !== accountId ||
+        capabilities.instrumentCode !== stockCode ||
+        !capabilities.canManualTrade ||
+        !capabilities.supportedSides.includes(side) ||
+        !capabilities.supportedPriceTypes.includes(priceType) ||
+        !capabilities.executionModes.includes(request.executionMode) ||
+        (request.executionMode === ManualOrderExecutionMode.Live &&
+          !(side === ManualOrderSide.Buy
+            ? capabilities.canLiveBuy
+            : capabilities.canLiveSell))
+      ) {
+        toast({
+          title: '当前委托能力不可用',
+          description:
+            capabilities?.liveBlockedReasons[0] ||
+            '服务端尚未允许当前方向、报价方式或执行模式',
           variant: 'destructive',
         });
         return;
       }
 
+      processingRef.current = true;
+      setConfirmationError('');
       try {
-        const result = await createOrder({
-          stockCode,
-          type: tradeType.toUpperCase(), // BUY or SELL
-          priceType: orderType.toUpperCase(), // LIMIT/MARKET/VWAP
-          price: priceNum,
-          volume: quantityNum,
-          strategyName: '手动交易',
-          orderRemark: getOrderRemark(tradeType, stockCode),
-          accountId,
+        const result = await executePreview({
+          input: {
+            accountId,
+            executionMode: request.executionMode,
+            idempotencyKey: createClientId('manual-order'),
+            instrumentCode: stockCode,
+            limitPrice:
+              priceType === ManualOrderPriceType.Limit ? limitPrice : undefined,
+            priceType,
+            side,
+            volume: quantity,
+          },
         });
-        const orderResult = result.data?.placeOrder;
-
-        if (result.error || orderResult?.success === false) {
+        const payload = result.data?.previewManualOrder;
+        if (result.error || !payload?.success || !payload.preview) {
           toast({
-            title: '交易失败',
+            title: '无法生成安全预览',
             description:
-              result.error?.message ||
-              orderResult?.message ||
-              '请检查输入信息后重试',
+              payload?.message ||
+              errorMessage(result.error, '服务端预览失败，请稍后重试'),
             variant: 'destructive',
           });
-        } else {
-          toast({
-            title: '交易成功',
-            description: '订单已提交',
-          });
-          resetForm();
-          onSuccess?.();
+          return;
         }
+        setPreview(payload.preview);
       } catch (error) {
         toast({
-          title: '系统错误',
-          description: error instanceof Error ? error.message : '交易提交异常',
+          title: '无法生成安全预览',
+          description: errorMessage(error, '服务端预览失败，请稍后重试'),
           variant: 'destructive',
         });
+      } finally {
+        processingRef.current = false;
       }
     },
-    [accountId, createOrder, toast, onSuccess]
+    [accountId, capabilities, executePreview, toast]
   );
+
+  const confirmPreview = useCallback(async () => {
+    if (!preview || processingRef.current) return false;
+    if (Date.parse(preview.challengeExpiresAt) <= Date.now()) {
+      setConfirmationError('确认票据已过期，请取消后重新获取服务器预览');
+      return false;
+    }
+
+    processingRef.current = true;
+    setConfirmationError('');
+    try {
+      const result = await executeConfirm({
+        input: {
+          challengeId: preview.challengeId,
+          confirmationToken: preview.confirmationToken,
+        },
+      });
+      const payload = result.data?.confirmManualOrder;
+      if (result.error || !payload?.success) {
+        setConfirmationError(
+          payload?.message ||
+            errorMessage(result.error, '委托确认失败，请重新获取预览')
+        );
+        return false;
+      }
+
+      setPreview(null);
+      toast({
+        title: '委托命令已排队',
+        description:
+          payload.message || '请等待 QMT Agent 和券商委托回报更新最终状态',
+      });
+      onQueued?.();
+      return true;
+    } catch (error) {
+      setConfirmationError(errorMessage(error, '委托确认失败，请重新获取预览'));
+      return false;
+    } finally {
+      processingRef.current = false;
+    }
+  }, [executeConfirm, onQueued, preview, toast]);
+
+  const dismissPreview = useCallback(() => {
+    if (processingRef.current) return;
+    setPreview(null);
+    setConfirmationError('');
+  }, []);
 
   return useMemo(
     () => ({
+      capabilities,
+      capabilitiesError,
+      capabilitiesLoading,
+      confirmationError,
+      confirmPreview,
+      dismissPreview,
       handleSubmit,
-      isSubmitting,
+      isConfirming: confirmLoading,
+      isPreviewing: previewLoading,
+      preview,
     }),
-    [handleSubmit, isSubmitting]
+    [
+      capabilities,
+      capabilitiesError,
+      capabilitiesLoading,
+      confirmationError,
+      confirmLoading,
+      confirmPreview,
+      dismissPreview,
+      handleSubmit,
+      preview,
+      previewLoading,
+    ]
   );
 }

@@ -17,6 +17,11 @@ import type {
   PortfolioSummaryData,
   Position,
 } from '@/features/portfolio/types';
+import {
+  ManualOrderExecutionMode,
+  ManualOrderPriceType,
+  ManualOrderSide,
+} from '@/generated/gql/graphql';
 import { useStockSearch } from '@/hooks/useStockSearch';
 import type { Stock } from '@/shared/types';
 import { formatCurrency } from '@/shared/utils/format';
@@ -25,6 +30,7 @@ import { cn } from '@/utils/cn';
 import { useFormState } from './hooks/useFormState';
 import { useTradingCalculation } from './hooks/useTradingCalculation';
 import { useTradingSubmit } from './hooks/useTradingSubmit';
+import { ManualOrderConfirmationDialog } from './ManualOrderConfirmationDialog';
 
 interface TradingCardProps {
   holdings: Position[];
@@ -76,12 +82,6 @@ const QUICK_QUANTITY_PRESETS = [
 ] as const;
 
 type QuickQuantityPreset = (typeof QUICK_QUANTITY_PRESETS)[number];
-
-const clampQuantity = (value: number, maxQuantity: number) => {
-  const quantity = toNonNegativeInteger(value);
-  if (quantity <= 0) return 0;
-  return maxQuantity > 0 ? Math.min(quantity, maxQuantity) : quantity;
-};
 
 const toBuyLotQuantity = (value: number) =>
   Math.floor(toNonNegativeInteger(value) / BUY_LOT_SIZE) * BUY_LOT_SIZE;
@@ -160,6 +160,9 @@ export function TradingCard({
     setPrice,
     resetForm,
   } = useFormState(initialSide === 'SELL' ? 'sell' : 'buy');
+  const [executionMode, setExecutionMode] = React.useState(
+    ManualOrderExecutionMode.Paper
+  );
 
   const {
     selectedStock,
@@ -252,23 +255,39 @@ export function TradingCard({
     }
   }, [holdings, normalizedInitialStockCode, selectedStock, selectStock]);
 
-  const { estimatedAmount, estimatedFees } = useTradingCalculation(
-    quantity,
-    price
-  );
-
-  const { handleSubmit, isSubmitting } = useTradingSubmit(() => {
+  const {
+    capabilities,
+    capabilitiesError,
+    capabilitiesLoading,
+    confirmationError,
+    confirmPreview,
+    dismissPreview,
+    handleSubmit,
+    isConfirming,
+    isPreviewing,
+    preview,
+  } = useTradingSubmit(selectedStockCode, () => {
     resetForm();
+    setExecutionMode(ManualOrderExecutionMode.Paper);
     onSuccess?.();
   });
 
   const currentOrderPrice = React.useMemo(() => {
     return (
-      toPositiveNumber(price) ||
+      (orderType === 'limit' ? toPositiveNumber(price) : 0) ||
       toPositiveNumber(selectedStock?.quote?.lastPrice) ||
       toPositiveNumber(selectedStock?.currentPrice)
     );
-  }, [price, selectedStock?.currentPrice, selectedStock?.quote?.lastPrice]);
+  }, [
+    orderType,
+    price,
+    selectedStock?.currentPrice,
+    selectedStock?.quote?.lastPrice,
+  ]);
+  const { estimatedAmount, estimatedFees } = useTradingCalculation(
+    quantity,
+    String(currentOrderPrice || '')
+  );
 
   const buyAvailableQuantity = toBuyLotQuantity(
     currentOrderPrice > 0
@@ -288,19 +307,37 @@ export function TradingCard({
       : selectedHolding
         ? sellAvailableQuantity.toLocaleString()
         : '0';
-  const quantityMax = availableQuantity > 0 ? availableQuantity : undefined;
-  const quantityMin = tradeType === 'buy' ? 100 : 1;
-  const quantityStep = tradeType === 'buy' ? 100 : 1;
-  const quantityNumber = toNonNegativeInteger(quantity);
-  const canSubmitPrice = toPositiveNumber(price) > 0;
-  const canSubmitQuantity =
-    quantityNumber > 0 &&
-    (tradeType === 'buy'
-      ? buyAvailableQuantity > 0 &&
-        quantityNumber >= BUY_LOT_SIZE &&
-        quantityNumber % BUY_LOT_SIZE === 0 &&
-        quantityNumber <= buyAvailableQuantity
-      : sellAvailableQuantity > 0 && quantityNumber <= sellAvailableQuantity);
+  const parsedQuantity = Number(quantity);
+  const quantityNumber =
+    Number.isInteger(parsedQuantity) && parsedQuantity > 0 ? parsedQuantity : 0;
+  const manualOrderSide =
+    tradeType === 'buy' ? ManualOrderSide.Buy : ManualOrderSide.Sell;
+  const manualOrderPriceType =
+    orderType === 'best'
+      ? ManualOrderPriceType.Best
+      : ManualOrderPriceType.Limit;
+  const canUseLive = Boolean(
+    capabilities?.executionModes.includes(ManualOrderExecutionMode.Live) &&
+    (tradeType === 'buy' ? capabilities.canLiveBuy : capabilities.canLiveSell)
+  );
+  const directionSupported = Boolean(
+    capabilities?.supportedSides.includes(manualOrderSide)
+  );
+  const priceTypeSupported = Boolean(
+    capabilities?.supportedPriceTypes.includes(manualOrderPriceType)
+  );
+  const executionModeSupported = Boolean(
+    capabilities?.executionModes.includes(executionMode) &&
+    (executionMode !== ManualOrderExecutionMode.Live || canUseLive)
+  );
+  const canSubmitPrice = orderType === 'best' || toPositiveNumber(price) > 0;
+  const canSubmitQuantity = quantityNumber > 0;
+  const canPreview = Boolean(
+    capabilities?.canManualTrade &&
+    directionSupported &&
+    priceTypeSupported &&
+    executionModeSupported
+  );
 
   React.useEffect(() => {
     if (priceUpdate?.price) {
@@ -309,31 +346,26 @@ export function TradingCard({
   }, [priceUpdate, setPrice]);
 
   React.useEffect(() => {
-    if (!quantity) return;
-    const parsedQuantity = toNonNegativeInteger(quantity);
-    if (parsedQuantity <= 0) {
-      setQuantity('');
-      return;
+    setExecutionMode(ManualOrderExecutionMode.Paper);
+  }, [selectedStockCode]);
+
+  React.useEffect(() => {
+    if (!capabilities) return;
+    if (
+      !capabilities.executionModes.includes(executionMode) ||
+      (executionMode === ManualOrderExecutionMode.Live && !canUseLive)
+    ) {
+      setExecutionMode(ManualOrderExecutionMode.Paper);
     }
-    if (tradeType === 'sell') {
-      const nextQuantity =
-        sellAvailableQuantity > 0
-          ? clampQuantity(parsedQuantity, sellAvailableQuantity)
-          : 0;
-      if (nextQuantity !== parsedQuantity) {
-        setQuantity(nextQuantity > 0 ? nextQuantity.toString() : '');
-      }
-      return;
-    }
-    if (buyAvailableQuantity > 0 && parsedQuantity > buyAvailableQuantity) {
-      setQuantity(buyAvailableQuantity.toString());
+    if (!capabilities.supportedPriceTypes.includes(manualOrderPriceType)) {
+      setOrderType('limit');
     }
   }, [
-    buyAvailableQuantity,
-    quantity,
-    sellAvailableQuantity,
-    setQuantity,
-    tradeType,
+    canUseLive,
+    capabilities,
+    executionMode,
+    manualOrderPriceType,
+    setOrderType,
   ]);
 
   const handleQuantityChange = (value: string) => {
@@ -341,22 +373,14 @@ export function TradingCard({
       setQuantity('');
       return;
     }
-    const parsedQuantity = toNonNegativeInteger(value);
-    if (parsedQuantity <= 0) {
-      setQuantity('');
-      return;
-    }
-    if (tradeType === 'sell' && sellAvailableQuantity <= 0) {
-      setQuantity('');
-      return;
-    }
-    setQuantity(clampQuantity(parsedQuantity, availableQuantity).toString());
+    setQuantity(value);
   };
 
   const handleTradeTypeChange = (nextTradeType: 'buy' | 'sell') => {
     if (nextTradeType === tradeType) return;
     setTradeType(nextTradeType);
     setQuantity('');
+    setExecutionMode(ManualOrderExecutionMode.Paper);
   };
 
   return (
@@ -367,10 +391,31 @@ export function TradingCard({
           <h4 className="text-ui-micro font-bold uppercase tracking-[0.2em] text-muted-foreground/50">
             交易控制台
           </h4>
-          <div className="flex items-center gap-1.5 px-1.5 py-0.5 bg-blue-500/5 rounded-full border border-blue-500/10">
-            <div className="w-1 h-1 bg-blue-500 rounded-full animate-pulse" />
-            <span className="text-ui-micro font-bold text-blue-500/70 uppercase tracking-tighter">
-              Live
+          <div
+            className={cn(
+              'flex items-center gap-1.5 rounded-full border px-1.5 py-0.5',
+              executionMode === ManualOrderExecutionMode.Live
+                ? 'border-amber-400/25 bg-amber-400/10'
+                : 'border-blue-500/15 bg-blue-500/5'
+            )}
+          >
+            <div
+              className={cn(
+                'h-1 w-1 rounded-full',
+                executionMode === ManualOrderExecutionMode.Live
+                  ? 'bg-amber-300'
+                  : 'bg-blue-500'
+              )}
+            />
+            <span
+              className={cn(
+                'text-ui-micro font-bold uppercase tracking-tighter',
+                executionMode === ManualOrderExecutionMode.Live
+                  ? 'text-amber-200'
+                  : 'text-blue-500/70'
+              )}
+            >
+              {executionMode}
             </span>
           </div>
         </div>
@@ -413,16 +458,15 @@ export function TradingCard({
       </div>
 
       <form
-        onSubmit={e =>
-          handleSubmit(
-            e,
-            tradeType,
+        onSubmit={event =>
+          handleSubmit(event, {
+            executionMode,
             orderType,
-            selectedStock,
-            quantity,
             price,
-            resetForm
-          )
+            quantity,
+            selectedStock,
+            tradeType,
+          })
         }
         className="flex-1 flex flex-col min-h-0"
       >
@@ -447,19 +491,126 @@ export function TradingCard({
                 onStockSelect={selectStock}
                 selectedStock={selectedStock}
               />
+              <div className="mt-2 px-1 text-ui-caption" role="status">
+                {capabilitiesLoading ? (
+                  <span className="text-slate-500">
+                    正在读取服务端下单能力…
+                  </span>
+                ) : capabilitiesError ? (
+                  <span className="text-rose-300">
+                    下单能力读取失败，请稍后重试
+                  </span>
+                ) : capabilities && !capabilities.canManualTrade ? (
+                  <span className="text-rose-300">
+                    {capabilities.liveBlockedReasons[0] ||
+                      '当前证券不可手动交易'}
+                  </span>
+                ) : capabilities ? (
+                  <span className="text-emerald-300">服务端下单能力已就绪</span>
+                ) : (
+                  <span className="text-slate-500">请选择带市场后缀的证券</span>
+                )}
+              </div>
             </div>
 
-            {/* 第二部分：价格设置 */}
+            {/* 第二部分：执行模式 */}
+            <div className="rounded-panel border border-slate-200/20 bg-slate-50/30 p-2 pb-2.5 transition-colors dark:border-slate-800/20 dark:bg-slate-900/10">
+              <div className="mb-1.5 flex items-center justify-between px-1">
+                <Label className="text-ui-micro font-black uppercase tracking-widest text-muted-foreground/40">
+                  执行模式
+                </Label>
+                <span className="text-ui-micro text-muted-foreground/50">
+                  默认 PAPER
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <Button
+                  type="button"
+                  variant="outline"
+                  aria-pressed={
+                    executionMode === ManualOrderExecutionMode.Paper
+                  }
+                  disabled={
+                    !capabilities?.executionModes.includes(
+                      ManualOrderExecutionMode.Paper
+                    )
+                  }
+                  className={cn(
+                    'h-control-compact rounded-control text-ui-label',
+                    executionMode === ManualOrderExecutionMode.Paper
+                      ? 'border-primary/40 bg-primary/10 text-primary'
+                      : 'border-slate-700 text-slate-400'
+                  )}
+                  onClick={() =>
+                    setExecutionMode(ManualOrderExecutionMode.Paper)
+                  }
+                >
+                  PAPER 模拟
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  aria-pressed={executionMode === ManualOrderExecutionMode.Live}
+                  disabled={!canUseLive}
+                  title={
+                    canUseLive
+                      ? '本次预览明确请求实盘执行'
+                      : capabilities?.liveBlockedReasons[0] ||
+                        '服务端尚未开放当前方向的实盘能力'
+                  }
+                  className={cn(
+                    'h-control-compact rounded-control text-ui-label',
+                    executionMode === ManualOrderExecutionMode.Live
+                      ? 'border-amber-400/40 bg-amber-400/10 text-amber-200'
+                      : 'border-slate-700 text-slate-400'
+                  )}
+                  onClick={() =>
+                    setExecutionMode(ManualOrderExecutionMode.Live)
+                  }
+                >
+                  LIVE 实盘
+                </Button>
+              </div>
+              <p
+                className={cn(
+                  'mt-2 px-1 text-ui-caption leading-4',
+                  executionMode === ManualOrderExecutionMode.Live
+                    ? 'text-amber-200/80'
+                    : 'text-slate-500'
+                )}
+              >
+                {executionMode === ManualOrderExecutionMode.Live
+                  ? '高风险：确认后进入实盘执行链，仍以券商回报为最终状态。'
+                  : '预览和确认都只进入模拟执行链，不会自动切换实盘。'}
+              </p>
+            </div>
+
+            {/* 第三部分：价格设置 */}
             <div className="group/section bg-slate-50/30 dark:bg-slate-900/10 rounded-panel border border-slate-200/20 dark:border-slate-800/20 p-2 pb-2.5 hover:border-slate-300/40 dark:hover:border-slate-700/40 transition-all duration-300">
               <div className="flex items-center justify-between mb-1.5 px-1">
                 <Label className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest">
                   价格设置
                 </Label>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const p = (
+                {orderType === 'limit' && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const p = (
+                          parseFloat(
+                            String(
+                              selectedStock?.quote?.lastPrice ??
+                                selectedStock?.currentPrice ??
+                                '0'
+                            )
+                          ) * 0.9
+                        ).toFixed(2);
+                        if (Number(p) > 0) setPrice(p);
+                      }}
+                      className="text-ui-micro font-black text-market-down/60 hover:text-market-down transition-colors uppercase"
+                    >
+                      跌停{' '}
+                      {(
                         parseFloat(
                           String(
                             selectedStock?.quote?.lastPrice ??
@@ -467,26 +618,26 @@ export function TradingCard({
                               '0'
                           )
                         ) * 0.9
-                      ).toFixed(2);
-                      if (Number(p) > 0) setPrice(p);
-                    }}
-                    className="text-ui-micro font-black text-market-down/60 hover:text-market-down transition-colors uppercase"
-                  >
-                    跌停{' '}
-                    {(
-                      parseFloat(
-                        String(
-                          selectedStock?.quote?.lastPrice ??
-                            selectedStock?.currentPrice ??
-                            '0'
-                        )
-                      ) * 0.9
-                    ).toFixed(2)}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const p = (
+                      ).toFixed(2)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const p = (
+                          parseFloat(
+                            String(
+                              selectedStock?.quote?.lastPrice ??
+                                selectedStock?.currentPrice ??
+                                '0'
+                            )
+                          ) * 1.1
+                        ).toFixed(2);
+                        if (Number(p) > 0) setPrice(p);
+                      }}
+                      className="text-ui-micro font-black text-market-up/60 hover:text-market-up transition-colors uppercase"
+                    >
+                      涨停{' '}
+                      {(
                         parseFloat(
                           String(
                             selectedStock?.quote?.lastPrice ??
@@ -494,33 +645,27 @@ export function TradingCard({
                               '0'
                           )
                         ) * 1.1
-                      ).toFixed(2);
-                      if (Number(p) > 0) setPrice(p);
-                    }}
-                    className="text-ui-micro font-black text-market-up/60 hover:text-market-up transition-colors uppercase"
-                  >
-                    涨停{' '}
-                    {(
-                      parseFloat(
-                        String(
-                          selectedStock?.quote?.lastPrice ??
-                            selectedStock?.currentPrice ??
-                            '0'
-                        )
-                      ) * 1.1
-                    ).toFixed(2)}
-                  </button>
-                </div>
+                      ).toFixed(2)}
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center gap-2 bg-white/50 dark:bg-slate-950/50 p-1 rounded-lg border border-slate-200/40 dark:border-slate-800/40 focus-within:ring-1 focus-within:ring-primary/20 focus-within:border-primary/40 transition-all">
-                <Select value={orderType} onValueChange={setOrderType}>
+                <Select
+                  value={orderType}
+                  onValueChange={value =>
+                    setOrderType(value === 'best' ? 'best' : 'limit')
+                  }
+                >
                   <SelectTrigger className="w-[80px] h-control-compact text-ui-caption border-none shadow-none bg-slate-100/50 dark:bg-slate-900/50 focus:ring-0 focus:ring-offset-0 ring-0 outline-none px-2 font-bold rounded-md transition-colors">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="rounded-lg border-slate-200/40 dark:border-slate-800/40">
                     <SelectItem value="limit">限价单</SelectItem>
-                    <SelectItem value="market">市价单</SelectItem>
+                    {capabilities?.supportedPriceTypes.includes(
+                      ManualOrderPriceType.Best
+                    ) && <SelectItem value="best">对手方最优</SelectItem>}
                   </SelectContent>
                 </Select>
 
@@ -528,28 +673,29 @@ export function TradingCard({
 
                 <div className="flex-1 flex items-center justify-end gap-1 px-1">
                   <span className="text-ui-micro font-bold text-muted-foreground/30 font-mono">
-                    CNY
+                    {orderType === 'best' ? 'BEST' : 'CNY'}
                   </span>
                   <Input
                     className="w-full max-w-[80px] h-control-compact text-ui-body font-black font-mono bg-transparent border-none shadow-none focus-visible:ring-0 text-right p-0 no-spin placeholder:text-muted-foreground/20"
                     type="number"
                     step="0.01"
-                    value={price}
+                    value={orderType === 'best' ? '' : price}
                     onChange={e => setPrice(e.target.value)}
-                    placeholder="0.00"
+                    placeholder={orderType === 'best' ? '服务端预览' : '0.00'}
+                    disabled={orderType === 'best'}
                   />
                 </div>
               </div>
             </div>
 
-            {/* 第三部分：委托数量 */}
+            {/* 第四部分：委托数量 */}
             <div className="group/section bg-slate-50/30 dark:bg-slate-900/10 rounded-panel border border-slate-200/20 dark:border-slate-800/20 p-2 pb-2.5 hover:border-slate-300/40 dark:hover:border-slate-700/40 transition-all duration-300">
               <div className="flex items-center justify-between mb-1.5 px-1">
                 <Label className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest">
                   委托数量
                 </Label>
                 <div className="flex items-center gap-1 text-ui-micro font-bold uppercase tracking-tighter">
-                  <span className="text-muted-foreground/50">可用</span>
+                  <span className="text-muted-foreground/50">本地估算可用</span>
                   <span className="text-primary tabular-nums">
                     {availableQuantityLabel}
                   </span>
@@ -564,9 +710,8 @@ export function TradingCard({
                   placeholder="100"
                   value={quantity}
                   onChange={e => handleQuantityChange(e.target.value)}
-                  min={quantityMin}
-                  max={quantityMax}
-                  step={quantityStep}
+                  min={1}
+                  step={1}
                 />
                 <div className="absolute right-3 top-1/2 -translate-y-1/2 text-ui-micro font-bold text-muted-foreground/30 uppercase">
                   股
@@ -620,12 +765,12 @@ export function TradingCard({
           </div>
         </ScrollArea>
 
-        {/* 第四部分：费用预览与提交 */}
+        {/* 本地估算与服务器预览 */}
         <div className="space-y-3 pt-3 border-t border-slate-200/20 dark:border-slate-800/20 shrink-0">
           <div className="grid grid-cols-2 gap-3 px-1">
             <div className="flex flex-col gap-0.5">
               <span className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest leading-none">
-                预计总额
+                本地估算总额
               </span>
               <span className="text-ui-label font-black font-mono text-foreground tabular-nums drop-shadow-sm">
                 {formatCurrency(estimatedAmount)}
@@ -633,7 +778,7 @@ export function TradingCard({
             </div>
             <div className="flex flex-col gap-0.5 text-right">
               <span className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest leading-none">
-                预计规费
+                本地估算规费
               </span>
               <span className="text-ui-label font-black font-mono text-muted-foreground/60 tabular-nums">
                 {formatCurrency(estimatedFees)}
@@ -653,20 +798,32 @@ export function TradingCard({
               !selectedStock ||
               !canSubmitPrice ||
               !canSubmitQuantity ||
-              isSubmitting
+              !canPreview ||
+              capabilitiesLoading ||
+              isPreviewing
             }
           >
-            {isSubmitting ? (
+            {isPreviewing ? (
               <div className="flex items-center gap-2">
                 <div className="w-2.5 h-2.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                <span>处理中...</span>
+                <span>生成预览中...</span>
               </div>
             ) : (
-              `确认${tradeType === 'buy' ? '买入' : '平仓'}`
+              `获取${tradeType === 'buy' ? '买入' : '平仓'}预览`
             )}
           </Button>
+          <p className="text-center text-ui-caption text-muted-foreground/50">
+            服务端会重新计算合法数量、费用并执行统一风控
+          </p>
         </div>
       </form>
+      <ManualOrderConfirmationDialog
+        confirmationError={confirmationError}
+        isConfirming={isConfirming}
+        onConfirm={confirmPreview}
+        onDismiss={dismissPreview}
+        preview={preview}
+      />
     </Card>
   );
 }
