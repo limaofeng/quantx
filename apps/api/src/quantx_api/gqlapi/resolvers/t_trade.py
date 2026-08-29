@@ -58,7 +58,10 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeBatch,
   TTradeBatchEvent,
   TTradeBatchEventPage,
+  TTradeBatchFilterInput,
+  TTradeBatchMetrics,
   TTradeBatchPage,
+  TTradeBatchSummary,
   TTradeCandidateApprovalExpectationInput,
   TTradeCandidateOutcomeAggregate,
   TTradeCandidateStatus,
@@ -2466,31 +2469,23 @@ class TTradeResolver:
   async def list_batches(
     cls,
     account_id: str,
-    status_group: Optional[str],
+    batch_filter: TTradeBatchFilterInput,
     offset: int,
     limit: int,
   ) -> List[TTradeBatch]:
     rows = await cls.operations_service.list_batches(
       account_id,
-      status_group=status_group,
+      batch_filter=cls._batch_filter(batch_filter),
       offset=offset,
       limit=limit,
     )
-    return [
-      TTradeBatch(
-        **cls._graphql_kwargs(
-          TTradeBatch,
-          cls._with_datetimes(row, "created_at", "updated_at"),
-        )
-      )
-      for row in rows
-    ]
+    return [cls._batch_type(row) for row in rows]
 
   @classmethod
   async def list_batches_page(
     cls,
     account_id: str,
-    status_group: Optional[str],
+    batch_filter: TTradeBatchFilterInput,
     first: int,
     after: Optional[str],
   ) -> TTradeBatchPage:
@@ -2498,31 +2493,55 @@ class TTradeResolver:
     cursor_id = None
     if after:
       cursor_time, cursor_id = decode_datetime_cursor(after)
-    rows, has_next_page = await cls.operations_service.list_batches_page(
+    rows, has_next_page, summary = await cls.operations_service.list_batches_page(
       account_id,
-      status_group=status_group,
-      cursor_updated_at=cursor_time,
+      batch_filter=cls._batch_filter(batch_filter),
+      cursor_activity_at=cursor_time,
       cursor_id=cursor_id,
       first=first,
     )
-    cursors = [encode_cursor(row["updated_at"], row["batch_id"]) for row in rows]
+    cursors = [encode_cursor(row["activity_at"], row["batch_id"]) for row in rows]
     return TTradeBatchPage(
-      items=[
-        TTradeBatch(
-          **cls._graphql_kwargs(
-            TTradeBatch,
-            cls._with_datetimes(row, "created_at", "updated_at"),
-          )
-        )
-        for row in rows
-      ],
+      items=[cls._batch_type(row) for row in rows],
       page_info=PageInfo(
         has_next_page=has_next_page,
         has_previous_page=bool(after),
         start_cursor=cursors[0] if cursors else None,
         end_cursor=cursors[-1] if cursors else None,
       ),
+      summary=TTradeBatchSummary(**summary),
     )
+
+  @staticmethod
+  def _batch_filter(
+    value: TTradeBatchFilterInput,
+  ) -> dict[str, Any]:
+    return {
+      "scope": getattr(value.scope, "value", value.scope),
+      "execution_modes": [
+        getattr(item, "value", item) for item in list(value.execution_modes or [])
+      ],
+      "result_groups": [
+        getattr(item, "value", item) for item in list(value.result_groups or [])
+      ],
+      "keyword": value.keyword,
+      "start_time": value.start_time,
+      "end_time": value.end_time,
+    }
+
+  @classmethod
+  def _batch_type(cls, row: dict[str, Any]) -> TTradeBatch:
+    payload = cls._with_datetimes(
+      row,
+      "entry_filled_at",
+      "closed_at",
+      "terminal_at",
+      "price_as_of",
+      "created_at",
+      "updated_at",
+    )
+    payload["metrics"] = TTradeBatchMetrics(**dict(payload.get("metrics") or {}))
+    return TTradeBatch(**cls._graphql_kwargs(TTradeBatch, payload))
 
   @classmethod
   async def list_batch_events(

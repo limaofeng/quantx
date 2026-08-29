@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   canDeleteReplay,
+  mapReplayCyclesToActivityBatches,
   mapReplayCyclesToActivityEvents,
   mapReplayCyclesToPositionBatches,
   mapReplayDecisionsToActivityEvaluations,
@@ -73,7 +74,7 @@ describe('replay workspace projections', () => {
       strategyRunId: 'run-replay',
       activeVolume: 0,
       netProfit: 380,
-      status: 'COMPLETED',
+      status: 'CLOSED',
     });
     expect(batch.entryBrokerOrderId).toBeNull();
     expect(events).toHaveLength(2);
@@ -84,6 +85,45 @@ describe('replay workspace projections', () => {
     expect(events[1].payload).toMatchObject({
       report: { source: 'BACKTEST_BROKER', direction: 'SELL' },
     });
+  });
+
+  it('keeps an unclosed replay cycle without an authoritative end mark incomplete', () => {
+    const openCycle: ReplayCycleLike = {
+      ...completedCycle,
+      batchId: 'cycle-open',
+      status: 'OPEN',
+      exitTime: null,
+      exitVolume: 0,
+      exitAvgPrice: 0,
+      openVolume: 100,
+      netProfit: 280,
+      netReturnPct: 0.18,
+    };
+
+    const [batch] = mapReplayCyclesToPositionBatches([openCycle], 'run-replay');
+    const [activityBatch] = mapReplayCyclesToActivityBatches(
+      [openCycle],
+      'run-replay'
+    );
+
+    expect(batch).toMatchObject({
+      status: 'ACTIVE',
+      lastPrice: null,
+      priceAsOf: null,
+      priceQuality: 'MISSING',
+      netProfit: null,
+      peakNetProfitPct: null,
+      terminalAt: null,
+      closedAt: null,
+      metrics: {
+        metricBasis: 'INCOMPLETE',
+        realizedNetProfitCny: null,
+        markToMarketNetProfitCny: null,
+        netReturnPct: null,
+      },
+    });
+    expect(activityBatch.lastPrice).toBeNull();
+    expect(activityBatch.peakNetProfitPct).toBeNull();
   });
 
   it('projects replay decisions and rejected execution facts into activity data', () => {

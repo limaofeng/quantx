@@ -4971,7 +4971,7 @@ type Query {
   watchlistGroups(accountId: String = null): [WatchlistGroup!]!
 
   """游标分页查询持久化做 T 批次"""
-  tTradeBatchesPage(accountId: String!, statusGroup: String = null, first: Int! = 30, after: String = null): TTradeBatchPage!
+  tTradeBatchesPage(accountId: String!, filter: TTradeBatchFilterInput!, first: Int! = 50, after: String = null): TTradeBatchPage!
 
   """游标分页查询做 T 委托和成交事件"""
   tTradeBatchEventsPage(accountId: String!, batchId: String = null, first: Int! = 30, after: String = null): TTradeBatchEventPage!
@@ -4998,7 +4998,7 @@ type Query {
   operationalAlerts(accountId: String!, status: String = null, severity: String = null, limit: Int! = 100): [OperationalAlert!]!
 
   """分页查询持久化做 T 批次"""
-  tTradeBatches(accountId: String!, statusGroup: String = null, offset: Int! = 0, limit: Int! = 100): [TTradeBatch!]!
+  tTradeBatches(accountId: String!, filter: TTradeBatchFilterInput!, offset: Int! = 0, limit: Int! = 100): [TTradeBatch!]!
 
   """查询做 T 批次的委托和成交事件"""
   tTradeBatchEvents(accountId: String!, batchId: String = null, limit: Int! = 100): [TTradeBatchEvent!]!
@@ -6713,12 +6713,20 @@ type TTradeBatch {
   exitFilledVolume: Int!
   exitAvgPrice: Float!
   activeVolume: Int!
-  lastPrice: Float!
+  lastPrice: Float
+  priceAsOf: DateTime
+  priceQuality: String!
   lastNetProfitPct: Float!
   peakNetProfitPct: Float!
   trailingFloorPct: Float
   exitReason: String
   exceptionReason: String
+  executionMode: String
+  metricsOrigin: String
+  entryFilledAt: DateTime
+  closedAt: DateTime
+  terminalAt: DateTime
+  metrics: TTradeBatchMetrics!
   policyVersion: Int!
   version: Int!
   createdAt: DateTime
@@ -6745,10 +6753,79 @@ type TTradeBatchEventPage {
   pageInfo: PageInfo!
 }
 
+"""做 T 批次执行来源"""
+enum TTradeBatchExecutionMode {
+  PAPER
+  LIVE
+}
+
+"""做 T 批次统一筛选"""
+input TTradeBatchFilterInput {
+  scope: TTradeBatchScope!
+  executionModes: [TTradeBatchExecutionMode!] = null
+  resultGroups: [TTradeBatchResultGroup!] = null
+  keyword: String = null
+  startTime: DateTime = null
+  endTime: DateTime = null
+}
+
+"""做 T 批次资金效率与税后收益"""
+type TTradeBatchMetrics {
+  """计算依据；当前统一为冻结成本规则估算 RULE_ESTIMATE"""
+  basis: String!
+
+  """指标事实来源；新批次为 RULE_ESTIMATE，历史权威回填为 LEGACY_BACKFILL"""
+  origin: String!
+  quality: String!
+  entryCapitalCny: Float
+  totalFeesCny: Float
+  realizedNetProfitCny: Float
+  markToMarketNetProfitCny: Float
+  netReturnPct: Float
+  holdingHours: Float
+  capitalUtilizationPct: Float
+}
+
 """做 T 批次游标分页"""
 type TTradeBatchPage {
   items: [TTradeBatch!]!
   pageInfo: PageInfo!
+  summary: TTradeBatchSummary!
+}
+
+"""做 T 历史批次结果"""
+enum TTradeBatchResultGroup {
+  COMPLETED
+  REJECTED
+}
+
+"""做 T 批次查询范围"""
+enum TTradeBatchScope {
+  CURRENT
+  TERMINAL
+}
+
+"""完整筛选范围内的做 T 批次摘要"""
+type TTradeBatchSummary {
+  totalCount: Int!
+  completedCount: Int!
+  completionRatePct: Float!
+  winningCount: Int!
+  winRatePct: Float
+
+  """仅汇总具备 COMPLETE 指标的批次；PARTIAL 时为部分合计，NONE 时为空"""
+  totalFeesCny: Float
+
+  """仅汇总具备 COMPLETE 指标的批次；PARTIAL 时为部分合计，NONE 时为空"""
+  netProfitCny: Float
+  averageHoldingHours: Float
+  averageCapitalUtilizationPct: Float
+  metricsCoveredCount: Int!
+  metricsTotalCount: Int!
+  metricsCoveragePct: Float!
+
+  """合计覆盖状态：NO_DATA、NONE、PARTIAL 或 COMPLETE"""
+  metricsCoverageState: String!
 }
 
 """确认 V3 做 T 候选时客户端观察到的 CAS 身份"""

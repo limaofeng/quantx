@@ -793,12 +793,20 @@ class TTradeBatch:
   exit_filled_volume: int
   exit_avg_price: float
   active_volume: int
-  last_price: float
+  last_price: Optional[float]
+  price_as_of: Optional[datetime]
+  price_quality: str
   last_net_profit_pct: float
   peak_net_profit_pct: float
   trailing_floor_pct: Optional[float]
   exit_reason: Optional[str]
   exception_reason: Optional[str]
+  execution_mode: Optional[str]
+  metrics_origin: Optional[str]
+  entry_filled_at: Optional[datetime]
+  closed_at: Optional[datetime]
+  terminal_at: Optional[datetime]
+  metrics: "TTradeBatchMetrics"
   policy_version: int
   version: int
   created_at: Optional[datetime]
@@ -819,10 +827,80 @@ class TTradeBatchEvent:
   error: Optional[str]
 
 
+@strawberry.enum(description="做 T 批次查询范围")
+class TTradeBatchScope(Enum):
+  CURRENT = "CURRENT"
+  TERMINAL = "TERMINAL"
+
+
+@strawberry.enum(description="做 T 批次执行来源")
+class TTradeBatchExecutionMode(Enum):
+  PAPER = "PAPER"
+  LIVE = "LIVE"
+
+
+@strawberry.enum(description="做 T 历史批次结果")
+class TTradeBatchResultGroup(Enum):
+  COMPLETED = "COMPLETED"
+  REJECTED = "REJECTED"
+
+
+@strawberry.input(description="做 T 批次统一筛选")
+class TTradeBatchFilterInput:
+  scope: TTradeBatchScope
+  execution_modes: Optional[List[TTradeBatchExecutionMode]] = None
+  result_groups: Optional[List[TTradeBatchResultGroup]] = None
+  keyword: Optional[str] = None
+  start_time: Optional[datetime] = None
+  end_time: Optional[datetime] = None
+
+
+@strawberry.type(description="做 T 批次资金效率与税后收益")
+class TTradeBatchMetrics:
+  basis: str = strawberry.field(
+    description="计算依据；当前统一为冻结成本规则估算 RULE_ESTIMATE"
+  )
+  origin: str = strawberry.field(
+    description="指标事实来源；新批次为 RULE_ESTIMATE，历史权威回填为 LEGACY_BACKFILL"
+  )
+  quality: str
+  entry_capital_cny: Optional[float]
+  total_fees_cny: Optional[float]
+  realized_net_profit_cny: Optional[float]
+  mark_to_market_net_profit_cny: Optional[float]
+  net_return_pct: Optional[float]
+  holding_hours: Optional[float]
+  capital_utilization_pct: Optional[float]
+
+
+@strawberry.type(description="完整筛选范围内的做 T 批次摘要")
+class TTradeBatchSummary:
+  total_count: int
+  completed_count: int
+  completion_rate_pct: float
+  winning_count: int
+  win_rate_pct: Optional[float]
+  total_fees_cny: Optional[float] = strawberry.field(
+    description="仅汇总具备 COMPLETE 指标的批次；PARTIAL 时为部分合计，NONE 时为空"
+  )
+  net_profit_cny: Optional[float] = strawberry.field(
+    description="仅汇总具备 COMPLETE 指标的批次；PARTIAL 时为部分合计，NONE 时为空"
+  )
+  average_holding_hours: Optional[float]
+  average_capital_utilization_pct: Optional[float]
+  metrics_covered_count: int
+  metrics_total_count: int
+  metrics_coverage_pct: float
+  metrics_coverage_state: str = strawberry.field(
+    description="合计覆盖状态：NO_DATA、NONE、PARTIAL 或 COMPLETE"
+  )
+
+
 @strawberry.type(description="做 T 批次游标分页")
 class TTradeBatchPage:
   items: List[TTradeBatch]
   page_info: PageInfo
+  summary: TTradeBatchSummary
 
 
 @strawberry.type(description="做 T 委托与成交事件游标分页")

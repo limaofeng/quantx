@@ -936,7 +936,11 @@ function ActivityRow({
         type="button"
         aria-expanded={expanded}
         aria-controls={snapshotId}
-        className="relative grid min-h-11 w-full cursor-pointer grid-cols-[40px_84px_minmax(110px,0.7fr)_minmax(135px,0.85fr)_minmax(200px,1.6fr)_24px] items-center gap-2 px-2 text-left transition-colors duration-200 hover:bg-blue-400/[0.035] focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 max-lg:grid-cols-[40px_78px_minmax(100px,0.6fr)_minmax(120px,0.7fr)_minmax(160px,1fr)_24px]"
+        className="relative grid min-h-11 w-full cursor-pointer items-center gap-2 px-2 text-left transition-colors duration-200 hover:bg-blue-400/[0.035] focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70"
+        style={{
+          gridTemplateColumns:
+            '40px 84px minmax(110px, 0.7fr) minmax(135px, 0.85fr) minmax(200px, 1.6fr) 24px',
+        }}
         onClick={onToggle}
       >
         <span
@@ -993,6 +997,7 @@ export function TTradeActivityView({
   eventError,
   events,
   evaluations,
+  focusedBatchId,
   hasMoreEvents,
   hasMoreSignals,
   includeDiagnostics,
@@ -1001,6 +1006,7 @@ export function TTradeActivityView({
   loading,
   loadingMore,
   onIncludeDiagnosticsChange,
+  onFocusedBatchIdClear,
   onLoadMore,
   onRefresh,
   onViewBatch,
@@ -1017,6 +1023,7 @@ export function TTradeActivityView({
   eventError?: string | null;
   events: readonly ActivityBatchEvent[];
   evaluations: readonly ActivitySignalEvaluation[];
+  focusedBatchId?: string | null;
   hasMoreEvents: boolean;
   hasMoreSignals: boolean;
   includeDiagnostics: boolean;
@@ -1025,6 +1032,7 @@ export function TTradeActivityView({
   loading: boolean;
   loadingMore: boolean;
   onIncludeDiagnosticsChange: (value: boolean) => void;
+  onFocusedBatchIdClear?: () => void;
   onLoadMore: () => void;
   onRefresh: () => void;
   onViewBatch: (batchId: string) => void;
@@ -1078,6 +1086,10 @@ export function TTradeActivityView({
       ).sort(),
     [items]
   );
+
+  React.useEffect(() => {
+    if (focusedBatchId) setSearch(focusedBatchId);
+  }, [focusedBatchId]);
 
   React.useEffect(() => {
     const newestId = items[0]?.id || null;
@@ -1245,12 +1257,31 @@ export function TTradeActivityView({
                   ))}
               </SelectContent>
             </Select>
+            {focusedBatchId && (
+              <button
+                type="button"
+                className="inline-flex h-control-compact cursor-pointer items-center gap-1.5 border border-blue-400/25 bg-blue-400/10 px-2.5 font-mono text-ui-micro text-blue-200 transition-colors hover:bg-blue-400/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                onClick={() => {
+                  setSearch('');
+                  onFocusedBatchIdClear?.();
+                }}
+              >
+                批次 {focusedBatchId.slice(0, 12)}
+                <XCircle className="h-3 w-3" aria-hidden="true" />
+                <span className="sr-only">清除批次筛选</span>
+              </button>
+            )}
             <div className="relative min-w-48 flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" />
               <Input
                 aria-label="搜索运行动态"
                 value={search}
-                onChange={event => setSearch(event.target.value)}
+                onChange={event => {
+                  setSearch(event.target.value);
+                  if (!event.target.value && focusedBatchId) {
+                    onFocusedBatchIdClear?.();
+                  }
+                }}
                 placeholder="搜索消息、标的或 ID"
                 className="h-8 rounded-sm border-white/10 bg-[#07111f] pl-8 text-ui-micro focus-visible:ring-blue-400/70"
               />
@@ -1323,7 +1354,13 @@ export function TTradeActivityView({
               </div>
             ) : (
               <div className="min-w-[820px]">
-                <div className="sticky top-0 z-10 grid h-8 grid-cols-[40px_84px_minmax(110px,0.7fr)_minmax(135px,0.85fr)_minmax(200px,1.6fr)_24px] items-center gap-2 border-b border-white/[0.06] bg-[#0b1628] px-2 text-ui-micro font-black uppercase tracking-[0.08em] text-slate-600 max-lg:grid-cols-[40px_78px_minmax(100px,0.6fr)_minmax(120px,0.7fr)_minmax(160px,1fr)_24px]">
+                <div
+                  className="sticky top-0 z-10 grid h-8 items-center gap-2 border-b border-white/[0.06] bg-[#0b1628] px-2 text-ui-micro font-black uppercase tracking-[0.08em] text-slate-600"
+                  style={{
+                    gridTemplateColumns:
+                      '40px 84px minmax(110px, 0.7fr) minmax(135px, 0.85fr) minmax(200px, 1.6fr) 24px',
+                  }}
+                >
                   <span />
                   <span>时间</span>
                   <span>标的</span>

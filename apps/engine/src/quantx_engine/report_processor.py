@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import md5, sha256
 from typing import Any, Awaitable, Callable, Optional
@@ -1893,6 +1893,38 @@ def _parse_report_time(value: Any) -> datetime:
   return time_utils.now()
 
 
+def _strict_t_trade_report_time(value: Any) -> datetime | None:
+  """Parse a broker lifecycle timestamp without inventing a receive time."""
+
+  if isinstance(value, datetime):
+    parsed = value
+  elif isinstance(value, (int, float)) and not isinstance(value, bool):
+    numeric = float(value)
+    if not math.isfinite(numeric):
+      return None
+    if numeric > 10_000_000_000:
+      numeric /= 1000.0
+    try:
+      parsed = datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+      return None
+  elif isinstance(value, str) and value.strip():
+    text = value.strip()
+    try:
+      parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+      try:
+        parsed = datetime.strptime(text, "%Y%m%d%H%M%S")
+      except ValueError:
+        return None
+  else:
+    return None
+  normalized = to_naive_utc(parsed)
+  if normalized > utcnow():
+    return None
+  return normalized
+
+
 def _parse_authoritative_snapshot_time(value: Any) -> datetime:
   """Parse a full-snapshot timestamp without turning bad input into ``now``."""
 
@@ -2741,6 +2773,10 @@ async def _project_t_trade_event(
     float(batch.entry_avg_price or 0.0),
     int(batch.exit_filled_volume or 0),
     float(batch.exit_avg_price or 0.0),
+    batch.entry_filled_at,
+    batch.last_exit_filled_at,
+    batch.closed_at,
+    batch.terminal_at,
   )
   broker_order_id = str(item.get("order_id") or item.get("broker_order_id") or "")
   if event_type == "ORDER":
@@ -2778,6 +2814,21 @@ async def _project_t_trade_event(
       batch.exception_reason = (
         str(item.get("effective_status_reason") or item.get("status_msg") or "") or None
       )
+      if (
+        batch.status in {"ENTRY_REJECTED", "ENTRY_EXPIRED"}
+        and int(batch.entry_filled_volume or 0) == 0
+      ):
+        # A zero-fill entry has no TRADE close.  Keep the broker ORDER terminal
+        # boundary separate from ``closed_at``, which is reserved for fills.
+        terminal_at = _strict_t_trade_report_time(
+          item.get("order_time") or item.get("reported_at")
+        )
+        if terminal_at is not None:
+          batch.terminal_at = (
+            max(batch.terminal_at, terminal_at)
+            if batch.terminal_at is not None
+            else terminal_at
+          )
     elif role == "EXIT":
       batch.status = {
         "PENDING": "EXIT_TRIGGERED",
@@ -2797,6 +2848,9 @@ async def _project_t_trade_event(
   else:
     volume = max(0, int(item.get("traded_volume") or item.get("volume") or 0))
     price = float(item.get("traded_price") or item.get("price") or 0.0)
+    traded_at = _strict_t_trade_report_time(
+      item.get("traded_time") or item.get("trade_time")
+    )
     if role == "ENTRY":
       previous = int(batch.entry_filled_volume or 0)
       total = previous + volume
@@ -2805,6 +2859,12 @@ async def _project_t_trade_event(
           float(batch.entry_avg_price or 0.0) * previous + price * volume
         ) / total
       batch.entry_filled_volume = total
+      if volume > 0 and price > 0 and traded_at is not None:
+        batch.entry_filled_at = (
+          min(batch.entry_filled_at, traded_at)
+          if batch.entry_filled_at is not None
+          else traded_at
+        )
       if terminal_projection and int(terminal_projection["expected"]) > int(
         terminal_projection["received"]
       ):
@@ -2823,6 +2883,12 @@ async def _project_t_trade_event(
           float(batch.exit_avg_price or 0.0) * previous + price * volume
         ) / total
       batch.exit_filled_volume = total
+      if volume > 0 and price > 0 and traded_at is not None:
+        batch.last_exit_filled_at = (
+          max(batch.last_exit_filled_at, traded_at)
+          if batch.last_exit_filled_at is not None
+          else traded_at
+        )
       if terminal_projection and int(terminal_projection["expected"]) > int(
         terminal_projection["received"]
       ):
@@ -2835,6 +2901,17 @@ async def _project_t_trade_event(
           else "EXIT_PARTIAL"
         )
         batch.exception_reason = None
+        if batch.status == "CLOSED" and batch.last_exit_filled_at is not None:
+          batch.closed_at = (
+            max(batch.closed_at, batch.last_exit_filled_at)
+            if batch.closed_at is not None
+            else batch.last_exit_filled_at
+          )
+          batch.terminal_at = (
+            max(batch.terminal_at, batch.last_exit_filled_at)
+            if batch.terminal_at is not None
+            else batch.last_exit_filled_at
+          )
   current_projection = (
     batch.status,
     batch.exception_reason,
@@ -2844,6 +2921,10 @@ async def _project_t_trade_event(
     float(batch.entry_avg_price or 0.0),
     int(batch.exit_filled_volume or 0),
     float(batch.exit_avg_price or 0.0),
+    batch.entry_filled_at,
+    batch.last_exit_filled_at,
+    batch.closed_at,
+    batch.terminal_at,
   )
   if current_projection != previous_projection:
     batch.version = int(batch.version or 0) + 1

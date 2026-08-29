@@ -521,13 +521,13 @@ export const TTradeReadinessQuery = gql(`
 export const TTradeBatchesPageQuery = gql(`
   query Portfolio_TTradeBatchesPage(
     $accountId: String!
-    $statusGroup: String
+    $filter: TTradeBatchFilterInput!
     $first: Int!
     $after: String
   ) {
     tTradeBatchesPage(
       accountId: $accountId
-      statusGroup: $statusGroup
+      filter: $filter
       first: $first
       after: $after
     ) {
@@ -549,7 +549,13 @@ export const TTradeBatchesPageQuery = gql(`
         exitFilledVolume
         exitAvgPrice
         activeVolume
+        executionMode
+        entryFilledAt
+        closedAt
+        terminalAt
         lastPrice
+        priceAsOf
+        priceQuality
         lastNetProfitPct
         peakNetProfitPct
         trailingFloorPct
@@ -559,10 +565,36 @@ export const TTradeBatchesPageQuery = gql(`
         version
         createdAt
         updatedAt
+        metrics {
+          basis
+          origin
+          quality
+          entryCapitalCny
+          totalFeesCny
+          realizedNetProfitCny
+          markToMarketNetProfitCny
+          netReturnPct
+          holdingHours
+          capitalUtilizationPct
+        }
       }
       pageInfo {
         hasNextPage
         endCursor
+      }
+      summary {
+        totalCount
+        completedCount
+        completionRatePct
+        winningCount
+        winRatePct
+        totalFeesCny
+        netProfitCny
+        averageHoldingHours
+        averageCapitalUtilizationPct
+        metricsCoveredCount
+        metricsTotalCount
+        metricsCoveragePct
       }
     }
   }
@@ -891,85 +923,6 @@ export const RejectTTradeEntryV3Mutation = gql(`
         runId
         status
       }
-    }
-  }
-`);
-
-export const TTradeOperationsQuery = gql(`
-  query Portfolio_TTradeOperations($accountId: String!) {
-    validateTTradeLiveReadiness(accountId: $accountId) {
-      accountId
-      ready
-      status
-      preparationReady
-      automationReady
-      stage
-      engineStatus
-      agentStatus
-      agentDeviceId
-      reconcileStatus
-      killSwitch
-      policyVersion
-      canApprove
-      canActivateLive
-      blockedReasons
-      preparationBlockedReasons
-      manualCoexistence
-      externalOrderCount
-      externalTradeCount
-      controlledWindowActive
-      controlledWindowSnapshotId
-      controlledWindowStartedAt
-      newExternalOrderCount
-      newExternalTradeCount
-      workingExternalOrderCount
-      checkedAt
-      checks {
-        code
-        passed
-        message
-        scope
-      }
-    }
-    tTradeBatches(accountId: $accountId, offset: 0, limit: 100) {
-      batchId
-      stockCode
-      strategyRunId
-      status
-      entryIntentId
-      exitIntentId
-      entryClientOrderId
-      exitClientOrderId
-      entryBrokerOrderId
-      exitBrokerOrderId
-      targetVolume
-      entryFilledVolume
-      entryAvgPrice
-      exitFilledVolume
-      exitAvgPrice
-      activeVolume
-      lastPrice
-      lastNetProfitPct
-      peakNetProfitPct
-      trailingFloorPct
-      exitReason
-      exceptionReason
-      policyVersion
-      version
-      createdAt
-      updatedAt
-    }
-    tTradeBatchEvents(accountId: $accountId, limit: 100) {
-      eventId
-      batchId
-      eventType
-      status
-      clientOrderId
-      brokerOrderId
-      payload
-      createdAt
-      appliedAt
-      error
     }
   }
 `);

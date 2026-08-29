@@ -202,10 +202,49 @@ def _ensure_compat_columns(connection):
           "ADD COLUMN universe_revision INTEGER NOT NULL DEFAULT 0"
         )
       )
+  if "t_trade_batches" in tables:
+    batch_columns = {
+      column["name"] for column in inspector.get_columns("t_trade_batches")
+    }
+    batch_additions = {
+      "execution_mode": "VARCHAR(16)",
+      "metrics_origin": "VARCHAR(24)",
+      "entry_filled_at": "TIMESTAMP",
+      "last_exit_filled_at": "TIMESTAMP",
+      "closed_at": "TIMESTAMP",
+      "terminal_at": "TIMESTAMP",
+      "commission_rate": "FLOAT",
+      "minimum_commission": "FLOAT",
+      "stamp_tax_rate": "FLOAT",
+      "transfer_fee_rate": "FLOAT",
+    }
+    for column_name, definition in batch_additions.items():
+      if column_name not in batch_columns:
+        connection.execute(
+          text(
+            f"ALTER TABLE t_trade_batches "
+            f"ADD COLUMN {column_name} {definition}"
+          )
+        )
   ensure_index(
     "pending_trade_orders",
     "ix_pending_trade_order_account_batch_client",
     "account_id, batch_id, client_order_id",
+  )
+  ensure_index(
+    "t_trade_batches",
+    "ix_t_trade_batch_account_mode",
+    "account_id, execution_mode",
+  )
+  ensure_index(
+    "t_trade_batches",
+    "ix_t_trade_batch_account_closed",
+    "account_id, closed_at, batch_id",
+  )
+  ensure_index(
+    "t_trade_batches",
+    "ix_t_trade_batch_account_terminal",
+    "account_id, terminal_at, batch_id",
   )
   ensure_index(
     "strategy_runtime_events",

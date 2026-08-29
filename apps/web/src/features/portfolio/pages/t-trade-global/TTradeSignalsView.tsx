@@ -1087,7 +1087,7 @@ export function TTradeSignalsView({
                     暂无真实信号
                   </div>
                   <p className="mt-1 max-w-md text-ui-caption leading-5 text-slate-600">
-                    当前没有候选、形态迁移或意图关联记录。持仓标的请在“总览”或“做T仓位”中查看。
+                    当前没有候选、形态迁移或意图关联记录。持仓标的请在“总览”或“仓位与批次”中查看。
                   </p>
                 </div>
               )}

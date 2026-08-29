@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock
 import pytest
 import quantx_api.gqlapi.resolvers.t_trade as resolver_module
 from quantx_api.gqlapi.resolvers.t_trade import TTradeResolver
+from quantx_api.gqlapi.schema import schema
 from quantx_api.gqlapi.types.t_trade_types import (
+  TTradeBatchExecutionMode,
+  TTradeBatchFilterInput,
+  TTradeBatchResultGroup,
+  TTradeBatchScope,
   TTradeGlobalMonitor,
   TTradeReplayPortfolioInput,
   TTradeReplayPortfolioSource,
@@ -99,6 +104,49 @@ def _signal_snapshot() -> dict:
     "profile_version": "profile-20260812",
     "profile_fingerprint": "profile-fingerprint",
   }
+
+
+def test_batch_filter_is_converted_to_typed_service_values() -> None:
+  start = datetime(2026, 8, 1)
+  end = datetime(2026, 8, 29)
+
+  values = TTradeResolver._batch_filter(
+    TTradeBatchFilterInput(
+      scope=TTradeBatchScope.TERMINAL,
+      execution_modes=[TTradeBatchExecutionMode.LIVE],
+      result_groups=[TTradeBatchResultGroup.COMPLETED],
+      keyword="600000",
+      start_time=start,
+      end_time=end,
+    )
+  )
+
+  assert values == {
+    "scope": "TERMINAL",
+    "execution_modes": ["LIVE"],
+    "result_groups": ["COMPLETED"],
+    "keyword": "600000",
+    "start_time": start,
+    "end_time": end,
+  }
+
+
+def test_batch_history_graphql_contract_exposes_fact_semantics() -> None:
+  sdl = schema.as_str()
+  batch_type = sdl.split("type TTradeBatch {", 1)[1].split("}", 1)[0]
+  metrics_type = sdl.split("type TTradeBatchMetrics {", 1)[1].split("}", 1)[0]
+  summary_type = sdl.split("type TTradeBatchSummary {", 1)[1].split("}", 1)[0]
+
+  assert "closedAt: DateTime" in batch_type
+  assert "closedAt: DateTime!" not in batch_type
+  assert "terminalAt: DateTime" in batch_type
+  assert "terminalAt: DateTime!" not in batch_type
+  assert "origin: String!" in metrics_type
+  assert "totalFeesCny: Float" in summary_type
+  assert "totalFeesCny: Float!" not in summary_type
+  assert "netProfitCny: Float" in summary_type
+  assert "netProfitCny: Float!" not in summary_type
+  assert "metricsCoverageState: String!" in summary_type
 
 
 def test_global_monitor_projects_graphql_scalar_types():

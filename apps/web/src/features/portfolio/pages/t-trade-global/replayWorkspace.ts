@@ -45,6 +45,10 @@ export type ReplayCycleLike = {
   exitAvgPrice: number;
   netProfit: number;
   netReturnPct: number;
+  totalFees?: number | null;
+  entryCapital?: number | null;
+  holdingHours?: number | null;
+  capitalUtilizationPct?: number | null;
   exitReason?: string | null;
   liquidationStatus?: string | null;
   forcedExit?: boolean;
@@ -98,37 +102,59 @@ export function mapReplayCyclesToPositionBatches(
   cycles: readonly ReplayCycleLike[],
   runId: string
 ): TTradePositionBatch[] {
-  return cycles.map(cycle => ({
-    batchId: cycle.batchId,
-    stockCode: cycle.stockCode.toUpperCase(),
-    strategyRunId: runId,
-    status: cycle.status || (cycle.openVolume > 0 ? 'OPEN' : 'COMPLETED'),
-    entryClientOrderId: null,
-    exitClientOrderId: null,
-    entryBrokerOrderId: null,
-    exitBrokerOrderId: null,
-    targetVolume: cycle.entryVolume,
-    entryFilledVolume: cycle.entryVolume,
-    entryAvgPrice: cycle.entryAvgPrice,
-    exitFilledVolume: cycle.exitVolume,
-    exitAvgPrice: cycle.exitAvgPrice,
-    activeVolume: cycle.openVolume,
-    lastPrice: cycle.exitAvgPrice || cycle.entryAvgPrice,
-    netProfit: cycle.netProfit,
-    lastNetProfitPct: cycle.netReturnPct,
-    peakNetProfitPct: cycle.netReturnPct,
-    trailingFloorPct: null,
-    exitReason: cycle.exitReason || null,
-    exceptionReason:
-      cycle.liquidationStatus &&
-      !['COMPLETED', 'SUCCESS', 'NONE'].includes(
-        cycle.liquidationStatus.toUpperCase()
-      )
-        ? cycle.liquidationStatus
-        : cycle.forcedExit
-          ? '期末强制清算'
-          : null,
-  }));
+  return cycles.map(cycle => {
+    const isClosed = cycle.openVolume <= 0;
+    return {
+      batchId: cycle.batchId,
+      stockCode: cycle.stockCode.toUpperCase(),
+      strategyRunId: runId,
+      status: isClosed ? 'CLOSED' : 'ACTIVE',
+      executionMode: 'BACKTEST',
+      entryClientOrderId: null,
+      exitClientOrderId: null,
+      entryBrokerOrderId: null,
+      exitBrokerOrderId: null,
+      targetVolume: cycle.entryVolume,
+      entryFilledVolume: cycle.entryVolume,
+      entryAvgPrice: cycle.entryAvgPrice,
+      exitFilledVolume: cycle.exitVolume,
+      exitAvgPrice: cycle.exitAvgPrice,
+      activeVolume: cycle.openVolume,
+      lastPrice: isClosed && cycle.exitAvgPrice > 0 ? cycle.exitAvgPrice : null,
+      priceAsOf: isClosed ? cycle.exitTime || null : null,
+      priceQuality: isClosed ? 'NOT_REQUIRED' : 'MISSING',
+      netProfit: isClosed ? cycle.netProfit : null,
+      lastNetProfitPct: cycle.netReturnPct,
+      peakNetProfitPct: isClosed ? cycle.netReturnPct : null,
+      trailingFloorPct: null,
+      createdAt: cycle.entryTime || null,
+      updatedAt: cycle.exitTime || cycle.entryTime || null,
+      entryFilledAt: cycle.entryTime || null,
+      terminalAt: isClosed ? cycle.exitTime || null : null,
+      closedAt: isClosed ? cycle.exitTime || null : null,
+      metrics: {
+        metricBasis: isClosed ? 'BACKTEST_MODEL' : 'INCOMPLETE',
+        entryCapitalCny:
+          cycle.entryCapital ?? cycle.entryAvgPrice * cycle.entryVolume,
+        totalFeesCny: cycle.totalFees ?? null,
+        realizedNetProfitCny: isClosed ? cycle.netProfit : null,
+        markToMarketNetProfitCny: isClosed ? cycle.netProfit : null,
+        netReturnPct: isClosed ? cycle.netReturnPct : null,
+        holdingHours: cycle.holdingHours ?? null,
+        capitalUtilizationPct: cycle.capitalUtilizationPct ?? null,
+      },
+      exitReason: cycle.exitReason || null,
+      exceptionReason:
+        cycle.liquidationStatus &&
+        !['COMPLETED', 'SUCCESS', 'NONE'].includes(
+          cycle.liquidationStatus.toUpperCase()
+        )
+          ? cycle.liquidationStatus
+          : cycle.forcedExit
+            ? '期末强制清算'
+            : null,
+    };
+  });
 }
 
 export function mapReplayCyclesToActivityBatches(

@@ -24,6 +24,7 @@ from ..types.t_trade_types import (
   TTradeBatch,
   TTradeBatchEvent,
   TTradeBatchEventPage,
+  TTradeBatchFilterInput,
   TTradeBatchPage,
   TTradeCandidateApprovalExpectationInput,
   TTradeCandidateTrace,
@@ -75,13 +76,13 @@ class TTradeQuery:
     self,
     info: strawberry.types.Info,
     account_id: str,
-    status_group: Optional[str] = None,
-    first: int = 30,
+    filter: TTradeBatchFilterInput,
+    first: int = 50,
     after: Optional[str] = None,
   ) -> TTradeBatchPage:
     return await TTradeResolver.list_batches_page(
       authorized_account_id(info, account_id),
-      status_group,
+      filter,
       first,
       after,
     )
@@ -205,13 +206,13 @@ class TTradeQuery:
     self,
     info: strawberry.types.Info,
     account_id: str,
-    status_group: Optional[str] = None,
+    filter: TTradeBatchFilterInput,
     offset: int = 0,
     limit: int = 100,
   ) -> List[TTradeBatch]:
     return await TTradeResolver.list_batches(
       authorized_account_id(info, account_id),
-      status_group,
+      filter,
       offset,
       limit,
     )

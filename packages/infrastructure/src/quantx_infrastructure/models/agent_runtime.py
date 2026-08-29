@@ -245,6 +245,19 @@ class TTradeBatch(Base, TimestampMixin):
       "updated_at",
       "batch_id",
     ),
+    Index("ix_t_trade_batch_account_mode", "account_id", "execution_mode"),
+    Index(
+      "ix_t_trade_batch_account_closed",
+      "account_id",
+      "closed_at",
+      "batch_id",
+    ),
+    Index(
+      "ix_t_trade_batch_account_terminal",
+      "account_id",
+      "terminal_at",
+      "batch_id",
+    ),
   )
 
   batch_id = Column(String(36), primary_key=True)
@@ -269,6 +282,16 @@ class TTradeBatch(Base, TimestampMixin):
   trailing_floor_pct = Column(Float, nullable=True)
   exit_reason = Column(String(64), nullable=True)
   exception_reason = Column(Text, nullable=True)
+  execution_mode = Column(String(16), nullable=True)
+  metrics_origin = Column(String(24), nullable=True)
+  entry_filled_at = Column(DateTime, nullable=True)
+  last_exit_filled_at = Column(DateTime, nullable=True)
+  closed_at = Column(DateTime, nullable=True)
+  terminal_at = Column(DateTime, nullable=True)
+  commission_rate = Column(Float, nullable=True)
+  minimum_commission = Column(Float, nullable=True)
+  stamp_tax_rate = Column(Float, nullable=True)
+  transfer_fee_rate = Column(Float, nullable=True)
   policy_version = Column(Integer, nullable=False, default=0)
   version = Column(Integer, nullable=False, default=1)
 

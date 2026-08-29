@@ -61,7 +61,7 @@ describe('TTradeGlobalPage toolbar color contract', () => {
       '总览',
       '信号',
       '诊断',
-      '做T仓位',
+      '仓位与批次',
       '运行动态',
       '参数',
     ]) {
@@ -84,7 +84,7 @@ describe('TTradeGlobalPage toolbar color contract', () => {
       '      </nav>'
     );
 
-    for (const label of ['总览', '信号', '做T仓位', '运行动态', '账户']) {
+    for (const label of ['总览', '信号', '仓位与批次', '运行动态', '账户']) {
       expect(replaySubviews).toContain(`'${label}'`);
     }
     expect(replaySubviews).toContain(

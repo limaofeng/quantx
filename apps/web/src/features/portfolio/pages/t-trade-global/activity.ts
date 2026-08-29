@@ -40,9 +40,9 @@ export type ActivityBatch = {
   exitFilledVolume: number;
   exitAvgPrice: number;
   activeVolume: number;
-  lastPrice: number;
+  lastPrice: number | null;
   lastNetProfitPct: number;
-  peakNetProfitPct: number;
+  peakNetProfitPct: number | null;
   trailingFloorPct?: number | null;
   exitReason?: string | null;
   exceptionReason?: string | null;

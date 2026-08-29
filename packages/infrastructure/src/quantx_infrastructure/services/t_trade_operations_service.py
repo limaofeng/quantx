@@ -7,8 +7,8 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from quantx_domain.clock import utcnow
-from sqlalchemy import and_, or_, select
+from quantx_domain.clock import to_naive_utc, utcnow
+from sqlalchemy import and_, func, or_, select
 
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -23,6 +23,10 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.services.account_execution_safety_service import (
   AccountExecutionSafetyService,
+)
+from quantx_infrastructure.services.t_trade_batch_metrics import (
+  METRIC_QUALITY_COMPLETE,
+  calculate_t_trade_batch_metrics,
 )
 from quantx_infrastructure.services.trading_service import TradingService
 
@@ -680,31 +684,20 @@ class TTradeOperationsService:
     self,
     account_id: str,
     *,
-    status_group: str | None = None,
+    batch_filter: dict[str, Any],
     offset: int = 0,
     limit: int = 100,
   ) -> list[dict[str, Any]]:
-    groups = {
-      "OPEN": {"ENTRY_PARTIAL", "OPEN"},
-      "EXITING": {"EXIT_TRIGGERED", "EXIT_SUBMITTED", "EXIT_PARTIAL"},
-      "CLOSED": {"CLOSED"},
-      "EXCEPTION": {
-        "ENTRY_EXPIRED",
-        "ENTRY_REJECTED",
-        "EXIT_REJECTED",
-        "RECONCILE_REQUIRED",
-        "KILL_SWITCHED",
-      },
-    }
     async with AsyncSessionLocal() as db:
       query = select(TTradeBatch).where(TTradeBatch.account_id == account_id)
-      selected = groups.get(str(status_group or "").upper())
-      if selected:
-        query = query.where(TTradeBatch.status.in_(selected))
+      query = self._filter_batches(query, batch_filter)
       rows = (
         (
           await db.execute(
-            query.order_by(TTradeBatch.updated_at.desc())
+            query.order_by(
+              self._batch_activity_time(batch_filter).desc(),
+              TTradeBatch.batch_id.desc(),
+            )
             .offset(max(0, offset))
             .limit(min(max(1, limit), 200))
           )
@@ -712,41 +705,30 @@ class TTradeOperationsService:
         .scalars()
         .all()
       )
-      return [self._batch_row(row) for row in rows]
+    now = utcnow()
+    return [self._batch_row(row, as_of=now) for row in rows]
 
   async def list_batches_page(
     self,
     account_id: str,
     *,
-    status_group: str | None = None,
-    cursor_updated_at: datetime | None = None,
+    batch_filter: dict[str, Any],
+    cursor_activity_at: datetime | None = None,
     cursor_id: str | None = None,
     first: int = 30,
-  ) -> tuple[list[dict[str, Any]], bool]:
-    groups = {
-      "OPEN": {"ENTRY_PARTIAL", "OPEN"},
-      "EXITING": {"EXIT_TRIGGERED", "EXIT_SUBMITTED", "EXIT_PARTIAL"},
-      "CLOSED": {"CLOSED"},
-      "EXCEPTION": {
-        "ENTRY_EXPIRED",
-        "ENTRY_REJECTED",
-        "EXIT_REJECTED",
-        "RECONCILE_REQUIRED",
-        "KILL_SWITCHED",
-      },
-    }
+  ) -> tuple[list[dict[str, Any]], bool, dict[str, Any]]:
     safe_first = max(1, min(int(first or 30), 100))
     async with AsyncSessionLocal() as db:
       query = select(TTradeBatch).where(TTradeBatch.account_id == account_id)
-      selected = groups.get(str(status_group or "").upper())
-      if selected:
-        query = query.where(TTradeBatch.status.in_(selected))
-      if cursor_updated_at is not None and cursor_id:
+      query = self._filter_batches(query, batch_filter)
+      summary_rows = list((await db.execute(query)).scalars().all())
+      activity_time = self._batch_activity_time(batch_filter)
+      if cursor_activity_at is not None and cursor_id:
         query = query.where(
           or_(
-            TTradeBatch.updated_at < cursor_updated_at,
+            activity_time < cursor_activity_at,
             and_(
-              TTradeBatch.updated_at == cursor_updated_at,
+              activity_time == cursor_activity_at,
               TTradeBatch.batch_id < cursor_id,
             ),
           )
@@ -755,7 +737,7 @@ class TTradeOperationsService:
         (
           await db.execute(
             query.order_by(
-              TTradeBatch.updated_at.desc(),
+              activity_time.desc(),
               TTradeBatch.batch_id.desc(),
             ).limit(safe_first + 1)
           )
@@ -763,13 +745,188 @@ class TTradeOperationsService:
         .scalars()
         .all()
       )
-      return (
-        [self._batch_row(row) for row in rows[:safe_first]],
-        len(rows) > safe_first,
+    now = utcnow()
+    return (
+      [self._batch_row(row, as_of=now) for row in rows[:safe_first]],
+      len(rows) > safe_first,
+      self._batch_summary(summary_rows, as_of=now),
+    )
+
+  @classmethod
+  def _filter_batches(cls, query, batch_filter: dict[str, Any] | None):
+    values = dict(batch_filter or {})
+    entry_volume = func.coalesce(TTradeBatch.entry_filled_volume, 0)
+    exit_volume = func.coalesce(TTradeBatch.exit_filled_volume, 0)
+    terminal_status = and_(
+      entry_volume == exit_volume,
+      TTradeBatch.status.in_(cls.TERMINAL_BATCH_STATUSES),
+    )
+
+    scope = str(values.get("scope") or "").upper()
+    if scope not in {"CURRENT", "TERMINAL"}:
+      raise ValueError("做 T 批次筛选 scope 必须是 CURRENT 或 TERMINAL")
+    if scope == "CURRENT":
+      query = query.where(~terminal_status)
+    elif scope == "TERMINAL":
+      query = query.where(terminal_status)
+
+    execution_modes = {
+      str(value or "").strip().lower()
+      for value in list(values.get("execution_modes") or [])
+      if str(value or "").strip().lower() in {"paper", "live"}
+    }
+    if execution_modes:
+      query = query.where(TTradeBatch.execution_mode.in_(execution_modes))
+
+    result_groups = {
+      str(value or "").strip().upper()
+      for value in list(values.get("result_groups") or [])
+    }
+    result_predicates = []
+    if "COMPLETED" in result_groups:
+      result_predicates.append(TTradeBatch.status == "CLOSED")
+    if "REJECTED" in result_groups:
+      result_predicates.append(
+        TTradeBatch.status.in_({"ENTRY_REJECTED", "ENTRY_EXPIRED"})
+      )
+    if result_predicates:
+      query = query.where(or_(*result_predicates))
+
+    keyword = str(values.get("keyword") or "").strip()
+    if keyword:
+      escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace(
+        "_", "\\_"
+      )
+      pattern = f"%{escaped}%"
+      query = query.where(
+        or_(
+          TTradeBatch.instrument_code.ilike(pattern, escape="\\"),
+          TTradeBatch.batch_id.ilike(pattern, escape="\\"),
+        )
       )
 
+    start_time = values.get("start_time")
+    end_time = values.get("end_time")
+    if scope == "TERMINAL" and not isinstance(start_time, datetime):
+      start_time = utcnow() - timedelta(days=30)
+    activity_time = cls._batch_activity_time(values)
+    if isinstance(start_time, datetime):
+      query = query.where(activity_time >= to_naive_utc(start_time))
+    if isinstance(end_time, datetime):
+      query = query.where(activity_time <= to_naive_utc(end_time))
+    return query
+
   @staticmethod
-  def _batch_row(row: TTradeBatch) -> dict[str, Any]:
+  def _batch_activity_time(batch_filter: dict[str, Any] | None):
+    if str(dict(batch_filter or {}).get("scope") or "").upper() == "TERMINAL":
+      return TTradeBatch.terminal_at
+    return func.coalesce(
+      TTradeBatch.entry_filled_at,
+      TTradeBatch.created_at,
+    )
+
+  @classmethod
+  def _batch_summary(
+    cls,
+    rows: list[TTradeBatch],
+    *,
+    as_of: datetime,
+  ) -> dict[str, Any]:
+    metrics = [calculate_t_trade_batch_metrics(row, as_of=as_of) for row in rows]
+    covered = [
+      metric
+      for metric in metrics
+      if metric["quality"] == METRIC_QUALITY_COMPLETE
+    ]
+    completed_pairs = [
+      (row, metric)
+      for row, metric in zip(rows, metrics, strict=True)
+      if str(row.status or "").upper() == "CLOSED"
+      and metric["quality"] == METRIC_QUALITY_COMPLETE
+    ]
+    winning = sum(
+      1
+      for _row, metric in completed_pairs
+      if float(metric["realized_net_profit_cny"] or 0.0) > 0
+    )
+    selected_profits = [
+      float(
+        metric[
+          "realized_net_profit_cny"
+          if str(row.status or "").upper() == "CLOSED"
+          else "mark_to_market_net_profit_cny"
+        ]
+        or 0.0
+      )
+      for row, metric in zip(rows, metrics, strict=True)
+      if metric["quality"] == METRIC_QUALITY_COMPLETE
+    ]
+    total = len(rows)
+    completed = sum(1 for row in rows if str(row.status or "").upper() == "CLOSED")
+    if total == 0:
+      coverage_state = "NO_DATA"
+    elif not covered:
+      coverage_state = "NONE"
+    elif len(covered) < total:
+      coverage_state = "PARTIAL"
+    else:
+      coverage_state = "COMPLETE"
+
+    def capital_weighted_average(field: str) -> float | None:
+      weighted = [
+        (float(metric[field]), float(metric["entry_capital_cny"]))
+        for metric in covered
+        if metric[field] is not None
+        and metric["entry_capital_cny"] is not None
+        and float(metric["entry_capital_cny"]) > 0
+      ]
+      total_weight = sum(weight for _value, weight in weighted)
+      return (
+        sum(value * weight for value, weight in weighted) / total_weight
+        if total_weight > 0
+        else None
+      )
+
+    return {
+      "total_count": total,
+      "completed_count": completed,
+      "completion_rate_pct": completed / total * 100.0 if total else 0.0,
+      "winning_count": winning,
+      "win_rate_pct": (
+        winning / len(completed_pairs) * 100.0 if completed_pairs else None
+      ),
+      "total_fees_cny": (
+        sum(float(metric["total_fees_cny"] or 0.0) for metric in covered)
+        if covered
+        else (0.0 if total == 0 else None)
+      ),
+      "net_profit_cny": (
+        sum(selected_profits) if covered else (0.0 if total == 0 else None)
+      ),
+      "average_holding_hours": capital_weighted_average("holding_hours"),
+      "average_capital_utilization_pct": capital_weighted_average(
+        "capital_utilization_pct"
+      ),
+      "metrics_covered_count": len(covered),
+      "metrics_total_count": total,
+      "metrics_coverage_pct": len(covered) / total * 100.0 if total else 100.0,
+      "metrics_coverage_state": coverage_state,
+    }
+
+  @classmethod
+  def _batch_row(
+    cls,
+    row: TTradeBatch,
+    *,
+    as_of: datetime,
+  ) -> dict[str, Any]:
+    entered = int(row.entry_filled_volume or 0)
+    exited = int(row.exit_filled_volume or 0)
+    active = entered > exited
+    terminal = (
+      entered == exited
+      and str(row.status or "").upper() in cls.TERMINAL_BATCH_STATUSES
+    )
     return {
       "batch_id": row.batch_id,
       "account_id": row.account_id,
@@ -791,16 +948,29 @@ class TTradeOperationsService:
         0,
         int(row.entry_filled_volume or 0) - int(row.exit_filled_volume or 0),
       ),
-      "last_price": row.last_price,
+      "last_price": None,
+      "price_as_of": None,
+      "price_quality": "MISSING" if active else "NOT_REQUIRED",
       "last_net_profit_pct": row.last_net_profit_pct,
       "peak_net_profit_pct": row.peak_net_profit_pct,
       "trailing_floor_pct": row.trailing_floor_pct,
       "exit_reason": row.exit_reason,
       "exception_reason": row.exception_reason,
+      "execution_mode": row.execution_mode,
+      "metrics_origin": row.metrics_origin,
+      "entry_filled_at": row.entry_filled_at,
+      "closed_at": row.closed_at,
+      "terminal_at": row.terminal_at,
+      "metrics": calculate_t_trade_batch_metrics(row, as_of=as_of),
       "policy_version": row.policy_version,
       "version": row.version,
       "created_at": row.created_at,
       "updated_at": row.updated_at,
+      "activity_at": (
+        row.terminal_at
+        if terminal
+        else (row.entry_filled_at or row.created_at)
+      ),
     }
 
   async def list_events(

@@ -67,6 +67,9 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
 from quantx_infrastructure.services.market_stream_readiness import (
   authoritative_market_stream_tradable,
 )
+from quantx_infrastructure.services.t_trade_batch_metrics import (
+  extract_t_trade_cost_snapshot,
+)
 
 
 class AgentUnavailableError(RuntimeError):
@@ -1615,22 +1618,51 @@ class TradeCommandService:
       if batch_id:
         batch = await self.db.get(TTradeBatch, batch_id)
         if batch is None:
+          cost_snapshot = extract_t_trade_cost_snapshot(immutable_metadata)
           batch = TTradeBatch(
             batch_id=batch_id,
             account_id=account_id,
             instrument_code=instrument_code,
             strategy_run_id=strategy_run_id,
             target_volume=volume,
+            execution_mode=normalized_mode,
+            metrics_origin="RULE_ESTIMATE",
+            commission_rate=(
+              cost_snapshot.commission_rate if cost_snapshot is not None else None
+            ),
+            minimum_commission=(
+              cost_snapshot.minimum_commission if cost_snapshot is not None else None
+            ),
+            stamp_tax_rate=(
+              cost_snapshot.stamp_tax_rate if cost_snapshot is not None else None
+            ),
+            transfer_fee_rate=(
+              cost_snapshot.transfer_fee_rate if cost_snapshot is not None else None
+            ),
             policy_version=max(0, int(policy_version or 0)),
           )
           self.db.add(batch)
         if normalized_role == "ENTRY":
+          # Entry creation freezes the execution and cost model.  Exit orders
+          # must not rewrite a batch using later global settings.
+          batch.execution_mode = batch.execution_mode or normalized_mode
+          batch.metrics_origin = batch.metrics_origin or "RULE_ESTIMATE"
+          if batch.commission_rate is None:
+            cost_snapshot = extract_t_trade_cost_snapshot(immutable_metadata)
+            if cost_snapshot is not None:
+              batch.commission_rate = cost_snapshot.commission_rate
+              batch.minimum_commission = cost_snapshot.minimum_commission
+              batch.stamp_tax_rate = cost_snapshot.stamp_tax_rate
+              batch.transfer_fee_rate = cost_snapshot.transfer_fee_rate
           batch.entry_intent_id = intent_id
           batch.entry_client_order_id = client_order_id
           batch.status = "ENTRY_QUEUED"
         elif normalized_role == "EXIT":
           batch.exit_intent_id = intent_id
           batch.exit_client_order_id = client_order_id
+          batch.exit_reason = batch.exit_reason or (
+            str(immutable_metadata.get("exit_reason") or "").strip() or None
+          )
           batch.status = "EXIT_TRIGGERED"
     self.db.add(
       TradeCommandOutbox(
