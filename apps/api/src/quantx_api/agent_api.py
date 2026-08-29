@@ -86,7 +86,7 @@ from quantx_infrastructure.services.market_stream_readiness import (
   authoritative_market_stream_tradable,
 )
 from redis.exceptions import RedisError
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.websockets import WebSocketState
@@ -157,6 +157,7 @@ MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS = 0.025
 TRADE_COMMAND_EXPIRY_SWEEP_INTERVAL_SECONDS = 1.0
 TRADE_COMMAND_EXPIRY_SWEEP_BATCH_SIZE = 100
+TRADE_COMMAND_REDELIVERY_SECONDS = 10.0
 AGENT_CONTROL_INBOUND_QUEUE_CAPACITY = 32
 AGENT_CONTROL_INBOUND_QUEUE_MAX_BYTES = 32 * 1024 * 1024
 AGENT_CONTROL_OUTBOUND_QUEUE_CAPACITY = 64
@@ -445,7 +446,11 @@ def _outbound_priority(envelope: AgentEnvelope) -> tuple[int, bool]:
     AgentMessageType.HEARTBEAT_ACK,
   }:
     return 0, True
-  if envelope.message_type is AgentMessageType.CANCEL_COMMAND:
+  if envelope.message_type is AgentMessageType.CANCEL_COMMAND or (
+    envelope.message_type is AgentMessageType.COMMAND
+    and str(envelope.payload.get("command_kind") or "").upper()
+    == "EMERGENCY_STOP"
+  ):
     return 1, False
   if envelope.message_type is AgentMessageType.COMMAND:
     return 2, False
@@ -1610,6 +1615,7 @@ async def _next_command(
 ) -> Optional[AgentEnvelope]:
   device_id = control_session.device_id
   now = utcnow()
+  redelivery_before = now - timedelta(seconds=TRADE_COMMAND_REDELIVERY_SECONDS)
   async with AsyncSessionLocal() as db:
     expired_count, staged_runtime_event = await _expire_trade_commands_in_session(
       db,
@@ -1622,18 +1628,62 @@ async def _next_command(
       await db.commit()
       if staged_runtime_event:
         await _wake_runtime_event_consumer()
-    result = await db.execute(
-      select(TradeCommandOutbox)
-      .where(
-        TradeCommandOutbox.device_id == device_id,
-        TradeCommandOutbox.delivery_status.in_(("QUEUED", "DELIVERED")),
-        TradeCommandOutbox.expires_at > now,
-      )
-      .order_by(TradeCommandOutbox.created_at)
-      .limit(1)
-      .with_for_update(skip_locked=True)
+    command_kind_expression = func.upper(
+      TradeCommandOutbox.payload["command_kind"].as_string()
     )
-    command = result.scalar_one_or_none()
+    high_priority_kinds = ("CANCEL_ORDER", "EMERGENCY_STOP")
+    eligible_delivery = or_(
+      TradeCommandOutbox.delivery_status == "QUEUED",
+      and_(
+        TradeCommandOutbox.delivery_status == "DELIVERED",
+        or_(
+          TradeCommandOutbox.delivered_at.is_(None),
+          TradeCommandOutbox.delivered_at <= redelivery_before,
+        ),
+      ),
+    )
+    command = (
+      await db.execute(
+        select(TradeCommandOutbox)
+        .where(
+          TradeCommandOutbox.device_id == device_id,
+          eligible_delivery,
+          TradeCommandOutbox.expires_at > now,
+          command_kind_expression.in_(high_priority_kinds),
+        )
+        .order_by(TradeCommandOutbox.created_at)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+      )
+    ).scalar_one_or_none()
+    if command is None:
+      fresh_delivery = await db.scalar(
+        select(TradeCommandOutbox.message_id)
+        .where(
+          TradeCommandOutbox.device_id == device_id,
+          TradeCommandOutbox.delivery_status == "DELIVERED",
+          TradeCommandOutbox.delivered_at > redelivery_before,
+          TradeCommandOutbox.expires_at > now,
+        )
+        .limit(1)
+      )
+      if fresh_delivery is not None:
+        await db.commit()
+        return None
+      command = (
+        await db.execute(
+          select(TradeCommandOutbox)
+          .where(
+            TradeCommandOutbox.device_id == device_id,
+            eligible_delivery,
+            TradeCommandOutbox.expires_at > now,
+            command_kind_expression.not_in(high_priority_kinds),
+          )
+          .order_by(TradeCommandOutbox.created_at)
+          .limit(1)
+          .with_for_update(skip_locked=True)
+        )
+      ).scalar_one_or_none()
     if command is None:
       await db.commit()
       return None
@@ -1646,9 +1696,10 @@ async def _next_command(
       f"qmt-agent:{device_id}",
     )
     command_kind = str(command.payload.get("command_kind") or "").upper()
+    high_priority_command = command_kind in {"CANCEL_ORDER", "EMERGENCY_STOP"}
     acceptable_statuses = (
       {"READY", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
-      if command_kind == "CANCEL_ORDER"
+      if high_priority_command
       else {"READY"}
     )
     session_state = evaluate_agent_session(
@@ -1675,7 +1726,7 @@ async def _next_command(
       message_id=command.message_id,
       message_type=(
         AgentMessageType.CANCEL_COMMAND
-        if command.payload.get("command_kind") == "CANCEL_ORDER"
+        if command_kind == "CANCEL_ORDER"
         else AgentMessageType.COMMAND
       ),
       sent_at=sent_at,
@@ -2530,9 +2581,11 @@ async def _assert_trade_delivery_session(
       f"qmt-agent:{control_session.device_id}",
     )
 
+  command_kind = str(envelope.payload.get("command_kind") or "").upper()
   acceptable_statuses = (
     {"READY", "EMERGENCY_STOP", "RECONCILE_REQUIRED"}
     if envelope.message_type is AgentMessageType.CANCEL_COMMAND
+    or command_kind == "EMERGENCY_STOP"
     else {"READY"}
   )
   session_state = evaluate_agent_session(

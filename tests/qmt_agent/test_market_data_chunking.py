@@ -1664,7 +1664,14 @@ async def test_isolated_history_does_not_hold_realtime_xtdata_gate() -> None:
   history = asyncio.create_task(
     runtime._prepared_market_data_chunks(
       "request-isolated-history",
-      {"request_id": "request-isolated-history", "operation": "bars"},
+      {
+        "request_id": "request-isolated-history",
+        "operation": "bars",
+        "stock_list": ["000001.SZ"],
+        "periods": ["1d"],
+        "start_time": "20250102",
+        "end_time": "20250102",
+      },
     )
   )
   await asyncio.wait_for(history_started.wait(), timeout=0.2)

@@ -23,6 +23,12 @@ from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
 DEFAULT_MARKET_SECTORS = ["沪深A股", "沪深ETF", "沪深指数"]
 SUPPORTED_PERIODS = {"tick", "1m", "1d"}
 MARKET_DATA_REQUEST_BATCH_SIZE = 300
+MAX_MARKET_DATA_REQUEST_RECORDS = 500_000
+ESTIMATED_MARKET_RECORDS_PER_DAY = {
+  "tick": 20_000,
+  "1m": 300,
+  "1d": 1,
+}
 
 
 def _validate_periods(periods: list[str]) -> list[str]:
@@ -35,6 +41,31 @@ def _validate_periods(periods: list[str]) -> list[str]:
   if not normalized:
     raise ValueError("至少选择一个数据周期")
   return normalized
+
+
+def _market_data_request_batch_size(
+  *,
+  periods: list[str],
+  start_time: str,
+  end_time: str,
+) -> int:
+  """Fit each durable request under the Agent's complete-record budget."""
+
+  start_date = _parse_date(start_time)
+  end_date = _parse_date(end_time)
+  span_days = (end_date - start_date).days + 1
+  estimated_per_code = span_days * sum(
+    ESTIMATED_MARKET_RECORDS_PER_DAY[period] for period in periods
+  ) + len(periods)
+  if estimated_per_code <= 0:
+    raise ValueError("行情请求记录预算必须为正数")
+  return max(
+    1,
+    min(
+      MARKET_DATA_REQUEST_BATCH_SIZE,
+      MAX_MARKET_DATA_REQUEST_RECORDS // estimated_per_code,
+    ),
+  )
 
 
 async def _resolve_market_time_range(
@@ -120,11 +151,16 @@ async def daily_market_data_sync_flow(
   transfer: Optional[dict[str, Any]] = None
   if not skip_download:
     transfers: list[dict[str, Any]] = []
+    request_batch_size = _market_data_request_batch_size(
+      periods=normalized_periods,
+      start_time=resolved_start,
+      end_time=resolved_end,
+    )
     total_batches = (
-      len(codes) + MARKET_DATA_REQUEST_BATCH_SIZE - 1
-    ) // MARKET_DATA_REQUEST_BATCH_SIZE
+      len(codes) + request_batch_size - 1
+    ) // request_batch_size
     for batch_index, code_batch in enumerate(
-      _chunks(codes, MARKET_DATA_REQUEST_BATCH_SIZE),
+      _chunks(codes, request_batch_size),
       start=1,
     ):
       request_payload = {

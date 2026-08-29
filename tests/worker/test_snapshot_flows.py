@@ -39,6 +39,24 @@ def test_daily_market_sync_retries_durable_batches() -> None:
   assert market_flow.daily_market_data_sync_flow.retry_delay_seconds == 60
 
 
+def test_market_request_batch_size_respects_complete_record_budget() -> None:
+  assert market_flow._market_data_request_batch_size(
+    periods=["1d"],
+    start_time="20260828",
+    end_time="20260828",
+  ) == 300
+  assert market_flow._market_data_request_batch_size(
+    periods=["tick"],
+    start_time="20260828",
+    end_time="20260828",
+  ) == 24
+  assert market_flow._market_data_request_batch_size(
+    periods=["1m"],
+    start_time="20260801",
+    end_time="20260831",
+  ) == 53
+
+
 @pytest.mark.asyncio
 async def test_expected_snapshot_date_changes_at_1535():
   helper = FakeTradingDates()
@@ -172,6 +190,49 @@ async def test_market_sync_splits_universe_at_agent_request_limit(
   assert result["transfer"]["batch_count"] == 2
   assert result["transfer"]["records_received"] == 301
   assert result["transfer"]["records_saved"] == 301
+
+
+@pytest.mark.asyncio
+async def test_market_sync_keeps_7552_daily_symbols_at_26_durable_batches(
+  monkeypatch,
+) -> None:
+  instruments = [
+    {
+      "code": f"{index:06d}.SZ",
+      "name": "",
+      "instrument_type": "stock",
+      "float_volume": None,
+    }
+    for index in range(7552)
+  ]
+  request = AsyncMock(
+    return_value={
+      "status": "completed",
+      "request_id": "request-daily",
+      "records_received": 1,
+      "records_saved": 1,
+    }
+  )
+  monkeypatch.setattr(
+    market_flow,
+    "resolve_instruments",
+    AsyncMock(return_value=instruments),
+  )
+  monkeypatch.setattr(market_flow, "_request_and_wait", request)
+  monkeypatch.setattr(market_flow, "get_run_logger", FakeLogger)
+
+  result = await market_flow.daily_market_data_sync_flow.fn(
+    start_time="20260828",
+    end_time="20260828",
+    periods=["1d"],
+  )
+
+  assert request.await_count == 26
+  assert [
+    len(call.args[0]["stock_list"])
+    for call in request.await_args_list
+  ] == [300] * 25 + [52]
+  assert result["transfer"]["batch_count"] == 26
 
 
 @pytest.mark.asyncio

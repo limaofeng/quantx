@@ -147,6 +147,75 @@ def test_history_qos_pauses_immediately_when_control_session_disconnects() -> No
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_uses_cached_xtdata_readiness_without_native_lock(
+  tmp_path,
+) -> None:
+  native_probe_calls = 0
+
+  class Broker:
+    @staticmethod
+    def ensure_market_data_ready() -> bool:
+      return True
+
+    @staticmethod
+    def is_market_data_ready() -> bool:
+      nonlocal native_probe_calls
+      native_probe_calls += 1
+      raise AssertionError("event loop attempted a native XTData readiness probe")
+
+  class Socket:
+    sent: list[str] = []
+
+    async def send(self, value: str) -> None:
+      self.sent.append(value)
+
+  runtime = AgentRuntime(
+    configuration=DeviceConfiguration(
+      api_url="http://127.0.0.1:8080",
+      device_id="cached-readiness",
+    ),
+    device_secret="unused",
+    mode="data-only",
+    allowed_accounts=set(),
+    broker=Broker(),
+    journal=LocalJournal(tmp_path / "cached-readiness.sqlite3"),
+    market_spool_base_directory=tmp_path,
+  )
+  runtime._set_market_data_ready(True)
+  socket = Socket()
+
+  await asyncio.wait_for(
+    runtime._send_heartbeat(socket, status="READY"),
+    timeout=0.2,
+  )
+
+  assert native_probe_calls == 0
+  assert len(socket.sent) == 1
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_later_heartbeat_ack_retires_older_lost_ack() -> None:
+  runtime = object.__new__(AgentRuntime)
+  runtime._ensure_market_upload_state()
+  runtime._heartbeat_sent_monotonic = {
+    "older-lost": 1.0,
+    "acknowledged": 2.0,
+    "newer": 3.0,
+  }
+
+  await runtime._handle_message(
+    None,
+    AgentEnvelope(
+      message_type=AgentMessageType.HEARTBEAT_ACK,
+      payload={"heartbeat_message_id": "acknowledged"},
+    ).model_dump_json(),
+  )
+
+  assert runtime._heartbeat_sent_monotonic == {"newer": 3.0}
+
+
+@pytest.mark.asyncio
 async def test_trade_command_does_not_block_control_receiver() -> None:
   runtime = object.__new__(AgentRuntime)
   runtime._ensure_market_upload_state()
@@ -188,6 +257,48 @@ async def test_trade_command_does_not_block_control_receiver() -> None:
   await runtime._command_requests.join()
   worker.cancel()
   await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_is_next_after_active_native_command() -> None:
+  runtime = object.__new__(AgentRuntime)
+  runtime._ensure_market_upload_state()
+  active_started = asyncio.Event()
+  release_active = asyncio.Event()
+  handled: list[str] = []
+
+  async def handle_command(_socket, envelope) -> None:
+    kind = str(envelope.payload.get("command_kind") or "")
+    handled.append(kind)
+    if kind == "PLACE_ORDER:first":
+      active_started.set()
+      await release_active.wait()
+
+  runtime._handle_command = handle_command
+  worker = asyncio.create_task(
+    runtime._command_request_loop(SimpleNamespace())
+  )
+  for kind, message_type in (
+    ("PLACE_ORDER:first", AgentMessageType.COMMAND),
+    ("PLACE_ORDER:second", AgentMessageType.COMMAND),
+    ("CANCEL_ORDER", AgentMessageType.CANCEL_COMMAND),
+  ):
+    await runtime._handle_message(
+      None,
+      AgentEnvelope(
+        message_type=message_type,
+        payload={"command_kind": kind},
+      ).model_dump_json(),
+    )
+    if kind == "PLACE_ORDER:first":
+      await asyncio.wait_for(active_started.wait(), timeout=0.2)
+
+  release_active.set()
+  await asyncio.wait_for(runtime._command_requests.join(), timeout=0.2)
+  worker.cancel()
+  await asyncio.gather(worker, return_exceptions=True)
+
+  assert handled == ["PLACE_ORDER:first", "CANCEL_ORDER", "PLACE_ORDER:second"]
 
 
 def test_stale_snapshot_ack_keeps_local_reconciliation_gate_closed() -> None:
@@ -350,6 +461,10 @@ async def test_repair_preparation_market_ingress_and_reconciliation_run_concurre
       {
         "request_id": "repair-market-data-batch",
         "operation": "bars",
+        "stock_list": ["000001.SZ"],
+        "periods": ["1d"],
+        "start_time": "20250102",
+        "end_time": "20250102",
       },
     )
   )

@@ -128,12 +128,18 @@ metadata，不重订。
 指数齐全才开始同步。覆盖不足时失败重连，禁止调用 `get_full_tick` 回补，因为
 点查询与全推回调混合会放大 XTData GIL 阻塞并破坏一致水位。批量历史查询不在
 该常驻 XTData 客户端上执行；主进程使用 Windows `spawn` 维护一个受监督、长驻的
-XTData-only 子进程。它复用自身只读 XTData 客户端，把每个请求拆为单周期、每批
-10–30 个标的的小工作单元，并直接原子写入 Agent 管理的不可变 gzip spool。IPC 只
+XTData-only 子进程，并把该进程设置为 Windows `BELOW_NORMAL` 优先级。主进程先按
+完整请求校验 500,000 条记录预算，再由子进程复用自身只读 XTData 客户端，把请求拆为
+单周期、tick 每批最多 10 个标的、分钟线/日线每批最多 20 个标的的小工作单元；tick
+和分钟线按单日窗口、日线按最多 31 日窗口调用原生 XTData。跨窗口结果先写入有界的
+每代码临时 spool；临时文件与最终 gzip 共用请求级字节预算和单记录上限，再按
+`period -> code -> time` 规范顺序合并摘要并原子生成不可变
+gzip spool。IPC 只
 传请求参数、spool 限额、调度 checkpoint 和规范化 manifest，不传 DataFrame、broker
 或账户对象。子进程不包含 XTTrading、设备凭据、控制/行情 WebSocket 或订阅状态；
 单元超时会终止并重建该 worker，超时和崩溃只失败当前 durable 请求，不终止主
-Agent。每个原子 spool 完成后立即由主进程的有界异步上传器传输（最多两批
+Agent。每个原子 spool 完成后立即由主进程的有界异步上传器使用同一请求级 HTTP
+连接池传输（最多两批
 并发），不等待整个请求也不占用后续 XTData 调用窗口；所有批次到达后再单独
 冻结 manifest。网络失败保留同一份 spool，由幂等重传和断点续传收敛。后续 DELTA 可补齐
 快照时尚未物化、但已在 universe 中的代码。独立 Python 子进程每 5 秒检查 Agent
@@ -161,9 +167,13 @@ XTTrading 连接代际变化或显式异常恢复才触发完整快照对账。�
 控制 heartbeat 或行情 ACK 延迟超过 5 秒、存在委托/撤单或 broker 回报积压、
 XTData/XTTrading 不稳定时停止派发后续单元；连续两个 1 秒健康周期后自动恢复。
 `historyWorkload=running/paused/idle` 仅用于诊断，绝不改变 `xttradingStatus`。
+heartbeat 和历史 QoS 只读取由独立 readiness worker 更新的 XTData 缓存状态，禁止在
+事件循环获取原生 XTData 锁；较新的 heartbeat ACK 会收敛此前丢失的旧 ACK，当前
+未完成的行情 ACK 年龄也直接参与暂停判定。
 交易命令进入独立的有界优先队列（撤单和 emergency 优先），由串行 XTTrading worker
-执行；控制 WebSocket receiver 只校验和入队，因此一个原生交易调用不会阻塞后续
-heartbeat/report ACK 的接收。
+执行；API durable outbox 同样优先选择撤单和 emergency，并用 10 秒投递租约避免一个
+等待本地 ACK 的旧委托阻塞后续命令。控制 WebSocket receiver 只校验和入队，因此
+一个原生交易调用不会阻塞后续命令、heartbeat 或 report ACK 的接收。
 每条 whole-quote tick 在线路编码前必须带有可比较的合法来源时间 `time` 或
 `timetag`；缺失、非有限或非法值会精确使当前行情 stream 失效并重新同步，不得
 回退到本机墙钟时间，也不得把单个 stream 的数据错误升级为整个 Agent 进程故障。

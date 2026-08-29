@@ -1766,6 +1766,25 @@ def _market_data_records(
   return list(_iter_market_data_records(manager, payload))
 
 
+def validate_market_data_request(payload: dict[str, Any]) -> None:
+  """Validate one complete request before any native workload is split.
+
+  Native XTData calls may be divided into smaller scheduling units, but the
+  record budget belongs to the immutable server request.  Validating that
+  original payload first prevents every small unit from independently passing
+  a limit that the complete transfer exceeds.
+  """
+
+  operation = str(payload.get("operation") or "bars")
+  if operation not in {
+    "sector_instruments",
+    "instrument_details",
+    "financial_data",
+    "divid_factors",
+  }:
+    _validate_bars_request(payload)
+
+
 def _iter_market_data_records(
   manager: Any,
   payload: dict[str, Any],

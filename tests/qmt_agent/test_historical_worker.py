@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from quantx_contracts import HistoricalBarSummary, historical_bar_key
 from quantx_qmt_agent import historical_worker
 from quantx_qmt_agent import runtime as runtime_module
 from quantx_qmt_agent.credentials import DeviceConfiguration
@@ -118,14 +119,30 @@ def test_xtdata_worker_prepares_spool_and_closes_its_own_client(
 
     @staticmethod
     def iter_market_data(_payload):
+      row = {
+        "code": "000001.SZ",
+        "period": "1d",
+        "time": 1_735_776_000_000,
+        "close": 10.0,
+      }
+      key = historical_bar_key(
+        code=row["code"],
+        period=row["period"],
+        time_ms=row["time"],
+        tick_ordinal=None,
+      )
       return iter(
         [
-          {
-            "code": "000001.SZ",
-            "period": "1d",
-            "time": 1_735_776_000_000,
-            "close": 10.0,
-          }
+          row,
+          HistoricalBarSummary(
+            code=row["code"],
+            period=row["period"],
+            row_count=1,
+            min_time=row["time"],
+            max_time=row["time"],
+            key_sha256=hashlib.sha256(key.encode()).hexdigest(),
+            no_data_reason=None,
+          ).model_dump(mode="json"),
         ]
       )
 
@@ -141,7 +158,14 @@ def test_xtdata_worker_prepares_spool_and_closes_its_own_client(
       {
         "type": "prepare",
         "request_id": "request-worker",
-        "payload": {"request_id": "request-worker", "operation": "bars"},
+        "payload": {
+          "request_id": "request-worker",
+          "operation": "bars",
+          "stock_list": ["000001.SZ"],
+          "periods": ["1d"],
+          "start_time": "20250102",
+          "end_time": "20250102",
+        },
         "spool_directory": str(spool_directory),
         "max_total_uncompressed_bytes": 1_000_000,
         "max_total_compressed_bytes": 1_000_000,
@@ -167,7 +191,7 @@ def test_xtdata_worker_prepares_spool_and_closes_its_own_client(
   assert completed["type"] == "ok"
   assert completed["request_id"] == "request-worker"
   manifest = completed["manifest"]
-  assert manifest["record_count"] == 1
+  assert manifest["record_count"] == 2
   assert manifest["chunks"][0]["path"] == str(
     next(spool_directory.glob("chunk-*.json.gz"))
   )
@@ -199,6 +223,158 @@ def test_bulk_bar_request_is_split_into_balanced_period_specific_units() -> None
     ["1m"],
   ]
   assert [code for unit in units[:3] for code in unit["stock_list"]] == codes
+
+
+def test_intraday_request_is_split_by_date_and_instrument_batch() -> None:
+  codes = [f"{index:06d}.SZ" for index in range(25)]
+
+  units = historical_worker.historical_work_units(
+    {
+      "operation": "bars",
+      "stock_list": codes,
+      "periods": ["1m"],
+      "start_time": "20260827",
+      "end_time": "20260829",
+    }
+  )
+
+  assert len(units) == 6
+  assert [len(unit["stock_list"]) for unit in units] == [13, 13, 13, 12, 12, 12]
+  assert [
+    (unit["start_time"], unit["end_time"])
+    for unit in units
+  ] == [
+    ("20260827", "20260827"),
+    ("20260828", "20260828"),
+    ("20260829", "20260829"),
+  ] * 2
+
+
+def test_windowed_units_reassemble_canonical_series_order(tmp_path) -> None:
+  codes = [f"{index:06d}.SZ" for index in range(25)]
+  boundary = object()
+
+  class Broker:
+    calls: list[dict[str, object]] = []
+
+    @classmethod
+    def iter_market_data(cls, unit):
+      cls.calls.append(unit)
+      period = unit["periods"][0]
+      source_time = int(unit["start_time"])
+      for code in sorted(unit["stock_list"]):
+        row = {"code": code, "period": period, "time": source_time}
+        yield row
+        key = historical_bar_key(
+          code=code,
+          period=period,
+          time_ms=source_time,
+          tick_ordinal=None,
+        )
+        yield HistoricalBarSummary(
+          code=code,
+          period=period,
+          row_count=1,
+          min_time=source_time,
+          max_time=source_time,
+          key_sha256=hashlib.sha256(key.encode()).hexdigest(),
+          no_data_reason=None,
+        ).model_dump(mode="json")
+
+  connection = _Connection(
+    [
+      {"type": "continue", "request_id": "windowed"},
+      {"type": "continue", "request_id": "windowed"},
+      {"type": "continue", "request_id": "windowed"},
+    ]
+  )
+  records = list(
+    historical_worker._iter_request_records(
+      Broker(),
+      {
+        "operation": "bars",
+        "stock_list": codes,
+        "periods": ["1m"],
+        "start_time": "20260828",
+        "end_time": "20260829",
+      },
+      connection,
+      "windowed",
+      boundary,
+      tmp_path,
+      max_staging_uncompressed_bytes=1_000_000,
+      max_record_uncompressed_bytes=100_000,
+    )
+  )
+  payload_records = [record for record in records if record is not boundary]
+  expected_order = [
+    (code, source_time)
+    for code in codes
+    for source_time in (20260828, 20260829, None)
+  ]
+
+  assert [
+    (record["code"], None if "record_type" in record else record["time"])
+    for record in payload_records
+  ] == expected_order
+  assert len(Broker.calls) == 4
+  assert [message["type"] for message in connection.messages] == [
+    "started",
+    "checkpoint",
+    "checkpoint",
+    "checkpoint",
+  ]
+  assert not list(tmp_path.glob(".series-*.jsonl"))
+
+
+def test_windowed_staging_obeys_request_byte_budget(tmp_path) -> None:
+  boundary = object()
+
+  class Broker:
+    @staticmethod
+    def iter_market_data(unit):
+      code = unit["stock_list"][0]
+      source_time = int(unit["start_time"])
+      yield {
+        "code": code,
+        "period": "1m",
+        "time": source_time,
+        "payload": "x" * 100,
+      }
+      yield HistoricalBarSummary(
+        code=code,
+        period="1m",
+        row_count=1,
+        min_time=source_time,
+        max_time=source_time,
+        key_sha256="0" * 64,
+        no_data_reason=None,
+      ).model_dump(mode="json")
+
+  connection = _Connection(
+    [{"type": "continue", "request_id": "bounded-staging"}]
+  )
+  with pytest.raises(ValueError, match="uncompressed byte limit"):
+    list(
+      historical_worker._iter_request_records(
+        Broker(),
+        {
+          "operation": "bars",
+          "stock_list": ["000001.SZ"],
+          "periods": ["1m"],
+          "start_time": "20260828",
+          "end_time": "20260829",
+        },
+        connection,
+        "bounded-staging",
+        boundary,
+        tmp_path,
+        max_staging_uncompressed_bytes=200,
+        max_record_uncompressed_bytes=1_000,
+      )
+    )
+
+  assert not list(tmp_path.glob(".series-*.jsonl"))
 
 
 def test_worker_reuses_one_xtdata_client_for_multiple_requests(
@@ -242,7 +418,7 @@ def test_worker_reuses_one_xtdata_client_for_multiple_requests(
     return {
       "type": "prepare",
       "request_id": request_id,
-      "payload": {"request_id": request_id, "operation": "custom"},
+      "payload": {"request_id": request_id, "operation": "instrument_details"},
       "spool_directory": str(spool),
       "max_total_uncompressed_bytes": 1_000_000,
       "max_total_compressed_bytes": 1_000_000,
@@ -283,6 +459,14 @@ async def test_runtime_selects_isolated_worker_for_production_broker() -> None:
   )
   expected = SimpleNamespace()
   calls: list[dict[str, object]] = []
+  payload = {
+    "request_id": "repair-batch-1",
+    "operation": "bars",
+    "stock_list": ["000001.SZ"],
+    "periods": ["1d"],
+    "start_time": "20250102",
+    "end_time": "20250102",
+  }
 
   async def isolated(request_id, payload, **limits):
     calls.append(
@@ -297,7 +481,7 @@ async def test_runtime_selects_isolated_worker_for_production_broker() -> None:
   runtime._run_isolated_market_data_preparation = isolated
   result = await runtime._run_market_data_preparation_daemon(
     "repair-batch-1",
-    {"request_id": "repair-batch-1", "operation": "bars"},
+    payload,
     max_total_uncompressed_bytes=100,
     max_total_compressed_bytes=50,
   )
@@ -306,12 +490,46 @@ async def test_runtime_selects_isolated_worker_for_production_broker() -> None:
   assert calls == [
     {
       "request_id": "repair-batch-1",
-      "payload": {"request_id": "repair-batch-1", "operation": "bars"},
+      "payload": payload,
       "worker_kind": historical_worker.XTDATA_HISTORICAL_WORKER_KIND,
       "max_total_uncompressed_bytes": 100,
       "max_total_compressed_bytes": 50,
     }
   ]
+
+
+@pytest.mark.asyncio
+async def test_complete_request_budget_is_checked_before_worker_dispatch() -> None:
+  runtime = object.__new__(AgentRuntime)
+  runtime.broker = SimpleNamespace(
+    historical_market_data_worker_kind=lambda: (
+      historical_worker.XTDATA_HISTORICAL_WORKER_KIND
+    )
+  )
+  dispatched = False
+
+  async def isolated(*_args, **_kwargs):
+    nonlocal dispatched
+    dispatched = True
+    raise AssertionError("oversized request reached isolated worker")
+
+  runtime._run_isolated_market_data_preparation = isolated
+  with pytest.raises(ValueError, match="estimated record count"):
+    await runtime._run_market_data_preparation_daemon(
+      "oversized-tick",
+      {
+        "request_id": "oversized-tick",
+        "operation": "bars",
+        "stock_list": [f"{index:06d}.SZ" for index in range(300)],
+        "periods": ["tick"],
+        "start_time": "20260828",
+        "end_time": "20260828",
+      },
+      max_total_uncompressed_bytes=100,
+      max_total_compressed_bytes=50,
+    )
+
+  assert dispatched is False
 
 
 @pytest.mark.asyncio
@@ -395,6 +613,7 @@ async def test_runtime_uploads_completed_spool_while_next_native_unit_runs(
   allow_upload = asyncio.Event()
   second_dispatch = asyncio.Event()
   finalized: list[tuple[str, int]] = []
+  upload_clients: list[object] = []
   dispatches = 0
 
   async def wait_for_history_dispatch() -> None:
@@ -404,14 +623,18 @@ async def test_runtime_uploads_completed_spool_while_next_native_unit_runs(
     if dispatches == 2:
       second_dispatch.set()
 
-  async def upload_chunk(request_id, chunk_index, chunk) -> None:
+  async def upload_chunk(client, request_id, chunk_index, chunk) -> None:
+    assert client is not None
+    upload_clients.append(client)
     assert request_id == "request-upload-pipeline"
     assert chunk_index == 0
     assert chunk.path.is_file()
     upload_started.set()
     await allow_upload.wait()
 
-  async def finalize(request_id, total_chunks) -> None:
+  async def finalize(request_id, total_chunks, *, client=None) -> None:
+    assert client is not None
+    upload_clients.append(client)
     finalized.append((request_id, total_chunks))
 
   runtime._wait_for_history_dispatch = wait_for_history_dispatch
@@ -436,6 +659,7 @@ async def test_runtime_uploads_completed_spool_while_next_native_unit_runs(
   allow_upload.set()
   prepared = await preparation
   assert finalized == [("request-upload-pipeline", 1)]
+  assert len({id(client) for client in upload_clients}) == 1
   assert "request-upload-pipeline" in runtime._streamed_market_uploads
   runtime._remove_prepared_market_data(prepared)
   await runtime._shutdown_historical_worker()
