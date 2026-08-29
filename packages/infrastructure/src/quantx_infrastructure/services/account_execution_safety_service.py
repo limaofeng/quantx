@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from quantx_contracts import ACCOUNT_EXECUTION_SAFETY_CHECK_CODE_SET
 from quantx_domain.clock import to_naive_utc, utcnow
 from sqlalchemy import func, literal, select
 from sqlalchemy.orm import aliased
@@ -45,28 +46,7 @@ ACCOUNT_EXECUTION_ALERT_CODES = frozenset(
     "HARD_KILL_ACTIVATED",
   }
 )
-ACCOUNT_EXECUTION_CHECK_CODES = frozenset(
-  {
-    "SERVER_REAL_TRADING_ENABLED",
-    "ACCOUNT_ALLOWLISTED",
-    "ENGINE_READY",
-    "LIVE_AGENT_READY",
-    "AGENT_MODE_LIVE",
-    "MARKET_STREAM_READY",
-    "PROTOCOL_1_1",
-    "EXECUTION_CONTROL_CONFIGURED",
-    "SNAPSHOT_RECONCILED",
-    "SNAPSHOT_FRESH",
-    "SNAPSHOT_ACTIVITY_CLASSIFIED",
-    "RECENT_BACKUP",
-    "NO_CRITICAL_ALERTS",
-    "NO_DEAD_LETTERS",
-    "CONTROLLED_WINDOW_ACTIVE",
-    "NO_EXTERNAL_BROKER_ACTIVITY",
-    "KILL_SWITCH_CLEAR",
-    "ACCOUNT_RISK_INCREASE_AUTHORIZED",
-  }
-)
+ACCOUNT_EXECUTION_CHECK_CODES = ACCOUNT_EXECUTION_SAFETY_CHECK_CODE_SET
 _RISK_REDUCTION_CHECKS = frozenset(
   {
     "SERVER_REAL_TRADING_ENABLED",

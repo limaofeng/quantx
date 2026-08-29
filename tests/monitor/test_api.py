@@ -50,12 +50,16 @@ async def test_public_api_is_sanitized_and_rejects_unknown_targets(tmp_path):
     ) as client:
       ready = await client.get("/monitor/health/ready")
       summary = await client.get("/monitor/api/v1/summary?window=24h")
+      safety_history = await client.get(
+        "/monitor/internal/api/v1/account-safety/history?range=24h"
+      )
       unknown = await client.get(
         "/monitor/api/v1/targets/not-a-target/history?range=24h"
       )
 
     assert ready.status_code == 200
     assert summary.status_code == 200
+    assert safety_history.status_code == 200
     payload = summary.json()
     postgresql = next(
       target for target in payload["targets"] if target["id"] == "postgresql"
@@ -73,5 +77,10 @@ async def test_public_api_is_sanitized_and_rejects_unknown_targets(tmp_path):
     assert "redis-secret" not in serialized
     assert "postgresql+asyncpg" not in serialized
     assert settings.qmt_agent_health_url not in serialized
+    safety_payload = safety_history.json()
+    assert len(safety_payload["checks"]) == 18
+    assert all(check["currentStatus"] == "unknown" for check in safety_payload["checks"])
+    assert "accountId" not in safety_history.text
+    assert "300000013250" not in safety_history.text
   finally:
     await storage.close()

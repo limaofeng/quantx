@@ -113,6 +113,7 @@ _register(
     "limitUpBoardReplayPreparation",
     "limitUpBoardReplayTrades",
     "accountExecutionSafety",
+    "accountExecutionSafetyHistory",
     "operationalAlerts",
     "strategies",
     "strategy",

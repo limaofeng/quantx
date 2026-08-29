@@ -153,6 +153,76 @@ enum AccountExecutionSafetyCheckStatus {
   FAILED
 }
 
+"""单项账户准入检查的历史摘要"""
+type AccountSafetyCheckHistory {
+  code: String!
+  currentStatus: AccountSafetyHistoryStatus!
+  checkedAt: DateTime
+  reasonCode: String
+  publicMessage: String
+  coveragePct: Float!
+  incidentCount: Int!
+  points: [AccountSafetyHistoryPoint!]!
+}
+
+"""由独立 Monitor 见证的账户准入历史"""
+type AccountSafetyHistory {
+  available: Boolean!
+  range: AccountSafetyHistoryRange!
+  generatedAt: DateTime!
+  firstObservedAt: DateTime
+  lastObservedAt: DateTime
+  observerFresh: Boolean!
+  bucketSeconds: Int!
+  checks: [AccountSafetyCheckHistory!]!
+  incidents: [AccountSafetyIncident!]!
+  incidentsTruncated: Boolean!
+}
+
+"""账户准入检查历史时间桶"""
+type AccountSafetyHistoryPoint {
+  start: DateTime!
+  status: AccountSafetyHistoryStatus!
+  coveragePct: Float!
+  sampleCount: Int!
+  passedCount: Int!
+  standbyCount: Int!
+  failedCount: Int!
+  unknownCount: Int!
+}
+
+"""账户准入观测历史范围"""
+enum AccountSafetyHistoryRange {
+  HOURS_24
+  DAYS_7
+  DAYS_30
+  DAYS_90
+  YEAR_1
+}
+
+"""Monitor 见证的账户准入检查状态"""
+enum AccountSafetyHistoryStatus {
+  PASSED
+  STANDBY
+  FAILED
+  UNKNOWN
+}
+
+"""账户准入检查异常事件"""
+type AccountSafetyIncident {
+  id: ID!
+  checkCode: String!
+  openedAt: DateTime!
+  resolvedAt: DateTime
+  lastConfirmedFailedAt: DateTime!
+  active: Boolean!
+  observationFresh: Boolean!
+  openedReasonCode: String!
+  lastReasonCode: String!
+  openedMessage: String!
+  lastMessage: String!
+}
+
 """QMT Agent 设备操作结果"""
 type AgentDeviceMutationResult {
   success: Boolean!
@@ -4920,6 +4990,9 @@ type Query {
 
   """账户级实盘执行安全状态"""
   accountExecutionSafety(accountId: String!): AccountExecutionSafety!
+
+  """查询独立 Monitor 见证的账户准入历史"""
+  accountExecutionSafetyHistory(accountId: String!, range: AccountSafetyHistoryRange! = DAYS_30): AccountSafetyHistory!
 
   """查询持久化运行告警"""
   operationalAlerts(accountId: String!, status: String = null, severity: String = null, limit: Int! = 100): [OperationalAlert!]!

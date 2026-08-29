@@ -4,15 +4,24 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import strawberry
 from quantx_infrastructure.services.account_execution_safety_service import (
   AccountExecutionSafetyService,
 )
+
+from quantx_api.account_safety_history import fetch_account_safety_history
 
 from ..types.trading_safety_types import (
   AccountExecutionHealthStatus,
   AccountExecutionSafety,
   AccountExecutionSafetyCheck,
   AccountExecutionSafetyCheckStatus,
+  AccountSafetyCheckHistory,
+  AccountSafetyHistory,
+  AccountSafetyHistoryPoint,
+  AccountSafetyHistoryRange,
+  AccountSafetyHistoryStatus,
+  AccountSafetyIncident,
 )
 
 
@@ -85,4 +94,85 @@ class AccountExecutionSafetyResolver:
       ),
       last_backup_at=_aware(payload.get("last_backup_at")),
       checked_at=_aware(payload.get("checked_at")),
+    )
+
+  @classmethod
+  async def history(
+    cls,
+    history_range: AccountSafetyHistoryRange,
+  ) -> AccountSafetyHistory:
+    payload = await fetch_account_safety_history(history_range.value)
+    return AccountSafetyHistory(
+      available=bool(payload.get("available")),
+      range=history_range,
+      generated_at=_aware(payload.get("generatedAt"))
+      or datetime.now(timezone.utc),
+      first_observed_at=_aware(payload.get("firstObservedAt")),
+      last_observed_at=_aware(payload.get("lastObservedAt")),
+      observer_fresh=bool(payload.get("observerFresh")),
+      bucket_seconds=int(payload.get("bucketSeconds") or 0),
+      checks=[
+        cls._history_check(item)
+        for item in payload.get("checks", [])
+        if isinstance(item, dict)
+      ],
+      incidents=[
+        cls._history_incident(item)
+        for item in payload.get("incidents", [])
+        if isinstance(item, dict)
+      ],
+      incidents_truncated=bool(payload.get("incidentsTruncated")),
+    )
+
+  @staticmethod
+  def _history_status(value: object) -> AccountSafetyHistoryStatus:
+    normalized = str(value or "unknown").upper()
+    try:
+      return AccountSafetyHistoryStatus(normalized)
+    except ValueError:
+      return AccountSafetyHistoryStatus.UNKNOWN
+
+  @classmethod
+  def _history_check(cls, item: dict) -> AccountSafetyCheckHistory:
+    return AccountSafetyCheckHistory(
+      code=str(item.get("code") or ""),
+      current_status=cls._history_status(item.get("currentStatus")),
+      checked_at=_aware(item.get("checkedAt")),
+      reason_code=item.get("reasonCode"),
+      public_message=item.get("publicMessage"),
+      coverage_pct=float(item.get("coveragePct") or 0),
+      incident_count=int(item.get("incidentCount") or 0),
+      points=[
+        AccountSafetyHistoryPoint(
+          start=_aware(point.get("start")) or datetime.now(timezone.utc),
+          status=cls._history_status(point.get("status")),
+          coverage_pct=float(point.get("coveragePct") or 0),
+          sample_count=int(point.get("sampleCount") or 0),
+          passed_count=int(point.get("passedCount") or 0),
+          standby_count=int(point.get("standbyCount") or 0),
+          failed_count=int(point.get("failedCount") or 0),
+          unknown_count=int(point.get("unknownCount") or 0),
+        )
+        for point in item.get("points", [])
+        if isinstance(point, dict)
+      ],
+    )
+
+  @classmethod
+  def _history_incident(cls, item: dict) -> AccountSafetyIncident:
+    opened_at = _aware(item.get("openedAt")) or datetime.now(timezone.utc)
+    return AccountSafetyIncident(
+      id=strawberry.ID(str(item.get("id") or "")),
+      check_code=str(item.get("checkCode") or ""),
+      opened_at=opened_at,
+      resolved_at=_aware(item.get("resolvedAt")),
+      last_confirmed_failed_at=(
+        _aware(item.get("lastConfirmedFailedAt")) or opened_at
+      ),
+      active=bool(item.get("active")),
+      observation_fresh=bool(item.get("observationFresh")),
+      opened_reason_code=str(item.get("openedReasonCode") or "UNKNOWN"),
+      last_reason_code=str(item.get("lastReasonCode") or "UNKNOWN"),
+      opened_message=str(item.get("openedMessage") or "准入检查未通过"),
+      last_message=str(item.get("lastMessage") or "准入检查未通过"),
     )

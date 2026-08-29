@@ -45,6 +45,56 @@ export const AccountExecutionSafetyQuery = gql(`
   }
 `);
 
+export const AccountExecutionSafetyHistoryQuery = gql(`
+  query TradingSafety_AccountExecutionSafetyHistory(
+    $accountId: String!
+    $range: AccountSafetyHistoryRange! = DAYS_30
+  ) {
+    accountExecutionSafetyHistory(accountId: $accountId, range: $range) {
+      available
+      range
+      generatedAt
+      firstObservedAt
+      lastObservedAt
+      observerFresh
+      bucketSeconds
+      incidentsTruncated
+      checks {
+        code
+        currentStatus
+        checkedAt
+        reasonCode
+        publicMessage
+        coveragePct
+        incidentCount
+        points {
+          start
+          status
+          coveragePct
+          sampleCount
+          passedCount
+          standbyCount
+          failedCount
+          unknownCount
+        }
+      }
+      incidents {
+        id
+        checkCode
+        openedAt
+        resolvedAt
+        lastConfirmedFailedAt
+        active
+        observationFresh
+        openedReasonCode
+        lastReasonCode
+        openedMessage
+        lastMessage
+      }
+    }
+  }
+`);
+
 export const PreviewAccountExecutionControlMutation = gql(`
   mutation TradingSafety_PreviewAccountExecutionControl(
     $input: AccountExecutionControlPreviewInput!

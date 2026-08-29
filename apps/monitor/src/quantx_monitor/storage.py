@@ -10,10 +10,17 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import aiosqlite
+from quantx_contracts import ACCOUNT_EXECUTION_SAFETY_CHECK_CODES
 
-from .models import MonitorStatus, ProbeResult, percentile
+from .models import (
+  AccountSafetyHistoryStatus,
+  AccountSafetyProbeOutcome,
+  MonitorStatus,
+  ProbeResult,
+  percentile,
+)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HOUR_SECONDS = 3600
 
 
@@ -44,6 +51,10 @@ class MonitorStorage:
       )
     if current_version == 0:
       await self._create_schema()
+      current_version = SCHEMA_VERSION
+    elif current_version < 2:
+      await self._migrate_to_v2()
+      current_version = 2
     for target_id in target_ids:
       await self._db.execute(
         """
@@ -53,6 +64,15 @@ class MonitorStorage:
         ) VALUES (?, 'unknown', 0, 0)
         """,
         (target_id,),
+      )
+    for check_code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES:
+      await self._db.execute(
+        """
+        INSERT OR IGNORE INTO safety_check_states (
+          check_code, status
+        ) VALUES (?, 'unknown')
+        """,
+        (check_code,),
       )
     await self._db.commit()
 
@@ -117,7 +137,114 @@ class MonitorStorage:
       );
       CREATE INDEX ix_hourly_rollups_time ON hourly_rollups (hour_start);
 
-      PRAGMA user_version=1;
+      CREATE TABLE safety_check_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        check_code TEXT NOT NULL,
+        checked_at REAL NOT NULL,
+        status TEXT NOT NULL,
+        reason_code TEXT,
+        public_message TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX ix_safety_samples_check_time
+        ON safety_check_samples (check_code, checked_at);
+      CREATE INDEX ix_safety_samples_time ON safety_check_samples (checked_at);
+
+      CREATE TABLE safety_check_incidents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        check_code TEXT NOT NULL,
+        opened_at REAL NOT NULL,
+        resolved_at REAL,
+        opened_reason_code TEXT,
+        last_reason_code TEXT,
+        opened_message TEXT NOT NULL DEFAULT '',
+        last_message TEXT NOT NULL DEFAULT '',
+        last_confirmed_failed_at REAL NOT NULL
+      );
+      CREATE INDEX ix_safety_incidents_check_opened
+        ON safety_check_incidents (check_code, opened_at);
+
+      CREATE TABLE safety_check_states (
+        check_code TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        checked_at REAL,
+        last_confirmed_at REAL,
+        reason_code TEXT,
+        public_message TEXT NOT NULL DEFAULT '',
+        active_incident_id INTEGER REFERENCES safety_check_incidents(id)
+      );
+
+      CREATE TABLE safety_hourly_rollups (
+        check_code TEXT NOT NULL,
+        hour_start REAL NOT NULL,
+        sample_count INTEGER NOT NULL,
+        passed_count INTEGER NOT NULL,
+        standby_count INTEGER NOT NULL,
+        failed_count INTEGER NOT NULL,
+        unknown_count INTEGER NOT NULL,
+        PRIMARY KEY (check_code, hour_start)
+      );
+      CREATE INDEX ix_safety_hourly_rollups_time
+        ON safety_hourly_rollups (hour_start);
+
+      PRAGMA user_version=2;
+      """
+    )
+    await self._db.commit()
+
+  async def _migrate_to_v2(self) -> None:
+    assert self._db is not None
+    await self._db.executescript(
+      """
+      CREATE TABLE IF NOT EXISTS safety_check_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        check_code TEXT NOT NULL,
+        checked_at REAL NOT NULL,
+        status TEXT NOT NULL,
+        reason_code TEXT,
+        public_message TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS ix_safety_samples_check_time
+        ON safety_check_samples (check_code, checked_at);
+      CREATE INDEX IF NOT EXISTS ix_safety_samples_time
+        ON safety_check_samples (checked_at);
+
+      CREATE TABLE IF NOT EXISTS safety_check_incidents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        check_code TEXT NOT NULL,
+        opened_at REAL NOT NULL,
+        resolved_at REAL,
+        opened_reason_code TEXT,
+        last_reason_code TEXT,
+        opened_message TEXT NOT NULL DEFAULT '',
+        last_message TEXT NOT NULL DEFAULT '',
+        last_confirmed_failed_at REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS ix_safety_incidents_check_opened
+        ON safety_check_incidents (check_code, opened_at);
+
+      CREATE TABLE IF NOT EXISTS safety_check_states (
+        check_code TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        checked_at REAL,
+        last_confirmed_at REAL,
+        reason_code TEXT,
+        public_message TEXT NOT NULL DEFAULT '',
+        active_incident_id INTEGER REFERENCES safety_check_incidents(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS safety_hourly_rollups (
+        check_code TEXT NOT NULL,
+        hour_start REAL NOT NULL,
+        sample_count INTEGER NOT NULL,
+        passed_count INTEGER NOT NULL,
+        standby_count INTEGER NOT NULL,
+        failed_count INTEGER NOT NULL,
+        unknown_count INTEGER NOT NULL,
+        PRIMARY KEY (check_code, hour_start)
+      );
+      CREATE INDEX IF NOT EXISTS ix_safety_hourly_rollups_time
+        ON safety_hourly_rollups (hour_start);
+      PRAGMA user_version=2;
       """
     )
     await self._db.commit()
@@ -138,6 +265,135 @@ class MonitorStorage:
       except Exception:
         await self._db.rollback()
         raise
+
+  async def record_cycle(
+    self,
+    results: Iterable[ProbeResult],
+    account_safety: AccountSafetyProbeOutcome,
+  ) -> None:
+    """Persist service probes and the account-safety observation atomically."""
+
+    assert self._db is not None
+    async with self._write_lock:
+      await self._db.execute("BEGIN IMMEDIATE")
+      try:
+        for result in results:
+          await self._record_result(result)
+        await self._record_account_safety(account_safety)
+        await self._db.commit()
+      except Exception:
+        await self._db.rollback()
+        raise
+
+  async def _record_account_safety(
+    self,
+    outcome: AccountSafetyProbeOutcome,
+  ) -> None:
+    assert self._db is not None
+    checked_at = outcome.source.checked_at_epoch
+    snapshot = outcome.snapshot
+    observed = {
+      item.code: (
+        item.status.value.lower(),
+        item.reason_code,
+        item.public_message,
+      )
+      for item in snapshot.checks
+    } if snapshot is not None and snapshot.status == "ready" else {}
+    fallback_reason = outcome.source.reason_code or "ACCOUNT_SAFETY_UNOBSERVED"
+    fallback_message = (
+      "账户准入观测未启用"
+      if outcome.source.observed_status is MonitorStatus.DISABLED
+      else "账户准入观测中断"
+    )
+
+    for check_code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES:
+      status, reason_code, public_message = observed.get(
+        check_code,
+        (
+          AccountSafetyHistoryStatus.UNKNOWN.value,
+          fallback_reason,
+          fallback_message,
+        ),
+      )
+      row = await (
+        await self._db.execute(
+          "SELECT * FROM safety_check_states WHERE check_code = ?",
+          (check_code,),
+        )
+      ).fetchone()
+      if row is None:
+        raise KeyError(f"unknown account-safety check: {check_code}")
+      active_incident_id = row["active_incident_id"]
+      last_confirmed_at = row["last_confirmed_at"]
+      if status == AccountSafetyHistoryStatus.FAILED.value:
+        last_confirmed_at = checked_at
+        if active_incident_id is None:
+          cursor = await self._db.execute(
+            """
+            INSERT INTO safety_check_incidents (
+              check_code, opened_at, opened_reason_code, last_reason_code,
+              opened_message, last_message, last_confirmed_failed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+              check_code,
+              checked_at,
+              reason_code,
+              reason_code,
+              public_message,
+              public_message,
+              checked_at,
+            ),
+          )
+          active_incident_id = cursor.lastrowid
+        else:
+          await self._db.execute(
+            """
+            UPDATE safety_check_incidents
+            SET last_reason_code = ?, last_message = ?,
+                last_confirmed_failed_at = ?
+            WHERE id = ?
+            """,
+            (reason_code, public_message, checked_at, active_incident_id),
+          )
+      elif status in {
+        AccountSafetyHistoryStatus.PASSED.value,
+        AccountSafetyHistoryStatus.STANDBY.value,
+      }:
+        last_confirmed_at = checked_at
+        if active_incident_id is not None:
+          await self._db.execute(
+            "UPDATE safety_check_incidents SET resolved_at = ? WHERE id = ?",
+            (checked_at, active_incident_id),
+          )
+          active_incident_id = None
+
+      await self._db.execute(
+        """
+        INSERT INTO safety_check_samples (
+          check_code, checked_at, status, reason_code, public_message
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (check_code, checked_at, status, reason_code, public_message),
+      )
+      await self._db.execute(
+        """
+        UPDATE safety_check_states
+        SET status = ?, checked_at = ?, last_confirmed_at = ?,
+            reason_code = ?, public_message = ?, active_incident_id = ?
+        WHERE check_code = ?
+        """,
+        (
+          status,
+          checked_at,
+          last_confirmed_at,
+          reason_code,
+          public_message,
+          active_incident_id,
+          check_code,
+        ),
+      )
 
   async def _record_result(self, result: ProbeResult) -> None:
     assert self._db is not None
@@ -461,6 +717,155 @@ class MonitorStorage:
     rows = await (await self._db.execute(query, params)).fetchall()
     return [dict(row) for row in rows]
 
+  async def account_safety_states(self) -> dict[str, dict[str, Any]]:
+    assert self._db is not None
+    rows = await (
+      await self._db.execute(
+        "SELECT * FROM safety_check_states ORDER BY check_code"
+      )
+    ).fetchall()
+    return {str(row["check_code"]): dict(row) for row in rows}
+
+  async def account_safety_observation_bounds(self) -> tuple[float | None, float | None]:
+    assert self._db is not None
+    row = await (
+      await self._db.execute(
+        "SELECT MIN(checked_at), MAX(checked_at) FROM safety_check_samples"
+      )
+    ).fetchone()
+    if row is None:
+      return None, None
+    first = float(row[0]) if row[0] is not None else None
+    last = float(row[1]) if row[1] is not None else None
+    return first, last
+
+  async def account_safety_history(
+    self,
+    check_code: str,
+    *,
+    since: float,
+    now: float,
+    bucket_seconds: int,
+    interval_seconds: float,
+    use_rollups: bool,
+  ) -> list[dict[str, Any]]:
+    assert self._db is not None
+    buckets: dict[int, dict[str, Any]] = {}
+    if use_rollups:
+      rows = await (
+        await self._db.execute(
+          """
+          SELECT * FROM safety_hourly_rollups
+          WHERE check_code = ? AND hour_start >= ? AND hour_start <= ?
+          ORDER BY hour_start
+          """,
+          (check_code, since, now),
+        )
+      ).fetchall()
+      for row in rows:
+        bucket = int(float(row["hour_start"]) // bucket_seconds * bucket_seconds)
+        item = buckets.setdefault(bucket, self._empty_safety_bucket(bucket))
+        for key, column in (
+          ("sampleCount", "sample_count"),
+          ("passedCount", "passed_count"),
+          ("standbyCount", "standby_count"),
+          ("failedCount", "failed_count"),
+          ("unknownCount", "unknown_count"),
+        ):
+          item[key] += int(row[column] or 0)
+    else:
+      rows = await (
+        await self._db.execute(
+          """
+          SELECT checked_at, status
+          FROM safety_check_samples
+          WHERE check_code = ? AND checked_at >= ? AND checked_at <= ?
+          ORDER BY checked_at
+          """,
+          (check_code, since, now),
+        )
+      ).fetchall()
+      for row in rows:
+        bucket = int(float(row["checked_at"]) // bucket_seconds * bucket_seconds)
+        item = buckets.setdefault(bucket, self._empty_safety_bucket(bucket))
+        item["sampleCount"] += 1
+        status_key = {
+          "passed": "passedCount",
+          "standby": "standbyCount",
+          "failed": "failedCount",
+          "unknown": "unknownCount",
+        }[str(row["status"])]
+        item[status_key] += 1
+
+    first_bucket = int(since // bucket_seconds * bucket_seconds)
+    last_bucket = int(now // bucket_seconds * bucket_seconds)
+    expected_samples = max(1, round(bucket_seconds / max(1.0, interval_seconds)))
+    return [
+      self._finalize_safety_bucket(
+        buckets.get(start, self._empty_safety_bucket(start)),
+        expected_samples=expected_samples,
+      )
+      for start in range(first_bucket, last_bucket + 1, bucket_seconds)
+    ]
+
+  @staticmethod
+  def _empty_safety_bucket(start: int) -> dict[str, Any]:
+    return {
+      "start": start,
+      "sampleCount": 0,
+      "passedCount": 0,
+      "standbyCount": 0,
+      "failedCount": 0,
+      "unknownCount": 0,
+    }
+
+  @staticmethod
+  def _finalize_safety_bucket(
+    item: dict[str, Any],
+    *,
+    expected_samples: int,
+  ) -> dict[str, Any]:
+    if item["failedCount"]:
+      status = AccountSafetyHistoryStatus.FAILED
+    elif item["passedCount"] or item["standbyCount"]:
+      status = (
+        AccountSafetyHistoryStatus.STANDBY
+        if item["standbyCount"] >= item["passedCount"]
+        else AccountSafetyHistoryStatus.PASSED
+      )
+    else:
+      status = AccountSafetyHistoryStatus.UNKNOWN
+    confirmed = (
+      item["passedCount"] + item["standbyCount"] + item["failedCount"]
+    )
+    item["status"] = status.value
+    item["coveragePct"] = min(100.0, confirmed / expected_samples * 100)
+    return item
+
+  async def account_safety_incidents(
+    self,
+    *,
+    since: float,
+    now: float,
+    limit: int = 201,
+  ) -> list[dict[str, Any]]:
+    assert self._db is not None
+    rows = await (
+      await self._db.execute(
+        """
+        SELECT id, check_code, opened_at, resolved_at,
+               opened_reason_code, last_reason_code,
+               opened_message, last_message, last_confirmed_failed_at
+        FROM safety_check_incidents
+        WHERE opened_at <= ? AND (resolved_at IS NULL OR resolved_at >= ?)
+        ORDER BY opened_at DESC, id DESC
+        LIMIT ?
+        """,
+        (now, since, max(1, min(int(limit), 501))),
+      )
+    ).fetchall()
+    return [dict(row) for row in rows]
+
   async def rollup_and_retain(
     self,
     *,
@@ -489,11 +894,34 @@ class MonitorStorage:
           (current_hour,),
         )
       ).fetchall()
+      missing_safety_hours = await (
+        await self._db.execute(
+          """
+          SELECT DISTINCT check_code,
+                 CAST(checked_at / 3600 AS INTEGER) * 3600 AS hour_start
+          FROM safety_check_samples AS sample
+          WHERE checked_at < ?
+            AND NOT EXISTS (
+              SELECT 1 FROM safety_hourly_rollups AS rollup
+              WHERE rollup.check_code = sample.check_code
+                AND rollup.hour_start =
+                    CAST(sample.checked_at / 3600 AS INTEGER) * 3600
+            )
+          ORDER BY hour_start, check_code
+          """,
+          (current_hour,),
+        )
+      ).fetchall()
       await self._db.execute("BEGIN IMMEDIATE")
       try:
         for missing in missing_hours:
           await self._rollup_hour(
             str(missing["target_id"]),
+            float(missing["hour_start"]),
+          )
+        for missing in missing_safety_hours:
+          await self._rollup_safety_hour(
+            str(missing["check_code"]),
             float(missing["hour_start"]),
           )
         await self._db.execute(
@@ -505,8 +933,23 @@ class MonitorStorage:
           (now - rollup_retention_seconds,),
         )
         await self._db.execute(
+          "DELETE FROM safety_check_samples WHERE checked_at < ?",
+          (now - raw_retention_seconds,),
+        )
+        await self._db.execute(
+          "DELETE FROM safety_hourly_rollups WHERE hour_start < ?",
+          (now - rollup_retention_seconds,),
+        )
+        await self._db.execute(
           """
           DELETE FROM incidents
+          WHERE resolved_at IS NOT NULL AND resolved_at < ?
+          """,
+          (now - rollup_retention_seconds,),
+        )
+        await self._db.execute(
+          """
+          DELETE FROM safety_check_incidents
           WHERE resolved_at IS NOT NULL AND resolved_at < ?
           """,
           (now - rollup_retention_seconds,),
@@ -557,6 +1000,39 @@ class MonitorStorage:
         max(latencies) if latencies else None,
         percentile(latencies, 0.50),
         percentile(latencies, 0.95),
+      ),
+    )
+
+  async def _rollup_safety_hour(self, check_code: str, hour_start: float) -> None:
+    assert self._db is not None
+    rows = await (
+      await self._db.execute(
+        """
+        SELECT status
+        FROM safety_check_samples
+        WHERE check_code = ? AND checked_at >= ? AND checked_at < ?
+        """,
+        (check_code, hour_start, hour_start + HOUR_SECONDS),
+      )
+    ).fetchall()
+    counts = {status.value: 0 for status in AccountSafetyHistoryStatus}
+    for row in rows:
+      counts[str(row["status"])] += 1
+    await self._db.execute(
+      """
+      INSERT OR REPLACE INTO safety_hourly_rollups (
+        check_code, hour_start, sample_count, passed_count, standby_count,
+        failed_count, unknown_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      """,
+      (
+        check_code,
+        hour_start,
+        len(rows),
+        counts["passed"],
+        counts["standby"],
+        counts["failed"],
+        counts["unknown"],
       ),
     )
 

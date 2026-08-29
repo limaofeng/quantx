@@ -6,12 +6,14 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from time import monotonic
+from typing import TypeVar
 
 import httpx
 
 from .config import MonitorSettings
 from .models import ProbeResult, utc_now
 from .probes import (
+  AccountSafetyProbe,
   HttpProbe,
   PostgreSQLProbe,
   QmtAgentHealthProbe,
@@ -23,6 +25,7 @@ from .probes.http import json_status
 from .storage import MonitorStorage
 
 logger = logging.getLogger(__name__)
+TProbe = TypeVar("TProbe")
 
 
 class MonitorScheduler:
@@ -156,12 +159,17 @@ class MonitorScheduler:
       )
       direct.append(lambda: qmt_agent_probe.run(self._client))
 
-      async def guarded(action: Callable[[], Awaitable[ProbeResult]]) -> ProbeResult:
+      async def guarded(action: Callable[[], Awaitable[TProbe]]) -> TProbe:
         async with semaphore:
           return await action()
 
-      direct_results = await asyncio.gather(
-        *(guarded(action) for action in direct),
+      account_safety_probe = AccountSafetyProbe(
+        self.settings.api_url,
+        self.settings.http_timeout_seconds,
+      )
+      direct_results, account_safety = await asyncio.gather(
+        asyncio.gather(*(guarded(action) for action in direct)),
+        guarded(lambda: account_safety_probe.run(self._client)),
       )
       snapshot = RuntimeSnapshotProbe(
         f"{self.settings.api_url.rstrip('/')}/health/components",
@@ -180,9 +188,10 @@ class MonitorScheduler:
         *(result for result in direct_results if result.target_id != "qmt-agent"),
         *(result for result in derived_results if result.target_id != "qmt-agent"),
         qmt_result,
+        account_safety.source,
       ]
       try:
-        await self.storage.record_results(results)
+        await self.storage.record_cycle(results, account_safety)
         self.last_cycle_at = utc_now().timestamp()
         self.last_persist_error = None
       except Exception as exc:

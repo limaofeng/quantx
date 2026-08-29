@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
+from quantx_contracts import AccountSafetyObservationSnapshot
+
 
 class MonitorStatus(StrEnum):
   HEALTHY = "healthy"
@@ -14,6 +16,13 @@ class MonitorStatus(StrEnum):
   UNAVAILABLE = "unavailable"
   UNKNOWN = "unknown"
   DISABLED = "disabled"
+
+
+class AccountSafetyHistoryStatus(StrEnum):
+  PASSED = "passed"
+  STANDBY = "standby"
+  FAILED = "failed"
+  UNKNOWN = "unknown"
 
 
 class TargetGroup(StrEnum):
@@ -51,6 +60,12 @@ class ProbeResult:
     if value.tzinfo is None:
       value = value.replace(tzinfo=timezone.utc)
     return value.timestamp()
+
+
+@dataclass(frozen=True)
+class AccountSafetyProbeOutcome:
+  source: ProbeResult
+  snapshot: AccountSafetyObservationSnapshot | None
 
 
 def utc_now() -> datetime:

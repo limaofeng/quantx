@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
+from quantx_contracts import ACCOUNT_EXECUTION_SAFETY_CHECK_CODES
 
 from .config import MonitorSettings
 from .models import MonitorStatus, iso_timestamp, public_round
@@ -30,6 +31,13 @@ BUCKET_SECONDS: dict[str, int] = {
   "30d": 1800,
   "90d": 3600,
   "1y": 21600,
+}
+SAFETY_BUCKET_SECONDS: dict[str, int] = {
+  "24h": 900,
+  "7d": 3600,
+  "30d": 14400,
+  "90d": 43200,
+  "1y": 172800,
 }
 
 
@@ -213,5 +221,108 @@ def build_router(runtime: RuntimeView) -> APIRouter:
         }
       )
     return {"range": range, "incidents": public_rows}
+
+  @router.get("/monitor/internal/api/v1/account-safety/history")
+  async def account_safety_history(
+    range: HistoryRange = "30d",
+  ) -> dict[str, object]:
+    now = time()
+    since = now - WINDOW_SECONDS[range]
+    bucket_seconds = SAFETY_BUCKET_SECONDS[range]
+    states = await runtime.storage.account_safety_states()
+    first_observed, last_observed = (
+      await runtime.storage.account_safety_observation_bounds()
+    )
+    incident_rows = await runtime.storage.account_safety_incidents(
+      since=since,
+      now=now,
+      limit=201,
+    )
+    incidents_truncated = len(incident_rows) > 200
+    incident_rows = incident_rows[:200]
+    incident_counts: dict[str, int] = {}
+    for row in incident_rows:
+      code = str(row["check_code"])
+      incident_counts[code] = incident_counts.get(code, 0) + 1
+
+    checks: list[dict[str, object]] = []
+    for code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES:
+      points = await runtime.storage.account_safety_history(
+        code,
+        since=since,
+        now=now,
+        bucket_seconds=bucket_seconds,
+        interval_seconds=runtime.settings.check_interval_seconds,
+        use_rollups=range == "1y",
+      )
+      for point in points:
+        point["start"] = iso_timestamp(point["start"])
+        point["coveragePct"] = public_round(point["coveragePct"])
+      state = states.get(code, {})
+      coverage = (
+        sum(float(point["coveragePct"]) for point in points) / len(points)
+        if points
+        else 0.0
+      )
+      checks.append(
+        {
+          "code": code,
+          "currentStatus": str(state.get("status") or "unknown"),
+          "checkedAt": iso_timestamp(state.get("checked_at")),
+          "reasonCode": state.get("reason_code"),
+          "publicMessage": str(state.get("public_message") or ""),
+          "coveragePct": public_round(coverage),
+          "incidentCount": incident_counts.get(code, 0),
+          "points": points,
+        }
+      )
+
+    freshness_seconds = max(
+      90.0,
+      float(runtime.settings.check_interval_seconds) * 3,
+    )
+    observer_fresh = bool(
+      last_observed is not None and now - last_observed <= freshness_seconds
+    )
+    public_incidents: list[dict[str, object]] = []
+    for row in incident_rows:
+      resolved_at = row.get("resolved_at")
+      code = str(row["check_code"])
+      state = states.get(code, {})
+      active = resolved_at is None
+      observation_fresh = bool(
+        active
+        and observer_fresh
+        and str(state.get("status") or "unknown") != "unknown"
+      )
+      public_incidents.append(
+        {
+          "id": int(row["id"]),
+          "checkCode": code,
+          "openedAt": iso_timestamp(row["opened_at"]),
+          "resolvedAt": iso_timestamp(resolved_at),
+          "lastConfirmedFailedAt": iso_timestamp(
+            row.get("last_confirmed_failed_at")
+          ),
+          "active": active,
+          "observationFresh": observation_fresh,
+          "openedReasonCode": row.get("opened_reason_code"),
+          "lastReasonCode": row.get("last_reason_code"),
+          "openedMessage": str(row.get("opened_message") or ""),
+          "lastMessage": str(row.get("last_message") or ""),
+        }
+      )
+    return {
+      "available": True,
+      "range": range,
+      "generatedAt": iso_timestamp(now),
+      "firstObservedAt": iso_timestamp(first_observed),
+      "lastObservedAt": iso_timestamp(last_observed),
+      "observerFresh": observer_fresh,
+      "bucketSeconds": bucket_seconds,
+      "checks": checks,
+      "incidents": public_incidents,
+      "incidentsTruncated": incidents_truncated,
+    }
 
   return router

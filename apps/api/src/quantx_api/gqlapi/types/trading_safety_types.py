@@ -22,6 +22,76 @@ class AccountExecutionSafetyCheckStatus(Enum):
   FAILED = "FAILED"
 
 
+@strawberry.enum(description="账户准入观测历史范围")
+class AccountSafetyHistoryRange(Enum):
+  HOURS_24 = "24h"
+  DAYS_7 = "7d"
+  DAYS_30 = "30d"
+  DAYS_90 = "90d"
+  YEAR_1 = "1y"
+
+
+@strawberry.enum(description="Monitor 见证的账户准入检查状态")
+class AccountSafetyHistoryStatus(Enum):
+  PASSED = "PASSED"
+  STANDBY = "STANDBY"
+  FAILED = "FAILED"
+  UNKNOWN = "UNKNOWN"
+
+
+@strawberry.type(description="账户准入检查历史时间桶")
+class AccountSafetyHistoryPoint:
+  start: datetime
+  status: AccountSafetyHistoryStatus
+  coverage_pct: float
+  sample_count: int
+  passed_count: int
+  standby_count: int
+  failed_count: int
+  unknown_count: int
+
+
+@strawberry.type(description="单项账户准入检查的历史摘要")
+class AccountSafetyCheckHistory:
+  code: str
+  current_status: AccountSafetyHistoryStatus
+  checked_at: Optional[datetime]
+  reason_code: Optional[str]
+  public_message: Optional[str]
+  coverage_pct: float
+  incident_count: int
+  points: List[AccountSafetyHistoryPoint] = field(default_factory=list)
+
+
+@strawberry.type(description="账户准入检查异常事件")
+class AccountSafetyIncident:
+  id: strawberry.ID
+  check_code: str
+  opened_at: datetime
+  resolved_at: Optional[datetime]
+  last_confirmed_failed_at: datetime
+  active: bool
+  observation_fresh: bool
+  opened_reason_code: str
+  last_reason_code: str
+  opened_message: str
+  last_message: str
+
+
+@strawberry.type(description="由独立 Monitor 见证的账户准入历史")
+class AccountSafetyHistory:
+  available: bool
+  range: AccountSafetyHistoryRange
+  generated_at: datetime
+  first_observed_at: Optional[datetime]
+  last_observed_at: Optional[datetime]
+  observer_fresh: bool
+  bucket_seconds: int
+  checks: List[AccountSafetyCheckHistory] = field(default_factory=list)
+  incidents: List[AccountSafetyIncident] = field(default_factory=list)
+  incidents_truncated: bool = False
+
+
 @strawberry.type(description="账户执行安全检查项")
 class AccountExecutionSafetyCheck:
   code: str

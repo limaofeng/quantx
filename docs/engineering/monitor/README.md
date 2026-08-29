@@ -40,6 +40,13 @@
 HTTP 200/503 都生成 RTT 样本。原因优先级固定为健康端点传输/协议错误、API 服务端
 语义原因、Windows 本地 readiness 原因。
 
+账户实盘准入采用单向见证模型：API 内的 `AccountExecutionSafetyService` 是唯一
+判定者，Monitor 每 30 秒从 API 回环地址读取一次完整、脱敏且不含账户标识的准入
+快照，只负责留痕。Monitor 不复算门禁、不向主系统回写状态，它自身不可用时也不会
+改变账户交易能力。准入状态固定为 `passed / standby / failed / unknown`：明确
+`failed` 立即打开异常，`passed` 或 `standby` 关闭异常，采集或协议中断记为
+`unknown` 且不打开或关闭既有异常。`standby` 表示休市等正常待机，不属于异常。
+
 状态词汇固定为 `healthy / degraded / unavailable / unknown / disabled`。连续两次
 `unavailable` 才打开事故；事故打开后连续两次 `healthy` 才关闭。第一次失败和
 第一次恢复均保持 `degraded`，避免单个瞬时样本制造事故抖动。可选且未配置的目标
@@ -54,6 +61,8 @@ SQLite 使用 WAL、事务写入和版本化 schema：
 - `24h/7d/30d/90d` 从原始样本分桶，`1y` 从小时汇总分桶；
 - 每次检测保存观测状态、去抖后的有效状态、耗时、HTTP 状态码和稳定原因码；
 - 活动事故与关闭时间持久化，Monitor 重启后继续沿用连续计数和事故状态。
+- 准入原始样本同样保留 90 天，小时汇总和异常事件保留 365 天；准入历史与普通
+  服务状态使用独立表和状态机。
 
 统一 `backup` 在历史库存在时通过 SQLite online backup API 写入
 `monitor/quantx-monitor.sqlite3`，`restore-verify` 会校验清单、哈希和
@@ -71,6 +80,12 @@ journal 的既有备份。
 | `/monitor/api/v1/summary?window=24h` | 当前状态和 `24h/7d/30d` 汇总 |
 | `/monitor/api/v1/targets/{id}/history?range=24h` | `24h/7d/30d/90d/1y` 分桶历史 |
 | `/monitor/api/v1/incidents?range=30d&targetId={id}` | 固定目标的事故记录 |
+
+账户准入历史的原始端点
+`/monitor/internal/api/v1/account-safety/history?range=30d` 仅绑定在 Monitor
+回环链路上，Caddy 对 `/monitor/internal/*` 固定返回 404。Web 必须通过带账户授权的
+GraphQL `accountExecutionSafetyHistory` 查询访问，支持 `24h/7d/30d/90d/1y`；
+GraphQL 只作为授权与脱敏门面，不参与判定。
 
 响应只包含固定目标 ID/名称、状态、采样时间、延迟分位数、覆盖率和稳定原因码。
 连接串、Redis/InfluxDB 凭据、内部探测 URL、异常文本和调用栈都不会出现在公共

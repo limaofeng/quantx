@@ -23,6 +23,7 @@ from quantx_infrastructure.core.data.market_stream_transport import (
 from quantx_infrastructure.database.manager import db_manager
 from quantx_infrastructure.database.relational_connection import get_async_db
 
+from quantx_api.account_safety_observation import account_safety_observation_snapshot
 from quantx_api.agent_api import (
   agent_router,
   run_market_data_staging_sweeper,
@@ -600,6 +601,14 @@ async def request_dev_shutdown(request: Request):
 @app.get("/health/live")
 async def health_live():
   return {"status": "alive", "component": "api"}
+
+
+@app.get(
+  "/internal/monitor/account-safety",
+  include_in_schema=False,
+)
+async def internal_monitor_account_safety():
+  return await account_safety_observation_snapshot()
 
 
 @app.get("/health/components")

@@ -1,7 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from quantx_monitor.models import MonitorStatus, ProbeResult
+from quantx_contracts import (
+  ACCOUNT_EXECUTION_SAFETY_CHECK_CODES,
+  AccountSafetyCheckObservation,
+  AccountSafetyCheckStatus,
+  AccountSafetyObservationSnapshot,
+)
+from quantx_monitor.models import (
+  AccountSafetyProbeOutcome,
+  MonitorStatus,
+  ProbeResult,
+)
 from quantx_monitor.storage import MonitorStorage
 
 
@@ -18,6 +28,52 @@ def result(
     observed_status=status,
     latency_ms=latency_ms,
     reason_code=reason_code,
+  )
+
+
+def safety_outcome(
+  checked_at: datetime,
+  status: AccountSafetyCheckStatus | None,
+) -> AccountSafetyProbeOutcome:
+  source_status = (
+    MonitorStatus.HEALTHY if status is not None else MonitorStatus.UNAVAILABLE
+  )
+  snapshot = None
+  if status is not None:
+    snapshot = AccountSafetyObservationSnapshot(
+      status="ready",
+      observed_at=checked_at,
+      checks=[
+        AccountSafetyCheckObservation(
+          code=code,
+          status=(status if code == "MARKET_STREAM_READY" else AccountSafetyCheckStatus.PASSED),
+          scope="INCREASE_RISK",
+          reason_code=(
+            None
+            if code != "MARKET_STREAM_READY" or status is AccountSafetyCheckStatus.PASSED
+            else "MARKET_CLOSED_STANDBY"
+            if status is AccountSafetyCheckStatus.STANDBY
+            else "MARKET_STREAM_READY_FAILED"
+          ),
+          public_message=(
+            ""
+            if code != "MARKET_STREAM_READY" or status is AccountSafetyCheckStatus.PASSED
+            else "当前休市"
+            if status is AccountSafetyCheckStatus.STANDBY
+            else "行情链路未收敛"
+          ),
+        )
+        for code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES
+      ],
+    )
+  return AccountSafetyProbeOutcome(
+    source=ProbeResult(
+      target_id="account-safety-observer",
+      checked_at=checked_at,
+      observed_status=source_status,
+      reason_code=None if snapshot else "ACCOUNT_SAFETY_CONNECT_ERROR",
+    ),
+    snapshot=snapshot,
   )
 
 
@@ -189,5 +245,52 @@ async def test_unavailable_latency_exception_is_scoped_to_qmt_agent(tmp_path):
 
     assert metrics["api-public"]["latencyP50Ms"] is None
     assert metrics["api-public"]["latencyP95Ms"] is None
+  finally:
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_safety_failed_opens_immediately_unknown_preserves_and_standby_resolves(
+  tmp_path,
+):
+  storage = MonitorStorage(tmp_path / "monitor.sqlite3")
+  await storage.open(["account-safety-observer"])
+  started = datetime(2026, 8, 27, 4, 0, tzinfo=timezone.utc)
+  try:
+    await storage.record_cycle(
+      [],
+      safety_outcome(started, AccountSafetyCheckStatus.FAILED),
+    )
+    failed_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert failed_state["status"] == "failed"
+    assert failed_state["active_incident_id"] is not None
+
+    await storage.record_cycle(
+      [],
+      safety_outcome(started + timedelta(seconds=30), None),
+    )
+    unknown_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert unknown_state["status"] == "unknown"
+    assert unknown_state["active_incident_id"] == failed_state["active_incident_id"]
+
+    await storage.record_cycle(
+      [],
+      safety_outcome(
+        started + timedelta(seconds=60),
+        AccountSafetyCheckStatus.STANDBY,
+      ),
+    )
+    standby_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert standby_state["status"] == "standby"
+    assert standby_state["active_incident_id"] is None
+
+    incidents = await storage.account_safety_incidents(
+      since=started.timestamp() - 1,
+      now=(started + timedelta(seconds=90)).timestamp(),
+    )
+    assert len(incidents) == 1
+    assert incidents[0]["resolved_at"] == pytest.approx(
+      (started + timedelta(seconds=60)).timestamp()
+    )
   finally:
     await storage.close()

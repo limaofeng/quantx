@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   previewControl: vi.fn(),
   refreshSafety: vi.fn(),
   useMutation: vi.fn(),
+  useQuery: vi.fn(),
   safety: {
     accountId: '300000013250',
     authorizationState: 'DISABLED',
@@ -52,10 +53,12 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('urql', () => ({
   useMutation: mocks.useMutation,
+  useQuery: mocks.useQuery,
 }));
 
 vi.mock('@/features/trading-safety', () => ({
   ConfirmAccountExecutionControlMutation: 'confirm-account-execution-control',
+  AccountExecutionSafetyHistoryQuery: 'account-execution-safety-history',
   PreviewAccountExecutionControlMutation: 'preview-account-execution-control',
   useTradingSafety: () => ({
     accountId: '300000013250',
@@ -73,6 +76,47 @@ describe('TradingSafetySettingsPanel', () => {
         ? [{ fetching: false }, mocks.previewControl]
         : [{ fetching: false }, mocks.confirmControl]
     );
+    mocks.useQuery.mockReturnValue([
+      {
+        fetching: false,
+        data: {
+          accountExecutionSafetyHistory: {
+            available: true,
+            range: 'DAYS_30',
+            generatedAt: '2026-08-25T06:00:10Z',
+            firstObservedAt: '2026-08-24T06:00:10Z',
+            lastObservedAt: '2026-08-25T06:00:10Z',
+            observerFresh: true,
+            bucketSeconds: 14_400,
+            incidentsTruncated: false,
+            checks: [
+              {
+                code: 'MARKET_STREAM_READY',
+                currentStatus: 'STANDBY',
+                checkedAt: '2026-08-25T06:00:10Z',
+                reasonCode: 'MARKET_CLOSED_STANDBY',
+                publicMessage: '当前休市，等待下一交易时段',
+                coveragePct: 100,
+                incidentCount: 0,
+                points: [
+                  {
+                    start: '2026-08-25T04:00:00Z',
+                    status: 'STANDBY',
+                    coveragePct: 100,
+                    sampleCount: 120,
+                    passedCount: 0,
+                    standbyCount: 120,
+                    failedCount: 0,
+                    unknownCount: 0,
+                  },
+                ],
+              },
+            ],
+            incidents: [],
+          },
+        },
+      },
+    ]);
     mocks.previewControl.mockResolvedValue({
       data: {
         previewAccountExecutionControl: {
@@ -133,5 +177,23 @@ describe('TradingSafetySettingsPanel', () => {
     expect(
       screen.getByText('预览已锁定 60 秒，请核对后确认。')
     ).toBeInTheDocument();
+  });
+
+  it('shows standby history without creating an incident', () => {
+    render(<TradingSafetySettingsPanel />);
+
+    fireEvent.click(screen.getByRole('button', { name: '异常历史' }));
+
+    expect(screen.getAllByText('休市待机')).not.toHaveLength(0);
+    expect(screen.getByText('0 次异常')).toBeInTheDocument();
+    expect(
+      screen.getByText('所选范围内没有确认的准入异常。')
+    ).toBeInTheDocument();
+    expect(mocks.useQuery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: 'account-execution-safety-history',
+        variables: expect.objectContaining({ range: 'DAYS_30' }),
+      })
+    );
   });
 });

@@ -39,6 +39,12 @@ TARGETS: tuple[TargetDefinition, ...] = (
     probe_kind=ProbeKind.DERIVED,
   ),
   TargetDefinition(
+    "account-safety-observer",
+    "账户准入观测",
+    TargetGroup.RUNTIME,
+    optional=True,
+  ),
+  TargetDefinition(
     "ai-runtime",
     "AI Runtime",
     TargetGroup.RUNTIME,

@@ -1521,6 +1521,18 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "accountExecutionSafetyHistory": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "aiAssistantCapabilities": {
         "audiences": [
           "web",

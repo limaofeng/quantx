@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     default="http://127.0.0.1:18082",
     description="独立行情接入进程内部地址",
   )
+  monitor_internal_url: str = Field(
+    default="http://127.0.0.1:18083",
+    description="API 查询独立 Monitor 只读历史的回环地址",
+  )
   runtime_profile: str = Field(
     default="web",
     description="运行就绪检查配置：web 或 full",

@@ -61,7 +61,11 @@ from ..types.trade_approval_types import (
   TradeApprovalPreview,
   TradeApprovalPreviewResult,
 )
-from ..types.trading_safety_types import AccountExecutionSafety
+from ..types.trading_safety_types import (
+  AccountExecutionSafety,
+  AccountSafetyHistory,
+  AccountSafetyHistoryRange,
+)
 
 
 @strawberry.type(description="持仓做 T 查询")
@@ -169,6 +173,16 @@ class TTradeQuery:
     return await AccountExecutionSafetyResolver.status(
       authorized_account_id(info, account_id)
     )
+
+  @strawberry.field(description="查询独立 Monitor 见证的账户准入历史")
+  async def account_execution_safety_history(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    range: AccountSafetyHistoryRange = AccountSafetyHistoryRange.DAYS_30,
+  ) -> AccountSafetyHistory:
+    authorized_account_id(info, account_id)
+    return await AccountExecutionSafetyResolver.history(range)
 
   @strawberry.field(description="查询持久化运行告警")
   async def operational_alerts(

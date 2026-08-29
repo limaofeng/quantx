@@ -5,6 +5,8 @@ from quantx_api.gqlapi.resolvers.trading_safety import (
 from quantx_api.gqlapi.types.trading_safety_types import (
   AccountExecutionHealthStatus,
   AccountExecutionSafetyCheckStatus,
+  AccountSafetyHistoryRange,
+  AccountSafetyHistoryStatus,
 )
 
 
@@ -48,3 +50,45 @@ def test_account_execution_health_rejects_query_process_states(
 ):
   with pytest.raises(ValueError, match=transient_status):
     AccountExecutionSafetyResolver.from_payload(_payload(transient_status))
+
+
+@pytest.mark.asyncio
+async def test_history_maps_monitor_observations_without_account_data(monkeypatch):
+  async def fetch(history_range: str) -> dict:
+    assert history_range == "30d"
+    return {
+      "available": True,
+      "range": "30d",
+      "generatedAt": "2026-08-27T05:00:00Z",
+      "firstObservedAt": "2026-08-26T05:00:00Z",
+      "lastObservedAt": "2026-08-27T05:00:00Z",
+      "observerFresh": True,
+      "bucketSeconds": 14400,
+      "checks": [
+        {
+          "code": "MARKET_STREAM_READY",
+          "currentStatus": "standby",
+          "checkedAt": "2026-08-27T05:00:00Z",
+          "reasonCode": "MARKET_CLOSED_STANDBY",
+          "publicMessage": "当前休市",
+          "coveragePct": 100,
+          "incidentCount": 0,
+          "points": [],
+        }
+      ],
+      "incidents": [],
+      "incidentsTruncated": False,
+    }
+
+  monkeypatch.setattr(
+    "quantx_api.gqlapi.resolvers.trading_safety.fetch_account_safety_history",
+    fetch,
+  )
+
+  history = await AccountExecutionSafetyResolver.history(
+    AccountSafetyHistoryRange.DAYS_30
+  )
+
+  assert history.available is True
+  assert history.checks[0].current_status is AccountSafetyHistoryStatus.STANDBY
+  assert history.checks[0].incident_count == 0
