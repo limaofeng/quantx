@@ -34,6 +34,7 @@ def _input(
   ordinal: int,
   amount: float,
   pvolume: float,
+  volume: float | None = None,
   generation: int = 1,
   cadence: StrategyCadence = StrategyCadence.TICK,
 ) -> StrategyInput:
@@ -47,6 +48,7 @@ def _input(
     ask_vol=[1000],
     amount=amount,
     pvolume=pvolume,
+    volume=volume,
     stock_status=0,
   )
   return StrategyInput(
@@ -161,6 +163,62 @@ def test_accumulator_reports_rule_intersections_and_ready_time() -> None:
   }
 
 
+def test_accumulator_derives_ashare_volume_from_lots_when_pvolume_is_zero() -> None:
+  accumulator = TTradePhaseOneBaselineAccumulator("run-phase-one")
+
+  accumulator.observe(_input(0, 100.0, ordinal=1, amount=100_000, pvolume=0, volume=10))
+  accumulator.observe(_input(1, 99.0, ordinal=2, amount=109_900, pvolume=0, volume=11))
+  evaluation = accumulator.observe(
+    _input(16, 99.3, ordinal=3, amount=119_830, pvolume=0, volume=12)
+  )
+
+  assert evaluation is not None
+  assert evaluation.trigger_edge is True
+
+
+def test_v3_diagnostics_use_every_tick_ready_exposure_without_material_rows() -> None:
+  accumulator = TTradePhaseOneBaselineAccumulator("run-phase-one")
+  evaluation = {
+    "policy_version": "policy-v1",
+    "feature_schema_version": "2",
+    "profile_version": "profile-v1",
+    "data_health": "READY",
+    "data_health_reasons": [],
+    "top_blockers": [],
+    "blockers": [],
+    "external_blockers": [],
+    "opportunity_score": 42.0,
+    "selected_path": "PULLBACK_REBOUND",
+    "pullback": {"phase": "LOW_STABILIZING"},
+    "momentum": {"phase": "OBSERVING"},
+  }
+
+  accumulator.observe(
+    _input(0, 100.0, ordinal=1, amount=100_000, pvolume=1_000),
+    v3_evaluation=evaluation,
+  )
+  accumulator.observe(
+    _input(3, 100.1, ordinal=2, amount=110_000, pvolume=1_100),
+    v3_evaluation=evaluation,
+  )
+
+  diagnostics = accumulator.v3_diagnostics_snapshot()
+  assert diagnostics["available"] is True
+  assert diagnostics["version_groups"] == [
+    {
+      "policy_version": "policy-v1",
+      "feature_schema_version": "2",
+      "profile_version": "profile-v1",
+      "count": 2,
+    }
+  ]
+  partition = diagnostics["partitions"][0]
+  assert partition["denominator"]["ready_instrument_seconds"] == 3.0
+  assert partition["funnel"][0]["count"] == 2
+  assert partition["funnel"][1]["count"] == 2
+  assert partition["score_distribution"][0]["count"] == 2
+
+
 def test_accumulator_compares_candidates_only_on_common_ready_exposure() -> None:
   accumulator = TTradePhaseOneBaselineAccumulator("run-phase-one")
   accumulator.observe(
@@ -254,6 +312,50 @@ def test_executor_reads_v3_comparison_fact_only_from_same_source_identity() -> N
     runtime,
     strategy_input,
   ) == (None, None)
+
+
+def test_executor_accepts_zero_valued_replay_source_identity() -> None:
+  strategy_input = _input(
+    16,
+    99.3,
+    ordinal=0,
+    amount=119_830,
+    pvolume=1_200,
+    generation=0,
+  )
+  context = strategy_input.market_data_context
+  evaluation = {
+    "source_time_ms": context.source_time_ms,
+    "tick_ordinal": 0,
+    "continuity_generation": "0",
+    "data_health": "READY",
+    "candidate_id": "candidate-zero-identity",
+    "candidate_created_at_ms": context.source_time_ms,
+    "selected_path": "MOMENTUM_ACCELERATION",
+  }
+  runtime = SimpleNamespace(
+    strategy=SimpleNamespace(
+      state={
+        "instrument_states": {
+          "600000.SH": {
+            "opportunity": {"latest_evaluation": evaluation},
+          }
+        }
+      }
+    )
+  )
+
+  assert (
+    StrategyExecutor._t_trade_phase_one_v3_evaluation_fact(
+      runtime,
+      strategy_input,
+    )
+    == evaluation
+  )
+  assert StrategyExecutor._t_trade_phase_one_v3_comparison_fact(
+    runtime,
+    strategy_input,
+  ) == (True, "MOMENTUM_ACCELERATION")
 
 
 def test_accumulator_ignores_non_tick_inputs_and_rejects_cross_run() -> None:

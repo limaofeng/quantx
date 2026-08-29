@@ -12,7 +12,7 @@ from quantx_domain.trading.t_trade_candidate_outcome import (
   CandidateOutcomeState,
   CandidateOutcomeStatus,
 )
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +34,26 @@ class TTradeCandidateOutcomeRepository:
 
   def __init__(self, db: AsyncSession) -> None:
     self.db = db
+
+  async def delete_for_run(
+    self,
+    strategy_run_id: str,
+    *,
+    commit: bool = True,
+  ) -> int:
+    """Delete run-local derived outcomes before replaying a new version."""
+
+    normalized_run_id = str(strategy_run_id or "").strip()
+    if not normalized_run_id:
+      raise ValueError("策略运行标识不能为空")
+    result = await self.db.execute(
+      delete(TTradeCandidateOutcome).where(
+        TTradeCandidateOutcome.strategy_run_id == normalized_run_id
+      )
+    )
+    if commit:
+      await self.db.commit()
+    return int(result.rowcount or 0)
 
   async def get(
     self,

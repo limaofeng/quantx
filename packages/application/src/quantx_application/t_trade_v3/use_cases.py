@@ -99,9 +99,7 @@ def normalize_signal_policy(value: Any) -> dict[str, Any]:
     key: item for key, item in values.items() if key != "policy_version"
   }
   default_semantic_values = {
-    key: item
-    for key, item in default.to_dict().items()
-    if key != "policy_version"
+    key: item for key, item in default.to_dict().items() if key != "policy_version"
   }
   values["policy_version"] = (
     default.policy_version
@@ -123,6 +121,7 @@ class ReadD1ReferenceProfile:
         instrument_code=request.instrument_code,
         evaluated_at=request.evaluated_at,
         required_version=request.required_version,
+        required_fingerprint=request.required_fingerprint,
       )
     except Exception as exc:
       return D1ProfileReadResult(
@@ -189,10 +188,19 @@ class ReadD1ReferenceProfile:
     fingerprint = str(raw.get("profile_fingerprint") or "").strip()
     if not fingerprint:
       fingerprint = hashlib.sha256(
-        json.dumps(
-          profile.to_dict(), sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(profile.to_dict(), sort_keys=True, separators=(",", ":")).encode(
+          "utf-8"
+        )
       ).hexdigest()
+    if (
+      request.required_fingerprint
+      and fingerprint.lower() != request.required_fingerprint
+    ):
+      return D1ProfileReadResult(
+        request=request,
+        profile=None,
+        reason=D1ProfileReadReason.FINGERPRINT_MISMATCH,
+      )
     return D1ProfileReadResult(
       request=request,
       profile=profile,
@@ -250,8 +258,7 @@ class MaterializeEvaluationAfterCAS:
     if not normalized:
       return ()
     event_keys = [
-      str(request.event.get("event_key") or "").strip()
-      for request in normalized
+      str(request.event.get("event_key") or "").strip() for request in normalized
     ]
     if any(not event_key for event_key in event_keys):
       raise ValueError("evaluation event_key is required")
@@ -264,8 +271,7 @@ class MaterializeEvaluationAfterCAS:
     account_id = normalized[0].account_id
     strategy_run_id = normalized[0].strategy_run_id
     if any(
-      request.account_id != account_id
-      or request.strategy_run_id != strategy_run_id
+      request.account_id != account_id or request.strategy_run_id != strategy_run_id
       for request in normalized
     ):
       raise ValueError("checkpoint batch must share account_id and strategy_run_id")
@@ -294,7 +300,9 @@ class MaterializeEvaluationAfterCAS:
         str(value or "").strip() for value in (raw_persisted_keys or ())
       )
     except TypeError as exc:
-      raise ValueError("checkpoint batch receipt must contain event_key values") from exc
+      raise ValueError(
+        "checkpoint batch receipt must contain event_key values"
+      ) from exc
     if any(not event_key for event_key in persisted_keys):
       raise ValueError("checkpoint batch receipt contains an empty event_key")
     if len(set(persisted_keys)) != len(persisted_keys):
@@ -498,9 +506,7 @@ class SignalPolicyChangePlanner:
       changed_fields=changed_fields,
       requires_rewarm=bool(changed_fields),
       warnings=(
-        ("保存后将清空机会窗口并使旧待确认入场失效",)
-        if changed_fields
-        else ()
+        ("保存后将清空机会窗口并使旧待确认入场失效",) if changed_fields else ()
       ),
     )
 

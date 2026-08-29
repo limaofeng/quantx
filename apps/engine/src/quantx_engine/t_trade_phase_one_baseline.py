@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Mapping, Optional
 
 from quantx_domain.strategies.base import StrategyCadence, StrategyInput
+from quantx_domain.trading.t_trade import normalize_ashare_cumulative_volume
 from quantx_domain.trading.t_trade_candidate_outcome import (
   CandidateOutcomeDefinition,
   CandidateOutcomeState,
@@ -29,6 +31,26 @@ from quantx_domain.trading.t_trade_phase_one_baseline import (
 
 PHASE_ONE_BASELINE_REPORT_SCHEMA_VERSION = 1
 _MAX_SOURCE_INTERVAL_MS = 60_000
+_MAX_V3_READY_INTERVAL_MS = 5_000
+_V3_ELIGIBILITY_BLOCKERS = {
+  "UNIVERSE_ELIGIBILITY_UNAVAILABLE",
+  "POSITION_NOT_ELIGIBLE",
+  "INSTRUMENT_DRAINING",
+}
+_V3_FUNNEL_LABELS = {
+  "ELIGIBLE": "合格持仓评估",
+  "DATA_READY": "数据可决策",
+  "PATTERN": "形态片段",
+  "PREVIEW": "越过预览阈值",
+  "CANDIDATE": "候选信号",
+}
+_V3_FUNNEL_UNITS = {
+  "ELIGIBLE": "TICK_EVALUATIONS",
+  "DATA_READY": "TICK_EVALUATIONS",
+  "PATTERN": "RUN_SCOPED_EPISODES",
+  "PREVIEW": "RUN_SCOPED_EPISODES",
+  "CANDIDATE": "RUN_SCOPED_CANDIDATES",
+}
 
 
 @dataclass
@@ -48,6 +70,16 @@ class _CommonReadyClock:
 
 
 @dataclass
+class _V3Clock:
+  trade_date: str
+  continuity_generation: str
+  source_time_ms: int
+  data_ready: bool
+  version_key: tuple[str, str, Optional[str]]
+  phases: dict[str, str]
+
+
+@dataclass
 class TTradePhaseOneBaselineAccumulator:
   """Bounded run-local comparison evidence; never consulted by the strategy."""
 
@@ -62,6 +94,40 @@ class TTradePhaseOneBaselineAccumulator:
       "V3": Counter(),
       "PHASE_ONE": Counter(),
     }
+  )
+  v3_clocks: dict[str, _V3Clock] = field(default_factory=dict)
+  v3_evaluation_counts: Counter[tuple[str, str, Optional[str]]] = field(
+    default_factory=Counter
+  )
+  v3_ready_instrument_ms: Counter[tuple[str, str, Optional[str]]] = field(
+    default_factory=Counter
+  )
+  v3_eligible_counts: Counter[tuple[str, str, Optional[str]]] = field(
+    default_factory=Counter
+  )
+  v3_ready_eligible_counts: Counter[tuple[str, str, Optional[str]]] = field(
+    default_factory=Counter
+  )
+  v3_blocker_counts: dict[tuple[str, str, Optional[str]], Counter[str]] = field(
+    default_factory=lambda: defaultdict(Counter)
+  )
+  v3_score_counts: dict[
+    tuple[str, str, Optional[str]], Counter[tuple[str, float, float]]
+  ] = field(default_factory=lambda: defaultdict(Counter))
+  v3_fsm_dwell_ms: dict[tuple[str, str, Optional[str]], Counter[tuple[str, str]]] = (
+    field(default_factory=lambda: defaultdict(Counter))
+  )
+  v3_fsm_transitions: dict[
+    tuple[str, str, Optional[str]], Counter[tuple[str, str, str]]
+  ] = field(default_factory=lambda: defaultdict(Counter))
+  v3_candidate_ids: dict[tuple[str, str, Optional[str]], set[str]] = field(
+    default_factory=lambda: defaultdict(set)
+  )
+  v3_episode_ids: dict[tuple[str, str, Optional[str]], set[str]] = field(
+    default_factory=lambda: defaultdict(set)
+  )
+  v3_preview_episode_ids: dict[tuple[str, str, Optional[str]], set[str]] = field(
+    default_factory=lambda: defaultdict(set)
   )
   evaluations_total: int = 0
   accepted_evaluations_total: int = 0
@@ -93,6 +159,7 @@ class TTradePhaseOneBaselineAccumulator:
     *,
     v3_data_ready: Optional[bool] = None,
     v3_candidate_path: Optional[str] = None,
+    v3_evaluation: Optional[Mapping[str, Any]] = None,
   ) -> Optional[PhaseOneBaselineEvaluation]:
     if strategy_input.cadence is not StrategyCadence.TICK:
       return None
@@ -132,6 +199,7 @@ class TTradePhaseOneBaselineAccumulator:
       v3_data_ready=v3_data_ready is True,
       v3_candidate_path=v3_candidate_path,
     )
+    self._record_v3_evaluation(sample, v3_evaluation)
     if evaluation.trigger_edge:
       self._start_outcome(evaluation, sample.price)
     return evaluation
@@ -244,9 +312,7 @@ class TTradePhaseOneBaselineAccumulator:
           sorted(self.common_ready_candidate_edges["PHASE_ONE"].items())
         ),
         "reason_code": (
-          None
-          if self.common_ready_instrument_ms > 0
-          else "COMMON_READY_EXPOSURE_EMPTY"
+          None if self.common_ready_instrument_ms > 0 else "COMMON_READY_EXPOSURE_EMPTY"
         ),
         "reason": (
           None
@@ -255,6 +321,241 @@ class TTradePhaseOneBaselineAccumulator:
         ),
       },
     }
+
+  def v3_diagnostics_snapshot(self) -> dict[str, Any]:
+    """Return bounded every-Tick V3 evidence for replay report denominators."""
+
+    partitions: list[dict[str, Any]] = []
+    for version_key in sorted(
+      self.v3_evaluation_counts,
+      key=lambda item: (item[0], item[1], item[2] or ""),
+    ):
+      policy_version, feature_schema_version, profile_version = version_key
+      observations = self.v3_evaluation_counts[version_key]
+      eligible = self.v3_eligible_counts[version_key]
+      data_ready = self.v3_ready_eligible_counts[version_key]
+      candidate_ids = self.v3_candidate_ids[version_key]
+      blockers = [
+        {
+          "blocker": {"code": code, "label": code, "detail": ""},
+          "count": count,
+          "rate": round(count / observations, 6) if observations else None,
+          "denominator_code": "V3_EVALUATIONS",
+          "denominator_value": float(observations),
+        }
+        for code, count in self.v3_blocker_counts[version_key].most_common()
+      ]
+      score_distribution = [
+        {
+          "policy_version": policy_version,
+          "feature_schema_version": feature_schema_version,
+          "profile_version": profile_version,
+          "path": path,
+          "lower_bound": lower,
+          "upper_bound": upper,
+          "count": count,
+        }
+        for (path, lower, upper), count in sorted(
+          self.v3_score_counts[version_key].items()
+        )
+      ]
+      fsm_dwell = [
+        {
+          "branch": branch,
+          "phase": phase,
+          "duration_seconds": round(duration_ms / 1000.0, 3),
+          "transition_count": sum(
+            count
+            for (edge_branch, _from_phase, to_phase), count in self.v3_fsm_transitions[
+              version_key
+            ].items()
+            if edge_branch == branch and to_phase == phase
+          ),
+        }
+        for (branch, phase), duration_ms in sorted(
+          self.v3_fsm_dwell_ms[version_key].items()
+        )
+      ]
+      fsm_transitions = [
+        {
+          "branch": branch,
+          "from_phase": from_phase,
+          "to_phase": to_phase,
+          "count": count,
+        }
+        for (branch, from_phase, to_phase), count in sorted(
+          self.v3_fsm_transitions[version_key].items()
+        )
+      ]
+      funnel_counts = (
+        ("ELIGIBLE", eligible),
+        ("DATA_READY", data_ready),
+        ("PATTERN", len(self.v3_episode_ids[version_key])),
+        ("PREVIEW", len(self.v3_preview_episode_ids[version_key])),
+        ("CANDIDATE", len(candidate_ids)),
+      )
+      previous_count: Optional[int] = None
+      previous_code: Optional[str] = None
+      funnel = []
+      for code, count in funnel_counts:
+        funnel.append(
+          {
+            "code": code,
+            "label": _V3_FUNNEL_LABELS[code],
+            "unit_code": _V3_FUNNEL_UNITS[code],
+            "denominator_code": previous_code,
+            "count": count,
+            "conversion_rate": (
+              None if previous_count in {None, 0} else round(count / previous_count, 6)
+            ),
+          }
+        )
+        previous_count = count
+        previous_code = code
+      partitions.append(
+        {
+          "policy_version": policy_version,
+          "feature_schema_version": feature_schema_version,
+          "profile_version": profile_version,
+          "denominator": {
+            "code": "READY_INSTRUMENT_SECONDS",
+            "label": "READY 标的时长（秒）",
+            "ready_instrument_seconds": round(
+              self.v3_ready_instrument_ms[version_key] / 1000.0, 3
+            ),
+          },
+          "funnel": funnel,
+          "blockers": blockers,
+          "score_distribution": score_distribution,
+          "fsm_dwell": fsm_dwell,
+          "fsm_transitions": fsm_transitions,
+          "candidate_outcomes": [],
+          "post_candidate_performance": {
+            "available": False,
+            "reason_code": "POST_FILL_OUTCOME_NOT_RECORDED",
+            "reason": "候选后表现由权威成交结果链补充。",
+            "sample_count": 0,
+            "net_mfe_pct": None,
+            "net_mae_pct": None,
+            "fixed_window_returns": [],
+            "required_data_codes": ["AUTHORITATIVE_EXECUTION_FEE_LEDGER"],
+          },
+        }
+      )
+    return {
+      "available": True,
+      "merged_versions": False,
+      "warnings": [],
+      "partitions": partitions,
+      "version_groups": [
+        {
+          "policy_version": key[0],
+          "feature_schema_version": key[1],
+          "profile_version": key[2],
+          "count": count,
+        }
+        for key, count in sorted(
+          self.v3_evaluation_counts.items(),
+          key=lambda item: (item[0][0], item[0][1], item[0][2] or ""),
+        )
+      ],
+    }
+
+  def _record_v3_evaluation(
+    self,
+    sample: OpportunitySample,
+    raw_evaluation: Optional[Mapping[str, Any]],
+  ) -> None:
+    if not isinstance(raw_evaluation, Mapping):
+      return
+    evaluation = dict(raw_evaluation)
+    version_key = (
+      str(evaluation.get("policy_version") or "UNKNOWN"),
+      str(evaluation.get("feature_schema_version") or "UNKNOWN"),
+      str(evaluation.get("profile_version") or "").strip() or None,
+    )
+    self.v3_evaluation_counts[version_key] += 1
+    data_health = str(evaluation.get("data_health") or "UNKNOWN").upper()
+    blocker_codes: set[str] = set()
+    for raw in (
+      list(evaluation.get("data_health_reasons") or [])
+      + list(evaluation.get("top_blockers") or [])
+      + list(evaluation.get("blockers") or [])
+      + list(evaluation.get("external_blockers") or [])
+    ):
+      code = (
+        str(raw.get("code") or "").strip()
+        if isinstance(raw, Mapping)
+        else str(raw or "").strip()
+      )
+      if code:
+        blocker_codes.add(code)
+    self.v3_blocker_counts[version_key].update(blocker_codes)
+    eligible = blocker_codes.isdisjoint(_V3_ELIGIBILITY_BLOCKERS)
+    if eligible:
+      self.v3_eligible_counts[version_key] += 1
+      if data_health == "READY":
+        self.v3_ready_eligible_counts[version_key] += 1
+
+    score = _finite_float(evaluation.get("opportunity_score"))
+    if score is not None:
+      lower = max(0.0, min(90.0, float(int(score // 10) * 10)))
+      upper = 100.0 if lower >= 90.0 else lower + 10.0
+      self.v3_score_counts[version_key][
+        (str(evaluation.get("selected_path") or "NONE"), lower, upper)
+      ] += 1
+
+    episode_id = str(evaluation.get("episode_id") or "").strip()
+    if episode_id and eligible and data_health == "READY":
+      self.v3_episode_ids[version_key].add(episode_id)
+      preview_threshold = _finite_float(evaluation.get("preview_threshold"))
+      if (
+        score is not None
+        and preview_threshold is not None
+        and score >= preview_threshold
+      ):
+        self.v3_preview_episode_ids[version_key].add(episode_id)
+    candidate_id = str(evaluation.get("candidate_id") or "").strip()
+    try:
+      created_on_source = (
+        int(evaluation.get("candidate_created_at_ms") or -1) == sample.source_time_ms
+      )
+    except (TypeError, ValueError, OverflowError):
+      created_on_source = False
+    if candidate_id and created_on_source and eligible and data_health == "READY":
+      self.v3_candidate_ids[version_key].add(candidate_id)
+
+    phases = {
+      "PULLBACK": str(dict(evaluation.get("pullback") or {}).get("phase") or "UNKNOWN"),
+      "MOMENTUM": str(dict(evaluation.get("momentum") or {}).get("phase") or "UNKNOWN"),
+    }
+    previous = self.v3_clocks.get(sample.instrument_code)
+    connected = bool(
+      previous is not None
+      and previous.trade_date == sample.trade_date
+      and previous.continuity_generation == sample.continuity_generation
+      and previous.version_key == version_key
+      and 0
+      < sample.source_time_ms - previous.source_time_ms
+      <= _MAX_V3_READY_INTERVAL_MS
+    )
+    if connected and previous is not None:
+      duration_ms = sample.source_time_ms - previous.source_time_ms
+      if previous.data_ready:
+        self.v3_ready_instrument_ms[version_key] += duration_ms
+      for branch, phase in previous.phases.items():
+        self.v3_fsm_dwell_ms[version_key][(branch, phase)] += duration_ms
+        next_phase = phases[branch]
+        if phase != next_phase:
+          self.v3_fsm_transitions[version_key][(branch, phase, next_phase)] += 1
+    self.v3_clocks[sample.instrument_code] = _V3Clock(
+      trade_date=sample.trade_date,
+      continuity_generation=sample.continuity_generation,
+      source_time_ms=sample.source_time_ms,
+      data_ready=data_health == "READY",
+      version_key=version_key,
+      phases=phases,
+    )
 
   def _record_evaluation(self, evaluation: PhaseOneBaselineEvaluation) -> bool:
     self.evaluations_total += 1
@@ -403,6 +704,10 @@ def _sample_from_input(strategy_input: StrategyInput) -> Optional[OpportunitySam
   bid_volumes = list(getattr(tick, "bid_vol", []) or [])
   ask_volumes = list(getattr(tick, "ask_vol", []) or [])
   price_tick = _positive((strategy_input.market_context or {}).get("price_tick"))
+  cumulative_volume = normalize_ashare_cumulative_volume(
+    pvolume=getattr(tick, "pvolume", None),
+    volume=getattr(tick, "volume", None),
+  )
   return OpportunitySample(
     instrument_code=str(strategy_input.instrument_code or "").strip().upper(),
     trade_date=context.trade_date.isoformat(),
@@ -418,7 +723,7 @@ def _sample_from_input(strategy_input: StrategyInput) -> Optional[OpportunitySam
     bid_volume=_non_negative(bid_volumes[0] if bid_volumes else None),
     ask_volume=_non_negative(ask_volumes[0] if ask_volumes else None),
     cumulative_amount=_non_negative(getattr(tick, "amount", None)),
-    cumulative_volume=_non_negative(getattr(tick, "pvolume", None)),
+    cumulative_volume=cumulative_volume.shares,
     price_tick=price_tick or 0.01,
   )
 
@@ -451,6 +756,14 @@ def _positive(value: Any) -> Optional[float]:
   except (TypeError, ValueError, OverflowError):
     return None
   return normalized if normalized > 0 else None
+
+
+def _finite_float(value: Any) -> Optional[float]:
+  try:
+    normalized = float(value)
+  except (TypeError, ValueError, OverflowError):
+    return None
+  return normalized if isfinite(normalized) else None
 
 
 def _non_negative(value: Any) -> Optional[float]:

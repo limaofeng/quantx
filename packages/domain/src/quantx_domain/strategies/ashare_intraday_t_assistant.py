@@ -52,6 +52,7 @@ from quantx_domain.trading.exit_plan import (
 from quantx_domain.trading.t_trade import (
   TickSample,
   TradingCostPolicy,
+  normalize_ashare_cumulative_volume,
 )
 from quantx_domain.trading.t_trade_opportunity_engine import (
   OPPORTUNITY_STATE_SCHEMA_VERSION,
@@ -77,12 +78,8 @@ _PROFILE_CONTEXT_KEY = "t_trade_instrument_profile"
 _EMISSION_CONTEXT_KEY = "t_trade_intent_emission"
 _OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION = 1
 _OPPORTUNITY_SAMPLE_WINDOW_PERSISTED_KEY = "sample_window_persisted"
-_OPPORTUNITY_SAMPLE_WINDOW_RESTORE_REQUIRED_KEY = (
-  "sample_window_restore_required"
-)
-_OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION_KEY = (
-  "sample_window_projection_version"
-)
+_OPPORTUNITY_SAMPLE_WINDOW_RESTORE_REQUIRED_KEY = "sample_window_restore_required"
+_OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION_KEY = "sample_window_projection_version"
 _OPPORTUNITY_SAMPLE_WINDOW_SAMPLE_COUNT_KEY = "sample_window_sample_count"
 _OPPORTUNITY_SAMPLE_WINDOW_LAST_SOURCE_IDENTITY_KEY = (
   "sample_window_last_source_identity"
@@ -525,10 +522,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       key: source[key]
       for key in keys
       if key in source
-      and (
-        source[key] is None
-        or isinstance(source[key], (bool, float, int, str))
-      )
+      and (source[key] is None or isinstance(source[key], (bool, float, int, str)))
     }
 
   @staticmethod
@@ -536,11 +530,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     if not isinstance(value, (list, tuple)):
       return []
     return list(
-      dict.fromkeys(
-        str(item).strip()
-        for item in value
-        if str(item).strip()
-      )
+      dict.fromkeys(str(item).strip() for item in value if str(item).strip())
     )[:_RUNTIME_EVENT_MARKER_LIST_LIMIT]
 
   @classmethod
@@ -590,10 +580,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
           "last_emitted_source_time_ms",
         )
         if key in cursor
-        and (
-          cursor[key] is None
-          or isinstance(cursor[key], (bool, float, int, str))
-        )
+        and (cursor[key] is None or isinstance(cursor[key], (bool, float, int, str)))
       }
     evaluation = opportunity.get("latest_evaluation")
     if isinstance(evaluation, Mapping):
@@ -691,9 +678,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       code = str(raw_code or "").strip().upper()
       state = dict(raw_state or {})
       opportunity = dict(state.get("opportunity") or {})
-      candidate_status = str(
-        opportunity.get("candidate_status") or ""
-      ).strip().upper()
+      candidate_status = str(opportunity.get("candidate_status") or "").strip().upper()
       if candidate_status not in {
         CandidateStatus.LATCHED.value,
         CandidateStatus.AWAITING_APPROVAL.value,
@@ -708,9 +693,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
           or 0
         )
         source_time_ms = int(
-          evaluation.get("source_time_ms")
-          or candidate.get("source_time_ms")
-          or 0
+          evaluation.get("source_time_ms") or candidate.get("source_time_ms") or 0
         )
       except (TypeError, ValueError, OverflowError):
         candidate_state_version = 0
@@ -719,9 +702,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         ManualApprovalRecoveryCandidate(
           instrument_code=code,
           candidate_id=str(
-            candidate.get("candidate_id")
-            or evaluation.get("candidate_id")
-            or ""
+            candidate.get("candidate_id") or evaluation.get("candidate_id") or ""
           ).strip(),
           candidate_fingerprint=str(
             candidate.get("fingerprint")
@@ -1966,6 +1947,10 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       return normalized if normalized >= 0 else None
 
     raw_price_tick = input.market_context.get("price_tick", 0.01)
+    cumulative_volume = normalize_ashare_cumulative_volume(
+      pvolume=getattr(tick, "pvolume", None),
+      volume=getattr(tick, "volume", None),
+    )
     return OpportunitySample(
       instrument_code=str(input.instrument_code or "").strip().upper(),
       trade_date=trade_date,
@@ -1981,7 +1966,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       bid_volume=optional_non_negative(bid_volumes[0] if bid_volumes else None),
       ask_volume=optional_non_negative(ask_volumes[0] if ask_volumes else None),
       cumulative_amount=optional_non_negative(getattr(tick, "amount", None)),
-      cumulative_volume=optional_non_negative(getattr(tick, "pvolume", None)),
+      cumulative_volume=cumulative_volume.shares,
       price_tick=float(raw_price_tick or 0.01),
     )
 
@@ -2294,11 +2279,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     if not material_changed:
       opportunity["event_cursor"] = {
         "baseline_established": baseline_established or bool(previous_opportunity),
-        **(
-          {"material_signature": previous_signature}
-          if previous_signature
-          else {}
-        ),
+        **({"material_signature": previous_signature} if previous_signature else {}),
         "last_emitted_source_time_ms": last_emitted_at,
       }
       return []
@@ -2379,9 +2360,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         CandidateStatus.REARMING.value: "CANDIDATE_REARMING",
         CandidateStatus.NONE.value: "CANDIDATE_CLEARED",
       }.get(status, "CANDIDATE_STATE_CHANGED")
-    if previous.get("continuity_generation") != current.get(
-      "continuity_generation"
-    ):
+    if previous.get("continuity_generation") != current.get("continuity_generation"):
       return "CONTINUITY_GENERATION_CHANGED"
     if any(
       previous.get(key) != current.get(key)
@@ -2393,10 +2372,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       for key in ("profile_version", "profile_fingerprint")
     ):
       return "PROFILE_CHANGED"
-    if (
-      previous.get("pullback_phase") != current.get("pullback_phase")
-      or previous.get("momentum_phase") != current.get("momentum_phase")
-    ):
+    if previous.get("pullback_phase") != current.get("pullback_phase") or previous.get(
+      "momentum_phase"
+    ) != current.get("momentum_phase"):
       return "FSM_TRANSITION"
     return None
 

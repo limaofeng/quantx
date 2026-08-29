@@ -78,20 +78,14 @@ def _validate_tick_storage_time(
   if hasattr(raw_time, "to_pydatetime"):
     raw_time = raw_time.to_pydatetime()
   if not isinstance(raw_time, datetime):
-    raise ValueError(
-      "做 T 标的画像历史 Tick 存储时间缺失或不是 datetime，未保存画像"
-    )
+    raise ValueError("做 T 标的画像历史 Tick 存储时间缺失或不是 datetime，未保存画像")
   try:
     actual_time = time_utils.to_utc(raw_time)
     expected_time = time_utils.to_utc(tick_storage_time(*source_key))
   except (TypeError, ValueError, OverflowError, OSError) as exc:
-    raise ValueError(
-      "做 T 标的画像历史 Tick 存储时间无法规范化，未保存画像"
-    ) from exc
+    raise ValueError("做 T 标的画像历史 Tick 存储时间无法规范化，未保存画像") from exc
   if actual_time != expected_time:
-    raise ValueError(
-      "做 T 标的画像历史 Tick 存储时间与源身份不一致，未保存画像"
-    )
+    raise ValueError("做 T 标的画像历史 Tick 存储时间与源身份不一致，未保存画像")
 
 
 class _CausalMinuteAccumulator:
@@ -111,11 +105,10 @@ class _CausalMinuteAccumulator:
     self.max_minute_entries = max_minute_entries
     self.require_source_identity = require_source_identity
     self.earliest_date = earliest_date
-    self._latest_by_minute: dict[
-      tuple[date, int, int], _MinuteObservation
-    ] = {}
+    self._latest_by_minute: dict[tuple[date, int, int], _MinuteObservation] = {}
     self._latest_keys: dict[tuple[date, int, int], tuple[Any, ...]] = {}
     self.accepted_tick_count = 0
+    self.accepted_tick_count_by_date: dict[date, int] = defaultdict(int)
 
   @property
   def minute_rows(self) -> dict[date, list[_MinuteObservation]]:
@@ -140,9 +133,7 @@ class _CausalMinuteAccumulator:
     for tick in page:
       key = _strict_tick_source_identity(tick)
       if page_key is not None and key <= page_key:
-        raise ValueError(
-          "做 T 标的画像历史 Tick 页重复、乱序或未推进，未保存画像"
-        )
+        raise ValueError("做 T 标的画像历史 Tick 页重复、乱序或未推进，未保存画像")
       page_key = key
       self._accept_tick(tick)
     return page_key
@@ -172,6 +163,7 @@ class _CausalMinuteAccumulator:
       return
 
     self.accepted_tick_count += 1
+    self.accepted_tick_count_by_date[at.date()] += 1
     minute_key = (at.date(), at.hour, at.minute)
     if source_key is None:
       ordinal = int(getattr(tick, "tick_ordinal", 0) or 0)
@@ -182,9 +174,7 @@ class _CausalMinuteAccumulator:
     if current_key is not None and order_key <= current_key:
       return
     if current_key is None and len(self._latest_by_minute) >= self.max_minute_entries:
-      raise ValueError(
-        "做 T 标的画像分钟聚合超过安全内存上限，未保存画像"
-      )
+      raise ValueError("做 T 标的画像分钟聚合超过安全内存上限，未保存画像")
     self._latest_keys[minute_key] = order_key
     self._latest_by_minute[minute_key] = _MinuteObservation(
       at=at,
@@ -265,18 +255,12 @@ class TTradeInstrumentProfileService:
     for page in pages:
       page_count += 1
       if page_count > max_pages:
-        raise ValueError(
-          "做 T 标的画像历史 Tick 页数超过安全上限，未保存画像"
-        )
+        raise ValueError("做 T 标的画像历史 Tick 页数超过安全上限，未保存画像")
       if len(page) > page_size:
-        raise ValueError(
-          "做 T 标的画像历史 Tick 单页超过安全上限，未保存画像"
-        )
+        raise ValueError("做 T 标的画像历史 Tick 单页超过安全上限，未保存画像")
       source_tick_count += len(page)
       if source_tick_count > max_source_ticks:
-        raise ValueError(
-          "做 T 标的画像历史 Tick 总量超过安全上限，未保存画像"
-        )
+        raise ValueError("做 T 标的画像历史 Tick 总量超过安全上限，未保存画像")
       previous_key = accumulator.add_page(page, previous_key=previous_key)
     return self._build_from_minutes(
       instrument_code=code,
@@ -320,18 +304,12 @@ class TTradeInstrumentProfileService:
     async for page in pages:
       page_count += 1
       if page_count > max_pages:
-        raise ValueError(
-          "做 T 标的画像历史 Tick 页数超过安全上限，未保存画像"
-        )
+        raise ValueError("做 T 标的画像历史 Tick 页数超过安全上限，未保存画像")
       if len(page) > page_size:
-        raise ValueError(
-          "做 T 标的画像历史 Tick 单页超过安全上限，未保存画像"
-        )
+        raise ValueError("做 T 标的画像历史 Tick 单页超过安全上限，未保存画像")
       source_tick_count += len(page)
       if source_tick_count > max_source_ticks:
-        raise ValueError(
-          "做 T 标的画像历史 Tick 总量超过安全上限，未保存画像"
-        )
+        raise ValueError("做 T 标的画像历史 Tick 总量超过安全上限，未保存画像")
       previous_key = accumulator.add_page(page, previous_key=previous_key)
 
     build = self._build_from_minutes(
@@ -343,6 +321,83 @@ class TTradeInstrumentProfileService:
       min_complete_days=min_complete_days,
     )
     return await repository.save_profile(**build.repository_arguments())
+
+  async def build_and_save_profiles_from_pages(
+    self,
+    *,
+    instrument_code: str,
+    pages: AsyncIterable[Sequence[Any]],
+    as_ofs: Sequence[datetime],
+    repository: TTradeInstrumentProfileRepository,
+    lookback_calendar_days: int = 60,
+    target_complete_days: int = T_TRADE_PROFILE_TARGET_COMPLETE_DAYS,
+    min_complete_days: int = T_TRADE_PROFILE_MIN_COMPLETE_DAYS,
+    page_size: int = T_TRADE_PROFILE_PAGE_SIZE,
+    max_pages: int = T_TRADE_PROFILE_MAX_PAGES,
+    max_source_ticks: int = T_TRADE_PROFILE_MAX_SOURCE_TICKS,
+  ) -> dict[str, Any]:
+    """Build several causal cutoffs from one bounded historical page stream.
+
+    A replay needs one D-1 profile per trading day.  Reading the overlapping
+    60-day history separately for every cutoff multiplies Influx scans without
+    adding information.  This reducer retains only the last observation per
+    minute across the union range, then applies each cutoff and lookback window
+    independently before persisting immutable profiles.
+    """
+
+    code = _instrument_code(instrument_code)
+    cutoffs = sorted({time_utils.to_shanghai(value) for value in as_ofs})
+    if not cutoffs:
+      raise ValueError("做 T 标的画像缺少生成时点")
+    _validate_page_limits(page_size, max_pages, max_source_ticks)
+    earliest_date = cutoffs[0].date() - timedelta(days=lookback_calendar_days - 1)
+    union_days = (cutoffs[-1].date() - earliest_date).days + 1
+    accumulator = _CausalMinuteAccumulator(
+      instrument_code=code,
+      cutoff=cutoffs[-1],
+      max_minute_entries=union_days * 240,
+      require_source_identity=True,
+      earliest_date=earliest_date,
+    )
+    page_count = 0
+    source_tick_count = 0
+    previous_key: Optional[tuple[int, int]] = None
+    async for page in pages:
+      page_count += 1
+      if page_count > max_pages:
+        raise ValueError("做 T 标的画像历史 Tick 页数超过安全上限，未保存画像")
+      if len(page) > page_size:
+        raise ValueError("做 T 标的画像历史 Tick 单页超过安全上限，未保存画像")
+      source_tick_count += len(page)
+      if source_tick_count > max_source_ticks:
+        raise ValueError("做 T 标的画像历史 Tick 总量超过安全上限，未保存画像")
+      previous_key = accumulator.add_page(page, previous_key=previous_key)
+
+    minute_rows = accumulator.minute_rows
+    saved: dict[str, Any] = {}
+    for cutoff in cutoffs:
+      cutoff_earliest = cutoff.date() - timedelta(days=lookback_calendar_days - 1)
+      causal_rows = {
+        trade_date: [row for row in rows if row.at <= cutoff]
+        for trade_date, rows in minute_rows.items()
+        if cutoff_earliest <= trade_date <= cutoff.date()
+      }
+      build = self._build_from_minutes(
+        instrument_code=code,
+        cutoff=cutoff,
+        minute_rows=causal_rows,
+        accepted_tick_count=sum(
+          count
+          for trade_date, count in accumulator.accepted_tick_count_by_date.items()
+          if cutoff_earliest <= trade_date <= cutoff.date()
+        ),
+        target_complete_days=target_complete_days,
+        min_complete_days=min_complete_days,
+      )
+      saved[cutoff.isoformat()] = await repository.save_profile(
+        **build.repository_arguments()
+      )
+    return saved
 
   def _build_from_minutes(
     self,
@@ -545,21 +600,15 @@ def _strict_tick_source_identity(tick: Any) -> tuple[int, int]:
     source_time_ms = int(source_value)
     tick_ordinal = int(ordinal_value)
   except (TypeError, ValueError, OverflowError) as exc:
-    raise ValueError(
-      "做 T 标的画像历史 Tick 源身份不是整数，未保存画像"
-    ) from exc
+    raise ValueError("做 T 标的画像历史 Tick 源身份不是整数，未保存画像") from exc
   if (
     source_time_ms <= 0
     or tick_ordinal < 0
     or tick_ordinal >= HISTORICAL_TICK_ORDINALS_PER_MILLISECOND
   ):
-    raise ValueError(
-      "做 T 标的画像历史 Tick 缺少可证明的源身份，未保存画像"
-    )
+    raise ValueError("做 T 标的画像历史 Tick 缺少可证明的源身份，未保存画像")
   if source_value != source_time_ms or ordinal_value != tick_ordinal:
-    raise ValueError(
-      "做 T 标的画像历史 Tick 源身份无法无损表示，未保存画像"
-    )
+    raise ValueError("做 T 标的画像历史 Tick 源身份无法无损表示，未保存画像")
   return source_time_ms, tick_ordinal
 
 
@@ -567,9 +616,7 @@ def _source_time_at(source_time_ms: int) -> datetime:
   try:
     return tick_storage_time(source_time_ms, 0)
   except (OverflowError, OSError, ValueError) as exc:
-    raise ValueError(
-      "做 T 标的画像历史 Tick 源时间无法转换，未保存画像"
-    ) from exc
+    raise ValueError("做 T 标的画像历史 Tick 源时间无法转换，未保存画像") from exc
 
 
 def _minute_entry_limit(lookback_calendar_days: int) -> int:
@@ -627,7 +674,9 @@ def _derive_day(rows: Sequence[_MinuteObservation]) -> dict[str, Any]:
 
   amounts = [row.cumulative_amount for row in rows]
   amount_deltas = [0.0]
-  amount_deltas.extend(max(0.0, current - previous) for previous, current in zip(amounts, amounts[1:]))
+  amount_deltas.extend(
+    max(0.0, current - previous) for previous, current in zip(amounts, amounts[1:])
+  )
   for index, row in enumerate(rows):
     pullback_start = max(0, index - 5)
     pullback_high = max(item.price for item in rows[pullback_start : index + 1])
@@ -662,9 +711,22 @@ def _spread_ticks(tick: Any) -> Optional[float]:
   ask = _finite_positive(ask_values[0] if ask_values else None)
   bid = _finite_positive(bid_values[0] if bid_values else None)
   price_tick = _finite_positive(getattr(tick, "price_tick", None))
+  if price_tick is None and _ashare_stock_code(getattr(tick, "stock_code", None)):
+    price_tick = 0.01
   if ask is None or bid is None or price_tick is None or ask < bid:
     return None
   return max(0.0, (ask - bid) / price_tick)
+
+
+def _ashare_stock_code(value: Any) -> bool:
+  code = str(value or "").strip().upper()
+  if code.endswith(".SH"):
+    return code[:6].startswith(("600", "601", "603", "605", "688", "689"))
+  if code.endswith(".SZ"):
+    return code[:6].startswith(("000", "001", "002", "003", "300", "301"))
+  if code.endswith(".BJ"):
+    return code[:6].startswith(("43", "83", "87", "88", "92"))
+  return False
 
 
 def _continuous_session(value: time) -> bool:

@@ -167,6 +167,52 @@ async def test_repository_rejects_candidate_identity_collision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repository_delete_for_run_joins_caller_transaction() -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: TTradeCandidateOutcome.__table__.create(sync_connection)
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  async with sessions() as db:
+    repository = TTradeCandidateOutcomeRepository(db)
+    await repository.create_or_get(
+      account_id="account-1",
+      state=_state(candidate_id="old-run", strategy_run_id="run-delete"),
+    )
+    await repository.create_or_get(
+      account_id="account-1",
+      state=_state(candidate_id="other-run", strategy_run_id="run-keep"),
+    )
+    assert await repository.delete_for_run("run-delete", commit=False) == 1
+    assert (
+      await repository.get(
+        strategy_run_id="run-delete",
+        candidate_id="old-run",
+      )
+      is None
+    )
+    assert (
+      await repository.get(
+        strategy_run_id="run-keep",
+        candidate_id="other-run",
+      )
+      is not None
+    )
+    await db.rollback()
+
+  async with sessions() as db:
+    assert (
+      await TTradeCandidateOutcomeRepository(db).get(
+        strategy_run_id="run-delete",
+        candidate_id="old-run",
+      )
+      is not None
+    )
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_repository_lists_unfinalized_with_bounded_candidate_keyset() -> None:
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   async with engine.begin() as connection:

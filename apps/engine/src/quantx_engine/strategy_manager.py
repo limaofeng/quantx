@@ -20,18 +20,23 @@ import logging
 import select
 import uuid
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, List, Optional, Set, Type
+from typing import Any, AsyncIterator, Dict, List, Optional, Set, Type
 
 from quantx_domain.strategies.base import (
   StrategyBase,
   StrategyContext,
   StrategyRunMode,
 )
+from quantx_domain.trading.t_trade import (
+  AShareCumulativeVolumeSource,
+  normalize_ashare_cumulative_volume,
+)
 from quantx_infrastructure.core.config import COMMON_PARAMETER_SCHEMAS, ParameterManager
 from quantx_infrastructure.core.strategy_reconciler import StrategyReconciler
 from quantx_infrastructure.core.strategy_registry import strategy_registry
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db, redis_client
+from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import ExecutionMetrics
 from quantx_infrastructure.models.enums import StrategyRunStatus
 from quantx_infrastructure.models.parameter_schema import (
@@ -41,6 +46,23 @@ from quantx_infrastructure.repositories import StrategyRunRepository
 from quantx_infrastructure.repositories.backtest_repository import BacktestRepository
 from quantx_infrastructure.repositories.managed_plan_repository import (
   managed_plan_config_fingerprint,
+)
+from quantx_infrastructure.repositories.strategy_run_state_repository import (
+  StrategyRunPositionRepository,
+  StrategyRunStateRepository,
+)
+from quantx_infrastructure.repositories.t_trade_candidate_outcome_repository import (
+  TTradeCandidateOutcomeRepository,
+)
+from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
+  TTradeInstrumentProfileRepository,
+  TTradeOpportunityEvaluationRepository,
+)
+from quantx_infrastructure.repositories.t_trade_replay_projection_repository import (
+  TTradeReplayProjectionRepository,
+)
+from quantx_infrastructure.repositories.trade_intent_repository import (
+  TradeIntentRepository,
 )
 from quantx_infrastructure.services.exit_plan_replay_projection_service import (
   ExitPlanReplayUpdateKind,
@@ -60,6 +82,14 @@ from quantx_infrastructure.services.market_data_request_service import (
 )
 from quantx_infrastructure.services.t_trade_candidate_outcome_service import (
   TTradeCandidateOutcomePersistenceFacade,
+)
+from quantx_infrastructure.services.t_trade_instrument_profile_service import (
+  T_TRADE_PROFILE_MAX_PAGES,
+  T_TRADE_PROFILE_MAX_SOURCE_TICKS,
+  T_TRADE_PROFILE_MIN_COMPLETE_DAYS,
+  T_TRADE_PROFILE_PAGE_SIZE,
+  T_TRADE_PROFILE_TARGET_COMPLETE_DAYS,
+  TTradeInstrumentProfileService,
 )
 from quantx_infrastructure.services.t_trade_replay_projection_service import (
   TTradeReplayUpdateKind,
@@ -82,6 +112,8 @@ _T_TRADE_REPLAY_CONTINUOUS_SESSIONS = (
   (time(9, 30), time(11, 30)),
   (time(13, 0), time(15, 0)),
 )
+_T_TRADE_REPLAY_PROFILE_LOOKBACK_CALENDAR_DAYS = 60
+_T_TRADE_REPLAY_PROFILE_QUERY_CHUNK_CALENDAR_DAYS = 1
 
 
 class StrategyManager:
@@ -444,10 +476,7 @@ class StrategyManager:
                   run.id,
                 )
                 should_start = True
-            if (
-              is_exit_plan_replay
-              and status_value == StrategyRunStatus.PENDING.value
-            ):
+            if is_exit_plan_replay and status_value == StrategyRunStatus.PENDING.value:
               projection = await exit_plan_replay_projection_service.get(run.id)
               projection_status = str((projection or {}).get("status") or "").upper()
               if projection_status in {"PENDING", "RUNNING", "PAUSED"}:
@@ -814,7 +843,42 @@ class StrategyManager:
         instruments=instruments,
         backtest_start_time=start_time,
         backtest_end_time=end_time,
+        commit=False,
       )
+
+      # One StrategyRun may own many immutable backtest versions, but its hot
+      # RuntimeState row is keyed only by run_id.  Carrying that row into a new
+      # version restores the previous version's SEALED checkpoints and output
+      # positions, which is both causally wrong and rejected by the checkpoint
+      # fingerprint guard.  Reset the hot state in the same transaction as the
+      # new version so a failed rerun setup cannot leave a half-reset run.
+      await StrategyRunPositionRepository(db).delete_missing_positions(
+        run_id,
+        [],
+        commit=False,
+      )
+      await StrategyRunStateRepository(db).delete_state(
+        run_id,
+        commit=False,
+      )
+      await TTradeCandidateOutcomeRepository(db).delete_for_run(
+        run_id,
+        commit=False,
+      )
+      await TTradeOpportunityEvaluationRepository(db).reset_for_backtest_rerun(
+        run_id,
+        commit=False,
+      )
+      await TradeIntentRepository(db).delete_for_strategy_run(
+        run_id,
+        commit=False,
+      )
+      account_id = str(parameters.get("account_id") or "").strip()
+      if parameters.get("t_trade_replay") and account_id:
+        await TTradeReplayProjectionRepository(db).reset_for_rerun(
+          run_id=run_id,
+          account_id=account_id,
+        )
 
       run.parameters = parameters
       run.instruments = instruments
@@ -1051,10 +1115,7 @@ class StrategyManager:
             if isinstance(persisted_parameters, str):
               persisted_parameters = json.loads(persisted_parameters)
             parameters = dict(persisted_parameters or {})
-            account_id = (
-              account_id
-              or str(parameters.get("account_id") or "").strip()
-            )
+            account_id = account_id or str(parameters.get("account_id") or "").strip()
             is_t_trade_replay = bool(parameters.get("t_trade_replay"))
             is_exit_plan_replay = bool(parameters.get("exit_plan_replay"))
             board_replay_job_id = str(
@@ -1129,6 +1190,7 @@ class StrategyManager:
       self.logger.warning("回测模式未提供 backtest_start_time，跳过历史数据校验")
       return
 
+    replay_start_time = start_time
     end_time = runtime.context.backtest_end_time or start_time
     if end_time < start_time:
       end_time = start_time
@@ -1149,7 +1211,9 @@ class StrategyManager:
         phase_message="正在检查配置标的的 Tick 历史行情",
       )
 
-    # 处理开始与结束时间，将其扩展到包含整个交易时段
+    # 严格行情完整性只审计用户选择的正式回放区间。做 T 画像所需的
+    # D-1 回看前缀由 _prepare_t_trade_replay_profiles 独立读取并按画像合同
+    # 验证；不能将该参考窗口误当成必须逐日完整的收益回放区间。
     start_time = start_time.replace(hour=9, minute=30, second=0, microsecond=0)
     end_time = end_time.replace(hour=15, minute=30, second=0, microsecond=0)
     requirements = runtime.strategy_class.get_data_requirements()
@@ -1189,6 +1253,20 @@ class StrategyManager:
 
     if not missing_before:
       if is_t_trade_replay:
+        await self._prepare_t_trade_replay_profiles(
+          runtime,
+          service=service,
+          replay_start_time=replay_start_time,
+          replay_end_time=end_time,
+        )
+        profile_count = len(
+          dict(
+            dict(
+              runtime.context.parameters.get("t_trade_replay_profile_manifest") or {}
+            ).get("entries")
+            or {}
+          )
+        )
         await self._set_t_trade_replay_phase(
           runtime,
           phase="VERIFYING_DATA",
@@ -1199,7 +1277,8 @@ class StrategyManager:
             "required_instruments": list(runtime.context.instruments),
             "required_periods": sorted(
               ({"tick"} if require_tick else set()) | required_kline_periods
-            ),
+            )
+            + ["t_trade_profile"],
             "total_windows": 0,
             "completed_windows": 0,
             "current_instrument": None,
@@ -1207,6 +1286,10 @@ class StrategyManager:
             "current_start_date": None,
             "current_end_date": None,
             "missing_instruments": [],
+            "profile_total": profile_count,
+            "profile_completed": profile_count,
+            "current_profile_date": None,
+            "issues": [],
           },
         )
       return
@@ -1255,6 +1338,20 @@ class StrategyManager:
           synchronization["status"] = "COMPLETED"
 
       if is_t_trade_replay:
+        await self._prepare_t_trade_replay_profiles(
+          runtime,
+          service=service,
+          replay_start_time=replay_start_time,
+          replay_end_time=end_time,
+        )
+        profile_count = len(
+          dict(
+            dict(
+              runtime.context.parameters.get("t_trade_replay_profile_manifest") or {}
+            ).get("entries")
+            or {}
+          )
+        )
         await self._set_t_trade_replay_phase(
           runtime,
           phase="VERIFYING_DATA",
@@ -1304,7 +1401,7 @@ class StrategyManager:
           data_preparation={
             "status": "COMPLETED",
             "required_instruments": list(runtime.context.instruments),
-            "required_periods": sorted(sync_periods),
+            "required_periods": sorted(sync_periods) + ["t_trade_profile"],
             "total_windows": 0,
             "completed_windows": 0,
             "current_instrument": None,
@@ -1312,6 +1409,10 @@ class StrategyManager:
             "current_start_date": None,
             "current_end_date": None,
             "missing_instruments": [],
+            "profile_total": profile_count,
+            "profile_completed": profile_count,
+            "current_profile_date": None,
+            "issues": [],
           },
         )
       return
@@ -1344,6 +1445,224 @@ class StrategyManager:
     if missing_after:
       remaining_desc = self._format_missing_data(missing_after)
       raise RuntimeError(f"历史数据同步后仍缺失: {remaining_desc}")
+
+  async def _prepare_t_trade_replay_profiles(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    service: HistoricalMarketDataService,
+    replay_start_time: datetime,
+    replay_end_time: datetime,
+  ) -> None:
+    """Materialize and freeze every causal D-1 profile used by one replay."""
+
+    helper = TradingDateHelper()
+    trading_dates = await helper.get_trading_calendar(
+      market="SH",
+      start_date=replay_start_time.date(),
+      end_date=replay_end_time.date(),
+    )
+    if not trading_dates:
+      raise RuntimeError("DATA_INSUFFICIENT: 回放区间没有可确认的交易日")
+    instruments = sorted(
+      {
+        str(code or "").strip().upper()
+        for code in runtime.context.instruments
+        if str(code or "").strip()
+      }
+    )
+    total = len(instruments) * len(trading_dates)
+    completed = 0
+    issues: List[Dict[str, Any]] = []
+    manifest_entries: Dict[str, Dict[str, Any]] = {}
+    profile_service = TTradeInstrumentProfileService()
+    profile_requirements: List[tuple[date, datetime]] = []
+    for trade_date in trading_dates:
+      previous_trade_date = await helper.trading_time_service.get_previous_trading_day(
+        "SH", trade_date
+      )
+      profile_requirements.append(
+        (trade_date, datetime.combine(previous_trade_date, time(15, 0)))
+      )
+
+    for instrument in instruments:
+      first_trade_date, first_as_of = profile_requirements[0]
+      last_as_of = profile_requirements[-1][1]
+      history_start = datetime.combine(
+        first_as_of.date()
+        - timedelta(days=_T_TRADE_REPLAY_PROFILE_LOOKBACK_CALENDAR_DAYS - 1),
+        time(9, 30),
+      )
+      await self._set_t_trade_replay_phase(
+        runtime,
+        phase="VERIFYING_DATA",
+        phase_progress_pct=(completed / total * 100.0 if total else 100.0),
+        phase_message=f"正在批量生成 {instrument} 的逐日 D-1 因果画像",
+        data_preparation={
+          "status": "RUNNING",
+          "required_instruments": instruments,
+          "required_periods": ["tick", "t_trade_profile"],
+          "total_windows": 0,
+          "completed_windows": 0,
+          "current_instrument": instrument,
+          "current_periods": ["t_trade_profile"],
+          "current_start_date": history_start.date().isoformat(),
+          "current_end_date": last_as_of.date().isoformat(),
+          "missing_instruments": [],
+          "profile_total": total,
+          "profile_completed": completed,
+          "current_profile_date": first_trade_date.isoformat(),
+          "issues": issues,
+        },
+      )
+      try:
+        pages = self._iter_t_trade_profile_tick_pages(
+          service=service,
+          stock_code=instrument,
+          start_time=history_start,
+          end_time=last_as_of,
+          page_size=T_TRADE_PROFILE_PAGE_SIZE,
+          max_pages=T_TRADE_PROFILE_MAX_PAGES,
+          max_source_ticks=T_TRADE_PROFILE_MAX_SOURCE_TICKS,
+        )
+        async with AsyncSessionLocal() as db:
+          rows_by_as_of = await profile_service.build_and_save_profiles_from_pages(
+            instrument_code=instrument,
+            pages=pages,
+            as_ofs=[as_of for _, as_of in profile_requirements],
+            repository=TTradeInstrumentProfileRepository(db),
+            lookback_calendar_days=_T_TRADE_REPLAY_PROFILE_LOOKBACK_CALENDAR_DAYS,
+            target_complete_days=T_TRADE_PROFILE_TARGET_COMPLETE_DAYS,
+            min_complete_days=T_TRADE_PROFILE_MIN_COMPLETE_DAYS,
+            page_size=T_TRADE_PROFILE_PAGE_SIZE,
+            max_pages=T_TRADE_PROFILE_MAX_PAGES,
+            max_source_ticks=T_TRADE_PROFILE_MAX_SOURCE_TICKS,
+          )
+      except Exception as exc:
+        issue = {
+          "code": "REFERENCE_PROFILE_HISTORY_INSUFFICIENT",
+          "instrument_code": instrument,
+          "trade_date": first_trade_date.isoformat(),
+          "detail": str(exc)[:1000],
+        }
+        issues.append(issue)
+        await self._set_t_trade_replay_phase(
+          runtime,
+          phase="FAILED",
+          phase_progress_pct=(completed / total * 100.0 if total else 0.0),
+          phase_message=f"{instrument} 的逐日 D-1 画像无法生成",
+          data_preparation={
+            "status": "FAILED",
+            "required_instruments": instruments,
+            "required_periods": ["tick", "t_trade_profile"],
+            "total_windows": 0,
+            "completed_windows": 0,
+            "current_instrument": instrument,
+            "current_periods": ["t_trade_profile"],
+            "current_start_date": history_start.date().isoformat(),
+            "current_end_date": last_as_of.date().isoformat(),
+            "missing_instruments": [instrument],
+            "profile_total": total,
+            "profile_completed": completed,
+            "current_profile_date": first_trade_date.isoformat(),
+            "issues": issues[:20],
+          },
+        )
+        raise RuntimeError(
+          "DATA_INSUFFICIENT: "
+          f"{instrument} 缺少可批量构建逐日 D-1 画像的完整历史: "
+          f"{str(exc)[:1000]}"
+        ) from exc
+
+      for trade_date, as_of in profile_requirements:
+        row = rows_by_as_of[time_utils.to_shanghai(as_of).isoformat()]
+        manifest_entries[f"{instrument}|{trade_date.isoformat()}"] = {
+          "instrument_code": instrument,
+          "trade_date": trade_date.isoformat(),
+          "profile_as_of": time_utils.to_shanghai(row.as_of).isoformat(),
+          "profile_version": str(row.version),
+          "profile_fingerprint": str(row.fingerprint),
+        }
+        completed += 1
+
+    manifest = {
+      "schema_version": 1,
+      "lookback_calendar_days": _T_TRADE_REPLAY_PROFILE_LOOKBACK_CALENDAR_DAYS,
+      "target_complete_days": T_TRADE_PROFILE_TARGET_COMPLETE_DAYS,
+      "min_complete_days": T_TRADE_PROFILE_MIN_COMPLETE_DAYS,
+      "entries": manifest_entries,
+    }
+    runtime.context.parameters["t_trade_replay_profile_manifest"] = manifest
+    async with AsyncSessionLocal() as db:
+      await StrategyRunRepository(db).update_run(
+        runtime.run_id,
+        {"parameters": runtime.context.parameters},
+      )
+    await self._set_t_trade_replay_phase(
+      runtime,
+      phase="VERIFYING_DATA",
+      phase_progress_pct=100.0,
+      phase_message=f"已冻结 {completed} 个逐日 D-1 因果画像",
+      data_preparation={
+        "status": "COMPLETED",
+        "required_instruments": instruments,
+        "required_periods": ["tick", "t_trade_profile"],
+        "total_windows": 0,
+        "completed_windows": 0,
+        "current_instrument": None,
+        "current_periods": [],
+        "current_start_date": None,
+        "current_end_date": None,
+        "missing_instruments": [],
+        "profile_total": total,
+        "profile_completed": completed,
+        "current_profile_date": None,
+        "issues": [],
+      },
+    )
+
+  @staticmethod
+  async def _iter_t_trade_profile_tick_pages(
+    *,
+    service: HistoricalMarketDataService,
+    stock_code: str,
+    start_time: datetime,
+    end_time: datetime,
+    page_size: int,
+    max_pages: int,
+    max_source_ticks: int,
+  ) -> AsyncIterator[List[Any]]:
+    """Read a long profile range through bounded Influx query windows.
+
+    InfluxDB 3 Core limits how many Parquet files one query may plan.  Cursor
+    pagination alone does not help because every page still plans the full
+    60-day predicate.  Calendar chunks keep each source query bounded while
+    preserving one globally ordered, gap-free page stream for the profile
+    builder's strict source-identity validation.
+    """
+
+    if end_time < start_time:
+      raise ValueError("profile Tick query end precedes start")
+    current_date = start_time.date()
+    final_date = end_time.date()
+    while current_date <= final_date:
+      chunk_last_date = min(
+        current_date
+        + timedelta(days=_T_TRADE_REPLAY_PROFILE_QUERY_CHUNK_CALENDAR_DAYS - 1),
+        final_date,
+      )
+      chunk_start = max(start_time, datetime.combine(current_date, time.min))
+      chunk_end = min(end_time, datetime.combine(chunk_last_date, time.max))
+      async for page in service.iter_tick_pages(
+        stock_code=stock_code,
+        start_time=chunk_start,
+        end_time=chunk_end,
+        page_size=page_size,
+        max_pages=max_pages,
+        max_source_ticks=max_source_ticks,
+      ):
+        yield page
+      current_date = chunk_last_date + timedelta(days=1)
 
   async def _queue_missing_backtest_data_supplement(
     self,
@@ -1759,10 +2078,9 @@ class StrategyManager:
     window_start = dates[0]
     window_end = dates[0]
     for current_date in dates[1:]:
-      if (
-        (current_date - window_end).days > 1
-        or (current_date - window_start).days + 1 > max_span_days
-      ):
+      if (current_date - window_end).days > 1 or (
+        current_date - window_start
+      ).days + 1 > max_span_days:
         windows.append((window_start, window_end))
         window_start = current_date
       window_end = current_date
@@ -1885,9 +2203,7 @@ class StrategyManager:
             )
             if not inspection["complete"]:
               confirmed_empty = False
-              if (
-                str(inspection.get("classification") or "").upper() == "MISSING"
-              ):
+              if str(inspection.get("classification") or "").upper() == "MISSING":
                 if confirmed_empty_tick_dates is None:
                   try:
                     confirmed_empty_tick_dates = await load_completed_empty_tick_days(
@@ -1963,7 +2279,7 @@ class StrategyManager:
         filters={"stock_code": instrument},
         start_time=query_start,
         end_time=query_end,
-        fields=["time"],
+        fields=["time", "amount", "volume", "pvolume"],
         limit=None,
         order_by="time ASC",
       )
@@ -1987,19 +2303,44 @@ class StrategyManager:
         },
       }
 
-    raw_times: List[Any]
+    raw_records: List[Dict[str, Any]]
     if hasattr(records, "empty"):
       if records.empty or "time" not in records.columns:
-        raw_times = []
+        raw_records = []
       else:
-        raw_times = list(records["time"])
+        raw_records = [dict(item) for item in records.to_dict("records")]
     else:
-      raw_times = []
+      raw_records = []
       for record in records or []:
         if isinstance(record, dict):
-          raw_times.append(record.get("time"))
+          raw_records.append(dict(record))
         else:
-          raw_times.append(getattr(record, "time", None))
+          raw_records.append(
+            {
+              "time": getattr(record, "time", None),
+              "amount": getattr(record, "amount", None),
+              "volume": getattr(record, "volume", None),
+              "pvolume": getattr(record, "pvolume", None),
+            }
+          )
+    raw_times = [item.get("time") for item in raw_records]
+
+    positive_amount_count = 0
+    cumulative_volume_source_counts = {
+      source.value: 0 for source in AShareCumulativeVolumeSource
+    }
+    for record in raw_records:
+      try:
+        amount = float(record.get("amount"))
+      except (TypeError, ValueError, OverflowError):
+        amount = 0.0
+      if amount > 0.0:
+        positive_amount_count += 1
+      cumulative_volume = normalize_ashare_cumulative_volume(
+        pvolume=record.get("pvolume"),
+        volume=record.get("volume"),
+      )
+      cumulative_volume_source_counts[cumulative_volume.source.value] += 1
 
     timestamps: List[datetime] = []
     invalid_timestamp_count = 0
@@ -2038,6 +2379,14 @@ class StrategyManager:
       reason_codes.append("INVALID_TICK_TIMESTAMPS")
     if len(continuous_times) < _T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY:
       reason_codes.append("TICK_COUNT_TOO_LOW")
+    if raw_records and positive_amount_count == 0:
+      reason_codes.append("CUMULATIVE_AMOUNT_UNAVAILABLE")
+    usable_cumulative_volume_count = (
+      cumulative_volume_source_counts["NATIVE_PVOLUME"]
+      + cumulative_volume_source_counts["DERIVED_VOLUME_LOTS"]
+    )
+    if raw_records and usable_cumulative_volume_count == 0:
+      reason_codes.append("CUMULATIVE_VOLUME_UNAVAILABLE")
 
     tolerance = _T_TRADE_REPLAY_SESSION_EDGE_TOLERANCE
     morning_start = datetime.combine(
@@ -2067,6 +2416,9 @@ class StrategyManager:
       "record_count": len(raw_times),
       "continuous_session_record_count": len(continuous_times),
       "invalid_timestamp_count": invalid_timestamp_count,
+      "positive_cumulative_amount_count": positive_amount_count,
+      "usable_cumulative_volume_count": usable_cumulative_volume_count,
+      "cumulative_volume_source_counts": cumulative_volume_source_counts,
       "first_continuous_time": (
         continuous_times[0].isoformat() if continuous_times else None
       ),
@@ -2092,7 +2444,7 @@ class StrategyManager:
         "complete": True,
         "classification": "COMPLETE",
         "reason_codes": [],
-        "message": "Tick 交易时段覆盖与连续性校验通过",
+        "message": "Tick 交易时段覆盖、连续性与累计成交字段语义校验通过",
         "statistics": statistics,
       }
 
@@ -2102,7 +2454,7 @@ class StrategyManager:
       "complete": False,
       "classification": classification,
       "reason_codes": reason_codes,
-      "message": "Tick 交易时段覆盖、记录数或连续性未达到回放最低完整性要求",
+      "message": "Tick 覆盖、连续性或累计成交字段语义未达到回放最低完整性要求",
       "statistics": statistics,
     }
 
@@ -2808,10 +3160,12 @@ class StrategyManager:
         "plan_kind": str(binding.get("plan_kind") or "").upper() or None,
         "plan_config_version": int(binding.get("config_version") or 0) or None,
         "frozen_config_snapshot": dict(binding.get("config_snapshot") or {}) or None,
-        "frozen_config_fingerprint": str(binding.get("config_fingerprint") or "") or None,
+        "frozen_config_fingerprint": str(binding.get("config_fingerprint") or "")
+        or None,
         "supersedes_run_id": str(binding.get("supersedes_run_id") or "") or None,
         "parent_run_id": str(binding.get("parent_run_id") or "") or None,
-        "input_event_watermark": str(binding.get("input_event_watermark") or "") or None,
+        "input_event_watermark": str(binding.get("input_event_watermark") or "")
+        or None,
       }
 
       await repo.create_strategy_run(run_data)

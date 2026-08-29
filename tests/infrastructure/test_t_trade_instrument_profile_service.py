@@ -123,6 +123,34 @@ def test_profile_ignores_future_suffix_without_leaking_metadata() -> None:
   assert datetime.fromisoformat(with_future.data_manifest["source_max_at"]) <= cutoff
 
 
+def test_profile_derives_missing_tick_size_only_for_ashare_stocks() -> None:
+  service = TTradeInstrumentProfileService()
+  stock_ticks = _history()
+  for tick in stock_ticks:
+    tick.price_tick = float("nan")
+
+  profile = service.build_profile(
+    instrument_code="600000.SH",
+    ticks=stock_ticks,
+    as_of=datetime(2026, 7, 10, 15, 0),
+  )
+  assert profile.profile["pullback_max_spread_ticks"] > 0
+
+  fund_ticks: list[SimpleNamespace] = []
+  for offset in range(10):
+    fund_ticks.extend(
+      _complete_day(datetime(2026, 7, 1) + timedelta(days=offset), code="510300.SH")
+    )
+  for tick in fund_ticks:
+    tick.price_tick = float("nan")
+  with pytest.raises(ValueError, match="盘口价差覆盖不足"):
+    service.build_profile(
+      instrument_code="510300.SH",
+      ticks=fund_ticks,
+      as_of=datetime(2026, 7, 10, 15, 0),
+    )
+
+
 def test_same_as_of_correction_gets_a_new_immutable_materialization_version() -> None:
   ticks = _history()
   cutoff = datetime(2026, 7, 10, 15, 0)
@@ -206,6 +234,46 @@ def test_streaming_profile_matches_full_build_across_three_pages() -> None:
   assert len(pages) >= 3
   assert streamed.fingerprint == full.fingerprint
   assert streamed.data_manifest["input_tick_count"] == 2_400
+
+
+@pytest.mark.asyncio
+async def test_multi_cutoff_stream_builds_causal_profiles_from_one_scan() -> None:
+  service = TTradeInstrumentProfileService()
+  source = _authoritative(_history(11))
+
+  async def stream():
+    for page in _pages(source, 1_000):
+      yield page
+
+  async def save_profile(**kwargs):
+    return SimpleNamespace(**kwargs)
+
+  repository = SimpleNamespace(save_profile=AsyncMock(side_effect=save_profile))
+  saved = await service.build_and_save_profiles_from_pages(
+    instrument_code="600000.SH",
+    pages=stream(),
+    as_ofs=[datetime(2026, 7, 10, 15, 0), datetime(2026, 7, 11, 15, 0)],
+    repository=repository,
+    lookback_calendar_days=10,
+    target_complete_days=10,
+    min_complete_days=10,
+    page_size=1_000,
+  )
+
+  assert repository.save_profile.await_count == 2
+  first = saved["2026-07-10T15:00:00"]
+  second = saved["2026-07-11T15:00:00"]
+  assert first.data_manifest["selected_trade_dates"] == [
+    f"2026-07-{day:02d}" for day in range(1, 11)
+  ]
+  assert second.data_manifest["selected_trade_dates"] == [
+    f"2026-07-{day:02d}" for day in range(2, 12)
+  ]
+  assert first.data_manifest["input_tick_count"] == 2_400
+  assert second.data_manifest["input_tick_count"] == 2_400
+  assert first.data_manifest["source_max_at"] <= first.as_of.isoformat(
+    timespec="milliseconds"
+  )
 
 
 def test_streaming_profile_keeps_last_same_millisecond_ordinal_across_pages() -> None:

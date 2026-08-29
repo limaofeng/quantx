@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import asc, desc, or_, select
+from sqlalchemy import asc, delete, desc, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +32,26 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
       select(TradeIntentRecord).filter(TradeIntentRecord.id == intent_id)
     )
     return result.scalar_one_or_none()
+
+  async def delete_for_strategy_run(
+    self,
+    strategy_run_id: str,
+    *,
+    commit: bool = True,
+  ) -> int:
+    """Delete run-local intents before replaying a new backtest version."""
+
+    normalized_run_id = str(strategy_run_id or "").strip()
+    if not normalized_run_id:
+      raise ValueError("策略运行标识不能为空")
+    result = await self.db.execute(
+      delete(TradeIntentRecord).where(
+        TradeIntentRecord.strategy_run_id == normalized_run_id
+      )
+    )
+    if commit:
+      await self.db.commit()
+    return int(result.rowcount or 0)
 
   async def find_by_strategy_run(self, strategy_run_id: str) -> List[TradeIntentRecord]:
     """获取策略运行的所有交易意图。"""
@@ -167,8 +187,7 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     rows = list(result.scalars().all())
     if len(rows) > row_limit:
       raise RuntimeError(
-        "V3 候选恢复查询超过有界上限: "
-        f"run_id={normalized_run_id}, limit={row_limit}"
+        f"V3 候选恢复查询超过有界上限: run_id={normalized_run_id}, limit={row_limit}"
       )
     candidates: List[TradeIntentRecord] = []
     for row in rows:
@@ -250,8 +269,7 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
       field
       for field in immutable_fields
       if field in incoming
-      and str(getattr(existing, field, "") or "")
-      != str(incoming.get(field) or "")
+      and str(getattr(existing, field, "") or "") != str(incoming.get(field) or "")
     ]
     existing_metadata = dict(existing.intent_metadata or {})
     incoming_metadata = dict(incoming.get("intent_metadata") or {})

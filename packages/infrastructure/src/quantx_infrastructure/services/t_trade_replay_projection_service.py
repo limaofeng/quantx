@@ -19,6 +19,7 @@ from quantx_infrastructure.repositories.t_trade_replay_projection_repository imp
 
 logger = logging.getLogger(__name__)
 T_TRADE_REPLAY_UPDATE_CHANNEL_PREFIX = "t-trade:replay:update:"
+_PHASE_MESSAGE_MAX_LENGTH = 500
 TERMINAL_REPLAY_STATUSES = frozenset(
   {"COMPLETED", "ERROR", "FAILED", "CANCELLED", "STOPPED"}
 )
@@ -32,10 +33,11 @@ class TTradeReplayUpdateKind(str, Enum):
 
 
 def t_trade_replay_update_channel(account_id: str) -> str:
-  return (
-    f"{T_TRADE_REPLAY_UPDATE_CHANNEL_PREFIX}"
-    f"{str(account_id or '').strip()}"
-  )
+  return f"{T_TRADE_REPLAY_UPDATE_CHANNEL_PREFIX}{str(account_id or '').strip()}"
+
+
+def _phase_message(value: Any) -> str:
+  return str(value or "")[:_PHASE_MESSAGE_MAX_LENGTH]
 
 
 def _snapshot(row: TTradeReplayProjection) -> Dict[str, Any]:
@@ -145,7 +147,7 @@ class TTradeReplayProjectionService:
           phase_progress_pct=self._normalized_phase_progress(
             normalized_phase, phase_progress_pct
           ),
-          phase_message=str(phase_message or ""),
+          phase_message=_phase_message(phase_message),
           data_preparation=dict(data_preparation or {}),
           processed_until=normalized_processed_until,
           revision=1,
@@ -156,16 +158,11 @@ class TTradeReplayProjectionService:
         if row.account_id != normalized_account_id:
           raise ValueError("回放运行不属于指定账户")
         current_status = str(row.status or "PENDING").upper()
-        terminal_transition_allowed = (
-          current_status == normalized_status
-          or (
-            current_status == "STOPPED"
-            and normalized_status == "CANCELLED"
-          )
+        terminal_transition_allowed = current_status == normalized_status or (
+          current_status == "STOPPED" and normalized_status == "CANCELLED"
         )
         if (
-          current_status in TERMINAL_REPLAY_STATUSES
-          and not terminal_transition_allowed
+          current_status in TERMINAL_REPLAY_STATUSES and not terminal_transition_allowed
         ):
           snapshot = _snapshot(row)
           break
@@ -174,8 +171,10 @@ class TTradeReplayProjectionService:
           self._normalized_progress(normalized_status, progress_pct),
         )
         next_processed_until = row.processed_until
-        next_phase = normalized_phase if phase is not None else self._normalized_phase(
-          normalized_status, row.phase
+        next_phase = (
+          normalized_phase
+          if phase is not None
+          else self._normalized_phase(normalized_status, row.phase)
         )
         if phase_progress_pct is not None:
           next_phase_progress = self._normalized_phase_progress(
@@ -188,9 +187,9 @@ class TTradeReplayProjectionService:
         else:
           next_phase_progress = float(row.phase_progress_pct or 0.0)
         next_phase_message = (
-          str(phase_message or "")
+          _phase_message(phase_message)
           if phase_message is not None
-          else str(row.phase_message or "")
+          else _phase_message(row.phase_message)
         )
         next_data_preparation = (
           dict(data_preparation)

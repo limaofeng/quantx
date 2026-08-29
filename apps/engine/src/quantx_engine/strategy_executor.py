@@ -105,6 +105,7 @@ from quantx_domain.trading.decision_trace import (
   summarize_intent,
   summarize_strategy_input,
 )
+from quantx_domain.trading.t_trade import normalize_ashare_cumulative_volume
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.brokers.live import LiveBroker
 from quantx_infrastructure.core.data import (
@@ -401,9 +402,7 @@ _T_TRADE_PROFILE_CACHE_MAX_ENTRIES = 4096
 # this; rejecting a larger reconcile keeps the fail-closed boundary bounded.
 _T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS = 4096
 
-_TRACE_AUDIT_JSON_SCALAR_TYPES = frozenset(
-  {type(None), bool, int, float, str}
-)
+_TRACE_AUDIT_JSON_SCALAR_TYPES = frozenset({type(None), bool, int, float, str})
 
 
 def _trace_audit_json_default(value: Any) -> Any:
@@ -422,9 +421,7 @@ def _trace_audit_json_default(value: Any) -> Any:
     return list(value)
   if isinstance(value, Mapping):
     return _trace_audit_json_value(value)
-  raise TypeError(
-    f"Object of type {type(value).__name__} is not JSON serializable"
-  )
+  raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _trace_audit_requires_normalization(value: Any) -> bool:
@@ -439,11 +436,7 @@ def _trace_audit_requires_normalization(value: Any) -> bool:
   value_type = type(value)
   if value_type in _TRACE_AUDIT_JSON_SCALAR_TYPES:
     return False
-  if (
-    value_type is not dict
-    and value_type is not list
-    and value_type is not tuple
-  ):
+  if value_type is not dict and value_type is not list and value_type is not tuple:
     return isinstance(value, Mapping)
 
   stack = [value]
@@ -460,15 +453,10 @@ def _trace_audit_requires_normalization(value: Any) -> bool:
         if type(key) is not str:
           return True
         child_type = type(child)
-        if (
-          child_type is dict
-          or child_type is list
-          or child_type is tuple
-        ):
+        if child_type is dict or child_type is list or child_type is tuple:
           stack.append(child)
-        elif (
-          child_type not in _TRACE_AUDIT_JSON_SCALAR_TYPES
-          and isinstance(child, Mapping)
+        elif child_type not in _TRACE_AUDIT_JSON_SCALAR_TYPES and isinstance(
+          child, Mapping
         ):
           return True
     elif current_type is list or current_type is tuple:
@@ -478,15 +466,10 @@ def _trace_audit_requires_normalization(value: Any) -> bool:
       visited.add(identity)
       for child in current:
         child_type = type(child)
-        if (
-          child_type is dict
-          or child_type is list
-          or child_type is tuple
-        ):
+        if child_type is dict or child_type is list or child_type is tuple:
           stack.append(child)
-        elif (
-          child_type not in _TRACE_AUDIT_JSON_SCALAR_TYPES
-          and isinstance(child, Mapping)
+        elif child_type not in _TRACE_AUDIT_JSON_SCALAR_TYPES and isinstance(
+          child, Mapping
         ):
           return True
     elif isinstance(current, Mapping):
@@ -510,10 +493,7 @@ def _trace_audit_json_value(value: Any) -> Any:
   """Normalize non-standard mapping/key payloads for deterministic JSON."""
 
   if isinstance(value, Mapping):
-    return {
-      str(key): _trace_audit_json_value(item)
-      for key, item in value.items()
-    }
+    return {str(key): _trace_audit_json_value(item) for key, item in value.items()}
   if isinstance(value, (list, tuple)):
     return [_trace_audit_json_value(item) for item in value]
   if isinstance(value, (datetime, date)):
@@ -618,9 +598,7 @@ def _compact_runtime_state_patch_for_audit(
   }
   requires_normalization = _trace_audit_requires_normalization(raw_patch)
   audit_patch = (
-    _trace_audit_json_value(raw_patch)
-    if requires_normalization
-    else raw_patch
+    _trace_audit_json_value(raw_patch) if requires_normalization else raw_patch
   )
   set_values = audit_patch["set"] or {}
   append_events = audit_patch["append_events"] or []
@@ -660,9 +638,7 @@ def _compact_runtime_state_patch_for_audit(
     event_mapping = event if isinstance(event, Mapping) else {}
     event_summaries.append(
       {
-        "event_key": _trace_audit_event_identity_value(
-          event_mapping.get("event_key")
-        ),
+        "event_key": _trace_audit_event_identity_value(event_mapping.get("event_key")),
         "type": _trace_audit_event_identity_value(event_mapping.get("type")),
         "record_kind": _trace_audit_event_identity_value(
           event_mapping.get("record_kind")
@@ -1297,8 +1273,10 @@ def _summarize_t_trade_intent_for_audit(intent: TradeIntent) -> Dict[str, Any]:
       + ",".join(unknown_metadata_keys)
     )
   for key in _T_TRADE_INTENT_METADATA_REFERENCE_KEYS:
-    if key in metadata and metadata[key] is not None and not isinstance(
-      metadata[key], Mapping
+    if (
+      key in metadata
+      and metadata[key] is not None
+      and not isinstance(metadata[key], Mapping)
     ):
       raise ValueError(f"T-trade trace intent metadata.{key} must be a mapping")
   metadata_marker = _t_trade_trace_scalar_marker(
@@ -1341,10 +1319,7 @@ def _build_t_trade_decision_trace_projection(
     raise ValueError("T-trade trace trade_intents must be a list")
   if len(raw_intents) > _T_TRADE_TRACE_MARKER_LIST_LIMIT:
     raise ValueError("T-trade trace trade_intents exceeds list size limit")
-  intents = [
-    _summarize_t_trade_intent_for_audit(intent)
-    for intent in raw_intents
-  ]
+  intents = [_summarize_t_trade_intent_for_audit(intent) for intent in raw_intents]
   state_patch, evidence_references = (
     _compact_t_trade_runtime_state_patch_for_audit(
       output.runtime_state_patch,
@@ -1897,9 +1872,7 @@ class StrategyExecutor:
     # service remains the adapter, while this composition root supplies the
     # Shanghai-causal profile read, post-CAS materialization and external
     # emission gate used by the existing Engine path.
-    self._d1_profile_reader = ReadD1ReferenceProfile(
-      self.opportunity_runtime_service
-    )
+    self._d1_profile_reader = ReadD1ReferenceProfile(self.opportunity_runtime_service)
     self._evaluation_materializer = MaterializeEvaluationAfterCAS(
       self.opportunity_runtime_service
     )
@@ -2273,27 +2246,17 @@ class StrategyExecutor:
     any additional queued or in-flight work.
     """
 
-    event_unfinished = int(
-      getattr(runtime.event_queue, "_unfinished_tasks", 0) or 0
-    )
-    if (
-      not runtime.event_queue.empty()
-      or not runtime.market_event_queue.empty()
-    ):
+    event_unfinished = int(getattr(runtime.event_queue, "_unfinished_tasks", 0) or 0)
+    if not runtime.event_queue.empty() or not runtime.market_event_queue.empty():
       return False
     market_unfinished = int(
       getattr(runtime.market_event_queue, "_unfinished_tasks", 0) or 0
     )
     active_market_events = len(runtime._processing_market_events)
     if allow_current_market_event:
-      return (
-        event_unfinished + market_unfinished <= 1
-        and active_market_events <= 1
-      )
+      return event_unfinished + market_unfinished <= 1 and active_market_events <= 1
     return (
-      event_unfinished == 0
-      and market_unfinished == 0
-      and active_market_events == 0
+      event_unfinished == 0 and market_unfinished == 0 and active_market_events == 0
     )
 
   @staticmethod
@@ -2462,8 +2425,7 @@ class StrategyExecutor:
         key
         for key, event in summaries.items()
         if not key.startswith(("MATERIAL:", "DIAGNOSTIC:"))
-        and str(event.get("record_kind") or "").upper()
-        == "COALESCED_DIAGNOSTIC"
+        and str(event.get("record_kind") or "").upper() == "COALESCED_DIAGNOSTIC"
       ]
 
     normalized_boundary_key = str(boundary_event_key or "").strip()
@@ -2681,9 +2643,7 @@ class StrategyExecutor:
       )
       return False
     expected_keys = set(pending_by_key)
-    captured_events = {
-      key: pending_by_key[key] for key in sorted(expected_keys)
-    }
+    captured_events = {key: pending_by_key[key] for key in sorted(expected_keys)}
     try:
       confirmed_keys = await self._flush_checkpoint_diagnostic_summaries(
         runtime,
@@ -2844,7 +2804,7 @@ class StrategyExecutor:
         status="DELAYED",
         reason="RUNTIME_QUEUES_ARRIVED_DURING_DRAIN",
         attempts=attempts + 1,
-    )
+      )
       return False
     complete = dict(completeness)
     complete["complete"] = bool(complete.get("complete") is True)
@@ -2885,9 +2845,7 @@ class StrategyExecutor:
           status="BLOCKED",
           reason="PREPARED_CHECKPOINT_INVALID_TRADE_DATE",
           attempts=attempts + 1,
-          prepared_checkpoint_id=str(
-            getattr(prepared, "checkpoint_id", "") or ""
-          ),
+          prepared_checkpoint_id=str(getattr(prepared, "checkpoint_id", "") or ""),
         )
         return False
       prepared_session = getattr(prepared, "session", None)
@@ -2905,7 +2863,9 @@ class StrategyExecutor:
           prepared_exists = await prepared_exists
       except Exception as exc:
         prepared_exists = True
-        prepared_reason = f"PREPARED_CHECKPOINT_INSPECTION_FAILED:{exc.__class__.__name__}"
+        prepared_reason = (
+          f"PREPARED_CHECKPOINT_INSPECTION_FAILED:{exc.__class__.__name__}"
+        )
       else:
         prepared_reason = "PREPARED_CHECKPOINT_CORRUPT"
       if prepared_exists:
@@ -3021,9 +2981,7 @@ class StrategyExecutor:
       return
     current = self._checkpoint_local_time(now or time_utils.now())
     eligible_specs = [
-      spec
-      for spec in _SESSION_CHECKPOINT_SPECS
-      if current.time() >= spec[2]
+      spec for spec in _SESSION_CHECKPOINT_SPECS if current.time() >= spec[2]
     ]
     if not eligible_specs:
       return
@@ -3035,9 +2993,7 @@ class StrategyExecutor:
     due_specs: list[tuple[str, time, time, Dict[str, Any]]] = []
     for session, boundary_time, eligible_time in eligible_specs:
       previous = dict(
-        runtime.checkpoint_status.get(
-          self._checkpoint_status_key(trade_date, session)
-        )
+        runtime.checkpoint_status.get(self._checkpoint_status_key(trade_date, session))
         or {}
       )
       if previous.get("status") in {"COMPLETE", "SKIPPED"}:
@@ -3045,9 +3001,10 @@ class StrategyExecutor:
       if int(previous.get("attempts", 0) or 0) >= _SESSION_CHECKPOINT_MAX_RETRIES:
         continue
       next_retry_at = self._checkpoint_datetime(previous.get("next_retry_at"))
-      if next_retry_at is not None and self._checkpoint_local_time(
-        next_retry_at
-      ) > current:
+      if (
+        next_retry_at is not None
+        and self._checkpoint_local_time(next_retry_at) > current
+      ):
         continue
       due_specs.append((session, boundary_time, eligible_time, previous))
     if not due_specs:
@@ -3066,9 +3023,7 @@ class StrategyExecutor:
           status="BLOCKED",
           reason=f"SH_TRADING_CALENDAR_UNAVAILABLE:{exc.__class__.__name__}",
           attempts=int(previous.get("attempts", 0) or 0) + 1,
-          next_retry_at=current + timedelta(
-            seconds=_SESSION_CHECKPOINT_RETRY_SECONDS
-          ),
+          next_retry_at=current + timedelta(seconds=_SESSION_CHECKPOINT_RETRY_SECONDS),
         )
       return
     if not trading_date:
@@ -3139,9 +3094,7 @@ class StrategyExecutor:
           session=session,
           status="DELAYED",
           reason=(
-            drain_reason
-            if not drained
-            else "RUNTIME_QUEUES_ARRIVED_DURING_DRAIN"
+            drain_reason if not drained else "RUNTIME_QUEUES_ARRIVED_DURING_DRAIN"
           ),
           attempts=int(previous.get("attempts", 0) or 0) + 1,
           fence=first_fence,
@@ -3311,6 +3264,16 @@ class StrategyExecutor:
     previous_date = runtime._checkpoint_virtual_trade_date
     if previous_date is None or event_date <= previous_date:
       return
+    # Historical adapter replay drives ticks directly from ``runtime.task``.
+    # Simulated broker order/trade callbacks still converge through the serial
+    # control consumer, so the last quote of the prior day can legitimately
+    # leave reports queued for a few event-loop turns.  Drain that causal tail
+    # before sealing the day.  A tick already running on the consumer itself
+    # must never join its own queue; in that path the acquired item allowance
+    # below remains the precise fence.
+    direct_replay_producer = asyncio.current_task() is runtime.task
+    if direct_replay_producer:
+      await self._wait_for_backtest_reports(runtime)
     watermark = dict(runtime._checkpoint_processed_watermark or {})
     sealed = await self._seal_runtime_checkpoint(
       runtime,
@@ -3322,15 +3285,20 @@ class StrategyExecutor:
       completeness={
         "complete": self._runtime_checkpoint_queues_drained(
           runtime,
-          allow_current_market_event=True,
+          allow_current_market_event=not direct_replay_producer,
         ),
         "reason": "VIRTUAL_DAY_QUEUE_NOT_DRAINED",
         "virtual_day_transition_to": event_date.isoformat(),
       },
-      allow_current_market_event=True,
+      allow_current_market_event=not direct_replay_producer,
     )
     if not sealed:
-      raise RuntimeError("BACKTEST_VIRTUAL_DAY_CHECKPOINT_BLOCKED")
+      checkpoint_key = self._checkpoint_status_key(previous_date, None)
+      checkpoint_status = dict(runtime.checkpoint_status.get(checkpoint_key) or {})
+      reason = str(checkpoint_status.get("reason") or "UNKNOWN")
+      diagnostic_error = str(checkpoint_status.get("diagnostic_error") or "").strip()
+      detail = f":{diagnostic_error}" if diagnostic_error else ""
+      raise RuntimeError(f"BACKTEST_VIRTUAL_DAY_CHECKPOINT_BLOCKED:{reason}{detail}")
 
   async def _coordinate_backtest_terminal_checkpoint(
     self,
@@ -3353,7 +3321,9 @@ class StrategyExecutor:
       # the serial watermark.  Do not invent one from wall clock during a
       # start/stop-only BACKTEST lifecycle.
       return
-    current_time = runtime.context.current_time or datetime.combine(trade_date, time.max)
+    current_time = runtime.context.current_time or datetime.combine(
+      trade_date, time.max
+    )
     boundary = (
       current_time
       if isinstance(current_time, datetime)
@@ -3552,9 +3522,7 @@ class StrategyExecutor:
           "PREPARED 检查点损坏，拒绝恢复当前运行状态: run_id=%s",
           run_id,
         )
-        raise RuntimeError(
-          "PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED"
-        )
+        raise RuntimeError("PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED")
       elif prepared_checkpoint is not None:
         try:
           prepared_trade_date = date.fromisoformat(
@@ -4996,15 +4964,9 @@ class StrategyExecutor:
       final_snapshot_saved = bool(
         final_snapshot_ready and runtime.state_manager is None
       )
-      if (
-        final_snapshot_ready
-        and terminal_checkpoint_aborted
-        and runtime.state_manager
-      ):
+      if final_snapshot_ready and terminal_checkpoint_aborted and runtime.state_manager:
         try:
-          await runtime.state_manager.abort_without_final_snapshot(
-            runtime.strategy
-          )
+          await runtime.state_manager.abort_without_final_snapshot(runtime.strategy)
           final_snapshot_saved = True
         except Exception as exc:
           cleanup_errors.append("state_manager_abort")
@@ -6447,7 +6409,11 @@ class StrategyExecutor:
     self,
     runtime: StrategyRuntime,
   ) -> None:
-    if not self._uses_strict_board_replay(runtime):
+    # Every strict replay shares the same causal contract: broker callbacks
+    # caused by one quote must be visible before the next quote can make a
+    # decision.  Restricting this fence to board replay made T-trade results
+    # depend on how often the producer happened to yield to the report task.
+    if not self._requires_replay_event_integrity(runtime):
       return
     if runtime.event_task is asyncio.current_task():
       raise RuntimeError("回放撮合不能在 Broker 回报事件任务内等待自身")
@@ -6562,26 +6528,107 @@ class StrategyExecutor:
         "reason_code": "DIAGNOSTICS_SCOPE_UNAVAILABLE",
         "reason": "回放缺少账户或有效时间范围，无法加载 V3 机会诊断。",
       }
+    baseline = runtime.t_trade_phase_one_baseline
+    replay_diagnostics = (
+      baseline.v3_diagnostics_snapshot() if baseline is not None else None
+    )
     try:
       async with AsyncSessionLocal() as db:
-        return await self.opportunity_diagnostics_service.signal_diagnostics(
-          account_id,
-          stock_code=None,
-          start_time=start_time,
-          end_time=end_time,
-          db=db,
-          strategy_run_id=runtime.run_id,
+        durable_diagnostics = (
+          await self.opportunity_diagnostics_service.signal_diagnostics(
+            account_id,
+            stock_code=None,
+            start_time=start_time,
+            end_time=end_time,
+            db=db,
+            strategy_run_id=runtime.run_id,
+          )
         )
     except Exception as exc:
       self.logger.exception(
         "加载做 T V3 回放诊断失败: run_id=%s",
         runtime.run_id,
       )
-      return {
-        "available": False,
-        "reason_code": "DIAGNOSTICS_LOAD_FAILED",
-        "reason": f"V3 机会诊断加载失败: {exc}",
+      if replay_diagnostics is None:
+        return {
+          "available": False,
+          "reason_code": "DIAGNOSTICS_LOAD_FAILED",
+          "reason": f"V3 机会诊断加载失败: {exc}",
+        }
+      durable_diagnostics = {"available": False}
+      replay_diagnostics.setdefault("warnings", []).append(
+        "DURABLE_DIAGNOSTICS_LOAD_FAILED"
+      )
+    if replay_diagnostics is None:
+      return durable_diagnostics
+    return self._merge_t_trade_replay_diagnostics(
+      replay_diagnostics,
+      durable_diagnostics,
+      strategy_run_id=runtime.run_id,
+      start_time=start_time,
+      end_time=end_time,
+    )
+
+  @staticmethod
+  def _merge_t_trade_replay_diagnostics(
+    replay_diagnostics: Mapping[str, Any],
+    durable_diagnostics: Mapping[str, Any],
+    *,
+    strategy_run_id: str,
+    start_time: datetime,
+    end_time: datetime,
+  ) -> Dict[str, Any]:
+    """Keep every-Tick denominators and merge durable execution outcomes."""
+
+    result = copy.deepcopy(dict(replay_diagnostics))
+    durable_partitions = {
+      (
+        str(item.get("policy_version") or ""),
+        str(item.get("feature_schema_version") or ""),
+        str(item.get("profile_version") or "").strip() or None,
+      ): dict(item)
+      for raw in list(durable_diagnostics.get("partitions") or [])
+      if isinstance(raw, Mapping)
+      for item in [dict(raw)]
+    }
+    for partition in list(result.get("partitions") or []):
+      coordinate = (
+        str(partition.get("policy_version") or ""),
+        str(partition.get("feature_schema_version") or ""),
+        str(partition.get("profile_version") or "").strip() or None,
+      )
+      durable = durable_partitions.get(coordinate)
+      if durable is None:
+        continue
+      durable_funnel = {
+        str(item.get("code") or ""): dict(item)
+        for item in list(durable.get("funnel") or [])
+        if isinstance(item, Mapping)
       }
+      partition["funnel"] = list(partition.get("funnel") or []) + [
+        durable_funnel[code]
+        for code in ("TRADE_INTENT", "APPROVED", "ORDERED", "FILLED")
+        if code in durable_funnel
+      ]
+      partition["candidate_outcomes"] = list(durable.get("candidate_outcomes") or [])
+      partition["post_candidate_performance"] = dict(
+        durable.get("post_candidate_performance")
+        or partition.get("post_candidate_performance")
+        or {}
+      )
+    result["scope"] = {
+      "strategy_run_id": strategy_run_id,
+      "stock_code": None,
+      "start_time": start_time.isoformat(),
+      "end_time": end_time.isoformat(),
+    }
+    result["warnings"] = list(
+      dict.fromkeys(
+        [str(item) for item in list(result.get("warnings") or [])]
+        + [str(item) for item in list(durable_diagnostics.get("warnings") or [])]
+      )
+    )
+    return result
 
   async def _finalize_t_trade_replay(self, runtime: StrategyRuntime) -> None:
     """Close replay-created T batches on the final tradable quote."""
@@ -8388,6 +8435,22 @@ class StrategyExecutor:
     key = f"{limit_kind}_{event_kind}"
     counts[key] = int(counts.get(key, 0) or 0) + 1
 
+  @staticmethod
+  def _record_t_trade_replay_cumulative_volume_source(
+    runtime: StrategyRuntime,
+    tick: Any,
+  ) -> None:
+    parameters = runtime.context.parameters
+    if not parameters.get("t_trade_replay"):
+      return
+    normalized = normalize_ashare_cumulative_volume(
+      pvolume=getattr(tick, "pvolume", None),
+      volume=getattr(tick, "volume", None),
+    )
+    counts = parameters.setdefault("replay_cumulative_volume_source_counts", {})
+    key = normalized.source.value
+    counts[key] = int(counts.get(key, 0) or 0) + 1
+
   def _bool_parameter(
     self,
     params: Dict[str, Any],
@@ -8897,8 +8960,7 @@ class StrategyExecutor:
             runtime.durable_event_barrier_key = None
         if event_type == "trade" and (
           durable_event
-          or runtime.context.mode
-          in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER}
+          or runtime.context.mode in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER}
         ):
           trade_metadata = dict(getattr(data, "metadata", {}) or {})
           if (
@@ -8968,9 +9030,7 @@ class StrategyExecutor:
           and has_applied_runtime_event(durable_event_key)
         )
         cas_conflict = bool(
-          str(
-            getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
-          )
+          str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
           == "CAS_CONFLICT"
         )
         if (
@@ -8999,8 +9059,7 @@ class StrategyExecutor:
           self._drain_runtime_control_queue_after_fail_stop(
             runtime,
             reason=(
-              "做 T PAPER 候选成交未完成持久化收敛，运行已停止: "
-              f"{runtime.run_id}"
+              f"做 T PAPER 候选成交未完成持久化收敛，运行已停止: {runtime.run_id}"
             ),
           )
         self.logger.error(f"处理事件失败: {e}")
@@ -9163,6 +9222,7 @@ class StrategyExecutor:
       )
       runtime.latest_market_data[tick.stock_code] = market_snapshot
       self._record_t_trade_replay_price_limit_source(runtime, market_snapshot)
+      self._record_t_trade_replay_cumulative_volume_source(runtime, tick)
       if runtime.state_manager:
         runtime.state_manager.settle_trading_day(tick.time.date())
       await self._expire_pending_approvals(runtime)
@@ -9362,10 +9422,7 @@ class StrategyExecutor:
     start_time = runtime.context.backtest_start_time
     end_time = runtime.context.backtest_end_time
     if (
-      not (
-        parameters.get("t_trade_replay")
-        or parameters.get("exit_plan_replay")
-      )
+      not (parameters.get("t_trade_replay") or parameters.get("exit_plan_replay"))
       or current_time is None
       or start_time is None
       or end_time is None
@@ -9530,9 +9587,7 @@ class StrategyExecutor:
     cache_key = (code, trade_date)
     is_backtest = runtime.context.mode == StrategyRunMode.BACKTEST
     retry_policy = (
-      "本交易日固定失败关闭，不重试"
-      if is_backtest
-      else "短暂保守门禁并定时重试"
+      "本交易日固定失败关闭，不重试" if is_backtest else "短暂保守门禁并定时重试"
     )
     if cache_key in runtime._t_trade_opportunity_profiles:
       cached = runtime._t_trade_opportunity_profiles[cache_key]
@@ -9549,6 +9604,44 @@ class StrategyExecutor:
       str(runtime.context.parameters.get("t_trade_profile_version") or "").strip()
       or None
     )
+    required_fingerprint: Optional[str] = None
+    if is_backtest and runtime.context.parameters.get("t_trade_replay"):
+      manifest = dict(
+        runtime.context.parameters.get("t_trade_replay_profile_manifest") or {}
+      )
+      entries = dict(manifest.get("entries") or {})
+      manifest_entry = dict(entries.get(f"{code}|{trade_date}") or {})
+      required_fingerprint = (
+        str(manifest_entry.get("profile_fingerprint") or "").strip().lower() or None
+      )
+      manifest_version = (
+        str(manifest_entry.get("profile_version") or "").strip() or None
+      )
+      if required_fingerprint is None or manifest_version is None:
+        runtime._t_trade_opportunity_profiles[cache_key] = None
+        runtime._t_trade_opportunity_profile_errors[cache_key] = (
+          "PROFILE_MANIFEST_MISSING"
+        )
+        self._runtime_log(
+          runtime,
+          "ERROR",
+          "做 T 回放缺少冻结画像清单，已保持不可决策: "
+          f"instrument={code} trade_date={trade_date}",
+        )
+        return
+      if required_version is not None and required_version != manifest_version:
+        runtime._t_trade_opportunity_profiles[cache_key] = None
+        runtime._t_trade_opportunity_profile_errors[cache_key] = (
+          "PROFILE_MANIFEST_VERSION_MISMATCH"
+        )
+        self._runtime_log(
+          runtime,
+          "ERROR",
+          "做 T 回放冻结画像版本与运行参数不一致，已保持不可决策: "
+          f"instrument={code} trade_date={trade_date}",
+        )
+        return
+      required_version = manifest_version
     try:
       profile_result = await self._d1_profile_reader.execute(
         D1ProfileReadRequest(
@@ -9558,6 +9651,7 @@ class StrategyExecutor:
           # value avoids an aware-UTC midnight crossing changing the D-1 set.
           evaluated_at=source_evaluated_at,
           required_version=required_version,
+          required_fingerprint=required_fingerprint,
         )
       )
       profile = (
@@ -9580,9 +9674,7 @@ class StrategyExecutor:
       else:
         runtime._t_trade_opportunity_profile_retry_after.pop(cache_key, None)
       if profile_result.reason is D1ProfileReadReason.READ_FAILED:
-        runtime._t_trade_opportunity_profile_errors[cache_key] = (
-          "PROFILE_LOOKUP_FAILED"
-        )
+        runtime._t_trade_opportunity_profile_errors[cache_key] = "PROFILE_LOOKUP_FAILED"
         self._runtime_log(
           runtime,
           "ERROR",
@@ -9702,9 +9794,7 @@ class StrategyExecutor:
     nested_scope = metadata.get("scope")
     scope = nested_scope if isinstance(nested_scope, Mapping) else metadata
     account_id = str(scope.get("account_id") or "").strip()
-    run_id = str(
-      scope.get("run_id") or scope.get("strategy_run_id") or ""
-    ).strip()
+    run_id = str(scope.get("run_id") or scope.get("strategy_run_id") or "").strip()
     return account_id, run_id
 
   @staticmethod
@@ -9742,9 +9832,7 @@ class StrategyExecutor:
         f"{len(desired)} > {_T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS}"
       )
 
-    if instrument_metadata is not None and not isinstance(
-      instrument_metadata, Mapping
-    ):
+    if instrument_metadata is not None and not isinstance(instrument_metadata, Mapping):
       raise ValueError("做 T 意图发射元数据必须是映射")
     if (
       instrument_metadata is not None
@@ -10251,8 +10339,8 @@ class StrategyExecutor:
     )
     market_context = dict(data_context.market_context or {})
     if self._uses_t_trade_opportunity_runtime(runtime):
-      market_context["t_trade_intent_emission"] = (
-        self._t_trade_intent_emission_context(runtime, instrument_code)
+      market_context["t_trade_intent_emission"] = self._t_trade_intent_emission_context(
+        runtime, instrument_code
       )
     if self._uses_t_trade_opportunity_runtime(runtime) and isinstance(
       evaluated_at, datetime
@@ -10620,9 +10708,7 @@ class StrategyExecutor:
         return materialized.record
       except Exception as exc:
         classification_error = (
-          exc.cause
-          if isinstance(exc, EvaluationMaterializationError)
-          else exc
+          exc.cause if isinstance(exc, EvaluationMaterializationError) else exc
         )
         transient = self._is_transient_evaluation_materialization_error(
           classification_error
@@ -10751,16 +10837,16 @@ class StrategyExecutor:
         return frozenset(persisted_event_keys)
       except Exception as exc:
         classification_error = (
-          exc.cause
-          if isinstance(exc, EvaluationMaterializationError)
-          else exc
+          exc.cause if isinstance(exc, EvaluationMaterializationError) else exc
         )
         transient = self._is_transient_evaluation_materialization_error(
           classification_error
         )
         self.opportunity_observability.record_operation(
           "evaluation_materialization_attempts_total",
-          detail=("BATCH_TRANSIENT_FAILURE" if transient else "BATCH_PERMANENT_FAILURE"),
+          detail=(
+            "BATCH_TRANSIENT_FAILURE" if transient else "BATCH_PERMANENT_FAILURE"
+          ),
           **labels,
         )
         if not transient or attempt >= maximum_attempts:
@@ -10924,27 +11010,33 @@ class StrategyExecutor:
   ) -> None:
     baseline = runtime.t_trade_phase_one_baseline
     if baseline is not None:
+      v3_evaluation = StrategyExecutor._t_trade_phase_one_v3_evaluation_fact(
+        runtime,
+        strategy_input,
+      )
       v3_data_ready, v3_candidate_path = (
         StrategyExecutor._t_trade_phase_one_v3_comparison_fact(
           runtime,
           strategy_input,
+          evaluation=v3_evaluation,
         )
       )
       baseline.observe(
         strategy_input,
         v3_data_ready=v3_data_ready,
         v3_candidate_path=v3_candidate_path,
+        v3_evaluation=v3_evaluation,
       )
 
   @staticmethod
-  def _t_trade_phase_one_v3_comparison_fact(
+  def _t_trade_phase_one_v3_evaluation_fact(
     runtime: StrategyRuntime,
     strategy_input: StrategyInput,
-  ) -> tuple[Optional[bool], Optional[str]]:
+  ) -> Optional[dict[str, Any]]:
     strategy = runtime.strategy
     state_container = getattr(strategy, "state", None)
     if strategy is None or state_container is None:
-      return None, None
+      return None
     raw_states = state_container.get("instrument_states", {})
     states = dict(raw_states) if isinstance(raw_states, Mapping) else {}
     raw_state = states.get(str(strategy_input.instrument_code or "").upper())
@@ -10953,16 +11045,37 @@ class StrategyExecutor:
     evaluation = dict(opportunity.get("latest_evaluation") or {})
     context = strategy_input.market_data_context
     try:
+      evaluation_tick_ordinal = evaluation.get("tick_ordinal")
+      evaluation_generation = evaluation.get("continuity_generation")
       same_source = bool(
         int(evaluation.get("source_time_ms") or -1) == int(context.source_time_ms)
-        and int(evaluation.get("tick_ordinal") or -1) == int(context.tick_ordinal)
-        and str(evaluation.get("continuity_generation") or "")
+        and int(evaluation_tick_ordinal if evaluation_tick_ordinal is not None else -1)
+        == int(context.tick_ordinal)
+        and str(evaluation_generation if evaluation_generation is not None else "")
         == str(context.continuity_generation)
       )
     except (TypeError, ValueError, OverflowError):
       same_source = False
     if not same_source:
+      return None
+    return evaluation
+
+  @staticmethod
+  def _t_trade_phase_one_v3_comparison_fact(
+    runtime: StrategyRuntime,
+    strategy_input: StrategyInput,
+    *,
+    evaluation: Optional[Mapping[str, Any]] = None,
+  ) -> tuple[Optional[bool], Optional[str]]:
+    if evaluation is None:
+      evaluation = StrategyExecutor._t_trade_phase_one_v3_evaluation_fact(
+        runtime,
+        strategy_input,
+      )
+    if evaluation is None:
       return None, None
+    evaluation = dict(evaluation)
+    context = strategy_input.market_data_context
     data_ready = str(evaluation.get("data_health") or "").upper() == "READY"
     candidate_path: Optional[str] = None
     try:
@@ -11054,9 +11167,7 @@ class StrategyExecutor:
             and str(state.definition.instrument_code or "").strip()
           }
           for instrument_code in active_instruments:
-            self._candidate_outcome_activity[
-              (runtime.run_id, instrument_code)
-            ] = True
+            self._candidate_outcome_activity[(runtime.run_id, instrument_code)] = True
       except Exception:
         attempt = min(
           self._candidate_outcome_repair_attempts.get(runtime.run_id, 0) + 1,
@@ -11117,9 +11228,7 @@ class StrategyExecutor:
     trade_id = str(getattr(trade, "trade_id", "") or "").strip()
     order_id = str(getattr(trade, "order_id", "") or "").strip()
     role = str(metadata.get("t_trade_role") or "").strip().upper()
-    candidate_fingerprint = str(
-      metadata.get("candidate_fingerprint") or ""
-    ).strip()
+    candidate_fingerprint = str(metadata.get("candidate_fingerprint") or "").strip()
     policy_version = str(metadata.get("policy_version") or "").strip()
     intent_id = str(metadata.get("intent_id") or "").strip()
     if (
@@ -11133,19 +11242,22 @@ class StrategyExecutor:
       or not intent_id
       or str(metadata.get("strategy_run_id") or "").strip() != runtime.run_id
       or str(metadata.get("account_id") or "").strip() != account_id
-      or str(metadata.get("instrument_code") or "").strip().upper()
-      != instrument_code
+      or str(metadata.get("instrument_code") or "").strip().upper() != instrument_code
     ):
       raise ValueError("做 T PAPER 成交缺少完整且匹配的候选作用域")
 
     trade_time = getattr(trade, "trade_time", None)
     if not isinstance(trade_time, datetime):
       raise ValueError("做 T PAPER 成交缺少权威成交时间")
-    trade_type = str(
-      getattr(getattr(trade, "trade_type", None), "value", None)
-      or getattr(trade, "trade_type", "")
-      or ""
-    ).strip().upper()
+    trade_type = (
+      str(
+        getattr(getattr(trade, "trade_type", None), "value", None)
+        or getattr(trade, "trade_type", "")
+        or ""
+      )
+      .strip()
+      .upper()
+    )
     if trade_type not in {item.value for item in BrokerOrderType}:
       raise ValueError("做 T PAPER 成交方向无效")
 
@@ -11168,9 +11280,7 @@ class StrategyExecutor:
     entry_target_volume: Optional[int] = None
     if role == "ENTRY":
       order = await runtime.broker.get_order(order_id)
-      requested_volume = int(
-        getattr(getattr(order, "request", None), "volume", 0) or 0
-      )
+      requested_volume = int(getattr(getattr(order, "request", None), "volume", 0) or 0)
       if requested_volume <= 0:
         raise ValueError("做 T PAPER 入场成交缺少委托目标数量")
       entry_target_volume = requested_volume
@@ -11225,9 +11335,7 @@ class StrategyExecutor:
     instrument_code = str(fact.get("instrument_code") or "").strip().upper()
     order_id = str(fact.get("order_id") or "").strip()
     candidate_id = str(metadata.get("candidate_id") or "").strip()
-    candidate_fingerprint = str(
-      metadata.get("candidate_fingerprint") or ""
-    ).strip()
+    candidate_fingerprint = str(metadata.get("candidate_fingerprint") or "").strip()
     policy_version = str(metadata.get("policy_version") or "").strip()
     intent_id = str(metadata.get("intent_id") or "").strip()
     missing_identity_fields = [
@@ -11246,14 +11354,12 @@ class StrategyExecutor:
     ]
     if missing_identity_fields:
       raise ValueError(
-        "做 T PAPER 成交 outbox 缺少候选身份字段: "
-        + ",".join(missing_identity_fields)
+        "做 T PAPER 成交 outbox 缺少候选身份字段: " + ",".join(missing_identity_fields)
       )
     if (
       str(metadata.get("strategy_run_id") or "").strip() != runtime.run_id
       or str(metadata.get("account_id") or "").strip() != account_id
-      or str(metadata.get("instrument_code") or "").strip().upper()
-      != instrument_code
+      or str(metadata.get("instrument_code") or "").strip().upper() != instrument_code
     ):
       raise ValueError("做 T PAPER 成交 outbox 作用域不匹配")
     try:
@@ -11385,9 +11491,7 @@ class StrategyExecutor:
     restored.sort(
       key=lambda item: (
         str(item[1].metadata.get("candidate_id") or ""),
-        0
-        if str(item[1].metadata.get("t_trade_role") or "").upper() == "ENTRY"
-        else 1,
+        0 if str(item[1].metadata.get("t_trade_role") or "").upper() == "ENTRY" else 1,
         time_utils.to_utc(item[1].trade_time).timestamp(),
         str(item[0].get("fact_key") or ""),
       )
@@ -11768,9 +11872,7 @@ class StrategyExecutor:
         await self._replay_pending_actionable_t_trade_material_events(runtime)
       except Exception as exc:
         cas_conflict = (
-          str(
-            getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
-          )
+          str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
           == "CAS_CONFLICT"
         )
         if cas_conflict:
@@ -11894,9 +11996,7 @@ class StrategyExecutor:
       )
     except Exception as exc:
       if (
-        str(
-          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
-        )
+        str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
         == "CAS_CONFLICT"
       ):
         # RuntimeStateManager has adopted the concurrent winner in full.  Any
@@ -12002,9 +12102,7 @@ class StrategyExecutor:
       )
     except Exception as exc:
       if (
-        str(
-          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
-        )
+        str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
         == "CAS_CONFLICT"
       ):
         runtime.status = ExecutionStatus.ERROR
@@ -12035,15 +12133,16 @@ class StrategyExecutor:
     # visibility.  Compensation is deliberately performed after it releases
     # both locks so an OrderStateEvent/MATERIAL path cannot re-enter them.
     if v3_manual_intents:
-      transition_failure, persisted_intents = (
-        await self._persist_v3_candidate_transition_under_locks(
-          runtime,
-          intents=intents,
-          v3_manual_intents=v3_manual_intents,
-          output=output,
-          input_snapshot=input_snapshot,
-          source_time_ms=source_time_ms,
-        )
+      (
+        transition_failure,
+        persisted_intents,
+      ) = await self._persist_v3_candidate_transition_under_locks(
+        runtime,
+        intents=intents,
+        v3_manual_intents=v3_manual_intents,
+        output=output,
+        input_snapshot=input_snapshot,
+        source_time_ms=source_time_ms,
       )
       if transition_failure is not None:
         failure_code, failure_message = transition_failure
@@ -12471,7 +12570,8 @@ class StrategyExecutor:
           for intent in intents:
             status = (
               "PENDING"
-              if intent.intent_id in {candidate.intent_id for candidate in v3_manual_intents}
+              if intent.intent_id
+              in {candidate.intent_id for candidate in v3_manual_intents}
               else "AWAITING_APPROVAL"
               if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
               else "PENDING"
@@ -12572,9 +12672,7 @@ class StrategyExecutor:
       self._apply_runtime_state_patch(runtime, patch)
       if not await runtime.state_manager.checkpoint_strategy_state_changes():
         if (
-          str(
-            getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
-          )
+          str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
           == "CAS_CONFLICT"
         ):
           runtime.status = ExecutionStatus.ERROR
@@ -12589,9 +12687,7 @@ class StrategyExecutor:
         )
     except Exception as exc:
       if (
-        str(
-          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
-        )
+        str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
         == "CAS_CONFLICT"
       ):
         runtime.status = ExecutionStatus.ERROR
@@ -12633,9 +12729,7 @@ class StrategyExecutor:
       await self._acknowledge_t_trade_actionable_material_events(runtime, acknowledged)
     except Exception as exc:
       if (
-        str(
-          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
-        )
+        str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
         == "CAS_CONFLICT"
       ):
         runtime.status = ExecutionStatus.ERROR
@@ -13533,7 +13627,9 @@ class StrategyExecutor:
           if not seeded:
             raise RuntimeError("V3 候选启动抑制结果初始化失败")
           acknowledged.append(event)
-        await self._acknowledge_t_trade_actionable_material_events(runtime, acknowledged)
+        await self._acknowledge_t_trade_actionable_material_events(
+          runtime, acknowledged
+        )
         for instrument_code in sorted(suppressed_instruments):
           await self._notify_t_trade_opportunity_update(
             runtime,
@@ -14268,10 +14364,9 @@ class StrategyExecutor:
           continue
         order_id = cancellation.strategy_order_id or cancellation.client_order_id
         cancellation_metadata = dict(cancellation.request_metadata or {})
-        is_managed_entry = (
-          str(cancellation_metadata.get("entry_plan_id") or "")
-          == self._managed_plan_id(runtime)
-        )
+        is_managed_entry = str(
+          cancellation_metadata.get("entry_plan_id") or ""
+        ) == self._managed_plan_id(runtime)
         if runtime.state_manager:
           runtime.state_manager.release_order_resources(order_id)
           if cancellation.intent_id:
@@ -14879,8 +14974,7 @@ class StrategyExecutor:
       code = blockers[0] if blockers else "T_TRADE_INTENT_EMISSION_BLOCKED"
       return (
         code,
-        "当前做 T 入场门禁未通过："
-        + (", ".join(blockers) if blockers else code),
+        "当前做 T 入场门禁未通过：" + (", ".join(blockers) if blockers else code),
       )
     facts = self._t_trade_account_facts(
       runtime,
@@ -14910,9 +15004,7 @@ class StrategyExecutor:
         f"账户级做 T 批次已达到上限（{max_batches} 个），信号仍保留至过期",
       )
     if facts.account_total_exposure_limit_reached:
-      max_exposure_pct = float(
-        params.get("max_total_t_exposure_pct", 0.1) or 0.1
-      )
+      max_exposure_pct = float(params.get("max_total_t_exposure_pct", 0.1) or 0.1)
       return (
         "T_TRADE_ACCOUNT_TOTAL_EXPOSURE_LIMIT_REACHED",
         f"确认后将超过账户总资产 {max_exposure_pct * 100:g}% 的做 T 敞口上限",
@@ -15120,9 +15212,7 @@ class StrategyExecutor:
     requires_strict = strict_persistence or self._is_v3_t_trade_manual_intent(intent)
     if runtime.state_manager is None:
       if requires_strict:
-        raise _PendingApprovalStatusPersistenceError(
-          "待确认意图缺少状态持久化管理器"
-        )
+        raise _PendingApprovalStatusPersistenceError("待确认意图缺少状态持久化管理器")
     else:
       updater = getattr(
         runtime.state_manager,
@@ -15264,9 +15354,8 @@ class StrategyExecutor:
         "trace_payload": dict(output.trace_payload or {}),
       }
       trace_tags = ["strategy_output", *list(output.decision_tags or [])]
-      trace_reason = (
-        str((output.trace_payload or {}).get("reason") or "")
-        or ("NO_TRADE_INTENT" if not intents else "TRADE_INTENT_GENERATED")
+      trace_reason = str((output.trace_payload or {}).get("reason") or "") or (
+        "NO_TRADE_INTENT" if not intents else "TRADE_INTENT_GENERATED"
       )
     trace = DecisionTrace.from_decision(
       run_id=runtime.run_id,
@@ -15336,7 +15425,8 @@ class StrategyExecutor:
     if (
       stage_actionable_material_events
       and material_events
-      and runtime.context.mode in {
+      and runtime.context.mode
+      in {
         StrategyRunMode.PAPER,
         StrategyRunMode.LIVE,
       }

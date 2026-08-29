@@ -26,6 +26,7 @@ class D1ProfileReadReason(StrEnum):
   INVALID = "PROFILE_INVALID"
   FUTURE = "PROFILE_NOT_CAUSAL"
   VERSION_MISMATCH = "PROFILE_VERSION_MISMATCH"
+  FINGERPRINT_MISMATCH = "PROFILE_FINGERPRINT_MISMATCH"
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class D1ProfileReadRequest:
   instrument_code: str
   evaluated_at: datetime
   required_version: Optional[str] = None
+  required_fingerprint: Optional[str] = None
 
   def __post_init__(self) -> None:
     code = str(self.instrument_code or "").strip().upper()
@@ -49,6 +51,13 @@ class D1ProfileReadRequest:
     )
     object.__setattr__(self, "instrument_code", code)
     object.__setattr__(self, "required_version", version)
+    fingerprint = str(self.required_fingerprint or "").strip().lower() or None
+    if fingerprint is not None and (
+      len(fingerprint) != 64
+      or any(character not in "0123456789abcdef" for character in fingerprint)
+    ):
+      raise ValueError("required_fingerprint must be a SHA-256 hex digest")
+    object.__setattr__(self, "required_fingerprint", fingerprint)
 
 
 @dataclass(frozen=True)
@@ -68,10 +77,7 @@ class D1ProfileReadResult:
 
   @property
   def available(self) -> bool:
-    return (
-      self.profile is not None
-      and self.reason is D1ProfileReadReason.AVAILABLE
-    )
+    return self.profile is not None and self.reason is D1ProfileReadReason.AVAILABLE
 
 
 class EvaluationMaterializationStatus(StrEnum):
@@ -145,9 +151,7 @@ class IntentEmissionGateInput:
     runtime_run_id = str(self.runtime_run_id or "").strip()
     context_run_id = str(self.context_run_id or "").strip()
     instrument_code = str(self.instrument_code or "").strip().upper()
-    if self.universe_entry is not None and not isinstance(
-      self.universe_entry, Mapping
-    ):
+    if self.universe_entry is not None and not isinstance(self.universe_entry, Mapping):
       raise TypeError("universe_entry must be a mapping")
     for name in (
       "reconciliation_required",

@@ -185,6 +185,51 @@ async def test_candidate_id_is_denormalized_only_for_material_evidence() -> None
 
 
 @pytest.mark.asyncio
+async def test_backtest_rerun_reset_is_run_scoped_and_joins_transaction() -> None:
+  engine, sessions = await _create_repositories()
+  at = datetime(2026, 8, 23, 10, 0, tzinfo=SHANGHAI)
+  try:
+    async with sessions() as db:
+      repository = TTradeOpportunityEvaluationRepository(db)
+      await repository.append_material(
+        **_evaluation_arguments(at, event_key="run-reset")
+      )
+      other = _evaluation_arguments(
+        at + timedelta(seconds=1),
+        event_key="run-keep",
+      )
+      other["strategy_run_id"] = "run-2"
+      await repository.append_material(**other)
+
+      assert (
+        await repository.reset_for_backtest_rerun(
+          "run-1",
+          commit=False,
+        )
+        == 1
+      )
+      remaining = list(
+        (
+          await db.execute(
+            select(TTradeOpportunityEvaluation).order_by(
+              TTradeOpportunityEvaluation.event_key
+            )
+          )
+        )
+        .scalars()
+        .all()
+      )
+      assert [row.event_key for row in remaining] == ["run-keep"]
+      await db.rollback()
+
+    async with sessions() as db:
+      count = await db.scalar(select(func.count(TTradeOpportunityEvaluation.id)))
+      assert count == 2
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_diagnostics_require_a_closed_point_in_time_window() -> None:
   engine, sessions = await _create_repositories()
   at = datetime(2026, 8, 23, 10, 0, tzinfo=SHANGHAI)
@@ -222,7 +267,9 @@ async def test_diagnostics_require_a_closed_point_in_time_window() -> None:
 
 
 @pytest.mark.asyncio
-async def test_batch_append_600_rows_uses_three_multi_values_executes_and_one_commit() -> None:
+async def test_batch_append_600_rows_uses_three_multi_values_executes_and_one_commit() -> (
+  None
+):
   class CountingAsyncSession(AsyncSession):
     execute_calls = 0
     commit_calls = 0

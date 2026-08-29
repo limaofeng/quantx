@@ -89,7 +89,25 @@ async def test_d1_profile_use_case_accepts_prior_profile_and_normalizes_code():
     instrument_code="600000.SH",
     evaluated_at=datetime(2026, 8, 23, 10, 0),
     required_version="profile-1",
+    required_fingerprint=None,
   )
+
+
+@pytest.mark.asyncio
+async def test_d1_profile_use_case_enforces_frozen_fingerprint():
+  port = AsyncMock()
+  port.load_reference_profile.return_value = _profile(profile_fingerprint="a" * 64)
+
+  result = await ReadD1ReferenceProfile(port).execute(
+    D1ProfileReadRequest(
+      instrument_code="600000.SH",
+      evaluated_at=datetime(2026, 8, 23, 10, 0),
+      required_fingerprint="b" * 64,
+    )
+  )
+
+  assert result.available is False
+  assert result.reason is D1ProfileReadReason.FINGERPRINT_MISMATCH
 
 
 @pytest.mark.asyncio
@@ -112,7 +130,9 @@ async def test_d1_profile_use_case_fail_closes_invalid_or_noncausal_payload(
     D1ProfileReadRequest(
       instrument_code="600000.SH",
       evaluated_at=datetime(2026, 8, 23, 10, 0),
-      required_version=("profile-1" if reason is D1ProfileReadReason.VERSION_MISMATCH else None),
+      required_version=(
+        "profile-1" if reason is D1ProfileReadReason.VERSION_MISMATCH else None
+      ),
     )
   )
 

@@ -40,6 +40,7 @@ from quantx_infrastructure.repositories.t_trade_candidate_outcome_repository imp
 
 _REPAIR_PAGE_SIZE = 256
 _FINALIZE_PAGE_SIZE = 128
+_CANDIDATE_CAS_MAX_ATTEMPTS = 3
 _MAX_REPAIR_RUN_CURSORS = 4_096
 _MAX_REPAIR_ISSUE_SAMPLES = 16
 _MAX_REPAIR_STATE_SAMPLES = 256
@@ -112,9 +113,7 @@ class TTradeCandidateOutcomeService:
     self.max_observation_gap_ms = int(max_observation_gap_ms)
     normalized_finalize_page_size = int(finalize_page_size)
     if not 1 <= normalized_finalize_page_size <= _FINALIZE_PAGE_SIZE:
-      raise ValueError(
-        f"候选结果终态分页大小必须在 1..{_FINALIZE_PAGE_SIZE} 之间"
-      )
+      raise ValueError(f"候选结果终态分页大小必须在 1..{_FINALIZE_PAGE_SIZE} 之间")
     self.finalize_page_size = normalized_finalize_page_size
 
   async def seed_material_event(
@@ -190,15 +189,30 @@ class TTradeCandidateOutcomeService:
       trading_halted=bool(trading_halted),
     )
     for row in rows:
-      state = self.repository.state_from_row(row)
-      before = state.to_dict()
-      observe_candidate_outcome(state, observation)
-      if state.to_dict() != before:
-        saved = await self.repository.save(
-          state=state,
-          expected_version=int(row.state_version),
-        )
+      current_row = row
+      for attempt in range(_CANDIDATE_CAS_MAX_ATTEMPTS):
+        state = self.repository.state_from_row(current_row)
+        before = state.to_dict()
+        observe_candidate_outcome(state, observation)
+        if state.to_dict() == before:
+          break
+        try:
+          saved = await self.repository.save(
+            state=state,
+            expected_version=int(current_row.state_version),
+          )
+        except CandidateOutcomeConcurrencyError:
+          if attempt + 1 >= _CANDIDATE_CAS_MAX_ATTEMPTS:
+            raise
+          current_row = await self.repository.get(
+            strategy_run_id=strategy_run_id,
+            candidate_id=str(current_row.candidate_id),
+          )
+          if current_row is None:
+            raise RuntimeError("候选结果并发更新后无法重新读取")
+          continue
         state = self.repository.state_from_row(saved)
+        break
       advanced.append(state)
     return advanced
 
@@ -216,36 +230,47 @@ class TTradeCandidateOutcomeService:
     entry_complete: bool = False,
     entry_target_volume: int | None = None,
   ) -> CandidateOutcomeState | None:
-    row = await self.repository.get(
+    current_row = await self.repository.get(
       strategy_run_id=strategy_run_id,
       candidate_id=candidate_id,
     )
-    if row is None:
+    if current_row is None:
       return None
-    state = self.repository.state_from_row(row)
-    before = state.to_dict()
-    apply_candidate_execution_fill(
-      state,
-      CandidateExecutionFill(
-        fill_id=fill_id,
-        role=str(role).upper(),
-        source_time_ms=int(source_time_ms),
-        price=float(price),
-        volume=int(volume),
-        fee=float(fee) if fee is not None else None,
-        entry_complete=bool(entry_complete),
-        entry_target_volume=(
-          int(entry_target_volume) if entry_target_volume is not None else None
-        ),
+    fill = CandidateExecutionFill(
+      fill_id=fill_id,
+      role=str(role).upper(),
+      source_time_ms=int(source_time_ms),
+      price=float(price),
+      volume=int(volume),
+      fee=float(fee) if fee is not None else None,
+      entry_complete=bool(entry_complete),
+      entry_target_volume=(
+        int(entry_target_volume) if entry_target_volume is not None else None
       ),
     )
-    if state.to_dict() == before:
-      return state
-    saved = await self.repository.save(
-      state=state,
-      expected_version=int(row.state_version),
-    )
-    return self.repository.state_from_row(saved)
+    for attempt in range(_CANDIDATE_CAS_MAX_ATTEMPTS):
+      state = self.repository.state_from_row(current_row)
+      before = state.to_dict()
+      apply_candidate_execution_fill(state, fill)
+      if state.to_dict() == before:
+        return state
+      try:
+        saved = await self.repository.save(
+          state=state,
+          expected_version=int(current_row.state_version),
+        )
+      except CandidateOutcomeConcurrencyError:
+        if attempt + 1 >= _CANDIDATE_CAS_MAX_ATTEMPTS:
+          raise
+        current_row = await self.repository.get(
+          strategy_run_id=strategy_run_id,
+          candidate_id=candidate_id,
+        )
+        if current_row is None:
+          raise RuntimeError("候选结果并发更新后无法重新读取")
+        continue
+      return self.repository.state_from_row(saved)
+    raise RuntimeError("候选成交事实超过并发重放上限")
 
   async def record_trade_fact(
     self,
@@ -283,7 +308,10 @@ class TTradeCandidateOutcomeService:
       != _optional_text(getattr(row, "account_id", None))
       or metadata_instrument is None
       or metadata_instrument.upper() != definition.instrument_code.upper()
-      or (trade_instrument is not None and trade_instrument.upper() != metadata_instrument.upper())
+      or (
+        trade_instrument is not None
+        and trade_instrument.upper() != metadata_instrument.upper()
+      )
       or _optional_text(metadata.get("candidate_fingerprint"))
       != definition.candidate_fingerprint
       or _optional_text(metadata.get("policy_version")) != definition.policy_version
@@ -397,9 +425,7 @@ class TTradeCandidateOutcomePersistenceFacade:
     self.repair_page_size = normalized_page_size
     normalized_finalize_page_size = int(finalize_page_size)
     if not 1 <= normalized_finalize_page_size <= _FINALIZE_PAGE_SIZE:
-      raise ValueError(
-        f"候选结果终态分页大小必须在 1..{_FINALIZE_PAGE_SIZE} 之间"
-      )
+      raise ValueError(f"候选结果终态分页大小必须在 1..{_FINALIZE_PAGE_SIZE} 之间")
     self.finalize_page_size = normalized_finalize_page_size
     self._repair_cursors: OrderedDict[str, tuple[datetime, str]] = OrderedDict()
 

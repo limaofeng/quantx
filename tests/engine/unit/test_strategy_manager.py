@@ -58,7 +58,7 @@ class MockStrategy(StrategyBase):
         "period": {"type": "integer", "default": 20},
         "threshold": {"type": "number", "default": 0.02},
       },
-      "required": []
+      "required": [],
     }
 
   async def on_init(self):
@@ -73,8 +73,7 @@ class MockStrategy(StrategyBase):
 
 def _t_trade_replay_runtime(instruments: list[str]) -> StrategyRuntime:
   metadata = {
-    code: {"instrument_name": code, "position_shares": 100}
-    for code in instruments
+    code: {"instrument_name": code, "position_shares": 100} for code in instruments
   }
   context = StrategyContext(
     run_id="replay-run",
@@ -143,7 +142,9 @@ class TestStrategyManager:
       patch.object(manager, "_update_runtime_metrics", new_callable=AsyncMock),
       patch.object(manager, "_ensure_backtest_data_available", new_callable=AsyncMock),
       patch.object(manager.executor, "_setup_broker_and_data", new_callable=AsyncMock),
-      patch.object(manager.executor, "_run_strategy_loop", side_effect=keep_running_loop),
+      patch.object(
+        manager.executor, "_run_strategy_loop", side_effect=keep_running_loop
+      ),
       patch.object(
         RuntimeStateManager,
         "restore",
@@ -186,7 +187,7 @@ class TestStrategyManager:
   async def test_run_strategy_with_auto_start(self, strategy_manager: StrategyManager):
     """测试 run_strategy 自动启动模式"""
     # Mock 数据库操作
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -215,9 +216,11 @@ class TestStrategyManager:
       assert runtime.parameters == {"period": 20, "threshold": 0.02}
 
   @pytest.mark.asyncio
-  async def test_run_strategy_without_auto_start(self, strategy_manager: StrategyManager):
+  async def test_run_strategy_without_auto_start(
+    self, strategy_manager: StrategyManager
+  ):
     """测试 run_strategy 不自动启动模式"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -239,7 +242,7 @@ class TestStrategyManager:
   @pytest.mark.asyncio
   async def test_start_strategy(self, strategy_manager):
     """测试 start_strategy 启动策略"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -268,7 +271,7 @@ class TestStrategyManager:
   @pytest.mark.asyncio
   async def test_stop_strategy(self, strategy_manager):
     """测试 stop_strategy 停止策略"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -570,7 +573,7 @@ class TestStrategyManager:
   @pytest.mark.asyncio
   async def test_pause_and_resume_strategy(self, strategy_manager):
     """测试 pause_strategy 和 resume_strategy"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -604,7 +607,7 @@ class TestStrategyManager:
   @pytest.mark.asyncio
   async def test_get_all_runs(self, strategy_manager):
     """测试 get_all_runs 获取所有运行"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -636,7 +639,7 @@ class TestStrategyManager:
   @pytest.mark.asyncio
   async def test_get_runs_by_status(self, strategy_manager):
     """测试 get_runs_by_status 按状态获取运行"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -658,7 +661,7 @@ class TestStrategyManager:
   @pytest.mark.asyncio
   async def test_run_strategy_backtest_mode(self, strategy_manager):
     """测试回测模式的策略运行"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -682,7 +685,7 @@ class TestStrategyManager:
   @pytest.mark.asyncio
   async def test_run_strategy_paper_mode(self, strategy_manager):
     """测试模拟盘模式的策略运行"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -765,7 +768,7 @@ class TestStrategyManager:
   @pytest.mark.asyncio
   async def test_run_strategy_live_mode(self, strategy_manager):
     """测试实盘模式的策略运行"""
-    with patch('quantx_engine.strategy_manager.get_async_db') as mock_db:
+    with patch("quantx_engine.strategy_manager.get_async_db") as mock_db:
       mock_session = AsyncMock()
       mock_db.return_value.__aiter__.return_value = [mock_session]
 
@@ -990,7 +993,12 @@ class TestStrategyManager:
 
     tick_repo = SimpleNamespace(
       find_all=lambda **kwargs: [
-        SimpleNamespace(time=value)
+        SimpleNamespace(
+          time=value,
+          amount=1_000_000.0,
+          volume=1_000.0,
+          pvolume=100_000.0,
+        )
         for value in complete_tick_times(kwargs["start_time"].date())
       ]
     )
@@ -1108,12 +1116,17 @@ class TestStrategyManager:
     manager = StrategyManager()
     trading_date = date(2026, 8, 3)
     partial_times = [
-      datetime(2026, 8, 3, 10, 0) + timedelta(minutes=index)
-      for index in range(10)
+      datetime(2026, 8, 3, 10, 0) + timedelta(minutes=index) for index in range(10)
     ]
     tick_repo = SimpleNamespace(
       find_all=lambda **_kwargs: [
-        SimpleNamespace(time=value) for value in partial_times
+        SimpleNamespace(
+          time=value,
+          amount=1_000_000.0,
+          volume=1_000.0,
+          pvolume=100_000.0,
+        )
+        for value in partial_times
       ]
     )
     calendar = SimpleNamespace(
@@ -1152,16 +1165,20 @@ class TestStrategyManager:
     manager = StrategyManager()
     trading_date = date(2026, 8, 3)
     morning = [
-      datetime(2026, 8, 3, 9, 30) + timedelta(minutes=index)
-      for index in range(121)
+      datetime(2026, 8, 3, 9, 30) + timedelta(minutes=index) for index in range(121)
     ]
     afternoon = [
-      datetime(2026, 8, 3, 13, 0) + timedelta(minutes=index)
-      for index in range(121)
+      datetime(2026, 8, 3, 13, 0) + timedelta(minutes=index) for index in range(121)
     ]
     tick_repo = SimpleNamespace(
       find_all=lambda **_kwargs: [
-        SimpleNamespace(time=value) for value in morning + afternoon
+        SimpleNamespace(
+          time=value,
+          amount=1_000_000.0,
+          volume=1_000.0,
+          pvolume=100_000.0,
+        )
+        for value in morning + afternoon
       ]
     )
     calendar = SimpleNamespace(
@@ -1192,25 +1209,166 @@ class TestStrategyManager:
     StrategyManager._instance = None
     manager = StrategyManager()
     runtime = _t_trade_replay_runtime(["600887.SH"])
+    find_missing = AsyncMock(return_value={})
     monkeypatch.setattr(
       manager,
       "_find_missing_backtest_data",
-      AsyncMock(return_value={}),
+      find_missing,
     )
     queued = AsyncMock()
     waited = AsyncMock()
     monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
-    monkeypatch.setattr("quantx_engine.strategy_manager.request_market_data_sync", waited)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.request_market_data_sync", waited
+    )
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.HistoricalMarketDataService",
       lambda: SimpleNamespace(),
+    )
+    prepare_profiles = AsyncMock()
+    monkeypatch.setattr(
+      manager,
+      "_prepare_t_trade_replay_profiles",
+      prepare_profiles,
     )
 
     await manager._ensure_backtest_data_available(runtime)
 
     queued.assert_not_awaited()
     waited.assert_not_awaited()
+    prepare_profiles.assert_awaited_once()
+    assert find_missing.await_args.kwargs["start_time"] == datetime(2026, 8, 3, 9, 30)
+    assert find_missing.await_args.kwargs["end_time"] == datetime(2026, 8, 4, 15, 30)
     assert runtime.context.instruments == ["600887.SH"]
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_t_trade_replay_materializes_and_freezes_each_daily_d1_profile(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    runtime = _t_trade_replay_runtime(["600887.SH"])
+    previous_days = [date(2026, 7, 31), date(2026, 8, 3)]
+    calendar = SimpleNamespace(
+      get_trading_calendar=AsyncMock(return_value=[date(2026, 8, 3), date(2026, 8, 4)]),
+      trading_time_service=SimpleNamespace(
+        get_previous_trading_day=AsyncMock(side_effect=previous_days)
+      ),
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.TradingDateHelper",
+      lambda: calendar,
+    )
+    pages = object()
+    service = SimpleNamespace(iter_tick_pages=lambda **_kwargs: pages)
+    profile_builder = SimpleNamespace(
+      build_and_save_profiles_from_pages=AsyncMock(
+        return_value={
+          "2026-07-31T15:00:00": SimpleNamespace(
+            as_of=datetime(2026, 7, 31, 15, 0),
+            version="profile-v1",
+            fingerprint="a" * 64,
+          ),
+          "2026-08-03T15:00:00": SimpleNamespace(
+            as_of=datetime(2026, 8, 3, 15, 0),
+            version="profile-v1",
+            fingerprint="b" * 64,
+          ),
+        }
+      )
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.TTradeInstrumentProfileService",
+      lambda: profile_builder,
+    )
+
+    class FakeSession:
+      async def __aenter__(self):
+        return object()
+
+      async def __aexit__(self, *_args):
+        return None
+
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.AsyncSessionLocal",
+      FakeSession,
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.TTradeInstrumentProfileRepository",
+      lambda _db: object(),
+    )
+    run_repository = SimpleNamespace(update_run=AsyncMock())
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.StrategyRunRepository",
+      lambda _db: run_repository,
+    )
+    phase = AsyncMock()
+    monkeypatch.setattr(manager, "_set_t_trade_replay_phase", phase)
+
+    await manager._prepare_t_trade_replay_profiles(
+      runtime,
+      service=service,
+      replay_start_time=datetime(2026, 8, 3, 9, 30),
+      replay_end_time=datetime(2026, 8, 4, 15, 0),
+    )
+
+    manifest = runtime.context.parameters["t_trade_replay_profile_manifest"]
+    assert manifest["schema_version"] == 1
+    assert manifest["entries"] == {
+      "600887.SH|2026-08-03": {
+        "instrument_code": "600887.SH",
+        "trade_date": "2026-08-03",
+        "profile_as_of": "2026-07-31T15:00:00",
+        "profile_version": "profile-v1",
+        "profile_fingerprint": "a" * 64,
+      },
+      "600887.SH|2026-08-04": {
+        "instrument_code": "600887.SH",
+        "trade_date": "2026-08-04",
+        "profile_as_of": "2026-08-03T15:00:00",
+        "profile_version": "profile-v1",
+        "profile_fingerprint": "b" * 64,
+      },
+    }
+    assert profile_builder.build_and_save_profiles_from_pages.await_count == 1
+    run_repository.update_run.assert_awaited_once()
+    assert (
+      phase.await_args_list[-1].kwargs["data_preparation"]["profile_completed"] == 2
+    )
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_t_trade_profile_tick_query_is_split_into_bounded_windows(self):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    calls = []
+
+    class Service:
+      async def iter_tick_pages(self, **kwargs):
+        calls.append(kwargs)
+        yield [kwargs["start_time"]]
+
+    pages = [
+      page
+      async for page in manager._iter_t_trade_profile_tick_pages(
+        service=Service(),
+        stock_code="600887.SH",
+        start_time=datetime(2026, 6, 2, 9, 30),
+        end_time=datetime(2026, 6, 4, 15, 0),
+        page_size=10_000,
+        max_pages=1_024,
+        max_source_ticks=2_000_000,
+      )
+    ]
+
+    assert len(pages) == 3
+    assert [(call["start_time"], call["end_time"]) for call in calls] == [
+      (datetime(2026, 6, 2, 9, 30), datetime(2026, 6, 2, 23, 59, 59, 999999)),
+      (datetime(2026, 6, 3), datetime(2026, 6, 3, 23, 59, 59, 999999)),
+      (datetime(2026, 6, 4), datetime(2026, 6, 4, 15, 0)),
+    ]
     StrategyManager._instance = None
 
   @pytest.mark.asyncio
@@ -1241,12 +1399,19 @@ class TestStrategyManager:
       "quantx_engine.strategy_manager.HistoricalMarketDataService",
       lambda: SimpleNamespace(),
     )
+    monkeypatch.setattr(
+      manager,
+      "_prepare_t_trade_replay_profiles",
+      AsyncMock(),
+    )
     repo = SimpleNamespace(update_run=AsyncMock())
 
     async def fake_get_async_db():
       yield object()
 
-    monkeypatch.setattr("quantx_engine.strategy_manager.get_async_db", fake_get_async_db)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.get_async_db", fake_get_async_db
+    )
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.StrategyRunRepository",
       lambda _db: repo,
@@ -1262,6 +1427,9 @@ class TestStrategyManager:
     queued.assert_not_awaited()
     find_missing = manager._find_missing_backtest_data
     assert find_missing.await_args_list[1].kwargs["strict_tick_quality"] is True
+    assert {call.kwargs["start_time"] for call in find_missing.await_args_list} == {
+      datetime(2026, 8, 3, 9, 30)
+    }
     assert runtime.context.instruments == ["600887.SH", "688552.SH"]
     preparation = runtime.context.parameters["replay_data_preparation"]
     assert preparation["schema_version"] == 3
@@ -1322,12 +1490,19 @@ class TestStrategyManager:
       "quantx_engine.strategy_manager.HistoricalMarketDataService",
       lambda: SimpleNamespace(),
     )
+    monkeypatch.setattr(
+      manager,
+      "_prepare_t_trade_replay_profiles",
+      AsyncMock(),
+    )
     repo = SimpleNamespace(update_run=AsyncMock())
 
     async def fake_get_async_db():
       yield object()
 
-    monkeypatch.setattr("quantx_engine.strategy_manager.get_async_db", fake_get_async_db)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.get_async_db", fake_get_async_db
+    )
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.StrategyRunRepository",
       lambda _db: repo,
@@ -1353,9 +1528,9 @@ class TestStrategyManager:
     assert preparation["synchronization"]["mode"] == "BLOCKING_REQUIRED"
     assert preparation["synchronization"]["status"] == "COMPLETED"
     assert preparation["quality_policy"] == "STRICT_DAILY_SESSION_COVERAGE"
-    assert preparation["quality_issues_after"]["688552.SH"][0][
-      "reason_codes"
-    ] == ["SESSION_CLOSE_NOT_COVERED"]
+    assert preparation["quality_issues_after"]["688552.SH"][0]["reason_codes"] == [
+      "SESSION_CLOSE_NOT_COVERED"
+    ]
     assert runtime.context.parameters["replay_skipped_instruments"] == []
     repo.update_run.assert_awaited_once()
     StrategyManager._instance = None
@@ -1389,12 +1564,19 @@ class TestStrategyManager:
       "quantx_engine.strategy_manager.HistoricalMarketDataService",
       lambda: SimpleNamespace(),
     )
+    monkeypatch.setattr(
+      manager,
+      "_prepare_t_trade_replay_profiles",
+      AsyncMock(),
+    )
     repo = SimpleNamespace(update_run=AsyncMock())
 
     async def fake_get_async_db():
       yield object()
 
-    monkeypatch.setattr("quantx_engine.strategy_manager.get_async_db", fake_get_async_db)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.get_async_db", fake_get_async_db
+    )
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.StrategyRunRepository",
       lambda _db: repo,
@@ -1443,8 +1625,7 @@ class TestStrategyManager:
     assert update_projection.await_count == 5
     assert get_projection.await_count == 4
     assert [
-      call.kwargs["phase"]
-      for call in update_projection.await_args_list[:-1]
+      call.kwargs["phase"] for call in update_projection.await_args_list[:-1]
     ] == ["CHECKING_DATA", "DOWNLOADING_DATA", "VERIFYING_DATA", "FAILED"]
     final_projection = update_projection.await_args_list[-1].kwargs
     assert final_projection["status"] == "ERROR"

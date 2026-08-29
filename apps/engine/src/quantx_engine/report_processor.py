@@ -286,6 +286,12 @@ async def _invalidate_t_trade_entry_authority_for_account(
   failures: list[str] = []
   for raw_run_id, runtime in runtime_items:
     context = getattr(runtime, "context", None)
+    runtime_mode = getattr(getattr(context, "mode", None), "value", None)
+    if str(runtime_mode or getattr(context, "mode", "") or "").upper() == ("BACKTEST"):
+      # Broker snapshots are live account facts. A historical replay owns an
+      # isolated BacktestBroker and must remain deterministic while a QMT
+      # snapshot for the same account converges in this Engine process.
+      continue
     parameters = dict(getattr(context, "parameters", {}) or {})
     runtime_account = str(parameters.get("account_id") or "").strip()
     if runtime_account != normalized_account:

@@ -49,12 +49,51 @@ def _identity_value_is_missing(value: object) -> bool:
 def _strict_source_identity(tick: Tick) -> tuple[int, int]:
   source_value = getattr(tick, "source_time_ms", None)
   ordinal_value = getattr(tick, "tick_ordinal", None)
-  if (
-    _identity_value_is_missing(source_value)
-    or _identity_value_is_missing(ordinal_value)
-  ):
+  source_missing = _identity_value_is_missing(source_value) or (
+    not isinstance(source_value, bool) and source_value == 0
+  )
+  ordinal_missing = _identity_value_is_missing(ordinal_value)
+  if source_missing:
+    # Legacy Influx points predate the explicit source-identity fields, but
+    # their primary timestamp is still a lossless keyset cursor.  Accept only
+    # the unambiguous legacy shape (missing source and absent/zero ordinal),
+    # derive the pair from storage time, and write it onto the in-memory Tick so
+    # downstream strict validators observe the same authoritative identity.
+    if not ordinal_missing and ordinal_value != 0:
+      raise HistoricalTickPaginationError(
+        "historical Tick source identity is partially missing"
+      )
+    raw_time = getattr(tick, "time", None)
+    if hasattr(raw_time, "to_pydatetime"):
+      raw_time = raw_time.to_pydatetime()
+    if not isinstance(raw_time, datetime):
+      raise HistoricalTickPaginationError(
+        "historical Tick storage time is missing or not a datetime"
+      )
+    try:
+      from quantx_infrastructure.core.data.tick_identity import (
+        tick_source_time_ms,
+        tick_storage_time,
+      )
+
+      source_time_ms = tick_source_time_ms(tick)
+      actual_time = time_utils.to_utc(raw_time)
+      base_time = time_utils.to_utc(tick_storage_time(source_time_ms, 0))
+      tick_ordinal = int((actual_time - base_time).total_seconds() * 1_000_000)
+    except (TypeError, ValueError, OverflowError, OSError) as exc:
+      raise HistoricalTickPaginationError(
+        "historical legacy Tick storage identity cannot be derived"
+      ) from exc
+    if not 0 <= tick_ordinal < HISTORICAL_TICK_ORDINALS_PER_MILLISECOND:
+      raise HistoricalTickPaginationError(
+        "historical legacy Tick storage identity is out of range"
+      )
+    tick.source_time_ms = source_time_ms
+    tick.tick_ordinal = tick_ordinal
+    return source_time_ms, tick_ordinal
+  if ordinal_missing:
     raise HistoricalTickPaginationError(
-      "historical Tick source identity is missing"
+      "historical Tick source identity is partially missing"
     )
   if isinstance(source_value, bool) or isinstance(ordinal_value, bool):
     raise HistoricalTickPaginationError(
@@ -86,9 +125,7 @@ def _storage_time_utc(source_time_ms: int, tick_ordinal: int) -> datetime:
   try:
     from quantx_infrastructure.core.data.tick_identity import tick_storage_time
 
-    return time_utils.to_utc(
-      tick_storage_time(source_time_ms, tick_ordinal)
-    )
+    return time_utils.to_utc(tick_storage_time(source_time_ms, tick_ordinal))
   except (OverflowError, ValueError) as exc:
     raise HistoricalTickPaginationError(
       "historical Tick source identity cannot produce a storage timestamp"
@@ -247,9 +284,7 @@ class HistoricalMarketDataService:
     dividend_type = "back" if dividend_type == "back_ratio" else dividend_type
 
     times = [
-      self._normalize_time(kline.time)
-      for kline in klines
-      if kline.time is not None
+      self._normalize_time(kline.time) for kline in klines if kline.time is not None
     ]
     if not times:
       return klines
@@ -288,9 +323,7 @@ class HistoricalMarketDataService:
       return klines
 
     factor_df = pd.DataFrame(factor_rows).sort_values("time")
-    factor_df = factor_df[
-      pd.to_datetime(factor_df["time"]) <= pd.Timestamp(end_time)
-    ]
+    factor_df = factor_df[pd.to_datetime(factor_df["time"]) <= pd.Timestamp(end_time)]
     factor_df["dr"] = pd.to_numeric(factor_df["dr"], errors="coerce").fillna(1.0)
     factor_df = factor_df[factor_df["dr"] > 0]
     if factor_df.empty:
@@ -299,9 +332,7 @@ class HistoricalMarketDataService:
     factor_df["cum_factor"] = factor_df["dr"].cumprod()
     total_factor = float(factor_df["cum_factor"].iloc[-1])
 
-    kline_df = pd.DataFrame(
-      {"time": [self._normalize_time(k.time) for k in klines]}
-    )
+    kline_df = pd.DataFrame({"time": [self._normalize_time(k.time) for k in klines]})
     kline_df = kline_df.sort_values("time")
 
     aligned = pd.merge_asof(
@@ -384,9 +415,7 @@ class HistoricalMarketDataService:
       return None
 
     factor_df = pd.DataFrame(factor_rows).sort_values("time")
-    factor_df = factor_df[
-      pd.to_datetime(factor_df["time"]) <= pd.Timestamp(end_time)
-    ]
+    factor_df = factor_df[pd.to_datetime(factor_df["time"]) <= pd.Timestamp(end_time)]
     factor_df["dr"] = pd.to_numeric(factor_df["dr"], errors="coerce").fillna(1.0)
     factor_df = factor_df[factor_df["dr"] > 0]
     if factor_df.empty:

@@ -80,14 +80,14 @@ class _Repository:
   ):
     rows = sorted(
       [
-      row
-      for row in self.rows.values()
-      if row.strategy_run_id == strategy_run_id
-      and (after_candidate_id is None or row.candidate_id > after_candidate_id)
-      and (
-        row.status == "OBSERVING"
-        or row.post_fill_status in {"WAITING_ENTRY", "OBSERVING"}
-      )
+        row
+        for row in self.rows.values()
+        if row.strategy_run_id == strategy_run_id
+        and (after_candidate_id is None or row.candidate_id > after_candidate_id)
+        and (
+          row.status == "OBSERVING"
+          or row.post_fill_status in {"WAITING_ENTRY", "OBSERVING"}
+        )
       ],
       key=lambda row: row.candidate_id,
     )[:limit]
@@ -108,6 +108,20 @@ class _Repository:
   @staticmethod
   def state_from_row(row) -> CandidateOutcomeState:
     return CandidateOutcomeState.from_dict(deepcopy(row.state))
+
+
+class _ConflictOnceRepository(_Repository):
+  def __init__(self) -> None:
+    super().__init__()
+    self.conflicts_remaining = 1
+
+  async def save(self, *, state: CandidateOutcomeState, expected_version: int):
+    if self.conflicts_remaining:
+      self.conflicts_remaining -= 1
+      key = (state.definition.strategy_run_id, state.definition.candidate_id)
+      self.rows[key].state_version += 1
+      raise CandidateOutcomeConcurrencyError("concurrent fact won")
+    return await super().save(state=state, expected_version=expected_version)
 
 
 def _event() -> dict:
@@ -220,6 +234,27 @@ async def test_seed_is_restart_safe_and_observation_resumes_from_repository() ->
 
 
 @pytest.mark.asyncio
+async def test_observation_rereads_and_replays_after_cas_conflict() -> None:
+  repository = _ConflictOnceRepository()
+  service = TTradeCandidateOutcomeService(repository, horizons_seconds=(1,))
+  await service.seed_material_event(
+    account_id="account-1", strategy_run_id="run-1", event=_event()
+  )
+
+  states = await service.observe_tick(
+    strategy_run_id="run-1",
+    instrument_code="600000.SH",
+    source_time_ms=1_001_000,
+    tick_ordinal=11,
+    continuity_generation="3",
+    price=10.1,
+  )
+
+  assert repository.conflicts_remaining == 0
+  assert states[0].horizons[0].observed_price == pytest.approx(10.1)
+
+
+@pytest.mark.asyncio
 async def test_fill_uses_authoritative_fee_and_is_idempotent() -> None:
   repository = _Repository()
   service = TTradeCandidateOutcomeService(repository, horizons_seconds=(1,))
@@ -241,6 +276,31 @@ async def test_fill_uses_authoritative_fee_and_is_idempotent() -> None:
   state = _Repository.state_from_row(next(iter(repository.rows.values())))
   assert state.execution.entry_volume == 100
   assert state.execution.entry_fee is None
+
+
+@pytest.mark.asyncio
+async def test_fill_rereads_and_replays_after_cas_conflict() -> None:
+  repository = _ConflictOnceRepository()
+  service = TTradeCandidateOutcomeService(repository, horizons_seconds=(1,))
+  await service.seed_material_event(
+    account_id="account-1", strategy_run_id="run-1", event=_event()
+  )
+
+  state = await service.record_fill(
+    strategy_run_id="run-1",
+    candidate_id="candidate-1",
+    fill_id="trade-1",
+    role="ENTRY",
+    source_time_ms=1_000_500,
+    price=10.0,
+    volume=100,
+    fee=3.5,
+  )
+
+  assert repository.conflicts_remaining == 0
+  assert state is not None
+  assert state.execution.entry_volume == 100
+  assert state.execution.entry_fee == pytest.approx(3.5)
 
 
 @pytest.mark.asyncio
@@ -412,9 +472,7 @@ async def test_finalize_run_pages_large_waiting_entry_population_with_bounded_re
   assert repository.unfinalized_page_limits == [17] * 32
   assert max(repository.unfinalized_page_sizes) == 17
   assert repository.unfinalized_page_sizes[-1] == 0
-  assert all(
-    row.post_fill_status == "UNAVAILABLE" for row in repository.rows.values()
-  )
+  assert all(row.post_fill_status == "UNAVAILABLE" for row in repository.rows.values())
 
 
 @pytest.mark.asyncio
@@ -456,9 +514,7 @@ async def test_finalize_run_surfaces_cas_conflict_when_row_remains_open() -> Non
   )
 
   with pytest.raises(CandidateOutcomeConcurrencyError, match="open row"):
-    await service.finalize_run(
-      strategy_run_id="run-1", finalized_at_ms=1_030_000
-    )
+    await service.finalize_run(strategy_run_id="run-1", finalized_at_ms=1_030_000)
 
   row = next(iter(repository.rows.values()))
   assert row.status == "OBSERVING"
@@ -754,15 +810,9 @@ async def test_poison_event_is_quarantined_and_later_valid_event_is_repaired() -
     await db.commit()
 
   facade = TTradeCandidateOutcomePersistenceFacade(sessions, repair_page_size=1)
-  poison_page = await facade.reconcile_applied_trade_events(
-    strategy_run_id="run-1"
-  )
-  valid_page = await facade.reconcile_applied_trade_events(
-    strategy_run_id="run-1"
-  )
-  exhausted = await facade.reconcile_applied_trade_events(
-    strategy_run_id="run-1"
-  )
+  poison_page = await facade.reconcile_applied_trade_events(strategy_run_id="run-1")
+  valid_page = await facade.reconcile_applied_trade_events(strategy_run_id="run-1")
+  exhausted = await facade.reconcile_applied_trade_events(strategy_run_id="run-1")
 
   assert poison_page.has_more is True
   assert poison_page.quarantined_count == 1
@@ -815,9 +865,7 @@ async def test_cursor_waits_for_older_pending_event_before_later_applied_fact() 
     await db.commit()
 
   facade = TTradeCandidateOutcomePersistenceFacade(sessions)
-  blocked = await facade.reconcile_applied_trade_events(
-    strategy_run_id="run-1"
-  )
+  blocked = await facade.reconcile_applied_trade_events(strategy_run_id="run-1")
   assert blocked.deferred_count == 1
   assert blocked.has_more is True
   assert blocked.repaired_count == 0
@@ -829,9 +877,7 @@ async def test_cursor_waits_for_older_pending_event_before_later_applied_fact() 
     stored.applied_at = datetime(2026, 8, 23, 1, 32, tzinfo=timezone.utc)
     await db.commit()
 
-  resumed = await facade.reconcile_applied_trade_events(
-    strategy_run_id="run-1"
-  )
+  resumed = await facade.reconcile_applied_trade_events(strategy_run_id="run-1")
   assert resumed.complete is True
   assert resumed.repaired_count == 1
   assert resumed.skipped_count == 1

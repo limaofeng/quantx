@@ -1,6 +1,6 @@
 ---
 name: strategy-backtest-rerun
-description: Rerun and verify QuantX strategy backtests from an existing StrategyRun. Use for retrying rerunBacktestVersion, executing apps/api/tests/integration/core/strategies/test_backtest_rerun_real.py, changing a backtest window, or summarizing the latest version, trades, and performance snapshot.
+description: Rerun and verify QuantX strategy backtests from an existing StrategyRun. Use for retrying rerunBacktestVersion, executing tests/engine/integration/strategies/test_backtest_rerun_real.py, changing a backtest window, or summarizing the latest version, trades, and performance snapshot.
 ---
 
 # Strategy Backtest Rerun
@@ -20,7 +20,7 @@ Run:
   --end "2026-05-14 23:59:59"
 ```
 
-The script runs the integration test from `apps/api`, then prints the latest
+The script runs the opt-in integration test from the repository root, then prints the latest
 backtest version/status, parent status, trades/intents/orders, performance
 metrics, snapshot path, and temporary sample count.
 

@@ -121,9 +121,7 @@ async def test_v3_recovery_query_filters_protocol_and_is_exactly_run_scoped() ->
   )
   db = SimpleNamespace(execute=AsyncMock(return_value=result))
 
-  rows = await TradeIntentRepository(
-    db
-  ).find_v3_manual_candidate_recovery_intents(
+  rows = await TradeIntentRepository(db).find_v3_manual_candidate_recovery_intents(
     "run-1",
     linked_intent_ids=["linked-1"],
   )
@@ -144,15 +142,31 @@ async def test_v3_recovery_query_filters_protocol_and_is_exactly_run_scoped() ->
 async def test_v3_recovery_query_rejects_more_than_its_bounded_row_limit() -> None:
   first = _existing_v3_intent(id="intent-1")
   second = _existing_v3_intent(id="intent-2")
-  result = SimpleNamespace(
-    scalars=lambda: SimpleNamespace(all=lambda: [first, second])
-  )
+  result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [first, second]))
   db = SimpleNamespace(execute=AsyncMock(return_value=result))
 
   with pytest.raises(RuntimeError, match="有界上限"):
-    await TradeIntentRepository(
-      db
-    ).find_v3_manual_candidate_recovery_intents(
+    await TradeIntentRepository(db).find_v3_manual_candidate_recovery_intents(
       "run-1",
       max_rows=1,
     )
+
+
+@pytest.mark.asyncio
+async def test_delete_for_strategy_run_joins_caller_transaction() -> None:
+  result = SimpleNamespace(rowcount=3)
+  db = SimpleNamespace(
+    execute=AsyncMock(return_value=result),
+    commit=AsyncMock(),
+  )
+
+  deleted = await TradeIntentRepository(db).delete_for_strategy_run(
+    "run-1",
+    commit=False,
+  )
+
+  assert deleted == 3
+  db.commit.assert_not_awaited()
+  statement = db.execute.await_args.args[0]
+  assert "strategy_trade_intents.strategy_run_id" in str(statement)
+  assert "run-1" in statement.compile().params.values()

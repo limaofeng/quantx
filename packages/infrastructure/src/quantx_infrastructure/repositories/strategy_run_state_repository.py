@@ -15,367 +15,375 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.database.relational_base import BaseRepository
 from quantx_infrastructure.models.strategy_run_state import (
-    StrategyRunPosition,
-    StrategyRunState,
+  StrategyRunPosition,
+  StrategyRunState,
 )
 
 
 class StrategyRunStateRepository(BaseRepository[StrategyRunState]):
-    """策略运行时状态仓储（资金 + 自定义状态）"""
+  """策略运行时状态仓储（资金 + 自定义状态）"""
 
-    model_class = StrategyRunState
+  model_class = StrategyRunState
 
-    def __init__(self, db_session: AsyncSession):
-        super().__init__(db_session)
+  def __init__(self, db_session: AsyncSession):
+    super().__init__(db_session)
 
-    async def get_state(self, run_id: str) -> Optional[StrategyRunState]:
-        """获取运行状态"""
-        stmt = select(StrategyRunState).filter(StrategyRunState.run_id == run_id)
-        result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
+  async def get_state(self, run_id: str) -> Optional[StrategyRunState]:
+    """获取运行状态"""
+    stmt = select(StrategyRunState).filter(StrategyRunState.run_id == run_id)
+    result = await self.db.execute(stmt)
+    return result.scalar_one_or_none()
 
-    async def upsert_state(
-        self,
-        run_id: str,
-        cash: float = 0.0,
-        frozen_cash: float = 0.0,
-        total_asset: float = 0.0,
-        custom_state: Dict[str, Any] = None,
-        expected_version: Optional[int] = None,
-        commit: bool = True,
-        flush: bool = True,
-    ) -> bool:
-        """
-        更新或插入状态（支持乐观锁）
+  async def delete_state(
+    self,
+    run_id: str,
+    *,
+    commit: bool = True,
+  ) -> None:
+    """Delete one run's durable hot state.
 
-        Returns:
-            是否成功
-        """
-        custom_state = custom_state or {}
-        conditions = [StrategyRunState.run_id == run_id]
-        if expected_version is not None:
-            conditions.append(StrategyRunState.version == expected_version)
-        stmt = (
-            update(StrategyRunState)
-            .where(*conditions)
-            .values(
-                cash=cash,
-                frozen_cash=frozen_cash,
-                total_asset=total_asset,
-                custom_state=custom_state,
-                version=StrategyRunState.version + 1,
+    A backtest rerun is a new execution generation even though it keeps the
+    same ``StrategyRun`` identity.  Its coordinator state must therefore
+    start empty instead of restoring a previous version's checkpoints.
+    """
+
+    await self.db.execute(
+      delete(StrategyRunState).where(StrategyRunState.run_id == run_id)
+    )
+    if commit:
+      await self.db.commit()
+    else:
+      await self.db.flush()
+
+  async def upsert_state(
+    self,
+    run_id: str,
+    cash: float = 0.0,
+    frozen_cash: float = 0.0,
+    total_asset: float = 0.0,
+    custom_state: Dict[str, Any] = None,
+    expected_version: Optional[int] = None,
+    commit: bool = True,
+    flush: bool = True,
+  ) -> bool:
+    """
+    更新或插入状态（支持乐观锁）
+
+    Returns:
+        是否成功
+    """
+    custom_state = custom_state or {}
+    conditions = [StrategyRunState.run_id == run_id]
+    if expected_version is not None:
+      conditions.append(StrategyRunState.version == expected_version)
+    stmt = (
+      update(StrategyRunState)
+      .where(*conditions)
+      .values(
+        cash=cash,
+        frozen_cash=frozen_cash,
+        total_asset=total_asset,
+        custom_state=custom_state,
+        version=StrategyRunState.version + 1,
+      )
+    )
+    result = await self.db.execute(stmt)
+    if result.rowcount != 1:
+      # A missing row is insertable only for a new snapshot. The nested
+      # transaction makes a concurrent unique-key winner a clean CAS miss
+      # instead of poisoning the caller's larger snapshot transaction.
+      if expected_version not in {None, 0}:
+        return False
+      try:
+        async with self.db.begin_nested():
+          await self.db.execute(
+            insert(StrategyRunState).values(
+              run_id=run_id,
+              cash=cash,
+              frozen_cash=frozen_cash,
+              total_asset=total_asset,
+              custom_state=custom_state,
+              version=1,
             )
-        )
-        result = await self.db.execute(stmt)
-        if result.rowcount != 1:
-            # A missing row is insertable only for a new snapshot. The nested
-            # transaction makes a concurrent unique-key winner a clean CAS miss
-            # instead of poisoning the caller's larger snapshot transaction.
-            if expected_version not in {None, 0}:
-                return False
-            try:
-                async with self.db.begin_nested():
-                    await self.db.execute(
-                        insert(StrategyRunState).values(
-                            run_id=run_id,
-                            cash=cash,
-                            frozen_cash=frozen_cash,
-                            total_asset=total_asset,
-                            custom_state=custom_state,
-                            version=1,
-                        )
-                    )
-                    await self.db.flush()
-            except IntegrityError:
-                return False
+          )
+          await self.db.flush()
+      except IntegrityError:
+        return False
 
-        if commit:
-            await self.db.commit()
-        elif flush:
-            await self.db.flush()
-        return True
+    if commit:
+      await self.db.commit()
+    elif flush:
+      await self.db.flush()
+    return True
 
 
 class StrategyRunPositionRepository(BaseRepository[StrategyRunPosition]):
-    """策略运行时持仓仓储（独立表）"""
+  """策略运行时持仓仓储（独立表）"""
 
-    model_class = StrategyRunPosition
+  model_class = StrategyRunPosition
 
-    def __init__(self, db_session: AsyncSession):
-        super().__init__(db_session)
+  def __init__(self, db_session: AsyncSession):
+    super().__init__(db_session)
 
-    async def get_all_positions(self, run_id: str) -> List[StrategyRunPosition]:
-        """获取某次运行的所有持仓"""
-        stmt = select(StrategyRunPosition).filter(StrategyRunPosition.run_id == run_id)
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
+  async def get_all_positions(self, run_id: str) -> List[StrategyRunPosition]:
+    """获取某次运行的所有持仓"""
+    stmt = select(StrategyRunPosition).filter(StrategyRunPosition.run_id == run_id)
+    result = await self.db.execute(stmt)
+    return list(result.scalars().all())
 
-    async def get_position(self, run_id: str, instrument_code: str) -> Optional[StrategyRunPosition]:
-        """获取特定标的持仓"""
-        stmt = select(StrategyRunPosition).filter(
-            StrategyRunPosition.run_id == run_id,
-            StrategyRunPosition.instrument_code == instrument_code,
-        )
-        result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
+  async def get_position(
+    self, run_id: str, instrument_code: str
+  ) -> Optional[StrategyRunPosition]:
+    """获取特定标的持仓"""
+    stmt = select(StrategyRunPosition).filter(
+      StrategyRunPosition.run_id == run_id,
+      StrategyRunPosition.instrument_code == instrument_code,
+    )
+    result = await self.db.execute(stmt)
+    return result.scalar_one_or_none()
 
-    async def delete_missing_positions(
-        self,
-        run_id: str,
-        instrument_codes: List[str],
-        *,
-        commit: bool = True,
-    ) -> None:
-        """Delete persisted positions absent from the authoritative snapshot."""
-        stmt = delete(StrategyRunPosition).where(
-            StrategyRunPosition.run_id == run_id
-        )
-        if instrument_codes:
-            stmt = stmt.where(
-                StrategyRunPosition.instrument_code.not_in(instrument_codes)
-            )
-        await self.db.execute(stmt)
-        if commit:
-            await self.db.commit()
-        else:
-            await self.db.flush()
+  async def delete_missing_positions(
+    self,
+    run_id: str,
+    instrument_codes: List[str],
+    *,
+    commit: bool = True,
+  ) -> None:
+    """Delete persisted positions absent from the authoritative snapshot."""
+    stmt = delete(StrategyRunPosition).where(StrategyRunPosition.run_id == run_id)
+    if instrument_codes:
+      stmt = stmt.where(StrategyRunPosition.instrument_code.not_in(instrument_codes))
+    await self.db.execute(stmt)
+    if commit:
+      await self.db.commit()
+    else:
+      await self.db.flush()
 
-    @staticmethod
-    def _normalize_snapshot_positions(
-        run_id: str,
-        positions: Dict[str, Dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Normalize one complete runtime position snapshot exactly once."""
-        normalized: list[dict[str, Any]] = []
-        seen_codes: set[str] = set()
-        for raw_code, raw_position in sorted(dict(positions or {}).items()):
-            code = str(raw_code or "").strip().upper()
-            if not code:
-                raise ValueError("runtime position snapshot contains empty code")
-            if code in seen_codes:
-                raise ValueError(
-                    "runtime position snapshot contains duplicate instrument code"
-                )
-            seen_codes.add(code)
-            position = dict(raw_position or {})
-            normalized.append(
-                {
-                    "snapshot_run_id": run_id,
-                    "snapshot_instrument_code": code,
-                    "long_volume": int(position.get("long_volume", 0) or 0),
-                    "short_volume": int(position.get("short_volume", 0) or 0),
-                    "long_avg_price": float(
-                        position.get("long_avg_price", 0.0) or 0.0
-                    ),
-                    "short_avg_price": float(
-                        position.get("short_avg_price", 0.0) or 0.0
-                    ),
-                    "market_value": float(position.get("market_value", 0.0) or 0.0),
-                    "pnl": float(position.get("pnl", 0.0) or 0.0),
-                    "last_price": float(position.get("last_price", 0.0) or 0.0),
-                }
-            )
-        return normalized
+  @staticmethod
+  def _normalize_snapshot_positions(
+    run_id: str,
+    positions: Dict[str, Dict[str, Any]],
+  ) -> list[dict[str, Any]]:
+    """Normalize one complete runtime position snapshot exactly once."""
+    normalized: list[dict[str, Any]] = []
+    seen_codes: set[str] = set()
+    for raw_code, raw_position in sorted(dict(positions or {}).items()):
+      code = str(raw_code or "").strip().upper()
+      if not code:
+        raise ValueError("runtime position snapshot contains empty code")
+      if code in seen_codes:
+        raise ValueError("runtime position snapshot contains duplicate instrument code")
+      seen_codes.add(code)
+      position = dict(raw_position or {})
+      normalized.append(
+        {
+          "snapshot_run_id": run_id,
+          "snapshot_instrument_code": code,
+          "long_volume": int(position.get("long_volume", 0) or 0),
+          "short_volume": int(position.get("short_volume", 0) or 0),
+          "long_avg_price": float(position.get("long_avg_price", 0.0) or 0.0),
+          "short_avg_price": float(position.get("short_avg_price", 0.0) or 0.0),
+          "market_value": float(position.get("market_value", 0.0) or 0.0),
+          "pnl": float(position.get("pnl", 0.0) or 0.0),
+          "last_price": float(position.get("last_price", 0.0) or 0.0),
+        }
+      )
+    return normalized
 
-    @staticmethod
-    def _delete_missing_snapshot_statement(
-        run_id: str,
-        incoming_codes: list[str],
-    ) -> Any:
-        deletion = delete(StrategyRunPosition).where(
-            StrategyRunPosition.run_id == run_id
-        )
-        if incoming_codes:
-            deletion = deletion.where(
-                StrategyRunPosition.instrument_code.not_in(incoming_codes)
-            )
-        return deletion
+  @staticmethod
+  def _delete_missing_snapshot_statement(
+    run_id: str,
+    incoming_codes: list[str],
+  ) -> Any:
+    deletion = delete(StrategyRunPosition).where(StrategyRunPosition.run_id == run_id)
+    if incoming_codes:
+      deletion = deletion.where(
+        StrategyRunPosition.instrument_code.not_in(incoming_codes)
+      )
+    return deletion
 
-    @staticmethod
-    def _batch_snapshot_update_statement() -> Any:
-        return (
-            StrategyRunPosition.__table__.update()
-            .where(
-                StrategyRunPosition.__table__.c.run_id
-                == bindparam("snapshot_run_id"),
-                StrategyRunPosition.__table__.c.instrument_code
-                == bindparam("snapshot_instrument_code"),
-            )
-            .values(
-                long_volume=bindparam("long_volume"),
-                short_volume=bindparam("short_volume"),
-                long_avg_price=bindparam("long_avg_price"),
-                short_avg_price=bindparam("short_avg_price"),
-                market_value=bindparam("market_value"),
-                pnl=bindparam("pnl"),
-                last_price=bindparam("last_price"),
-                updated_at=func.now(),
-            )
-        )
+  @staticmethod
+  def _batch_snapshot_update_statement() -> Any:
+    return (
+      StrategyRunPosition.__table__.update()
+      .where(
+        StrategyRunPosition.__table__.c.run_id == bindparam("snapshot_run_id"),
+        StrategyRunPosition.__table__.c.instrument_code
+        == bindparam("snapshot_instrument_code"),
+      )
+      .values(
+        long_volume=bindparam("long_volume"),
+        short_volume=bindparam("short_volume"),
+        long_avg_price=bindparam("long_avg_price"),
+        short_avg_price=bindparam("short_avg_price"),
+        market_value=bindparam("market_value"),
+        pnl=bindparam("pnl"),
+        last_price=bindparam("last_price"),
+        updated_at=func.now(),
+      )
+    )
 
-    async def replace_positions_snapshot(
-        self,
-        run_id: str,
-        positions: Dict[str, Dict[str, Any]],
-        *,
-        commit: bool = True,
-        flush: bool = True,
-    ) -> None:
-        """Atomically replace one runtime's complete structured position view.
+  async def replace_positions_snapshot(
+    self,
+    run_id: str,
+    positions: Dict[str, Dict[str, Any]],
+    *,
+    commit: bool = True,
+    flush: bool = True,
+  ) -> None:
+    """Atomically replace one runtime's complete structured position view.
 
-        ``RuntimeStateManager`` owns an authoritative complete snapshot.  The
-        previous implementation faithfully persisted it, but did so as a
-        SELECT + ORM flush for every held instrument on every checkpoint.  A
-        run with eight holdings therefore turned one causally-required
-        checkpoint into many remote database round trips.  This method keeps
-        the exact replacement and caller-owned transaction semantics while
-        executing the existing-row updates as one DBAPI executemany operation.
+    ``RuntimeStateManager`` owns an authoritative complete snapshot.  The
+    previous implementation faithfully persisted it, but did so as a
+    SELECT + ORM flush for every held instrument on every checkpoint.  A
+    run with eight holdings therefore turned one causally-required
+    checkpoint into many remote database round trips.  This method keeps
+    the exact replacement and caller-owned transaction semantics while
+    executing the existing-row updates as one DBAPI executemany operation.
 
-        There is deliberately no upsert-on-conflict here: the historical table
-        has no compound unique constraint on ``(run_id, instrument_code)``.
-        Duplicate durable rows are rejected rather than silently selecting an
-        arbitrary truth.  First snapshots insert missing rows in the same
-        transaction; normal checkpoints update the known rows in one batch.
-        """
+    There is deliberately no upsert-on-conflict here: the historical table
+    has no compound unique constraint on ``(run_id, instrument_code)``.
+    Duplicate durable rows are rejected rather than silently selecting an
+    arbitrary truth.  First snapshots insert missing rows in the same
+    transaction; normal checkpoints update the known rows in one batch.
+    """
 
-        normalized = self._normalize_snapshot_positions(run_id, positions)
+    normalized = self._normalize_snapshot_positions(run_id, positions)
 
-        incoming_codes = [item["snapshot_instrument_code"] for item in normalized]
-        await self.db.execute(
-            self._delete_missing_snapshot_statement(run_id, incoming_codes)
-        )
+    incoming_codes = [item["snapshot_instrument_code"] for item in normalized]
+    await self.db.execute(
+      self._delete_missing_snapshot_statement(run_id, incoming_codes)
+    )
 
-        existing_rows = await self.db.execute(
-            select(StrategyRunPosition.instrument_code).where(
-                StrategyRunPosition.run_id == run_id
-            )
-        )
-        existing_codes_list = [str(item).upper() for item in existing_rows.scalars()]
-        existing_codes = set(existing_codes_list)
-        if len(existing_codes) != len(existing_codes_list):
-            raise RuntimeError(
-                "runtime position snapshot has duplicate durable instrument rows"
-            )
+    existing_rows = await self.db.execute(
+      select(StrategyRunPosition.instrument_code).where(
+        StrategyRunPosition.run_id == run_id
+      )
+    )
+    existing_codes_list = [str(item).upper() for item in existing_rows.scalars()]
+    existing_codes = set(existing_codes_list)
+    if len(existing_codes) != len(existing_codes_list):
+      raise RuntimeError(
+        "runtime position snapshot has duplicate durable instrument rows"
+      )
 
-        update_rows = [
-            item
-            for item in normalized
-            if item["snapshot_instrument_code"] in existing_codes
+    update_rows = [
+      item for item in normalized if item["snapshot_instrument_code"] in existing_codes
+    ]
+    if update_rows:
+      await self.db.execute(self._batch_snapshot_update_statement(), update_rows)
+
+    missing_rows = [
+      item
+      for item in normalized
+      if item["snapshot_instrument_code"] not in existing_codes
+    ]
+    if missing_rows:
+      self.db.add_all(
+        [
+          StrategyRunPosition(
+            run_id=item["snapshot_run_id"],
+            instrument_code=item["snapshot_instrument_code"],
+            long_volume=item["long_volume"],
+            short_volume=item["short_volume"],
+            long_avg_price=item["long_avg_price"],
+            short_avg_price=item["short_avg_price"],
+            market_value=item["market_value"],
+            pnl=item["pnl"],
+            last_price=item["last_price"],
+          )
+          for item in missing_rows
         ]
-        if update_rows:
-            await self.db.execute(self._batch_snapshot_update_statement(), update_rows)
+      )
 
-        missing_rows = [
-            item
-            for item in normalized
-            if item["snapshot_instrument_code"] not in existing_codes
-        ]
-        if missing_rows:
-            self.db.add_all(
-                [
-                    StrategyRunPosition(
-                        run_id=item["snapshot_run_id"],
-                        instrument_code=item["snapshot_instrument_code"],
-                        long_volume=item["long_volume"],
-                        short_volume=item["short_volume"],
-                        long_avg_price=item["long_avg_price"],
-                        short_avg_price=item["short_avg_price"],
-                        market_value=item["market_value"],
-                        pnl=item["pnl"],
-                        last_price=item["last_price"],
-                    )
-                    for item in missing_rows
-                ]
-            )
+    if commit:
+      await self.db.commit()
+    elif flush:
+      await self.db.flush()
 
-        if commit:
-            await self.db.commit()
-        elif flush:
-            await self.db.flush()
+  async def update_existing_positions_snapshot(
+    self,
+    run_id: str,
+    positions: Dict[str, Dict[str, Any]],
+    *,
+    commit: bool = True,
+    flush: bool = True,
+  ) -> None:
+    """Replace a known-complete snapshot without a per-checkpoint SELECT.
 
-    async def update_existing_positions_snapshot(
-        self,
-        run_id: str,
-        positions: Dict[str, Dict[str, Any]],
-        *,
-        commit: bool = True,
-        flush: bool = True,
-    ) -> None:
-        """Replace a known-complete snapshot without a per-checkpoint SELECT.
+    The caller may use this only after it has durably established the same
+    complete instrument-code set for this run.  Deletion still runs on
+    every checkpoint, so stray durable rows cannot survive.  The batch
+    update's row count rejects a missing or duplicate expected row rather
+    than silently relaxing complete-snapshot semantics.
+    """
 
-        The caller may use this only after it has durably established the same
-        complete instrument-code set for this run.  Deletion still runs on
-        every checkpoint, so stray durable rows cannot survive.  The batch
-        update's row count rejects a missing or duplicate expected row rather
-        than silently relaxing complete-snapshot semantics.
-        """
-
-        normalized = self._normalize_snapshot_positions(run_id, positions)
-        incoming_codes = [item["snapshot_instrument_code"] for item in normalized]
-        await self.db.execute(
-            self._delete_missing_snapshot_statement(run_id, incoming_codes)
+    normalized = self._normalize_snapshot_positions(run_id, positions)
+    incoming_codes = [item["snapshot_instrument_code"] for item in normalized]
+    await self.db.execute(
+      self._delete_missing_snapshot_statement(run_id, incoming_codes)
+    )
+    if normalized:
+      result = await self.db.execute(
+        self._batch_snapshot_update_statement(),
+        normalized,
+      )
+      rowcount = result.rowcount
+      if rowcount is not None and rowcount >= 0 and rowcount != len(normalized):
+        raise RuntimeError(
+          "runtime position snapshot expected durable rows no longer match"
         )
-        if normalized:
-            result = await self.db.execute(
-                self._batch_snapshot_update_statement(),
-                normalized,
-            )
-            rowcount = result.rowcount
-            if rowcount is not None and rowcount >= 0 and rowcount != len(normalized):
-                raise RuntimeError(
-                    "runtime position snapshot expected durable rows no longer match"
-                )
-        if commit:
-            await self.db.commit()
-        elif flush:
-            await self.db.flush()
+    if commit:
+      await self.db.commit()
+    elif flush:
+      await self.db.flush()
 
-    async def update_position(
-        self,
-        run_id: str,
-        instrument_code: str,
-        long_volume: int = 0,
-        short_volume: int = 0,
-        long_avg_price: float = 0.0,
-        short_avg_price: float = 0.0,
-        market_value: float = 0.0,
-        pnl: float = 0.0,
-        last_price: float = 0.0,
-        commit: bool = True,
-    ) -> StrategyRunPosition:
-        """更新或创建持仓"""
-        existing = await self.get_position(run_id, instrument_code)
+  async def update_position(
+    self,
+    run_id: str,
+    instrument_code: str,
+    long_volume: int = 0,
+    short_volume: int = 0,
+    long_avg_price: float = 0.0,
+    short_avg_price: float = 0.0,
+    market_value: float = 0.0,
+    pnl: float = 0.0,
+    last_price: float = 0.0,
+    commit: bool = True,
+  ) -> StrategyRunPosition:
+    """更新或创建持仓"""
+    existing = await self.get_position(run_id, instrument_code)
 
-        if existing:
-            existing.long_volume = long_volume
-            existing.short_volume = short_volume
-            existing.long_avg_price = long_avg_price
-            existing.short_avg_price = short_avg_price
-            existing.market_value = market_value
-            existing.pnl = pnl
-            existing.last_price = last_price
-            if commit:
-                await self.db.commit()
-                await self.db.refresh(existing)
-            else:
-                await self.db.flush()
-            return existing
-        else:
-            new_pos = StrategyRunPosition(
-                run_id=run_id,
-                instrument_code=instrument_code,
-                long_volume=long_volume,
-                short_volume=short_volume,
-                long_avg_price=long_avg_price,
-                short_avg_price=short_avg_price,
-                market_value=market_value,
-                pnl=pnl,
-                last_price=last_price,
-            )
-            self.db.add(new_pos)
-            if commit:
-                await self.db.commit()
-                await self.db.refresh(new_pos)
-            else:
-                await self.db.flush()
-            return new_pos
+    if existing:
+      existing.long_volume = long_volume
+      existing.short_volume = short_volume
+      existing.long_avg_price = long_avg_price
+      existing.short_avg_price = short_avg_price
+      existing.market_value = market_value
+      existing.pnl = pnl
+      existing.last_price = last_price
+      if commit:
+        await self.db.commit()
+        await self.db.refresh(existing)
+      else:
+        await self.db.flush()
+      return existing
+    else:
+      new_pos = StrategyRunPosition(
+        run_id=run_id,
+        instrument_code=instrument_code,
+        long_volume=long_volume,
+        short_volume=short_volume,
+        long_avg_price=long_avg_price,
+        short_avg_price=short_avg_price,
+        market_value=market_value,
+        pnl=pnl,
+        last_price=last_price,
+      )
+      self.db.add(new_pos)
+      if commit:
+        await self.db.commit()
+        await self.db.refresh(new_pos)
+      else:
+        await self.db.flush()
+      return new_pos

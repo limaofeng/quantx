@@ -614,9 +614,12 @@ async def test_account_facts_toctou_recheck_suppresses_before_strict_recorder():
     runtime._t_trade_opportunity_failures["600000.SH"]["code"]
     == "T_TRADE_ACCOUNT_CONCURRENT_BATCH_LIMIT_REACHED"
   )
-  assert runtime._t_trade_opportunity_failures["600000.SH"]["compensation"][
-    intent.intent_id
-  ]["evaluation_materialized"] is True
+  assert (
+    runtime._t_trade_opportunity_failures["600000.SH"]["compensation"][
+      intent.intent_id
+    ]["evaluation_materialized"]
+    is True
+  )
 
 
 @pytest.mark.asyncio
@@ -884,7 +887,9 @@ async def test_awaiting_link_checkpoint_cas_conflict_never_compensates_loser() -
 
 
 @pytest.mark.asyncio
-async def test_material_outbox_enqueue_failure_rolls_back_state_and_fail_stops_runtime() -> None:
+async def test_material_outbox_enqueue_failure_rolls_back_state_and_fail_stops_runtime() -> (
+  None
+):
   """A full/corrupt outbox must not leave a state-sync-able ghost candidate."""
 
   class EnqueueFailureStateManager(_StateManager):
@@ -1012,12 +1017,8 @@ async def test_material_outbox_replays_stable_events_once_after_restart() -> Non
     outcome_facade=SimpleNamespace(seed_material_event=seed),
   )
 
-  await restarted_executor._replay_pending_actionable_t_trade_material_events(
-    restarted
-  )
-  await restarted_executor._replay_pending_actionable_t_trade_material_events(
-    restarted
-  )
+  await restarted_executor._replay_pending_actionable_t_trade_material_events(restarted)
+  await restarted_executor._replay_pending_actionable_t_trade_material_events(restarted)
 
   assert materialized_keys == expected_event_keys
   assert seeded_keys == expected_event_keys
@@ -1428,8 +1429,8 @@ async def test_backtest_tick_progress_never_writes_replay_projection(
   )
 
   for ordinal in range(1_000):
-    runtime.context.current_time = (
-      runtime.context.backtest_start_time + timedelta(seconds=ordinal)
+    runtime.context.current_time = runtime.context.backtest_start_time + timedelta(
+      seconds=ordinal
     )
     await executor._report_t_trade_replay_progress(runtime)
 
@@ -1499,9 +1500,7 @@ async def test_backtest_day_boundary_projection_writes_once_per_day_across_windo
   )
 
   assert update.await_count == 2
-  assert [
-    call.kwargs["processed_until"] for call in update.await_args_list
-  ] == [
+  assert [call.kwargs["processed_until"] for call in update.await_args_list] == [
     datetime(2026, 8, 23, 15, 30),
     datetime(2026, 8, 24, 13, 45),
   ]
@@ -1534,6 +1533,69 @@ async def test_profile_request_uses_shanghai_trade_date_before_d1_validation():
   request = executor._d1_profile_reader.port.load_reference_profile.await_args
   assert request.kwargs["evaluated_at"] == datetime(2026, 8, 23, 0, 30)
   assert runtime._t_trade_opportunity_profiles[("600000.SH", "2026-08-23")]
+
+
+@pytest.mark.asyncio
+async def test_backtest_replay_profile_request_is_pinned_to_manifest_fingerprint():
+  profile = {
+    "profile_version": "p-20260822",
+    "profile_schema_version": 1,
+    "as_of_trade_date": "2026-08-22",
+    "profile_fingerprint": "e" * 64,
+    "pullback_threshold_pct": 0.8,
+    "momentum_rise_threshold_pct": 0.9,
+    "momentum_amount_velocity_ratio": 2.1,
+    "pullback_max_spread_ticks": 3,
+    "momentum_max_spread_ticks": 10,
+  }
+  service = SimpleNamespace(load_reference_profile=AsyncMock(return_value=profile))
+  executor = _executor(service)
+  runtime = _runtime([])
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  runtime.context.parameters.update(
+    {
+      "t_trade_replay": True,
+      "t_trade_replay_profile_manifest": {
+        "entries": {
+          "600000.SH|2026-08-23": {
+            "profile_version": "p-20260822",
+            "profile_fingerprint": "e" * 64,
+          }
+        }
+      },
+    }
+  )
+
+  await executor._ensure_t_trade_opportunity_profile(
+    runtime,
+    instrument_code="600000.SH",
+    evaluated_at=datetime(2026, 8, 23, 9, 31),
+  )
+
+  request = service.load_reference_profile.await_args.kwargs
+  assert request["required_version"] == "p-20260822"
+  assert request["required_fingerprint"] == "e" * 64
+
+
+@pytest.mark.asyncio
+async def test_backtest_replay_without_profile_manifest_fails_closed_before_storage():
+  service = SimpleNamespace(load_reference_profile=AsyncMock())
+  executor = _executor(service)
+  runtime = _runtime([])
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  runtime.context.parameters["t_trade_replay"] = True
+
+  await executor._ensure_t_trade_opportunity_profile(
+    runtime,
+    instrument_code="600000.SH",
+    evaluated_at=datetime(2026, 8, 23, 9, 31),
+  )
+
+  assert (
+    runtime._t_trade_opportunity_profile_errors[("600000.SH", "2026-08-23")]
+    == "PROFILE_MANIFEST_MISSING"
+  )
+  service.load_reference_profile.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1578,9 +1640,7 @@ async def test_1000_ordinary_diagnostics_are_not_staged_or_persisted(mode):
   runtime = _runtime(calls)
   runtime.context.mode = mode
   runtime.state_manager.persist_enabled = True
-  runtime.state_manager.checkpoint_strategy_state_changes = AsyncMock(
-    return_value=True
-  )
+  runtime.state_manager.checkpoint_strategy_state_changes = AsyncMock(return_value=True)
   runtime.state_manager.force_save = AsyncMock(return_value=True)
   runtime.state_manager.prepare_checkpoint = AsyncMock(return_value=None)
   runtime.state_manager.finalize_prepared_checkpoint = AsyncMock(return_value=None)

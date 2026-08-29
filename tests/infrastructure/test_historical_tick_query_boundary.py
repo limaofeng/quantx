@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
 from quantx_infrastructure.core.data.tick_identity import tick_storage_time
 from quantx_infrastructure.repositories.tick_repository import TickRepository
 from quantx_infrastructure.services.historical_market_data_service import (
@@ -35,9 +36,7 @@ def test_get_tick_data_expands_end_to_last_ordinal_microsecond() -> None:
 
   assert result == []
   assert repository.kwargs is not None
-  assert repository.kwargs["end_time"] == datetime(
-    2026, 8, 14, 9, 30, 0, 123999
-  )
+  assert repository.kwargs["end_time"] == datetime(2026, 8, 14, 9, 30, 0, 123999)
 
 
 def test_get_tick_data_forwards_replay_pagination_offset() -> None:
@@ -120,7 +119,9 @@ def test_source_identity_page_query_uses_keyset_without_offset() -> None:
   assert all("COUNT(" not in sql.upper() for sql in operations.sqls)
 
 
-def test_source_identity_page_does_not_scan_count_for_duplicate_cursor_identity() -> None:
+def test_source_identity_page_does_not_scan_count_for_duplicate_cursor_identity() -> (
+  None
+):
   class _Operations:
     def __init__(self) -> None:
       self.sql = ""
@@ -133,13 +134,16 @@ def test_source_identity_page_does_not_scan_count_for_duplicate_cursor_identity(
   repository.operations = _Operations()
   operations = _Operations()
   repository.operations = operations
-  assert repository.find_source_identity_page(
-    stock_code="601318.SH",
-    start_time=datetime(2026, 8, 14, 9, 30),
-    end_time=datetime(2026, 8, 14, 15, 0),
-    after=(123, 4),
-    limit=10,
-  ) == []
+  assert (
+    repository.find_source_identity_page(
+      stock_code="601318.SH",
+      start_time=datetime(2026, 8, 14, 9, 30),
+      end_time=datetime(2026, 8, 14, 15, 0),
+      after=(123, 4),
+      limit=10,
+    )
+    == []
+  )
   assert "COUNT(" not in operations.sql.upper()
 
 
@@ -177,7 +181,7 @@ def test_iter_tick_pages_requires_strict_progress_and_terminal_probe() -> None:
   assert repository.calls == [None, (2, 0), (3, 0)]
 
 
-def test_iter_tick_pages_rejects_missing_or_mismatched_storage_identity() -> None:
+def test_iter_tick_pages_rejects_mismatched_storage_identity() -> None:
   class _BadRepository:
     def __init__(self, page):
       self.page = page
@@ -187,13 +191,6 @@ def test_iter_tick_pages_rejects_missing_or_mismatched_storage_identity() -> Non
       return page
 
   cases = [
-    [
-      SimpleNamespace(
-        source_time_ms=None,
-        tick_ordinal=0,
-        time=tick_storage_time(1, 0),
-      )
-    ],
     [
       _tick(
         1,
@@ -223,7 +220,7 @@ def test_iter_tick_pages_rejects_missing_or_mismatched_storage_identity() -> Non
     raise AssertionError("invalid Tick identity/time must fail closed")
 
 
-def test_iter_tick_pages_labels_nullable_integer_bridge_nan_as_missing_identity() -> None:
+def test_iter_tick_pages_derives_legacy_nullable_identity_from_storage_time() -> None:
   class _Repository:
     def __init__(self) -> None:
       self.calls = 0
@@ -255,12 +252,11 @@ def test_iter_tick_pages_labels_nullable_integer_bridge_nan_as_missing_identity(
       )
     ]
 
-  try:
-    asyncio.run(collect())
-  except HistoricalTickPaginationError as exc:
-    assert str(exc) == "historical Tick source identity is missing"
-  else:
-    raise AssertionError("nullable integer bridge NaN must fail closed as missing")
+  pages = asyncio.run(collect())
+  assert len(pages) == 1
+  assert pages[0][0].source_time_ms == 1
+  assert pages[0][0].tick_ordinal == 0
+  assert service.tick_repo.calls == 2
 
 
 def test_iter_tick_pages_rejects_same_identity_with_different_storage_time() -> None:
@@ -303,7 +299,7 @@ def test_iter_tick_pages_rejects_same_identity_with_different_storage_time() -> 
     raise AssertionError("same identity with a different storage time must fail")
 
 
-def test_iter_tick_pages_does_not_treat_late_missing_identity_as_terminal() -> None:
+def test_iter_tick_pages_derives_late_legacy_identity_and_continues() -> None:
   class _Repository:
     def __init__(self) -> None:
       self.calls = 0
@@ -335,12 +331,42 @@ def test_iter_tick_pages_does_not_treat_late_missing_identity_as_terminal() -> N
       )
     ]
 
-  try:
+  pages = asyncio.run(collect())
+  assert [
+    [(tick.source_time_ms, tick.tick_ordinal) for tick in page] for page in pages
+  ] == [
+    [(1, 0)],
+    [(2, 0)],
+  ]
+  assert service.tick_repo.calls == 3
+
+
+def test_iter_tick_pages_rejects_partially_missing_legacy_identity() -> None:
+  class _Repository:
+    def find_source_identity_page(self, **_kwargs):
+      return [
+        SimpleNamespace(
+          source_time_ms=None,
+          tick_ordinal=1,
+          time=tick_storage_time(1, 1),
+        )
+      ]
+
+  service = HistoricalMarketDataService.__new__(HistoricalMarketDataService)
+  service.tick_repo = _Repository()
+
+  async def collect():
+    return [
+      page
+      async for page in service.iter_tick_pages(
+        stock_code="601318.SH",
+        start_time=datetime(2026, 8, 14, 9, 30),
+        end_time=datetime(2026, 8, 14, 15, 0),
+      )
+    ]
+
+  with pytest.raises(HistoricalTickPaginationError, match="partially missing"):
     asyncio.run(collect())
-  except HistoricalTickPaginationError:
-    pass
-  else:
-    raise AssertionError("late missing identity must fail instead of terminating")
 
 
 def test_iter_tick_pages_fails_closed_on_repeated_page_and_page_limit() -> None:

@@ -89,7 +89,7 @@ class MockStrategy(StrategyBase):
         "period": {"type": "integer", "default": 20},
         "threshold": {"type": "number", "default": 0.02},
       },
-      "required": []
+      "required": [],
     }
 
   async def on_init(self):
@@ -146,9 +146,7 @@ def isolate_executor_tests_from_runtime_state_database():
       return True
     return bool(await adapter.connect())
 
-  original_seed_simulated_positions = (
-    StrategyExecutor._seed_simulated_broker_positions
-  )
+  original_seed_simulated_positions = StrategyExecutor._seed_simulated_broker_positions
 
   def seed_without_mocked_backtest_broker(executor, runtime) -> None:
     if not isinstance(strategy_executor_module.BacktestBroker, type):
@@ -214,23 +212,39 @@ def test_runtime_state_persistence_scope_and_startup_checkpoint_invariants() -> 
   assert StrategyExecutor._runtime_state_persistence_enabled(live) is True
   assert StrategyExecutor._runtime_state_persistence_enabled(unsupported) is False
   assert (
-    StrategyExecutor._runtime_state_checkpoint_policy(ordinary_backtest)
-    == "DAY_BATCH"
+    StrategyExecutor._runtime_state_checkpoint_policy(ordinary_backtest) == "DAY_BATCH"
+  )
+  assert StrategyExecutor._runtime_state_checkpoint_policy(paper) == "SESSION_BOUNDARY"
+
+  assert (
+    StrategyExecutor._requires_startup_runtime_state_checkpoint(ordinary_backtest)
+    is True
   )
   assert (
-    StrategyExecutor._runtime_state_checkpoint_policy(paper)
-    == "SESSION_BOUNDARY"
+    StrategyExecutor._requires_startup_runtime_state_checkpoint(replay_backtest) is True
   )
-
-  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(
-    ordinary_backtest
-  ) is True
-  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(
-    replay_backtest
-  ) is True
   assert StrategyExecutor._requires_startup_runtime_state_checkpoint(paper) is True
   assert StrategyExecutor._requires_startup_runtime_state_checkpoint(live) is True
-  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(unsupported) is False
+  assert (
+    StrategyExecutor._requires_startup_runtime_state_checkpoint(unsupported) is False
+  )
+
+
+@pytest.mark.asyncio
+async def test_t_trade_replay_waits_for_broker_report_causal_tail(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  runtime, _manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
+  runtime.context.parameters["t_trade_replay"] = True
+
+  with patch.object(
+    strategy_executor,
+    "_wait_for_backtest_reports",
+    new_callable=AsyncMock,
+  ) as wait_for_reports:
+    await strategy_executor._board_replay_report_barrier(runtime)
+
+  wait_for_reports.assert_awaited_once_with(runtime)
 
 
 def _session_checkpoint_runtime(
@@ -262,9 +276,7 @@ def _session_checkpoint_runtime(
     return pending()
 
   async def prepare(**kwargs) -> SimpleNamespace:
-    materialization_events = [
-      dict(event) for event in kwargs["materialization_events"]
-    ]
+    materialization_events = [dict(event) for event in kwargs["materialization_events"]]
     for event in materialization_events:
       event_key = str(event.get("event_key") or "").strip()
       if event_key:
@@ -288,7 +300,9 @@ def _session_checkpoint_runtime(
 
   async def finalize(**kwargs) -> SimpleNamespace | None:
     checkpoint = prepared_holder["value"]
-    if checkpoint is None or kwargs["prepared_checkpoint_id"] != checkpoint.checkpoint_id:
+    if (
+      checkpoint is None or kwargs["prepared_checkpoint_id"] != checkpoint.checkpoint_id
+    ):
       return None
     for event_key in kwargs["materialization_event_keys"]:
       diagnostic_outbox.pop(event_key, None)
@@ -310,9 +324,7 @@ def _session_checkpoint_runtime(
     prepared_t_trade_diagnostic_events=MagicMock(side_effect=prepared_events),
     prepare_checkpoint=AsyncMock(side_effect=prepare),
     finalize_prepared_checkpoint=AsyncMock(side_effect=finalize),
-    latest_prepared_checkpoint=MagicMock(
-      side_effect=lambda: prepared_holder["value"]
-    ),
+    latest_prepared_checkpoint=MagicMock(side_effect=lambda: prepared_holder["value"]),
     has_prepared_checkpoint=MagicMock(
       side_effect=lambda: prepared_holder["value"] is not None
     ),
@@ -419,18 +431,15 @@ async def test_session_checkpoint_uses_idle_timeout_boundary_and_global_fence(
   manager.prepare_checkpoint.assert_awaited_once()
   manager.finalize_prepared_checkpoint.assert_awaited_once()
   assert status_snapshot.call_count == 2
-  assert (
-    manager.prepare_checkpoint.await_args.kwargs["processed_watermark"]
-    == {
-      "stream_id": "whole-quote-stream",
-      "generation": 3,
-      "sequence": 17,
-      "source_time_ms": int(fence["captured_at"].timestamp() * 1000),
-      "captured_at": fence["captured_at"].isoformat(),
-      "queue_depth": 0,
-      "lagging_consumers": 0,
-    }
-  )
+  assert manager.prepare_checkpoint.await_args.kwargs["processed_watermark"] == {
+    "stream_id": "whole-quote-stream",
+    "generation": 3,
+    "sequence": 17,
+    "source_time_ms": int(fence["captured_at"].timestamp() * 1000),
+    "captured_at": fence["captured_at"].isoformat(),
+    "queue_depth": 0,
+    "lagging_consumers": 0,
+  }
   # A sparse instrument has no per-symbol update requirement; audit state is
   # deliberately not used as the completion predicate.
   assert runtime._checkpoint_processed_watermark == {}
@@ -457,15 +466,13 @@ async def test_session_checkpoint_skips_non_trading_day_and_throttles_retry(
   status_snapshot.assert_not_called()
   manager.prepare_checkpoint.assert_not_awaited()
   assert {
-    key: status["status"]
-    for key, status in runtime.checkpoint_status.items()
+    key: status["status"] for key, status in runtime.checkpoint_status.items()
   } == {
     "2026-08-24:AM": "SKIPPED",
     "2026-08-24:PM": "SKIPPED",
   }
   assert all(
-    status["reason"] == "SH_NON_TRADING_DAY"
-    and "next_retry_at" not in status
+    status["reason"] == "SH_NON_TRADING_DAY" and "next_retry_at" not in status
     for status in runtime.checkpoint_status.values()
   )
   await executor._maybe_coordinate_session_checkpoints(runtime, now=eligible_at)
@@ -515,9 +522,7 @@ async def test_session_checkpoint_skips_calendar_without_enabled_state_persisten
   runtime, _manager = _session_checkpoint_runtime()
   runtime.state_manager = state_manager
   trading_day = AsyncMock(return_value=True)
-  strategy_executor._trading_date_helper = SimpleNamespace(
-    is_trading_date=trading_day
-  )
+  strategy_executor._trading_date_helper = SimpleNamespace(is_trading_date=trading_day)
 
   await strategy_executor._maybe_coordinate_session_checkpoints(
     runtime,
@@ -541,9 +546,7 @@ async def test_session_checkpoint_filters_terminal_and_exhausted_specs_before_ca
     }
   )
   trading_day = AsyncMock(return_value=True)
-  strategy_executor._trading_date_helper = SimpleNamespace(
-    is_trading_date=trading_day
-  )
+  strategy_executor._trading_date_helper = SimpleNamespace(is_trading_date=trading_day)
 
   await strategy_executor._maybe_coordinate_session_checkpoints(runtime, now=current)
 
@@ -557,9 +560,7 @@ async def test_session_checkpoint_throttles_calendar_failure_before_retry(
   runtime, _manager = _session_checkpoint_runtime()
   current = datetime(2026, 8, 24, 11, 35)
   trading_day = AsyncMock(side_effect=RuntimeError("calendar unavailable"))
-  strategy_executor._trading_date_helper = SimpleNamespace(
-    is_trading_date=trading_day
-  )
+  strategy_executor._trading_date_helper = SimpleNamespace(is_trading_date=trading_day)
 
   await strategy_executor._maybe_coordinate_session_checkpoints(runtime, now=current)
   await strategy_executor._maybe_coordinate_session_checkpoints(runtime, now=current)
@@ -568,9 +569,7 @@ async def test_session_checkpoint_throttles_calendar_failure_before_retry(
   assert status["status"] == "BLOCKED"
   assert status["reason"] == "SH_TRADING_CALENDAR_UNAVAILABLE:RuntimeError"
   assert status["attempts"] == 1
-  assert status["next_retry_at"] == (
-    current + timedelta(seconds=5)
-  ).isoformat()
+  assert status["next_retry_at"] == (current + timedelta(seconds=5)).isoformat()
   trading_day.assert_awaited_once_with("SH", current.date())
 
   await strategy_executor._maybe_coordinate_session_checkpoints(
@@ -705,7 +704,9 @@ async def test_terminal_session_prefix_seals_hot_diagnostics_for_live_and_paper(
 
   manager.prepare_checkpoint.assert_awaited_once()
   assert manager.prepare_checkpoint.await_args.kwargs["session"] == "TERMINAL"
-  assert manager.prepare_checkpoint.await_args.kwargs["completeness"]["terminal"] is True
+  assert (
+    manager.prepare_checkpoint.await_args.kwargs["completeness"]["terminal"] is True
+  )
   manager.finalize_prepared_checkpoint.assert_awaited_once()
   assert runtime._checkpoint_diagnostic_summaries == {}
   assert runtime.checkpoint_status["2026-08-24:TERMINAL"]["status"] == "COMPLETE"
@@ -827,6 +828,52 @@ async def test_backtest_day_checkpoint_excludes_acquired_first_event_of_next_day
     runtime.checkpoint_status[f"{second_tick.time.date().isoformat()}:DAY"]["status"]
     == "COMPLETE"
   )
+
+
+@pytest.mark.asyncio
+async def test_backtest_day_checkpoint_error_exposes_internal_block_reason(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
+  previous_date = date(2026, 8, 24)
+  runtime._checkpoint_virtual_trade_date = previous_date
+  manager.prepare_checkpoint.side_effect = None
+  manager.prepare_checkpoint.return_value = None
+
+  with pytest.raises(
+    RuntimeError,
+    match=("BACKTEST_VIRTUAL_DAY_CHECKPOINT_BLOCKED:CHECKPOINT_PREPARE_REJECTED"),
+  ):
+    await strategy_executor._coordinate_backtest_virtual_day_before_event(
+      runtime,
+      datetime(2026, 8, 25, 9, 30),
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_backtest_day_checkpoint_waits_for_prior_day_reports(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
+  runtime._checkpoint_virtual_trade_date = date(2026, 8, 24)
+  runtime.task = asyncio.current_task()
+  runtime.event_queue.put_nowait(("order", object()))
+
+  async def settle_queued_report() -> None:
+    await asyncio.sleep(0)
+    runtime.event_queue.get_nowait()
+    runtime.event_queue.task_done()
+
+  settle_task = asyncio.create_task(settle_queued_report())
+  await strategy_executor._coordinate_backtest_virtual_day_before_event(
+    runtime,
+    datetime(2026, 8, 25, 9, 30),
+  )
+  await settle_task
+
+  manager.prepare_checkpoint.assert_awaited_once()
+  assert manager.prepare_checkpoint.await_args.kwargs["trade_date"] == date(2026, 8, 24)
+  assert runtime.event_queue.empty()
 
 
 def test_backtest_day_checkpoint_never_admits_two_acquired_queue_items() -> None:
@@ -1199,20 +1246,17 @@ def test_strategy_output_trace_content_addresses_hot_runtime_state(
   assert max(len(record) for record in encoded_records) < 8_192
   assert all(b"hot-state-sentinel" not in record for record in encoded_records)
   assert all(
-    b"event-payload-must-not-be-copied" not in record
-    for record in encoded_records
+    b"event-payload-must-not-be-copied" not in record for record in encoded_records
   )
   assert all(
-    record["state_patch"]["full_patch_sha256"]
-    == first_patch["full_patch_sha256"]
+    record["state_patch"]["full_patch_sha256"] == first_patch["full_patch_sha256"]
     for record in records
   )
 
   same_patch = RuntimeStatePatch(
     set={
       "instrument_states": {
-        code: instrument_states[code]
-        for code in reversed(list(instrument_states))
+        code: instrument_states[code] for code in reversed(list(instrument_states))
       },
       "algorithm_phase": "EVALUATED",
     },
@@ -1497,9 +1541,7 @@ def test_t_trade_material_trace_projects_top_level_opportunity_without_hot_roots
 ) -> None:
   """Legacy top-level T state remains materializable without copying its tree."""
 
-  runtime, input_snapshot, output, _signal = _t_trade_trace_fixture(
-    strategy_executor
-  )
+  runtime, input_snapshot, output, _signal = _t_trade_trace_fixture(strategy_executor)
   top_level_sample = "top-level-hot-sample-must-not-be-copied" * 128
   output.runtime_state_patch = RuntimeStatePatch(
     set={
@@ -1558,9 +1600,7 @@ def test_t_trade_trace_rejects_unknown_complex_roots(
 ) -> None:
   """A newly introduced complex root fails closed instead of leaking JSON."""
 
-  runtime, input_snapshot, output, _signal = _t_trade_trace_fixture(
-    strategy_executor
-  )
+  runtime, input_snapshot, output, _signal = _t_trade_trace_fixture(strategy_executor)
   if bad_output == "trace_payload":
     output.trace_payload = {
       **output.trace_payload,
@@ -1929,9 +1969,7 @@ class TestStrategyExecutor:
     assert input_snapshot.risk_caps["risk_mode"] == "PANIC"
     assert input_snapshot.position_profile["profile"] == "DEFENSIVE"
 
-  def test_strategy_input_exposes_engine_owned_market_lineage(
-    self, strategy_executor
-  ):
+  def test_strategy_input_exposes_engine_owned_market_lineage(self, strategy_executor):
     run_id = "test-run-market-lineage"
     timestamp = datetime(2024, 1, 2, 10, 0)
     context = StrategyContext(
@@ -2106,9 +2144,7 @@ class TestStrategyExecutor:
       SimpleNamespace(
         set={"safe_update": True},
         unset=["preserved"],
-        append_events=[
-          {"event_type": "RISK", "payload": {"final_volume": 100}}
-        ],
+        append_events=[{"event_type": "RISK", "payload": {"final_volume": 100}}],
       ),
     ),
   )
@@ -2459,7 +2495,9 @@ class TestStrategyExecutor:
       SimpleNamespace(time=datetime(2026, 5, 14, 9, 30), label="morning_open"),
       SimpleNamespace(time=datetime(2026, 5, 14, 11, 30), label="morning_close"),
       SimpleNamespace(time=datetime(2026, 5, 14, 13, 0), label="afternoon_open"),
-      SimpleNamespace(time=datetime(2026, 5, 14, 14, 56, 59), label="before_close_call"),
+      SimpleNamespace(
+        time=datetime(2026, 5, 14, 14, 56, 59), label="before_close_call"
+      ),
       SimpleNamespace(time=datetime(2026, 5, 14, 14, 57), label="close_call"),
       SimpleNamespace(time=datetime(2026, 5, 14, 15, 0), label="close_call_end"),
     ]
@@ -2514,14 +2552,16 @@ class TestStrategyExecutor:
   async def test_start_run(self, strategy_executor):
     """测试 start 启动策略运行"""
     # Mock 数据适配器
-    with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+    with patch(
+      "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+    ) as mock_get_adapter:
       mock_data_adapter = AsyncMock()
       mock_data_adapter.connect = AsyncMock()
       mock_data_adapter.subscribe_kline = AsyncMock(return_value="subscription-id")
       mock_get_adapter.return_value = mock_data_adapter
 
       # Mock BacktestBroker
-      with patch('quantx_engine.strategy_executor.BacktestBroker') as mock_broker_class:
+      with patch("quantx_engine.strategy_executor.BacktestBroker") as mock_broker_class:
         mock_broker = AsyncMock()
         mock_broker.connect = AsyncMock()
         mock_broker_class.return_value = mock_broker
@@ -2574,25 +2614,33 @@ class TestStrategyExecutor:
   async def test_stop_run(self, strategy_executor):
     """测试 stop 停止策略运行"""
     # Mock 数据适配器
-    with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+    with patch(
+      "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+    ) as mock_get_adapter:
       mock_data_adapter = AsyncMock()
       mock_data_adapter.connect = AsyncMock()
       mock_get_adapter.return_value = mock_data_adapter
 
       # Mock release_adapter_for_mode
-      with patch('quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode') as mock_release:
+      with patch(
+        "quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode"
+      ) as mock_release:
         # Mock BacktestBroker
-        with patch('quantx_engine.strategy_executor.BacktestBroker') as mock_broker_class:
+        with patch(
+          "quantx_engine.strategy_executor.BacktestBroker"
+        ) as mock_broker_class:
           mock_broker = AsyncMock()
           mock_broker.connect = AsyncMock()
           mock_broker.disconnect = AsyncMock()
-          mock_broker.get_performance_metrics = MagicMock(return_value={
-            "final_equity": 1050000.0,
-            "max_drawdown": 0.02,
-            "win_rate": 0.6,
-            "sharpe_ratio": 1.5,
-            "total_trades": 10,
-          })
+          mock_broker.get_performance_metrics = MagicMock(
+            return_value={
+              "final_equity": 1050000.0,
+              "max_drawdown": 0.02,
+              "win_rate": 0.6,
+              "sharpe_ratio": 1.5,
+              "total_trades": 10,
+            }
+          )
           mock_broker_class.return_value = mock_broker
 
           # 创建并启动策略
@@ -2631,7 +2679,9 @@ class TestStrategyExecutor:
   async def test_pause_and_resume_run(self, strategy_executor):
     """测试 pause 和 resume"""
     # Mock 数据适配器
-    with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+    with patch(
+      "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+    ) as mock_get_adapter:
       mock_data_adapter = AsyncMock()
       mock_data_adapter.connect = AsyncMock()
       mock_data_adapter.subscribe_kline = AsyncMock(return_value="subscription-id")
@@ -2639,7 +2689,9 @@ class TestStrategyExecutor:
       mock_get_adapter.return_value = mock_data_adapter
 
       # Mock SimulatorBroker (PAPER 模式)
-      with patch('quantx_engine.strategy_executor.SimulatorBroker') as mock_broker_class:
+      with patch(
+        "quantx_engine.strategy_executor.SimulatorBroker"
+      ) as mock_broker_class:
         mock_broker = AsyncMock()
         mock_broker.connect = AsyncMock()
         mock_broker_class.return_value = mock_broker
@@ -2768,13 +2820,15 @@ class TestStrategyExecutor:
   async def test_get_running_runs(self, strategy_executor):
     """测试 get_running 获取运行中的策略"""
     # Mock 数据适配器
-    with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+    with patch(
+      "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+    ) as mock_get_adapter:
       mock_data_adapter = AsyncMock()
       mock_data_adapter.connect = AsyncMock()
       mock_get_adapter.return_value = mock_data_adapter
 
       # Mock BacktestBroker
-      with patch('quantx_engine.strategy_executor.BacktestBroker') as mock_broker_class:
+      with patch("quantx_engine.strategy_executor.BacktestBroker") as mock_broker_class:
         mock_broker = AsyncMock()
         mock_broker.connect = AsyncMock()
         mock_broker_class.return_value = mock_broker
@@ -2800,7 +2854,9 @@ class TestStrategyExecutor:
           run_ids.append(run_id)
 
         # 只启动前两个
-        with patch.object(strategy_executor, "_run_strategy_loop", side_effect=keep_running_loop):
+        with patch.object(
+          strategy_executor, "_run_strategy_loop", side_effect=keep_running_loop
+        ):
           await strategy_executor.start(run_ids[0])
           await strategy_executor.start(run_ids[1])
           await asyncio.sleep(0.1)
@@ -2814,13 +2870,15 @@ class TestStrategyExecutor:
   async def test_multiple_runs_concurrent(self, strategy_executor):
     """测试多个策略并发运行"""
     # Mock 数据适配器
-    with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+    with patch(
+      "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+    ) as mock_get_adapter:
       mock_data_adapter = AsyncMock()
       mock_data_adapter.connect = AsyncMock()
       mock_get_adapter.return_value = mock_data_adapter
 
       # Mock BacktestBroker
-      with patch('quantx_engine.strategy_executor.BacktestBroker') as mock_broker_class:
+      with patch("quantx_engine.strategy_executor.BacktestBroker") as mock_broker_class:
         mock_broker = AsyncMock()
         mock_broker.connect = AsyncMock()
         mock_broker.disconnect = AsyncMock()
@@ -2829,7 +2887,9 @@ class TestStrategyExecutor:
         mock_broker_class.return_value = mock_broker
 
         # Mock release_adapter_for_mode
-        with patch('quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode'):
+        with patch(
+          "quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode"
+        ):
           # 创建多个策略运行
           run_ids = []
           for i in range(3):
@@ -2851,10 +2911,7 @@ class TestStrategyExecutor:
             run_ids.append(run_id)
 
           # 并发启动所有策略
-          start_tasks = [
-            strategy_executor.start(run_id)
-            for run_id in run_ids
-          ]
+          start_tasks = [strategy_executor.start(run_id) for run_id in run_ids]
           results = await asyncio.gather(*start_tasks)
 
           # 验证所有策略都启动成功
@@ -2864,10 +2921,7 @@ class TestStrategyExecutor:
           await asyncio.sleep(0.2)
 
           # 并发停止所有策略
-          stop_tasks = [
-            strategy_executor.stop(run_id)
-            for run_id in run_ids
-          ]
+          stop_tasks = [strategy_executor.stop(run_id) for run_id in run_ids]
           results = await asyncio.gather(*stop_tasks)
 
           # 验证所有策略都停止成功
@@ -2877,25 +2931,33 @@ class TestStrategyExecutor:
   async def test_metrics_update_on_stop(self, strategy_executor):
     """测试停止时更新指标"""
     # Mock 数据适配器
-    with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+    with patch(
+      "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+    ) as mock_get_adapter:
       mock_data_adapter = AsyncMock()
       mock_data_adapter.connect = AsyncMock()
       mock_get_adapter.return_value = mock_data_adapter
 
       # Mock release_adapter_for_mode
-      with patch('quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode'):
+      with patch(
+        "quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode"
+      ):
         # Mock BacktestBroker with performance metrics
-        with patch('quantx_engine.strategy_executor.BacktestBroker') as mock_broker_class:
+        with patch(
+          "quantx_engine.strategy_executor.BacktestBroker"
+        ) as mock_broker_class:
           mock_broker = AsyncMock()
           mock_broker.connect = AsyncMock()
           mock_broker.disconnect = AsyncMock()
-          mock_broker.get_performance_metrics = MagicMock(return_value={
-            "final_equity": 1050000.0,
-            "max_drawdown": 0.02,
-            "win_rate": 0.6,
-            "sharpe_ratio": 1.5,
-            "total_trades": 10,
-          })
+          mock_broker.get_performance_metrics = MagicMock(
+            return_value={
+              "final_equity": 1050000.0,
+              "max_drawdown": 0.02,
+              "win_rate": 0.6,
+              "sharpe_ratio": 1.5,
+              "total_trades": 10,
+            }
+          )
           mock_broker_class.return_value = mock_broker
 
           # 创建并启动策略
@@ -2935,7 +2997,9 @@ class TestStrategyExecutor:
   async def test_error_handling_on_start(self, strategy_executor):
     """测试启动时的错误处理"""
     # Mock 数据适配器抛出异常
-    with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+    with patch(
+      "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+    ) as mock_get_adapter:
       mock_get_adapter.side_effect = Exception("数据适配器错误")
 
       # 创建策略
@@ -2974,7 +3038,9 @@ class TestStrategyExecutor:
     ]
 
     for mode, broker_class in modes:
-      with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+      with patch(
+        "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+      ) as mock_get_adapter:
         mock_data_adapter = AsyncMock()
         mock_data_adapter.connect = AsyncMock()
         mock_get_adapter.return_value = mock_data_adapter
@@ -3004,7 +3070,9 @@ class TestStrategyExecutor:
           )
 
           # 启动策略
-          with patch.object(strategy_executor, "_run_strategy_loop", side_effect=keep_running_loop):
+          with patch.object(
+            strategy_executor, "_run_strategy_loop", side_effect=keep_running_loop
+          ):
             await strategy_executor.start(run_id)
             await asyncio.sleep(0.1)
 
@@ -3042,7 +3110,9 @@ class TestStrategyExecutor:
     with (
       patch("quantx_engine.strategy_executor.LiveBroker") as live_broker,
       patch("quantx_engine.strategy_executor.SimulatorBroker") as simulator_broker,
-      patch("quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode") as get_adapter,
+      patch(
+        "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+      ) as get_adapter,
     ):
       broker = AsyncMock()
       broker.connect = AsyncMock(return_value=True)
@@ -3092,7 +3162,9 @@ class TestStrategyExecutor:
     )
 
     with (
-      patch("quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode") as get_adapter,
+      patch(
+        "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+      ) as get_adapter,
       patch.object(
         strategy_executor,
         "_run_strategy_loop",
@@ -3162,7 +3234,9 @@ class TestStrategyExecutor:
     async def stop_after_heartbeat(_seconds):
       runtime.status = ExecutionStatus.STOPPED
 
-    with patch("quantx_engine.strategy_executor.asyncio.sleep", side_effect=stop_after_heartbeat):
+    with patch(
+      "quantx_engine.strategy_executor.asyncio.sleep", side_effect=stop_after_heartbeat
+    ):
       await strategy_executor._run_realtime_loop(runtime)
 
     adapter.subscribe_kline.assert_awaited_once()
@@ -3173,13 +3247,15 @@ class TestStrategyExecutor:
   async def test_stop_all_runs(self, strategy_executor):
     """测试停止所有运行"""
     # Mock 数据适配器
-    with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
+    with patch(
+      "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+    ) as mock_get_adapter:
       mock_data_adapter = AsyncMock()
       mock_data_adapter.connect = AsyncMock()
       mock_get_adapter.return_value = mock_data_adapter
 
       # Mock BacktestBroker
-      with patch('quantx_engine.strategy_executor.BacktestBroker') as mock_broker_class:
+      with patch("quantx_engine.strategy_executor.BacktestBroker") as mock_broker_class:
         mock_broker = AsyncMock()
         mock_broker.connect = AsyncMock()
         mock_broker.disconnect = AsyncMock()
@@ -3188,7 +3264,9 @@ class TestStrategyExecutor:
         mock_broker_class.return_value = mock_broker
 
         # Mock release_adapter_for_mode
-        with patch('quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode'):
+        with patch(
+          "quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode"
+        ):
           # 创建并启动多个策略
           run_ids = []
           for i in range(3):

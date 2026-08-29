@@ -484,22 +484,17 @@ class OpportunityPolicy:
       )
     if self.candidate_confirm_seconds > OPPORTUNITY_MAX_CONFIRM_SECONDS:
       raise ValueError(
-        "candidate_confirm_seconds must not exceed "
-        f"{OPPORTUNITY_MAX_CONFIRM_SECONDS}"
+        f"candidate_confirm_seconds must not exceed {OPPORTUNITY_MAX_CONFIRM_SECONDS}"
       )
     if self.candidate_confirm_ticks > OPPORTUNITY_MAX_CONFIRM_TICKS:
       raise ValueError(
-        "candidate_confirm_ticks must not exceed "
-        f"{OPPORTUNITY_MAX_CONFIRM_TICKS}"
+        f"candidate_confirm_ticks must not exceed {OPPORTUNITY_MAX_CONFIRM_TICKS}"
       )
     if self.rearm_seconds > OPPORTUNITY_MAX_REARM_SECONDS:
-      raise ValueError(
-        f"rearm_seconds must not exceed {OPPORTUNITY_MAX_REARM_SECONDS}"
-      )
+      raise ValueError(f"rearm_seconds must not exceed {OPPORTUNITY_MAX_REARM_SECONDS}")
     if self.candidate_ttl_seconds > OPPORTUNITY_MAX_CANDIDATE_TTL_SECONDS:
       raise ValueError(
-        "candidate_ttl_seconds must not exceed "
-        f"{OPPORTUNITY_MAX_CANDIDATE_TTL_SECONDS}"
+        f"candidate_ttl_seconds must not exceed {OPPORTUNITY_MAX_CANDIDATE_TTL_SECONDS}"
       )
     if self.pullback_min_coverage_seconds < self.pullback_stabilization_seconds:
       raise ValueError(
@@ -853,6 +848,8 @@ class OpportunityFeatures:
   spread_ticks: Optional[float] = None
   spread_pct: Optional[float] = None
   book_imbalance: Optional[float] = None
+  cumulative_amount: Optional[float] = None
+  cumulative_volume: Optional[float] = None
   session_vwap: Optional[float] = None
   vwap_premium_pct: Optional[float] = None
   return_5s_pct: Optional[float] = None
@@ -2187,6 +2184,8 @@ def _extract_features(
       spread_ticks=spread_ticks,
       spread_pct=spread_pct,
       book_imbalance=book_imbalance,
+      cumulative_amount=amount,
+      cumulative_volume=volume,
       session_vwap=vwap,
       vwap_premium_pct=vwap_premium,
       return_5s_pct=returns[5],
@@ -2663,9 +2662,7 @@ def _advance_pullback_branch(
   stable_episode_id = previous.episode_id or episode_id
   changed = previous.episode_id != stable_episode_id
   started = None if changed else previous.confirmation_started_at_ms
-  started_ordinal = (
-    None if changed else previous.confirmation_started_tick_ordinal
-  )
+  started_ordinal = None if changed else previous.confirmation_started_tick_ordinal
   ticks = 0 if changed else previous.confirmation_ticks
   if qualifies:
     if started is None:
@@ -2714,9 +2711,7 @@ def _advance_momentum_branch(
   stable_episode_id = previous.episode_id or episode_id
   changed = previous.episode_id != stable_episode_id
   started = None if changed else previous.confirmation_started_at_ms
-  started_ordinal = (
-    None if changed else previous.confirmation_started_tick_ordinal
-  )
+  started_ordinal = None if changed else previous.confirmation_started_tick_ordinal
   ticks = 0 if changed else previous.confirmation_ticks
   if qualifies:
     if started is None:
@@ -3222,8 +3217,10 @@ def _required_feature_available(
     return features.ask_price is not None
   if field_name in {"bid_volume", "ask_volume"}:
     return features.book_imbalance is not None
-  if field_name in {"cumulative_amount", "cumulative_volume"}:
-    return features.session_vwap is not None
+  if field_name == "cumulative_amount":
+    return features.cumulative_amount is not None
+  if field_name == "cumulative_volume":
+    return features.cumulative_volume is not None
   raise AssertionError(f"unsupported required sample field: {field_name}")
 
 

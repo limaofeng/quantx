@@ -272,21 +272,27 @@ async def test_authority_invalidation_targets_only_matching_v3_account_runtime(
     run_id="run-non-t-trade",
     context=SimpleNamespace(parameters={"account_id": "account-1"}),
   )
+  backtest = SimpleNamespace(
+    run_id="run-backtest",
+    context=SimpleNamespace(
+      mode=SimpleNamespace(value="BACKTEST"),
+      parameters={"account_id": "account-1"},
+    ),
+  )
   executor = SimpleNamespace(
     runs={
       matching.run_id: matching,
       other_account.run_id: other_account,
       non_t_trade.run_id: non_t_trade,
+      backtest.run_id: backtest,
     },
-    _uses_t_trade_opportunity_runtime=lambda runtime: runtime is matching,
+    _uses_t_trade_opportunity_runtime=lambda runtime: runtime in (matching, backtest),
     invalidate_t_trade_entry_authority=AsyncMock(return_value=True),
   )
   manager = SimpleNamespace(executor=executor)
   import importlib
 
-  strategy_manager_module = importlib.import_module(
-    "quantx_engine.strategy_manager"
-  )
+  strategy_manager_module = importlib.import_module("quantx_engine.strategy_manager")
   monkeypatch.setattr(strategy_manager_module, "strategy_manager", manager)
 
   await report_processor._invalidate_t_trade_entry_authority_for_account(
@@ -307,9 +313,7 @@ async def test_authority_invalidation_rejects_unbounded_runtime_scan(
 ) -> None:
   import importlib
 
-  strategy_manager_module = importlib.import_module(
-    "quantx_engine.strategy_manager"
-  )
+  strategy_manager_module = importlib.import_module("quantx_engine.strategy_manager")
   executor = SimpleNamespace(
     runs={str(index): SimpleNamespace() for index in range(4097)},
     _uses_t_trade_opportunity_runtime=lambda _runtime: False,
@@ -330,11 +334,7 @@ async def test_authority_invalidation_rejects_unbounded_runtime_scan(
 
 
 def test_snapshot_account_scope_rejects_4097_accounts() -> None:
-  payload = {
-    "positions_by_account": {
-      f"account-{index}": [] for index in range(4097)
-    }
-  }
+  payload = {"positions_by_account": {f"account-{index}": [] for index in range(4097)}}
 
   with pytest.raises(report_processor.RetryableReportError, match="4096"):
     report_processor._report_account_ids(payload)
@@ -393,12 +393,8 @@ async def test_oversized_full_scope_fails_closed_to_authenticated_device_scope(
     "is_complete": True,
     "source_sequence": 23,
     "unavailable_accounts": [],
-    "accounts": [
-      {"account_id": f"account-{index}"} for index in range(4097)
-    ],
-    "positions_by_account": {
-      f"account-{index}": [] for index in range(4097)
-    },
+    "accounts": [{"account_id": f"account-{index}"} for index in range(4097)],
+    "positions_by_account": {f"account-{index}": [] for index in range(4097)},
     "section_completeness_by_account": {
       f"account-{index}": {
         "account": True,
@@ -464,11 +460,13 @@ async def test_stale_full_duplicate_does_not_replay_business_sections(
     "is_complete": True,
     "source_sequence": 100,
     "source_event_at": datetime.now(timezone.utc).isoformat(),
-    "accounts": [{
-      "account_id": "account-1",
-      "cash": "999999.99",
-      "total_asset": "999999.99",
-    }],
+    "accounts": [
+      {
+        "account_id": "account-1",
+        "cash": "999999.99",
+        "total_asset": "999999.99",
+      }
+    ],
     "positions_by_account": {"account-1": []},
     "section_completeness_by_account": {
       "account-1": {
@@ -523,15 +521,17 @@ async def test_stale_full_duplicate_does_not_stage_runtime_zero_fill_event() -> 
       }
     },
     "unavailable_accounts": [],
-    "orders": [{
-      "account_id": "account-1",
-      "client_order_id": "client-1",
-      "order_id": "old-order",
-      "stock_code": "600000.SH",
-      "order_status": "CANCELLED",
-      "order_volume": 100,
-      "traded_volume": 0,
-    }],
+    "orders": [
+      {
+        "account_id": "account-1",
+        "client_order_id": "client-1",
+        "order_id": "old-order",
+        "stock_code": "600000.SH",
+        "order_status": "CANCELLED",
+        "order_volume": 100,
+        "traded_volume": 0,
+      }
+    ],
     "trades": [],
   }
   payload["snapshot_hash"] = sha256(
@@ -557,10 +557,13 @@ async def test_stale_full_duplicate_does_not_stage_runtime_zero_fill_event() -> 
     payload=payload,
   )
 
-  assert await report_processor._full_snapshot_zero_fill_items(
-    FakeDatabase(),
-    report,
-  ) == []
+  assert (
+    await report_processor._full_snapshot_zero_fill_items(
+      FakeDatabase(),
+      report,
+    )
+    == []
+  )
 
 
 @pytest.mark.asyncio
@@ -668,9 +671,7 @@ async def test_full_snapshot_keeps_monitor_out_until_final_rollout_projection(
   )
   await asyncio.sleep(0)
 
-  assert events.index("position-prepare-incomplete") < events.index(
-    "discrepancy-read"
-  )
+  assert events.index("position-prepare-incomplete") < events.index("discrepancy-read")
   assert events.index("snapshot-begin-incomplete") < events.index(
     "position-prepare-incomplete"
   )
@@ -681,9 +682,7 @@ async def test_full_snapshot_keeps_monitor_out_until_final_rollout_projection(
   assert events.index(
     "authority-clear:BROKER_POSITION_SNAPSHOT_UPDATED"
   ) < events.index("snapshot-finalize-complete")
-  assert events.index("snapshot-finalize-complete") < events.index(
-    "monitor-publish"
-  )
+  assert events.index("snapshot-finalize-complete") < events.index("monitor-publish")
 
 
 @pytest.mark.asyncio
@@ -811,14 +810,11 @@ async def test_failed_newer_full_generation_blocks_intermediate_sequence(
   calls: list[str] = []
 
   def is_resumable() -> bool:
-    return (
-      not state["is_complete"]
-      and str(state["last_error"] or "").startswith(
-        (
-          "SNAPSHOT_APPLY_IN_PROGRESS",
-          "SNAPSHOT_APPLY_FAILED",
-          "SNAPSHOT_AUTHORITY_INVALIDATION_FAILED",
-        )
+    return not state["is_complete"] and str(state["last_error"] or "").startswith(
+      (
+        "SNAPSHOT_APPLY_IN_PROGRESS",
+        "SNAPSHOT_APPLY_FAILED",
+        "SNAPSHOT_AUTHORITY_INVALIDATION_FAILED",
       )
     )
 
@@ -927,11 +923,13 @@ async def test_failed_newer_full_generation_blocks_intermediate_sequence(
         }
       },
       "unavailable_accounts": [],
-      "orders": [{
-        "account_id": "account-1",
-        "order_id": f"order-{sequence}",
-        "order_status": "SUBMITTED",
-      }],
+      "orders": [
+        {
+          "account_id": "account-1",
+          "order_id": f"order-{sequence}",
+          "order_status": "SUBMITTED",
+        }
+      ],
       "trades": [],
     }
     value["snapshot_hash"] = sha256(
@@ -1171,10 +1169,7 @@ async def test_invalid_authoritative_sequence_still_fails_closed(
     )
 
   fail_closed.assert_awaited_once()
-  assert (
-    fail_closed.await_args.kwargs["failure_kind"]
-    == "SNAPSHOT_APPLY_FAILED"
-  )
+  assert fail_closed.await_args.kwargs["failure_kind"] == "SNAPSHOT_APPLY_FAILED"
 
 
 @pytest.mark.asyncio

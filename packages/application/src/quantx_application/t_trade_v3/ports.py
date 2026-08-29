@@ -14,9 +14,7 @@ from quantx_domain.trading.t_trade_opportunity_engine import (
   OpportunityReferenceProfile,
 )
 
-ProfilePayload = Optional[
-  OpportunityReferenceProfile | Mapping[str, Any]
-]
+ProfilePayload = Optional[OpportunityReferenceProfile | Mapping[str, Any]]
 
 
 class D1ReferenceProfilePort(Protocol):
@@ -28,6 +26,7 @@ class D1ReferenceProfilePort(Protocol):
     instrument_code: str,
     evaluated_at: datetime,
     required_version: Optional[str] = None,
+    required_fingerprint: Optional[str] = None,
   ) -> ProfilePayload: ...
 
 

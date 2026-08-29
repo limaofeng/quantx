@@ -873,6 +873,18 @@ def build_t_trade_replay_metrics(
     for source, count in price_limit_source_counts.items()
     if source.startswith("MISSING_")
   )
+  cumulative_volume_source_counts = {
+    str(key): max(0, _integer(value))
+    for key, value in dict(
+      params.get("replay_cumulative_volume_source_counts") or {}
+    ).items()
+  }
+  derived_cumulative_volume_events = cumulative_volume_source_counts.get(
+    "DERIVED_VOLUME_LOTS", 0
+  )
+  missing_cumulative_volume_events = cumulative_volume_source_counts.get(
+    "UNAVAILABLE", 0
+  )
   tick_read_audit = dict(params.get("replay_tick_read_audit") or {})
   tick_read_issues = list(tick_read_audit.get("issues") or [])
   quality_messages = []
@@ -887,6 +899,14 @@ def build_t_trade_replay_metrics(
   if missing_limit_events:
     quality_messages.append(
       f"{missing_limit_events} 个行情事件缺少可确认的涨跌停价，严格风控保持拒绝"
+    )
+  if derived_cumulative_volume_events:
+    quality_messages.append(
+      f"{derived_cumulative_volume_events} 个行情事件的累计成交股数由手数按每手 100 股派生"
+    )
+  if missing_cumulative_volume_events:
+    quality_messages.append(
+      f"{missing_cumulative_volume_events} 个行情事件缺少可用累计成交量，机会引擎保持不可决策"
     )
   if tick_read_issues:
     quality_messages.append(f"{len(tick_read_issues)} 个 Tick 读取窗口未通过完整性校验")
@@ -941,6 +961,7 @@ def build_t_trade_replay_metrics(
       ),
       "price_limit_policy": price_limit_policy,
       "price_limit_source_counts": price_limit_source_counts,
+      "cumulative_volume_source_counts": cumulative_volume_source_counts,
       "tick_read_audit": tick_read_audit,
     },
     "summary": {

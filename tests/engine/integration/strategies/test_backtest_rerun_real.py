@@ -9,10 +9,11 @@ not mock repositories.
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
+from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi.schema import schema
 from quantx_engine.strategy_executor import ExecutionStatus
 from quantx_engine.strategy_manager import strategy_manager
@@ -30,40 +31,12 @@ TARGET_RUN_ID = os.getenv(
   "PULLBACK_GRID_RERUN_REAL_RUN_ID",
   "632958c3-751f-4862-80ab-b61ca30c0a8a",
 )
-TARGET_BACKTEST_START_TIME = os.getenv(
-  "PULLBACK_GRID_RERUN_BACKTEST_START_TIME",
-  "2026-04-14 00:00:00",
-)
-TARGET_BACKTEST_END_TIME = os.getenv(
-  "PULLBACK_GRID_RERUN_BACKTEST_END_TIME",
-  "2026-05-14 23:59:59",
-)
+TARGET_BACKTEST_START_TIME = os.getenv("PULLBACK_GRID_RERUN_BACKTEST_START_TIME")
+TARGET_BACKTEST_END_TIME = os.getenv("PULLBACK_GRID_RERUN_BACKTEST_END_TIME")
 
 HISTORY_QUERY = """
 query BacktestHistory($runId: String!) {
   backtestHistory(runId: $runId) {
-    id
-    strategyRunId
-    version
-    status
-    backtestStartTime
-    backtestEndTime
-    createdAt
-  }
-}
-"""
-
-RERUN_MUTATION = """
-mutation RerunBacktestVersion(
-  $runId: String!
-  $backtestStartTime: DateTime
-  $backtestEndTime: DateTime
-) {
-  rerunBacktestVersion(
-    runId: $runId
-    backtestStartTime: $backtestStartTime
-    backtestEndTime: $backtestEndTime
-  ) {
     id
     strategyRunId
     version
@@ -108,7 +81,32 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
   return None
 
 
-def _configured_backtest_window() -> tuple[datetime, datetime]:
+def _graphql_context() -> Dict[str, Any]:
+  return {
+    "principal": Principal(
+      user_id="backtest-rerun-test",
+      username="backtest-rerun-test",
+      display_name="Backtest Rerun Test",
+      device_session_id="backtest-rerun-test-session",
+      access_token_expires_at=(
+        datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=30)
+      ),
+      permissions=frozenset({"strategy:read", "strategy:write"}),
+      authorized_account_ids=(),
+    ),
+    "request_id": "backtest-rerun-real-test",
+  }
+
+
+def _configured_backtest_window(
+  run: StrategyRun,
+  history: List[StrategyBacktest],
+) -> tuple[datetime, datetime]:
+  if TARGET_BACKTEST_START_TIME is None and TARGET_BACKTEST_END_TIME is None:
+    return _choose_backtest_window(run, history)
+  assert TARGET_BACKTEST_START_TIME and TARGET_BACKTEST_END_TIME, (
+    "重新回测时间范围必须同时配置开始与结束时间"
+  )
   start_time = _parse_datetime(TARGET_BACKTEST_START_TIME)
   end_time = _parse_datetime(TARGET_BACKTEST_END_TIME)
   assert start_time and end_time, (
@@ -159,7 +157,11 @@ async def _get_backtest(backtest_id: str) -> StrategyBacktest:
 
 
 async def _graphql_history(run_id: str) -> List[Dict[str, Any]]:
-  result = await schema.execute(HISTORY_QUERY, variable_values={"runId": run_id})
+  result = await schema.execute(
+    HISTORY_QUERY,
+    variable_values={"runId": run_id},
+    context_value=_graphql_context(),
+  )
   assert not result.errors, result.errors
   return list(result.data["backtestHistory"])
 
@@ -168,10 +170,10 @@ async def _wait_for_runtime_task(run_id: str, timeout_seconds: float = 300.0):
   deadline = asyncio.get_running_loop().time() + timeout_seconds
   while asyncio.get_running_loop().time() < deadline:
     runtime = strategy_manager.get_run(run_id)
-    if runtime and runtime.task is not None:
-      return runtime
     if runtime and runtime.status == ExecutionStatus.ERROR:
       raise AssertionError(runtime.error_message or "后台启动回测任务失败")
+    if runtime and runtime.task is not None:
+      return runtime
     await asyncio.sleep(0.5)
   raise AssertionError("重新回测后台启动超时")
 
@@ -222,30 +224,29 @@ async def test_rerun_backtest_version_creates_history_for_specific_run():
   assert before_records, "重新回测前必须已有至少一个历史版本"
   before_versions = {record.version for record in before_records}
   before_max_version = max(before_versions)
-  start_time, end_time = _configured_backtest_window()
+  start_time, end_time = _configured_backtest_window(run, before_records)
 
   before_history = await _graphql_history(TARGET_RUN_ID)
   assert len(before_history) == len(before_records)
 
-  mutation_result = await schema.execute(
-    RERUN_MUTATION,
-    variable_values={
-      "runId": TARGET_RUN_ID,
-      "backtestStartTime": start_time.isoformat(),
-      "backtestEndTime": end_time.isoformat(),
-    },
+  # Execute the Engine-owned command in this process so the integration run
+  # exercises the checked-out Engine code.  The GraphQL resolver dispatches to
+  # the already-running external Engine process; waiting on this process's
+  # singleton after that dispatch is a false timeout and can accidentally test
+  # a stale deployment instead of the working tree.
+  created_id = await strategy_manager.rerun_backtest_version(
+    TARGET_RUN_ID,
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
   )
-  assert not mutation_result.errors, mutation_result.errors
-
-  created = mutation_result.data["rerunBacktestVersion"]
-  assert created["strategyRunId"] == TARGET_RUN_ID
-  assert created["version"] == before_max_version + 1
-  assert created["id"]
+  created_backtest = await _get_backtest(created_id)
+  assert created_backtest.strategy_run_id == TARGET_RUN_ID
+  assert created_backtest.version == before_max_version + 1
 
   after_history = await _graphql_history(TARGET_RUN_ID)
   after_ids = {item["id"] for item in after_history}
   after_versions = {item["version"] for item in after_history}
-  assert created["id"] in after_ids
+  assert created_id in after_ids
   assert len(after_history) == len(before_history) + 1
   assert after_versions == before_versions | {before_max_version + 1}
   assert len(after_history) >= 2
@@ -261,5 +262,5 @@ async def test_rerun_backtest_version_creates_history_for_specific_run():
   assert runtime.error_message is None, runtime.error_message
   assert runtime.status == ExecutionStatus.COMPLETED
 
-  completed_backtest = await _get_backtest(created["id"])
+  completed_backtest = await _get_backtest(created_id)
   assert completed_backtest.status == "COMPLETED"

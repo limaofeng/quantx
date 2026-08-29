@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional
 
-from sqlalchemy import and_, insert, or_, select
+from sqlalchemy import and_, delete, insert, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,12 +29,30 @@ _EVALUATION_BATCH_INSERT_CHUNK_SIZE = 256
 class TTradeOpportunityEvaluationRepository:
   """Append and page immutable opportunity evaluations.
 
-  The repository deliberately exposes no update or delete operation. A caller may
-  pass ``commit=False`` to include the append in a wider application unit of work.
+  Ordinary callers cannot update or delete evidence. The sole reset operation is
+  the backtest-rerun lifecycle boundary: rows have no backtest-version column, so
+  a new version must replace the run-scoped projection while the immutable report
+  artifact preserves the previous version's audit history.
   """
 
   def __init__(self, db: AsyncSession) -> None:
     self.db = db
+
+  async def reset_for_backtest_rerun(
+    self,
+    strategy_run_id: str,
+    *,
+    commit: bool = True,
+  ) -> int:
+    normalized_run_id = _required_text(strategy_run_id, "策略运行标识", 36)
+    result = await self.db.execute(
+      delete(TTradeOpportunityEvaluation).where(
+        TTradeOpportunityEvaluation.strategy_run_id == normalized_run_id
+      )
+    )
+    if commit:
+      await self.db.commit()
+    return int(result.rowcount or 0)
 
   async def get_by_event_key(
     self,
@@ -292,9 +310,7 @@ class TTradeOpportunityEvaluationRepository:
   ) -> list[TTradeOpportunityEvaluation]:
     """Write fresh rows first, then reconcile only an exceptional outcome."""
 
-    expected_by_key = {
-      str(item["event_key"]): item for item in prepared
-    }
+    expected_by_key = {str(item["event_key"]): item for item in prepared}
     event_keys = tuple(expected_by_key)
     rows_to_insert_by_key = {
       event_key: {
@@ -309,10 +325,7 @@ class TTradeOpportunityEvaluationRepository:
     for attempt in range(_BATCH_APPEND_MAX_ATTEMPTS):
       try:
         inserted_by_key = await self._insert_prepared_many(pending)
-        expected_pending_keys = {
-          str(item["event_key"])
-          for item in pending
-        }
+        expected_pending_keys = {str(item["event_key"]) for item in pending}
         if set(inserted_by_key) != expected_pending_keys:
           raise RuntimeError("做 T 机会评估批量追加返回行不完整")
         await self.db.commit()
@@ -355,8 +368,10 @@ class TTradeOpportunityEvaluationRepository:
       # Keep every bounded multi-values INSERT inside the caller's current
       # transaction.  Passing ``chunk`` to execute() would choose executemany
       # and make PostgreSQL/asyncpg RETURNING degrade at daily batch scale.
-      statement = insert(TTradeOpportunityEvaluation).values(chunk).returning(
-        TTradeOpportunityEvaluation
+      statement = (
+        insert(TTradeOpportunityEvaluation)
+        .values(chunk)
+        .returning(TTradeOpportunityEvaluation)
       )
       result = await self.db.execute(statement)
       rows.extend(result.scalars().all())
@@ -388,8 +403,7 @@ class TTradeOpportunityEvaluationRepository:
     event_keys: Iterable[str],
   ) -> dict[str, TTradeOpportunityEvaluation]:
     normalized_keys = tuple(
-      _required_text(event_key, "评估事件键", 160)
-      for event_key in event_keys
+      _required_text(event_key, "评估事件键", 160) for event_key in event_keys
     )
     if not normalized_keys:
       return {}
@@ -398,10 +412,7 @@ class TTradeOpportunityEvaluationRepository:
         TTradeOpportunityEvaluation.event_key.in_(normalized_keys)
       )
     )
-    return {
-      str(row.event_key): row
-      for row in result.scalars().all()
-    }
+    return {str(row.event_key): row for row in result.scalars().all()}
 
 
 class TTradeInstrumentProfileRepository:
@@ -623,9 +634,7 @@ def _prepare_evaluation(
     else None
   )
   normalized_metrics = _json_object(metrics or {}, "评估指标")
-  normalized_count = int(
-    1 if coalesced_count is None else coalesced_count
-  )
+  normalized_count = int(1 if coalesced_count is None else coalesced_count)
   normalized_window_started_at = (
     _storage_time(window_started_at) if window_started_at is not None else None
   )

@@ -63,9 +63,7 @@ def snapshot_dependencies(monkeypatch):
       commit=True,
       flush=True,
     ):
-      deleted_position_snapshots.append(
-        (run_id, list(positions), commit)
-      )
+      deleted_position_snapshots.append((run_id, list(positions), commit))
 
     async def update_existing_positions_snapshot(
       self,
@@ -75,9 +73,7 @@ def snapshot_dependencies(monkeypatch):
       commit=True,
       flush=True,
     ):
-      updated_position_snapshots.append(
-        (run_id, list(positions), commit)
-      )
+      updated_position_snapshots.append((run_id, list(positions), commit))
 
   monkeypatch.setattr(connection_module, "get_async_db", fake_get_async_db)
   monkeypatch.setattr(
@@ -144,11 +140,11 @@ async def test_snapshot_keeps_tick_cas_but_skips_unchanged_position_projection(
 async def test_snapshot_updates_same_code_when_position_values_change(
   snapshot_dependencies,
 ) -> None:
-  _calls, results, replacements, _fake_db, incremental_updates = (
-    snapshot_dependencies
-  )
+  _calls, results, replacements, _fake_db, incremental_updates = snapshot_dependencies
   results.extend([True, True])
-  manager = RuntimeStateManager(run_id="run-position-value-change", persist_enabled=True)
+  manager = RuntimeStateManager(
+    run_id="run-position-value-change", persist_enabled=True
+  )
   manager.update_position("600000.SH", long_volume=100, last_price=10.0)
 
   assert await manager.save_snapshot() is True
@@ -157,21 +153,15 @@ async def test_snapshot_updates_same_code_when_position_values_change(
 
   # Same code-set is insufficient: a durable value change must use the batch
   # update path rather than being skipped.
-  assert replacements == [
-    ("run-position-value-change", ["600000.SH"], False)
-  ]
-  assert incremental_updates == [
-    ("run-position-value-change", ["600000.SH"], False)
-  ]
+  assert replacements == [("run-position-value-change", ["600000.SH"], False)]
+  assert incremental_updates == [("run-position-value-change", ["600000.SH"], False)]
 
 
 @pytest.mark.asyncio
 async def test_snapshot_replaces_complete_positions_for_addition_and_deletion(
   snapshot_dependencies,
 ) -> None:
-  _calls, results, replacements, _fake_db, incremental_updates = (
-    snapshot_dependencies
-  )
+  _calls, results, replacements, _fake_db, incremental_updates = snapshot_dependencies
   results.extend([True, True, True])
   manager = RuntimeStateManager(run_id="run-position-set-change", persist_enabled=True)
   manager.update_position("600000.SH", long_volume=100, last_price=10.0)
@@ -195,9 +185,7 @@ async def test_snapshot_replaces_complete_positions_for_addition_and_deletion(
 async def test_snapshot_failure_forces_position_replacement_on_retry(
   snapshot_dependencies,
 ) -> None:
-  calls, results, replacements, _fake_db, incremental_updates = (
-    snapshot_dependencies
-  )
+  calls, results, replacements, _fake_db, incremental_updates = snapshot_dependencies
   results.extend([True, False, True])
   manager = RuntimeStateManager(run_id="run-position-retry", persist_enabled=True)
   manager.update_position("600000.SH", long_volume=100, last_price=10.0)
@@ -267,6 +255,43 @@ async def test_state_repository_compare_and_swap_allows_only_one_session(
     authoritative = await StrategyRunStateRepository(db).get_state("run-cas")
     assert authoritative.version == 2
     assert authoritative.custom_state == {"winner": "first"}
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_state_repository_delete_state_joins_caller_transaction(tmp_path) -> None:
+  from quantx_infrastructure.database.relational_base import Base
+  from quantx_infrastructure.models.strategy_run_state import StrategyRunState
+  from quantx_infrastructure.repositories.strategy_run_state_repository import (
+    StrategyRunStateRepository,
+  )
+  from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+  database_path = (tmp_path / "runtime-state-delete.sqlite3").as_posix()
+  engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=[StrategyRunState.__table__],
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  async with sessions() as db:
+    repository = StrategyRunStateRepository(db)
+    assert await repository.upsert_state(
+      run_id="run-delete",
+      custom_state={"checkpoint": "old-version"},
+      expected_version=0,
+    )
+    await repository.delete_state("run-delete", commit=False)
+    assert await repository.get_state("run-delete") is None
+    await db.rollback()
+
+  async with sessions() as db:
+    restored = await StrategyRunStateRepository(db).get_state("run-delete")
+    assert restored is not None
+    assert restored.custom_state == {"checkpoint": "old-version"}
   await engine.dispose()
 
 
@@ -361,7 +386,10 @@ async def test_position_repository_replaces_complete_snapshot_in_one_transaction
     ("300001.SZ", 600, 31.0),
     ("600000.SH", 500, 12.0),
   ]
-  assert not any(statement.lstrip().upper().startswith("SELECT") for statement in checkpoint_statements)
+  assert not any(
+    statement.lstrip().upper().startswith("SELECT")
+    for statement in checkpoint_statements
+  )
   await engine.dispose()
 
 
@@ -421,7 +449,9 @@ async def test_runtime_manager_bulk_position_snapshot_keeps_tick_checkpoint_cas(
     )
 
   assert state.version == 2
-  assert [(row.instrument_code, row.long_volume, row.last_price) for row in positions] == [
+  assert [
+    (row.instrument_code, row.long_volume, row.last_price) for row in positions
+  ] == [
     ("000001.SZ", 200, 20.0),
     ("600000.SH", 300, 11.0),
   ]
@@ -584,9 +614,7 @@ async def test_external_cas_winner_replaces_all_stale_runtime_truth(
   # local position cache.  The next normal checkpoint must replace all rows.
   manager.update_custom_state({"next": "checkpoint"})
   assert await manager.save_snapshot() is True
-  assert position_replacements == [
-    ("run-external-cas", ["600000.SH"], False)
-  ]
+  assert position_replacements == [("run-external-cas", ["600000.SH"], False)]
 
 
 @pytest.mark.asyncio
@@ -692,9 +720,7 @@ async def test_restore_forces_full_position_snapshot_on_first_checkpoint(
   assert manager._force_position_snapshot is True
   manager.update_custom_state({"candidate": "RESTORED"})
   assert await manager.save_snapshot() is True
-  assert replacements == [
-    ("run-restore-force", ["600000.SH"], False)
-  ]
+  assert replacements == [("run-restore-force", ["600000.SH"], False)]
 
 
 @pytest.mark.asyncio
@@ -884,10 +910,7 @@ async def test_checkpoint_adopts_authoritative_marker_after_commit_unknown(
 
   monkeypatch.setattr(manager, "save_snapshot", commit_then_raise_equivalent)
 
-  assert (
-    await manager.checkpoint_durable_runtime_event("trade:committed-event")
-    is True
-  )
+  assert await manager.checkpoint_durable_runtime_event("trade:committed-event") is True
   assert manager._state["version"] == 3
   assert manager.get_account()["cash"] == pytest.approx(9_000.0)
   adopted_position = manager.get_position("600000.SH")
@@ -1081,20 +1104,26 @@ async def test_prepared_checkpoint_crash_boundaries_preserve_replayable_state(
   if crash_boundary == "FINALIZE_KNOWN_FAILURE":
     failed_finalizer = restored_from_durable()
     install_durable_save(failed_finalizer, persist=False, result=False)
-    assert await failed_finalizer.finalize_prepared_checkpoint(
-      prepared_checkpoint_id=prepared.checkpoint_id,
-      materialization_event_keys=receipt_keys,
-    ) is None
+    assert (
+      await failed_finalizer.finalize_prepared_checkpoint(
+        prepared_checkpoint_id=prepared.checkpoint_id,
+        materialization_event_keys=receipt_keys,
+      )
+      is None
+    )
     assert failed_finalizer.latest_prepared_checkpoint() is not None
   elif crash_boundary == "FINALIZE_COMMIT_UNKNOWN":
     unknown_finalizer = restored_from_durable()
     # The DB committed, but the commit response was unavailable.  A fresh
     # owner follows durable truth and must not replay a vanished outbox.
     install_durable_save(unknown_finalizer, persist=True, result=False)
-    assert await unknown_finalizer.finalize_prepared_checkpoint(
-      prepared_checkpoint_id=prepared.checkpoint_id,
-      materialization_event_keys=receipt_keys,
-    ) is None
+    assert (
+      await unknown_finalizer.finalize_prepared_checkpoint(
+        prepared_checkpoint_id=prepared.checkpoint_id,
+        materialization_event_keys=receipt_keys,
+      )
+      is None
+    )
     recovered = restored_from_durable()
     assert recovered.has_prepared_checkpoint() is False
     finalized = recovered.latest_complete_checkpoint(
@@ -1196,7 +1225,9 @@ async def test_damaged_prepared_checkpoint_never_rolls_back_to_old_complete(
   # is retained or restored as a fallback.
   assert recovered is None
   assert len(restored._runtime_checkpoint_records()) == 1
-  assert restored._runtime_checkpoint_records()[0].checkpoint_id == prepared.checkpoint_id
+  assert (
+    restored._runtime_checkpoint_records()[0].checkpoint_id == prepared.checkpoint_id
+  )
   assert restored._state["custom"]["strategy_window"] == {"corrupt": True}
   assert complete.checkpoint_id != prepared.checkpoint_id
 
@@ -1231,12 +1262,17 @@ async def test_finalize_prepared_checkpoint_requires_the_exact_receipt(
   )
   assert prepared is not None
 
-  assert await manager.finalize_prepared_checkpoint(
-    prepared_checkpoint_id=prepared.checkpoint_id,
-    materialization_event_keys=["diagnostic:a"],
-  ) is None
+  assert (
+    await manager.finalize_prepared_checkpoint(
+      prepared_checkpoint_id=prepared.checkpoint_id,
+      materialization_event_keys=["diagnostic:a"],
+    )
+    is None
+  )
   assert manager.latest_prepared_checkpoint() is not None
-  assert {item["event_key"] for item in manager.pending_t_trade_diagnostic_events()} == {
+  assert {
+    item["event_key"] for item in manager.pending_t_trade_diagnostic_events()
+  } == {
     "diagnostic:a",
     "diagnostic:b",
   }
@@ -1353,15 +1389,18 @@ async def test_prepare_checkpoint_commit_unknown_recovers_durable_handoff() -> N
     return False
 
   manager.save_snapshot = commit_then_return_unknown  # type: ignore[method-assign]
-  assert await manager.prepare_checkpoint(
-    trade_date="2026-08-21",
-    session=None,
-    boundary_source_time=datetime(2026, 8, 21, 15, 0),
-    processed_watermark={"stream_id": "backtest", "sequence": 200},
-    continuity_generation=1,
-    completeness={"complete": True},
-    materialization_events=[{"event_key": "diagnostic:unknown"}],
-  ) is None
+  assert (
+    await manager.prepare_checkpoint(
+      trade_date="2026-08-21",
+      session=None,
+      boundary_source_time=datetime(2026, 8, 21, 15, 0),
+      processed_watermark={"stream_id": "backtest", "sequence": 200},
+      continuity_generation=1,
+      completeness={"complete": True},
+      materialization_events=[{"event_key": "diagnostic:unknown"}],
+    )
+    is None
+  )
 
   restored = RuntimeStateManager(
     run_id="run-checkpoint-prepare-unknown",
@@ -1392,10 +1431,7 @@ async def test_day_checkpoint_outbox_covers_9600_fixture_worst_case_and_caps() -
   manager.save_snapshot = fake_save_snapshot  # type: ignore[method-assign]
   # The fixed 9,600-Tick fixture can put approximately half its input in one
   # virtual day.  Exact MATERIAL rows must fit without silently coalescing.
-  one_day_events = [
-    {"event_key": f"diagnostic:day:{index}"}
-    for index in range(4_800)
-  ]
+  one_day_events = [{"event_key": f"diagnostic:day:{index}"} for index in range(4_800)]
   prepared = await manager.prepare_checkpoint(
     trade_date="2026-08-21",
     session=None,
@@ -1417,13 +1453,13 @@ async def test_day_checkpoint_outbox_covers_9600_fixture_worst_case_and_caps() -
     [{"event_key": f"diagnostic:cap:{index}"} for index in range(8_192)]
   )
   with pytest.raises(RuntimeError, match="8192"):
-    capped.enqueue_t_trade_diagnostic_events(
-      [{"event_key": "diagnostic:cap:overflow"}]
-    )
+    capped.enqueue_t_trade_diagnostic_events([{"event_key": "diagnostic:cap:overflow"}])
 
 
 @pytest.mark.asyncio
-async def test_prepared_checkpoint_keeps_large_diagnostic_payload_once_and_validates_manifest() -> None:
+async def test_prepared_checkpoint_keeps_large_diagnostic_payload_once_and_validates_manifest() -> (
+  None
+):
   """A day batch owns full diagnostics only in its retryable top-level outbox."""
 
   manager = RuntimeStateManager(
@@ -1477,9 +1513,9 @@ async def test_prepared_checkpoint_keeps_large_diagnostic_payload_once_and_valid
 
   # An outbox payload mutation with an unchanged event key is still a corrupt
   # handoff, not a safe retry of the earlier PREPARED boundary.
-  outbox["diagnostic:large:0000"]["signal_snapshot"][
-    "full_diagnostic_sentinel"
-  ] = "mutated"
+  outbox["diagnostic:large:0000"]["signal_snapshot"]["full_diagnostic_sentinel"] = (
+    "mutated"
+  )
   assert manager.prepared_t_trade_diagnostic_events(prepared.checkpoint_id) is None
   assert manager.latest_prepared_checkpoint() is None
 
@@ -1627,9 +1663,7 @@ async def test_checkpoint_does_not_replace_manager_markers_from_strategy_snapsho
     "trade:already-applied",
     "trade:new-event",
   ]
-  assert manager._state["custom"]["order_cash_reservations"] == {
-    "order-1": 100.0
-  }
+  assert manager._state["custom"]["order_cash_reservations"] == {"order-1": 100.0}
   assert manager.get_custom("strategy_value") == 42
 
 
@@ -1788,9 +1822,7 @@ async def test_boundary_capture_replaces_strategy_keys_and_preserves_manager_cus
 
   assert await manager.drain_strategy_state_changes()
   assert strategy.state.to_dict_calls == source_reads_at_start + 1
-  assert manager.get_custom("instrument_states") == {
-    "600000.SH": {"phase": "FRESH"}
-  }
+  assert manager.get_custom("instrument_states") == {"600000.SH": {"phase": "FRESH"}}
   assert manager.get_custom("runtime_events") == [{"event_key": "latest"}]
   assert manager.get_custom("stale_strategy_key") is None
   assert manager.get_custom(T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY) == {
@@ -1801,9 +1833,7 @@ async def test_boundary_capture_replaces_strategy_keys_and_preserves_manager_cus
     "revision": 9,
     "source": "manager",
   }
-  assert manager.get_custom("auto_exit_plan_book") == {
-    "plan-1": {"status": "OPEN"}
-  }
+  assert manager.get_custom("auto_exit_plan_book") == {"plan-1": {"status": "OPEN"}}
 
   strategy.state.values.pop("runtime_events")
   strategy.queue.put_nowait(
@@ -1910,7 +1940,9 @@ async def test_state_sync_persistence_projection_failure_is_fail_closed(
   assert manager._state_sync_durable_strategy_snapshot is None
 
 
-def test_pre_subscription_capture_uses_compact_projection_and_rejects_raw_hot_window() -> None:
+def test_pre_subscription_capture_uses_compact_projection_and_rejects_raw_hot_window() -> (
+  None
+):
   class FakeState:
     def __init__(self) -> None:
       self.values: dict[str, object] = {
@@ -1960,9 +1992,9 @@ def test_pre_subscription_capture_uses_compact_projection_and_rejects_raw_hot_wi
 
   manager.capture_strategy_state_for_persistence(strategy)
 
-  assert manager._state["custom"]["instrument_states"]["600000.SH"][
-    "opportunity"
-  ]["samples"] == [{"sentinel": "startup-hot-sample"}]
+  assert manager._state["custom"]["instrument_states"]["600000.SH"]["opportunity"][
+    "samples"
+  ] == [{"sentinel": "startup-hot-sample"}]
   projection = manager._checkpoint_state_projection()
   durable_opportunity = projection["custom"]["instrument_states"]["600000.SH"][
     "opportunity"
@@ -2149,9 +2181,9 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   )
 
   assert await manager.drain_strategy_state_changes()
-  full_opportunity = manager._state["custom"]["instrument_states"][
-    "600000.SH"
-  ]["opportunity"]
+  full_opportunity = manager._state["custom"]["instrument_states"]["600000.SH"][
+    "opportunity"
+  ]
   projection = manager._checkpoint_state_projection()
   durable_opportunity = projection["custom"]["instrument_states"]["600000.SH"][
     "opportunity"
@@ -2170,15 +2202,23 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   assert T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY not in projection["custom"]
 
   assert await manager.save_snapshot() is True
-  assert "samples" not in saved_custom_states[-1]["instrument_states"][
-    "600000.SH"
-  ]["opportunity"]
+  assert (
+    "samples"
+    not in saved_custom_states[-1]["instrument_states"]["600000.SH"]["opportunity"]
+  )
   assert "volatile-sample-1" not in repr(saved_custom_states[-1])
   assert saved_custom_states[-1]["runtime_events"] == [
     {"event_key": "runtime-marker-1"}
   ]
   assert "volatile-runtime-event" not in repr(saved_custom_states[-1])
-  assert len(manager._state["custom"]["instrument_states"]["600000.SH"]["opportunity"]["samples"]) == 1_000
+  assert (
+    len(
+      manager._state["custom"]["instrument_states"]["600000.SH"]["opportunity"][
+        "samples"
+      ]
+    )
+    == 1_000
+  )
 
   # A normal terminal teardown removes the source but deliberately retains the
   # compact projection through its final generic RuntimeState save.
@@ -2187,9 +2227,10 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   assert manager._state_sync_durable_strategy_snapshot is not None
   manager._mark_dirty()
   assert await manager.save_snapshot() is True
-  assert "samples" not in saved_custom_states[-1]["instrument_states"][
-    "600000.SH"
-  ]["opportunity"]
+  assert (
+    "samples"
+    not in saved_custom_states[-1]["instrument_states"]["600000.SH"]["opportunity"]
+  )
 
   prepared = await manager.prepare_checkpoint(
     trade_date="2026-08-21",
@@ -2230,7 +2271,9 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   )
   prepared_restore._state["account"] = copy.deepcopy(manager._state["account"])
   prepared_restore._state["positions"] = copy.deepcopy(manager._state["positions"])
-  prepared_restore._state["bucket_ledger"] = copy.deepcopy(manager._state["bucket_ledger"])
+  prepared_restore._state["bucket_ledger"] = copy.deepcopy(
+    manager._state["bucket_ledger"]
+  )
   prepared_restore._state["custom"] = copy.deepcopy(saved_custom_states[-1])
   prepared_restore._state["version"] = manager._state["version"]
   assert prepared_restore.latest_prepared_checkpoint() == prepared
@@ -2255,15 +2298,20 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   restored._state["custom"] = copy.deepcopy(saved_custom_states[-1])
   restored._state["version"] = manager._state["version"]
   assert restored.latest_complete_checkpoint() == finalized
-  assert "samples" not in restored._checkpoint_state_projection()["custom"][
-    "instrument_states"
-  ]["600000.SH"]["opportunity"]
+  assert (
+    "samples"
+    not in restored._checkpoint_state_projection()["custom"]["instrument_states"][
+      "600000.SH"
+    ]["opportunity"]
+  )
 
   await manager.stop()
   assert manager._state_sync_durable_strategy_snapshot is None
 
 
-def test_checkpoint_state_projection_filters_checkpoint_metadata_before_deepcopy() -> None:
+def test_checkpoint_state_projection_filters_checkpoint_metadata_before_deepcopy() -> (
+  None
+):
   class MustNotCopy:
     def __deepcopy__(self, _memo):
       raise AssertionError("checkpoint history must be filtered before deepcopy")
@@ -2312,7 +2360,9 @@ def test_durable_projection_drops_all_t_trade_opportunity_runtime_events() -> No
   assert "must-not-cross-runtime-state" not in repr(projected)
 
 
-def test_durable_trace_record_keeps_only_supplemental_and_rebuilds_publish_shape() -> None:
+def test_durable_trace_record_keeps_only_supplemental_and_rebuilds_publish_shape() -> (
+  None
+):
   from quantx_domain.trading.decision_trace import DecisionTrace
 
   timestamp = datetime(2026, 8, 24, 10, 1, tzinfo=timezone.utc)
@@ -2583,6 +2633,7 @@ async def test_failed_trace_append_keeps_exact_audit_for_snapshot_retry(
   assert published_traces == []
 
   failure = False
+
   # A new DB implementation lets the retry commit; re-use a transaction that
   # records the one final commit rather than weakening the previous failure.
   class SucceedingDb:
@@ -2714,9 +2765,7 @@ async def test_commit_unknown_acknowledges_trace_only_after_snapshot_token_prove
   assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
     "trace-commit-unknown"
   ]
-  assert [trace["trace_id"] for trace in published_traces] == [
-    "trace-commit-unknown"
-  ]
+  assert [trace["trace_id"] for trace in published_traces] == ["trace-commit-unknown"]
 
 
 @pytest.mark.asyncio
@@ -2941,7 +2990,9 @@ async def test_decision_trace_idempotent_replay_accepts_identical_content() -> N
 
 
 @pytest.mark.asyncio
-async def test_decision_trace_append_fresh_batch_uses_one_jsonb_recordset_execute() -> None:
+async def test_decision_trace_append_fresh_batch_uses_one_jsonb_recordset_execute() -> (
+  None
+):
   """Fresh trace batches bind one PostgreSQL JSONB recordset without executemany."""
 
   from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
@@ -3004,7 +3055,8 @@ async def test_decision_trace_append_fresh_batch_uses_one_jsonb_recordset_execut
   assert json.loads(parameter_batch["trace_payload"]) == [
     {
       **item,
-      "decided_at": item["decided_at"].astimezone(timezone.utc)
+      "decided_at": item["decided_at"]
+      .astimezone(timezone.utc)
       .replace(tzinfo=None)
       .isoformat(),
     }
@@ -3082,7 +3134,9 @@ async def test_decision_trace_append_sqlite_test_session_uses_values_fallback() 
 
 
 @pytest.mark.asyncio
-async def test_decision_trace_append_600_rows_uses_one_recordset_without_intermediate_commit() -> None:
+async def test_decision_trace_append_600_rows_uses_one_recordset_without_intermediate_commit() -> (
+  None
+):
   from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
     StrategyDecisionTraceRepository,
   )
@@ -3162,10 +3216,7 @@ async def test_decision_trace_replay_across_chunks_uses_one_final_select() -> No
     }
     for index in range(1_100)
   ]
-  replayed = [
-    SimpleNamespace(**payload)
-    for payload in payloads[1_024:]
-  ]
+  replayed = [SimpleNamespace(**payload) for payload in payloads[1_024:]]
 
   class ScalarResult:
     def __init__(self, values) -> None:
@@ -3189,9 +3240,7 @@ async def test_decision_trace_replay_across_chunks_uses_one_final_select() -> No
       if call_index == 2:
         return ScalarResult(replayed)
       start = call_index * 1_024
-      return ScalarResult(
-        [item["id"] for item in payloads[start : start + 1_024]]
-      )
+      return ScalarResult([item["id"] for item in payloads[start : start + 1_024]])
 
   db = FakeDb()
   records = await StrategyDecisionTraceRepository(db).append_traces(
@@ -3209,17 +3258,16 @@ async def test_decision_trace_replay_across_chunks_uses_one_final_select() -> No
   from sqlalchemy.dialects import postgresql
 
   assert all(
-    "jsonb_to_recordset"
-    in str(statement.compile(dialect=postgresql.dialect()))
+    "jsonb_to_recordset" in str(statement.compile(dialect=postgresql.dialect()))
     for statement, _params in db.calls[:2]
   )
-  assert str(db.calls[2][0].compile(dialect=postgresql.dialect())).startswith(
-    "SELECT "
-  )
+  assert str(db.calls[2][0].compile(dialect=postgresql.dialect())).startswith("SELECT ")
 
 
 @pytest.mark.asyncio
-async def test_create_trace_normalizes_aware_decided_at_at_repository_boundary() -> None:
+async def test_create_trace_normalizes_aware_decided_at_at_repository_boundary() -> (
+  None
+):
   """The legacy single-row entrypoint obeys the same timestamp contract."""
 
   from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
@@ -3333,6 +3381,4 @@ async def test_decision_trace_idempotent_replay_rejects_different_content() -> N
   assert "jsonb_to_recordset" in str(
     db.calls[0][0].compile(dialect=postgresql.dialect())
   )
-  assert str(db.calls[1][0].compile(dialect=postgresql.dialect())).startswith(
-    "SELECT "
-  )
+  assert str(db.calls[1][0].compile(dialect=postgresql.dialect())).startswith("SELECT ")

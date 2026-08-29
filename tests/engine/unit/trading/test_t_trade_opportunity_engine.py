@@ -1112,6 +1112,20 @@ def test_startup_coverage_with_valid_profile_is_warming_and_scores_are_null():
   assert result.evaluation.opportunity_score is None
 
 
+def test_cumulative_amount_and_volume_are_validated_independently() -> None:
+  _, results = _reduce_all(
+    [
+      _sample(0, 10.0, 0, amount=100_000, volume=None),
+      _sample(5, 10.0, 1, amount=110_000, volume=None),
+      _sample(20, 10.0, 2, amount=120_000, volume=None),
+    ]
+  )
+
+  reasons = results[-1].evaluation.data_health_reasons
+  assert "REQUIRED_FIELD_CUMULATIVE_VOLUME_UNAVAILABLE" in reasons
+  assert "REQUIRED_FIELD_CUMULATIVE_AMOUNT_UNAVAILABLE" not in reasons
+
+
 def test_state_round_trip_is_exact_and_rejects_old_schema():
   state, _ = _reduce_all(_pullback_samples())
 
@@ -1190,9 +1204,7 @@ def test_seeded_episodes_emit_at_most_one_candidate_across_adversarial_inputs(se
   for _, candidate in created:
     assert candidate is not None
     candidates_by_episode.setdefault(candidate.episode_id, []).append(candidate)
-  assert all(
-    len(candidates) <= 1 for candidates in candidates_by_episode.values()
-  )
+  assert all(len(candidates) <= 1 for candidates in candidates_by_episode.values())
   assert len(candidates_by_episode) == len(created)
 
   for marker in ("first_duplicate", "second_duplicate"):
