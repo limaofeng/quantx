@@ -706,7 +706,8 @@ class MonitorStorage:
     target_id: str | None = None,
     page: int = 1,
     page_size: int = 20,
-  ) -> tuple[int, list[dict[str, Any]]]:
+    max_incident_id: int | None = None,
+  ) -> tuple[int, int, list[dict[str, Any]]]:
     assert self._db is not None
     where = """
       WHERE opened_at <= ? AND (resolved_at IS NULL OR resolved_at >= ?)
@@ -715,8 +716,16 @@ class MonitorStorage:
     if target_id is not None:
       where += " AND target_id = ?"
       params.append(target_id)
-    # Keep count and page consistent with the scheduler on this connection.
+    # Freeze the insertion boundary, count and page together. checked_at is captured
+    # before probing, so incidents persisted later may have opened_at before now.
     async with self._write_lock:
+      if max_incident_id is None:
+        watermark = await (
+          await self._db.execute("SELECT COALESCE(MAX(id), 0) FROM incidents")
+        ).fetchone()
+        max_incident_id = int(watermark[0])
+      where += " AND id <= ?"
+      params.append(max_incident_id)
       count = await (
         await self._db.execute("SELECT COUNT(*) FROM incidents " + where, params)
       ).fetchone()
@@ -732,7 +741,7 @@ class MonitorStorage:
           [*params, page_size, (page - 1) * page_size],
         )
       ).fetchall()
-    return int(count[0]), [dict(row) for row in rows]
+    return int(count[0]), max_incident_id, [dict(row) for row in rows]
 
   async def account_safety_states(self) -> dict[str, dict[str, Any]]:
     assert self._db is not None

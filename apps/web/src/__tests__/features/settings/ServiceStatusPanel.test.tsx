@@ -83,6 +83,7 @@ function incidentPage(incidents: MonitorIncident[]) {
     pageSize: 20,
     total: incidents.length,
     asOf: new Date().toISOString(),
+    maxIncidentId: Math.max(0, ...incidents.map(incident => incident.id)),
     incidents,
   };
 }

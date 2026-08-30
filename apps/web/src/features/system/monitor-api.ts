@@ -72,12 +72,16 @@ export interface MonitorIncident {
   reasonCode: string | null;
 }
 
-export interface MonitorIncidentPage {
+export interface MonitorIncidentSnapshot {
+  asOf: string;
+  maxIncidentId: number;
+}
+
+export interface MonitorIncidentPage extends MonitorIncidentSnapshot {
   range: MonitorRange;
   page: number;
   pageSize: number;
   total: number;
-  asOf: string;
   incidents: MonitorIncident[];
 }
 
@@ -116,7 +120,7 @@ export function getMonitorIncidents(
   page = 1,
   pageSize = 20,
   signal?: AbortSignal,
-  asOf?: string
+  snapshot?: MonitorIncidentSnapshot
 ): Promise<MonitorIncidentPage> {
   const query = new URLSearchParams({
     range,
@@ -124,7 +128,10 @@ export function getMonitorIncidents(
     page: String(page),
     pageSize: String(pageSize),
   });
-  if (asOf) query.set('asOf', asOf);
+  if (snapshot) {
+    query.set('asOf', snapshot.asOf);
+    query.set('maxIncidentId', String(snapshot.maxIncidentId));
+  }
   return getJson<MonitorIncidentPage>(
     `/monitor/api/v1/incidents?${query.toString()}`,
     signal

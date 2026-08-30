@@ -299,7 +299,7 @@ export function ServiceStatusHistoryPanel({ targetId }: { targetId: string }) {
       </header>
 
       {resources.summary.error ? (
-        <Message error onRetry={refresh}>
+        <Message error onRetry={resources.summary.retry}>
           Monitor 当前不可访问，无法确认当前服务状态。
         </Message>
       ) : !summary ? (
@@ -444,7 +444,7 @@ export function ServiceStatusHistoryPanel({ targetId }: { targetId: string }) {
                 </span>
               </div>
               {resources.history.error ? (
-                <Message error onRetry={refresh}>
+                <Message error onRetry={resources.history.retry}>
                   历史曲线暂时不可访问
                 </Message>
               ) : !history ? (
@@ -495,7 +495,7 @@ export function ServiceStatusHistoryPanel({ targetId }: { targetId: string }) {
                 手动刷新获取最新记录，翻页时不自动插入新事故。只读观测，不参与交易门禁。
               </p>
               {resources.incidents.error ? (
-                <Message error onRetry={refresh}>
+                <Message error onRetry={resources.incidents.retry}>
                   事故记录暂时不可访问
                 </Message>
               ) : loadingIncidents ? (
@@ -517,7 +517,7 @@ export function ServiceStatusHistoryPanel({ targetId }: { targetId: string }) {
                     <IncidentItem
                       key={incident.id}
                       incident={incident}
-                      now={now}
+                      now={new Date(incidentPage.asOf).getTime()}
                     />
                   ))}
                 </ul>

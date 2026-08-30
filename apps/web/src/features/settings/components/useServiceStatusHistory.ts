@@ -6,6 +6,7 @@ import {
   getMonitorSummary,
   type MonitorHistory,
   type MonitorIncidentPage,
+  type MonitorIncidentSnapshot,
   type MonitorRange,
   type MonitorSummary,
 } from '@/features/system/monitor-api';
@@ -16,6 +17,10 @@ interface Resource<T> {
   error?: boolean;
 }
 
+interface RetryableResource<T> extends Partial<Resource<T>> {
+  retry: () => void;
+}
+
 export function useServiceStatusHistory(
   targetId: string,
   range: MonitorRange,
@@ -23,19 +28,29 @@ export function useServiceStatusHistory(
   pageSize: number,
   revision: number
 ): {
-  summary: Partial<Resource<MonitorSummary>>;
-  history: Partial<Resource<MonitorHistory>>;
-  incidents: Partial<Resource<MonitorIncidentPage>>;
+  summary: RetryableResource<MonitorSummary>;
+  history: RetryableResource<MonitorHistory>;
+  incidents: RetryableResource<MonitorIncidentPage>;
 } {
   const [summary, setSummary] = useState<Resource<MonitorSummary>>({ key: '' });
   const [history, setHistory] = useState<Resource<MonitorHistory>>({ key: '' });
   const [incidents, setIncidents] = useState<Resource<MonitorIncidentPage>>({
     key: '',
   });
-  const summaryKey = String(revision);
-  const historyKey = `${targetId}:${range}:${revision}`;
-  const incidentKey = `${historyKey}:${page}:${pageSize}`;
-  const incidentCutoff = useRef<{ key: string; asOf: string }>();
+  const [retries, setRetries] = useState({
+    summary: 0,
+    history: 0,
+    incidents: 0,
+  });
+  const queryKey = `${targetId}:${range}:${revision}`;
+  const summaryKey = `${queryKey}:${retries.summary}`;
+  const historyKey = `${queryKey}:${retries.history}`;
+  const incidentKey = `${queryKey}:${page}:${pageSize}:${retries.incidents}`;
+  const incidentCutoff = useRef<MonitorIncidentSnapshot>();
+
+  useEffect(() => {
+    incidentCutoff.current = undefined;
+  }, [queryKey]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -68,21 +83,20 @@ export function useServiceStatusHistory(
   useEffect(() => {
     const controller = new AbortController();
     setIncidents({ key: incidentKey });
-    const asOf =
-      incidentCutoff.current?.key === historyKey
-        ? incidentCutoff.current.asOf
-        : undefined;
     void getMonitorIncidents(
       range,
       targetId,
       page,
       pageSize,
       controller.signal,
-      asOf
+      incidentCutoff.current
     )
       .then(data => {
         if (controller.signal.aborted) return;
-        incidentCutoff.current = { key: historyKey, asOf: data.asOf };
+        incidentCutoff.current = {
+          asOf: data.asOf,
+          maxIncidentId: data.maxIncidentId,
+        };
         setIncidents({ key: incidentKey, data });
       })
       .catch(() => {
@@ -90,11 +104,27 @@ export function useServiceStatusHistory(
           setIncidents({ key: incidentKey, error: true });
       });
     return () => controller.abort();
-  }, [targetId, range, page, pageSize, incidentKey, historyKey]);
+  }, [targetId, range, page, pageSize, incidentKey]);
+
+  function retry(resource: keyof typeof retries) {
+    setRetries(previous => ({
+      ...previous,
+      [resource]: previous[resource] + 1,
+    }));
+  }
 
   return {
-    summary: summary.key === summaryKey ? summary : {},
-    history: history.key === historyKey ? history : {},
-    incidents: incidents.key === incidentKey ? incidents : {},
+    summary: {
+      ...(summary.key === summaryKey ? summary : {}),
+      retry: () => retry('summary'),
+    },
+    history: {
+      ...(history.key === historyKey ? history : {}),
+      retry: () => retry('history'),
+    },
+    incidents: {
+      ...(incidents.key === incidentKey ? incidents : {}),
+      retry: () => retry('incidents'),
+    },
   };
 }

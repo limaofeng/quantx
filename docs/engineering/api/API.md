@@ -72,7 +72,7 @@ Web 的 `/settings/status/:targetId/history` 复用以下只读接口：
 | --- | --- | --- |
 | `GET /monitor/api/v1/summary` | `window=24h` | 当前状态及明确标注的近 24 小时可用率、覆盖率和延迟分位数；支持顶部指标切换 |
 | `GET /monitor/api/v1/targets/{targetId}/history` | `range=24h\|7d\|30d\|90d\|1y` | 时间桶状态与 P50/P95 曲线；按范围聚合，不伪造无延迟采样组件的延迟 |
-| `GET /monitor/api/v1/incidents` | 同上 `range`，可选 `targetId`、`page`、`pageSize`、`asOf` | `{range, page, pageSize, total, asOf, incidents}`，服务端分页读取完整范围内的事故 |
+| `GET /monitor/api/v1/incidents` | 同上 `range`，可选 `targetId`、`page`、`pageSize`，成对可选 `asOf` / `maxIncidentId` | `{range, page, pageSize, total, asOf, maxIncidentId, incidents}`，服务端分页读取完整范围内的事故 |
 
 事故按 `opened_at DESC, id DESC` 稳定排序；匹配条件是开始时间不晚于查询截止，
 且尚未恢复或恢复时间不早于范围起点，因此不会漏掉跨越范围边界的长事故。
@@ -81,11 +81,17 @@ Web 的 `/settings/status/:targetId/history` 复用以下只读接口：
 超出末页返回空数组但保留真实 `total`；没有记录时 `total=0`。
 未知目标返回 404，非法范围或分页参数返回 422。
 
-首次响应给出带时区的 ISO `asOf`，后续翻页回传它，固定事故开始时间截止点和
-范围起点，避免新事故插入导致偏移分页重复、漏项。`asOf` 不接受未来时间或
-无时区时间。它不是历史状态快照：既有事故的恢复时间、最近原因仍可更新，
+首次响应给出带时区的 ISO `asOf` 和已入库事故 ID 上限 `maxIncidentId`（空库为 0）。
+后续翻页必须成对回传，固定时间范围和 `id <= maxIncidentId` 的记录集合；上限、
+总数和分页内容在同一写锁内读取。即使探测早于截止点开始、结果稍后才入库，
+新事故也不会挤入已有分页。只传其中一个字段返回 422；`maxIncidentId` 为
+0–9,007,199,254,740,991 的整数，`asOf` 不接受未来时间或无时区时间。
+该边界不是历史状态快照：既有事故的恢复时间、最近原因仍可更新，
 保留期清理也可能减少总数。刷新或切换目标/范围会开始新的查询截止点。
 Web 将目标、范围、页码和每页条数保存在 URL；页面刷新后重新获取查询截止点。
+局部失败重试只重发对应请求，保留页码和事故分页边界；顶部刷新回到第一页并
+重新查询全部资源。切换指标或范围同时刷新当前概览，事故持续时间以事故响应的
+`asOf` 计算，不借用概览生成时间。
 
 “完整历史”指所选范围与实际保留期内的全部事故；默认事故保留期是一年。
 范围切换作用于状态带、曲线和事故列表；概览指标及切换面板始终明确标注近 24 小时，

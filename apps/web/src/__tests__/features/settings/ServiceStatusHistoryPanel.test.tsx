@@ -105,6 +105,7 @@ function pageOf(
     pageSize,
     total,
     asOf: now,
+    maxIncidentId: 45,
     incidents: Array.from(
       {
         length: Math.min(pageSize, Math.max(0, total - (page - 1) * pageSize)),
@@ -201,7 +202,7 @@ describe('single-service history', () => {
       2,
       20,
       expect.any(AbortSignal),
-      now
+      { asOf: now, maxIncidentId: 45 }
     );
     expect(api.getMonitorHistory).toHaveBeenCalledTimes(historyCalls);
     expect(screen.getByRole('heading', { name: '事故历史' })).toHaveFocus();
@@ -295,6 +296,144 @@ describe('single-service history', () => {
     expect(
       await screen.findByText('共 45 条 · 第 1 / 3 页')
     ).toBeInTheDocument();
+  });
+
+  it('retries a failed later page without resetting the URL or snapshot', async () => {
+    mount();
+    await screen.findByText('共 45 条 · 第 1 / 3 页');
+    api.getMonitorIncidents.mockRejectedValueOnce(new Error('offline'));
+    fireEvent.click(screen.getByRole('button', { name: '第 3 页' }));
+    await screen.findByText('事故记录暂时不可访问');
+    const failedQuery = api.getMonitorIncidents.mock.calls.at(-1)!;
+    const summaryCalls = api.getMonitorSummary.mock.calls.length;
+    const historyCalls = api.getMonitorHistory.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    await screen.findByText('共 45 条 · 第 3 / 3 页');
+    expect(currentQuery()).toContain('page=3');
+    expect(api.getMonitorIncidents).toHaveBeenLastCalledWith(
+      ...failedQuery.slice(0, 4),
+      expect.any(AbortSignal),
+      { asOf: now, maxIncidentId: 45 }
+    );
+    expect(api.getMonitorSummary).toHaveBeenCalledTimes(summaryCalls);
+    expect(api.getMonitorHistory).toHaveBeenCalledTimes(historyCalls);
+  });
+
+  it.each(['summary', 'history'] as const)(
+    'retries only the failed %s resource on a deep-linked page',
+    async resource => {
+      const failed =
+        resource === 'summary' ? api.getMonitorSummary : api.getMonitorHistory;
+      const other =
+        resource === 'summary' ? api.getMonitorHistory : api.getMonitorSummary;
+      failed.mockRejectedValueOnce(new Error('offline'));
+      mount('/settings/status/qmt-agent/history?range=7d&page=3&pageSize=20');
+      await screen.findByRole('button', { name: '重试' });
+      const otherCalls = other.mock.calls.length;
+      const incidentCalls = api.getMonitorIncidents.mock.calls.length;
+      fireEvent.click(screen.getByRole('button', { name: '重试' }));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole('button', { name: '重试' })
+        ).not.toBeInTheDocument()
+      );
+      await screen.findByText('共 45 条 · 第 3 / 3 页');
+      expect(currentQuery()).toBe('?range=7d&page=3&pageSize=20');
+      expect(failed).toHaveBeenCalledTimes(2);
+      expect(other).toHaveBeenCalledTimes(otherCalls);
+      expect(api.getMonitorIncidents).toHaveBeenCalledTimes(incidentCalls);
+    }
+  );
+
+  it.each(['target', 'range'] as const)(
+    'refreshes current state on %s changes and times incidents from their own cutoff',
+    async change => {
+      const initialTime = '2026-08-31T10:00:00Z';
+      const summaryTime = '2026-08-31T10:09:00Z';
+      const incidentTime = '2026-08-31T10:10:00Z';
+      api.getMonitorSummary.mockResolvedValueOnce({
+        ...summary,
+        generatedAt: initialTime,
+      });
+      mount();
+      await screen.findByText('共 45 条 · 第 1 / 3 页');
+      api.getMonitorSummary.mockResolvedValue({
+        ...summary,
+        generatedAt: summaryTime,
+        targets: summary.targets.map(item => ({
+          ...item,
+          status: 'unavailable',
+          reasonCode: 'TIMEOUT',
+        })),
+      });
+      const targetId = change === 'target' ? 'engine' : 'qmt-agent';
+      api.getMonitorIncidents.mockResolvedValue({
+        ...pageOf(change === 'target' ? '24h' : '7d', targetId, 1, 20),
+        total: 1,
+        asOf: incidentTime,
+        maxIncidentId: 46,
+        incidents: [
+          {
+            id: 46,
+            targetId,
+            targetName: targetId,
+            openedAt: summaryTime,
+            resolvedAt: null,
+            active: true,
+            reasonCode: 'TIMEOUT',
+          },
+        ],
+      });
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: change === 'target' ? '切换到 策略引擎' : '7 天',
+        })
+      );
+      await screen.findByText('共 1 条 · 第 1 / 1 页');
+      expect(api.getMonitorSummary).toHaveBeenCalledTimes(2);
+      expect(
+        screen.getByText('持续至本次刷新').nextElementSibling
+      ).toHaveTextContent('1 分 0 秒');
+      const switcher = screen.getByRole('button', {
+        name: `切换到 ${change === 'target' ? '策略引擎' : 'QMT Agent'}`,
+      });
+      expect(switcher).toHaveTextContent('不可用');
+    }
+  );
+
+  it('starts a new snapshot on explicit refresh and returns to page one', async () => {
+    mount('/settings/status/qmt-agent/history?range=24h&page=3&pageSize=20');
+    await screen.findByText('共 45 条 · 第 3 / 3 页');
+    fireEvent.click(screen.getByRole('button', { name: '刷新历史' }));
+    await screen.findByText('共 45 条 · 第 1 / 3 页');
+    expect(api.getMonitorIncidents).toHaveBeenLastCalledWith(
+      '24h',
+      'qmt-agent',
+      1,
+      20,
+      expect.any(AbortSignal),
+      undefined
+    );
+    expect(api.getMonitorSummary).toHaveBeenCalledTimes(2);
+    expect(api.getMonitorHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reuse an earlier target snapshot after switching through a failed query', async () => {
+    mount();
+    await screen.findByText('共 45 条 · 第 1 / 3 页');
+    api.getMonitorIncidents.mockRejectedValueOnce(new Error('offline'));
+    fireEvent.click(screen.getByRole('button', { name: '切换到 策略引擎' }));
+    await screen.findByText('事故记录暂时不可访问');
+    fireEvent.click(screen.getByRole('button', { name: '切换到 QMT Agent' }));
+    await screen.findByText('共 45 条 · 第 1 / 3 页');
+    expect(api.getMonitorIncidents).toHaveBeenLastCalledWith(
+      '24h',
+      'qmt-agent',
+      1,
+      20,
+      expect.any(AbortSignal),
+      undefined
+    );
   });
 
   it('does not overwrite a switched metric with a late response', async () => {

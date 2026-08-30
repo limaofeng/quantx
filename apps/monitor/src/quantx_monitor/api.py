@@ -199,9 +199,16 @@ def build_router(runtime: RuntimeView) -> APIRouter:
     page: int = Query(default=1, ge=1, le=1000000),
     page_size: int = Query(default=20, ge=1, le=100, alias="pageSize"),
     as_of: datetime | None = Query(default=None, alias="asOf"),
+    max_incident_id: int | None = Query(
+      default=None, ge=0, le=9007199254740991, alias="maxIncidentId"
+    ),
   ) -> dict[str, object]:
     if target_id is not None and target_id not in TARGET_BY_ID:
       raise HTTPException(status_code=404, detail="Unknown monitor target")
+    if (as_of is None) != (max_incident_id is None):
+      raise HTTPException(
+        status_code=422, detail="asOf and maxIncidentId must be supplied together"
+      )
     now = time()
     if as_of is not None:
       if as_of.tzinfo is None or as_of.timestamp() > now:
@@ -209,12 +216,13 @@ def build_router(runtime: RuntimeView) -> APIRouter:
           status_code=422, detail="asOf must be a past timestamp with timezone"
         )
       now = as_of.timestamp()
-    total, rows = await runtime.storage.incidents(
+    total, max_incident_id, rows = await runtime.storage.incidents(
       since=now - WINDOW_SECONDS[range],
       now=now,
       target_id=target_id,
       page=page,
       page_size=page_size,
+      max_incident_id=max_incident_id,
     )
     public_rows = []
     for row in rows:
@@ -237,6 +245,7 @@ def build_router(runtime: RuntimeView) -> APIRouter:
       "pageSize": page_size,
       "total": total,
       "asOf": iso_timestamp(now),
+      "maxIncidentId": max_incident_id,
       "incidents": public_rows,
     }
 

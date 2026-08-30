@@ -133,17 +133,40 @@ async def test_two_failures_open_and_two_successes_close_an_incident(tmp_path):
     assert state["effective_status"] == "healthy"
     assert state["active_incident_id"] is None
 
-    total, incidents = await storage.incidents(
+    total, max_incident_id, incidents = await storage.incidents(
       since=started.timestamp() - 1,
       now=(started + timedelta(seconds=120)).timestamp(),
       target_id="postgresql",
     )
     assert total == 1
+    assert max_incident_id == incidents[0]["id"]
     assert len(incidents) == 1
     assert incidents[0]["opened_reason_code"] == "TIMEOUT"
     assert incidents[0]["resolved_at"] == pytest.approx(
       (started + timedelta(seconds=90)).timestamp()
     )
+  finally:
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_incident_watermark_stays_empty_after_a_late_insert(tmp_path):
+  storage = MonitorStorage(tmp_path / "empty-watermark.sqlite3")
+  await storage.open(["postgresql"])
+  started = datetime(2026, 8, 27, 1, 0, tzinfo=timezone.utc)
+  params = {"since": started.timestamp() - 60, "now": started.timestamp() + 60}
+  try:
+    assert await storage.incidents(**params) == (0, 0, [])
+    await storage.record_results(
+      [
+        result(MonitorStatus.UNAVAILABLE, started),
+        result(MonitorStatus.UNAVAILABLE, started + timedelta(seconds=30)),
+      ]
+    )
+    assert await storage.incidents(**params, max_incident_id=0) == (0, 0, [])
+    total, watermark, rows = await storage.incidents(**params)
+    assert total == watermark == 1
+    assert rows[0]["id"] == 1
   finally:
     await storage.close()
 

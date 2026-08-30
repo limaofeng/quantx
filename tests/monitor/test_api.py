@@ -130,6 +130,7 @@ async def test_incident_pagination_covers_all_records_and_overlapping_incidents(
       )
       await storage._db.commit()
       params["asOf"] = first["asOf"]
+      params["maxIncidentId"] = first["maxIncidentId"]
       second = (
         await client.get("/monitor/api/v1/incidents", params={**params, "page": 2})
       ).json()
@@ -160,6 +161,8 @@ async def test_incident_pagination_covers_all_records_and_overlapping_incidents(
         {"page": 0},
         {"pageSize": 0},
         {"pageSize": 101},
+        {"maxIncidentId": -1},
+        {"maxIncidentId": 9007199254740992},
         {"range": "all"},
         {"asOf": "invalid"},
         {"asOf": "2026-01-01T00:00:00"},
@@ -173,5 +176,66 @@ async def test_incident_pagination_covers_all_records_and_overlapping_incidents(
         "/monitor/api/v1/incidents", params={**params, "targetId": "missing"}
       )
       assert unknown.status_code == 404
+  finally:
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_incident_pages_exclude_late_persistence_of_earlier_probes(tmp_path):
+  storage = MonitorStorage(tmp_path / "delayed-probe.sqlite3")
+  await storage.open(["postgresql"])
+  now = datetime.now(timezone.utc)
+  try:
+    # Two closed incidents, followed by a failure whose confirming probe is pending.
+    for seconds, status in (
+      (-100, MonitorStatus.UNAVAILABLE),
+      (-90, MonitorStatus.UNAVAILABLE),
+      (-80, MonitorStatus.HEALTHY),
+      (-70, MonitorStatus.HEALTHY),
+      (-60, MonitorStatus.UNAVAILABLE),
+      (-50, MonitorStatus.UNAVAILABLE),
+      (-40, MonitorStatus.HEALTHY),
+      (-30, MonitorStatus.HEALTHY),
+      (-10, MonitorStatus.UNAVAILABLE),
+    ):
+      await storage.record_results(
+        [
+          ProbeResult(
+            target_id="postgresql",
+            checked_at=now + timedelta(seconds=seconds),
+            observed_status=status,
+          )
+        ]
+      )
+    delayed_result = ProbeResult(
+      target_id="postgresql",
+      checked_at=now - timedelta(seconds=1),
+      observed_status=MonitorStatus.UNAVAILABLE,
+    )
+    app = FastAPI()
+    app.include_router(build_router(SimpleNamespace(storage=storage)))
+    async with httpx.AsyncClient(
+      transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+      params = {"targetId": "postgresql", "range": "24h", "pageSize": 1}
+      first = (await client.get("/monitor/api/v1/incidents", params=params)).json()
+      await storage.record_results([delayed_result])
+      cutoff = {"asOf": first["asOf"], "maxIncidentId": first["maxIncidentId"]}
+      second = (
+        await client.get(
+          "/monitor/api/v1/incidents", params={**params, **cutoff, "page": 2}
+        )
+      ).json()
+      assert first["total"] == second["total"] == 2
+      assert first["maxIncidentId"] == second["maxIncidentId"] == 2
+      assert [item["id"] for item in first["incidents"] + second["incidents"]] == [2, 1]
+      refreshed = (await client.get("/monitor/api/v1/incidents", params=params)).json()
+      assert refreshed["total"] == refreshed["maxIncidentId"] == 3
+      assert refreshed["incidents"][0]["id"] == 3
+      for incomplete in ({"asOf": first["asOf"]}, {"maxIncidentId": 2}):
+        response = await client.get(
+          "/monitor/api/v1/incidents", params={**params, **incomplete}
+        )
+        assert response.status_code == 422
   finally:
     await storage.close()
