@@ -329,6 +329,8 @@ function TargetDetails({
   const hasLatency = chartData.some(
     point => point.p50 !== null || point.p95 !== null
   );
+  const hasIncidentList =
+    !incidentsLoading && !incidentsError && incidents.length > 0;
   const explanation =
     target.id === 'account-safety-observer'
       ? '该状态只表示 Monitor 能持续采集脱敏准入快照；QMT、行情与交易门禁的实际结论请在“交易安全”中查看。'
@@ -394,7 +396,9 @@ function TargetDetails({
             </div>
           </dl>
 
-          <div className="h-48 min-w-0 md:h-44">
+          <div
+            className={cn('h-48 min-w-0 md:h-44', !currentReason && 'xl:h-64')}
+          >
             {historyLoading && !history ? (
               <div
                 role="status"
@@ -467,18 +471,38 @@ function TargetDetails({
 
       <aside
         aria-labelledby={`${detailId(target.id)}-incidents`}
-        className="rounded-lg border border-white/5 bg-white/[0.025] p-3"
+        className="flex max-h-96 min-h-0 flex-col rounded-lg border border-white/5 bg-white/[0.025] p-3 xl:max-h-80"
       >
-        <div className="flex items-center gap-2">
-          <Clock3 className="h-4 w-4 text-slate-500" aria-hidden="true" />
-          <h3
-            id={`${detailId(target.id)}-incidents`}
-            className="text-ui-title font-semibold text-slate-100"
-          >
-            最近事故
-          </h3>
+        <div className="flex shrink-0 items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Clock3 className="h-4 w-4 text-slate-500" aria-hidden="true" />
+            <h3
+              id={`${detailId(target.id)}-incidents`}
+              className="text-ui-title font-semibold text-slate-100"
+            >
+              最近事故
+            </h3>
+          </div>
+          {hasIncidentList && (
+            <span className="font-mono text-ui-caption text-slate-600">
+              {incidents.length} 条
+            </span>
+          )}
         </div>
-        <div className="mt-3 space-y-2">
+        <div
+          role={hasIncidentList ? 'region' : undefined}
+          aria-label={
+            hasIncidentList
+              ? `最近事故列表，共 ${incidents.length} 条`
+              : undefined
+          }
+          tabIndex={hasIncidentList ? 0 : undefined}
+          className={cn(
+            'mt-3 min-h-0 space-y-2',
+            hasIncidentList &&
+              'custom-scrollbar flex-1 overflow-y-auto overscroll-contain pr-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400/70'
+          )}
+        >
           {incidentsLoading ? (
             <div
               role="status"

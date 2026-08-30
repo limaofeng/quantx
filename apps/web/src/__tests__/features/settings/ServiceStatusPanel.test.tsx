@@ -212,6 +212,49 @@ describe('ServiceStatusPanel', () => {
     expect(screen.getByText('QMT_AGENT_NOT_RECONCILED')).toBeInTheDocument();
   });
 
+  it('keeps growing incident history inside a balanced scroll region', async () => {
+    monitorMocks.getMonitorSummary.mockResolvedValue(summary());
+    monitorMocks.getMonitorHistory.mockResolvedValue({
+      target: { id: 'qmt-agent', name: 'QMT Agent' },
+      range: '24h',
+      bucketSeconds: 60,
+      points: [],
+    });
+    monitorMocks.getMonitorIncidents.mockResolvedValue(
+      Array.from({ length: 5 }, (_, index) => ({
+        id: 200 - index,
+        targetId: 'qmt-agent',
+        targetName: 'QMT Agent',
+        openedAt: new Date(Date.now() - index * 60_000).toISOString(),
+        resolvedAt: new Date(Date.now() - index * 30_000).toISOString(),
+        active: false,
+        reasonCode: 'CONNECT_ERROR',
+      }))
+    );
+
+    render(<ServiceStatusPanel />);
+
+    const incidentRegion = await screen.findByRole('region', {
+      name: '最近事故列表，共 5 条',
+    });
+    expect(incidentRegion).toHaveAttribute('tabindex', '0');
+    expect(incidentRegion).toHaveClass(
+      'flex-1',
+      'overflow-y-auto',
+      'overscroll-contain',
+      'custom-scrollbar'
+    );
+    expect(screen.getByRole('complementary', { name: '最近事故' })).toHaveClass(
+      'max-h-96',
+      'xl:max-h-80'
+    );
+    expect(screen.getByText('5 条')).toBeInTheDocument();
+
+    const chart =
+      screen.getByText('当前范围没有独立延迟样本').parentElement?.parentElement;
+    expect(chart).toHaveClass('xl:h-64');
+  });
+
   it('clarifies that account admission availability is not the gate result', async () => {
     const monitorSummary = summary();
     const now = new Date().toISOString();
