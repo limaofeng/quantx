@@ -119,6 +119,7 @@ function TargetRow({
 
 function TargetDetails({
   target,
+  marketDataHealthy,
   history,
   historyLoading,
   historyError,
@@ -129,6 +130,7 @@ function TargetDetails({
   incidentTotal,
 }: {
   target: MonitorTargetSummary;
+  marketDataHealthy: boolean;
   history: MonitorHistory | undefined;
   historyLoading: boolean;
   historyError: boolean;
@@ -138,6 +140,15 @@ function TargetDetails({
   range: MonitorRange;
   incidentTotal: number;
 }) {
+  const tradingUnavailableWithMarketData =
+    target.id === 'qmt-agent' &&
+    target.status === 'degraded' &&
+    marketDataHealthy &&
+    [
+      'XTTRADING_UNAVAILABLE',
+      'TRADING_RECONCILING',
+      'QMT_AGENT_NOT_RECONCILED',
+    ].includes(target.reasonCode ?? '');
   const currentReason = target.reasonCode
     ? monitorReasonPresentation(target.reasonCode, target.name)
     : null;
@@ -169,10 +180,15 @@ function TargetDetails({
             {target.reasonCode && currentReason && (
               <div className="mt-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2">
                 <p className="text-ui-label font-medium text-amber-300">
-                  当前原因：{currentReason.title}
+                  当前原因：
+                  {tradingUnavailableWithMarketData
+                    ? '交易不可用，行情服务正常'
+                    : currentReason.title}
                 </p>
                 <p className="mt-1 text-ui-caption leading-5 text-slate-500">
                   {currentReason.description}
+                  {tradingUnavailableWithMarketData &&
+                    ' 当前 XTData 行情服务正常，实盘交易仍保持阻断。'}
                 </p>
                 <p className="mt-1 text-ui-caption text-slate-600">
                   错误码{' '}
@@ -747,6 +763,11 @@ export function ServiceStatusPanel() {
                         {targetSelected && (
                           <TargetDetails
                             target={target}
+                            marketDataHealthy={summary.targets.some(
+                              item =>
+                                item.id === 'market-data' &&
+                                item.status === 'healthy'
+                            )}
                             history={histories[target.id]}
                             historyLoading={historyLoadingIds.has(target.id)}
                             historyError={historyErrorIds.has(target.id)}

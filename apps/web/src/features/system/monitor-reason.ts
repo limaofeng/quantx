@@ -53,9 +53,9 @@ const MONITOR_REASON_PRESENTATIONS: Record<string, MonitorReasonPresentation> =
         'QMT Agent 无法使用 XTData，实时行情与全市场行情流当前不可用。',
     },
     XTTRADING_UNAVAILABLE: {
-      title: 'MiniQMT 交易连接未就绪',
+      title: 'MiniQMT 交易能力未就绪',
       description:
-        'QMT Agent 在线，但 XTTrading 尚未连接，实盘交易当前不可用。',
+        '交易连接或券商账户尚未就绪，实盘交易当前不可用；行情能力独立判断。',
     },
     MARKET_STREAM_NOT_READY: {
       title: '全市场行情流尚未就绪',

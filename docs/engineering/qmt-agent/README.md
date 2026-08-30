@@ -211,9 +211,12 @@ XTTrading 连接代际变化或显式异常恢复才触发完整快照对账。�
 心跳先于 durable report backlog 刷新；报告刷新全局串行，积压不会让多个 producer
 重复发送同一批 Journal 帧，也不会把后续心跳锁在整批报告之后。
 每个历史工作单元之后都回到实时优先调度点：任一模式的控制会话断开、实时行情
-不是 `READY`、native subscription/reset/control 正在恢复、正在对账、账户快照年龄
-超过 30 秒、控制 heartbeat 或行情 ACK 延迟超过 5 秒、存在委托/撤单或 broker 回报
-积压、XTData/XTTrading 不稳定时停止派发后续单元；连续两个 1 秒健康周期后自动恢复。
+不是 `READY`、native subscription/reset/control 正在恢复、账户快照正在执行、控制
+heartbeat 或行情 ACK 延迟超过 5 秒、存在委托/撤单或 broker 回报积压、XTData 不稳定
+时停止派发后续单元。实盘模式还优先保障交易恢复、对账及 30 秒内的新鲜账户快照；
+但原生 RPC 正常、仅券商账户未就绪的等待期间，账户未对账或快照过期不阻断历史行情。
+账户恢复或原生 RPC 故障后立即恢复交易恢复与对账的优先门禁；连续两个 1 秒健康周期
+后自动恢复历史派发。该例外不放开实盘交易，也不把不完整账户快照当作权威事实。
 `historyWorkload=running/paused/idle` 仅用于诊断，绝不改变 `xttradingStatus`。
 heartbeat 和历史 QoS 只读取由独立 readiness worker 更新的 XTData 缓存状态，禁止在
 事件循环获取原生 XTData 锁；较新的 heartbeat ACK 会收敛此前丢失的旧 ACK，当前

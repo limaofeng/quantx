@@ -5983,26 +5983,31 @@ class AgentRuntime:
     if xtdata_control_lock is not None and xtdata_control_lock.locked():
       return "XTDATA_CONTROL_PENDING"
     if getattr(self, "mode", "data-only") == "live":
-      if self._requires_trading_reconciliation():
-        return "TRADING_RECONCILING"
-      if (
-        not self._is_trading_ready()
-        or getattr(self, "_trading_readiness_failed", False)
-      ):
-        return "XTTRADING_UNSTABLE"
+      # A responsive native RPC with an unavailable broker account must not
+      # suspend XTData history while waiting for the broker to recover. Actual
+      # native work and report/command backpressure still take priority below.
+      if not self._trading_account_waiting:
+        if self._requires_trading_reconciliation():
+          return "TRADING_RECONCILING"
+        if (
+          not self._is_trading_ready()
+          or getattr(self, "_trading_readiness_failed", False)
+        ):
+          return "XTTRADING_UNSTABLE"
       if getattr(self, "_full_snapshot_lock", None) is not None and (
         self._full_snapshot_lock.locked()
       ):
         return "ACCOUNT_SNAPSHOT_RUNNING"
-      snapshot_at = getattr(
-        self,
-        "_last_complete_account_snapshot_monotonic",
-        0.0,
-      )
-      if snapshot_at <= 0 or time.monotonic() - snapshot_at > (
-        HISTORY_QOS_MAX_SNAPSHOT_AGE_SECONDS
-      ):
-        return "ACCOUNT_SNAPSHOT_STALE"
+      if not self._trading_account_waiting:
+        snapshot_at = getattr(
+          self,
+          "_last_complete_account_snapshot_monotonic",
+          0.0,
+        )
+        if snapshot_at <= 0 or time.monotonic() - snapshot_at > (
+          HISTORY_QOS_MAX_SNAPSHOT_AGE_SECONDS
+        ):
+          return "ACCOUNT_SNAPSHOT_STALE"
     if not self._is_market_data_ready():
       return "XTDATA_UNSTABLE"
     command_queue = getattr(self, "_command_requests", None)

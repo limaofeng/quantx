@@ -250,3 +250,97 @@ async def test_rpc_failure_after_account_wait_still_has_bounded_recovery(
     runtime._raise_if_trading_recovery_expired()
   assert runtime._is_trading_ready() is False
   assert runtime._requires_trading_reconciliation() is True
+
+
+async def _prepare_history_on_waiting_account(runtime):
+  await runtime._initialize_authenticated_session()
+  runtime._control_session_authenticated = True
+  runtime._whole_market_subscription_ready.set()
+  runtime._whole_market_subscription_active = True
+  for report in runtime.journal.pending_reports():
+    runtime.journal.acknowledge_report(
+      AgentEnvelope.model_validate_json(report).message_id
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [3, 1, None])
+async def test_history_remains_available_without_authoritative_account_snapshot(
+  account_runtime, status
+):
+  runtime, manager = account_runtime
+  manager.xttrader.status = status
+  await _prepare_history_on_waiting_account(runtime)
+
+  for snapshot_at in (0.0, time.monotonic() - 3600):
+    runtime._last_complete_account_snapshot_monotonic = snapshot_at
+    await asyncio.wait_for(runtime._wait_for_history_dispatch(), timeout=1)
+    assert runtime._history_workload == "running"
+    assert runtime._history_workload_reason == ""
+    assert runtime._is_trading_ready() is False
+    assert runtime._requires_trading_reconciliation() is True
+  assert manager.fact_queries == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("blocked_by", "reason"),
+  [
+    ("control", "CONTROL_CONNECTION_UNHEALTHY"),
+    ("market", "MARKET_STREAM_NOT_READY"),
+    ("xtdata", "XTDATA_UNSTABLE"),
+    ("snapshot", "ACCOUNT_SNAPSHOT_RUNNING"),
+    ("command", "TRADE_COMMAND_PENDING"),
+    ("report", "BROKER_REPORT_PENDING"),
+    ("heartbeat", "CONTROL_HEARTBEAT_DELAYED"),
+    ("market_ack", "MARKET_STREAM_DELAYED"),
+  ],
+)
+async def test_account_wait_keeps_history_transport_and_workload_guards(
+  account_runtime, blocked_by, reason
+):
+  runtime, _ = account_runtime
+  await _prepare_history_on_waiting_account(runtime)
+  assert runtime._history_qos_block_reason() == ""
+
+  if blocked_by == "control":
+    runtime._control_session_authenticated = False
+  elif blocked_by == "market":
+    runtime._set_market_stream_status("OFFLINE")
+  elif blocked_by == "xtdata":
+    runtime._set_market_data_ready(False)
+  elif blocked_by == "snapshot":
+    await runtime._full_snapshot_lock.acquire()
+  elif blocked_by == "command":
+    runtime._active_command_count = 1
+  elif blocked_by == "report":
+    await runtime._queue_full_snapshot(reconciliation=True)
+  elif blocked_by == "heartbeat":
+    runtime._heartbeat_sent_monotonic = {"unacked": time.monotonic() - 6}
+  elif blocked_by == "market_ack":
+    runtime._market_stream_pending_ack_monotonic = time.monotonic() - 6
+
+  try:
+    assert runtime._history_qos_block_reason() == reason
+  finally:
+    if blocked_by == "snapshot":
+      runtime._full_snapshot_lock.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rpc_failed", [False, True])
+async def test_account_wait_exit_restores_history_reconciliation_priority(
+  account_runtime, rpc_failed
+):
+  runtime, manager = account_runtime
+  await _prepare_history_on_waiting_account(runtime)
+  assert runtime._history_qos_block_reason() == ""
+
+  manager.xttrader.rpc_failed = rpc_failed
+  manager.xttrader.status = 0
+  await runtime._ensure_trading_ready()
+
+  assert runtime._trading_account_waiting is False
+  assert runtime._history_qos_block_reason() == "TRADING_RECONCILING"
+  assert runtime._is_trading_ready() is not rpc_failed
+  assert runtime._requires_trading_reconciliation() is True

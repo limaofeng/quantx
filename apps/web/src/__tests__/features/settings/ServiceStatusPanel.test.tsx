@@ -211,10 +211,10 @@ describe('ServiceStatusPanel', () => {
     render(<ServiceStatusPanel />);
 
     expect(
-      await screen.findByText('当前原因：MiniQMT 交易连接未就绪')
+      await screen.findByText('当前原因：MiniQMT 交易能力未就绪')
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/XTTrading 尚未连接，实盘交易当前不可用/)
+      screen.getByText(/交易连接或券商账户尚未就绪，实盘交易当前不可用/)
     ).toBeInTheDocument();
     expect(
       await screen.findByText('QMT Agent 尚未完成账户对账')
@@ -225,6 +225,61 @@ describe('ServiceStatusPanel', () => {
     expect(screen.getByText('XTTRADING_UNAVAILABLE')).toBeInTheDocument();
     expect(screen.getByText('QMT_AGENT_NOT_RECONCILED')).toBeInTheDocument();
   });
+
+  it.each(['healthy', 'degraded', 'unavailable', 'unknown'] as const)(
+    'uses independent market evidence when trading is unavailable and market is %s',
+    async marketStatus => {
+      const monitorSummary = summary('degraded');
+      monitorSummary.targets[0].reasonCode = 'XTTRADING_UNAVAILABLE';
+      monitorSummary.groups[0].targetIds.push('market-data');
+      monitorSummary.targets.push({
+        ...monitorSummary.targets[1],
+        id: 'market-data',
+        name: '行情服务',
+        status: marketStatus,
+      });
+      monitorMocks.getMonitorSummary.mockResolvedValue(monitorSummary);
+      monitorMocks.getMonitorHistory.mockResolvedValue({
+        target: { id: 'qmt-agent', name: 'QMT Agent' },
+        range: '24h',
+        bucketSeconds: 60,
+        points: [],
+      });
+      monitorMocks.getMonitorIncidents.mockResolvedValue(
+        incidentPage([
+          {
+            id: 112,
+            targetId: 'qmt-agent',
+            targetName: 'QMT Agent',
+            openedAt: new Date().toISOString(),
+            resolvedAt: null,
+            active: true,
+            reasonCode: 'XTTRADING_UNAVAILABLE',
+          },
+        ])
+      );
+
+      render(<ServiceStatusPanel />);
+
+      if (marketStatus === 'healthy') {
+        expect(
+          await screen.findByText('当前原因：交易不可用，行情服务正常')
+        ).toBeInTheDocument();
+        expect(
+          screen.getByText(/当前 XTData 行情服务正常，实盘交易仍保持阻断/)
+        ).toBeInTheDocument();
+      } else {
+        expect(
+          await screen.findByText('当前原因：MiniQMT 交易能力未就绪')
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/行情服务正常/)).not.toBeInTheDocument();
+      }
+      // Current market evidence must not rewrite the cause of a past incident.
+      expect(
+        await screen.findByText('MiniQMT 交易能力未就绪')
+      ).toBeInTheDocument();
+    }
+  );
 
   it('keeps growing incident history inside a balanced scroll region', async () => {
     monitorMocks.getMonitorSummary.mockResolvedValue(summary());
