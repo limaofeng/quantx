@@ -136,6 +136,18 @@ import {
 } from './t-trade-global/operationPersistence';
 import { readinessStageLabel } from './t-trade-global/readiness';
 import {
+  cloneReplayCostForm,
+  cloneSettingsForm,
+  costFormFromReplaySettings,
+  defaultReplayCostForm,
+  replaySettingsDifferenceCount,
+  replaySettingsInput,
+  settingsFormFromReplaySettings,
+  updateSignalPolicyValue,
+  validateReplaySettings,
+  type ReplayCostForm,
+} from './t-trade-global/replaySettings';
+import {
   isNewerReplayRevision,
   replayFallbackPollInterval,
   replayNoticeRefreshTargets,
@@ -237,6 +249,18 @@ const TTradeReplayAccountPanel = React.lazy(() =>
   }))
 );
 
+const TTradeReplaySettingsEditor = React.lazy(() =>
+  import('./t-trade-global/TTradeReplaySettingsPanel').then(module => ({
+    default: module.TTradeReplaySettingsEditor,
+  }))
+);
+
+const TTradeReplayFrozenSettings = React.lazy(() =>
+  import('./t-trade-global/TTradeReplaySettingsPanel').then(module => ({
+    default: module.TTradeReplayFrozenSettings,
+  }))
+);
+
 const tTradeReplayAccountFallback = (
   <div
     className="flex min-h-64 items-center justify-center text-ui-label text-slate-500"
@@ -244,6 +268,16 @@ const tTradeReplayAccountFallback = (
   >
     <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
     正在加载回测账户…
+  </div>
+);
+
+const tTradeReplaySettingsFallback = (
+  <div
+    className="flex min-h-64 items-center justify-center text-ui-label text-slate-500"
+    role="status"
+  >
+    <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+    正在加载回测参数…
   </div>
 );
 
@@ -376,7 +410,7 @@ function useStableValueByKey<T>(
 }
 
 type ReplayWorkspaceView =
-  'OVERVIEW' | 'SIGNALS' | 'POSITIONS' | 'EVENTS' | 'ACCOUNT';
+  'OVERVIEW' | 'PARAMETERS' | 'SIGNALS' | 'POSITIONS' | 'EVENTS' | 'ACCOUNT';
 
 function replaySignalValue(value: unknown) {
   if (value === null || value === undefined || value === '') return '--';
@@ -718,15 +752,43 @@ function TTradeReplaySignals({
 function TTradeReplayPanel({
   accountId,
   activeView,
+  baseCosts,
+  baseForm,
+  costs,
   form,
+  liveConfigVersion,
+  liveSettingsStale,
   onActiveViewChange,
+  onCopySettings,
+  onCostChange,
+  onFieldChange,
+  onRestoreSettings,
   onSidebarContextChange,
+  onSignalPolicyChange,
+  restoringSettings,
 }: {
   accountId: string;
   activeView: ReplayWorkspaceView;
+  baseCosts: ReplayCostForm;
+  baseForm: SettingsForm;
+  costs: ReplayCostForm;
   form: SettingsForm;
+  liveConfigVersion: number;
+  liveSettingsStale: boolean;
   onActiveViewChange: (view: ReplayWorkspaceView) => void;
+  onCopySettings: (form: SettingsForm, costs: ReplayCostForm) => void;
+  onCostChange: (field: keyof ReplayCostForm, value: string) => void;
+  onFieldChange: <K extends keyof SettingsForm>(
+    field: K,
+    value: SettingsForm[K]
+  ) => void;
+  onRestoreSettings: () => Promise<boolean>;
   onSidebarContextChange: (context: ReplaySidebarContext | null) => void;
+  onSignalPolicyChange: (
+    field: keyof SignalPolicyForm,
+    value: SignalPolicyFormValue
+  ) => void;
+  restoringSettings: boolean;
 }) {
   const { toast } = useToast();
   const { confirm: confirmDialog } = useAppDialog();
@@ -808,6 +870,44 @@ function TTradeReplayPanel({
     activeRunId,
     replayValue,
     replayValue?.runId
+  );
+  const frozenSignalPolicy = readFragment(
+    TTradeSignalPolicyFieldsFragment,
+    replay?.settings.signalPolicy
+  );
+  const frozenForm = React.useMemo(
+    () =>
+      replay && frozenSignalPolicy
+        ? settingsFormFromReplaySettings({
+            ...replay.settings,
+            signalPolicy: frozenSignalPolicy,
+          })
+        : null,
+    [frozenSignalPolicy, replay]
+  );
+  const frozenCosts = React.useMemo(
+    () => (replay ? costFormFromReplaySettings(replay.settings) : null),
+    [replay]
+  );
+  const replaySettingsErrors = React.useMemo(
+    () => validateReplaySettings(form, costs),
+    [costs, form]
+  );
+  const replaySettingsDifference = React.useMemo(
+    () => replaySettingsDifferenceCount(form, costs, baseForm, baseCosts),
+    [baseCosts, baseForm, costs, form]
+  );
+  const frozenSettingsDifference = React.useMemo(
+    () =>
+      frozenForm && frozenCosts
+        ? replaySettingsDifferenceCount(
+            frozenForm,
+            frozenCosts,
+            baseForm,
+            baseCosts
+          )
+        : 0,
+    [baseCosts, baseForm, frozenCosts, frozenForm]
   );
   const [decisionResult, refreshDecisions] = useQuery({
     query: StrategyDecisionHistoryQuery,
@@ -1432,6 +1532,15 @@ function TTradeReplayPanel({
   };
 
   const handleStart = async () => {
+    if (replaySettingsErrors.length > 0) {
+      onActiveViewChange('PARAMETERS');
+      toast({
+        title: '回测参数未通过校验',
+        description: replaySettingsErrors[0],
+        variant: 'destructive',
+      });
+      return;
+    }
     if (portfolioSource === 'SNAPSHOT' && !snapshotPortfolioValid) {
       toast({
         title: '缺少 D-1 账户快照',
@@ -1472,41 +1581,7 @@ function TTradeReplayPanel({
       startTime,
       endTime,
       portfolio,
-      targetTradeAmount: numberValue(form.targetTradeAmount, 10000),
-      maxTradeAmount: numberValue(form.maxTradeAmount, 12000),
-      maxConcurrentBatches: integerValue(form.maxConcurrentBatches, 3),
-      maxTotalTExposurePct: numberValue(form.maxTotalTExposurePct, 10) / 100,
-      signalPolicy: signalPolicyInput(form.signalPolicy),
-      maxPriceDeviationPct: numberValue(form.maxPriceDeviationPct, 0.3),
-      targetProfitPct: numberValue(form.targetProfitPct, 2),
-      baseFloorPct: numberValue(form.baseFloorPct, 0.5),
-      initialGapPct: numberValue(form.initialGapPct, 1.5),
-      trailingGapSlope: numberValue(form.trailingGapSlope, 0.25),
-      maxGapPct: numberValue(form.maxGapPct, 3),
-      highProfitLockEnabled: form.highProfitLockEnabled,
-      highProfitArmPct: numberValue(form.highProfitArmPct, 4),
-      highProfitMaxDrawdownPct: numberValue(form.highProfitMaxDrawdownPct, 1.2),
-      rapidReversalEnabled: form.rapidReversalEnabled,
-      rapidReversalWindowSeconds: integerValue(
-        form.rapidReversalWindowSeconds,
-        15
-      ),
-      rapidReversalDrawdownPct: numberValue(form.rapidReversalDrawdownPct, 0.8),
-      rapidReversalConfirmTicks: integerValue(
-        form.rapidReversalConfirmTicks,
-        2
-      ),
-      limitUpTouchExitEnabled: form.limitUpTouchExitEnabled,
-      limitUpTouchToleranceTicks: integerValue(
-        form.limitUpTouchToleranceTicks,
-        0
-      ),
-      hardStopEnabled: form.hardStopEnabled,
-      hardStopPct: numberValue(form.hardStopPct, -0.8),
-      timeExitMode: form.timeExitMode,
-      timeExitTime: form.timeExitTime,
-      maxHoldingTradingDays: integerValue(form.maxHoldingTradingDays, 5),
-      cooldownSeconds: integerValue(form.cooldownSeconds, 300),
+      ...replaySettingsInput(form, costs),
     };
     const identity = JSON.stringify(input);
     const previousOperation = replayOperationRef.current;
@@ -1711,6 +1786,7 @@ function TTradeReplayPanel({
                         (portfolioSource === 'SNAPSHOT'
                           ? !snapshotPortfolioValid
                           : !manualPortfolioValid) ||
+                        replaySettingsErrors.length > 0 ||
                         startResult.fetching ||
                         history.some(item =>
                           ['PENDING', 'RUNNING', 'STARTING'].includes(
@@ -2083,6 +2159,44 @@ function TTradeReplayPanel({
               </div>
             )}
           </div>
+        ) : activeView === 'PARAMETERS' ? (
+          <React.Suspense fallback={tTradeReplaySettingsFallback}>
+            {activeRunId && frozenForm && frozenCosts ? (
+              <TTradeReplayFrozenSettings
+                costs={frozenCosts}
+                differenceCount={frozenSettingsDifference}
+                form={frozenForm}
+                onCopy={() => {
+                  onCopySettings(frozenForm, frozenCosts);
+                  setActiveRunId('');
+                  toast({
+                    title: '已复制历史参数',
+                    description: '当前参数已成为下一次回测草稿。',
+                  });
+                }}
+                onRestore={() => {
+                  void onRestoreSettings().then(restored => {
+                    if (restored) setActiveRunId('');
+                  });
+                }}
+                restoring={restoringSettings}
+              />
+            ) : (
+              <TTradeReplaySettingsEditor
+                costs={costs}
+                differenceCount={replaySettingsDifference}
+                errors={replaySettingsErrors}
+                form={form}
+                liveConfigVersion={liveConfigVersion}
+                liveSettingsStale={liveSettingsStale}
+                onCostChange={onCostChange}
+                onFieldChange={onFieldChange}
+                onRestore={() => void onRestoreSettings()}
+                onSignalPolicyChange={onSignalPolicyChange}
+                restoring={restoringSettings}
+              />
+            )}
+          </React.Suspense>
         ) : activeView === 'ACCOUNT' ? (
           <div className="min-h-0 flex-1 overflow-y-auto p-ui-section custom-scrollbar">
             <React.Suspense fallback={tTradeReplayAccountFallback}>
@@ -2193,6 +2307,23 @@ export function TTradeGlobalPage() {
   const [activeMode, setActiveMode] =
     React.useState<TTradeStudioMode>('MONITOR');
   const [form, setForm] = React.useState<SettingsForm>(defaultForm);
+  const [replayForm, setReplayForm] = React.useState<SettingsForm>(() =>
+    cloneSettingsForm(defaultForm)
+  );
+  const [replayBaseForm, setReplayBaseForm] = React.useState<SettingsForm>(() =>
+    cloneSettingsForm(defaultForm)
+  );
+  const [replayCosts, setReplayCosts] = React.useState<ReplayCostForm>(() =>
+    cloneReplayCostForm(defaultReplayCostForm)
+  );
+  const [replayBaseCosts, setReplayBaseCosts] = React.useState<ReplayCostForm>(
+    () => cloneReplayCostForm(defaultReplayCostForm)
+  );
+  const [replayConfigVersion, setReplayConfigVersion] = React.useState(0);
+  const [replaySettingsAccountId, setReplaySettingsAccountId] =
+    React.useState('');
+  const [replaySettingsRestoring, setReplaySettingsRestoring] =
+    React.useState(false);
   const [ignoredCodes, setIgnoredCodes] = React.useState<string[]>([]);
   const [ignoreInput, setIgnoreInput] = React.useState('');
   const [lastMonitorRefreshAt, setLastMonitorRefreshAt] =
@@ -2361,6 +2492,103 @@ export function TTradeGlobalPage() {
     (lastTrustedMonitor?.accountId === accountId
       ? lastTrustedMonitor
       : undefined);
+  const replayDraftDirty = React.useMemo(
+    () =>
+      replaySettingsDifferenceCount(
+        replayForm,
+        replayCosts,
+        replayBaseForm,
+        replayBaseCosts
+      ) > 0,
+    [replayBaseCosts, replayBaseForm, replayCosts, replayForm]
+  );
+  React.useEffect(() => {
+    if (!monitor) return;
+    const shouldInitialize = replaySettingsAccountId !== monitor.accountId;
+    const shouldAdvanceCleanDraft =
+      !replayDraftDirty && replayConfigVersion !== monitor.configVersion;
+    if (!shouldInitialize && !shouldAdvanceCleanDraft) return;
+    const nextForm = settingsFormFromReplaySettings(monitor);
+    setReplayForm(cloneSettingsForm(nextForm));
+    setReplayBaseForm(cloneSettingsForm(nextForm));
+    setReplayCosts(cloneReplayCostForm(defaultReplayCostForm));
+    setReplayBaseCosts(cloneReplayCostForm(defaultReplayCostForm));
+    setReplayConfigVersion(monitor.configVersion);
+    setReplaySettingsAccountId(monitor.accountId);
+  }, [monitor, replayConfigVersion, replayDraftDirty, replaySettingsAccountId]);
+  const replayLiveSettingsStale = Boolean(
+    monitor && replayConfigVersion !== monitor.configVersion
+  );
+  const setReplayField = React.useCallback(
+    <K extends keyof SettingsForm>(field: K, value: SettingsForm[K]) => {
+      setReplayForm(current => ({ ...current, [field]: value }));
+    },
+    []
+  );
+  const setReplaySignalPolicyField = React.useCallback(
+    (field: keyof SignalPolicyForm, value: SignalPolicyFormValue) => {
+      setReplayForm(current => updateSignalPolicyValue(current, field, value));
+    },
+    []
+  );
+  const setReplayCostField = React.useCallback(
+    (field: keyof ReplayCostForm, value: string) => {
+      setReplayCosts(current => ({ ...current, [field]: value }));
+    },
+    []
+  );
+  const copyReplaySettings = React.useCallback(
+    (nextForm: SettingsForm, nextCosts: ReplayCostForm) => {
+      setReplayForm(cloneSettingsForm(nextForm));
+      setReplayCosts(cloneReplayCostForm(nextCosts));
+    },
+    []
+  );
+  const restoreReplaySettings = React.useCallback(async () => {
+    if (!accountId) return false;
+    setReplaySettingsRestoring(true);
+    try {
+      const result = await client
+        .query(
+          TTradeGlobalMonitorQuery,
+          { accountId },
+          { requestPolicy: 'network-only' }
+        )
+        .toPromise();
+      const payload = result.data?.tTradeGlobalMonitor;
+      const policy = readFragment(
+        TTradeSignalPolicyFieldsFragment,
+        payload?.signalPolicy
+      );
+      if (!payload || !policy || result.error) {
+        throw new Error(result.error?.message || '读取当前实盘参数失败');
+      }
+      const nextForm = settingsFormFromReplaySettings({
+        ...payload,
+        signalPolicy: policy,
+      });
+      setReplayForm(cloneSettingsForm(nextForm));
+      setReplayBaseForm(cloneSettingsForm(nextForm));
+      setReplayCosts(cloneReplayCostForm(defaultReplayCostForm));
+      setReplayBaseCosts(cloneReplayCostForm(defaultReplayCostForm));
+      setReplayConfigVersion(payload.configVersion);
+      setReplaySettingsAccountId(payload.accountId);
+      toast({
+        title: '已还原当前实盘参数',
+        description: `回测草稿已更新为实盘配置 v${payload.configVersion}，未修改实盘运行。`,
+      });
+      return true;
+    } catch (error) {
+      toast({
+        title: '无法还原实盘参数',
+        description: error instanceof Error ? error.message : '请求失败',
+        variant: 'destructive',
+      });
+      return false;
+    } finally {
+      setReplaySettingsRestoring(false);
+    }
+  }, [accountId, client, toast]);
   const signalSnapshotTrusted =
     graphqlWsStatus === 'connected' &&
     !monitorResult.error &&
@@ -3956,38 +4184,44 @@ export function TTradeGlobalPage() {
             })}
           </>
         )}
-        {workspaceMode === 'REPLAY' &&
-          Boolean(replaySidebarContext?.activeRunId) && (
-            <>
-              <span className="mx-2 my-3 w-px bg-white/[0.08]" />
-              {(
-                [
+        {workspaceMode === 'REPLAY' && (
+          <>
+            <span className="mx-2 my-3 w-px bg-white/[0.08]" />
+            {(replaySidebarContext?.activeRunId
+              ? [
                   ['OVERVIEW', '总览'],
+                  ['PARAMETERS', '参数'],
                   ['SIGNALS', '信号'],
                   ['POSITIONS', '仓位与批次'],
                   ['EVENTS', '运行动态'],
                   ['ACCOUNT', '账户'],
-                ] as const
-              ).map(([view, label]) => {
-                const active = activeReplayView === view;
-                return (
-                  <button
-                    key={view}
-                    type="button"
-                    onClick={() => setActiveReplayView(view)}
-                    className={cn(
-                      'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
-                      active
-                        ? 'text-cyan-200 after:bg-cyan-400'
-                        : 'text-slate-500 hover:text-slate-200'
-                    )}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </>
-          )}
+                ]
+              : [
+                  ['OVERVIEW', '总览'],
+                  ['PARAMETERS', '参数'],
+                  ['ACCOUNT', '账户'],
+                ]
+            ).map(([view, label]) => {
+              const replayView = view as ReplayWorkspaceView;
+              const active = activeReplayView === view;
+              return (
+                <button
+                  key={view}
+                  type="button"
+                  onClick={() => setActiveReplayView(replayView)}
+                  className={cn(
+                    'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
+                    active
+                      ? 'text-cyan-200 after:bg-cyan-400'
+                      : 'text-slate-500 hover:text-slate-200'
+                  )}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </>
+        )}
       </nav>
 
       <div className="flex shrink-0 items-center gap-2">
@@ -4872,9 +5106,20 @@ export function TTradeGlobalPage() {
           <TTradeReplayPanel
             accountId={accountId}
             activeView={activeReplayView}
-            form={form}
+            baseCosts={replayBaseCosts}
+            baseForm={replayBaseForm}
+            costs={replayCosts}
+            form={replayForm}
+            liveConfigVersion={replayConfigVersion}
+            liveSettingsStale={replayLiveSettingsStale}
             onActiveViewChange={setActiveReplayView}
+            onCopySettings={copyReplaySettings}
+            onCostChange={setReplayCostField}
+            onFieldChange={setReplayField}
+            onRestoreSettings={restoreReplaySettings}
             onSidebarContextChange={setReplaySidebarContext}
+            onSignalPolicyChange={setReplaySignalPolicyField}
+            restoringSettings={replaySettingsRestoring}
           />
         ) : activeMode === 'MONITOR' ? (
           monitorView

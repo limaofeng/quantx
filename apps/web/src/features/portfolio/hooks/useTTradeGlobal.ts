@@ -1204,6 +1204,41 @@ export const TTradeReplayQuery = gql(`
           marketValue
         }
       }
+      settings {
+        targetTradeAmount
+        maxTradeAmount
+        maxConcurrentBatches
+        maxTotalTExposurePct
+        signalPolicy {
+          ...Portfolio_TTradeSignalPolicyFields
+        }
+        maxPriceDeviationPct
+        targetProfitPct
+        baseFloorPct
+        initialGapPct
+        trailingGapSlope
+        maxGapPct
+        highProfitLockEnabled
+        highProfitArmPct
+        highProfitMaxDrawdownPct
+        rapidReversalEnabled
+        rapidReversalWindowSeconds
+        rapidReversalDrawdownPct
+        rapidReversalConfirmTicks
+        limitUpTouchExitEnabled
+        limitUpTouchToleranceTicks
+        hardStopEnabled
+        hardStopPct
+        timeExitMode
+        timeExitTime
+        maxHoldingTradingDays
+        cooldownSeconds
+        commissionRate
+        minimumCommission
+        stampTaxRate
+        transferFeeRate
+        slippageRate
+      }
       skippedStockCodes
       summary {
         initialEquity

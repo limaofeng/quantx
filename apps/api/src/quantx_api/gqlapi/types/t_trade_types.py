@@ -1444,6 +1444,41 @@ class TTradeReplayReport:
   json_artifact: str
 
 
+@strawberry.type(description="做 T 历史回放冻结参数快照")
+class TTradeReplaySettings:
+  target_trade_amount: float
+  max_trade_amount: float
+  max_concurrent_batches: int
+  max_total_t_exposure_pct: float
+  signal_policy: TTradeSignalPolicy
+  max_price_deviation_pct: float
+  target_profit_pct: float
+  base_floor_pct: float
+  initial_gap_pct: float
+  trailing_gap_slope: float
+  max_gap_pct: float
+  high_profit_lock_enabled: bool
+  high_profit_arm_pct: float
+  high_profit_max_drawdown_pct: float
+  rapid_reversal_enabled: bool
+  rapid_reversal_window_seconds: int
+  rapid_reversal_drawdown_pct: float
+  rapid_reversal_confirm_ticks: int
+  limit_up_touch_exit_enabled: bool
+  limit_up_touch_tolerance_ticks: int
+  hard_stop_enabled: bool
+  hard_stop_pct: float
+  time_exit_mode: TTradeTimeExitMode
+  time_exit_time: str
+  max_holding_trading_days: int
+  cooldown_seconds: int
+  commission_rate: float
+  minimum_commission: float
+  stamp_tax_rate: float
+  transfer_fee_rate: float
+  slippage_rate: float
+
+
 @strawberry.type(description="做 T 历史回放运行")
 class TTradeReplay:
   run_id: str
@@ -1467,6 +1502,7 @@ class TTradeReplay:
   data_quality_message: str
   data_preparation: TTradeReplayDataPreparation
   initial_portfolio: TTradeReplayInitialPortfolio
+  settings: TTradeReplaySettings
   skipped_stock_codes: List[str]
   summary: Optional[TTradeReplaySummary]
   instruments: List[TTradeReplayInstrumentResult]

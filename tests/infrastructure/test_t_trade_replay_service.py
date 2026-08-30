@@ -3,11 +3,58 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from quantx_infrastructure.models.enums import StrategyRunMode
 from quantx_infrastructure.services.t_trade_replay_service import (
   RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH,
   RUNTIME_STATE_CHECKPOINT_POLICY_KEY,
   TTradeReplayService,
 )
+
+
+def test_replay_validation_rejects_out_of_range_slippage() -> None:
+  with pytest.raises(ValueError, match="slippage_rate"):
+    TTradeReplayService().t_trade_service._validate_parameters(
+      {"slippage_rate": 0.02}, StrategyRunMode.BACKTEST
+    )
+
+
+def test_replay_projection_exposes_frozen_settings_snapshot() -> None:
+  service = TTradeReplayService()
+  run = SimpleNamespace(
+    id="replay-1",
+    instruments=["600887.SH"],
+    parameters={
+      "t_trade_replay": True,
+      "account_id": "account-1",
+      "replay_start_time": "2026-08-19T09:30:00",
+      "replay_end_time": "2026-08-19T15:00:00",
+      "target_trade_amount": 15_000.0,
+      "commission_rate": 0.0002,
+      "minimum_commission": 3.0,
+      "stamp_tax_rate": 0.0005,
+      "transfer_fee_rate": 0.00001,
+      "slippage_rate": 0.0006,
+    },
+    metrics={},
+    error_message=None,
+    created_at=datetime(2026, 8, 20, 8, 0),
+  )
+  projection = {
+    "account_id": "account-1",
+    "status": "COMPLETED",
+    "progress_pct": 100.0,
+    "revision": "3",
+    "processed_until": datetime(2026, 8, 19, 15, 0),
+    "updated_at": datetime(2026, 8, 20, 8, 5),
+  }
+
+  replay = service._project(run, None, projection)
+
+  assert replay["settings"]["target_trade_amount"] == 15_000.0
+  assert replay["settings"]["signal_policy"]["policy_version"]
+  assert replay["settings"]["time_exit_mode"] == "UNLIMITED"
+  assert replay["settings"]["commission_rate"] == 0.0002
+  assert replay["settings"]["slippage_rate"] == 0.0006
 
 
 @pytest.mark.asyncio

@@ -101,6 +101,7 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeReplayPosition,
   TTradeReplayPreparation,
   TTradeReplayReport,
+  TTradeReplaySettings,
   TTradeReplayStartInput,
   TTradeReplaySummary,
   TTradeRolloutTarget,
@@ -817,6 +818,49 @@ class TTradeResolver:
     return TTradeSession(**cls._graphql_kwargs(TTradeSession, payload))
 
   @classmethod
+  def _replay_settings_type(cls, data: Any) -> TTradeReplaySettings:
+    settings = {
+      "target_trade_amount": 10_000.0,
+      "max_trade_amount": 12_000.0,
+      "max_concurrent_batches": 3,
+      "max_total_t_exposure_pct": 0.1,
+      "max_price_deviation_pct": 0.3,
+      "target_profit_pct": 2.0,
+      "base_floor_pct": 0.5,
+      "initial_gap_pct": 1.5,
+      "trailing_gap_slope": 0.25,
+      "max_gap_pct": 3.0,
+      "high_profit_lock_enabled": True,
+      "high_profit_arm_pct": 4.0,
+      "high_profit_max_drawdown_pct": 1.2,
+      "rapid_reversal_enabled": True,
+      "rapid_reversal_window_seconds": 15,
+      "rapid_reversal_drawdown_pct": 0.8,
+      "rapid_reversal_confirm_ticks": 2,
+      "limit_up_touch_exit_enabled": True,
+      "limit_up_touch_tolerance_ticks": 0,
+      "hard_stop_enabled": False,
+      "hard_stop_pct": -0.8,
+      "time_exit_mode": "UNLIMITED",
+      "time_exit_time": "14:50",
+      "max_holding_trading_days": 5,
+      "cooldown_seconds": 300,
+      "commission_rate": 0.0003,
+      "minimum_commission": 5.0,
+      "stamp_tax_rate": 0.0005,
+      "transfer_fee_rate": 0.00001,
+      "slippage_rate": 0.0001,
+      **dict(data or {}),
+    }
+    raw_policy = dict(settings.pop("signal_policy", {}) or {})
+    policy = (
+      OpportunityPolicy.from_dict(raw_policy) if raw_policy else OpportunityPolicy()
+    )
+    settings["time_exit_mode"] = cls._time_exit_mode(settings.get("time_exit_mode"))
+    settings["signal_policy"] = cls._signal_policy_from_domain(policy)
+    return TTradeReplaySettings(**cls._graphql_kwargs(TTradeReplaySettings, settings))
+
+  @classmethod
   def _replay_type(cls, data: dict) -> TTradeReplay:
     payload = cls._with_datetimes(
       data,
@@ -886,6 +930,7 @@ class TTradeResolver:
     payload["initial_portfolio"] = TTradeReplayInitialPortfolio(
       **cls._graphql_kwargs(TTradeReplayInitialPortfolio, initial_portfolio)
     )
+    payload["settings"] = cls._replay_settings_type(payload.get("settings"))
     return TTradeReplay(**cls._graphql_kwargs(TTradeReplay, payload))
 
   @classmethod

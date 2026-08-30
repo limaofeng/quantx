@@ -734,6 +734,7 @@ class TTradeService:
       "minimum_commission": (0.0, 100.0, 5.0),
       "stamp_tax_rate": (0.0, 0.01, 0.0005),
       "transfer_fee_rate": (0.0, 0.01, 0.00001),
+      "slippage_rate": (0.0, 0.01, 0.0001),
     }
     values: Dict[str, float] = {}
     for key, (minimum, maximum, default) in numeric_ranges.items():

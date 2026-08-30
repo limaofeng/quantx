@@ -75,7 +75,7 @@ describe('TTradeGlobalPage toolbar color contract', () => {
     );
   });
 
-  it('shows replay detail subviews only after a record is selected', () => {
+  it('keeps replay parameters available before selection and adds result views afterward', () => {
     const source = readFileSync(new URL(SOURCE_PATH, import.meta.url), 'utf8');
     const toolbar = readToolbarSource();
     const replaySubviews = sourceSection(
@@ -84,12 +84,18 @@ describe('TTradeGlobalPage toolbar color contract', () => {
       '      </nav>'
     );
 
-    for (const label of ['总览', '信号', '仓位与批次', '运行动态', '账户']) {
+    for (const label of [
+      '总览',
+      '参数',
+      '信号',
+      '仓位与批次',
+      '运行动态',
+      '账户',
+    ]) {
       expect(replaySubviews).toContain(`'${label}'`);
     }
-    expect(replaySubviews).toContain(
-      'Boolean(replaySidebarContext?.activeRunId)'
-    );
+    expect(replaySubviews).toContain('replaySidebarContext?.activeRunId');
+    expect(replaySubviews).toContain("['PARAMETERS', '参数']");
     expect(replaySubviews).toContain('focus-visible:ring-cyan-400/60');
     expect(replaySubviews).toContain("? 'text-cyan-200 after:bg-cyan-400'");
     expect(source).not.toContain('aria-label="回放内容"');

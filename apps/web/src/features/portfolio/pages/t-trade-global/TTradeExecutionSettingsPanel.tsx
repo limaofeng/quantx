@@ -334,9 +334,11 @@ function timeExitSummary(form: SettingsForm) {
 export function TTradeExecutionSettingsPanel({
   form,
   onFieldChange,
+  showModeSelector = true,
 }: {
   form: SettingsForm;
   onFieldChange: SettingsFieldChange;
+  showModeSelector?: boolean;
 }) {
   const [fundsOpen, setFundsOpen] = React.useState(false);
   const [trajectoryOpen, setTrajectoryOpen] = React.useState(false);
@@ -365,40 +367,42 @@ export function TTradeExecutionSettingsPanel({
             先看策略轮廓，再按需调整细节
           </p>
         </div>
-        <div
-          aria-label="运行模式"
-          className="flex rounded-control border border-white/[0.07] bg-[#07111f] p-1"
-          role="group"
-        >
-          <button
-            type="button"
-            aria-pressed={form.mode === 'paper'}
-            className={cn(
-              'flex h-control-compact cursor-pointer items-center gap-1.5 rounded-sm px-3 text-ui-caption font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/70',
-              form.mode === 'paper'
-                ? 'bg-primary/15 text-blue-200'
-                : 'text-slate-500 hover:text-slate-300'
-            )}
-            onClick={() => onFieldChange('mode', 'paper')}
+        {showModeSelector && (
+          <div
+            aria-label="运行模式"
+            className="flex rounded-control border border-white/[0.07] bg-[#07111f] p-1"
+            role="group"
           >
-            <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
-            模拟观察
-          </button>
-          <button
-            type="button"
-            aria-pressed={form.mode === 'live'}
-            className={cn(
-              'flex h-control-compact cursor-pointer items-center gap-1.5 rounded-sm px-3 text-ui-caption font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/70',
-              form.mode === 'live'
-                ? 'bg-primary/15 text-blue-200'
-                : 'text-slate-500 hover:text-slate-300'
-            )}
-            onClick={() => onFieldChange('mode', 'live')}
-          >
-            <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
-            实盘执行
-          </button>
-        </div>
+            <button
+              type="button"
+              aria-pressed={form.mode === 'paper'}
+              className={cn(
+                'flex h-control-compact cursor-pointer items-center gap-1.5 rounded-sm px-3 text-ui-caption font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/70',
+                form.mode === 'paper'
+                  ? 'bg-primary/15 text-blue-200'
+                  : 'text-slate-500 hover:text-slate-300'
+              )}
+              onClick={() => onFieldChange('mode', 'paper')}
+            >
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              模拟观察
+            </button>
+            <button
+              type="button"
+              aria-pressed={form.mode === 'live'}
+              className={cn(
+                'flex h-control-compact cursor-pointer items-center gap-1.5 rounded-sm px-3 text-ui-caption font-semibold outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/70',
+                form.mode === 'live'
+                  ? 'bg-primary/15 text-blue-200'
+                  : 'text-slate-500 hover:text-slate-300'
+              )}
+              onClick={() => onFieldChange('mode', 'live')}
+            >
+              <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+              实盘执行
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">

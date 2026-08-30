@@ -743,6 +743,7 @@ class TTradeReplayService:
         "total_asset": float(params.get("initial_total_asset", 0.0) or 0.0),
         "positions": list(params.get("initial_positions") or []),
       }
+    settings = self.t_trade_service._normalize_exit_settings(params)
     return {
       "run_id": run.id,
       "backtest_id": backtest.id if backtest else None,
@@ -769,6 +770,55 @@ class TTradeReplayService:
       ),
       "data_preparation": data_preparation,
       "initial_portfolio": initial_portfolio,
+      "settings": {
+        "target_trade_amount": float(settings.get("target_trade_amount", 10_000.0)),
+        "max_trade_amount": float(settings.get("max_trade_amount", 12_000.0)),
+        "max_concurrent_batches": int(settings.get("max_concurrent_batches", 3)),
+        "max_total_t_exposure_pct": float(
+          settings.get("max_total_t_exposure_pct", 0.1)
+        ),
+        "signal_policy": dict(settings["signal_policy"]),
+        "max_price_deviation_pct": float(settings.get("max_price_deviation_pct", 0.3)),
+        "target_profit_pct": float(settings.get("target_profit_pct", 2.0)),
+        "base_floor_pct": float(settings.get("base_floor_pct", 0.5)),
+        "initial_gap_pct": float(settings.get("initial_gap_pct", 1.5)),
+        "trailing_gap_slope": float(settings.get("trailing_gap_slope", 0.25)),
+        "max_gap_pct": float(settings.get("max_gap_pct", 3.0)),
+        "high_profit_lock_enabled": bool(
+          settings.get("high_profit_lock_enabled", True)
+        ),
+        "high_profit_arm_pct": float(settings.get("high_profit_arm_pct", 4.0)),
+        "high_profit_max_drawdown_pct": float(
+          settings.get("high_profit_max_drawdown_pct", 1.2)
+        ),
+        "rapid_reversal_enabled": bool(settings.get("rapid_reversal_enabled", True)),
+        "rapid_reversal_window_seconds": int(
+          settings.get("rapid_reversal_window_seconds", 15)
+        ),
+        "rapid_reversal_drawdown_pct": float(
+          settings.get("rapid_reversal_drawdown_pct", 0.8)
+        ),
+        "rapid_reversal_confirm_ticks": int(
+          settings.get("rapid_reversal_confirm_ticks", 2)
+        ),
+        "limit_up_touch_exit_enabled": bool(
+          settings.get("limit_up_touch_exit_enabled", True)
+        ),
+        "limit_up_touch_tolerance_ticks": int(
+          settings.get("limit_up_touch_tolerance_ticks", 0)
+        ),
+        "hard_stop_enabled": bool(settings.get("hard_stop_enabled", False)),
+        "hard_stop_pct": float(settings.get("hard_stop_pct", -0.8)),
+        "time_exit_mode": str(settings.get("time_exit_mode", "UNLIMITED")),
+        "time_exit_time": str(settings.get("time_exit_time", "14:50")),
+        "max_holding_trading_days": int(settings.get("max_holding_trading_days", 5)),
+        "cooldown_seconds": int(settings.get("cooldown_seconds", 300)),
+        "commission_rate": float(params.get("commission_rate", 0.0003)),
+        "minimum_commission": float(params.get("minimum_commission", 5.0)),
+        "stamp_tax_rate": float(params.get("stamp_tax_rate", 0.0005)),
+        "transfer_fee_rate": float(params.get("transfer_fee_rate", 0.00001)),
+        "slippage_rate": float(params.get("slippage_rate", 0.0001)),
+      },
       "skipped_stock_codes": list(
         replay_metrics.get("skipped_stock_codes")
         or [str(item.get("stock_code", "") or "") for item in skipped]

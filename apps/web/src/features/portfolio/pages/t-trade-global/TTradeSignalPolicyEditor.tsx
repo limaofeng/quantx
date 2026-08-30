@@ -1374,6 +1374,7 @@ export function TTradeSignalPolicyEditor({
   preview,
   previewLoading,
   serverConfigVersion,
+  showPreviewAction = true,
 }: {
   conflictVersion?: number | null;
   conflictPolicy?: SignalPolicyLike | null;
@@ -1387,6 +1388,7 @@ export function TTradeSignalPolicyEditor({
   preview?: SignalPolicyPreviewLike | null;
   previewLoading: boolean;
   serverConfigVersion: number;
+  showPreviewAction?: boolean;
 }) {
   const [activeView, setActiveView] = React.useState<PolicyViewId>('overview');
   const [editedFields, setEditedFields] = React.useState<
@@ -1580,30 +1582,34 @@ export function TTradeSignalPolicyEditor({
                 {localErrors.length > 0 ? '本地校验未通过' : '本地校验通过'}
               </h3>
               <p className="mt-0.5 text-ui-caption text-slate-500">
-                配置版本 v{serverConfigVersion} ·{' '}
-                {preview
-                  ? '已生成服务端纯校验预览'
-                  : editedFields.size > 0
-                    ? '服务端预览待更新'
-                    : '尚无未验证修改'}
+                {showPreviewAction ? `配置版本 v${serverConfigVersion} · ` : ''}
+                {showPreviewAction
+                  ? preview
+                    ? '已生成服务端纯校验预览'
+                    : editedFields.size > 0
+                      ? '服务端预览待更新'
+                      : '尚无未验证修改'
+                  : '启动回放时服务端会再次校验'}
               </p>
             </div>
           </div>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-control-compact rounded-control border-primary/35 text-ui-caption text-blue-100 hover:bg-primary/[0.08]"
-            disabled={previewLoading || localErrors.length > 0}
-            onClick={onPreview}
-          >
-            {previewLoading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            验证配置
-          </Button>
+          {showPreviewAction && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-control-compact rounded-control border-primary/35 text-ui-caption text-blue-100 hover:bg-primary/[0.08]"
+              disabled={previewLoading || localErrors.length > 0}
+              onClick={onPreview}
+            >
+              {previewLoading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              验证配置
+            </Button>
+          )}
         </div>
 
         {localErrors.length > 0 && (

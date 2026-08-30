@@ -175,7 +175,7 @@ export const appRoutes: AppRouteConfig[] = [
     path: '/t-trade',
     title: '做T助手',
     importer: toDefaultExport(
-      () => import('@/features/portfolio'),
+      () => import('@/features/portfolio/pages/TTradeGlobalPage'),
       'TTradeGlobalPage'
     ),
     skeleton: 'dashboard',
