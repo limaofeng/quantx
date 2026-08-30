@@ -69,6 +69,9 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import market_data_staging as _market_data_staging
+from quantx_infrastructure.services.account_execution_quarantine_service import (
+  AccountExecutionQuarantineService,
+)
 from quantx_infrastructure.services.account_execution_safety_service import (
   AccountExecutionSafetyService,
 )
@@ -84,8 +87,15 @@ from quantx_infrastructure.services.agent_session_guard import (
   to_naive_utc,
   utc_iso,
 )
+from quantx_infrastructure.services.exit_plan_zero_fill_safety import (
+  invalidate_exit_plan_zero_fill_proof,
+)
 from quantx_infrastructure.services.market_stream_readiness import (
   authoritative_market_stream_tradable,
+)
+from quantx_infrastructure.services.trade_intent_processor import (
+  LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE,
+  LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE,
 )
 from redis.exceptions import RedisError
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -1181,6 +1191,7 @@ async def _stage_command_runtime_event(
   status: str,
   reason: str,
   now: datetime,
+  zero_fill_invalidation: dict[str, Any] | None = None,
 ) -> bool:
   if correlation is None:
     return False
@@ -1215,6 +1226,8 @@ async def _stage_command_runtime_event(
     "command_message_id": command.message_id,
     "command_lifecycle_status": str(pending.status or "").upper(),
   }
+  if zero_fill_invalidation:
+    metadata["zero_fill_proof_invalidation"] = dict(zero_fill_invalidation)
   event = StrategyRuntimeEvent(
     event_id=str(uuid.uuid4()),
     business_key=business_key,
@@ -1321,6 +1334,7 @@ async def _transition_place_order_command(
     batch = await db.get(TTradeBatch, pending.batch_id, with_for_update=True)
 
   normalized_status = str(requested_status or "").upper()
+  previous_command_status = str(command.delivery_status or "").upper()
   role = str(pending.t_trade_role or "").upper() if pending is not None else ""
   batch_fill_volume = 0
   if role == "ENTRY" and batch is not None:
@@ -1386,9 +1400,15 @@ async def _transition_place_order_command(
     normalized_status = "RECONCILE_REQUIRED"
     reason = f"{reason}:durable_pre_execution_proof_missing"[:256]
 
+  pending_request_metadata = (
+    dict(pending.request_metadata or {}) if pending is not None else {}
+  )
+  correlation_request_metadata = (
+    dict(correlation.request_metadata or {}) if correlation is not None else {}
+  )
   request_metadata = {
-    **(dict(pending.request_metadata or {}) if pending is not None else {}),
-    **(dict(correlation.request_metadata or {}) if correlation is not None else {}),
+    **pending_request_metadata,
+    **correlation_request_metadata,
   }
   intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
   entry_plan_id = str(
@@ -1409,9 +1429,112 @@ async def _transition_place_order_command(
     and str(intent_metadata.get("entry_plan_id") or "") == entry_plan_id
     and intent_zero_execution
   )
-  strategy_status = (
-    "RECONCILED_ZERO_FILL" if managed_entry_zero_fill else normalized_status
+  request_exit_plan_id = str(request_metadata.get("exit_plan_id") or "").strip()
+  intent_exit_plan_id = str(intent_metadata.get("exit_plan_id") or "").strip()
+  exact_exit_plan_binding = bool(
+    request_exit_plan_id
+    and request_exit_plan_id == intent_exit_plan_id
+    and pending is not None
+    and intent is not None
+    and str(pending.side or "").upper() == "SELL"
+    and str(intent.direction or "").upper() == "SELL"
+    and str(intent.owner_type or "").upper() == "EXIT_PLAN"
+    and str(intent.owner_id or "") == request_exit_plan_id
+    and str(intent_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
+    and str(intent_metadata.get("owner_id") or "") == request_exit_plan_id
+    and str(pending_request_metadata.get("owner_type") or "").upper()
+    == "EXIT_PLAN"
+    and str(pending_request_metadata.get("owner_id") or "")
+    == request_exit_plan_id
+    and str(pending_request_metadata.get("exit_plan_id") or "")
+    == request_exit_plan_id
+    and str(intent.account_id or "") == str(pending.account_id or "")
+    and str(intent.instrument_code or "").upper()
+    == str(pending.instrument_code or "").upper()
+    and str(intent.strategy_run_id or "") == str(pending.strategy_run_id or "")
+    and (
+      correlation is None
+      or (
+        str(correlation.intent_id or "") == str(intent.id or "")
+        and str(correlation.account_id or "") == str(pending.account_id or "")
+        and str(correlation.strategy_run_id or "")
+        == str(pending.strategy_run_id or "")
+        and str(correlation_request_metadata.get("owner_type") or "").upper()
+        == "EXIT_PLAN"
+        and str(correlation_request_metadata.get("owner_id") or "")
+        == request_exit_plan_id
+        and str(correlation_request_metadata.get("exit_plan_id") or "")
+        == request_exit_plan_id
+      )
+    )
+    and intent_zero_execution
   )
+  first_exit_plan_outbox_expiry = bool(
+    normalized_status == "EXPIRED"
+    and reason == "command_expired_before_delivery"
+    and previous_command_status == "QUEUED"
+    and command.delivered_at is None
+    and safe_pre_execution_state
+    and exact_exit_plan_binding
+  )
+  replayed_exit_plan_outbox_expiry = bool(
+    normalized_status != "RECONCILE_REQUIRED"
+    and previous_command_status == "EXPIRED"
+    and command.delivered_at is None
+    and pending is not None
+    and str(pending.status or "").upper() == "EXPIRED"
+    and intent is not None
+    and str(intent.status or "").upper() == "RECONCILED_ZERO_FILL"
+    and str(intent_metadata.get("execution_terminal_source") or "").upper()
+    == LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE
+    and safe_pre_execution_state
+    and exact_exit_plan_binding
+  )
+  first_exit_plan_agent_rejection = bool(
+    exact_exit_plan_binding
+    and normalized_status in {"REJECTED", "EXPIRED"}
+    and reason in _PRE_EXECUTION_REJECTION_REASONS
+    and safe_pre_execution_state
+  )
+  replayed_exit_plan_agent_rejection = bool(
+    exact_exit_plan_binding
+    and normalized_status != "RECONCILE_REQUIRED"
+    and previous_command_status in {"REJECTED", "EXPIRED"}
+    and pending is not None
+    and str(pending.status or "").upper() in {"REJECTED", "EXPIRED"}
+    and intent is not None
+    and str(intent.status or "").upper() == "RECONCILED_ZERO_FILL"
+    and str(intent_metadata.get("execution_terminal_source") or "").upper()
+    == LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE
+    and safe_pre_execution_state
+  )
+  replayed_exit_plan_zero_fill = bool(
+    replayed_exit_plan_outbox_expiry or replayed_exit_plan_agent_rejection
+  )
+  exit_plan_zero_fill = bool(
+    first_exit_plan_outbox_expiry
+    or replayed_exit_plan_outbox_expiry
+    or first_exit_plan_agent_rejection
+    or replayed_exit_plan_agent_rejection
+  )
+  strategy_status = (
+    "RECONCILED_ZERO_FILL"
+    if managed_entry_zero_fill or exit_plan_zero_fill
+    else normalized_status
+  )
+  if (
+    exact_exit_plan_binding
+    and normalized_status == "RECONCILE_REQUIRED"
+    and reason == "accepted_ack_conflicts_with_terminal_command_state"
+  ):
+    await invalidate_exit_plan_zero_fill_proof(
+      db,
+      client_order_id=str(pending.client_order_id or ""),
+      evidence_kind="COMMAND_ACK",
+      evidence_status="ACCEPTED",
+      evidence_key=f"command-ack:{command.message_id}:ACCEPTED",
+    )
+    intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
 
   if normalized_status == "RECONCILE_REQUIRED":
     command.delivery_status = "RECONCILE_REQUIRED"
@@ -1432,14 +1555,43 @@ async def _transition_place_order_command(
   if intent is not None:
     intent.status = strategy_status
     intent.notes = reason[:2000] or intent.notes
-    if managed_entry_zero_fill:
-      intent.intent_metadata = {
-        **intent_metadata,
-        "execution_terminal_source": "AGENT_COMMAND_LIFECYCLE",
-        "execution_terminal_reason": reason,
-        "command_lifecycle_status": normalized_status,
-        "execution_terminal_at": now.isoformat(),
+    if normalized_status == "RECONCILE_REQUIRED" and str(
+      intent_metadata.get("execution_terminal_source") or ""
+    ).upper() in {
+      LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE,
+      LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE,
+    }:
+      intent_metadata = {
+        key: value
+        for key, value in intent_metadata.items()
+        if key
+        not in {
+          "execution_terminal_source",
+          "execution_terminal_reason",
+          "execution_terminal_at",
+          "command_lifecycle_status",
+          "command_lifecycle_previous_status",
+          "command_lifecycle_message_id",
+        }
       }
+      intent.intent_metadata = intent_metadata
+    if managed_entry_zero_fill or exit_plan_zero_fill:
+      if not replayed_exit_plan_zero_fill:
+        intent.intent_metadata = {
+          **intent_metadata,
+          "execution_terminal_source": (
+            LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE
+            if first_exit_plan_outbox_expiry
+            else LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE
+            if first_exit_plan_agent_rejection
+            else "AGENT_COMMAND_LIFECYCLE"
+          ),
+          "execution_terminal_reason": reason,
+          "command_lifecycle_status": normalized_status,
+          "command_lifecycle_previous_status": previous_command_status,
+          "command_lifecycle_message_id": str(command.message_id or ""),
+          "execution_terminal_at": now.isoformat(),
+        }
   await _project_command_batch_status(
     db,
     pending=pending,
@@ -1454,6 +1606,11 @@ async def _transition_place_order_command(
     status=strategy_status,
     reason=reason,
     now=now,
+    zero_fill_invalidation=(
+      dict(intent_metadata.get("zero_fill_proof_invalidation") or {})
+      if isinstance(intent_metadata.get("zero_fill_proof_invalidation"), dict)
+      else None
+    ),
   )
 
 
@@ -1488,26 +1645,55 @@ async def _expire_trade_commands_in_session(
   outcome twice.
   """
 
-  query = select(TradeCommandOutbox).where(
+  query = select(
+    TradeCommandOutbox.message_id,
+    TradeCommandOutbox.payload,
+  ).where(
     TradeCommandOutbox.delivery_status.in_(("QUEUED", "DELIVERED")),
     TradeCommandOutbox.expires_at <= now,
   )
   if device_id:
     query = query.where(TradeCommandOutbox.device_id == device_id)
-  expired_commands = (
+  candidates = list(
     (
       await db.execute(
         query.order_by(TradeCommandOutbox.expires_at, TradeCommandOutbox.created_at)
         .limit(max(1, int(batch_size)))
-        .with_for_update(skip_locked=True)
       )
-    )
-    .scalars()
-    .all()
+    ).all()
   )
 
   staged_runtime_event = False
-  for expired in expired_commands:
+  expired_count = 0
+  for message_id, candidate_payload in candidates:
+    candidate_payload = dict(candidate_payload or {})
+    live_place = bool(
+      str(candidate_payload.get("command_kind") or "").upper() == "PLACE_ORDER"
+      and str(candidate_payload.get("execution_mode") or "").lower() == "live"
+    )
+    if live_place:
+      lifecycle_lock = await AccountExecutionQuarantineService(
+        db
+      ).lock_command_for_lifecycle(
+        message_id=str(message_id),
+        device_id=str(device_id or ""),
+      )
+      expired = lifecycle_lock.command
+    else:
+      expired = await db.get(
+        TradeCommandOutbox,
+        str(message_id),
+        with_for_update=True,
+        populate_existing=True,
+      )
+    if (
+      expired is None
+      or str(expired.delivery_status or "").upper() not in {"QUEUED", "DELIVERED"}
+      or expired.expires_at > now
+      or (device_id and str(expired.device_id or "") != str(device_id))
+    ):
+      continue
+    expired_count += 1
     previous_status = str(expired.delivery_status or "").upper()
     if _is_place_order(expired):
       if previous_status == "QUEUED":
@@ -1543,7 +1729,7 @@ async def _expire_trade_commands_in_session(
         if previous_status == "QUEUED"
         else "delivered_command_expired_without_ack"
       )
-  return len(expired_commands), staged_runtime_event
+  return expired_count, staged_runtime_event
 
 
 async def sweep_expired_trade_commands(
@@ -1602,17 +1788,31 @@ async def _record_command_ack(device_id: str, payload: dict[str, Any]) -> None:
   reason = ack.reason.strip()
   staged_runtime_event = False
   async with AsyncSessionLocal() as db:
-    query = select(TradeCommandOutbox).where(
-      TradeCommandOutbox.device_id == device_id,
-      TradeCommandOutbox.message_id == message_id,
+    lifecycle_lock = await AccountExecutionQuarantineService(
+      db
+    ).lock_command_for_lifecycle(
+      message_id=message_id,
+      device_id=device_id,
     )
-    command = (await db.execute(query.with_for_update())).scalar_one_or_none()
+    command = lifecycle_lock.command
     if command is None:
       return
     if command.client_order_id != client_order_id:
       raise ValueError("command_ack 命令与 client_order_id 不匹配")
     now = utcnow()
     previous_status = str(command.delivery_status or "").upper()
+    if reason == "command_processing":
+      # A redelivery raced the Agent's original native call. This is neither
+      # rejection nor broker acceptance; postpone another delivery and wait
+      # for the original durable result/report.  A late processing ACK must
+      # never revive a command already quarantined or otherwise terminalized.
+      if previous_status in {"QUEUED", "DELIVERED"}:
+        command.delivery_status = "DELIVERED"
+        command.delivered_at = now
+        command.acknowledged_at = None
+        command.last_error = reason
+      await db.commit()
+      return
     command.acknowledged_at = now
     if not _is_place_order(command):
       if accepted:
@@ -1629,7 +1829,11 @@ async def _record_command_ack(device_id: str, payload: dict[str, Any]) -> None:
     elif accepted and previous_status == "ACKNOWLEDGED":
       # Idempotent replay of the Agent journal result.
       command.last_error = reason[:256] or None
-    elif accepted and previous_status in {"QUEUED", "DELIVERED", "RECONCILE_REQUIRED"}:
+    elif accepted and previous_status == "RECONCILE_REQUIRED":
+      # ACK proves only Agent-local receipt.  It cannot resolve broker
+      # uncertainty or erase the durable reason that quarantined this command.
+      pass
+    elif accepted and previous_status in {"QUEUED", "DELIVERED"}:
       # ACK is delivery/local-processing evidence only.  Pending order truth
       # still waits for a durable broker report.
       command.delivery_status = "ACKNOWLEDGED"
@@ -1777,8 +1981,8 @@ async def _record_report(
     message_type=envelope.message_type.value,
     protocol_version=envelope.protocol_version,
     client_order_id=str(wire_payload.get("client_order_id", "")) or None,
-    raw_payload_hash=payload_hash,
-    business_idempotency_key=business_idempotency_key,
+    raw_payload_hash=prepared.payload_hash,
+    business_idempotency_key=prepared.business_idempotency_key,
     payload=payload,
     received_at=received_at,
     processing_status="PENDING",
@@ -1952,20 +2156,30 @@ async def _next_command(
       if fresh_delivery is not None:
         await db.commit()
         return None
-      command = (
-        await db.execute(
-          select(TradeCommandOutbox)
-          .where(
-            TradeCommandOutbox.device_id == device_id,
-            eligible_delivery,
-            TradeCommandOutbox.expires_at > now,
-            command_kind_expression.not_in(high_priority_kinds),
-          )
-          .order_by(TradeCommandOutbox.created_at)
-          .limit(1)
-          .with_for_update(skip_locked=True)
+      # Discover without a durable row lock, then claim through the shared
+      # account -> outbox boundary.  Exact release-proof invalidation takes the
+      # same account lock before it quarantines a PLACE_ORDER, so a concurrent
+      # LIVE SELL is either already DELIVERED evidence or cannot leave here.
+      candidate_message_id = await db.scalar(
+        select(TradeCommandOutbox.message_id)
+        .where(
+          TradeCommandOutbox.device_id == device_id,
+          eligible_delivery,
+          TradeCommandOutbox.expires_at > now,
+          command_kind_expression.not_in(high_priority_kinds),
         )
-      ).scalar_one_or_none()
+        .order_by(TradeCommandOutbox.created_at)
+        .limit(1)
+      )
+      if candidate_message_id is not None:
+        delivery_lock = await AccountExecutionQuarantineService(
+          db
+        ).lock_command_for_delivery(
+          message_id=str(candidate_message_id),
+          now=now,
+          redelivery_before=redelivery_before,
+        )
+        command = delivery_lock.command
     if command is None:
       await db.commit()
       return None
@@ -2964,16 +3178,55 @@ async def _send_agent_control_messages(
       agent_session_id=control_session.agent_session_id,
     ):
       raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
+    serialized = item.envelope.model_dump_json()
+    live_place_order = bool(
+      item.envelope.message_type is AgentMessageType.COMMAND
+      and str(item.envelope.payload.get("command_kind") or "").upper()
+      == "PLACE_ORDER"
+      and str(item.envelope.payload.get("execution_mode") or "").lower() == "live"
+    )
     if item.envelope.message_type in {
       AgentMessageType.COMMAND,
       AgentMessageType.CANCEL_COMMAND,
     }:
       await _assert_trade_delivery_session(control_session, item.envelope)
     try:
-      await asyncio.wait_for(
-        websocket.send_text(item.envelope.model_dump_json()),
-        timeout=AGENT_CONTROL_SEND_TIMEOUT_SECONDS,
-      )
+      if live_place_order:
+        async with AsyncSessionLocal() as db:
+          send_lock = await AccountExecutionQuarantineService(
+            db
+          ).lock_command_for_physical_send(
+            message_id=item.envelope.message_id,
+            expected_payload=item.envelope.payload,
+          )
+          if send_lock.command is None:
+            if send_lock.commit_required:
+              # The physical EXIT_PLAN final gate sealed a claimed DELIVERED
+              # row and opened an explicit reconciliation barrier.
+              await db.commit()
+            else:
+              await db.rollback()
+            await outbound.complete(item)
+            AGENT_CONTROL_EVENTS.labels(
+              event="delivery",
+              reason=(
+                "live_place_physical_send_"
+                + str(send_lock.blocked_reason or "blocked").lower()
+              ),
+            ).inc()
+            continue
+          # Keep Account -> PLACE outbox locked only for this bounded physical
+          # write.  This is the linearization point with exact quarantine.
+          await asyncio.wait_for(
+            websocket.send_text(serialized),
+            timeout=AGENT_CONTROL_SEND_TIMEOUT_SECONDS,
+          )
+          await db.commit()
+      else:
+        await asyncio.wait_for(
+          websocket.send_text(serialized),
+          timeout=AGENT_CONTROL_SEND_TIMEOUT_SECONDS,
+        )
     except asyncio.TimeoutError as exc:
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",

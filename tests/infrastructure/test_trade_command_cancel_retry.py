@@ -4,6 +4,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
+from quantx_contracts import CancelCommandPayload
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import AgentDevice, TradeCommandOutbox
@@ -77,8 +78,12 @@ async def test_expired_never_delivered_cancel_reuses_same_attempt_safely() -> No
       assert retried == first
       assert revived.delivery_status == "QUEUED"
       assert revived.expires_at > utcnow()
-      assert revived.payload["cancel_attempt"] == 1
-      assert revived.payload["cancel_business_identity"] == revived.idempotency_key
+      assert revived.idempotency_key == hashlib.sha256(
+        b"cancel:user-1:account-1:cancel-business-1"
+      ).hexdigest()
+      assert CancelCommandPayload.model_validate(revived.payload)
+      assert "cancel_attempt" not in revived.payload
+      assert "cancel_business_identity" not in revived.payload
       assert await db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 1
   finally:
     await engine.dispose()
@@ -117,13 +122,11 @@ async def test_uncertain_cancel_attempt_creates_new_deterministic_identity() -> 
       assert new_attempt.delivery_status == "QUEUED"
       assert new_attempt.client_order_id != old_attempt.client_order_id
       assert new_attempt.message_id != old_attempt.message_id
-      assert new_attempt.payload["cancel_business_identity"] == (
-        old_attempt.payload["cancel_business_identity"]
+      assert new_attempt.idempotency_key == (
+        f"{old_attempt.idempotency_key}:attempt:2"
       )
-      assert new_attempt.payload["cancel_attempt"] == 2
-      assert new_attempt.idempotency_key == hashlib.sha256(
-        f"{old_attempt.idempotency_key}:attempt:2".encode("utf-8")
-      ).hexdigest()
+      assert CancelCommandPayload.model_validate(old_attempt.payload)
+      assert CancelCommandPayload.model_validate(new_attempt.payload)
   finally:
     await engine.dispose()
 
@@ -176,7 +179,8 @@ async def test_nonexpired_dispatched_cancel_remains_the_only_active_attempt(
       assert retry is not None
       assert after_deadline.message_id != first.message_id
       assert retry.delivery_status == "QUEUED"
-      assert retry.payload["cancel_attempt"] == 2
+      assert retry.idempotency_key == f"{original.idempotency_key}:attempt:2"
+      assert CancelCommandPayload.model_validate(retry.payload)
       assert await db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 2
   finally:
     await engine.dispose()
@@ -229,8 +233,9 @@ async def test_concurrent_cancel_requests_leave_only_one_active_attempt(
         .all()
       )
       assert len(active) == 1
-      assert active[0].payload["cancel_business_identity"] == hashlib.sha256(
+      assert active[0].idempotency_key == hashlib.sha256(
         b"cancel:user-1:account-1:cancel-business-concurrent"
       ).hexdigest()
+      assert CancelCommandPayload.model_validate(active[0].payload)
   finally:
     await engine.dispose()

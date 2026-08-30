@@ -731,6 +731,15 @@ class AccountExecutionQuarantineService:
       or str(control.reconcile_status or "").strip().upper() != "READY"
     ):
       return TradeCommandDeliveryLock(None, "ACCOUNT_RECONCILE_REQUIRED")
+    side = str(payload.get("side") or "").strip().upper()
+    if side == "BUY":
+      # LIVE buys share the account/quarantine linearization point, while
+      # their market and risk-increase gates are rechecked by the API control
+      # session immediately before this lock. Exit-plan ownership and current
+      # sellable-volume validation apply only to SELL commands.
+      return TradeCommandDeliveryLock(command)
+    if side != "SELL":
+      return TradeCommandDeliveryLock(None, "COMMAND_CHANGED")
     from quantx_infrastructure.services.trade_command_service import (
       AgentUnavailableError,
       TradeCommandService,

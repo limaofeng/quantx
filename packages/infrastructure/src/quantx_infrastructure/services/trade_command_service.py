@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal
 from typing import Any, Mapping
 
+from quantx_contracts import CancelCommandPayload
 from quantx_domain.clock import to_naive_utc, utcnow
 from quantx_domain.strategies.ashare_managed_entry_plan import (
   ENTRY_PLAN_ENABLED_KEY,
@@ -2218,17 +2219,28 @@ class TradeCommandService:
         f"cancel:{user_id}:{account_id}:{idempotency_key.strip() or broker_order_id}"
       ).encode("utf-8")
     ).hexdigest()
+    cancel_retry_prefix = f"{cancel_business_identity}:attempt:"
+    cancel_attempt_selector = or_(
+      TradeCommandOutbox.idempotency_key == cancel_business_identity,
+      TradeCommandOutbox.idempotency_key.like(f"{cancel_retry_prefix}%"),
+    )
+
+    def cancel_attempt_number(attempt: TradeCommandOutbox) -> int:
+      attempt_key = str(attempt.idempotency_key or "")
+      if attempt_key == cancel_business_identity:
+        return 1
+      if attempt_key.startswith(cancel_retry_prefix):
+        try:
+          return max(1, int(attempt_key.removeprefix(cancel_retry_prefix)))
+        except ValueError:
+          return 1
+      return 1
+
     attempts = list(
       (
         await self.db.execute(
           select(TradeCommandOutbox)
-          .where(
-            or_(
-              TradeCommandOutbox.idempotency_key == cancel_business_identity,
-              TradeCommandOutbox.payload["cancel_business_identity"].as_string()
-              == cancel_business_identity,
-            )
-          )
+          .where(cancel_attempt_selector)
           .with_for_update()
         )
       )
@@ -2272,11 +2284,15 @@ class TradeCommandService:
     )
     if safely_reusable is not None:
       expires_at = now + timedelta(minutes=2)
-      payload = dict(safely_reusable.payload or {})
-      payload["cancel_business_identity"] = cancel_business_identity
-      payload["cancel_attempt"] = int(payload.get("cancel_attempt") or 1)
-      payload["expires_at"] = expires_at.isoformat() + "Z"
-      safely_reusable.payload = payload
+      reusable_payload = dict(safely_reusable.payload or {})
+      safely_reusable.payload = CancelCommandPayload(
+        client_order_id=str(safely_reusable.client_order_id or ""),
+        account_id=str(safely_reusable.account_id or ""),
+        execution_mode=str(reusable_payload.get("execution_mode") or "paper"),
+        broker_order_id=str(reusable_payload.get("broker_order_id") or ""),
+        trace_id=str(reusable_payload.get("trace_id") or safely_reusable.message_id),
+        expires_at=expires_at.replace(tzinfo=timezone.utc),
+      ).model_dump(mode="json")
       safely_reusable.delivery_status = "QUEUED"
       safely_reusable.expires_at = expires_at
       safely_reusable.last_error = None
@@ -2300,17 +2316,12 @@ class TradeCommandService:
         attempt.delivery_status = "RECONCILE_REQUIRED"
         attempt.last_error = "cancel_retry_requires_new_command_identity"
 
-    attempt_numbers = [
-      max(1, int(dict(attempt.payload or {}).get("cancel_attempt") or 1))
-      for attempt in attempts
-    ]
+    attempt_numbers = [cancel_attempt_number(attempt) for attempt in attempts]
     cancel_attempt = max(attempt_numbers, default=0) + 1
     business_idempotency_key = (
       cancel_business_identity
       if cancel_attempt == 1
-      else hashlib.sha256(
-        f"{cancel_business_identity}:attempt:{cancel_attempt}".encode("utf-8")
-      ).hexdigest()
+      else f"{cancel_retry_prefix}{cancel_attempt}"
     )
     device = await self._device_for(
       user_id=user_id,
@@ -2321,17 +2332,14 @@ class TradeCommandService:
     client_order_id = f"cancel:{uuid.uuid4()}"
     message_id = str(uuid.uuid4())
     expires_at = now + timedelta(minutes=2)
-    payload = {
-      "command_kind": "CANCEL_ORDER",
-      "client_order_id": client_order_id,
-      "account_id": account_id,
-      "execution_mode": execution_mode,
-      "broker_order_id": str(broker_order_id),
-      "trace_id": message_id,
-      "cancel_business_identity": cancel_business_identity,
-      "cancel_attempt": cancel_attempt,
-      "expires_at": expires_at.isoformat() + "Z",
-    }
+    payload = CancelCommandPayload(
+      client_order_id=client_order_id,
+      account_id=account_id,
+      execution_mode=execution_mode,
+      broker_order_id=str(broker_order_id),
+      trace_id=message_id,
+      expires_at=expires_at.replace(tzinfo=timezone.utc),
+    ).model_dump(mode="json")
     command = TradeCommandOutbox(
       message_id=message_id,
       client_order_id=client_order_id,
@@ -2352,13 +2360,7 @@ class TradeCommandService:
         existing_attempts = list(
           (
             await self.db.execute(
-              select(TradeCommandOutbox).where(
-                or_(
-                  TradeCommandOutbox.idempotency_key == cancel_business_identity,
-                  TradeCommandOutbox.payload["cancel_business_identity"].as_string()
-                  == cancel_business_identity,
-                )
-              )
+              select(TradeCommandOutbox).where(cancel_attempt_selector)
             )
           )
           .scalars()
@@ -2393,13 +2395,7 @@ class TradeCommandService:
         existing_attempts = list(
           (
             await self.db.execute(
-              select(TradeCommandOutbox).where(
-                or_(
-                  TradeCommandOutbox.idempotency_key == cancel_business_identity,
-                  TradeCommandOutbox.payload["cancel_business_identity"].as_string()
-                  == cancel_business_identity,
-                )
-              )
+              select(TradeCommandOutbox).where(cancel_attempt_selector)
             )
           )
           .scalars()

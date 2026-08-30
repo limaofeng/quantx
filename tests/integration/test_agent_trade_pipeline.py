@@ -14,6 +14,13 @@ from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
 )
 from quantx_domain.strategies.base import StrategyContext, StrategyRunMode
+from quantx_domain.trading.exit_plan import (
+  ExitPlan,
+  ExitPlanStatus,
+  ExitPlanTemplate,
+  ExitRuleSpec,
+  ExitRuleType,
+)
 from quantx_engine import report_processor
 from quantx_engine.strategy_executor import (
   ExecutionStatus,
@@ -34,6 +41,10 @@ from quantx_infrastructure.models.agent_runtime import (
   TTradeBatch,
 )
 from quantx_infrastructure.models.auth import AuthUser
+from quantx_infrastructure.models.auto_exit_plan import (
+  AutoExitPlanEvent,
+  AutoExitPlanRecord,
+)
 from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
@@ -65,6 +76,8 @@ TABLES = [
   StrategyRuntimeEvent.__table__,
   TTradeBatch.__table__,
   TradeIntentRecord.__table__,
+  AutoExitPlanRecord.__table__,
+  AutoExitPlanEvent.__table__,
   AgentReportInbox.__table__,
   RuntimeComponentHeartbeat.__table__,
   Order.__table__,
@@ -276,6 +289,120 @@ async def _enqueue_strategy_order(
   return queued, intent_id, batch_id
 
 
+async def _enqueue_exit_plan_order(
+  session_factory: async_sessionmaker[AsyncSession],
+  *,
+  owner_kind: str,
+):
+  if owner_kind not in {"monitor", "runtime"}:
+    raise ValueError(f"unsupported canonical exit-plan owner: {owner_kind}")
+  plan_id = f"exit-plan-{owner_kind}"
+  intent_id = f"exit-intent-{owner_kind}"
+  has_runtime_owner = owner_kind == "runtime"
+  strategy_run_id = f"exit-run-{owner_kind}" if has_runtime_owner else ""
+  strategy_name = (
+    "ashare_intraday_t_assistant"
+    if owner_kind == "runtime"
+    else "auto_exit_monitor"
+  )
+  metadata = {
+    "owner_type": "EXIT_PLAN",
+    "owner_id": plan_id,
+    "exit_plan_id": plan_id,
+  }
+  async with session_factory() as db:
+    db.add(
+      TradeIntentRecord(
+        id=intent_id,
+        strategy_run_id=strategy_run_id or None,
+        owner_type="EXIT_PLAN",
+        owner_id=plan_id,
+        account_id="account-1",
+        strategy_id=strategy_name,
+        instrument_code="600000.SH",
+        direction="SELL",
+        bucket="swing" if owner_kind == "runtime" else "manual",
+        reason="AUTO_EXIT_TEST",
+        status="PENDING",
+        target_volume=100,
+        limit_price_hint=10.5,
+        executed_volume=0,
+        intent_metadata=metadata,
+      )
+    )
+    await db.flush()
+    queued = await TradeCommandService(db).enqueue_order(
+      user_id="user-1",
+      account_id="account-1",
+      instrument_code="600000.SH",
+      side="SELL",
+      order_type="FIX_PRICE",
+      limit_price=Decimal("10.50"),
+      volume=100,
+      strategy_name=strategy_name,
+      trace_id=f"trace-{owner_kind}",
+      idempotency_key=f"exit-plan-expiry-{owner_kind}",
+      execution_mode="paper",
+      strategy_run_id=strategy_run_id,
+      strategy_order_id=(f"strategy-order-{owner_kind}" if has_runtime_owner else ""),
+      intent_id=intent_id,
+      bucket="swing" if owner_kind == "runtime" else "manual",
+      request_metadata=metadata,
+    )
+    source_type = (
+      "T_TRADE_BATCH" if owner_kind == "runtime" else "MANUAL_POSITION"
+    )
+    plan = ExitPlan(
+      template=ExitPlanTemplate(
+        plan_id=plan_id,
+        source_type=source_type,
+        source_id=plan_id,
+        account_id="account-1",
+        instrument_code="600000.SH",
+        bucket="swing" if owner_kind == "runtime" else "manual",
+        run_id=strategy_run_id,
+        config_version=1,
+        rules=[
+          ExitRuleSpec(
+            rule_id=f"{plan_id}:target",
+            strategy=ExitRuleType.TARGET_PRICE,
+            parameters={"target_price": 11.0},
+          )
+        ],
+      )
+    )
+    plan.register_entry_fill(volume=100, price=10.0)
+    plan.pending_intent_id = intent_id
+    plan.pending_order_id = queued.client_order_id
+    plan.pending_rule_id = f"{plan_id}:target"
+    plan.pending_requested_volume = 100
+    plan.status = ExitPlanStatus.EXIT_PENDING
+    db.add(
+      AutoExitPlanRecord(
+        plan_id=plan_id,
+        account_id="account-1",
+        instrument_code="600000.SH",
+        bucket=plan.template.bucket,
+        source_type=source_type,
+        source_id=plan_id,
+        strategy_run_id=strategy_run_id or None,
+        enabled=True,
+        status=ExitPlanStatus.EXIT_PENDING.value,
+        execution_mode="paper",
+        config_version=1,
+        state_version=1,
+        protected_volume=100,
+        exited_volume=0,
+        remaining_volume=100,
+        entry_avg_price=10.0,
+        pending_client_order_id=queued.client_order_id,
+        plan_state=plan.to_dict(),
+      )
+    )
+    await db.commit()
+  return queued, intent_id
+
+
 def _runtime(
   journal_path: Path,
   broker,
@@ -332,6 +459,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
   assert [item.message_type for item in reports] == [
     AgentMessageType.ORDER_REPORT,
     AgentMessageType.EXECUTION_REPORT,
+    AgentMessageType.ORDER_REPORT,
   ]
 
   await agent_api._record_command_ack("device-1", command_ack.payload)
@@ -361,7 +489,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
     inbox_count = await db.scalar(select(func.count()).select_from(AgentReportInbox))
     assert outbox is not None and outbox.delivery_status == "ACKNOWLEDGED"
     assert pending is not None and pending.status == "QUEUED"
-    assert inbox_count == 2
+    assert inbox_count == 3
     stored = (
       (
         await db.execute(
@@ -371,7 +499,9 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
       .scalars()
       .all()
     )
-  order_inbox = next(item for item in stored if item.message_type == "order_report")
+  order_inboxes = [item for item in stored if item.message_type == "order_report"]
+  order_inbox = order_inboxes[0]
+  terminal_order_inbox = order_inboxes[1]
   execution_inbox = next(
     item for item in stored if item.message_type == "execution_report"
   )
@@ -393,6 +523,8 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
   await report_processor._finish(order_inbox.message_id)
   await report_processor._process(execution_inbox)
   await report_processor._finish(execution_inbox.message_id)
+  await report_processor._process(terminal_order_inbox)
+  await report_processor._finish(terminal_order_inbox.message_id)
 
   async with session_factory() as db:
     persisted_order = (
@@ -408,7 +540,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
     assert persisted_trade.order_id == persisted_order.id
     assert persisted_trade.volume == 100
     assert pending is not None and pending.status == "FILLED"
-    assert processed == ["PROCESSED", "PROCESSED"]
+    assert processed == ["PROCESSED", "PROCESSED", "PROCESSED"]
 
   await engine.dispose()
 
@@ -480,7 +612,10 @@ async def test_live_buy_frame_revalidates_market_and_account_safety_before_send(
     }
     await db.commit()
 
-  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+  with pytest.raises(
+    agent_api._TradeCommandDeliveryDeferred,
+    match="market_stream_not_ready",
+  ):
     await agent_api._assert_trade_delivery_session(session, command)
 
   async with session_factory() as db:
@@ -493,12 +628,18 @@ async def test_live_buy_frame_revalidates_market_and_account_safety_before_send(
     await db.commit()
 
   account_gate_ready = False
-  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+  with pytest.raises(
+    agent_api._TradeCommandDeliveryDeferred,
+    match="risk_increase_gate_closed",
+  ):
     await agent_api._assert_trade_delivery_session(session, command)
 
   account_gate_ready = True
   market_tradable = False
-  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+  with pytest.raises(
+    agent_api._TradeCommandDeliveryDeferred,
+    match="risk_increase_gate_closed",
+  ):
     await agent_api._assert_trade_delivery_session(session, command)
 
   market_tradable = True
@@ -787,6 +928,330 @@ async def test_expiry_sweeper_closes_disconnected_command_and_restart_is_idempot
     assert [event.business_key for event in events] == [
       f"order:{queued.client_order_id}::EXPIRED:0"
     ]
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_kind", ["monitor", "runtime"])
+async def test_exit_plan_queued_expiry_proves_zero_fill_for_exact_owner(
+  monkeypatch: pytest.MonkeyPatch,
+  owner_kind: str,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id = await _enqueue_exit_plan_order(
+    session_factory,
+    owner_kind=owner_kind,
+  )
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+
+  assert await agent_api.sweep_expired_trade_commands() == 1
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    events = list((await db.execute(select(StrategyRuntimeEvent))).scalars().all())
+    assert outbox is not None and outbox.delivery_status == "EXPIRED"
+    assert outbox.delivered_at is None
+    assert pending is not None and pending.status == "EXPIRED"
+    assert pending.broker_order_id is None
+    assert intent is not None and intent.status == "RECONCILED_ZERO_FILL"
+    assert intent.executed_volume == 0
+    assert intent.intent_metadata["execution_terminal_source"] == (
+      "LOCAL_OUTBOX_EXPIRED"
+    )
+    assert intent.intent_metadata["command_lifecycle_status"] == "EXPIRED"
+    assert intent.intent_metadata["command_lifecycle_previous_status"] == "QUEUED"
+    assert intent.intent_metadata["command_lifecycle_message_id"] == queued.message_id
+    if owner_kind == "monitor":
+      assert events == []
+    else:
+      assert len(events) == 1
+      assert events[0].payload["report"]["status"] == "RECONCILED_ZERO_FILL"
+      assert events[0].payload["metadata"]["intent_id"] == intent_id
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_queued_expiry_transition_replay_preserves_zero_fill(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id = await _enqueue_exit_plan_order(
+    session_factory,
+    owner_kind="runtime",
+  )
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+
+  assert await agent_api.sweep_expired_trade_commands() == 1
+  async with session_factory() as db:
+    command = await db.get(
+      TradeCommandOutbox,
+      queued.message_id,
+      with_for_update=True,
+    )
+    assert command is not None and command.delivery_status == "EXPIRED"
+    await agent_api._transition_place_order_command(
+      db,
+      command=command,
+      requested_status="EXPIRED",
+      reason="command_expired_before_delivery",
+      now=utcnow(),
+      pre_execution_proven=True,
+    )
+    await db.commit()
+
+  async with session_factory() as db:
+    intent = await db.get(TradeIntentRecord, intent_id)
+    event_count = await db.scalar(
+      select(func.count()).select_from(StrategyRuntimeEvent)
+    )
+    assert intent is not None and intent.status == "RECONCILED_ZERO_FILL"
+    assert intent.intent_metadata["execution_terminal_source"] == (
+      "LOCAL_OUTBOX_EXPIRED"
+    )
+    assert intent.intent_metadata["command_lifecycle_previous_status"] == "QUEUED"
+    assert event_count == 1
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_kind", ["monitor", "runtime"])
+async def test_exit_plan_accepted_ack_invalidates_local_outbox_zero_fill_proof(
+  monkeypatch: pytest.MonkeyPatch,
+  owner_kind: str,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id = await _enqueue_exit_plan_order(
+    session_factory,
+    owner_kind=owner_kind,
+  )
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+  assert await agent_api.sweep_expired_trade_commands() == 1
+  async with session_factory() as db:
+    record = await db.get(
+      AutoExitPlanRecord,
+      f"exit-plan-{owner_kind}",
+      with_for_update=True,
+    )
+    assert record is not None
+    plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+    plan.reconciled_zero_fill_intent_ids = [intent_id] + [
+      f"historical-zero-fill-{index}" for index in range(20)
+    ]
+    plan.pending_intent_id = ""
+    plan.pending_order_id = ""
+    plan.pending_rule_id = ""
+    plan.pending_requested_volume = 0
+    plan.status = ExitPlanStatus.ACTIVE
+    record.plan_state = plan.to_dict()
+    record.status = ExitPlanStatus.ACTIVE.value
+    record.pending_client_order_id = None
+    record.state_version = int(record.state_version or 1) + 1
+    await db.commit()
+
+  await agent_api._record_command_ack(
+    "device-1",
+    {
+      "command_message_id": queued.message_id,
+      "client_order_id": queued.client_order_id,
+      "accepted": True,
+      "reason": "accepted_after_local_expiry",
+    },
+  )
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    record = await db.get(AutoExitPlanRecord, f"exit-plan-{owner_kind}")
+    events = list((await db.execute(select(StrategyRuntimeEvent))).scalars().all())
+    assert outbox is not None and outbox.delivery_status == "RECONCILE_REQUIRED"
+    assert pending is not None and pending.status == "RECONCILE_REQUIRED"
+    assert intent is not None and intent.status == "RECONCILE_REQUIRED"
+    assert intent.executed_volume == 0
+    assert intent.executed_price is None
+    assert intent.executed_time is None
+    assert "execution_terminal_source" not in dict(intent.intent_metadata or {})
+    assert "command_lifecycle_status" not in dict(intent.intent_metadata or {})
+    assert record is not None and not record.enabled and record.status == "ERROR"
+    plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+    assert plan.status == ExitPlanStatus.ERROR
+    assert plan.error_message == (
+      f"ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:{intent_id}"
+    )
+    assert len(plan.reconciled_zero_fill_intent_ids) == 21
+    assert plan.reconciled_zero_fill_intent_ids[0] == intent_id
+    if owner_kind == "monitor":
+      assert events == []
+    else:
+      assert any(
+        event.payload["report"].get("status") == "RECONCILE_REQUIRED"
+        and event.payload["metadata"].get("zero_fill_proof_invalidation", {}).get(
+          "released"
+        )
+        is True
+        for event in events
+      )
+
+    # A later raw broker terminal cannot resurrect the invalidated local proof
+    # during startup recovery.
+    pending.status = "EXPIRED"
+    pending.broker_order_id = "broker-late"
+    intent.status = "EXPIRED"
+    await db.commit()
+    assert not auto_exit_plan_service._has_authoritative_zero_fill_proof(
+      str(intent.status or ""),
+      dict(intent.intent_metadata or {}),
+    )
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_kind", ["monitor", "runtime"])
+async def test_exit_plan_agent_pre_execution_rejection_proves_zero_fill(
+  monkeypatch: pytest.MonkeyPatch,
+  owner_kind: str,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id = await _enqueue_exit_plan_order(
+    session_factory,
+    owner_kind=owner_kind,
+  )
+  assert await agent_api._next_command(_control_session()) is not None
+  ack = {
+    "command_message_id": queued.message_id,
+    "client_order_id": queued.client_order_id,
+    "accepted": False,
+    "reason": "miniQMT disconnected",
+  }
+  await agent_api._record_command_ack("device-1", ack)
+  await agent_api._record_command_ack("device-1", ack)
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    events = list((await db.execute(select(StrategyRuntimeEvent))).scalars().all())
+    assert outbox is not None and outbox.delivery_status == "REJECTED"
+    assert pending is not None and pending.status == "REJECTED"
+    assert pending.broker_order_id is None
+    assert intent is not None and intent.status == "RECONCILED_ZERO_FILL"
+    assert intent.intent_metadata["execution_terminal_source"] == (
+      "LOCAL_AGENT_PRE_EXECUTION_REJECTION"
+    )
+    assert intent.intent_metadata["command_lifecycle_previous_status"] == (
+      "DELIVERED"
+    )
+    if owner_kind == "monitor":
+      assert events == []
+    else:
+      assert len(events) == 1
+      assert events[0].payload["report"]["status"] == "RECONCILED_ZERO_FILL"
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_agent_expiry_ack_resolves_delivered_reconcile_gate(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id = await _enqueue_exit_plan_order(
+    session_factory,
+    owner_kind="runtime",
+  )
+  assert await agent_api._next_command(_control_session()) is not None
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None and outbox.delivery_status == "DELIVERED"
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+
+  assert await agent_api.sweep_expired_trade_commands() == 1
+  ack = {
+    "command_message_id": queued.message_id,
+    "client_order_id": queued.client_order_id,
+    "accepted": False,
+    "reason": "command_expired",
+  }
+  await agent_api._record_command_ack("device-1", ack)
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    events = list(
+      (
+        await db.execute(
+          select(StrategyRuntimeEvent).order_by(
+            StrategyRuntimeEvent.created_at,
+            StrategyRuntimeEvent.event_id,
+          )
+        )
+      )
+      .scalars()
+      .all()
+    )
+    assert outbox is not None and outbox.delivery_status == "EXPIRED"
+    assert pending is not None and pending.status == "EXPIRED"
+    assert intent is not None and intent.status == "RECONCILED_ZERO_FILL"
+    assert intent.intent_metadata["execution_terminal_source"] == (
+      "LOCAL_AGENT_PRE_EXECUTION_REJECTION"
+    )
+    assert [event.payload["report"]["status"] for event in events] == [
+      "RECONCILE_REQUIRED",
+      "RECONCILED_ZERO_FILL",
+    ]
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_kind", ["monitor", "runtime"])
+async def test_exit_plan_delivered_expiry_remains_reconcile_required(
+  monkeypatch: pytest.MonkeyPatch,
+  owner_kind: str,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id = await _enqueue_exit_plan_order(
+    session_factory,
+    owner_kind=owner_kind,
+  )
+  assert await agent_api._next_command(_control_session()) is not None
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None and outbox.delivery_status == "DELIVERED"
+    assert outbox.delivered_at is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+
+  assert await agent_api.sweep_expired_trade_commands() == 1
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    events = list((await db.execute(select(StrategyRuntimeEvent))).scalars().all())
+    assert outbox is not None and outbox.delivery_status == "RECONCILE_REQUIRED"
+    assert pending is not None and pending.status == "RECONCILE_REQUIRED"
+    assert intent is not None and intent.status == "RECONCILE_REQUIRED"
+    assert "execution_terminal_source" not in dict(intent.intent_metadata or {})
+    if owner_kind == "monitor":
+      assert events == []
+    else:
+      assert len(events) == 1
+      assert events[0].payload["report"]["status"] == "RECONCILE_REQUIRED"
   await engine.dispose()
 
 
@@ -1360,27 +1825,6 @@ async def test_real_broker_reports_override_reconcile_gate_and_restore_monitorin
     assert inbox is not None
     await report_processor._process(inbox)
     await report_processor._stage_runtime_events(inbox)
-
-  final_order_payload = deepcopy(simulated["reports"][0][1])
-  final_order_payload["order"]["order_status"] = 56
-  final_order_payload["order"]["traded_volume"] = 100
-  final_order_payload["order"]["traded_price"] = 10.5
-  final_order = AgentEnvelope(
-    message_type=AgentMessageType.ORDER_REPORT,
-    payload=final_order_payload,
-  )
-  assert (
-    await agent_api._record_report(
-      _control_session(),
-      final_order,
-      received_at=agent_api.utcnow(),
-    )
-  ).accepted
-  async with session_factory() as db:
-    final_order_inbox = await db.get(AgentReportInbox, final_order.message_id)
-  assert final_order_inbox is not None
-  await report_processor._process(final_order_inbox)
-  await report_processor._stage_runtime_events(final_order_inbox)
 
   async with session_factory() as db:
     pending = await db.get(PendingTradeOrder, queued.client_order_id)

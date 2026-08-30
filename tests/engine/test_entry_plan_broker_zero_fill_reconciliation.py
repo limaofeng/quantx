@@ -1495,7 +1495,10 @@ async def test_released_order_late_accepted_ack_cancels_after_broker_id_arrives(
         "9002",
       }
       assert len(
-        {command.payload["cancel_business_identity"] for command in cancels}
+        {
+          str(command.idempotency_key).split(":attempt:", 1)[0]
+          for command in cancels
+        }
       ) == 2
   finally:
     await engine.dispose()
