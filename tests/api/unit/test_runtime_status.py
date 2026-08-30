@@ -1,5 +1,7 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api import agent_api, runtime_status
@@ -18,6 +20,21 @@ from quantx_infrastructure.services.agent_session_guard import (
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
+def gateway_payload(status="ready"):
+  return {
+    "component": "market-gateway",
+    "protocol": "quantx.market.v2",
+    "status": status,
+    "reasonCode": None if status == "ready" else "MARKET_STREAM_OFFLINE",
+    "connectedDevices": 1 if status == "ready" else 0,
+    "sequence": 42,
+    "instrumentCount": 100,
+    "universeCount": 100,
+    "streamAgeSeconds": 0.125,
+    "tradingSession": True,
+  }
+
+
 @pytest.mark.asyncio
 async def test_market_gateway_status_uses_readiness_endpoint(
   monkeypatch: pytest.MonkeyPatch,
@@ -30,7 +47,7 @@ async def test_market_gateway_status_uses_readiness_endpoint(
 
     @staticmethod
     def json():
-      return {"status": "ready", "dependencies": {"redis": "ready"}}
+      return gateway_payload()
 
   class FakeClient:
     def __init__(self, **kwargs):
@@ -57,11 +74,7 @@ async def test_market_gateway_status_uses_readiness_endpoint(
 
   assert calls["client_kwargs"] == {"timeout": 1.0, "trust_env": False}
   assert calls["url"] == "http://127.0.0.1:18082/health/ready"
-  assert status == {
-    "status": "ready",
-    "statusCode": 200,
-    "dependencies": {"redis": "ready"},
-  }
+  assert status == {**gateway_payload(), "statusCode": 200}
 
 
 @pytest.mark.asyncio
@@ -74,10 +87,7 @@ async def test_market_gateway_status_rejects_non_ready_payload(
 
     @staticmethod
     def json():
-      return {
-        "status": "not_ready",
-        "dependencies": {"redis": "unavailable"},
-      }
+      return gateway_payload("not_ready")
 
   class FakeClient:
     def __init__(self, **_kwargs):
@@ -97,9 +107,9 @@ async def test_market_gateway_status_rejects_non_ready_payload(
   status = await runtime_status._market_gateway_status()
 
   assert status == {
+    **gateway_payload("not_ready"),
     "status": "unavailable",
     "statusCode": 503,
-    "dependencies": {"redis": "unavailable"},
   }
 
 
@@ -219,6 +229,9 @@ async def test_component_status_exposes_worker_registration_counts(
     fake_component_heartbeats,
   )
   monkeypatch.setattr(runtime_status, "_prefect_status", fake_prefect_status)
+  monkeypatch.setattr(
+    runtime_status, "_market_gateway_status", AsyncMock(return_value=gateway_payload())
+  )
 
   components = await runtime_status.component_status()
 
@@ -275,6 +288,9 @@ async def test_component_status_uses_aggregated_runtime_snapshot(
     fake_component_heartbeats,
   )
   monkeypatch.setattr(runtime_status, "_prefect_status", fake_prefect_status)
+  monkeypatch.setattr(
+    runtime_status, "_market_gateway_status", AsyncMock(return_value=gateway_payload())
+  )
 
   components = await runtime_status.component_status()
 
@@ -284,27 +300,16 @@ async def test_component_status_uses_aggregated_runtime_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_market_data_runtime_status_uses_only_heartbeat_snapshot(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  snapshot = {
-    "market-data": {
-      "status": "ready",
-      "sequence": 42,
-      "engineSequence": 42,
-      "engineAgeSeconds": 0.125,
-    }
-  }
-
-  async def fake_component_heartbeats():
-    return snapshot
-
+async def test_market_data_runtime_status_uses_only_gateway_supply(monkeypatch):
+  gateway = AsyncMock(return_value=gateway_payload())
+  monkeypatch.setattr(runtime_status, "_market_gateway_status", gateway)
   monkeypatch.setattr(
     runtime_status,
     "_component_heartbeats",
-    fake_component_heartbeats,
+    AsyncMock(side_effect=AssertionError("must not read Engine or account")),
   )
-  assert await runtime_status.market_data_runtime_status() == snapshot["market-data"]
+  assert await runtime_status.market_data_runtime_status() == gateway_payload()
+  gateway.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -373,6 +378,11 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
 
   async with session_factory() as db:
     db.add(
+      RuntimeComponentHeartbeat(
+        component="engine", instance_id="engine-1", status="READY", updated_at=now
+      )
+    )
+    db.add(
       AgentDevice(
         id="device-1",
         user_id="user-1",
@@ -430,9 +440,21 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     "reasonCode": "QMT_AGENT_NOT_RECONCILED",
   }
   assert "qmt-agent:device-1" not in components
-  assert components["market-data"]["status"] == "ready"
-  assert components["market-data"]["streamAgeSeconds"] >= 25
-  assert components["market-data"]["engineAgeSeconds"] >= 25
+  assert components["engine"]["marketConsumption"]["status"] == "ready"
+  assert components["engine"]["marketConsumption"]["streamAgeSeconds"] >= 25
+  assert components["engine"]["marketConsumption"]["engineAgeSeconds"] >= 25
+  assert components["engine"]["status"] == "ready"
+  assert "market-data" not in components
+
+  monkeypatch.setattr(
+    runtime_status.market_stream_store,
+    "engine_state",
+    AsyncMock(return_value=replace(stream_state, sequence=4)),
+  )
+  components = await runtime_status._component_heartbeats()
+  assert components["engine"]["status"] == "degraded"
+  assert components["engine"]["reasonCode"] == "ENGINE_MARKET_NOT_READY"
+  monkeypatch.setattr(runtime_status.market_stream_store, "engine_state", engine_state)
 
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
@@ -448,7 +470,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   assert components["qmt-agent"]["latestReadyHeartbeatAt"] == (
     now.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
   )
-  assert components["market-data"]["status"] == "ready"
+  assert components["engine"]["marketConsumption"]["status"] == "ready"
 
   async with session_factory() as db:
     api_heartbeat = await db.get(RuntimeComponentHeartbeat, "api")
@@ -498,7 +520,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   components = await runtime_status._component_heartbeats()
   assert components["qmt-agent"]["status"] == "degraded"
   assert components["qmt-agent"]["reasonCode"] == "XTTRADING_UNAVAILABLE"
-  assert components["market-data"]["status"] == "ready"
+  assert components["engine"]["marketConsumption"]["status"] == "ready"
 
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
@@ -514,8 +536,8 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     state_without_freshness,
   )
   components = await runtime_status._component_heartbeats()
-  assert components["market-data"]["status"] == "stale"
-  assert components["market-data"]["readinessStatus"] == "failed"
+  assert components["engine"]["marketConsumption"]["status"] == "stale"
+  assert components["engine"]["marketConsumption"]["readinessStatus"] == "failed"
 
   async def outside_session(*_args):
     return False
@@ -526,9 +548,9 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     outside_session,
   )
   components = await runtime_status._component_heartbeats()
-  assert components["market-data"]["status"] == "ready"
-  assert components["market-data"]["readinessStatus"] == "standby"
-  assert "休市" in components["market-data"]["readinessMessage"]
+  assert components["engine"]["marketConsumption"]["status"] == "ready"
+  assert components["engine"]["marketConsumption"]["readinessStatus"] == "standby"
+  assert "休市" in components["engine"]["marketConsumption"]["readinessMessage"]
 
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
@@ -539,7 +561,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   assert components["qmt-agent"]["status"] == "degraded"
   assert components["qmt-agent"]["reasonCode"] == "XTDATA_UNAVAILABLE"
   assert components["qmt-agent"]["degradedDevices"] == 1
-  assert components["market-data"]["status"] == "offline"
+  assert components["engine"]["marketConsumption"]["status"] == "offline"
 
   monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
   monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_RUNTIME_UNAVAILABLE")

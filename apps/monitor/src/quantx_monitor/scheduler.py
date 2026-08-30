@@ -21,7 +21,7 @@ from .probes import (
   RuntimeSnapshotProbe,
   combine_qmt_agent_probe,
 )
-from .probes.http import json_status
+from .probes.http import json_status, market_gateway_status
 from .storage import MonitorStorage
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class MonitorScheduler:
           "market-gateway",
           f"{self.settings.market_gateway_url.rstrip('/')}/health/ready",
           timeout_seconds=self.settings.http_timeout_seconds,
-          evaluator=json_status("ready"),
+          evaluator=market_gateway_status,
         ),
       ]
       direct.extend(

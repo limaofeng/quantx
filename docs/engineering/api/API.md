@@ -27,16 +27,27 @@ API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部�
 | `/health/live` | 只证明 API 事件循环可响应 |
 | `/health/ready` | 按 `web/full` profile 检查必要组件 |
 | `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、行情和 AI Runtime 分项状态 |
-| `/health/runtime/market-data` | 高频交易 UI 使用的行情水位与新鲜度；不执行全量依赖探测 |
+| `/health/runtime/market-data` | 网关供给健康与水位的校验投影；不包含 Engine 消费或账户交易健康 |
 | `/health` | `/health/ready` 的兼容别名 |
 
 `full` profile 中，Prefect Worker、QMT Agent 连接和行情 capability 也必须
 ready。QMT Agent 的组件健康表示进程与会话在线；账户对账、kill switch 和
 交易能力由交易就绪检查独立判定，不会把在线 Agent 误报为离线。
 开发启动若以 `QMT_AGENT_LAUNCH_STATE=BLOCKED` 明确跳过本地 Agent，组件聚合
-必须覆盖数据库中尚未超过 90 秒的旧心跳：`qmtAgent` 与 `marketData` 返回
-`blocked`、连接/在线/ready 设备数归零并附稳定原因码，`/health/ready` 保持
+必须覆盖数据库中尚未超过 90 秒的旧心跳：`qmtAgent` 返回 `blocked`，
+连接/在线/ready 设备数归零并附稳定原因码；无活动行情连接的网关供给返回
+`marketData.status=unavailable`，不得把 Redis 遗留 READY 当成在线，`/health/ready` 保持
 非就绪；`/health/live` 与非 QMT API 仍可用。
+
+`marketData` 是独立 Market Gateway `/health/ready` 的脱敏投影，不再重复返回
+`marketGateway`。网关的 `/health/live` 只检查进程响应，`/health/ready` 检查本进程
+QMT 行情连接、Redis 已提交快照及交易时段新鲜度；XTTrading/账户故障不影响正常
+行情供给。健康响应契约位于 `quantx_contracts.market_health`，HTTP 200 表示 ready，
+503 附固定 `reasonCode`，不含账户、连接 ID 或异常文本。
+
+Engine 消费状态归 `engine.marketConsumption`；引擎心跳为 ready 但消费未就绪时，
+组件返回 `degraded / ENGINE_MARKET_NOT_READY`。交易准入仍要求引擎与权威行情水位
+收敛，不因供给健康拆分而放宽。Monitor 直接探测网关，HTTP RTT 不是行情传输延迟。
 
 GraphQL `accountExecutionSafety` 是账户级实盘执行能力真源，以
 `healthStatus=HEALTHY/BLOCKED/KILLED` 表示账户事实链路，以

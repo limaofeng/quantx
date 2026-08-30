@@ -1702,7 +1702,7 @@ function Invoke-Up {
       -DatabaseProcessRole "market-gateway"
     Wait-HttpReady `
       -Name "Market Gateway" `
-      -Url "http://127.0.0.1:$MarketGatewayPort/health/ready"
+      -Url "http://127.0.0.1:$MarketGatewayPort/health/live"
 
     Start-ManagedProcess `
       -Name "api" `

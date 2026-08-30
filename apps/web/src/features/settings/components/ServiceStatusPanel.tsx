@@ -765,7 +765,7 @@ export function ServiceStatusPanel() {
                             target={target}
                             marketDataHealthy={summary.targets.some(
                               item =>
-                                item.id === 'market-data' &&
+                                item.id === 'market-gateway' &&
                                 item.status === 'healthy'
                             )}
                             history={histories[target.id]}

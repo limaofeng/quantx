@@ -7,15 +7,14 @@ describe('useMarketDataHealth', () => {
     vi.unstubAllGlobals();
   });
 
-  it('reports the authoritative Agent-to-Engine watermark independently', async () => {
+  it('reports gateway supply health independently of Engine consumption', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         marketData: {
           status: 'ready',
           sequence: 42,
-          engineSequence: 42,
-          engineAgeSeconds: 0.125,
+          streamAgeSeconds: 0.125,
         },
       }),
     });
@@ -24,8 +23,8 @@ describe('useMarketDataHealth', () => {
     const { result } = renderHook(() => useMarketDataHealth());
 
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    expect(result.current.engineSequence).toBe(42);
-    expect(result.current.engineAgeSeconds).toBe(0.125);
+    expect(result.current.sequence).toBe(42);
+    expect(result.current.streamAgeSeconds).toBe(0.125);
     expect(fetchMock).toHaveBeenCalledWith(
       '/health/runtime/market-data',
       expect.objectContaining({ cache: 'no-store' })

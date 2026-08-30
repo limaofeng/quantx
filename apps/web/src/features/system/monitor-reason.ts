@@ -62,6 +62,35 @@ const MONITOR_REASON_PRESENTATIONS: Record<string, MonitorReasonPresentation> =
       description:
         '行情连接已建立，但全市场数据流仍在同步或尚未达到新鲜度要求。',
     },
+    MARKET_STREAM_OFFLINE: {
+      title: 'QMT 行情连接离线',
+      description:
+        '网关没有当前有效的 QMT 行情连接；历史缓存不能证明行情在线。',
+    },
+    MARKET_STREAM_SYNCING: {
+      title: '行情正在同步',
+      description: '全市场快照、就绪确认或 Redis 提交尚未完成。',
+    },
+    MARKET_STREAM_STALE: {
+      title: '行情供给已过期',
+      description: '交易时段没有当前行情水位对应的新鲜度租约。',
+    },
+    MARKET_SNAPSHOT_INCOMPLETE: {
+      title: '行情快照不完整',
+      description: '网关尚未取得达到覆盖要求的完整行情快照。',
+    },
+    MARKET_REDIS_UNAVAILABLE: {
+      title: '行情存储不可用',
+      description: '网关无法读取 Redis 中的行情提交状态和新鲜度租约。',
+    },
+    MARKET_CALENDAR_UNAVAILABLE: {
+      title: '交易日历暂不可用',
+      description: '无法确认当前是否为交易时段，行情健康检查保持未就绪。',
+    },
+    ENGINE_MARKET_NOT_READY: {
+      title: '引擎行情消费尚未就绪',
+      description: 'Engine 的行情消费或同步水位未就绪；行情网关健康独立判断。',
+    },
     QMT_HEALTH_CONNECT_ERROR: {
       title: '无法连接 QMT Agent 健康端点',
       description: 'Monitor 无法建立到本机 QMT Agent 健康服务的连接。',

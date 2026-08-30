@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+from quantx_contracts.market_health import MarketGatewayHealth
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.data.market_stream_transport import (
   market_stream_store,
@@ -116,7 +117,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     }
     return {
       "qmt-agent": {**unavailable, "connectedDevices": 0},
-      "market-data": {**unavailable, "connectedDevices": 0},
+      "engine": unavailable,
     }
 
   components: dict[str, dict[str, Any]] = {}
@@ -218,9 +219,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     agent for agent, status in connected_agents if status in RECONCILING_AGENT_STATUSES
   ]
   connected_agent_reasons = {
-    agent_unready_reason_code(
-      heartbeat_by_component.get(f"qmt-agent:{agent.id}")
-    )
+    agent_unready_reason_code(heartbeat_by_component.get(f"qmt-agent:{agent.id}"))
     for agent, status in connected_agents
     if status != "READY"
   }
@@ -345,7 +344,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       effective_status = "syncing"
     else:
       effective_status = "syncing"
-    components["market-data"] = {
+    market_consumption = {
       "status": effective_status,
       "connectedDevices": (
         len(market_stream_agents)
@@ -375,12 +374,17 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "tradingSession": trading_session,
     }
   except Exception as exc:
-    components["market-data"] = {
+    market_consumption = {
       "status": "unavailable",
       "connectedDevices": 0,
       "protocol": "quantx.market.v2",
       "error": exc.__class__.__name__,
     }
+  engine = components.setdefault("engine", {"status": "offline"})
+  engine["marketConsumption"] = market_consumption
+  if engine["status"] == "ready" and market_consumption["status"] != "ready":
+    engine["status"] = "degraded"
+    engine["reasonCode"] = "ENGINE_MARKET_NOT_READY"
   return components
 
 
@@ -431,18 +435,20 @@ async def _market_gateway_status() -> dict[str, Any]:
       response = await client.get(
         f"{settings.market_gateway_url.rstrip('/')}/health/ready"
       )
-    payload = response.json()
+    payload = MarketGatewayHealth.model_validate(response.json())
+    if response.status_code != (200 if payload.status == "ready" else 503):
+      raise ValueError("market gateway HTTP status disagrees with its health")
     return {
-      "status": (
-        "ready"
-        if response.is_success and payload.get("status") == "ready"
-        else "unavailable"
-      ),
+      **payload.model_dump(mode="json", by_alias=True),
+      "status": "ready" if payload.status == "ready" else "unavailable",
       "statusCode": response.status_code,
-      "dependencies": dict(payload.get("dependencies") or {}),
     }
   except Exception as exc:
-    return {"status": "unavailable", "error": exc.__class__.__name__}
+    return {
+      "status": "unavailable",
+      "reasonCode": "MARKET_GATEWAY_UNAVAILABLE",
+      "error": exc.__class__.__name__,
+    }
 
 
 async def component_status() -> dict[str, dict[str, Any]]:
@@ -473,16 +479,14 @@ async def component_status() -> dict[str, dict[str, Any]]:
     },
     "qmtAgent": heartbeats["qmt-agent"],
     "aiRuntime": ai_runtime,
-    "marketData": heartbeats.get("market-data", {"status": "offline"}),
-    "marketGateway": market_gateway,
+    "marketData": market_gateway,
     "prefect": prefect,
   }
 
 
 async def market_data_runtime_status() -> dict[str, Any]:
-  """Return only API-owned market-data semantics for frequent trading UI reads."""
-  heartbeats = await _component_heartbeats()
-  return heartbeats.get("market-data", {"status": "offline"})
+  """Project the gateway's supply health without probing trading or consumers."""
+  return await _market_gateway_status()
 
 
 def required_components() -> tuple[str, ...]:
@@ -495,7 +499,6 @@ def required_components() -> tuple[str, ...]:
       "prefect",
       "worker",
       "qmtAgent",
-      "marketGateway",
       "marketData",
     )
   return ("api", "database", "engine")

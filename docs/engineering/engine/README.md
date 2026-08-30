@@ -4,6 +4,11 @@
 Agent 回报收敛。它使用 PostgreSQL advisory lock 保证同数据库只运行一个
 实例，并定期写入组件心跳。
 
+服务健康把行情供给与消费分开：Market Gateway 的健康不依赖 Engine；API 在
+`engine.marketConsumption` 报告 Engine 与权威行情水位的消费、新鲜度和收敛状态。
+引擎心跳正常但消费未就绪时，Engine 组件为 `degraded / ENGINE_MARKET_NOT_READY`。
+账户实盘准入继续使用完整的权威行情与 Engine 收敛判定，不因网关健康而放行。
+
 Engine 的 `WholeQuoteHub` 是沪深 tick 的唯一进程内入口。它先订阅 Redis 二进制
 批次频道，再加载最新全量快照与水位，按 `stream_id + sequence` 检查重复、
 乱序和缺口，并按标的源时间阻止旧 tick 回退；启动期间收到的批次在快照补水

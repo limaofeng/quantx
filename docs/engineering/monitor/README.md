@@ -25,22 +25,29 @@
 默认每 30 秒运行一次检测，最多并发 8 个。目标分两组：
 
 - 外部依赖：PostgreSQL、Redis、InfluxDB、Prefect Server；
-- QuantX 组件：Web 入口、文档、API 公共入口、API 进程、Market Gateway、
-  Engine、Worker、QMT Agent、行情链路和可选 AI Runtime。
+- QuantX 组件：Web 入口、文档、API 公共入口、API 进程、行情服务（Market Gateway）、
+  Engine、Worker、QMT Agent 和可选 AI Runtime。
 
-前一类使用独立协议或 HTTP probe；后一类的进程级入口直接探测，Engine、Worker、
-行情和 AI Runtime 从一次脱敏的 `/health/components` 快照派生，避免同一轮重复触发
+前一类使用独立协议或 HTTP probe；后一类的进程级入口直接探测，Engine、Worker
+和 AI Runtime 从一次脱敏的 `/health/components` 快照派生，避免同一轮重复触发
 主服务的完整健康计算。QMT Agent 是组合目标：Monitor 直接请求 Windows
 `/health/ready` 取得本地状态和真实 HTTP RTT，再与同轮 API 会话、心跳、完整快照和
 对账语义取较差结果；每轮只持久化一条 QMT Agent 样本。纯派生目标不伪造独立延迟。
 
 固定目标来源使用 `probeKind=direct | derived | composite`。QMT Agent 为
-`composite`；Engine、Worker、行情服务和 AI Runtime 为 `derived`；其余为
+`composite`；Engine、Worker 和 AI Runtime 为 `derived`；其余为
 `direct`。Windows 连接或协议失败时 QMT Agent 立即为 unavailable 且延迟为空；合法
 HTTP 200/503 都生成 RTT 样本。原因优先级固定为健康端点传输/协议错误、API 服务端
 语义原因、Windows 本地 readiness 原因。XTTrading/账户登录失败但控制连接、XTData
 与行情流仍在线时固定记为 `degraded / XTTRADING_UNAVAILABLE`；账户准入中的
 `MARKET_STREAM_READY` 独立读取权威行情水位，不以交易账户 READY 为前置条件。
+
+行情服务唯一目标为 `market-gateway`，直接探测网关 `/health/ready`，按共享健康
+契约校验 HTTP 200/503 和固定原因码，均记录 HTTP RTT；连接失败或超时不生成 RTT。
+检查 QMT 行情连接、快照、Redis 和交易时段新鲜度，不检查账户交易能力或 Engine。
+Engine 的消费异常由引擎组件报告，实盘准入仍要求端到端收敛。状态页显示网关探测
+P50/P95，不将其解释为行情传输延迟。不再采集重复的 `market-data` 派生目标；既有
+网关 HTTP 历史保留，旧派生目标原始记录按原保留策略留存，但不进入当前列表和事故分页。
 
 账户实盘准入采用单向见证模型：API 内的 `AccountExecutionSafetyService` 是唯一
 判定者，Monitor 每 30 秒从 API 回环地址读取一次完整、脱敏且不含账户标识的准入

@@ -48,11 +48,13 @@ export function formatTime(value: string | null) {
 export function probeExplanation(target: MonitorTargetSummary) {
   return target.id === 'account-safety-observer'
     ? '该状态只表示 Monitor 能持续采集脱敏准入快照；QMT、行情与交易门禁的实际结论请在“交易安全”中查看。'
-    : target.probeKind === 'derived'
-      ? '该组件来自语义快照，不生成虚假的独立延迟。'
-      : target.probeKind === 'composite'
-        ? '状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。'
-        : '延迟来自 Monitor 到目标服务的主动健康探测。';
+    : target.id === 'market-gateway'
+      ? '状态检查 QMT 行情连接、快照与数据新鲜度，不包含交易能力或 Engine 消费状态；延迟是网关健康接口的 HTTP RTT，不是行情传输延迟。'
+      : target.probeKind === 'derived'
+        ? '该组件来自语义快照，不生成虚假的独立延迟。'
+        : target.probeKind === 'composite'
+          ? '状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。'
+          : '延迟来自 Monitor 到目标服务的主动健康探测。';
 }
 
 export function serviceHistoryPath(

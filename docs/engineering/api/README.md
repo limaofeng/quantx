@@ -18,11 +18,11 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 `/health/ready`、`/health/components` 和 `/ws/agent`。原生客户端在线
 文档位于 `/docs/`；FastAPI 开发 Swagger 只在内部 API 端口的
 `/_dev/api-docs` 提供。QMT Agent 的交易连接使用 `/ws/agent`，
-唯一沪深行情连接使用 `/ws/agent/market` 和 `quantx.market.v1`。统一开发者中心覆盖 Web、原生客户端与
+唯一沪深行情连接使用 `/ws/agent/market` 和 `quantx.market.v2`。统一开发者中心覆盖 Web、原生客户端与
 第三方 API。
 
-交易页面的高频行情水位读取使用 `/health/runtime/market-data`，只计算 API 已有的
-行情心跳语义，不触发数据库、Prefect 或 Market Gateway 的全量健康探测。长期
+交易页面的行情水位读取使用 `/health/runtime/market-data`，只转发并校验独立
+Market Gateway 的供给健康快照，不触发 API 的账户、Engine 或 Prefect 全量探测。长期
 可用性、延迟和事故历史不在 API 内实现，由独立 `quantx-monitor` 通过
 `/monitor/*` 提供；它不参与 API readiness 或交易门禁。
 
@@ -46,11 +46,12 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
   ACK，并通过 `RESYNC` 使 stream 失效。Redis 最新 Hash 还按源时间拒绝旧 tick
   回退；不提供旧 whole JSON 双读、双写或不可靠直通降级。
 - 每次批次 CAS commit 同时原子刷新 10 秒 Redis freshness lease；`SYNCING`、
-  `OFFLINE` 会删除租约。交易时段的 `marketData=ready` 同时要求活动 Agent 行情
-  连接、API 完整快照、Engine 水位与 lease 的 stream/sequence 一致，租约过期立即
-  关闭实时交易门禁。休市时只要 Agent、API 与 Engine 的 sequence 3 权威水位已经
-  收敛，组件健康保持 `ready`，账户检查显示 `STANDBY`，不得把自然过期的租约报告
-  为运行异常；任何水位不一致、提交未完成或 Agent 离线仍保持失败。
+  `OFFLINE` 会删除租约。`marketData` 只表示网关供给健康：本进程持有匹配的活动
+  QMT 行情连接、sequence 3 确认和完整快照，交易时段还要求当前水位的新鲜度租约。
+  不依赖账户交易能力或 Engine；休市时允许租约自然过期，但连接与快照仍须有效。
+- Engine 的消费水位、新鲜度与收敛检查归 `engine.marketConsumption`；消费异常使
+  就绪的引擎组件降级，不会让正常的行情供给变红。实盘准入仍独立校验 Agent、
+  行情供给和 Engine 完整权威水位，休市为 `STANDBY`，未收敛始终失败。
 
 ## GraphQL 耗时跟踪
 

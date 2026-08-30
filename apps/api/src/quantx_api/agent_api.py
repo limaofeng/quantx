@@ -642,6 +642,10 @@ class _MarketConnectionRegistry:
     self._lock = asyncio.Lock()
     self._connection_id = ""
 
+  @property
+  def active_stream_id(self) -> str:
+    return self._connection_id
+
   async def register(self) -> str | None:
     async with self._lock:
       if self._connection_id:
@@ -656,6 +660,11 @@ class _MarketConnectionRegistry:
 
 
 _market_connections = _MarketConnectionRegistry()
+
+
+def active_market_stream_id() -> str:
+  """Only the owning gateway process can attest to a live market connection."""
+  return _market_connections.active_stream_id
 
 
 @dataclass(frozen=True)
@@ -2870,7 +2879,7 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
       market_stream_store.allocate_generation(),
       timeout=MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
     )
-    stream_id = str(uuid.uuid4())
+    stream_id = connection_id
     await asyncio.wait_for(
       market_stream_store.mark_syncing(
         stream_id,

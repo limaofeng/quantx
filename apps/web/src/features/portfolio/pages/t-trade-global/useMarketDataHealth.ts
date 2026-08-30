@@ -7,10 +7,8 @@ export type MarketDataHealth = {
   connectedDevices?: number;
   protocol?: string;
   sequence?: number;
-  engineSequence?: number;
   instrumentCount?: number;
   streamAgeSeconds?: number | null;
-  engineAgeSeconds?: number | null;
   tradingSession?: boolean;
 };
 

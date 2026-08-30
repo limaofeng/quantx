@@ -13,7 +13,6 @@ COMPONENT_TARGETS = {
   "engine": "engine",
   "worker": "worker",
   "qmtAgent": "qmt-agent",
-  "marketData": "market-data",
   "aiRuntime": "ai-runtime",
 }
 

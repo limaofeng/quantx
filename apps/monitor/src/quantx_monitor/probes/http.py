@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
+from quantx_contracts.market_health import MarketGatewayHealth
 
 from ..models import MonitorStatus, ProbeResult, utc_now
 from .base import timed_result
@@ -39,6 +42,23 @@ def json_status(expected: str) -> PayloadEvaluator:
     return MonitorStatus.UNAVAILABLE, "DEPENDENCY_NOT_READY"
 
   return evaluate
+
+
+def market_gateway_status(
+  response: httpx.Response,
+  payload: dict[str, Any] | None,
+) -> tuple[MonitorStatus, str | None]:
+  """A real HTTP response contributes RTT, including unavailable supply (503)."""
+  try:
+    health = MarketGatewayHealth.model_validate(payload)
+    if response.status_code != (200 if health.status == "ready" else 503):
+      raise ValueError("HTTP status and market supply health disagree")
+  except (ValidationError, ValueError):
+    return MonitorStatus.UNAVAILABLE, "PROTOCOL_ERROR"
+  return (
+    MonitorStatus.HEALTHY if health.status == "ready" else MonitorStatus.UNAVAILABLE,
+    health.reason_code.value if health.reason_code is not None else None,
+  )
 
 
 class HttpProbe:
@@ -99,7 +119,11 @@ class HttpProbe:
       return status, response.status_code, reason
 
     try:
-      return await timed_result(self.target_id, request, evaluate)
+      result = await timed_result(self.target_id, request, evaluate)
+      # A timeout/connection failure has no HTTP RTT; do not chart its deadline.
+      return (
+        result if result.status_code is not None else replace(result, latency_ms=None)
+      )
     finally:
       if temporary_client is not None:
         await temporary_client.aclose()

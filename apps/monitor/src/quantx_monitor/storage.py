@@ -29,12 +29,14 @@ class MonitorStorage:
     self.path = path
     self._db: aiosqlite.Connection | None = None
     self._write_lock = asyncio.Lock()
+    self._target_ids: tuple[str, ...] = ()
 
   @property
   def is_open(self) -> bool:
     return self._db is not None
 
   async def open(self, target_ids: Iterable[str]) -> None:
+    self._target_ids = tuple(target_ids)
     self.path.parent.mkdir(parents=True, exist_ok=True)
     self._db = await aiosqlite.connect(self.path)
     self._db.row_factory = aiosqlite.Row
@@ -55,7 +57,7 @@ class MonitorStorage:
     elif current_version < 2:
       await self._migrate_to_v2()
       current_version = 2
-    for target_id in target_ids:
+    for target_id in self._target_ids:
       await self._db.execute(
         """
         INSERT OR IGNORE INTO target_states (
@@ -709,10 +711,15 @@ class MonitorStorage:
     max_incident_id: int | None = None,
   ) -> tuple[int, int, list[dict[str, Any]]]:
     assert self._db is not None
+    if not self._target_ids:
+      return 0, max_incident_id or 0, []
     where = """
       WHERE opened_at <= ? AND (resolved_at IS NULL OR resolved_at >= ?)
     """
     params: list[Any] = [now, since]
+    # Retired targets retain their audit rows but are not part of the current API.
+    where += " AND target_id IN (" + ",".join("?" for _ in self._target_ids) + ")"
+    params.extend(self._target_ids)
     if target_id is not None:
       where += " AND target_id = ?"
       params.append(target_id)

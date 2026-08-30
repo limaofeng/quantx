@@ -93,6 +93,42 @@ describe('ServiceStatusPanel', () => {
     vi.clearAllMocks();
   });
 
+  it('shows direct gateway RTT and percentiles independently of Engine degradation', async () => {
+    const data = summary();
+    data.groups[0].targetIds = ['market-gateway', 'engine'];
+    data.targets[0] = {
+      ...data.targets[0],
+      id: 'market-gateway',
+      name: '行情服务（Market Gateway）',
+      probeKind: 'direct',
+    };
+    data.targets[1] = {
+      ...data.targets[1],
+      status: 'degraded',
+      reasonCode: 'ENGINE_MARKET_NOT_READY',
+    };
+    monitorMocks.getMonitorSummary.mockResolvedValue(data);
+    monitorMocks.getMonitorHistory.mockResolvedValue({
+      target: { id: 'market-gateway', name: '行情服务（Market Gateway）' },
+      range: '24h',
+      bucketSeconds: 60,
+      points: [],
+    });
+    monitorMocks.getMonitorIncidents.mockResolvedValue(incidentPage([]));
+    render(<ServiceStatusPanel />);
+    const gateway = await screen.findByRole('button', {
+      name: /行情服务（Market Gateway）.*延迟/,
+    });
+    if (gateway.getAttribute('aria-expanded') !== 'true')
+      fireEvent.click(gateway);
+    expect(
+      await screen.findByText(/不包含交易能力或 Engine 消费状态/)
+    ).toBeInTheDocument();
+    expect(screen.getByText('延迟 12.40 ms')).toBeInTheDocument();
+    expect(screen.getByText('11.20 ms')).toBeInTheDocument();
+    expect(screen.getByText('18.80 ms')).toBeInTheDocument();
+  });
+
   it('shows composite QMT RTT, percentiles, trend evidence, and derived N/A', async () => {
     const now = new Date().toISOString();
     monitorMocks.getMonitorSummary.mockResolvedValue(summary());
@@ -232,10 +268,10 @@ describe('ServiceStatusPanel', () => {
     async marketStatus => {
       const monitorSummary = summary('degraded');
       monitorSummary.targets[0].reasonCode = 'XTTRADING_UNAVAILABLE';
-      monitorSummary.groups[0].targetIds.push('market-data');
+      monitorSummary.groups[0].targetIds.push('market-gateway');
       monitorSummary.targets.push({
         ...monitorSummary.targets[1],
-        id: 'market-data',
+        id: 'market-gateway',
         name: '行情服务',
         status: marketStatus,
       });

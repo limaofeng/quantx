@@ -22,6 +22,10 @@ QMT Agent。只有明确需要关闭实盘连接时才使用：
 .\ops\quantx.ps1 up -Environment dev -Profile web -Mode data-only
 ```
 
+Market Gateway 先启动，启动器仅等待其 `/health/live` 后继续启动 API 和 Agent。
+网关 `/health/ready` 需要当前 QMT 行情连接与完整供给快照，不得在 Agent 启动前
+用它阻塞启动顺序。最终 full readiness 仍检查供给、Engine 消费和 QMT 状态。
+
 Monitor 保持独立生命周期：
 
 ```powershell
