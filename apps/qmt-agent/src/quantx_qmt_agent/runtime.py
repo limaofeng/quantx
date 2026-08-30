@@ -1936,6 +1936,7 @@ class AgentRuntime:
     ) = None
     self._trading_recovery_started_monotonic: float | None = None
     self._trading_recovery_reason = ""
+    self._trading_account_waiting = False
     self._trading_readiness_failed = False
     self._market_data_ready_cache = False
     if broker is not None and not callable(
@@ -2282,6 +2283,24 @@ class AgentRuntime:
     self._trading_ready_cache = bool(ready)
     self._health_state().set_xttrading_connected(bool(ready))
 
+  def _set_trading_account_waiting(self, waiting: bool) -> None:
+    was_waiting = self._trading_account_waiting
+    self._trading_account_waiting = waiting
+    if waiting:
+      # Account login/availability is external to the Agent. A responsive RPC
+      # does not need process recovery, however long the account takes to return.
+      self._trading_recovery_started_monotonic = None
+    elif (
+      was_waiting
+      and self._requires_trading_reconciliation()
+      and self._trading_recovery_reason != "journal_indeterminate_commands"
+    ):
+      # A real transport failure or a newly eligible account gets its own full
+      # recovery window; time spent waiting for the account cannot consume it.
+      self._trading_recovery_started_monotonic = time.monotonic()
+    if waiting != was_waiting:
+      logger.info("XTTrading account availability wait changed: waiting=%s", waiting)
+
   def _requires_trading_reconciliation(self) -> bool:
     return bool(
       self.mode == "live" and getattr(self, "_trading_reconciliation_required", False)
@@ -2316,7 +2335,9 @@ class AgentRuntime:
     self._trading_reconciliation_snapshot_generation = None
     self._trading_reconciliation_snapshot_callback_failure_generation = None
     self._trading_recovery_reason = reason[:128]
-    if not already_reconciling or self._trading_recovery_started_monotonic is None:
+    if self._trading_account_waiting:
+      self._trading_recovery_started_monotonic = None
+    elif not already_reconciling or self._trading_recovery_started_monotonic is None:
       self._trading_recovery_started_monotonic = time.monotonic()
     require_reconciliation = getattr(
       getattr(self, "broker", None),
@@ -2413,6 +2434,8 @@ class AgentRuntime:
 
   def _raise_if_trading_recovery_expired(self) -> None:
     if not self._requires_trading_reconciliation():
+      return
+    if self._trading_account_waiting:
       return
     if self._trading_recovery_reason == "journal_indeterminate_commands":
       return
@@ -3198,16 +3221,18 @@ class AgentRuntime:
       return True
     ensure_ready = getattr(self.broker, "ensure_trading_ready", None)
     if not callable(ensure_ready):
+      self._set_trading_account_waiting(False)
       self._set_trading_ready(False)
       self._trading_readiness_failed = True
       return False
 
-    def ensure_with_generation() -> tuple[bool, int]:
+    def ensure_with_generation() -> tuple[bool, int, bool]:
       ready = bool(ensure_ready())
-      return ready, self._read_broker_trading_generation()
+      transport_healthy = self.broker.is_trading_transport_healthy()
+      return ready, self._read_broker_trading_generation(), transport_healthy
 
     try:
-      ready, generation = await self._run_native_xttrading(
+      ready, generation, transport_healthy = await self._run_native_xttrading(
         "readiness",
         ensure_with_generation,
         timeout=XTTRADING_RECONNECT_TIMEOUT_SECONDS,
@@ -3215,6 +3240,7 @@ class AgentRuntime:
         coalesce_key="readiness",
       )
       self._trading_connection_generation_cache = max(0, int(generation))
+      self._set_trading_account_waiting(transport_healthy and not ready)
       self._set_trading_ready(bool(ready))
       self._trading_readiness_failed = not ready
       return bool(ready)
@@ -3225,6 +3251,7 @@ class AgentRuntime:
         "XTTrading readiness retry failed: error=%s",
         exc.__class__.__name__,
       )
+    self._set_trading_account_waiting(False)
     self._set_trading_ready(False)
     self._trading_readiness_failed = True
     return False

@@ -31,7 +31,8 @@ SQLite journal 和历史上传 spool 也只留在 Windows。运行模式为 `dat
 启动顺序固定为：加载凭据与安全配置、校验 live 环境、校验 journal 完整性、获取
 短期 token、完成控制 WebSocket 认证，然后才初始化 XTData/XTTrading。每次新控制会话
 都必须重放未确认报告并重新上报完整账户快照；Engine 对账完成前，Agent heartbeat
-不能自行把状态提升为 `READY`，服务端也不会向该 live 会话发放全市场行情租约。
+不能自行把交易状态提升为 `READY`。全市场行情租约独立于账户就绪与交易对账，
+仍由已认证控制会话、行情能力和单设备选主决定。
 Windows 单实例锁和长期进程监督由 Windows 启动器方案负责，不能通过手工并行启动
 两个 Agent 绕过。
 
@@ -74,9 +75,13 @@ WebSocket 前都会检查 Agent 声明、API 已提交 watermark 与 Engine 已�
 XTTrading 原生 RPC 连接健康与账户交易状态必须分开判断。只要
 `query_account_status` RPC 仍可返回，就保留当前原生会话；`ACCOUNT_STATUS_FAIL` 等
 非就绪状态只关闭交易门禁并等待原会话恢复，不能反复调用 `connect()`、递增连接
-代际或重新触发对账。RPC 调用本身失败时才进入 XTTrading 重连。账户状态恢复后只
-生成一次新对账快照。`ACCOUNT_STATUS_CLOSED` 代表休市但连接可用，仍允许 Agent
-维持只读账户快照、实时行情和历史数据服务。
+代际或重启整个 Agent。运行时依据最近一次原生账户状态 RPC 是否成功区分账户等待
+与连接故障，账户等待期间不累计 90 秒交易恢复超时，控制心跳、健康监听和实时行情
+继续运行。RPC 调用失败或重新连接时立即清除旧的探测成功证据，不能仅凭
+`connect()` 成功或旧账户状态取消故障恢复期限；原生调用超时仍由独立 watchdog
+触发进程恢复。账户恢复到 `OK/CLOSED` 后只生成一次新对账快照，并重新开始完整的
+90 秒对账窗口，快照确认与 Engine 对账前继续禁止交易。`ACCOUNT_STATUS_CLOSED`
+代表休市但连接可用，仍允许 Agent 维持只读账户快照、实时行情和历史数据服务。
 
 完整账户快照还必须携带逐账户 `snapshot_authority_by_account`。Agent 在每个原生
 查询分区前和最终组装时都重新调用 `query_account_status`，并把起止状态、稳定性、

@@ -55,6 +55,7 @@ class XTTradingManager:
       raise TradingConnectionError("QMT_USERDATA_PATH is not configured")
     self.account_id = account_id
     self.is_connected = False
+    self.account_status_rpc_succeeded = False
     self.session_id = None
     self.account_type = account_type
     self.xttrader = None
@@ -141,6 +142,8 @@ class XTTradingManager:
     trader = self.xttrader
     if trader is None or not self._native_started:
       return False
+    self.account_status_rpc_succeeded = False
+    self._last_connection_health_status = None
     try:
       connect_result = trader.connect()
     except Exception as exc:
@@ -729,12 +732,16 @@ class XTTradingManager:
     }
 
   def _query_account_status(self) -> int | None:
+    self.account_status_rpc_succeeded = False
+    self._last_connection_health_status = None
     if not self.is_connected:
       raise TradingConnectionError("交易连接未建立")
 
     expected_account_id = str(self.acc.account_id).strip()
     expected_account_type = str(self.acc.account_type).strip().upper()
-    for account_status in self.xttrader.query_account_status() or []:
+    statuses = self.xttrader.query_account_status()
+    self.account_status_rpc_succeeded = True
+    for account_status in statuses or []:
       account_id = str(getattr(account_status, "account_id", "")).strip()
       account_type = str(getattr(account_status, "account_type", "")).strip().upper()
       if account_id != expected_account_id or account_type != expected_account_type:
@@ -1050,6 +1057,7 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
     """连接断开回调"""
     logger.warning("交易连接已断开")
     self.trading_manager.is_connected = False
+    self.trading_manager.account_status_rpc_succeeded = False
     self._submit_async_task(
       self.trading_manager.handle_connection_event(connected=False)
     )

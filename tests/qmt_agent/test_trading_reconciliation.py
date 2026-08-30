@@ -28,6 +28,7 @@ def _bare_live_runtime(broker) -> AgentRuntime:
   runtime._trading_reconciliation_snapshot_callback_failure_generation = None
   runtime._trading_recovery_started_monotonic = None
   runtime._trading_recovery_reason = ""
+  runtime._trading_account_waiting = False
   runtime._trading_readiness_failed = False
   runtime._trading_ready_cache = False
   runtime._trading_connection_generation_cache = 0
@@ -1477,8 +1478,10 @@ async def test_repair_preparation_market_ingress_and_reconciliation_run_concurre
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("account_waiting", [False, True])
 async def test_native_trading_timeout_is_fatal_without_event_loop_block(
   monkeypatch: pytest.MonkeyPatch,
+  account_waiting: bool,
 ) -> None:
   release = threading.Event()
 
@@ -1501,6 +1504,7 @@ async def test_native_trading_timeout_is_fatal_without_event_loop_block(
       return None
 
   runtime = _bare_live_runtime(Broker())
+  runtime._trading_account_waiting = account_waiting
   monkeypatch.setattr(
     runtime_module,
     "XTTRADING_RECONNECT_TIMEOUT_SECONDS",

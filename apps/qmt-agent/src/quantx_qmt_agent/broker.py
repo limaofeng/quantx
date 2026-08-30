@@ -1539,6 +1539,15 @@ class LiveBroker:
         for agent in self.agents.values()
       )
 
+  def is_trading_transport_healthy(self) -> bool:
+    """Read native RPC evidence from the preceding serialized readiness probe."""
+    with self._trading_access_lock:
+      return bool(self.agents) and all(
+        agent.trading_manager.is_connected
+        and agent.trading_manager.account_status_rpc_succeeded
+        for agent in self.agents.values()
+      )
+
   @staticmethod
   def _trading_manager_ready(manager: Any) -> bool:
     if not bool(getattr(manager, "is_connected", False)):
