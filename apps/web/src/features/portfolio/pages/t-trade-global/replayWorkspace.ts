@@ -28,8 +28,38 @@ export function replayStatusAfterDelete(
   deletedRunId: string,
   activeRunId: string
 ) {
-  if (activeRunId !== deletedRunId) return activeRunId;
-  return historyRunIds.find(runId => runId !== deletedRunId) || '';
+  return replayStatusAfterDeleteMany(
+    historyRunIds,
+    [deletedRunId],
+    activeRunId
+  );
+}
+
+export function replayStatusAfterDeleteMany(
+  historyRunIds: readonly string[],
+  deletedRunIds: readonly string[],
+  activeRunId: string
+) {
+  const deleted = new Set(deletedRunIds);
+  if (!deleted.has(activeRunId)) return activeRunId;
+  return historyRunIds.find(runId => !deleted.has(runId)) || '';
+}
+
+export async function deleteReplayRunsSequentially(
+  runIds: readonly string[],
+  deleteRun: (runId: string) => Promise<unknown>
+) {
+  const deletedRunIds: string[] = [];
+  const failedRunIds: string[] = [];
+  for (const runId of runIds) {
+    try {
+      await deleteRun(runId);
+      deletedRunIds.push(runId);
+    } catch {
+      failedRunIds.push(runId);
+    }
+  }
+  return { deletedRunIds, failedRunIds };
 }
 
 export type ReplayCycleLike = {

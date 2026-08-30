@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   canDeleteReplay,
+  deleteReplayRunsSequentially,
   mapReplayCyclesToActivityBatches,
   mapReplayCyclesToActivityEvents,
   mapReplayCyclesToPositionBatches,
@@ -12,6 +13,7 @@ import {
   replayDecisionTraceItems,
   replayProjectionActivityItems,
   replayStatusAfterDelete,
+  replayStatusAfterDeleteMany,
   type ReplayCycleLike,
 } from './replayWorkspace';
 
@@ -40,6 +42,44 @@ describe('replay workspace deletion policy', () => {
     expect(replayStatusAfterDelete(['run-1', 'run-2'], 'run-2', 'run-1')).toBe(
       'run-1'
     );
+  });
+
+  it('selects the first remaining record after deleting a range', () => {
+    expect(
+      replayStatusAfterDeleteMany(
+        ['run-1', 'run-2', 'run-3', 'run-4'],
+        ['run-1', 'run-2', 'run-3'],
+        'run-2'
+      )
+    ).toBe('run-4');
+  });
+
+  it('keeps an active record outside the deleted range', () => {
+    expect(
+      replayStatusAfterDeleteMany(
+        ['run-1', 'run-2', 'run-3'],
+        ['run-2', 'run-3'],
+        'run-1'
+      )
+    ).toBe('run-1');
+  });
+
+  it('deletes a batch sequentially and reports partial failures', async () => {
+    const deleteRun = vi.fn(async (runId: string) => {
+      if (runId === 'run-2') throw new Error('failed');
+    });
+
+    await expect(
+      deleteReplayRunsSequentially(['run-1', 'run-2', 'run-3'], deleteRun)
+    ).resolves.toEqual({
+      deletedRunIds: ['run-1', 'run-3'],
+      failedRunIds: ['run-2'],
+    });
+    expect(deleteRun.mock.calls.map(([runId]) => runId)).toEqual([
+      'run-1',
+      'run-2',
+      'run-3',
+    ]);
   });
 });
 

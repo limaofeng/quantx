@@ -46,6 +46,7 @@ function createContext(
     mode: 'VIEW',
     onCreate: vi.fn(),
     onDelete: vi.fn(),
+    onDeleteMany: vi.fn(),
     onHistoryRefresh: vi.fn(),
     onSelectRun: vi.fn(),
     positions: [],
@@ -152,8 +153,112 @@ describe('TTradeReplaySidebar', () => {
       { clientX: 320, clientY: 160 }
     );
 
-    expect(screen.getByRole('menuitem', { name: '删除记录' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: /^删除记录/ })).toBeDisabled();
     expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it('selects a contiguous range with shift-click and deletes it from the context menu', () => {
+    const onDelete = vi.fn();
+    const onDeleteMany = vi.fn();
+    const history = [
+      {
+        progressPct: 100,
+        runId: 'run-1',
+        startTime: '2026-08-03T09:30:00+08:00',
+        status: 'COMPLETED',
+        tNetProfit: 110.38,
+      },
+      {
+        progressPct: 0,
+        runId: 'run-2',
+        startTime: '2026-07-28T09:30:00+08:00',
+        status: 'FAILED',
+        tNetProfit: null,
+      },
+      {
+        progressPct: 12,
+        runId: 'run-3',
+        startTime: '2026-06-04T09:30:00+08:00',
+        status: 'CANCELLED',
+        tNetProfit: 0,
+      },
+      {
+        progressPct: 100,
+        runId: 'run-4',
+        startTime: '2026-05-30T09:30:00+08:00',
+        status: 'COMPLETED',
+        tNetProfit: 20,
+      },
+    ];
+
+    render(
+      <TTradeReplaySidebar
+        context={createContext({
+          history,
+          onDelete,
+          onDeleteMany,
+        })}
+      />
+    );
+
+    const first = screen.getByRole('button', { name: /^2026-08-03已完成/ });
+    const middle = screen.getByRole('button', { name: /^2026-07-28失败/ });
+    const third = screen.getByRole('button', { name: /^2026-06-04已取消/ });
+    const last = screen.getByRole('button', { name: /^2026-05-30已完成/ });
+
+    fireEvent.click(first);
+    fireEvent.click(third, { shiftKey: true });
+
+    expect(first).toHaveAttribute('aria-pressed', 'true');
+    expect(middle).toHaveAttribute('aria-pressed', 'true');
+    expect(third).toHaveAttribute('aria-pressed', 'true');
+    expect(last).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText('已选择 3 条')).toBeInTheDocument();
+
+    fireEvent.contextMenu(middle, { clientX: 320, clientY: 320 });
+    fireEvent.click(screen.getByRole('menuitem', { name: '删除已选 3 条' }));
+
+    expect(onDeleteMany).toHaveBeenCalledWith(history.slice(0, 3));
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it('blocks batch deletion when the selected range contains an active replay', () => {
+    const onDeleteMany = vi.fn();
+    const history = [
+      {
+        progressPct: 100,
+        runId: 'run-completed',
+        startTime: '2026-08-29T09:30:00+08:00',
+        status: 'COMPLETED',
+        tNetProfit: 10,
+      },
+      {
+        progressPct: 36,
+        runId: 'run-active',
+        startTime: '2026-08-30T09:30:00+08:00',
+        status: 'RUNNING',
+        tNetProfit: null,
+      },
+    ];
+
+    render(
+      <TTradeReplaySidebar context={createContext({ history, onDeleteMany })} />
+    );
+
+    const completed = screen.getByRole('button', {
+      name: /^2026-08-29已完成/,
+    });
+    const running = screen.getByRole('button', {
+      name: /^2026-08-30进行中/,
+    });
+    fireEvent.click(completed);
+    fireEvent.click(running, { shiftKey: true });
+    fireEvent.contextMenu(completed, { clientX: 320, clientY: 320 });
+
+    expect(
+      screen.getByRole('menuitem', { name: /^删除已选 2 条/ })
+    ).toBeDisabled();
+    expect(onDeleteMany).not.toHaveBeenCalled();
   });
 
   it('renders new replay account maintenance in the main account panel', () => {

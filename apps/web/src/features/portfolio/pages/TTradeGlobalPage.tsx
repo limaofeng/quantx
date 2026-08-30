@@ -155,6 +155,7 @@ import {
 } from './t-trade-global/replaySync';
 import {
   canDeleteReplay,
+  deleteReplayRunsSequentially,
   mapReplayCyclesToActivityBatches,
   mapReplayCyclesToActivityEvents,
   mapReplayCyclesToPositionBatches,
@@ -165,6 +166,7 @@ import {
   replayDecisionTraceItems,
   replayProjectionActivityItems,
   replayStatusAfterDelete,
+  replayStatusAfterDeleteMany,
 } from './t-trade-global/replayWorkspace';
 import {
   isAppliedTTradeGlobalSave,
@@ -1143,6 +1145,19 @@ function TTradeReplayPanel({
     },
     [manualPositions, toast]
   );
+  const deleteReplayRun = React.useCallback(
+    async (runId: string) => {
+      const result = await deleteStrategyRun({ runId });
+      const payload = result.data?.deleteStrategyRun;
+      if (!payload?.success) {
+        throw new Error(
+          payload?.message || result.error?.message || '删除回放失败'
+        );
+      }
+      return payload.message || '回放及关联数据已删除。';
+    },
+    [deleteStrategyRun]
+  );
   const handleDelete = React.useCallback(
     async (item: (typeof history)[number]) => {
       if (!canDeleteReplay(item.status)) {
@@ -1173,16 +1188,10 @@ function TTradeReplayPanel({
         activeRunId
       );
       try {
-        const result = await deleteStrategyRun({ runId: item.runId });
-        const payload = result.data?.deleteStrategyRun;
-        if (!payload?.success) {
-          throw new Error(
-            payload?.message || result.error?.message || '删除回放失败'
-          );
-        }
+        const message = await deleteReplayRun(item.runId);
         setActiveRunId(nextRunId);
         if (!nextRunId) onActiveViewChange('OVERVIEW');
-        toast({ title: '回放已删除', description: payload.message });
+        toast({ title: '回放已删除', description: message });
         refreshHistory({ requestPolicy: 'network-only' });
       } catch (error) {
         toast({
@@ -1195,7 +1204,83 @@ function TTradeReplayPanel({
     [
       activeRunId,
       confirmDialog,
-      deleteStrategyRun,
+      deleteReplayRun,
+      history,
+      onActiveViewChange,
+      refreshHistory,
+      toast,
+    ]
+  );
+  const handleDeleteMany = React.useCallback(
+    async (runIds: readonly string[]) => {
+      const requestedRunIds = new Set(runIds);
+      const targets = history.filter(item => requestedRunIds.has(item.runId));
+      if (targets.length === 0) return;
+
+      if (targets.length !== requestedRunIds.size) {
+        toast({
+          title: '所选回放已经变化',
+          description: '请刷新回测记录后重新选择。',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      if (targets.some(item => !canDeleteReplay(item.status))) {
+        toast({
+          title: '所选回放不能批量删除',
+          description: '选区包含仍在运行或尚未结束的回放，请调整选择。',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const confirmed = await confirmDialog({
+        title: `删除选中的 ${targets.length} 次回放？`,
+        description: `将批量删除选中的 ${targets.length} 次回放记录、关联回测运行、回测版本、审计轨迹与结果文件。共享策略模板不会被删除。此操作不可撤销。`,
+        confirmText: `删除 ${targets.length} 次回放及关联数据`,
+        cancelText: '取消',
+        variant: 'destructive',
+      });
+      if (!confirmed) return;
+
+      const { deletedRunIds, failedRunIds } =
+        await deleteReplayRunsSequentially(
+          targets.map(target => target.runId),
+          deleteReplayRun
+        );
+
+      if (deletedRunIds.length > 0) {
+        const nextRunId = replayStatusAfterDeleteMany(
+          history.map(item => item.runId),
+          deletedRunIds,
+          activeRunId
+        );
+        setActiveRunId(nextRunId);
+        if (!nextRunId) onActiveViewChange('OVERVIEW');
+        refreshHistory({ requestPolicy: 'network-only' });
+      }
+
+      if (failedRunIds.length > 0) {
+        toast({
+          title: '批量删除未完全成功',
+          description: `成功 ${deletedRunIds.length} 条，失败 ${failedRunIds.length} 条。失败记录：${failedRunIds
+            .map(runId => runId.slice(0, 8))
+            .join('、')}。`,
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      toast({
+        title: `已删除 ${deletedRunIds.length} 次回放`,
+        description: '关联回测版本、审计轨迹与结果文件已一并删除。',
+      });
+    },
+    [
+      activeRunId,
+      confirmDialog,
+      deleteReplayRun,
       history,
       onActiveViewChange,
       refreshHistory,
@@ -1222,6 +1307,9 @@ function TTradeReplayPanel({
       onDelete: (item: (typeof sidebarHistory)[number]) => {
         const target = history.find(row => row.runId === item.runId);
         if (target) void handleDelete(target);
+      },
+      onDeleteMany: (items: (typeof sidebarHistory)[number][]) => {
+        void handleDeleteMany(items.map(item => item.runId));
       },
       onHistoryRefresh: () => refreshHistory({ requestPolicy: 'network-only' }),
       onSelectRun: (runId: string) => {
@@ -1358,6 +1446,7 @@ function TTradeReplayPanel({
     deleteResult.fetching,
     handleReplayCashChange,
     handleDelete,
+    handleDeleteMany,
     handleReplayPortfolioSourceChange,
     handleReplayPositionAdd,
     handleReplayPositionChange,

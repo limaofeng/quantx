@@ -7,7 +7,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useQuery } from 'urql';
 
 import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
@@ -101,6 +102,7 @@ export interface ReplaySidebarContext {
   mode: 'CREATE' | 'VIEW';
   onCreate: () => void;
   onDelete: (item: ReplaySidebarHistoryItem) => void;
+  onDeleteMany: (items: ReplaySidebarHistoryItem[]) => void;
   onHistoryRefresh: () => void;
   onSelectRun: (runId: string) => void;
   positions: ReplayPortfolioPositionContext[];
@@ -130,6 +132,11 @@ function canDeleteReplay(status: string) {
   return ['COMPLETED', 'ERROR', 'FAILED', 'CANCELLED', 'STOPPED'].includes(
     String(status || '').toUpperCase()
   );
+}
+
+interface ReplayHistoryMenuPayload {
+  items: ReplaySidebarHistoryItem[];
+  target: ReplaySidebarHistoryItem;
 }
 
 function ReplayPositionList({
@@ -459,9 +466,83 @@ function ReplayAccountEditor({
 
 function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
   const { closeMenu, menu, openAtPointer } =
-    useStudioMenu<ReplaySidebarHistoryItem>();
-  const menuItem = menu?.payload;
+    useStudioMenu<ReplayHistoryMenuPayload>();
+  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [selectionAnchorRunId, setSelectionAnchorRunId] = useState<
+    string | null
+  >(null);
   const historyScrollRef = useRef<HTMLDivElement>(null);
+  const selectedItems = context.history.filter(item =>
+    selectedRunIds.has(item.runId)
+  );
+  const menuItems = menu?.payload.items ?? [];
+  const menuTarget = menu?.payload.target;
+  const deleteSelectionAllowed =
+    menuItems.length > 0 &&
+    menuItems.every(item => canDeleteReplay(item.status));
+
+  useEffect(() => {
+    const availableRunIds = new Set(context.history.map(item => item.runId));
+    setSelectedRunIds(current => {
+      const next = new Set(
+        [...current].filter(runId => availableRunIds.has(runId))
+      );
+      return next.size === current.size ? current : next;
+    });
+    setSelectionAnchorRunId(current =>
+      current && availableRunIds.has(current) ? current : null
+    );
+  }, [context.history]);
+
+  const clearSelection = () => {
+    setSelectedRunIds(new Set());
+    setSelectionAnchorRunId(null);
+  };
+
+  const handleHistoryItemClick = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    item: ReplaySidebarHistoryItem
+  ) => {
+    const itemIndex = context.history.findIndex(
+      historyItem => historyItem.runId === item.runId
+    );
+    const anchorIndex = context.history.findIndex(
+      historyItem =>
+        historyItem.runId ===
+        (selectionAnchorRunId || context.activeRunId || item.runId)
+    );
+
+    if (event.shiftKey && itemIndex >= 0 && anchorIndex >= 0) {
+      const start = Math.min(anchorIndex, itemIndex);
+      const end = Math.max(anchorIndex, itemIndex);
+      setSelectedRunIds(
+        new Set(context.history.slice(start, end + 1).map(row => row.runId))
+      );
+      if (!selectionAnchorRunId) {
+        setSelectionAnchorRunId(context.history[anchorIndex].runId);
+      }
+    } else {
+      setSelectedRunIds(new Set([item.runId]));
+      setSelectionAnchorRunId(item.runId);
+    }
+
+    context.onSelectRun(item.runId);
+  };
+
+  const handleHistoryItemContextMenu = (
+    event: ReactMouseEvent<HTMLDivElement>,
+    item: ReplaySidebarHistoryItem
+  ) => {
+    const preserveSelection = selectedRunIds.has(item.runId);
+    const items = preserveSelection ? selectedItems : [item];
+    if (!preserveSelection) {
+      setSelectedRunIds(new Set([item.runId]));
+      setSelectionAnchorRunId(item.runId);
+    }
+    openAtPointer(event, { items, target: item });
+  };
 
   return (
     <section
@@ -471,12 +552,19 @@ function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
     >
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/[0.06] px-ui-section">
         <div className="text-ui-caption text-slate-600">
-          {context.activeRunId ? '当前已进入记录详情' : '选择记录查看详情'}
+          {selectedItems.length > 0
+            ? `已选择 ${selectedItems.length} 条`
+            : context.activeRunId
+              ? '当前已进入记录详情'
+              : '选择记录查看详情'}
         </div>
         <div className="flex items-center gap-1">
           <button
             type="button"
-            onClick={context.onCreate}
+            onClick={() => {
+              clearSelection();
+              context.onCreate();
+            }}
             className={cn(
               'flex h-control-compact cursor-pointer items-center gap-1 border px-2 text-ui-caption font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60',
               !context.activeRunId
@@ -513,17 +601,24 @@ function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
           <div
             key={item.runId}
             className="group relative border-b border-white/[0.05]"
-            onContextMenu={event => openAtPointer(event, item)}
+            onContextMenu={event => handleHistoryItemContextMenu(event, item)}
           >
             <button
               type="button"
               aria-haspopup="menu"
-              onClick={() => context.onSelectRun(item.runId)}
+              aria-pressed={selectedRunIds.has(item.runId)}
+              onClick={event => handleHistoryItemClick(event, item)}
               className={cn(
                 'block w-full cursor-pointer px-ui-section py-2.5 pr-10 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
                 context.activeRunId === item.runId
-                  ? 'bg-cyan-400/[0.07]'
-                  : 'hover:bg-white/[0.025]'
+                  ? cn(
+                      'bg-cyan-400/[0.07]',
+                      selectedRunIds.has(item.runId) &&
+                        'ring-1 ring-inset ring-blue-400/40'
+                    )
+                  : selectedRunIds.has(item.runId)
+                    ? 'bg-blue-500/10 ring-1 ring-inset ring-blue-400/40'
+                    : 'hover:bg-white/[0.025]'
               )}
             >
               <div className="flex items-center justify-between gap-2">
@@ -598,26 +693,33 @@ function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
             icon: <Eye size={14} />,
             label: '查看详情',
             onSelect: () => {
-              if (menuItem) context.onSelectRun(menuItem.runId);
+              if (menuTarget) context.onSelectRun(menuTarget.runId);
             },
           },
           { id: 'replay-record-actions', type: 'separator' },
           {
             id: 'delete',
             danger: true,
-            disabled:
-              !menuItem ||
-              !canDeleteReplay(menuItem.status) ||
-              context.deletingHistory,
+            disabled: !deleteSelectionAllowed || context.deletingHistory,
             icon: context.deletingHistory ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
             ) : (
               <Trash2 size={14} />
             ),
-            label: '删除记录',
+            label:
+              menuItems.length > 1
+                ? `删除已选 ${menuItems.length} 条`
+                : '删除记录',
+            shortcut:
+              menuItems.length > 0 && !deleteSelectionAllowed
+                ? '不可删除'
+                : undefined,
             onSelect: () => {
-              if (menuItem && canDeleteReplay(menuItem.status)) {
-                context.onDelete(menuItem);
+              if (!deleteSelectionAllowed) return;
+              if (menuItems.length > 1) {
+                context.onDeleteMany(menuItems);
+              } else if (menuTarget) {
+                context.onDelete(menuTarget);
               }
             },
           },
