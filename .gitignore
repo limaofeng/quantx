@@ -88,6 +88,7 @@ quantx_service_runner.bat
 .shared/
 .codex_screenshots/
 /.codex_test_tmp/
+/.codex_*/
 /.codex_*.prof
 .codex_tmp/
 /.codex_tmp_*/
