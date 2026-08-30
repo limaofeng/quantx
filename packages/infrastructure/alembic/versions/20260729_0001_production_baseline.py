@@ -115,6 +115,21 @@ POST_BASELINE_COLUMNS = {
     "owner_id",
     "owner_type",
   },
+  # Revisions 20260829_0036/0037 own the durable T-batch history fields.  Keep
+  # them out of the immutable production baseline so an empty database applies
+  # their backfill and terminal-state migrations in the intended order.
+  "t_trade_batches": {
+    "closed_at",
+    "commission_rate",
+    "entry_filled_at",
+    "execution_mode",
+    "last_exit_filled_at",
+    "metrics_origin",
+    "minimum_commission",
+    "stamp_tax_rate",
+    "terminal_at",
+    "transfer_fee_rate",
+  },
   "stock_announcements": {
     "content_fetched_at",
     "content_hash",
@@ -129,6 +144,11 @@ POST_BASELINE_INDEXES = {
   # out of the immutable baseline so a fresh database does not create the
   # index before the revision that owns it runs.
   "strategy_runtime_events": {"ix_strategy_runtime_event_run_created"},
+  "t_trade_batches": {
+    "ix_t_trade_batch_account_closed",
+    "ix_t_trade_batch_account_mode",
+    "ix_t_trade_batch_account_terminal",
+  },
   "trade_command_outbox": {
     "ix_trade_command_device_status_delivery_expiry",
     "ix_trade_command_device_status_expiry_created",
