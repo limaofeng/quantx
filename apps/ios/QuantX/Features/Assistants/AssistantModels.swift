@@ -5,6 +5,15 @@ enum TradeApprovalKind: String, Equatable, Sendable {
   case strategyTradeIntent = "STRATEGY_TRADE_INTENT_APPROVAL"
 }
 
+struct TTradeCandidateApprovalExpectation: Equatable, Hashable, Sendable {
+  let signalVersion: Int
+  let candidateID: String
+  let candidateFingerprint: String
+  let candidateStateVersion: Int
+  let configVersion: Int
+  let policyVersion: String
+}
+
 struct TradeApprovalPreview: Equatable, Identifiable, Sendable {
   let id: String
   let confirmationToken: String
@@ -22,6 +31,7 @@ struct TradeApprovalPreview: Equatable, Identifiable, Sendable {
   let signalExpiresAt: Date?
   let challengeExpiresAt: Date
   let warnings: [String]
+  let tTradeExpectation: TTradeCandidateApprovalExpectation?
 
   func isExpired(at date: Date = Date()) -> Bool {
     challengeExpiresAt <= date
@@ -58,6 +68,46 @@ struct TTradeReadiness: Equatable, Sendable {
   let checks: [TTradeReadinessCheck]
 }
 
+enum TTradeCandidateStatus: Equatable, Hashable, Sendable {
+  case none
+  case latched
+  case awaitingApproval
+  case suppressed
+  case rearming
+  case unknown(String)
+
+  init(serverValue: String?) {
+    let normalized = (serverValue ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .uppercased()
+    switch normalized {
+    case "NONE": self = .none
+    case "LATCHED": self = .latched
+    case "AWAITING_APPROVAL": self = .awaitingApproval
+    case "SUPPRESSED": self = .suppressed
+    case "REARMING": self = .rearming
+    default: self = .unknown(normalized)
+    }
+  }
+
+  var title: String {
+    switch self {
+    case .none: "观察中"
+    case .latched: "候选已锁存"
+    case .awaitingApproval: "等待确认"
+    case .suppressed: "候选已抑制"
+    case .rearming: "等待再武装"
+    case .unknown: "未知候选状态"
+    }
+  }
+}
+
+struct TTradeSignalBlocker: Equatable, Hashable, Sendable {
+  let code: String
+  let label: String
+  let detail: String
+}
+
 struct TTradeHoldingSession: Equatable, Sendable {
   let runID: String
   let runStatus: String
@@ -81,6 +131,7 @@ struct TTradeHoldingSession: Equatable, Sendable {
   let lastExitReason: String
   let canCancel: Bool
   let errorMessage: String?
+  let signalSnapshot: TTradeSignalItem?
 }
 
 struct TTradeHolding: Equatable, Identifiable, Sendable {
@@ -122,15 +173,33 @@ struct TTradeSignalItem: Equatable, Hashable, Identifiable, Sendable {
   let id: String
   let runID: String
   let stockCode: String
-  let status: String
-  let statusReason: String
-  let signalPrice: Double
-  let pullbackPercent: Double
-  let reboundPercent: Double
-  let requestedVolume: Int
-  let createdAt: Date?
-  let expiresAt: Date?
-  let updatedAt: Date?
+  let candidateStatus: TTradeCandidateStatus
+  let signalPrice: Double?
+  let pullbackPercent: Double?
+  let reboundPercent: Double?
+  let opportunityScore: Double?
+  let candidateThreshold: Double
+  let dataHealth: String
+  let dominantPhase: String
+  let firstBlocker: TTradeSignalBlocker?
+  let sourceAt: Date
+  let evaluatedAt: Date
+  let candidateExpiresAt: Date?
+  let pendingEntryIntentID: String?
+  let approvalExpectation: TTradeCandidateApprovalExpectation?
+  let compatibilityMessage: String?
+
+  func approvalUnavailableReason(at now: Date = Date()) -> String? {
+    if let compatibilityMessage { return compatibilityMessage }
+    guard candidateStatus == .awaitingApproval else { return "当前候选不在等待确认状态" }
+    guard pendingEntryIntentID != nil, approvalExpectation != nil else {
+      return "候选审批身份不完整，请等待服务端刷新"
+    }
+    guard let candidateExpiresAt, candidateExpiresAt > now else {
+      return "候选已过期，请刷新后等待新的服务端信号"
+    }
+    return nil
+  }
 }
 
 struct TTradeAssistantSnapshot: Equatable, Sendable {
@@ -163,7 +232,6 @@ struct TTradeAssistantSnapshot: Equatable, Sendable {
   let batches: [TTradeBatchItem]
   let batchesHaveMore: Bool
   let signals: [TTradeSignalItem]
-  let signalsHaveMore: Bool
   let fetchedAt: Date
 }
 

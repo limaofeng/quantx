@@ -174,6 +174,24 @@ final class ExitPlanWorkspaceTests: XCTestCase {
     }
   }
 
+  func testInvalidOrUnknownExecutionOwnerStaysVisibleButCannotBeAuthorized() async {
+    for owner in [ExitPlanExecutionOwner.invalidOwner, .unknown("FUTURE_OWNER")] {
+      let repository = ExitPlanLoaderSpy(plan: makePlan(executionOwner: owner))
+      let harness = makeHarness(repository: repository)
+      await harness.store.refresh()
+      let loaded = harness.store.listState.snapshot!.plans[0]
+
+      XCTAssertNotNil(harness.store.authorizationUnavailableReason(for: loaded))
+      do {
+        try await harness.store.previewAuthorization(for: loaded)
+        XCTFail("无效或未知执行归属不得请求自动退出授权")
+      } catch {
+        XCTAssertNotNil(error as? ExitPlanWorkspaceError)
+      }
+      XCTAssertEqual(repository.previewCount, 0)
+    }
+  }
+
   private func makeHarness(
     repository: ExitPlanLoaderSpy,
     authentication: ExitPlanAuthenticationSpy = ExitPlanAuthenticationSpy(),
@@ -212,7 +230,8 @@ final class ExitPlanWorkspaceTests: XCTestCase {
 
   private func makePlan(
     mode: ExitPlanExecutionMode = .live,
-    configVersion: Int = 7
+    configVersion: Int = 7,
+    executionOwner: ExitPlanExecutionOwner = .exitPlanMonitor
   ) -> ExitPlanItem {
     ExitPlanItem(
       id: "plan-1",
@@ -220,7 +239,7 @@ final class ExitPlanWorkspaceTests: XCTestCase {
       accountID: "ACCOUNT-1",
       instrumentCode: "600519.SH",
       bucket: "core",
-      sourceType: "MANUAL",
+      sourceType: "MANUAL_POSITION",
       sourceID: "source-1",
       strategyRunID: nil,
       enabled: true,
@@ -230,6 +249,8 @@ final class ExitPlanWorkspaceTests: XCTestCase {
       autoExitAuthorizationConfigVersion: nil,
       autoExitAuthorizationExpiresAt: nil,
       configVersion: configVersion,
+      stateVersion: 9,
+      executionOwner: executionOwner,
       completionStrategy: "UNTIL_SNAPSHOT_CLEARED",
       completionNote: nil,
       protectedVolume: 500,

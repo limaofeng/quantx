@@ -26,6 +26,7 @@ protocol TradeApprovalLoading: AnyObject {
   func previewTTradeEntry(
     runID: String,
     intentID: String,
+    expectation: TTradeCandidateApprovalExpectation,
     authorizedAccountIDs: Set<String>
   ) async throws -> TradeApprovalPreview
 
@@ -53,8 +54,10 @@ final class TradeApprovalRepository: TradeApprovalLoading {
   func previewTTradeEntry(
     runID: String,
     intentID: String,
+    expectation: TTradeCandidateApprovalExpectation,
     authorizedAccountIDs: Set<String>
   ) async throws -> TradeApprovalPreview {
+    try validate(expectation)
     let response = try await client.perform(
       mutation: QuantXAPI.IOSPreviewTTradeEntryApprovalMutation(
         runId: runID,
@@ -88,6 +91,7 @@ final class TradeApprovalRepository: TradeApprovalLoading {
       expectedKind: .tTradeEntry,
       expectedRunID: runID,
       expectedIntentID: intentID,
+      tTradeExpectation: expectation,
       authorizedAccountIDs: authorizedAccountIDs
     )
   }
@@ -95,14 +99,27 @@ final class TradeApprovalRepository: TradeApprovalLoading {
   func confirmTTradeEntry(_ preview: TradeApprovalPreview) async throws
     -> TradeApprovalConfirmation
   {
-    guard preview.kind == .tTradeEntry, !preview.isExpired() else {
+    guard
+      preview.kind == .tTradeEntry,
+      !preview.isExpired(),
+      let expectation = preview.tTradeExpectation
+    else {
       throw TradeApprovalRepositoryError.contextMismatch
     }
+    try validate(expectation)
     let response = try await client.perform(
       mutation: QuantXAPI.IOSConfirmTTradeEntryApprovalMutation(
         runId: preview.runID,
         intentId: preview.intentID,
-        confirmationToken: preview.confirmationToken
+        confirmationToken: preview.confirmationToken,
+        expectation: QuantXAPI.TTradeCandidateApprovalExpectationInput(
+          signalVersion: Int32(expectation.signalVersion),
+          candidateId: expectation.candidateID,
+          candidateFingerprint: expectation.candidateFingerprint,
+          candidateStateVersion: Int32(expectation.candidateStateVersion),
+          configVersion: Int32(expectation.configVersion),
+          policyVersion: expectation.policyVersion
+        )
       )
     )
     try ApolloReadOnlyResponseValidator.validate(response.errors)
@@ -156,6 +173,7 @@ final class TradeApprovalRepository: TradeApprovalLoading {
       expectedKind: .strategyTradeIntent,
       expectedRunID: runID,
       expectedIntentID: intentID,
+      tTradeExpectation: nil,
       authorizedAccountIDs: authorizedAccountIDs
     )
   }
@@ -206,13 +224,15 @@ final class TradeApprovalRepository: TradeApprovalLoading {
     expectedKind: TradeApprovalKind,
     expectedRunID: String,
     expectedIntentID: String,
+    tTradeExpectation: TTradeCandidateApprovalExpectation?,
     authorizedAccountIDs: Set<String>
   ) throws -> TradeApprovalPreview {
     guard
       let kind = TradeApprovalKind(rawValue: action),
       kind == expectedKind,
       runID == expectedRunID,
-      intentID == expectedIntentID
+      intentID == expectedIntentID,
+      (kind == .tTradeEntry) == (tTradeExpectation != nil)
     else {
       throw TradeApprovalRepositoryError.contextMismatch
     }
@@ -261,7 +281,8 @@ final class TradeApprovalRepository: TradeApprovalLoading {
       estimatedAmount: estimatedAmount,
       signalExpiresAt: signalExpiresAt.flatMap(PortfolioDateParser.parse),
       challengeExpiresAt: expiresAt,
-      warnings: warnings.map { String($0.prefix(300)) }
+      warnings: warnings.map { String($0.prefix(300)) },
+      tTradeExpectation: tTradeExpectation
     )
   }
 
@@ -295,5 +316,34 @@ final class TradeApprovalRepository: TradeApprovalLoading {
 
   private func safeMessage(_ value: String) -> String {
     String(value.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
+  }
+
+  private func validate(_ expectation: TTradeCandidateApprovalExpectation) throws {
+    let candidateID = expectation.candidateID.trimmingCharacters(in: .whitespacesAndNewlines)
+    let candidateFingerprint = expectation.candidateFingerprint.trimmingCharacters(
+      in: .whitespacesAndNewlines
+    )
+    let policyVersion = expectation.policyVersion.trimmingCharacters(
+      in: .whitespacesAndNewlines
+    )
+    guard
+      expectation.signalVersion >= 0,
+      expectation.signalVersion <= Int(Int32.max),
+      expectation.candidateStateVersion > 0,
+      expectation.candidateStateVersion <= Int(Int32.max),
+      expectation.configVersion >= 0,
+      expectation.configVersion <= Int(Int32.max),
+      !candidateID.isEmpty,
+      candidateID == expectation.candidateID,
+      candidateID.count <= 160,
+      !candidateFingerprint.isEmpty,
+      candidateFingerprint == expectation.candidateFingerprint,
+      candidateFingerprint.count <= 256,
+      !policyVersion.isEmpty,
+      policyVersion == expectation.policyVersion,
+      policyVersion.count <= 160
+    else {
+      throw TradeApprovalRepositoryError.contextMismatch
+    }
   }
 }

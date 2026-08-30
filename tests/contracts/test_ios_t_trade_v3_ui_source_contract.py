@@ -4,14 +4,21 @@ ROOT = Path(__file__).resolve().parents[2]
 IOS_ROOT = ROOT / "apps" / "ios"
 PLAN = ROOT / "docs" / "plans" / "持仓做T有状态机会引擎V3实施规格.md"
 
-V3_IOS_SYMBOLS = (
+CORE_V3_IOS_SYMBOLS = (
+  "TTradeCandidateApprovalExpectationInput",
+  "TTradeSignalSnapshot",
+  "TTradeCandidateStatus",
+  "approvalUnavailableReason",
+  "最近一次刷新失败，禁止基于旧信号快照确认",
+)
+
+DEFERRED_V3_IOS_SYMBOLS = (
   "IOSTTradeSignalEvaluationsQuery",
   "IOSTTradeSignalDiagnosticsQuery",
   "IOSTTradeCandidateTraceQuery",
   "IOSTTradeUpdatesSubscription",
   "IOSRecordTTradeClientTelemetryMutation",
   "IOSTTradeSignalSnapshotFields",
-  "TTradeCandidateApprovalExpectationInput",
   "TTradeSignalEvaluationKind",
   "TTradeOpportunitySnapshot",
   "TTradeCandidateTrace",
@@ -19,13 +26,11 @@ V3_IOS_SYMBOLS = (
 )
 
 
-def test_v3_ios_scope_is_explicitly_waived_on_windows() -> None:
+def test_v3_ios_core_client_is_present_and_advanced_scope_remains_deferred() -> None:
   plan = PLAN.read_text(encoding="utf-8")
 
-  assert "Windows 当前交付已明确 iOS scope-waiver" in plan
-  assert "§16、§18.6 与 Phase 4 保留为后续 iOS 计划" in plan
-  assert "Web 只按桌面体验验收" in plan
-  assert "移动 Web" in plan
+  assert "iOS 核心契约迁移已交付" in plan
+  assert "高级诊断与实时体验仍待 macOS" in plan
 
   ios_sources = [
     path.read_text(encoding="utf-8")
@@ -33,5 +38,8 @@ def test_v3_ios_scope_is_explicitly_waived_on_windows() -> None:
     if path.is_file() and path.suffix in {".swift", ".graphql"}
   ]
   combined = "\n".join(ios_sources)
-  for symbol in V3_IOS_SYMBOLS:
+  assert "tTradeSignalHistoryPage" not in combined
+  for symbol in CORE_V3_IOS_SYMBOLS:
+    assert symbol in combined
+  for symbol in DEFERRED_V3_IOS_SYMBOLS:
     assert symbol not in combined

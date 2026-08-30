@@ -9,7 +9,7 @@ extension QuantXAPI {
     static let operationName: String = "IOSTTradeAssistant"
     static let operationDocument: ApolloAPI.OperationDocument = .init(
       definition: .init(
-        #"query IOSTTradeAssistant($accountId: String!) { tTradeGlobalMonitor(accountId: $accountId) { __typename accountId enabled mode holdingCount eligibleCount ignoredCount monitoredCount pendingSignalCount activeBatchCount drainingCount lastReconciledAt lastError updatedAt positionSnapshotSource positionSnapshotReportedAt positionSnapshotReceivedAt positionSnapshotComplete positionSnapshotError rolloutStage engineStatus agentStatus reconcileStatus killSwitch canApprove canActivateLive blockedReasons projectionGeneratedAt readiness { __typename accountId ready stage engineStatus agentStatus agentDeviceId reconcileStatus killSwitch policyVersion canApprove canActivateLive blockedReasons checkedAt checks { __typename code passed message } } holdings { __typename stockCode instrumentName volume availableVolume ignored eligible status reason session { __typename runId runStatus status mode activeVolume lastPrice lastNetProfitPct peakNetProfitPct trailingFloorPct completedCycles pendingEntryIntentId pendingExitIntentId entryOrderStatus exitOrderStatus entryFilledVolume entryAvgPrice exitFilledVolume exitAvgPrice profitArmed lastExitReason canCancel errorMessage } } } tTradeBatchesPage(accountId: $accountId, first: 20) { __typename items { __typename batchId accountId stockCode status targetVolume entryFilledVolume entryAvgPrice exitFilledVolume exitAvgPrice activeVolume lastPrice lastNetProfitPct peakNetProfitPct trailingFloorPct exitReason exceptionReason createdAt updatedAt } pageInfo { __typename hasNextPage endCursor } } tTradeSignalHistoryPage(accountId: $accountId, first: 20) { __typename items { __typename intentId runId stockCode status statusReason signalPrice pullbackPct reboundPct requestedVolume createdAt expiresAt updatedAt } pageInfo { __typename hasNextPage endCursor } } }"#
+        #"query IOSTTradeAssistant($accountId: String!) { tTradeGlobalMonitor(accountId: $accountId) { __typename accountId enabled mode holdingCount eligibleCount ignoredCount monitoredCount pendingSignalCount activeBatchCount drainingCount lastReconciledAt lastError updatedAt positionSnapshotSource positionSnapshotReportedAt positionSnapshotReceivedAt positionSnapshotComplete positionSnapshotError rolloutStage engineStatus agentStatus reconcileStatus killSwitch canApprove canActivateLive blockedReasons projectionGeneratedAt readiness { __typename accountId ready stage engineStatus agentStatus agentDeviceId reconcileStatus killSwitch policyVersion canApprove canActivateLive blockedReasons checkedAt checks { __typename code passed message } } holdings { __typename stockCode instrumentName volume availableVolume ignored eligible status reason session { __typename runId runStatus status mode activeVolume lastPrice lastNetProfitPct peakNetProfitPct trailingFloorPct completedCycles pendingEntryIntentId pendingExitIntentId entryOrderStatus exitOrderStatus entryFilledVolume entryAvgPrice exitFilledVolume exitAvgPrice profitArmed lastExitReason canCancel errorMessage signalSnapshot { __typename instrumentCode evaluatedAt sourceAt dataHealth dominantPhase opportunityScore candidateThreshold features { __typename price pullbackPct reboundPct } topBlockers { __typename code label detail } candidateId candidateFingerprint candidateStatus candidateExpiresAt pendingEntryIntentId signalVersion candidateStateVersion stateSchemaVersion featureSchemaVersion policyVersion configVersion } } } } tTradeBatchesPage(accountId: $accountId, filter: {scope: CURRENT}, first: 20) { __typename items { __typename batchId accountId stockCode status targetVolume entryFilledVolume entryAvgPrice exitFilledVolume exitAvgPrice activeVolume lastPrice lastNetProfitPct peakNetProfitPct trailingFloorPct exitReason exceptionReason createdAt updatedAt } pageInfo { __typename hasNextPage endCursor } } }"#
       ))
 
     public var accountId: String
@@ -29,10 +29,7 @@ extension QuantXAPI {
         .field("tTradeGlobalMonitor", TTradeGlobalMonitor.self, arguments: ["accountId": .variable("accountId")]),
         .field("tTradeBatchesPage", TTradeBatchesPage.self, arguments: [
           "accountId": .variable("accountId"),
-          "first": 20
-        ]),
-        .field("tTradeSignalHistoryPage", TTradeSignalHistoryPage.self, arguments: [
-          "accountId": .variable("accountId"),
+          "filter": ["scope": "CURRENT"],
           "first": 20
         ]),
       ] }
@@ -42,7 +39,6 @@ extension QuantXAPI {
 
       var tTradeGlobalMonitor: TTradeGlobalMonitor { __data["tTradeGlobalMonitor"] }
       var tTradeBatchesPage: TTradeBatchesPage { __data["tTradeBatchesPage"] }
-      var tTradeSignalHistoryPage: TTradeSignalHistoryPage { __data["tTradeSignalHistoryPage"] }
 
       /// TTradeGlobalMonitor
       nonisolated struct TTradeGlobalMonitor: QuantXAPI.SelectionSet {
@@ -242,6 +238,7 @@ extension QuantXAPI {
               .field("lastExitReason", String.self),
               .field("canCancel", Bool.self),
               .field("errorMessage", String?.self),
+              .field("signalSnapshot", SignalSnapshot?.self),
             ] }
             static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
               IOSTTradeAssistantQuery.Data.TTradeGlobalMonitor.Holding.Session.self
@@ -269,6 +266,104 @@ extension QuantXAPI {
             var lastExitReason: String { __data["lastExitReason"] }
             var canCancel: Bool { __data["canCancel"] }
             var errorMessage: String? { __data["errorMessage"] }
+            var signalSnapshot: SignalSnapshot? { __data["signalSnapshot"] }
+
+            /// TTradeGlobalMonitor.Holding.Session.SignalSnapshot
+            nonisolated struct SignalSnapshot: QuantXAPI.SelectionSet {
+              let __data: DataDict
+              init(_dataDict: DataDict) { __data = _dataDict }
+
+              static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.TTradeSignalSnapshot }
+              static var __selections: [ApolloAPI.Selection] { [
+                .field("__typename", String.self),
+                .field("instrumentCode", String.self),
+                .field("evaluatedAt", QuantXAPI.DateTime.self),
+                .field("sourceAt", QuantXAPI.DateTime.self),
+                .field("dataHealth", GraphQLEnum<QuantXAPI.TTradeSignalDataHealth>.self),
+                .field("dominantPhase", GraphQLEnum<QuantXAPI.TTradeDominantPhase>.self),
+                .field("opportunityScore", Double?.self),
+                .field("candidateThreshold", Double.self),
+                .field("features", Features.self),
+                .field("topBlockers", [TopBlocker].self),
+                .field("candidateId", String?.self),
+                .field("candidateFingerprint", String?.self),
+                .field("candidateStatus", GraphQLEnum<QuantXAPI.TTradeCandidateStatus>.self),
+                .field("candidateExpiresAt", QuantXAPI.DateTime?.self),
+                .field("pendingEntryIntentId", String?.self),
+                .field("signalVersion", Int.self),
+                .field("candidateStateVersion", Int.self),
+                .field("stateSchemaVersion", String.self),
+                .field("featureSchemaVersion", String.self),
+                .field("policyVersion", String.self),
+                .field("configVersion", Int.self),
+              ] }
+              static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
+                IOSTTradeAssistantQuery.Data.TTradeGlobalMonitor.Holding.Session.SignalSnapshot.self
+              ] }
+
+              var instrumentCode: String { __data["instrumentCode"] }
+              var evaluatedAt: QuantXAPI.DateTime { __data["evaluatedAt"] }
+              var sourceAt: QuantXAPI.DateTime { __data["sourceAt"] }
+              var dataHealth: GraphQLEnum<QuantXAPI.TTradeSignalDataHealth> { __data["dataHealth"] }
+              var dominantPhase: GraphQLEnum<QuantXAPI.TTradeDominantPhase> { __data["dominantPhase"] }
+              var opportunityScore: Double? { __data["opportunityScore"] }
+              var candidateThreshold: Double { __data["candidateThreshold"] }
+              var features: Features { __data["features"] }
+              var topBlockers: [TopBlocker] { __data["topBlockers"] }
+              var candidateId: String? { __data["candidateId"] }
+              var candidateFingerprint: String? { __data["candidateFingerprint"] }
+              var candidateStatus: GraphQLEnum<QuantXAPI.TTradeCandidateStatus> { __data["candidateStatus"] }
+              var candidateExpiresAt: QuantXAPI.DateTime? { __data["candidateExpiresAt"] }
+              var pendingEntryIntentId: String? { __data["pendingEntryIntentId"] }
+              var signalVersion: Int { __data["signalVersion"] }
+              var candidateStateVersion: Int { __data["candidateStateVersion"] }
+              var stateSchemaVersion: String { __data["stateSchemaVersion"] }
+              var featureSchemaVersion: String { __data["featureSchemaVersion"] }
+              var policyVersion: String { __data["policyVersion"] }
+              var configVersion: Int { __data["configVersion"] }
+
+              /// TTradeGlobalMonitor.Holding.Session.SignalSnapshot.Features
+              nonisolated struct Features: QuantXAPI.SelectionSet {
+                let __data: DataDict
+                init(_dataDict: DataDict) { __data = _dataDict }
+
+                static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.TTradeSignalFeatures }
+                static var __selections: [ApolloAPI.Selection] { [
+                  .field("__typename", String.self),
+                  .field("price", Double?.self),
+                  .field("pullbackPct", Double?.self),
+                  .field("reboundPct", Double?.self),
+                ] }
+                static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
+                  IOSTTradeAssistantQuery.Data.TTradeGlobalMonitor.Holding.Session.SignalSnapshot.Features.self
+                ] }
+
+                var price: Double? { __data["price"] }
+                var pullbackPct: Double? { __data["pullbackPct"] }
+                var reboundPct: Double? { __data["reboundPct"] }
+              }
+
+              /// TTradeGlobalMonitor.Holding.Session.SignalSnapshot.TopBlocker
+              nonisolated struct TopBlocker: QuantXAPI.SelectionSet {
+                let __data: DataDict
+                init(_dataDict: DataDict) { __data = _dataDict }
+
+                static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.TTradeSignalBlocker }
+                static var __selections: [ApolloAPI.Selection] { [
+                  .field("__typename", String.self),
+                  .field("code", String.self),
+                  .field("label", String.self),
+                  .field("detail", String.self),
+                ] }
+                static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
+                  IOSTTradeAssistantQuery.Data.TTradeGlobalMonitor.Holding.Session.SignalSnapshot.TopBlocker.self
+                ] }
+
+                var code: String { __data["code"] }
+                var label: String { __data["label"] }
+                var detail: String { __data["detail"] }
+              }
+            }
           }
         }
       }
@@ -362,82 +457,6 @@ extension QuantXAPI {
         }
       }
 
-      /// TTradeSignalHistoryPage
-      nonisolated struct TTradeSignalHistoryPage: QuantXAPI.SelectionSet {
-        let __data: DataDict
-        init(_dataDict: DataDict) { __data = _dataDict }
-
-        static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.TTradeSignalHistoryPage }
-        static var __selections: [ApolloAPI.Selection] { [
-          .field("__typename", String.self),
-          .field("items", [Item].self),
-          .field("pageInfo", PageInfo.self),
-        ] }
-        static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
-          IOSTTradeAssistantQuery.Data.TTradeSignalHistoryPage.self
-        ] }
-
-        var items: [Item] { __data["items"] }
-        var pageInfo: PageInfo { __data["pageInfo"] }
-
-        /// TTradeSignalHistoryPage.Item
-        nonisolated struct Item: QuantXAPI.SelectionSet {
-          let __data: DataDict
-          init(_dataDict: DataDict) { __data = _dataDict }
-
-          static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.TTradeSignalHistoryEntry }
-          static var __selections: [ApolloAPI.Selection] { [
-            .field("__typename", String.self),
-            .field("intentId", String.self),
-            .field("runId", String.self),
-            .field("stockCode", String.self),
-            .field("status", String.self),
-            .field("statusReason", String.self),
-            .field("signalPrice", Double.self),
-            .field("pullbackPct", Double.self),
-            .field("reboundPct", Double.self),
-            .field("requestedVolume", Int.self),
-            .field("createdAt", QuantXAPI.DateTime?.self),
-            .field("expiresAt", QuantXAPI.DateTime?.self),
-            .field("updatedAt", QuantXAPI.DateTime?.self),
-          ] }
-          static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
-            IOSTTradeAssistantQuery.Data.TTradeSignalHistoryPage.Item.self
-          ] }
-
-          var intentId: String { __data["intentId"] }
-          var runId: String { __data["runId"] }
-          var stockCode: String { __data["stockCode"] }
-          var status: String { __data["status"] }
-          var statusReason: String { __data["statusReason"] }
-          var signalPrice: Double { __data["signalPrice"] }
-          var pullbackPct: Double { __data["pullbackPct"] }
-          var reboundPct: Double { __data["reboundPct"] }
-          var requestedVolume: Int { __data["requestedVolume"] }
-          var createdAt: QuantXAPI.DateTime? { __data["createdAt"] }
-          var expiresAt: QuantXAPI.DateTime? { __data["expiresAt"] }
-          var updatedAt: QuantXAPI.DateTime? { __data["updatedAt"] }
-        }
-
-        /// TTradeSignalHistoryPage.PageInfo
-        nonisolated struct PageInfo: QuantXAPI.SelectionSet {
-          let __data: DataDict
-          init(_dataDict: DataDict) { __data = _dataDict }
-
-          static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.PageInfo }
-          static var __selections: [ApolloAPI.Selection] { [
-            .field("__typename", String.self),
-            .field("hasNextPage", Bool.self),
-            .field("endCursor", String?.self),
-          ] }
-          static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
-            IOSTTradeAssistantQuery.Data.TTradeSignalHistoryPage.PageInfo.self
-          ] }
-
-          var hasNextPage: Bool { __data["hasNextPage"] }
-          var endCursor: String? { __data["endCursor"] }
-        }
-      }
     }
   }
 

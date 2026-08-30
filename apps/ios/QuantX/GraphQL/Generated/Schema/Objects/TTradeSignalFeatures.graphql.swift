@@ -4,8 +4,8 @@
 import ApolloAPI
 
 extension QuantXAPI.Objects {
-  nonisolated static let TTradeSignalHistoryEntry = ApolloAPI.Object(
-    typename: "TTradeSignalHistoryEntry",
+  nonisolated static let TTradeSignalFeatures = ApolloAPI.Object(
+    typename: "TTradeSignalFeatures",
     implementedInterfaces: [],
     keyFields: nil
   )

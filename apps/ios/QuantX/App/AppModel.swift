@@ -1239,7 +1239,8 @@ final class AppModel: ObservableObject {
 
   func previewTTradeEntryApproval(
     runID: String,
-    intentID: String
+    intentID: String,
+    expectation: TTradeCandidateApprovalExpectation
   ) async throws -> TradeApprovalPreview {
     let accountIDs = try authorizedTradeApprovalAccountIDs()
     guard let repository = tradeApprovalRepository else {
@@ -1249,6 +1250,7 @@ final class AppModel: ObservableObject {
       return try await repository.previewTTradeEntry(
         runID: runID,
         intentID: intentID,
+        expectation: expectation,
         authorizedAccountIDs: accountIDs
       )
     } catch ReadOnlyRepositoryError.unauthenticated {
@@ -1262,6 +1264,7 @@ final class AppModel: ObservableObject {
       return try await refreshedRepository.previewTTradeEntry(
         runID: runID,
         intentID: intentID,
+        expectation: expectation,
         authorizedAccountIDs: try authorizedTradeApprovalAccountIDs()
       )
     }

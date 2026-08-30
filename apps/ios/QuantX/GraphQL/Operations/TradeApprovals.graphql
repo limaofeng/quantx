@@ -28,11 +28,13 @@ mutation IOSConfirmTTradeEntryApproval(
   $runId: String!
   $intentId: String!
   $confirmationToken: String!
+  $expectation: TTradeCandidateApprovalExpectationInput!
 ) {
   confirmTTradeEntryApproval(
     runId: $runId
     intentId: $intentId
     confirmationToken: $confirmationToken
+    expectation: $expectation
   ) {
     success
     code

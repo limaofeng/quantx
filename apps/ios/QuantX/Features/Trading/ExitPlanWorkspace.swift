@@ -121,6 +121,14 @@ final class ExitPlanWorkspace: ObservableObject {
     guard plan.accountID == binding.identity.activeAccountID else {
       return "退出计划不属于当前唯一主账户"
     }
+    switch plan.executionOwner {
+    case .strategyRuntime, .exitPlanMonitor:
+      break
+    case .invalidOwner:
+      return "服务端审计判定执行归属无效，已阻断自动退出授权"
+    case .unknown:
+      return "服务端返回未知执行归属，已阻断自动退出授权"
+    }
     guard let current = currentPlan(id: plan.id), current.configVersion == plan.configVersion else {
       return "计划版本已变化，请刷新并重新进入详情"
     }

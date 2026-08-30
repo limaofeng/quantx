@@ -59,7 +59,8 @@ struct QuantXApp: App {
         warnings: [
           "价格变化超过风控阈值时会拒绝提交",
           "Kill Switch 或账户状态变化时会拒绝提交",
-        ]
+        ],
+        tTradeExpectation: nil
       )
     }
   }

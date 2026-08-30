@@ -126,7 +126,7 @@ struct TTradeAssistantView: View {
         case .batches:
           batchesSection(snapshot)
         case .signals:
-          signalsSection(snapshot)
+          signalsSection(snapshot, dataTrusted: refreshWarning == nil)
         case .readiness:
           readinessSection(snapshot)
         case .control:
@@ -258,7 +258,7 @@ struct TTradeAssistantView: View {
   @ViewBuilder
   private func batchesSection(_ snapshot: TTradeAssistantSnapshot) -> some View {
     if snapshot.batches.isEmpty {
-      emptyCard("暂无做T批次", "没有已进入委托与成交状态流的做T批次。")
+      emptyCard("暂无当前做T批次", "当前没有仍在执行或等待收敛的做T批次。")
     } else {
       ForEach(snapshot.batches) { batch in
         QuantXCard {
@@ -293,7 +293,7 @@ struct TTradeAssistantView: View {
         }
       }
       if snapshot.batchesHaveMore {
-        Text("仅显示最近 20 个批次")
+        Text("仅显示前 20 个当前批次")
           .font(.caption)
           .foregroundStyle(QuantXTheme.secondaryText)
       }
@@ -301,9 +301,12 @@ struct TTradeAssistantView: View {
   }
 
   @ViewBuilder
-  private func signalsSection(_ snapshot: TTradeAssistantSnapshot) -> some View {
+  private func signalsSection(
+    _ snapshot: TTradeAssistantSnapshot,
+    dataTrusted: Bool
+  ) -> some View {
     if snapshot.signals.isEmpty {
-      emptyCard("暂无做T信号", "当前没有等待确认或已处理的买入信号。")
+      emptyCard("暂无做T信号", "当前持仓还没有可展示的服务端信号快照。")
     } else {
       ForEach(snapshot.signals) { signal in
         QuantXCard {
@@ -312,33 +315,64 @@ struct TTradeAssistantView: View {
               Text(signal.stockCode)
                 .font(.headline.monospaced())
               Spacer()
-              Text(signal.status)
+              Text(signal.candidateStatus.title)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(statusColor(signal.status))
+                .foregroundStyle(
+                  signal.candidateStatus == .awaitingApproval
+                    ? QuantXTheme.warning : QuantXTheme.accent
+                )
             }
             HStack(spacing: 14) {
-              labeledValue("信号价", PortfolioFormatters.decimal(signal.signalPrice))
+              labeledValue(
+                "信号价",
+                signal.signalPrice.map { PortfolioFormatters.decimal($0) } ?? "不可用"
+              )
               labeledValue(
                 "回撤",
-                PortfolioFormatters.signedPercentage(signal.pullbackPercent)
+                signal.pullbackPercent.map { PortfolioFormatters.signedPercentage($0) }
+                  ?? "不可用"
               )
-              labeledValue("数量", "\(signal.requestedVolume.formatted()) 股")
+              labeledValue(
+                "反弹",
+                signal.reboundPercent.map { PortfolioFormatters.signedPercentage($0) }
+                  ?? "不可用"
+              )
             }
-            if !signal.statusReason.isEmpty {
-              Text(signal.statusReason)
+            HStack(spacing: 14) {
+              labeledValue(
+                "机会分",
+                signal.opportunityScore.map { PortfolioFormatters.decimal($0) } ?? "不可用"
+              )
+              labeledValue("候选阈值", PortfolioFormatters.decimal(signal.candidateThreshold))
+            }
+            Text("\(signal.dominantPhase) · \(signal.dataHealth)")
+              .font(.caption)
+              .foregroundStyle(QuantXTheme.secondaryText)
+            if let blocker = signal.firstBlocker {
+              Text("\(blocker.label)：\(blocker.detail)")
                 .font(.caption)
                 .foregroundStyle(QuantXTheme.secondaryText)
             }
-            if signal.status.uppercased() == "AWAITING_APPROVAL" {
-              approvalAction(signal: signal, snapshot: snapshot)
+            Text("源时间 \(signal.sourceAt.formatted(date: .omitted, time: .standard))")
+              .font(.caption2)
+              .foregroundStyle(QuantXTheme.secondaryText)
+            if let candidateExpiresAt = signal.candidateExpiresAt {
+              Text(
+                "候选有效至 \(candidateExpiresAt.formatted(date: .abbreviated, time: .standard))"
+              )
+              .font(.caption2)
+              .foregroundStyle(QuantXTheme.secondaryText)
+            }
+            if let compatibilityMessage = signal.compatibilityMessage {
+              Label(compatibilityMessage, systemImage: "exclamationmark.shield.fill")
+                .font(.caption)
+                .foregroundStyle(QuantXTheme.warning)
+            }
+            if signal.candidateStatus == .awaitingApproval {
+              approvalAction(signal: signal, snapshot: snapshot, dataTrusted: dataTrusted)
             }
           }
         }
-      }
-      if snapshot.signalsHaveMore {
-        Text("仅显示最近 20 条信号")
-          .font(.caption)
-          .foregroundStyle(QuantXTheme.secondaryText)
       }
     }
   }
@@ -346,28 +380,38 @@ struct TTradeAssistantView: View {
   @ViewBuilder
   private func approvalAction(
     signal: TTradeSignalItem,
-    snapshot: TTradeAssistantSnapshot
+    snapshot: TTradeAssistantSnapshot,
+    dataTrusted: Bool
   ) -> some View {
     if model.canApproveTrades {
-      Button {
-        Task { await requestApprovalPreview(signal) }
-      } label: {
-        if approvalRequestIntentID == signal.id {
-          ProgressView()
-            .frame(maxWidth: .infinity)
-        } else {
-          Label("核对并安全确认", systemImage: "faceid")
-            .frame(maxWidth: .infinity)
+      if let reason = dataTrusted
+        ? signal.approvalUnavailableReason()
+        : "最近一次刷新失败，禁止基于旧信号快照确认"
+      {
+        Label(reason, systemImage: "exclamationmark.shield.fill")
+          .font(.caption)
+          .foregroundStyle(QuantXTheme.warning)
+          .fixedSize(horizontal: false, vertical: true)
+      } else {
+        Button {
+          Task { await requestApprovalPreview(signal, dataTrusted: dataTrusted) }
+        } label: {
+          if approvalRequestIntentID == signal.pendingEntryIntentID {
+            ProgressView()
+              .frame(maxWidth: .infinity)
+          } else {
+            Label("核对并安全确认", systemImage: "faceid")
+              .frame(maxWidth: .infinity)
+          }
         }
+        .buttonStyle(.borderedProminent)
+        .tint(QuantXTheme.approvalAction)
+        .disabled(
+          approvalRequestIntentID != nil
+            || snapshot.killSwitch
+            || !snapshot.canApprove
+        )
       }
-      .buttonStyle(.borderedProminent)
-      .tint(QuantXTheme.approvalAction)
-      .disabled(
-        approvalRequestIntentID != nil
-          || snapshot.killSwitch
-          || !snapshot.canApprove
-          || signal.expiresAt.map { $0 <= Date() } == true
-      )
     } else {
       Label("当前会话仅可查看；确认需要 trade:approve 独立权限", systemImage: "lock.fill")
         .font(.caption)
@@ -376,14 +420,27 @@ struct TTradeAssistantView: View {
     }
   }
 
-  private func requestApprovalPreview(_ signal: TTradeSignalItem) async {
-    guard approvalRequestIntentID == nil else { return }
-    approvalRequestIntentID = signal.id
+  private func requestApprovalPreview(
+    _ signal: TTradeSignalItem,
+    dataTrusted: Bool
+  ) async {
+    guard
+      dataTrusted,
+      approvalRequestIntentID == nil,
+      signal.approvalUnavailableReason() == nil,
+      let intentID = signal.pendingEntryIntentID,
+      let expectation = signal.approvalExpectation
+    else {
+      approvalRequestError = "当前候选身份已变化，请刷新后重试"
+      return
+    }
+    approvalRequestIntentID = intentID
     defer { approvalRequestIntentID = nil }
     do {
       approvalPreview = try await model.previewTTradeEntryApproval(
         runID: signal.runID,
-        intentID: signal.id
+        intentID: intentID,
+        expectation: expectation
       )
     } catch is CancellationError {
       return

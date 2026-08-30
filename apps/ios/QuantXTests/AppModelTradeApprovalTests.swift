@@ -72,6 +72,70 @@ final class AppModelTradeApprovalTests: XCTestCase {
     XCTAssertEqual(authentication.tradeAuthorizationCount, 0)
   }
 
+  func testTTradePreviewCarriesTheObservedCandidateExpectation() async throws {
+    let expectation = TTradeCandidateApprovalExpectation(
+      signalVersion: 8,
+      candidateID: "candidate-1",
+      candidateFingerprint: "fingerprint-1",
+      candidateStateVersion: 3,
+      configVersion: 4,
+      policyVersion: "t_trade_opportunity_v3.0.0"
+    )
+    let approval = TradeApprovalLoaderSpy(
+      preview: makePreview(kind: .tTradeEntry, expectation: expectation)
+    )
+    let model = makeModel(
+      permissions: ["trade:approve"],
+      approval: approval,
+      authentication: TradeAuthenticationSpy()
+    )
+    await model.restoreSession(requireLocalUnlock: false)
+
+    let loaded = try await model.previewTTradeEntryApproval(
+      runID: "run-1",
+      intentID: "intent-1",
+      expectation: expectation
+    )
+
+    XCTAssertEqual(approval.receivedExpectation, expectation)
+    XCTAssertEqual(loaded.tTradeExpectation, expectation)
+  }
+
+  func testTTradeSignalApprovalFailsClosedForStaleOrIncompatibleSnapshot() {
+    let expectation = TTradeCandidateApprovalExpectation(
+      signalVersion: 8,
+      candidateID: "candidate-1",
+      candidateFingerprint: "fingerprint-1",
+      candidateStateVersion: 3,
+      configVersion: 4,
+      policyVersion: "t_trade_opportunity_v3.0.0"
+    )
+    let valid = makeSignal(expectation: expectation)
+    let stale = makeSignal(
+      expectation: expectation,
+      expiresAt: Date().addingTimeInterval(-1)
+    )
+    let incompatible = makeSignal(
+      expectation: nil,
+      compatibilityMessage: "信号协议版本不兼容，当前信号保持只读"
+    )
+    let missingIdentity = makeSignal(expectation: nil)
+    let notAwaiting = makeSignal(
+      expectation: expectation,
+      candidateStatus: .latched
+    )
+
+    XCTAssertNil(valid.approvalUnavailableReason())
+    XCTAssertNotNil(stale.approvalUnavailableReason())
+    XCTAssertNotNil(incompatible.approvalUnavailableReason())
+    XCTAssertNotNil(missingIdentity.approvalUnavailableReason())
+    XCTAssertNotNil(notAwaiting.approvalUnavailableReason())
+    XCTAssertEqual(
+      TTradeCandidateStatus(serverValue: "future_state"),
+      .unknown("FUTURE_STATE")
+    )
+  }
+
   private func makeModel(
     permissions: [String],
     approval: TradeApprovalLoaderSpy,
@@ -108,12 +172,14 @@ final class AppModelTradeApprovalTests: XCTestCase {
   }
 
   private func makePreview(
-    expiresAt: Date = Date().addingTimeInterval(60)
+    expiresAt: Date = Date().addingTimeInterval(60),
+    kind: TradeApprovalKind = .strategyTradeIntent,
+    expectation: TTradeCandidateApprovalExpectation? = nil
   ) -> TradeApprovalPreview {
     TradeApprovalPreview(
       id: "challenge-1",
       confirmationToken: "one-time-token",
-      kind: .strategyTradeIntent,
+      kind: kind,
       accountID: "ACCOUNT-1",
       runID: "run-1",
       intentID: "intent-1",
@@ -126,7 +192,36 @@ final class AppModelTradeApprovalTests: XCTestCase {
       estimatedAmount: 1_000,
       signalExpiresAt: expiresAt,
       challengeExpiresAt: expiresAt,
-      warnings: ["确认后仍需统一风控"]
+      warnings: ["确认后仍需统一风控"],
+      tTradeExpectation: expectation
+    )
+  }
+
+  private func makeSignal(
+    expectation: TTradeCandidateApprovalExpectation?,
+    expiresAt: Date = Date().addingTimeInterval(60),
+    compatibilityMessage: String? = nil,
+    candidateStatus: TTradeCandidateStatus = .awaitingApproval
+  ) -> TTradeSignalItem {
+    TTradeSignalItem(
+      id: "run-1",
+      runID: "run-1",
+      stockCode: "600000.SH",
+      candidateStatus: candidateStatus,
+      signalPrice: 10,
+      pullbackPercent: -1.5,
+      reboundPercent: 0.8,
+      opportunityScore: 80,
+      candidateThreshold: 70,
+      dataHealth: "READY",
+      dominantPhase: "PULLBACK_CANDIDATE_LATCHED",
+      firstBlocker: nil,
+      sourceAt: Date(),
+      evaluatedAt: Date(),
+      candidateExpiresAt: expiresAt,
+      pendingEntryIntentID: "intent-1",
+      approvalExpectation: expectation,
+      compatibilityMessage: compatibilityMessage
     )
   }
 }
@@ -136,6 +231,7 @@ private final class TradeApprovalLoaderSpy: TradeApprovalLoading {
   let preview: TradeApprovalPreview
   private(set) var previewCount = 0
   private(set) var confirmationCount = 0
+  private(set) var receivedExpectation: TTradeCandidateApprovalExpectation?
 
   init(preview: TradeApprovalPreview) {
     self.preview = preview
@@ -144,9 +240,11 @@ private final class TradeApprovalLoaderSpy: TradeApprovalLoading {
   func previewTTradeEntry(
     runID _: String,
     intentID _: String,
+    expectation: TTradeCandidateApprovalExpectation,
     authorizedAccountIDs _: Set<String>
   ) async throws -> TradeApprovalPreview {
     previewCount += 1
+    receivedExpectation = expectation
     return preview
   }
 

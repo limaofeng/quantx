@@ -7,7 +7,7 @@
 extension QuantXAPI {
   nonisolated struct IOSExitPlanFields: QuantXAPI.SelectionSet, Fragment {
     static var fragmentDefinition: StaticString {
-      #"fragment IOSExitPlanFields on ExitPlanView { __typename planId groupId accountId instrumentCode bucket sourceType sourceId strategyRunId enabled status executionMode autoExitAuthorized autoExitAuthorizationConfigVersion autoExitAuthorizationExpiresAt configVersion completionStrategy completionNote protectedVolume exitedVolume remainingVolume entryAvgPrice rules metadata canEditRules editRoute phase dataQuality lastDecision peakPrice peakDrawdownPct trailingFloorPct pendingClientOrderId pendingIntentId lastEvaluatedAt lastError createdAt updatedAt }"#
+      #"fragment IOSExitPlanFields on ExitPlanView { __typename planId groupId accountId instrumentCode bucket sourceType sourceId strategyRunId enabled status executionMode autoExitAuthorized autoExitAuthorizationConfigVersion autoExitAuthorizationExpiresAt configVersion stateVersion executionOwner completionStrategy completionNote protectedVolume exitedVolume remainingVolume entryAvgPrice rules metadata canEditRules editRoute phase dataQuality lastDecision peakPrice peakDrawdownPct trailingFloorPct pendingClientOrderId pendingIntentId lastEvaluatedAt lastError createdAt updatedAt }"#
     }
 
     let __data: DataDict
@@ -31,6 +31,8 @@ extension QuantXAPI {
       .field("autoExitAuthorizationConfigVersion", Int?.self),
       .field("autoExitAuthorizationExpiresAt", QuantXAPI.DateTime?.self),
       .field("configVersion", Int.self),
+      .field("stateVersion", Int.self),
+      .field("executionOwner", String.self),
       .field("completionStrategy", String?.self),
       .field("completionNote", String?.self),
       .field("protectedVolume", Int.self),
@@ -73,6 +75,8 @@ extension QuantXAPI {
     var autoExitAuthorizationConfigVersion: Int? { __data["autoExitAuthorizationConfigVersion"] }
     var autoExitAuthorizationExpiresAt: QuantXAPI.DateTime? { __data["autoExitAuthorizationExpiresAt"] }
     var configVersion: Int { __data["configVersion"] }
+    var stateVersion: Int { __data["stateVersion"] }
+    var executionOwner: String { __data["executionOwner"] }
     var completionStrategy: String? { __data["completionStrategy"] }
     var completionNote: String? { __data["completionNote"] }
     var protectedVolume: Int { __data["protectedVolume"] }

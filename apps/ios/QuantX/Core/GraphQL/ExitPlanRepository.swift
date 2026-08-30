@@ -46,6 +46,8 @@ struct ExitPlanRawPlan: Sendable {
   let autoExitAuthorizationConfigVersion: Int?
   let autoExitAuthorizationExpiresAt: String?
   let configVersion: Int
+  let stateVersion: Int
+  let executionOwner: String
   let completionStrategy: String?
   let completionNote: String?
   let protectedVolume: Int
@@ -224,6 +226,11 @@ final class ExitPlanRepository: ExitPlanLoading {
     guard plan.executionMode == .live else {
       throw ExitPlanWorkspaceError.invalidRequest("只有明确的 LIVE 退出计划需要自动实盘授权")
     }
+    guard
+      plan.executionOwner == .strategyRuntime || plan.executionOwner == .exitPlanMonitor
+    else {
+      throw ExitPlanWorkspaceError.invalidRequest("退出计划执行归属无效或未知，不能自动授权")
+    }
     guard plan.status.isAuthorizable, plan.remainingVolume > 0 else {
       throw ExitPlanWorkspaceError.invalidRequest("只有仍有保护量的活动计划可以授权")
     }
@@ -338,6 +345,8 @@ extension ExitPlanRepository {
         autoExitAuthorizationConfigVersion: fragment.autoExitAuthorizationConfigVersion,
         autoExitAuthorizationExpiresAt: fragment.autoExitAuthorizationExpiresAt,
         configVersion: fragment.configVersion,
+        stateVersion: fragment.stateVersion,
+        executionOwner: fragment.executionOwner,
         completionStrategy: fragment.completionStrategy,
         completionNote: fragment.completionNote,
         protectedVolume: fragment.protectedVolume,
@@ -388,6 +397,12 @@ extension ExitPlanRepository {
     let bucket = try required(raw.bucket, field: "bucket", maximumLength: 80)
     let sourceType = try required(raw.sourceType, field: "sourceType", maximumLength: 80)
     let sourceID = try required(raw.sourceID, field: "sourceId", maximumLength: 160)
+    let strategyRunID = try strictOptional(
+      raw.strategyRunID,
+      field: "strategyRunId",
+      maximumLength: 160
+    )
+    let executionOwner = ExitPlanExecutionOwner(serverValue: raw.executionOwner)
     let phase = try required(raw.phase, field: "phase", maximumLength: 80)
     let dataQuality = try required(raw.dataQuality, field: "dataQuality", maximumLength: 80)
     let status = ExitPlanStatus(serverValue: raw.status)
@@ -395,6 +410,8 @@ extension ExitPlanRepository {
     guard
       raw.configVersion > 0,
       raw.configVersion <= Int(Int32.max),
+      raw.stateVersion > 0,
+      raw.stateVersion <= Int(Int32.max),
       raw.protectedVolume >= 0,
       raw.exitedVolume >= 0,
       raw.remainingVolume >= 0,
@@ -408,6 +425,26 @@ extension ExitPlanRepository {
       raw.peakDrawdownPercent >= 0,
       raw.trailingFloorPercent?.isFinite != false
     else {
+      throw ExitPlanWorkspaceError.invalidResponse
+    }
+    let entryRuntimeSources: Set<String> = [
+      "T_TRADE_BATCH", "LIMIT_UP_BOARD", "FIRST_BOARD_PROMOTION_V2", "ENTRY_PLAN",
+    ]
+    let monitorSources: Set<String> = [
+      "MANUAL_POSITION", "MANUAL_LIQUIDATION",
+    ]
+    switch executionOwner {
+    case .strategyRuntime
+      where strategyRunID != nil && entryRuntimeSources.contains(sourceType.uppercased()):
+      break
+    case .exitPlanMonitor
+      where strategyRunID == nil && monitorSources.contains(sourceType.uppercased()):
+      break
+    case .invalidOwner, .unknown:
+      // The API deliberately projects invalid/unknown ownership for audit. Keep
+      // the plan visible, while the workspace blocks every authorization action.
+      break
+    default:
       throw ExitPlanWorkspaceError.invalidResponse
     }
     let authorizationExpiry = try optionalDate(
@@ -431,7 +468,7 @@ extension ExitPlanRepository {
       bucket: bucket,
       sourceType: sourceType,
       sourceID: sourceID,
-      strategyRunID: optional(raw.strategyRunID, maximumLength: 160),
+      strategyRunID: strategyRunID,
       enabled: raw.enabled,
       status: status,
       executionMode: executionMode,
@@ -439,6 +476,8 @@ extension ExitPlanRepository {
       autoExitAuthorizationConfigVersion: raw.autoExitAuthorizationConfigVersion,
       autoExitAuthorizationExpiresAt: authorizationExpiry,
       configVersion: raw.configVersion,
+      stateVersion: raw.stateVersion,
+      executionOwner: executionOwner,
       completionStrategy: optional(raw.completionStrategy, maximumLength: 80),
       completionNote: optional(raw.completionNote, maximumLength: 500),
       protectedVolume: raw.protectedVolume,
@@ -835,6 +874,19 @@ extension ExitPlanRepository {
 
   static func optional(_ value: String?, maximumLength: Int) -> String? {
     nonempty(value, maximumLength: maximumLength)
+  }
+
+  static func strictOptional(
+    _ value: String?,
+    field _: String,
+    maximumLength: Int
+  ) throws -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.count <= maximumLength else {
+      throw ExitPlanWorkspaceError.invalidResponse
+    }
+    return trimmed.isEmpty ? nil : trimmed
   }
 
   static func optionalDate(_ value: String?, field: String) throws -> Date? {

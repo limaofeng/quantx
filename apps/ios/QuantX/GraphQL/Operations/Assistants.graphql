@@ -79,10 +79,44 @@ query IOSTTradeAssistant($accountId: String!) {
         lastExitReason
         canCancel
         errorMessage
+        signalSnapshot {
+          instrumentCode
+          evaluatedAt
+          sourceAt
+          dataHealth
+          dominantPhase
+          opportunityScore
+          candidateThreshold
+          features {
+            price
+            pullbackPct
+            reboundPct
+          }
+          topBlockers {
+            code
+            label
+            detail
+          }
+          candidateId
+          candidateFingerprint
+          candidateStatus
+          candidateExpiresAt
+          pendingEntryIntentId
+          signalVersion
+          candidateStateVersion
+          stateSchemaVersion
+          featureSchemaVersion
+          policyVersion
+          configVersion
+        }
       }
     }
   }
-  tTradeBatchesPage(accountId: $accountId, first: 20) {
+  tTradeBatchesPage(
+    accountId: $accountId
+    filter: { scope: CURRENT }
+    first: 20
+  ) {
     items {
       batchId
       accountId
@@ -101,26 +135,6 @@ query IOSTTradeAssistant($accountId: String!) {
       exitReason
       exceptionReason
       createdAt
-      updatedAt
-    }
-    pageInfo {
-      hasNextPage
-      endCursor
-    }
-  }
-  tTradeSignalHistoryPage(accountId: $accountId, first: 20) {
-    items {
-      intentId
-      runId
-      stockCode
-      status
-      statusReason
-      signalPrice
-      pullbackPct
-      reboundPct
-      requestedVolume
-      createdAt
-      expiresAt
       updatedAt
     }
     pageInfo {

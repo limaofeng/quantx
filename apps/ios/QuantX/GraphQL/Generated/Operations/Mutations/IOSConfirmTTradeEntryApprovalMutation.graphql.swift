@@ -9,27 +9,31 @@ extension QuantXAPI {
     static let operationName: String = "IOSConfirmTTradeEntryApproval"
     static let operationDocument: ApolloAPI.OperationDocument = .init(
       definition: .init(
-        #"mutation IOSConfirmTTradeEntryApproval($runId: String!, $intentId: String!, $confirmationToken: String!) { confirmTTradeEntryApproval( runId: $runId intentId: $intentId confirmationToken: $confirmationToken ) { __typename success code message challengeId } }"#
+        #"mutation IOSConfirmTTradeEntryApproval($runId: String!, $intentId: String!, $confirmationToken: String!, $expectation: TTradeCandidateApprovalExpectationInput!) { confirmTTradeEntryApproval( runId: $runId intentId: $intentId confirmationToken: $confirmationToken expectation: $expectation ) { __typename success code message challengeId } }"#
       ))
 
     public var runId: String
     public var intentId: String
     public var confirmationToken: String
+    public var expectation: TTradeCandidateApprovalExpectationInput
 
     public init(
       runId: String,
       intentId: String,
-      confirmationToken: String
+      confirmationToken: String,
+      expectation: TTradeCandidateApprovalExpectationInput
     ) {
       self.runId = runId
       self.intentId = intentId
       self.confirmationToken = confirmationToken
+      self.expectation = expectation
     }
 
     @_spi(Unsafe) public var __variables: Variables? { [
       "runId": runId,
       "intentId": intentId,
-      "confirmationToken": confirmationToken
+      "confirmationToken": confirmationToken,
+      "expectation": expectation
     ] }
 
     nonisolated struct Data: QuantXAPI.SelectionSet {
@@ -41,7 +45,8 @@ extension QuantXAPI {
         .field("confirmTTradeEntryApproval", ConfirmTTradeEntryApproval.self, arguments: [
           "runId": .variable("runId"),
           "intentId": .variable("intentId"),
-          "confirmationToken": .variable("confirmationToken")
+          "confirmationToken": .variable("confirmationToken"),
+          "expectation": .variable("expectation")
         ]),
       ] }
       static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [

@@ -13,6 +13,8 @@ final class ExitPlanRepositoryTests: XCTestCase {
     XCTAssertEqual(plan.accountID, "ACCOUNT-1")
     XCTAssertEqual(plan.status, .unknown("FUTURE_STATE"))
     XCTAssertEqual(plan.executionMode, .unknown("FUTURE_MODE"))
+    XCTAssertEqual(plan.stateVersion, 9)
+    XCTAssertEqual(plan.executionOwner, .exitPlanMonitor)
     XCTAssertEqual(plan.rules.topLevelFields.first?.key, "rules")
   }
 
@@ -24,6 +26,106 @@ final class ExitPlanRepositoryTests: XCTestCase {
       )
     ) { error in
       XCTAssertEqual(error as? ExitPlanWorkspaceError, .accountScopeMismatch)
+    }
+  }
+
+  func testPlanMappingRejectsExecutionOwnerThatConflictsWithRunLineage() {
+    XCTAssertThrowsError(
+      try ExitPlanRepository.mapPlan(
+        replacing(makeRawPlan(), executionOwner: "STRATEGY_RUNTIME"),
+        context: makeContext()
+      )
+    ) { error in
+      XCTAssertEqual(error as? ExitPlanWorkspaceError, .invalidResponse)
+    }
+  }
+
+  func testPlanMappingKeepsInvalidManagedRuntimeVisibleForAudit() throws {
+    let raw = replacing(
+      makeRawPlan(),
+      strategyRunID: "managed-exit-run-1",
+      executionOwner: "INVALID_OWNER"
+    )
+
+    let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
+
+    XCTAssertEqual(plan.executionOwner, .invalidOwner)
+    XCTAssertEqual(plan.strategyRunID, "managed-exit-run-1")
+  }
+
+  func testPlanMappingAcceptsOriginalEntryRuntimeOwner() throws {
+    let raw = replacing(
+      makeRawPlan(),
+      sourceType: "T_TRADE_BATCH",
+      strategyRunID: "t-run-1",
+      executionOwner: "STRATEGY_RUNTIME"
+    )
+
+    let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
+
+    XCTAssertEqual(plan.executionOwner, .strategyRuntime)
+    XCTAssertEqual(plan.strategyRunID, "t-run-1")
+  }
+
+  func testPlanMappingAcceptsFirstBoardPromotionRuntimeOwner() throws {
+    let raw = replacing(
+      makeRawPlan(),
+      sourceType: "FIRST_BOARD_PROMOTION_V2",
+      strategyRunID: "first-board-run-1",
+      executionOwner: "STRATEGY_RUNTIME"
+    )
+
+    let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
+
+    XCTAssertEqual(plan.executionOwner, .strategyRuntime)
+    XCTAssertEqual(plan.strategyRunID, "first-board-run-1")
+  }
+
+  func testPlanMappingAcceptsManualLiquidationMonitorOwner() throws {
+    let raw = replacing(makeRawPlan(), sourceType: "MANUAL_LIQUIDATION")
+
+    let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
+
+    XCTAssertEqual(plan.executionOwner, .exitPlanMonitor)
+    XCTAssertNil(plan.strategyRunID)
+  }
+
+  func testPlanMappingRejectsMonitorOwnerForNonmanualSource() {
+    XCTAssertThrowsError(
+      try ExitPlanRepository.mapPlan(
+        replacing(makeRawPlan(), sourceType: "T_TRADE_BATCH"),
+        context: makeContext()
+      )
+    ) { error in
+      XCTAssertEqual(error as? ExitPlanWorkspaceError, .invalidResponse)
+    }
+  }
+
+  func testPlanMappingKeepsInvalidAndUnknownOwnerProjectionsVisible() throws {
+    let invalid = try ExitPlanRepository.mapPlan(
+      replacing(makeRawPlan(), executionOwner: "INVALID_OWNER"),
+      context: makeContext()
+    )
+    let unknown = try ExitPlanRepository.mapPlan(
+      replacing(makeRawPlan(), executionOwner: "FUTURE_OWNER"),
+      context: makeContext()
+    )
+
+    XCTAssertEqual(invalid.executionOwner, .invalidOwner)
+    XCTAssertEqual(unknown.executionOwner, .unknown("FUTURE_OWNER"))
+  }
+
+  func testPlanMappingRejectsOverlongRunIdentityInsteadOfTreatingItAsMissing() {
+    XCTAssertThrowsError(
+      try ExitPlanRepository.mapPlan(
+        replacing(
+          makeRawPlan(),
+          strategyRunID: String(repeating: "r", count: 161)
+        ),
+        context: makeContext()
+      )
+    ) { error in
+      XCTAssertEqual(error as? ExitPlanWorkspaceError, .invalidResponse)
     }
   }
 
@@ -182,7 +284,7 @@ final class ExitPlanRepositoryTests: XCTestCase {
       accountID: "ACCOUNT-1",
       instrumentCode: "600519.SH",
       bucket: "core",
-      sourceType: "MANUAL",
+      sourceType: "MANUAL_POSITION",
       sourceID: "source-1",
       strategyRunID: nil,
       enabled: true,
@@ -192,6 +294,8 @@ final class ExitPlanRepositoryTests: XCTestCase {
       autoExitAuthorizationConfigVersion: nil,
       autoExitAuthorizationExpiresAt: nil,
       configVersion: 7,
+      stateVersion: 9,
+      executionOwner: "EXIT_PLAN_MONITOR",
       completionStrategy: "UNTIL_SNAPSHOT_CLEARED",
       completionNote: nil,
       protectedVolume: 500,
@@ -231,7 +335,7 @@ final class ExitPlanRepositoryTests: XCTestCase {
       planID: "plan-1",
       instrumentCode: "600519.SH",
       bucket: "core",
-      sourceType: "MANUAL",
+      sourceType: "MANUAL_POSITION",
       executionMode: "LIVE",
       configVersion: 7,
       protectedVolume: 500,
@@ -269,8 +373,11 @@ final class ExitPlanRepositoryTests: XCTestCase {
   private func replacing(
     _ raw: ExitPlanRawPlan,
     accountID: String? = nil,
+    sourceType: String? = nil,
     status: String? = nil,
     executionMode: String? = nil,
+    strategyRunID: String? = nil,
+    executionOwner: String? = nil,
     autoExitAuthorized: Bool? = nil,
     authorizationVersion: Int? = nil,
     authorizationExpiry: String? = nil
@@ -281,9 +388,9 @@ final class ExitPlanRepositoryTests: XCTestCase {
       accountID: accountID ?? raw.accountID,
       instrumentCode: raw.instrumentCode,
       bucket: raw.bucket,
-      sourceType: raw.sourceType,
+      sourceType: sourceType ?? raw.sourceType,
       sourceID: raw.sourceID,
-      strategyRunID: raw.strategyRunID,
+      strategyRunID: strategyRunID ?? raw.strategyRunID,
       enabled: raw.enabled,
       status: status ?? raw.status,
       executionMode: executionMode ?? raw.executionMode,
@@ -293,6 +400,8 @@ final class ExitPlanRepositoryTests: XCTestCase {
       autoExitAuthorizationExpiresAt: authorizationExpiry
         ?? raw.autoExitAuthorizationExpiresAt,
       configVersion: raw.configVersion,
+      stateVersion: raw.stateVersion,
+      executionOwner: executionOwner ?? raw.executionOwner,
       completionStrategy: raw.completionStrategy,
       completionNote: raw.completionNote,
       protectedVolume: raw.protectedVolume,

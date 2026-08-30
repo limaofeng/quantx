@@ -142,6 +142,9 @@ private struct ExitPlanRow: View {
             Text("\(plan.bucket) · \(plan.sourceType)")
               .font(.caption)
               .foregroundStyle(QuantXTheme.secondaryText)
+            Text("\(plan.executionOwner.title) · 状态 r\(plan.stateVersion)")
+              .font(.caption2)
+              .foregroundStyle(QuantXTheme.secondaryText)
           }
           Spacer(minLength: 8)
           if dynamicTypeSize.isAccessibilitySize {
@@ -371,10 +374,24 @@ private struct ExitPlanDetailView: View {
         ExitPlanKeyValueRow(label: "来源", value: plan.sourceType)
         ExitPlanKeyValueRow(label: "状态", value: plan.status.title)
         ExitPlanKeyValueRow(label: "执行模式", value: plan.executionMode.title)
+        ExitPlanKeyValueRow(label: "执行归属", value: plan.executionOwner.title)
+        ExitPlanKeyValueRow(label: "状态修订", value: "r\(plan.stateVersion)")
         if case .unknown = plan.status {
           Label("服务端返回未知状态；客户端只展示，不推断可操作性。", systemImage: "questionmark.diamond.fill")
             .font(.caption)
             .foregroundStyle(QuantXTheme.warning)
+        }
+        switch plan.executionOwner {
+        case .invalidOwner:
+          Label("执行归属审计失败；计划保持可见，但自动授权入口已关闭。", systemImage: "exclamationmark.shield.fill")
+            .font(.caption)
+            .foregroundStyle(QuantXTheme.warning)
+        case .unknown:
+          Label("客户端不认识此执行归属；计划保持只读并禁止授权。", systemImage: "questionmark.diamond.fill")
+            .font(.caption)
+            .foregroundStyle(QuantXTheme.warning)
+        case .strategyRuntime, .exitPlanMonitor:
+          EmptyView()
         }
       }
     }

@@ -128,6 +128,32 @@ enum ExitPlanStatus: Equatable, Sendable {
   }
 }
 
+enum ExitPlanExecutionOwner: Equatable, Sendable {
+  case strategyRuntime
+  case exitPlanMonitor
+  case invalidOwner
+  case unknown(String)
+
+  init(serverValue: String) {
+    let normalized = serverValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    switch normalized {
+    case "STRATEGY_RUNTIME": self = .strategyRuntime
+    case "EXIT_PLAN_MONITOR": self = .exitPlanMonitor
+    case "INVALID_OWNER": self = .invalidOwner
+    default: self = .unknown(normalized)
+    }
+  }
+
+  var title: String {
+    switch self {
+    case .strategyRuntime: "原入场 / 做 T 运行"
+    case .exitPlanMonitor: "全局计划监控"
+    case .invalidOwner: "执行归属无效"
+    case .unknown(let value): "未知执行归属（\(value.isEmpty ? "空值" : value)）"
+    }
+  }
+}
+
 enum ExitPlanAuthorizationState: Equatable, Sendable {
   case notApplicable
   case authorized(expiresAt: Date)
@@ -164,6 +190,8 @@ struct ExitPlanItem: Equatable, Identifiable, Sendable {
   let autoExitAuthorizationConfigVersion: Int?
   let autoExitAuthorizationExpiresAt: Date?
   let configVersion: Int
+  let stateVersion: Int
+  let executionOwner: ExitPlanExecutionOwner
   let completionStrategy: String?
   let completionNote: String?
   let protectedVolume: Int

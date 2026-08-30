@@ -1,11 +1,11 @@
 # 持仓做 T 有状态机会引擎 V3 实施规格
 
-> 状态：实施权威规格；Windows 当前交付已明确 iOS scope-waiver
+> 状态：实施权威规格；Web/API 已交付，iOS 核心契约迁移已交付，高级诊断与实时体验仍待 macOS
 > 版本：V3
-> 最后更新：2026-08-29
+> 最后更新：2026-08-30
 > 适用范围：账户持仓做 T 助手的入场机会识别、候选确认与执行分级、诊断与客户端展示
 
-> **当前 Windows 交付边界（2026-08-23）**：本轮交付按 Windows 主机范围验收，Web 只按桌面体验验收；移动 Web、手机断点、触控 ergonomics 与 phone-browser compatibility 不额外扩展。iOS V3 本轮暂不开发、不生成 Apollo types、不运行 Xcode/SwiftUI/Dynamic Type/VoiceOver 验证，也不作为当前完成门禁。§16、§18.6 与 Phase 4 保留为后续 iOS 计划；`apps/ios` 只保留并行 watchlist 与用户原有改动。
+> **平台交付边界**：2026-08-23 的原始 Windows 交付仍只按 Web 桌面体验验收；移动 Web、手机断点、触控 ergonomics 与 phone-browser compatibility 不额外扩展。2026-08-30 的 iOS 跟进已完成客户端继续运行所必需的核心原子切换：删除旧 signal-history 查询，改读 `TTradeSession.signalSnapshot`，只展示服务端分数/状态，并把 candidate CAS 身份绑定到确认请求。Windows 不提供 Xcode，因此高级诊断、subscription 合并 refetch、完整详情、Dynamic Type 与 VoiceOver 仍属于后续 macOS 门禁，不得把当前源码级验证表述为完整 iOS 验收。
 
 ## 1. 文档地位与适用边界
 
@@ -17,7 +17,7 @@
 2. 数据健康、回撤/动量双 FSM、候选生命周期三层信号域状态。
 3. 特征、评分、硬门禁、episode、候选锁存与再武装。
 4. `MarketDataContext`、`RuntimeState`、评估事件、标的画像和读投影的真源边界。
-5. GraphQL、Web（当前按桌面范围）的查询、展示、配置和实时刷新契约；iOS 对应契约保留为后续计划。
+5. GraphQL、Web（当前按桌面范围）的查询、展示、配置和实时刷新契约；iOS 已交付核心快照/审批兼容层，高级诊断与实时体验保留为后续计划。
 6. 回测、PAPER、LIVE 的一致性、测试、验收和迁移。
 7. 机器学习作为 V3 稳定后的后续阶段，不参与本轮实盘决策。
 
@@ -811,9 +811,9 @@ tTradeSignalDiagnostics(
 - 尊重 `prefers-reduced-motion`，FSM 跃迁和分数更新不使用强制动画。
 - 数值正负不只依赖红绿；“READY/STALE”等文本始终可见。
 
-## 16. iOS SwiftUI 设计（后续计划；当前 Windows scope-waiver）
+## 16. iOS SwiftUI 设计（核心契约已交付；完整体验后续）
 
-本节保留目标 iOS 设计与未来验收契约。本轮不实现、不生成、不编译、不运行 iOS 相关代码；§19 当前 Windows 完成定义不引用本节门禁。
+2026-08-30 的 Phase 4A 已完成旧 signal-history 到当前 `signalSnapshot` 的最小原子迁移、Apollo 类型同步、候选身份 fail-closed 映射和 CAS 确认绑定。以下页面详情、实时订阅和无障碍清单仍是 Phase 4B 的 macOS 验收契约；Windows 源码级验证不替代 Xcode/iOS 验收。
 
 ### 16.1 页面结构
 
@@ -825,28 +825,28 @@ tTradeSignalDiagnostics(
 
 - **监控**：运行状态、数据健康、待确认信号和活动批次摘要。
 - **批次**：现有 TTradeBatch/退出状态。
-- **信号**：持仓信号卡片与单标的详情。
+- **信号**：持仓服务端信号快照卡片；单标的高级详情留待 Phase 4B。
 - **门禁**：失败门禁、blocker 与数据健康诊断。
 - **控制**：现有启停/授权，首期只读 policy/version 摘要。
 
 ### 16.2 信号卡与详情
 
-持仓卡至少显示：dominant phase、机会分/阈值、数据健康、第一 blocker、source time 和候选 TTL。进入详情后依次展示：结论、Swift Charts 价格/VWAP 与分数、两条垂直 FSM、硬门禁、分数贡献、状态跃迁、TradeIntent/批次/退出审计。
+Phase 4A 的持仓卡已显示 dominant phase、机会分/阈值、数据健康、第一 blocker、source time 和候选 TTL。Phase 4B 进入详情后再依次展示：结论、Swift Charts 价格/VWAP 与分数、两条垂直 FSM、硬门禁、分数贡献、状态跃迁、TradeIntent/批次/退出审计。
 
 Swift Charts 缺失值必须断开，不能以零点连线；图表提供 VoiceOver summary。动态字体放大后卡片纵向展开，不截断 blocker 或关键风险文案。红绿语义同时配图标与文字。
 
 ### 16.3 数据与实时
 
-- `TTradeControlRepository`/对应新 repository 查询 `signalSnapshot`、历史和门禁。
-- 增加 `tTradeUpdates` subscription；通知后合并 refetch，不把推送 payload 当真源。
-- 进入前台、网络恢复、订阅重连时先全量 refetch。
-- 刷新失败时保留最后一个可信快照并明确显示“数据可能已过期”，禁止基于旧 snapshot 确认。
-- 未知枚举、feature schema 不兼容或缺失关键版本时进入只读失败态。
-- 不在本地持久化完整特征快照、候选 fingerprint 历史或任何券商敏感信息。
+- Phase 4A：`TTradeAssistantRepository` 从账户 monitor 内查询 `TTradeSession.signalSnapshot` 和 `CURRENT` 批次，不再查询已删除的 signal-history。
+- Phase 4A：刷新失败时保留最后一个可信快照并明确显示旧数据，禁止基于旧 snapshot 发起确认。
+- Phase 4A：未知枚举、state/feature schema 不兼容、候选过期或意图上下文错配时进入只读失败态；确认请求绑定 signal/candidate/config/policy 版本与 candidate fingerprint。
+- Phase 4A：不在本地持久化完整特征快照、候选 fingerprint 历史或任何券商敏感信息。
+- Phase 4B：增加 evaluations/history/diagnostics 查询与 `tTradeUpdates` subscription；通知只触发合并 refetch，不把 payload 当真源。
+- Phase 4B：进入前台、网络恢复、订阅重连时先全量 refetch，并完成重复/漏通知测试。
 
 ### 16.4 配置边界
 
-首期 iOS 不提供完整策略参数编辑，只显示当前 policy/config/feature version、核心阈值和最近生效时间。若后续支持编辑，必须复用服务端 preview、版本锁、重热说明和本地生物认证，不能在 App 内实现另一套校验。
+iOS 不提供完整策略参数编辑。Phase 4A 只读取 policy/config/feature version 作为兼容与审批身份；Phase 4B 再补只读策略摘要、核心阈值和最近生效时间。若后续支持编辑，必须复用服务端 preview、版本锁、重热说明和本地生物认证，不能在 App 内实现另一套校验。
 
 ## 17. 可观测性与效果指标
 
@@ -942,16 +942,16 @@ Engine 内存累计器必须同时限制活动 stream 数和 metric series 数�
 - 1920/1366 px 桌面响应式；键盘、读屏、对比度、reduced motion。移动 Web 断点与 phone-browser compatibility 不属于当前 Windows 验收。
 - 图表与等价表格使用同一服务端数据。
 
-### 18.6 iOS 测试（后续门禁；不属于当前 Windows 完成定义）
+### 18.6 iOS 测试（核心源码门禁已执行；完整设备门禁后续）
 
-本节测试清单继续作为后续 macOS/iOS 交付门禁；本轮只验证 iOS V3 scope-waiver 与残留引用清理，不将 Swift/Xcode 验收结果计入 Windows 交付。
+Phase 4A 在 Windows 完成 GraphQL operation/SDL 校验、生成 Swift 与 ApolloAPI 2.1.2 类型编译、全量 Swift 语法解析和针对性 XCTest 源码补齐；Windows 无法运行 Xcode/xcodebuild，因此以下 Phase 4B 项目仍是 macOS/iOS 完成门禁。
 
-- GraphQL enum/model 映射和未知枚举失败态。
-- 信号卡、详情、双 FSM、门禁和贡献的 snapshot tests/单元测试。
-- Apollo subscription 通知合并、前后台切换、网络恢复与 refetch。
-- 旧 snapshot 明确过期并禁用确认。
-- Dynamic Type、VoiceOver、深浅外观和小屏布局。
-- iOS 首期不出现可写的完整 policy 表单。
+- [x] GraphQL enum/model 映射、未知枚举/版本失败态、旧 snapshot 过期禁用确认与 CAS 期望传递。
+- [x] iOS 首期不出现可写的完整 policy 表单。
+- [ ] 在 macOS 运行全部 XCTest/xcodebuild，并验证真机或模拟器编译原子性。
+- [ ] 信号详情、双 FSM、门禁和贡献的 snapshot tests/单元测试。
+- [ ] Apollo subscription 通知合并、前后台切换、网络恢复与 refetch。
+- [ ] Dynamic Type、VoiceOver、深浅外观和小屏布局。
 
 ## 19. 验收标准
 
@@ -962,7 +962,7 @@ Engine 内存累计器必须同时限制活动 stream 数和 metric series 数�
 - [x] V3 opportunity RuntimeState 与候选补丁不含现金、持仓、可卖量、冻结量或最终订单量；外层回报派生投影不参与合法数量判断。
 - [x] 三层信号状态与 `TTradeStatus`、订单、ExitPlan 完全独立。
 - [x] Universe/运行资格只作为外部 intent 发射门禁。
-- [x] 当前 Windows Web 桌面客户端对分数、门禁、资格零重算；iOS 同等验收属于后续 scope，不阻塞本轮。
+- [x] Web 桌面客户端与 iOS Phase 4A 信号卡对分数、门禁、资格零重算；iOS 高级诊断同等验收属于后续 Phase 4B。
 
 ### 19.2 正确性验收
 
@@ -979,7 +979,7 @@ Engine 内存累计器必须同时限制活动 stream 数和 metric series 数�
 - [x] PostgreSQL 不逐 Tick 写评估；COALESCED_DIAGNOSTIC 达到合并窗口约束，MATERIAL 全量保留。
 - [x] 最新列表使用读投影，不对每行执行独立历史查询；不存在 N+1。
 - [x] RuntimeState 和 evaluation 写入失败时不发布幽灵候选。
-- [x] Redis/订阅中断、静默丢通知、重复通知或订阅重连后，Web 桌面端将通知仅视作失效提示，并通过重连、前台/网络/可见性恢复及 30 秒审计的 `network-only` refetch 回拉数据库真源；重复版本和错误会合并，避免 refetch 风暴。iOS 对应验证留在后续 §18.6。
+- [x] Redis/订阅中断、静默丢通知、重复通知或订阅重连后，Web 桌面端将通知仅视作失效提示，并通过重连、前台/网络/可见性恢复及 30 秒审计的 `network-only` refetch 回拉数据库真源；重复版本和错误会合并，避免 refetch 风暴。iOS Phase 4A 已在普通刷新失败时阻断旧快照确认，subscription/前后台合并 refetch 留在 Phase 4B。
 - [ ] **BLOCKED（未达 SLO）**：固定 9,600 输入尚未完成；旧路径的早期取消与后续隔离 BACKTEST 的 82.85% 日历进度取消都不能替代完整结果。最新 sealed persistent 480 Tick（8 标的、run `638f3579-b8de-41eb-b5f7-81d5d00e4043`）保留逐 Tick CAS/审计，持仓写降为 1 次完整 replace/8 行，但 Engine p95/p99 仍为 5509.579435/9853.155481 ms，checkpoint/snapshot p95 为 4016.9334/4289.245725 ms，长尾在外部数据库持久化边界；因此不冻结 SLO、不判 PASS，且未启动新的 9,600 Tick。
 
 ### 19.4 前端验收
@@ -987,7 +987,7 @@ Engine 内存累计器必须同时限制活动 stream 数和 metric series 数�
 - [x] Windows Web 桌面端的总览、信号与诊断页可在一个工作区回答“现在有没有信号、还差多少、被什么阻止、数据是否可信”；已在 1920/1366 验证。当前账户没有实际候选明细，候选详情状态由既有 fixture/component tests 补足，未声称出现过真实候选。
 - [x] 信号、待确认意图、订单事件、成交与批次使用独立页面/文案；订单事件明确 `command_ack ≠ broker fill`。候选详情的区分由既有 fixture/component tests 覆盖，非当前账户实际候选数据。
 - [x] Web 1920/1366 px 桌面范围无核心信息横向溢出，键盘焦点、读屏语义与 reduced motion 可完成查看和配置预览；移动 Web 不额外扩展。
-- [ ] iOS Dynamic Type/VoiceOver 可读，网络失效时明确旧数据且不能误确认（后续 iOS 门禁，本轮 Windows 不计入）。
+- [ ] iOS 已实现网络失效时明确旧数据且不能误确认；Dynamic Type/VoiceOver 仍需 macOS/设备验收。
 - [x] 参数冲突不覆盖草稿，重热影响在保存前清楚呈现。
 
 ### 19.5 自动执行授权
@@ -1036,11 +1036,12 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 - Web 增加信号/诊断视图，删除客户端 `conditionProgress` 和旧字段推断。
 - 运行 codegen、check、lint、test、build 与桌面范围无障碍/响应式验收；移动 Web 不额外扩展。
 
-### Phase 4：iOS（后续计划；当前 Windows 不执行）
+### Phase 4：iOS（4A 核心迁移完成；4B 完整体验后续）
 
-- 在 macOS 上更新 Apollo operations/generated types、repository、models、store 和 SwiftUI 视图；本轮不新增或修复 iOS V3 源码。
-- 接入通知/refetch、未知枚举和旧数据保护。
-- 完成单元、UI、Dynamic Type 与 VoiceOver 验收。
+- [x] Phase 4A：更新 Apollo operations/generated types、repository、models 和 SwiftUI 信号卡，删除旧 signal-history 客户端依赖。
+- [x] Phase 4A：接入未知枚举、schema 版本、旧数据、候选 TTL、意图上下文与 CAS 确认的 fail-closed 保护。
+- [ ] Phase 4B：接入 evaluations/history/diagnostics、通知合并 refetch、完整信号详情与只读 policy 摘要。
+- [ ] Phase 4B：在 macOS 完成全部单元/UI、Dynamic Type、VoiceOver 与小屏验收。
 
 ### Phase 5：回测研究与 PAPER 观察
 
@@ -1054,7 +1055,7 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 - 停止旧入场机会生成，V3 成为唯一权威。
 - 旧 RuntimeState 不做字段兼容：schema bump 后进入 `WARMING`。
 - 所有旧版本未确认信号/入场意图失效；已成交 TTradeBatch、BucketLedger 和 ExitPlan 原样保留至安全退出。
-- 当前 Windows 交付完成 Web/API 同批切换并删除旧 `latestEvaluation/currentSignal/conditionProgress` 查询与兜底；iOS 同批切换留待 Phase 4，不作为本轮门禁。
+- Web/API 已删除旧 `latestEvaluation/currentSignal/conditionProgress` 与 signal-history 查询；iOS Phase 4A 也已切到 `TTradeSession.signalSnapshot`，高级诊断与实时体验留待 Phase 4B。
 - 单账户小范围灰度，满足监控窗口后再扩大到全部合格持仓。
 
 > CANARY/LIVE 的激活仅由第 19.5 节的当前账户安全、功能配置、有限暴露和显式确认保护。历史回放与 PAPER 不参与判定。
@@ -1101,15 +1102,14 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 - `apps/web/src/features/portfolio/pages/t-trade-global/monitoring.ts`：删除客户端业务计算，只保留展示映射。
 - 同目录新增/拆分 diagnostics、policy editor、FSM、gate、score components，并配套现有测试目录。
 
-### iOS（后续计划；本轮 Windows 不纳入文件边界）
+### iOS（Phase 4A 已交付 / Phase 4B 后续）
 
-- `apps/ios/QuantX/GraphQL/Operations/TTradeControls.graphql`：snapshot/history/diagnostics/subscription operations。
-- `apps/ios/QuantX/Core/GraphQL/TTradeControlRepository.swift`：通知/refetch 和读模型。
-- `apps/ios/QuantX/Features/Assistants/TTradeControlModels.swift`、`TTradeControlStore.swift`：未知枚举、旧数据与版本状态。
-- `apps/ios/QuantX/Features/Assistants/TTradeAssistantView.swift`：监控/批次/信号/门禁/控制及详情。
-- `apps/ios/QuantXTests/TTradeControlRepositoryTests.swift`、`TTradeControlStoreTests.swift` 与 UI tests：契约、实时、无障碍。
+- Phase 4A：`Assistants.graphql` 查询 `signalSnapshot` 与当前批次，`TradeApprovals.graphql` 提交候选 CAS expectation；对应 generated types、repository、models、`AppModel`、`TTradeAssistantView` 和单元测试同步切换。
+- Phase 4A：README 与 iOS traceability 记录服务端快照真源、只读失败态和交易审批边界。
+- Phase 4B：新增 evaluations/history/diagnostics/subscription operations 与通知/refetch store。
+- Phase 4B：补齐信号详情、图表/FSM/门禁/贡献、只读 policy 摘要及 UI/无障碍测试。
 
-### 本轮实施与验收状态（2026-08-23）
+### 本轮实施与验收状态（截至 2026-08-30）
 
 | 范围 | 当前实施状态 | 验证证据 / 剩余门禁 |
 |---|---|---|
@@ -1117,7 +1117,7 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 | Infrastructure / Engine | evaluation/profile/projection、持久化、CAS、权威行情 lineage、审批重验、账户级配置互斥、崩溃恢复、幂等关联与结果未知（result unknown）收敛已落地。D-1 画像已改为“Influx 主 `time` keyset + 严格 source identity/storage-time 映射校验”的有界流式、每分钟压缩、`fail-closed`。 | D-1 画像专项已通过（主代理独立 4 文件 `47 passed`）；画像缓存、诊断窗口、终态意图缓存、结果修复游标与结果归档查询继续保持全局或分页硬界限。 |
 | GraphQL / API | V3 snapshot/history/diagnostics/preview/save、candidate trace、结果口径和低基数 telemetry 已原子替换；发布 SDL 不再含旧 signal-history；控制链路的 `beginTTradeControlledWindow(accountId, policyVersion, snapshotId, idempotencyKey)` 与 `activateTTradeLive(accountId, policyVersion, snapshotId, idempotencyKey, targetStage, confirmation)` 均以 `policyVersion + snapshotId` 绑定确认上下文。 | CANARY/LIVE 只检查当前账户安全、功能配置、有限暴露、绑定快照与显式确认；历史回放、PAPER、候选数量和专用发布证据不参与授权。 |
 | Web（当前仅桌面范围） | 六模式信息架构、信号 inspector、诊断、policy editor、冲突草稿、candidate trace、客户端 scope/版本信任边界与订阅 refetch 已落地。订阅通知只作失效提示；静默丢通知、重复通知、重连、前台/网络/可见性恢复以及 30 秒审计均触发受合并保护的 authoritative `network-only` 回拉。 | 已在 1920/1366 桌面检查总览/信号/诊断/参数纯预览/回放报告：无横向溢出、console 0 errors，键盘焦点、读屏语义与 reduced motion 通过；参数服务端纯校验通过，未执行任何写/交易动作。移动 Web 不额外扩展。 |
-| iOS（当前 Windows scope-waiver） | 本轮不开发、不生成 Apollo types、不运行 Xcode/SwiftUI 验证；已按 hunk 清理 V3 手写源码、GraphQL operations、V3 测试与缺失 generated symbol 引用；并行 watchlist 与用户原有 iOS 改动保留。 | Windows 无 Xcode；iOS codegen/xcodebuild、Dynamic Type、VoiceOver 与可编译原子性全部留待 Phase 4，且不属于当前 Windows 完成门禁。 |
+| iOS（Phase 4A 核心迁移） | 已删除旧 signal-history 查询，改读 `TTradeSession.signalSnapshot` 与当前批次；未知枚举/版本/旧快照只读，候选确认绑定完整 CAS expectation。 | Windows 已完成 operation/SDL 校验、ApolloAPI 类型编译、Swift 语法解析和源码契约测试；Xcode/xcodebuild、完整 XCTest、subscription、详情、Dynamic Type 与 VoiceOver 留待 Phase 4B/macOS。 |
 | 控制 / 迁移 / 文档质量 | TTrade 控制链路与文档构建已完成专项验证；开发库已按授权完成 `0028 → 0031`。 | 控制专项 `282 passed`；迁移专项 `6 passed`；迁移 `0029/0030/0031` 已增加对开发库预创建完整空表的严格 schema 验证与采用，局部或不匹配 `fail-closed`；迁移前自动备份记录于 `F:\Workspace\quantx\.runtime\backups\20260823T104409Z`，迁移后 schema head 为 `20260823_0031`。随后按 `full/live` 重启验收：9 个受管组件均 RUNNING，`liveTrading=ENABLED`，QMT Agent `ready`、协议 `1.1`，快照新鲜（<90s）。混合工作树 Alembic 唯一 head 为 `20260823_0031`；V3 可提交迁移链独立止于 `20260823_0030`，明确不纳入并行 watchlist `0031`；docs build passed；Ruff 对 146 个变更 Python 文件通过；`diff-check` 无 whitespace errors。 |
 | 回放 / 自动执行 | V3 漏斗、blocker/FSM/版本分组、成熟 cohort 结果口径、同源同 Tick READY 基线与因果诊断报告已落地。 | 回放统一走普通 BACKTEST，单次最多 20 个交易日只是资源上限；回放结果与 PAPER 观察不阻塞 CANARY/LIVE。压力与性能数据继续作为工程优化依据，不作为自动执行授权指标。 |
 
@@ -1126,7 +1126,7 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 - 发布快照已完成：官方 `npm run docs:contracts` 已刷新发布 SDL，`tests/api/unit/test_client_contracts.py` 9 passed。
 - 运行端点已刷新并确认：Caddy `/health/live=200`，公开 `/graphql` 已确认新 V3 queries/types 及 `begin`/`activate` 完整签名（两者均要求 `policyVersion + snapshotId`）；不再保留“运行中仍是旧签名”的表述。
 - 公开端点 codegen 后的 `npm run check`、`npm run lint`、`npm run test:run`（100 files/512 tests）、`npm run build` 全通过；Web mutation 变量与当前运行 schema 的 `policyVersion + snapshotId` 已同步。
-- Web 桌面端已验证：Redis/GraphQL subscription 仅作失效提示；静默丢通知下也会以 30 秒 `network-only` 审计回拉服务端真源，重连与重复通知受到合并保护。1920/1366 无横向溢出，键盘焦点、读屏语义与 reduced motion 已通过；参数服务端纯校验通过，未执行任何写/交易动作。移动 Web 不额外扩展；iOS Apollo codegen/xcodebuild（Windows 无 Xcode，必须 macOS）及 Dynamic Type/VoiceOver 验证属于后续 Phase 4，未纳入当前门禁。
+- Web 桌面端已验证：Redis/GraphQL subscription 仅作失效提示；静默丢通知下也会以 30 秒 `network-only` 审计回拉服务端真源，重连与重复通知受到合并保护。1920/1366 无横向溢出，键盘焦点、读屏语义与 reduced motion 已通过；参数服务端纯校验通过，未执行任何写/交易动作。移动 Web 不额外扩展。iOS Phase 4A 已完成源码与契约级迁移；Xcode/xcodebuild、完整 XCTest、Dynamic Type/VoiceOver 与 Phase 4B 高级体验仍必须在 macOS 验证。
 - 普通回测、PAPER 观察和压力测试可按研究需要继续运行；不得把它们包装成 CANARY/LIVE 或发布所需的“正式证据”。
 - 压力数据仍可用于定位 Engine 与数据库长尾，但不改变当前账户安全授权结果。
 - CANARY/LIVE 是否可激活，以调用时服务端返回的当前账户安全、功能配置、有限暴露和确认状态为准。
@@ -1187,8 +1187,8 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 
 ### 24.1 当前 Windows 交付
 
-本轮 Windows 交付在以下条件满足时才算完成：领域契约、RuntimeState、评估/画像/投影、GraphQL/API、Web 桌面范围、回放与自动化测试按同一版本原子落地；旧客户端计算和旧信号主路径已删除；任意一个候选都能从 source identity 追溯到因果特征、三层状态、双 FSM、分数贡献、硬门禁、episode、policy/profile/feature 版本、TradeIntent 和后续 QMT 执行事实。移动 Web 不额外扩展，iOS V3 不在本轮完成定义中；§16、§18.6 与 Phase 4 是后续计划，不是当前 Windows 门禁。`apps/ios` 必须不再引用 V3 专属缺失 Apollo symbols，同时保留并行 watchlist 与用户原有改动。
+Windows 服务端/Web 交付在以下条件满足时才算完成：领域契约、RuntimeState、评估/画像/投影、GraphQL/API、Web 桌面范围、回放与自动化测试按同一版本原子落地；旧客户端计算和旧信号主路径已删除；任意一个候选都能从 source identity 追溯到因果特征、三层状态、双 FSM、分数贡献、硬门禁、episode、policy/profile/feature 版本、TradeIntent 和后续 QMT 执行事实。移动 Web 不额外扩展。iOS Phase 4A 只纳入可在 Windows 验证的核心 operation、generated types、模型映射与旧快照确认阻断，不得把它扩大表述为完整 iOS 体验验收。
 
-### 24.2 后续 iOS 交付
+### 24.2 iOS 剩余交付
 
-iOS 完整交付仍需在 macOS 完成 §16 的 SwiftUI 设计、Apollo codegen/生成物、编译原子性、§18.6 的 Swift/UI/Dynamic Type/VoiceOver 测试，并与服务端/Web 契约原子切换；这些条件在后续 Phase 4 完成前不计入 Windows 交付，也不得反向扩大本轮范围。
+iOS 完整交付仍需在 macOS 以官方 Apollo codegen 复核生成物并运行 xcodebuild/XCTest，完成 §16 的高级详情、subscription 合并 refetch、只读 policy 摘要，以及 §18.6 的 UI/Dynamic Type/VoiceOver 测试。这些 Phase 4B 条件不计入 Windows 源码级门禁，也不得反向扩大 Phase 4A 的完成声明。

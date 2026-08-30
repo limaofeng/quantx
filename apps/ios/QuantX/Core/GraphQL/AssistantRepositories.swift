@@ -49,6 +49,7 @@ final class TTradeAssistantRepository: TTradeAssistantLoading {
       )
 
       let holdings = try monitor.holdings.map(mapHolding)
+      let signals = holdings.compactMap { $0.session?.signalSnapshot }
       let batches = try data.tTradeBatchesPage.items.map { item in
         guard item.accountId == accountID else {
           throw ReadOnlyRepositoryError.accountScopeMismatch
@@ -87,34 +88,6 @@ final class TTradeAssistantRepository: TTradeAssistantLoading {
           exitReason: item.exitReason,
           exceptionReason: item.exceptionReason,
           createdAt: item.createdAt.flatMap(PortfolioDateParser.parse),
-          updatedAt: item.updatedAt.flatMap(PortfolioDateParser.parse)
-        )
-      }
-
-      let signals = try data.tTradeSignalHistoryPage.items.map { item in
-        try ReadOnlyModelValidator.requireNonempty(item.intentId, field: "tTrade.signal.id")
-        try ReadOnlyModelValidator.requireNonempty(item.runId, field: "tTrade.signal.runId")
-        try ReadOnlyModelValidator.requireNonempty(item.stockCode, field: "tTrade.signal.stockCode")
-        try ReadOnlyModelValidator.requireNonnegative(
-          [item.requestedVolume],
-          field: "tTrade.signal.volume"
-        )
-        try ReadOnlyModelValidator.requireFinite(
-          [item.signalPrice, item.pullbackPct, item.reboundPct],
-          field: "tTrade.signal.price"
-        )
-        return TTradeSignalItem(
-          id: item.intentId,
-          runID: item.runId,
-          stockCode: item.stockCode,
-          status: item.status,
-          statusReason: item.statusReason,
-          signalPrice: item.signalPrice,
-          pullbackPercent: item.pullbackPct,
-          reboundPercent: item.reboundPct,
-          requestedVolume: item.requestedVolume,
-          createdAt: item.createdAt.flatMap(PortfolioDateParser.parse),
-          expiresAt: item.expiresAt.flatMap(PortfolioDateParser.parse),
           updatedAt: item.updatedAt.flatMap(PortfolioDateParser.parse)
         )
       }
@@ -177,9 +150,8 @@ final class TTradeAssistantRepository: TTradeAssistantLoading {
         },
         batchesHaveMore: data.tTradeBatchesPage.pageInfo.hasNextPage,
         signals: signals.sorted {
-          ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
+          $0.evaluatedAt > $1.evaluatedAt
         },
-        signalsHaveMore: data.tTradeSignalHistoryPage.pageInfo.hasNextPage,
         fetchedAt: Date()
       )
     } catch is CancellationError {
@@ -227,6 +199,140 @@ final class TTradeAssistantRepository: TTradeAssistantLoading {
         ] + [session.trailingFloorPct].compactMap { $0 },
         field: "tTrade.session.price"
       )
+      let signalSnapshot = try session.signalSnapshot.map { snapshot in
+        try ReadOnlyModelValidator.requireNonempty(
+          snapshot.instrumentCode,
+          field: "tTrade.signal.instrumentCode"
+        )
+        guard snapshot.instrumentCode == value.stockCode else {
+          throw ReadOnlyMappingError.invalidField("tTrade.signal.instrumentCode")
+        }
+        try ReadOnlyModelValidator.requireFinite(
+          [
+            snapshot.opportunityScore,
+            snapshot.features.price,
+            snapshot.features.pullbackPct,
+            snapshot.features.reboundPct,
+          ].compactMap { $0 } + [snapshot.candidateThreshold],
+          field: "tTrade.signal.values"
+        )
+        try ReadOnlyModelValidator.requireNonnegative(
+          [snapshot.signalVersion, snapshot.candidateStateVersion, snapshot.configVersion],
+          field: "tTrade.signal.versions"
+        )
+        let evaluatedAt = try ReadOnlyModelValidator.requireDate(
+          snapshot.evaluatedAt,
+          field: "tTrade.signal.evaluatedAt"
+        )
+        let sourceAt = try ReadOnlyModelValidator.requireDate(
+          snapshot.sourceAt,
+          field: "tTrade.signal.sourceAt"
+        )
+        let candidateExpiresAt = snapshot.candidateExpiresAt.flatMap(PortfolioDateParser.parse)
+        let candidateStatus = TTradeCandidateStatus(
+          serverValue: snapshot.candidateStatus.value?.rawValue
+        )
+        let dataHealth = snapshot.dataHealth.value?.rawValue ?? "UNKNOWN"
+        let dominantPhase = snapshot.dominantPhase.value?.rawValue ?? "UNKNOWN"
+        let candidateID = normalizedIdentity(snapshot.candidateId, maximumLength: 160)
+        let candidateFingerprint = normalizedIdentity(
+          snapshot.candidateFingerprint,
+          maximumLength: 256
+        )
+        let pendingEntryIntentID = normalizedIdentity(
+          snapshot.pendingEntryIntentId,
+          maximumLength: 160
+        )
+        let sessionPendingEntryIntentID = normalizedIdentity(
+          session.pendingEntryIntentId,
+          maximumLength: 160
+        )
+        let policyVersion = normalizedIdentity(snapshot.policyVersion, maximumLength: 160)
+        let stateSchemaVersion = normalizedIdentity(
+          snapshot.stateSchemaVersion,
+          maximumLength: 40
+        )
+        let featureSchemaVersion = normalizedIdentity(
+          snapshot.featureSchemaVersion,
+          maximumLength: 40
+        )
+        var compatibilityIssues: [String] = []
+        if case .unknown = candidateStatus { compatibilityIssues.append("候选状态未知") }
+        if dataHealth == "UNKNOWN" { compatibilityIssues.append("数据健康状态未知") }
+        if dominantPhase == "UNKNOWN" { compatibilityIssues.append("主导阶段未知") }
+        if stateSchemaVersion != "3" || featureSchemaVersion != "1" {
+          compatibilityIssues.append("信号协议版本不兼容")
+        }
+        if policyVersion == nil { compatibilityIssues.append("策略版本缺失") }
+        if sessionPendingEntryIntentID != pendingEntryIntentID {
+          compatibilityIssues.append("待确认意图上下文不一致")
+        }
+        if candidateStatus == .awaitingApproval {
+          if candidateID == nil || candidateFingerprint == nil || pendingEntryIntentID == nil {
+            compatibilityIssues.append("候选审批身份不完整")
+          }
+          if snapshot.candidateStateVersion <= 0 {
+            compatibilityIssues.append("候选状态版本无效")
+          }
+          if candidateExpiresAt == nil {
+            compatibilityIssues.append("候选到期时间缺失或无效")
+          }
+        }
+        let compatibilityMessage = compatibilityIssues.isEmpty
+          ? nil
+          : "\(compatibilityIssues.joined(separator: "、"))，当前信号保持只读"
+        let approvalExpectation: TTradeCandidateApprovalExpectation?
+        if
+          compatibilityMessage == nil,
+          candidateStatus == .awaitingApproval,
+          let candidateID,
+          let candidateFingerprint,
+          pendingEntryIntentID != nil,
+          let policyVersion
+        {
+          approvalExpectation = TTradeCandidateApprovalExpectation(
+            signalVersion: snapshot.signalVersion,
+            candidateID: candidateID,
+            candidateFingerprint: candidateFingerprint,
+            candidateStateVersion: snapshot.candidateStateVersion,
+            configVersion: snapshot.configVersion,
+            policyVersion: policyVersion
+          )
+        } else {
+          approvalExpectation = nil
+        }
+        let firstBlocker = try snapshot.topBlockers.first.map { blocker in
+          try ReadOnlyModelValidator.requireNonempty(
+            blocker.code,
+            field: "tTrade.signal.blocker.code"
+          )
+          return TTradeSignalBlocker(
+            code: String(blocker.code.prefix(120)),
+            label: String(blocker.label.prefix(160)),
+            detail: String(blocker.detail.prefix(500))
+          )
+        }
+        return TTradeSignalItem(
+          id: session.runId,
+          runID: session.runId,
+          stockCode: value.stockCode,
+          candidateStatus: candidateStatus,
+          signalPrice: snapshot.features.price,
+          pullbackPercent: snapshot.features.pullbackPct,
+          reboundPercent: snapshot.features.reboundPct,
+          opportunityScore: snapshot.opportunityScore,
+          candidateThreshold: snapshot.candidateThreshold,
+          dataHealth: dataHealth,
+          dominantPhase: dominantPhase,
+          firstBlocker: firstBlocker,
+          sourceAt: sourceAt,
+          evaluatedAt: evaluatedAt,
+          candidateExpiresAt: candidateExpiresAt,
+          pendingEntryIntentID: pendingEntryIntentID,
+          approvalExpectation: approvalExpectation,
+          compatibilityMessage: compatibilityMessage
+        )
+      }
       return TTradeHoldingSession(
         runID: session.runId,
         runStatus: session.runStatus,
@@ -249,7 +355,8 @@ final class TTradeAssistantRepository: TTradeAssistantLoading {
         profitArmed: session.profitArmed,
         lastExitReason: session.lastExitReason,
         canCancel: session.canCancel,
-        errorMessage: session.errorMessage
+        errorMessage: session.errorMessage,
+        signalSnapshot: signalSnapshot
       )
     }
     return TTradeHolding(
@@ -263,6 +370,17 @@ final class TTradeAssistantRepository: TTradeAssistantLoading {
       reason: value.reason,
       session: session
     )
+  }
+
+  private func normalizedIdentity(_ value: String?, maximumLength: Int) -> String? {
+    guard let value else { return nil }
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard
+      !normalized.isEmpty,
+      normalized == value,
+      normalized.count <= maximumLength
+    else { return nil }
+    return normalized
   }
 }
 
