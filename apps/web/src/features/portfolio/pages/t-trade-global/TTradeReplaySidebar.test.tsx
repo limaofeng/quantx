@@ -94,6 +94,68 @@ describe('TTradeReplaySidebar', () => {
     expect(onDelete).toHaveBeenCalledWith(historyItem);
   });
 
+  it('opens replay records from the shared context menu', () => {
+    const onDelete = vi.fn();
+    const onSelectRun = vi.fn();
+    const historyItem = {
+      progressPct: 100,
+      runId: 'run-20260803',
+      startTime: '2026-08-03T09:30:00+08:00',
+      status: 'COMPLETED',
+      tNetProfit: 110.38,
+    };
+
+    render(
+      <TTradeReplaySidebar
+        context={createContext({
+          history: [historyItem],
+          onDelete,
+          onSelectRun,
+        })}
+      />
+    );
+
+    const replayRecord = screen.getByRole('button', {
+      name: /^2026-08-03已完成/,
+    });
+    fireEvent.contextMenu(replayRecord, { clientX: 320, clientY: 160 });
+
+    expect(
+      screen.getByRole('menu', { name: '回测记录菜单' })
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('menuitem', { name: '查看详情' }));
+    expect(onSelectRun).toHaveBeenCalledWith(historyItem.runId);
+
+    fireEvent.contextMenu(replayRecord, { clientX: 320, clientY: 160 });
+    fireEvent.click(screen.getByRole('menuitem', { name: '删除记录' }));
+    expect(onDelete).toHaveBeenCalledWith(historyItem);
+  });
+
+  it('disables deleting an active replay from the context menu', () => {
+    const onDelete = vi.fn();
+    const historyItem = {
+      progressPct: 36,
+      runId: 'run-active',
+      startTime: '2026-08-30T09:30:00+08:00',
+      status: 'RUNNING',
+      tNetProfit: null,
+    };
+
+    render(
+      <TTradeReplaySidebar
+        context={createContext({ history: [historyItem], onDelete })}
+      />
+    );
+
+    fireEvent.contextMenu(
+      screen.getByRole('button', { name: /^2026-08-30进行中/ }),
+      { clientX: 320, clientY: 160 }
+    );
+
+    expect(screen.getByRole('menuitem', { name: '删除记录' })).toBeDisabled();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
   it('renders new replay account maintenance in the main account panel', () => {
     const onSourceChange = vi.fn();
     const context = createContext({

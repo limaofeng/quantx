@@ -1,13 +1,16 @@
 import {
   CalendarDays,
+  Eye,
   Loader2,
   Plus,
   RefreshCw,
   Trash2,
   X,
 } from 'lucide-react';
+import { useRef } from 'react';
 import { useQuery } from 'urql';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -455,6 +458,11 @@ function ReplayAccountEditor({
 }
 
 function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
+  const { closeMenu, menu, openAtPointer } =
+    useStudioMenu<ReplaySidebarHistoryItem>();
+  const menuItem = menu?.payload;
+  const historyScrollRef = useRef<HTMLDivElement>(null);
+
   return (
     <section
       aria-busy={context.historyLoading}
@@ -497,14 +505,19 @@ function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+      <div
+        ref={historyScrollRef}
+        className="min-h-0 flex-1 overflow-y-auto custom-scrollbar"
+      >
         {context.history.map(item => (
           <div
             key={item.runId}
             className="group relative border-b border-white/[0.05]"
+            onContextMenu={event => openAtPointer(event, item)}
           >
             <button
               type="button"
+              aria-haspopup="menu"
               onClick={() => context.onSelectRun(item.runId)}
               className={cn(
                 'block w-full cursor-pointer px-ui-section py-2.5 pr-10 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
@@ -572,6 +585,44 @@ function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
           </div>
         )}
       </div>
+
+      <StudioMenu
+        ariaLabel="回测记录菜单"
+        closeOnScrollRef={historyScrollRef}
+        menu={menu}
+        onClose={closeMenu}
+        width={176}
+        items={[
+          {
+            id: 'open',
+            icon: <Eye size={14} />,
+            label: '查看详情',
+            onSelect: () => {
+              if (menuItem) context.onSelectRun(menuItem.runId);
+            },
+          },
+          { id: 'replay-record-actions', type: 'separator' },
+          {
+            id: 'delete',
+            danger: true,
+            disabled:
+              !menuItem ||
+              !canDeleteReplay(menuItem.status) ||
+              context.deletingHistory,
+            icon: context.deletingHistory ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <Trash2 size={14} />
+            ),
+            label: '删除记录',
+            onSelect: () => {
+              if (menuItem && canDeleteReplay(menuItem.status)) {
+                context.onDelete(menuItem);
+              }
+            },
+          },
+        ]}
+      />
     </section>
   );
 }
