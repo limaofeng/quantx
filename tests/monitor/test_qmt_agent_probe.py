@@ -319,7 +319,7 @@ async def test_scheduler_persists_exactly_one_composite_qmt_sample(
 
   class Storage:
     @staticmethod
-    async def record_results(results) -> None:
+    async def record_cycle(results, _account_safety) -> None:
       captured.extend(results)
 
   class DirectProbe:
