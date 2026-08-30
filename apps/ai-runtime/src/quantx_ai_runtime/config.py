@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
-from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.repositories.ai_runtime_settings_repository import (
   AiRuntimeEditableValues,
   AiRuntimeSettingsRepository,
@@ -18,6 +17,9 @@ from quantx_infrastructure.repositories.ai_runtime_settings_repository import (
 from quantx_infrastructure.services.ai_runtime_settings_event_bus import (
   AI_RUNTIME_SETTINGS_WAKE_CHANNEL,
 )
+from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+from .database import database_session, log_database_pressure
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +109,7 @@ def load_config() -> AiRuntimeConfig:
 
 
 async def load_effective_config() -> AiRuntimeConfig:
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     effective = await AiRuntimeSettingsRepository(db).get_effective()
   return _from_effective(effective)
 
@@ -155,6 +157,8 @@ async def config_refresh_loop(
     while not stopped.is_set():
       try:
         await controller.refresh()
+      except PoolTimeout as exc:
+        log_database_pressure("config-refresh", exc)
       except Exception as exc:
         logger.warning(
           "AI Runtime config refresh failed: %s",

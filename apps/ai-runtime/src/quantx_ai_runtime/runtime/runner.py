@@ -14,7 +14,6 @@ from quantx_application.assistant.contracts import (
   AssistantExecutionContext,
 )
 from quantx_domain.clock import utcnow
-from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.ai_assistant import AiAssistantRun
 from quantx_infrastructure.models.auth import AuthUser, AuthUserAccountAccess
 from quantx_infrastructure.repositories.ai_assistant_repository import (
@@ -25,6 +24,7 @@ from sqlalchemy import select
 
 from quantx_ai_runtime.agents import build_agent
 from quantx_ai_runtime.config import AiRuntimeConfig
+from quantx_ai_runtime.database import database_session
 from quantx_ai_runtime.guardrails import validate_user_text
 from quantx_ai_runtime.tools import RuntimeRunContext
 
@@ -136,7 +136,7 @@ def _tool_idempotency(run_id: str, tool_name: str, arguments: dict) -> str:
 
 
 async def _execution_context(run: AiAssistantRun) -> AssistantExecutionContext:
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     thread = await AiAssistantRepository(db).get_thread(run.thread_id)
     if thread is None:
       raise ValueError("AI_THREAD_NOT_FOUND")
@@ -180,7 +180,7 @@ async def _execution_context(run: AiAssistantRun) -> AssistantExecutionContext:
 
 
 async def _run_was_cancelled(run_id: str) -> bool:
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     current = await db.get(AiAssistantRun, run_id)
     return current is None or current.cancel_requested_at is not None
 
@@ -197,7 +197,7 @@ async def _persist_approval_interruptions(
     if tool_name != "create_backtest_rerun_task" or not call_id:
       raise PermissionError("AI_UNEXPECTED_APPROVAL_TOOL")
     idempotency_key = _tool_idempotency(run.id, tool_name, arguments)
-    async with AsyncSessionLocal() as db:
+    async with database_session() as db:
       repository = AiAssistantRepository(db)
       call = await repository.get_tool_call_by_idempotency(idempotency_key)
       if call is None:
@@ -243,7 +243,7 @@ async def _audit_hosted_web_searches(
     if not runtime_context.execution.external_search_enabled:
       raise PermissionError("AI_UNEXPECTED_EXTERNAL_SEARCH")
     arguments = {"action": _dump_value(raw.get("action") or {})}
-    async with AsyncSessionLocal() as db:
+    async with database_session() as db:
       repository = AiAssistantRepository(db)
       existing = next(
         (
@@ -278,7 +278,7 @@ async def _audit_hosted_web_searches(
       },
     )
     if limit_exceeded:
-      async with AsyncSessionLocal() as db:
+      async with database_session() as db:
         call = await AiAssistantRepository(db).finish_tool_call(
           await db.merge(call),
           status="FAILED",
@@ -296,7 +296,7 @@ async def _audit_hosted_web_searches(
         },
       )
       raise RuntimeError("AI_TOOL_CALL_LIMIT_EXCEEDED")
-    async with AsyncSessionLocal() as db:
+    async with database_session() as db:
       call = await AiAssistantRepository(db).finish_tool_call(
         await db.merge(call),
         status="SUCCEEDED",
@@ -333,7 +333,7 @@ async def _resume_state(run: AiAssistantRun, agent: Any) -> Any:
     context_override=_sdk_context(run),
   )
   interruptions = state_interruptions(state)
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     calls = await AiAssistantRepository(db).list_tool_calls(run.id)
   calls_by_sdk_id = {call.call_id: call for call in calls}
   calls_by_idempotency = {
@@ -366,7 +366,7 @@ async def execute_run(
   instance_id: str,
 ) -> None:
   event_writer = AssistantEventWriter()
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     repository = AiAssistantRepository(db)
     run = await repository.get_run(run_id)
     if run is None or run.status != "RUNNING":
@@ -451,7 +451,7 @@ async def execute_run(
   usage = stream.context_wrapper.usage
   if stream.interruptions:
     state_payload = await _persist_approval_interruptions(run, stream, event_writer)
-    async with AsyncSessionLocal() as db:
+    async with database_session() as db:
       run = await AiAssistantRepository(db).finish_run(
         run,
         status="WAITING_APPROVAL",
@@ -474,7 +474,7 @@ async def execute_run(
   if not final_text:
     final_text = "本次运行没有生成可展示的结果。"
   blocks = _content_blocks(final_text, list(stream.new_items or []))
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     repository = AiAssistantRepository(db)
     message, run = await repository.complete_run(
       run,
@@ -524,7 +524,7 @@ async def settle_run_failure(
     message = "当前权限或账户授权已变化，AI 运行已停止。"
   else:
     message = "AI 运行暂时失败，请稍后重试。"
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     repository = AiAssistantRepository(db)
     run = await repository.get_run(run_id)
     if run is None:

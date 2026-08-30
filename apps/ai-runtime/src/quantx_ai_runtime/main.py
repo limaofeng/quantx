@@ -10,13 +10,14 @@ import socket
 import uuid
 
 from quantx_infrastructure.database.relational_connection import close_database
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from .config import (
   AiRuntimeConfigController,
   config_refresh_loop,
   load_config,
-  runtime_status,
 )
+from .database import log_database_pressure
 from .observability import heartbeat_loop, write_heartbeat
 
 logger = logging.getLogger(__name__)
@@ -69,14 +70,7 @@ async def run_runtime() -> None:
         "AI Runtime dependency is unavailable; run uv sync or configure "
         "QUANTX_AI_RUNTIME_PYTHON_EXE"
       )
-  await write_heartbeat(
-    instance_id=instance_id,
-    config=config,
-    status=runtime_status(
-      config,
-      dependencies_available=dependencies_available,
-    ),
-  )
+  # The heartbeat loop writes immediately and retries transient pool pressure.
   tasks = [
     asyncio.create_task(
       config_refresh_loop(stopped, controller=controller),
@@ -131,6 +125,8 @@ async def run_runtime() -> None:
         config=controller.snapshot(),
         status="offline",
       )
+    except PoolTimeout as exc:
+      log_database_pressure("shutdown-heartbeat", exc)
     finally:
       await close_database()
 

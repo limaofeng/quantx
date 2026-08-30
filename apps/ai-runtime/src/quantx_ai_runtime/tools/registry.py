@@ -20,7 +20,6 @@ from quantx_application.assistant.contracts import (
 )
 from quantx_application.assistant.policies import authorize_tool, tool_requires_approval
 from quantx_infrastructure.core.utils import time_utils
-from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import Instrument
 from quantx_infrastructure.models.enums import StrategyRunMode
 from quantx_infrastructure.models.first_board_promotion import LimitUpChainSnapshot
@@ -40,6 +39,7 @@ from quantx_infrastructure.repositories.strategy_run_repository import (
 from quantx_infrastructure.services.engine_command_service import engine_command_service
 from sqlalchemy import select
 
+from quantx_ai_runtime.database import database_session, database_work_slot
 from quantx_ai_runtime.runtime.event_writer import AssistantEventWriter
 
 
@@ -99,7 +99,7 @@ async def _invoke_audited(
     if metadata.risk_level is AssistantToolRisk.NON_TRADING_WRITE
     else None
   )
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     repository = AiAssistantRepository(db)
     call = (
       await repository.get_tool_call_by_idempotency(idempotency_key)
@@ -137,7 +137,7 @@ async def _invoke_audited(
     async with asyncio.timeout(metadata.timeout_seconds):
       result = _jsonable(await callback())
     summary = str(result.get("summary") or f"{metadata.name} 已完成")[:512]
-    async with AsyncSessionLocal() as db:
+    async with database_session() as db:
       call = await AiAssistantRepository(db).finish_tool_call(
         await db.merge(call),
         status="SUCCEEDED",
@@ -157,7 +157,7 @@ async def _invoke_audited(
     )
     return json.dumps(result, ensure_ascii=False, default=str)
   except Exception as exc:
-    async with AsyncSessionLocal() as db:
+    async with database_session() as db:
       call = await AiAssistantRepository(db).finish_tool_call(
         await db.merge(call),
         status="FAILED",
@@ -194,7 +194,7 @@ def build_tools(
     normalized = code.strip().upper()
 
     async def query() -> dict[str, Any]:
-      async with AsyncSessionLocal() as db:
+      async with database_session() as db:
         instrument = await db.get(Instrument, normalized)
         if instrument is None:
           raise ValueError("INSTRUMENT_NOT_FOUND")
@@ -231,7 +231,7 @@ def build_tools(
     account_id = context.execution.require_account()
 
     async def query() -> dict[str, Any]:
-      async with AsyncSessionLocal() as db:
+      async with database_session() as db:
         account = await AccountRepository(db).find_by_account_id(account_id)
         if account is None:
           raise ValueError("ACCOUNT_SNAPSHOT_NOT_FOUND")
@@ -261,7 +261,7 @@ def build_tools(
     """按 StrategyRun ID 读取该用户的所有回测版本。"""
 
     async def query() -> dict[str, Any]:
-      async with AsyncSessionLocal() as db:
+      async with database_session() as db:
         strategy_run = await StrategyRunRepository(db).find_run_by_id(strategy_run_id)
         if strategy_run is None or strategy_run.user_id != context.execution.user_id:
           raise ValueError("STRATEGY_RUN_NOT_FOUND")
@@ -302,7 +302,7 @@ def build_tools(
     }
 
     async def command() -> dict[str, Any]:
-      async with AsyncSessionLocal() as db:
+      async with database_session() as db:
         strategy_run = await StrategyRunRepository(db).find_run_by_id(strategy_run_id)
         if strategy_run is None or strategy_run.user_id != context.execution.user_id:
           raise ValueError("STRATEGY_RUN_NOT_FOUND")
@@ -313,17 +313,18 @@ def build_tools(
           datetime.fromisoformat(value.replace("Z", "+00:00"))
       key = _idempotency_key(context, rerun_metadata.name, arguments)
       backtest_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key))
-      receipt = await engine_command_service.enqueue(
-        "STRATEGY_RERUN_BACKTEST",
-        {
-          "run_id": strategy_run_id,
-          "backtest_id": backtest_id,
-          "backtest_start_time": backtest_start_time,
-          "backtest_end_time": backtest_end_time,
-        },
-        aggregate_id=strategy_run_id,
-        idempotency_key=f"assistant:{key}",
-      )
+      async with database_work_slot():
+        receipt = await engine_command_service.enqueue(
+          "STRATEGY_RERUN_BACKTEST",
+          {
+            "run_id": strategy_run_id,
+            "backtest_id": backtest_id,
+            "backtest_start_time": backtest_start_time,
+            "backtest_end_time": backtest_end_time,
+          },
+          aggregate_id=strategy_run_id,
+          idempotency_key=f"assistant:{key}",
+        )
       return {
         "summary": "回测重跑任务已提交给 Engine",
         "taskKind": "BACKTEST_RERUN",
@@ -349,7 +350,7 @@ def build_tools(
 
     async def query() -> dict[str, Any]:
       trade_date = time_utils.to_shanghai(time_utils.now()).date()
-      async with AsyncSessionLocal() as db:
+      async with database_session() as db:
         rows = await FirstBoardPromotionRepository(db).latest_assessments(
           trade_date, limit=500
         )
@@ -395,7 +396,7 @@ def build_tools(
 
     async def query() -> dict[str, Any]:
       trade_date = time_utils.to_shanghai(time_utils.now()).date()
-      async with AsyncSessionLocal() as db:
+      async with database_session() as db:
         row = (
           await db.execute(
             select(LimitUpChainSnapshot)
@@ -429,7 +430,7 @@ def build_tools(
     normalized = code.strip().upper()
 
     async def query() -> dict[str, Any]:
-      async with AsyncSessionLocal() as db:
+      async with database_session() as db:
         rows = (
           await db.execute(
             select(StockAnnouncement)

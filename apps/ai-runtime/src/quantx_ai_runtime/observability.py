@@ -7,10 +7,12 @@ import os
 import socket
 
 from quantx_domain.clock import utcnow
-from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
+from quantx_infrastructure.database.relational_connection import database_pool_snapshot
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from .config import AiRuntimeConfig, AiRuntimeConfigController, runtime_status
+from .database import database_session, log_database_pressure, wait_for_database_retry
 
 
 async def write_heartbeat(
@@ -19,7 +21,8 @@ async def write_heartbeat(
   config: AiRuntimeConfig,
   status: str,
 ) -> None:
-  async with AsyncSessionLocal() as db:
+  pool_snapshot = database_pool_snapshot()
+  async with database_session(heartbeat=True) as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "ai-runtime")
     details = {
       "pid": os.getpid(),
@@ -31,6 +34,7 @@ async def write_heartbeat(
       "configSource": config.source,
       "enabled": config.enabled,
       "apiKeyConfigured": config.provider_configured,
+      "databasePool": pool_snapshot,
     }
     if heartbeat is None:
       heartbeat = RuntimeComponentHeartbeat(
@@ -58,14 +62,20 @@ async def heartbeat_loop(
 ) -> None:
   while not stopped.is_set():
     config = controller.snapshot()
-    await write_heartbeat(
-      instance_id=instance_id,
-      config=config,
-      status=runtime_status(
-        config,
-        dependencies_available=dependencies_available,
-      ),
-    )
+    try:
+      await write_heartbeat(
+        instance_id=instance_id,
+        config=config,
+        status=runtime_status(
+          config,
+          dependencies_available=dependencies_available,
+        ),
+      )
+    except PoolTimeout as exc:
+      # Do not advance freshness on failure; the API can still report stale.
+      log_database_pressure("heartbeat", exc)
+      await wait_for_database_retry(stopped)
+      continue
     try:
       await asyncio.wait_for(stopped.wait(), timeout=15.0)
     except asyncio.TimeoutError:

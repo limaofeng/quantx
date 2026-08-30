@@ -10,7 +10,6 @@ from datetime import timedelta
 from agents import Agent, Runner
 from pydantic import BaseModel, Field
 from quantx_domain.clock import utcnow
-from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.first_board_promotion import (
   FirstBoardPromotionAssessmentRecord,
   LimitUpChainSnapshot,
@@ -22,8 +21,14 @@ from quantx_infrastructure.repositories.first_board_promotion_repository import 
   FirstBoardPromotionRepository,
 )
 from sqlalchemy import select
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from quantx_ai_runtime.config import AiRuntimeConfig, AiRuntimeConfigController
+from quantx_ai_runtime.database import (
+  database_session,
+  log_database_pressure,
+  wait_for_database_retry,
+)
 
 logger = logging.getLogger(__name__)
 PROMPT_VERSION = "limit-up-research-v1"
@@ -66,7 +71,7 @@ def _sanitize_citations(
 async def execute_limit_up_research_job(
   job_id: str, config: AiRuntimeConfig
 ) -> None:
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     job = await db.get(LimitUpResearchJob, job_id)
     if job is None or job.status != "RUNNING":
       return
@@ -132,7 +137,7 @@ async def execute_limit_up_research_job(
   )
   usage = result.context_wrapper.usage
   generated_at = utcnow()
-  async with AsyncSessionLocal() as db:
+  async with database_session() as db:
     repository = FirstBoardPromotionRepository(db)
     current_job = await db.get(LimitUpResearchJob, job_id)
     if current_job is None or current_job.status != "RUNNING":
@@ -173,11 +178,16 @@ async def run_limit_up_research_consumer(
       except asyncio.TimeoutError:
         pass
       continue
-    async with AsyncSessionLocal() as db:
-      job = await FirstBoardPromotionRepository(db).claim_next_research_job(
-        instance_id=instance_id,
-        lease_seconds=config.lease_seconds,
-      )
+    try:
+      async with database_session() as db:
+        job = await FirstBoardPromotionRepository(db).claim_next_research_job(
+          instance_id=instance_id,
+          lease_seconds=config.lease_seconds,
+        )
+    except PoolTimeout as exc:
+      log_database_pressure("research-claim", exc)
+      await wait_for_database_retry(stopped)
+      continue
     if job is None:
       try:
         await asyncio.wait_for(stopped.wait(), timeout=1.0)
@@ -194,11 +204,16 @@ async def run_limit_up_research_consumer(
         job.id,
         exc.__class__.__name__,
       )
-      async with AsyncSessionLocal() as db:
-        current = await db.get(LimitUpResearchJob, job.id)
-        if current is not None:
-          await FirstBoardPromotionRepository(db).fail_research_job(
-            current,
-            error_code=exc.__class__.__name__,
-            error_message="首板研究生成失败",
-          )
+      try:
+        async with database_session() as db:
+          current = await db.get(LimitUpResearchJob, job.id)
+          if current is not None:
+            await FirstBoardPromotionRepository(db).fail_research_job(
+              current,
+              error_code=exc.__class__.__name__,
+              error_message="首板研究生成失败",
+            )
+      except PoolTimeout as persist_exc:
+        # Do not pretend settlement succeeded; retain the persisted lease/state.
+        log_database_pressure("research-failure", persist_exc)
+        await wait_for_database_retry(stopped)

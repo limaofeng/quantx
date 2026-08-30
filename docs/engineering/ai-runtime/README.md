@@ -526,11 +526,48 @@ Provider 在线 smoke test 必须使用测试 key、测试用户和非实盘数�
 
 ### 13.1 心跳与能力降级
 
-Runtime 周期性写 `RuntimeComponentHeartbeat(component="ai-runtime")`。API 将
-超过 45 秒的心跳视为 `unavailable`。前端仍可浏览历史对话，但不应把 Runtime
-离线误报成整个 QuantX 离线。
+Runtime 每 15 秒写 `RuntimeComponentHeartbeat(component="ai-runtime")`。
+`/health/components` 将超过 90 秒的心跳视为 `stale`；助手能力接口使用自身的
+45 秒新鲜度门限。前端仍可浏览历史对话，但不应把 Runtime 离线误报成整个
+QuantX 离线。
 
-### 13.2 日志和指标
+### 13.2 数据库并发预算与容量恢复
+
+AI Runtime 继续复用 PostgreSQL，每进程只有一个连接池，默认 `pool_size=2`、
+`max_overflow=1`，不因模型并发数直接扩张数据库连接。空闲时也有心跳、配置刷新、
+聊天队列领取和首板研究队列领取四条循环；数据库操作变慢时，这些循环可能同时
+申请连接，不能假定“无用户请求”就没有池竞争。
+
+`quantx_ai_runtime.database` 在取得连接前做有限等待的并发准入：普通工作最多
+占用 `maximum_connections - 1` 个额度，为心跳留出一个额度；显式配置只有一个
+连接时，所有操作共用一个串行额度。总额度始终不超过同一个物理连接池的预算。
+排队等待沿用 `DATABASE_POOL_TIMEOUT_SECONDS`，超时使用
+`DatabaseCapacityTimeout`，不会无界积压。会话回滚/关闭完成后才归还额度。
+模型调用、Redis 等待和重试等待不得持有会话或额度；自行开启会话的 Engine
+命令入箱服务也必须经过同一工作额度。
+
+心跳、聊天领取和研究领取遇到容量/连接池超时时，关闭当前会话后以一秒间隔重试，
+不终止整个进程，也不重启已有模型任务；配置刷新继续按原有五秒周期重试。
+失败的心跳不更新数据库时间，心跳持续失败仍会被报告为过期。运行中的任务不适用
+无条件重试：续租失败仍停止该任务，不能跳过租约校验或把未持久化审计当作成功。
+取消和关闭 Runtime 时会一并取消并等待模型执行子任务，避免其继续持有连接。
+心跳和队列领取中的非容量类编程错误仍向监督循环传播，不被吞掉。
+
+心跳 `details.databasePool` 记录脱敏的连接池计数；容量超时日志记录固定操作名、
+异常类型、已借出连接数和总上限，不记录 SQL、参数、连接串或原始异常正文。
+这些指标用于区分池容量压力与数据库服务离线，不能把池超时直接解释为 PostgreSQL
+宕机。公开健康接口仍只返回既有脱敏字段，不暴露心跳内部明细。
+
+回归测试包括模拟容量超时、取消清理，以及隔离测试库上的真实 PostgreSQL
+`2+1` 连接池复现。后者只执行 `SELECT 1`，强制只读事务，不写业务表、不调用模型、
+不接触交易链路：
+
+```powershell
+python -m pytest tests/ai_runtime/ -m "not integration"
+python -m pytest tests/ai_runtime/test_database_pool_postgres.py
+```
+
+### 13.3 日志和指标
 
 允许记录：run/thread/request ID、状态、延迟、token、工具名、风险、审批耗时、
 错误码。禁止记录：完整 prompt、完整持仓、工具原始敏感结果、API key、券商
@@ -545,12 +582,13 @@ Runtime 周期性写 `RuntimeComponentHeartbeat(component="ai-runtime")`。API �
 - 单 run token/tool/turn 上限命中率。
 - subscription 重放 gap 与 Redis 唤醒失败率。
 
-### 13.3 常见故障
+### 13.4 常见故障
 
 | 表现 | 检查 | 行为 |
 |---|---|---|
 | capabilities 为 `unconfigured` | key 是否只注入服务端、enabled 是否打开 | 配置 key 后重启 Runtime；不要降级交易栈 |
 | capabilities 为 `unavailable` | Dev 进程、heartbeat、DB | 恢复 Runtime；历史聊天仍可读 |
+| 容量日志出现 `TimeoutError` / `DatabaseCapacityTimeout` | 操作名、池借出数、事务耗时与锁等待 | 保持有限预算，优先排查慢事务；后台循环限频重试，不盲目增大池或更换数据库 |
 | run 长期 `QUEUED` | Runtime 日志、DB 租约、provider 配额 | 修复后消费者自动领取 |
 | run `WAITING_APPROVAL` | 是否还有多个 pending call | 逐个批准/拒绝或取消 run |
 | 订阅断线 | Caddy websocket、最后 sequence | 用 `afterSequence` 重连并从 DB 回放 |

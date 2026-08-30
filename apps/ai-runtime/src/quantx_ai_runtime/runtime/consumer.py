@@ -6,15 +6,20 @@ import asyncio
 import logging
 
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
-from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.repositories.ai_assistant_repository import (
   AiAssistantRepository,
 )
 from quantx_infrastructure.services.ai_assistant_event_bus import (
   AI_ASSISTANT_RUN_WAKE_CHANNEL,
 )
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from quantx_ai_runtime.config import AiRuntimeConfig, AiRuntimeConfigController
+from quantx_ai_runtime.database import (
+  database_session,
+  log_database_pressure,
+  wait_for_database_retry,
+)
 
 from .runner import execute_run, settle_run_failure
 
@@ -34,7 +39,7 @@ async def _renew_lease(
       continue
     except asyncio.TimeoutError:
       pass
-    async with AsyncSessionLocal() as db:
+    async with database_session() as db:
       renewed = await AiAssistantRepository(db).renew_lease(
         run_id,
         instance_id=instance_id,
@@ -59,8 +64,8 @@ async def _execute_guarded(
     ),
     name=f"ai-assistant-lease:{run_id}",
   )
+  run_task = asyncio.create_task(execute_run(run_id, config, instance_id=instance_id))
   try:
-    run_task = asyncio.create_task(execute_run(run_id, config, instance_id=instance_id))
     done, _ = await asyncio.wait(
       [run_task, lease_task], return_when=asyncio.FIRST_COMPLETED
     )
@@ -84,7 +89,8 @@ async def _execute_guarded(
   finally:
     lease_stopped.set()
     lease_task.cancel()
-    await asyncio.gather(lease_task, return_exceptions=True)
+    run_task.cancel()
+    await asyncio.gather(lease_task, run_task, return_exceptions=True)
 
 
 async def run_consumer(
@@ -118,11 +124,16 @@ async def run_consumer(
             pass
         continue
       while len(tasks) < config.max_concurrent_runs:
-        async with AsyncSessionLocal() as db:
-          run = await AiAssistantRepository(db).claim_next_run(
-            instance_id=instance_id,
-            lease_seconds=config.lease_seconds,
-          )
+        try:
+          async with database_session() as db:
+            run = await AiAssistantRepository(db).claim_next_run(
+              instance_id=instance_id,
+              lease_seconds=config.lease_seconds,
+            )
+        except PoolTimeout as exc:
+          log_database_pressure("assistant-claim", exc)
+          await wait_for_database_retry(stopped)
+          break
         if run is None:
           break
         snapshot = dict(run.runtime_config_snapshot or {})
