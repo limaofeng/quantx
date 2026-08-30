@@ -6,7 +6,6 @@ import type {
 import type {
   ActivityBatch,
   ActivityBatchEvent,
-  ActivitySignalEvaluation,
   TTradeActivityItem,
 } from './activity';
 import type { TTradePositionBatch } from './TTradePositionsView';
@@ -150,15 +149,16 @@ export function replayDecisionReason(decision: StrategyDecision) {
   const output = decision.outputSummary;
   for (const key of ['reason', 'result_summary', 'summary', 'status']) {
     const value = output[key];
-    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (
+      typeof value === 'string' &&
+      value.trim() &&
+      !REPLAY_DECISION_TECHNICAL_MARKERS.has(value.trim().toLowerCase())
+    )
+      return value.trim();
   }
   return decision.tradeIntents.length
     ? `产生 ${decision.tradeIntents.length} 个 TradeIntent`
     : '本次决策未产生 TradeIntent';
-}
-
-function compactDecisionSummary(decision: StrategyDecision) {
-  return replayDecisionReason(decision);
 }
 
 export function mapReplayCyclesToPositionBatches(
@@ -298,31 +298,6 @@ export function mapReplayCyclesToActivityEvents(
   );
 }
 
-export function mapReplayDecisionsToActivityEvaluations(
-  decisions: readonly StrategyDecision[],
-  runId: string,
-  accountId: string
-): ActivitySignalEvaluation[] {
-  return decisions.map(decision => {
-    const stockCode = replayDecisionInstrumentCode(decision);
-    const hasIntent = decision.tradeIntents.length > 0;
-    return {
-      id: `replay-decision:${decision.id}`,
-      accountId,
-      runId,
-      stockCode,
-      eventKind: 'MATERIAL',
-      eventType: hasIntent ? 'INTENT_LINKED' : 'DECISION_RECORDED',
-      evaluatedAt: decision.decidedAt,
-      coalescedCount: 1,
-      policyVersion: 'replay',
-      title: hasIntent ? '回放交易意图' : '回放决策',
-      summary: compactDecisionSummary(decision),
-      signalSnapshot: null,
-    };
-  });
-}
-
 function executionFailed(execution: ExecutionTraceView) {
   return [
     execution.riskDecision,
@@ -400,7 +375,7 @@ export function replayProjectionActivityItems(
       id: `replay-status:${replay.runId}:${normalizedStatus}`,
       occurredAt,
       stockCode: '',
-      kind: failed ? 'ERROR' : 'DIAGNOSTIC',
+      kind: failed ? 'ERROR' : 'CONTEXT',
       tone: failed
         ? 'rose'
         : normalizedStatus === 'COMPLETED'
@@ -437,7 +412,7 @@ export function replayProjectionActivityItems(
       id: `replay-report:${replay.runId}:${report.conclusionCode}`,
       occurredAt: timestampOrFallback(report.generatedAt, occurredAt),
       stockCode: '',
-      kind: 'DIAGNOSTIC',
+      kind: 'CONTEXT',
       tone: healthyConclusion ? 'emerald' : 'amber',
       eventType: report.conclusionCode,
       title: '回放报告结论',
@@ -453,7 +428,7 @@ export function replayProjectionActivityItems(
       id: `replay-skipped:${replay.runId}`,
       occurredAt,
       stockCode: '',
-      kind: 'DIAGNOSTIC',
+      kind: 'CONTEXT',
       tone: 'amber',
       eventType: 'REPLAY_INSTRUMENTS_SKIPPED',
       title: '回放跳过标的',

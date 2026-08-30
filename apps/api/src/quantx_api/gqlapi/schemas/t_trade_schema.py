@@ -8,6 +8,7 @@ import strawberry
 from quantx_api.monitoring.metrics import record_t_trade_client_event
 
 from ..resolvers.t_trade import EngineCommandPendingError, TTradeResolver
+from ..resolvers.t_trade_replay_evidence import TTradeReplayEvidenceResolver
 from ..resolvers.trading_safety import AccountExecutionSafetyResolver
 from ..security import authorized_account_id, principal_from_context
 from ..t_trade_control import (
@@ -18,6 +19,12 @@ from ..trade_approval import (
   T_TRADE_ENTRY_APPROVAL,
   TradeApprovalChallengeError,
   TradeApprovalChallengeService,
+)
+from ..types.t_trade_replay_evidence_types import (
+  TTradeReplayAuditFilterInput,
+  TTradeReplayAuditPage,
+  TTradeReplaySignalFilterInput,
+  TTradeReplaySignalPage,
 )
 from ..types.t_trade_types import (
   OperationalAlert,
@@ -71,6 +78,22 @@ from ..types.trading_safety_types import (
 
 @strawberry.type(description="持仓做 T 查询")
 class TTradeQuery:
+  @strawberry.field(description="按精确回测版本读取真实机会事件，不从审计推导信号")
+  async def t_trade_replay_signal_evaluations(
+    self, info: strawberry.types.Info, run_id: str, backtest_id: str,
+    filters: Optional[TTradeReplaySignalFilterInput] = None,
+    first: int = 50, after: Optional[str] = None,
+  ) -> TTradeReplaySignalPage:
+    return await TTradeReplayEvidenceResolver.signals(info, run_id, backtest_id, filters, first, after)
+
+  @strawberry.field(description="按精确回测版本读取材料决策、关联评估与执行结果")
+  async def t_trade_replay_decision_audit(
+    self, info: strawberry.types.Info, run_id: str, backtest_id: str,
+    filters: Optional[TTradeReplayAuditFilterInput] = None,
+    first: int = 50, after: Optional[str] = None,
+  ) -> TTradeReplayAuditPage:
+    return await TTradeReplayEvidenceResolver.audit(info, run_id, backtest_id, filters, first, after)
+
   @strawberry.field(description="游标分页查询持久化做 T 批次")
   async def t_trade_batches_page(
     self,

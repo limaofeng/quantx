@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional
 
@@ -240,6 +241,25 @@ class TTradeOpportunityEvaluationRepository:
       .limit(normalized_limit)
     )
     return list(result.scalars().all())
+
+  async def iter_run_evaluations(
+    self, *, account_id: str, strategy_run_id: str,
+  ) -> AsyncIterator[dict[str, Any]]:
+    """Bounded keyset export of the current run projection, including diagnostics."""
+    from quantx_infrastructure.core.t_trade_replay_evidence import evaluation_record
+
+    cursor_at = None
+    cursor_id = None
+    while True:
+      rows = await self.list_evaluations(
+        account_id=account_id, strategy_run_id=strategy_run_id, limit=500,
+        cursor_evaluated_at=cursor_at, cursor_id=cursor_id,
+      )
+      if not rows:
+        return
+      for row in rows:
+        yield evaluation_record(row)
+      cursor_at, cursor_id = rows[-1].evaluated_at, rows[-1].id
 
   async def _append(
     self,

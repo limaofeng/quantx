@@ -114,9 +114,10 @@ const kindLabels: Readonly<Record<ActivityKindFilter, string>> = {
   ALL: '全部类型',
   SIGNAL: '信号状态',
   CANDIDATE: '候选与意图',
+  CONTEXT: '运行与上下文',
   DIAGNOSTIC: '诊断观测',
   ORDER: '委托事件',
-  TRADE: '真实成交',
+  TRADE: '成交事件',
   ERROR: '执行异常',
 };
 

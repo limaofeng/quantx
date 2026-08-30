@@ -55,6 +55,9 @@ Market Gateway 的供给健康快照，不触发 API 的账户、Engine 或 Pref
 
 ## GraphQL 耗时跟踪
 
+做 T 回放的信号分类、精确版本读取、归档完整性和决策追溯契约见
+[做 T 回放：信号与决策审计](TTRADE_REPLAY_EVIDENCE.md)。
+
 每个 GraphQL HTTP 请求都会分别记录 `context`、`parse`、`validate`、`execute`、
 `format` 和 `serialize` 阶段。`execute` 内的 resolver 以 GraphQL schema 的
 `ParentType.field` 聚合 `count`、`total`、`max` 和错误次数；列表下同一字段解析多次

@@ -282,6 +282,9 @@ class TradeIntentView:
   target_bucket: Optional[str] = None
   price_intent: Optional[JSON] = None
   quantity_intent: Optional[JSON] = None
+  target_volume: Optional[int] = None
+  target_amount: Optional[float] = None
+  target_position_pct: Optional[float] = None
   reason: Optional[str] = None
   trace_id: Optional[str] = None
   status: Optional[str] = None
@@ -302,6 +305,9 @@ class TradeIntentView:
       target_bucket=record.bucket,
       price_intent=record.limit_price_hint,
       quantity_intent=quantity,
+      target_volume=record.target_volume,
+      target_amount=record.target_amount,
+      target_position_pct=record.target_position_pct,
       reason=record.reason,
       trace_id=record.trace_id,
       status=record.status,
@@ -323,6 +329,9 @@ class TradeIntentView:
       target_bucket=summary.get("bucket"),
       price_intent=summary.get("limit_price_hint") or summary.get("price"),
       quantity_intent=quantity,
+      target_volume=summary.get("target_volume"),
+      target_amount=summary.get("target_amount"),
+      target_position_pct=summary.get("target_position_pct"),
       reason=summary.get("reason"),
       trace_id=summary.get("trace_id"),
       status=summary.get("status"),
@@ -344,6 +353,9 @@ class TradeIntentView:
       target_bucket=data.get("bucket"),
       price_intent=data.get("limit_price_hint") or data.get("price"),
       quantity_intent=quantity,
+      target_volume=data.get("target_volume"),
+      target_amount=data.get("target_amount"),
+      target_position_pct=data.get("target_position_pct"),
       reason=data.get("reason"),
       trace_id=data.get("trace_id"),
       status=data.get("status"),

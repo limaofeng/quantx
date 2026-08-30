@@ -992,6 +992,34 @@ async def test_normal_backtest_stops_before_terminal_day_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_replay_archive_failure_never_reports_completed(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
+  runtime.strategy = MockStrategy(runtime.context)
+  runtime.strategy.stop = AsyncMock()
+  runtime.context.parameters.update(t_trade_replay=True, account_id="account-1")
+  manager.get_latest_backtest_grid_book_snapshot = MagicMock(return_value=None)
+  manager.get_backtest_grid_book_snapshot_count = MagicMock(return_value=0)
+  manager.get_backtest_grid_book_observed_count = MagicMock(return_value=0)
+  manager.finalize_backtest = AsyncMock(side_effect=RuntimeError("archive failed"))
+  with (
+    patch.object(strategy_executor, "_initialize_backtest_dynamic_universe", new_callable=AsyncMock),
+    patch.object(strategy_executor, "_run_backtest_loop", new_callable=AsyncMock),
+    patch.object(strategy_executor, "_finalize_t_trade_phase_one_baseline"),
+    patch.object(strategy_executor, "_finalize_t_trade_replay", new_callable=AsyncMock),
+    patch.object(strategy_executor, "_finalize_t_trade_candidate_outcomes", new_callable=AsyncMock),
+    patch.object(strategy_executor, "_flush_t_trade_opportunity_diagnostics", new_callable=AsyncMock),
+    patch.object(strategy_executor, "_ensure_terminal_cleanup", new_callable=AsyncMock) as cleanup,
+  ):
+    await strategy_executor._run_strategy_loop(runtime)
+  assert runtime.status == ExecutionStatus.ERROR
+  assert runtime.error_message == "archive failed"
+  manager.finalize_backtest.assert_awaited_once_with(opportunity_account_id="account-1")
+  cleanup.assert_awaited_once_with(runtime)
+
+
+@pytest.mark.asyncio
 async def test_normal_paper_completion_checkpoints_post_stop_state(
   strategy_executor: StrategyExecutor,
 ) -> None:

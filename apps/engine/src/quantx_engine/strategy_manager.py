@@ -17,6 +17,7 @@
 import asyncio
 import json
 import logging
+import os
 import select
 import uuid
 from datetime import date, datetime, time, timedelta
@@ -769,6 +770,32 @@ class StrategyManager:
 
       history = await backtest_repo.get_backtests_by_run(run_id)
       latest = history[0] if history else None
+      if (parameters.get("t_trade_replay") and latest
+          and str(latest.status).upper() == "COMPLETED"):
+        from quantx_infrastructure.core.t_trade_replay_evidence import (
+          read_manifest,
+          sealed_opportunity_path,
+        )
+
+        previous_path = next((
+          path for path in self._backtest_result_path_candidates(latest.result_path)
+          if os.path.isfile(path)
+        ), None)
+        if previous_path is None:
+          raise ValueError("历史回测归档缺失，禁止清空当前评估投影")
+        previous_manifest = read_manifest(
+          previous_path, run_id=run_id, backtest_id=str(latest.id),
+          version=int(latest.version),
+        )
+        # v3 never recorded signal evidence. It remains explicitly unavailable;
+        # a rerun creates the first v4 archive, never a reconstructed v3 signal.
+        if previous_manifest.get("schema_version") not in {3, 4}:
+          raise ValueError("历史回测归档版本不受支持，禁止清空当前评估投影")
+        if previous_manifest.get("schema_version") == 4:
+          await asyncio.to_thread(
+            sealed_opportunity_path, previous_path, previous_manifest,
+            account_id=str(parameters.get("account_id") or ""),
+          )
       snapshot_repo = StrategyGridBookSnapshotRepository(db)
       template_record = await snapshot_repo.get_template(run_id)
       if not template_record and latest:

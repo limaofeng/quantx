@@ -51,7 +51,13 @@ export type ActivityBatch = {
 };
 
 export type ActivityKind =
-  'SIGNAL' | 'CANDIDATE' | 'DIAGNOSTIC' | 'ORDER' | 'TRADE' | 'ERROR';
+  | 'SIGNAL'
+  | 'CANDIDATE'
+  | 'CONTEXT'
+  | 'DIAGNOSTIC'
+  | 'ORDER'
+  | 'TRADE'
+  | 'ERROR';
 
 export type ActivityTone =
   'blue' | 'emerald' | 'amber' | 'rose' | 'slate' | 'marketBuy' | 'marketSell';
@@ -273,7 +279,7 @@ function executionSummary(
 function signalKind(evaluation: ActivitySignalEvaluation): ActivityKind {
   if (evaluation.eventKind === 'COALESCED_DIAGNOSTIC') return 'DIAGNOSTIC';
   if (CANDIDATE_EVENT_TYPES.has(evaluation.eventType)) return 'CANDIDATE';
-  return 'SIGNAL';
+  return evaluation.eventType === 'FSM_TRANSITION' ? 'SIGNAL' : 'CONTEXT';
 }
 
 function signalTone(evaluation: ActivitySignalEvaluation): ActivityTone {

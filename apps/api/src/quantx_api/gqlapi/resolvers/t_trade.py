@@ -14,6 +14,7 @@ from typing import Any, List, Mapping, Optional
 import strawberry
 from graphql import GraphQLError
 from quantx_domain.trading.t_trade_opportunity_engine import OpportunityPolicy
+from quantx_infrastructure.core.t_trade_replay_evidence import SIGNAL_EVENT_TYPES
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import (
   OperationalAlert as OperationalAlertModel,
@@ -1494,6 +1495,14 @@ class TTradeResolver:
       items.append(
         TTradeSignalEvaluation(
           id=strawberry.ID(str(row.id)),
+          event_key=str(row.event_key),
+          category=(
+            "DIAGNOSTIC" if str(row.record_kind) == "COALESCED_DIAGNOSTIC"
+            else "SIGNAL" if str(row.event_type) in SIGNAL_EVENT_TYPES else "CONTEXT"
+          ),
+          candidate_id=row.candidate_id,
+          linked_intent_id=(evidence.get("intent_link") or {}).get("intent_id")
+          or (evidence.get("signal_snapshot") or {}).get("pending_entry_intent_id"),
           account_id=str(row.account_id),
           run_id=strawberry.ID(str(row.strategy_run_id)),
           stock_code=str(row.instrument_code),

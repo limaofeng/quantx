@@ -88,6 +88,7 @@ describe('TTradeGlobalPage toolbar color contract', () => {
       '总览',
       '参数',
       '信号',
+      '决策审计',
       '仓位与批次',
       '运行动态',
       '账户',
@@ -96,8 +97,8 @@ describe('TTradeGlobalPage toolbar color contract', () => {
     }
     expect(replaySubviews).toContain('replaySidebarContext?.activeRunId');
     expect(replaySubviews).toContain("['PARAMETERS', '参数']");
-    expect(replaySubviews).toContain('focus-visible:ring-cyan-400/60');
-    expect(replaySubviews).toContain("? 'text-cyan-200 after:bg-cyan-400'");
+    expect(replaySubviews).toContain('focus-visible:ring-blue-400/70');
+    expect(replaySubviews).toContain("? 'text-blue-200 after:bg-blue-400'");
     expect(source).not.toContain('aria-label="回放内容"');
   });
 });

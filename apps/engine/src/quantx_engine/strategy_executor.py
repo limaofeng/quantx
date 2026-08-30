@@ -5850,9 +5850,6 @@ class StrategyExecutor:
           )
           if not callable(checkpoint) or not await checkpoint():
             raise RuntimeError("RUNTIME_TERMINAL_STATE_CHECKPOINT_BLOCKED")
-        runtime.status = ExecutionStatus.COMPLETED
-        self._runtime_log(runtime, "SUCCESS", f"策略运行完成: {runtime.run_id}")
-
         # 回测模式：写入结果文件并更新数据库记录
         if runtime.context.mode == StrategyRunMode.BACKTEST and runtime.state_manager:
           self._runtime_log(runtime, "INFO", "回测结果文件写入开始")
@@ -5867,7 +5864,12 @@ class StrategyExecutor:
           grid_book_observed_count = (
             runtime.state_manager.get_backtest_grid_book_observed_count()
           )
-          result_path = await runtime.state_manager.finalize_backtest()
+          if runtime.context.parameters.get("t_trade_replay"):
+            result_path = await runtime.state_manager.finalize_backtest(
+              opportunity_account_id=str(runtime.context.parameters.get("account_id") or ""),
+            )
+          else:
+            result_path = await runtime.state_manager.finalize_backtest()
           self._runtime_log(runtime, "SUCCESS", f"回测结果文件写入完成: {result_path}")
 
           # 更新 StrategyBacktest 记录
@@ -6016,6 +6018,9 @@ class StrategyExecutor:
                 progress_pct=100.0,
                 result_ready=True,
               )
+
+        runtime.status = ExecutionStatus.COMPLETED
+        self._runtime_log(runtime, "SUCCESS", f"策略运行完成: {runtime.run_id}")
 
     except asyncio.CancelledError:
       if runtime.status != ExecutionStatus.STOPPING:

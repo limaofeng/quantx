@@ -4538,10 +4538,32 @@ class RuntimeStateManager:
             f"进入回测模式: backtest_id={backtest_id}, version={backtest_version}"
         )
 
-    async def finalize_backtest(self) -> str:
+    async def finalize_backtest(self, *, opportunity_account_id: Optional[str] = None) -> str:
         """结束回测，将缓冲数据写入文件"""
         if not self._backtest_storage:
+            if opportunity_account_id is not None:
+                raise RuntimeError("REPLAY_EVIDENCE_STORAGE_UNAVAILABLE")
             return ""
+        if opportunity_account_id is not None:
+            if not opportunity_account_id.strip():
+                raise ValueError("REPLAY_EVIDENCE_ACCOUNT_REQUIRED")
+            if self.pending_t_trade_material_events() or self.pending_t_trade_diagnostic_events():
+                raise RuntimeError("REPLAY_EVIDENCE_MATERIALIZATION_PENDING")
+            from quantx_infrastructure.database.connection import get_async_db
+            from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
+                TTradeOpportunityEvaluationRepository,
+            )
+
+            async for db in get_async_db():
+                records = TTradeOpportunityEvaluationRepository(db).iter_run_evaluations(
+                    account_id=opportunity_account_id, strategy_run_id=self.run_id,
+                )
+                await self._backtest_storage.archive_opportunity_evaluations(
+                    records, account_id=opportunity_account_id,
+                )
+                break
+            else:
+                raise RuntimeError("REPLAY_EVIDENCE_DATABASE_UNAVAILABLE")
         path = await self._backtest_storage.flush()
         self.logger.info(f"回测数据已写入: {path}")
         return path

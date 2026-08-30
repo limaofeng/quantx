@@ -140,6 +140,8 @@ _register(
     "tTradeGlobalMonitor",
     "tTradeImportedEntries",
     "tTradeReplay",
+    "tTradeReplaySignalEvaluations",
+    "tTradeReplayDecisionAudit",
     "tTradeReplayCycles",
     "tTradeReplayHistory",
     "tTradeReplayPreparation",

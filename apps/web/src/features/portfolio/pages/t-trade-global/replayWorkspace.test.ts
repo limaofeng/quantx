@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { filterTTradeActivityItems } from './activity';
 import {
   canDeleteReplay,
   deleteReplayRunsSequentially,
   mapReplayCyclesToActivityBatches,
   mapReplayCyclesToActivityEvents,
   mapReplayCyclesToPositionBatches,
-  mapReplayDecisionsToActivityEvaluations,
   mapReplayExecutionsToActivityEvents,
   replayDecisionInstrumentCode,
   replayDecisionReason,
@@ -193,23 +193,7 @@ describe('replay workspace projections', () => {
     expect(activityBatch.peakNetProfitPct).toBeNull();
   });
 
-  it('projects replay decisions and rejected execution facts into activity data', () => {
-    const [evaluation] = mapReplayDecisionsToActivityEvaluations(
-      [
-        {
-          id: 'decision-1',
-          instanceId: 'run-replay',
-          decidedAt: '2026-08-25T09:50:00+08:00',
-          inputSummary: { instrument_code: '600519.SH' },
-          outputSummary: {},
-          tradeIntents: [],
-          statePatch: {},
-          decisionTrace: ['INSUFFICIENT_READY_TIME'],
-        },
-      ],
-      'run-replay',
-      'account-1'
-    );
+  it('projects rejected execution facts into activity data without creating signals', () => {
     const [event] = mapReplayExecutionsToActivityEvents(
       [
         {
@@ -225,12 +209,6 @@ describe('replay workspace projections', () => {
       '2026-08-25T15:00:00+08:00'
     );
 
-    expect(evaluation).toMatchObject({
-      accountId: 'account-1',
-      runId: 'run-replay',
-      eventType: 'DECISION_RECORDED',
-      summary: 'INSUFFICIENT_READY_TIME',
-    });
     expect(event).toMatchObject({
       eventType: 'ORDER',
       error: 'INSUFFICIENT_READY_TIME',
@@ -261,6 +239,14 @@ describe('replay workspace projections', () => {
     });
 
     expect(items).toHaveLength(2);
+    expect(
+      filterTTradeActivityItems(items, {
+        includeDiagnostics: false,
+        kind: 'ALL',
+        stockCode: 'ALL',
+        search: '',
+      })
+    ).toHaveLength(2);
     expect(items).toContainEqual(
       expect.objectContaining({
         eventType: 'INSUFFICIENT_READY_TIME',

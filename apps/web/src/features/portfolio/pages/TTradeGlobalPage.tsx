@@ -4,7 +4,6 @@ import {
   BarChart3,
   Check,
   CircleDollarSign,
-  ClipboardList,
   Clock3,
   FileCheck2,
   FlaskConical,
@@ -54,17 +53,8 @@ import {
   useGraphqlWsStatus,
   type GraphqlWsStatus,
 } from '@/core/graphql/ws-status';
-import {
-  mapExecutionTraceView,
-  mapStrategyDecisionView,
-  type ExecutionTraceView,
-  type StrategyDecision,
-} from '@/features/strategies/domain';
-import {
-  DeleteStrategyRunMutation,
-  StrategyDecisionHistoryQuery,
-  StrategyExecutionTraceQuery,
-} from '@/features/strategies/hooks/strategyInstanceOperations';
+import { mapExecutionTraceView } from '@/features/strategies/domain';
+import { DeleteStrategyRunMutation } from '@/features/strategies/hooks/strategyInstanceOperations';
 import { useTradingSafety } from '@/features/trading-safety';
 import { useFragment as readFragment } from '@/generated/gql';
 import {
@@ -112,6 +102,7 @@ import {
   TTradeUpdatesSubscription,
   TTradeSourceOrdersQuery,
 } from '../hooks/useTTradeGlobal';
+import { useTTradeReplayEvidence } from '../hooks/useTTradeReplayEvidence';
 
 import type { ActivitySignalEvaluation } from './t-trade-global/activity';
 import {
@@ -135,6 +126,7 @@ import {
   type ClientOperationRef,
 } from './t-trade-global/operationPersistence';
 import { readinessStageLabel } from './t-trade-global/readiness';
+import { replayEvidenceUnavailableMessage } from './t-trade-global/replayEvidencePresentation';
 import {
   cloneReplayCostForm,
   cloneSettingsForm,
@@ -159,11 +151,7 @@ import {
   mapReplayCyclesToActivityBatches,
   mapReplayCyclesToActivityEvents,
   mapReplayCyclesToPositionBatches,
-  mapReplayDecisionsToActivityEvaluations,
   mapReplayExecutionsToActivityEvents,
-  replayDecisionInstrumentCode,
-  replayDecisionReason,
-  replayDecisionTraceItems,
   replayProjectionActivityItems,
   replayStatusAfterDelete,
   replayStatusAfterDeleteMany,
@@ -194,10 +182,12 @@ import type {
   TTradeExecutionMode,
   TTradePositionBatch,
 } from './t-trade-global/TTradePositionsView';
+import { TTradeReplayDecisionAudit } from './t-trade-global/TTradeReplayDecisionAudit';
 import type {
   ReplayManualPositionDraft,
   ReplaySidebarContext,
 } from './t-trade-global/TTradeReplaySidebar';
+import { TTradeReplaySignals } from './t-trade-global/TTradeReplaySignals';
 import { TTradeSignalDiagnosticsPanel } from './t-trade-global/TTradeSignalDiagnostics';
 import {
   TTradeSignalPolicyEditor,
@@ -415,346 +405,13 @@ function useStableValueByKey<T>(
 }
 
 type ReplayWorkspaceView =
-  'OVERVIEW' | 'PARAMETERS' | 'SIGNALS' | 'POSITIONS' | 'EVENTS' | 'ACCOUNT';
-
-function replaySignalValue(value: unknown) {
-  if (value === null || value === undefined || value === '') return '--';
-  if (typeof value === 'number') return formatNumber(value, 4);
-  if (typeof value === 'boolean') return value ? '是' : '否';
-  if (typeof value === 'string') return value;
-  return JSON.stringify(value);
-}
-
-function ReplaySignalSummary({
-  title,
-  values,
-}: {
-  title: string;
-  values: Record<string, unknown>;
-}) {
-  const entries = Object.entries(values).slice(0, 8);
-  return (
-    <section className="border border-white/[0.06] bg-white/[0.02]">
-      <div className="border-b border-white/[0.05] px-3 py-2 text-ui-caption font-black text-slate-300">
-        {title}
-      </div>
-      <div className="grid gap-x-4 sm:grid-cols-2">
-        {entries.map(([key, value]) => (
-          <div
-            key={key}
-            className="flex min-w-0 items-center justify-between gap-3 border-b border-white/[0.04] px-3 py-2 text-ui-caption"
-          >
-            <span className="truncate text-slate-600">{key}</span>
-            <span className="max-w-[60%] truncate font-mono text-slate-300">
-              {replaySignalValue(value)}
-            </span>
-          </div>
-        ))}
-        {entries.length === 0 && (
-          <div className="p-ui-section text-ui-caption text-slate-600">
-            暂无摘要字段
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-export function TTradeReplaySignals({
-  decisions,
-  error,
-  executions,
-  fetching,
-  hasReplay,
-}: {
-  decisions: StrategyDecision[];
-  error?: Error;
-  executions: ExecutionTraceView[];
-  fetching: boolean;
-  hasReplay: boolean;
-}) {
-  const [expandedId, setExpandedId] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    if (expandedId && !decisions.some(item => item.id === expandedId)) {
-      setExpandedId(null);
-    }
-  }, [decisions, expandedId]);
-
-  React.useEffect(() => {
-    if (!expandedId) return;
-    const collapseOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setExpandedId(null);
-    };
-    window.addEventListener('keydown', collapseOnEscape);
-    return () => window.removeEventListener('keydown', collapseOnEscape);
-  }, [expandedId]);
-
-  if (!hasReplay) {
-    return (
-      <div className="flex h-full min-h-[360px] flex-col items-center justify-center px-ui-panel text-center">
-        <ClipboardList className="h-9 w-9 text-slate-700" />
-        <h2 className="mt-3 text-ui-body font-black text-slate-300">
-          请先选择一条回放记录
-        </h2>
-        <p className="mt-1.5 text-ui-caption text-slate-600">
-          信号页展示该次回放持久化的 DecisionTrace 与 TradeIntent。
-        </p>
-      </div>
-    );
-  }
-
-  if (fetching && decisions.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-ui-caption text-slate-500">
-        <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-        正在读取回放信号…
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div
-        role="alert"
-        className="m-ui-section flex items-start gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-ui-caption text-rose-100"
-      >
-        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        {error.message}
-      </div>
-    );
-  }
-
-  if (decisions.length === 0) {
-    return (
-      <div className="flex h-full min-h-[360px] flex-col items-center justify-center px-ui-panel text-center">
-        <ClipboardList className="h-9 w-9 text-slate-700" />
-        <h2 className="mt-3 text-ui-body font-black text-slate-300">
-          这次回放没有产生可展示的信号
-        </h2>
-        <p className="mt-1.5 text-ui-caption text-slate-600">
-          未买入、少买、拒绝和熔断原因仍会在存在决策审计时显示。
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full min-h-0 flex-col bg-[#07111f]">
-      <header className="flex shrink-0 items-center justify-between border-b border-white/[0.06] bg-[#091422] px-ui-section py-2.5">
-        <div>
-          <h2 className="text-ui-label font-black text-slate-200">决策信号</h2>
-          <p className="mt-0.5 text-ui-micro text-slate-600">
-            回放信号按业务动态排列；展开后查看策略输入、原因链与模拟执行结果。
-          </p>
-        </div>
-        <span className="border border-cyan-400/20 bg-cyan-400/[0.04] px-2 py-1 font-mono text-ui-micro font-bold text-cyan-200">
-          {decisions.length} 条
-        </span>
-      </header>
-      <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
-        <div style={{ minWidth: 880 }}>
-          <div
-            className="sticky top-0 z-10 grid h-8 items-center gap-2 border-b border-white/[0.06] bg-[#0b1628] px-ui-section text-ui-micro font-black text-slate-600"
-            style={{
-              gridTemplateColumns:
-                '28px 120px minmax(130px, .8fr) minmax(120px, .7fr) minmax(120px, .7fr) minmax(220px, 1.4fr) 24px',
-            }}
-          >
-            <span />
-            <span>时间</span>
-            <span>标的</span>
-            <span>方向 / 数量</span>
-            <span>决策状态</span>
-            <span>原因 / 阻断</span>
-            <span />
-          </div>
-          {decisions.map(decision => {
-            const expanded = expandedId === decision.id;
-            const primaryIntent = decision.tradeIntents[0];
-            const primaryExecution = primaryIntent
-              ? executions.find(item => item.intentId === primaryIntent.id)
-              : undefined;
-            const instrumentCode = replayDecisionInstrumentCode(decision);
-            const decisionReason = replayDecisionReason(decision);
-            const traceItems = replayDecisionTraceItems(decision);
-            const detailId = `replay-signal-${decision.id}`;
-            const status =
-              primaryExecution?.orderStatus ||
-              primaryIntent?.status ||
-              (primaryIntent ? '意图已生成' : '未发意图');
-            return (
-              <article
-                key={decision.id}
-                className={cn(
-                  'border-b border-white/[0.05] bg-[#091422]',
-                  expanded && 'border border-cyan-400/25 bg-[#0a1727]'
-                )}
-              >
-                <button
-                  type="button"
-                  aria-expanded={expanded}
-                  aria-controls={detailId}
-                  onClick={() =>
-                    setExpandedId(current =>
-                      current === decision.id ? null : decision.id
-                    )
-                  }
-                  className="grid min-h-11 w-full cursor-pointer items-center gap-2 px-ui-section text-left text-ui-caption transition-colors hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
-                  style={{
-                    gridTemplateColumns:
-                      '28px 120px minmax(130px, .8fr) minmax(120px, .7fr) minmax(120px, .7fr) minmax(220px, 1.4fr) 24px',
-                  }}
-                >
-                  <span className="font-mono text-slate-600">
-                    {expanded ? '−' : '+'}
-                  </span>
-                  <span className="font-mono text-slate-400">
-                    {formatTime(decision.decidedAt)}
-                  </span>
-                  <span className="min-w-0 truncate font-mono font-bold text-slate-200">
-                    {instrumentCode || '未关联标的'}
-                  </span>
-                  <span className="font-mono text-slate-300">
-                    {primaryIntent
-                      ? `${primaryIntent.side} ${replaySignalValue(primaryIntent.quantityIntent)}`
-                      : '无交易意图'}
-                  </span>
-                  <span className="text-cyan-200">{status}</span>
-                  <span className="truncate text-slate-500">
-                    {primaryExecution?.reason ||
-                      primaryIntent?.reason ||
-                      decisionReason}
-                  </span>
-                  <span className="text-slate-600">›</span>
-                </button>
-                {expanded && (
-                  <div
-                    id={detailId}
-                    className="space-y-3 border-t border-white/[0.06] p-ui-section"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h3 className="text-ui-label font-black text-slate-100">
-                          决策审计 · {formatTime(decision.decidedAt)}
-                        </h3>
-                        <p className="mt-1 font-mono text-ui-micro text-slate-600">
-                          {decision.id}
-                        </p>
-                      </div>
-                      <span className="border border-cyan-400/20 bg-cyan-400/[0.06] px-2 py-1 text-ui-micro font-black text-cyan-200">
-                        TradeIntent {decision.tradeIntents.length}
-                      </span>
-                    </div>
-                    <div className="grid gap-3 xl:grid-cols-2">
-                      <ReplaySignalSummary
-                        title="策略输入"
-                        values={decision.inputSummary}
-                      />
-                      <ReplaySignalSummary
-                        title="策略输出"
-                        values={decision.outputSummary}
-                      />
-                    </div>
-                    <section className="border border-white/[0.06] bg-white/[0.02]">
-                      <div className="border-b border-white/[0.05] px-3 py-2 text-ui-caption font-black text-slate-300">
-                        原因链
-                      </div>
-                      <div className="space-y-1.5 p-3">
-                        {traceItems.map((item, index) => (
-                          <div
-                            key={`${index}-${item}`}
-                            className="flex items-start gap-2 text-ui-caption text-slate-400"
-                          >
-                            <span className="mt-0.5 font-mono text-ui-micro text-cyan-300">
-                              {String(index + 1).padStart(2, '0')}
-                            </span>
-                            <span>{item}</span>
-                          </div>
-                        ))}
-                        {traceItems.length === 0 && (
-                          <div className="text-ui-caption text-slate-600">
-                            本次决策没有返回额外原因链。
-                          </div>
-                        )}
-                      </div>
-                    </section>
-                    <section className="overflow-hidden border border-white/[0.06]">
-                      <div className="border-b border-white/[0.05] bg-white/[0.02] px-3 py-2 text-ui-caption font-black text-slate-300">
-                        交易意图与执行结果
-                      </div>
-                      <div className="overflow-x-auto custom-scrollbar">
-                        <table className="w-full min-w-[760px] text-ui-caption">
-                          <thead className="bg-white/[0.02] text-left text-ui-micro font-black text-slate-600">
-                            <tr>
-                              <th className="px-3 py-2">标的 / 方向</th>
-                              <th className="px-3 py-2">目标数量</th>
-                              <th className="px-3 py-2">风控 / 订单</th>
-                              <th className="px-3 py-2">成交</th>
-                              <th className="px-3 py-2">原因</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {decision.tradeIntents.map(intent => {
-                              const execution = executions.find(
-                                item => item.intentId === intent.id
-                              );
-                              return (
-                                <tr
-                                  key={intent.id}
-                                  className="border-t border-white/[0.05] text-slate-400"
-                                >
-                                  <td className="px-3 py-2 font-mono text-slate-200">
-                                    {intent.instrumentCode} · {intent.side}
-                                  </td>
-                                  <td className="px-3 py-2 font-mono">
-                                    {replaySignalValue(intent.quantityIntent)}
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    {execution?.riskDecision || '--'} /{' '}
-                                    {execution?.orderStatus ||
-                                      intent.status ||
-                                      '--'}
-                                  </td>
-                                  <td className="px-3 py-2 font-mono">
-                                    {execution?.executedVolume
-                                      ? `${execution.executedVolume} @ ${formatNumber(execution.executedPrice || 0, 3)}`
-                                      : '--'}
-                                  </td>
-                                  <td className="max-w-xs px-3 py-2">
-                                    <div className="truncate">
-                                      {execution?.reason ||
-                                        intent.reason ||
-                                        '--'}
-                                    </div>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                            {decision.tradeIntents.length === 0 && (
-                              <tr>
-                                <td
-                                  colSpan={5}
-                                  className="p-ui-section text-center text-slate-600"
-                                >
-                                  本次决策没有产生交易意图
-                                </td>
-                              </tr>
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </section>
-                  </div>
-                )}
-              </article>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
+  | 'OVERVIEW'
+  | 'PARAMETERS'
+  | 'SIGNALS'
+  | 'AUDIT'
+  | 'POSITIONS'
+  | 'EVENTS'
+  | 'ACCOUNT';
 
 function TTradeReplayPanel({
   accountId,
@@ -916,48 +573,21 @@ function TTradeReplayPanel({
         : 0,
     [baseCosts, baseForm, frozenCosts, frozenForm]
   );
-  const [decisionResult, refreshDecisions] = useQuery({
-    query: StrategyDecisionHistoryQuery,
-    variables: {
-      instanceId: activeRunId,
-      cursor: null,
-      limit: 200,
-      backtestId: replay?.backtestId || null,
-    },
-    pause:
-      !['SIGNALS', 'EVENTS'].includes(activeView) ||
-      !activeRunId ||
-      !replay?.backtestId,
-    requestPolicy: 'cache-and-network',
+  const replayEvidence = useTTradeReplayEvidence({
+    runId: activeRunId,
+    backtestId: replay?.backtestId,
+    activeView,
+    includeDiagnostics: includeActivityDiagnostics,
   });
-  const [executionResult, refreshExecutions] = useQuery({
-    query: StrategyExecutionTraceQuery,
-    variables: {
-      instanceId: activeRunId,
-      decisionId: null,
-      backtestId: replay?.backtestId || null,
-      cursor: null,
-      limit: 200,
-    },
-    pause:
-      !['SIGNALS', 'EVENTS'].includes(activeView) ||
-      !activeRunId ||
-      !replay?.backtestId,
-    requestPolicy: 'cache-and-network',
-  });
-  const replayDecisions = React.useMemo(
-    () =>
-      ((decisionResult.data?.strategyDecisionHistory || []) as unknown[]).map(
-        mapStrategyDecisionView
-      ),
-    [decisionResult.data]
-  );
   const replayExecutions = React.useMemo(
-    () =>
-      ((executionResult.data?.strategyExecutionTrace || []) as unknown[]).map(
-        mapExecutionTraceView
-      ),
-    [executionResult.data]
+    () => [
+      ...new Map(
+        replayEvidence.auditRecords
+          .flatMap(item => item.executions)
+          .map(item => [item.intentId, mapExecutionTraceView(item)])
+      ).values(),
+    ],
+    [replayEvidence.auditRecords]
   );
   const preparationValue = preparationResult.data?.tTradeReplayPreparation;
   const preparation = useStableValueByKey(
@@ -1012,15 +642,7 @@ function TTradeReplayPanel({
       replayExecutions,
     ]
   );
-  const replayActivityEvaluations = React.useMemo(
-    () =>
-      mapReplayDecisionsToActivityEvaluations(
-        replayDecisions,
-        activeRunId,
-        accountId
-      ),
-    [accountId, activeRunId, replayDecisions]
-  );
+  const replayActivityEvaluations = replayEvidence.evaluations;
   const replayActivitySupplementalItems = React.useMemo(
     () => (replay ? replayProjectionActivityItems(replay) : []),
     [replay]
@@ -1042,19 +664,18 @@ function TTradeReplayPanel({
     }
     return names;
   }, [replay?.initialPortfolio.positions, replay?.instruments]);
+  const refreshEvidence = replayEvidence.refresh;
   const refreshReplayFacts = React.useCallback(() => {
     if (!activeRunId) return;
     refreshReplay({ requestPolicy: 'network-only' });
     refreshCycles({ requestPolicy: 'network-only' });
     if (replay?.backtestId) {
-      refreshDecisions({ requestPolicy: 'network-only' });
-      refreshExecutions({ requestPolicy: 'network-only' });
+      refreshEvidence();
     }
   }, [
     activeRunId,
     refreshCycles,
-    refreshDecisions,
-    refreshExecutions,
+    refreshEvidence,
     refreshReplay,
     replay?.backtestId,
   ]);
@@ -2300,19 +1921,25 @@ function TTradeReplayPanel({
         ) : activeView === 'SIGNALS' ? (
           <div className="min-h-0 flex-1 overflow-hidden">
             <TTradeReplaySignals
-              decisions={replayDecisions}
-              error={
-                decisionResult.error || executionResult.error
-                  ? new Error(
-                      decisionResult.error?.message ||
-                        executionResult.error?.message ||
-                        '读取回放信号失败'
-                    )
-                  : undefined
-              }
-              executions={replayExecutions}
-              fetching={decisionResult.fetching || executionResult.fetching}
+              controller={replayEvidence}
+              instrumentNames={replayInstrumentNames}
               hasReplay={Boolean(activeRunId && replay?.backtestId)}
+              onViewAudit={eventKey => {
+                replayEvidence.setAuditFilters({ eventKey });
+                onActiveViewChange('AUDIT');
+              }}
+            />
+          </div>
+        ) : activeView === 'AUDIT' ? (
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <TTradeReplayDecisionAudit
+              controller={replayEvidence}
+              instrumentNames={replayInstrumentNames}
+              hasReplay={Boolean(activeRunId && replay?.backtestId)}
+              onViewSignal={eventKey => {
+                replayEvidence.setSignalFilters({ eventKey });
+                onActiveViewChange('SIGNALS');
+              }}
             />
           </div>
         ) : activeView === 'POSITIONS' ? (
@@ -2342,25 +1969,44 @@ function TTradeReplayPanel({
               backtestId={replay?.backtestId}
               batchError={cyclesResult.error?.message}
               batches={replayActivityBatches}
-              eventError={executionResult.error?.message}
+              eventError={
+                replayEvidence.auditError ||
+                (replayEvidence.auditPage?.evidence.availability ===
+                'UNAVAILABLE'
+                  ? replayEvidenceUnavailableMessage(
+                      replayEvidence.auditPage.evidence.reasonCode
+                    )
+                  : undefined)
+              }
               events={replayActivityEvents}
               evaluations={replayActivityEvaluations}
               focusedBatchId={activityBatchFilter}
-              hasMoreEvents={false}
-              hasMoreSignals={false}
+              hasMoreEvents={Boolean(
+                replayEvidence.auditPage?.pageInfo.hasNextPage
+              )}
+              hasMoreSignals={Boolean(
+                replayEvidence.signalPage?.pageInfo.hasNextPage
+              )}
               includeDiagnostics={includeActivityDiagnostics}
               instrumentNames={replayInstrumentNames}
               isRunning={isRunning}
               loading={
                 replayResult.fetching ||
                 cyclesResult.fetching ||
-                decisionResult.fetching ||
-                executionResult.fetching
+                replayEvidence.signalsLoading ||
+                replayEvidence.auditLoading
               }
-              loadingMore={false}
+              loadingMore={
+                replayEvidence.signalsLoading || replayEvidence.auditLoading
+              }
               onIncludeDiagnosticsChange={setIncludeActivityDiagnostics}
               onFocusedBatchIdClear={() => setActivityBatchFilter(null)}
-              onLoadMore={() => undefined}
+              onLoadMore={() => {
+                if (replayEvidence.signalPage?.pageInfo.hasNextPage)
+                  replayEvidence.loadMoreSignals();
+                if (replayEvidence.auditPage?.pageInfo.hasNextPage)
+                  replayEvidence.loadMoreAudit();
+              }}
               onRefresh={refreshReplayFacts}
               onViewBatch={batchId => {
                 setPositionFocusBatchId(batchId);
@@ -2369,7 +2015,15 @@ function TTradeReplayPanel({
               onViewCurrent={() => onActiveViewChange('SIGNALS')}
               runId={activeRunId}
               runMode="BACKTEST"
-              signalError={decisionResult.error?.message}
+              signalError={
+                replayEvidence.signalError ||
+                (replayEvidence.signalPage?.evidence.availability ===
+                'UNAVAILABLE'
+                  ? replayEvidenceUnavailableMessage(
+                      replayEvidence.signalPage.evidence.reasonCode
+                    )
+                  : undefined)
+              }
               supplementalItems={replayActivitySupplementalItems}
               wsStatus={graphqlWsStatus}
             />
@@ -4284,10 +3938,11 @@ export function TTradeGlobalPage() {
             {(replaySidebarContext?.activeRunId
               ? [
                   ['OVERVIEW', '总览'],
-                  ['PARAMETERS', '参数'],
                   ['SIGNALS', '信号'],
+                  ['AUDIT', '决策审计'],
                   ['POSITIONS', '仓位与批次'],
                   ['EVENTS', '运行动态'],
+                  ['PARAMETERS', '参数'],
                   ['ACCOUNT', '账户'],
                 ]
               : [
@@ -4304,9 +3959,9 @@ export function TTradeGlobalPage() {
                   type="button"
                   onClick={() => setActiveReplayView(replayView)}
                   className={cn(
-                    'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60',
+                    'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
                     active
-                      ? 'text-cyan-200 after:bg-cyan-400'
+                      ? 'text-blue-200 after:bg-blue-400'
                       : 'text-slate-500 hover:text-slate-200'
                   )}
                 >

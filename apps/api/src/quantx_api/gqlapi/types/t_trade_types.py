@@ -912,6 +912,10 @@ class TTradeBatchEventPage:
 @strawberry.type(description="持久化做 T 信号评估证据")
 class TTradeSignalEvaluation:
   id: strawberry.ID
+  event_key: str
+  category: str
+  candidate_id: Optional[str]
+  linked_intent_id: Optional[str]
   account_id: str
   run_id: strawberry.ID
   stock_code: str

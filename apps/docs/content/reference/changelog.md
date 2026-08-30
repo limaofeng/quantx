@@ -10,6 +10,16 @@
   `graphql-operation-policies.v2.json` 替代，支持 all-of 权限、受众、稳定性与风险。
 - 新增 `openapi-web.json`，Web Cookie 会话不再混入原生/第三方 Client OpenAPI。
 
+## 2026-08-31：做 T 回放证据读模型
+
+- 新增 `tTradeReplaySignalEvaluations`、`tTradeReplayDecisionAudit`，必须同时指定
+  `runId` 与 `backtestId`，使用 `strategy:read` 权限和账户归属校验。
+- 返回数据来源、归档可用性、密封状态、全量筛选统计及稳定游标，不回退到其它版本。
+- `TTradeSignalEvaluation` 新增事件键、分类、候选和意图关联；
+  `TradeIntentView` 新增股数、金额和仓位比例三个显式目标字段。
+- 旧回放未保存信号归档时明确返回不可用，原审计可只读查看；新回放使用 v4 密封归档。
+- 信号只是只读机会证据，不改变 `StrategyInput -> TradeIntent[]` 主路径及实盘审批权限。
+
 ## 2026-08-15：iOS 产品目标重置
 
 - iOS 从只读监控端调整为个人 A 股量化移动控制中心。

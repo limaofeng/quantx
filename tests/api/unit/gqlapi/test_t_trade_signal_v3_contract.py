@@ -1092,6 +1092,8 @@ async def test_evaluation_history_uses_stable_keyset_and_material_default(
       policy_version="t_trade_opportunity_v3.0.0",
       schema_version="3",
       content_fingerprint="fingerprint-b",
+      event_key="event-b",
+      candidate_id="candidate-1",
       payload={"signal_snapshot": _signal_snapshot()},
     ),
     SimpleNamespace(
@@ -1108,6 +1110,8 @@ async def test_evaluation_history_uses_stable_keyset_and_material_default(
       policy_version="t_trade_opportunity_v3.0.0",
       schema_version="3",
       content_fingerprint="fingerprint-a",
+      event_key="event-a",
+      candidate_id=None,
       payload={},
     ),
   ]

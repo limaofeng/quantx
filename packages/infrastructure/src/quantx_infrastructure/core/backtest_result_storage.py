@@ -8,6 +8,7 @@
 import json
 import logging
 import os
+from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -75,6 +76,7 @@ class BacktestResultStorage:
     _execution_logs_path: Optional[str] = field(default=None, repr=False)
     _latest_grid_book_path: Optional[str] = field(default=None, repr=False)
     _manifest_path: Optional[str] = field(default=None, repr=False)
+    _opportunity_archive: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
     def __post_init__(self):
         os.makedirs(self.result_dir, exist_ok=True)
@@ -302,10 +304,26 @@ class BacktestResultStorage:
             separators=(",", ":"),
         )
 
+    async def archive_opportunity_evaluations(
+        self, records: AsyncIterable[Dict[str, Any]], *, account_id: str,
+    ) -> None:
+        from .t_trade_replay_evidence import write_opportunity_archive
+
+        if not self._base_dir or not self.strategy_run_id or not self.version:
+            raise ValueError("REPLAY_EVIDENCE_REQUIRES_VERSION")
+        if self._manifest_path and os.path.exists(self._manifest_path):
+            raise ValueError("BACKTEST_VERSION_ALREADY_SEALED")
+        self._opportunity_archive = await write_opportunity_archive(
+            self._base_dir, records, run_id=self.strategy_run_id,
+            backtest_id=self.backtest_id, version=self.version, account_id=account_id,
+        )
+
     async def flush(self) -> str:
         """将缓冲区数据写入文件并返回文件路径"""
         if not self._file_path:
             raise ValueError("File path not initialized")
+        if self._manifest_path and os.path.exists(self._manifest_path):
+            raise ValueError("BACKTEST_VERSION_ALREADY_SEALED")
 
         all_records = []
         all_records.extend(self._trade_intents)
@@ -439,14 +457,19 @@ class BacktestResultStorage:
                 json.dump(self._latest_grid_book, fp, ensure_ascii=False, default=str)
 
         manifest = {
-            "schema_version": 3,
+            "schema_version": 4,
+            "sealed": True,
             "backtest_id": self.backtest_id,
             "strategy_run_id": self.strategy_run_id,
             "version": self.version,
             "created_at": time_utils.now().isoformat(),
             "audit_mode": self.audit_mode,
             "compaction_policy": BACKTEST_AUDIT_COMPACTION_POLICY,
+            "opportunity_evaluations": self._opportunity_archive,
             "artifacts": {
+                "opportunity_evaluations": (
+                    "opportunity_evaluations.jsonl" if self._opportunity_archive else None
+                ),
                 "raw_trace": (
                     os.path.basename(self._raw_file_path)
                     if self.audit_mode == AUDIT_MODE_FULL and self._raw_file_path
@@ -487,8 +510,19 @@ class BacktestResultStorage:
                 "grid_books_observed": self._grid_book_observed_count,
             },
         }
-        with open(self._manifest_path, "w", encoding="utf-8") as fp:
+        from .t_trade_replay_evidence import file_fingerprint
+
+        manifest["artifact_fingerprints"] = {
+            key: file_fingerprint(os.path.join(self._base_dir, name))
+            for key, name in manifest["artifacts"].items()
+            if name and key in {"decision_events", "execution_summary"}
+        }
+        temporary_manifest = self._manifest_path + ".tmp"
+        with open(temporary_manifest, "w", encoding="utf-8") as fp:
             json.dump(manifest, fp, ensure_ascii=False, default=str, indent=2)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(temporary_manifest, self._manifest_path)
 
     @staticmethod
     def _json_line(record: Dict[str, Any]) -> str:
@@ -496,9 +530,13 @@ class BacktestResultStorage:
 
     @classmethod
     def _write_jsonl(cls, path: str, records: List[Dict[str, Any]]) -> None:
-        with open(path, "w", encoding="utf-8") as fp:
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as fp:
             for record in records:
                 fp.write(cls._json_line(record))
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(temporary, path)
 
     @classmethod
     def _append_jsonl_sync(cls, path: str, record: Dict[str, Any]) -> None:
@@ -972,7 +1010,8 @@ class BacktestResultStorage:
     def _compact_output_summary(cls, output_summary: Dict[str, Any]) -> Dict[str, Any]:
         compact = cls._pick_keys(
             output_summary,
-            ["trade_intent_count", "decision_tags", "reason", "tags"],
+            ["trade_intent_count", "decision_tags", "reason", "tags",
+             "format", "record_kind", "evaluation_references"],
         )
         payload = dict(output_summary.get("trace_payload") or {})
         if payload:

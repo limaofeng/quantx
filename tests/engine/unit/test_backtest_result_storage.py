@@ -160,7 +160,7 @@ async def test_indexed_layout_writes_query_summaries_and_manifest(tmp_path):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     artifact_dir = manifest_path.parent
 
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     assert manifest["audit_mode"] == "events_only"
     assert manifest["strategy_run_id"] == "run-indexed"
     assert manifest["version"] == 2

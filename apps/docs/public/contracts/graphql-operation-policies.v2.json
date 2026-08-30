@@ -2786,6 +2786,18 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "tTradeReplayDecisionAudit": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "tTradeReplayHistory": {
         "audiences": [
           "web",
@@ -2799,6 +2811,18 @@
         "stability": "supported"
       },
       "tTradeReplayPreparation": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeReplaySignalEvaluations": {
         "audiences": [
           "web",
           "native",

@@ -163,12 +163,11 @@ describe('buildTTradeActivityItems', () => {
     expect(newest.previousSignalSnapshot).toBeNull();
   });
 
-  it('labels backtest broker fills as simulated and keeps replay summaries', () => {
+  it('labels backtest broker fills as simulated and keeps real signal summaries', () => {
     const replayEvaluation: ActivitySignalEvaluation = {
-      ...evaluation('replay-decision', '2026-08-25T09:45:00+08:00'),
-      signalSnapshot: null,
-      title: '回放决策',
-      summary: '准备时长不足，未产生 TradeIntent',
+      ...evaluation('replay-signal', '2026-08-25T09:45:00+08:00'),
+      eventType: 'CANDIDATE_SUPPRESSED',
+      summary: '准备时长不足，候选已抑制',
     };
     const replayTrade: ActivityBatchEvent = {
       eventId: 'replay-trade',
@@ -197,13 +196,37 @@ describe('buildTTradeActivityItems', () => {
 
     expect(items[0].title).toBe('模拟成交');
     expect(items[1]).toMatchObject({
-      title: '回放决策',
-      summary: '准备时长不足，未产生 TradeIntent',
+      kind: 'CANDIDATE',
+      title: '候选已抑制',
+      summary: '准备时长不足，候选已抑制',
     });
   });
 });
 
 describe('filterTTradeActivityItems', () => {
+  it('keeps policy and continuity changes visible when diagnostics are hidden', () => {
+    const items = buildTTradeActivityItems(
+      [
+        'POLICY_CHANGED',
+        'PROFILE_CHANGED',
+        'CONTINUITY_GENERATION_CHANGED',
+      ].map(eventType => ({
+        ...evaluation(eventType, '2026-08-25T10:00:00+08:00'),
+        eventType,
+      })),
+      [],
+      []
+    );
+    expect(
+      filterTTradeActivityItems(items, {
+        includeDiagnostics: false,
+        kind: 'ALL',
+        stockCode: 'ALL',
+        search: '',
+      }).map(item => item.kind)
+    ).toEqual(['CONTEXT', 'CONTEXT', 'CONTEXT']);
+  });
+
   it('hides diagnostic observations by default and searches persisted IDs', () => {
     const items = buildTTradeActivityItems(
       [

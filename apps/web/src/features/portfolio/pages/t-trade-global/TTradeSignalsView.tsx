@@ -23,92 +23,20 @@ import {
   type SignalSnapshot,
 } from './monitoring';
 import {
+  nullableScore,
+  signalEventTypes,
+  signalEventLabels,
+  candidateStatusLabels,
+  signalPathLabels,
+  signalPhaseLabels,
+  signalEventTone,
+} from './signalPresentation';
+import {
   type SignalEvaluationLike,
   type TTradeMonitorLike,
 } from './TTradeLiveMonitor';
+import { TTradeSignalEvidence } from './TTradeSignalEvidence';
 import { formatNumber, formatTime } from './utils';
-
-function nullableScore(value?: number | null) {
-  return value == null || !Number.isFinite(value)
-    ? '不可计算'
-    : formatNumber(value, 1);
-}
-
-const signalEventTypes = new Set([
-  'FSM_TRANSITION',
-  'CANDIDATE_LATCHED',
-  'CANDIDATE_AWAITING_APPROVAL',
-  'CANDIDATE_SUPPRESSED',
-  'CANDIDATE_REARMING',
-  'CANDIDATE_CLEARED',
-  'CANDIDATE_STATE_CHANGED',
-  'INTENT_LINKED',
-]);
-
-const signalEventLabels: Readonly<Record<string, string>> = {
-  FSM_TRANSITION: '形态状态迁移',
-  CANDIDATE_LATCHED: '候选已锁存',
-  CANDIDATE_AWAITING_APPROVAL: '候选等待确认',
-  CANDIDATE_SUPPRESSED: '候选已抑制',
-  CANDIDATE_REARMING: '候选等待再武装',
-  CANDIDATE_CLEARED: '候选已清除',
-  CANDIDATE_STATE_CHANGED: '候选状态变更',
-  INTENT_LINKED: '交易意图已关联',
-};
-
-const candidateStatusLabels: Readonly<Record<string, string>> = {
-  NONE: '无候选',
-  LATCHED: '候选已锁存',
-  AWAITING_APPROVAL: '等待人工确认',
-  SUPPRESSED: '候选已抑制',
-  REARMING: '等待再武装',
-};
-
-const signalPathLabels: Readonly<Record<string, string>> = {
-  PULLBACK_REBOUND: '回撤反弹',
-  MOMENTUM_ACCELERATION: '早期动量',
-};
-
-const signalPhaseLabels: Readonly<Record<string, string>> = {
-  NONE: '暂无主导形态',
-  OBSERVING: '观察中',
-  PULLBACK_FORMING: '回撤形成',
-  LOW_STABILIZING: '低点企稳',
-  REBOUND_CONFIRMING: '反弹确认',
-  BASELINING: '建立基线',
-  MOMENTUM_BUILDING: '动量形成',
-  ACCELERATING: '加速确认',
-  OVEREXTENDED: '过度延伸',
-  CANDIDATE_LATCHED: '候选锁存',
-  SUPPRESSED: '已抑制',
-  PULLBACK_OBSERVING: '回撤 · 观察',
-  PULLBACK_LOW_STABILIZING: '回撤 · 低点企稳',
-  PULLBACK_REBOUND_CONFIRMING: '回撤 · 反弹确认',
-  PULLBACK_CANDIDATE_LATCHED: '回撤 · 候选锁存',
-  PULLBACK_SUPPRESSED: '回撤 · 已抑制',
-  MOMENTUM_OBSERVING: '动量 · 观察',
-  MOMENTUM_BASELINING: '动量 · 建立基线',
-  MOMENTUM_ACCELERATING: '动量 · 加速确认',
-  MOMENTUM_OVEREXTENDED: '动量 · 过度延伸',
-  MOMENTUM_CANDIDATE_LATCHED: '动量 · 候选锁存',
-  MOMENTUM_SUPPRESSED: '动量 · 已抑制',
-};
-
-function signalEventTone(eventType: string) {
-  if (eventType === 'CANDIDATE_SUPPRESSED') {
-    return 'border-rose-400/25 bg-rose-400/[0.05] text-rose-200';
-  }
-  if (
-    eventType === 'CANDIDATE_AWAITING_APPROVAL' ||
-    eventType === 'CANDIDATE_REARMING'
-  ) {
-    return 'border-amber-400/25 bg-amber-400/[0.05] text-amber-200';
-  }
-  if (eventType === 'INTENT_LINKED') {
-    return 'border-emerald-400/25 bg-emerald-400/[0.05] text-emerald-200';
-  }
-  return 'border-blue-400/25 bg-blue-400/[0.05] text-blue-200';
-}
 
 export type CandidateTraceLike = {
   accountId: string;
@@ -488,9 +416,6 @@ function TTradeSignalDetails({
     selectedTrace.strategyRunId === signal.runId &&
     selectedTrace.candidateId === snapshot.candidateId
   );
-  const path = snapshot?.selectedPath
-    ? signalPathLabels[snapshot.selectedPath] || snapshot.selectedPath
-    : signalPhaseLabels[snapshot?.dominantPhase || ''] || '未选择路径';
 
   return (
     <div className="space-y-3 border-t border-white/[0.06] bg-[#0a1727] p-ui-section">
@@ -556,85 +481,7 @@ function TTradeSignalDetails({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-2 text-ui-caption lg:grid-cols-4">
-            {[
-              [
-                '候选状态',
-                candidateStatusLabels[snapshot.candidateStatus] ||
-                  snapshot.candidateStatus,
-              ],
-              ['形态 / 路径', path],
-              [
-                '机会分 / 候选阈值',
-                `${nullableScore(snapshot.opportunityScore)} / ${nullableScore(snapshot.candidateThreshold)}`,
-              ],
-              ['数据健康', snapshot.dataHealth],
-            ].map(([label, value]) => (
-              <div key={label} className="border border-white/[0.06] p-2.5">
-                <div className="text-slate-600">{label}</div>
-                <div className="mt-1 font-mono font-bold text-slate-200">
-                  {value}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="grid gap-3 xl:grid-cols-2">
-            <section className="border border-white/[0.06] p-3">
-              <h4 className="text-ui-caption font-bold text-slate-300">
-                阻断原因
-              </h4>
-              {snapshot.topBlockers.length === 0 ? (
-                <p className="mt-2 text-ui-caption text-slate-600">
-                  当前信号没有首要阻断。
-                </p>
-              ) : (
-                <ul className="mt-2 space-y-2">
-                  {snapshot.topBlockers.map(blocker => (
-                    <li
-                      key={blocker.code}
-                      className="border-l-2 border-amber-400/50 pl-2 text-ui-caption"
-                    >
-                      <div className="font-bold text-amber-100">
-                        {blocker.label}
-                      </div>
-                      <div className="mt-0.5 leading-4 text-slate-600">
-                        {blocker.detail || blocker.code}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            <section className="border border-white/[0.06] p-3">
-              <h4 className="text-ui-caption font-bold text-slate-300">
-                评分贡献
-              </h4>
-              {snapshot.scoreContributions.length === 0 ? (
-                <p className="mt-2 text-ui-caption text-slate-600">
-                  当前快照没有评分贡献明细。
-                </p>
-              ) : (
-                <ul className="mt-2 space-y-1.5 text-ui-caption">
-                  {snapshot.scoreContributions.slice(0, 6).map(contribution => (
-                    <li
-                      key={contribution.code}
-                      className="flex items-center justify-between gap-3"
-                    >
-                      <span className="truncate text-slate-500">
-                        {contribution.label}
-                      </span>
-                      <span className="shrink-0 font-mono text-slate-300">
-                        {formatNumber(contribution.points, 1)} /{' '}
-                        {formatNumber(contribution.maxPoints, 1)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          </div>
+          <TTradeSignalEvidence snapshot={snapshot} />
 
           <div className="flex flex-wrap items-center justify-end gap-2 border-t border-white/[0.05] pt-3">
             {snapshot.candidateId &&
