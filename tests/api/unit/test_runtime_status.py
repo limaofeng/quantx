@@ -485,6 +485,26 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     current_heartbeat_at.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
   )
 
+  async with session_factory() as db:
+    heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
+    heartbeat.status = "TRADING_UNAVAILABLE"
+    heartbeat.details = {
+      **dict(heartbeat.details or {}),
+      "xttradingStatus": "DISCONNECTED",
+      "xttradingReason": "XTTRADING_UNAVAILABLE",
+    }
+    await db.commit()
+
+  components = await runtime_status._component_heartbeats()
+  assert components["qmt-agent"]["status"] == "degraded"
+  assert components["qmt-agent"]["reasonCode"] == "XTTRADING_UNAVAILABLE"
+  assert components["market-data"]["status"] == "ready"
+
+  async with session_factory() as db:
+    heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
+    heartbeat.status = "READY"
+    await db.commit()
+
   async def state_without_freshness():
     return stream_state, None
 
@@ -517,6 +537,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
 
   components = await runtime_status._component_heartbeats()
   assert components["qmt-agent"]["status"] == "degraded"
+  assert components["qmt-agent"]["reasonCode"] == "XTDATA_UNAVAILABLE"
   assert components["qmt-agent"]["degradedDevices"] == 1
   assert components["market-data"]["status"] == "offline"
 

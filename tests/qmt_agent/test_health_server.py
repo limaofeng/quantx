@@ -114,7 +114,7 @@ async def test_data_only_health_does_not_require_xttrading() -> None:
     ),
     (
       lambda state: state.set_xttrading_connected(False),
-      "unavailable",
+      "degraded",
       "XTTRADING_UNAVAILABLE",
     ),
     (

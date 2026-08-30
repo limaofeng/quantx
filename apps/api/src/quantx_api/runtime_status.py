@@ -22,6 +22,7 @@ from quantx_infrastructure.services.agent_session_guard import (
   QMT_AGENT_NOT_RECONCILED,
   QMT_AGENT_OFFLINE,
   QMT_AGENT_STALE,
+  agent_unready_reason_code,
   evaluate_agent_session,
 )
 from quantx_infrastructure.services.market_stream_readiness import (
@@ -216,6 +217,26 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
   reconciling_agents = [
     agent for agent, status in connected_agents if status in RECONCILING_AGENT_STATUSES
   ]
+  connected_agent_reasons = {
+    agent_unready_reason_code(
+      heartbeat_by_component.get(f"qmt-agent:{agent.id}")
+    )
+    for agent, status in connected_agents
+    if status != "READY"
+  }
+  degraded_reason = next(
+    (
+      reason
+      for reason in (
+        "XTDATA_UNAVAILABLE",
+        "XTTRADING_UNAVAILABLE",
+        "EMERGENCY_STOP",
+        QMT_AGENT_NOT_RECONCILED,
+      )
+      if reason in connected_agent_reasons
+    ),
+    QMT_AGENT_NOT_RECONCILED,
+  )
   components["qmt-agent"] = {
     "status": (
       "blocked"
@@ -247,7 +268,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       else ""
       if ready_agents
       else (
-        QMT_AGENT_NOT_RECONCILED
+        degraded_reason
         if connected_agents
         else next(
           (

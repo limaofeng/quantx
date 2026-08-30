@@ -19,6 +19,8 @@ QMT_AGENT_OFFLINE = "QMT_AGENT_OFFLINE"
 QMT_AGENT_STALE = "QMT_AGENT_STALE"
 QMT_AGENT_NOT_RECONCILED = "QMT_AGENT_NOT_RECONCILED"
 QMT_ACCOUNT_MISMATCH = "QMT_ACCOUNT_MISMATCH"
+XTDATA_UNAVAILABLE = "XTDATA_UNAVAILABLE"
+XTTRADING_UNAVAILABLE = "XTTRADING_UNAVAILABLE"
 
 DEFAULT_SESSION_TTL_SECONDS = 90.0
 MAX_AGENT_CLOCK_SKEW_SECONDS = 5.0
@@ -162,6 +164,23 @@ def evaluate_agent_session(
     agent_session_id=agent_session_id,
     server_received_at=server_received_at,
   )
+
+
+def agent_unready_reason_code(agent_heartbeat: Any) -> str:
+  """Return the stable capability reason for a current non-ready Agent."""
+
+  if agent_heartbeat is None:
+    return QMT_AGENT_OFFLINE
+  status = str(getattr(agent_heartbeat, "status", "")).upper()
+  if status == "READY":
+    return ""
+  if status == "XTDATA_UNAVAILABLE":
+    return XTDATA_UNAVAILABLE
+  if status == "TRADING_UNAVAILABLE":
+    return XTTRADING_UNAVAILABLE
+  if status == "EMERGENCY_STOP":
+    return "EMERGENCY_STOP"
+  return QMT_AGENT_NOT_RECONCILED
 
 
 def report_belongs_to_current_session(

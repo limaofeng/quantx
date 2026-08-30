@@ -430,6 +430,48 @@ async def test_account_status_treats_closed_market_as_healthy_standby(
 
 
 @pytest.mark.asyncio
+async def test_account_status_keeps_market_standby_when_trading_is_unavailable(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+) -> None:
+  agent = _agent(fixed_utcnow)
+  agent.status = "TRADING_UNAVAILABLE"
+  agent.details["xttradingStatus"] = "DISCONNECTED"
+  agent.details["xttradingReason"] = "XTTRADING_UNAVAILABLE"
+  rows = [
+    (
+      _control(fixed_utcnow),
+      SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+      _device("device-1"),
+      agent,
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+    )
+  ]
+
+  result = await _status(
+    monkeypatch,
+    rows,
+    market_status=MarketStreamReadinessStatus.STANDBY,
+  )
+  checks = {item["code"]: item for item in result["checks"]}
+
+  assert result["agent_status"] == "TRADING_UNAVAILABLE"
+  assert result["agent_mode"] == "live"
+  assert result["protocol_version"] == "1.1"
+  assert result["qmt_launch_reason_code"] == "XTTRADING_UNAVAILABLE"
+  assert checks["LIVE_AGENT_READY"]["status"] == "FAILED"
+  assert "XTTRADING_UNAVAILABLE" in checks["LIVE_AGENT_READY"]["message"]
+  assert checks["AGENT_MODE_LIVE"]["status"] == "PASSED"
+  assert checks["PROTOCOL_1_1"]["status"] == "PASSED"
+  assert checks["MARKET_STREAM_READY"]["status"] == "STANDBY"
+  assert result["can_increase_risk"] is False
+
+
+@pytest.mark.asyncio
 async def test_account_status_fails_closed_for_multiple_ready_live_agents(
   monkeypatch: pytest.MonkeyPatch,
   fixed_utcnow: datetime,

@@ -164,7 +164,7 @@ class AgentHealthState:
       and projection.xttrading_status is not QmtAgentDependencyStatus.CONNECTED
     ):
       return (
-        QmtAgentHealthStatus.UNAVAILABLE,
+        QmtAgentHealthStatus.DEGRADED,
         QmtAgentHealthReason.XTTRADING_UNAVAILABLE,
       )
     if projection.reconciliation_status is QmtAgentReconciliationStatus.RECONCILING:

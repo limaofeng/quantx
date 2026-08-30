@@ -53,8 +53,10 @@ Agent 默认监听 `0.0.0.0:18084`，可用 `QMT_AGENT_HEALTH_HOST` 和
 响应不包含账户、设备 ID、远端地址、QMT 路径、凭据、日志、异常文本或调用栈。
 handler 只读取一次不可变的 `AgentHealthState`，不会调用 broker、XTData、
 XTTrading、数据库或网络。`data-only` 和 `paper` 的 XTTrading 状态固定为
-`disabled`，不会因此失败；`live` 必须实际连接 XTTrading。emergency stop、账户增仓
-授权和 kill switch 仍由既有安全入口裁决，不单独改变本地健康状态。
+`disabled`，不会因此失败；`live` 的 XTTrading 断开会关闭全部交易门并把 Agent
+标为 `degraded / XTTRADING_UNAVAILABLE`，但只要控制连接和 XTData 仍可用，就不把
+行情与历史数据能力误报为整体 `unavailable`。emergency stop、账户增仓授权和 kill
+switch 仍由既有安全入口裁决，不单独改变本地健康状态。
 
 健康 server、Agent runtime 与进程 watchdog heartbeat 位于同一结构化并发边界。
 端口绑定失败或 server 意外退出会结束 Agent 主进程并由 supervisor 重启；正常关闭

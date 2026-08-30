@@ -29,7 +29,7 @@ from quantx_infrastructure.services.account_execution_quarantine_service import 
   AccountExecutionQuarantineService,
 )
 from quantx_infrastructure.services.agent_session_guard import (
-  QMT_AGENT_NOT_RECONCILED,
+  agent_unready_reason_code,
   evaluate_agent_session,
 )
 from quantx_infrastructure.services.market_stream_readiness import (
@@ -551,17 +551,16 @@ class AccountExecutionSafetyService:
       agent_session = evaluate_agent_session(
         agent,
         now=now,
-        acceptable_statuses={"READY"},
       )
-      agent_heartbeat_fresh = agent_session.current
+      agent_heartbeat_current = agent_session.current
       live_agent_ready = bool(
         not multiple_ready_live_agents
         and len(ready_live_agents) == 1
-        and agent_heartbeat_fresh
+        and agent_heartbeat_current
         and str(agent.status).upper() == "READY"
       )
       agent_market_stream_ready = bool(
-        live_agent_ready
+        agent_heartbeat_current
         and str(agent_details.get("marketStreamStatus") or "").upper() == "READY"
       )
       market_stream_readiness = (
@@ -587,13 +586,13 @@ class AccountExecutionSafetyService:
         live_agent_blocked_reason = "没有绑定该账户且具备 live 能力的已登记 QMT Agent"
       elif agent is None:
         live_agent_blocked_reason = "对应账户的 live Agent 尚未上报心跳"
-      elif not agent_heartbeat_fresh:
+      elif not agent_heartbeat_current:
         live_agent_blocked_reason = "对应账户的 live Agent 已离线或心跳超过 90 秒"
       else:
         live_agent_blocked_reason = "对应账户的 live Agent 当前未就绪"
 
       agent_reason_code = agent_session.reason_code or (
-        "" if live_agent_ready else QMT_AGENT_NOT_RECONCILED
+        "" if live_agent_ready else agent_unready_reason_code(agent)
       )
       launch_block_reason = qmt_agent_launch_block_reason()
       if not multiple_ready_live_agents and not live_agent_ready and agent_reason_code:
@@ -825,19 +824,21 @@ class AccountExecutionSafetyService:
           "BLOCKED"
           if launch_block_reason
           else str(agent.status)
-          if agent_heartbeat_fresh and agent
+          if agent_heartbeat_current and agent
           else "OFFLINE"
         ),
         "agent_device_id": str(device.id) if device else None,
         "ready_live_agent_count": len(ready_live_agents),
         "agent_mode": (
           reported_agent_mode
-          if agent_heartbeat_fresh and not launch_block_reason
+          if agent_heartbeat_current and not launch_block_reason
           else "offline"
         ),
         "requested_agent_mode": reported_agent_mode or "unknown",
         "qmt_launch_reason_code": agent_reason_code,
-        "protocol_version": reported_protocol_version if agent_heartbeat_fresh else "",
+        "protocol_version": (
+          reported_protocol_version if agent_heartbeat_current else ""
+        ),
         "reconcile_status": str(control.reconcile_status if control else "UNKNOWN"),
         "kill_switch": authorization_state == "KILLED",
         "execution_window_active": controlled_window_active,

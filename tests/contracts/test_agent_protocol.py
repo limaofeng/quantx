@@ -113,6 +113,13 @@ def test_qmt_agent_health_applies_mode_specific_trading_requirement() -> None:
   )
   assert degraded.reason_code is QmtAgentHealthReason.TRADING_RECONCILING
 
+  trading_unavailable = _ready_agent_health(
+    status=QmtAgentHealthStatus.DEGRADED,
+    reason_code=QmtAgentHealthReason.XTTRADING_UNAVAILABLE,
+    xttrading_status=QmtAgentDependencyStatus.DISCONNECTED,
+  )
+  assert trading_unavailable.status is QmtAgentHealthStatus.DEGRADED
+
 
 def test_protocol_rejects_unknown_version() -> None:
   with pytest.raises(ValidationError):

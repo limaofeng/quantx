@@ -38,7 +38,9 @@
 `composite`；Engine、Worker、行情服务和 AI Runtime 为 `derived`；其余为
 `direct`。Windows 连接或协议失败时 QMT Agent 立即为 unavailable 且延迟为空；合法
 HTTP 200/503 都生成 RTT 样本。原因优先级固定为健康端点传输/协议错误、API 服务端
-语义原因、Windows 本地 readiness 原因。
+语义原因、Windows 本地 readiness 原因。XTTrading/账户登录失败但控制连接、XTData
+与行情流仍在线时固定记为 `degraded / XTTRADING_UNAVAILABLE`；账户准入中的
+`MARKET_STREAM_READY` 独立读取权威行情水位，不以交易账户 READY 为前置条件。
 
 账户实盘准入采用单向见证模型：API 内的 `AccountExecutionSafetyService` 是唯一
 判定者，Monitor 每 30 秒从 API 回环地址读取一次完整、脱敏且不含账户标识的准入

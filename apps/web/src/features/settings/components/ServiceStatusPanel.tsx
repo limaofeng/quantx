@@ -326,7 +326,9 @@ function TargetDetails({
     point => point.p50 !== null || point.p95 !== null
   );
   const explanation =
-    target.probeKind === 'derived'
+    target.id === 'account-safety-observer'
+      ? '该状态只表示 Monitor 能持续采集脱敏准入快照；QMT、行情与交易门禁的实际结论请在“交易安全”中查看。'
+      : target.probeKind === 'derived'
       ? '该组件来自语义快照，不生成虚假的独立延迟。'
       : target.probeKind === 'composite'
         ? '状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。'

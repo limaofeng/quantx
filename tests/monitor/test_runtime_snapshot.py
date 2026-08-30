@@ -11,6 +11,7 @@ from quantx_monitor.probes.runtime_snapshot import (
   ("value", "expected"),
   [
     ("ready", MonitorStatus.HEALTHY),
+    ("degraded", MonitorStatus.DEGRADED),
     ("stale", MonitorStatus.DEGRADED),
     ("disabled", MonitorStatus.DISABLED),
     ("blocked", MonitorStatus.UNAVAILABLE),

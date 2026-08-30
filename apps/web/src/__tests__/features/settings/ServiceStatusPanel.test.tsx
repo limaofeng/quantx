@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ServiceStatusPanel } from '@/features/settings/components/ServiceStatusPanel';
+import type { MonitorSummary } from '@/features/system/monitor-api';
 
 const monitorMocks = vi.hoisted(() => ({
   getMonitorSummary: vi.fn(),
@@ -13,7 +14,7 @@ vi.mock('@/features/system/monitor-api', () => monitorMocks);
 
 function summary(
   qmtStatus: 'healthy' | 'degraded' | 'unavailable' = 'healthy'
-) {
+): MonitorSummary {
   const now = new Date().toISOString();
   return {
     generatedAt: now,
@@ -169,6 +170,50 @@ describe('ServiceStatusPanel', () => {
 
     expect(await screen.findByText('延迟 15.60 ms')).toBeInTheDocument();
     expect(screen.getAllByText('不可用').length).toBeGreaterThan(0);
+  });
+
+  it('clarifies that account admission availability is not the gate result', async () => {
+    const monitorSummary = summary();
+    const now = new Date().toISOString();
+    monitorSummary.groups[0].targetIds.push('account-safety-observer');
+    monitorSummary.targets.push({
+      id: 'account-safety-observer',
+      name: '账户准入观测',
+      group: 'quantx_runtime',
+      optional: true,
+      probeKind: 'direct',
+      status: 'healthy',
+      checkedAt: now,
+      lastSuccessAt: now,
+      latencyMs: 20,
+      reasonCode: null,
+      availabilityPct: 100,
+      healthyPct: 100,
+      coveragePct: 100,
+      latencyP50Ms: 18,
+      latencyP95Ms: 25,
+      sampleCount: 120,
+      activeIncident: false,
+    });
+    monitorMocks.getMonitorSummary.mockResolvedValue(monitorSummary);
+    monitorMocks.getMonitorHistory.mockImplementation((targetId: string) =>
+      Promise.resolve({
+        target: { id: targetId, name: targetId },
+        range: '24h',
+        bucketSeconds: 60,
+        points: [],
+      })
+    );
+    monitorMocks.getMonitorIncidents.mockResolvedValue([]);
+
+    render(<ServiceStatusPanel />);
+    fireEvent.click(
+      await screen.findByRole('button', { name: /账户准入观测/ })
+    );
+
+    expect(
+      await screen.findByText(/该状态只表示 Monitor 能持续采集脱敏准入快照/)
+    ).toBeInTheDocument();
   });
 
   it('announces an initial monitor failure and offers a retry', async () => {

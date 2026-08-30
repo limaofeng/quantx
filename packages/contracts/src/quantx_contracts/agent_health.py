@@ -118,7 +118,7 @@ class QmtAgentHealthSnapshot(_QmtAgentHealthBase):
       self.mode is QmtAgentMode.LIVE
       and self.xttrading_status is not QmtAgentDependencyStatus.CONNECTED
     ):
-      expected_status = QmtAgentHealthStatus.UNAVAILABLE
+      expected_status = QmtAgentHealthStatus.DEGRADED
       expected_reason = QmtAgentHealthReason.XTTRADING_UNAVAILABLE
     elif self.reconciliation_status is QmtAgentReconciliationStatus.RECONCILING:
       expected_status = QmtAgentHealthStatus.DEGRADED

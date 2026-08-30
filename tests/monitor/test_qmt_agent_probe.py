@@ -34,8 +34,11 @@ def health_payload(
   reason: QmtAgentHealthReason | None = None,
 ) -> dict[str, object]:
   xtdata_status = QmtAgentDependencyStatus.CONNECTED
+  xttrading_status = QmtAgentDependencyStatus.CONNECTED
   if reason is QmtAgentHealthReason.XTDATA_UNAVAILABLE:
     xtdata_status = QmtAgentDependencyStatus.DISCONNECTED
+  if reason is QmtAgentHealthReason.XTTRADING_UNAVAILABLE:
+    xttrading_status = QmtAgentDependencyStatus.DISCONNECTED
   return QmtAgentHealthSnapshot(
     status=status,
     reason_code=reason,
@@ -49,7 +52,7 @@ def health_payload(
       else QmtAgentReconciliationStatus.RECONCILING
     ),
     xtdata_status=xtdata_status,
-    xttrading_status=QmtAgentDependencyStatus.CONNECTED,
+    xttrading_status=xttrading_status,
     market_stream_status=QmtAgentMarketStreamStatus.READY,
     observed_at=datetime.now(timezone.utc),
   ).model_dump(mode="json")
@@ -72,6 +75,12 @@ async def run_probe(handler) -> ProbeResult:
       503,
       QmtAgentHealthStatus.DEGRADED,
       QmtAgentHealthReason.TRADING_RECONCILING,
+      MonitorStatus.DEGRADED,
+    ),
+    (
+      503,
+      QmtAgentHealthStatus.DEGRADED,
+      QmtAgentHealthReason.XTTRADING_UNAVAILABLE,
       MonitorStatus.DEGRADED,
     ),
     (

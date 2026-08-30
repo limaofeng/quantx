@@ -18,7 +18,7 @@ COMPONENT_TARGETS = {
 }
 
 HEALTHY = frozenset({"ready", "alive", "healthy"})
-DEGRADED = frozenset({"starting", "reconciling", "syncing", "stale"})
+DEGRADED = frozenset({"degraded", "starting", "reconciling", "syncing", "stale"})
 DISABLED = frozenset({"disabled", "unconfigured"})
 
 
