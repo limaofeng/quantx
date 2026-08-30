@@ -4,6 +4,7 @@ GraphQL应用模块
 """
 
 import asyncio
+import time
 import uuid
 from typing import Any, Dict
 
@@ -22,6 +23,12 @@ from quantx_api.auth.service import AuthService
 from quantx_api.auth.tokens import utcnow
 
 from .dataloaders.quote_loader import load_quotes
+from .performance import (
+  bind_graphql_http_request,
+  current_graphql_http_request,
+  record_graphql_transport_phase,
+  reset_graphql_http_request,
+)
 from .schema import schema
 from .security import bearer_from_connection_params, extract_bearer
 
@@ -34,39 +41,77 @@ async def _authenticate(token: str):
 
 async def get_context(request: HTTPConnection):
   """Build an authenticated context for HTTP or the WebSocket handshake."""
-  request_id = str(
-    getattr(getattr(request, "state", None), "request_id", "") or uuid.uuid4()
-  )[:64]
-  context: Dict[str, Any] = {
-    "auth_error": None,
-    "principal": None,
-    "quote_loader": DataLoader(load_fn=load_quotes),
-    "request": request,
-    "request_id": request_id,
-  }
-  authorization = request.headers.get("authorization")
-  if authorization:
-    try:
-      context["principal"] = await _authenticate(extract_bearer(authorization))
-    except AuthError as exc:
-      context["auth_error"] = exc
-  elif isinstance(request, Request):
-    context["auth_error"] = AuthError(
-      "UNAUTHENTICATED", "缺少 Bearer 访问令牌", status_code=401
-    )
-  return context
+  started_at = time.perf_counter()
+  try:
+    request_id = str(
+      getattr(getattr(request, "state", None), "request_id", "") or uuid.uuid4()
+    )[:64]
+    context: Dict[str, Any] = {
+      "auth_error": None,
+      "principal": None,
+      "quote_loader": DataLoader(load_fn=load_quotes),
+      "request": request,
+      "request_id": request_id,
+    }
+    authorization = request.headers.get("authorization")
+    if authorization:
+      try:
+        context["principal"] = await _authenticate(extract_bearer(authorization))
+      except AuthError as exc:
+        context["auth_error"] = exc
+    elif isinstance(request, Request):
+      context["auth_error"] = AuthError(
+        "UNAUTHENTICATED", "缺少 Bearer 访问令牌", status_code=401
+      )
+    return context
+  finally:
+    if isinstance(request, Request):
+      record_graphql_transport_phase(
+        request,
+        "context",
+        time.perf_counter() - started_at,
+      )
 
 
 class AuthenticatedGraphQLRouter(GraphQLRouter):
-  async def run(self, *args, **kwargs):
-    context = kwargs.get("context")
+  async def run(self, request, *args, **kwargs):
+    context = kwargs.get("context", args[0] if args else None)
+    request_token = (
+      bind_graphql_http_request(request) if isinstance(request, Request) else None
+    )
     try:
-      return await super().run(*args, **kwargs)
+      return await super().run(request, *args, **kwargs)
     finally:
+      if request_token is not None:
+        reset_graphql_http_request(request_token)
       if isinstance(context, dict):
         expiry_task = context.get("auth_expiry_task")
         if isinstance(expiry_task, asyncio.Task) and not expiry_task.done():
           expiry_task.cancel()
+
+  async def process_result(self, request, result):
+    started_at = time.perf_counter()
+    try:
+      return await super().process_result(request, result)
+    finally:
+      record_graphql_transport_phase(
+        request,
+        "format",
+        time.perf_counter() - started_at,
+      )
+
+  def create_response(self, response_data, sub_response):
+    request = current_graphql_http_request()
+    started_at = time.perf_counter()
+    try:
+      return super().create_response(response_data, sub_response)
+    finally:
+      if request is not None:
+        record_graphql_transport_phase(
+          request,
+          "serialize",
+          time.perf_counter() - started_at,
+        )
 
   async def on_ws_connect(self, context: Dict[str, Any]):
     if context.get("principal") is None:

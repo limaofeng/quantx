@@ -124,6 +124,31 @@ GRAPHQL_QUERY_ADMISSION_REJECTIONS = Counter(
   "GraphQL query requests rejected before execution",
   ["reason"],
 )
+GRAPHQL_PHASE_DURATION = Histogram(
+  "quantx_graphql_phase_duration_seconds",
+  "GraphQL request duration by bounded execution phase",
+  ["phase"],
+)
+GRAPHQL_FIELD_RESOLVER_INVOCATIONS = Counter(
+  "quantx_graphql_field_resolver_invocations_total",
+  "GraphQL field resolver invocations by schema field and outcome",
+  ["parent_type", "field", "outcome"],
+)
+GRAPHQL_FIELD_RESOLVER_REQUEST_DURATION = Histogram(
+  "quantx_graphql_field_resolver_request_duration_seconds",
+  "Per-request aggregate GraphQL field resolver duration",
+  ["parent_type", "field", "statistic"],
+)
+GRAPHQL_SQL_STATEMENTS = Counter(
+  "quantx_graphql_sql_statements_total",
+  "SQL statements executed while resolving GraphQL operations",
+  ["kind", "outcome"],
+)
+GRAPHQL_SQL_REQUEST_DURATION = Histogram(
+  "quantx_graphql_sql_request_duration_seconds",
+  "Per-request aggregate SQL duration while resolving GraphQL operations",
+  ["kind", "statistic"],
+)
 MARKET_STREAM_CONNECTIONS = Gauge(
   "quantx_market_stream_connections",
   "Active dedicated QMT Agent market connections",

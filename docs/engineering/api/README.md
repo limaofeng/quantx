@@ -52,6 +52,31 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
   收敛，组件健康保持 `ready`，账户检查显示 `STANDBY`，不得把自然过期的租约报告
   为运行异常；任何水位不一致、提交未完成或 Agent 离线仍保持失败。
 
+## GraphQL 耗时跟踪
+
+每个 GraphQL HTTP 请求都会分别记录 `context`、`parse`、`validate`、`execute`、
+`format` 和 `serialize` 阶段。`execute` 内的 resolver 以 GraphQL schema 的
+`ParentType.field` 聚合 `count`、`total`、`max` 和错误次数；列表下同一字段解析多次
+只占一个聚合项。SQL 统计与当前 GraphQL operation 关联，只导出语句类型和规范化
+语句的 SHA-256 短指纹，不记录 SQL 原文、绑定参数或 GraphQL variables。
+
+浏览器 Network 面板的 GraphQL 响应包含 `Server-Timing`，其中可直接查看阶段耗时、
+SQL 总耗时和总耗时最高的六个字段。已认证请求显式携带
+`X-QuantX-Debug-Timing: 1` 时，响应 `extensions.quantxTiming` 还会返回最多 100 个
+字段聚合和 20 个 SQL 指纹聚合；Web 开发客户端会自动携带该请求头。并发 sibling
+resolver 的 `total` 会相加，因此可能大于 `execute` 墙钟耗时，定位单次长尾时应同时
+查看 `max`。
+
+慢于 1 秒的 operation 会额外输出一条聚合日志，包含 request ID、各阶段、SQL 总耗时
+和最慢字段。Prometheus 提供以下低基数指标，标签只使用固定阶段、SQL 类型以及
+schema 的父类型/字段名，不使用 operation name、别名、请求参数或 request ID：
+
+- `quantx_graphql_phase_duration_seconds`
+- `quantx_graphql_field_resolver_invocations_total`
+- `quantx_graphql_field_resolver_request_duration_seconds`
+- `quantx_graphql_sql_statements_total`
+- `quantx_graphql_sql_request_duration_seconds`
+
 ## 开发认证与交易审批
 
 开发自动登录用户在 API 启动时会与 `AUTH_BOOTSTRAP_PERMISSIONS` 做一次仅增量的

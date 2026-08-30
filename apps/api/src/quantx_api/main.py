@@ -39,6 +39,7 @@ from quantx_api.gqlapi.admission import (
   graphql_query_admission,
   graphql_request_identity,
 )
+from quantx_api.gqlapi.performance import graphql_server_timing_header
 from quantx_api.live_runtime_status import live_trading_runtime_status
 from quantx_api.monitoring import get_prometheus_metrics
 from quantx_api.monitoring.metrics import REQUEST_COUNT, REQUEST_DURATION
@@ -452,29 +453,39 @@ async def graphql_query_admission_middleware(request: Request, call_next):
   if request.method != "POST" or request.url.path != "/graphql":
     return await call_next(request)
   identity = graphql_request_identity(await request.body())
-  if not identity.is_query:
-    return await call_next(request)
-  waited = await graphql_query_admission.acquire()
-  if waited is None:
-    return JSONResponse(
-      status_code=503,
-      headers={"Retry-After": "1"},
-      content={
-        "errors": [
-          {
-            "message": "GraphQL query capacity is temporarily exhausted",
-            "extensions": {"code": "SERVICE_BUSY", "retryable": True},
-          }
-        ]
-      },
-    )
+  waited: float | None = None
+  admitted = False
+  if identity.is_query:
+    waited = await graphql_query_admission.acquire()
+    if waited is None:
+      return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "1"},
+        content={
+          "errors": [
+            {
+              "message": "GraphQL query capacity is temporarily exhausted",
+              "extensions": {"code": "SERVICE_BUSY", "retryable": True},
+            }
+          ]
+        },
+      )
+    admitted = True
   started = time.monotonic()
   try:
-    return await call_next(request)
+    response = await call_next(request)
+    duration = max(0.0, time.monotonic() - started)
+    response.headers["Server-Timing"] = graphql_server_timing_header(
+      request,
+      admission_wait_seconds=waited,
+      transport_seconds=duration,
+    )
+    return response
   finally:
     duration = max(0.0, time.monotonic() - started)
-    graphql_query_admission.release()
-    if duration >= GRAPHQL_SLOW_REQUEST_SECONDS:
+    if admitted:
+      graphql_query_admission.release()
+    if identity.is_query and duration >= GRAPHQL_SLOW_REQUEST_SECONDS:
       logger.warning(
         "Slow GraphQL query: operation=%s duration=%.3fs admission_wait=%.3fs client_instance=%s route=%s",
         identity.operation_name,

@@ -5,6 +5,10 @@
 /* eslint-disable no-console */
 
 import {
+  clearGraphqlRequestTimings,
+  getGraphqlRequestTimings,
+} from '@/core/performance/graphql-timing';
+import {
   webVitals,
   performanceBudget,
   type PerformanceMetric,
@@ -25,6 +29,12 @@ interface DebugPerformanceTools {
   violations: () => void;
   // 实时监控
   monitor: (enable?: boolean) => void;
+  // 查看 GraphQL 请求级耗时
+  graphql: () => void;
+  // 查看某次 GraphQL 请求的字段和 SQL 明细
+  graphqlFields: (requestId?: string) => void;
+  // 清空 GraphQL 请求耗时
+  clearGraphql: () => void;
 }
 
 declare global {
@@ -171,6 +181,94 @@ const createDebugPerformanceTools = (): DebugPerformanceTools => {
         console.log('监控状态:', monitoringEnabled ? '已启用' : '已停用');
       }
     },
+
+    graphql: () => {
+      const timings = getGraphqlRequestTimings();
+      console.group('🔎 GraphQL 请求耗时');
+      if (timings.length === 0) {
+        console.log('暂无 GraphQL 网络请求数据');
+      } else {
+        console.table(
+          [...timings].reverse().map(timing => {
+            const slowestField = timing.server?.fields[0];
+            return {
+              时间: new Date(timing.receivedAt).toLocaleTimeString(),
+              操作: timing.operationName,
+              类型: timing.operationType,
+              客户端毫秒: timing.clientMs.toFixed(1),
+              GraphQL毫秒:
+                timing.graphqlMs === null ? '-' : timing.graphqlMs.toFixed(1),
+              外围毫秒:
+                timing.outsideGraphqlMs === null
+                  ? '-'
+                  : timing.outsideGraphqlMs.toFixed(1),
+              SQL毫秒: timing.server?.sql.totalMs.toFixed(1) ?? '-',
+              SQL次数: timing.server?.sql.count ?? '-',
+              最慢字段: slowestField
+                ? `${slowestField.parentType}.${slowestField.field} ${slowestField.totalMs.toFixed(1)}ms`
+                : '-',
+              错误: timing.hasError ? '是' : '否',
+              请求ID: timing.requestId,
+              路由: timing.route,
+            };
+          })
+        );
+      }
+      console.groupEnd();
+    },
+
+    graphqlFields: (requestId?: string) => {
+      const timings = getGraphqlRequestTimings();
+      const timing = requestId
+        ? [...timings].reverse().find(item => item.requestId === requestId)
+        : timings[timings.length - 1];
+      console.group(`🧩 GraphQL 字段耗时 ${requestId ?? '(最近一次)'}`);
+      if (!timing) {
+        console.log('未找到对应 GraphQL 请求');
+      } else if (!timing.server) {
+        console.log('该请求没有服务端字段明细；请确认当前为开发环境');
+      } else {
+        console.log({
+          requestId: timing.requestId,
+          operation: timing.operationName,
+          route: timing.route,
+          clientMs: timing.clientMs,
+          graphqlMs: timing.graphqlMs,
+          phases: timing.server.phases,
+          fieldInvocations: timing.server.fieldInvocations,
+          fieldsTruncated: timing.server.fieldsTruncated,
+          sql: timing.server.sql,
+        });
+        console.table(
+          timing.server.fields.map(field => ({
+            字段: `${field.parentType}.${field.field}`,
+            路径: field.paths.join(', '),
+            次数: field.count,
+            总毫秒: field.totalMs.toFixed(3),
+            最大毫秒: field.maxMs.toFixed(3),
+            错误: field.errors,
+          }))
+        );
+        if (timing.server.sql.statements.length > 0) {
+          console.table(
+            timing.server.sql.statements.map(statement => ({
+              类型: statement.kind,
+              指纹: statement.fingerprint,
+              次数: statement.count,
+              总毫秒: statement.totalMs.toFixed(3),
+              最大毫秒: statement.maxMs.toFixed(3),
+              错误: statement.errors,
+            }))
+          );
+        }
+      }
+      console.groupEnd();
+    },
+
+    clearGraphql: () => {
+      clearGraphqlRequestTimings();
+      console.log('GraphQL 请求耗时已清空');
+    },
   };
 };
 
@@ -249,6 +347,16 @@ if (import.meta.env.DEV) {
   );
   console.log(
     '%cdebugPerformance.monitor()%c - 启用实时监控',
+    'color: #3b82f6; font-family: monospace;',
+    'color: #6b7280;'
+  );
+  console.log(
+    '%cdebugPerformance.graphql()%c - 查看 GraphQL 请求耗时',
+    'color: #3b82f6; font-family: monospace;',
+    'color: #6b7280;'
+  );
+  console.log(
+    '%cdebugPerformance.graphqlFields()%c - 查看最近请求的字段/SQL 明细',
     'color: #3b82f6; font-family: monospace;',
     'color: #6b7280;'
   );

@@ -17,6 +17,7 @@ import {
   willAccessTokenExpireSoon,
 } from '@/core/auth';
 import { logger } from '@/core/errors/logger';
+import { graphqlTimingExchange } from '@/core/performance/graphql-timing';
 import { env } from '@/shared/utils/env';
 import { createClientId } from '@/utils/clientId';
 
@@ -142,10 +143,12 @@ export const urqlClient = new Client({
       'X-QuantX-Client-Instance': graphqlClientInstanceId,
       'X-QuantX-Client-Route':
         typeof window === 'undefined' ? 'server' : window.location.pathname,
+      ...(import.meta.env.DEV ? { 'X-QuantX-Debug-Timing': '1' } : {}),
     },
   }),
   exchanges: [
     cacheExchange,
+    graphqlTimingExchange,
     authExchange(async utils => ({
       addAuthToOperation(operation) {
         const accessToken = getAccessToken();

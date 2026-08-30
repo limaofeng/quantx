@@ -2,6 +2,7 @@ import strawberry
 from quantx_infrastructure.config.settings import settings
 from strawberry.extensions import DisableIntrospection
 
+from .performance import GraphQLPerformanceExtension
 from .schemas import (
   AgentMutation,
   AgentQuery,
@@ -173,7 +174,7 @@ class Subscription(
   pass
 
 
-schema_extensions = [AuthorizationExtension]
+schema_extensions = [AuthorizationExtension, GraphQLPerformanceExtension]
 if not settings.graphql_introspection:
   schema_extensions.append(DisableIntrospection())
 
