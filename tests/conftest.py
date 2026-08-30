@@ -7,11 +7,80 @@ import os
 import sys
 import types
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import AsyncGenerator
 
 import pytest
+from dotenv import dotenv_values
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
+from sqlalchemy.engine import make_url
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_BASE_ENV_FILE = _REPOSITORY_ROOT / "apps" / "api" / ".env"
+_TEST_ENV_FILE = _REPOSITORY_ROOT / "apps" / "api" / ".env.testing"
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _flag_enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in _TRUE_VALUES
+
+
+def _e2e_requested() -> bool:
+    return "--quantx-run-e2e" in sys.argv or _flag_enabled("QUANTX_RUN_E2E")
+
+
+def _isolated_test_database_url() -> str:
+    """Derive a dedicated PostgreSQL URL without exposing stored credentials."""
+
+    explicit_url = os.getenv("QUANTX_TEST_DATABASE_URL", "").strip()
+    ambient_url = os.getenv("DATABASE_URL", "").strip()
+    dotenv_url = str(
+        dotenv_values(_TEST_ENV_FILE).get("DATABASE_URL")
+        or dotenv_values(_BASE_ENV_FILE).get("DATABASE_URL")
+        or ""
+    ).strip()
+    source_url = explicit_url or ambient_url or dotenv_url
+    if not source_url:
+        raise RuntimeError(
+            "Pytest requires QUANTX_TEST_DATABASE_URL or apps/api/.env.testing"
+        )
+
+    parsed = make_url(source_url)
+    if not parsed.drivername.startswith("postgresql+asyncpg"):
+        raise RuntimeError("Pytest requires an asyncpg PostgreSQL test database")
+
+    configured_name = os.getenv("QUANTX_TEST_DATABASE_NAME", "").strip()
+    source_name = str(parsed.database or "").strip()
+    if configured_name:
+        database_name = configured_name
+    elif explicit_url and source_name:
+        database_name = source_name
+    elif source_name.endswith("_test") or source_name.startswith("test_"):
+        database_name = source_name
+    else:
+        database_name = "quantx_test"
+
+    if database_name == "quantx" or not (
+        database_name.endswith("_test") or database_name.startswith("test_")
+    ):
+        raise RuntimeError(
+            "Pytest database must be dedicated to tests and named *_test or test_*"
+        )
+    return parsed.set(database=database_name).render_as_string(hide_password=False)
+
+
+def _configure_pytest_process_environment() -> None:
+    """Install fail-closed external-state defaults before project imports."""
+
+    os.environ["ENV"] = "testing"
+    os.environ["DATABASE_URL"] = _isolated_test_database_url()
+    if not _e2e_requested():
+        os.environ["ENABLE_REAL_TRADING"] = "false"
+        os.environ["QMT_REAL_TRADING_ENABLED"] = "false"
+
+
+_configure_pytest_process_environment()
 
 
 def pytest_addoption(parser):
@@ -105,6 +174,7 @@ if _module_missing("xtquant"):
     class DummyConstant:
         ACCOUNT_STATUS_OK = 0
         ACCOUNT_STATUS_FAIL = 3
+        ACCOUNT_STATUS_CLOSED = 6
 
         def __getattr__(self, name):
             return 0

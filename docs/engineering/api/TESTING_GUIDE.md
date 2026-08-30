@@ -29,9 +29,16 @@ python -m ruff check apps packages tests
 python -m pytest tests/ -m "not dangerous and not real_trading and not e2e"
 ```
 
+普通 pytest 进程会在导入 QuantX 模块前，把关系库强制切换到独立的
+`quantx_test`（或显式 `QUANTX_TEST_DATABASE_URL` 指向的 `*_test / test_*` 数据库）。
+测试配置即使保存了与 Dev 相同的 PostgreSQL 主机和凭据，也不得连接数据库
+`quantx`；全局测试门禁会在收集阶段直接拒绝这种配置。首次使用前应在外部
+PostgreSQL 创建 `quantx_test` 并执行当前 Alembic migration。普通测试同时强制关闭
+`ENABLE_REAL_TRADING` 和 `QMT_REAL_TRADING_ENABLED`。
+
 `e2e` 标记默认由根测试配置跳过。只有在已确认外部服务、数据写入范围和风险后，
 才显式传入 `--quantx-run-e2e`（或设置 `QUANTX_RUN_E2E=true`）；该开关本身不
-替代真实交易所需的环境、账户白名单与 QMT 实盘开关。
+替代独立测试数据库，也不替代真实交易所需的环境、账户白名单与 QMT 实盘开关。
 
 可按组件缩小范围：
 
