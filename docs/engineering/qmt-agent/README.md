@@ -69,6 +69,13 @@ WebSocket 前都会检查 Agent 声明、API 已提交 watermark 与 Engine 已�
 完全一致，并在发送前重新计算账户级增仓安全状态；Windows Agent 在调用 Broker 前
 再次检查。撤单与明确的风险降低型卖出保留故障逃生路径。
 
+XTTrading 原生 RPC 连接健康与账户交易状态必须分开判断。只要
+`query_account_status` RPC 仍可返回，就保留当前原生会话；`ACCOUNT_STATUS_FAIL` 等
+非就绪状态只关闭交易门禁并等待原会话恢复，不能反复调用 `connect()`、递增连接
+代际或重新触发对账。RPC 调用本身失败时才进入 XTTrading 重连。账户状态恢复后只
+生成一次新对账快照。`ACCOUNT_STATUS_CLOSED` 代表休市但连接可用，仍允许 Agent
+维持只读账户快照、实时行情和历史数据服务。
+
 本机 QMT 健康以统一启动器的 `QMT_AGENT_LAUNCH_*`、本次进程启动边界和服务端写入
 的 heartbeat `updated_at` 为真源，TTL 为 90 秒。Agent 自报时间与服务端处理时间的
 差值只记录为 `heartbeatDelaySeconds/heartbeatDelayWarning` 诊断信息，不参与账户或
@@ -82,7 +89,18 @@ API 仍为每个进程和控制连接生成 `apiInstanceId` 与 `agentSessionId`
 行情租约绑定当前控制连接的 `apiInstanceId + agentSessionId + deviceId`。行情连接
 自身仍必须用有效短期 token 完成握手，但 token 续期不会改变已认证控制会话身份。
 Redis 只允许较新的 API 启动代际覆盖租约，旧 API 只能清理自己的租约，不能删除或
-回写新代际。服务端不持久化或输出 token 本身。
+回写新代际。租约只依赖已认证控制会话、`market-data` 能力和单设备选主，不依赖
+XTTrading 账户对账；因此账户暂未就绪时，实时行情仍保持在线，而订单门禁继续
+fail-closed。服务端不持久化或输出 token 本身。
+
+行情租约握手失败必须携带稳定 `reason_code`。API 在租约等待超时时记录一条结构化
+诊断，包含当前进程可见的控制会话提示、`market-data` 能力、选中的设备、
+Redis 租约状态，以及 QMT/Engine heartbeat 状态和安全原因码；Market Gateway 不得把
+自身进程看不到 API 内存会话误报为控制连接缺失。不记录 token、账户快照或
+原始 heartbeat payload。Agent 重连日志记录同一原因码、WebSocket close code、close
+reason 和截断后的安全错误文本。行情租约失败可直接区分 Redis 发布失败、租约代际
+错配和普通网络断线；`QMT_AGENT_NOT_RECONCILED` 只用于交易/账户门禁，不得再阻断
+行情租约，也不能仅以重连次数或 `1006/1011` 猜测根因。
 
 服务端控制的 Agent heartbeat details 字段为：`apiInstanceId`、
 `agentSessionId`、`serverConnectedAt`、`serverReceivedAt`、`agentSentAt`、

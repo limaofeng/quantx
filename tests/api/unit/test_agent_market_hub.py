@@ -322,13 +322,56 @@ async def test_duplicate_device_connection_replaces_exact_session_generation(
     "device-1",
     agent_session_id=first.agent_session_id,
   )
-  assert await hub.market_lease("device-1") is None
-  assert await hub.authorize_market_after_reconciliation(replacement)
   assert await hub.market_lease("device-1") == agent_hub.MarketSessionLease(
     device_id="device-1",
     api_instance_id="api-instance-1",
     agent_session_id=replacement.agent_session_id,
   )
+
+
+@pytest.mark.asyncio
+async def test_live_market_lease_is_independent_from_trading_reconciliation(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  fake_redis = FakeRedis()
+
+  async def get_redis():
+    return fake_redis
+
+  monkeypatch.setattr(agent_hub.redis_pubsub, "get_redis", get_redis)
+  hub = agent_hub.AgentConnectionHub(api_instance_id="api-instance-1")
+  await hub.register(
+    "device-live",
+    {"market-data", "live"},
+    authorized_account_ids={"account-1"},
+    connected_at=datetime.now(timezone.utc),
+    remote_address_summary="10.0.0.*",
+  )
+
+  ready = await hub.market_lease_diagnostic("device-live")
+  assert ready["reasonCode"] == "MARKET_LEASE_READY"
+  assert ready["controlSessionRegistered"] is True
+  assert ready["marketDataCapability"] is True
+  assert ready["redisLeasePresent"] is True
+  assert ready["redisLeaseDeviceId"] == "device-live"
+
+
+@pytest.mark.asyncio
+async def test_market_gateway_diagnostic_does_not_infer_missing_control_session(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  fake_redis = FakeRedis()
+
+  async def get_redis():
+    return fake_redis
+
+  monkeypatch.setattr(agent_hub.redis_pubsub, "get_redis", get_redis)
+  gateway_hub = agent_hub.AgentConnectionHub(api_instance_id="gateway-process")
+
+  diagnostic = await gateway_hub.market_lease_diagnostic("device-live")
+
+  assert diagnostic["controlSessionRegistered"] is False
+  assert diagnostic["reasonCode"] == "MARKET_LEASE_NOT_PUBLISHED"
 
 
 @pytest.mark.asyncio

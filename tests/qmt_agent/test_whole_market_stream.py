@@ -236,6 +236,41 @@ async def test_market_handshake_times_out_when_start_never_arrives(
 
 
 @pytest.mark.asyncio
+async def test_market_handshake_preserves_structured_lease_rejection() -> None:
+  class RejectedSocket:
+    def __init__(self) -> None:
+      self.sent: list[str] = []
+
+    async def send(self, payload: str) -> None:
+      self.sent.append(payload)
+
+    async def recv(self) -> str:
+      return AgentEnvelope(
+        message_type=AgentMessageType.AUTH_RESULT,
+        payload={
+          "accepted": False,
+          "reason": "当前设备尚未取得活动行情租约",
+          "reason_code": "QMT_AGENT_NOT_RECONCILED",
+        },
+      ).model_dump_json()
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.configuration = SimpleNamespace(device_id="device-1")
+  runtime.mode = "live"
+  socket = RejectedSocket()
+
+  with pytest.raises(runtime_module._MarketStreamHandshakeError) as captured:
+    await runtime._perform_market_stream_handshake(
+      socket,
+      access_token="token-1",
+    )
+
+  assert captured.value.reason_code == "QMT_AGENT_NOT_RECONCILED"
+  assert str(captured.value) == "当前设备尚未取得活动行情租约"
+  assert len(socket.sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_empty_delta_encodes_as_ready_barrier_but_snapshot_cannot_be_empty() -> (
   None
 ):

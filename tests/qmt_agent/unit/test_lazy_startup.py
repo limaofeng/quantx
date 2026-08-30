@@ -185,6 +185,60 @@ def test_xt_trading_manager_account_status_ok():
   assert manager.is_account_status_ok() is True
 
 
+def test_xt_trading_manager_market_closed_session_remains_connection_healthy():
+  from quantx_qmt_agent.miniqmt.trading.trading_manager import XTTradingManager
+  from xtquant import xtconstant
+
+  class FakeAccount:
+    account_id = "300000013250"
+    account_type = 2
+
+  class FakeStatus:
+    account_id = "300000013250"
+    account_type = 2
+    status = xtconstant.ACCOUNT_STATUS_CLOSED
+
+  class FakeTrader:
+    def query_account_status(self):
+      return [FakeStatus()]
+
+  manager = object.__new__(XTTradingManager)
+  manager.is_connected = True
+  manager.acc = FakeAccount()
+  manager.xttrader = FakeTrader()
+
+  assert manager.is_account_status_ok() is False
+  assert manager.is_connection_healthy() is True
+  assert manager.is_account_status_ready() is True
+
+
+def test_xt_trading_manager_account_failure_keeps_transport_but_closes_gate():
+  from quantx_qmt_agent.miniqmt.trading.trading_manager import XTTradingManager
+  from xtquant import xtconstant
+
+  class FakeAccount:
+    account_id = "300000013250"
+    account_type = 2
+
+  class FakeStatus:
+    account_id = "300000013250"
+    account_type = 2
+    status = xtconstant.ACCOUNT_STATUS_FAIL
+
+  class FakeTrader:
+    def query_account_status(self):
+      return [FakeStatus()]
+
+  manager = object.__new__(XTTradingManager)
+  manager.is_connected = True
+  manager.acc = FakeAccount()
+  manager.xttrader = FakeTrader()
+
+  assert manager.is_connection_healthy() is True
+  assert manager.is_connected is True
+  assert manager.is_account_status_ready() is False
+
+
 def test_xt_trading_manager_account_status_rejects_non_ok_status():
   from quantx_qmt_agent.miniqmt.trading.trading_manager import XTTradingManager
   from xtquant import xtconstant

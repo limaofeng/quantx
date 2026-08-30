@@ -1311,9 +1311,10 @@ async def test_market_lease_refresh_retries_without_closing_control_session(
     refresh_market_device,
   )
   monkeypatch.setattr(agent_api, "AGENT_CONTROL_DEPENDENCY_RETRY_SECONDS", 0.001)
+  session = control_session()
   task = asyncio.create_task(
     agent_api._refresh_agent_market_lease(
-      control_session=control_session(),
+      control_session=session,
     )
   )
   try:
@@ -1323,3 +1324,32 @@ async def test_market_lease_refresh_retries_without_closing_control_session(
   finally:
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_market_lease_refresh_is_independent_from_engine_reconciliation(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session = control_session()
+  refreshed: list[agent_api.AgentControlSession] = []
+
+  async def refresh(control):
+    refreshed.append(control)
+
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "refresh_market_device",
+    refresh,
+  )
+
+  task = asyncio.create_task(
+    agent_api._refresh_agent_market_lease(control_session=session)
+  )
+  try:
+    while not refreshed:
+      await asyncio.sleep(0)
+  finally:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+  assert refreshed == [session]

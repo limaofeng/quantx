@@ -675,25 +675,75 @@ class XTTradingManager:
   def is_account_status_ok(self) -> bool:
     """检查当前交易账户状态是否正常"""
     try:
-      if not self.is_connected:
-        raise TradingConnectionError("交易连接未建立")
-
-      statuses = self.xttrader.query_account_status()
-      expected_account_id = self.acc.account_id
-      expected_account_type = self.acc.account_type
-
-      for account_status in statuses or []:
-        if (
-          getattr(account_status, "account_id", None) == expected_account_id
-          and getattr(account_status, "account_type", None) == expected_account_type
-        ):
-          return getattr(account_status, "status", None) == xtconstant.ACCOUNT_STATUS_OK
-
-      return False
+      return self._query_account_status() == xtconstant.ACCOUNT_STATUS_OK
 
     except Exception as exc:
       logger.error("检查账户状态失败: error=%s", exc.__class__.__name__)
       return False
+
+  def is_connection_healthy(self) -> bool:
+    """Probe the native RPC transport without conflating account readiness.
+
+    ``query_account_status`` can succeed while miniQMT reports a transitional,
+    closed, or failed account state.  Reconnecting a responsive transport for
+    those account-level states resets login and reconciliation continuously.
+    Keep the transport and let the readiness gate observe the cached account
+    status independently.
+    """
+    try:
+      previous = getattr(self, "_last_connection_health_status", object())
+      status = self._query_account_status()
+      if not self._account_status_ready(status) and status != previous:
+        logger.warning(
+          "XTTrading account status is not trading-ready: "
+          "reason_code=XTTRADING_ACCOUNT_STATUS_NOT_READY status=%s",
+          status,
+        )
+      return True
+    except Exception as exc:
+      logger.error("检查交易连接状态失败: error=%s", exc.__class__.__name__)
+      return False
+
+  def is_account_status_ready(self) -> bool:
+    """Return cached account readiness after the registry transport probe."""
+    sentinel = object()
+    status = getattr(self, "_last_connection_health_status", sentinel)
+    if status is sentinel:
+      try:
+        status = self._query_account_status()
+      except Exception as exc:
+        logger.error("检查账户就绪状态失败: error=%s", exc.__class__.__name__)
+        return False
+    return self._account_status_ready(status)
+
+  @staticmethod
+  def _account_status_ready(status: int | None) -> bool:
+    return status in {
+      xtconstant.ACCOUNT_STATUS_OK,
+      xtconstant.ACCOUNT_STATUS_CLOSED,
+    }
+
+  def _query_account_status(self) -> int | None:
+    if not self.is_connected:
+      raise TradingConnectionError("交易连接未建立")
+
+    expected_account_id = str(self.acc.account_id).strip()
+    expected_account_type = str(self.acc.account_type).strip().upper()
+    for account_status in self.xttrader.query_account_status() or []:
+      account_id = str(getattr(account_status, "account_id", "")).strip()
+      account_type = str(getattr(account_status, "account_type", "")).strip().upper()
+      if account_id != expected_account_id or account_type != expected_account_type:
+        continue
+      try:
+        status = int(
+          getattr(account_status, "status", xtconstant.ACCOUNT_STATUS_INVALID)
+        )
+        self._last_connection_health_status = status
+        return status
+      except (TypeError, ValueError):
+        return None
+    self._last_connection_health_status = None
+    return None
 
   def buy_stock(
     self, stock_code: str, quantity: int, price: float = 0

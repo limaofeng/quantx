@@ -1468,9 +1468,21 @@ class LiveBroker:
     """Return cached XTTrading readiness without calling the native SDK."""
     with self._trading_access_lock:
       return bool(self.agents) and all(
-        bool(getattr(agent.trading_manager, "is_connected", False))
+        self._trading_manager_ready(agent.trading_manager)
         for agent in self.agents.values()
       )
+
+  @staticmethod
+  def _trading_manager_ready(manager: Any) -> bool:
+    if not bool(getattr(manager, "is_connected", False)):
+      return False
+    account_ready = getattr(manager, "is_account_status_ready", None)
+    if not callable(account_ready):
+      return True
+    try:
+      return bool(account_ready())
+    except Exception:
+      return False
 
   def ensure_trading_ready(self) -> bool:
     """Reconnect dead XTTrading sessions and rebind their report sinks."""

@@ -860,10 +860,13 @@ def _auth_result(
   *,
   accepted: bool,
   reason: str = "",
+  reason_code: str = "",
   protocol_version: str = PROTOCOL_VERSION,
   agent_session_id: str = "",
 ) -> AgentEnvelope:
   payload = {"accepted": accepted, "reason": reason}
+  if reason_code:
+    payload["reason_code"] = reason_code
   if agent_session_id:
     payload["agent_session_id"] = agent_session_id
   return AgentEnvelope(
@@ -1066,20 +1069,6 @@ async def _record_heartbeat(
     await db.commit()
   for revoked_device_id in revoked_ids:
     await agent_connection_hub.revoke(revoked_device_id)
-  if status == "READY" and "market-data" in session.capabilities:
-    try:
-      await agent_connection_hub.authorize_market_after_reconciliation(session)
-    except Exception as exc:
-      # Heartbeat durability is already committed. The independent lease
-      # refresher retries Redis publication without rebuilding the control
-      # session. The short freshness lease keeps market trading fail-closed.
-      logger.warning(
-        "无法在账户对账后启用 Agent 行情租约: device=%s error=%s",
-        session.device_id,
-        exc.__class__.__name__,
-      )
-
-
 async def _mark_session_offline(session: AgentControlSession) -> None:
   """Persist disconnect only when this is still the authoritative generation."""
   now = utcnow()
@@ -2426,23 +2415,68 @@ async def _wait_for_active_market_device(
   while True:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-      raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
+      await _reject_unavailable_market_lease(device_id)
     try:
       lease = await asyncio.wait_for(
         agent_connection_hub.market_lease(device_id),
         timeout=remaining,
       )
     except asyncio.TimeoutError as exc:
-      raise AuthError(
-        "FORBIDDEN",
-        "当前设备不是活动行情 Agent",
-      ) from exc
+      try:
+        await _reject_unavailable_market_lease(device_id)
+      except AuthError as auth_error:
+        raise auth_error from exc
     if lease is not None:
       return lease
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-      raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
+      await _reject_unavailable_market_lease(device_id)
     await asyncio.sleep(min(MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS, remaining))
+
+
+async def _reject_unavailable_market_lease(device_id: str) -> None:
+  diagnostic = await agent_connection_hub.market_lease_diagnostic(device_id)
+  try:
+    async with AsyncSessionLocal() as db:
+      agent_heartbeat = await db.get(
+        RuntimeComponentHeartbeat,
+        f"qmt-agent:{device_id}",
+      )
+      engine_heartbeat = await db.get(RuntimeComponentHeartbeat, "engine")
+    agent_details = dict(agent_heartbeat.details or {}) if agent_heartbeat else {}
+    engine_details = dict(engine_heartbeat.details or {}) if engine_heartbeat else {}
+    diagnostic.update(
+      {
+        "agentHeartbeatStatus": str(
+          getattr(agent_heartbeat, "status", "OFFLINE") or "OFFLINE"
+        ).upper(),
+        "agentHeartbeatReasonCode": str(agent_details.get("reasonCode") or ""),
+        "engineHeartbeatStatus": str(
+          getattr(engine_heartbeat, "status", "OFFLINE") or "OFFLINE"
+        ).upper(),
+        "engineHeartbeatReasonCode": str(
+          engine_details.get("reasonCode") or ""
+        ),
+      }
+    )
+  except Exception as exc:
+    diagnostic["heartbeatDiagnosticError"] = exc.__class__.__name__
+  reason_code = str(diagnostic.get("reasonCode") or "MARKET_LEASE_UNAVAILABLE")
+  logger.warning(
+    "Agent market lease unavailable: diagnostics=%s",
+    json.dumps(
+      diagnostic,
+      ensure_ascii=False,
+      separators=(",", ":"),
+      sort_keys=True,
+    ),
+  )
+  raise AuthError(
+    reason_code,
+    "当前设备尚未取得活动行情租约",
+    status_code=403,
+    retryable=True,
+  )
 
 
 async def _request_market_resync(
@@ -2874,7 +2908,11 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
       try:
         await _send_market_text(
           websocket,
-          _auth_result(accepted=False, reason=exc.message).model_dump_json(),
+          _auth_result(
+            accepted=False,
+            reason=exc.message,
+            reason_code=exc.code,
+          ).model_dump_json(),
         )
       except Exception:
         pass

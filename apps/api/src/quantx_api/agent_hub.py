@@ -74,7 +74,6 @@ class AgentControlSession:
   server_connected_at: datetime
   remote_address_summary: str
   revoked: asyncio.Event
-  market_reconciliation_ready: bool = False
 
 
 class AgentConnectionHub:
@@ -172,7 +171,6 @@ class AgentConnectionHub:
         for session in self._sessions.values()
         if (
           "market-data" in session.capabilities
-          and session.market_reconciliation_ready
           and not session.revoked.is_set()
         )
       ),
@@ -186,7 +184,6 @@ class AgentConnectionHub:
       session is None
       or session.revoked.is_set()
       or "market-data" not in session.capabilities
-      or not session.market_reconciliation_ready
     ):
       return None
     return session
@@ -214,11 +211,6 @@ class AgentConnectionHub:
       server_connected_at=connected_at,
       remote_address_summary=remote_address_summary,
       revoked=asyncio.Event(),
-      # Data-only and paper sessions do not have a live account snapshot to
-      # reconcile. A live session becomes market-eligible only after Engine
-      # has applied its new complete snapshot and a subsequent heartbeat keeps
-      # the server-owned status at READY.
-      market_reconciliation_ready="live" not in normalized_capabilities,
     )
     async with self._lock:
       previous = self._sessions.get(device_id)
@@ -243,30 +235,6 @@ class AgentConnectionHub:
       selected = self._current_market_session()
       await self._publish_market_lease(selected)
     return session
-
-  async def authorize_market_after_reconciliation(
-    self,
-    control_session: AgentControlSession,
-  ) -> bool:
-    """Make the current live session eligible only after durable reconciliation."""
-
-    async with self._lock:
-      session = self._sessions.get(control_session.device_id)
-      if (
-        session is not control_session
-        or session.revoked.is_set()
-        or "market-data" not in session.capabilities
-      ):
-        return False
-      session.market_reconciliation_ready = True
-      selected = self._current_market_session()
-      if selected is None:
-        selected = self._select_market_session()
-        self._market_device_id = selected.device_id if selected else None
-        if selected is not None:
-          self._queue_snapshot(selected)
-      await self._publish_market_lease(selected)
-      return selected is session
 
   async def revoke(self, device_id: str) -> bool:
     """Wake the registered control-session guard after durable revocation."""
@@ -364,6 +332,64 @@ class AgentConnectionHub:
       return None
     return parsed
 
+  async def market_lease_diagnostic(self, device_id: str) -> dict[str, Any]:
+    """Explain why one control session has or has not received the lease."""
+
+    async with self._lock:
+      session = self._sessions.get(device_id)
+      registered = session is not None
+      revoked = bool(session is not None and session.revoked.is_set())
+      market_capable = bool(
+        session is not None and "market-data" in session.capabilities
+      )
+      selected_device_id = str(self._market_device_id or "")
+
+    redis = await redis_pubsub.get_redis()
+    raw = await redis.get(MARKET_DEVICE_LEASE_KEY)
+    redis_lease_valid = False
+    redis_lease_device_id = ""
+    if raw:
+      try:
+        lease = json.loads(raw)
+      except (TypeError, json.JSONDecodeError):
+        lease = None
+      if isinstance(lease, dict):
+        redis_lease_device_id = str(lease.get("device_id") or "")
+        redis_lease_valid = bool(
+          redis_lease_device_id
+          and lease.get("api_instance_id")
+          and lease.get("agent_session_id")
+        )
+
+    if raw and not redis_lease_valid:
+      reason_code = "MARKET_LEASE_INVALID"
+    elif raw and redis_lease_device_id != device_id:
+      reason_code = "MARKET_LEASE_DEVICE_MISMATCH"
+    elif raw:
+      reason_code = "MARKET_LEASE_READY"
+    elif registered and revoked:
+      reason_code = "MARKET_CONTROL_SESSION_REVOKED"
+    elif registered and not market_capable:
+      reason_code = "MARKET_DATA_CAPABILITY_MISSING"
+    elif registered and selected_device_id != device_id:
+      reason_code = "MARKET_SESSION_NOT_SELECTED"
+    else:
+      # The market endpoint runs in the independent Market Gateway process.
+      # Its in-memory hub does not own the API control session, so absence from
+      # this local map is not proof that the control WebSocket is missing.
+      reason_code = "MARKET_LEASE_NOT_PUBLISHED"
+    return {
+      "reasonCode": reason_code,
+      "deviceId": device_id,
+      "controlSessionRegistered": registered,
+      "controlSessionRevoked": revoked,
+      "marketDataCapability": market_capable,
+      "selectedDeviceId": selected_device_id or None,
+      "redisLeasePresent": bool(raw),
+      "redisLeaseValid": redis_lease_valid,
+      "redisLeaseDeviceId": redis_lease_device_id or None,
+    }
+
   async def is_market_device(self, device_id: str) -> bool:
     return await self.market_lease(device_id) is not None
 
@@ -380,7 +406,6 @@ class AgentConnectionHub:
       if (
         session is not control_session
         or self._market_device_id != control_session.device_id
-        or not session.market_reconciliation_ready
       ):
         return
       await self._publish_market_lease(session)

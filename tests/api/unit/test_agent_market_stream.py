@@ -179,10 +179,34 @@ async def test_market_auth_rejects_device_that_never_becomes_active(
     calls += 1
     return None
 
+  async def market_lease_diagnostic(device_id: str):
+    assert device_id == "standby-device"
+    return {
+      "reasonCode": "MARKET_LEASE_NOT_PUBLISHED",
+      "redisLeasePresent": False,
+    }
+
+  class UnavailableHeartbeatSession:
+    async def __aenter__(self):
+      raise ConnectionError("diagnostic database unavailable")
+
+    async def __aexit__(self, *_args):
+      return False
+
   monkeypatch.setattr(
     agent_api.agent_connection_hub,
     "market_lease",
     market_lease,
+  )
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "market_lease_diagnostic",
+    market_lease_diagnostic,
+  )
+  monkeypatch.setattr(
+    agent_api,
+    "AsyncSessionLocal",
+    UnavailableHeartbeatSession,
   )
   monkeypatch.setattr(
     agent_api,
@@ -198,8 +222,9 @@ async def test_market_auth_rejects_device_that_never_becomes_active(
   with pytest.raises(agent_api.AuthError) as error:
     await agent_api._wait_for_active_market_device("standby-device")
 
-  assert error.value.code == "FORBIDDEN"
-  assert error.value.message == "当前设备不是活动行情 Agent"
+  assert error.value.code == "MARKET_LEASE_NOT_PUBLISHED"
+  assert error.value.message == "当前设备尚未取得活动行情租约"
+  assert error.value.retryable is True
   assert calls >= 2
 
 
@@ -248,6 +273,7 @@ async def test_market_auth_accepts_valid_device_token_without_control_token_coup
   result = AgentEnvelope.model_validate_json(websocket.sent_text[0])
   assert result.message_type is AgentMessageType.AUTH_RESULT
   assert result.payload["reason"] == "controlled stop"
+  assert result.payload["reason_code"] == "UNAUTHENTICATED"
   assert websocket.closed[-1][0] == 4401
 
 

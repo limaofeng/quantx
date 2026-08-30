@@ -87,6 +87,79 @@ def test_live_broker_observes_same_manager_health_probe_reconnect():
   assert broker.trading_requires_reconciliation() is True
 
 
+def test_registry_does_not_reconnect_market_closed_healthy_session():
+  registry = object.__new__(XTTradingManagerRegistry)
+  reconnect_calls = 0
+
+  class Manager:
+    is_connected = True
+
+    @staticmethod
+    def is_connection_healthy() -> bool:
+      return True
+
+    @staticmethod
+    def is_account_status_ok() -> bool:
+      return False
+
+    def reconnect(self) -> bool:
+      nonlocal reconnect_calls
+      reconnect_calls += 1
+      return True
+
+  manager = Manager()
+  registry._managers = {"account-1": manager}
+  registry._last_reconnect_attempts = {}
+  registry._connection_generations = {}
+  registry._reconnect_interval = 0.0
+
+  assert registry.get_manager("account-1") is manager
+  assert reconnect_calls == 0
+  assert registry.connection_generation("account-1") == 0
+
+
+def test_live_broker_keeps_transport_but_rejects_unready_account_status():
+  reconnect_calls = 0
+
+  class Manager:
+    is_connected = True
+
+    @staticmethod
+    def is_connection_healthy() -> bool:
+      return True
+
+    @staticmethod
+    def is_account_status_ready() -> bool:
+      return False
+
+    def reconnect(self) -> bool:
+      nonlocal reconnect_calls
+      reconnect_calls += 1
+      return True
+
+  manager = Manager()
+  registry = object.__new__(XTTradingManagerRegistry)
+  registry._managers = {"account-1": manager}
+  registry._last_reconnect_attempts = {}
+  registry._connection_generations = {}
+  registry._reconnect_interval = 0.0
+
+  broker = object.__new__(LiveBroker)
+  broker.agents = {"account-1": FakeAgent(manager)}
+  broker._trading_registry = registry
+  broker._trading_journal = SimpleNamespace()
+  broker._trading_access_lock = threading.RLock()
+  broker._trading_generation_lock = threading.Lock()
+  broker._trading_connection_generation = 0
+  broker._trading_reconciled_generation = 0
+  broker._registry_trading_generations = {"account-1": 0}
+
+  assert broker.ensure_trading_ready() is False
+  assert manager.is_connected is True
+  assert reconnect_calls == 0
+  assert broker.trading_connection_generation() == 0
+
+
 def test_trading_manager_reconnect_does_not_restart_native_client():
   class NativeTrader:
     def __init__(self) -> None:

@@ -223,6 +223,15 @@ class _MarketOutboundOverflow(RuntimeError):
   """Encoded batches exceeded the bounded outbound window."""
 
 
+class _MarketStreamHandshakeError(RuntimeError):
+  """Safe, structured market-lease rejection returned by the API."""
+
+  def __init__(self, reason_code: str, message: str) -> None:
+    self.reason_code = str(reason_code or "MARKET_AUTH_REJECTED")[:64]
+    self.message = str(message or "market authentication rejected")[:256]
+    super().__init__(self.message)
+
+
 @dataclass(frozen=True, slots=True)
 class _EncodedMarketBatch:
   batch: MarketStreamBatch
@@ -3639,12 +3648,22 @@ class AgentRuntime:
         self._market_stream_resyncs += 1
         self._set_market_stream_status("SYNCING")
         self._market_stream_ready_since_monotonic = 0.0
+        reason_code = str(
+          getattr(exc, "reason_code", None) or exc.__class__.__name__
+        )[:64]
+        close_code = getattr(exc, "code", None)
+        close_reason = str(getattr(exc, "reason", None) or "")[:256]
+        error_detail = str(exc)[:256]
         logger.warning(
           "QMT whole-market stream reconnecting: resyncs=%s "
-          "ready_seconds=%.3f error=%s",
+          "ready_seconds=%.3f reason_code=%s close_code=%s "
+          "close_reason=%s error=%s",
           self._market_stream_resyncs,
           ready_seconds,
-          exc.__class__.__name__,
+          reason_code,
+          close_code,
+          close_reason,
+          error_detail,
         )
         await asyncio.sleep(
           sleep_delay + random.uniform(0.0, min(1.0, sleep_delay * 0.2))
@@ -3679,8 +3698,9 @@ class AgentRuntime:
       auth_result.message_type is not AgentMessageType.AUTH_RESULT
       or not auth_result.payload.get("accepted")
     ):
-      raise RuntimeError(
-        str(auth_result.payload.get("reason") or "market authentication rejected")
+      raise _MarketStreamHandshakeError(
+        str(auth_result.payload.get("reason_code") or "MARKET_AUTH_REJECTED"),
+        str(auth_result.payload.get("reason") or "market authentication rejected"),
       )
     raw_start = await asyncio.wait_for(
       socket.recv(),
