@@ -31,7 +31,11 @@ import {
 import { cn } from '@/utils/cn';
 import { formatCurrency } from '@/utils/transform/data';
 
-import { accountExecutionModeLabel, accountHealthLabel } from './presentation';
+import {
+  accountExecutionModeLabel,
+  accountHealthLabel,
+  accountSafetyReason,
+} from './presentation';
 import { ageSecondsLabel } from './time';
 import { useTradingSafety } from './trading-safety-context';
 
@@ -434,7 +438,9 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
     safety?.checks.filter(
       check => check.status === AccountExecutionSafetyCheckStatus.Failed
     ) ?? [];
-  const blockedReason = safety?.blockedReasons[0] || failedChecks[0]?.message;
+  const blockedReason = accountSafetyReason(
+    safety?.blockedReasons[0] || failedChecks[0]?.message
+  );
   const orderChainHealthy = Boolean(
     safety &&
     safety.deadLetterCount === 0 &&

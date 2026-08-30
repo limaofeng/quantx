@@ -18,6 +18,71 @@ export interface ConnectionHealth {
   description: string;
 }
 
+export interface ConnectionStagePresentation {
+  tone: ConnectionTone;
+  label: string;
+}
+
+const CONNECTION_STATUS_LABELS: Record<string, string> = {
+  BLOCKED: '已阻断',
+  CONNECTED: '已连接',
+  DISABLED: '已禁用',
+  DISCONNECTED: '未连接',
+  EMERGENCY_STOP: '紧急停止',
+  IDLE: '空闲',
+  OFFLINE: '离线',
+  ONLINE: '在线',
+  OK: '正常',
+  QMT_ACCOUNT_MISMATCH: '账户不匹配',
+  READY: '就绪',
+  RECONCILE_REQUIRED: '等待对账',
+  RECONCILING: '对账中',
+  REVOKED: '已撤销',
+  STALE: '心跳过期',
+  STARTING: '启动中',
+  SYNCING: '同步中',
+  TRADING_UNAVAILABLE: '交易未就绪',
+  UNAVAILABLE: '不可用',
+  UNKNOWN: '未知',
+  XTDATA_UNAVAILABLE: '行情未就绪',
+};
+
+const DEGRADED_CONNECTION_STATUSES = new Set([
+  'ONLINE',
+  'RECONCILE_REQUIRED',
+  'RECONCILING',
+  'STARTING',
+  'SYNCING',
+  'TRADING_UNAVAILABLE',
+  'XTDATA_UNAVAILABLE',
+]);
+
+export function connectionStatusLabel(value: string) {
+  const normalized = value.trim().toUpperCase();
+  if (!normalized) return '未知';
+  return CONNECTION_STATUS_LABELS[normalized] ?? '状态异常';
+}
+
+export function connectionStagePresentation(
+  status: string,
+  disabledIsReady = false
+): ConnectionStagePresentation {
+  const normalized = status.trim().toUpperCase();
+  const ready =
+    normalized === 'READY' ||
+    normalized === 'CONNECTED' ||
+    normalized === 'OK' ||
+    (disabledIsReady && normalized === 'DISABLED');
+  return {
+    tone: ready
+      ? 'ready'
+      : DEGRADED_CONNECTION_STATUSES.has(normalized)
+        ? 'degraded'
+        : 'offline',
+    label: connectionStatusLabel(normalized),
+  };
+}
+
 const SAFE_REASON_LABELS: Record<string, string> = {
   TRADING_DISABLED_BY_MODE: '当前运行模式未启用交易连接',
   XTDATA_UNAVAILABLE: 'MiniQMT 行情连接暂不可用',
@@ -70,8 +135,7 @@ export function connectionHealth(
       label: '交易异常',
       title: 'MiniQMT 交易连接未就绪',
       description:
-        safeReasonLabel(current.xttradingReason) ||
-        'XTTrading 当前不可用。',
+        safeReasonLabel(current.xttradingReason) || 'XTTrading 当前不可用。',
     };
   }
   if (current.reconciliationStatus.toUpperCase() !== 'READY') {

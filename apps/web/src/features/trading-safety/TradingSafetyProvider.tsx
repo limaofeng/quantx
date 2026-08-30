@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { useQuery } from 'urql';
 
 import { AccountExecutionSafetyQuery } from './operations';
+import { accountSafetyReason } from './presentation';
 import {
   TradingSafetyContext,
   type TradingSafetyContextValue,
@@ -41,7 +42,9 @@ export function TradingSafetyProvider({
     if (!accountId) return ['当前用户没有可用资金账户'];
     if (error) return [`安全状态查询失败：${error.message}`];
     if (!safety) return ['实盘安全状态尚未加载'];
-    return Array.from(new Set(safety.blockedReasons ?? []));
+    return Array.from(
+      new Set((safety.blockedReasons ?? []).map(accountSafetyReason))
+    );
   }, [accountId, error, safety]);
 
   const refreshSafety = useCallback(() => {
@@ -60,14 +63,7 @@ export function TradingSafetyProvider({
       refreshSafety,
       safety: safety ?? null,
     }),
-    [
-      accountId,
-      blockedReasons,
-      error,
-      fetching,
-      refreshSafety,
-      safety,
-    ]
+    [accountId, blockedReasons, error, fetching, refreshSafety, safety]
   );
 
   return (

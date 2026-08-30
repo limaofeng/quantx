@@ -63,6 +63,8 @@ import { cn } from '@/utils/cn';
 
 import {
   connectionHealth,
+  connectionStagePresentation,
+  connectionStatusLabel,
   formatBytes,
   formatDuration,
   type ConnectionTone,
@@ -169,50 +171,26 @@ function formatTimestamp(value?: string | null) {
   }).format(new Date(value));
 }
 
-function normalizedStatus(value: string) {
-  const labels: Record<string, string> = {
-    CONNECTED: '已连接',
-    DISCONNECTED: '未连接',
-    DISABLED: '已禁用',
-    IDLE: '空闲',
-    OFFLINE: '离线',
-    ONLINE: '在线',
-    OK: '正常',
-    READY: '就绪',
-    RECONCILING: '对账中',
-    RECONCILE_REQUIRED: '等待对账',
-    REVOKED: '已撤销',
-    UNKNOWN: '未知',
-  };
-  const normalized = value.toUpperCase();
-  return labels[normalized] ?? normalized;
-}
-
 function stageAppearance(status: string, disabledIsReady = false) {
-  const normalized = status.toUpperCase();
-  if (
-    normalized === 'READY' ||
-    normalized === 'CONNECTED' ||
-    (disabledIsReady && normalized === 'DISABLED')
-  ) {
+  const presentation = connectionStagePresentation(status, disabledIsReady);
+  if (presentation.tone === 'ready') {
     return {
       icon: CheckCircle2,
       className: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300',
+      label: presentation.label,
     };
   }
-  if (
-    normalized === 'RECONCILING' ||
-    normalized === 'RECONCILE_REQUIRED' ||
-    normalized === 'ONLINE'
-  ) {
+  if (presentation.tone === 'degraded') {
     return {
       icon: CircleDashed,
       className: 'border-amber-400/25 bg-amber-400/10 text-amber-300',
+      label: presentation.label,
     };
   }
   return {
     icon: Unplug,
     className: 'border-rose-400/25 bg-rose-400/10 text-rose-300',
+    label: presentation.label,
   };
 }
 
@@ -244,7 +222,7 @@ function ConnectionStage({
           )}
         >
           <StatusIcon className="h-3 w-3" />
-          {normalizedStatus(status)}
+          {appearance.label}
         </span>
       </div>
       <p className="mt-4 text-ui-body font-medium text-slate-100">{label}</p>
@@ -910,7 +888,8 @@ export function AgentManagementPanel() {
                       实时行情数据面
                     </h2>
                     <p className="mt-1 text-ui-label text-slate-500">
-                      当前状态 {normalizedStatus(current.marketStream.status)} ·
+                      当前状态{' '}
+                      {connectionStatusLabel(current.marketStream.status)} ·
                       提交阶段 {current.marketStream.commitPhase}
                     </p>
                   </div>
@@ -1011,7 +990,7 @@ export function AgentManagementPanel() {
                       <dl className="mt-3">
                         <DetailValue
                           label="完整性"
-                          value={normalizedStatus(
+                          value={connectionStatusLabel(
                             current.diagnostics.journalIntegrity
                           )}
                         />
@@ -1039,7 +1018,9 @@ export function AgentManagementPanel() {
                       <dl className="mt-3">
                         <DetailValue
                           label="数据面状态"
-                          value={normalizedStatus(current.marketStream.status)}
+                          value={connectionStatusLabel(
+                            current.marketStream.status
+                          )}
                         />
                         <DetailValue
                           label="提交阶段"
@@ -1128,7 +1109,7 @@ export function AgentManagementPanel() {
                         </p>
                       </div>
                       <span className="text-slate-500">
-                        {normalizedStatus(device.status)}
+                        {connectionStatusLabel(device.status)}
                       </span>
                       <span className="font-mono text-slate-600">
                         {formatTimestamp(device.revokedAt ?? device.lastSeenAt)}

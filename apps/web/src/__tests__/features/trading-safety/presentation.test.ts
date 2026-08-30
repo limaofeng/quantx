@@ -1,6 +1,7 @@
 import {
   accountExecutionModeLabel,
   accountHealthLabel,
+  accountSafetyReason,
   accountSafetySummary,
 } from '@/features/trading-safety/presentation';
 import { AccountExecutionHealthStatus } from '@/generated/gql/graphql';
@@ -25,5 +26,16 @@ describe('account execution safety presentation', () => {
         blockedReasons: ['尚未建立账户实盘窗口'],
       })
     ).toBe('账户已对账 · 尚未建立账户实盘窗口');
+  });
+
+  it('replaces internal reason codes in user-facing safety messages', () => {
+    expect(
+      accountSafetyReason(
+        '本机 QMT Agent 当前不可用于实盘（XTTRADING_UNAVAILABLE）'
+      )
+    ).toBe('本机 QMT Agent 当前不可用于实盘（MiniQMT 交易连接未就绪）');
+    expect(accountSafetyReason('实盘阻断（BROKER_PRIVATE_FAILURE）')).toBe(
+      '实盘阻断（状态异常）'
+    );
   });
 });
