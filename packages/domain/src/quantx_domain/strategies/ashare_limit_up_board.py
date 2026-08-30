@@ -40,6 +40,7 @@ TERMINAL_EXIT_PLAN_STATUSES = {"COMPLETED", "CANCELLED"}
 class AshareLimitUpBoardStrategy(StrategyBase):
   """Create one audited board-entry intent and delegate exits to ExitPlanBook."""
 
+  OWNS_RUNTIME_EXIT_PLAN_BOOK = True
   CATEGORY = StrategyCategory.TREND_FOLLOWING
   RISK_LEVEL = "high"
   TAGS = ["A股", "打板", "涨停", "超短线", "T+1", "单标的"]

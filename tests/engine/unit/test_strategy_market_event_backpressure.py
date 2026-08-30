@@ -1366,6 +1366,13 @@ async def test_startup_expires_restored_t_pending_before_runtime_is_running() ->
   status_update.assert_awaited_once_with(
     intent.intent_id,
     "EXPIRED",
+    metadata={
+      **dict(intent.metadata or {}),
+      "intent_id": intent.intent_id,
+      "approval_reason": "APPROVAL_SIGNAL_INVALIDATED",
+      "execution_terminal_source": "LOCAL_PRE_BROKER_REJECTION",
+      "execution_terminal_reason": "APPROVAL_SIGNAL_INVALIDATED",
+    },
     notes="APPROVAL_SIGNAL_INVALIDATED",
   )
   runtime.state_manager.force_save.assert_awaited_once()

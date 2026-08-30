@@ -145,6 +145,12 @@ const statusLabels: Record<string, string> = {
   PENDING_ENTRY: '等待持仓',
 };
 
+const executionOwnerLabels: Record<string, string> = {
+  EXIT_PLAN_MONITOR: '全局计划监控',
+  INVALID_OWNER: '执行归属无效',
+  STRATEGY_RUNTIME: '原入场 / 做 T 运行',
+};
+
 function useExitPlans(accountId: string, instrumentCode?: string) {
   const [result, refetch] = useQuery({
     query: ExitPlansQuery,
@@ -237,6 +243,7 @@ function PlanCard({
   plan: ExitPlan;
 }) {
   const terminal = plan.status === 'COMPLETED' || plan.status === 'CANCELLED';
+  const invalidOwner = plan.executionOwner === 'INVALID_OWNER';
   const pending =
     plan.status === 'EXIT_PENDING' || Boolean(plan.pendingClientOrderId);
   const rules = Array.isArray(plan.rules) ? plan.rules : [];
@@ -301,6 +308,11 @@ function PlanCard({
             <span>已卖 {plan.exitedVolume.toLocaleString()} 股</span>
             <span>剩余 {plan.remainingVolume.toLocaleString()} 股</span>
             <span>版本 v{plan.configVersion}</span>
+            <span>
+              执行归属{' '}
+              {executionOwnerLabels[plan.executionOwner] || plan.executionOwner}
+            </span>
+            <span>状态修订 r{plan.stateVersion}</span>
           </div>
           <div className="mt-2">
             <ExitPlanCostBasisSummary showFrozenAt value={plan.costBasis} />
@@ -318,11 +330,19 @@ function PlanCard({
               );
             })}
           </div>
+          {invalidOwner ? (
+            <p
+              className="mt-2 text-ui-caption font-bold text-rose-300"
+              role="alert"
+            >
+              执行归属校验失败，计划操作已停用
+            </p>
+          ) : null}
           <ExitPlanNotices plan={plan} />
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
           <Button
-            disabled={busy}
+            disabled={busy || invalidOwner}
             onClick={() => onReplay(plan)}
             size="sm"
             type="button"
@@ -334,7 +354,7 @@ function PlanCard({
           {plan.pendingIntentId && !plan.pendingClientOrderId && (
             <>
               <Button
-                disabled={busy}
+                disabled={busy || invalidOwner}
                 onClick={() => onConfirmIntent(plan)}
                 size="sm"
                 type="button"
@@ -343,7 +363,7 @@ function PlanCard({
                 预览并确认 SELL
               </Button>
               <Button
-                disabled={busy}
+                disabled={busy || invalidOwner}
                 onClick={() => onRejectIntent(plan)}
                 size="sm"
                 type="button"
@@ -356,7 +376,7 @@ function PlanCard({
           )}
           {!terminal && (
             <Button
-              disabled={busy || pending}
+              disabled={busy || pending || invalidOwner}
               onClick={() => onToggle(plan)}
               size="sm"
               type="button"
@@ -368,7 +388,7 @@ function PlanCard({
           )}
           {!terminal && (
             <Button
-              disabled={busy}
+              disabled={busy || invalidOwner}
               onClick={() => onEvaluate(plan)}
               size="sm"
               type="button"
@@ -378,9 +398,9 @@ function PlanCard({
               立即检查
             </Button>
           )}
-          {plan.canEditRules && !terminal && (
+          {plan.canEditRules && !terminal && !invalidOwner && (
             <Button
-              disabled={busy || pending}
+              disabled={busy || pending || invalidOwner}
               onClick={() => onEdit(plan)}
               size="sm"
               type="button"
@@ -402,7 +422,7 @@ function PlanCard({
           )}
           {!terminal && (
             <Button
-              disabled={busy || pending}
+              disabled={busy || pending || invalidOwner}
               onClick={() => onCancel(plan)}
               size="sm"
               type="button"
@@ -459,6 +479,10 @@ export function ManualPlanEditor({
     string | null
   >(null);
   const createRequestRef = React.useRef<{
+    fingerprint: string;
+    idempotencyKey: string;
+  } | null>(null);
+  const updateRequestRef = React.useRef<{
     fingerprint: string;
     idempotencyKey: string;
   } | null>(null);
@@ -603,6 +627,7 @@ export function ManualPlanEditor({
 
   const close = () => {
     createRequestRef.current = null;
+    updateRequestRef.current = null;
     setAuthorizationChallenge(null);
     setAuthorizationError(null);
     setOpen(false);
@@ -690,16 +715,27 @@ export function ManualPlanEditor({
     try {
       const rulesPayload = serializedRules();
       if (editingPlan) {
+        const updateInput = {
+          accountId,
+          autoExitAuthorized: false,
+          configVersion: editingPlan.configVersion,
+          executionMode,
+          planId: editingPlan.planId,
+          protectedVolume: Number(protectedVolume),
+          remark,
+          rules: rulesPayload,
+        };
+        const fingerprint = JSON.stringify(updateInput);
+        if (updateRequestRef.current?.fingerprint !== fingerprint) {
+          updateRequestRef.current = {
+            fingerprint,
+            idempotencyKey: createClientId('exit-plan-update'),
+          };
+        }
         const result = await updatePlan({
           input: {
-            accountId,
-            autoExitAuthorized: false,
-            configVersion: editingPlan.configVersion,
-            executionMode,
-            planId: editingPlan.planId,
-            protectedVolume: Number(protectedVolume),
-            remark,
-            rules: rulesPayload,
+            ...updateInput,
+            idempotencyKey: updateRequestRef.current.idempotencyKey,
           },
         });
         if (result.error) throw result.error;
@@ -744,7 +780,8 @@ export function ManualPlanEditor({
         savedPlan = result.data?.createManualExitPlan;
       }
       if (!savedPlan) throw new Error('服务端未返回已保存的计划');
-      if (!editingPlan) createRequestRef.current = null;
+      if (editingPlan) updateRequestRef.current = null;
+      else createRequestRef.current = null;
       toast({
         description: `${normalizedCode} · ${protectedVolume} 股`,
         title: editingPlan ? '人工计划已更新' : '人工计划已创建',
@@ -1240,6 +1277,9 @@ export function ExitPlansPanel({
   const [editingPlan, setEditingPlan] = React.useState<ExitPlan | null>(null);
   const plans = useExitPlans(accountId, instrumentCode);
   const [toggleResult, togglePlan] = useMutation(SetExitPlanEnabledMutation);
+  const toggleRequestRef = React.useRef(
+    new Map<string, { fingerprint: string; idempotencyKey: string }>()
+  );
   const [cancelResult, cancelPlan] = useMutation(CancelExitPlanMutation);
   const [evaluateResult, evaluatePlan] = useMutation(
     EvaluateExitPlanNowMutation
@@ -1265,6 +1305,34 @@ export function ExitPlansPanel({
       variant: result.error ? 'destructive' : 'default',
     });
     plans.refetch({ requestPolicy: 'network-only' });
+  };
+  const setPlanEnabled = async (plan: ExitPlan) => {
+    const enabled = !plan.enabled;
+    const fingerprint = JSON.stringify({
+      accountId,
+      configVersion: plan.configVersion,
+      enabled,
+      planId: plan.planId,
+    });
+    const existingRequest = toggleRequestRef.current.get(plan.planId);
+    const request =
+      existingRequest?.fingerprint === fingerprint
+        ? existingRequest
+        : {
+            fingerprint,
+            idempotencyKey: createClientId('exit-plan-set-enabled'),
+          };
+    if (existingRequest !== request) {
+      toggleRequestRef.current.set(plan.planId, request);
+    }
+    const result = await togglePlan({
+      configVersion: plan.configVersion,
+      enabled,
+      idempotencyKey: request.idempotencyKey,
+      planId: plan.planId,
+    });
+    if (!result.error) toggleRequestRef.current.delete(plan.planId);
+    return result;
   };
   const visiblePlans = (plans.data?.exitPlans ?? []).filter(plan =>
     activeStatuses.has(plan.status)
@@ -1417,12 +1485,7 @@ export function ExitPlansPanel({
               }
               onToggle={item =>
                 void run(
-                  () =>
-                    togglePlan({
-                      configVersion: item.configVersion,
-                      enabled: !item.enabled,
-                      planId: item.planId,
-                    }),
+                  () => setPlanEnabled(item),
                   item.enabled ? '卖出计划已暂停' : '卖出计划已恢复'
                 )
               }
@@ -1520,7 +1583,6 @@ export function PositionLiquidationPanel({
     if (!completion || !conflict || !executionMode) return;
     try {
       await liquidateMultiple(selected, {
-        autoExitAuthorized: executionMode === 'paper',
         completionStrategy: completion,
         conflictStrategy: conflict,
         executionMode,

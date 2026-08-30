@@ -61,14 +61,12 @@ from ..types.liquidation_types import (
   ExitPlanView,
   LiquidateAllPositionsInput,
   LiquidatePositionInput,
-  LiquidatePositionsInput,
   LiquidationCompletionStrategy,
   LiquidationConfirmationInput,
   LiquidationConfirmationResult,
   LiquidationConflictPreview,
   LiquidationConflictStrategy,
   LiquidationExecutionMode,
-  LiquidationGroupResult,
   LiquidationItemPreview,
   LiquidationOrder,
   LiquidationPlanResult,
@@ -725,12 +723,13 @@ class LiquidationMutation:
     owner = await LiquidationResolver.exit_plan_account_id(plan_id)
     account_id = authorized_account_id(info, owner)
     try:
-      run_id = await LiquidationResolver.exit_plan_run_id(plan_id)
       preview = await TradeApprovalChallengeService.issue(
         principal=principal_from_context(info.context),
         action=EXIT_PLAN_SELL_APPROVAL,
         account_id=account_id,
-        run_id=run_id,
+        # EXIT_PLAN approvals bind the challenge to the business owner, not to
+        # its optional execution runtime.  The runtime is routing lineage only.
+        business_owner_id=plan_id,
         intent_id=intent_id,
       )
       return TradeApprovalPreviewResult(
@@ -754,31 +753,73 @@ class LiquidationMutation:
   ) -> TradeApprovalConfirmationResult:
     owner = await LiquidationResolver.exit_plan_account_id(plan_id)
     account_id = authorized_account_id(info, owner)
+    challenge_id: Optional[str] = None
     try:
-      run_id = await LiquidationResolver.exit_plan_run_id(plan_id)
-      challenge_id = await TradeApprovalChallengeService.consume(
-        principal=principal_from_context(info.context),
+      principal = principal_from_context(info.context)
+      dispatch = await TradeApprovalChallengeService.consume(
+        principal=principal,
         action=EXIT_PLAN_SELL_APPROVAL,
         account_id=account_id,
-        run_id=run_id,
+        business_owner_id=plan_id,
         intent_id=intent_id,
         confirmation_token=confirmation_token,
+        command_type="EXIT_PLAN_CONFIRM_INTENT",
+        command_aggregate_id=f"{account_id}:{plan_id}",
+        command_idempotency_key_factory=lambda value: (
+          f"exit-plan-confirm:{value}"
+        ),
+        command_payload={
+          "plan_id": plan_id,
+          "intent_id": intent_id,
+          "account_id": account_id,
+          "approval_audit": {
+            "actor_id": principal.user_id,
+            "device_session_id": principal.device_session_id,
+            "channel": "EXIT_PLAN_DEVICE_CHALLENGE",
+          },
+        },
+        return_command_reference=True,
       )
-      await LiquidationResolver.confirm_exit_intent(
-        plan_id=plan_id,
-        intent_id=intent_id,
-        account_id=account_id,
+      challenge_id = dispatch.challenge_id
+      result = await LiquidationResolver._existing_engine_request(
+        dispatch.message_id,
+        "EXIT_PLAN_CONFIRM_INTENT",
       )
       return TradeApprovalConfirmationResult(
-        True,
-        "APPROVED",
-        "卖出意图已确认并重新进入下单风控",
-        challenge_id,
+        success=bool(result.get("success")),
+        code=str(result.get("code") or "APPROVED"),
+        message=str(result.get("message") or "卖出意图已确认并重新进入下单风控"),
+        challenge_id=challenge_id,
       )
     except TradeApprovalChallengeError as exc:
-      return TradeApprovalConfirmationResult(False, exc.code, exc.message)
-    except (ValueError, RuntimeError) as exc:
-      return TradeApprovalConfirmationResult(False, "EXECUTION_FAILED", str(exc))
+      return TradeApprovalConfirmationResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+        challenge_id=challenge_id,
+      )
+    except RuntimeError:
+      return TradeApprovalConfirmationResult(
+        success=False,
+        code="EXIT_PLAN_CONFIRM_INTENT_COMMAND_PENDING",
+        message="确认请求仍在处理中，尚不知是否已提交；请稍后重试原确认请求",
+        challenge_id=challenge_id,
+      )
+    except ValueError as exc:
+      return TradeApprovalConfirmationResult(
+        success=False,
+        code="EXECUTION_FAILED",
+        message=str(exc),
+        challenge_id=challenge_id,
+      )
+    except Exception:
+      logger.exception("退出卖出意图确认结果未知")
+      return TradeApprovalConfirmationResult(
+        success=False,
+        code="EXIT_PLAN_CONFIRM_INTENT_OUTCOME_UNKNOWN",
+        message="确认请求提交结果尚不知是否已提交，请继续重试原确认请求",
+        challenge_id=challenge_id,
+      )
 
   @strawberry.mutation(description="拒绝退出 SELL 意图")
   async def reject_exit_intent(
@@ -845,6 +886,7 @@ class LiquidationMutation:
     plan_id: str,
     enabled: bool,
     config_version: int,
+    idempotency_key: str,
   ) -> ExitPlanView:
     owner = await LiquidationResolver.exit_plan_account_id(plan_id)
     return await LiquidationResolver.set_exit_plan_enabled(
@@ -852,6 +894,7 @@ class LiquidationMutation:
       enabled=enabled,
       config_version=config_version,
       account_id=authorized_account_id(info, owner),
+      idempotency_key=idempotency_key,
     )
 
   @strawberry.mutation(description="取消并释放退出计划保护数量")
@@ -880,17 +923,6 @@ class LiquidationMutation:
     return await LiquidationResolver.evaluate_exit_plan_now(
       plan_id=plan_id,
       account_id=authorized_account_id(info, owner),
-    )
-
-  @strawberry.mutation(description="按股票创建一组统一清仓计划")
-  async def liquidate_positions(
-    self,
-    info: strawberry.types.Info,
-    input: LiquidatePositionsInput,
-  ) -> LiquidationGroupResult:
-    _require_legacy_web_liquidation_session(info)
-    return await LiquidationResolver.liquidate_positions(
-      input, authorized_account_id(info, input.account_id)
     )
 
   @strawberry.mutation(

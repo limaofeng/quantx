@@ -209,10 +209,32 @@ class AshareManagedExitPlanStrategy(StrategyBase):
     intent_id = str(metadata.get("exit_intent_id") or plan.pending_intent_id or "")
     if not intent_id:
       return None
+    status = str(event.status or "").upper()
+    zero_fill_invalidation = metadata.get("zero_fill_proof_invalidation")
+    if (
+      isinstance(zero_fill_invalidation, Mapping)
+      and zero_fill_invalidation.get("released") is True
+      and str(zero_fill_invalidation.get("release_kind") or "")
+      == "ZERO_FILL_PROOF"
+      and intent_id not in plan.reconciled_zero_fill_intent_ids
+    ):
+      plan.reconciled_zero_fill_intent_ids.append(intent_id)
+    local_zero_fill_proof = (
+      str(metadata.get("execution_terminal_source") or "").upper()
+      == "LOCAL_PRE_BROKER_REJECTION"
+    )
+    if local_zero_fill_proof and (
+      status in {"REJECTED", "CANCELLED", "EXPIRED"}
+      or (
+        status == "PENDING"
+        and str(metadata.get("risk_action") or "").upper() == "DELAY"
+      )
+    ):
+      status = "RECONCILED_ZERO_FILL"
     ExitPlanBook([plan]).apply_order_event(
       plan_id=plan.plan_id,
       intent_id=intent_id,
-      status=event.status,
+      status=status,
       order_id=str(event.order_id or ""),
       risk_action=str(metadata.get("risk_action") or ""),
       timestamp_ms=int(
@@ -223,6 +245,7 @@ class AshareManagedExitPlanStrategy(StrategyBase):
         ).timestamp()
         * 1000
       ),
+      cumulative_filled_volume=event.filled_volume,
     )
     return self._persist_plan(plan)
 
@@ -235,11 +258,25 @@ class AshareManagedExitPlanStrategy(StrategyBase):
       or "SELL" not in str(event.trade_type or "").upper()
     ):
       return None
+    zero_fill_invalidation = metadata.get("zero_fill_proof_invalidation")
+    intent_id = str(
+      metadata.get("intent_id") or metadata.get("exit_intent_id") or ""
+    )
+    if (
+      isinstance(zero_fill_invalidation, Mapping)
+      and zero_fill_invalidation.get("released") is True
+      and str(zero_fill_invalidation.get("release_kind") or "")
+      == "ZERO_FILL_PROOF"
+      and intent_id
+      and intent_id not in plan.reconciled_zero_fill_intent_ids
+    ):
+      plan.reconciled_zero_fill_intent_ids.append(intent_id)
     ExitPlanBook([plan]).apply_exit_fill(
       plan_id=plan.plan_id,
       volume=event.volume,
       price=event.price,
-      rule_id=str(metadata.get("exit_rule_id") or plan.pending_rule_id or ""),
+      rule_id=str(metadata.get("exit_rule_id") or ""),
+      intent_id=intent_id,
     )
     patch = self._persist_plan(plan)
     patch.append_events.append(
@@ -274,14 +311,11 @@ class AshareManagedExitPlanStrategy(StrategyBase):
     requested_execution_mode = TradeIntentExecutionMode(
       str(execution.execution_mode or "AUTO").upper()
     )
-    is_live = str(getattr(self.context.mode, "value", self.context.mode)).lower() == "live"
-    execution_mode = (
-      TradeIntentExecutionMode.MANUAL_CONFIRM
-      if is_live
-      and requested_execution_mode == TradeIntentExecutionMode.AUTO
-      and self.context.parameters.get("exit_plan_auto_authorized") is not True
-      else requested_execution_mode
-    )
+    # Authorization is an Engine/infrastructure fact.  The pure strategy keeps
+    # the configured execution policy; the Engine validates the exact durable
+    # authorization envelope and downgrades LIVE AUTO to manual confirmation
+    # before the intent is persisted or routed.
+    execution_mode = requested_execution_mode
     urgent_types = {
       ExitRuleType.HARD_STOP.value,
       ExitRuleType.LIMIT_UP_TOUCH.value,
@@ -313,8 +347,9 @@ class AshareManagedExitPlanStrategy(StrategyBase):
       max_price_deviation_bps=execution.max_slippage_bps,
       metadata={
         **dict(plan.template.metadata or {}),
-        "owner_type": "STRATEGY_RUN",
-        "owner_id": input.run_id,
+        "owner_type": "EXIT_PLAN",
+        "owner_id": plan.plan_id,
+        "intent_origin_type": "STRATEGY_RUN",
         "plan_id": plan.plan_id,
         "exit_plan_id": plan.plan_id,
         "exit_intent_id": intent_id,

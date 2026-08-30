@@ -29,9 +29,10 @@ Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 
 订单/成交回报由 `business_key` 唯一的 `strategy_runtime_events`
 串行进入策略。TradeIntent 和做 T 批次投影与该事件的首次落库在
-同一事务内完成；Engine 回调后再把 event marker、资金、持仓、策略状态
-和 `ExitPlanBook` 作为一个 RuntimeState 快照提交，最后才把事件设为
-`APPLIED`。回调异常会回滚当次内存效果；快照提交失败、结果不确定，
+同一事务内完成；Engine 回调后再把 event marker、资金、持仓和策略状态作为
+一个 RuntimeState 快照提交，并在同一收敛过程中更新 PAPER/LIVE
+`auto_exit_plans` 真源，最后才把事件设为 `APPLIED`。回测的 `ExitPlanBook`
+仍随隔离运行状态保存。回调异常会回滚当次内存效果；快照提交失败、结果不确定，
 或启动时存在未应用事件时，runtime 安装同业务键屏障，丢弃新的
 tick/kline 决策并拒绝人工确认，直到同事件幂等收敛。
 
@@ -102,15 +103,20 @@ Redis 只用于唤醒消费者，以及向 API 发布行情、策略与交易事
 唤醒后仍会从数据库重新读取投影。订单必须先持久化 pending 状态和
 `trade_command_outbox`，才能由 API Hub 下发给 Agent。
 
-自动卖出由 Engine 的 `ExitPlanBook` 统一承载。入场策略在 BUY 意图中附带
+自动卖出由 Engine 的 `ExitPlanBook` 统一承载。它是运行时内部组件，不是一个
+独立的“卖出策略”服务。入场策略在 BUY 意图中附带
 `ExitPlanTemplate`，只有真实 BUY 成交回报会激活计划。Engine 在策略
 `step()` 之前评估退出规则，将命中的计划转换成标准 SELL `TradeIntent`，
 继续经过 OrderSizer、后置风控、Broker 和成交回报收敛。做 T 仅负责入场
-信号和退出模板，不再维护独立的自动卖出主路径。完整契约见
+信号和退出模板；同一个做 T `StrategyRun` 内的 `ExitPlanBook` 负责退出评估，
+绝不为做 T 新建退出策略。PAPER/LIVE 计划以
+`auto_exit_plans` 为唯一持久化真源，运行内 `ExitPlanBook` 只是热缓存；回测
+保持内存计划。完整契约见
 [A 股自动退出计划与卖出策略契约](../../trading/contracts/A股自动退出计划与卖出策略契约.md)。
 
-手工持仓的部分动态止盈也由 Engine 承载。计划创建时固定保护股数，条件清仓
-监控每秒从 `WholeQuoteHub` 中央快照读取价格、累计成交量和五档盘口，执行
+手工持仓的部分动态止盈也由 Engine 承载。此类 `MANUAL_POSITION` 计划不创建
+StrategyRun，由全局 `ExitPlanMonitor` 从 `WholeQuoteHub` 中央快照读取价格、累计
+成交量和五档盘口，执行
 `ADAPTIVE_VOLUME_PRICE_TRAILING`。量能陈旧会降级到价格模式，价格陈旧则
 暂停；触发后持久化 pending 委托，逐笔成交通过 `agent_report_inbox` 幂等
 回填，部分成交只继续管理未成交的保护数量。实盘计划要求显式自动卖出授权。
@@ -118,11 +124,92 @@ Redis 只用于唤醒消费者，以及向 API 发布行情、策略与交易事
 Engine 使用 PostgreSQL advisory lock 保证同一数据库只有一个实例取得执行
 权，并持续写入 `runtime_component_heartbeats`，供 API 就绪检查使用。
 
-持久化 `ExitPlanMonitor` 与策略运行解耦，每秒扫描 `auto_exit_plans` 的活动
-计划并消费 `WholeQuoteHub` 全市场批次。API 对计划的创建、修改、启停、取消、立即
-评估和批量清仓全部写入 `engine_command_outbox`；Engine 在账户＋股票锁内
-校验 `config_version`、保护量冲突和待成交 SELL。策略非回测计划在运行时幂等
-同步到同一张表，策略停止不再终止已有退出保护。
+持久化 `ExitPlanMonitor` 每秒只扫描 `auto_exit_plans` 中没有运行绑定的
+`MANUAL_POSITION / MANUAL_LIQUIDATION`，并消费 `WholeQuoteHub` 全市场批次；历史
+托管运行命令标记由启动迁移清除，不改变 `strategy_run_id` 为空即归 Monitor 的规则。
+`T_TRADE_BATCH / LIMIT_UP_BOARD / FIRST_BOARD_PROMOTION_V2 / ENTRY_PLAN`
+等入场来源计划由原 `StrategyRun` 在自身串行行情队列、策略 `step()` 之前评估。
+用户新建的人工托管 `MANUAL_POSITION` 与清仓计划都由 Monitor 执行。Engine 启动
+迁移会先停止旧专用退出运行、保留计划状态和订单血缘，再恢复策略运行；持续看门狗
+负责发现孤儿或错配所有者，并立即
+fail-stop；Monitor 不接管执行。API 对人工计划的
+创建、修改、启停、取消、立即评估和批量清仓全部写入
+`engine_command_outbox`；Engine 在账户＋股票锁内校验 `config_version`、保护量
+冲突和待成交 SELL。承载活跃入场来源计划的原运行只能 `DRAINING`，不得普通
+停止；原运行异常时只能恢复同一个运行，不得另建退出策略。
+
+退出计划运行态使用独立单调 `state_version` 做数据库 CAS；配置变更继续使用
+`config_version`，两者不得混用。一次规则命中时，计划的 `pending_intent_id` 与同
+ID、同 `plan_id/run_id/account_id` 的 SELL `TradeIntent` 必须在一个事务中提交；
+任何版本竞争、绑定不一致或意图写入失败都整体回滚。重启恢复时，已有
+`PendingTradeOrder` 的意图只等待回报，不再次路由；命令结果落盘前崩溃后的重放
+返回既有订单。普通 `CANCELLED / REJECTED / EXPIRED` 即使累计成交量为零，也不能
+单独释放 pending；只有带 QMT 完整快照证明、从未投递的本地消息箱过期/取消证明、
+明确未越过 Broker 边界的本地拒绝证明，或 Agent 明确声明尚未执行的拒绝/过期证明的
+`RECONCILED_ZERO_FILL` 才能释放。已投递但缺少这种证明的过期命令继续进入
+`RECONCILE_REQUIRED`。后续 accepted ACK、Broker 委托或成交等相反证据必须立即撤销
+本地零成交证明；迟到成交必须计入成交量并把计划置为 `ERROR`，禁止第二次卖出。
+已释放 intent 的同终态委托快照重放，只有在累计成交量不超过已经持久化的真实
+成交量时才视为幂等重放；更高序号的工作态、累计成交增长或新成交才是矛盾证据。
+由零成交证明失效或旧 intent 迟到成交形成的安全 `ERROR` 不得通过普通启用、
+`RESUME` 或规则更新清除。LIVE 计划发生这种反证时，计划失效与账户执行隔离必须在
+同一事务完成：账户转为 `PAUSED / RECONCILE_REQUIRED`、清空 controlled window，
+`paused_reason.kind=BROKER_EXECUTION_AFTER_RELEASE`。隔离事务扫描该账户所有未终结的
+LIVE PLACE SELL，不只处理触发反证计划的替代卖单；历史上已有持久化终态的
+卖单不得被重新打开。每个受影响的退出计划都撤销旧自动授权、停用并保留
+sticky `ERROR`，之后只能取消后按最新持仓重建。若某条 SELL 的 outbox 可以证明
+从未投递，则把 outbox/pending 本地取消，并由它所属计划的 `ExitPlanBook` 以
+`RECONCILED_ZERO_FILL / LOCAL_OUTBOX_CANCEL` 释放当前 pending，同时保留原 sticky
+`ERROR`；若已经投递或绑定不完整，则原 PLACE_ORDER 立即转为
+`RECONCILE_REQUIRED` 并禁止重投，精确 pending 持久化为 `CANCEL_REQUESTED`。有
+Broker order id 时只排队一个幂等 `CANCEL_ORDER`；没有 id 时等待权威委托回报，首个
+补齐身份的 ORDER 回报沿同一业务身份排队撤单，重复回报不得重复撤单。每个撤单对象
+拥有稳定业务身份和单调尝试号：安全过期且确定未投递的尝试可以原地续期；结果不确定的
+旧尝试必须封存，再以同一业务身份创建至多一个后继尝试。旧证据单与当前替代单是两个
+独立撤单对象，不能因其中一个已经终态而漏撤另一个。投递、ACK 与物理 WebSocket 发送
+路径统一按“候选只读发现 → 账户锁 → outbox 锁并重验”取锁，不能与失效事务形成
+outbox→account 反向锁；迟到 `command_processing` 或 accepted ACK 只记录事实，不能
+复活或改写已隔离 PLACE_ORDER。全链统一锁序为
+`AccountExecutionControl → TradeCommandOutbox → PendingTradeOrder → StrategyOrderCorrelation`
+` → TradeIntentRecord → AutoExitPlanRecord`。
+
+只要 `CANCEL_REQUESTED` 尚未由券商终态收敛，完整快照必须持续报告
+`CANCEL_REQUEST_PENDING` 并保持账户 `PAUSED / RECONCILE_REQUIRED`。即使旧委托已经
+终态，一张干净快照也不能自动清除释放后反证形成的 sticky 隔离。用户必须从账户安全页
+选择服务端列出的精确隔离订单，通过两阶段
+`REPAIR_QUARANTINED_ORDER` 挑战绑定
+`client_order_id / quarantine_reason / snapshot_id / state_version`。服务端在统一锁序内
+重验最新完整快照、原隔离事件、计划/意图/订单绑定和权威终态或已收敛成交，修复后只会
+终结精确 pending 并写审计事件；计划仍保持 sticky `ERROR`，账户仍保持
+`PAUSED / RECONCILE_REQUIRED`，且把该修复快照设为新的新鲜度边界。只有之后一张严格
+更新且无冲突的完整快照，才可把账户降为 `DISABLED / READY`；它不会恢复交易权限，
+用户仍须取消旧计划并按最新持仓重建。若本地已记录撤单终态、但更晚的权威快照仍显示
+原委托处于工作态，则以 `TERMINAL_ORDER_STILL_WORKING` 继续阻断，不把相互矛盾的两份
+事实解释为已完成撤单。快照判断只使用 LIVE 订单，并同时校验隔离来源序号、快照
+`state_version` 和最终锁内刷新；同一 Broker 事实缺少 execution id 时使用稳定内容指纹，
+不得用随机身份破坏幂等。
+
+做 T 的保护 SELL 使用 `MARKET` 执行偏好：LiveBroker 转为
+`MARKET_CONVERT_5_LIMIT`，QMT Agent 对沪/北市场与深市分别映射为
+`MARKET_SH_CONVERT_5_CANCEL` 和 `MARKET_SZ_CONVERT_5_CANCEL`，即五档即时成交、
+剩余撤销。SELL intent 固定由退出计划拥有：`owner_type=EXIT_PLAN`、
+`owner_id=plan_id`，并保留 `strategy_run_id`、`t_batch_id` 与
+`t_trade_role=exit` 供原运行收敛批次。
+
+未预授权退出的预览—确认挑战绑定精确的计划、意图、账户、设备与版本；挑战消费、
+Engine command outbox 创建和幂等业务键在同一事务中提交。`command_ack` 只表示
+投递，计划成交状态仍只由 QMT Agent 的委托与成交回报推进。所有
+`owner_type=EXIT_PLAN` 的 SELL 在通用执行器进入 Broker 前都强制使用
+`strategy-exit:{plan_id}:{intent_id}`，Monitor 崩溃重放也只能命中同一条
+持久命令。LIVE SELL 的最终入队事务还会重新校验计划投影与内嵌模板的
+`plan/account/instrument/source/run` 完全一致，并按来源、运行和托管命令标记的
+正向矩阵确认唯一执行 owner；任一错配或未知来源都不能生成 QMT outbox。
+Agent 真正领取普通 PLACE_ORDER 前还会重新锁定账户执行控制和该 outbox：账户未完成
+对账、命令已被隔离或命令载荷在候选发现后发生变化时均不投递；撤单和紧急停止仍走
+高优先级通道，不被账户隔离阻塞。
+人工计划的创建、更新和启停由客户端为每次用户操作生成业务幂等键；传输重试复用
+原键，新的用户操作使用新键。服务端按账户、计划和操作做命名空间哈希，因此旧
+“启用”响应在后续“暂停”完成后重放，只返回旧命令结果，不能再次启用计划。
 
 行情状态为 `STARTING → SYNCING → READY → STALE/OFFLINE`。只有 `READY`
 继续分发关键实时动作；交易时段 10 秒无新批次进入 `STALE`，午休、收盘和

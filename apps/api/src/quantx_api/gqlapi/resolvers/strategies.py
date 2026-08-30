@@ -1160,6 +1160,12 @@ class StrategyResolver:
           )
           for item in persistent
         ]
+      mode_value = str(getattr(run.mode, "value", run.mode) or "").upper()
+      if mode_value != StrategyRunMode.BACKTEST.value:
+        # PAPER/LIVE use auto_exit_plans as the only durable truth.  An empty
+        # authoritative table is not permission to resurrect a legacy runtime
+        # snapshot after migration or restart.
+        return []
       state = await StrategyRunStateRepository(db).get_state(run_id)
       custom_state = dict(state.custom_state or {}) if state else {}
       book = ExitPlanBook.from_dict(custom_state.get(EXIT_PLAN_BOOK_STATE_KEY))

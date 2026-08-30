@@ -197,6 +197,7 @@ def test_client_contract_contains_narrow_mobile_control_permissions():
     "PAUSE_RISK_INCREASE",
     "KILL_SWITCH",
     "CLEAR_KILL_SWITCH",
+    "REPAIR_QUARANTINED_ORDER",
   }
   t_trade_actions = schema_sdl.split("enum TTradeControlAction {", 1)[1].split(
     "}", 1

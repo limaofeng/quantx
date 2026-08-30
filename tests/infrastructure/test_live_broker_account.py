@@ -2,8 +2,14 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-
+from quantx_domain.brokers.base import OrderRequest, OrderStatus, OrderType, PriceType
 from quantx_infrastructure.core.brokers.live import LiveBroker
+from quantx_infrastructure.services.trade_command_service import (
+  AgentUnavailableError,
+)
+from quantx_infrastructure.services.trade_intent_processor import (
+  LOCAL_PRE_BROKER_ZERO_FILL_SOURCE,
+)
 
 
 class _TradingService:
@@ -23,6 +29,17 @@ class _TradingService:
   async def _get_positions(self, *, account_id: str):
     assert account_id == "account-1"
     return []
+
+
+def _sell_request(*, price: float = 10.0, volume: int = 100) -> OrderRequest:
+  return OrderRequest(
+    instrument_code="600000.SH",
+    order_type=OrderType.SELL,
+    price_type=PriceType.LIMIT,
+    volume=volume,
+    price=price,
+    metadata={"intent_id": "intent-1"},
+  )
 
 
 @pytest.mark.asyncio
@@ -49,3 +66,101 @@ async def test_get_account_normalizes_database_decimals_to_domain_floats() -> No
       account.total_pnl,
     )
   )
+
+
+@pytest.mark.asyncio
+async def test_disconnected_rejection_is_authoritative_local_zero_fill() -> None:
+  broker = LiveBroker(account_id="account-1")
+  request = _sell_request()
+
+  order = await broker.place_order(request)
+
+  assert order.status is OrderStatus.REJECTED
+  assert request.metadata["execution_terminal_source"] == (
+    LOCAL_PRE_BROKER_ZERO_FILL_SOURCE
+  )
+  assert request.metadata["execution_terminal_reason"] == "未连接到交易系统"
+
+
+@pytest.mark.asyncio
+async def test_local_risk_rejection_is_authoritative_zero_fill() -> None:
+  broker = LiveBroker(account_id="account-1", max_order_amount=10.0)
+  broker.trading_service = _TradingService()
+  broker.is_connected = True
+  request = OrderRequest(
+    instrument_code="600000.SH",
+    order_type=OrderType.BUY,
+    price_type=PriceType.LIMIT,
+    volume=100,
+    price=10.0,
+    metadata={"intent_id": "intent-1"},
+  )
+
+  order = await broker.place_order(request)
+
+  assert order.status is OrderStatus.REJECTED
+  assert request.metadata["execution_terminal_source"] == (
+    LOCAL_PRE_BROKER_ZERO_FILL_SOURCE
+  )
+  assert "超过限制" in request.metadata["execution_terminal_reason"]
+
+
+@pytest.mark.asyncio
+async def test_local_risk_exception_is_authoritative_zero_fill() -> None:
+  broker = LiveBroker(account_id="account-1")
+  broker.trading_service = _TradingService()
+  broker.is_connected = True
+
+  async def broken_risk_check(_request: OrderRequest):
+    raise RuntimeError("local risk snapshot unavailable")
+
+  broker._risk_check = broken_risk_check  # type: ignore[method-assign]
+  request = _sell_request()
+
+  order = await broker.place_order(request)
+
+  assert order.status is OrderStatus.REJECTED
+  assert request.metadata["execution_terminal_source"] == (
+    LOCAL_PRE_BROKER_ZERO_FILL_SOURCE
+  )
+  assert request.metadata["execution_terminal_reason"] == (
+    "local risk snapshot unavailable"
+  )
+
+
+@pytest.mark.asyncio
+async def test_agent_unavailable_is_authoritative_pre_enqueue_zero_fill() -> None:
+  class UnavailableTradingService:
+    async def place_order(self, **_kwargs):
+      raise AgentUnavailableError("没有就绪 QMT Agent")
+
+  broker = LiveBroker(account_id="account-1", enable_risk_control=False)
+  broker.trading_service = UnavailableTradingService()
+  broker.is_connected = True
+  request = _sell_request()
+
+  order = await broker.place_order(request)
+
+  assert order.status is OrderStatus.REJECTED
+  assert request.metadata["execution_terminal_source"] == (
+    LOCAL_PRE_BROKER_ZERO_FILL_SOURCE
+  )
+  assert request.metadata["execution_terminal_reason"] == "没有就绪 QMT Agent"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_outcome_unknown_is_not_fabricated_as_rejection() -> None:
+  class OutcomeUnknownTradingService:
+    async def place_order(self, **_kwargs):
+      raise RuntimeError("connection lost while commit outcome is unknown")
+
+  broker = LiveBroker(account_id="account-1", enable_risk_control=False)
+  broker.trading_service = OutcomeUnknownTradingService()
+  broker.is_connected = True
+  request = _sell_request()
+
+  with pytest.raises(RuntimeError, match="commit outcome is unknown"):
+    await broker.place_order(request)
+
+  assert "execution_terminal_source" not in request.metadata
+  assert broker.orders == {}

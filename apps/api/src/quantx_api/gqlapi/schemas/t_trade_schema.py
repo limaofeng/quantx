@@ -422,6 +422,7 @@ class TTradeMutation:
     intent_id: str,
   ) -> TradeApprovalPreviewResult:
     principal = principal_from_context(info.context)
+    principal.require_permission("liquidation:control")
     principal.require_permission("trade:approve")
     try:
       owner_account_id = await TTradeResolver.session_account_id(run_id)
@@ -430,7 +431,7 @@ class TTradeMutation:
         principal=principal,
         action=T_TRADE_ENTRY_APPROVAL,
         account_id=resolved_account_id,
-        run_id=run_id,
+        business_owner_id=run_id,
         intent_id=intent_id,
       )
       return TradeApprovalPreviewResult(
@@ -454,6 +455,7 @@ class TTradeMutation:
     expectation: TTradeCandidateApprovalExpectationInput,
   ) -> TradeApprovalConfirmationResult:
     principal = principal_from_context(info.context)
+    principal.require_permission("liquidation:control")
     principal.require_permission("trade:approve")
     challenge_id: Optional[str] = None
     try:
@@ -471,7 +473,7 @@ class TTradeMutation:
         principal=principal,
         action=T_TRADE_ENTRY_APPROVAL,
         account_id=resolved_account_id,
-        run_id=run_id,
+        business_owner_id=run_id,
         intent_id=intent_id,
         confirmation_token=confirmation_token,
         command_type="T_TRADE_APPROVE_ENTRY",

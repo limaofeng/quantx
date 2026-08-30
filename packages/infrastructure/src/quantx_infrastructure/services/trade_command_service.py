@@ -62,7 +62,12 @@ from quantx_infrastructure.services.entry_plan_authorization_service import (
   scope_from_managed_entry_config,
 )
 from quantx_infrastructure.services.exit_plan_authorization_service import (
+  validate_consumed_exit_plan_sell_challenge,
   validate_exact_auto_exit_authorization,
+)
+from quantx_infrastructure.services.exit_plan_execution_owner import (
+  INVALID_OWNER,
+  durable_exit_plan_owner_kind,
 )
 from quantx_infrastructure.services.market_stream_readiness import (
   authoritative_market_stream_tradable,
@@ -92,6 +97,10 @@ _AUTHORITATIVE_ENTRY_TERMINAL_STATUSES = {
   int(PersistedOrderStatus.SUCCEEDED),
   int(PersistedOrderStatus.JUNK),
 }
+
+_ROUTABLE_EXIT_PLAN_STATUSES = frozenset(
+  {"ACTIVE", "PARTIALLY_EXITED", "EXIT_PENDING"}
+)
 
 
 @dataclass(frozen=True)
@@ -201,6 +210,7 @@ class TradeCommandService:
       AccountExecutionControl,
       account_id,
       with_for_update=True,
+      populate_existing=True,
     )
     if control is None:
       raise AgentUnavailableError("账户尚未配置独立执行控制与对账状态")
@@ -248,6 +258,227 @@ class TradeCommandService:
   @staticmethod
   def _enum_value(value: Any) -> str:
     return str(getattr(value, "value", value) or "").strip().lower()
+
+  async def _lock_and_validate_live_exit_plan_sell(
+    self,
+    *,
+    locked_intent: TradeIntentRecord,
+    plan_id: str,
+    intent_id: str,
+    strategy_run_id: str,
+    account_id: str,
+    instrument_code: str,
+    volume: int,
+    request_metadata: Mapping[str, Any],
+  ) -> tuple[
+    AutoExitPlanRecord,
+    TradeIntentRecord,
+    Position,
+    dict[str, Any],
+  ]:
+    """Lock the final durable authority for one live EXIT_PLAN SELL.
+
+    A consumed device challenge or exact-auto grant authorizes only a bound
+    plan intent.  It is not a reservation against later plan/position state.
+    These three rows therefore stay locked in the enqueue transaction until
+    the PendingTradeOrder and TradeCommandOutbox rows commit.
+    """
+
+    normalized_plan_id = str(plan_id or "").strip()
+    normalized_intent_id = str(intent_id or "").strip()
+    normalized_account_id = str(account_id or "").strip()
+    normalized_instrument = str(instrument_code or "").strip().upper()
+    metadata = dict(request_metadata or {})
+    if not normalized_plan_id or not normalized_intent_id:
+      raise AgentUnavailableError("退出计划卖单缺少精确计划或意图绑定")
+
+    if str(locked_intent.id or "") != normalized_intent_id:
+      raise AgentUnavailableError("退出计划卖单意图锁与请求绑定不匹配")
+
+    plan = await self.db.scalar(
+      select(AutoExitPlanRecord)
+      .where(AutoExitPlanRecord.plan_id == normalized_plan_id)
+      .with_for_update()
+      .execution_options(populate_existing=True)
+    )
+    intent = locked_intent
+    position = await self.db.scalar(
+      select(Position)
+      .where(
+        Position.account_id == normalized_account_id,
+        Position.stock_code == normalized_instrument,
+      )
+      .with_for_update()
+      .execution_options(populate_existing=True)
+    )
+    if plan is None or intent is None or position is None:
+      raise AgentUnavailableError("退出计划卖单缺少计划、意图或最新持仓")
+
+    intent_metadata = dict(intent.intent_metadata or {})
+    plan_state = dict(plan.plan_state or {})
+    exact_auto = bool(intent_metadata.get("exact_auto_exit_authorized"))
+    expected_intent_status = "PENDING" if exact_auto else "APPROVED"
+    plan_status = str(plan.status or "").strip().upper()
+    target_volume = int(intent.target_volume or 0)
+    remaining_volume = max(0, int(plan.remaining_volume or 0))
+    available_volume = max(0, int(position.can_use_volume or 0))
+    position_volume = max(0, int(position.volume or 0))
+    plan_run_id = str(plan.strategy_run_id or "")
+    intent_run_id = str(intent.strategy_run_id or "")
+    caller_run_id = str(strategy_run_id or "")
+    raw_metadata_run_id = metadata.get("strategy_run_id")
+    metadata_run_id = (
+      raw_metadata_run_id if isinstance(raw_metadata_run_id, str) else ""
+    )
+
+    owner_binding_invalid = (
+      durable_exit_plan_owner_kind(plan) == INVALID_OWNER
+      or str(intent.owner_type or "").strip().upper() != "EXIT_PLAN"
+      or str(intent.owner_id or "").strip() != normalized_plan_id
+      or str(intent_metadata.get("owner_type") or "").strip().upper()
+      != "EXIT_PLAN"
+      or str(intent_metadata.get("owner_id") or "").strip()
+      != normalized_plan_id
+      or str(intent_metadata.get("exit_plan_id") or "").strip()
+      != normalized_plan_id
+      or str(metadata.get("owner_type") or "").strip().upper()
+      != "EXIT_PLAN"
+      or str(metadata.get("owner_id") or "").strip() != normalized_plan_id
+      or str(metadata.get("exit_plan_id") or "").strip()
+      != normalized_plan_id
+      or "strategy_run_id" not in metadata
+      or not isinstance(raw_metadata_run_id, str)
+      or intent_run_id != plan_run_id
+      or caller_run_id != plan_run_id
+      or metadata_run_id != plan_run_id
+    )
+    identity_invalid = (
+      str(plan.account_id or "") != normalized_account_id
+      or str(plan.instrument_code or "").strip().upper()
+      != normalized_instrument
+      or str(plan.execution_mode or "").strip().lower() != "live"
+      or str(intent.account_id or "") != normalized_account_id
+      or str(intent.instrument_code or "").strip().upper()
+      != normalized_instrument
+      or str(intent.direction or "").strip().upper() != "SELL"
+      or str(intent.status or "").strip().upper() != expected_intent_status
+    )
+    plan_not_routable = (
+      not bool(plan.enabled)
+      or plan_status not in _ROUTABLE_EXIT_PLAN_STATUSES
+      or str(plan_state.get("pending_intent_id") or "").strip()
+      != normalized_intent_id
+    )
+    volume_invalid = (
+      int(volume) <= 0
+      or target_volume <= 0
+      or int(volume) > target_volume
+      or int(volume) > remaining_volume
+      or int(volume) > available_volume
+      or int(volume) > position_volume
+    )
+    if owner_binding_invalid:
+      raise AgentUnavailableError("退出计划卖单所有权绑定已变化")
+    if identity_invalid:
+      raise AgentUnavailableError("退出计划卖单账户、标的、方向或状态已变化")
+    if plan_not_routable:
+      raise AgentUnavailableError("退出计划已暂停、终止或 pending 意图已变化")
+    if volume_invalid:
+      raise AgentUnavailableError("退出计划委托量超过意图目标、计划剩余量或最新可卖量")
+    return plan, intent, position, intent_metadata
+
+  async def validate_locked_live_exit_plan_place_for_delivery(
+    self,
+    command: TradeCommandOutbox,
+  ) -> None:
+    """Revalidate a claimed EXIT_PLAN SELL at the physical-send boundary.
+
+    The caller already owns AccountExecutionControl -> PLACE outbox.  This
+    method continues the one lifecycle order with Pending -> Intent -> Plan ->
+    Position and rejects a cached envelope whose durable quantity or owner has
+    changed since enqueue.
+    """
+
+    payload = dict(command.payload or {})
+    metadata = dict(payload.get("request_metadata") or {})
+    if not (
+      str(payload.get("command_kind") or "").strip().upper() == "PLACE_ORDER"
+      and str(payload.get("execution_mode") or "").strip().lower() == "live"
+      and str(payload.get("side") or "").strip().upper() == "SELL"
+    ):
+      raise AgentUnavailableError("物理投递门禁仅接受 LIVE PLACE SELL")
+    client_order_id = str(payload.get("client_order_id") or "").strip()
+    intent_id = str(payload.get("intent_id") or "").strip()
+    pending = await self.db.get(
+      PendingTradeOrder,
+      client_order_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+    if pending is None:
+      raise AgentUnavailableError("卖单物理投递缺少 Pending 投影")
+    try:
+      requested_volume = int(payload.get("volume") or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+      raise AgentUnavailableError("卖单物理投递数量无效") from exc
+    if not (
+      str(command.client_order_id or "") == client_order_id
+      and str(command.account_id or "") == str(payload.get("account_id") or "")
+      and str(pending.client_order_id or "") == client_order_id
+      and str(pending.account_id or "") == str(command.account_id or "")
+      and str(pending.execution_mode or "").strip().lower() == "live"
+      and str(pending.side or "").strip().upper() == "SELL"
+      and str(pending.intent_id or "") == intent_id
+      and str(pending.instrument_code or "").strip().upper()
+      == str(payload.get("instrument_code") or "").strip().upper()
+      and int(pending.volume or 0) == requested_volume
+      and str(pending.status or "").strip().upper()
+      not in {
+        "FILLED",
+        "CANCELLED",
+        "CANCELED",
+        "REJECTED",
+        "EXPIRED",
+        "RECONCILE_REQUIRED",
+        "RECONCILED_ZERO_FILL",
+      }
+    ):
+      raise AgentUnavailableError("卖单 Pending 绑定或状态已变化")
+
+    caller_claims_exit_plan = bool(
+      str(metadata.get("owner_type") or "").strip().upper() == "EXIT_PLAN"
+      or str(metadata.get("exit_plan_id") or "").strip()
+      or bool(metadata.get("exact_auto_exit_authorized"))
+    )
+    intent = (
+      await self.db.get(
+        TradeIntentRecord,
+        intent_id,
+        with_for_update=True,
+        populate_existing=True,
+      )
+      if intent_id
+      else None
+    )
+    persisted_exit_plan_sell = bool(
+      intent is not None
+      and str(intent.owner_type or "").strip().upper() == "EXIT_PLAN"
+    )
+    if caller_claims_exit_plan != persisted_exit_plan_sell:
+      raise AgentUnavailableError("卖单物理投递 EXIT_PLAN 所有权已变化")
+    if not persisted_exit_plan_sell:
+      return
+
+    await self._lock_and_validate_live_exit_plan_sell(
+      locked_intent=intent,
+      plan_id=str(metadata.get("exit_plan_id") or ""),
+      intent_id=intent_id,
+      strategy_run_id=str(payload.get("strategy_run_id") or ""),
+      account_id=str(command.account_id or ""),
+      instrument_code=str(payload.get("instrument_code") or ""),
+      volume=requested_volume,
+      request_metadata=metadata,
+    )
 
   @staticmethod
   def _managed_entry_state(
@@ -790,6 +1021,7 @@ class TradeCommandService:
       AccountExecutionControl,
       account_id,
       with_for_update=True,
+      populate_existing=True,
     )
     if control is None:
       raise AgentUnavailableError("账户尚未配置独立执行控制与对账状态")
@@ -1477,6 +1709,7 @@ class TradeCommandService:
     manual_live: bool = False,
     reason_tags: list[str] | None = None,
     commit_transaction: bool = True,
+    _locked_live_control: AccountExecutionControl | None = None,
   ) -> QueuedTradeCommand:
     if volume <= 0:
       raise ValueError("委托数量必须大于 0")
@@ -1490,7 +1723,19 @@ class TradeCommandService:
     if manual_live and normalized_mode != "live":
       raise ValueError("手动实盘授权只能用于 live 交易命令")
     risk_reducing = normalized_role == "EXIT" or side.upper() == "SELL"
-    if manual_live:
+    live_sell = normalized_mode == "live" and side.upper() == "SELL"
+    if _locked_live_control is not None:
+      if (
+        not live_sell
+        or str(_locked_live_control.account_id or "") != str(account_id or "")
+      ):
+        raise ValueError("预锁账户控制与 LIVE SELL 命令不匹配")
+    elif live_sell:
+      _locked_live_control = await self._require_manual_live_authorization(
+        account_id,
+        risk_reducing=True,
+      )
+    elif manual_live:
       # This lock must precede the outbox lookup/insert to match the account
       # hard-kill control -> pending/outbox lock order.
       await self._require_manual_live_authorization(
@@ -1521,7 +1766,7 @@ class TradeCommandService:
     else:
       business_idempotency_key = f"generated:{uuid.uuid4()}"
 
-    if normalized_mode == "live" and not manual_live:
+    if normalized_mode == "live" and not manual_live and not live_sell:
       await self._require_live_authorization(
         account_id,
         risk_reducing=risk_reducing,
@@ -1732,7 +1977,66 @@ class TradeCommandService:
   ) -> QueuedTradeCommand:
     normalized_execution_mode = str(execution_mode or "paper").lower()
     metadata = dict(request_metadata or {})
-    if require_risk_reducing_live_authorization:
+    locked_live_sell_control = (
+      await self._require_manual_live_authorization(
+        str(account_id),
+        risk_reducing=True,
+      )
+      if normalized_execution_mode == "live" and str(side or "").upper() == "SELL"
+      else None
+    )
+    live_sell_intent = (
+      await self.db.get(
+        TradeIntentRecord,
+        str(intent_id or ""),
+        with_for_update=True,
+        populate_existing=True,
+      )
+      if normalized_execution_mode == "live"
+      and str(side or "").upper() == "SELL"
+      and str(intent_id or "")
+      else None
+    )
+    live_sell_metadata = (
+      dict(live_sell_intent.intent_metadata or {})
+      if live_sell_intent is not None
+      else {}
+    )
+    caller_claims_exit_plan = bool(
+      str(metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
+      or str(metadata.get("exit_plan_id") or "").strip()
+      or bool(metadata.get("exact_auto_exit_authorized"))
+      or require_risk_reducing_live_authorization
+    )
+    persisted_exit_plan_sell = bool(
+      live_sell_intent is not None
+      and str(live_sell_intent.owner_type or "").upper() == "EXIT_PLAN"
+    )
+    if (
+      normalized_execution_mode == "live"
+      and caller_claims_exit_plan
+      and not persisted_exit_plan_sell
+    ):
+      raise AgentUnavailableError("自动退出卖单缺少持久化 EXIT_PLAN 意图所有权")
+    locked_exit_plan: AutoExitPlanRecord | None = None
+    if persisted_exit_plan_sell:
+      locked_exit_plan, live_sell_intent, _position, live_sell_metadata = (
+        await self._lock_and_validate_live_exit_plan_sell(
+          locked_intent=live_sell_intent,
+          plan_id=str(metadata.get("exit_plan_id") or ""),
+          intent_id=str(intent_id or ""),
+          strategy_run_id=str(strategy_run_id or ""),
+          account_id=str(account_id),
+          instrument_code=str(instrument_code),
+          volume=int(volume),
+          request_metadata=metadata,
+        )
+      )
+    requires_exact_exit_authorization = bool(
+      persisted_exit_plan_sell
+      and live_sell_metadata.get("exact_auto_exit_authorized")
+    )
+    if requires_exact_exit_authorization:
       authorization_plan_id = str(metadata.get("exit_plan_id") or "").strip()
       authorization_fingerprint = str(
         metadata.get("auto_exit_authorization_fingerprint") or ""
@@ -1743,13 +2047,7 @@ class TradeCommandService:
         raise AgentUnavailableError("自动退出授权缺少确认用户绑定")
       if not authorization_plan_id or not authorization_fingerprint:
         raise AgentUnavailableError("自动退出命令缺少精确计划授权绑定")
-      plan = (
-        await self.db.execute(
-          select(AutoExitPlanRecord)
-          .where(AutoExitPlanRecord.plan_id == authorization_plan_id)
-          .with_for_update()
-        )
-      ).scalar_one_or_none()
+      plan = locked_exit_plan
       if (
         plan is None
         or str(plan.account_id) != str(account_id)
@@ -1767,48 +2065,18 @@ class TradeCommandService:
       )
       if not validation.valid:
         raise AgentUnavailableError(f"自动退出授权已失效：{validation.code}")
-      intent = await self.db.get(
-        TradeIntentRecord,
-        str(intent_id or ""),
-        with_for_update=True,
-      )
+      intent = live_sell_intent
       intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
-      plan_state = dict(plan.plan_state or {})
       if (
         intent is None
-        or str(intent.owner_type or "") != "EXIT_PLAN"
-        or str(intent.owner_id or "") != authorization_plan_id
-        or str(intent.account_id or "") != str(account_id)
-        or str(intent.instrument_code or "") != str(instrument_code)
-        or str(intent.direction or "").upper() != "SELL"
-        or str(intent.status or "").upper() != "PENDING"
-        or str(plan_state.get("pending_intent_id") or "") != str(intent_id or "")
+        or not bool(metadata.get("exact_auto_exit_authorized"))
         or not bool(intent_metadata.get("exact_auto_exit_authorized"))
         or str(intent_metadata.get("auto_exit_authorization_fingerprint") or "")
         != authorization_fingerprint
         or str(intent_metadata.get("auto_exit_authorization_user_id") or "")
         != str(authorization_user_id)
-        or int(intent.target_volume or 0) < int(volume)
       ):
         raise AgentUnavailableError("自动退出意图与精确计划授权不匹配")
-      position = await self.db.scalar(
-        select(Position)
-        .where(
-          Position.account_id == account_id,
-          Position.stock_code == instrument_code,
-        )
-        .with_for_update()
-      )
-      if (
-        int(volume) > int(plan.remaining_volume or 0)
-        or position is None
-        or int(volume) > int(position.can_use_volume or 0)
-      ):
-        raise AgentUnavailableError("自动退出委托超过当前计划剩余量或实时可卖量")
-      await self._require_manual_live_authorization(
-        account_id,
-        risk_reducing=True,
-      )
       device = await self._device_for(
         user_id=str(authorization_user_id),
         account_id=account_id,
@@ -1834,6 +2102,29 @@ class TradeCommandService:
           "自动退出要求唯一 READY、live、协议 1.1 的 QMT Agent"
         )
     else:
+      if persisted_exit_plan_sell:
+        manual_plan_id = str(live_sell_metadata.get("exit_plan_id") or "").strip()
+        try:
+          await validate_consumed_exit_plan_sell_challenge(
+            self.db,
+            plan_id=manual_plan_id,
+            intent_id=str(intent_id or ""),
+            account_id=str(account_id),
+            approval_audit={
+              "challenge_id": live_sell_metadata.get(
+                "exit_plan_approval_challenge_id"
+              ),
+              "actor_id": live_sell_metadata.get("exit_plan_approval_user_id"),
+              "device_session_id": live_sell_metadata.get(
+                "exit_plan_approval_device_session_id"
+              ),
+              "channel": live_sell_metadata.get("exit_plan_approval_channel"),
+            },
+          )
+        except ValueError as exc:
+          raise AgentUnavailableError(
+            f"退出计划人工确认挑战无效：{exc}"
+          ) from exc
       persisted_intent = (
         await self.db.get(TradeIntentRecord, str(intent_id or ""))
         if normalized_execution_mode == "live"
@@ -1909,6 +2200,7 @@ class TradeCommandService:
       substitution_plan=substitution_plan,
       policy_version=policy_version,
       request_metadata=request_metadata,
+      _locked_live_control=locked_live_sell_control,
     )
 
   async def enqueue_cancel(
@@ -1921,31 +2213,111 @@ class TradeCommandService:
     execution_mode: str = "paper",
     commit_transaction: bool = True,
   ) -> QueuedTradeCommand:
-    business_idempotency_key = hashlib.sha256(
+    cancel_business_identity = hashlib.sha256(
       (
         f"cancel:{user_id}:{account_id}:{idempotency_key.strip() or broker_order_id}"
       ).encode("utf-8")
     ).hexdigest()
-    existing = (
-      await self.db.execute(
-        select(TradeCommandOutbox).where(
-          TradeCommandOutbox.idempotency_key == business_idempotency_key
+    attempts = list(
+      (
+        await self.db.execute(
+          select(TradeCommandOutbox)
+          .where(
+            or_(
+              TradeCommandOutbox.idempotency_key == cancel_business_identity,
+              TradeCommandOutbox.payload["cancel_business_identity"].as_string()
+              == cancel_business_identity,
+            )
+          )
+          .with_for_update()
         )
       )
-    ).scalar_one_or_none()
-    if existing is not None:
+      .scalars()
+      .all()
+    )
+    now = utcnow()
+    active_attempt = next(
+      (
+        attempt
+        for attempt in attempts
+        if str(attempt.delivery_status or "").upper()
+        in {"QUEUED", "DELIVERED", "ACKNOWLEDGED"}
+        and attempt.expires_at > now
+      ),
+      None,
+    )
+    if active_attempt is not None:
       return QueuedTradeCommand(
-        existing.client_order_id,
-        existing.message_id,
-        existing.delivery_status,
+        active_attempt.client_order_id,
+        active_attempt.message_id,
+        active_attempt.delivery_status,
       )
+
+    # An expired cancel that never left this process is safe to revive in
+    # place.  Do not change its command identity: the Agent may still have a
+    # durable journal for that exact message if the delivery evidence was
+    # incomplete, which is why every other expired/old attempt is retired and
+    # gets a distinct next-attempt identity below.
+    safely_reusable = next(
+      (
+        attempt
+        for attempt in attempts
+        if str(attempt.delivery_status or "").upper() in {"QUEUED", "EXPIRED"}
+        and attempt.expires_at <= now
+        and attempt.delivered_at is None
+        and attempt.acknowledged_at is None
+        and int(attempt.attempts or 0) == 0
+      ),
+      None,
+    )
+    if safely_reusable is not None:
+      expires_at = now + timedelta(minutes=2)
+      payload = dict(safely_reusable.payload or {})
+      payload["cancel_business_identity"] = cancel_business_identity
+      payload["cancel_attempt"] = int(payload.get("cancel_attempt") or 1)
+      payload["expires_at"] = expires_at.isoformat() + "Z"
+      safely_reusable.payload = payload
+      safely_reusable.delivery_status = "QUEUED"
+      safely_reusable.expires_at = expires_at
+      safely_reusable.last_error = None
+      if commit_transaction:
+        await self.db.commit()
+      else:
+        await self.db.flush()
+      return QueuedTradeCommand(
+        safely_reusable.client_order_id,
+        safely_reusable.message_id,
+        "QUEUED",
+      )
+
+    # A delivered, acknowledged, reconciliation-required, or otherwise
+    # uncertain attempt must never become deliverable again.  Its immutable
+    # evidence remains in the outbox while a fresh attempt receives new Agent
+    # identities.  A stale QUEUED row with any delivery evidence is uncertain
+    # too, so retire it explicitly before adding the replacement.
+    for attempt in attempts:
+      if str(attempt.delivery_status or "").upper() == "QUEUED":
+        attempt.delivery_status = "RECONCILE_REQUIRED"
+        attempt.last_error = "cancel_retry_requires_new_command_identity"
+
+    attempt_numbers = [
+      max(1, int(dict(attempt.payload or {}).get("cancel_attempt") or 1))
+      for attempt in attempts
+    ]
+    cancel_attempt = max(attempt_numbers, default=0) + 1
+    business_idempotency_key = (
+      cancel_business_identity
+      if cancel_attempt == 1
+      else hashlib.sha256(
+        f"{cancel_business_identity}:attempt:{cancel_attempt}".encode("utf-8")
+      ).hexdigest()
+    )
     device = await self._device_for(
       user_id=user_id,
       account_id=account_id,
       execution_mode=execution_mode,
       allow_degraded_cancel=True,
     )
-    now = utcnow()
     client_order_id = f"cancel:{uuid.uuid4()}"
     message_id = str(uuid.uuid4())
     expires_at = now + timedelta(minutes=2)
@@ -1956,33 +2328,52 @@ class TradeCommandService:
       "execution_mode": execution_mode,
       "broker_order_id": str(broker_order_id),
       "trace_id": message_id,
+      "cancel_business_identity": cancel_business_identity,
+      "cancel_attempt": cancel_attempt,
       "expires_at": expires_at.isoformat() + "Z",
     }
-    self.db.add(
-      TradeCommandOutbox(
-        message_id=message_id,
-        client_order_id=client_order_id,
-        idempotency_key=business_idempotency_key,
-        device_id=device.id,
-        account_id=account_id,
-        payload=payload,
-        delivery_status="QUEUED",
-        expires_at=expires_at,
-        attempts=0,
-      )
+    command = TradeCommandOutbox(
+      message_id=message_id,
+      client_order_id=client_order_id,
+      idempotency_key=business_idempotency_key,
+      device_id=device.id,
+      account_id=account_id,
+      payload=payload,
+      delivery_status="QUEUED",
+      expires_at=expires_at,
+      attempts=0,
     )
     if commit_transaction:
+      self.db.add(command)
       try:
         await self.db.commit()
       except IntegrityError:
         await self.db.rollback()
-        existing = (
-          await self.db.execute(
-            select(TradeCommandOutbox).where(
-              TradeCommandOutbox.idempotency_key == business_idempotency_key
+        existing_attempts = list(
+          (
+            await self.db.execute(
+              select(TradeCommandOutbox).where(
+                or_(
+                  TradeCommandOutbox.idempotency_key == cancel_business_identity,
+                  TradeCommandOutbox.payload["cancel_business_identity"].as_string()
+                  == cancel_business_identity,
+                )
+              )
             )
           )
-        ).scalar_one_or_none()
+          .scalars()
+          .all()
+        )
+        existing = next(
+          (
+            attempt
+            for attempt in existing_attempts
+            if str(attempt.delivery_status or "").upper()
+            in {"QUEUED", "DELIVERED", "ACKNOWLEDGED"}
+            and attempt.expires_at > utcnow()
+          ),
+          None,
+        )
         if existing is None:
           raise
         return QueuedTradeCommand(
@@ -1991,7 +2382,46 @@ class TradeCommandService:
           existing.delivery_status,
         )
     else:
-      await self.db.flush()
+      # Isolate a concurrent uniqueness collision in a savepoint so callers
+      # that own a larger authorization/report transaction remain usable.
+      # The competing active QUEUED attempt is then returned below.
+      try:
+        async with self.db.begin_nested():
+          self.db.add(command)
+          await self.db.flush()
+      except IntegrityError:
+        existing_attempts = list(
+          (
+            await self.db.execute(
+              select(TradeCommandOutbox).where(
+                or_(
+                  TradeCommandOutbox.idempotency_key == cancel_business_identity,
+                  TradeCommandOutbox.payload["cancel_business_identity"].as_string()
+                  == cancel_business_identity,
+                )
+              )
+            )
+          )
+          .scalars()
+          .all()
+        )
+        existing = next(
+          (
+            attempt
+            for attempt in existing_attempts
+            if str(attempt.delivery_status or "").upper()
+            in {"QUEUED", "DELIVERED", "ACKNOWLEDGED"}
+            and attempt.expires_at > utcnow()
+          ),
+          None,
+        )
+        if existing is None:
+          raise
+        return QueuedTradeCommand(
+          existing.client_order_id,
+          existing.message_id,
+          existing.delivery_status,
+        )
     return QueuedTradeCommand(client_order_id, message_id, "QUEUED")
 
   async def request_strategy_buy_cancellations(

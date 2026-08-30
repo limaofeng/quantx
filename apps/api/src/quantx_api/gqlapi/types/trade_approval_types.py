@@ -4,8 +4,30 @@ from datetime import datetime
 from typing import List, Optional
 
 import strawberry
+from strawberry.scalars import JSON
 
-from ..trade_approval import TradeApprovalPreviewData
+from ..trade_approval import (
+  TradeApprovalPreviewData,
+  TTradeAutoExitAuthorizationPreviewData,
+)
+
+
+@strawberry.type(description="做 T 买入确认同时覆盖的精确自动退出范围")
+class TTradeAutoExitAuthorizationPreview:
+  plan_id: str
+  config_version: int
+  max_protected_volume: int
+  rules: JSON
+  t1_policy: str
+  execution_policy: JSON
+  execution_semantics: str
+  authorization_expires_at: datetime
+
+  @staticmethod
+  def from_data(
+    data: TTradeAutoExitAuthorizationPreviewData,
+  ) -> "TTradeAutoExitAuthorizationPreview":
+    return TTradeAutoExitAuthorizationPreview(**vars(data))
 
 
 @strawberry.type(description="服务器生成的单笔交易确认预览")
@@ -26,10 +48,22 @@ class TradeApprovalPreview:
   signal_expires_at: Optional[datetime]
   challenge_expires_at: datetime
   warnings: List[str]
+  t_trade_auto_exit_authorization: Optional[
+    TTradeAutoExitAuthorizationPreview
+  ] = None
 
   @staticmethod
   def from_data(data: TradeApprovalPreviewData) -> "TradeApprovalPreview":
-    return TradeApprovalPreview(**vars(data))
+    values = vars(data).copy()
+    authorization = values.pop("t_trade_auto_exit_authorization", None)
+    return TradeApprovalPreview(
+      **values,
+      t_trade_auto_exit_authorization=(
+        TTradeAutoExitAuthorizationPreview.from_data(authorization)
+        if authorization is not None
+        else None
+      ),
+    )
 
 
 @strawberry.type(description="交易确认预览结果")

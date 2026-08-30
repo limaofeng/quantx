@@ -100,6 +100,19 @@ class AccountExecutionSafetyCheck:
   scope: str
 
 
+@strawberry.type(description="需要显式修复的账户隔离委托")
+class QuarantinedOrder:
+  client_order_id: str
+  plan_id: str
+  intent_id: str
+  quarantine_reason: str
+  broker_order_id: str
+  repairable: bool
+  blocked_reason: str
+  quarantined_at: datetime
+  source_sequence: int
+
+
 @strawberry.type(description="账户级实盘执行能力，不包含具体助手的灰度策略")
 class AccountExecutionSafety:
   account_id: str
@@ -113,6 +126,7 @@ class AccountExecutionSafety:
   summary: str
   blocked_reasons: List[str] = field(default_factory=list)
   checks: List[AccountExecutionSafetyCheck] = field(default_factory=list)
+  quarantined_orders: List[QuarantinedOrder] = field(default_factory=list)
   engine_status: str = "OFFLINE"
   agent_status: str = "OFFLINE"
   agent_mode: str = "offline"
@@ -144,6 +158,7 @@ class AccountExecutionControlAction(Enum):
   PAUSE_RISK_INCREASE = "PAUSE_RISK_INCREASE"
   KILL_SWITCH = "KILL_SWITCH"
   CLEAR_KILL_SWITCH = "CLEAR_KILL_SWITCH"
+  REPAIR_QUARANTINED_ORDER = "REPAIR_QUARANTINED_ORDER"
 
 
 @strawberry.input(description="预览账户级执行控制")
@@ -154,6 +169,8 @@ class AccountExecutionControlPreviewInput:
   idempotency_key: str
   snapshot_id: str = ""
   reason: str = ""
+  client_order_id: str = ""
+  quarantine_reason: str = ""
 
 
 @strawberry.type(description="账户级执行控制预览")
@@ -166,6 +183,8 @@ class AccountExecutionControlPreview:
   state_version: int
   snapshot_id: str
   reason: str
+  client_order_id: str
+  quarantine_reason: str
   challenge_expires_at: datetime
   challenge_status: str
   operation_status: str
@@ -195,3 +214,10 @@ class AccountExecutionControlConfirmationResult:
   action: Optional[AccountExecutionControlAction] = None
   operation_status: str = "NOT_CONSUMED"
   safety: Optional[AccountExecutionSafety] = None
+  event_id: Optional[strawberry.ID] = None
+  client_order_id: Optional[str] = None
+  plan_id: Optional[str] = None
+  intent_id: Optional[str] = None
+  snapshot_id: Optional[str] = None
+  broker_terminal_status: Optional[str] = None
+  cumulative_filled_volume: Optional[int] = None

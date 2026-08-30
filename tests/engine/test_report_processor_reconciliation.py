@@ -16,10 +16,16 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   AgentReportInbox,
   OperationalAlert,
+  PendingTradeOrder,
   RuntimeComponentHeartbeat,
+  StrategyOrderCorrelation,
 )
 from quantx_infrastructure.models.auth import AuthUser
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import trade_command_service as command_module
+from quantx_infrastructure.services.account_execution_quarantine_service import (
+  BROKER_EXECUTION_AFTER_RELEASE,
+)
 from quantx_infrastructure.services.agent_session_guard import (
   AGENT_SERVER_SESSION_PAYLOAD_KEY,
   QMT_ACCOUNT_MISMATCH,
@@ -27,6 +33,311 @@ from quantx_infrastructure.services.agent_session_guard import (
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+@pytest.mark.parametrize(
+  ("report", "expected"),
+  [
+    ({}, None),
+    ({"traded_volume": None}, None),
+    ({"traded_volume": True}, None),
+    ({"traded_volume": -1}, None),
+    ({"traded_volume": 1.5}, None),
+    ({"traded_volume": "400"}, 400),
+    ({"traded_volume": 0}, 0),
+    ({"traded_volume": 100, "filled_volume": 400}, 400),
+  ],
+)
+def test_reported_cumulative_fill_preserves_missing_and_invalid_values(
+  report: dict[str, object],
+  expected: int | None,
+) -> None:
+  assert report_processor._reported_cumulative_fill(report) == expected
+
+
+def test_runtime_order_key_distinguishes_missing_invalid_and_explicit_zero_fill():
+  correlation = SimpleNamespace(
+    account_id="account-1",
+    client_order_id="client-1",
+  )
+  order = {
+    "order_id": 101,
+    "order_status": "CANCELLED",
+  }
+
+  missing = report_processor._runtime_business_key("ORDER", correlation, order)
+  invalid = report_processor._runtime_business_key(
+    "ORDER",
+    correlation,
+    {**order, "traded_volume": "invalid"},
+  )
+  explicit_zero = report_processor._runtime_business_key(
+    "ORDER",
+    correlation,
+    {**order, "traded_volume": 0},
+  )
+
+  assert missing.endswith(":CANCELLED:MISSING")
+  assert invalid.endswith(":CANCELLED:INVALID")
+  assert explicit_zero.endswith(":CANCELLED:0")
+  assert len({missing, invalid, explicit_zero}) == 3
+
+
+@pytest.mark.asyncio
+async def test_runtime_order_event_preserves_missing_cumulative_fill(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  from quantx_engine.strategy_manager import strategy_manager
+
+  apply_order = AsyncMock()
+  monkeypatch.setattr(
+    strategy_manager.executor,
+    "apply_durable_order_report",
+    apply_order,
+  )
+  event = SimpleNamespace(
+    strategy_run_id="run-1",
+    event_type="ORDER",
+    business_key="order:client-1:101:CANCELLED:MISSING",
+    payload={
+      "metadata": {
+        "strategy_order_id": "strategy-order-1",
+        "instrument_code": "600000.SH",
+      },
+      "report": {
+        "order_id": 101,
+        "account_id": "account-1",
+        "stock_code": "600000.SH",
+        "side": "SELL",
+        "order_volume": 100,
+        "order_status": "CANCELLED",
+      },
+    },
+  )
+
+  await report_processor._apply_runtime_event(event)
+
+  order = apply_order.await_args.args[1]
+  assert order.filled_volume is None
+
+
+@pytest.mark.asyncio
+async def test_stale_order_sequence_does_not_propagate_to_exit_plan(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AuthUser.__table__,
+    PendingTradeOrder.__table__,
+    StrategyOrderCorrelation.__table__,
+    TradeIntentRecord.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  order_upsert = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "OrderService",
+    lambda _account_id: SimpleNamespace(upsert_report=order_upsert),
+  )
+  plan_event = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "AutoExitPlanService",
+    lambda: SimpleNamespace(apply_order_event_for_report=plan_event),
+  )
+  async with sessions() as db:
+    db.add(
+      AuthUser(
+        id="user-1",
+        username="stale-order-user",
+        display_name="Stale Order User",
+        password_hash="unused",
+        permissions=[],
+      )
+    )
+    db.add(
+      PendingTradeOrder(
+        client_order_id="client-1",
+        user_id="user-1",
+        account_id="account-1",
+        instrument_code="600000.SH",
+        side="SELL",
+        order_type="MARKET",
+        limit_price="0",
+        volume=1_000,
+        status="PARTIAL_FILLED",
+        broker_order_id="101",
+        execution_mode="live",
+        strategy_run_id="run-1",
+        strategy_order_id="strategy-order-1",
+        intent_id="intent-1",
+        bucket="swing",
+        request_metadata={"exit_plan_id": "plan-1"},
+        last_source_sequence=10,
+      )
+    )
+    db.add(
+      StrategyOrderCorrelation(
+        id="correlation-1",
+        client_order_id="client-1",
+        broker_order_id="101",
+        account_id="account-1",
+        strategy_run_id="run-1",
+        strategy_order_id="strategy-order-1",
+        intent_id="intent-1",
+        bucket="swing",
+        execution_mode="live",
+        trace_id="trace-1",
+        request_metadata={"exit_plan_id": "plan-1"},
+      )
+    )
+    await db.commit()
+
+  await report_processor._process_order_report(
+    {
+      "client_order_id": "client-1",
+      "source_sequence": 9,
+      "order": {
+        "order_id": 101,
+        "account_id": "account-1",
+        "stock_code": "600000.SH",
+        "order_type": 24,
+        "order_volume": 1_000,
+        "order_status": 56,
+        "traded_volume": 400,
+        "traded_price": 10.5,
+      },
+    }
+  )
+
+  plan_event.assert_not_awaited()
+  async with sessions() as db:
+    pending = await db.get(PendingTradeOrder, "client-1")
+    assert pending is not None
+    assert pending.status == "PARTIAL_FILLED"
+    assert pending.last_source_sequence == 10
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_order_without_client_id_uses_broker_correlation_for_exit_plan(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AuthUser.__table__,
+    PendingTradeOrder.__table__,
+    StrategyOrderCorrelation.__table__,
+    TradeIntentRecord.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(
+    report_processor,
+    "OrderService",
+    lambda _account_id: SimpleNamespace(upsert_report=AsyncMock()),
+  )
+  plan_event = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "AutoExitPlanService",
+    lambda: SimpleNamespace(apply_order_event_for_report=plan_event),
+  )
+  async with sessions() as db:
+    db.add(
+      AuthUser(
+        id="user-1",
+        username="broker-correlation-user",
+        display_name="Broker Correlation User",
+        password_hash="unused",
+        permissions=[],
+      )
+    )
+    db.add(
+      PendingTradeOrder(
+        client_order_id="client-1",
+        user_id="user-1",
+        account_id="account-1",
+        instrument_code="600000.SH",
+        side="SELL",
+        order_type="MARKET",
+        limit_price="0",
+        volume=1_000,
+        status="SUBMITTED",
+        broker_order_id="101",
+        execution_mode="live",
+        strategy_run_id="run-1",
+        strategy_order_id="strategy-order-1",
+        intent_id="intent-1",
+        bucket="swing",
+        request_metadata={"exit_plan_id": "plan-1"},
+        last_source_sequence=10,
+      )
+    )
+    db.add(
+      StrategyOrderCorrelation(
+        id="correlation-1",
+        client_order_id="client-1",
+        broker_order_id="101",
+        account_id="account-1",
+        strategy_run_id="run-1",
+        strategy_order_id="strategy-order-1",
+        intent_id="intent-1",
+        bucket="swing",
+        execution_mode="live",
+        trace_id="trace-1",
+        request_metadata={"exit_plan_id": "plan-1"},
+      )
+    )
+    await db.commit()
+
+  await report_processor._process_order_report(
+    {
+      "source_sequence": 11,
+      "order": {
+        "order_id": 101,
+        "account_id": "account-1",
+        "stock_code": "600000.SH",
+        "order_type": 24,
+        "order_volume": 1_000,
+        "order_status": 53,
+        "traded_volume": 0,
+        "traded_price": 0,
+      },
+    }
+  )
+
+  plan_event.assert_awaited_once_with(
+    client_order_id="",
+    broker_order_id="101",
+    status="CANCELLED",
+    source_sequence=11,
+    cumulative_filled_volume=0,
+    cumulative_fill_state="VALUE",
+  )
+  async with sessions() as db:
+    pending = await db.get(PendingTradeOrder, "client-1")
+    assert pending is not None
+    assert pending.status == "CANCELLED"
+    assert pending.last_source_sequence == 11
+
+  await engine.dispose()
 
 
 def _session_details(
@@ -269,7 +580,6 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
     "_snapshot_discrepancies",
     snapshot_discrepancies,
   )
-
   async with sessions() as db:
     db.add(_api_heartbeat())
     db.add(
@@ -420,6 +730,12 @@ async def test_clean_snapshot_rolls_controlled_window_binding_and_keeps_buy_gate
     "_snapshot_discrepancies",
     snapshot_discrepancies,
   )
+  authorization_rederivation = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
+    authorization_rederivation,
+  )
   position_service = SimpleNamespace(
     prepare_full_snapshot=AsyncMock(
       return_value={"applied": True, "reason": "PREPARED"}
@@ -482,6 +798,10 @@ async def test_clean_snapshot_rolls_controlled_window_binding_and_keeps_buy_gate
     "account-1",
     reason="BROKER_POSITION_SNAPSHOT_UPDATED",
   )
+  authorization_rederivation.assert_awaited_once_with(
+    "account-1",
+    instrument_codes=None,
+  )
   monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
   monkeypatch.setattr(
     command_module.settings,
@@ -517,6 +837,108 @@ async def test_clean_snapshot_rolls_controlled_window_binding_and_keeps_buy_gate
 
 
 @pytest.mark.asyncio
+async def test_clean_snapshot_keeps_broker_release_quarantine_until_explicit_repair(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AccountExecutionControl.__table__,
+    AccountExecutionControlEvent.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(
+    report_processor,
+    "_invalidate_t_trade_entry_authority_for_account",
+    AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_snapshot_discrepancies",
+    AsyncMock(
+      return_value={
+        "blocking_discrepancies": [],
+        "external_orders": [],
+        "external_trades": [],
+      }
+    ),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
+    AsyncMock(),
+  )
+  position_service = SimpleNamespace(
+    prepare_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "PREPARED"}
+    ),
+    finalize_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "APPLIED"}
+    ),
+    mark_snapshot_failure=AsyncMock(),
+  )
+  async with sessions() as db:
+    db.add(
+      AccountExecutionControl(
+        account_id="account-1",
+        authorization_state="PAUSED",
+        state_version=9,
+        reconcile_status="RECONCILE_REQUIRED",
+        paused_reason=json.dumps(
+          [
+            {
+              "kind": BROKER_EXECUTION_AFTER_RELEASE,
+              "planId": "exit-plan-1",
+            }
+          ]
+        ),
+        last_snapshot_id="snapshot-quarantined",
+        last_snapshot_hash="a" * 64,
+        last_snapshot_at=utcnow(),
+        controlled_window_active=False,
+      )
+    )
+    await db.commit()
+
+  reported_at = utcnow()
+  result, blocked, _summary = (
+    await report_processor._reconcile_authoritative_full_account_locked(
+      "account-1",
+      {"orders": [], "trades": []},
+      snapshot_id="snapshot-clean",
+      snapshot_hash="b" * 64,
+      reported_at=reported_at,
+      sequence=10,
+      positions=[],
+      position_service=position_service,
+    )
+  )
+
+  assert result == {"applied": True, "reason": "PREPARED"}
+  assert blocked is True
+  async with sessions() as db:
+    control = await db.get(AccountExecutionControl, "account-1")
+    assert control is not None
+    assert control.reconcile_status == "RECONCILE_REQUIRED"
+    assert control.authorization_state == "PAUSED"
+    assert control.state_version == 10
+    assert json.loads(str(control.paused_reason))[0]["kind"] == (
+      BROKER_EXECUTION_AFTER_RELEASE
+    )
+    assert control.controlled_window_active is False
+  position_service.finalize_full_snapshot.assert_not_awaited()
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_ready_reconciliation_atomically_completes_agent_handover(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -540,6 +962,11 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
   monkeypatch.setattr(
     report_processor,
     "_invalidate_t_trade_entry_authority_for_account",
+    AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
     AsyncMock(),
   )
   monkeypatch.setattr(report_processor, "_process_order_report", AsyncMock())

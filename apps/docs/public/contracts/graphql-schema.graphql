@@ -41,6 +41,7 @@ enum AccountExecutionControlAction {
   PAUSE_RISK_INCREASE
   KILL_SWITCH
   CLEAR_KILL_SWITCH
+  REPAIR_QUARANTINED_ORDER
 }
 
 """确认账户级执行控制"""
@@ -58,6 +59,13 @@ type AccountExecutionControlConfirmationResult {
   action: AccountExecutionControlAction
   operationStatus: String!
   safety: AccountExecutionSafety
+  eventId: ID
+  clientOrderId: String
+  planId: String
+  intentId: String
+  snapshotId: String
+  brokerTerminalStatus: String
+  cumulativeFilledVolume: Int
 }
 
 """账户级执行控制预览"""
@@ -70,6 +78,8 @@ type AccountExecutionControlPreview {
   stateVersion: Int!
   snapshotId: String!
   reason: String!
+  clientOrderId: String!
+  quarantineReason: String!
   challengeExpiresAt: DateTime!
   challengeStatus: String!
   operationStatus: String!
@@ -84,6 +94,8 @@ input AccountExecutionControlPreviewInput {
   idempotencyKey: String!
   snapshotId: String! = ""
   reason: String! = ""
+  clientOrderId: String! = ""
+  quarantineReason: String! = ""
 }
 
 """账户级执行控制预览结果"""
@@ -114,6 +126,7 @@ type AccountExecutionSafety {
   summary: String!
   blockedReasons: [String!]!
   checks: [AccountExecutionSafetyCheck!]!
+  quarantinedOrders: [QuarantinedOrder!]!
   engineStatus: String!
   agentStatus: String!
   agentMode: String!
@@ -1790,6 +1803,8 @@ type ExitPlanView {
   autoExitAuthorizationConfigVersion: Int
   autoExitAuthorizationExpiresAt: DateTime
   configVersion: Int!
+  stateVersion: Int!
+  executionOwner: String!
   completionStrategy: String
   completionNote: String
   protectedVolume: Int!
@@ -3212,18 +3227,6 @@ input LiquidatePositionInput {
   accountId: String = null
 }
 
-"""批量或一键清仓"""
-input LiquidatePositionsInput {
-  completionStrategy: String!
-  conflictStrategy: String!
-  confirm: Boolean!
-  accountId: String = null
-  scope: String! = "SELECTED"
-  instrumentCodes: [String!] = null
-  executionMode: String! = "paper"
-  autoExitAuthorized: Boolean! = false
-}
-
 """清仓完成策略"""
 enum LiquidationCompletionStrategy {
   AVAILABLE_NOW
@@ -3282,14 +3285,6 @@ type LiquidationError {
 enum LiquidationExecutionMode {
   PAPER
   LIVE
-}
-
-"""一组持仓清仓计划"""
-type LiquidationGroupResult {
-  groupId: String!
-  success: Boolean!
-  message: String!
-  plans: [LiquidationPlanResult!]!
 }
 
 """清仓预览中的单只证券固定快照"""
@@ -3493,7 +3488,7 @@ type LogLine {
   message: String!
 }
 
-"""移动端手动委托确认输入"""
+"""手动委托确认输入"""
 input ManualOrderConfirmationInput {
   """预览返回的确认挑战 ID"""
   challengeId: String!
@@ -3502,7 +3497,7 @@ input ManualOrderConfirmationInput {
   confirmationToken: String!
 }
 
-"""移动端手动委托确认结果；成功只表示命令已排队"""
+"""手动委托确认结果；成功只表示命令已排队"""
 type ManualOrderConfirmationResult {
   success: Boolean!
   code: String!
@@ -3512,13 +3507,13 @@ type ManualOrderConfirmationResult {
   status: String
 }
 
-"""移动端手动委托执行模式"""
+"""手动委托执行模式"""
 enum ManualOrderExecutionMode {
   PAPER
   LIVE
 }
 
-"""移动端手动委托服务器预览"""
+"""手动委托服务器预览"""
 type ManualOrderPreview {
   challengeId: String!
   confirmationToken: String!
@@ -3560,7 +3555,7 @@ type ManualOrderPreview {
   warnings: [String!]!
 }
 
-"""移动端手动委托预览输入"""
+"""手动委托预览输入"""
 input ManualOrderPreviewInput {
   """必填资金账号"""
   accountId: String!
@@ -3587,7 +3582,7 @@ input ManualOrderPreviewInput {
   limitPrice: Float = null
 }
 
-"""移动端手动委托预览结果"""
+"""手动委托预览结果"""
 type ManualOrderPreviewResult {
   success: Boolean!
   code: String!
@@ -3595,13 +3590,13 @@ type ManualOrderPreviewResult {
   preview: ManualOrderPreview
 }
 
-"""移动端手动委托报价类型"""
+"""手动委托报价类型"""
 enum ManualOrderPriceType {
   LIMIT
   BEST
 }
 
-"""移动端手动委托方向"""
+"""手动委托方向"""
 enum ManualOrderSide {
   BUY
   SELL
@@ -3732,10 +3727,10 @@ type Mutation {
   """消费一次性挑战并应用账户级实盘执行控制"""
   confirmAccountExecutionControl(input: AccountExecutionControlConfirmationInput!): AccountExecutionControlConfirmationResult!
 
-  """预览移动端手动委托并签发一次性确认挑战"""
+  """预览手动委托并签发一次性确认挑战"""
   previewManualOrder(input: ManualOrderPreviewInput!): ManualOrderPreviewResult!
 
-  """消费一次性挑战并排队移动端手动委托"""
+  """消费一次性挑战并排队手动委托"""
   confirmManualOrder(input: ManualOrderConfirmationInput!): ManualOrderConfirmationResult!
 
   """创建手工交易命令并返回排队状态；成功不表示已报、成交或持仓已变化"""
@@ -3781,16 +3776,13 @@ type Mutation {
   reconcileExitPlanCapacity(instrumentCode: String!, accountId: String = null): ExitPlanCapacityReconciliationResult!
 
   """启用或暂停退出计划"""
-  setExitPlanEnabled(planId: String!, enabled: Boolean!, configVersion: Int!): ExitPlanView!
+  setExitPlanEnabled(planId: String!, enabled: Boolean!, configVersion: Int!, idempotencyKey: String!): ExitPlanView!
 
   """取消并释放退出计划保护数量"""
   cancelExitPlan(planId: String!, configVersion: Int!, reason: String! = "USER_CANCELLED"): ExitPlanView!
 
   """立即评估一个退出计划"""
   evaluateExitPlanNow(planId: String!): ExitPlanView!
-
-  """按股票创建一组统一清仓计划"""
-  liquidatePositions(input: LiquidatePositionsInput!): LiquidationGroupResult!
 
   """为当前可退出的未归因持仓创建清仓计划；返回计划结果而非成交确认"""
   liquidateAllPositions(input: LiquidateAllPositionsInput!): LiquidationResult!
@@ -4150,7 +4142,7 @@ enum OrderDirection {
   DESC
 }
 
-"""服务端计算的移动端手动委托能力"""
+"""服务端计算的手动委托能力"""
 type OrderEntryCapabilities {
   accountId: String!
   instrumentCode: String!
@@ -4662,6 +4654,19 @@ type QmtMarketStreamMetrics {
   commitPhase: String!
 }
 
+"""需要显式修复的账户隔离委托"""
+type QuarantinedOrder {
+  clientOrderId: String!
+  planId: String!
+  intentId: String!
+  quarantineReason: String!
+  brokerOrderId: String!
+  repairable: Boolean!
+  blockedReason: String!
+  quarantinedAt: DateTime!
+  sourceSequence: Int!
+}
+
 "QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
 type Query {
   """AI Runtime 全局非敏感配置与应用状态"""
@@ -4748,7 +4753,7 @@ type Query {
   """获取交易日历（指定区间内的交易日列表）"""
   tradingCalendar(market: String! = "SH", startDate: Date = null, endDate: Date = null): [Date!]!
 
-  """查询当前账户与标的的移动端下单能力"""
+  """查询当前账户与标的的手工下单能力"""
   orderEntryCapabilities(instrumentCode: String!, accountId: String = null): OrderEntryCapabilities!
 
   """获取当日委托列表"""
@@ -6694,6 +6699,18 @@ type Subscription {
   strategyKlines(runId: String!, periods: [String!] = null): StrategyKLineData!
 }
 
+"""做 T 买入确认同时覆盖的精确自动退出范围"""
+type TTradeAutoExitAuthorizationPreview {
+  planId: String!
+  configVersion: Int!
+  maxProtectedVolume: Int!
+  rules: JSON!
+  t1Policy: String!
+  executionPolicy: JSON!
+  executionSemantics: String!
+  authorizationExpiresAt: DateTime!
+}
+
 """持久化做 T 批次"""
 type TTradeBatch {
   batchId: String!
@@ -8287,6 +8304,7 @@ type TradeApprovalPreview {
   signalExpiresAt: DateTime
   challengeExpiresAt: DateTime!
   warnings: [String!]!
+  tTradeAutoExitAuthorization: TTradeAutoExitAuthorizationPreview
 }
 
 """交易确认预览结果"""
@@ -8367,6 +8385,9 @@ input UpdateManualExitPlanInput {
   planId: String!
   configVersion: Int!
   rules: JSON!
+
+  """调用方生成的更新请求幂等键"""
+  idempotencyKey: String!
   accountId: String = null
   protectedVolume: Int = null
   executionMode: String = null

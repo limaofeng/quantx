@@ -39,17 +39,19 @@ function toFiniteNumber(value: unknown) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function isSellOrderType(value: unknown) {
+function isSellDirection(value: unknown) {
   const text = String(value ?? '').toUpperCase();
   return text === 'SELL' || text.endsWith('.SELL');
 }
 
-function getPositivePrice(...values: unknown[]) {
-  for (const value of values) {
-    const parsed = toFiniteNumber(value);
-    if (parsed !== null && parsed > 0) return parsed;
-  }
-  return null;
+function tradeTimeIso(value: number) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+  const milliseconds = String(Math.trunc(timestamp)).length > 10
+    ? timestamp
+    : timestamp * 1000;
+  const parsed = new Date(milliseconds);
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString();
 }
 
 function buildHoldingNameMap(holdings: Position[]) {
@@ -61,28 +63,28 @@ function buildHoldingNameMap(holdings: Position[]) {
   );
 }
 
-function mapOrderToLiquidatedStock(
-  order: LiquidationTodayOrder,
+function mapTradeToLiquidatedStock(
+  trade: LiquidationTodayTrade,
   holdingNameMap: Map<string, string>,
   holdings: Position[]
 ): LiquidatedStock {
-  const stockCode = normalizeStockCode(order.stockCode);
+  const stockCode = normalizeStockCode(trade.stockCode);
   const matchingHolding = holdings.find(
     holding => normalizeStockCode(holding.stockCode) === stockCode
   );
 
   return {
-    id: `order-${order.id}`,
-    name: order.stockName || holdingNameMap.get(stockCode) || stockCode,
-    orderId: order.id,
+    id: `trade-${trade.tradedId}`,
+    name: trade.stockName || holdingNameMap.get(stockCode) || stockCode,
+    orderId: trade.orderId,
     originalCost: matchingHolding?.avgPrice ?? null,
-    quantity: Number(order.tradedVolume || order.volume || 0),
+    quantity: Number(trade.tradedVolume),
     realizedPnL: null,
     realizedPnLPercent: null,
-    sellDate: order.time,
-    sellPrice: getPositivePrice(order.tradedPrice, order.price),
-    source: 'ORDER',
-    status: order.status,
+    sellDate: tradeTimeIso(trade.tradedTime),
+    sellPrice: Number(trade.tradedPrice),
+    source: 'TRADE',
+    status: 'FILLED',
     symbol: stockCode,
   };
 }
@@ -140,12 +142,15 @@ export function useLiquidationData(): UseLiquidationDataResult {
   const liquidatedStocks = useMemo(() => {
     const holdingNameMap = buildHoldingNameMap(currentHoldings);
 
-    return todayOrders
-      .filter(order => isSellOrderType(order.type))
-      .map(order =>
-        mapOrderToLiquidatedStock(order, holdingNameMap, currentHoldings)
+    return todayTrades
+      .filter(
+        trade =>
+          isSellDirection(trade.direction) && Number(trade.tradedVolume) > 0
+      )
+      .map(trade =>
+        mapTradeToLiquidatedStock(trade, holdingNameMap, currentHoldings)
       );
-  }, [currentHoldings, todayOrders]);
+  }, [currentHoldings, todayTrades]);
 
   const refetch = useCallback(() => {
     refetchHoldings();

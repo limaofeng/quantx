@@ -52,6 +52,7 @@ TERMINAL_ORDER_STATUSES = {
 class AshareManagedEntryPlanStrategy(StrategyBase):
   """Thin adapter from StrategyInput to the pure managed-entry evaluator."""
 
+  OWNS_RUNTIME_EXIT_PLAN_BOOK = True
   INSTRUMENT_SCOPE = StrategyInstrumentScope.SINGLE
 
   def __init__(self, context):

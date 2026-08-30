@@ -57,6 +57,10 @@ class AutoExitPlanRecord(Base, TimestampMixin):
       "auto_exit_authorization_device_session_id IS NOT NULL)",
       name="ck_auto_exit_plan_exact_authorization",
     ),
+    CheckConstraint(
+      "state_version >= 1",
+      name="ck_auto_exit_plan_state_version",
+    ),
   )
 
   plan_id = Column(String(128), primary_key=True)
@@ -79,6 +83,7 @@ class AutoExitPlanRecord(Base, TimestampMixin):
   auto_exit_authorization_user_id = Column(String(36), nullable=True)
   auto_exit_authorization_device_session_id = Column(String(36), nullable=True)
   config_version = Column(Integer, nullable=False, default=1)
+  state_version = Column(Integer, nullable=False, default=1)
   completion_strategy = Column(String(32), nullable=True)
 
   protected_volume = Column(Integer, nullable=False)

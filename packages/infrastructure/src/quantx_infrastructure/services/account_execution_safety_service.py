@@ -24,6 +24,9 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
   TradeCommandOutbox,
 )
+from quantx_infrastructure.services.account_execution_quarantine_service import (
+  AccountExecutionQuarantineService,
+)
 from quantx_infrastructure.services.agent_session_guard import (
   QMT_AGENT_NOT_RECONCILED,
   evaluate_agent_session,
@@ -698,6 +701,12 @@ class AccountExecutionSafetyService:
       projection = project_account_execution_safety(
         {"authorization_state": authorization_state, "checks": items}
       )
+      quarantined_orders = await AccountExecutionQuarantineService(
+        db
+      ).list_quarantined_orders(
+        account_id=account_id,
+        control=control,
+      )
 
       return {
         "account_id": account_id,
@@ -761,6 +770,7 @@ class AccountExecutionSafetyService:
         "journal_pending_reports": int(agent_details.get("journalPendingReports") or 0),
         "last_backup_at": backup_at,
         "checked_at": now,
+        "quarantined_orders": quarantined_orders,
       }
 
   async def _latest_full_snapshot(

@@ -28,7 +28,8 @@ export enum AccountExecutionControlAction {
   ClearKillSwitch = 'CLEAR_KILL_SWITCH',
   EnableRiskIncrease = 'ENABLE_RISK_INCREASE',
   KillSwitch = 'KILL_SWITCH',
-  PauseRiskIncrease = 'PAUSE_RISK_INCREASE'
+  PauseRiskIncrease = 'PAUSE_RISK_INCREASE',
+  RepairQuarantinedOrder = 'REPAIR_QUARANTINED_ORDER'
 }
 
 /** 确认账户级执行控制 */
@@ -41,11 +42,44 @@ export type AccountExecutionControlConfirmationInput = {
 export type AccountExecutionControlPreviewInput = {
   accountId: Scalars['String']['input'];
   action: AccountExecutionControlAction;
+  clientOrderId?: Scalars['String']['input'];
   idempotencyKey: Scalars['String']['input'];
+  quarantineReason?: Scalars['String']['input'];
   reason?: Scalars['String']['input'];
   snapshotId?: Scalars['String']['input'];
   stateVersion: Scalars['Int']['input'];
 };
+
+/** 账户事实链路健康状态；不包含查询或检查过程 */
+export enum AccountExecutionHealthStatus {
+  Blocked = 'BLOCKED',
+  Healthy = 'HEALTHY',
+  Killed = 'KILLED'
+}
+
+/** 账户执行安全检查状态 */
+export enum AccountExecutionSafetyCheckStatus {
+  Failed = 'FAILED',
+  Passed = 'PASSED',
+  Standby = 'STANDBY'
+}
+
+/** 账户准入观测历史范围 */
+export enum AccountSafetyHistoryRange {
+  Days_7 = 'DAYS_7',
+  Days_30 = 'DAYS_30',
+  Days_90 = 'DAYS_90',
+  Hours_24 = 'HOURS_24',
+  Year_1 = 'YEAR_1'
+}
+
+/** Monitor 见证的账户准入检查状态 */
+export enum AccountSafetyHistoryStatus {
+  Failed = 'FAILED',
+  Passed = 'PASSED',
+  Standby = 'STANDBY',
+  Unknown = 'UNKNOWN'
+}
 
 export enum AiAssistantApprovalDecision {
   Approve = 'APPROVE',
@@ -645,18 +679,6 @@ export type LiquidatePositionInput = {
   stockCode: Scalars['String']['input'];
 };
 
-/** 批量或一键清仓 */
-export type LiquidatePositionsInput = {
-  accountId?: InputMaybe<Scalars['String']['input']>;
-  autoExitAuthorized?: Scalars['Boolean']['input'];
-  completionStrategy: Scalars['String']['input'];
-  confirm: Scalars['Boolean']['input'];
-  conflictStrategy: Scalars['String']['input'];
-  executionMode?: Scalars['String']['input'];
-  instrumentCodes?: InputMaybe<Array<Scalars['String']['input']>>;
-  scope?: Scalars['String']['input'];
-};
-
 /** 清仓完成策略 */
 export enum LiquidationCompletionStrategy {
   AvailableNow = 'AVAILABLE_NOW',
@@ -717,7 +739,7 @@ export enum LogLevel {
   Warning = 'WARNING'
 }
 
-/** 移动端手动委托确认输入 */
+/** 手动委托确认输入 */
 export type ManualOrderConfirmationInput = {
   /** 预览返回的确认挑战 ID */
   challengeId: Scalars['String']['input'];
@@ -725,13 +747,13 @@ export type ManualOrderConfirmationInput = {
   confirmationToken: Scalars['String']['input'];
 };
 
-/** 移动端手动委托执行模式 */
+/** 手动委托执行模式 */
 export enum ManualOrderExecutionMode {
   Live = 'LIVE',
   Paper = 'PAPER'
 }
 
-/** 移动端手动委托预览输入 */
+/** 手动委托预览输入 */
 export type ManualOrderPreviewInput = {
   /** 必填资金账号 */
   accountId: Scalars['String']['input'];
@@ -751,13 +773,13 @@ export type ManualOrderPreviewInput = {
   volume: Scalars['Int']['input'];
 };
 
-/** 移动端手动委托报价类型 */
+/** 手动委托报价类型 */
 export enum ManualOrderPriceType {
   Best = 'BEST',
   Limit = 'LIMIT'
 }
 
-/** 移动端手动委托方向 */
+/** 手动委托方向 */
 export enum ManualOrderSide {
   Buy = 'BUY',
   Sell = 'SELL'
@@ -1278,6 +1300,34 @@ export enum StrategyStatus {
   Upgrading = 'UPGRADING'
 }
 
+/** 做 T 批次执行来源 */
+export enum TTradeBatchExecutionMode {
+  Live = 'LIVE',
+  Paper = 'PAPER'
+}
+
+/** 做 T 批次统一筛选 */
+export type TTradeBatchFilterInput = {
+  endTime?: InputMaybe<Scalars['DateTime']['input']>;
+  executionModes?: InputMaybe<Array<TTradeBatchExecutionMode>>;
+  keyword?: InputMaybe<Scalars['String']['input']>;
+  resultGroups?: InputMaybe<Array<TTradeBatchResultGroup>>;
+  scope: TTradeBatchScope;
+  startTime?: InputMaybe<Scalars['DateTime']['input']>;
+};
+
+/** 做 T 历史批次结果 */
+export enum TTradeBatchResultGroup {
+  Completed = 'COMPLETED',
+  Rejected = 'REJECTED'
+}
+
+/** 做 T 批次查询范围 */
+export enum TTradeBatchScope {
+  Current = 'CURRENT',
+  Terminal = 'TERMINAL'
+}
+
 /** 确认 V3 做 T 候选时客户端观察到的 CAS 身份 */
 export type TTradeCandidateApprovalExpectationInput = {
   candidateFingerprint: Scalars['String']['input'];
@@ -1715,6 +1765,8 @@ export type UpdateManualExitPlanInput = {
   autoExitAuthorized?: InputMaybe<Scalars['Boolean']['input']>;
   configVersion: Scalars['Int']['input'];
   executionMode?: InputMaybe<Scalars['String']['input']>;
+  /** 调用方生成的更新请求幂等键 */
+  idempotencyKey: Scalars['String']['input'];
   planId: Scalars['String']['input'];
   protectedVolume?: InputMaybe<Scalars['Int']['input']>;
   remark?: InputMaybe<Scalars['String']['input']>;

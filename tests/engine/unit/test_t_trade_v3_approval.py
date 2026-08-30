@@ -367,7 +367,16 @@ async def test_v3_approval_expires_intent_that_is_not_latest_candidate():
   assert intent.intent_id not in runtime.pending_approvals
   assert runtime.state_manager.updates[-1][1:] == (
     "EXPIRED",
-    {"notes": "T_TRADE_CANDIDATE_NOT_LATEST"},
+    {
+      "metadata": {
+        **dict(intent.metadata or {}),
+        "intent_id": intent.intent_id,
+        "approval_reason": "T_TRADE_CANDIDATE_NOT_LATEST",
+        "execution_terminal_source": "LOCAL_PRE_BROKER_REJECTION",
+        "execution_terminal_reason": "T_TRADE_CANDIDATE_NOT_LATEST",
+      },
+      "notes": "T_TRADE_CANDIDATE_NOT_LATEST",
+    },
   )
   executor._process_trade_intent.assert_not_awaited()
 

@@ -7,10 +7,11 @@ import json
 import logging
 import math
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import md5, sha256
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
 from quantx_contracts import (
   TERMINAL_ORDER_STATUSES,
@@ -44,21 +45,45 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
   StrategyOrderCorrelation,
   StrategyRuntimeEvent,
+  TradeCommandOutbox,
   TTradeBatch,
 )
+from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.enums import AccountType
+from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.account_repository import AccountRepository
+from quantx_infrastructure.services.account_execution_quarantine_service import (
+  BROKER_EXECUTION_AFTER_RELEASE,
+  QUARANTINE_CANCEL_REQUIRED_METADATA_KEY,
+  QUARANTINE_RECONCILE_REQUIRED_METADATA_KEY,
+  QUARANTINE_REPAIR_REQUIRED_METADATA_KEY,
+  AccountExecutionQuarantineService,
+)
 from quantx_infrastructure.services.agent_handover import converge_ready_agent
 from quantx_infrastructure.services.agent_session_guard import (
   AGENT_SERVER_SESSION_PAYLOAD_KEY,
   QMT_ACCOUNT_MISMATCH,
   report_belongs_to_current_session,
 )
-from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
+from quantx_infrastructure.services.auto_exit_plan_service import (
+  AutoExitPlanService,
+)
 from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationService,
+)
+from quantx_infrastructure.services.exit_plan_execution_owner import (
+  MANAGED_EXIT_STRATEGY_OWNER,
+  MONITOR_OWNER,
+  RUNTIME_BOOK_OWNER,
+  durable_exit_plan_owner_kind,
+)
+from quantx_infrastructure.services.exit_plan_zero_fill_safety import (
+  ZERO_FILL_CONTRADICTION_ORDER_STATUSES,
+  invalidate_exit_plan_zero_fill_proof,
+  is_exact_finalized_exit_order_replay,
+  runtime_zero_fill_invalidation,
 )
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
@@ -68,7 +93,14 @@ from quantx_infrastructure.services.position_service import PositionService
 from quantx_infrastructure.services.runtime_subscription_bridge import (
   TRADING_EVENT_CHANNEL,
 )
-from quantx_infrastructure.services.trade_command_service import TradeCommandService
+from quantx_infrastructure.services.trade_command_service import (
+  AgentUnavailableError,
+  TradeCommandService,
+)
+from quantx_infrastructure.services.trade_intent_processor import (
+  LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE,
+  LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE,
+)
 from quantx_infrastructure.services.trade_service import TradeService
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -107,12 +139,19 @@ _ORDER_STATUS_NAMES = {
 
 _SNAPSHOT_PROMOTABLE_HEARTBEAT_STATUSES = {"RECONCILING"}
 _AUTOMATIC_RECONCILIATION_KINDS = {
+  BROKER_EXECUTION_AFTER_RELEASE,
+  "CANCEL_REQUEST_PENDING",
   "MISSING_WORKING_ORDER",
   "PROTOCOL_1_1_REQUIRED",
+  "PENDING_ORDER_RECONCILE_REQUIRED",
+  "QUARANTINED_ORDER_REPAIR_REQUIRED",
+  "QUARANTINE_REPAIR_AWAITING_FRESH_SNAPSHOT",
   "SNAPSHOT_COMPLETENESS_REQUIRED",
   "SNAPSHOT_IDENTITY_INVALID",
+  "SNAPSHOT_NOT_NEWER_THAN_QUARANTINE",
   "SNAPSHOT_PROTOCOL_INVALID",
   "SNAPSHOT_SECTION_INCOMPLETE",
+  "TERMINAL_ORDER_STILL_WORKING",
   "UNKNOWN_BROKER_ORDER",
   "UNKNOWN_BROKER_TRADE",
 }
@@ -125,6 +164,14 @@ _ZERO_FILL_RECONCILABLE_ORDER_STATUSES = {"CANCELLED", "EXPIRED"}
 
 class RetryableReportError(RuntimeError):
   pass
+
+
+@dataclass(frozen=True)
+class PendingOrderUpdate:
+  """Outcome of monotonic PendingTradeOrder convergence for one report."""
+
+  accepted: bool
+  canonical_status: Optional[str] = None
 
 
 def _snapshot_can_promote_heartbeat(status: Any) -> bool:
@@ -341,6 +388,7 @@ async def _run_account_snapshot_mutation(
   mutation: Callable[[], Awaitable[Any]],
   *,
   reason: str,
+  affected_instrument_codes: Optional[Iterable[str]] = (),
 ) -> Any:
   """Linearize one durable snapshot mutation and authority invalidation."""
 
@@ -389,7 +437,44 @@ async def _run_account_snapshot_mutation(
       ) from mutation_marker_error
     if mutation_error is not None:
       raise mutation_error
+    normalized_codes = (
+      None
+      if affected_instrument_codes is None
+      else tuple(
+        sorted(
+          {
+            str(code or "").strip().upper()
+            for code in affected_instrument_codes
+            if str(code or "").strip()
+          }
+        )
+      )
+    )
+    if normalized_codes is None or normalized_codes:
+      await _rederive_t_trade_exit_authorizations_after_position_update(
+        normalized_account,
+        instrument_codes=normalized_codes,
+      )
     return result
+
+
+async def _rederive_t_trade_exit_authorizations_after_position_update(
+  account_id: str,
+  *,
+  instrument_codes: Optional[Iterable[str]],
+) -> None:
+  """Keep T-entry-derived LIVE exit grants convergent with broker positions."""
+
+  try:
+    await AutoExitPlanService().rederive_t_trade_exit_authorizations_after_position_update(
+      account_id=account_id,
+      instrument_codes=instrument_codes,
+    )
+  except Exception as exc:
+    raise RetryableReportError(
+      "做 T 自动退出授权未随持仓回报完成重算: "
+      f"account={account_id}, error={exc}"
+    ) from exc
 
 
 _REQUIRED_SNAPSHOT_SECTIONS = ("account", "positions", "orders", "trades")
@@ -514,6 +599,121 @@ def _was_automatic_reconciliation_pause(reason: Any) -> bool:
   )
 
 
+def _broker_release_quarantine_boundary(
+  reason: Any,
+) -> tuple[str, int, Optional[datetime], str, str]:
+  """Return the newest durable broker-release quarantine time, if present."""
+
+  if not isinstance(reason, str) or not reason.strip():
+    return "", 0, None, "", ""
+  try:
+    items = json.loads(reason)
+  except (TypeError, ValueError):
+    return "", 0, None, "", ""
+  if not isinstance(items, list):
+    return "", 0, None, "", ""
+  matching = [
+    item
+    for item in items
+    if isinstance(item, dict)
+    and str(item.get("kind") or "")
+    in {
+      BROKER_EXECUTION_AFTER_RELEASE,
+      "QUARANTINE_REPAIR_AWAITING_FRESH_SNAPSHOT",
+    }
+  ]
+  if not matching:
+    return "", 0, None, "", ""
+  phase = (
+    "UNREPAIRED_BROKER"
+    if any(
+      str(item.get("kind") or "") == BROKER_EXECUTION_AFTER_RELEASE
+      for item in matching
+    )
+    else "REPAIR_AWAITING_FRESH_SNAPSHOT"
+  )
+  quarantine_sequence = max(
+    (
+      max(0, int(item.get("quarantineSourceSequence") or 0))
+      for item in matching
+    ),
+    default=0,
+  )
+  parsed: list[datetime] = []
+  for item in matching:
+    value = str(item.get("quarantinedAt") or "").strip()
+    if not value:
+      continue
+    try:
+      parsed.append(to_naive_utc(datetime.fromisoformat(value.replace("Z", "+00:00"))))
+    except (TypeError, ValueError, OverflowError):
+      continue
+  newest = matching[-1]
+  return (
+    phase,
+    quarantine_sequence,
+    max(parsed) if parsed else None,
+    str(newest.get("repairSnapshotId") or ""),
+    str(newest.get("repairSnapshotHash") or ""),
+  )
+
+
+async def _invalidate_monitor_snapshot_zero_fill_proof(
+  db,
+  pending: PendingTradeOrder,
+  *,
+  broker_order_id: str,
+  evidence_status: str,
+  source_sequence: int,
+  execution_evidence: bool,
+  cumulative_filled_volume: Optional[int] = None,
+  evidence_key: str = "",
+) -> None:
+  """Fail closed one exact EXIT_PLAN binding contradicted by broker evidence."""
+
+  pending_metadata = dict(pending.request_metadata or {})
+  plan_id = str(pending_metadata.get("exit_plan_id") or "").strip()
+  intent_id = str(pending.intent_id or "").strip()
+  if (
+    not plan_id
+    or not intent_id
+    or str(pending.side or "").upper() != "SELL"
+  ):
+    return
+  try:
+    evidence_sequence = max(0, int(source_sequence or 0))
+  except (TypeError, ValueError, OverflowError):
+    return
+  normalized_status = str(evidence_status or "").upper()
+  if not execution_evidence:
+    if normalized_status not in ZERO_FILL_CONTRADICTION_ORDER_STATUSES:
+      return
+    stored_sequence = max(0, int(pending.last_source_sequence or 0))
+    if evidence_sequence and evidence_sequence <= stored_sequence:
+      return
+  evidence_kind = "TRADE" if execution_evidence else "ORDER"
+  stable_evidence_key = str(evidence_key or "").strip()
+  if execution_evidence and not stable_evidence_key:
+    # A trade without a durable execution identity cannot safely manufacture
+    # a new broker fact from a snapshot/report sequence number.
+    return
+  if not stable_evidence_key:
+    stable_evidence_key = (
+      f"qmt-order:{pending.account_id}:{pending.client_order_id}:"
+      f"{broker_order_id}:{normalized_status}"
+    )
+  await invalidate_exit_plan_zero_fill_proof(
+    db,
+    client_order_id=str(pending.client_order_id or ""),
+    evidence_kind=evidence_kind,
+    evidence_status=normalized_status,
+    evidence_key=stable_evidence_key,
+    broker_order_id=str(broker_order_id or ""),
+    source_sequence=evidence_sequence,
+    cumulative_filled_volume=cumulative_filled_volume,
+  )
+
+
 async def _update_pending(
   client_order_id: Optional[str],
   *,
@@ -522,15 +722,65 @@ async def _update_pending(
   reason: Optional[str] = None,
   source_sequence: int = 0,
   source_event_at: Optional[datetime] = None,
-) -> None:
+  execution_evidence: bool = False,
+  cumulative_filled_volume: Optional[int] = None,
+  evidence_key: str = "",
+) -> PendingOrderUpdate:
   if not client_order_id:
-    return
+    return PendingOrderUpdate(False)
   async with AsyncSessionLocal() as db:
     pending = await db.get(PendingTradeOrder, client_order_id)
     if pending is None:
-      return
+      return PendingOrderUpdate(False)
+    pending_owner = dict(pending.request_metadata or {})
+    is_exit_plan_sell = bool(
+      str(pending.side or "").upper() == "SELL"
+      and str(pending_owner.get("exit_plan_id") or "").strip()
+      and str(pending_owner.get("owner_type") or "").upper() == "EXIT_PLAN"
+      and str(pending_owner.get("owner_id") or "")
+      == str(pending_owner.get("exit_plan_id") or "")
+    )
+    if (
+      not execution_evidence
+      and is_exit_plan_sell
+      and await is_exact_finalized_exit_order_replay(
+        db,
+        client_order_id=str(pending.client_order_id or ""),
+        evidence_status=status,
+        cumulative_filled_volume=cumulative_filled_volume,
+      )
+    ):
+      sequence = max(0, int(source_sequence or 0))
+      if sequence > max(0, int(pending.last_source_sequence or 0)):
+        pending.last_source_sequence = sequence
+        if source_event_at is not None:
+          pending.last_source_event_at = to_naive_utc(source_event_at)
+      pending.broker_order_id = broker_order_id or pending.broker_order_id
+      pending.status_reason = "ignored finalized terminal replay"
+      await db.commit()
+      return PendingOrderUpdate(False)
+    await _invalidate_monitor_snapshot_zero_fill_proof(
+      db,
+      pending,
+      broker_order_id=str(broker_order_id or ""),
+      evidence_status=status,
+      source_sequence=source_sequence,
+      execution_evidence=execution_evidence,
+      cumulative_filled_volume=cumulative_filled_volume,
+      evidence_key=evidence_key,
+    )
+    pending_metadata = dict(pending.request_metadata or {})
+    sticky_reconcile_required = bool(
+      pending_metadata.get(QUARANTINE_RECONCILE_REQUIRED_METADATA_KEY)
+    )
+    cancel_required_marker = bool(
+      pending_metadata.get(QUARANTINE_CANCEL_REQUIRED_METADATA_KEY)
+    )
     cancel_rejected = str(status or "").upper() == "CANCEL_REJECTED"
-    cancel_requested = str(pending.status or "").upper() == "CANCEL_REQUESTED"
+    cancel_requested = bool(
+      str(pending.status or "").upper() == "CANCEL_REQUESTED"
+      or cancel_required_marker
+    )
     proposed_status = (
       str(pending.status or "PENDING")
       if cancel_rejected
@@ -540,7 +790,7 @@ async def _update_pending(
     stored_sequence = int(pending.last_source_sequence or 0)
     sequence = max(0, int(source_sequence or 0))
     stale_sequence = bool(sequence and stored_sequence and sequence < stored_sequence)
-    transition_allowed = not stale_sequence and (
+    transition_allowed = not sticky_reconcile_required and not stale_sequence and (
       (cancel_requested and not proposed_terminal)
       or can_transition_order_status(pending.status, proposed_status)
     )
@@ -554,9 +804,22 @@ async def _update_pending(
         pending.last_source_sequence = sequence
       if source_event_at is not None:
         pending.last_source_event_at = to_naive_utc(source_event_at)
+      if proposed_terminal and cancel_required_marker:
+        pending_metadata.pop(QUARANTINE_CANCEL_REQUIRED_METADATA_KEY, None)
+        pending.request_metadata = pending_metadata
+    elif sticky_reconcile_required and not stale_sequence:
+      if sequence:
+        pending.last_source_sequence = sequence
+      if source_event_at is not None:
+        pending.last_source_event_at = to_naive_utc(source_event_at)
     pending.broker_order_id = broker_order_id or pending.broker_order_id
     if stale_sequence:
       pending.status_reason = "ignored stale broker report"
+    elif sticky_reconcile_required:
+      pending.status = "RECONCILE_REQUIRED"
+      pending.status_reason = str(
+        pending.status_reason or "account quarantine requires explicit reconciliation"
+      )[:256]
     elif cancel_rejected:
       pending.status_reason = (reason or "cancel rejected")[:256]
     elif cancel_requested and not proposed_terminal:
@@ -577,15 +840,29 @@ async def _update_pending(
     if correlation is not None and broker_order_id:
       correlation.broker_order_id = broker_order_id
     if cancel_requested and not proposed_terminal and broker_order_id:
-      await TradeCommandService(db).enqueue_cancel(
-        user_id=str(pending.user_id),
-        account_id=str(pending.account_id),
-        broker_order_id=str(broker_order_id),
-        idempotency_key=(f"entry-plan-cancel:{client_order_id}:{broker_order_id}"),
-        execution_mode=str(pending.execution_mode or "paper").lower(),
-        commit_transaction=False,
-      )
+      try:
+        await TradeCommandService(db).enqueue_cancel(
+          user_id=str(pending.user_id),
+          account_id=str(pending.account_id),
+          broker_order_id=str(broker_order_id),
+          idempotency_key=(f"entry-plan-cancel:{client_order_id}:{broker_order_id}"),
+          execution_mode=str(pending.execution_mode or "paper").lower(),
+          commit_transaction=False,
+        )
+      except AgentUnavailableError:
+        # Keep the durable CANCEL_REQUESTED marker and account quarantine even
+        # while no current Agent can route the command.  A later broker replay
+        # retries this same stable business cancellation identity.
+        pass
     await db.commit()
+    return PendingOrderUpdate(
+      accepted=bool(
+        transition_allowed
+        and not cancel_rejected
+        and (not cancel_requested or proposed_terminal)
+      ),
+      canonical_status=(proposed_status if transition_allowed else None),
+    )
 
 
 async def _update_pending_by_broker(
@@ -595,9 +872,12 @@ async def _update_pending_by_broker(
   reason: str,
   source_sequence: int = 0,
   source_event_at: Optional[datetime] = None,
-) -> None:
+  execution_evidence: bool = False,
+  cumulative_filled_volume: Optional[int] = None,
+  evidence_key: str = "",
+) -> PendingOrderUpdate:
   if broker_order_id is None:
-    return
+    return PendingOrderUpdate(False)
   async with AsyncSessionLocal() as db:
     pending = (
       await db.execute(
@@ -607,16 +887,56 @@ async def _update_pending_by_broker(
       )
     ).scalar_one_or_none()
     if pending is None:
-      return
+      return PendingOrderUpdate(False)
+    if (
+      not execution_evidence
+      and await is_exact_finalized_exit_order_replay(
+        db,
+        client_order_id=str(pending.client_order_id or ""),
+        evidence_status=status,
+        cumulative_filled_volume=cumulative_filled_volume,
+      )
+    ):
+      sequence = max(0, int(source_sequence or 0))
+      if sequence > max(0, int(pending.last_source_sequence or 0)):
+        pending.last_source_sequence = sequence
+        if source_event_at is not None:
+          pending.last_source_event_at = to_naive_utc(source_event_at)
+      pending.status_reason = "ignored finalized terminal replay"
+      await db.commit()
+      return PendingOrderUpdate(False)
+    await _invalidate_monitor_snapshot_zero_fill_proof(
+      db,
+      pending,
+      broker_order_id=str(broker_order_id or ""),
+      evidence_status=status,
+      source_sequence=source_sequence,
+      execution_evidence=execution_evidence,
+      cumulative_filled_volume=cumulative_filled_volume,
+      evidence_key=evidence_key,
+    )
+    pending_metadata = dict(pending.request_metadata or {})
+    sticky_reconcile_required = bool(
+      pending_metadata.get(QUARANTINE_RECONCILE_REQUIRED_METADATA_KEY)
+    )
+    cancel_required_marker = bool(
+      pending_metadata.get(QUARANTINE_CANCEL_REQUIRED_METADATA_KEY)
+    )
     proposed_status = _normalized_order_status(status)
-    cancel_requested = str(pending.status or "").upper() == "CANCEL_REQUESTED"
+    cancel_requested = bool(
+      str(pending.status or "").upper() == "CANCEL_REQUESTED"
+      or cancel_required_marker
+    )
     proposed_terminal = proposed_status in TERMINAL_ORDER_STATUSES
     sequence = max(0, int(source_sequence or 0))
     stored_sequence = int(pending.last_source_sequence or 0)
-    if (not sequence or not stored_sequence or sequence >= stored_sequence) and (
+    transition_allowed = not sticky_reconcile_required and (
+      not sequence or not stored_sequence or sequence >= stored_sequence
+    ) and (
       (cancel_requested and not proposed_terminal)
       or can_transition_order_status(pending.status, proposed_status)
-    ):
+    )
+    if transition_allowed:
       pending.status = (
         "CANCEL_REQUESTED"
         if cancel_requested and not proposed_terminal
@@ -626,27 +946,49 @@ async def _update_pending_by_broker(
         pending.last_source_sequence = sequence
       if source_event_at is not None:
         pending.last_source_event_at = to_naive_utc(source_event_at)
-    pending.status_reason = (
-      str(pending.status_reason or "cancellation requested")[:256]
-      if cancel_requested and not proposed_terminal
-      else reason[:256] or None
-    )
-    if cancel_requested and not proposed_terminal:
-      await TradeCommandService(db).enqueue_cancel(
-        user_id=str(pending.user_id),
-        account_id=str(pending.account_id),
-        broker_order_id=str(broker_order_id),
-        idempotency_key=(
-          f"entry-plan-cancel:{pending.client_order_id}:{broker_order_id}"
-        ),
-        execution_mode=str(pending.execution_mode or "paper").lower(),
-        commit_transaction=False,
+      if proposed_terminal and cancel_required_marker:
+        pending_metadata.pop(QUARANTINE_CANCEL_REQUIRED_METADATA_KEY, None)
+        pending.request_metadata = pending_metadata
+    if sticky_reconcile_required:
+      pending.status = "RECONCILE_REQUIRED"
+      pending.status_reason = str(
+        pending.status_reason or "account quarantine requires explicit reconciliation"
+      )[:256]
+    else:
+      pending.status_reason = (
+        str(pending.status_reason or "cancellation requested")[:256]
+        if cancel_requested and not proposed_terminal
+        else reason[:256] or None
       )
+    if cancel_requested and not proposed_terminal:
+      try:
+        await TradeCommandService(db).enqueue_cancel(
+          user_id=str(pending.user_id),
+          account_id=str(pending.account_id),
+          broker_order_id=str(broker_order_id),
+          idempotency_key=(
+            f"entry-plan-cancel:{pending.client_order_id}:{broker_order_id}"
+          ),
+          execution_mode=str(pending.execution_mode or "paper").lower(),
+          commit_transaction=False,
+        )
+      except AgentUnavailableError:
+        pass
     await db.commit()
+    return PendingOrderUpdate(
+      accepted=bool(
+        transition_allowed
+        and proposed_status != "CANCEL_REJECTED"
+        and (not cancel_requested or proposed_terminal)
+      ),
+      canonical_status=(proposed_status if transition_allowed else None),
+    )
 
 
 async def _process_order_report(payload: dict[str, Any]) -> None:
   order = _body(payload, "order")
+  cumulative_filled_volume = _reported_cumulative_fill(order)
+  cumulative_fill_state = _reported_cumulative_fill_state(order)
   broker_order_id = order.get("order_id") or order.get("broker_order_id")
   if broker_order_id is None:
     raise ValueError("order_report 缺少 broker order id")
@@ -664,20 +1006,40 @@ async def _process_order_report(payload: dict[str, Any]) -> None:
     or order.get("order_status")
     or "SUBMITTED"
   )
-  await _update_pending(
-    str(payload.get("client_order_id") or "") or None,
-    status=status,
-    broker_order_id=str(broker_order_id),
-    reason=str(order.get("effective_status_reason") or order.get("status_msg") or ""),
-    source_sequence=int(payload.get("source_sequence") or 0),
-    source_event_at=_parse_report_time(payload.get("source_event_at")),
+  client_order_id = str(payload.get("client_order_id") or "")
+  source_sequence = int(payload.get("source_sequence") or 0)
+  source_event_at = _parse_report_time(payload.get("source_event_at"))
+  reason = str(
+    order.get("effective_status_reason") or order.get("status_msg") or ""
   )
-  await AutoExitPlanService().apply_order_event_for_report(
-    client_order_id=str(payload.get("client_order_id") or ""),
-    broker_order_id=str(broker_order_id),
-    status=status,
-    source_sequence=int(payload.get("source_sequence") or 0),
-  )
+  if client_order_id:
+    update_result = await _update_pending(
+      client_order_id,
+      status=status,
+      broker_order_id=str(broker_order_id),
+      reason=reason,
+      source_sequence=source_sequence,
+      source_event_at=source_event_at,
+      cumulative_filled_volume=cumulative_filled_volume,
+    )
+  else:
+    update_result = await _update_pending_by_broker(
+      broker_order_id,
+      status=status,
+      reason=reason,
+      source_sequence=source_sequence,
+      source_event_at=source_event_at,
+      cumulative_filled_volume=cumulative_filled_volume,
+    )
+  if update_result.accepted:
+    await AutoExitPlanService().apply_order_event_for_report(
+      client_order_id=client_order_id,
+      broker_order_id=str(broker_order_id),
+      status=str(update_result.canonical_status or status),
+      source_sequence=source_sequence,
+      cumulative_filled_volume=cumulative_filled_volume,
+      cumulative_fill_state=cumulative_fill_state,
+    )
 
 
 async def _process_execution_report(payload: dict[str, Any]) -> None:
@@ -703,22 +1065,49 @@ async def _process_execution_report(payload: dict[str, Any]) -> None:
     raise ValueError("execution_report 缺少 execution id")
   await TradeService(str(trade.get("account_id", ""))).upsert_report(trade)
   await _consume_exact_auto_entry_fill(payload, trade)
-  await _update_pending(
-    str(payload.get("client_order_id") or "") or None,
-    status=str(payload.get("order_status") or "PARTIAL_FILLED"),
-    broker_order_id=str(broker_order_id),
-    source_sequence=int(payload.get("source_sequence") or 0),
-    source_event_at=_parse_report_time(payload.get("source_event_at")),
+  client_order_id = str(payload.get("client_order_id") or "")
+  status = str(payload.get("order_status") or "PARTIAL_FILLED")
+  source_sequence = int(payload.get("source_sequence") or 0)
+  source_event_at = _parse_report_time(payload.get("source_event_at"))
+  execution_id = str(
+    trade.get("execution_id")
+    or trade.get("traded_id")
+    or trade.get("trade_id")
+    or ""
+  ).strip()
+  evidence_key = (
+    f"qmt-trade:{trade.get('account_id')}:{execution_id}" if execution_id else ""
   )
-  await AutoExitPlanService().apply_order_event_for_report(
-    client_order_id=str(payload.get("client_order_id") or ""),
-    broker_order_id=str(broker_order_id),
-    status=str(payload.get("order_status") or "PARTIAL_FILLED"),
-    source_sequence=int(payload.get("source_sequence") or 0),
-  )
+  if client_order_id:
+    update_result = await _update_pending(
+      client_order_id,
+      status=status,
+      broker_order_id=str(broker_order_id),
+      source_sequence=source_sequence,
+      source_event_at=source_event_at,
+      execution_evidence=True,
+      evidence_key=evidence_key,
+    )
+  else:
+    update_result = await _update_pending_by_broker(
+      broker_order_id,
+      status=status,
+      reason="",
+      source_sequence=source_sequence,
+      source_event_at=source_event_at,
+      execution_evidence=True,
+      evidence_key=evidence_key,
+    )
+  if update_result.accepted:
+    await AutoExitPlanService().apply_order_event_for_report(
+      client_order_id=client_order_id,
+      broker_order_id=str(broker_order_id),
+      status=str(update_result.canonical_status or status),
+      source_sequence=source_sequence,
+    )
   await AutoExitPlanService().apply_execution_for_report(
     execution_id=str(trade.get("execution_id") or trade.get("traded_id") or ""),
-    client_order_id=str(payload.get("client_order_id") or ""),
+    client_order_id=client_order_id,
     broker_order_id=str(broker_order_id),
     volume=int(trade.get("traded_volume") or 0),
     price=float(trade.get("traded_price") or 0.0),
@@ -1329,7 +1718,9 @@ async def _process_delta_report_inner(
         or payload.get("sequence"),
         "source_event_at": trade.get("source_event_at")
         or payload.get("source_event_at"),
-        "order_status": trade.get("order_status") or "FILLED",
+        # A TRADE callback proves only this execution.  The authoritative
+        # terminal lifecycle remains a separate ORDER report.
+        "order_status": trade.get("order_status") or "PARTIAL_FILLED",
         "execution": dict(trade),
       }
     )
@@ -1357,28 +1748,44 @@ async def _process_delta_report_inner(
     client_order_id = str(error.get("client_order_id") or "")
     broker_order_id = str(error.get("order_id") or error.get("broker_order_id") or "")
     if client_order_id:
-      await _update_pending(
+      update_result = await _update_pending(
         client_order_id,
         status=terminal_status,
         reason=reason,
+        source_sequence=int(
+          error.get("source_sequence")
+          or payload.get("source_sequence")
+          or payload.get("sequence")
+          or 0
+        ),
       )
     else:
-      await _update_pending_by_broker(
+      update_result = await _update_pending_by_broker(
         broker_order_id,
         status=terminal_status,
         reason=reason,
+        source_sequence=int(
+          error.get("source_sequence")
+          or payload.get("source_sequence")
+          or payload.get("sequence")
+          or 0
+        ),
       )
-    await AutoExitPlanService().apply_order_event_for_report(
-      client_order_id=client_order_id,
-      broker_order_id=broker_order_id,
-      status="REJECTED",
-      source_sequence=int(
-        error.get("source_sequence")
-        or payload.get("source_sequence")
-        or payload.get("sequence")
-        or 0
-      ),
-    )
+    if update_result.accepted:
+      cumulative_filled_volume = _reported_cumulative_fill(error)
+      await AutoExitPlanService().apply_order_event_for_report(
+        client_order_id=client_order_id,
+        broker_order_id=broker_order_id,
+        status=str(update_result.canonical_status or terminal_status),
+        source_sequence=int(
+          error.get("source_sequence")
+          or payload.get("source_sequence")
+          or payload.get("sequence")
+          or 0
+        ),
+        cumulative_filled_volume=cumulative_filled_volume,
+        cumulative_fill_state=_reported_cumulative_fill_state(error),
+      )
   for error in payload.get("cancel_errors") or []:
     if skip_stale_full_item(error, unknown_account_is_stale=True):
       continue
@@ -1408,6 +1815,11 @@ async def _process_delta_report_inner(
       account_id = str(value.get("account_id") or default_account_id)
       if not account_id:
         raise ValueError("持仓增量缺少 account_id")
+      instrument_code = str(
+        value.get("stock_code") or value.get("instrument_code") or ""
+      ).strip().upper()
+      if not instrument_code:
+        raise ValueError("持仓增量缺少 instrument_code")
       await _run_account_snapshot_mutation(
         account_id,
         lambda value=value, account_id=account_id: (
@@ -1417,6 +1829,7 @@ async def _process_delta_report_inner(
           )
         ),
         reason="BROKER_POSITION_DELTA_APPLIED",
+        affected_instrument_codes=(instrument_code,),
       )
 
   if authoritative:
@@ -1553,6 +1966,11 @@ async def _reconcile_authoritative_full_account_locked(
 
   async with AsyncSessionLocal() as db:
     existing_rollout = await db.get(AccountExecutionControl, account_id)
+    initial_control_version = (
+      int(existing_rollout.state_version or 0)
+      if existing_rollout is not None
+      else None
+    )
     controlled_window_active = bool(
       existing_rollout and existing_rollout.controlled_window_active
     )
@@ -1592,63 +2010,147 @@ async def _reconcile_authoritative_full_account_locked(
       AccountExecutionControl,
       account_id,
       with_for_update=True,
+      populate_existing=True,
     )
-    if rollout is None:
-      rollout = AccountExecutionControl(account_id=account_id)
-      db.add(rollout)
-    rollout.last_snapshot_id = snapshot_id or None
-    rollout.last_snapshot_hash = snapshot_hash or None
-    rollout.last_snapshot_at = to_naive_utc(reported_at)
-    rollout.reconcile_status = "READY" if not discrepancies else "RECONCILE_REQUIRED"
-    if discrepancies:
-      window_was_active = bool(rollout.controlled_window_active)
-      previous_state = str(rollout.authorization_state)
-      if rollout.authorization_state != "KILLED":
-        rollout.authorization_state = "PAUSED"
-      rollout.state_version = int(rollout.state_version or 0) + 1
-      rollout.paused_reason = json.dumps(
-        discrepancies[:20],
-        ensure_ascii=False,
-        default=str,
-      )[:2000]
-      if window_was_active:
-        rollout.controlled_window_active = False
-        rollout.controlled_window_snapshot_id = None
-        rollout.controlled_window_snapshot_hash = None
-        rollout.controlled_window_started_at = None
-        rollout.controlled_window_started_by_user_id = None
-        rollout.controlled_window_external_order_ids = []
-        rollout.controlled_window_external_trade_ids = []
-        db.add(
-          AccountExecutionControlEvent(
-            event_id=str(uuid.uuid4()),
-            account_id=account_id,
-            event_type="CONTROLLED_WINDOW_INVALIDATED",
-            previous_state=previous_state,
-            next_state=str(rollout.authorization_state),
-            snapshot_id=snapshot_id or None,
-            details={"discrepancies": discrepancies[:20]},
-            created_at=utcnow(),
-          )
+    locked_control_version = (
+      int(rollout.state_version or 0) if rollout is not None else None
+    )
+    control_changed_during_snapshot = (
+      locked_control_version != initial_control_version
+    )
+    (
+      quarantine_phase,
+      quarantine_source_sequence,
+      quarantined_at,
+      repair_snapshot_id,
+      repair_snapshot_hash,
+    ) = _broker_release_quarantine_boundary(
+      rollout.paused_reason if rollout is not None else None
+    )
+    normalized_reported_at = to_naive_utc(reported_at)
+    snapshot_not_newer_than_quarantine = bool(
+      quarantine_phase == "REPAIR_AWAITING_FRESH_SNAPSHOT"
+      and (
+        snapshot_id == repair_snapshot_id
+        or snapshot_hash == repair_snapshot_hash
+        or (
+          max(0, int(sequence or 0)) <= quarantine_source_sequence
+          if quarantine_source_sequence > 0
+          else quarantined_at is None
+          or normalized_reported_at <= quarantined_at
         )
-    else:
-      if bool(rollout.controlled_window_active):
-        rollout.controlled_window_snapshot_id = snapshot_id or None
-        rollout.controlled_window_snapshot_hash = snapshot_hash or None
-      if str(
-        rollout.authorization_state
-      ).upper() == "PAUSED" and _was_automatic_reconciliation_pause(
-        rollout.paused_reason
-      ):
-        # A recovered automatic pause returns to the read-only preparation
-        # stage.  It never silently resumes CANARY/LIVE order authority.
-        rollout.authorization_state = "DISABLED"
+      )
+    )
+    if control_changed_during_snapshot:
+      # The discrepancy scan was computed against an older authorization
+      # generation.  Preserve the concurrent state verbatim and force the next
+      # authoritative snapshot to recompute instead of clearing a quarantine.
+      discrepancies.append(
+        {
+          "kind": "ACCOUNT_CONTROL_CHANGED_DURING_SNAPSHOT",
+          "business_id": account_id,
+          "expected_state_version": initial_control_version,
+          "actual_state_version": locked_control_version,
+        }
+      )
+    elif quarantine_phase == "UNREPAIRED_BROKER":
+      # A broker-release quarantine is sticky.  New snapshots update the
+      # exact evidence offered to the explicit repair action, but no clean
+      # snapshot can bypass that action or clear the original pause boundary.
+      discrepancies.append(
+        {
+          "kind": "QUARANTINED_ORDER_REPAIR_REQUIRED",
+          "business_id": account_id,
+        }
+      )
+      if rollout is not None:
+        rollout.last_snapshot_id = snapshot_id or None
+        rollout.last_snapshot_hash = snapshot_hash or None
+        rollout.last_snapshot_at = to_naive_utc(reported_at)
+        rollout.reconcile_status = "RECONCILE_REQUIRED"
+        if str(rollout.authorization_state or "").upper() != "KILLED":
+          rollout.authorization_state = "PAUSED"
         rollout.state_version = int(rollout.state_version or 0) + 1
-        rollout.paused_reason = None
+    elif snapshot_not_newer_than_quarantine:
+      # An authoritative snapshot may be delivered after the quarantine while
+      # still describing broker state from before (or from the same report).
+      # Preserve the quarantine verbatim until a strictly newer snapshot is
+      # recomputed; do not rewrite its timestamp-bearing pause reason.
+      discrepancies.append(
+        {
+          "kind": "SNAPSHOT_NOT_NEWER_THAN_QUARANTINE",
+          "business_id": account_id,
+          "snapshot_reported_at": normalized_reported_at.isoformat(),
+          "snapshot_source_sequence": max(0, int(sequence or 0)),
+          "quarantine_source_sequence": quarantine_source_sequence,
+          "quarantined_at": (
+            quarantined_at.isoformat() if quarantined_at is not None else None
+          ),
+        }
+      )
+    else:
+      if rollout is None:
+        rollout = AccountExecutionControl(account_id=account_id)
+        db.add(rollout)
+      rollout.last_snapshot_id = snapshot_id or None
+      rollout.last_snapshot_hash = snapshot_hash or None
+      rollout.last_snapshot_at = to_naive_utc(reported_at)
+      rollout.reconcile_status = "READY" if not discrepancies else "RECONCILE_REQUIRED"
+      if discrepancies:
+        window_was_active = bool(rollout.controlled_window_active)
+        previous_state = str(rollout.authorization_state)
+        if rollout.authorization_state != "KILLED":
+          rollout.authorization_state = "PAUSED"
+        rollout.state_version = int(rollout.state_version or 0) + 1
+        rollout.paused_reason = json.dumps(
+          discrepancies[:20],
+          ensure_ascii=False,
+          default=str,
+        )[:2000]
+        if window_was_active:
+          rollout.controlled_window_active = False
+          rollout.controlled_window_snapshot_id = None
+          rollout.controlled_window_snapshot_hash = None
+          rollout.controlled_window_started_at = None
+          rollout.controlled_window_started_by_user_id = None
+          rollout.controlled_window_external_order_ids = []
+          rollout.controlled_window_external_trade_ids = []
+          db.add(
+            AccountExecutionControlEvent(
+              event_id=str(uuid.uuid4()),
+              account_id=account_id,
+              event_type="CONTROLLED_WINDOW_INVALIDATED",
+              previous_state=previous_state,
+              next_state=str(rollout.authorization_state),
+              snapshot_id=snapshot_id or None,
+              details={"discrepancies": discrepancies[:20]},
+              created_at=utcnow(),
+            )
+          )
+      else:
+        if bool(rollout.controlled_window_active):
+          rollout.controlled_window_snapshot_id = snapshot_id or None
+          rollout.controlled_window_snapshot_hash = snapshot_hash or None
+        if str(
+          rollout.authorization_state
+        ).upper() == "PAUSED" and _was_automatic_reconciliation_pause(
+          rollout.paused_reason
+        ):
+          # A recovered automatic pause returns to the read-only preparation
+          # stage.  It never silently resumes CANARY/LIVE order authority.
+          rollout.authorization_state = "DISABLED"
+          rollout.state_version = int(rollout.state_version or 0) + 1
+          rollout.paused_reason = None
+    summary_status = (
+      str(rollout.reconcile_status) if rollout is not None else "RECONCILE_REQUIRED"
+    )
+    summary_controlled_window_active = bool(
+      rollout is not None and rollout.controlled_window_active
+    )
     summary = {
       "snapshotId": snapshot_id,
       "snapshotAt": reported_at.isoformat(),
-      "status": rollout.reconcile_status,
+      "status": summary_status,
       "manualCoexistence": allow_external_activity,
       "externalOrderCount": len(reconciliation["external_orders"]),
       "externalTradeCount": len(reconciliation["external_trades"]),
@@ -1662,7 +2164,7 @@ async def _reconcile_authoritative_full_account_locked(
         str(item.get("status") or "") in {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
         for item in reconciliation["external_orders"]
       ),
-      "controlledWindowActive": bool(rollout.controlled_window_active),
+      "controlledWindowActive": summary_controlled_window_active,
       "blockingDiscrepancyCount": len(discrepancies),
     }
     await db.commit()
@@ -1715,6 +2217,15 @@ async def _reconcile_authoritative_full_account_locked(
     ) from authority_error
 
   if not discrepancies:
+    # Rebind exact T-exit authority while this prepared position generation is
+    # still resumable.  If the process stops here, replaying the same full
+    # report re-enters the prepared generation and retries the idempotent
+    # derivation.  Finalizing first would leave a crash window where replay is
+    # classified as a stale duplicate and never reaches the derivation hook.
+    await _rederive_t_trade_exit_authorizations_after_position_update(
+      account_id,
+      instrument_codes=None,
+    )
     finalize = getattr(position_service, "finalize_full_snapshot", None)
     if not callable(finalize):
       raise RetryableReportError("完整快照缺少持久化 finalize 边界")
@@ -1763,7 +2274,22 @@ async def _snapshot_discrepancies(
     pending = (
       (
         await db.execute(
-          select(PendingTradeOrder).where(PendingTradeOrder.account_id == account_id)
+          select(PendingTradeOrder).where(
+            PendingTradeOrder.account_id == account_id,
+            PendingTradeOrder.execution_mode == "live",
+          )
+        )
+      )
+      .scalars()
+      .all()
+    )
+    reconcile_required_place_commands = list(
+      (
+        await db.execute(
+          select(TradeCommandOutbox).where(
+            TradeCommandOutbox.account_id == account_id,
+            TradeCommandOutbox.delivery_status == "RECONCILE_REQUIRED",
+          )
         )
       )
       .scalars()
@@ -1774,22 +2300,25 @@ async def _snapshot_discrepancies(
     str(item.broker_order_id): item for item in pending if item.broker_order_id
   }
   discrepancies: list[dict[str, str]] = []
+  blocked_pending_ids: set[str] = set()
   external_orders: list[dict[str, Any]] = []
   external_trades: list[dict[str, Any]] = []
   seen_broker_ids: set[str] = set()
   for order in snapshot_orders:
     client_id = str(order.get("client_order_id") or "")
     broker_id = str(order.get("order_id") or order.get("broker_order_id") or "")
+    matched_pending = by_client.get(client_id) or by_broker.get(broker_id)
+    broker_status = _normalized_order_status(
+      order.get("effective_order_status")
+      or order.get("order_status", order.get("status"))
+    )
     if broker_id:
       seen_broker_ids.add(broker_id)
-    if not by_client.get(client_id) and not by_broker.get(broker_id):
+    if matched_pending is None:
       observation = {
         "kind": "EXTERNAL_BROKER_ORDER",
         "business_id": broker_id or client_id or "unknown",
-        "status": _normalized_order_status(
-          order.get("effective_order_status")
-          or order.get("order_status", order.get("status"))
-        ),
+        "status": broker_status,
         "raw_status": _normalized_order_status(
           order.get("order_status", order.get("status"))
         ),
@@ -1806,6 +2335,16 @@ async def _snapshot_discrepancies(
             "business_id": observation["business_id"],
           }
         )
+    elif (
+      str(matched_pending.status or "").upper() in TERMINAL_ORDER_STATUSES
+      and broker_status in {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
+    ):
+      discrepancies.append(
+        {
+          "kind": "TERMINAL_ORDER_STILL_WORKING",
+          "business_id": str(matched_pending.client_order_id),
+        }
+      )
   for trade in snapshot_trades:
     client_id = str(trade.get("client_order_id") or "")
     broker_id = str(trade.get("order_id") or trade.get("broker_order_id") or "")
@@ -1833,9 +2372,45 @@ async def _snapshot_discrepancies(
           }
         )
   for item in pending:
+    client_order_id = str(item.client_order_id)
+    item_status = str(item.status or "").upper()
+    item_metadata = dict(getattr(item, "request_metadata", None) or {})
+    if item_metadata.get(QUARANTINE_REPAIR_REQUIRED_METADATA_KEY):
+      discrepancies.append(
+        {
+          "kind": "QUARANTINED_ORDER_REPAIR_REQUIRED",
+          "business_id": client_order_id,
+        }
+      )
+      blocked_pending_ids.add(client_order_id)
+      continue
+    if item_metadata.get(QUARANTINE_RECONCILE_REQUIRED_METADATA_KEY):
+      discrepancies.append(
+        {
+          "kind": "PENDING_ORDER_RECONCILE_REQUIRED",
+          "business_id": client_order_id,
+        }
+      )
+      blocked_pending_ids.add(client_order_id)
+      continue
+    if (
+      item_status == "CANCEL_REQUESTED"
+      or (
+        item_metadata.get(QUARANTINE_CANCEL_REQUIRED_METADATA_KEY)
+        and item_status not in TERMINAL_ORDER_STATUSES
+      )
+    ):
+      discrepancies.append(
+        {
+          "kind": "CANCEL_REQUEST_PENDING",
+          "business_id": client_order_id,
+        }
+      )
+      blocked_pending_ids.add(client_order_id)
+      continue
     if (
       item.broker_order_id
-      and str(item.status).upper() in {"SUBMITTED", "PARTIAL_FILLED", "PENDING"}
+      and item_status in {"SUBMITTED", "PARTIAL_FILLED", "PENDING"}
       and str(item.broker_order_id) not in seen_broker_ids
     ):
       discrepancies.append(
@@ -1844,6 +2419,33 @@ async def _snapshot_discrepancies(
           "business_id": str(item.client_order_id),
         }
       )
+  for command in reconcile_required_place_commands:
+    raw_command_payload = getattr(command, "payload", None)
+    if not isinstance(raw_command_payload, Mapping):
+      continue
+    command_payload = dict(raw_command_payload)
+    client_order_id = str(command.client_order_id or "")
+    command_pending = by_client.get(client_order_id)
+    if (
+      not client_order_id
+      or client_order_id in blocked_pending_ids
+      or str(command_payload.get("command_kind") or "").upper() != "PLACE_ORDER"
+      or str(command_payload.get("execution_mode") or "").lower() != "live"
+      or str(command_payload.get("account_id") or command.account_id or "")
+      != account_id
+      or (
+        command_pending is not None
+        and str(command_pending.status or "").upper() in TERMINAL_ORDER_STATUSES
+      )
+    ):
+      continue
+    discrepancies.append(
+      {
+        "kind": "PENDING_ORDER_RECONCILE_REQUIRED",
+        "business_id": client_order_id,
+      }
+    )
+    blocked_pending_ids.add(client_order_id)
   return {
     "blocking_discrepancies": discrepancies,
     "external_orders": external_orders,
@@ -1991,14 +2593,31 @@ def _reported_cumulative_fill(report: dict[str, Any]) -> Optional[int]:
   for key in ("traded_volume", "filled_volume"):
     if key not in report:
       continue
+    raw_value = report.get(key)
+    if raw_value is None or isinstance(raw_value, bool):
+      return None
+    if isinstance(raw_value, float) and (
+      not math.isfinite(raw_value) or not raw_value.is_integer()
+    ):
+      return None
+    if isinstance(raw_value, Decimal) and (
+      not raw_value.is_finite() or raw_value != raw_value.to_integral_value()
+    ):
+      return None
     try:
-      value = int(report.get(key))
+      value = int(raw_value)
     except (TypeError, ValueError, OverflowError):
       return None
     if value < 0:
       return None
     values.append(value)
   return max(values) if values else None
+
+
+def _reported_cumulative_fill_state(report: Mapping[str, Any]) -> str:
+  if not any(key in report for key in ("traded_volume", "filled_volume")):
+    return "MISSING"
+  return "VALUE" if _reported_cumulative_fill(dict(report)) is not None else "INVALID"
 
 
 async def _terminal_order_fill_projection(
@@ -2066,15 +2685,16 @@ async def _terminal_order_fill_projection(
       ),
     )
     reported = _reported_cumulative_fill(report)
-    reported_field_present = any(
-      key in report for key in ("traded_volume", "filled_volume")
-    )
     expected = (
+      # Missing and malformed cumulative fill are both non-authoritative. A
+      # cancellation-class terminal without an explicit zero must remain
+      # fail-closed just like FILLED; only an actual numeric zero proves that
+      # no TRADE report needs to catch up.
       max(1, requested)
-      if reported is None and reported_field_present
+      if reported is None
       else (
-        int(reported or 0)
-        if int(reported or 0) > 0
+        int(reported)
+        if int(reported) > 0
         else (max(1, requested) if status == "FILLED" else 0)
       )
     )
@@ -2229,7 +2849,7 @@ async def _full_snapshot_zero_fill_items(
   db,
   report: AgentReportInbox,
 ) -> list[tuple[str, dict[str, Any]]]:
-  """Prove broker-terminal managed BUY orders had no execution.
+  """Prove exact managed BUY or EXIT_PLAN SELL orders had no execution.
 
   A terminal order report alone is deliberately insufficient: QMT execution
   reports may arrive after it.  The proof is emitted only after a verified
@@ -2307,6 +2927,7 @@ async def _full_snapshot_zero_fill_items(
       AccountExecutionControl,
       account_id,
       with_for_update=True,
+      populate_existing=True,
     )
     if (
       rollout is None
@@ -2322,34 +2943,30 @@ async def _full_snapshot_zero_fill_items(
       client_order_id=client_order_id,
       broker_order_id=broker_order_id,
     )
-    if correlation is None:
-      continue
-    correlation = await db.get(
-      StrategyOrderCorrelation,
-      correlation.id,
-      with_for_update=True,
-    )
+    if correlation is not None:
+      correlation = await db.get(
+        StrategyOrderCorrelation,
+        correlation.id,
+        with_for_update=True,
+        populate_existing=True,
+      )
     pending = await db.get(
       PendingTradeOrder,
       client_order_id,
       with_for_update=True,
+      populate_existing=True,
     )
-    if correlation is None or pending is None:
+    if pending is None:
       continue
-    request_metadata = {
-      **dict(pending.request_metadata or {}),
-      **dict(correlation.request_metadata or {}),
-    }
-    plan_id = str(request_metadata.get("entry_plan_id") or "").strip()
+    pending_metadata = dict(pending.request_metadata or {})
+    correlation_metadata = (
+      dict(correlation.request_metadata or {}) if correlation is not None else {}
+    )
+    request_metadata = {**pending_metadata, **correlation_metadata}
     run_id = str(pending.strategy_run_id or "").strip()
     if (
-      not plan_id
-      or not run_id
-      or run_id != str(correlation.strategy_run_id or "")
-      or str(correlation.account_id or "") != account_id
-      or str(pending.account_id or "") != account_id
+      str(pending.account_id or "") != account_id
       or str(pending.instrument_code or "").upper() != instrument_code
-      or str(pending.side or "").upper() != "BUY"
       or str(pending.broker_order_id or "") != broker_order_id
       or _normalized_order_status(pending.status) != terminal_status
       or snapshot_sequence < max(0, int(pending.last_source_sequence or 0))
@@ -2361,10 +2978,21 @@ async def _full_snapshot_zero_fill_items(
     ):
       continue
 
+    intent_id = str(pending.intent_id or "").strip()
+    if not intent_id:
+      continue
+    if correlation is not None and (
+      str(correlation.client_order_id or "") != client_order_id
+      or str(correlation.broker_order_id or "") != broker_order_id
+      or str(correlation.account_id or "") != account_id
+      or str(correlation.intent_id or "") != intent_id
+    ):
+      continue
     intent = await db.get(
       TradeIntentRecord,
-      correlation.intent_id,
+      intent_id,
       with_for_update=True,
+      populate_existing=True,
     )
     intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
     try:
@@ -2374,17 +3002,104 @@ async def _full_snapshot_zero_fill_items(
       continue
     if (
       intent is None
-      or str(intent.strategy_run_id or "") != run_id
-      or str(intent.direction or "").upper() != "BUY"
       or str(intent.instrument_code or "").upper() != instrument_code
-      or (intent.account_id and str(intent.account_id) != account_id)
-      or str(intent_metadata.get("entry_plan_id") or "") != plan_id
+      or str(intent.account_id or "") != account_id
       or executed_volume != 0
       or executed_price is None
       or not executed_price.is_finite()
       or executed_price > 0
       or intent.executed_time is not None
     ):
+      continue
+
+    entry_plan_id = str(request_metadata.get("entry_plan_id") or "").strip()
+    managed_entry_owner = bool(
+      correlation is not None
+      and entry_plan_id
+      and run_id
+      and run_id == str(correlation.strategy_run_id or "")
+      and str(intent.strategy_run_id or "") == run_id
+      and str(pending.side or "").upper() == "BUY"
+      and str(intent.direction or "").upper() == "BUY"
+      and str(intent_metadata.get("entry_plan_id") or "") == entry_plan_id
+    )
+
+    exit_plan_record = None
+    exit_owner_kind = ""
+    pending_exit_plan_id = str(pending_metadata.get("exit_plan_id") or "").strip()
+    intent_exit_plan_id = str(intent_metadata.get("exit_plan_id") or "").strip()
+    if (
+      pending_exit_plan_id
+      and pending_exit_plan_id == intent_exit_plan_id
+      and str(pending.side or "").upper() == "SELL"
+      and str(intent.direction or "").upper() == "SELL"
+      and str(intent.owner_type or "").upper() == "EXIT_PLAN"
+      and str(intent.owner_id or "") == pending_exit_plan_id
+      and str(pending_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
+      and str(pending_metadata.get("owner_id") or "") == pending_exit_plan_id
+      and str(intent_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
+      and str(intent_metadata.get("owner_id") or "") == pending_exit_plan_id
+    ):
+      exit_plan_record = await db.get(
+        AutoExitPlanRecord,
+        pending_exit_plan_id,
+        with_for_update=True,
+        populate_existing=True,
+      )
+      if exit_plan_record is not None:
+        durable_owner_kind = durable_exit_plan_owner_kind(exit_plan_record)
+        plan_state = dict(exit_plan_record.plan_state or {})
+        template = dict(plan_state.get("template") or {})
+        state_pending_intent_id = str(
+          plan_state.get("pending_intent_id") or ""
+        ).strip()
+        state_pending_order_id = str(
+          plan_state.get("pending_order_id") or ""
+        ).strip()
+        record_pending_order_id = str(
+          exit_plan_record.pending_client_order_id or ""
+        ).strip()
+        plan_binding_exact = bool(
+          str(exit_plan_record.account_id or "") == account_id
+          and str(exit_plan_record.instrument_code or "").upper()
+          == instrument_code
+          and str(exit_plan_record.strategy_run_id or "") == run_id
+          and str(template.get("plan_id") or "") == pending_exit_plan_id
+          and str(template.get("account_id") or "") == account_id
+          and str(template.get("instrument_code") or "").upper()
+          == instrument_code
+          and str(template.get("run_id") or "") == run_id
+          and state_pending_intent_id == intent_id
+          and state_pending_order_id in {"", client_order_id}
+          and record_pending_order_id in {"", client_order_id}
+          and str(intent.strategy_run_id or "") == run_id
+        )
+        if (
+          plan_binding_exact
+          and run_id
+          and durable_owner_kind
+          in {RUNTIME_BOOK_OWNER, MANAGED_EXIT_STRATEGY_OWNER}
+        ):
+          if (
+            correlation is not None
+            and str(correlation.strategy_run_id or "") == run_id
+            and str(correlation_metadata.get("owner_type") or "").upper()
+            == "EXIT_PLAN"
+            and str(correlation_metadata.get("owner_id") or "")
+            == pending_exit_plan_id
+            and str(correlation_metadata.get("exit_plan_id") or "")
+            == pending_exit_plan_id
+          ):
+            exit_owner_kind = "STRATEGY_RUN"
+        elif (
+          plan_binding_exact
+          and not run_id
+          and correlation is None
+          and durable_owner_kind == MONITOR_OWNER
+        ):
+          exit_owner_kind = "MONITOR"
+
+    if not managed_entry_owner and not exit_owner_kind:
       continue
     if _snapshot_has_order_execution_detail(
       payload,
@@ -2427,20 +3142,28 @@ async def _full_snapshot_zero_fill_items(
       if int(historical_fill or 0) > 0:
         execution_announced = True
         break
-      historical_projection = await _terminal_order_fill_projection(
-        db,
-        correlation,
-        intent,
-        current_order=historical_order,
-      )
-      if historical_projection and int(historical_projection["expected"]) > 0:
-        execution_announced = True
-        break
+      if correlation is not None:
+        historical_projection = await _terminal_order_fill_projection(
+          db,
+          correlation,
+          intent,
+          current_order=historical_order,
+        )
+        if historical_projection and int(historical_projection["expected"]) > 0:
+          execution_announced = True
+          break
     if execution_announced:
       continue
     try:
       numeric_broker_order_id = int(broker_order_id)
     except (TypeError, ValueError, OverflowError):
+      continue
+    durable_order = await db.get(Order, numeric_broker_order_id)
+    if durable_order is not None and (
+      str(durable_order.account_id or "") != account_id
+      or str(durable_order.stock_code or "").upper() != instrument_code
+      or int(durable_order.traded_volume or 0) != 0
+    ):
       continue
     durable_trade = (
       await db.execute(
@@ -2466,6 +3189,38 @@ async def _full_snapshot_zero_fill_items(
       "received_execution_volume": 0,
       "reconciled_at": utcnow().isoformat(),
     }
+    if exit_owner_kind:
+      audit.update(
+        {
+          "owner_type": "EXIT_PLAN",
+          "owner_id": pending_exit_plan_id,
+          "exit_plan_id": pending_exit_plan_id,
+          "intent_id": intent_id,
+          "strategy_run_id": run_id,
+          "execution_owner": exit_owner_kind,
+          "account_id": account_id,
+          "instrument_code": instrument_code,
+          "client_order_id": client_order_id,
+          "broker_order_id": broker_order_id,
+        }
+      )
+      if exit_owner_kind == "MONITOR":
+        existing_audit = intent_metadata.get("qmt_zero_fill_reconciliation")
+        if (
+          isinstance(existing_audit, dict)
+          and str(existing_audit.get("snapshot_id") or "") == snapshot_id
+          and str(existing_audit.get("snapshot_hash") or "").lower()
+          == snapshot_hash
+        ):
+          audit["reconciled_at"] = str(
+            existing_audit.get("reconciled_at") or audit["reconciled_at"]
+          )
+        intent.status = "RECONCILED_ZERO_FILL"
+        intent.notes = "QMT_FULL_SNAPSHOT_ZERO_FILL_RECONCILIATION"
+        intent.intent_metadata = {
+          **intent_metadata,
+          "qmt_zero_fill_reconciliation": dict(audit),
+        }
     results.append(
       (
         "ORDER",
@@ -2495,9 +3250,45 @@ async def _correlation_for_report(
     clauses.append(StrategyOrderCorrelation.broker_order_id == broker_order_id)
   if not clauses:
     return None
-  return (
-    await db.execute(select(StrategyOrderCorrelation).where(or_(*clauses)))
-  ).scalar_one_or_none()
+  candidate = (
+    await db.execute(
+      select(
+        StrategyOrderCorrelation.id,
+        StrategyOrderCorrelation.client_order_id,
+        StrategyOrderCorrelation.account_id,
+        StrategyOrderCorrelation.execution_mode,
+      ).where(or_(*clauses))
+    )
+  ).one_or_none()
+  if candidate is None:
+    return None
+  correlation_id, resolved_client_order_id, account_id, execution_mode = candidate
+  await AccountExecutionQuarantineService(db).lock_client_order_for_lifecycle(
+    client_order_id=str(resolved_client_order_id or "")
+  )
+  # This establishes the shared account/outbox -> pending -> correlation
+  # order before any expiry, intent, or plan projection helper can run.
+  pending = await db.get(
+    PendingTradeOrder,
+    str(resolved_client_order_id or ""),
+    with_for_update=True,
+    populate_existing=True,
+  )
+  correlation = await db.get(
+    StrategyOrderCorrelation,
+    str(correlation_id or ""),
+    with_for_update=True,
+    populate_existing=True,
+  )
+  if (
+    pending is None
+    or correlation is None
+    or str(correlation.client_order_id or "") != str(resolved_client_order_id or "")
+    or str(correlation.account_id or "") != str(account_id or "")
+    or str(correlation.execution_mode or "") != str(execution_mode or "")
+  ):
+    return None
+  return correlation
 
 
 async def _command_expired_entry_zero_fill_reconciliation(
@@ -2626,9 +3417,9 @@ def _runtime_business_key(
   cumulative_fill = _reported_cumulative_fill(item)
   fill_field_present = any(key in item for key in ("traded_volume", "filled_volume"))
   fill_component = (
-    "INVALID"
-    if cumulative_fill is None and fill_field_present
-    else str(int(cumulative_fill or 0))
+    ("INVALID" if fill_field_present else "MISSING")
+    if cumulative_fill is None
+    else str(int(cumulative_fill))
   )
   return (
     f"order:{correlation.client_order_id}:{broker_order_id}:"
@@ -2660,6 +3451,9 @@ def _event_payload(
   zero_fill_reconciliation = item.get("zero_fill_reconciliation")
   if isinstance(zero_fill_reconciliation, dict):
     metadata["qmt_zero_fill_reconciliation"] = dict(zero_fill_reconciliation)
+  zero_fill_invalidation = item.get("zero_fill_proof_invalidation")
+  if isinstance(zero_fill_invalidation, dict):
+    metadata["zero_fill_proof_invalidation"] = dict(zero_fill_invalidation)
   return {"report": item, "metadata": metadata}
 
 
@@ -2674,6 +3468,24 @@ async def _project_trade_intent_event(
   intent = await db.get(TradeIntentRecord, correlation.intent_id, with_for_update=True)
   if intent is None:
     return None
+  intent_metadata = dict(intent.intent_metadata or {})
+  if str(intent_metadata.get("execution_terminal_source") or "").upper() in {
+    LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE,
+    LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE,
+  }:
+    intent.intent_metadata = {
+      key: value
+      for key, value in intent_metadata.items()
+      if key
+      not in {
+        "execution_terminal_source",
+        "execution_terminal_reason",
+        "execution_terminal_at",
+        "command_lifecycle_status",
+        "command_lifecycle_previous_status",
+        "command_lifecycle_message_id",
+      }
+    }
   intent.order_id = correlation.strategy_order_id or intent.order_id
   if correlation.risk_decision_id:
     intent.risk_decision_id = correlation.risk_decision_id
@@ -2740,6 +3552,18 @@ async def _project_trade_intent_event(
     0,
     int((pending.volume if pending is not None else None) or intent.target_volume or 0),
   )
+  invalidation = item.get("zero_fill_proof_invalidation")
+  if isinstance(invalidation, Mapping) and str(
+    invalidation.get("error_code") or ""
+  ):
+    # The execution itself remains authoritative and is accumulated above, but
+    # it contradicts a plan state that already finalized or released this
+    # intent.  Keep the audit row sticky until the account/plan is reconciled;
+    # projecting the late fill as an ordinary PARTIAL_FILLED would silently
+    # erase the fail-closed quarantine raised in the same transaction.
+    intent.status = "RECONCILE_REQUIRED"
+    intent.notes = str(invalidation["error_code"])
+    return None
   projection = await _terminal_order_fill_projection(db, correlation, intent)
   if projection and int(projection["expected"]) > int(projection["received"]):
     intent.status = "RECONCILE_REQUIRED"
@@ -3144,6 +3968,26 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
             or item.get("status")
             or item.get("order_status")
           )
+          if await is_exact_finalized_exit_order_replay(
+            db,
+            client_order_id=correlation.client_order_id,
+            evidence_status=proposed_status,
+            cumulative_filled_volume=_reported_cumulative_fill(item),
+          ):
+            continue
+          if proposed_status in ZERO_FILL_CONTRADICTION_ORDER_STATUSES:
+            zero_fill_invalidation = await runtime_zero_fill_invalidation(
+              db,
+              correlation=correlation,
+            )
+            if zero_fill_invalidation is not None:
+              item["zero_fill_proof_invalidation"] = zero_fill_invalidation
+              item["zero_fill_contradicted_order_status"] = proposed_status
+              item["effective_status_reason"] = (
+                str(zero_fill_invalidation.get("error_code") or "")
+                or "EXIT_PLAN_BROKER_FACT_CONTRADICTED_RELEASED_INTENT"
+              )
+              proposed_status = "RECONCILE_REQUIRED"
           if proposed_status not in _SPECIAL_RUNTIME_ORDER_STATUSES:
             pending = await db.get(
               PendingTradeOrder,
@@ -3171,6 +4015,13 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
               ):
                 continue
           item["effective_order_status"] = proposed_status
+        elif event_type == "TRADE":
+          zero_fill_invalidation = await runtime_zero_fill_invalidation(
+            db,
+            correlation=correlation,
+          )
+          if zero_fill_invalidation is not None:
+            item["zero_fill_proof_invalidation"] = zero_fill_invalidation
 
         if broker_order_id and not correlation.broker_order_id:
           correlation.broker_order_id = broker_order_id
@@ -3270,6 +4121,7 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
   side = str(report.get("side") or report.get("order_type") or "").upper()
   order_type = OrderType.SELL if side in {"SELL", "24", "ORDER_SELL"} else OrderType.BUY
   if event.event_type == "ORDER":
+    authoritative_cumulative_fill = _reported_cumulative_fill(report)
     request = OrderRequest(
       instrument_code=str(
         report.get("stock_code")
@@ -3305,9 +4157,12 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
       submit_time=_parse_report_time(
         report.get("order_time") or report.get("submit_time")
       ),
-      filled_volume=int(report.get("traded_volume") or 0),
+      # ``None`` preserves missing/invalid cumulative fill.  It must not be
+      # confused with an explicit broker zero when the strategy/ExitPlanBook
+      # decides whether a terminal order can release its pending intent.
+      filled_volume=authoritative_cumulative_fill,
       filled_amount=float(report.get("traded_price") or 0.0)
-      * int(report.get("traded_volume") or 0),
+      * int(authoritative_cumulative_fill or 0),
       avg_price=float(report.get("traded_price") or 0.0),
       error_message=str(report.get("status_msg") or ""),
       last_update_time=_parse_report_time(

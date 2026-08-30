@@ -10,10 +10,12 @@ from quantx_domain.strategies.ashare_managed_exit_plan import (
 )
 from quantx_domain.strategies.base import (
   ManualCommandIntentOrigin,
+  OrderStateEvent,
   StrategyCadence,
   StrategyContext,
   StrategyInput,
   StrategyRunIntentOrigin,
+  TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
   TradeIntentExecutionMode,
@@ -105,12 +107,86 @@ async def test_fixed_exit_strategy_emits_stable_plan_origin_and_state_patch():
 
 
 @pytest.mark.asyncio
-async def test_live_exit_defaults_to_manual_confirmation_without_exact_grant():
+async def test_live_strategy_requests_auto_and_leaves_authorization_to_engine():
   strategy = await _strategy(StrategyRunMode.LIVE)
 
   [intent] = (await strategy.step(_input())).trade_intents
 
-  assert intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
+  assert intent.execution_mode == TradeIntentExecutionMode.AUTO
+  assert intent.metadata["owner_type"] == "EXIT_PLAN"
+  assert intent.metadata["owner_id"] == "exit-plan-1"
+
+
+@pytest.mark.asyncio
+async def test_managed_exit_waits_for_terminal_cumulative_fill_to_converge():
+  strategy = await _strategy(StrategyRunMode.PAPER)
+  [intent] = (await strategy.step(_input())).trade_intents
+  metadata = dict(intent.metadata)
+
+  await strategy.on_order(
+    OrderStateEvent(
+      order_id="order-1",
+      status="FILLED",
+      filled_volume=400,
+      metadata=metadata,
+      timestamp=NOW,
+    )
+  )
+  pending = strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)
+  assert pending["status"] == "EXIT_PENDING"
+  assert pending["pending_terminal_cumulative_fill"] == 400
+
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="order-1",
+      instrument_code="600000.SH",
+      trade_type="SELL",
+      price=10.6,
+      volume=400,
+      trade_time=NOW,
+      metadata=metadata,
+    )
+  )
+  settled = strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)
+  assert settled["status"] == "PARTIALLY_EXITED"
+  assert settled["pending_intent_id"] == ""
+  assert settled["exited_volume"] == 400
+
+
+@pytest.mark.asyncio
+async def test_managed_exit_only_releases_local_rejection_with_explicit_proof():
+  strategy = await _strategy(StrategyRunMode.LIVE)
+  [intent] = (await strategy.step(_input())).trade_intents
+  metadata = dict(intent.metadata)
+
+  await strategy.on_order(
+    OrderStateEvent(
+      order_id=None,
+      status="REJECTED",
+      filled_volume=0,
+      metadata=metadata,
+      timestamp=NOW,
+    )
+  )
+  blocked = strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)
+  assert blocked["status"] == "EXIT_PENDING"
+  assert blocked["pending_intent_id"] == intent.intent_id
+
+  await strategy.on_order(
+    OrderStateEvent(
+      order_id=None,
+      status="REJECTED",
+      filled_volume=0,
+      metadata={
+        **metadata,
+        "execution_terminal_source": "LOCAL_PRE_BROKER_REJECTION",
+      },
+      timestamp=NOW,
+    )
+  )
+  released = strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)
+  assert released["status"] == "ACTIVE"
+  assert released["pending_intent_id"] == ""
 
 
 def test_manual_command_intent_has_no_fake_strategy_run_identity():

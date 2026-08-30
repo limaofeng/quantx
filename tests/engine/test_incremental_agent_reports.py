@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 from hashlib import sha256
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 from quantx_engine import report_processor
@@ -15,6 +15,7 @@ async def test_partial_delta_uses_position_delta_without_full_snapshot(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   calls = SimpleNamespace(delta=[], full=[])
+  rederive = AsyncMock()
 
   class FakePositionService:
     async def apply_position_delta(self, value, account_id):
@@ -32,6 +33,11 @@ async def test_partial_delta_uses_position_delta_without_full_snapshot(
     report_processor,
     "_invalidate_t_trade_entry_authority_for_account",
     AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
+    rederive,
   )
   monkeypatch.setattr(
     report_processor,
@@ -66,6 +72,10 @@ async def test_partial_delta_uses_position_delta_without_full_snapshot(
       "account-1",
     )
   ]
+  rederive.assert_awaited_once_with(
+    "account-1",
+    instrument_codes=("600000.SH",),
+  )
 
 
 @pytest.mark.asyncio
@@ -73,6 +83,7 @@ async def test_complete_delta_still_applies_authoritative_snapshot(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   calls = SimpleNamespace(delta=[], full=[])
+  rederive = AsyncMock()
 
   class FakePositionService:
     async def apply_position_delta(self, value, account_id):
@@ -112,6 +123,11 @@ async def test_complete_delta_still_applies_authoritative_snapshot(
 
   monkeypatch.setattr(report_processor, "PositionService", FakePositionService)
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", FakeDatabase)
+  monkeypatch.setattr(
+    report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
+    rederive,
+  )
   monkeypatch.setattr(
     report_processor,
     "_upsert_account",
@@ -166,6 +182,7 @@ async def test_complete_delta_still_applies_authoritative_snapshot(
   assert len(calls.full) == 1
   assert calls.full[0]["account_id"] == "account-1"
   assert "complete" not in calls.full[0]
+  rederive.assert_awaited_once_with("account-1", instrument_codes=None)
 
 
 @pytest.mark.asyncio
@@ -252,6 +269,61 @@ async def test_failed_delta_writer_marks_snapshot_stale_before_rethrow(
     "account-1",
     reason="BROKER_POSITION_DELTA_APPLIED",
   )
+
+
+@pytest.mark.asyncio
+async def test_position_delta_retries_when_t_exit_rederivation_is_unavailable(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  mutation = AsyncMock(return_value="applied")
+  invalidation = AsyncMock()
+  rederive = AsyncMock(
+    side_effect=[RuntimeError("authorization store unavailable"), []]
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_invalidate_t_trade_entry_authority_for_account",
+    invalidation,
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "AutoExitPlanService",
+    lambda: SimpleNamespace(
+      rederive_t_trade_exit_authorizations_after_position_update=rederive
+    ),
+  )
+
+  with pytest.raises(
+    report_processor.RetryableReportError,
+    match="自动退出授权",
+  ):
+    await report_processor._run_account_snapshot_mutation(
+      "account-1",
+      mutation,
+      reason="BROKER_POSITION_DELTA_APPLIED",
+      affected_instrument_codes=("600000.sh",),
+    )
+
+  result = await report_processor._run_account_snapshot_mutation(
+    "account-1",
+    mutation,
+    reason="BROKER_POSITION_DELTA_APPLIED",
+    affected_instrument_codes=("600000.sh",),
+  )
+
+  assert result == "applied"
+  assert mutation.await_count == 2
+  assert invalidation.await_count == 2
+  assert rederive.await_args_list == [
+    call(
+      account_id="account-1",
+      instrument_codes=("600000.SH",),
+    ),
+    call(
+      account_id="account-1",
+      instrument_codes=("600000.SH",),
+    ),
+  ]
 
 
 @pytest.mark.asyncio
@@ -504,6 +576,45 @@ async def test_stale_full_duplicate_does_not_replay_business_sections(
 
 
 @pytest.mark.asyncio
+async def test_incremental_trade_does_not_manufacture_filled_order_status(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  process_execution = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "_process_execution_report",
+    process_execution,
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "PositionService",
+    lambda: SimpleNamespace(),
+  )
+
+  await report_processor._process_delta_report(
+    "device-1",
+    {
+      "is_complete": False,
+      "source_sequence": 11,
+      "trades": [
+        {
+          "client_order_id": "client-1",
+          "account_id": "account-1",
+          "order_id": 101,
+          "execution_id": "trade-1",
+          "traded_volume": 400,
+          "traded_price": 10.5,
+        }
+      ],
+    },
+    protocol_version="1.1",
+  )
+
+  [call] = process_execution.await_args_list
+  assert call.args[0]["order_status"] == "PARTIAL_FILLED"
+
+
+@pytest.mark.asyncio
 async def test_stale_full_duplicate_does_not_stage_runtime_zero_fill_event() -> None:
   payload = {
     "snapshot_id": "older-snapshot",
@@ -626,6 +737,14 @@ async def test_full_snapshot_keeps_monitor_out_until_final_rollout_projection(
   async def invalidate(_account_id: str, *, reason: str) -> None:
     events.append(f"authority-clear:{reason}")
 
+  async def rederive(
+    _account_id: str,
+    *,
+    instrument_codes,
+  ) -> None:
+    assert instrument_codes is None
+    events.append("t-exit-authorization-rederived")
+
   monkeypatch.setattr(report_processor, "PositionService", FakePositionService)
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", FakeDatabase)
   monkeypatch.setattr(report_processor, "_snapshot_discrepancies", discrepancies)
@@ -633,6 +752,11 @@ async def test_full_snapshot_keeps_monitor_out_until_final_rollout_projection(
     report_processor,
     "_invalidate_t_trade_entry_authority_for_account",
     invalidate,
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
+    rederive,
   )
   monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
 
@@ -681,7 +805,10 @@ async def test_full_snapshot_keeps_monitor_out_until_final_rollout_projection(
   )
   assert events.index(
     "authority-clear:BROKER_POSITION_SNAPSHOT_UPDATED"
-  ) < events.index("snapshot-finalize-complete")
+  ) < events.index("t-exit-authorization-rederived")
+  assert events.index("t-exit-authorization-rederived") < events.index(
+    "snapshot-finalize-complete"
+  )
   assert events.index("snapshot-finalize-complete") < events.index("monitor-publish")
 
 
@@ -756,6 +883,11 @@ async def test_prepared_full_snapshot_same_sequence_can_resume_to_complete(
     "_invalidate_t_trade_entry_authority_for_account",
     AsyncMock(),
   )
+  monkeypatch.setattr(
+    report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
+    AsyncMock(),
+  )
   monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
 
   payload = {
@@ -796,6 +928,90 @@ async def test_prepared_full_snapshot_same_sequence_can_resume_to_complete(
   assert calls[-1] == "finalize"
   assert state["is_complete"] is True
   assert state["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_full_snapshot_retries_rederivation_before_finalize(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class FakeDatabase:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_):
+      return None
+
+    async def get(self, *_args, **_kwargs):
+      return None
+
+    def add(self, _value):
+      return None
+
+    async def commit(self):
+      return None
+
+  position_service = SimpleNamespace(
+    prepare_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "PREPARED"}
+    ),
+    finalize_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "APPLIED"}
+    ),
+  )
+  rederive = AsyncMock(
+    side_effect=[report_processor.RetryableReportError("retry"), None]
+  )
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", FakeDatabase)
+  monkeypatch.setattr(
+    report_processor,
+    "_snapshot_discrepancies",
+    AsyncMock(
+      return_value={
+        "blocking_discrepancies": [],
+        "external_orders": [],
+        "external_trades": [],
+      }
+    ),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_invalidate_t_trade_entry_authority_for_account",
+    AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
+    rederive,
+  )
+  arguments = {
+    "snapshot_id": "snapshot-retry",
+    "snapshot_hash": "a" * 64,
+    "reported_at": datetime.now(timezone.utc),
+    "sequence": 9,
+    "positions": [],
+    "position_service": position_service,
+  }
+
+  with pytest.raises(report_processor.RetryableReportError, match="retry"):
+    await report_processor._reconcile_authoritative_full_account_locked(
+      "account-1",
+      {"orders": [], "trades": []},
+      **arguments,
+    )
+  position_service.finalize_full_snapshot.assert_not_awaited()
+
+  result, blocked, _summary = (
+    await report_processor._reconcile_authoritative_full_account_locked(
+      "account-1",
+      {"orders": [], "trades": []},
+      **arguments,
+    )
+  )
+
+  assert result == {"applied": True, "reason": "APPLIED"}
+  assert blocked is False
+  assert rederive.await_count == 2
+  position_service.finalize_full_snapshot.assert_awaited_once()
 
 
 @pytest.mark.asyncio

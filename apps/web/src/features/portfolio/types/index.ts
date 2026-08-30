@@ -47,7 +47,7 @@ export interface LiquidatedStock {
   realizedPnLPercent?: number | null;
   originalCost?: number | null;
   orderId?: number | string | null;
-  source: 'ORDER' | 'TRADE';
+  source: 'TRADE';
   status?: string | null;
 }
 

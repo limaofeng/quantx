@@ -42,6 +42,17 @@ const mocks = vi.hoisted(() => ({
     workingExternalOrderCount: 0,
     lastBackupAt: '2026-08-25T04:00:00Z',
     checkedAt: '2026-08-25T06:00:10Z',
+    quarantinedOrders: [] as Array<{
+      clientOrderId: string;
+      planId: string;
+      intentId: string;
+      quarantineReason: string;
+      brokerOrderId: string;
+      repairable: boolean;
+      blockedReason: string;
+      quarantinedAt: string;
+      sourceSequence: number;
+    }>,
     checks: [] as Array<{
       code: string;
       status: 'PASSED' | 'STANDBY' | 'FAILED';
@@ -133,6 +144,7 @@ describe('TradingSafetySettingsPanel', () => {
 
   afterEach(() => {
     mocks.safety.checks = [];
+    mocks.safety.quarantinedOrders = [];
     vi.unstubAllGlobals();
   });
 
@@ -195,5 +207,80 @@ describe('TradingSafetySettingsPanel', () => {
         variables: expect.objectContaining({ range: 'DAYS_30' }),
       })
     );
+  });
+
+  it('binds an explicit quarantine repair preview to one exact order and snapshot', async () => {
+    mocks.safety.quarantinedOrders = [
+      {
+        clientOrderId: 'sell-client-1',
+        planId: 'exit-plan-1',
+        intentId: 'exit-intent-1',
+        quarantineReason: 'ACCOUNT_WIDE_STALE_SELL',
+        brokerOrderId: 'broker-order-1',
+        repairable: true,
+        blockedReason: '',
+        quarantinedAt: '2026-08-25T06:00:05Z',
+        sourceSequence: 41,
+      },
+    ];
+
+    render(<TradingSafetySettingsPanel />);
+
+    fireEvent.change(screen.getByLabelText('暂停、紧急停止或隔离修复原因'), {
+      target: { value: '已核对券商终态' },
+    });
+
+    fireEvent.click(
+      screen.getByRole('button', { name: '修复委托 sell-client-1' })
+    );
+
+    await waitFor(() => {
+      expect(mocks.previewControl).toHaveBeenCalledWith({
+        input: expect.objectContaining({
+          accountId: '300000013250',
+          action: 'REPAIR_QUARANTINED_ORDER',
+          clientOrderId: 'sell-client-1',
+          quarantineReason: 'ACCOUNT_WIDE_STALE_SELL',
+          snapshotId: 'snapshot-1',
+          stateVersion: 1,
+          reason: '已核对券商终态',
+          idempotencyKey: expect.stringMatching(
+            /^account-execution:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+          ),
+        }),
+      });
+    });
+    expect(
+      screen.getByText('待确认：修复隔离委托 · sell-client-1')
+    ).toBeInTheDocument();
+  });
+
+  it('keeps a quarantined order blocked until a newer full snapshot exists', () => {
+    mocks.safety.quarantinedOrders = [
+      {
+        clientOrderId: 'sell-client-blocked',
+        planId: 'exit-plan-2',
+        intentId: 'exit-intent-2',
+        quarantineReason: 'BROKER_EXECUTION_AFTER_RELEASE',
+        brokerOrderId: '',
+        repairable: false,
+        blockedReason: 'SNAPSHOT_NOT_NEWER_THAN_QUARANTINE',
+        quarantinedAt: '2026-08-25T06:00:05Z',
+        sourceSequence: 42,
+      },
+    ];
+
+    render(<TradingSafetySettingsPanel />);
+
+    fireEvent.change(screen.getByLabelText('暂停、紧急停止或隔离修复原因'), {
+      target: { value: '已尝试核对' },
+    });
+
+    expect(screen.getByText('快照必须严格晚于隔离事实')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: '修复委托 sell-client-blocked',
+      })
+    ).toBeDisabled();
   });
 });

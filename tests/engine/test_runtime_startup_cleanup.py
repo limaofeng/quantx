@@ -1155,6 +1155,16 @@ async def test_startup_replays_restored_continuity_gate_before_checkpoint(
     checkpoint,
   )
   monkeypatch.setattr(RuntimeStateManager, "save_snapshot", save)
+  monkeypatch.setattr(
+    executor_module.AutoExitPlanService,
+    "load_strategy_plan_book",
+    AsyncMock(return_value=({"version": 1, "plans": {}}, {})),
+  )
+  monkeypatch.setattr(
+    executor_module.AutoExitPlanService,
+    "load_strategy_pending_exit_intents",
+    AsyncMock(return_value=[]),
+  )
   if handled:
     monkeypatch.setattr(
       RuntimeStateManager,

@@ -181,7 +181,6 @@ export function CurrentHoldingsSection({
     try {
       if (!completionStrategy || !conflictStrategy || !executionMode) return;
       await liquidateMultiple([normalizeStockCode(stockCode)], {
-        autoExitAuthorized: executionMode === 'paper',
         completionStrategy,
         conflictStrategy,
         executionMode,
@@ -333,7 +332,6 @@ export function CurrentHoldingsSection({
                     )
                       return;
                     onLiquidateSelected({
-                      autoExitAuthorized: executionMode === 'paper',
                       completionStrategy,
                       conflictStrategy,
                       executionMode,

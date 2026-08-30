@@ -38,6 +38,7 @@ function safetySnapshot(overrides: Record<string, unknown> = {}) {
     newExternalOrderCount: 0,
     newExternalTradeCount: 0,
     protocolVersion: '1.1',
+    quarantinedOrders: [],
     queueDelaySeconds: 0,
     queuedCommandCount: 0,
     reconciliationAgeSeconds: 12,

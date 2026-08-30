@@ -11,7 +11,21 @@ from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder as ConditionalOrderModel,
 )
+from quantx_infrastructure.services.exit_plan_execution_owner import (
+  MONITOR_OWNER,
+  RUNTIME_BOOK_OWNER,
+  durable_exit_plan_owner_kind,
+)
 from strawberry.scalars import JSON
+
+
+def _exit_plan_execution_owner(model: AutoExitPlanRecord) -> str:
+  owner_kind = durable_exit_plan_owner_kind(model)
+  if owner_kind == MONITOR_OWNER:
+    return "EXIT_PLAN_MONITOR"
+  if owner_kind == RUNTIME_BOOK_OWNER:
+    return "STRATEGY_RUNTIME"
+  return "INVALID_OWNER"
 
 
 @strawberry.enum(description="移动端清仓范围")
@@ -281,6 +295,8 @@ class ExitPlanView:
   auto_exit_authorization_config_version: Optional[int]
   auto_exit_authorization_expires_at: Optional[datetime]
   config_version: int
+  state_version: int
+  execution_owner: str
   completion_strategy: Optional[str]
   completion_note: Optional[str]
   protected_volume: int
@@ -312,6 +328,7 @@ class ExitPlanView:
     state = dict(model.plan_state or {})
     template = dict(state.get("template") or {})
     metadata = dict(template.get("metadata") or {})
+    execution_owner = _exit_plan_execution_owner(model)
     cost_basis = dict(
       getattr(model, "cost_basis_snapshot", None)
       or metadata.get("cost_basis")
@@ -351,6 +368,8 @@ class ExitPlanView:
         model, "auto_exit_authorization_expires_at", None
       ),
       config_version=int(model.config_version or 0),
+      state_version=max(1, int(getattr(model, "state_version", 1) or 1)),
+      execution_owner=execution_owner,
       completion_strategy=getattr(model, "completion_strategy", None),
       completion_note=(
         "本次持仓快照已处理完成；后续新增持仓未纳入本次清仓"
@@ -367,7 +386,10 @@ class ExitPlanView:
       capacity_error=getattr(model, "capacity_error", None),
       rules=list(template.get("rules") or []),
       metadata=metadata,
-      can_edit_rules=model.source_type == "MANUAL_POSITION",
+      can_edit_rules=(
+        execution_owner == "EXIT_PLAN_MONITOR"
+        and str(model.source_type or "").upper() == "MANUAL_POSITION"
+      ),
       edit_route=source_routes.get(model.source_type),
       phase=str(model.phase or "WAITING_ARM"),
       data_quality=str(model.data_quality or "PRICE_UNAVAILABLE"),
@@ -695,23 +717,12 @@ class UpdateManualExitPlanInput:
   plan_id: str
   config_version: int
   rules: JSON
+  idempotency_key: str = strawberry.field(description="调用方生成的更新请求幂等键")
   account_id: Optional[str] = None
   protected_volume: Optional[int] = None
   execution_mode: Optional[str] = None
   auto_exit_authorized: Optional[bool] = None
   remark: Optional[str] = None
-
-
-@strawberry.input(description="批量或一键清仓")
-class LiquidatePositionsInput:
-  completion_strategy: str
-  conflict_strategy: str
-  confirm: bool
-  account_id: Optional[str] = None
-  scope: str = "SELECTED"
-  instrument_codes: Optional[List[str]] = None
-  execution_mode: str = "paper"
-  auto_exit_authorized: bool = False
 
 
 @strawberry.input(description="一键清仓输入")

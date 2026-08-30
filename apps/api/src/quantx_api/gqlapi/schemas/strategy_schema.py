@@ -581,7 +581,7 @@ class StrategyMutation:
         principal=principal,
         action=STRATEGY_TRADE_INTENT_APPROVAL,
         account_id=resolved_account_id,
-        run_id=run_id,
+        business_owner_id=run_id,
         intent_id=intent_id,
       )
       return TradeApprovalPreviewResult(
@@ -612,7 +612,7 @@ class StrategyMutation:
         principal=principal,
         action=STRATEGY_TRADE_INTENT_APPROVAL,
         account_id=resolved_account_id,
-        run_id=run_id,
+        business_owner_id=run_id,
         intent_id=intent_id,
         confirmation_token=confirmation_token,
       )

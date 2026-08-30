@@ -15,6 +15,21 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
 EXIT_PLAN_BOOK_STATE_KEY = "auto_exit_plan_book"
 
+STICKY_EXIT_PLAN_ERROR_PREFIXES = (
+  "ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:",
+  "LATE_FILL_AFTER_RECONCILED_ZERO_FILL:",
+  "EXIT_FILL_INTENT_MISMATCH:",
+  "TERMINAL_CUMULATIVE_FILL_BEHIND_EXECUTIONS:",
+  "ACCOUNT_WIDE_STALE_SELL:",
+  "QUARANTINE_REPAIRED:",
+)
+
+
+def is_sticky_exit_plan_error(value: Any) -> bool:
+  """Return whether an exit-plan error requires explicit reconciliation."""
+
+  return str(value or "").startswith(STICKY_EXIT_PLAN_ERROR_PREFIXES)
+
 
 class ExitPlanStatus(str, Enum):
   PENDING_ENTRY = "PENDING_ENTRY"
@@ -548,6 +563,13 @@ class ExitPlan:
   pending_requested_volume: int = 0
   pending_filled_volume: int = 0
   pending_order_terminal: bool = False
+  # Authoritative cumulative fill announced by a terminal broker ORDER report.
+  # ``None`` means no trustworthy cumulative target is available.  In
+  # particular, a missing/invalid field must never be coerced to zero because
+  # ORDER and TRADE reports are independent and the corresponding execution
+  # may still be in flight.
+  pending_terminal_cumulative_fill: Optional[int] = None
+  reconciled_zero_fill_intent_ids: list[str] = field(default_factory=list)
   rule_state: Dict[str, Dict[str, Any]] = field(default_factory=dict)
   rule_target_volumes: Dict[str, int] = field(default_factory=dict)
   rule_filled_volumes: Dict[str, int] = field(default_factory=dict)
@@ -644,6 +666,14 @@ class ExitPlan:
       "pending_requested_volume": int(self.pending_requested_volume),
       "pending_filled_volume": int(self.pending_filled_volume),
       "pending_order_terminal": bool(self.pending_order_terminal),
+      "pending_terminal_cumulative_fill": (
+        int(self.pending_terminal_cumulative_fill)
+        if self.pending_terminal_cumulative_fill is not None
+        else None
+      ),
+      "reconciled_zero_fill_intent_ids": list(
+        self.reconciled_zero_fill_intent_ids
+      ),
       "rule_state": {
         str(key): dict(value or {}) for key, value in self.rule_state.items()
       },
@@ -684,6 +714,14 @@ class ExitPlan:
       pending_requested_volume=int(raw.get("pending_requested_volume", 0) or 0),
       pending_filled_volume=int(raw.get("pending_filled_volume", 0) or 0),
       pending_order_terminal=bool(raw.get("pending_order_terminal", False)),
+      pending_terminal_cumulative_fill=_optional_non_negative_int(
+        raw.get("pending_terminal_cumulative_fill")
+      ),
+      reconciled_zero_fill_intent_ids=[
+        str(item)
+        for item in list(raw.get("reconciled_zero_fill_intent_ids") or [])
+        if str(item)
+      ],
       rule_state={
         str(key): dict(value or {})
         for key, value in dict(raw.get("rule_state") or {}).items()
@@ -961,6 +999,10 @@ class ExitPlanBook:
     if command.command == ExitPlanCommandType.PAUSE:
       plan.status = ExitPlanStatus.PAUSED
     elif command.command == ExitPlanCommandType.RESUME:
+      if self._reconciliation_error(plan):
+        raise ValueError(
+          "EXIT_PLAN_RECONCILIATION_REQUIRED:退出计划必须先完成券商事实对账"
+        )
       if plan.remaining_volume > 0:
         plan.status = ExitPlanStatus.ACTIVE
     elif command.command == ExitPlanCommandType.CANCEL:
@@ -986,11 +1028,14 @@ class ExitPlanBook:
     plan = self.plans.get(decision.plan_id)
     if plan is None:
       return None
+    if intent_id in set(plan.reconciled_zero_fill_intent_ids):
+      raise ValueError("cannot reuse an intent proven to have zero execution")
     plan.pending_intent_id = intent_id
     plan.pending_rule_id = decision.rule_id
     plan.pending_requested_volume = int(decision.volume)
     plan.pending_filled_volume = 0
     plan.pending_order_terminal = False
+    plan.pending_terminal_cumulative_fill = None
     rule = self._rule(plan, decision.rule_id)
     if rule and rule.once and rule.rule_id not in plan.rule_target_volumes:
       plan.rule_target_volumes[rule.rule_id] = int(decision.volume)
@@ -1008,37 +1053,73 @@ class ExitPlanBook:
     order_id: str = "",
     risk_action: str = "",
     timestamp_ms: int = 0,
+    cumulative_filled_volume: Optional[int] = None,
   ) -> Optional[ExitPlan]:
     plan = self.plans.get(plan_id)
+    normalized = str(status or "").upper()
+    current_intent_id = str(plan.pending_intent_id or "") if plan is not None else ""
+    late_after_zero_fill = bool(
+      intent_id and intent_id in set(plan.reconciled_zero_fill_intent_ids)
+    ) if plan is not None else False
+    mismatches_pending = bool(
+      plan is not None
+      and intent_id
+      and str(intent_id) != current_intent_id
+    )
+    if (late_after_zero_fill or mismatches_pending) and normalized in {
+      "PENDING",
+      "REPORTED",
+      "SUBMITTED",
+      "ACCEPTED",
+      "WORKING",
+      "PARTIAL",
+      "PARTIAL_FILLED",
+      "FILLED",
+      "RECONCILE_REQUIRED",
+    }:
+      # A released intent may no longer be the current pending intent.  Broker
+      # evidence that it did work must still burn the plan without disturbing
+      # a newer pending intent/rule; durable reconciliation owns the recovery.
+      plan.status = ExitPlanStatus.ERROR
+      plan.error_message = self._fill_intent_mismatch_error(
+        intent_id=intent_id,
+        current_intent_id=current_intent_id,
+        late_after_zero_fill=late_after_zero_fill,
+      )
+      return plan
     if (
       plan is None or not plan.pending_intent_id or intent_id != plan.pending_intent_id
     ):
       return plan
-    normalized = str(status or "").upper()
+    sticky_error = self._reconciliation_error(plan)
     if order_id:
       plan.pending_order_id = order_id
     if normalized in {"PENDING", "SUBMITTED", "ACCEPTED", "PARTIAL_FILLED"}:
-      if str(risk_action or "").upper() == "DELAY" and not order_id:
-        self._release_pending(plan)
+      plan.status = ExitPlanStatus.EXIT_PENDING
+      self._restore_reconciliation_error(plan, sticky_error)
+      return plan
+    if normalized == "RECONCILED_ZERO_FILL":
+      self._remember_zero_fill_intent(plan, intent_id)
+      self._release_pending(plan)
+      if str(risk_action or "").upper() == "DELAY":
         plan.retry_after_ms = max(
           int(plan.retry_after_ms or 0), int(timestamp_ms or 0) + 1000
         )
-        plan.status = ExitPlanStatus.ACTIVE
-      else:
-        plan.status = ExitPlanStatus.EXIT_PENDING
-      return plan
-    if normalized in {"REJECTED", "CANCELLED", "EXPIRED"}:
-      self._release_pending(plan)
       plan.status = (
         ExitPlanStatus.PARTIALLY_EXITED
         if plan.exited_volume > 0
         else ExitPlanStatus.ACTIVE
       )
+      self._restore_reconciliation_error(plan, sticky_error)
       return plan
-    if normalized == "FILLED":
-      plan.pending_order_terminal = True
-      if plan.pending_filled_volume >= plan.pending_requested_volume:
-        self._finalize_pending(plan)
+    if normalized in {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}:
+      self._apply_terminal_order_event(
+        plan,
+        intent_id=intent_id,
+        status=normalized,
+        cumulative_filled_volume=cumulative_filled_volume,
+      )
+      self._restore_reconciliation_error(plan, sticky_error)
     return plan
 
   def apply_exit_fill(
@@ -1048,39 +1129,105 @@ class ExitPlanBook:
     volume: int,
     price: float,
     rule_id: str = "",
+    intent_id: str = "",
   ) -> Optional[ExitPlan]:
     plan = self.plans.get(plan_id)
     fill_volume = max(0, int(volume or 0))
     if plan is None or fill_volume <= 0 or price <= 0:
       return plan
-    had_pending = bool(plan.pending_intent_id)
+    sticky_error = self._reconciliation_error(plan)
+    late_after_zero_fill = bool(
+      intent_id and intent_id in set(plan.reconciled_zero_fill_intent_ids)
+    )
+    late_safety_error = (
+      f"ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:{intent_id}"
+      if late_after_zero_fill
+      else ""
+    )
+    current_intent_id = str(plan.pending_intent_id or "")
+    matches_pending = bool(
+      current_intent_id and intent_id and intent_id == current_intent_id
+    )
+    mismatches_pending = bool(
+      not matches_pending and (current_intent_id or str(intent_id or ""))
+    )
     previous = int(plan.exited_volume or 0)
     applied = min(fill_volume, plan.remaining_volume)
     total = previous + applied
     if applied <= 0:
+      if mismatches_pending or late_safety_error:
+        plan.status = ExitPlanStatus.ERROR
+        plan.error_message = (
+          late_safety_error
+          or self._fill_intent_mismatch_error(
+            intent_id=intent_id,
+            current_intent_id=current_intent_id,
+            late_after_zero_fill=False,
+          )
+        )
       return plan
     plan.exit_avg_price = (
       plan.exit_avg_price * previous + float(price) * applied
     ) / total
     plan.exited_volume = total
-    if had_pending:
+    if matches_pending:
       plan.pending_filled_volume += applied
-    resolved_rule_id = str(rule_id or plan.pending_rule_id or "")
+    # A rule aggregate belongs to the exact pending intent.  A late or
+    # uncorrelated TRADE still changes the plan's real position aggregate, but
+    # must never borrow the current intent's rule and accidentally complete or
+    # shrink that rule.
+    resolved_rule_id = str(
+      (rule_id or plan.pending_rule_id or "") if matches_pending else ""
+    )
     if resolved_rule_id:
       plan.rule_filled_volumes[resolved_rule_id] = (
         int(plan.rule_filled_volumes.get(resolved_rule_id, 0) or 0) + applied
       )
-    if plan.remaining_volume <= 0 or (
-      had_pending
+    terminal_target = plan.pending_terminal_cumulative_fill
+    terminal_target_exceeded = bool(
+      matches_pending
       and plan.pending_order_terminal
-      and plan.pending_filled_volume >= plan.pending_requested_volume
-    ):
+      and terminal_target is not None
+      and int(plan.pending_filled_volume or 0) > terminal_target
+    )
+    if mismatches_pending:
+      plan.status = ExitPlanStatus.ERROR
+      plan.error_message = (
+        late_safety_error
+        or self._fill_intent_mismatch_error(
+          intent_id=intent_id,
+          current_intent_id=current_intent_id,
+          late_after_zero_fill=False,
+        )
+      )
+    elif terminal_target_exceeded:
+      plan.status = ExitPlanStatus.EXIT_PENDING
+      plan.error_message = (
+        "TERMINAL_CUMULATIVE_FILL_BEHIND_EXECUTIONS:"
+        f"{terminal_target}<{int(plan.pending_filled_volume or 0)}"
+      )
+    elif matches_pending and plan.pending_order_terminal:
+      # Once a terminal ORDER has announced a cumulative target, that target
+      # is the release barrier even if an inconsistent execution happens to
+      # consume the plan's whole remaining position first.  Releasing on
+      # ``remaining_volume == 0`` here would silently accept a target that is
+      # still ahead of the durable TRADE facts.
+      if self._terminal_fill_target_reached(plan):
+        self._finalize_pending(plan)
+      else:
+        plan.status = ExitPlanStatus.EXIT_PENDING
+    elif plan.remaining_volume <= 0:
       self._finalize_pending(plan)
-    elif not had_pending:
+    elif not matches_pending:
       self._complete_once_rule(plan, resolved_rule_id)
       plan.status = ExitPlanStatus.PARTIALLY_EXITED
     else:
       plan.status = ExitPlanStatus.EXIT_PENDING
+    if sticky_error:
+      self._restore_reconciliation_error(plan, sticky_error)
+    elif late_safety_error and not mismatches_pending:
+      plan.status = ExitPlanStatus.ERROR
+      plan.error_message = late_safety_error
     return plan
 
   def projections(self, instrument_code: Optional[str] = None) -> list[Dict[str, Any]]:
@@ -1150,6 +1297,100 @@ class ExitPlanBook:
     plan.pending_requested_volume = 0
     plan.pending_filled_volume = 0
     plan.pending_order_terminal = False
+    plan.pending_terminal_cumulative_fill = None
+
+  def _apply_terminal_order_event(
+    self,
+    plan: ExitPlan,
+    *,
+    intent_id: str,
+    status: str,
+    cumulative_filled_volume: Optional[int],
+  ) -> None:
+    """Apply a terminal ORDER without manufacturing an execution fact.
+
+    The terminal ORDER's cumulative fill is only a target for TRADE-report
+    convergence.  It never increments ``exited_volume`` itself.  This also
+    lets a broker ``FILLED`` order complete at the actually sized quantity,
+    which may be lower than the strategy's originally requested volume.
+    """
+
+    plan.pending_order_terminal = True
+    plan.status = ExitPlanStatus.EXIT_PENDING
+    target = _optional_non_negative_int(cumulative_filled_volume)
+    consumed = max(0, int(plan.pending_filled_volume or 0))
+    previous_target = plan.pending_terminal_cumulative_fill
+
+    # Missing/invalid cumulative fill, a FILLED order claiming zero, a target
+    # behind already consumed TRADE facts, or a regressing terminal target are
+    # contradictory.  Preserve the pending gate instead of guessing zero.
+    if (
+      target is None
+      or (status == "FILLED" and target == 0)
+      or target < consumed
+      or (previous_target is not None and target < previous_target)
+    ):
+      return
+
+    plan.pending_terminal_cumulative_fill = target
+    if target > consumed:
+      return
+
+    if target == 0:
+      # A terminal ORDER projection can still race a late TRADE callback.  It
+      # therefore cannot authorize another SELL even when it reports zero.
+      # Only the explicit RECONCILED_ZERO_FILL path above, backed by a full
+      # broker snapshot or a deterministic local pre-routing proof, releases
+      # this intent.
+      return
+
+    self._finalize_pending(plan)
+
+  @staticmethod
+  def _remember_zero_fill_intent(plan: ExitPlan, intent_id: str) -> None:
+    normalized_intent_id = str(intent_id or "")
+    if (
+      normalized_intent_id
+      and normalized_intent_id not in plan.reconciled_zero_fill_intent_ids
+    ):
+      plan.reconciled_zero_fill_intent_ids.append(normalized_intent_id)
+
+  @staticmethod
+  def _reconciliation_error(plan: ExitPlan) -> str:
+    error = str(plan.error_message or "")
+    if plan.status == ExitPlanStatus.ERROR and is_sticky_exit_plan_error(error):
+      return error
+    return ""
+
+  @staticmethod
+  def _restore_reconciliation_error(plan: ExitPlan, error: str) -> None:
+    if error:
+      plan.status = ExitPlanStatus.ERROR
+      plan.error_message = error
+
+  @staticmethod
+  def _fill_intent_mismatch_error(
+    *,
+    intent_id: str,
+    current_intent_id: str,
+    late_after_zero_fill: bool,
+  ) -> str:
+    incoming = str(intent_id or "MISSING")
+    current = str(current_intent_id or "NONE")
+    if late_after_zero_fill:
+      return f"ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:{incoming}"
+    return f"EXIT_FILL_INTENT_MISMATCH:{incoming}:CURRENT_PENDING:{current}"
+
+  @staticmethod
+  def _terminal_fill_target_reached(plan: ExitPlan) -> bool:
+    target = plan.pending_terminal_cumulative_fill
+    return bool(
+      plan.pending_intent_id
+      and plan.pending_order_terminal
+      and target is not None
+      and target > 0
+      and int(plan.pending_filled_volume or 0) == target
+    )
 
   def _finalize_pending(self, plan: ExitPlan) -> None:
     if plan.pending_rule_id:
@@ -1867,6 +2108,18 @@ def _optional_float(value: Any) -> Optional[float]:
     return None if value is None else float(value)
   except (TypeError, ValueError):
     return None
+
+
+def _optional_non_negative_int(value: Any) -> Optional[int]:
+  if value is None or isinstance(value, bool):
+    return None
+  try:
+    if isinstance(value, float) and not value.is_integer():
+      return None
+    resolved = int(value)
+  except (TypeError, ValueError, OverflowError):
+    return None
+  return resolved if resolved >= 0 else None
 
 
 def _strategy_value(value: Any) -> str:

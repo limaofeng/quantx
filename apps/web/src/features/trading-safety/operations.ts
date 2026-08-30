@@ -41,6 +41,17 @@ export const AccountExecutionSafetyQuery = gql(`
         message
         scope
       }
+      quarantinedOrders {
+        clientOrderId
+        planId
+        intentId
+        quarantineReason
+        brokerOrderId
+        repairable
+        blockedReason
+        quarantinedAt
+        sourceSequence
+      }
     }
   }
 `);

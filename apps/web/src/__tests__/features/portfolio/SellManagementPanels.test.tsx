@@ -1,21 +1,27 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ExitPlansPanel } from '@/features/portfolio/components/SellManagementPanels';
+import { SetExitPlanEnabledMutation } from '@/features/portfolio/hooks/usePortfolio';
 import type { Position } from '@/features/portfolio/types';
 
 const mocks = vi.hoisted(() => ({
   exitPlans: [] as Array<Record<string, unknown>>,
   refetch: vi.fn(),
+  togglePlan: vi.fn(),
 }));
 
 vi.mock('urql', () => ({
-  useMutation: () => [{ fetching: false }, vi.fn()],
+  useMutation: (document: unknown) => [
+    { fetching: false },
+    document === SetExitPlanEnabledMutation ? mocks.togglePlan : vi.fn(),
+  ],
   useQuery: ({ query }: { query: { definitions?: unknown[] } }) => {
     const operationName = (
       query.definitions?.[0] as { name?: { value?: string } } | undefined
     )?.name?.value;
-    if (operationName === 'ExitPlans') {
+    if (operationName === 'ExitPlans' || operationName === undefined) {
       return [
         {
           data: { exitPlans: mocks.exitPlans },
@@ -58,6 +64,7 @@ function makePlan(instrumentCode: string) {
     enabled: true,
     entryAvgPrice: 28.3628,
     executionMode: 'live',
+    executionOwner: 'EXIT_PLAN_MONITOR',
     exitedVolume: 0,
     groupId: null,
     instrumentCode,
@@ -78,6 +85,7 @@ function makePlan(instrumentCode: string) {
     sourceType: 'MANUAL_POSITION',
     status: 'ACTIVE',
     strategyRunId: null,
+    stateVersion: 7,
     trailingFloorPct: null,
     updatedAt: '2026-08-21T15:00:00+08:00',
   };
@@ -135,5 +143,104 @@ describe('ExitPlansPanel', () => {
     expect(
       screen.queryByText('ADAPTIVE_VOLUME_PRICE_TRAILING')
     ).not.toBeInTheDocument();
+  });
+
+  it('shows the execution owner and durable state revision', () => {
+    mocks.exitPlans = [
+      {
+        ...makePlan('300917.SZ'),
+        executionOwner: 'STRATEGY_RUNTIME',
+        sourceType: 'T_TRADE_BATCH',
+        strategyRunId: 't-run-1',
+      },
+    ];
+    render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
+
+    expect(screen.getByText(/执行归属\s*原入场 \/ 做 T 运行/)).toBeVisible();
+    expect(screen.getByText('状态修订 r7')).toBeVisible();
+  });
+
+  it('shows manual plans as monitor-owned and editable', () => {
+    mocks.exitPlans = [
+      {
+        ...makePlan('300917.SZ'),
+        canEditRules: true,
+        executionOwner: 'EXIT_PLAN_MONITOR',
+        sourceType: 'MANUAL_POSITION',
+        strategyRunId: null,
+      },
+    ];
+    render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
+
+    expect(screen.getByText(/执行归属\s*全局计划监控/)).toBeVisible();
+    expect(screen.getByRole('button', { name: '编辑计划' })).toBeEnabled();
+  });
+
+  it('labels an invalid owner and fails closed on plan operations', () => {
+    mocks.exitPlans = [
+      {
+        ...makePlan('300917.SZ'),
+        canEditRules: true,
+        executionOwner: 'INVALID_OWNER',
+        pendingIntentId: 'intent-1',
+      },
+    ];
+    render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
+
+    expect(screen.getByText(/执行归属\s*执行归属无效/)).toBeVisible();
+    expect(screen.getByText('执行归属校验失败，计划操作已停用')).toBeVisible();
+    expect(screen.getByRole('button', { name: '回放测试' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: '预览并确认 SELL' })
+    ).toBeDisabled();
+    expect(screen.getByRole('button', { name: '拒绝意图' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '暂停' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '立即检查' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled();
+    expect(
+      screen.queryByRole('button', { name: '编辑计划' })
+    ).not.toBeInTheDocument();
+  });
+
+  it('reuses an enable-state operation key on retry and rotates it after success', async () => {
+    const user = userEvent.setup();
+    mocks.togglePlan
+      .mockResolvedValueOnce({ error: new Error('Engine 尚未确认操作') })
+      .mockResolvedValue({
+        data: {
+          setExitPlanEnabled: {
+            configVersion: 1,
+            enabled: false,
+            planId: 'plan-300917.SZ',
+            status: 'PAUSED',
+          },
+        },
+        error: undefined,
+      });
+    render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
+
+    const pause = screen.getByRole('button', { name: '暂停' });
+    await user.click(pause);
+    await waitFor(() => expect(mocks.togglePlan).toHaveBeenCalledTimes(1));
+    await user.click(pause);
+    await waitFor(() => expect(mocks.togglePlan).toHaveBeenCalledTimes(2));
+
+    const first = mocks.togglePlan.mock.calls[0][0];
+    const retry = mocks.togglePlan.mock.calls[1][0];
+    expect(first).toEqual(
+      expect.objectContaining({
+        configVersion: 1,
+        enabled: false,
+        idempotencyKey: expect.any(String),
+        planId: 'plan-300917.SZ',
+      })
+    );
+    expect(retry.idempotencyKey).toBe(first.idempotencyKey);
+
+    await user.click(pause);
+    await waitFor(() => expect(mocks.togglePlan).toHaveBeenCalledTimes(3));
+    expect(mocks.togglePlan.mock.calls[2][0].idempotencyKey).not.toBe(
+      first.idempotencyKey
+    );
   });
 });

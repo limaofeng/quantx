@@ -285,6 +285,8 @@ class TradingMutation:
         snapshot_id=input.snapshot_id,
         reason=input.reason,
         idempotency_key=input.idempotency_key,
+        client_order_id=input.client_order_id,
+        quarantine_reason=input.quarantine_reason,
       )
       issued = await AccountExecutionControlChallengeService.issue(
         principal=principal_from_context(info.context),
@@ -303,6 +305,8 @@ class TradingMutation:
           state_version=request.state_version,
           snapshot_id=request.snapshot_id,
           reason=request.reason,
+          client_order_id=request.client_order_id,
+          quarantine_reason=request.quarantine_reason,
           challenge_expires_at=issued.challenge_expires_at,
           challenge_status=issued.challenge_status,
           operation_status=issued.operation_status,
@@ -338,6 +342,41 @@ class TradingMutation:
         safety=(
           AccountExecutionSafetyResolver.from_payload(result.safety)
           if result.safety is not None
+          else None
+        ),
+        event_id=(
+          strawberry.ID(str(result.repair_result.get("event_id")))
+          if result.repair_result and result.repair_result.get("event_id")
+          else None
+        ),
+        client_order_id=(
+          str(result.repair_result.get("client_order_id"))
+          if result.repair_result
+          else None
+        ),
+        plan_id=(
+          str(result.repair_result.get("plan_id"))
+          if result.repair_result
+          else None
+        ),
+        intent_id=(
+          str(result.repair_result.get("intent_id"))
+          if result.repair_result
+          else None
+        ),
+        snapshot_id=(
+          str(result.repair_result.get("snapshot_id"))
+          if result.repair_result
+          else None
+        ),
+        broker_terminal_status=(
+          str(result.repair_result.get("broker_terminal_status"))
+          if result.repair_result
+          else None
+        ),
+        cumulative_filled_volume=(
+          int(result.repair_result.get("cumulative_filled_volume") or 0)
+          if result.repair_result
           else None
         ),
       )

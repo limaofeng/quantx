@@ -67,7 +67,6 @@ from ..types.liquidation_types import (
   LiquidatablePosition,
   LiquidateAllPositionsInput,
   LiquidatePositionInput,
-  LiquidatePositionsInput,
   LiquidationError,
   LiquidationGroupResult,
   LiquidationOrder,
@@ -84,6 +83,29 @@ from ..types.liquidation_types import (
 
 class LiquidationResolver:
   """卖出管理与统一退出计划解析器。"""
+
+  @staticmethod
+  def _exit_plan_operation_idempotency_key(
+    *,
+    operation: str,
+    account_id: str,
+    plan_id: str,
+    client_key: str,
+  ) -> str:
+    normalized_key = str(client_key or "").strip()
+    if not normalized_key or len(normalized_key) > 128:
+      raise ValueError("操作幂等键不能为空且不能超过 128 个字符")
+    digest = hashlib.sha256(
+      "\0".join(
+        (
+          str(operation),
+          str(account_id),
+          str(plan_id),
+          normalized_key,
+        )
+      ).encode("utf-8")
+    ).hexdigest()
+    return f"exit-plan-{operation}:{digest}"
 
   @staticmethod
   def _liquidation_order(model: LiquidationOrderModel) -> LiquidationOrder:
@@ -204,6 +226,20 @@ class LiquidationResolver:
         or f"{command_type.lower()}:{aggregate_id}:{uuid.uuid4()}"
       ),
     )
+    if receipt.status == "FAILED":
+      raise ValueError(receipt.error or f"{command_type} 执行失败")
+    if receipt.status != "SUCCEEDED":
+      raise RuntimeError(f"Engine 尚未确认操作: {receipt.message_id}")
+    return dict(receipt.result or {})
+
+  @staticmethod
+  async def _existing_engine_request(
+    message_id: str,
+    command_type: str,
+  ) -> dict:
+    """Wait for the exact command atomically bound to an approval challenge."""
+
+    receipt = await engine_command_service.wait(message_id)
     if receipt.status == "FAILED":
       raise ValueError(receipt.error or f"{command_type} 执行失败")
     if receipt.status != "SUCCEEDED":
@@ -849,10 +885,17 @@ class LiquidationResolver:
       payload["execution_mode"] = input.execution_mode
     if input.auto_exit_authorized is not None:
       payload["auto_exit_authorized"] = False
+    command_key = LiquidationResolver._exit_plan_operation_idempotency_key(
+      operation="update",
+      account_id=account_id,
+      plan_id=input.plan_id,
+      client_key=input.idempotency_key,
+    )
     await LiquidationResolver._request_engine(
       "EXIT_PLAN_UPDATE_MANUAL",
       payload,
       aggregate_id=f"{account_id}:{input.plan_id}",
+      idempotency_key=command_key,
     )
     record = await LiquidationResolver._load_exit_plan(
       input.plan_id, account_id=account_id
@@ -868,7 +911,14 @@ class LiquidationResolver:
     enabled: bool,
     config_version: int,
     account_id: str,
+    idempotency_key: str,
   ) -> ExitPlanView:
+    command_key = LiquidationResolver._exit_plan_operation_idempotency_key(
+      operation="set-enabled",
+      account_id=account_id,
+      plan_id=plan_id,
+      client_key=idempotency_key,
+    )
     await LiquidationResolver._request_engine(
       "EXIT_PLAN_SET_ENABLED",
       {
@@ -878,6 +928,7 @@ class LiquidationResolver:
         "account_id": account_id,
       },
       aggregate_id=f"{account_id}:{plan_id}",
+      idempotency_key=command_key,
     )
     record = await LiquidationResolver._load_exit_plan(
       plan_id, account_id=account_id
@@ -931,7 +982,7 @@ class LiquidationResolver:
 
   @staticmethod
   async def liquidate_positions(
-    input: LiquidatePositionsInput,
+    input: SimpleNamespace,
     account_id: str,
   ) -> LiquidationGroupResult:
     execution_mode = str(input.execution_mode or "paper").strip().lower()
@@ -1025,7 +1076,7 @@ class LiquidationResolver:
   ) -> LiquidationResult:
     """Compatibility adapter: old callers only protect currently sellable shares."""
     result_data = await LiquidationResolver.liquidate_positions(
-      LiquidatePositionsInput(
+      SimpleNamespace(
         completion_strategy="AVAILABLE_NOW",
         conflict_strategy="UNALLOCATED_ONLY",
         confirm=input.confirm,
@@ -1062,7 +1113,7 @@ class LiquidationResolver:
   ) -> PositionLiquidationResult:
     """Compatibility adapter fixed to AVAILABLE_NOW semantics."""
     group = await LiquidationResolver.liquidate_positions(
-      LiquidatePositionsInput(
+      SimpleNamespace(
         completion_strategy="AVAILABLE_NOW",
         conflict_strategy="UNALLOCATED_ONLY",
         confirm=input.confirm,

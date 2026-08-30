@@ -16,6 +16,7 @@ from quantx_domain.trading.exit_plan import (
 )
 from quantx_infrastructure.models.agent_runtime import PendingTradeOrder
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import auto_exit_plan_service as service_module
 from quantx_infrastructure.services.auto_exit_plan_service import (
   AVAILABLE_NOW,
@@ -442,7 +443,7 @@ async def test_cost_basis_candidates_hide_orders_claimed_by_active_plans(
   assert [item["order_id"] for item in result] == ["2"]
 
 
-def pending_plan():
+def pending_plan(*, volume=300):
   book = ExitPlanBook()
   plan = book.register_entry_fill(
     ExitPlanTemplate(
@@ -459,7 +460,7 @@ def pending_plan():
         )
       ],
     ),
-    volume=300,
+    volume=volume,
     price=10,
   )
   book.mark_intent(
@@ -468,12 +469,79 @@ def pending_plan():
       rule_id="adaptive-volume-price",
       rule_type=ExitRuleType.ADAPTIVE_VOLUME_PRICE_TRAILING,
       reason="test",
-      volume=300,
+      volume=volume,
       priority=750,
     ),
     "intent-1",
   )
   return plan
+
+
+def install_monitor_report_fakes(monkeypatch, *, volume=1000):
+  plan = pending_plan(volume=volume)
+  record = active_record(plan_id=plan.plan_id, volume=volume)
+  record.plan_state = plan.to_dict()
+  record.status = plan.status.value
+  record.strategy_run_id = None
+  pending = SimpleNamespace(
+    client_order_id="client-1",
+    broker_order_id="101",
+    status="SUBMITTED",
+    request_metadata={
+      "exit_plan_id": plan.plan_id,
+      "intent_id": plan.pending_intent_id,
+      "exit_rule_id": plan.pending_rule_id,
+    },
+  )
+
+  class Session:
+    commits = 0
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def execute(self, _statement):
+      return ScalarResult(None)
+
+    async def get(self, *_args, **_kwargs):
+      return None
+
+    async def commit(self):
+      self.commits += 1
+
+  class Repository:
+    def __init__(self, _db):
+      pass
+
+    async def find_by_id(self, plan_id, *, for_update=False):
+      del for_update
+      return record if plan_id == record.plan_id else None
+
+  session = Session()
+  events = []
+
+  async def pending_order(_db, **_kwargs):
+    return pending
+
+  async def append_event(_db, **kwargs):
+    events.append(dict(kwargs))
+
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(service_module, "AutoExitPlanRepository", Repository)
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "_pending_order",
+    staticmethod(pending_order),
+  )
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "_append_event",
+    staticmethod(append_event),
+  )
+  return plan, record, pending, events
 
 
 def strategy_exit_template(
@@ -632,6 +700,8 @@ async def test_submit_decision_without_sellable_volume_records_audit_error(
       current_price=10.0,
     ),
     position=None,
+    expected_config_version=1,
+    expected_state_version=1,
   )
 
   assert result is None
@@ -660,6 +730,308 @@ async def test_pending_submission_is_recovered_from_durable_command():
 
 
 @pytest.mark.asyncio
+async def test_reserved_exit_intent_is_rerouted_once_with_original_identity(
+  monkeypatch,
+):
+  plan = pending_plan()
+  record = active_record(plan_id=plan.plan_id, volume=300)
+  record.plan_state = plan.to_dict()
+  record.status = plan.status.value
+  record.strategy_run_id = None
+  reserved = TradeIntentRecord(
+    id=plan.pending_intent_id,
+    strategy_run_id=None,
+    owner_type="EXIT_PLAN",
+    owner_id=plan.plan_id,
+    account_id=record.account_id,
+    instrument_code=record.instrument_code,
+    direction="SELL",
+    status="RESERVED",
+    target_volume=plan.pending_requested_volume,
+    intent_metadata={
+      "owner_type": "EXIT_PLAN",
+      "owner_id": plan.plan_id,
+      "exit_plan_id": plan.plan_id,
+    },
+  )
+
+  class RecoverySession:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, model, key):
+      if model is TradeIntentRecord and key == reserved.id:
+        return reserved
+      return None
+
+    async def commit(self):
+      return None
+
+  class Repository:
+    def __init__(self, _db):
+      pass
+
+    async def find_by_id(self, plan_id, *, for_update=False):
+      del for_update
+      return record if plan_id == record.plan_id else None
+
+  processor = SimpleNamespace(
+    process_exit_decision=AsyncMock(
+      return_value={
+        "success": True,
+        "awaiting_approval": True,
+        "intent_id": reserved.id,
+      }
+    )
+  )
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", RecoverySession)
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=locked_scope_for(record)),
+  )
+  monkeypatch.setattr(service_module, "AutoExitPlanRepository", Repository)
+  monkeypatch.setattr(service_module, "TradeIntentProcessor", lambda: processor)
+  monkeypatch.setattr(AutoExitPlanService, "_sync_source_order", AsyncMock())
+  monkeypatch.setattr(AutoExitPlanService, "_append_event", AsyncMock())
+
+  result = await AutoExitPlanService().evaluate_and_submit(
+    plan_id=plan.plan_id,
+    context=ExitEvaluationContext(
+      timestamp=datetime.now(),
+      current_price=10.0,
+    ),
+    position=liquidation_position(volume=300, available=300),
+    market_session_open=True,
+    market_ready=lambda: True,
+  )
+
+  assert result == {
+    "success": True,
+    "awaiting_approval": True,
+    "intent_id": reserved.id,
+  }
+  processor.process_exit_decision.assert_awaited_once()
+  call = processor.process_exit_decision.await_args.kwargs
+  assert call["intent_id"] == reserved.id
+  assert call["decision"].volume == plan.pending_requested_volume
+  assert ExitPlan.from_dict(record.plan_state).pending_intent_id == reserved.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("terminal_source", "pending_status"),
+  [
+    ("LOCAL_OUTBOX_EXPIRED", "EXPIRED"),
+    ("LOCAL_AGENT_PRE_EXECUTION_REJECTION", "EXPIRED"),
+  ],
+)
+async def test_monitor_terminal_local_proof_releases_exact_zero_fill_intent(
+  terminal_source,
+  pending_status,
+):
+  plan = pending_plan()
+  record = active_record(plan_id=plan.plan_id, volume=300)
+  record.strategy_run_id = None
+  pending = PendingTradeOrder(
+    client_order_id="client-expired",
+    account_id=record.account_id,
+    instrument_code=record.instrument_code,
+    side="SELL",
+    intent_id=plan.pending_intent_id,
+    status=pending_status,
+    request_metadata={"exit_plan_id": plan.plan_id},
+  )
+  intent = TradeIntentRecord(
+    id=plan.pending_intent_id,
+    strategy_run_id=None,
+    owner_type="EXIT_PLAN",
+    owner_id=plan.plan_id,
+    account_id=record.account_id,
+    instrument_code=record.instrument_code,
+    direction="SELL",
+    status="RECONCILED_ZERO_FILL",
+    intent_metadata={
+      "owner_type": "EXIT_PLAN",
+      "owner_id": plan.plan_id,
+      "exit_plan_id": plan.plan_id,
+      "execution_terminal_source": terminal_source,
+      "command_lifecycle_status": pending_status,
+    },
+  )
+
+  class RecoveryDb(FakeDb):
+    async def get(self, model, key):
+      if model is TradeIntentRecord and key == intent.id:
+        return intent
+      return None
+
+  recovered = await AutoExitPlanService._recover_pending_submission(
+    RecoveryDb(pending),
+    record,
+    plan,
+  )
+
+  assert recovered
+  assert plan.pending_intent_id == ""
+  assert plan.pending_order_id == ""
+  assert plan.status == ExitPlanStatus.ACTIVE
+  assert record.last_error == "outbox_expiry_reconciled_zero_fill"
+
+
+@pytest.mark.asyncio
+async def test_monitor_evaluation_recovers_exit_pending_before_all_market_gates(
+  monkeypatch,
+):
+  plan = pending_plan()
+  ExitPlanBook([plan]).apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id=plan.pending_intent_id,
+    status="PENDING",
+    order_id="client-expired",
+  )
+  record = active_record(plan_id=plan.plan_id, volume=300)
+  record.plan_state = plan.to_dict()
+  record.status = plan.status.value
+  record.pending_client_order_id = "client-expired"
+  pending = PendingTradeOrder(
+    client_order_id="client-expired",
+    account_id=record.account_id,
+    instrument_code=record.instrument_code,
+    side="SELL",
+    intent_id=plan.pending_intent_id,
+    status="EXPIRED",
+    request_metadata={"exit_plan_id": plan.plan_id},
+  )
+  intent = TradeIntentRecord(
+    id=plan.pending_intent_id,
+    strategy_run_id=None,
+    owner_type="EXIT_PLAN",
+    owner_id=plan.plan_id,
+    account_id=record.account_id,
+    instrument_code=record.instrument_code,
+    direction="SELL",
+    status="RECONCILED_ZERO_FILL",
+    intent_metadata={
+      "owner_type": "EXIT_PLAN",
+      "owner_id": plan.plan_id,
+      "exit_plan_id": plan.plan_id,
+      "execution_terminal_source": "LOCAL_OUTBOX_EXPIRED",
+      "command_lifecycle_status": "EXPIRED",
+    },
+  )
+
+  class RecoverySession:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def execute(self, _statement):
+      return ScalarResult(pending)
+
+    async def get(self, model, key):
+      if model is TradeIntentRecord and key == intent.id:
+        return intent
+      return None
+
+    async def commit(self):
+      return None
+
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", RecoverySession)
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=locked_scope_for(record)),
+  )
+  sync_source = AsyncMock()
+  monkeypatch.setattr(AutoExitPlanService, "_sync_source_order", sync_source)
+
+  result = await AutoExitPlanService().evaluate_and_submit(
+    plan_id=plan.plan_id,
+    context=ExitEvaluationContext(
+      timestamp=datetime.now(),
+      current_price=10.0,
+      market_data_age_seconds=999.0,
+    ),
+    position=None,
+    market_session_open=False,
+    market_ready=lambda: False,
+  )
+
+  assert result is None
+  recovered = ExitPlan.from_dict(record.plan_state)
+  assert recovered.status == ExitPlanStatus.ACTIVE
+  assert recovered.pending_intent_id == ""
+  assert recovered.pending_order_id == ""
+  assert record.pending_client_order_id is None
+  sync_source.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_evaluation_missing_pending_row_keeps_durable_order_gate(
+  monkeypatch,
+):
+  plan = pending_plan()
+  ExitPlanBook([plan]).apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id=plan.pending_intent_id,
+    status="PENDING",
+    order_id="missing-client-order",
+  )
+  record = active_record(plan_id=plan.plan_id, volume=300)
+  record.plan_state = plan.to_dict()
+  record.status = plan.status.value
+  record.pending_client_order_id = "missing-client-order"
+
+  class MissingPendingSession:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def execute(self, _statement):
+      return ScalarResult(None)
+
+    async def get(self, _model, _key):
+      return None
+
+    async def commit(self):
+      return None
+
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", MissingPendingSession)
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=locked_scope_for(record)),
+  )
+  monkeypatch.setattr(AutoExitPlanService, "_sync_source_order", AsyncMock())
+
+  result = await AutoExitPlanService().evaluate_and_submit(
+    plan_id=plan.plan_id,
+    context=ExitEvaluationContext(
+      timestamp=datetime.now(),
+      current_price=10.0,
+    ),
+    position=None,
+    market_session_open=True,
+    market_ready=lambda: True,
+  )
+
+  assert result is None
+  blocked = ExitPlan.from_dict(record.plan_state)
+  assert blocked.status == ExitPlanStatus.EXIT_PENDING
+  assert blocked.pending_intent_id == plan.pending_intent_id
+  assert blocked.pending_order_id == "missing-client-order"
+  assert record.last_error == "pending_exit_order_projection_missing"
+
+
+@pytest.mark.asyncio
 async def test_orphaned_intent_is_released_for_retry_after_timeout():
   plan = pending_plan()
   plan.rule_state["__runtime__"] = {
@@ -674,7 +1046,160 @@ async def test_orphaned_intent_is_released_for_retry_after_timeout():
   assert not recovered
   assert plan.pending_intent_id == ""
   assert plan.status == ExitPlanStatus.ACTIVE
-  assert record.last_error == "orphaned_exit_intent_released"
+  assert record.last_error == "orphaned_exit_intent_reconciled_zero_fill"
+
+
+@pytest.mark.asyncio
+async def test_monitor_order_before_trade_waits_for_terminal_target(monkeypatch):
+  original, record, _pending, events = install_monitor_report_fakes(monkeypatch)
+  service = AutoExitPlanService()
+
+  await service.apply_order_event_for_report(
+    client_order_id="client-1",
+    broker_order_id="101",
+    status="FILLED",
+    source_sequence=11,
+    cumulative_filled_volume=400,
+    cumulative_fill_state="VALUE",
+  )
+
+  pending_plan_state = ExitPlan.from_dict(dict(record.plan_state or {}))
+  assert pending_plan_state.status == ExitPlanStatus.EXIT_PENDING
+  assert pending_plan_state.pending_intent_id == original.pending_intent_id
+  assert pending_plan_state.pending_terminal_cumulative_fill == 400
+
+  await service.apply_execution_for_report(
+    execution_id="trade-1",
+    client_order_id="client-1",
+    broker_order_id="101",
+    volume=400,
+    price=10.5,
+  )
+
+  settled = ExitPlan.from_dict(dict(record.plan_state or {}))
+  assert settled.status == ExitPlanStatus.PARTIALLY_EXITED
+  assert settled.exited_volume == 400
+  assert settled.remaining_volume == 600
+  assert settled.pending_intent_id == ""
+  assert events[0]["business_key"].endswith(":FILLED:400")
+  assert events[0]["payload"]["cumulative_fill_state"] == "VALUE"
+  assert events[0]["payload"]["cumulative_filled_volume"] == 400
+
+
+@pytest.mark.asyncio
+async def test_monitor_trade_before_partial_cancel_converges_exact_target(monkeypatch):
+  _original, record, _pending, _events = install_monitor_report_fakes(monkeypatch)
+  service = AutoExitPlanService()
+
+  await service.apply_execution_for_report(
+    execution_id="trade-1",
+    client_order_id="client-1",
+    broker_order_id="101",
+    volume=400,
+    price=10.5,
+  )
+  before_terminal = ExitPlan.from_dict(dict(record.plan_state or {}))
+  assert before_terminal.status == ExitPlanStatus.EXIT_PENDING
+  assert before_terminal.pending_filled_volume == 400
+  assert before_terminal.pending_order_terminal is False
+
+  await service.apply_order_event_for_report(
+    client_order_id="client-1",
+    broker_order_id="101",
+    status="CANCELLED",
+    source_sequence=12,
+    cumulative_filled_volume=400,
+    cumulative_fill_state="VALUE",
+  )
+
+  settled = ExitPlan.from_dict(dict(record.plan_state or {}))
+  assert settled.status == ExitPlanStatus.PARTIALLY_EXITED
+  assert settled.exited_volume == 400
+  assert settled.remaining_volume == 600
+  assert settled.pending_intent_id == ""
+
+
+@pytest.mark.asyncio
+async def test_monitor_terminal_fill_audit_distinguishes_unknown_from_zero(
+  monkeypatch,
+):
+  original, record, _pending, events = install_monitor_report_fakes(monkeypatch)
+  service = AutoExitPlanService()
+
+  await service.apply_order_event_for_report(
+    client_order_id="client-1",
+    broker_order_id="101",
+    status="CANCELLED",
+    source_sequence=11,
+    cumulative_fill_state="MISSING",
+  )
+  missing = ExitPlan.from_dict(dict(record.plan_state or {}))
+  assert missing.status == ExitPlanStatus.EXIT_PENDING
+  assert missing.pending_intent_id == original.pending_intent_id
+
+  await service.apply_order_event_for_report(
+    client_order_id="client-1",
+    broker_order_id="101",
+    status="CANCELLED",
+    source_sequence=12,
+    cumulative_filled_volume=-1,
+    cumulative_fill_state="VALUE",
+  )
+  invalid = ExitPlan.from_dict(dict(record.plan_state or {}))
+  assert invalid.status == ExitPlanStatus.EXIT_PENDING
+  assert invalid.pending_intent_id == original.pending_intent_id
+
+  await service.apply_order_event_for_report(
+    client_order_id="client-1",
+    broker_order_id="101",
+    status="CANCELLED",
+    source_sequence=13,
+    cumulative_filled_volume=0,
+    cumulative_fill_state="VALUE",
+  )
+  explicit_zero = ExitPlan.from_dict(dict(record.plan_state or {}))
+  assert explicit_zero.status == ExitPlanStatus.EXIT_PENDING
+  assert explicit_zero.pending_intent_id == original.pending_intent_id
+  assert [event["payload"]["cumulative_fill_state"] for event in events] == [
+    "MISSING",
+    "INVALID",
+    "VALUE",
+  ]
+  assert len({event["business_key"] for event in events}) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_kind", ["ORDER", "TRADE"])
+async def test_monitor_report_consumer_rejects_orphan_runtime_plan(
+  monkeypatch,
+  event_kind: str,
+) -> None:
+  _original, record, _pending, events = install_monitor_report_fakes(monkeypatch)
+  record.source_type = "T_TRADE_BATCH"
+  before = dict(record.plan_state)
+  service = AutoExitPlanService()
+
+  with pytest.raises(RuntimeError, match="Monitor 无权消费"):
+    if event_kind == "ORDER":
+      await service.apply_order_event_for_report(
+        client_order_id="client-1",
+        broker_order_id="101",
+        status="FILLED",
+        source_sequence=11,
+        cumulative_filled_volume=1000,
+        cumulative_fill_state="VALUE",
+      )
+    else:
+      await service.apply_execution_for_report(
+        execution_id="trade-1",
+        client_order_id="client-1",
+        broker_order_id="101",
+        volume=1000,
+        price=10.5,
+      )
+
+  assert record.plan_state == before
+  assert events == []
 
 
 @pytest.mark.asyncio
@@ -818,6 +1343,35 @@ async def test_stale_market_context_is_persisted_without_exit_submit(
   assert record.data_quality == "MARKET_DATA_STALE"
   assert record.last_error == "market_data_stale"
   assert session.committed
+  submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_monitor_evaluation_rejects_orphan_runtime_plan(monkeypatch) -> None:
+  record = active_record(plan_id="orphan-t-evaluate")
+  record.source_type = "T_TRADE_BATCH"
+  submit = AsyncMock()
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=locked_scope_for(record)),
+  )
+  monkeypatch.setattr(AutoExitPlanService, "_submit_decision", submit)
+
+  with pytest.raises(RuntimeError, match="Monitor 无权执行"):
+    await AutoExitPlanService().evaluate_and_submit(
+      plan_id=record.plan_id,
+      context=ExitEvaluationContext(
+        timestamp=datetime.now(),
+        current_price=21.0,
+        market_data_age_seconds=0.0,
+        source="QMT_WHOLE_QUOTE",
+      ),
+      position=liquidation_position(),
+      market_session_open=True,
+      market_ready=lambda: True,
+    )
+
   submit.assert_not_awaited()
 
 
@@ -1002,6 +1556,11 @@ async def test_confirm_intent_rejects_nonready_stream_without_processor_submit(
     "TradeIntentProcessor",
     lambda: processor,
   )
+  monkeypatch.setattr(
+    service_module,
+    "validate_consumed_exit_plan_sell_challenge",
+    AsyncMock(return_value="challenge-1"),
+  )
 
   result = await AutoExitPlanService().confirm_exit_intent(
     plan_id=record.plan_id,
@@ -1027,6 +1586,9 @@ async def test_confirm_intent_rejects_nonready_stream_without_processor_submit(
   assert intent.status == "REJECTED"
   assert intent.notes == "MARKET_DATA_STREAM_NOT_READY"
   assert intent.intent_metadata["market_data_gate"] == ("MARKET_DATA_STREAM_NOT_READY")
+  assert intent.intent_metadata["execution_terminal_source"] == (
+    "LOCAL_PRE_BROKER_REJECTION"
+  )
   assert record.plan_state["pending_intent_id"] == ""
   assert session.committed
   processor.process_approved_exit_intent.assert_not_awaited()
@@ -1073,6 +1635,11 @@ async def test_confirm_intent_waits_outside_session_without_rejecting_it(
     AsyncMock(return_value=locked_scope_for(record)),
   )
   monkeypatch.setattr(service_module, "TradeIntentProcessor", lambda: processor)
+  monkeypatch.setattr(
+    service_module,
+    "validate_consumed_exit_plan_sell_challenge",
+    AsyncMock(return_value="challenge-1"),
+  )
 
   result = await AutoExitPlanService().confirm_exit_intent(
     plan_id=record.plan_id,
@@ -1148,6 +1715,11 @@ async def test_capacity_shortfall_blocks_manual_confirmation_before_processor(
   )
   monkeypatch.setattr(service_module, "TradeIntentProcessor", lambda: processor)
   monkeypatch.setattr(AutoExitPlanService, "_append_event", AsyncMock())
+  monkeypatch.setattr(
+    service_module,
+    "validate_consumed_exit_plan_sell_challenge",
+    AsyncMock(return_value="challenge-1"),
+  )
 
   with pytest.raises(ValueError, match="持仓少于计划认领数量"):
     await AutoExitPlanService().confirm_exit_intent(

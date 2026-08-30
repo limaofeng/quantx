@@ -254,7 +254,7 @@ class EntryPlanMutation:
       principal=principal,
       action=STRATEGY_TRADE_INTENT_APPROVAL,
       account_id=account_id,
-      run_id=str(plan.run_id),
+      business_owner_id=str(plan.run_id),
       intent_id=str(intent_id),
     )
     preview.challenge_id = challenge.challenge_id
@@ -280,7 +280,7 @@ class EntryPlanMutation:
         principal=principal,
         action=STRATEGY_TRADE_INTENT_APPROVAL,
         account_id=account_id,
-        run_id=str(plan.run_id),
+        business_owner_id=str(plan.run_id),
         intent_id=str(intent_id),
         confirmation_token=confirmation_token,
       )

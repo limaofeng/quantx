@@ -261,6 +261,11 @@ async def _status(
   snapshot = AsyncMock(return_value=normalized_rows)
   monkeypatch.setattr(safety_module, "AsyncSessionLocal", session)
   monkeypatch.setattr(AccountExecutionSafetyService, "_readiness_snapshot", snapshot)
+  monkeypatch.setattr(
+    safety_module.AccountExecutionQuarantineService,
+    "list_quarantined_orders",
+    AsyncMock(return_value=[]),
+  )
   monkeypatch.setattr(safety_module.settings, "enable_real_trading", True)
   monkeypatch.setattr(
     safety_module.settings,

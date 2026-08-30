@@ -263,7 +263,6 @@ _register(
     "evaluateExitPlanNow",
     "liquidateAllPositions",
     "liquidatePosition",
-    "liquidatePositions",
     "placeOrder",
     "previewExitIntent",
     "reconcileExitPlanCapacity",
@@ -499,6 +498,23 @@ for _field in _TRADE_APPROVAL_FIELDS:
   _POLICIES[_key] = replace(
     _policy,
     required_permissions=(*_policy.required_permissions, "trade:approve"),
+  )
+
+# A confirmed V3 T-entry also scopes a future automatic EXIT_PLAN SELL.  Both
+# preview and consume therefore require the liquidation authority before a
+# challenge can be issued or consumed, while retaining trade:approve as the
+# final explicit approval scope.
+for _field in {"previewTTradeEntryApproval", "confirmTTradeEntryApproval"}:
+  _key = ("Mutation", normalize_field_name(_field))
+  _policy = _POLICIES[_key]
+  _permissions = tuple(_policy.required_permissions)
+  _POLICIES[_key] = replace(
+    _policy,
+    required_permissions=(
+      *_permissions[:-1],
+      "liquidation:control",
+      _permissions[-1],
+    ),
   )
 
 _register(

@@ -9,15 +9,20 @@ created by a device-bound confirmation challenge.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from math import isfinite
+from typing import Any, Mapping, Optional
 
 from quantx_domain.clock import utcnow
+from quantx_domain.trading.exit_plan import ExitPlanTemplate
+from quantx_domain.trading.market_rules import AShareMarketRules
 from sqlalchemy import select
 
+from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import PendingTradeOrder
@@ -31,6 +36,10 @@ from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanRecord,
 )
 from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.models.trade_confirmation_challenge import (
+  TradeConfirmationChallenge,
+)
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   RESERVING_EXIT_PLAN_STATUSES,
 )
@@ -46,6 +55,11 @@ ACTIVE_PENDING_SELL_STATUSES = frozenset(
   {"QUEUED", "PENDING", "SUBMITTED", "REPORTED", "PARTIAL_FILLED"}
 )
 AUTHORIZABLE_PLAN_STATUSES = frozenset({"ACTIVE", "PARTIALLY_EXITED"})
+T_TRADE_ENTRY_APPROVAL_ACTION = "T_TRADE_ENTRY_APPROVAL"
+EXIT_PLAN_SELL_APPROVAL_ACTION = "EXIT_PLAN_SELL_APPROVAL"
+T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY = "t_trade_exit_authorization_v1"
+_T_TRADE_EXIT_AUTHORIZATION_SCHEMA_VERSION = 1
+_DEFAULT_AUTH_SECRET = "change-this-secret-key"
 
 
 @dataclass(frozen=True)
@@ -63,6 +77,41 @@ class ExitPlanAuthorizationValidation:
   valid: bool
   code: str
   message: str
+  fingerprint: Optional[str] = None
+  authorization_user_id: Optional[str] = None
+  config_version: Optional[int] = None
+  challenge_id: Optional[str] = None
+  device_session_id: Optional[str] = None
+  authorized_at: Optional[datetime] = None
+  authorization_expires_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class TTradeEntryExitAuthorizationEnvelope:
+  """Immutable exit authority disclosed by one T-entry confirmation."""
+
+  subject: dict[str, Any]
+  fingerprint: str
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "subject": dict(self.subject),
+      "fingerprint": self.fingerprint,
+    }
+
+
+@dataclass(frozen=True)
+class TTradeExitAuthorizationDerivation:
+  """Result of deriving exact exit authority from an executed T entry."""
+
+  valid: bool
+  code: str
+  message: str
+  authorization_expires_at: Optional[datetime] = None
+  fingerprint: Optional[str] = None
+  authorization_user_id: Optional[str] = None
+  config_version: Optional[int] = None
+  challenge_id: Optional[str] = None
 
 
 def authorization_expiry_for_challenge(expires_at: datetime) -> datetime:
@@ -94,6 +143,309 @@ def _canonical_fingerprint(value: dict[str, Any]) -> str:
     default=str,
   ).encode("utf-8")
   return hashlib.sha256(encoded).hexdigest()
+
+
+def _sha256_fingerprint(value: Mapping[str, Any]) -> str:
+  encoded = json.dumps(
+    dict(value),
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+    default=str,
+  ).encode("utf-8")
+  return hashlib.sha256(encoded).hexdigest()
+
+
+def trade_confirmation_payload_fingerprint(payload: Mapping[str, Any]) -> str:
+  """Return the HMAC used by durable trade-confirmation challenges.
+
+  This intentionally matches the API challenge signer while keeping Engine
+  authorization validation out of the API package dependency graph.
+  """
+
+  secret = str(getattr(settings, "secret_key", "") or "").strip()
+  algorithm = str(getattr(settings, "algorithm", "") or "").upper()
+  normalized_secret = secret.lower()
+  if (
+    secret == _DEFAULT_AUTH_SECRET
+    or normalized_secret.startswith("change-this")
+    or normalized_secret.startswith("replace-me")
+    or len(secret.encode("utf-8")) < 32
+    or algorithm != "HS256"
+  ):
+    raise ValueError("AUTH_SIGNING_KEY_UNAVAILABLE")
+  encoded = json.dumps(
+    dict(payload),
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+    default=str,
+  ).encode("utf-8")
+  return hmac.new(secret.encode("utf-8"), encoded, hashlib.sha256).hexdigest()
+
+
+async def validate_consumed_exit_plan_sell_challenge(
+  db: Any,
+  *,
+  plan_id: str,
+  intent_id: str,
+  account_id: str,
+  approval_audit: Optional[Mapping[str, Any]],
+) -> str:
+  """Require an exact consumed device challenge for one manual plan SELL."""
+
+  audit = dict(approval_audit or {})
+  challenge_id = str(audit.get("challenge_id") or "").strip()
+  actor_id = str(audit.get("actor_id") or "").strip()
+  device_session_id = str(audit.get("device_session_id") or "").strip()
+  channel = str(audit.get("channel") or "").strip().upper()
+  if (
+    not challenge_id
+    or not actor_id
+    or not device_session_id
+    or channel not in {"EXIT_PLAN_DEVICE_CHALLENGE", "IOS_BIOMETRIC"}
+  ):
+    raise ValueError("EXIT_PLAN_DEVICE_CHALLENGE_REQUIRED")
+  challenge = await db.get(TradeConfirmationChallenge, challenge_id)
+  intent = await db.get(TradeIntentRecord, intent_id)
+  if challenge is None or intent is None:
+    raise ValueError("EXIT_PLAN_DEVICE_CHALLENGE_REQUIRED")
+  payload = dict(challenge.payload or {})
+  try:
+    fingerprint = trade_confirmation_payload_fingerprint(payload)
+  except ValueError as exc:
+    raise ValueError("EXIT_PLAN_DEVICE_CHALLENGE_INVALID") from exc
+  if (
+    challenge.consumed_at is None
+    or str(challenge.action or "") != EXIT_PLAN_SELL_APPROVAL_ACTION
+    or str(challenge.user_id or "") != actor_id
+    or str(challenge.device_session_id or "") != device_session_id
+    or str(challenge.account_id or "") != str(account_id)
+    or str(payload.get("action") or "") != EXIT_PLAN_SELL_APPROVAL_ACTION
+    or str(payload.get("user_id") or "") != actor_id
+    or str(payload.get("device_session_id") or "") != device_session_id
+    or str(payload.get("account_id") or "") != str(account_id)
+    or str(payload.get("business_owner_id") or "") != str(plan_id)
+    or str(payload.get("intent_id") or "") != str(intent_id)
+    or not hmac.compare_digest(
+      str(challenge.payload_fingerprint or ""),
+      fingerprint,
+    )
+    or str(intent.owner_type or "").upper() != "EXIT_PLAN"
+    or str(intent.owner_id or "") != str(plan_id)
+    or str(intent.account_id or "") != str(account_id)
+    or str(intent.direction or "").upper() != "SELL"
+    or str(dict(intent.intent_metadata or {}).get("exit_plan_id") or "")
+    != str(plan_id)
+  ):
+    raise ValueError("EXIT_PLAN_DEVICE_CHALLENGE_CONTEXT_MISMATCH")
+  return challenge_id
+
+
+def _positive_int(value: Any) -> int:
+  try:
+    parsed = int(value or 0)
+  except (TypeError, ValueError, OverflowError):
+    return 0
+  return max(0, parsed)
+
+
+def _positive_float(value: Any) -> float:
+  try:
+    parsed = float(value or 0.0)
+  except (TypeError, ValueError, OverflowError):
+    return 0.0
+  return parsed if isfinite(parsed) and parsed > 0 else 0.0
+
+
+def _t_trade_entry_volume_ceiling(record: TradeIntentRecord) -> int:
+  metadata = dict(record.intent_metadata or {})
+  rules = AShareMarketRules()
+  requested_volume = _positive_int(
+    record.target_volume
+    or metadata.get("requested_volume")
+    or metadata.get("volume")
+  )
+  if requested_volume > 0:
+    return int(rules.normalize_buy_volume(requested_volume))
+
+  target_amount = _positive_float(
+    record.target_amount
+    or metadata.get("target_amount")
+    or metadata.get("requested_entry_amount")
+    or metadata.get("target_trade_amount")
+  )
+  reference_price = _positive_float(
+    record.limit_price_hint
+    or metadata.get("signal_price")
+    or dict(metadata.get("signal") or {}).get("signal_price")
+  )
+  try:
+    deviation_bps = float(metadata.get("max_price_deviation_bps") or 0.0)
+  except (TypeError, ValueError, OverflowError):
+    deviation_bps = 0.0
+  if (
+    target_amount <= 0
+    or reference_price <= 0
+    or not isfinite(deviation_bps)
+    or deviation_bps <= 0
+    or deviation_bps >= 10_000
+  ):
+    return 0
+  minimum_approved_price = reference_price * (1.0 - deviation_bps / 10_000.0)
+  if minimum_approved_price <= 0:
+    return 0
+  return int(
+    rules.normalize_buy_volume(int(target_amount // minimum_approved_price))
+  )
+
+
+def _normalized_t_trade_exit_template(
+  record: TradeIntentRecord,
+) -> dict[str, Any]:
+  metadata = dict(record.intent_metadata or {})
+  raw_template = metadata.get("exit_plan_template")
+  if not isinstance(raw_template, Mapping):
+    raise ValueError("T_TRADE_EXIT_PLAN_TEMPLATE_MISSING")
+  try:
+    template = ExitPlanTemplate.from_dict(raw_template).to_dict()
+  except (KeyError, TypeError, ValueError) as exc:
+    raise ValueError("T_TRADE_EXIT_PLAN_TEMPLATE_INVALID") from exc
+  template.pop("auto_exit_authorized", None)
+
+  account_id = str(record.account_id or metadata.get("account_id") or "").strip()
+  run_id = str(record.strategy_run_id or metadata.get("strategy_run_id") or "").strip()
+  instrument_code = str(record.instrument_code or "").strip().upper()
+  batch_id = str(metadata.get("t_batch_id") or "").strip()
+  plan_id = str(metadata.get("exit_plan_id") or "").strip()
+  template_metadata = dict(template.get("metadata") or {})
+  expected = {
+    "plan_id": (template.get("plan_id"), plan_id),
+    "source_type": (template.get("source_type"), "T_TRADE_BATCH"),
+    "source_id": (template.get("source_id"), batch_id),
+    "account_id": (template.get("account_id"), account_id),
+    "instrument_code": (
+      str(template.get("instrument_code") or "").upper(),
+      instrument_code,
+    ),
+    "bucket": (template.get("bucket"), record.bucket),
+    "run_id": (template.get("run_id"), run_id),
+    "metadata.t_batch_id": (template_metadata.get("t_batch_id"), batch_id),
+    "metadata.strategy_run_id": (
+      template_metadata.get("strategy_run_id"),
+      run_id,
+    ),
+    "metadata.account_id": (template_metadata.get("account_id"), account_id),
+    "metadata.instrument_code": (
+      str(template_metadata.get("instrument_code") or "").upper(),
+      instrument_code,
+    ),
+    "metadata.t_trade_role": (
+      str(template_metadata.get("t_trade_role") or "").lower(),
+      "exit",
+    ),
+  }
+  if not account_id or not run_id or not instrument_code or not batch_id or not plan_id:
+    raise ValueError("T_TRADE_EXIT_AUTHORIZATION_IDENTITY_MISSING")
+  if any(str(actual or "") != str(wanted or "") for actual, wanted in expected.values()):
+    raise ValueError("T_TRADE_EXIT_AUTHORIZATION_IDENTITY_MISMATCH")
+  if int(template.get("config_version") or 0) <= 0:
+    raise ValueError("T_TRADE_EXIT_CONFIG_VERSION_INVALID")
+  execution = dict(template.get("execution") or {})
+  if (
+    str(execution.get("price_type") or "").upper() != "MARKET"
+    or str(execution.get("execution_mode") or "").upper() != "AUTO"
+  ):
+    raise ValueError("T_TRADE_EXIT_EXECUTION_POLICY_INVALID")
+  if not list(template.get("rules") or []):
+    raise ValueError("T_TRADE_EXIT_RULES_UNAVAILABLE")
+  return template
+
+
+def build_t_trade_entry_exit_authorization_envelope(
+  record: TradeIntentRecord,
+  *,
+  max_protected_volume: Optional[int] = None,
+) -> TTradeEntryExitAuthorizationEnvelope:
+  """Build the immutable exit scope shown with a T-entry confirmation."""
+
+  metadata = dict(record.intent_metadata or {})
+  if (
+    str(record.direction or "").upper() != "BUY"
+    or str(metadata.get("t_trade_role") or "").lower() != "entry"
+  ):
+    raise ValueError("T_TRADE_ENTRY_INTENT_REQUIRED")
+  if str(record.owner_type or "").upper() != "STRATEGY_RUN":
+    raise ValueError("T_TRADE_ENTRY_OWNER_INVALID")
+  template = _normalized_t_trade_exit_template(record)
+  computed_ceiling = _t_trade_entry_volume_ceiling(record)
+  requested_ceiling = _positive_int(max_protected_volume)
+  if computed_ceiling <= 0:
+    raise ValueError("T_TRADE_ENTRY_VOLUME_BOUND_UNAVAILABLE")
+  if max_protected_volume is not None:
+    normalized_requested = int(
+      AShareMarketRules().normalize_buy_volume(requested_ceiling)
+    )
+    if normalized_requested <= 0 or normalized_requested > computed_ceiling:
+      raise ValueError("T_TRADE_ENTRY_VOLUME_BOUND_INVALID")
+    volume_ceiling = normalized_requested
+  else:
+    volume_ceiling = computed_ceiling
+  account_id = str(record.account_id or metadata.get("account_id") or "").strip()
+  run_id = str(record.strategy_run_id or metadata.get("strategy_run_id") or "").strip()
+  subject = {
+    "schema_version": _T_TRADE_EXIT_AUTHORIZATION_SCHEMA_VERSION,
+    "account_id": account_id,
+    "strategy_run_id": run_id,
+    "entry_intent_id": str(record.id),
+    "instrument_code": str(record.instrument_code or "").strip().upper(),
+    "bucket": str(record.bucket or ""),
+    "t_batch_id": str(metadata.get("t_batch_id") or ""),
+    "exit_plan_id": str(metadata.get("exit_plan_id") or ""),
+    "exit_config_version": int(template.get("config_version") or 0),
+    "max_protected_volume": volume_ceiling,
+    "entry_target_amount": _positive_float(record.target_amount),
+    "entry_reference_price": _positive_float(record.limit_price_hint),
+    "entry_max_price_deviation_bps": _positive_float(
+      metadata.get("max_price_deviation_bps")
+    ),
+    "exit_plan_template": template,
+  }
+  return TTradeEntryExitAuthorizationEnvelope(
+    subject=subject,
+    fingerprint=_sha256_fingerprint(subject),
+  )
+
+
+def bind_t_trade_exit_authorization_to_challenge_payload(
+  payload: Mapping[str, Any],
+  record: TradeIntentRecord,
+  *,
+  max_protected_volume: Optional[int] = None,
+) -> dict[str, Any]:
+  """Attach an exact T-exit envelope before the challenge is HMAC-signed."""
+
+  bound = dict(payload)
+  envelope = build_t_trade_entry_exit_authorization_envelope(
+    record,
+    max_protected_volume=max_protected_volume,
+  )
+  expected_payload = {
+    "action": T_TRADE_ENTRY_APPROVAL_ACTION,
+    "account_id": envelope.subject["account_id"],
+    "business_owner_id": envelope.subject["strategy_run_id"],
+    "intent_id": envelope.subject["entry_intent_id"],
+  }
+  if any(
+    str(bound.get(key) or "") != str(value)
+    for key, value in expected_payload.items()
+  ):
+    raise ValueError("T_TRADE_CHALLENGE_CONTEXT_MISMATCH")
+  existing = bound.get(T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY)
+  if existing is not None and dict(existing or {}) != envelope.to_dict():
+    raise ValueError("T_TRADE_CHALLENGE_BINDING_CONFLICT")
+  bound[T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY] = envelope.to_dict()
+  return bound
 
 
 def _template_binding(record: AutoExitPlanRecord) -> dict[str, Any]:
@@ -275,9 +627,28 @@ async def build_exit_plan_authorization_snapshot(
   )
 
 
-def clear_exact_auto_exit_authorization(record: AutoExitPlanRecord) -> None:
+def _advance_authorization_projection_version(
+  record: AutoExitPlanRecord,
+  *,
+  previous_state: Mapping[str, Any],
+  bump_state_version: bool,
+) -> None:
+  """Version an authorization change carried inside the canonical plan state."""
+
+  if not bump_state_version or dict(previous_state) == dict(record.plan_state or {}):
+    return
+  current_version = max(1, int(getattr(record, "state_version", 1) or 1))
+  record.state_version = current_version + 1
+
+
+def clear_exact_auto_exit_authorization(
+  record: AutoExitPlanRecord,
+  *,
+  bump_state_version: bool = True,
+) -> None:
   """Remove only autonomous-live authority; the plan keeps monitoring."""
 
+  previous_state = dict(record.plan_state or {})
   record.auto_exit_authorized = False
   record.auto_exit_authorization_fingerprint = None
   record.auto_exit_authorization_config_version = None
@@ -292,6 +663,11 @@ def clear_exact_auto_exit_authorization(record: AutoExitPlanRecord) -> None:
     template["auto_exit_authorized"] = False
     state["template"] = template
     record.plan_state = state
+  _advance_authorization_projection_version(
+    record,
+    previous_state=previous_state,
+    bump_state_version=bump_state_version,
+  )
 
 
 def grant_exact_auto_exit_authorization(
@@ -303,6 +679,7 @@ def grant_exact_auto_exit_authorization(
   device_session_id: str,
   authorized_at: datetime,
   authorization_expires_at: datetime,
+  bump_state_version: bool = True,
 ) -> None:
   if str(record.execution_mode or "").lower() != "live":
     raise ValueError("LIVE_EXIT_PLAN_REQUIRED")
@@ -310,6 +687,7 @@ def grant_exact_auto_exit_authorization(
     raise ValueError("INVALID_AUTHORIZATION_FINGERPRINT")
   if authorization_expires_at <= authorized_at:
     raise ValueError("INVALID_AUTHORIZATION_EXPIRY")
+  previous_state = dict(record.plan_state or {})
   record.auto_exit_authorized = True
   record.auto_exit_authorization_fingerprint = fingerprint
   record.auto_exit_authorization_config_version = int(record.config_version or 0)
@@ -325,6 +703,339 @@ def grant_exact_auto_exit_authorization(
   template["auto_exit_authorized"] = True
   state["template"] = template
   record.plan_state = state
+  _advance_authorization_projection_version(
+    record,
+    previous_state=previous_state,
+    bump_state_version=bump_state_version,
+  )
+
+
+def _t_trade_derivation_failure(
+  record: AutoExitPlanRecord,
+  code: str,
+  message: str,
+) -> TTradeExitAuthorizationDerivation:
+  clear_exact_auto_exit_authorization(record)
+  return TTradeExitAuthorizationDerivation(False, code, message)
+
+
+async def _add_t_trade_authorization_event(
+  db: Any,
+  record: AutoExitPlanRecord,
+  *,
+  challenge: TradeConfirmationChallenge,
+  entry_intent_id: str,
+  cumulative_filled_volume: int,
+  fingerprint: str,
+  authorization_expires_at: datetime,
+  created_at: datetime,
+) -> None:
+  identity = _sha256_fingerprint(
+    {
+      "plan_id": str(record.plan_id),
+      "challenge_id": str(challenge.id),
+      "entry_intent_id": entry_intent_id,
+      "cumulative_filled_volume": cumulative_filled_volume,
+      "authorization_fingerprint": fingerprint,
+    }
+  )
+  business_key = f"t-entry-exit-authorization-derived:{identity}"
+  existing = await db.scalar(
+    select(AutoExitPlanEvent).where(
+      AutoExitPlanEvent.business_key == business_key
+    )
+  )
+  if existing is not None:
+    return
+  db.add(
+    AutoExitPlanEvent(
+      event_id=str(uuid.uuid4()),
+      business_key=business_key,
+      plan_id=str(record.plan_id),
+      event_type="AUTO_EXIT_AUTHORIZATION_DERIVED_FROM_T_ENTRY",
+      payload={
+        "challenge_id": str(challenge.id),
+        "entry_intent_id": entry_intent_id,
+        "strategy_run_id": str(record.strategy_run_id or ""),
+        "t_batch_id": str(record.source_id),
+        "config_version": int(record.config_version or 0),
+        "cumulative_filled_volume": cumulative_filled_volume,
+        "authorization_fingerprint": fingerprint,
+        "actor_user_id": str(challenge.user_id),
+        "device_session_id": str(challenge.device_session_id),
+        "authorization_expires_at": authorization_expires_at.isoformat(),
+      },
+      created_at=created_at,
+    )
+  )
+
+
+async def derive_exact_auto_exit_authorization_from_t_trade_entry(
+  db: Any,
+  record: AutoExitPlanRecord,
+  *,
+  entry_intent_id: str,
+  challenge_id: str,
+  cumulative_filled_volume: int,
+  now: Optional[datetime] = None,
+  locked_scope: Optional[LockedExitPlanScope] = None,
+) -> TTradeExitAuthorizationDerivation:
+  """Derive exact live-exit authority from a consumed T-entry challenge.
+
+  The caller must update the durable entry intent, position and exit-plan
+  volume in the same transaction before calling this function.  The function
+  never commits.  That lets the report UOW atomically publish the fill and the
+  resulting exact authorization.
+  """
+
+  checked_at = now or time_utils.now()
+  normalized_intent_id = str(entry_intent_id or "").strip()
+  normalized_challenge_id = str(challenge_id or "").strip()
+  actual_volume = _positive_int(cumulative_filled_volume)
+  if not normalized_intent_id or not normalized_challenge_id or actual_volume <= 0:
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_AUTHORIZATION_CONTEXT_MISSING",
+      "做 T 买入成交缺少可验证的确认上下文",
+    )
+
+  scope = locked_scope or await lock_exit_plan_scope(
+    db,
+    account_id=str(record.account_id),
+    instrument_code=str(record.instrument_code),
+    target_plan_id=str(record.plan_id),
+  )
+  locked_record = scope.plan(str(record.plan_id))
+  if locked_record is None:
+    return _t_trade_derivation_failure(
+      record,
+      "EXIT_PLAN_NOT_FOUND",
+      "退出计划不存在",
+    )
+  record = locked_record
+  intent = await db.get(TradeIntentRecord, normalized_intent_id)
+  challenge = await db.get(TradeConfirmationChallenge, normalized_challenge_id)
+  if intent is None:
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_INTENT_NOT_FOUND",
+      "做 T 买入意图不存在",
+    )
+  if challenge is None:
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_CHALLENGE_NOT_FOUND",
+      "做 T 买入确认挑战不存在",
+    )
+
+  payload = dict(challenge.payload or {})
+  try:
+    expected_payload_fingerprint = trade_confirmation_payload_fingerprint(payload)
+  except ValueError:
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_CHALLENGE_SIGNATURE_UNAVAILABLE",
+      "做 T 买入确认签名无法验证",
+    )
+  if not hmac.compare_digest(
+    str(challenge.payload_fingerprint or ""),
+    expected_payload_fingerprint,
+  ):
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_CHALLENGE_TAMPERED",
+      "做 T 买入确认内容已变化",
+    )
+  expected_challenge_context = {
+    "action": T_TRADE_ENTRY_APPROVAL_ACTION,
+    "user_id": str(challenge.user_id),
+    "device_session_id": str(challenge.device_session_id),
+    "account_id": str(challenge.account_id),
+    "business_owner_id": str(intent.strategy_run_id or ""),
+    "intent_id": str(intent.id),
+  }
+  if (
+    str(challenge.action or "") != T_TRADE_ENTRY_APPROVAL_ACTION
+    or challenge.consumed_at is None
+    or any(
+      str(payload.get(key) or "") != expected
+      for key, expected in expected_challenge_context.items()
+    )
+  ):
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_CHALLENGE_CONTEXT_MISMATCH",
+      "做 T 买入确认未消费或身份上下文不匹配",
+    )
+
+  raw_envelope = payload.get(T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY)
+  if not isinstance(raw_envelope, Mapping):
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_EXIT_AUTHORIZATION_BINDING_MISSING",
+      "做 T 买入确认未绑定自动退出范围",
+    )
+  subject = raw_envelope.get("subject")
+  envelope_fingerprint = str(raw_envelope.get("fingerprint") or "")
+  if (
+    not isinstance(subject, Mapping)
+    or int(dict(subject).get("schema_version") or 0)
+    != _T_TRADE_EXIT_AUTHORIZATION_SCHEMA_VERSION
+    or len(envelope_fingerprint) != 64
+    or not hmac.compare_digest(
+      envelope_fingerprint,
+      _sha256_fingerprint(subject),
+    )
+  ):
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_EXIT_AUTHORIZATION_BINDING_INVALID",
+      "做 T 自动退出确认范围无效",
+    )
+  bound_subject = dict(subject)
+  try:
+    rebuilt = build_t_trade_entry_exit_authorization_envelope(
+      intent,
+      max_protected_volume=_positive_int(
+        bound_subject.get("max_protected_volume")
+      ),
+    )
+  except ValueError:
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_INTENT_SCOPE_CHANGED",
+      "做 T 买入意图或退出模板已变化",
+    )
+  if (
+    rebuilt.subject != bound_subject
+    or not hmac.compare_digest(rebuilt.fingerprint, envelope_fingerprint)
+  ):
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_INTENT_SCOPE_CHANGED",
+      "做 T 买入意图或退出模板已变化",
+    )
+
+  plan_binding = _template_binding(record)
+  expected_plan_binding = {
+    "plan_id": str(bound_subject.get("exit_plan_id") or ""),
+    "account_id": str(bound_subject.get("account_id") or ""),
+    "instrument_code": str(bound_subject.get("instrument_code") or ""),
+    "bucket": str(bound_subject.get("bucket") or ""),
+    "source_type": "T_TRADE_BATCH",
+    "source_id": str(bound_subject.get("t_batch_id") or ""),
+    "strategy_run_id": str(bound_subject.get("strategy_run_id") or ""),
+    "config_version": int(bound_subject.get("exit_config_version") or 0),
+    "template": dict(bound_subject.get("exit_plan_template") or {}),
+  }
+  if any(
+    plan_binding.get(key) != value
+    for key, value in expected_plan_binding.items()
+  ):
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_EXIT_PLAN_SCOPE_CHANGED",
+      "退出计划与买入时确认的范围不一致",
+    )
+  try:
+    require_authorizable_live_plan(
+      record,
+      account_id=str(bound_subject.get("account_id") or ""),
+      expected_config_version=int(
+        bound_subject.get("exit_config_version") or 0
+      ),
+    )
+  except ValueError as exc:
+    return _t_trade_derivation_failure(record, str(exc), "退出计划当前不可授权")
+
+  max_volume = _positive_int(bound_subject.get("max_protected_volume"))
+  durable_filled_volume = _positive_int(intent.executed_volume)
+  if (
+    actual_volume > max_volume
+    or durable_filled_volume != actual_volume
+    or str(intent.status or "").upper() not in {"PARTIAL_FILLED", "FILLED"}
+    or int(record.protected_volume or 0) != actual_volume
+    or int(record.exited_volume or 0) > actual_volume
+    or int(record.remaining_volume or 0)
+    != actual_volume - int(record.exited_volume or 0)
+  ):
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_FILL_SCOPE_MISMATCH",
+      "实际买入成交量超出确认上限或尚未形成一致的持久化计划",
+    )
+
+  authorization_expires_at = authorization_expiry_for_challenge(
+    challenge.expires_at
+  )
+  if authorization_expires_at <= checked_at:
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_EXIT_AUTHORIZATION_EXPIRED",
+      "买入确认派生的自动退出授权已过期",
+    )
+  if not await _authorization_session_valid(
+    db,
+    record,
+    lock_mutable_rows=True,
+    authorization_user_id=str(challenge.user_id),
+    authorization_device_session_id=str(challenge.device_session_id),
+  ):
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_ENTRY_AUTHORIZATION_REVOKED",
+      "买入确认对应的用户、设备权限或账户范围已失效",
+    )
+  try:
+    snapshot = await build_exit_plan_authorization_snapshot(
+      db,
+      record,
+      lock_mutable_rows=True,
+      locked_scope=scope,
+    )
+  except ValueError:
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_EXIT_SAFETY_SNAPSHOT_UNAVAILABLE",
+      "当前持仓、T+1 或保护计划状态无法形成安全快照",
+    )
+  if snapshot.has_pending_sell:
+    return _t_trade_derivation_failure(
+      record,
+      "T_TRADE_EXIT_COMPETING_SELL_EXISTS",
+      "当前已有竞争卖单，不能派生自动退出授权",
+    )
+
+  authorized_at = time_utils.to_shanghai(challenge.consumed_at)
+  grant_exact_auto_exit_authorization(
+    record,
+    fingerprint=snapshot.fingerprint,
+    challenge_id=str(challenge.id),
+    user_id=str(challenge.user_id),
+    device_session_id=str(challenge.device_session_id),
+    authorized_at=authorized_at,
+    authorization_expires_at=authorization_expires_at,
+  )
+  await _add_t_trade_authorization_event(
+    db,
+    record,
+    challenge=challenge,
+    entry_intent_id=normalized_intent_id,
+    cumulative_filled_volume=actual_volume,
+    fingerprint=snapshot.fingerprint,
+    authorization_expires_at=authorization_expires_at,
+    created_at=checked_at,
+  )
+  return TTradeExitAuthorizationDerivation(
+    True,
+    "T_TRADE_EXIT_AUTHORIZATION_DERIVED",
+    "已从做 T 买入确认派生精确自动退出授权",
+    authorization_expires_at=authorization_expires_at,
+    fingerprint=snapshot.fingerprint,
+    authorization_user_id=str(challenge.user_id),
+    config_version=int(record.config_version or 0),
+    challenge_id=str(challenge.id),
+  )
 
 
 async def _authorization_session_valid(
@@ -332,9 +1043,17 @@ async def _authorization_session_valid(
   record: AutoExitPlanRecord,
   *,
   lock_mutable_rows: bool,
+  authorization_user_id: Optional[str] = None,
+  authorization_device_session_id: Optional[str] = None,
 ) -> bool:
-  session_id = str(record.auto_exit_authorization_device_session_id or "")
-  user_id = str(record.auto_exit_authorization_user_id or "")
+  session_id = str(
+    authorization_device_session_id
+    or record.auto_exit_authorization_device_session_id
+    or ""
+  )
+  user_id = str(
+    authorization_user_id or record.auto_exit_authorization_user_id or ""
+  )
   if not session_id or not user_id:
     return False
   session_stmt = (
@@ -484,7 +1203,18 @@ async def validate_exact_auto_exit_authorization(
       "AUTO_EXIT_AUTHORIZATION_SCOPE_CHANGED",
       "规则、保护量、持仓、T+1、冲突或待成交 SELL 已变化",
     )
-  return ExitPlanAuthorizationValidation(True, "AUTHORIZED", "精确授权有效")
+  return ExitPlanAuthorizationValidation(
+    True,
+    "AUTHORIZED",
+    "精确授权有效",
+    fingerprint=str(record.auto_exit_authorization_fingerprint or ""),
+    authorization_user_id=str(record.auto_exit_authorization_user_id or ""),
+    config_version=int(record.auto_exit_authorization_config_version or 0),
+    challenge_id=str(record.auto_exit_authorization_challenge_id or ""),
+    device_session_id=str(record.auto_exit_authorization_device_session_id or ""),
+    authorized_at=time_utils.to_shanghai(record.auto_exit_authorized_at),
+    authorization_expires_at=expires_at,
+  )
 
 
 class AutoExitAuthorizationGuard:
@@ -547,12 +1277,22 @@ __all__ = [
   "AutoExitAuthorizationGuard",
   "ExitPlanAuthorizationSnapshot",
   "ExitPlanAuthorizationValidation",
+  "EXIT_PLAN_SELL_APPROVAL_ACTION",
+  "T_TRADE_ENTRY_APPROVAL_ACTION",
+  "T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY",
+  "TTradeEntryExitAuthorizationEnvelope",
+  "TTradeExitAuthorizationDerivation",
   "authorization_expiry_for_challenge",
+  "bind_t_trade_exit_authorization_to_challenge_payload",
   "build_exit_plan_authorization_snapshot",
+  "build_t_trade_entry_exit_authorization_envelope",
   "clear_exact_auto_exit_authorization",
+  "derive_exact_auto_exit_authorization_from_t_trade_entry",
   "grant_exact_auto_exit_authorization",
   "lock_exit_plan_scope",
   "lock_exit_plan_scope_for_plan",
   "require_authorizable_live_plan",
+  "trade_confirmation_payload_fingerprint",
+  "validate_consumed_exit_plan_sell_challenge",
   "validate_exact_auto_exit_authorization",
 ]

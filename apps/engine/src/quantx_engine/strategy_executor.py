@@ -56,11 +56,16 @@ from quantx_domain.brokers.base import (
 )
 from quantx_domain.brokers.base import OrderType as BrokerOrderType
 from quantx_domain.brokers.simulator import SimulatorBroker
+from quantx_domain.strategies.ashare_managed_exit_plan import (
+  MANAGED_EXIT_RUNTIME_KEY,
+  AshareManagedExitPlanStrategy,
+)
 from quantx_domain.strategies.base import (
   ManualApprovalRecoveryCandidate,
   MarketDataContext,
   MarketDataSession,
   OrderStateEvent,
+  RuntimeStatePatch,
   StrategyBase,
   StrategyCadence,
   StrategyContext,
@@ -83,8 +88,12 @@ from quantx_domain.trading import (
   EntryPlanStatus,
   ExitDecision,
   ExitEvaluationContext,
+  ExitPlan,
   ExitPlanBook,
+  ExitPlanCommand,
+  ExitPlanCommandType,
   ExitPlanEvaluator,
+  ExitPlanStatus,
   ExitPlanTemplate,
   ExitPriceReference,
   ExitRuleType,
@@ -136,12 +145,23 @@ from quantx_infrastructure.models.agent_runtime import (
   TradeCommandOutbox,
 )
 from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
+from quantx_infrastructure.models.trade_confirmation_challenge import (
+  TradeConfirmationChallenge,
+)
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.repositories.auto_exit_plan_repository import (
+  AutoExitPlanConcurrencyError,
+)
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationError,
   EntryPlanAuthorizationService,
   scope_from_managed_entry_config,
+)
+from quantx_infrastructure.services.exit_plan_authorization_service import (
+  T_TRADE_ENTRY_APPROVAL_ACTION,
+  T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY,
+  AutoExitAuthorizationGuard,
 )
 from quantx_infrastructure.services.exit_plan_replay_projection_service import (
   ExitPlanReplayUpdateKind,
@@ -170,6 +190,10 @@ from quantx_infrastructure.services.t_trade_signal_diagnostics_service import (
   TTradeSignalDiagnosticsService,
 )
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
+from quantx_infrastructure.services.trade_intent_processor import (
+  LOCAL_PRE_BROKER_ZERO_FILL_SOURCE,
+  local_pre_broker_zero_fill_metadata,
+)
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -1627,6 +1651,13 @@ class StrategyRuntime:
   )
   #: Engine-owned automatic exit plans, persisted outside strategy-owned state.
   exit_plan_book: ExitPlanBook = field(default_factory=ExitPlanBook, repr=False)
+  #: Optimistic-lock versions for the canonical PAPER/LIVE plan rows.
+  exit_plan_state_versions: Dict[str, int] = field(default_factory=dict, repr=False)
+  #: Durable exit intents reserved before a crash but not yet command-queued.
+  exit_plan_recovery_intents: Dict[str, TradeIntent] = field(
+    default_factory=dict,
+    repr=False,
+  )
   _last_replay_projection_at: float = field(default=0.0, repr=False)
   _last_replay_progress_pct: float = field(default=0.0, repr=False)
   _last_t_trade_replay_projection_trade_date: Optional[str] = field(
@@ -1951,6 +1982,14 @@ class StrategyExecutor:
     """
     if strategy_id is None or strategy_class is None or context is None:
       raise TypeError("strategy_id, strategy_class and context are required")
+    if (
+      strategy_class is AshareManagedExitPlanStrategy
+      and context.mode != StrategyRunMode.BACKTEST
+    ):
+      raise ValueError(
+        "AshareManagedExitPlanStrategy 仅允许用于独立回放或回测，"
+        "PAPER/LIVE 卖出由原策略运行或 ExitPlanMonitor 执行"
+      )
 
     runtime_name = name or f"Strategy-{strategy_id}"
 
@@ -2033,6 +2072,7 @@ class StrategyExecutor:
     """Drop process-local state; durable restore is the only restart source."""
 
     runtime.pending_approvals.clear()
+    runtime.exit_plan_recovery_intents.clear()
     runtime.t_trade_entry_reservations.clear()
     runtime.latest_market_data.clear()
     runtime.realtime_subscription_ids.clear()
@@ -3569,12 +3609,66 @@ class StrategyExecutor:
             attempts=1,
           )
           raise RuntimeError("COMPLETE_CHECKPOINT_STATE_MISMATCH")
-      runtime.exit_plan_book = ExitPlanBook.from_dict(
+      restored_exit_book = (
         (restored_state.get("custom") or {}).get(EXIT_PLAN_BOOK_STATE_KEY)
         if restored_state
-        else None,
-        evaluator=ExitPlanEvaluator(self.exit_strategy_registry),
+        else None
       )
+      durable_managed_exit_state: Optional[dict[str, Any]] = None
+      if self._owns_runtime_exit_plan_book(runtime):
+        if runtime.context.mode == StrategyRunMode.BACKTEST:
+          runtime.exit_plan_book = ExitPlanBook.from_dict(
+            restored_exit_book,
+            evaluator=ExitPlanEvaluator(self.exit_strategy_registry),
+          )
+        else:
+          if dict((restored_exit_book or {}).get("plans") or {}):
+            # Merge every missing legacy T plan before loading the authoritative
+            # aggregate.  Other strategy classes own their exit state inside
+            # their strategy implementation and must never be double-loaded.
+            await AutoExitPlanService().sync_strategy_plan_book(
+              strategy_run_id=runtime.run_id,
+              book_state=restored_exit_book,
+              execution_mode=runtime.context.mode.value,
+            )
+          durable_state, durable_versions = (
+            await AutoExitPlanService().load_strategy_plan_book(
+              strategy_run_id=runtime.run_id,
+              terminal_history_limit=int(
+                runtime.context.parameters.get("exit_plan_history_limit", 200) or 200
+              ),
+            )
+          )
+          runtime.exit_plan_book = ExitPlanBook.from_dict(
+            durable_state,
+            evaluator=ExitPlanEvaluator(self.exit_strategy_registry),
+          )
+          runtime.exit_plan_state_versions = dict(durable_versions)
+      else:
+        runtime.exit_plan_book = ExitPlanBook(
+          evaluator=ExitPlanEvaluator(self.exit_strategy_registry)
+        )
+        runtime.exit_plan_state_versions = {}
+        if (
+          runtime.strategy_class is AshareManagedExitPlanStrategy
+          and runtime.context.mode != StrategyRunMode.BACKTEST
+        ):
+          managed_plan_id, managed_config_version = (
+            self._required_managed_plan_binding(runtime, expected_kind="EXIT")
+          )
+          durable_managed_exit_state, durable_managed_exit_version = (
+            await AutoExitPlanService().load_managed_runtime_plan(
+              strategy_run_id=runtime.run_id,
+              expected_plan_id=managed_plan_id,
+              expected_config_version=managed_config_version,
+            )
+          )
+          durable_managed_plan_id = ExitPlan.from_dict(
+            durable_managed_exit_state
+          ).plan_id
+          runtime.exit_plan_state_versions = {
+            durable_managed_plan_id: durable_managed_exit_version
+          }
       if runtime.strategy and hasattr(runtime.strategy, "apply_state_snapshot"):
         strategy_snapshot_loader = getattr(
           runtime.state_manager,
@@ -3587,6 +3681,8 @@ class StrategyExecutor:
           else dict((restored_state or {}).get("custom") or {})
         )
         strategy_snapshot.pop(EXIT_PLAN_BOOK_STATE_KEY, None)
+        if durable_managed_exit_state is not None:
+          strategy_snapshot[MANAGED_EXIT_RUNTIME_KEY] = durable_managed_exit_state
         runtime.strategy.apply_state_snapshot(strategy_snapshot)
       runtime._restored_market_windows_unverified.update(
         self._restored_causal_market_window_codes(runtime)
@@ -3667,6 +3763,7 @@ class StrategyExecutor:
         runtime,
         t_trade_account_coordination_held=t_trade_account_coordination_held,
       )
+      await self._restore_runtime_exit_plan_intents(runtime)
       self._restore_t_trade_entry_reservations(runtime)
       invalidated_intent_ids = set(runtime.strategy.invalidated_manual_intent_ids())
       for intent_id in invalidated_intent_ids:
@@ -4302,7 +4399,12 @@ class StrategyExecutor:
         completion = None
         if event_type in {"durable_order", "durable_trade"}:
           _payload, completion = data
-        elif event_type == "universe" and isinstance(data, dict):
+        elif event_type in {
+          "universe",
+          "exit_plan_command",
+          "exit_plan_evaluate",
+          "exit_plan_register_external",
+        } and isinstance(data, dict):
           completion = data.get("future")
         if completion is not None and not completion.done():
           completion.set_exception(RuntimeConsumerUnavailable(reason))
@@ -4665,7 +4767,12 @@ class StrategyExecutor:
         completion = None
         if event_type in {"durable_order", "durable_trade"}:
           _payload, completion = data
-        elif event_type == "universe" and isinstance(data, dict):
+        elif event_type in {
+          "universe",
+          "exit_plan_command",
+          "exit_plan_evaluate",
+          "exit_plan_register_external",
+        } and isinstance(data, dict):
           completion = data.get("future")
         if completion is not None and not completion.done():
           completion.set_exception(
@@ -6268,6 +6375,29 @@ class StrategyExecutor:
     return runtime.run_id
 
   @staticmethod
+  def _required_managed_plan_binding(
+    runtime: StrategyRuntime,
+    *,
+    expected_kind: str,
+  ) -> tuple[str, int]:
+    """Return the exact immutable Plan/config identity frozen into one run."""
+
+    binding = dict(runtime.context.parameters.get("_managed_plan_binding") or {})
+    plan_id = str(binding.get("plan_id") or "").strip()
+    plan_kind = str(binding.get("plan_kind") or "").strip().upper()
+    try:
+      config_version = int(binding.get("config_version") or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+      raise RuntimeError("托管 StrategyRun 配置版本绑定无效") from exc
+    if (
+      not plan_id
+      or plan_kind != str(expected_kind or "").strip().upper()
+      or config_version <= 0
+    ):
+      raise RuntimeError("托管 StrategyRun 缺少精确计划、类型或配置版本绑定")
+    return plan_id, config_version
+
+  @staticmethod
   def _advance_runtime_replay_clock(
     runtime: StrategyRuntime,
     timestamp: datetime,
@@ -6478,6 +6608,8 @@ class StrategyExecutor:
         **dict(plan.template.metadata or {}),
         "t_batch_id": batch_id,
         "exit_plan_id": plan.plan_id,
+        "owner_type": "EXIT_PLAN",
+        "owner_id": plan.plan_id,
         "exit_rule_id": rule_id,
         "exit_rule_type": "BACKTEST_END_FORCE_CLOSE",
         "exit_reason": "BACKTEST_END_FORCE_CLOSE",
@@ -7448,13 +7580,617 @@ class StrategyExecutor:
       self._apply_runtime_state_patch(runtime, output.runtime_state_patch)
 
   def _persist_exit_plan_book(self, runtime: StrategyRuntime) -> None:
-    if runtime.state_manager:
+    """Persist only BACKTEST books in RuntimeState.
+
+    PAPER/LIVE plans use ``auto_exit_plans`` as their sole durable truth and
+    are written through ``_persist_runtime_exit_plan_states``.
+    """
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST and runtime.state_manager:
       runtime.state_manager.set_custom(
         EXIT_PLAN_BOOK_STATE_KEY,
         runtime.exit_plan_book.to_dict(),
       )
 
-  def register_external_exit_plan(
+  async def _load_runtime_exit_plan_book(self, runtime: StrategyRuntime) -> None:
+    if not self._owns_runtime_exit_plan_book(runtime):
+      runtime.exit_plan_book = ExitPlanBook(
+        evaluator=ExitPlanEvaluator(self.exit_strategy_registry)
+      )
+      runtime.exit_plan_state_versions = {}
+      if (
+        runtime.strategy_class is AshareManagedExitPlanStrategy
+        and runtime.context.mode != StrategyRunMode.BACKTEST
+      ):
+        managed_plan_id, managed_config_version = (
+          self._required_managed_plan_binding(runtime, expected_kind="EXIT")
+        )
+        state, version = await AutoExitPlanService().load_managed_runtime_plan(
+          strategy_run_id=runtime.run_id,
+          expected_plan_id=managed_plan_id,
+          expected_config_version=managed_config_version,
+        )
+        plan_id = ExitPlan.from_dict(state).plan_id
+        if not plan_id:
+          raise RuntimeError("独立卖出策略的权威退出计划缺少标识")
+        runtime.exit_plan_state_versions = {plan_id: int(version)}
+        if runtime.strategy is not None:
+          runtime.strategy.apply_state_snapshot(
+            {MANAGED_EXIT_RUNTIME_KEY: state}
+          )
+      return
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return
+    state, versions = await AutoExitPlanService().load_strategy_plan_book(
+      strategy_run_id=runtime.run_id,
+      terminal_history_limit=int(
+        runtime.context.parameters.get("exit_plan_history_limit", 200) or 200
+      ),
+    )
+    runtime.exit_plan_book = ExitPlanBook.from_dict(
+      state,
+      evaluator=ExitPlanEvaluator(self.exit_strategy_registry),
+    )
+    runtime.exit_plan_state_versions = dict(versions)
+
+  @staticmethod
+  def _exit_plan_recovery_intent(item: Mapping[str, Any]) -> TradeIntent:
+    try:
+      priority = TradeIntentPriority(str(item.get("priority") or "NORMAL"))
+    except ValueError:
+      priority = TradeIntentPriority.NORMAL
+    created_at = item.get("created_at")
+    if not isinstance(created_at, datetime):
+      created_at = time_utils.now()
+    action = str(item.get("action") or "").upper()
+    return TradeIntent(
+      intent_id=str(item.get("intent_id") or ""),
+      strategy_id=str(item.get("strategy_id") or ""),
+      run_id=str(item.get("strategy_run_id") or ""),
+      instrument_code=str(item.get("instrument_code") or ""),
+      direction=TradeIntentDirection.SELL,
+      bucket=str(item.get("bucket") or "swing"),
+      reason=str(item.get("reason") or "AUTO_EXIT_RECOVERY"),
+      priority=priority,
+      target_amount=item.get("target_amount"),
+      target_position_pct=item.get("target_position_pct"),
+      target_volume=item.get("target_volume"),
+      limit_price_hint=item.get("limit_price_hint"),
+      approval_ttl_ms=item.get("approval_ttl_ms"),
+      max_price_deviation_bps=item.get("max_price_deviation_bps"),
+      expiry_policy=dict(item.get("expiry_policy") or {}),
+      execution_mode=(
+        TradeIntentExecutionMode.MANUAL_CONFIRM
+        if action in {"AWAIT_APPROVAL", "RESTORE_APPROVAL"}
+        else TradeIntentExecutionMode.AUTO
+      ),
+      metadata={
+        **dict(item.get("metadata") or {}),
+        "exit_plan_recovery_durable_status": str(
+          item.get("durable_status") or ""
+        ).upper(),
+      },
+      trace_id=item.get("trace_id"),
+      created_at=created_at,
+    )
+
+  async def _restore_runtime_exit_plan_intents(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return
+    if runtime.strategy_class is AshareManagedExitPlanStrategy:
+      managed_plan_id, managed_config_version = (
+        self._required_managed_plan_binding(runtime, expected_kind="EXIT")
+      )
+      recovery = await AutoExitPlanService().load_managed_pending_exit_intent(
+        strategy_run_id=runtime.run_id,
+        expected_plan_id=managed_plan_id,
+        expected_config_version=managed_config_version,
+      )
+      if recovery is None:
+        return
+      action = str(recovery.get("action") or "").upper()
+      if action == "WAIT_ORDER":
+        return
+      intent = self._exit_plan_recovery_intent(recovery)
+      if action == "RESTORE_APPROVAL":
+        runtime.pending_approvals[intent.intent_id] = intent
+        return
+      if action == "ROUTE_AUTO":
+        runtime.exit_plan_recovery_intents[intent.intent_id] = intent
+        return
+      raise RuntimeError(
+        "独立卖出计划待提交意图需要人工收敛: "
+        f"plan_id={recovery.get('plan_id')} intent_id={intent.intent_id} "
+        f"status={recovery.get('durable_status')}"
+      )
+    if not self._owns_runtime_exit_plan_book(runtime):
+      return
+    recoveries = await AutoExitPlanService().load_strategy_pending_exit_intents(
+      strategy_run_id=runtime.run_id
+    )
+    released_plan_ids: list[str] = []
+    for item in recoveries:
+      action = str(item.get("action") or "").upper()
+      intent = self._exit_plan_recovery_intent(item)
+      if action == "AWAIT_APPROVAL":
+        runtime.pending_approvals[intent.intent_id] = intent
+        continue
+      if action == "ROUTE":
+        runtime.exit_plan_recovery_intents[intent.intent_id] = intent
+        continue
+      if action == "WAIT_ORDER":
+        continue
+      if action == "BLOCK":
+        raise RuntimeError(
+          "退出计划待提交意图缺少可证明的订单收敛状态: "
+          f"plan_id={item.get('plan_id')} intent_id={intent.intent_id} "
+          f"status={item.get('durable_status')}"
+        )
+      plan_id = str(item.get("plan_id") or "")
+      plan = runtime.exit_plan_book.plans.get(plan_id)
+      if plan is None:
+        raise RuntimeError(f"退出计划恢复缺少权威计划: {plan_id}")
+      runtime.exit_plan_book.apply_order_event(
+        plan_id=plan_id,
+        intent_id=intent.intent_id,
+        status=(
+          "RECONCILED_ZERO_FILL"
+          if action == "RELEASE_ZERO"
+          else
+          str(item.get("durable_status") or "REJECTED")
+          if str(item.get("durable_status") or "").upper()
+          in {"REJECTED", "CANCELLED", "EXPIRED"}
+          else "REJECTED"
+        ),
+      )
+      released_plan_ids.append(plan_id)
+    if released_plan_ids:
+      await self._persist_runtime_exit_plan_states(
+        runtime,
+        plan_ids=released_plan_ids,
+        event_type="STRATEGY_EXIT_ORPHAN_RELEASED",
+      )
+
+  async def _route_recovered_exit_plan_intents(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+    only_plan_id: Optional[str] = None,
+  ) -> None:
+    if (
+      runtime.durable_event_barrier_key
+      or self._runtime_state_reconciliation_failure(runtime) is not None
+    ):
+      return
+    candidates = [
+      intent
+      for intent in runtime.exit_plan_recovery_intents.values()
+      if intent.instrument_code == instrument_code
+      and (
+        only_plan_id is None
+        or str(dict(intent.metadata or {}).get("exit_plan_id") or "")
+        == only_plan_id
+      )
+    ]
+    for intent in candidates:
+      runtime.exit_plan_recovery_intents.pop(intent.intent_id, None)
+      metadata = dict(intent.metadata or {})
+      if str(metadata.get("exit_plan_recovery_durable_status") or "") == "APPROVED":
+        failure = self._approval_failure(runtime, intent)
+        if failure is not None:
+          plan_id = str(metadata.get("exit_plan_id") or "")
+          terminal_metadata = local_pre_broker_zero_fill_metadata(
+            {
+              **metadata,
+              "intent_id": intent.intent_id,
+              "approval_reason": failure[0],
+            },
+            reason=failure[0],
+          )
+          intent.metadata.update(terminal_metadata)
+          runtime.exit_plan_book.apply_order_event(
+            plan_id=plan_id,
+            intent_id=intent.intent_id,
+            status="RECONCILED_ZERO_FILL",
+          )
+          if runtime.state_manager is not None:
+            await runtime.state_manager.update_trade_intent_status(
+              intent.intent_id,
+              "EXPIRED",
+              metadata=terminal_metadata,
+              notes=failure[0],
+            )
+          await self._persist_runtime_exit_plan_states(
+            runtime,
+            plan_ids=[plan_id],
+            event_type="STRATEGY_EXIT_APPROVAL_RECOVERY_EXPIRED",
+          )
+          continue
+      await self._process_trade_intent(runtime, intent)
+
+  async def _route_recovered_managed_exit_intents(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+  ) -> None:
+    """Resume a dedicated AUTO SELL only after a fresh authoritative tick."""
+
+    if runtime.strategy_class is not AshareManagedExitPlanStrategy:
+      return
+    if (
+      runtime.durable_event_barrier_key
+      or self._runtime_state_reconciliation_failure(runtime) is not None
+    ):
+      return
+    candidates = [
+      intent
+      for intent in runtime.exit_plan_recovery_intents.values()
+      if intent.instrument_code == instrument_code
+    ]
+    for intent in candidates:
+      metadata = dict(intent.metadata or {})
+      plan_id = str(metadata.get("exit_plan_id") or "").strip()
+      if (
+        str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
+        or str(metadata.get("owner_id") or "") != plan_id
+      ):
+        raise RuntimeError("独立卖出恢复意图缺少精确 ExitPlan 所有权")
+      if (
+        runtime.context.mode == StrategyRunMode.LIVE
+        and intent.execution_mode == TradeIntentExecutionMode.AUTO
+      ):
+        authorization = await AutoExitAuthorizationGuard.validate_or_invalidate(
+          plan_id
+        )
+        intent.metadata["auto_exit_authorization_code"] = authorization.code
+        if not authorization.valid:
+          intent.execution_mode = TradeIntentExecutionMode.MANUAL_CONFIRM
+          intent.metadata.update(
+            {
+              "exact_auto_exit_authorized": False,
+              "auto_exit_authorization_user_id": "",
+              "auto_exit_authorization_fingerprint": "",
+              "auto_exit_authorization_challenge_id": "",
+            }
+          )
+          updater = getattr(
+            runtime.state_manager,
+            "update_trade_intent_status_strict",
+            None,
+          )
+          if not callable(updater):
+            raise RuntimeError("独立卖出恢复缺少严格意图状态持久化边界")
+          await updater(
+            intent.intent_id,
+            "AWAITING_APPROVAL",
+            metadata=dict(intent.metadata or {}),
+            notes=f"AUTO_EXIT_RECOVERY_DOWNGRADED:{authorization.code}",
+          )
+          runtime.pending_approvals[intent.intent_id] = intent
+          runtime.exit_plan_recovery_intents.pop(intent.intent_id, None)
+          continue
+      await self._process_trade_intent(runtime, intent)
+      runtime.exit_plan_recovery_intents.pop(intent.intent_id, None)
+
+  async def _persist_runtime_exit_plan_states(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    plan_ids: Optional[Iterable[str]] = None,
+    event_type: str = "STRATEGY_PLAN_STATE_UPDATED",
+    intents_by_plan: Optional[Mapping[str, TradeIntent]] = None,
+    entry_authorizations_by_plan: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    event_business_keys_by_plan: Optional[Mapping[str, str]] = None,
+    revoke_authorization_plan_ids: Optional[Iterable[str]] = None,
+    evaluated_at: Optional[datetime] = None,
+  ) -> None:
+    if not self._owns_runtime_exit_plan_book(runtime):
+      raise RuntimeError("当前策略不拥有 Engine ExitPlanBook")
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      self._persist_exit_plan_book(runtime)
+      return
+    source_plan_ids = (
+      runtime.exit_plan_book.plans.keys() if plan_ids is None else plan_ids
+    )
+    selected_ids = sorted(
+      {
+        str(plan_id)
+        for plan_id in source_plan_ids
+        if str(plan_id) in runtime.exit_plan_book.plans
+      }
+    )
+    if not selected_ids:
+      return
+    service = AutoExitPlanService()
+    revoked_ids = {str(plan_id) for plan_id in revoke_authorization_plan_ids or []}
+    try:
+      for plan_id in selected_ids:
+        plan = runtime.exit_plan_book.plans[plan_id]
+        stored_state, state_version = await service.persist_strategy_plan_state(
+          strategy_run_id=runtime.run_id,
+          plan_state=plan.to_dict(),
+          execution_mode=runtime.context.mode.value,
+          expected_state_version=runtime.exit_plan_state_versions.get(plan_id),
+          evaluated_at=evaluated_at,
+           event_type=event_type,
+           event_business_key=dict(event_business_keys_by_plan or {}).get(plan_id),
+          intent=(dict(intents_by_plan or {}).get(plan_id)),
+           entry_authorization=(
+             dict(entry_authorizations_by_plan or {}).get(plan_id)
+           ),
+           revoke_authorization=plan_id in revoked_ids,
+         )
+        runtime.exit_plan_book.plans[plan_id] = ExitPlan.from_dict(stored_state)
+        runtime.exit_plan_state_versions[plan_id] = int(state_version)
+    except AutoExitPlanConcurrencyError:
+      await self._load_runtime_exit_plan_book(runtime)
+      raise
+
+  @staticmethod
+  def _material_exit_plan_state(plan: ExitPlan) -> dict[str, Any]:
+    """Return state whose change affects future evaluation or execution."""
+
+    state = plan.to_dict()
+    state.pop("last_evaluated_at", None)
+    state.pop("last_price", None)
+    state.pop("last_net_profit_pct", None)
+    return state
+
+  async def _apply_runtime_exit_plan_commands(
+    self,
+    runtime: StrategyRuntime,
+    commands: Iterable[ExitPlanCommand],
+    *,
+    evaluated_at: Optional[datetime],
+    event_type: str = "STRATEGY_EXIT_PLAN_COMMAND_APPLIED",
+  ) -> None:
+    """Apply plan commands on the owner queue and replay them after one CAS race."""
+
+    command_list = list(commands)
+    plan_ids = [command.plan_id for command in command_list]
+    if not plan_ids:
+      return
+    if not self._owns_runtime_exit_plan_book(runtime):
+      raise RuntimeError("当前策略不能输出 Engine ExitPlanBook 命令")
+    for attempt in range(2):
+      for command in command_list:
+        runtime.exit_plan_book.apply_command(command)
+      try:
+        await self._persist_runtime_exit_plan_states(
+          runtime,
+          plan_ids=plan_ids,
+          event_type=event_type,
+          revoke_authorization_plan_ids=plan_ids,
+          evaluated_at=evaluated_at,
+        )
+        return
+      except AutoExitPlanConcurrencyError:
+        if attempt:
+          raise
+
+  async def _execute_runtime_exit_plan_command(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    command: ExitPlanCommand,
+    account_id: str,
+    config_version: int,
+  ) -> dict[str, Any]:
+    if not self._owns_runtime_exit_plan_book(runtime):
+      raise ValueError("退出计划不由当前策略的 Engine ExitPlanBook 执行")
+    event_type = {
+      ExitPlanCommandType.PAUSE: "STRATEGY_EXIT_PLAN_PAUSED",
+      ExitPlanCommandType.RESUME: "STRATEGY_EXIT_PLAN_RESUMED",
+      ExitPlanCommandType.CANCEL: "STRATEGY_EXIT_PLAN_CANCELLED",
+      ExitPlanCommandType.UPSERT_POLICY: "STRATEGY_EXIT_PLAN_POLICY_UPDATED",
+    }[command.command]
+    for attempt in range(2):
+      plan = runtime.exit_plan_book.plans.get(command.plan_id)
+      if plan is None:
+        raise ValueError("退出计划不属于当前策略运行")
+      if str(plan.template.account_id or "") != str(account_id or ""):
+        raise ValueError("退出计划不属于当前账户")
+      if int(plan.template.config_version or 0) != int(config_version):
+        raise ValueError(
+          f"CONFIG_VERSION_CONFLICT: current={plan.template.config_version}"
+        )
+      if plan.status.value in {"COMPLETED", "CANCELLED"}:
+        raise ValueError("终态退出计划不能再修改")
+      if command.command in {
+        ExitPlanCommandType.PAUSE,
+        ExitPlanCommandType.CANCEL,
+      } and (
+        plan.status.value == "EXIT_PENDING"
+        or bool(plan.pending_intent_id)
+        or bool(plan.pending_order_id)
+      ):
+        raise ValueError("已有卖出意图或委托待收敛，暂不能暂停或取消")
+      runtime.exit_plan_book.apply_command(command)
+      try:
+        await self._persist_runtime_exit_plan_states(
+          runtime,
+          plan_ids=[command.plan_id],
+          event_type=event_type,
+          revoke_authorization_plan_ids=[command.plan_id],
+          evaluated_at=runtime.context.current_time or time_utils.now(),
+        )
+        break
+      except AutoExitPlanConcurrencyError:
+        if attempt:
+          raise
+    stored = runtime.exit_plan_book.plans[command.plan_id]
+    return {
+      **stored.projection(),
+      "state_version": runtime.exit_plan_state_versions.get(command.plan_id),
+    }
+
+  async def command_exit_plan(
+    self,
+    run_id: str,
+    command: ExitPlanCommand,
+    *,
+    account_id: str,
+    config_version: int,
+  ) -> dict[str, Any]:
+    """Serialize an external plan command on its original StrategyRun."""
+
+    runtime = self.runs.get(str(run_id or ""))
+    if runtime is None:
+      raise RuntimeConsumerUnavailable(f"退出计划所属策略运行尚未恢复: {run_id}")
+    if not self._owns_runtime_exit_plan_book(runtime):
+      raise ValueError("退出计划不由该策略运行的 Engine ExitPlanBook 执行")
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return await self._execute_runtime_exit_plan_command(
+        runtime,
+        command=command,
+        account_id=account_id,
+        config_version=config_version,
+      )
+    if runtime.status not in {ExecutionStatus.RUNNING, ExecutionStatus.PAUSED}:
+      raise RuntimeConsumerUnavailable(
+        f"退出计划所属策略运行当前不消费命令: {run_id} ({runtime.status.value})"
+      )
+    if runtime.event_task is None or runtime.event_task.done():
+      raise RuntimeConsumerUnavailable(f"退出计划所属策略运行事件消费者未运行: {run_id}")
+    future = asyncio.get_running_loop().create_future()
+    await self._put_runtime_control_event(
+      runtime,
+      (
+        "exit_plan_command",
+        {
+          "command": command,
+          "account_id": str(account_id or ""),
+          "config_version": int(config_version),
+          "future": future,
+        },
+      ),
+    )
+    try:
+      return await asyncio.wait_for(
+        asyncio.shield(future),
+        timeout=_DURABLE_EVENT_APPLY_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      future.cancel()
+      raise RuntimeConsumerUnavailable(
+        f"退出计划所属策略运行未在时限内确认命令: {run_id}"
+      ) from exc
+
+  async def _execute_runtime_exit_plan_evaluate(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    plan_id: str,
+    account_id: str,
+    config_version: int,
+    instrument_code: str,
+    market_data: MarketDataSnapshot,
+  ) -> dict[str, Any]:
+    if not self._owns_runtime_exit_plan_book(runtime):
+      raise ValueError("退出计划不由当前策略的 Engine ExitPlanBook 执行")
+    if runtime.status != ExecutionStatus.RUNNING:
+      raise RuntimeConsumerUnavailable("退出计划所属策略运行当前未运行")
+    plan = runtime.exit_plan_book.plans.get(plan_id)
+    if plan is None:
+      raise ValueError("退出计划不属于当前策略运行")
+    if str(plan.template.account_id or "") != str(account_id or ""):
+      raise ValueError("退出计划不属于当前账户")
+    if int(plan.template.config_version or 0) != int(config_version):
+      raise ValueError(
+        f"CONFIG_VERSION_CONFLICT: current={plan.template.config_version}"
+      )
+    normalized_code = str(instrument_code or "").strip().upper()
+    if normalized_code != str(plan.template.instrument_code or "").strip().upper():
+      raise ValueError("退出计划标的与即时检查行情不一致")
+    if plan.status not in {
+      ExitPlanStatus.ACTIVE,
+      ExitPlanStatus.PARTIALLY_EXITED,
+    }:
+      raise ValueError("退出计划当前未在监控")
+    if not isinstance(market_data, MarketDataSnapshot):
+      raise ValueError("退出计划即时检查缺少权威行情快照")
+    timestamp = market_data.timestamp or runtime.context.current_time
+    if not isinstance(timestamp, datetime):
+      raise ValueError("退出计划即时检查行情时间无效")
+    await self._process_auto_exit_plans(
+      runtime,
+      instrument_code=normalized_code,
+      timestamp=timestamp,
+      market_data=market_data,
+      only_plan_id=plan_id,
+    )
+    stored = runtime.exit_plan_book.plans.get(plan_id)
+    if stored is None:
+      raise RuntimeError("退出计划即时检查后权威状态不可用")
+    return {
+      **stored.projection(),
+      "state_version": runtime.exit_plan_state_versions.get(plan_id),
+    }
+
+  async def evaluate_exit_plan_now(
+    self,
+    run_id: str,
+    *,
+    plan_id: str,
+    account_id: str,
+    config_version: int,
+    instrument_code: str,
+    market_data: MarketDataSnapshot,
+  ) -> dict[str, Any]:
+    """Evaluate exactly one T-owned plan on its original serial queue."""
+
+    runtime = self.runs.get(str(run_id or ""))
+    if runtime is None:
+      raise RuntimeConsumerUnavailable(f"退出计划所属策略运行尚未恢复: {run_id}")
+    if not self._owns_runtime_exit_plan_book(runtime):
+      raise ValueError("退出计划不由该策略运行的 Engine ExitPlanBook 执行")
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return await self._execute_runtime_exit_plan_evaluate(
+        runtime,
+        plan_id=plan_id,
+        account_id=account_id,
+        config_version=config_version,
+        instrument_code=instrument_code,
+        market_data=market_data,
+      )
+    if runtime.status != ExecutionStatus.RUNNING:
+      raise RuntimeConsumerUnavailable(
+        f"退出计划所属策略运行当前不消费行情: {run_id} ({runtime.status.value})"
+      )
+    if runtime.event_task is None or runtime.event_task.done():
+      raise RuntimeConsumerUnavailable(f"退出计划所属策略运行事件消费者未运行: {run_id}")
+    future = asyncio.get_running_loop().create_future()
+    await self._put_runtime_control_event(
+      runtime,
+      (
+        "exit_plan_evaluate",
+        {
+          "plan_id": str(plan_id),
+          "account_id": str(account_id),
+          "config_version": int(config_version),
+          "instrument_code": str(instrument_code).strip().upper(),
+          "market_data": market_data,
+          "future": future,
+        },
+      ),
+    )
+    try:
+      return await asyncio.wait_for(
+        asyncio.shield(future),
+        timeout=_DURABLE_EVENT_APPLY_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      future.cancel()
+      raise RuntimeConsumerUnavailable(
+        f"退出计划所属策略运行未在时限内完成即时检查: {run_id}"
+      ) from exc
+
+  async def register_external_exit_plan(
     self,
     run_id: str,
     template: ExitPlanTemplate | Dict[str, Any],
@@ -7463,22 +8199,86 @@ class StrategyExecutor:
     price: float,
     trade_time: Optional[datetime] = None,
   ) -> Dict[str, Any]:
-    """Register an audited fill that did not originate from this executor."""
-
+    """Serialize an audited external fill on the owning runtime."""
     runtime = self.runs.get(run_id)
     if runtime is None:
       raise ValueError("策略运行不存在或尚未启动")
-    plan = runtime.exit_plan_book.register_entry_fill(
-      template,
-      volume=volume,
-      price=price,
-      trade_time=trade_time,
+    if not self._owns_runtime_exit_plan_book(runtime):
+      raise ValueError("当前策略不接受 Engine ExitPlanBook 外部成交")
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return await self._register_external_exit_plan_serial(
+        runtime,
+        template,
+        volume=volume,
+        price=price,
+        trade_time=trade_time,
+      )
+    if runtime.status != ExecutionStatus.RUNNING:
+      raise RuntimeConsumerUnavailable(
+        f"策略运行当前不接受外部成交: {run_id} ({runtime.status.value})"
+      )
+    if runtime.event_task is None or runtime.event_task.done():
+      raise RuntimeConsumerUnavailable(f"策略运行事件消费者未运行: {run_id}")
+    future = asyncio.get_running_loop().create_future()
+    await self._put_runtime_control_event(
+      runtime,
+      (
+        "exit_plan_register_external",
+        {
+          "template": template,
+          "volume": int(volume),
+          "price": float(price),
+          "trade_time": trade_time,
+          "future": future,
+        },
+      ),
     )
-    runtime.exit_plan_book.prune_terminal(
-      int(runtime.context.parameters.get("exit_plan_history_limit", 200) or 200)
-    )
-    self._persist_exit_plan_book(runtime)
-    return plan.projection()
+    try:
+      return await asyncio.wait_for(
+        asyncio.shield(future),
+        timeout=_DURABLE_EVENT_APPLY_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      future.cancel()
+      raise RuntimeConsumerUnavailable(
+        f"策略运行未在时限内确认外部成交: {run_id}"
+      ) from exc
+
+  async def _register_external_exit_plan_serial(
+    self,
+    runtime: StrategyRuntime,
+    template: ExitPlanTemplate | Dict[str, Any],
+    *,
+    volume: int,
+    price: float,
+    trade_time: Optional[datetime],
+  ) -> Dict[str, Any]:
+    if not self._owns_runtime_exit_plan_book(runtime):
+      raise ValueError("当前策略不拥有 Engine ExitPlanBook")
+    for attempt in range(2):
+      plan = runtime.exit_plan_book.register_entry_fill(
+        template,
+        volume=volume,
+        price=price,
+        trade_time=trade_time,
+      )
+      try:
+        await self._persist_runtime_exit_plan_states(
+          runtime,
+          plan_ids=[plan.plan_id],
+          event_type="STRATEGY_EXTERNAL_ENTRY_REGISTERED",
+          evaluated_at=trade_time,
+        )
+        runtime.exit_plan_book.prune_terminal(
+          int(runtime.context.parameters.get("exit_plan_history_limit", 200) or 200)
+        )
+        if runtime.context.mode == StrategyRunMode.BACKTEST:
+          self._persist_exit_plan_book(runtime)
+        return runtime.exit_plan_book.plans[plan.plan_id].projection()
+      except AutoExitPlanConcurrencyError:
+        if attempt:
+          raise
+    raise AutoExitPlanConcurrencyError("外部成交登记冲突")
 
   async def _process_auto_exit_plans(
     self,
@@ -7487,25 +8287,63 @@ class StrategyExecutor:
     instrument_code: str,
     timestamp: datetime,
     market_data: MarketDataSnapshot,
+    only_plan_id: Optional[str] = None,
   ) -> None:
-    """Evaluate Engine-owned exit plans and route resulting SELL intents."""
+    """Evaluate one market fact, reloading and replaying it after one CAS race."""
 
-    if not any(
-      plan.template.instrument_code == instrument_code and plan.remaining_volume > 0
-      for plan in runtime.exit_plan_book.plans.values()
-    ):
-      return
-    from quantx_engine.exit_plan_monitor import exit_plan_monitor
-
-    if (
-      runtime.context.mode != StrategyRunMode.BACKTEST and exit_plan_monitor.is_running
-    ):
-      await AutoExitPlanService().sync_strategy_plan_book(
-        strategy_run_id=runtime.run_id,
-        book_state=runtime.exit_plan_book.to_dict(),
-        execution_mode=runtime.context.mode.value,
+    if not self._owns_runtime_exit_plan_book(runtime):
+      await self._route_recovered_managed_exit_intents(
+        runtime,
+        instrument_code=instrument_code,
       )
       return
+    for attempt in range(2):
+      await self._route_recovered_exit_plan_intents(
+        runtime,
+        instrument_code=instrument_code,
+        only_plan_id=only_plan_id,
+      )
+      try:
+        await self._process_auto_exit_plans_once(
+          runtime,
+          instrument_code=instrument_code,
+          timestamp=timestamp,
+          market_data=market_data,
+          only_plan_id=only_plan_id,
+        )
+        return
+      except AutoExitPlanConcurrencyError:
+        # A preceding plan in this same multi-plan evaluation may already have
+        # committed its intent reservation.  Restore that crash-gap intent
+        # before replaying the exact same market fact against the reloaded book.
+        await self._restore_runtime_exit_plan_intents(runtime)
+        if attempt:
+          raise
+
+  async def _process_auto_exit_plans_once(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+    timestamp: datetime,
+    market_data: MarketDataSnapshot,
+    only_plan_id: Optional[str] = None,
+  ) -> None:
+    """Apply one attempt of an Engine-owned exit-plan evaluation."""
+
+    candidate_plan_ids = {
+      plan.plan_id
+      for plan in runtime.exit_plan_book.plans.values()
+      if plan.template.instrument_code == instrument_code
+      and plan.remaining_volume > 0
+      and (only_plan_id is None or plan.plan_id == only_plan_id)
+    }
+    if not candidate_plan_ids:
+      return
+    before_material_state = {
+      plan_id: self._material_exit_plan_state(runtime.exit_plan_book.plans[plan_id])
+      for plan_id in candidate_plan_ids
+    }
     bids = list(getattr(market_data, "bid_price", []) or [])
     asks = list(getattr(market_data, "ask_price", []) or [])
     if runtime.context.parameters.get("exit_plan_replay"):
@@ -7575,9 +8413,27 @@ class StrategyExecutor:
       ),
       source=str(getattr(market_data, "source", "") or ""),
     )
-    decisions = runtime.exit_plan_book.evaluate(instrument_code, context)
+    if only_plan_id is None:
+      decisions = runtime.exit_plan_book.evaluate(instrument_code, context)
+    else:
+      selected_plan = runtime.exit_plan_book.plans[only_plan_id]
+      selected_decision = runtime.exit_plan_book.evaluator.evaluate(
+        selected_plan, context
+      )
+      decisions = [selected_decision] if selected_decision is not None else []
     if not decisions:
-      self._persist_exit_plan_book(runtime)
+      changed_plan_ids = {
+        plan_id
+        for plan_id in candidate_plan_ids
+        if self._material_exit_plan_state(runtime.exit_plan_book.plans[plan_id])
+        != before_material_state[plan_id]
+      }
+      await self._persist_runtime_exit_plan_states(
+        runtime,
+        plan_ids=changed_plan_ids,
+        event_type="STRATEGY_PLAN_EVALUATED",
+        evaluated_at=timestamp,
+      )
       return
 
     intents: List[TradeIntent] = []
@@ -7595,12 +8451,58 @@ class StrategyExecutor:
       execution_mode = TradeIntentExecutionMode(
         str(execution.execution_mode or "AUTO").upper()
       )
-      if runtime.context.mode == StrategyRunMode.LIVE:
-        # LIVE automation is granted only to the persisted plan version by
-        # ExitPlanAuthorizationChallengeService.  This in-memory fallback has
-        # no durable challenge envelope to validate, so it must fail closed
-        # even when an old strategy template contains the legacy boolean.
-        execution_mode = TradeIntentExecutionMode.MANUAL_CONFIRM
+      authorization_metadata: dict[str, Any] = {
+        "auto_exit_authorization_code": "PAPER_NOT_REQUIRED",
+        "exact_auto_exit_authorized": False,
+        "auto_exit_authorization_user_id": "",
+        "auto_exit_authorization_fingerprint": "",
+        "auto_exit_authorization_challenge_id": "",
+        "auto_exit_authorization_device_session_id": "",
+        "auto_exit_authorized_at": "",
+        "auto_exit_authorization_expires_at": "",
+      }
+      if (
+        runtime.context.mode == StrategyRunMode.LIVE
+        and execution_mode == TradeIntentExecutionMode.AUTO
+      ):
+        authorization = await AutoExitAuthorizationGuard.validate_or_invalidate(
+          plan.plan_id
+        )
+        authorization_metadata["auto_exit_authorization_code"] = authorization.code
+        if authorization.valid:
+          authorization_metadata.update(
+            {
+              "exact_auto_exit_authorized": True,
+              "auto_exit_authorization_user_id": str(
+                authorization.authorization_user_id or ""
+              ),
+              "auto_exit_authorization_fingerprint": str(
+                authorization.fingerprint or ""
+              ),
+              "auto_exit_authorization_challenge_id": str(
+                authorization.challenge_id or ""
+              ),
+              "auto_exit_authorization_device_session_id": str(
+                authorization.device_session_id or ""
+              ),
+              "auto_exit_authorized_at": (
+                authorization.authorized_at.isoformat()
+                if authorization.authorized_at is not None
+                else ""
+              ),
+              "auto_exit_authorization_expires_at": (
+                authorization.authorization_expires_at.isoformat()
+                if authorization.authorization_expires_at is not None
+                else ""
+              ),
+            }
+          )
+        else:
+          execution_mode = TradeIntentExecutionMode.MANUAL_CONFIRM
+      elif runtime.context.mode == StrategyRunMode.LIVE:
+        authorization_metadata["auto_exit_authorization_code"] = (
+          "EXIT_POLICY_REQUIRES_APPROVAL"
+        )
       priority = (
         TradeIntentPriority.URGENT
         if decision.rule_type
@@ -7627,6 +8529,11 @@ class StrategyExecutor:
         max_price_deviation_bps=execution.max_slippage_bps,
         metadata={
           **dict(plan.template.metadata or {}),
+          "owner_type": "EXIT_PLAN",
+          "owner_id": plan.plan_id,
+          "intent_origin_type": "STRATEGY_RUN",
+          "account_id": plan.template.account_id,
+          "strategy_run_id": runtime.run_id,
           "exit_plan_id": plan.plan_id,
           "exit_rule_id": decision.rule_id,
           "exit_rule_type": decision.rule_type,
@@ -7634,6 +8541,7 @@ class StrategyExecutor:
           "exit_plan_source_type": plan.template.source_type,
           "exit_plan_source_id": plan.template.source_id,
           "exit_plan_config_version": plan.template.config_version,
+          "exit_policy_version": plan.template.config_version,
           "price_type": execution.price_type,
           "price_reference": execution.price_reference.value,
           "protected_limit": execution.protected_limit,
@@ -7649,12 +8557,31 @@ class StrategyExecutor:
             else "DELAY"
           ),
           "exit_metrics": dict(decision.metrics or {}),
+          **authorization_metadata,
         },
+      )
+      intent.metadata["idempotency_key"] = (
+        f"strategy-exit:{plan.plan_id}:{intent.intent_id}"
       )
       runtime.exit_plan_book.mark_intent(decision, intent.intent_id)
       intents.append(intent)
 
-    self._persist_exit_plan_book(runtime)
+    intents_by_plan = {
+      str(intent.metadata.get("exit_plan_id") or ""): intent for intent in intents
+    }
+    changed_plan_ids = {
+      plan_id
+      for plan_id in candidate_plan_ids
+      if self._material_exit_plan_state(runtime.exit_plan_book.plans[plan_id])
+      != before_material_state[plan_id]
+    }
+    await self._persist_runtime_exit_plan_states(
+      runtime,
+      plan_ids=changed_plan_ids,
+      event_type="STRATEGY_EXIT_INTENT_RESERVED",
+      intents_by_plan=intents_by_plan,
+      evaluated_at=timestamp,
+    )
     if intents:
       await self._process_strategy_output(
         runtime,
@@ -7669,65 +8596,251 @@ class StrategyExecutor:
         ),
       )
 
-  def _apply_exit_plan_order_event(
+  async def _apply_exit_plan_order_event(
+    self, runtime: StrategyRuntime, event: OrderStateEvent
+  ) -> None:
+    """Replay one durable order fact after a concurrent plan revision."""
+
+    if not self._owns_runtime_exit_plan_book(runtime):
+      return
+    for attempt in range(2):
+      try:
+        await self._apply_exit_plan_order_event_once(runtime, event)
+        return
+      except AutoExitPlanConcurrencyError:
+        if attempt:
+          raise
+
+  @staticmethod
+  def _exit_plan_runtime_event_business_key(
+    plan_id: str,
+    metadata: Mapping[str, Any],
+  ) -> str:
+    runtime_event_key = str(metadata.get("runtime_event_key") or "").strip()
+    if not plan_id or not runtime_event_key:
+      return ""
+    identity = f"{plan_id}\0{runtime_event_key}".encode("utf-8")
+    return f"strategy-exit-runtime-event:{hashlib.sha256(identity).hexdigest()}"
+
+  async def _deduplicated_managed_exit_runtime_event(
+    self,
+    runtime: StrategyRuntime,
+    metadata: Mapping[str, Any],
+  ) -> Optional[RuntimeStatePatch]:
+    """Reload a dedicated plan fact already committed before a crash.
+
+    The AutoExitPlan aggregate and its event marker share one transaction.
+    RuntimeStateManager checkpoints afterward, so a crash in between must
+    restore the aggregate instead of invoking the strategy callback twice.
+    """
+
+    if (
+      runtime.strategy_class is not AshareManagedExitPlanStrategy
+      or runtime.context.mode == StrategyRunMode.BACKTEST
+      or runtime.strategy is None
+    ):
+      return None
+    plan_id = str(dict(metadata or {}).get("exit_plan_id") or "").strip()
+    event_business_key = self._exit_plan_runtime_event_business_key(
+      plan_id,
+      metadata,
+    )
+    if not plan_id or not event_business_key:
+      return None
+    managed_plan_id, managed_config_version = self._required_managed_plan_binding(
+      runtime,
+      expected_kind="EXIT",
+    )
+    if managed_plan_id != plan_id:
+      raise RuntimeError("独立卖出持久回报与冻结运行绑定不一致")
+    service = AutoExitPlanService()
+    if not await service.strategy_plan_event_applied(
+      plan_id=plan_id,
+      business_key=event_business_key,
+    ):
+      return None
+    canonical_state, canonical_version = await service.load_managed_runtime_plan(
+      strategy_run_id=runtime.run_id,
+      expected_plan_id=managed_plan_id,
+      expected_config_version=managed_config_version,
+    )
+    canonical_plan = ExitPlan.from_dict(canonical_state)
+    if canonical_plan.plan_id != managed_plan_id:
+      raise RuntimeError("独立卖出持久回报恢复了错误退出计划")
+    snapshot = {MANAGED_EXIT_RUNTIME_KEY: canonical_state}
+    runtime.strategy.apply_state_snapshot(snapshot)
+    runtime.exit_plan_state_versions = {
+      managed_plan_id: int(canonical_version),
+    }
+    return RuntimeStatePatch(set=snapshot)
+
+  async def _apply_exit_plan_order_event_once(
     self, runtime: StrategyRuntime, event: OrderStateEvent
   ) -> None:
     metadata = dict(event.metadata or {})
     plan_id = str(metadata.get("exit_plan_id", "") or "")
     if not plan_id:
       return
-    effective_status = event.status
-    plan = runtime.exit_plan_book.plans.get(plan_id)
-    normalized_status = str(event.status or "").upper()
-    if (
-      plan is not None
-      and normalized_status in {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}
-      and int(event.filled_volume or 0) > int(plan.pending_filled_volume or 0)
+    event_business_key = self._exit_plan_runtime_event_business_key(plan_id, metadata)
+    if event_business_key and await AutoExitPlanService().strategy_plan_event_applied(
+      plan_id=plan_id,
+      business_key=event_business_key,
     ):
-      # The terminal order projection can lead its execution report. Keep the
-      # plan pending until fills catch up; otherwise the next tick can emit a
-      # duplicate exit. A partial cancel's reported fill is the terminal target.
-      if normalized_status != "FILLED":
-        plan.pending_requested_volume = int(event.filled_volume or 0)
-      effective_status = "FILLED"
+      await self._load_runtime_exit_plan_book(runtime)
+      return
     event_time = event.timestamp or runtime.context.current_time or time_utils.now()
+    normalized_status = str(event.status or "").upper()
+    zero_fill_invalidation = metadata.get("zero_fill_proof_invalidation")
+    if (
+      isinstance(zero_fill_invalidation, Mapping)
+      and zero_fill_invalidation.get("released") is True
+      and str(zero_fill_invalidation.get("release_kind") or "")
+      == "ZERO_FILL_PROOF"
+    ):
+      released_intent_id = str(metadata.get("intent_id", "") or "")
+      plan = runtime.exit_plan_book.plans.get(plan_id)
+      if (
+        plan is not None
+        and released_intent_id
+        and released_intent_id not in plan.reconciled_zero_fill_intent_ids
+      ):
+        plan.reconciled_zero_fill_intent_ids.append(released_intent_id)
+    local_zero_fill_proof = (
+      str(metadata.get("execution_terminal_source") or "").upper()
+      == LOCAL_PRE_BROKER_ZERO_FILL_SOURCE
+    )
+    if local_zero_fill_proof and (
+      normalized_status in {"REJECTED", "CANCELLED", "EXPIRED"}
+      or (
+        normalized_status == "PENDING"
+        and str(metadata.get("risk_action") or "").upper() == "DELAY"
+      )
+    ):
+      normalized_status = "RECONCILED_ZERO_FILL"
     runtime.exit_plan_book.apply_order_event(
       plan_id=plan_id,
       intent_id=str(metadata.get("intent_id", "") or ""),
-      status=effective_status,
+      status=normalized_status,
       order_id=str(event.order_id or ""),
       risk_action=str(metadata.get("risk_action", "") or ""),
       timestamp_ms=int(event_time.timestamp() * 1000),
+      cumulative_filled_volume=event.filled_volume,
     )
-    self._persist_exit_plan_book(runtime)
+    await self._persist_runtime_exit_plan_states(
+      runtime,
+      plan_ids=[plan_id],
+      event_type="STRATEGY_EXIT_ORDER_APPLIED",
+      event_business_keys_by_plan={plan_id: event_business_key},
+      evaluated_at=event_time,
+    )
 
-  def _apply_exit_plan_trade_event(
+  async def _apply_exit_plan_trade_event(
+    self, runtime: StrategyRuntime, event: TradeExecutionEvent
+  ) -> None:
+    """Replay one durable execution fact after a concurrent plan revision."""
+
+    if not self._owns_runtime_exit_plan_book(runtime):
+      return
+    for attempt in range(2):
+      try:
+        await self._apply_exit_plan_trade_event_once(runtime, event)
+        return
+      except AutoExitPlanConcurrencyError:
+        if attempt:
+          raise
+
+  async def _apply_exit_plan_trade_event_once(
     self, runtime: StrategyRuntime, event: TradeExecutionEvent
   ) -> None:
     metadata = dict(event.metadata or {})
     trade_type = str(event.trade_type or "").upper()
     changed = False
+    entry_authorizations_by_plan: dict[str, Mapping[str, Any]] = {}
+    plan_id = str(
+      metadata.get("exit_plan_id")
+      or dict(metadata.get("exit_plan_template") or {}).get("plan_id")
+      or ""
+    )
+    event_business_key = self._exit_plan_runtime_event_business_key(plan_id, metadata)
+    if event_business_key and await AutoExitPlanService().strategy_plan_event_applied(
+      plan_id=plan_id,
+      business_key=event_business_key,
+    ):
+      await self._load_runtime_exit_plan_book(runtime)
+      return
     if trade_type == "BUY" and metadata.get("exit_plan_template"):
-      runtime.exit_plan_book.register_entry_fill(
+      registered_plan = runtime.exit_plan_book.register_entry_fill(
         metadata["exit_plan_template"],
         volume=event.volume,
         price=event.price,
         trade_time=event.trade_time or runtime.context.current_time,
       )
+      challenge_id = str(
+        metadata.get("t_trade_entry_approval_challenge_id") or ""
+      ).strip()
+      entry_intent_id = str(metadata.get("intent_id") or "").strip()
+      if challenge_id and entry_intent_id:
+        entry_authorizations_by_plan[registered_plan.plan_id] = {
+          "entry_intent_id": entry_intent_id,
+          "challenge_id": challenge_id,
+          "cumulative_filled_volume": int(
+            registered_plan.entry_filled_volume or 0
+          ),
+        }
+      plan_id = registered_plan.plan_id
       changed = True
     elif trade_type == "SELL" and metadata.get("exit_plan_id"):
+      plan_id = str(metadata["exit_plan_id"])
+      zero_fill_invalidation = metadata.get("zero_fill_proof_invalidation")
+      if (
+        isinstance(zero_fill_invalidation, Mapping)
+        and zero_fill_invalidation.get("released") is True
+        and str(zero_fill_invalidation.get("release_kind") or "")
+        == "ZERO_FILL_PROOF"
+      ):
+        released_intent_id = str(
+          metadata.get("intent_id") or metadata.get("exit_intent_id") or ""
+        )
+        plan = runtime.exit_plan_book.plans.get(plan_id)
+        if (
+          plan is not None
+          and released_intent_id
+          and released_intent_id not in plan.reconciled_zero_fill_intent_ids
+        ):
+          plan.reconciled_zero_fill_intent_ids.append(released_intent_id)
       runtime.exit_plan_book.apply_exit_fill(
-        plan_id=str(metadata["exit_plan_id"]),
+        plan_id=plan_id,
         volume=event.volume,
         price=event.price,
         rule_id=str(metadata.get("exit_rule_id", "") or ""),
+        intent_id=str(
+          metadata.get("intent_id")
+          or metadata.get("exit_intent_id")
+          or ""
+        ),
       )
       changed = True
     if changed:
+      await self._persist_runtime_exit_plan_states(
+        runtime,
+        plan_ids=[plan_id],
+        event_type=(
+          "STRATEGY_EXIT_FILL_APPLIED"
+          if trade_type == "SELL"
+          else "STRATEGY_ENTRY_FILL_REGISTERED"
+        ),
+        entry_authorizations_by_plan=entry_authorizations_by_plan,
+        event_business_keys_by_plan={plan_id: event_business_key},
+        evaluated_at=event.trade_time or runtime.context.current_time,
+      )
+      # Persist the just-completed aggregate before bounding its in-memory
+      # history.  Pruning first can skip the selected plan and resurrect an old
+      # EXIT_PENDING row after restart.
       runtime.exit_plan_book.prune_terminal(
         int(runtime.context.parameters.get("exit_plan_history_limit", 200) or 200)
       )
-      self._persist_exit_plan_book(runtime)
+      if runtime.context.mode == StrategyRunMode.BACKTEST:
+        self._persist_exit_plan_book(runtime)
 
   async def _run_backtest_timeline_with_ticks(
     self,
@@ -8190,11 +9303,26 @@ class StrategyExecutor:
     if not runtime.strategy:
       return None
     try:
-      self._apply_exit_plan_order_event(runtime, event)
+      replay_patch = await self._deduplicated_managed_exit_runtime_event(
+        runtime,
+        event.metadata,
+      )
+      if replay_patch is not None:
+        return replay_patch
+      await self._apply_exit_plan_order_event(runtime, event)
       self._update_t_trade_entry_reservation(runtime, event)
       result = runtime.strategy.on_order(event)
       patch = await result if inspect.isawaitable(result) else result
       if patch:
+        await self._persist_dedicated_managed_exit_patch(
+          runtime,
+          patch,
+          evaluated_at=event.timestamp or runtime.context.current_time,
+          event_business_key=self._exit_plan_runtime_event_business_key(
+            str(dict(event.metadata or {}).get("exit_plan_id") or ""),
+            dict(event.metadata or {}),
+          ),
+        )
         self._apply_runtime_state_patch(runtime, patch)
       self._refresh_t_trade_entry_reservation(runtime, event)
       return patch
@@ -8217,10 +9345,25 @@ class StrategyExecutor:
     if not runtime.strategy:
       return None
     try:
-      self._apply_exit_plan_trade_event(runtime, event)
+      replay_patch = await self._deduplicated_managed_exit_runtime_event(
+        runtime,
+        event.metadata,
+      )
+      if replay_patch is not None:
+        return replay_patch
+      await self._apply_exit_plan_trade_event(runtime, event)
       result = runtime.strategy.on_trade(event)
       patch = await result if inspect.isawaitable(result) else result
       if patch:
+        await self._persist_dedicated_managed_exit_patch(
+          runtime,
+          patch,
+          evaluated_at=event.trade_time or runtime.context.current_time,
+          event_business_key=self._exit_plan_runtime_event_business_key(
+            str(dict(event.metadata or {}).get("exit_plan_id") or ""),
+            dict(event.metadata or {}),
+          ),
+        )
         self._apply_runtime_state_patch(runtime, patch)
       self._refresh_t_trade_entry_reservation(runtime, event)
       return patch
@@ -8519,6 +9662,9 @@ class StrategyExecutor:
         else None
       ),
       "exit_plan_book": copy.deepcopy(runtime.exit_plan_book.to_dict()),
+      "exit_plan_state_versions": copy.deepcopy(
+        runtime.exit_plan_state_versions
+      ),
       "metrics": copy.deepcopy(runtime.metrics),
       "last_order_report_at": runtime.last_order_report_at,
       "last_trade_report_at": runtime.last_trade_report_at,
@@ -8554,6 +9700,9 @@ class StrategyExecutor:
     runtime.exit_plan_book = ExitPlanBook.from_dict(
       copy.deepcopy(snapshot["exit_plan_book"]),
       evaluator=ExitPlanEvaluator(self.exit_strategy_registry),
+    )
+    runtime.exit_plan_state_versions = copy.deepcopy(
+      snapshot["exit_plan_state_versions"]
     )
     runtime.metrics = copy.deepcopy(snapshot["metrics"])
     runtime.last_order_report_at = snapshot["last_order_report_at"]
@@ -8657,7 +9806,12 @@ class StrategyExecutor:
               reason="DURABLE_EVENT_BARRIER",
             )
             await self._apply_pending_runtime_market_invalidations(runtime)
-          if event_type == "universe" and isinstance(data, dict):
+          if event_type in {
+            "universe",
+            "exit_plan_command",
+            "exit_plan_evaluate",
+            "exit_plan_register_external",
+          } and isinstance(data, dict):
             future = data.get("future")
             if future is not None and not future.done():
               future.set_exception(
@@ -8705,6 +9859,9 @@ class StrategyExecutor:
           "order",
           "trade",
           "universe",
+          "exit_plan_command",
+          "exit_plan_evaluate",
+          "exit_plan_register_external",
         ]:
           if event_type in {"tick", "kline"}:
             _dropped, affected = self._drain_runtime_market_queue(runtime)
@@ -8779,6 +9936,51 @@ class StrategyExecutor:
               )
         elif event_type == "entry_plan_evaluate":
           await self._process_entry_plan_evaluate(runtime, data)
+        elif event_type == "exit_plan_command":
+          future = data.get("future")
+          try:
+            result = await self._execute_runtime_exit_plan_command(
+              runtime,
+              command=data["command"],
+              account_id=str(data.get("account_id") or ""),
+              config_version=int(data.get("config_version") or 0),
+            )
+            if future is not None and not future.done():
+              future.set_result(result)
+          except Exception as exc:
+            if future is not None and not future.done():
+              future.set_exception(exc)
+        elif event_type == "exit_plan_evaluate":
+          future = data.get("future")
+          try:
+            result = await self._execute_runtime_exit_plan_evaluate(
+              runtime,
+              plan_id=str(data.get("plan_id") or ""),
+              account_id=str(data.get("account_id") or ""),
+              config_version=int(data.get("config_version") or 0),
+              instrument_code=str(data.get("instrument_code") or ""),
+              market_data=data.get("market_data"),
+            )
+            if future is not None and not future.done():
+              future.set_result(result)
+          except Exception as exc:
+            if future is not None and not future.done():
+              future.set_exception(exc)
+        elif event_type == "exit_plan_register_external":
+          future = data.get("future")
+          try:
+            result = await self._register_external_exit_plan_serial(
+              runtime,
+              data["template"],
+              volume=int(data.get("volume") or 0),
+              price=float(data.get("price") or 0.0),
+              trade_time=data.get("trade_time"),
+            )
+            if future is not None and not future.done():
+              future.set_result(result)
+          except Exception as exc:
+            if future is not None and not future.done():
+              future.set_exception(exc)
         elif event_type == "order":
           self._update_broker_report_health(runtime, "order", data)
           if runtime.state_manager and hasattr(data, "status"):
@@ -8939,7 +10141,12 @@ class StrategyExecutor:
           custom_updates = (
             runtime.strategy.state.to_dict() if runtime.strategy is not None else {}
           )
-          custom_updates[EXIT_PLAN_BOOK_STATE_KEY] = runtime.exit_plan_book.to_dict()
+          if runtime.context.mode == StrategyRunMode.BACKTEST:
+            custom_updates[EXIT_PLAN_BOOK_STATE_KEY] = (
+              runtime.exit_plan_book.to_dict()
+            )
+          else:
+            custom_updates.pop(EXIT_PLAN_BOOK_STATE_KEY, None)
           checkpointed = await runtime.state_manager.checkpoint_durable_runtime_event(
             durable_event_key,
             custom_updates=custom_updates,
@@ -9021,6 +10228,7 @@ class StrategyExecutor:
           completion.set_result(True)
 
       except Exception as e:
+        exit_plan_cas_conflict = isinstance(e, AutoExitPlanConcurrencyError)
         has_applied_runtime_event = getattr(
           runtime.state_manager,
           "has_applied_runtime_event",
@@ -9046,6 +10254,11 @@ class StrategyExecutor:
             runtime,
             durable_rollback_snapshot,
           )
+          if exit_plan_cas_conflict:
+            # The generic durable rollback restores the pre-callback in-memory
+            # snapshot.  Replace only the exit aggregate with canonical DB
+            # state so a retry cannot act on the stale version again.
+            await self._load_runtime_exit_plan_book(runtime)
         if durable_event_key and (
           runtime.durable_event_barrier_key in {None, durable_event_key}
         ):
@@ -9300,6 +10513,15 @@ class StrategyExecutor:
 
     if runtime.strategy is None or not isinstance(payload, dict):
       raise ValueError("人工建仓触发缺少运行策略或结构化事件")
+    if str(payload.get("type") or "") == "EXIT_PLAN_EVALUATE_NOW":
+      binding = dict(runtime.context.parameters.get("_managed_plan_binding") or {})
+      if (
+        runtime.strategy_class is not AshareManagedExitPlanStrategy
+        or str(binding.get("plan_kind") or "").upper() != "EXIT"
+        or str(binding.get("plan_id") or "")
+        != str(payload.get("plan_id") or "")
+      ):
+        raise ValueError("卖出计划即时检查与独立 StrategyRun 绑定不一致")
     instrument_code = str(payload.get("instrument_code") or "").upper()
     if instrument_code not in set(runtime.context.instruments or []):
       raise ValueError("人工建仓触发标的与固定策略运行不匹配")
@@ -9770,6 +10992,22 @@ class StrategyExecutor:
       getattr(strategy, "USES_T_TRADE_OPPORTUNITY_PROFILE", False)
       or getattr(strategy_class, "USES_T_TRADE_OPPORTUNITY_PROFILE", False)
       or runtime.context.parameters.get("t_trade_opportunity_v3")
+    )
+
+  @staticmethod
+  def _owns_runtime_exit_plan_book(runtime: StrategyRuntime) -> bool:
+    """Return whether this strategy explicitly owns the Engine ExitPlanBook.
+
+    A strategy_run_id is lineage, not an execution-owner discriminator.
+    Dedicated managed-exit strategies evaluate their own serialized plan state;
+    only the T assistant opts into the shared runtime component.
+    """
+
+    strategy = getattr(runtime, "strategy", None)
+    strategy_class = getattr(runtime, "strategy_class", None)
+    return bool(
+      getattr(strategy, "OWNS_RUNTIME_EXIT_PLAN_BOOK", False)
+      or getattr(strategy_class, "OWNS_RUNTIME_EXIT_PLAN_BOOK", False)
     )
 
   @staticmethod
@@ -10438,6 +11676,140 @@ class StrategyExecutor:
     base_profile.setdefault("instrument_code", instrument_code)
     return base_profile
 
+  async def _bind_exit_plan_execution_authorization(
+    self,
+    runtime: StrategyRuntime,
+    intents: Iterable[TradeIntent],
+  ) -> None:
+    """Apply durable LIVE authorization to every ExitPlan-owned SELL intent.
+
+    Strategies remain pure and may only request AUTO.  The Engine turns that
+    request into an executable exact grant or a manual-confirm intent before
+    any durable TradeIntent row is written.
+    """
+
+    for intent in intents:
+      metadata = dict(intent.metadata or {})
+      if intent.direction != TradeIntentDirection.SELL:
+        continue
+      plan_id = str(metadata.get("exit_plan_id") or "").strip()
+      if str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN":
+        continue
+      if not plan_id or str(metadata.get("owner_id") or "") != plan_id:
+        raise ValueError("退出意图缺少精确 ExitPlan 所有权绑定")
+      # The runtime ExitPlanBook already performed this guard while reserving
+      # its intent.  Dedicated managed-exit strategies enter here instead.
+      if "auto_exit_authorization_code" in metadata:
+        continue
+      authorization_metadata: dict[str, Any] = {
+        "auto_exit_authorization_code": "PAPER_NOT_REQUIRED",
+        "exact_auto_exit_authorized": False,
+        "auto_exit_authorization_user_id": "",
+        "auto_exit_authorization_fingerprint": "",
+        "auto_exit_authorization_challenge_id": "",
+      }
+      if runtime.context.mode == StrategyRunMode.LIVE and (
+        intent.execution_mode == TradeIntentExecutionMode.AUTO
+      ):
+        authorization = await AutoExitAuthorizationGuard.validate_or_invalidate(
+          plan_id
+        )
+        authorization_metadata["auto_exit_authorization_code"] = authorization.code
+        if authorization.valid:
+          authorization_metadata.update(
+            {
+              "exact_auto_exit_authorized": True,
+              "auto_exit_authorization_user_id": str(
+                authorization.authorization_user_id or ""
+              ),
+              "auto_exit_authorization_fingerprint": str(
+                authorization.fingerprint or ""
+              ),
+              "auto_exit_authorization_challenge_id": str(
+                authorization.challenge_id or ""
+              ),
+            }
+          )
+        else:
+          intent.execution_mode = TradeIntentExecutionMode.MANUAL_CONFIRM
+      elif runtime.context.mode == StrategyRunMode.LIVE:
+        authorization_metadata["auto_exit_authorization_code"] = (
+          "EXIT_POLICY_REQUIRES_APPROVAL"
+        )
+      intent.metadata.update(authorization_metadata)
+
+  async def _persist_dedicated_managed_exit_patch(
+    self,
+    runtime: StrategyRuntime,
+    patch: Any,
+    *,
+    intents: Iterable[TradeIntent] = (),
+    evaluated_at: Optional[datetime] = None,
+    event_business_key: str = "",
+  ) -> None:
+    """Cross the dedicated plan-state/intent boundary before any routing."""
+
+    if (
+      runtime.strategy_class is not AshareManagedExitPlanStrategy
+      or runtime.context.mode == StrategyRunMode.BACKTEST
+      or patch is None
+    ):
+      return
+    managed_state = getattr(patch, "set", {}).get(MANAGED_EXIT_RUNTIME_KEY)
+    if not isinstance(managed_state, Mapping):
+      return
+    plan = ExitPlan.from_dict(dict(managed_state))
+    intent_list = list(intents)
+    owned_intents = [
+      intent
+      for intent in intent_list
+      if str(dict(intent.metadata or {}).get("exit_plan_id") or "") == plan.plan_id
+    ]
+    if len(owned_intents) != len(intent_list) or len(owned_intents) > 1:
+      raise ValueError("独立卖出策略输出包含不属于当前计划的交易意图")
+    expected_version = runtime.exit_plan_state_versions.get(plan.plan_id)
+    if expected_version is None:
+      raise RuntimeError("独立卖出策略缺少退出计划状态版本")
+    managed_plan_id, managed_config_version = self._required_managed_plan_binding(
+      runtime,
+      expected_kind="EXIT",
+    )
+    if managed_plan_id != plan.plan_id:
+      raise RuntimeError("独立卖出策略输出计划与冻结运行绑定不一致")
+    try:
+      stored_state, state_version = (
+        await AutoExitPlanService().persist_managed_runtime_transition(
+          strategy_run_id=runtime.run_id,
+          expected_plan_id=managed_plan_id,
+          expected_config_version=managed_config_version,
+          plan_state=plan.to_dict(),
+          expected_state_version=int(expected_version),
+          intent=owned_intents[0] if owned_intents else None,
+          evaluated_at=evaluated_at,
+          event_business_key=event_business_key or None,
+        )
+      )
+    except Exception:
+      canonical_state, canonical_version = (
+        await AutoExitPlanService().load_managed_runtime_plan(
+          strategy_run_id=runtime.run_id,
+          expected_plan_id=managed_plan_id,
+          expected_config_version=managed_config_version,
+        )
+      )
+      canonical_plan_id = ExitPlan.from_dict(canonical_state).plan_id
+      runtime.exit_plan_state_versions = {
+        canonical_plan_id: int(canonical_version)
+      }
+      if runtime.strategy is not None:
+        runtime.strategy.apply_state_snapshot(
+          {MANAGED_EXIT_RUNTIME_KEY: canonical_state}
+        )
+      getattr(patch, "set", {})[MANAGED_EXIT_RUNTIME_KEY] = canonical_state
+      raise
+    getattr(patch, "set", {})[MANAGED_EXIT_RUNTIME_KEY] = stored_state
+    runtime.exit_plan_state_versions[plan.plan_id] = int(state_version)
+
   async def _process_strategy_output(
     self,
     runtime: StrategyRuntime,
@@ -10469,6 +11841,7 @@ class StrategyExecutor:
       )
       return
     intents = output.trade_intents or []
+    await self._bind_exit_plan_execution_authorization(runtime, intents)
     if runtime._checkpoint_diagnostic_summaries and (
       intents or output.runtime_state_patch or output.exit_plan_commands
     ):
@@ -10550,20 +11923,19 @@ class StrategyExecutor:
         )
       return
     if output.runtime_state_patch:
-      self._apply_runtime_state_patch(runtime, output.runtime_state_patch)
-      managed_exit_state = output.runtime_state_patch.set.get(
-        "managed_exit_plan_runtime"
+      await self._persist_dedicated_managed_exit_patch(
+        runtime,
+        output.runtime_state_patch,
+        intents=intents,
+        evaluated_at=(input_snapshot.timestamp if input_snapshot else None),
       )
-      if isinstance(managed_exit_state, Mapping):
-        await AutoExitPlanService().sync_managed_runtime_state(
-          strategy_run_id=runtime.run_id,
-          plan_state=managed_exit_state,
-          evaluated_at=(input_snapshot.timestamp if input_snapshot else None),
-        )
+      self._apply_runtime_state_patch(runtime, output.runtime_state_patch)
     if output.exit_plan_commands:
-      for command in output.exit_plan_commands:
-        runtime.exit_plan_book.apply_command(command)
-      self._persist_exit_plan_book(runtime)
+      await self._apply_runtime_exit_plan_commands(
+        runtime,
+        output.exit_plan_commands,
+        evaluated_at=(input_snapshot.timestamp if input_snapshot else None),
+      )
     if runtime.context.mode == StrategyRunMode.BACKTEST:
       created_at = self._runtime_now(runtime)
       for intent in intents:
@@ -12075,9 +13447,11 @@ class StrategyExecutor:
           stage_actionable_material_events=immediate_actionable_material,
         )
       if output.exit_plan_commands:
-        for command in output.exit_plan_commands:
-          runtime.exit_plan_book.apply_command(command)
-        self._persist_exit_plan_book(runtime)
+        await self._apply_runtime_exit_plan_commands(
+          runtime,
+          output.exit_plan_commands,
+          evaluated_at=(input_snapshot.timestamp if input_snapshot else None),
+        )
       # Keep the StrategyInput -> StrategyOutput audit in the same durable
       # transaction as this causally-required RuntimeState CAS.  The runtime
       # manager keeps the immutable trace pending through a failed or
@@ -13113,6 +14487,7 @@ class StrategyExecutor:
     approval_expectation: Optional[Mapping[str, Any]] = None,
     approval_audit: Optional[Mapping[str, Any]] = None,
     approval_mode: str = "MANUAL",
+    expected_exit_plan_id: Optional[str] = None,
   ) -> Dict[str, Any]:
     """Approve one intent after an in-lock fail-closed recheck."""
 
@@ -13127,18 +14502,75 @@ class StrategyExecutor:
           t_trade_account_coordination_lock(account_id)
         )
       await approval_stack.enter_async_context(runtime.approval_lock)
+      intent = runtime.pending_approvals.get(intent_id)
+      normalized_exit_plan_id = str(expected_exit_plan_id or "").strip()
+      if intent is None and normalized_exit_plan_id:
+        try:
+          queued = await AutoExitPlanService().load_existing_exit_order_projection(
+            strategy_run_id=runtime.run_id,
+            expected_plan_id=normalized_exit_plan_id,
+            intent_id=intent_id,
+            account_id=account_id,
+          )
+        except Exception as exc:
+          self._runtime_log(
+            runtime,
+            "ERROR",
+            "退出确认命令重放无法证明既有订单边界: "
+            f"plan_id={normalized_exit_plan_id} intent_id={intent_id} error={exc}",
+          )
+          return {
+            "success": False,
+            "code": "EXIT_INTENT_REPLAY_RECONCILIATION_REQUIRED",
+            "message": "退出意图与既有订单的持久化绑定需要人工核对",
+          }
+        if queued is not None:
+          client_order_id = str(queued.get("client_order_id") or "")
+          return {
+            "success": True,
+            "code": "EXIT_INTENT_ALREADY_QUEUED",
+            "message": "退出卖单已经进入持久订单队列，本次重放未重复下单",
+            "plan_id": normalized_exit_plan_id,
+            "intent_id": intent_id,
+            "client_order_id": client_order_id,
+            "order_id": client_order_id,
+            "status": str(queued.get("status") or "PENDING"),
+            "volume": int(queued.get("volume") or 0),
+          }
       if not self._accepts_non_durable_output(runtime):
         return {
           "success": False,
           "code": "RUNTIME_NOT_RUNNING",
           "message": "策略运行不在 RUNNING 状态，不能确认交易信号",
         }
-      intent = runtime.pending_approvals.get(intent_id)
       if intent is None:
         return {
           "success": False,
           "code": "INTENT_NOT_AWAITING_APPROVAL",
           "message": "信号不存在、已处理或已过期",
+        }
+      binding_failure = self._exit_plan_intent_binding_failure(
+        runtime,
+        intent,
+        expected_exit_plan_id=expected_exit_plan_id,
+      )
+      if binding_failure is not None:
+        return {
+          "success": False,
+          "code": binding_failure[0],
+          "message": binding_failure[1],
+        }
+      exit_plan_challenge_failure = await self._exit_plan_approval_challenge_failure(
+        runtime,
+        intent,
+        approval_audit=approval_audit,
+        expected_exit_plan_id=expected_exit_plan_id,
+      )
+      if exit_plan_challenge_failure is not None:
+        return {
+          "success": False,
+          "code": exit_plan_challenge_failure[0],
+          "message": exit_plan_challenge_failure[1],
         }
       normalized_approval_mode = str(approval_mode or "MANUAL").strip().upper()
       if normalized_approval_mode == "LIVE_AUTO":
@@ -13206,6 +14638,17 @@ class StrategyExecutor:
           "success": False,
           "code": challenge_failure[0],
           "message": challenge_failure[1],
+        }
+      t_trade_challenge_failure = await self._v3_t_trade_entry_challenge_failure(
+        runtime,
+        intent,
+        approval_audit=approval_audit,
+      )
+      if t_trade_challenge_failure is not None:
+        return {
+          "success": False,
+          "code": t_trade_challenge_failure[0],
+          "message": t_trade_challenge_failure[1],
         }
       if runtime.durable_event_barrier_key:
         return {
@@ -13278,6 +14721,48 @@ class StrategyExecutor:
           "code": portfolio_failure[0],
           "message": portfolio_failure[1],
         }
+
+      if self._is_v3_t_trade_manual_intent(intent):
+        audit = dict(approval_audit or {})
+        challenge_id = str(audit.get("challenge_id") or "").strip()
+        if challenge_id:
+          intent.metadata.update(
+            {
+              "t_trade_entry_approval_challenge_id": challenge_id,
+              "t_trade_entry_approval_user_id": str(
+                audit.get("actor_id") or ""
+              ).strip(),
+              "t_trade_entry_approval_device_session_id": str(
+                audit.get("device_session_id") or ""
+              ).strip(),
+              "t_trade_entry_approval_channel": str(
+                audit.get("channel") or ""
+              ).strip(),
+            }
+          )
+
+      intent_metadata = dict(intent.metadata or {})
+      if (
+        intent.direction == TradeIntentDirection.SELL
+        and str(intent_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
+      ):
+        audit = dict(approval_audit or {})
+        intent.metadata.update(
+          {
+            "exit_plan_approval_challenge_id": str(
+              audit.get("challenge_id") or ""
+            ).strip(),
+            "exit_plan_approval_user_id": str(
+              audit.get("actor_id") or ""
+            ).strip(),
+            "exit_plan_approval_device_session_id": str(
+              audit.get("device_session_id") or ""
+            ).strip(),
+            "exit_plan_approval_channel": str(
+              audit.get("channel") or ""
+            ).strip(),
+          }
+        )
 
       if runtime.state_manager:
         strict_status_update = getattr(
@@ -13382,20 +14867,33 @@ class StrategyExecutor:
         }
       self._reserve_t_trade_entry_exposure(runtime, intent)
       runtime.pending_approvals.pop(intent_id, None)
-      await self._notify_strategy_order(
-        runtime,
-        OrderStateEvent(
-          order_id=None,
-          status=OrderStatus.PENDING.value,
-          metadata={
-            **dict(intent.metadata or {}),
-            "intent_id": intent.intent_id,
-            "instrument_code": intent.instrument_code,
-            "approval_mode": normalized_approval_mode,
-          },
-        ),
-      )
-      await self._process_trade_intent(runtime, intent)
+      try:
+        await self._notify_strategy_order(
+          runtime,
+          OrderStateEvent(
+            order_id=None,
+            status=OrderStatus.PENDING.value,
+            metadata={
+              **dict(intent.metadata or {}),
+              "intent_id": intent.intent_id,
+              "instrument_code": intent.instrument_code,
+              "approval_mode": normalized_approval_mode,
+            },
+          ),
+        )
+        await self._process_trade_intent(runtime, intent)
+      except Exception:
+        # APPROVED is already durable at this point.  Preserve the exact
+        # in-process recovery object until an order command crosses its own
+        # durable boundary; otherwise a transient route failure can only be
+        # recovered by restarting the whole Engine.
+        if (
+          intent.direction == TradeIntentDirection.SELL
+          and str(dict(intent.metadata or {}).get("owner_type") or "").upper()
+          == "EXIT_PLAN"
+        ):
+          runtime.pending_approvals[intent_id] = intent
+        raise
       return {
         "success": True,
         "code": "APPROVED",
@@ -13405,6 +14903,86 @@ class StrategyExecutor:
           else "信号已确认并进入下单风控"
         ),
       }
+
+  async def _v3_t_trade_entry_challenge_failure(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    approval_audit: Optional[Mapping[str, Any]],
+  ) -> Optional[tuple[str, str]]:
+    """Require the consumed device challenge that also scopes the future exit."""
+
+    if (
+      runtime.context.mode != StrategyRunMode.LIVE
+      or not self._is_v3_t_trade_manual_intent(intent)
+    ):
+      return None
+    failure = (
+      "T_TRADE_ENTRY_DEVICE_CHALLENGE_REQUIRED",
+      "LIVE 做 T 买入必须使用 confirmTTradeEntryApproval 完成设备挑战",
+    )
+    audit = dict(approval_audit or {})
+    challenge_id = str(audit.get("challenge_id") or "").strip()
+    actor_id = str(audit.get("actor_id") or "").strip()
+    device_session_id = str(audit.get("device_session_id") or "").strip()
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    if not challenge_id or not actor_id or not device_session_id or not account_id:
+      return failure
+    async with AsyncSessionLocal() as db:
+      challenge = await db.get(TradeConfirmationChallenge, challenge_id)
+    payload = dict(challenge.payload or {}) if challenge is not None else {}
+    exit_binding = dict(payload.get(T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY) or {})
+    if (
+      challenge is None
+      or challenge.consumed_at is None
+      or str(challenge.action or "") != T_TRADE_ENTRY_APPROVAL_ACTION
+      or str(challenge.user_id or "") != actor_id
+      or str(challenge.device_session_id or "") != device_session_id
+      or str(challenge.account_id or "") != account_id
+      or str(payload.get("run_id") or "") != runtime.run_id
+      or str(payload.get("intent_id") or "") != intent.intent_id
+      or not exit_binding.get("subject")
+      or not str(exit_binding.get("fingerprint") or "").strip()
+    ):
+      return failure
+    return None
+
+  async def _exit_plan_approval_challenge_failure(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    approval_audit: Optional[Mapping[str, Any]],
+    expected_exit_plan_id: Optional[str],
+  ) -> Optional[tuple[str, str]]:
+    metadata = dict(intent.metadata or {})
+    if (
+      runtime.context.mode != StrategyRunMode.LIVE
+      or
+      intent.direction != TradeIntentDirection.SELL
+      or str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
+    ):
+      return None
+    plan_id = str(expected_exit_plan_id or metadata.get("exit_plan_id") or "").strip()
+    account_id = str(
+      metadata.get("account_id")
+      or runtime.context.parameters.get("account_id")
+      or ""
+    ).strip()
+    try:
+      await AutoExitPlanService().validate_exit_plan_sell_approval(
+        plan_id=plan_id,
+        intent_id=intent.intent_id,
+        account_id=account_id,
+        approval_audit=approval_audit,
+      )
+    except ValueError as exc:
+      return (
+        str(exc) or "EXIT_PLAN_DEVICE_CHALLENGE_REQUIRED",
+        "退出卖出必须使用与当前计划、意图和设备绑定的确认挑战",
+      )
+    return None
 
   async def _managed_entry_approval_challenge_failure(
     self,
@@ -14477,7 +16055,12 @@ class StrategyExecutor:
       }
 
   async def reject_trade_intent(
-    self, run_id: str, intent_id: str, reason: str = "USER_REJECTED"
+    self,
+    run_id: str,
+    intent_id: str,
+    reason: str = "USER_REJECTED",
+    *,
+    expected_exit_plan_id: Optional[str] = None,
   ) -> Dict[str, Any]:
     """Reject one manual-confirm intent without creating any broker order."""
 
@@ -14492,6 +16075,17 @@ class StrategyExecutor:
           "code": "INTENT_NOT_AWAITING_APPROVAL",
           "message": "信号不存在、已处理或已过期",
         }
+      binding_failure = self._exit_plan_intent_binding_failure(
+        runtime,
+        intent,
+        expected_exit_plan_id=expected_exit_plan_id,
+      )
+      if binding_failure is not None:
+        return {
+          "success": False,
+          "code": binding_failure[0],
+          "message": binding_failure[1],
+        }
       persistence_failure = await self._terminalize_pending_approval_for_request(
         runtime,
         intent,
@@ -14502,6 +16096,30 @@ class StrategyExecutor:
       if persistence_failure is not None:
         return persistence_failure
       return {"success": True, "code": "REJECTED", "message": "信号已忽略"}
+
+  @staticmethod
+  def _exit_plan_intent_binding_failure(
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    expected_exit_plan_id: Optional[str],
+  ) -> Optional[tuple[str, str]]:
+    plan_id = str(expected_exit_plan_id or "").strip()
+    if not plan_id:
+      return None
+    metadata = dict(intent.metadata or {})
+    if (
+      intent.direction != TradeIntentDirection.SELL
+      or str(intent.run_id or "") != runtime.run_id
+      or str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
+      or str(metadata.get("owner_id") or "") != plan_id
+      or str(metadata.get("exit_plan_id") or "") != plan_id
+    ):
+      return (
+        "EXIT_PLAN_INTENT_BINDING_MISMATCH",
+        "卖出意图不属于当前退出计划，请刷新后重试",
+      )
+    return None
 
   async def cancel_open_buy_orders(self, run_id: str, reason: str) -> int:
     """Request durable cancellation while preserving late broker fills."""
@@ -15366,6 +16984,14 @@ class StrategyExecutor:
     strict_persistence: bool = False,
   ) -> None:
     requires_strict = strict_persistence or self._is_v3_t_trade_manual_intent(intent)
+    terminal_metadata = local_pre_broker_zero_fill_metadata(
+      {
+        **dict(intent.metadata or {}),
+        "intent_id": intent.intent_id,
+        "approval_reason": reason,
+      },
+      reason=reason,
+    )
     if runtime.state_manager is None:
       if requires_strict:
         raise _PendingApprovalStatusPersistenceError("待确认意图缺少状态持久化管理器")
@@ -15388,6 +17014,7 @@ class StrategyExecutor:
         await updater(
           intent.intent_id,
           status,
+          metadata=terminal_metadata,
           notes=reason,
         )
       except Exception as exc:
@@ -15403,11 +17030,7 @@ class StrategyExecutor:
         order_id=None,
         status=status,
         error_message=message,
-        metadata={
-          **dict(intent.metadata or {}),
-          "intent_id": intent.intent_id,
-          "approval_reason": reason,
-        },
+        metadata=terminal_metadata,
       ),
     )
 
@@ -15637,16 +17260,22 @@ class StrategyExecutor:
     """Audit and converge an intent whose source market window is invalid."""
 
     code, message = failure
+    terminal_metadata = local_pre_broker_zero_fill_metadata(
+      {
+        **dict(intent.metadata or {}),
+        "intent_id": intent.intent_id,
+        "instrument_code": intent.instrument_code,
+        "market_data_gate": code,
+      },
+      reason=code,
+    )
     if runtime.state_manager:
       if reservation_key:
         runtime.state_manager.release_order_resources(reservation_key)
       await runtime.state_manager.update_trade_intent_status(
         intent.intent_id,
         "REJECTED",
-        metadata={
-          **dict(intent.metadata or {}),
-          "market_data_gate": code,
-        },
+        metadata=terminal_metadata,
         notes=code,
       )
     runtime.pending_approvals.pop(intent.intent_id, None)
@@ -15657,12 +17286,7 @@ class StrategyExecutor:
         order_id=None,
         status=OrderStatus.REJECTED.value,
         error_message=message,
-        metadata={
-          **dict(intent.metadata or {}),
-          "intent_id": intent.intent_id,
-          "instrument_code": intent.instrument_code,
-          "market_data_gate": code,
-        },
+        metadata=terminal_metadata,
       ),
     )
     self._runtime_log(
@@ -15679,17 +17303,24 @@ class StrategyExecutor:
     reservation_key: Optional[str] = None,
   ) -> None:
     """Converge an intent that lost the race with pause/stop before routing."""
+    terminal_reason = f"RUNTIME_{runtime.status.value}"
+    terminal_metadata = local_pre_broker_zero_fill_metadata(
+      {
+        **dict(intent.metadata or {}),
+        "intent_id": intent.intent_id,
+        "instrument_code": intent.instrument_code,
+        "runtime_gate": runtime.status.value,
+      },
+      reason=terminal_reason,
+    )
     if runtime.state_manager:
       if reservation_key:
         runtime.state_manager.release_order_resources(reservation_key)
       await runtime.state_manager.update_trade_intent_status(
         intent.intent_id,
         "REJECTED",
-        metadata={
-          **dict(intent.metadata or {}),
-          "runtime_gate": runtime.status.value,
-        },
-        notes=f"RUNTIME_{runtime.status.value}",
+        metadata=terminal_metadata,
+        notes=terminal_reason,
       )
     runtime.t_trade_entry_reservations.pop(intent.intent_id, None)
     await self._notify_strategy_order(
@@ -15698,12 +17329,7 @@ class StrategyExecutor:
         order_id=None,
         status=OrderStatus.REJECTED.value,
         error_message=f"策略运行已进入 {runtime.status.value}，未向券商提交委托",
-        metadata={
-          **dict(intent.metadata or {}),
-          "intent_id": intent.intent_id,
-          "instrument_code": intent.instrument_code,
-          "runtime_gate": runtime.status.value,
-        },
+        metadata=terminal_metadata,
       ),
     )
 
@@ -15914,6 +17540,9 @@ class StrategyExecutor:
     """处理策略交易意图"""
     broker = runtime.broker
     metrics = runtime.metrics
+    broker_boundary_crossed = False
+    reservation_key = ""
+    request: Optional[OrderRequest] = None
 
     if not self._accepts_non_durable_output(runtime):
       await self._reject_intent_during_runtime_transition(runtime, intent)
@@ -15954,14 +17583,19 @@ class StrategyExecutor:
 
     async def reject_stale_market_stream() -> None:
       reason = "MARKET_DATA_STREAM_NOT_READY"
+      terminal_metadata = local_pre_broker_zero_fill_metadata(
+        {
+          **dict(intent.metadata or {}),
+          "intent_id": intent.intent_id,
+          "market_data_gate": reason,
+        },
+        reason=reason,
+      )
       if runtime.state_manager:
         await runtime.state_manager.update_trade_intent_status(
           intent.intent_id,
           "REJECTED",
-          metadata={
-            **dict(intent.metadata or {}),
-            "market_data_gate": reason,
-          },
+          metadata=terminal_metadata,
           notes=reason,
         )
       await self._notify_strategy_order(
@@ -15970,11 +17604,7 @@ class StrategyExecutor:
           order_id=None,
           status=OrderStatus.REJECTED.value,
           error_message="权威行情链路未就绪，已拒绝本次交易意图",
-          metadata={
-            **dict(intent.metadata or {}),
-            "intent_id": intent.intent_id,
-            "market_data_gate": reason,
-          },
+          metadata=terminal_metadata,
         ),
       )
       self._runtime_log(
@@ -16053,16 +17683,21 @@ class StrategyExecutor:
           if "MIN_LOT_EXCEEDS_RISK_BUDGET" in size_reasons
           else "ZERO_SIZED_VOLUME"
         )
+        terminal_metadata = local_pre_broker_zero_fill_metadata(
+          {
+            **dict(intent.metadata or {}),
+            "intent_id": intent.intent_id,
+            "order_draft_id": getattr(draft, "draft_id", None),
+            "order_draft_size_reasons": size_reasons,
+            "sized_volume": getattr(draft, "sized_volume", None),
+          },
+          reason=rejection_reason,
+        )
         if runtime.state_manager:
           await runtime.state_manager.update_trade_intent_status(
             intent.intent_id,
             "REJECTED",
-            metadata={
-              **dict(intent.metadata or {}),
-              "order_draft_id": getattr(draft, "draft_id", None),
-              "order_draft_size_reasons": size_reasons,
-              "sized_volume": getattr(draft, "sized_volume", None),
-            },
+            metadata=terminal_metadata,
             notes=rejection_reason,
           )
         self._record_decision_trace(
@@ -16083,18 +17718,10 @@ class StrategyExecutor:
             request={
               "instrument_code": intent.instrument_code,
               "order_type": order_type,
-              "metadata": {
-                **(intent.metadata or {}),
-                "intent_id": intent.intent_id,
-                "order_draft": draft.__dict__,
-              },
+              "metadata": {**terminal_metadata, "order_draft": draft.__dict__},
             },
             error_message="交易意图无法转换为合法订单数量",
-            metadata={
-              **(intent.metadata or {}),
-              "intent_id": intent.intent_id,
-              "order_draft": draft.__dict__,
-            },
+            metadata={**terminal_metadata, "order_draft": draft.__dict__},
           ),
         )
         self.logger.warning(
@@ -16147,6 +17774,23 @@ class StrategyExecutor:
           "order_expire_at_ms": order_expire_at_ms,
         },
       )
+      if intent.direction == TradeIntentDirection.SELL:
+        exit_plan_id = str(intent.metadata.get("exit_plan_id") or "").strip()
+        owner_type = str(intent.metadata.get("owner_type") or "").strip().upper()
+        owner_id = str(intent.metadata.get("owner_id") or "").strip()
+        if exit_plan_id or owner_type == "EXIT_PLAN":
+          if (
+            not exit_plan_id
+            or owner_type != "EXIT_PLAN"
+            or owner_id != exit_plan_id
+          ):
+            raise ValueError("退出卖单缺少精确 ExitPlan 所有权绑定")
+          # Dedicated managed-exit recovery must replay the same durable
+          # broker command after a crash.  Never trust a template-provided key
+          # and never fall back to LiveBroker's random internal order ID.
+          request.metadata["idempotency_key"] = (
+            f"strategy-exit:{exit_plan_id}:{intent.intent_id}"
+          )
 
       checker = TradingRiskChecker(
         rules,
@@ -16180,20 +17824,25 @@ class StrategyExecutor:
         }
       )
       if not decision.allowed:
+        terminal_metadata = local_pre_broker_zero_fill_metadata(
+          {
+            **dict(intent.metadata or {}),
+            "order_draft_id": draft.draft_id,
+            "order_draft_size_reasons": draft.size_reason_codes,
+            "sized_volume": draft.sized_volume,
+            "risk_reason_code": decision.reason_code,
+            "risk_action": decision.action.value,
+            "risk_tags": decision.risk_tags,
+          },
+          reason=decision.reason_code,
+        )
+        request.metadata.update(terminal_metadata)
         if runtime.state_manager:
           await runtime.state_manager.update_trade_intent_status(
             intent.intent_id,
             "DELAYED" if decision.action == RiskAction.DELAY else "REJECTED",
             risk_decision_id=decision.risk_decision_id,
-            metadata={
-              **dict(intent.metadata or {}),
-              "order_draft_id": draft.draft_id,
-              "order_draft_size_reasons": draft.size_reason_codes,
-              "sized_volume": draft.sized_volume,
-              "risk_reason_code": decision.reason_code,
-              "risk_action": decision.action.value,
-              "risk_tags": decision.risk_tags,
-            },
+            metadata=terminal_metadata,
             notes=decision.reason_detail,
           )
         self._record_decision_trace(
@@ -16274,16 +17923,21 @@ class StrategyExecutor:
       reservation_key = intent.intent_id
       reserved = await self._reserve_order_resources(runtime, reservation_key, request)
       if not reserved:
+        terminal_metadata = local_pre_broker_zero_fill_metadata(
+          {
+            **dict(intent.metadata or {}),
+            **dict(request.metadata or {}),
+            "sized_volume": request.volume,
+          },
+          reason="RESERVE_FAILED",
+        )
+        request.metadata.update(terminal_metadata)
         if runtime.state_manager:
           await runtime.state_manager.update_trade_intent_status(
             intent.intent_id,
             "REJECTED",
             risk_decision_id=decision.risk_decision_id,
-            metadata={
-              **dict(intent.metadata or {}),
-              **dict(request.metadata or {}),
-              "sized_volume": request.volume,
-            },
+            metadata=terminal_metadata,
             notes="RESERVE_FAILED",
           )
         self._record_decision_trace(
@@ -16341,12 +17995,8 @@ class StrategyExecutor:
           runtime.state_manager.release_order_resources(reservation_key)
         await reject_stale_market_stream()
         return
-      try:
-        order = await broker.place_order(request)
-      except Exception:
-        if runtime.state_manager:
-          runtime.state_manager.release_order_resources(reservation_key)
-        raise
+      broker_boundary_crossed = True
+      order = await broker.place_order(request)
 
       if runtime.state_manager:
         runtime.state_manager.transfer_reservation(reservation_key, order.order_id)
@@ -16410,26 +18060,49 @@ class StrategyExecutor:
       )
 
     except Exception as e:
-      runtime.t_trade_entry_reservations.pop(intent.intent_id, None)
+      failure_metadata = {
+        **dict(intent.metadata or {}),
+        **dict(getattr(request, "metadata", {}) or {}),
+        "intent_id": intent.intent_id,
+      }
+      if broker_boundary_crossed:
+        failure_status = "RECONCILE_REQUIRED"
+        failure_metadata.update(
+          {
+            "execution_terminal_source": "BROKER_BOUNDARY_UNKNOWN",
+            "execution_terminal_reason": type(e).__name__,
+          }
+        )
+      else:
+        failure_status = OrderStatus.REJECTED.value
+        failure_metadata = local_pre_broker_zero_fill_metadata(
+          failure_metadata,
+          reason=f"PRE_BROKER_EXCEPTION:{type(e).__name__}",
+        )
+        runtime.t_trade_entry_reservations.pop(intent.intent_id, None)
+        if runtime.state_manager and reservation_key:
+          runtime.state_manager.release_order_resources(reservation_key)
+      if runtime.state_manager:
+        await runtime.state_manager.update_trade_intent_status(
+          intent.intent_id,
+          failure_status,
+          metadata=failure_metadata,
+          notes=str(e),
+        )
       if metrics:
         metrics.error_count += 1
       await self._notify_strategy_order(
         runtime,
         OrderStateEvent(
           order_id=None,
-          status=OrderStatus.REJECTED.value,
-          request={
+          status=failure_status,
+          request=request
+          or {
             "instrument_code": intent.instrument_code,
-            "metadata": {
-              **dict(intent.metadata or {}),
-              "intent_id": intent.intent_id,
-            },
+            "metadata": failure_metadata,
           },
           error_message=str(e),
-          metadata={
-            **dict(intent.metadata or {}),
-            "intent_id": intent.intent_id,
-          },
+          metadata=failure_metadata,
         ),
       )
       self._runtime_log(runtime, "ERROR", f"处理交易意图失败: {e}")

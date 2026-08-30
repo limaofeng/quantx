@@ -8,6 +8,7 @@ import {
   PauseCircle,
   RefreshCw,
   ShieldCheck,
+  Wrench,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from 'urql';
@@ -42,6 +43,38 @@ const actionLabels: Record<AccountExecutionControlAction, string> = {
   [AccountExecutionControlAction.PauseRiskIncrease]: '暂停买入权限',
   [AccountExecutionControlAction.KillSwitch]: '账户紧急停止',
   [AccountExecutionControlAction.ClearKillSwitch]: '清除紧急停止',
+  [AccountExecutionControlAction.RepairQuarantinedOrder]: '修复隔离委托',
+};
+
+interface QuarantinedOrderTarget {
+  clientOrderId: string;
+  planId: string;
+  intentId: string;
+  quarantineReason: string;
+  brokerOrderId: string;
+  repairable: boolean;
+  blockedReason: string;
+  quarantinedAt: string;
+  sourceSequence: number;
+}
+
+const quarantineReasonLabels: Record<string, string> = {
+  ACCOUNT_WIDE_STALE_SELL: '账户隔离时仍在途的卖单',
+  BINDING_MISMATCH: '委托与退出计划绑定不一致',
+  BROKER_EXECUTION_AFTER_RELEASE: '计划释放后券商又上报执行事实',
+  PHYSICAL_DELIVERY_GATE_REJECTED: '物理发送前最终闸门拒绝',
+  PLACE_ORDER_BINDING_MISSING: '在途卖单缺少完整持久化绑定',
+  PLAN_PENDING_RELEASE_FAILED: '计划 pending 意图释放失败',
+};
+
+const quarantineBlockedReasonLabels: Record<string, string> = {
+  BROKER_TERMINAL_EVIDENCE_REQUIRED: '等待券商终态与成交数量完整收敛',
+  DURABLE_BINDING_UNPROVEN: '持久化计划、意图或委托绑定无法证明',
+  LATEST_FULL_SNAPSHOT_REQUIRED: '等待最新完整账户快照',
+  LATEST_FULL_SNAPSHOT_EVIDENCE_UNAVAILABLE: '最新完整快照证据不可用',
+  SNAPSHOT_NOT_NEWER_THAN_QUARANTINE: '快照必须严格晚于隔离事实',
+  SNAPSHOT_SEQUENCE_NOT_NEWER_THAN_QUARANTINE:
+    '快照序号必须严格晚于隔离事实',
 };
 
 function useNow() {
@@ -461,6 +494,8 @@ export function TradingSafetySettingsPanel() {
     action: AccountExecutionControlAction;
     challengeId: string;
     confirmationToken: string;
+    clientOrderId?: string;
+    quarantineReason?: string;
   } | null>(null);
   const failedChecks = useMemo(
     () =>
@@ -483,7 +518,10 @@ export function TradingSafetySettingsPanel() {
     refreshSafety();
   };
 
-  const preview = async (action: AccountExecutionControlAction) => {
+  const preview = async (
+    action: AccountExecutionControlAction,
+    quarantinedOrder?: QuarantinedOrderTarget
+  ) => {
     if (!safety) return;
     setSubmitting(true);
     setMessage('');
@@ -493,12 +531,20 @@ export function TradingSafetySettingsPanel() {
         action,
         stateVersion: safety.stateVersion,
         snapshotId:
-          action === AccountExecutionControlAction.BeginControlledWindow
+          action === AccountExecutionControlAction.BeginControlledWindow ||
+          action === AccountExecutionControlAction.RepairQuarantinedOrder
             ? safety.snapshotId || ''
             : '',
+        ...(quarantinedOrder
+          ? {
+              clientOrderId: quarantinedOrder.clientOrderId,
+              quarantineReason: quarantinedOrder.quarantineReason,
+            }
+          : {}),
         reason:
           action === AccountExecutionControlAction.PauseRiskIncrease ||
-          action === AccountExecutionControlAction.KillSwitch
+          action === AccountExecutionControlAction.KillSwitch ||
+          action === AccountExecutionControlAction.RepairQuarantinedOrder
             ? reason.trim()
             : '',
         idempotencyKey: `account-execution:${createClientId()}`,
@@ -515,6 +561,8 @@ export function TradingSafetySettingsPanel() {
       action,
       challengeId: String(issued.challengeId),
       confirmationToken: issued.confirmationToken,
+      clientOrderId: quarantinedOrder?.clientOrderId,
+      quarantineReason: quarantinedOrder?.quarantineReason,
     });
     setMessage('预览已锁定 60 秒，请核对后确认。');
     setSubmitting(false);
@@ -668,7 +716,7 @@ export function TradingSafetySettingsPanel() {
         </div>
 
         <label className="mt-4 block text-ui-label text-slate-400">
-          暂停或紧急停止原因
+          暂停、紧急停止或隔离修复原因
           <Input
             value={reason}
             onChange={event => setReason(event.target.value)}
@@ -682,9 +730,16 @@ export function TradingSafetySettingsPanel() {
           <div className="mt-4 rounded-lg border border-border bg-muted p-ui-section">
             <p className="text-ui-body font-medium text-foreground">
               待确认：{actionLabels[pending.action]}
+              {pending.clientOrderId ? ` · ${pending.clientOrderId}` : ''}
             </p>
             <p className="mt-1 text-ui-label text-muted-foreground">
               确认将消费一次性挑战；状态或快照变化时服务端会拒绝应用。
+              {pending.quarantineReason
+                ? ` 隔离原因：${
+                    quarantineReasonLabels[pending.quarantineReason] ||
+                    pending.quarantineReason
+                  }。`
+                : ''}
             </p>
             <div className="mt-3 flex gap-2">
               <button
@@ -710,6 +765,79 @@ export function TradingSafetySettingsPanel() {
           <p className="mt-3 text-ui-label text-slate-300">{message}</p>
         )}
       </section>
+
+      {!!safety?.quarantinedOrders.length && (
+        <section className="rounded-panel border border-rose-400/25 bg-card p-ui-section">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-rose-300" />
+            <div>
+              <h2 className="text-ui-body font-medium text-slate-100">
+                隔离委托显式修复
+              </h2>
+              <p className="mt-1 max-w-3xl text-ui-label leading-5 text-slate-400">
+                系统不会自动重放或解除这些卖单。每条修复都绑定当前完整快照；全部修复后，还需下一份严格更新的干净快照才能恢复账户对账。
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 space-y-2">
+            {safety.quarantinedOrders.map(order => (
+              <article
+                key={`${order.clientOrderId}:${order.quarantineReason}`}
+                className="rounded-lg border border-rose-400/15 bg-rose-400/5 p-3"
+                aria-label={`隔离委托 ${order.clientOrderId}`}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-mono text-ui-body font-medium text-slate-100">
+                      {order.clientOrderId}
+                    </p>
+                    <p className="mt-1 text-ui-label text-rose-100/80">
+                      {quarantineReasonLabels[order.quarantineReason] ||
+                        order.quarantineReason}
+                    </p>
+                    <p className="mt-1 break-all text-ui-caption text-slate-500">
+                      计划 {order.planId || '—'} · 意图 {order.intentId || '—'}
+                      {order.brokerOrderId
+                        ? ` · 券商委托 ${order.brokerOrderId}`
+                        : ''}
+                      {order.sourceSequence
+                        ? ` · 源序号 ${order.sourceSequence}`
+                        : ''}
+                    </p>
+                    {!order.repairable && (
+                      <p className="mt-2 text-ui-label text-amber-200">
+                        {quarantineBlockedReasonLabels[order.blockedReason] ||
+                          order.blockedReason ||
+                          '当前还不具备显式修复条件'}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={
+                      submitting ||
+                      !order.repairable ||
+                      !safety.snapshotId ||
+                      !reason.trim()
+                    }
+                    onClick={() =>
+                      preview(
+                        AccountExecutionControlAction.RepairQuarantinedOrder,
+                        order
+                      )
+                    }
+                    className="inline-flex items-center gap-2 rounded-lg border border-rose-300/30 bg-rose-300/10 px-3 py-2 text-ui-label font-medium text-rose-100 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Wrench className="h-4 w-4" /> 修复委托{' '}
+                    {order.clientOrderId}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="rounded-panel border border-border bg-card p-ui-section">
         <div className="flex flex-wrap items-start justify-between gap-3">

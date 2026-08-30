@@ -298,12 +298,69 @@ export const LiquidatePositionMutation = gql(`
   }
 `);
 
-export const LiquidatePositionsMutation = gql(`
-  mutation LiquidatePositions($input: LiquidatePositionsInput!) {
-    liquidatePositions(input: $input) {
-      groupId
+export const PreviewLiquidationMutation = gql(`
+  mutation Portfolio_PreviewLiquidation($input: LiquidationPreviewInput!) {
+    previewLiquidation(input: $input) {
       success
+      code
       message
+      preview {
+        challengeId
+        confirmationToken
+        groupId
+        accountId
+        scope
+        instrumentCodes
+        completionStrategy
+        conflictStrategy
+        executionMode
+        idempotencyKey
+        snapshotVersion
+        accountUpdatedAt
+        challengeExpiresAt
+        includedCount
+        skippedCount
+        warnings
+        items {
+          instrumentCode
+          instrumentName
+          totalVolume
+          availableVolume
+          frozenVolume
+          t1UnavailableVolume
+          protectedVolume
+          pendingSellVolume
+          maxProtectedVolume
+          included
+          reasonCode
+          reasonDetail
+          positionUpdatedAt
+          conflicts {
+            planId
+            sourceType
+            status
+            remainingVolume
+            configVersion
+            pending
+          }
+        }
+      }
+    }
+  }
+`);
+
+export const ConfirmLiquidationMutation = gql(`
+  mutation Portfolio_ConfirmLiquidation($input: LiquidationConfirmationInput!) {
+    confirmLiquidation(input: $input) {
+      success
+      code
+      message
+      challengeId
+      groupId
+      commandId
+      status
+      createdCount
+      failedCount
       plans {
         instrumentCode
         success
@@ -346,6 +403,8 @@ export const ExitPlansQuery = gql(`
       autoExitAuthorizationConfigVersion
       autoExitAuthorizationExpiresAt
       configVersion
+      stateVersion
+      executionOwner
       completionStrategy
       completionNote
       protectedVolume
@@ -794,11 +853,13 @@ export const SetExitPlanEnabledMutation = gql(`
     $planId: String!
     $enabled: Boolean!
     $configVersion: Int!
+    $idempotencyKey: String!
   ) {
     setExitPlanEnabled(
       planId: $planId
       enabled: $enabled
       configVersion: $configVersion
+      idempotencyKey: $idempotencyKey
     ) {
       planId
       enabled

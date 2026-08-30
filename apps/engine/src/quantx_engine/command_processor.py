@@ -356,7 +356,8 @@ async def _dispatch(
     }
   if command_type == "EXIT_PLAN_CREATE_MANUAL":
     record = await AutoExitPlanService(strategy_manager).create_manual_exit_plan(
-      payload
+      payload,
+      command_id=str(command_id or ""),
     )
     return {
       "plan_id": record.plan_id,
@@ -365,7 +366,8 @@ async def _dispatch(
     }
   if command_type == "EXIT_PLAN_UPDATE_MANUAL":
     record = await AutoExitPlanService(strategy_manager).update_manual_exit_plan(
-      payload
+      payload,
+      command_id=str(command_id or ""),
     )
     return {
       "plan_id": record.plan_id,
@@ -383,6 +385,7 @@ async def _dispatch(
       bool(payload["enabled"]),
       account_id=payload.get("account_id"),
       config_version=payload.get("config_version"),
+      command_id=str(command_id or ""),
     )
     return {
       "plan_id": record.plan_id if record else str(payload["plan_id"]),
@@ -400,6 +403,31 @@ async def _dispatch(
       "config_version": record.config_version if record else None,
     }
   if command_type == "EXIT_PLAN_EVALUATE_NOW":
+    async with AsyncSessionLocal() as db:
+      exit_record = await AutoExitPlanRepository(db).find_by_id(
+        str(payload["plan_id"])
+      )
+    if exit_record is None or (
+      payload.get("account_id")
+      and str(exit_record.account_id) != str(payload.get("account_id"))
+    ):
+      raise ValueError("退出计划不存在或不属于当前账户")
+    if not exit_record.strategy_run_id:
+      results = await exit_plan_monitor.evaluate_all_active_plans(
+        account_id=str(exit_record.account_id),
+        instrument_code=str(exit_record.instrument_code),
+        plan_id=str(exit_record.plan_id),
+      )
+      if not results:
+        raise ValueError("退出计划未在监控，不能立即检查")
+      return _json_value(
+        {
+          "success": True,
+          "code": "EXIT_PLAN_EVALUATED",
+          "plan_id": str(exit_record.plan_id),
+          "result": results[0].get("result"),
+        }
+      )
     return _json_value(
       await AutoExitPlanService(strategy_manager).evaluate_now(
         str(payload["plan_id"]),
@@ -422,12 +450,14 @@ async def _dispatch(
         await exit_plan_monitor.confirm_exit_intent(
           plan_id=str(payload["plan_id"]),
           intent_id=str(payload["intent_id"]),
+          approval_audit=dict(payload.get("approval_audit") or {}),
         )
       )
     return _json_value(
       await AutoExitPlanService(strategy_manager).confirm_managed_intent(
         plan_id=str(payload["plan_id"]),
         intent_id=str(payload["intent_id"]),
+        approval_audit=dict(payload.get("approval_audit") or {}),
       )
     )
   if command_type == "EXIT_PLAN_REJECT_INTENT":

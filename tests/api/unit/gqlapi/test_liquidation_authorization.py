@@ -5,6 +5,11 @@ from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi.resolvers.liquidation import LiquidationResolver
 from quantx_api.gqlapi.schema import schema
 from quantx_api.gqlapi.security import required_permission
+from quantx_api.gqlapi.trade_approval import (
+  EXIT_PLAN_SELL_APPROVAL,
+  TradeApprovalChallengeService,
+  TradeApprovalDispatchData,
+)
 from quantx_api.gqlapi.types.liquidation_types import PositionLiquidationResult
 from quantx_infrastructure.services import trade_command_service
 
@@ -95,28 +100,106 @@ def test_liquidation_contract_requires_account_and_defaults_to_paper():
 
 
 @pytest.mark.asyncio
+async def test_confirm_exit_intent_binds_durable_challenge_to_engine_command(
+  monkeypatch,
+):
+  captured = {}
+
+  async def exit_plan_account_id(plan_id):
+    assert plan_id == "exit-plan-1"
+    return "AUTHORIZED-ACCOUNT"
+
+  async def consume(**kwargs):
+    captured.update(kwargs)
+    return TradeApprovalDispatchData(
+      challenge_id="challenge-1",
+      message_id="message-1",
+      idempotency_key="exit-plan-confirm:challenge-1",
+    )
+
+  async def existing_engine_request(message_id, command_type):
+    assert message_id == "message-1"
+    assert command_type == "EXIT_PLAN_CONFIRM_INTENT"
+    return {
+      "success": True,
+      "code": "APPROVED",
+      "message": "卖出意图已确认",
+    }
+
+  async def forbidden_legacy_confirm(**_kwargs):
+    raise AssertionError("legacy exit-plan confirm attempted a second enqueue")
+
+  monkeypatch.setattr(
+    LiquidationResolver,
+    "exit_plan_account_id",
+    exit_plan_account_id,
+  )
+  monkeypatch.setattr(TradeApprovalChallengeService, "consume", consume)
+  monkeypatch.setattr(
+    LiquidationResolver,
+    "_existing_engine_request",
+    existing_engine_request,
+  )
+  monkeypatch.setattr(
+    LiquidationResolver,
+    "confirm_exit_intent",
+    forbidden_legacy_confirm,
+  )
+
+  result = await schema.execute(
+    """
+    mutation {
+      confirmExitIntent(
+        planId: "exit-plan-1"
+        intentId: "exit-intent-1"
+        confirmationToken: "confirmation-token-1"
+      ) {
+        success
+        code
+        challengeId
+      }
+    }
+    """,
+    context_value=_native_context("orders:write", "trade:approve"),
+  )
+
+  assert result.errors is None
+  assert result.data == {
+    "confirmExitIntent": {
+      "success": True,
+      "code": "APPROVED",
+      "challengeId": "challenge-1",
+    }
+  }
+  assert captured["action"] == EXIT_PLAN_SELL_APPROVAL
+  assert captured["account_id"] == "AUTHORIZED-ACCOUNT"
+  assert captured["business_owner_id"] == "exit-plan-1"
+  assert captured["intent_id"] == "exit-intent-1"
+  assert captured["confirmation_token"] == "confirmation-token-1"
+  assert captured["command_type"] == "EXIT_PLAN_CONFIRM_INTENT"
+  assert captured["command_aggregate_id"] == (
+    "AUTHORIZED-ACCOUNT:exit-plan-1"
+  )
+  assert captured["command_idempotency_key_factory"]("challenge-1") == (
+    "exit-plan-confirm:challenge-1"
+  )
+  assert captured["command_payload"] == {
+    "plan_id": "exit-plan-1",
+    "intent_id": "exit-intent-1",
+    "account_id": "AUTHORIZED-ACCOUNT",
+    "approval_audit": {
+      "actor_id": "liquidation-user",
+      "device_session_id": "liquidation-session",
+      "channel": "EXIT_PLAN_DEVICE_CHALLENGE",
+    },
+  }
+  assert captured["return_command_reference"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
   ("resolver_name", "operation", "variables"),
   [
-    (
-      "liquidate_positions",
-      """
-      mutation Legacy($input: LiquidatePositionsInput!) {
-        liquidatePositions(input: $input) { success }
-      }
-      """,
-      {
-        "input": {
-          "completionStrategy": "AVAILABLE_NOW",
-          "conflictStrategy": "UNALLOCATED_ONLY",
-          "confirm": True,
-          "scope": "SELECTED",
-          "instrumentCodes": ["000001.SZ"],
-          "executionMode": "live",
-          "autoExitAuthorized": True,
-        }
-      },
-    ),
     (
       "liquidate_position",
       """
@@ -162,96 +245,11 @@ async def test_native_session_cannot_call_legacy_liquidation_mutations(
   assert result.errors[0].extensions["code"] == "FORBIDDEN"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-  ("execution_mode", "auto_exit_authorized"),
-  [("live", False), ("paper", True), ("live", True)],
-)
-async def test_legacy_web_unsafe_liquidation_fails_before_engine(
-  monkeypatch,
-  execution_mode,
-  auto_exit_authorized,
-):
-  called = False
+def test_legacy_group_liquidation_contract_is_removed():
+  rendered = schema.as_str()
 
-  async def forbidden_engine_request(*_args, **_kwargs):
-    nonlocal called
-    called = True
-    raise AssertionError("unsafe legacy liquidation reached Engine")
-
-  monkeypatch.setattr(
-    LiquidationResolver,
-    "_request_engine",
-    forbidden_engine_request,
-  )
-  result = await schema.execute(
-    """
-    mutation Legacy($input: LiquidatePositionsInput!) {
-      liquidatePositions(input: $input) { success }
-    }
-    """,
-    variable_values={
-      "input": {
-        "accountId": "AUTHORIZED-ACCOUNT",
-        "completionStrategy": "AVAILABLE_NOW",
-        "conflictStrategy": "UNALLOCATED_ONLY",
-        "confirm": True,
-        "scope": "SELECTED",
-        "instrumentCodes": ["000001.SZ"],
-        "executionMode": execution_mode,
-        "autoExitAuthorized": auto_exit_authorized,
-      }
-    },
-    context_value=_context("AUTHORIZED-ACCOUNT"),
-  )
-
-  assert not called
-  assert result.errors
-  error = result.errors[0]
-  assert error.extensions["code"] == "LEGACY_LIQUIDATION_UNSAFE_MODE"
-  assert error.message == "旧清仓接口仅支持 PAPER 且不允许自动卖出授权"
-  assert "AUTHORIZED-ACCOUNT" not in error.message
-  assert "000001.SZ" not in error.message
-
-
-@pytest.mark.asyncio
-async def test_legacy_web_default_liquidation_keeps_safe_paper_payload(monkeypatch):
-  captured = {}
-
-  async def fake_request(command_type, payload, *, aggregate_id):
-    captured.update(
-      command_type=command_type,
-      payload=payload,
-      aggregate_id=aggregate_id,
-    )
-    return {"group_id": "legacy-safe-group", "success": True, "items": []}
-
-  monkeypatch.setattr(LiquidationResolver, "_request_engine", fake_request)
-  result = await schema.execute(
-    """
-    mutation Legacy($input: LiquidatePositionsInput!) {
-      liquidatePositions(input: $input) { success }
-    }
-    """,
-    variable_values={
-      "input": {
-        "accountId": "AUTHORIZED-ACCOUNT",
-        "completionStrategy": "AVAILABLE_NOW",
-        "conflictStrategy": "UNALLOCATED_ONLY",
-        "confirm": True,
-        "scope": "SELECTED",
-        "instrumentCodes": ["000001.SZ"],
-      }
-    },
-    context_value=_context("AUTHORIZED-ACCOUNT"),
-  )
-
-  assert result.errors is None
-  assert result.data == {"liquidatePositions": {"success": True}}
-  assert captured["command_type"] == "EXIT_PLAN_LIQUIDATE_POSITIONS"
-  assert captured["aggregate_id"] == "AUTHORIZED-ACCOUNT"
-  assert captured["payload"]["execution_mode"] == "paper"
-  assert captured["payload"]["auto_exit_authorized"] is False
+  assert "liquidatePositions" not in rendered
+  assert "LiquidatePositionsInput" not in rendered
 
 
 @pytest.mark.asyncio

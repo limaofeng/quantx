@@ -16,6 +16,9 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import TradeConfirmationChallenge
 from quantx_infrastructure.models.agent_runtime import AccountExecutionControl
+from quantx_infrastructure.services.account_execution_quarantine_service import (
+  AccountExecutionQuarantineService,
+)
 from quantx_infrastructure.services.account_execution_safety_service import (
   AccountExecutionControlIdempotencyError,
   AccountExecutionSafetyService,
@@ -50,6 +53,8 @@ class AccountExecutionControlRequestData:
   snapshot_id: str
   reason: str
   idempotency_key: str
+  client_order_id: str
+  quarantine_reason: str
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,7 @@ class AccountExecutionControlConfirmationData:
   operation_code: str
   message: str
   safety: Optional[dict[str, Any]] = None
+  repair_result: Optional[dict[str, Any]] = None
 
 
 def normalize_account_execution_control_request(
@@ -83,11 +89,15 @@ def normalize_account_execution_control_request(
   snapshot_id: str,
   reason: str,
   idempotency_key: str,
+  client_order_id: str = "",
+  quarantine_reason: str = "",
 ) -> AccountExecutionControlRequestData:
   normalized_account = str(account_id or "").strip()
   normalized_snapshot = str(snapshot_id or "").strip()
   normalized_reason = str(reason or "").strip()
   normalized_key = str(idempotency_key or "").strip()
+  normalized_client_order_id = str(client_order_id or "").strip()
+  normalized_quarantine_reason = str(quarantine_reason or "").strip().upper()
   try:
     normalized_action = (
       action
@@ -110,7 +120,10 @@ def normalize_account_execution_control_request(
     )
   if len(normalized_reason) > _MAX_REASON_LENGTH:
     raise TradeApprovalChallengeError("INVALID_REASON", "操作原因不能超过 512 个字符")
-  if normalized_action == AccountExecutionControlAction.BEGIN_CONTROLLED_WINDOW:
+  if normalized_action in {
+    AccountExecutionControlAction.BEGIN_CONTROLLED_WINDOW,
+    AccountExecutionControlAction.REPAIR_QUARANTINED_ORDER,
+  }:
     if not normalized_snapshot:
       raise TradeApprovalChallengeError("SNAPSHOT_REQUIRED", "必须绑定最新完整快照")
   elif normalized_snapshot:
@@ -127,6 +140,19 @@ def normalize_account_execution_control_request(
     and not normalized_reason
   ):
     raise TradeApprovalChallengeError("REASON_REQUIRED", "暂停或紧急停止必须填写原因")
+  if normalized_action == AccountExecutionControlAction.REPAIR_QUARANTINED_ORDER:
+    if not normalized_client_order_id or not normalized_quarantine_reason:
+      raise TradeApprovalChallengeError(
+        "QUARANTINED_ORDER_REQUIRED",
+        "隔离修复必须绑定委托和隔离原因",
+      )
+    if not normalized_reason:
+      raise TradeApprovalChallengeError("REASON_REQUIRED", "隔离修复必须填写原因")
+  elif normalized_client_order_id or normalized_quarantine_reason:
+    raise TradeApprovalChallengeError(
+      "UNEXPECTED_QUARANTINED_ORDER",
+      "当前账户控制动作不接受隔离委托参数",
+    )
   return AccountExecutionControlRequestData(
     account_id=normalized_account,
     action=normalized_action,
@@ -134,6 +160,8 @@ def normalize_account_execution_control_request(
     snapshot_id=normalized_snapshot,
     reason=normalized_reason,
     idempotency_key=normalized_key,
+    client_order_id=normalized_client_order_id,
+    quarantine_reason=normalized_quarantine_reason,
   )
 
 
@@ -145,6 +173,8 @@ def _request_binding(request: AccountExecutionControlRequestData) -> dict[str, A
     "snapshot_id": request.snapshot_id,
     "reason": request.reason,
     "idempotency_key": request.idempotency_key,
+    "client_order_id": request.client_order_id,
+    "quarantine_reason": request.quarantine_reason,
   }
 
 
@@ -164,6 +194,8 @@ def _request_from_payload(
     snapshot_id=str(request.get("snapshot_id") or ""),
     reason=str(request.get("reason") or ""),
     idempotency_key=str(request.get("idempotency_key") or ""),
+    client_order_id=str(request.get("client_order_id") or ""),
+    quarantine_reason=str(request.get("quarantine_reason") or ""),
   )
 
 
@@ -181,6 +213,21 @@ def _safety_binding(safety: dict[str, Any]) -> dict[str, Any]:
     "new_external_trade_count": int(safety.get("new_external_trade_count") or 0),
     "working_external_order_count": int(
       safety.get("working_external_order_count") or 0
+    ),
+    "quarantined_orders": sorted(
+      [
+        {
+          "client_order_id": str(item.get("client_order_id") or ""),
+          "plan_id": str(item.get("plan_id") or ""),
+          "intent_id": str(item.get("intent_id") or ""),
+          "quarantine_reason": str(item.get("quarantine_reason") or ""),
+          "broker_order_id": str(item.get("broker_order_id") or ""),
+          "repairable": bool(item.get("repairable")),
+          "blocked_reason": str(item.get("blocked_reason") or ""),
+        }
+        for item in list(safety.get("quarantined_orders") or [])
+      ],
+      key=lambda item: (item["client_order_id"], item["quarantine_reason"]),
     ),
     "checks": sorted(
       [
@@ -226,6 +273,32 @@ def _validate_action(
       raise TradeApprovalChallengeError(
         "SNAPSHOT_CHANGED",
         "完整快照已经更新，请刷新后重试",
+      )
+  elif request.action == AccountExecutionControlAction.REPAIR_QUARANTINED_ORDER:
+    if str(safety.get("snapshot_id") or "") != request.snapshot_id:
+      raise TradeApprovalChallengeError(
+        "SNAPSHOT_CHANGED",
+        "隔离修复绑定的完整快照已经更新",
+      )
+    candidate = next(
+      (
+        item
+        for item in list(safety.get("quarantined_orders") or [])
+        if str(item.get("client_order_id") or "") == request.client_order_id
+        and str(item.get("quarantine_reason") or "").upper()
+        == request.quarantine_reason
+      ),
+      None,
+    )
+    if candidate is None:
+      raise TradeApprovalChallengeError(
+        "QUARANTINED_ORDER_CHANGED",
+        "隔离修复目标已变化或不存在",
+      )
+    if not bool(candidate.get("repairable")):
+      raise TradeApprovalChallengeError(
+        "QUARANTINED_ORDER_NOT_REPAIRABLE",
+        str(candidate.get("blocked_reason") or "隔离委托尚未满足修复条件"),
       )
   elif request.action == AccountExecutionControlAction.ENABLE_RISK_INCREASE:
     if not bool(safety.get("can_activate_automation")):
@@ -401,6 +474,7 @@ class AccountExecutionControlChallengeService:
         AccountExecutionControl,
         request.account_id,
         with_for_update=True,
+        populate_existing=True,
       )
       challenge = (
         await db.execute(
@@ -445,6 +519,11 @@ class AccountExecutionControlChallengeService:
             safety=(
               dict(result["safety"]) if isinstance(result.get("safety"), dict) else None
             ),
+            repair_result=(
+              dict(result["repair_result"])
+              if isinstance(result.get("repair_result"), dict)
+              else None
+            ),
           )
       else:
         if control is None or int(control.state_version) != request.state_version:
@@ -457,6 +536,7 @@ class AccountExecutionControlChallengeService:
         if request.action in {
           AccountExecutionControlAction.BEGIN_CONTROLLED_WINDOW,
           AccountExecutionControlAction.ENABLE_RISK_INCREASE,
+          AccountExecutionControlAction.REPAIR_QUARANTINED_ORDER,
         } and not hmac.compare_digest(
           _canonical_hash(_safety_binding(safety)),
           str(payload.get("safety_fingerprint") or ""),
@@ -472,6 +552,7 @@ class AccountExecutionControlChallengeService:
         }
         await db.commit()
 
+    repair_result: dict[str, Any] | None = None
     try:
       if request.action == AccountExecutionControlAction.BEGIN_CONTROLLED_WINDOW:
         safety = await cls.safety_service.begin_controlled_window(
@@ -481,6 +562,32 @@ class AccountExecutionControlChallengeService:
           expected_state_version=request.state_version,
           operation_id=normalized_id,
         )
+      elif request.action == AccountExecutionControlAction.REPAIR_QUARANTINED_ORDER:
+        async with AsyncSessionLocal() as db:
+          repaired = await AccountExecutionQuarantineService(
+            db
+          ).repair_quarantined_order(
+            account_id=request.account_id,
+            client_order_id=request.client_order_id,
+            quarantine_reason=request.quarantine_reason,
+            snapshot_id=request.snapshot_id,
+            expected_state_version=request.state_version,
+            actor_id=current.user_id,
+            operator_reason=request.reason,
+            operation_id=normalized_id,
+          )
+          await db.commit()
+        repair_result = {
+          "applied": repaired.applied,
+          "event_id": repaired.event_id,
+          "client_order_id": repaired.client_order_id,
+          "plan_id": repaired.plan_id,
+          "intent_id": repaired.intent_id,
+          "snapshot_id": repaired.snapshot_id,
+          "broker_terminal_status": repaired.broker_terminal_status,
+          "cumulative_filled_volume": repaired.cumulative_filled_volume,
+        }
+        safety = await cls.safety_service.status(request.account_id)
       else:
         target_state = {
           AccountExecutionControlAction.ENABLE_RISK_INCREASE: "ENABLED",
@@ -518,6 +625,11 @@ class AccountExecutionControlChallengeService:
         "operation_code": code,
         "message": message[:512],
         **({"safety": _json_safe(safety)} if safety is not None else {}),
+        **(
+          {"repair_result": _json_safe(repair_result)}
+          if repair_result is not None
+          else {}
+        ),
       }
       await db.commit()
     return AccountExecutionControlConfirmationData(
@@ -528,6 +640,7 @@ class AccountExecutionControlChallengeService:
       operation_code=code,
       message=message,
       safety=safety,
+      repair_result=repair_result,
     )
 
 

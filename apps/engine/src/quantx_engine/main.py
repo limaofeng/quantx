@@ -21,6 +21,7 @@ from quantx_infrastructure.database.relational_connection import (
   engine,
 )
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.limit_up_radar import limit_up_radar_monitor
 from quantx_infrastructure.services.t_trade_monitor_projection_service import (
   t_trade_monitor_projection_service,
@@ -49,6 +50,7 @@ ENGINE_LEASE_RETRY_SECONDS = 2.0
 ENGINE_LEASE_IDLE_TIMEOUT_SECONDS = 60
 ENGINE_DATABASE_OPERATION_TIMEOUT_SECONDS = 10.0
 ENGINE_HEARTBEAT_RETRY_SECONDS = 1.0
+ENGINE_RUNTIME_OWNER_AUDIT_SECONDS = 2.0
 ENGINE_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 ENGINE_RESTART_MAX_DELAY_SECONDS = 30.0
 
@@ -136,6 +138,38 @@ async def _lease_watchdog(stopped: asyncio.Event, lock_connection) -> None:
     except Exception as exc:
       stopped.set()
       raise RuntimeError("Engine database lease connection was lost") from exc
+
+
+async def _runtime_owner_watchdog(stopped: asyncio.Event) -> None:
+  """Continuously enforce that every active run-owned plan has a consumer."""
+
+  service = AutoExitPlanService(strategy_manager)
+  while not stopped.is_set():
+    await service.audit_active_runtime_owned_plans()
+    if not exit_plan_monitor.is_running:
+      raise RuntimeError("ExitPlanMonitor manual-plan consumer is not running")
+    try:
+      await asyncio.wait_for(
+        stopped.wait(),
+        timeout=ENGINE_RUNTIME_OWNER_AUDIT_SECONDS,
+      )
+    except asyncio.TimeoutError:
+      pass
+
+
+async def _start_and_reconcile_runtime_exit_plans() -> dict[str, object]:
+  """Restore strategy-owned runs after the manual-plan migration barrier."""
+
+  await strategy_manager.start()
+  service = AutoExitPlanService(strategy_manager)
+  audit = await service.audit_active_runtime_owned_plans()
+  if audit["examined"]:
+    logger.info(
+      "Runtime exit-plan owner audit passed: examined=%s verified=%s",
+      audit["examined"],
+      len(audit["verified"]),
+    )
+  return {"audit": audit}
 
 
 def _detach_engine_lease_connection(lock_connection) -> None:
@@ -324,8 +358,9 @@ async def run_engine() -> None:
     await realtime_manager.start()
     await limit_up_radar_monitor.start()
     await intraday_warm_cache.start()
-    await strategy_manager.start()
     await exit_plan_monitor.start()
+    # Migrate legacy manual ownership before any StrategyRun can restore.
+    await _start_and_reconcile_runtime_exit_plans()
     await conditional_liquidation_monitor.start()
     await t_trade_global_monitor.start()
     await limit_up_board_assistant.start()
@@ -337,6 +372,10 @@ async def run_engine() -> None:
       asyncio.create_task(
         _lease_watchdog(stopped, lock_connection),
         name="engine-lease-watchdog",
+      ),
+      asyncio.create_task(
+        _runtime_owner_watchdog(stopped),
+        name="runtime-exit-plan-owner-watchdog",
       ),
       asyncio.create_task(
         run_report_consumer(stopped),

@@ -20,6 +20,13 @@ from quantx_domain.brokers.base import (
 )
 
 from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.services.trade_command_service import (
+  AgentUnavailableError,
+)
+from quantx_infrastructure.services.trade_intent_processor import (
+  local_pre_broker_zero_fill_metadata,
+)
+from quantx_infrastructure.services.trading_service import InvalidOrderError
 
 
 class LiveBroker(BrokerBase):
@@ -106,9 +113,25 @@ class LiveBroker(BrokerBase):
 
     # 风控检查
     if self.enable_risk_control:
-      risk_check = await self._risk_check(request)
+      try:
+        risk_check = await self._risk_check(request)
+      except Exception as exc:
+        self.logger.error("本地风控检查异常: %s", exc)
+        return self._create_rejected_order(request, str(exc))
       if not risk_check["passed"]:
         return self._create_rejected_order(request, risk_check["reason"])
+
+    if self.trading_service is None:
+      return self._create_rejected_order(request, "交易服务尚未初始化")
+
+    try:
+      # These conversions and all checks above happen before the durable
+      # command enqueue boundary, so a failure here is authoritative zero-fill.
+      xt_order_type = self._convert_order_type(request.order_type)
+      xt_price_type = self._convert_price_type(request.price_type)
+    except Exception as exc:
+      self.logger.error("下单前转换失败: %s", exc)
+      return self._create_rejected_order(request, str(exc))
 
     # 创建内部订单
     internal_order_id = self.generate_order_id()
@@ -120,11 +143,9 @@ class LiveBroker(BrokerBase):
     )
 
     try:
-      # 转换订单类型
-      xt_order_type = self._convert_order_type(request.order_type)
-      xt_price_type = self._convert_price_type(request.price_type)
-
-      # 调用交易服务下单
+      # Crossing this call means a database commit may already have succeeded
+      # even if the caller later observes an exception. Only typed validation
+      # failures below are guaranteed to have rolled the transaction back.
       result = await self.trading_service.place_order(
         stock_code=request.instrument_code,
         order_type=xt_order_type,
@@ -169,12 +190,19 @@ class LiveBroker(BrokerBase):
 
       return order
 
+    except (AgentUnavailableError, InvalidOrderError) as exc:
+      self.logger.warning("下单在持久化前被拒绝: %s", exc)
+      return self._create_rejected_order(
+        request,
+        str(exc),
+        order_id=internal_order_id,
+      )
     except Exception as e:
-      self.logger.error(f"下单失败: {e}")
-      order.status = OrderStatus.REJECTED
-      order.error_message = str(e)
-      self.orders[internal_order_id] = order
-      return order
+      # Do not fabricate a zero-fill rejection after entering TradingService:
+      # the enqueue commit may have reached PostgreSQL. The executor will mark
+      # this intent RECONCILE_REQUIRED and retain its reservation/pending gate.
+      self.logger.error("交易命令持久化结果不确定: %s", e)
+      raise
 
   async def cancel_order(self, order_id: str) -> bool:
     """撤单"""
@@ -489,7 +517,7 @@ class LiveBroker(BrokerBase):
     from quantx_infrastructure.models.enums import PriceType as XTPriceType
 
     mapping = {
-      PriceType.LIMIT: XTPriceType.LIMIT,
+      PriceType.LIMIT: XTPriceType.FIX_PRICE,
       PriceType.MARKET: XTPriceType.MARKET_CONVERT_5_LIMIT,
     }
     return mapping.get(price_type, XTPriceType.MARKET_CONVERT_5_LIMIT)
@@ -550,10 +578,20 @@ class LiveBroker(BrokerBase):
       or external_order.time,
     )
 
-  def _create_rejected_order(self, request: OrderRequest, reason: str) -> OrderResponse:
-    """创建被拒绝的订单"""
+  def _create_rejected_order(
+    self,
+    request: OrderRequest,
+    reason: str,
+    *,
+    order_id: Optional[str] = None,
+  ) -> OrderResponse:
+    """创建有本地零成交证明的拒单。"""
+    request.metadata = local_pre_broker_zero_fill_metadata(
+      request.metadata,
+      reason=reason,
+    )
     order = OrderResponse(
-      order_id=self.generate_order_id(),
+      order_id=order_id or self.generate_order_id(),
       request=request,
       status=OrderStatus.REJECTED,
       submit_time=time_utils.now(),

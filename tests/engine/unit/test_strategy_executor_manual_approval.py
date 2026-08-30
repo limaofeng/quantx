@@ -36,6 +36,7 @@ from quantx_engine.strategy_executor import (
 )
 from quantx_engine.t_trade_coordination import t_trade_account_coordination_lock
 from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 
 _V3_POLICY = OpportunityPolicy()
 
@@ -1082,7 +1083,17 @@ async def test_restore_requires_reconciliation_for_approved_without_order_id():
 
 
 @pytest.mark.asyncio
-async def test_restore_filled_intent_waits_for_idempotent_inbox_replay():
+async def test_restore_filled_intent_waits_for_idempotent_inbox_replay(
+  monkeypatch: pytest.MonkeyPatch,
+):
+  async def persist_plan_state(_service, *, plan_state, **_kwargs):
+    return dict(plan_state), 1
+
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "persist_strategy_plan_state",
+    persist_plan_state,
+  )
   executor = StrategyExecutor()
   context = StrategyContext(
     run_id="run-filled-recovery",
@@ -1190,7 +1201,17 @@ async def test_restore_filled_intent_waits_for_idempotent_inbox_replay():
 
 
 @pytest.mark.asyncio
-async def test_restore_cancelled_partial_fill_keeps_open_lot_and_blocks_new_entry():
+async def test_restore_cancelled_partial_fill_keeps_open_lot_and_blocks_new_entry(
+  monkeypatch: pytest.MonkeyPatch,
+):
+  async def persist_plan_state(_service, *, plan_state, **_kwargs):
+    return dict(plan_state), 1
+
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "persist_strategy_plan_state",
+    persist_plan_state,
+  )
   executor = StrategyExecutor()
   context = StrategyContext(
     run_id="run-cancelled-partial-recovery",

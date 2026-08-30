@@ -318,6 +318,18 @@ class TTradeService:
     approval_audit: Optional[Mapping[str, Any]] = None,
   ) -> Dict[str, Any]:
     strategy_manager = self._require_runtime_manager()
+    runtime = strategy_manager.get_run(run_id)
+    pending_intent = (
+      runtime.pending_approvals.get(intent_id) if runtime is not None else None
+    )
+    pending_metadata = dict(getattr(pending_intent, "metadata", {}) or {})
+    if (
+      pending_intent is None
+      or str(getattr(getattr(pending_intent, "direction", None), "value", ""))
+      != "BUY"
+      or str(pending_metadata.get("t_trade_role") or "").lower() != "entry"
+    ):
+      raise ValueError("只能通过做 T 买入确认接口批准当前待确认的入场意图")
     session_before_approval = await self.get_session(run_id, intent_id=intent_id)
     result = await strategy_manager.executor.approve_trade_intent(
       run_id,
@@ -412,7 +424,7 @@ class TTradeService:
       break
     strategy_manager.executor.apply_external_state_patch(run_id, patch)
     imported_state = dict(patch.set["instrument_states"][order.stock_code] or {})
-    strategy_manager.executor.register_external_exit_plan(
+    await strategy_manager.executor.register_external_exit_plan(
       run_id,
       runtime.strategy.build_exit_plan_template(
         instrument_code=order.stock_code,

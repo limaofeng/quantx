@@ -13,7 +13,11 @@ from quantx_infrastructure.database.types import (
 )
 
 from .account_repository import AccountRepository
-from .auto_exit_plan_repository import AutoExitPlanRepository
+from .auto_exit_plan_repository import (
+  AutoExitPlanConcurrencyError,
+  AutoExitPlanRepository,
+  auto_exit_plan_state_values,
+)
 from .closed_position_cycle_repository import ClosedPositionCycleRepository
 from .conditional_liquidation_order_repository import (
   ConditionalLiquidationOrderRepository,
@@ -78,7 +82,9 @@ __all__ = [
   "MarketDataRepository",
   "HolidayRepository",
   "AccountRepository",
+  "AutoExitPlanConcurrencyError",
   "AutoExitPlanRepository",
+  "auto_exit_plan_state_values",
   "DailyAssetSnapshotRepository",
   "DailyAssetPositionSnapshotRepository",
   "ManagedPlanRepository",

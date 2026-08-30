@@ -4326,8 +4326,14 @@ class RuntimeStateManager:
                 or getattr(intent, "run_id", self.run_id)
                 or self.run_id
             )
-            owner_type = "STRATEGY_RUN"
-            owner_id = strategy_run_id
+            requested_owner_type = str(metadata.get("owner_type") or "").upper()
+            requested_owner_id = str(metadata.get("owner_id") or "")
+            if requested_owner_type == "EXIT_PLAN" and requested_owner_id:
+                owner_type = "EXIT_PLAN"
+                owner_id = requested_owner_id
+            else:
+                owner_type = "STRATEGY_RUN"
+                owner_id = strategy_run_id
             metadata.setdefault("plan_id", getattr(origin, "plan_id", None))
         metadata.setdefault("origin_type", origin_type)
         metadata.setdefault(

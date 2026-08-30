@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
 
@@ -21,10 +22,12 @@ from quantx_engine.strategy_manager import strategy_manager
 from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
+  AccountExecutionControl,
   AgentReportInbox,
   PendingTradeOrder,
   StrategyOrderCorrelation,
   StrategyRuntimeEvent,
+  TradeCommandOutbox,
   TTradeBatch,
 )
 from quantx_infrastructure.models.auth import AuthUser
@@ -33,8 +36,79 @@ from quantx_infrastructure.models.strategy_run_state import (
   StrategyRunState,
 )
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_strategy_exit_plan_store(monkeypatch: pytest.MonkeyPatch) -> None:
+  """Keep runtime-event tests hermetic across pytest event loops."""
+
+  states: dict[tuple[str, str], dict] = {}
+  versions: dict[tuple[str, str], int] = {}
+  applied_events: set[tuple[str, str]] = set()
+
+  async def strategy_plan_event_applied(
+    _service,
+    *,
+    plan_id: str,
+    business_key: str,
+  ) -> bool:
+    return (str(plan_id), str(business_key)) in applied_events
+
+  async def persist_strategy_plan_state(
+    _service,
+    *,
+    strategy_run_id: str,
+    plan_state,
+    event_business_key: str | None = None,
+    **_kwargs,
+  ):
+    plan_id = str(plan_state["template"]["plan_id"])
+    key = (str(strategy_run_id), plan_id)
+    next_version = versions.get(key, 0) + 1
+    states[key] = deepcopy(dict(plan_state))
+    versions[key] = next_version
+    if event_business_key:
+      applied_events.add((plan_id, str(event_business_key)))
+    return deepcopy(states[key]), next_version
+
+  async def load_strategy_plan_book(
+    _service,
+    *,
+    strategy_run_id: str,
+    terminal_history_limit: int = 200,
+  ):
+    del terminal_history_limit
+    normalized_run_id = str(strategy_run_id)
+    plans = {
+      plan_id: deepcopy(plan_state)
+      for (run_id, plan_id), plan_state in states.items()
+      if run_id == normalized_run_id
+    }
+    plan_versions = {
+      plan_id: version
+      for (run_id, plan_id), version in versions.items()
+      if run_id == normalized_run_id
+    }
+    return {"version": ExitPlanBook.VERSION, "plans": plans}, plan_versions
+
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "strategy_plan_event_applied",
+    strategy_plan_event_applied,
+  )
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "persist_strategy_plan_state",
+    persist_strategy_plan_state,
+  )
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "load_strategy_plan_book",
+    load_strategy_plan_book,
+  )
 
 
 def _reconcile_trade_fixture(run_id: str):
@@ -113,9 +187,11 @@ async def test_strategy_report_events_are_durable_and_applied_once(
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   tables = [
     AuthUser.__table__,
+    AccountExecutionControl.__table__,
     PendingTradeOrder.__table__,
     StrategyOrderCorrelation.__table__,
     StrategyRuntimeEvent.__table__,
+    TradeCommandOutbox.__table__,
     TTradeBatch.__table__,
     TradeIntentRecord.__table__,
   ]
@@ -298,9 +374,11 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   tables = [
     AuthUser.__table__,
+    AccountExecutionControl.__table__,
     PendingTradeOrder.__table__,
     StrategyOrderCorrelation.__table__,
     StrategyRuntimeEvent.__table__,
+    TradeCommandOutbox.__table__,
     TTradeBatch.__table__,
     TradeIntentRecord.__table__,
   ]
@@ -572,9 +650,11 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
   engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
   tables = [
     AuthUser.__table__,
+    AccountExecutionControl.__table__,
     PendingTradeOrder.__table__,
     StrategyOrderCorrelation.__table__,
     StrategyRuntimeEvent.__table__,
+    TradeCommandOutbox.__table__,
     TTradeBatch.__table__,
     TradeIntentRecord.__table__,
     StrategyRunState.__table__,
@@ -1065,6 +1145,9 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
     fresh_runtime.state_manager = restored_manager
     fresh_runtime.exit_plan_book = ExitPlanBook.from_dict(exit_plan_snapshot)
     fresh_executor.runs[fresh_runtime.run_id] = fresh_runtime
+    # PAPER/LIVE restores its ExitPlanBook from auto_exit_plans, not from the
+    # strategy custom-state checkpoint.
+    await fresh_executor._load_runtime_exit_plan_book(fresh_runtime)
     fresh_runtime.event_task = asyncio.create_task(
       fresh_executor._process_event_queue(fresh_runtime)
     )

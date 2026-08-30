@@ -165,6 +165,7 @@ class TTradeTimeExitMode:
 class AshareIntradayTAssistantStrategy(StrategyBase):
   """Monitor an account holdings universe in one strategy instance."""
 
+  OWNS_RUNTIME_EXIT_PLAN_BOOK = True
   USES_T_TRADE_OPPORTUNITY_PROFILE = True
   CATEGORY = StrategyCategory.MEAN_REVERSION
   RISK_LEVEL = "medium"

@@ -9,7 +9,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.config.settings import settings
@@ -23,6 +23,11 @@ from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.engine_command_service import (
   engine_command_service,
 )
+from quantx_infrastructure.services.exit_plan_authorization_service import (
+  T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY,
+  authorization_expiry_for_challenge,
+  bind_t_trade_exit_authorization_to_challenge_payload,
+)
 from sqlalchemy import select
 
 from quantx_api.auth.principal import Principal
@@ -35,6 +40,9 @@ _MAX_TOKEN_LENGTH = 256
 T_TRADE_ENTRY_APPROVAL = "T_TRADE_ENTRY_APPROVAL"
 STRATEGY_TRADE_INTENT_APPROVAL = "STRATEGY_TRADE_INTENT_APPROVAL"
 EXIT_PLAN_SELL_APPROVAL = "EXIT_PLAN_SELL_APPROVAL"
+_DURABLE_COMMAND_APPROVAL_ACTIONS = frozenset(
+  {T_TRADE_ENTRY_APPROVAL, EXIT_PLAN_SELL_APPROVAL}
+)
 
 
 class TradeApprovalChallengeError(ValueError):
@@ -42,6 +50,18 @@ class TradeApprovalChallengeError(ValueError):
     super().__init__(message)
     self.code = code
     self.message = message
+
+
+@dataclass(frozen=True)
+class TTradeAutoExitAuthorizationPreviewData:
+  plan_id: str
+  config_version: int
+  max_protected_volume: int
+  rules: list[dict[str, Any]]
+  t1_policy: str
+  execution_policy: dict[str, Any]
+  execution_semantics: str
+  authorization_expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -62,6 +82,9 @@ class TradeApprovalPreviewData:
   signal_expires_at: Optional[datetime]
   challenge_expires_at: datetime
   warnings: list[str]
+  t_trade_auto_exit_authorization: Optional[
+    TTradeAutoExitAuthorizationPreviewData
+  ] = None
 
 
 @dataclass(frozen=True)
@@ -243,15 +266,21 @@ def _validate_pending_intent(
   record: Optional[TradeIntentRecord],
   *,
   action: str,
-  run_id: str,
+  business_owner_id: str,
   intent_id: str,
 ) -> TradeIntentRecord:
   is_exit_plan = action == EXIT_PLAN_SELL_APPROVAL
   belongs_to_owner = bool(
     record
     and (
-      (is_exit_plan and record.owner_type == "EXIT_PLAN" and record.owner_id == run_id)
-      or (not is_exit_plan and record.strategy_run_id == run_id)
+      (
+        is_exit_plan
+        and record.owner_type == "EXIT_PLAN"
+        and record.owner_id == business_owner_id
+      )
+      or (
+        not is_exit_plan and record.strategy_run_id == business_owner_id
+      )
     )
   )
   if record is None or record.id != intent_id or not belongs_to_owner:
@@ -282,7 +311,7 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    run_id: str,
+    business_owner_id: str,
     intent_id: str,
   ) -> TradeApprovalPreviewData:
     """Keep the Engine-managed strategy/exit approval contract intact.
@@ -307,7 +336,7 @@ class TradeApprovalChallengeService:
       record = _validate_pending_intent(
         result.scalar_one_or_none(),
         action=action,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
       )
       if record.account_id and record.account_id != normalized_account_id:
@@ -333,7 +362,7 @@ class TradeApprovalChallengeService:
         "user_id": principal.user_id,
         "device_session_id": principal.device_session_id,
         "account_id": normalized_account_id,
-        "run_id": run_id,
+        "business_owner_id": business_owner_id,
         "intent_id": intent_id,
         "intent_fingerprint": _intent_fingerprint(record),
         "created_at": _aware_shanghai(now).isoformat(),
@@ -361,7 +390,7 @@ class TradeApprovalChallengeService:
         confirmation_token=raw_token,
         action=action,
         account_id=normalized_account_id,
-        run_id=run_id,
+        run_id=business_owner_id,
         intent_id=intent_id,
         instrument_code=str(record.instrument_code or ""),
         side=str(record.direction or ""),
@@ -388,7 +417,7 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    run_id: str,
+    business_owner_id: str,
     intent_id: str,
     confirmation_token: str,
   ) -> str:
@@ -405,7 +434,7 @@ class TradeApprovalChallengeService:
       record = _validate_pending_intent(
         result.scalar_one_or_none(),
         action=action,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
       )
       if record.account_id and record.account_id != normalized_account_id:
@@ -420,7 +449,7 @@ class TradeApprovalChallengeService:
         "user_id": principal.user_id,
         "device_session_id": principal.device_session_id,
         "account_id": normalized_account_id,
-        "run_id": run_id,
+        "business_owner_id": business_owner_id,
         "intent_id": intent_id,
       }
       if not challenge or any(
@@ -513,7 +542,7 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    run_id: str,
+    business_owner_id: str,
     intent_id: str,
     intent_fingerprint: str,
   ) -> dict[str, Any]:
@@ -522,7 +551,7 @@ class TradeApprovalChallengeService:
       "user_id": principal.user_id,
       "device_session_id": principal.device_session_id,
       "account_id": account_id,
-      "run_id": run_id,
+      "business_owner_id": business_owner_id,
       "intent_id": intent_id,
       "intent_fingerprint": intent_fingerprint,
     }
@@ -535,7 +564,7 @@ class TradeApprovalChallengeService:
     user_id: str,
     device_session_id: str,
     account_id: str,
-    run_id: str,
+    business_owner_id: str,
     intent_id: str,
   ) -> bool:
     payload = dict(challenge.payload or {})
@@ -544,7 +573,7 @@ class TradeApprovalChallengeService:
       "user_id": user_id,
       "device_session_id": device_session_id,
       "account_id": account_id,
-      "run_id": run_id,
+      "business_owner_id": business_owner_id,
       "intent_id": intent_id,
     }
     return all(
@@ -559,7 +588,7 @@ class TradeApprovalChallengeService:
     action: str,
     user_id: str,
     account_id: str,
-    run_id: str,
+    business_owner_id: str,
     intent_id: str,
   ) -> bool:
     """Match an operation independently of the issuing device.
@@ -575,7 +604,7 @@ class TradeApprovalChallengeService:
       "action": action,
       "user_id": user_id,
       "account_id": account_id,
-      "run_id": run_id,
+      "business_owner_id": business_owner_id,
       "intent_id": intent_id,
     }
     return all(
@@ -623,7 +652,7 @@ class TradeApprovalChallengeService:
     record: TradeIntentRecord,
     action: str,
     account_id: str,
-    run_id: str,
+    business_owner_id: str,
     intent_id: str,
     confirmation_token: str,
     signal_expires_at: Optional[datetime],
@@ -641,12 +670,39 @@ class TradeApprovalChallengeService:
     estimated_amount = _optional_float(record.target_amount)
     if estimated_amount is None and reference_price and target_volume:
       estimated_amount = reference_price * target_volume
+    raw_binding = dict(challenge.payload or {}).get(
+      T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY
+    )
+    binding = dict(raw_binding) if isinstance(raw_binding, Mapping) else {}
+    raw_subject = binding.get("subject")
+    subject = dict(raw_subject) if isinstance(raw_subject, Mapping) else {}
+    raw_template = subject.get("exit_plan_template")
+    template = dict(raw_template) if isinstance(raw_template, Mapping) else {}
+    raw_execution = template.get("execution")
+    execution = (
+      dict(raw_execution) if isinstance(raw_execution, Mapping) else {}
+    )
+    rules = [
+      dict(rule)
+      for rule in list(template.get("rules") or [])
+      if isinstance(rule, Mapping)
+    ]
+    warnings = [
+      "确认仅授权该意图进入统一下单风控，不代表委托已提交或成交",
+      "价格、资金、整手、涨跌停、T+1 与可用量会在确认后重新校验",
+      "最终状态只能以 QMT Agent 上报的券商委托与成交回报为准",
+    ]
+    if subject:
+      warnings.insert(
+        1,
+        "本次确认同时授权买入成交后，在约定规则和最大保护数量内自动卖出",
+      )
     return TradeApprovalPreviewData(
       challenge_id=str(challenge.id),
       confirmation_token=confirmation_token,
       action=action,
       account_id=account_id,
-      run_id=run_id,
+      run_id=business_owner_id,
       intent_id=intent_id,
       instrument_code=str(record.instrument_code or ""),
       side=str(record.direction or ""),
@@ -659,11 +715,27 @@ class TradeApprovalChallengeService:
         _aware_shanghai(signal_expires_at) if signal_expires_at else None
       ),
       challenge_expires_at=_aware_shanghai(challenge.expires_at),
-      warnings=[
-        "确认仅授权该意图进入统一下单风控，不代表委托已提交或成交",
-        "价格、资金、整手、涨跌停、T+1 与可用量会在确认后重新校验",
-        "最终状态只能以 QMT Agent 上报的券商委托与成交回报为准",
-      ],
+      warnings=warnings,
+      t_trade_auto_exit_authorization=(
+        TTradeAutoExitAuthorizationPreviewData(
+          plan_id=str(subject.get("exit_plan_id") or ""),
+          config_version=int(subject.get("exit_config_version") or 0),
+          max_protected_volume=int(subject.get("max_protected_volume") or 0),
+          rules=rules,
+          t1_policy=str(template.get("t1_policy") or ""),
+          execution_policy=execution,
+          execution_semantics=(
+            "MiniQMT STOCK_SELL；沪深五档即时成交剩余撤销；委托价 0"
+            if str(execution.get("price_type") or "").upper() == "MARKET"
+            else "按退出计划的限价与保护价策略执行"
+          ),
+          authorization_expires_at=_aware_shanghai(
+            authorization_expiry_for_challenge(challenge.expires_at)
+          ),
+        )
+        if subject
+        else None
+      ),
     )
 
   @staticmethod
@@ -672,15 +744,15 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    run_id: str,
+    business_owner_id: str,
     intent_id: str,
   ) -> TradeApprovalPreviewData:
-    if action != T_TRADE_ENTRY_APPROVAL:
+    if action not in _DURABLE_COMMAND_APPROVAL_ACTIONS:
       return await TradeApprovalChallengeService._issue_legacy(
         principal=principal,
         action=action,
         account_id=account_id,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
       )
     normalized_account_id = principal.require_account(account_id)
@@ -711,7 +783,10 @@ class TradeApprovalChallengeService:
             TradeConfirmationChallenge.user_id == principal.user_id,
             TradeConfirmationChallenge.account_id == normalized_account_id,
             TradeConfirmationChallenge.action == action,
-            TradeConfirmationChallenge.payload["run_id"].as_string() == run_id,
+            TradeConfirmationChallenge.payload[
+              "business_owner_id"
+            ].as_string()
+            == business_owner_id,
             TradeConfirmationChallenge.payload["intent_id"].as_string()
             == intent_id,
           )
@@ -729,7 +804,7 @@ class TradeApprovalChallengeService:
             action=action,
             user_id=principal.user_id,
             account_id=normalized_account_id,
-            run_id=run_id,
+            business_owner_id=business_owner_id,
             intent_id=intent_id,
           )
         ),
@@ -762,7 +837,7 @@ class TradeApprovalChallengeService:
             action=action,
             user_id=principal.user_id,
             account_id=normalized_account_id,
-            run_id=run_id,
+            business_owner_id=business_owner_id,
             intent_id=intent_id,
           )
         ):
@@ -775,7 +850,7 @@ class TradeApprovalChallengeService:
       record = _validate_pending_intent(
         raw_record,
         action=action,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
       )
       signal_expires_at = _intent_expiry(record)
@@ -792,10 +867,15 @@ class TradeApprovalChallengeService:
         principal=principal,
         action=action,
         account_id=normalized_account_id,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
         intent_fingerprint=_intent_fingerprint(record),
       )
+      if action == T_TRADE_ENTRY_APPROVAL:
+        payload = bind_t_trade_exit_authorization_to_challenge_payload(
+          payload,
+          record,
+        )
       challenge = TradeConfirmationChallenge(
         id=str(uuid.uuid4()),
         action=action,
@@ -820,7 +900,7 @@ class TradeApprovalChallengeService:
         record=record,
         action=action,
         account_id=normalized_account_id,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
         confirmation_token=raw_token,
         signal_expires_at=signal_expires_at,
@@ -833,7 +913,7 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    run_id: str,
+    business_owner_id: str,
     intent_id: str,
     confirmation_token: str,
     command_type: Optional[str] = None,
@@ -849,12 +929,12 @@ class TradeApprovalChallengeService:
         "INVALID_CONFIRMATION_TOKEN",
         "确认凭据无效，请重新获取预览",
       )
-    if action != T_TRADE_ENTRY_APPROVAL:
+    if action not in _DURABLE_COMMAND_APPROVAL_ACTIONS:
       return await TradeApprovalChallengeService._consume_legacy(
         principal=principal,
         action=action,
         account_id=account_id,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
         confirmation_token=token,
       )
@@ -867,7 +947,7 @@ class TradeApprovalChallengeService:
       command_idempotency_key_factory,
       command_payload,
     )
-    if (action == T_TRADE_ENTRY_APPROVAL or any(value is not None for value in command_args)) and (
+    if (action in _DURABLE_COMMAND_APPROVAL_ACTIONS or any(value is not None for value in command_args)) and (
       command_type is None
       or command_aggregate_id is None
       or (command_idempotency_key is None and command_idempotency_key_factory is None)
@@ -892,9 +972,12 @@ class TradeApprovalChallengeService:
           (
             is_exit_plan
             and record.owner_type == "EXIT_PLAN"
-            and record.owner_id == run_id
+            and record.owner_id == business_owner_id
           )
-          or (not is_exit_plan and record.strategy_run_id == run_id)
+          or (
+            not is_exit_plan
+            and record.strategy_run_id == business_owner_id
+          )
         )
       )
       if record is None or record.id != intent_id or not belongs_to_owner:
@@ -915,7 +998,10 @@ class TradeApprovalChallengeService:
             TradeConfirmationChallenge.user_id == principal.user_id,
             TradeConfirmationChallenge.account_id == normalized_account_id,
             TradeConfirmationChallenge.action == action,
-            TradeConfirmationChallenge.payload["run_id"].as_string() == run_id,
+            TradeConfirmationChallenge.payload[
+              "business_owner_id"
+            ].as_string()
+            == business_owner_id,
             TradeConfirmationChallenge.payload["intent_id"].as_string()
             == intent_id,
             TradeConfirmationChallenge.token_digest == token_digest,
@@ -950,7 +1036,7 @@ class TradeApprovalChallengeService:
         user_id=principal.user_id,
         device_session_id=principal.device_session_id,
         account_id=normalized_account_id,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
       ):
         raise TradeApprovalChallengeError(
@@ -965,6 +1051,14 @@ class TradeApprovalChallengeService:
           "TRADE_PAYLOAD_CHANGED",
           "交易内容已变化，请重新获取预览",
         )
+      if command_payload is not None:
+        # Bind the consumed challenge identity into the Engine command on both
+        # first delivery and idempotent retry.  The runtime then carries this
+        # immutable reference through the BUY order and broker execution report.
+        command_payload = dict(command_payload)
+        approval_audit = dict(command_payload.get("approval_audit") or {})
+        approval_audit["challenge_id"] = str(challenge.id)
+        command_payload["approval_audit"] = approval_audit
       result_reference = dict(challenge.result_reference or {})
       if (
         challenge.consumed_at is None
@@ -1039,7 +1133,7 @@ class TradeApprovalChallengeService:
       record = _validate_pending_intent(
         record,
         action=action,
-        run_id=run_id,
+        business_owner_id=business_owner_id,
         intent_id=intent_id,
       )
       expires_at = _parse_local_datetime(challenge.expires_at)

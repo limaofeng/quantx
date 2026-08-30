@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 import quantx_engine.main as engine_main
@@ -105,6 +106,78 @@ async def test_lost_lease_requests_shutdown(monkeypatch) -> None:
     await _lease_watchdog(stopped, BrokenConnection())
 
   assert stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_runtime_owner_watchdog_propagates_dead_consumer(monkeypatch) -> None:
+  stopped = asyncio.Event()
+
+  class FailingAudit:
+    async def audit_active_runtime_owned_plans(self):
+      raise RuntimeError("StrategyRun 消费任务未运行")
+
+  monkeypatch.setattr(
+    engine_main,
+    "AutoExitPlanService",
+    lambda _manager: FailingAudit(),
+  )
+
+  with pytest.raises(RuntimeError, match="消费任务未运行"):
+    await engine_main._runtime_owner_watchdog(stopped)
+
+
+@pytest.mark.asyncio
+async def test_runtime_owner_watchdog_rejects_dead_manual_monitor(
+  monkeypatch,
+) -> None:
+  stopped = asyncio.Event()
+
+  class PassingAudit:
+    async def audit_active_runtime_owned_plans(self):
+      return {"examined": 0, "verified": []}
+
+  monkeypatch.setattr(
+    engine_main,
+    "AutoExitPlanService",
+    lambda _manager: PassingAudit(),
+  )
+  monkeypatch.setattr(
+    engine_main,
+    "exit_plan_monitor",
+    SimpleNamespace(is_running=False),
+  )
+
+  with pytest.raises(RuntimeError, match="manual-plan consumer"):
+    await engine_main._runtime_owner_watchdog(stopped)
+
+
+@pytest.mark.asyncio
+async def test_strategy_startup_restores_runs_before_owner_audit(
+  monkeypatch,
+) -> None:
+  events: list[str] = []
+
+  class StrategyManager:
+    async def start(self) -> None:
+      events.append("strategy-start")
+
+  class ExitPlanService:
+    async def audit_active_runtime_owned_plans(self):
+      events.append("owner-audit")
+      return {"examined": 1, "verified": ["plan-1"]}
+
+  manager = StrategyManager()
+  monkeypatch.setattr(engine_main, "strategy_manager", manager)
+  service = ExitPlanService()
+  # AutoExitPlanService is constructed synchronously in production.
+  monkeypatch.setattr(engine_main, "AutoExitPlanService", lambda current: service)
+
+  result = await engine_main._start_and_reconcile_runtime_exit_plans()
+
+  assert events == ["strategy-start", "owner-audit"]
+  assert result == {
+    "audit": {"examined": 1, "verified": ["plan-1"]},
+  }
 
 
 @pytest.mark.asyncio

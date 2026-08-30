@@ -65,7 +65,7 @@ export function LiquidatedStocksSection({
               暂无真实清仓回报
             </h3>
             <p className="text-muted-foreground mt-1">
-              只有真实委托或成交回报会显示在这里
+              只有实际成交回报会显示在这里
             </p>
           </div>
         </div>

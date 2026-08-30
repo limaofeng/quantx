@@ -108,6 +108,7 @@ async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
     AccountExecutionControl,
     "account-1",
     with_for_update=True,
+    populate_existing=True,
   )
 
 
@@ -188,7 +189,10 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
   events: list[str] = []
 
   async def get(_model, _key, **kwargs):
-    assert kwargs == {"with_for_update": True}
+    assert kwargs == {
+      "with_for_update": True,
+      "populate_existing": True,
+    }
     events.append("rollout-lock")
     return _ready_control()
 

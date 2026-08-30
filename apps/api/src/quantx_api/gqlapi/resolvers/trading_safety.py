@@ -22,6 +22,7 @@ from ..types.trading_safety_types import (
   AccountSafetyHistoryRange,
   AccountSafetyHistoryStatus,
   AccountSafetyIncident,
+  QuarantinedOrder,
 )
 
 
@@ -67,6 +68,21 @@ class AccountExecutionSafetyResolver:
           scope=str(item.get("scope") or "INCREASE_RISK"),
         )
         for item in list(payload.get("checks") or [])
+      ],
+      quarantined_orders=[
+        QuarantinedOrder(
+          client_order_id=str(item.get("client_order_id") or ""),
+          plan_id=str(item.get("plan_id") or ""),
+          intent_id=str(item.get("intent_id") or ""),
+          quarantine_reason=str(item.get("quarantine_reason") or ""),
+          broker_order_id=str(item.get("broker_order_id") or ""),
+          repairable=bool(item.get("repairable")),
+          blocked_reason=str(item.get("blocked_reason") or ""),
+          quarantined_at=_aware(item.get("quarantined_at"))
+          or datetime.now(timezone.utc),
+          source_sequence=max(0, int(item.get("source_sequence") or 0)),
+        )
+        for item in list(payload.get("quarantined_orders") or [])
       ],
       engine_status=str(payload.get("engine_status") or "OFFLINE"),
       agent_status=str(payload.get("agent_status") or "OFFLINE"),

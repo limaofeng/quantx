@@ -507,14 +507,20 @@ def test_staged_once_rule_uses_its_own_sell_sizing():
     volume=1000,
     price=10.0,
   )
-  [decision] = book.evaluate("600000.SH", context(11.0))
+  [decision] = book.evaluate("600000.SH", context(12.0))
   book.mark_intent(decision, "intent-1")
-  book.apply_exit_fill(plan_id=plan.plan_id, volume=500, price=11.0)
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    volume=500,
+    price=11.0,
+  )
   book.apply_order_event(
     plan_id=plan.plan_id,
     intent_id="intent-1",
     status="FILLED",
     order_id="order-1",
+    cumulative_filled_volume=500,
   )
 
   assert plan.status == ExitPlanStatus.PARTIALLY_EXITED
@@ -549,18 +555,203 @@ def test_filled_order_before_trade_report_keeps_plan_pending_until_fill_arrives(
     intent_id="intent-1",
     status="FILLED",
     order_id="order-1",
+    cumulative_filled_volume=500,
   )
 
   assert plan.status == ExitPlanStatus.EXIT_PENDING
   assert plan.pending_order_terminal is True
   assert book.evaluate("600000.SH", context(11.2)) == []
 
-  book.apply_exit_fill(plan_id=plan.plan_id, volume=500, price=11.0)
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    volume=500,
+    price=11.0,
+  )
 
   assert plan.status == ExitPlanStatus.PARTIALLY_EXITED
   assert plan.pending_intent_id == ""
   assert "first-stage" in plan.completed_rule_ids
   assert book.evaluate("600000.SH", context(11.2)) == []
+
+
+def test_terminal_filled_uses_actual_cumulative_volume_after_sizing_cap():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="target",
+        strategy=ExitRuleType.TARGET_PRICE,
+        parameters={"target_price": 11.0},
+      )
+    ),
+    volume=1_000,
+    price=10.0,
+  )
+  [decision] = book.evaluate("600000.SH", context(11.0))
+  assert decision.volume == 1_000
+  book.mark_intent(decision, "intent-sized-down")
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-sized-down",
+    status="FILLED",
+    cumulative_filled_volume=400,
+  )
+
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+  assert plan.pending_requested_volume == 1_000
+  assert plan.pending_terminal_cumulative_fill == 400
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-sized-down",
+    volume=400,
+    price=11.0,
+    rule_id="target",
+  )
+  assert plan.status == ExitPlanStatus.PARTIALLY_EXITED
+  assert plan.pending_intent_id == ""
+  assert plan.remaining_volume == 600
+
+
+def test_cancelled_with_fill_waits_for_matching_trade_before_release():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="target",
+        strategy=ExitRuleType.TARGET_PRICE,
+        parameters={"target_price": 11.0},
+      )
+    ),
+    volume=1_000,
+    price=10.0,
+  )
+  [decision] = book.evaluate("600000.SH", context(11.0))
+  book.mark_intent(decision, "intent-part-cancel")
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-part-cancel",
+    status="CANCELLED",
+    cumulative_filled_volume=400,
+  )
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+  assert plan.pending_terminal_cumulative_fill == 400
+
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-part-cancel",
+    volume=400,
+    price=11.0,
+    rule_id="target",
+  )
+  assert plan.status == ExitPlanStatus.PARTIALLY_EXITED
+  assert plan.pending_intent_id == ""
+
+
+@pytest.mark.parametrize("cumulative", [None, -1])
+def test_terminal_missing_or_invalid_cumulative_fill_stays_fail_closed(cumulative):
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="stop",
+        strategy=ExitRuleType.STOP_PRICE,
+        parameters={"stop_price": 9.8},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  [decision] = book.evaluate("600000.SH", context(9.7))
+  book.mark_intent(decision, "intent-unknown-fill")
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-unknown-fill",
+    status="CANCELLED",
+    cumulative_filled_volume=cumulative,
+  )
+
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+  assert plan.pending_intent_id == "intent-unknown-fill"
+  assert plan.pending_terminal_cumulative_fill is None
+  assert book.evaluate("600000.SH", context(9.6)) == []
+
+
+def test_terminal_target_ahead_of_all_remaining_volume_stays_fail_closed():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="stop",
+        strategy=ExitRuleType.STOP_PRICE,
+        parameters={"stop_price": 9.8},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  [decision] = book.evaluate("600000.SH", context(9.7))
+  book.mark_intent(decision, "intent-impossible-target")
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-impossible-target",
+    status="FILLED",
+    cumulative_filled_volume=200,
+  )
+
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-impossible-target",
+    volume=100,
+    price=9.7,
+    rule_id="stop",
+  )
+
+  assert plan.remaining_volume == 0
+  assert plan.pending_filled_volume == 100
+  assert plan.pending_terminal_cumulative_fill == 200
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+  assert plan.pending_intent_id == "intent-impossible-target"
+
+
+def test_cancellation_terminal_explicit_zero_waits_for_authoritative_reconciliation():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="stop",
+        strategy=ExitRuleType.STOP_PRICE,
+        parameters={"stop_price": 9.8},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  [decision] = book.evaluate("600000.SH", context(9.7))
+  book.mark_intent(decision, "intent-zero-cancel")
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-zero-cancel",
+    status="CANCELLED",
+    cumulative_filled_volume=0,
+  )
+
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+  assert plan.pending_intent_id == "intent-zero-cancel"
+  assert book.evaluate("600000.SH", context(9.6)) == []
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-zero-cancel",
+    status="RECONCILED_ZERO_FILL",
+  )
+
+  assert plan.status == ExitPlanStatus.ACTIVE
+  assert plan.pending_intent_id == ""
 
 
 def test_partially_filled_once_rule_retries_only_its_unfilled_stage_volume():
@@ -585,6 +776,7 @@ def test_partially_filled_once_rule_retries_only_its_unfilled_stage_volume():
   book.mark_intent(first, "intent-1")
   book.apply_exit_fill(
     plan_id=plan.plan_id,
+    intent_id="intent-1",
     volume=200,
     price=11.0,
     rule_id="first-stage",
@@ -593,6 +785,7 @@ def test_partially_filled_once_rule_retries_only_its_unfilled_stage_volume():
     plan_id=plan.plan_id,
     intent_id="intent-1",
     status="CANCELLED",
+    cumulative_filled_volume=200,
   )
 
   [retry] = book.evaluate("600000.SH", context(11.2))
@@ -602,7 +795,7 @@ def test_partially_filled_once_rule_retries_only_its_unfilled_stage_volume():
   assert plan.rule_filled_volumes["first-stage"] == 200
 
 
-def test_late_trade_after_cancel_updates_position_without_leaving_false_pending():
+def test_trade_after_zero_cancel_stays_pending_until_terminal_target_catches_up():
   book = ExitPlanBook()
   plan = book.register_entry_fill(
     template(
@@ -626,22 +819,145 @@ def test_late_trade_after_cancel_updates_position_without_leaving_false_pending(
     plan_id=plan.plan_id,
     intent_id="intent-1",
     status="CANCELLED",
+    cumulative_filled_volume=0,
   )
 
   book.apply_exit_fill(
     plan_id=plan.plan_id,
+    intent_id="intent-1",
     volume=200,
     price=11.0,
     rule_id="first-stage",
   )
 
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+  assert plan.pending_intent_id == "intent-1"
+  assert plan.error_message == "TERMINAL_CUMULATIVE_FILL_BEHIND_EXECUTIONS:0<200"
+  assert book.evaluate("600000.SH", context(11.2)) == []
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    status="CANCELLED",
+    cumulative_filled_volume=200,
+  )
   assert plan.status == ExitPlanStatus.PARTIALLY_EXITED
   assert plan.pending_intent_id == ""
-  [retry] = book.evaluate("600000.SH", context(11.2))
-  assert retry.volume == 300
 
 
-def test_rejected_exit_releases_plan_for_a_fresh_evaluation():
+def test_late_fill_for_released_intent_never_mutates_new_pending_intent():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="first-stage",
+        strategy=ExitRuleType.TARGET_PRICE,
+        parameters={"target_price": 11.0},
+        sizing=ExitSizingPolicy(
+          mode=ExitSizingMode.PERCENT_REMAINING,
+          value=50,
+        ),
+        once=True,
+      )
+    ),
+    volume=1000,
+    price=10.0,
+  )
+  [first] = book.evaluate("600000.SH", context(11.0))
+  book.mark_intent(first, "intent-1")
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    status="RECONCILED_ZERO_FILL",
+  )
+  [second] = book.evaluate("600000.SH", context(11.1))
+  book.mark_intent(second, "intent-2")
+
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    volume=200,
+    price=11.0,
+    rule_id="first-stage",
+  )
+
+  assert plan.exited_volume == 200
+  assert plan.remaining_volume == 800
+  assert plan.pending_intent_id == "intent-2"
+  assert plan.pending_filled_volume == 0
+  assert plan.pending_requested_volume == 500
+  assert plan.status == ExitPlanStatus.ERROR
+  assert plan.error_message == (
+    "ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:intent-1"
+  )
+  assert book.evaluate("600000.SH", context(11.2)) == []
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-2",
+    status="CANCELLED",
+    cumulative_filled_volume=0,
+  )
+  assert plan.pending_intent_id == "intent-2"
+  assert plan.status == ExitPlanStatus.ERROR
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-2",
+    status="RECONCILED_ZERO_FILL",
+  )
+  assert plan.pending_intent_id == ""
+  assert plan.status == ExitPlanStatus.ERROR
+
+
+def test_missing_intent_trade_never_borrows_current_pending_rule():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="same-rule",
+        strategy=ExitRuleType.TARGET_PRICE,
+        parameters={"target_price": 11.0},
+        sizing=ExitSizingPolicy(
+          mode=ExitSizingMode.PERCENT_REMAINING,
+          value=50,
+        ),
+        once=True,
+      )
+    ),
+    volume=1_000,
+    price=10.0,
+  )
+  [first] = book.evaluate("600000.SH", context(11.0))
+  book.mark_intent(first, "intent-1")
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    status="RECONCILED_ZERO_FILL",
+  )
+  [second] = book.evaluate("600000.SH", context(11.1))
+  book.mark_intent(second, "intent-2")
+
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="",
+    volume=200,
+    price=11.0,
+    rule_id="",
+  )
+
+  assert plan.exited_volume == 200
+  assert plan.pending_intent_id == "intent-2"
+  assert plan.pending_filled_volume == 0
+  assert plan.rule_filled_volumes["same-rule"] == 0
+  assert plan.status == ExitPlanStatus.ERROR
+  assert plan.error_message == (
+    "EXIT_FILL_INTENT_MISMATCH:MISSING:CURRENT_PENDING:intent-2"
+  )
+  assert book.evaluate("600000.SH", context(11.2)) == []
+
+
+def test_rejected_exit_waits_for_zero_fill_proof_before_fresh_evaluation():
   book = ExitPlanBook()
   plan = book.register_entry_fill(
     template(
@@ -661,14 +977,24 @@ def test_rejected_exit_releases_plan_for_a_fresh_evaluation():
     plan_id=plan.plan_id,
     intent_id="intent-1",
     status="REJECTED",
+    cumulative_filled_volume=0,
   )
 
+  assert plan.pending_intent_id == "intent-1"
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+  assert book.evaluate("600000.SH", context(9.7)) == []
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    status="RECONCILED_ZERO_FILL",
+  )
   assert plan.pending_intent_id == ""
   assert plan.status == ExitPlanStatus.ACTIVE
   assert book.evaluate("600000.SH", context(9.7))
 
 
-def test_stale_order_report_cannot_mutate_a_released_plan():
+def test_late_filled_order_for_released_intent_fails_closed():
   book = ExitPlanBook()
   plan = book.register_entry_fill(
     template(
@@ -686,7 +1012,7 @@ def test_stale_order_report_cannot_mutate_a_released_plan():
   book.apply_order_event(
     plan_id=plan.plan_id,
     intent_id="intent-1",
-    status="REJECTED",
+    status="RECONCILED_ZERO_FILL",
   )
 
   book.apply_order_event(
@@ -696,8 +1022,281 @@ def test_stale_order_report_cannot_mutate_a_released_plan():
     order_id="late-order",
   )
 
-  assert plan.status == ExitPlanStatus.ACTIVE
+  assert plan.status == ExitPlanStatus.ERROR
+  assert plan.error_message == (
+    "ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:intent-1"
+  )
   assert plan.pending_order_id == ""
+
+
+@pytest.mark.parametrize(
+  "status",
+  ["ACCEPTED", "PARTIAL_FILLED", "FILLED", "RECONCILE_REQUIRED"],
+)
+def test_late_order_for_released_intent_preserves_new_pending_intent(status: str):
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="stop",
+        strategy=ExitRuleType.STOP_PRICE,
+        parameters={"stop_price": 9.8},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  [first] = book.evaluate("600000.SH", context(9.7))
+  book.mark_intent(first, "intent-1")
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    status="RECONCILED_ZERO_FILL",
+  )
+  [second] = book.evaluate("600000.SH", context(9.6))
+  book.mark_intent(second, "intent-2")
+  pending_before = (
+    plan.pending_intent_id,
+    plan.pending_rule_id,
+    plan.pending_requested_volume,
+    plan.pending_filled_volume,
+    dict(plan.rule_state),
+  )
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-1",
+    status=status,
+    order_id="late-old-order",
+  )
+
+  assert plan.status == ExitPlanStatus.ERROR
+  assert plan.error_message == (
+    "ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:intent-1"
+  )
+  assert plan.pending_order_id == ""
+  assert (
+    plan.pending_intent_id,
+    plan.pending_rule_id,
+    plan.pending_requested_volume,
+    plan.pending_filled_volume,
+    dict(plan.rule_state),
+  ) == pending_before
+
+
+def test_reconciled_zero_fill_releases_exact_intent_once_and_survives_restore():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="stop",
+        strategy=ExitRuleType.STOP_PRICE,
+        parameters={"stop_price": 9.8},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  [decision] = book.evaluate("600000.SH", context(9.7))
+  book.mark_intent(decision, "intent-zero")
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-zero",
+    status="RECONCILED_ZERO_FILL",
+  )
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-zero",
+    status="RECONCILED_ZERO_FILL",
+  )
+  restored = ExitPlanBook.from_dict(book.to_dict())
+  restored_plan = restored.plans[plan.plan_id]
+
+  assert restored_plan.status == ExitPlanStatus.ACTIVE
+  assert restored_plan.pending_intent_id == ""
+  assert restored_plan.reconciled_zero_fill_intent_ids == ["intent-zero"]
+  with pytest.raises(ValueError, match="zero execution"):
+    restored.mark_intent(decision, "intent-zero")
+
+
+def test_zero_fill_release_safety_history_never_evicts_old_intents():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="stop",
+        strategy=ExitRuleType.STOP_PRICE,
+        parameters={"stop_price": 9.8},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  for index in range(21):
+    intent_id = f"intent-{index}"
+    plan.pending_intent_id = intent_id
+    plan.pending_rule_id = "stop"
+    plan.pending_requested_volume = 100
+    plan.status = ExitPlanStatus.EXIT_PENDING
+    book.apply_order_event(
+      plan_id=plan.plan_id,
+      intent_id=intent_id,
+      status="RECONCILED_ZERO_FILL",
+    )
+
+  restored = ExitPlanBook.from_dict(book.to_dict())
+  restored_plan = restored.plans[plan.plan_id]
+  assert restored_plan.reconciled_zero_fill_intent_ids == [
+    f"intent-{index}" for index in range(21)
+  ]
+  restored.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-0",
+    status="ACCEPTED",
+  )
+  assert restored_plan.status == ExitPlanStatus.ERROR
+  assert restored_plan.error_message == (
+    "ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:intent-0"
+  )
+
+
+def test_late_order_and_trade_for_ordinary_finalized_intent_fail_closed():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="target",
+        strategy=ExitRuleType.TARGET_PRICE,
+        parameters={"target_price": 11.0},
+        sizing=ExitSizingPolicy(mode=ExitSizingMode.FIXED_VOLUME, value=50),
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  plan.pending_intent_id = "intent-finalized"
+  plan.pending_rule_id = "target"
+  plan.pending_requested_volume = 50
+  plan.rule_target_volumes["target"] = 50
+  plan.rule_filled_volumes["target"] = 0
+  plan.status = ExitPlanStatus.EXIT_PENDING
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-finalized",
+    status="FILLED",
+    cumulative_filled_volume=50,
+  )
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-finalized",
+    volume=50,
+    price=11.0,
+    rule_id="target",
+  )
+  assert plan.pending_intent_id == ""
+  assert plan.exited_volume == 50
+  plan.status = ExitPlanStatus.CANCELLED
+
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-finalized",
+    status="ACCEPTED",
+  )
+  assert plan.status == ExitPlanStatus.ERROR
+  assert plan.error_message == (
+    "EXIT_FILL_INTENT_MISMATCH:intent-finalized:CURRENT_PENDING:NONE"
+  )
+
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-finalized",
+    volume=20,
+    price=11.1,
+    rule_id="target",
+  )
+  assert plan.exited_volume == 70
+  assert plan.pending_intent_id == ""
+  assert plan.rule_filled_volumes["target"] == 50
+  assert plan.status == ExitPlanStatus.ERROR
+  assert plan.error_message == (
+    "EXIT_FILL_INTENT_MISMATCH:intent-finalized:CURRENT_PENDING:NONE"
+  )
+
+
+@pytest.mark.parametrize(
+  "sticky_error",
+  [
+    "ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:intent-old",
+    "ACCOUNT_WIDE_STALE_SELL:intent-old",
+    "QUARANTINE_REPAIRED:intent-old",
+  ],
+)
+def test_sticky_reconciliation_error_cannot_be_resumed_by_plain_command(
+  sticky_error: str,
+):
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="stop",
+        strategy=ExitRuleType.STOP_PRICE,
+        parameters={"stop_price": 9.8},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  plan.status = ExitPlanStatus.ERROR
+  plan.error_message = sticky_error
+
+  with pytest.raises(ValueError, match="EXIT_PLAN_RECONCILIATION_REQUIRED"):
+    book.apply_command(
+      ExitPlanCommand(
+        command=ExitPlanCommandType.RESUME,
+        plan_id=plan.plan_id,
+      )
+    )
+
+  assert plan.status == ExitPlanStatus.ERROR
+  assert plan.error_message == sticky_error
+
+
+def test_late_fill_after_zero_fill_proof_fails_closed_instead_of_reselling():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="stop",
+        strategy=ExitRuleType.STOP_PRICE,
+        parameters={"stop_price": 9.8},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  [decision] = book.evaluate("600000.SH", context(9.7))
+  book.mark_intent(decision, "intent-zero")
+  book.apply_order_event(
+    plan_id=plan.plan_id,
+    intent_id="intent-zero",
+    status="RECONCILED_ZERO_FILL",
+  )
+
+  book.apply_exit_fill(
+    plan_id=plan.plan_id,
+    intent_id="intent-zero",
+    volume=20,
+    price=9.7,
+    rule_id="stop",
+  )
+
+  assert plan.exited_volume == 20
+  assert plan.status == ExitPlanStatus.ERROR
+  assert plan.error_message == (
+    "ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:intent-zero"
+  )
+  assert book.evaluate("600000.SH", context(9.6)) == []
 
 
 def test_policy_update_preserves_fills_and_replaces_sell_strategies():

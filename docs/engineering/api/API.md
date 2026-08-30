@@ -175,7 +175,9 @@ Client OpenAPI 与 Web OpenAPI。运行时只在 Dev 内部端口提供调试文
 `exitPlanCostBasisCandidates`。写入入口为
 `createManualExitPlan`、`updateManualExitPlan`、`setExitPlanEnabled`、
 `cancelExitPlan`、`evaluateExitPlanNow`、`reconcileExitPlanCapacity` 和
-`liquidatePositions`。
+`previewLiquidation`、`confirmLiquidation`。清仓必须先预览固定持仓、可卖量、冲突和
+执行模式，再用 `challengeId + confirmationToken` 二次确认；旧
+`liquidatePositions` 不再属于公开 schema。
 
 `createManualExitPlan.costBasis` 必填。成交委托模式只提交委托 ID，Engine 会
 重新读取账户、股票、方向、成交数量与成交均价并冻结成本快照；手工模式提交的

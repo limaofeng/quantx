@@ -619,7 +619,6 @@ function SingleStockLiquidationPanel({
                   )
                     return;
                   void onLiquidate([selectedStockCode], {
-                    autoExitAuthorized: executionMode === 'paper',
                     completionStrategy,
                     conflictStrategy,
                     executionMode,

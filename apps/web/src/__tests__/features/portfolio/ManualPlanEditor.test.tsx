@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ComponentProps } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ManualPlanEditor } from '@/features/portfolio/components/SellManagementPanels';
@@ -50,6 +51,67 @@ const capabilitiesData = {
     ],
   },
 };
+
+type EditingPlan = NonNullable<
+  ComponentProps<typeof ManualPlanEditor>['editingPlan']
+>;
+
+function makeEditingPlan(): EditingPlan {
+  return {
+    accountId: '300000013250',
+    autoExitAuthorizationConfigVersion: null,
+    autoExitAuthorizationExpiresAt: null,
+    autoExitAuthorized: false,
+    bucket: 'manual',
+    canEditRules: true,
+    capacityError: null,
+    capacityStatus: 'READY',
+    completionNote: null,
+    completionStrategy: null,
+    configVersion: 4,
+    costBasis: {},
+    createdAt: '2026-08-21T09:30:00+08:00',
+    dataQuality: 'READY',
+    editRoute: null,
+    enabled: true,
+    entryAvgPrice: 12.5,
+    executionMode: 'paper',
+    executionOwner: 'EXIT_PLAN_MONITOR',
+    exitedVolume: 0,
+    groupId: null,
+    instrumentCode: '601318.SH',
+    lastDecision: null,
+    lastError: null,
+    lastEvaluatedAt: null,
+    metadata: { remark: '原备注' },
+    peakDrawdownPct: 0,
+    peakPrice: 12.5,
+    pendingClientOrderId: null,
+    pendingIntentId: null,
+    phase: 'WAITING_ARM',
+    planId: 'plan-update-1',
+    protectedVolume: 300,
+    remainingVolume: 300,
+    rules: [
+      {
+        enabled: true,
+        once: false,
+        parameters: { target_price: 15 },
+        priority: 500,
+        rule_id: 'rule-update-1',
+        sizing: { mode: 'ALL_REMAINING' },
+        strategy: 'TARGET_PRICE',
+      },
+    ],
+    sourceId: 'manual',
+    sourceType: 'MANUAL_POSITION',
+    stateVersion: 8,
+    status: 'ACTIVE',
+    strategyRunId: null,
+    trailingFloorPct: null,
+    updatedAt: '2026-08-21T15:00:00+08:00',
+  };
+}
 
 vi.mock('urql', () => ({
   useMutation: mocks.useMutation,
@@ -394,6 +456,59 @@ describe('ManualPlanEditor', () => {
     expect(firstKey).toEqual(expect.any(String));
     expect(firstKey).not.toHaveLength(0);
     expect(secondKey).toBe(firstKey);
+  });
+
+  it('reuses the update idempotency key when the same edit is retried', async () => {
+    const user = userEvent.setup();
+    mocks.updatePlan
+      .mockResolvedValueOnce({
+        data: undefined,
+        error: new Error('Engine 尚未确认操作'),
+      })
+      .mockResolvedValueOnce({
+        data: {
+          updateManualExitPlan: {
+            autoExitAuthorized: false,
+            configVersion: 5,
+            executionMode: 'paper',
+            instrumentCode: '601318.SH',
+            metadata: { remark: '原备注' },
+            planId: 'plan-update-1',
+            protectedVolume: 300,
+            rules: [],
+            status: 'ACTIVE',
+          },
+        },
+        error: undefined,
+      });
+
+    render(
+      <ManualPlanEditor
+        accountId="300000013250"
+        editingPlan={makeEditingPlan()}
+        onFinishedEditing={vi.fn()}
+        onSaved={vi.fn()}
+      />
+    );
+
+    const save = await screen.findByRole('button', {
+      name: '保存计划修改',
+    });
+    await user.click(save);
+    await user.click(save);
+
+    await waitFor(() => expect(mocks.updatePlan).toHaveBeenCalledTimes(2));
+    const firstInput = mocks.updatePlan.mock.calls[0][0].input;
+    const secondInput = mocks.updatePlan.mock.calls[1][0].input;
+    expect(firstInput.idempotencyKey).toEqual(expect.any(String));
+    expect(firstInput.idempotencyKey).not.toHaveLength(0);
+    expect(secondInput.idempotencyKey).toBe(firstInput.idempotencyKey);
+    expect(firstInput).toEqual(
+      expect.objectContaining({
+        configVersion: 4,
+        planId: 'plan-update-1',
+      })
+    );
   });
 
   it('saves a live plan without boolean authorization, then previews and confirms the exact plan version', async () => {

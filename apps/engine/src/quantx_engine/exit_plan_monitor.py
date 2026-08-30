@@ -1,4 +1,4 @@
-"""Engine-owned monitor for every persistent ExitPlanBook plan."""
+"""Authoritative Engine monitor for manual exit plans without a StrategyRun."""
 
 from __future__ import annotations
 
@@ -14,7 +14,10 @@ from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   AutoExitPlanRepository,
 )
 from quantx_infrastructure.repositories.position_repository import PositionRepository
-from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
+from quantx_infrastructure.services.auto_exit_plan_service import (
+  AutoExitPlanService,
+  is_monitor_owned_exit_plan,
+)
 from quantx_infrastructure.services.intraday_volume_scanner import (
   intraday_volume_scanner,
 )
@@ -23,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class ExitPlanMonitor:
-  """Evaluate persisted plans independently from their originating feature."""
+  """Evaluate only positively classified manual plans without a StrategyRun."""
 
   def __init__(
     self,
@@ -45,12 +48,12 @@ class ExitPlanMonitor:
   async def start(self) -> None:
     if self._task and not self._task.done():
       return
-    try:
-      migrated = await AutoExitPlanService().migrate_legacy_plan_state()
-      if any(migrated.values()):
-        logger.info("统一退出计划历史状态迁移完成: %s", migrated)
-    except Exception as exc:
-      logger.warning("统一退出计划历史状态迁移失败，将在下次启动重试: %s", exc)
+    # This is the startup barrier for legacy manual ownership and conditional
+    # plans. PAPER/LIVE strategy plans are restored only from auto_exit_plans;
+    # StrategyRun custom_state is never imported as a competing truth source.
+    migrated = await AutoExitPlanService().migrate_legacy_plan_state()
+    if any(migrated.values()):
+      logger.info("统一退出计划历史状态迁移完成: %s", migrated)
     await self.scanner.start()
     self._stopping = asyncio.Event()
     self._task = asyncio.create_task(self._run(), name="ExitPlanMonitor")
@@ -95,7 +98,7 @@ class ExitPlanMonitor:
           [plan]
           if plan is not None
           and plan.enabled
-          and not str(plan.strategy_run_id or "").strip()
+          and is_monitor_owned_exit_plan(plan)
           else []
         )
       else:
@@ -103,9 +106,7 @@ class ExitPlanMonitor:
           account_id=account_id,
           instrument_code=instrument_code,
         )
-        plans = [
-          plan for plan in plans if not str(plan.strategy_run_id or "").strip()
-        ]
+        plans = [plan for plan in plans if is_monitor_owned_exit_plan(plan)]
     if not plans:
       return []
     if not self.scanner.is_running:
@@ -150,11 +151,14 @@ class ExitPlanMonitor:
     *,
     plan_id: str,
     intent_id: str,
+    approval_audit: Optional[dict] = None,
   ) -> dict:
     async with AsyncSessionLocal() as db:
       record = await AutoExitPlanRepository(db).find_by_id(plan_id)
       if record is None:
         raise ValueError("退出计划不存在")
+      if not is_monitor_owned_exit_plan(record):
+        raise ValueError("EXIT_PLAN_OWNER_CHANGED")
       position = await PositionRepository(db).find_by_stock_code(
         record.instrument_code,
         account_id=record.account_id,
@@ -179,6 +183,7 @@ class ExitPlanMonitor:
       position=position,
       market_session_open=market_session_open,
       market_ready=self._market_data_ready,
+      approval_audit=approval_audit,
     )
 
   def _market_data_ready(self) -> bool:

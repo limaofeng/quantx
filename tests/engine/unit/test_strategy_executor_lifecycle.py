@@ -79,13 +79,23 @@ async def test_stop_quiesces_current_event_before_snapshot_and_disconnect(
   executor.runs[runtime.run_id] = runtime
   process_intent = AsyncMock()
   monkeypatch.setattr(executor, "_process_trade_intent", process_intent)
+  pending_intent = TradeIntent(
+    strategy_id="1",
+    run_id=runtime.run_id,
+    instrument_code="600000.SH",
+    direction=TradeIntentDirection.BUY,
+    bucket="swing",
+    reason="lifecycle-test",
+    target_volume=100,
+    execution_mode=TradeIntentExecutionMode.AUTO,
+  )
 
   async def process_tick(_runtime, _tick) -> None:
     event_started.set()
     await release_event.wait()
     await executor._process_strategy_output(
       runtime,
-      StrategyOutput(trade_intents=[object()]),
+      StrategyOutput(trade_intents=[pending_intent]),
     )
     calls.append("event-finished")
 
