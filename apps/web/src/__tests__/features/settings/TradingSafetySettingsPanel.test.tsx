@@ -163,7 +163,11 @@ describe('TradingSafetySettingsPanel', () => {
     expect(
       screen.getByRole('article', { name: '全市场行情链路：休市待机' })
     ).toBeInTheDocument();
-    expect(screen.getByText('0 项通过 · 1 项休市待机')).toBeInTheDocument();
+    expect(screen.getByText('准入链路正常，当前休市待机')).toBeInTheDocument();
+    expect(screen.getByText('0 项通过 · 1 项待机')).toBeInTheDocument();
+    expect(
+      screen.getByText('休市待机属于预期状态，不计入异常。')
+    ).toBeInTheDocument();
     expect(screen.queryByText('需处理')).not.toBeInTheDocument();
   });
 
@@ -196,17 +200,125 @@ describe('TradingSafetySettingsPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '异常历史' }));
 
-    expect(screen.getAllByText('休市待机')).not.toHaveLength(0);
-    expect(screen.getByText('0 次异常')).toBeInTheDocument();
+    expect(screen.getByText('其余 1 项无异常')).toBeInTheDocument();
     expect(
       screen.getByText('所选范围内没有确认的准入异常。')
     ).toBeInTheDocument();
+    expect(
+      screen.getByText('休市待机属于预期状态，不会在这里形成事件。')
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('article', { name: /全市场行情链路/ })
+    ).not.toBeInTheDocument();
     expect(mocks.useQuery).toHaveBeenCalledWith(
       expect.objectContaining({
         query: 'account-execution-safety-history',
         variables: expect.objectContaining({ range: 'DAYS_30' }),
       })
     );
+  });
+
+  it('presents resolved failures as incidents and filters by affected check', () => {
+    mocks.useQuery.mockReturnValue([
+      {
+        fetching: false,
+        data: {
+          accountExecutionSafetyHistory: {
+            available: true,
+            range: 'DAYS_30',
+            generatedAt: '2026-08-25T06:02:00Z',
+            firstObservedAt: '2026-08-24T06:00:10Z',
+            lastObservedAt: '2026-08-25T06:02:00Z',
+            observerFresh: true,
+            bucketSeconds: 14_400,
+            incidentsTruncated: false,
+            checks: [
+              {
+                code: 'LIVE_AGENT_READY',
+                currentStatus: 'PASSED',
+                checkedAt: '2026-08-25T06:02:00Z',
+                reasonCode: 'AGENT_READY',
+                publicMessage: 'QMT 实盘代理在线',
+                coveragePct: 100,
+                incidentCount: 1,
+                points: [],
+              },
+              {
+                code: 'MARKET_STREAM_READY',
+                currentStatus: 'STANDBY',
+                checkedAt: '2026-08-25T06:02:00Z',
+                reasonCode: 'MARKET_CLOSED_STANDBY',
+                publicMessage: '当前休市，等待下一交易时段',
+                coveragePct: 100,
+                incidentCount: 1,
+                points: [],
+              },
+              {
+                code: 'SNAPSHOT_RECONCILED',
+                currentStatus: 'PASSED',
+                checkedAt: '2026-08-25T06:02:00Z',
+                reasonCode: 'SNAPSHOT_RECONCILED',
+                publicMessage: '账户快照已对账',
+                coveragePct: 100,
+                incidentCount: 0,
+                points: [],
+              },
+            ],
+            incidents: [
+              {
+                id: 'incident-agent',
+                checkCode: 'LIVE_AGENT_READY',
+                openedAt: '2026-08-25T06:00:00Z',
+                resolvedAt: '2026-08-25T06:01:00Z',
+                lastConfirmedFailedAt: '2026-08-25T06:00:30Z',
+                active: false,
+                observationFresh: true,
+                openedReasonCode: 'AGENT_OFFLINE',
+                lastReasonCode: 'AGENT_OFFLINE',
+                openedMessage: 'QMT 实盘代理短暂离线',
+                lastMessage: 'QMT 实盘代理短暂离线，连接已经恢复。',
+              },
+              {
+                id: 'incident-market-stream',
+                checkCode: 'MARKET_STREAM_READY',
+                openedAt: '2026-08-25T06:00:00Z',
+                resolvedAt: '2026-08-25T06:01:00Z',
+                lastConfirmedFailedAt: '2026-08-25T06:00:30Z',
+                active: false,
+                observationFresh: true,
+                openedReasonCode: 'STREAM_SYNC_FAILED',
+                lastReasonCode: 'STREAM_SYNC_FAILED',
+                openedMessage: '行情水位同步中断',
+                lastMessage: '行情水位同步中断，三阶段链路已经重新收敛。',
+              },
+            ],
+          },
+        },
+      },
+    ]);
+
+    render(<TradingSafetySettingsPanel />);
+    fireEvent.click(screen.getByRole('button', { name: '异常历史' }));
+
+    expect(
+      screen.getByRole('article', { name: 'QMT 实盘代理就绪：已恢复' })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('article', { name: '全市场行情链路：已恢复' })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('QMT 实盘代理短暂离线，连接已经恢复。')
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/观测覆盖/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /QMT 实盘代理就绪/ }));
+
+    expect(
+      screen.getByRole('article', { name: 'QMT 实盘代理就绪：已恢复' })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('article', { name: '全市场行情链路：已恢复' })
+    ).not.toBeInTheDocument();
   });
 
   it('binds an explicit quarantine repair preview to one exact order and snapshot', async () => {
