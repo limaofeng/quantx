@@ -1095,6 +1095,11 @@ async def test_failed_newer_full_generation_blocks_intermediate_sequence(
   monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
   monkeypatch.setattr(
     report_processor,
+    "_rederive_t_trade_exit_authorizations_after_position_update",
+    AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
     "_snapshot_discrepancies",
     lambda *_args, **_kwargs: _async_result(
       {
