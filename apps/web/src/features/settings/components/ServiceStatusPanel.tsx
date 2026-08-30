@@ -1,33 +1,19 @@
 import {
   Activity,
-  AlertTriangle,
-  CheckCircle2,
   ChevronDown,
-  CircleOff,
   Clock3,
   Gauge,
-  HelpCircle,
+  Maximize2,
   RefreshCw,
-  XCircle,
-  type LucideIcon,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation, useSearch } from 'wouter';
 
 import {
   getMonitorHistory,
   getMonitorIncidents,
   getMonitorSummary,
   type MonitorHistory,
-  type MonitorHistoryPoint,
   type MonitorIncident,
   type MonitorRange,
   type MonitorStatus,
@@ -37,179 +23,19 @@ import {
 import { monitorReasonPresentation } from '@/features/system/monitor-reason';
 import { cn } from '@/utils/cn';
 
-const ranges: Array<{ value: MonitorRange; label: string }> = [
-  { value: '24h', label: '24 小时' },
-  { value: '7d', label: '7 天' },
-  { value: '30d', label: '30 天' },
-  { value: '90d', label: '90 天' },
-  { value: '1y', label: '1 年' },
-];
-
-const statusLabel: Record<MonitorStatus, string> = {
-  healthy: '正常',
-  degraded: '降级',
-  unavailable: '不可用',
-  unknown: '未知',
-  disabled: '未启用',
-};
-
-const statusPriority: Record<MonitorStatus, number> = {
-  healthy: 1,
-  disabled: 2,
-  unknown: 3,
-  degraded: 4,
-  unavailable: 5,
-};
-
-const historyTone: Record<MonitorStatus, string> = {
-  healthy: 'bg-emerald-400',
-  degraded: 'bg-amber-400',
-  unavailable: 'bg-rose-400',
-  unknown: 'bg-amber-300/60',
-  disabled: 'bg-slate-600/70',
-};
-
-const placeholderBars = Array.from({ length: 28 }, (_, index) => index);
-
-function metric(value: number | null, suffix = '') {
-  return value === null ? 'N/A' : `${value.toFixed(2)}${suffix}`;
-}
-
-function formatTime(value: string | null) {
-  if (!value) return '尚无记录';
-  return new Date(value).toLocaleString('zh-CN', { hour12: false });
-}
+import {
+  formatTime,
+  metric,
+  probeExplanation,
+  ranges,
+  serviceHistoryPath,
+  statusLabel,
+  statusPriority,
+} from './service-status-presentation';
+import { HistoryStrip, LatencyChart, StatusIcon } from './ServiceStatusVisuals';
 
 function detailId(targetId: string) {
   return `service-status-${targetId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-}
-
-function compressHistory(points: MonitorHistoryPoint[], limit = 84) {
-  if (points.length <= limit) return points;
-
-  const compressed: MonitorHistoryPoint[] = [];
-  const chunkSize = Math.ceil(points.length / limit);
-  for (let index = 0; index < points.length; index += chunkSize) {
-    const chunk = points.slice(index, index + chunkSize);
-    const worst = chunk.reduce((current, point) =>
-      statusPriority[point.status] > statusPriority[current.status]
-        ? point
-        : current
-    );
-    compressed.push(worst);
-  }
-  return compressed;
-}
-
-function StatusIcon({
-  status,
-  className,
-}: {
-  status: MonitorStatus;
-  className?: string;
-}) {
-  let Icon: LucideIcon = CheckCircle2;
-  let tone = 'text-emerald-300';
-
-  if (status === 'degraded') {
-    Icon = AlertTriangle;
-    tone = 'text-amber-300';
-  } else if (status === 'unavailable') {
-    Icon = XCircle;
-    tone = 'text-rose-300';
-  } else if (status === 'unknown') {
-    Icon = HelpCircle;
-    tone = 'text-amber-300';
-  } else if (status === 'disabled') {
-    Icon = CircleOff;
-    tone = 'text-slate-500';
-  }
-
-  return (
-    <span className={cn('shrink-0', tone, className)}>
-      <Icon className="h-full w-full" aria-hidden="true" />
-      <span className="sr-only">{statusLabel[status]}</span>
-    </span>
-  );
-}
-
-function HistoryStrip({
-  target,
-  history,
-  loading,
-  error,
-}: {
-  target: MonitorTargetSummary;
-  history: MonitorHistory | undefined;
-  loading: boolean;
-  error: boolean;
-}) {
-  const points = useMemo(
-    () => compressHistory(history?.points ?? []),
-    [history]
-  );
-  const counts = useMemo(
-    () =>
-      (history?.points ?? []).reduce<Record<MonitorStatus, number>>(
-        (result, point) => ({
-          ...result,
-          [point.status]: result[point.status] + 1,
-        }),
-        { healthy: 0, degraded: 0, unavailable: 0, unknown: 0, disabled: 0 }
-      ),
-    [history]
-  );
-  const description =
-    points.length === 0
-      ? `${target.name} 当前范围没有历史样本`
-      : `${target.name} 历史状态：${history?.points.length ?? 0} 个时间段，正常 ${counts.healthy}，降级 ${counts.degraded}，不可用 ${counts.unavailable}，未知 ${counts.unknown}，未启用 ${counts.disabled}`;
-
-  return (
-    <div className="flex min-w-0 flex-1 items-center gap-2">
-      <div
-        role="img"
-        aria-label={description}
-        aria-busy={loading}
-        className={cn(
-          'flex h-6 min-w-0 flex-1 items-stretch gap-px overflow-hidden rounded-sm',
-          loading && points.length === 0 && 'motion-safe:animate-pulse',
-          error && 'opacity-60'
-        )}
-      >
-        {points.length > 0
-          ? points.map((point, index) => (
-              <span
-                key={`${point.start}-${index}`}
-                aria-hidden="true"
-                title={`${formatTime(point.start)} · ${statusLabel[point.status]}`}
-                className={cn(
-                  'min-w-0 flex-1 rounded-sm',
-                  historyTone[point.status]
-                )}
-              />
-            ))
-          : placeholderBars.map(index => (
-              <span
-                key={index}
-                aria-hidden="true"
-                className={cn(
-                  'min-w-0 flex-1 rounded-sm',
-                  error ? 'bg-rose-500/20' : 'bg-slate-800/80'
-                )}
-              />
-            ))}
-      </div>
-      {error && (
-        <span
-          aria-label={`${target.name} 历史更新失败`}
-          title="历史更新失败"
-          className="shrink-0 text-amber-300"
-        >
-          <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-        </span>
-      )}
-    </div>
-  );
 }
 
 function TargetRow({
@@ -299,6 +125,8 @@ function TargetDetails({
   incidents,
   incidentsLoading,
   incidentsError,
+  range,
+  incidentTotal,
 }: {
   target: MonitorTargetSummary;
   history: MonitorHistory | undefined;
@@ -307,38 +135,19 @@ function TargetDetails({
   incidents: MonitorIncident[];
   incidentsLoading: boolean;
   incidentsError: boolean;
+  range: MonitorRange;
+  incidentTotal: number;
 }) {
   const currentReason = target.reasonCode
     ? monitorReasonPresentation(target.reasonCode, target.name)
     : null;
-  const chartData = useMemo(
-    () =>
-      (history?.points ?? []).map(point => ({
-        time: new Date(point.start).toLocaleString('zh-CN', {
-          month: '2-digit',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        }),
-        p50: point.latencyP50Ms,
-        p95: point.latencyP95Ms,
-      })),
-    [history]
-  );
-  const hasLatency = chartData.some(
-    point => point.p50 !== null || point.p95 !== null
+  const [, navigate] = useLocation();
+  const hasLatency = history?.points.some(
+    point => point.latencyP50Ms !== null || point.latencyP95Ms !== null
   );
   const hasIncidentList =
     !incidentsLoading && !incidentsError && incidents.length > 0;
-  const explanation =
-    target.id === 'account-safety-observer'
-      ? '该状态只表示 Monitor 能持续采集脱敏准入快照；QMT、行情与交易门禁的实际结论请在“交易安全”中查看。'
-      : target.probeKind === 'derived'
-        ? '该组件来自语义快照，不生成虚假的独立延迟。'
-        : target.probeKind === 'composite'
-          ? '状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。'
-          : '延迟来自 Monitor 到目标服务的主动健康探测。';
+  const explanation = probeExplanation(target);
 
   return (
     <div
@@ -377,6 +186,15 @@ function TargetDetails({
           <div className="flex shrink-0 gap-ui-section font-mono text-ui-caption text-slate-500">
             <span>覆盖 {metric(target.coveragePct, '%')}</span>
             <span>健康 {metric(target.healthyPct, '%')}</span>
+            <button
+              type="button"
+              aria-label={`查看 ${target.name} 完整历史`}
+              title="查看完整历史"
+              onClick={() => navigate(serviceHistoryPath(target.id, range))}
+              className="flex h-control-compact w-control-compact shrink-0 items-center justify-center rounded-control text-slate-400 hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+            >
+              <Maximize2 className="h-4 w-4" aria-hidden="true" />
+            </button>
           </div>
         </div>
 
@@ -413,52 +231,8 @@ function TargetDetails({
               >
                 历史数据暂时不可访问
               </div>
-            ) : hasLatency ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData}>
-                  <CartesianGrid
-                    stroke="var(--studio-border)"
-                    vertical={false}
-                  />
-                  <XAxis
-                    dataKey="time"
-                    stroke="var(--studio-text-subtle)"
-                    tick={{ fontSize: 11 }}
-                    minTickGap={36}
-                  />
-                  <YAxis
-                    stroke="var(--studio-text-subtle)"
-                    tick={{ fontSize: 11 }}
-                    unit=" ms"
-                    width={64}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      background: 'var(--studio-panel-muted)',
-                      border: '1px solid var(--studio-border)',
-                      borderRadius: 8,
-                      color: 'var(--studio-text-secondary)',
-                      fontSize: 12,
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="p50"
-                    name="P50"
-                    stroke="var(--studio-success)"
-                    dot={false}
-                    strokeWidth={2}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="p95"
-                    name="P95"
-                    stroke="var(--studio-warning)"
-                    dot={false}
-                    strokeWidth={1.5}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+            ) : hasLatency && history ? (
+              <LatencyChart history={history} />
             ) : (
               <div className="flex h-full flex-col items-center justify-center rounded-lg border border-dashed border-white/10 text-slate-600">
                 <Gauge className="h-7 w-7" aria-hidden="true" />
@@ -486,6 +260,9 @@ function TargetDetails({
           {hasIncidentList && (
             <span className="font-mono text-ui-caption text-slate-600">
               {incidents.length} 条
+              {incidentTotal > incidents.length
+                ? ` / 共 ${incidentTotal} 条`
+                : ''}
             </span>
           )}
         </div>
@@ -642,9 +419,14 @@ function overallPresentation({
 }
 
 export function ServiceStatusPanel() {
-  const [range, setRange] = useState<MonitorRange>('24h');
+  const query = new URLSearchParams(useSearch());
+  const [range, setRange] = useState<MonitorRange>(
+    () => ranges.find(item => item.value === query.get('range'))?.value ?? '24h'
+  );
   const [summary, setSummary] = useState<MonitorSummary | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() =>
+    query.get('target')
+  );
   const [histories, setHistories] = useState<
     Record<string, MonitorHistory | undefined>
   >({});
@@ -655,6 +437,7 @@ export function ServiceStatusPanel() {
     new Set()
   );
   const [incidents, setIncidents] = useState<MonitorIncident[]>([]);
+  const [incidentTotal, setIncidentTotal] = useState(0);
   const [incidentsLoading, setIncidentsLoading] = useState(false);
   const [incidentsError, setIncidentsError] = useState(false);
   const [error, setError] = useState(false);
@@ -745,9 +528,11 @@ export function ServiceStatusPanel() {
     const controller = new AbortController();
     setIncidentsLoading(true);
     setIncidentsError(false);
-    void getMonitorIncidents(range, selectedId, controller.signal)
+    void getMonitorIncidents(range, selectedId, 1, 20, controller.signal)
       .then(nextIncidents => {
-        setIncidents(nextIncidents);
+        if (controller.signal.aborted) return;
+        setIncidents(nextIncidents.incidents);
+        setIncidentTotal(nextIncidents.total);
       })
       .catch(errorValue => {
         if (!(
@@ -968,6 +753,8 @@ export function ServiceStatusPanel() {
                             incidents={incidents}
                             incidentsLoading={incidentsLoading}
                             incidentsError={incidentsError}
+                            incidentTotal={incidentTotal}
+                            range={range}
                           />
                         )}
                       </article>

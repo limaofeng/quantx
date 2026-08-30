@@ -9,7 +9,7 @@ import {
   ShieldCheck,
   type LucideIcon,
 } from 'lucide-react';
-import { useLocation } from 'wouter';
+import { useLocation, useRoute } from 'wouter';
 
 import { useStudioNavigate } from '@/components/studio-workspace';
 import {
@@ -21,6 +21,7 @@ import { SystemInsightCard } from '@/features/system/components/SystemInsightCar
 import { cn } from '@/utils/cn';
 
 import { AiRuntimeSettingsPanel } from '../components/AiRuntimeSettingsPanel';
+import { ServiceStatusHistoryPanel } from '../components/ServiceStatusHistoryPanel';
 import { ServiceStatusPanel } from '../components/ServiceStatusPanel';
 import { TradingSafetySettingsPanel } from '../components/TradingSafetySettingsPanel';
 
@@ -178,6 +179,7 @@ export function SystemSettingsPage() {
   const [location] = useLocation();
   const navigate = useStudioNavigate();
   const section = activeSection(location);
+  const [, historyParams] = useRoute('/settings/status/:targetId/history');
 
   return (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col text-slate-100 md:flex-row">
@@ -253,7 +255,12 @@ export function SystemSettingsPage() {
       <main className="min-h-0 flex-1 overflow-hidden">
         <StudioPageFrame>
           {section === 'overview' && <SettingsOverview onNavigate={navigate} />}
-          {section === 'status' && <ServiceStatusPanel />}
+          {section === 'status' &&
+            (historyParams ? (
+              <ServiceStatusHistoryPanel targetId={historyParams.targetId} />
+            ) : (
+              <ServiceStatusPanel />
+            ))}
           {section === 'trading-safety' && <TradingSafetySettingsPanel />}
           {section === 'qmt' && <AgentManagementPanel />}
           {section === 'ai-runtime' && <AiRuntimeSettingsPanel />}

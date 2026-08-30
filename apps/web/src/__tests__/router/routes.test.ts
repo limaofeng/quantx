@@ -43,6 +43,12 @@ describe('router configuration', () => {
   });
 
   it('resolves titles from the unified route source', () => {
+    expect(getPageTitle('/settings/status/qmt-agent/history?page=2')).toBe(
+      '服务历史'
+    );
+    expect(
+      isNavigationItemActive('/settings', '/settings/status/qmt-agent/history')
+    ).toBe(true);
     expect(getPageTitle('/')).toBe('行情工作台');
     expect(getPageTitle('/market/indices')).toBe('全部指数');
     expect(getPageTitle('/holdings')).toBe('持仓');

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -79,8 +79,99 @@ async def test_public_api_is_sanitized_and_rejects_unknown_targets(tmp_path):
     assert settings.qmt_agent_health_url not in serialized
     safety_payload = safety_history.json()
     assert len(safety_payload["checks"]) == 18
-    assert all(check["currentStatus"] == "unknown" for check in safety_payload["checks"])
+    assert all(
+      check["currentStatus"] == "unknown" for check in safety_payload["checks"]
+    )
     assert "accountId" not in safety_history.text
     assert "300000013250" not in safety_history.text
+  finally:
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_incident_pagination_covers_all_records_and_overlapping_incidents(
+  tmp_path,
+):
+  storage = MonitorStorage(tmp_path / "history.sqlite3")
+  await storage.open(target.target_id for target in TARGETS)
+  now = datetime.now(timezone.utc)
+  epoch = now.timestamp()
+  try:
+    assert storage._db is not None
+    await storage._db.executemany(
+      "INSERT INTO incidents (target_id, opened_at, resolved_at, opened_reason_code) VALUES (?, ?, ?, ?)",
+      [("qmt-agent", epoch - 100, epoch - 50, "CONNECT_ERROR") for _ in range(205)]
+      + [
+        ("qmt-agent", epoch - 2 * 86400, None, "QMT_AGENT_NOT_RECONCILED"),
+        ("qmt-agent", epoch - 2 * 86400, epoch - 30, "XTTRADING_UNAVAILABLE"),
+        ("qmt-agent", epoch - 2 * 86400, epoch - 86401, "TIMEOUT"),
+        ("engine", epoch - 100, None, "TIMEOUT"),
+        ("qmt-agent", epoch + 86400, None, "TIMEOUT"),
+      ],
+    )
+    await storage._db.commit()
+    runtime = SimpleNamespace(storage=storage)
+    app = FastAPI()
+    app.include_router(build_router(runtime))
+    async with httpx.AsyncClient(
+      transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+      params = {"targetId": "qmt-agent", "range": "24h", "pageSize": 100}
+      first = (await client.get("/monitor/api/v1/incidents", params=params)).json()
+      assert first["total"] == 207
+      assert first["page"] == 1
+      assert first["pageSize"] == 100
+      assert len(first["incidents"]) == 100
+      # An incident created after page one must not move older records across pages.
+      cutoff = datetime.fromisoformat(first["asOf"].replace("Z", "+00:00")).timestamp()
+      await storage._db.execute(
+        "INSERT INTO incidents (target_id, opened_at) VALUES (?, ?)",
+        ("qmt-agent", cutoff + 0.001),
+      )
+      await storage._db.commit()
+      params["asOf"] = first["asOf"]
+      second = (
+        await client.get("/monitor/api/v1/incidents", params={**params, "page": 2})
+      ).json()
+      third = (
+        await client.get("/monitor/api/v1/incidents", params={**params, "page": 3})
+      ).json()
+      assert second["total"] == third["total"] == 207
+      ids = [
+        item["id"]
+        for payload in (first, second, third)
+        for item in payload["incidents"]
+      ]
+      assert len(set(ids)) == len(ids) == 207
+      assert ids[:205] == list(range(205, 0, -1))
+      assert ids[-2:] == [207, 206]
+      assert third["incidents"][-1]["active"] is True
+      beyond = (
+        await client.get("/monitor/api/v1/incidents", params={**params, "page": 4})
+      ).json()
+      assert beyond["incidents"] == []
+      empty = (
+        await client.get(
+          "/monitor/api/v1/incidents", params={**params, "targetId": "redis"}
+        )
+      ).json()
+      assert empty["total"] == 0
+      for invalid in (
+        {"page": 0},
+        {"pageSize": 0},
+        {"pageSize": 101},
+        {"range": "all"},
+        {"asOf": "invalid"},
+        {"asOf": "2026-01-01T00:00:00"},
+        {"asOf": (now + timedelta(days=2)).isoformat()},
+      ):
+        response = await client.get(
+          "/monitor/api/v1/incidents", params={**params, **invalid}
+        )
+        assert response.status_code == 422
+      unknown = await client.get(
+        "/monitor/api/v1/incidents", params={**params, "targetId": "missing"}
+      )
+      assert unknown.status_code == 404
   finally:
     await storage.close()

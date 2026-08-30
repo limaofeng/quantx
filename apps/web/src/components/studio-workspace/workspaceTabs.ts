@@ -108,6 +108,13 @@ export function getStudioWorkspaceTabId(rawPath: string) {
   }
 
   if (
+    normalizedPath === '/settings/status' ||
+    normalizedPath.startsWith('/settings/status/')
+  ) {
+    return 'page:/settings/status';
+  }
+
+  if (
     [
       '/settings',
       '/settings/trading-safety',

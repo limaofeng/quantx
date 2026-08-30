@@ -72,6 +72,15 @@ export interface MonitorIncident {
   reasonCode: string | null;
 }
 
+export interface MonitorIncidentPage {
+  range: MonitorRange;
+  page: number;
+  pageSize: number;
+  total: number;
+  asOf: string;
+  incidents: MonitorIncident[];
+}
+
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, { cache: 'no-store', signal });
   if (!response.ok) {
@@ -101,16 +110,23 @@ export function getMonitorHistory(
   );
 }
 
-export async function getMonitorIncidents(
+export function getMonitorIncidents(
   range: MonitorRange,
-  targetId?: string,
-  signal?: AbortSignal
-): Promise<MonitorIncident[]> {
-  const query = new URLSearchParams({ range });
-  if (targetId) query.set('targetId', targetId);
-  const response = await getJson<{ incidents: MonitorIncident[] }>(
+  targetId: string,
+  page = 1,
+  pageSize = 20,
+  signal?: AbortSignal,
+  asOf?: string
+): Promise<MonitorIncidentPage> {
+  const query = new URLSearchParams({
+    range,
+    targetId,
+    page: String(page),
+    pageSize: String(pageSize),
+  });
+  if (asOf) query.set('asOf', asOf);
+  return getJson<MonitorIncidentPage>(
     `/monitor/api/v1/incidents?${query.toString()}`,
     signal
   );
-  return response.incidents;
 }

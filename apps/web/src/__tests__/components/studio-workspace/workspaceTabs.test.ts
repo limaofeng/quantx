@@ -8,6 +8,15 @@ import {
 } from '@/components/studio-workspace';
 
 describe('studio workspace tabs', () => {
+  it('keeps service history, metric switches and pagination in the status tab', () => {
+    for (const path of [
+      '/settings/status',
+      '/settings/status/qmt-agent/history?range=1y&page=3&pageSize=20',
+      '/settings/status/engine/history?range=7d&page=1',
+    ]) {
+      expect(getStudioWorkspaceTabId(path)).toBe('page:/settings/status');
+    }
+  });
   it('labels the screening workspace as stock selection', () => {
     expect(buildStudioWorkspaceTab('/screening')).toMatchObject({
       name: '选股',

@@ -2,7 +2,10 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ServiceStatusPanel } from '@/features/settings/components/ServiceStatusPanel';
-import type { MonitorSummary } from '@/features/system/monitor-api';
+import type {
+  MonitorIncident,
+  MonitorSummary,
+} from '@/features/system/monitor-api';
 
 const monitorMocks = vi.hoisted(() => ({
   getMonitorSummary: vi.fn(),
@@ -73,6 +76,17 @@ function summary(
   };
 }
 
+function incidentPage(incidents: MonitorIncident[]) {
+  return {
+    range: '24h',
+    page: 1,
+    pageSize: 20,
+    total: incidents.length,
+    asOf: new Date().toISOString(),
+    incidents,
+  };
+}
+
 describe('ServiceStatusPanel', () => {
   afterEach(() => {
     vi.clearAllMocks();
@@ -121,7 +135,7 @@ describe('ServiceStatusPanel', () => {
             : [],
       })
     );
-    monitorMocks.getMonitorIncidents.mockResolvedValue([]);
+    monitorMocks.getMonitorIncidents.mockResolvedValue(incidentPage([]));
 
     render(<ServiceStatusPanel />);
 
@@ -136,23 +150,21 @@ describe('ServiceStatusPanel', () => {
         name: /QMT Agent 历史状态：2 个时间段，正常 2/,
       })
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /QMT Agent/ })).toHaveAttribute(
-      'aria-expanded',
-      'true'
-    );
+    expect(
+      screen.getByRole('button', { name: /QMT Agent.*延迟/ })
+    ).toHaveAttribute('aria-expanded', 'true');
     expect(screen.queryByText('延迟 0.00 ms')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /策略引擎/ }));
+    fireEvent.click(screen.getByRole('button', { name: /策略引擎.*延迟/ }));
 
     await waitFor(() => {
       expect(
         screen.getByText('该组件来自语义快照，不生成虚假的独立延迟。')
       ).toBeInTheDocument();
     });
-    expect(screen.getByRole('button', { name: /策略引擎/ })).toHaveAttribute(
-      'aria-expanded',
-      'true'
-    );
+    expect(
+      screen.getByRole('button', { name: /策略引擎.*延迟/ })
+    ).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByText('延迟 N/A')).toBeInTheDocument();
   });
 
@@ -164,7 +176,7 @@ describe('ServiceStatusPanel', () => {
       bucketSeconds: 60,
       points: [],
     });
-    monitorMocks.getMonitorIncidents.mockResolvedValue([]);
+    monitorMocks.getMonitorIncidents.mockResolvedValue(incidentPage([]));
 
     render(<ServiceStatusPanel />);
 
@@ -182,17 +194,19 @@ describe('ServiceStatusPanel', () => {
       bucketSeconds: 60,
       points: [],
     });
-    monitorMocks.getMonitorIncidents.mockResolvedValue([
-      {
-        id: 112,
-        targetId: 'qmt-agent',
-        targetName: 'QMT Agent',
-        openedAt: new Date().toISOString(),
-        resolvedAt: null,
-        active: true,
-        reasonCode: 'QMT_AGENT_NOT_RECONCILED',
-      },
-    ]);
+    monitorMocks.getMonitorIncidents.mockResolvedValue(
+      incidentPage([
+        {
+          id: 112,
+          targetId: 'qmt-agent',
+          targetName: 'QMT Agent',
+          openedAt: new Date().toISOString(),
+          resolvedAt: null,
+          active: true,
+          reasonCode: 'QMT_AGENT_NOT_RECONCILED',
+        },
+      ])
+    );
 
     render(<ServiceStatusPanel />);
 
@@ -221,15 +235,17 @@ describe('ServiceStatusPanel', () => {
       points: [],
     });
     monitorMocks.getMonitorIncidents.mockResolvedValue(
-      Array.from({ length: 5 }, (_, index) => ({
-        id: 200 - index,
-        targetId: 'qmt-agent',
-        targetName: 'QMT Agent',
-        openedAt: new Date(Date.now() - index * 60_000).toISOString(),
-        resolvedAt: new Date(Date.now() - index * 30_000).toISOString(),
-        active: false,
-        reasonCode: 'CONNECT_ERROR',
-      }))
+      incidentPage(
+        Array.from({ length: 5 }, (_, index) => ({
+          id: 200 - index,
+          targetId: 'qmt-agent',
+          targetName: 'QMT Agent',
+          openedAt: new Date(Date.now() - index * 60_000).toISOString(),
+          resolvedAt: new Date(Date.now() - index * 30_000).toISOString(),
+          active: false,
+          reasonCode: 'CONNECT_ERROR',
+        }))
+      )
     );
 
     render(<ServiceStatusPanel />);
@@ -287,11 +303,11 @@ describe('ServiceStatusPanel', () => {
         points: [],
       })
     );
-    monitorMocks.getMonitorIncidents.mockResolvedValue([]);
+    monitorMocks.getMonitorIncidents.mockResolvedValue(incidentPage([]));
 
     render(<ServiceStatusPanel />);
     fireEvent.click(
-      await screen.findByRole('button', { name: /账户准入观测/ })
+      await screen.findByRole('button', { name: /账户准入观测.*延迟/ })
     );
 
     expect(

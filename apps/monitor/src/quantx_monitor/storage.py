@@ -292,14 +292,18 @@ class MonitorStorage:
     assert self._db is not None
     checked_at = outcome.source.checked_at_epoch
     snapshot = outcome.snapshot
-    observed = {
-      item.code: (
-        item.status.value.lower(),
-        item.reason_code,
-        item.public_message,
-      )
-      for item in snapshot.checks
-    } if snapshot is not None and snapshot.status == "ready" else {}
+    observed = (
+      {
+        item.code: (
+          item.status.value.lower(),
+          item.reason_code,
+          item.public_message,
+        )
+        for item in snapshot.checks
+      }
+      if snapshot is not None and snapshot.status == "ready"
+      else {}
+    )
     fallback_reason = outcome.source.reason_code or "ACCOUNT_SAFETY_UNOBSERVED"
     fallback_message = (
       "账户准入观测未启用"
@@ -698,35 +702,48 @@ class MonitorStorage:
     self,
     *,
     since: float,
+    now: float,
     target_id: str | None = None,
-    limit: int = 200,
-  ) -> list[dict[str, Any]]:
+    page: int = 1,
+    page_size: int = 20,
+  ) -> tuple[int, list[dict[str, Any]]]:
     assert self._db is not None
-    query = """
-      SELECT id, target_id, opened_at, resolved_at,
-             opened_reason_code, last_reason_code
-      FROM incidents
-      WHERE opened_at >= ?
+    where = """
+      WHERE opened_at <= ? AND (resolved_at IS NULL OR resolved_at >= ?)
     """
-    params: list[Any] = [since]
+    params: list[Any] = [now, since]
     if target_id is not None:
-      query += " AND target_id = ?"
+      where += " AND target_id = ?"
       params.append(target_id)
-    query += " ORDER BY opened_at DESC LIMIT ?"
-    params.append(limit)
-    rows = await (await self._db.execute(query, params)).fetchall()
-    return [dict(row) for row in rows]
+    # Keep count and page consistent with the scheduler on this connection.
+    async with self._write_lock:
+      count = await (
+        await self._db.execute("SELECT COUNT(*) FROM incidents " + where, params)
+      ).fetchone()
+      rows = await (
+        await self._db.execute(
+          """
+          SELECT id, target_id, opened_at, resolved_at,
+                 opened_reason_code, last_reason_code
+          FROM incidents
+          """
+          + where
+          + " ORDER BY opened_at DESC, id DESC LIMIT ? OFFSET ?",
+          [*params, page_size, (page - 1) * page_size],
+        )
+      ).fetchall()
+    return int(count[0]), [dict(row) for row in rows]
 
   async def account_safety_states(self) -> dict[str, dict[str, Any]]:
     assert self._db is not None
     rows = await (
-      await self._db.execute(
-        "SELECT * FROM safety_check_states ORDER BY check_code"
-      )
+      await self._db.execute("SELECT * FROM safety_check_states ORDER BY check_code")
     ).fetchall()
     return {str(row["check_code"]): dict(row) for row in rows}
 
-  async def account_safety_observation_bounds(self) -> tuple[float | None, float | None]:
+  async def account_safety_observation_bounds(
+    self,
+  ) -> tuple[float | None, float | None]:
     assert self._db is not None
     row = await (
       await self._db.execute(
@@ -835,9 +852,7 @@ class MonitorStorage:
       )
     else:
       status = AccountSafetyHistoryStatus.UNKNOWN
-    confirmed = (
-      item["passedCount"] + item["standbyCount"] + item["failedCount"]
-    )
+    confirmed = item["passedCount"] + item["standbyCount"] + item["failedCount"]
     item["status"] = status.value
     item["coveragePct"] = min(100.0, confirmed / expected_samples * 100)
     return item

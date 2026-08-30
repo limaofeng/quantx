@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from time import time
 from typing import Literal, Protocol
 
@@ -195,15 +196,25 @@ def build_router(runtime: RuntimeView) -> APIRouter:
   async def incidents(
     range: HistoryRange = "30d",
     target_id: str | None = Query(default=None, alias="targetId"),
-    limit: int = Query(default=200, ge=1, le=200),
+    page: int = Query(default=1, ge=1, le=1000000),
+    page_size: int = Query(default=20, ge=1, le=100, alias="pageSize"),
+    as_of: datetime | None = Query(default=None, alias="asOf"),
   ) -> dict[str, object]:
     if target_id is not None and target_id not in TARGET_BY_ID:
       raise HTTPException(status_code=404, detail="Unknown monitor target")
     now = time()
-    rows = await runtime.storage.incidents(
+    if as_of is not None:
+      if as_of.tzinfo is None or as_of.timestamp() > now:
+        raise HTTPException(
+          status_code=422, detail="asOf must be a past timestamp with timezone"
+        )
+      now = as_of.timestamp()
+    total, rows = await runtime.storage.incidents(
       since=now - WINDOW_SECONDS[range],
+      now=now,
       target_id=target_id,
-      limit=limit,
+      page=page,
+      page_size=page_size,
     )
     public_rows = []
     for row in rows:
@@ -220,7 +231,14 @@ def build_router(runtime: RuntimeView) -> APIRouter:
           "reasonCode": row.get("last_reason_code") or row.get("opened_reason_code"),
         }
       )
-    return {"range": range, "incidents": public_rows}
+    return {
+      "range": range,
+      "page": page,
+      "pageSize": page_size,
+      "total": total,
+      "asOf": iso_timestamp(now),
+      "incidents": public_rows,
+    }
 
   @router.get("/monitor/internal/api/v1/account-safety/history")
   async def account_safety_history(
@@ -230,9 +248,10 @@ def build_router(runtime: RuntimeView) -> APIRouter:
     since = now - WINDOW_SECONDS[range]
     bucket_seconds = SAFETY_BUCKET_SECONDS[range]
     states = await runtime.storage.account_safety_states()
-    first_observed, last_observed = (
-      await runtime.storage.account_safety_observation_bounds()
-    )
+    (
+      first_observed,
+      last_observed,
+    ) = await runtime.storage.account_safety_observation_bounds()
     incident_rows = await runtime.storage.account_safety_incidents(
       since=since,
       now=now,
@@ -291,9 +310,7 @@ def build_router(runtime: RuntimeView) -> APIRouter:
       state = states.get(code, {})
       active = resolved_at is None
       observation_fresh = bool(
-        active
-        and observer_fresh
-        and str(state.get("status") or "unknown") != "unknown"
+        active and observer_fresh and str(state.get("status") or "unknown") != "unknown"
       )
       public_incidents.append(
         {
@@ -301,9 +318,7 @@ def build_router(runtime: RuntimeView) -> APIRouter:
           "checkCode": code,
           "openedAt": iso_timestamp(row["opened_at"]),
           "resolvedAt": iso_timestamp(resolved_at),
-          "lastConfirmedFailedAt": iso_timestamp(
-            row.get("last_confirmed_failed_at")
-          ),
+          "lastConfirmedFailedAt": iso_timestamp(row.get("last_confirmed_failed_at")),
           "active": active,
           "observationFresh": observation_fresh,
           "openedReasonCode": row.get("opened_reason_code"),

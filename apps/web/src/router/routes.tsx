@@ -339,6 +339,15 @@ export const appRoutes: AppRouteConfig[] = [
     },
   }),
   route({
+    path: '/settings/status/:targetId/history',
+    title: '服务历史',
+    importer: toDefaultExport(
+      () => import('@/features/settings'),
+      'SystemSettingsPage'
+    ),
+    skeleton: 'detail',
+  }),
+  route({
     path: '/settings/status',
     title: '服务状态',
     importer: toDefaultExport(
@@ -556,6 +565,7 @@ export function isNavigationItemActive(
 
   if (normalizedHref === '/') return normalizedPathname === '/';
   if (normalizedHref === '/settings') {
+    if (normalizedPathname.startsWith('/settings/status/')) return true;
     return [
       '/settings',
       '/settings/status',

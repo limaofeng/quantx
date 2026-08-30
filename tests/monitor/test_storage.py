@@ -46,18 +46,22 @@ def safety_outcome(
       checks=[
         AccountSafetyCheckObservation(
           code=code,
-          status=(status if code == "MARKET_STREAM_READY" else AccountSafetyCheckStatus.PASSED),
+          status=(
+            status if code == "MARKET_STREAM_READY" else AccountSafetyCheckStatus.PASSED
+          ),
           scope="INCREASE_RISK",
           reason_code=(
             None
-            if code != "MARKET_STREAM_READY" or status is AccountSafetyCheckStatus.PASSED
+            if code != "MARKET_STREAM_READY"
+            or status is AccountSafetyCheckStatus.PASSED
             else "MARKET_CLOSED_STANDBY"
             if status is AccountSafetyCheckStatus.STANDBY
             else "MARKET_STREAM_READY_FAILED"
           ),
           public_message=(
             ""
-            if code != "MARKET_STREAM_READY" or status is AccountSafetyCheckStatus.PASSED
+            if code != "MARKET_STREAM_READY"
+            or status is AccountSafetyCheckStatus.PASSED
             else "当前休市"
             if status is AccountSafetyCheckStatus.STANDBY
             else "行情链路未收敛"
@@ -129,10 +133,12 @@ async def test_two_failures_open_and_two_successes_close_an_incident(tmp_path):
     assert state["effective_status"] == "healthy"
     assert state["active_incident_id"] is None
 
-    incidents = await storage.incidents(
+    total, incidents = await storage.incidents(
       since=started.timestamp() - 1,
+      now=(started + timedelta(seconds=120)).timestamp(),
       target_id="postgresql",
     )
+    assert total == 1
     assert len(incidents) == 1
     assert incidents[0]["opened_reason_code"] == "TIMEOUT"
     assert incidents[0]["resolved_at"] == pytest.approx(
