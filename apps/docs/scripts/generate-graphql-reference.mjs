@@ -11,12 +11,8 @@ import {
 
 const docsRoot = path.resolve(import.meta.dirname, '..');
 const contractRoot = path.join(docsRoot, 'public', 'contracts');
-const outputRoot = path.join(
-  docsRoot,
-  'content',
-  'reference',
-  'graphql-api'
-);
+const outputRoot = path.join(docsRoot, 'content', 'reference', 'graphql-api');
+const typeOutputRoot = path.join(outputRoot, 'type');
 
 const schemaSource = await fs.readFile(
   path.join(contractRoot, 'graphql-schema.graphql'),
@@ -34,8 +30,12 @@ if (policyContract.schemaVersion !== 2) {
 const operationPolicies = policyContract.operations;
 const schema = buildSchema(schemaSource);
 
-await fs.rm(outputRoot, { recursive: true, force: true });
-await fs.mkdir(path.join(outputRoot, 'type'), { recursive: true });
+// The docs dev server and a verification build can generate this reference at
+// the same time. Keep existing pages available while rewriting them so one
+// process cannot make another VitePress process observe a missing entry page.
+await fs.mkdir(typeOutputRoot, { recursive: true });
+const expectedRootFiles = new Set(['index.md', 'types.md']);
+const expectedTypeFiles = new Set();
 
 function frontmatter(title) {
   return `---\ntitle: ${JSON.stringify(title)}\noutline: [2, 3]\n---\n\n`;
@@ -75,7 +75,9 @@ function renderOperation(operationName, type) {
   )) {
     const policy = policyMap[field.name];
     if (!policy) {
-      throw new Error(`Missing operation policy: ${operationName}.${field.name}`);
+      throw new Error(
+        `Missing operation policy: ${operationName}.${field.name}`
+      );
     }
     lines.push(`## ${field.name}`, '');
     lines.push(
@@ -91,7 +93,10 @@ function renderOperation(operationName, type) {
     if (field.description) lines.push(field.description, '');
     lines.push('```graphql', fieldSignature(field), '```', '');
     if (field.args.length > 0) {
-      lines.push('| 参数 | 类型 | 默认值 | 说明 |', '| --- | --- | --- | --- |');
+      lines.push(
+        '| 参数 | 类型 | 默认值 | 说明 |',
+        '| --- | --- | --- | --- |'
+      );
       for (const argument of field.args) {
         lines.push(
           `| \`${argument.name}\` | ${typeReference(argument.type)} | ${
@@ -118,8 +123,10 @@ const operationTypes = [
 ];
 for (const [operationName, type] of operationTypes) {
   if (!type) continue;
+  const fileName = `${operationName.toLowerCase()}.md`;
+  expectedRootFiles.add(fileName);
   await fs.writeFile(
-    path.join(outputRoot, `${operationName.toLowerCase()}.md`),
+    path.join(outputRoot, fileName),
     renderOperation(operationName, type),
     'utf8'
   );
@@ -145,6 +152,8 @@ const typeIndexLines = [
   '',
 ];
 for (const type of types) {
+  const fileName = `${type.name}.md`;
+  expectedTypeFiles.add(fileName);
   typeIndexLines.push(`- [\`${type.name}\`](./type/${type.name})`);
   const body = [
     frontmatter(type.name),
@@ -159,11 +168,7 @@ for (const type of types) {
     '[返回类型索引](../types)',
     '',
   ].join('\n');
-  await fs.writeFile(
-    path.join(outputRoot, 'type', `${type.name}.md`),
-    body,
-    'utf8'
-  );
+  await fs.writeFile(path.join(typeOutputRoot, fileName), body, 'utf8');
 }
 await fs.writeFile(
   path.join(outputRoot, 'types.md'),
@@ -194,3 +199,22 @@ const index = [
   '',
 ].join('\n');
 await fs.writeFile(path.join(outputRoot, 'index.md'), index, 'utf8');
+
+for (const entry of await fs.readdir(outputRoot, { withFileTypes: true })) {
+  if (
+    entry.isFile() &&
+    entry.name.endsWith('.md') &&
+    !expectedRootFiles.has(entry.name)
+  ) {
+    await fs.rm(path.join(outputRoot, entry.name), { force: true });
+  }
+}
+for (const entry of await fs.readdir(typeOutputRoot, { withFileTypes: true })) {
+  if (
+    entry.isFile() &&
+    entry.name.endsWith('.md') &&
+    !expectedTypeFiles.has(entry.name)
+  ) {
+    await fs.rm(path.join(typeOutputRoot, entry.name), { force: true });
+  }
+}
