@@ -172,6 +172,46 @@ describe('ServiceStatusPanel', () => {
     expect(screen.getAllByText('不可用').length).toBeGreaterThan(0);
   });
 
+  it('explains current and historical reason codes in plain language', async () => {
+    const monitorSummary = summary('degraded');
+    monitorSummary.targets[0].reasonCode = 'XTTRADING_UNAVAILABLE';
+    monitorMocks.getMonitorSummary.mockResolvedValue(monitorSummary);
+    monitorMocks.getMonitorHistory.mockResolvedValue({
+      target: { id: 'qmt-agent', name: 'QMT Agent' },
+      range: '24h',
+      bucketSeconds: 60,
+      points: [],
+    });
+    monitorMocks.getMonitorIncidents.mockResolvedValue([
+      {
+        id: 112,
+        targetId: 'qmt-agent',
+        targetName: 'QMT Agent',
+        openedAt: new Date().toISOString(),
+        resolvedAt: null,
+        active: true,
+        reasonCode: 'QMT_AGENT_NOT_RECONCILED',
+      },
+    ]);
+
+    render(<ServiceStatusPanel />);
+
+    expect(
+      await screen.findByText('当前原因：MiniQMT 交易连接未就绪')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/XTTrading 尚未连接，实盘交易当前不可用/)
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText('QMT Agent 尚未完成账户对账')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/账户资产、持仓、委托和成交快照完成对账前/)
+    ).toBeInTheDocument();
+    expect(screen.getByText('XTTRADING_UNAVAILABLE')).toBeInTheDocument();
+    expect(screen.getByText('QMT_AGENT_NOT_RECONCILED')).toBeInTheDocument();
+  });
+
   it('clarifies that account admission availability is not the gate result', async () => {
     const monitorSummary = summary();
     const now = new Date().toISOString();

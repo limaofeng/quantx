@@ -34,6 +34,7 @@ import {
   type MonitorSummary,
   type MonitorTargetSummary,
 } from '@/features/system/monitor-api';
+import { monitorReasonPresentation } from '@/features/system/monitor-reason';
 import { cn } from '@/utils/cn';
 
 const ranges: Array<{ value: MonitorRange; label: string }> = [
@@ -307,6 +308,9 @@ function TargetDetails({
   incidentsLoading: boolean;
   incidentsError: boolean;
 }) {
+  const currentReason = target.reasonCode
+    ? monitorReasonPresentation(target.reasonCode, target.name)
+    : null;
   const chartData = useMemo(
     () =>
       (history?.points ?? []).map(point => ({
@@ -329,10 +333,10 @@ function TargetDetails({
     target.id === 'account-safety-observer'
       ? '该状态只表示 Monitor 能持续采集脱敏准入快照；QMT、行情与交易门禁的实际结论请在“交易安全”中查看。'
       : target.probeKind === 'derived'
-      ? '该组件来自语义快照，不生成虚假的独立延迟。'
-      : target.probeKind === 'composite'
-        ? '状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。'
-        : '延迟来自 Monitor 到目标服务的主动健康探测。';
+        ? '该组件来自语义快照，不生成虚假的独立延迟。'
+        : target.probeKind === 'composite'
+          ? '状态综合 Windows 健康端点与服务端会话/对账语义；延迟为 Monitor 到 Windows Agent 的健康探测 RTT。'
+          : '延迟来自 Monitor 到目标服务的主动健康探测。';
 
   return (
     <div
@@ -351,10 +355,21 @@ function TargetDetails({
             <p className="mt-1 max-w-3xl text-ui-caption leading-5 text-slate-500">
               {explanation}
             </p>
-            {target.reasonCode && (
-              <p className="mt-1 font-mono text-ui-caption text-amber-300">
-                {target.reasonCode}
-              </p>
+            {target.reasonCode && currentReason && (
+              <div className="mt-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+                <p className="text-ui-label font-medium text-amber-300">
+                  当前原因：{currentReason.title}
+                </p>
+                <p className="mt-1 text-ui-caption leading-5 text-slate-500">
+                  {currentReason.description}
+                </p>
+                <p className="mt-1 text-ui-caption text-slate-600">
+                  错误码{' '}
+                  <code className="break-all font-mono text-slate-500">
+                    {target.reasonCode}
+                  </code>
+                </p>
+              </div>
             )}
           </div>
           <div className="flex shrink-0 gap-ui-section font-mono text-ui-caption text-slate-500">
@@ -489,39 +504,54 @@ function TargetDetails({
               </p>
             </div>
           ) : (
-            incidents.map(incident => (
-              <article
-                key={incident.id}
-                className="rounded-lg border border-white/5 bg-slate-950/35 p-3"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span
-                    className={cn(
-                      'rounded px-1.5 py-0.5 text-ui-caption',
-                      incident.active
-                        ? 'bg-rose-500/10 text-rose-300'
-                        : 'bg-emerald-500/10 text-emerald-300'
-                    )}
-                  >
-                    {incident.active ? '进行中' : '已恢复'}
-                  </span>
-                  <span className="font-mono text-ui-caption text-slate-600">
-                    #{incident.id}
-                  </span>
-                </div>
-                <p className="mt-2 break-all font-mono text-ui-label text-slate-300">
-                  {incident.reasonCode ?? 'DEPENDENCY_NOT_READY'}
-                </p>
-                <p className="mt-2 text-ui-caption text-slate-600">
-                  开始 {formatTime(incident.openedAt)}
-                </p>
-                {incident.resolvedAt && (
-                  <p className="mt-1 text-ui-caption text-slate-600">
-                    恢复 {formatTime(incident.resolvedAt)}
+            incidents.map(incident => {
+              const reasonCode =
+                incident.reasonCode?.trim() || 'DEPENDENCY_NOT_READY';
+              const reason = monitorReasonPresentation(
+                reasonCode,
+                incident.targetName
+              );
+              return (
+                <article
+                  key={incident.id}
+                  className="rounded-lg border border-white/5 bg-slate-950/35 p-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span
+                      className={cn(
+                        'rounded px-1.5 py-0.5 text-ui-caption',
+                        incident.active
+                          ? 'bg-rose-500/10 text-rose-300'
+                          : 'bg-emerald-500/10 text-emerald-300'
+                      )}
+                    >
+                      {incident.active ? '进行中' : '已恢复'}
+                    </span>
+                    <span className="font-mono text-ui-caption text-slate-600">
+                      #{incident.id}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-ui-label font-medium text-slate-300">
+                    {reason.title}
                   </p>
-                )}
-              </article>
-            ))
+                  <p className="mt-1 text-ui-caption leading-5 text-slate-500">
+                    {reason.description}
+                  </p>
+                  <p className="mt-1 text-ui-caption text-slate-600">
+                    错误码{' '}
+                    <code className="break-all font-mono">{reasonCode}</code>
+                  </p>
+                  <p className="mt-2 text-ui-caption text-slate-600">
+                    开始 {formatTime(incident.openedAt)}
+                  </p>
+                  {incident.resolvedAt && (
+                    <p className="mt-1 text-ui-caption text-slate-600">
+                      恢复 {formatTime(incident.resolvedAt)}
+                    </p>
+                  )}
+                </article>
+              );
+            })
           )}
         </div>
       </aside>
