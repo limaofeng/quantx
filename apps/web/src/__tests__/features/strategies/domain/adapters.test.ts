@@ -4,6 +4,7 @@ import {
   mapBucketLedgerFromRun,
   mapDecisionHistoryFromRun,
   mapExecutionTraceFromRun,
+  mapStrategyDecisionView,
   parseSingleInstrumentCode,
 } from '@/features/strategies/domain/adapters';
 import { StrategyRunMode, StrategyRunStatus } from '@/generated/gql/graphql';
@@ -111,6 +112,31 @@ describe('strategy domain adapters', () => {
       orderStatus: 'NOT_SUBMITTED',
       fillStatus: 'NO_FILL',
     });
+  });
+
+  it('prioritizes the decision reason and removes the internal strategy output tag', () => {
+    const decision = mapStrategyDecisionView({
+      id: 'decision-1',
+      instanceId: 'run-1',
+      decidedAt: '2026-08-29T08:25:28+08:00',
+      inputSummary: {},
+      outputSummary: {},
+      tradeIntents: [],
+      decisionTrace: {
+        instrument_code: '600519.sh',
+        reason: 'MINIMUM_COVERAGE_NOT_REACHED',
+        tags: ['strategy_output', 'opportunity_observed', 'no_trade'],
+      },
+      reason: 'MINIMUM_COVERAGE_NOT_REACHED',
+      tags: ['strategy_output', 'opportunity_observed', 'no_trade'],
+    });
+
+    expect(decision.decisionTrace).toEqual([
+      'MINIMUM_COVERAGE_NOT_REACHED',
+      'opportunity_observed',
+      'no_trade',
+    ]);
+    expect(decision.inputSummary.instrument_code).toBe('600519.SH');
   });
 
   it('enforces a single bound instrument in creation input parsing', () => {

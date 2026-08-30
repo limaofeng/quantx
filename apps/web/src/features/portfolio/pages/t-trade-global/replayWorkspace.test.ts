@@ -7,6 +7,9 @@ import {
   mapReplayCyclesToPositionBatches,
   mapReplayDecisionsToActivityEvaluations,
   mapReplayExecutionsToActivityEvents,
+  replayDecisionInstrumentCode,
+  replayDecisionReason,
+  replayDecisionTraceItems,
   replayProjectionActivityItems,
   replayStatusAfterDelete,
   type ReplayCycleLike,
@@ -59,6 +62,30 @@ const completedCycle: ReplayCycleLike = {
 };
 
 describe('replay workspace projections', () => {
+  it('shows the evaluated instrument and useful reason for a no-intent decision', () => {
+    const decision = {
+      id: 'decision-no-intent',
+      instanceId: 'run-replay',
+      decidedAt: '2026-08-29T08:25:28+08:00',
+      inputSummary: { instrument_code: '600519.SH' },
+      outputSummary: {},
+      tradeIntents: [],
+      statePatch: {},
+      decisionTrace: [
+        'strategy_output',
+        'MINIMUM_COVERAGE_NOT_REACHED',
+        'opportunity_observed',
+      ],
+    };
+
+    expect(replayDecisionInstrumentCode(decision)).toBe('600519.SH');
+    expect(replayDecisionReason(decision)).toBe('MINIMUM_COVERAGE_NOT_REACHED');
+    expect(replayDecisionTraceItems(decision)).toEqual([
+      'MINIMUM_COVERAGE_NOT_REACHED',
+      'opportunity_observed',
+    ]);
+  });
+
   it('projects replay cycles without any live account or broker identifier', () => {
     const [batch] = mapReplayCyclesToPositionBatches(
       [completedCycle],

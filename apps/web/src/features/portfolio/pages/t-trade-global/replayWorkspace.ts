@@ -85,8 +85,37 @@ function timestampOrFallback(
   return value && Number.isFinite(Date.parse(value)) ? value : fallback;
 }
 
-function compactDecisionSummary(decision: StrategyDecision) {
-  const trace = decision.decisionTrace.find(item => Boolean(item.trim()));
+const REPLAY_DECISION_TECHNICAL_MARKERS = new Set(['strategy_output']);
+
+export function replayDecisionTraceItems(decision: StrategyDecision) {
+  return decision.decisionTrace.filter(item => {
+    const value = item.trim();
+    return (
+      Boolean(value) &&
+      !REPLAY_DECISION_TECHNICAL_MARKERS.has(value.toLowerCase())
+    );
+  });
+}
+
+export function replayDecisionInstrumentCode(decision: StrategyDecision) {
+  const firstIntent = decision.tradeIntents[0];
+  const inputCode =
+    decision.inputSummary.instrument_code ||
+    decision.inputSummary.instrumentCode;
+  const outputCode =
+    decision.outputSummary.instrument_code ||
+    decision.outputSummary.instrumentCode;
+  return String(
+    firstIntent?.instrumentCode ||
+      (typeof inputCode === 'string' ? inputCode : '') ||
+      (typeof outputCode === 'string' ? outputCode : '')
+  ).toUpperCase();
+}
+
+export function replayDecisionReason(decision: StrategyDecision) {
+  const trace = replayDecisionTraceItems(decision).find(item =>
+    Boolean(item.trim())
+  );
   if (trace) return trace;
   const output = decision.outputSummary;
   for (const key of ['reason', 'result_summary', 'summary', 'status']) {
@@ -96,6 +125,10 @@ function compactDecisionSummary(decision: StrategyDecision) {
   return decision.tradeIntents.length
     ? `产生 ${decision.tradeIntents.length} 个 TradeIntent`
     : '本次决策未产生 TradeIntent';
+}
+
+function compactDecisionSummary(decision: StrategyDecision) {
+  return replayDecisionReason(decision);
 }
 
 export function mapReplayCyclesToPositionBatches(
@@ -241,12 +274,7 @@ export function mapReplayDecisionsToActivityEvaluations(
   accountId: string
 ): ActivitySignalEvaluation[] {
   return decisions.map(decision => {
-    const firstIntent = decision.tradeIntents[0];
-    const inputCode = decision.inputSummary.instrument_code;
-    const stockCode = String(
-      firstIntent?.instrumentCode ||
-        (typeof inputCode === 'string' ? inputCode : '')
-    ).toUpperCase();
+    const stockCode = replayDecisionInstrumentCode(decision);
     const hasIntent = decision.tradeIntents.length > 0;
     return {
       id: `replay-decision:${decision.id}`,

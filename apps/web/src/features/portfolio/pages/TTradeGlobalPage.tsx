@@ -160,6 +160,9 @@ import {
   mapReplayCyclesToPositionBatches,
   mapReplayDecisionsToActivityEvaluations,
   mapReplayExecutionsToActivityEvents,
+  replayDecisionInstrumentCode,
+  replayDecisionReason,
+  replayDecisionTraceItems,
   replayProjectionActivityItems,
   replayStatusAfterDelete,
 } from './t-trade-global/replayWorkspace';
@@ -455,7 +458,7 @@ function ReplaySignalSummary({
   );
 }
 
-function TTradeReplaySignals({
+export function TTradeReplaySignals({
   decisions,
   error,
   executions,
@@ -570,11 +573,14 @@ function TTradeReplaySignals({
             const primaryExecution = primaryIntent
               ? executions.find(item => item.intentId === primaryIntent.id)
               : undefined;
+            const instrumentCode = replayDecisionInstrumentCode(decision);
+            const decisionReason = replayDecisionReason(decision);
+            const traceItems = replayDecisionTraceItems(decision);
             const detailId = `replay-signal-${decision.id}`;
             const status =
               primaryExecution?.orderStatus ||
               primaryIntent?.status ||
-              (primaryIntent ? '意图已生成' : '仅评估');
+              (primaryIntent ? '意图已生成' : '未发意图');
             return (
               <article
                 key={decision.id}
@@ -605,19 +611,18 @@ function TTradeReplaySignals({
                     {formatTime(decision.decidedAt)}
                   </span>
                   <span className="min-w-0 truncate font-mono font-bold text-slate-200">
-                    {primaryIntent?.instrumentCode || '--'}
+                    {instrumentCode || '未关联标的'}
                   </span>
                   <span className="font-mono text-slate-300">
                     {primaryIntent
                       ? `${primaryIntent.side} ${replaySignalValue(primaryIntent.quantityIntent)}`
-                      : '--'}
+                      : '无交易意图'}
                   </span>
                   <span className="text-cyan-200">{status}</span>
                   <span className="truncate text-slate-500">
                     {primaryExecution?.reason ||
                       primaryIntent?.reason ||
-                      decision.decisionTrace[0] ||
-                      '策略完成本次决策评估'}
+                      decisionReason}
                   </span>
                   <span className="text-slate-600">›</span>
                 </button>
@@ -654,7 +659,7 @@ function TTradeReplaySignals({
                         原因链
                       </div>
                       <div className="space-y-1.5 p-3">
-                        {decision.decisionTrace.map((item, index) => (
+                        {traceItems.map((item, index) => (
                           <div
                             key={`${index}-${item}`}
                             className="flex items-start gap-2 text-ui-caption text-slate-400"
@@ -665,7 +670,7 @@ function TTradeReplaySignals({
                             <span>{item}</span>
                           </div>
                         ))}
-                        {decision.decisionTrace.length === 0 && (
+                        {traceItems.length === 0 && (
                           <div className="text-ui-caption text-slate-600">
                             本次决策没有返回额外原因链。
                           </div>

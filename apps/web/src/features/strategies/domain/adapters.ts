@@ -475,13 +475,32 @@ export function mapStrategyDecisionView(raw: unknown): StrategyDecision {
   const record = asRecord(raw) as Record<string, unknown>;
   const trace = record.decisionTrace || record.decision_trace;
   const traceRecord = asRecord(trace) as Record<string, unknown>;
+  const explicitReason =
+    readString(record, ['reason']) || readString(traceRecord, ['reason']);
+  const explicitTags = firstArray(record.tags, traceRecord.tags)
+    .map(item => String(item))
+    .filter(item => item && item.toLowerCase() !== 'strategy_output');
+  const inputSummary = asRecord(
+    record.inputSummary || record.input_summary || {}
+  );
+  const traceInstrumentCode = readString(traceRecord, [
+    'instrumentCode',
+    'instrument_code',
+  ]);
+  if (
+    traceInstrumentCode &&
+    !readString(inputSummary as Record<string, unknown>, [
+      'instrumentCode',
+      'instrument_code',
+    ])
+  ) {
+    inputSummary.instrument_code = normalizeInstrumentCode(traceInstrumentCode);
+  }
   const traceItems =
-    Array.isArray(traceRecord.tags) || traceRecord.reason
+    explicitTags.length > 0 || explicitReason
       ? [
-          ...(Array.isArray(traceRecord.tags)
-            ? traceRecord.tags.map(item => String(item))
-            : []),
-          ...(traceRecord.reason ? [String(traceRecord.reason)] : []),
+          ...(explicitReason ? [explicitReason] : []),
+          ...explicitTags.filter(item => item !== explicitReason),
         ]
       : typeof trace === 'string'
         ? [trace]
@@ -495,10 +514,7 @@ export function mapStrategyDecisionView(raw: unknown): StrategyDecision {
     decidedAt:
       readString(record, ['decidedAt', 'decided_at']) ||
       new Date().toISOString(),
-    inputSummary: (record.inputSummary || record.input_summary || {}) as Record<
-      string,
-      StrategyJsonValue
-    >,
+    inputSummary,
     outputSummary: (record.outputSummary ||
       record.output_summary ||
       {}) as Record<string, StrategyJsonValue>,
