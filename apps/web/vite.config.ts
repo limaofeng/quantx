@@ -1,6 +1,7 @@
 import path from 'path';
 
 import graphql from '@rollup/plugin-graphql';
+import { babelOptimizerPlugin } from '@graphql-codegen/client-preset';
 import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv } from 'vite';
 
@@ -16,6 +17,22 @@ export default defineConfig(({ mode }) => {
       react({
         // 优化 JSX 运行时
         jsxRuntime: 'automatic',
+        // Resolve static gql calls to typed documents so unused operations and
+        // the all-query lookup map do not ship with the replay workspace.
+        babel: {
+          plugins: [
+            [
+              babelOptimizerPlugin,
+              {
+                artifactDirectory: path.resolve(
+                  import.meta.dirname,
+                  'src/generated/gql'
+                ),
+                gqlTagName: 'gql',
+              },
+            ],
+          ],
+        },
       }),
       // 支持导入 .gql 文件
       graphql(),
