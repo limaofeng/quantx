@@ -181,6 +181,57 @@ async def test_strategy_startup_restores_runs_before_owner_audit(
 
 
 @pytest.mark.asyncio
+async def test_owner_audit_failure_degrades_only_trading_runtime(
+  monkeypatch,
+) -> None:
+  stopped = asyncio.Event()
+  failure = engine_main.ActiveRuntimeExitPlanOwnerAuditError(
+    [
+      engine_main.ActiveRuntimeExitPlanOwnerAuditFailure(
+        plan_id="orphan-plan",
+        strategy_run_id="missing-run",
+        account_id="account-live",
+        owner_kind="RUNTIME_BOOK",
+        reason_code="STRATEGY_RUN_MISSING",
+        message="StrategyRun missing",
+        stage="preflight",
+      )
+    ]
+  )
+
+  class FailingPreflight:
+    async def preflight_active_runtime_owned_plans(self):
+      raise failure
+
+  async def pause_and_stop(error) -> None:
+    assert error is failure
+    stopped.set()
+
+  async def unexpected_start() -> None:
+    raise AssertionError("trading components must not start after preflight failure")
+
+  monkeypatch.setattr(
+    engine_main,
+    "AutoExitPlanService",
+    lambda _manager: FailingPreflight(),
+  )
+  monkeypatch.setattr(engine_main, "_pause_owner_audit_accounts", pause_and_stop)
+  monkeypatch.setattr(
+    engine_main,
+    "exit_plan_monitor",
+    SimpleNamespace(is_running=False, start=unexpected_start),
+  )
+  state = engine_main.EngineOperationalState()
+
+  await engine_main._trading_runtime_supervisor(stopped, state)
+
+  assert state.status == "degraded"
+  assert state.trading_ready is False
+  assert state.reason_code == failure.code
+  assert state.owner_audit["failures"] == [failure.failures[0].to_dict()]
+
+
+@pytest.mark.asyncio
 async def test_engine_supervisor_restarts_after_critical_failure(
   monkeypatch,
 ) -> None:

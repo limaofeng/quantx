@@ -131,8 +131,14 @@ Engine 使用 PostgreSQL advisory lock 保证同一数据库只有一个实例�
 等入场来源计划由原 `StrategyRun` 在自身串行行情队列、策略 `step()` 之前评估。
 用户新建的人工托管 `MANUAL_POSITION` 与清仓计划都由 Monitor 执行。Engine 启动
 迁移会先停止旧专用退出运行、保留计划状态和订单血缘，再恢复策略运行；持续看门狗
-负责发现孤儿或错配所有者，并立即
-fail-stop；Monitor 不接管执行。API 对人工计划的
+负责发现孤儿或错配所有者。所有权审计保持 fail-closed，但故障域只覆盖交易运行域：
+Engine 先启动 heartbeat、Agent report 收敛、订阅桥和行情查询桥；审计失败时停止
+StrategyManager、人工计划 Monitor、自动交易监控和命令 consumer，把 Engine heartbeat
+标记为 `DEGRADED / ACTIVE_RUNTIME_EXIT_PLAN_OWNER_AUDIT_FAILED`，并幂等地将受影响账户
+置为 `PAUSED / RECONCILE_REQUIRED`、清空 controlled window。核心数据面和 PostgreSQL
+租约继续运行，因此 QMT 完整快照、控制会话和行情租约不会被孤儿计划拖入重启循环。
+持久化预检通过后仍需连续两个运行态审计周期健康，才启动命令 consumer；账户授权不
+自动恢复，必须完成显式对账。Monitor 不接管执行。API 对人工计划的
 创建、修改、启停、取消、立即评估和批量清仓全部写入
 `engine_command_outbox`；Engine 在账户＋股票锁内校验 `config_version`、保护量
 冲突和待成交 SELL。承载活跃入场来源计划的原运行只能 `DRAINING`，不得普通

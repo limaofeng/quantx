@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -328,6 +329,105 @@ class AccountExecutionSafetyService:
         await db.commit()
         await db.refresh(control)
       return control
+
+  async def pause_for_runtime_owner_audit(
+    self,
+    account_id: str,
+    *,
+    failures: list[dict[str, Any]],
+  ) -> bool:
+    """Idempotently close one account after an Engine owner-audit failure."""
+
+    normalized_account_id = str(account_id or "").strip()
+    if not normalized_account_id:
+      raise ValueError("runtime owner audit pause requires an account")
+    normalized_failures = sorted(
+      (
+        {
+          "planId": str(item.get("planId") or "")[:128],
+          "strategyRunId": str(item.get("strategyRunId") or "")[:64],
+          "reasonCode": str(item.get("reasonCode") or "UNKNOWN")[:64],
+          "stage": str(item.get("stage") or "runtime")[:32],
+        }
+        for item in failures
+        if str(item.get("accountId") or "") == normalized_account_id
+      ),
+      key=lambda item: (
+        item["planId"],
+        item["strategyRunId"],
+        item["reasonCode"],
+        item["stage"],
+      ),
+    )
+    if not normalized_failures:
+      raise ValueError("runtime owner audit pause requires an account failure")
+    fingerprint = hashlib.sha256(
+      json.dumps(
+        {
+          "accountId": normalized_account_id,
+          "failures": normalized_failures,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+      ).encode("utf-8")
+    ).hexdigest()
+    operation_id = f"engine-owner-audit:{fingerprint}"
+    reason_payload = {
+      "reasonCode": "ACTIVE_RUNTIME_EXIT_PLAN_OWNER_AUDIT_FAILED",
+      "failureCount": len(normalized_failures),
+      "failures": normalized_failures[:20],
+    }
+    paused_reason = json.dumps(
+      reason_payload,
+      ensure_ascii=False,
+      separators=(",", ":"),
+      sort_keys=True,
+    )[:2000]
+    async with AsyncSessionLocal() as db:
+      existing = await db.get(AccountExecutionControlEvent, operation_id)
+      if existing is not None:
+        if (
+          str(existing.account_id or "") != normalized_account_id
+          or str(existing.event_type or "") != "RUNTIME_OWNER_AUDIT_FAILED"
+        ):
+          raise AccountExecutionControlIdempotencyError(
+            "Engine 所有权审计幂等标识已绑定其他账户"
+          )
+        await db.rollback()
+        return False
+      control = await db.get(
+        AccountExecutionControl,
+        normalized_account_id,
+        with_for_update=True,
+      )
+      if control is None:
+        control = AccountExecutionControl(account_id=normalized_account_id)
+        db.add(control)
+      previous_state = str(control.authorization_state or "DISABLED").upper()
+      control.reconcile_status = "RECONCILE_REQUIRED"
+      if previous_state != "KILLED":
+        control.authorization_state = "PAUSED"
+      control.authorized_by_user_id = None
+      control.authorized_at = None
+      control.paused_reason = paused_reason
+      self._invalidate_controlled_window(control)
+      control.state_version = int(control.state_version or 0) + 1
+      self._append_event(
+        db,
+        account_id=normalized_account_id,
+        event_id=operation_id,
+        event_type="RUNTIME_OWNER_AUDIT_FAILED",
+        previous_state=previous_state,
+        next_state=str(control.authorization_state or "PAUSED"),
+        snapshot_id=control.last_snapshot_id,
+        details={
+          "operationId": operation_id,
+          **reason_payload,
+        },
+      )
+      await db.commit()
+      return True
 
   async def _readiness_snapshot(self, db, account_id: str):
     anchor = select(literal(account_id).label("account_id")).subquery()

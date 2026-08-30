@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
 from math import isfinite
@@ -178,6 +179,65 @@ _T_TRADE_AUTHORIZATION_DEFERRED_CODES = frozenset(
     "T_TRADE_EXIT_SAFETY_SNAPSHOT_UNAVAILABLE",
   }
 )
+
+
+@dataclass(frozen=True)
+class ActiveRuntimeExitPlanOwnerAuditFailure:
+  """One durable plan whose exact Engine execution owner is unavailable."""
+
+  plan_id: str
+  strategy_run_id: str
+  account_id: str
+  owner_kind: str
+  reason_code: str
+  message: str
+  stage: str
+
+  def to_dict(self) -> dict[str, str]:
+    return {
+      "planId": self.plan_id,
+      "strategyRunId": self.strategy_run_id,
+      "accountId": self.account_id,
+      "ownerKind": self.owner_kind,
+      "reasonCode": self.reason_code,
+      "message": self.message,
+      "stage": self.stage,
+    }
+
+
+class ActiveRuntimeExitPlanOwnerAuditError(RuntimeError):
+  """Structured fail-closed owner-audit failure consumed by Engine supervision."""
+
+  code = "ACTIVE_RUNTIME_EXIT_PLAN_OWNER_AUDIT_FAILED"
+
+  def __init__(
+    self,
+    failures: Iterable[ActiveRuntimeExitPlanOwnerAuditFailure],
+  ) -> None:
+    self.failures = tuple(failures)
+    if not self.failures:
+      raise ValueError("owner audit error requires at least one failure")
+    summary = "; ".join(
+      (
+        f"{item.plan_id}:{item.strategy_run_id}:"
+        f"{item.reason_code}:{item.message}"
+      )
+      for item in self.failures
+    )
+    super().__init__(f"{self.code}: {summary}")
+
+  @property
+  def account_ids(self) -> tuple[str, ...]:
+    return tuple(
+      dict.fromkeys(item.account_id for item in self.failures if item.account_id)
+    )
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "reasonCode": self.code,
+      "failures": [item.to_dict() for item in self.failures],
+      "accountIds": list(self.account_ids),
+    }
 
 
 def _is_sticky_exit_plan_error(value: Any) -> bool:
@@ -3480,17 +3540,22 @@ class AutoExitPlanService:
         .all()
       )
     verified: list[str] = []
-    failures: list[str] = []
+    failures: list[ActiveRuntimeExitPlanOwnerAuditFailure] = []
     for record in rows:
       run_id = str(record.strategy_run_id or "").strip()
+      owner_kind = durable_exit_plan_owner_kind(record)
       try:
-        owner_kind = self._strategy_owner_kind(record)
-        if owner_kind == "MONITOR":
+        if owner_kind == INVALID_OWNER:
+          raise ValueError(
+            "INVALID_DURABLE_OWNER:退出计划持久化身份不一致或没有合法执行所有者"
+          )
+        if owner_kind == MONITOR_OWNER:
           verified.append(str(record.plan_id))
           continue
         runtime = self._runtime_manager.get_run(run_id)
         if runtime is None:
-          raise RuntimeError("StrategyRun 未恢复到 Engine")
+          raise ValueError("RUNTIME_NOT_RESTORED:StrategyRun 未恢复到 Engine")
+        resolved_owner_kind = self._strategy_owner_kind(record)
         runtime_status = str(
           getattr(
             getattr(runtime, "status", None),
@@ -3501,32 +3566,39 @@ class AutoExitPlanService:
         ).upper()
         task = getattr(runtime, "task", None)
         if runtime_status not in {"RUNNING", "STARTING"}:
-          raise RuntimeError(f"StrategyRun 状态为 {runtime_status or 'UNKNOWN'}")
+          raise ValueError(
+            "RUNTIME_STATUS_INVALID:"
+            f"StrategyRun 状态为 {runtime_status or 'UNKNOWN'}"
+          )
         if task is None or getattr(task, "done", lambda: True)():
-          raise RuntimeError("StrategyRun 消费任务未运行")
+          raise ValueError("RUNTIME_CONSUMER_STOPPED:StrategyRun 消费任务未运行")
         plan = ExitPlan.from_dict(dict(record.plan_state or {}))
-        if owner_kind == "MANAGED_EXIT_STRATEGY":
+        if resolved_owner_kind == MANAGED_EXIT_STRATEGY_OWNER:
           metadata = dict(plan.template.metadata or {})
           command_id = str(metadata.get(MANAGED_RUNTIME_COMMAND_ID_KEY) or "")
           command_kind = str(
             metadata.get(MANAGED_RUNTIME_COMMAND_KIND_KEY) or ""
           ).upper()
           if not command_id or command_kind not in {"CREATE", "UPDATE"}:
-            raise RuntimeError("独立卖出计划缺少确定性配置命令")
+            raise ValueError(
+              "MANAGED_BINDING_INVALID:独立卖出计划缺少确定性配置命令"
+            )
           await self._validate_finalized_managed_runtime_binding(
             record,
             plan,
             command_id=command_id,
             command_kind=command_kind,
           )
-        elif owner_kind == "RUNTIME_BOOK":
+        elif resolved_owner_kind == RUNTIME_BOOK_OWNER:
           if (
             plan.plan_id != str(record.plan_id)
             or str(plan.template.run_id or "") != run_id
             or int(plan.template.config_version or 0)
             != int(record.config_version or 0)
           ):
-            raise RuntimeError("运行内退出计划持久化绑定不一致")
+            raise ValueError(
+              "RUNTIME_BINDING_INVALID:运行内退出计划持久化绑定不一致"
+            )
           runtime_plan = getattr(runtime, "exit_plan_book", None)
           runtime_plan = (
             runtime_plan.plans.get(record.plan_id)
@@ -3536,17 +3608,123 @@ class AutoExitPlanService:
           if runtime_plan is None or (
             runtime_plan.template.to_dict() != plan.template.to_dict()
           ):
-            raise RuntimeError("StrategyRun 未装载权威退出计划配置")
+            raise ValueError(
+              "RUNTIME_PLAN_NOT_LOADED:StrategyRun 未装载权威退出计划配置"
+            )
         else:
-          raise RuntimeError("退出计划没有唯一 Engine 所有者")
+          raise ValueError(
+            "INVALID_RUNTIME_OWNER:退出计划没有唯一 Engine 所有者"
+          )
       except Exception as exc:
-        failures.append(f"{record.plan_id}:{run_id}:{exc}")
+        message = str(exc)
+        reason_code, separator, detail = message.partition(":")
+        reason_code = reason_code.strip()
+        if (
+          not separator
+          or not reason_code
+          or len(reason_code) > 64
+          or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+            for character in reason_code
+          )
+        ):
+          reason_code = "RUNTIME_OWNER_INVALID"
+          detail = message
+        failures.append(
+          ActiveRuntimeExitPlanOwnerAuditFailure(
+            plan_id=str(record.plan_id),
+            strategy_run_id=run_id,
+            account_id=str(record.account_id or ""),
+            owner_kind=owner_kind,
+            reason_code=reason_code[:64],
+            message=(detail or message)[:512],
+            stage="runtime",
+          )
+        )
       else:
         verified.append(str(record.plan_id))
     if failures:
-      raise RuntimeError(
-        "ACTIVE_RUNTIME_EXIT_PLAN_OWNER_AUDIT_FAILED: " + "; ".join(failures)
+      raise ActiveRuntimeExitPlanOwnerAuditError(failures)
+    return {"examined": len(rows), "verified": verified}
+
+  async def preflight_active_runtime_owned_plans(self) -> dict[str, Any]:
+    """Reject durable orphan plans before starting any StrategyRun consumer."""
+
+    async with AsyncSessionLocal() as db:
+      rows = list(
+        (
+          await db.execute(
+            select(AutoExitPlanRecord)
+            .where(AutoExitPlanRecord.enabled.is_(True))
+            .where(AutoExitPlanRecord.status.notin_(list(TERMINAL_PLAN_STATUSES)))
+            .order_by(AutoExitPlanRecord.plan_id)
+          )
+        )
+        .scalars()
+        .all()
       )
+      run_ids = {
+        str(record.strategy_run_id or "").strip()
+        for record in rows
+        if str(record.strategy_run_id or "").strip()
+      }
+      durable_runs = (
+        {
+          str(run.id): run
+          for run in (
+            (
+              await db.execute(select(StrategyRun).where(StrategyRun.id.in_(run_ids)))
+            )
+            .scalars()
+            .all()
+          )
+        }
+        if run_ids
+        else {}
+      )
+
+    verified: list[str] = []
+    failures: list[ActiveRuntimeExitPlanOwnerAuditFailure] = []
+    for record in rows:
+      plan_id = str(record.plan_id or "")
+      account_id = str(record.account_id or "")
+      run_id = str(record.strategy_run_id or "").strip()
+      owner_kind = durable_exit_plan_owner_kind(record)
+      reason_code = ""
+      message = ""
+      if owner_kind == INVALID_OWNER:
+        reason_code = "INVALID_DURABLE_OWNER"
+        message = "退出计划持久化身份不一致或没有合法执行所有者"
+      elif owner_kind == MONITOR_OWNER:
+        verified.append(plan_id)
+        continue
+      else:
+        durable_run = durable_runs.get(run_id)
+        if durable_run is None:
+          reason_code = "STRATEGY_RUN_MISSING"
+          message = "退出计划绑定的 StrategyRun 持久化记录不存在"
+        else:
+          raw_status = getattr(durable_run, "status", "")
+          run_status = str(getattr(raw_status, "value", raw_status) or "").upper()
+          if run_status != StrategyRunStatus.RUNNING.value.upper():
+            reason_code = "STRATEGY_RUN_NOT_RUNNING"
+            message = f"退出计划绑定的 StrategyRun 状态为 {run_status or 'UNKNOWN'}"
+      if reason_code:
+        failures.append(
+          ActiveRuntimeExitPlanOwnerAuditFailure(
+            plan_id=plan_id,
+            strategy_run_id=run_id,
+            account_id=account_id,
+            owner_kind=owner_kind,
+            reason_code=reason_code,
+            message=message,
+            stage="preflight",
+          )
+        )
+      else:
+        verified.append(plan_id)
+    if failures:
+      raise ActiveRuntimeExitPlanOwnerAuditError(failures)
     return {"examined": len(rows), "verified": verified}
 
   async def create_manual_exit_plan(
