@@ -517,6 +517,10 @@ async def test_partitioned_live_snapshot_restarts_after_interleaved_cancel(
     is_connected = True
     cancelled = False
 
+    @staticmethod
+    def query_account_status() -> int:
+      return 0
+
     def get_account_info(self) -> dict:
       native_calls.append("account")
       account_started.set()
@@ -644,6 +648,10 @@ async def test_durable_callback_fence_prevents_stale_snapshot_commit(
       self.account_calls = 0
       self.trade_calls = 0
       self.orders: list[dict] = []
+
+    @staticmethod
+    def query_account_status() -> int:
+      return 0
 
     def get_account_info(self) -> dict:
       self.account_calls += 1
@@ -830,6 +838,77 @@ def test_callback_after_final_snapshot_fence_is_journaled_after_snapshot(
   assert persisted["snapshot_id"] == snapshot_message_id
   assert broker.trading_mutation_generation() == 1
   assert broker.mark_trading_reconciled(0, 0) is True
+
+
+def test_status_callback_is_linearized_after_snapshot_commit(tmp_path) -> None:
+  journal = LocalJournal(tmp_path / "status-after-snapshot-fence.sqlite3")
+  broker = object.__new__(LiveBroker)
+  broker.agents = {}
+  broker._trading_generation_lock = threading.Lock()
+  broker._trading_connection_generation = 0
+  broker._trading_mutation_generation = 0
+  broker._trading_reconciled_generation = -1
+  runtime = _bare_live_runtime(broker)
+  runtime.journal = journal
+  snapshot_commit_started = threading.Event()
+  status_callback_started = threading.Event()
+  callback_failures: list[BaseException] = []
+  original_persist = runtime._persist_full_snapshot_report
+
+  def persist_snapshot(message_id: str, serialized: str) -> None:
+    snapshot_commit_started.set()
+    assert status_callback_started.wait(timeout=1)
+    assert broker.trading_mutation_generation() == 0
+    original_persist(message_id, serialized)
+
+  runtime._persist_full_snapshot_report = persist_snapshot
+  sink = _LiveReportSink(
+    "account-1",
+    journal,
+    on_callback_observed=broker._advance_trading_mutation,
+  )
+
+  def observe_status() -> None:
+    try:
+      assert snapshot_commit_started.wait(timeout=1)
+      status_callback_started.set()
+      sink.mark_status_observed()
+    except BaseException as exc:
+      callback_failures.append(exc)
+
+  callback_thread = threading.Thread(target=observe_status)
+  callback_thread.start()
+  snapshot_message_id = "snapshot-before-status"
+  runtime._persist_captured_full_snapshot(
+    {
+      "accounts": [],
+      "positions_by_account": {},
+      "orders": [],
+      "trades": [],
+      "sequence": 1,
+      "is_complete": True,
+      "unavailable_accounts": [],
+      "section_completeness_by_account": {},
+      "mode": "live",
+    },
+    snapshot_message_id,
+    0,
+    0,
+    0,
+  )
+  callback_thread.join(timeout=1)
+
+  assert callback_thread.is_alive() is False
+  assert callback_failures == []
+  reports = [
+    AgentEnvelope.model_validate_json(serialized)
+    for serialized in journal.pending_reports()
+  ]
+  assert [report.message_type for report in reports] == [
+    AgentMessageType.DELTA_REPORT,
+  ]
+  assert reports[0].message_id == snapshot_message_id
+  assert broker.trading_mutation_generation() == 1
 
 
 def test_snapshot_ack_cannot_clear_callback_gap_created_after_commit(

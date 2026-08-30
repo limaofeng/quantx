@@ -31,6 +31,7 @@ import type { Position } from '../types';
 interface HoldingCardProps {
   holding: Position;
   onLiquidate: (stockCode: string) => Promise<unknown>;
+  tradingDisabled?: boolean;
 }
 
 function copyText(value: string | number | undefined | null) {
@@ -54,7 +55,11 @@ function isInteractiveTarget(target: EventTarget | null) {
     : false;
 }
 
-export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
+export function HoldingCard({
+  holding,
+  onLiquidate,
+  tradingDisabled = false,
+}: HoldingCardProps) {
   const [, setLocation] = useLocation();
   const openStudioTab = useStudioNavigate();
   const { confirm: confirmDialog } = useAppDialog();
@@ -74,6 +79,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
   );
 
   const handleLiquidate = async () => {
+    if (tradingDisabled) return;
     try {
       const confirmed = await confirmDialog({
         title: `确认清仓 ${stockName}`,
@@ -113,7 +119,9 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
         aria-label={`查看 ${stockName} 详情`}
         onClick={handleRowClick}
         onKeyDown={handleRowKeyDown}
-        onContextMenu={event => openAtPointer(event, holding)}
+        onContextMenu={
+          tradingDisabled ? undefined : event => openAtPointer(event, holding)
+        }
       >
         <div className="flex min-w-0 items-center gap-3 border-r border-white/5 px-3 py-2">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-blue-500/15 bg-blue-500/10 text-ui-label font-black text-blue-300">
@@ -201,6 +209,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
             size="sm"
             variant="ghost"
             className="h-control-compact justify-start gap-2 rounded-md px-2 text-ui-caption font-black text-slate-300 hover:bg-white/10 hover:text-slate-50"
+            disabled={tradingDisabled}
             onClick={event => {
               event.stopPropagation();
               openStudioTab(`/holdings?symbol=${holding.stockCode}`);
@@ -214,6 +223,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
             size="sm"
             variant="ghost"
             className="h-control-compact justify-start gap-2 rounded-md px-2 text-ui-caption font-black text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+            disabled={tradingDisabled}
             onClick={event => {
               event.stopPropagation();
               void handleLiquidate();

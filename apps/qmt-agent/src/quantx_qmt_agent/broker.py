@@ -30,6 +30,8 @@ from quantx_contracts import (
   HistoricalBarSummary,
   historical_bar_key,
   historical_bar_transfer_fields,
+  qmt_account_status_is_snapshot_eligible,
+  qmt_account_status_name,
 )
 
 from .endpoints import masked_account_id
@@ -47,6 +49,62 @@ LIVE_FULL_SNAPSHOT_PARTITIONS = (
   "cancelable_orders",
   "trades",
 )
+
+
+def _fresh_snapshot_account_status(manager: Any) -> tuple[int | None, bool]:
+  """Read native account status without accepting cached readiness."""
+
+  query = getattr(manager, "query_account_status", None)
+  if not callable(query):
+    return None, False
+  try:
+    value = query()
+  except Exception as exc:
+    logger.warning(
+      "XTTrading account-status snapshot probe failed: error=%s",
+      exc.__class__.__name__,
+    )
+    return None, False
+  try:
+    return (None if value is None else int(value)), True
+  except (TypeError, ValueError):
+    return None, True
+
+
+def _snapshot_account_authority(
+  observations: list[int | None],
+  *,
+  probes_complete: bool,
+) -> dict[str, Any]:
+  initial_status = observations[0] if observations else None
+  final_status = observations[-1] if observations else None
+  stable = bool(
+    probes_complete
+    and observations
+    and initial_status is not None
+    and all(status == initial_status for status in observations)
+  )
+  eligible = bool(
+    stable and qmt_account_status_is_snapshot_eligible(final_status)
+  )
+  if not probes_complete:
+    reason_code = "XTTRADING_ACCOUNT_STATUS_QUERY_FAILED"
+  elif any(status is None for status in observations):
+    reason_code = "XTTRADING_ACCOUNT_STATUS_UNKNOWN"
+  elif not stable:
+    reason_code = "XTTRADING_ACCOUNT_STATUS_CHANGED_DURING_SNAPSHOT"
+  elif not eligible:
+    reason_code = "XTTRADING_ACCOUNT_STATUS_NOT_SNAPSHOT_ELIGIBLE"
+  else:
+    reason_code = "XTTRADING_ACCOUNT_STATUS_AUTHORITATIVE"
+  return {
+    "initial_status": initial_status,
+    "final_status": final_status,
+    "stable": stable,
+    "snapshot_eligible": eligible,
+    "status_name": qmt_account_status_name(final_status),
+    "reason_code": reason_code,
+  }
 WHOLE_QUOTE_INSTRUMENT_DETAIL_BATCH_SIZE = 500
 WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE = 256
 WHOLE_QUOTE_METADATA_REFRESH_RETRY_SECONDS = 60.0
@@ -488,6 +546,15 @@ class _LiveReportSink:
 
     if self.on_callback_observed is not None:
       self.on_callback_observed()
+
+  def mark_status_observed(self) -> None:
+    """Linearize a status-only callback against full-snapshot persistence."""
+
+    # Order/trade/asset/position callbacks acquire this lock when their durable
+    # report is written.  Account-status callbacks have no report of their own,
+    # so advance their mutation fence under the same lock instead.
+    with self.journal.lock:
+      self.mark_callback_observed()
 
   def prepare_callback(self, kind: str, callback_value: Any) -> _PreparedLiveReport:
     if kind == "order":
@@ -1720,10 +1787,20 @@ class LiveBroker:
       generation = self.trading_connection_generation()
       captured: dict[str, dict[str, Any]] = {}
       for account_id, agent in self.agents.items():
+        manager = agent.trading_manager
         connected_before = bool(
-          getattr(agent.trading_manager, "is_connected", False)
+          getattr(manager, "is_connected", False)
         )
-        if connected_before:
+        status_before, status_before_complete = (
+          _fresh_snapshot_account_status(manager)
+          if connected_before
+          else (None, False)
+        )
+        status_before_eligible = bool(
+          status_before_complete
+          and qmt_account_status_is_snapshot_eligible(status_before)
+        )
+        if connected_before and status_before_eligible:
           capture = getattr(agent, "capture_full_snapshot_partition", None)
           if callable(capture):
             try:
@@ -1741,7 +1818,7 @@ class LiveBroker:
         else:
           section = None
         connected_after = bool(
-          getattr(agent.trading_manager, "is_connected", False)
+          getattr(manager, "is_connected", False)
         )
         valid_section = isinstance(section, dict)
         captured[account_id] = {
@@ -1753,10 +1830,13 @@ class LiveBroker:
           "is_complete": bool(
             connected_before
             and connected_after
+            and status_before_eligible
             and valid_section
             and section.get("is_complete") is True
           ),
           "connected": bool(connected_before and connected_after),
+          "account_status_observations": [status_before],
+          "account_status_probes_complete": status_before_complete,
         }
       if generation != self.trading_connection_generation():
         raise RuntimeError(
@@ -1777,6 +1857,7 @@ class LiveBroker:
     trades = []
     unavailable_accounts = []
     section_completeness_by_account: dict[str, dict[str, bool]] = {}
+    snapshot_authority_by_account: dict[str, dict[str, Any]] = {}
     expected_generation = max(0, int(connection_generation))
     with self._trading_access_lock:
       if expected_generation != self.trading_connection_generation():
@@ -1786,6 +1867,8 @@ class LiveBroker:
       for account_id, agent in self.agents.items():
         local_partitions: dict[str, dict[str, Any]] = {}
         captured_connected = True
+        status_observations: list[int | None] = []
+        status_probes_complete = True
         for partition in LIVE_FULL_SNAPSHOT_PARTITIONS:
           account_sections = partitions.get(partition)
           section = (
@@ -1798,6 +1881,27 @@ class LiveBroker:
             captured_connected
             and valid_section
             and section.get("connected") is True
+          )
+          raw_observations = (
+            section.get("account_status_observations")
+            if valid_section
+            else None
+          )
+          if isinstance(raw_observations, list):
+            status_observations.extend(
+              (
+                None
+                if value is None
+                else int(value)
+              )
+              for value in raw_observations
+            )
+          else:
+            status_probes_complete = False
+          status_probes_complete = bool(
+            status_probes_complete
+            and valid_section
+            and section.get("account_status_probes_complete") is True
           )
           local_partitions[partition] = {
             "value": (
@@ -1824,6 +1928,20 @@ class LiveBroker:
             },
             "is_complete": False,
           }
+        final_status, final_status_probe_complete = (
+          _fresh_snapshot_account_status(agent.trading_manager)
+          if bool(getattr(agent.trading_manager, "is_connected", False))
+          else (None, False)
+        )
+        status_observations.append(final_status)
+        status_probes_complete = bool(
+          status_probes_complete and final_status_probe_complete
+        )
+        authority = _snapshot_account_authority(
+          status_observations,
+          probes_complete=status_probes_complete,
+        )
+        snapshot_authority_by_account[account_id] = authority
         raw_section_completeness = snapshot.get("section_completeness")
         if isinstance(raw_section_completeness, dict):
           section_completeness = {
@@ -1834,8 +1952,15 @@ class LiveBroker:
           section_completeness = {
             section: False for section in LIVE_FULL_SNAPSHOT_PARTITIONS
           }
+        if not authority["snapshot_eligible"]:
+          section_completeness = {
+            section: False for section in LIVE_FULL_SNAPSHOT_PARTITIONS
+          }
         section_completeness_by_account[account_id] = section_completeness
         account = dict(snapshot.get("account") or {})
+        if not authority["snapshot_eligible"]:
+          unavailable_accounts.append(account_id)
+          continue
         if (
           not captured_connected
           or not snapshot.get("connected")
@@ -1855,34 +1980,39 @@ class LiveBroker:
           captured_connected
           and snapshot.get("is_complete") is True
           and all(section_completeness.values())
+          and authority["snapshot_eligible"] is True
         )
         if not snapshot_complete:
           # ``is_connected`` only records the last native callback.  A failed
           # account/positions/orders/trades query after miniQMT restarts makes
           # that cached flag untrustworthy, so force the registry through its
           # bounded reconnect path before another snapshot can be authoritative.
-          agent.trading_manager.is_connected = False
+          if authority["snapshot_eligible"] is True:
+            agent.trading_manager.is_connected = False
           unavailable_accounts.append(account_id)
         else:
           agent.mark_report_received()
         account["account_id"] = account_id
         account["snapshot_is_complete"] = snapshot_complete
         accounts.append(account)
-        positions[account_id] = list(snapshot.get("positions") or [])
-        orders.extend(
-          {
-            "account_id": account_id,
-            **dict(order),
-          }
-          for order in snapshot.get("orders") or []
+        positions[account_id] = (
+          list(snapshot.get("positions") or []) if snapshot_complete else []
         )
-        trades.extend(
-          {
-            "account_id": account_id,
-            **dict(trade),
-          }
-          for trade in snapshot.get("trades") or []
-        )
+        if snapshot_complete:
+          orders.extend(
+            {
+              "account_id": account_id,
+              **dict(order),
+            }
+            for order in snapshot.get("orders") or []
+          )
+          trades.extend(
+            {
+              "account_id": account_id,
+              **dict(trade),
+            }
+            for trade in snapshot.get("trades") or []
+          )
       if expected_generation != self.trading_connection_generation():
         raise RuntimeError(
           "XTTrading connection generation changed while assembling full snapshot"
@@ -1897,6 +2027,7 @@ class LiveBroker:
           "is_complete": not unavailable_accounts,
           "unavailable_accounts": unavailable_accounts,
           "section_completeness_by_account": section_completeness_by_account,
+          "snapshot_authority_by_account": snapshot_authority_by_account,
           "mode": "live",
         },
         expected_generation,

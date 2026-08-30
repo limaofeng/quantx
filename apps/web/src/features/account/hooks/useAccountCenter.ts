@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react';
 import { useQuery } from 'urql';
 
+import { resolvePortfolioSnapshotPresentation } from '@/features/portfolio/utils/snapshotPresentation';
 import { gql } from '@/generated/gql';
 
 export const AccountOverviewQuery = gql(`
@@ -11,6 +12,14 @@ export const AccountOverviewQuery = gql(`
     $includeSnapshots: Boolean!
   ) {
     portfolioOverview(accountId: $accountId) {
+      positionSnapshot {
+        sequence
+        reportedAt
+        receivedAt
+        positionCount
+        isComplete
+        lastError
+      }
       summary {
         accountId
         accountName
@@ -130,17 +139,25 @@ export function useAccountOverview(
     reexecute({ requestPolicy: 'network-only' });
   }, [reexecute]);
 
-  return useMemo(
-    () => ({
-      summary: result.data?.portfolioOverview.summary,
-      positions: result.data?.portfolioOverview.positions ?? [],
+  return useMemo(() => {
+    const portfolioOverview = result.data?.portfolioOverview;
+    const positions = portfolioOverview?.positions ?? [];
+    return {
+      summary: portfolioOverview?.summary,
+      positions,
+      positionSnapshot: portfolioOverview?.positionSnapshot,
+      snapshotPresentation: resolvePortfolioSnapshotPresentation({
+        snapshot: portfolioOverview?.positionSnapshot,
+        renderedPositionCount: positions.length,
+        hasOverview: Boolean(portfolioOverview),
+        queryError: result.error?.message,
+      }),
       snapshots: result.data?.dailyAssetSnapshots ?? [],
       loading: result.fetching,
       error: result.error,
       refresh,
-    }),
-    [result.data, result.fetching, result.error, refresh]
-  );
+    };
+  }, [result.data, result.fetching, result.error, refresh]);
 }
 
 export function useClosedPositionCycles(

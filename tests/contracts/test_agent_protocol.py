@@ -225,8 +225,83 @@ def test_complete_snapshot_requires_durable_identity() -> None:
         "trades": True,
       }
     },
+    snapshot_authority_by_account={
+      "account-1": {
+        "initial_status": 0,
+        "final_status": 0,
+        "stable": True,
+        "snapshot_eligible": True,
+        "status_name": "OK",
+        "reason_code": "XTTRADING_ACCOUNT_STATUS_AUTHORITATIVE",
+      }
+    },
   )
   assert snapshot.snapshot_hash == "a" * 64
+
+
+def test_complete_snapshot_rejects_failed_account_status() -> None:
+  with pytest.raises(
+    ValidationError,
+    match="authoritative account status",
+  ):
+    AccountSnapshotPayload(
+      account_id="account-1",
+      snapshot_id="snapshot-1",
+      snapshot_hash="a" * 64,
+      is_complete=True,
+      accounts=[{"account_id": "account-1", "total_asset": 0}],
+      positions_by_account={"account-1": []},
+      section_completeness_by_account={
+        "account-1": {
+          "account": True,
+          "positions": True,
+          "orders": True,
+          "trades": True,
+        }
+      },
+      snapshot_authority_by_account={
+        "account-1": {
+          "initial_status": 3,
+          "final_status": 3,
+          "stable": True,
+          "snapshot_eligible": False,
+          "status_name": "FAIL",
+          "reason_code": "XTTRADING_ACCOUNT_STATUS_NOT_SNAPSHOT_ELIGIBLE",
+        }
+      },
+    )
+
+
+def test_complete_snapshot_accepts_closed_empty_account() -> None:
+  snapshot = AccountSnapshotPayload(
+    account_id="account-1",
+    snapshot_id="snapshot-closed",
+    snapshot_hash="b" * 64,
+    is_complete=True,
+    accounts=[{"account_id": "account-1", "total_asset": 0}],
+    positions_by_account={"account-1": []},
+    section_completeness_by_account={
+      "account-1": {
+        "account": True,
+        "positions": True,
+        "orders": True,
+        "trades": True,
+      }
+    },
+    snapshot_authority_by_account={
+      "account-1": {
+        "initial_status": 6,
+        "final_status": 6,
+        "stable": True,
+        "snapshot_eligible": True,
+        "status_name": "CLOSED",
+        "reason_code": "XTTRADING_ACCOUNT_STATUS_AUTHORITATIVE",
+      }
+    },
+  )
+
+  assert snapshot.is_complete is True
+  assert snapshot.positions_by_account == {"account-1": []}
 
 
 def test_complete_snapshot_requires_explicit_section_completeness() -> None:

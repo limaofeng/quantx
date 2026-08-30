@@ -17,6 +17,7 @@ from quantx_contracts import (
   TERMINAL_ORDER_STATUSES,
   can_transition_order_status,
   normalize_order_status,
+  snapshot_account_authority_is_authoritative,
 )
 from quantx_domain.brokers.base import (
   OrderRequest,
@@ -259,6 +260,15 @@ def _report_account_ids(payload: dict[str, Any]) -> set[str]:
       )
     for account_id in section_completeness:
       add(account_id)
+  snapshot_authority = payload.get("snapshot_authority_by_account")
+  if isinstance(snapshot_authority, dict):
+    if len(snapshot_authority) > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
+      raise RetryableReportError(
+        "Agent snapshot authority account scope exceeds limit: "
+        f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+      )
+    for account_id in snapshot_authority:
+      add(account_id)
   unavailable_accounts = payload.get("unavailable_accounts") or []
   try:
     unavailable_count = len(unavailable_accounts)
@@ -487,12 +497,14 @@ def _complete_snapshot_account_ids(
 
   unavailable_accounts = payload.get("unavailable_accounts")
   section_completeness = payload.get("section_completeness_by_account")
+  snapshot_authority = payload.get("snapshot_authority_by_account")
   accounts = payload.get("accounts")
   positions_by_account = payload.get("positions_by_account")
   if (
     not isinstance(unavailable_accounts, list)
     or unavailable_accounts
     or not isinstance(section_completeness, dict)
+    or not isinstance(snapshot_authority, dict)
     or not isinstance(accounts, list)
     or not isinstance(positions_by_account, dict)
   ):
@@ -501,6 +513,7 @@ def _complete_snapshot_account_ids(
     ("accounts", accounts),
     ("positions_by_account", positions_by_account),
     ("section_completeness_by_account", section_completeness),
+    ("snapshot_authority_by_account", snapshot_authority),
     ("unavailable_accounts", unavailable_accounts),
   )
   for section_name, values in scoped_values:
@@ -524,12 +537,18 @@ def _complete_snapshot_account_ids(
     for account_id in section_completeness
     if str(account_id).strip()
   }
+  authority_account_ids = {
+    str(account_id).strip()
+    for account_id in snapshot_authority
+    if str(account_id).strip()
+  }
   covered_accounts = _report_account_ids(payload)
   if (
     not covered_accounts
     or account_record_ids != covered_accounts
     or position_account_ids != covered_accounts
     or section_account_ids != covered_accounts
+    or authority_account_ids != covered_accounts
   ):
     return None
   for account_id in covered_accounts:
@@ -538,7 +557,26 @@ def _complete_snapshot_account_ids(
       sections.get(section) is True for section in _REQUIRED_SNAPSHOT_SECTIONS
     ):
       return None
+    if not snapshot_account_authority_is_authoritative(
+      snapshot_authority.get(account_id)
+    ):
+      return None
   return covered_accounts
+
+
+def _snapshot_authority_failure_reason(payload: dict[str, Any]) -> str:
+  values = payload.get("snapshot_authority_by_account")
+  if not isinstance(values, dict) or not values:
+    return "ACCOUNT_STATUS_AUTHORITY_MISSING"
+  reasons = sorted(
+    {
+      str(value.get("reason_code") or "ACCOUNT_STATUS_AUTHORITY_INVALID")
+      for value in values.values()
+      if isinstance(value, dict)
+      and not snapshot_account_authority_is_authoritative(value)
+    }
+  )
+  return ",".join(reasons) or "ACCOUNT_STATUS_AUTHORITY_VALID"
 
 
 def _snapshot_section_is_complete(
@@ -1504,6 +1542,7 @@ async def _process_delta_report_inner(
   full_snapshot_attempt = bool(
     declared_complete
     or "section_completeness_by_account" in payload
+    or "snapshot_authority_by_account" in payload
     or "unavailable_accounts" in payload
   )
   complete_account_ids = (
@@ -1627,8 +1666,16 @@ async def _process_delta_report_inner(
         else "SNAPSHOT_IDENTITY_MISSING"
       )
     else:
-      failure_kind = "SNAPSHOT_SECTION_INCOMPLETE"
-      failure_reason = "SECTION_PROOF_MISSING_OR_INCOMPLETE"
+      authority_reason = _snapshot_authority_failure_reason(payload)
+      if authority_reason not in {
+        "ACCOUNT_STATUS_AUTHORITY_MISSING",
+        "ACCOUNT_STATUS_AUTHORITY_VALID",
+      }:
+        failure_kind = "SNAPSHOT_ACCOUNT_STATUS_INVALID"
+        failure_reason = authority_reason
+      else:
+        failure_kind = "SNAPSHOT_SECTION_INCOMPLETE"
+        failure_reason = "SECTION_PROOF_MISSING_OR_INCOMPLETE"
     # Close the durable trading gate before processing any partial section.
     # A concurrent order enqueue must never observe the prior READY rollout.
     await _fail_closed_incomplete_snapshot(
@@ -1638,8 +1685,15 @@ async def _process_delta_report_inner(
       failure_kind=failure_kind,
       failure_reason=failure_reason,
     )
-  if snapshot_identity_error:
-    raise ValueError(snapshot_identity_error)
+    if snapshot_identity_error:
+      raise ValueError(snapshot_identity_error)
+    if declared_complete:
+      raise ValueError(
+        "完整账户快照缺少可接受的账户状态与分区权威证明"
+      )
+    # Expected unavailable/incomplete observations are durable failure
+    # metadata, not partial account facts.  ACK them after closing the gate.
+    return
 
   if authoritative:
     begin_full_snapshot_attempt = getattr(
@@ -4387,6 +4441,7 @@ async def _supersede_obsolete_pending_full_snapshots(
     oldest.message_type != "delta_report"
     or str(oldest.protocol_version or "") != "1.1"
     or payload.get("is_complete") is not True
+    or _authoritative_snapshot_identity(oldest) is None
   ):
     return 0
 
@@ -4520,6 +4575,7 @@ async def _supersede_prior_complete_snapshot_failures(
     report.message_type != "delta_report"
     or str(report.protocol_version or "") != "1.1"
     or not bool(payload.get("is_complete"))
+    or _authoritative_snapshot_identity(report) is None
     or not current_accounts
   ):
     return 0

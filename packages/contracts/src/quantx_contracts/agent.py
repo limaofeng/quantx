@@ -4,13 +4,104 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Type
+from typing import Any, Dict, List, Literal, Mapping, Optional, Type
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PROTOCOL_VERSION = "1.1"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset({"1.0", PROTOCOL_VERSION})
+
+
+class QmtAccountStatus(int, Enum):
+  """Stable XTTrading account-status values used by snapshot authority proof."""
+
+  INVALID = -1
+  OK = 0
+  WAITING_LOGIN = 1
+  LOGGING_IN = 2
+  FAIL = 3
+  INITIALIZING = 4
+  CORRECTING = 5
+  CLOSED = 6
+  ASSIST_FAIL = 7
+  DISABLE_BY_SYS = 8
+  DISABLE_BY_USER = 9
+
+
+QMT_SNAPSHOT_ELIGIBLE_ACCOUNT_STATUSES = frozenset(
+  {QmtAccountStatus.OK.value, QmtAccountStatus.CLOSED.value}
+)
+
+
+def qmt_account_status_name(value: Any) -> str:
+  """Return a deterministic diagnostic name for an XTTrading account status."""
+
+  try:
+    return QmtAccountStatus(int(value)).name
+  except (TypeError, ValueError):
+    return "UNKNOWN"
+
+
+def qmt_account_status_is_snapshot_eligible(value: Any) -> bool:
+  """Only OK and the legal read-only CLOSED state can assert broker truth."""
+
+  try:
+    return int(value) in QMT_SNAPSHOT_ELIGIBLE_ACCOUNT_STATUSES
+  except (TypeError, ValueError):
+    return False
+
+
+class AccountSnapshotAuthority(BaseModel):
+  """Fresh account-status evidence bounding one full snapshot capture."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  initial_status: Optional[int] = None
+  final_status: Optional[int] = None
+  stable: bool = False
+  snapshot_eligible: bool = False
+  status_name: str = "UNKNOWN"
+  reason_code: str = Field(min_length=1)
+
+  @model_validator(mode="after")
+  def require_consistent_authority_claim(self):
+    expected_name = qmt_account_status_name(self.final_status)
+    if self.status_name != expected_name:
+      raise ValueError("snapshot authority status name is inconsistent")
+    if self.stable and (
+      self.initial_status is None
+      or self.final_status is None
+      or self.initial_status != self.final_status
+    ):
+      raise ValueError("stable snapshot authority requires identical statuses")
+    if self.snapshot_eligible and (
+      not self.stable
+      or self.initial_status != self.final_status
+      or not qmt_account_status_is_snapshot_eligible(self.final_status)
+    ):
+      raise ValueError("snapshot authority is not eligible")
+    return self
+
+
+def snapshot_account_authority_is_authoritative(value: Any) -> bool:
+  """Validate raw status evidence before accepting a complete snapshot."""
+
+  if isinstance(value, AccountSnapshotAuthority):
+    authority = value
+  elif isinstance(value, Mapping):
+    try:
+      authority = AccountSnapshotAuthority.model_validate(dict(value))
+    except (TypeError, ValueError):
+      return False
+  else:
+    return False
+  return bool(
+    authority.stable
+    and authority.snapshot_eligible
+    and authority.initial_status == authority.final_status
+    and qmt_account_status_is_snapshot_eligible(authority.final_status)
+  )
 HISTORICAL_TICK_ORDINAL_FIELD = "tick_ordinal"
 HISTORICAL_TICK_SOURCE_TIME_FIELD = "source_time_ms"
 HISTORICAL_TICK_ORDINALS_PER_MILLISECOND = 1000
@@ -431,6 +522,9 @@ class AccountSnapshotPayload(BaseModel):
   section_completeness_by_account: Dict[str, Dict[str, bool]] = Field(
     default_factory=dict
   )
+  snapshot_authority_by_account: Dict[str, AccountSnapshotAuthority] = Field(
+    default_factory=dict
+  )
   unavailable_accounts: List[str] = Field(default_factory=list)
   order_errors: List[Dict[str, Any]] = Field(default_factory=list)
   cancel_errors: List[Dict[str, Any]] = Field(default_factory=list)
@@ -468,6 +562,10 @@ class AccountSnapshotPayload(BaseModel):
           str(account_id).strip()
           for account_id in self.section_completeness_by_account
         ),
+        *(
+          str(account_id).strip()
+          for account_id in self.snapshot_authority_by_account
+        ),
       }
       covered_accounts.discard("")
       if not covered_accounts:
@@ -487,10 +585,16 @@ class AccountSnapshotPayload(BaseModel):
         for account_id in self.section_completeness_by_account
         if str(account_id).strip()
       }
+      authority_account_ids = {
+        str(account_id).strip()
+        for account_id in self.snapshot_authority_by_account
+        if str(account_id).strip()
+      }
       if (
         account_record_ids != covered_accounts
         or position_account_ids != covered_accounts
         or section_account_ids != covered_accounts
+        or authority_account_ids != covered_accounts
       ):
         raise ValueError("complete snapshot requires every account section")
       required_sections = ("account", "positions", "orders", "trades")
@@ -503,6 +607,13 @@ class AccountSnapshotPayload(BaseModel):
         for account_id in covered_accounts
       ):
         raise ValueError("complete snapshot contains an incomplete account section")
+      if any(
+        not snapshot_account_authority_is_authoritative(
+          self.snapshot_authority_by_account[account_id]
+        )
+        for account_id in covered_accounts
+      ):
+        raise ValueError("complete snapshot lacks authoritative account status")
     return self
 
 

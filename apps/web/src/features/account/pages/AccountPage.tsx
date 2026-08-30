@@ -1,6 +1,7 @@
 import {
   ArrowDownToLine,
   ArrowUpRight,
+  AlertTriangle,
   BarChart3,
   BriefcaseBusiness,
   ChevronLeft,
@@ -266,9 +267,16 @@ export function AccountPage() {
           ? `同交易日资产快照 · ${formatDateTime(result.snapshotAt)}`
           : result.total > 0
             ? `实时行情覆盖 0/${result.total}，且无同日资产快照`
-            : '当前无持仓；未生成当日资产快照';
+            : overview.snapshotPresentation.isAuthoritativeEmpty
+              ? '完整券商快照已确认当前空仓'
+              : '当前无法确认持仓；未生成当日资产快照';
     return { ...result, detail };
-  }, [overview.positions, overview.snapshots, today]);
+  }, [
+    overview.positions,
+    overview.snapshots,
+    overview.snapshotPresentation.isAuthoritativeEmpty,
+    today,
+  ]);
 
   const pnlStats = useMemo(() => {
     const values = overview.snapshots.filter(
@@ -487,14 +495,18 @@ export function AccountPage() {
 
   const loading = accountLoading || overview.loading;
   const error = accountError || overview.error;
-  if (!loading && !account) {
+  if (
+    !loading &&
+    (!account || overview.snapshotPresentation.state === 'NO_CACHE')
+  ) {
     return (
       <StudioPageFrame className="text-slate-200">
         <EmptyState
-          title="当前未连接资金账户"
+          title="没有可展示的账户快照"
           detail={
+            overview.snapshotPresentation.message ||
             error?.message ||
-            '账户概览不会使用默认账号或模拟资产。请先连接 miniQMT 并完成一次账户同步。'
+            '请先连接 miniQMT 并完成一次成功的账户同步。'
           }
         />
       </StudioPageFrame>
@@ -508,6 +520,14 @@ export function AccountPage() {
     .filter(order => CANCELABLE_STATUSES.has(String(order.status)))
     .slice(0, 5);
   const recentTrades = todayTrades.trades.slice(0, 5);
+  const snapshotCurrent =
+    overview.snapshotPresentation.state === 'CURRENT' && !accountError;
+  const snapshotMessage = accountError
+    ? `账户查询失败，页面仅保留最近读取到的数据：${accountError.message}`
+    : overview.snapshotPresentation.message;
+  const lastSuccessfulSync = overview.snapshotPresentation.lastSuccessfulSyncAt
+    ? formatDateTime(overview.snapshotPresentation.lastSuccessfulSyncAt)
+    : '--';
 
   return (
     <StudioPageFrame className="text-slate-100">
@@ -519,8 +539,17 @@ export function AccountPage() {
               <h1 className="truncate text-ui-label font-black uppercase tracking-[0.18em] text-slate-100">
                 账户概览
               </h1>
-              <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-ui-caption text-emerald-300">
-                miniQMT · 单账户
+              <span
+                className={cn(
+                  'rounded-full border px-2 py-0.5 text-ui-caption',
+                  snapshotCurrent
+                    ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
+                    : 'border-amber-500/20 bg-amber-500/10 text-amber-200'
+                )}
+              >
+                {snapshotCurrent
+                  ? 'miniQMT · 已同步'
+                  : 'miniQMT · 当前不可交易'}
               </span>
             </div>
             <p className="mt-1 truncate text-ui-caption font-medium text-slate-500">
@@ -547,12 +576,25 @@ export function AccountPage() {
               size="sm"
               className="h-control-compact border-white/[0.08] bg-white/[0.025] text-ui-label hover:border-white/20 hover:bg-white/[0.05]"
               onClick={exportCurrentView}
+              disabled={!snapshotCurrent}
             >
               <Download className="mr-2 h-4 w-4" />
               导出 CSV
             </Button>
           </div>
         </header>
+        {!snapshotCurrent && (
+          <div className="flex items-start gap-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-ui-section py-3 text-ui-label text-amber-100">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <p className="font-black">实时账户同步不可用，当前不可交易</p>
+              <p className="mt-1 text-amber-200/80">{snapshotMessage}</p>
+              <p className="mt-1 text-ui-caption text-slate-500">
+                最近成功同步：{lastSuccessfulSync}
+              </p>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label="总资产"
@@ -656,7 +698,10 @@ export function AccountPage() {
                   <button
                     key={String(label)}
                     type="button"
-                    onClick={() => setLocation(String(href))}
+                    onClick={() => {
+                      if (snapshotCurrent) setLocation(String(href));
+                    }}
+                    disabled={!snapshotCurrent}
                     className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.025] text-ui-label text-slate-300 transition-colors duration-200 hover:border-blue-500/40 hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   >
                     <Icon className="h-5 w-5 text-blue-300" />
@@ -825,10 +870,15 @@ export function AccountPage() {
                     </tbody>
                   </table>
                 </div>
-              ) : (
+              ) : overview.snapshotPresentation.isAuthoritativeEmpty ? (
                 <EmptyState
                   title="当前无持仓"
-                  detail="该账户的真实持仓快照为空。"
+                  detail="已接受的完整券商快照明确报告 positionCount=0。"
+                />
+              ) : (
+                <EmptyState
+                  title="当前无法确认持仓是否为空"
+                  detail="等待下一次成功同步；异常或请求失败返回的空列表不会被显示为真实空仓。"
                 />
               )}
             </section>

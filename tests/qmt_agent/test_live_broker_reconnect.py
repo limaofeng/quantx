@@ -7,7 +7,10 @@ from quantx_qmt_agent import clock
 from quantx_qmt_agent.broker import LiveBroker, _LiveReportSink
 from quantx_qmt_agent.miniqmt.local_agent import MiniQmtLocalAgent
 from quantx_qmt_agent.miniqmt.manager_registry import XTTradingManagerRegistry
-from quantx_qmt_agent.miniqmt.trading.trading_manager import XTTradingManager
+from quantx_qmt_agent.miniqmt.trading.trading_manager import (
+  MiniQMTTraderCallback,
+  XTTradingManager,
+)
 
 
 class FakeAgent:
@@ -284,7 +287,8 @@ def test_disconnected_live_snapshot_is_never_complete():
 
   assert snapshot["is_complete"] is False
   assert snapshot["unavailable_accounts"] == ["account-1"]
-  assert snapshot["positions_by_account"] == {"account-1": []}
+  assert snapshot["accounts"] == []
+  assert snapshot["positions_by_account"] == {}
 
 
 def test_trade_query_failure_marks_live_snapshot_sections_incomplete():
@@ -400,3 +404,175 @@ def test_native_position_query_failure_cannot_become_authoritative_empty():
   assert snapshot["section_completeness"]["positions"] is False
   assert snapshot["is_complete"] is False
   assert agent.preflight_check()["ok"] is False
+
+
+def _live_snapshot_broker(manager) -> LiveBroker:
+  broker = object.__new__(LiveBroker)
+  broker.agents = {"account-1": MiniQmtLocalAgent(manager)}
+  broker._trading_access_lock = threading.RLock()
+  broker._trading_generation_lock = threading.Lock()
+  broker._trading_connection_generation = 0
+  broker._trading_mutation_generation = 0
+  broker._trading_reconciled_generation = 0
+  return broker
+
+
+def test_failed_account_status_cannot_authorize_zero_empty_snapshot():
+  queries: list[str] = []
+
+  class Manager:
+    is_connected = True
+
+    @staticmethod
+    def query_account_status() -> int:
+      return 3
+
+    @staticmethod
+    def get_account_info():
+      queries.append("account")
+      return {
+        "total_asset": 0,
+        "cash": 0,
+        "market_value": 0,
+        "frozen_cash": 0,
+      }
+
+    @staticmethod
+    def get_positions():
+      queries.append("positions")
+      return []
+
+    @staticmethod
+    def get_orders(_cancelable_only=False):
+      queries.append("orders")
+      return []
+
+    @staticmethod
+    def get_trades():
+      queries.append("trades")
+      return []
+
+  manager = Manager()
+  snapshot = _live_snapshot_broker(manager).full_snapshot()
+
+  assert snapshot["is_complete"] is False
+  assert snapshot["unavailable_accounts"] == ["account-1"]
+  assert snapshot["accounts"] == []
+  assert snapshot["positions_by_account"] == {}
+  assert snapshot["orders"] == []
+  assert snapshot["trades"] == []
+  assert snapshot["snapshot_authority_by_account"]["account-1"] == {
+    "initial_status": 3,
+    "final_status": 3,
+    "stable": True,
+    "snapshot_eligible": False,
+    "status_name": "FAIL",
+    "reason_code": "XTTRADING_ACCOUNT_STATUS_NOT_SNAPSHOT_ELIGIBLE",
+  }
+  assert manager.is_connected is True
+  assert queries == []
+
+
+def test_closed_account_status_can_authorize_true_empty_snapshot():
+  class Manager:
+    is_connected = True
+
+    @staticmethod
+    def query_account_status() -> int:
+      return 6
+
+    @staticmethod
+    def get_account_info():
+      return {
+        "total_asset": 0,
+        "cash": 0,
+        "market_value": 0,
+        "frozen_cash": 0,
+      }
+
+    @staticmethod
+    def get_positions():
+      return []
+
+    @staticmethod
+    def get_orders(_cancelable_only=False):
+      return []
+
+    @staticmethod
+    def get_trades():
+      return []
+
+  snapshot = _live_snapshot_broker(Manager()).full_snapshot()
+
+  assert snapshot["is_complete"] is True
+  assert snapshot["unavailable_accounts"] == []
+  assert snapshot["positions_by_account"] == {"account-1": []}
+  assert snapshot["snapshot_authority_by_account"]["account-1"][
+    "status_name"
+  ] == "CLOSED"
+
+
+def test_account_status_change_during_capture_invalidates_snapshot():
+  statuses = iter([0, 0, 3, 3, 3, 3])
+
+  class Manager:
+    is_connected = True
+
+    @staticmethod
+    def query_account_status() -> int:
+      return next(statuses)
+
+    @staticmethod
+    def get_account_info():
+      return {"total_asset": 100_000, "cash": 100_000}
+
+    @staticmethod
+    def get_positions():
+      return []
+
+    @staticmethod
+    def get_orders(_cancelable_only=False):
+      return []
+
+    @staticmethod
+    def get_trades():
+      return []
+
+  manager = Manager()
+  snapshot = _live_snapshot_broker(manager).full_snapshot()
+
+  authority = snapshot["snapshot_authority_by_account"]["account-1"]
+  assert snapshot["is_complete"] is False
+  assert authority["initial_status"] == 0
+  assert authority["final_status"] == 3
+  assert authority["stable"] is False
+  assert authority["reason_code"] == (
+    "XTTRADING_ACCOUNT_STATUS_CHANGED_DURING_SNAPSHOT"
+  )
+  assert manager.is_connected is True
+
+
+def test_account_status_callback_advances_snapshot_commit_fence():
+  observed: list[str] = []
+
+  async def handle_account_status_event(_status) -> None:
+    return None
+
+  generic_observed: list[str] = []
+  manager = SimpleNamespace(
+    trading_service=SimpleNamespace(
+      mark_status_observed=lambda: observed.append("status"),
+      mark_callback_observed=lambda: generic_observed.append("generic"),
+    ),
+    handle_account_status_event=handle_account_status_event,
+  )
+  callback = MiniQMTTraderCallback(manager)
+
+  def close_coroutine(coroutine) -> None:
+    coroutine.close()
+
+  callback._submit_async_task = close_coroutine
+  callback.on_account_status(SimpleNamespace(status=3))
+
+  assert observed == ["status"]
+  assert generic_observed == []

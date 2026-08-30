@@ -75,6 +75,16 @@ def _snapshot_report(
     "source_event_at": snapshot_at.isoformat(),
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": {
+      "account-1": {
+        "initial_status": 0,
+        "final_status": 0,
+        "stable": True,
+        "snapshot_eligible": True,
+        "status_name": "OK",
+        "reason_code": "XTTRADING_ACCOUNT_STATUS_AUTHORITATIVE",
+      }
+    },
     "section_completeness_by_account": {
       "account-1": {
         "account": True,

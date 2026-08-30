@@ -35,6 +35,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
+def _snapshot_authority(
+  account_ids=("account-1",),
+) -> dict[str, dict[str, object]]:
+  return {
+    account_id: {
+      "initial_status": 0,
+      "final_status": 0,
+      "stable": True,
+      "snapshot_eligible": True,
+      "status_name": "OK",
+      "reason_code": "XTTRADING_ACCOUNT_STATUS_AUTHORITATIVE",
+    }
+    for account_id in account_ids
+  }
+
+
 @pytest.mark.parametrize(
   ("report", "expected"),
   [
@@ -618,6 +634,7 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
     "source_event_at": utcnow().isoformat(),
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -1059,6 +1076,7 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
     "source_event_at": now.isoformat(),
     "accounts": [{"account_id": "account-1", "cash": 0}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -1229,6 +1247,7 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
     "unavailable_accounts": [],
   }
   if include_completeness:
+    payload["snapshot_authority_by_account"] = _snapshot_authority()
     payload["section_completeness_by_account"] = {
       "account-1": {
         "account": True,
@@ -1257,13 +1276,14 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
         protocol_version="1.1",
       )
   else:
-    await report_processor._process_delta_report(
-      "device-1",
-      payload,
-      protocol_version="1.1",
-    )
+    with pytest.raises(ValueError, match="权威证明"):
+      await report_processor._process_delta_report(
+        "device-1",
+        payload,
+        protocol_version="1.1",
+      )
 
-  assert observed_gate_statuses == ([] if corrupt_hash else ["RECONCILE_REQUIRED"])
+  assert observed_gate_statuses == []
   position_service.prepare_full_snapshot.assert_not_awaited()
   position_service.finalize_full_snapshot.assert_not_awaited()
   position_service.apply_position_delta.assert_not_awaited()
@@ -1369,6 +1389,7 @@ async def test_authoritative_snapshot_account_mismatch_fails_closed_once(
     "source_event_at": now.isoformat(),
     "accounts": [{"account_id": "account-1", "cash": 0}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -1494,22 +1515,36 @@ async def test_new_authoritative_snapshot_supersedes_old_snapshot_dead_letter(
         capabilities=["live"],
       )
     )
-    common_payload = {
-      "accounts": [{"account_id": "account-1"}],
-      "positions_by_account": {"account-1": []},
-      "section_completeness_by_account": {
-        "account-1": {
-          "account": True,
-          "positions": True,
-          "orders": True,
-          "trades": True,
-        }
-      },
-      "unavailable_accounts": [],
-      "orders": [],
-      "trades": [],
-      "is_complete": True,
-    }
+    def full_payload(snapshot_id: str, sequence: int) -> dict:
+      value = {
+        "snapshot_id": snapshot_id,
+        "source_sequence": sequence,
+        "source_event_at": now.isoformat(),
+        "accounts": [{"account_id": "account-1"}],
+        "positions_by_account": {"account-1": []},
+        "snapshot_authority_by_account": _snapshot_authority(),
+        "section_completeness_by_account": {
+          "account-1": {
+            "account": True,
+            "positions": True,
+            "orders": True,
+            "trades": True,
+          }
+        },
+        "unavailable_accounts": [],
+        "orders": [],
+        "trades": [],
+        "is_complete": True,
+      }
+      value["snapshot_hash"] = sha256(
+        json.dumps(
+          value,
+          sort_keys=True,
+          separators=(",", ":"),
+          default=str,
+        ).encode("utf-8")
+      ).hexdigest()
+      return value
     db.add(
       AgentReportInbox(
         message_id=old_id,
@@ -1518,7 +1553,7 @@ async def test_new_authoritative_snapshot_supersedes_old_snapshot_dead_letter(
         protocol_version="1.1",
         raw_payload_hash="a" * 64,
         business_idempotency_key="old-snapshot",
-        payload=common_payload,
+        payload=full_payload("snapshot-old", 1),
         received_at=now - timedelta(minutes=1),
         processing_status="FAILED",
         processing_attempts=10,
@@ -1533,7 +1568,7 @@ async def test_new_authoritative_snapshot_supersedes_old_snapshot_dead_letter(
         protocol_version="1.1",
         raw_payload_hash="b" * 64,
         business_idempotency_key="current-snapshot",
-        payload=common_payload,
+        payload=full_payload("snapshot-current", 2),
         received_at=now,
         processing_status="PROCESSING",
         processing_attempts=1,
@@ -1604,6 +1639,7 @@ async def test_claim_coalesces_old_full_snapshots_without_skipping_deltas(
       "source_event_at": now.isoformat(),
       "accounts": [{"account_id": "account-1"}],
       "positions_by_account": {"account-1": []},
+      "snapshot_authority_by_account": _snapshot_authority(),
       "section_completeness_by_account": {
         "account-1": {
           "account": True,

@@ -7,12 +7,14 @@ interface HoldingsListProps {
   holdings: Position[];
   enableRealTime?: boolean;
   onLiquidate: (stockCode: string) => Promise<unknown>;
+  tradingDisabled?: boolean;
 }
 
 export function HoldingsList({
   holdings,
   enableRealTime = true,
   onLiquidate,
+  tradingDisabled = false,
 }: HoldingsListProps) {
   // 使用实时持仓 Hook
   const { holdings: realtimeHoldings, isConnected } = useRealTimeHoldings({
@@ -36,6 +38,7 @@ export function HoldingsList({
           key={holding.id}
           holding={holding}
           onLiquidate={onLiquidate}
+          tradingDisabled={tradingDisabled}
         />
       ))}
     </div>

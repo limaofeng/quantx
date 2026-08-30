@@ -10,6 +10,22 @@ from quantx_engine import report_processor
 from quantx_engine.t_trade_coordination import t_trade_account_coordination_lock
 
 
+def _snapshot_authority(
+  account_ids=("account-1",),
+) -> dict[str, dict[str, object]]:
+  return {
+    account_id: {
+      "initial_status": 0,
+      "final_status": 0,
+      "stable": True,
+      "snapshot_eligible": True,
+      "status_name": "OK",
+      "reason_code": "XTTRADING_ACCOUNT_STATUS_AUTHORITATIVE",
+    }
+    for account_id in account_ids
+  }
+
+
 @pytest.mark.asyncio
 async def test_partial_delta_uses_position_delta_without_full_snapshot(
   monkeypatch: pytest.MonkeyPatch,
@@ -151,6 +167,7 @@ async def test_complete_delta_still_applies_authoritative_snapshot(
     "accounts": [{"account_id": "account-1"}],
     "orders": [],
     "trades": [],
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -183,6 +200,127 @@ async def test_complete_delta_still_applies_authoritative_snapshot(
   assert calls.full[0]["account_id"] == "account-1"
   assert "complete" not in calls.full[0]
   rederive.assert_awaited_once_with("account-1", instrument_codes=None)
+
+
+@pytest.mark.asyncio
+async def test_failed_status_incomplete_snapshot_never_mutates_account_facts(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  fail_closed = AsyncMock()
+  upsert_account = AsyncMock()
+  process_order = AsyncMock()
+  process_trade = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "_fail_closed_incomplete_snapshot",
+    fail_closed,
+  )
+  monkeypatch.setattr(report_processor, "_upsert_account", upsert_account)
+  monkeypatch.setattr(report_processor, "_process_order_report", process_order)
+  monkeypatch.setattr(
+    report_processor,
+    "_process_execution_report",
+    process_trade,
+  )
+  begin_snapshot = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "PositionService",
+    lambda: SimpleNamespace(begin_full_snapshot_attempt=begin_snapshot),
+  )
+
+  await report_processor._process_delta_report_inner(
+    "device-1",
+    {
+      "source_event_at": datetime.now(timezone.utc).isoformat(),
+      "is_complete": False,
+      "accounts": [
+        {
+          "account_id": "account-1",
+          "total_asset": 0,
+          "cash": 0,
+          "market_value": 0,
+        }
+      ],
+      "positions_by_account": {"account-1": []},
+      "orders": [],
+      "trades": [],
+      "unavailable_accounts": ["account-1"],
+      "section_completeness_by_account": {
+        "account-1": {
+          "account": False,
+          "positions": False,
+          "orders": False,
+          "trades": False,
+        }
+      },
+      "snapshot_authority_by_account": {
+        "account-1": {
+          "initial_status": 3,
+          "final_status": 3,
+          "stable": True,
+          "snapshot_eligible": False,
+          "status_name": "FAIL",
+          "reason_code": "XTTRADING_ACCOUNT_STATUS_NOT_SNAPSHOT_ELIGIBLE",
+        }
+      },
+    },
+    protocol_version="1.1",
+  )
+
+  fail_closed.assert_awaited_once()
+  assert fail_closed.await_args.kwargs["failure_kind"] == (
+    "SNAPSHOT_ACCOUNT_STATUS_INVALID"
+  )
+  upsert_account.assert_not_awaited()
+  process_order.assert_not_awaited()
+  process_trade.assert_not_awaited()
+  begin_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_partition_keeps_valid_status_diagnostic_distinct(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  fail_closed = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "_fail_closed_incomplete_snapshot",
+    fail_closed,
+  )
+  monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
+
+  await report_processor._process_delta_report_inner(
+    "device-1",
+    {
+      "source_event_at": datetime.now(timezone.utc).isoformat(),
+      "is_complete": False,
+      "accounts": [{"account_id": "account-1"}],
+      "positions_by_account": {"account-1": []},
+      "orders": [],
+      "trades": [],
+      "unavailable_accounts": ["account-1"],
+      "section_completeness_by_account": {
+        "account-1": {
+          "account": True,
+          "positions": False,
+          "orders": True,
+          "trades": True,
+        }
+      },
+      "snapshot_authority_by_account": _snapshot_authority(),
+    },
+    protocol_version="1.1",
+  )
+
+  fail_closed.assert_awaited_once()
+  assert fail_closed.await_args.kwargs["failure_kind"] == (
+    "SNAPSHOT_SECTION_INCOMPLETE"
+  )
+  assert fail_closed.await_args.kwargs["failure_reason"] == (
+    "SECTION_PROOF_MISSING_OR_INCOMPLETE"
+  )
+  report_processor._upsert_account.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -467,6 +605,9 @@ async def test_oversized_full_scope_fails_closed_to_authenticated_device_scope(
     "unavailable_accounts": [],
     "accounts": [{"account_id": f"account-{index}"} for index in range(4097)],
     "positions_by_account": {f"account-{index}": [] for index in range(4097)},
+    "snapshot_authority_by_account": _snapshot_authority(
+      f"account-{index}" for index in range(4097)
+    ),
     "section_completeness_by_account": {
       f"account-{index}": {
         "account": True,
@@ -540,6 +681,7 @@ async def test_stale_full_duplicate_does_not_replay_business_sections(
       }
     ],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -623,6 +765,7 @@ async def test_stale_full_duplicate_does_not_stage_runtime_zero_fill_event() -> 
     "source_event_at": datetime.now(timezone.utc).isoformat(),
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -767,6 +910,7 @@ async def test_full_snapshot_keeps_monitor_out_until_final_rollout_projection(
     "source_event_at": datetime.now(timezone.utc).isoformat(),
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -897,6 +1041,7 @@ async def test_prepared_full_snapshot_same_sequence_can_resume_to_complete(
     "source_event_at": datetime.now(timezone.utc).isoformat(),
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -1135,6 +1280,7 @@ async def test_failed_newer_full_generation_blocks_intermediate_sequence(
       "source_event_at": datetime.now(timezone.utc).isoformat(),
       "accounts": [{"account_id": "account-1", "cash": "100"}],
       "positions_by_account": {"account-1": []},
+      "snapshot_authority_by_account": _snapshot_authority(),
       "section_completeness_by_account": {
         "account-1": {
           "account": True,
@@ -1253,6 +1399,7 @@ async def test_delta_incomplete_marker_rejects_same_sequence_old_full_snapshot(
     "source_event_at": datetime.now(timezone.utc).isoformat(),
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -1303,6 +1450,7 @@ async def test_invalid_authoritative_snapshot_time_still_fails_closed(
     "source_event_at": bad_time,
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,
@@ -1361,6 +1509,7 @@ async def test_invalid_authoritative_sequence_still_fails_closed(
     "source_event_at": datetime.now(timezone.utc).isoformat(),
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "snapshot_authority_by_account": _snapshot_authority(),
     "section_completeness_by_account": {
       "account-1": {
         "account": True,

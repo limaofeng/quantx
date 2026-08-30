@@ -78,6 +78,14 @@ XTTrading 原生 RPC 连接健康与账户交易状态必须分开判断。只�
 生成一次新对账快照。`ACCOUNT_STATUS_CLOSED` 代表休市但连接可用，仍允许 Agent
 维持只读账户快照、实时行情和历史数据服务。
 
+完整账户快照还必须携带逐账户 `snapshot_authority_by_account`。Agent 在每个原生
+查询分区前和最终组装时都重新调用 `query_account_status`，并把起止状态、稳定性、
+是否允许形成快照及诊断原因纳入快照哈希。只有全过程稳定为
+`ACCOUNT_STATUS_OK(0)` 或 `ACCOUNT_STATUS_CLOSED(6)` 才允许
+`is_complete=true`；`FAIL`、登录中、初始化中、未知状态及采集中状态变化都只能形成
+不完整观测，且不得把零资金或空列表作为账户事实发送。账户状态回调同时推进本地
+交易状态代际，阻止状态在最终组装后变化的快照提交。
+
 本机 QMT 健康以统一启动器的 `QMT_AGENT_LAUNCH_*`、本次进程启动边界和服务端写入
 的 heartbeat `updated_at` 为真源，TTL 为 90 秒。Agent 自报时间与服务端处理时间的
 差值只记录为 `heartbeatDelaySeconds/heartbeatDelayWarning` 诊断信息，不参与账户或

@@ -263,6 +263,46 @@ async def test_stale_or_incomplete_snapshot_never_clears_positions(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_snapshot_failure_preserves_positions_and_last_success_metadata(
+  monkeypatch,
+):
+  reported_at = datetime(2026, 7, 13, 10, 0)
+  received_at = datetime(2026, 7, 13, 10, 0, 5)
+  status = BrokerPositionSnapshot(
+    account_id="account-1",
+    sequence=20,
+    source="QMT_AGENT",
+    reported_at=reported_at,
+    received_at=received_at,
+    position_count=1,
+    is_complete=True,
+  )
+  position = Position.from_dict(
+    {"account_id": "account-1", "stock_code": "600000.SH", "volume": 100}
+  )
+  db = FakeDb([position], status)
+
+  async def fake_get_async_db():
+    yield db
+
+  monkeypatch.setattr(position_service_module, "get_async_db", fake_get_async_db)
+  await PositionService().mark_snapshot_failure(
+    "account-1",
+    "SNAPSHOT_ACCOUNT_STATUS_INVALID:ACCOUNT_STATUS_FAIL",
+  )
+
+  assert db.positions == [position]
+  assert db.deleted == []
+  assert db.status.sequence == 20
+  assert db.status.position_count == 1
+  assert db.status.reported_at == reported_at
+  assert db.status.received_at == received_at
+  assert db.status.is_complete is False
+  assert db.status.last_error.startswith("SNAPSHOT_ACCOUNT_STATUS_INVALID")
+  assert db.commits == 1
+
+
+@pytest.mark.asyncio
 async def test_position_delta_invalidates_complete_snapshot_atomically(monkeypatch):
   status = BrokerPositionSnapshot(
     account_id="account-1",

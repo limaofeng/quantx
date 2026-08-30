@@ -13,6 +13,7 @@ import type {
   Position,
   PortfolioSummaryData,
 } from '../types';
+import { resolvePortfolioSnapshotPresentation } from '../utils/snapshotPresentation';
 
 import {
   DailyAssetSnapshotsPageQuery,
@@ -86,6 +87,24 @@ export function useHoldings({
   const snapshotHoldings: Position[] = useMemo(
     () => overviewResult.data?.portfolioOverview.positions ?? [],
     [overviewResult.data?.portfolioOverview.positions]
+  );
+  const positionSnapshot =
+    overviewResult.data?.portfolioOverview.positionSnapshot;
+  const snapshotPresentation = useMemo(
+    () =>
+      resolvePortfolioSnapshotPresentation({
+        snapshot: positionSnapshot,
+        renderedPositionCount: snapshotHoldings.length,
+        hasOverview: Boolean(overviewResult.data?.portfolioOverview),
+        queryError: (overviewResult.error || accountError)?.message,
+      }),
+    [
+      accountError,
+      overviewResult.data?.portfolioOverview,
+      overviewResult.error,
+      positionSnapshot,
+      snapshotHoldings.length,
+    ]
   );
   const {
     holdings,
@@ -233,11 +252,14 @@ export function useHoldings({
 
   const liquidateHolding = useCallback(
     async (stockCode: string) => {
+      if (!snapshotPresentation.canTrade) {
+        throw new Error('当前账户快照不可用于交易，请等待下一次成功同步');
+      }
       return await executeLiquidate({
         input: { accountId, stockCode, confirm: true },
       });
     },
-    [accountId, executeLiquidate]
+    [accountId, executeLiquidate, snapshotPresentation.canTrade]
   );
 
   return useMemo(
@@ -251,6 +273,7 @@ export function useHoldings({
       historyError,
       historyLoading,
       quoteError,
+      snapshotPresentation,
       snapshotAsOf: overviewResult.data?.portfolioOverview.asOf,
       latestQuoteAt,
       refreshHistory,
@@ -272,6 +295,7 @@ export function useHoldings({
       historyError,
       historyLoading,
       quoteError,
+      snapshotPresentation,
       latestQuoteAt,
       refreshHistory,
       refreshOverview,

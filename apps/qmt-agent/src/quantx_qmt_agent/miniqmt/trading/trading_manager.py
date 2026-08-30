@@ -675,7 +675,7 @@ class XTTradingManager:
   def is_account_status_ok(self) -> bool:
     """检查当前交易账户状态是否正常"""
     try:
-      return self._query_account_status() == xtconstant.ACCOUNT_STATUS_OK
+      return self.query_account_status() == xtconstant.ACCOUNT_STATUS_OK
 
     except Exception as exc:
       logger.error("检查账户状态失败: error=%s", exc.__class__.__name__)
@@ -716,6 +716,11 @@ class XTTradingManager:
         return False
     return self._account_status_ready(status)
 
+  def query_account_status(self) -> int | None:
+    """Freshly query the native account status for snapshot authority."""
+
+    return self._query_account_status()
+
   @staticmethod
   def _account_status_ready(status: int | None) -> bool:
     return status in {
@@ -741,6 +746,7 @@ class XTTradingManager:
         self._last_connection_health_status = status
         return status
       except (TypeError, ValueError):
+        self._last_connection_health_status = None
         return None
     self._last_connection_health_status = None
     return None
@@ -828,8 +834,27 @@ class XTTradingManager:
   async def handle_account_status_event(self, status):
     """处理账户状态变更事件"""
     try:
-      logger.info("账户状态更新: event=%s", status.__class__.__name__)
-      # TODO: 可以在此发布事件到事件管理器
+      event_account_id = str(getattr(status, "account_id", "")).strip()
+      event_account_type = str(
+        getattr(status, "account_type", "")
+      ).strip().upper()
+      expected_account_id = str(self.acc.account_id).strip()
+      expected_account_type = str(self.acc.account_type).strip().upper()
+      if (
+        event_account_id == expected_account_id
+        and event_account_type == expected_account_type
+      ):
+        try:
+          self._last_connection_health_status = int(
+            getattr(status, "status", xtconstant.ACCOUNT_STATUS_INVALID)
+          )
+        except (TypeError, ValueError):
+          self._last_connection_health_status = None
+      logger.info(
+        "账户状态更新: event=%s status=%s",
+        status.__class__.__name__,
+        getattr(self, "_last_connection_health_status", None),
+      )
     except Exception as exc:
       logger.error("处理账户状态事件失败: error=%s", exc.__class__.__name__)
 
@@ -1037,6 +1062,14 @@ class MiniQMTTraderCallback(XtQuantTraderCallback):
       status: XtAccountStatus 对象
     """
     logger.info("账户状态变更: event=%s", status.__class__.__name__)
+    service = getattr(self.trading_manager, "trading_service", None)
+    mark_observed = getattr(service, "mark_status_observed", None)
+    if not callable(mark_observed):
+      mark_observed = getattr(service, "mark_callback_observed", None)
+    if callable(mark_observed):
+      # Fence a status transition before the asynchronous cache update.  A
+      # snapshot assembled immediately before this callback must not commit.
+      mark_observed()
     self._submit_async_task(self.trading_manager.handle_account_status_event(status))
 
   # ==================== 资产和持仓回调 ====================

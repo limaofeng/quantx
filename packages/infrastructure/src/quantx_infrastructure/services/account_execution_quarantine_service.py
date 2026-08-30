@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
+from quantx_contracts import snapshot_account_authority_is_authoritative
 from quantx_domain.clock import to_naive_utc, utcnow
 from quantx_domain.trading.exit_plan import (
   ExitPlan,
@@ -34,6 +35,9 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.services.agent_session_guard import (
+  AGENT_SERVER_SESSION_PAYLOAD_KEY,
+)
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   clear_exact_auto_exit_authorization,
 )
@@ -251,7 +255,11 @@ def _normalized_broker_status(value: Any) -> str:
 
 
 def _snapshot_hash(payload: Mapping[str, Any]) -> str:
-  canonical = {key: value for key, value in dict(payload or {}).items() if key != "snapshot_hash"}
+  canonical = {
+    key: value
+    for key, value in dict(payload or {}).items()
+    if key not in {"snapshot_hash", AGENT_SERVER_SESSION_PAYLOAD_KEY}
+  }
   return hashlib.sha256(
     json.dumps(
       canonical,
@@ -977,13 +985,19 @@ class AccountExecutionQuarantineService:
         dict(payload.get("section_completeness_by_account") or {}).get(account_id)
         or {}
       )
+      authority = dict(
+        dict(payload.get("snapshot_authority_by_account") or {}).get(account_id)
+        or {}
+      )
       unavailable = {
         str(value.get("account_id") if isinstance(value, Mapping) else value)
         for value in list(payload.get("unavailable_accounts") or [])
       }
       if (
         account_id in account_ids
+        and account_id in dict(payload.get("positions_by_account") or {})
         and account_id not in unavailable
+        and snapshot_account_authority_is_authoritative(authority)
         and all(
           sections.get(section) is True
           for section in ("account", "positions", "orders", "trades")

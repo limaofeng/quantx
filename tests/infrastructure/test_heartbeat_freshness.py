@@ -205,6 +205,17 @@ def _control(now: datetime):
   )
 
 
+def _position_snapshot(control, *, complete: bool = True, error: str | None = None):
+  return SimpleNamespace(
+    sequence=1,
+    reported_at=control.last_snapshot_at,
+    received_at=control.last_snapshot_at,
+    position_count=1,
+    is_complete=complete,
+    last_error=error,
+  )
+
+
 def _device(value: str):
   return SimpleNamespace(
     id=value,
@@ -257,7 +268,12 @@ async def _status(
   async def session():
     yield SimpleNamespace()
 
-  normalized_rows = [row[:4] + row[5:] if len(row) == 9 else row for row in rows]
+  normalized_rows = []
+  for row in rows:
+    normalized = row[:4] + row[5:] if len(row) in {9, 10} else row
+    if len(normalized) == 8:
+      normalized = (*normalized, _position_snapshot(normalized[0]))
+    normalized_rows.append(normalized)
   snapshot = AsyncMock(return_value=normalized_rows)
   monkeypatch.setattr(safety_module, "AsyncSessionLocal", session)
   monkeypatch.setattr(AccountExecutionSafetyService, "_readiness_snapshot", snapshot)
@@ -334,6 +350,41 @@ async def test_account_status_prefers_the_single_fresh_live_agent(
   assert result["ready_live_agent_count"] == 1
   assert result["agent_status"] == "READY"
   assert result["can_increase_risk"] is True
+
+
+@pytest.mark.asyncio
+async def test_incomplete_marker_never_refreshes_snapshot_freshness(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+) -> None:
+  control = _control(fixed_utcnow)
+  rows = [
+    (
+      control,
+      SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+      _device("device-1"),
+      _agent(fixed_utcnow),
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+      _position_snapshot(
+        control,
+        complete=False,
+        error="SNAPSHOT_ACCOUNT_STATUS_INVALID:ACCOUNT_STATUS_FAIL",
+      ),
+    )
+  ]
+
+  result = await _status(monkeypatch, rows)
+  checks = {item["code"]: item for item in result["checks"]}
+
+  assert result["reconciliation_age_seconds"] == pytest.approx(10)
+  assert checks["SNAPSHOT_RECONCILED"]["status"] == "FAILED"
+  assert checks["SNAPSHOT_FRESH"]["status"] == "FAILED"
+  assert "ACCOUNT_STATUS_FAIL" in checks["SNAPSHOT_FRESH"]["message"]
+  assert result["can_increase_risk"] is False
 
 
 @pytest.mark.asyncio
@@ -468,6 +519,7 @@ async def test_account_status_keeps_market_standby_when_trading_is_unavailable(
   assert checks["AGENT_MODE_LIVE"]["status"] == "PASSED"
   assert checks["PROTOCOL_1_1"]["status"] == "PASSED"
   assert checks["MARKET_STREAM_READY"]["status"] == "STANDBY"
+  assert checks["SNAPSHOT_FRESH"]["status"] == "FAILED"
   assert result["can_increase_risk"] is False
 
 

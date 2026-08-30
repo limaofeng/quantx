@@ -397,9 +397,20 @@ def _full_snapshot_payload(
     "reported_at": reported_at.isoformat(),
     "accounts": [{"account_id": ACCOUNT_ID}],
     "positions": [],
+    "positions_by_account": {ACCOUNT_ID: []},
     "orders": list(orders or []),
     "trades": list(trades or []),
     "unavailable_accounts": [],
+    "snapshot_authority_by_account": {
+      ACCOUNT_ID: {
+        "initial_status": 0,
+        "final_status": 0,
+        "stable": True,
+        "snapshot_eligible": True,
+        "status_name": "OK",
+        "reason_code": "XTTRADING_ACCOUNT_STATUS_AUTHORITATIVE",
+      }
+    },
     "section_completeness_by_account": {
       ACCOUNT_ID: {
         "account": True,

@@ -8,7 +8,10 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from quantx_contracts import ACCOUNT_EXECUTION_SAFETY_CHECK_CODE_SET
+from quantx_contracts import (
+  ACCOUNT_EXECUTION_SAFETY_CHECK_CODE_SET,
+  snapshot_account_authority_is_authoritative,
+)
 from quantx_domain.clock import to_naive_utc, utcnow
 from sqlalchemy import func, literal, select
 from sqlalchemy.orm import aliased
@@ -25,10 +28,14 @@ from quantx_infrastructure.models.agent_runtime import (
   RuntimeComponentHeartbeat,
   TradeCommandOutbox,
 )
+from quantx_infrastructure.models.broker_position_snapshot import (
+  BrokerPositionSnapshot,
+)
 from quantx_infrastructure.services.account_execution_quarantine_service import (
   AccountExecutionQuarantineService,
 )
 from quantx_infrastructure.services.agent_session_guard import (
+  AGENT_SERVER_SESSION_PAYLOAD_KEY,
   agent_unready_reason_code,
   evaluate_agent_session,
 )
@@ -481,6 +488,7 @@ class AccountExecutionSafetyService:
           oldest_queued_at,
           dead_letter_count,
           unresolved_critical_alert_count,
+          BrokerPositionSnapshot,
         )
         .select_from(anchor)
         .outerjoin(
@@ -492,6 +500,10 @@ class AccountExecutionSafetyService:
         .outerjoin(
           agent_heartbeat,
           agent_heartbeat.component == literal("qmt-agent:").concat(AgentDevice.id),
+        )
+        .outerjoin(
+          BrokerPositionSnapshot,
+          BrokerPositionSnapshot.account_id == anchor.c.account_id,
         )
       )
     ).all()
@@ -510,6 +522,7 @@ class AccountExecutionSafetyService:
         oldest_queued_at,
         dead_letter_count,
         unresolved_critical_alert_count,
+        position_snapshot,
       ) = rows[0]
       device = None
       agent = None
@@ -662,6 +675,23 @@ class AccountExecutionSafetyService:
       snapshot_age = (
         max(0.0, (now - snapshot_at).total_seconds()) if snapshot_at else None
       )
+      position_snapshot_reported_at = (
+        to_naive_utc(position_snapshot.reported_at)
+        if position_snapshot and position_snapshot.reported_at
+        else None
+      )
+      position_snapshot_current = bool(
+        control
+        and position_snapshot
+        and position_snapshot.is_complete
+        and int(position_snapshot.sequence or 0) > 0
+        and not str(position_snapshot.last_error or "").strip()
+        and snapshot_at is not None
+        and position_snapshot_reported_at == snapshot_at
+      )
+      position_snapshot_error = str(
+        position_snapshot.last_error if position_snapshot else ""
+      ).strip()
       backup_age = max(0.0, (now - backup_at).total_seconds()) if backup_at else None
       queue_delay = (
         max(0.0, (now - to_naive_utc(oldest_queued_at)).total_seconds())
@@ -714,14 +744,24 @@ class AccountExecutionSafetyService:
         ),
         (
           "SNAPSHOT_RECONCILED",
-          bool(control and control.reconcile_status == "READY"),
-          "资金、持仓、委托和成交快照尚未完成对账",
+          bool(
+            control
+            and control.reconcile_status == "READY"
+            and position_snapshot_current
+          ),
+          position_snapshot_error
+          or "资金、持仓、委托和成交快照尚未完成对账",
           "OBSERVATION",
         ),
         (
           "SNAPSHOT_FRESH",
-          snapshot_age is not None and snapshot_age <= 90,
-          "账户完整快照缺失或已超过 90 秒",
+          position_snapshot_current
+          and live_agent_ready
+          and snapshot_age is not None
+          and snapshot_age <= 90,
+          position_snapshot_error
+          or (live_agent_blocked_reason if not live_agent_ready else "")
+          or "账户完整快照缺失、无效或已超过 90 秒",
           "OBSERVATION",
         ),
         (
@@ -884,6 +924,7 @@ class AccountExecutionSafetyService:
           .where(
             AgentReportInbox.message_type == "delta_report",
             AgentReportInbox.protocol_version == "1.1",
+            AgentReportInbox.processing_status == "PROCESSED",
           )
           .order_by(AgentReportInbox.received_at.desc())
           .limit(100)
@@ -900,7 +941,44 @@ class AccountExecutionSafetyService:
         and account_id
         in {str(item.get("account_id") or "") for item in payload.get("accounts") or []}
       ):
-        return payload
+        authority = dict(payload.get("snapshot_authority_by_account") or {}).get(
+          account_id
+        )
+        snapshot_hash = str(payload.get("snapshot_hash") or "").lower()
+        hash_input = {
+          key: value
+          for key, value in payload.items()
+          if key not in {"snapshot_hash", AGENT_SERVER_SESSION_PAYLOAD_KEY}
+        }
+        expected_hash = hashlib.sha256(
+          json.dumps(
+            hash_input,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+          ).encode("utf-8")
+        ).hexdigest()
+        if (
+          snapshot_account_authority_is_authoritative(authority)
+          and snapshot_hash == expected_hash
+          and account_id in dict(payload.get("positions_by_account") or {})
+          and account_id
+          not in {
+            str(value)
+            for value in list(payload.get("unavailable_accounts") or [])
+          }
+          and all(
+            dict(
+              dict(payload.get("section_completeness_by_account") or {}).get(
+                account_id
+              )
+              or {}
+            ).get(section)
+            is True
+            for section in ("account", "positions", "orders", "trades")
+          )
+        ):
+          return payload
     raise ValueError("最新权威账户快照原文不可用，请等待 Agent 再次完整上报")
 
   async def _external_snapshot_activity(
