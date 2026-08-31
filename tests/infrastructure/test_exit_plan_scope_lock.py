@@ -14,11 +14,15 @@ async def test_concurrent_plan_writers_share_position_first_lock_order(
       plan_id="plan-a",
       account_id="account-a",
       instrument_code="600000.SH",
+      execution_mode="live",
+      strategy_run_id="run-a",
     ),
     "plan-b": SimpleNamespace(
       plan_id="plan-b",
       account_id="account-a",
       instrument_code="600000.SH",
+      execution_mode="live",
+      strategy_run_id="run-b",
     ),
   }
   position = SimpleNamespace(

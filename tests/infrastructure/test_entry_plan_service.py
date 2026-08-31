@@ -196,7 +196,16 @@ class _Service(EntryPlanService):
       "total_asset_cny": 500_000,
       "reference_price": 125.0,
       "account_snapshot_version": "account-v7",
+      "paper_portfolio": {
+        "initial_capital": 500_000,
+        "initial_cash": 475_000,
+        "initial_total_asset": 500_000,
+        "initial_portfolio_metadata": {},
+      },
     }
+
+  async def _paper_run_baseline(self, loaded):
+    return await self._authoritative_baseline("acct-1", loaded.config.instrument_code, EntryEnvironment.PAPER)
 
   async def _persist_run_status(self, plan_id: str, status: StrategyRunStatus) -> None:
     self.persisted_statuses.append((plan_id, status))
@@ -438,7 +447,7 @@ def _baseline_session(
   rollout: Any = None,
 ) -> _BaselineSession:
   return _BaselineSession(
-    account=SimpleNamespace(updated_at=now, total_asset=500_000),
+    account=SimpleNamespace(updated_at=now, total_asset=500_000, cash=475_000),
     position=position,
     position_snapshot=position_snapshot,
     instrument=SimpleNamespace(
@@ -455,12 +464,12 @@ async def test_active_plan_overlap_is_per_instrument_not_bucket(
   monkeypatch,
 ) -> None:
   core = EntryPlanService._build_config(
-    _input(),
+    _input(environment="LIVE"),
     plan_id="plan-new",
     account_id="acct-1",
     config_version=1,
   )
-  swing_input = _input()
+  swing_input = _input(environment="LIVE")
   swing_input["bucket"] = "swing"
   swing = EntryPlanService._build_config(
     swing_input,
@@ -470,6 +479,7 @@ async def test_active_plan_overlap_is_per_instrument_not_bucket(
   )
   existing = SimpleNamespace(
     id="plan-existing",
+    mode=StrategyRunMode.LIVE,
     parameters={
       "account_id": "acct-1",
       MANAGED_ENTRY_STATE_KEY: swing.to_dict(),
@@ -507,6 +517,10 @@ async def test_active_plan_overlap_is_per_instrument_not_bucket(
   with pytest.raises(ValueError, match="ACTIVE_ENTRY_PLAN_EXISTS:plan-existing"):
     await service._ensure_no_active_overlap("acct-1", core)
 
+  existing.mode = StrategyRunMode.PAPER
+  await service._ensure_no_active_overlap("acct-1", core)
+  existing.mode = StrategyRunMode.LIVE
+
   draining = ManagedEntryPlanState(
     phase=EntryPlanStatus.ENTRY_PENDING,
     pending_intent_id="intent-existing",
@@ -528,6 +542,22 @@ async def test_active_plan_overlap_is_per_instrument_not_bucket(
   )
   assert draining.phase == EntryPlanStatus.CANCELLED
   await service._ensure_no_active_overlap("acct-1", core)
+
+
+@pytest.mark.asyncio
+async def test_paper_entry_plan_never_competes_for_another_run_capacity() -> None:
+  config = EntryPlanService._build_config(
+    _input(environment="PAPER"),
+    plan_id="paper-new",
+    account_id="acct-1",
+    config_version=1,
+  )
+
+  def forbidden_shared_scope():
+    raise AssertionError("Independent PAPER runs must not share an overlap lock")
+
+  service = EntryPlanService(_Manager(), session_factory=forbidden_shared_scope)
+  await service._ensure_no_active_overlap("acct-1", config)
 
 
 @pytest.mark.asyncio

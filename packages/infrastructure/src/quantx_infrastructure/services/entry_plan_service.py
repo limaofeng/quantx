@@ -215,6 +215,8 @@ class EntryPlanService:
       note=str(raw_input.get("note") or ""),
       config=config,
     )
+    if mode == StrategyRunMode.PAPER:
+      parameters.update(dict(baseline["paper_portfolio"]))
     start_immediately = bool(raw_input.get("start_immediately", False))
     authorization_required = self._requires_live_auto_authorization(config)
     # A runtime may be partially started even when its start call ultimately
@@ -313,10 +315,12 @@ class EntryPlanService:
         "instrument_code": loaded.config.instrument_code,
         "bucket": loaded.config.bucket,
       }
-      baseline = await self._authoritative_baseline(
-        account_id,
-        loaded.config.instrument_code,
-        self._entry_environment(config_input),
+      baseline = (
+        await self._paper_run_baseline(loaded)
+        if loaded.config.execution_policy.environment == EntryEnvironment.PAPER
+        else await self._authoritative_baseline(
+          account_id, loaded.config.instrument_code, self._entry_environment(config_input),
+        )
       )
       config_input = self._with_authoritative_baseline(config_input, baseline)
       updated = self._build_config(
@@ -370,6 +374,8 @@ class EntryPlanService:
         ENTRY_PLAN_ENABLED_KEY: False,
         MANAGED_ENTRY_STATE_KEY: updated.to_dict(),
       }
+      if self._run_mode(updated) == StrategyRunMode.PAPER:
+        parameters.update(dict(baseline["paper_portfolio"]))
       if normalized_command_id:
         parameters[ENTRY_PLAN_LAST_COMMAND_ID_KEY] = normalized_command_id
       await self._require_plan_not_terminal(old_run_id)
@@ -1036,12 +1042,92 @@ class EntryPlanService:
       default=str,
     ).encode("utf-8")
     snapshot_version = hashlib.sha256(encoded).hexdigest()
-    return {
+    result = {
       "position_volume": position_volume,
       "market_value_cny": market_value,
       "total_asset_cny": total_asset,
       "reference_price": reference_price,
       "account_snapshot_version": snapshot_version,
+    }
+    if environment == EntryEnvironment.PAPER:
+      result["paper_portfolio"] = {
+        "initial_capital": total_asset,
+        "initial_cash": max(0.0, float(account.cash or 0)),
+        "initial_total_asset": total_asset,
+        "initial_portfolio_metadata": {
+          normalized_code: {
+            "position_shares": position_volume,
+            "position_available_shares": max(0, int(position.can_use_volume or 0)) if position else 0,
+            "position_frozen_shares": 0,
+            "position_avg_price": float(position.avg_price or 0) if position else 0,
+            "position_market_value": market_value,
+          }
+        },
+      }
+    return result
+
+  async def _paper_run_baseline(self, loaded: _LoadedPlan) -> dict[str, Any]:
+    """Revise against this run's simulated portfolio, never current LIVE facts."""
+    run_id = str(loaded.run.id)
+    runtime = self._runtime_manager.get_run(run_id)
+    manager = getattr(runtime, "state_manager", None)
+    if manager is not None:
+      account = dict(manager.get_account())
+      positions = dict(manager.get_all_positions())
+    else:
+      from quantx_infrastructure.models.strategy_run_state import (
+        StrategyRunPosition,
+        StrategyRunState,
+      )
+
+      async with self._session_factory() as db:
+        state = await db.scalar(select(StrategyRunState).where(StrategyRunState.run_id == run_id))
+        rows = (await db.execute(select(StrategyRunPosition).where(StrategyRunPosition.run_id == run_id))).scalars().all()
+      if state is None or (float(state.total_asset or 0) <= 0 and not rows):
+        if getattr(loaded.run, "start_time", None) is not None:
+          raise ValueError("PAPER_PORTFOLIO_UNAVAILABLE:模拟运行缺少资金检查点")
+        return {
+          **loaded.config.to_dict()["target_policy"]["baseline_snapshot"],
+          "paper_portfolio": {
+            key: loaded.parameters[key]
+            for key in ("initial_capital", "initial_cash", "initial_total_asset", "initial_portfolio_metadata")
+          },
+        }
+      account = {"cash": state.cash, "total_asset": state.total_asset}
+      ledger = dict(dict(state.custom_state or {}).get("bucket_ledger_snapshot") or {}).get("instruments", {})
+      positions = {
+        row.instrument_code: {
+          **row.to_dict(),
+          "available_volume": sum(int(bucket.get("available_volume", 0)) for bucket in dict(ledger.get(row.instrument_code) or {}).values()),
+        }
+        for row in rows
+      }
+    code = loaded.config.instrument_code
+    position = positions.get(code, {})
+    price = float(position.get("last_price") or loaded.config.target_policy.baseline_snapshot.reference_price)
+    portfolio = {
+      "initial_capital": float(account["total_asset"]),
+      "initial_cash": float(account["cash"]),
+      "initial_total_asset": float(account["total_asset"]),
+      "initial_portfolio_metadata": {
+        instrument: {
+          "position_shares": int(item.get("long_volume", 0)),
+          "position_available_shares": int(item.get("available_volume", 0)),
+          "position_frozen_shares": int(item.get("frozen_volume", 0)),
+          "position_avg_price": float(item.get("long_avg_price", 0)),
+          "position_market_value": float(item.get("market_value", 0)),
+        }
+        for instrument, item in positions.items()
+      },
+    }
+    identity = json.dumps({"run_id": run_id, **portfolio}, sort_keys=True).encode()
+    return {
+      "position_volume": int(position.get("long_volume", 0)),
+      "market_value_cny": float(position.get("market_value", 0)),
+      "total_asset_cny": float(account["total_asset"]),
+      "reference_price": price,
+      "account_snapshot_version": hashlib.sha256(identity).hexdigest(),
+      "paper_portfolio": portfolio,
     }
 
   @staticmethod
@@ -1072,12 +1158,18 @@ class EntryPlanService:
     *,
     exclude_plan_id: str = "",
   ) -> None:
+    # Each PAPER run owns an independent simulated portfolio. Only LIVE plans
+    # compete for this account's single instrument exposure.
+    if config.execution_policy.environment == EntryEnvironment.PAPER:
+      return
     async with self._session_factory() as db:
       runs = await StrategyRunRepository(db).find_active_runs_by_strategy_class(
         MANAGED_ENTRY_STRATEGY_CLASS_NAME
       )
       state_repository = StrategyRunStateRepository(db)
       for run in runs:
+        if run.mode != StrategyRunMode.LIVE:
+          continue
         other_plan_id = str(getattr(run, "plan_id", "") or run.id)
         if other_plan_id == str(exclude_plan_id or ""):
           continue

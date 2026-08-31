@@ -3708,12 +3708,9 @@ class StrategyExecutor:
           and account.get("total_asset", 0.0) <= 0
           and not positions
         )
-        is_portfolio_replay = bool(
-          runtime.context.mode == StrategyRunMode.BACKTEST
-          and (
-            runtime.context.parameters.get("t_trade_replay")
-            or runtime.context.parameters.get("exit_plan_replay")
-          )
+        is_portfolio_replay = (
+          runtime.context.mode in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER}
+          and "initial_cash" in runtime.context.parameters
         )
         if initialize_account and not is_portfolio_replay:
           runtime.state_manager.update_account(
@@ -3958,14 +3955,23 @@ class StrategyExecutor:
       "configure_initial_portfolio",
       None,
     )
-    if runtime.context.mode == StrategyRunMode.BACKTEST and callable(
-      configure_initial_portfolio
-    ):
+    if callable(configure_initial_portfolio):
       params = dict(runtime.context.parameters or {})
+      account = (
+        runtime.state_manager.get_account()
+        if runtime.context.mode == StrategyRunMode.PAPER
+        else {}
+      )
       runtime.broker.configure_initial_portfolio(
-        cash=float(params.get("initial_cash", runtime.context.initial_capital) or 0.0),
+        cash=float(
+          account["cash"]
+          if runtime.context.mode == StrategyRunMode.PAPER
+          else params.get("initial_cash", runtime.context.initial_capital) or 0.0
+        ),
         total_asset=float(
-          params.get("initial_total_asset", runtime.context.initial_capital) or 0.0
+          account["total_asset"]
+          if runtime.context.mode == StrategyRunMode.PAPER
+          else params.get("initial_total_asset", runtime.context.initial_capital) or 0.0
         ),
         positions=dict(runtime.broker.positions or {}),
       )
@@ -3988,6 +3994,16 @@ class StrategyExecutor:
       code = str(raw_code or "").strip().upper()
       metadata = dict(raw_metadata or {})
       if not code or "position_shares" not in metadata:
+        continue
+      if (
+        runtime.context.mode == StrategyRunMode.PAPER
+        and (
+          runtime.state_manager.get_position(code) is not None
+          or code in runtime.state_manager.get_bucket_ledger_snapshot().get("instruments", {})
+        )
+      ):
+        # LIVE holdings define the initial sample only. Later universe refreshes
+        # cannot replenish shares already sold by this simulated run.
         continue
       state = dict(instrument_states.get(code, {}) or {})
       active_volume = max(

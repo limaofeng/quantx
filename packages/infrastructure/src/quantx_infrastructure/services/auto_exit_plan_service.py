@@ -1874,6 +1874,8 @@ class AutoExitPlanService:
         account_id=str(template.account_id),
         instrument_code=str(template.instrument_code),
         target_plan_id=plan.plan_id,
+        execution_mode=normalized_mode,
+        strategy_run_id=normalized_run_id,
       )
       record = locked_scope.plan(plan.plan_id)
       if record is None:
@@ -3768,6 +3770,8 @@ class AutoExitPlanService:
         db,
         account_id=account_id,
         instrument_code=instrument_code,
+        target_plan_id=plan_id,
+        execution_mode=self._execution_mode(payload.get("execution_mode")),
       )
       position = scope.position
       if position is None or int(position.volume or 0) <= 0:
@@ -4002,9 +4006,8 @@ class AutoExitPlanService:
       record.strategy_run_id = None
       record.protected_volume = protected_volume
       record.remaining_volume = desired_remaining
-      record.execution_mode = self._execution_mode(
-        payload.get("execution_mode", record.execution_mode)
-      )
+      if self._execution_mode(payload.get("execution_mode", record.execution_mode)) != record.execution_mode:
+        raise ValueError("执行环境创建后不可切换，请为新环境创建独立计划")
       clear_exact_auto_exit_authorization(record, bump_state_version=False)
       self._sync_record(record, plan)
       record.last_error = None
@@ -4241,9 +4244,8 @@ class AutoExitPlanService:
         record.config_version = next_version
         record.protected_volume = protected_volume
         record.remaining_volume = desired_remaining
-        record.execution_mode = self._execution_mode(
-          payload.get("execution_mode", record.execution_mode)
-        )
+        if self._execution_mode(payload.get("execution_mode", record.execution_mode)) != record.execution_mode:
+          raise ValueError("执行环境创建后不可切换，请为新环境创建独立计划")
         clear_exact_auto_exit_authorization(record, bump_state_version=False)
         runtime_plan = ExitPlan.from_dict(plan.to_dict())
         pending_plan = ExitPlan.from_dict(plan.to_dict())
@@ -4478,6 +4480,7 @@ class AutoExitPlanService:
           account_id=account_id,
           instrument_code=code,
           for_update=True,
+          execution_mode=execution_mode,
         )
         pending = [
           item

@@ -226,14 +226,29 @@ class AutoExitPlanRepository:
     account_id: str,
     instrument_code: str,
     for_update: bool = False,
+    execution_mode: str = "live",
+    strategy_run_id: Optional[str] = None,
+    plan_id: Optional[str] = None,
   ) -> list[AutoExitPlanRecord]:
+    mode = str(execution_mode).lower()
+    if mode not in {"live", "paper"}:
+      raise ValueError("退出容量只支持 live 或 paper")
     stmt = (
       select(AutoExitPlanRecord)
       .where(AutoExitPlanRecord.account_id == account_id)
       .where(AutoExitPlanRecord.instrument_code == instrument_code)
+      .where(AutoExitPlanRecord.execution_mode == mode)
       .where(AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES))
       .order_by(AutoExitPlanRecord.created_at, AutoExitPlanRecord.plan_id)
     )
+    if mode == "paper":
+      # A PAPER run owns its own simulated inventory. Monitor-owned previews
+      # have no run and may only claim their own frozen plan sample.
+      stmt = stmt.where(
+        AutoExitPlanRecord.strategy_run_id == strategy_run_id
+        if strategy_run_id
+        else AutoExitPlanRecord.plan_id == (plan_id or "")
+      )
     if for_update:
       stmt = stmt.with_for_update()
     return list((await self.db.execute(stmt)).scalars().all())
