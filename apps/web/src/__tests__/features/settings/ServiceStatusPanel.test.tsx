@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ServiceStatusPanel } from '@/features/settings/components/ServiceStatusPanel';
 import type {
+  MonitorHistory,
   MonitorIncident,
   MonitorSummary,
 } from '@/features/system/monitor-api';
@@ -91,6 +92,69 @@ function incidentPage(incidents: MonitorIncident[]) {
 describe('ServiceStatusPanel', () => {
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('updates the latest sample on recovery without erasing failures in compressed history', async () => {
+    const latestMinute = Math.floor(Date.now() / 60000) * 60000;
+    const history: MonitorHistory = {
+      target: { id: 'qmt-agent', name: 'QMT Agent' },
+      range: '24h',
+      bucketSeconds: 60,
+      points: Array.from({ length: 171 }, (_, index) => {
+        const status = index === 169 ? 'unavailable' : 'healthy';
+        return {
+          start: new Date(latestMinute - (170 - index) * 60000).toISOString(),
+          status,
+          sampleCount: 1,
+          healthyCount: status === 'healthy' ? 1 : 0,
+          degradedCount: 0,
+          unavailableCount: status === 'unavailable' ? 1 : 0,
+          unknownCount: 0,
+          disabledCount: 0,
+          latencyCount: 0,
+          latencyMaxMs: null,
+          latencyP50Ms: null,
+          latencyP95Ms: null,
+        };
+      }),
+    };
+    monitorMocks.getMonitorSummary.mockResolvedValue(summary('unavailable'));
+    monitorMocks.getMonitorHistory.mockResolvedValue(history);
+    monitorMocks.getMonitorIncidents.mockResolvedValue(incidentPage([]));
+
+    render(<ServiceStatusPanel />);
+
+    const strip = await screen.findByRole('img', {
+      name: /QMT Agent 历史状态：171 个时间段，正常 170，降级 0，不可用 1/,
+    });
+    expect(strip.childElementCount).toBeLessThanOrEqual(84);
+    expect(strip.lastElementChild).toHaveClass('bg-rose-400');
+    expect(strip.lastElementChild).toHaveAttribute(
+      'title',
+      `${new Date(latestMinute - 120000).toLocaleString('zh-CN', { hour12: false })} – ${new Date(latestMinute + 60000).toLocaleString('zh-CN', { hour12: false })} · 区间最差：不可用`
+    );
+    expect(
+      screen.getByRole('img', { name: /QMT Agent 最新采样：不可用/ })
+    ).toHaveClass('bg-rose-400');
+
+    // A new summary can arrive before history refreshes, or while that request fails.
+    monitorMocks.getMonitorSummary.mockResolvedValue(summary());
+    monitorMocks.getMonitorHistory.mockRejectedValue(
+      new Error('history unavailable')
+    );
+    fireEvent.click(screen.getByRole('button', { name: '刷新服务状态' }));
+
+    expect(
+      await screen.findByRole('img', { name: /QMT Agent 最新采样：正常/ })
+    ).toHaveClass('bg-emerald-400');
+    expect(
+      await screen.findByLabelText('QMT Agent 历史更新失败')
+    ).toBeInTheDocument();
+    expect(strip.lastElementChild).toHaveClass('bg-rose-400');
+    expect(strip).toHaveAccessibleName(/正常 170，降级 0，不可用 1/);
+    expect(
+      screen.getByRole('button', { name: /QMT Agent.*延迟/ })
+    ).toHaveTextContent('99.50%');
   });
 
   it('shows direct gateway RTT and percentiles independently of Engine degradation', async () => {

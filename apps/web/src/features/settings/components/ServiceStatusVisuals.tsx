@@ -34,11 +34,19 @@ import {
 
 const placeholderBars = Array.from({ length: 28 }, (_, index) => index);
 
-function compressHistory(points: MonitorHistoryPoint[], limit = 84) {
-  if (points.length <= limit) return points;
+interface HistoryBlock {
+  start: string;
+  end: string;
+  status: MonitorStatus;
+}
 
-  const compressed: MonitorHistoryPoint[] = [];
-  const chunkSize = Math.ceil(points.length / limit);
+function compressHistory(
+  points: MonitorHistoryPoint[],
+  bucketSeconds: number,
+  limit = 84
+) {
+  const compressed: HistoryBlock[] = [];
+  const chunkSize = Math.max(1, Math.ceil(points.length / limit));
   for (let index = 0; index < points.length; index += chunkSize) {
     const chunk = points.slice(index, index + chunkSize);
     const worst = chunk.reduce((current, point) =>
@@ -46,7 +54,13 @@ function compressHistory(points: MonitorHistoryPoint[], limit = 84) {
         ? point
         : current
     );
-    compressed.push(worst);
+    compressed.push({
+      start: chunk[0].start,
+      end: new Date(
+        new Date(chunk[chunk.length - 1].start).getTime() + bucketSeconds * 1000
+      ).toISOString(),
+      status: worst.status,
+    });
   }
   return compressed;
 }
@@ -100,7 +114,8 @@ export function HistoryStrip({
   error: boolean;
 }) {
   const points = useMemo(
-    () => compressHistory(history?.points ?? []),
+    () =>
+      history ? compressHistory(history.points, history.bucketSeconds) : [],
     [history]
   );
   const counts = useMemo(
@@ -118,6 +133,7 @@ export function HistoryStrip({
     points.length === 0
       ? `${target.name} 当前范围没有历史样本`
       : `${target.name} 历史状态：${history?.points.length ?? 0} 个时间段，正常 ${counts.healthy}，降级 ${counts.degraded}，不可用 ${counts.unavailable}，未知 ${counts.unknown}，未启用 ${counts.disabled}`;
+  const latestDescription = `${target.name} 最新采样：${statusLabel[target.status]} · ${formatTime(target.checkedAt)}`;
 
   return (
     <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -125,6 +141,7 @@ export function HistoryStrip({
         role="img"
         aria-label={description}
         aria-busy={loading}
+        title="历史色块表示各区间内的最差状态，右侧单列最新采样"
         className={cn(
           'flex h-6 min-w-0 flex-1 items-stretch gap-px overflow-hidden rounded-sm',
           loading && points.length === 0 && 'motion-safe:animate-pulse',
@@ -136,7 +153,7 @@ export function HistoryStrip({
               <span
                 key={`${point.start}-${index}`}
                 aria-hidden="true"
-                title={`${formatTime(point.start)} · ${statusLabel[point.status]}`}
+                title={`${formatTime(point.start)} – ${formatTime(point.end)} · 区间最差：${statusLabel[point.status]}`}
                 className={cn(
                   'min-w-0 flex-1 rounded-sm',
                   historyTone[point.status]
@@ -163,6 +180,18 @@ export function HistoryStrip({
           <AlertTriangle className="h-4 w-4" aria-hidden="true" />
         </span>
       )}
+      <div className="flex shrink-0 items-center gap-1.5 border-l border-white/10 pl-2">
+        <span className="text-ui-caption text-slate-500">最新</span>
+        <span
+          role="img"
+          aria-label={latestDescription}
+          title={latestDescription}
+          className={cn(
+            'h-6 w-2 shrink-0 rounded-sm',
+            historyTone[target.status]
+          )}
+        />
+      </div>
     </div>
   );
 }

@@ -694,7 +694,7 @@ export function ServiceStatusPanel() {
           className="overflow-hidden rounded-panel border border-white/10 bg-slate-950/20"
         >
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 bg-white/[0.025] px-3 py-2 text-ui-caption text-slate-500">
-            <span>连续状态</span>
+            <span>历史区间（最差状态） · 右侧为最新采样</span>
             <span
               className="flex flex-wrap items-center gap-3"
               aria-label="状态图例"
