@@ -11,6 +11,7 @@ import { AppDialogProvider } from '@/components/ui/app-dialog-provider';
 import { Button } from '@/components/ui/button';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { UiDensityProvider } from '@/components/UiDensityProvider';
 import { AuthProvider, useAuth } from '@/core/auth';
 import { urqlClient } from '@/core/graphql';
 import { LoginPage, safeInternalPath } from '@/features/auth';
@@ -212,16 +213,18 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <ThemeProvider>
-        <TooltipProvider>
-          <AppDialogProvider>
-            <AuthProvider>
-              <Toaster />
-              <AuthenticatedApp />
-            </AuthProvider>
-          </AppDialogProvider>
-        </TooltipProvider>
-      </ThemeProvider>
+      <UiDensityProvider>
+        <ThemeProvider>
+          <TooltipProvider>
+            <AppDialogProvider>
+              <AuthProvider>
+                <Toaster />
+                <AuthenticatedApp />
+              </AuthProvider>
+            </AppDialogProvider>
+          </TooltipProvider>
+        </ThemeProvider>
+      </UiDensityProvider>
     </ErrorBoundary>
   );
 }
