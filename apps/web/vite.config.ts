@@ -15,6 +15,9 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       react({
+        // Generated documents contain no JSX or gql calls. Let esbuild handle
+        // their TypeScript once, with source maps, instead of parsing in Babel.
+        exclude: /\/src\/generated\//,
         // 优化 JSX 运行时
         jsxRuntime: 'automatic',
         // Resolve static gql calls to typed documents so unused operations and
@@ -140,6 +143,15 @@ export default defineConfig(({ mode }) => {
       port: 5250,
       strictPort: true,
       open: false,
+      // Transform frequent entry points on the server without downloading or
+      // evaluating unrelated routes in the browser.
+      warmup: {
+        clientFiles: [
+          './src/main.tsx',
+          './src/generated/gql/graphql.ts',
+          './src/features/portfolio/pages/TTradeGlobalPage.tsx',
+        ],
+      },
       // 启用 HMR
       hmr: {
         overlay: true,

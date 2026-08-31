@@ -35,6 +35,21 @@
 			@docs path /docs/*
 			reverse_proxy @docs 127.0.0.1:5251
 
+			# Only the Web frontend reaches this handler. Keep API responses and
+			# streaming connections outside static-resource compression.
+			encode {
+				gzip 1
+				minimum_length 1024
+				match {
+					header Content-Type text/html*
+					header Content-Type text/javascript*
+					header Content-Type application/javascript*
+					header Content-Type text/css*
+					header Content-Type application/json*
+					header Content-Type image/svg+xml*
+				}
+			}
+
 			reverse_proxy 127.0.0.1:5250
 		}
 	}
