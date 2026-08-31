@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack
 
 import pytest
 from quantx_ai_runtime import database
 from quantx_ai_runtime.database import DatabaseAdmission, DatabaseCapacityTimeout
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @pytest.mark.asyncio
@@ -67,18 +68,19 @@ async def test_session_closes_before_work_permit_is_released(monkeypatch) -> Non
   admission = DatabaseAdmission(2, timeout_seconds=0.03)
   monkeypatch.setattr(database, "database_admission", admission)
 
-  @asynccontextmanager
-  async def sessions():
-    events.append("open")
-    try:
-      yield object()
-    finally:
+  class Session(AsyncSession):
+    def __init__(self):
+      super().__init__()
+      events.append("open")
+
+    async def close(self):
       with pytest.raises(DatabaseCapacityTimeout):
         async with admission.slot():
           pytest.fail("permit released before rollback/close")
+      await super().close()
       events.append("closed")
 
-  monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(database, "AsyncSessionLocal", Session)
   with pytest.raises(ValueError, match="business failure"):
     async with database.database_session():
       raise ValueError("business failure")
@@ -92,10 +94,8 @@ async def test_session_open_failure_releases_admission(monkeypatch) -> None:
   admission = DatabaseAdmission(2, timeout_seconds=0.03)
   monkeypatch.setattr(database, "database_admission", admission)
 
-  @asynccontextmanager
-  async def sessions():
+  def sessions():
     raise RuntimeError("session open failed")
-    yield  # pragma: no cover
 
   monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
   with pytest.raises(RuntimeError, match="session open failed"):
@@ -132,14 +132,12 @@ async def test_cancelled_holder_releases_session_and_admission(monkeypatch) -> N
   entered = asyncio.Event()
   closed = asyncio.Event()
 
-  @asynccontextmanager
-  async def sessions():
-    try:
-      yield object()
-    finally:
+  class Session(AsyncSession):
+    async def close(self):
+      await super().close()
       closed.set()
 
-  monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(database, "AsyncSessionLocal", Session)
 
   async def hold():
     async with database.database_session():
@@ -166,3 +164,52 @@ async def test_capacity_uses_the_configured_pool_budget() -> None:
     with pytest.raises(DatabaseCapacityTimeout):
       async with admission.slot(heartbeat=True):
         pytest.fail("configured total capacity was exceeded")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_real_session_close_keeps_admission_despite_cancellation(
+  monkeypatch, cancel_count
+) -> None:
+  admission = DatabaseAdmission(2, timeout_seconds=0.03)
+  monkeypatch.setattr(database, "database_admission", admission)
+  closing = asyncio.Event()
+  allow_close = asyncio.Event()
+  closed = asyncio.Event()
+  close_tasks = []
+
+  class DelayedSession(AsyncSession):
+    async def close(self):
+      close_tasks.append(asyncio.current_task())
+      closing.set()
+      await allow_close.wait()
+      await super().close()
+      closed.set()
+
+  monkeypatch.setattr(database, "AsyncSessionLocal", DelayedSession)
+
+  async def work():
+    async with database.database_session():
+      pass
+
+  task = asyncio.create_task(work())
+  try:
+    await asyncio.wait_for(closing.wait(), timeout=1)
+    for _ in range(cancel_count):
+      task.cancel()
+      await asyncio.sleep(0)
+      assert not task.done(), "caller left while SQLAlchemy was still closing"
+    with pytest.raises(DatabaseCapacityTimeout):
+      async with admission.slot():
+        pytest.fail("work permit released while session was still closing")
+    async with admission.slot(heartbeat=True):
+      pass
+    allow_close.set()
+    with pytest.raises(asyncio.CancelledError):
+      await asyncio.wait_for(task, timeout=1)
+    assert closed.is_set()
+    async with admission.slot():
+      pass
+  finally:
+    allow_close.set()
+    await asyncio.gather(task, *close_tasks, return_exceptions=True)

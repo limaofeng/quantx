@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
-from agents import Runner
+from agents import Runner, RunResultStreaming, StreamEvent
 from openai.types.responses import ResponseTextDeltaEvent
 from quantx_application.assistant.contracts import (
   AssistantContextRef,
@@ -23,6 +25,7 @@ from quantx_infrastructure.repositories.ai_assistant_repository import (
 from sqlalchemy import select
 
 from quantx_ai_runtime.agents import build_agent
+from quantx_ai_runtime.cleanup import finish_cleanup
 from quantx_ai_runtime.config import AiRuntimeConfig
 from quantx_ai_runtime.database import database_session
 from quantx_ai_runtime.guardrails import validate_user_text
@@ -35,6 +38,8 @@ from .recovery import (
   serialize_run_state,
   state_interruptions,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AssistantRunCancelled(Exception):
@@ -359,6 +364,19 @@ async def _resume_state(run: AiAssistantRun, agent: Any) -> Any:
   return state
 
 
+async def _drain_cancelled_stream(
+  stream: RunResultStreaming, events: AsyncIterator[StreamEvent]
+) -> None:
+  try:
+    async for _ in events:
+      pass
+  finally:
+    # Cancellation inside __anext__ may already have closed the original
+    # iterator without joining the SDK run loop. A final drain joins it too.
+    async for _ in stream.stream_events():
+      pass
+
+
 async def execute_run(
   run_id: str,
   config: AiRuntimeConfig,
@@ -398,7 +416,9 @@ async def execute_run(
     max_tool_calls=config.max_tool_calls,
   )
   agent = build_agent(
-    runtime_context, model=config.model, agent_id=str(run.agent_id or "research_assistant")
+    runtime_context,
+    model=config.model,
+    agent_id=str(run.agent_id or "research_assistant"),
   )
   resume_state = await _resume_state(run, agent)
   input_value: Any = resume_state
@@ -420,25 +440,40 @@ async def execute_run(
   )
   buffer = ""
   last_flush = asyncio.get_running_loop().time()
-  async with asyncio.timeout(config.run_timeout_seconds):
-    async for event in stream.stream_events():
-      if await _run_was_cancelled(run.id):
-        raise AssistantRunCancelled()
-      if event.type != "raw_response_event" or not isinstance(
-        event.data, ResponseTextDeltaEvent
-      ):
-        continue
-      buffer += event.data.delta
-      now = asyncio.get_running_loop().time()
-      if len(buffer) >= 1024 or now - last_flush >= 0.25:
-        await event_writer.append(
-          thread_id=run.thread_id,
-          run_id=run.id,
-          event_type="MESSAGE_DELTA",
-          payload={"text": buffer},
-        )
-        buffer = ""
-        last_flush = now
+  events = stream.stream_events()
+  try:
+    async with asyncio.timeout(config.run_timeout_seconds):
+      async for event in events:
+        if await _run_was_cancelled(run.id):
+          raise AssistantRunCancelled()
+        if event.type != "raw_response_event" or not isinstance(
+          event.data, ResponseTextDeltaEvent
+        ):
+          continue
+        buffer += event.data.delta
+        now = asyncio.get_running_loop().time()
+        if len(buffer) >= 1024 or now - last_flush >= 0.25:
+          await event_writer.append(
+            thread_id=run.thread_id,
+            run_id=run.id,
+            event_type="MESSAGE_DELTA",
+            payload={"text": buffer},
+          )
+          buffer = ""
+          last_flush = now
+  except BaseException:
+    # The SDK owns a separate run task. Cancelling this event consumer alone
+    # does not stop it when cancellation arrives in the loop body (e.g. SQL).
+    # Do not cancel twice if the SDK already started cleaning up in __anext__.
+    if not stream.is_complete:
+      stream.cancel()
+    try:
+      await finish_cleanup(_drain_cancelled_stream(stream, events))
+    except Exception as exc:
+      logger.warning(
+        "AI stream cleanup failed: run_id=%s error=%s", run.id, type(exc).__name__
+      )
+    raise
   if buffer:
     await event_writer.append(
       thread_id=run.thread_id,

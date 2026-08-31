@@ -16,6 +16,8 @@ from quantx_infrastructure.database.relational_connection import (
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .cleanup import finish_cleanup
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,8 +73,13 @@ async def database_session(*, heartbeat: bool = False) -> AsyncIterator[AsyncSes
   # Release admission only AFTER rollback/close has returned the connection.
   # No model request, Redis wait or retry sleep belongs inside this context.
   async with database_admission.slot(heartbeat=heartbeat):
-    async with AsyncSessionLocal() as db:
+    db = AsyncSessionLocal()
+    try:
       yield db
+    finally:
+      # AsyncSession.__aexit__ shields close but can return before it finishes
+      # if this task is cancelled. Own and join close before releasing admission.
+      await finish_cleanup(db.close())
 
 
 def log_database_pressure(operation: str, exc: PoolTimeout) -> None:

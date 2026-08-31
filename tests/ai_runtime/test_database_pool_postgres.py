@@ -11,15 +11,13 @@ from quantx_infrastructure.config.settings import settings
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import TimeoutError as PoolTimeout
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_three_connection_pool_exhaustion_and_admitted_recovery(monkeypatch):
+def _readonly_engine():
   database_name = make_url(settings.database_url).database or ""
   assert database_name.endswith("_test") or database_name.startswith("test_")
-  engine = create_async_engine(
+  return create_async_engine(
     settings.database_url,
     pool_size=2,
     max_overflow=1,
@@ -32,6 +30,12 @@ async def test_three_connection_pool_exhaustion_and_admitted_recovery(monkeypatc
       }
     },
   )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_three_connection_pool_exhaustion_and_admitted_recovery(monkeypatch):
+  engine = _readonly_engine()
   sessions = async_sessionmaker(engine, expire_on_commit=False)
   monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
   monkeypatch.setattr(
@@ -75,4 +79,75 @@ async def test_three_connection_pool_exhaustion_and_admitted_recovery(monkeypatc
     )
     assert engine.pool.checkedout() == 0
   finally:
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_cancelled_closes_keep_real_connections_within_admission_budget(
+  monkeypatch, cancel_count
+):
+  engine = _readonly_engine()
+  closing = asyncio.Event()
+  allow_close = asyncio.Event()
+  close_tasks = []
+
+  class DelayedCloseSession(AsyncSession):
+    async def close(self):
+      if self.info.get("delay_close"):
+        close_tasks.append(asyncio.current_task())
+        if len(close_tasks) == 2:
+          closing.set()
+        await allow_close.wait()
+      await super().close()
+
+  monkeypatch.setattr(
+    database,
+    "AsyncSessionLocal",
+    async_sessionmaker(engine, class_=DelayedCloseSession, expire_on_commit=False),
+  )
+  monkeypatch.setattr(
+    database, "database_admission", database.DatabaseAdmission(3, timeout_seconds=0.05)
+  )
+
+  async def work():
+    async with database.database_session() as db:
+      db.info["delay_close"] = True
+      await db.execute(text("SELECT 1"))
+
+  tasks = [asyncio.create_task(work()) for _ in range(2)]
+  try:
+    await asyncio.wait_for(closing.wait(), timeout=10)
+    for _ in range(cancel_count):
+      for task in tasks:
+        task.cancel()
+      await asyncio.sleep(0)
+      assert not any(task.done() for task in tasks)
+    assert engine.pool.checkedout() == 2
+    with pytest.raises(database.DatabaseCapacityTimeout):
+      async with database.database_session():
+        pytest.fail("replacement admitted before old connections were returned")
+    async with database.database_session(heartbeat=True) as heartbeat:
+      assert await heartbeat.scalar(text("SELECT 1")) == 1
+      assert engine.pool.checkedout() == 3
+    allow_close.set()
+    results = await asyncio.wait_for(
+      asyncio.gather(*tasks, return_exceptions=True), timeout=5
+    )
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    assert engine.pool.checkedout() == 0
+
+    # Both work permits and the heartbeat permit are reusable after cleanup.
+    async with AsyncExitStack() as stack:
+      for heartbeat in (False, False, True):
+        db = await stack.enter_async_context(
+          database.database_session(heartbeat=heartbeat)
+        )
+        assert await db.scalar(text("SELECT 1")) == 1
+      assert engine.pool.checkedout() == 3
+    assert engine.pool.checkedout() == 0
+  finally:
+    allow_close.set()
+    await asyncio.gather(*tasks, *close_tasks, return_exceptions=True)
     await engine.dispose()
