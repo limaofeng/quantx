@@ -26,6 +26,7 @@ from quantx_domain.trading.exit_plan import (
 from sqlalchemy import select
 
 from quantx_infrastructure.models.agent_runtime import (
+  AGENT_REPORT_SNAPSHOT_ID,
   AccountExecutionControl,
   AccountExecutionControlEvent,
   AgentReportInbox,
@@ -958,7 +959,7 @@ class AccountExecutionQuarantineService:
           .where(
             AgentReportInbox.message_type == "delta_report",
             AgentReportInbox.protocol_version == "1.1",
-            AgentReportInbox.payload["snapshot_id"].as_string() == snapshot_id,
+            AGENT_REPORT_SNAPSHOT_ID == snapshot_id,
           )
           .order_by(AgentReportInbox.received_at.desc())
         )
@@ -1138,22 +1139,7 @@ class AccountExecutionQuarantineService:
     snapshot_sequence = 0
     snapshot_evidence_error = ""
     snapshot_payload: dict[str, Any] | None = None
-    if (
-      control is not None
-      and str(control.last_snapshot_id or "")
-      and str(control.last_snapshot_hash or "")
-      and control.last_snapshot_at is not None
-    ):
-      try:
-        snapshot_payload = await self._latest_full_snapshot_payload(
-          account_id=normalized_account_id,
-          snapshot_id=str(control.last_snapshot_id or ""),
-          snapshot_hash=str(control.last_snapshot_hash or ""),
-        )
-      except ValueError:
-        snapshot_evidence_error = "LATEST_FULL_SNAPSHOT_EVIDENCE_UNAVAILABLE"
-      else:
-        snapshot_sequence = _snapshot_sequence(snapshot_payload)
+    snapshot_loaded = False
     events = list(
       (
         await self.db.execute(
@@ -1212,6 +1198,24 @@ class AccountExecutionQuarantineService:
           and str(outbox.delivery_status or "").upper() == "RECONCILE_REQUIRED"
         ):
           continue
+        if not snapshot_loaded:
+          snapshot_loaded = True
+          if (
+            control is not None
+            and str(control.last_snapshot_id or "")
+            and str(control.last_snapshot_hash or "")
+            and control.last_snapshot_at is not None
+          ):
+            try:
+              snapshot_payload = await self._latest_full_snapshot_payload(
+                account_id=normalized_account_id,
+                snapshot_id=str(control.last_snapshot_id or ""),
+                snapshot_hash=str(control.last_snapshot_hash or ""),
+              )
+            except ValueError:
+              snapshot_evidence_error = "LATEST_FULL_SNAPSHOT_EVIDENCE_UNAVAILABLE"
+            else:
+              snapshot_sequence = _snapshot_sequence(snapshot_payload)
         blocked_reason = ""
         quarantine_sequence = max(
           0,

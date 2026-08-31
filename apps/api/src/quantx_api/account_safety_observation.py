@@ -55,11 +55,8 @@ async def account_safety_observation_snapshot() -> AccountSafetyObservationSnaps
     )
 
   account_id = account_ids[0]
-  payload = await AccountExecutionSafetyService().status(account_id)
-  by_code = {
-    str(item.get("code") or ""): item
-    for item in list(payload.get("checks") or [])
-  }
+  raw_checks = await AccountExecutionSafetyService().checks(account_id)
+  by_code = {str(item.get("code") or ""): item for item in raw_checks}
   checks: list[AccountSafetyCheckObservation] = []
   for code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES:
     item = by_code.get(code)

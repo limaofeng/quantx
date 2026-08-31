@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from quantx_api import account_safety_observation as observation
 from quantx_contracts import ACCOUNT_EXECUTION_SAFETY_CHECK_CODES
@@ -13,26 +15,25 @@ async def test_observation_is_complete_account_free_and_sanitized(monkeypatch):
     [account_id],
   )
 
-  async def status(_self, requested_account_id: str) -> dict:
+  async def checks(_self, requested_account_id: str) -> list[dict]:
     assert requested_account_id == account_id
-    return {
-      "account_id": account_id,
-      "checks": [
-        {
-          "code": code,
-          "status": "STANDBY" if code == "MARKET_STREAM_READY" else "PASSED",
-          "scope": "INCREASE_RISK",
-          "message": (
-            f"账户 {account_id} 快照 {secret_hash} 当前休市"
-            if code == "MARKET_STREAM_READY"
-            else "已通过"
-          ),
-        }
-        for code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES
-      ],
-    }
+    return [
+      {
+        "code": code,
+        "status": "STANDBY" if code == "MARKET_STREAM_READY" else "PASSED",
+        "scope": "INCREASE_RISK",
+        "message": (
+          f"账户 {account_id} 快照 {secret_hash} 当前休市"
+          if code == "MARKET_STREAM_READY"
+          else "已通过"
+        ),
+      }
+      for code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES
+    ]
 
-  monkeypatch.setattr(observation.AccountExecutionSafetyService, "status", status)
+  full_status = AsyncMock(side_effect=AssertionError("observer must not load details"))
+  monkeypatch.setattr(observation.AccountExecutionSafetyService, "status", full_status)
+  monkeypatch.setattr(observation.AccountExecutionSafetyService, "checks", checks)
   snapshot = await observation.account_safety_observation_snapshot()
   serialized = snapshot.model_dump_json()
 
@@ -45,17 +46,33 @@ async def test_observation_is_complete_account_free_and_sanitized(monkeypatch):
   assert standby.reason_code == "MARKET_CLOSED_STANDBY"
   assert account_id not in serialized
   assert secret_hash not in serialized
+  full_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_observation_is_disabled_without_one_configured_account(monkeypatch):
+@pytest.mark.parametrize("accounts", [[], ["account-a", "account-b"]])
+async def test_observation_is_disabled_without_one_configured_account(
+  monkeypatch, accounts
+):
   monkeypatch.setattr(
     observation.settings,
     "real_trading_account_allowlist",
-    [],
+    accounts,
   )
 
   snapshot = await observation.account_safety_observation_snapshot()
 
   assert snapshot.status == "disabled"
   assert snapshot.checks == []
+
+
+@pytest.mark.asyncio
+async def test_observation_rejects_incomplete_check_results(monkeypatch):
+  monkeypatch.setattr(
+    observation.settings, "real_trading_account_allowlist", ["account-a"]
+  )
+  monkeypatch.setattr(
+    observation.AccountExecutionSafetyService, "checks", AsyncMock(return_value=[])
+  )
+  with pytest.raises(RuntimeError, match="missing check"):
+    await observation.account_safety_observation_snapshot()

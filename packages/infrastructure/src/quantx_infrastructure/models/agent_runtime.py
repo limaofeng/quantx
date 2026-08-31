@@ -14,6 +14,7 @@ from sqlalchemy import (
   Text,
   UniqueConstraint,
   func,
+  literal,
 )
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
@@ -442,6 +443,21 @@ class AgentReportInbox(Base):
   next_attempt_at = Column(DateTime, nullable=True)
   processed_at = Column(DateTime, nullable=True)
   processing_error = Column(Text, nullable=True)
+
+
+# Keep the fixed JSON path literal in prepared queries so they match the index.
+# JSONStrIndexType also renders SQLite's JSON path correctly in unit tests.
+AGENT_REPORT_SNAPSHOT_ID = AgentReportInbox.payload[
+  literal("snapshot_id", type_=JSON.JSONStrIndexType, literal_execute=True)
+].as_string()
+
+Index(
+  "ix_agent_report_snapshot_lookup",
+  AgentReportInbox.message_type,
+  AgentReportInbox.protocol_version,
+  AGENT_REPORT_SNAPSHOT_ID,
+  AgentReportInbox.received_at.desc(),
+)
 
 
 class OperationalAlert(Base):

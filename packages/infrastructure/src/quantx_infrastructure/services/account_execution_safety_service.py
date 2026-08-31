@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from time import perf_counter
 from typing import Any
 
 from quantx_contracts import (
@@ -72,6 +77,45 @@ _RISK_REDUCTION_CHECKS = frozenset(
   }
 )
 _AUTHORIZATION_CHECK = "ACCOUNT_RISK_INCREASE_AUTHORIZED"
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _StatusTiming:
+  phases: dict[str, float] = field(default_factory=dict)
+
+  @contextmanager
+  def phase(self, name: str) -> Iterator[None]:
+    started = perf_counter()
+    try:
+      yield
+    finally:
+      self.phases[name] = (perf_counter() - started) * 1000
+
+
+@contextmanager
+def _status_timing() -> Iterator[_StatusTiming]:
+  timing = _StatusTiming()
+  started = perf_counter()
+  error_type = "none"
+  try:
+    yield timing
+  except BaseException as exc:
+    error_type = type(exc).__name__
+    raise
+  finally:
+    total_ms = (perf_counter() - started) * 1000
+    if total_ms >= 1000:
+      logger.warning(
+        "Account safety slow read: total_ms=%.2f base_query_ms=%.2f "
+        "market_ms=%.2f details_ms=%.2f error_type=%s",
+        total_ms,
+        timing.phases.get("base_query", 0.0),
+        timing.phases.get("market", 0.0),
+        timing.phases.get("details", 0.0),
+        error_type,
+      )
 
 
 class AccountExecutionControlIdempotencyError(ValueError):
@@ -508,411 +552,425 @@ class AccountExecutionSafetyService:
       )
     ).all()
 
-  async def status(self, account_id: str) -> dict[str, Any]:
-    async with AsyncSessionLocal() as db:
-      rows = await self._readiness_snapshot(db, account_id)
-      if not rows:
-        raise RuntimeError("账户执行安全状态数据库查询未返回结果")
-      (
-        control,
-        engine,
-        _,
-        _,
-        queued_count,
-        oldest_queued_at,
-        dead_letter_count,
-        unresolved_critical_alert_count,
-        position_snapshot,
-      ) = rows[0]
-      device = None
-      agent = None
-      live_agent_candidates = []
-      for row in rows:
-        candidate_device = row[2]
-        if candidate_device is None:
-          continue
-        if account_id in list(candidate_device.authorized_account_ids or []) and (
-          "live"
-          in {str(value).lower() for value in list(candidate_device.capabilities or [])}
-        ):
-          candidate_agent = row[3]
-          live_agent_candidates.append((candidate_device, candidate_agent))
-          if device is None or self._agent_candidate_rank(
-            candidate_agent,
-          ) > self._agent_candidate_rank(agent):
-            device = candidate_device
-            agent = candidate_agent
+  async def checks(self, account_id: str) -> list[dict[str, Any]]:
+    """Evaluate current admission facts without loading repair UI evidence."""
+    with _status_timing() as timing:
+      async with AsyncSessionLocal() as db:
+        payload, _ = await self._evaluate_status(db, account_id, timing)
+        return payload["checks"]
 
-      now = utcnow()
-      ready_live_agents = [
-        (candidate_device, candidate_agent)
-        for candidate_device, candidate_agent in live_agent_candidates
-        if self._agent_fresh(candidate_agent)
-      ]
-      multiple_ready_live_agents = len(ready_live_agents) > 1
-      if len(ready_live_agents) == 1:
-        device, agent = ready_live_agents[0]
-      agent_details = dict(agent.details or {}) if agent else {}
-      capabilities = {
-        str(value).lower() for value in list(agent_details.get("capabilities") or [])
-      }
-      reported_agent_mode = next(
-        (value for value in ("live", "paper", "data-only") if value in capabilities),
-        "offline",
-      )
-      reported_protocol_version = str(agent_details.get("protocolVersion") or "")
-      agent_session = evaluate_agent_session(
-        agent,
-        now=now,
-      )
-      agent_heartbeat_current = agent_session.current
-      live_agent_ready = bool(
-        not multiple_ready_live_agents
-        and len(ready_live_agents) == 1
-        and agent_heartbeat_current
-        and str(agent.status).upper() == "READY"
-      )
-      agent_market_stream_ready = bool(
-        agent_heartbeat_current
-        and str(agent_details.get("marketStreamStatus") or "").upper() == "READY"
-      )
+  async def status(self, account_id: str) -> dict[str, Any]:
+    with _status_timing() as timing:
+      async with AsyncSessionLocal() as db:
+        payload, control = await self._evaluate_status(db, account_id, timing)
+        with timing.phase("details"):
+          payload["quarantined_orders"] = await AccountExecutionQuarantineService(
+            db
+          ).list_quarantined_orders(account_id=account_id, control=control)
+        return payload
+
+  async def _evaluate_status(
+    self, db, account_id: str, timing: _StatusTiming
+  ) -> tuple[dict[str, Any], AccountExecutionControl | None]:
+    """Keep all admission rules and the selected control snapshot in one read."""
+    with timing.phase("base_query"):
+      rows = await self._readiness_snapshot(db, account_id)
+    if not rows:
+      raise RuntimeError("账户执行安全状态数据库查询未返回结果")
+    (
+      control,
+      engine,
+      _,
+      _,
+      queued_count,
+      oldest_queued_at,
+      dead_letter_count,
+      unresolved_critical_alert_count,
+      position_snapshot,
+    ) = rows[0]
+    device = None
+    agent = None
+    live_agent_candidates = []
+    for row in rows:
+      candidate_device = row[2]
+      if candidate_device is None:
+        continue
+      if account_id in list(candidate_device.authorized_account_ids or []) and (
+        "live"
+        in {str(value).lower() for value in list(candidate_device.capabilities or [])}
+      ):
+        candidate_agent = row[3]
+        live_agent_candidates.append((candidate_device, candidate_agent))
+        if device is None or self._agent_candidate_rank(
+          candidate_agent,
+        ) > self._agent_candidate_rank(agent):
+          device = candidate_device
+          agent = candidate_agent
+
+    now = utcnow()
+    ready_live_agents = [
+      (candidate_device, candidate_agent)
+      for candidate_device, candidate_agent in live_agent_candidates
+      if self._agent_fresh(candidate_agent)
+    ]
+    multiple_ready_live_agents = len(ready_live_agents) > 1
+    if len(ready_live_agents) == 1:
+      device, agent = ready_live_agents[0]
+    agent_details = dict(agent.details or {}) if agent else {}
+    capabilities = {
+      str(value).lower() for value in list(agent_details.get("capabilities") or [])
+    }
+    reported_agent_mode = next(
+      (value for value in ("live", "paper", "data-only") if value in capabilities),
+      "offline",
+    )
+    reported_protocol_version = str(agent_details.get("protocolVersion") or "")
+    agent_session = evaluate_agent_session(
+      agent,
+      now=now,
+    )
+    agent_heartbeat_current = agent_session.current
+    live_agent_ready = bool(
+      not multiple_ready_live_agents
+      and len(ready_live_agents) == 1
+      and agent_heartbeat_current
+      and str(agent.status).upper() == "READY"
+    )
+    agent_market_stream_ready = bool(
+      agent_heartbeat_current
+      and str(agent_details.get("marketStreamStatus") or "").upper() == "READY"
+    )
+    with timing.phase("market"):
       market_stream_readiness = (
         await authoritative_market_stream_readiness()
         if agent_market_stream_ready
         else None
       )
-      market_stream_check_status = (
-        market_stream_readiness.status.value
-        if market_stream_readiness is not None
-        else MarketStreamReadinessStatus.FAILED.value
+    market_stream_check_status = (
+      market_stream_readiness.status.value
+      if market_stream_readiness is not None
+      else MarketStreamReadinessStatus.FAILED.value
+    )
+    market_stream_check_message = (
+      market_stream_readiness.message
+      if market_stream_readiness is not None
+      else "QMT Agent 全市场行情流尚未进入 READY"
+    )
+    if multiple_ready_live_agents:
+      live_agent_blocked_reason = (
+        "同一账户检测到多个就绪 live QMT Agent，必须先恢复唯一会话"
       )
-      market_stream_check_message = (
-        market_stream_readiness.message
-        if market_stream_readiness is not None
-        else "QMT Agent 全市场行情流尚未进入 READY"
-      )
-      if multiple_ready_live_agents:
-        live_agent_blocked_reason = (
-          "同一账户检测到多个就绪 live QMT Agent，必须先恢复唯一会话"
-        )
-      elif device is None:
-        live_agent_blocked_reason = "没有绑定该账户且具备 live 能力的已登记 QMT Agent"
-      elif agent is None:
-        live_agent_blocked_reason = "对应账户的 live Agent 尚未上报心跳"
-      elif not agent_heartbeat_current:
-        live_agent_blocked_reason = "对应账户的 live Agent 已离线或心跳超过 90 秒"
-      else:
-        live_agent_blocked_reason = "对应账户的 live Agent 当前未就绪"
+    elif device is None:
+      live_agent_blocked_reason = "没有绑定该账户且具备 live 能力的已登记 QMT Agent"
+    elif agent is None:
+      live_agent_blocked_reason = "对应账户的 live Agent 尚未上报心跳"
+    elif not agent_heartbeat_current:
+      live_agent_blocked_reason = "对应账户的 live Agent 已离线或心跳超过 90 秒"
+    else:
+      live_agent_blocked_reason = "对应账户的 live Agent 当前未就绪"
 
-      agent_reason_code = agent_session.reason_code or (
-        "" if live_agent_ready else agent_unready_reason_code(agent)
-      )
-      launch_block_reason = qmt_agent_launch_block_reason()
-      if not multiple_ready_live_agents and not live_agent_ready and agent_reason_code:
-        live_agent_blocked_reason = (
-          f"本机 QMT Agent 当前不可用于实盘（{agent_reason_code}）"
-        )
-
-      account_reconciliation = dict(agent_details.get("accountReconciliation") or {})
-      reconciliation_summary = dict(account_reconciliation.get(account_id) or {})
-      current_snapshot_id = str(control.last_snapshot_id if control else "")
-      activity_classification_current = bool(
-        current_snapshot_id
-        and str(reconciliation_summary.get("snapshotId") or "") == current_snapshot_id
-      )
-      external_order_count = max(
-        0, int(reconciliation_summary.get("externalOrderCount") or 0)
-      )
-      external_trade_count = max(
-        0, int(reconciliation_summary.get("externalTradeCount") or 0)
-      )
-      controlled_window_active = bool(control and control.controlled_window_active)
-      controlled_window_snapshot_id = str(
-        control.controlled_window_snapshot_id
-        if control and control.controlled_window_snapshot_id
-        else ""
-      )
-      current_reconciliation_snapshot_id = str(
-        reconciliation_summary.get("snapshotId") or ""
-      )
-      if (
-        controlled_window_active
-        and controlled_window_snapshot_id
-        and current_reconciliation_snapshot_id == controlled_window_snapshot_id
-      ):
-        new_external_order_count = 0
-        new_external_trade_count = 0
-        working_external_order_count = 0
-      else:
-        new_external_order_count = max(
-          0,
-          int(
-            reconciliation_summary.get("newExternalOrderCount", external_order_count)
-            or 0
-          ),
-        )
-        new_external_trade_count = max(
-          0,
-          int(
-            reconciliation_summary.get("newExternalTradeCount", external_trade_count)
-            or 0
-          ),
-        )
-        working_external_order_count = max(
-          0, int(reconciliation_summary.get("workingExternalOrderCount") or 0)
-        )
-
-      snapshot_at = (
-        to_naive_utc(control.last_snapshot_at)
-        if control and control.last_snapshot_at
-        else None
-      )
-      backup_at = (
-        to_naive_utc(control.last_backup_at)
-        if control and control.last_backup_at
-        else None
-      )
-      snapshot_age = (
-        max(0.0, (now - snapshot_at).total_seconds()) if snapshot_at else None
-      )
-      position_snapshot_reported_at = (
-        to_naive_utc(position_snapshot.reported_at)
-        if position_snapshot and position_snapshot.reported_at
-        else None
-      )
-      position_snapshot_current = bool(
-        control
-        and position_snapshot
-        and position_snapshot.is_complete
-        and int(position_snapshot.sequence or 0) > 0
-        and not str(position_snapshot.last_error or "").strip()
-        and snapshot_at is not None
-        and position_snapshot_reported_at == snapshot_at
-      )
-      position_snapshot_error = str(
-        position_snapshot.last_error if position_snapshot else ""
-      ).strip()
-      backup_age = max(0.0, (now - backup_at).total_seconds()) if backup_at else None
-      queue_delay = (
-        max(0.0, (now - to_naive_utc(oldest_queued_at)).total_seconds())
-        if oldest_queued_at
-        else 0.0
-      )
-      dead_letter_count = int(dead_letter_count or 0)
-      unresolved_critical_alert_count = int(unresolved_critical_alert_count or 0)
-      authorization_state = str(
-        control.authorization_state if control else "DISABLED"
-      ).upper()
-
-      binary_checks = [
-        (
-          "SERVER_REAL_TRADING_ENABLED",
-          bool(settings.enable_real_trading),
-          "服务端 ENABLE_REAL_TRADING 未启用",
-          "INCREASE_RISK",
-        ),
-        (
-          "ACCOUNT_ALLOWLISTED",
-          account_id in set(settings.real_trading_account_allowlist or []),
-          "账户不在 REAL_TRADING_ACCOUNT_ALLOWLIST",
-          "INCREASE_RISK",
-        ),
-        ("ENGINE_READY", self._fresh(engine), "Engine 心跳缺失或已过期", "OBSERVATION"),
-        (
-          "LIVE_AGENT_READY",
-          live_agent_ready,
-          live_agent_blocked_reason,
-          "OBSERVATION",
-        ),
-        (
-          "AGENT_MODE_LIVE",
-          reported_agent_mode == "live",
-          "QMT Agent 尚未明确切换到 live 模式",
-          "OBSERVATION",
-        ),
-        (
-          "PROTOCOL_1_1",
-          reported_protocol_version == "1.1",
-          "账户观察与真实下单均要求 Agent 协议 1.1",
-          "OBSERVATION",
-        ),
-        (
-          "EXECUTION_CONTROL_CONFIGURED",
-          control is not None,
-          "账户尚未创建独立执行控制配置",
-          "OBSERVATION",
-        ),
-        (
-          "SNAPSHOT_RECONCILED",
-          bool(
-            control
-            and control.reconcile_status == "READY"
-            and position_snapshot_current
-          ),
-          position_snapshot_error
-          or "资金、持仓、委托和成交快照尚未完成对账",
-          "OBSERVATION",
-        ),
-        (
-          "SNAPSHOT_FRESH",
-          position_snapshot_current
-          and live_agent_ready
-          and snapshot_age is not None
-          and snapshot_age <= 90,
-          position_snapshot_error
-          or (live_agent_blocked_reason if not live_agent_ready else "")
-          or "账户完整快照缺失、无效或已超过 90 秒",
-          "OBSERVATION",
-        ),
-        (
-          "SNAPSHOT_ACTIVITY_CLASSIFIED",
-          activity_classification_current,
-          "最新完整快照尚未完成手工/外部交易分类",
-          "OBSERVATION",
-        ),
-        (
-          "RECENT_BACKUP",
-          backup_age is not None and backup_age < 24 * 60 * 60,
-          "最近成功备份缺失或已超过 24 小时",
-          "INCREASE_RISK",
-        ),
-        (
-          "NO_CRITICAL_ALERTS",
-          unresolved_critical_alert_count == 0,
-          "存在尚未解决的账户执行 Sev-1/Sev-2 运行告警",
-          "OBSERVATION",
-        ),
-        (
-          "NO_DEAD_LETTERS",
-          dead_letter_count == 0,
-          "存在尚未被后续权威快照取代的 Agent 报告死信",
-          "OBSERVATION",
-        ),
-        (
-          "CONTROLLED_WINDOW_ACTIVE",
-          controlled_window_active,
-          "尚未基于最新完整快照建立账户实盘窗口",
-          "INCREASE_RISK",
-        ),
-        (
-          "NO_EXTERNAL_BROKER_ACTIVITY",
-          new_external_order_count == 0
-          and new_external_trade_count == 0
-          and working_external_order_count == 0,
-          "账户实盘窗口后出现新的 QMT 手工/外部交易或仍有活动委托",
-          "INCREASE_RISK",
-        ),
-        (
-          "KILL_SWITCH_CLEAR",
-          authorization_state != "KILLED",
-          "账户紧急停止已触发",
-          "OBSERVATION",
-        ),
-        (
-          _AUTHORIZATION_CHECK,
-          authorization_state == "ENABLED",
-          "账户买入权限未启用",
-          "INCREASE_RISK",
-        ),
-      ]
-      items = [
-        {
-          "code": code,
-          "status": (
-            MarketStreamReadinessStatus.PASSED.value
-            if passed
-            else MarketStreamReadinessStatus.FAILED.value
-          ),
-          "message": "" if passed else message,
-          "scope": scope,
-        }
-        for code, passed, message, scope in binary_checks
-      ]
-      items.insert(
-        5,
-        {
-          "code": "MARKET_STREAM_READY",
-          "status": market_stream_check_status,
-          "message": market_stream_check_message,
-          "scope": "INCREASE_RISK",
-        },
-      )
-      projection = project_account_execution_safety(
-        {"authorization_state": authorization_state, "checks": items}
-      )
-      quarantined_orders = await AccountExecutionQuarantineService(
-        db
-      ).list_quarantined_orders(
-        account_id=account_id,
-        control=control,
+    agent_reason_code = agent_session.reason_code or (
+      "" if live_agent_ready else agent_unready_reason_code(agent)
+    )
+    launch_block_reason = qmt_agent_launch_block_reason()
+    if not multiple_ready_live_agents and not live_agent_ready and agent_reason_code:
+      live_agent_blocked_reason = (
+        f"本机 QMT Agent 当前不可用于实盘（{agent_reason_code}）"
       )
 
-      return {
-        "account_id": account_id,
-        "authorization_state": authorization_state,
-        "state_version": int(control.state_version if control else 0),
-        "health_status": projection["health_status"],
-        "execution_mode": projection["execution_mode"],
-        "can_increase_risk": projection["can_increase_risk"],
-        "can_reduce_risk": projection["can_reduce_risk"],
-        "can_activate_automation": projection["can_activate_automation"],
-        "summary": projection["summary"],
-        "blocked_reasons": projection["blocked_reasons"],
-        "checks": projection["checks"],
-        "engine_status": str(engine.status if engine else "OFFLINE"),
-        "agent_status": (
-          "BLOCKED"
-          if launch_block_reason
-          else str(agent.status)
-          if agent_heartbeat_current and agent
-          else "OFFLINE"
+    account_reconciliation = dict(agent_details.get("accountReconciliation") or {})
+    reconciliation_summary = dict(account_reconciliation.get(account_id) or {})
+    current_snapshot_id = str(control.last_snapshot_id if control else "")
+    activity_classification_current = bool(
+      current_snapshot_id
+      and str(reconciliation_summary.get("snapshotId") or "") == current_snapshot_id
+    )
+    external_order_count = max(
+      0, int(reconciliation_summary.get("externalOrderCount") or 0)
+    )
+    external_trade_count = max(
+      0, int(reconciliation_summary.get("externalTradeCount") or 0)
+    )
+    controlled_window_active = bool(control and control.controlled_window_active)
+    controlled_window_snapshot_id = str(
+      control.controlled_window_snapshot_id
+      if control and control.controlled_window_snapshot_id
+      else ""
+    )
+    current_reconciliation_snapshot_id = str(
+      reconciliation_summary.get("snapshotId") or ""
+    )
+    if (
+      controlled_window_active
+      and controlled_window_snapshot_id
+      and current_reconciliation_snapshot_id == controlled_window_snapshot_id
+    ):
+      new_external_order_count = 0
+      new_external_trade_count = 0
+      working_external_order_count = 0
+    else:
+      new_external_order_count = max(
+        0,
+        int(
+          reconciliation_summary.get("newExternalOrderCount", external_order_count)
+          or 0
         ),
-        "agent_device_id": str(device.id) if device else None,
-        "ready_live_agent_count": len(ready_live_agents),
-        "agent_mode": (
-          reported_agent_mode
-          if agent_heartbeat_current and not launch_block_reason
-          else "offline"
+      )
+      new_external_trade_count = max(
+        0,
+        int(
+          reconciliation_summary.get("newExternalTradeCount", external_trade_count)
+          or 0
         ),
-        "requested_agent_mode": reported_agent_mode or "unknown",
-        "qmt_launch_reason_code": agent_reason_code,
-        "protocol_version": (
-          reported_protocol_version if agent_heartbeat_current else ""
+      )
+      working_external_order_count = max(
+        0, int(reconciliation_summary.get("workingExternalOrderCount") or 0)
+      )
+
+    snapshot_at = (
+      to_naive_utc(control.last_snapshot_at)
+      if control and control.last_snapshot_at
+      else None
+    )
+    backup_at = (
+      to_naive_utc(control.last_backup_at)
+      if control and control.last_backup_at
+      else None
+    )
+    snapshot_age = (
+      max(0.0, (now - snapshot_at).total_seconds()) if snapshot_at else None
+    )
+    position_snapshot_reported_at = (
+      to_naive_utc(position_snapshot.reported_at)
+      if position_snapshot and position_snapshot.reported_at
+      else None
+    )
+    position_snapshot_current = bool(
+      control
+      and position_snapshot
+      and position_snapshot.is_complete
+      and int(position_snapshot.sequence or 0) > 0
+      and not str(position_snapshot.last_error or "").strip()
+      and snapshot_at is not None
+      and position_snapshot_reported_at == snapshot_at
+    )
+    position_snapshot_error = str(
+      position_snapshot.last_error if position_snapshot else ""
+    ).strip()
+    backup_age = max(0.0, (now - backup_at).total_seconds()) if backup_at else None
+    queue_delay = (
+      max(0.0, (now - to_naive_utc(oldest_queued_at)).total_seconds())
+      if oldest_queued_at
+      else 0.0
+    )
+    dead_letter_count = int(dead_letter_count or 0)
+    unresolved_critical_alert_count = int(unresolved_critical_alert_count or 0)
+    authorization_state = str(
+      control.authorization_state if control else "DISABLED"
+    ).upper()
+
+    binary_checks = [
+      (
+        "SERVER_REAL_TRADING_ENABLED",
+        bool(settings.enable_real_trading),
+        "服务端 ENABLE_REAL_TRADING 未启用",
+        "INCREASE_RISK",
+      ),
+      (
+        "ACCOUNT_ALLOWLISTED",
+        account_id in set(settings.real_trading_account_allowlist or []),
+        "账户不在 REAL_TRADING_ACCOUNT_ALLOWLIST",
+        "INCREASE_RISK",
+      ),
+      ("ENGINE_READY", self._fresh(engine), "Engine 心跳缺失或已过期", "OBSERVATION"),
+      (
+        "LIVE_AGENT_READY",
+        live_agent_ready,
+        live_agent_blocked_reason,
+        "OBSERVATION",
+      ),
+      (
+        "AGENT_MODE_LIVE",
+        reported_agent_mode == "live",
+        "QMT Agent 尚未明确切换到 live 模式",
+        "OBSERVATION",
+      ),
+      (
+        "PROTOCOL_1_1",
+        reported_protocol_version == "1.1",
+        "账户观察与真实下单均要求 Agent 协议 1.1",
+        "OBSERVATION",
+      ),
+      (
+        "EXECUTION_CONTROL_CONFIGURED",
+        control is not None,
+        "账户尚未创建独立执行控制配置",
+        "OBSERVATION",
+      ),
+      (
+        "SNAPSHOT_RECONCILED",
+        bool(
+          control
+          and control.reconcile_status == "READY"
+          and position_snapshot_current
         ),
-        "reconcile_status": str(control.reconcile_status if control else "UNKNOWN"),
-        "kill_switch": authorization_state == "KILLED",
-        "execution_window_active": controlled_window_active,
-        "snapshot_id": control.last_snapshot_id if control else None,
-        "snapshot_hash": control.last_snapshot_hash if control else None,
-        "snapshot_at": snapshot_at,
-        "reconciliation_age_seconds": snapshot_age,
-        "queued_command_count": int(queued_count or 0),
-        "queue_delay_seconds": queue_delay,
-        "dead_letter_count": dead_letter_count,
-        "unresolved_critical_alert_count": unresolved_critical_alert_count,
-        "manual_coexistence": bool(
-          reconciliation_summary.get("manualCoexistence")
-          if activity_classification_current
-          else authorization_state != "ENABLED"
+        position_snapshot_error
+        or "资金、持仓、委托和成交快照尚未完成对账",
+        "OBSERVATION",
+      ),
+      (
+        "SNAPSHOT_FRESH",
+        position_snapshot_current
+        and live_agent_ready
+        and snapshot_age is not None
+        and snapshot_age <= 90,
+        position_snapshot_error
+        or (live_agent_blocked_reason if not live_agent_ready else "")
+        or "账户完整快照缺失、无效或已超过 90 秒",
+        "OBSERVATION",
+      ),
+      (
+        "SNAPSHOT_ACTIVITY_CLASSIFIED",
+        activity_classification_current,
+        "最新完整快照尚未完成手工/外部交易分类",
+        "OBSERVATION",
+      ),
+      (
+        "RECENT_BACKUP",
+        backup_age is not None and backup_age < 24 * 60 * 60,
+        "最近成功备份缺失或已超过 24 小时",
+        "INCREASE_RISK",
+      ),
+      (
+        "NO_CRITICAL_ALERTS",
+        unresolved_critical_alert_count == 0,
+        "存在尚未解决的账户执行 Sev-1/Sev-2 运行告警",
+        "OBSERVATION",
+      ),
+      (
+        "NO_DEAD_LETTERS",
+        dead_letter_count == 0,
+        "存在尚未被后续权威快照取代的 Agent 报告死信",
+        "OBSERVATION",
+      ),
+      (
+        "CONTROLLED_WINDOW_ACTIVE",
+        controlled_window_active,
+        "尚未基于最新完整快照建立账户实盘窗口",
+        "INCREASE_RISK",
+      ),
+      (
+        "NO_EXTERNAL_BROKER_ACTIVITY",
+        new_external_order_count == 0
+        and new_external_trade_count == 0
+        and working_external_order_count == 0,
+        "账户实盘窗口后出现新的 QMT 手工/外部交易或仍有活动委托",
+        "INCREASE_RISK",
+      ),
+      (
+        "KILL_SWITCH_CLEAR",
+        authorization_state != "KILLED",
+        "账户紧急停止已触发",
+        "OBSERVATION",
+      ),
+      (
+        _AUTHORIZATION_CHECK,
+        authorization_state == "ENABLED",
+        "账户买入权限未启用",
+        "INCREASE_RISK",
+      ),
+    ]
+    items = [
+      {
+        "code": code,
+        "status": (
+          MarketStreamReadinessStatus.PASSED.value
+          if passed
+          else MarketStreamReadinessStatus.FAILED.value
         ),
-        "external_order_count": external_order_count,
-        "external_trade_count": external_trade_count,
-        "controlled_window_snapshot_id": controlled_window_snapshot_id or None,
-        "controlled_window_started_at": to_naive_utc(
-          control.controlled_window_started_at
-        )
-        if control and control.controlled_window_started_at
-        else None,
-        "new_external_order_count": new_external_order_count,
-        "new_external_trade_count": new_external_trade_count,
-        "working_external_order_count": working_external_order_count,
-        "journal_integrity": str(agent_details.get("journalIntegrity") or "unknown"),
-        "journal_size_bytes": int(agent_details.get("journalSizeBytes") or 0),
-        "journal_pending_reports": int(agent_details.get("journalPendingReports") or 0),
-        "last_backup_at": backup_at,
-        "checked_at": now,
-        "quarantined_orders": quarantined_orders,
+        "message": "" if passed else message,
+        "scope": scope,
       }
+      for code, passed, message, scope in binary_checks
+    ]
+    items.insert(
+      5,
+      {
+        "code": "MARKET_STREAM_READY",
+        "status": market_stream_check_status,
+        "message": market_stream_check_message,
+        "scope": "INCREASE_RISK",
+      },
+    )
+    projection = project_account_execution_safety(
+      {"authorization_state": authorization_state, "checks": items}
+    )
+    payload = {
+      "account_id": account_id,
+      "authorization_state": authorization_state,
+      "state_version": int(control.state_version if control else 0),
+      "health_status": projection["health_status"],
+      "execution_mode": projection["execution_mode"],
+      "can_increase_risk": projection["can_increase_risk"],
+      "can_reduce_risk": projection["can_reduce_risk"],
+      "can_activate_automation": projection["can_activate_automation"],
+      "summary": projection["summary"],
+      "blocked_reasons": projection["blocked_reasons"],
+      "checks": projection["checks"],
+      "engine_status": str(engine.status if engine else "OFFLINE"),
+      "agent_status": (
+        "BLOCKED"
+        if launch_block_reason
+        else str(agent.status)
+        if agent_heartbeat_current and agent
+        else "OFFLINE"
+      ),
+      "agent_device_id": str(device.id) if device else None,
+      "ready_live_agent_count": len(ready_live_agents),
+      "agent_mode": (
+        reported_agent_mode
+        if agent_heartbeat_current and not launch_block_reason
+        else "offline"
+      ),
+      "requested_agent_mode": reported_agent_mode or "unknown",
+      "qmt_launch_reason_code": agent_reason_code,
+      "protocol_version": (
+        reported_protocol_version if agent_heartbeat_current else ""
+      ),
+      "reconcile_status": str(control.reconcile_status if control else "UNKNOWN"),
+      "kill_switch": authorization_state == "KILLED",
+      "execution_window_active": controlled_window_active,
+      "snapshot_id": control.last_snapshot_id if control else None,
+      "snapshot_hash": control.last_snapshot_hash if control else None,
+      "snapshot_at": snapshot_at,
+      "reconciliation_age_seconds": snapshot_age,
+      "queued_command_count": int(queued_count or 0),
+      "queue_delay_seconds": queue_delay,
+      "dead_letter_count": dead_letter_count,
+      "unresolved_critical_alert_count": unresolved_critical_alert_count,
+      "manual_coexistence": bool(
+        reconciliation_summary.get("manualCoexistence")
+        if activity_classification_current
+        else authorization_state != "ENABLED"
+      ),
+      "external_order_count": external_order_count,
+      "external_trade_count": external_trade_count,
+      "controlled_window_snapshot_id": controlled_window_snapshot_id or None,
+      "controlled_window_started_at": to_naive_utc(
+        control.controlled_window_started_at
+      )
+      if control and control.controlled_window_started_at
+      else None,
+      "new_external_order_count": new_external_order_count,
+      "new_external_trade_count": new_external_trade_count,
+      "working_external_order_count": working_external_order_count,
+      "journal_integrity": str(agent_details.get("journalIntegrity") or "unknown"),
+      "journal_size_bytes": int(agent_details.get("journalSizeBytes") or 0),
+      "journal_pending_reports": int(agent_details.get("journalPendingReports") or 0),
+      "last_backup_at": backup_at,
+      "checked_at": now,
+    }
+    return payload, control
 
   async def _latest_full_snapshot(
     self, db, *, account_id: str, snapshot_id: str

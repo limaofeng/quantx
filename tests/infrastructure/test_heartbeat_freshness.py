@@ -277,10 +277,11 @@ async def _status(
   snapshot = AsyncMock(return_value=normalized_rows)
   monkeypatch.setattr(safety_module, "AsyncSessionLocal", session)
   monkeypatch.setattr(AccountExecutionSafetyService, "_readiness_snapshot", snapshot)
+  details = AsyncMock(return_value=[])
   monkeypatch.setattr(
     safety_module.AccountExecutionQuarantineService,
     "list_quarantined_orders",
-    AsyncMock(return_value=[]),
+    details,
   )
   monkeypatch.setattr(safety_module.settings, "enable_real_trading", True)
   monkeypatch.setattr(
@@ -309,6 +310,12 @@ async def _status(
   )
   result = await AccountExecutionSafetyService().status("TEST-ACCOUNT")
   snapshot.assert_awaited_once()
+  details.assert_awaited_once()
+  details.reset_mock()
+  checks = await AccountExecutionSafetyService().checks("TEST-ACCOUNT")
+  assert checks == result["checks"]
+  assert snapshot.await_count == 2
+  details.assert_not_awaited()
   return result
 
 

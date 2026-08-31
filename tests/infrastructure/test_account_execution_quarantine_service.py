@@ -36,6 +36,8 @@ from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.account_execution_quarantine_service import (
   BROKER_EXECUTION_AFTER_RELEASE,
+  QUARANTINE_REASON_METADATA_KEY,
+  QUARANTINE_REPAIR_REQUIRED_METADATA_KEY,
   AccountExecutionQuarantineService,
 )
 from sqlalchemy import func, select
@@ -524,6 +526,110 @@ async def _seed(
   )
   await db.commit()
   return plan
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate_state", ["none", "repaired", "active"])
+@pytest.mark.parametrize("has_evidence", [False, True])
+async def test_snapshot_evidence_is_loaded_once_only_for_active_candidates(
+  candidate_state, has_evidence, monkeypatch
+):
+  async with _database() as sessions:
+    async with sessions() as db:
+      await _seed(db, owner_kind="monitor", delivered=False)
+      other_plan, other_intent, other_pending, other_outbox = _other_plan_command(
+        delivered=False
+      )
+      db.add_all([other_plan, other_intent, other_pending, other_outbox])
+      if candidate_state != "none":
+        pending = await db.get(PendingTradeOrder, CLIENT_ORDER_ID)
+        assert pending is not None
+        for item in (pending, other_pending):
+          item.request_metadata = {
+            **dict(item.request_metadata or {}),
+            QUARANTINE_REASON_METADATA_KEY: BROKER_EXECUTION_AFTER_RELEASE,
+            QUARANTINE_REPAIR_REQUIRED_METADATA_KEY: candidate_state == "active",
+          }
+        db.add(
+          AccountExecutionControlEvent(
+            event_id="lazy-evidence-quarantine",
+            account_id=ACCOUNT_ID,
+            event_type=BROKER_EXECUTION_AFTER_RELEASE,
+            created_at=utcnow() - timedelta(seconds=2),
+            details={
+              "commandDispositions": [
+                {
+                  "clientOrderId": item.client_order_id,
+                  "repairReason": BROKER_EXECUTION_AFTER_RELEASE,
+                }
+                for item in (pending, other_pending)
+              ]
+            },
+          )
+        )
+      await db.commit()
+      if has_evidence:
+        now = utcnow()
+        await _store_full_snapshot(
+          db,
+          _full_snapshot_payload(
+            snapshot_id="lazy-evidence", source_sequence=200, reported_at=now
+          ),
+          received_at=now,
+        )
+      service = AccountExecutionQuarantineService(db)
+      lookup = AsyncMock(wraps=service._latest_full_snapshot_payload)
+      monkeypatch.setattr(service, "_latest_full_snapshot_payload", lookup)
+      control = await db.get(AccountExecutionControl, ACCOUNT_ID)
+      result = await service.list_quarantined_orders(
+        account_id=ACCOUNT_ID, control=control
+      )
+      if candidate_state == "active":
+        assert len(result) == 2
+        lookup.assert_awaited_once()
+        assert all(not item["repairable"] for item in result)
+        if not has_evidence:
+          assert {item["blocked_reason"] for item in result} == {
+            "LATEST_FULL_SNAPSHOT_EVIDENCE_UNAVAILABLE"
+          }
+      else:
+        assert result == []
+        lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_indexed_snapshot_lookup_keeps_searching_past_invalid_newer_evidence():
+  async with _database() as sessions:
+    async with sessions() as db:
+      await _seed(db, owner_kind="monitor", delivered=False)
+      now = utcnow()
+      payload = _full_snapshot_payload(
+        snapshot_id="indexed-evidence", source_sequence=200, reported_at=now
+      )
+      await _store_full_snapshot(db, payload, received_at=now)
+      db.add(
+        AgentReportInbox(
+          message_id="invalid-newer-evidence",
+          device_id=DEVICE_ID,
+          message_type="delta_report",
+          protocol_version="1.1",
+          raw_payload_hash="b" * 64,
+          business_idempotency_key="invalid-newer-evidence",
+          payload={**payload, "snapshot_hash": "b" * 64},
+          received_at=now + timedelta(seconds=1),
+          processing_status="PROCESSED",
+          processing_attempts=1,
+        )
+      )
+      await db.commit()
+      result = await AccountExecutionQuarantineService(
+        db
+      )._latest_full_snapshot_payload(
+        account_id=ACCOUNT_ID,
+        snapshot_id="indexed-evidence",
+        snapshot_hash=payload["snapshot_hash"],
+      )
+      assert result == payload
 
 
 @pytest.mark.asyncio

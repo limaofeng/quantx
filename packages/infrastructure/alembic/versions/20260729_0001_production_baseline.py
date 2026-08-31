@@ -138,6 +138,7 @@ POST_BASELINE_COLUMNS = {
   },
 }
 POST_BASELINE_INDEXES = {
+  "agent_report_inbox": {"ix_agent_report_snapshot_lookup"},
   "market_data_request": {"ix_market_data_request_device_status_created"},
   "orders": {"ix_orders_exit_plan_cost_basis"},
   # Added by 20260823_0030 for the candidate-outcome repair cursor.  Keep it
