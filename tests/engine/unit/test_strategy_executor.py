@@ -242,7 +242,7 @@ async def test_t_trade_replay_waits_for_broker_report_causal_tail(
     "_wait_for_backtest_reports",
     new_callable=AsyncMock,
   ) as wait_for_reports:
-    await strategy_executor._board_replay_report_barrier(runtime)
+    await strategy_executor._replay_report_barrier(runtime)
 
   wait_for_reports.assert_awaited_once_with(runtime)
 
@@ -743,10 +743,10 @@ async def test_terminal_session_prefix_fails_closed_without_a_processed_watermar
 
 
 @pytest.mark.asyncio
-async def test_backtest_day_checkpoint_excludes_acquired_first_event_of_next_day(
+async def test_backtest_timeline_seals_previous_day_before_next_market_event(
   strategy_executor: StrategyExecutor,
 ) -> None:
-  """The serial replay queue seals each completed virtual day exactly once."""
+  """The replay timeline seals each completed virtual day exactly once."""
 
   executor = strategy_executor
   runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
@@ -795,8 +795,9 @@ async def test_backtest_day_checkpoint_excludes_acquired_first_event_of_next_day
     ),
   ):
     consumer = asyncio.create_task(executor._process_event_queue(runtime))
-    executor._enqueue_runtime_market_event(runtime, "tick", first_tick)
-    executor._enqueue_runtime_market_event(runtime, "tick", second_tick)
+    runtime.event_task = consumer
+    await executor._process_tick(runtime, first_tick)
+    await executor._process_tick(runtime, second_tick)
     await asyncio.wait_for(runtime.event_queue.join(), timeout=2.0)
     await executor._coordinate_backtest_terminal_checkpoint(runtime, cause="TEST")
     runtime.status = ExecutionStatus.COMPLETED
@@ -2639,8 +2640,9 @@ class TestStrategyExecutor:
     assert success is False
 
   @pytest.mark.asyncio
-  async def test_stop_run(self, strategy_executor):
+  async def test_stop_run(self, strategy_executor, monkeypatch):
     """测试 stop 停止策略运行"""
+    monkeypatch.setattr(strategy_executor, "_run_backtest_loop", keep_running_loop)
     # Mock 数据适配器
     with patch(
       "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"

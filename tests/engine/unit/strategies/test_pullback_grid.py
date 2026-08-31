@@ -132,6 +132,29 @@ def bar_at(
   )
 
 
+@pytest.mark.asyncio
+async def test_minute_inputs_do_not_change_daily_ema_or_atr():
+  strategy = make_strategy()
+  await strategy.on_init()
+  for index in range(4):
+    event = bar(index, 10 + index)
+    await strategy.warmup(StrategyInput(
+      run_id="grid-run", strategy_id="grid", timestamp=event.time,
+      cadence=StrategyCadence.BAR, instrument_code=event.stock_code, event=event,
+    ))
+  expected = (strategy.trend_ema.previous_ema, strategy.fast_ema.previous_ema, list(strategy.atr.tr_history))
+  for index in range(25):
+    event = bar(0, 100 + index)
+    event.period = "1m"
+    item = StrategyInput(
+      run_id="grid-run", strategy_id="grid", timestamp=event.time,
+      cadence=StrategyCadence.BAR, instrument_code=event.stock_code, event=event,
+    )
+    await strategy.warmup(item)
+    await strategy.step(item)
+  assert (strategy.trend_ema.previous_ema, strategy.fast_ema.previous_ema, strategy.atr.tr_history) == expected
+
+
 def step_tick(
   strategy: PullbackGridStrategy,
   price: float,

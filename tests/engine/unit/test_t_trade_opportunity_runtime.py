@@ -1590,7 +1590,7 @@ async def test_backtest_day_boundary_projection_writes_once_per_day_across_windo
     status=ExecutionStatus.RUNNING,
   )
 
-  await executor._run_backtest_multi_instrument_timeline(
+  await executor._run_backtest_timeline(
     runtime,
     context.instruments,
     [],

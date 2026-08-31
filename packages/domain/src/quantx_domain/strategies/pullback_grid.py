@@ -337,7 +337,7 @@ class PullbackGridStrategy(StrategyBase):
         return StrategyOutput()
 
     async def warmup(self, input: StrategyInput) -> None:
-        if input.cadence != StrategyCadence.BAR:
+        if input.bar_period != "1d":
             return None
         bar = input.event
         if bar is None:
@@ -352,10 +352,13 @@ class PullbackGridStrategy(StrategyBase):
         bar = input.event
         if bar is None:
             return StrategyOutput(decision_tags=["invalid_bar"])
-        # 1. 更新指标
-        self.trend_ema.update(bar)
-        self.fast_ema.update(bar)
-        self.atr.update(bar)
+        if input.bar_period not in {"1d", "1m"}:
+            return StrategyOutput(decision_tags=["unsupported_bar_period", "no_trade"])
+        # 日线只更新日指标；分钟收盘可使用上一完整日线的指标触发网格。
+        if input.bar_period == "1d":
+            self.trend_ema.update(bar)
+            self.fast_ema.update(bar)
+            self.atr.update(bar)
 
         if (
             not self.trend_ema.is_warmed_up

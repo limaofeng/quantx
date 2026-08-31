@@ -101,7 +101,7 @@ async def test_multi_instrument_replay_marks_empty_window_processed(
     status=ExecutionStatus.RUNNING,
   )
 
-  await executor._run_backtest_multi_instrument_timeline(
+  await executor._run_backtest_timeline(
     runtime,
     context.instruments,
     [],
@@ -179,7 +179,7 @@ async def test_multi_instrument_replay_yields_engine_loop_in_fixed_batches(
     status=ExecutionStatus.RUNNING,
   )
 
-  await executor._run_backtest_multi_instrument_timeline(
+  await executor._run_backtest_timeline(
     runtime,
     context.instruments,
     [],
@@ -193,7 +193,7 @@ async def test_multi_instrument_replay_yields_engine_loop_in_fixed_batches(
 
 
 @pytest.mark.asyncio
-async def test_tick_driven_klines_count_toward_cooperative_yield(
+async def test_mixed_timeline_bars_count_toward_cooperative_yield(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   class FakeHistoricalDataAdapter:
@@ -228,6 +228,7 @@ async def test_tick_driven_klines_count_toward_cooperative_yield(
   klines = [
     SimpleNamespace(
       stock_code="000001.SZ",
+      period="1m",
       time=start_time + timedelta(seconds=index),
     )
     for index in range(127)
@@ -257,12 +258,13 @@ async def test_tick_driven_klines_count_toward_cooperative_yield(
     status=ExecutionStatus.RUNNING,
   )
 
-  await executor._run_backtest_timeline_with_ticks(
+  await executor._run_backtest_timeline(
     runtime,
-    "000001.SZ",
-    ["1d"],
+    ["000001.SZ"],
+    ["1m"],
     start_time,
     end_time,
+    use_tick_data=True,
   )
 
   executor._process_tick.assert_awaited_once()

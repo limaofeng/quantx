@@ -422,7 +422,11 @@ class TradeIntent:
 
 @dataclass
 class StrategyInput:
-  """策略 Step 的唯一输入快照。"""
+  """策略 Step 的唯一输入快照。
+
+  BAR 只交付完整 K 线：timestamp 是可用/决策时间，event.time 保留存储标签，
+  bar_period 是指标窗口所属周期。分钟输入不得隐式推进日线窗口。
+  """
 
   run_id: str
   strategy_id: str
@@ -444,6 +448,14 @@ class StrategyInput:
   open_orders: List[Any] = field(default_factory=list)
   strategy_state: Dict[str, Any] = field(default_factory=dict)
   parameters: Dict[str, Any] = field(default_factory=dict)
+
+  @property
+  def bar_period(self) -> str:
+    return (
+      str(getattr(self.event, "period", "") or "").lower()
+      if self.cadence == StrategyCadence.BAR
+      else ""
+    )
 
   @property
   def decision_time_ms(self) -> int:

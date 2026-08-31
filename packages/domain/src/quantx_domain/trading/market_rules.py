@@ -8,6 +8,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Dict, Optional, Sequence
 
 from quantx_domain.brokers.base import OrderRequest, OrderType, PriceType
+from quantx_domain.trading.bar_timing import resolve_bar_timing
 
 _MAIN_BOARD_ST_LIMIT_UNIFICATION_DATE = date(2026, 7, 6)
 _CHINEXT_TWENTY_PCT_LIMIT_DATE = date(2020, 8, 24)
@@ -61,6 +62,7 @@ class MarketDataSnapshot:
     kline: Any,
     *,
     limit_rate: Optional[float] = None,
+    time_alignment: str = "end",
   ) -> "MarketDataSnapshot":
     suspend_flag = int(getattr(kline, "suspend_flag", 0) or 0)
     close = float(getattr(kline, "close", 0.0) or 0.0)
@@ -74,7 +76,7 @@ class MarketDataSnapshot:
     )
     return cls(
       instrument_code=getattr(kline, "code", None) or getattr(kline, "stock_code", ""),
-      timestamp=getattr(kline, "time", None),
+      timestamp=resolve_bar_timing(kline, alignment=time_alignment).available_at,
       price=close,
       open=_optional_float(getattr(kline, "open", None)),
       high=_optional_float(getattr(kline, "high", None)),

@@ -110,6 +110,11 @@ from quantx_domain.trading import (
   TradingRiskChecker,
   resolve_ashare_daily_limit_rate,
 )
+from quantx_domain.trading.bar_timing import (
+  bar_query_start,
+  exchange_local_time,
+  resolve_bar_timing,
+)
 from quantx_domain.trading.decision_trace import (
   summarize_intent,
   summarize_strategy_input,
@@ -2283,12 +2288,10 @@ class StrategyExecutor:
   ) -> bool:
     """Return whether no pre-boundary work remains in either runtime queue.
 
-    Virtual-day sealing is invoked before processing the first event of the
-    next day.  Historical replay delivers that acquired event through the
-    serial control queue, while a real-time market event uses the market
-    queue.  It is explicitly outside the prior-day fence; permitting exactly
-    one acquired item avoids assigning it to the wrong day without admitting
-    any additional queued or in-flight work.
+    Historical replay drives the common timeline outside the report consumer
+    and seals only after all reports converge. A real-time market event may
+    already be acquired outside the boundary being sealed; its allowance must
+    never admit any additional queued or in-flight work.
     """
 
     event_unfinished = int(getattr(runtime.event_queue, "_unfinished_tasks", 0) or 0)
@@ -2416,7 +2419,7 @@ class StrategyExecutor:
     *,
     instrument_code: str,
   ) -> None:
-    timestamp = self._get_value(event, "time")
+    timestamp = self._get_value(event, "timestamp") or self._get_value(event, "time")
     if not isinstance(timestamp, datetime):
       return
     local_time = self._checkpoint_local_time(timestamp)
@@ -3309,16 +3312,9 @@ class StrategyExecutor:
     previous_date = runtime._checkpoint_virtual_trade_date
     if previous_date is None or event_date <= previous_date:
       return
-    # Historical adapter replay drives ticks directly from ``runtime.task``.
-    # Simulated broker order/trade callbacks still converge through the serial
-    # control consumer, so the last quote of the prior day can legitimately
-    # leave reports queued for a few event-loop turns.  Drain that causal tail
-    # before sealing the day.  A tick already running on the consumer itself
-    # must never join its own queue; in that path the acquired item allowance
-    # below remains the precise fence.
-    direct_replay_producer = asyncio.current_task() is runtime.task
-    if direct_replay_producer:
-      await self._wait_for_backtest_reports(runtime)
+    # Only the replay timeline advances market time. Broker reports converge
+    # on its separate serial consumer before the previous day can be sealed.
+    await self._replay_report_barrier(runtime)
     watermark = dict(runtime._checkpoint_processed_watermark or {})
     sealed = await self._seal_runtime_checkpoint(
       runtime,
@@ -3328,14 +3324,10 @@ class StrategyExecutor:
       processed_watermark=watermark,
       continuity_generation=runtime._checkpoint_virtual_sequence,
       completeness={
-        "complete": self._runtime_checkpoint_queues_drained(
-          runtime,
-          allow_current_market_event=not direct_replay_producer,
-        ),
+        "complete": self._runtime_checkpoint_queues_drained(runtime),
         "reason": "VIRTUAL_DAY_QUEUE_NOT_DRAINED",
         "virtual_day_transition_to": event_date.isoformat(),
       },
-      allow_current_market_event=not direct_replay_producer,
     )
     if not sealed:
       checkpoint_key = self._checkpoint_status_key(previous_date, None)
@@ -4436,10 +4428,10 @@ class StrategyExecutor:
     event_type: str,
     data: Any,
   ) -> None:
-    # Historical replays are lossless and already drive their own serial clock.
+    # Historical market events must use the sorted replay timeline, separate
+    # from the report consumer that each quote waits for.
     if runtime.context.mode == StrategyRunMode.BACKTEST:
-      self._put_runtime_control_event_nowait(runtime, (event_type, data))
-      return
+      raise RuntimeError("BACKTEST_TIMELINE_REQUIRED:历史行情必须由回放时间线驱动")
 
     if event_type == "tick" and not self._observe_runtime_market_transport(
       runtime,
@@ -5823,6 +5815,7 @@ class StrategyExecutor:
       if runtime.context.mode == StrategyRunMode.BACKTEST:
         self._runtime_log(runtime, "INFO", "回测执行开始")
         await self._run_backtest_loop(runtime)
+        await self._wait_for_backtest_reports(runtime)
         self._finalize_t_trade_phase_one_baseline(runtime)
         await self._finalize_t_trade_replay(runtime)
         await self._finalize_t_trade_candidate_outcomes(runtime)
@@ -6129,55 +6122,16 @@ class StrategyExecutor:
       ),
     )
 
-    if (
-      isinstance(data_adapter, HistoricalDataAdapter)
-      and len(runtime.context.instruments) > 1
-    ):
-      await self._run_backtest_multi_instrument_timeline(
-        runtime,
-        list(runtime.context.instruments),
-        periods,
-        start_time,
-        end_time,
-        use_tick_data=use_tick_data,
-      )
-      return
-
-    for instrument_code in runtime.context.instruments:
-      self._runtime_log(runtime, "INFO", f"回测标的开始回放: {instrument_code}")
-      if isinstance(data_adapter, HistoricalDataAdapter):
-        if use_tick_data:
-          await self._run_backtest_timeline_with_ticks(
-            runtime, instrument_code, periods, start_time, end_time
-          )
-        else:
-          await self._run_backtest_timeline_with_klines(
-            runtime, instrument_code, periods, start_time, end_time
-          )
-        self._runtime_log(runtime, "SUCCESS", f"回测标的回放完成: {instrument_code}")
-        continue
-
-      if use_tick_data:
-        # 双数据流模式：订阅tick和K线
-        await data_adapter.subscribe_tick(
-          instrument_code,
-          lambda tick: self._enqueue_runtime_market_event(runtime, "tick", tick),
-        )
-
-        for period in periods:
-          await data_adapter.subscribe_kline(
-            instrument_code,
-            period,
-            lambda kline: self._enqueue_runtime_market_event(runtime, "kline", kline),
-          )
-      else:
-        # 仅K线模式 - 支持多周期
-        for period in periods:
-          await data_adapter.subscribe_kline(
-            instrument_code,
-            period,
-            lambda kline: self._enqueue_runtime_market_event(runtime, "kline", kline),
-          )
+    if not isinstance(data_adapter, HistoricalDataAdapter):
+      raise ValueError("BACKTEST_HISTORICAL_ADAPTER_REQUIRED:回测必须使用可排序的历史行情")
+    await self._run_backtest_timeline(
+      runtime,
+      list(runtime.context.instruments),
+      periods,
+      start_time,
+      end_time,
+      use_tick_data=use_tick_data,
+    )
 
   async def _run_limit_up_board_replay(
     self,
@@ -6366,6 +6320,8 @@ class StrategyExecutor:
   ) -> None:
     """Wait until simulated broker reports have reached runtime state."""
 
+    if runtime.status == ExecutionStatus.ERROR:
+      raise RuntimeError(runtime.error_message or "REPLAY_EVENT_PROCESSING_FAILED")
     try:
       await asyncio.wait_for(
         runtime.event_queue.join(),
@@ -6373,6 +6329,8 @@ class StrategyExecutor:
       )
     except asyncio.TimeoutError as exc:
       raise RuntimeError("回测 Broker 回报未在结束前完成收敛") from exc
+    if runtime.status == ExecutionStatus.ERROR:
+      raise RuntimeError(runtime.error_message or "REPLAY_EVENT_PROCESSING_FAILED")
 
   @staticmethod
   def _runtime_now(runtime: StrategyRuntime) -> datetime:
@@ -6503,7 +6461,7 @@ class StrategyExecutor:
     return await self.cancel_open_buy_orders(runtime.run_id, reason)
 
   async def wait_replay_reports(self, runtime: StrategyRuntime) -> None:
-    await self._board_replay_report_barrier(runtime)
+    await self._replay_report_barrier(runtime)
 
   def replay_sticky_instruments(self, runtime: StrategyRuntime) -> set[str]:
     return self._board_replay_sticky_instruments(runtime)
@@ -6552,23 +6510,14 @@ class StrategyExecutor:
   def _requires_replay_event_integrity(runtime: StrategyRuntime) -> bool:
     """Return whether one failed market event must fail the whole replay."""
 
-    if runtime.context.mode != StrategyRunMode.BACKTEST:
-      return False
-    parameters = runtime.context.parameters
-    return bool(
-      parameters.get("limit_up_board_replay")
-      or parameters.get("t_trade_replay")
-      or parameters.get("exit_plan_replay")
-    )
+    return runtime.context.mode == StrategyRunMode.BACKTEST
 
-  async def _board_replay_report_barrier(
+  async def _replay_report_barrier(
     self,
     runtime: StrategyRuntime,
   ) -> None:
-    # Every strict replay shares the same causal contract: broker callbacks
-    # caused by one quote must be visible before the next quote can make a
-    # decision.  Restricting this fence to board replay made T-trade results
-    # depend on how often the producer happened to yield to the report task.
+    # Every backtest shares one causal contract: callbacks caused by one
+    # quote must be applied before the next quote can make a decision.
     if not self._requires_replay_event_integrity(runtime):
       return
     if runtime.event_task is asyncio.current_task():
@@ -6870,7 +6819,7 @@ class StrategyExecutor:
       f"failed={liquidation['failed_cycles']}",
     )
 
-  async def _run_backtest_multi_instrument_timeline(
+  async def _run_backtest_timeline(
     self,
     runtime: StrategyRuntime,
     instrument_codes: List[str],
@@ -6880,12 +6829,21 @@ class StrategyExecutor:
     *,
     use_tick_data: bool,
   ) -> None:
-    """Replay all instruments on one chronological event timeline."""
+    """Replay any instrument count and cadence on one causal timeline.
+
+    Ticks at a bar's close precede that completed bar, so an intent based on
+    the bar cannot fill on a quote that helped produce it.
+    """
     data_adapter = runtime.data_adapter
     if not isinstance(data_adapter, HistoricalDataAdapter):
-      return
-    for code in instrument_codes:
-      await self._run_backtest_warmup_klines(runtime, code, periods, start_time)
+      raise ValueError(
+        "BACKTEST_HISTORICAL_ADAPTER_REQUIRED:回测必须使用可排序的历史行情"
+      )
+    start_time = exchange_local_time(start_time)
+    end_time = exchange_local_time(end_time)
+    await self._run_backtest_warmup_klines(
+      runtime, instrument_codes, periods, start_time
+    )
 
     trading_dates = await TradingDateHelper().get_trading_calendar(
       market="SH",
@@ -6938,7 +6896,7 @@ class StrategyExecutor:
             for tick in self._filter_backtest_continuous_session_events(filtered_ticks):
               events.append(
                 (
-                  tick.time,
+                  exchange_local_time(tick.time),
                   0,
                   self._backtest_tick_source_identity(tick),
                   code,
@@ -6950,7 +6908,7 @@ class StrategyExecutor:
             klines = await data_adapter.get_klines(
               instrument_code=code,
               period=period,
-              start_time=window_start,
+              start_time=bar_query_start(window_start, period, alignment=alignment),
               end_time=window_end,
             )
             previous_kline = last_kline_time.get((code, period))
@@ -6967,6 +6925,8 @@ class StrategyExecutor:
               )
             for kline in filtered_klines:
               event_time = self._get_kline_end_time(kline, period, alignment=alignment)
+              if not window_start <= event_time <= window_end:
+                continue
               events.append(
                 (
                   event_time,
@@ -6983,7 +6943,7 @@ class StrategyExecutor:
           # the per-instrument fetch order or an arbitrary stock-code tie-break.
           events.sort(key=lambda item: (item[2], item[1], item[3], item[4]))
         else:
-          events.sort(key=lambda item: (item[0], item[1], item[3], item[4]))
+          events.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
         for event_index, (_, event_type, _, code, period, event) in enumerate(
           events,
           start=1,
@@ -7015,6 +6975,8 @@ class StrategyExecutor:
           processed_until=day_end,
           force=True,
         )
+    if runtime.status != ExecutionStatus.RUNNING:
+      return
     self._runtime_log(
       runtime,
       "SUCCESS",
@@ -7522,7 +7484,7 @@ class StrategyExecutor:
   async def _run_backtest_warmup_klines(
     self,
     runtime: StrategyRuntime,
-    instrument_code: str,
+    instrument_codes: List[str],
     periods: List[str],
     start_time: datetime,
   ) -> None:
@@ -7532,36 +7494,56 @@ class StrategyExecutor:
       return
 
     warmup_events: List[KLine] = []
+    alignment = str(
+      runtime.context.parameters.get("kline_time_alignment", "end") or "end"
+    ).lower()
     warmup_end = start_time - timedelta(microseconds=1)
     dividend_type = str(
       (runtime.context.parameters or {}).get("dividend_type", "none") or "none"
     )
-    for period in periods:
-      warmup_bars = self._get_backtest_warmup_bars(runtime, period)
-      if warmup_bars <= 0:
-        continue
-      warmup_start = self._get_backtest_warmup_start_time(
-        start_time, period, warmup_bars
-      )
-      klines = await data_adapter.get_klines(
-        instrument_code=instrument_code,
-        period=period,
-        start_time=warmup_start,
-        end_time=warmup_end,
-        limit=warmup_bars,
-        order="desc",
-        dividend_type=dividend_type,
-      )
-      if self._is_backtest_intraday_period(period):
-        klines = self._filter_backtest_continuous_session_events(klines)
-      warmup_events.extend(
-        k for k in (klines or []) if k is not None and k.time is not None
-      )
+    for instrument_code in instrument_codes:
+      for period in periods:
+        warmup_bars = self._get_backtest_warmup_bars(runtime, period)
+        if warmup_bars <= 0:
+          continue
+        warmup_start = self._get_backtest_warmup_start_time(
+          start_time, period, warmup_bars
+        )
+        klines = await data_adapter.get_klines(
+          instrument_code=instrument_code,
+          period=period,
+          start_time=warmup_start,
+          end_time=warmup_end,
+          limit=warmup_bars + 1,
+          order="desc",
+          dividend_type=dividend_type,
+        )
+        if self._is_backtest_intraday_period(period):
+          klines = self._filter_backtest_continuous_session_events(klines)
+        warmup_events.extend(
+          sorted(
+            (
+              k
+              for k in (klines or [])
+              if k is not None
+              and k.time is not None
+              and self._get_kline_end_time(k, period, alignment=alignment)
+              < exchange_local_time(start_time)
+            ),
+            key=lambda k: self._get_kline_end_time(k, period, alignment=alignment),
+          )[-warmup_bars:]
+        )
 
     if not warmup_events:
       return
 
-    warmup_events.sort(key=lambda kline: kline.time)
+    warmup_events.sort(
+      key=lambda kline: (
+        self._get_kline_end_time(kline, kline.period, alignment=alignment),
+        kline.stock_code,
+        kline.period,
+      )
+    )
     for kline in warmup_events:
       if runtime.status != ExecutionStatus.RUNNING:
         break
@@ -7570,7 +7552,7 @@ class StrategyExecutor:
     self._runtime_log(
       runtime,
       "INFO",
-      f"回测预热完成: {instrument_code}, start={start_time}, bars={len(warmup_events)}",
+      f"回测预热完成: instruments={len(instrument_codes)}, start={start_time}, bars={len(warmup_events)}",
     )
 
   async def _process_warmup_kline(self, runtime: StrategyRuntime, kline: KLine) -> None:
@@ -7578,15 +7560,20 @@ class StrategyExecutor:
     if not strategy:
       return
 
-    runtime.context.current_time = kline.time
+    alignment = str(
+      runtime.context.parameters.get("kline_time_alignment", "end") or "end"
+    ).lower()
+    available_at = self._get_kline_end_time(kline, kline.period, alignment=alignment)
+    runtime.context.current_time = available_at
     if isinstance(runtime.data_adapter, HistoricalDataAdapter):
-      runtime.data_adapter.current_time = kline.time
+      runtime.data_adapter.current_time = available_at
     market_snapshot = MarketDataSnapshot.from_kline(
       kline,
+      time_alignment=alignment,
       limit_rate=self._backtest_limit_rate(
         runtime,
         instrument_code=kline.stock_code,
-        timestamp=kline.time,
+        timestamp=available_at,
       ),
     )
     runtime.latest_market_data[kline.stock_code] = market_snapshot
@@ -7594,7 +7581,7 @@ class StrategyExecutor:
       runtime,
       cadence=StrategyCadence.BAR,
       instrument_code=kline.stock_code,
-      timestamp=kline.time,
+      timestamp=available_at,
       market_data=market_snapshot,
       event=kline,
     )
@@ -8865,455 +8852,17 @@ class StrategyExecutor:
       if runtime.context.mode == StrategyRunMode.BACKTEST:
         self._persist_exit_plan_book(runtime)
 
-  async def _run_backtest_timeline_with_ticks(
-    self,
-    runtime: StrategyRuntime,
-    instrument_code: str,
-    periods: List[str],
-    start_time: datetime,
-    end_time: datetime,
-  ) -> None:
-    """统一时间线回放：tick 驱动 + 触发多周期K线"""
-    data_adapter = runtime.data_adapter
-    if not isinstance(data_adapter, HistoricalDataAdapter):
-      return
-
-    total_ticks = 0
-    total_klines_by_period = {period: 0 for period in periods}
-
-    await self._run_backtest_warmup_klines(
-      runtime, instrument_code, periods, start_time
-    )
-
-    market = "SH"  # 沪深市场的交易时间是一致的，所以使用 SH 就可以了
-
-    trading_helper = TradingDateHelper()
-    trading_dates = await trading_helper.get_trading_calendar(
-      market=market,
-      start_date=start_time.date(),
-      end_date=end_time.date(),
-    )
-    if not trading_dates:
-      self._runtime_log(
-        runtime,
-        "WARNING",
-        f"回测区间无交易日: {instrument_code}, {start_time.date()} -> {end_time.date()}",
-      )
-      return
-
-    window_hours = self._get_backtest_window_hours()
-    last_tick_time: Optional[datetime] = None
-    last_kline_time: Dict[str, Optional[datetime]] = {
-      period: None for period in periods
-    }
-
-    session_start = time(9, 30)
-    session_end = time(15, 30)
-
-    for trading_date in trading_dates:
-      if runtime.status != ExecutionStatus.RUNNING:
-        break
-
-      day_start = datetime.combine(trading_date, session_start)
-      day_end = datetime.combine(trading_date, session_end)
-      day_window_start = max(start_time, day_start)
-      day_window_end = min(end_time, day_end)
-
-      if day_window_end < day_window_start:
-        continue
-
-      for window_start, window_end in self._iter_backtest_windows(
-        day_window_start, day_window_end, window_hours
-      ):
-        if runtime.status != ExecutionStatus.RUNNING:
-          break
-
-        self._runtime_log(
-          runtime,
-          "INFO",
-          f"回测窗口开始: {instrument_code}, {window_start} -> {window_end}",
-        )
-        self.logger.info(
-          "回测tick查询窗口: %s, local=%s~%s, utc=%s~%s",
-          instrument_code,
-          window_start,
-          window_end,
-          time_utils.to_utc(window_start),
-          time_utils.to_utc(window_end),
-        )
-
-        ticks = await self._load_backtest_ticks(
-          runtime,
-          data_adapter,
-          instrument_code=instrument_code,
-          start_time=window_start,
-          end_time=window_end,
-        )
-        if ticks:
-          ticks = [
-            t
-            for t in ticks
-            if t is not None
-            and t.time is not None
-            and (last_tick_time is None or t.time > last_tick_time)
-          ]
-          ticks = self._filter_backtest_continuous_session_events(ticks)
-        else:
-          ticks = []
-
-        self._runtime_log(
-          runtime,
-          "INFO",
-          f"回测tick查询结果: {instrument_code}, {window_start.date()}, ticks={len(ticks)}",
-        )
-
-        all_klines: Dict[str, List[KLine]] = {}
-        for period in periods:
-          period_lower = period.lower()
-          is_intraday = period_lower.endswith("m") or period_lower.endswith("h")
-          if is_intraday:
-            kline_start = window_start
-            kline_end = window_end
-          else:
-            kline_start = datetime.combine(trading_date, time(0, 0))
-            kline_end = datetime.combine(trading_date, time(23, 59, 59))
-
-          klines = await data_adapter.get_klines(
-            instrument_code=instrument_code,
-            period=period,
-            start_time=kline_start,
-            end_time=kline_end,
-          )
-          if klines:
-            last_time = last_kline_time.get(period)
-            if last_time is not None:
-              klines = [
-                k
-                for k in klines
-                if k is not None and k.time is not None and k.time > last_time
-              ]
-            else:
-              klines = [k for k in klines if k is not None and k.time is not None]
-            if self._is_backtest_intraday_period(period):
-              klines = self._filter_backtest_continuous_session_events(klines)
-          else:
-            klines = []
-
-          all_klines[period] = klines
-
-        if not ticks and all(not v for v in all_klines.values()):
-          self._runtime_log(
-            runtime, "INFO", f"回测窗口无数据: {instrument_code}, {window_start.date()}"
-          )
-          continue
-
-        tick_idx = 0
-        kline_indices = {period: 0 for period in periods}
-        kline_end_times: Dict[str, datetime] = {}
-
-        kline_time_alignment = (
-          runtime.context.parameters.get("kline_time_alignment", "end") or "end"
-        ).lower()
-
-        for period, klines in all_klines.items():
-          if klines:
-            kline_end_times[period] = self._get_kline_end_time(
-              klines[0], period, alignment=kline_time_alignment
-            )
-
-        def has_more_data() -> bool:
-          return tick_idx < len(ticks) or any(
-            kline_indices[p] < len(all_klines[p]) for p in periods if p in all_klines
-          )
-
-        processed_events = 0
-        while has_more_data():
-          if runtime.status != ExecutionStatus.RUNNING:
-            break
-
-          if tick_idx < len(ticks):
-            tick = ticks[tick_idx]
-            await self._process_tick(runtime, tick)
-            if tick.time and (last_tick_time is None or tick.time > last_tick_time):
-              last_tick_time = tick.time
-            tick_idx += 1
-            processed_events += 1
-            if processed_events % BACKTEST_COOPERATIVE_YIELD_INTERVAL == 0:
-              await asyncio.sleep(0)
-
-            # tick 驱动 K 线触发（可能跨越多根K线）
-            for period in periods:
-              klines = all_klines.get(period, [])
-              kline_idx = kline_indices[period]
-              while (
-                kline_idx < len(klines)
-                and period in kline_end_times
-                and tick.time >= kline_end_times[period]
-              ):
-                kline = klines[kline_idx]
-                await self._process_kline(runtime, kline)
-                if kline.time and (
-                  last_kline_time.get(period) is None
-                  or kline.time > last_kline_time[period]
-                ):
-                  last_kline_time[period] = kline.time
-                kline_idx += 1
-                if kline_idx < len(klines):
-                  kline_end_times[period] = self._get_kline_end_time(
-                    klines[kline_idx], period, alignment=kline_time_alignment
-                  )
-                processed_events += 1
-                if processed_events % BACKTEST_COOPERATIVE_YIELD_INTERVAL == 0:
-                  await asyncio.sleep(0)
-
-              kline_indices[period] = kline_idx
-
-            continue
-
-          # 无 tick 时，按时间顺序处理剩余K线
-          next_period = None
-          next_time = None
-          for period in periods:
-            kline_idx = kline_indices[period]
-            klines = all_klines.get(period, [])
-            if kline_idx < len(klines):
-              kline_time = klines[kline_idx].time
-              if next_time is None or kline_time < next_time:
-                next_time = kline_time
-                next_period = period
-
-          if not next_period:
-            break
-
-          kline = all_klines[next_period][kline_indices[next_period]]
-          await self._process_kline(runtime, kline)
-          if kline.time and (
-            last_kline_time.get(next_period) is None
-            or kline.time > last_kline_time[next_period]
-          ):
-            last_kline_time[next_period] = kline.time
-          kline_indices[next_period] += 1
-          if kline_indices[next_period] < len(all_klines[next_period]):
-            kline_end_times[next_period] = self._get_kline_end_time(
-              all_klines[next_period][kline_indices[next_period]],
-              next_period,
-              alignment=kline_time_alignment,
-            )
-          processed_events += 1
-          if processed_events % BACKTEST_COOPERATIVE_YIELD_INTERVAL == 0:
-            await asyncio.sleep(0)
-
-        total_ticks += tick_idx
-        for period in periods:
-          total_klines_by_period[period] += kline_indices.get(period, 0)
-
-        if periods:
-          per_period_summary = ", ".join(
-            f"{period}:{kline_indices.get(period, 0)}" for period in periods
-          )
-        else:
-          per_period_summary = "none"
-
-        self._runtime_log(
-          runtime,
-          "INFO",
-          f"回测窗口完成: {instrument_code}, {window_start} -> {window_end}, "
-          f"tick={tick_idx}, kline={per_period_summary}",
-        )
-      if runtime.status == ExecutionStatus.RUNNING:
-        await self._report_t_trade_replay_progress(
-          runtime,
-          processed_until=day_window_end,
-          force=True,
-        )
-
-    total_klines = sum(total_klines_by_period.values())
-    self._runtime_log(
-      runtime,
-      "SUCCESS",
-      f"统一时间线回测完成: {instrument_code}, "
-      f"处理了 {total_ticks} 个tick和 {total_klines} 根K线",
-    )
-
-  async def _run_backtest_timeline_with_klines(
-    self,
-    runtime: StrategyRuntime,
-    instrument_code: str,
-    periods: List[str],
-    start_time: datetime,
-    end_time: datetime,
-  ) -> None:
-    """统一时间线回放：多周期K线按时间顺序回放"""
-    data_adapter = runtime.data_adapter
-    if not isinstance(data_adapter, HistoricalDataAdapter):
-      return
-
-    market = runtime.context.parameters.get("market")
-    if not market:
-      market = "SZ" if instrument_code.endswith(".SZ") else "SH"
-
-    trading_helper = TradingDateHelper()
-    trading_dates = await trading_helper.get_trading_calendar(
-      market=market,
-      start_date=start_time.date(),
-      end_date=end_time.date(),
-    )
-    if not trading_dates:
-      self._runtime_log(
-        runtime,
-        "WARNING",
-        f"回测区间无交易日: {instrument_code}, {start_time.date()} -> {end_time.date()}",
-      )
-      return
-
-    total_klines_by_period = {period: 0 for period in periods}
-    window_hours = self._get_backtest_window_hours()
-    last_kline_time: Dict[str, Optional[datetime]] = {
-      period: None for period in periods
-    }
-
-    await self._run_backtest_warmup_klines(
-      runtime, instrument_code, periods, start_time
-    )
-
-    for trading_date in trading_dates:
-      if runtime.status != ExecutionStatus.RUNNING:
-        break
-
-      day_window_start = max(start_time, datetime.combine(trading_date, time(0, 0)))
-      day_window_end = min(end_time, datetime.combine(trading_date, time(23, 59, 59)))
-
-      if day_window_end < day_window_start:
-        continue
-
-      for window_start, window_end in self._iter_backtest_windows(
-        day_window_start, day_window_end, window_hours
-      ):
-        if runtime.status != ExecutionStatus.RUNNING:
-          break
-
-        all_klines: Dict[str, List[KLine]] = {}
-        for period in periods:
-          klines = await data_adapter.get_klines(
-            instrument_code=instrument_code,
-            period=period,
-            start_time=window_start,
-            end_time=window_end,
-          )
-          if klines:
-            last_time = last_kline_time.get(period)
-            if last_time is not None:
-              klines = [
-                k
-                for k in klines
-                if k is not None and k.time is not None and k.time > last_time
-              ]
-            else:
-              klines = [k for k in klines if k is not None and k.time is not None]
-            if self._is_backtest_intraday_period(period):
-              klines = self._filter_backtest_continuous_session_events(klines)
-          else:
-            klines = []
-          all_klines[period] = klines
-
-        if all(not v for v in all_klines.values()):
-          self._runtime_log(
-            runtime,
-            "INFO",
-            f"回测窗口无数据: {instrument_code}, {window_start} -> {window_end}",
-          )
-          continue
-
-        kline_indices = {period: 0 for period in periods}
-
-        def has_more_klines() -> bool:
-          return any(
-            kline_indices[p] < len(all_klines[p]) for p in periods if p in all_klines
-          )
-
-        while has_more_klines():
-          if runtime.status != ExecutionStatus.RUNNING:
-            break
-
-          next_period = None
-          next_time = None
-          for period in periods:
-            kline_idx = kline_indices[period]
-            klines = all_klines.get(period, [])
-            if kline_idx < len(klines):
-              kline_time = klines[kline_idx].time
-              if next_time is None or kline_time < next_time:
-                next_time = kline_time
-                next_period = period
-
-          if not next_period:
-            break
-
-          kline = all_klines[next_period][kline_indices[next_period]]
-          await self._process_kline(runtime, kline)
-          if kline.time and (
-            last_kline_time.get(next_period) is None
-            or kline.time > last_kline_time[next_period]
-          ):
-            last_kline_time[next_period] = kline.time
-          kline_indices[next_period] += 1
-
-        for period in periods:
-          total_klines_by_period[period] += kline_indices.get(period, 0)
-
-        if periods:
-          per_period_summary = ", ".join(
-            f"{period}:{kline_indices.get(period, 0)}" for period in periods
-          )
-        else:
-          per_period_summary = "none"
-
-        self._runtime_log(
-          runtime,
-          "INFO",
-          f"回测窗口完成: {instrument_code}, {window_start} -> {window_end}, "
-          f"kline={per_period_summary}",
-        )
-      if runtime.status == ExecutionStatus.RUNNING:
-        await self._report_t_trade_replay_progress(
-          runtime,
-          processed_until=day_window_end,
-          force=True,
-        )
-
-    total_klines = sum(total_klines_by_period.values())
-    self._runtime_log(
-      runtime,
-      "SUCCESS",
-      f"统一时间线回测完成: {instrument_code}, 处理了 {total_klines} 根K线",
-    )
-
   def _get_kline_end_time(
     self,
     kline: KLine,
     period: str,
     alignment: str = "end",
   ) -> datetime:
-    """获取K线结束时间
-
-    alignment:
-      - "end": kline.time 表示该K线结束时间（更常见）
-      - "start": kline.time 表示该K线开始时间
-    """
-    period_map = {
-      "1m": timedelta(minutes=1),
-      "5m": timedelta(minutes=5),
-      "15m": timedelta(minutes=15),
-      "30m": timedelta(minutes=30),
-      "60m": timedelta(hours=1),
-      "1h": timedelta(hours=1),
-      "1d": timedelta(days=1),
-      "1w": timedelta(days=7),
-    }
-    alignment = (alignment or "end").lower()
-    if alignment == "start":
-      return kline.time + period_map.get(period, timedelta(minutes=1))
-    return kline.time
+    """Return completed-bar availability without rewriting its storage label."""
+    timing = resolve_bar_timing(kline, alignment=alignment)
+    if timing.period != period.lower():
+      raise ValueError("BAR_PERIOD_MISMATCH:查询周期与行情记录不一致")
+    return timing.available_at
 
   async def _notify_strategy_order(
     self,
@@ -9353,7 +8902,7 @@ class StrategyExecutor:
       if runtime.metrics:
         runtime.metrics.error_count += 1
       self._runtime_log(runtime, "ERROR", f"策略订单回调失败: {exc}")
-      if raise_on_error:
+      if raise_on_error or self._requires_replay_event_integrity(runtime):
         raise
       return None
 
@@ -9394,7 +8943,7 @@ class StrategyExecutor:
       if runtime.metrics:
         runtime.metrics.error_count += 1
       self._runtime_log(runtime, "ERROR", f"策略成交回调失败: {exc}")
-      if raise_on_error:
+      if raise_on_error or self._requires_replay_event_integrity(runtime):
         raise
       return None
 
@@ -9923,6 +9472,11 @@ class StrategyExecutor:
           )
 
         # 根据事件类型分发
+        if runtime.context.mode == StrategyRunMode.BACKTEST and event_type in {
+          "tick",
+          "kline",
+        }:
+          raise RuntimeError("BACKTEST_TIMELINE_REQUIRED:历史行情不能由回报消费者推进")
         if event_type == "kline":
           await self._process_kline(runtime, data)
           if market_event:
@@ -10174,9 +9728,7 @@ class StrategyExecutor:
             runtime.strategy.state.to_dict() if runtime.strategy is not None else {}
           )
           if runtime.context.mode == StrategyRunMode.BACKTEST:
-            custom_updates[EXIT_PLAN_BOOK_STATE_KEY] = (
-              runtime.exit_plan_book.to_dict()
-            )
+            custom_updates[EXIT_PLAN_BOOK_STATE_KEY] = runtime.exit_plan_book.to_dict()
           else:
             custom_updates.pop(EXIT_PLAN_BOOK_STATE_KEY, None)
           checkpointed = await runtime.state_manager.checkpoint_durable_runtime_event(
@@ -10310,6 +9862,14 @@ class StrategyExecutor:
               f"做 T PAPER 候选成交未完成持久化收敛，运行已停止: {runtime.run_id}"
             ),
           )
+        if self._requires_replay_event_integrity(runtime):
+          runtime.status = ExecutionStatus.ERROR
+          runtime.error_message = (
+            runtime.error_message or f"REPLAY_EVENT_PROCESSING_FAILED: {e}"
+          )
+          self._drain_runtime_control_queue_after_fail_stop(
+            runtime, reason=runtime.error_message
+          )
         self.logger.error(f"处理事件失败: {e}")
         if runtime.metrics:
           runtime.metrics.error_count += 1
@@ -10321,15 +9881,28 @@ class StrategyExecutor:
             queued_at,
           ):
             runtime._processing_market_events.pop(code, None)
-        if acquired_queue is not None:
+        if acquired_queue is not None and not self._requires_replay_event_integrity(
+          runtime
+        ):
+          # Session boundaries in live/paper inspect the fully drained queue.
           acquired_queue.task_done()
+          acquired_queue = None
         try:
           await self._maybe_coordinate_session_checkpoints(runtime)
-        except Exception:
+        except Exception as exc:
           self.logger.exception(
             "策略会话检查点协调器异常: run_id=%s",
             runtime.run_id,
           )
+          if self._requires_replay_event_integrity(runtime):
+            runtime.status = ExecutionStatus.ERROR
+            runtime.error_message = f"REPLAY_CHECKPOINT_FAILED: {exc}"
+            self._drain_runtime_control_queue_after_fail_stop(
+              runtime, reason=runtime.error_message
+            )
+        finally:
+          if acquired_queue is not None:
+            acquired_queue.task_done()
 
   async def apply_durable_order_report(
     self,
@@ -10484,7 +10057,7 @@ class StrategyExecutor:
           tick.time,
           market_data=market_snapshot,
         )
-        await self._board_replay_report_barrier(runtime)
+        await self._replay_report_barrier(runtime)
 
       # 广播 Tick 数据到订阅者
       runtime.broadcast_tick(tick)
@@ -10495,7 +10068,7 @@ class StrategyExecutor:
         timestamp=tick.time,
         market_data=market_snapshot,
       )
-      await self._board_replay_report_barrier(runtime)
+      await self._replay_report_barrier(runtime)
 
       await self._ensure_t_trade_opportunity_profile(
         runtime,
@@ -10518,7 +10091,7 @@ class StrategyExecutor:
         input_snapshot=strategy_input,
         market_data=market_snapshot,
       )
-      await self._board_replay_report_barrier(runtime)
+      await self._replay_report_barrier(runtime)
       if runtime.performance_recorder:
         await runtime.performance_recorder.record(runtime, "tick", tick)
       await self._report_t_trade_replay_progress(runtime)
@@ -10581,44 +10154,51 @@ class StrategyExecutor:
     metrics = runtime.metrics
 
     try:
-      await self._coordinate_backtest_virtual_day_before_event(
-        runtime,
-        getattr(kline, "time", None),
-      )
       if kline.stock_code not in set(runtime.context.instruments or []):
         self.logger.debug("忽略已移出标的池的迟到 K 线: %s", kline.stock_code)
         return
+      alignment = str(
+        runtime.context.parameters.get("kline_time_alignment", "end") or "end"
+      ).lower()
+      available_at = self._get_kline_end_time(kline, kline.period, alignment=alignment)
+      if (
+        runtime.context.mode != StrategyRunMode.BACKTEST
+        and available_at > exchange_local_time(time_utils.now())
+      ):
+        return  # A forming intraday/daily bar is not a completed strategy input.
+      await self._coordinate_backtest_virtual_day_before_event(runtime, available_at)
       # 更新策略上下文时间
       if runtime.context.mode == StrategyRunMode.BACKTEST:
-        self._advance_runtime_replay_clock(runtime, kline.time)
+        self._advance_runtime_replay_clock(runtime, available_at)
       else:
-        runtime.context.current_time = kline.time
+        runtime.context.current_time = available_at
       if isinstance(runtime.data_adapter, HistoricalDataAdapter):
-        runtime.data_adapter.current_time = kline.time
+        runtime.data_adapter.current_time = available_at
       market_snapshot = MarketDataSnapshot.from_kline(
         kline,
+        time_alignment=alignment,
         limit_rate=self._backtest_limit_rate(
           runtime,
           instrument_code=kline.stock_code,
-          timestamp=kline.time,
+          timestamp=available_at,
         ),
       )
       runtime.latest_market_data[kline.stock_code] = market_snapshot
       self._record_t_trade_replay_price_limit_source(runtime, market_snapshot)
       if runtime.state_manager:
-        runtime.state_manager.settle_trading_day(kline.time.date())
+        runtime.state_manager.settle_trading_day(available_at.date())
       await self._expire_pending_approvals(runtime)
-      await self._cancel_expired_strategy_orders(runtime, kline.time)
+      await self._cancel_expired_strategy_orders(runtime, available_at)
 
       # 更新回测 Broker 的市场数据
       if isinstance(broker, BacktestBroker):
         await broker.update_market_data(
           kline.stock_code,
           kline.close,
-          kline.time,
+          available_at,
           market_data=market_snapshot,
         )
-        await self._board_replay_report_barrier(runtime)
+        await self._replay_report_barrier(runtime)
 
       # 广播 K线 数据到订阅者
       runtime.broadcast_kline(kline)
@@ -10626,29 +10206,31 @@ class StrategyExecutor:
       await self._process_auto_exit_plans(
         runtime,
         instrument_code=kline.stock_code,
-        timestamp=kline.time,
+        timestamp=available_at,
         market_data=market_snapshot,
       )
-      await self._board_replay_report_barrier(runtime)
+      await self._replay_report_barrier(runtime)
 
       strategy_input = self._build_strategy_input(
         runtime,
         cadence=StrategyCadence.BAR,
         instrument_code=kline.stock_code,
-        timestamp=kline.time,
+        timestamp=available_at,
         market_data=market_snapshot,
         event=kline,
       )
       output = await strategy.step(strategy_input)
       await self._process_strategy_output(runtime, output, strategy_input)
-      await self._board_replay_report_barrier(runtime)
+      await self._replay_report_barrier(runtime)
       if runtime.performance_recorder:
-        await runtime.performance_recorder.record(runtime, "bar", kline)
+        await runtime.performance_recorder.record(
+          runtime, "bar", kline, timestamp=available_at
+        )
       await self._report_t_trade_replay_progress(runtime)
       if runtime.context.mode == StrategyRunMode.BACKTEST:
         self._record_backtest_market_watermark(
           runtime,
-          kline,
+          market_snapshot,
           instrument_code=kline.stock_code,
         )
 
@@ -15676,6 +15258,10 @@ class StrategyExecutor:
     if kind == "RECONCILED_ZERO_FILL":
       metadata = {
         **dict(truth.get("metadata") or {}),
+        "owner_type": "STRATEGY_RUN",
+        "owner_id": runtime.run_id,
+        "strategy_run_id": runtime.run_id,
+        "side": "BUY",
         "entry_plan_id": StrategyExecutor._managed_plan_id(runtime),
         "entry_stage_id": state.pending_stage_id,
         "entry_rule_id": state.pending_rule_id,
@@ -18646,7 +18232,7 @@ class StrategyExecutor:
         )
         output = await runtime.strategy.step(reconcile_input)
         await self._process_strategy_output(runtime, output, reconcile_input)
-        await self._board_replay_report_barrier(runtime)
+        await self._replay_report_barrier(runtime)
       except Exception:
         if self._uses_t_trade_opportunity_runtime(runtime):
           self._clear_t_trade_intent_emission_snapshot(runtime)

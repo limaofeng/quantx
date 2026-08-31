@@ -464,7 +464,7 @@ async def test_executor_observes_baseline_after_strategy_output(
   monkeypatch.setattr(executor, "_expire_pending_approvals", AsyncMock())
   monkeypatch.setattr(executor, "_cancel_expired_strategy_orders", AsyncMock())
   monkeypatch.setattr(executor, "_process_auto_exit_plans", AsyncMock())
-  monkeypatch.setattr(executor, "_board_replay_report_barrier", AsyncMock())
+  monkeypatch.setattr(executor, "_replay_report_barrier", AsyncMock())
   monkeypatch.setattr(executor, "_ensure_t_trade_opportunity_profile", AsyncMock())
   monkeypatch.setattr(executor, "_observe_t_trade_candidate_outcomes", AsyncMock())
   monkeypatch.setattr(executor, "_report_t_trade_replay_progress", AsyncMock())

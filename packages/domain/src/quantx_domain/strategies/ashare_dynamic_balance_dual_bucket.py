@@ -207,13 +207,17 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
       )
 
     if input.cadence == StrategyCadence.BAR:
-      return self._handle_bar(input)
+      if input.bar_period == "1d":
+        return self._handle_bar(input)
+      if input.bar_period == "1m":
+        return self._handle_intraday(input)
+      return StrategyOutput(decision_tags=["unsupported_bar_period", "no_trade"])
     if input.cadence == StrategyCadence.TICK:
       return self._handle_intraday(input)
     return StrategyOutput()
 
   async def warmup(self, input: StrategyInput) -> None:
-    if input.cadence != StrategyCadence.BAR:
+    if input.bar_period != "1d":
       return None
     if not self._is_bound_instrument(input.instrument_code):
       return None
@@ -317,7 +321,11 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
 
   def _handle_intraday(self, input: StrategyInput) -> StrategyOutput:
     tick = input.event
-    price = self._tick_price(tick, input.market_data)
+    price = (
+      _float(getattr(tick, "close", 0))
+      if input.cadence == StrategyCadence.BAR
+      else self._tick_price(tick, input.market_data)
+    )
     if price <= 0:
       return StrategyOutput(decision_tags=["invalid_tick"])
     analysis = dict(self._last_daily_confirm or {})

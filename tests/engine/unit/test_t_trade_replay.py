@@ -33,6 +33,7 @@ from quantx_engine.strategy_executor import (
   StrategyExecutor,
   StrategyRuntime,
 )
+from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.core.t_trade_replay_metrics import (
   build_t_trade_replay_metrics,
 )
@@ -457,7 +458,7 @@ async def test_multi_instrument_replay_reports_empty_window_as_processed(
     status=ExecutionStatus.RUNNING,
   )
 
-  await executor._run_backtest_multi_instrument_timeline(
+  await executor._run_backtest_timeline(
     runtime,
     context.instruments,
     [],
@@ -561,7 +562,7 @@ async def test_multi_instrument_t_trade_replay_consumes_global_source_identity_o
     executor._process_auto_exit_plans = AsyncMock()
     executor._ensure_t_trade_opportunity_profile = AsyncMock()
     executor._process_strategy_output = AsyncMock()
-    executor._board_replay_report_barrier = AsyncMock()
+    executor._replay_report_barrier = AsyncMock()
     executor._observe_t_trade_candidate_outcomes = AsyncMock()
     executor._observe_t_trade_phase_one_baseline = lambda *_args, **_kwargs: None
     executor._runtime_log = lambda *_args, **_kwargs: None
@@ -589,7 +590,7 @@ async def test_multi_instrument_t_trade_replay_consumes_global_source_identity_o
     )
     runtime.strategy = RecordingStrategy(consumed)
 
-    await executor._run_backtest_multi_instrument_timeline(
+    await executor._run_backtest_timeline(
       runtime,
       context.instruments,
       [],
@@ -1303,6 +1304,7 @@ async def test_replay_auto_confirms_manual_intent_through_executor(
     context=context,
   )
   runtime.status = ExecutionStatus.RUNNING
+  runtime.state_manager = RuntimeStateManager(runtime.run_id, persist_enabled=False)
   intent = TradeIntent(
     strategy_id="1",
     run_id=context.run_id,
@@ -1705,6 +1707,17 @@ async def test_replay_finalizer_discloses_unfilled_batch_without_a_next_tick() -
     ),
   )
   runtime.latest_market_data["000001.SZ"] = broker.market_snapshots["000001.SZ"]
+  runtime.state_manager = RuntimeStateManager(runtime.run_id, persist_enabled=False)
+  runtime.state_manager.update_account(cash=89_000.0, total_asset=100_000.0)
+  runtime.state_manager.update_position(
+    "000001.SZ",
+    long_volume=1_100,
+    available_volume=1_000,
+    today_buy_volume=100,
+    long_avg_price=10.0,
+    last_price=10.0,
+    market_value=11_000.0,
+  )
   template = strategy.build_exit_plan_template(
     instrument_code="000001.SZ",
     batch_id="batch-finalize",

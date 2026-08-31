@@ -131,6 +131,23 @@ async def test_dynamic_warmup_primes_daily_window_before_backtest_start():
 
 
 @pytest.mark.asyncio
+async def test_minute_bars_never_advance_daily_confirmation_or_warmup():
+  strategy = AshareDynamicBalanceDualBucketStrategy(_context())
+  await strategy.on_init()
+  for index in range(30):
+    event = _bar(0, 10 + index * 0.1)
+    event.period = "1m"
+    event.time = datetime(2024, 1, 2, 9, 31) + timedelta(minutes=index)
+    item = _input(strategy, StrategyCadence.BAR, event)
+    await strategy.warmup(item)
+    output = await strategy.step(item)
+    assert not any(intent.reason == "dynamic_balance_build_core" for intent in output.trade_intents)
+    assert output.trace_payload.get("reason") != "daily_confirmation"
+  assert strategy._bars == []
+  assert strategy._last_daily_confirm == {}
+
+
+@pytest.mark.asyncio
 async def test_dynamic_strategy_blocks_swing_buy_in_downtrend():
   strategy = AshareDynamicBalanceDualBucketStrategy(_context())
   await strategy.on_init()

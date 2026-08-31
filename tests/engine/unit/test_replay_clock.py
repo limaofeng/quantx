@@ -43,16 +43,17 @@ def test_replay_clock_normalizes_aware_start_and_has_stable_epoch_ms() -> None:
 
 
 @pytest.mark.parametrize(
-  ("mode", "parameters"),
+  ("mode", "parameters", "required"),
   [
-    (StrategyRunMode.BACKTEST, {}),
-    (StrategyRunMode.PAPER, {"t_trade_replay": True}),
-    (StrategyRunMode.LIVE, {"t_trade_replay": True}),
+    (StrategyRunMode.BACKTEST, {}, True),
+    (StrategyRunMode.PAPER, {"t_trade_replay": True}, False),
+    (StrategyRunMode.LIVE, {"t_trade_replay": True}, False),
   ],
 )
-def test_replay_event_fail_fast_does_not_expand_to_other_runs(
+def test_all_backtests_require_event_integrity_without_changing_live_modes(
   mode: StrategyRunMode,
   parameters: dict,
+  required: bool,
 ) -> None:
   runtime = SimpleNamespace(
     context=StrategyContext(
@@ -63,17 +64,18 @@ def test_replay_event_fail_fast_does_not_expand_to_other_runs(
     )
   )
 
-  assert StrategyExecutor._requires_replay_event_integrity(runtime) is False
+  assert StrategyExecutor._requires_replay_event_integrity(runtime) is required
 
 
 @pytest.mark.asyncio
-async def test_t_trade_replay_clock_integrity_error_marks_runtime_error() -> None:
+@pytest.mark.parametrize("parameters", [{}, {"t_trade_replay": True}])
+async def test_replay_clock_integrity_error_marks_runtime_error(parameters) -> None:
   executor = StrategyExecutor(max_workers=1)
   context = StrategyContext(
     run_id="t-replay-clock-error",
     mode=StrategyRunMode.BACKTEST,
     instruments=["000001.SZ"],
-    parameters={"t_trade_replay": True},
+    parameters=parameters,
     backtest_start_time=datetime(2024, 1, 2, 9, 30),
     backtest_end_time=datetime(2024, 1, 2, 15, 0),
   )
