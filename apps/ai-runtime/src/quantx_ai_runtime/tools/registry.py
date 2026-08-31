@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import json
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -49,6 +51,39 @@ class RuntimeRunContext:
   tool_call_count: int = 0
   max_tool_calls: int = 8
   event_writer: AssistantEventWriter = field(default_factory=AssistantEventWriter)
+  _tool_tasks: set[asyncio.Task[Any]] = field(
+    default_factory=set, init=False, repr=False
+  )
+  _tools_closing: bool = field(default=False, init=False, repr=False)
+
+  @contextmanager
+  def tool_call(self) -> Iterator[None]:
+    # Register before the first await, including audit writes and session close.
+    if self._tools_closing:
+      raise asyncio.CancelledError("AI_RUN_CLOSING")
+    task = asyncio.current_task()
+    if task is None:
+      raise RuntimeError("AI_TOOL_TASK_REQUIRED")
+    self._tool_tasks.add(task)
+    try:
+      yield
+    finally:
+      self._tool_tasks.discard(task)
+
+  def stop_tool_calls(self) -> None:
+    # SDK tasks already queued but not yet invoked must not begin new DB work.
+    self._tools_closing = True
+
+  async def close_tool_calls(self) -> None:
+    """Join run-owned tools after the SDK stops; caller shields this cleanup."""
+    self.stop_tool_calls()
+    tasks = tuple(self._tool_tasks)
+    for task in tasks:
+      if not task.done() and not task.cancelling():
+        task.cancel()
+    # The SDK owns tool results/errors, but may leave cancelled invokes running.
+    # Do not interrupt a tool again if it is already unwinding its DB session.
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _jsonable(value: Any) -> Any:
@@ -84,6 +119,16 @@ def _require_persisted_approval(
 
 
 async def _invoke_audited(
+  context: RuntimeRunContext,
+  metadata: AssistantToolMetadata,
+  arguments: dict[str, Any],
+  callback: Callable[[], Awaitable[dict[str, Any]]],
+) -> str:
+  with context.tool_call():
+    return await _execute_audited(context, metadata, arguments, callback)
+
+
+async def _execute_audited(
   context: RuntimeRunContext,
   metadata: AssistantToolMetadata,
   arguments: dict[str, Any],
@@ -432,16 +477,20 @@ def build_tools(
     async def query() -> dict[str, Any]:
       async with database_session() as db:
         rows = (
-          await db.execute(
-            select(StockAnnouncement)
-            .where(
-              StockAnnouncement.stock_code == normalized,
-              StockAnnouncement.source_authority.is_not(None),
+          (
+            await db.execute(
+              select(StockAnnouncement)
+              .where(
+                StockAnnouncement.stock_code == normalized,
+                StockAnnouncement.source_authority.is_not(None),
+              )
+              .order_by(StockAnnouncement.announce_date.desc())
+              .limit(20)
             )
-            .order_by(StockAnnouncement.announce_date.desc())
-            .limit(20)
           )
-        ).scalars().all()
+          .scalars()
+          .all()
+        )
         return {
           "summary": f"{normalized} 已持久化公告 {len(rows)} 条",
           "code": normalized,
@@ -450,9 +499,7 @@ def build_tools(
             ["NO_PERSISTED_ANNOUNCEMENT"]
             if not rows
             else [
-              "ANNOUNCEMENT_CONTENT_MISSING"
-              for item in rows
-              if not item.content_text
+              "ANNOUNCEMENT_CONTENT_MISSING" for item in rows if not item.content_text
             ][:1]
           ),
         }

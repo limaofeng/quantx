@@ -364,17 +364,34 @@ async def _resume_state(run: AiAssistantRun, agent: Any) -> Any:
   return state
 
 
-async def _drain_cancelled_stream(
-  stream: RunResultStreaming, events: AsyncIterator[StreamEvent]
+async def _finish_stream(
+  stream: RunResultStreaming,
+  events: AsyncIterator[StreamEvent],
+  runtime_context: RuntimeRunContext,
 ) -> None:
   try:
-    async for _ in events:
-      pass
+    # Cancelling the consumer inside a loop-body SQL wait does not stop the SDK.
+    # Already-complete/cancelling streams must not have cleanup interrupted again.
+    if not stream.is_complete:
+      stream.cancel()
+    try:
+      async for _ in events:
+        pass
+    finally:
+      # Cancellation inside __anext__ may already have closed the original
+      # iterator without joining the SDK run loop. A final drain joins it too.
+      async for _ in stream.stream_events():
+        pass
+  except Exception as exc:
+    logger.warning(
+      "AI stream cleanup failed: run_id=%s error=%s",
+      runtime_context.execution.run_id,
+      type(exc).__name__,
+    )
   finally:
-    # Cancellation inside __anext__ may already have closed the original
-    # iterator without joining the SDK run loop. A final drain joins it too.
-    async for _ in stream.stream_events():
-      pass
+    # The SDK run loop can finish before its cancelled function-tool tasks.
+    # Keep ownership until tool audit/DB cleanup finishes, even if draining fails.
+    await runtime_context.close_tool_calls()
 
 
 async def execute_run(
@@ -461,19 +478,9 @@ async def execute_run(
           )
           buffer = ""
           last_flush = now
-  except BaseException:
-    # The SDK owns a separate run task. Cancelling this event consumer alone
-    # does not stop it when cancellation arrives in the loop body (e.g. SQL).
-    # Do not cancel twice if the SDK already started cleaning up in __anext__.
-    if not stream.is_complete:
-      stream.cancel()
-    try:
-      await finish_cleanup(_drain_cancelled_stream(stream, events))
-    except Exception as exc:
-      logger.warning(
-        "AI stream cleanup failed: run_id=%s error=%s", run.id, type(exc).__name__
-      )
-    raise
+  finally:
+    runtime_context.stop_tool_calls()
+    await finish_cleanup(_finish_stream(stream, events, runtime_context))
   if buffer:
     await event_writer.append(
       thread_id=run.thread_id,
