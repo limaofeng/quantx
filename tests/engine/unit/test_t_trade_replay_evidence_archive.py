@@ -1,12 +1,16 @@
+import asyncio
 import json
+from unittest.mock import MagicMock
 
 import pytest
 from quantx_infrastructure.core.backtest_result_storage import BacktestResultStorage
+from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.core.t_trade_replay_evidence import (
   ReplayEvidenceUnavailable,
   iter_jsonl,
   read_manifest,
   sealed_opportunity_path,
+  validate_replay_archive_for_reset,
 )
 
 
@@ -120,4 +124,120 @@ def test_compaction_preserves_exact_evaluation_links():
       }
     )["evaluation_references"]
     == references
+  )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "artifact", ["opportunity_evaluations", "decision_events", "execution_summary"]
+)
+async def test_reset_requires_every_evidence_artifact_to_be_intact(tmp_path, artifact):
+  storage = BacktestResultStorage("bt", str(tmp_path), "run", 1)
+  await storage.archive_opportunity_evaluations(records(), account_id="test-account")
+  path = await storage.flush()
+  validate_replay_archive_for_reset(
+    path, run_id="run", backtest_id="bt", version=1, account_id="test-account"
+  )
+  (tmp_path / "run/v1" / f"{artifact}.jsonl").write_text("{}\n")
+  with pytest.raises(ReplayEvidenceUnavailable, match="INTEGRITY_FAILED"):
+    validate_replay_archive_for_reset(
+      path, run_id="run", backtest_id="bt", version=1, account_id="test-account"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_checks_archive_record_counts(tmp_path):
+  storage = BacktestResultStorage("bt", str(tmp_path), "run", 1)
+  await storage.archive_opportunity_evaluations(records(), account_id="test-account")
+  path = await storage.flush()
+  manifest_path = tmp_path / "run/v1/manifest.json"
+  manifest = json.loads(manifest_path.read_text())
+  manifest["opportunity_evaluations"]["count"] += 1
+  manifest_path.write_text(json.dumps(manifest))
+  with pytest.raises(ReplayEvidenceUnavailable, match="INTEGRITY_FAILED"):
+    validate_replay_archive_for_reset(
+      path, run_id="run", backtest_id="bt", version=1, account_id="test-account"
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_finalize_is_idempotent_without_overwriting_archive(
+  tmp_path, monkeypatch
+):
+  from quantx_infrastructure.database import connection
+  from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
+    TTradeOpportunityEvaluationRepository,
+  )
+
+  async def database():
+    yield object()
+
+  export = MagicMock(side_effect=lambda **_kwargs: records())
+  monkeypatch.setattr(connection, "get_async_db", database)
+  monkeypatch.setattr(
+    TTradeOpportunityEvaluationRepository, "iter_run_evaluations", export
+  )
+  manager = RuntimeStateManager(run_id="run", persist_enabled=False)
+  manager._backtest_storage = BacktestResultStorage("bt", str(tmp_path), "run", 1)
+
+  path = await manager.finalize_backtest(opportunity_account_id="test-account")
+  original = (tmp_path / "run/v1/manifest.json").read_bytes()
+  assert await manager.finalize_backtest(opportunity_account_id="test-account") == path
+  export.assert_called_once_with(account_id="test-account", strategy_run_id="run")
+  assert (tmp_path / "run/v1/manifest.json").read_bytes() == original
+  validate_replay_archive_for_reset(
+    path, run_id="run", backtest_id="bt", version=1, account_id="test-account"
+  )
+
+  # Idempotence must not hide new, unmaterialized evidence after sealing.
+  monkeypatch.setattr(manager, "pending_t_trade_material_events", lambda: [{}])
+  with pytest.raises(RuntimeError, match="MATERIALIZATION_PENDING"):
+    await manager.finalize_backtest(opportunity_account_id="test-account")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_terminal_callers_share_one_complete_archive(
+  tmp_path, monkeypatch
+):
+  from quantx_infrastructure.database import connection
+  from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
+    TTradeOpportunityEvaluationRepository,
+  )
+
+  entered = asyncio.Event()
+  release = asyncio.Event()
+
+  async def database():
+    yield object()
+
+  async def paused_records(**_kwargs):
+    yield record(1)
+    entered.set()
+    await release.wait()
+    yield record(2)
+
+  export = MagicMock(side_effect=paused_records)
+  monkeypatch.setattr(connection, "get_async_db", database)
+  monkeypatch.setattr(
+    TTradeOpportunityEvaluationRepository, "iter_run_evaluations", export
+  )
+  manager = RuntimeStateManager(run_id="run", persist_enabled=False)
+  manager._backtest_storage = BacktestResultStorage("bt", str(tmp_path), "run", 1)
+  first = asyncio.create_task(
+    manager.finalize_backtest(opportunity_account_id="test-account")
+  )
+  await asyncio.wait_for(entered.wait(), timeout=2)
+  second = asyncio.create_task(
+    manager.finalize_backtest(opportunity_account_id="test-account")
+  )
+  try:
+    await asyncio.sleep(0)
+    assert export.call_count == 1
+  finally:
+    release.set()
+    paths = await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
+  assert paths[0] == paths[1]
+  export.assert_called_once()
+  validate_replay_archive_for_reset(
+    paths[0], run_id="run", backtest_id="bt", version=1, account_id="test-account"
   )

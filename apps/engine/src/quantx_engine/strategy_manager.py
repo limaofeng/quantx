@@ -715,6 +715,69 @@ class StrategyManager:
       os.path.join("data", "backtests", os.path.basename(raw_path)),
     ]
 
+  async def _assert_replay_evidence_archived(
+    self, db, *, run_id: str, latest, account_id: str
+  ) -> None:
+    """Fail closed before a rerun removes the only copy of terminal evidence."""
+    from quantx_infrastructure.core.t_trade_replay_evidence import (
+      validate_replay_archive_for_reset,
+    )
+    from quantx_infrastructure.models.strategy_decision_trace_record import (
+      StrategyDecisionTraceRecord,
+    )
+    from quantx_infrastructure.models.strategy_run_state import StrategyRunState
+    from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
+      TTradeOpportunityEvaluation,
+    )
+    from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+    from sqlalchemy import select as sql_select
+
+    if latest:
+      previous_path = next(
+        (
+          path for path in self._backtest_result_path_candidates(latest.result_path)
+          if os.path.isfile(path)
+        ),
+        None,
+      )
+      if previous_path is not None:
+        await asyncio.to_thread(
+          validate_replay_archive_for_reset,
+          previous_path,
+          run_id=run_id,
+          backtest_id=str(latest.id),
+          version=int(latest.version),
+          account_id=account_id,
+        )
+        return
+      if str(latest.status).upper() == "COMPLETED":
+        raise ValueError("历史回测归档缺失，禁止清空当前评估投影")
+
+    # A failure before startup has no evidence and may be retried. Prove that
+    # explicitly; ERROR/CANCELLED is not permission to discard durable facts.
+    # RuntimeState may still own an unmaterialized outbox after a process crash.
+    statements = [
+      sql_select(TTradeOpportunityEvaluation.id).where(
+        TTradeOpportunityEvaluation.strategy_run_id == run_id
+      ),
+      sql_select(TradeIntentRecord.id).where(
+        TradeIntentRecord.strategy_run_id == run_id
+      ),
+      sql_select(StrategyRunState.id).where(StrategyRunState.run_id == run_id),
+    ]
+    decisions = sql_select(StrategyDecisionTraceRecord.id).where(
+      StrategyDecisionTraceRecord.strategy_run_id == run_id
+    )
+    if latest:
+      # Decision rows from older versions are not reset and must not make an
+      # otherwise empty startup failure look like it produced new evidence.
+      decisions = decisions.where(
+        StrategyDecisionTraceRecord.created_at >= latest.created_at
+      )
+    for statement in [*statements, decisions]:
+      if await db.scalar(statement.limit(1)) is not None:
+        raise ValueError("回测证据尚未归档，禁止清空当前评估投影和交易意图")
+
   async def rerun_backtest_version(
     self,
     run_id: str,
@@ -768,34 +831,30 @@ class StrategyManager:
       parameters = dict(parameters or {})
       instruments = list(run.instruments or [])
 
+      if parameters.get("t_trade_replay"):
+        previous_runtime = self.executor.get(run_id)
+        if previous_runtime is not None:
+          if previous_runtime.status in {
+            ExecutionStatus.STARTING,
+            ExecutionStatus.RUNNING,
+            ExecutionStatus.PAUSED,
+            ExecutionStatus.STOPPING,
+          }:
+            raise ValueError("当前回放运行时尚未终止，禁止重跑清理")
+          # Stop/seal the old owner before touching run-scoped state. In
+          # particular, never archive an ERROR/CANCELLED run after its reset.
+          if not await self.executor.delete(run_id):
+            raise ValueError("历史回放收尾未完成，禁止重跑清理")
+
       history = await backtest_repo.get_backtests_by_run(run_id)
       latest = history[0] if history else None
-      if (parameters.get("t_trade_replay") and latest
-          and str(latest.status).upper() == "COMPLETED"):
-        from quantx_infrastructure.core.t_trade_replay_evidence import (
-          read_manifest,
-          sealed_opportunity_path,
+      if parameters.get("t_trade_replay"):
+        await self._assert_replay_evidence_archived(
+          db,
+          run_id=run_id,
+          latest=latest,
+          account_id=str(parameters.get("account_id") or ""),
         )
-
-        previous_path = next((
-          path for path in self._backtest_result_path_candidates(latest.result_path)
-          if os.path.isfile(path)
-        ), None)
-        if previous_path is None:
-          raise ValueError("历史回测归档缺失，禁止清空当前评估投影")
-        previous_manifest = read_manifest(
-          previous_path, run_id=run_id, backtest_id=str(latest.id),
-          version=int(latest.version),
-        )
-        # v3 never recorded signal evidence. It remains explicitly unavailable;
-        # a rerun creates the first v4 archive, never a reconstructed v3 signal.
-        if previous_manifest.get("schema_version") not in {3, 4}:
-          raise ValueError("历史回测归档版本不受支持，禁止清空当前评估投影")
-        if previous_manifest.get("schema_version") == 4:
-          await asyncio.to_thread(
-            sealed_opportunity_path, previous_path, previous_manifest,
-            account_id=str(parameters.get("account_id") or ""),
-          )
       snapshot_repo = StrategyGridBookSnapshotRepository(db)
       template_record = await snapshot_repo.get_template(run_id)
       if not template_record and latest:

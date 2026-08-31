@@ -184,3 +184,48 @@ def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
           yield record
   except (OSError, ValueError) as exc:
     raise ReplayEvidenceUnavailable("ARCHIVE_INTEGRITY_FAILED") from exc
+
+
+def validate_replay_archive_for_reset(
+  manifest_path: str,
+  *,
+  run_id: str,
+  backtest_id: str,
+  version: int,
+  account_id: str,
+) -> None:
+  """Check the version's evidence before deleting its remaining hot projection."""
+  manifest = read_manifest(
+    manifest_path, run_id=run_id, backtest_id=backtest_id, version=version
+  )
+  schema_version = manifest.get("schema_version")
+  if schema_version not in {3, 4}:
+    raise ReplayEvidenceUnavailable("ARCHIVE_SCHEMA_UNSUPPORTED")
+  if schema_version == 4:
+    archive = sealed_opportunity_path(manifest_path, manifest, account_id=account_id)
+    count = 0
+    for record in iter_jsonl(archive):
+      if (
+        record.get("strategy_run_id") != run_id
+        or record.get("account_id") != account_id
+      ):
+        raise ReplayEvidenceUnavailable("ARCHIVE_IDENTITY_MISMATCH")
+      if record.get("record_kind") not in {"MATERIAL", "COALESCED_DIAGNOSTIC"}:
+        raise ReplayEvidenceUnavailable("ARCHIVE_INTEGRITY_FAILED")
+      count += 1
+    if count != manifest[OPPORTUNITY_ARTIFACT].get("count"):
+      raise ReplayEvidenceUnavailable("ARCHIVE_INTEGRITY_FAILED")
+  # v3 intentionally has no signal archive. Preserve its existing audit contract;
+  # do not reconstruct old signals. Both versions must retain readable audits.
+  for key, count_key in (
+    ("decision_events", "decision_events"),
+    ("execution_summary", "execution_summaries"),
+  ):
+    path = artifact_path(manifest_path, manifest, key)
+    if schema_version == 4 and file_fingerprint(path) != (
+      manifest.get("artifact_fingerprints") or {}
+    ).get(key):
+      raise ReplayEvidenceUnavailable("ARCHIVE_INTEGRITY_FAILED")
+    count = sum(1 for _ in iter_jsonl(path))
+    if count != (manifest.get("counts") or {}).get(count_key):
+      raise ReplayEvidenceUnavailable("ARCHIVE_INTEGRITY_FAILED")

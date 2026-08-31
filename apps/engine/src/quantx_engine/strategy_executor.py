@@ -5109,6 +5109,14 @@ class StrategyExecutor:
           runtime.run_id,
         )
 
+      if final_snapshot_saved and not terminal_checkpoint_aborted:
+        try:
+          await self._archive_t_trade_replay_evidence(runtime, during_cleanup=True)
+        except Exception as exc:
+          cleanup_errors.append("replay_evidence")
+          final_snapshot_saved = False
+          self.logger.error("异常终止归档回放证据失败: %s, %s", runtime.run_id, exc)
+
       if final_snapshot_saved:
         try:
           if runtime.broker:
@@ -5195,6 +5203,11 @@ class StrategyExecutor:
     previous_status = runtime.status
 
     if runtime.status == ExecutionStatus.STOPPED:
+      try:
+        await self._archive_t_trade_replay_evidence(runtime, during_cleanup=True)
+      except Exception as exc:
+        self.logger.error("已停止回放归档证据失败: %s, %s", run_id, exc)
+        return False
       self.opportunity_observability.forget_run(run_id)
       return True
     if runtime.status == ExecutionStatus.STOPPING:
@@ -5313,9 +5326,10 @@ class StrategyExecutor:
         await runtime.performance_recorder.flush()
       if runtime.state_manager:
         await runtime.state_manager.stop()
+      await self._archive_t_trade_replay_evidence(runtime, during_cleanup=True)
 
-      # Final snapshot is authoritative; only then release the broker and data
-      # adapter so no callback can mutate state after the persisted stop point.
+      # Final snapshot and replay archive are durable; only then release the
+      # broker and adapter so no callback can mutate the persisted stop point.
       if runtime.broker:
         await runtime.broker.disconnect()
       await self._release_runtime_adapter(runtime)
@@ -5352,6 +5366,26 @@ class StrategyExecutor:
       self.logger.error(f"停止策略运行失败: {run_id}, 错误: {e}")
       await self._ensure_terminal_cleanup(runtime)
       return False
+
+  async def _archive_t_trade_replay_evidence(
+    self, runtime: StrategyRuntime, *, during_cleanup: bool = False
+  ) -> str:
+    """Seal the processed prefix for every terminal replay, not only COMPLETED."""
+    if during_cleanup and self._shutdown_event.is_set():
+      # Engine shutdown preserves the database recovery intent. Sealing that
+      # still-resumable version here would prevent its next owner from finishing.
+      return ""
+    if (
+      runtime.context.mode != StrategyRunMode.BACKTEST
+      or not runtime.context.parameters.get("t_trade_replay")
+      or runtime.state_manager is None
+    ):
+      # A replay rejected before startup has no in-memory evidence to archive.
+      # Rerun still checks that no durable facts would be removed.
+      return ""
+    return await runtime.state_manager.finalize_backtest(
+      opportunity_account_id=str(runtime.context.parameters.get("account_id") or ""),
+    )
 
   async def _flush_t_trade_opportunity_diagnostics(
     self,
@@ -5876,9 +5910,7 @@ class StrategyExecutor:
             runtime.state_manager.get_backtest_grid_book_observed_count()
           )
           if runtime.context.parameters.get("t_trade_replay"):
-            result_path = await runtime.state_manager.finalize_backtest(
-              opportunity_account_id=str(runtime.context.parameters.get("account_id") or ""),
-            )
+            result_path = await self._archive_t_trade_replay_evidence(runtime)
           else:
             result_path = await runtime.state_manager.finalize_backtest()
           self._runtime_log(runtime, "SUCCESS", f"回测结果文件写入完成: {result_path}")

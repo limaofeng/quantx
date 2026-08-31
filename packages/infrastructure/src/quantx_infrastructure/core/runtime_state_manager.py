@@ -219,6 +219,8 @@ class RuntimeStateManager:
     is_backtest: bool = False  # 是否为回测模式
     backtest_id: Optional[str] = None  # 回测记录ID (StrategyBacktest.id)
     _backtest_storage: Optional["BacktestResultStorage"] = field(default=None, repr=False)
+    _backtest_finalized_path: Optional[str] = field(default=None, repr=False)
+    _backtest_finalize_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     # 内存状态缓存
     _state: Dict[str, Any] = field(default_factory=lambda: {
@@ -4485,6 +4487,7 @@ class RuntimeStateManager:
         )
         self.is_backtest = True
         self.backtest_id = backtest_id
+        self._backtest_finalized_path = None
         self._backtest_storage = BacktestResultStorage(
             backtest_id=backtest_id,
             strategy_run_id=self.run_id,
@@ -4497,6 +4500,14 @@ class RuntimeStateManager:
 
     async def finalize_backtest(self, *, opportunity_account_id: Optional[str] = None) -> str:
         """结束回测，将缓冲数据写入文件"""
+        # ERROR teardown is independently owned and may overlap an explicit stop.
+        # Both callers must await the same seal, never write the same tmp file.
+        async with self._backtest_finalize_lock:
+            return await self._finalize_backtest_once(
+                opportunity_account_id=opportunity_account_id,
+            )
+
+    async def _finalize_backtest_once(self, *, opportunity_account_id: Optional[str]) -> str:
         if not self._backtest_storage:
             if opportunity_account_id is not None:
                 raise RuntimeError("REPLAY_EVIDENCE_STORAGE_UNAVAILABLE")
@@ -4506,6 +4517,11 @@ class RuntimeStateManager:
                 raise ValueError("REPLAY_EVIDENCE_ACCOUNT_REQUIRED")
             if self.pending_t_trade_material_events() or self.pending_t_trade_diagnostic_events():
                 raise RuntimeError("REPLAY_EVIDENCE_MATERIALIZATION_PENDING")
+        # Completion, ERROR cleanup and explicit stop share one terminal archive.
+        # A retry after a successful seal must not overwrite it with empty buffers.
+        if self._backtest_finalized_path is not None:
+            return self._backtest_finalized_path
+        if opportunity_account_id is not None:
             from quantx_infrastructure.database.connection import get_async_db
             from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
                 TTradeOpportunityEvaluationRepository,
@@ -4522,6 +4538,7 @@ class RuntimeStateManager:
             else:
                 raise RuntimeError("REPLAY_EVIDENCE_DATABASE_UNAVAILABLE")
         path = await self._backtest_storage.flush()
+        self._backtest_finalized_path = path
         self.logger.info(f"回测数据已写入: {path}")
         return path
 
