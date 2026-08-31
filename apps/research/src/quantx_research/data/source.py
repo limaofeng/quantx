@@ -176,6 +176,22 @@ class InfrastructureResearchDataSource:
     }
     return normalize_daily_bars(frames)
 
+  async def latest_daily_date(self, benchmark_code: str) -> date:
+    """Resolve latest from persisted benchmark bars, never from wall-clock time."""
+    repository = self._get_kline_repository()
+    rows = await asyncio.to_thread(
+      repository.find_latest_by_stock_code_and_period,
+      benchmark_code,
+      "1d",
+      1,
+    )
+    if not rows:
+      raise ValueError("缺少已持久化基准日线，无法解析 latest 研究截止日")
+    timestamp = pd.Timestamp(rows[0].time)
+    if timestamp.tzinfo is not None:
+      timestamp = timestamp.tz_convert("Asia/Shanghai")
+    return timestamp.date()
+
   async def load_dividend_factors(
     self,
     stock_codes: Sequence[str],

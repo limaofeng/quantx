@@ -3,6 +3,81 @@
 `quantx-research` 是 QuantX 的离线只读研究应用。它不属于常规 API、Engine
 或 Worker 运行链路，也不会触发行情同步或写入业务数据库。
 
+## 日级因子与条件交集研究
+
+`study: factor-study` 使用 `quantx_domain.factors` 的同一份版本化定义、
+因子计算和条件比较。每日快照与历史研究不再各自解释“量比”“连续下跌”或
+交叉指标。首版覆盖目录中 `research_supported=true` 的量价因子；财务和
+换手率因子暂不具备已核验的历史覆盖，指定它们时会明确拒绝研究配置。
+
+```powershell
+uv run --no-sync quantx-research validate --config apps/research/configs/factor_study_smoke.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
+uv run --no-sync quantx-research run --config apps/research/configs/factor_study_smoke.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
+uv run --no-sync quantx-research run --config apps/research/configs/factor_study_v1_20260729.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
+uv run --no-sync quantx-research render --run-dir <factor-study-run-directory>
+```
+
+`factor_study_v1.yaml` 默认研究最近五年；`latest` 根据已经持久化的基准日线
+解析，不采用电脑当天日期。运行前将实际起止日冻结在 `resolved-config.yaml`
+并纳入配置指纹。`factor_study_v1_20260729.yaml` 固定使用现有 archive 可验证
+窗口，包含全部首批量价因子的单独报告及一个明确标注为验收示例的交集报告；
+示例阈值不表示最优条件或投资建议。
+
+最小配置如下；`factor_ids` 指定要生成总体分组报告的因子，`conditions`
+指定一个精确条件交集，可以只填其中之一。
+
+```yaml
+study: factor-study
+version: v1
+factor_ids: [volume_ratio, change_pct]
+conditions:
+  - {factor_id: volume_ratio, operator: between, value: 0.8, value_to: 1.5}
+  - {factor_id: change_pct, operator: lt, value: 0}
+universe:
+  instrument_type: stock
+  exclude_st: false
+  include_industries: []
+  exclude_industries: []
+```
+
+- 数值操作符为 `gte/lte/gt/lt/eq/between`；区间两端包含，二值因子仅允许
+  `eq: 0/1`。零是合法阈值。条件排序及重复不改变规范化身份。
+- 默认观察未来连续 1–20 个交易日，可配置 `outcomes.horizons`，上限 60。
+  主口径是 `C(T+h)/C(T)-1`，辅助口径是 `C(T+h)/O(T+1)-1`；第 1 日的
+  辅助口径是次日开盘到次日收盘，不是再持有一天。
+- 为保证页面有界读取，单报告最多 12,000 统计行，单次研究预估最多 60,000
+  行、结构化统计最多 64 MiB；超出时明确要求拆分配置，不发布无法查看的报告。
+- 全市场交易日历对齐，不把停牌后的下一条行情顺延成次日；每个期限独立
+  判断收益是否完整，不因缺少 20 日结果排除已有的 1 日结果。
+- 单因子按每日截面五分位分组，相同值不拆组；常量截面只有一个有效分组。
+  二值因子按真假分组。取值分布的上下限是跨日观测范围，并非固定条件阈值。
+- 联合报告比较交集、各单独条件及基准。全部条件先使用共同有效因子样本，
+  再为每个收益期限限定交集可观察的日期，各组采用同一日期支持。
+- 报告同时提供股票日合并上涨比例、均值和精确中位数，以及日期等权上涨
+  比例、均值、同日基准差异、样本股票数和日期数。置信区间针对日期等权的
+  配对差异，而非把每个股票日当成相互独立的投票。
+- 移动区块 Bootstrap 的块长不短于收益周期；每个端点分别在本次运行所有
+  报告/分组/周期/收益起点的完整检验族内做 BH 校正。样本不足保留描述统计，
+  不输出推断结论。年度分段和截至数据末日的滚动 12 个月只作稳定性检查。
+- 历史 ST 和行业分类未核验，配置中 `exclude_st=true` 或行业条件会明确
+  拒绝；总体报告只能作为相应当前筛选的参考，不能声称精确匹配。固定股票
+  列表或额外上市天数限制也会标记 `coverage.restricted_universe=true`。
+
+研究仍使用现有只读数据适配器、复权覆盖证明和物理内存保护。按完整股票
+历史分批计算，按月保存窄投影；报告逐个计算，精确中位数使用临时数值文件，
+不将整个全市场宽面板装入内存。完整五年研究建议预留至少 20 GiB 临时磁盘，
+运行时间取决于因子数量、股票数量和 Bootstrap 配置。
+
+数据库读取与 CPU 阶段分离：完成股票特征及来源证据读取后立即退出只读连接，
+再执行全局交易日对齐、前向收益和统计，避免长时间闲置事务在退出时超时。
+计算因子时同样传入基准交易日历；物理缺失的一根行情与显式不可用行情保持
+一致，不把缺失交易日两边的数据拼成一个完整滚动窗口。
+
+产物包括一个不可变运行身份、配置/数据指纹、`analysis-sample.parquet`、
+包含 `reports[]` 的 `metrics.json`、逐报告 CSV、质量报告及 HTML。每个报告
+有独立 `report_id`，包含定义版本、规范化条件、覆盖、分组和多周期统计。
+页面只查找已有产物，不创建研究任务，也不显示校准后的个股预测概率。
+
 默认研究配置：
 
 ```powershell

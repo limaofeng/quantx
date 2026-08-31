@@ -344,6 +344,18 @@ class QmtDailyBarArchiveResearchDataSource:
       "requests": request_evidence,
     }
 
+  async def latest_daily_date(self, benchmark_code: str) -> date:
+    """Use the latest actual benchmark bar inside the verified archive."""
+    self._ensure_ledger_unchanged()
+    end = datetime.strptime(str(self._campaign["end_date"]), "%Y%m%d").date()
+    await self.list_instruments(instrument_types=("index",), codes=[benchmark_code])
+    bars = await self.load_daily_bars(
+      [benchmark_code], end - timedelta(days=30), end, batch_size=1
+    )
+    if bars.empty:
+      raise ValueError("archive 缺少截止边界的基准日线，无法解析 latest")
+    return pd.Timestamp(bars["time"].max()).date()
+
   def _read_verified_request(
     self,
     request: _ArchiveRequest,

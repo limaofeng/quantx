@@ -102,6 +102,14 @@ async def validate_study(
   source: ResearchDataSource | None = None,
   market_data_archive: str | Path | None = None,
 ) -> dict[str, Any]:
+  if _configured_study(config_path) == "factor-study":
+    from quantx_research.factor_runner import validate_factor_study
+
+    return await validate_factor_study(
+      config_path,
+      source=source,
+      market_data_archive=market_data_archive,
+    )
   if _configured_study(config_path) == "first-board-promotion":
     if source is not None or market_data_archive is not None:
       raise ValueError(
@@ -184,6 +192,16 @@ async def run_study(
   output_root: str | Path | None = None,
   now: datetime | None = None,
 ) -> Path:
+  if _configured_study(config_path) == "factor-study":
+    from quantx_research.factor_runner import run_factor_study
+
+    return await run_factor_study(
+      config_path,
+      source=source,
+      market_data_archive=market_data_archive,
+      output_root=output_root,
+      now=now,
+    )
   if _configured_study(config_path) == "first-board-promotion":
     if source is not None or market_data_archive is not None:
       raise ValueError(
@@ -422,6 +440,13 @@ def _remove_partial_output_artifacts(run_dir: Path) -> list[str]:
 def render_existing(run_dir: str | Path) -> Path:
   directory = Path(run_dir)
   manifest = _read_json(directory / "manifest.json")
+  if manifest.get("study_id") == "factor-study":
+    from quantx_research.factor_runner import render_factor_report
+
+    report = render_factor_report(directory)
+    manifest["artifacts"] = artifact_index(directory)
+    write_json(directory / "manifest.json", manifest)
+    return report
   if manifest.get("study_id") == "first-board-promotion":
     from quantx_research.first_board_runner import render_first_board_existing
 

@@ -1,0 +1,56 @@
+study: factor-study
+version: v1
+# Default window: the last five years. Freeze date_range for published comparisons.
+factor_ids:
+  - current_price
+  - change_pct
+  - volume_ratio
+  - volume_ratio_5
+  - avg_volume_5
+  - avg_volume_20
+  - avg_amount_20
+  - amount_ratio_20
+  - volume_percentile_60
+  - amount_percentile_60
+  - price_drop_pct
+  - price_rise_pct
+  - days_since_peak
+  - days_since_low
+  - consecutive_down_days
+  - consecutive_down_pct
+  - rsi6
+  - rsi12
+  - rsi24
+  - ma5
+  - ma10
+  - ma20
+  - kdj_k
+  - kdj_d
+  - kdj_j
+  - kdj_cross_up
+  - ma_cross_up
+  - boll_percent_b
+  - boll_bandwidth
+  - boll_near_lower
+  - boll_near_upper
+# Acceptance example only; not an optimized or recommended screening rule.
+conditions:
+  - {factor_id: volume_ratio, operator: between, value: 0.8, value_to: 1.5}
+  - {factor_id: change_pct, operator: lt, value: 0}
+universe:
+  instrument_type: stock
+  exclude_st: false
+  include_industries: []
+  exclude_industries: []
+  lookback_years: 5
+statistics:
+  bootstrap_samples: 1000
+  moving_block_length: horizon
+  minimum_cell_samples: 30
+  minimum_inference_dates: 30
+  fdr_alpha: 0.05
+runtime:
+  batch_size: 100
+  minimum_available_memory_gib: 8
+  memory_sample_interval_seconds: 0.25
+  output_root: .runtime/research-runs
