@@ -32,6 +32,19 @@ Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 订单、成交、持仓与对账结果。进程重启后会恢复超时的 `PROCESSING` 消息，
 并继续从数据库推进。
 
+普通策略、做 T 和买卖计划的最终 LIVE 容量由
+`quantx_infrastructure.services.account_capacity_service.AccountCapacityService`
+统一核验。新命令与保护量调整先锁账户控制行，再锁标的持仓行，以同一份已处理的
+协议 1.1 完整快照为基准，保留未被快照覆盖的本地订单占用和退出保护义务。不能从
+不同时间的账户/持仓查询拼出可用容量，也不能用晚于快照的订单终态释放旧快照的占用。
+LIVE BUY 使用有资金上限的限价；正向做 T 的 BUY 还受未占用老仓可卖量限制。
+PAPER Broker 只恢复本运行模拟资产，模拟计划与 LIVE 保护量、授权和容量隔离。
+
+`StrategyExecutor._process_strategy_output` 对整批 `TradeIntent` 先完成严格持久化，
+再安装可审批意图或进入执行路由。普通策略和专用助手没有两种受理标准。买入计划的
+ORDER/TRADE 必须匹配 run、计划、BUY 方向、intent 和入场阶段；同计划旧入场成交可以
+补记累计事实，但退出 SELL 或旧委托终态不能清空当前 BUY pending。
+
 订单/成交回报由 `business_key` 唯一的 `strategy_runtime_events`
 串行进入策略。TradeIntent 和做 T 批次投影与该事件的首次落库在
 同一事务内完成；Engine 回调后再把 event marker、资金、持仓和策略状态作为
@@ -80,6 +93,30 @@ tick 循环不执行数据库 I/O；错误或取消必须 seal 已处理前缀�
 真正可执行的候选、`TradeIntent` 与模拟成交生命周期仍是即时幂等交易事实，不能为
 压测而延后。性能证据必须将这些不可消除的业务写入与普通热路径写入分开统计；恢复
 同样依赖最近完整日检查点加权威 tick，任何连续性缺口均 fail-closed。
+
+历史 BAR 的可用时间由 `quantx_domain.trading.bar_timing` 统一解释。原始 K 线标签不被
+改写，`StrategyInput.timestamp`、行情快照、回放时钟及绩效水位使用完成后的可用时间；
+零点日期标签的日线只能在 15:00 进入决策。预热按同一规则过滤，排除尚未完成的当日日线。
+`_run_backtest_timeline` 合并所有标的和周期，Tick 在同一完成时刻的 BAR 之前执行；
+每一步等待模拟 Broker 回报收敛，日切也必须先完成前一日的回报。行情生产者与回报
+消费者分离，回报消费者拒绝推进历史 Tick/BAR。所有 BACKTEST 的必需回调或检查点错误
+均使运行失败，不再仅对专用回放启用严格模式。
+
+策略的日线指标与分钟触发分开维护。超市、动态天平、Pullback Grid 的持久状态包含
+影响后续决策的有界记忆；EMA 保存递推种子，ATR 保存前收盘与真实波幅窗口，网格簿保存
+触网最低价和时刻、部分成交与未结数量。已保存的最后日线时间用于防止恢复预热重复
+累计。缺失或不一致的活动状态不能按新策略参数重新生成库存。
+`StrategyBase.restore_algorithm_state()` 在启动恢复和持久回报回滚时重建私有缓存，
+保持缓存与公开 `state` 一致；它不执行 I/O，也不改变策略状态。做 T 自身的观察窗恢复仍
+遵守既有完整检查点和连续性门禁，不因这个缓存重建钩子跳过验证。
+
+托管计划的新版本运行就绪之前，旧 `StrategyRun` 绑定继续有效；切换必须校验冻结的
+计划/配置版本。停止策略前同时核验数据库中的未结订单、冻结与保护计划，即使该运行
+尚未恢复进内存也不能绕过。相关回归集中在
+`tests/infrastructure/test_managed_plan_revision_safety.py`、
+`tests/infrastructure/test_account_capacity_service.py`、
+`tests/engine/unit/test_strategy_bar_causality.py` 和
+`tests/engine/unit/strategies/test_strategy_state_recovery.py`。
 
 完整账户快照的对账按灰度阶段处理。`SHADOW` 是手工交易共存的准备阶段：QMT
 客户端产生且没有 QuantX 关联 ID 的委托/成交会作为外部活动持久化并计数，

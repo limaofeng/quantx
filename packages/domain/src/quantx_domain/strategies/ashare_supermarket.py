@@ -4,14 +4,13 @@ A-share supermarket strategy with T+1 sell queue, box buying, and layered risk c
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
-from quantx_domain import clock as time_utils
 from quantx_domain.enums import (
   RiskControlLevel,
   SellReason,
@@ -19,8 +18,10 @@ from quantx_domain.enums import (
   StrategyInstrumentScope,
 )
 from quantx_domain.schemas import ParameterProperty, ParameterSchema
+from quantx_domain.state_schema import StateProperty, StateSchema
 from quantx_domain.strategies.base import (
   OrderStateEvent,
+  RuntimeStatePatch,
   StrategyBase,
   StrategyCadence,
   StrategyInput,
@@ -31,6 +32,9 @@ from quantx_domain.strategies.base import (
   TradeIntentPriority,
 )
 from quantx_domain.strategies.universe import CandidatePool
+from quantx_domain.trading.bar_timing import exchange_local_time
+
+_DECISION_MEMORY_KEY = "decision_memory"
 
 
 class StrategyState(str, Enum):
@@ -313,22 +317,6 @@ class AshareSupermarketStrategy(StrategyBase):
       raise ValueError("min_position_pct must not exceed max_position_pct")
 
     self.strategy_state = StrategyState.INITIALIZED
-    self.pending_exit_reasons: Dict[str, SellReason] = {}
-    self.tracked_positions: Dict[str, PositionState] = {}
-    self.pending_entry_codes: Set[str] = set()
-    self.price_history: Dict[str, List[float]] = {}
-    self.last_prices: Dict[str, float] = {}
-    self.rebalance_out_codes: Set[str] = set()
-    self.candidates: pd.DataFrame = pd.DataFrame()
-
-    self.reference_equity = float(self.context.initial_capital)
-    self.realized_pnl = 0.0
-    self.current_date: Optional[date] = None
-    self.daily_entry_signal_count = 0
-    self.loss_streak = 0
-    self.position_scale = 1.0
-    self.risk_level = RiskControlLevel.NORMAL
-
     self.candidate_pool = CandidatePool()
     self.period_settings = {
       "1d": PeriodSettings(
@@ -348,6 +336,97 @@ class AshareSupermarketStrategy(StrategyBase):
         take_profit_pct=self.take_profit_pct,
       ),
     }
+    self.restore_algorithm_state()
+    self._sync_decision_memory()
+
+  @classmethod
+  def get_state_schema(cls) -> StateSchema:
+    return StateSchema(
+      properties={
+        _DECISION_MEMORY_KEY: StateProperty(type="object", default={}),
+      }
+    )
+
+  def restore_algorithm_state(self) -> None:
+    if not hasattr(self, "period_settings"):
+      return
+    self.pending_exit_reasons: Dict[str, SellReason] = {}
+    self.tracked_positions: Dict[str, PositionState] = {}
+    self.pending_entry_codes: Set[str] = set()
+    self.price_history: Dict[str, List[float]] = {}
+    self.last_prices: Dict[str, float] = {}
+    self.last_daily_times: Dict[str, datetime] = {}
+    self.rebalance_out_codes: Set[str] = set()
+    self.candidates = pd.DataFrame()
+    self.reference_equity = float(self.context.initial_capital)
+    self.realized_pnl = 0.0
+    self.current_date: Optional[date] = None
+    self.daily_entry_signal_count = 0
+    self.loss_streak = 0
+    memory = self.state.get(_DECISION_MEMORY_KEY)
+    if memory:
+      self.tracked_positions = {
+        code: PositionState(
+          **{**row, "entry_date": date.fromisoformat(row["entry_date"])}
+        )
+        for code, row in memory["tracked_positions"].items()
+      }
+      self.pending_exit_reasons = {
+        code: SellReason(reason)
+        for code, reason in memory["pending_exit_reasons"].items()
+      }
+      self.pending_entry_codes = set(memory["pending_entry_codes"])
+      self.price_history = {
+        code: list(prices) for code, prices in memory["price_history"].items()
+      }
+      self.last_prices = dict(memory["last_prices"])
+      self.last_daily_times = {
+        code: datetime.fromisoformat(stamp)
+        for code, stamp in memory["last_daily_times"].items()
+      }
+      self.rebalance_out_codes = set(memory["rebalance_out_codes"])
+      self.candidates = pd.DataFrame(memory["candidates"], dtype=object)
+      self.reference_equity = float(memory["reference_equity"])
+      self.realized_pnl = float(memory["realized_pnl"])
+      self.current_date = (
+        date.fromisoformat(memory["current_date"]) if memory["current_date"] else None
+      )
+      self.daily_entry_signal_count = int(memory["daily_entry_signal_count"])
+      self.loss_streak = int(memory["loss_streak"])
+    self._update_risk_control()
+
+  def _sync_decision_memory(self) -> RuntimeStatePatch:
+    columns = [
+      name
+      for name in ("code", "box_support", "box_resistance", "box_valid", "structure_ok")
+      if name in self.candidates.columns
+    ]
+    memory = {
+      "tracked_positions": {
+        code: {**asdict(position), "entry_date": position.entry_date.isoformat()}
+        for code, position in self.tracked_positions.items()
+      },
+      "pending_exit_reasons": {
+        code: reason.value for code, reason in self.pending_exit_reasons.items()
+      },
+      "pending_entry_codes": sorted(self.pending_entry_codes),
+      "price_history": {
+        code: list(prices) for code, prices in self.price_history.items()
+      },
+      "last_prices": dict(self.last_prices),
+      "last_daily_times": {
+        code: stamp.isoformat() for code, stamp in self.last_daily_times.items()
+      },
+      "rebalance_out_codes": sorted(self.rebalance_out_codes),
+      "candidates": self.candidates[columns].to_dict(orient="records"),
+      "reference_equity": self.reference_equity,
+      "realized_pnl": self.realized_pnl,
+      "current_date": self.current_date.isoformat() if self.current_date else None,
+      "daily_entry_signal_count": self.daily_entry_signal_count,
+      "loss_streak": self.loss_streak,
+    }
+    self.state.set(_DECISION_MEMORY_KEY, memory)
+    return RuntimeStatePatch(set={_DECISION_MEMORY_KEY: memory})
 
   async def start(self) -> None:
     await super().start()
@@ -356,6 +435,8 @@ class AshareSupermarketStrategy(StrategyBase):
   async def step(self, input: StrategyInput) -> StrategyOutput:
     if input.cadence != StrategyCadence.BAR:
       return StrategyOutput()
+    if input.bar_period != "1d":
+      return StrategyOutput(decision_tags=["unsupported_bar_period", "no_trade"])
     bar = input.event
     if not self.is_running or self.strategy_state in (
       StrategyState.PAUSED,
@@ -364,13 +445,15 @@ class AshareSupermarketStrategy(StrategyBase):
       return StrategyOutput()
 
     code = self._resolve_code(bar)
-    if not code:
-      return StrategyOutput()
-
-    self.context.current_time = getattr(bar, "time", None)
-    bar_date = self._resolve_bar_date(bar)
-    period_key = self._get_period_key(getattr(bar, "period", "1d"))
-    settings = self._get_period_settings(period_key)
+    if not code or code not in self.context.instruments:
+      return StrategyOutput(decision_tags=["instrument_mismatch", "no_trade"])
+    timestamp = exchange_local_time(input.timestamp)
+    if code in self.last_daily_times and timestamp <= self.last_daily_times[code]:
+      return StrategyOutput(decision_tags=["duplicate_or_old_daily_bar", "no_trade"])
+    self.last_daily_times[code] = timestamp
+    self.context.current_time = timestamp
+    bar_date = timestamp.date()
+    settings = self._get_period_settings("1d")
 
     self._update_price_history(code, bar.close)
     self._update_position_from_bar(code, bar.close)
@@ -391,7 +474,9 @@ class AshareSupermarketStrategy(StrategyBase):
     if self.risk_level == RiskControlLevel.LIQUIDATE:
       if allow_swing_sell:
         intents.extend(self._generate_liquidation_intents(bar_date))
-      return StrategyOutput(trade_intents=intents)
+      return StrategyOutput(
+        trade_intents=intents, runtime_state_patch=self._sync_decision_memory()
+      )
 
     sell_intent = (
       self._maybe_generate_sell_intent(code, bar.close, bar_date, settings)
@@ -401,7 +486,16 @@ class AshareSupermarketStrategy(StrategyBase):
     if sell_intent:
       intents.append(sell_intent)
 
-    if allow_swing_buy and self._can_open_new_position(code):
+    # Missing execution history cannot be reconstructed from a broker cost
+    # average: keep new entries closed until the strategy tracker is restored.
+    unknown_holdings = [
+      held_code
+      for held_code, position in input.portfolio_state.get("positions", {}).items()
+      if held_code in self.context.instruments
+      and held_code not in self.tracked_positions
+      and int(self._extract(position, "long_volume", 0) or 0) > 0
+    ]
+    if not unknown_holdings and allow_swing_buy and self._can_open_new_position(code):
       buy_intent = await self._maybe_generate_buy_intent(
         code, bar.close, bar_date, settings
       )
@@ -412,10 +506,17 @@ class AshareSupermarketStrategy(StrategyBase):
       if buy_intent:
         intents.append(buy_intent)
 
-    return StrategyOutput(trade_intents=intents)
+    return StrategyOutput(
+      trade_intents=intents,
+      runtime_state_patch=self._sync_decision_memory(),
+      decision_tags=["position_history_reconcile_required"] if unknown_holdings else [],
+      trace_payload={"unknown_position_history": unknown_holdings}
+      if unknown_holdings
+      else {},
+    )
 
   async def warmup(self, input: StrategyInput) -> None:
-    if input.cadence != StrategyCadence.BAR:
+    if input.bar_period != "1d":
       return None
     bar = input.event
     if not self.is_running or self.strategy_state in (
@@ -425,18 +526,21 @@ class AshareSupermarketStrategy(StrategyBase):
       return None
 
     code = self._resolve_code(bar)
-    if not code:
+    if not code or code not in self.context.instruments:
       return None
-
-    self.context.current_time = getattr(bar, "time", None)
-    bar_date = self._resolve_bar_date(bar)
-    period_key = self._get_period_key(getattr(bar, "period", "1d"))
-    settings = self._get_period_settings(period_key)
+    timestamp = exchange_local_time(input.timestamp)
+    if code in self.last_daily_times and timestamp <= self.last_daily_times[code]:
+      return None
+    self.last_daily_times[code] = timestamp
+    self.context.current_time = timestamp
+    bar_date = timestamp.date()
+    settings = self._get_period_settings("1d")
 
     self._update_price_history(code, bar.close)
     self._update_position_from_bar(code, bar.close)
     self._update_daily_state(bar_date, settings)
     self._update_risk_control()
+    self._sync_decision_memory()
     return None
 
   async def on_stop(self) -> None:
@@ -453,21 +557,29 @@ class AshareSupermarketStrategy(StrategyBase):
       self.is_running = True
 
   def set_candidates(self, candidates: Optional[pd.DataFrame]) -> None:
-    self.candidates = candidates.copy() if candidates is not None else pd.DataFrame()
+    self.candidates = (
+      candidates.astype(object).where(pd.notna(candidates), None)
+      if candidates is not None
+      else pd.DataFrame()
+    )
+    self._sync_decision_memory()
 
   def update_candidates(
     self, universe: Sequence[Dict[str, Any]], price_map: Dict[str, Sequence[float]]
   ) -> pd.DataFrame:
-    self.candidates = self.candidate_pool.build_candidates(universe, price_map)
+    self.set_candidates(self.candidate_pool.build_candidates(universe, price_map))
     return self.candidates
 
   async def on_order(self, event: OrderStateEvent):
     status = event.status
     request = event.request
     code = self._extract(request, "instrument_code")
-    order_type = str(self._extract(request, "order_type", "") or "").split(".")[-1].upper()
+    order_type = (
+      str(self._extract(request, "order_type", "") or "").split(".")[-1].upper()
+    )
     if status in {"REJECTED", "CANCELLED", "EXPIRED"} and order_type == "BUY" and code:
       self.pending_entry_codes.discard(str(code))
+      return self._sync_decision_memory()
     return None
 
   async def on_trade(self, event: TradeExecutionEvent):
@@ -481,8 +593,8 @@ class AshareSupermarketStrategy(StrategyBase):
       return None
 
     trade_type = event.trade_type
-    trade_time = event.trade_time or time_utils.now()
-    trade_date = trade_time.date() if isinstance(trade_time, datetime) else time_utils.today()
+    trade_time = event.trade_time or self.context.current_time
+    trade_date = exchange_local_time(trade_time).date()
 
     if trade_type == "BUY":
       self.pending_entry_codes.discard(code)
@@ -502,14 +614,17 @@ class AshareSupermarketStrategy(StrategyBase):
           highest_price=price,
           last_price=price,
         )
-      return None
+      return self._sync_decision_memory()
 
     if trade_type == "SELL":
       state = self.tracked_positions.get(code)
       if not state:
         return None
-      pnl_pct = (price - state.entry_price) / state.entry_price if state.entry_price else 0.0
-      self.record_trade_result(pnl_pct)
+      pnl_pct = (
+        (price - state.entry_price) / state.entry_price if state.entry_price else 0.0
+      )
+      self.loss_streak = self.loss_streak + 1 if pnl_pct < 0 else 0
+      self._update_risk_control()
       self.realized_pnl += (price - state.entry_price) * min(volume, state.volume)
       state.volume -= volume
       if state.volume <= 0:
@@ -517,6 +632,7 @@ class AshareSupermarketStrategy(StrategyBase):
         self.pending_exit_reasons.pop(code, None)
       else:
         state.last_price = price
+      return self._sync_decision_memory()
     return None
 
   def _extract(self, source: Any, key: str, default: Any = None) -> Any:
@@ -532,15 +648,10 @@ class AshareSupermarketStrategy(StrategyBase):
     else:
       self.loss_streak = 0
     self._update_risk_control()
+    self._sync_decision_memory()
 
   def _resolve_code(self, bar: Any) -> Optional[str]:
     return getattr(bar, "code", None) or getattr(bar, "stock_code", None)
-
-  def _resolve_bar_date(self, bar: Any) -> date:
-    bar_time = getattr(bar, "time", None)
-    if isinstance(bar_time, datetime):
-      return bar_time.date()
-    return time_utils.today()
 
   def _get_period_key(self, period: str) -> str:
     period_value = (period or "").lower()

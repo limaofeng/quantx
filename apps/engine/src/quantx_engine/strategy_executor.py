@@ -9271,6 +9271,7 @@ class StrategyExecutor:
         copy.deepcopy(snapshot["strategy_state"]),
         notify=False,
       )
+      runtime.strategy.restore_algorithm_state()
     runtime.exit_plan_book = ExitPlanBook.from_dict(
       copy.deepcopy(snapshot["exit_plan_book"]),
       evaluator=ExitPlanEvaluator(self.exit_strategy_registry),

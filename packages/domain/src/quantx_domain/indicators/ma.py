@@ -2,7 +2,8 @@
 移动平均线指标
 """
 
-from typing import List, Union
+from math import isfinite
+from typing import Any, Dict, List, Union
 
 from .base import IndicatorBase
 
@@ -54,6 +55,20 @@ class EMA(IndicatorBase):
     """重置EMA状态"""
     super().reset()
     self.previous_ema = None
+
+  def snapshot_state(self) -> Dict[str, Any]:
+    return {**self._window_snapshot(), "previous_ema": self.previous_ema}
+
+  def restore_state(self, snapshot: Dict[str, Any]) -> None:
+    previous = snapshot["previous_ema"]
+    if previous is not None and not isfinite(float(previous)):
+      raise ValueError("EMA_STATE_ACCUMULATOR_INVALID")
+    self._restore_window(snapshot)
+    if (
+      previous is not None
+    ) != self.is_warmed_up or previous != self.get_current_value():
+      raise ValueError("EMA_STATE_ACCUMULATOR_INVALID")
+    self.previous_ema = previous
 
 
 class WMA(IndicatorBase):

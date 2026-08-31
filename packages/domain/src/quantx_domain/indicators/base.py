@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Any, Dict, List, Optional, Union
 
 from quantx_domain.market import KLine
@@ -70,7 +71,20 @@ class IndicatorBase(ABC):
     value = self.calculate(list(self.data_window))
     if value is not None:
       indicator_value = IndicatorValue(
-        timestamp=bar.time, value=value, metadata={"bar": bar.to_dict()}
+        timestamp=bar.time,
+        value=value,
+        metadata={
+          "bar": {
+            "stock_code": bar.stock_code,
+            "period": bar.period,
+            "time": bar.time,
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+          }
+        },
       )
       self.values.append(indicator_value)
       return indicator_value
@@ -100,3 +114,49 @@ class IndicatorBase(ABC):
     self.data_window.clear()
     self.values.clear()
     self.is_warmed_up = False
+
+  def _window_snapshot(self) -> Dict[str, Any]:
+    """Bounded calculation state; chart history is not part of recovery."""
+    latest = self.values[-1] if self.values else None
+    return {
+      "indicator": self.__class__.__name__,
+      "period": self.period,
+      "data_window": list(self.data_window),
+      "is_warmed_up": self.is_warmed_up,
+      "last_value": {
+        "timestamp": latest.timestamp.isoformat(),
+        "value": latest.value,
+      }
+      if latest
+      else None,
+    }
+
+  def _restore_window(self, snapshot: Dict[str, Any]) -> None:
+    if (
+      snapshot["indicator"] != self.__class__.__name__
+      or snapshot["period"] != self.period
+    ):
+      raise ValueError("INDICATOR_STATE_CONFIG_MISMATCH")
+    window = [float(value) for value in snapshot["data_window"]]
+    if len(window) > self.data_window.maxlen or not all(
+      isfinite(value) for value in window
+    ):
+      raise ValueError("INDICATOR_STATE_WINDOW_INVALID")
+    warmed = snapshot["is_warmed_up"]
+    latest = snapshot["last_value"]
+    if (
+      type(warmed) is not bool
+      or warmed != (len(window) >= self.period)
+      or warmed != (latest is not None)
+    ):
+      raise ValueError("INDICATOR_STATE_WARMUP_INVALID")
+    values = []
+    if latest is not None:
+      value = float(latest["value"])
+      if not isfinite(value):
+        raise ValueError("INDICATOR_STATE_VALUE_INVALID")
+      values.append(IndicatorValue(datetime.fromisoformat(latest["timestamp"]), value))
+    self.data_window.clear()
+    self.data_window.extend(window)
+    self.is_warmed_up = warmed
+    self.values = values

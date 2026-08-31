@@ -1035,6 +1035,16 @@ class StrategyBase(ABC):
     if state:
       defaults.update(state)
     self.state.replace(defaults, notify=False)
+    self.restore_algorithm_state()
+
+  def restore_algorithm_state(self) -> None:
+    """Rebuild private decision caches from ``state`` without side effects.
+
+    Called after a startup snapshot and after a failed durable callback rolls
+    back. Strategies with private caches also call it after parameter setup in
+    ``on_init``. This hook must not change state, emit intents, or perform I/O.
+    """
+    return None
 
   def persistence_state_snapshot(self) -> Dict[str, Any]:
     """Return the strategy projection used at a durable runtime boundary.

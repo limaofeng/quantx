@@ -1,6 +1,7 @@
 """Average True Range (ATR) indicator."""
 
-from typing import Dict, List, Optional, Union
+from math import isfinite
+from typing import Any, Dict, List, Optional, Union
 
 from quantx_domain.indicators.base import IndicatorBase, IndicatorValue
 from quantx_domain.market import KLine
@@ -59,3 +60,27 @@ class ATR(IndicatorBase):
     super().reset()
     self.previous_close = None
     self.tr_history.clear()
+
+  def snapshot_state(self) -> Dict[str, Any]:
+    return {
+      **self._window_snapshot(),
+      "previous_close": self.previous_close,
+      "true_ranges": list(self.tr_history[-self.period :]),
+    }
+
+  def restore_state(self, snapshot: Dict[str, Any]) -> None:
+    previous = snapshot["previous_close"]
+    ranges = [float(value) for value in snapshot["true_ranges"]]
+    if len(ranges) > self.period or not all(
+      isfinite(value) and value >= 0 for value in ranges
+    ):
+      raise ValueError("ATR_STATE_WINDOW_INVALID")
+    self._restore_window(snapshot)
+    if len(ranges) != min(self.period, len(self.data_window)) or (
+      previous != (self.data_window[-1] if self.data_window else None)
+    ):
+      raise ValueError("ATR_STATE_PREVIOUS_CLOSE_INVALID")
+    if self.calculate(ranges) != self.get_current_value():
+      raise ValueError("ATR_STATE_VALUE_INVALID")
+    self.previous_close = previous
+    self.tr_history = ranges

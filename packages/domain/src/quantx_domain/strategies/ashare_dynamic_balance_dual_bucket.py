@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from quantx_domain.enums import StrategyCategory, StrategyInstrumentScope
@@ -22,11 +24,14 @@ from quantx_domain.strategies.base import (
   TradeIntentDirection,
   TradeIntentPriority,
 )
+from quantx_domain.trading.bar_timing import exchange_local_time
 from quantx_domain.trading.bucket_ledger import (
   CORE_BUCKET,
   LOCKED_CORE_BUCKET,
   SWING_BUCKET,
 )
+
+_DECISION_MEMORY_KEY = "decision_memory"
 
 
 class BalanceTrendState:
@@ -176,6 +181,7 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
         "last_grid_index": StateProperty(type="integer", default=0),
         "last_filled_grid_index": StateProperty(type="integer", default=0),
         "pending_intents": StateProperty(type="object", default={}),
+        _DECISION_MEMORY_KEY: StateProperty(type="object", default={}),
       },
     )
 
@@ -184,8 +190,42 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
     return {"use_tick_data": True, "periods": ["1m", "1d"]}
 
   async def on_init(self) -> None:
+    self.restore_algorithm_state()
+    self._sync_decision_memory()
+
+  def restore_algorithm_state(self) -> None:
     self._bars: List[Dict[str, float]] = []
     self._last_daily_confirm: Dict[str, Any] = {}
+    self._last_daily_time: Optional[datetime] = None
+    memory = self.state.get(_DECISION_MEMORY_KEY)
+    if memory:
+      self._bars = deepcopy(memory["daily_bars"])
+      self._last_daily_time = (
+        datetime.fromisoformat(memory["last_daily_time"])
+        if memory["last_daily_time"]
+        else None
+      )
+      if bool(self._bars) != (self._last_daily_time is not None):
+        raise ValueError("DAILY_MEMORY_WATERMARK_INVALID")
+      self._last_daily_confirm = deepcopy(memory["daily_confirmation"])
+      if self._last_daily_confirm:
+        if len(self._bars) < 20:
+          raise ValueError("DAILY_CONFIRMATION_WINDOW_INCOMPLETE")
+        self._last_daily_confirm["targets"] = BalanceTargets(**self._last_daily_confirm["targets"])
+
+  def _sync_decision_memory(self) -> RuntimeStatePatch:
+    confirmation = deepcopy(self._last_daily_confirm)
+    if confirmation:
+      confirmation["targets"] = asdict(confirmation["targets"])
+    memory = {
+      "daily_bars": deepcopy(self._bars),
+      "last_daily_time": self._last_daily_time.isoformat()
+      if self._last_daily_time
+      else None,
+      "daily_confirmation": confirmation,
+    }
+    self.state.set(_DECISION_MEMORY_KEY, memory)
+    return RuntimeStatePatch(set={_DECISION_MEMORY_KEY: memory})
 
   async def on_stop(self) -> None:
     return None
@@ -223,6 +263,9 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
       return None
     if not self._is_supported_instrument(input.instrument_code):
       return None
+    timestamp = exchange_local_time(input.timestamp)
+    if self._last_daily_time is not None and timestamp <= self._last_daily_time:
+      return None
 
     row = self._bar_row(input.event, input.market_data)
     if not row:
@@ -230,9 +273,11 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
     self._bars.append(row)
     max_len = max(160, int(self.get_parameter("atr_period", 14)) * 4)
     self._bars = self._bars[-max_len:]
+    self._last_daily_time = timestamp
 
     analysis = self._analyze_daily(row)
     if not analysis:
+      self._sync_decision_memory()
       return None
     targets = self._build_targets(input, analysis)
     phase = self._phase_from_state(analysis["trend_state"], targets)
@@ -243,6 +288,7 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
       "targets": targets,
       "position_phase": phase,
     }
+    self._sync_decision_memory()
     return None
 
   async def on_order(self, event: OrderStateEvent) -> Optional[RuntimeStatePatch]:
@@ -279,6 +325,9 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
     return RuntimeStatePatch(set=updates)
 
   def _handle_bar(self, input: StrategyInput) -> StrategyOutput:
+    timestamp = exchange_local_time(input.timestamp)
+    if self._last_daily_time is not None and timestamp <= self._last_daily_time:
+      return StrategyOutput(decision_tags=["duplicate_or_old_daily_bar", "no_trade"])
     bar = input.event
     row = self._bar_row(bar, input.market_data)
     if not row:
@@ -286,10 +335,14 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
     self._bars.append(row)
     max_len = max(160, int(self.get_parameter("atr_period", 14)) * 4)
     self._bars = self._bars[-max_len:]
+    self._last_daily_time = timestamp
 
     analysis = self._analyze_daily(row)
     if not analysis:
-      return StrategyOutput(decision_tags=["warming_up"])
+      return StrategyOutput(
+        runtime_state_patch=self._sync_decision_memory(),
+        decision_tags=["warming_up", "no_trade"],
+      )
 
     targets = self._build_targets(input, analysis)
     phase = self._phase_from_state(analysis["trend_state"], targets)
@@ -302,6 +355,7 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
       "targets": targets,
       "position_phase": phase,
     }
+    patch.set.update(self._sync_decision_memory().set)
     return StrategyOutput(
       trade_intents=intents,
       runtime_state_patch=patch,
@@ -330,23 +384,12 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
       return StrategyOutput(decision_tags=["invalid_tick"])
     analysis = dict(self._last_daily_confirm or {})
     if not analysis:
-      analysis = {
-        "benchmark_price": float(self.state.get("benchmark_price", 0.0) or price),
-        "grid_step_pct": float(self.state.get("grid_step_pct", 0.01) or 0.01),
-        "trend_state": str(self.state.get("trend_state", BalanceTrendState.NEUTRAL)),
-      }
-      targets = BalanceTargets(
-        signal=0.0,
-        target_total_pct=float(self.state.get("target_total_pct", 0.0) or 0.0),
-        target_core_pct=float(self.state.get("target_core_pct", 0.0) or 0.0),
-        target_swing_pct=float(self.state.get("target_swing_pct", 0.0) or 0.0),
-        locked_core_pct=float(self.state.get("locked_core_pct", 0.0) or 0.0),
-        core_share=float(self.get_parameter("core_base_share", 0.75)),
+      return StrategyOutput(
+        decision_tags=["warming_up", "no_trade"],
+        trace_payload={"reason": "daily_confirmation_required"},
       )
-      phase = str(self.state.get("position_phase", BalancePositionPhase.BALANCED_RUN))
-    else:
-      targets = analysis["targets"]
-      phase = str(analysis["position_phase"])
+    targets = analysis["targets"]
+    phase = str(analysis["position_phase"])
 
     intents = self._grid_intents(input, price, analysis, targets, phase)
     return StrategyOutput(
@@ -865,7 +908,7 @@ class AshareDynamicBalanceDualBucketStrategy(StrategyBase):
     high = _float(getattr(source, "high", close), close)
     low = _float(getattr(source, "low", close), close)
     volume = _float(getattr(source, "volume", 0.0))
-    if close <= 0:
+    if close <= 0 or not all(math.isfinite(value) for value in (close, high, low, volume)):
       return None
     return {"close": close, "high": high, "low": low, "volume": volume}
 

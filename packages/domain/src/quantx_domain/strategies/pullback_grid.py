@@ -7,6 +7,7 @@ Pullback Grid (回撤网格) 策略
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from math import isfinite
 from typing import Any, Dict, List, Optional
 
 from quantx_domain.enums import StrategyCategory, StrategyInstrumentScope
@@ -38,6 +39,9 @@ from quantx_domain.strategies.base import (
     TradeIntentDirection,
     TradeIntentPriority,
 )
+from quantx_domain.trading.bar_timing import exchange_local_time
+
+_DECISION_MEMORY_KEY = "decision_memory"
 
 
 @dataclass
@@ -260,7 +264,9 @@ class PullbackGridStrategy(StrategyBase):
             self.get_parameter("pullback_confirm_pct", 0.002) or 0.0
         )
         self.position_per_grid = int(self.get_parameter("position_per_grid", 1000) or 0)
-        self.max_total_position = int(self.get_parameter("max_total_position", 5000) or 0)
+        self.max_total_position = int(
+            self.get_parameter("max_total_position", 5000) or 0
+        )
         self.price_ceiling = float(self.get_parameter("price_ceiling", -1) or -1)
         self.price_floor = float(self.get_parameter("price_floor", -1) or -1)
         self.base_price = self.get_parameter(
@@ -273,10 +279,11 @@ class PullbackGridStrategy(StrategyBase):
         self.fast_ema = EMA(self.fast_ema_period)
         self.atr = ATR(self.atr_period)
 
-        # 策略状态
-        self.grids: List[GridLevel] = self._load_external_grids()
-        self.inventory_lots: List[GridInventoryLot] = self._load_inventory_lots()
-        self.release_events: List[GridReleaseEvent] = self._load_release_events()
+        # 策略状态与指标递推种子必须从同一个检查点恢复。
+        self.restore_algorithm_state()
+        if not self.state.get(_DECISION_MEMORY_KEY):
+            self.state.last_trend_state = "undefined"
+        self._sync_indicator_memory()
         self._sync_grid_book_state("initialized")
         with self.state.silent(persist=True, notify=True, flush_on_exit=True):
             if self.state.get("last_trend_state") is None:
@@ -298,6 +305,7 @@ class PullbackGridStrategy(StrategyBase):
         return StateSchema(
             type="object",
             properties={
+                _DECISION_MEMORY_KEY: StateProperty(type="object", default={}),
                 "last_trend_state": StateProperty(
                     type="string",
                     default="undefined",
@@ -325,6 +333,55 @@ class PullbackGridStrategy(StrategyBase):
             },
         )
 
+    def restore_algorithm_state(self) -> None:
+        if not hasattr(self, "trend_ema"):
+            return
+        self.trend_ema.reset()
+        self.fast_ema.reset()
+        self.atr.reset()
+        self._last_daily_time: Optional[datetime] = None
+        memory = self.state.get(_DECISION_MEMORY_KEY)
+        if memory:
+            if type(memory["has_external_grid_plan"]) is not bool:
+                raise ValueError("GRID_GENERATION_POLICY_INVALID")
+            self._has_external_grid_plan = memory["has_external_grid_plan"]
+            self.trend_ema.restore_state(memory["trend_ema"])
+            self.fast_ema.restore_state(memory["fast_ema"])
+            self.atr.restore_state(memory["atr"])
+            self._last_daily_time = (
+                datetime.fromisoformat(memory["last_daily_time"])
+                if memory["last_daily_time"]
+                else None
+            )
+            if bool(self.trend_ema.data_window) != (self._last_daily_time is not None):
+                raise ValueError("GRID_INDICATOR_WATERMARK_INVALID")
+        self.grids = self._load_external_grids()
+        self.inventory_lots = self._load_inventory_lots()
+        self.release_events = self._load_release_events()
+
+    def _sync_indicator_memory(self) -> RuntimeStatePatch:
+        memory = {
+            "has_external_grid_plan": self._has_external_grid_plan,
+            "trend_ema": self.trend_ema.snapshot_state(),
+            "fast_ema": self.fast_ema.snapshot_state(),
+            "atr": self.atr.snapshot_state(),
+            "last_daily_time": self._last_daily_time.isoformat()
+            if self._last_daily_time
+            else None,
+        }
+        self.state.set(_DECISION_MEMORY_KEY, memory)
+        return RuntimeStatePatch(set={_DECISION_MEMORY_KEY: memory})
+
+    def _observe_daily_bar(self, input: StrategyInput) -> bool:
+        timestamp = exchange_local_time(input.timestamp)
+        if self._last_daily_time is not None and timestamp <= self._last_daily_time:
+            return False
+        self.trend_ema.update(input.event)
+        self.fast_ema.update(input.event)
+        self.atr.update(input.event)
+        self._last_daily_time = timestamp
+        return True
+
     async def step(self, input: StrategyInput) -> StrategyOutput:
         if input.cadence == StrategyCadence.BAR:
             return self._handle_bar(input)
@@ -342,9 +399,8 @@ class PullbackGridStrategy(StrategyBase):
         bar = input.event
         if bar is None:
             return None
-        self.trend_ema.update(bar)
-        self.fast_ema.update(bar)
-        self.atr.update(bar)
+        if self._observe_daily_bar(input):
+            self._sync_indicator_memory()
         return None
 
     def _handle_bar(self, input: StrategyInput) -> StrategyOutput:
@@ -355,10 +411,13 @@ class PullbackGridStrategy(StrategyBase):
         if input.bar_period not in {"1d", "1m"}:
             return StrategyOutput(decision_tags=["unsupported_bar_period", "no_trade"])
         # 日线只更新日指标；分钟收盘可使用上一完整日线的指标触发网格。
+        indicator_patch = None
         if input.bar_period == "1d":
-            self.trend_ema.update(bar)
-            self.fast_ema.update(bar)
-            self.atr.update(bar)
+            if not self._observe_daily_bar(input):
+                return StrategyOutput(
+                    decision_tags=["duplicate_or_old_daily_bar", "no_trade"]
+                )
+            indicator_patch = self._sync_indicator_memory()
 
         if (
             not self.trend_ema.is_warmed_up
@@ -366,6 +425,7 @@ class PullbackGridStrategy(StrategyBase):
             or not self.atr.is_warmed_up
         ):
             return StrategyOutput(
+                runtime_state_patch=indicator_patch,
                 decision_tags=["warming_up"],
                 trace_payload={"reason": "indicator_warming_up"},
             )
@@ -378,6 +438,7 @@ class PullbackGridStrategy(StrategyBase):
         instrument_code = input.instrument_code or self._get_bar_instrument_code(bar)
         if current_price <= 0 or current_atr <= 0:
             return StrategyOutput(
+                runtime_state_patch=indicator_patch,
                 decision_tags=["invalid_bar_price_or_atr"],
                 trace_payload={
                     "reason": "invalid_bar_price_or_atr",
@@ -419,14 +480,18 @@ class PullbackGridStrategy(StrategyBase):
             elif not self._has_external_grid_plan:
                 should_generate_dynamic_grid = True
 
-        if trend_state == "up" and should_generate_dynamic_grid and not self._has_external_grid_plan:
+        if (
+            trend_state == "up"
+            and should_generate_dynamic_grid
+            and not self._has_external_grid_plan
+        ):
             if self._generate_dynamic_grids(current_price, current_atr):
                 grid_state_patch = self._sync_grid_book_state("dynamic_grid_generated")
 
-        bar_key = self._make_bar_key(getattr(bar, "time", None))
+        bar_key = self._make_bar_key(input.timestamp)
         buy_intents, buy_grid_changed, buy_block_events = self._collect_buy_intents(
             current_price=current_price,
-            current_time=getattr(bar, "time", None),
+            current_time=input.timestamp,
             instrument_code=instrument_code,
             source="BAR",
             bar_key=bar_key,
@@ -450,13 +515,17 @@ class PullbackGridStrategy(StrategyBase):
         patch = grid_state_patch
         if patch is None and self.state.last_trend_state == trend_state:
             patch = RuntimeStatePatch(set={"last_trend_state": trend_state})
+        if indicator_patch is not None:
+            patch.set.update(indicator_patch.set)
 
         return StrategyOutput(
             trade_intents=trade_intents,
             runtime_state_patch=patch,
             decision_tags=["trend_updated", f"trend_{trend_state}"],
             trace_payload={
-                "reason": "bar_update" if trade_intents or block_events else "bar_no_trade",
+                "reason": "bar_update"
+                if trade_intents or block_events
+                else "bar_no_trade",
                 "trend_state": trend_state,
                 "fast_ema": current_fast,
                 "trend_ema": current_trend,
@@ -1326,8 +1395,13 @@ class PullbackGridStrategy(StrategyBase):
     def _load_external_grids(self) -> List[GridLevel]:
         """加载前端生成的网格"""
         snapshot = self.state.get(GRID_BOOK_CUSTOM_STATE_KEY) or {}
-        raw_levels = snapshot.get("levels") if isinstance(snapshot, dict) else None
-        if not raw_levels:
+        if not isinstance(snapshot, dict):
+            raise ValueError("GRID_STATE_INVALID")
+        from_snapshot = bool(snapshot)
+        raw_levels = snapshot["levels"] if from_snapshot else None
+        if from_snapshot and not isinstance(raw_levels, list):
+            raise ValueError("GRID_STATE_LEVELS_INVALID")
+        if not from_snapshot:
             raw_levels = (
                 self.get_parameter("grid_levels")
                 or self.get_parameter("gridLevels")
@@ -1365,7 +1439,11 @@ class PullbackGridStrategy(StrategyBase):
                 continue
 
             price = raw.get("price", raw.get("trigger_price", raw.get("triggerPrice")))
-            shares = raw.get("shares", raw.get("volume", raw.get("qty")))
+            shares = (
+                raw["planned_shares"]
+                if from_snapshot
+                else raw.get("shares", raw.get("volume", raw.get("qty")))
+            )
             try:
                 price = float(price)
             except (TypeError, ValueError):
@@ -1380,7 +1458,7 @@ class PullbackGridStrategy(StrategyBase):
             except (TypeError, ValueError):
                 shares = 0
 
-            if price <= 0 or shares <= 0:
+            if not isfinite(price) or price <= 0 or shares <= 0:
                 invalid_grid_rows += 1
                 self.log_warning(
                     f"pullback_grid 外部网格配置无效，已跳过。 reason=non_positive, index={idx}, "
@@ -1398,9 +1476,37 @@ class PullbackGridStrategy(StrategyBase):
             if not grid_id:
                 grid_id = raw.get("gridId")
             enabled = bool(raw.get("enabled", True))
-            filled_volume = int(raw.get("filled_shares", raw.get("filledShares", raw.get("filled_volume", 0))) or 0)
-            pending_volume = int(raw.get("pending_shares", raw.get("pendingShares", raw.get("pending_volume", 0))) or 0)
+            filled_volume = int(
+                raw.get(
+                    "filled_shares",
+                    raw.get("filledShares", raw.get("filled_volume", 0)),
+                )
+                or 0
+            )
+            pending_volume = int(
+                raw.get(
+                    "pending_shares",
+                    raw.get("pendingShares", raw.get("pending_volume", 0)),
+                )
+                or 0
+            )
             status = normalize_status(raw.get("status"), enabled=enabled)
+            monitoring = bool(
+                raw.get("monitoring", raw.get("is_monitoring", status == "MONITORING"))
+            )
+            lowest_price = raw.get("lowest_price_since_touch")
+            touch_time = raw.get("touch_time")
+            if (
+                from_snapshot
+                and monitoring
+                and (
+                    lowest_price is None
+                    or not isfinite(float(lowest_price))
+                    or float(lowest_price) <= 0
+                    or not touch_time
+                )
+            ):
+                raise ValueError("GRID_MONITORING_STATE_INCOMPLETE")
 
             grids.append(
                 GridLevel(
@@ -1411,14 +1517,18 @@ class PullbackGridStrategy(StrategyBase):
                     grid_id=grid_id,
                     amount=float(raw.get("amount", price * shares) or 0),
                     pct_from_base=raw.get("pctFromBase", raw.get("pct_from_base")),
-                    expected_profit=raw.get("expectedProfit", raw.get("expected_profit")),
+                    expected_profit=raw.get(
+                        "expectedProfit", raw.get("expected_profit")
+                    ),
                     enabled=enabled,
                     status=status,
                     role=raw.get(
                         "role",
                         "BUY_SLOT" if side == "BUY" else "SELL_WATERLINE",
                     ),
-                    cycle_count=int(raw.get("cycle_count", raw.get("cycleCount", 0)) or 0),
+                    cycle_count=int(
+                        raw.get("cycle_count", raw.get("cycleCount", 0)) or 0
+                    ),
                     available_inventory_shares=int(
                         raw.get(
                             "available_inventory_shares",
@@ -1435,30 +1545,62 @@ class PullbackGridStrategy(StrategyBase):
                     ),
                     waiting_reason=raw.get("waiting_reason", raw.get("waitingReason")),
                     is_filled=status == "FILLED",
-                    entry_price=float(raw.get("entry_price", raw.get("entryPrice", 0.0)) or 0.0),
-                    entry_time=raw.get("entry_time", raw.get("entryTime")),
-                    is_pending=status == "PENDING",
+                    entry_price=float(
+                        raw.get("entry_price", raw.get("entryPrice", 0.0)) or 0.0
+                    ),
+                    entry_time=(
+                        datetime.fromisoformat(raw["entry_time"])
+                        if from_snapshot and raw.get("entry_time")
+                        else raw.get("entry_time", raw.get("entryTime"))
+                    ),
+                    is_pending=pending_volume > 0,
                     order_id=raw.get("order_id", raw.get("orderId")),
-                    is_monitoring=bool(raw.get("monitoring", raw.get("is_monitoring", status == "MONITORING"))),
+                    is_monitoring=monitoring,
+                    lowest_price_since_touch=float(lowest_price)
+                    if lowest_price is not None
+                    else float("inf"),
+                    touch_time=datetime.fromisoformat(touch_time)
+                    if touch_time
+                    else None,
                     filled_volume=filled_volume,
                     pending_volume=pending_volume,
                     last_intent_id=raw.get("last_intent_id", raw.get("lastIntentId")),
                     last_trace_id=raw.get("last_trace_id", raw.get("lastTraceId")),
-                    last_intent_bar_key=raw.get("last_intent_bar_key", raw.get("lastIntentBarKey")),
-                    last_intent_source=raw.get("last_intent_source", raw.get("lastIntentSource")),
-                    last_intent_side=raw.get("last_intent_side", raw.get("lastIntentSide")),
-                    last_rejected_side=raw.get("last_rejected_side", raw.get("lastRejectedSide")),
-                    last_rejected_date=raw.get("last_rejected_date", raw.get("lastRejectedDate")),
-                    last_rejected_reason=raw.get("last_rejected_reason", raw.get("lastRejectedReason")),
-                    is_day_locked=bool(raw.get("is_day_locked", raw.get("isDayLocked", False))),
-                    sell_lock_reason=raw.get("sell_lock_reason", raw.get("sellLockReason")),
-                    sell_last_filled_date=raw.get("sell_last_filled_date", raw.get("sellLastFilledDate")),
+                    last_intent_bar_key=raw.get(
+                        "last_intent_bar_key", raw.get("lastIntentBarKey")
+                    ),
+                    last_intent_source=raw.get(
+                        "last_intent_source", raw.get("lastIntentSource")
+                    ),
+                    last_intent_side=raw.get(
+                        "last_intent_side", raw.get("lastIntentSide")
+                    ),
+                    last_rejected_side=raw.get(
+                        "last_rejected_side", raw.get("lastRejectedSide")
+                    ),
+                    last_rejected_date=raw.get(
+                        "last_rejected_date", raw.get("lastRejectedDate")
+                    ),
+                    last_rejected_reason=raw.get(
+                        "last_rejected_reason", raw.get("lastRejectedReason")
+                    ),
+                    is_day_locked=bool(
+                        raw.get("is_day_locked", raw.get("isDayLocked", False))
+                    ),
+                    sell_lock_reason=raw.get(
+                        "sell_lock_reason", raw.get("sellLockReason")
+                    ),
+                    sell_last_filled_date=raw.get(
+                        "sell_last_filled_date", raw.get("sellLastFilledDate")
+                    ),
                     reason=raw.get("reason"),
                     updated_at=raw.get("updated_at", raw.get("updatedAt")),
                 )
             )
 
         if invalid_grid_rows:
+            if from_snapshot:
+                raise ValueError("GRID_STATE_LEVELS_INVALID")
             self.log_warning(
                 f"pullback_grid 外部网格总计失败: invalid_grid_row={invalid_grid_rows}, run_id={self.context.run_id}"
             )
@@ -1469,8 +1611,10 @@ class PullbackGridStrategy(StrategyBase):
     def _load_inventory_lots(self) -> List[GridInventoryLot]:
         snapshot = self.state.get(GRID_BOOK_CUSTOM_STATE_KEY) or {}
         raw_lots = []
-        if isinstance(snapshot, dict):
-            raw_lots = snapshot.get("inventory_lots") or snapshot.get("inventoryLots") or []
+        if snapshot:
+            raw_lots = snapshot["inventory_lots"]
+            if not isinstance(raw_lots, list):
+                raise ValueError("GRID_STATE_INVENTORY_INVALID")
 
         invalid_lot_rows = 0
         lots = []
@@ -1499,10 +1643,12 @@ class PullbackGridStrategy(StrategyBase):
             lots.append(lot)
 
         if invalid_lot_rows:
+            if "inventory_lots" in snapshot:
+                raise ValueError("GRID_STATE_INVENTORY_INVALID")
             self.log_warning(
                 f"pullback_grid 持仓批次总计失败: invalid_lot_row={invalid_lot_rows}, run_id={self.context.run_id}"
             )
-        if lots:
+        if lots or "inventory_lots" in snapshot:
             return lots
 
         swing_shares = int(
@@ -1515,8 +1661,7 @@ class PullbackGridStrategy(StrategyBase):
         if swing_shares <= 0:
             return []
         entry_price = float(
-            self.get_parameter("avg_cost", self.get_parameter("base_price", 0.0))
-            or 0.0
+            self.get_parameter("avg_cost", self.get_parameter("base_price", 0.0)) or 0.0
         )
         instrument_code = self.get_parameter(
             "instrument_code",
@@ -1530,7 +1675,9 @@ class PullbackGridStrategy(StrategyBase):
             swing_shares=swing_shares,
             entry_price=entry_price,
             owner=instrument_code or self.context.run_id,
-            sell_levels=[self._grid_level_to_inventory_plan(grid) for grid in self.grids],
+            sell_levels=[
+                self._grid_level_to_inventory_plan(grid) for grid in self.grids
+            ],
         )
         return [self._inventory_lot_from_dict(lot) for lot in lot_dicts]
 
@@ -1547,8 +1694,10 @@ class PullbackGridStrategy(StrategyBase):
     def _load_release_events(self) -> List[GridReleaseEvent]:
         snapshot = self.state.get(GRID_BOOK_CUSTOM_STATE_KEY) or {}
         raw_events = []
-        if isinstance(snapshot, dict):
-            raw_events = snapshot.get("release_events") or snapshot.get("releaseEvents") or []
+        if snapshot:
+            raw_events = snapshot["release_events"]
+            if not isinstance(raw_events, list) or not all(isinstance(raw, dict) for raw in raw_events):
+                raise ValueError("GRID_STATE_RELEASE_EVENTS_INVALID")
         return [
             self._release_event_from_dict(raw)
             for raw in raw_events
@@ -2006,45 +2155,57 @@ class PullbackGridStrategy(StrategyBase):
                 status = "PENDING"
             elif grid.is_monitoring:
                 status = "MONITORING"
-            levels.append({
-                "grid_id": grid.grid_id or f"grid-{grid.level_index}-{grid.side}",
-                "level_index": grid.level_index,
-                "side": grid.side,
-                "role": grid.role,
-                "price": grid.trigger_price,
-                "planned_shares": grid.volume,
-                "amount": grid.amount or grid.trigger_price * grid.volume,
-                "pct_from_base": grid.pct_from_base,
-                "expected_profit": grid.expected_profit,
-                "enabled": grid.enabled,
-                "status": status,
-                "monitoring": grid.is_monitoring,
-                "pending_shares": grid.pending_volume,
-                "filled_shares": grid.filled_volume,
-                "available_inventory_shares": grid.available_inventory_shares,
-                "reserved_inventory_shares": grid.reserved_inventory_shares,
-                "cycle_count": grid.cycle_count,
-                "waiting_reason": grid.waiting_reason,
-                "order_id": grid.order_id,
-                "entry_price": grid.entry_price or None,
-                "entry_time": grid.entry_time.isoformat() if isinstance(grid.entry_time, datetime) else grid.entry_time,
-                "last_intent_id": grid.last_intent_id,
-                "last_trace_id": grid.last_trace_id,
-                "last_intent_bar_key": grid.last_intent_bar_key,
-                "last_intent_source": grid.last_intent_source,
-                "last_intent_side": grid.last_intent_side,
-                "last_rejected_side": grid.last_rejected_side,
-                "last_rejected_date": grid.last_rejected_date,
-                "last_rejected_reason": grid.last_rejected_reason,
-                "is_day_locked": grid.is_day_locked,
-                "sell_lock_reason": grid.sell_lock_reason,
-                "sell_last_filled_date": grid.sell_last_filled_date,
-                "reason": grid.reason or reason,
-                "updated_at": grid.updated_at,
-            })
+            levels.append(
+                {
+                    "grid_id": grid.grid_id or f"grid-{grid.level_index}-{grid.side}",
+                    "level_index": grid.level_index,
+                    "side": grid.side,
+                    "role": grid.role,
+                    "price": grid.trigger_price,
+                    "planned_shares": grid.volume,
+                    "amount": grid.amount or grid.trigger_price * grid.volume,
+                    "pct_from_base": grid.pct_from_base,
+                    "expected_profit": grid.expected_profit,
+                    "enabled": grid.enabled,
+                    "status": status,
+                    "monitoring": grid.is_monitoring,
+                    "lowest_price_since_touch": grid.lowest_price_since_touch
+                    if isfinite(grid.lowest_price_since_touch)
+                    else None,
+                    "touch_time": grid.touch_time.isoformat()
+                    if grid.touch_time
+                    else None,
+                    "pending_shares": grid.pending_volume,
+                    "filled_shares": grid.filled_volume,
+                    "available_inventory_shares": grid.available_inventory_shares,
+                    "reserved_inventory_shares": grid.reserved_inventory_shares,
+                    "cycle_count": grid.cycle_count,
+                    "waiting_reason": grid.waiting_reason,
+                    "order_id": grid.order_id,
+                    "entry_price": grid.entry_price or None,
+                    "entry_time": grid.entry_time.isoformat()
+                    if isinstance(grid.entry_time, datetime)
+                    else grid.entry_time,
+                    "last_intent_id": grid.last_intent_id,
+                    "last_trace_id": grid.last_trace_id,
+                    "last_intent_bar_key": grid.last_intent_bar_key,
+                    "last_intent_source": grid.last_intent_source,
+                    "last_intent_side": grid.last_intent_side,
+                    "last_rejected_side": grid.last_rejected_side,
+                    "last_rejected_date": grid.last_rejected_date,
+                    "last_rejected_reason": grid.last_rejected_reason,
+                    "is_day_locked": grid.is_day_locked,
+                    "sell_lock_reason": grid.sell_lock_reason,
+                    "sell_last_filled_date": grid.sell_last_filled_date,
+                    "reason": grid.reason or reason,
+                    "updated_at": grid.updated_at,
+                }
+            )
         return {
             "run_id": self.context.run_id,
-            "instrument_code": self.get_parameter("instrument_code", self.get_parameter("symbol", "")),
+            "instrument_code": self.get_parameter(
+                "instrument_code", self.get_parameter("symbol", "")
+            ),
             "base_price": self.base_price,
             "parameter_version": str(self.get_parameter("_parameter_version", "")),
             "version": 1,
@@ -2055,9 +2216,12 @@ class PullbackGridStrategy(StrategyBase):
             "sell_empty_behavior": SELL_EMPTY_BEHAVIOR,
             "needs_backtest": False,
             "levels": levels,
-            "inventory_lots": [self._inventory_lot_to_dict(lot) for lot in self.inventory_lots],
+            "inventory_lots": [
+                self._inventory_lot_to_dict(lot) for lot in self.inventory_lots
+            ],
             "release_events": [
-                self._release_event_to_dict(event) for event in self.release_events[-200:]
+                self._release_event_to_dict(event)
+                for event in self.release_events[-200:]
             ],
             "updated_at": now_iso(),
         }
