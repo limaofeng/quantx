@@ -19,6 +19,7 @@ from quantx_infrastructure.core.t_trade_replay_evidence import (
   read_manifest,
   sealed_opportunity_path,
 )
+from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.strategy_decision_trace_record import (
   StrategyDecisionTraceRecord,
@@ -60,7 +61,9 @@ def _datetime(value) -> datetime:
       result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError as exc:
       raise ReplayEvidenceUnavailable("ARCHIVE_INTEGRITY_FAILED") from exc
-  return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result
+  # QuantX's naive persisted timestamps are Asia/Shanghai, never UTC.
+  # Keep an explicit China offset on the wire, including for legacy archives.
+  return time_utils.to_shanghai(result, keep_tz=True)
 
 
 def _key(record: dict, kind: str) -> tuple[str, str]:

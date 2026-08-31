@@ -1,3 +1,4 @@
+import { formatDateTime, formatTradeTime } from '@/shared/utils/date';
 import { financialToneClass } from '@/shared/utils/financialColors';
 
 import type { SignalHistoryFilter } from './types';
@@ -144,18 +145,14 @@ export function formatNumber(value: number, digits = 2) {
 
 export function formatTime(value?: string | null) {
   if (!value) return '尚未同步';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleString('zh-CN', { hour12: false });
+  const formatted = formatDateTime(value);
+  return formatted === '无效日期' ? value : formatted;
 }
 
 export function formatQuoteTime(value?: string | null) {
   if (!value) return '行情接收中';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : `更新于 ${date.toLocaleTimeString('zh-CN', { hour12: false })}`;
+  const formatted = formatTradeTime(value);
+  return formatted === '无效日期' ? value : `更新于 ${formatted}`;
 }
 
 export function formatSignedPercent(value?: number | null) {

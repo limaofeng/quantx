@@ -60,6 +60,7 @@ export function TTradeReplaySignals({
   const available =
     hasReplay && page?.evidence.availability === 'AVAILABLE' && !signalError;
   const summary = page?.summary;
+  const tracingEvidence = Boolean(filters.eventKey && filters.includeContext);
   const update = (
     field: 'stockCode' | 'selectedPath' | 'candidateStatus' | 'search',
     value: string
@@ -67,16 +68,20 @@ export function TTradeReplaySignals({
   return (
     <section
       className="studio-workspace-surface flex h-full min-h-0 flex-col"
-      aria-label="回放真实信号"
+      aria-label={tracingEvidence ? '回放关联评估证据' : '回放真实信号'}
     >
       <ReplayEvidenceHeader
-        title="真实信号"
-        description="记录真实机会事件；无交易意图不等于无信号，方向和数量在决策审计中查看。"
+        title={tracingEvidence ? '关联评估证据' : '真实信号'}
+        description={
+          tracingEvidence
+            ? '按精确事件键查看审计来源；上下文事件不是交易信号。'
+            : '记录真实机会事件；无交易意图不等于无信号，方向和数量在决策审计中查看。'
+        }
         evidence={page?.evidence}
         loading={signalsLoading}
         onRefresh={controller.refreshSignals}
         counts={[
-          ['信号事件', summary?.eventCount],
+          [tracingEvidence ? '关联事件' : '信号事件', summary?.eventCount],
           ['唯一候选', summary?.candidateCount],
           ['关联意图', summary?.linkedIntentCount],
           ['已抑制事件', summary?.suppressedCount],
@@ -160,7 +165,7 @@ export function TTradeReplaySignals({
                 '',
                 '时间',
                 '标的',
-                '信号事件',
+                tracingEvidence ? '评估事件' : '信号事件',
                 '路径 / 阶段',
                 '机会分 / 阈值',
                 '候选状态',
@@ -221,6 +226,11 @@ export function TTradeReplaySignals({
                       )}
                     >
                       {signalEventLabels[signal.eventType] || signal.eventType}
+                      {signal.category === 'CONTEXT' && (
+                        <span className="mt-1 block text-slate-400">
+                          上下文事件 · 非交易信号
+                        </span>
+                      )}
                     </span>
                     <span className="text-ui-caption text-slate-300">
                       {signalPathLabels[snapshot?.selectedPath || ''] ||

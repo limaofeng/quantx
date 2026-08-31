@@ -78,6 +78,7 @@ function controller(
     },
     setSignalFilters: vi.fn(),
     setAuditFilters: vi.fn(),
+    focusSignalEvent: vi.fn(),
     refresh: vi.fn(),
     refreshSignals: vi.fn(),
     refreshAudit: vi.fn(),
@@ -94,6 +95,35 @@ function controller(
 const names = new Map([['600000.SH', '测试股票']]);
 
 describe('replay evidence pages', () => {
+  it('shows an audit-linked context event explicitly as non-signal evidence', () => {
+    const state = controller({
+      signalFilters: { eventKey: 'policy-event', includeContext: true },
+      evaluations: [
+        {
+          ...signal,
+          eventKey: 'policy-event',
+          category: 'CONTEXT',
+          eventType: 'POLICY_CHANGED',
+        },
+      ],
+    });
+    render(
+      <TTradeReplaySignals
+        controller={state}
+        hasReplay
+        instrumentNames={names}
+        onViewAudit={vi.fn()}
+      />
+    );
+    expect(
+      screen.getByRole('heading', { name: '关联评估证据' })
+    ).toBeInTheDocument();
+    expect(screen.getByText('上下文事件 · 非交易信号')).toBeInTheDocument();
+    expect(screen.queryByText('信号事件')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /策略配置变更 600000.SH/ })
+    ).toHaveAttribute('aria-expanded', 'true');
+  });
   it('explains known audit reasons while retaining unknown evidence codes', () => {
     expect(replayReasonLabel('MONITOR_ENGINE_EXIT_PLAN')).toBe(
       '持续监控已有批次的退出计划'

@@ -61,6 +61,36 @@ function renderView(
 }
 
 describe('TTradePositionsView', () => {
+  it('keeps replay date filters on China calendar boundaries for UTC and naive facts', () => {
+    renderView({
+      batches: [
+        {
+          ...baseBatch,
+          batchId: 'china-day',
+          stockCode: '600000.SH',
+          entryFilledAt: '2026-08-27T00:01:00',
+          terminalAt: '2026-08-26T16:05:00Z',
+          closedAt: '2026-08-26T16:05:00Z',
+        },
+        {
+          ...baseBatch,
+          batchId: 'previous-day',
+          entryFilledAt: '2026-08-26T14:01:00',
+          terminalAt: '2026-08-26T14:30:00',
+          closedAt: '2026-08-26T14:30:00',
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole('tab', { name: /历史批次/ }));
+    expect(screen.getByLabelText('历史结束日期')).toHaveValue('2026-08-27');
+    fireEvent.change(screen.getByLabelText('历史开始日期'), {
+      target: { value: '2026-08-27' },
+    });
+    expect(screen.getByText('600000.SH')).toBeInTheDocument();
+    expect(screen.queryByText('贵州茅台')).not.toBeInTheDocument();
+    expect(screen.getByText('08-27 00:05')).toBeInTheDocument();
+  });
+
   it('normalizes the replay workspace into end positions and historical batches', () => {
     renderView();
 

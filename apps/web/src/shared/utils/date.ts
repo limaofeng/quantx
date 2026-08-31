@@ -19,7 +19,8 @@ const chinaDateFormatter = new Intl.DateTimeFormat('en-US', {
   hour12: false,
 });
 
-function parseDate(date: string | Date): Date {
+/** Parse timezone-less business timestamps as China time, never browser time. */
+export function parseDate(date: string | Date): Date {
   if (date instanceof Date) return date;
 
   const normalized = date.includes(' ') ? date.replace(' ', 'T') : date;

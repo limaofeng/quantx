@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/select';
 import type { GraphqlWsStatus } from '@/core/graphql/ws-status';
 import StrategyLogsTab from '@/features/strategies/components/StrategyLogsTab';
+import { formatTradeTime, parseDate } from '@/shared/utils/date';
 import { cn } from '@/utils/cn';
 
 import {
@@ -181,11 +182,10 @@ function activityIcon(kind: ActivityKind) {
 }
 
 function formatEventTime(value: string) {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return value;
-  const date = new Date(timestamp);
+  const date = parseDate(value);
+  if (!Number.isFinite(date.getTime())) return value;
   const milliseconds = String(date.getMilliseconds()).padStart(3, '0');
-  return `${date.toLocaleTimeString('zh-CN', { hour12: false })}.${milliseconds}`;
+  return `${formatTradeTime(date)}.${milliseconds}`;
 }
 
 function nullableNumber(
@@ -1065,8 +1065,8 @@ export function TTradeActivityView({
       sourceMode
     );
     return [...projected, ...supplementalItems].sort((left, right) => {
-      const leftTime = Date.parse(left.occurredAt) || 0;
-      const rightTime = Date.parse(right.occurredAt) || 0;
+      const leftTime = parseDate(left.occurredAt).getTime() || 0;
+      const rightTime = parseDate(right.occurredAt).getTime() || 0;
       return rightTime - leftTime || right.id.localeCompare(left.id);
     });
   }, [batches, evaluations, events, sourceMode, supplementalItems]);

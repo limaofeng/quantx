@@ -103,6 +103,56 @@ beforeEach(() => {
 });
 
 describe('useTTradeReplayEvidence', () => {
+  it('resets cursors and filters on a version round trip instead of restoring stale state', () => {
+    const { result, rerender } = renderHook(useTTradeReplayEvidence, {
+      initialProps,
+    });
+    act(() => result.current.setSignalFilters({ candidateId: 'candidate-A' }));
+    respond('signal', ['event-A'], 'cursor-A');
+    rerender(initialProps);
+    act(() => result.current.loadMoreSignals());
+    rerender({ ...initialProps, backtestId: 'backtest-2' });
+    respond('signal', ['event-B']);
+    rerender({ ...initialProps, backtestId: 'backtest-2' });
+    rerender(initialProps);
+    expect(result.current.signalFilters).toEqual({});
+    expect(harness.requests.signal.variables.after).toBeNull();
+    expect(result.current.evaluations).toEqual([]);
+  });
+
+  it('starts at page one after a filter round trip for signals and audit', () => {
+    const { result, rerender } = renderHook(useTTradeReplayEvidence, {
+      initialProps,
+    });
+    respond('signal', ['event-A'], 'cursor-A');
+    respond('audit', ['decision-A'], 'audit-A');
+    rerender(initialProps);
+    act(() => {
+      result.current.loadMoreSignals();
+      result.current.loadMoreAudit();
+    });
+    act(() => {
+      result.current.setSignalFilters({ stockCode: '600000.SH' });
+      result.current.setAuditFilters({ stockCode: '600000.SH' });
+    });
+    act(() => {
+      result.current.setSignalFilters({});
+      result.current.setAuditFilters({});
+    });
+    expect(harness.requests.signal.variables.after).toBeNull();
+    expect(harness.requests.audit.variables.after).toBeNull();
+  });
+
+  it('opts into exact context evidence when following an audit backlink', () => {
+    const { result } = renderHook(useTTradeReplayEvidence, { initialProps });
+    act(() => result.current.focusSignalEvent('policy-event'));
+    expect(harness.requests.signal.variables.filters).toEqual({
+      eventKey: 'policy-event',
+      includeContext: true,
+    });
+    expect(harness.requests.signal.variables.after).toBeNull();
+  });
+
   it('retains earlier pages while loading and deduplicates stable event keys', () => {
     const { result, rerender } = renderHook(useTTradeReplayEvidence, {
       initialProps,

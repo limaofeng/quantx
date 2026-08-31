@@ -66,6 +66,21 @@ const batch: ActivityBatch = {
 };
 
 describe('buildTTradeActivityItems', () => {
+  it('orders China-naive and offset-aware evidence by the same timeline', () => {
+    const items = buildTTradeActivityItems(
+      [
+        evaluation('older-china', '2026-08-25T09:30:00'),
+        evaluation('newer-utc', '2026-08-25T01:31:00Z'),
+      ],
+      [],
+      []
+    );
+    expect(items.map(item => item.id)).toEqual([
+      'signal:newer-utc',
+      'signal:older-china',
+    ]);
+  });
+
   it('merges signal and broker events in reverse chronological order', () => {
     const orderEvent: ActivityBatchEvent = {
       eventId: 'event-order',

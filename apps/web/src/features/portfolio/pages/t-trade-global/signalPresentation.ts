@@ -18,6 +18,9 @@ export const signalEventTypes = new Set([
 ]);
 
 export const signalEventLabels: Readonly<Record<string, string>> = {
+  POLICY_CHANGED: '策略配置变更',
+  PROFILE_CHANGED: '标的画像变更',
+  CONTINUITY_GENERATION_CHANGED: '行情连续性变更',
   FSM_TRANSITION: '形态状态迁移',
   CANDIDATE_LATCHED: '候选已锁存',
   CANDIDATE_AWAITING_APPROVAL: '候选等待确认',

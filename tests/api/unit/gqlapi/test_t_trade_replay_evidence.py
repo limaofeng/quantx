@@ -1,6 +1,7 @@
 import json
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -66,6 +67,50 @@ def signal(index, event_type="CANDIDATE_SUPPRESSED", kind="MATERIAL"):
     "policy_version": "3",
     "content_fingerprint": f"fingerprint-{index}",
   }
+
+
+@pytest.mark.parametrize(
+  "timestamp",
+  [
+    "2026-08-03T09:30:00",
+    "2026-08-03T01:30:00Z",
+    "2026-08-03T09:30:00+08:00",
+    datetime(2026, 8, 3, 9, 30),
+  ],
+)
+def test_signal_and_audit_times_use_china_timezone(timestamp):
+  record = {**signal(1), "evaluated_at": timestamp}
+  item = resolver._signal_type(record)
+  assert item.evaluated_at.isoformat() == "2026-08-03T09:30:00+08:00"
+  assert item.evaluated_at.utcoffset() == timedelta(hours=8)
+  audit = resolver._audit_type(
+    {
+      "id": "decision-1",
+      "run_id": "run-1",
+      "timestamp": timestamp,
+      "trade_intents": [],
+    },
+    {},
+  )
+  assert audit.decision.decided_at == item.evaluated_at
+  assert resolver._key(record, "signal")[0] == "2026-08-03T01:30:00.000000+00:00"
+
+
+def test_exact_audit_backlink_can_read_context_without_reclassifying_it():
+  collector = resolver._SignalCollector(
+    evidence(),
+    TTradeReplaySignalFilterInput(event_key="event-1", include_context=True),
+    50,
+    None,
+    account_id="account-1",
+  )
+  collector.add(signal(1, "POLICY_CHANGED"))
+  collector.add(signal(2))
+  page = collector.finish()
+  assert [(item.event_key, item.category) for item in page.items] == [
+    ("event-1", "CONTEXT"),
+  ]
+  assert page.summary.event_count == 1
 
 
 def test_true_signals_include_suppressed_candidate_without_intent():

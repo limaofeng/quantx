@@ -23,6 +23,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { formatDate, formatDateTime, parseDate } from '@/shared/utils/date';
 import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
@@ -268,10 +269,7 @@ function batchTimestamp(batch: TTradePositionBatch) {
 }
 
 function dateInput(value: Date) {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, '0');
-  const day = String(value.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return formatDate(value);
 }
 
 function clampDateInput(value: string, min: string, max: string) {
@@ -288,7 +286,7 @@ function defaultHistoryRange(
     const timestamps = batches
       .flatMap(batch => [batch.entryFilledAt, batch.terminalAt, batch.closedAt])
       .filter((value): value is string => Boolean(value))
-      .map(value => Date.parse(value))
+      .map(value => parseDate(value).getTime())
       .filter(Number.isFinite);
     if (timestamps.length > 0) {
       return {
@@ -298,22 +296,14 @@ function defaultHistoryRange(
     }
   }
   const end = new Date();
-  const start = new Date(end);
-  start.setDate(start.getDate() - 30);
+  const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
   return { start: dateInput(start), end: dateInput(end) };
 }
 
 function formattedDateTime(value?: string | null) {
   if (!value) return '--';
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return value;
-  return new Date(timestamp).toLocaleString('zh-CN', {
-    hour12: false,
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const formatted = formatDateTime(value, 'MM-dd HH:mm');
+  return formatted === '无效日期' ? value : formatted;
 }
 
 function cny(value: number | null | undefined, signed = false) {
@@ -476,7 +466,8 @@ function BatchDetailDrawer({
             .filter(event => event.batchId === batch.batchId)
             .sort(
               (left, right) =>
-                Date.parse(right.createdAt) - Date.parse(left.createdAt)
+                parseDate(right.createdAt).getTime() -
+                parseDate(left.createdAt).getTime()
             )
         : [],
     [batch, events]
@@ -1180,15 +1171,15 @@ export function TTradePositionsView({
   const historyRows = React.useMemo(() => {
     const query = keyword.trim().toLowerCase();
     const start = startDate
-      ? Date.parse(`${startDate}T00:00:00`)
+      ? parseDate(`${startDate}T00:00:00`).getTime()
       : Number.NEGATIVE_INFINITY;
     const end = endDate
-      ? Date.parse(`${endDate}T23:59:59.999`)
+      ? parseDate(`${endDate}T23:59:59.999`).getTime()
       : Number.POSITIVE_INFINITY;
     return historyBatches
       .filter(batch => {
         const timestamp = batchTimestamp(batch);
-        const epoch = timestamp ? Date.parse(timestamp) : null;
+        const epoch = timestamp ? parseDate(timestamp).getTime() : null;
         if (
           epoch != null &&
           Number.isFinite(epoch) &&
@@ -1242,8 +1233,8 @@ export function TTradePositionsView({
         const leftTimestamp = batchTimestamp(left);
         const rightTimestamp = batchTimestamp(right);
         return (
-          (rightTimestamp ? Date.parse(rightTimestamp) : 0) -
-          (leftTimestamp ? Date.parse(leftTimestamp) : 0)
+          (rightTimestamp ? parseDate(rightTimestamp).getTime() : 0) -
+          (leftTimestamp ? parseDate(leftTimestamp).getTime() : 0)
         );
       });
   }, [

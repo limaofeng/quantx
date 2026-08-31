@@ -1,3 +1,5 @@
+import { parseDate } from '@/shared/utils/date';
+
 import type { SignalSnapshot } from './monitoring';
 
 export type ActivitySignalEvaluation = {
@@ -314,7 +316,7 @@ function executionTone(
 }
 
 function epoch(value: string): number {
-  const parsed = Date.parse(value);
+  const parsed = parseDate(value).getTime();
   return Number.isFinite(parsed) ? parsed : 0;
 }
 

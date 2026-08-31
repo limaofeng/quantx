@@ -1937,7 +1937,7 @@ function TTradeReplayPanel({
               instrumentNames={replayInstrumentNames}
               hasReplay={Boolean(activeRunId && replay?.backtestId)}
               onViewSignal={eventKey => {
-                replayEvidence.setSignalFilters({ eventKey });
+                replayEvidence.focusSignalEvent(eventKey);
                 onActiveViewChange('SIGNALS');
               }}
             />

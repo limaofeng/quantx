@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { useQuery } from 'urql';
 
-import { gql, useFragment as readFragment } from '@/generated/gql';
+import { gql } from '@/generated/gql';
+import { useFragment as readFragment } from '@/generated/gql/fragment-masking';
 import type {
   Portfolio_ReplaySignalsQuery,
   Portfolio_ReplayAuditQuery,
@@ -60,6 +61,8 @@ function useCursor<T>(scope: string, identity: (item: T) => string) {
     after: string | null;
     prefix: T[];
   }>({ scope, after: null, prefix: [] });
+  // Commit the reset to state, so A -> B -> A cannot resurrect A's cursor.
+  if (state.scope !== scope) setState({ scope, after: null, prefix: [] });
   const after = state.scope === scope ? state.after : null;
   const merge = (items: T[]) => {
     const rows = new Map<string, T>();
@@ -102,6 +105,7 @@ function useVersionFilters(scope: string) {
   });
   const current: VersionFilters =
     state.scope === scope ? state : { scope, signal: {}, audit: {} };
+  if (state.scope !== scope) setState(current);
   const setSignalFilters = React.useCallback(
     (update: React.SetStateAction<TTradeReplaySignalFilterInput>) => {
       setState(previous => {
@@ -258,6 +262,10 @@ export function useTTradeReplayEvidence({
     refreshSignals();
     refreshAudit();
   }, [refreshSignals, refreshAudit]);
+  const focusSignalEvent = React.useCallback(
+    (eventKey: string) => setSignalFilters({ eventKey, includeContext: true }),
+    [setSignalFilters]
+  );
 
   return {
     evaluations,
@@ -268,6 +276,7 @@ export function useTTradeReplayEvidence({
     auditFilters,
     setSignalFilters,
     setAuditFilters,
+    focusSignalEvent,
     refresh,
     refreshSignals,
     refreshAudit,
