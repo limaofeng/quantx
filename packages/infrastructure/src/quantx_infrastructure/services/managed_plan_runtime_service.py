@@ -10,7 +10,6 @@ from quantx_domain.strategies.base import StrategyBase, StrategyRunMode
 from sqlalchemy import select
 
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
-from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.managed_plan import (
   ManagedPlanConfigRevision,
   ManagedPlanRecord,
@@ -20,6 +19,9 @@ from quantx_infrastructure.models.strategy_run_state import StrategyRunState
 from quantx_infrastructure.repositories.managed_plan_repository import (
   ManagedPlanRepository,
   managed_plan_config_fingerprint,
+)
+from quantx_infrastructure.services.runtime_obligations import (
+  runtime_obligation_blocker,
 )
 
 
@@ -242,15 +244,6 @@ class ManagedPlanRuntimeService:
       current_version = int(current.current_config_version or 0)
       if current_version == int(expected_version):
         old_run_id = str(current.current_run_id or "")
-        _, revision = await repo.append_revision(
-          plan_id=plan_id,
-          expected_version=expected_version,
-          config_snapshot=snapshot,
-          state_migration_policy=state_migration_policy,
-          supersedes_run_id=old_run_id or None,
-          created_by_user_id=created_by_user_id,
-          last_command_id=normalized_command_id or None,
-        )
       elif current_version == next_version:
         revision = await repo.current_revision(plan_id, for_update=True)
         old_run_id = str(getattr(revision, "supersedes_run_id", None) or "")
@@ -275,9 +268,23 @@ class ManagedPlanRuntimeService:
         )
       await db.commit()
 
+    # A rejected stop (for example, an active protection plan) is a rejected
+    # revision, not a plan failure. Do not mutate its version, pointer or status.
+    if old_run_id:
+      await self._stop_runtime(old_run_id)
     try:
-      if old_run_id:
-        await self._stop_runtime(old_run_id)
+      if current_version == int(expected_version):
+        async with self._session_factory() as db:
+          await ManagedPlanRepository(db).append_revision(
+            plan_id=plan_id,
+            expected_version=expected_version,
+            config_snapshot=snapshot,
+            state_migration_policy=state_migration_policy,
+            supersedes_run_id=old_run_id or None,
+            run_id=run_id,
+            created_by_user_id=created_by_user_id,
+          )
+          await db.commit()
       await self._create_and_bind_run(
         plan_id=plan_id,
         plan_kind=plan_kind,
@@ -301,8 +308,16 @@ class ManagedPlanRuntimeService:
     except Exception as exc:
       async with self._session_factory() as db:
         plan = await ManagedPlanRepository(db).find(plan_id, for_update=True)
-        if plan is not None:
-          plan.status = "ERROR"
+        if plan is not None and (
+          plan.current_run_id == run_id
+          or (
+            plan.current_run_id == old_run_id
+            and int(plan.current_config_version) == int(expected_version)
+          )
+        ):
+          # The old binding remains queryable and can be retried. Once a new
+          # run is published, keep its identity even if its startup fails.
+          plan.status = "ERROR" if plan.current_run_id == run_id else "PAUSED"
           plan.last_error = str(exc)[:2000]
           await db.commit()
       raise
@@ -585,14 +600,17 @@ class ManagedPlanRuntimeService:
       async with self._session_factory() as db:
         repo = ManagedPlanRepository(db)
         managed_plan = await repo.find(plan_id, for_update=True)
-        revision = await repo.current_revision(plan_id, for_update=True)
+        revision = await repo.find_revision(plan_id, config_version, for_update=True)
         if managed_plan is None or revision is None:
           raise RuntimeError("托管计划或配置版本在运行绑定前丢失")
-        if int(managed_plan.current_config_version or 0) != int(config_version):
+        if int(managed_plan.current_config_version or 0) not in {
+          int(config_version), int(config_version) - 1
+        }:
           raise ValueError("托管计划绑定运行时版本已变化")
         if revision.run_id and str(revision.run_id) != run_id:
           raise ValueError("托管计划配置版本已经绑定其他运行")
-        if state_snapshot:
+        already_bound = managed_plan.current_run_id == run_id
+        if state_snapshot and not already_bound:
           persisted_state = await db.scalar(
             select(StrategyRunState).where(StrategyRunState.run_id == run_id)
           )
@@ -609,16 +627,16 @@ class ManagedPlanRuntimeService:
                 version=1,
               )
             )
-          elif not revision.run_id and dict(persisted_state.custom_state or {}) != (
-            state_snapshot
-          ):
+          elif dict(persisted_state.custom_state or {}) != state_snapshot:
             raise RuntimeError("未启动托管运行的初始状态与命令不一致")
-        await repo.bind_run(
-          plan_id=plan_id,
-          config_version=config_version,
-          run_id=run_id,
-          status="PENDING" if start_immediately else "PAUSED",
-        )
+        if not already_bound:
+          await repo.bind_run(
+            plan_id=plan_id,
+            config_version=config_version,
+            run_id=run_id,
+            status="PENDING" if start_immediately else "PAUSED",
+            command_id=command_id,
+          )
         await db.commit()
     elif state_snapshot and runtime is not None and runtime.strategy is not None:
       runtime.strategy.apply_state_snapshot(state_snapshot)
@@ -853,13 +871,4 @@ class ManagedPlanRuntimeService:
       )
       if active_managed_owner is not None:
         return False
-      active_auto_owner = await db.scalar(
-        select(AutoExitPlanRecord.plan_id)
-        .where(AutoExitPlanRecord.strategy_run_id == run_id)
-        .where(AutoExitPlanRecord.enabled.is_(True))
-        .where(
-          AutoExitPlanRecord.status.notin_(["COMPLETED", "CANCELLED", "ERROR"])
-        )
-        .limit(1)
-      )
-      return active_auto_owner is None
+      return await runtime_obligation_blocker(db, run_id) is None

@@ -2890,9 +2890,7 @@ class StrategyManager:
   async def _stop_persisted_strategy(self, run_id: str) -> bool:
     """幂等停止未恢复到当前 Executor 的持久化运行。
 
-    Engine 重启、策略代码加载失败或恢复中断后，数据库中的运行记录可能仍然
-    存在，但当前进程没有对应的内存运行态。此时实际执行循环已经不存在，
-    停止请求必须收敛持久化状态，避免记录在后续重启时再次被恢复。
+    内存缺失不代表交易义务已结束；必须先检查持久化订单、回报、意图和保护。
     """
     terminal_statuses = {
       StrategyRunStatus.STOPPED,
@@ -2904,6 +2902,15 @@ class StrategyManager:
       run = await repo.find_run_by_id(run_id)
       if run is None:
         self.logger.warning("停止策略运行失败，运行不存在: %s", run_id)
+        return False
+
+      from quantx_infrastructure.services.runtime_obligations import (
+        runtime_obligation_blocker,
+      )
+
+      blocker = await runtime_obligation_blocker(db, run_id)
+      if blocker:
+        self.logger.warning("拒绝停止未恢复的策略运行 %s: %s", run_id, blocker)
         return False
 
       status_value = getattr(run.status, "value", run.status)

@@ -46,9 +46,16 @@ class ManagedPlanRepository:
     plan = await self.find(plan_id, for_update=for_update)
     if plan is None:
       return None
+    return await self.find_revision(
+      plan_id, int(plan.current_config_version), for_update=for_update
+    )
+
+  async def find_revision(
+    self, plan_id: str, config_version: int, *, for_update: bool = False
+  ) -> Optional[ManagedPlanConfigRevision]:
     stmt = select(ManagedPlanConfigRevision).where(
-      ManagedPlanConfigRevision.plan_id == plan.plan_id,
-      ManagedPlanConfigRevision.config_version == plan.current_config_version,
+      ManagedPlanConfigRevision.plan_id == plan_id,
+      ManagedPlanConfigRevision.config_version == config_version,
     )
     if for_update:
       stmt = stmt.with_for_update()
@@ -101,8 +108,8 @@ class ManagedPlanRepository:
     config_snapshot: Mapping[str, Any],
     state_migration_policy: str,
     supersedes_run_id: Optional[str],
+    run_id: str,
     created_by_user_id: Optional[str] = None,
-    last_command_id: Optional[str] = None,
   ) -> tuple[ManagedPlanRecord, ManagedPlanConfigRevision]:
     plan = await self.find(plan_id, for_update=True)
     if plan is None:
@@ -113,6 +120,18 @@ class ManagedPlanRepository:
       )
     version = int(expected_version) + 1
     snapshot = dict(config_snapshot or {})
+    existing = await self.find_revision(plan_id, version, for_update=True)
+    if existing is not None:
+      if (
+        dict(existing.config_snapshot or {}) != snapshot
+        or existing.config_fingerprint != managed_plan_config_fingerprint(snapshot)
+        or existing.state_migration_policy != state_migration_policy
+        or str(existing.supersedes_run_id or "") != str(supersedes_run_id or "")
+        or str(existing.created_by_user_id or "") != str(created_by_user_id or "")
+        or existing.run_id != run_id
+      ):
+        raise ValueError("MANAGED_PLAN_REPLAY_CONFLICT:待绑定配置与命令不一致")
+      return plan, existing
     revision = ManagedPlanConfigRevision(
       revision_id=str(uuid.uuid4()),
       plan_id=plan_id,
@@ -121,14 +140,12 @@ class ManagedPlanRepository:
       config_fingerprint=managed_plan_config_fingerprint(snapshot),
       state_migration_policy=state_migration_policy,
       supersedes_run_id=supersedes_run_id,
+      run_id=run_id,
       created_by_user_id=created_by_user_id,
       created_at=datetime.now(),
     )
-    plan.current_config_version = version
-    plan.current_run_id = None
-    plan.status = "DRAFT"
-    plan.last_command_id = last_command_id
-    plan.last_error = None
+    # Preparing a revision cannot invalidate the last usable plan binding.
+    # Only bind_run publishes the new version and run together.
     self.db.add(revision)
     await self.db.flush()
     return plan, revision
@@ -140,17 +157,34 @@ class ManagedPlanRepository:
     config_version: int,
     run_id: str,
     status: str,
+    command_id: Optional[str] = None,
   ) -> ManagedPlanRecord:
     plan = await self.find(plan_id, for_update=True)
-    if plan is None or int(plan.current_config_version or 0) != int(config_version):
+    if plan is None or int(plan.current_config_version or 0) not in {
+      int(config_version), int(config_version) - 1
+    }:
       raise ValueError("托管计划绑定运行时版本已变化")
-    revision = await self.current_revision(plan_id, for_update=True)
+    revision = await self.find_revision(plan_id, config_version, for_update=True)
     if revision is None:
       raise ValueError("托管计划配置版本不存在")
     if revision.run_id and revision.run_id != run_id:
       raise ValueError("托管计划配置版本已经绑定其他运行")
+    if (
+      int(plan.current_config_version) == int(config_version)
+      and plan.current_run_id
+      and plan.current_run_id != run_id
+    ):
+      raise ValueError("托管计划当前版本已经绑定其他运行")
+    if (
+      int(plan.current_config_version) != int(config_version)
+      and str(plan.current_run_id or "") != str(revision.supersedes_run_id or "")
+    ):
+      raise ValueError("托管计划旧运行绑定已变化")
     revision.run_id = run_id
+    plan.current_config_version = config_version
     plan.current_run_id = run_id
     plan.status = str(status or "PAUSED").upper()
+    plan.last_command_id = command_id or None
+    plan.last_error = None
     await self.db.flush()
     return plan

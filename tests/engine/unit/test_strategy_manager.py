@@ -307,6 +307,8 @@ class TestStrategyManager:
     persisted_run = SimpleNamespace(status=StrategyRunStatus.RUNNING)
     repository = AsyncMock()
     repository.find_run_by_id.return_value = persisted_run
+    session = AsyncMock()
+    session.scalar.return_value = None
 
     with (
       patch("quantx_engine.strategy_manager.get_async_db") as mock_db,
@@ -315,7 +317,7 @@ class TestStrategyManager:
         return_value=repository,
       ),
     ):
-      mock_db.return_value.__aiter__.return_value = [AsyncMock()]
+      mock_db.return_value.__aiter__.return_value = [session]
 
       success = await strategy_manager.stop_strategy("persisted-run")
 
@@ -341,6 +343,8 @@ class TestStrategyManager:
     """终态运行不应被回退或重写，但停止请求应视为已完成。"""
     repository = AsyncMock()
     repository.find_run_by_id.return_value = SimpleNamespace(status=terminal_status)
+    session = AsyncMock()
+    session.scalar.return_value = None
 
     with (
       patch("quantx_engine.strategy_manager.get_async_db") as mock_db,
@@ -349,11 +353,30 @@ class TestStrategyManager:
         return_value=repository,
       ),
     ):
-      mock_db.return_value.__aiter__.return_value = [AsyncMock()]
+      mock_db.return_value.__aiter__.return_value = [session]
 
       success = await strategy_manager.stop_strategy("terminal-run")
 
     assert success is True
+    repository.update_run.assert_not_awaited()
+
+  @pytest.mark.asyncio
+  @pytest.mark.parametrize("status", [StrategyRunStatus.RUNNING, StrategyRunStatus.ERROR])
+  async def test_missing_runtime_cannot_abandon_persisted_obligations(
+    self, strategy_manager, status
+  ):
+    repository = AsyncMock()
+    repository.find_run_by_id.return_value = SimpleNamespace(status=status)
+    with (
+      patch("quantx_engine.strategy_manager.get_async_db") as mock_db,
+      patch("quantx_engine.strategy_manager.StrategyRunRepository", return_value=repository),
+      patch(
+        "quantx_infrastructure.services.runtime_obligations.runtime_obligation_blocker",
+        new=AsyncMock(return_value="仍有未解除的退出保护义务"),
+      ),
+    ):
+      mock_db.return_value.__aiter__.return_value = [AsyncMock()]
+      assert not await strategy_manager.stop_strategy("unrestored-run")
     repository.update_run.assert_not_awaited()
 
   @pytest.mark.asyncio
