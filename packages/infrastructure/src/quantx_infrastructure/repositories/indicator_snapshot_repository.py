@@ -5,7 +5,12 @@
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, case, delete, exists, func, not_, or_, select
+from quantx_domain.factors import (
+  FACTOR_DEFINITIONS,
+  FACTOR_VERSION,
+  normalize_conditions,
+)
+from sqlalchemy import and_, case, delete, exists, func, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -129,6 +134,27 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     await self.db.commit()
     return len(records)
 
+  async def invalidate_factor_scope(
+    self, codes: List[str], snapshot_dates: List[date],
+  ) -> None:
+    """Fail closed before recomputation, retaining old values for audit/baselines.
+
+    Commit separately from the later upsert so a read/calculation/write failure
+    cannot resurrect a previously valid factor row for this exact target scope.
+    """
+    if not codes or not snapshot_dates:
+      return
+    await self.db.execute(
+      update(IndicatorSnapshot)
+      .where(
+        IndicatorSnapshot.code.in_(codes),
+        IndicatorSnapshot.snapshot_date.in_(snapshot_dates),
+        IndicatorSnapshot.calculation_version == FACTOR_VERSION,
+      )
+      .values(calculation_version=None)
+    )
+    await self.db.commit()
+
   async def find_by_date(
     self, snapshot_date: date
   ) -> List[IndicatorSnapshot]:
@@ -145,20 +171,32 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     result = await self.db.execute(select(func.max(IndicatorSnapshot.snapshot_date)))
     return result.scalar_one_or_none()
 
+  async def get_latest_factor_snapshot_date(self) -> Optional[date]:
+    """日级因子选股只读取当前定义版本，不能借用雷达历史基线。"""
+    result = await self.db.execute(
+      select(func.max(IndicatorSnapshot.snapshot_date)).where(
+        IndicatorSnapshot.calculation_version == FACTOR_VERSION
+      )
+    )
+    return result.scalar_one_or_none()
+
   async def find_snapshot_dates(
-    self, start_date: date, end_date: date
+    self, start_date: date, end_date: date, *, calculation_version: Optional[str] = None,
   ) -> List[date]:
     """返回日期区间内实际存在快照的交易日。"""
+    conditions = [IndicatorSnapshot.snapshot_date >= start_date,
+                  IndicatorSnapshot.snapshot_date <= end_date]
+    if calculation_version is not None:
+      conditions.append(IndicatorSnapshot.calculation_version == calculation_version)
     result = await self.db.execute(
-      select(IndicatorSnapshot.snapshot_date)
-      .where(
-        IndicatorSnapshot.snapshot_date >= start_date,
-        IndicatorSnapshot.snapshot_date <= end_date,
-      )
+      select(IndicatorSnapshot.snapshot_date).where(*conditions)
       .distinct()
       .order_by(IndicatorSnapshot.snapshot_date.asc())
     )
     return list(result.scalars().all())
+
+  async def find_factor_snapshot_dates(self, start_date: date, end_date: date) -> List[date]:
+    return await self.find_snapshot_dates(start_date, end_date, calculation_version=FACTOR_VERSION)
 
   async def get_latest_calculated_at(self, snapshot_date: date):
     """获取指定快照日期最后更新时间"""
@@ -264,17 +302,29 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
   def _exclude_st_condition(self):
     return not_(and_(self._stock_type_condition(), self._st_name_condition()))
 
-  async def screen_snapshots(
+  async def list_baseline_snapshots(
+    self, snapshot_date: date, *, universe: str = "stock_and_etf", exclude_st: bool = True,
+  ) -> List[IndicatorSnapshot]:
+    """Radar's existing daily baselines are independent of factor-study readiness."""
+    conditions = [IndicatorSnapshot.snapshot_date == snapshot_date, self._universe_condition(universe)]
+    if exclude_st:
+      conditions.append(self._exclude_st_condition())
+    result = await self.db.execute(
+      select(IndicatorSnapshot)
+      .outerjoin(Instrument, Instrument.id == IndicatorSnapshot.code)
+      .where(*conditions)
+      .order_by(IndicatorSnapshot.change_pct.desc(), IndicatorSnapshot.volume_ratio.desc(), IndicatorSnapshot.code.asc())
+      .limit(20_000)
+    )
+    return list(result.scalars().all())
+
+  async def screen_factor_snapshots(
     self,
     snapshot_date: date,
-    signal_codes: Optional[List[str]] = None,
-    field_conditions: Optional[List[Dict[str, Any]]] = None,
+    factor_conditions: Optional[List[Dict[str, Any]]] = None,
     include_industries: Optional[List[str]] = None,
     exclude_industries: Optional[List[str]] = None,
     sort: Optional[Dict[str, str]] = None,
-    min_roe: Optional[float] = None,
-    min_net_profit_growth: Optional[float] = None,
-    min_yoy_growth: Optional[float] = None,
     limit: int = 200,
     offset: int = 0,
     universe: str = "stock",
@@ -283,63 +333,10 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     """基于已落库日级快照做条件选股。"""
     conditions = [
       IndicatorSnapshot.snapshot_date == snapshot_date,
+      IndicatorSnapshot.calculation_version == FACTOR_VERSION,
       self._universe_condition(universe),
     ]
-
-    for signal_code in signal_codes or []:
-      conditions.append(IndicatorSnapshot.matched_signals.any(signal_code))
-
-    allowed_fields = {
-      "current_price": IndicatorSnapshot.current_price,
-      "change_pct": IndicatorSnapshot.change_pct,
-      "volume_ratio": IndicatorSnapshot.volume_ratio,
-      "avg_volume_5": IndicatorSnapshot.avg_volume_5,
-      "avg_volume_20": IndicatorSnapshot.avg_volume_20,
-      "volume_ratio_5": IndicatorSnapshot.volume_ratio_5,
-      "avg_amount_20": IndicatorSnapshot.avg_amount_20,
-      "amount_ratio_20": IndicatorSnapshot.amount_ratio_20,
-      "turnover_rate_pct": IndicatorSnapshot.turnover_rate_pct,
-      "volume_percentile_60": IndicatorSnapshot.volume_percentile_60,
-      "amount_percentile_60": IndicatorSnapshot.amount_percentile_60,
-      "price_drop_pct": IndicatorSnapshot.price_drop_pct,
-      "price_rise_pct": IndicatorSnapshot.price_rise_pct,
-      "days_since_peak": IndicatorSnapshot.days_since_peak,
-      "days_since_low": IndicatorSnapshot.days_since_low,
-      "consecutive_down_days": IndicatorSnapshot.consecutive_down_days,
-      "consecutive_down_pct": IndicatorSnapshot.consecutive_down_pct,
-      "rsi6": IndicatorSnapshot.rsi6,
-      "rsi12": IndicatorSnapshot.rsi12,
-      "rsi24": IndicatorSnapshot.rsi24,
-      "kdj_k": IndicatorSnapshot.kdj_k,
-      "kdj_d": IndicatorSnapshot.kdj_d,
-      "kdj_j": IndicatorSnapshot.kdj_j,
-      "ma5": IndicatorSnapshot.ma5,
-      "ma10": IndicatorSnapshot.ma10,
-      "ma20": IndicatorSnapshot.ma20,
-      "boll_percent_b": IndicatorSnapshot.boll_percent_b,
-      "boll_bandwidth": IndicatorSnapshot.boll_bandwidth,
-    }
-    for item in field_conditions or []:
-      field = allowed_fields.get(item.get("field"))
-      if field is None:
-        continue
-      operator = item.get("operator") or "gte"
-      value = item.get("value")
-      value_to = item.get("value_to")
-      if value is None:
-        continue
-      if operator == "lte":
-        conditions.append(field <= value)
-      elif operator == "lt":
-        conditions.append(field < value)
-      elif operator == "gt":
-        conditions.append(field > value)
-      elif operator == "eq":
-        conditions.append(field == value)
-      elif operator == "between" and value_to is not None:
-        conditions.append(and_(field >= value, field <= value_to))
-      else:
-        conditions.append(field >= value)
+    normalized_conditions = normalize_conditions(factor_conditions or [])
 
     include_condition = self._industry_condition(include_industries or [], True)
     if include_condition is not None:
@@ -410,21 +407,32 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       (valid_roe_condition, FinancialMetricSnapshot.roe_ttm),
       else_=None,
     )
-    if min_roe is not None:
-      conditions.extend([
-        valid_roe_condition,
-        FinancialMetricSnapshot.roe_ttm >= min_roe,
-      ])
-    if min_net_profit_growth is not None:
-      conditions.extend([
-        FinancialMetricSnapshot.net_profit_quarter_growth_pct.isnot(None),
-        FinancialMetricSnapshot.net_profit_quarter_growth_pct >= min_net_profit_growth,
-      ])
-    if min_yoy_growth is not None:
-      conditions.extend([
-        FinancialMetricSnapshot.revenue_quarter_growth_pct.isnot(None),
-        FinancialMetricSnapshot.revenue_quarter_growth_pct >= min_yoy_growth,
-      ])
+    valid_growth_condition = and_(
+      FinancialSyncCodeAudit.status == "SUCCESS",
+      FinancialMetricSnapshot.quality_status.in_(["valid", "partial"]),
+      FinancialMetricSnapshot.report_date >= minimum_report_date,
+    )
+    allowed_fields = {
+      definition.id: getattr(IndicatorSnapshot, definition.id)
+      for definition in FACTOR_DEFINITIONS
+      if hasattr(IndicatorSnapshot, definition.id)
+    }
+    allowed_fields.update({
+      "roe_ttm": effective_roe,
+      "net_profit_growth_pct": case((valid_growth_condition, FinancialMetricSnapshot.net_profit_quarter_growth_pct), else_=None),
+      "revenue_growth_pct": case((valid_growth_condition, FinancialMetricSnapshot.revenue_quarter_growth_pct), else_=None),
+    })
+    for item in normalized_conditions:
+      field = allowed_fields[item["factor_id"]]
+      value = item["value"]
+      operator = item["operator"]
+      if operator == "between":
+        conditions.append(and_(field >= value, field <= item["value_to"]))
+      else:
+        conditions.append({
+          "gte": field.__ge__, "lte": field.__le__, "gt": field.__gt__,
+          "lt": field.__lt__, "eq": field.__eq__,
+        }[operator](value))
 
     base = (
       select(
@@ -442,44 +450,24 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     count_stmt = select(func.count()).select_from(base.subquery())
     total = (await self.db.execute(count_stmt)).scalar_one() or 0
 
-    signal_count = func.coalesce(
-      func.array_length(IndicatorSnapshot.matched_signals, 1),
-      0,
-    )
     sortable_fields = {
+      **allowed_fields,
       "code": IndicatorSnapshot.code,
       "name": IndicatorSnapshot.name,
-      "current_price": IndicatorSnapshot.current_price,
-      "change_pct": IndicatorSnapshot.change_pct,
-      "signal_count": signal_count,
-      "kdj_j": IndicatorSnapshot.kdj_j,
-      "rsi12": IndicatorSnapshot.rsi12,
-      "volume_ratio": IndicatorSnapshot.volume_ratio,
-      "volume_ratio_5": IndicatorSnapshot.volume_ratio_5,
-      "amount_ratio_20": IndicatorSnapshot.amount_ratio_20,
-      "turnover_rate_pct": IndicatorSnapshot.turnover_rate_pct,
-      "volume_percentile_60": IndicatorSnapshot.volume_percentile_60,
-      "amount_percentile_60": IndicatorSnapshot.amount_percentile_60,
-      "price_drop_pct": IndicatorSnapshot.price_drop_pct,
-      "days_since_peak": IndicatorSnapshot.days_since_peak,
-      "roe_ttm": effective_roe,
-      "net_profit_growth_pct": FinancialMetricSnapshot.net_profit_quarter_growth_pct,
-      "revenue_growth_pct": FinancialMetricSnapshot.revenue_quarter_growth_pct,
     }
     order_by = [
-      IndicatorSnapshot.change_pct.desc(),
-      IndicatorSnapshot.volume_ratio.desc(),
+      IndicatorSnapshot.change_pct.desc().nulls_last(),
       IndicatorSnapshot.code.asc(),
     ]
     if sort:
       sort_field = sortable_fields.get(sort.get("field") or "")
-      if sort_field is not None:
-        direction = (sort.get("direction") or "desc").lower()
-        sort_expression = sort_field.asc() if direction == "asc" else sort_field.desc()
-        order_by = [
-          sort_expression.nulls_last(),
-          IndicatorSnapshot.code.asc(),
-        ]
+      if sort_field is None:
+        raise ValueError("未知排序因子")
+      direction = (sort.get("direction") or "desc").lower()
+      if direction not in {"asc", "desc"}:
+        raise ValueError("未知排序方向")
+      sort_expression = sort_field.asc() if direction == "asc" else sort_field.desc()
+      order_by = [sort_expression.nulls_last(), IndicatorSnapshot.code.asc()]
 
     stmt = (
       base.order_by(*order_by)
@@ -499,6 +487,13 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       setattr(snapshot, "financial_audit", financial_audit)
       setattr(snapshot, "roe_quality_status", roe_quality_status)
       setattr(snapshot, "roe_quality_flags", roe_quality_flags)
+      setattr(snapshot, "financial_growth_selectable", bool(
+        financial_metric is not None
+        and financial_audit is not None
+        and financial_audit.status == "SUCCESS"
+        and financial_metric.quality_status in {"valid", "partial"}
+        and financial_metric.report_date >= minimum_report_date
+      ))
       records.append(snapshot)
     return records, total
 
@@ -514,6 +509,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     """Count effective ROE states for the requested screening universe."""
     conditions = [
       IndicatorSnapshot.snapshot_date == snapshot_date,
+      IndicatorSnapshot.calculation_version == FACTOR_VERSION,
       self._universe_condition(universe),
     ]
     include_condition = self._industry_condition(include_industries or [], True)

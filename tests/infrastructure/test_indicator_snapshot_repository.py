@@ -45,30 +45,42 @@ def test_effective_roe_quality_requires_latest_per_code_sync_audit() -> None:
   quality = SimpleNamespace(status="VALID", flags=[])
   success = SimpleNamespace(status="SUCCESS", verified_at=datetime(2026, 5, 2))
 
-  assert _effective_roe_quality(
-    metric,
-    quality,
-    success,
-    date(2026, 5, 2),
-  )[0] == "VALID"
-  assert _effective_roe_quality(
-    metric,
-    quality,
-    None,
-    date(2026, 5, 2),
-  )[0] == "UNVERIFIED"
-  assert _effective_roe_quality(
-    metric,
-    quality,
-    SimpleNamespace(status="FAILED"),
-    date(2026, 5, 2),
-  )[0] == "UNVERIFIED"
-  assert _effective_roe_quality(
-    metric,
-    quality,
-    SimpleNamespace(status="EMPTY"),
-    date(2026, 5, 2),
-  )[0] == "INVALID"
+  assert (
+    _effective_roe_quality(
+      metric,
+      quality,
+      success,
+      date(2026, 5, 2),
+    )[0]
+    == "VALID"
+  )
+  assert (
+    _effective_roe_quality(
+      metric,
+      quality,
+      None,
+      date(2026, 5, 2),
+    )[0]
+    == "UNVERIFIED"
+  )
+  assert (
+    _effective_roe_quality(
+      metric,
+      quality,
+      SimpleNamespace(status="FAILED"),
+      date(2026, 5, 2),
+    )[0]
+    == "UNVERIFIED"
+  )
+  assert (
+    _effective_roe_quality(
+      metric,
+      quality,
+      SimpleNamespace(status="EMPTY"),
+      date(2026, 5, 2),
+    )[0]
+    == "INVALID"
+  )
 
 
 def test_effective_roe_quality_marks_report_stale_after_deadline() -> None:
@@ -108,6 +120,12 @@ class _ScreenResult:
   def all(self):
     return []
 
+  def scalars(self):
+    return self
+
+  def scalar_one_or_none(self):
+    return None
+
 
 class _ScreenSession:
   def __init__(self) -> None:
@@ -116,6 +134,36 @@ class _ScreenSession:
   async def execute(self, statement):
     self.statements.append(statement)
     return _ScreenResult()
+
+
+@pytest.mark.asyncio
+async def test_factor_scope_invalidation_is_exact_and_committed_before_recalculation():
+  session = _FakeSession()
+  repo = IndicatorSnapshotRepository(session)
+  await repo.invalidate_factor_scope(["000001.SZ"], [date(2026, 5, 20)])
+  assert session.commits == 1
+  assert len(session.statements) == 1
+  sql = str(
+    session.statements[0].compile(
+      dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+    )
+  )
+  assert "UPDATE indicator_snapshots SET" in sql
+  assert "calculation_version=NULL" in sql
+  assert "indicator_snapshots.code IN ('000001.SZ')" in sql
+  assert "indicator_snapshots.snapshot_date IN ('2026-05-20')" in sql
+  assert "indicator_snapshots.calculation_version = 'daily-v1'" in sql
+
+
+@pytest.mark.parametrize(
+  "codes,dates", [([], [date(2026, 5, 20)]), (["000001.SZ"], [])]
+)
+@pytest.mark.asyncio
+async def test_factor_scope_invalidation_never_expands_empty_scope(codes, dates):
+  session = _FakeSession()
+  await IndicatorSnapshotRepository(session).invalidate_factor_scope(codes, dates)
+  assert session.statements == []
+  assert session.commits == 0
 
 
 @pytest.mark.asyncio
@@ -146,9 +194,9 @@ async def test_roe_filter_sort_and_count_share_strict_quality_joins() -> None:
   session = _ScreenSession()
   repo = IndicatorSnapshotRepository(session)
 
-  rows, total = await repo.screen_snapshots(
+  rows, total = await repo.screen_factor_snapshots(
     snapshot_date=date(2026, 5, 20),
-    min_roe=5.0,
+    factor_conditions=[{"factor_id": "roe_ttm", "operator": "gte", "value": 5.0}],
     sort={"field": "roe_ttm", "direction": "desc"},
     limit=20,
     offset=40,
@@ -172,3 +220,76 @@ async def test_roe_filter_sort_and_count_share_strict_quality_joins() -> None:
   assert "NULLS LAST" in page_sql
   assert "LIMIT" in page_sql
   assert "OFFSET" in page_sql
+
+
+@pytest.mark.asyncio
+async def test_factor_filters_keep_zero_and_version_boundary_and_default_order():
+  session = _ScreenSession()
+  await IndicatorSnapshotRepository(session).screen_factor_snapshots(
+    snapshot_date=date(2026, 5, 20),
+    factor_conditions=[
+      {"factor_id": "consecutive_down_days", "operator": "eq", "value": 0}
+    ],
+  )
+  compiled = session.statements[-1].compile(dialect=postgresql.dialect())
+  assert "calculation_version" in str(compiled)
+  assert "daily-v1" in compiled.params.values()
+  assert 0 in compiled.params.values()
+  order = str(compiled).split("ORDER BY")[-1]
+  assert "change_pct DESC NULLS LAST, indicator_snapshots.code ASC" in order
+  assert "volume_ratio DESC" not in order
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "condition",
+  [
+    {"factor_id": "unknown", "operator": "gte", "value": 1},
+    {"factor_id": "rsi12", "operator": "gt_or_eq", "value": 1},
+    {"factor_id": "rsi12", "operator": "between", "value": 70, "value_to": 30},
+  ],
+)
+async def test_factor_repository_rejects_invalid_conditions(condition):
+  session = _ScreenSession()
+  with pytest.raises(ValueError):
+    await IndicatorSnapshotRepository(session).screen_factor_snapshots(
+      snapshot_date=date(2026, 5, 20),
+      factor_conditions=[condition],
+    )
+  assert session.statements == []
+
+
+@pytest.mark.asyncio
+async def test_radar_baseline_reads_are_independent_of_factor_version_readiness():
+  session = _ScreenSession()
+  repo = IndicatorSnapshotRepository(session)
+  await repo.get_latest_snapshot_date()
+  await repo.list_baseline_snapshots(date(2026, 5, 20))
+  await repo.find_snapshot_dates(date(2026, 5, 19), date(2026, 5, 20))
+  for statement in session.statements:
+    # The selected model includes calculation_version, but no version WHERE predicate.
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert "calculation_version =" not in sql
+  session.statements.clear()
+  await repo.get_latest_factor_snapshot_date()
+  await repo.find_factor_snapshot_dates(date(2026, 5, 19), date(2026, 5, 20))
+  for statement in session.statements:
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert "calculation_version =" in sql
+
+
+@pytest.mark.asyncio
+async def test_completed_factor_runs_exclude_scoped_success_without_changing_radar_reads():
+  from quantx_infrastructure.repositories.daily_signal_run_repository import (
+    DailySignalRunRepository,
+  )
+
+  session = _ScreenSession()
+  repo = DailySignalRunRepository(session)
+  await repo.find_latest_completed(date(2026, 5, 20))
+  await repo.find_completed_dates(date(2026, 5, 19), date(2026, 5, 20))
+  for statement in session.statements:
+    compiled = statement.compile(dialect=postgresql.dialect())
+    assert "success" in compiled.params.values()
+    assert "scoped_success" not in compiled.params.values()
+    assert "daily-v1" in compiled.params.values()

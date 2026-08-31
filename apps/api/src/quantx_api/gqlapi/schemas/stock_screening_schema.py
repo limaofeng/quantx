@@ -11,7 +11,7 @@ from ..types import (
   LimitUpLifecycleSnapshotType,
   LimitUpRadarInput,
   LimitUpRadarPage,
-  SignalMeta,
+  StockFactorDefinition,
   StockScreenInput,
   StockScreenPage,
   StockScreenSnapshotStatus,
@@ -20,7 +20,7 @@ from ..types import (
 
 @strawberry.type(description="条件选股查询")
 class StockScreeningQuery:
-  @strawberry.field(description="基于日级信号快照执行条件选股")
+  @strawberry.field(description="基于当前版本日级因子快照执行条件交集选股")
   async def stock_screen(self, input: StockScreenInput) -> StockScreenPage:
     return await StockScreeningResolver.stock_screen(input)
 
@@ -78,6 +78,6 @@ class StockScreeningQuery:
   ) -> List[LimitUpLifecycleSnapshotType]:
     return await StockScreeningResolver.limit_up_lifecycle(code, trade_date)
 
-  @strawberry.field(description="获取可用日级信号及快照元信息")
-  async def stock_signal_snapshot_meta(self) -> List[SignalMeta]:
-    return await StockScreeningResolver.stock_signal_snapshot_meta()
+  @strawberry.field(description="获取选股与历史研究共用的版本化因子目录")
+  def stock_factor_catalog(self) -> List[StockFactorDefinition]:
+    return StockScreeningResolver.stock_factor_catalog()

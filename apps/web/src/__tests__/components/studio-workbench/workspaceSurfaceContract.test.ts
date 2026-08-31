@@ -54,7 +54,7 @@ describe('workspace page surface contract', () => {
       label: 'ScreeningTopBar',
       path: '../../../features/screening/components/ScreeningTopBar.tsx',
       pattern:
-        /export function ScreeningTopBar[\s\S]*?return \(\s*<div className="([^"]+)"/,
+        /export function ScreeningTopBar[\s\S]*?return \(\s*<aside\s+className="([^"]+)"/,
     },
     {
       label: 'TTradeHealthConsole',

@@ -1841,6 +1841,18 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "factorReport": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "financialOverview": {
         "audiences": [
           "web",
@@ -2438,6 +2450,30 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "stockFactorCatalog": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "stockFactorReportMatches": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "stockScreen": {
         "audiences": [
           "web",
@@ -2463,18 +2499,6 @@
         "stability": "supported"
       },
       "stockSectors": {
-        "audiences": [
-          "web",
-          "native",
-          "third-party"
-        ],
-        "requiredPermissions": [
-          "market:read"
-        ],
-        "risk": "READ",
-        "stability": "supported"
-      },
-      "stockSignalSnapshotMeta": {
         "audiences": [
           "web",
           "native",

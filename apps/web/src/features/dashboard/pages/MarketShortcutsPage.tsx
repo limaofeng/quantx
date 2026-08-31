@@ -118,11 +118,11 @@ const sectionNavigation: ReadonlyArray<{
 ];
 
 interface RankedStockRow {
-  changePct: number;
+  changePct?: number | null;
   code: string;
-  currentPrice: number;
+  currentPrice?: number | null;
   name: string;
-  volumeRatio: number;
+  volumeRatio?: number | null;
 }
 
 interface IntradayMover {
@@ -1235,12 +1235,9 @@ export default function MarketShortcutsPage() {
                   >
                     <StockRankingList
                       direction="gainers"
-                      rows={pulse.gainers as RankedStockRow[]}
+                      rows={pulse.gainers}
                     />
-                    <StockRankingList
-                      direction="losers"
-                      rows={pulse.losers as RankedStockRow[]}
-                    />
+                    <StockRankingList direction="losers" rows={pulse.losers} />
                   </div>
                 </div>
               </section>

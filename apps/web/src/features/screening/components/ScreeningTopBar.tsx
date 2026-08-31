@@ -1,23 +1,41 @@
 import {
-  AlertTriangle,
-  Check,
+  BookOpen,
   ChevronDown,
   ExternalLink,
   Info,
+  Plus,
   RefreshCw,
   Search,
-  Settings2,
   SlidersHorizontal,
+  X,
 } from 'lucide-react';
-import { useMemo, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { cn } from '@/utils/cn';
 
 import {
-  type ScreeningCriteria,
-  type ScreeningMode,
-  type StockScreenUniverse,
-  type StockScreeningMeta,
+  FACTOR_OPERATOR_LABELS,
+  FACTOR_TEMPLATES,
+  describeFactorCondition,
+  validateFactorConditions,
+} from '../factorModel';
+import type {
+  FactorCondition,
+  FactorDefinition,
+  FactorOperator,
+  ScreeningCriteria,
+  ScreeningMode,
+  StockScreenUniverse,
+  StockScreeningMeta,
 } from '../types';
 
 interface ScreeningTopBarProps {
@@ -37,36 +55,12 @@ interface ScreeningTopBarProps {
   snapshotBackfillLoading: boolean;
   snapshotRunState?: string | null;
   hasPendingChanges?: boolean;
-}
-
-const STRATEGIES = [
-  { id: 'enableOversoldRebound', label: '超跌反弹' },
-  { id: 'enableStrongTrend', label: '强势股' },
-  { id: 'enableKDJGoldenCross', label: 'KDJ 金叉' },
-  { id: 'enableVolumeBreakout', label: '放量突破' },
-  { id: 'enableMACrossover', label: '均线金叉' },
-  { id: 'enableBollingerLowerRebound', label: '布林下轨反弹' },
-  { id: 'enableBollingerUpperBreakout', label: '布林上轨突破' },
-  { id: 'enableRSIOversold', label: 'RSI 超卖' },
-  { id: 'enableRSIStrong', label: 'RSI 强势' },
-] as const;
-
-const UNIVERSE_OPTIONS: Array<{
-  label: string;
-  value: StockScreenUniverse;
-}> = [
-  { label: '股票', value: 'STOCK' },
-  { label: 'ETF', value: 'ETF' },
-  { label: '股票 + ETF', value: 'STOCK_AND_ETF' },
-];
-
-const MODE_OPTIONS: Array<{ label: string; value: ScreeningMode }> = [
-  { label: '日级', value: 'DAILY' },
-  { label: '盘中', value: 'INTRADAY' },
-];
-
-function formatInputValue(value: number | undefined) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : '';
+  factors: FactorDefinition[];
+  catalogLoading?: boolean;
+  catalogError?: string;
+  onRetryCatalog: () => void;
+  onOpenFactorReport: (factorId: string) => void;
+  onOpenJointReport: () => void;
 }
 
 function Section({
@@ -81,11 +75,11 @@ function Section({
   return (
     <details
       open={open}
-      className="group border-b border-white/[0.06] py-ui-section"
+      className="group border-b border-white/10 py-ui-section"
     >
-      <summary className="flex cursor-pointer list-none items-center justify-between text-ui-body font-semibold text-slate-200 outline-none marker:hidden focus-visible:rounded focus-visible:ring-2 focus-visible:ring-cyan-400/70 [&::-webkit-details-marker]:hidden">
-        <span>{label}</span>
-        <ChevronDown className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-180 motion-reduce:transition-none" />
+      <summary className="flex cursor-pointer list-none items-center justify-between text-ui-body font-semibold text-slate-200 focus-visible:outline-blue-400">
+        {label}
+        <ChevronDown className="h-4 w-4 text-slate-500" />
       </summary>
       <div className="mt-3 space-y-3">{children}</div>
     </details>
@@ -95,92 +89,66 @@ function Section({
 function NumberField({
   id,
   label,
-  suffix,
   value,
   onChange,
   step = '0.1',
 }: {
   id: string;
   label: string;
-  suffix?: string;
-  value: number | undefined;
+  value?: number;
   onChange: (value: number | undefined) => void;
   step?: string;
 }) {
   return (
     <div className="space-y-1.5">
-      <label
-        htmlFor={id}
-        className="block text-ui-label font-medium text-slate-400"
-      >
+      <label htmlFor={id} className="block text-ui-label text-slate-400">
         {label}
       </label>
-      <div className="relative">
-        <Input
-          id={id}
-          type="number"
-          inputMode="decimal"
-          min="0"
-          step={step}
-          value={formatInputValue(value)}
-          onChange={event => {
-            const raw = event.target.value;
-            onChange(raw === '' ? undefined : Number(raw));
-          }}
-          className="h-9 w-full rounded-md border border-white/[0.09] bg-[#09111f] px-3 text-ui-body font-mono text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-cyan-400/80 focus:ring-2 focus:ring-cyan-400/20"
-        />
-        {suffix && (
-          <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-ui-label text-slate-500">
-            {suffix}
-          </span>
-        )}
-      </div>
+      <Input
+        id={id}
+        type="number"
+        step={step}
+        value={value ?? ''}
+        onChange={event =>
+          onChange(
+            event.target.value === '' ? undefined : Number(event.target.value)
+          )
+        }
+        className="font-mono"
+      />
     </div>
   );
 }
 
 function ChoiceGroup({
-  label,
   options,
   value,
   onChange,
-  ariaLabel,
+  label,
 }: {
-  label?: string;
   options: Array<{ label: string; value: string }>;
   value: string;
   onChange: (value: string) => void;
-  ariaLabel: string;
+  label: string;
 }) {
   return (
-    <div className="space-y-2">
-      {label && (
-        <div className="text-ui-label font-medium text-slate-400">{label}</div>
-      )}
-      <div
-        role="group"
-        aria-label={ariaLabel}
-        className="grid grid-cols-3 gap-1 rounded-md border border-white/[0.08] bg-[#09111f] p-1"
-      >
-        {options.map(option => {
-          const selected = option.value === value;
-          return (
-            <button
-              key={option.value}
-              type="button"
-              aria-pressed={selected}
-              onClick={() => onChange(option.value)}
-              className={`h-8 rounded px-2 text-ui-label font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
-                selected
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
-              }`}
-            >
-              {option.label}
-            </button>
-          );
-        })}
-      </div>
+    <div
+      role="group"
+      aria-label={label}
+      className="flex gap-1 rounded-md border border-white/10 p-1"
+    >
+      {options.map(option => (
+        <Button
+          key={option.value}
+          size="sm"
+          variant={option.value === value ? 'default' : 'ghost'}
+          className="flex-1"
+          aria-pressed={option.value === value}
+          onClick={() => onChange(option.value)}
+        >
+          {option.label}
+        </Button>
+      ))}
     </div>
   );
 }
@@ -199,560 +167,561 @@ export function ScreeningTopBar({
   snapshotBackfillLoading,
   snapshotRunState,
   hasPendingChanges = false,
+  factors,
+  catalogLoading,
+  catalogError,
+  onRetryCatalog,
+  onOpenFactorReport,
+  onOpenJointReport,
 }: ScreeningTopBarProps) {
   const [industrySearch, setIndustrySearch] = useState('');
-  const screeningMode = screeningCriteria.screeningMode ?? 'DAILY';
-  const isIntradayMode = screeningMode === 'INTRADAY';
+  const [factorSearch, setFactorSearch] = useState('');
+  const mode = screeningCriteria.screeningMode ?? 'DAILY';
+  const intraday = mode === 'INTRADAY';
   const universe = screeningCriteria.universe ?? 'STOCK';
-  const stockOnlyFiltersEnabled = universe === 'STOCK';
-  const latestRunFailed = ['failed', 'partial_failure', 'crashed'].includes(
-    (meta.latestRunStatus || '').toLowerCase()
+  const conditions = screeningCriteria.factorConditions ?? [];
+  const conditionError = validateFactorConditions(conditions);
+  const selectedIndustries = screeningCriteria.includeIndustries ?? [];
+  const filteredIndustries = availableIndustries.filter(item =>
+    item.includes(industrySearch.trim())
   );
-  const missingSnapshotCount = meta.missingSnapshotDates.length;
-  const filteredIndustries = useMemo(() => {
-    const keyword = industrySearch.trim().toLowerCase();
-    if (!keyword) return availableIndustries;
-    return availableIndustries.filter(industry =>
-      industry.toLowerCase().includes(keyword)
-    );
-  }, [availableIndustries, industrySearch]);
-
-  const updateCriteria = <K extends keyof ScreeningCriteria>(
+  const filteredFactors = factors.filter(factor =>
+    `${factor.label} ${factor.id} ${factor.category}`
+      .toLowerCase()
+      .includes(factorSearch.trim().toLowerCase())
+  );
+  const distinctFactors = new Set(conditions.map(item => item.factorId)).size;
+  const update = <K extends keyof ScreeningCriteria>(
     key: K,
     value: ScreeningCriteria[K]
-  ) => {
-    setScreeningCriteria(previous => ({ ...previous, [key]: value }));
-  };
-
-  const updateUniverse = (nextUniverse: StockScreenUniverse) => {
-    setScreeningCriteria(previous => {
-      if (nextUniverse === 'STOCK') {
-        return { ...previous, universe: nextUniverse };
-      }
-      return {
-        ...previous,
-        universe: nextUniverse,
-        includeIndustries: undefined,
-        excludeIndustries: undefined,
-        minROE: undefined,
-        minNetProfitGrowth: undefined,
-        minYoYGrowth: undefined,
-      };
-    });
-  };
-
-  const toggleIndustry = (industry: string) => {
-    setScreeningCriteria(previous => {
-      const current = previous.includeIndustries ?? [];
-      return {
-        ...previous,
-        includeIndustries: current.includes(industry)
-          ? current.filter(item => item !== industry)
-          : [...current, industry],
-      };
-    });
-  };
-
-  const selectedIndustries = screeningCriteria.includeIndustries ?? [];
-  const selectedSignals = STRATEGIES.filter(strategy =>
-    Boolean(screeningCriteria[strategy.id])
-  ).length;
-  const activeConditions =
-    selectedIndustries.length +
-    (isIntradayMode
-      ? [
-          screeningCriteria.intradayVolumePaceMin,
-          screeningCriteria.intradayAmountPaceMin,
-          screeningCriteria.intradayLast5mVolumeRatioMin,
-          screeningCriteria.intradayTurnoverRateMin,
-          screeningCriteria.intradayDepthImbalanceMin,
-        ]
-      : [
-          screeningCriteria.minROE,
-          screeningCriteria.minNetProfitGrowth,
-          screeningCriteria.minYoYGrowth,
-          screeningCriteria.priceDropMin,
-          screeningCriteria.volumeRatioMin,
-          screeningCriteria.volumeRatioMax,
-          screeningCriteria.volumeRatio5Min,
-          screeningCriteria.amountRatioMin,
-          screeningCriteria.turnoverRateMin,
-        ]
-    ).filter(value => typeof value === 'number' && value > 0).length +
-    (isIntradayMode ? 0 : selectedSignals);
-
-  const snapshotStateLabel = snapshotBackfillLoading
-    ? '补算中'
-    : latestRunFailed
-      ? '快照补算失败'
-      : meta.isComplete
-        ? '最新交易日快照'
-        : meta.snapshotDate
-          ? `缺少 ${missingSnapshotCount} 个交易日`
-          : '尚无快照';
-  const snapshotStateClass = snapshotBackfillLoading
-    ? 'text-blue-300'
-    : latestRunFailed
-      ? 'text-rose-300'
-      : meta.isComplete
-        ? 'text-emerald-300'
-        : meta.snapshotDate
-          ? 'text-amber-300'
-          : 'text-slate-400';
+  ) => setScreeningCriteria(previous => ({ ...previous, [key]: value }));
+  const updateCondition = (index: number, patch: Partial<FactorCondition>) =>
+    update(
+      'factorConditions',
+      conditions.map((condition, position) =>
+        position === index ? { ...condition, ...patch } : condition
+      )
+    );
+  const toggleIndustry = (industry: string) =>
+    update(
+      'includeIndustries',
+      selectedIndustries.includes(industry)
+        ? selectedIndustries.filter(item => item !== industry)
+        : [...selectedIndustries, industry]
+    );
+  const updateUniverse = (next: StockScreenUniverse) =>
+    setScreeningCriteria(previous => ({
+      ...previous,
+      universe: next,
+      ...(next === 'STOCK'
+        ? {}
+        : { includeIndustries: [], excludeIndustries: [] }),
+    }));
+  const failed = ['failed', 'partial_failure', 'crashed'].includes(
+    (meta.latestRunStatus ?? '').toLowerCase()
+  );
+  const scopedRun =
+    (meta.latestRunStatus ?? '').toLowerCase() === 'scoped_success';
 
   return (
-    <div className="studio-workspace-surface flex h-full min-h-0 w-full shrink-0 flex-col border-r border-white/[0.07] bg-slate-900">
-      <header className="shrink-0 border-b border-white/[0.07] px-ui-section py-ui-section">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <SlidersHorizontal className="h-4 w-4 text-blue-400" />
-              <h1 className="text-ui-title font-bold tracking-tight text-white">
-                选股
-              </h1>
-            </div>
-            <p className="mt-1 text-ui-label text-slate-500">
-              构建条件，运行后应用
-            </p>
-          </div>
-          <span className="rounded border border-blue-400/20 bg-blue-500/10 px-1.5 py-0.5 font-mono text-ui-caption text-blue-300">
-            {activeConditions} 条条件
-          </span>
-        </div>
-        <div
-          role="group"
-          aria-label="筛选模式"
-          className="mt-4 grid grid-cols-2 gap-1 rounded-md border border-white/[0.08] bg-[#09111f] p-1"
-        >
-          {MODE_OPTIONS.map(option => {
-            const selected = option.value === screeningMode;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                data-testid={`screening-mode-${option.value}`}
-                aria-pressed={selected}
-                onClick={() => updateCriteria('screeningMode', option.value)}
-                className={`h-9 rounded text-ui-body font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
-                  selected
-                    ? option.value === 'INTRADAY'
-                      ? 'bg-cyan-500 text-slate-950'
-                      : 'bg-blue-600 text-white'
-                    : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
-                }`}
-              >
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
+    <aside
+      className="studio-workspace-surface flex min-h-0 flex-col border-r border-white/10 text-slate-200"
+      aria-label="选股条件"
+    >
+      <header className="shrink-0 border-b border-white/10 p-ui-section">
+        <h1 className="mb-3 flex items-center gap-2 text-ui-title font-semibold">
+          <SlidersHorizontal className="h-4 w-4 text-blue-400" />
+          {intraday ? '盘中选股' : '因子选股'}
+        </h1>
+        <ChoiceGroup
+          label="选股模式"
+          options={[
+            { label: '日级', value: 'DAILY' },
+            { label: '盘中', value: 'INTRADAY' },
+          ]}
+          value={mode}
+          onChange={value => update('screeningMode', value as ScreeningMode)}
+        />
         {hasPendingChanges && (
           <div
-            aria-live="polite"
-            className="mt-3 flex items-center gap-2 rounded-md border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2 text-ui-label text-amber-200"
+            role="status"
+            className="mt-3 flex items-start gap-2 text-ui-label text-amber-200"
           >
-            <Info className="h-3.5 w-3.5 shrink-0" />
-            有未应用更改，点击运行后更新结果
+            <Info className="h-4 w-4 shrink-0" />
+            有未应用更改；报告对应当前草稿，结果仍为上次筛选。
           </div>
         )}
       </header>
-
       <div className="min-h-0 flex-1 overflow-y-auto px-ui-section custom-scrollbar">
         <Section label="筛选范围">
           <ChoiceGroup
-            ariaLabel="股票范围"
-            options={UNIVERSE_OPTIONS}
+            label="股票范围"
+            options={[
+              { label: 'A 股', value: 'STOCK' },
+              { label: 'ETF', value: 'ETF' },
+              { label: '股票 + ETF', value: 'STOCK_AND_ETF' },
+            ]}
             value={universe}
             onChange={value => updateUniverse(value as StockScreenUniverse)}
           />
-
-          {!isIntradayMode && stockOnlyFiltersEnabled && (
-            <label
-              htmlFor="screening-exclude-st"
-              className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md border border-white/[0.08] bg-[#09111f] px-3 text-ui-label text-slate-300 transition-colors hover:border-white/20 focus-within:ring-2 focus-within:ring-cyan-400/70"
-            >
+          {!intraday && universe === 'STOCK' && (
+            <label className="flex items-center gap-2 text-ui-label">
               <input
-                id="screening-exclude-st"
                 type="checkbox"
                 checked={screeningCriteria.excludeST !== false}
-                onChange={event =>
-                  updateCriteria('excludeST', event.target.checked)
-                }
-                className="h-4 w-4 rounded border-slate-600 bg-transparent accent-blue-500 focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                onChange={event => update('excludeST', event.target.checked)}
+                className="accent-blue-500"
               />
-              <span>排除 ST</span>
+              排除当前 ST
             </label>
           )}
-
-          {stockOnlyFiltersEnabled && (
-            <div className="space-y-2">
-              <label
-                htmlFor="screening-industry-search"
-                className="block text-ui-label font-medium text-slate-400"
-              >
-                行业（包含）
-              </label>
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-600" />
-                <Input
-                  id="screening-industry-search"
-                  value={industrySearch}
-                  onChange={event => setIndustrySearch(event.target.value)}
-                  placeholder="搜索申万一级行业"
-                  className="h-9 w-full rounded-md border border-white/[0.09] bg-[#09111f] pl-9 pr-3 text-ui-label text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-cyan-400/80 focus:ring-2 focus:ring-cyan-400/20"
-                />
-              </div>
-              {selectedIndustries.length > 0 && (
-                <div className="flex flex-wrap gap-1.5" aria-label="已选行业">
-                  {selectedIndustries.map(industry => (
-                    <button
-                      key={industry}
-                      type="button"
-                      aria-label={`移除行业 ${industry}`}
-                      onClick={() => toggleIndustry(industry)}
-                      className="inline-flex items-center gap-1 rounded border border-blue-400/30 bg-blue-500/10 px-2 py-1 text-ui-caption text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
-                    >
-                      {industry} <span aria-hidden="true">×</span>
-                    </button>
-                  ))}
-                </div>
-              )}
+          {universe === 'STOCK' && (
+            <details>
+              <summary className="cursor-pointer text-ui-label text-slate-400 focus-visible:outline-blue-400">
+                行业（包含）· 已选 {selectedIndustries.length}
+              </summary>
+              <Input
+                className="my-2"
+                aria-label="搜索行业"
+                placeholder="搜索申万一级行业"
+                value={industrySearch}
+                onChange={event => setIndustrySearch(event.target.value)}
+              />
               <div
+                className="flex flex-wrap gap-1"
                 role="group"
                 aria-label="行业选择"
-                className="grid max-h-36 grid-cols-2 gap-1 overflow-y-auto rounded-md border border-white/[0.07] bg-[#09111f] p-1.5 custom-scrollbar"
               >
-                {filteredIndustries.length > 0 ? (
-                  filteredIndustries.map(industry => {
-                    const selected = selectedIndustries.includes(industry);
-                    return (
-                      <button
-                        key={industry}
-                        type="button"
-                        role="checkbox"
-                        aria-checked={selected}
-                        onClick={() => toggleIndustry(industry)}
-                        className={`flex min-h-8 items-center justify-between rounded px-2 text-left text-ui-label transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
-                          selected
-                            ? 'bg-blue-500/15 text-blue-200'
-                            : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
-                        }`}
-                      >
-                        <span className="truncate">{industry}</span>
-                        {selected && <Check className="h-3.5 w-3.5 shrink-0" />}
-                      </button>
-                    );
-                  })
-                ) : (
-                  <span className="col-span-2 px-2 py-3 text-center text-ui-label text-slate-600">
-                    行业列表暂不可用
-                  </span>
-                )}
+                {filteredIndustries.map(industry => (
+                  <Button
+                    key={industry}
+                    size="sm"
+                    variant={
+                      selectedIndustries.includes(industry)
+                        ? 'default'
+                        : 'outline'
+                    }
+                    aria-pressed={selectedIndustries.includes(industry)}
+                    onClick={() => toggleIndustry(industry)}
+                  >
+                    {industry}
+                  </Button>
+                ))}
               </div>
-            </div>
+            </details>
           )}
         </Section>
-
-        {isIntradayMode ? (
+        {intraday ? (
           <Section label="盘中量能">
             <NumberField
               id="screening-intraday-volume-pace"
               label="量速"
               value={screeningCriteria.intradayVolumePaceMin}
-              onChange={value => updateCriteria('intradayVolumePaceMin', value)}
-              step="0.1"
+              onChange={value => update('intradayVolumePaceMin', value)}
             />
             <NumberField
               id="screening-intraday-amount-pace"
               label="额速"
               value={screeningCriteria.intradayAmountPaceMin}
-              onChange={value => updateCriteria('intradayAmountPaceMin', value)}
-              step="0.1"
+              onChange={value => update('intradayAmountPaceMin', value)}
             />
             <NumberField
               id="screening-intraday-last-5m"
               label="近 5 分钟放量"
               value={screeningCriteria.intradayLast5mVolumeRatioMin}
-              onChange={value =>
-                updateCriteria('intradayLast5mVolumeRatioMin', value)
-              }
-              step="0.1"
+              onChange={value => update('intradayLast5mVolumeRatioMin', value)}
             />
             <NumberField
               id="screening-intraday-turnover"
-              label="盘中换手"
-              suffix="%"
+              label="盘中换手（%）"
               value={screeningCriteria.intradayTurnoverRateMin}
-              onChange={value =>
-                updateCriteria('intradayTurnoverRateMin', value)
-              }
-              step="0.1"
+              onChange={value => update('intradayTurnoverRateMin', value)}
             />
             <NumberField
               id="screening-intraday-depth"
               label="买盘失衡"
               value={screeningCriteria.intradayDepthImbalanceMin}
-              onChange={value =>
-                updateCriteria('intradayDepthImbalanceMin', value)
-              }
               step="0.05"
+              onChange={value => update('intradayDepthImbalanceMin', value)}
             />
           </Section>
         ) : (
           <>
-            {stockOnlyFiltersEnabled && (
-              <Section label="基本面">
-                <NumberField
-                  id="screening-min-roe"
-                  label="最小 ROE（TTM）"
-                  suffix="%"
-                  value={screeningCriteria.minROE}
-                  onChange={value => updateCriteria('minROE', value)}
-                />
-                <NumberField
-                  id="screening-min-net-profit-growth"
-                  label="最小净利单季同比"
-                  suffix="%"
-                  value={screeningCriteria.minNetProfitGrowth}
-                  onChange={value =>
-                    updateCriteria('minNetProfitGrowth', value)
-                  }
-                />
-                <NumberField
-                  id="screening-min-yoy-growth"
-                  label="最小营收单季同比"
-                  suffix="%"
-                  value={screeningCriteria.minYoYGrowth}
-                  onChange={value => updateCriteria('minYoYGrowth', value)}
-                />
-              </Section>
-            )}
-
-            <Section label="日级量能与价格">
-              <NumberField
-                id="screening-price-drop-min"
-                label="跌幅最小值"
-                suffix="%"
-                value={screeningCriteria.priceDropMin}
-                onChange={value => updateCriteria('priceDropMin', value)}
-              />
-              <div className="grid grid-cols-2 gap-3">
-                <NumberField
-                  id="screening-volume-ratio-min"
-                  label="量比下限"
-                  value={screeningCriteria.volumeRatioMin}
-                  onChange={value => updateCriteria('volumeRatioMin', value)}
-                />
-                <NumberField
-                  id="screening-volume-ratio-max"
-                  label="量比上限"
-                  value={screeningCriteria.volumeRatioMax}
-                  onChange={value => updateCriteria('volumeRatioMax', value)}
-                />
-              </div>
-              <NumberField
-                id="screening-volume-ratio-5-min"
-                label="5 日量比下限"
-                value={screeningCriteria.volumeRatio5Min}
-                onChange={value => updateCriteria('volumeRatio5Min', value)}
-              />
-              <NumberField
-                id="screening-amount-ratio-min"
-                label="额比下限"
-                value={screeningCriteria.amountRatioMin}
-                onChange={value => updateCriteria('amountRatioMin', value)}
-              />
-              <NumberField
-                id="screening-turnover-min"
-                label="换手率下限"
-                suffix="%"
-                value={screeningCriteria.turnoverRateMin}
-                onChange={value => updateCriteria('turnoverRateMin', value)}
-              />
-            </Section>
-
-            <Section label="量化信号">
-              <div
-                className="grid grid-cols-2 gap-2"
-                role="group"
-                aria-label="量化信号"
-              >
-                {STRATEGIES.map(strategy => {
-                  const id = `screening-${strategy.id}`;
-                  const checked = Boolean(screeningCriteria[strategy.id]);
-                  return (
-                    <label
-                      key={strategy.id}
-                      htmlFor={id}
-                      className={`flex min-h-9 cursor-pointer items-center gap-2 rounded-md border px-2 text-ui-label transition-colors focus-within:ring-2 focus-within:ring-cyan-400/80 ${
-                        checked
-                          ? 'border-blue-400/40 bg-blue-500/10 text-blue-200'
-                          : 'border-white/[0.08] bg-[#09111f] text-slate-500 hover:border-white/20 hover:text-slate-200'
-                      }`}
+            <Section label={`因子条件 · ${conditions.length} 条 AND`}>
+              <details>
+                <summary className="cursor-pointer text-ui-label text-blue-300 focus-visible:outline-blue-400">
+                  条件模板（展开查看实际阈值）
+                </summary>
+                <div className="mt-2 space-y-2">
+                  {FACTOR_TEMPLATES.filter(template =>
+                    template.conditions.every(condition =>
+                      factors.some(factor => factor.id === condition.factorId)
+                    )
+                  ).map(template => (
+                    <div
+                      key={template.label}
+                      className="rounded-md border border-white/10 p-2"
                     >
-                      <input
-                        id={id}
-                        type="checkbox"
-                        checked={checked}
-                        onChange={event =>
-                          updateCriteria(strategy.id, event.target.checked)
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          update('factorConditions', [
+                            ...conditions,
+                            ...template.conditions.map(condition => ({
+                              ...condition,
+                            })),
+                          ])
                         }
-                        className="h-4 w-4 rounded border-slate-600 bg-transparent accent-blue-500"
-                      />
-                      <span>{strategy.label}</span>
-                    </label>
-                  );
-                })}
-              </div>
-              {(screeningCriteria.enableRSIOversold ||
-                screeningCriteria.enableRSIStrong) && (
-                <div className="space-y-3 border-t border-white/[0.06] pt-3">
-                  <div className="text-ui-label font-medium text-slate-400">
-                    RSI 阈值
-                  </div>
-                  {screeningCriteria.enableRSIOversold && (
-                    <NumberField
-                      id="screening-rsi-oversold-threshold"
-                      label="RSI 超卖阈值"
-                      value={screeningCriteria.rsiOversoldThreshold}
-                      onChange={value =>
-                        updateCriteria('rsiOversoldThreshold', value)
-                      }
-                    />
-                  )}
-                  {screeningCriteria.enableRSIStrong && (
-                    <NumberField
-                      id="screening-rsi-strong-threshold"
-                      label="RSI 强势阈值"
-                      value={screeningCriteria.rsiStrongThreshold}
-                      onChange={value =>
-                        updateCriteria('rsiStrongThreshold', value)
-                      }
-                    />
-                  )}
+                      >
+                        添加 {template.label}
+                      </Button>
+                      {template.conditions.map(condition => (
+                        <p
+                          key={condition.factorId}
+                          className="mt-1 text-ui-caption text-slate-400"
+                        >
+                          {describeFactorCondition(condition, factors)}
+                        </p>
+                      ))}
+                    </div>
+                  ))}
                 </div>
+              </details>
+              {!conditions.length && (
+                <p className="text-ui-label text-slate-400">
+                  未预选因子。添加数值范围或二值条件，所有条件取交集。
+                </p>
+              )}
+              {conditions.map((condition, index) => {
+                const factor = factors.find(
+                  item => item.id === condition.factorId
+                );
+                return (
+                  <div
+                    key={`${condition.factorId}:${index}`}
+                    className="space-y-2 rounded-md border border-white/10 p-2"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span className="min-w-0 flex-1 text-ui-label font-medium">
+                        {factor?.label ?? condition.factorId}
+                      </span>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label={`查看 ${factor?.label ?? condition.factorId} 报告`}
+                        onClick={() => onOpenFactorReport(condition.factorId)}
+                      >
+                        <BookOpen className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label={`移除 ${factor?.label ?? condition.factorId} 条件`}
+                        onClick={() =>
+                          update(
+                            'factorConditions',
+                            conditions.filter(
+                              (_, position) => position !== index
+                            )
+                          )
+                        }
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    {factor?.kind === 'binary' ? (
+                      <Select
+                        value={String(condition.value ?? 1)}
+                        onValueChange={value =>
+                          updateCondition(index, {
+                            operator: 'eq',
+                            value: Number(value),
+                            valueTo: null,
+                          })
+                        }
+                      >
+                        <SelectTrigger aria-label={`${factor.label} 条件`}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="1">成立（1）</SelectItem>
+                          <SelectItem value="0">不成立（0）</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <>
+                        <Select
+                          value={condition.operator}
+                          onValueChange={operator =>
+                            updateCondition(index, {
+                              operator: operator as FactorOperator,
+                            })
+                          }
+                        >
+                          <SelectTrigger
+                            aria-label={`${factor?.label ?? condition.factorId} 比较方式`}
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {Object.entries(FACTOR_OPERATOR_LABELS)
+                              .filter(
+                                ([operator]) =>
+                                  !factor?.operators.length ||
+                                  factor.operators.includes(operator)
+                              )
+                              .map(([operator, label]) => (
+                                <SelectItem key={operator} value={operator}>
+                                  {label}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            type="number"
+                            step="any"
+                            aria-label={`${factor?.label ?? condition.factorId} ${condition.operator === 'between' ? '下限' : '数值'}`}
+                            value={condition.value ?? ''}
+                            onChange={event =>
+                              updateCondition(index, {
+                                value:
+                                  event.target.value === ''
+                                    ? null
+                                    : Number(event.target.value),
+                              })
+                            }
+                            className="min-w-0 font-mono"
+                          />
+                          {condition.operator === 'between' && (
+                            <Input
+                              type="number"
+                              step="any"
+                              aria-label={`${factor?.label ?? condition.factorId} 上限`}
+                              value={condition.valueTo ?? ''}
+                              onChange={event =>
+                                updateCondition(index, {
+                                  valueTo:
+                                    event.target.value === ''
+                                      ? null
+                                      : Number(event.target.value),
+                                })
+                              }
+                              className="min-w-0 font-mono"
+                            />
+                          )}
+                          <span className="text-ui-caption text-slate-400">
+                            {factor?.unit}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                    {factor && !factor.researchSupported && (
+                      <p className="text-ui-caption text-amber-200">
+                        可选股；历史研究未覆盖
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+              {conditionError && (
+                <p role="alert" className="text-ui-label text-amber-200">
+                  {conditionError}
+                </p>
+              )}
+              {distinctFactors >= 1 && (
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  disabled={Boolean(conditionError)}
+                  onClick={onOpenJointReport}
+                >
+                  <BookOpen className="mr-2 h-4 w-4" />
+                  {distinctFactors >= 2
+                    ? '查看当前组合报告'
+                    : '查看当前条件报告'}
+                </Button>
               )}
             </Section>
-
+            <Section label="因子目录">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
+                <Input
+                  aria-label="搜索因子"
+                  placeholder="名称、类别或指标代码"
+                  value={factorSearch}
+                  onChange={event => setFactorSearch(event.target.value)}
+                  className="pl-9"
+                />
+              </div>
+              {catalogLoading && !factors.length && (
+                <p role="status" className="text-ui-label text-slate-400">
+                  正在读取因子目录…
+                </p>
+              )}
+              {catalogError && (
+                <div role="alert" className="text-ui-label text-rose-300">
+                  {catalogError}
+                  <Button size="sm" variant="outline" onClick={onRetryCatalog}>
+                    重试
+                  </Button>
+                </div>
+              )}
+              {!catalogLoading && !catalogError && !filteredFactors.length && (
+                <p className="text-ui-label text-slate-400">没有匹配的因子</p>
+              )}
+              {filteredFactors.map(factor => (
+                <div
+                  key={factor.id}
+                  className="flex items-center gap-1 border-b border-white/5 pb-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-ui-label text-slate-200">
+                      {factor.label}
+                    </div>
+                    <div className="text-ui-caption text-slate-400">
+                      {factor.category} · {factor.lookback} 日 ·{' '}
+                      {factor.researchSupported ? '量价研究' : '研究待覆盖'}
+                    </div>
+                  </div>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`查看 ${factor.label} 报告`}
+                    onClick={() => onOpenFactorReport(factor.id)}
+                  >
+                    <BookOpen className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`添加 ${factor.label} 条件`}
+                    onClick={() =>
+                      update('factorConditions', [
+                        ...conditions,
+                        {
+                          factorId: factor.id,
+                          operator: factor.kind === 'binary' ? 'eq' : 'gte',
+                          value: factor.kind === 'binary' ? 1 : null,
+                        },
+                      ])
+                    }
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </Section>
             <Section label="数据健康">
-              <label
-                htmlFor="screening-require-fresh"
-                className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md border border-white/[0.08] bg-[#09111f] px-3 text-ui-label text-slate-300 focus-within:ring-2 focus-within:ring-cyan-400/70"
-              >
+              <label className="flex items-center gap-2 text-ui-label">
                 <input
-                  id="screening-require-fresh"
                   type="checkbox"
                   checked={Boolean(screeningCriteria.requireFresh)}
                   onChange={event =>
-                    updateCriteria('requireFresh', event.target.checked)
+                    update('requireFresh', event.target.checked)
                   }
-                  className="h-4 w-4 rounded border-slate-600 bg-transparent accent-blue-500"
+                  className="accent-blue-500"
                 />
-                <span>只看新鲜信号</span>
+                只使用应有日期的完整快照
               </label>
-
               <div
-                aria-live="polite"
-                className="rounded-md border border-white/[0.07] bg-[#09111f] p-3 text-ui-label"
+                role="status"
+                className={cn(
+                  'text-ui-label',
+                  failed
+                    ? 'text-rose-300'
+                    : meta.isComplete
+                      ? 'text-slate-300'
+                      : 'text-amber-200'
+                )}
               >
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`h-2 w-2 rounded-full ${snapshotBackfillLoading ? 'bg-blue-400' : latestRunFailed ? 'bg-rose-400' : meta.isComplete ? 'bg-emerald-400' : 'bg-amber-400'}`}
-                  />
-                  <span className={snapshotStateClass}>
-                    {snapshotStateLabel}
-                  </span>
+                {snapshotBackfillLoading
+                  ? '正在核对 / 补算快照'
+                  : failed
+                    ? '最近补算失败'
+                    : meta.isComplete
+                      ? '快照已就绪'
+                      : '快照未完整就绪'}
+                <div className="mt-1 font-mono text-ui-caption">
+                  {meta.snapshotDate ?? '--'} ·{' '}
+                  {meta.calculationVersion ?? '因子版本未就绪'}
                 </div>
-                {meta.snapshotDate && (
-                  <div className="mt-2 font-mono text-ui-caption text-slate-500">
-                    快照 {meta.snapshotDate}
+                {!meta.isComplete && (
+                  <div>
+                    历史缺口 {meta.missingSnapshotDates.length} 个交易日
                   </div>
                 )}
-                {!meta.isComplete && meta.snapshotDate && (
-                  <div className="mt-1 text-amber-300">
-                    历史缺口：{missingSnapshotCount} 个交易日
-                  </div>
+                {scopedRun && (
+                  <p className="mt-1 text-amber-200">
+                    最近仅完成指定标的补算，不代表全市场快照就绪。
+                  </p>
                 )}
-                {!isIntradayMode && snapshotRunState && (
-                  <div className="mt-1 font-mono text-ui-caption text-slate-500">
-                    Prefect · {snapshotRunState}
-                  </div>
+                {snapshotRunState && (
+                  <div className="font-mono">Prefect · {snapshotRunState}</div>
                 )}
               </div>
-
               {!meta.isComplete && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={onBackfillSnapshot}
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
                     disabled={snapshotBackfillLoading}
-                    className="inline-flex min-h-9 items-center gap-2 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 text-ui-label font-semibold text-amber-200 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={onBackfillSnapshot}
                   >
-                    {snapshotBackfillLoading ? (
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-                    ) : (
-                      <AlertTriangle className="h-3.5 w-3.5" />
-                    )}
-                    {snapshotBackfillLoading ? '补算中' : '立即补算'}
-                  </button>
-                  {latestRunFailed && onOpenSnapshotRun && (
-                    <button
-                      type="button"
-                      onClick={onOpenSnapshotRun}
-                      className="inline-flex min-h-9 items-center gap-1 rounded-md px-2 text-ui-label text-rose-300 transition-colors hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                      查看日志
-                    </button>
-                  )}
-                  <button
-                    type="button"
+                    <RefreshCw
+                      className={cn(
+                        'mr-2 h-4 w-4',
+                        snapshotBackfillLoading &&
+                          'animate-spin motion-reduce:animate-none'
+                      )}
+                    />
+                    立即补算
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
                     onClick={onOpenAdvancedData}
-                    className="inline-flex min-h-9 items-center gap-1 rounded-md px-2 text-ui-label text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                   >
-                    <Settings2 className="h-3.5 w-3.5" />
                     高级补数
-                  </button>
+                  </Button>
                 </div>
+              )}
+              {onOpenSnapshotRun && (
+                <Button size="sm" variant="ghost" onClick={onOpenSnapshotRun}>
+                  <ExternalLink className="mr-2 h-4 w-4" />
+                  查看补算日志
+                </Button>
               )}
             </Section>
           </>
         )}
       </div>
-
-      <footer className="sticky bottom-0 shrink-0 border-t border-white/[0.08] bg-slate-900 p-ui-section shadow-[0_-8px_20px_rgba(0,0,0,0.18)]">
-        <div className="mb-3 text-ui-label text-slate-500">
-          <span>
-            {hasPendingChanges
-              ? `当前草稿 · ${activeConditions} 条，运行后应用`
-              : `已应用 ${activeConditions} 条条件（全部为 AND）`}
-          </span>
-        </div>
-        <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-2">
-          <button
-            type="button"
-            onClick={onReset}
-            className="h-10 rounded-md border border-white/[0.12] bg-[#09111f] text-ui-body font-semibold text-slate-300 transition-colors hover:border-white/25 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
-          >
+      <footer className="shrink-0 border-t border-white/10 p-ui-section">
+        <p className="mb-2 text-ui-caption text-slate-400">
+          {hasPendingChanges
+            ? '当前草稿 · 应用后更新结果'
+            : '结果对应已应用条件（全部为 AND）'}
+        </p>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={onReset}>
             重置
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            className="flex-1"
+            disabled={
+              screeningLoading || (!intraday && Boolean(conditionError))
+            }
             onClick={onRunScreening}
-            disabled={screeningLoading}
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-blue-600 px-3 text-ui-body font-semibold text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {screeningLoading && (
-              <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-            )}
             {screeningLoading
-              ? '运行中'
-              : isIntradayMode
+              ? '筛选中…'
+              : intraday
                 ? '开始盘中扫描'
-                : '运行筛选'}
-          </button>
+                : '应用筛选'}
+          </Button>
         </div>
       </footer>
-    </div>
+    </aside>
   );
 }

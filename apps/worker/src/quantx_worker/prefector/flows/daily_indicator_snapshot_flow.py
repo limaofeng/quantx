@@ -8,6 +8,7 @@ from typing import Any, Iterable, Optional
 
 from prefect import flow, get_run_logger
 from prefect.runtime import flow_run as flow_run_runtime
+from quantx_domain.factors import FACTOR_VERSION
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -72,13 +73,10 @@ async def expected_snapshot_date(
   shanghai_reference = time_utils.to_shanghai(reference)
   current = shanghai_reference.date()
   if (
-    await helper.is_trading_date("SH", current)
-    and shanghai_reference.time() >= cutoff
+    await helper.is_trading_date("SH", current) and shanghai_reference.time() >= cutoff
   ):
     return current
-  return await helper.trading_time_service.get_previous_trading_day(
-    "SH", current
-  )
+  return await helper.trading_time_service.get_previous_trading_day("SH", current)
 
 
 async def resolve_snapshot_dates(
@@ -227,20 +225,34 @@ async def _release_snapshot_locks(
     await redis.eval(_LOCK_RELEASE_SCRIPT, 1, key, token)
 
 
-def _run_status(saved: int, failed: int) -> str:
+async def _has_full_snapshot_scope(codes: list[str]) -> bool:
+  """Only the exact default market set may certify whole-day readiness."""
+  complete = await resolve_instruments(
+    DEFAULT_SNAPSHOT_SECTORS,
+    None,
+    allowed_types={InstrumentType.STOCK, InstrumentType.ETF},
+  )
+  return bool(complete) and set(codes) == {item["code"] for item in complete}
+
+
+def _run_status(
+  saved: int, failed: int, *, full_scope: bool, missing_target: int
+) -> str:
   if saved <= 0:
     return "failed"
-  if failed > 0:
+  if failed > 0 or missing_target > 0:
     return "partial_failure"
-  return "success"
+  return "success" if full_scope else "scoped_success"
 
 
 def _run_warnings(result: dict[str, Any], errors: list[str]) -> str:
   warnings = []
   if result["saved"] <= 0:
-    warnings.append("未保存任何日级信号快照")
+    warnings.append("未保存任何日级因子快照")
   if result["missing_target"]:
     warnings.append(f"{result['missing_target']} 只标的目标日无行情")
+  if result["inactive_target"]:
+    warnings.append(f"{result['inactive_target']} 只标的目标日停牌或无成交，已跳过")
   if result["insufficient_history"]:
     warnings.append(f"{result['insufficient_history']} 只新股或历史数据不足")
   if result["failed"]:
@@ -259,7 +271,7 @@ async def _create_signal_runs(
       run = await DailySignalRunRepository(db).create_run(
         {
           "snapshot_date": target,
-          "signal_version": f"daily-signal-v2:{target.isoformat()}",
+          "signal_version": FACTOR_VERSION,
           "score_version": "score-v1",
           "status": "running",
           "started_at": time_utils.now(),
@@ -327,10 +339,9 @@ async def daily_indicator_snapshot_flow(
     raise RuntimeError("PostgreSQL 中没有匹配的股票或 ETF 标的")
 
   codes = [item["code"] for item in instruments]
+  full_scope = await _has_full_snapshot_scope(codes)
   name_map = {item["code"]: item["name"] for item in instruments}
-  instrument_type_map = {
-    item["code"]: item["instrument_type"] for item in instruments
-  }
+  instrument_type_map = {item["code"]: item["instrument_type"] for item in instruments}
   float_volume_map = {
     item["code"]: item["float_volume"]
     for item in instruments
@@ -352,6 +363,7 @@ async def daily_indicator_snapshot_flow(
       "skipped": 0,
       "failed": 0,
       "missing_target": 0,
+      "inactive_target": 0,
       "insufficient_history": 0,
       "errors": [],
     }
@@ -384,6 +396,7 @@ async def daily_indicator_snapshot_flow(
           "skipped",
           "failed",
           "missing_target",
+          "inactive_target",
           "insufficient_history",
         ):
           aggregate[key] += int(target_result[key])
@@ -392,8 +405,23 @@ async def daily_indicator_snapshot_flow(
     reports = []
     for target in target_dates:
       target_result = date_results[target]
-      status = _run_status(target_result["saved"], target_result["failed"])
+      status = _run_status(
+        target_result["saved"],
+        target_result["failed"],
+        full_scope=full_scope,
+        missing_target=target_result["missing_target"],
+      )
       warnings = _run_warnings(target_result, target_result["errors"])
+      if status == "scoped_success":
+        warnings = "; ".join(
+          filter(
+            None,
+            [
+              "仅完成指定标的，不代表全市场因子快照就绪",
+              warnings,
+            ],
+          )
+        )
       await _finish_signal_run(
         run_ids[target],
         started_at=started_at,
@@ -413,6 +441,7 @@ async def daily_indicator_snapshot_flow(
             "skipped",
             "failed",
             "missing_target",
+            "inactive_target",
             "insufficient_history",
           )
         },
@@ -436,7 +465,7 @@ async def daily_indicator_snapshot_flow(
     return {
       "status": (
         "success"
-        if all(item["status"] == "success" for item in reports)
+        if all(item["status"] in {"success", "scoped_success"} for item in reports)
         else "failed"
       ),
       "dates": reports,

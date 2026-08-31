@@ -3,6 +3,28 @@ export type ScreeningMode = 'DAILY' | 'INTRADAY';
 export type RoeQualityStatus =
   'VALID' | 'STALE' | 'SUSPICIOUS' | 'INVALID' | 'UNVERIFIED';
 
+export type FactorOperator = 'eq' | 'gte' | 'lte' | 'gt' | 'lt' | 'between';
+export interface FactorCondition {
+  factorId: string;
+  operator: FactorOperator;
+  value: number | null;
+  valueTo?: number | null;
+}
+
+export interface FactorDefinition {
+  id: string;
+  label: string;
+  category: string;
+  description: string;
+  unit: string;
+  lookback: number;
+  kind: string;
+  operators: string[];
+  researchSupported: boolean;
+  unsupportedReason?: string | null;
+  version: string;
+}
+
 export interface ScreeningCriteria {
   // --- Universe ---
   screeningMode?: ScreeningMode;
@@ -11,31 +33,7 @@ export interface ScreeningCriteria {
   includeIndustries?: string[];
   excludeIndustries?: string[];
 
-  // --- Fundamentals (screening.py lines 153-163) ---
-  minROE?: number; // default 5
-  minNetProfitGrowth?: number; // default 5
-  minYoYGrowth?: number; // default 0
-
-  // --- Strategies (Toggles) ---
-  enableOversoldRebound?: boolean; // 超跌反弹
-  enableStrongTrend?: boolean; // 强势股
-  enableKDJGoldenCross?: boolean; // KDJ金叉
-  enableVolumeBreakout?: boolean; // 放量上涨
-  enableMACrossover?: boolean; // MA金叉
-  enableBollingerLowerRebound?: boolean; // 布林下轨反弹
-  enableBollingerUpperBreakout?: boolean; // 布林上轨突破
-  enableRSIOversold?: boolean; // RSI超卖
-  enableRSIStrong?: boolean; // RSI强势
-
-  // --- Technical Parameters ---
-  priceDropMin?: number; // 跌幅最小值
-  rsiOversoldThreshold?: number; // Default 30
-  rsiStrongThreshold?: number; // Default 70
-  volumeRatioMin?: number;
-  volumeRatioMax?: number;
-  volumeRatio5Min?: number;
-  amountRatioMin?: number;
-  turnoverRateMin?: number;
+  factorConditions?: FactorCondition[];
   intradayVolumePaceMin?: number;
   intradayAmountPaceMin?: number;
   intradayLast5mVolumeRatioMin?: number;
@@ -51,20 +49,20 @@ export interface StockScreeningResult {
   instrumentType: string;
 
   // Market Data
-  currentPrice: number;
-  openPrice: number;
-  changePct: number;
-  volume: number;
-  volumeRatio: number; // Current / Avg20
-  avgVolume20: number;
-  avgVolume5?: number;
-  volumeRatio5?: number;
-  avgAmount20?: number;
-  amountRatio20?: number;
+  currentPrice: number | null;
+  openPrice: number | null;
+  changePct: number | null;
+  volume: number | null;
+  volumeRatio: number | null;
+  avgVolume20: number | null;
+  avgVolume5?: number | null;
+  volumeRatio5?: number | null;
+  avgAmount20?: number | null;
+  amountRatio20?: number | null;
   turnoverRatePct?: number | null;
-  volumePercentile60?: number;
-  amountPercentile60?: number;
-  isBullish: boolean; // Close > Open
+  volumePercentile60?: number | null;
+  amountPercentile60?: number | null;
+  isBullish: boolean | null;
   amount?: number;
 
   // Intraday volume scan
@@ -91,45 +89,41 @@ export interface StockScreeningResult {
   financialQualityFlags?: string[];
 
   // Peak/Trough Stats
-  peakPrice: number;
-  daysSincePeak: number;
-  priceDropPct: number;
-  lowPrice: number;
-  daysSinceLow: number;
-  priceRisePct: number;
+  peakPrice: number | null;
+  daysSincePeak: number | null;
+  priceDropPct: number | null;
+  lowPrice: number | null;
+  daysSinceLow: number | null;
+  priceRisePct: number | null;
 
   // Consecutive Stats
-  consecutiveDownDays: number;
-  consecutiveDownPct: number;
+  consecutiveDownDays: number | null;
+  consecutiveDownPct: number | null;
 
   // Technical Indicators
-  k: number;
-  d: number;
-  j: number;
+  k: number | null;
+  d: number | null;
+  j: number | null;
 
-  rsi6: number;
-  rsi12: number;
-  rsi24: number;
+  rsi6: number | null;
+  rsi12: number | null;
+  rsi24: number | null;
 
-  upperBand: number;
-  middleBand: number;
-  lowerBand: number;
+  upperBand: number | null;
+  middleBand: number | null;
+  lowerBand: number | null;
 
-  ma5: number;
-  ma10: number;
-  ma20: number;
+  ma5: number | null;
+  ma10: number | null;
+  ma20: number | null;
   ma5Prev?: number;
   ma10Prev?: number;
 
-  // Signals
-  matchedStrategies: string[];
-  score: number;
-  scoreVersion?: string;
-  signalVersion?: string;
+  intradaySignals?: string[];
+  calculationVersion?: string;
+  factorValues?: Array<{ factorId: string; value?: number | null }>;
   calculatedAt?: string | null;
   hasStaleData?: boolean;
-  signalMissing?: boolean;
-  missingSignals?: string[];
 }
 
 export interface StockScreeningMeta {
@@ -139,8 +133,7 @@ export interface StockScreeningMeta {
   expectedSnapshotDate?: string | null;
   missingSnapshotDates: string[];
   latestRunStatus?: string | null;
-  scoreVersion?: string;
-  signalVersion?: string;
+  calculationVersion?: string;
   calculatedAt?: string | null;
   hasStaleData: boolean;
   isComplete: boolean;
@@ -184,11 +177,11 @@ export interface FilterOption {
 }
 
 export type StockScreenSortField =
+  | (string & {})
   | 'CODE'
   | 'NAME'
   | 'CURRENT_PRICE'
   | 'CHANGE_PCT'
-  | 'SIGNAL_COUNT'
   | 'KDJ_J'
   | 'RSI12'
   | 'VOLUME_RATIO'

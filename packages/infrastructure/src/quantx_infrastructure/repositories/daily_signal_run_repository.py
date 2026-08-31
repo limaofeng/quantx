@@ -3,11 +3,38 @@
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import delete, select
+from quantx_domain.factors import FACTOR_VERSION
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from quantx_infrastructure.database.relational_base import BaseRepository
 from quantx_infrastructure.models.daily_signal_run import DailySignalRun
+
+
+def _latest_current_success() -> ColumnElement[bool]:
+  """A later attempt revokes the older run's certification for that date.
+
+  The autoincrement run ID records creation order. started_at can be supplied
+  by a caller and completed_at/updated_at change after creation, so none of
+  those timestamps may let an older successful attempt overtake a newer run.
+  """
+  candidate = aliased(DailySignalRun)
+  latest_id = (
+    select(func.max(candidate.id))
+    .where(
+      candidate.snapshot_date == DailySignalRun.snapshot_date,
+      candidate.signal_version == FACTOR_VERSION,
+    )
+    .correlate(DailySignalRun)
+    .scalar_subquery()
+  )
+  return and_(
+    DailySignalRun.signal_version == FACTOR_VERSION,
+    DailySignalRun.status == "success",
+    DailySignalRun.id == latest_id,
+  )
 
 
 class DailySignalRunRepository(BaseRepository[DailySignalRun]):
@@ -38,12 +65,11 @@ class DailySignalRunRepository(BaseRepository[DailySignalRun]):
   async def find_latest_completed(
     self, snapshot_date: Optional[date] = None
   ) -> Optional[DailySignalRun]:
-    stmt = select(DailySignalRun).where(DailySignalRun.status == "success")
+    stmt = select(DailySignalRun).where(_latest_current_success())
     if snapshot_date is not None:
       stmt = stmt.where(DailySignalRun.snapshot_date == snapshot_date)
     stmt = stmt.order_by(
       DailySignalRun.snapshot_date.desc(),
-      DailySignalRun.completed_at.desc(),
       DailySignalRun.id.desc(),
     ).limit(1)
     result = await self.db.execute(stmt)
@@ -67,11 +93,11 @@ class DailySignalRunRepository(BaseRepository[DailySignalRun]):
   async def find_completed_dates(
     self, start_date: date, end_date: date
   ) -> List[date]:
-    """返回日期区间内至少有一次成功运行的交易日。"""
+    """只返回当前因子版本最后一次运行成功的交易日。"""
     result = await self.db.execute(
       select(DailySignalRun.snapshot_date)
       .where(
-        DailySignalRun.status == "success",
+        _latest_current_success(),
         DailySignalRun.snapshot_date >= start_date,
         DailySignalRun.snapshot_date <= end_date,
       )

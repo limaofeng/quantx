@@ -34,6 +34,11 @@ class InMemorySnapshotRepo:
       self.rows[key] = record
     return len(records)
 
+  async def invalidate_factor_scope(self, codes, snapshot_dates):
+    for (code, target), record in self.rows.items():
+      if code in codes and target in snapshot_dates:
+        record["calculation_version"] = None
+
   async def delete_older_than(self, cutoff_date):
     old_keys = [key for key in self.rows if key[1] < cutoff_date]
     for key in old_keys:
@@ -62,19 +67,124 @@ def daily_frame(last_close: float, end: str = "2026-05-20", periods: int = 40):
 
 
 def make_service(repository):
+  async def verified_history(frames):
+    return {
+      code: frame.sort_values("time").drop_duplicates("time", keep="last")
+      for code, frame in frames.items()
+    }
+
+  class VerifiedCalendar:
+    async def get_trading_calendar(self, market, start_date, end_date):
+      return list(pd.bdate_range(start_date, end_date).date)
+
   return DailyIndicatorSnapshotService(
     kline_repo_factory=lambda: repository,
     db_factory=fake_db_factory,
     snapshot_repo_cls=InMemorySnapshotRepo,
+    price_history_loader=verified_history,
+    trading_dates=VerifiedCalendar(),
   )
+
+
+@pytest.mark.parametrize("inactive_kind", ["no_volume", "suspended"])
+@pytest.mark.asyncio
+async def test_inactive_target_is_audited_skip_not_calculation_failure(inactive_kind):
+  InMemorySnapshotRepo.rows = {}
+  frame = daily_frame(10)
+  inactive = frame.copy()
+  if inactive_kind == "no_volume":
+    inactive.loc[inactive.index[-1], "volume"] = 0
+  else:
+    inactive["suspend_flag"] = 0
+    inactive.loc[inactive.index[-1], "suspend_flag"] = 1
+  service = make_service(
+    FakeKLineRepository({"000001.SZ": frame, "000002.SZ": inactive})
+  )
+  result = await service.compute_and_save_batch(
+    codes=["000001.SZ", "000002.SZ"],
+    snapshot_date=date(2026, 5, 20),
+    instrument_type_map={},
+    name_map={},
+  )
+  assert result["saved"] == 1
+  assert result["skipped"] == result["inactive_target"] == 1
+  assert result["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bad_ohlc_remains_failed_and_past_inactivity_invalidates_windows():
+  InMemorySnapshotRepo.rows = {}
+  active = daily_frame(10)
+  active.loc[active.index[-2], "volume"] = 0
+  bad = daily_frame(10)
+  bad.loc[bad.index[-1], "high"] = 1
+  service = make_service(FakeKLineRepository({"000001.SZ": active, "000002.SZ": bad}))
+  result = await service.compute_and_save_batch(
+    codes=["000001.SZ", "000002.SZ"],
+    snapshot_date=date(2026, 5, 20),
+    instrument_type_map={},
+    name_map={},
+  )
+  assert result["saved"] == result["failed"] == 1
+  assert result["inactive_target"] == 0
+  assert InMemorySnapshotRepo.rows[("000001.SZ", date(2026, 5, 20))]["ma5"] is None
+
+
+@pytest.mark.parametrize(
+  "changed_kind", ["no_volume", "suspended", "missing", "bad", "read_error"]
+)
+@pytest.mark.asyncio
+async def test_rerun_invalidates_old_factor_rows_only_in_requested_scope(changed_kind):
+  from quantx_domain.factors import FACTOR_VERSION
+
+  InMemorySnapshotRepo.rows = {}
+  repository = FakeKLineRepository(
+    {"000001.SZ": daily_frame(10), "000002.SZ": daily_frame(20)}
+  )
+  service = make_service(repository)
+  await service.compute_and_save_dates_batch(
+    codes=["000001.SZ", "000002.SZ"],
+    snapshot_dates=[date(2026, 5, 19), date(2026, 5, 20)],
+    instrument_type_map={},
+    name_map={},
+  )
+  changed = daily_frame(10)
+  if changed_kind == "no_volume":
+    changed.loc[changed.index[-1], "volume"] = 0
+  elif changed_kind == "suspended":
+    changed["suspend_flag"] = 0
+    changed.loc[changed.index[-1], "suspend_flag"] = 1
+  elif changed_kind == "missing":
+    changed = changed.iloc[:-1]
+  elif changed_kind == "bad":
+    changed.loc[changed.index[-1], "high"] = 1
+  else:
+    repository.error = RuntimeError("history unavailable")
+  repository.market_data["000001.SZ"] = changed
+  result = await service.compute_and_save_batch(
+    codes=["000001.SZ"],
+    snapshot_date=date(2026, 5, 20),
+    instrument_type_map={},
+    name_map={},
+  )
+  assert result["saved"] == 0
+  assert len(InMemorySnapshotRepo.rows) == 4  # retain evidence, do not delete
+  assert (
+    InMemorySnapshotRepo.rows[("000001.SZ", date(2026, 5, 20))]["calculation_version"]
+    is None
+  )
+  for key in [
+    ("000001.SZ", date(2026, 5, 19)),
+    ("000002.SZ", date(2026, 5, 19)),
+    ("000002.SZ", date(2026, 5, 20)),
+  ]:
+    assert InMemorySnapshotRepo.rows[key]["calculation_version"] == FACTOR_VERSION
 
 
 @pytest.mark.asyncio
 async def test_same_stock_same_day_upserts_one_snapshot():
   InMemorySnapshotRepo.rows = {}
-  repository = FakeKLineRepository(
-    {"000001.SZ": daily_frame(10)}
-  )
+  repository = FakeKLineRepository({"000001.SZ": daily_frame(10)})
   service = make_service(repository)
 
   first = await service.compute_and_save_batch(
@@ -94,18 +204,14 @@ async def test_same_stock_same_day_upserts_one_snapshot():
   assert first["saved"] == 1
   assert second["saved"] == 1
   assert len(InMemorySnapshotRepo.rows) == 1
-  snapshot = InMemorySnapshotRepo.rows[
-    ("000001.SZ", date(2026, 5, 19))
-  ]
+  snapshot = InMemorySnapshotRepo.rows[("000001.SZ", date(2026, 5, 19))]
   assert snapshot["current_price"] > 20
 
 
 @pytest.mark.asyncio
 async def test_multiple_target_dates_share_one_kline_read():
   InMemorySnapshotRepo.rows = {}
-  repository = FakeKLineRepository(
-    {"000001.SZ": daily_frame(10)}
-  )
+  repository = FakeKLineRepository({"000001.SZ": daily_frame(10)})
   service = make_service(repository)
 
   result = await service.compute_and_save_dates_batch(
@@ -141,14 +247,13 @@ async def test_long_history_is_read_in_non_overlapping_time_windows():
     name_map={"000001.SZ": "平安银行"},
   )
 
-  assert len(repository.calls) == 4
+  assert len(repository.calls) == 7
   assert all(
     current["end"] < following["start"]
     for current, following in zip(repository.calls, repository.calls[1:])
   )
   assert all(
-    call["end"] - call["start"] <= timedelta(days=90)
-    for call in repository.calls
+    call["end"] - call["start"] <= timedelta(days=90) for call in repository.calls
   )
   assert result["saved"] == 1
   assert result["systemic_failure"] is False
@@ -157,9 +262,7 @@ async def test_long_history_is_read_in_non_overlapping_time_windows():
 @pytest.mark.asyncio
 async def test_missing_target_day_does_not_reuse_previous_close():
   InMemorySnapshotRepo.rows = {}
-  repository = FakeKLineRepository(
-    {"000001.SZ": daily_frame(10, end="2026-05-19")}
-  )
+  repository = FakeKLineRepository({"000001.SZ": daily_frame(10, end="2026-05-19")})
   service = make_service(repository)
 
   result = await service.compute_and_save_batch(
@@ -177,9 +280,7 @@ async def test_missing_target_day_does_not_reuse_previous_close():
 
 @pytest.mark.asyncio
 async def test_batch_reports_influx_read_error_as_systemic_failure():
-  repository = FakeKLineRepository(
-    error=RuntimeError("influx unavailable")
-  )
+  repository = FakeKLineRepository(error=RuntimeError("influx unavailable"))
   service = make_service(repository)
 
   result = await service.compute_and_save_batch(

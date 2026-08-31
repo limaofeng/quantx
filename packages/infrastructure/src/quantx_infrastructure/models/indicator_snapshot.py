@@ -3,7 +3,7 @@
 每日收盘后由 Prefect Flow 批量计算写入，用于量化选股
 """
 
-from sqlalchemy import ARRAY, Column, Date, Float, Integer, String
+from sqlalchemy import ARRAY, Column, Date, Float, Index, Integer, String
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
 
@@ -12,10 +12,24 @@ class IndicatorSnapshot(Base, TimestampMixin):
   """技术指标日快照表（每标的每交易日一行）"""
 
   __tablename__ = "indicator_snapshots"
+  __table_args__ = (
+    Index(
+      "ix_indicator_snapshots_version_date", "calculation_version", "snapshot_date"
+    ),
+  )
 
   # ── 主键 ──────────────────────────────────────────
   code = Column(String(10), primary_key=True, comment="标的代码，如 000001.SZ")
   snapshot_date = Column(Date, primary_key=True, comment="快照日期（交易日）")
+  calculation_version = Column(
+    String(40),
+    nullable=True,
+    comment="日级因子计算版本；旧记录未标记，不得视为当前版本",
+  )
+  kdj_cross_up = Column(Float, comment="KDJ向上交叉，0/1；历史不足为空")
+  ma_cross_up = Column(Float, comment="MA5上穿MA10，0/1；历史不足为空")
+  boll_near_lower = Column(Float, comment="收盘价触及布林下轨附近，0/1")
+  boll_near_upper = Column(Float, comment="收盘价触及布林上轨附近，0/1")
 
   # ── 基本信息（冗余，省 JOIN）─────────────────────
   instrument_type = Column(String(10), comment="stock / etf")

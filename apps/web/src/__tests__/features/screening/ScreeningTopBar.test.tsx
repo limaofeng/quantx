@@ -30,6 +30,10 @@ function renderTopBar({
   const onOpenAdvancedData = vi.fn();
   render(
     <ScreeningTopBar
+      factors={[]}
+      onRetryCatalog={vi.fn()}
+      onOpenFactorReport={vi.fn()}
+      onOpenJointReport={vi.fn()}
       screeningCriteria={{ screeningMode: mode }}
       setScreeningCriteria={vi.fn()}
       availableIndustries={[]}
@@ -66,12 +70,22 @@ function renderTopBar({
 }
 
 describe('ScreeningTopBar snapshot recovery', () => {
+  it('does not describe scoped success as full-market readiness', () => {
+    renderTopBar({ latestRunStatus: 'scoped_success', isComplete: false });
+    expect(
+      screen.getByText('最近仅完成指定标的补算，不代表全市场快照就绪。')
+    ).toBeInTheDocument();
+    expect(screen.getByText('快照未完整就绪')).toBeInTheDocument();
+    expect(screen.queryByText('快照已就绪')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '立即补算' })).toBeEnabled();
+  });
+
   it('announces missing trading days and exposes both recovery levels', () => {
     const callbacks = renderTopBar();
 
-    expect(screen.getByText('缺少 5 个交易日')).toBeInTheDocument();
+    expect(screen.getByText('历史缺口 5 个交易日')).toBeInTheDocument();
     expect(
-      screen.getByText('已应用 0 条条件（全部为 AND）')
+      screen.getByText('结果对应已应用条件（全部为 AND）')
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '立即补算' }));
     fireEvent.click(screen.getByRole('button', { name: '高级补数' }));
@@ -82,7 +96,7 @@ describe('ScreeningTopBar snapshot recovery', () => {
   it('disables recovery while the run is active', () => {
     renderTopBar({ snapshotBackfillLoading: true });
 
-    expect(screen.getByRole('button', { name: '补算中' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '立即补算' })).toBeDisabled();
     expect(screen.getByText('Prefect · RUNNING')).toBeInTheDocument();
   });
 
@@ -103,14 +117,14 @@ describe('ScreeningTopBar snapshot recovery', () => {
     expect(screen.getByLabelText('量速')).toBeInTheDocument();
     expect(screen.getByLabelText('额速')).toBeInTheDocument();
     expect(screen.getByLabelText('近 5 分钟放量')).toBeInTheDocument();
-    expect(screen.getByLabelText('盘中换手')).toBeInTheDocument();
+    expect(screen.getByLabelText('盘中换手（%）')).toBeInTheDocument();
     expect(screen.getByLabelText('买盘失衡')).toBeInTheDocument();
     expect(screen.queryByLabelText('最小 ROE（TTM）')).not.toBeInTheDocument();
     expect(screen.queryByText('排除 ST')).not.toBeInTheDocument();
     expect(
-      screen.getByText('有未应用更改，点击运行后更新结果')
+      screen.getByText('有未应用更改；报告对应当前草稿，结果仍为上次筛选。')
     ).toBeInTheDocument();
-    expect(screen.getByText('当前草稿 · 0 条，运行后应用')).toBeInTheDocument();
+    expect(screen.getByText('当前草稿 · 应用后更新结果')).toBeInTheDocument();
   });
 
   it('keeps result columns on the active mode until the draft is run', () => {
@@ -125,6 +139,10 @@ describe('ScreeningTopBar snapshot recovery', () => {
       return (
         <div>
           <ScreeningTopBar
+            factors={[]}
+            onRetryCatalog={vi.fn()}
+            onOpenFactorReport={vi.fn()}
+            onOpenJointReport={vi.fn()}
             screeningCriteria={criteria}
             setScreeningCriteria={setCriteria}
             availableIndustries={[]}
@@ -168,9 +186,9 @@ describe('ScreeningTopBar snapshot recovery', () => {
     render(<DraftApplyHarness />);
     expect(screen.getByText('KDJ (9,3,3)')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByTestId('screening-mode-INTRADAY'));
+    fireEvent.click(screen.getByRole('button', { name: '盘中' }));
     expect(
-      screen.getByText('有未应用更改，点击运行后更新结果')
+      screen.getByText('有未应用更改；报告对应当前草稿，结果仍为上次筛选。')
     ).toBeInTheDocument();
     expect(screen.getByText('KDJ (9,3,3)')).toBeInTheDocument();
     expect(

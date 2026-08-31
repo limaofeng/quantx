@@ -983,10 +983,8 @@ class LimitUpRadarMonitor:
         self._snapshot_date = None
         self._loaded_at = now
         return
-      records, _ = await repo.screen_snapshots(
+      records = await repo.list_baseline_snapshots(
         snapshot_date=snapshot_date,
-        limit=20000,
-        offset=0,
         universe="stock_and_etf",
         exclude_st=True,
       )

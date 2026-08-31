@@ -37,6 +37,7 @@ import { cn } from '@/utils/cn';
 
 import {
   type ScreeningMode,
+  type FactorDefinition,
   type StockScreenSortDirection,
   type StockScreenSortField,
   type StockScreenSortState,
@@ -53,6 +54,7 @@ interface ScreeningResultsProps {
   onSortChange?: (sort: StockScreenSortState | null) => void;
   activeMode?: ScreeningMode;
   onRetry?: () => void;
+  selectedFactors?: FactorDefinition[];
 }
 
 interface ScreeningColumn {
@@ -92,13 +94,6 @@ const DAILY_COLUMNS: ScreeningColumn[] = [
     sortField: 'CHANGE_PCT',
     width: 120,
     widthClass: 'min-w-[120px] w-[120px]',
-  },
-  {
-    id: 'signals',
-    label: '信号',
-    sortField: 'SIGNAL_COUNT',
-    width: 340,
-    widthClass: 'min-w-[340px] w-[340px]',
   },
   {
     align: 'center',
@@ -334,9 +329,23 @@ export function ScreeningResults({
   onSortChange,
   activeMode = 'DAILY',
   onRetry,
+  selectedFactors = [],
 }: ScreeningResultsProps) {
   const isIntradayMode = activeMode === 'INTRADAY';
-  const columns = isIntradayMode ? INTRADAY_COLUMNS : DAILY_COLUMNS;
+  const columns = isIntradayMode
+    ? INTRADAY_COLUMNS
+    : [
+        ...DAILY_COLUMNS.slice(0, 3),
+        ...selectedFactors.map(factor => ({
+          id: `factor:${factor.id}`,
+          label: `${factor.label}${factor.unit ? ` (${factor.unit})` : ''}`,
+          sortField: factor.id,
+          width: 140,
+          widthClass: 'min-w-[140px] w-[140px]',
+          align: 'right' as const,
+        })),
+        ...DAILY_COLUMNS.slice(3),
+      ];
   const [warningsExpanded, setWarningsExpanded] = useState(false);
   const { toast } = useToast();
   const [, setLocation] = useLocation();
@@ -355,6 +364,10 @@ export function ScreeningResults({
   } = useStudioMenu<ScreeningColumn>();
 
   const displayData = results ?? [];
+  const showDailyEmptyState =
+    !isIntradayMode && !screeningLoading && !error && displayData.length === 0;
+  const isDailySnapshotUnavailable =
+    meta?.snapshotDate === null && !meta.isComplete;
   const loadedCount = meta?.loadedCount ?? displayData.length;
   const intradayStaleRowCount =
     meta?.intradayStaleRowCount ??
@@ -427,7 +440,9 @@ export function ScreeningResults({
     onSortChange?.(null);
   };
 
-  const formatPercent = (val: number, bold = false) => {
+  const formatPercent = (val: number | null, bold = false) => {
+    if (val === null || !Number.isFinite(val))
+      return <span className="text-slate-500">--</span>;
     const isPositive = val > 0;
     const isNegative = val < 0;
     const colorClass = financialToneClass(val);
@@ -450,7 +465,8 @@ export function ScreeningResults({
     );
   };
 
-  const formatPrice = (val: number) => `¥${val.toFixed(2)}`;
+  const formatPrice = (val: number | null) =>
+    val == null ? '--' : `¥${val.toFixed(2)}`;
 
   const formatOptionalPercent = (value?: number | null) => {
     if (value === null || value === undefined || !Number.isFinite(value)) {
@@ -544,48 +560,6 @@ export function ScreeningResults({
     return parts.join('\n');
   };
 
-  const getKDJColor = (val: number) => {
-    if (val < 20) return 'text-cyan-300 font-bold';
-    if (val > 80) return 'text-rose-400 font-bold';
-    return 'text-slate-500';
-  };
-
-  const getRSIColor = (val: number) => {
-    if (val < 30) return 'text-emerald-400 font-bold';
-    if (val > 70) return 'text-rose-400 font-bold';
-    return 'text-slate-500';
-  };
-
-  const getSignalBadgeClass = (signal: string) => {
-    const oversold = ['超跌反弹', '布林下轨反弹', 'RSI 超卖', '缩量调整'];
-    const momentum = [
-      '强势股',
-      '布林上轨突破',
-      'RSI 强势',
-      '放量突破',
-      '放量上涨',
-      '成交额放大',
-      '高换手',
-      '盘中放量',
-      '成交额加速',
-      '近5分钟放量',
-      '盘中高换手',
-      '买盘占优',
-      '成交活跃',
-    ];
-    const risk = ['放量下跌', '高位放量滞涨', '卖盘占优'];
-    const crossover = ['KDJ 金叉', '均线金叉'];
-    if (oversold.includes(signal))
-      return 'border-emerald-500/30 text-emerald-400 bg-emerald-500/10';
-    if (momentum.includes(signal))
-      return 'border-rose-500/30 text-rose-400 bg-rose-500/10';
-    if (risk.includes(signal))
-      return 'border-cyan-500/30 text-cyan-300 bg-cyan-500/10';
-    if (crossover.includes(signal))
-      return 'border-amber-500/30 text-amber-400 bg-amber-500/10';
-    return 'border-blue-500/30 text-blue-300 bg-blue-500/10';
-  };
-
   const getInstrumentTypeLabel = (instrumentType: string) => {
     return instrumentType?.toLowerCase() === 'etf' ? 'ETF' : '股票';
   };
@@ -607,36 +581,6 @@ export function ScreeningResults({
     );
   };
 
-  const renderSignalBadges = (signals: string[]) => {
-    const signalText = signals.join(' / ');
-
-    return (
-      <div
-        className="relative w-[316px] max-w-full overflow-hidden"
-        title={signalText}
-      >
-        <div
-          data-testid="screening-signal-strip"
-          aria-label={`命中信号：${signals.join('、')}`}
-          className="flex h-4 flex-nowrap items-center gap-1 overflow-x-auto overflow-y-hidden pr-5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        >
-          {signals.map((s, idx) => (
-            <Badge
-              key={`${s}-${idx}`}
-              variant="outline"
-              className={cn(
-                'h-4 shrink-0 whitespace-nowrap px-1.5 text-ui-caption font-normal leading-none',
-                getSignalBadgeClass(s)
-              )}
-            >
-              {s}
-            </Badge>
-          ))}
-        </div>
-      </div>
-    );
-  };
-
   const renderBodyCell = (
     stock: StockScreeningResult,
     column: ScreeningColumn,
@@ -644,7 +588,37 @@ export function ScreeningResults({
   ) => {
     const bodyStyle = table.getColumnStyle(column, 'body');
     const baseCellClass =
-      'h-[33px] overflow-hidden whitespace-nowrap border-b border-r border-white/5 px-3 py-1.5';
+      'overflow-hidden whitespace-nowrap border-b border-r border-white/5 px-3 py-1.5';
+
+    if (column.id.startsWith('factor:')) {
+      const factorId = column.id.slice(7);
+      const value = stock.factorValues?.find(
+        factor => factor.factorId === factorId
+      )?.value;
+      const definition = selectedFactors.find(factor => factor.id === factorId);
+      return (
+        <td
+          key={column.id}
+          style={bodyStyle}
+          className={cn(
+            baseCellClass,
+            'text-right font-mono text-slate-300',
+            table.getFrozenClass(column, 'bg-[#08101d]')
+          )}
+          title={
+            value == null ? '因子历史不足或输入缺失' : definition?.description
+          }
+        >
+          {value == null
+            ? '--'
+            : definition?.kind === 'binary'
+              ? value === 1
+                ? '成立 (1)'
+                : '不成立 (0)'
+              : value.toFixed(2)}
+        </td>
+      );
+    }
 
     switch (column.id) {
       case 'identity':
@@ -714,110 +688,40 @@ export function ScreeningResults({
             {formatPercent(stock.changePct, true)}
           </td>
         );
-      case 'signals':
+      case 'kdj':
+      case 'rsi': {
+        const values =
+          column.id === 'kdj'
+            ? [stock.k, stock.d, stock.j]
+            : [stock.rsi6, stock.rsi12, stock.rsi24];
         return (
           <td
             key={column.id}
             style={bodyStyle}
             className={cn(
               baseCellClass,
+              'text-center font-mono text-slate-300',
               table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
-            {renderSignalBadges(stock.matchedStrategies)}
+            {values.map(formatOptionalRatio).join(' / ')}
           </td>
         );
-      case 'kdj': {
-        const backgroundClass = stock.matchedStrategies.includes('KDJ 金叉')
-          ? 'bg-amber-500/5 ring-1 ring-inset ring-amber-500/20'
-          : 'bg-white/[0.02]';
-
+      }
+      case 'volumeRatio':
         return (
           <td
             key={column.id}
             style={bodyStyle}
             className={cn(
               baseCellClass,
-              'text-center',
-              backgroundClass,
-              table.getFrozenClass(column, backgroundClass)
+              'text-center font-mono text-slate-300',
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
-            <div className="flex items-center justify-center gap-3 text-ui-caption">
-              <span className={cn('leading-none', getKDJColor(stock.k))}>
-                {stock.k.toFixed(0)}
-              </span>
-              <span className="leading-none text-slate-500">
-                {stock.d.toFixed(0)}
-              </span>
-              <span className={cn('leading-none', getKDJColor(stock.j))}>
-                {stock.j.toFixed(0)}
-              </span>
-            </div>
+            {formatOptionalRatio(stock.volumeRatio)}
           </td>
         );
-      }
-      case 'rsi': {
-        const backgroundClass = stock.matchedStrategies.some(
-          s => s === 'RSI 超卖' || s === 'RSI 强势'
-        )
-          ? 'bg-rose-500/5 ring-1 ring-inset ring-rose-500/20'
-          : 'bg-white/[0.02]';
-
-        return (
-          <td
-            key={column.id}
-            style={bodyStyle}
-            className={cn(
-              baseCellClass,
-              'text-center',
-              backgroundClass,
-              table.getFrozenClass(column, backgroundClass)
-            )}
-          >
-            <div className="flex items-center justify-center gap-2 text-ui-caption">
-              <span className={getRSIColor(stock.rsi6)}>
-                {stock.rsi6.toFixed(0)}
-              </span>
-              <span className="text-slate-700">/</span>
-              <span className={getRSIColor(stock.rsi12)}>
-                {stock.rsi12.toFixed(0)}
-              </span>
-              <span className="text-slate-700">/</span>
-              <span className="text-slate-600">{stock.rsi24.toFixed(0)}</span>
-            </div>
-          </td>
-        );
-      }
-      case 'volumeRatio': {
-        const backgroundClass = stock.matchedStrategies.some(signal =>
-          ['放量突破', '放量上涨', '放量下跌', '盘中放量'].includes(signal)
-        )
-          ? 'bg-amber-500/5 ring-1 ring-inset ring-amber-500/20'
-          : 'bg-white/[0.02]';
-
-        return (
-          <td
-            key={column.id}
-            style={bodyStyle}
-            className={cn(
-              baseCellClass,
-              'text-center',
-              backgroundClass,
-              table.getFrozenClass(column, backgroundClass)
-            )}
-          >
-            <span
-              className={cn(
-                'font-medium',
-                stock.volumeRatio > 1.5 ? 'text-amber-500' : 'text-slate-500'
-              )}
-            >
-              {stock.volumeRatio.toFixed(1)}
-            </span>
-          </td>
-        );
-      }
       case 'amountRatio':
         return (
           <td
@@ -1028,10 +932,12 @@ export function ScreeningResults({
             <span
               className={cn(
                 'font-medium',
-                stock.priceDropPct < -20 ? 'text-market-down' : 'text-slate-300'
+                stock.priceDropPct != null && stock.priceDropPct < -20
+                  ? 'text-market-down'
+                  : 'text-slate-300'
               )}
             >
-              {stock.priceDropPct.toFixed(1)}%
+              {formatOptionalPercent(stock.priceDropPct)}
             </span>
           </td>
         );
@@ -1046,7 +952,7 @@ export function ScreeningResults({
               table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
-            {stock.daysSincePeak}天
+            {stock.daysSincePeak == null ? '--' : `${stock.daysSincePeak}天`}
           </td>
         );
       case 'roe': {
@@ -1142,7 +1048,7 @@ export function ScreeningResults({
           <td
             key={column.id}
             style={bodyStyle}
-            className="h-[33px] overflow-hidden whitespace-nowrap border-b border-white/5 px-2 py-1.5 text-right"
+            className="overflow-hidden whitespace-nowrap border-b border-white/5 px-2 py-1.5 text-right"
           >
             <div className="inline-flex items-center gap-1">
               <button
@@ -1178,7 +1084,7 @@ export function ScreeningResults({
       columnMenuTestIdPrefix="screening-sort-menu"
       defaultFrozenColumnIds={DEFAULT_FROZEN_COLUMN_IDS}
       emptyState={
-        error ? null : (
+        error || !isIntradayMode ? null : (
           <tr>
             <td
               colSpan={columns.length}
@@ -1193,7 +1099,7 @@ export function ScreeningResults({
                     未找到符合条件的股票
                   </p>
                   <p className="text-ui-label">
-                    请尝试放宽筛选条件，或减少选定的信号策略
+                    请尝试放宽筛选条件；缺失因子值不会当作零值参与筛选
                   </p>
                 </div>
               </div>
@@ -1207,7 +1113,7 @@ export function ScreeningResults({
       }
       loading={screeningLoading}
       loadingOverlay={
-        screeningLoading && (
+        screeningLoading ? (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-slate-950/45 backdrop-blur-[1px]">
             <div className="flex flex-col items-center">
               <div className="mb-2 h-8 w-8 animate-spin rounded-full border-2 border-slate-700 border-t-cyan-400 motion-reduce:animate-none" />
@@ -1216,7 +1122,31 @@ export function ScreeningResults({
               </p>
             </div>
           </div>
-        )
+        ) : showDailyEmptyState ? (
+          <div
+            role="status"
+            data-testid="screening-daily-empty-state"
+            className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-ui-panel text-center"
+          >
+            <div className="flex flex-col items-center justify-center space-y-3 text-slate-500">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800/50">
+                <Search className="h-6 w-6 text-slate-400" />
+              </div>
+              <div className="space-y-1">
+                <p className="font-bold text-slate-300">
+                  {isDailySnapshotUnavailable
+                    ? '因子快照尚未就绪'
+                    : '未找到符合条件的股票'}
+                </p>
+                <p className="text-ui-label">
+                  {isDailySnapshotUnavailable
+                    ? '完成日级因子快照重算后显示结果；旧版快照不参与当前筛选'
+                    : '请尝试放宽筛选条件；缺失因子值不会当作零值参与筛选'}
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : null
       }
       notice={
         hasNotice ? (
@@ -1498,7 +1428,8 @@ export function ScreeningResults({
                     : 'text-slate-400'
                 )}
               >
-                快照 {meta?.snapshotDate || '--'} ·{' '}
+                因子 {meta?.calculationVersion || '未就绪'} · 快照{' '}
+                {meta?.snapshotDate || '--'} ·{' '}
                 {meta?.hasStaleData ? '最近可用' : '新鲜'}
               </Badge>
               <Badge

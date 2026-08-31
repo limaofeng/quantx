@@ -28,6 +28,7 @@ import {
   VolumeComparisonPanel,
   WarningStrip,
 } from '../components';
+import { FactorStudyRun } from '../components/FactorStudyRun';
 import { useResearchRun } from '../hooks';
 import { isSmallSample, readResearchRunKey } from '../model';
 
@@ -125,6 +126,8 @@ export default function ResearchRunDetailPage() {
   }
 
   const quality = parsed.dataQuality;
+  if (summary.studyId === 'factor-study')
+    return <FactorStudyRun run={detail} />;
   const qualityWarnings = quality?.warnings || [];
   const artifactErrors = Array.from(
     new Set([

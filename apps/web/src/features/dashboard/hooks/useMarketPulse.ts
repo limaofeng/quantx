@@ -19,15 +19,15 @@ const MarketPulseQuery = gql(`
         universe: STOCK
         excludeSt: true
         requireFresh: false
-        fieldConditions: [
+        factorConditions: [
           {
-            field: "change_pct"
+            factorId: "change_pct"
             operator: "between"
             value: 0.000001
             valueTo: 100
           }
         ]
-        sort: { field: CHANGE_PCT, direction: DESC }
+        sort: { field: "change_pct", direction: DESC }
         limit: 10
         offset: 0
       }
@@ -51,15 +51,15 @@ const MarketPulseQuery = gql(`
         universe: STOCK
         excludeSt: true
         requireFresh: false
-        fieldConditions: [
+        factorConditions: [
           {
-            field: "change_pct"
+            factorId: "change_pct"
             operator: "between"
             value: -100
             valueTo: -0.000001
           }
         ]
-        sort: { field: CHANGE_PCT, direction: ASC }
+        sort: { field: "change_pct", direction: ASC }
         limit: 10
         offset: 0
       }
@@ -83,8 +83,8 @@ const MarketPulseQuery = gql(`
         universe: STOCK
         excludeSt: true
         requireFresh: false
-        fieldConditions: [
-          { field: "change_pct", operator: "eq", value: 0 }
+        factorConditions: [
+          { factorId: "change_pct", operator: "eq", value: 0 }
         ]
         limit: 1
         offset: 0

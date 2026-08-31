@@ -257,6 +257,7 @@ class ResearchRunDetailRecord:
   robustness: dict[str, list[dict[str, Any]]]
   warnings: list[str]
   artifact_errors: tuple[str, ...]
+  factor_reports: tuple[dict[str, Any], ...] = ()
 
 
 class ResearchArtifactStore:
@@ -276,10 +277,15 @@ class ResearchArtifactStore:
     limit: int = 50,
     offset: int = 0,
     status: str | None = None,
+    study_id: str | None = None,
   ) -> tuple[list[ResearchRunRecord], int]:
     _validate_pagination(limit=limit, offset=offset)
     normalized_status = _validate_status(status)
     records = self._discover_runs()
+    if study_id is not None:
+      if not _SEGMENT_PATTERN.fullmatch(study_id):
+        raise ResearchArtifactError("研究类型 ID 格式无效")
+      records = [item for item in records if item.study_id == study_id]
     if normalized_status is not None:
       records = [
         item
@@ -314,7 +320,7 @@ class ResearchArtifactStore:
     metrics = self._load_optional_json(
       summary.run_directory,
       "metrics.json",
-      max_bytes=_MAX_METRICS_BYTES,
+      max_bytes=self._metrics_limit(summary.study_id),
       required=summary.status == "success",
       errors=errors,
     )
@@ -322,6 +328,17 @@ class ResearchArtifactStore:
 
     safe_quality = _sanitize_data_quality(data_quality)
     safe_metrics = _sanitize_metrics(metrics)
+    factor_reports: list[dict[str, Any]] = []
+    if summary.study_id == "factor-study" and metrics is not None:
+      from quantx_api.factor_research_artifacts import (
+        project_factor_metrics,
+        report_reference,
+      )
+      try:
+        factor_metrics = project_factor_metrics(metrics)
+        factor_reports = [report_reference(summary, factor_metrics, report) for report in factor_metrics["reports"]]
+      except ResearchArtifactError as exc:
+        errors.append(f"因子报告不可用: {exc}")
     return ResearchRunDetailRecord(
       summary=summary,
       data_quality=safe_quality,
@@ -334,6 +351,7 @@ class ResearchArtifactStore:
       robustness=safe_metrics["robustness"],
       warnings=safe_metrics["warnings"],
       artifact_errors=tuple(errors),
+      factor_reports=tuple(factor_reports),
     )
 
   def _discover_runs(self) -> list[ResearchRunRecord]:
@@ -369,6 +387,10 @@ class ResearchArtifactStore:
         if record is not None:
           records.append(record)
     return records
+
+  @staticmethod
+  def _metrics_limit(study_id: str) -> int:
+    return 64 * 1024 * 1024 if study_id == "factor-study" else _MAX_METRICS_BYTES
 
   def _safe_directory(self, path: Path) -> bool:
     if not _SEGMENT_PATTERN.fullmatch(path.name):
@@ -407,7 +429,7 @@ class ResearchArtifactStore:
     has_metrics = self._safe_artifact_presence(
       run_directory,
       "metrics.json",
-      max_bytes=_MAX_METRICS_BYTES,
+      max_bytes=self._metrics_limit(study_id),
     )
     return ResearchRunRecord(
       key=key,

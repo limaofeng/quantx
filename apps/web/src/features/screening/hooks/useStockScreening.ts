@@ -7,10 +7,10 @@ import {
   type GetSectorsQuery,
   type GetSectorsQueryVariables,
   StockScreenSortDirection as GqlStockScreenSortDirection,
-  StockScreenSortField as GqlStockScreenSortField,
   StockScreenUniverse as GqlStockScreenUniverse,
 } from '@/generated/gql/graphql';
 
+import { validateFactorConditions } from '../factorModel';
 import {
   type ScreeningCriteria,
   type ScreeningMode,
@@ -31,8 +31,7 @@ const STOCK_SCREEN_QUERY = gql(`
       limit
       offset
       snapshotDate
-      scoreVersion
-      signalVersion
+      calculationVersion
       calculatedAt
       hasStaleData
       isComplete
@@ -99,14 +98,10 @@ const STOCK_SCREEN_QUERY = gql(`
         financialAsOfDate
         financialVerifiedAt
         financialQualityFlags
-        matchedStrategies
-        score
-        scoreVersion
-        signalVersion
+        calculationVersion
+        factorValues { factorId value }
         calculatedAt
         hasStaleData
-        signalMissing
-        missingSignals
       }
     }
   }
@@ -150,27 +145,16 @@ function normalizeIndustryName(name: string): string {
   return name.trim().replace(/\s+/g, '').replace(/加权$/, '');
 }
 
-const DEFAULT_CRITERIA: ScreeningCriteria = {
+export const DEFAULT_CRITERIA: ScreeningCriteria = {
   screeningMode: 'DAILY',
   universe: 'STOCK',
   excludeST: true,
-  minROE: 5,
-  minNetProfitGrowth: 5,
-  minYoYGrowth: 0,
-
-  enableOversoldRebound: false,
-  enableStrongTrend: false,
-  enableKDJGoldenCross: false,
-  enableVolumeBreakout: false,
-  enableMACrossover: false,
-  enableBollingerLowerRebound: false,
-  enableBollingerUpperBreakout: false,
-  enableRSIOversold: false,
-  enableRSIStrong: false,
-
-  rsiOversoldThreshold: 30,
-  rsiStrongThreshold: 70,
+  factorConditions: [],
   requireFresh: false,
+};
+export const DEFAULT_SORT: StockScreenSortState = {
+  field: 'CHANGE_PCT',
+  direction: 'DESC',
 };
 
 const FALLBACK_INDUSTRIES = [
@@ -186,39 +170,25 @@ const FALLBACK_INDUSTRIES = [
   '有色金属',
 ];
 
-const SIGNAL_BY_FLAG: Array<[keyof ScreeningCriteria, string, number]> = [
-  ['enableOversoldRebound', '超跌反弹', 2],
-  ['enableStrongTrend', '强势股', 2],
-  ['enableKDJGoldenCross', 'KDJ 金叉', 1.5],
-  ['enableVolumeBreakout', '放量突破', 1],
-  ['enableMACrossover', '均线金叉', 1.5],
-  ['enableBollingerLowerRebound', '布林下轨反弹', 1],
-  ['enableBollingerUpperBreakout', '布林上轨突破', 1],
-  ['enableRSIOversold', 'RSI 超卖', 1],
-  ['enableRSIStrong', 'RSI 强势', 1],
-];
-
-const SORT_FIELD_INPUT: Record<StockScreenSortField, GqlStockScreenSortField> =
-  {
-    AMOUNT_PERCENTILE_60: GqlStockScreenSortField.AmountPercentile_60,
-    AMOUNT_RATIO_20: GqlStockScreenSortField.AmountRatio_20,
-    CHANGE_PCT: GqlStockScreenSortField.ChangePct,
-    CODE: GqlStockScreenSortField.Code,
-    CURRENT_PRICE: GqlStockScreenSortField.CurrentPrice,
-    DAYS_SINCE_PEAK: GqlStockScreenSortField.DaysSincePeak,
-    KDJ_J: GqlStockScreenSortField.KdjJ,
-    NAME: GqlStockScreenSortField.Name,
-    NET_PROFIT_GROWTH: GqlStockScreenSortField.NetProfitGrowth,
-    PRICE_DROP_PCT: GqlStockScreenSortField.PriceDropPct,
-    ROE: GqlStockScreenSortField.Roe,
-    RSI12: GqlStockScreenSortField.Rsi12,
-    SIGNAL_COUNT: GqlStockScreenSortField.SignalCount,
-    TURNOVER_RATE: GqlStockScreenSortField.TurnoverRate,
-    VOLUME_PERCENTILE_60: GqlStockScreenSortField.VolumePercentile_60,
-    VOLUME_RATIO: GqlStockScreenSortField.VolumeRatio,
-    VOLUME_RATIO_5: GqlStockScreenSortField.VolumeRatio_5,
-    YOY_GROWTH: GqlStockScreenSortField.YoyGrowth,
-  };
+const SORT_FIELD_INPUT: Record<string, string> = {
+  AMOUNT_PERCENTILE_60: 'amount_percentile_60',
+  AMOUNT_RATIO_20: 'amount_ratio_20',
+  CHANGE_PCT: 'change_pct',
+  CODE: 'code',
+  CURRENT_PRICE: 'current_price',
+  DAYS_SINCE_PEAK: 'days_since_peak',
+  KDJ_J: 'kdj_j',
+  NAME: 'name',
+  NET_PROFIT_GROWTH: 'net_profit_growth_pct',
+  PRICE_DROP_PCT: 'price_drop_pct',
+  ROE: 'roe_ttm',
+  RSI12: 'rsi12',
+  TURNOVER_RATE: 'turnover_rate_pct',
+  VOLUME_PERCENTILE_60: 'volume_percentile_60',
+  VOLUME_RATIO: 'volume_ratio',
+  VOLUME_RATIO_5: 'volume_ratio_5',
+  YOY_GROWTH: 'revenue_growth_pct',
+};
 
 const SORT_DIRECTION_INPUT: Record<
   StockScreenSortDirection,
@@ -262,114 +232,36 @@ function activePositiveThreshold(value?: number) {
     : null;
 }
 
-function buildStockScreenInput(
+export function buildStockScreenInput(
   criteria: ScreeningCriteria,
   sort: StockScreenSortState | null
 ) {
   const universe = criteria.universe ?? 'STOCK';
-  const supportsStockOnlyFilters = universe === 'STOCK';
-  const activeFundamentalThreshold = activePositiveThreshold;
-  const signalConditions = SIGNAL_BY_FLAG.filter(
-    ([flag]) => criteria[flag]
-  ).map(([, signalCode]) => ({
-    signalCode,
-    required: true,
-  }));
-  const scoreRules = SIGNAL_BY_FLAG.map(([, signalCode, weight]) => ({
-    signalCode,
-    weight,
-  }));
-  const fieldConditions = [];
-
-  if (criteria.priceDropMin && criteria.priceDropMin > 0) {
-    fieldConditions.push({
-      field: 'price_drop_pct',
-      operator: 'lte',
-      value: -Math.abs(criteria.priceDropMin),
-    });
-  }
-  if (criteria.volumeRatioMin && criteria.volumeRatioMin > 0) {
-    fieldConditions.push({
-      field: 'volume_ratio',
-      operator: 'gte',
-      value: criteria.volumeRatioMin,
-    });
-  }
-  if (criteria.volumeRatioMax && criteria.volumeRatioMax > 0) {
-    fieldConditions.push({
-      field: 'volume_ratio',
-      operator: 'lte',
-      value: criteria.volumeRatioMax,
-    });
-  }
-  if (criteria.volumeRatio5Min && criteria.volumeRatio5Min > 0) {
-    fieldConditions.push({
-      field: 'volume_ratio_5',
-      operator: 'gte',
-      value: criteria.volumeRatio5Min,
-    });
-  }
-  if (criteria.amountRatioMin && criteria.amountRatioMin > 0) {
-    fieldConditions.push({
-      field: 'amount_ratio_20',
-      operator: 'gte',
-      value: criteria.amountRatioMin,
-    });
-  }
-  if (criteria.turnoverRateMin && criteria.turnoverRateMin > 0) {
-    fieldConditions.push({
-      field: 'turnover_rate_pct',
-      operator: 'gte',
-      value: criteria.turnoverRateMin,
-    });
-  }
-  if (criteria.rsiOversoldThreshold && criteria.enableRSIOversold) {
-    fieldConditions.push({
-      field: 'rsi12',
-      operator: 'lte',
-      value: criteria.rsiOversoldThreshold,
-    });
-  }
-  if (criteria.rsiStrongThreshold && criteria.enableRSIStrong) {
-    fieldConditions.push({
-      field: 'rsi12',
-      operator: 'gte',
-      value: criteria.rsiStrongThreshold,
-    });
-  }
-
+  const effectiveSort = sort ?? DEFAULT_SORT;
+  const validationError = validateFactorConditions(
+    criteria.factorConditions ?? []
+  );
+  if (validationError) throw new Error(validationError);
   return {
     includeIndustries:
-      supportsStockOnlyFilters && criteria.includeIndustries?.length
-        ? criteria.includeIndustries
-        : null,
+      universe === 'STOCK' ? (criteria.includeIndustries ?? []) : [],
     excludeIndustries:
-      supportsStockOnlyFilters && criteria.excludeIndustries?.length
-        ? criteria.excludeIndustries
-        : null,
-    signalConditions,
-    scoreRules,
-    fieldConditions,
+      universe === 'STOCK' ? (criteria.excludeIndustries ?? []) : [],
+    factorConditions: (criteria.factorConditions ?? []).map(condition => ({
+      factorId: condition.factorId,
+      operator: condition.operator,
+      value: condition.value!,
+      valueTo: condition.operator === 'between' ? condition.valueTo : null,
+    })),
     universe: UNIVERSE_INPUT[universe],
     excludeSt: criteria.excludeST !== false,
     requireFresh: Boolean(criteria.requireFresh),
-    sort: sort
-      ? {
-          field: SORT_FIELD_INPUT[sort.field],
-          direction: SORT_DIRECTION_INPUT[sort.direction],
-        }
-      : null,
+    sort: {
+      field: SORT_FIELD_INPUT[effectiveSort.field] ?? effectiveSort.field,
+      direction: SORT_DIRECTION_INPUT[effectiveSort.direction],
+    },
     limit: 200,
     offset: 0,
-    minRoe: supportsStockOnlyFilters
-      ? activeFundamentalThreshold(criteria.minROE)
-      : null,
-    minNetProfitGrowth: supportsStockOnlyFilters
-      ? activeFundamentalThreshold(criteria.minNetProfitGrowth)
-      : null,
-    minYoyGrowth: supportsStockOnlyFilters
-      ? activeFundamentalThreshold(criteria.minYoYGrowth)
-      : null,
   };
 }
 
@@ -433,8 +325,6 @@ function getSortValue(
       return stock.roe ?? 0;
     case 'RSI12':
       return stock.rsi12;
-    case 'SIGNAL_COUNT':
-      return stock.matchedStrategies.length;
     case 'TURNOVER_RATE':
       return stock.turnoverRatePct ?? stock.intradayTurnoverRatePct ?? 0;
     case 'VOLUME_PERCENTILE_60':
@@ -460,12 +350,20 @@ function sortResultsLocally(
   return [...results].sort((left, right) => {
     const leftValue = getSortValue(left, sort.field);
     const rightValue = getSortValue(right, sort.field);
+    if (leftValue == null && rightValue == null)
+      return left.code.localeCompare(right.code);
+    if (leftValue == null) return 1;
+    if (rightValue == null) return -1;
     if (typeof leftValue === 'string' || typeof rightValue === 'string') {
       return (
-        String(leftValue).localeCompare(String(rightValue), 'zh-CN') * direction
+        String(leftValue).localeCompare(String(rightValue), 'zh-CN') *
+          direction || left.code.localeCompare(right.code)
       );
     }
-    return ((leftValue as number) - (rightValue as number)) * direction;
+    return (
+      (leftValue - rightValue) * direction ||
+      left.code.localeCompare(right.code)
+    );
   });
 }
 
@@ -502,7 +400,7 @@ function mapIntradayItemToResult(
     ma5: item.currentPrice,
     ma10: item.currentPrice,
     ma20: item.currentPrice,
-    matchedStrategies: item.matchedSignals,
+    intradaySignals: item.matchedSignals,
     middleBand: item.currentPrice,
     name: item.name,
     openPrice: item.currentPrice,
@@ -512,8 +410,6 @@ function mapIntradayItemToResult(
     rsi6: 0,
     rsi12: 0,
     rsi24: 0,
-    score: item.volumePaceRatio,
-    signalMissing: false,
     upperBand: item.currentPrice,
     updatedAt: item.updatedAt ?? null,
     volume: item.volume,
@@ -526,7 +422,7 @@ export function useStockScreening() {
   const [screeningCriteria, setScreeningCriteria] =
     useState<ScreeningCriteria>(DEFAULT_CRITERIA);
   const [activeMode, setActiveMode] = useState<ScreeningMode>('DAILY');
-  const [sort, setSort] = useState<StockScreenSortState | null>(null);
+  const [sort, setSort] = useState<StockScreenSortState | null>(DEFAULT_SORT);
   const [queryInput, setQueryInput] = useState(() =>
     buildStockScreenInput(DEFAULT_CRITERIA, null)
   );
@@ -624,6 +520,33 @@ export function useStockScreening() {
     const items = stockScreenResult.data?.stockScreen?.items ?? [];
     return items.map(item => ({
       ...item,
+      currentPrice: item.currentPrice ?? null,
+      openPrice: item.openPrice ?? null,
+      changePct: item.changePct ?? null,
+      volume: item.volume ?? null,
+      volumeRatio: item.volumeRatio ?? null,
+      avgVolume20: item.avgVolume20 ?? null,
+      isBullish: item.isBullish ?? null,
+      peakPrice: item.peakPrice ?? null,
+      daysSincePeak: item.daysSincePeak ?? null,
+      priceDropPct: item.priceDropPct ?? null,
+      lowPrice: item.lowPrice ?? null,
+      daysSinceLow: item.daysSinceLow ?? null,
+      priceRisePct: item.priceRisePct ?? null,
+      consecutiveDownDays: item.consecutiveDownDays ?? null,
+      consecutiveDownPct: item.consecutiveDownPct ?? null,
+      k: item.k ?? null,
+      d: item.d ?? null,
+      j: item.j ?? null,
+      rsi6: item.rsi6 ?? null,
+      rsi12: item.rsi12 ?? null,
+      rsi24: item.rsi24 ?? null,
+      upperBand: item.upperBand ?? null,
+      middleBand: item.middleBand ?? null,
+      lowerBand: item.lowerBand ?? null,
+      ma5: item.ma5 ?? null,
+      ma10: item.ma10 ?? null,
+      ma20: item.ma20 ?? null,
       industry: item.industry ?? undefined,
       instrumentType: item.instrumentType || 'stock',
       ma5Prev: item.ma5Prev ?? undefined,
@@ -659,8 +582,7 @@ export function useStockScreening() {
         expectedSnapshotDate: null,
         missingSnapshotDates: [],
         latestRunStatus: null,
-        scoreVersion: 'intraday-volume',
-        signalVersion: 'xtquant-whole-quote',
+        calculationVersion: 'intraday-volume',
         calculatedAt: page?.updatedAt ?? null,
         hasStaleData: false,
         // Scanner availability is intentionally exposed separately; a running
@@ -680,13 +602,12 @@ export function useStockScreening() {
     return {
       total: page?.total ?? 0,
       loadedCount: page?.items?.length ?? 0,
-      snapshotDate: status?.latestSnapshotDate ?? page?.snapshotDate ?? null,
+      snapshotDate: page?.snapshotDate ?? null,
       expectedSnapshotDate: status?.expectedSnapshotDate ?? null,
       missingSnapshotDates: status?.missingSnapshotDates ?? [],
       latestRunStatus: status?.latestRunStatus ?? null,
-      scoreVersion: page?.scoreVersion,
-      signalVersion: page?.signalVersion,
-      calculatedAt: status?.latestCalculatedAt ?? page?.calculatedAt ?? null,
+      calculationVersion: page?.calculationVersion,
+      calculatedAt: page?.calculatedAt ?? null,
       hasStaleData: Boolean(page?.hasStaleData),
       isComplete: Boolean(status?.isComplete && page?.isComplete),
       warnings: Array.from(
@@ -717,14 +638,14 @@ export function useStockScreening() {
   };
 
   const applySort = (nextSort: StockScreenSortState | null) => {
-    setSort(nextSort);
+    setSort(nextSort ?? DEFAULT_SORT);
     setQueryInput(buildStockScreenInput(screeningCriteria, nextSort));
   };
 
   const resetCriteria = () => {
     setScreeningCriteria(DEFAULT_CRITERIA);
     setActiveMode('DAILY');
-    setSort(null);
+    setSort(DEFAULT_SORT);
     setQueryInput(buildStockScreenInput(DEFAULT_CRITERIA, null));
     setIntradayInput(buildIntradayVolumeScreenInput(DEFAULT_CRITERIA));
   };

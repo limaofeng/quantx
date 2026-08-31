@@ -8,13 +8,17 @@ import {
 
 import { parseResearchResult } from '../model';
 
-export function useResearchRuns(status: string | null) {
+export function useResearchRuns(
+  status: string | null,
+  studyId: string | null = null
+) {
   const [result, refresh] = useQuery({
     query: ResearchRunsDocument,
     variables: {
       limit: 100,
       offset: 0,
       status: status || null,
+      studyId,
     },
     requestPolicy: 'cache-and-network',
   });

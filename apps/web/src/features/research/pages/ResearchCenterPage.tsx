@@ -10,6 +10,14 @@ import { useState } from 'react';
 import { Link } from 'wouter';
 
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+
+import {
   ResearchEmptyState,
   ResearchErrorState,
   ResearchLoadingState,
@@ -34,6 +42,7 @@ export interface ResearchRunListItem {
 
 const STUDY_LABELS: Record<string, string> = {
   'volume-shock': '异常放量 × 价格位置',
+  'factor-study': '单因子与条件交集研究',
 };
 
 const FILTERS = [
@@ -69,7 +78,10 @@ function QualityBadge({ run }: { run: ResearchRunListItem }) {
       <span className="text-ui-caption font-bold text-amber-300">统计缺失</span>
     );
   }
-  if (isSmallSample(run.version, run.eventCount)) {
+  if (
+    run.studyId !== 'factor-study' &&
+    isSmallSample(run.version, run.eventCount)
+  ) {
     return (
       <span className="text-ui-caption font-bold text-amber-200">
         小样本验证
@@ -221,7 +233,11 @@ export function ResearchRunsView({
 
 export default function ResearchCenterPage() {
   const [status, setStatus] = useState<string | null>(null);
-  const { error, fetching, refresh, runs, total } = useResearchRuns(status);
+  const [studyId, setStudyId] = useState<string>('all');
+  const { error, fetching, refresh, runs, total } = useResearchRuns(
+    status,
+    studyId === 'all' ? null : studyId
+  );
 
   return (
     <main className="studio-workspace-surface flex h-full min-h-0 flex-col overflow-hidden">
@@ -235,6 +251,16 @@ export default function ResearchCenterPage() {
             查看最近 100 次离线因子研究的可复现结果、样本质量与统计检验。
           </p>
         </div>
+        <Select value={studyId} onValueChange={setStudyId}>
+          <SelectTrigger aria-label="研究类型" className="w-56">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部研究类型</SelectItem>
+            <SelectItem value="factor-study">单因子与条件交集研究</SelectItem>
+            <SelectItem value="volume-shock">异常放量 × 价格位置</SelectItem>
+          </SelectContent>
+        </Select>
         <div
           className="flex items-center gap-1"
           role="group"
@@ -269,7 +295,7 @@ export default function ResearchCenterPage() {
         </button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {error ? (
           <ResearchErrorState message={error.message} onRetry={refresh} />
         ) : (

@@ -42,21 +42,30 @@ def test_daily_market_sync_retries_durable_batches() -> None:
 
 
 def test_market_request_batch_size_respects_complete_record_budget() -> None:
-  assert market_flow._market_data_request_batch_size(
-    periods=["1d"],
-    start_time="20260828",
-    end_time="20260828",
-  ) == 300
-  assert market_flow._market_data_request_batch_size(
-    periods=["tick"],
-    start_time="20260828",
-    end_time="20260828",
-  ) == 24
-  assert market_flow._market_data_request_batch_size(
-    periods=["1m"],
-    start_time="20260801",
-    end_time="20260831",
-  ) == 53
+  assert (
+    market_flow._market_data_request_batch_size(
+      periods=["1d"],
+      start_time="20260828",
+      end_time="20260828",
+    )
+    == 300
+  )
+  assert (
+    market_flow._market_data_request_batch_size(
+      periods=["tick"],
+      start_time="20260828",
+      end_time="20260828",
+    )
+    == 24
+  )
+  assert (
+    market_flow._market_data_request_batch_size(
+      periods=["1m"],
+      start_time="20260801",
+      end_time="20260831",
+    )
+    == 53
+  )
 
 
 @pytest.mark.asyncio
@@ -89,6 +98,50 @@ async def test_explicit_snapshot_range_filters_weekend():
     date(2026, 7, 24),
     date(2026, 7, 27),
   ]
+
+
+@pytest.mark.parametrize(
+  ("codes", "expected"),
+  [
+    (["000001.SZ"], False),
+    (["000001.SZ", "600001.SH"], False),
+    (["510300.SH", "000001.SZ"], True),
+  ],
+)
+@pytest.mark.asyncio
+async def test_only_exact_full_snapshot_universe_certifies_readiness(
+  monkeypatch, codes, expected
+):
+  resolve = AsyncMock(return_value=[{"code": "000001.SZ"}, {"code": "510300.SH"}])
+  monkeypatch.setattr(indicator_flow, "resolve_instruments", resolve)
+  assert await indicator_flow._has_full_snapshot_scope(codes) is expected
+  assert resolve.await_args.args == (indicator_flow.DEFAULT_SNAPSHOT_SECTORS, None)
+
+
+@pytest.mark.parametrize(
+  ("saved", "failed", "full_scope", "expected"),
+  [
+    (0, 0, True, "failed"),
+    (1, 1, True, "partial_failure"),
+    (1, 0, False, "scoped_success"),
+    (1, 0, True, "success"),
+  ],
+)
+def test_partial_universe_success_is_not_global_snapshot_success(
+  saved, failed, full_scope, expected
+):
+  assert (
+    indicator_flow._run_status(saved, failed, full_scope=full_scope, missing_target=0)
+    == expected
+  )
+
+
+@pytest.mark.parametrize("full_scope", [True, False])
+def test_unknown_missing_target_cannot_certify_complete_snapshot(full_scope):
+  assert (
+    indicator_flow._run_status(10, 0, full_scope=full_scope, missing_target=1)
+    == "partial_failure"
+  )
 
 
 @pytest.mark.asyncio
@@ -183,10 +236,10 @@ async def test_market_sync_splits_universe_at_agent_request_limit(
   )
 
   assert request.await_count == 2
-  assert [
-    len(call.args[0]["stock_list"])
-    for call in request.await_args_list
-  ] == [300, 1]
+  assert [len(call.args[0]["stock_list"]) for call in request.await_args_list] == [
+    300,
+    1,
+  ]
   assert result["transfer"]["request_id"] is None
   assert result["transfer"]["request_ids"] == ["request-1", "request-2"]
   assert result["transfer"]["batch_count"] == 2
@@ -227,6 +280,7 @@ async def test_market_sync_keeps_7552_daily_symbols_at_26_durable_batches(
       "records_received": len(payload["stock_list"]),
       "records_saved": len(payload["stock_list"]),
     }
+
   monkeypatch.setattr(
     market_flow,
     "resolve_instruments",
@@ -244,9 +298,7 @@ async def test_market_sync_keeps_7552_daily_symbols_at_26_durable_batches(
 
   assert peak == 2
   assert sorted(scopes_by_offset) == [index * 300 for index in range(26)]
-  assert [
-    scopes_by_offset[index * 300] for index in range(26)
-  ] == [
+  assert [scopes_by_offset[index * 300] for index in range(26)] == [
     f"repair-7552:batch:{index:04d}" for index in range(1, 27)
   ]
   assert result["transfer"]["batch_count"] == 26
@@ -277,9 +329,10 @@ def test_market_sync_idempotency_scope_is_retry_stable_and_run_scoped(
   assert first == retry == "daily-market-data-sync-v1:flow-run-1"
   assert next_run == "daily-market-data-sync-v1:flow-run-2"
   assert next_run != first
-  assert market_flow._market_data_sync_idempotency_scope(
-    " explicit-campaign "
-  ) == "explicit-campaign"
+  assert (
+    market_flow._market_data_sync_idempotency_scope(" explicit-campaign ")
+    == "explicit-campaign"
+  )
 
 
 @pytest.mark.asyncio
@@ -409,9 +462,7 @@ async def test_market_sync_binds_explicit_live_agent(monkeypatch):
   )
 
   assert request.await_args.kwargs["agent_device_id"] == "device-live"
-  assert request.await_args.kwargs["idempotency_scope"].endswith(
-    ":batch:0001"
-  )
+  assert request.await_args.kwargs["idempotency_scope"].endswith(":batch:0001")
 
 
 @pytest.mark.asyncio
@@ -420,9 +471,7 @@ async def test_skip_download_only_runs_snapshot_flow(monkeypatch):
   indicator = AsyncMock(
     return_value={
       "status": "success",
-      "dates": [
-        {"snapshot_date": "2026-07-29", "status": "success"}
-      ],
+      "dates": [{"snapshot_date": "2026-07-29", "status": "success"}],
     }
   )
   monkeypatch.setattr(

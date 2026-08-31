@@ -1,0 +1,98 @@
+query StockFactorCatalog {
+  stockFactorCatalog {
+    id
+    label
+    category
+    description
+    unit
+    lookback
+    kind
+    operators
+    researchSupported
+    unsupportedReason
+    version
+  }
+}
+
+query StockFactorReportMatches($requests: [StockFactorReportRequestInput!]!) {
+  stockFactorReportMatches(requests: $requests) {
+    requestId
+    status
+    reason
+    configJson
+    command
+    blockers
+    reports {
+      runKey
+      matchStatus
+      matchReason
+      reportId
+      kind
+      factorIds
+      studyId
+      version
+      runId
+      completedAt
+      dataStart
+      dataEnd
+      configHash
+      warnings
+    }
+  }
+}
+
+query FactorReport($runKey: String!, $reportId: String!) {
+  factorReport(runKey: $runKey, reportId: $reportId) {
+    reference {
+      runKey
+      reportId
+      kind
+      factorIds
+      studyId
+      version
+      runId
+      completedAt
+      dataStart
+      dataEnd
+      configHash
+      warnings
+    }
+    factorVersion
+    universe
+    horizons
+    returnBases
+    conditions
+    definitions
+    coverage
+    distribution
+    configJson
+    warnings
+    artifactErrors
+    rows {
+      group
+      horizon
+      returnBasis
+      period
+      sampleCount
+      stockCount
+      dateCount
+      upRate
+      meanReturn
+      medianReturn
+      dateEqualUpRate
+      dateEqualMeanReturn
+      baselineUpRate
+      upRateLift
+      meanReturnLift
+      ciLow
+      ciHigh
+      pValue
+      qValue
+      inferenceStatus
+      meanCiLow
+      meanCiHigh
+      meanPValue
+      meanQValue
+    }
+  }
+}

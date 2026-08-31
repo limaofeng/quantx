@@ -1,5 +1,15 @@
-query ResearchRuns($limit: Int = 50, $offset: Int = 0, $status: String) {
-  researchRuns(limit: $limit, offset: $offset, status: $status) {
+query ResearchRuns(
+  $limit: Int = 50
+  $offset: Int = 0
+  $status: String
+  $studyId: String
+) {
+  researchRuns(
+    limit: $limit
+    offset: $offset
+    status: $status
+    studyId: $studyId
+  ) {
     items {
       key
       runId
@@ -37,6 +47,20 @@ query ResearchRun($key: String!) {
       artifactErrors
     }
     analysisSampleCount
+    factorReports {
+      runKey
+      reportId
+      kind
+      factorIds
+      studyId
+      version
+      runId
+      completedAt
+      dataStart
+      dataEnd
+      configHash
+      warnings
+    }
     dataQuality
     eventCurve
     interactionHeatmap

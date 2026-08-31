@@ -1,5 +1,5 @@
 import { Activity, Filter } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery } from 'urql';
 import { useLocation } from 'wouter';
 
@@ -9,8 +9,10 @@ import { useToast } from '@/hooks/use-toast';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn';
 
+import { FactorReportDrawer } from '../components/FactorReportDrawer';
 import { ScreeningResults } from '../components/ScreeningResults';
 import { ScreeningTopBar } from '../components/ScreeningTopBar';
+import { useFactorResearch } from '../hooks/useFactorResearch';
 import { useStockScreening } from '../hooks/useStockScreening';
 import { buildSnapshotBackfillParameters } from '../snapshotBackfill';
 import { type ScreeningCriteria } from '../types';
@@ -156,6 +158,14 @@ export default function StockScreeningPage() {
   // 2. Initial criteria state
   const [localCriteria, setLocalCriteria] =
     useState<ScreeningCriteria>(screeningCriteria);
+  const [reportFocus, setReportFocus] = useState<string | null>(null);
+  const factorResearch = useFactorResearch(
+    localCriteria,
+    reportFocus?.startsWith('single:') ? reportFocus.slice(7) : null
+  );
+  useEffect(() => {
+    if (localCriteria.screeningMode === 'INTRADAY') setReportFocus(null);
+  }, [localCriteria.screeningMode]);
 
   // Sync local criteria when global criteria resets/changes
   useEffect(() => {
@@ -194,19 +204,9 @@ export default function StockScreeningPage() {
     setSnapshotLogRunId(runId);
     setSnapshotRunState('PENDING');
   };
-  const activeStrategyCount = useMemo(() => {
-    return [
-      localCriteria.enableOversoldRebound,
-      localCriteria.enableStrongTrend,
-      localCriteria.enableKDJGoldenCross,
-      localCriteria.enableVolumeBreakout,
-      localCriteria.enableMACrossover,
-      localCriteria.enableBollingerLowerRebound,
-      localCriteria.enableBollingerUpperBreakout,
-      localCriteria.enableRSIOversold,
-      localCriteria.enableRSIStrong,
-    ].filter(Boolean).length;
-  }, [localCriteria]);
+  const activeFactorCount = new Set(
+    (localCriteria.factorConditions ?? []).map(condition => condition.factorId)
+  ).size;
   const activeIndustryCount = localCriteria.includeIndustries?.length || 0;
   const isIntradayMode = activeMode === 'INTRADAY';
   const loadedCount = meta.loadedCount ?? results?.length ?? 0;
@@ -253,6 +253,14 @@ export default function StockScreeningPage() {
               snapshotBackfillLoading={snapshotBackfillLoading}
               snapshotRunState={snapshotRunState}
               hasPendingChanges={hasPendingChanges}
+              factors={factorResearch.factors}
+              catalogLoading={factorResearch.catalogLoading}
+              catalogError={factorResearch.catalogError?.message}
+              onRetryCatalog={factorResearch.refresh}
+              onOpenFactorReport={factorId =>
+                setReportFocus(`single:${factorId}`)
+              }
+              onOpenJointReport={() => setReportFocus('joint')}
             />
 
             <div className="studio-workspace-surface relative min-h-0 min-w-0 overflow-hidden p-1">
@@ -265,9 +273,27 @@ export default function StockScreeningPage() {
                 activeMode={activeMode}
                 onRetry={retry}
                 error={error?.message}
+                selectedFactors={factorResearch.factors.filter(factor =>
+                  screeningCriteria.factorConditions?.some(
+                    condition => condition.factorId === factor.id
+                  )
+                )}
               />
             </div>
           </div>
+          <FactorReportDrawer
+            focus={reportFocus}
+            onClose={() => setReportFocus(null)}
+            criteria={localCriteria}
+            factors={factorResearch.factors}
+            match={factorResearch.matches.find(
+              match => match.requestId === reportFocus
+            )}
+            loading={factorResearch.loading}
+            error={factorResearch.error?.message}
+            onRefresh={factorResearch.refresh}
+            pending={hasPendingChanges}
+          />
         </div>
       }
       statusBarLeft={
@@ -296,7 +322,7 @@ export default function StockScreeningPage() {
           <>
             <span className="inline-flex items-center gap-2">
               <Filter className="h-3 w-3 text-blue-300" />
-              策略 {activeStrategyCount}
+              因子 {activeFactorCount}
             </span>
             <span className="text-slate-700">|</span>
             <span>行业 {activeIndustryCount}</span>

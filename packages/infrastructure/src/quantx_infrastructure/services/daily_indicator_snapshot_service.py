@@ -5,15 +5,17 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
-from quantx_domain.indicators.bollinger import BollingerBands
-from quantx_domain.indicators.ma import SMA
-from quantx_domain.indicators.rsi import RSI
+from quantx_domain.factors import FACTOR_VERSION, calculate_factor_frame
 
 from quantx_infrastructure.database.relational_connection import get_async_db
 from quantx_infrastructure.repositories.indicator_snapshot_repository import (
   IndicatorSnapshotRepository,
 )
 from quantx_infrastructure.repositories.kline_repository import KLineRepository
+from quantx_infrastructure.services.snapshot_price_history import (
+  load_snapshot_price_history,
+)
+from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
 logger = logging.getLogger(__name__)
 
@@ -40,131 +42,6 @@ def _time_windows(
     cursor = window_end + timedelta(microseconds=1)
 
 
-def compute_kdj_series(
-  highs: List[float],
-  lows: List[float],
-  closes: List[float],
-  period: int = 9,
-) -> List[Tuple[float, float, float]]:
-  """计算 KDJ (K, D, J) 完整序列。"""
-  result: List[Tuple[float, float, float]] = []
-  k_prev, d_prev = 50.0, 50.0
-
-  for i in range(len(closes)):
-    if i < period - 1:
-      result.append((50.0, 50.0, 50.0))
-      continue
-    window_high = max(highs[i - period + 1 : i + 1])
-    window_low = min(lows[i - period + 1 : i + 1])
-    denom = window_high - window_low
-    rsv = (closes[i] - window_low) / denom * 100 if denom > 0 else 50.0
-    k = 2 / 3 * k_prev + 1 / 3 * rsv
-    d = 2 / 3 * d_prev + 1 / 3 * k
-    j = 3 * k - 2 * d
-    result.append((k, d, j))
-    k_prev, d_prev = k, d
-
-  return result
-
-
-def detect_daily_signals(snap: Dict[str, Any]) -> List[str]:
-  """根据快照字段判断命中的量化信号。"""
-  signals: List[str] = []
-
-  def _f(key: str) -> Optional[float]:
-    return snap.get(key)
-
-  if (
-    (_f("price_drop_pct") or 0) < -20
-    and (_f("rsi12") or 100) < 40
-    and (_f("boll_percent_b") or 1) < 0.25
-  ):
-    signals.append("超跌反弹")
-
-  if (
-    (_f("boll_percent_b") or 0) > 0.8
-    and (_f("volume_ratio") or 0) > 1.2
-    and (_f("price_drop_pct") or -100) > -10
-  ):
-    signals.append("强势股")
-
-  k, d = _f("kdj_k"), _f("kdj_d")
-  k_p, d_p = _f("kdj_k_prev"), _f("kdj_d_prev")
-  if all(v is not None for v in (k, d, k_p, d_p)) and k > d and k_p <= d_p:
-    signals.append("KDJ 金叉")
-
-  if (_f("volume_ratio") or 0) > 1.5:
-    signals.append("放量突破")
-
-  if (_f("change_pct") or 0) > 0 and (_f("volume_ratio") or 0) >= 1.5:
-    signals.append("放量上涨")
-
-  if (_f("change_pct") or 0) < 0 and (_f("volume_ratio") or 0) >= 1.5:
-    signals.append("放量下跌")
-
-  if (_f("amount_ratio_20") or 0) >= 1.5:
-    signals.append("成交额放大")
-
-  if (_f("turnover_rate_pct") is not None) and (_f("turnover_rate_pct") or 0) >= 3.0:
-    signals.append("高换手")
-
-  if (_f("change_pct") or 0) < 0 and 0 < (_f("volume_ratio") or 0) <= 0.8:
-    signals.append("缩量调整")
-
-  if (
-    (_f("volume_ratio") or 0) >= 1.5
-    and (_f("boll_percent_b") or 0) >= 0.8
-    and -1.0 <= (_f("change_pct") or 0) <= 1.0
-  ):
-    signals.append("高位放量滞涨")
-
-  ma5, ma10 = _f("ma5"), _f("ma10")
-  ma5p, ma10p = _f("ma5_prev"), _f("ma10_prev")
-  if all(v is not None for v in (ma5, ma10, ma5p, ma10p)) and ma5 > ma10 and ma5p <= ma10p:
-    signals.append("均线金叉")
-
-  lower = _f("boll_lower")
-  price = _f("current_price")
-  if lower is not None and price is not None and price <= lower * 1.02:
-    signals.append("布林下轨反弹")
-
-  upper = _f("boll_upper")
-  if upper is not None and price is not None and price >= upper * 0.98:
-    signals.append("布林上轨突破")
-
-  if (_f("rsi12") or 100) <= 30:
-    signals.append("RSI 超卖")
-
-  if (_f("rsi12") or 0) >= 70:
-    signals.append("RSI 强势")
-
-  return signals
-
-
-def _average(values: List[float], fallback: float = 0.0) -> float:
-  cleaned = [float(value or 0.0) for value in values]
-  return sum(cleaned) / len(cleaned) if cleaned else fallback
-
-
-def _ratio(value: float, denominator: float, default: float = 1.0) -> float:
-  return value / denominator if denominator > 0 else default
-
-
-def _percentile_rank(values: List[float], current: float) -> float:
-  if not values:
-    return 0.0
-  below_or_equal = sum(1 for value in values if float(value or 0.0) <= current)
-  return below_or_equal / len(values) * 100
-
-
-def _turnover_rate_pct(volume: float, float_volume: Optional[float]) -> Optional[float]:
-  if not float_volume or float_volume <= 0:
-    return None
-  # xtdata A-share K-line volume is stored in this project as lots/hands.
-  traded_shares = volume * 100
-  return traded_shares / float_volume * 100
-
-
 def build_snapshot_record(
   code: str,
   instrument_type: str,
@@ -172,141 +49,46 @@ def build_snapshot_record(
   snapshot_date: date,
   df,
   float_volume: Optional[float] = None,
+  *,
+  trading_dates=None,
 ) -> Optional[Dict[str, Any]]:
-  """从单只标的日线 DataFrame 计算指标快照。"""
-  try:
-    closes = list(df["close"])
-    highs = list(df["high"])
-    lows = list(df["low"])
-    opens = list(df["open"])
-    volumes = list(df["volume"])
-    amounts = list(df["amount"]) if "amount" in df.columns else [0.0] * len(closes)
-
-    if len(closes) < 25:
-      return None
-
-    cur = closes[-1]
-    prev_close = closes[-2]
-    change_pct = (cur - prev_close) / prev_close * 100 if prev_close else 0.0
-
-    vol_today = volumes[-1]
-    recent_vols = volumes[-21:-1]
-    recent_vols_5 = volumes[-6:-1]
-    recent_amounts_20 = amounts[-21:-1]
-    avg_vol_20 = _average(recent_vols, vol_today)
-    avg_vol_5 = _average(recent_vols_5, vol_today)
-    avg_amount_20 = _average(recent_amounts_20, amounts[-1])
-    volume_ratio = _ratio(vol_today, avg_vol_20)
-    volume_ratio_5 = _ratio(vol_today, avg_vol_5)
-    amount_ratio_20 = _ratio(amounts[-1], avg_amount_20)
-    turnover_rate_pct = _turnover_rate_pct(vol_today, float_volume)
-    volume_percentile_60 = _percentile_rank(volumes[-60:], vol_today)
-    amount_percentile_60 = _percentile_rank(amounts[-60:], amounts[-1])
-
-    ma5 = SMA(5).calculate(closes)
-    ma10 = SMA(10).calculate(closes)
-    ma20 = SMA(20).calculate(closes)
-    ma5_prev = SMA(5).calculate(closes[:-1]) if len(closes) > 5 else None
-    ma10_prev = SMA(10).calculate(closes[:-1]) if len(closes) > 10 else None
-
-    rsi6 = RSI(6).calculate(closes)
-    rsi12 = RSI(12).calculate(closes)
-    rsi24 = RSI(24).calculate(closes)
-    rsi12_prev = RSI(12).calculate(closes[:-1]) if len(closes) > 13 else None
-
-    kdj_series = compute_kdj_series(highs, lows, closes, period=9)
-    k_cur, d_cur, j_cur = kdj_series[-1]
-    k_prev_val, d_prev_val, _ = (
-      kdj_series[-2] if len(kdj_series) >= 2 else (50.0, 50.0, 50.0)
-    )
-
-    boll_result = BollingerBands(period=20, multiplier=2.0).calculate(closes)
-    boll_upper = boll_result["upper"] if boll_result else None
-    boll_mid = boll_result["middle"] if boll_result else None
-    boll_lower = boll_result["lower"] if boll_result else None
-    boll_percent_b = boll_result["percent_b"] if boll_result else None
-    boll_bandwidth = boll_result["bandwidth"] if boll_result else None
-
-    h252 = highs[-252:] if len(highs) >= 252 else highs
-    l252 = lows[-252:] if len(lows) >= 252 else lows
-    peak_price = max(h252)
-    low_252 = min(l252)
-    price_drop_pct = (cur - peak_price) / peak_price * 100 if peak_price else 0.0
-    price_rise_pct = (cur - low_252) / low_252 * 100 if low_252 else 0.0
-    peak_idx = max(range(len(h252)), key=lambda i: h252[i])
-    low_idx = min(range(len(l252)), key=lambda i: l252[i])
-
-    consecutive_down_days = 0
-    for i in range(len(closes) - 2, max(len(closes) - 21, -1), -1):
-      if closes[i] >= closes[i + 1]:
-        break
-      consecutive_down_days += 1
-
-    consecutive_start = (
-      closes[-(consecutive_down_days + 1)] if consecutive_down_days > 0 else cur
-    )
-    consecutive_down_pct = (
-      (cur - consecutive_start) / consecutive_start * 100
-      if consecutive_down_days > 0 and consecutive_start > 0
-      else 0.0
-    )
-
-    snap: Dict[str, Any] = {
-      "code": code,
-      "snapshot_date": snapshot_date,
-      "instrument_type": instrument_type,
-      "name": name,
-      "current_price": round(cur, 4),
-      "open_price": round(opens[-1], 4),
-      "high_price": round(highs[-1], 4),
-      "low_price_day": round(lows[-1], 4),
-      "change_pct": round(change_pct, 4),
-      "volume": round(vol_today, 2),
-      "amount": round(amounts[-1], 2),
-      "volume_ratio": round(volume_ratio, 4),
-      "avg_volume_20": round(avg_vol_20, 2),
-      "avg_volume_5": round(avg_vol_5, 2),
-      "volume_ratio_5": round(volume_ratio_5, 4),
-      "avg_amount_20": round(avg_amount_20, 2),
-      "amount_ratio_20": round(amount_ratio_20, 4),
-      "turnover_rate_pct": round(turnover_rate_pct, 4)
-      if turnover_rate_pct is not None
-      else None,
-      "volume_percentile_60": round(volume_percentile_60, 4),
-      "amount_percentile_60": round(amount_percentile_60, 4),
-      "ma5": round(ma5, 4) if ma5 is not None else None,
-      "ma10": round(ma10, 4) if ma10 is not None else None,
-      "ma20": round(ma20, 4) if ma20 is not None else None,
-      "ma5_prev": round(ma5_prev, 4) if ma5_prev is not None else None,
-      "ma10_prev": round(ma10_prev, 4) if ma10_prev is not None else None,
-      "rsi6": round(rsi6, 4) if rsi6 is not None else None,
-      "rsi12": round(rsi12, 4) if rsi12 is not None else None,
-      "rsi24": round(rsi24, 4) if rsi24 is not None else None,
-      "rsi12_prev": round(rsi12_prev, 4) if rsi12_prev is not None else None,
-      "kdj_k": round(k_cur, 4),
-      "kdj_d": round(d_cur, 4),
-      "kdj_j": round(j_cur, 4),
-      "kdj_k_prev": round(k_prev_val, 4),
-      "kdj_d_prev": round(d_prev_val, 4),
-      "boll_upper": round(boll_upper, 4) if boll_upper is not None else None,
-      "boll_mid": round(boll_mid, 4) if boll_mid is not None else None,
-      "boll_lower": round(boll_lower, 4) if boll_lower is not None else None,
-      "boll_percent_b": round(boll_percent_b, 6) if boll_percent_b is not None else None,
-      "boll_bandwidth": round(boll_bandwidth, 6) if boll_bandwidth is not None else None,
-      "peak_price": round(peak_price, 4),
-      "price_drop_pct": round(price_drop_pct, 4),
-      "days_since_peak": int(len(h252) - 1 - peak_idx),
-      "low_price_252": round(low_252, 4),
-      "price_rise_pct": round(price_rise_pct, 4),
-      "days_since_low": int(len(l252) - 1 - low_idx),
-      "consecutive_down_days": consecutive_down_days,
-      "consecutive_down_pct": round(consecutive_down_pct, 4),
-    }
-    snap["matched_signals"] = detect_daily_signals(snap)
-    return snap
-  except Exception:
-    logger.exception("构建技术指标快照失败: %s", code)
+  """Build one versioned snapshot from validated point-in-time price history."""
+  if df.empty:
     return None
+  factors = calculate_factor_frame(df, trading_dates=trading_dates).iloc[-1]
+  if pd.isna(factors["current_price"]):
+    return None
+  current = df.iloc[-1]
+  snap: Dict[str, Any] = {
+    "code": code,
+    "instrument_type": instrument_type,
+    "name": name,
+    "snapshot_date": snapshot_date,
+    "calculation_version": FACTOR_VERSION,
+    "matched_signals": [],
+  }
+  for key, value in factors.items():
+    snap[key] = None if pd.isna(value) else float(value)
+  for source, target in (
+    ("open", "open_price"),
+    ("high", "high_price"),
+    ("low", "low_price_day"),
+  ):
+    value = current.get(f"raw_{source}", current.get(source))
+    snap[target] = None if value is None or pd.isna(value) else float(value)
+  for key in ("volume", "amount"):
+    value = current.get(key)
+    snap[key] = None if value is None or pd.isna(value) else float(value)
+  for key in ("days_since_peak", "days_since_low", "consecutive_down_days"):
+    if snap.get(key) is not None:
+      snap[key] = int(snap[key])
+  volume = snap.get("volume")
+  snap["turnover_rate_pct"] = (
+    round(volume * 100 / float_volume * 100, 8)
+    if volume is not None and float_volume is not None and float_volume > 0
+    else None
+  )
+  return snap
 
 
 class DailyIndicatorSnapshotService:
@@ -318,11 +100,15 @@ class DailyIndicatorSnapshotService:
     db_factory=get_async_db,
     snapshot_repo_cls=IndicatorSnapshotRepository,
     logger_=None,
+    price_history_loader=None,
+    trading_dates=None,
   ):
     self.kline_repo_factory = kline_repo_factory
     self.db_factory = db_factory
     self.snapshot_repo_cls = snapshot_repo_cls
     self.logger = logger_ or logger
+    self.price_history_loader = price_history_loader
+    self.trading_dates = trading_dates or TradingDateHelper()
 
   def _load_daily_batch(
     self,
@@ -343,8 +129,7 @@ class DailyIndicatorSnapshotService:
       )
       if not isinstance(window_data, dict):
         raise RuntimeError(
-          "批量读取 1d K 线返回格式异常: "
-          f"{type(window_data).__name__}"
+          f"批量读取 1d K 线返回格式异常: {type(window_data).__name__}"
         )
       for code, frame in window_data.items():
         if frame is None or getattr(frame, "empty", True):
@@ -363,7 +148,7 @@ class DailyIndicatorSnapshotService:
     instrument_type_map: Dict[str, str],
     name_map: Dict[str, str],
     float_volume_map: Optional[Dict[str, float]] = None,
-    lookback_days: int = 310,
+    lookback_days: int = 540,
   ) -> Dict[str, Any]:
     """计算并保存一批标的的单日日级技术指标快照。"""
     result = await self.compute_and_save_dates_batch(
@@ -382,6 +167,7 @@ class DailyIndicatorSnapshotService:
       "failed": day_result.get("failed", 0),
       "errors": result["errors"],
       "missing_target": day_result.get("missing_target", 0),
+      "inactive_target": day_result.get("inactive_target", 0),
       "insufficient_history": day_result.get("insufficient_history", 0),
       "systemic_failure": result["systemic_failure"],
     }
@@ -393,7 +179,7 @@ class DailyIndicatorSnapshotService:
     instrument_type_map: Dict[str, str],
     name_map: Dict[str, str],
     float_volume_map: Optional[Dict[str, float]] = None,
-    lookback_days: int = 310,
+    lookback_days: int = 540,
   ) -> Dict[str, Any]:
     """分段读取公共历史区间并生成一个代码批次的多个目标日快照。"""
     dates = sorted(set(snapshot_dates))
@@ -411,6 +197,7 @@ class DailyIndicatorSnapshotService:
           "skipped": 0,
           "failed": 0,
           "missing_target": 0,
+          "inactive_target": 0,
           "insufficient_history": 0,
         }
         for target in dates
@@ -420,6 +207,15 @@ class DailyIndicatorSnapshotService:
       return result
 
     try:
+      # A rerun can turn a formerly valid bar into missing/inactive/bad data.
+      # Remove its factor eligibility before any fallible work; only freshly
+      # successful records below regain the current version. Other scopes and
+      # the historical values themselves are retained.
+      async for db in self.db_factory():
+        await self.snapshot_repo_cls(db).invalidate_factor_scope(codes, dates)
+        break
+      else:
+        raise RuntimeError("日级因子重算未取得数据库连接")
       history_start = datetime.combine(
         dates[0] - timedelta(days=lookback_days),
         time.min,
@@ -430,8 +226,20 @@ class DailyIndicatorSnapshotService:
         start=history_start,
         end=history_end,
       )
+      if isinstance(market_data, dict):
+        if self.price_history_loader is not None:
+          market_data = await self.price_history_loader(market_data)
+        else:
+          market_data = await load_snapshot_price_history(market_data, self.db_factory)
+      market_calendar = await self.trading_dates.get_trading_calendar(
+        "SH",
+        start_date=history_start.date(),
+        end_date=history_end.date(),
+      )
+      if not market_calendar:
+        raise ValueError("日级因子计算缺少交易日历")
     except Exception as e:
-      msg = f"批量读取已入库 1d K 线失败: {e}"
+      msg = f"准备或读取日级因子历史数据失败: {e}"
       self.logger.exception(msg)
       result["failed"] = result["total"]
       result["systemic_failure"] = True
@@ -465,9 +273,7 @@ class DailyIndicatorSnapshotService:
           raise ValueError("K 线缺少 time 字段")
         frame["time"] = pd.to_datetime(frame["time"], errors="coerce", utc=True)
         frame = frame.dropna(subset=["time"]).sort_values("time")
-        frame["_trade_date"] = frame["time"].dt.tz_convert(
-          "Asia/Shanghai"
-        ).dt.date
+        frame["_trade_date"] = frame["time"].dt.tz_convert("Asia/Shanghai").dt.date
       except Exception as e:
         msg = f"{code} K 线格式异常: {e}"
         result["errors"].append(msg)
@@ -484,9 +290,14 @@ class DailyIndicatorSnapshotService:
         target_frame = frame.loc[frame["_trade_date"] <= target].drop(
           columns=["_trade_date"]
         )
-        if len(target_frame) < 25:
+        current = target_frame.iloc[-1]
+        volume = pd.to_numeric(current.get("volume"), errors="coerce")
+        suspended = pd.to_numeric(current.get("suspend_flag", 0), errors="coerce")
+        if (pd.notna(volume) and volume == 0) or (
+          pd.notna(suspended) and suspended == 1
+        ):
           day_result["skipped"] += 1
-          day_result["insufficient_history"] += 1
+          day_result["inactive_target"] += 1
           continue
         snap = build_snapshot_record(
           code=code,
@@ -495,6 +306,7 @@ class DailyIndicatorSnapshotService:
           snapshot_date=target,
           df=target_frame,
           float_volume=(float_volume_map or {}).get(code),
+          trading_dates=market_calendar,
         )
         if snap is None:
           day_result["failed"] += 1
@@ -509,6 +321,8 @@ class DailyIndicatorSnapshotService:
           repo = self.snapshot_repo_cls(db)
           await repo.bulk_upsert(records)
           break
+        else:
+          raise RuntimeError("日级因子写入未取得数据库连接")
       except Exception as e:
         msg = f"批量写入快照失败: {e}"
         self.logger.exception(msg)

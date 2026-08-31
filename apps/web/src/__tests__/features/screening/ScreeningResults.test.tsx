@@ -7,10 +7,13 @@ import { type StockScreeningResult } from '@/features/screening/types';
 const watchlistSaveItem = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ success: true, message: 'ok' })
 );
-const watchlistItems = vi.hoisted(() => [] as Array<{
-  groups: Array<{ id: string }>;
-  stockCode: string;
-}>);
+const watchlistItems = vi.hoisted(
+  () =>
+    [] as Array<{
+      groups: Array<{ id: string }>;
+      stockCode: string;
+    }>
+);
 
 vi.mock('@/features/watchlist/hooks', () => ({
   useWatchlistWorkspace: () => ({
@@ -40,13 +43,7 @@ const baseStock: StockScreeningResult = {
   ma5: 6.2,
   ma10: 6.1,
   ma20: 5.9,
-  matchedStrategies: [
-    '强势股',
-    'KDJ 金叉',
-    '放量突破',
-    '均线金叉',
-    '布林上轨突破',
-  ],
+  calculationVersion: 'daily-v1',
   middleBand: 6.1,
   name: '浙能电力',
   openPrice: 6.1,
@@ -56,13 +53,62 @@ const baseStock: StockScreeningResult = {
   rsi6: 91,
   rsi12: 59,
   rsi24: 61,
-  score: 6.5,
   upperBand: 6.7,
   volume: 2000,
   volumeRatio: 1.9,
 };
 
 describe('ScreeningResults', () => {
+  it('shows missing daily factors as unavailable and preserves a selected zero factor with canonical sorting', () => {
+    const onSortChange = vi.fn();
+    render(
+      <ScreeningResults
+        screeningLoading={false}
+        results={[
+          {
+            ...baseStock,
+            currentPrice: null,
+            changePct: null,
+            k: null,
+            d: null,
+            j: null,
+            rsi6: null,
+            rsi12: null,
+            rsi24: null,
+            volumeRatio: null,
+            priceDropPct: null,
+            daysSincePeak: null,
+            factorValues: [{ factorId: 'consecutive_down_days', value: 0 }],
+          },
+        ]}
+        selectedFactors={[
+          {
+            id: 'consecutive_down_days',
+            label: '连续下跌天数',
+            category: '动量',
+            description: '平盘中断',
+            unit: '日',
+            lookback: 21,
+            kind: 'numeric',
+            operators: ['gte'],
+            version: 'daily-v1',
+            researchSupported: true,
+          },
+        ]}
+        onSortChange={onSortChange}
+      />
+    );
+    expect(screen.getByText('0.00')).toBeInTheDocument();
+    expect(screen.getAllByText('--').length).toBeGreaterThan(3);
+    fireEvent.click(
+      screen.getByTestId('screening-sort-factor:consecutive_down_days')
+    );
+    expect(onSortChange).toHaveBeenLastCalledWith({
+      direction: 'DESC',
+      field: 'consecutive_down_days',
+    });
+  });
+
   function renderResults(onSortChange = vi.fn()) {
     render(
       <ScreeningResults
@@ -164,7 +210,7 @@ describe('ScreeningResults', () => {
       .getByTestId('screening-sort-price')
       .closest('th')!;
     const signalsHeader = screen
-      .getByTestId('screening-sort-signals')
+      .getByTestId('screening-sort-kdj')
       .closest('th')!;
 
     fireEvent.dragStart(priceHeader, { dataTransfer });
@@ -172,18 +218,16 @@ describe('ScreeningResults', () => {
     fireEvent.drop(signalsHeader, { dataTransfer });
 
     expect(getHeaderTexts().slice(0, 4).join('|')).toContain(
-      '代码 / 名称|涨跌幅|信号|价格'
+      '代码 / 名称|涨跌幅|KDJ (9,3,3)|价格'
     );
   });
 
-  it('keeps signal badges horizontal without a visible scrollbar', () => {
+  it('does not present counted signals as daily screening evidence', () => {
     renderResults();
-
-    const signalStrip = screen.getByTestId('screening-signal-strip');
-
-    expect(signalStrip.className).toContain('overflow-x-auto');
-    expect(signalStrip.className).toContain('[scrollbar-width:none]');
-    expect(signalStrip.className).toContain('[&::-webkit-scrollbar]:hidden');
+    expect(
+      screen.queryByTestId('screening-signal-strip')
+    ).not.toBeInTheDocument();
+    expect(getHeaderTexts().join('|')).not.toContain('信号');
   });
 
   it('supports horizontal drag scrolling from the table body', () => {
@@ -387,6 +431,88 @@ describe('ScreeningResults', () => {
     expect(headers.join('|')).not.toContain('ROE');
     expect(screen.getByText('数据延迟')).toBeInTheDocument();
     expect(screen.getByText('已加载 1 / 共 200')).toBeInTheDocument();
+  });
+
+  it('shows unavailable daily snapshots separately from no matches, outside the wide table', () => {
+    render(
+      <ScreeningResults
+        screeningLoading={false}
+        results={[]}
+        meta={{
+          hasStaleData: false,
+          isComplete: false,
+          snapshotDate: null,
+          missingSnapshotDates: ['2026-08-31'],
+          total: 0,
+          warnings: [],
+        }}
+      />
+    );
+
+    const emptyState = screen.getByTestId('screening-daily-empty-state');
+    expect(emptyState).toHaveTextContent('因子快照尚未就绪');
+    expect(emptyState).toHaveTextContent('完成日级因子快照重算后显示结果');
+    expect(screen.queryByText('未找到符合条件的股票')).not.toBeInTheDocument();
+    expect(emptyState.closest('table')).toBeNull();
+    expect(emptyState).toHaveClass('absolute', 'inset-0');
+    expect(emptyState.parentElement).toBe(
+      screen.getByTestId('screening-results-grid').parentElement
+    );
+  });
+
+  it('keeps no-match wording when a current-version daily snapshot exists despite historical gaps', () => {
+    render(
+      <ScreeningResults
+        screeningLoading={false}
+        results={[]}
+        meta={{
+          hasStaleData: false,
+          isComplete: false,
+          snapshotDate: '2026-08-31',
+          missingSnapshotDates: ['2026-08-28'],
+          total: 0,
+          warnings: [],
+        }}
+      />
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '未找到符合条件的股票'
+    );
+    expect(screen.queryByText('因子快照尚未就绪')).not.toBeInTheDocument();
+  });
+
+  it('does not change the intraday empty state based on daily snapshot metadata', () => {
+    render(
+      <ScreeningResults
+        activeMode="INTRADAY"
+        screeningLoading={false}
+        results={[]}
+        meta={{
+          hasStaleData: false,
+          isComplete: false,
+          snapshotDate: null,
+          missingSnapshotDates: [],
+          total: 0,
+          warnings: [],
+        }}
+      />
+    );
+
+    expect(screen.getByText('未找到符合条件的股票')).toBeInTheDocument();
+    expect(
+      screen.queryByTestId('screening-daily-empty-state')
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('因子快照尚未就绪')).not.toBeInTheDocument();
+  });
+
+  it('does not announce an empty daily result while screening is loading', () => {
+    render(<ScreeningResults screeningLoading results={[]} />);
+
+    expect(screen.getByText('正在执行筛选...')).toBeInTheDocument();
+    expect(
+      screen.queryByTestId('screening-daily-empty-state')
+    ).not.toBeInTheDocument();
   });
 
   it('keeps GraphQL errors distinct from a successful empty result', () => {

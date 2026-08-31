@@ -3,6 +3,11 @@ import math
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 
+from quantx_domain.factors import (
+  FACTOR_DEFINITIONS,
+  FACTOR_VERSION,
+  normalize_conditions,
+)
 from quantx_infrastructure.core.assistant_strategy_policy import (
   LIMIT_UP_BOARD_STRATEGY_CLASS_NAME,
   is_active_execution_run,
@@ -52,7 +57,8 @@ from ..types.stock_screening_types import (
   LimitUpRadarSummary,
   LimitUpResearchArtifactType,
   RoeQualityStatus,
-  SignalMeta,
+  StockFactorDefinition,
+  StockFactorValue,
   StockScreenFinancialHealth,
   StockScreenInput,
   StockScreenItem,
@@ -61,25 +67,6 @@ from ..types.stock_screening_types import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-SIGNAL_DEFINITIONS = [
-  ("超跌反弹", "超跌反弹", "technical", "回撤、RSI、布林位置联合低位信号", 252),
-  ("强势股", "强势股", "technical", "价格接近强势区间且量能放大", 252),
-  ("KDJ 金叉", "KDJ 金叉", "technical", "K值向上穿越D值", 9),
-  ("放量突破", "放量突破", "technical", "当日量比显著放大", 20),
-  ("放量上涨", "放量上涨", "technical", "上涨且20日量比显著放大", 20),
-  ("放量下跌", "放量下跌", "technical", "下跌且20日量比显著放大", 20),
-  ("成交额放大", "成交额放大", "technical", "当日成交额相对20日均额放大", 20),
-  ("高换手", "高换手", "technical", "按流通股本估算的换手率较高", 20),
-  ("缩量调整", "缩量调整", "technical", "下跌但成交量低于20日均量", 20),
-  ("高位放量滞涨", "高位放量滞涨", "technical", "高位区域放量但涨跌幅有限", 20),
-  ("均线金叉", "均线金叉", "technical", "MA5向上穿越MA10", 10),
-  ("布林下轨反弹", "布林下轨反弹", "technical", "价格靠近布林下轨", 20),
-  ("布林上轨突破", "布林上轨突破", "technical", "价格靠近布林上轨", 20),
-  ("RSI 超卖", "RSI 超卖", "technical", "RSI12低位", 24),
-  ("RSI 强势", "RSI 强势", "technical", "RSI12强势区间", 24),
-]
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -105,6 +92,11 @@ def _finite_optional_float(value: Any) -> Optional[float]:
 def _finite_int(value: Any, default: int = 0) -> int:
   number = _finite_optional_float(value)
   return default if number is None else int(number)
+
+
+def _finite_optional_int(value: Any) -> Optional[int]:
+  number = _finite_optional_float(value)
+  return None if number is None else int(number)
 
 
 def _instrument_type_value(value: Any) -> str:
@@ -172,22 +164,8 @@ class StockScreeningResolver:
   @staticmethod
   def _stale_snapshot_warning(expected_snapshot_date: date, today: date) -> str:
     if expected_snapshot_date == today:
-      return "今日快照未完成，结果来自最近可用信号快照"
-    return f"{expected_snapshot_date.isoformat()} 交易日快照未完成，结果来自最近可用信号快照"
-
-  @staticmethod
-  def _score(matched: List[str], weights: Dict[str, float], volume_ratio: float, price_drop_pct: float) -> float:
-    if weights:
-      return round(
-        sum(_finite_float(weights.get(signal, 0.0)) for signal in matched),
-        4,
-      )
-    volume_ratio = _finite_float(volume_ratio)
-    price_drop_pct = _finite_float(price_drop_pct)
-    signal_score = len(matched) * 10.0
-    volume_score = min(max(volume_ratio, 0.0), 3.0) * 2.0
-    drawdown_score = min(abs(price_drop_pct) / 10.0, 5.0) if price_drop_pct < 0 else 0.0
-    return round(signal_score + volume_score + drawdown_score, 4)
+      return "今日快照未完成，结果来自最近可用因子快照"
+    return f"{expected_snapshot_date.isoformat()} 交易日快照未完成，结果来自最近可用因子快照"
 
   @staticmethod
   async def stock_screen_snapshot_status(
@@ -203,45 +181,36 @@ class StockScreeningResolver:
     async for db in get_async_db():
       snapshot_repo = IndicatorSnapshotRepository(db)
       run_repo = DailySignalRunRepository(db)
-      latest_snapshot_date = await snapshot_repo.get_latest_snapshot_date()
+      latest_snapshot_date = await snapshot_repo.get_latest_factor_snapshot_date()
       latest_run = await run_repo.find_latest()
       successful_expected_run = await run_repo.find_latest_completed(
         expected_date
       )
 
+      # Existing old-version history defines the retained backfill window, but
+      # it must never count as available evidence for the current factor version.
+      retained_dates = set(await snapshot_repo.find_snapshot_dates(window_start, expected_date))
+      snapshot_dates = set(await snapshot_repo.find_factor_snapshot_dates(window_start, expected_date))
+      completed_dates = set(await run_repo.find_completed_dates(window_start, expected_date))
+      available_dates = snapshot_dates & completed_dates
+      history_anchor = min(retained_dates | snapshot_dates | {expected_date})
+      calendar_start = max(window_start, history_anchor)
+      if retained_dates or snapshot_dates:
+        helper = TradingDateHelper()
+        calendar_dates = await helper.get_trading_calendar(
+          "SH", start_date=calendar_start, end_date=expected_date,
+        )
+        trading_dates = sorted(set(calendar_dates) | {expected_date})
+      else:
+        trading_dates = [expected_date]
+      missing_dates = [target for target in trading_dates if target not in available_dates]
+
       if latest_snapshot_date is None:
-        missing_dates = [expected_date]
-        warnings.append("尚无可用日级信号快照")
+        warnings.append(f"因子版本 {FACTOR_VERSION} 快照尚未就绪；旧版本日期需要重算")
         latest_calculated_at = (
           latest_run.completed_at if latest_run is not None else None
         )
       else:
-        snapshot_dates = set(
-          await snapshot_repo.find_snapshot_dates(
-            window_start,
-            expected_date,
-          )
-        )
-        completed_dates = set(
-          await run_repo.find_completed_dates(
-            window_start,
-            expected_date,
-          )
-        )
-        available_dates = snapshot_dates & completed_dates
-        history_anchor = min(
-          available_dates or snapshot_dates or {expected_date}
-        )
-        calendar_start = max(window_start, min(history_anchor, expected_date))
-        helper = TradingDateHelper()
-        trading_dates = await helper.get_trading_calendar(
-          "SH",
-          start_date=calendar_start,
-          end_date=expected_date,
-        )
-        missing_dates = [
-          target for target in trading_dates if target not in available_dates
-        ]
         latest_snapshot_run = await run_repo.find_latest(latest_snapshot_date)
         latest_calculated_at = (
           latest_snapshot_run.completed_at
@@ -259,6 +228,8 @@ class StockScreeningResolver:
           "最近快照运行未成功: "
           f"{latest_run.warnings or latest_run.status}"
         )
+      if latest_run is not None and latest_run.status == "scoped_success":
+        warnings.append("最近日级因子快照仅完成指定标的范围，不代表全市场已就绪")
       if missing_dates:
         warnings.append(
           f"缺少 {len(missing_dates)} 个交易日快照"
@@ -272,6 +243,7 @@ class StockScreeningResolver:
           not missing_dates
           and latest_snapshot_date == expected_date
           and successful_expected_run is not None
+          and successful_expected_run.signal_version == FACTOR_VERSION
         ),
         latest_run_status=(
           latest_run.status if latest_run is not None else None
@@ -287,6 +259,11 @@ class StockScreeningResolver:
     limit = min(max(input.limit or 200, 1), 200)
     offset = min(max(input.offset or 0, 0), 200 * 1000)
     warnings: List[str] = []
+    factor_conditions = normalize_conditions([
+      {"factor_id": item.factor_id, "operator": item.operator,
+       "value": item.value, "value_to": item.value_to}
+      for item in input.factor_conditions or []
+    ])
 
     async for db in get_async_db():
       snapshot_repo = IndicatorSnapshotRepository(db)
@@ -297,7 +274,9 @@ class StockScreeningResolver:
       run = await run_repo.find_latest_completed(
         expected_snapshot_date if input.require_fresh else None
       )
-      snapshot_date = run.snapshot_date if run else await snapshot_repo.get_latest_snapshot_date()
+      if run is not None and run.signal_version != FACTOR_VERSION:
+        run = None
+      snapshot_date = run.snapshot_date if run else await snapshot_repo.get_latest_factor_snapshot_date()
       if run is not None:
         latest_run = run
       elif snapshot_date is not None:
@@ -305,11 +284,14 @@ class StockScreeningResolver:
       else:
         latest_run = await run_repo.find_latest()
 
+      if latest_run is not None and latest_run.status == "scoped_success":
+        warnings.append("最近日级因子快照仅完成指定标的范围，不代表全市场已就绪")
+
       if input.require_fresh and (
         run is None or snapshot_date != expected_snapshot_date
       ):
         warnings.append(
-          f"{expected_snapshot_date.isoformat()} 交易日信号快照尚未完成，"
+          f"{expected_snapshot_date.isoformat()} 交易日因子快照尚未完成，"
           "requireFresh=true 时不返回上次快照结果"
         )
         return StockScreenPage(
@@ -318,8 +300,7 @@ class StockScreeningResolver:
           limit=limit,
           offset=offset,
           snapshot_date=snapshot_date,
-          score_version="score-v1",
-          signal_version="daily-signal-v2",
+          calculation_version=FACTOR_VERSION,
           calculated_at=None,
           has_stale_data=True,
           is_complete=False,
@@ -329,18 +310,17 @@ class StockScreeningResolver:
       if snapshot_date is None:
         if latest_run and latest_run.status in {"failed", "partial_failure"}:
           warnings.append(
-            f"最近日级信号快照运行未成功: {latest_run.warnings or latest_run.status}"
+            f"最近日级因子快照运行未成功: {latest_run.warnings or latest_run.status}"
           )
         if not warnings:
-          warnings.append("尚无可用日级信号快照")
+          warnings.append(f"因子版本 {FACTOR_VERSION} 快照尚未就绪，请执行日级快照重算")
         return StockScreenPage(
           items=[],
           total=0,
           limit=limit,
           offset=offset,
           snapshot_date=None,
-          score_version="score-v1",
-          signal_version="daily-signal-v2",
+          calculation_version=FACTOR_VERSION,
           calculated_at=None,
           has_stale_data=True,
           is_complete=False,
@@ -349,8 +329,6 @@ class StockScreeningResolver:
 
       metadata_run = latest_run if latest_run and latest_run.snapshot_date == snapshot_date else run
       calculated_at = metadata_run.completed_at if metadata_run else await snapshot_repo.get_latest_calculated_at(snapshot_date)
-      signal_version = metadata_run.signal_version if metadata_run else f"indicator-snapshot:{snapshot_date.isoformat()}"
-      score_version = metadata_run.score_version if metadata_run else "score-v1"
       has_stale_data = snapshot_date != expected_snapshot_date
       if has_stale_data:
         warnings.append(
@@ -360,41 +338,25 @@ class StockScreeningResolver:
           )
         )
       if metadata_run is None:
-        warnings.append("未找到信号运行元信息，已回退到快照更新时间")
+        warnings.append("未找到因子运行元信息，已回退到快照更新时间")
       elif metadata_run.status == "partial_failure":
-        warnings.append(f"日级信号快照部分完成: {metadata_run.warnings or '部分标的未成功'}")
+        warnings.append(f"日级因子快照部分完成: {metadata_run.warnings or '部分标的未成功'}")
       elif metadata_run.status == "failed":
-        warnings.append(f"最近日级信号快照运行失败: {metadata_run.warnings or '未保存任何快照'}")
-      required_signals = [
-        item.signal_code for item in input.signal_conditions or [] if item.required
-      ]
-      field_conditions = [
-        {
-          "field": item.field,
-          "operator": item.operator,
-          "value": item.value,
-          "value_to": item.value_to,
-        }
-        for item in input.field_conditions or []
-      ]
+        warnings.append(f"最近日级因子快照运行失败: {metadata_run.warnings or '未保存任何快照'}")
       sort = (
         {
-          "field": input.sort.field.value,
+          "field": input.sort.field,
           "direction": input.sort.direction.value,
         }
         if input.sort
         else None
       )
-      records, total = await snapshot_repo.screen_snapshots(
+      records, total = await snapshot_repo.screen_factor_snapshots(
         snapshot_date=snapshot_date,
-        signal_codes=required_signals,
-        field_conditions=field_conditions,
+        factor_conditions=factor_conditions,
         include_industries=input.include_industries,
         exclude_industries=input.exclude_industries,
         sort=sort,
-        min_roe=input.min_roe,
-        min_net_profit_growth=input.min_net_profit_growth,
-        min_yoy_growth=input.min_yoy_growth,
         limit=limit,
         offset=offset,
         universe=input.universe.value,
@@ -443,12 +405,8 @@ class StockScreeningResolver:
         ),
       )
       financial_filter_active = any(
-        value is not None
-        for value in [
-          input.min_roe,
-          input.min_net_profit_growth,
-          input.min_yoy_growth,
-        ]
+        item["factor_id"] in {"roe_ttm", "net_profit_growth_pct", "revenue_growth_pct"}
+        for item in factor_conditions
       )
       if financial_filter_active:
         if financial_health_data["status"] != "SUCCESS":
@@ -470,22 +428,22 @@ class StockScreeningResolver:
         if hasattr(snapshot_repo, "find_instrument_types_by_codes")
         else {}
       )
-      weights = {item.signal_code: item.weight for item in input.score_rules or []}
 
       items: List[StockScreenItem] = []
       for record in records:
-        matched = list(record.matched_signals or [])
-        missing = [signal for signal in required_signals if signal not in matched]
-        score = StockScreeningResolver._score(
-          matched,
-          weights,
-          record.volume_ratio,
-          record.price_drop_pct,
-        )
-        current_price = _finite_float(record.current_price)
-        open_price = _finite_float(record.open_price)
+        current_price = _finite_optional_float(record.current_price)
+        open_price = _finite_optional_float(record.open_price)
         financial_metric = getattr(record, "financial_metric", None)
         financial_audit = getattr(record, "financial_audit", None)
+        growth_selectable = bool(getattr(record, "financial_growth_selectable", False))
+        net_profit_growth = (
+          _finite_optional_float(getattr(financial_metric, "net_profit_quarter_growth_pct", None))
+          if growth_selectable else None
+        )
+        revenue_growth = (
+          _finite_optional_float(getattr(financial_metric, "revenue_quarter_growth_pct", None))
+          if growth_selectable else None
+        )
         raw_roe_quality_status = getattr(
           record,
           "roe_quality_status",
@@ -506,44 +464,44 @@ class StockScreeningResolver:
             ),
             current_price=current_price,
             open_price=open_price,
-            change_pct=_finite_float(record.change_pct),
-            volume=_finite_float(record.volume),
-            volume_ratio=_finite_float(record.volume_ratio),
-            avg_volume_20=_finite_float(record.avg_volume_20),
-            avg_volume_5=_finite_float(getattr(record, "avg_volume_5", None)),
-            volume_ratio_5=_finite_float(getattr(record, "volume_ratio_5", None)),
-            avg_amount_20=_finite_float(getattr(record, "avg_amount_20", None)),
-            amount_ratio_20=_finite_float(getattr(record, "amount_ratio_20", None)),
+            change_pct=_finite_optional_float(record.change_pct),
+            volume=_finite_optional_float(record.volume),
+            volume_ratio=_finite_optional_float(record.volume_ratio),
+            avg_volume_20=_finite_optional_float(record.avg_volume_20),
+            avg_volume_5=_finite_optional_float(getattr(record, "avg_volume_5", None)),
+            volume_ratio_5=_finite_optional_float(getattr(record, "volume_ratio_5", None)),
+            avg_amount_20=_finite_optional_float(getattr(record, "avg_amount_20", None)),
+            amount_ratio_20=_finite_optional_float(getattr(record, "amount_ratio_20", None)),
             turnover_rate_pct=_finite_optional_float(
               getattr(record, "turnover_rate_pct", None)
             ),
-            volume_percentile_60=_finite_float(
+            volume_percentile_60=_finite_optional_float(
               getattr(record, "volume_percentile_60", None)
             ),
-            amount_percentile_60=_finite_float(
+            amount_percentile_60=_finite_optional_float(
               getattr(record, "amount_percentile_60", None)
             ),
-            is_bullish=current_price > open_price,
-            peak_price=_finite_float(record.peak_price),
-            days_since_peak=_finite_int(record.days_since_peak),
-            price_drop_pct=_finite_float(record.price_drop_pct),
-            low_price=_finite_float(record.low_price_252),
-            days_since_low=_finite_int(record.days_since_low),
-            price_rise_pct=_finite_float(record.price_rise_pct),
-            consecutive_down_days=_finite_int(record.consecutive_down_days),
-            consecutive_down_pct=_finite_float(record.consecutive_down_pct),
-            k=_finite_float(record.kdj_k),
-            d=_finite_float(record.kdj_d),
-            j=_finite_float(record.kdj_j),
-            rsi6=_finite_float(record.rsi6),
-            rsi12=_finite_float(record.rsi12),
-            rsi24=_finite_float(record.rsi24),
-            upper_band=_finite_float(record.boll_upper),
-            middle_band=_finite_float(record.boll_mid),
-            lower_band=_finite_float(record.boll_lower),
-            ma5=_finite_float(record.ma5),
-            ma10=_finite_float(record.ma10),
-            ma20=_finite_float(record.ma20),
+            is_bullish=(current_price > open_price if current_price is not None and open_price is not None else None),
+            peak_price=_finite_optional_float(record.peak_price),
+            days_since_peak=_finite_optional_int(record.days_since_peak),
+            price_drop_pct=_finite_optional_float(record.price_drop_pct),
+            low_price=_finite_optional_float(record.low_price_252),
+            days_since_low=_finite_optional_int(record.days_since_low),
+            price_rise_pct=_finite_optional_float(record.price_rise_pct),
+            consecutive_down_days=_finite_optional_int(record.consecutive_down_days),
+            consecutive_down_pct=_finite_optional_float(record.consecutive_down_pct),
+            k=_finite_optional_float(record.kdj_k),
+            d=_finite_optional_float(record.kdj_d),
+            j=_finite_optional_float(record.kdj_j),
+            rsi6=_finite_optional_float(record.rsi6),
+            rsi12=_finite_optional_float(record.rsi12),
+            rsi24=_finite_optional_float(record.rsi24),
+            upper_band=_finite_optional_float(record.boll_upper),
+            middle_band=_finite_optional_float(record.boll_mid),
+            lower_band=_finite_optional_float(record.boll_lower),
+            ma5=_finite_optional_float(record.ma5),
+            ma10=_finite_optional_float(record.ma10),
+            ma20=_finite_optional_float(record.ma20),
             ma5_prev=_finite_optional_float(record.ma5_prev),
             ma10_prev=_finite_optional_float(record.ma10_prev),
             roe=(
@@ -552,12 +510,8 @@ class StockScreeningResolver:
               else None
             ),
             roe_quality_status=roe_quality_status,
-            net_profit_growth=_finite_optional_float(
-              getattr(financial_metric, "net_profit_quarter_growth_pct", None)
-            ),
-            yoy_growth=_finite_optional_float(
-              getattr(financial_metric, "revenue_quarter_growth_pct", None)
-            ),
+            net_profit_growth=net_profit_growth,
+            yoy_growth=revenue_growth,
             net_profit_accum_growth=_finite_optional_float(
               getattr(financial_metric, "net_profit_growth_pct", None)
             ),
@@ -571,33 +525,42 @@ class StockScreeningResolver:
             financial_quality_flags=list(
               getattr(record, "roe_quality_flags", None) or []
             ),
-            matched_strategies=matched,
-            score=score,
-            score_version=score_version,
-            signal_version=signal_version,
+            factor_values=[
+              StockFactorValue(
+                factor_id=definition.id,
+                value=_finite_optional_float(
+                  (getattr(financial_metric, "roe_ttm", None)
+                   if roe_quality_status is RoeQualityStatus.VALID else None)
+                  if definition.id == "roe_ttm"
+                  else net_profit_growth
+                  if definition.id == "net_profit_growth_pct"
+                  else revenue_growth
+                  if definition.id == "revenue_growth_pct"
+                  else getattr(record, definition.id, None)
+                ),
+              )
+              for definition in FACTOR_DEFINITIONS
+            ],
+            calculation_version=FACTOR_VERSION,
             calculated_at=calculated_at,
             has_stale_data=has_stale_data,
-            signal_missing=bool(missing),
-            missing_signals=missing,
           )
         )
 
-      if sort is None:
-        items.sort(key=lambda item: (item.score, item.change_pct), reverse=True)
       return StockScreenPage(
         items=items,
         total=total,
         limit=limit,
         offset=offset,
         snapshot_date=snapshot_date,
-        score_version=score_version,
-        signal_version=signal_version,
+        calculation_version=FACTOR_VERSION,
         calculated_at=calculated_at,
         has_stale_data=has_stale_data,
         is_complete=(
           not has_stale_data
           and metadata_run is not None
           and metadata_run.status == "success"
+          and metadata_run.signal_version == FACTOR_VERSION
         ),
         warnings=warnings,
         financial_health=financial_health,
@@ -1068,36 +1031,14 @@ class StockScreeningResolver:
     return []
 
   @staticmethod
-  async def stock_signal_snapshot_meta() -> List[SignalMeta]:
-    async for db in get_async_db():
-      snapshot_repo = IndicatorSnapshotRepository(db)
-      run_repo = DailySignalRunRepository(db)
-      run = await run_repo.find_latest_completed()
-      snapshot_date = run.snapshot_date if run else await snapshot_repo.get_latest_snapshot_date()
-      if run is not None:
-        latest_run = run
-      elif snapshot_date is not None:
-        latest_run = await run_repo.find_latest(snapshot_date)
-      else:
-        latest_run = await run_repo.find_latest()
-      calculated_at = latest_run.completed_at if latest_run else (
-        await snapshot_repo.get_latest_calculated_at(snapshot_date)
-        if snapshot_date is not None
-        else None
+  def stock_factor_catalog() -> List[StockFactorDefinition]:
+    return [
+      StockFactorDefinition(
+        id=factor.id, label=factor.label, category=factor.category,
+        description=factor.description, unit=factor.unit, lookback=factor.lookback,
+        kind=factor.kind, research_supported=factor.research_supported,
+        unsupported_reason=factor.unsupported_reason, version=factor.version,
+        operators=list(factor.operators),
       )
-      signal_version = latest_run.signal_version if latest_run else "daily-signal-v2"
-      return [
-        SignalMeta(
-          signal_code=code,
-          display_name=name,
-          category=category,
-          description=description,
-          max_window=max_window,
-          signal_version=signal_version,
-          calculated_at=calculated_at,
-          available_snapshot_date=snapshot_date,
-          enabled=True,
-        )
-        for code, name, category, description, max_window in SIGNAL_DEFINITIONS
-      ]
-    return []
+      for factor in FACTOR_DEFINITIONS
+    ]

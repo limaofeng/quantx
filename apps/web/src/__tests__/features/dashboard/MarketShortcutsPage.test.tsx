@@ -107,6 +107,34 @@ describe('MarketShortcutsPage realtime date guard', () => {
     };
   });
 
+  it('renders nullable daily ranking metrics as unavailable without asserting non-null data', () => {
+    mocks.market = createMarketState({
+      dataMode: 'live',
+      freshCoverage: CORE_MARKET_INDICES.length,
+      latestQuoteAt: '2026-08-13T10:30:10+08:00',
+      targetDateCoverage: CORE_MARKET_INDICES.length,
+    });
+    mocks.pulse = {
+      ...mocks.pulse,
+      gainers: [
+        {
+          code: '600001.SH',
+          name: '缺失行情标的',
+          currentPrice: null,
+          changePct: null,
+          volumeRatio: null,
+        },
+      ],
+      snapshotMode: 'daily',
+      snapshotAt: '2026-08-13',
+    };
+    render(<MarketShortcutsPage />);
+    const row = screen.getByRole('link', { name: '缺失行情标的 --' });
+    expect(row).toBeInTheDocument();
+    expect(row).not.toHaveTextContent('0.00');
+    expect(within(row).getAllByText('--').length).toBeGreaterThan(1);
+  });
+
   it('marks yesterday-only quotes as stale on the current trading day', () => {
     mocks.market = createMarketState({
       dataMode: 'close',
@@ -191,8 +219,7 @@ describe('MarketShortcutsPage realtime date guard', () => {
       }),
       indices: CORE_MARKET_INDICES.map((definition, index) => ({
         definition,
-        quote:
-          index === 0 ? positiveQuote : index === 1 ? negativeQuote : null,
+        quote: index === 0 ? positiveQuote : index === 1 ? negativeQuote : null,
       })),
     };
 
@@ -236,7 +263,9 @@ describe('MarketShortcutsPage realtime date guard', () => {
     expect(within(risingCard).getByText('3,728.48')).toHaveClass(
       'text-market-up'
     );
-    expect(within(risingCard).getByText('+68.48')).toHaveClass('text-market-up');
+    expect(within(risingCard).getByText('+68.48')).toHaveClass(
+      'text-market-up'
+    );
     expect(within(risingCard).getByText('+1.87%')).toHaveClass(
       'text-market-up'
     );
@@ -251,9 +280,9 @@ describe('MarketShortcutsPage realtime date guard', () => {
     );
     expect(within(unavailableCard).getAllByText('--')).toHaveLength(3);
     expect(
-      within(unavailableCard).getAllByText('--').every(element =>
-        element.classList.contains('text-market-flat')
-      )
+      within(unavailableCard)
+        .getAllByText('--')
+        .every(element => element.classList.contains('text-market-flat'))
     ).toBe(true);
 
     fireEvent.click(fallingCard);

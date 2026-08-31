@@ -1832,6 +1832,69 @@ type ExitPlanView {
   updatedAt: DateTime
 }
 
+"""单因子或联合因子的安全结构化研究报告"""
+type FactorReportDetail {
+  reference: FactorReportReference!
+  factorVersion: String!
+  universe: JSON!
+  horizons: [Int!]!
+  returnBases: [String!]!
+  conditions: JSON!
+  definitions: JSON!
+  coverage: JSON!
+  distribution: JSON!
+  rows: [FactorReportRow!]!
+  warnings: [String!]!
+  artifactErrors: [String!]!
+  configJson: JSON
+}
+
+"""可快捷打开的因子报告及研究数据边界"""
+type FactorReportReference {
+  runKey: String!
+  reportId: String!
+  kind: String!
+  factorIds: [String!]!
+  studyId: String!
+  version: String!
+  runId: String!
+  completedAt: DateTime
+  dataStart: String
+  dataEnd: String
+  configHash: String
+  warnings: [String!]!
+  matchStatus: String
+  matchReason: String
+}
+
+"""一个分组、观察周期及收益口径的描述统计与日期配对推断"""
+type FactorReportRow {
+  group: String!
+  horizon: Int!
+  returnBasis: String!
+  period: String!
+  sampleCount: Int!
+  stockCount: Int!
+  dateCount: Int!
+  upRate: Float
+  meanReturn: Float
+  medianReturn: Float
+  dateEqualUpRate: Float
+  dateEqualMeanReturn: Float
+  baselineUpRate: Float
+  upRateLift: Float
+  meanReturnLift: Float
+  ciLow: Float
+  ciHigh: Float
+  pValue: Float
+  qValue: Float
+  meanCiLow: Float
+  meanCiHigh: Float
+  meanPValue: Float
+  meanQValue: Float
+  inferenceStatus: String!
+}
+
 """资产负债表核心字段"""
 type FinancialBalanceSheetData {
   """标的代码"""
@@ -4948,7 +5011,7 @@ type Query {
   """获取指定市场年度的节假日列表"""
   holidays(market: String! = "CN", year: Int = null): HolidayQueryResult!
 
-  """基于日级信号快照执行条件选股"""
+  """基于当前版本日级因子快照执行条件交集选股"""
   stockScreen(input: StockScreenInput!): StockScreenPage!
 
   """获取选股日级快照完整性及缺失交易日"""
@@ -4966,8 +5029,8 @@ type Query {
   """读取指定交易日的首板生命周期快照"""
   limitUpLifecycle(code: String!, tradeDate: Date!): [LimitUpLifecycleSnapshotType!]!
 
-  """获取可用日级信号及快照元信息"""
-  stockSignalSnapshotMeta: [SignalMeta!]!
+  """获取选股与历史研究共用的版本化因子目录"""
+  stockFactorCatalog: [StockFactorDefinition!]!
 
   """获取全部自选股列表"""
   watchlist(accountId: String = null): [WatchlistItem!]!
@@ -5038,8 +5101,14 @@ type Query {
   """分页查询做 T 历史回放批次"""
   tTradeReplayCycles(runId: String!, offset: Int! = 0, limit: Int! = 50): TTradeReplayCyclePage!
 
+  """批量匹配单因子及当前条件交集的历史研究报告"""
+  stockFactorReportMatches(requests: [StockFactorReportRequestInput!]!): [StockFactorReportMatch!]!
+
+  """只读打开一份因子研究报告；不会启动分析命令"""
+  factorReport(runKey: String!, reportId: String!): FactorReportDetail
+
   """分页列出已完成的研究运行"""
-  researchRuns(limit: Int! = 50, offset: Int! = 0, status: String = null): ResearchRunPage!
+  researchRuns(limit: Int! = 50, offset: Int! = 0, status: String = null, studyId: String = null): ResearchRunPage!
 
   """按不透明稳定 key 获取一次研究运行详情"""
   researchRun(key: String!): ResearchRunDetail
@@ -5255,6 +5324,9 @@ type ResearchRunDetail {
 
   """产物读取告警"""
   artifactErrors: [String!]!
+
+  """本次运行生成的单因子及联合报告"""
+  factorReports: [FactorReportReference!]!
 }
 
 """离线研究运行分页结果"""
@@ -5411,19 +5483,6 @@ input SendAiAssistantMessageInput {
   contextRefs: [AiAssistantContextRefInput!]! = []
 }
 
-"""日级信号元信息"""
-type SignalMeta {
-  signalCode: String!
-  displayName: String!
-  category: String!
-  description: String!
-  maxWindow: Int!
-  signalVersion: String!
-  calculatedAt: DateTime
-  availableSnapshotDate: Date
-  enabled: Boolean!
-}
-
 """上市公司公告"""
 type StockAnnouncement {
   """公告ID"""
@@ -5490,10 +5549,10 @@ type StockDisclosureSummary {
   repurchaseEvents: [StockRepurchaseEvent!]!
 }
 
-"""选股字段条件"""
-input StockFieldConditionInput {
-  """快照字段名"""
-  field: String!
+"""日级因子条件，多个条件取交集"""
+input StockFactorConditionInput {
+  """因子目录中的唯一标识"""
+  factorId: String!
 
   """操作符: gte/lte/gt/lt/eq/between"""
   operator: String! = "gte"
@@ -5503,6 +5562,50 @@ input StockFieldConditionInput {
 
   """区间结束值"""
   valueTo: Float = null
+}
+
+"""共用于日级筛选与历史研究的因子定义"""
+type StockFactorDefinition {
+  id: String!
+  label: String!
+  category: String!
+  description: String!
+  unit: String!
+  lookback: Int!
+  kind: String!
+  researchSupported: Boolean!
+  unsupportedReason: String
+  version: String!
+  operators: [String!]!
+}
+
+"""匹配状态与离线研究配置；不启动研究任务"""
+type StockFactorReportMatch {
+  requestId: String!
+  status: String!
+  reason: String
+  reports: [FactorReportReference!]!
+  configJson: JSON!
+  command: String!
+  blockers: [String!]!
+}
+
+"""一个单因子或当前条件交集的报告查询"""
+input StockFactorReportRequestInput {
+  requestId: String!
+  kind: String!
+  factorIds: [String!]!
+  conditions: [StockFactorConditionInput!] = null
+  universe: StockScreenUniverse! = STOCK
+  excludeSt: Boolean! = true
+  includeIndustries: [String!] = null
+  excludeIndustries: [String!] = null
+}
+
+"""因子数值；数据不足时为 null，不伪造中性值"""
+type StockFactorValue {
+  factorId: String!
+  value: Float
 }
 
 """股票行情报价"""
@@ -5624,14 +5727,8 @@ input StockScreenInput {
   """排除行业"""
   excludeIndustries: [String!] = null
 
-  """基础字段条件"""
-  fieldConditions: [StockFieldConditionInput!] = null
-
-  """信号条件"""
-  signalConditions: [StockSignalConditionInput!] = null
-
-  """评分规则"""
-  scoreRules: [StockSignalWeightInput!] = null
+  """因子条件，全部必须满足"""
+  factorConditions: [StockFactorConditionInput!] = null
 
   """标的范围：默认股票，可切换 ETF 或股票+ETF"""
   universe: StockScreenUniverse! = STOCK
@@ -5639,7 +5736,7 @@ input StockScreenInput {
   """是否排除 ST/*ST 风险警示股票"""
   excludeSt: Boolean! = true
 
-  """是否要求当日信号完成"""
+  """是否要求当日全市场因子快照完成"""
   requireFresh: Boolean! = false
 
   """排序配置"""
@@ -5650,15 +5747,6 @@ input StockScreenInput {
 
   """偏移量"""
   offset: Int! = 0
-
-  """最小 ROE（TTM），仅使用截至快照已披露且验证通过的数据"""
-  minRoe: Float = null
-
-  """最小归母净利润单季同比增速"""
-  minNetProfitGrowth: Float = null
-
-  """最小营收单季同比增速"""
-  minYoyGrowth: Float = null
 }
 
 """条件选股结果项"""
@@ -5667,40 +5755,40 @@ type StockScreenItem {
   name: String!
   industry: String
   instrumentType: String!
-  currentPrice: Float!
-  openPrice: Float!
-  changePct: Float!
-  volume: Float!
-  volumeRatio: Float!
-  avgVolume20: Float!
-  avgVolume5: Float!
-  volumeRatio5: Float!
-  avgAmount20: Float!
-  amountRatio20: Float!
+  currentPrice: Float
+  openPrice: Float
+  changePct: Float
+  volume: Float
+  volumeRatio: Float
+  avgVolume20: Float
+  avgVolume5: Float
+  volumeRatio5: Float
+  avgAmount20: Float
+  amountRatio20: Float
   turnoverRatePct: Float
-  volumePercentile60: Float!
-  amountPercentile60: Float!
-  isBullish: Boolean!
-  peakPrice: Float!
-  daysSincePeak: Int!
-  priceDropPct: Float!
-  lowPrice: Float!
-  daysSinceLow: Int!
-  priceRisePct: Float!
-  consecutiveDownDays: Int!
-  consecutiveDownPct: Float!
-  k: Float!
-  d: Float!
-  j: Float!
-  rsi6: Float!
-  rsi12: Float!
-  rsi24: Float!
-  upperBand: Float!
-  middleBand: Float!
-  lowerBand: Float!
-  ma5: Float!
-  ma10: Float!
-  ma20: Float!
+  volumePercentile60: Float
+  amountPercentile60: Float
+  isBullish: Boolean
+  peakPrice: Float
+  daysSincePeak: Int
+  priceDropPct: Float
+  lowPrice: Float
+  daysSinceLow: Int
+  priceRisePct: Float
+  consecutiveDownDays: Int
+  consecutiveDownPct: Float
+  k: Float
+  d: Float
+  j: Float
+  rsi6: Float
+  rsi12: Float
+  rsi24: Float
+  upperBand: Float
+  middleBand: Float
+  lowerBand: Float
+  ma5: Float
+  ma10: Float
+  ma20: Float
   ma5Prev: Float
   ma10Prev: Float
   roe: Float
@@ -5714,14 +5802,10 @@ type StockScreenItem {
   financialAsOfDate: Date
   financialVerifiedAt: DateTime
   financialQualityFlags: [String!]!
-  matchedStrategies: [String!]!
-  score: Float!
-  scoreVersion: String!
-  signalVersion: String!
+  factorValues: [StockFactorValue!]!
+  calculationVersion: String!
   calculatedAt: DateTime
   hasStaleData: Boolean!
-  signalMissing: Boolean!
-  missingSignals: [String!]!
 }
 
 """条件选股分页结果"""
@@ -5731,8 +5815,7 @@ type StockScreenPage {
   limit: Int!
   offset: Int!
   snapshotDate: Date
-  scoreVersion: String!
-  signalVersion: String!
+  calculationVersion: String!
   calculatedAt: DateTime
   hasStaleData: Boolean!
   isComplete: Boolean!
@@ -5757,32 +5840,10 @@ enum StockScreenSortDirection {
   DESC
 }
 
-"""条件选股排序字段"""
-enum StockScreenSortField {
-  CODE
-  NAME
-  CURRENT_PRICE
-  CHANGE_PCT
-  SIGNAL_COUNT
-  KDJ_J
-  RSI12
-  VOLUME_RATIO
-  VOLUME_RATIO_5
-  AMOUNT_RATIO_20
-  TURNOVER_RATE
-  VOLUME_PERCENTILE_60
-  AMOUNT_PERCENTILE_60
-  PRICE_DROP_PCT
-  DAYS_SINCE_PEAK
-  ROE
-  NET_PROFIT_GROWTH
-  YOY_GROWTH
-}
-
 """条件选股排序输入"""
 input StockScreenSortInput {
-  """排序字段"""
-  field: StockScreenSortField!
+  """因子标识，或 code/name"""
+  field: String!
 
   """排序方向"""
   direction: StockScreenSortDirection! = DESC
@@ -5793,24 +5854,6 @@ enum StockScreenUniverse {
   STOCK
   ETF
   STOCK_AND_ETF
-}
-
-"""选股信号条件"""
-input StockSignalConditionInput {
-  """信号码"""
-  signalCode: String!
-
-  """是否必须命中"""
-  required: Boolean! = true
-}
-
-"""选股评分规则"""
-input StockSignalWeightInput {
-  """信号码"""
-  signalCode: String!
-
-  """命中权重"""
-  weight: Float! = 1
 }
 
 """策略模板信息"""

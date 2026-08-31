@@ -7,46 +7,33 @@ import strawberry
 from .financial_types import FinancialSyncHealthStatus
 
 
-@strawberry.input(description="选股字段条件")
-class StockFieldConditionInput:
-  field: str = strawberry.field(description="快照字段名")
+@strawberry.input(description="日级因子条件，多个条件取交集")
+class StockFactorConditionInput:
+  factor_id: str = strawberry.field(description="因子目录中的唯一标识")
   operator: str = strawberry.field(default="gte", description="操作符: gte/lte/gt/lt/eq/between")
   value: float = strawberry.field(description="比较值")
   value_to: Optional[float] = strawberry.field(default=None, description="区间结束值")
 
 
-@strawberry.input(description="选股信号条件")
-class StockSignalConditionInput:
-  signal_code: str = strawberry.field(description="信号码")
-  required: bool = strawberry.field(default=True, description="是否必须命中")
+@strawberry.type(description="共用于日级筛选与历史研究的因子定义")
+class StockFactorDefinition:
+  id: str
+  label: str
+  category: str
+  description: str
+  unit: str
+  lookback: int
+  kind: str
+  research_supported: bool
+  unsupported_reason: Optional[str]
+  version: str
+  operators: List[str]
 
 
-@strawberry.input(description="选股评分规则")
-class StockSignalWeightInput:
-  signal_code: str = strawberry.field(description="信号码")
-  weight: float = strawberry.field(default=1.0, description="命中权重")
-
-
-@strawberry.enum(description="条件选股排序字段")
-class StockScreenSortField(Enum):
-  CODE = "code"
-  NAME = "name"
-  CURRENT_PRICE = "current_price"
-  CHANGE_PCT = "change_pct"
-  SIGNAL_COUNT = "signal_count"
-  KDJ_J = "kdj_j"
-  RSI12 = "rsi12"
-  VOLUME_RATIO = "volume_ratio"
-  VOLUME_RATIO_5 = "volume_ratio_5"
-  AMOUNT_RATIO_20 = "amount_ratio_20"
-  TURNOVER_RATE = "turnover_rate_pct"
-  VOLUME_PERCENTILE_60 = "volume_percentile_60"
-  AMOUNT_PERCENTILE_60 = "amount_percentile_60"
-  PRICE_DROP_PCT = "price_drop_pct"
-  DAYS_SINCE_PEAK = "days_since_peak"
-  ROE = "roe_ttm"
-  NET_PROFIT_GROWTH = "net_profit_growth_pct"
-  YOY_GROWTH = "revenue_growth_pct"
+@strawberry.type(description="因子数值；数据不足时为 null，不伪造中性值")
+class StockFactorValue:
+  factor_id: str
+  value: Optional[float]
 
 
 @strawberry.enum(description="条件选股排序方向")
@@ -73,7 +60,7 @@ class RoeQualityStatus(Enum):
 
 @strawberry.input(description="条件选股排序输入")
 class StockScreenSortInput:
-  field: StockScreenSortField = strawberry.field(description="排序字段")
+  field: str = strawberry.field(description="因子标识，或 code/name")
   direction: StockScreenSortDirection = strawberry.field(
     default=StockScreenSortDirection.DESC,
     description="排序方向",
@@ -84,14 +71,8 @@ class StockScreenSortInput:
 class StockScreenInput:
   include_industries: Optional[List[str]] = strawberry.field(default=None, description="包含行业")
   exclude_industries: Optional[List[str]] = strawberry.field(default=None, description="排除行业")
-  field_conditions: Optional[List[StockFieldConditionInput]] = strawberry.field(
-    default=None, description="基础字段条件"
-  )
-  signal_conditions: Optional[List[StockSignalConditionInput]] = strawberry.field(
-    default=None, description="信号条件"
-  )
-  score_rules: Optional[List[StockSignalWeightInput]] = strawberry.field(
-    default=None, description="评分规则"
+  factor_conditions: Optional[List[StockFactorConditionInput]] = strawberry.field(
+    default=None, description="因子条件，全部必须满足"
   )
   universe: StockScreenUniverse = strawberry.field(
     default=StockScreenUniverse.STOCK,
@@ -101,16 +82,10 @@ class StockScreenInput:
     default=True,
     description="是否排除 ST/*ST 风险警示股票",
   )
-  require_fresh: bool = strawberry.field(default=False, description="是否要求当日信号完成")
+  require_fresh: bool = strawberry.field(default=False, description="是否要求当日全市场因子快照完成")
   sort: Optional[StockScreenSortInput] = strawberry.field(default=None, description="排序配置")
   limit: int = strawberry.field(default=200, description="每页数量，最大200")
   offset: int = strawberry.field(default=0, description="偏移量")
-  min_roe: Optional[float] = strawberry.field(
-    default=None,
-    description="最小 ROE（TTM），仅使用截至快照已披露且验证通过的数据",
-  )
-  min_net_profit_growth: Optional[float] = strawberry.field(default=None, description="最小归母净利润单季同比增速")
-  min_yoy_growth: Optional[float] = strawberry.field(default=None, description="最小营收单季同比增速")
 
 
 @strawberry.type(description="条件选股结果项")
@@ -119,40 +94,40 @@ class StockScreenItem:
   name: str
   industry: Optional[str]
   instrument_type: str
-  current_price: float
-  open_price: float
-  change_pct: float
-  volume: float
-  volume_ratio: float
-  avg_volume_20: float
-  avg_volume_5: float
-  volume_ratio_5: float
-  avg_amount_20: float
-  amount_ratio_20: float
+  current_price: Optional[float]
+  open_price: Optional[float]
+  change_pct: Optional[float]
+  volume: Optional[float]
+  volume_ratio: Optional[float]
+  avg_volume_20: Optional[float]
+  avg_volume_5: Optional[float]
+  volume_ratio_5: Optional[float]
+  avg_amount_20: Optional[float]
+  amount_ratio_20: Optional[float]
   turnover_rate_pct: Optional[float]
-  volume_percentile_60: float
-  amount_percentile_60: float
-  is_bullish: bool
-  peak_price: float
-  days_since_peak: int
-  price_drop_pct: float
-  low_price: float
-  days_since_low: int
-  price_rise_pct: float
-  consecutive_down_days: int
-  consecutive_down_pct: float
-  k: float
-  d: float
-  j: float
-  rsi6: float
-  rsi12: float
-  rsi24: float
-  upper_band: float
-  middle_band: float
-  lower_band: float
-  ma5: float
-  ma10: float
-  ma20: float
+  volume_percentile_60: Optional[float]
+  amount_percentile_60: Optional[float]
+  is_bullish: Optional[bool]
+  peak_price: Optional[float]
+  days_since_peak: Optional[int]
+  price_drop_pct: Optional[float]
+  low_price: Optional[float]
+  days_since_low: Optional[int]
+  price_rise_pct: Optional[float]
+  consecutive_down_days: Optional[int]
+  consecutive_down_pct: Optional[float]
+  k: Optional[float]
+  d: Optional[float]
+  j: Optional[float]
+  rsi6: Optional[float]
+  rsi12: Optional[float]
+  rsi24: Optional[float]
+  upper_band: Optional[float]
+  middle_band: Optional[float]
+  lower_band: Optional[float]
+  ma5: Optional[float]
+  ma10: Optional[float]
+  ma20: Optional[float]
   ma5_prev: Optional[float]
   ma10_prev: Optional[float]
   roe: Optional[float]
@@ -166,14 +141,10 @@ class StockScreenItem:
   financial_as_of_date: Optional[date]
   financial_verified_at: Optional[datetime]
   financial_quality_flags: List[str]
-  matched_strategies: List[str]
-  score: float
-  score_version: str
-  signal_version: str
+  factor_values: List[StockFactorValue]
+  calculation_version: str
   calculated_at: Optional[datetime]
   has_stale_data: bool
-  signal_missing: bool
-  missing_signals: List[str]
 
 
 @strawberry.type(description="条件选股分页结果")
@@ -183,8 +154,7 @@ class StockScreenPage:
   limit: int
   offset: int
   snapshot_date: Optional[date]
-  score_version: str
-  signal_version: str
+  calculation_version: str
   calculated_at: Optional[datetime]
   has_stale_data: bool
   is_complete: bool
@@ -477,16 +447,3 @@ class LimitUpLifecycleSnapshotType:
   ever_touched_limit: bool
   break_count: int
   as_of: datetime
-
-
-@strawberry.type(description="日级信号元信息")
-class SignalMeta:
-  signal_code: str
-  display_name: str
-  category: str
-  description: str
-  max_window: int
-  signal_version: str
-  calculated_at: Optional[datetime]
-  available_snapshot_date: Optional[date]
-  enabled: bool
