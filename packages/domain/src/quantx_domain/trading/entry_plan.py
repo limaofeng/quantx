@@ -538,6 +538,8 @@ class ManagedEntryPlanState:
 
   def _settle_pending(self, *, target_reached: bool) -> None:
     self.clear_pending()
+    if self.phase == EntryPlanStatus.ERROR:
+      return
     if target_reached:
       self.phase = EntryPlanStatus.COMPLETED
     elif self.terminal_requested is not None:
@@ -553,6 +555,7 @@ class ManagedEntryPlanState:
     self,
     *,
     trade_key: str,
+    matches_pending: bool,
     volume: int,
     price: float,
     trade_date: str,
@@ -570,16 +573,7 @@ class ManagedEntryPlanState:
     amount = volume * price
     self.filled_volume += volume
     self.filled_amount_cny += amount
-    self.pending_filled_volume += volume
-    self.pending_filled_amount_cny += amount
-    selected_rule = str(rule_id or self.pending_rule_id or "")
-    pending_rule_id = self.pending_rule_id
-    pending_rule_type = self.pending_rule_type
-    pending_activation_id = self.pending_activation_id
-    if pending_activation_id:
-      self.completed_activation_ids.add(pending_activation_id)
-    if pending_activation_id and pending_activation_id == pending_rule_id:
-      self.completed_rule_ids.add(pending_rule_id)
+    selected_rule = str(rule_id or (self.pending_rule_id if matches_pending else ""))
     if selected_rule:
       self.rule_filled_volumes[selected_rule] = (
         int(self.rule_filled_volumes.get(selected_rule, 0) or 0) + volume
@@ -591,6 +585,22 @@ class ManagedEntryPlanState:
       float(self.daily_filled_amounts_cny.get(trade_date, 0.0) or 0.0) + amount
     )
     self.last_fill_at_ms = timestamp_ms
+    if not matches_pending:
+      # A late fill remains a real plan expense, but cannot consume the active
+      # slice's reservation or satisfy its terminal barrier. Stop new entries
+      # until the unexpected execution has been explicitly reconciled.
+      self.phase = EntryPlanStatus.ERROR
+      self.last_decision = {"reason": "ENTRY_FILL_OUTSIDE_PENDING", "trade_key": trade_key}
+      return True
+    self.pending_filled_volume += volume
+    self.pending_filled_amount_cny += amount
+    pending_rule_id = self.pending_rule_id
+    pending_rule_type = self.pending_rule_type
+    pending_activation_id = self.pending_activation_id
+    if pending_activation_id:
+      self.completed_activation_ids.add(pending_activation_id)
+    if pending_activation_id and pending_activation_id == pending_rule_id:
+      self.completed_rule_ids.add(pending_rule_id)
     if pending_rule_type == EntryRuleType.TREND_PULLBACK_CONFIRMATION:
       self.rule_state.setdefault(pending_rule_id, {}).update(
         {
@@ -604,6 +614,8 @@ class ManagedEntryPlanState:
       self.terminal_requested is not None and not self.has_pending
     ):
       self._settle_pending(target_reached=target_reached)
+    elif self.phase == EntryPlanStatus.ERROR:
+      return True
     elif self.terminal_requested is not None:
       self.phase = EntryPlanStatus.DRAINING
     elif target_reached and not self.has_pending:

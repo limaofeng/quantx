@@ -303,6 +303,7 @@ def test_price_ladder_level_with_a_real_fill_is_not_rearmed():
     context(executable_price=9.9, manual_trigger_rule_id=None),
   )
   assert first.state.apply_trade_fill(
+    matches_pending=True,
     trade_key="ladder-trade",
     volume=100,
     price=9.9,
@@ -436,6 +437,7 @@ def test_terminal_order_report_before_trade_does_not_release_pending():
 
   assert (
     state.apply_trade_fill(
+      matches_pending=True,
       trade_key="trade-1",
       volume=300,
       price=10,
@@ -501,6 +503,7 @@ def test_non_reconciled_terminal_zero_fill_never_releases_pending(
 
   assert state.apply_trade_fill(
     trade_key=f"late-{terminal_status}",
+    matches_pending=True,
     volume=100,
     price=10,
     trade_date="2026-08-20",
@@ -533,6 +536,7 @@ def test_filled_zero_uses_requested_volume_as_late_execution_barrier():
   assert state.terminal_expected_filled_volume == expected
   assert state.apply_trade_fill(
     trade_key="filled-zero-first-late",
+    matches_pending=True,
     volume=100,
     price=10,
     trade_date="2026-08-20",
@@ -542,6 +546,7 @@ def test_filled_zero_uses_requested_volume_as_late_execution_barrier():
 
   assert state.apply_trade_fill(
     trade_key="filled-zero-final-late",
+    matches_pending=True,
     volume=expected - 100,
     price=10,
     trade_date="2026-08-20",
@@ -572,6 +577,7 @@ def test_rejected_intent_with_no_broker_fill_settles_zero_immediately():
 def test_trade_fill_replay_is_idempotent():
   state = ManagedEntryPlanState()
   first = state.apply_trade_fill(
+    matches_pending=False,
     trade_key="trade-1",
     volume=100,
     price=10,
@@ -580,6 +586,7 @@ def test_trade_fill_replay_is_idempotent():
     rule_id="manual",
   )
   replay = state.apply_trade_fill(
+    matches_pending=False,
     trade_key="trade-1",
     volume=100,
     price=10,

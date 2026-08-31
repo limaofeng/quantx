@@ -1595,6 +1595,11 @@ async def test_service_cancel_persists_terminal_request_before_late_fill() -> No
     "entry_plan_id": "plan-1",
     "entry_rule_id": "trend-1",
     "entry_stage_id": "stage-1",
+    "owner_type": "STRATEGY_RUN",
+    "owner_id": "plan-1",
+    "strategy_run_id": "plan-1",
+    "intent_id": "intent-1",
+    "side": "BUY",
   }
   await item.on_order(
     OrderStateEvent(

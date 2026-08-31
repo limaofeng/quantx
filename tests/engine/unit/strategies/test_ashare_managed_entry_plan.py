@@ -683,6 +683,60 @@ async def test_unrelated_or_sell_trade_cannot_advance_entry_state():
   )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["REJECTED", "RECONCILED_ZERO_FILL", "FILLED"])
+@pytest.mark.parametrize("foreign_kind", ["exit", "old_intent", "other_run", "other_stage"])
+async def test_foreign_order_terminal_preserves_current_entry(status, foreign_kind):
+  item = await strategy()
+  [intent] = (await item.step(input_snapshot())).trade_intents
+  before = item.state.to_dict()
+  metadata = dict(intent.metadata)
+  if foreign_kind == "exit":
+    metadata.update(owner_type="EXIT_PLAN", owner_id="exit-1", side="SELL")
+  elif foreign_kind == "old_intent":
+    metadata["intent_id"] = "old-buy"
+  elif foreign_kind == "other_run":
+    metadata["strategy_run_id"] = "another-run"
+  else:
+    metadata["entry_stage_id"] = "old-stage"
+
+  patch = await item.on_order(OrderStateEvent(
+    order_id="foreign-order", status=status, filled_volume=100,
+    metadata=metadata, timestamp=NOW,
+  ))
+
+  assert patch is None
+  assert item.state.to_dict() == before
+
+
+@pytest.mark.asyncio
+async def test_old_entry_fill_is_accounted_without_consuming_current_pending():
+  item = await strategy()
+  [intent] = (await item.step(input_snapshot())).trade_intents
+  before = ManagedEntryPlanState.from_dict(item.state.get(MANAGED_ENTRY_STATE_KEY))
+  event = TradeExecutionEvent(
+    order_id="old-order", instrument_code="600000.SH", trade_type="BUY",
+    price=10, volume=100, trade_time=NOW,
+    metadata={**intent.metadata, "intent_id": "old-intent",
+              "entry_stage_id": "old-stage", "trade_id": "late-old-fill"},
+  )
+
+  patch = await item.on_trade(event)
+
+  assert patch is not None
+  state = ManagedEntryPlanState.from_dict(patch.set[MANAGED_ENTRY_STATE_KEY])
+  assert state.filled_volume == 100
+  assert state.filled_amount_cny == 1000
+  assert state.pending_intent_id == before.pending_intent_id
+  assert state.pending_stage_id == before.pending_stage_id
+  assert state.pending_filled_volume == 0
+  assert state.reserved_amount_cny == before.reserved_amount_cny
+  assert state.order_terminal_seen is False
+  assert state.phase == EntryPlanStatus.ERROR
+  assert await item.on_trade(event) is None
+  assert (await item.step(input_snapshot())).trade_intents == []
+
+
 def test_each_entry_stage_gets_an_independent_exit_protection_identity():
   base = {
     "plan_id": "base-plan",

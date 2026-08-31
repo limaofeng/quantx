@@ -259,6 +259,15 @@ async def _seed_managed_order(
   snapshot_at = to_naive_utc(
     datetime.fromisoformat(snapshot.payload["source_event_at"])
   )
+  entry_metadata = {
+    "owner_type": "STRATEGY_RUN",
+    "owner_id": "plan-1",
+    "strategy_run_id": "plan-1",
+    "entry_plan_id": "plan-1",
+    "intent_id": "intent-1",
+    "entry_stage_id": "stage-1",
+    "side": "BUY",
+  }
   async with sessions() as db:
     db.add(
       AuthUser(
@@ -285,7 +294,7 @@ async def _seed_managed_order(
         executed_volume=0,
         executed_price=None,
         executed_time=None,
-        intent_metadata={"entry_plan_id": "plan-1"},
+        intent_metadata=dict(entry_metadata),
       )
     )
     db.add(
@@ -305,7 +314,7 @@ async def _seed_managed_order(
         strategy_order_id="strategy-order-1",
         intent_id="intent-1",
         bucket="core",
-        request_metadata={"entry_plan_id": "plan-1"},
+        request_metadata=dict(entry_metadata),
         last_source_sequence=10,
         last_source_event_at=snapshot_at,
       )
@@ -323,7 +332,7 @@ async def _seed_managed_order(
         execution_mode="live",
         trace_id="trace-1",
         request_metadata={
-          "entry_plan_id": "plan-1",
+          **entry_metadata,
           "instrument_code": "605499.SH",
         },
       )

@@ -260,6 +260,9 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
       metadata={
         "owner_type": "STRATEGY_RUN",
         "owner_id": input.run_id,
+        "strategy_run_id": input.run_id,
+        "intent_id": decision.intent_id,
+        "side": "BUY",
         "entry_plan_id": plan_id,
         "entry_config_version": config.config_version,
         "entry_rule_id": decision.rule_id,
@@ -320,7 +323,7 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
 
   async def on_order(self, event: OrderStateEvent) -> Optional[RuntimeStatePatch]:
     metadata = dict(event.metadata or {})
-    if str(metadata.get("entry_plan_id", "")) != self._plan_id():
+    if not self._owns_entry_event(metadata):
       return None
     status = str(event.status or "").split(".")[-1].upper()
     if status not in TERMINAL_ORDER_STATUSES:
@@ -328,6 +331,8 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
     state = ManagedEntryPlanState.from_dict(
       _mapping(self.state.get(MANAGED_ENTRY_STATE_KEY))
     )
+    if not self._matches_pending_entry(metadata, state):
+      return None
     timestamp = event.timestamp or self.context.current_time or datetime.min
     state.apply_order_terminal(
       status=status,
@@ -344,11 +349,11 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
 
   async def on_trade(self, event: TradeExecutionEvent) -> Optional[RuntimeStatePatch]:
     metadata = dict(event.metadata or {})
-    if str(metadata.get("entry_plan_id", "")) != self._plan_id():
+    if not self._owns_entry_event(metadata):
       return None
     if event.instrument_code != self._require_config().instrument_code:
       return None
-    if "BUY" not in str(event.trade_type or "").upper():
+    if str(event.trade_type or "").split(".")[-1].upper() != "BUY":
       return None
     state = ManagedEntryPlanState.from_dict(
       _mapping(self.state.get(MANAGED_ENTRY_STATE_KEY))
@@ -362,6 +367,7 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
     )
     changed = state.apply_trade_fill(
       trade_key=trade_key,
+      matches_pending=self._matches_pending_entry(metadata, state),
       volume=event.volume,
       price=event.price,
       trade_date=trade_time.date().isoformat(),
@@ -389,6 +395,28 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
           "stage_id": metadata.get("entry_stage_id"),
         }
       ],
+    )
+
+  def _owns_entry_event(self, metadata: Mapping[str, Any]) -> bool:
+    """An exit retains entry lineage, but never owns the entry state machine."""
+    return bool(
+      metadata.get("owner_type") == "STRATEGY_RUN"
+      and metadata.get("owner_id") == self.context.run_id
+      and metadata.get("strategy_run_id") == self.context.run_id
+      and metadata.get("entry_plan_id") == self._plan_id()
+      and metadata.get("side") == "BUY"
+      and metadata.get("intent_id")
+      and metadata.get("entry_stage_id")
+    )
+
+  @staticmethod
+  def _matches_pending_entry(
+    metadata: Mapping[str, Any], state: ManagedEntryPlanState
+  ) -> bool:
+    return bool(
+      state.pending_intent_id
+      and metadata.get("intent_id") == state.pending_intent_id
+      and metadata.get("entry_stage_id") == state.pending_stage_id
     )
 
   def _require_config(self) -> ManagedEntryPlanConfig:
