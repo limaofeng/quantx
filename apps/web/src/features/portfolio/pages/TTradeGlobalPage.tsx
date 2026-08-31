@@ -2096,7 +2096,7 @@ export function TTradeGlobalPage() {
   const toolbar = (
     <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-ui-section custom-scrollbar">
       <nav
-        className="flex h-full min-w-0 items-stretch"
+        className="flex h-full shrink-0 items-stretch"
         aria-label="做 T 工作区"
       >
         {(['REALTIME', 'REPLAY'] as const).map(mode => {

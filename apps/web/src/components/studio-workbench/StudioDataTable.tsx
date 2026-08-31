@@ -521,7 +521,7 @@ export function StudioDataTable<TRow, TColumn extends StudioDataTableColumn>({
                     key={`${String(getRowKey(row))}-${column.id}`}
                     style={getColumnStyle(column, 'body')}
                     className={cn(
-                      'h-[33px] overflow-hidden whitespace-nowrap border-b border-r border-white/5 px-3 py-1.5 last:border-r-0',
+                      'h-ui-table-row overflow-hidden whitespace-nowrap border-b border-r border-white/5 px-3 py-1.5 last:border-r-0',
                       column.widthClass,
                       getTextAlignClass(column.align),
                       backgroundClass,

@@ -333,6 +333,15 @@ export const appRoutes: AppRouteConfig[] = [
     },
   }),
   route({
+    path: '/settings/appearance',
+    title: '外观',
+    importer: toDefaultExport(
+      () => import('@/features/settings/pages/SystemSettingsPage'),
+      'SystemSettingsPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
     path: '/settings/status/:targetId/history',
     title: '服务历史',
     importer: toDefaultExport(
@@ -563,6 +572,7 @@ export function isNavigationItemActive(
     return [
       '/settings',
       '/settings/status',
+      '/settings/appearance',
       '/settings/qmt',
       '/settings/ai-runtime',
       '/settings/agents',

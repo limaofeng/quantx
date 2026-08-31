@@ -42,7 +42,7 @@ export function ActivityBar({
           themeStyles.focusRing,
           isStudioVariant
             ? cn(
-                'w-16 flex-col items-center justify-center gap-1 rounded-md border border-transparent px-1',
+                'w-[var(--studio-navigation-item-width)] flex-col items-center justify-center gap-1 rounded-md border border-transparent px-1',
                 isActive
                   ? 'text-slate-100'
                   : 'text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
@@ -63,7 +63,7 @@ export function ActivityBar({
         style={
           isStudioVariant
             ? {
-                height: 'clamp(3.5rem, 7.6vh, 4.5rem)',
+                height: 'var(--studio-navigation-item-height)',
                 ...(isActive
                   ? {
                       background: '#0c1a2b',
@@ -129,7 +129,7 @@ export function ActivityBar({
           themeStyles.focusRing,
           isStudioVariant
             ? cn(
-                'w-16 flex-col items-center justify-center gap-1.5 rounded-md border border-transparent px-1',
+                'w-[var(--studio-navigation-item-width)] flex-col items-center justify-center gap-1.5 rounded-md border border-transparent px-1',
                 isActive
                   ? 'text-slate-100'
                   : isDisabled
@@ -153,7 +153,7 @@ export function ActivityBar({
         style={
           isStudioVariant
             ? {
-                height: 'clamp(3.5rem, 7.6vh, 4.5rem)',
+                height: 'var(--studio-navigation-item-height)',
                 ...(isActive
                   ? {
                       background: '#0c1a2b',
@@ -209,7 +209,7 @@ export function ActivityBar({
           ? {
               background: STUDIO_CHROME_BACKGROUND,
               position: 'relative',
-              width: 84,
+              width: 'var(--studio-navigation-width)',
               zIndex: 20,
             }
           : undefined
@@ -301,7 +301,7 @@ export function ActivityBar({
             background: '#091524',
             borderColor: '#23364b',
             boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.05)',
-            width: 68,
+            width: 'var(--studio-environment-width)',
           }}
           title={`${environmentStatus.label} · ${environmentStatus.detail}`}
         >

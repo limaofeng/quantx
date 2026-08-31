@@ -245,7 +245,7 @@ describe('StudioWorkspace', () => {
       borderColor: '#22364d',
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
-      height: '36px',
+      height: 'var(--studio-tab-height)',
       zIndex: 10,
     });
     expect(

@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 
 export const STUDIO_CHROME_BACKGROUND = '#040b15';
-export const STUDIO_HEADER_HEIGHT = 40;
+export const STUDIO_HEADER_HEIGHT = 'var(--studio-header-height)';
 export const STUDIO_WORKSPACE_SURFACE = 'var(--studio-workspace-surface)';
 export const STUDIO_WORKSPACE_SURFACE_RADIUS = 8;
 export const STUDIO_WORKSPACE_TAB_RADIUS = 8;
@@ -10,7 +10,7 @@ export const STUDIO_WORKSPACE_WEAK_BORDER = '#22364d';
 export const STUDIO_WORKSPACE_TAB_STYLE = {
   borderTopLeftRadius: STUDIO_WORKSPACE_TAB_RADIUS,
   borderTopRightRadius: STUDIO_WORKSPACE_TAB_RADIUS,
-  height: 36,
+  height: 'var(--studio-tab-height)',
 } satisfies CSSProperties;
 
 export const STUDIO_WORKSPACE_ACTIVE_TAB_STYLE = {

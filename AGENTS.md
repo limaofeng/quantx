@@ -102,6 +102,9 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 
 ## GraphQL 与前端
 
+Web 支持标准（默认）与紧凑两种界面密度；字体、控件和间距必须遵循
+`docs/engineering/web/UI_UX_DESIGN_SYSTEM.md` 的可选界面密度规范，保留布局与交易语义。
+
 GraphQL/API schema 或前端查询变化后，必须在同一轮执行：
 
 ```powershell

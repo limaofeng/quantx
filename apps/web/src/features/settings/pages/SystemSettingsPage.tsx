@@ -5,6 +5,7 @@ import {
   Database,
   Gauge,
   HeartPulse,
+  Monitor,
   Settings,
   ShieldCheck,
   type LucideIcon,
@@ -21,12 +22,18 @@ import { SystemInsightCard } from '@/features/system/components/SystemInsightCar
 import { cn } from '@/utils/cn';
 
 import { AiRuntimeSettingsPanel } from '../components/AiRuntimeSettingsPanel';
+import { AppearanceSettingsPanel } from '../components/AppearanceSettingsPanel';
 import { ServiceStatusHistoryPanel } from '../components/ServiceStatusHistoryPanel';
 import { ServiceStatusPanel } from '../components/ServiceStatusPanel';
 import { TradingSafetySettingsPanel } from '../components/TradingSafetySettingsPanel';
 
 type SettingsSection =
-  'overview' | 'status' | 'trading-safety' | 'qmt' | 'ai-runtime';
+  | 'overview'
+  | 'appearance'
+  | 'status'
+  | 'trading-safety'
+  | 'qmt'
+  | 'ai-runtime';
 
 const navigation: Array<{
   id: SettingsSection;
@@ -41,6 +48,13 @@ const navigation: Array<{
     description: '服务健康与快捷入口',
     href: '/settings',
     icon: Gauge,
+  },
+  {
+    id: 'appearance',
+    label: '外观',
+    description: '标准与 IDE 紧凑密度',
+    href: '/settings/appearance',
+    icon: Monitor,
   },
   {
     id: 'status',
@@ -73,6 +87,7 @@ const navigation: Array<{
 ];
 
 function activeSection(path: string): SettingsSection {
+  if (path.startsWith('/settings/appearance')) return 'appearance';
   if (path.startsWith('/settings/status')) return 'status';
   if (path.startsWith('/settings/trading-safety')) return 'trading-safety';
   if (path.startsWith('/settings/qmt')) return 'qmt';
@@ -86,6 +101,13 @@ function SettingsOverview({
   onNavigate: (path: string) => void;
 }) {
   const cards = [
+    {
+      title: '外观',
+      description: '选择标准或紧凑显示密度，调整字体、控件和间距。',
+      href: '/settings/appearance',
+      icon: Monitor,
+      accent: 'text-blue-300 bg-blue-500/10 border-blue-500/20',
+    },
     {
       title: '服务状态',
       description: '查看外部依赖与运行组件的长期可用性、延迟和事故历史。',
@@ -255,6 +277,7 @@ export function SystemSettingsPage() {
       <main className="min-h-0 flex-1 overflow-hidden">
         <StudioPageFrame>
           {section === 'overview' && <SettingsOverview onNavigate={navigate} />}
+          {section === 'appearance' && <AppearanceSettingsPanel />}
           {section === 'status' &&
             (historyParams ? (
               <ServiceStatusHistoryPanel targetId={historyParams.targetId} />

@@ -212,16 +212,16 @@ function App() {
 
   return (
     <ErrorBoundary>
-              <ThemeProvider>
-          <TooltipProvider>
-            <AppDialogProvider>
-              <AuthProvider>
-                <Toaster />
-                <AuthenticatedApp />
-              </AuthProvider>
-            </AppDialogProvider>
-          </TooltipProvider>
-        </ThemeProvider>
+      <ThemeProvider>
+        <TooltipProvider>
+          <AppDialogProvider>
+            <AuthProvider>
+              <Toaster />
+              <AuthenticatedApp />
+            </AuthProvider>
+          </AppDialogProvider>
+        </TooltipProvider>
+      </ThemeProvider>
     </ErrorBoundary>
   );
 }

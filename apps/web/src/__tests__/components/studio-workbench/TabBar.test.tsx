@@ -52,7 +52,7 @@ describe('TabBar', () => {
     const tabBar = screen.getByTestId('studio-tab-bar');
     expect(screen.getByRole('tablist', { name: '工作区标签' })).toBeVisible();
     expect(tabBar).toHaveClass('bg-[#07111f]');
-    expect(tabBar).toHaveStyle({ height: '40px' });
+    expect(tabBar).toHaveStyle({ height: 'var(--studio-header-height)' });
     expect(firstTab.parentElement).toHaveStyle({
       borderTopLeftRadius: 'calc(var(--radius) - 2px)',
       borderTopRightRadius: 'calc(var(--radius) - 2px)',
@@ -201,7 +201,7 @@ describe('TabBar', () => {
       borderColor: '#22364d',
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
-      height: '36px',
+      height: 'var(--studio-tab-height)',
       maxWidth: 'min(13rem, 100%)',
       minWidth: '6.5rem',
       width: 'fit-content',

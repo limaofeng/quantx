@@ -1391,7 +1391,7 @@ export function TTradeLiveBoard({
             正在刷新服务端快照，暂保留上次可信结果…
           </div>
         )}
-        <div className="hidden min-w-[880px] grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] border-b border-white/[0.06] px-ui-section py-2 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600 lg:grid">
+        <div className="hidden grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] gap-3 border-b border-white/[0.06] px-ui-section py-2 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600 lg:grid lg:min-w-[calc(905px+6*var(--space-panel)+2*var(--space-section))]">
           <span>持仓标的</span>
           <span>服务端价格</span>
           <span>数据健康</span>
@@ -1430,7 +1430,7 @@ export function TTradeLiveBoard({
                 lastSelectedCodeRef.current = row.holding.stockCode;
                 setSelectedCode(row.holding.stockCode);
               }}
-              className="grid w-full cursor-pointer gap-3 border-b border-white/[0.05] px-ui-section py-3 text-left transition-colors hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60 lg:min-w-[880px] lg:grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] lg:items-center"
+              className="grid w-full cursor-pointer gap-3 border-b border-white/[0.05] px-ui-section py-ui-table-multiline-y text-left transition-colors hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60 lg:min-w-[calc(905px+6*var(--space-panel)+2*var(--space-section))] lg:grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] lg:items-center"
             >
               <span className="min-w-0">
                 <span className="block truncate text-ui-label font-black text-slate-100">

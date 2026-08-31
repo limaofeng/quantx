@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 
 import { logger } from '@/core/errors/logger';
+import { initializeUiDensity } from '@/core/ui-density';
 import {
   checkRequiredEnvVars,
   printEnvInfo,
@@ -11,6 +12,9 @@ import { setupGlobalErrorHandlers } from '@/shared/utils/error-handler';
 import App from './App';
 
 import './index.css';
+
+// Apply the saved preference before React paints the first frame.
+initializeUiDensity();
 
 // 验证环境变量
 if (!checkRequiredEnvVars()) {

@@ -83,7 +83,7 @@ describe('ActivityBar', () => {
     expect(activityBar).toHaveStyle({
       background: '#040b15',
       position: 'relative',
-      width: '84px',
+      width: 'var(--studio-navigation-width)',
       zIndex: 20,
     });
     expect(activityBar).not.toHaveClass('border-t');
@@ -97,10 +97,10 @@ describe('ActivityBar', () => {
     expect(screen.getByText('行情')).toBeVisible();
     expect(screen.getByText('设置')).toBeVisible();
     expect(screen.getByRole('button', { name: '系统设置' })).toHaveClass(
-      'w-16'
+      'w-[var(--studio-navigation-item-width)]'
     );
     expect(screen.getByRole('button', { name: '系统设置' })).toHaveStyle({
-      height: 'clamp(3.5rem, 7.6vh, 4.5rem)',
+      height: 'var(--studio-navigation-item-height)',
     });
     const navigationIcon = screen
       .getByRole('button', { name: '行情工作台' })
@@ -109,7 +109,9 @@ describe('ActivityBar', () => {
     expect(navigationIcon).toHaveAttribute('height', '20');
     expect(navigationIcon).toHaveAttribute('stroke-width', '1.75');
     const environmentStatus = screen.getByTestId('studio-environment-status');
-    expect(environmentStatus).toHaveStyle({ width: '68px' });
+    expect(environmentStatus).toHaveStyle({
+      width: 'var(--studio-environment-width)',
+    });
     expect(environmentStatus).toHaveTextContent('READY实盘');
     expect(environmentStatus.firstElementChild).toHaveClass('text-emerald-300');
     expect(environmentStatus.firstElementChild?.firstElementChild).toHaveClass(

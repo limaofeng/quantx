@@ -117,6 +117,7 @@ export function getStudioWorkspaceTabId(rawPath: string) {
   if (
     [
       '/settings',
+      '/settings/appearance',
       '/settings/trading-safety',
       '/settings/qmt',
       '/settings/ai-runtime',
@@ -151,6 +152,7 @@ function getTabIcon(pathname: string): LucideIcon {
   if (
     [
       '/settings',
+      '/settings/appearance',
       '/settings/trading-safety',
       '/settings/qmt',
       '/settings/ai-runtime',
@@ -175,6 +177,7 @@ function getTabTitle(pathname: string, search = '') {
   if (
     [
       '/settings',
+      '/settings/appearance',
       '/settings/trading-safety',
       '/settings/qmt',
       '/settings/ai-runtime',

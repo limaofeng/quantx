@@ -2,6 +2,16 @@ import typography from '@tailwindcss/typography';
 import type { Config } from 'tailwindcss';
 import tailwindcssAnimate from 'tailwindcss-animate';
 
+// Only whitespace follows density. Geometry (width/height/inset), chart sizes,
+// breakpoints and the root rem size keep the existing Tailwind scale.
+const densitySpacing = {
+  1.5: 'var(--s1h)',
+  2: 'var(--s2)',
+  2.5: 'var(--s2h)',
+  3: 'var(--space-panel)',
+  3.5: 'var(--s3h)',
+};
+
 export default {
   darkMode: ['class'],
   content: [
@@ -75,10 +85,19 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        sans: ['var(--font-sans)'],
         serif: ['var(--font-serif)'],
         mono: ['var(--font-mono)'],
       },
+      fontWeight: {
+        extrabold: 'var(--font-weight-ui-heavy)',
+        black: 'var(--font-weight-ui-strong)',
+      },
+      padding: densitySpacing,
+      // Preserve fixed offsets; only the small title/metadata separation changes.
+      margin: { 1: 'var(--s1)' },
+      gap: densitySpacing,
+      space: densitySpacing,
       fontSize: {
         'ui-micro': [
           'var(--font-size-ui-micro)',
@@ -128,6 +147,8 @@ export default {
         'studio-header': 'var(--studio-header-height)',
         'studio-status': 'var(--studio-status-height)',
         'studio-tab': 'var(--studio-tab-height)',
+        'ui-table-header': 'var(--table-header-height)',
+        'ui-table-row': 'var(--table-row-height)',
       },
       minHeight: {
         'control-compact': 'var(--control-height-compact)',
@@ -142,6 +163,8 @@ export default {
         'ui-section': 'var(--space-section)',
         'ui-empty': 'var(--space-empty)',
         'ui-page': 'var(--space-page)',
+        'ui-table-cell-y': 'var(--table-cell-y)',
+        'ui-table-multiline-y': 'var(--table-multiline-cell-y)',
       },
       keyframes: {
         'accordion-down': {
