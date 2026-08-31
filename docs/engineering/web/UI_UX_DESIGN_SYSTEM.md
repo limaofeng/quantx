@@ -97,6 +97,8 @@ CSS Token。不得使用浏览器/CSS zoom、transform 缩放或更改根 rem �
 
 所有尺寸由 `apps/web/src/index.css` 和 `apps/web/tailwind.config.ts` 中的 Token 提供。
 业务页面不得重新定义同类尺寸。
+语义字号、控件高度和间距还须同步登记到 `apps/web/src/utils/cn.ts` 的类名合并规则，
+保证字号与颜色独立生效，且组件调用方的尺寸覆盖遵循 Tailwind 的同组与方向规则。
 
 | 类别     | 紧凑             | 默认           | 大号                 |
 | -------- | ---------------- | -------------- | -------------------- |
