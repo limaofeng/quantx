@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
-from quantx_api import agent_api, market_gateway
+from quantx_api import agent_api, market_gateway, runtime_status
 from quantx_contracts.market_health import MarketGatewayHealth, MarketHealthReason
 from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamFreshnessLease,
@@ -160,6 +160,81 @@ async def test_calendar_failure_does_not_assume_market_closed(supply, monkeypatc
   assert (
     await response_health()
   ).reason_code is MarketHealthReason.CALENDAR_UNAVAILABLE
+
+
+async def test_calendar_and_redis_share_one_readiness_deadline(supply, monkeypatch):
+  async def slow_calendar(*args):
+    await asyncio.sleep(0.25)
+    return True
+
+  async def slow_redis():
+    await asyncio.sleep(0.25)
+    return supply[0], supply[1]
+
+  monkeypatch.setattr(market_gateway, "MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS", 0.4)
+  monkeypatch.setattr(market_gateway._trading_time, "is_trading_hours", slow_calendar)
+  supply[2].side_effect = slow_redis
+  assert (await response_health()).reason_code is MarketHealthReason.REDIS_UNAVAILABLE
+
+
+async def test_api_waits_for_gateway_combined_dependency_budget(supply, monkeypatch):
+  # Use a loopback-only fake HTTP peer so the real httpx read deadline is enforced.
+  # Neither dependency below can touch a live database, Redis or QMT connection.
+  async def slow_calendar(*args):
+    await asyncio.sleep(0.65)
+    return True
+
+  async def slow_redis():
+    await asyncio.sleep(0.65)
+    return supply[0], supply[1]
+
+  monkeypatch.setattr(market_gateway._trading_time, "is_trading_hours", slow_calendar)
+  supply[2].side_effect = slow_redis
+  handlers = set()
+
+  async def serve_health(reader, writer):
+    task = asyncio.current_task()
+    handlers.add(task)
+    try:
+      await reader.readuntil(b"\r\n\r\n")
+      response = await market_gateway.health_ready()
+      writer.write(
+        (
+          f"HTTP/1.1 {response.status_code} OK\r\n"
+          "Content-Type: application/json\r\n"
+          f"Content-Length: {len(response.body)}\r\n"
+          "Connection: close\r\n\r\n"
+        ).encode()
+        + response.body
+      )
+      await writer.drain()
+    except (ConnectionError, asyncio.IncompleteReadError):
+      pass
+    finally:
+      writer.close()
+      try:
+        await writer.wait_closed()
+      except ConnectionError:
+        pass
+      handlers.discard(task)
+
+  server = await asyncio.start_server(serve_health, "127.0.0.1", 0)
+  try:
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(
+      runtime_status.settings, "market_gateway_url", f"http://127.0.0.1:{port}"
+    )
+    status = await runtime_status._market_gateway_status()
+    assert status["status"] == "ready"
+    assert status["statusCode"] == 200
+    assert status["reasonCode"] is None
+  finally:
+    server.close()
+    await server.wait_closed()
+    pending = list(handlers)
+    for task in pending:
+      task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def test_liveness_does_not_check_dependencies(monkeypatch):

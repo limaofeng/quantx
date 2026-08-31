@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from quantx_contracts.market_health import MarketGatewayHealth, MarketHealthReason
+from quantx_contracts.market_health import (
+  MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS,
+  MarketGatewayHealth,
+  MarketHealthReason,
+)
 from quantx_infrastructure.core.data.market_stream_transport import (
   market_stream_store,
 )
@@ -18,7 +22,6 @@ from quantx_infrastructure.services.trading_time_service import TradingTimeServi
 
 from quantx_api.agent_api import active_market_stream_id, market_agent_router
 
-MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS = 1.0
 _trading_time = TradingTimeService()
 
 
@@ -59,6 +62,8 @@ async def market_supply_health() -> MarketGatewayHealth:
   """Read bounded upstream facts; never ask Engine or account readiness."""
   stream_id = active_market_stream_id()
   values = {
+    "component": "market-gateway",
+    "protocol": "quantx.market.v2",
     "connected_devices": int(bool(stream_id)),
     "sequence": 0,
     "instrument_count": 0,
@@ -72,20 +77,19 @@ async def market_supply_health() -> MarketGatewayHealth:
 
   if not stream_id:
     return unavailable(MarketHealthReason.STREAM_OFFLINE)
+  deadline = (
+    asyncio.get_running_loop().time() + MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS
+  )
   try:
-    trading = await asyncio.wait_for(
-      _trading_time.is_trading_hours("SH", time_utils.now()),
-      timeout=MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS,
-    )
+    async with asyncio.timeout_at(deadline):
+      trading = await _trading_time.is_trading_hours("SH", time_utils.now())
   except Exception:
     return unavailable(MarketHealthReason.CALENDAR_UNAVAILABLE)
   values["trading_session"] = trading
   # Read the expiring lease last, so a slow calendar read cannot preserve it.
   try:
-    state, lease = await asyncio.wait_for(
-      market_stream_store.state_with_freshness(),
-      timeout=MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS,
-    )
+    async with asyncio.timeout_at(deadline):
+      state, lease = await market_stream_store.state_with_freshness()
   except Exception:
     return unavailable(MarketHealthReason.REDIS_UNAVAILABLE)
   if active_market_stream_id() != stream_id:

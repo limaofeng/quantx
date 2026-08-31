@@ -12,6 +12,8 @@ from quantx_monitor.targets import TARGET_BY_ID
 
 def health_payload(ready=True):
   return MarketGatewayHealth(
+    component="market-gateway",
+    protocol="quantx.market.v2",
     status="ready" if ready else "not_ready",
     reason_code=None if ready else "MARKET_STREAM_STALE",
     connected_devices=1,
@@ -59,6 +61,17 @@ def test_gateway_protocol_is_strict_and_does_not_expose_arbitrary_reasons(
 ):
   result = market_gateway_status(httpx.Response(status), payload)
   assert result == (MonitorStatus.UNAVAILABLE, "PROTOCOL_ERROR")
+
+
+@pytest.mark.parametrize("ready", [True, False])
+@pytest.mark.parametrize("missing", ["component", "protocol"])
+def test_gateway_probe_does_not_fill_missing_identity(ready, missing):
+  payload = health_payload(ready)
+  del payload[missing]
+  assert market_gateway_status(httpx.Response(200 if ready else 503), payload) == (
+    MonitorStatus.UNAVAILABLE,
+    "PROTOCOL_ERROR",
+  )
 
 
 async def test_gateway_connection_failure_has_no_http_latency():

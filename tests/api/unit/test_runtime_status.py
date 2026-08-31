@@ -3,8 +3,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from quantx_api import agent_api, runtime_status
+from quantx_contracts.market_health import MARKET_GATEWAY_HTTP_TIMEOUT_SECONDS
 from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamFreshnessLease,
   MarketStreamState,
@@ -72,7 +74,10 @@ async def test_market_gateway_status_uses_readiness_endpoint(
 
   status = await runtime_status._market_gateway_status()
 
-  assert calls["client_kwargs"] == {"timeout": 1.0, "trust_env": False}
+  assert calls["client_kwargs"] == {
+    "timeout": MARKET_GATEWAY_HTTP_TIMEOUT_SECONDS,
+    "trust_env": False,
+  }
   assert calls["url"] == "http://127.0.0.1:18082/health/ready"
   assert status == {**gateway_payload(), "statusCode": 200}
 
@@ -110,6 +115,26 @@ async def test_market_gateway_status_rejects_non_ready_payload(
     **gateway_payload("not_ready"),
     "status": "unavailable",
     "statusCode": 503,
+  }
+
+
+@pytest.mark.parametrize("ready", [True, False])
+@pytest.mark.parametrize("missing", ["component", "protocol"])
+async def test_market_gateway_projection_does_not_fill_missing_identity(
+  monkeypatch, ready, missing
+):
+  payload = gateway_payload("ready" if ready else "not_ready")
+  del payload[missing]
+  client = httpx.AsyncClient(
+    transport=httpx.MockTransport(
+      lambda request: httpx.Response(200 if ready else 503, json=payload)
+    )
+  )
+  monkeypatch.setattr(runtime_status.httpx, "AsyncClient", lambda **kwargs: client)
+  assert await runtime_status._market_gateway_status() == {
+    "status": "unavailable",
+    "reasonCode": "MARKET_GATEWAY_UNAVAILABLE",
+    "error": "ValidationError",
   }
 
 

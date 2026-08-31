@@ -6,6 +6,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
+# One deadline covers all readiness dependencies; HTTP callers retain transport slack.
+MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS = 2.0
+MARKET_GATEWAY_HTTP_TIMEOUT_SECONDS = MARKET_GATEWAY_READINESS_TIMEOUT_SECONDS + 1.0
+
 
 class MarketHealthReason(StrEnum):
   STREAM_OFFLINE = "MARKET_STREAM_OFFLINE"
@@ -24,8 +28,8 @@ class MarketGatewayHealth(BaseModel):
     allow_inf_nan=False,
   )
 
-  component: Literal["market-gateway"] = "market-gateway"
-  protocol: Literal["quantx.market.v2"] = "quantx.market.v2"
+  component: Literal["market-gateway"]
+  protocol: Literal["quantx.market.v2"]
   status: Literal["ready", "not_ready"]
   reason_code: MarketHealthReason | None
   connected_devices: int = Field(ge=0, le=1)

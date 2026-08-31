@@ -26,6 +26,11 @@ Market Gateway 的供给健康快照，不触发 API 的账户、Engine 或 Pref
 可用性、延迟和事故历史不在 API 内实现，由独立 `quantx-monitor` 通过
 `/monitor/*` 提供；它不参与 API readiness 或交易门禁。
 
+网关健康响应必须显式携带 `component=market-gateway` 与
+`protocol=quantx.market.v2`；API 和 Monitor 不会为缺失字段补默认值。日历与 Redis
+检查共用一次 2 秒的单调时钟截止时间，Redis 新鲜度租约仍最后读取；API 的 HTTP
+等待预算为 3 秒，包含传输余量。预算定义统一位于 `quantx_contracts.market_health`。
+
 ## 代码边界
 
 - API mutation 只创建应用命令或持久化消息，不同步宣称成交。

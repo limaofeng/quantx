@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
-from quantx_contracts.market_health import MarketGatewayHealth
+from quantx_contracts.market_health import (
+  MARKET_GATEWAY_HTTP_TIMEOUT_SECONDS,
+  MarketGatewayHealth,
+)
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.data.market_stream_transport import (
   market_stream_store,
@@ -431,7 +434,9 @@ async def _prefect_status() -> dict[str, Any]:
 
 async def _market_gateway_status() -> dict[str, Any]:
   try:
-    async with httpx.AsyncClient(timeout=1.0, trust_env=False) as client:
+    async with httpx.AsyncClient(
+      timeout=MARKET_GATEWAY_HTTP_TIMEOUT_SECONDS, trust_env=False
+    ) as client:
       response = await client.get(
         f"{settings.market_gateway_url.rstrip('/')}/health/ready"
       )
