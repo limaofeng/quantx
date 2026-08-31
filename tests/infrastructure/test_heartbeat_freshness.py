@@ -359,6 +359,58 @@ async def test_account_status_prefers_the_single_fresh_live_agent(
   assert result["can_increase_risk"] is True
 
 
+@pytest.mark.parametrize(
+  ("window_active", "working_orders", "expected_message"),
+  [
+    (False, 0, "活动委托 0 笔；需建立实盘窗口确认这些历史交易"),
+    (True, 0, "实盘窗口后新增手工/外部委托 1 笔、成交 1 笔"),
+    (False, 2, "仍有 2 笔 QMT 手工/外部活动委托"),
+  ],
+)
+@pytest.mark.asyncio
+async def test_external_activity_explains_confirmation_without_relaxing_gates(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+  window_active: bool,
+  working_orders: int,
+  expected_message: str,
+) -> None:
+  control = _control(fixed_utcnow)
+  control.authorization_state = "PAUSED"
+  control.controlled_window_active = window_active
+  control.controlled_window_snapshot_id = "earlier-snapshot" if window_active else None
+  agent = _agent(fixed_utcnow)
+  agent.details["accountReconciliation"]["TEST-ACCOUNT"].update(
+    externalOrderCount=1,
+    externalTradeCount=1,
+    newExternalOrderCount=1,
+    newExternalTradeCount=1,
+    workingExternalOrderCount=working_orders,
+  )
+
+  result = await _status(monkeypatch, [(
+    control,
+    SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+    _device("device-1"),
+    agent,
+    0,
+    None,
+    0,
+    0,
+  )])
+
+  checks = {item["code"]: item for item in result["checks"]}
+  assert checks["NO_EXTERNAL_BROKER_ACTIVITY"]["status"] == "FAILED"
+  assert expected_message in checks["NO_EXTERNAL_BROKER_ACTIVITY"]["message"]
+  assert "需人工启用" in checks["ACCOUNT_RISK_INCREASE_AUTHORIZED"]["message"]
+  assert result["authorization_state"] == "PAUSED"
+  assert result["can_increase_risk"] is False
+  assert result["can_activate_automation"] is False
+  assert result["can_reduce_risk"] is True
+  assert control.controlled_window_active is window_active
+  assert control.state_version == 4
+
+
 @pytest.mark.asyncio
 async def test_incomplete_marker_never_refreshes_snapshot_freshness(
   monkeypatch: pytest.MonkeyPatch,

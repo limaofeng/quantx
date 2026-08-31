@@ -104,7 +104,7 @@ from quantx_infrastructure.services.trade_intent_processor import (
 )
 from quantx_infrastructure.services.trade_service import TradeService
 from sqlalchemy import and_, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import aliased
 
@@ -117,6 +117,7 @@ logger = logging.getLogger(__name__)
 
 _DATABASE_CONTENTION_RETRY_SECONDS = 0.25
 _DATABASE_CONTENTION_MAX_RETRY_SECONDS = 2.0
+_RETRYABLE_DATABASE_SQLSTATES = frozenset({"55P03", "40P01", "40001"})
 
 # Production owns a single Engine report consumer, while this lock also makes
 # direct/test drain calls obey the same invariant. Recovery of PROCESSING rows
@@ -165,6 +166,27 @@ _ZERO_FILL_RECONCILABLE_ORDER_STATUSES = {"CANCELLED", "EXPIRED"}
 
 class RetryableReportError(RuntimeError):
   pass
+
+
+def _database_sqlstate(error: DBAPIError) -> str:
+  value = getattr(error.orig, "sqlstate", None)
+  return value if isinstance(value, str) and len(value) == 5 else "UNKNOWN"
+
+
+def _retryable_database_error(error: Exception) -> bool:
+  return isinstance(error, SQLAlchemyTimeoutError) or (
+    isinstance(error, DBAPIError)
+    and _database_sqlstate(error) in _RETRYABLE_DATABASE_SQLSTATES
+  )
+
+
+def _report_error_text(error: Exception) -> str:
+  # SQLAlchemy includes SQL and bound account data in str(DBAPIError).
+  if isinstance(error, DBAPIError):
+    return f"{type(error).__name__}: SQLSTATE={_database_sqlstate(error)}"
+  if isinstance(error, SQLAlchemyTimeoutError):
+    return "database connection pool timeout"
+  return str(error)[:2000]
 
 
 @dataclass(frozen=True)
@@ -4556,18 +4578,102 @@ async def _recover_stuck_runtime_events(
     await db.commit()
 
 
-async def _supersede_prior_complete_snapshot_failures(
+def _obsolete_unavailable_snapshot(
+  payload: dict[str, Any],
+  *,
+  covered_accounts: set[str],
+  current_payload: dict[str, Any],
+) -> bool:
+  """Recognize an older failed status observation with no broker facts."""
+
+  fact_fields = {
+    "accounts",
+    "positions_by_account",
+    "positions",
+    "position_deltas",
+    "orders",
+    "trades",
+    "order_errors",
+    "cancel_errors",
+  }
+  observation_fields = {
+    "account_id",
+    "sequence",
+    "source_sequence",
+    "source_event_at",
+    "snapshot_id",
+    "snapshot_hash",
+    "report_id",
+    "is_complete",
+    "mode",
+    "unavailable_accounts",
+    "section_completeness_by_account",
+    "snapshot_authority_by_account",
+    AGENT_SERVER_SESSION_PAYLOAD_KEY,
+  }
+  if (
+    payload.get("is_complete") is not False
+    or not set(payload).issubset(fact_fields | observation_fields)
+    or any(payload.get(key) not in (None, [], {}) for key in fact_fields)
+  ):
+    return False
+  authorities = payload.get("snapshot_authority_by_account")
+  sections = payload.get("section_completeness_by_account")
+  unavailable = payload.get("unavailable_accounts")
+  if (
+    not isinstance(authorities, dict)
+    or not isinstance(sections, dict)
+    or not isinstance(unavailable, list)
+    or any(not isinstance(value, str) for value in unavailable)
+    or set(unavailable) != covered_accounts
+    or set(authorities) != covered_accounts
+    or set(sections) != covered_accounts
+  ):
+    return False
+  for account_id in covered_accounts:
+    authority = authorities[account_id]
+    account_sections = sections[account_id]
+    if (
+      not isinstance(authority, dict)
+      or authority.get("snapshot_eligible") is not False
+      or not isinstance(account_sections, dict)
+      or any(
+        account_sections.get(section) is not False
+        for section in _REQUIRED_SNAPSHOT_SECTIONS
+      )
+    ):
+      return False
+  if not payload.get("source_event_at") or not current_payload.get("source_event_at"):
+    return False
+  try:
+    failed_at = to_naive_utc(
+      _parse_authoritative_snapshot_time(payload["source_event_at"])
+    )
+    current_at = to_naive_utc(
+      _parse_authoritative_snapshot_time(current_payload["source_event_at"])
+    )
+    return (
+      failed_at < current_at <= utcnow()
+      and _parse_authoritative_snapshot_sequence(payload)
+      < _parse_authoritative_snapshot_sequence(current_payload)
+    )
+  except (TypeError, ValueError, OverflowError, OSError):
+    return False
+
+
+async def _supersede_prior_snapshot_failures(
   db,
   report: AgentReportInbox,
   *,
   resolved_at: datetime,
 ) -> int:
-  """Close obsolete full-snapshot dead letters after newer state converges.
+  """Close obsolete snapshot dead letters after newer state converges.
 
   Complete protocol 1.1 snapshots are authoritative account-state checkpoints.
   Once a newer checkpoint for the same device and accounts succeeds, an older
-  failed complete snapshot no longer represents an unresolved state gap. The
-  raw report and its error remain stored with a SUPERSEDED audit status.
+  failed complete snapshot or fact-free unavailable observation no longer
+  represents an unresolved state gap. Partial broker facts and incremental
+  reports are never discarded. Original reports and errors remain in audit.
   """
   payload = dict(report.payload or {})
   current_accounts = _report_account_ids(payload)
@@ -4595,13 +4701,21 @@ async def _supersede_prior_complete_snapshot_failures(
     .scalars()
     .all()
   )
-  superseded = [
-    item
-    for item in failures
-    if (covered_accounts := _report_account_ids(dict(item.payload or {})))
-    and covered_accounts.issubset(current_accounts)
-    and bool(dict(item.payload or {}).get("is_complete"))
-  ]
+  superseded = []
+  for item in failures:
+    failed_payload = dict(item.payload or {})
+    try:
+      covered_accounts = _report_account_ids(failed_payload)
+    except RetryableReportError:
+      continue
+    if not covered_accounts or not covered_accounts.issubset(current_accounts):
+      continue
+    if failed_payload.get("is_complete") is True or _obsolete_unavailable_snapshot(
+      failed_payload,
+      covered_accounts=covered_accounts,
+      current_payload=payload,
+    ):
+      superseded.append(item)
   if not superseded:
     return 0
   message_ids = [item.message_id for item in superseded]
@@ -4620,7 +4734,10 @@ async def _supersede_prior_complete_snapshot_failures(
       status="RESOLVED",
       resolved_by="SYSTEM_RECONCILIATION",
       resolved_at=resolved_at,
-      resolution=("后续协议 1.1 完整账户快照已成功收敛；旧失败快照已由权威状态取代"),
+      resolution=(
+        "后续协议 1.1 完整账户快照已成功收敛；旧失败快照或无交易事实的不可用观测"
+        f"已由权威状态取代，原始失败记录保留。快照：{payload['snapshot_id']}"
+      ),
     )
   )
   return len(superseded)
@@ -4641,7 +4758,7 @@ async def _finish(
       report.processed_at = finished_at
       report.processing_error = None
       report.next_attempt_at = None
-      superseded_count = await _supersede_prior_complete_snapshot_failures(
+      superseded_count = await _supersede_prior_snapshot_failures(
         db,
         report,
         resolved_at=finished_at,
@@ -4653,8 +4770,11 @@ async def _finish(
         )
     else:
       attempts = int(report.processing_attempts or 1)
-      report.processing_error = str(error)[:2000]
-      if attempts >= 10 or not isinstance(error, RetryableReportError):
+      report.processing_error = _report_error_text(error)
+      retryable = isinstance(error, RetryableReportError) or _retryable_database_error(
+        error
+      )
+      if attempts >= 10 or not retryable:
         report.processing_status = "FAILED"
         account_ids = sorted(_report_account_ids(dict(report.payload or {})))
         for account_id in account_ids or [None]:
@@ -4675,7 +4795,7 @@ async def _finish(
               "payload_hash": report.raw_payload_hash,
               "attempts": attempts,
               "error_class": error.__class__.__name__,
-              "error": str(error)[:2000],
+              "error": _report_error_text(error),
             },
             commit=False,
           )
@@ -4708,12 +4828,14 @@ async def _recover_consumer_state(stopped: asyncio.Event) -> bool:
       await _recover_stuck_reports()
       await _recover_stuck_runtime_events()
       return True
-    except SQLAlchemyTimeoutError as exc:
+    except (SQLAlchemyTimeoutError, DBAPIError) as exc:
+      if not _retryable_database_error(exc):
+        raise
       logger.warning(
-        "Engine report recovery deferred by database pool contention: "
+        "Engine report recovery deferred by database contention: "
         "retry_in=%.2fs error=%s",
         delay,
-        exc,
+        _report_error_text(exc),
       )
       if await _wait_for_database_retry(stopped, delay=delay):
         return False
@@ -4734,13 +4856,15 @@ async def _finish_with_database_retry(
     try:
       await _finish(message_id, error=error)
       return True
-    except SQLAlchemyTimeoutError as exc:
+    except (SQLAlchemyTimeoutError, DBAPIError) as exc:
+      if not _retryable_database_error(exc):
+        raise
       logger.warning(
-        "Engine report completion deferred by database pool contention: "
+        "Engine report completion deferred by database contention: "
         "message_id=%s retry_in=%.2fs error=%s",
         message_id,
         delay,
-        exc,
+        _report_error_text(exc),
       )
       if await _wait_for_database_retry(stopped, delay=delay):
         return False
@@ -4805,12 +4929,14 @@ async def run_report_consumer(stopped: asyncio.Event) -> None:
     while not stopped.is_set():
       try:
         message_id = await _claim()
-      except SQLAlchemyTimeoutError as exc:
+      except (SQLAlchemyTimeoutError, DBAPIError) as exc:
+        if not _retryable_database_error(exc):
+          raise
         logger.warning(
-          "Engine report claim deferred by database pool contention: "
+          "Engine report claim deferred by database contention: "
           "retry_in=%.2fs error=%s",
           retry_delay,
-          exc,
+          _report_error_text(exc),
         )
         if await _wait_for_database_retry(stopped, delay=retry_delay):
           return
@@ -4860,31 +4986,24 @@ async def run_report_consumer(stopped: asyncio.Event) -> None:
             await redis_pubsub.publish(TRADING_EVENT_CHANNEL, event)
           except Exception as exc:
             logger.debug("Redis wake-up failed: %s", exc.__class__.__name__)
-      except SQLAlchemyTimeoutError as exc:
-        retryable_error = RetryableReportError(
-          f"database pool contention while applying Agent report: {exc}"
-        )
-        logger.warning(
-          "Agent report deferred by database pool contention: message_id=%s error=%s",
-          message_id,
-          exc,
-        )
-        if not await _finish_with_database_retry(
-          stopped,
-          message_id,
-          error=retryable_error,
-        ):
-          return
       except Exception as exc:
+        error = (
+          RetryableReportError(
+            "database contention while applying Agent report: "
+            + _report_error_text(exc)
+          )
+          if _retryable_database_error(exc)
+          else exc
+        )
         logger.warning(
           "Agent report processing failed: message_id=%s error=%s",
           message_id,
-          exc,
+          _report_error_text(error),
         )
         if not await _finish_with_database_retry(
           stopped,
           message_id,
-          error=exc,
+          error=error,
         ):
           return
   finally:

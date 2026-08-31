@@ -768,6 +768,22 @@ class AccountExecutionSafetyService:
     authorization_state = str(
       control.authorization_state if control else "DISABLED"
     ).upper()
+    if working_external_order_count:
+      external_activity_message = (
+        f"仍有 {working_external_order_count} 笔 QMT 手工/外部活动委托；"
+        "需先等待委托结束，再确认账户实盘窗口"
+      )
+    elif controlled_window_active:
+      external_activity_message = (
+        f"实盘窗口后新增手工/外部委托 {new_external_order_count} 笔、"
+        f"成交 {new_external_trade_count} 笔；需重新确认账户实盘窗口"
+      )
+    else:
+      external_activity_message = (
+        f"当前快照包含手工/外部委托 {external_order_count} 笔、"
+        f"成交 {external_trade_count} 笔，活动委托 0 笔；"
+        "需建立实盘窗口确认这些历史交易"
+      )
 
     binary_checks = [
       (
@@ -856,7 +872,7 @@ class AccountExecutionSafetyService:
       (
         "CONTROLLED_WINDOW_ACTIVE",
         controlled_window_active,
-        "尚未基于最新完整快照建立账户实盘窗口",
+        "尚未基于最新完整快照建立账户实盘窗口；需人工确认，不会自动建立",
         "INCREASE_RISK",
       ),
       (
@@ -864,7 +880,7 @@ class AccountExecutionSafetyService:
         new_external_order_count == 0
         and new_external_trade_count == 0
         and working_external_order_count == 0,
-        "账户实盘窗口后出现新的 QMT 手工/外部交易或仍有活动委托",
+        external_activity_message,
         "INCREASE_RISK",
       ),
       (
@@ -876,7 +892,7 @@ class AccountExecutionSafetyService:
       (
         _AUTHORIZATION_CHECK,
         authorization_state == "ENABLED",
-        "账户买入权限未启用",
+        "账户买入权限未启用；其他准入条件通过后需人工启用",
         "INCREASE_RISK",
       ),
     ]
