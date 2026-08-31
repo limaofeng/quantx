@@ -36,7 +36,6 @@ export interface AppRouteConfig {
   importer: RouteImporter;
   skeleton?: RouteSkeletonVariant;
   nav?: RouteNavConfig;
-  preload?: boolean;
 }
 
 export interface NavigationItem {
@@ -53,8 +52,8 @@ export interface NavigationGroup {
 
 type RouteDefinition = Omit<AppRouteConfig, 'component'>;
 
-const MAIN_GROUP = '‰∏ªËèúÂçï';
-const SETTINGS_GROUP = 'Á≥ªÁªüËÆæÁΩÆ';
+const MAIN_GROUP = '÷˜≤Àµ•';
+const SETTINGS_GROUP = 'œµÕ≥…Ë÷√';
 
 function toDefaultExport<T extends Record<string, unknown>>(
   importModule: () => Promise<T>,
@@ -68,7 +67,7 @@ function toDefaultExport<T extends Record<string, unknown>>(
 
 function route(definition: RouteDefinition): AppRouteConfig {
   const title =
-    typeof definition.title === 'string' ? definition.title : 'È°µÈù¢';
+    typeof definition.title === 'string' ? definition.title : '“≥√Ê';
 
   return {
     ...definition,
@@ -83,15 +82,14 @@ function route(definition: RouteDefinition): AppRouteConfig {
 export const appRoutes: AppRouteConfig[] = [
   route({
     path: '/',
-    title: 'Ë°åÊÉÖÂ∑•‰ΩúÂè∞',
+    title: '––«Èπ§◊˜Ã®',
     importer: toDefaultExport(
-      () => import('@/features/dashboard'),
-      'MarketShortcutsPage'
+      () => import('@/features/dashboard/pages/MarketShortcutsPage'),
+      'default'
     ),
     skeleton: 'studio',
-    preload: true,
     nav: {
-      label: 'Ë°åÊÉÖ',
+      label: '––«È',
       icon: MarketWorkbenchIcon,
       group: MAIN_GROUP,
       order: 10,
@@ -99,16 +97,16 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/market/indices',
-    title: 'ÂÖ®ÈÉ®ÊåáÊï∞',
+    title: '»´≤ø÷∏ ˝',
     importer: toDefaultExport(
-      () => import('@/features/dashboard'),
-      'MarketIndicesPage'
+      () => import('@/features/dashboard/pages/MarketIndicesPage'),
+      'default'
     ),
     skeleton: 'table',
   }),
   route({
     path: '/market-shortcuts',
-    title: 'Ë°åÊÉÖÂ∑•‰ΩúÂè∞',
+    title: '––«Èπ§◊˜Ã®',
     importer: toDefaultExport(
       () => import('./redirects'),
       'MarketWorkbenchRedirect'
@@ -117,15 +115,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/watchlist',
-    title: 'Ëá™ÈÄâ',
+    title: '◊‘—°',
     importer: toDefaultExport(
-      () => import('@/features/watchlist'),
-      'WatchlistPage'
+      () => import('@/features/watchlist/pages/WatchlistPage'),
+      'default'
     ),
     skeleton: 'table',
-    preload: true,
     nav: {
-      label: 'Ëá™ÈÄâ',
+      label: '◊‘—°',
       icon: WatchlistIcon,
       group: MAIN_GROUP,
       order: 15,
@@ -133,15 +130,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/holdings',
-    title: 'ÊåÅ‰ªì',
+    title: '≥÷≤÷',
     importer: toDefaultExport(
-      () => import('@/features/trading'),
-      'TradingPage'
+      () => import('@/features/trading/pages/TradingPage'),
+      'default'
     ),
     skeleton: 'dashboard',
-    preload: true,
     nav: {
-      label: 'ÊåÅ‰ªì',
+      label: '≥÷≤÷',
       icon: PortfolioHoldingsIcon,
       group: MAIN_GROUP,
       order: 20,
@@ -149,23 +145,23 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/account',
-    title: 'Ë¥¶Êà∑Ê¶ÇËßà',
+    title: '’Àªß∏≈¿¿',
     importer: toDefaultExport(
-      () => import('@/features/account'),
+      () => import('@/features/account/pages/AccountPage'),
       'AccountPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/entry-plans',
-    title: '‰π∞ÂÖ•ÁÆ°ÁêÜ',
+    title: '¬Ú»Îπ‹¿Ì',
     importer: toDefaultExport(
-      () => import('@/features/entry-plans'),
+      () => import('@/features/entry-plans/pages/ConnectedEntryPlansPage'),
       'ConnectedEntryPlansPage'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: '‰π∞ÂÖ•ÁÆ°ÁêÜ',
+      label: '¬Ú»Îπ‹¿Ì',
       icon: BuyManagementIcon,
       group: MAIN_GROUP,
       order: 25,
@@ -173,14 +169,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/t-trade',
-    title: 'ÂÅöTÂä©Êâã',
+    title: '◊ˆT÷˙ ÷',
     importer: toDefaultExport(
       () => import('@/features/portfolio/pages/TTradeGlobalPage'),
       'TTradeGlobalPage'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: 'ÂÅöTÂä©Êâã',
+      label: '◊ˆT÷˙ ÷',
       icon: TTradeCycleIcon,
       group: MAIN_GROUP,
       order: 30,
@@ -188,15 +184,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/limit-up-board',
-    title: 'ÊâìÊùøÂä©Êâã',
+    title: '¥Ú∞Â÷˙ ÷',
     importer: toDefaultExport(
-      () => import('@/features/strategies'),
-      'LimitUpBoardPage'
+      () => import('@/features/strategies/pages/LimitUpBoardPage'),
+      'default'
     ),
     skeleton: 'dashboard',
-    preload: true,
     nav: {
-      label: 'ÊâìÊùøÂä©Êâã',
+      label: '¥Ú∞Â÷˙ ÷',
       icon: LimitUpBoardIcon,
       group: MAIN_GROUP,
       order: 35,
@@ -204,14 +199,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/liquidation',
-    title: 'ÂçñÂá∫ÁÆ°ÁêÜ',
+    title: '¬Ù≥ˆπ‹¿Ì',
     importer: toDefaultExport(
-      () => import('@/features/portfolio'),
+      () => import('@/features/portfolio/pages/LiquidationPage'),
       'LiquidationPage'
     ),
     skeleton: 'table',
     nav: {
-      label: 'ÂçñÂá∫ÁÆ°ÁêÜ',
+      label: '¬Ù≥ˆπ‹¿Ì',
       icon: SellManagementIcon,
       group: MAIN_GROUP,
       order: 40,
@@ -219,15 +214,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/strategies',
-    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
+    title: '≤ﬂ¬‘π‹¿Ì',
     importer: toDefaultExport(
-      () => import('@/features/strategies'),
-      'StrategiesPage'
+      () => import('@/features/strategies/pages/StrategiesPage'),
+      'default'
     ),
     skeleton: 'dashboard',
-    preload: true,
     nav: {
-      label: 'Á≠ñÁï•ÁÆ°ÁêÜ',
+      label: '≤ﬂ¬‘π‹¿Ì',
       icon: StrategyManagementIcon,
       group: MAIN_GROUP,
       order: 50,
@@ -235,37 +229,37 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/strategies/run',
-    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
+    title: '≤ﬂ¬‘π‹¿Ì',
     importer: toDefaultExport(
-      () => import('@/features/strategies'),
-      'StrategyRunPage'
+      () => import('@/features/strategies/pages/StrategyRunPage'),
+      'default'
     ),
     skeleton: 'form',
   }),
   route({
     path: '/strategies/:strategyId/run',
-    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
+    title: '≤ﬂ¬‘π‹¿Ì',
     importer: toDefaultExport(
-      () => import('@/features/strategies'),
-      'StrategyRunPage'
+      () => import('@/features/strategies/pages/StrategyRunPage'),
+      'default'
     ),
     skeleton: 'form',
   }),
   route({
     path: '/strategies/:strategyId/runs/:runId',
-    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
+    title: '≤ﬂ¬‘π‹¿Ì',
     importer: toDefaultExport(
-      () => import('@/features/strategies'),
-      'StrategyDetailPage'
+      () => import('@/features/strategies/pages/StrategyDetailPage'),
+      'default'
     ),
     skeleton: 'detail',
   }),
   route({
     path: '/strategies/:strategyId',
-    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
+    title: '≤ﬂ¬‘π‹¿Ì',
     importer: toDefaultExport(
-      () => import('@/features/strategies'),
-      'StrategyDetailPage'
+      () => import('@/features/strategies/pages/StrategyDetailPage'),
+      'default'
     ),
     skeleton: 'detail',
   }),
@@ -273,27 +267,27 @@ export const appRoutes: AppRouteConfig[] = [
     path: '/research/:studyId/:version/runs/:runId',
     title: pathname => {
       const runId = normalizePath(pathname).split('/').filter(Boolean)[4];
-      if (!runId) return 'Á†îÁ©∂ËØ¶ÊÉÖ';
+      if (!runId) return '—–æøœÍ«È';
       const decoded = safeDecodeURIComponent(runId);
       const suffix = decoded.length > 12 ? decoded.slice(-12) : decoded;
-      return `Á†îÁ©∂ ${suffix}`;
+      return `—–æø ${suffix}`;
     },
     importer: toDefaultExport(
-      () => import('@/features/research'),
-      'ResearchRunDetailPage'
+      () => import('@/features/research/pages/ResearchRunDetailPage'),
+      'default'
     ),
     skeleton: 'detail',
   }),
   route({
     path: '/research',
-    title: 'Á†îÁ©∂‰∏≠ÂøÉ',
+    title: '—–æø÷––ƒ',
     importer: toDefaultExport(
-      () => import('@/features/research'),
-      'ResearchCenterPage'
+      () => import('@/features/research/pages/ResearchCenterPage'),
+      'default'
     ),
     skeleton: 'table',
     nav: {
-      label: 'Á†îÁ©∂‰∏≠ÂøÉ',
+      label: '—–æø÷––ƒ',
       icon: MarketResearchIcon,
       group: MAIN_GROUP,
       order: 55,
@@ -301,14 +295,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/screening',
-    title: 'ÈÄâËÇ°',
+    title: '—°π…',
     importer: toDefaultExport(
-      () => import('@/features/screening'),
-      'StockScreeningPage'
+      () => import('@/features/screening/pages/StockScreeningPage'),
+      'default'
     ),
     skeleton: 'table',
     nav: {
-      label: 'ÈÄâËÇ°',
+      label: '—°π…',
       icon: StockScreeningIcon,
       group: MAIN_GROUP,
       order: 60,
@@ -316,23 +310,23 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/stock/:stockCode',
-    title: '‰∏™ËÇ°ËØ¶ÊÉÖ',
+    title: '∏ˆπ…œÍ«È',
     importer: toDefaultExport(
-      () => import('@/features/stocks'),
-      'StockDetailPage'
+      () => import('@/features/stocks/pages/StockDetailPage'),
+      'default'
     ),
     skeleton: 'detail',
   }),
   route({
     path: '/settings',
-    title: 'Á≥ªÁªüËÆæÁΩÆ',
+    title: 'œµÕ≥…Ë÷√',
     importer: toDefaultExport(
-      () => import('@/features/settings'),
+      () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: 'Á≥ªÁªüËÆæÁΩÆ',
+      label: 'œµÕ≥…Ë÷√',
       icon: ControlSettingsIcon,
       group: SETTINGS_GROUP,
       order: 10,
@@ -340,52 +334,52 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/status/:targetId/history',
-    title: 'ÊúçÂä°ÂéÜÂè≤',
+    title: '∑˛ŒÒ¿˙ ∑',
     importer: toDefaultExport(
-      () => import('@/features/settings'),
+      () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
     ),
     skeleton: 'detail',
   }),
   route({
     path: '/settings/status',
-    title: 'ÊúçÂä°Áä∂ÊÄÅ',
+    title: '∑˛ŒÒ◊¥Ã¨',
     importer: toDefaultExport(
-      () => import('@/features/settings'),
+      () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/trading-safety',
-    title: '‰∫§ÊòìÂÆâÂÖ®',
+    title: 'Ωª“◊∞≤»´',
     importer: toDefaultExport(
-      () => import('@/features/settings'),
+      () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/qmt',
-    title: 'Á≥ªÁªüËÆæÁΩÆ',
+    title: 'œµÕ≥…Ë÷√',
     importer: toDefaultExport(
-      () => import('@/features/settings'),
+      () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/ai-runtime',
-    title: 'Á≥ªÁªüËÆæÁΩÆ',
+    title: 'œµÕ≥…Ë÷√',
     importer: toDefaultExport(
-      () => import('@/features/settings'),
+      () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/agents',
-    title: 'Á≥ªÁªüËÆæÁΩÆ',
+    title: 'œµÕ≥…Ë÷√',
     importer: toDefaultExport(
       () => import('./redirects'),
       'LegacyAgentSettingsRedirect'
@@ -394,117 +388,117 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data',
-    title: 'Êï∞ÊçÆÁÆ°ÁêÜÈó®Êà∑',
+    title: ' ˝æ›π‹¿Ì√≈ªß',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/DataManagementPage'),
       'DataManagementPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/data/market',
-    title: 'ÂÖ®Â∏ÇÂú∫Êï∞ÊçÆ',
+    title: '»´ –≥° ˝æ›',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/MarketPage'),
       'ComprehensiveMarketPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/data/stocks',
-    title: '‰∏™ËÇ°Êï∞ÊçÆ',
+    title: '∏ˆπ… ˝æ›',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/StockDataIndexPage'),
       'StockDataIndexPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/data/sectors',
-    title: 'ÊùøÂùóÊï∞ÊçÆÁÆ°ÁêÜ',
+    title: '∞ÂøÈ ˝æ›π‹¿Ì',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/SectorDataPage'),
       'SectorDataPage'
     ),
     skeleton: 'table',
   }),
   route({
     path: '/settings/data/holdings',
-    title: 'ÊåÅ‰ªìÊï∞ÊçÆÂêåÊ≠•',
+    title: '≥÷≤÷ ˝æ›Õ¨≤Ω',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/HoldingsDataSyncPage'),
       'HoldingsDataSyncPage'
     ),
     skeleton: 'table',
   }),
   route({
     path: '/settings/data/calendar',
-    title: '‰∫§ÊòìÊó•ÂéÜ',
+    title: 'Ωª“◊»’¿˙',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/TradingCalendarPage'),
       'TradingCalendarPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/data/reverse-repo',
-    title: 'ÈÄÜÂõûË¥≠Êï∞ÊçÆ',
+    title: 'ƒÊªÿπ∫ ˝æ›',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/ReverseRepoDataPage'),
       'ReverseRepoDataPage'
     ),
     skeleton: 'table',
   }),
   route({
     path: '/settings/data/transactions',
-    title: '‰∫§ÊòìÊµÅÊ∞¥Êï∞ÊçÆ',
+    title: 'Ωª“◊¡˜ÀÆ ˝æ›',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/TransactionDataPage'),
       'TransactionDataPage'
     ),
     skeleton: 'table',
   }),
   route({
     path: '/settings/data/financial',
-    title: 'Ë¥¢Âä°Êï∞ÊçÆ',
+    title: '≤∆ŒÒ ˝æ›',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/FinancialDataPage'),
       'FinancialDataPage'
     ),
     skeleton: 'table',
   }),
   route({
     path: '/settings/data/market-data',
-    title: 'KÁ∫øÊâπÈáèÂêåÊ≠•',
+    title: 'Kœﬂ≈˙¡øÕ¨≤Ω',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/DailyMarketDataSyncPage'),
       'DailyMarketDataSyncPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/data/announcements',
-    title: 'ÂÖ¨ÂëäÂêåÊ≠•',
+    title: 'π´∏ÊÕ¨≤Ω',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/AnnouncementSyncPage'),
       'AnnouncementSyncPage'
     ),
     skeleton: 'dashboard',
   }),
   route({
     path: '/settings/data/:stockCode',
-    title: 'Êï∞ÊçÆËØ¶ÊÉÖ',
+    title: ' ˝æ›œÍ«È',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/StockDataDetailPage'),
       'StockDataDetailPage'
     ),
     skeleton: 'detail',
   }),
   route({
     path: '/system/flow-runs/:id',
-    title: '‰ªªÂä°ËØ¶ÊÉÖ',
+    title: '»ŒŒÒœÍ«È',
     importer: toDefaultExport(
-      () => import('@/features/system'),
+      () => import('@/features/system/pages/FlowRunDetailPage'),
       'FlowRunDetailPage'
     ),
     skeleton: 'detail',
@@ -550,7 +544,7 @@ export function findRoute(pathname: string): AppRouteConfig | undefined {
 
 export function getPageTitle(pathname: string): string {
   const routeConfig = findRoute(pathname);
-  if (!routeConfig) return 'È°µÈù¢';
+  if (!routeConfig) return '“≥√Ê';
   return typeof routeConfig.title === 'function'
     ? routeConfig.title(pathname)
     : routeConfig.title;
@@ -609,21 +603,4 @@ export function preloadRoute(pathname: string): Promise<void> | undefined {
     ) || findRoute(pathname);
 
   return routeConfig ? preloadImporter(routeConfig.importer) : undefined;
-}
-
-export function preloadImportantRoutes(): void {
-  const preload = () => {
-    appRoutes
-      .filter(routeConfig => routeConfig.preload && routeConfig.path !== '/')
-      .forEach(routeConfig => {
-        void preloadImporter(routeConfig.importer);
-      });
-  };
-
-  if (typeof window.requestIdleCallback === 'function') {
-    window.requestIdleCallback(preload, { timeout: 2500 });
-    return;
-  }
-
-  window.setTimeout(preload, 1200);
 }

@@ -7,6 +7,30 @@
 
 Web 对外开发者文档位于 `apps/docs/`；本目录记录仓库内实现和维护规则。
 
+## DEV 页面加载
+
+开发访问仍通过 Caddy `8080`，保留 Vite HMR 和开发 source map。
+
+- Caddy 只对前端响应中的 HTML、JavaScript、CSS、JSON 和 SVG 启用 gzip
+  level 1，最小响应长度为 1024 字节。API、GraphQL、Agent、Monitor 和文档代理
+  在该处理器之前分流，不改变其流式连接及响应语义；原有缓存头保留。
+- Vite 在启动时仅预热 `main.tsx`、`generated/gql/graphql.ts` 和
+  `TTradeGlobalPage.tsx`。纯生成目录跳过 React/Babel 插件，继续由 esbuild
+  处理 TypeScript 和 source map；业务模块保留 GraphQL optimizer 与 Fast Refresh。
+- 路由直接导入页面文件，不导入 feature 聚合出口。首页不自动预加载其他页面；
+  导航栏、功能启动器及标签的悬停或键盘聚焦才触发预加载。预加载与真正导航共享
+  同一加载 Promise，推测加载失败不会产生未处理异常，后续导航可以重试。
+- 做 T 首屏只加载实时监控。回放组件及 Recharts、诊断、动态和参数编辑器按需加载，
+  局部 Suspense/错误边界保留外层工具栏、导航和草稿。回放与实时查询的暂停条件、
+  订阅和交易操作契约不因模块拆分改变。
+- 使用 `useFragment` 时直接导入 `generated/gql/fragment-masking`，避免把完整
+  GraphQL 查询查找表带入运行时；静态 `gql(...)` 继续使用现有 codegen optimizer。
+
+验收应分别记录服务启动后的首次访问、相同缓存条件的多次刷新和已访问页面的切换。
+区分“页面代码已就绪”和“业务数据已返回”，检查响应 `Content-Encoding: gzip`、
+Network 中的实际传输字节数与首屏依赖，再确认 GraphQL/行情连接和 HMR 正常。
+不要把开发工具控制开销或单次波动当作稳定的加载改善比例。
+
 ## GraphQL 性能排障
 
 开发构建会记录最近 200 次实际进入网络层的 GraphQL query/mutation。浏览器控制台

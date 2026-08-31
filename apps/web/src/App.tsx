@@ -5,7 +5,7 @@ import { Switch, Route, useLocation } from 'wouter';
 
 import ErrorBoundary from '@/components/ErrorBoundary';
 import NotFound from '@/components/NotFound';
-import { StudioWorkspace } from '@/components/studio-workspace';
+import { StudioWorkspace } from '@/components/studio-workspace/StudioWorkspace';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { AppDialogProvider } from '@/components/ui/app-dialog-provider';
 import { Button } from '@/components/ui/button';
@@ -14,15 +14,13 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { AuthProvider, useAuth } from '@/core/auth';
 import { urqlClient } from '@/core/graphql';
 import { LoginPage, safeInternalPath } from '@/features/auth';
-import {
-  accountActivityStatus,
-  TradingSafetyBar,
-  TradingSafetyProvider,
-  useTradingSafety,
-} from '@/features/trading-safety';
+import { accountActivityStatus } from '@/features/trading-safety/accountActivityStatus';
+import { useTradingSafety } from '@/features/trading-safety/trading-safety-context';
+import { TradingSafetyBar } from '@/features/trading-safety/TradingSafetyBar';
+import { TradingSafetyProvider } from '@/features/trading-safety/TradingSafetyProvider';
 import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars';
 import { useWatchlist } from '@/hooks/useWatchlist';
-import { appRoutes, preloadImportantRoutes } from '@/router';
+import { appRoutes } from '@/router';
 import { tradingAccountConfig } from '@/shared/utils/env';
 import { cn } from '@/utils/cn';
 
@@ -65,10 +63,6 @@ function TradingStudioRouter() {
 }
 
 function Router({ accountId }: { accountId: string }) {
-  useEffect(() => {
-    preloadImportantRoutes();
-  }, []);
-
   return (
     <TradingSafetyProvider accountId={accountId}>
       <TradingStudioRouter />
@@ -157,8 +151,8 @@ function AuthenticatedApp() {
   if (bootstrapStatus === 'initializing') {
     return (
       <SessionStatusPage
-        title="æ­£åœ¨æ¢å¤å®‰å…¨ä¼šè¯"
-        detail="æ­£åœ¨éªŒè¯ HttpOnly åˆ·æ–°å‡­è¯ï¼Œä¸šåŠ¡è¯·æ±‚ä¼šåœ¨è®¤è¯å®ŒæˆåŽå¼€å§‹ã€‚"
+        title="ÕýÔÚ»Ö¸´°²È«»á»°"
+        detail="ÕýÔÚÑéÖ¤ HttpOnly Ë¢ÐÂÆ¾Ö¤£¬ÒµÎñÇëÇó»áÔÚÈÏÖ¤Íê³Éºó¿ªÊ¼¡£"
         isLoading
       />
     );
@@ -167,9 +161,9 @@ function AuthenticatedApp() {
   if (bootstrapStatus === 'error') {
     return (
       <SessionStatusPage
-        title="æš‚æ—¶æ— æ³•è¿žæŽ¥è®¤è¯æœåŠ¡"
-        detail={bootstrapError?.message || 'è¯·æ£€æŸ¥åŽç«¯æœåŠ¡ä¸Žç½‘ç»œè¿žæŽ¥ã€‚'}
-        actionLabel="é‡æ–°è¿žæŽ¥"
+        title="ÔÝÊ±ÎÞ·¨Á¬½ÓÈÏÖ¤·þÎñ"
+        detail={bootstrapError?.message || 'Çë¼ì²éºó¶Ë·þÎñÓëÍøÂçÁ¬½Ó¡£'}
+        actionLabel="ÖØÐÂÁ¬½Ó"
         onAction={() => void retryBootstrap()}
       />
     );
@@ -186,9 +180,9 @@ function AuthenticatedApp() {
   ) {
     return (
       <SessionStatusPage
-        title="é»˜è®¤è´¦æˆ·æœªæŽˆæƒ"
-        detail="VITE_DEFAULT_ACCOUNT_ID ä¸Žå½“å‰ç”¨æˆ·çš„åŽç«¯è´¦æˆ·æŽˆæƒä¸ä¸€è‡´ï¼Œè¯·ä¿®æ­£æœ¬åœ°çŽ¯å¢ƒé…ç½®åŽé‡æ–°ç™»å½•ã€‚"
-        actionLabel="é€€å‡ºç™»å½•"
+        title="Ä¬ÈÏÕË»§Î´ÊÚÈ¨"
+        detail="VITE_DEFAULT_ACCOUNT_ID Óëµ±Ç°ÓÃ»§µÄºó¶ËÕË»§ÊÚÈ¨²»Ò»ÖÂ£¬ÇëÐÞÕý±¾µØ»·¾³ÅäÖÃºóÖØÐÂµÇÂ¼¡£"
+        actionLabel="ÍË³öµÇÂ¼"
         onAction={() => void logout()}
       />
     );
@@ -197,8 +191,8 @@ function AuthenticatedApp() {
   if (location === '/login') {
     return (
       <SessionStatusPage
-        title="æ­£åœ¨è¿›å…¥å·¥ä½œå°"
-        detail="å®‰å…¨ä¼šè¯å·²æ¢å¤ï¼Œæ­£åœ¨è¿”å›žåŽŸé¡µé¢ã€‚"
+        title="ÕýÔÚ½øÈë¹¤×÷Ì¨"
+        detail="°²È«»á»°ÒÑ»Ö¸´£¬ÕýÔÚ·µ»ØÔ­Ò³Ãæ¡£"
         isLoading
       />
     );

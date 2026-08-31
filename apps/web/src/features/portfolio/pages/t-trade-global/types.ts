@@ -150,3 +150,12 @@ export type TTradeStudioMode =
 export type SignalPanelMode = 'PENDING' | 'HISTORY';
 
 export type SignalHistoryFilter = 'ALL' | 'EXPIRED' | 'IGNORED' | 'CONFIRMED';
+
+export type ReplayWorkspaceView =
+  | 'OVERVIEW'
+  | 'PARAMETERS'
+  | 'SIGNALS'
+  | 'AUDIT'
+  | 'POSITIONS'
+  | 'EVENTS'
+  | 'ACCOUNT';

@@ -6,7 +6,6 @@ export {
   isNavigationItemActive,
   matchAppRoute,
   normalizePath,
-  preloadImportantRoutes,
   preloadRoute,
   safeDecodeURIComponent,
 } from './routes';

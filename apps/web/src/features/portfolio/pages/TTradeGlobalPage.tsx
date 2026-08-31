@@ -2,69 +2,44 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
-  Check,
-  CircleDollarSign,
   Clock3,
-  FileCheck2,
   FlaskConical,
-  Gauge,
-  History,
-  Hourglass,
   ListChecks,
   Loader2,
-  Plus,
   Play,
+  Plus,
   Radar,
   RefreshCw,
   Save,
   Settings2,
-  ShieldCheck,
   ShieldAlert,
-  Square,
-  TrendingUp,
+  ShieldCheck,
   WalletCards,
   X,
 } from 'lucide-react';
 import * as React from 'react';
-import {
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
 import { useClient, useMutation, useQuery, useSubscription } from 'urql';
 
-import {
-  StudioWorkbench,
-  type StudioMode,
-} from '@/components/studio-workbench';
-import { useStudioNavigate } from '@/components/studio-workspace';
+import { StudioWorkbench } from '@/components/studio-workbench/StudioWorkbench';
+import type { StudioMode } from '@/components/studio-workbench/types';
+import { useStudioNavigate } from '@/components/studio-workspace/useStudioNavigate';
 import { getShanghaiDateKey } from '@/components/trading-chart/utils/time-utils';
 import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Progress } from '@/components/ui/progress';
 import {
   useGraphqlWsStatus,
   type GraphqlWsStatus,
 } from '@/core/graphql/ws-status';
-import { mapExecutionTraceView } from '@/features/strategies/domain';
-import { DeleteStrategyRunMutation } from '@/features/strategies/hooks/strategyInstanceOperations';
-import { useTradingSafety } from '@/features/trading-safety';
-import { useFragment as readFragment } from '@/generated/gql';
+import { useTradingSafety } from '@/features/trading-safety/trading-safety-context';
+import { useFragment as readFragment } from '@/generated/gql/fragment-masking';
 import {
-  TTradeReplayPortfolioSource,
   TTradeBatchScope,
   TTradeRolloutTarget,
   TTradeSignalEvaluationKind,
   TTradeTimeExitMode,
   type TTradeBatchEvent,
-  type TTradeReplayCycle,
 } from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
 import { useTradingDays } from '@/hooks/useTradingDays';
@@ -73,36 +48,28 @@ import { cn } from '@/utils/cn';
 
 import { useLatestMarketQuotes } from '../hooks/useRealTimeHoldings';
 import {
-  ApproveTTradeEntryV3Mutation,
-  CancelTTradeReplayMutation,
-  CancelTTradeOrderMutation,
   ActivateTTradeLiveMutation,
+  ApproveTTradeEntryV3Mutation,
+  CancelTTradeOrderMutation,
   ImportTTradeExternalEntryMutation,
-  ReconcileTTradeGlobalMonitorMutation,
   PauseTTradeEntriesMutation,
   PreviewTTradeSignalPolicyMutation,
+  ReconcileTTradeGlobalMonitorMutation,
   RecordTTradeClientTelemetryMutation,
   RejectTTradeEntryV3Mutation,
   SaveTTradeGlobalMonitorMutation,
-  StartTTradeReplayMutation,
   SyncTTradeSourceOrdersMutation,
-  TTradeGlobalMonitorQuery,
   TTradeBatchesPageQuery,
   TTradeBatchEventsPageQuery,
-  TTradeReplayCyclesQuery,
-  TTradeReplayHistoryQuery,
-  TTradeReplayPreparationQuery,
-  TTradeReplayQuery,
-  TTradeReplayUpdatesSubscription,
   TTradeCandidateTraceQuery,
+  TTradeGlobalMonitorQuery,
   TTradeSignalDiagnosticsQuery,
   TTradeSignalEvaluationsQuery,
   TTradeSignalPolicyFieldsFragment,
   TTradeSignalSnapshotFieldsFragment,
-  TTradeUpdatesSubscription,
   TTradeSourceOrdersQuery,
+  TTradeUpdatesSubscription,
 } from '../hooks/useTTradeGlobal';
-import { useTTradeReplayEvidence } from '../hooks/useTTradeReplayEvidence';
 
 import type { ActivitySignalEvaluation } from './t-trade-global/activity';
 import {
@@ -126,36 +93,15 @@ import {
   type ClientOperationRef,
 } from './t-trade-global/operationPersistence';
 import { readinessStageLabel } from './t-trade-global/readiness';
-import { replayEvidenceUnavailableMessage } from './t-trade-global/replayEvidencePresentation';
 import {
   cloneReplayCostForm,
   cloneSettingsForm,
-  costFormFromReplaySettings,
   defaultReplayCostForm,
   replaySettingsDifferenceCount,
-  replaySettingsInput,
   settingsFormFromReplaySettings,
   updateSignalPolicyValue,
-  validateReplaySettings,
   type ReplayCostForm,
 } from './t-trade-global/replaySettings';
-import {
-  isNewerReplayRevision,
-  replayFallbackPollInterval,
-  replayNoticeRefreshTargets,
-  stableValueByKey,
-} from './t-trade-global/replaySync';
-import {
-  canDeleteReplay,
-  deleteReplayRunsSequentially,
-  mapReplayCyclesToActivityBatches,
-  mapReplayCyclesToActivityEvents,
-  mapReplayCyclesToPositionBatches,
-  mapReplayExecutionsToActivityEvents,
-  replayProjectionActivityItems,
-  replayStatusAfterDelete,
-  replayStatusAfterDeleteMany,
-} from './t-trade-global/replayWorkspace';
 import {
   isAppliedTTradeGlobalSave,
   tTradeGlobalSaveToastTitle,
@@ -171,30 +117,30 @@ import {
   signalPolicyInput,
   type SignalPolicyLike,
 } from './t-trade-global/signalPolicy';
-import { TTradeActivityView } from './t-trade-global/TTradeActivityView';
-import { TTradeExecutionSettingsPanel } from './t-trade-global/TTradeExecutionSettingsPanel';
 import {
   TTradeHealthConsole,
   TTradeLiveBoard,
   type SignalEvaluationLike,
 } from './t-trade-global/TTradeLiveMonitor';
+import { TTradePanelBoundary } from './t-trade-global/TTradePanelBoundary';
 import type {
   TTradeExecutionMode,
   TTradePositionBatch,
 } from './t-trade-global/TTradePositionsView';
-import { TTradeReplayDecisionAudit } from './t-trade-global/TTradeReplayDecisionAudit';
-import type {
-  ReplayManualPositionDraft,
-  ReplaySidebarContext,
-} from './t-trade-global/TTradeReplaySidebar';
-import { TTradeReplaySignals } from './t-trade-global/TTradeReplaySignals';
-import { TTradeSignalDiagnosticsPanel } from './t-trade-global/TTradeSignalDiagnostics';
+import type { ReplaySidebarContext } from './t-trade-global/TTradeReplaySidebar';
 import {
+  TTradeActivityView,
+  TTradeExecutionSettingsPanel,
+  TTradePositionsView,
+  TTradeReplaySidebar,
+  TTradeSignalDiagnosticsPanel,
   TTradeSignalPolicyEditor,
-  type SignalPolicyPreviewLike,
-} from './t-trade-global/TTradeSignalPolicyEditor';
+  TTradeSignalsView,
+} from './t-trade-global/TTradeSecondaryViews';
+import type { SignalPolicyPreviewLike } from './t-trade-global/TTradeSignalPolicyEditor';
 import type { CandidateTraceSelection } from './t-trade-global/TTradeSignalsView';
 import type {
+  ReplayWorkspaceView,
   SettingsForm,
   SignalPolicyForm,
   SignalPolicyFormValue,
@@ -207,17 +153,15 @@ import {
   hasInstrumentName,
   integerValue,
   numberValue,
-  replayDatePreset,
   replayIdempotencyKey,
-  replayPhaseLabel,
-  replayStatusLabel,
   resolveInstrumentName,
 } from './t-trade-global/utils';
 
-const TTradePositionsView = React.lazy(async () => {
-  const module = await import('./t-trade-global/TTradePositionsView');
-  return { default: module.TTradePositionsView };
-});
+const TTradeReplayPanel = React.lazy(() =>
+  import('./t-trade-global/TTradeReplayPanel').then(module => ({
+    default: module.TTradeReplayPanel,
+  }))
+);
 
 const tTradePositionsFallback = (
   <div
@@ -228,67 +172,17 @@ const tTradePositionsFallback = (
       className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none"
       aria-hidden="true"
     />
-    æ­£åœ¨åŠ è½½ä»“ä½ä¸æ‰¹æ¬¡â€¦
+    ÕıÔÚ¼ÓÔØ²ÖÎ»ÓëÅú´Î¡­
   </div>
-);
-
-const TTradeReplaySidebar = React.lazy(() =>
-  import('./t-trade-global/TTradeReplaySidebar').then(module => ({
-    default: module.TTradeReplaySidebar,
-  }))
-);
-
-const TTradeReplayAccountPanel = React.lazy(() =>
-  import('./t-trade-global/TTradeReplaySidebar').then(module => ({
-    default: module.TTradeReplayAccountPanel,
-  }))
-);
-
-const TTradeReplaySettingsEditor = React.lazy(() =>
-  import('./t-trade-global/TTradeReplaySettingsPanel').then(module => ({
-    default: module.TTradeReplaySettingsEditor,
-  }))
-);
-
-const TTradeReplayFrozenSettings = React.lazy(() =>
-  import('./t-trade-global/TTradeReplaySettingsPanel').then(module => ({
-    default: module.TTradeReplayFrozenSettings,
-  }))
-);
-
-const tTradeReplayAccountFallback = (
-  <div
-    className="flex min-h-64 items-center justify-center text-ui-label text-slate-500"
-    role="status"
-  >
-    <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-    æ­£åœ¨åŠ è½½å›æµ‹è´¦æˆ·â€¦
-  </div>
-);
-
-const tTradeReplaySettingsFallback = (
-  <div
-    className="flex min-h-64 items-center justify-center text-ui-label text-slate-500"
-    role="status"
-  >
-    <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-    æ­£åœ¨åŠ è½½å›æµ‹å‚æ•°â€¦
-  </div>
-);
-
-const TTradeSignalsView = React.lazy(() =>
-  import('./t-trade-global/TTradeSignalsView').then(module => ({
-    default: module.TTradeSignalsView,
-  }))
 );
 
 const tTradeModes: StudioMode[] = [
-  { id: 'MONITOR', icon: Radar, label: 'æ€»è§ˆ' },
-  { id: 'SIGNALS', icon: Activity, label: 'ä¿¡å·' },
-  { id: 'DIAGNOSTICS', icon: BarChart3, label: 'è¯Šæ–­' },
-  { id: 'POSITIONS', icon: WalletCards, label: 'ä»“ä½ä¸æ‰¹æ¬¡' },
-  { id: 'EVENTS', icon: ListChecks, label: 'è¿è¡ŒåŠ¨æ€' },
-  { id: 'SETTINGS', icon: Settings2, label: 'å‚æ•°' },
+  { id: 'MONITOR', icon: Radar, label: '×ÜÀÀ' },
+  { id: 'SIGNALS', icon: Activity, label: 'ĞÅºÅ' },
+  { id: 'DIAGNOSTICS', icon: BarChart3, label: 'Õï¶Ï' },
+  { id: 'POSITIONS', icon: WalletCards, label: '²ÖÎ»ÓëÅú´Î' },
+  { id: 'EVENTS', icon: ListChecks, label: 'ÔËĞĞ¶¯Ì¬' },
+  { id: 'SETTINGS', icon: Settings2, label: '²ÎÊı' },
 ];
 
 const defaultForm: SettingsForm = {
@@ -321,40 +215,6 @@ const defaultForm: SettingsForm = {
   maxHoldingTradingDays: '5',
   cooldownSeconds: '300',
 };
-
-function MetricCard({
-  icon: Icon,
-  label,
-  tone = 'slate',
-  value,
-}: {
-  icon: React.ElementType;
-  label: string;
-  tone?:
-    'amber' | 'emerald' | 'marketDown' | 'marketUp' | 'red' | 'sky' | 'slate';
-  value: string | number;
-}) {
-  const tones = {
-    amber: 'border-amber-400/15 bg-amber-400/[0.06] text-amber-200',
-    emerald: 'border-emerald-400/15 bg-emerald-400/[0.06] text-emerald-200',
-    marketDown: 'border-market-down/15 bg-market-down/[0.06] text-market-down',
-    marketUp: 'border-market-up/15 bg-market-up/[0.06] text-market-up',
-    red: 'border-red-400/15 bg-red-400/[0.06] text-red-200',
-    sky: 'border-sky-300/15 bg-sky-300/[0.06] text-sky-200',
-    slate: 'border-white/[0.07] bg-white/[0.025] text-slate-200',
-  };
-  return (
-    <div className={cn('border p-2.5', tones[tone])}>
-      <div className="flex items-center gap-2 text-ui-caption font-bold uppercase tracking-[0.12em] opacity-70">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
-      </div>
-      <div className="mt-1.5 font-mono text-ui-heading font-black tabular-nums">
-        {value}
-      </div>
-    </div>
-  );
-}
 
 function NumericField({
   disabled = false,
@@ -389,1645 +249,6 @@ function NumericField({
           <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ui-caption font-bold text-slate-600">
             {suffix}
           </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function useStableValueByKey<T>(
-  key: string,
-  value: T | undefined,
-  valueKey: string | undefined
-) {
-  const cache = React.useRef(new Map<string, T>());
-  return stableValueByKey(cache.current, key, value, valueKey);
-}
-
-type ReplayWorkspaceView =
-  | 'OVERVIEW'
-  | 'PARAMETERS'
-  | 'SIGNALS'
-  | 'AUDIT'
-  | 'POSITIONS'
-  | 'EVENTS'
-  | 'ACCOUNT';
-
-function TTradeReplayPanel({
-  accountId,
-  activeView,
-  baseCosts,
-  baseForm,
-  costs,
-  form,
-  liveConfigVersion,
-  liveSettingsStale,
-  onActiveViewChange,
-  onCopySettings,
-  onCostChange,
-  onFieldChange,
-  onRestoreSettings,
-  onSidebarContextChange,
-  onSignalPolicyChange,
-  restoringSettings,
-}: {
-  accountId: string;
-  activeView: ReplayWorkspaceView;
-  baseCosts: ReplayCostForm;
-  baseForm: SettingsForm;
-  costs: ReplayCostForm;
-  form: SettingsForm;
-  liveConfigVersion: number;
-  liveSettingsStale: boolean;
-  onActiveViewChange: (view: ReplayWorkspaceView) => void;
-  onCopySettings: (form: SettingsForm, costs: ReplayCostForm) => void;
-  onCostChange: (field: keyof ReplayCostForm, value: string) => void;
-  onFieldChange: <K extends keyof SettingsForm>(
-    field: K,
-    value: SettingsForm[K]
-  ) => void;
-  onRestoreSettings: () => Promise<boolean>;
-  onSidebarContextChange: (context: ReplaySidebarContext | null) => void;
-  onSignalPolicyChange: (
-    field: keyof SignalPolicyForm,
-    value: SignalPolicyFormValue
-  ) => void;
-  restoringSettings: boolean;
-}) {
-  const { toast } = useToast();
-  const { confirm: confirmDialog } = useAppDialog();
-  const { tradingDays: replayTradingDays } = useTradingDays('SH', 60);
-  const initialRange = React.useMemo(() => replayDatePreset(5), []);
-  const [startDate, setStartDate] = React.useState(initialRange.start);
-  const [endDate, setEndDate] = React.useState(initialRange.end);
-  const appliedTradingCalendarRef = React.useRef(false);
-  const [activeRunId, setActiveRunId] = React.useState('');
-  const [portfolioSource, setPortfolioSource] = React.useState<
-    'SNAPSHOT' | 'MANUAL'
-  >('SNAPSHOT');
-  const [portfolioDirty, setPortfolioDirty] = React.useState(false);
-  const [manualCash, setManualCash] = React.useState('');
-  const [manualPositions, setManualPositions] = React.useState<
-    ReplayManualPositionDraft[]
-  >([]);
-  const [includeActivityDiagnostics, setIncludeActivityDiagnostics] =
-    React.useState(true);
-  const [activityBatchFilter, setActivityBatchFilter] = React.useState<
-    string | null
-  >(null);
-  const [positionFocusBatchId, setPositionFocusBatchId] = React.useState<
-    string | null
-  >(null);
-  const [cycleOffset, setCycleOffset] = React.useState(0);
-  const [cycles, setCycles] = React.useState<TTradeReplayCycle[]>([]);
-  const startTime = `${startDate}T09:30:00`;
-  const endTime = `${endDate}T15:00:00`;
-
-  const [preparationResult, _refreshPreparation] = useQuery({
-    query: TTradeReplayPreparationQuery,
-    variables: { accountId, startTime },
-    pause: !accountId || !startDate,
-    requestPolicy: 'network-only',
-  });
-  const [historyResult, refreshHistory] = useQuery({
-    query: TTradeReplayHistoryQuery,
-    variables: { accountId, limit: 20 },
-    pause: !accountId,
-    requestPolicy: 'network-only',
-  });
-  const [replayResult, refreshReplay] = useQuery({
-    query: TTradeReplayQuery,
-    variables: { runId: activeRunId },
-    pause: !activeRunId,
-    requestPolicy: 'network-only',
-  });
-  const [cyclesResult, refreshCycles] = useQuery({
-    query: TTradeReplayCyclesQuery,
-    variables: { runId: activeRunId, offset: cycleOffset, limit: 200 },
-    pause: !activeRunId,
-    requestPolicy: 'network-only',
-  });
-  const [startResult, startReplay] = useMutation(StartTTradeReplayMutation);
-  const [cancelResult, cancelReplay] = useMutation(CancelTTradeReplayMutation);
-  const [deleteResult, deleteStrategyRun] = useMutation(
-    DeleteStrategyRunMutation
-  );
-  const replayOperationRef = React.useRef<ClientOperationRef | null>(null);
-  React.useEffect(() => {
-    replayOperationRef.current = readUncertainOperation(`replay:${accountId}`);
-  }, [accountId]);
-  const graphqlWsStatus = useGraphqlWsStatus();
-  const [replayUpdateResult] = useSubscription({
-    query: TTradeReplayUpdatesSubscription,
-    variables: { accountId },
-    pause: !accountId,
-  });
-
-  const stableHistory = useStableValueByKey(
-    accountId,
-    historyResult.data?.tTradeReplayHistory,
-    String(historyResult.operation?.variables.accountId || '')
-  );
-  const history = React.useMemo(() => stableHistory || [], [stableHistory]);
-  const replayValue = replayResult.data?.tTradeReplay;
-  const replay = useStableValueByKey(
-    activeRunId,
-    replayValue,
-    replayValue?.runId
-  );
-  const frozenSignalPolicy = readFragment(
-    TTradeSignalPolicyFieldsFragment,
-    replay?.settings.signalPolicy
-  );
-  const frozenForm = React.useMemo(
-    () =>
-      replay && frozenSignalPolicy
-        ? settingsFormFromReplaySettings({
-            ...replay.settings,
-            signalPolicy: frozenSignalPolicy,
-          })
-        : null,
-    [frozenSignalPolicy, replay]
-  );
-  const frozenCosts = React.useMemo(
-    () => (replay ? costFormFromReplaySettings(replay.settings) : null),
-    [replay]
-  );
-  const replaySettingsErrors = React.useMemo(
-    () => validateReplaySettings(form, costs),
-    [costs, form]
-  );
-  const replaySettingsDifference = React.useMemo(
-    () => replaySettingsDifferenceCount(form, costs, baseForm, baseCosts),
-    [baseCosts, baseForm, costs, form]
-  );
-  const frozenSettingsDifference = React.useMemo(
-    () =>
-      frozenForm && frozenCosts
-        ? replaySettingsDifferenceCount(
-            frozenForm,
-            frozenCosts,
-            baseForm,
-            baseCosts
-          )
-        : 0,
-    [baseCosts, baseForm, frozenCosts, frozenForm]
-  );
-  const replayEvidence = useTTradeReplayEvidence({
-    runId: activeRunId,
-    backtestId: replay?.backtestId,
-    activeView,
-    includeDiagnostics: includeActivityDiagnostics,
-  });
-  const replayExecutions = React.useMemo(
-    () => [
-      ...new Map(
-        replayEvidence.auditRecords
-          .flatMap(item => item.executions)
-          .map(item => [item.intentId, mapExecutionTraceView(item)])
-      ).values(),
-    ],
-    [replayEvidence.auditRecords]
-  );
-  const preparationValue = preparationResult.data?.tTradeReplayPreparation;
-  const preparation = useStableValueByKey(
-    startTime,
-    preparationValue,
-    preparationValue?.startTime
-  );
-  const cyclesPage = useStableValueByKey(
-    activeRunId,
-    cyclesResult.data?.tTradeReplayCycles,
-    String(cyclesResult.operation?.variables.runId || '')
-  );
-  React.useEffect(() => {
-    setCycleOffset(0);
-    setCycles([]);
-  }, [activeRunId]);
-  React.useEffect(() => {
-    if (!cyclesPage) return;
-    setCycles(previous => {
-      if (cyclesPage.offset === 0) return cyclesPage.items;
-      const byId = new Map(previous.map(item => [item.batchId, item]));
-      for (const item of cyclesPage.items) byId.set(item.batchId, item);
-      return Array.from(byId.values());
-    });
-    if (cyclesPage.hasMore) {
-      const nextOffset = cyclesPage.offset + cyclesPage.items.length;
-      if (nextOffset > cycleOffset) setCycleOffset(nextOffset);
-    }
-  }, [cycleOffset, cyclesPage]);
-  const replayPositionBatches = React.useMemo(
-    () => mapReplayCyclesToPositionBatches(cycles, activeRunId),
-    [activeRunId, cycles]
-  );
-  const replayActivityBatches = React.useMemo(
-    () => mapReplayCyclesToActivityBatches(cycles, activeRunId),
-    [activeRunId, cycles]
-  );
-  const replayActivityEvents = React.useMemo(
-    () => [
-      ...mapReplayCyclesToActivityEvents(cycles, activeRunId),
-      ...mapReplayExecutionsToActivityEvents(
-        replayExecutions,
-        replay?.updatedAt || replay?.endTime || endTime
-      ),
-    ],
-    [
-      activeRunId,
-      cycles,
-      endTime,
-      replay?.endTime,
-      replay?.updatedAt,
-      replayExecutions,
-    ]
-  );
-  const replayActivityEvaluations = replayEvidence.evaluations;
-  const replayActivitySupplementalItems = React.useMemo(
-    () => (replay ? replayProjectionActivityItems(replay) : []),
-    [replay]
-  );
-  const replayInstrumentNames = React.useMemo(() => {
-    const names = new Map<string, string>();
-    for (const position of replay?.initialPortfolio.positions || []) {
-      if (position.instrumentName) {
-        names.set(position.stockCode.toUpperCase(), position.instrumentName);
-      }
-    }
-    for (const instrument of replay?.instruments || []) {
-      if (instrument.instrumentName) {
-        names.set(
-          instrument.stockCode.toUpperCase(),
-          instrument.instrumentName
-        );
-      }
-    }
-    return names;
-  }, [replay?.initialPortfolio.positions, replay?.instruments]);
-  const refreshEvidence = replayEvidence.refresh;
-  const refreshReplayFacts = React.useCallback(() => {
-    if (!activeRunId) return;
-    refreshReplay({ requestPolicy: 'network-only' });
-    refreshCycles({ requestPolicy: 'network-only' });
-    if (replay?.backtestId) {
-      refreshEvidence();
-    }
-  }, [
-    activeRunId,
-    refreshCycles,
-    refreshEvidence,
-    refreshReplay,
-    replay?.backtestId,
-  ]);
-  const previousTradingDate = React.useMemo(
-    () =>
-      [...replayTradingDays]
-        .filter(day => day < startDate)
-        .sort()
-        .at(-1) ||
-      preparation?.snapshotDate ||
-      '',
-    [preparation?.snapshotDate, replayTradingDays, startDate]
-  );
-  const manualCashNumber = Number(manualCash);
-  const manualRowsValid = manualPositions.every(
-    item =>
-      Boolean(item.stockCode) &&
-      Number.isInteger(Number(item.volume)) &&
-      Number(item.volume) > 0 &&
-      Number.isFinite(Number(item.avgPrice)) &&
-      Number(item.avgPrice) > 0
-  );
-  const manualPortfolioValid =
-    previousTradingDate !== '' &&
-    Number.isFinite(manualCashNumber) &&
-    manualCashNumber >= 0 &&
-    manualPositions.some(item => Number(item.volume) >= 100) &&
-    manualRowsValid;
-  const snapshotPortfolioValid = Boolean(
-    preparation?.snapshotId && preparation.snapshotDate
-  );
-  const isRunning = ['PENDING', 'RUNNING', 'STARTING'].includes(
-    String(replay?.status || '').toUpperCase()
-  );
-  const hasActiveReplay =
-    isRunning ||
-    history.some(item =>
-      ['PENDING', 'RUNNING', 'STARTING'].includes(item.status.toUpperCase())
-    );
-  const handleReplayPortfolioSourceChange = React.useCallback(
-    (source: 'MANUAL' | 'SNAPSHOT') => {
-      setPortfolioSource(source);
-      setPortfolioDirty(true);
-    },
-    []
-  );
-  const handleReplayCashChange = React.useCallback((value: string) => {
-    setManualCash(value);
-    setPortfolioDirty(true);
-  }, []);
-  const handleReplayPositionChange = React.useCallback(
-    (index: number, field: 'avgPrice' | 'volume', value: string) => {
-      setManualPositions(rows =>
-        rows.map((row, rowIndex) =>
-          rowIndex === index ? { ...row, [field]: value } : row
-        )
-      );
-      setPortfolioDirty(true);
-    },
-    []
-  );
-  const handleReplayPositionRemove = React.useCallback((index: number) => {
-    setManualPositions(rows =>
-      rows.filter((_, rowIndex) => rowIndex !== index)
-    );
-    setPortfolioDirty(true);
-  }, []);
-  const handleReplayPositionAdd = React.useCallback(
-    (stockCode: string, instrumentName: string, avgPrice: string) => {
-      if (manualPositions.some(item => item.stockCode === stockCode)) {
-        toast({
-          title: 'è‚¡ç¥¨å·²ç»å­˜åœ¨',
-          description: `${stockCode} å·²åœ¨åˆå§‹ç»„åˆä¸­ã€‚`,
-          variant: 'destructive',
-        });
-        return;
-      }
-      setManualPositions(rows => [
-        ...rows,
-        {
-          stockCode,
-          instrumentName,
-          volume: '100',
-          avgPrice,
-        },
-      ]);
-      setPortfolioDirty(true);
-    },
-    [manualPositions, toast]
-  );
-  const deleteReplayRun = React.useCallback(
-    async (runId: string) => {
-      const result = await deleteStrategyRun({ runId });
-      const payload = result.data?.deleteStrategyRun;
-      if (!payload?.success) {
-        throw new Error(
-          payload?.message || result.error?.message || 'åˆ é™¤å›æ”¾å¤±è´¥'
-        );
-      }
-      return payload.message || 'å›æ”¾åŠå…³è”æ•°æ®å·²åˆ é™¤ã€‚';
-    },
-    [deleteStrategyRun]
-  );
-  const handleDelete = React.useCallback(
-    async (item: (typeof history)[number]) => {
-      if (!canDeleteReplay(item.status)) {
-        toast({
-          title: 'å½“å‰å›æ”¾ä¸èƒ½åˆ é™¤',
-          description: 'ä»…å·²å®Œæˆã€å¤±è´¥ã€å·²å–æ¶ˆæˆ–å·²åœæ­¢çš„å›æ”¾å¯ä»¥åˆ é™¤ã€‚',
-          variant: 'destructive',
-        });
-        return;
-      }
-      const confirmed = await confirmDialog({
-        title: 'åˆ é™¤è¿™æ¬¡å›æ”¾ï¼Ÿ',
-        description: `å°†åŒæ—¶åˆ é™¤ ${String(item.startTime).slice(0, 10)} è‡³ ${String(
-          item.endTime
-        ).slice(
-          0,
-          10
-        )} çš„å›æ”¾è®°å½•ã€å…³è”å›æµ‹è¿è¡Œã€å›æµ‹ç‰ˆæœ¬ã€å®¡è®¡è½¨è¿¹ä¸ç»“æœæ–‡ä»¶ã€‚å…±äº«ç­–ç•¥æ¨¡æ¿ä¸ä¼šè¢«åˆ é™¤ã€‚æ­¤æ“ä½œä¸å¯æ’¤é”€ã€‚`,
-        confirmText: 'åˆ é™¤å›æ”¾åŠå…³è”æ•°æ®',
-        cancelText: 'å–æ¶ˆ',
-        variant: 'destructive',
-      });
-      if (!confirmed) return;
-
-      const nextRunId = replayStatusAfterDelete(
-        history.map(historyItem => historyItem.runId),
-        item.runId,
-        activeRunId
-      );
-      try {
-        const message = await deleteReplayRun(item.runId);
-        setActiveRunId(nextRunId);
-        if (!nextRunId) onActiveViewChange('OVERVIEW');
-        toast({ title: 'å›æ”¾å·²åˆ é™¤', description: message });
-        refreshHistory({ requestPolicy: 'network-only' });
-      } catch (error) {
-        toast({
-          title: 'æ— æ³•åˆ é™¤å›æ”¾',
-          description: error instanceof Error ? error.message : 'è¯·æ±‚å¤±è´¥',
-          variant: 'destructive',
-        });
-      }
-    },
-    [
-      activeRunId,
-      confirmDialog,
-      deleteReplayRun,
-      history,
-      onActiveViewChange,
-      refreshHistory,
-      toast,
-    ]
-  );
-  const handleDeleteMany = React.useCallback(
-    async (runIds: readonly string[]) => {
-      const requestedRunIds = new Set(runIds);
-      const targets = history.filter(item => requestedRunIds.has(item.runId));
-      if (targets.length === 0) return;
-
-      if (targets.length !== requestedRunIds.size) {
-        toast({
-          title: 'æ‰€é€‰å›æ”¾å·²ç»å˜åŒ–',
-          description: 'è¯·åˆ·æ–°å›æµ‹è®°å½•åé‡æ–°é€‰æ‹©ã€‚',
-          variant: 'destructive',
-        });
-        return;
-      }
-
-      if (targets.some(item => !canDeleteReplay(item.status))) {
-        toast({
-          title: 'æ‰€é€‰å›æ”¾ä¸èƒ½æ‰¹é‡åˆ é™¤',
-          description: 'é€‰åŒºåŒ…å«ä»åœ¨è¿è¡Œæˆ–å°šæœªç»“æŸçš„å›æ”¾ï¼Œè¯·è°ƒæ•´é€‰æ‹©ã€‚',
-          variant: 'destructive',
-        });
-        return;
-      }
-
-      const confirmed = await confirmDialog({
-        title: `åˆ é™¤é€‰ä¸­çš„ ${targets.length} æ¬¡å›æ”¾ï¼Ÿ`,
-        description: `å°†æ‰¹é‡åˆ é™¤é€‰ä¸­çš„ ${targets.length} æ¬¡å›æ”¾è®°å½•ã€å…³è”å›æµ‹è¿è¡Œã€å›æµ‹ç‰ˆæœ¬ã€å®¡è®¡è½¨è¿¹ä¸ç»“æœæ–‡ä»¶ã€‚å…±äº«ç­–ç•¥æ¨¡æ¿ä¸ä¼šè¢«åˆ é™¤ã€‚æ­¤æ“ä½œä¸å¯æ’¤é”€ã€‚`,
-        confirmText: `åˆ é™¤ ${targets.length} æ¬¡å›æ”¾åŠå…³è”æ•°æ®`,
-        cancelText: 'å–æ¶ˆ',
-        variant: 'destructive',
-      });
-      if (!confirmed) return;
-
-      const { deletedRunIds, failedRunIds } =
-        await deleteReplayRunsSequentially(
-          targets.map(target => target.runId),
-          deleteReplayRun
-        );
-
-      if (deletedRunIds.length > 0) {
-        const nextRunId = replayStatusAfterDeleteMany(
-          history.map(item => item.runId),
-          deletedRunIds,
-          activeRunId
-        );
-        setActiveRunId(nextRunId);
-        if (!nextRunId) onActiveViewChange('OVERVIEW');
-        refreshHistory({ requestPolicy: 'network-only' });
-      }
-
-      if (failedRunIds.length > 0) {
-        toast({
-          title: 'æ‰¹é‡åˆ é™¤æœªå®Œå…¨æˆåŠŸ',
-          description: `æˆåŠŸ ${deletedRunIds.length} æ¡ï¼Œå¤±è´¥ ${failedRunIds.length} æ¡ã€‚å¤±è´¥è®°å½•ï¼š${failedRunIds
-            .map(runId => runId.slice(0, 8))
-            .join('ã€')}ã€‚`,
-          variant: 'destructive',
-        });
-        return;
-      }
-
-      toast({
-        title: `å·²åˆ é™¤ ${deletedRunIds.length} æ¬¡å›æ”¾`,
-        description: 'å…³è”å›æµ‹ç‰ˆæœ¬ã€å®¡è®¡è½¨è¿¹ä¸ç»“æœæ–‡ä»¶å·²ä¸€å¹¶åˆ é™¤ã€‚',
-      });
-    },
-    [
-      activeRunId,
-      confirmDialog,
-      deleteReplayRun,
-      history,
-      onActiveViewChange,
-      refreshHistory,
-      toast,
-    ]
-  );
-  const replaySidebarContext = React.useMemo<ReplaySidebarContext>(() => {
-    const sidebarHistory = history.map(item => ({
-      progressPct: item.progressPct,
-      runId: item.runId,
-      startTime: String(item.startTime),
-      status: item.status,
-      tNetProfit: item.summary?.tNetProfit ?? null,
-    }));
-    const historyControls = {
-      activeRunId,
-      deletingHistory: deleteResult.fetching,
-      history: sidebarHistory,
-      historyLoading: historyResult.fetching,
-      onCreate: () => {
-        setActiveRunId('');
-        onActiveViewChange('OVERVIEW');
-      },
-      onDelete: (item: (typeof sidebarHistory)[number]) => {
-        const target = history.find(row => row.runId === item.runId);
-        if (target) void handleDelete(target);
-      },
-      onDeleteMany: (items: (typeof sidebarHistory)[number][]) => {
-        void handleDeleteMany(items.map(item => item.runId));
-      },
-      onHistoryRefresh: () => refreshHistory({ requestPolicy: 'network-only' }),
-      onSelectRun: (runId: string) => {
-        setActiveRunId(runId);
-        onActiveViewChange('OVERVIEW');
-      },
-    };
-    if (activeRunId) {
-      if (!replay) {
-        return {
-          ...historyControls,
-          accountId,
-          asOf: '',
-          cashAvailable: 0,
-          editor: null,
-          frozen: true,
-          loading: true,
-          message: 'æ­£åœ¨è¯»å–è¯¥æ¬¡å›æ”¾å†»ç»“çš„åˆå§‹è´¦æˆ·â€¦',
-          mode: 'VIEW',
-          positions: [],
-          source: 'SNAPSHOT',
-          totalAsset: 0,
-        };
-      }
-      return {
-        ...historyControls,
-        accountId: replay.accountId,
-        asOf: String(replay.initialPortfolio.asOf || '').slice(0, 10),
-        cashAvailable: replay.initialPortfolio.cashAvailable,
-        editor: null,
-        frozen: true,
-        loading: false,
-        message:
-          'è¯¥ç»„åˆå·²éšå›æ”¾å†»ç»“ï¼Œåªç”¨äºå¤æ ¸æœ¬æ¬¡ç»“æœï¼Œä¸ä¼šè·Ÿéšå½“å‰å®ç›˜è´¦æˆ·å˜åŒ–ã€‚',
-        mode: 'VIEW',
-        positions: replay.initialPortfolio.positions.map(item => ({
-          avgPrice: item.avgPrice,
-          availableVolume: item.availableVolume,
-          instrumentName: item.instrumentName,
-          marketValue: item.marketValue,
-          stockCode: item.stockCode,
-          volume: item.volume,
-        })),
-        source:
-          String(replay.initialPortfolio.source).toUpperCase() === 'MANUAL'
-            ? 'MANUAL'
-            : 'SNAPSHOT',
-        totalAsset: replay.initialPortfolio.totalAsset,
-      };
-    }
-
-    if (portfolioSource === 'MANUAL') {
-      const positions = manualPositions.map(item => {
-        const volume = Number(item.volume) || 0;
-        const avgPrice = Number(item.avgPrice) || 0;
-        return {
-          avgPrice,
-          availableVolume: volume,
-          instrumentName: item.instrumentName,
-          marketValue: volume * avgPrice,
-          stockCode: item.stockCode,
-          volume,
-        };
-      });
-      const cashAvailable = Number.isFinite(manualCashNumber)
-        ? manualCashNumber
-        : 0;
-      return {
-        ...historyControls,
-        accountId,
-        asOf: previousTradingDate,
-        cashAvailable,
-        editor: {
-          manualCash,
-          manualPositions,
-          onAddPosition: handleReplayPositionAdd,
-          onCashChange: handleReplayCashChange,
-          onPositionChange: handleReplayPositionChange,
-          onPositionRemove: handleReplayPositionRemove,
-          onSourceChange: handleReplayPortfolioSourceChange,
-          previousTradingDate,
-          requiresManualPortfolio: Boolean(
-            preparation?.requiresManualPortfolio
-          ),
-          snapshotAvailable: snapshotPortfolioValid,
-        },
-        frozen: false,
-        loading: false,
-        message: 'æ‰‹å·¥ç»„åˆä¼šåœ¨å¯åŠ¨æ—¶å†»ç»“ï¼›ä¸è¶³ 100 è‚¡çš„æŒä»“åªè®¡å…¥è´¦æˆ·æƒç›Šã€‚',
-        mode: 'CREATE',
-        positions,
-        source: 'MANUAL',
-        totalAsset:
-          cashAvailable +
-          positions.reduce((total, item) => total + item.marketValue, 0),
-      };
-    }
-
-    return {
-      ...historyControls,
-      accountId,
-      asOf: preparation?.snapshotDate || '',
-      cashAvailable: preparation?.initialCash || 0,
-      editor: {
-        manualCash,
-        manualPositions,
-        onAddPosition: handleReplayPositionAdd,
-        onCashChange: handleReplayCashChange,
-        onPositionChange: handleReplayPositionChange,
-        onPositionRemove: handleReplayPositionRemove,
-        onSourceChange: handleReplayPortfolioSourceChange,
-        previousTradingDate,
-        requiresManualPortfolio: Boolean(preparation?.requiresManualPortfolio),
-        snapshotAvailable: snapshotPortfolioValid,
-      },
-      frozen: false,
-      loading: preparationResult.fetching && !preparation,
-      message: preparation?.message || 'é€‰æ‹©æ—¥æœŸåè¯»å–å¼€å§‹æ—¥å‰çš„è´¦æˆ·æ—¥ç»“å¿«ç…§ã€‚',
-      mode: 'CREATE',
-      positions: (preparation?.positions || []).map(item => ({
-        avgPrice: item.avgPrice,
-        availableVolume: item.availableVolume,
-        instrumentName: item.instrumentName,
-        marketValue: item.marketValue,
-        stockCode: item.stockCode,
-        volume: item.volume,
-      })),
-      source: 'SNAPSHOT',
-      totalAsset: preparation?.initialTotalAsset || 0,
-    };
-  }, [
-    accountId,
-    activeRunId,
-    deleteResult.fetching,
-    handleReplayCashChange,
-    handleDelete,
-    handleDeleteMany,
-    handleReplayPortfolioSourceChange,
-    handleReplayPositionAdd,
-    handleReplayPositionChange,
-    handleReplayPositionRemove,
-    manualCash,
-    manualCashNumber,
-    manualPositions,
-    history,
-    historyResult.fetching,
-    onActiveViewChange,
-    portfolioSource,
-    preparation,
-    preparationResult.fetching,
-    previousTradingDate,
-    replay,
-    refreshHistory,
-    snapshotPortfolioValid,
-  ]);
-
-  React.useEffect(() => {
-    onSidebarContextChange(replaySidebarContext);
-  }, [onSidebarContextChange, replaySidebarContext]);
-
-  React.useEffect(
-    () => () => onSidebarContextChange(null),
-    [onSidebarContextChange]
-  );
-
-  const fallbackPollInterval = replayFallbackPollInterval(
-    graphqlWsStatus,
-    hasActiveReplay
-  );
-  const pendingRefreshRef = React.useRef({
-    history: false,
-    replay: false,
-    cycles: false,
-  });
-  const refreshTimerRef = React.useRef<number | undefined>(undefined);
-  const latestRevisionRef = React.useRef(new Map<string, string>());
-
-  React.useEffect(() => {
-    if (appliedTradingCalendarRef.current || replayTradingDays.length === 0) {
-      return;
-    }
-    appliedTradingCalendarRef.current = true;
-    const range = replayDatePreset(5, replayTradingDays);
-    setStartDate(range.start);
-    setEndDate(range.end);
-  }, [replayTradingDays]);
-
-  React.useEffect(() => {
-    if (!preparation || portfolioDirty) return;
-    if (!preparation.requiresManualPortfolio && preparation.snapshotId) {
-      setPortfolioSource('SNAPSHOT');
-      setManualCash(String(preparation.initialCash));
-      setManualPositions(
-        preparation.positions.map(item => ({
-          stockCode: item.stockCode,
-          instrumentName: item.instrumentName,
-          volume: String(item.volume),
-          avgPrice: String(item.avgPrice),
-        }))
-      );
-      return;
-    }
-    setPortfolioSource('MANUAL');
-    setManualCash('');
-    setManualPositions([]);
-  }, [portfolioDirty, preparation]);
-
-  React.useEffect(() => {
-    setPortfolioDirty(false);
-  }, [startDate]);
-
-  const scheduleRefresh = React.useCallback(
-    (targets: { history: boolean; replay: boolean; cycles: boolean }) => {
-      pendingRefreshRef.current.history ||= targets.history;
-      pendingRefreshRef.current.replay ||= targets.replay;
-      pendingRefreshRef.current.cycles ||= targets.cycles;
-      if (refreshTimerRef.current !== undefined) return;
-      refreshTimerRef.current = window.setTimeout(() => {
-        const pending = pendingRefreshRef.current;
-        pendingRefreshRef.current = {
-          history: false,
-          replay: false,
-          cycles: false,
-        };
-        refreshTimerRef.current = undefined;
-        if (pending.history) {
-          refreshHistory({ requestPolicy: 'network-only' });
-        }
-        if (pending.replay && activeRunId) {
-          refreshReplay({ requestPolicy: 'network-only' });
-        }
-        if (pending.cycles && activeRunId) {
-          refreshCycles({ requestPolicy: 'network-only' });
-        }
-      }, 100);
-    },
-    [activeRunId, refreshCycles, refreshHistory, refreshReplay]
-  );
-
-  React.useEffect(
-    () => () => {
-      if (refreshTimerRef.current !== undefined) {
-        window.clearTimeout(refreshTimerRef.current);
-      }
-    },
-    []
-  );
-
-  React.useEffect(() => {
-    const notice = replayUpdateResult.data?.tTradeReplayUpdates;
-    if (!notice) return;
-    const previousRevision = latestRevisionRef.current.get(notice.runId);
-    if (!isNewerReplayRevision(previousRevision, notice.revision)) return;
-    latestRevisionRef.current.set(notice.runId, notice.revision);
-    scheduleRefresh(
-      replayNoticeRefreshTargets(String(notice.kind), notice.runId, activeRunId)
-    );
-  }, [activeRunId, replayUpdateResult.data, scheduleRefresh]);
-
-  React.useEffect(() => {
-    if (!accountId || fallbackPollInterval === null) return;
-    const poll = () => {
-      if (document.visibilityState !== 'visible') return;
-      refreshHistory({ requestPolicy: 'network-only' });
-      if (hasActiveReplay && activeRunId) {
-        refreshReplay({ requestPolicy: 'network-only' });
-      }
-    };
-    poll();
-    const timer = window.setInterval(poll, fallbackPollInterval);
-    return () => window.clearInterval(timer);
-  }, [
-    accountId,
-    activeRunId,
-    fallbackPollInterval,
-    hasActiveReplay,
-    refreshHistory,
-    refreshReplay,
-  ]);
-
-  const previousWsStatusRef = React.useRef(graphqlWsStatus);
-  React.useEffect(() => {
-    const reconnected =
-      graphqlWsStatus === 'connected' &&
-      previousWsStatusRef.current !== 'connected';
-    previousWsStatusRef.current = graphqlWsStatus;
-    if (reconnected) {
-      scheduleRefresh({
-        history: true,
-        replay: Boolean(activeRunId),
-        cycles: Boolean(activeRunId),
-      });
-    }
-  }, [activeRunId, graphqlWsStatus, scheduleRefresh]);
-
-  React.useEffect(() => {
-    const handleVisibility = () => {
-      if (document.visibilityState !== 'visible') return;
-      scheduleRefresh({
-        history: true,
-        replay: Boolean(activeRunId),
-        cycles: Boolean(activeRunId && !hasActiveReplay),
-      });
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () =>
-      document.removeEventListener('visibilitychange', handleVisibility);
-  }, [activeRunId, hasActiveReplay, scheduleRefresh]);
-
-  const setPreset = (days: 1 | 5 | 20) => {
-    const range = replayDatePreset(days, replayTradingDays);
-    setStartDate(range.start);
-    setEndDate(range.end);
-  };
-
-  const handleStart = async () => {
-    if (replaySettingsErrors.length > 0) {
-      onActiveViewChange('PARAMETERS');
-      toast({
-        title: 'å›æµ‹å‚æ•°æœªé€šè¿‡æ ¡éªŒ',
-        description: replaySettingsErrors[0],
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (portfolioSource === 'SNAPSHOT' && !snapshotPortfolioValid) {
-      toast({
-        title: 'ç¼ºå°‘ D-1 è´¦æˆ·å¿«ç…§',
-        description: 'è¯·é€‰æ‹©æ‰‹å·¥ç»„åˆï¼Œæˆ–å…ˆå‡†å¤‡å›æ”¾é¦–æ—¥å‰çš„è´¦æˆ·æ—¥ç»“å¿«ç…§ã€‚',
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (portfolioSource === 'MANUAL' && !manualPortfolioValid) {
-      toast({
-        title: 'åˆå§‹å›æµ‹è´¦æˆ·ä¸å®Œæ•´',
-        description:
-          'è¯·å¡«å†™éè´Ÿå¯ç”¨èµ„é‡‘ï¼Œå¹¶è‡³å°‘é…ç½®ä¸€åªä¸å°‘äº 100 è‚¡çš„æœ‰æ•ˆæŒä»“ã€‚',
-        variant: 'destructive',
-      });
-      return;
-    }
-    const portfolio =
-      portfolioSource === 'SNAPSHOT'
-        ? {
-            source: TTradeReplayPortfolioSource.Snapshot,
-            asOf: `${preparation?.snapshotDate}T15:00:00`,
-            snapshotId: preparation?.snapshotId,
-            positions: [],
-          }
-        : {
-            source: TTradeReplayPortfolioSource.Manual,
-            asOf: `${previousTradingDate}T15:00:00`,
-            cashAvailable: manualCashNumber,
-            positions: manualPositions.map(item => ({
-              stockCode: item.stockCode,
-              volume: Number(item.volume),
-              avgPrice: Number(item.avgPrice),
-            })),
-          };
-    const input = {
-      accountId,
-      startTime,
-      endTime,
-      portfolio,
-      ...replaySettingsInput(form, costs),
-    };
-    const identity = JSON.stringify(input);
-    const previousOperation = replayOperationRef.current;
-    if (previousOperation?.blocked) {
-      toast({
-        title: 'å›æ”¾æ“ä½œä¸å¯æ¢å¤',
-        description: 'æµè§ˆå™¨ä¸­çš„æœªå†³å›æ”¾è®°å½•ä¸å¯ç”¨ï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (
-      previousOperation?.uncertain &&
-      previousOperation.identity !== identity
-    ) {
-      toast({
-        title: 'ä¸Šä¸€ç¬”å›æ”¾ç»“æœæœªçŸ¥',
-        description: 'è¯·å…ˆæ¢å¤åŸå›æ”¾ç»“æœï¼Œä¸èƒ½ç”¨æ–°çš„å‚æ•°é‡å¤å¯åŠ¨ã€‚',
-        variant: 'destructive',
-      });
-      return;
-    }
-    const operation =
-      previousOperation?.identity === identity
-        ? previousOperation
-        : {
-            identity,
-            idempotencyKey: replayIdempotencyKey(),
-            uncertain: false,
-          };
-    const pendingOperation = { ...operation, uncertain: true };
-    if (!persistUncertainOperation(`replay:${accountId}`, pendingOperation)) {
-      replayOperationRef.current = { ...pendingOperation, blocked: true };
-      toast({
-        title: 'æ— æ³•å®‰å…¨è®°å½•å›æ”¾æ“ä½œ',
-        description: 'æœªå†™å…¥æµè§ˆå™¨æœªå†³è®°å½•ï¼Œæœ¬æ¬¡å›æ”¾æœªå‘é€ã€‚',
-        variant: 'destructive',
-      });
-      return;
-    }
-    replayOperationRef.current = pendingOperation;
-    let responseReceived = false;
-    try {
-      const result = await startReplay({
-        input: { ...input, idempotencyKey: operation.idempotencyKey },
-      });
-      responseReceived = true;
-      const payload = result.data?.startTTradeReplay;
-      // Keep the operation key while the Engine outcome is unknown, including
-      // a transport error with no GraphQL payload. A terminal response marks
-      // the next click as a new user action.
-      const uncertain =
-        !payload ||
-        String(payload.code || '').endsWith('_COMMAND_PENDING') ||
-        String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
-      if (uncertain) {
-        replayOperationRef.current = pendingOperation;
-        persistUncertainOperation(`replay:${accountId}`, pendingOperation);
-      } else {
-        replayOperationRef.current = null;
-        clearPersistedOperation(`replay:${accountId}`);
-      }
-      if (!payload?.success || !payload.replay?.runId) {
-        throw new Error(
-          payload?.message || result.error?.message || 'å¯åŠ¨å¤±è´¥'
-        );
-      }
-      setActiveRunId(payload.replay.runId);
-      toast({ title: 'å†å²å›æ”¾å·²å¯åŠ¨', description: payload.message });
-      refreshHistory({ requestPolicy: 'network-only' });
-    } catch (error) {
-      if (!responseReceived) {
-        replayOperationRef.current = pendingOperation;
-        persistUncertainOperation(`replay:${accountId}`, pendingOperation);
-      }
-      toast({
-        title: 'æ— æ³•å¯åŠ¨å†å²å›æ”¾',
-        description: error instanceof Error ? error.message : 'è¯·æ±‚å¤±è´¥',
-        variant: 'destructive',
-      });
-    }
-  };
-
-  const handleCancel = async () => {
-    if (!activeRunId) return;
-    try {
-      const result = await cancelReplay({ runId: activeRunId });
-      const payload = result.data?.cancelTTradeReplay;
-      if (!payload?.success) {
-        throw new Error(
-          payload?.message || result.error?.message || 'å–æ¶ˆå¤±è´¥'
-        );
-      }
-      toast({ title: 'å›æ”¾å·²å–æ¶ˆ', description: payload.message });
-      refreshReplay({ requestPolicy: 'network-only' });
-      refreshHistory({ requestPolicy: 'network-only' });
-    } catch (error) {
-      toast({
-        title: 'æ— æ³•å–æ¶ˆå›æ”¾',
-        description: error instanceof Error ? error.message : 'è¯·æ±‚å¤±è´¥',
-        variant: 'destructive',
-      });
-    }
-  };
-
-  const chartData = (replay?.curve || []).map(point => ({
-    time: new Date(point.timestamp).toLocaleString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      month: '2-digit',
-      day: '2-digit',
-      hour12: false,
-    }),
-    è´¦æˆ·æ”¶ç›Š: Number(point.returnPct.toFixed(4)),
-    ä¸åšTåŸºå‡†: Number(point.passiveReturnPct.toFixed(4)),
-    åšTå¢é‡: Number(point.excessReturnPct.toFixed(4)),
-  }));
-
-  return (
-    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
-      <div className="flex min-h-0 flex-1 flex-col">
-        {activeView === 'OVERVIEW' ? (
-          <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
-            {!activeRunId && (
-              <section className="border-b border-white/[0.06] bg-[#0a1728] p-ui-section">
-                <div className="flex flex-wrap items-end justify-between gap-ui-section">
-                  <div>
-                    <div className="flex items-center gap-2 text-ui-body font-black text-slate-100">
-                      <FlaskConical className="h-4 w-4 text-cyan-300" />
-                      å†å²å›æ”¾æµ‹è¯•
-                      <span
-                        aria-live="polite"
-                        className={cn(
-                          'border px-1.5 py-0.5 text-ui-micro font-bold',
-                          graphqlWsStatus === 'connected'
-                            ? 'border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300'
-                            : 'border-amber-400/20 bg-amber-400/[0.06] text-amber-300'
-                        )}
-                      >
-                        {graphqlWsStatus === 'connected'
-                          ? 'å®æ—¶æ¨é€'
-                          : 'è½®è¯¢æ¢å¤'}
-                      </span>
-                    </div>
-                    <p className="mt-1 text-ui-caption text-slate-500">
-                      ä½¿ç”¨åŒä¸€åš T
-                      ç­–ç•¥å’Œäº¤æ˜“é£æ§ï¼›æµ‹è¯•ä¿¡å·è‡ªåŠ¨ç¡®è®¤ï¼Œä¸ä¼šæäº¤å®ç›˜å§”æ‰˜ã€‚
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-end gap-2">
-                    <div>
-                      <Label
-                        htmlFor="replay-start"
-                        className="text-ui-caption text-slate-500"
-                      >
-                        å¼€å§‹æ—¥æœŸ
-                      </Label>
-                      <Input
-                        id="replay-start"
-                        type="date"
-                        value={startDate}
-                        max={endDate}
-                        onChange={event => setStartDate(event.target.value)}
-                        className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
-                      />
-                    </div>
-                    <div>
-                      <Label
-                        htmlFor="replay-end"
-                        className="text-ui-caption text-slate-500"
-                      >
-                        ç»“æŸæ—¥æœŸ
-                      </Label>
-                      <Input
-                        id="replay-end"
-                        type="date"
-                        value={endDate}
-                        min={startDate}
-                        onChange={event => setEndDate(event.target.value)}
-                        className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
-                      />
-                    </div>
-                    <div className="flex h-8 overflow-hidden border border-white/10">
-                      {([1, 5, 20] as const).map(days => (
-                        <button
-                          key={days}
-                          type="button"
-                          onClick={() => setPreset(days)}
-                          className="cursor-pointer border-r border-white/10 px-2.5 text-ui-caption font-bold text-slate-400 transition-colors last:border-r-0 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
-                        >
-                          {days}æ—¥
-                        </button>
-                      ))}
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={handleStart}
-                      disabled={
-                        !accountId ||
-                        !preparation ||
-                        (portfolioSource === 'SNAPSHOT'
-                          ? !snapshotPortfolioValid
-                          : !manualPortfolioValid) ||
-                        replaySettingsErrors.length > 0 ||
-                        startResult.fetching ||
-                        history.some(item =>
-                          ['PENDING', 'RUNNING', 'STARTING'].includes(
-                            item.status
-                          )
-                        )
-                      }
-                      className="h-8 rounded-sm bg-cyan-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-cyan-400"
-                    >
-                      {startResult.fetching ? (
-                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-                      ) : (
-                        <Play className="mr-1.5 h-3.5 w-3.5" />
-                      )}
-                      å¯åŠ¨å›æ”¾
-                    </Button>
-                  </div>
-                </div>
-
-                <div
-                  className={cn(
-                    'mt-3 flex items-start gap-2 border px-3 py-2 text-ui-caption',
-                    preparation?.requiresManualPortfolio ||
-                      preparationResult.error
-                      ? 'border-amber-400/20 bg-amber-400/[0.06] text-amber-100'
-                      : 'border-cyan-400/15 bg-cyan-400/[0.04] text-cyan-100'
-                  )}
-                >
-                  {preparationResult.fetching ? (
-                    <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
-                  ) : preparation?.requiresManualPortfolio ||
-                    preparationResult.error ? (
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  ) : (
-                    <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  )}
-                  <span>
-                    {preparationResult.error?.message ||
-                      preparation?.message ||
-                      'æ­£åœ¨è¯»å–å›æ”¾å¼€å§‹æ—¥å‰çš„è´¦æˆ·å¿«ç…§â€¦'}
-                    {preparation?.snapshotDate && (
-                      <span className="ml-2 font-mono text-slate-400">
-                        å¿«ç…§ {preparation.snapshotDate} Â·{' '}
-                        {preparation.positions.length} åªæŒä»“ Â· æ€»èµ„äº§ Â¥
-                        {formatNumber(preparation.initialTotalAsset)}
-                      </span>
-                    )}
-                  </span>
-                </div>
-              </section>
-            )}
-
-            {activeRunId && replay ? (
-              <>
-                <section className="border-b border-white/[0.06] p-ui-section">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <span
-                        className={cn(
-                          'border px-2 py-1 text-ui-caption font-black',
-                          replay.status === 'COMPLETED'
-                            ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
-                            : replay.status === 'ERROR'
-                              ? 'border-rose-400/25 bg-rose-400/10 text-rose-200'
-                              : 'border-cyan-400/25 bg-cyan-400/10 text-cyan-200'
-                        )}
-                      >
-                        {replayStatusLabel(replay.status)}
-                      </span>
-                      <span className="font-mono text-ui-caption text-slate-500">
-                        {replay.runId.slice(0, 8)} Â·{' '}
-                        {formatNumber(replay.progressPct, 1)}%
-                      </span>
-                      {replay.processedUntil && (
-                        <span className="font-mono text-ui-caption text-slate-600">
-                          å·²å¤„ç† {formatTime(replay.processedUntil)}
-                        </span>
-                      )}
-                      <span className="text-ui-caption text-slate-600">
-                        {replay.dataQualityMessage}
-                      </span>
-                    </div>
-                    {isRunning && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={cancelResult.fetching}
-                        onClick={handleCancel}
-                        className="h-control-compact rounded-sm border-rose-400/20 bg-rose-400/[0.04] text-ui-caption text-rose-200 hover:bg-rose-400/10"
-                      >
-                        {cancelResult.fetching ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-                        ) : (
-                          <Square className="mr-1.5 h-3 w-3" />
-                        )}
-                        å–æ¶ˆå›æ”¾
-                      </Button>
-                    )}
-                  </div>
-                  {replay.phase && (
-                    <div className="mt-3 border border-cyan-400/15 bg-cyan-400/[0.035] px-3 py-2.5">
-                      <div className="flex items-center justify-between gap-3 text-ui-caption">
-                        <span className="font-black text-cyan-100">
-                          {replayPhaseLabel(replay.phase)}
-                        </span>
-                        <span className="font-mono text-cyan-200/65">
-                          {formatNumber(replay.phaseProgressPct, 0)}%
-                        </span>
-                      </div>
-                      <Progress
-                        value={replay.phaseProgressPct}
-                        className="mt-2 h-1 bg-white/[0.06]"
-                      />
-                      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-ui-caption text-slate-500">
-                        <span>{replay.phaseMessage || 'æ­£åœ¨å‡†å¤‡å›æµ‹ä»»åŠ¡'}</span>
-                        {replay.dataPreparation?.currentInstrument && (
-                          <span className="font-mono text-slate-600">
-                            {replay.dataPreparation.currentInstrument}
-                            {replay.dataPreparation.currentStartDate
-                              ? ` Â· ${replay.dataPreparation.currentStartDate}~${
-                                  replay.dataPreparation.currentEndDate ||
-                                  replay.dataPreparation.currentStartDate
-                                }`
-                              : ''}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {replay.errorMessage && (
-                    <div className="mt-3 flex items-center gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-ui-caption text-rose-100">
-                      <AlertTriangle className="h-3.5 w-3.5" />
-                      {replay.errorMessage}
-                    </div>
-                  )}
-                </section>
-
-                <section className="grid gap-2 border-b border-white/[0.06] p-ui-section sm:grid-cols-2 xl:grid-cols-4">
-                  <MetricCard
-                    icon={CircleDollarSign}
-                    label="åš T ç¨è´¹åå¢é‡"
-                    tone={
-                      (replay.summary?.tNetProfit || 0) >= 0
-                        ? 'marketUp'
-                        : 'marketDown'
-                    }
-                    value={
-                      replay.summary
-                        ? `Â¥${formatNumber(replay.summary.tNetProfit)}`
-                        : '--'
-                    }
-                  />
-                  <MetricCard
-                    icon={TrendingUp}
-                    label="ç›¸å¯¹ä¸åš T è¶…é¢"
-                    tone={
-                      (replay.summary?.excessReturnPct || 0) >= 0
-                        ? 'marketUp'
-                        : 'marketDown'
-                    }
-                    value={
-                      replay.summary
-                        ? `${formatNumber(replay.summary.excessReturnPct)}%`
-                        : '--'
-                    }
-                  />
-                  <MetricCard
-                    icon={Check}
-                    label="å®Œæˆæ‰¹æ¬¡ / èƒœç‡"
-                    tone="slate"
-                    value={
-                      replay.summary
-                        ? `${replay.summary.completedCycles} / ${
-                            replay.summary.completedCycles > 0
-                              ? `${formatNumber(replay.summary.winRatePct, 1)}%`
-                              : 'æ— æ ·æœ¬'
-                          }`
-                        : '--'
-                    }
-                  />
-                  <MetricCard
-                    icon={WalletCards}
-                    label="äº¤æ˜“ç¨è´¹"
-                    tone="amber"
-                    value={
-                      replay.summary
-                        ? `Â¥${formatNumber(replay.summary.totalFees)}`
-                        : '--'
-                    }
-                  />
-                </section>
-
-                {replay.summary && (
-                  <section className="border-b border-white/[0.06] p-ui-section">
-                    <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h3 className="flex items-center gap-2 text-ui-label font-black text-slate-200">
-                          <Gauge className="h-4 w-4 text-cyan-300" />
-                          èµ„é‡‘æ•ˆç‡ä¸æœŸæœ«æ¸…ç®—
-                        </h3>
-                        <p className="mt-1 text-ui-caption text-slate-600">
-                          èµ„é‡‘åˆ©ç”¨ç‡æŒ‰ 4
-                          å°æ—¶äº¤æ˜“æ—¥æŠ˜ç®—å¹¶æŒ‰å®é™…ä¹°å…¥èµ„é‡‘åŠ æƒï¼›å–å‡ºç­‰å¾…è¶Šä¹…ï¼Œåˆ©ç”¨ç‡è¶Šä½ã€‚
-                        </p>
-                      </div>
-                      <span
-                        className={cn(
-                          'border px-2 py-1 text-ui-caption font-black',
-                          replay.summary.liquidationFailedCycles > 0
-                            ? 'border-rose-400/25 bg-rose-400/10 text-rose-200'
-                            : 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
-                        )}
-                      >
-                        æœŸæœ«æ¸…ç®— {replay.summary.forcedExitCycles} æ‰¹ Â· å¤±è´¥{' '}
-                        {replay.summary.liquidationFailedCycles} æ‰¹
-                      </span>
-                    </div>
-                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                      <MetricCard
-                        icon={Gauge}
-                        label="ç­‰å¾…æŠ˜æŸååˆ©ç”¨ç‡"
-                        tone="sky"
-                        value={`${formatNumber(replay.summary.capitalUtilizationPct, 1)}%`}
-                      />
-                      <MetricCard
-                        icon={WalletCards}
-                        label="å¹³å‡å ç”¨ / å¯ç”¨ç‡"
-                        tone="slate"
-                        value={`Â¥${formatNumber(replay.summary.averageOccupiedCapital)} / ${formatNumber(replay.summary.capitalAvailabilityPct, 1)}%`}
-                      />
-                      <MetricCard
-                        icon={RefreshCw}
-                        label="ç´¯è®¡ / æ—¥å‡å‘¨è½¬"
-                        tone="emerald"
-                        value={`${formatNumber(replay.summary.capitalTurnoverTimes)}Ã— / ${formatNumber(replay.summary.capitalTurnoverPerTradingDay)}Ã—`}
-                      />
-                      <MetricCard
-                        icon={Hourglass}
-                        label="å¹³å‡ / æœ€é•¿ç­‰å¾…"
-                        tone="amber"
-                        value={`${formatNumber(replay.summary.averageHoldingHours, 1)}h / ${formatNumber(replay.summary.maxHoldingHours, 1)}h`}
-                      />
-                    </div>
-                  </section>
-                )}
-
-                {replay.report && (
-                  <section className="border-b border-white/[0.06] bg-cyan-400/[0.025] p-ui-section">
-                    <div className="flex items-start gap-3">
-                      <FileCheck2 className="mt-0.5 h-5 w-5 shrink-0 text-cyan-300" />
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="text-ui-label font-black text-slate-100">
-                            å›æ”¾æŠ¥å‘Š Â· {replay.report.conclusionCode}
-                          </h3>
-                          <span className="border border-cyan-400/20 bg-cyan-400/[0.08] px-1.5 py-0.5 text-ui-micro font-black text-cyan-200">
-                            {replay.report.status === 'GENERATED'
-                              ? 'HTML / JSON å·²ç”Ÿæˆ'
-                              : 'æŠ¥å‘Šç”Ÿæˆå¤±è´¥'}
-                          </span>
-                        </div>
-                        <p className="mt-1.5 text-ui-caption leading-5 text-slate-400">
-                          {replay.report.conclusion}
-                        </p>
-                        <p className="mt-1 font-mono text-ui-micro text-slate-700">
-                          {replay.report.generatedAt
-                            ? formatTime(replay.report.generatedAt)
-                            : '--'}{' '}
-                          Â· {replay.report.htmlArtifact || '--'} Â·{' '}
-                          {replay.report.jsonArtifact || '--'}
-                        </p>
-                      </div>
-                    </div>
-                  </section>
-                )}
-
-                <section className="border-b border-white/[0.06] p-ui-section">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div>
-                      <h3 className="flex items-center gap-2 text-ui-label font-black text-slate-200">
-                        <BarChart3 className="h-4 w-4 text-cyan-300" />
-                        è´¦æˆ·æ”¶ç›Šä¸ä¸åš T åŸºå‡†
-                      </h3>
-                      <p className="mt-1 text-ui-caption text-slate-600">
-                        åŒä¸€åˆå§‹ç°é‡‘å’ŒæŒä»“æŒ‰å†å²ä»·æ ¼ä¼°å€¼ï¼Œå·®å€¼ä¸ºåš T
-                        ç¨è´¹åå¢é‡ã€‚
-                      </p>
-                    </div>
-                  </div>
-                  <div className="h-64 border border-white/[0.06] bg-[#07111f] p-2">
-                    {chartData.length > 1 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={chartData}>
-                          <CartesianGrid
-                            stroke="rgba(148,163,184,0.08)"
-                            vertical={false}
-                          />
-                          <XAxis
-                            dataKey="time"
-                            minTickGap={40}
-                            tick={{ fill: '#64748b', fontSize: 9 }}
-                            axisLine={{ stroke: 'rgba(148,163,184,0.12)' }}
-                            tickLine={false}
-                          />
-                          <YAxis
-                            width={48}
-                            tickFormatter={value => `${value}%`}
-                            tick={{ fill: '#64748b', fontSize: 9 }}
-                            axisLine={false}
-                            tickLine={false}
-                          />
-                          <Tooltip
-                            contentStyle={{
-                              background: '#0b1628',
-                              border: '1px solid rgba(148,163,184,0.18)',
-                              borderRadius: 2,
-                              fontSize: 11,
-                            }}
-                            formatter={value =>
-                              `${formatNumber(Number(value), 3)}%`
-                            }
-                          />
-                          <Legend wrapperStyle={{ fontSize: 10 }} />
-                          <Line
-                            type="monotone"
-                            dataKey="è´¦æˆ·æ”¶ç›Š"
-                            stroke="#22d3ee"
-                            dot={false}
-                            strokeWidth={1.5}
-                          />
-                          <Line
-                            type="monotone"
-                            dataKey="ä¸åšTåŸºå‡†"
-                            stroke="#94a3b8"
-                            dot={false}
-                            strokeWidth={1.2}
-                          />
-                          <Line
-                            type="monotone"
-                            dataKey="åšTå¢é‡"
-                            stroke="#fb7185"
-                            dot={false}
-                            strokeWidth={1.4}
-                          />
-                        </LineChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="flex h-full flex-col items-center justify-center text-center text-ui-caption text-slate-600">
-                        <History className="mb-2 h-6 w-6 text-slate-700" />
-                        å›æ”¾äº§ç”Ÿæ•°æ®åæ˜¾ç¤ºæ”¶ç›Šæ›²çº¿
-                      </div>
-                    )}
-                  </div>
-                </section>
-              </>
-            ) : activeRunId ? (
-              <div
-                role="status"
-                className="flex min-h-[360px] items-center justify-center text-ui-label text-slate-500"
-              >
-                <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-                æ­£åœ¨è¯»å–å›æ”¾è¯¦æƒ…â€¦
-              </div>
-            ) : (
-              <div className="p-ui-section">
-                <React.Suspense fallback={tTradeReplayAccountFallback}>
-                  <TTradeReplayAccountPanel context={replaySidebarContext} />
-                </React.Suspense>
-              </div>
-            )}
-          </div>
-        ) : activeView === 'PARAMETERS' ? (
-          <React.Suspense fallback={tTradeReplaySettingsFallback}>
-            {activeRunId && frozenForm && frozenCosts ? (
-              <TTradeReplayFrozenSettings
-                costs={frozenCosts}
-                differenceCount={frozenSettingsDifference}
-                form={frozenForm}
-                onCopy={() => {
-                  onCopySettings(frozenForm, frozenCosts);
-                  setActiveRunId('');
-                  toast({
-                    title: 'å·²å¤åˆ¶å†å²å‚æ•°',
-                    description: 'å½“å‰å‚æ•°å·²æˆä¸ºä¸‹ä¸€æ¬¡å›æµ‹è‰ç¨¿ã€‚',
-                  });
-                }}
-                onRestore={() => {
-                  void onRestoreSettings().then(restored => {
-                    if (restored) setActiveRunId('');
-                  });
-                }}
-                restoring={restoringSettings}
-              />
-            ) : (
-              <TTradeReplaySettingsEditor
-                costs={costs}
-                differenceCount={replaySettingsDifference}
-                errors={replaySettingsErrors}
-                form={form}
-                liveConfigVersion={liveConfigVersion}
-                liveSettingsStale={liveSettingsStale}
-                onCostChange={onCostChange}
-                onFieldChange={onFieldChange}
-                onRestore={() => void onRestoreSettings()}
-                onSignalPolicyChange={onSignalPolicyChange}
-                restoring={restoringSettings}
-              />
-            )}
-          </React.Suspense>
-        ) : activeView === 'ACCOUNT' ? (
-          <div className="min-h-0 flex-1 overflow-y-auto p-ui-section custom-scrollbar">
-            <React.Suspense fallback={tTradeReplayAccountFallback}>
-              <TTradeReplayAccountPanel context={replaySidebarContext} />
-            </React.Suspense>
-          </div>
-        ) : activeView === 'SIGNALS' ? (
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <TTradeReplaySignals
-              controller={replayEvidence}
-              instrumentNames={replayInstrumentNames}
-              hasReplay={Boolean(activeRunId && replay?.backtestId)}
-              onViewAudit={eventKey => {
-                replayEvidence.setAuditFilters({ eventKey });
-                onActiveViewChange('AUDIT');
-              }}
-            />
-          </div>
-        ) : activeView === 'AUDIT' ? (
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <TTradeReplayDecisionAudit
-              controller={replayEvidence}
-              instrumentNames={replayInstrumentNames}
-              hasReplay={Boolean(activeRunId && replay?.backtestId)}
-              onViewSignal={eventKey => {
-                replayEvidence.focusSignalEvent(eventKey);
-                onActiveViewChange('SIGNALS');
-              }}
-            />
-          </div>
-        ) : activeView === 'POSITIONS' ? (
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <React.Suspense fallback={tTradePositionsFallback}>
-              <TTradePositionsView
-                batches={replayPositionBatches}
-                error={cyclesResult.error?.message}
-                events={replayActivityEvents}
-                focusBatchId={positionFocusBatchId}
-                historyScopeKey={activeRunId}
-                instrumentNames={replayInstrumentNames}
-                loading={cyclesResult.fetching}
-                mode="REPLAY"
-                onFocusBatchHandled={() => setPositionFocusBatchId(null)}
-                onRefresh={refreshReplayFacts}
-                onViewActivity={batchId => {
-                  setActivityBatchFilter(batchId);
-                  onActiveViewChange('EVENTS');
-                }}
-              />
-            </React.Suspense>
-          </div>
-        ) : (
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <TTradeActivityView
-              backtestId={replay?.backtestId}
-              batchError={cyclesResult.error?.message}
-              batches={replayActivityBatches}
-              eventError={
-                replayEvidence.auditError ||
-                (replayEvidence.auditPage?.evidence.availability ===
-                'UNAVAILABLE'
-                  ? replayEvidenceUnavailableMessage(
-                      replayEvidence.auditPage.evidence.reasonCode
-                    )
-                  : undefined)
-              }
-              events={replayActivityEvents}
-              evaluations={replayActivityEvaluations}
-              focusedBatchId={activityBatchFilter}
-              hasMoreEvents={Boolean(
-                replayEvidence.auditPage?.pageInfo.hasNextPage
-              )}
-              hasMoreSignals={Boolean(
-                replayEvidence.signalPage?.pageInfo.hasNextPage
-              )}
-              includeDiagnostics={includeActivityDiagnostics}
-              instrumentNames={replayInstrumentNames}
-              isRunning={isRunning}
-              loading={
-                replayResult.fetching ||
-                cyclesResult.fetching ||
-                replayEvidence.signalsLoading ||
-                replayEvidence.auditLoading
-              }
-              loadingMore={
-                replayEvidence.signalsLoading || replayEvidence.auditLoading
-              }
-              onIncludeDiagnosticsChange={setIncludeActivityDiagnostics}
-              onFocusedBatchIdClear={() => setActivityBatchFilter(null)}
-              onLoadMore={() => {
-                if (replayEvidence.signalPage?.pageInfo.hasNextPage)
-                  replayEvidence.loadMoreSignals();
-                if (replayEvidence.auditPage?.pageInfo.hasNextPage)
-                  replayEvidence.loadMoreAudit();
-              }}
-              onRefresh={refreshReplayFacts}
-              onViewBatch={batchId => {
-                setPositionFocusBatchId(batchId);
-                onActiveViewChange('POSITIONS');
-              }}
-              onViewCurrent={() => onActiveViewChange('SIGNALS')}
-              runId={activeRunId}
-              runMode="BACKTEST"
-              signalError={
-                replayEvidence.signalError ||
-                (replayEvidence.signalPage?.evidence.availability ===
-                'UNAVAILABLE'
-                  ? replayEvidenceUnavailableMessage(
-                      replayEvidence.signalPage.evidence.reasonCode
-                    )
-                  : undefined)
-              }
-              supplementalItems={replayActivitySupplementalItems}
-              wsStatus={graphqlWsStatus}
-            />
-          </div>
         )}
       </div>
     </div>
@@ -2309,7 +530,7 @@ export function TTradeGlobalPage() {
         payload?.signalPolicy
       );
       if (!payload || !policy || result.error) {
-        throw new Error(result.error?.message || 'è¯»å–å½“å‰å®ç›˜å‚æ•°å¤±è´¥');
+        throw new Error(result.error?.message || '¶ÁÈ¡µ±Ç°ÊµÅÌ²ÎÊıÊ§°Ü');
       }
       const nextForm = settingsFormFromReplaySettings({
         ...payload,
@@ -2322,14 +543,14 @@ export function TTradeGlobalPage() {
       setReplayConfigVersion(payload.configVersion);
       setReplaySettingsAccountId(payload.accountId);
       toast({
-        title: 'å·²è¿˜åŸå½“å‰å®ç›˜å‚æ•°',
-        description: `å›æµ‹è‰ç¨¿å·²æ›´æ–°ä¸ºå®ç›˜é…ç½® v${payload.configVersion}ï¼Œæœªä¿®æ”¹å®ç›˜è¿è¡Œã€‚`,
+        title: 'ÒÑ»¹Ô­µ±Ç°ÊµÅÌ²ÎÊı',
+        description: `»Ø²â²İ¸åÒÑ¸üĞÂÎªÊµÅÌÅäÖÃ v${payload.configVersion}£¬Î´ĞŞ¸ÄÊµÅÌÔËĞĞ¡£`,
       });
       return true;
     } catch (error) {
       toast({
-        title: 'æ— æ³•è¿˜åŸå®ç›˜å‚æ•°',
-        description: error instanceof Error ? error.message : 'è¯·æ±‚å¤±è´¥',
+        title: 'ÎŞ·¨»¹Ô­ÊµÅÌ²ÎÊı',
+        description: error instanceof Error ? error.message : 'ÇëÇóÊ§°Ü',
         variant: 'destructive',
       });
       return false;
@@ -2953,11 +1174,11 @@ export function TTradeGlobalPage() {
       const result = await syncSourceOrders({ accountId });
       const payload = result.data?.syncTTradeSourceOrders;
       const errorMessage =
-        payload?.message || result.error?.message || 'åŒæ­¥å½“æ—¥å§”æ‰˜å¤±è´¥';
+        payload?.message || result.error?.message || 'Í¬²½µ±ÈÕÎ¯ÍĞÊ§°Ü';
       if (!payload?.success) {
         setSourceOrdersSyncError(errorMessage);
         toast({
-          title: 'å½“æ—¥å§”æ‰˜åŒæ­¥å¤±è´¥',
+          title: 'µ±ÈÕÎ¯ÍĞÍ¬²½Ê§°Ü',
           description: errorMessage,
           variant: 'destructive',
         });
@@ -2967,7 +1188,7 @@ export function TTradeGlobalPage() {
       refreshSourceOrders({ requestPolicy: 'network-only' });
       if (showSuccessToast) {
         toast({
-          title: 'å½“æ—¥å§”æ‰˜å·²åŒæ­¥',
+          title: 'µ±ÈÕÎ¯ÍĞÒÑÍ¬²½',
           description: payload.message,
         });
       }
@@ -3210,8 +1431,8 @@ export function TTradeGlobalPage() {
       if (!accountId) return false;
       if (draftDirty && !requirePolicyPreview) {
         toast({
-          title: 'å½“å‰æœ‰æœªä¿å­˜è‰ç¨¿',
-          description: 'è¯·å…ˆåœ¨å‚æ•°é¡µéªŒè¯å¹¶ä¿å­˜ï¼Œé¿å…è¿è¡Œæ§åˆ¶éšå¼å¸¦å…¥æ–°è§„åˆ™ã€‚',
+          title: 'µ±Ç°ÓĞÎ´±£´æ²İ¸å',
+          description: 'ÇëÏÈÔÚ²ÎÊıÒ³ÑéÖ¤²¢±£´æ£¬±ÜÃâÔËĞĞ¿ØÖÆÒşÊ½´øÈëĞÂ¹æÔò¡£',
           variant: 'destructive',
         });
         return false;
@@ -3222,8 +1443,8 @@ export function TTradeGlobalPage() {
           policyPreview.configVersion !== draftConfigVersionRef.current)
       ) {
         toast({
-          title: 'è¯·å…ˆéªŒè¯å½“å‰ç­–ç•¥è‰ç¨¿',
-          description: 'ä¿å­˜åªæ¥å—åŒä¸€é…ç½®ç‰ˆæœ¬ä¸‹å·²é€šè¿‡æœåŠ¡ç«¯é¢„è§ˆçš„å‚æ•°ã€‚',
+          title: 'ÇëÏÈÑéÖ¤µ±Ç°²ßÂÔ²İ¸å',
+          description: '±£´æÖ»½ÓÊÜÍ¬Ò»ÅäÖÃ°æ±¾ÏÂÒÑÍ¨¹ı·şÎñ¶ËÔ¤ÀÀµÄ²ÎÊı¡£',
           variant: 'destructive',
         });
         return false;
@@ -3296,7 +1517,7 @@ export function TTradeGlobalPage() {
       }
       toast({
         title: tTradeGlobalSaveToastTitle(payload),
-        description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
+        description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
         variant: success ? 'default' : 'destructive',
       });
       if (success) {
@@ -3344,8 +1565,8 @@ export function TTradeGlobalPage() {
     const payload = result.data?.previewTTradeSignalPolicy;
     if (!payload) {
       toast({
-        title: 'ç­–ç•¥é¢„è§ˆå¤±è´¥',
-        description: result.error?.message || 'æœåŠ¡ç«¯æœªè¿”å›æ ¡éªŒç»“æœ',
+        title: '²ßÂÔÔ¤ÀÀÊ§°Ü',
+        description: result.error?.message || '·şÎñ¶ËÎ´·µ»ØĞ£Ñé½á¹û',
         variant: 'destructive',
       });
       return;
@@ -3398,8 +1619,8 @@ export function TTradeGlobalPage() {
     if (!accountId) return;
     if (reconcileOperationRef.current?.blocked) {
       toast({
-        title: 'åŒæ­¥è®°å½•ä¸å¯æ¢å¤',
-        description: 'æµè§ˆå™¨ä¸­çš„æœªå†³åŒæ­¥è®°å½•å·²æŸåï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
+        title: 'Í¬²½¼ÇÂ¼²»¿É»Ö¸´',
+        description: 'ä¯ÀÀÆ÷ÖĞµÄÎ´¾öÍ¬²½¼ÇÂ¼ÒÑËğ»µ£¬ÇëÇåÀíºóÔÙ·¢Æğ²Ù×÷¡£',
         variant: 'destructive',
       });
       return;
@@ -3412,8 +1633,8 @@ export function TTradeGlobalPage() {
     }
     if (reconcileOperationRef.current?.blocked) {
       toast({
-        title: 'åŒæ­¥è®°å½•ä¸å¯æ¢å¤',
-        description: 'æµè§ˆå™¨ä¸­çš„æœªå†³åŒæ­¥è®°å½•å·²æŸåï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
+        title: 'Í¬²½¼ÇÂ¼²»¿É»Ö¸´',
+        description: 'ä¯ÀÀÆ÷ÖĞµÄÎ´¾öÍ¬²½¼ÇÂ¼ÒÑËğ»µ£¬ÇëÇåÀíºóÔÙ·¢Æğ²Ù×÷¡£',
         variant: 'destructive',
       });
       return;
@@ -3433,8 +1654,8 @@ export function TTradeGlobalPage() {
     ) {
       reconcileOperationRef.current = { ...pendingOperation, blocked: true };
       toast({
-        title: 'æ— æ³•å®‰å…¨è®°å½•åŒæ­¥æ“ä½œ',
-        description: 'æœªå†™å…¥æµè§ˆå™¨æœªå†³è®°å½•ï¼Œæœ¬æ¬¡åŒæ­¥æœªå‘é€ã€‚',
+        title: 'ÎŞ·¨°²È«¼ÇÂ¼Í¬²½²Ù×÷',
+        description: 'Î´Ğ´Èëä¯ÀÀÆ÷Î´¾ö¼ÇÂ¼£¬±¾´ÎÍ¬²½Î´·¢ËÍ¡£',
         variant: 'destructive',
       });
       return;
@@ -3450,9 +1671,9 @@ export function TTradeGlobalPage() {
       reconcileOperationRef.current = pendingOperation;
       persistUncertainOperation(`reconcile:${accountId}`, pendingOperation);
       toast({
-        title: 'åŒæ­¥ç»“æœæœªçŸ¥',
+        title: 'Í¬²½½á¹ûÎ´Öª',
         description:
-          error instanceof Error ? error.message : 'è¯·æ±‚ç»“æœæœªçŸ¥ï¼Œè¯·é‡è¯•åŸåŒæ­¥',
+          error instanceof Error ? error.message : 'ÇëÇó½á¹ûÎ´Öª£¬ÇëÖØÊÔÔ­Í¬²½',
         variant: 'destructive',
       });
       refreshVisibleData();
@@ -3473,8 +1694,8 @@ export function TTradeGlobalPage() {
       clearPersistedOperation(`reconcile:${accountId}`);
     }
     toast({
-      title: payload?.success ? 'æŒä»“å·²åŒæ­¥' : 'åŒæ­¥æœªå®Œæˆ',
-      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
+      title: payload?.success ? '³Ö²ÖÒÑÍ¬²½' : 'Í¬²½Î´Íê³É',
+      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshVisibleData();
@@ -3492,17 +1713,17 @@ export function TTradeGlobalPage() {
     if (action === 'approve') {
       if (!signalSnapshotTrusted) {
         toast({
-          title: 'å½“å‰è¿æ¥ä¸å¯ä¿¡ï¼Œç¦æ­¢ç¡®è®¤',
-          description: 'è¯·ç­‰å¾…æŸ¥è¯¢æˆåŠŸä¸”è®¢é˜…é‡è¿åçš„å…¨é‡åˆ·æ–°ã€‚',
+          title: 'µ±Ç°Á¬½Ó²»¿ÉĞÅ£¬½ûÖ¹È·ÈÏ',
+          description: 'ÇëµÈ´ı²éÑ¯³É¹¦ÇÒ¶©ÔÄÖØÁ¬ºóµÄÈ«Á¿Ë¢ĞÂ¡£',
           variant: 'destructive',
         });
         return;
       }
       if (!canApproveSnapshot(snapshot)) {
         toast({
-          title: 'å½“å‰å¿«ç…§ä¸èƒ½ç¡®è®¤',
+          title: 'µ±Ç°¿ìÕÕ²»ÄÜÈ·ÈÏ',
           description:
-            'å€™é€‰å·²è¿‡æœŸã€èº«ä»½ä¸å®Œæ•´æˆ–åè®®ç‰ˆæœ¬æœªçŸ¥ã€‚è¯·ç­‰å¾…æœåŠ¡ç«¯åˆ·æ–°ï¼›æœåŠ¡ç«¯ä¼šåœ¨ç¡®è®¤æ—¶é‡æ–°æ ¡éªŒäº¤æ˜“èµ„æ ¼ã€‚',
+            'ºòÑ¡ÒÑ¹ıÆÚ¡¢Éí·İ²»ÍêÕû»òĞ­Òé°æ±¾Î´Öª¡£ÇëµÈ´ı·şÎñ¶ËË¢ĞÂ£»·şÎñ¶Ë»áÔÚÈ·ÈÏÊ±ÖØĞÂĞ£Ñé½»Ò××Ê¸ñ¡£',
           variant: 'destructive',
         });
         return;
@@ -3527,8 +1748,8 @@ export function TTradeGlobalPage() {
         readUncertainOperation(`approve:${accountId}:${approvalKey}`);
       if (existingOperation?.blocked) {
         toast({
-          title: 'å®¡æ‰¹æ“ä½œä¸å¯æ¢å¤',
-          description: 'æµè§ˆå™¨ä¸­çš„æœªå†³å®¡æ‰¹è®°å½•ä¸å¯ç”¨ï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
+          title: 'ÉóÅú²Ù×÷²»¿É»Ö¸´',
+          description: 'ä¯ÀÀÆ÷ÖĞµÄÎ´¾öÉóÅú¼ÇÂ¼²»¿ÉÓÃ£¬ÇëÇåÀíºóÔÙ·¢Æğ²Ù×÷¡£',
           variant: 'destructive',
         });
         return;
@@ -3538,8 +1759,8 @@ export function TTradeGlobalPage() {
         existingOperation.identity !== approvalIdentity
       ) {
         toast({
-          title: 'ä¸Šä¸€ç¬”å®¡æ‰¹ç»“æœæœªçŸ¥',
-          description: 'è¯·å…ˆæ¢å¤åŸå®¡æ‰¹ç»“æœï¼Œä¸èƒ½ç”¨æ–°çš„å€™é€‰èº«ä»½é‡å¤ç¡®è®¤ã€‚',
+          title: 'ÉÏÒ»±ÊÉóÅú½á¹ûÎ´Öª',
+          description: 'ÇëÏÈ»Ö¸´Ô­ÉóÅú½á¹û£¬²»ÄÜÓÃĞÂµÄºòÑ¡Éí·İÖØ¸´È·ÈÏ¡£',
           variant: 'destructive',
         });
         return;
@@ -3565,8 +1786,8 @@ export function TTradeGlobalPage() {
           blocked: true,
         });
         toast({
-          title: 'æ— æ³•å®‰å…¨è®°å½•å®¡æ‰¹æ“ä½œ',
-          description: 'æœªå†™å…¥æµè§ˆå™¨æœªå†³è®°å½•ï¼Œæœ¬æ¬¡å®¡æ‰¹æœªå‘é€ã€‚',
+          title: 'ÎŞ·¨°²È«¼ÇÂ¼ÉóÅú²Ù×÷',
+          description: 'Î´Ğ´Èëä¯ÀÀÆ÷Î´¾ö¼ÇÂ¼£¬±¾´ÎÉóÅúÎ´·¢ËÍ¡£',
           variant: 'destructive',
         });
         return;
@@ -3587,11 +1808,11 @@ export function TTradeGlobalPage() {
           pendingOperation
         );
         toast({
-          title: 'å®¡æ‰¹ç»“æœæœªçŸ¥',
+          title: 'ÉóÅú½á¹ûÎ´Öª',
           description:
             error instanceof Error
               ? error.message
-              : 'è¯·æ±‚ç»“æœæœªçŸ¥ï¼Œè¯·é‡è¯•åŸå®¡æ‰¹',
+              : 'ÇëÇó½á¹ûÎ´Öª£¬ÇëÖØÊÔÔ­ÉóÅú',
           variant: 'destructive',
         });
         return;
@@ -3618,8 +1839,8 @@ export function TTradeGlobalPage() {
       errorMessage = result.error?.message || '';
     }
     toast({
-      title: payload?.success ? 'ä¿¡å·å·²å¤„ç†' : 'ä¿¡å·æœªæ‰§è¡Œ',
-      description: payload?.message || errorMessage || 'è¯·æ±‚å¤±è´¥',
+      title: payload?.success ? 'ĞÅºÅÒÑ´¦Àí' : 'ĞÅºÅÎ´Ö´ĞĞ',
+      description: payload?.message || errorMessage || 'ÇëÇóÊ§°Ü',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshVisibleData();
@@ -3636,8 +1857,8 @@ export function TTradeGlobalPage() {
     });
     const payload = result.data?.importTTradeExternalEntry;
     toast({
-      title: payload?.success ? 'å¤–éƒ¨æˆäº¤å·²çº³å…¥ç›‘æ§' : 'å¤–éƒ¨æˆäº¤æœªå¯¼å…¥',
-      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
+      title: payload?.success ? 'Íâ²¿³É½»ÒÑÄÉÈë¼à¿Ø' : 'Íâ²¿³É½»Î´µ¼Èë',
+      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
       variant: payload?.success ? 'default' : 'destructive',
     });
     if (payload?.success) {
@@ -3661,26 +1882,26 @@ export function TTradeGlobalPage() {
     if (targetStage === TTradeRolloutTarget.Live) {
       const expected = `LIVE:${accountId}`;
       const input = await promptDialog({
-        title: 'å¯ç”¨æ­£å¼ LIVE å®ç›˜',
+        title: 'ÆôÓÃÕıÊ½ LIVE ÊµÅÌ',
         description:
-          'æ­¤æ“ä½œå°†æˆæƒå½“å‰è´¦æˆ·æ‰§è¡Œæ­£å¼å®ç›˜å‘½ä»¤ã€‚è¯·è¾“å…¥ä¸‹æ–¹ç¡®è®¤çŸ­è¯­å®Œæˆç²¾ç¡®ç¡®è®¤ã€‚',
-        inputLabel: `ç¡®è®¤çŸ­è¯­ï¼š${expected}`,
+          '´Ë²Ù×÷½«ÊÚÈ¨µ±Ç°ÕË»§Ö´ĞĞÕıÊ½ÊµÅÌÃüÁî¡£ÇëÊäÈëÏÂ·½È·ÈÏ¶ÌÓïÍê³É¾«È·È·ÈÏ¡£',
+        inputLabel: `È·ÈÏ¶ÌÓï£º${expected}`,
         placeholder: expected,
-        confirmText: 'å¯ç”¨æ­£å¼ LIVE',
-        cancelText: 'å–æ¶ˆ',
+        confirmText: 'ÆôÓÃÕıÊ½ LIVE',
+        cancelText: 'È¡Ïû',
         variant: 'destructive',
         validate: value =>
-          value === expected ? null : `å¿…é¡»å®Œæ•´è¾“å…¥ ${expected}`,
+          value === expected ? null : `±ØĞëÍêÕûÊäÈë ${expected}`,
       });
       if (input === null) return;
       confirmation = input;
     } else {
       const confirmed = await confirmDialog({
-        title: 'è¿›å…¥ä¸¥æ ¼ Canary å®ç›˜',
+        title: '½øÈëÑÏ¸ñ Canary ÊµÅÌ',
         description:
-          'ä¹°å…¥ä»éœ€äººå·¥ç¡®è®¤ï¼›ä¹°å…¥çœŸå®æˆäº¤åï¼Œæ­¢ç›ˆã€æ­¢æŸå’Œæ—¶é—´é€€å‡ºä¼šè‡ªåŠ¨æäº¤å–å•ã€‚',
-        confirmText: 'å¯ç”¨ Canary',
-        cancelText: 'å–æ¶ˆ',
+          'ÂòÈëÈÔĞèÈË¹¤È·ÈÏ£»ÂòÈëÕæÊµ³É½»ºó£¬Ö¹Ó¯¡¢Ö¹ËğºÍÊ±¼äÍË³ö»á×Ô¶¯Ìá½»Âôµ¥¡£',
+        confirmText: 'ÆôÓÃ Canary',
+        cancelText: 'È¡Ïû',
         variant: 'warning',
       });
       if (!confirmed) return;
@@ -3697,8 +1918,8 @@ export function TTradeGlobalPage() {
       readUncertainOperation(operationScope);
     if (existingOperation?.blocked) {
       toast({
-        title: 'å®ç›˜æå‡æ“ä½œä¸å¯æ¢å¤',
-        description: 'æµè§ˆå™¨ä¸­çš„æœªå†³æå‡è®°å½•ä¸å¯ç”¨ï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
+        title: 'ÊµÅÌÌáÉı²Ù×÷²»¿É»Ö¸´',
+        description: 'ä¯ÀÀÆ÷ÖĞµÄÎ´¾öÌáÉı¼ÇÂ¼²»¿ÉÓÃ£¬ÇëÇåÀíºóÔÙ·¢Æğ²Ù×÷¡£',
         variant: 'destructive',
       });
       return;
@@ -3708,8 +1929,8 @@ export function TTradeGlobalPage() {
       existingOperation.identity !== identity
     ) {
       toast({
-        title: 'ä¸Šä¸€ç¬”å®ç›˜æå‡ç»“æœæœªçŸ¥',
-        description: 'è¯·å…ˆæ¢å¤åŸæå‡ç»“æœï¼Œä¸èƒ½ç”¨æ–°çš„é—¨ç¦æˆ–ç¡®è®¤å†æ¬¡æå‡ã€‚',
+        title: 'ÉÏÒ»±ÊÊµÅÌÌáÉı½á¹ûÎ´Öª',
+        description: 'ÇëÏÈ»Ö¸´Ô­ÌáÉı½á¹û£¬²»ÄÜÓÃĞÂµÄÃÅ½û»òÈ·ÈÏÔÙ´ÎÌáÉı¡£',
         variant: 'destructive',
       });
       return;
@@ -3729,8 +1950,8 @@ export function TTradeGlobalPage() {
         blocked: true,
       };
       toast({
-        title: 'æ— æ³•å®‰å…¨è®°å½•å®ç›˜æå‡æ“ä½œ',
-        description: 'æœªå†™å…¥æµè§ˆå™¨æœªå†³è®°å½•ï¼Œæœ¬æ¬¡å®ç›˜æå‡æœªå‘é€ã€‚',
+        title: 'ÎŞ·¨°²È«¼ÇÂ¼ÊµÅÌÌáÉı²Ù×÷',
+        description: 'Î´Ğ´Èëä¯ÀÀÆ÷Î´¾ö¼ÇÂ¼£¬±¾´ÎÊµÅÌÌáÉıÎ´·¢ËÍ¡£',
         variant: 'destructive',
       });
       return;
@@ -3750,9 +1971,9 @@ export function TTradeGlobalPage() {
       activateLiveOperationRef.current = pendingOperation;
       persistUncertainOperation(operationScope, pendingOperation);
       toast({
-        title: 'å®ç›˜æå‡ç»“æœæœªçŸ¥',
+        title: 'ÊµÅÌÌáÉı½á¹ûÎ´Öª',
         description:
-          error instanceof Error ? error.message : 'è¯·æ±‚ç»“æœæœªçŸ¥ï¼Œè¯·é‡è¯•åŸæ“ä½œ',
+          error instanceof Error ? error.message : 'ÇëÇó½á¹ûÎ´Öª£¬ÇëÖØÊÔÔ­²Ù×÷',
         variant: 'destructive',
       });
       return;
@@ -3772,10 +1993,10 @@ export function TTradeGlobalPage() {
     toast({
       title: payload?.success
         ? targetStage === TTradeRolloutTarget.Live
-          ? 'æ­£å¼ LIVE å·²å¯ç”¨'
-          : 'Canary å·²å¯ç”¨'
-        : 'å®ç›˜æœªå¯ç”¨',
-      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
+          ? 'ÕıÊ½ LIVE ÒÑÆôÓÃ'
+          : 'Canary ÒÑÆôÓÃ'
+        : 'ÊµÅÌÎ´ÆôÓÃ',
+      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshOperationalState();
@@ -3785,12 +2006,12 @@ export function TTradeGlobalPage() {
     if (!accountId) return;
     const result = await pauseEntries({
       accountId,
-      reason: 'ç”¨æˆ·ä»åš T å·¥ä½œå°æš‚åœæ–°ä¹°å…¥',
+      reason: 'ÓÃ»§´Ó×ö T ¹¤×÷Ì¨ÔİÍ£ĞÂÂòÈë',
     });
     const payload = result.data?.pauseTTradeEntries;
     toast({
-      title: payload?.success ? 'æ–°ä¹°å…¥å·²æš‚åœ' : 'æš‚åœå¤±è´¥',
-      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
+      title: payload?.success ? 'ĞÂÂòÈëÒÑÔİÍ£' : 'ÔİÍ£Ê§°Ü',
+      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshOperationalState();
@@ -3801,8 +2022,8 @@ export function TTradeGlobalPage() {
     const result = await cancelTTradeOrder({ accountId, clientOrderId });
     const payload = result.data?.cancelTTradeOrder;
     toast({
-      title: payload?.success ? 'æ’¤å•è¯·æ±‚å·²æäº¤' : 'å½“å‰ä¸èƒ½æ’¤å•',
-      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
+      title: payload?.success ? '³·µ¥ÇëÇóÒÑÌá½»' : 'µ±Ç°²»ÄÜ³·µ¥',
+      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshOperationalState();
@@ -3848,33 +2069,35 @@ export function TTradeGlobalPage() {
   );
 
   const replaySidebar = (
-    <React.Suspense
-      fallback={
-        <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
-          <div className="h-[68px] shrink-0 border-b border-white/[0.05] px-ui-section py-3">
-            <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-cyan-300">
-              Replay Lab
+    <TTradePanelBoundary name="»Ø²â¼ÇÂ¼">
+      <React.Suspense
+        fallback={
+          <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
+            <div className="h-[68px] shrink-0 border-b border-white/[0.05] px-ui-section py-3">
+              <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-cyan-300">
+                Replay Lab
+              </div>
+              <div className="mt-1 text-ui-title font-black text-slate-100">
+                »Ø²â¼ÇÂ¼
+              </div>
             </div>
-            <div className="mt-1 text-ui-title font-black text-slate-100">
-              å›æµ‹è®°å½•
+            <div className="flex items-center gap-2 p-ui-section text-ui-caption text-slate-500">
+              <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+              ÕıÔÚÔØÈë»Ø²â¼ÇÂ¼¡­
             </div>
-          </div>
-          <div className="flex items-center gap-2 p-ui-section text-ui-caption text-slate-500">
-            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-            æ­£åœ¨è½½å…¥å›æµ‹è®°å½•â€¦
-          </div>
-        </aside>
-      }
-    >
-      <TTradeReplaySidebar context={replaySidebarContext} />
-    </React.Suspense>
+          </aside>
+        }
+      >
+        <TTradeReplaySidebar context={replaySidebarContext} />
+      </React.Suspense>
+    </TTradePanelBoundary>
   );
 
   const toolbar = (
     <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-ui-section custom-scrollbar">
       <nav
         className="flex h-full min-w-0 items-stretch"
-        aria-label="åš T å·¥ä½œåŒº"
+        aria-label="×ö T ¹¤×÷Çø"
       >
         {(['REALTIME', 'REPLAY'] as const).map(mode => {
           const active = workspaceMode === mode;
@@ -3900,7 +2123,7 @@ export function TTradeGlobalPage() {
               ) : (
                 <Radar className="h-3.5 w-3.5" />
               )}
-              {mode === 'REPLAY' ? 'å›æ”¾æµ‹è¯•' : 'å®æ—¶ç›‘æ§'}
+              {mode === 'REPLAY' ? '»Ø·Å²âÊÔ' : 'ÊµÊ±¼à¿Ø'}
             </button>
           );
         })}
@@ -3937,18 +2160,18 @@ export function TTradeGlobalPage() {
             <span className="mx-2 my-3 w-px bg-white/[0.08]" />
             {(replaySidebarContext?.activeRunId
               ? [
-                  ['OVERVIEW', 'æ€»è§ˆ'],
-                  ['SIGNALS', 'ä¿¡å·'],
-                  ['AUDIT', 'å†³ç­–å®¡è®¡'],
-                  ['POSITIONS', 'ä»“ä½ä¸æ‰¹æ¬¡'],
-                  ['EVENTS', 'è¿è¡ŒåŠ¨æ€'],
-                  ['PARAMETERS', 'å‚æ•°'],
-                  ['ACCOUNT', 'è´¦æˆ·'],
+                  ['OVERVIEW', '×ÜÀÀ'],
+                  ['SIGNALS', 'ĞÅºÅ'],
+                  ['AUDIT', '¾ö²ßÉó¼Æ'],
+                  ['POSITIONS', '²ÖÎ»ÓëÅú´Î'],
+                  ['EVENTS', 'ÔËĞĞ¶¯Ì¬'],
+                  ['PARAMETERS', '²ÎÊı'],
+                  ['ACCOUNT', 'ÕË»§'],
                 ]
               : [
-                  ['OVERVIEW', 'æ€»è§ˆ'],
-                  ['PARAMETERS', 'å‚æ•°'],
-                  ['ACCOUNT', 'è´¦æˆ·'],
+                  ['OVERVIEW', '×ÜÀÀ'],
+                  ['PARAMETERS', '²ÎÊı'],
+                  ['ACCOUNT', 'ÕË»§'],
                 ]
             ).map(([view, label]) => {
               const replayView = view as ReplayWorkspaceView;
@@ -3982,13 +2205,13 @@ export function TTradeGlobalPage() {
             type="button"
             variant="outline"
           >
-            <WalletCards className="h-3.5 w-3.5" />T æ‰¹æ¬¡é€€å‡º
+            <WalletCards className="h-3.5 w-3.5" />T Åú´ÎÍË³ö
           </Button>
         )}
         {workspaceMode === 'REPLAY' ? (
           <span className="hidden items-center gap-1.5 text-ui-caption font-bold text-cyan-200 sm:inline-flex">
             <ShieldCheck className="h-3.5 w-3.5" />
-            éš”ç¦»å›æµ‹ Â· è‡ªåŠ¨ç¡®è®¤æµ‹è¯•ä¿¡å·
+            ¸ôÀë»Ø²â ¡¤ ×Ô¶¯È·ÈÏ²âÊÔĞÅºÅ
           </span>
         ) : (
           <>
@@ -4003,10 +2226,10 @@ export function TTradeGlobalPage() {
               )}
             >
               {(readiness?.stage || monitor?.rolloutStage) === 'LIVE'
-                ? 'LIVE Â· è‡ªåŠ¨æ‰§è¡Œ'
+                ? 'LIVE ¡¤ ×Ô¶¯Ö´ĞĞ'
                 : (readiness?.stage || monitor?.rolloutStage) === 'CANARY'
-                  ? 'CANARY Â· äººå·¥ç¡®è®¤'
-                  : `${readiness?.stage || monitor?.rolloutStage || 'SHADOW'} Â· æ–°ä¹°å…¥å…³é—­`}
+                  ? 'CANARY ¡¤ ÈË¹¤È·ÈÏ'
+                  : `${readiness?.stage || monitor?.rolloutStage || 'SHADOW'} ¡¤ ĞÂÂòÈë¹Ø±Õ`}
             </span>
             {(readiness?.stage || monitor?.rolloutStage) === 'LIVE' && (
               <Button
@@ -4017,7 +2240,7 @@ export function TTradeGlobalPage() {
                 onClick={handlePauseEntries}
                 className="hidden h-control-compact rounded-sm border-amber-400/20 px-2 text-ui-caption text-amber-200 xl:inline-flex"
               >
-                æš‚åœè‡ªåŠ¨æ‰§è¡Œ
+                ÔİÍ£×Ô¶¯Ö´ĞĞ
               </Button>
             )}
             <span
@@ -4034,11 +2257,11 @@ export function TTradeGlobalPage() {
                     : 'bg-slate-700'
                 )}
               />
-              {monitor?.enabled ? 'å…¨å±€ç›‘æ§è¿è¡Œä¸­' : 'å…¨å±€ç›‘æ§å·²åœæ­¢'}
+              {monitor?.enabled ? 'È«¾Ö¼à¿ØÔËĞĞÖĞ' : 'È«¾Ö¼à¿ØÒÑÍ£Ö¹'}
             </span>
             <span className="hidden h-4 w-px bg-white/[0.08] sm:block" />
             <span className="hidden font-mono text-ui-micro text-slate-600 sm:inline">
-              è¡Œæƒ… WS {graphqlWsStatus} Â· ç­–ç•¥æŠ•å½±çº¦ 10s
+              ĞĞÇé WS {graphqlWsStatus} ¡¤ ²ßÂÔÍ¶Ó°Ô¼ 10s
             </span>
           </>
         )}
@@ -4051,7 +2274,7 @@ export function TTradeGlobalPage() {
       {!accountId && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/15 bg-amber-400/[0.07] px-ui-section py-2.5 text-ui-label font-bold text-amber-100">
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          æœªé…ç½®é»˜è®¤äº¤æ˜“è´¦æˆ·ï¼Œè¯·è®¾ç½®ç¯å¢ƒå˜é‡ VITE_DEFAULT_ACCOUNT_IDã€‚
+          Î´ÅäÖÃÄ¬ÈÏ½»Ò×ÕË»§£¬ÇëÉèÖÃ»·¾³±äÁ¿ VITE_DEFAULT_ACCOUNT_ID¡£
         </div>
       )}
       {(monitorResult.error || monitor?.lastError) && (
@@ -4085,17 +2308,17 @@ export function TTradeGlobalPage() {
             )}
             <div>
               <div className="text-ui-label font-black text-slate-100">
-                {readinessStageLabel(readiness.status, readiness.stage)} Â·
-                Engine {readiness.engineStatus} Â· Agent {readiness.agentStatus}
+                {readinessStageLabel(readiness.status, readiness.stage)} ¡¤
+                Engine {readiness.engineStatus} ¡¤ Agent {readiness.agentStatus}
               </div>
               <div className="mt-1 text-ui-caption leading-4 text-slate-400">
                 {readiness.preparationReady && !readiness.automationReady
-                  ? `è´¦æˆ·äº‹å®å·²æ”¶æ•›ï¼›åš T è‡ªåŠ¨æ‰§è¡Œä»å…³é—­ã€‚è´¦æˆ·å®ç›˜çª—å£${readiness.controlledWindowActive ? 'å·²å»ºç«‹' : 'æœªå»ºç«‹'}ï¼Œå½“å‰å¿«ç…§è¯†åˆ«æ‰‹å·¥å§”æ‰˜ ${readiness.externalOrderCount} ç¬”ã€æˆäº¤ ${readiness.externalTradeCount} ç¬”ï¼Œçª—å£åæ–°å¢ ${readiness.newExternalOrderCount + readiness.newExternalTradeCount} ç¬”ï¼Œæ´»åŠ¨å§”æ‰˜ ${readiness.workingExternalOrderCount} ç¬”ã€‚${readiness.blockedReasons[0] || ''}`
+                  ? `ÕË»§ÊÂÊµÒÑÊÕÁ²£»×ö T ×Ô¶¯Ö´ĞĞÈÔ¹Ø±Õ¡£ÕË»§ÊµÅÌ´°¿Ú${readiness.controlledWindowActive ? 'ÒÑ½¨Á¢' : 'Î´½¨Á¢'}£¬µ±Ç°¿ìÕÕÊ¶±ğÊÖ¹¤Î¯ÍĞ ${readiness.externalOrderCount} ±Ê¡¢³É½» ${readiness.externalTradeCount} ±Ê£¬´°¿ÚºóĞÂÔö ${readiness.newExternalOrderCount + readiness.newExternalTradeCount} ±Ê£¬»î¶¯Î¯ÍĞ ${readiness.workingExternalOrderCount} ±Ê¡£${readiness.blockedReasons[0] || ''}`
                   : readiness.automationReady && !readiness.canApprove
-                    ? `è´¦æˆ·å®ç›˜é—¨ç¦å·²é€šè¿‡ï¼›åš T å½“å‰å¤„äº ${readiness.stage}ï¼Œå¯ç”¨ Canary æˆ– LIVE åæ‰å…è®¸ç¡®è®¤æ–°ä¹°å…¥ã€‚`
+                    ? `ÕË»§ÊµÅÌÃÅ½ûÒÑÍ¨¹ı£»×ö T µ±Ç°´¦ÓÚ ${readiness.stage}£¬ÆôÓÃ Canary »ò LIVE ºó²ÅÔÊĞíÈ·ÈÏĞÂÂòÈë¡£`
                     : readiness.blockedReasons.length
-                      ? readiness.blockedReasons.join('ï¼›')
-                      : 'åš T è‡ªåŠ¨æ‰§è¡Œå·²å¯ç”¨ï¼Œå¯æŒ‰å½“å‰ç°åº¦é˜¶æ®µå¤„ç†äº¤æ˜“ã€‚'}
+                      ? readiness.blockedReasons.join('£»')
+                      : '×ö T ×Ô¶¯Ö´ĞĞÒÑÆôÓÃ£¬¿É°´µ±Ç°»Ò¶È½×¶Î´¦Àí½»Ò×¡£'}
               </div>
             </div>
           </div>
@@ -4109,7 +2332,7 @@ export function TTradeGlobalPage() {
                 onClick={handlePauseEntries}
                 className="h-control-compact rounded-sm border-amber-400/20 text-ui-caption text-amber-200"
               >
-                æš‚åœæ–°ä¹°å…¥
+                ÔİÍ£ĞÂÂòÈë
               </Button>
             ) : (
               <>
@@ -4121,8 +2344,8 @@ export function TTradeGlobalPage() {
                   className="h-8 rounded-sm border-sky-400/20 text-ui-caption text-sky-200"
                 >
                   {readiness.controlledWindowActive
-                    ? 'æŸ¥çœ‹è´¦æˆ·äº¤æ˜“å®‰å…¨'
-                    : 'å‰å¾€å»ºç«‹è´¦æˆ·å®ç›˜çª—å£'}
+                    ? '²é¿´ÕË»§½»Ò×°²È«'
+                    : 'Ç°Íù½¨Á¢ÕË»§ÊµÅÌ´°¿Ú'}
                 </Button>
                 <Button
                   type="button"
@@ -4132,7 +2355,7 @@ export function TTradeGlobalPage() {
                   onClick={() => handleActivateLive(TTradeRolloutTarget.Canary)}
                   className="h-8 rounded-sm border-emerald-400/20 text-ui-caption text-emerald-200"
                 >
-                  å¯ç”¨ä¸¥æ ¼ Canary
+                  ÆôÓÃÑÏ¸ñ Canary
                 </Button>
                 <Button
                   type="button"
@@ -4141,7 +2364,7 @@ export function TTradeGlobalPage() {
                   onClick={() => handleActivateLive(TTradeRolloutTarget.Live)}
                   className="h-8 rounded-sm bg-emerald-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-emerald-400"
                 >
-                  å¯ç”¨æ­£å¼ LIVE
+                  ÆôÓÃÕıÊ½ LIVE
                 </Button>
               </>
             )}
@@ -4152,7 +2375,7 @@ export function TTradeGlobalPage() {
               onClick={() => openStudioTab('/settings/trading-safety')}
               className="h-8 rounded-sm border-rose-400/20 text-ui-caption text-rose-200"
             >
-              è´¦æˆ·ç´§æ€¥åœæ­¢
+              ÕË»§½ô¼±Í£Ö¹
             </Button>
           </div>
         </section>
@@ -4164,24 +2387,24 @@ export function TTradeGlobalPage() {
           className="flex shrink-0 items-center justify-between border-b border-amber-400/15 bg-amber-400/[0.05] px-ui-section py-2.5 text-left transition-colors hover:bg-amber-400/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400/50"
         >
           <span className="inline-flex items-center gap-2 text-ui-label font-bold text-amber-100">
-            <Activity className="h-4 w-4" />æœ‰ {pendingSessions.length}{' '}
-            ä¸ªä¹°å…¥æœºä¼šç­‰å¾…äººå·¥ç¡®è®¤
+            <Activity className="h-4 w-4" />ÓĞ {pendingSessions.length}{' '}
+            ¸öÂòÈë»ú»áµÈ´ıÈË¹¤È·ÈÏ
           </span>
           <span className="text-ui-caption font-bold text-amber-300">
-            æŸ¥çœ‹ä¿¡å· â†’
+            ²é¿´ĞÅºÅ ¡ú
           </span>
         </button>
       )}
 
       <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section py-3">
         <div>
-          <h2 className="text-ui-body font-black text-slate-100">å®æ—¶ä½œæˆ˜è¡¨</h2>
+          <h2 className="text-ui-body font-black text-slate-100">ÊµÊ±×÷Õ½±í</h2>
           <p className="mt-0.5 text-ui-caption text-slate-600">
-            è¡Œæƒ…æµä¸ç­–ç•¥æµç‹¬ç«‹æ ‡æ—¶ Â· é»˜è®¤æŒ‰éœ€è¦å…³æ³¨ç¨‹åº¦æ’åº
+            ĞĞÇéÁ÷Óë²ßÂÔÁ÷¶ÀÁ¢±êÊ± ¡¤ Ä¬ÈÏ°´ĞèÒª¹Ø×¢³Ì¶ÈÅÅĞò
           </p>
         </div>
         <div className="flex items-center gap-3 text-ui-caption font-bold text-slate-600">
-          <span>{monitor?.mode === 'live' ? 'å®ç›˜æ‰§è¡Œ' : 'æ¨¡æ‹Ÿè§‚å¯Ÿ'}</span>
+          <span>{monitor?.mode === 'live' ? 'ÊµÅÌÖ´ĞĞ' : 'Ä£Äâ¹Û²ì'}</span>
           <Button
             type="button"
             size="sm"
@@ -4191,14 +2414,14 @@ export function TTradeGlobalPage() {
             onClick={() => setShowExternalEntry(value => !value)}
           >
             <Plus className="mr-1.5 h-3.5 w-3.5" />
-            ä»å·²æˆå§”æ‰˜é€‰æ‹©
+            ´ÓÒÑ³ÉÎ¯ÍĞÑ¡Ôñ
           </Button>
           {monitorResult.fetching && !monitor ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-red-300" />
           ) : lastMonitorRefreshAt ? (
             <span
               className="font-mono font-normal text-slate-700"
-              title={`æœ€è¿‘åŒæ­¥ï¼š${lastMonitorRefreshAt.toLocaleString('zh-CN', {
+              title={`×î½üÍ¬²½£º${lastMonitorRefreshAt.toLocaleString('zh-CN', {
                 hour12: false,
               })}`}
             >
@@ -4218,11 +2441,11 @@ export function TTradeGlobalPage() {
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
                 <div>
                   <div className="text-ui-label font-black text-amber-100">
-                    è¯·å…ˆå¯åŠ¨å…¨å±€ç›‘æ§
+                    ÇëÏÈÆô¶¯È«¾Ö¼à¿Ø
                   </div>
                   <p className="mt-1 text-ui-caption leading-4 text-slate-500">
-                    å¤–éƒ¨æˆäº¤éœ€è¦åŠ å…¥ä¸€ä¸ªæ­£åœ¨è¿è¡Œçš„åš T
-                    ç­–ç•¥ï¼Œæ‰èƒ½æŒç»­è¯»å–è¡Œæƒ…å¹¶è§¦å‘è‡ªåŠ¨å–å‡ºã€‚
+                    Íâ²¿³É½»ĞèÒª¼ÓÈëÒ»¸öÕıÔÚÔËĞĞµÄ×ö T
+                    ²ßÂÔ£¬²ÅÄÜ³ÖĞø¶ÁÈ¡ĞĞÇé²¢´¥·¢×Ô¶¯Âô³ö¡£
                   </p>
                 </div>
               </div>
@@ -4236,7 +2459,7 @@ export function TTradeGlobalPage() {
                 onClick={() => persist(true)}
               >
                 <Play className="mr-1.5 h-3.5 w-3.5" />
-                å¯åŠ¨ç›‘æ§åæ·»åŠ 
+                Æô¶¯¼à¿ØºóÌí¼Ó
               </Button>
             </div>
           ) : (
@@ -4244,15 +2467,15 @@ export function TTradeGlobalPage() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div className="text-ui-label font-black text-slate-100">
-                    é€‰æ‹©å·²æˆäº¤ä¹°å…¥å§”æ‰˜
+                    Ñ¡ÔñÒÑ³É½»ÂòÈëÎ¯ÍĞ
                   </div>
                   <p className="mt-1 text-ui-caption text-slate-500">
-                    å…ˆåŒæ­¥ miniQMT
-                    å½“æ—¥å§”æ‰˜ï¼Œå†è¯»å–å§”æ‰˜è¡¨ï¼›æ¯ä¸ªå·²æˆå§”æ‰˜åªèƒ½å»ºç«‹ä¸€æ¬¡è‡ªåŠ¨å–å‡ºæ‰¹æ¬¡ã€‚
+                    ÏÈÍ¬²½ miniQMT
+                    µ±ÈÕÎ¯ÍĞ£¬ÔÙ¶ÁÈ¡Î¯ÍĞ±í£»Ã¿¸öÒÑ³ÉÎ¯ÍĞÖ»ÄÜ½¨Á¢Ò»´Î×Ô¶¯Âô³öÅú´Î¡£
                   </p>
                   {sourceOrdersSyncedAt && !sourceOrdersSyncError && (
                     <p className="mt-1 font-mono text-ui-micro text-emerald-500/70">
-                      å½“æ—¥å§”æ‰˜å·²åŒæ­¥ Â·{' '}
+                      µ±ÈÕÎ¯ÍĞÒÑÍ¬²½ ¡¤{' '}
                       {sourceOrdersSyncedAt.toLocaleTimeString('zh-CN', {
                         hour12: false,
                       })}
@@ -4275,14 +2498,14 @@ export function TTradeGlobalPage() {
                         'animate-spin motion-reduce:animate-none'
                     )}
                   />
-                  {syncSourceOrdersResult.fetching ? 'åŒæ­¥ä¸­' : 'åŒæ­¥å¹¶åˆ·æ–°'}
+                  {syncSourceOrdersResult.fetching ? 'Í¬²½ÖĞ' : 'Í¬²½²¢Ë¢ĞÂ'}
                 </Button>
               </div>
               {sourceOrdersSyncError && (
                 <div className="mt-3 flex items-start gap-2 border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-ui-caption leading-4 text-red-200">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
                   <span>
-                    {sourceOrdersSyncError}ã€‚å½“å‰ä»æ˜¾ç¤ºå§”æ‰˜è¡¨ä¸­çš„å·²æœ‰è®°å½•ã€‚
+                    {sourceOrdersSyncError}¡£µ±Ç°ÈÔÏÔÊ¾Î¯ÍĞ±íÖĞµÄÒÑÓĞ¼ÇÂ¼¡£
                   </span>
                 </div>
               )}
@@ -4292,7 +2515,7 @@ export function TTradeGlobalPage() {
                     htmlFor="t-trade-source-start"
                     className="text-ui-caption text-slate-500"
                   >
-                    å¼€å§‹æ—¥æœŸ
+                    ¿ªÊ¼ÈÕÆÚ
                   </Label>
                   <Input
                     id="t-trade-source-start"
@@ -4307,7 +2530,7 @@ export function TTradeGlobalPage() {
                     htmlFor="t-trade-source-end"
                     className="text-ui-caption text-slate-500"
                   >
-                    ç»“æŸæ—¥æœŸ
+                    ½áÊøÈÕÆÚ
                   </Label>
                   <Input
                     id="t-trade-source-end"
@@ -4357,10 +2580,10 @@ export function TTradeGlobalPage() {
                         </span>
                       </span>
                       <span className="text-right font-mono text-slate-300">
-                        {order.tradedVolume.toLocaleString()} è‚¡
+                        {order.tradedVolume.toLocaleString()} ¹É
                       </span>
                       <span className="text-right font-mono text-slate-300">
-                        Â¥{formatNumber(order.tradedPrice, 3)}
+                        £¤{formatNumber(order.tradedPrice, 3)}
                       </span>
                       <span
                         className={cn(
@@ -4371,7 +2594,7 @@ export function TTradeGlobalPage() {
                         )}
                       >
                         {imported
-                          ? 'å·²çº³å…¥'
+                          ? 'ÒÑÄÉÈë'
                           : new Date(order.time).toLocaleDateString('zh-CN')}
                       </span>
                     </label>
@@ -4380,7 +2603,7 @@ export function TTradeGlobalPage() {
                 {!sourceOrdersResult.fetching &&
                   sourceBuyOrders.length === 0 && (
                     <div className="px-3 py-ui-panel text-center text-ui-caption text-slate-600">
-                      æ‰€é€‰æ—¥æœŸèŒƒå›´å†…æ²¡æœ‰å·²æˆäº¤ä¹°å…¥å§”æ‰˜
+                      ËùÑ¡ÈÕÆÚ·¶Î§ÄÚÃ»ÓĞÒÑ³É½»ÂòÈëÎ¯ÍĞ
                     </div>
                   )}
               </div>
@@ -4394,7 +2617,7 @@ export function TTradeGlobalPage() {
                     }
                     className="mt-0.5 h-3.5 w-3.5 accent-amber-400"
                   />
-                  æˆ‘ç¡®è®¤å°†æ‰€é€‰å·²æˆäº¤ä¹°å…¥å§”æ‰˜çº³å…¥å½“å‰å·²å¯ç”¨çš„è‡ªåŠ¨é€€å‡ºè§„åˆ™ã€‚
+                  ÎÒÈ·ÈÏ½«ËùÑ¡ÒÑ³É½»ÂòÈëÎ¯ÍĞÄÉÈëµ±Ç°ÒÑÆôÓÃµÄ×Ô¶¯ÍË³ö¹æÔò¡£
                 </label>
                 <Button
                   type="button"
@@ -4409,7 +2632,7 @@ export function TTradeGlobalPage() {
                   {importResult.fetching && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                   )}
-                  çº³å…¥è‡ªåŠ¨å–å‡º
+                  ÄÉÈë×Ô¶¯Âô³ö
                 </Button>
               </div>
             </>
@@ -4579,7 +2802,7 @@ export function TTradeGlobalPage() {
             className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none"
             aria-hidden="true"
           />
-          æ­£åœ¨åŠ è½½çœŸå®ä¿¡å·â€¦
+          ÕıÔÚ¼ÓÔØÕæÊµĞÅºÅ¡­
         </div>
       }
     >
@@ -4590,9 +2813,9 @@ export function TTradeGlobalPage() {
         candidateTrace={candidateTraceForUi}
         candidateTraceError={
           candidateTraceIdentityMismatch
-            ? 'å€™é€‰è¿½æº¯å“åº”èº«ä»½ä¸ä¸€è‡´ï¼Œå·²é˜»æ­¢å±•ç¤º'
+            ? 'ºòÑ¡×·ËİÏìÓ¦Éí·İ²»Ò»ÖÂ£¬ÒÑ×èÖ¹Õ¹Ê¾'
             : candidateTraceResult.error
-              ? 'å€™é€‰è¿½æº¯æš‚ä¸å¯ç”¨ï¼Œè¯·ç¨åé‡è¯•'
+              ? 'ºòÑ¡×·ËİÔİ²»¿ÉÓÃ£¬ÇëÉÔºóÖØÊÔ'
               : undefined
         }
         candidateTraceLoading={candidateTraceResult.fetching}
@@ -4655,7 +2878,7 @@ export function TTradeGlobalPage() {
             className="mt-0.5 h-3.5 w-3.5 shrink-0"
             aria-hidden="true"
           />
-          é…ç½®è¯»å–å¤±è´¥ï¼›å½“å‰è¡¨å•å¯èƒ½æ˜¯ä¸Šæ¬¡æˆåŠŸè¯»å–çš„è‰ç¨¿ï¼Œä¿å­˜å·²æš‚åœï¼Œè¯·å…ˆåˆ·æ–°ã€‚
+          ÅäÖÃ¶ÁÈ¡Ê§°Ü£»µ±Ç°±íµ¥¿ÉÄÜÊÇÉÏ´Î³É¹¦¶ÁÈ¡µÄ²İ¸å£¬±£´æÒÑÔİÍ££¬ÇëÏÈË¢ĞÂ¡£
         </div>
       )}
       {!monitorResult.error && monitorResult.fetching && (
@@ -4668,30 +2891,30 @@ export function TTradeGlobalPage() {
             className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
             aria-hidden="true"
           />
-          æ­£åœ¨åˆ·æ–°é…ç½®ç‰ˆæœ¬â€¦
+          ÕıÔÚË¢ĞÂÅäÖÃ°æ±¾¡­
         </div>
       )}
       <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section py-3">
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-ui-body font-black text-slate-100">
-              å…¨å±€ç­–ç•¥å‚æ•°
+              È«¾Ö²ßÂÔ²ÎÊı
             </h2>
             {draftDirty && (
               <span
                 role="status"
                 className="rounded-sm border border-primary/20 bg-primary/10 px-1.5 py-0.5 text-ui-micro font-semibold text-blue-200"
               >
-                å·²ä¿®æ”¹
+                ÒÑĞŞ¸Ä
               </span>
             )}
           </div>
           <p className="mt-0.5 text-ui-caption text-slate-600">
-            å¯¹è´¦æˆ·å†…æ‰€æœ‰æœªå¿½ç•¥çš„åˆæ ¼æŒä»“ç»Ÿä¸€ç”Ÿæ•ˆ
+            ¶ÔÕË»§ÄÚËùÓĞÎ´ºöÂÔµÄºÏ¸ñ³Ö²ÖÍ³Ò»ÉúĞ§
           </p>
         </div>
         <span className="font-mono text-ui-caption text-slate-600">
-          é…ç½®ç‰ˆæœ¬ v{monitor?.configVersion ?? 0}
+          ÅäÖÃ°æ±¾ v{monitor?.configVersion ?? 0}
         </span>
       </div>
 
@@ -4702,14 +2925,14 @@ export function TTradeGlobalPage() {
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.05] pb-3">
               <div>
                 <div className="text-ui-label font-black text-slate-200">
-                  V3 æœ‰çŠ¶æ€ä¿¡å·è§„åˆ™
+                  V3 ÓĞ×´Ì¬ĞÅºÅ¹æÔò
                 </div>
                 <div className="mt-1 text-ui-caption text-slate-600">
-                  å› æœçª—å£ã€åŒ FSMã€å¯è§£é‡Šè¯„åˆ†ã€ç¡¬é—¨ç¦ä¸ episode é˜²é‡å¤
+                  Òò¹û´°¿Ú¡¢Ë« FSM¡¢¿É½âÊÍÆÀ·Ö¡¢Ó²ÃÅ½ûÓë episode ·ÀÖØ¸´
                 </div>
               </div>
               <div className="font-mono text-ui-micro text-slate-600">
-                {monitor?.signalPolicy.policyVersion || 'ç­‰å¾…ç­–ç•¥ç‰ˆæœ¬'} Â·
+                {monitor?.signalPolicy.policyVersion || 'µÈ´ı²ßÂÔ°æ±¾'} ¡¤
                 feature {monitor?.signalPolicy.featureSchemaVersion || '--'}
               </div>
             </div>
@@ -4717,15 +2940,15 @@ export function TTradeGlobalPage() {
             <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
               <NumericField
                 id="t-trade-deviation"
-                label="ç¡®è®¤ä»·åç¦»"
+                label="È·ÈÏ¼ÛÆ«Àë"
                 suffix="%"
                 value={form.maxPriceDeviationPct}
                 onChange={value => setField('maxPriceDeviationPct', value)}
               />
               <NumericField
                 id="t-trade-cooldown"
-                label="æ‰¹æ¬¡å†·å´æ—¶é—´"
-                suffix="ç§’"
+                label="Åú´ÎÀäÈ´Ê±¼ä"
+                suffix="Ãë"
                 value={form.cooldownSeconds}
                 onChange={value => setField('cooldownSeconds', value)}
               />
@@ -4748,10 +2971,10 @@ export function TTradeGlobalPage() {
                 htmlFor="t-trade-ignore-code"
                 className="text-ui-label font-bold text-slate-300"
               >
-                å¿½ç•¥è‚¡ç¥¨ä»£ç 
+                ºöÂÔ¹ÉÆ±´úÂë
               </Label>
               <p className="mt-1 text-ui-caption text-slate-600">
-                å¿½ç•¥åå•å±äºå¤–éƒ¨å‘æ„å›¾é—¨ç¦ï¼Œä¸æ”¹å˜æœåŠ¡ç«¯ä¸‰å±‚ä¿¡å·çŠ¶æ€ã€‚
+                ºöÂÔÃûµ¥ÊôÓÚÍâ²¿·¢ÒâÍ¼ÃÅ½û£¬²»¸Ä±ä·şÎñ¶ËÈı²ãĞÅºÅ×´Ì¬¡£
               </p>
               <div className="mt-3 flex gap-2">
                 <Input
@@ -4764,7 +2987,7 @@ export function TTradeGlobalPage() {
                       handleAddIgnore();
                     }
                   }}
-                  placeholder="ä¾‹å¦‚ 600000 æˆ– 600000.SH"
+                  placeholder="ÀıÈç 600000 »ò 600000.SH"
                   className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-ui-label focus-visible:ring-red-500/60"
                 />
                 <Button
@@ -4775,13 +2998,13 @@ export function TTradeGlobalPage() {
                   disabled={!ignoreInput.trim() || actionLoading}
                   onClick={handleAddIgnore}
                 >
-                  æ·»åŠ 
+                  Ìí¼Ó
                 </Button>
               </div>
               <div className="mt-3 flex min-h-8 flex-wrap gap-1.5">
                 {ignoredCodes.length === 0 ? (
                   <span className="text-ui-caption text-slate-700">
-                    å½“å‰æœªå¿½ç•¥ä»»ä½•è‚¡ç¥¨
+                    µ±Ç°Î´ºöÂÔÈÎºÎ¹ÉÆ±
                   </span>
                 ) : (
                   ignoredCodes.map(code => (
@@ -4791,7 +3014,7 @@ export function TTradeGlobalPage() {
                       disabled={actionLoading}
                       onClick={() => handleIgnore(code, false)}
                       className="inline-flex items-center gap-1 border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-ui-caption text-slate-400 outline-none transition-colors hover:border-rose-400/30 hover:text-rose-200 focus-visible:ring-2 focus-visible:ring-red-500/60"
-                      aria-label={'ä»å¿½ç•¥åå•ç§»é™¤ ' + code}
+                      aria-label={'´ÓºöÂÔÃûµ¥ÒÆ³ı ' + code}
                     >
                       {code}
                       <X className="h-3 w-3" />
@@ -4811,15 +3034,15 @@ export function TTradeGlobalPage() {
               onChange={event => setField('acknowledged', event.target.checked)}
               className="mt-0.5 h-4 w-4 shrink-0 accent-amber-400"
             />
-            æˆ‘ç¡®è®¤æ‰€æœ‰æŒä»“å½¢æˆ T
-            æ‰¹æ¬¡åï¼Œå½“å‰å·²å¯ç”¨çš„é€€å‡ºè§„åˆ™å¯è‡ªåŠ¨æäº¤å®ç›˜å–å•ã€‚
+            ÎÒÈ·ÈÏËùÓĞ³Ö²ÖĞÎ³É T
+            Åú´Îºó£¬µ±Ç°ÒÑÆôÓÃµÄÍË³ö¹æÔò¿É×Ô¶¯Ìá½»ÊµÅÌÂôµ¥¡£
           </label>
         )}
       </div>
 
       <div className="flex shrink-0 items-center justify-between border-t border-white/[0.06] bg-[#091322] px-ui-section py-3">
         <div className="text-ui-caption text-slate-600">
-          ä¿å­˜åç«‹å³åº”ç”¨äºå½“å‰è´¦æˆ·çš„å•ä¸€ T ç­–ç•¥è¿è¡Œ
+          ±£´æºóÁ¢¼´Ó¦ÓÃÓÚµ±Ç°ÕË»§µÄµ¥Ò» T ²ßÂÔÔËĞĞ
         </div>
         <Button
           type="button"
@@ -4841,7 +3064,7 @@ export function TTradeGlobalPage() {
           ) : (
             <Save className="mr-2 h-4 w-4" />
           )}
-          ä¿å­˜å…¨å±€è®¾ç½®
+          ±£´æÈ«¾ÖÉèÖÃ
         </Button>
       </div>
     </div>
@@ -4851,38 +3074,47 @@ export function TTradeGlobalPage() {
     <div className="flex h-full min-h-0 flex-col">
       {toolbar}
       <div className="min-h-0 flex-1">
-        {workspaceMode === 'REPLAY' ? (
-          <TTradeReplayPanel
-            accountId={accountId}
-            activeView={activeReplayView}
-            baseCosts={replayBaseCosts}
-            baseForm={replayBaseForm}
-            costs={replayCosts}
-            form={replayForm}
-            liveConfigVersion={replayConfigVersion}
-            liveSettingsStale={replayLiveSettingsStale}
-            onActiveViewChange={setActiveReplayView}
-            onCopySettings={copyReplaySettings}
-            onCostChange={setReplayCostField}
-            onFieldChange={setReplayField}
-            onRestoreSettings={restoreReplaySettings}
-            onSidebarContextChange={setReplaySidebarContext}
-            onSignalPolicyChange={setReplaySignalPolicyField}
-            restoringSettings={replaySettingsRestoring}
-          />
-        ) : activeMode === 'MONITOR' ? (
-          monitorView
-        ) : activeMode === 'SIGNALS' ? (
-          signalsView
-        ) : activeMode === 'DIAGNOSTICS' ? (
-          diagnosticsView
-        ) : activeMode === 'POSITIONS' ? (
-          positionsView
-        ) : activeMode === 'EVENTS' ? (
-          eventsView
-        ) : (
-          settingsView
-        )}
+        <TTradePanelBoundary
+          name={
+            workspaceMode === 'REPLAY'
+              ? '»Ø·Å²âÊÔ'
+              : (tTradeModes.find(mode => mode.id === activeMode)?.label ??
+                '×ö T Ãæ°å')
+          }
+        >
+          {workspaceMode === 'REPLAY' ? (
+            <TTradeReplayPanel
+              accountId={accountId}
+              activeView={activeReplayView}
+              baseCosts={replayBaseCosts}
+              baseForm={replayBaseForm}
+              costs={replayCosts}
+              form={replayForm}
+              liveConfigVersion={replayConfigVersion}
+              liveSettingsStale={replayLiveSettingsStale}
+              onActiveViewChange={setActiveReplayView}
+              onCopySettings={copyReplaySettings}
+              onCostChange={setReplayCostField}
+              onFieldChange={setReplayField}
+              onRestoreSettings={restoreReplaySettings}
+              onSidebarContextChange={setReplaySidebarContext}
+              onSignalPolicyChange={setReplaySignalPolicyField}
+              restoringSettings={replaySettingsRestoring}
+            />
+          ) : activeMode === 'MONITOR' ? (
+            monitorView
+          ) : activeMode === 'SIGNALS' ? (
+            signalsView
+          ) : activeMode === 'DIAGNOSTICS' ? (
+            diagnosticsView
+          ) : activeMode === 'POSITIONS' ? (
+            positionsView
+          ) : activeMode === 'EVENTS' ? (
+            eventsView
+          ) : (
+            settingsView
+          )}
+        </TTradePanelBoundary>
       </div>
     </div>
   );
@@ -4917,19 +3149,19 @@ export function TTradeGlobalPage() {
               )}
             />
             {workspaceMode === 'REPLAY'
-              ? 'å†å²å›æ”¾æµ‹è¯•æ¨¡å¼'
+              ? 'ÀúÊ·»Ø·Å²âÊÔÄ£Ê½'
               : monitor?.enabled
-                ? 'å…¨å±€ç›‘æ§è¿è¡Œä¸­'
-                : 'å…¨å±€ç›‘æ§å·²åœæ­¢'}
+                ? 'È«¾Ö¼à¿ØÔËĞĞÖĞ'
+                : 'È«¾Ö¼à¿ØÒÑÍ£Ö¹'}
           </span>
           <span className="text-slate-700">|</span>
-          <span className="font-mono">{accountId || 'æœªé…ç½®è´¦æˆ·'}</span>
+          <span className="font-mono">{accountId || 'Î´ÅäÖÃÕË»§'}</span>
           {workspaceMode === 'REALTIME' && (
             <>
               <span className="text-slate-700">|</span>
               <span className="inline-flex items-center gap-1.5">
                 <Clock3 className="h-3 w-3" />
-                æœ€è¿‘åŒæ­¥ {formatTime(monitor?.lastReconciledAt)}
+                ×î½üÍ¬²½ {formatTime(monitor?.lastReconciledAt)}
               </span>
             </>
           )}
@@ -4940,23 +3172,23 @@ export function TTradeGlobalPage() {
           <>
             <span>BACKTEST Broker</span>
             <span className="text-slate-700">|</span>
-            <span>æœ€é•¿ 20 ä¸ªäº¤æ˜“æ—¥</span>
+            <span>×î³¤ 20 ¸ö½»Ò×ÈÕ</span>
             <span className="text-slate-700">|</span>
-            <span>å®æ—¶ç›‘æ§äº’ä¸å½±å“</span>
+            <span>ÊµÊ±¼à¿Ø»¥²»Ó°Ïì</span>
           </>
         ) : (
           <>
             <span className="font-mono">
-              è¿è¡Œ {monitor?.strategyRunId?.slice(0, 8) || '--'}
+              ÔËĞĞ {monitor?.strategyRunId?.slice(0, 8) || '--'}
             </span>
             <span className="text-slate-700">|</span>
             <span>
-              æ ‡çš„ v{monitor?.universeRevision ?? 0} Â· é…ç½® v
+              ±êµÄ v{monitor?.universeRevision ?? 0} ¡¤ ÅäÖÃ v
               {monitor?.configVersion ?? 0}
             </span>
             <span className="text-slate-700">|</span>
             <span>
-              å¾…ç¡®è®¤ {monitor?.pendingSignalCount ?? 0} Â· æ´»è·ƒ{' '}
+              ´ıÈ·ÈÏ {monitor?.pendingSignalCount ?? 0} ¡¤ »îÔ¾{' '}
               {monitor?.activeBatchCount ?? 0}
             </span>
           </>
@@ -4965,7 +3197,7 @@ export function TTradeGlobalPage() {
       theme={{
         icon: workspaceMode === 'REPLAY' ? FlaskConical : Radar,
         name: 'blue',
-        title: workspaceMode === 'REPLAY' ? 'åšTå›æ”¾æµ‹è¯•' : 'åšTåŠ©æ‰‹',
+        title: workspaceMode === 'REPLAY' ? '×öT»Ø·Å²âÊÔ' : '×öTÖúÊÖ',
       }}
     />
   );

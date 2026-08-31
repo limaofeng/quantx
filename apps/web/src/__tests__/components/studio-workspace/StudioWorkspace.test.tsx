@@ -3,19 +3,27 @@ import userEvent from '@testing-library/user-event';
 import { useEffect } from 'react';
 import { vi } from 'vitest';
 
-import type * as StudioWorkbenchModule from '@/components/studio-workbench';
+import type * as StudioGlobalActionsModule from '@/components/studio-workbench/useStudioGlobalActions';
 import {
   StudioWorkspace,
   useStudioWorkspaceContext,
 } from '@/components/studio-workspace';
+import type * as RouterModule from '@/router';
 
 const studioWorkbenchMocks = vi.hoisted(() => ({
   onSelect: vi.fn(),
+  onHover: vi.fn(),
+  preloadRoute: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('@/components/studio-workbench', async () => {
-  const actual = await vi.importActual<typeof StudioWorkbenchModule>(
-    '@/components/studio-workbench'
+vi.mock('@/router', async importOriginal => ({
+  ...(await importOriginal<typeof RouterModule>()),
+  preloadRoute: studioWorkbenchMocks.preloadRoute,
+}));
+
+vi.mock('@/components/studio-workbench/useStudioGlobalActions', async () => {
+  const actual = await vi.importActual<typeof StudioGlobalActionsModule>(
+    '@/components/studio-workbench/useStudioGlobalActions'
   );
 
   return {
@@ -27,25 +35,26 @@ vi.mock('@/components/studio-workbench', async () => {
         icon: Icon,
         id,
         label,
+        onHover: () => studioWorkbenchMocks.onHover(id),
         onSelect: () => studioWorkbenchMocks.onSelect(id),
       });
       return {
-        currentUserLabel: 'QuantX å¼€å‘ç”¨æˆ·',
+        currentUserLabel: 'QuantX ¿ª·¢ÓÃ»§',
         globalActions: [
-          action('nav:/', 'è¡Œæƒ…'),
-          action('nav:/holdings', 'æŒä»“'),
-          action('nav:/entry-plans', 'ä¹°å…¥ç®¡ç†'),
-          action('nav:/t-trade', 'åšTåŠ©æ‰‹'),
-          action('nav:/limit-up-board', 'æ‰“æ¿åŠ©æ‰‹'),
-          action('nav:/liquidation', 'å–å‡ºç®¡ç†'),
-          action('nav:/strategies', 'ç­–ç•¥ç®¡ç†'),
-          action('nav:/research', 'ç ”ç©¶ä¸­å¿ƒ'),
-          action('nav:/screening', 'è‚¡ç¥¨ç­›é€‰'),
+          action('nav:/', 'ĞĞÇé'),
+          action('nav:/holdings', '³Ö²Ö'),
+          action('nav:/entry-plans', 'ÂòÈë¹ÜÀí'),
+          action('nav:/t-trade', '×öTÖúÊÖ'),
+          action('nav:/limit-up-board', '´ò°åÖúÊÖ'),
+          action('nav:/liquidation', 'Âô³ö¹ÜÀí'),
+          action('nav:/strategies', '²ßÂÔ¹ÜÀí'),
+          action('nav:/research', 'ÑĞ¾¿ÖĞĞÄ'),
+          action('nav:/screening', '¹ÉÆ±É¸Ñ¡'),
         ],
         utilityActions: [
-          action('utility:assets', 'è´¦æˆ·'),
-          action('utility:notifications', 'é€šçŸ¥'),
-          action('nav:/settings', 'ç³»ç»Ÿè®¾ç½®'),
+          action('utility:assets', 'ÕË»§'),
+          action('utility:notifications', 'Í¨Öª'),
+          action('nav:/settings', 'ÏµÍ³ÉèÖÃ'),
         ],
       };
     },
@@ -60,14 +69,14 @@ vi.mock('@/features/ai-assistant', () => ({
     draftRequest?: { id: number; text: string } | null;
     onClose: () => void;
   }) => (
-    <aside aria-label="AI åŠ©æ‰‹" data-testid="mock-assistant-drawer">
+    <aside aria-label="AI ÖúÊÖ" data-testid="mock-assistant-drawer">
       <input
-        aria-label="AI åŠ©æ‰‹è¾“å…¥æ¡†"
+        aria-label="AI ÖúÊÖÊäÈë¿ò"
         readOnly
         value={draftRequest?.text || ''}
       />
       <button type="button" onClick={onClose}>
-        å…³é—­ AI åŠ©æ‰‹
+        ¹Ø±Õ AI ÖúÊÖ
       </button>
     </aside>
   ),
@@ -107,8 +116,8 @@ function WorkspaceTabLauncher() {
     const queueTabUpdate = (event: MouseEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (!target.closest('button[aria-label="å…³é—­ æŒä»“"]')) return;
-      workspace?.updateActiveTab({ name: 'æŒä»“' });
+      if (!target.closest('button[aria-label="¹Ø±Õ ³Ö²Ö"]')) return;
+      workspace?.updateActiveTab({ name: '³Ö²Ö' });
     };
 
     document.addEventListener('click', queueTabUpdate, true);
@@ -117,7 +126,7 @@ function WorkspaceTabLauncher() {
 
   return (
     <button type="button" onClick={() => workspace?.openStudioTab('/holdings')}>
-      æ‰“å¼€æŒä»“æ ‡ç­¾
+      ´ò¿ª³Ö²Ö±êÇ©
     </button>
   );
 }
@@ -128,9 +137,9 @@ function WorkspaceAssistantLauncher() {
   return (
     <button
       type="button"
-      onClick={() => workspace?.openAssistant('å®¡è®¡å½“å‰ç½‘æ ¼å‚æ•°')}
+      onClick={() => workspace?.openAssistant('Éó¼Æµ±Ç°Íø¸ñ²ÎÊı')}
     >
-      å®¡è®¡ç½‘æ ¼å‚æ•°
+      Éó¼ÆÍø¸ñ²ÎÊı
     </button>
   );
 }
@@ -138,6 +147,8 @@ function WorkspaceAssistantLauncher() {
 describe('StudioWorkspace', () => {
   beforeEach(() => {
     studioWorkbenchMocks.onSelect.mockClear();
+    studioWorkbenchMocks.onHover.mockClear();
+    studioWorkbenchMocks.preloadRoute.mockClear();
     vi.mocked(window.localStorage.getItem).mockImplementation(key => {
       if (key === 'quantx-studio-workbench') {
         return JSON.stringify({
@@ -172,7 +183,7 @@ describe('StudioWorkspace', () => {
     expect(screen.getByText('Workspace page content')).toBeInTheDocument();
     expect(screen.getByText('Registered sidebar')).toBeInTheDocument();
     expect(screen.getByTestId('studio-current-user')).toHaveTextContent(
-      'QuantX å¼€å‘ç”¨æˆ·'
+      'QuantX ¿ª·¢ÓÃ»§'
     );
     expect(screen.getAllByTestId('studio-sidebar-dock')).toHaveLength(1);
     expect(dock).toHaveStyle({ width: '280px' });
@@ -192,10 +203,10 @@ describe('StudioWorkspace', () => {
     expect(chrome.style.boxShadow).toBe('');
     expect(tabBar).toHaveAttribute('data-variant', 'workspace');
     const workspaceTabList = screen.getByRole('tablist', {
-      name: 'å·¥ä½œåŒºæ ‡ç­¾',
+      name: '¹¤×÷Çø±êÇ©',
     });
     const brandButton = screen.getByRole('button', {
-      name: 'QuantX Studio Â· æ‰“å¼€è¡Œæƒ…å·¥ä½œå°',
+      name: 'QuantX Studio ¡¤ ´ò¿ªĞĞÇé¹¤×÷Ì¨',
     });
     const brandMark = within(brandButton).getByTestId('studio-brand-logo');
     expect(brandButton).not.toHaveClass('border-r');
@@ -205,13 +216,13 @@ describe('StudioWorkspace', () => {
       within(brandButton).getByTestId('studio-brand-wordmark')
     ).toHaveTextContent('QuantX Studio');
     expect(
-      screen.queryByRole('navigation', { name: 'å›ºå®šå·¥ä½œåŒº' })
+      screen.queryByRole('navigation', { name: '¹Ì¶¨¹¤×÷Çø' })
     ).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'æ‰“å¼€åŠŸèƒ½å¯åŠ¨å™¨' })).toHaveClass(
+    expect(screen.getByRole('button', { name: '´ò¿ª¹¦ÄÜÆô¶¯Æ÷' })).toHaveClass(
       'focus-visible:ring-blue-400/70'
     );
     const fixedHomeTab = within(workspaceTabList).getByRole('tab', {
-      name: 'å·¥ä½œå°',
+      name: '¹¤×÷Ì¨',
     });
     expect(within(workspaceTabList).getAllByRole('tab')[0]).toBe(fixedHomeTab);
     expect(fixedHomeTab).toHaveAttribute('aria-selected', 'true');
@@ -238,7 +249,7 @@ describe('StudioWorkspace', () => {
       zIndex: 10,
     });
     expect(
-      screen.queryByRole('button', { name: 'å…³é—­ è¡Œæƒ…å·¥ä½œå°' })
+      screen.queryByRole('button', { name: '¹Ø±Õ ĞĞÇé¹¤×÷Ì¨' })
     ).not.toBeInTheDocument();
     const activityBar = screen.getByTestId('studio-activity-bar');
     expect(activityBar).toHaveAttribute('data-variant', 'studio');
@@ -272,35 +283,35 @@ describe('StudioWorkspace', () => {
       'rail:/settings/data',
     ]);
     expect(railButtons.map(button => button.textContent)).toEqual([
-      'æŒä»“',
-      'ä¹°å…¥',
-      'åš T',
-      'å–å‡º',
-      'ç­–ç•¥',
-      'ç ”ç©¶',
-      'æ•°æ®',
+      '³Ö²Ö',
+      'ÂòÈë',
+      '×ö T',
+      'Âô³ö',
+      '²ßÂÔ',
+      'ÑĞ¾¿',
+      'Êı¾İ',
     ]);
     expect(
       railButtons.filter(
         button => button.getAttribute('aria-pressed') === 'true'
       )
     ).toEqual([railButtons[2]]);
-    ['å›æµ‹ä¸ç ”ç©¶è¿è¡Œ', 'è´¦æˆ·', 'é€šçŸ¥'].forEach(label =>
+    ['»Ø²âÓëÑĞ¾¿ÔËĞĞ', 'ÕË»§', 'Í¨Öª'].forEach(label =>
       expect(
         within(activityBar).queryByRole('button', { name: label })
       ).not.toBeInTheDocument()
     );
     expect(
-      within(activityBar).getByRole('button', { name: 'ç³»ç»Ÿè®¾ç½®' })
+      within(activityBar).getByRole('button', { name: 'ÏµÍ³ÉèÖÃ' })
     ).toBeVisible();
-    expect(screen.getByRole('button', { name: 'æŸ¥çœ‹é€šçŸ¥' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '²é¿´Í¨Öª' })).toBeVisible();
     expect(
-      screen.queryByRole('button', { name: 'æ‰“å¼€ç³»ç»Ÿè®¾ç½®' })
+      screen.queryByRole('button', { name: '´ò¿ªÏµÍ³ÉèÖÃ' })
     ).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'æ‰“å¼€è´¦æˆ·æ¦‚è§ˆ' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '´ò¿ªÕË»§¸ÅÀÀ' })).toBeVisible();
     expect(
       screen.getByRole('button', {
-        name: 'æ‰“å¼€è´¦æˆ·ï¼šQuantX å¼€å‘ç”¨æˆ·',
+        name: '´ò¿ªÕË»§£ºQuantX ¿ª·¢ÓÃ»§',
       })
     ).toBeVisible();
     expect(content).toContainElement(dock);
@@ -314,10 +325,10 @@ describe('StudioWorkspace', () => {
     ).toBeTruthy();
 
     expect(
-      screen.queryByRole('button', { name: 'æ‰“å¼€Test Studioä¾§è¾¹æ ' })
+      screen.queryByRole('button', { name: '´ò¿ªTest Studio²à±ßÀ¸' })
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole('button', { name: 'å…³é—­Test Studioä¾§è¾¹æ ' })
+      screen.queryByRole('button', { name: '¹Ø±ÕTest Studio²à±ßÀ¸' })
     ).not.toBeInTheDocument();
   });
 
@@ -332,12 +343,12 @@ describe('StudioWorkspace', () => {
 
     const primaryNavigation = screen.getByTestId('studio-primary-navigation');
     for (const label of [
-      'æŒä»“',
-      'ä¹°å…¥ç®¡ç†',
-      'åšTåŠ©æ‰‹',
-      'å–å‡ºç®¡ç†',
-      'ç­–ç•¥ç®¡ç†',
-      'ç ”ç©¶ä¸­å¿ƒ',
+      '³Ö²Ö',
+      'ÂòÈë¹ÜÀí',
+      '×öTÖúÊÖ',
+      'Âô³ö¹ÜÀí',
+      '²ßÂÔ¹ÜÀí',
+      'ÑĞ¾¿ÖĞĞÄ',
     ]) {
       await user.click(
         within(primaryNavigation).getByRole('button', { name: label })
@@ -353,15 +364,53 @@ describe('StudioWorkspace', () => {
     ]);
 
     await user.click(
-      within(primaryNavigation).getByRole('button', { name: 'æ•°æ®ç®¡ç†' })
+      within(primaryNavigation).getByRole('button', { name: 'Êı¾İ¹ÜÀí' })
     );
     expect(
-      await screen.findByRole('tab', { name: 'æ•°æ®ç®¡ç†é—¨æˆ·' })
+      await screen.findByRole('tab', { name: 'Êı¾İ¹ÜÀíÃÅ»§' })
     ).toBeVisible();
 
-    await user.click(screen.getByRole('button', { name: 'æ‰“å¼€åŠŸèƒ½å¯åŠ¨å™¨' }));
-    expect(screen.getByRole('menuitem', { name: 'æ‰“æ¿åŠ©æ‰‹' })).toBeVisible();
-    expect(screen.getByRole('menuitem', { name: 'è‚¡ç¥¨ç­›é€‰' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '´ò¿ª¹¦ÄÜÆô¶¯Æ÷' }));
+    expect(screen.getByRole('menuitem', { name: '´ò°åÖúÊÖ' })).toBeVisible();
+    expect(screen.getByRole('menuitem', { name: '¹ÉÆ±É¸Ñ¡' })).toBeVisible();
+  });
+
+  it('preloads only destinations the user hovers or focuses without navigating', () => {
+    render(
+      <StudioWorkspace>
+        <main>Workspace page content</main>
+      </StudioWorkspace>
+    );
+
+    expect(studioWorkbenchMocks.onHover).not.toHaveBeenCalled();
+    expect(studioWorkbenchMocks.preloadRoute).not.toHaveBeenCalled();
+
+    const rail = screen.getByTestId('studio-primary-navigation');
+    fireEvent.mouseEnter(within(rail).getByRole('button', { name: '×öTÖúÊÖ' }));
+    expect(studioWorkbenchMocks.onHover).toHaveBeenLastCalledWith(
+      'nav:/t-trade'
+    );
+
+    fireEvent.focus(within(rail).getByRole('button', { name: 'Êı¾İ¹ÜÀí' }));
+    expect(studioWorkbenchMocks.preloadRoute).toHaveBeenLastCalledWith(
+      '/settings/data'
+    );
+
+    fireEvent.focus(screen.getByRole('tab', { name: '¹¤×÷Ì¨' }));
+    expect(studioWorkbenchMocks.preloadRoute).toHaveBeenLastCalledWith('/');
+
+    fireEvent.click(screen.getByRole('button', { name: '´ò¿ª¹¦ÄÜÆô¶¯Æ÷' }));
+    const replay = screen.getByRole('menuitem', { name: '´ò°åÖúÊÖ' });
+    fireEvent.mouseEnter(replay);
+    fireEvent.focus(replay);
+    expect(studioWorkbenchMocks.onHover).toHaveBeenLastCalledWith(
+      'nav:/limit-up-board'
+    );
+    expect(studioWorkbenchMocks.onSelect).not.toHaveBeenCalled();
+    expect(screen.getByRole('tab', { name: '¹¤×÷Ì¨' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
   });
 
   it('marks the current and already-open workspace tabs in the launcher', async () => {
@@ -382,17 +431,17 @@ describe('StudioWorkspace', () => {
       </StudioWorkspace>
     );
 
-    await user.click(screen.getByRole('button', { name: 'æ‰“å¼€åŠŸèƒ½å¯åŠ¨å™¨' }));
+    await user.click(screen.getByRole('button', { name: '´ò¿ª¹¦ÄÜÆô¶¯Æ÷' }));
 
-    const marketAction = screen.getByRole('menuitem', { name: 'è¡Œæƒ…' });
-    const screeningAction = screen.getByRole('menuitem', { name: 'è‚¡ç¥¨ç­›é€‰' });
-    const holdingsAction = screen.getByRole('menuitem', { name: 'æŒä»“' });
+    const marketAction = screen.getByRole('menuitem', { name: 'ĞĞÇé' });
+    const screeningAction = screen.getByRole('menuitem', { name: '¹ÉÆ±É¸Ñ¡' });
+    const holdingsAction = screen.getByRole('menuitem', { name: '³Ö²Ö' });
 
     expect(marketAction).toHaveAttribute('aria-current', 'page');
     expect(marketAction).toHaveAttribute('data-launcher-state', 'current');
-    expect(marketAction).toHaveAccessibleDescription('å½“å‰æ ‡ç­¾');
+    expect(marketAction).toHaveAccessibleDescription('µ±Ç°±êÇ©');
     expect(screeningAction).toHaveAttribute('data-launcher-state', 'open');
-    expect(screeningAction).toHaveAccessibleDescription('å·²æ‰“å¼€æ ‡ç­¾');
+    expect(screeningAction).toHaveAccessibleDescription('ÒÑ´ò¿ª±êÇ©');
     expect(holdingsAction).toHaveAttribute('data-launcher-state', 'closed');
     expect(holdingsAction).not.toHaveAttribute('aria-current');
   });
@@ -409,7 +458,7 @@ describe('StudioWorkspace', () => {
     );
 
     expect(screen.getByTestId('custom-global-status')).toHaveTextContent(
-      'QuantX å¼€å‘ç”¨æˆ·'
+      'QuantX ¿ª·¢ÓÃ»§'
     );
     expect(screen.queryByTestId('studio-status-bar')).not.toBeInTheDocument();
   });
@@ -432,18 +481,18 @@ describe('StudioWorkspace', () => {
     );
 
     const workspaceTabList = screen.getByRole('tablist', {
-      name: 'å·¥ä½œåŒºæ ‡ç­¾',
+      name: '¹¤×÷Çø±êÇ©',
     });
     expect(
       within(workspaceTabList)
         .getAllByRole('tab')
         .map(tab => tab.textContent)
-    ).toEqual(['å·¥ä½œå°', 'é€‰è‚¡']);
+    ).toEqual(['¹¤×÷Ì¨', 'Ñ¡¹É']);
     expect(
-      screen.queryByRole('button', { name: 'å…³é—­ è¡Œæƒ…å·¥ä½œå°' })
+      screen.queryByRole('button', { name: '¹Ø±Õ ĞĞÇé¹¤×÷Ì¨' })
     ).not.toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'é€‰è‚¡' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'å…³é—­ é€‰è‚¡' })).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Ñ¡¹É' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '¹Ø±Õ Ñ¡¹É' })).toBeVisible();
   });
 
   it('selects the home tab after closing the last closable tab', async () => {
@@ -455,16 +504,16 @@ describe('StudioWorkspace', () => {
       </StudioWorkspace>
     );
 
-    await user.click(screen.getByRole('button', { name: 'æ‰“å¼€æŒä»“æ ‡ç­¾' }));
-    expect(screen.getByRole('tab', { name: 'æŒä»“' })).toHaveAttribute(
+    await user.click(screen.getByRole('button', { name: '´ò¿ª³Ö²Ö±êÇ©' }));
+    expect(screen.getByRole('tab', { name: '³Ö²Ö' })).toHaveAttribute(
       'aria-selected',
       'true'
     );
 
-    await user.click(screen.getByRole('button', { name: 'å…³é—­ æŒä»“' }));
+    await user.click(screen.getByRole('button', { name: '¹Ø±Õ ³Ö²Ö' }));
 
-    expect(screen.queryByRole('tab', { name: 'æŒä»“' })).not.toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'å·¥ä½œå°' })).toHaveAttribute(
+    expect(screen.queryByRole('tab', { name: '³Ö²Ö' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '¹¤×÷Ì¨' })).toHaveAttribute(
       'aria-selected',
       'true'
     );
@@ -480,7 +529,7 @@ describe('StudioWorkspace', () => {
     );
 
     const launcherTrigger = screen.getByRole('button', {
-      name: 'æ‰“å¼€åŠŸèƒ½å¯åŠ¨å™¨',
+      name: '´ò¿ª¹¦ÄÜÆô¶¯Æ÷',
     });
     expect(
       screen.queryByTestId('studio-assistant-tool-rail')
@@ -490,7 +539,7 @@ describe('StudioWorkspace', () => {
     ).not.toBeInTheDocument();
 
     await user.click(launcherTrigger);
-    await user.click(screen.getByRole('menuitem', { name: 'AI åŠ©æ‰‹' }));
+    await user.click(screen.getByRole('menuitem', { name: 'AI ÖúÊÖ' }));
 
     const panel = await screen.findByTestId('studio-assistant-panel');
     expect(
@@ -498,7 +547,7 @@ describe('StudioWorkspace', () => {
     ).toBeInTheDocument();
     expect(panel).toHaveClass('right-0', '2xl:relative');
 
-    await user.click(screen.getByRole('textbox', { name: 'AI åŠ©æ‰‹è¾“å…¥æ¡†' }));
+    await user.click(screen.getByRole('textbox', { name: 'AI ÖúÊÖÊäÈë¿ò' }));
     await user.keyboard('{Escape}');
 
     expect(
@@ -507,9 +556,9 @@ describe('StudioWorkspace', () => {
     expect(launcherTrigger).toHaveFocus();
 
     await user.click(launcherTrigger);
-    await user.click(screen.getByRole('menuitem', { name: 'AI åŠ©æ‰‹' }));
+    await user.click(screen.getByRole('menuitem', { name: 'AI ÖúÊÖ' }));
     await user.click(
-      await screen.findByRole('button', { name: 'å…³é—­ AI åŠ©æ‰‹' })
+      await screen.findByRole('button', { name: '¹Ø±Õ AI ÖúÊÖ' })
     );
 
     expect(
@@ -527,11 +576,11 @@ describe('StudioWorkspace', () => {
       </StudioWorkspace>
     );
 
-    await user.click(screen.getByRole('button', { name: 'å®¡è®¡ç½‘æ ¼å‚æ•°' }));
+    await user.click(screen.getByRole('button', { name: 'Éó¼ÆÍø¸ñ²ÎÊı' }));
 
     expect(await screen.findByTestId('studio-assistant-panel')).toBeVisible();
-    expect(screen.getByRole('textbox', { name: 'AI åŠ©æ‰‹è¾“å…¥æ¡†' })).toHaveValue(
-      'å®¡è®¡å½“å‰ç½‘æ ¼å‚æ•°'
+    expect(screen.getByRole('textbox', { name: 'AI ÖúÊÖÊäÈë¿ò' })).toHaveValue(
+      'Éó¼Æµ±Ç°Íø¸ñ²ÎÊı'
     );
   });
 
@@ -544,12 +593,12 @@ describe('StudioWorkspace', () => {
       </StudioWorkspace>
     );
 
-    await user.click(screen.getByRole('button', { name: 'æ‰“å¼€åŠŸèƒ½å¯åŠ¨å™¨' }));
-    await user.click(screen.getByRole('menuitem', { name: 'AI åŠ©æ‰‹' }));
+    await user.click(screen.getByRole('button', { name: '´ò¿ª¹¦ÄÜÆô¶¯Æ÷' }));
+    await user.click(screen.getByRole('menuitem', { name: 'AI ÖúÊÖ' }));
 
     const panel = await screen.findByTestId('studio-assistant-panel');
     const resizer = screen.getByRole('separator', {
-      name: 'AI åŠ©æ‰‹é¢æ¿å®½åº¦',
+      name: 'AI ÖúÊÖÃæ°å¿í¶È',
     });
 
     expect(panel).toHaveStyle({ width: '400px' });

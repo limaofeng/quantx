@@ -79,10 +79,11 @@ describe('T trade V3 client telemetry contract', () => {
 
   it('reuses replay and approval operation keys until terminal outcomes', () => {
     const page = source('../TTradeGlobalPage.tsx');
-    expect(page).toContain('const replayOperationRef = React.useRef');
-    const replay = page.slice(
-      page.indexOf('const handleStart'),
-      page.indexOf('const handleCancel')
+    const replayPanel = source('./TTradeReplayPanel.tsx');
+    expect(replayPanel).toContain('const replayOperationRef = React.useRef');
+    const replay = replayPanel.slice(
+      replayPanel.indexOf('const handleStart'),
+      replayPanel.indexOf('const handleCancel')
     );
     expect(replay).toContain(
       "String(payload.code || '').endsWith('_COMMAND_PENDING')"
@@ -90,13 +91,13 @@ describe('T trade V3 client telemetry contract', () => {
     expect(replay).toContain(
       "String(payload.code || '').endsWith('_OUTCOME_UNKNOWN')"
     );
-    expect(page).toContain(
+    expect(replayPanel).toContain(
       'input: { ...input, idempotencyKey: operation.idempotencyKey }'
     );
-    expect(page).toContain('persistUncertainOperation');
-    expect(page).toContain('readUncertainOperation');
-    expect(page).toContain('previousOperation?.uncertain');
-    expect(page).toContain('previousOperation.identity !== identity');
+    expect(replayPanel).toContain('persistUncertainOperation');
+    expect(replayPanel).toContain('readUncertainOperation');
+    expect(replayPanel).toContain('previousOperation?.uncertain');
+    expect(replayPanel).toContain('previousOperation.identity !== identity');
     expect(page).toContain('const approveOperationRef = React.useRef');
     expect(page).toContain(
       'approveOperationRef.current.set(approvalKey, operation)'
@@ -135,7 +136,7 @@ describe('T trade V3 client telemetry contract', () => {
     const page = source('../TTradeGlobalPage.tsx');
     expect(page).toContain('上一笔审批结果未知');
     expect(page).toContain('上一笔实盘提升结果未知');
-    expect(page).toContain('上一笔回放结果未知');
+    expect(source('./TTradeReplayPanel.tsx')).toContain('上一笔回放结果未知');
     expect(page).toContain(
       'const operationScope = `activate-live:${accountId}`'
     );

@@ -3,13 +3,14 @@ import React, { Suspense, type ComponentType } from 'react';
 import type { RouteComponentProps } from 'wouter';
 
 import ErrorBoundary from '@/components/ErrorBoundary';
+import { logger } from '@/core/errors/logger';
 
 import { RouteSkeleton, type RouteSkeletonVariant } from './skeletons';
 
 export type RouteComponent = ComponentType<RouteComponentProps>;
 export type RouteImporter = () => Promise<{ default: RouteComponent }>;
 
-const preloadCache = new WeakMap<RouteImporter, Promise<void>>();
+const preloadCache = new WeakMap<RouteImporter, ReturnType<RouteImporter>>();
 
 function RouteLoadError({ routeName }: { routeName: string }) {
   return (
@@ -24,7 +25,7 @@ function RouteLoadError({ routeName }: { routeName: string }) {
         <button
           type="button"
           onClick={() => window.location.reload()}
-          className="mt-4 rounded-md bg-rose-600 px-4 py-2 text-ui-body font-bold text-white transition-colors hover:bg-rose-500"
+          className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-ui-body font-bold text-white transition-colors hover:bg-blue-500"
         >
           重新加载
         </button>
@@ -33,12 +34,12 @@ function RouteLoadError({ routeName }: { routeName: string }) {
   );
 }
 
-export function preloadImporter(importer: RouteImporter): Promise<void> {
+function loadRoute(importer: RouteImporter): ReturnType<RouteImporter> {
   const cached = preloadCache.get(importer);
   if (cached) return cached;
 
-  const promise = importer()
-    .then(() => undefined)
+  const promise = Promise.resolve()
+    .then(importer)
     .catch(error => {
       preloadCache.delete(importer);
       throw error;
@@ -47,12 +48,25 @@ export function preloadImporter(importer: RouteImporter): Promise<void> {
   return promise;
 }
 
+export function preloadImporter(importer: RouteImporter): Promise<void> {
+  return loadRoute(importer).then(
+    () => undefined,
+    error => {
+      // Speculation must not produce an unhandled rejection or prevent a
+      // subsequent navigation from retrying the actual module load.
+      logger.warn('路由预加载失败，将在访问时重试', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  );
+}
+
 export function createLazyRoute(
   importer: RouteImporter,
   routeName: string,
   skeleton: RouteSkeletonVariant = 'default'
 ) {
-  const LazyComponent = React.lazy(importer);
+  const LazyComponent = React.lazy(() => loadRoute(importer));
 
   function LazyRouteComponent(props: RouteComponentProps) {
     return (

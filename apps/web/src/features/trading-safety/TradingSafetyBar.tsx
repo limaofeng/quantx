@@ -11,8 +11,8 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 
-import { StatusBar } from '@/components/studio-workbench';
-import { useStudioNavigate } from '@/components/studio-workspace';
+import { StatusBar } from '@/components/studio-workbench/StatusBar';
+import { useStudioNavigate } from '@/components/studio-workspace/useStudioNavigate';
 import { AccountExecutionHealthStatus } from '@/generated/gql/graphql';
 import { cn } from '@/utils/cn';
 

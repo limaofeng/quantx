@@ -45,6 +45,7 @@ export interface TabBarProps<T extends StudioTab> {
   onTabClose: (tabId: string, event?: React.MouseEvent) => void;
   onTabCreate?: () => void;
   onTabPin?: (tabId: string, pinned: boolean) => void;
+  onTabPreload?: (tabId: string) => void;
   renderTabContent?: (tab: T, isActive: boolean) => React.ReactNode;
   tabs: T[];
   themeColor: StudioThemeName;
@@ -60,6 +61,7 @@ export function TabBar<T extends StudioTab>({
   onTabClose,
   onTabCreate,
   onTabPin,
+  onTabPreload,
   renderTabContent,
   tabs,
   themeColor,
@@ -368,6 +370,8 @@ export function TabBar<T extends StudioTab>({
                     tabIndex={isActive ? 0 : -1}
                     data-studio-tab-id={tab.id}
                     onClick={() => onTabChange(tab.id)}
+                    onMouseEnter={() => onTabPreload?.(tab.id)}
+                    onFocus={() => onTabPreload?.(tab.id)}
                     onDoubleClick={() => {
                       if (tab.isPreview) onTabPin?.(tab.id, true);
                     }}

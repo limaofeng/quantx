@@ -5,7 +5,7 @@ import { useGraphqlWsStatus } from '@/core/graphql/ws-status';
 import {
   type FragmentType,
   useFragment as getFragmentData,
-} from '@/generated/gql';
+} from '@/generated/gql/fragment-masking';
 import {
   CancelLimitUpBoardReplayDocument,
   LimitUpBoardReplayCoverageFieldsFragmentDoc,

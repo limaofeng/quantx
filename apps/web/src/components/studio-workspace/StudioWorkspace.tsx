@@ -19,20 +19,13 @@ import {
 import type React from 'react';
 import { useLocation } from 'wouter';
 
-import {
-  ActivityBar,
-  StatusBar,
-  TabBar,
-  type StudioAction,
-  type StudioMode,
-  type StudioTheme,
-  useStudioGlobalActions,
-} from '@/components/studio-workbench';
+import { ActivityBar } from '@/components/studio-workbench/ActivityBar';
 import {
   STUDIO_WORKSPACE_SIDEBAR_SIZING,
   STUDIO_WORKSPACE_SIDEBAR_STORAGE_SCOPE,
   useStudioSidebarSizing,
 } from '@/components/studio-workbench/sidebarSizing';
+import { StatusBar } from '@/components/studio-workbench/StatusBar';
 import {
   STUDIO_CHROME_BACKGROUND,
   STUDIO_HEADER_HEIGHT,
@@ -40,7 +33,15 @@ import {
   STUDIO_WORKSPACE_SURFACE_RADIUS,
   STUDIO_WORKSPACE_WEAK_BORDER,
 } from '@/components/studio-workbench/studioShellStyles';
+import { TabBar } from '@/components/studio-workbench/TabBar';
 import { getStudioThemeStyles } from '@/components/studio-workbench/themeStyles';
+import type {
+  StudioAction,
+  StudioMode,
+  StudioTheme,
+} from '@/components/studio-workbench/types';
+import { useStudioGlobalActions } from '@/components/studio-workbench/useStudioGlobalActions';
+import { preloadRoute } from '@/router';
 import { cn } from '@/utils/cn';
 
 import {
@@ -259,6 +260,8 @@ function StudioWorkspaceHeader({
                       setIsLauncherOpen(false);
                       action.onSelect();
                     }}
+                    onMouseEnter={action.onHover}
+                    onFocus={action.onHover}
                     role="menuitem"
                     title={`${action.label}${isOpen ? ` · ${isCurrent ? '当前标签' : '已打开标签'}` : ''}`}
                   >
@@ -851,6 +854,10 @@ export function StudioWorkspace({
         canCloseTab={tab => tab.path !== DEFAULT_WORKSPACE_PATH}
         createTooltip="打开行情工作台"
         onTabChange={handleTabChange}
+        onTabPreload={tabId => {
+          const tab = displayTabs.find(item => item.id === tabId);
+          if (tab) void preloadRoute(tab.path);
+        }}
         onTabClose={handleTabClose}
         onTabCreate={() => openStudioTab(DEFAULT_WORKSPACE_PATH)}
         onTabPin={handleTabPin}
@@ -937,6 +944,7 @@ export function StudioWorkspace({
     id: 'rail:/settings/data',
     label: '数据管理',
     onSelect: () => openStudioTab('/settings/data'),
+    onHover: () => void preloadRoute('/settings/data'),
     shortLabel: '数据',
   });
   const railUtilityActions = settingsAction ? [settingsAction] : [];
