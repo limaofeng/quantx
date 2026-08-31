@@ -34,11 +34,14 @@ Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 
 普通策略、做 T 和买卖计划的最终 LIVE 容量由
 `quantx_infrastructure.services.account_capacity_service.AccountCapacityService`
-统一核验。新命令与保护量调整先锁账户控制行，再锁标的持仓行，以同一份已处理的
-协议 1.1 完整快照为基准，保留未被快照覆盖的本地订单占用和退出保护义务。不能从
+统一核验。新命令以同一份已处理的协议 1.1 完整快照为基准，保留未被快照覆盖的
+本地订单占用和退出保护义务。保护量调整和批量清仓使用与命令入队一致的锁顺序：
+先锁账户控制行，再锁标的持仓行及保护计划。不能从
 不同时间的账户/持仓查询拼出可用容量，也不能用晚于快照的订单终态释放旧快照的占用。
 LIVE BUY 使用有资金上限的限价；正向做 T 的 BUY 还受未占用老仓可卖量限制。
 PAPER Broker 只恢复本运行模拟资产，模拟计划与 LIVE 保护量、授权和容量隔离。
+无运行的 PAPER 退出/清仓计划只在创建时冻结持仓样本，之后不读取 LIVE 资产补仓；
+API 授权预览、确认与 Engine 创建计划均使用相同的环境隔离规则。
 
 `StrategyExecutor._process_strategy_output` 对整批 `TradeIntent` 先完成严格持久化，
 再安装可审批意图或进入执行路由。普通策略和专用助手没有两种受理标准。买入计划的

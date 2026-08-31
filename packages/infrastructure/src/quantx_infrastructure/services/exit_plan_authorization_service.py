@@ -510,7 +510,10 @@ async def build_exit_plan_authorization_snapshot(
   lock_mutable_rows: bool,
   locked_scope: Optional[LockedExitPlanScope] = None,
 ) -> ExitPlanAuthorizationSnapshot:
-  """Build the stable plan/position/T+1/protection subject to be signed."""
+  """Build the stable LIVE plan/position/T+1/protection subject to be signed."""
+
+  if str(record.execution_mode or "").lower() != "live":
+    raise ValueError("LIVE_EXIT_PLAN_REQUIRED")
 
   scope = locked_scope
   if lock_mutable_rows:
@@ -540,6 +543,7 @@ async def build_exit_plan_authorization_snapshot(
           .where(
             AutoExitPlanRecord.account_id == record.account_id,
             AutoExitPlanRecord.instrument_code == record.instrument_code,
+            AutoExitPlanRecord.execution_mode == "live",
             AutoExitPlanRecord.plan_id != record.plan_id,
             AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES),
           )
@@ -562,6 +566,7 @@ async def build_exit_plan_authorization_snapshot(
     .where(
       PendingTradeOrder.account_id == record.account_id,
       PendingTradeOrder.instrument_code == record.instrument_code,
+      PendingTradeOrder.execution_mode == "live",
       PendingTradeOrder.side == "SELL",
       PendingTradeOrder.status.in_(ACTIVE_PENDING_SELL_STATUSES),
     )

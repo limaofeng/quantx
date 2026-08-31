@@ -130,6 +130,7 @@ async def liquidation_database(monkeypatch):
         cash=50000,
         market_value=50000,
         frozen_cash=0,
+        updated_at=liquidation_approval.time_utils.now(),
       )
     )
     db.add(
@@ -145,6 +146,7 @@ async def liquidation_database(monkeypatch):
         yesterday_volume=400,
         avg_price=10,
         market_value=5000,
+        updated_at=liquidation_approval.time_utils.now(),
       )
     )
     await db.commit()
@@ -445,9 +447,32 @@ async def test_live_preview_is_fail_closed_while_paper_remains_available(
 
 
 @pytest.mark.asyncio
-async def test_selected_preview_lists_pending_sell_as_partial_skip(
+@pytest.mark.parametrize("mode", ["LIVE", "PAPER"])
+@pytest.mark.parametrize("other_mode", ["live", "paper"])
+@pytest.mark.parametrize("resource", ["protection", "pending_sell"])
+async def test_liquidation_preview_and_confirmation_isolate_execution_environment(
   liquidation_database,
+  monkeypatch,
+  mode,
+  other_mode,
+  resource,
 ):
+  # Only snapshot selection is under test. No trading settings are enabled
+  # and confirmation queues an Engine command, never a broker order.
+  async def authorize(_self, account_id, **_kwargs):
+    assert account_id == "ACCOUNT-1"
+    return SimpleNamespace(last_snapshot_id="snapshot-1", last_snapshot_hash="h" * 64)
+
+  async def device(_self, **kwargs):
+    assert kwargs["execution_mode"] == "live"
+    return SimpleNamespace(device_id="test-device")
+
+  monkeypatch.setattr(
+    liquidation_approval.TradeCommandService,
+    "_require_manual_live_authorization",
+    authorize,
+  )
+  monkeypatch.setattr(liquidation_approval.TradeCommandService, "_device_for", device)
   async with liquidation_database() as db:
     db.add(
       Position(
@@ -462,24 +487,43 @@ async def test_selected_preview_lists_pending_sell_as_partial_skip(
         yesterday_volume=200,
         avg_price=12,
         market_value=2400,
+        updated_at=liquidation_approval.time_utils.now(),
       )
     )
-    db.add(
-      PendingTradeOrder(
-        client_order_id="pending-sell-1",
-        user_id="liquidation-user-1",
-        account_id="ACCOUNT-1",
-        instrument_code="600000.SH",
-        side="SELL",
-        order_type="FIX_PRICE",
-        limit_price="10",
-        volume=100,
-        status="QUEUED",
-        execution_mode="paper",
-        bucket="manual",
-        request_metadata={},
+    if resource == "pending_sell":
+      db.add(
+        PendingTradeOrder(
+          client_order_id="pending-sell-1",
+          user_id="liquidation-user-1",
+          account_id="ACCOUNT-1",
+          instrument_code="600000.SH",
+          side="SELL",
+          order_type="FIX_PRICE",
+          limit_price="10",
+          volume=100,
+          status="QUEUED",
+          execution_mode=other_mode,
+          bucket="manual",
+          request_metadata={},
+        )
       )
-    )
+    else:
+      db.add(
+        AutoExitPlanRecord(
+          plan_id="other-plan",
+          source_id="other-plan",
+          source_type="MANUAL_POSITION",
+          account_id="ACCOUNT-1",
+          instrument_code="600000.SH",
+          execution_mode=other_mode,
+          status="ACTIVE",
+          enabled=True,
+          protected_volume=100,
+          remaining_volume=100,
+          entry_avg_price=10,
+          plan_state={},
+        )
+      )
     await db.commit()
 
   preview = await LiquidationChallengeService.issue(
@@ -488,14 +532,35 @@ async def test_selected_preview_lists_pending_sell_as_partial_skip(
       key="liquidation-partial-1",
       codes=("600000.SH", "000001.SZ"),
       completion="UNTIL_SNAPSHOT_CLEARED",
+      mode=mode,
     ),
   )
   items = {item.instrument_code: item for item in preview.snapshot.items}
   assert items["000001.SZ"].included
   assert items["000001.SZ"].max_protected_volume == 200
-  assert not items["600000.SH"].included
-  assert items["600000.SH"].pending_sell_volume == 100
-  assert items["600000.SH"].reason_code == "PENDING_SELL_CONFLICT"
+  item = items["600000.SH"]
+  shares_live_inventory = mode == "LIVE" and other_mode == "live"
+  pending = shares_live_inventory and resource == "pending_sell"
+  protected = shares_live_inventory and resource == "protection"
+  assert item.included is (not pending)
+  assert item.pending_sell_volume == (100 if pending else 0)
+  assert item.protected_volume == (100 if protected else 0)
+  assert [conflict.plan_id for conflict in item.conflicts] == (
+    ["other-plan"] if protected else []
+  )
+  assert item.max_protected_volume == (0 if pending else 400 if protected else 500)
+  assert item.reason_code == ("PENDING_SELL_CONFLICT" if pending else "INCLUDED")
+
+  confirmed = await LiquidationChallengeService.confirm(
+    principal=_principal(),
+    challenge_id=preview.challenge_id,
+    confirmation_token=preview.confirmation_token,
+  )
+  async with liquidation_database() as db:
+    command = await db.get(EngineCommandOutbox, confirmed.command_id)
+    assert command.payload["expected_items"] == [
+      item.payload() for item in preview.snapshot.items
+    ]
 
 
 @pytest.mark.parametrize(

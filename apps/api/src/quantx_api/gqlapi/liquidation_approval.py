@@ -405,43 +405,46 @@ async def _build_snapshot(
   positions = list((await db.execute(position_stmt)).scalars().all())
   positions_by_code = {str(item.stock_code).upper(): item for item in positions}
   selected_codes = (
-    tuple(positions_by_code)
-    if request.scope == "ALL"
-    else request.instrument_codes
+    tuple(positions_by_code) if request.scope == "ALL" else request.instrument_codes
   )
   if request.scope == "ALL" and len(selected_codes) > 200:
     raise TradeApprovalChallengeError(
       "TOO_MANY_INSTRUMENTS", "全仓预览一次最多处理 200 只持仓"
     )
 
-  plan_stmt = (
-    select(AutoExitPlanRecord)
-    .where(AutoExitPlanRecord.account_id == request.account_id)
-    .where(AutoExitPlanRecord.instrument_code.in_(selected_codes or ("",)))
-    .where(AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES))
-    .order_by(AutoExitPlanRecord.instrument_code, AutoExitPlanRecord.created_at)
-  )
-  if lock_mutable_rows:
-    plan_stmt = plan_stmt.with_for_update()
-  plans = list((await db.execute(plan_stmt)).scalars().all())
   plans_by_code: dict[str, list[AutoExitPlanRecord]] = {}
-  for plan in plans:
-    plans_by_code.setdefault(str(plan.instrument_code).upper(), []).append(plan)
-
-  pending_stmt = (
-    select(PendingTradeOrder)
-    .where(PendingTradeOrder.account_id == request.account_id)
-    .where(PendingTradeOrder.instrument_code.in_(selected_codes or ("",)))
-    .where(PendingTradeOrder.side == "SELL")
-    .where(PendingTradeOrder.status.in_(_ACTIVE_PENDING_SELL_STATUSES))
-    .order_by(PendingTradeOrder.instrument_code, PendingTradeOrder.created_at)
-  )
-  if lock_mutable_rows:
-    pending_stmt = pending_stmt.with_for_update()
-  pending_orders = list((await db.execute(pending_stmt)).scalars().all())
   pending_by_code: dict[str, list[PendingTradeOrder]] = {}
-  for order in pending_orders:
-    pending_by_code.setdefault(str(order.instrument_code).upper(), []).append(order)
+  # A new PAPER group freezes its own simulation sample. It cannot claim or
+  # replace any existing run/plan's inventory, regardless of environment.
+  if request.execution_mode == "LIVE":
+    plan_stmt = (
+      select(AutoExitPlanRecord)
+      .where(AutoExitPlanRecord.account_id == request.account_id)
+      .where(AutoExitPlanRecord.instrument_code.in_(selected_codes or ("",)))
+      .where(AutoExitPlanRecord.execution_mode == "live")
+      .where(AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES))
+      .order_by(AutoExitPlanRecord.instrument_code, AutoExitPlanRecord.created_at)
+    )
+    if lock_mutable_rows:
+      plan_stmt = plan_stmt.with_for_update()
+    plans = list((await db.execute(plan_stmt)).scalars().all())
+    for plan in plans:
+      plans_by_code.setdefault(str(plan.instrument_code).upper(), []).append(plan)
+
+    pending_stmt = (
+      select(PendingTradeOrder)
+      .where(PendingTradeOrder.account_id == request.account_id)
+      .where(PendingTradeOrder.instrument_code.in_(selected_codes or ("",)))
+      .where(PendingTradeOrder.execution_mode == "live")
+      .where(PendingTradeOrder.side == "SELL")
+      .where(PendingTradeOrder.status.in_(_ACTIVE_PENDING_SELL_STATUSES))
+      .order_by(PendingTradeOrder.instrument_code, PendingTradeOrder.created_at)
+    )
+    if lock_mutable_rows:
+      pending_stmt = pending_stmt.with_for_update()
+    pending_orders = list((await db.execute(pending_stmt)).scalars().all())
+    for order in pending_orders:
+      pending_by_code.setdefault(str(order.instrument_code).upper(), []).append(order)
 
   items: list[LiquidationItemData] = []
   for code in selected_codes:
@@ -485,15 +488,9 @@ async def _build_snapshot(
     )
     pending_conflicts = [item for item in conflicts if item.pending]
     snapshot_target = (
-      available
-      if request.completion_strategy == "AVAILABLE_NOW"
-      else total
+      available if request.completion_strategy == "AVAILABLE_NOW" else total
     )
-    reserved = (
-      0
-      if request.conflict_strategy == "REPLACE_CANCELLABLE"
-      else protected
-    )
+    reserved = 0 if request.conflict_strategy == "REPLACE_CANCELLABLE" else protected
     maximum = max(0, min(snapshot_target, total - reserved))
     included = True
     reason_code = "INCLUDED"
@@ -535,9 +532,7 @@ async def _build_snapshot(
     )
 
   if not items:
-    raise TradeApprovalChallengeError(
-      "NO_POSITIONS", "当前账户没有可预览的持仓"
-    )
+    raise TradeApprovalChallengeError("NO_POSITIONS", "当前账户没有可预览的持仓")
   if not any(item.included for item in items):
     raise TradeApprovalChallengeError(
       "NO_LIQUIDATABLE_POSITIONS", "当前选择没有可创建清仓计划的持仓"

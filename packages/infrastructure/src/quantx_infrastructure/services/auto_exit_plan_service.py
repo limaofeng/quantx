@@ -45,7 +45,11 @@ from sqlalchemy import func, or_, select
 
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
-from quantx_infrastructure.models.agent_runtime import PendingTradeOrder, TTradeBatch
+from quantx_infrastructure.models.agent_runtime import (
+  AccountExecutionControl,
+  PendingTradeOrder,
+  TTradeBatch,
+)
 from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanEvent,
   AutoExitPlanRecord,
@@ -4365,6 +4369,10 @@ class AutoExitPlanService:
       )
     results: list[dict[str, Any]] = []
     async with AsyncSessionLocal() as db:
+      if execution_mode == "live":
+        # Batch liquidation claims the same account capacity as every other
+        # LIVE order/plan writer, before taking any instrument or plan lock.
+        await db.get(AccountExecutionControl, account_id, with_for_update=True)
       if native_confirmation:
         existing_group = list(
           (
@@ -4419,8 +4427,9 @@ class AutoExitPlanService:
         .where(Position.account_id == account_id)
         .where(Position.volume > 0)
         .order_by(Position.stock_code)
-        .with_for_update()
       )
+      if execution_mode == "live":
+        position_stmt = position_stmt.with_for_update()
       if scope == "SELECTED":
         position_stmt = position_stmt.where(Position.stock_code.in_(selected))
       positions = list((await db.execute(position_stmt)).scalars().all())
@@ -4431,10 +4440,11 @@ class AutoExitPlanService:
         )
       repo = AutoExitPlanRepository(db)
       pending_sell_by_code: dict[str, list[PendingTradeOrder]] = {}
-      if native_confirmation:
+      if native_confirmation and execution_mode == "live":
         pending_sell_stmt = (
           select(PendingTradeOrder)
           .where(PendingTradeOrder.account_id == account_id)
+          .where(PendingTradeOrder.execution_mode == "live")
           .where(PendingTradeOrder.side == "SELL")
           .where(PendingTradeOrder.status.in_(ACTIVE_ORDER_STATUSES))
           .with_for_update()

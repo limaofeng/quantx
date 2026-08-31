@@ -15,7 +15,11 @@ from quantx_domain.trading.exit_plan import (
 )
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_base import Base
-from quantx_infrastructure.models.agent_runtime import PendingTradeOrder, TTradeBatch
+from quantx_infrastructure.models.agent_runtime import (
+  AccountExecutionControl,
+  PendingTradeOrder,
+  TTradeBatch,
+)
 from quantx_infrastructure.models.auth import (
   AuthDeviceSession,
   AuthUser,
@@ -42,6 +46,7 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY,
   authorization_expiry_for_challenge,
   bind_t_trade_exit_authorization_to_challenge_payload,
+  build_exit_plan_authorization_snapshot,
   derive_exact_auto_exit_authorization_from_t_trade_entry,
   trade_confirmation_payload_fingerprint,
   validate_exact_auto_exit_authorization,
@@ -181,6 +186,7 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
           AuthUserAccountAccess.__table__,
           AuthDeviceSession.__table__,
           TradeConfirmationChallenge.__table__,
+          AccountExecutionControl.__table__,
           Position.__table__,
           AutoExitPlanRecord.__table__,
           AutoExitPlanEvent.__table__,
@@ -209,6 +215,7 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
   async with factory() as db:
     db.add_all(
       [
+        AccountExecutionControl(account_id=ACCOUNT_ID),
         AuthUser(
           id="user-1",
           username="operator",
@@ -283,6 +290,72 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
     await db.commit()
   yield factory
   await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lock_mutable_rows", [False, True])
+async def test_live_authorization_snapshot_excludes_paper_protections_and_sells(
+  authorization_database,
+  lock_mutable_rows: bool,
+) -> None:
+  async with authorization_database() as db:
+    plan = await db.get(AutoExitPlanRecord, PLAN_ID)
+    baseline = await build_exit_plan_authorization_snapshot(
+      db, plan, lock_mutable_rows=lock_mutable_rows
+    )
+    paper_plan = _exit_plan_record(protected_volume=10_000)
+    paper_plan.plan_id = "paper-protection"
+    paper_plan.source_id = "paper-batch"
+    paper_plan.execution_mode = "paper"
+    paper_sell = PendingTradeOrder(
+      client_order_id="paper-sell",
+      user_id="user-1",
+      account_id=ACCOUNT_ID,
+      instrument_code=INSTRUMENT,
+      side="SELL",
+      order_type="FIX_PRICE",
+      limit_price="10",
+      volume=10_000,
+      status="QUEUED",
+      execution_mode="paper",
+    )
+    db.add_all([paper_plan, paper_sell])
+    await db.flush()
+    with_paper = await build_exit_plan_authorization_snapshot(
+      db, plan, lock_mutable_rows=lock_mutable_rows
+    )
+    assert with_paper.fingerprint == baseline.fingerprint
+    assert with_paper.subject == baseline.subject
+    assert not with_paper.has_pending_sell
+
+    live_plan = _exit_plan_record(protected_volume=100)
+    live_plan.plan_id = "other-live-protection"
+    live_plan.source_id = "other-live-batch"
+    live_sell = PendingTradeOrder(
+      client_order_id="live-sell",
+      user_id="user-1",
+      account_id=ACCOUNT_ID,
+      instrument_code=INSTRUMENT,
+      side="SELL",
+      order_type="FIX_PRICE",
+      limit_price="10",
+      volume=100,
+      status="QUEUED",
+      execution_mode="live",
+    )
+    db.add_all([live_plan, live_sell])
+    await db.flush()
+    with_live = await build_exit_plan_authorization_snapshot(
+      db, plan, lock_mutable_rows=lock_mutable_rows
+    )
+    assert with_live.fingerprint != baseline.fingerprint
+    assert with_live.has_pending_sell
+    assert [item["plan_id"] for item in with_live.subject["other_protections"]] == [
+      "other-live-protection"
+    ]
+    assert [item["client_order_id"] for item in with_live.subject["pending_sells"]] == [
+      "live-sell"
+    ]
 
 
 @pytest.mark.asyncio

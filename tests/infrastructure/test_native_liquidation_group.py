@@ -2,7 +2,10 @@ import uuid
 
 import pytest
 from quantx_infrastructure.database.relational_base import Base
-from quantx_infrastructure.models.agent_runtime import PendingTradeOrder
+from quantx_infrastructure.models.agent_runtime import (
+  AccountExecutionControl,
+  PendingTradeOrder,
+)
 from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanEvent,
   AutoExitPlanRecord,
@@ -23,6 +26,7 @@ async def native_liquidation_database(monkeypatch):
       lambda sync_connection: Base.metadata.create_all(
         sync_connection,
         tables=[
+          AccountExecutionControl.__table__,
           Position.__table__,
           AutoExitPlanRecord.__table__,
           AutoExitPlanEvent.__table__,
@@ -32,6 +36,9 @@ async def native_liquidation_database(monkeypatch):
     )
   session_factory = async_sessionmaker(engine, expire_on_commit=False)
   monkeypatch.setattr(service_module, "AsyncSessionLocal", session_factory)
+  async with session_factory() as db:
+    db.add(AccountExecutionControl(account_id="ACCOUNT-1"))
+    await db.commit()
   yield session_factory
   await engine.dispose()
 
@@ -173,8 +180,20 @@ async def test_native_group_caps_post_confirmation_position_growth_and_is_idempo
 
 
 @pytest.mark.asyncio
-async def test_native_group_rejects_new_exit_plan_conflict_after_confirmation(
+@pytest.mark.parametrize(
+  ("group_mode", "other_plan_mode", "conflicts"),
+  [
+    ("live", "live", True),
+    ("live", "paper", False),
+    ("paper", "live", False),
+    ("paper", "paper", False),
+  ],
+)
+async def test_native_group_conflicts_respect_execution_environment(
   native_liquidation_database,
+  group_mode,
+  other_plan_mode,
+  conflicts,
 ):
   group_id = str(uuid.uuid4())
   async with native_liquidation_database() as db:
@@ -200,7 +219,7 @@ async def test_native_group_rejects_new_exit_plan_conflict_after_confirmation(
         source_id="new-conflict-after-confirm",
         enabled=True,
         status="ACTIVE",
-        execution_mode="paper",
+        execution_mode=other_plan_mode,
         auto_exit_authorized=False,
         config_version=1,
         protected_volume=100,
@@ -212,10 +231,19 @@ async def test_native_group_rejects_new_exit_plan_conflict_after_confirmation(
     )
     await db.commit()
 
-  result = await AutoExitPlanService().create_liquidation_group(_payload(group_id))
-  assert not result["success"]
-  assert result["items"][0]["success"] is False
-  assert "冲突" in result["items"][0]["error"]
+  result = await AutoExitPlanService().create_liquidation_group(
+    {
+      **_payload(group_id),
+      "execution_mode": group_mode,
+      "auto_exit_authorized": False,
+    }
+  )
+  assert result["success"] is (not conflicts)
+  assert result["items"][0]["success"] is (not conflicts)
+  if conflicts:
+    assert "冲突" in result["items"][0]["error"]
+  else:
+    assert result["items"][0]["protected_volume"] == 300
   async with native_liquidation_database() as db:
     existing = await db.get(AutoExitPlanRecord, "new-conflict-after-confirm")
     assert existing.enabled
@@ -228,4 +256,61 @@ async def test_native_group_rejects_new_exit_plan_conflict_after_confirmation(
       .scalars()
       .all()
     )
-    assert created == []
+    assert len(created) == (0 if conflicts else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("group_mode", "order_mode", "blocked"),
+  [
+    ("live", "live", True),
+    ("live", "paper", False),
+    ("paper", "live", False),
+    ("paper", "paper", False),
+  ],
+)
+async def test_native_group_pending_sells_respect_execution_environment(
+  native_liquidation_database,
+  group_mode,
+  order_mode,
+  blocked,
+):
+  group_id = str(uuid.uuid4())
+  async with native_liquidation_database() as db:
+    db.add_all(
+      [
+        Position(
+          id="position-with-pending-sell",
+          account_id="ACCOUNT-1",
+          stock_code="600000.SH",
+          volume=500,
+          can_use_volume=500,
+          avg_price=10,
+        ),
+        PendingTradeOrder(
+          client_order_id="pending-sell",
+          user_id="test-user",
+          account_id="ACCOUNT-1",
+          instrument_code="600000.SH",
+          side="SELL",
+          order_type="FIX_PRICE",
+          limit_price="10",
+          volume=100,
+          status="QUEUED",
+          execution_mode=order_mode,
+        ),
+      ]
+    )
+    await db.commit()
+  result = await AutoExitPlanService().create_liquidation_group(
+    {
+      **_payload(group_id),
+      "execution_mode": group_mode,
+      "auto_exit_authorized": False,
+    }
+  )
+  assert result["success"] is (not blocked)
+  if blocked:
+    assert "待成交卖单" in result["items"][0]["error"]
+  else:
+    assert result["items"][0]["protected_volume"] == 300
