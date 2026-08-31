@@ -78,7 +78,7 @@ async def test_gateway_connection_failure_has_no_http_latency():
 
 def test_supply_has_one_direct_target_and_no_derived_duplicate():
   assert TARGET_BY_ID["market-gateway"].probe_kind is ProbeKind.DIRECT
-  assert TARGET_BY_ID["market-gateway"].name == "行情服务（Market Gateway）"
+  assert TARGET_BY_ID["market-gateway"].name == "行情服务"
   assert "market-data" not in TARGET_BY_ID
   assert "marketData" not in COMPONENT_TARGETS
 

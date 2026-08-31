@@ -99,7 +99,7 @@ describe('ServiceStatusPanel', () => {
     data.targets[0] = {
       ...data.targets[0],
       id: 'market-gateway',
-      name: '行情服务（Market Gateway）',
+      name: '行情服务',
       probeKind: 'direct',
     };
     data.targets[1] = {
@@ -109,7 +109,7 @@ describe('ServiceStatusPanel', () => {
     };
     monitorMocks.getMonitorSummary.mockResolvedValue(data);
     monitorMocks.getMonitorHistory.mockResolvedValue({
-      target: { id: 'market-gateway', name: '行情服务（Market Gateway）' },
+      target: { id: 'market-gateway', name: '行情服务' },
       range: '24h',
       bucketSeconds: 60,
       points: [],
@@ -117,7 +117,7 @@ describe('ServiceStatusPanel', () => {
     monitorMocks.getMonitorIncidents.mockResolvedValue(incidentPage([]));
     render(<ServiceStatusPanel />);
     const gateway = await screen.findByRole('button', {
-      name: /行情服务（Market Gateway）.*延迟/,
+      name: /行情服务.*延迟/,
     });
     if (gateway.getAttribute('aria-expanded') !== 'true')
       fireEvent.click(gateway);

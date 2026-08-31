@@ -25,7 +25,7 @@
 默认每 30 秒运行一次检测，最多并发 8 个。目标分两组：
 
 - 外部依赖：PostgreSQL、Redis、InfluxDB、Prefect Server；
-- QuantX 组件：Web 入口、文档、API 公共入口、API 进程、行情服务（Market Gateway）、
+- QuantX 组件：Web 入口、文档、API 公共入口、API 进程、行情服务、
   Engine、Worker、QMT Agent 和可选 AI Runtime。
 
 前一类使用独立协议或 HTTP probe；后一类的进程级入口直接探测，Engine、Worker

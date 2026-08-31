@@ -13,7 +13,7 @@ TARGETS: tuple[TargetDefinition, ...] = (
   TargetDefinition("docs", "开发文档", TargetGroup.RUNTIME),
   TargetDefinition("api-public", "API 公共链路", TargetGroup.RUNTIME),
   TargetDefinition("api-process", "API 进程", TargetGroup.RUNTIME),
-  TargetDefinition("market-gateway", "行情服务（Market Gateway）", TargetGroup.RUNTIME),
+  TargetDefinition("market-gateway", "行情服务", TargetGroup.RUNTIME),
   TargetDefinition(
     "engine",
     "策略引擎",
