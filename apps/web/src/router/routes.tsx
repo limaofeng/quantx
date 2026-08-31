@@ -52,8 +52,8 @@ export interface NavigationGroup {
 
 type RouteDefinition = Omit<AppRouteConfig, 'component'>;
 
-const MAIN_GROUP = '÷˜≤Àµ•';
-const SETTINGS_GROUP = 'œµÕ≥…Ë÷√';
+const MAIN_GROUP = '‰∏ªËèúÂçï';
+const SETTINGS_GROUP = 'Á≥ªÁªüËÆæÁΩÆ';
 
 function toDefaultExport<T extends Record<string, unknown>>(
   importModule: () => Promise<T>,
@@ -67,7 +67,7 @@ function toDefaultExport<T extends Record<string, unknown>>(
 
 function route(definition: RouteDefinition): AppRouteConfig {
   const title =
-    typeof definition.title === 'string' ? definition.title : '“≥√Ê';
+    typeof definition.title === 'string' ? definition.title : 'È°µÈù¢';
 
   return {
     ...definition,
@@ -82,14 +82,14 @@ function route(definition: RouteDefinition): AppRouteConfig {
 export const appRoutes: AppRouteConfig[] = [
   route({
     path: '/',
-    title: '––«Èπ§◊˜Ã®',
+    title: 'Ë°åÊÉÖÂ∑•‰ΩúÂè∞',
     importer: toDefaultExport(
       () => import('@/features/dashboard/pages/MarketShortcutsPage'),
       'default'
     ),
     skeleton: 'studio',
     nav: {
-      label: '––«È',
+      label: 'Ë°åÊÉÖ',
       icon: MarketWorkbenchIcon,
       group: MAIN_GROUP,
       order: 10,
@@ -97,7 +97,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/market/indices',
-    title: '»´≤ø÷∏ ˝',
+    title: 'ÂÖ®ÈÉ®ÊåáÊï∞',
     importer: toDefaultExport(
       () => import('@/features/dashboard/pages/MarketIndicesPage'),
       'default'
@@ -106,7 +106,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/market-shortcuts',
-    title: '––«Èπ§◊˜Ã®',
+    title: 'Ë°åÊÉÖÂ∑•‰ΩúÂè∞',
     importer: toDefaultExport(
       () => import('./redirects'),
       'MarketWorkbenchRedirect'
@@ -115,14 +115,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/watchlist',
-    title: '◊‘—°',
+    title: 'Ëá™ÈÄâ',
     importer: toDefaultExport(
       () => import('@/features/watchlist/pages/WatchlistPage'),
       'default'
     ),
     skeleton: 'table',
     nav: {
-      label: '◊‘—°',
+      label: 'Ëá™ÈÄâ',
       icon: WatchlistIcon,
       group: MAIN_GROUP,
       order: 15,
@@ -130,14 +130,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/holdings',
-    title: '≥÷≤÷',
+    title: 'ÊåÅ‰ªì',
     importer: toDefaultExport(
       () => import('@/features/trading/pages/TradingPage'),
       'default'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: '≥÷≤÷',
+      label: 'ÊåÅ‰ªì',
       icon: PortfolioHoldingsIcon,
       group: MAIN_GROUP,
       order: 20,
@@ -145,7 +145,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/account',
-    title: '’Àªß∏≈¿¿',
+    title: 'Ë¥¶Êà∑Ê¶ÇËßà',
     importer: toDefaultExport(
       () => import('@/features/account/pages/AccountPage'),
       'AccountPage'
@@ -154,14 +154,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/entry-plans',
-    title: '¬Ú»Îπ‹¿Ì',
+    title: '‰π∞ÂÖ•ÁÆ°ÁêÜ',
     importer: toDefaultExport(
       () => import('@/features/entry-plans/pages/ConnectedEntryPlansPage'),
       'ConnectedEntryPlansPage'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: '¬Ú»Îπ‹¿Ì',
+      label: '‰π∞ÂÖ•ÁÆ°ÁêÜ',
       icon: BuyManagementIcon,
       group: MAIN_GROUP,
       order: 25,
@@ -169,14 +169,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/t-trade',
-    title: '◊ˆT÷˙ ÷',
+    title: 'ÂÅöTÂä©Êâã',
     importer: toDefaultExport(
       () => import('@/features/portfolio/pages/TTradeGlobalPage'),
       'TTradeGlobalPage'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: '◊ˆT÷˙ ÷',
+      label: 'ÂÅöTÂä©Êâã',
       icon: TTradeCycleIcon,
       group: MAIN_GROUP,
       order: 30,
@@ -184,14 +184,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/limit-up-board',
-    title: '¥Ú∞Â÷˙ ÷',
+    title: 'ÊâìÊùøÂä©Êâã',
     importer: toDefaultExport(
       () => import('@/features/strategies/pages/LimitUpBoardPage'),
       'default'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: '¥Ú∞Â÷˙ ÷',
+      label: 'ÊâìÊùøÂä©Êâã',
       icon: LimitUpBoardIcon,
       group: MAIN_GROUP,
       order: 35,
@@ -199,14 +199,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/liquidation',
-    title: '¬Ù≥ˆπ‹¿Ì',
+    title: 'ÂçñÂá∫ÁÆ°ÁêÜ',
     importer: toDefaultExport(
       () => import('@/features/portfolio/pages/LiquidationPage'),
       'LiquidationPage'
     ),
     skeleton: 'table',
     nav: {
-      label: '¬Ù≥ˆπ‹¿Ì',
+      label: 'ÂçñÂá∫ÁÆ°ÁêÜ',
       icon: SellManagementIcon,
       group: MAIN_GROUP,
       order: 40,
@@ -214,14 +214,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/strategies',
-    title: '≤ﬂ¬‘π‹¿Ì',
+    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
     importer: toDefaultExport(
       () => import('@/features/strategies/pages/StrategiesPage'),
       'default'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: '≤ﬂ¬‘π‹¿Ì',
+      label: 'Á≠ñÁï•ÁÆ°ÁêÜ',
       icon: StrategyManagementIcon,
       group: MAIN_GROUP,
       order: 50,
@@ -229,7 +229,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/strategies/run',
-    title: '≤ﬂ¬‘π‹¿Ì',
+    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
     importer: toDefaultExport(
       () => import('@/features/strategies/pages/StrategyRunPage'),
       'default'
@@ -238,7 +238,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/strategies/:strategyId/run',
-    title: '≤ﬂ¬‘π‹¿Ì',
+    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
     importer: toDefaultExport(
       () => import('@/features/strategies/pages/StrategyRunPage'),
       'default'
@@ -247,7 +247,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/strategies/:strategyId/runs/:runId',
-    title: '≤ﬂ¬‘π‹¿Ì',
+    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
     importer: toDefaultExport(
       () => import('@/features/strategies/pages/StrategyDetailPage'),
       'default'
@@ -256,7 +256,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/strategies/:strategyId',
-    title: '≤ﬂ¬‘π‹¿Ì',
+    title: 'Á≠ñÁï•ÁÆ°ÁêÜ',
     importer: toDefaultExport(
       () => import('@/features/strategies/pages/StrategyDetailPage'),
       'default'
@@ -267,10 +267,10 @@ export const appRoutes: AppRouteConfig[] = [
     path: '/research/:studyId/:version/runs/:runId',
     title: pathname => {
       const runId = normalizePath(pathname).split('/').filter(Boolean)[4];
-      if (!runId) return '—–æøœÍ«È';
+      if (!runId) return 'Á†îÁ©∂ËØ¶ÊÉÖ';
       const decoded = safeDecodeURIComponent(runId);
       const suffix = decoded.length > 12 ? decoded.slice(-12) : decoded;
-      return `—–æø ${suffix}`;
+      return `Á†îÁ©∂ ${suffix}`;
     },
     importer: toDefaultExport(
       () => import('@/features/research/pages/ResearchRunDetailPage'),
@@ -280,14 +280,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/research',
-    title: '—–æø÷––ƒ',
+    title: 'Á†îÁ©∂‰∏≠ÂøÉ',
     importer: toDefaultExport(
       () => import('@/features/research/pages/ResearchCenterPage'),
       'default'
     ),
     skeleton: 'table',
     nav: {
-      label: '—–æø÷––ƒ',
+      label: 'Á†îÁ©∂‰∏≠ÂøÉ',
       icon: MarketResearchIcon,
       group: MAIN_GROUP,
       order: 55,
@@ -295,14 +295,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/screening',
-    title: '—°π…',
+    title: 'ÈÄâËÇ°',
     importer: toDefaultExport(
       () => import('@/features/screening/pages/StockScreeningPage'),
       'default'
     ),
     skeleton: 'table',
     nav: {
-      label: '—°π…',
+      label: 'ÈÄâËÇ°',
       icon: StockScreeningIcon,
       group: MAIN_GROUP,
       order: 60,
@@ -310,7 +310,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/stock/:stockCode',
-    title: '∏ˆπ…œÍ«È',
+    title: '‰∏™ËÇ°ËØ¶ÊÉÖ',
     importer: toDefaultExport(
       () => import('@/features/stocks/pages/StockDetailPage'),
       'default'
@@ -319,14 +319,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings',
-    title: 'œµÕ≥…Ë÷√',
+    title: 'Á≥ªÁªüËÆæÁΩÆ',
     importer: toDefaultExport(
       () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
     ),
     skeleton: 'dashboard',
     nav: {
-      label: 'œµÕ≥…Ë÷√',
+      label: 'Á≥ªÁªüËÆæÁΩÆ',
       icon: ControlSettingsIcon,
       group: SETTINGS_GROUP,
       order: 10,
@@ -334,7 +334,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/status/:targetId/history',
-    title: '∑˛ŒÒ¿˙ ∑',
+    title: 'ÊúçÂä°ÂéÜÂè≤',
     importer: toDefaultExport(
       () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
@@ -343,7 +343,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/status',
-    title: '∑˛ŒÒ◊¥Ã¨',
+    title: 'ÊúçÂä°Áä∂ÊÄÅ',
     importer: toDefaultExport(
       () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
@@ -352,7 +352,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/trading-safety',
-    title: 'Ωª“◊∞≤»´',
+    title: '‰∫§ÊòìÂÆâÂÖ®',
     importer: toDefaultExport(
       () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
@@ -361,7 +361,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/qmt',
-    title: 'œµÕ≥…Ë÷√',
+    title: 'Á≥ªÁªüËÆæÁΩÆ',
     importer: toDefaultExport(
       () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
@@ -370,7 +370,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/ai-runtime',
-    title: 'œµÕ≥…Ë÷√',
+    title: 'Á≥ªÁªüËÆæÁΩÆ',
     importer: toDefaultExport(
       () => import('@/features/settings/pages/SystemSettingsPage'),
       'SystemSettingsPage'
@@ -379,7 +379,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/agents',
-    title: 'œµÕ≥…Ë÷√',
+    title: 'Á≥ªÁªüËÆæÁΩÆ',
     importer: toDefaultExport(
       () => import('./redirects'),
       'LegacyAgentSettingsRedirect'
@@ -388,7 +388,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data',
-    title: ' ˝æ›π‹¿Ì√≈ªß',
+    title: 'Êï∞ÊçÆÁÆ°ÁêÜÈó®Êà∑',
     importer: toDefaultExport(
       () => import('@/features/system/pages/DataManagementPage'),
       'DataManagementPage'
@@ -397,7 +397,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/market',
-    title: '»´ –≥° ˝æ›',
+    title: 'ÂÖ®Â∏ÇÂú∫Êï∞ÊçÆ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/MarketPage'),
       'ComprehensiveMarketPage'
@@ -406,7 +406,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/stocks',
-    title: '∏ˆπ… ˝æ›',
+    title: '‰∏™ËÇ°Êï∞ÊçÆ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/StockDataIndexPage'),
       'StockDataIndexPage'
@@ -415,7 +415,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/sectors',
-    title: '∞ÂøÈ ˝æ›π‹¿Ì',
+    title: 'ÊùøÂùóÊï∞ÊçÆÁÆ°ÁêÜ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/SectorDataPage'),
       'SectorDataPage'
@@ -424,7 +424,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/holdings',
-    title: '≥÷≤÷ ˝æ›Õ¨≤Ω',
+    title: 'ÊåÅ‰ªìÊï∞ÊçÆÂêåÊ≠•',
     importer: toDefaultExport(
       () => import('@/features/system/pages/HoldingsDataSyncPage'),
       'HoldingsDataSyncPage'
@@ -433,7 +433,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/calendar',
-    title: 'Ωª“◊»’¿˙',
+    title: '‰∫§ÊòìÊó•ÂéÜ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/TradingCalendarPage'),
       'TradingCalendarPage'
@@ -442,7 +442,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/reverse-repo',
-    title: 'ƒÊªÿπ∫ ˝æ›',
+    title: 'ÈÄÜÂõûË¥≠Êï∞ÊçÆ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/ReverseRepoDataPage'),
       'ReverseRepoDataPage'
@@ -451,7 +451,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/transactions',
-    title: 'Ωª“◊¡˜ÀÆ ˝æ›',
+    title: '‰∫§ÊòìÊµÅÊ∞¥Êï∞ÊçÆ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/TransactionDataPage'),
       'TransactionDataPage'
@@ -460,7 +460,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/financial',
-    title: '≤∆ŒÒ ˝æ›',
+    title: 'Ë¥¢Âä°Êï∞ÊçÆ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/FinancialDataPage'),
       'FinancialDataPage'
@@ -469,7 +469,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/market-data',
-    title: 'Kœﬂ≈˙¡øÕ¨≤Ω',
+    title: 'KÁ∫øÊâπÈáèÂêåÊ≠•',
     importer: toDefaultExport(
       () => import('@/features/system/pages/DailyMarketDataSyncPage'),
       'DailyMarketDataSyncPage'
@@ -478,7 +478,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/announcements',
-    title: 'π´∏ÊÕ¨≤Ω',
+    title: 'ÂÖ¨ÂëäÂêåÊ≠•',
     importer: toDefaultExport(
       () => import('@/features/system/pages/AnnouncementSyncPage'),
       'AnnouncementSyncPage'
@@ -487,7 +487,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/settings/data/:stockCode',
-    title: ' ˝æ›œÍ«È',
+    title: 'Êï∞ÊçÆËØ¶ÊÉÖ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/StockDataDetailPage'),
       'StockDataDetailPage'
@@ -496,7 +496,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/system/flow-runs/:id',
-    title: '»ŒŒÒœÍ«È',
+    title: '‰ªªÂä°ËØ¶ÊÉÖ',
     importer: toDefaultExport(
       () => import('@/features/system/pages/FlowRunDetailPage'),
       'FlowRunDetailPage'
@@ -544,7 +544,7 @@ export function findRoute(pathname: string): AppRouteConfig | undefined {
 
 export function getPageTitle(pathname: string): string {
   const routeConfig = findRoute(pathname);
-  if (!routeConfig) return '“≥√Ê';
+  if (!routeConfig) return 'È°µÈù¢';
   return typeof routeConfig.title === 'function'
     ? routeConfig.title(pathname)
     : routeConfig.title;

@@ -151,8 +151,8 @@ function AuthenticatedApp() {
   if (bootstrapStatus === 'initializing') {
     return (
       <SessionStatusPage
-        title="ÕýÔÚ»Ö¸´°²È«»á»°"
-        detail="ÕýÔÚÑéÖ¤ HttpOnly Ë¢ÐÂÆ¾Ö¤£¬ÒµÎñÇëÇó»áÔÚÈÏÖ¤Íê³Éºó¿ªÊ¼¡£"
+        title="æ­£åœ¨æ¢å¤å®‰å…¨ä¼šè¯"
+        detail="æ­£åœ¨éªŒè¯ HttpOnly åˆ·æ–°å‡­è¯ï¼Œä¸šåŠ¡è¯·æ±‚ä¼šåœ¨è®¤è¯å®ŒæˆåŽå¼€å§‹ã€‚"
         isLoading
       />
     );
@@ -161,9 +161,9 @@ function AuthenticatedApp() {
   if (bootstrapStatus === 'error') {
     return (
       <SessionStatusPage
-        title="ÔÝÊ±ÎÞ·¨Á¬½ÓÈÏÖ¤·þÎñ"
-        detail={bootstrapError?.message || 'Çë¼ì²éºó¶Ë·þÎñÓëÍøÂçÁ¬½Ó¡£'}
-        actionLabel="ÖØÐÂÁ¬½Ó"
+        title="æš‚æ—¶æ— æ³•è¿žæŽ¥è®¤è¯æœåŠ¡"
+        detail={bootstrapError?.message || 'è¯·æ£€æŸ¥åŽç«¯æœåŠ¡ä¸Žç½‘ç»œè¿žæŽ¥ã€‚'}
+        actionLabel="é‡æ–°è¿žæŽ¥"
         onAction={() => void retryBootstrap()}
       />
     );
@@ -180,9 +180,9 @@ function AuthenticatedApp() {
   ) {
     return (
       <SessionStatusPage
-        title="Ä¬ÈÏÕË»§Î´ÊÚÈ¨"
-        detail="VITE_DEFAULT_ACCOUNT_ID Óëµ±Ç°ÓÃ»§µÄºó¶ËÕË»§ÊÚÈ¨²»Ò»ÖÂ£¬ÇëÐÞÕý±¾µØ»·¾³ÅäÖÃºóÖØÐÂµÇÂ¼¡£"
-        actionLabel="ÍË³öµÇÂ¼"
+        title="é»˜è®¤è´¦æˆ·æœªæŽˆæƒ"
+        detail="VITE_DEFAULT_ACCOUNT_ID ä¸Žå½“å‰ç”¨æˆ·çš„åŽç«¯è´¦æˆ·æŽˆæƒä¸ä¸€è‡´ï¼Œè¯·ä¿®æ­£æœ¬åœ°çŽ¯å¢ƒé…ç½®åŽé‡æ–°ç™»å½•ã€‚"
+        actionLabel="é€€å‡ºç™»å½•"
         onAction={() => void logout()}
       />
     );
@@ -191,8 +191,8 @@ function AuthenticatedApp() {
   if (location === '/login') {
     return (
       <SessionStatusPage
-        title="ÕýÔÚ½øÈë¹¤×÷Ì¨"
-        detail="°²È«»á»°ÒÑ»Ö¸´£¬ÕýÔÚ·µ»ØÔ­Ò³Ãæ¡£"
+        title="æ­£åœ¨è¿›å…¥å·¥ä½œå°"
+        detail="å®‰å…¨ä¼šè¯å·²æ¢å¤ï¼Œæ­£åœ¨è¿”å›žåŽŸé¡µé¢ã€‚"
         isLoading
       />
     );
@@ -212,16 +212,16 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <ThemeProvider>
-        <TooltipProvider>
-          <AppDialogProvider>
-            <AuthProvider>
-              <Toaster />
-              <AuthenticatedApp />
-            </AuthProvider>
-          </AppDialogProvider>
-        </TooltipProvider>
-      </ThemeProvider>
+              <ThemeProvider>
+          <TooltipProvider>
+            <AppDialogProvider>
+              <AuthProvider>
+                <Toaster />
+                <AuthenticatedApp />
+              </AuthProvider>
+            </AppDialogProvider>
+          </TooltipProvider>
+        </ThemeProvider>
     </ErrorBoundary>
   );
 }

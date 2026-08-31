@@ -172,17 +172,17 @@ const tTradePositionsFallback = (
       className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none"
       aria-hidden="true"
     />
-    ÕıÔÚ¼ÓÔØ²ÖÎ»ÓëÅú´Î¡­
+    æ­£åœ¨åŠ è½½ä»“ä½ä¸æ‰¹æ¬¡â€¦
   </div>
 );
 
 const tTradeModes: StudioMode[] = [
-  { id: 'MONITOR', icon: Radar, label: '×ÜÀÀ' },
-  { id: 'SIGNALS', icon: Activity, label: 'ĞÅºÅ' },
-  { id: 'DIAGNOSTICS', icon: BarChart3, label: 'Õï¶Ï' },
-  { id: 'POSITIONS', icon: WalletCards, label: '²ÖÎ»ÓëÅú´Î' },
-  { id: 'EVENTS', icon: ListChecks, label: 'ÔËĞĞ¶¯Ì¬' },
-  { id: 'SETTINGS', icon: Settings2, label: '²ÎÊı' },
+  { id: 'MONITOR', icon: Radar, label: 'æ€»è§ˆ' },
+  { id: 'SIGNALS', icon: Activity, label: 'ä¿¡å·' },
+  { id: 'DIAGNOSTICS', icon: BarChart3, label: 'è¯Šæ–­' },
+  { id: 'POSITIONS', icon: WalletCards, label: 'ä»“ä½ä¸æ‰¹æ¬¡' },
+  { id: 'EVENTS', icon: ListChecks, label: 'è¿è¡ŒåŠ¨æ€' },
+  { id: 'SETTINGS', icon: Settings2, label: 'å‚æ•°' },
 ];
 
 const defaultForm: SettingsForm = {
@@ -530,7 +530,7 @@ export function TTradeGlobalPage() {
         payload?.signalPolicy
       );
       if (!payload || !policy || result.error) {
-        throw new Error(result.error?.message || '¶ÁÈ¡µ±Ç°ÊµÅÌ²ÎÊıÊ§°Ü');
+        throw new Error(result.error?.message || 'è¯»å–å½“å‰å®ç›˜å‚æ•°å¤±è´¥');
       }
       const nextForm = settingsFormFromReplaySettings({
         ...payload,
@@ -543,14 +543,14 @@ export function TTradeGlobalPage() {
       setReplayConfigVersion(payload.configVersion);
       setReplaySettingsAccountId(payload.accountId);
       toast({
-        title: 'ÒÑ»¹Ô­µ±Ç°ÊµÅÌ²ÎÊı',
-        description: `»Ø²â²İ¸åÒÑ¸üĞÂÎªÊµÅÌÅäÖÃ v${payload.configVersion}£¬Î´ĞŞ¸ÄÊµÅÌÔËĞĞ¡£`,
+        title: 'å·²è¿˜åŸå½“å‰å®ç›˜å‚æ•°',
+        description: `å›æµ‹è‰ç¨¿å·²æ›´æ–°ä¸ºå®ç›˜é…ç½® v${payload.configVersion}ï¼Œæœªä¿®æ”¹å®ç›˜è¿è¡Œã€‚`,
       });
       return true;
     } catch (error) {
       toast({
-        title: 'ÎŞ·¨»¹Ô­ÊµÅÌ²ÎÊı',
-        description: error instanceof Error ? error.message : 'ÇëÇóÊ§°Ü',
+        title: 'æ— æ³•è¿˜åŸå®ç›˜å‚æ•°',
+        description: error instanceof Error ? error.message : 'è¯·æ±‚å¤±è´¥',
         variant: 'destructive',
       });
       return false;
@@ -1174,11 +1174,11 @@ export function TTradeGlobalPage() {
       const result = await syncSourceOrders({ accountId });
       const payload = result.data?.syncTTradeSourceOrders;
       const errorMessage =
-        payload?.message || result.error?.message || 'Í¬²½µ±ÈÕÎ¯ÍĞÊ§°Ü';
+        payload?.message || result.error?.message || 'åŒæ­¥å½“æ—¥å§”æ‰˜å¤±è´¥';
       if (!payload?.success) {
         setSourceOrdersSyncError(errorMessage);
         toast({
-          title: 'µ±ÈÕÎ¯ÍĞÍ¬²½Ê§°Ü',
+          title: 'å½“æ—¥å§”æ‰˜åŒæ­¥å¤±è´¥',
           description: errorMessage,
           variant: 'destructive',
         });
@@ -1188,7 +1188,7 @@ export function TTradeGlobalPage() {
       refreshSourceOrders({ requestPolicy: 'network-only' });
       if (showSuccessToast) {
         toast({
-          title: 'µ±ÈÕÎ¯ÍĞÒÑÍ¬²½',
+          title: 'å½“æ—¥å§”æ‰˜å·²åŒæ­¥',
           description: payload.message,
         });
       }
@@ -1431,8 +1431,8 @@ export function TTradeGlobalPage() {
       if (!accountId) return false;
       if (draftDirty && !requirePolicyPreview) {
         toast({
-          title: 'µ±Ç°ÓĞÎ´±£´æ²İ¸å',
-          description: 'ÇëÏÈÔÚ²ÎÊıÒ³ÑéÖ¤²¢±£´æ£¬±ÜÃâÔËĞĞ¿ØÖÆÒşÊ½´øÈëĞÂ¹æÔò¡£',
+          title: 'å½“å‰æœ‰æœªä¿å­˜è‰ç¨¿',
+          description: 'è¯·å…ˆåœ¨å‚æ•°é¡µéªŒè¯å¹¶ä¿å­˜ï¼Œé¿å…è¿è¡Œæ§åˆ¶éšå¼å¸¦å…¥æ–°è§„åˆ™ã€‚',
           variant: 'destructive',
         });
         return false;
@@ -1443,8 +1443,8 @@ export function TTradeGlobalPage() {
           policyPreview.configVersion !== draftConfigVersionRef.current)
       ) {
         toast({
-          title: 'ÇëÏÈÑéÖ¤µ±Ç°²ßÂÔ²İ¸å',
-          description: '±£´æÖ»½ÓÊÜÍ¬Ò»ÅäÖÃ°æ±¾ÏÂÒÑÍ¨¹ı·şÎñ¶ËÔ¤ÀÀµÄ²ÎÊı¡£',
+          title: 'è¯·å…ˆéªŒè¯å½“å‰ç­–ç•¥è‰ç¨¿',
+          description: 'ä¿å­˜åªæ¥å—åŒä¸€é…ç½®ç‰ˆæœ¬ä¸‹å·²é€šè¿‡æœåŠ¡ç«¯é¢„è§ˆçš„å‚æ•°ã€‚',
           variant: 'destructive',
         });
         return false;
@@ -1517,7 +1517,7 @@ export function TTradeGlobalPage() {
       }
       toast({
         title: tTradeGlobalSaveToastTitle(payload),
-        description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
+        description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
         variant: success ? 'default' : 'destructive',
       });
       if (success) {
@@ -1565,8 +1565,8 @@ export function TTradeGlobalPage() {
     const payload = result.data?.previewTTradeSignalPolicy;
     if (!payload) {
       toast({
-        title: '²ßÂÔÔ¤ÀÀÊ§°Ü',
-        description: result.error?.message || '·şÎñ¶ËÎ´·µ»ØĞ£Ñé½á¹û',
+        title: 'ç­–ç•¥é¢„è§ˆå¤±è´¥',
+        description: result.error?.message || 'æœåŠ¡ç«¯æœªè¿”å›æ ¡éªŒç»“æœ',
         variant: 'destructive',
       });
       return;
@@ -1619,8 +1619,8 @@ export function TTradeGlobalPage() {
     if (!accountId) return;
     if (reconcileOperationRef.current?.blocked) {
       toast({
-        title: 'Í¬²½¼ÇÂ¼²»¿É»Ö¸´',
-        description: 'ä¯ÀÀÆ÷ÖĞµÄÎ´¾öÍ¬²½¼ÇÂ¼ÒÑËğ»µ£¬ÇëÇåÀíºóÔÙ·¢Æğ²Ù×÷¡£',
+        title: 'åŒæ­¥è®°å½•ä¸å¯æ¢å¤',
+        description: 'æµè§ˆå™¨ä¸­çš„æœªå†³åŒæ­¥è®°å½•å·²æŸåï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
         variant: 'destructive',
       });
       return;
@@ -1633,8 +1633,8 @@ export function TTradeGlobalPage() {
     }
     if (reconcileOperationRef.current?.blocked) {
       toast({
-        title: 'Í¬²½¼ÇÂ¼²»¿É»Ö¸´',
-        description: 'ä¯ÀÀÆ÷ÖĞµÄÎ´¾öÍ¬²½¼ÇÂ¼ÒÑËğ»µ£¬ÇëÇåÀíºóÔÙ·¢Æğ²Ù×÷¡£',
+        title: 'åŒæ­¥è®°å½•ä¸å¯æ¢å¤',
+        description: 'æµè§ˆå™¨ä¸­çš„æœªå†³åŒæ­¥è®°å½•å·²æŸåï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
         variant: 'destructive',
       });
       return;
@@ -1654,8 +1654,8 @@ export function TTradeGlobalPage() {
     ) {
       reconcileOperationRef.current = { ...pendingOperation, blocked: true };
       toast({
-        title: 'ÎŞ·¨°²È«¼ÇÂ¼Í¬²½²Ù×÷',
-        description: 'Î´Ğ´Èëä¯ÀÀÆ÷Î´¾ö¼ÇÂ¼£¬±¾´ÎÍ¬²½Î´·¢ËÍ¡£',
+        title: 'æ— æ³•å®‰å…¨è®°å½•åŒæ­¥æ“ä½œ',
+        description: 'æœªå†™å…¥æµè§ˆå™¨æœªå†³è®°å½•ï¼Œæœ¬æ¬¡åŒæ­¥æœªå‘é€ã€‚',
         variant: 'destructive',
       });
       return;
@@ -1671,9 +1671,9 @@ export function TTradeGlobalPage() {
       reconcileOperationRef.current = pendingOperation;
       persistUncertainOperation(`reconcile:${accountId}`, pendingOperation);
       toast({
-        title: 'Í¬²½½á¹ûÎ´Öª',
+        title: 'åŒæ­¥ç»“æœæœªçŸ¥',
         description:
-          error instanceof Error ? error.message : 'ÇëÇó½á¹ûÎ´Öª£¬ÇëÖØÊÔÔ­Í¬²½',
+          error instanceof Error ? error.message : 'è¯·æ±‚ç»“æœæœªçŸ¥ï¼Œè¯·é‡è¯•åŸåŒæ­¥',
         variant: 'destructive',
       });
       refreshVisibleData();
@@ -1694,8 +1694,8 @@ export function TTradeGlobalPage() {
       clearPersistedOperation(`reconcile:${accountId}`);
     }
     toast({
-      title: payload?.success ? '³Ö²ÖÒÑÍ¬²½' : 'Í¬²½Î´Íê³É',
-      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
+      title: payload?.success ? 'æŒä»“å·²åŒæ­¥' : 'åŒæ­¥æœªå®Œæˆ',
+      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshVisibleData();
@@ -1713,17 +1713,17 @@ export function TTradeGlobalPage() {
     if (action === 'approve') {
       if (!signalSnapshotTrusted) {
         toast({
-          title: 'µ±Ç°Á¬½Ó²»¿ÉĞÅ£¬½ûÖ¹È·ÈÏ',
-          description: 'ÇëµÈ´ı²éÑ¯³É¹¦ÇÒ¶©ÔÄÖØÁ¬ºóµÄÈ«Á¿Ë¢ĞÂ¡£',
+          title: 'å½“å‰è¿æ¥ä¸å¯ä¿¡ï¼Œç¦æ­¢ç¡®è®¤',
+          description: 'è¯·ç­‰å¾…æŸ¥è¯¢æˆåŠŸä¸”è®¢é˜…é‡è¿åçš„å…¨é‡åˆ·æ–°ã€‚',
           variant: 'destructive',
         });
         return;
       }
       if (!canApproveSnapshot(snapshot)) {
         toast({
-          title: 'µ±Ç°¿ìÕÕ²»ÄÜÈ·ÈÏ',
+          title: 'å½“å‰å¿«ç…§ä¸èƒ½ç¡®è®¤',
           description:
-            'ºòÑ¡ÒÑ¹ıÆÚ¡¢Éí·İ²»ÍêÕû»òĞ­Òé°æ±¾Î´Öª¡£ÇëµÈ´ı·şÎñ¶ËË¢ĞÂ£»·şÎñ¶Ë»áÔÚÈ·ÈÏÊ±ÖØĞÂĞ£Ñé½»Ò××Ê¸ñ¡£',
+            'å€™é€‰å·²è¿‡æœŸã€èº«ä»½ä¸å®Œæ•´æˆ–åè®®ç‰ˆæœ¬æœªçŸ¥ã€‚è¯·ç­‰å¾…æœåŠ¡ç«¯åˆ·æ–°ï¼›æœåŠ¡ç«¯ä¼šåœ¨ç¡®è®¤æ—¶é‡æ–°æ ¡éªŒäº¤æ˜“èµ„æ ¼ã€‚',
           variant: 'destructive',
         });
         return;
@@ -1748,8 +1748,8 @@ export function TTradeGlobalPage() {
         readUncertainOperation(`approve:${accountId}:${approvalKey}`);
       if (existingOperation?.blocked) {
         toast({
-          title: 'ÉóÅú²Ù×÷²»¿É»Ö¸´',
-          description: 'ä¯ÀÀÆ÷ÖĞµÄÎ´¾öÉóÅú¼ÇÂ¼²»¿ÉÓÃ£¬ÇëÇåÀíºóÔÙ·¢Æğ²Ù×÷¡£',
+          title: 'å®¡æ‰¹æ“ä½œä¸å¯æ¢å¤',
+          description: 'æµè§ˆå™¨ä¸­çš„æœªå†³å®¡æ‰¹è®°å½•ä¸å¯ç”¨ï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
           variant: 'destructive',
         });
         return;
@@ -1759,8 +1759,8 @@ export function TTradeGlobalPage() {
         existingOperation.identity !== approvalIdentity
       ) {
         toast({
-          title: 'ÉÏÒ»±ÊÉóÅú½á¹ûÎ´Öª',
-          description: 'ÇëÏÈ»Ö¸´Ô­ÉóÅú½á¹û£¬²»ÄÜÓÃĞÂµÄºòÑ¡Éí·İÖØ¸´È·ÈÏ¡£',
+          title: 'ä¸Šä¸€ç¬”å®¡æ‰¹ç»“æœæœªçŸ¥',
+          description: 'è¯·å…ˆæ¢å¤åŸå®¡æ‰¹ç»“æœï¼Œä¸èƒ½ç”¨æ–°çš„å€™é€‰èº«ä»½é‡å¤ç¡®è®¤ã€‚',
           variant: 'destructive',
         });
         return;
@@ -1786,8 +1786,8 @@ export function TTradeGlobalPage() {
           blocked: true,
         });
         toast({
-          title: 'ÎŞ·¨°²È«¼ÇÂ¼ÉóÅú²Ù×÷',
-          description: 'Î´Ğ´Èëä¯ÀÀÆ÷Î´¾ö¼ÇÂ¼£¬±¾´ÎÉóÅúÎ´·¢ËÍ¡£',
+          title: 'æ— æ³•å®‰å…¨è®°å½•å®¡æ‰¹æ“ä½œ',
+          description: 'æœªå†™å…¥æµè§ˆå™¨æœªå†³è®°å½•ï¼Œæœ¬æ¬¡å®¡æ‰¹æœªå‘é€ã€‚',
           variant: 'destructive',
         });
         return;
@@ -1808,11 +1808,11 @@ export function TTradeGlobalPage() {
           pendingOperation
         );
         toast({
-          title: 'ÉóÅú½á¹ûÎ´Öª',
+          title: 'å®¡æ‰¹ç»“æœæœªçŸ¥',
           description:
             error instanceof Error
               ? error.message
-              : 'ÇëÇó½á¹ûÎ´Öª£¬ÇëÖØÊÔÔ­ÉóÅú',
+              : 'è¯·æ±‚ç»“æœæœªçŸ¥ï¼Œè¯·é‡è¯•åŸå®¡æ‰¹',
           variant: 'destructive',
         });
         return;
@@ -1839,8 +1839,8 @@ export function TTradeGlobalPage() {
       errorMessage = result.error?.message || '';
     }
     toast({
-      title: payload?.success ? 'ĞÅºÅÒÑ´¦Àí' : 'ĞÅºÅÎ´Ö´ĞĞ',
-      description: payload?.message || errorMessage || 'ÇëÇóÊ§°Ü',
+      title: payload?.success ? 'ä¿¡å·å·²å¤„ç†' : 'ä¿¡å·æœªæ‰§è¡Œ',
+      description: payload?.message || errorMessage || 'è¯·æ±‚å¤±è´¥',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshVisibleData();
@@ -1857,8 +1857,8 @@ export function TTradeGlobalPage() {
     });
     const payload = result.data?.importTTradeExternalEntry;
     toast({
-      title: payload?.success ? 'Íâ²¿³É½»ÒÑÄÉÈë¼à¿Ø' : 'Íâ²¿³É½»Î´µ¼Èë',
-      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
+      title: payload?.success ? 'å¤–éƒ¨æˆäº¤å·²çº³å…¥ç›‘æ§' : 'å¤–éƒ¨æˆäº¤æœªå¯¼å…¥',
+      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
       variant: payload?.success ? 'default' : 'destructive',
     });
     if (payload?.success) {
@@ -1882,26 +1882,26 @@ export function TTradeGlobalPage() {
     if (targetStage === TTradeRolloutTarget.Live) {
       const expected = `LIVE:${accountId}`;
       const input = await promptDialog({
-        title: 'ÆôÓÃÕıÊ½ LIVE ÊµÅÌ',
+        title: 'å¯ç”¨æ­£å¼ LIVE å®ç›˜',
         description:
-          '´Ë²Ù×÷½«ÊÚÈ¨µ±Ç°ÕË»§Ö´ĞĞÕıÊ½ÊµÅÌÃüÁî¡£ÇëÊäÈëÏÂ·½È·ÈÏ¶ÌÓïÍê³É¾«È·È·ÈÏ¡£',
-        inputLabel: `È·ÈÏ¶ÌÓï£º${expected}`,
+          'æ­¤æ“ä½œå°†æˆæƒå½“å‰è´¦æˆ·æ‰§è¡Œæ­£å¼å®ç›˜å‘½ä»¤ã€‚è¯·è¾“å…¥ä¸‹æ–¹ç¡®è®¤çŸ­è¯­å®Œæˆç²¾ç¡®ç¡®è®¤ã€‚',
+        inputLabel: `ç¡®è®¤çŸ­è¯­ï¼š${expected}`,
         placeholder: expected,
-        confirmText: 'ÆôÓÃÕıÊ½ LIVE',
-        cancelText: 'È¡Ïû',
+        confirmText: 'å¯ç”¨æ­£å¼ LIVE',
+        cancelText: 'å–æ¶ˆ',
         variant: 'destructive',
         validate: value =>
-          value === expected ? null : `±ØĞëÍêÕûÊäÈë ${expected}`,
+          value === expected ? null : `å¿…é¡»å®Œæ•´è¾“å…¥ ${expected}`,
       });
       if (input === null) return;
       confirmation = input;
     } else {
       const confirmed = await confirmDialog({
-        title: '½øÈëÑÏ¸ñ Canary ÊµÅÌ',
+        title: 'è¿›å…¥ä¸¥æ ¼ Canary å®ç›˜',
         description:
-          'ÂòÈëÈÔĞèÈË¹¤È·ÈÏ£»ÂòÈëÕæÊµ³É½»ºó£¬Ö¹Ó¯¡¢Ö¹ËğºÍÊ±¼äÍË³ö»á×Ô¶¯Ìá½»Âôµ¥¡£',
-        confirmText: 'ÆôÓÃ Canary',
-        cancelText: 'È¡Ïû',
+          'ä¹°å…¥ä»éœ€äººå·¥ç¡®è®¤ï¼›ä¹°å…¥çœŸå®æˆäº¤åï¼Œæ­¢ç›ˆã€æ­¢æŸå’Œæ—¶é—´é€€å‡ºä¼šè‡ªåŠ¨æäº¤å–å•ã€‚',
+        confirmText: 'å¯ç”¨ Canary',
+        cancelText: 'å–æ¶ˆ',
         variant: 'warning',
       });
       if (!confirmed) return;
@@ -1918,8 +1918,8 @@ export function TTradeGlobalPage() {
       readUncertainOperation(operationScope);
     if (existingOperation?.blocked) {
       toast({
-        title: 'ÊµÅÌÌáÉı²Ù×÷²»¿É»Ö¸´',
-        description: 'ä¯ÀÀÆ÷ÖĞµÄÎ´¾öÌáÉı¼ÇÂ¼²»¿ÉÓÃ£¬ÇëÇåÀíºóÔÙ·¢Æğ²Ù×÷¡£',
+        title: 'å®ç›˜æå‡æ“ä½œä¸å¯æ¢å¤',
+        description: 'æµè§ˆå™¨ä¸­çš„æœªå†³æå‡è®°å½•ä¸å¯ç”¨ï¼Œè¯·æ¸…ç†åå†å‘èµ·æ“ä½œã€‚',
         variant: 'destructive',
       });
       return;
@@ -1929,8 +1929,8 @@ export function TTradeGlobalPage() {
       existingOperation.identity !== identity
     ) {
       toast({
-        title: 'ÉÏÒ»±ÊÊµÅÌÌáÉı½á¹ûÎ´Öª',
-        description: 'ÇëÏÈ»Ö¸´Ô­ÌáÉı½á¹û£¬²»ÄÜÓÃĞÂµÄÃÅ½û»òÈ·ÈÏÔÙ´ÎÌáÉı¡£',
+        title: 'ä¸Šä¸€ç¬”å®ç›˜æå‡ç»“æœæœªçŸ¥',
+        description: 'è¯·å…ˆæ¢å¤åŸæå‡ç»“æœï¼Œä¸èƒ½ç”¨æ–°çš„é—¨ç¦æˆ–ç¡®è®¤å†æ¬¡æå‡ã€‚',
         variant: 'destructive',
       });
       return;
@@ -1950,8 +1950,8 @@ export function TTradeGlobalPage() {
         blocked: true,
       };
       toast({
-        title: 'ÎŞ·¨°²È«¼ÇÂ¼ÊµÅÌÌáÉı²Ù×÷',
-        description: 'Î´Ğ´Èëä¯ÀÀÆ÷Î´¾ö¼ÇÂ¼£¬±¾´ÎÊµÅÌÌáÉıÎ´·¢ËÍ¡£',
+        title: 'æ— æ³•å®‰å…¨è®°å½•å®ç›˜æå‡æ“ä½œ',
+        description: 'æœªå†™å…¥æµè§ˆå™¨æœªå†³è®°å½•ï¼Œæœ¬æ¬¡å®ç›˜æå‡æœªå‘é€ã€‚',
         variant: 'destructive',
       });
       return;
@@ -1971,9 +1971,9 @@ export function TTradeGlobalPage() {
       activateLiveOperationRef.current = pendingOperation;
       persistUncertainOperation(operationScope, pendingOperation);
       toast({
-        title: 'ÊµÅÌÌáÉı½á¹ûÎ´Öª',
+        title: 'å®ç›˜æå‡ç»“æœæœªçŸ¥',
         description:
-          error instanceof Error ? error.message : 'ÇëÇó½á¹ûÎ´Öª£¬ÇëÖØÊÔÔ­²Ù×÷',
+          error instanceof Error ? error.message : 'è¯·æ±‚ç»“æœæœªçŸ¥ï¼Œè¯·é‡è¯•åŸæ“ä½œ',
         variant: 'destructive',
       });
       return;
@@ -1993,10 +1993,10 @@ export function TTradeGlobalPage() {
     toast({
       title: payload?.success
         ? targetStage === TTradeRolloutTarget.Live
-          ? 'ÕıÊ½ LIVE ÒÑÆôÓÃ'
-          : 'Canary ÒÑÆôÓÃ'
-        : 'ÊµÅÌÎ´ÆôÓÃ',
-      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
+          ? 'æ­£å¼ LIVE å·²å¯ç”¨'
+          : 'Canary å·²å¯ç”¨'
+        : 'å®ç›˜æœªå¯ç”¨',
+      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshOperationalState();
@@ -2006,12 +2006,12 @@ export function TTradeGlobalPage() {
     if (!accountId) return;
     const result = await pauseEntries({
       accountId,
-      reason: 'ÓÃ»§´Ó×ö T ¹¤×÷Ì¨ÔİÍ£ĞÂÂòÈë',
+      reason: 'ç”¨æˆ·ä»åš T å·¥ä½œå°æš‚åœæ–°ä¹°å…¥',
     });
     const payload = result.data?.pauseTTradeEntries;
     toast({
-      title: payload?.success ? 'ĞÂÂòÈëÒÑÔİÍ£' : 'ÔİÍ£Ê§°Ü',
-      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
+      title: payload?.success ? 'æ–°ä¹°å…¥å·²æš‚åœ' : 'æš‚åœå¤±è´¥',
+      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshOperationalState();
@@ -2022,8 +2022,8 @@ export function TTradeGlobalPage() {
     const result = await cancelTTradeOrder({ accountId, clientOrderId });
     const payload = result.data?.cancelTTradeOrder;
     toast({
-      title: payload?.success ? '³·µ¥ÇëÇóÒÑÌá½»' : 'µ±Ç°²»ÄÜ³·µ¥',
-      description: payload?.message || result.error?.message || 'ÇëÇóÊ§°Ü',
+      title: payload?.success ? 'æ’¤å•è¯·æ±‚å·²æäº¤' : 'å½“å‰ä¸èƒ½æ’¤å•',
+      description: payload?.message || result.error?.message || 'è¯·æ±‚å¤±è´¥',
       variant: payload?.success ? 'default' : 'destructive',
     });
     refreshOperationalState();
@@ -2069,7 +2069,7 @@ export function TTradeGlobalPage() {
   );
 
   const replaySidebar = (
-    <TTradePanelBoundary name="»Ø²â¼ÇÂ¼">
+    <TTradePanelBoundary name="å›æµ‹è®°å½•">
       <React.Suspense
         fallback={
           <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
@@ -2078,12 +2078,12 @@ export function TTradeGlobalPage() {
                 Replay Lab
               </div>
               <div className="mt-1 text-ui-title font-black text-slate-100">
-                »Ø²â¼ÇÂ¼
+                å›æµ‹è®°å½•
               </div>
             </div>
             <div className="flex items-center gap-2 p-ui-section text-ui-caption text-slate-500">
               <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-              ÕıÔÚÔØÈë»Ø²â¼ÇÂ¼¡­
+              æ­£åœ¨è½½å…¥å›æµ‹è®°å½•â€¦
             </div>
           </aside>
         }
@@ -2097,7 +2097,7 @@ export function TTradeGlobalPage() {
     <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-ui-section custom-scrollbar">
       <nav
         className="flex h-full min-w-0 items-stretch"
-        aria-label="×ö T ¹¤×÷Çø"
+        aria-label="åš T å·¥ä½œåŒº"
       >
         {(['REALTIME', 'REPLAY'] as const).map(mode => {
           const active = workspaceMode === mode;
@@ -2123,7 +2123,7 @@ export function TTradeGlobalPage() {
               ) : (
                 <Radar className="h-3.5 w-3.5" />
               )}
-              {mode === 'REPLAY' ? '»Ø·Å²âÊÔ' : 'ÊµÊ±¼à¿Ø'}
+              {mode === 'REPLAY' ? 'å›æ”¾æµ‹è¯•' : 'å®æ—¶ç›‘æ§'}
             </button>
           );
         })}
@@ -2160,18 +2160,18 @@ export function TTradeGlobalPage() {
             <span className="mx-2 my-3 w-px bg-white/[0.08]" />
             {(replaySidebarContext?.activeRunId
               ? [
-                  ['OVERVIEW', '×ÜÀÀ'],
-                  ['SIGNALS', 'ĞÅºÅ'],
-                  ['AUDIT', '¾ö²ßÉó¼Æ'],
-                  ['POSITIONS', '²ÖÎ»ÓëÅú´Î'],
-                  ['EVENTS', 'ÔËĞĞ¶¯Ì¬'],
-                  ['PARAMETERS', '²ÎÊı'],
-                  ['ACCOUNT', 'ÕË»§'],
+                  ['OVERVIEW', 'æ€»è§ˆ'],
+                  ['SIGNALS', 'ä¿¡å·'],
+                  ['AUDIT', 'å†³ç­–å®¡è®¡'],
+                  ['POSITIONS', 'ä»“ä½ä¸æ‰¹æ¬¡'],
+                  ['EVENTS', 'è¿è¡ŒåŠ¨æ€'],
+                  ['PARAMETERS', 'å‚æ•°'],
+                  ['ACCOUNT', 'è´¦æˆ·'],
                 ]
               : [
-                  ['OVERVIEW', '×ÜÀÀ'],
-                  ['PARAMETERS', '²ÎÊı'],
-                  ['ACCOUNT', 'ÕË»§'],
+                  ['OVERVIEW', 'æ€»è§ˆ'],
+                  ['PARAMETERS', 'å‚æ•°'],
+                  ['ACCOUNT', 'è´¦æˆ·'],
                 ]
             ).map(([view, label]) => {
               const replayView = view as ReplayWorkspaceView;
@@ -2205,13 +2205,13 @@ export function TTradeGlobalPage() {
             type="button"
             variant="outline"
           >
-            <WalletCards className="h-3.5 w-3.5" />T Åú´ÎÍË³ö
+            <WalletCards className="h-3.5 w-3.5" />T æ‰¹æ¬¡é€€å‡º
           </Button>
         )}
         {workspaceMode === 'REPLAY' ? (
           <span className="hidden items-center gap-1.5 text-ui-caption font-bold text-cyan-200 sm:inline-flex">
             <ShieldCheck className="h-3.5 w-3.5" />
-            ¸ôÀë»Ø²â ¡¤ ×Ô¶¯È·ÈÏ²âÊÔĞÅºÅ
+            éš”ç¦»å›æµ‹ Â· è‡ªåŠ¨ç¡®è®¤æµ‹è¯•ä¿¡å·
           </span>
         ) : (
           <>
@@ -2226,10 +2226,10 @@ export function TTradeGlobalPage() {
               )}
             >
               {(readiness?.stage || monitor?.rolloutStage) === 'LIVE'
-                ? 'LIVE ¡¤ ×Ô¶¯Ö´ĞĞ'
+                ? 'LIVE Â· è‡ªåŠ¨æ‰§è¡Œ'
                 : (readiness?.stage || monitor?.rolloutStage) === 'CANARY'
-                  ? 'CANARY ¡¤ ÈË¹¤È·ÈÏ'
-                  : `${readiness?.stage || monitor?.rolloutStage || 'SHADOW'} ¡¤ ĞÂÂòÈë¹Ø±Õ`}
+                  ? 'CANARY Â· äººå·¥ç¡®è®¤'
+                  : `${readiness?.stage || monitor?.rolloutStage || 'SHADOW'} Â· æ–°ä¹°å…¥å…³é—­`}
             </span>
             {(readiness?.stage || monitor?.rolloutStage) === 'LIVE' && (
               <Button
@@ -2240,7 +2240,7 @@ export function TTradeGlobalPage() {
                 onClick={handlePauseEntries}
                 className="hidden h-control-compact rounded-sm border-amber-400/20 px-2 text-ui-caption text-amber-200 xl:inline-flex"
               >
-                ÔİÍ£×Ô¶¯Ö´ĞĞ
+                æš‚åœè‡ªåŠ¨æ‰§è¡Œ
               </Button>
             )}
             <span
@@ -2257,11 +2257,11 @@ export function TTradeGlobalPage() {
                     : 'bg-slate-700'
                 )}
               />
-              {monitor?.enabled ? 'È«¾Ö¼à¿ØÔËĞĞÖĞ' : 'È«¾Ö¼à¿ØÒÑÍ£Ö¹'}
+              {monitor?.enabled ? 'å…¨å±€ç›‘æ§è¿è¡Œä¸­' : 'å…¨å±€ç›‘æ§å·²åœæ­¢'}
             </span>
             <span className="hidden h-4 w-px bg-white/[0.08] sm:block" />
             <span className="hidden font-mono text-ui-micro text-slate-600 sm:inline">
-              ĞĞÇé WS {graphqlWsStatus} ¡¤ ²ßÂÔÍ¶Ó°Ô¼ 10s
+              è¡Œæƒ… WS {graphqlWsStatus} Â· ç­–ç•¥æŠ•å½±çº¦ 10s
             </span>
           </>
         )}
@@ -2274,7 +2274,7 @@ export function TTradeGlobalPage() {
       {!accountId && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/15 bg-amber-400/[0.07] px-ui-section py-2.5 text-ui-label font-bold text-amber-100">
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          Î´ÅäÖÃÄ¬ÈÏ½»Ò×ÕË»§£¬ÇëÉèÖÃ»·¾³±äÁ¿ VITE_DEFAULT_ACCOUNT_ID¡£
+          æœªé…ç½®é»˜è®¤äº¤æ˜“è´¦æˆ·ï¼Œè¯·è®¾ç½®ç¯å¢ƒå˜é‡ VITE_DEFAULT_ACCOUNT_IDã€‚
         </div>
       )}
       {(monitorResult.error || monitor?.lastError) && (
@@ -2308,17 +2308,17 @@ export function TTradeGlobalPage() {
             )}
             <div>
               <div className="text-ui-label font-black text-slate-100">
-                {readinessStageLabel(readiness.status, readiness.stage)} ¡¤
-                Engine {readiness.engineStatus} ¡¤ Agent {readiness.agentStatus}
+                {readinessStageLabel(readiness.status, readiness.stage)} Â·
+                Engine {readiness.engineStatus} Â· Agent {readiness.agentStatus}
               </div>
               <div className="mt-1 text-ui-caption leading-4 text-slate-400">
                 {readiness.preparationReady && !readiness.automationReady
-                  ? `ÕË»§ÊÂÊµÒÑÊÕÁ²£»×ö T ×Ô¶¯Ö´ĞĞÈÔ¹Ø±Õ¡£ÕË»§ÊµÅÌ´°¿Ú${readiness.controlledWindowActive ? 'ÒÑ½¨Á¢' : 'Î´½¨Á¢'}£¬µ±Ç°¿ìÕÕÊ¶±ğÊÖ¹¤Î¯ÍĞ ${readiness.externalOrderCount} ±Ê¡¢³É½» ${readiness.externalTradeCount} ±Ê£¬´°¿ÚºóĞÂÔö ${readiness.newExternalOrderCount + readiness.newExternalTradeCount} ±Ê£¬»î¶¯Î¯ÍĞ ${readiness.workingExternalOrderCount} ±Ê¡£${readiness.blockedReasons[0] || ''}`
+                  ? `è´¦æˆ·äº‹å®å·²æ”¶æ•›ï¼›åš T è‡ªåŠ¨æ‰§è¡Œä»å…³é—­ã€‚è´¦æˆ·å®ç›˜çª—å£${readiness.controlledWindowActive ? 'å·²å»ºç«‹' : 'æœªå»ºç«‹'}ï¼Œå½“å‰å¿«ç…§è¯†åˆ«æ‰‹å·¥å§”æ‰˜ ${readiness.externalOrderCount} ç¬”ã€æˆäº¤ ${readiness.externalTradeCount} ç¬”ï¼Œçª—å£åæ–°å¢ ${readiness.newExternalOrderCount + readiness.newExternalTradeCount} ç¬”ï¼Œæ´»åŠ¨å§”æ‰˜ ${readiness.workingExternalOrderCount} ç¬”ã€‚${readiness.blockedReasons[0] || ''}`
                   : readiness.automationReady && !readiness.canApprove
-                    ? `ÕË»§ÊµÅÌÃÅ½ûÒÑÍ¨¹ı£»×ö T µ±Ç°´¦ÓÚ ${readiness.stage}£¬ÆôÓÃ Canary »ò LIVE ºó²ÅÔÊĞíÈ·ÈÏĞÂÂòÈë¡£`
+                    ? `è´¦æˆ·å®ç›˜é—¨ç¦å·²é€šè¿‡ï¼›åš T å½“å‰å¤„äº ${readiness.stage}ï¼Œå¯ç”¨ Canary æˆ– LIVE åæ‰å…è®¸ç¡®è®¤æ–°ä¹°å…¥ã€‚`
                     : readiness.blockedReasons.length
-                      ? readiness.blockedReasons.join('£»')
-                      : '×ö T ×Ô¶¯Ö´ĞĞÒÑÆôÓÃ£¬¿É°´µ±Ç°»Ò¶È½×¶Î´¦Àí½»Ò×¡£'}
+                      ? readiness.blockedReasons.join('ï¼›')
+                      : 'åš T è‡ªåŠ¨æ‰§è¡Œå·²å¯ç”¨ï¼Œå¯æŒ‰å½“å‰ç°åº¦é˜¶æ®µå¤„ç†äº¤æ˜“ã€‚'}
               </div>
             </div>
           </div>
@@ -2332,7 +2332,7 @@ export function TTradeGlobalPage() {
                 onClick={handlePauseEntries}
                 className="h-control-compact rounded-sm border-amber-400/20 text-ui-caption text-amber-200"
               >
-                ÔİÍ£ĞÂÂòÈë
+                æš‚åœæ–°ä¹°å…¥
               </Button>
             ) : (
               <>
@@ -2344,8 +2344,8 @@ export function TTradeGlobalPage() {
                   className="h-8 rounded-sm border-sky-400/20 text-ui-caption text-sky-200"
                 >
                   {readiness.controlledWindowActive
-                    ? '²é¿´ÕË»§½»Ò×°²È«'
-                    : 'Ç°Íù½¨Á¢ÕË»§ÊµÅÌ´°¿Ú'}
+                    ? 'æŸ¥çœ‹è´¦æˆ·äº¤æ˜“å®‰å…¨'
+                    : 'å‰å¾€å»ºç«‹è´¦æˆ·å®ç›˜çª—å£'}
                 </Button>
                 <Button
                   type="button"
@@ -2355,7 +2355,7 @@ export function TTradeGlobalPage() {
                   onClick={() => handleActivateLive(TTradeRolloutTarget.Canary)}
                   className="h-8 rounded-sm border-emerald-400/20 text-ui-caption text-emerald-200"
                 >
-                  ÆôÓÃÑÏ¸ñ Canary
+                  å¯ç”¨ä¸¥æ ¼ Canary
                 </Button>
                 <Button
                   type="button"
@@ -2364,7 +2364,7 @@ export function TTradeGlobalPage() {
                   onClick={() => handleActivateLive(TTradeRolloutTarget.Live)}
                   className="h-8 rounded-sm bg-emerald-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-emerald-400"
                 >
-                  ÆôÓÃÕıÊ½ LIVE
+                  å¯ç”¨æ­£å¼ LIVE
                 </Button>
               </>
             )}
@@ -2375,7 +2375,7 @@ export function TTradeGlobalPage() {
               onClick={() => openStudioTab('/settings/trading-safety')}
               className="h-8 rounded-sm border-rose-400/20 text-ui-caption text-rose-200"
             >
-              ÕË»§½ô¼±Í£Ö¹
+              è´¦æˆ·ç´§æ€¥åœæ­¢
             </Button>
           </div>
         </section>
@@ -2387,24 +2387,24 @@ export function TTradeGlobalPage() {
           className="flex shrink-0 items-center justify-between border-b border-amber-400/15 bg-amber-400/[0.05] px-ui-section py-2.5 text-left transition-colors hover:bg-amber-400/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400/50"
         >
           <span className="inline-flex items-center gap-2 text-ui-label font-bold text-amber-100">
-            <Activity className="h-4 w-4" />ÓĞ {pendingSessions.length}{' '}
-            ¸öÂòÈë»ú»áµÈ´ıÈË¹¤È·ÈÏ
+            <Activity className="h-4 w-4" />æœ‰ {pendingSessions.length}{' '}
+            ä¸ªä¹°å…¥æœºä¼šç­‰å¾…äººå·¥ç¡®è®¤
           </span>
           <span className="text-ui-caption font-bold text-amber-300">
-            ²é¿´ĞÅºÅ ¡ú
+            æŸ¥çœ‹ä¿¡å· â†’
           </span>
         </button>
       )}
 
       <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section py-3">
         <div>
-          <h2 className="text-ui-body font-black text-slate-100">ÊµÊ±×÷Õ½±í</h2>
+          <h2 className="text-ui-body font-black text-slate-100">å®æ—¶ä½œæˆ˜è¡¨</h2>
           <p className="mt-0.5 text-ui-caption text-slate-600">
-            ĞĞÇéÁ÷Óë²ßÂÔÁ÷¶ÀÁ¢±êÊ± ¡¤ Ä¬ÈÏ°´ĞèÒª¹Ø×¢³Ì¶ÈÅÅĞò
+            è¡Œæƒ…æµä¸ç­–ç•¥æµç‹¬ç«‹æ ‡æ—¶ Â· é»˜è®¤æŒ‰éœ€è¦å…³æ³¨ç¨‹åº¦æ’åº
           </p>
         </div>
         <div className="flex items-center gap-3 text-ui-caption font-bold text-slate-600">
-          <span>{monitor?.mode === 'live' ? 'ÊµÅÌÖ´ĞĞ' : 'Ä£Äâ¹Û²ì'}</span>
+          <span>{monitor?.mode === 'live' ? 'å®ç›˜æ‰§è¡Œ' : 'æ¨¡æ‹Ÿè§‚å¯Ÿ'}</span>
           <Button
             type="button"
             size="sm"
@@ -2414,14 +2414,14 @@ export function TTradeGlobalPage() {
             onClick={() => setShowExternalEntry(value => !value)}
           >
             <Plus className="mr-1.5 h-3.5 w-3.5" />
-            ´ÓÒÑ³ÉÎ¯ÍĞÑ¡Ôñ
+            ä»å·²æˆå§”æ‰˜é€‰æ‹©
           </Button>
           {monitorResult.fetching && !monitor ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-red-300" />
           ) : lastMonitorRefreshAt ? (
             <span
               className="font-mono font-normal text-slate-700"
-              title={`×î½üÍ¬²½£º${lastMonitorRefreshAt.toLocaleString('zh-CN', {
+              title={`æœ€è¿‘åŒæ­¥ï¼š${lastMonitorRefreshAt.toLocaleString('zh-CN', {
                 hour12: false,
               })}`}
             >
@@ -2441,11 +2441,11 @@ export function TTradeGlobalPage() {
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
                 <div>
                   <div className="text-ui-label font-black text-amber-100">
-                    ÇëÏÈÆô¶¯È«¾Ö¼à¿Ø
+                    è¯·å…ˆå¯åŠ¨å…¨å±€ç›‘æ§
                   </div>
                   <p className="mt-1 text-ui-caption leading-4 text-slate-500">
-                    Íâ²¿³É½»ĞèÒª¼ÓÈëÒ»¸öÕıÔÚÔËĞĞµÄ×ö T
-                    ²ßÂÔ£¬²ÅÄÜ³ÖĞø¶ÁÈ¡ĞĞÇé²¢´¥·¢×Ô¶¯Âô³ö¡£
+                    å¤–éƒ¨æˆäº¤éœ€è¦åŠ å…¥ä¸€ä¸ªæ­£åœ¨è¿è¡Œçš„åš T
+                    ç­–ç•¥ï¼Œæ‰èƒ½æŒç»­è¯»å–è¡Œæƒ…å¹¶è§¦å‘è‡ªåŠ¨å–å‡ºã€‚
                   </p>
                 </div>
               </div>
@@ -2459,7 +2459,7 @@ export function TTradeGlobalPage() {
                 onClick={() => persist(true)}
               >
                 <Play className="mr-1.5 h-3.5 w-3.5" />
-                Æô¶¯¼à¿ØºóÌí¼Ó
+                å¯åŠ¨ç›‘æ§åæ·»åŠ 
               </Button>
             </div>
           ) : (
@@ -2467,15 +2467,15 @@ export function TTradeGlobalPage() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div className="text-ui-label font-black text-slate-100">
-                    Ñ¡ÔñÒÑ³É½»ÂòÈëÎ¯ÍĞ
+                    é€‰æ‹©å·²æˆäº¤ä¹°å…¥å§”æ‰˜
                   </div>
                   <p className="mt-1 text-ui-caption text-slate-500">
-                    ÏÈÍ¬²½ miniQMT
-                    µ±ÈÕÎ¯ÍĞ£¬ÔÙ¶ÁÈ¡Î¯ÍĞ±í£»Ã¿¸öÒÑ³ÉÎ¯ÍĞÖ»ÄÜ½¨Á¢Ò»´Î×Ô¶¯Âô³öÅú´Î¡£
+                    å…ˆåŒæ­¥ miniQMT
+                    å½“æ—¥å§”æ‰˜ï¼Œå†è¯»å–å§”æ‰˜è¡¨ï¼›æ¯ä¸ªå·²æˆå§”æ‰˜åªèƒ½å»ºç«‹ä¸€æ¬¡è‡ªåŠ¨å–å‡ºæ‰¹æ¬¡ã€‚
                   </p>
                   {sourceOrdersSyncedAt && !sourceOrdersSyncError && (
                     <p className="mt-1 font-mono text-ui-micro text-emerald-500/70">
-                      µ±ÈÕÎ¯ÍĞÒÑÍ¬²½ ¡¤{' '}
+                      å½“æ—¥å§”æ‰˜å·²åŒæ­¥ Â·{' '}
                       {sourceOrdersSyncedAt.toLocaleTimeString('zh-CN', {
                         hour12: false,
                       })}
@@ -2498,14 +2498,14 @@ export function TTradeGlobalPage() {
                         'animate-spin motion-reduce:animate-none'
                     )}
                   />
-                  {syncSourceOrdersResult.fetching ? 'Í¬²½ÖĞ' : 'Í¬²½²¢Ë¢ĞÂ'}
+                  {syncSourceOrdersResult.fetching ? 'åŒæ­¥ä¸­' : 'åŒæ­¥å¹¶åˆ·æ–°'}
                 </Button>
               </div>
               {sourceOrdersSyncError && (
                 <div className="mt-3 flex items-start gap-2 border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-ui-caption leading-4 text-red-200">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
                   <span>
-                    {sourceOrdersSyncError}¡£µ±Ç°ÈÔÏÔÊ¾Î¯ÍĞ±íÖĞµÄÒÑÓĞ¼ÇÂ¼¡£
+                    {sourceOrdersSyncError}ã€‚å½“å‰ä»æ˜¾ç¤ºå§”æ‰˜è¡¨ä¸­çš„å·²æœ‰è®°å½•ã€‚
                   </span>
                 </div>
               )}
@@ -2515,7 +2515,7 @@ export function TTradeGlobalPage() {
                     htmlFor="t-trade-source-start"
                     className="text-ui-caption text-slate-500"
                   >
-                    ¿ªÊ¼ÈÕÆÚ
+                    å¼€å§‹æ—¥æœŸ
                   </Label>
                   <Input
                     id="t-trade-source-start"
@@ -2530,7 +2530,7 @@ export function TTradeGlobalPage() {
                     htmlFor="t-trade-source-end"
                     className="text-ui-caption text-slate-500"
                   >
-                    ½áÊøÈÕÆÚ
+                    ç»“æŸæ—¥æœŸ
                   </Label>
                   <Input
                     id="t-trade-source-end"
@@ -2580,10 +2580,10 @@ export function TTradeGlobalPage() {
                         </span>
                       </span>
                       <span className="text-right font-mono text-slate-300">
-                        {order.tradedVolume.toLocaleString()} ¹É
+                        {order.tradedVolume.toLocaleString()} è‚¡
                       </span>
                       <span className="text-right font-mono text-slate-300">
-                        £¤{formatNumber(order.tradedPrice, 3)}
+                        Â¥{formatNumber(order.tradedPrice, 3)}
                       </span>
                       <span
                         className={cn(
@@ -2594,7 +2594,7 @@ export function TTradeGlobalPage() {
                         )}
                       >
                         {imported
-                          ? 'ÒÑÄÉÈë'
+                          ? 'å·²çº³å…¥'
                           : new Date(order.time).toLocaleDateString('zh-CN')}
                       </span>
                     </label>
@@ -2603,7 +2603,7 @@ export function TTradeGlobalPage() {
                 {!sourceOrdersResult.fetching &&
                   sourceBuyOrders.length === 0 && (
                     <div className="px-3 py-ui-panel text-center text-ui-caption text-slate-600">
-                      ËùÑ¡ÈÕÆÚ·¶Î§ÄÚÃ»ÓĞÒÑ³É½»ÂòÈëÎ¯ÍĞ
+                      æ‰€é€‰æ—¥æœŸèŒƒå›´å†…æ²¡æœ‰å·²æˆäº¤ä¹°å…¥å§”æ‰˜
                     </div>
                   )}
               </div>
@@ -2617,7 +2617,7 @@ export function TTradeGlobalPage() {
                     }
                     className="mt-0.5 h-3.5 w-3.5 accent-amber-400"
                   />
-                  ÎÒÈ·ÈÏ½«ËùÑ¡ÒÑ³É½»ÂòÈëÎ¯ÍĞÄÉÈëµ±Ç°ÒÑÆôÓÃµÄ×Ô¶¯ÍË³ö¹æÔò¡£
+                  æˆ‘ç¡®è®¤å°†æ‰€é€‰å·²æˆäº¤ä¹°å…¥å§”æ‰˜çº³å…¥å½“å‰å·²å¯ç”¨çš„è‡ªåŠ¨é€€å‡ºè§„åˆ™ã€‚
                 </label>
                 <Button
                   type="button"
@@ -2632,7 +2632,7 @@ export function TTradeGlobalPage() {
                   {importResult.fetching && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                   )}
-                  ÄÉÈë×Ô¶¯Âô³ö
+                  çº³å…¥è‡ªåŠ¨å–å‡º
                 </Button>
               </div>
             </>
@@ -2802,7 +2802,7 @@ export function TTradeGlobalPage() {
             className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none"
             aria-hidden="true"
           />
-          ÕıÔÚ¼ÓÔØÕæÊµĞÅºÅ¡­
+          æ­£åœ¨åŠ è½½çœŸå®ä¿¡å·â€¦
         </div>
       }
     >
@@ -2813,9 +2813,9 @@ export function TTradeGlobalPage() {
         candidateTrace={candidateTraceForUi}
         candidateTraceError={
           candidateTraceIdentityMismatch
-            ? 'ºòÑ¡×·ËİÏìÓ¦Éí·İ²»Ò»ÖÂ£¬ÒÑ×èÖ¹Õ¹Ê¾'
+            ? 'å€™é€‰è¿½æº¯å“åº”èº«ä»½ä¸ä¸€è‡´ï¼Œå·²é˜»æ­¢å±•ç¤º'
             : candidateTraceResult.error
-              ? 'ºòÑ¡×·ËİÔİ²»¿ÉÓÃ£¬ÇëÉÔºóÖØÊÔ'
+              ? 'å€™é€‰è¿½æº¯æš‚ä¸å¯ç”¨ï¼Œè¯·ç¨åé‡è¯•'
               : undefined
         }
         candidateTraceLoading={candidateTraceResult.fetching}
@@ -2878,7 +2878,7 @@ export function TTradeGlobalPage() {
             className="mt-0.5 h-3.5 w-3.5 shrink-0"
             aria-hidden="true"
           />
-          ÅäÖÃ¶ÁÈ¡Ê§°Ü£»µ±Ç°±íµ¥¿ÉÄÜÊÇÉÏ´Î³É¹¦¶ÁÈ¡µÄ²İ¸å£¬±£´æÒÑÔİÍ££¬ÇëÏÈË¢ĞÂ¡£
+          é…ç½®è¯»å–å¤±è´¥ï¼›å½“å‰è¡¨å•å¯èƒ½æ˜¯ä¸Šæ¬¡æˆåŠŸè¯»å–çš„è‰ç¨¿ï¼Œä¿å­˜å·²æš‚åœï¼Œè¯·å…ˆåˆ·æ–°ã€‚
         </div>
       )}
       {!monitorResult.error && monitorResult.fetching && (
@@ -2891,30 +2891,30 @@ export function TTradeGlobalPage() {
             className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
             aria-hidden="true"
           />
-          ÕıÔÚË¢ĞÂÅäÖÃ°æ±¾¡­
+          æ­£åœ¨åˆ·æ–°é…ç½®ç‰ˆæœ¬â€¦
         </div>
       )}
       <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section py-3">
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-ui-body font-black text-slate-100">
-              È«¾Ö²ßÂÔ²ÎÊı
+              å…¨å±€ç­–ç•¥å‚æ•°
             </h2>
             {draftDirty && (
               <span
                 role="status"
                 className="rounded-sm border border-primary/20 bg-primary/10 px-1.5 py-0.5 text-ui-micro font-semibold text-blue-200"
               >
-                ÒÑĞŞ¸Ä
+                å·²ä¿®æ”¹
               </span>
             )}
           </div>
           <p className="mt-0.5 text-ui-caption text-slate-600">
-            ¶ÔÕË»§ÄÚËùÓĞÎ´ºöÂÔµÄºÏ¸ñ³Ö²ÖÍ³Ò»ÉúĞ§
+            å¯¹è´¦æˆ·å†…æ‰€æœ‰æœªå¿½ç•¥çš„åˆæ ¼æŒä»“ç»Ÿä¸€ç”Ÿæ•ˆ
           </p>
         </div>
         <span className="font-mono text-ui-caption text-slate-600">
-          ÅäÖÃ°æ±¾ v{monitor?.configVersion ?? 0}
+          é…ç½®ç‰ˆæœ¬ v{monitor?.configVersion ?? 0}
         </span>
       </div>
 
@@ -2925,14 +2925,14 @@ export function TTradeGlobalPage() {
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.05] pb-3">
               <div>
                 <div className="text-ui-label font-black text-slate-200">
-                  V3 ÓĞ×´Ì¬ĞÅºÅ¹æÔò
+                  V3 æœ‰çŠ¶æ€ä¿¡å·è§„åˆ™
                 </div>
                 <div className="mt-1 text-ui-caption text-slate-600">
-                  Òò¹û´°¿Ú¡¢Ë« FSM¡¢¿É½âÊÍÆÀ·Ö¡¢Ó²ÃÅ½ûÓë episode ·ÀÖØ¸´
+                  å› æœçª—å£ã€åŒ FSMã€å¯è§£é‡Šè¯„åˆ†ã€ç¡¬é—¨ç¦ä¸ episode é˜²é‡å¤
                 </div>
               </div>
               <div className="font-mono text-ui-micro text-slate-600">
-                {monitor?.signalPolicy.policyVersion || 'µÈ´ı²ßÂÔ°æ±¾'} ¡¤
+                {monitor?.signalPolicy.policyVersion || 'ç­‰å¾…ç­–ç•¥ç‰ˆæœ¬'} Â·
                 feature {monitor?.signalPolicy.featureSchemaVersion || '--'}
               </div>
             </div>
@@ -2940,15 +2940,15 @@ export function TTradeGlobalPage() {
             <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
               <NumericField
                 id="t-trade-deviation"
-                label="È·ÈÏ¼ÛÆ«Àë"
+                label="ç¡®è®¤ä»·åç¦»"
                 suffix="%"
                 value={form.maxPriceDeviationPct}
                 onChange={value => setField('maxPriceDeviationPct', value)}
               />
               <NumericField
                 id="t-trade-cooldown"
-                label="Åú´ÎÀäÈ´Ê±¼ä"
-                suffix="Ãë"
+                label="æ‰¹æ¬¡å†·å´æ—¶é—´"
+                suffix="ç§’"
                 value={form.cooldownSeconds}
                 onChange={value => setField('cooldownSeconds', value)}
               />
@@ -2971,10 +2971,10 @@ export function TTradeGlobalPage() {
                 htmlFor="t-trade-ignore-code"
                 className="text-ui-label font-bold text-slate-300"
               >
-                ºöÂÔ¹ÉÆ±´úÂë
+                å¿½ç•¥è‚¡ç¥¨ä»£ç 
               </Label>
               <p className="mt-1 text-ui-caption text-slate-600">
-                ºöÂÔÃûµ¥ÊôÓÚÍâ²¿·¢ÒâÍ¼ÃÅ½û£¬²»¸Ä±ä·şÎñ¶ËÈı²ãĞÅºÅ×´Ì¬¡£
+                å¿½ç•¥åå•å±äºå¤–éƒ¨å‘æ„å›¾é—¨ç¦ï¼Œä¸æ”¹å˜æœåŠ¡ç«¯ä¸‰å±‚ä¿¡å·çŠ¶æ€ã€‚
               </p>
               <div className="mt-3 flex gap-2">
                 <Input
@@ -2987,7 +2987,7 @@ export function TTradeGlobalPage() {
                       handleAddIgnore();
                     }
                   }}
-                  placeholder="ÀıÈç 600000 »ò 600000.SH"
+                  placeholder="ä¾‹å¦‚ 600000 æˆ– 600000.SH"
                   className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-ui-label focus-visible:ring-red-500/60"
                 />
                 <Button
@@ -2998,13 +2998,13 @@ export function TTradeGlobalPage() {
                   disabled={!ignoreInput.trim() || actionLoading}
                   onClick={handleAddIgnore}
                 >
-                  Ìí¼Ó
+                  æ·»åŠ 
                 </Button>
               </div>
               <div className="mt-3 flex min-h-8 flex-wrap gap-1.5">
                 {ignoredCodes.length === 0 ? (
                   <span className="text-ui-caption text-slate-700">
-                    µ±Ç°Î´ºöÂÔÈÎºÎ¹ÉÆ±
+                    å½“å‰æœªå¿½ç•¥ä»»ä½•è‚¡ç¥¨
                   </span>
                 ) : (
                   ignoredCodes.map(code => (
@@ -3014,7 +3014,7 @@ export function TTradeGlobalPage() {
                       disabled={actionLoading}
                       onClick={() => handleIgnore(code, false)}
                       className="inline-flex items-center gap-1 border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-ui-caption text-slate-400 outline-none transition-colors hover:border-rose-400/30 hover:text-rose-200 focus-visible:ring-2 focus-visible:ring-red-500/60"
-                      aria-label={'´ÓºöÂÔÃûµ¥ÒÆ³ı ' + code}
+                      aria-label={'ä»å¿½ç•¥åå•ç§»é™¤ ' + code}
                     >
                       {code}
                       <X className="h-3 w-3" />
@@ -3034,15 +3034,15 @@ export function TTradeGlobalPage() {
               onChange={event => setField('acknowledged', event.target.checked)}
               className="mt-0.5 h-4 w-4 shrink-0 accent-amber-400"
             />
-            ÎÒÈ·ÈÏËùÓĞ³Ö²ÖĞÎ³É T
-            Åú´Îºó£¬µ±Ç°ÒÑÆôÓÃµÄÍË³ö¹æÔò¿É×Ô¶¯Ìá½»ÊµÅÌÂôµ¥¡£
+            æˆ‘ç¡®è®¤æ‰€æœ‰æŒä»“å½¢æˆ T
+            æ‰¹æ¬¡åï¼Œå½“å‰å·²å¯ç”¨çš„é€€å‡ºè§„åˆ™å¯è‡ªåŠ¨æäº¤å®ç›˜å–å•ã€‚
           </label>
         )}
       </div>
 
       <div className="flex shrink-0 items-center justify-between border-t border-white/[0.06] bg-[#091322] px-ui-section py-3">
         <div className="text-ui-caption text-slate-600">
-          ±£´æºóÁ¢¼´Ó¦ÓÃÓÚµ±Ç°ÕË»§µÄµ¥Ò» T ²ßÂÔÔËĞĞ
+          ä¿å­˜åç«‹å³åº”ç”¨äºå½“å‰è´¦æˆ·çš„å•ä¸€ T ç­–ç•¥è¿è¡Œ
         </div>
         <Button
           type="button"
@@ -3064,7 +3064,7 @@ export function TTradeGlobalPage() {
           ) : (
             <Save className="mr-2 h-4 w-4" />
           )}
-          ±£´æÈ«¾ÖÉèÖÃ
+          ä¿å­˜å…¨å±€è®¾ç½®
         </Button>
       </div>
     </div>
@@ -3077,9 +3077,9 @@ export function TTradeGlobalPage() {
         <TTradePanelBoundary
           name={
             workspaceMode === 'REPLAY'
-              ? '»Ø·Å²âÊÔ'
+              ? 'å›æ”¾æµ‹è¯•'
               : (tTradeModes.find(mode => mode.id === activeMode)?.label ??
-                '×ö T Ãæ°å')
+                'åš T é¢æ¿')
           }
         >
           {workspaceMode === 'REPLAY' ? (
@@ -3149,19 +3149,19 @@ export function TTradeGlobalPage() {
               )}
             />
             {workspaceMode === 'REPLAY'
-              ? 'ÀúÊ·»Ø·Å²âÊÔÄ£Ê½'
+              ? 'å†å²å›æ”¾æµ‹è¯•æ¨¡å¼'
               : monitor?.enabled
-                ? 'È«¾Ö¼à¿ØÔËĞĞÖĞ'
-                : 'È«¾Ö¼à¿ØÒÑÍ£Ö¹'}
+                ? 'å…¨å±€ç›‘æ§è¿è¡Œä¸­'
+                : 'å…¨å±€ç›‘æ§å·²åœæ­¢'}
           </span>
           <span className="text-slate-700">|</span>
-          <span className="font-mono">{accountId || 'Î´ÅäÖÃÕË»§'}</span>
+          <span className="font-mono">{accountId || 'æœªé…ç½®è´¦æˆ·'}</span>
           {workspaceMode === 'REALTIME' && (
             <>
               <span className="text-slate-700">|</span>
               <span className="inline-flex items-center gap-1.5">
                 <Clock3 className="h-3 w-3" />
-                ×î½üÍ¬²½ {formatTime(monitor?.lastReconciledAt)}
+                æœ€è¿‘åŒæ­¥ {formatTime(monitor?.lastReconciledAt)}
               </span>
             </>
           )}
@@ -3172,23 +3172,23 @@ export function TTradeGlobalPage() {
           <>
             <span>BACKTEST Broker</span>
             <span className="text-slate-700">|</span>
-            <span>×î³¤ 20 ¸ö½»Ò×ÈÕ</span>
+            <span>æœ€é•¿ 20 ä¸ªäº¤æ˜“æ—¥</span>
             <span className="text-slate-700">|</span>
-            <span>ÊµÊ±¼à¿Ø»¥²»Ó°Ïì</span>
+            <span>å®æ—¶ç›‘æ§äº’ä¸å½±å“</span>
           </>
         ) : (
           <>
             <span className="font-mono">
-              ÔËĞĞ {monitor?.strategyRunId?.slice(0, 8) || '--'}
+              è¿è¡Œ {monitor?.strategyRunId?.slice(0, 8) || '--'}
             </span>
             <span className="text-slate-700">|</span>
             <span>
-              ±êµÄ v{monitor?.universeRevision ?? 0} ¡¤ ÅäÖÃ v
+              æ ‡çš„ v{monitor?.universeRevision ?? 0} Â· é…ç½® v
               {monitor?.configVersion ?? 0}
             </span>
             <span className="text-slate-700">|</span>
             <span>
-              ´ıÈ·ÈÏ {monitor?.pendingSignalCount ?? 0} ¡¤ »îÔ¾{' '}
+              å¾…ç¡®è®¤ {monitor?.pendingSignalCount ?? 0} Â· æ´»è·ƒ{' '}
               {monitor?.activeBatchCount ?? 0}
             </span>
           </>
@@ -3197,7 +3197,7 @@ export function TTradeGlobalPage() {
       theme={{
         icon: workspaceMode === 'REPLAY' ? FlaskConical : Radar,
         name: 'blue',
-        title: workspaceMode === 'REPLAY' ? '×öT»Ø·Å²âÊÔ' : '×öTÖúÊÖ',
+        title: workspaceMode === 'REPLAY' ? 'åšTå›æ”¾æµ‹è¯•' : 'åšTåŠ©æ‰‹',
       }}
     />
   );

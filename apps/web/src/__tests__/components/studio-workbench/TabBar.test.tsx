@@ -6,7 +6,7 @@ import { TabBar, type StudioTab } from '@/components/studio-workbench';
 function buildTabs(count: number): StudioTab[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `tab-${index + 1}`,
-    name: `±êÇ© ${index + 1}`,
+    name: `æ ‡ç­¾ ${index + 1}`,
     type: 'test',
   }));
 }
@@ -27,7 +27,7 @@ describe('TabBar', () => {
     );
 
     expect(onTabPreload).not.toHaveBeenCalled();
-    const target = screen.getByRole('tab', { name: '±êÇ© 2' });
+    const target = screen.getByRole('tab', { name: 'æ ‡ç­¾ 2' });
     fireEvent.mouseEnter(target);
     fireEvent.focus(target);
     expect(onTabPreload.mock.calls).toEqual([['tab-2'], ['tab-2']]);
@@ -48,9 +48,9 @@ describe('TabBar', () => {
       />
     );
 
-    const firstTab = screen.getByRole('tab', { name: '±êÇ© 1' });
+    const firstTab = screen.getByRole('tab', { name: 'æ ‡ç­¾ 1' });
     const tabBar = screen.getByTestId('studio-tab-bar');
-    expect(screen.getByRole('tablist', { name: '¹¤×÷Çø±êÇ©' })).toBeVisible();
+    expect(screen.getByRole('tablist', { name: 'å·¥ä½œåŒºæ ‡ç­¾' })).toBeVisible();
     expect(tabBar).toHaveClass('bg-[#07111f]');
     expect(tabBar).toHaveStyle({ height: '40px' });
     expect(firstTab.parentElement).toHaveStyle({
@@ -60,9 +60,9 @@ describe('TabBar', () => {
     expect(
       screen.queryByTestId('studio-workspace-tab-connector')
     ).not.toBeInTheDocument();
-    expect(firstTab).toHaveAttribute('title', '±êÇ© 1');
+    expect(firstTab).toHaveAttribute('title', 'æ ‡ç­¾ 1');
     expect(
-      screen.getByRole('tab', { name: '±êÇ© 2' }).parentElement
+      screen.getByRole('tab', { name: 'æ ‡ç­¾ 2' }).parentElement
     ).toHaveClass('hover:border-white/5');
     expect(firstTab).toHaveAttribute('aria-selected', 'true');
 
@@ -76,7 +76,7 @@ describe('TabBar', () => {
     render(
       <TabBar
         activeTabId="tab-1"
-        createTooltip="´ò¿ªÐÐÇé¹¤×÷Ì¨"
+        createTooltip="æ‰“å¼€è¡Œæƒ…å·¥ä½œå°"
         onTabChange={vi.fn()}
         onTabClose={vi.fn()}
         onTabCreate={onTabCreate}
@@ -85,7 +85,7 @@ describe('TabBar', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '´ò¿ªÐÐÇé¹¤×÷Ì¨' }));
+    fireEvent.click(screen.getByRole('button', { name: 'æ‰“å¼€è¡Œæƒ…å·¥ä½œå°' }));
     expect(onTabCreate).toHaveBeenCalledTimes(1);
   });
 
@@ -105,7 +105,7 @@ describe('TabBar', () => {
       />
     );
 
-    const fixedTab = screen.getByRole('tab', { name: '±êÇ© 1' });
+    const fixedTab = screen.getByRole('tab', { name: 'æ ‡ç­¾ 1' });
     expect(screen.getAllByRole('tab')[0]).toBe(fixedTab);
     expect(fixedTab.parentElement).toHaveAttribute(
       'data-studio-fixed-tab',
@@ -116,7 +116,7 @@ describe('TabBar', () => {
     expect(fixedRegion).toContainElement(fixedTab);
     expect(scrollableRegion).not.toContainElement(fixedTab);
     expect(scrollableRegion).toContainElement(
-      screen.getByRole('tab', { name: '±êÇ© 2' })
+      screen.getByRole('tab', { name: 'æ ‡ç­¾ 2' })
     );
     expect(fixedRegion).toHaveClass('shrink-0');
     expect(fixedRegion).not.toHaveClass('bg-[#07111f]');
@@ -129,9 +129,9 @@ describe('TabBar', () => {
       paddingLeft: '9px',
     });
     expect(
-      screen.queryByRole('button', { name: '¹Ø±Õ ±êÇ© 1' })
+      screen.queryByRole('button', { name: 'å…³é—­ æ ‡ç­¾ 1' })
     ).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '¹Ø±Õ ±êÇ© 2' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'å…³é—­ æ ‡ç­¾ 2' })).toBeVisible();
 
     fireEvent.keyDown(fixedTab, { key: 'Delete' });
     expect(onTabClose).not.toHaveBeenCalled();
@@ -140,12 +140,12 @@ describe('TabBar', () => {
     expect(onTabChange).toHaveBeenCalledWith('tab-2');
 
     fireEvent.contextMenu(fixedTab);
-    expect(screen.getByRole('menuitem', { name: '¹Ø±Õ' })).toBeDisabled();
-    expect(screen.getByRole('menuitem', { name: '¹Ø±ÕÆäËû' })).toBeEnabled();
-    expect(screen.getByRole('menuitem', { name: '¹Ø±ÕÓÒ²à' })).toBeEnabled();
-    expect(screen.getByRole('menuitem', { name: '¹Ø±ÕÈ«²¿' })).toBeEnabled();
+    expect(screen.getByRole('menuitem', { name: 'å…³é—­' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: 'å…³é—­å…¶ä»–' })).toBeEnabled();
+    expect(screen.getByRole('menuitem', { name: 'å…³é—­å³ä¾§' })).toBeEnabled();
+    expect(screen.getByRole('menuitem', { name: 'å…³é—­å…¨éƒ¨' })).toBeEnabled();
 
-    fireEvent.click(screen.getByRole('menuitem', { name: '¹Ø±ÕÓÒ²à' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'å…³é—­å³ä¾§' }));
     expect(onTabClose).toHaveBeenCalledTimes(1);
     expect(onTabClose).toHaveBeenCalledWith('tab-2');
   });
@@ -163,8 +163,8 @@ describe('TabBar', () => {
     );
 
     const tabBar = screen.getByTestId('studio-tab-bar');
-    const tab = screen.getByRole('tab', { name: '±êÇ© 1' });
-    const inactiveTab = screen.getByRole('tab', { name: '±êÇ© 2' });
+    const tab = screen.getByRole('tab', { name: 'æ ‡ç­¾ 1' });
+    const inactiveTab = screen.getByRole('tab', { name: 'æ ‡ç­¾ 2' });
     expect(tabBar).toHaveAttribute('data-variant', 'workspace');
     expect(tabBar).toHaveClass(
       'studio-shell-tabbar',
@@ -172,10 +172,10 @@ describe('TabBar', () => {
       'bg-transparent'
     );
     expect(tabBar).toHaveStyle({ height: '100%' });
-    expect(screen.getByRole('tablist', { name: '¹¤×÷Çø±êÇ©' })).toHaveClass(
+    expect(screen.getByRole('tablist', { name: 'å·¥ä½œåŒºæ ‡ç­¾' })).toHaveClass(
       'px-ui-section'
     );
-    expect(screen.getByRole('tablist', { name: '¹¤×÷Çø±êÇ©' })).toHaveStyle({
+    expect(screen.getByRole('tablist', { name: 'å·¥ä½œåŒºæ ‡ç­¾' })).toHaveStyle({
       height: 'calc(100% + 1px)',
       marginBottom: '-1px',
       paddingBottom: '1px',
@@ -281,10 +281,10 @@ describe('TabBar', () => {
       />
     );
 
-    const tablist = screen.getByRole('tablist', { name: '¹¤×÷Çø±êÇ©' });
+    const tablist = screen.getByRole('tablist', { name: 'å·¥ä½œåŒºæ ‡ç­¾' });
     expect(screen.getAllByRole('tab')).toHaveLength(10);
-    expect(screen.getByRole('tab', { name: '±êÇ© 8' })).toBeVisible();
-    expect(screen.getByRole('tab', { name: '±êÇ© 10' })).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'æ ‡ç­¾ 8' })).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'æ ‡ç­¾ 10' })).toBeVisible();
     expect(tablist).toHaveClass(
       'overflow-x-auto',
       'overscroll-x-contain',
@@ -309,7 +309,7 @@ describe('TabBar', () => {
 
     const tabList = screen.getByTestId('studio-scrollable-tab-region');
     const activeTab = screen.getByRole('tab', {
-      name: '±êÇ© 3',
+      name: 'æ ‡ç­¾ 3',
     }).parentElement!;
     Object.defineProperty(tabList, 'clientWidth', {
       configurable: true,
@@ -346,8 +346,8 @@ describe('TabBar', () => {
 
     const tabList = screen.getByTestId('studio-scrollable-tab-region');
     const fixedRegion = screen.getByTestId('studio-fixed-tab-region');
-    const fixedTab = screen.getByRole('tab', { name: '±êÇ© 1' });
-    const scrollingTab = screen.getByRole('tab', { name: '±êÇ© 10' });
+    const fixedTab = screen.getByRole('tab', { name: 'æ ‡ç­¾ 1' });
+    const scrollingTab = screen.getByRole('tab', { name: 'æ ‡ç­¾ 10' });
     tabList.scrollLeft = 360;
 
     fireEvent(window, new Event('resize'));
@@ -374,10 +374,10 @@ describe('TabBar', () => {
     );
 
     const fixedTabElement = screen.getByRole('tab', {
-      name: '±êÇ© 1',
+      name: 'æ ‡ç­¾ 1',
     }).parentElement!;
     const regularTabElement = screen.getByRole('tab', {
-      name: '±êÇ© 3',
+      name: 'æ ‡ç­¾ 3',
     }).parentElement!;
 
     expect(fixedTabElement.className).toBe(regularTabElement.className);
@@ -401,7 +401,7 @@ describe('TabBar', () => {
             id: 'preview',
             isPreview: true,
             isPreviewable: true,
-            name: '¸ö¹É 601318.SH',
+            name: 'ä¸ªè‚¡ 601318.SH',
             type: 'test',
           },
         ]}
@@ -411,7 +411,7 @@ describe('TabBar', () => {
 
     fireEvent.doubleClick(
       screen.getByRole('tab', {
-        name: '¸ö¹É 601318.SH',
+        name: 'ä¸ªè‚¡ 601318.SH',
       })
     );
     expect(onTabPin).toHaveBeenCalledWith('preview', true);
