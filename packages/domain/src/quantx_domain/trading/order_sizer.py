@@ -78,6 +78,18 @@ class OrderSizer:
       sized_volume = self.rules.normalize_buy_volume(raw_target_volume)
       if sized_volume != raw_target_volume:
         reason_codes.append("BUY_LOT_NORMALIZED")
+      if str(metadata.get("t_trade_role") or "").lower() == "entry":
+        # Positive T must be exit-capable using old shares under T+1. This is
+        # an execution fact supplied by the portfolio, never strategy metadata.
+        holding = dict(position or {})
+        capacity = max(0, int(holding.get("t_trade_exit_capacity", max(
+          0, int(holding.get("available_volume", 0))
+          - int(holding.get("locked_core_available_volume", 0)),
+        ))))
+        capped = min(sized_volume, self.rules.normalize_buy_volume(capacity))
+        if capped != sized_volume:
+          reason_codes.append("T_TRADE_OLD_INVENTORY_CAP")
+        sized_volume = capped
     elif order_type == OrderType.SELL:
       available = int((position or {}).get("available_volume", 0) or 0)
       if (

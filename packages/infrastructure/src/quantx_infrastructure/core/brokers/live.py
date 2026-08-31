@@ -2,7 +2,6 @@
 实盘 Broker - 对接 XTQuant 真实交易
 """
 
-import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -56,7 +55,6 @@ class LiveBroker(BrokerBase):
 
     # 连接状态
     self.is_connected = False
-    self._monitor_task: Optional[asyncio.Task] = None
 
     self.logger = logging.getLogger("LiveBroker")
 
@@ -82,13 +80,6 @@ class LiveBroker(BrokerBase):
         f"可用资金: {account.cash:.2f}"
       )
 
-      # 启动订单状态监控，并由 Broker 显式拥有其生命周期。
-      if self._monitor_task is None or self._monitor_task.done():
-        self._monitor_task = asyncio.create_task(
-          self._monitor_orders(),
-          name=f"live-broker-monitor:{self.account_id}",
-        )
-
       return True
 
     except Exception as e:
@@ -98,12 +89,6 @@ class LiveBroker(BrokerBase):
   async def disconnect(self) -> None:
     """断开连接"""
     self.is_connected = False
-    monitor_task = self._monitor_task
-    self._monitor_task = None
-    if monitor_task is not None and monitor_task is not asyncio.current_task():
-      if not monitor_task.done():
-        monitor_task.cancel()
-      await asyncio.gather(monitor_task, return_exceptions=True)
     self.logger.info("实盘 Broker 断开连接")
 
   async def place_order(self, request: OrderRequest) -> OrderResponse:
@@ -261,95 +246,89 @@ class LiveBroker(BrokerBase):
 
     return None
 
-  async def get_position(self, instrument_code: str = None) -> Dict[str, Position]:
-    """查询持仓"""
+  async def get_portfolio_snapshot(self) -> tuple[AccountInfo, set[str]]:
+    """Read cash, positions and reservation coverage from one complete snapshot."""
+    from quantx_domain.clock import to_naive_utc, utcnow
+    from sqlalchemy import select
+
+    from quantx_infrastructure.database import AsyncSessionLocal
+    from quantx_infrastructure.models.agent_runtime import (
+      AccountExecutionControl,
+      PendingTradeOrder,
+    )
+    from quantx_infrastructure.services.account_capacity_service import (
+      load_authoritative_account_snapshot,
+    )
+
     if not self.is_connected:
-      return {}
-
-    try:
-      # 获取所有持仓
-      positions = await self.trading_service.position_service.get_positions(
-        account_id=self.account_id
+      raise AgentUnavailableError("LIVE_ACCOUNT_SNAPSHOT_DISCONNECTED")
+    async with AsyncSessionLocal() as db:
+      control = await db.get(AccountExecutionControl, self.account_id)
+      if control is None or control.last_snapshot_at is None:
+        raise AgentUnavailableError("LIVE_ACCOUNT_SNAPSHOT_UNAVAILABLE")
+      age = (utcnow() - to_naive_utc(control.last_snapshot_at)).total_seconds()
+      if control.reconcile_status != "READY" or not 0 <= age <= 90:
+        raise AgentUnavailableError("LIVE_ACCOUNT_SNAPSHOT_NOT_READY")
+      payload = await load_authoritative_account_snapshot(db, control)
+      observed = {
+        str(item.get("order_id") or item.get("broker_order_id") or "")
+        for item in payload.get("orders", [])
+        if item.get("account_id") == self.account_id
+      } - {""}
+      observed_clients = {
+        str(item.get("client_order_id") or "")
+        for item in payload.get("orders", [])
+        if item.get("account_id") == self.account_id
+      } - {""}
+      pending = list((await db.scalars(select(PendingTradeOrder).where(
+        PendingTradeOrder.account_id == self.account_id,
+        PendingTradeOrder.execution_mode == "live",
+        (PendingTradeOrder.broker_order_id.in_(observed)
+         | PendingTradeOrder.client_order_id.in_(observed_clients)),
+      ))).all())
+      covered_ids = {
+        str(value) for item in pending
+        for value in (item.strategy_order_id, item.client_order_id, item.broker_order_id)
+        if value
+      }
+      snapshot_at = control.last_snapshot_at
+    raw_account = next(item for item in payload["accounts"] if item["account_id"] == self.account_id)
+    positions = {}
+    for item in payload["positions_by_account"][self.account_id]:
+      code = str(item["stock_code"])
+      volume = max(0, int(item.get("volume") or 0))
+      if volume == 0:
+        continue
+      available = max(0, int(item.get("can_use_volume") or 0))
+      average = float(item.get("avg_price") or 0)
+      market_value = float(item.get("market_value") or 0)
+      last_price = float(item.get("last_price") or market_value / volume)
+      positions[code] = Position(
+        instrument_code=code, long_volume=volume, available_volume=available,
+        frozen_volume=max(0, int(item.get("frozen_volume") or 0)),
+        today_buy_volume=max(0, volume - int(item.get("yesterday_volume") or 0)),
+        long_avg_price=average, last_price=last_price, market_value=market_value,
+        pnl=(last_price - average) * volume,
       )
+    total_asset = float(raw_account["total_asset"])
+    return AccountInfo(
+      account_id=self.account_id, total_asset=total_asset,
+      cash=float(raw_account["cash"]), frozen_cash=float(raw_account.get("frozen_cash") or 0),
+      market_value=float(raw_account.get("market_value") or 0),
+      total_pnl=total_asset - self.initial_capital, daily_pnl=0,
+      positions=positions, last_update_time=snapshot_at,
+    ), covered_ids
 
-      result = {}
-      for pos in positions:
-        if instrument_code and pos.stock_code != instrument_code:
-          continue
-
-        volume = int(pos.volume or 0)
-        available_volume = int(pos.can_use_volume or 0)
-        avg_price = float(pos.avg_price or 0.0)
-        market_value = float(pos.market_value or 0.0)
-        last_price = float(getattr(pos, "last_price", 0.0) or 0.0)
-        if last_price <= 0 and volume > 0:
-          last_price = market_value / volume
-        pnl = (last_price - avg_price) * volume if volume > 0 else 0.0
-        cost = avg_price * volume
-
-        position = Position(
-          instrument_code=pos.stock_code,
-          long_volume=volume,
-          available_volume=available_volume,
-          frozen_volume=int(pos.frozen_volume or max(0, volume - available_volume)),
-          today_buy_volume=max(0, volume - int(pos.yesterday_volume or 0)),
-          long_avg_price=avg_price,
-          market_value=market_value,
-          pnl=pnl,
-          pnl_percent=(pnl / cost * 100.0) if cost > 0 else 0.0,
-          last_price=last_price,
-        )
-        result[pos.stock_code] = position
-
-      return result
-
-    except Exception as e:
-      self.logger.error(f"查询持仓失败: {e}")
-      return {}
+  async def get_position(self, instrument_code: str = None) -> Dict[str, Position]:
+    account, _covered = await self.get_portfolio_snapshot()
+    return {
+      code: position for code, position in account.positions.items()
+      if instrument_code is None or code == instrument_code
+    }
 
   async def get_account(self) -> AccountInfo:
-    """查询账户信息"""
-    if not self.is_connected:
-      return AccountInfo(
-        account_id=self.account_id,
-        total_asset=0,
-        cash=0,
-        frozen_cash=0,
-        market_value=0,
-        total_pnl=0,
-        daily_pnl=0,
-      )
-
-    try:
-      account = await self.trading_service.get_account_info(realtime=True)
-
-      # 获取持仓
-      positions = await self.get_position()
-      total_asset = float(account.total_asset or 0.0)
-
-      return AccountInfo(
-        account_id=account.account_id,
-        total_asset=total_asset,
-        cash=float(account.cash or 0.0),
-        frozen_cash=float(account.frozen_cash or 0.0),
-        market_value=float(account.market_value or 0.0),
-        total_pnl=total_asset - self.initial_capital,
-        daily_pnl=0,  # 需要额外计算
-        positions=positions,
-        last_update_time=time_utils.now(),
-      )
-
-    except Exception as e:
-      self.logger.error(f"查询账户失败: {e}")
-      return AccountInfo(
-        account_id=self.account_id,
-        total_asset=0,
-        cash=0,
-        frozen_cash=0,
-        market_value=0,
-        total_pnl=0,
-        daily_pnl=0,
-      )
+    account, _covered = await self.get_portfolio_snapshot()
+    return account
 
   async def get_trades(
     self, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None
@@ -414,93 +393,6 @@ class LiveBroker(BrokerBase):
         }
 
     return {"passed": True, "reason": ""}
-
-  async def _monitor_orders(self) -> None:
-    """监控订单状态"""
-    while self.is_connected:
-      try:
-        # 查询所有活动订单
-        for internal_id, order in self.orders.items():
-          if order.status in [OrderStatus.SUBMITTED, OrderStatus.PARTIAL_FILLED]:
-            client_order_id = self.order_id_mapping.get(internal_id)
-            if client_order_id:
-              # 查询外部订单状态
-              await self._update_order_status(internal_id, client_order_id)
-
-        await asyncio.sleep(1)  # 每秒检查一次
-
-      except Exception as e:
-        self.logger.error(f"订单监控异常: {e}")
-        await asyncio.sleep(5)
-
-  async def _update_order_status(
-    self,
-    internal_id: str,
-    client_order_id: str,
-  ) -> None:
-    """更新订单状态"""
-    try:
-      # 查询外部订单
-      external_order = await self.trading_service.order_for_client_order(
-        client_order_id
-      )
-
-      if external_order:
-        internal_order = self.orders[internal_id]
-        old_status = internal_order.status
-        old_filled_volume = int(internal_order.filled_volume or 0)
-
-        # 转换状态
-        new_status = self._convert_order_status(external_order.status)
-        filled_volume = int(getattr(external_order, "traded_volume", 0) or 0)
-        avg_price = float(getattr(external_order, "traded_price", 0.0) or 0.0)
-
-        if new_status != old_status or filled_volume != old_filled_volume:
-          internal_order.status = new_status
-          internal_order.filled_volume = filled_volume
-          internal_order.filled_amount = avg_price * filled_volume
-          internal_order.avg_price = avg_price
-          internal_order.last_update_time = time_utils.now()
-
-          # 委托回报中的累计成交量仅转换为增量成交事件，避免重复记账。
-          incremental_volume = max(0, filled_volume - old_filled_volume)
-          if incremental_volume > 0:
-            await self._create_trade_from_order(
-              internal_order,
-              price=avg_price,
-              volume=incremental_volume,
-              trade_time=getattr(external_order, "time", None),
-            )
-
-          await self.emit_order_update(internal_order)
-
-    except Exception as e:
-      self.logger.error(f"更新订单状态失败: {e}")
-
-  async def _create_trade_from_order(
-    self,
-    internal_order: OrderResponse,
-    *,
-    price: float,
-    volume: int,
-    trade_time: Optional[datetime] = None,
-  ) -> None:
-    """从订单创建成交记录"""
-    trade = TradeRecord(
-      trade_id=self.generate_trade_id(),
-      order_id=internal_order.order_id,
-      instrument_code=internal_order.request.instrument_code,
-      trade_type=internal_order.request.order_type,
-      price=price,
-      volume=volume,
-      amount=price * volume,
-      commission=0.0,
-      trade_time=trade_time or time_utils.now(),
-      metadata=dict(internal_order.request.metadata or {}),
-    )
-
-    self.trades.append(trade)
-    await self.emit_trade_update(trade)
 
   def _convert_order_type(self, order_type: OrderType) -> Any:
     """转换订单类型到 XTQuant"""

@@ -137,6 +137,9 @@ class FakeStateManager:
   def get_account_quota(self):
     return {"total_asset": 100_000.0}
 
+  def get_position(self, _instrument_code):
+    return {"long_volume": 10000, "available_volume": 10000}
+
 
 def make_durable_entry_snapshot(
   intent_id,

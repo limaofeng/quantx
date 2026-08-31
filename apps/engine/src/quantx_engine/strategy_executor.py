@@ -1617,6 +1617,7 @@ class StrategyRuntime:
   last_trade_report_at: Optional[datetime] = field(default=None, repr=False)
   #: 最近任意 broker 回报时间（用于 broker 健康状态）
   last_broker_report_at: Optional[datetime] = field(default=None, repr=False)
+  account_snapshot_pending: bool = field(default=False, repr=False)
   #: 等待人工确认的交易意图，仅在运行进程内保留完整对象
   pending_approvals: Dict[str, TradeIntent] = field(default_factory=dict, repr=False)
   #: 审批串行锁，避免重复点击导致重复下单
@@ -2081,6 +2082,7 @@ class StrategyExecutor:
     runtime.last_order_report_at = None
     runtime.last_trade_report_at = None
     runtime.last_broker_report_at = None
+    runtime.account_snapshot_pending = False
     runtime._pending_market_invalidations.clear()
     runtime._active_market_continuity_losses.clear()
     runtime._market_fail_closed_codes.clear()
@@ -9672,6 +9674,7 @@ class StrategyExecutor:
         state_manager._last_snapshot_attempt_revision
       ),
       "manager_reservations": copy.deepcopy(state_manager._reservations),
+      "broker_covered_cash_reservations": set(state_manager._broker_covered_cash_reservations),
       "manager_position_reservations": copy.deepcopy(
         state_manager._position_reservations
       ),
@@ -9706,6 +9709,7 @@ class StrategyExecutor:
       snapshot["manager_last_snapshot_attempt_revision"]
     )
     state_manager._reservations = copy.deepcopy(snapshot["manager_reservations"])
+    state_manager._broker_covered_cash_reservations = set(snapshot["broker_covered_cash_reservations"])
     state_manager._position_reservations = copy.deepcopy(
       snapshot["manager_position_reservations"]
     )
@@ -9815,6 +9819,8 @@ class StrategyExecutor:
 
         durable_event = event_type in {"durable_order", "durable_trade"}
         if runtime.durable_event_barrier_key and not durable_event:
+          if event_type == "account_snapshot":
+            runtime.account_snapshot_pending = False
           if event_type in {"tick", "kline"}:
             _dropped, affected = self._drain_runtime_market_queue(runtime)
             if market_event:
@@ -9955,6 +9961,11 @@ class StrategyExecutor:
                 data,
                 instrument_code=market_event_code,
               )
+        elif event_type == "account_snapshot":
+          try:
+            await self._refresh_live_account_snapshot(runtime)
+          finally:
+            runtime.account_snapshot_pending = False
         elif event_type == "entry_plan_evaluate":
           await self._process_entry_plan_evaluate(runtime, data)
         elif event_type == "exit_plan_command":
@@ -16795,7 +16806,92 @@ class StrategyExecutor:
         "T_TRADE_ACCOUNT_TOTAL_EXPOSURE_LIMIT_REACHED",
         f"确认后将超过账户总资产 {max_exposure_pct * 100:g}% 的做 T 敞口上限",
       )
+    inventory_capacity = self._t_trade_old_inventory_capacity(
+      runtime, intent.instrument_code, current_intent_id=intent.intent_id,
+    )
+    if inventory_capacity < 100 or (requested_volume > 0 and requested_volume > inventory_capacity):
+      return (
+        "T_TRADE_EXIT_CAPACITY_EXCEEDED",
+        f"正T需要预留旧仓平仓能力，当前未占用可卖量为 {inventory_capacity} 股",
+      )
     return None
+
+  def _t_trade_old_inventory_capacity(
+    self,
+    runtime: StrategyRuntime,
+    instrument_code: str,
+    *,
+    current_intent_id: str = "",
+  ) -> int:
+    manager = runtime.state_manager
+    get_position = getattr(manager, "get_position", None)
+    position = (
+      dict(get_position(instrument_code) or {}) if callable(get_position) else {}
+    )
+    available = max(
+      0,
+      int(position.get("available_volume", 0))
+      - int(position.get("locked_core_available_volume", 0)),
+    )
+    states = (
+      dict(runtime.strategy.state.get("instrument_states", {}) or {})
+      if runtime.strategy
+      else {}
+    )
+    state = dict(states.get(instrument_code) or {})
+    batch_id = str(state.get("batch_id") or "")
+    batches = {}
+    filled = max(
+      0,
+      int(state.get("entry_filled_volume", 0))
+      - int(state.get("exit_filled_volume", 0)),
+    )
+    if filled:
+      if not batch_id:
+        return 0
+      batches[batch_id] = filled
+    plan_claims = {}
+    for plan in runtime.exit_plan_book.active_plans():
+      if plan.template.instrument_code != instrument_code:
+        continue
+      if plan.template.source_type == "T_TRADE_BATCH":
+        key = str(plan.template.source_id)
+        batches[key] = max(batches.get(key, 0), int(plan.remaining_volume))
+      else:
+        plan_claims[plan.plan_id] = int(plan.remaining_volume)
+    for order in self._build_open_order_snapshots(runtime):
+      if (
+        order["instrument_code"] != instrument_code
+        or str(order["order_type"]).upper() != "SELL"
+      ):
+        continue
+      metadata = order["metadata"]
+      key = str(metadata.get("t_batch_id") or "")
+      plan_id = str(metadata.get("exit_plan_id") or "")
+      # Open SELL quantity is already deducted from position.available_volume.
+      if key in batches:
+        batches[key] = max(0, batches[key] - int(order["remaining_volume"]))
+      elif plan_id in plan_claims:
+        plan_claims[plan_id] = max(
+          0, plan_claims[plan_id] - int(order["remaining_volume"])
+        )
+    pending_entry = 0
+    for intent_id, reservation in runtime.t_trade_entry_reservations.items():
+      if (
+        intent_id == current_intent_id
+        or reservation.get("instrument_code") != instrument_code
+      ):
+        continue
+      volume = max(0, int(reservation.get("volume", 0)))
+      if volume == 0:
+        price = float(reservation.get("price") or 0)
+        if price <= 0:
+          return 0
+        volume = int(float(reservation.get("amount") or 0) / price)
+      pending_entry += volume
+    return max(
+      0, available - sum(batches.values()) - sum(plan_claims.values()) - pending_entry
+    )
 
   def _reserve_t_trade_entry_exposure(
     self, runtime: StrategyRuntime, intent: TradeIntent
@@ -17650,8 +17746,7 @@ class StrategyExecutor:
         if broker_position:
           position = {
             "long_volume": broker_position.long_volume,
-            "available_volume": broker_position.available_volume
-            or broker_position.long_volume,
+            "available_volume": broker_position.available_volume,
           }
 
       context_snapshot = self._build_execution_context_snapshot(
@@ -17662,6 +17757,10 @@ class StrategyExecutor:
         positions={intent.instrument_code: position},
       )
       sizer = OrderSizer(rules)
+      if intent.direction == TradeIntentDirection.BUY and str(intent.metadata.get("t_trade_role") or "").lower() == "entry":
+        position["t_trade_exit_capacity"] = self._t_trade_old_inventory_capacity(
+          runtime, intent.instrument_code, current_intent_id=intent.intent_id,
+        )
       draft = sizer.draft_intent(intent, order_type, price, account, position)
       if draft.sized_volume <= 0:
         size_reasons = list(getattr(draft, "size_reason_codes", []) or [])
@@ -18666,11 +18765,61 @@ class StrategyExecutor:
         failed_ids = ", ".join(item[0] for item in failures)
         raise RuntimeError(f"实时订阅取消失败: {failed_ids}") from failures[0][1]
 
+  async def _refresh_live_account_snapshot(self, runtime: StrategyRuntime) -> None:
+    """Refresh inside the event consumer, never across an unapplied fill."""
+    from quantx_domain.clock import to_naive_utc
+
+    if runtime.context.mode != StrategyRunMode.LIVE or runtime.state_manager is None:
+      return
+    try:
+      account, covered_ids = await runtime.broker.get_portfolio_snapshot()
+      async with AsyncSessionLocal() as db:
+        unapplied = await db.scalar(
+          select(StrategyRuntimeEvent.event_id)
+          .where(
+            StrategyRuntimeEvent.strategy_run_id == runtime.run_id,
+            StrategyRuntimeEvent.application_status != "APPLIED",
+          )
+          .limit(1)
+        )
+      if unapplied is not None:
+        return
+      last_report = runtime.last_broker_report_at
+      if last_report is not None and to_naive_utc(
+        account.last_update_time
+      ) < to_naive_utc(last_report):
+        return
+      manager = runtime.state_manager
+      manager.update_account(
+        cash=account.cash,
+        frozen_cash=account.frozen_cash,
+        total_asset=account.total_asset,
+        covered_order_ids=covered_ids,
+      )
+      manager.replace_broker_positions(
+        {
+          code: {
+            "long_volume": item.long_volume,
+            "available_volume": item.available_volume,
+            "frozen_volume": item.frozen_volume,
+            "today_buy_volume": item.today_buy_volume,
+            "long_avg_price": item.long_avg_price,
+            "last_price": item.last_price,
+            "market_value": item.market_value,
+            "pnl": item.pnl,
+          }
+          for code, item in account.positions.items()
+        },
+        covered_order_ids=covered_ids,
+      )
+      runtime.context.account_info = manager.get_account()
+      runtime.context.positions = account.positions
+    except Exception as exc:
+      self._runtime_log(runtime, "WARNING", f"LIVE_ACCOUNT_SNAPSHOT_NOT_APPLIED: {exc}")
+
   async def _run_realtime_loop(self, runtime: StrategyRuntime) -> None:
     """运行实时交易循环"""
     metrics = runtime.metrics
-    broker = runtime.broker
-
     instruments = self._resolve_realtime_instruments(runtime)
     await self._apply_realtime_instrument_reconcile(runtime, instruments)
 
@@ -18690,41 +18839,18 @@ class StrategyExecutor:
       heartbeat_count += 1
       setattr(self, f"heartbeat_count_{runtime.run_id}", heartbeat_count)
 
-      # 检查持仓
-      positions_result = await broker.get_position()
-      positions = positions_result if isinstance(positions_result, dict) else {}
-      runtime.context.positions = positions
-
-      # 检查账户
-      account = await broker.get_account()
-      runtime.context.account_info = {
-        "cash": account.cash,
-        "total_value": account.total_asset,
-        "buying_power": account.cash,
-        "frozen_cash": account.frozen_cash,
-        "market_value": account.market_value,
-        "total_pnl": account.total_pnl,
-        "daily_pnl": account.daily_pnl,
-      }
-      state_manager = getattr(runtime, "state_manager", None)
-      if state_manager:
-        state_manager.update_account(
-          cash=account.cash,
-          frozen_cash=account.frozen_cash,
-          total_asset=account.total_asset,
-        )
-        for instrument_code, position in positions.items():
-          state_manager.update_position(
-            instrument_code,
-            long_volume=position.long_volume,
-            available_volume=position.available_volume,
-            frozen_volume=position.frozen_volume,
-            today_buy_volume=position.today_buy_volume,
-            long_avg_price=position.long_avg_price,
-            last_price=position.last_price,
-            market_value=position.market_value,
-            pnl=position.pnl,
-          )
+      if (
+        runtime.context.mode == StrategyRunMode.LIVE
+        and not runtime.account_snapshot_pending
+      ):
+        runtime.account_snapshot_pending = True
+        await runtime.event_queue.put(("account_snapshot", None))
+      elif runtime.context.mode == StrategyRunMode.PAPER and runtime.state_manager:
+        # PAPER portfolio truth advances only through its own serialized fills.
+        # Polling a simulator between fill generation and application would
+        # install future balances and then apply the same fill a second time.
+        runtime.context.account_info = runtime.state_manager.get_account()
+        runtime.context.positions = runtime.state_manager.get_all_positions()
 
       await asyncio.sleep(1)
 

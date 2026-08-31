@@ -39,6 +39,7 @@ BUCKET_LEDGER_CUSTOM_STATE_KEY = "bucket_ledger_snapshot"
 APPLIED_CORPORATE_ACTIONS_KEY = "applied_corporate_actions"
 GRID_BOOK_CUSTOM_STATE_KEY = "grid_book_snapshot"
 ORDER_CASH_RESERVATIONS_KEY = "order_cash_reservations"
+BROKER_COVERED_CASH_RESERVATIONS_KEY = "broker_covered_cash_reservations"
 ORDER_POSITION_RESERVATIONS_KEY = "order_position_reservations"
 APPLIED_RUNTIME_EVENT_KEYS = "applied_runtime_event_keys"
 RUNTIME_SNAPSHOT_ATTEMPT_KEY = "runtime_snapshot_attempt"
@@ -86,6 +87,7 @@ _MANAGER_OWNED_CUSTOM_STATE_KEYS = frozenset(
         BUCKET_LEDGER_VIOLATIONS_KEY,
         MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY,
         ORDER_CASH_RESERVATIONS_KEY,
+        BROKER_COVERED_CASH_RESERVATIONS_KEY,
         ORDER_POSITION_RESERVATIONS_KEY,
         RUNTIME_RECONCILIATION_REASON_KEY,
         RUNTIME_RECONCILIATION_STATUS_KEY,
@@ -265,6 +267,7 @@ class RuntimeStateManager:
 
     # 资金/持仓冻结索引；镜像到 custom state，供 Engine 重启恢复。
     _reservations: Dict[str, float] = field(default_factory=dict, repr=False)
+    _broker_covered_cash_reservations: set[str] = field(default_factory=set, repr=False)
     _position_reservations: Dict[str, Dict[str, int]] = field(
         default_factory=dict, repr=False
     )
@@ -3142,6 +3145,26 @@ class RuntimeStateManager:
             data = self._bucket_ledger.decorate_position(instrument_code, data)
         return data
 
+    def replace_broker_positions(
+        self, positions: Mapping[str, Mapping[str, Any]], *, covered_order_ids: Iterable[str],
+    ) -> None:
+        """Install a complete position snapshot and retain unobserved SELL holds."""
+        covered = set(covered_order_ids)
+        codes = set(self._state.get("positions", {})) | set(positions)
+        for code in codes:
+            data = dict(positions.get(code) or {})
+            local_frozen = sum(
+                int(reservations.get(code, 0))
+                for order_id, reservations in self._position_reservations.items()
+                if order_id not in covered
+            )
+            data["available_volume"] = max(0, int(data.get("available_volume", 0)) - local_frozen)
+            data["frozen_volume"] = int(data.get("frozen_volume", 0)) + local_frozen
+            self.update_position(code, **data)
+            if code not in positions and local_frozen == 0:
+                self._state["positions"].pop(code, None)
+        self._mark_positions_dirty()
+
     def get_all_positions(self) -> Dict[str, Dict[str, Any]]:
         from quantx_domain.trading.portfolio_state import ensure_position_dict
 
@@ -3299,14 +3322,22 @@ class RuntimeStateManager:
         frozen_cash: float = 0.0,
         total_asset: float = 0.0,
         non_trading_asset: float = 0.0,
+        *,
+        covered_order_ids: Iterable[str] = (),
     ) -> None:
-        """更新账户信息"""
+        """Project broker facts without erasing unobserved local reservations."""
+        self._broker_covered_cash_reservations = set(covered_order_ids) & self._reservations.keys()
+        unobserved = sum(
+            amount for order_id, amount in self._reservations.items()
+            if order_id not in self._broker_covered_cash_reservations
+        )
         self._state["account"] = {
-            "cash": cash,
-            "frozen_cash": frozen_cash,
+            "cash": cash - unobserved,
+            "frozen_cash": frozen_cash + unobserved,
             "total_asset": total_asset,
             "non_trading_asset": max(0.0, float(non_trading_asset or 0.0)),
         }
+        self._sync_reservation_state()
         self._mark_dirty()
 
     def get_account(self) -> Dict[str, float]:
@@ -3353,6 +3384,9 @@ class RuntimeStateManager:
 
     def _sync_reservation_state(self) -> None:
         custom = self._state.setdefault("custom", {})
+        custom[BROKER_COVERED_CASH_RESERVATIONS_KEY] = sorted(
+            self._broker_covered_cash_reservations & self._reservations.keys()
+        )
         custom[ORDER_CASH_RESERVATIONS_KEY] = {
             str(order_id): float(amount)
             for order_id, amount in self._reservations.items()
@@ -3379,6 +3413,9 @@ class RuntimeStateManager:
             for order_id, amount in cash.items()
             if float(amount or 0.0) > 0
         }
+        self._broker_covered_cash_reservations = set(
+            custom.get(BROKER_COVERED_CASH_RESERVATIONS_KEY) or []
+        ) & self._reservations.keys()
         self._position_reservations = {
             str(order_id): {
                 str(code): int(volume)
@@ -3415,6 +3452,9 @@ class RuntimeStateManager:
         """Move temporary reservations from intent id to real broker order id."""
         if old_order_id == new_order_id:
             return
+        if old_order_id in self._broker_covered_cash_reservations:
+            self._broker_covered_cash_reservations.discard(old_order_id)
+            self._broker_covered_cash_reservations.add(new_order_id)
         cash_reserved = self._reservations.pop(old_order_id, 0.0)
         if cash_reserved:
             self._reservations[new_order_id] = (
@@ -3451,6 +3491,7 @@ class RuntimeStateManager:
         remaining = reserved - consumed
         if remaining <= 1e-8:
             self._reservations.pop(order_id, None)
+            self._broker_covered_cash_reservations.discard(order_id)
         else:
             self._reservations[order_id] = remaining
 
@@ -3471,15 +3512,17 @@ class RuntimeStateManager:
             return False
 
         account = self._state.get("account", {})
-        account["cash"] = float(account.get("cash", 0.0)) + release_amount
-        account["frozen_cash"] = max(
-            0.0, float(account.get("frozen_cash", 0.0)) - release_amount
-        )
+        if order_id not in self._broker_covered_cash_reservations:
+            account["cash"] = float(account.get("cash", 0.0)) + release_amount
+            account["frozen_cash"] = max(
+                0.0, float(account.get("frozen_cash", 0.0)) - release_amount
+            )
         self._state["account"] = account
 
         remaining = reserved - release_amount
         if remaining <= 0:
             self._reservations.pop(order_id, None)
+            self._broker_covered_cash_reservations.discard(order_id)
         else:
             self._reservations[order_id] = remaining
 

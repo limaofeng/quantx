@@ -45,6 +45,9 @@ class _StateManager:
   def get_account_quota(self) -> dict[str, float]:
     return {"total_asset": 100_000.0}
 
+  def get_position(self, _instrument_code):
+    return {"long_volume": 10000, "available_volume": 10000}
+
 
 class _ApprovalStrategy:
   def __init__(self, state: dict[str, object]) -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -39,9 +41,11 @@ from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
   AccountExecutionControlEvent,
   AgentDevice,
+  AgentReportInbox,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
   TradeCommandOutbox,
+  TTradeBatch,
 )
 from quantx_infrastructure.models.auth import (
   AuthDeviceSession,
@@ -53,7 +57,9 @@ from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanRecord,
 )
 from quantx_infrastructure.models.enums import AccountType
+from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_confirmation_challenge import (
   TradeConfirmationChallenge,
 )
@@ -172,6 +178,10 @@ async def authorization_database(monkeypatch):
           AccountExecutionControlEvent.__table__,
           AgentDevice.__table__,
           RuntimeComponentHeartbeat.__table__,
+          AgentReportInbox.__table__,
+          TTradeBatch.__table__,
+          Order.__table__,
+          Trade.__table__,
         ],
       )
     )
@@ -257,7 +267,7 @@ async def authorization_database(monkeypatch):
           state_version=2,
           reconcile_status="READY",
           last_snapshot_id="snapshot-1",
-          last_snapshot_hash="snapshot-hash-1",
+          last_snapshot_hash="a" * 64,
           last_snapshot_at=utcnow(),
           created_at=shanghai_now,
           updated_at=shanghai_now,
@@ -299,6 +309,27 @@ async def authorization_database(monkeypatch):
         ),
       ]
     )
+    await db.commit()
+    payload = {
+      "snapshot_id": "snapshot-1", "is_complete": True,
+      "accounts": [{"account_id": "ACCOUNT-1", "cash": 50000}],
+      "positions_by_account": {"ACCOUNT-1": [{"stock_code": "600000.SH", "can_use_volume": 400}]},
+      "orders": [], "trades": [],
+      "section_completeness_by_account": {"ACCOUNT-1": dict.fromkeys(("account", "positions", "orders", "trades"), True)},
+      "snapshot_authority_by_account": {"ACCOUNT-1": {
+        "initial_status": 0, "final_status": 0, "stable": True,
+        "snapshot_eligible": True, "status_name": "OK", "reason_code": "AUTHORITATIVE",
+      }},
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    payload["snapshot_hash"] = digest
+    control = await db.get(AccountExecutionControl, "ACCOUNT-1")
+    control.last_snapshot_hash = digest
+    db.add(AgentReportInbox(
+      message_id="snapshot-1", device_id="agent-1", message_type="delta_report",
+      protocol_version="1.1", raw_payload_hash=digest, business_idempotency_key="snapshot-1",
+      payload=payload, received_at=observed_at, processing_status="PROCESSED",
+    ))
     await db.commit()
 
   monkeypatch.setattr(exit_plan_authorization, "AsyncSessionLocal", factory)
@@ -1143,7 +1174,7 @@ async def test_confirmation_fails_closed_when_bound_safety_facts_change(
       position.can_use_volume = 300
     else:
       rollout = await db.get(AccountExecutionControl, "ACCOUNT-1")
-      rollout.last_snapshot_hash = "snapshot-hash-2"
+      rollout.last_snapshot_hash = "b" * 64
     await db.commit()
   with pytest.raises(TradeApprovalChallengeError) as rejected:
     await ExitPlanAuthorizationChallengeService.confirm(

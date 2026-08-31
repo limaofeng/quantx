@@ -118,6 +118,7 @@ async def test_enqueue_detects_managed_auto_entry_from_persisted_intent() -> Non
   service = TradeCommandService(db)
   device = SimpleNamespace(id="device-1", user_id="authorized-user")
   service._exact_auto_entry_device = AsyncMock(return_value=device)
+  service._require_live_authorization = AsyncMock(return_value=_ready_rollout())
   service._device_for_account = AsyncMock()
   service.enqueue_order = AsyncMock(
     return_value=QueuedTradeCommand("client-1", "message-1", "QUEUED")
@@ -161,6 +162,7 @@ async def test_enqueue_keeps_managed_manual_entry_on_existing_path() -> None:
   device = SimpleNamespace(id="device-1", user_id="manual-user")
   service._exact_auto_entry_device = AsyncMock()
   service._managed_manual_entry_device = AsyncMock(return_value=device)
+  service._require_live_authorization = AsyncMock(return_value=_ready_rollout())
   service._device_for_account = AsyncMock()
   service.enqueue_order = AsyncMock(
     return_value=QueuedTradeCommand("client-1", "message-1", "QUEUED")
@@ -427,47 +429,6 @@ def test_external_position_increase_consumes_incremental_target_gap() -> None:
       requested_price=Decimal("100"),
       requested_volume=100,
     )
-
-
-def test_working_buy_cash_reserve_covers_all_account_instruments() -> None:
-  orders = [
-    SimpleNamespace(
-      intent_id="other-symbol-buy",
-      instrument_code="600000.SH",
-      side="BUY",
-      limit_price=100,
-      volume=100,
-    ),
-    SimpleNamespace(
-      intent_id="same-symbol-buy",
-      instrument_code="605499.SH",
-      side="BUY",
-      limit_price=20,
-      volume=50,
-    ),
-    SimpleNamespace(
-      intent_id="other-symbol-sell",
-      instrument_code="600001.SH",
-      side="SELL",
-      limit_price=1_000,
-      volume=100,
-    ),
-    SimpleNamespace(
-      intent_id="intent-1",
-      instrument_code="605499.SH",
-      side="BUY",
-      limit_price=1_000,
-      volume=100,
-    ),
-  ]
-
-  reserve = TradeCommandService._working_buy_cash_reserve(
-    orders,
-    intent_id="intent-1",
-    executed_volumes={"other-symbol-buy": 20},
-  )
-
-  assert reserve == Decimal("9000")
 
 
 @pytest.mark.asyncio
@@ -1035,6 +996,11 @@ async def test_second_gate_rechecks_authoritative_plan_snapshot_and_position(
   service._device_for = AsyncMock(return_value=device)
   service._require_no_conflicting_entry_exit = AsyncMock()
   service._require_no_authoritative_entry_order_conflict = AsyncMock()
+  monkeypatch.setattr(
+    command_module.AccountCapacityService,
+    "read",
+    AsyncMock(return_value=SimpleNamespace(available_cash=Decimal("50000"))),
+  )
 
   call = service._exact_auto_entry_device(
     account_id="account-1",

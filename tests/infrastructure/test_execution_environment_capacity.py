@@ -7,6 +7,7 @@ from quantx_domain.strategies.base import StrategyRunMode
 from quantx_engine.strategy_executor import StrategyExecutor
 from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.database.relational_base import Base
+from quantx_infrastructure.models.agent_runtime import AccountExecutionControl
 from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanEvent,
   AutoExitPlanRecord,
@@ -32,6 +33,7 @@ async def environment_database():
       lambda db: Base.metadata.create_all(
         db,
         tables=[
+          AccountExecutionControl.__table__,
           Position.__table__,
           AutoExitPlanRecord.__table__,
           AutoExitPlanEvent.__table__,

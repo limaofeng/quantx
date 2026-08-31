@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from sqlalchemy import select
 
+from quantx_infrastructure.models.agent_runtime import AccountExecutionControl
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.strategy_run_state import (
@@ -20,7 +21,7 @@ from quantx_infrastructure.repositories.auto_exit_plan_repository import (
 
 @dataclass(frozen=True)
 class LockedExitPlanScope:
-  """Rows locked in the only supported order: position, plans, target."""
+  """Lock order: LIVE account control, position, reserving plans, target."""
 
   position: Optional[Position]
   plans: list[AutoExitPlanRecord]
@@ -131,6 +132,9 @@ async def lock_exit_plan_scope(
     str(initial.strategy_run_id or "") if initial is not None else ""
   )
   if mode == "live":
+    # Plan creation/resizing and order enqueue claim the same LIVE inventory.
+    # The account gate precedes position/plan locks in every writer.
+    await db.get(AccountExecutionControl, account_id, with_for_update=True)
     position = await db.scalar(
       select(Position)
       .where(

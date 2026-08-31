@@ -6,7 +6,7 @@ from quantx_infrastructure.services import exit_plan_scope_lock as scope_module
 
 
 @pytest.mark.asyncio
-async def test_concurrent_plan_writers_share_position_first_lock_order(
+async def test_concurrent_plan_writers_share_account_first_lock_order(
   monkeypatch,
 ):
   records = {
@@ -29,6 +29,7 @@ async def test_concurrent_plan_writers_share_position_first_lock_order(
     account_id="account-a",
     stock_code="600000.SH",
   )
+  account_lock = asyncio.Lock()
   position_lock = asyncio.Lock()
   plan_locks = {plan_id: asyncio.Lock() for plan_id in records}
 
@@ -36,6 +37,15 @@ async def test_concurrent_plan_writers_share_position_first_lock_order(
     def __init__(self):
       self.acquired = []
       self.trace = []
+
+    async def get(self, model, key, *, with_for_update):
+      assert model is scope_module.AccountExecutionControl
+      assert key == "account-a"
+      assert with_for_update
+      self.trace.append("account")
+      await account_lock.acquire()
+      self.acquired.append(account_lock)
+      return SimpleNamespace(account_id=key)
 
     async def scalar(self, _statement):
       self.trace.append("position")
@@ -85,6 +95,6 @@ async def test_concurrent_plan_writers_share_position_first_lock_order(
   )
 
   assert traces == [
-    ["position", "plan-a", "plan-b"],
-    ["position", "plan-a", "plan-b"],
+    ["account", "position", "plan-a", "plan-b"],
+    ["account", "position", "plan-a", "plan-b"],
   ]

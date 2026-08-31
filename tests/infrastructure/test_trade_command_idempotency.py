@@ -16,6 +16,8 @@ from quantx_infrastructure.models.agent_runtime import (
   TTradeBatch,
 )
 from quantx_infrastructure.models.auth import AuthUser
+from quantx_infrastructure.models.strategy_run import StrategyRun
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import trade_command_service as command_module
 from quantx_infrastructure.services.trade_command_service import (
   AgentUnavailableError,
@@ -31,6 +33,7 @@ TABLES = [
   StrategyOrderCorrelation.__table__,
   TTradeBatch.__table__,
   TradeCommandOutbox.__table__,
+  TradeIntentRecord.__table__,
 ]
 
 
@@ -183,8 +186,9 @@ async def test_manual_sell_still_rejects_stale_reconciliation(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("manual_live", [True, False])
 async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
-  monkeypatch,
+  monkeypatch, manual_live,
 ) -> None:
   events: list[str] = []
 
@@ -214,6 +218,7 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
   service = TradeCommandService(db)
   service._device_for = AsyncMock(return_value=SimpleNamespace(id="device-1"))
   service._require_live_market_stream_ready = AsyncMock()
+  service._require_account_capacity = AsyncMock(return_value={"snapshot_id": "snapshot-1"})
   monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
   monkeypatch.setattr(
     command_module.settings,
@@ -231,7 +236,7 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
     volume=100,
     idempotency_key="manual-1",
     execution_mode="live",
-    manual_live=True,
+    manual_live=manual_live,
     commit_transaction=False,
   )
 
@@ -522,6 +527,19 @@ async def test_strategy_order_context_is_preserved_without_manual_bucket() -> No
     )
   session_factory = async_sessionmaker(engine, expire_on_commit=False)
   async with session_factory() as db:
+    original_get = db.get
+
+    async def get(model, key, **kwargs):
+      if model is StrategyRun and key == "run-1":
+        return SimpleNamespace(mode="paper", parameters={"account_id": "account-1"})
+      return await original_get(model, key, **kwargs)
+
+    db.get = get
+    db.add(TradeIntentRecord(
+      id="intent-1", strategy_run_id="run-1", owner_type="STRATEGY_RUN", owner_id="run-1",
+      account_id="account-1", instrument_code="600000.SH", direction="BUY", bucket="swing",
+      intent_metadata={"t_trade_role": "entry", "t_batch_id": "batch-1"},
+    ))
     db.add(
       AgentDevice(
         id="paper-device",
