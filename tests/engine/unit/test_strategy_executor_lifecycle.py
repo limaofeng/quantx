@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_domain.strategies.base import (
+  RuntimeStatePatch,
   StrategyContext,
   StrategyOutput,
   StrategyRunMode,
@@ -37,6 +38,39 @@ def _runtime(run_id: str = "run-lifecycle") -> StrategyRuntime:
       parameters={},
     ),
   )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [TradeIntentExecutionMode.AUTO, TradeIntentExecutionMode.MANUAL_CONFIRM])
+async def test_intent_persistence_failure_cannot_publish_patch_or_route(monkeypatch, mode):
+  executor = StrategyExecutor()
+  runtime = _runtime("persist-failure")
+  runtime.status = ExecutionStatus.RUNNING
+  runtime.state_manager = RuntimeStateManager(run_id=runtime.run_id, persist_enabled=False)
+  monkeypatch.setattr(
+    runtime.state_manager, "record_trade_intents",
+    AsyncMock(side_effect=RuntimeError("database unavailable")),
+  )
+  apply_patch = AsyncMock()
+  dispatch = AsyncMock()
+  monkeypatch.setattr(executor, "_apply_runtime_state_patch", apply_patch)
+  monkeypatch.setattr(executor, "_process_trade_intent", dispatch)
+  output = StrategyOutput(
+    trade_intents=[TradeIntent(
+      strategy_id="1", run_id=runtime.run_id, instrument_code="600000.SH",
+      direction=TradeIntentDirection.BUY, bucket="core", reason="entry",
+      target_amount=1000, execution_mode=mode,
+    )],
+    runtime_state_patch=RuntimeStatePatch(set={"pending": True}),
+  )
+  with pytest.raises(RuntimeError, match="database unavailable"):
+    await executor._process_strategy_output(runtime, output)
+  assert runtime.status == ExecutionStatus.ERROR
+  assert runtime.error_message == "TRADE_INTENT_PERSIST_FAILED"
+  assert runtime.pending_approvals == {}
+  assert runtime.state_manager._state["trade_intents"] == {}
+  apply_patch.assert_not_called()
+  dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -224,8 +258,8 @@ async def test_stop_racing_manual_intent_persistence_rejects_instead_of_queuing(
     _reservations: dict[str, float] = {}
     _position_reservations: dict[str, dict[str, int]] = {}
 
-    async def record_trade_intent(self, _intent, *, status: str) -> None:
-      statuses.append(status)
+    async def record_trade_intents(self, records) -> None:
+      statuses.extend(status for _, status in records)
       record_started.set()
       await release_record.wait()
 

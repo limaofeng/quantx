@@ -226,30 +226,39 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     status fails closed.
     """
 
-    normalized = self._normalize_payload(intent_data)
-    intent_id = str(normalized.get("id") or "").strip()
-    if not intent_id:
-      raise ValueError("交易意图标识不能为空")
-    existing = await self.find_by_id(intent_id)
-    if existing is not None:
-      self._validate_idempotent_create(existing, normalized)
-      return existing
+    return (await self.create_intents_idempotent([intent_data]))[0]
 
-    intent = TradeIntentRecord(**normalized)
-    self.db.add(intent)
+  async def create_intents_idempotent(
+    self, intent_data: List[Dict[str, Any]]
+  ) -> List[TradeIntentRecord]:
+    """Accept a complete strategy output in one transaction, or accept none."""
+    normalized = [self._normalize_payload(item) for item in intent_data]
+    ids = [str(item.get("id") or "").strip() for item in normalized]
+    if any(not value for value in ids) or len(set(ids)) != len(ids):
+      raise ValueError("交易意图标识不能为空或重复")
+    records = []
+    for intent_id, payload in zip(ids, normalized, strict=True):
+      existing = await self.find_by_id(intent_id)
+      if existing is not None:
+        self._validate_idempotent_create(existing, payload)
+        records.append(existing)
+      else:
+        records.append(TradeIntentRecord(**payload))
+    self.db.add_all(records)
     try:
       await self.db.commit()
     except IntegrityError:
-      # A concurrent exact retry may win the unique-key race. Re-read and
-      # perform the same immutable identity/status validation.
       await self.db.rollback()
-      existing = await self.find_by_id(intent_id)
-      if existing is None:
-        raise
-      self._validate_idempotent_create(existing, normalized)
-      return existing
-    await self.db.refresh(intent)
-    return intent
+      # Only a fully committed exact retry may satisfy this batch. A partial
+      # overlap must not make the other intents appear accepted.
+      records = []
+      for intent_id, payload in zip(ids, normalized, strict=True):
+        existing = await self.find_by_id(intent_id)
+        if existing is None:
+          raise
+        self._validate_idempotent_create(existing, payload)
+        records.append(existing)
+    return records
 
   @staticmethod
   def _validate_idempotent_create(
@@ -257,6 +266,8 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     incoming: Dict[str, Any],
   ) -> None:
     immutable_fields = (
+      "owner_type",
+      "owner_id",
       "strategy_run_id",
       "account_id",
       "strategy_id",
@@ -264,33 +275,24 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
       "direction",
       "bucket",
       "reason",
+      "priority",
+      "intent_type",
+      "target_amount",
+      "target_position_pct",
+      "target_volume",
+      "limit_price_hint",
     )
     mismatched = [
       field
       for field in immutable_fields
       if field in incoming
-      and str(getattr(existing, field, "") or "") != str(incoming.get(field) or "")
+      and getattr(existing, field, None) != incoming.get(field)
     ]
     existing_metadata = dict(existing.intent_metadata or {})
     incoming_metadata = dict(incoming.get("intent_metadata") or {})
-    try:
-      opportunity_schema_version = int(
-        incoming_metadata.get("opportunity_schema_version") or 0
-      )
-    except (TypeError, ValueError, OverflowError):
-      opportunity_schema_version = 0
-    if opportunity_schema_version >= 3:
-      for field in (
-        "candidate_id",
-        "candidate_fingerprint",
-        "candidate_state_version",
-        "config_version",
-        "policy_version",
-      ):
-        if str(existing_metadata.get(field) or "") != str(
-          incoming_metadata.get(field) or ""
-        ):
-          mismatched.append(f"metadata.{field}")
+    for field, value in incoming_metadata.items():
+      if existing_metadata.get(field) != value:
+        mismatched.append(f"metadata.{field}")
     existing_status = str(existing.status or "").upper()
     incoming_status = str(incoming.get("status") or "").upper()
     if existing_status != incoming_status:

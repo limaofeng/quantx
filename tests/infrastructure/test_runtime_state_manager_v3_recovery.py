@@ -369,10 +369,8 @@ async def test_v3_terminal_intent_cache_is_bounded_without_evicting_active_inten
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("strict", [False, True])
 async def test_late_fill_after_terminal_lru_eviction_reloads_complete_durable_truth(
   monkeypatch: pytest.MonkeyPatch,
-  strict: bool,
 ) -> None:
   record = _durable_v3_intent_record()
   manager = RuntimeStateManager(run_id="run-1", persist_enabled=True)
@@ -407,12 +405,7 @@ async def test_late_fill_after_terminal_lru_eviction_reloads_complete_durable_tr
   monkeypatch.setattr(TradeIntentRepository, "find_by_id", find)
   monkeypatch.setattr(TradeIntentRepository, "update_intent", update)
 
-  updater = (
-    manager.update_trade_intent_status_strict
-    if strict
-    else manager.update_trade_intent_status
-  )
-  await updater(
+  await manager.update_trade_intent_status(
     record.id,
     "FILLED",
     executed_price=10.2,
@@ -453,16 +446,8 @@ async def test_cache_miss_never_writes_incomplete_persistent_intent(
   monkeypatch.setattr(TradeIntentRepository, "update_intent", unexpected_update)
   manager = RuntimeStateManager(run_id="run-1", persist_enabled=True)
 
-  await manager.update_trade_intent_status(
-    "missing-intent",
-    "FILLED",
-    executed_volume=100,
-    accumulate_executed_volume=True,
-  )
-  assert "missing-intent" not in manager._state["trade_intents"]
-
   with pytest.raises(RuntimeStateRestoreError, match="持久化记录不存在"):
-    await manager.update_trade_intent_status_strict(
+    await manager.update_trade_intent_status(
       "missing-intent",
       "FILLED",
       executed_volume=100,

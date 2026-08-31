@@ -61,6 +61,9 @@ class FakeStateManager:
   async def record_trade_intent(self, intent, status="PENDING"):
     self.records.append((intent, status))
 
+  async def record_trade_intents(self, records):
+    self.records.extend(records)
+
 
 class ExecutionStateManager(FakeStateManager):
   def __init__(self):

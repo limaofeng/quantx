@@ -92,14 +92,6 @@ class _SuccessfulCheckpointStateManager:
   ) -> None:
     self.updates.append((intent_id, status, updates))
 
-  async def update_trade_intent_status_strict(
-    self,
-    intent_id: str,
-    status: str,
-    **updates,
-  ) -> None:
-    await self.update_trade_intent_status(intent_id, status, **updates)
-
   def record_decision_trace(self, _trace: object) -> None:
     return None
 
@@ -1356,7 +1348,6 @@ async def test_startup_expires_restored_t_pending_before_runtime_is_running() ->
     ),
     restore_manual_trade_intent=AsyncMock(return_value=intent),
     update_trade_intent_status=status_update,
-    update_trade_intent_status_strict=status_update,
     update_strategy_custom_state=Mock(),
     force_save=AsyncMock(return_value=True),
   )

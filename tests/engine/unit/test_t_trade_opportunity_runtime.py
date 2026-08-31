@@ -197,7 +197,7 @@ class _StateManager:
     self.calls.append("drain")
     return True
 
-  async def record_trade_intent_strict(
+  async def record_trade_intent(
     self,
     _intent: TradeIntent,
     *,
@@ -208,14 +208,6 @@ class _StateManager:
       raise RuntimeError("intent persistence failed")
 
   async def update_trade_intent_status(
-    self,
-    intent_id: str,
-    status: str,
-    **_updates: object,
-  ) -> None:
-    self.status_updates.append((intent_id, status))
-
-  async def update_trade_intent_status_strict(
     self,
     intent_id: str,
     status: str,
@@ -742,7 +734,7 @@ async def test_candidate_and_invalidation_interleave_without_deadlock():
   strict_started = asyncio.Event()
   release_strict = asyncio.Event()
   config_waiting = asyncio.Event()
-  original_record = runtime.state_manager.record_trade_intent_strict
+  original_record = runtime.state_manager.record_trade_intent
 
   async def blocked_record(candidate, *, status):
     events.append("strict-start")
@@ -751,7 +743,7 @@ async def test_candidate_and_invalidation_interleave_without_deadlock():
     await original_record(candidate, status=status)
     events.append("strict-done")
 
-  runtime.state_manager.record_trade_intent_strict = blocked_record
+  runtime.state_manager.record_trade_intent = blocked_record
   candidate_task = asyncio.create_task(
     executor._process_strategy_output(
       runtime,

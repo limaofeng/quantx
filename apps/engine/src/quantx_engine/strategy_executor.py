@@ -7865,7 +7865,7 @@ class StrategyExecutor:
           )
           updater = getattr(
             runtime.state_manager,
-            "update_trade_intent_status_strict",
+            "update_trade_intent_status",
             None,
           )
           if not callable(updater):
@@ -11927,6 +11927,27 @@ class StrategyExecutor:
           failure=failure,
         )
       return
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      created_at = self._runtime_now(runtime)
+      for intent in intents:
+        intent.created_at = created_at
+    if intents:
+      try:
+        if runtime.state_manager is None:
+          raise RuntimeError("交易意图缺少持久化状态管理器")
+        await runtime.state_manager.record_trade_intents([
+          (
+            intent,
+            "AWAITING_APPROVAL"
+            if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
+            else "PENDING",
+          )
+          for intent in intents
+        ])
+      except Exception:
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "TRADE_INTENT_PERSIST_FAILED"
+        raise
     if output.runtime_state_patch:
       await self._persist_dedicated_managed_exit_patch(
         runtime,
@@ -11941,20 +11962,8 @@ class StrategyExecutor:
         output.exit_plan_commands,
         evaluated_at=(input_snapshot.timestamp if input_snapshot else None),
       )
-    if runtime.context.mode == StrategyRunMode.BACKTEST:
-      created_at = self._runtime_now(runtime)
-      for intent in intents:
-        intent.created_at = created_at
     if runtime.metrics:
       runtime.metrics.trade_intents_generated += len(intents)
-    if runtime.state_manager:
-      for intent in intents:
-        status = (
-          "AWAITING_APPROVAL"
-          if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
-          else "PENDING"
-        )
-        await runtime.state_manager.record_trade_intent(intent, status=status)
     if runtime.strategy:
       for intent in intents:
         runtime.strategy.record_trade_intent(intent)
@@ -13714,7 +13723,7 @@ class StrategyExecutor:
 
     strict_recorder = getattr(
       runtime.state_manager,
-      "record_trade_intent_strict",
+      "record_trade_intent",
       None,
     )
     if intents and not callable(strict_recorder):
@@ -13829,7 +13838,7 @@ class StrategyExecutor:
 
     strict_status_updater = getattr(
       runtime.state_manager,
-      "update_trade_intent_status_strict",
+      "update_trade_intent_status",
       None,
     )
     if v3_manual_intents and not callable(strict_status_updater):
@@ -14006,7 +14015,7 @@ class StrategyExecutor:
           )
         strict_recorder = getattr(
           runtime.state_manager,
-          "record_trade_intent_strict",
+          "record_trade_intent",
           None,
         )
         if not callable(strict_recorder):
@@ -14019,7 +14028,7 @@ class StrategyExecutor:
           )
         strict_status_updater = getattr(
           runtime.state_manager,
-          "update_trade_intent_status_strict",
+          "update_trade_intent_status",
           None,
         )
         if v3_manual_intents and not callable(strict_status_updater):
@@ -14221,20 +14230,10 @@ class StrategyExecutor:
       "metadata": {**dict(intent.metadata or {}), "runtime_gate": code},
       "notes": code,
     }
-    strict_updater = getattr(
-      runtime.state_manager,
-      "update_trade_intent_status_strict",
-      None,
-    )
     try:
-      if callable(strict_updater):
-        await strict_updater(intent.intent_id, "REJECTED", **updates)
-      else:
-        await runtime.state_manager.update_trade_intent_status(
-          intent.intent_id,
-          "REJECTED",
-          **updates,
-        )
+      await runtime.state_manager.update_trade_intent_status(
+        intent.intent_id, "REJECTED", **updates,
+      )
     except Exception:
       # The initial V3 record remains PENDING, never AWAITING_APPROVAL, so a
       # failed rejection update still cannot be restored or exposed for approval.
@@ -14769,24 +14768,18 @@ class StrategyExecutor:
           }
         )
 
+      if runtime.state_manager is None:
+        return {
+          "success": False,
+          "code": "APPROVAL_STATUS_PERSISTENCE_UNAVAILABLE",
+          "message": "确认状态缺少持久化管理器，信号仍保持待确认",
+        }
       if runtime.state_manager:
         strict_status_update = getattr(
           runtime.state_manager,
-          "update_trade_intent_status_strict",
+          "update_trade_intent_status",
           None,
         )
-        if not callable(strict_status_update):
-          if self._is_v3_t_trade_manual_intent(intent):
-            return {
-              "success": False,
-              "code": "T_TRADE_APPROVAL_STATUS_PERSISTENCE_UNAVAILABLE",
-              "message": "确认状态缺少严格持久化边界，信号仍保持待确认",
-            }
-          strict_status_update = getattr(
-            runtime.state_manager,
-            "update_trade_intent_status",
-            None,
-          )
         if not callable(strict_status_update):
           return {
             "success": False,
@@ -14861,7 +14854,6 @@ class StrategyExecutor:
           status="EXPIRED",
           reason=late_failure[0],
           message=late_failure[1],
-          strict_persistence=True,
         )
         if persistence_failure is not None:
           return persistence_failure
@@ -15109,7 +15101,6 @@ class StrategyExecutor:
           status="EXPIRED",
           reason=invalidation[0],
           message=invalidation[1],
-          strict_persistence=True,
         )
         self._checkpoint_restored_strategy_state(runtime)
         force_save = getattr(runtime.state_manager, "force_save", None)
@@ -15173,7 +15164,7 @@ class StrategyExecutor:
     if not account_id:
       raise RuntimeError("V3 候选启动收敛缺少唯一账户绑定")
     loader = getattr(state_manager, "restore_v3_manual_candidate_intents", None)
-    strict_updater = getattr(state_manager, "update_trade_intent_status_strict", None)
+    strict_updater = getattr(state_manager, "update_trade_intent_status", None)
     force_save = getattr(state_manager, "force_save", None)
     if not callable(loader) or not callable(strict_updater) or not callable(force_save):
       raise RuntimeError("V3 候选启动收敛缺少严格持久化边界")
@@ -16986,9 +16977,7 @@ class StrategyExecutor:
     status: str,
     reason: str,
     message: str,
-    strict_persistence: bool = False,
   ) -> None:
-    requires_strict = strict_persistence or self._is_v3_t_trade_manual_intent(intent)
     terminal_metadata = local_pre_broker_zero_fill_metadata(
       {
         **dict(intent.metadata or {}),
@@ -16998,36 +16987,15 @@ class StrategyExecutor:
       reason=reason,
     )
     if runtime.state_manager is None:
-      if requires_strict:
-        raise _PendingApprovalStatusPersistenceError("待确认意图缺少状态持久化管理器")
-    else:
-      updater = getattr(
-        runtime.state_manager,
-        (
-          "update_trade_intent_status_strict"
-          if requires_strict
-          else "update_trade_intent_status"
-        ),
-        None,
+      raise _PendingApprovalStatusPersistenceError("待确认意图缺少状态持久化管理器")
+    try:
+      await runtime.state_manager.update_trade_intent_status(
+        intent.intent_id, status, metadata=terminal_metadata, notes=reason,
       )
-      if not callable(updater):
-        error = "待确认意图缺少严格状态持久化边界"
-        if requires_strict:
-          raise _PendingApprovalStatusPersistenceError(error)
-        raise RuntimeError(error)
-      try:
-        await updater(
-          intent.intent_id,
-          status,
-          metadata=terminal_metadata,
-          notes=reason,
-        )
-      except Exception as exc:
-        if requires_strict:
-          raise _PendingApprovalStatusPersistenceError(
-            "待确认意图终结状态持久化失败"
-          ) from exc
-        raise
+    except Exception as exc:
+      raise _PendingApprovalStatusPersistenceError(
+        "待确认意图终结状态持久化失败"
+      ) from exc
     runtime.pending_approvals.pop(intent.intent_id, None)
     await self._notify_strategy_order(
       runtime,
@@ -17047,7 +17015,6 @@ class StrategyExecutor:
     status: str,
     reason: str,
     message: str,
-    strict_persistence: bool = False,
   ) -> Optional[Dict[str, Any]]:
     """Return a stable request failure while preserving an uncommitted intent."""
 
@@ -17058,7 +17025,6 @@ class StrategyExecutor:
         status=status,
         reason=reason,
         message=message,
-        strict_persistence=strict_persistence,
       )
     except _PendingApprovalStatusPersistenceError as exc:
       if runtime.metrics:

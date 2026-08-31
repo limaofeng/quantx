@@ -288,10 +288,6 @@ class RuntimeStateManager:
         default_factory=dict,
         repr=False,
     )
-    _unpersisted_trade_intent_ids: set[str] = field(
-        default_factory=set,
-        repr=False,
-    )
 
     # 后台任务
     _snapshot_task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -2211,7 +2207,6 @@ class RuntimeStateManager:
 
                 data = record.to_dict()
                 intent = self._manual_trade_intent_from_record(record)
-                self._unpersisted_trade_intent_ids.discard(intent_id)
                 self._cache_trade_intent(data)
                 return intent
         except Exception as e:
@@ -2299,7 +2294,6 @@ class RuntimeStateManager:
                         f"run_id={self.run_id}, intent_id={record.id}"
                     )
                 data = record.to_dict()
-                self._unpersisted_trade_intent_ids.discard(str(record.id))
                 self._cache_trade_intent(data)
                 restored.append(
                     RestoredManualTradeIntent(
@@ -4011,91 +4005,45 @@ class RuntimeStateManager:
             "decision_trace": _json_safe(supplemental),
         }
 
-    async def record_trade_intent(self, intent, status: str = "PENDING") -> None:
-        """Persist a TradeIntent snapshot before it enters sizing/risk routing."""
-        data = self._trade_intent_record_data(intent, status=status)
-        intent_id = data["id"]
-        self._cache_trade_intent(data, prune_terminal=False)
-        if self.persist_enabled:
-            self._unpersisted_trade_intent_ids.add(intent_id)
-        if self._backtest_storage and hasattr(self._backtest_storage, "add_trade_intent"):
-            self._backtest_storage.add_trade_intent(dict(data))
-        persisted = await self._upsert_trade_intent_record(data, create_only=True)
-        if persisted:
-            self._unpersisted_trade_intent_ids.discard(intent_id)
-            self._prune_terminal_trade_intent_cache(
-                self._state.setdefault("trade_intents", {})
-            )
-        self._mark_dirty()
-
-    async def record_trade_intent_strict(
+    async def record_trade_intent(
         self,
         intent,
         status: str = "PENDING",
     ) -> None:
-        """Persist an intent or raise before exposing it to runtime consumers.
+        """Persist an intent or raise before exposing it to any consumer."""
 
-        The ordinary recorder retains its historical best-effort behaviour for
-        existing strategies. Stateful opportunity candidates use this strict
-        boundary so a failed database append cannot become an in-memory manual
-        approval that disappears on restart.
-        """
+        await self.record_trade_intents([(intent, status)])
 
-        data = self._trade_intent_record_data(intent, status=status)
-        await self._upsert_trade_intent_record_strict(data, create_only=True)
-        self._unpersisted_trade_intent_ids.discard(data["id"])
-        self._cache_trade_intent(data)
-        if self._backtest_storage and hasattr(
-            self._backtest_storage,
-            "add_trade_intent",
-        ):
-            self._backtest_storage.add_trade_intent(dict(data))
+    async def record_trade_intents(self, intents_and_statuses) -> None:
+        """Persist the complete intent batch before publishing any cache entry."""
+        records = [
+            self._trade_intent_record_data(intent, status=status)
+            for intent, status in intents_and_statuses
+        ]
+        if not records:
+            return
+        if self.persist_enabled:
+            from quantx_infrastructure.database.connection import get_async_db
+            from quantx_infrastructure.repositories.trade_intent_repository import (
+                TradeIntentRepository,
+            )
+
+            opened_session = False
+            async for db in get_async_db():
+                opened_session = True
+                await TradeIntentRepository(db).create_intents_idempotent(
+                    [self._db_trade_intent_payload(data) for data in records]
+                )
+                break
+            if not opened_session:
+                raise RuntimeError("交易意图数据库会话不可用")
+        for data in records:
+            if self._backtest_storage and hasattr(self._backtest_storage, "add_trade_intent"):
+                self._backtest_storage.add_trade_intent(dict(data))
+            self._cache_trade_intent(data)
         self._mark_dirty()
 
     async def update_trade_intent_status(
-        self, intent_id: Optional[str], status: str, **updates: Any
-    ) -> None:
-        """Update a persisted TradeIntent lifecycle status."""
-        if not intent_id:
-            return
-        existing = await self._trade_intent_update_base(
-            intent_id,
-            strict=False,
-        )
-        if existing is None:
-            return
-        existing.setdefault("id", intent_id)
-        existing["status"] = status
-        accumulate_executed_volume = bool(updates.pop("accumulate_executed_volume", False))
-        if accumulate_executed_volume and updates.get("executed_volume") is not None:
-            previous_volume = int(existing.get("executed_volume", 0) or 0)
-            fill_volume = int(updates.get("executed_volume", 0) or 0)
-            total_volume = previous_volume + fill_volume
-            previous_price = float(existing.get("executed_price", 0.0) or 0.0)
-            fill_price = float(updates.get("executed_price", 0.0) or 0.0)
-            if total_volume > 0:
-                if previous_volume > 0 and previous_price > 0 and fill_price > 0:
-                    updates["executed_price"] = (
-                        previous_price * previous_volume + fill_price * fill_volume
-                    ) / total_volume
-                elif fill_price <= 0:
-                    updates["executed_price"] = previous_price
-            updates["executed_volume"] = total_volume
-        existing.update({key: value for key, value in updates.items() if value is not None})
-        if self.persist_enabled:
-            self._unpersisted_trade_intent_ids.add(intent_id)
-        self._cache_trade_intent(existing, prune_terminal=False)
-        if self._backtest_storage and hasattr(self._backtest_storage, "add_trade_intent"):
-            self._backtest_storage.add_trade_intent(dict(existing))
-        persisted = await self._upsert_trade_intent_record(existing)
-        if persisted:
-            self._unpersisted_trade_intent_ids.discard(intent_id)
-            self._prune_terminal_trade_intent_cache(
-                self._state.setdefault("trade_intents", {})
-            )
-        self._mark_dirty()
-
-    async def update_trade_intent_status_strict(
         self,
         intent_id: Optional[str],
         status: str,
@@ -4107,7 +4055,6 @@ class RuntimeStateManager:
             raise ValueError("交易意图标识不能为空")
         existing = await self._trade_intent_update_base(
             intent_id,
-            strict=True,
         )
         if existing is None:  # pragma: no cover - strict loader always raises
             raise RuntimeStateRestoreError(
@@ -4132,8 +4079,7 @@ class RuntimeStateManager:
         existing.update(
             {key: value for key, value in updates.items() if value is not None}
         )
-        await self._upsert_trade_intent_record_strict(existing)
-        self._unpersisted_trade_intent_ids.discard(intent_id)
+        await self._upsert_trade_intent_record(existing)
         self._cache_trade_intent(existing)
         if self._backtest_storage and hasattr(
             self._backtest_storage,
@@ -4145,17 +4091,13 @@ class RuntimeStateManager:
     async def _trade_intent_update_base(
         self,
         intent_id: str,
-        *,
-        strict: bool,
     ) -> Optional[Dict[str, Any]]:
         """Load complete lifecycle truth when the bounded cache missed.
 
         A terminal record can legitimately receive a late broker report after
         LRU eviction.  In persistent runtimes that update must be based on the
         complete database row; synthesizing ``{"id": ...}`` would reset
-        metadata and cumulative fill fields.  Ordinary callers keep their
-        historical best-effort contract by returning without a write, while
-        strict callers fail closed.
+        metadata and cumulative fill fields. Missing durable truth fails closed.
         """
 
         cached = self._state.setdefault("trade_intents", {}).get(intent_id)
@@ -4207,12 +4149,9 @@ class RuntimeStateManager:
                 "交易意图缓存缺失且持久化快照读取失败，拒绝残缺更新: "
                 f"run_id={self.run_id}, intent_id={intent_id}"
             )
-            if strict:
-                if isinstance(exc, RuntimeStateRestoreError):
-                    raise
-                raise RuntimeStateRestoreError(message) from exc
-            self.logger.error("%s, error=%s", message, exc)
-            return None
+            if isinstance(exc, RuntimeStateRestoreError):
+                raise
+            raise RuntimeStateRestoreError(message) from exc
         return None
 
     def _cache_trade_intent(
@@ -4249,8 +4188,7 @@ class RuntimeStateManager:
         terminal_ids = [
             intent_id
             for intent_id, item in cache.items()
-            if intent_id not in self._unpersisted_trade_intent_ids
-            and str(_enum_value(dict(item or {}).get("status")) or "")
+            if str(_enum_value(dict(item or {}).get("status")) or "")
             .strip()
             .upper()
             in _TERMINAL_TRADE_INTENT_STATUSES
@@ -4262,26 +4200,6 @@ class RuntimeStateManager:
     async def _upsert_trade_intent_record(
         self,
         data: Dict[str, Any],
-        *,
-        create_only: bool = False,
-    ) -> bool:
-        if not self.persist_enabled:
-            return True
-        try:
-            await self._upsert_trade_intent_record_strict(
-                data,
-                create_only=create_only,
-            )
-            return True
-        except Exception as e:
-            self.logger.error(f"交易意图持久化失败: {e}")
-            return False
-
-    async def _upsert_trade_intent_record_strict(
-        self,
-        data: Dict[str, Any],
-        *,
-        create_only: bool = False,
     ) -> None:
         if not self.persist_enabled:
             return
@@ -4295,14 +4213,10 @@ class RuntimeStateManager:
         async for db in get_async_db():
             opened_session = True
             repo = TradeIntentRepository(db)
-            if create_only:
-                await repo.create_intent_idempotent(payload)
-            else:
-                existing = await repo.find_by_id(payload["id"])
-                if existing:
-                    await repo.update_intent(payload["id"], payload)
-                else:
-                    await repo.create_intent(payload)
+            existing = await repo.find_by_id(payload["id"])
+            if existing is None:
+                raise RuntimeStateRestoreError("未受理的交易意图不得推进执行状态")
+            await repo.update_intent(payload["id"], payload)
             break
         if not opened_session:
             raise RuntimeError("交易意图数据库会话不可用")

@@ -79,10 +79,11 @@ class FakeStateManager:
   async def record_trade_intent(self, intent, status="PENDING"):
     self.records.append((intent.intent_id, status))
 
-  async def update_trade_intent_status(self, intent_id, status, **updates):
-    self.updates.append((intent_id, status, updates))
+  async def record_trade_intents(self, records):
+    for intent, status in records:
+      await self.record_trade_intent(intent, status)
 
-  async def update_trade_intent_status_strict(self, intent_id, status, **updates):
+  async def update_trade_intent_status(self, intent_id, status, **updates):
     self.updates.append((intent_id, status, updates))
 
   async def restore_v3_manual_candidate_intents(

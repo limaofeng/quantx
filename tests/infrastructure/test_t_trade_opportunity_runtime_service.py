@@ -752,7 +752,7 @@ async def test_strict_intent_recorder_raises_before_mutating_runtime_truth(
     def __init__(self, _db) -> None:
       return None
 
-    async def create_intent_idempotent(self, _payload: dict):
+    async def create_intents_idempotent(self, _payload: list[dict]):
       raise RuntimeError("database unavailable")
 
   async def _db_sessions():
@@ -776,6 +776,6 @@ async def test_strict_intent_recorder_raises_before_mutating_runtime_truth(
   )
 
   with pytest.raises(RuntimeError, match="database unavailable"):
-    await manager.record_trade_intent_strict(intent, status="AWAITING_APPROVAL")
+    await manager.record_trade_intent(intent, status="AWAITING_APPROVAL")
 
   assert intent.intent_id not in manager._state["trade_intents"]

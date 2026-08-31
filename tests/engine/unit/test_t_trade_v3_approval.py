@@ -36,16 +36,11 @@ class _StateManager:
   async def update_trade_intent_status(
     self, intent_id: str, status: str, **updates: object
   ) -> None:
+    if self.strict_error is not None:
+      raise self.strict_error
     self.updates.append((intent_id, status, dict(updates)))
     if self.on_update is not None:
       self.on_update(status)
-
-  async def update_trade_intent_status_strict(
-    self, intent_id: str, status: str, **updates: object
-  ) -> None:
-    if self.strict_error is not None:
-      raise self.strict_error
-    await self.update_trade_intent_status(intent_id, status, **updates)
 
   def get_account_quota(self) -> dict[str, float]:
     return {"total_asset": 100_000.0}
