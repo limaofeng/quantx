@@ -123,6 +123,9 @@ describe('replay evidence pages', () => {
     expect(
       screen.getByRole('button', { name: /策略配置变更 600000.SH/ })
     ).toHaveAttribute('aria-expanded', 'true');
+    expect(
+      screen.getByRole('button', { name: /策略配置变更 600000.SH/ })
+    ).toHaveFocus();
   });
   it('explains known audit reasons while retaining unknown evidence codes', () => {
     expect(replayReasonLabel('MONITOR_ENGINE_EXIT_PLAN')).toBe(
@@ -155,8 +158,11 @@ describe('replay evidence pages', () => {
     expect(
       screen.queryByRole('button', { name: /确认买入|拒绝信号/ })
     ).not.toBeInTheDocument();
-    fireEvent.keyDown(row, { key: 'Escape' });
+    const auditLink = screen.getByRole('button', { name: '查看决策审计' });
+    auditLink.focus();
+    fireEvent.keyDown(auditLink, { key: 'Escape' });
     expect(row).toHaveAttribute('aria-expanded', 'false');
+    expect(row).toHaveFocus();
     fireEvent.click(screen.getByRole('button', { name: '加载更多' }));
     expect(state.loadMoreSignals).toHaveBeenCalledOnce();
   });
@@ -227,6 +233,48 @@ describe('replay evidence pages', () => {
     expect(screen.getByText(/定量、委托与成交不适用/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /返回信号/ }));
     expect(onViewSignal).toHaveBeenCalledWith('exact-event-key');
+    const signalLink = screen.getByRole('button', { name: /返回信号/ });
+    signalLink.focus();
+    fireEvent.keyDown(signalLink, { key: 'Escape' });
+    const row = screen.getByRole('button', { name: /决策 600000.SH/ });
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    expect(row).toHaveFocus();
+  });
+
+  it('focuses the exact audit row after following a signal across pages', () => {
+    const state = controller({
+      auditFilters: { eventKey: 'page-two-event' },
+      auditRecords: [
+        {
+          decision: {
+            id: 'page-two-decision',
+            instanceId: 'run-1',
+            traceId: 'trace-page-two',
+            decidedAt: '2026-08-28T02:00:00Z',
+            inputSummary: { instrument_code: '600000.SH' },
+            outputSummary: {},
+            statePatch: {},
+            tradeIntents: [],
+            decisionTrace: {},
+            reason: 'MINIMUM_COVERAGE_NOT_REACHED',
+            tags: [],
+          },
+          evaluationEventKeys: ['page-two-event'],
+          executions: [],
+        },
+      ],
+    });
+    render(
+      <TTradeReplayDecisionAudit
+        controller={state}
+        hasReplay
+        instrumentNames={names}
+        onViewSignal={vi.fn()}
+      />
+    );
+    const row = screen.getByRole('button', { name: /决策 600000.SH/ });
+    expect(row).toHaveAttribute('aria-expanded', 'true');
+    expect(row).toHaveFocus();
   });
 
   it('does not label an amount or portfolio weight as share quantity', () => {

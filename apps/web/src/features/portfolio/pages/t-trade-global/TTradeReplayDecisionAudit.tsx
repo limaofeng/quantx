@@ -14,6 +14,7 @@ import {
   ReplayEvidenceSelect,
   ReplayEvidenceState,
 } from './ReplayEvidenceChrome';
+import { collapseEvidenceOnEscape } from './replayEvidenceKeyboard';
 import {
   replayIntentTarget,
   replayReasonLabel,
@@ -118,13 +119,17 @@ export function TTradeReplayDecisionAudit({
     auditError,
   } = controller;
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
+  const linkedRowRef = React.useRef<HTMLButtonElement>(null);
   const scope = `${page?.evidence.runId}/${page?.evidence.backtestId}`;
   React.useEffect(() => setExpandedId(null), [scope]);
   const focusedDecisionId = filters.eventKey
     ? auditRecords[0]?.decision.id
     : null;
   React.useEffect(() => {
-    if (focusedDecisionId) setExpandedId(focusedDecisionId);
+    if (focusedDecisionId) {
+      setExpandedId(focusedDecisionId);
+      linkedRowRef.current?.focus();
+    }
   }, [focusedDecisionId]);
   const available =
     hasReplay && page?.evidence.availability === 'AVAILABLE' && !auditError;
@@ -214,9 +219,9 @@ export function TTradeReplayDecisionAudit({
       </div>
       <div
         className="min-h-0 flex-1 overflow-auto custom-scrollbar"
-        onKeyDown={event => {
-          if (event.key === 'Escape') setExpandedId(null);
-        }}
+        onKeyDown={event =>
+          collapseEvidenceOnEscape(event, () => setExpandedId(null))
+        }
       >
         <ReplayEvidenceState
           hasReplay={hasReplay}
@@ -280,6 +285,11 @@ export function TTradeReplayDecisionAudit({
                   )}
                 >
                   <button
+                    ref={
+                      focusedDecisionId === decision.id
+                        ? linkedRowRef
+                        : undefined
+                    }
                     type="button"
                     aria-label={`决策 ${instrumentCode || '账户级'} ${formatTime(decision.decidedAt)}`}
                     aria-expanded={expanded}

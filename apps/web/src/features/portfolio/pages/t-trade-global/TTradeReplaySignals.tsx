@@ -13,6 +13,7 @@ import {
   ReplayEvidenceSelect,
   ReplayEvidenceState,
 } from './ReplayEvidenceChrome';
+import { collapseEvidenceOnEscape } from './replayEvidenceKeyboard';
 import {
   candidateStatusLabels,
   nullableScore,
@@ -47,6 +48,7 @@ export function TTradeReplaySignals({
     signalError,
   } = controller;
   const [expandedKey, setExpandedKey] = React.useState<string | null>(null);
+  const linkedRowRef = React.useRef<HTMLButtonElement>(null);
   const scope = `${page?.evidence.runId}/${page?.evidence.backtestId}`;
   React.useEffect(() => setExpandedKey(null), [scope]);
   const focusedEventKey =
@@ -55,7 +57,10 @@ export function TTradeReplaySignals({
       ? filters.eventKey
       : null;
   React.useEffect(() => {
-    if (focusedEventKey) setExpandedKey(focusedEventKey);
+    if (focusedEventKey) {
+      setExpandedKey(focusedEventKey);
+      linkedRowRef.current?.focus();
+    }
   }, [focusedEventKey]);
   const available =
     hasReplay && page?.evidence.availability === 'AVAILABLE' && !signalError;
@@ -138,9 +143,9 @@ export function TTradeReplaySignals({
       </div>
       <div
         className="min-h-0 flex-1 overflow-auto custom-scrollbar"
-        onKeyDown={event => {
-          if (event.key === 'Escape') setExpandedKey(null);
-        }}
+        onKeyDown={event =>
+          collapseEvidenceOnEscape(event, () => setExpandedKey(null))
+        }
       >
         <ReplayEvidenceState
           hasReplay={hasReplay}
@@ -189,6 +194,11 @@ export function TTradeReplaySignals({
                   )}
                 >
                   <button
+                    ref={
+                      focusedEventKey === signal.eventKey
+                        ? linkedRowRef
+                        : undefined
+                    }
                     type="button"
                     aria-label={`${signalEventLabels[signal.eventType] || signal.eventType} ${signal.stockCode} ${formatTime(signal.evaluatedAt)}`}
                     aria-expanded={expanded}
