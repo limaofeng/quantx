@@ -279,7 +279,19 @@ class MiniQmtLocalAgent:
           "status": "REJECTED",
           "reason": "outside trading session",
         }
-      market_check = self._market_preflight(stock_code, price, is_buy)
+      price_type_value = data.get("price_type")
+      raw_price_type = str(
+        getattr(price_type_value, "name", price_type_value) or ""
+      ).upper()
+      fixed_price = raw_price_type in {"LIMIT", "FIX", "FIX_PRICE"} or (
+        not raw_price_type and price > 0
+      )
+      market_check = self._market_preflight(
+        stock_code,
+        price,
+        is_buy,
+        require_fresh_quote=not fixed_price,
+      )
       if not market_check.get("ok"):
         return market_check
 
@@ -327,6 +339,8 @@ class MiniQmtLocalAgent:
     stock_code: str,
     price: float,
     is_buy: bool,
+    *,
+    require_fresh_quote: bool = True,
   ) -> Dict[str, Any]:
     manager = self.market_data_manager
     if manager is None:
@@ -376,7 +390,9 @@ class MiniQmtLocalAgent:
         "reason": "quote timestamp unavailable",
       }
     quote_lag = (clock.now_aware() - quote_time).total_seconds()
-    if quote_lag < -5 or quote_lag > self.max_quote_lag_seconds:
+    if quote_lag < -5 or (
+      require_fresh_quote and quote_lag > self.max_quote_lag_seconds
+    ):
       return {"ok": False, "status": "REJECTED", "reason": "stale live quote"}
 
     price_tick = float(

@@ -49,7 +49,7 @@ def test_registry_reuses_native_manager_during_reconnect():
   assert registry.connection_generation("account-1") == 1
 
 
-def test_live_market_preflight_uses_shared_api_quote_age_boundary(monkeypatch):
+def test_live_market_preflight_only_expires_quote_derived_orders(monkeypatch):
   observed_at = clock.to_shanghai(clock.now_aware()).replace(
     hour=10,
     minute=30,
@@ -90,6 +90,38 @@ def test_live_market_preflight_uses_shared_api_quote_age_boundary(monkeypatch):
 
   market.quote_age_seconds = LIVE_ORDER_MAX_QUOTE_AGE_SECONDS + 1
   assert agent._market_preflight("600000.SH", 10.0, True) == {
+    "ok": False,
+    "status": "REJECTED",
+    "reason": "stale live quote",
+  }
+  assert agent._market_preflight(
+    "600000.SH",
+    10.0,
+    True,
+    require_fresh_quote=False,
+  )["ok"] is True
+
+  agent.query_account = lambda: {"cash": 100_000}
+  assert agent._command_preflight(
+    {
+      "execution_mode": "live",
+      "order_type": "BUY",
+      "price_type": "FIX_PRICE",
+      "price": 10.0,
+    },
+    "600000.SH",
+    100,
+  )["ok"] is True
+  assert agent._command_preflight(
+    {
+      "execution_mode": "live",
+      "order_type": "BUY",
+      "price_type": "MARKET_PEER_PRICE_FIRST",
+      "price": 10.0,
+    },
+    "600000.SH",
+    100,
+  ) == {
     "ok": False,
     "status": "REJECTED",
     "reason": "stale live quote",

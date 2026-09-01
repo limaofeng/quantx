@@ -13,6 +13,7 @@ from quantx_api.gqlapi.manual_order import (
   normalize_manual_order_request,
 )
 from quantx_api.gqlapi.trade_approval import TradeApprovalChallengeError
+from quantx_contracts import LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_base import Base
@@ -1125,6 +1126,31 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
   assert result.final_volume == 100
   assert result.risk_action == "ALLOW"
   assert any("手续费" in warning for warning in result.warnings)
+
+  tick.time = time_utils.now() - timedelta(
+    seconds=LIVE_ORDER_MAX_QUOTE_AGE_SECONDS + 1
+  )
+  stale_limit = await manual_order._preflight(
+    _request(key="ios-inactive-limit-preview-1")
+  )
+  assert stale_limit.reference_price == 10.5
+  assert any("限价委托仍按填写价格确认" in item for item in stale_limit.warnings)
+
+  stale_best_request = normalize_manual_order_request(
+    account_id="ACCOUNT-1",
+    instrument_code="600000.SH",
+    side="BUY",
+    price_type="BEST",
+    volume=100,
+    limit_price=None,
+    idempotency_key="ios-stale-best-preview-1",
+    execution_mode="LIVE",
+  )
+  with pytest.raises(TradeApprovalChallengeError) as stale_best:
+    await manual_order._preflight(stale_best_request)
+  assert stale_best.value.code == "QUOTE_STALE"
+  assert "对手方最优价" in stale_best.value.message
+  tick.time = time_utils.now()
 
   capped_request = normalize_manual_order_request(
     account_id="ACCOUNT-1",

@@ -215,8 +215,10 @@ input ManualOrderConfirmationInput {
 
 iOS 只在内存持有 Token。用户点击确认后先执行 LocalAuthentication；成功后发送
 确认。客户端不传 `biometricPassed: true` 之类可伪造字段。确认时服务端重新校验
-挑战、会话、行情、资金、可卖量、T+1、停牌、涨跌停、账户实盘窗口、Agent、对账和
-Kill Switch；任一事实改变到超出服务端策略时使挑战失效并要求新预览。
+挑战、会话、资金、可卖量、T+1、停牌、涨跌停、账户实盘窗口、Agent、对账和
+Kill Switch。`BEST` 还必须重新绑定新鲜对手价；`LIMIT` 以用户填写价格为准，单只
+证券超过 30 秒无新行情事件只产生参考价警告，不得让仍在 60 秒有效期内的挑战提前
+失效。任一其他事实改变到超出服务端策略时使挑战失效并要求新预览。
 
 `idempotencyKey` 在预览时绑定进挑战和后续 TradeCommand；确认不允许重新提交
 业务输入或替换幂等键。成功结果只包含 `clientOrderId`、`status=QUEUED`、时间和

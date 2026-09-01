@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from enum import Enum
 
-# The API preview and the QMT Agent's final pre-submit check must enforce the
-# same quote-age boundary. A command accepted by the API must not be rejected
-# milliseconds later merely because two runtimes use different thresholds.
+# Quote-derived orders such as BEST must use the same age boundary in the API
+# preview and the QMT Agent's final pre-submit check. A fixed-price order does
+# not expire merely because an inactive instrument emitted no new quote event;
+# it still requires a connected market source and valid trading metadata.
 LIVE_ORDER_MAX_QUOTE_AGE_SECONDS = 30
 
 

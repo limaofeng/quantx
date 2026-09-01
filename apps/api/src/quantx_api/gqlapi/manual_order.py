@@ -549,8 +549,14 @@ async def _preflight(
 
   quote_timestamp = getattr(tick, "time", None)
   quote_age = _snapshot_age(quote_timestamp, now)
-  if quote_age is None or quote_age < timedelta(0) or quote_age > _MAX_QUOTE_AGE:
+  if quote_age is None or quote_age < timedelta(0):
     raise TradeApprovalChallengeError("QUOTE_STALE", "行情已过期，已拒绝生成交易确认")
+  quote_event_stale = quote_age > _MAX_QUOTE_AGE
+  if quote_event_stale and request.price_type == "BEST":
+    raise TradeApprovalChallengeError(
+      "QUOTE_STALE",
+      "对手方最优价行情已过期，已拒绝生成交易确认",
+    )
 
   instrument = await db.get(
     Instrument,
@@ -769,6 +775,15 @@ async def _preflight(
       "最终状态只能以 QMT Agent 上报并由 Engine 收敛的券商回报为准",
     ]
 
+  quote_warnings = (
+    [
+      f"该标的已超过 {LIVE_ORDER_MAX_QUOTE_AGE_SECONDS} 秒没有新的行情事件；"
+      "限价委托仍按填写价格确认，行情参考价可能不是最新成交价"
+    ]
+    if quote_event_stale
+    else []
+  )
+
   return ManualOrderPreflightData(
     quote_timestamp=_aware_local(quote_timestamp),
     quote_fingerprint=_quote_fingerprint(
@@ -794,6 +809,7 @@ async def _preflight(
     warnings=[
       "风控已使用保守手续费缓冲校验购买力；预览不展示非权威费用报价",
       "确认时会锁定并复核设备会话、账户、持仓和风控快照",
+      *quote_warnings,
       *mode_warnings,
     ],
   )
