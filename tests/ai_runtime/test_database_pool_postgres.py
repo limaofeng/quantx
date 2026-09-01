@@ -8,8 +8,11 @@ from contextlib import AsyncExitStack
 import pytest
 from quantx_ai_runtime import database
 from quantx_infrastructure.config.settings import settings
+from quantx_infrastructure.services import engine_command_service as service_module
+from quantx_infrastructure.services.engine_command_service import EngineCommandService
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -150,4 +153,85 @@ async def test_cancelled_closes_keep_real_connections_within_admission_budget(
   finally:
     allow_close.set()
     await asyncio.gather(*tasks, *close_tasks, return_exceptions=True)
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_cancelled_engine_command_keeps_work_slot_until_real_session_closes(
+  monkeypatch,
+):
+  engine = _readonly_engine()
+  closing = asyncio.Event()
+  allow_close = asyncio.Event()
+  closed = asyncio.Event()
+
+  class DelayedCommandSession(AsyncSession):
+    def add(self, instance, _warn=True):
+      self.info["command"] = instance
+
+    async def commit(self):
+      raise IntegrityError("synthetic idempotency conflict", {}, RuntimeError())
+
+    async def rollback(self):
+      return None
+
+    async def scalar(self, _statement, *args, **kwargs):
+      assert await super().scalar(text("SELECT 1")) == 1
+      return self.info["command"]
+
+    async def close(self):
+      closing.set()
+      await allow_close.wait()
+      await super().close()
+      closed.set()
+
+  sessions = async_sessionmaker(
+    engine,
+    class_=DelayedCommandSession,
+    expire_on_commit=False,
+  )
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(
+    database, "database_admission", database.DatabaseAdmission(3, timeout_seconds=0.05)
+  )
+
+  async def enqueue():
+    async with database.database_work_slot():
+      await EngineCommandService().enqueue(
+        "BACKTEST_RERUN",
+        {"run_id": "run-cancelled"},
+        aggregate_id="run-cancelled",
+        idempotency_key="rerun:run-cancelled",
+      )
+
+  task = asyncio.create_task(enqueue())
+  try:
+    await asyncio.wait_for(closing.wait(), timeout=10)
+    assert engine.pool.checkedout() == 1
+
+    task.cancel("tool cancelled")
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert not closed.is_set()
+
+    # The cancelled command still owns one of the two business permits until
+    # its real SQLAlchemy session has returned the physical connection.
+    async with database.database_work_slot():
+      with pytest.raises(database.DatabaseCapacityTimeout):
+        async with database.database_work_slot():
+          pytest.fail("work permit was released before session close completed")
+
+    allow_close.set()
+    with pytest.raises(asyncio.CancelledError, match="tool cancelled"):
+      await asyncio.wait_for(task, timeout=5)
+    assert closed.is_set()
+    assert engine.pool.checkedout() == 0
+
+    async with AsyncExitStack() as stack:
+      for _ in range(2):
+        await stack.enter_async_context(database.database_work_slot())
+  finally:
+    allow_close.set()
+    await asyncio.gather(task, return_exceptions=True)
     await engine.dispose()

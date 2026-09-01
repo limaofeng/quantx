@@ -52,6 +52,78 @@ async def command_database(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["enqueue", "get"])
+async def test_engine_command_session_close_remains_owned_during_cancellation(
+  monkeypatch: pytest.MonkeyPatch,
+  operation: str,
+) -> None:
+  closing = asyncio.Event()
+  allow_close = asyncio.Event()
+  closed = asyncio.Event()
+  close_tasks: list[asyncio.Task] = []
+  command = EngineCommandOutbox(
+    message_id="00000000-0000-0000-0000-000000000301",
+    idempotency_key="command-cancellation-test",
+    command_type="STRATEGY_STOP",
+    aggregate_id="run-cancelled",
+    payload={"run_id": "run-cancelled"},
+    processing_status="PENDING",
+    available_at=datetime(2026, 9, 1),
+  )
+
+  class DelayedCloseSession:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback):
+      close_task = asyncio.create_task(self.close())
+      close_tasks.append(close_task)
+      await asyncio.shield(close_task)
+
+    def add(self, instance):
+      nonlocal command
+      command = instance
+
+    async def commit(self):
+      return None
+
+    async def get(self, _model, _message_id):
+      return command
+
+    async def close(self):
+      closing.set()
+      await allow_close.wait()
+      closed.set()
+
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", DelayedCloseSession)
+  service = EngineCommandService()
+  if operation == "enqueue":
+    request = service.enqueue(
+      "STRATEGY_STOP",
+      {"run_id": "run-cancelled"},
+      aggregate_id="run-cancelled",
+    )
+  else:
+    request = service.get(command.message_id)
+  task = asyncio.create_task(request)
+
+  try:
+    await asyncio.wait_for(closing.wait(), timeout=1)
+    task.cancel("request cancelled")
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert not closed.is_set()
+
+    allow_close.set()
+    with pytest.raises(asyncio.CancelledError, match="request cancelled"):
+      await asyncio.wait_for(task, timeout=1)
+    assert closed.is_set()
+  finally:
+    allow_close.set()
+    await asyncio.gather(task, *close_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_engine_command_idempotency_is_database_enforced(
   command_database,
 ) -> None:
@@ -71,10 +143,7 @@ async def test_engine_command_idempotency_is_database_enforced(
 
   assert second.message_id == first.message_id
   async with command_database() as db:
-    assert (
-      await db.scalar(select(func.count()).select_from(EngineCommandOutbox))
-      == 1
-    )
+    assert await db.scalar(select(func.count()).select_from(EngineCommandOutbox)) == 1
 
 
 @pytest.mark.asyncio
@@ -166,10 +235,7 @@ async def test_engine_command_idempotency_concurrent_retries_share_one_row(
 
   assert len({receipt.message_id for receipt in receipts}) == 1
   async with command_database() as db:
-    assert (
-      await db.scalar(select(func.count()).select_from(EngineCommandOutbox))
-      == 1
-    )
+    assert await db.scalar(select(func.count()).select_from(EngineCommandOutbox)) == 1
 
 
 @pytest.mark.asyncio

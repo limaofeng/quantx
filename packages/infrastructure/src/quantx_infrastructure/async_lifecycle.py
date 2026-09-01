@@ -1,4 +1,4 @@
-"""Keep resource cleanup owned until it finishes, even during repeated cancellation."""
+"""Join owned asynchronous cleanup before propagating caller cancellation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 
 
 async def finish_cleanup(cleanup: Coroutine[Any, Any, None]) -> None:
+  """Run one cleanup coroutine to completion despite repeated cancellation."""
   task = asyncio.create_task(cleanup)
   cancelled: asyncio.CancelledError | None = None
   try:

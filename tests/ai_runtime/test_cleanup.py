@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from quantx_ai_runtime.cleanup import finish_cleanup
+from quantx_infrastructure.async_lifecycle import finish_cleanup
 
 
 @pytest.mark.asyncio

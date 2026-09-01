@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from quantx_ai_runtime import database
-from quantx_ai_runtime.cleanup import finish_cleanup
 from quantx_ai_runtime.runtime import runner
 from quantx_ai_runtime.tools import registry
 from quantx_application.assistant.contracts import (
@@ -16,6 +15,7 @@ from quantx_application.assistant.contracts import (
   AssistantToolMetadata,
   AssistantToolRisk,
 )
+from quantx_infrastructure.async_lifecycle import finish_cleanup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 

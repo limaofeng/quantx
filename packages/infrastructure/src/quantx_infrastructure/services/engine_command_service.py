@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -13,7 +15,9 @@ from typing import Any, Optional
 from quantx_domain.clock import utcnow
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from quantx_infrastructure.async_lifecycle import finish_cleanup
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
 
@@ -53,6 +57,16 @@ class EngineCommandIdempotencyError(ValueError):
     )
 
 
+@asynccontextmanager
+async def _command_session() -> AsyncIterator[AsyncSession]:
+  """Keep command-session ownership until its connection is returned."""
+  db = AsyncSessionLocal()
+  try:
+    yield db
+  finally:
+    await finish_cleanup(db.close())
+
+
 class EngineCommandService:
   """Enqueue idempotent commands and optionally await their durable result."""
 
@@ -67,7 +81,7 @@ class EngineCommandService:
     message_id = str(uuid.uuid4())
     business_key = idempotency_key or f"{command_type}:{aggregate_id or message_id}"
     canonical_payload, canonical_payload_json = self._canonical_payload(payload)
-    async with AsyncSessionLocal() as db:
+    async with _command_session() as db:
       command = EngineCommandOutbox(
         message_id=message_id,
         idempotency_key=business_key,
@@ -115,7 +129,7 @@ class EngineCommandService:
       return self._receipt(command)
 
   async def get(self, message_id: str) -> Optional[EngineCommandReceipt]:
-    async with AsyncSessionLocal() as db:
+    async with _command_session() as db:
       command = await db.get(EngineCommandOutbox, message_id)
       return self._receipt(command) if command is not None else None
 

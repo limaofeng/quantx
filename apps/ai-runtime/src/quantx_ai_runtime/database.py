@@ -7,6 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from quantx_infrastructure.async_lifecycle import finish_cleanup
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.relational_connection import (
   AsyncSessionLocal,
@@ -15,8 +16,6 @@ from quantx_infrastructure.database.relational_connection import (
 )
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from .cleanup import finish_cleanup
 
 logger = logging.getLogger(__name__)
 

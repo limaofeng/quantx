@@ -16,6 +16,7 @@ from quantx_application.assistant.contracts import (
   AssistantExecutionContext,
 )
 from quantx_domain.clock import utcnow
+from quantx_infrastructure.async_lifecycle import finish_cleanup
 from quantx_infrastructure.models.ai_assistant import AiAssistantRun
 from quantx_infrastructure.models.auth import AuthUser, AuthUserAccountAccess
 from quantx_infrastructure.repositories.ai_assistant_repository import (
@@ -25,7 +26,6 @@ from quantx_infrastructure.repositories.ai_assistant_repository import (
 from sqlalchemy import select
 
 from quantx_ai_runtime.agents import build_agent
-from quantx_ai_runtime.cleanup import finish_cleanup
 from quantx_ai_runtime.config import AiRuntimeConfig
 from quantx_ai_runtime.database import database_session
 from quantx_ai_runtime.guardrails import validate_user_text
