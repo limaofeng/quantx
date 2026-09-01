@@ -23,6 +23,7 @@ from quantx_domain.enums import (
 from quantx_domain.schemas import ParameterProperty, ParameterSchema
 from quantx_domain.state_schema import StateProperty, StateSchema
 from quantx_domain.strategies.base import (
+  BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
   ManualApprovalRecoveryCandidate,
   OrderStateEvent,
   RuntimeStatePatch,
@@ -336,6 +337,18 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
   @classmethod
   def get_data_requirements(cls) -> Dict[str, Any]:
     return {"use_tick_data": True, "periods": []}
+
+  @classmethod
+  def get_backtest_data_requirements(
+    cls,
+    parameters: Mapping[str, Any],
+  ) -> Dict[str, Any]:
+    requirements = super().get_backtest_data_requirements(parameters)
+    requirements.update(
+      tick_quality_policy=BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
+      require_order_book_depth=True,
+    )
+    return requirements
 
   def apply_state_snapshot(self, state: Optional[Dict[str, Any]]) -> None:
     """Atomically move runtime state to V3 without interpreting legacy signals.

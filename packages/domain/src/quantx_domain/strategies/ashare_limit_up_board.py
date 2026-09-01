@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import time
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from quantx_domain.enums import StrategyCategory, StrategyInstrumentScope
 from quantx_domain.schemas import ParameterProperty, ParameterSchema
 from quantx_domain.state_schema import StateProperty, StateSchema
 from quantx_domain.strategies.base import (
+  BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
   OrderStateEvent,
   RuntimeStatePatch,
   StrategyBase,
@@ -395,6 +396,18 @@ class AshareLimitUpBoardStrategy(StrategyBase):
   @classmethod
   def get_data_requirements(cls) -> Dict[str, Any]:
     return {"use_tick_data": True, "periods": ["1d"]}
+
+  @classmethod
+  def get_backtest_data_requirements(
+    cls,
+    parameters: Mapping[str, Any],
+  ) -> Dict[str, Any]:
+    requirements = super().get_backtest_data_requirements(parameters)
+    requirements.update(
+      tick_quality_policy=BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
+      require_order_book_depth=True,
+    )
+    return requirements
 
   async def on_init(self) -> None:
     self._validate_parameters()

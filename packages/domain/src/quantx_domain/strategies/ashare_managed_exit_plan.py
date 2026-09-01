@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -9,6 +10,7 @@ from quantx_domain.enums import StrategyInstrumentScope
 from quantx_domain.schemas import ParameterProperty, ParameterSchema
 from quantx_domain.state_schema import StateProperty, StateSchema
 from quantx_domain.strategies.base import (
+  BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
   OrderStateEvent,
   RuntimeStatePatch,
   StrategyBase,
@@ -113,6 +115,27 @@ class AshareManagedExitPlanStrategy(StrategyBase):
   def get_data_requirements(cls) -> Dict[str, Any]:
     return {"use_tick_data": True, "periods": ["1m", "1d"]}
 
+  @classmethod
+  def get_backtest_data_requirements(
+    cls,
+    parameters: Mapping[str, Any],
+  ) -> Dict[str, Any]:
+    requirements = super().get_backtest_data_requirements(parameters)
+    raw_template = _mapping(parameters.get(MANAGED_EXIT_PLAN_KEY))
+    require_order_book_depth = False
+    if raw_template:
+      template = ExitPlanTemplate.from_dict(raw_template)
+      require_order_book_depth = any(
+        rule.enabled
+        and rule.strategy == ExitRuleType.ADAPTIVE_VOLUME_PRICE_TRAILING.value
+        for rule in template.rules
+      )
+    requirements.update(
+      tick_quality_policy=BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
+      require_order_book_depth=require_order_book_depth,
+    )
+    return requirements
+
   async def on_init(self) -> None:
     self._template = ExitPlanTemplate.from_dict(
       _mapping(self.context.parameters.get(MANAGED_EXIT_PLAN_KEY))
@@ -160,7 +183,7 @@ class AshareManagedExitPlanStrategy(StrategyBase):
       )
       market = input.market_data
       if requires_depth and not all(
-        _sequence(_get(market, key, []))
+        _has_complete_five_level_depth(_get(market, key, []))
         for key in ("bid_price", "ask_price", "bid_vol", "ask_vol")
       ):
         raise RuntimeError(
@@ -488,6 +511,22 @@ def _sequence(value: Any) -> list[Any]:
   if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
     return list(value)
   return [value] if value is not None else []
+
+
+def _has_complete_five_level_depth(value: Any) -> bool:
+  levels = _sequence(value)
+  if len(levels) < 5:
+    return False
+  for item in levels[:5]:
+    if isinstance(item, bool):
+      return False
+    try:
+      number = float(item)
+    except (TypeError, ValueError, OverflowError):
+      return False
+    if not math.isfinite(number) or number < 0.0:
+      return False
+  return True
 
 
 def _float(value: Any) -> float:

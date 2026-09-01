@@ -19,6 +19,7 @@ from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
 )
 from quantx_domain.strategies.base import (
+  StrategyBase,
   StrategyCadence,
   StrategyContext,
   StrategyInput,
@@ -241,7 +242,7 @@ async def test_t_trade_replay_market_exit_waits_for_next_tick_and_uses_bid_depth
     run_id=context.run_id,
     name="strict replay",
     strategy_id=1,
-    strategy_class=object,
+    strategy_class=AshareIntradayTAssistantStrategy,
     context=context,
   )
 
@@ -329,7 +330,7 @@ async def test_ordinary_backtest_keeps_immediate_market_order_semantics(
     run_id=context.run_id,
     name="ordinary backtest",
     strategy_id=1,
-    strategy_class=object,
+    strategy_class=StrategyBase,
     context=context,
   )
 

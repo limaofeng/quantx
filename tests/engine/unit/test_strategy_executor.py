@@ -113,6 +113,17 @@ class PatchCallbackStrategy(MockStrategy):
     return RuntimeStatePatch(set={"trade_seen": int(event.volume or 0)})
 
 
+class StrictCoverageOnlyStrategy(MockStrategy):
+  @classmethod
+  def get_backtest_data_requirements(cls, parameters):
+    requirements = super().get_backtest_data_requirements(parameters)
+    requirements.update(
+      tick_quality_policy="STRICT_DAILY_SESSION_COVERAGE",
+      require_order_book_depth=False,
+    )
+    return requirements
+
+
 async def keep_running_loop(runtime):
   """测试用：让执行循环保持运行，直到任务被取消。"""
   await asyncio.Event().wait()
@@ -3161,6 +3172,55 @@ class TestStrategyExecutor:
       initial_capital=250000.0,
     )
     live_broker.assert_not_called()
+
+  @pytest.mark.asyncio
+  async def test_backtest_broker_uses_strategy_data_contract_not_feature_flags(
+    self,
+    strategy_executor: StrategyExecutor,
+  ):
+    async def setup(strategy_class, parameters):
+      context = StrategyContext(
+        run_id=f"backtest-{strategy_class.__name__}",
+        mode=StrategyRunMode.BACKTEST,
+        instruments=["688552.SH"],
+        parameters=parameters,
+        initial_capital=250000.0,
+      )
+      runtime = StrategyRuntime(
+        run_id=context.run_id,
+        name="Backtest Run",
+        strategy_id=1,
+        strategy_class=strategy_class,
+        context=context,
+      )
+      with (
+        patch("quantx_engine.strategy_executor.BacktestBroker") as broker_class,
+        patch(
+          "quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode"
+        ) as get_adapter,
+      ):
+        broker = AsyncMock()
+        broker.connect = AsyncMock(return_value=True)
+        broker.subscribe_order_updates = MagicMock()
+        broker.subscribe_trade_updates = MagicMock()
+        broker_class.return_value = broker
+        adapter = AsyncMock()
+        adapter.connect = AsyncMock(return_value=True)
+        get_adapter.return_value = adapter
+
+        await strategy_executor._setup_broker_and_data(runtime)
+
+      return broker_class.call_args.kwargs
+
+    strict_options = await setup(StrictCoverageOnlyStrategy, {})
+    flag_only_options = await setup(MockStrategy, {"t_trade_replay": True})
+
+    assert strict_options["no_queue_credit"] is True
+    assert strict_options["defer_new_orders_until_next_quote"] is True
+    assert strict_options["strict_book_depth"] is False
+    assert flag_only_options["no_queue_credit"] is False
+    assert flag_only_options["defer_new_orders_until_next_quote"] is False
+    assert flag_only_options["strict_book_depth"] is False
 
   @pytest.mark.asyncio
   async def test_paper_broker_seeds_initial_holdings(

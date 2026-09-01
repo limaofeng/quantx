@@ -17,13 +17,15 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import select
 import uuid
 from datetime import date, datetime, time, timedelta
-from typing import Any, AsyncIterator, Dict, List, Optional, Set, Type
+from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Type
 
 from quantx_domain.strategies.base import (
+  BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
   StrategyBase,
   StrategyContext,
   StrategyRunMode,
@@ -106,10 +108,10 @@ _MARKET_DATA_SYNC_MAX_DATE_SPAN_DAYS = {
   "1d": 3_700,
 }
 
-_T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY = 120
-_T_TRADE_REPLAY_SESSION_EDGE_TOLERANCE = timedelta(minutes=5)
-_T_TRADE_REPLAY_MAX_CONTINUOUS_GAP = timedelta(minutes=15)
-_T_TRADE_REPLAY_CONTINUOUS_SESSIONS = (
+_STRICT_TICK_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY = 120
+_STRICT_TICK_REPLAY_SESSION_EDGE_TOLERANCE = timedelta(minutes=5)
+_STRICT_TICK_REPLAY_MAX_CONTINUOUS_GAP = timedelta(minutes=15)
+_STRICT_TICK_REPLAY_CONTINUOUS_SESSIONS = (
   (time(9, 30), time(11, 30)),
   (time(13, 0), time(15, 0)),
 )
@@ -1302,8 +1304,16 @@ class StrategyManager:
     # 验证；不能将该参考窗口误当成必须逐日完整的收益回放区间。
     start_time = start_time.replace(hour=9, minute=30, second=0, microsecond=0)
     end_time = end_time.replace(hour=15, minute=30, second=0, microsecond=0)
-    requirements = runtime.strategy_class.get_data_requirements()
+    requirements = runtime.strategy_class.resolve_backtest_data_requirements(
+      runtime.context.parameters
+    )
     require_tick = bool(requirements.get("use_tick_data", False))
+    tick_quality_policy = str(requirements["tick_quality_policy"])
+    require_order_book_depth = bool(requirements["require_order_book_depth"])
+    strict_tick_quality = (
+      tick_quality_policy
+      == BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE
+    )
     required_kline_periods = {
       str(period).lower()
       for period in (requirements.get("periods") or [])
@@ -1318,11 +1328,11 @@ class StrategyManager:
       f"检查回测历史数据: {runtime.run_id}, "
       f"{start_time.date()} ~ {end_time.date()}, "
       f"标的: {runtime.instruments}, "
-      f"tick={require_tick}, periods={sorted(required_kline_periods)}"
+      f"tick={require_tick}, periods={sorted(required_kline_periods)}, "
+      f"tick_quality_policy={tick_quality_policy}, "
+      f"require_order_book_depth={require_order_book_depth}"
     )
 
-    is_exit_plan_replay = bool(runtime.context.parameters.get("exit_plan_replay"))
-    is_strict_tick_replay = is_t_trade_replay or is_exit_plan_replay
     missing_before = await self._find_missing_backtest_data(
       service=service,
       instruments=runtime.instruments,
@@ -1330,7 +1340,8 @@ class StrategyManager:
       end_time=end_time,
       required_kline_periods=required_kline_periods,
       require_tick=require_tick,
-      strict_tick_quality=is_strict_tick_replay,
+      strict_tick_quality=strict_tick_quality,
+      require_order_book_depth=require_order_book_depth,
     )
 
     self.logger.info(
@@ -1383,7 +1394,7 @@ class StrategyManager:
     missing_desc = self._format_missing_data(missing_before)
     sync_periods = self._extract_supported_sync_periods(missing_before)
     unsupported_periods = self._collect_unsupported_periods(missing_before)
-    if is_strict_tick_replay:
+    if strict_tick_quality:
       self.logger.info(
         "严格 Tick 回放本地历史数据不完整，将阻塞补齐并复核 InfluxDB: %s",
         missing_desc,
@@ -1452,13 +1463,16 @@ class StrategyManager:
         required_kline_periods=required_kline_periods,
         require_tick=require_tick,
         strict_tick_quality=True,
+        require_order_book_depth=require_order_book_depth,
       )
-      await self._apply_t_trade_replay_data_availability(
+      await self._apply_strict_tick_replay_data_availability(
         runtime=runtime,
         missing=missing_after,
         missing_before=missing_before,
         synchronization=synchronization,
         unsupported_periods=unsupported_periods,
+        tick_quality_policy=tick_quality_policy,
+        require_order_book_depth=require_order_book_depth,
       )
       if missing_after:
         error_code = (
@@ -1475,7 +1489,7 @@ class StrategyManager:
         raise error
       if sync_error is not None:
         self.logger.warning(
-          "做 T 回放历史数据补齐返回失败，但严格 InfluxDB 复核已通过: %s",
+          "严格 Tick 回放历史数据补齐返回失败，但 InfluxDB 复核已通过: %s",
           sync_error,
         )
       if is_t_trade_replay:
@@ -1814,7 +1828,7 @@ class StrategyManager:
       summary["status"] = "ALREADY_COMPLETED"
     return summary
 
-  async def _apply_t_trade_replay_data_availability(
+  async def _apply_strict_tick_replay_data_availability(
     self,
     *,
     runtime: StrategyRuntime,
@@ -1822,6 +1836,8 @@ class StrategyManager:
     missing_before: Dict[str, Dict[str, Any]],
     synchronization: Dict[str, Any],
     unsupported_periods: Set[str],
+    tick_quality_policy: str,
+    require_order_book_depth: bool,
   ) -> None:
     """Persist the blocking replay-data decision without pruning instruments."""
 
@@ -1830,7 +1846,7 @@ class StrategyManager:
       code for code in runtime.context.instruments if code not in missing_codes
     ]
     replay_data_preparation = {
-      "schema_version": 3,
+      "schema_version": 4,
       "policy": "INFLUXDB_LOCAL_FIRST_AGENT_SYNC_BLOCKING",
       "local_authority": "INFLUXDB",
       "blocking": True,
@@ -1842,6 +1858,8 @@ class StrategyManager:
       "replay_start_allowed": not bool(missing),
       "unsupported_periods": sorted(unsupported_periods),
       "synchronization": synchronization,
+      "tick_quality_policy": tick_quality_policy,
+      "require_order_book_depth": require_order_book_depth,
     }
     quality_issues_before = {
       code: list(info.get("quality_issues") or [])
@@ -1856,7 +1874,6 @@ class StrategyManager:
     if quality_issues_before or quality_issues_after:
       replay_data_preparation.update(
         {
-          "quality_policy": "STRICT_DAILY_SESSION_COVERAGE",
           "quality_issues_before": quality_issues_before,
           "quality_issues_after": quality_issues_after,
         }
@@ -1873,7 +1890,8 @@ class StrategyManager:
       break
     if missing_codes:
       self.logger.warning(
-        "做 T 回放历史数据严格复核后仍不完整，已阻止启动: %s (synchronization=%s)",
+        "严格 Tick 回放历史数据复核后仍不完整，已阻止启动: %s "
+        "(synchronization=%s)",
         ", ".join(sorted(missing_codes)),
         synchronization.get("status"),
       )
@@ -2226,13 +2244,16 @@ class StrategyManager:
     required_kline_periods: Optional[Set[str]] = None,
     require_tick: bool = True,
     strict_tick_quality: bool = False,
+    require_order_book_depth: bool = False,
   ) -> Dict[str, Dict[str, Any]]:
     """逐日统计每个标的缺失的历史数据（按策略数据需求检查）。
 
-    普通回测继续使用既有存在性语义。做 T 历史回放显式启用
-    ``strict_tick_quality``，只有交易时段覆盖、记录数和连续性均达到最小严格
-    口径时才允许生成绩效。
+    普通回测继续使用既有存在性语义。严格 Tick 回放只有交易时段覆盖、
+    记录数和连续性均达到最小严格口径时才允许生成绩效；需要盘口深度时，
+    每条连续竞价 Tick 还必须包含完整五档买卖价量。
     """
+    if require_order_book_depth and not strict_tick_quality:
+      raise ValueError("order-book depth preflight requires strict Tick quality")
     missing: Dict[str, Dict[str, Any]] = {}
     if not instruments:
       return missing
@@ -2282,10 +2303,11 @@ class StrategyManager:
         if require_tick:
           if strict_tick_quality:
             inspection = await asyncio.to_thread(
-              self._inspect_t_trade_replay_tick_day,
+              self._inspect_strict_tick_replay_day,
               service,
               instrument,
               trading_date,
+              require_order_book_depth=require_order_book_depth,
             )
             if not inspection["complete"]:
               confirmed_empty = False
@@ -2345,11 +2367,13 @@ class StrategyManager:
 
     return missing
 
-  def _inspect_t_trade_replay_tick_day(
+  def _inspect_strict_tick_replay_day(
     self,
     service: HistoricalMarketDataService,
     instrument: str,
     trading_date: date,
+    *,
+    require_order_book_depth: bool = False,
   ) -> Dict[str, Any]:
     """Return an auditable, fail-closed quality decision for one Tick day."""
 
@@ -2360,18 +2384,34 @@ class StrategyManager:
       "date": trading_date.isoformat(),
       "instrument_code": instrument,
     }
+    query_fields = ["time", "amount", "volume", "pvolume"]
+    if require_order_book_depth:
+      query_fields.extend(
+        [
+          f"{prefix}{level}"
+          for prefix in ("ask", "bid")
+          for level in range(1, 6)
+        ]
+      )
+      query_fields.extend(
+        [
+          f"{prefix}{level}"
+          for prefix in ("ask_vol", "bid_vol")
+          for level in range(1, 6)
+        ]
+      )
     try:
       records = service.tick_repo.find_all(
         filters={"stock_code": instrument},
         start_time=query_start,
         end_time=query_end,
-        fields=["time", "amount", "volume", "pvolume"],
+        fields=query_fields,
         limit=None,
         order_by="time ASC",
       )
     except Exception as exc:
       self.logger.warning(
-        "做 T 回放逐日 Tick 质量查询失败: instrument=%s, date=%s, error=%s",
+        "严格 Tick 回放逐日质量查询失败: instrument=%s, date=%s, error=%s",
         instrument,
         trading_date,
         exc,
@@ -2407,6 +2447,10 @@ class StrategyManager:
               "amount": getattr(record, "amount", None),
               "volume": getattr(record, "volume", None),
               "pvolume": getattr(record, "pvolume", None),
+              "ask_price": getattr(record, "ask_price", None),
+              "bid_price": getattr(record, "bid_price", None),
+              "ask_vol": getattr(record, "ask_vol", None),
+              "bid_vol": getattr(record, "bid_vol", None),
             }
           )
     raw_times = [item.get("time") for item in raw_records]
@@ -2428,24 +2472,46 @@ class StrategyManager:
       )
       cumulative_volume_source_counts[cumulative_volume.source.value] += 1
 
-    timestamps: List[datetime] = []
+    timestamped_records: List[tuple[datetime, Dict[str, Any]]] = []
     invalid_timestamp_count = 0
-    for value in raw_times:
+    for record in raw_records:
+      value = record.get("time")
       if hasattr(value, "to_pydatetime"):
         value = value.to_pydatetime()
       if not isinstance(value, datetime):
         invalid_timestamp_count += 1
         continue
-      timestamps.append(time_utils.to_shanghai(value))
-    timestamps.sort()
+      timestamped_records.append((time_utils.to_shanghai(value), record))
+    timestamped_records.sort(key=lambda item: item[0])
+    timestamps = [item[0] for item in timestamped_records]
 
     session_times: List[List[datetime]] = []
-    for session_start, session_end in _T_TRADE_REPLAY_CONTINUOUS_SESSIONS:
+    for session_start, session_end in _STRICT_TICK_REPLAY_CONTINUOUS_SESSIONS:
       lower = datetime.combine(trading_date, session_start)
       upper = datetime.combine(trading_date, session_end)
       session_times.append([value for value in timestamps if lower <= value <= upper])
 
     continuous_times = [value for values in session_times for value in values]
+    continuous_records = [
+      record
+      for timestamp, record in timestamped_records
+      if any(
+        datetime.combine(trading_date, session_start)
+        <= timestamp
+        <= datetime.combine(trading_date, session_end)
+        for session_start, session_end in _STRICT_TICK_REPLAY_CONTINUOUS_SESSIONS
+      )
+    ]
+    incomplete_order_book_depth_count = 0
+    if require_order_book_depth:
+      incomplete_order_book_depth_count = sum(
+        1
+        for record in continuous_records
+        if not all(
+          self._has_complete_five_level_depth(record.get(field))
+          for field in ("bid_price", "ask_price", "bid_vol", "ask_vol")
+        )
+      )
     morning_times, afternoon_times = session_times
     max_gap_seconds = 0.0
     max_gap_start: Optional[datetime] = None
@@ -2463,8 +2529,12 @@ class StrategyManager:
       reason_codes.append("NO_TICK_DATA")
     if invalid_timestamp_count:
       reason_codes.append("INVALID_TICK_TIMESTAMPS")
-    if len(continuous_times) < _T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY:
+    if (
+      len(continuous_times) < _STRICT_TICK_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY
+    ):
       reason_codes.append("TICK_COUNT_TOO_LOW")
+    if require_order_book_depth and incomplete_order_book_depth_count:
+      reason_codes.append("ORDER_BOOK_DEPTH_INCOMPLETE")
     if raw_records and positive_amount_count == 0:
       reason_codes.append("CUMULATIVE_AMOUNT_UNAVAILABLE")
     usable_cumulative_volume_count = (
@@ -2474,18 +2544,18 @@ class StrategyManager:
     if raw_records and usable_cumulative_volume_count == 0:
       reason_codes.append("CUMULATIVE_VOLUME_UNAVAILABLE")
 
-    tolerance = _T_TRADE_REPLAY_SESSION_EDGE_TOLERANCE
+    tolerance = _STRICT_TICK_REPLAY_SESSION_EDGE_TOLERANCE
     morning_start = datetime.combine(
-      trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[0][0]
+      trading_date, _STRICT_TICK_REPLAY_CONTINUOUS_SESSIONS[0][0]
     )
     morning_end = datetime.combine(
-      trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[0][1]
+      trading_date, _STRICT_TICK_REPLAY_CONTINUOUS_SESSIONS[0][1]
     )
     afternoon_start = datetime.combine(
-      trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[1][0]
+      trading_date, _STRICT_TICK_REPLAY_CONTINUOUS_SESSIONS[1][0]
     )
     afternoon_end = datetime.combine(
-      trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[1][1]
+      trading_date, _STRICT_TICK_REPLAY_CONTINUOUS_SESSIONS[1][1]
     )
     if not morning_times or morning_times[0] > morning_start + tolerance:
       reason_codes.append("SESSION_OPEN_NOT_COVERED")
@@ -2495,12 +2565,14 @@ class StrategyManager:
       reason_codes.append("AFTERNOON_OPEN_NOT_COVERED")
     if not afternoon_times or afternoon_times[-1] < afternoon_end - tolerance:
       reason_codes.append("SESSION_CLOSE_NOT_COVERED")
-    if max_gap_seconds > _T_TRADE_REPLAY_MAX_CONTINUOUS_GAP.total_seconds():
+    if max_gap_seconds > _STRICT_TICK_REPLAY_MAX_CONTINUOUS_GAP.total_seconds():
       reason_codes.append("CONTINUOUS_SESSION_GAP_TOO_LARGE")
 
     statistics = {
       "record_count": len(raw_times),
       "continuous_session_record_count": len(continuous_times),
+      "require_order_book_depth": require_order_book_depth,
+      "incomplete_order_book_depth_count": incomplete_order_book_depth_count,
       "invalid_timestamp_count": invalid_timestamp_count,
       "positive_cumulative_amount_count": positive_amount_count,
       "usable_cumulative_volume_count": usable_cumulative_volume_count,
@@ -2520,29 +2592,56 @@ class StrategyManager:
         max_gap_start.isoformat() if max_gap_start else None
       ),
       "max_continuous_gap_end": max_gap_end.isoformat() if max_gap_end else None,
-      "minimum_record_count": _T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY,
-      "maximum_gap_seconds": _T_TRADE_REPLAY_MAX_CONTINUOUS_GAP.total_seconds(),
+      "minimum_record_count": _STRICT_TICK_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY,
+      "maximum_gap_seconds": _STRICT_TICK_REPLAY_MAX_CONTINUOUS_GAP.total_seconds(),
       "session_edge_tolerance_seconds": tolerance.total_seconds(),
     }
     if not reason_codes:
+      validated_semantics = "交易时段覆盖、连续性与累计成交字段"
+      if require_order_book_depth:
+        validated_semantics += "、五档盘口"
       return {
         **base,
         "complete": True,
         "classification": "COMPLETE",
         "reason_codes": [],
-        "message": "Tick 交易时段覆盖、连续性与累计成交字段语义校验通过",
+        "message": f"Tick {validated_semantics}语义校验通过",
         "statistics": statistics,
       }
 
     classification = "MISSING" if "NO_TICK_DATA" in reason_codes else "PARTIAL"
+    failed_semantics = "覆盖、连续性或累计成交字段"
+    if require_order_book_depth:
+      failed_semantics += "、五档盘口"
     return {
       **base,
       "complete": False,
       "classification": classification,
       "reason_codes": reason_codes,
-      "message": "Tick 覆盖、连续性或累计成交字段语义未达到回放最低完整性要求",
+      "message": f"Tick {failed_semantics}语义未达到回放最低完整性要求",
       "statistics": statistics,
     }
+
+  @staticmethod
+  def _has_complete_five_level_depth(values: Any) -> bool:
+    if values is None or isinstance(values, (str, bytes, Mapping)):
+      return False
+    try:
+      levels = list(values)
+    except TypeError:
+      return False
+    if len(levels) < 5:
+      return False
+    for value in levels[:5]:
+      if isinstance(value, bool):
+        return False
+      try:
+        number = float(value)
+      except (TypeError, ValueError, OverflowError):
+        return False
+      if not math.isfinite(number) or number < 0.0:
+        return False
+    return True
 
   @staticmethod
   def _contains_partial_market_data(missing: Dict[str, Dict[str, Any]]) -> bool:

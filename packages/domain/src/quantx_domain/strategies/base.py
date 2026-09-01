@@ -52,6 +52,16 @@ class MarketDataSession(str, Enum):
     return self in {self.CONTINUOUS_AM, self.CONTINUOUS_PM}
 
 
+BACKTEST_TICK_QUALITY_EXISTENCE_ONLY = "EXISTENCE_ONLY"
+BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE = (
+  "STRICT_DAILY_SESSION_COVERAGE"
+)
+_SUPPORTED_BACKTEST_TICK_QUALITY_POLICIES = {
+  BACKTEST_TICK_QUALITY_EXISTENCE_ONLY,
+  BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
+}
+
+
 @dataclass(frozen=True)
 class MarketDataContext:
   """Causal identity and continuity facts for one market-data input.
@@ -873,6 +883,52 @@ class StrategyBase(ABC):
   def get_data_requirements(cls) -> Dict[str, Any]:
     """获取策略的数据订阅需求（固定声明，运行层据此订阅数据）"""
     return {"use_tick_data": True, "periods": ["1m", "1d"]}
+
+  @classmethod
+  def get_backtest_data_requirements(
+    cls,
+    parameters: Mapping[str, Any],
+  ) -> Dict[str, Any]:
+    """Return historical replay requirements resolved from frozen parameters."""
+
+    del parameters
+    return {
+      **cls.get_data_requirements(),
+      "tick_quality_policy": BACKTEST_TICK_QUALITY_EXISTENCE_ONLY,
+      "require_order_book_depth": False,
+    }
+
+  @classmethod
+  def resolve_backtest_data_requirements(
+    cls,
+    parameters: Mapping[str, Any],
+  ) -> Dict[str, Any]:
+    """Normalize and validate the strategy-owned backtest data contract."""
+
+    requirements = dict(cls.get_backtest_data_requirements(parameters))
+    policy = str(
+      requirements.get("tick_quality_policy")
+      or BACKTEST_TICK_QUALITY_EXISTENCE_ONLY
+    ).upper()
+    if policy not in _SUPPORTED_BACKTEST_TICK_QUALITY_POLICIES:
+      raise ValueError(f"unsupported backtest tick quality policy: {policy}")
+    requirements["tick_quality_policy"] = policy
+    requirements["require_order_book_depth"] = bool(
+      requirements.get("require_order_book_depth", False)
+    )
+    use_tick_data = bool(requirements.get("use_tick_data", False)) or any(
+      str(period or "").lower() == "tick"
+      for period in requirements.get("periods") or []
+    )
+    requirements["use_tick_data"] = use_tick_data
+    if requirements["require_order_book_depth"] and not use_tick_data:
+      raise ValueError("order-book depth requires Tick data")
+    if (
+      policy == BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE
+      and not use_tick_data
+    ):
+      raise ValueError("strict daily Tick coverage requires Tick data")
+    return requirements
 
   def pending_manual_intent_ids(self) -> List[str]:
     """Return persisted manual-confirm intents that should survive a restart."""

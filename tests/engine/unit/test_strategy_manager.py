@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from quantx_domain.strategies.base import (
+  BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
   StrategyBase,
   StrategyContext,
   StrategyInput,
@@ -71,6 +72,17 @@ class MockStrategy(StrategyBase):
     self.stopped = True
 
 
+class StrictTickMockStrategy(MockStrategy):
+  @classmethod
+  def get_backtest_data_requirements(cls, parameters):
+    requirements = super().get_backtest_data_requirements(parameters)
+    requirements.update(
+      tick_quality_policy=BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
+      require_order_book_depth=True,
+    )
+    return requirements
+
+
 def _t_trade_replay_runtime(instruments: list[str]) -> StrategyRuntime:
   metadata = {
     code: {"instrument_name": code, "position_shares": 100} for code in instruments
@@ -91,7 +103,7 @@ def _t_trade_replay_runtime(instruments: list[str]) -> StrategyRuntime:
     run_id=context.run_id,
     name="isolated replay",
     strategy_id=1,
-    strategy_class=MockStrategy,
+    strategy_class=StrictTickMockStrategy,
     context=context,
   )
 
@@ -1224,6 +1236,60 @@ class TestStrategyManager:
     assert missing == {}
     StrategyManager._instance = None
 
+  def test_strict_tick_replay_depth_preflight_requires_five_valid_levels(self):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    trading_date = date(2026, 8, 3)
+    morning = [
+      datetime(2026, 8, 3, 9, 30) + timedelta(minutes=index)
+      for index in range(121)
+    ]
+    afternoon = [
+      datetime(2026, 8, 3, 13, 0) + timedelta(minutes=index)
+      for index in range(121)
+    ]
+    records = [
+      SimpleNamespace(
+        time=value,
+        amount=1_000_000.0,
+        volume=1_000.0,
+        pvolume=100_000.0,
+        bid_price=[0.0] * 5,
+        ask_price=[0.0] * 5,
+        bid_vol=[0.0] * 5,
+        ask_vol=[0.0] * 5,
+      )
+      for value in morning + afternoon
+    ]
+    query = []
+
+    def find_all(**kwargs):
+      query.append(kwargs)
+      return records
+
+    service = SimpleNamespace(tick_repo=SimpleNamespace(find_all=find_all))
+    complete = manager._inspect_strict_tick_replay_day(
+      service,
+      "600887.SH",
+      trading_date,
+      require_order_book_depth=True,
+    )
+    records[100].bid_vol = [0.0] * 4
+    incomplete = manager._inspect_strict_tick_replay_day(
+      service,
+      "600887.SH",
+      trading_date,
+      require_order_book_depth=True,
+    )
+
+    assert complete["complete"] is True
+    assert "ask1" in query[0]["fields"]
+    assert "bid_vol5" in query[0]["fields"]
+    assert incomplete["classification"] == "PARTIAL"
+    assert "ORDER_BOOK_DEPTH_INCOMPLETE" in incomplete["reason_codes"]
+    assert incomplete["statistics"]["incomplete_order_book_depth_count"] == 1
+    StrategyManager._instance = None
+
   @pytest.mark.asyncio
   async def test_t_trade_replay_with_complete_local_data_never_calls_agent(
     self,
@@ -1450,15 +1516,22 @@ class TestStrategyManager:
     queued.assert_not_awaited()
     find_missing = manager._find_missing_backtest_data
     assert find_missing.await_args_list[1].kwargs["strict_tick_quality"] is True
+    assert (
+      find_missing.await_args_list[1].kwargs["require_order_book_depth"] is True
+    )
     assert {call.kwargs["start_time"] for call in find_missing.await_args_list} == {
       datetime(2026, 8, 3, 9, 30)
     }
     assert runtime.context.instruments == ["600887.SH", "688552.SH"]
     preparation = runtime.context.parameters["replay_data_preparation"]
-    assert preparation["schema_version"] == 3
+    assert preparation["schema_version"] == 4
     assert preparation["policy"] == "INFLUXDB_LOCAL_FIRST_AGENT_SYNC_BLOCKING"
     assert preparation["blocking"] is True
     assert preparation["required"] is True
+    assert preparation["tick_quality_policy"] == (
+      "STRICT_DAILY_SESSION_COVERAGE"
+    )
+    assert preparation["require_order_book_depth"] is True
     assert preparation["missing_before"] == ["688552.SH"]
     assert preparation["missing_after"] == []
     assert preparation["required_instruments"] == ["600887.SH", "688552.SH"]
@@ -1545,12 +1618,15 @@ class TestStrategyManager:
       "688552.SH"
     ]
     preparation = runtime.context.parameters["replay_data_preparation"]
-    assert preparation["schema_version"] == 3
+    assert preparation["schema_version"] == 4
     assert preparation["policy"] == "INFLUXDB_LOCAL_FIRST_AGENT_SYNC_BLOCKING"
     assert preparation["replay_start_allowed"] is False
     assert preparation["synchronization"]["mode"] == "BLOCKING_REQUIRED"
     assert preparation["synchronization"]["status"] == "COMPLETED"
-    assert preparation["quality_policy"] == "STRICT_DAILY_SESSION_COVERAGE"
+    assert preparation["tick_quality_policy"] == (
+      "STRICT_DAILY_SESSION_COVERAGE"
+    )
+    assert preparation["require_order_book_depth"] is True
     assert preparation["quality_issues_after"]["688552.SH"][0]["reason_codes"] == [
       "SESSION_CLOSE_NOT_COVERED"
     ]
@@ -1669,6 +1745,7 @@ class TestStrategyManager:
     manager = StrategyManager()
     runtime = _t_trade_replay_runtime(["600887.SH"])
     runtime.context.parameters.pop("t_trade_replay")
+    runtime.strategy_class = MockStrategy
     missing = {
       "600887.SH": {
         "dates": {date(2026, 8, 3)},

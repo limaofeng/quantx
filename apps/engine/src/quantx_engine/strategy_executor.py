@@ -61,6 +61,7 @@ from quantx_domain.strategies.ashare_managed_exit_plan import (
   AshareManagedExitPlanStrategy,
 )
 from quantx_domain.strategies.base import (
+  BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
   ManualApprovalRecoveryCandidate,
   MarketDataContext,
   MarketDataSession,
@@ -5706,11 +5707,14 @@ class StrategyExecutor:
 
     # 创建 Broker
     if mode == StrategyRunMode.BACKTEST:
-      is_strict_tick_replay = bool(
-        runtime.context.parameters.get("limit_up_board_replay")
-        or runtime.context.parameters.get("t_trade_replay")
-        or runtime.context.parameters.get("exit_plan_replay")
+      requirements = runtime.strategy_class.resolve_backtest_data_requirements(
+        runtime.context.parameters
       )
+      strict_tick_quality = (
+        requirements["tick_quality_policy"]
+        == BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE
+      )
+      require_order_book_depth = bool(requirements["require_order_book_depth"])
       runtime.broker = BacktestBroker(
         account_id=runtime.run_id,
         initial_capital=runtime.context.initial_capital,
@@ -5739,9 +5743,9 @@ class StrategyExecutor:
           )
           or 0.25
         ),
-        strict_book_depth=is_strict_tick_replay,
-        no_queue_credit=is_strict_tick_replay,
-        defer_new_orders_until_next_quote=is_strict_tick_replay,
+        strict_book_depth=require_order_book_depth,
+        no_queue_credit=strict_tick_quality,
+        defer_new_orders_until_next_quote=strict_tick_quality,
       )
     elif mode == StrategyRunMode.PAPER:
       runtime.broker = SimulatorBroker(
@@ -6137,7 +6141,9 @@ class StrategyExecutor:
       return
 
     # 读取策略声明的数据需求
-    requirements = runtime.strategy_class.get_data_requirements()
+    requirements = runtime.strategy_class.resolve_backtest_data_requirements(
+      runtime.context.parameters
+    )
     use_tick_data = bool(requirements.get("use_tick_data", False))
     periods = [
       p.lower()

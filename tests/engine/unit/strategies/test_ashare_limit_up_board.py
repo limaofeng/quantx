@@ -356,6 +356,12 @@ def test_data_requirements_subscribe_tick_and_daily_bar():
     "use_tick_data": True,
     "periods": ["1d"],
   }
+  assert AshareLimitUpBoardStrategy.resolve_backtest_data_requirements({}) == {
+    "use_tick_data": True,
+    "periods": ["1d"],
+    "tick_quality_policy": "STRICT_DAILY_SESSION_COVERAGE",
+    "require_order_book_depth": True,
+  }
 
 
 def test_schema_exposes_production_backtest_and_order_expiry_defaults():

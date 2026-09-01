@@ -48,20 +48,28 @@ def _template() -> ExitPlanTemplate:
   )
 
 
-async def _strategy(mode: StrategyRunMode) -> AshareManagedExitPlanStrategy:
+async def _strategy(
+  mode: StrategyRunMode,
+  *,
+  template: ExitPlanTemplate | None = None,
+  extra_parameters: dict | None = None,
+) -> AshareManagedExitPlanStrategy:
+  resolved_template = template or _template()
+  parameters = {
+    MANAGED_EXIT_PLAN_KEY: resolved_template.to_dict(),
+    EXIT_PLAN_ENABLED_KEY: True,
+    "account_id": "account-1",
+    "initial_protected_volume": 1_000,
+    "initial_entry_avg_price": 10.0,
+    "initial_entry_time": NOW.isoformat(),
+  }
+  parameters.update(extra_parameters or {})
   strategy = AshareManagedExitPlanStrategy(
     StrategyContext(
       run_id="run-v3",
       mode=mode,
       instruments=["600000.SH"],
-      parameters={
-        MANAGED_EXIT_PLAN_KEY: _template().to_dict(),
-        EXIT_PLAN_ENABLED_KEY: True,
-        "account_id": "account-1",
-        "initial_protected_volume": 1_000,
-        "initial_entry_avg_price": 10.0,
-        "initial_entry_time": NOW.isoformat(),
-      },
+      parameters=parameters,
       current_time=NOW,
     )
   )
@@ -208,3 +216,60 @@ def test_manual_command_intent_has_no_fake_strategy_run_identity():
   assert intent.run_id == ""
   assert intent.strategy_id == ""
   assert intent.origin.command_id == "liquidation-command-1"
+
+
+def test_backtest_requirements_resolve_depth_from_enabled_adaptive_rule():
+  target_parameters = {MANAGED_EXIT_PLAN_KEY: _template().to_dict()}
+  target_requirements = (
+    AshareManagedExitPlanStrategy.resolve_backtest_data_requirements(
+      target_parameters
+    )
+  )
+
+  adaptive_template = _template().to_dict()
+  adaptive_template["rules"][0]["strategy"] = (
+    ExitRuleType.ADAPTIVE_VOLUME_PRICE_TRAILING.value
+  )
+  adaptive_requirements = (
+    AshareManagedExitPlanStrategy.resolve_backtest_data_requirements(
+      {MANAGED_EXIT_PLAN_KEY: adaptive_template}
+    )
+  )
+  adaptive_template["rules"][0]["enabled"] = False
+  disabled_requirements = (
+    AshareManagedExitPlanStrategy.resolve_backtest_data_requirements(
+      {MANAGED_EXIT_PLAN_KEY: adaptive_template}
+    )
+  )
+
+  assert target_requirements["tick_quality_policy"] == (
+    "STRICT_DAILY_SESSION_COVERAGE"
+  )
+  assert target_requirements["require_order_book_depth"] is False
+  assert adaptive_requirements["require_order_book_depth"] is True
+  assert disabled_requirements["require_order_book_depth"] is False
+
+
+@pytest.mark.asyncio
+async def test_adaptive_replay_runtime_depth_guard_requires_five_valid_levels():
+  adaptive_template = _template().to_dict()
+  adaptive_template["rules"][0]["strategy"] = (
+    ExitRuleType.ADAPTIVE_VOLUME_PRICE_TRAILING.value
+  )
+  strategy = await _strategy(
+    StrategyRunMode.BACKTEST,
+    template=ExitPlanTemplate.from_dict(adaptive_template),
+    extra_parameters={"exit_plan_replay": True},
+  )
+  market_input = _input()
+
+  with pytest.raises(RuntimeError, match="EXIT_PLAN_REPLAY_DEPTH_DATA_MISSING"):
+    await strategy.step(market_input)
+
+  market_input.market_data.update(
+    bid_price=[0.0] * 5,
+    ask_price=[0.0] * 5,
+    bid_vol=[0.0] * 5,
+    ask_vol=[0.0] * 5,
+  )
+  await strategy.step(market_input)

@@ -47,6 +47,19 @@ REFERENCE_PROFILE = {
 }
 
 
+def test_backtest_data_requirements_are_strict_and_require_depth():
+  requirements = (
+    AshareIntradayTAssistantStrategy.resolve_backtest_data_requirements({})
+  )
+
+  assert requirements == {
+    "use_tick_data": True,
+    "periods": [],
+    "tick_quality_policy": "STRICT_DAILY_SESSION_COVERAGE",
+    "require_order_book_depth": True,
+  }
+
+
 def make_tick(
   timestamp: datetime,
   price: float,
