@@ -14,7 +14,10 @@ import {
   ReplayEvidenceSelect,
   ReplayEvidenceState,
 } from './ReplayEvidenceChrome';
-import { collapseEvidenceOnEscape } from './replayEvidenceKeyboard';
+import {
+  collapseEvidenceOnEscape,
+  useRevealReplayEvidenceTarget,
+} from './replayEvidenceKeyboard';
 import {
   replayIntentTarget,
   replayReasonLabel,
@@ -125,12 +128,12 @@ export function TTradeReplayDecisionAudit({
   const focusedDecisionId = filters.eventKey
     ? auditRecords[0]?.decision.id
     : null;
-  React.useEffect(() => {
-    if (focusedDecisionId) {
-      setExpandedId(focusedDecisionId);
-      linkedRowRef.current?.focus();
-    }
-  }, [focusedDecisionId]);
+  useRevealReplayEvidenceTarget(
+    filters.eventKey,
+    focusedDecisionId,
+    linkedRowRef,
+    setExpandedId
+  );
   const available =
     hasReplay && page?.evidence.availability === 'AVAILABLE' && !auditError;
   const summary = page?.summary;

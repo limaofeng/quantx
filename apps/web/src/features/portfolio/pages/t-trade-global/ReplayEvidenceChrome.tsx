@@ -206,11 +206,17 @@ export function ReplayEvidenceFooter({
       <span>
         已显示 {count} / {total ?? '—'} 条
       </span>
-      {more && (
-        <Button variant="outline" size="sm" disabled={loading} onClick={onMore}>
-          {loading ? '读取中…' : '加载更多'}
-        </Button>
-      )}
+      <Button
+        variant="outline"
+        size="sm"
+        aria-disabled={loading || !more}
+        className="aria-disabled:pointer-events-none aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+        onClick={() => {
+          if (!loading && more) onMore();
+        }}
+      >
+        {loading ? '读取中…' : more ? '加载更多' : '已全部加载'}
+      </Button>
     </footer>
   );
 }

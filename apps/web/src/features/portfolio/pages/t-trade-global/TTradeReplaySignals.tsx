@@ -13,7 +13,10 @@ import {
   ReplayEvidenceSelect,
   ReplayEvidenceState,
 } from './ReplayEvidenceChrome';
-import { collapseEvidenceOnEscape } from './replayEvidenceKeyboard';
+import {
+  collapseEvidenceOnEscape,
+  useRevealReplayEvidenceTarget,
+} from './replayEvidenceKeyboard';
 import {
   candidateStatusLabels,
   nullableScore,
@@ -56,12 +59,12 @@ export function TTradeReplaySignals({
     evaluations.some(item => item.eventKey === filters.eventKey)
       ? filters.eventKey
       : null;
-  React.useEffect(() => {
-    if (focusedEventKey) {
-      setExpandedKey(focusedEventKey);
-      linkedRowRef.current?.focus();
-    }
-  }, [focusedEventKey]);
+  useRevealReplayEvidenceTarget(
+    filters.eventKey,
+    focusedEventKey,
+    linkedRowRef,
+    setExpandedKey
+  );
   const available =
     hasReplay && page?.evidence.availability === 'AVAILABLE' && !signalError;
   const summary = page?.summary;

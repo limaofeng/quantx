@@ -277,6 +277,114 @@ describe('replay evidence pages', () => {
     expect(row).toHaveFocus();
   });
 
+  it('does not reclaim focus from search when linked audit results refresh', () => {
+    const linkedDecision = {
+      decision: {
+        id: 'page-two-decision',
+        instanceId: 'run-1',
+        traceId: 'trace-page-two',
+        decidedAt: '2026-08-28T02:00:00Z',
+        inputSummary: { instrument_code: '600000.SH' },
+        outputSummary: {},
+        statePatch: {},
+        tradeIntents: [],
+        decisionTrace: {},
+        reason: 'MINIMUM_COVERAGE_NOT_REACHED',
+        tags: [],
+      },
+      evaluationEventKeys: ['page-two-event'],
+      executions: [],
+    };
+    const props = {
+      hasReplay: true,
+      instrumentNames: names,
+      onViewSignal: vi.fn(),
+    };
+    const { rerender } = render(
+      <TTradeReplayDecisionAudit
+        controller={controller({
+          auditFilters: { eventKey: 'page-two-event' },
+          auditRecords: [linkedDecision],
+        })}
+        {...props}
+      />
+    );
+    const search = screen.getByRole('textbox', { name: '搜索决策审计' });
+    search.focus();
+
+    rerender(
+      <TTradeReplayDecisionAudit
+        controller={controller({
+          auditFilters: { eventKey: 'page-two-event', search: '6' },
+          auditRecords: [],
+          auditLoading: true,
+        })}
+        {...props}
+      />
+    );
+    expect(search).toHaveFocus();
+
+    rerender(
+      <TTradeReplayDecisionAudit
+        controller={controller({
+          auditFilters: { eventKey: 'page-two-event', search: '6' },
+          auditRecords: [linkedDecision],
+        })}
+        {...props}
+      />
+    );
+    expect(search).toHaveFocus();
+  });
+
+  it('keeps the pagination control focused while loading and after the last page', () => {
+    const loadMoreSignals = vi.fn();
+    const initial = controller({ loadMoreSignals });
+    const props = {
+      hasReplay: true,
+      instrumentNames: names,
+      onViewAudit: vi.fn(),
+    };
+    const { rerender } = render(
+      <TTradeReplaySignals controller={initial} {...props} />
+    );
+    const loadMore = screen.getByRole('button', { name: '加载更多' });
+    loadMore.focus();
+    fireEvent.click(loadMore);
+    expect(loadMoreSignals).toHaveBeenCalledOnce();
+
+    rerender(
+      <TTradeReplaySignals
+        controller={controller({ loadMoreSignals, signalsLoading: true })}
+        {...props}
+      />
+    );
+    const loading = screen.getByRole('button', { name: '读取中…' });
+    expect(loading).toHaveAttribute('aria-disabled', 'true');
+    expect(loading).not.toBeDisabled();
+    expect(loading).toHaveFocus();
+    fireEvent.click(loading);
+    expect(loadMoreSignals).toHaveBeenCalledOnce();
+
+    rerender(
+      <TTradeReplaySignals
+        controller={controller({
+          loadMoreSignals,
+          signalPage: {
+            ...initial.signalPage!,
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        })}
+        {...props}
+      />
+    );
+    const complete = screen.getByRole('button', { name: '已全部加载' });
+    expect(complete).toHaveAttribute('aria-disabled', 'true');
+    expect(complete).not.toBeDisabled();
+    expect(complete).toHaveFocus();
+    fireEvent.click(complete);
+    expect(loadMoreSignals).toHaveBeenCalledOnce();
+  });
+
   it('does not label an amount or portfolio weight as share quantity', () => {
     expect(replayIntentTarget({ targetVolume: 100 })).toBe('100 股');
     expect(replayIntentTarget({ targetAmount: 2000 })).toBe('¥2,000.00');
