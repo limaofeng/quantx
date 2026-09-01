@@ -51,9 +51,21 @@ class FakeCoverageSession(FakeSession):
   async def execute(self, statement):
     sql = str(statement)
     self.statements.append(sql)
-    if sql.startswith("SET TRANSACTION") or "pg_advisory_xact_lock_shared" in sql:
+    if (
+      sql.startswith("SET TRANSACTION")
+      or sql.startswith("SET LOCAL idle_in_transaction_session_timeout")
+      or "pg_advisory_xact_lock_shared" in sql
+    ):
       return FakeRowsResult([])
     return FakeRowsResult(self.result_sets.pop(0))
+
+
+class FailingTimeoutSession(FakeSession):
+  async def execute(self, statement) -> None:
+    sql = str(statement)
+    self.statements.append(sql)
+    if sql.startswith("SET LOCAL idle_in_transaction_session_timeout"):
+      raise RuntimeError("timeout setting failed")
 
 
 class FakeInstrumentRepository:
@@ -179,8 +191,24 @@ async def test_owned_postgres_session_is_read_only_and_rolled_back() -> None:
     pass
 
   assert session.statements == [
-    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+    "SET LOCAL idle_in_transaction_session_timeout = '15min'",
   ]
+  assert session.rolled_back
+  assert session.closed
+
+
+@pytest.mark.asyncio
+async def test_owned_session_is_closed_when_read_only_initialization_fails() -> None:
+  session = FailingTimeoutSession()
+  source = InfrastructureResearchDataSource(
+    session_factory=lambda: session,
+    kline_repository=FakeKLineRepository(),
+  )
+
+  with pytest.raises(RuntimeError, match="timeout setting failed"):
+    await source.__aenter__()
+
   assert session.rolled_back
   assert session.closed
 
@@ -455,4 +483,11 @@ async def test_factor_coverage_rejects_legacy_audit_before_reading_factor_rows()
 
   assert result.loc[0, "audit_schema_version"] == 1
   assert not result.loc[0, "current_matches"]
-  assert len(session.statements) == 3
+  assert session.statements[0] == (
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+  )
+  assert session.statements[1] == (
+    "SET LOCAL idle_in_transaction_session_timeout = '15min'"
+  )
+  assert "pg_advisory_xact_lock_shared" in session.statements[2]
+  assert "market_data_request" in session.statements[3]

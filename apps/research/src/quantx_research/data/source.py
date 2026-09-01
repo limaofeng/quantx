@@ -21,6 +21,7 @@ from .normalization import (
 _INFLUX_TIME_CHUNK_DAYS = 180
 _FACTOR_BULK_THRESHOLD = 50
 _MAX_FACTOR_EVIDENCE_REQUESTS = 4_096
+_RESEARCH_IDLE_TRANSACTION_TIMEOUT = "15min"
 
 
 @runtime_checkable
@@ -88,9 +89,13 @@ class InfrastructureResearchDataSource:
     self._enforce_postgres_read_only = enforce_postgres_read_only
 
   async def __aenter__(self) -> "InfrastructureResearchDataSource":
-    await self._ensure_relational_ready()
-    self._get_kline_repository()
-    return self
+    try:
+      await self._ensure_relational_ready()
+      self._get_kline_repository()
+      return self
+    except BaseException:
+      await self.close()
+      raise
 
   async def __aexit__(self, *_: object) -> None:
     await self.close()
@@ -475,6 +480,16 @@ class InfrastructureResearchDataSource:
       # 此语句必须是会话首个 SQL：既固定关系库快照，也禁止研究写库。
       await self._session.execute(
         text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+      )
+      # 因子证据核验和 archive 特征构造会在同一冻结快照内进行较长时间的
+      # CPU/文件处理。服务进程的 30 秒 idle-in-transaction 保护不适用于这个
+      # 有明确生命周期的离线只读事务；只在当前事务提升到有界上限，退出
+      # source 时仍会统一 rollback/close，不改变连接池或在线服务的全局保护。
+      await self._session.execute(
+        text(
+          "SET LOCAL idle_in_transaction_session_timeout = "
+          f"'{_RESEARCH_IDLE_TRANSACTION_TIMEOUT}'"
+        )
       )
     self._read_only_initialized = True
     return self._session
