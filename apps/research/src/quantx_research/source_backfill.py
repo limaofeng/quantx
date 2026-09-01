@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 
 from quantx_infrastructure import DurableRuntimeStore
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from .data.qmt_archive_source import (
   QMT_DAILY_BAR_ARCHIVE_FORMAT,
@@ -63,6 +64,82 @@ _CAMPAIGN_LOCK_KEY = int.from_bytes(
 
 class SourceBackfillError(RuntimeError):
   """Source transfer, archive, or campaign evidence failed closed."""
+
+
+async def _await_lock_cleanup(cleanup: Any) -> None:
+  """Finish lock cleanup even if the caller is cancelled, then re-cancel."""
+
+  cleanup_task = asyncio.create_task(cleanup)
+  cancellation: asyncio.CancelledError | None = None
+  try:
+    while not cleanup_task.done():
+      try:
+        await asyncio.shield(cleanup_task)
+      except asyncio.CancelledError as exc:
+        cancellation = cancellation or exc
+    await cleanup_task
+  except BaseException:
+    if cancellation is not None:
+      raise cancellation
+    raise
+  if cancellation is not None:
+    raise cancellation
+
+
+async def _abort_lock_transaction(connection: Any) -> None:
+  """Discard a session whose advisory-lock statement did not finish cleanly."""
+
+  async def cleanup() -> None:
+    cancellation: asyncio.CancelledError | None = None
+    try:
+      await connection.rollback()
+    except asyncio.CancelledError as exc:
+      cancellation = cancellation or exc
+    except Exception:
+      pass
+    try:
+      await connection.invalidate()
+    except asyncio.CancelledError as exc:
+      cancellation = cancellation or exc
+    except Exception:
+      pass
+    if cancellation is not None:
+      raise cancellation
+
+  await _await_lock_cleanup(cleanup())
+
+
+async def _close_lock_connection(connection: Any) -> None:
+  async def cleanup() -> None:
+    try:
+      await connection.close()
+    except asyncio.CancelledError:
+      raise
+    except Exception:
+      pass
+
+  await _await_lock_cleanup(cleanup())
+
+
+async def _lock_scalar(
+  connection: Any,
+  statement: Any,
+  parameters: dict[str, Any] | None = None,
+) -> Any:
+  """Run one lock query and end its transaction without ending the session."""
+
+  try:
+    if parameters is None:
+      value = await connection.scalar(statement)
+    else:
+      value = await connection.scalar(statement, parameters)
+    # Session advisory locks survive COMMIT.  End every implicit transaction
+    # so source collection can wait for QMT without idle-in-transaction expiry.
+    await connection.commit()
+    return value
+  except BaseException:
+    await _abort_lock_transaction(connection)
+    raise
 
 
 def _now_iso() -> str:
@@ -967,6 +1044,13 @@ async def _active_requests(
     ]
 
 
+async def _assert_campaign_lock(
+  campaign_lock: _CampaignLock | None,
+) -> None:
+  if campaign_lock is not None:
+    await campaign_lock.assert_held()
+
+
 async def _market_data_agent(
   store: DurableRuntimeStore,
   *,
@@ -1011,10 +1095,13 @@ async def _wait_for_unrelated_queue(
   allowed_request_id: str | None,
   poll_seconds: float,
   timeout_seconds: float,
+  campaign_lock: _CampaignLock | None = None,
 ) -> None:
   deadline = asyncio.get_running_loop().time() + timeout_seconds
   while True:
+    await _assert_campaign_lock(campaign_lock)
     active = await _active_requests(store)
+    await _assert_campaign_lock(campaign_lock)
     blockers = [
       item
       for item in active
@@ -1038,10 +1125,13 @@ async def _wait_for_archivable_request(
   *,
   poll_seconds: float,
   timeout_seconds: float,
+  campaign_lock: _CampaignLock | None = None,
 ) -> dict[str, Any]:
   deadline = asyncio.get_running_loop().time() + timeout_seconds
   while True:
+    await _assert_campaign_lock(campaign_lock)
     request = await store.market_data_request(request_id)
+    await _assert_campaign_lock(campaign_lock)
     if request is None:
       raise SourceBackfillError(f"market-data request 消失: {request_id}")
     status = str(request.get("status") or "")
@@ -1063,9 +1153,12 @@ async def _reconcile_archived_terminal(
   entry: Mapping[str, Any],
   *,
   archive_root: Path,
+  campaign_lock: _CampaignLock | None = None,
 ) -> None:
+  await _assert_campaign_lock(campaign_lock)
   request_id = str(entry["request_id"])
   request = await store.market_data_request(request_id)
+  await _assert_campaign_lock(campaign_lock)
   if request is None:
     raise SourceBackfillError(
       f"已归档 request 在 PostgreSQL 中消失: {request_id}"
@@ -1083,6 +1176,7 @@ async def _reconcile_archived_terminal(
     )
   manifest_path = archive_root / "requests" / request_id / "manifest.json"
   manifest_sha256 = _file_sha256(manifest_path)
+  await _assert_campaign_lock(campaign_lock)
   await store.finish_market_data_request(
     request_id,
     status="FAILED",
@@ -1092,7 +1186,9 @@ async def _reconcile_archived_terminal(
       f"manifest_sha256={manifest_sha256}"
     ),
   )
+  await _assert_campaign_lock(campaign_lock)
   terminal = await store.market_data_request_status(request_id)
+  await _assert_campaign_lock(campaign_lock)
   if terminal != "FAILED":
     raise SourceBackfillError(
       f"source-only request 未收敛为 FAILED: {request_id} {terminal}"
@@ -1112,7 +1208,9 @@ async def _process_job(
   agent_max_age_seconds: float,
   existing_only: bool,
   dry_run: bool,
+  campaign_lock: _CampaignLock | None = None,
 ) -> str:
+  await _assert_campaign_lock(campaign_lock)
   existing_entries = {
     str(item.get("job_id")): item
     for item in ledger["requests"]
@@ -1128,15 +1226,19 @@ async def _process_job(
         f"ledger 与 request manifest 不一致: {job['id']}"
       )
     if not dry_run:
+      await _assert_campaign_lock(campaign_lock)
       await _reconcile_archived_terminal(
         store,
         entry,
         archive_root=archive_root,
+        campaign_lock=campaign_lock,
       )
+      await _assert_campaign_lock(campaign_lock)
     return "reconciled"
 
   payload = _request_payload(job)
   request_id = await _find_request_by_idempotency(store, payload)
+  await _assert_campaign_lock(campaign_lock)
   recorded_request_id = str(job.get("recorded_request_id") or "")
   if request_id and recorded_request_id and request_id != recorded_request_id:
     raise SourceBackfillError(
@@ -1150,17 +1252,21 @@ async def _process_job(
       allowed_request_id=None,
       poll_seconds=poll_seconds,
       timeout_seconds=queue_timeout_seconds,
+      campaign_lock=campaign_lock,
     )
     device_id = await _market_data_agent(
       store,
       max_age_seconds=agent_max_age_seconds,
     )
+    await _assert_campaign_lock(campaign_lock)
     request_id = await store.create_market_data_request(
       payload,
       device_id=device_id,
     )
+    await _assert_campaign_lock(campaign_lock)
   if dry_run:
     request = await store.market_data_request(request_id)
+    await _assert_campaign_lock(campaign_lock)
     if request is None:
       raise SourceBackfillError(
         f"market-data request 消失: {request_id}"
@@ -1173,14 +1279,17 @@ async def _process_job(
       allowed_request_id=request_id,
       poll_seconds=poll_seconds,
       timeout_seconds=queue_timeout_seconds,
+      campaign_lock=campaign_lock,
     )
     request = await _wait_for_archivable_request(
       store,
       request_id,
       poll_seconds=poll_seconds,
       timeout_seconds=request_timeout_seconds,
+      campaign_lock=campaign_lock,
     )
   manifest = await store.market_data_transfers(request_id)
+  await _assert_campaign_lock(campaign_lock)
   request_with_id = {**request, "request_id": request_id}
   entry = await asyncio.to_thread(
     archive_request,
@@ -1191,6 +1300,7 @@ async def _process_job(
     manifest=manifest,
     publish=not dry_run,
   )
+  await _assert_campaign_lock(campaign_lock)
   if dry_run:
     return "validated"
   publish_ledger_entry(
@@ -1198,11 +1308,14 @@ async def _process_job(
     ledger=ledger,
     entry=entry,
   )
+  await _assert_campaign_lock(campaign_lock)
   await _reconcile_archived_terminal(
     store,
     entry,
     archive_root=archive_root,
+    campaign_lock=campaign_lock,
   )
+  await _assert_campaign_lock(campaign_lock)
   return "archived"
 
 
@@ -1210,52 +1323,140 @@ class _CampaignLock:
   def __init__(self, store: DurableRuntimeStore) -> None:
     self._store = store
     self._connection = None
+    self._backend_pid: int | None = None
 
   async def __aenter__(self) -> "_CampaignLock":
-    self._connection = await self._store.engine.connect()
-    acquired = await self._connection.scalar(
-      text("SELECT pg_try_advisory_lock(:lock_key)"),
-      {"lock_key": _CAMPAIGN_LOCK_KEY},
-    )
+    connection = await self._store.engine.connect()
+    try:
+      backend_pid = await _lock_scalar(
+        connection,
+        text("SELECT pg_backend_pid()"),
+      )
+      acquired = await _lock_scalar(
+        connection,
+        text("SELECT pg_try_advisory_lock(:lock_key)"),
+        {"lock_key": _CAMPAIGN_LOCK_KEY},
+      )
+    except BaseException:
+      await _close_lock_connection(connection)
+      raise
     if not acquired:
-      await self._connection.close()
-      self._connection = None
+      await _close_lock_connection(connection)
       raise SourceBackfillError(
         "另一个 QMT 日线回填或 source-backfill 正在运行"
       )
+    if backend_pid is None:
+      await _close_lock_connection(connection)
+      raise SourceBackfillError("无法识别 source-backfill 数据库锁会话")
+    self._connection = connection
+    self._backend_pid = int(backend_pid)
     return self
 
   async def __aexit__(self, exc_type, exc, traceback) -> None:
     if self._connection is None:
       return
+    connection = self._connection
+    backend_pid = self._backend_pid
+    self._connection = None
+    self._backend_pid = None
     try:
-      await self._connection.scalar(
-        text("SELECT pg_advisory_unlock(:lock_key)"),
-        {"lock_key": _CAMPAIGN_LOCK_KEY},
-      )
+      if (
+        not connection.closed
+        and not getattr(connection, "invalidated", False)
+        and backend_pid is not None
+      ):
+        await _lock_scalar(
+          connection,
+          text(
+            "SELECT CASE WHEN pg_backend_pid() = :backend_pid "
+            "THEN pg_advisory_unlock(:lock_key) ELSE false END"
+          ),
+          {
+            "backend_pid": backend_pid,
+            "lock_key": _CAMPAIGN_LOCK_KEY,
+          },
+        )
+    except SQLAlchemyError:
+      # A dropped connection has already released its session lock server-side.
+      pass
     finally:
-      await self._connection.close()
+      await _close_lock_connection(connection)
+
+  async def assert_held(self) -> None:
+    connection = self._connection
+    backend_pid = self._backend_pid
+    if (
+      connection is None
+      or connection.closed
+      or getattr(connection, "invalidated", False)
+      or backend_pid is None
+    ):
+      raise SourceBackfillError("source-backfill 数据库锁连接已关闭")
+    try:
+      held = await _lock_scalar(
+        connection,
+        text(
+          """
+          SELECT EXISTS (
+            SELECT 1
+            FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND mode = 'ExclusiveLock'
+              AND granted
+              AND pid = pg_backend_pid()
+              AND pid = :backend_pid
+              AND classid::bigint = (
+                (CAST(:lock_key AS bigint) >> 32) & 4294967295
+              )
+              AND objid::bigint = (
+                CAST(:lock_key AS bigint) & 4294967295
+              )
+              AND objsubid = 1
+          )
+          """
+        ),
+        {
+          "backend_pid": backend_pid,
+          "lock_key": _CAMPAIGN_LOCK_KEY,
+        },
+      )
+    except BaseException as exc:
       self._connection = None
+      self._backend_pid = None
+      await _close_lock_connection(connection)
+      if isinstance(exc, SQLAlchemyError):
+        raise SourceBackfillError(
+          "source-backfill 数据库锁连接已失效"
+        ) from exc
+      raise
+    if held is not True:
+      self._connection = None
+      self._backend_pid = None
+      await _close_lock_connection(connection)
+      raise SourceBackfillError("source-backfill 数据库 advisory lock 已丢失")
 
 
 async def run(args: argparse.Namespace) -> int:
   state_path = Path(args.state_file).resolve(strict=True)
-  state_before = _file_sha256(state_path)
-  campaign = load_campaign(state_path)
-  archive_root = (
-    _archive_root_for_dry_run(Path(args.archive_root))
-    if args.dry_run
-    else _prepare_archive_root(Path(args.archive_root))
-  )
-  source_root = resolve_market_data_root(args.market_data_root)
-  campaign["market_data_root"] = str(source_root)
-  ledger = _load_ledger(archive_root, campaign)
   store = DurableRuntimeStore()
   processed = 0
   outcomes: dict[str, int] = {}
   try:
-    async with _CampaignLock(store):
+    async with _CampaignLock(store) as campaign_lock:
+      await campaign_lock.assert_held()
+      state_before = _file_sha256(state_path)
+      campaign = load_campaign(state_path)
+      archive_root = (
+        _archive_root_for_dry_run(Path(args.archive_root))
+        if args.dry_run
+        else _prepare_archive_root(Path(args.archive_root))
+      )
+      source_root = resolve_market_data_root(args.market_data_root)
+      campaign["market_data_root"] = str(source_root)
+      ledger = _load_ledger(archive_root, campaign)
+      await campaign_lock.assert_held()
       for job in campaign["jobs"]:
+        await campaign_lock.assert_held()
         if args.max_jobs is not None and processed >= args.max_jobs:
           break
         outcome = await _process_job(
@@ -1270,7 +1471,9 @@ async def run(args: argparse.Namespace) -> int:
           agent_max_age_seconds=args.agent_max_age_seconds,
           existing_only=args.existing_only,
           dry_run=args.dry_run,
+          campaign_lock=campaign_lock,
         )
+        await campaign_lock.assert_held()
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
         if outcome == "pending" and args.existing_only and not args.dry_run:
           continue
@@ -1288,15 +1491,17 @@ async def run(args: argparse.Namespace) -> int:
           ),
           flush=True,
         )
+      await campaign_lock.assert_held()
       _refresh_ledger(ledger)
       if ledger["requests"] and not args.dry_run:
         _atomic_write_json(archive_root / "ledger.json", ledger)
+      await campaign_lock.assert_held()
+      if _file_sha256(state_path) != state_before:
+        raise SourceBackfillError(
+          "原日线账本在 source-backfill 运行期间发生变化"
+        )
   finally:
     await store.close()
-  if _file_sha256(state_path) != state_before:
-    raise SourceBackfillError(
-      "原日线账本在 source-backfill 运行期间发生变化"
-    )
   if args.dry_run:
     print(
       json.dumps(

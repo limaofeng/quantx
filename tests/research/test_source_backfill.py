@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 import hashlib
 import json
@@ -16,6 +17,137 @@ from quantx_research.data.qmt_archive_source import (
 REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 CODE = "000001.SZ"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+class _LockConnection:
+  def __init__(self, results):
+    self.results = list(results)
+    self.events = []
+    self.closed = False
+    self.invalidated = False
+
+  async def scalar(self, statement, parameters=None):
+    self.events.append(("scalar", str(statement), parameters))
+    result = self.results.pop(0)
+    if isinstance(result, BaseException):
+      raise result
+    return result
+
+  async def commit(self):
+    self.events.append(("commit",))
+
+  async def rollback(self):
+    self.events.append(("rollback",))
+
+  async def invalidate(self):
+    self.invalidated = True
+    self.events.append(("invalidate",))
+
+  async def close(self):
+    self.closed = True
+    self.events.append(("close",))
+
+
+class _LockEngine:
+  def __init__(self, connection):
+    self.connection = connection
+
+  async def connect(self):
+    return self.connection
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_commits_each_lock_query_and_proves_owner() -> None:
+  connection = _LockConnection([911, True, True, True])
+  store = type("Store", (), {"engine": _LockEngine(connection)})()
+  lock = source_backfill._CampaignLock(store)
+
+  await lock.__aenter__()
+  await lock.assert_held()
+  await lock.__aexit__(None, None, None)
+
+  scalar_sql = [event[1] for event in connection.events if event[0] == "scalar"]
+  assert "pg_backend_pid" in scalar_sql[0]
+  assert "pg_try_advisory_lock" in scalar_sql[1]
+  assert "FROM pg_locks" in scalar_sql[2]
+  assert "pg_advisory_unlock" in scalar_sql[3]
+  assert [event[0] for event in connection.events].count("commit") == 4
+  assert connection.closed is True
+  assert connection.invalidated is False
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_fails_closed_when_session_no_longer_owns_lock() -> None:
+  connection = _LockConnection([911, True, False])
+  store = type("Store", (), {"engine": _LockEngine(connection)})()
+  lock = source_backfill._CampaignLock(store)
+  await lock.__aenter__()
+
+  with pytest.raises(source_backfill.SourceBackfillError, match="已丢失"):
+    await lock.assert_held()
+
+  assert lock._connection is None
+  assert lock._backend_pid is None
+  assert connection.closed is True
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_invalidates_failed_connection() -> None:
+  connection = _LockConnection(
+    [911, True, source_backfill.SQLAlchemyError("connection closed")]
+  )
+  store = type("Store", (), {"engine": _LockEngine(connection)})()
+  lock = source_backfill._CampaignLock(store)
+  await lock.__aenter__()
+
+  with pytest.raises(source_backfill.SourceBackfillError, match="已失效"):
+    await lock.assert_held()
+
+  assert connection.invalidated is True
+  assert connection.closed is True
+  assert "rollback" in [event[0] for event in connection.events]
+
+
+@pytest.mark.asyncio
+async def test_lock_connection_close_finishes_before_cancellation_propagates() -> None:
+  class CloseBlockingConnection(_LockConnection):
+    def __init__(self):
+      super().__init__([])
+      self.close_started = asyncio.Event()
+      self.finish_close = asyncio.Event()
+
+    async def close(self):
+      self.close_started.set()
+      await self.finish_close.wait()
+      self.closed = True
+
+  connection = CloseBlockingConnection()
+  task = asyncio.create_task(source_backfill._close_lock_connection(connection))
+  await connection.close_started.wait()
+  task.cancel()
+  await asyncio.sleep(0)
+
+  assert task.done() is False
+  connection.finish_close.set()
+  with pytest.raises(asyncio.CancelledError):
+    await task
+  assert connection.closed is True
+
+
+@pytest.mark.asyncio
+async def test_queue_wait_checks_campaign_lock_before_polling() -> None:
+  class LostLock:
+    async def assert_held(self):
+      raise source_backfill.SourceBackfillError("lock lost")
+
+  with pytest.raises(source_backfill.SourceBackfillError, match="lock lost"):
+    await source_backfill._wait_for_unrelated_queue(
+      object(),
+      allowed_request_id=None,
+      poll_seconds=0.01,
+      timeout_seconds=1,
+      campaign_lock=LostLock(),
+    )
 
 
 @pytest.mark.asyncio
@@ -527,6 +659,45 @@ async def test_reconcile_uploaded_archive_finishes_failed_without_influx(
   assert store.finish_call[:2] == (REQUEST_ID, "FAILED")
   assert "SOURCE_ONLY_ARCHIVED_NO_INFLUX" in store.finish_call[2]
   assert "no Influx ingestion was attempted" in store.finish_call[2]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_finish_request_after_campaign_lock_loss(
+  tmp_path: Path,
+) -> None:
+  archive_root = tmp_path / "archive"
+  manifest_dir = archive_root / "requests" / REQUEST_ID
+  manifest_dir.mkdir(parents=True)
+  (manifest_dir / "manifest.json").write_text("{}", encoding="utf-8")
+  payload = source_backfill._request_payload(_job())
+
+  class Store:
+    finish_called = False
+
+    async def market_data_request(self, request_id):
+      return {"request_payload": payload, "status": "UPLOADED"}
+
+    async def finish_market_data_request(self, *args, **kwargs):
+      self.finish_called = True
+
+  class LostAfterReadLock:
+    checks = 0
+
+    async def assert_held(self):
+      self.checks += 1
+      if self.checks == 2:
+        raise source_backfill.SourceBackfillError("lock lost")
+
+  store = Store()
+  with pytest.raises(source_backfill.SourceBackfillError, match="lock lost"):
+    await source_backfill._reconcile_archived_terminal(
+      store,
+      {"request_id": REQUEST_ID, "payload": payload},
+      archive_root=archive_root,
+      campaign_lock=LostAfterReadLock(),
+    )
+
+  assert store.finish_called is False
 
 
 @pytest.mark.asyncio

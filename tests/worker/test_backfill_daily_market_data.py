@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from quantx_research import source_backfill
 
 
 def _load_module():
@@ -31,6 +32,225 @@ def _load_module():
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   return module
+
+
+def _load_factor_module():
+  script_path = (
+    Path(__file__).parents[2]
+    / "apps"
+    / "worker"
+    / "scripts"
+    / "backfill_divid_factors.py"
+  )
+  spec = importlib.util.spec_from_file_location(
+    "backfill_divid_factors_lock_invariant",
+    script_path,
+  )
+  assert spec and spec.loader
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+class _LockConnection:
+  def __init__(self, results):
+    self.results = list(results)
+    self.events = []
+    self.closed = False
+    self.invalidated = False
+
+  async def scalar(self, statement, parameters=None):
+    self.events.append(("scalar", str(statement), parameters))
+    result = self.results.pop(0)
+    if isinstance(result, BaseException):
+      raise result
+    return result
+
+  async def commit(self):
+    self.events.append(("commit",))
+
+  async def rollback(self):
+    self.events.append(("rollback",))
+
+  async def invalidate(self):
+    self.invalidated = True
+    self.events.append(("invalidate",))
+
+  async def close(self):
+    self.closed = True
+    self.events.append(("close",))
+
+
+class _LockEngine:
+  def __init__(self, connection):
+    self.connection = connection
+
+  async def connect(self):
+    return self.connection
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_commits_each_lock_query_and_proves_owner(
+  monkeypatch,
+):
+  module = _load_module()
+  connection = _LockConnection([731, True, True, True])
+  monkeypatch.setattr(module, "relational_engine", _LockEngine(connection))
+  lock = module.CampaignDatabaseLock()
+
+  await lock.acquire()
+  await lock.assert_held()
+  await lock.release()
+
+  scalar_sql = [event[1] for event in connection.events if event[0] == "scalar"]
+  assert "pg_backend_pid" in scalar_sql[0]
+  assert "pg_try_advisory_lock" in scalar_sql[1]
+  assert "FROM pg_locks" in scalar_sql[2]
+  assert "pg_advisory_unlock" in scalar_sql[3]
+  assert [event[0] for event in connection.events].count("commit") == 4
+  assert connection.closed is True
+  assert connection.invalidated is False
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_fails_closed_when_session_no_longer_owns_lock(
+  monkeypatch,
+):
+  module = _load_module()
+  connection = _LockConnection([731, True, False])
+  monkeypatch.setattr(module, "relational_engine", _LockEngine(connection))
+  lock = module.CampaignDatabaseLock()
+  await lock.acquire()
+
+  with pytest.raises(module.CampaignLockLost, match="已丢失"):
+    await lock.assert_held()
+
+  assert lock.connection is None
+  assert lock.backend_pid is None
+  assert connection.closed is True
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_invalidates_failed_connection(monkeypatch):
+  module = _load_module()
+  connection = _LockConnection(
+    [731, True, module.SQLAlchemyError("connection closed")]
+  )
+  monkeypatch.setattr(module, "relational_engine", _LockEngine(connection))
+  lock = module.CampaignDatabaseLock()
+  await lock.acquire()
+
+  with pytest.raises(module.CampaignLockLost, match="已失效"):
+    await lock.assert_held()
+
+  assert connection.invalidated is True
+  assert connection.closed is True
+  assert "rollback" in [event[0] for event in connection.events]
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_acquire_cancellation_invalidates_and_closes(
+  monkeypatch,
+):
+  module = _load_module()
+
+  class CommitBlockingConnection(_LockConnection):
+    def __init__(self):
+      super().__init__([731])
+      self.commit_started = asyncio.Event()
+
+    async def commit(self):
+      self.commit_started.set()
+      await asyncio.Event().wait()
+
+  connection = CommitBlockingConnection()
+  monkeypatch.setattr(module, "relational_engine", _LockEngine(connection))
+  task = asyncio.create_task(module.CampaignDatabaseLock().acquire())
+  await connection.commit_started.wait()
+
+  task.cancel()
+  with pytest.raises(asyncio.CancelledError):
+    await task
+
+  assert connection.invalidated is True
+  assert connection.closed is True
+
+
+@pytest.mark.asyncio
+async def test_lock_connection_close_finishes_before_cancellation_propagates():
+  module = _load_module()
+
+  class CloseBlockingConnection(_LockConnection):
+    def __init__(self):
+      super().__init__([])
+      self.close_started = asyncio.Event()
+      self.finish_close = asyncio.Event()
+
+    async def close(self):
+      self.close_started.set()
+      await self.finish_close.wait()
+      self.closed = True
+
+  connection = CloseBlockingConnection()
+  task = asyncio.create_task(module._close_lock_connection(connection))
+  await connection.close_started.wait()
+  task.cancel()
+  await asyncio.sleep(0)
+
+  assert task.done() is False
+  connection.finish_close.set()
+  with pytest.raises(asyncio.CancelledError):
+    await task
+  assert connection.closed is True
+
+
+def test_campaign_lock_key_matches_factor_and_source_backfills():
+  module = _load_module()
+  factor_module = _load_factor_module()
+
+  assert (
+    module.CAMPAIGN_LOCK_KEY
+    == factor_module.CAMPAIGN_LOCK_KEY
+    == source_backfill._CAMPAIGN_LOCK_KEY
+  )
+
+
+@pytest.mark.asyncio
+async def test_verification_error_does_not_persist_after_campaign_lock_loss(
+  monkeypatch,
+  tmp_path,
+):
+  module = _load_module()
+  persisted = False
+
+  async def failed_verification(*args, **kwargs):
+    raise RuntimeError("verification transport failed")
+
+  class LostLock:
+    async def assert_held(self):
+      raise module.CampaignLockLost("lock lost")
+
+  def persist_status(*args, **kwargs):
+    nonlocal persisted
+    persisted = True
+
+  monkeypatch.setattr(module, "_audit_and_verify_job", failed_verification)
+  monkeypatch.setattr(module, "_persist_status", persist_status)
+  history_entry = {}
+
+  with pytest.raises(module.CampaignLockLost, match="lock lost"):
+    await module._verify_reprocessed_ingestion(
+      tmp_path / "state.json",
+      {"jobs": []},
+      {},
+      history_entry,
+      request_id="request-id",
+      source_records=1,
+      campaign_lock=LostLock(),
+    )
+
+  assert persisted is False
+  assert history_entry == {}
 
 
 def _agent_store(status: str, capabilities: list[str] | None = None):
@@ -511,6 +731,45 @@ def test_v2_nonterminal_state_requires_manual_prefect_reconciliation(
 
   with pytest.raises(RuntimeError, match="无法证明原 Prefect API"):
     asyncio.run(module._load_or_create_state(args))
+
+
+@pytest.mark.asyncio
+async def test_new_state_is_not_persisted_when_lock_is_lost_during_load(
+  monkeypatch,
+  tmp_path,
+):
+  module = _load_module()
+  state_path = tmp_path / "state.json"
+  args = argparse.Namespace(
+    state_file=str(state_path),
+    start_date=date(2025, 1, 1),
+    end_date=date(2025, 1, 31),
+    batch_size=100,
+    code_limit=None,
+    deployment_name="daily-market-data-sync",
+    prefect_api_url=module.DEFAULT_PREFECT_API_URL,
+  )
+
+  async def load_universe(*, code_limit):
+    return [], {"stock_count": 0}
+
+  class LostAfterLoadLock:
+    checks = 0
+
+    async def assert_held(self):
+      self.checks += 1
+      if self.checks == 2:
+        raise module.CampaignLockLost("lock lost")
+
+  monkeypatch.setattr(module, "load_universe", load_universe)
+
+  with pytest.raises(module.CampaignLockLost, match="lock lost"):
+    await module._load_or_create_state(
+      args,
+      campaign_lock=LostAfterLoadLock(),
+    )
+
+  assert state_path.exists() is False
 
 
 def test_outdated_completed_job_is_queued_for_read_only_verification():
