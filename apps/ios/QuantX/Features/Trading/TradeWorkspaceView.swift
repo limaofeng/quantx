@@ -630,8 +630,8 @@ private struct ManualOrderTicketView: View {
   }
 
   private func normalizeSelectionsForCapabilities() {
-    executionMode = .paper
-    guard currentCapabilities != nil else {
+    guard let capabilities = currentCapabilities else {
+      executionMode = .paper
       quoteType = .limit
       return
     }
@@ -639,6 +639,13 @@ private struct ManualOrderTicketView: View {
       quoteType = selectableQuoteTypes.first ?? .limit
       limitPriceText = quoteType == .best ? "" : limitPriceText
     }
+    executionMode = capabilities.supports(
+      direction: direction,
+      quoteType: quoteType,
+      executionMode: capabilities.defaultExecutionMode
+    )
+      ? capabilities.defaultExecutionMode
+      : .paper
   }
 
   private func masked(_ accountID: String) -> String {

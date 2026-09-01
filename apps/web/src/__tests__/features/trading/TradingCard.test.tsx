@@ -6,6 +6,20 @@ import { TradingCard } from '@/features/trading/components/TradingCard';
 import type { Stock } from '@/shared/types';
 
 const mocks = vi.hoisted(() => ({
+  capabilities: {
+    accountId: '300000013250',
+    canLiveBuy: true,
+    canLiveSell: true,
+    canManualTrade: true,
+    defaultExecutionMode: 'PAPER',
+    executionModes: ['PAPER', 'LIVE'],
+    instrumentCode: '688577.SH',
+    liveBlockedReasons: [],
+    liveReady: true,
+    supportedPriceTypes: ['LIMIT', 'BEST'],
+    supportedSides: ['BUY', 'SELL'],
+    warnings: [],
+  },
   handleSubmit: vi.fn(),
   onQueued: vi.fn(),
   useStockSearch: vi.fn(),
@@ -21,20 +35,7 @@ vi.mock(
     useTradingSubmit: (_instrumentCode: string, onQueued?: () => void) => {
       mocks.onQueued.mockImplementation(() => onQueued?.());
       return {
-        capabilities: {
-          accountId: '300000013250',
-          canLiveBuy: true,
-          canLiveSell: true,
-          canManualTrade: true,
-          defaultExecutionMode: 'PAPER',
-          executionModes: ['PAPER', 'LIVE'],
-          instrumentCode: '688577.SH',
-          liveBlockedReasons: [],
-          liveReady: true,
-          supportedPriceTypes: ['LIMIT', 'BEST'],
-          supportedSides: ['BUY', 'SELL'],
-          warnings: [],
-        },
+        capabilities: mocks.capabilities,
         capabilitiesError: null,
         capabilitiesLoading: false,
         confirmationError: '',
@@ -109,6 +110,15 @@ function setupTradingCard(
 describe('TradingCard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.assign(mocks.capabilities, {
+      canLiveBuy: true,
+      canLiveSell: true,
+      canManualTrade: true,
+      defaultExecutionMode: 'PAPER',
+      executionModes: ['PAPER', 'LIVE'],
+      liveBlockedReasons: [],
+      liveReady: true,
+    });
     mocks.handleSubmit.mockImplementation(event => event.preventDefault());
   });
 
@@ -195,7 +205,7 @@ describe('TradingCard', () => {
     );
   });
 
-  it('defaults to PAPER and only selects LIVE through an explicit action', () => {
+  it('uses the PAPER capability default and preserves explicit mode changes', () => {
     setupTradingCard();
 
     expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
@@ -226,6 +236,35 @@ describe('TradingCard', () => {
     act(() => mocks.onQueued());
 
     expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+  });
+
+  it('follows the LIVE capability default across direction and queue resets', () => {
+    Object.assign(mocks.capabilities, { defaultExecutionMode: 'LIVE' });
+    setupTradingCard();
+
+    expect(screen.getByText('默认 LIVE')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'PAPER 模拟' }));
+    expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+
+    act(() => mocks.onQueued());
+    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
       'aria-pressed',
       'true'
     );

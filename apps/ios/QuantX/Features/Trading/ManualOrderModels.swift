@@ -94,14 +94,13 @@ struct ManualOrderEntryCapabilities: Equatable, Sendable {
   let accountID: String
   let instrumentCode: String
   let canManualTrade: Bool
+  let defaultExecutionMode: ManualOrderExecutionMode
   let executionModes: Set<ManualOrderExecutionMode>
   let supportedDirections: Set<ManualOrderDirection>
   let supportedQuoteTypes: Set<ManualOrderQuoteType>
   let liveReady: Bool
   let liveBlockedReasons: [String]
   let warnings: [String]
-
-  var defaultExecutionMode: ManualOrderExecutionMode { .paper }
 
   var selectableExecutionModes: [ManualOrderExecutionMode] {
     var modes: [ManualOrderExecutionMode] = [.paper]

@@ -255,6 +255,7 @@ final class ManualTradingStoreTests: XCTestCase {
 
   private func makeCapabilities(
     instrumentCode: String = "600519.SH",
+    defaultExecutionMode: ManualOrderExecutionMode = .paper,
     executionModes: Set<ManualOrderExecutionMode>,
     liveReady: Bool
   ) -> ManualOrderEntryCapabilities {
@@ -262,6 +263,7 @@ final class ManualTradingStoreTests: XCTestCase {
       accountID: "ACCOUNT-1",
       instrumentCode: instrumentCode,
       canManualTrade: true,
+      defaultExecutionMode: defaultExecutionMode,
       executionModes: executionModes,
       supportedDirections: [.buy, .sell],
       supportedQuoteTypes: [.limit, .best],

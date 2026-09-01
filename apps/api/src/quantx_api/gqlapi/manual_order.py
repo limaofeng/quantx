@@ -541,10 +541,6 @@ async def _preflight(
     raise TradeApprovalChallengeError(
       "INSTRUMENT_NOT_FOUND", "证券主数据不存在，已拒绝下单"
     )
-  if getattr(instrument, "is_trading", None) is False:
-    raise TradeApprovalChallengeError(
-      "INSTRUMENT_NOT_TRADING", "证券主数据标记为不可交易"
-    )
 
   account_statement = select(Account).where(
     Account.account_id == request.account_id,

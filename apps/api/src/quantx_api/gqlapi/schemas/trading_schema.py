@@ -152,9 +152,7 @@ class TradingQuery:
     if valid_code:
       async with AsyncSessionLocal() as db:
         instrument = await db.get(Instrument, normalized_code)
-    instrument_available = bool(
-      instrument is not None and getattr(instrument, "is_trading", True) is not False
-    )
+    instrument_available = instrument is not None
     has_manual_scope = "trade:manual" in principal.permissions
     can_manual_trade = bool(valid_code and instrument_available and has_manual_scope)
     execution_modes = [ManualOrderExecutionMode.PAPER] if can_manual_trade else []
@@ -176,7 +174,7 @@ class TradingQuery:
     elif not valid_code:
       live_blocked_reasons = ["证券代码格式无效"]
     else:
-      live_blocked_reasons = ["证券主数据不存在或当前不可交易"]
+      live_blocked_reasons = ["证券主数据不存在"]
     supported_price_types = (
       [ManualOrderPriceType.LIMIT, ManualOrderPriceType.BEST]
       if normalized_code.endswith((".SH", ".SZ"))
@@ -186,7 +184,11 @@ class TradingQuery:
       account_id=resolved_account_id,
       instrument_code=normalized_code,
       can_manual_trade=can_manual_trade,
-      default_execution_mode=ManualOrderExecutionMode.PAPER,
+      default_execution_mode=(
+        ManualOrderExecutionMode.LIVE
+        if live_ready
+        else ManualOrderExecutionMode.PAPER
+      ),
       execution_modes=execution_modes,
       supported_sides=[ManualOrderSide.BUY, ManualOrderSide.SELL],
       supported_price_types=supported_price_types,
@@ -196,6 +198,7 @@ class TradingQuery:
       live_blocked_reasons=list(dict.fromkeys(live_blocked_reasons)),
       warnings=[
         "能力只决定可展示的票据选项；每次预览和确认仍重新执行服务端风控",
+        "停牌与实时可交易状态以最新行情和 QMT 下单前检查为准",
         "北交所暂不提供 BEST；沪深 BEST 仅映射对手方最优价",
       ],
     )

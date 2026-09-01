@@ -36,7 +36,7 @@ def _info(*, manual: bool = True) -> SimpleNamespace:
 class _SessionContext:
   async def __aenter__(self):
     return SimpleNamespace(
-      get=AsyncMock(return_value=SimpleNamespace(is_trading=True))
+      get=AsyncMock(return_value=SimpleNamespace(is_trading=False))
     )
 
   async def __aexit__(self, exc_type, exc, traceback):
@@ -46,12 +46,13 @@ class _SessionContext:
 def _ready():
   return {
     "can_increase_risk": True,
+    "can_reduce_risk": True,
     "blocked_reasons": [],
   }
 
 
 @pytest.mark.asyncio
-async def test_order_entry_capabilities_are_server_driven_and_paper_first(
+async def test_order_entry_capabilities_follow_live_trading_and_ignore_stale_flag(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
@@ -65,7 +66,7 @@ async def test_order_entry_capabilities_are_server_driven_and_paper_first(
     )
 
   assert result.can_manual_trade is True
-  assert result.default_execution_mode == ManualOrderExecutionMode.PAPER
+  assert result.default_execution_mode == ManualOrderExecutionMode.LIVE
   assert result.execution_modes == [
     ManualOrderExecutionMode.PAPER,
     ManualOrderExecutionMode.LIVE,
@@ -74,6 +75,32 @@ async def test_order_entry_capabilities_are_server_driven_and_paper_first(
     ManualOrderPriceType.LIMIT,
     ManualOrderPriceType.BEST,
   ]
+
+
+@pytest.mark.asyncio
+async def test_order_entry_capabilities_fall_back_to_paper_when_live_is_disabled(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
+  with patch.object(
+    trading_schema.AccountExecutionSafetyService,
+    "status",
+    new=AsyncMock(
+      return_value={
+        "can_increase_risk": False,
+        "can_reduce_risk": False,
+        "blocked_reasons": ["服务端 ENABLE_REAL_TRADING 未启用"],
+      }
+    ),
+  ):
+    result = await TradingQuery().order_entry_capabilities(
+      _info(), "600000.SH"
+    )
+
+  assert result.can_manual_trade is True
+  assert result.default_execution_mode == ManualOrderExecutionMode.PAPER
+  assert result.execution_modes == [ManualOrderExecutionMode.PAPER]
+  assert result.live_ready is False
 
 
 @pytest.mark.asyncio

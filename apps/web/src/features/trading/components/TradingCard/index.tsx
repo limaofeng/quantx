@@ -21,6 +21,7 @@ import {
   ManualOrderExecutionMode,
   ManualOrderPriceType,
   ManualOrderSide,
+  type Trading_ManualOrderCapabilitiesQuery,
 } from '@/generated/gql/graphql';
 import { useStockSearch } from '@/hooks/useStockSearch';
 import type { Stock } from '@/shared/types';
@@ -82,6 +83,24 @@ const QUICK_QUANTITY_PRESETS = [
 ] as const;
 
 type QuickQuantityPreset = (typeof QUICK_QUANTITY_PRESETS)[number];
+type ManualOrderCapabilities =
+  Trading_ManualOrderCapabilitiesQuery['orderEntryCapabilities'];
+
+const resolveDefaultExecutionMode = (
+  capabilities: ManualOrderCapabilities | null | undefined,
+  tradeType: 'buy' | 'sell'
+) => {
+  const liveAllowed = Boolean(
+    capabilities?.defaultExecutionMode === ManualOrderExecutionMode.Live &&
+      capabilities.executionModes.includes(ManualOrderExecutionMode.Live) &&
+      (tradeType === 'buy'
+        ? capabilities.canLiveBuy
+        : capabilities.canLiveSell)
+  );
+  return liveAllowed
+    ? ManualOrderExecutionMode.Live
+    : ManualOrderExecutionMode.Paper;
+};
 
 const toBuyLotQuantity = (value: number) =>
   Math.floor(toNonNegativeInteger(value) / BUY_LOT_SIZE) * BUY_LOT_SIZE;
@@ -163,6 +182,10 @@ export function TradingCard({
   const [executionMode, setExecutionMode] = React.useState(
     ManualOrderExecutionMode.Paper
   );
+  const defaultExecutionModeRef = React.useRef(
+    ManualOrderExecutionMode.Paper
+  );
+  const defaultSelectionKeyRef = React.useRef('');
 
   const {
     selectedStock,
@@ -268,7 +291,7 @@ export function TradingCard({
     preview,
   } = useTradingSubmit(selectedStockCode, () => {
     resetForm();
-    setExecutionMode(ManualOrderExecutionMode.Paper);
+    setExecutionMode(defaultExecutionModeRef.current);
     onSuccess?.();
   });
 
@@ -320,6 +343,20 @@ export function TradingCard({
     capabilities?.executionModes.includes(ManualOrderExecutionMode.Live) &&
     (tradeType === 'buy' ? capabilities.canLiveBuy : capabilities.canLiveSell)
   );
+  const defaultExecutionMode = resolveDefaultExecutionMode(
+    capabilities,
+    tradeType
+  );
+  defaultExecutionModeRef.current = defaultExecutionMode;
+  const defaultSelectionKey = capabilities
+    ? [
+        capabilities.accountId,
+        capabilities.instrumentCode,
+        tradeType,
+        capabilities.defaultExecutionMode,
+        defaultExecutionMode,
+      ].join(':')
+    : '';
   const directionSupported = Boolean(
     capabilities?.supportedSides.includes(manualOrderSide)
   );
@@ -347,7 +384,19 @@ export function TradingCard({
 
   React.useEffect(() => {
     setExecutionMode(ManualOrderExecutionMode.Paper);
+    defaultSelectionKeyRef.current = '';
   }, [selectedStockCode]);
+
+  React.useEffect(() => {
+    if (
+      !capabilities ||
+      defaultSelectionKeyRef.current === defaultSelectionKey
+    ) {
+      return;
+    }
+    defaultSelectionKeyRef.current = defaultSelectionKey;
+    setExecutionMode(defaultExecutionMode);
+  }, [capabilities, defaultExecutionMode, defaultSelectionKey]);
 
   React.useEffect(() => {
     if (!capabilities) return;
@@ -355,7 +404,7 @@ export function TradingCard({
       !capabilities.executionModes.includes(executionMode) ||
       (executionMode === ManualOrderExecutionMode.Live && !canUseLive)
     ) {
-      setExecutionMode(ManualOrderExecutionMode.Paper);
+      setExecutionMode(defaultExecutionMode);
     }
     if (!capabilities.supportedPriceTypes.includes(manualOrderPriceType)) {
       setOrderType('limit');
@@ -363,6 +412,7 @@ export function TradingCard({
   }, [
     canUseLive,
     capabilities,
+    defaultExecutionMode,
     executionMode,
     manualOrderPriceType,
     setOrderType,
@@ -380,7 +430,7 @@ export function TradingCard({
     if (nextTradeType === tradeType) return;
     setTradeType(nextTradeType);
     setQuantity('');
-    setExecutionMode(ManualOrderExecutionMode.Paper);
+    setExecutionMode(resolveDefaultExecutionMode(capabilities, nextTradeType));
   };
 
   return (
@@ -520,7 +570,7 @@ export function TradingCard({
                   执行模式
                 </Label>
                 <span className="text-ui-micro text-muted-foreground/50">
-                  默认 PAPER
+                  默认 {defaultExecutionMode}
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-1.5">
@@ -581,7 +631,7 @@ export function TradingCard({
               >
                 {executionMode === ManualOrderExecutionMode.Live
                   ? '高风险：确认后进入实盘执行链，仍以券商回报为最终状态。'
-                  : '预览和确认都只进入模拟执行链，不会自动切换实盘。'}
+                  : '当前选择为模拟执行链，不会向券商发送真实委托。'}
               </p>
             </div>
 

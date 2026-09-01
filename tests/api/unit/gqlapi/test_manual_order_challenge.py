@@ -927,7 +927,7 @@ def test_manual_order_input_is_strongly_and_fail_closed_validated(overrides, cod
 
 
 @pytest.mark.asyncio
-async def test_preflight_uses_fresh_quote_account_instrument_and_order_sizer(
+async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
   monkeypatch,
 ):
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -965,7 +965,7 @@ async def test_preflight_uses_fresh_quote_account_instrument_and_order_sizer(
           instrument_id="600000",
           market="SH",
           name="浦发银行",
-          is_trading=True,
+          is_trading=False,
           price_tick=0.01,
           up_stop_price=11.0,
           down_stop_price=9.0,

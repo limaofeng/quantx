@@ -147,9 +147,10 @@ final class ManualOrderRepositoryTests: XCTestCase {
     XCTAssertTrue(preview.wasCapped)
   }
 
-  func testCapabilitiesKeepPaperAsOnlyDefaultAndExposeReadyLive() throws {
+  func testCapabilitiesFollowReadyLiveDefault() throws {
     let capabilities = try ManualOrderRepository.mapCapabilities(
       makeGraphQLCapabilities(
+        defaultExecutionMode: .live,
         executionModes: [.paper, .live],
         liveReady: true
       ),
@@ -158,7 +159,7 @@ final class ManualOrderRepositoryTests: XCTestCase {
       authorizedAccountIDs: ["ACCOUNT-1"]
     )
 
-    XCTAssertEqual(capabilities.defaultExecutionMode, .paper)
+    XCTAssertEqual(capabilities.defaultExecutionMode, .live)
     XCTAssertEqual(capabilities.selectableExecutionModes, [.paper, .live])
     XCTAssertTrue(
       capabilities.supports(
@@ -296,6 +297,7 @@ final class ManualOrderRepositoryTests: XCTestCase {
   private func makeGraphQLCapabilities(
     accountID: String = "ACCOUNT-1",
     instrumentCode: String = "600519.SH",
+    defaultExecutionMode: QuantXAPI.ManualOrderExecutionMode = .paper,
     executionModes: [QuantXAPI.ManualOrderExecutionMode] = [.paper],
     rawExecutionModes: [GraphQLEnum<QuantXAPI.ManualOrderExecutionMode>]? = nil,
     supportedPriceTypes: [QuantXAPI.ManualOrderPriceType] = [.limit, .best],
@@ -309,7 +311,7 @@ final class ManualOrderRepositoryTests: XCTestCase {
           "instrumentCode": instrumentCode,
           "canManualTrade": true,
           "defaultExecutionMode": GraphQLEnum(
-            QuantXAPI.ManualOrderExecutionMode.paper
+            defaultExecutionMode
           ),
           "executionModes": rawExecutionModes
             ?? executionModes.map(GraphQLEnum.init),

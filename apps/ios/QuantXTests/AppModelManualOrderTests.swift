@@ -288,6 +288,7 @@ private final class ManualOrderLoaderSpy: ManualOrderLoading {
       accountID: accountID,
       instrumentCode: instrumentCode,
       canManualTrade: true,
+      defaultExecutionMode: .live,
       executionModes: [.paper, .live],
       supportedDirections: [.buy, .sell],
       supportedQuoteTypes: [.limit, .best],

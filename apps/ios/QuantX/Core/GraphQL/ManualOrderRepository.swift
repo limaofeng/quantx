@@ -333,10 +333,15 @@ final class ManualOrderRepository: ManualOrderLoading {
     else {
       throw ManualOrderRepositoryError.accountScopeMismatch
     }
-    guard value.instrumentCode == requestedInstrumentCode,
-      value.defaultExecutionMode.rawValue == ManualOrderExecutionMode.paper.rawValue
-    else {
+    guard value.instrumentCode == requestedInstrumentCode else {
       throw ManualOrderRepositoryError.contextMismatch
+    }
+    guard
+      let defaultExecutionMode = ManualOrderExecutionMode(
+        rawValue: value.defaultExecutionMode.rawValue
+      )
+    else {
+      throw ManualOrderRepositoryError.invalidResponse
     }
 
     let modes = try strictSet(
@@ -353,7 +358,10 @@ final class ManualOrderRepository: ManualOrderLoading {
     )
     guard
       !value.canManualTrade
-        || (modes.contains(.paper) && !directions.isEmpty && !quoteTypes.isEmpty),
+        || (modes.contains(defaultExecutionMode)
+          && modes.contains(.paper)
+          && !directions.isEmpty
+          && !quoteTypes.isEmpty),
       value.liveReady == modes.contains(.live)
     else {
       throw ManualOrderRepositoryError.invalidResponse
@@ -362,6 +370,7 @@ final class ManualOrderRepository: ManualOrderLoading {
       accountID: value.accountId,
       instrumentCode: value.instrumentCode,
       canManualTrade: value.canManualTrade,
+      defaultExecutionMode: defaultExecutionMode,
       executionModes: modes,
       supportedDirections: directions,
       supportedQuoteTypes: quoteTypes,
