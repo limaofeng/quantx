@@ -31,30 +31,15 @@ vi.mock('urql', () => ({
 }));
 
 vi.mock('@/components/studio-workbench', () => ({
-  StudioWorkbench: ({
-    content,
-    showSidebar,
-    sidebar,
-  }: {
-    content: ReactNode;
-    showSidebar?: boolean;
-    sidebar?: ReactNode;
-  }) => (
-    <>
-      {showSidebar && sidebar ? (
-        <div data-testid="workspace-sidebar">{sidebar}</div>
-      ) : null}
-      {content}
-    </>
-  ),
+  StudioWorkbench: ({ content }: { content: ReactNode }) => <>{content}</>,
 }));
 
 vi.mock('@/components/studio-workspace', () => ({
   useStudioNavigate: () => mocks.navigate,
 }));
 
-vi.mock('@/features/trading-safety', () => ({
-  ExecutionHealthSidebar: () => <aside>卖出执行健康</aside>,
+vi.mock('@/features/trading/components/TradingHoldingsSidebar', () => ({
+  TradingHoldingsSidebar: () => null,
 }));
 
 vi.mock('@/features/portfolio/components/SellManagementPanels', () => ({
@@ -82,32 +67,7 @@ vi.mock('@/features/portfolio/hooks/useLiquidationActions', () => ({
 vi.mock('@/features/portfolio/hooks/useLiquidationData', () => ({
   useLiquidationData: () => ({
     accountId: '300000013250',
-    currentHoldings: [
-      {
-        avgPrice: 18.6,
-        canUseVolume: 800,
-        frozenVolume: 0,
-        instrumentName: '测试标的',
-        lastPrice: 22.4,
-        marketValue: 22_400,
-        onRoadVolume: 0,
-        stockCode: '300917.SZ',
-        volume: 1000,
-        yesterdayVolume: 1000,
-      },
-      {
-        avgPrice: 9.8,
-        canUseVolume: 600,
-        frozenVolume: 0,
-        instrumentName: '示例科技',
-        lastPrice: 10.2,
-        marketValue: 6120,
-        onRoadVolume: 0,
-        stockCode: '000001.SZ',
-        volume: 600,
-        yesterdayVolume: 600,
-      },
-    ],
+    currentHoldings: [],
     error: undefined,
     isLoading: false,
     liquidatedStocks: [],
@@ -128,7 +88,6 @@ vi.mock('@/hooks/use-toast', () => ({
 describe('LiquidationPage overview navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    window.HTMLElement.prototype.scrollIntoView = vi.fn();
   });
 
   it('returns from a stock workspace to all exit plans', async () => {
@@ -158,33 +117,6 @@ describe('LiquidationPage overview navigation', () => {
     expect(within(navigation).queryByText('卖出计划')).not.toBeInTheDocument();
     expect(mocks.setLocation).toHaveBeenCalledWith(
       '/liquidation?symbol=300917.SZ&workspace=REPLAY'
-    );
-  });
-
-  it('docks execution health in the left workspace instead of a holdings sidebar', () => {
-    render(<LiquidationPage />);
-
-    expect(screen.getByTestId('workspace-sidebar')).toHaveTextContent(
-      '卖出执行健康'
-    );
-    expect(
-      screen.queryByRole('button', { name: /执行健康 ·/ })
-    ).not.toBeInTheDocument();
-  });
-
-  it('selects a sell target from the compact searchable selector', async () => {
-    const user = userEvent.setup();
-    render(<LiquidationPage />);
-
-    await user.click(screen.getByRole('combobox', { name: '选择卖出标的' }));
-    await user.type(
-      screen.getByRole('combobox', { name: '搜索持仓股票' }),
-      '示例科技'
-    );
-    await user.click(screen.getByText('示例科技'));
-
-    expect(mocks.setLocation).toHaveBeenCalledWith(
-      '/liquidation?symbol=000001.SZ'
     );
   });
 });

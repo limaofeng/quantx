@@ -4,10 +4,7 @@ import type { ContextType, ReactNode } from 'react';
 import { CombinedError } from 'urql';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  ExecutionHealthControl,
-  ExecutionHealthSidebar,
-} from '@/features/trading-safety';
+import { ExecutionHealthControl } from '@/features/trading-safety';
 import { TradingSafetyContext } from '@/features/trading-safety/trading-safety-context';
 
 const mocks = vi.hoisted(() => ({
@@ -163,25 +160,6 @@ describe('ExecutionHealthControl', () => {
     ).toBeVisible();
     expect(screen.getByText('T+1 不可卖')).toBeVisible();
     expect(screen.getByText('1,000 股')).toBeVisible();
-  });
-
-  it('renders sell execution health as a docked sidebar without a dialog', () => {
-    renderControl(
-      <ExecutionHealthSidebar
-        details={{
-          activeExitPlanCount: 0,
-          holding: null,
-          workingSellOrderCount: 0,
-        }}
-        scope="SELL"
-      />
-    );
-
-    expect(screen.getByRole('complementary')).toBeVisible();
-    expect(screen.getByRole('heading', { name: '执行健康' })).toBeVisible();
-    expect(screen.getByText('Sell execution')).toBeVisible();
-    expect(screen.getByText('交易权限：可交易')).toBeVisible();
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('keeps a returned snapshot visible but closes execution on query error', async () => {

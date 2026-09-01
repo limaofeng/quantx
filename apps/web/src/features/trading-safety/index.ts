@@ -2,10 +2,7 @@ export {
   accountActivityStatus,
   type AccountActivityStatus,
 } from './accountActivityStatus';
-export {
-  ExecutionHealthControl,
-  ExecutionHealthSidebar,
-} from './ExecutionHealthControl';
+export { ExecutionHealthControl } from './ExecutionHealthControl';
 export type {
   BuyExecutionHealthDetails,
   SellExecutionHealthDetails,
