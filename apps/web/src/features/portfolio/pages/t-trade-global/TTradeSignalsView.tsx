@@ -725,7 +725,12 @@ export function TTradeSignalsView({
         onRequestCandidateTrace?.(null);
       }
     },
-    [onRequestCandidateTrace, selectedTrace]
+    [
+      expandedSignalId,
+      onRequestCandidateTrace,
+      onRequestEvaluationDetail,
+      selectedTrace,
+    ]
   );
 
   return (

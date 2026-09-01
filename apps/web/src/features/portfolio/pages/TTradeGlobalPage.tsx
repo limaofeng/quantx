@@ -2976,6 +2976,7 @@ export function TTradeGlobalPage() {
         }
         onFocusHandled={() => setFocusedSignalStockCode(null)}
         onRequestCandidateTrace={setSelectedTrace}
+        onRequestEvaluationDetail={setRequestedSignalDetailId}
         onReject={(session, snapshot) =>
           void handleSignal(
             'reject',
