@@ -83,27 +83,34 @@ def test_account_freshness_rejects_stale_or_degraded_heartbeat(
   ("target", "value"),
   [
     ("stream.status", "SYNCING"),
-    ("stream.commit_phase", "APPLYING"),
+    ("stream.commit_phase", "WRITING"),
     ("stream.sequence", 2),
     ("freshness.stream_id", "stream-other"),
     ("freshness.sequence", 2),
     ("engine.status", "SYNCING"),
     ("engine.stream_id", "stream-other"),
-    ("engine.sequence", 2),
+    ("engine.generation", 8),
+    ("engine.sequence", 4),
   ],
 )
-def test_authoritative_market_readiness_requires_exact_committed_watermarks(
+def test_authoritative_market_readiness_rejects_invalid_or_unready_fences(
   target: str,
   value: object,
 ) -> None:
   stream = SimpleNamespace(
     status="READY",
     commit_phase="IDLE",
+    generation=7,
     sequence=3,
     stream_id="stream-1",
   )
   freshness = SimpleNamespace(stream_id="stream-1", sequence=3)
-  engine = SimpleNamespace(status="READY", stream_id="stream-1", sequence=3)
+  engine = SimpleNamespace(
+    status="READY",
+    generation=7,
+    stream_id="stream-1",
+    sequence=3,
+  )
   owner, attribute = target.split(".", maxsplit=1)
   setattr(
     {"stream": stream, "freshness": freshness, "engine": engine}[owner],
@@ -141,7 +148,7 @@ def test_authoritative_market_readiness_is_passed_only_during_a_fresh_session() 
   assert readiness.tradable_now
 
 
-def test_authoritative_market_readiness_marks_recent_engine_progress_as_transient() -> (
+def test_authoritative_market_readiness_keeps_recent_engine_progress_tradable() -> (
   None
 ):
   observed_at = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
@@ -170,11 +177,12 @@ def test_authoritative_market_readiness_marks_recent_engine_progress_as_transien
     observed_at=observed_at,
   )
 
-  assert readiness.status is MarketStreamReadinessStatus.TRANSIENT
+  assert readiness.status is MarketStreamReadinessStatus.PASSED
   assert readiness.sequence_lag == 6
   assert readiness.progress_age_seconds == pytest.approx(1.5)
-  assert not readiness.tradable_now
-  assert "落后 6 批" in readiness.message
+  assert readiness.tradable_now
+  assert not readiness.converged
+  assert readiness.message == ""
 
 
 def test_authoritative_market_readiness_fails_when_engine_progress_stalls() -> None:
@@ -209,7 +217,7 @@ def test_authoritative_market_readiness_fails_when_engine_progress_stalls() -> N
   assert "长时间未收敛" in readiness.message
 
 
-def test_authoritative_market_readiness_marks_short_atomic_commit_as_transient() -> (
+def test_authoritative_market_readiness_keeps_short_atomic_commit_tradable() -> (
   None
 ):
   observed_at = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
@@ -239,9 +247,106 @@ def test_authoritative_market_readiness_marks_short_atomic_commit_as_transient()
     observed_at=observed_at,
   )
 
-  assert readiness.status is MarketStreamReadinessStatus.TRANSIENT
+  assert readiness.status is MarketStreamReadinessStatus.PASSED
+  assert readiness.tradable_now
+  assert not readiness.converged
+  assert readiness.message == ""
+
+
+def test_authoritative_market_readiness_keeps_apply_and_engine_lag_tradable() -> (
+  None
+):
+  observed_at = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
+  stream = SimpleNamespace(
+    status="READY",
+    commit_phase="APPLYING",
+    pending_sequence=126,
+    generation=7,
+    sequence=125,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(milliseconds=20),
+  )
+  freshness = SimpleNamespace(stream_id="stream-1", sequence=125)
+  engine = SimpleNamespace(
+    status="READY",
+    generation=7,
+    sequence=121,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(milliseconds=800),
+  )
+
+  readiness = classify_authoritative_market_stream_readiness(
+    stream_state=stream,
+    freshness_lease=freshness,
+    engine_state=engine,
+    trading_session=True,
+    observed_at=observed_at,
+  )
+
+  assert readiness.status is MarketStreamReadinessStatus.PASSED
+  assert readiness.tradable_now
+  assert readiness.sequence_lag == 4
+  assert readiness.progress_age_seconds == pytest.approx(0.8)
+  assert not readiness.converged
+
+
+@pytest.mark.parametrize(
+  (
+    "freshness",
+    "pending_sequence",
+    "stream_age_seconds",
+    "engine_age_seconds",
+    "message",
+  ),
+  [
+    (
+      SimpleNamespace(stream_id="stream-1", sequence=124),
+      126,
+      0.02,
+      0.05,
+      "新鲜度租约",
+    ),
+    (SimpleNamespace(stream_id="stream-1", sequence=125), 126, 0.02, 4.0, "APPLYING"),
+    (SimpleNamespace(stream_id="stream-1", sequence=125), 127, 0.02, 0.05, "APPLYING"),
+    (SimpleNamespace(stream_id="stream-1", sequence=125), 126, 4.0, 0.05, "APPLYING"),
+  ],
+)
+def test_authoritative_market_readiness_fails_unsafe_atomic_commit_fence(
+  freshness: SimpleNamespace,
+  pending_sequence: int,
+  stream_age_seconds: float,
+  engine_age_seconds: float,
+  message: str,
+) -> None:
+  observed_at = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
+  stream = SimpleNamespace(
+    status="READY",
+    commit_phase="APPLYING",
+    pending_sequence=pending_sequence,
+    generation=7,
+    sequence=125,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(seconds=stream_age_seconds),
+  )
+  engine = SimpleNamespace(
+    status="READY",
+    generation=7,
+    sequence=125,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(seconds=engine_age_seconds),
+  )
+
+  readiness = classify_authoritative_market_stream_readiness(
+    stream_state=stream,
+    freshness_lease=freshness,
+    engine_state=engine,
+    trading_session=True,
+    observed_at=observed_at,
+  )
+
+  assert readiness.status is MarketStreamReadinessStatus.FAILED
   assert not readiness.tradable_now
-  assert "原子提交" in readiness.message
+  assert message in readiness.message
 
 
 def test_authoritative_market_readiness_is_standby_while_market_is_closed() -> None:
@@ -401,7 +506,7 @@ async def _status(
         message=(
           "当前休市，权威水位已收敛"
           if market_status is MarketStreamReadinessStatus.STANDBY
-          else "Engine 正在追赶全市场行情水位"
+          else "Engine 正在恢复全市场行情消费水位"
           if market_status is MarketStreamReadinessStatus.TRANSIENT
           else "全市场行情未就绪"
           if market_status is MarketStreamReadinessStatus.FAILED
@@ -620,7 +725,7 @@ async def test_account_status_rejects_agent_ready_claim_without_server_watermark
 
 
 @pytest.mark.asyncio
-async def test_account_status_keeps_transient_market_catchup_fail_closed(
+async def test_account_status_keeps_transient_market_recovery_fail_closed(
   monkeypatch: pytest.MonkeyPatch,
   fixed_utcnow: datetime,
 ) -> None:
@@ -648,7 +753,7 @@ async def test_account_status_keeps_transient_market_catchup_fail_closed(
   assert checks["MARKET_STREAM_READY"]["status"] == "TRANSIENT"
   assert result["can_increase_risk"] is False
   assert result["can_reduce_risk"] is True
-  assert "追赶" in result["blocked_reasons"][0]
+  assert "恢复" in result["blocked_reasons"][0]
 
 
 @pytest.mark.asyncio

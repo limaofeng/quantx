@@ -71,8 +71,8 @@ async def account_safety_observation_snapshot() -> AccountSafetyObservationSnaps
       reason_code = "MARKET_CLOSED_STANDBY"
       message = message or "当前休市，权威行情链路已收敛并保持待机"
     elif status is AccountSafetyCheckStatus.TRANSIENT:
-      reason_code = "MARKET_STREAM_CATCHING_UP"
-      message = message or "权威行情链路正在同步追赶，增仓保持关闭"
+      reason_code = "MARKET_STREAM_RECOVERING"
+      message = message or "权威行情链路正在恢复同步，增仓保持关闭"
     else:
       reason_code = f"{code}_FAILED"
       message = message or "该项账户准入检查未通过"

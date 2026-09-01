@@ -90,7 +90,7 @@ def safety_outcome(
             or status is AccountSafetyCheckStatus.PASSED
             else "MARKET_CLOSED_STANDBY"
             if status is AccountSafetyCheckStatus.STANDBY
-            else "MARKET_STREAM_CATCHING_UP"
+            else "MARKET_STREAM_RECOVERING"
             if status is AccountSafetyCheckStatus.TRANSIENT
             else "MARKET_STREAM_READY_FAILED"
           ),
@@ -100,7 +100,7 @@ def safety_outcome(
             or status is AccountSafetyCheckStatus.PASSED
             else "当前休市"
             if status is AccountSafetyCheckStatus.STANDBY
-            else "行情链路正在同步追赶"
+            else "行情链路正在恢复同步"
             if status is AccountSafetyCheckStatus.TRANSIENT
             else "行情链路未收敛"
           ),

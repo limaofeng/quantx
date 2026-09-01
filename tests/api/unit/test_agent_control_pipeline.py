@@ -2,12 +2,15 @@ import asyncio
 import threading
 import time
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from quantx_api import agent_api
 from quantx_contracts import AgentEnvelope, AgentMessageType, ReportAckPayload
+from quantx_infrastructure.services.market_stream_readiness import (
+  classify_authoritative_market_stream_readiness,
+)
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 
@@ -557,6 +560,90 @@ async def test_closed_market_gate_defers_live_risk_increase(
     match="market_stream_not_ready",
   ):
     await agent_api._assert_trade_delivery_session(session, command)
+
+
+@pytest.mark.asyncio
+async def test_live_risk_increase_delivery_accepts_progressing_market_fence(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session = control_session()
+  device = SimpleNamespace(revoked_at=None)
+  heartbeat = SimpleNamespace(
+    status="READY",
+    details={
+      "apiInstanceId": session.api_instance_id,
+      "agentSessionId": session.agent_session_id,
+      "marketStreamStatus": "READY",
+    },
+  )
+
+  class DatabaseSession:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, model, _identity):
+      return device if model is agent_api.AgentDevice else heartbeat
+
+  class SafetyService:
+    async def status(self, _account_id):
+      return {"can_increase_risk": True}
+
+  observed_at = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
+
+  async def progressing_market_stream_is_tradable() -> bool:
+    readiness = classify_authoritative_market_stream_readiness(
+      stream_state=SimpleNamespace(
+        status="READY",
+        commit_phase="IDLE",
+        generation=7,
+        stream_id="stream-1",
+        sequence=125,
+        updated_at=observed_at,
+      ),
+      freshness_lease=SimpleNamespace(stream_id="stream-1", sequence=125),
+      engine_state=SimpleNamespace(
+        status="READY",
+        generation=7,
+        stream_id="stream-1",
+        sequence=119,
+        updated_at=observed_at - timedelta(milliseconds=500),
+      ),
+      trading_session=True,
+      observed_at=observed_at,
+    )
+    return readiness.tradable_now
+
+  monkeypatch.setattr(agent_api, "AsyncSessionLocal", DatabaseSession)
+  monkeypatch.setattr(
+    agent_api,
+    "evaluate_agent_session",
+    lambda *_args, **_kwargs: SimpleNamespace(
+      current=True,
+      reason_code="",
+      api_instance_id=session.api_instance_id,
+      agent_session_id=session.agent_session_id,
+    ),
+  )
+  monkeypatch.setattr(agent_api, "AccountExecutionSafetyService", SafetyService)
+  monkeypatch.setattr(
+    agent_api,
+    "authoritative_market_stream_tradable",
+    progressing_market_stream_is_tradable,
+  )
+  command = AgentEnvelope(
+    message_type=AgentMessageType.COMMAND,
+    payload={
+      "command_kind": "PLACE_ORDER",
+      "account_id": "account-1",
+      "execution_mode": "live",
+      "side": "BUY",
+    },
+  )
+
+  await agent_api._assert_trade_delivery_session(session, command)
 
 
 @pytest.mark.asyncio

@@ -290,6 +290,8 @@ sequence 2 连续性屏障提交后仍保持 `SYNCING`。Agent 收到其 ACK 后
 sequence 3 readiness-confirm（可为空），只有该批次被同一 Redis CAS 提交后，
 API、Engine 与 freshness lease 的 stream/sequence 才完全一致，Hub 才首次向
 消费者分发完整中央快照；之后真实有序回调从 sequence 4 开始。同一
-stream/generation 下 API 暂时领先且 Engine 最近 3 秒仍持续推进时，账户准入投影为
-`TRANSIENT`，实时增仓动作保持关闭但 Monitor 不创建事故；推进停止、身份不一致、
-水位回退或租约过期才投影为 `FAILED`。
+stream/generation 下 Engine 为 `READY`、freshness lease 匹配且最近 3 秒仍持续推进时，
+API 暂时领先或正在把大 DELTA 提交到下一个 fence 都投影为 `PASSED`；全市场移动 sequence
+不再因瞬时不相等关闭实时增仓。sequence 3 初始屏障、重同步和恢复仍精确收敛；推进停止、
+身份不一致、水位回退或租约过期才投影为 `FAILED`，恢复同步期间为阻止增仓的
+`TRANSIENT`。策略与关键消费者始终只使用 Hub 已完整应用的 Engine fence。

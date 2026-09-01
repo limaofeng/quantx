@@ -1,7 +1,7 @@
 import asyncio
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -65,9 +65,18 @@ async def test_ready_supply_needs_neither_engine_nor_trading_account(supply):
   assert health.connected_devices == 1
   assert health.sequence == 4
   market_gateway.market_stream_store.engine_state.assert_not_awaited()
-  # The separate trading gate MUST still reject missing/lagging Engine state.
+  # The separate trading gate rejects missing, stalled, or wrong-identity
+  # Engine state, while bounded progress behind the moving API head is healthy.
   state, lease, _ = supply
-  for engine in (None, replace(state, sequence=3), replace(state, stream_id="old")):
+  for engine in (
+    None,
+    replace(
+      state,
+      sequence=3,
+      updated_at=datetime.now(timezone.utc) - timedelta(seconds=4),
+    ),
+    replace(state, stream_id="old"),
+  ):
     readiness = classify_authoritative_market_stream_readiness(
       stream_state=state,
       freshness_lease=lease,
@@ -75,6 +84,15 @@ async def test_ready_supply_needs_neither_engine_nor_trading_account(supply):
       trading_session=True,
     )
     assert not readiness.tradable_now
+  progressing = classify_authoritative_market_stream_readiness(
+    stream_state=state,
+    freshness_lease=lease,
+    engine_state=replace(state, sequence=3),
+    trading_session=True,
+  )
+  assert progressing.status is MarketStreamReadinessStatus.PASSED
+  assert progressing.tradable_now
+  assert not progressing.converged
   assert (
     classify_authoritative_market_stream_readiness(
       stream_state=state,

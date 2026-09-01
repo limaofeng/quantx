@@ -98,7 +98,7 @@ def test_closed_market_standby_is_healthy_and_non_blocking() -> None:
   assert status["summary"] == "账户状态与买入条件正常；当前休市待机"
 
 
-def test_market_catchup_is_healthy_but_blocks_risk_increase() -> None:
+def test_market_recovery_sync_is_healthy_but_blocks_risk_increase() -> None:
   status = project_account_execution_safety(
     _readiness(transient={"MARKET_STREAM_READY"})
   )

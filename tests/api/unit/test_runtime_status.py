@@ -472,6 +472,48 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   assert components["engine"]["reasonCode"] == "ENGINE_MARKET_NOT_READY"
   current_engine_state = stream_state
 
+  recent = datetime.now(timezone.utc)
+  stream_state = replace(
+    stream_state,
+    sequence=8,
+    captured_at=recent,
+    updated_at=recent,
+  )
+  current_freshness = MarketStreamFreshnessLease(
+    stream_id=stream_state.stream_id,
+    sequence=stream_state.sequence,
+  )
+  current_engine_state = replace(
+    stream_state,
+    sequence=6,
+    updated_at=recent - timedelta(milliseconds=200),
+  )
+  components = await runtime_status._component_heartbeats()
+  consumption = components["engine"]["marketConsumption"]
+  assert components["engine"]["status"] == "ready"
+  assert consumption["status"] == "ready"
+  assert consumption["readinessStatus"] == "passed"
+  assert consumption["readinessMessage"] == ""
+  assert consumption["sequence"] == 8
+  assert consumption["engineSequence"] == 6
+
+  current_engine_state = replace(stream_state, updated_at=recent)
+  stream_state = replace(
+    stream_state,
+    commit_phase="APPLYING",
+    pending_sequence=9,
+    updated_at=recent,
+  )
+  components = await runtime_status._component_heartbeats()
+  consumption = components["engine"]["marketConsumption"]
+  assert components["engine"]["status"] == "ready"
+  assert consumption["status"] == "ready"
+  assert consumption["readinessStatus"] == "passed"
+  assert consumption["commitPhase"] == "APPLYING"
+
+  stream_state = replace(stream_state, commit_phase="IDLE", pending_sequence=0)
+  current_engine_state = stream_state
+
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
     heartbeat.status = "READY"

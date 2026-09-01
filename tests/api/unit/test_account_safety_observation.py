@@ -79,7 +79,7 @@ async def test_observation_rejects_incomplete_check_results(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_observation_projects_market_catchup_without_an_incident_status(
+async def test_observation_projects_market_recovery_without_an_incident_status(
   monkeypatch,
 ):
   monkeypatch.setattr(
@@ -95,7 +95,7 @@ async def test_observation_projects_market_catchup_without_an_incident_status(
           "status": "TRANSIENT" if code == "MARKET_STREAM_READY" else "PASSED",
           "scope": "INCREASE_RISK",
           "message": (
-            "Engine 正在追赶全市场行情水位" if code == "MARKET_STREAM_READY" else ""
+            "Engine 正在恢复全市场行情消费水位" if code == "MARKET_STREAM_READY" else ""
           ),
         }
         for code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES
@@ -107,5 +107,5 @@ async def test_observation_projects_market_catchup_without_an_incident_status(
   market = next(item for item in snapshot.checks if item.code == "MARKET_STREAM_READY")
 
   assert market.status.value == "TRANSIENT"
-  assert market.reason_code == "MARKET_STREAM_CATCHING_UP"
-  assert "追赶" in market.public_message
+  assert market.reason_code == "MARKET_STREAM_RECOVERING"
+  assert "恢复" in market.public_message

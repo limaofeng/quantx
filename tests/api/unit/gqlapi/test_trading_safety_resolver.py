@@ -44,10 +44,10 @@ def test_account_execution_health_status_is_a_closed_business_enum():
   assert safety.checks[0].status is AccountExecutionSafetyCheckStatus.STANDBY
 
 
-def test_account_execution_safety_accepts_transient_market_catchup():
+def test_account_execution_safety_accepts_transient_market_recovery():
   payload = _payload("HEALTHY")
   payload["checks"][0]["status"] = "TRANSIENT"
-  payload["checks"][0]["message"] = "Engine 正在追赶全市场行情水位"
+  payload["checks"][0]["message"] = "Engine 正在恢复全市场行情消费水位"
   payload["can_increase_risk"] = False
   payload["execution_mode"] = "REDUCE_ONLY"
 

@@ -172,12 +172,12 @@ describe('TradingSafetySettingsPanel', () => {
     expect(screen.queryByText('需处理')).not.toBeInTheDocument();
   });
 
-  it('presents market catchup as transient without calling it an incident', () => {
+  it('presents market recovery sync as transient without calling it an incident', () => {
     mocks.safety.checks = [
       {
         code: 'MARKET_STREAM_READY',
         status: 'TRANSIENT',
-        message: 'Engine 正在追赶全市场行情水位：落后 6 批',
+        message: 'Engine 正在恢复全市场行情消费水位',
         scope: 'INCREASE_RISK',
       },
     ];
