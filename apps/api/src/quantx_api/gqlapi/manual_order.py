@@ -50,6 +50,7 @@ from sqlalchemy.exc import IntegrityError
 from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
 from quantx_api.auth.service import AuthService
+from quantx_api.manual_order_runtime import configured_manual_order_execution_mode
 
 from .trade_approval import (
   TradeApprovalChallengeError,
@@ -491,6 +492,13 @@ async def _preflight(
   lock_mutable_rows: bool = False,
   risk_decision_id: Optional[str] = None,
 ) -> ManualOrderPreflightData:
+  configured_mode = configured_manual_order_execution_mode(request.account_id)
+  if request.execution_mode != configured_mode:
+    configured_label = "LIVE 实盘" if configured_mode == "LIVE" else "PAPER 模拟"
+    raise TradeApprovalChallengeError(
+      "EXECUTION_MODE_MISMATCH",
+      f"当前 liveTrading 配置只允许 {configured_label}，不会自动切换执行环境",
+    )
   if db is None:
     async with AsyncSessionLocal() as owned_db:
       return await _preflight(

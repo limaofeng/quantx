@@ -21,7 +21,6 @@ import {
   ManualOrderExecutionMode,
   ManualOrderPriceType,
   ManualOrderSide,
-  type Trading_ManualOrderCapabilitiesQuery,
 } from '@/generated/gql/graphql';
 import { useStockSearch } from '@/hooks/useStockSearch';
 import type { Stock } from '@/shared/types';
@@ -83,22 +82,6 @@ const QUICK_QUANTITY_PRESETS = [
 ] as const;
 
 type QuickQuantityPreset = (typeof QUICK_QUANTITY_PRESETS)[number];
-type ManualOrderCapabilities =
-  Trading_ManualOrderCapabilitiesQuery['orderEntryCapabilities'];
-
-const resolveDefaultExecutionMode = (
-  capabilities: ManualOrderCapabilities | null | undefined,
-  tradeType: 'buy' | 'sell'
-) => {
-  const liveAllowed = Boolean(
-    capabilities?.defaultExecutionMode === ManualOrderExecutionMode.Live &&
-    capabilities.executionModes.includes(ManualOrderExecutionMode.Live) &&
-    (tradeType === 'buy' ? capabilities.canLiveBuy : capabilities.canLiveSell)
-  );
-  return liveAllowed
-    ? ManualOrderExecutionMode.Live
-    : ManualOrderExecutionMode.Paper;
-};
 
 const toBuyLotQuantity = (value: number) =>
   Math.floor(toNonNegativeInteger(value) / BUY_LOT_SIZE) * BUY_LOT_SIZE;
@@ -344,7 +327,8 @@ export function TradingCard({
     capabilities?.executionModes.includes(ManualOrderExecutionMode.Live) &&
     (tradeType === 'buy' ? capabilities.canLiveBuy : capabilities.canLiveSell)
   );
-  const executionMode = resolveDefaultExecutionMode(capabilities, tradeType);
+  const executionMode = capabilities?.defaultExecutionMode;
+  const isLiveExecution = executionMode === ManualOrderExecutionMode.Live;
   const directionSupported = Boolean(
     capabilities?.supportedSides.includes(manualOrderSide)
   );
@@ -352,6 +336,7 @@ export function TradingCard({
     capabilities?.supportedPriceTypes.includes(manualOrderPriceType)
   );
   const executionModeSupported = Boolean(
+    executionMode &&
     capabilities?.executionModes.includes(executionMode) &&
     (executionMode !== ManualOrderExecutionMode.Live || canUseLive)
   );
@@ -402,28 +387,34 @@ export function TradingCard({
           <div
             className={cn(
               'flex items-center gap-1.5 rounded-full border px-1.5 py-0.5',
-              executionMode === ManualOrderExecutionMode.Live
+              isLiveExecution
                 ? 'border-amber-400/25 bg-amber-400/10'
-                : 'border-blue-500/15 bg-blue-500/5'
+                : executionMode === ManualOrderExecutionMode.Paper
+                  ? 'border-blue-500/15 bg-blue-500/5'
+                  : 'border-slate-500/15 bg-slate-500/5'
             )}
           >
             <div
               className={cn(
                 'h-1 w-1 rounded-full',
-                executionMode === ManualOrderExecutionMode.Live
+                isLiveExecution
                   ? 'bg-amber-300'
-                  : 'bg-blue-500'
+                  : executionMode === ManualOrderExecutionMode.Paper
+                    ? 'bg-blue-500'
+                    : 'bg-slate-500'
               )}
             />
             <span
               className={cn(
                 'text-ui-micro font-bold uppercase tracking-tighter',
-                executionMode === ManualOrderExecutionMode.Live
+                isLiveExecution
                   ? 'text-amber-200'
-                  : 'text-blue-500/70'
+                  : executionMode === ManualOrderExecutionMode.Paper
+                    ? 'text-blue-500/70'
+                    : 'text-slate-500'
               )}
             >
-              {executionMode}
+              {executionMode || (capabilitiesLoading ? '读取中' : '不可用')}
             </span>
           </div>
         </div>
@@ -466,7 +457,11 @@ export function TradingCard({
       </div>
 
       <form
-        onSubmit={event =>
+        onSubmit={event => {
+          if (!executionMode) {
+            event.preventDefault();
+            return;
+          }
           handleSubmit(event, {
             executionMode,
             orderType,
@@ -474,8 +469,8 @@ export function TradingCard({
             quantity,
             selectedStock,
             tradeType,
-          })
-        }
+          });
+        }}
         className="flex-1 flex flex-col min-h-0"
       >
         <ScrollArea className="flex-1 -mr-3">
@@ -512,6 +507,12 @@ export function TradingCard({
                   <span className="text-rose-300">
                     {capabilities.liveBlockedReasons[0] ||
                       '当前证券不可手动交易'}
+                  </span>
+                ) : capabilities && isLiveExecution && !canUseLive ? (
+                  <span className="text-rose-300">
+                    LIVE 下单已阻止：
+                    {capabilities.liveBlockedReasons[0] ||
+                      '当前实盘安全门禁未就绪'}
                   </span>
                 ) : capabilities ? (
                   <span className="text-emerald-300">服务端下单能力已就绪</span>

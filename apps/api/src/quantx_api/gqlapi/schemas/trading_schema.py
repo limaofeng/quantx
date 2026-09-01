@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from quantx_api.auth.errors import AuthError
 from quantx_api.auth.service import AuthService
+from quantx_api.manual_order_runtime import configured_manual_order_execution_mode
 
 from ..account_execution_control import (
   AccountExecutionControlChallengeService,
@@ -155,20 +156,22 @@ class TradingQuery:
     instrument_available = instrument is not None
     has_manual_scope = "trade:manual" in principal.permissions
     can_manual_trade = bool(valid_code and instrument_available and has_manual_scope)
-    execution_modes = [ManualOrderExecutionMode.PAPER] if can_manual_trade else []
+    configured_execution_mode = ManualOrderExecutionMode(
+      configured_manual_order_execution_mode(resolved_account_id)
+    )
+    execution_modes = [configured_execution_mode] if can_manual_trade else []
     live_ready = False
     can_live_sell = False
     live_blocked_reasons: List[str] = []
     if can_manual_trade:
-      try:
-        safety = await AccountExecutionSafetyService().status(resolved_account_id)
-        live_blocked_reasons = list(safety.get("blocked_reasons") or [])
-        live_ready = bool(safety.get("can_increase_risk"))
-        can_live_sell = bool(safety.get("can_reduce_risk"))
-      except Exception:
-        live_blocked_reasons = ["实盘安全状态暂不可用"]
-      if live_ready or can_live_sell:
-        execution_modes.append(ManualOrderExecutionMode.LIVE)
+      if configured_execution_mode == ManualOrderExecutionMode.LIVE:
+        try:
+          safety = await AccountExecutionSafetyService().status(resolved_account_id)
+          live_blocked_reasons = list(safety.get("blocked_reasons") or [])
+          live_ready = bool(safety.get("can_increase_risk"))
+          can_live_sell = bool(safety.get("can_reduce_risk"))
+        except Exception:
+          live_blocked_reasons = ["实盘安全状态暂不可用"]
     elif not has_manual_scope:
       live_blocked_reasons = ["当前会话未获授 trade:manual"]
     elif not valid_code:
@@ -184,11 +187,7 @@ class TradingQuery:
       account_id=resolved_account_id,
       instrument_code=normalized_code,
       can_manual_trade=can_manual_trade,
-      default_execution_mode=(
-        ManualOrderExecutionMode.LIVE
-        if live_ready
-        else ManualOrderExecutionMode.PAPER
-      ),
+      default_execution_mode=configured_execution_mode,
       execution_modes=execution_modes,
       supported_sides=[ManualOrderSide.BUY, ManualOrderSide.SELL],
       supported_price_types=supported_price_types,
@@ -197,7 +196,8 @@ class TradingQuery:
       live_ready=live_ready,
       live_blocked_reasons=list(dict.fromkeys(live_blocked_reasons)),
       warnings=[
-        "能力只决定可展示的票据选项；每次预览和确认仍重新执行服务端风控",
+        "执行模式跟随 liveTrading 配置；实盘门禁失败只会阻止下单，不会降级到 PAPER",
+        "每次预览和确认仍重新执行服务端风控",
         "停牌与实时可交易状态以最新行情和 QMT 下单前检查为准",
         "北交所暂不提供 BEST；沪深 BEST 仅映射对手方最优价",
       ],

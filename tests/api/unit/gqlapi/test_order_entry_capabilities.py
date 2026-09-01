@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from quantx_api import manual_order_runtime
 from quantx_api.auth.principal import Principal
 from quantx_api.auth.tokens import utcnow
 from quantx_api.gqlapi.schemas import trading_schema
@@ -51,10 +52,31 @@ def _ready():
   }
 
 
+def _configure_live(monkeypatch: pytest.MonkeyPatch) -> None:
+  monkeypatch.setattr(manual_order_runtime.settings, "runtime_profile", "full")
+  monkeypatch.setattr(manual_order_runtime.settings, "enable_real_trading", True)
+  monkeypatch.setattr(
+    manual_order_runtime.settings,
+    "real_trading_account_allowlist",
+    ["ACCOUNT-1"],
+  )
+
+
+def _configure_paper(monkeypatch: pytest.MonkeyPatch) -> None:
+  monkeypatch.setattr(manual_order_runtime.settings, "runtime_profile", "web")
+  monkeypatch.setattr(manual_order_runtime.settings, "enable_real_trading", False)
+  monkeypatch.setattr(
+    manual_order_runtime.settings,
+    "real_trading_account_allowlist",
+    [],
+  )
+
+
 @pytest.mark.asyncio
 async def test_order_entry_capabilities_follow_live_trading_and_ignore_stale_flag(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+  _configure_live(monkeypatch)
   monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
   with patch.object(
     trading_schema.AccountExecutionSafetyService,
@@ -67,10 +89,7 @@ async def test_order_entry_capabilities_follow_live_trading_and_ignore_stale_fla
 
   assert result.can_manual_trade is True
   assert result.default_execution_mode == ManualOrderExecutionMode.LIVE
-  assert result.execution_modes == [
-    ManualOrderExecutionMode.PAPER,
-    ManualOrderExecutionMode.LIVE,
-  ]
+  assert result.execution_modes == [ManualOrderExecutionMode.LIVE]
   assert result.supported_price_types == [
     ManualOrderPriceType.LIMIT,
     ManualOrderPriceType.BEST,
@@ -78,20 +97,16 @@ async def test_order_entry_capabilities_follow_live_trading_and_ignore_stale_fla
 
 
 @pytest.mark.asyncio
-async def test_order_entry_capabilities_fall_back_to_paper_when_live_is_disabled(
+async def test_order_entry_capabilities_use_paper_only_when_live_trading_is_disabled(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+  _configure_paper(monkeypatch)
   monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
+  safety_status = AsyncMock()
   with patch.object(
     trading_schema.AccountExecutionSafetyService,
     "status",
-    new=AsyncMock(
-      return_value={
-        "can_increase_risk": False,
-        "can_reduce_risk": False,
-        "blocked_reasons": ["服务端 ENABLE_REAL_TRADING 未启用"],
-      }
-    ),
+    new=safety_status,
   ):
     result = await TradingQuery().order_entry_capabilities(
       _info(), "600000.SH"
@@ -101,12 +116,52 @@ async def test_order_entry_capabilities_fall_back_to_paper_when_live_is_disabled
   assert result.default_execution_mode == ManualOrderExecutionMode.PAPER
   assert result.execution_modes == [ManualOrderExecutionMode.PAPER]
   assert result.live_ready is False
+  assert result.can_live_buy is False
+  assert result.can_live_sell is False
+  assert result.live_blocked_reasons == []
+  safety_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("can_increase_risk", "can_reduce_risk"),
+  [(False, True), (False, False)],
+)
+async def test_order_entry_capabilities_never_downgrade_configured_live_to_paper(
+  monkeypatch: pytest.MonkeyPatch,
+  can_increase_risk: bool,
+  can_reduce_risk: bool,
+) -> None:
+  _configure_live(monkeypatch)
+  monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
+  with patch.object(
+    trading_schema.AccountExecutionSafetyService,
+    "status",
+    new=AsyncMock(
+      return_value={
+        "can_increase_risk": can_increase_risk,
+        "can_reduce_risk": can_reduce_risk,
+        "blocked_reasons": ["实盘安全门禁暂未就绪"],
+      }
+    ),
+  ):
+    result = await TradingQuery().order_entry_capabilities(
+      _info(), "600000.SH"
+    )
+
+  assert result.default_execution_mode == ManualOrderExecutionMode.LIVE
+  assert result.execution_modes == [ManualOrderExecutionMode.LIVE]
+  assert ManualOrderExecutionMode.PAPER not in result.execution_modes
+  assert result.can_live_buy is can_increase_risk
+  assert result.can_live_sell is can_reduce_risk
+  assert result.live_blocked_reasons == ["实盘安全门禁暂未就绪"]
 
 
 @pytest.mark.asyncio
 async def test_beijing_market_never_advertises_best_quote(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+  _configure_live(monkeypatch)
   monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
   with patch.object(
     trading_schema.AccountExecutionSafetyService,
@@ -124,6 +179,7 @@ async def test_beijing_market_never_advertises_best_quote(
 async def test_missing_manual_scope_keeps_market_query_read_only(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+  _configure_live(monkeypatch)
   monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
   safety_status = AsyncMock()
   with patch.object(

@@ -11,8 +11,8 @@ const mocks = vi.hoisted(() => ({
     canLiveBuy: true,
     canLiveSell: true,
     canManualTrade: true,
-    defaultExecutionMode: 'PAPER',
-    executionModes: ['PAPER', 'LIVE'],
+    defaultExecutionMode: 'LIVE',
+    executionModes: ['LIVE'],
     instrumentCode: '688577.SH',
     liveBlockedReasons: [],
     liveReady: true,
@@ -121,8 +121,8 @@ describe('TradingCard', () => {
       canLiveBuy: true,
       canLiveSell: true,
       canManualTrade: true,
-      defaultExecutionMode: 'PAPER',
-      executionModes: ['PAPER', 'LIVE'],
+      defaultExecutionMode: 'LIVE',
+      executionModes: ['LIVE'],
       liveBlockedReasons: [],
       liveReady: true,
     });
@@ -265,7 +265,7 @@ describe('TradingCard', () => {
   it('does not expose a manual PAPER or LIVE switch', () => {
     setupTradingCard();
 
-    expect(screen.getByText('PAPER')).toBeVisible();
+    expect(screen.getByText('LIVE')).toBeVisible();
     expect(
       screen.queryByRole('button', { name: 'PAPER 模拟' })
     ).not.toBeInTheDocument();
@@ -275,17 +275,22 @@ describe('TradingCard', () => {
     expect(screen.queryByText('执行模式')).not.toBeInTheDocument();
   });
 
-  it('derives the execution mode from capability and direction', () => {
+  it('keeps configured LIVE visible when the selected direction is blocked', () => {
     Object.assign(mocks.capabilities, {
       canLiveSell: false,
       defaultExecutionMode: 'LIVE',
+      executionModes: ['LIVE'],
+      liveBlockedReasons: ['实盘安全门禁暂未就绪'],
     });
     setupTradingCard();
 
     expect(screen.getByText('LIVE')).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '卖出' }));
-    expect(screen.getByText('PAPER')).toBeVisible();
+    expect(screen.getByText('LIVE')).toBeVisible();
+    expect(screen.queryByText('PAPER')).not.toBeInTheDocument();
+    expect(screen.getByText(/LIVE 下单已阻止/)).toBeVisible();
+    expect(screen.getByRole('button', { name: '获取卖出预览' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: '买入' }));
     fireEvent.change(screen.getByPlaceholderText('0.00'), {
@@ -316,12 +321,39 @@ describe('TradingCard', () => {
     expect(mocks.handleSubmit).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        executionMode: 'PAPER',
+        executionMode: 'LIVE',
         orderType: 'limit',
         price: '48.76',
         quantity: '420',
         tradeType: 'buy',
       })
+    );
+  });
+
+  it('uses PAPER only when the server reports a non-live runtime', () => {
+    Object.assign(mocks.capabilities, {
+      canLiveBuy: false,
+      canLiveSell: false,
+      defaultExecutionMode: 'PAPER',
+      executionModes: ['PAPER'],
+      liveBlockedReasons: [],
+      liveReady: false,
+    });
+    setupTradingCard();
+
+    expect(screen.getByText('PAPER')).toBeVisible();
+
+    fireEvent.change(screen.getByPlaceholderText('0.00'), {
+      target: { value: '48.76' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('100'), {
+      target: { value: '420' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '获取买入预览' }));
+
+    expect(mocks.handleSubmit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ executionMode: 'PAPER', tradeType: 'buy' })
     );
   });
 

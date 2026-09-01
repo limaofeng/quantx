@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_api import manual_order_runtime
 from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi import manual_order, trade_approval
 from quantx_api.gqlapi.manual_order import (
@@ -57,6 +58,54 @@ def _request(*, key: str = "ios-order-1"):
     idempotency_key=key,
     execution_mode="LIVE",
   )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("runtime_profile", "enable_real_trading", "accounts", "requested_mode"),
+  [
+    ("full", True, ["ACCOUNT-1"], "PAPER"),
+    ("web", False, [], "LIVE"),
+  ],
+)
+async def test_preflight_rejects_mode_that_does_not_match_live_trading(
+  monkeypatch: pytest.MonkeyPatch,
+  runtime_profile: str,
+  enable_real_trading: bool,
+  accounts: list[str],
+  requested_mode: str,
+) -> None:
+  monkeypatch.setattr(
+    manual_order_runtime.settings,
+    "runtime_profile",
+    runtime_profile,
+  )
+  monkeypatch.setattr(
+    manual_order_runtime.settings,
+    "enable_real_trading",
+    enable_real_trading,
+  )
+  monkeypatch.setattr(
+    manual_order_runtime.settings,
+    "real_trading_account_allowlist",
+    accounts,
+  )
+  request = normalize_manual_order_request(
+    account_id="ACCOUNT-1",
+    instrument_code="600000.SH",
+    side="BUY",
+    price_type="LIMIT",
+    volume=100,
+    limit_price=10.5,
+    idempotency_key=f"mode-mismatch-{requested_mode.lower()}",
+    execution_mode=requested_mode,
+  )
+
+  with pytest.raises(TradeApprovalChallengeError) as rejected:
+    await manual_order._preflight(request)
+
+  assert rejected.value.code == "EXECUTION_MODE_MISMATCH"
+  assert "不会自动切换执行环境" in rejected.value.message
 
 
 _MUTABLE_SNAPSHOT_AT = datetime(2026, 8, 15, 10, 0, 0)
@@ -1015,6 +1064,7 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     SimpleNamespace(is_trading_hours=AsyncMock(return_value=True)),
   )
   monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(command_module.settings, "runtime_profile", "full")
   monkeypatch.setattr(
     command_module.settings,
     "real_trading_account_allowlist",
@@ -1070,6 +1120,7 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     volume=100,
     limit_price=11.0,
     idempotency_key="ios-limit-up-1",
+    execution_mode="LIVE",
   )
   with pytest.raises(TradeApprovalChallengeError) as limit_up:
     await manual_order._preflight(limit_up_request)
@@ -1125,6 +1176,7 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     volume=100,
     limit_price=10.5,
     idempotency_key="ios-stale-sell-1",
+    execution_mode="LIVE",
   )
   with pytest.raises(TradeApprovalChallengeError) as rejected:
     await manual_order._preflight(stale_sell)
@@ -1146,6 +1198,7 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     volume=200,
     limit_price=10.5,
     idempotency_key="ios-corrupt-sell-bounds-1",
+    execution_mode="LIVE",
   )
   sell_preview = await manual_order._preflight(sell_with_corrupt_bounds)
   assert sell_preview.requested_volume == 200
