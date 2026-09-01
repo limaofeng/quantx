@@ -77,6 +77,47 @@ class CampaignLockLost(RuntimeError):
   """Raised when the connection-scoped campaign lock can no longer exist."""
 
 
+async def _abort_lock_transaction(connection: Any) -> None:
+  """Discard a session whose advisory-lock statement did not finish cleanly."""
+
+  try:
+    await connection.rollback()
+  except BaseException:
+    pass
+  try:
+    await connection.invalidate()
+  except BaseException:
+    pass
+
+
+async def _close_lock_connection(connection: Any) -> None:
+  try:
+    await connection.close()
+  except BaseException:
+    pass
+
+
+async def _lock_scalar(
+  connection: Any,
+  statement: Any,
+  parameters: dict[str, Any] | None = None,
+) -> Any:
+  """Run one lock query and end its transaction without ending the session."""
+
+  try:
+    if parameters is None:
+      value = await connection.scalar(statement)
+    else:
+      value = await connection.scalar(statement, parameters)
+    # PostgreSQL session advisory locks survive COMMIT. Ending every implicit
+    # transaction avoids idle-in-transaction while the campaign waits on QMT.
+    await connection.commit()
+    return value
+  except BaseException:
+    await _abort_lock_transaction(connection)
+    raise
+
+
 class CampaignDatabaseLock:
   def __init__(self) -> None:
     self.connection = None
@@ -85,19 +126,23 @@ class CampaignDatabaseLock:
   async def acquire(self) -> None:
     connection = await relational_engine.connect()
     try:
-      backend_pid = await connection.scalar(text("SELECT pg_backend_pid()"))
-      acquired = await connection.scalar(
+      backend_pid = await _lock_scalar(
+        connection,
+        text("SELECT pg_backend_pid()"),
+      )
+      acquired = await _lock_scalar(
+        connection,
         text("SELECT pg_try_advisory_lock(:lock_key)"),
         {"lock_key": CAMPAIGN_LOCK_KEY},
       )
-    except Exception:
-      await connection.close()
+    except BaseException:
+      await _close_lock_connection(connection)
       raise
     if not acquired:
-      await connection.close()
+      await _close_lock_connection(connection)
       raise RuntimeError("日线或复权因子 QMT 回填正在运行；请等待其释放全局数据回填锁")
     if backend_pid is None:
-      await connection.close()
+      await _close_lock_connection(connection)
       raise RuntimeError("无法识别复权因子 campaign 数据库锁会话")
     self.connection = connection
     self.backend_pid = int(backend_pid)
@@ -110,8 +155,13 @@ class CampaignDatabaseLock:
     self.connection = None
     self.backend_pid = None
     try:
-      if not connection.closed and backend_pid is not None:
-        await connection.scalar(
+      if (
+        not connection.closed
+        and not getattr(connection, "invalidated", False)
+        and backend_pid is not None
+      ):
+        await _lock_scalar(
+          connection,
           text(
             "SELECT CASE WHEN pg_backend_pid() = :backend_pid "
             "THEN pg_advisory_unlock(:lock_key) ELSE false END"
@@ -127,10 +177,7 @@ class CampaignDatabaseLock:
       # cleanup must not hide the original campaign failure.
       pass
     finally:
-      try:
-        await connection.close()
-      except SQLAlchemyError:
-        pass
+      await _close_lock_connection(connection)
 
   async def assert_held(self) -> None:
     connection = self.connection
@@ -138,7 +185,8 @@ class CampaignDatabaseLock:
     if connection is None or connection.closed or backend_pid is None:
       raise CampaignLockLost("复权因子 campaign 数据库锁连接已关闭")
     try:
-      held = await connection.scalar(
+      held = await _lock_scalar(
+        connection,
         text(
           """
           SELECT EXISTS (
@@ -164,9 +212,17 @@ class CampaignDatabaseLock:
           "lock_key": CAMPAIGN_LOCK_KEY,
         },
       )
-    except SQLAlchemyError as exc:
-      raise CampaignLockLost("复权因子 campaign 数据库锁连接已失效") from exc
+    except BaseException as exc:
+      self.connection = None
+      self.backend_pid = None
+      await _close_lock_connection(connection)
+      if isinstance(exc, SQLAlchemyError):
+        raise CampaignLockLost("复权因子 campaign 数据库锁连接已失效") from exc
+      raise
     if held is not True:
+      self.connection = None
+      self.backend_pid = None
+      await _close_lock_connection(connection)
       raise CampaignLockLost("复权因子 campaign 数据库 advisory lock 已丢失")
 
 

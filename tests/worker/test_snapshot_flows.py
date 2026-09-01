@@ -359,16 +359,168 @@ async def test_snapshot_lock_rejects_a_reconnected_database_session():
   class Connection:
     closed = False
 
+    def __init__(self):
+      self.commit_count = 0
+      self.close_called = False
+
     async def execute(self, statement, parameters):
       del statement, parameters
       return Result()
 
+    async def commit(self):
+      self.commit_count += 1
+
+    async def close(self):
+      self.close_called = True
+      self.closed = True
+
   locks = indicator_flow.SnapshotDatabaseLocks([date(2026, 7, 29)])
-  locks.connection = Connection()
+  connection = Connection()
+  locks.connection = connection
   locks.backend_pid = 101
 
   with pytest.raises(indicator_flow.SnapshotLockLost, match="所有权已丢失"):
     await locks.assert_held()
+  assert connection.commit_count == 1
+  assert connection.close_called is True
+  assert locks.connection is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_locks_commit_without_releasing_session_locks(monkeypatch):
+  snapshot_dates = [date(2026, 7, 28), date(2026, 7, 29)]
+
+  class Result:
+    def __init__(self, connection):
+      self.connection = connection
+
+    def one(self):
+      return (
+        7301,
+        len(self.connection.date_locks),
+        int(self.connection.factor_lock),
+      )
+
+  class Connection:
+    closed = False
+    invalidated = False
+
+    def __init__(self):
+      self.date_locks = set()
+      self.factor_lock = False
+      self.transaction_active = False
+      self.commit_count = 0
+      self.close_called = False
+
+    async def scalar(self, statement, parameters=None):
+      self.transaction_active = True
+      sql = str(statement)
+      if "pg_try_advisory_lock" in sql:
+        self.date_locks.add(parameters["date_key"])
+        return True
+      if "pg_advisory_lock_shared" in sql:
+        self.factor_lock = True
+        return None
+      if "pg_advisory_unlock_all" in sql:
+        self.date_locks.clear()
+        self.factor_lock = False
+        return None
+      if "pg_backend_pid" in sql:
+        return 7301
+      raise AssertionError(sql)
+
+    async def execute(self, statement, parameters):
+      del statement, parameters
+      self.transaction_active = True
+      return Result(self)
+
+    async def commit(self):
+      assert self.transaction_active is True
+      self.transaction_active = False
+      self.commit_count += 1
+
+    async def rollback(self):
+      self.transaction_active = False
+
+    async def invalidate(self):
+      self.invalidated = True
+      self.date_locks.clear()
+      self.factor_lock = False
+
+    async def close(self):
+      self.closed = True
+      self.close_called = True
+      self.date_locks.clear()
+      self.factor_lock = False
+
+  connection = Connection()
+
+  async def connect():
+    return connection
+
+  monkeypatch.setattr(
+    indicator_flow,
+    "relational_engine",
+    SimpleNamespace(connect=connect),
+  )
+  locks = indicator_flow.SnapshotDatabaseLocks(snapshot_dates)
+
+  await locks.acquire()
+  assert connection.commit_count == 5
+  assert len(connection.date_locks) == 2
+  assert connection.factor_lock is True
+  assert connection.transaction_active is False
+
+  await locks.assert_held()
+  assert connection.commit_count == 6
+  assert len(connection.date_locks) == 2
+  assert connection.factor_lock is True
+
+  await locks.release()
+  assert connection.commit_count == 7
+  assert connection.date_locks == set()
+  assert connection.factor_lock is False
+  assert connection.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_lock_query_failure_rolls_back_and_invalidates():
+  class Connection:
+    closed = False
+    invalidated = False
+
+    def __init__(self):
+      self.rollback_count = 0
+      self.invalidate_count = 0
+      self.close_called = False
+
+    async def execute(self, statement, parameters):
+      del statement, parameters
+      raise indicator_flow.SQLAlchemyError("query failed")
+
+    async def rollback(self):
+      self.rollback_count += 1
+
+    async def invalidate(self):
+      self.invalidate_count += 1
+      self.invalidated = True
+
+    async def close(self):
+      self.close_called = True
+      self.closed = True
+
+  connection = Connection()
+  locks = indicator_flow.SnapshotDatabaseLocks([date(2026, 7, 29)])
+  locks.connection = connection
+  locks.backend_pid = 8301
+
+  with pytest.raises(indicator_flow.SnapshotLockLost, match="连接已失效"):
+    await locks.assert_held()
+
+  assert connection.rollback_count == 1
+  assert connection.invalidate_count == 1
+  assert connection.close_called is True
+  assert locks.connection is None
 
 
 @pytest.mark.asyncio

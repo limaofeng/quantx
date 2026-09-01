@@ -944,11 +944,13 @@ async def test_campaign_lock_detects_reconnected_backend_pid(monkeypatch):
 
   class ReconnectedConnection:
     closed = False
+    invalidated = False
 
     def __init__(self):
       self.backend_pid = 4101
       self.owns_lock = True
       self.close_called = False
+      self.commit_count = 0
 
     async def scalar(self, statement, parameters=None):
       sql = str(statement)
@@ -963,8 +965,19 @@ async def test_campaign_lock_detects_reconnected_backend_pid(monkeypatch):
         return self.backend_pid
       raise AssertionError(sql)
 
+    async def commit(self):
+      self.commit_count += 1
+
+    async def rollback(self):
+      return None
+
+    async def invalidate(self):
+      self.invalidated = True
+      self.owns_lock = False
+
     async def close(self):
       self.close_called = True
+      self.closed = True
 
   connection = ReconnectedConnection()
 
@@ -976,7 +989,11 @@ async def test_campaign_lock_detects_reconnected_backend_pid(monkeypatch):
 
   await lock.acquire()
   assert lock.backend_pid == 4101
+  assert connection.commit_count == 2
+  assert connection.owns_lock is True
   await lock.assert_held()
+  assert connection.commit_count == 3
+  assert connection.owns_lock is True
 
   # SQLAlchemy may transparently reconnect an invalidated AsyncConnection.
   # A liveness SELECT would succeed, but the session-level lock disappeared.
@@ -986,7 +1003,137 @@ async def test_campaign_lock_detects_reconnected_backend_pid(monkeypatch):
     await lock.assert_held()
 
   await lock.release()
+  assert connection.commit_count == 4
   assert connection.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_commits_without_releasing_session_lock(monkeypatch):
+  module = _load_module()
+
+  class Connection:
+    closed = False
+    invalidated = False
+
+    def __init__(self):
+      self.owns_lock = False
+      self.transaction_active = False
+      self.commit_count = 0
+      self.close_called = False
+
+    async def scalar(self, statement, parameters=None):
+      self.transaction_active = True
+      sql = str(statement)
+      if "pg_try_advisory_lock" in sql:
+        self.owns_lock = True
+        return True
+      if "FROM pg_locks" in sql:
+        assert parameters["backend_pid"] == 5201
+        return self.owns_lock
+      if "pg_advisory_unlock" in sql:
+        assert parameters["backend_pid"] == 5201
+        was_owned = self.owns_lock
+        self.owns_lock = False
+        return was_owned
+      if "pg_backend_pid" in sql:
+        return 5201
+      raise AssertionError(sql)
+
+    async def commit(self):
+      assert self.transaction_active is True
+      self.transaction_active = False
+      self.commit_count += 1
+
+    async def rollback(self):
+      self.transaction_active = False
+
+    async def invalidate(self):
+      self.invalidated = True
+      self.owns_lock = False
+
+    async def close(self):
+      self.closed = True
+      self.close_called = True
+      self.owns_lock = False
+
+  connection = Connection()
+
+  async def connect():
+    return connection
+
+  monkeypatch.setattr(module, "relational_engine", SimpleNamespace(connect=connect))
+  lock = module.CampaignDatabaseLock()
+
+  await lock.acquire()
+  assert connection.commit_count == 2
+  assert connection.owns_lock is True
+  assert connection.transaction_active is False
+
+  await lock.assert_held()
+  assert connection.commit_count == 3
+  assert connection.owns_lock is True
+  assert connection.transaction_active is False
+
+  await lock.release()
+  assert connection.commit_count == 4
+  assert connection.owns_lock is False
+  assert connection.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_commit_failure_rolls_back_and_invalidates(monkeypatch):
+  module = _load_module()
+
+  class Connection:
+    closed = False
+    invalidated = False
+
+    def __init__(self):
+      self.commit_count = 0
+      self.rollback_count = 0
+      self.invalidate_count = 0
+      self.close_called = False
+      self.owns_lock = False
+
+    async def scalar(self, statement, _parameters=None):
+      if "pg_try_advisory_lock" in str(statement):
+        self.owns_lock = True
+        return True
+      return 6201
+
+    async def commit(self):
+      self.commit_count += 1
+      if self.commit_count == 2:
+        raise module.SQLAlchemyError("commit failed")
+
+    async def rollback(self):
+      self.rollback_count += 1
+
+    async def invalidate(self):
+      self.invalidate_count += 1
+      self.invalidated = True
+      self.owns_lock = False
+
+    async def close(self):
+      self.close_called = True
+      self.closed = True
+
+  connection = Connection()
+
+  async def connect():
+    return connection
+
+  monkeypatch.setattr(module, "relational_engine", SimpleNamespace(connect=connect))
+  lock = module.CampaignDatabaseLock()
+
+  with pytest.raises(module.SQLAlchemyError, match="commit failed"):
+    await lock.acquire()
+
+  assert connection.rollback_count == 1
+  assert connection.invalidate_count == 1
+  assert connection.owns_lock is False
+  assert connection.close_called is True
+  assert lock.connection is None
 
 
 @pytest.mark.asyncio

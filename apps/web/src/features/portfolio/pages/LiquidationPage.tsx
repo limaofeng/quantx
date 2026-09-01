@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   BarChart3,
+  Check,
+  ChevronsUpDown,
   ClipboardList,
   FlaskConical,
   Hand,
@@ -33,9 +35,21 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command';
 import { NativeSelect } from '@/components/ui/native-select';
-import { TradingHoldingsSidebar } from '@/features/trading/components/TradingHoldingsSidebar';
-import { ExecutionHealthControl } from '@/features/trading-safety';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
+import { ExecutionHealthSidebar } from '@/features/trading-safety';
 import type { ConditionalLiquidationOrdersQuery as ConditionalLiquidationOrdersQueryData } from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
 import { financialToneClass } from '@/shared/utils/financialColors';
@@ -118,7 +132,8 @@ function buildLiquidationSymbolPath(
   if (normalizedStockCode) params.set('symbol', normalizedStockCode);
   if (workspaceTab) params.set('workspaceTab', workspaceTab);
   if (workspaceTab && stockName) params.set('name', stockName);
-  return `/liquidation?${params.toString()}`;
+  const query = params.toString();
+  return query ? `/liquidation?${query}` : '/liquidation';
 }
 
 function getStockCodePrefix(value: unknown) {
@@ -194,6 +209,136 @@ function getEstimatedSellValue(holding?: Position | null) {
   const price =
     toFiniteNumber(holding.lastPrice) ?? toFiniteNumber(holding.avgPrice) ?? 0;
   return sellableVolume * price;
+}
+
+function LiquidationHoldingSelector({
+  holdings,
+  onSelect,
+  selectedStockCode,
+}: {
+  holdings: Position[];
+  onSelect: (stockCode: string) => void;
+  selectedStockCode: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const selectedHolding = holdings.find(holding =>
+    stockCodeMatches(holding.stockCode, selectedStockCode)
+  );
+  const selectedCode = normalizeStockCode(
+    selectedHolding?.stockCode || selectedStockCode
+  );
+
+  function select(stockCode: string) {
+    onSelect(stockCode);
+    setOpen(false);
+  }
+
+  return (
+    <Popover onOpenChange={setOpen} open={open}>
+      <PopoverTrigger asChild>
+        <Button
+          aria-expanded={open}
+          aria-label="选择卖出标的"
+          className="h-control-compact w-64 justify-between gap-2 border-white/10 bg-white/[0.025] px-2.5 text-left hover:border-blue-500/40 hover:bg-blue-500/10 focus-visible:ring-blue-400/70"
+          role="combobox"
+          type="button"
+          variant="outline"
+        >
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="truncate text-ui-label font-bold text-slate-200">
+              {selectedHolding?.instrumentName ||
+                (selectedCode ? '非当前持仓' : '全部持仓')}
+            </span>
+            <span className="shrink-0 font-mono text-ui-micro text-slate-500">
+              {selectedCode || `${holdings.length} 只`}
+            </span>
+          </span>
+          <ChevronsUpDown
+            aria-hidden="true"
+            className="h-3.5 w-3.5 shrink-0 text-slate-500"
+          />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        className="w-80 border-white/10 bg-[#0b1728] p-0 shadow-none"
+        sideOffset={6}
+      >
+        <Command className="bg-transparent text-slate-200" label="搜索持仓股票">
+          <CommandInput
+            aria-label="搜索持仓股票"
+            className="h-control-large text-ui-body"
+            placeholder="搜索股票名称或代码"
+          />
+          <CommandList className="max-h-80 p-1 custom-scrollbar">
+            <CommandEmpty className="py-ui-empty text-ui-label text-slate-500">
+              暂无匹配持仓
+            </CommandEmpty>
+            <CommandGroup heading="卖出标的">
+              <CommandItem
+                className="cursor-pointer px-2 py-2"
+                onSelect={() => select('')}
+                value="全部持仓 账户级卖出"
+              >
+                <Check
+                  aria-hidden="true"
+                  className={cn(
+                    'h-3.5 w-3.5 text-blue-300',
+                    selectedCode ? 'opacity-0' : 'opacity-100'
+                  )}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-ui-label font-bold">
+                    全部持仓
+                  </span>
+                  <span className="block text-ui-caption text-slate-500">
+                    返回账户级持仓清仓
+                  </span>
+                </span>
+                <span className="font-mono text-ui-micro text-slate-500">
+                  {holdings.length} 只
+                </span>
+              </CommandItem>
+              {holdings.map(holding => {
+                const stockCode = normalizeStockCode(holding.stockCode);
+                const selected = stockCodeMatches(stockCode, selectedCode);
+                return (
+                  <CommandItem
+                    className="cursor-pointer px-2 py-2"
+                    key={stockCode}
+                    onSelect={() => select(stockCode)}
+                    value={`${holding.instrumentName || ''} ${stockCode}`}
+                  >
+                    <Check
+                      aria-hidden="true"
+                      className={cn(
+                        'h-3.5 w-3.5 text-blue-300',
+                        selected ? 'opacity-100' : 'opacity-0'
+                      )}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-ui-label font-bold">
+                        {holding.instrumentName || stockCode}
+                      </span>
+                      <span className="block font-mono text-ui-caption text-slate-500">
+                        {stockCode} · 现价 {formatPrice(holding.lastPrice)}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-right text-ui-caption text-slate-400">
+                      可卖
+                      <span className="ml-1 font-mono text-market-down">
+                        {formatShares(getSellableVolume(holding))}
+                      </span>
+                    </span>
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 function formatDateTime(value: unknown) {
@@ -851,7 +996,6 @@ export function LiquidationPage() {
     [conditionalOrders, selectedStockCode]
   );
   const accountName = portfolioSummary?.accountName || accountId || '当前账户';
-  const totalAsset = portfolioSummary?.totalAsset;
   const [activeMode, setActiveMode] = React.useState<LiquidationStudioMode>(
     selectedStockCode ? 'LIQUIDATION' : 'EXIT_PLANS'
   );
@@ -1057,38 +1201,34 @@ export function LiquidationPage() {
     setLocation('/liquidation');
   }, [setLocation]);
 
+  const handleHoldingSelect = React.useCallback(
+    (stockCode: string) => {
+      const normalizedStockCode = normalizeStockCode(stockCode);
+      const holding = currentHoldings.find(item =>
+        stockCodeMatches(item.stockCode, normalizedStockCode)
+      );
+      setWorkspaceMode('MANAGEMENT');
+      setActiveMode('LIQUIDATION');
+      setLocation(
+        buildLiquidationSymbolPath(
+          normalizedStockCode,
+          manualWorkspaceTabId || undefined,
+          holding?.instrumentName
+        )
+      );
+    },
+    [currentHoldings, manualWorkspaceTabId, setLocation]
+  );
+
   const sidebar = (
-    <TradingHoldingsSidebar
-      accountName={accountName}
-      error={dataError}
-      holdings={currentHoldings}
-      isLoading={dataLoading}
-      onAccountOpen={() => openStudioTab('/holdings')}
-      onHoldingSelect={holding =>
-        openStudioTab(
-          buildLiquidationSymbolPath(
-            holding.stockCode,
-            manualWorkspaceTabId,
-            holding.instrumentName
-          )
-        )
-      }
-      onHoldingOpenInNewWindow={holding =>
-        openStudioTab(
-          buildLiquidationSymbolPath(
-            holding.stockCode,
-            `${normalizeStockCode(holding.stockCode)}-${Date.now()}`,
-            holding.instrumentName
-          )
-        )
-      }
+    <ExecutionHealthSidebar
+      details={{
+        activeExitPlanCount,
+        holding: healthHolding,
+        workingSellOrderCount,
+      }}
       onRefresh={handleRefresh}
-      onStockInfoOpen={holding =>
-        openStudioTab(`/stock/${normalizeStockCode(holding.stockCode)}`)
-      }
-      portfolioSummary={portfolioSummary}
-      selectedStockCode={selectedStockCode}
-      totalAsset={totalAsset}
+      scope="SELL"
     />
   );
 
@@ -1161,15 +1301,6 @@ export function LiquidationPage() {
             全部卖出计划
           </button>
         ) : null}
-        <ExecutionHealthControl
-          details={{
-            activeExitPlanCount,
-            holding: healthHolding,
-            workingSellOrderCount,
-          }}
-          onRefresh={handleRefresh}
-          scope="SELL"
-        />
         <button
           type="button"
           onClick={handleRefresh}
@@ -1191,6 +1322,51 @@ export function LiquidationPage() {
       </div>
     </div>
   );
+
+  const targetToolbar =
+    workspaceMode === 'MANAGEMENT' ? (
+      <div
+        aria-label="卖出标的选择栏"
+        className="studio-workspace-surface flex h-10 shrink-0 items-center gap-3 overflow-x-auto border-b border-white/[0.05] px-ui-section custom-scrollbar"
+        role="toolbar"
+      >
+        <span className="shrink-0 text-ui-micro font-black uppercase tracking-[0.14em] text-slate-600">
+          卖出标的
+        </span>
+        <LiquidationHoldingSelector
+          holdings={currentHoldings}
+          onSelect={handleHoldingSelect}
+          selectedStockCode={selectedStockCode}
+        />
+        <span className="h-4 w-px shrink-0 bg-white/[0.08]" />
+        {selectedHolding ? (
+          <div className="flex min-w-0 items-center gap-ui-section text-ui-caption text-slate-500">
+            <span className="shrink-0">
+              现价{' '}
+              <span className="font-mono text-slate-200">
+                {formatPrice(selectedHolding.lastPrice)}
+              </span>
+            </span>
+            <span className="shrink-0">
+              持仓{' '}
+              <span className="font-mono text-slate-200">
+                {formatShares(selectedHolding.volume)}
+              </span>
+            </span>
+            <span className="shrink-0">
+              可卖{' '}
+              <span className="font-mono text-market-down">
+                {formatShares(getSellableVolume(selectedHolding))}
+              </span>
+            </span>
+          </div>
+        ) : (
+          <span className="truncate text-ui-caption text-slate-600">
+            选择一只持仓进入单标的卖出；全部持仓用于账户级清仓管理。
+          </span>
+        )}
+      </div>
+    ) : null;
 
   const dashboardContent = (
     <PositionLiquidationPanel
@@ -1227,6 +1403,7 @@ export function LiquidationPage() {
   const content = (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {toolbar}
+      {targetToolbar}
       {dataError && (
         <div className="border-b border-amber-400/20 bg-amber-500/10 px-ui-section py-2 text-ui-label font-bold text-amber-100">
           数据读取异常：{dataError.message}
@@ -1277,14 +1454,14 @@ export function LiquidationPage() {
       isPage
       modes={workspaceMode === 'MANAGEMENT' ? liquidationModes : []}
       onModeChange={handleStudioModeChange}
-      sidebar={sidebar}
+      sidebar={workspaceMode === 'MANAGEMENT' ? sidebar : undefined}
       sidebarSizing={{
         defaultWidth: 312,
         maxWidth: 430,
         minWidth: 260,
         storageScope: 'liquidation-studio',
       }}
-      showSidebar
+      showSidebar={workspaceMode === 'MANAGEMENT'}
       statusBarLeft={
         <>
           <span className="inline-flex items-center gap-2">

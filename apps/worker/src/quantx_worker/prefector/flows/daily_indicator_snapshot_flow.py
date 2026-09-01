@@ -213,6 +213,57 @@ class SnapshotLockLost(RuntimeError):
   """The dedicated PostgreSQL session no longer owns every date lock."""
 
 
+async def _abort_snapshot_lock_transaction(connection: Any) -> None:
+  try:
+    await connection.rollback()
+  except BaseException:
+    pass
+  try:
+    await connection.invalidate()
+  except BaseException:
+    pass
+
+
+async def _close_snapshot_lock_connection(connection: Any) -> None:
+  try:
+    await connection.close()
+  except BaseException:
+    pass
+
+
+async def _snapshot_lock_scalar(
+  connection: Any,
+  statement: Any,
+  parameters: dict[str, Any] | None = None,
+) -> Any:
+  try:
+    if parameters is None:
+      value = await connection.scalar(statement)
+    else:
+      value = await connection.scalar(statement, parameters)
+    # Session advisory locks survive COMMIT. Ending every implicit transaction
+    # prevents a long snapshot calculation from being idle-in-transaction.
+    await connection.commit()
+    return value
+  except BaseException:
+    await _abort_snapshot_lock_transaction(connection)
+    raise
+
+
+async def _snapshot_lock_row(
+  connection: Any,
+  statement: Any,
+  parameters: dict[str, Any],
+) -> Any:
+  try:
+    row = (await connection.execute(statement, parameters)).one()
+    await connection.commit()
+    return row
+  except BaseException:
+    await _abort_snapshot_lock_transaction(connection)
+    raise
+
+
 class SnapshotDatabaseLocks:
   def __init__(self, snapshot_dates: list[date]) -> None:
     self.snapshot_dates = tuple(sorted(set(snapshot_dates)))
@@ -223,10 +274,14 @@ class SnapshotDatabaseLocks:
     self.connection = await relational_engine.connect()
     try:
       self.backend_pid = int(
-        await self.connection.scalar(text("SELECT pg_backend_pid()"))
+        await _snapshot_lock_scalar(
+          self.connection,
+          text("SELECT pg_backend_pid()"),
+        )
       )
       for target in self.snapshot_dates:
-        acquired = await self.connection.scalar(
+        acquired = await _snapshot_lock_scalar(
+          self.connection,
           text("SELECT pg_try_advisory_lock(:namespace, :date_key)"),
           {
             "namespace": SNAPSHOT_LOCK_NAMESPACE,
@@ -240,7 +295,8 @@ class SnapshotDatabaseLocks:
       # Keep the factor table generation stable from evidence verification
       # through snapshot certification. Authoritative writers take the
       # exclusive transaction variant of this same bigint key.
-      await self.connection.scalar(
+      await _snapshot_lock_scalar(
+        self.connection,
         text("SELECT pg_advisory_lock_shared(:lock_key)"),
         {"lock_key": DIVID_FACTOR_WRITE_LOCK_KEY},
       )
@@ -254,37 +310,44 @@ class SnapshotDatabaseLocks:
     if connection is None or connection.closed or self.backend_pid is None:
       raise SnapshotLockLost("日级快照数据库锁连接已关闭")
     try:
-      row = (
-        await connection.execute(
-          text(
-            "SELECT pg_backend_pid(), "
-            "(SELECT count(*) FROM pg_locks "
-            "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
-            "AND granted AND classid = CAST(:namespace AS oid) "
-            "AND objsubid = 2), "
-            "(SELECT count(*) FROM pg_locks "
-            "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
-            "AND granted AND mode = 'ShareLock' "
-            "AND classid::bigint = "
-            "((CAST(:factor_key AS bigint) >> 32) & 4294967295) "
-            "AND objid::bigint = "
-            "(CAST(:factor_key AS bigint) & 4294967295) "
-            "AND objsubid = 1)"
-          ),
-          {
-            "namespace": SNAPSHOT_LOCK_NAMESPACE,
-            "factor_key": DIVID_FACTOR_WRITE_LOCK_KEY,
-          },
-        )
-      ).one()
-    except SQLAlchemyError as exc:
-      raise SnapshotLockLost("日级快照数据库锁连接已失效") from exc
+      row = await _snapshot_lock_row(
+        connection,
+        text(
+          "SELECT pg_backend_pid(), "
+          "(SELECT count(*) FROM pg_locks "
+          "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
+          "AND granted AND classid = CAST(:namespace AS oid) "
+          "AND objsubid = 2), "
+          "(SELECT count(*) FROM pg_locks "
+          "WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
+          "AND granted AND mode = 'ShareLock' "
+          "AND classid::bigint = "
+          "((CAST(:factor_key AS bigint) >> 32) & 4294967295) "
+          "AND objid::bigint = "
+          "(CAST(:factor_key AS bigint) & 4294967295) "
+          "AND objsubid = 1)"
+        ),
+        {
+          "namespace": SNAPSHOT_LOCK_NAMESPACE,
+          "factor_key": DIVID_FACTOR_WRITE_LOCK_KEY,
+        },
+      )
+    except BaseException as exc:
+      self.connection = None
+      self.backend_pid = None
+      await _close_snapshot_lock_connection(connection)
+      if isinstance(exc, SQLAlchemyError):
+        raise SnapshotLockLost("日级快照数据库锁连接已失效") from exc
+      raise
     current_pid, lock_count, factor_lock_count = map(int, row)
     if (
       current_pid != self.backend_pid
       or lock_count != len(self.snapshot_dates)
       or factor_lock_count != 1
     ):
+      self.connection = None
+      self.backend_pid = None
+      await _close_snapshot_lock_connection(connection)
       raise SnapshotLockLost("日级快照数据库锁所有权已丢失")
 
   async def release(self) -> None:
@@ -294,18 +357,15 @@ class SnapshotDatabaseLocks:
     if connection is None:
       return
     try:
-      if not connection.closed:
-        await connection.scalar(text("SELECT pg_advisory_unlock_all()"))
+      if not connection.closed and not getattr(connection, "invalidated", False):
+        await _snapshot_lock_scalar(
+          connection,
+          text("SELECT pg_advisory_unlock_all()"),
+        )
     except BaseException:
-      try:
-        await connection.invalidate()
-      except BaseException:
-        pass
+      await _abort_snapshot_lock_transaction(connection)
     finally:
-      try:
-        await connection.close()
-      except BaseException:
-        pass
+      await _close_snapshot_lock_connection(connection)
 
 
 async def _acquire_snapshot_locks(snapshot_dates: list[date]) -> SnapshotDatabaseLocks:
