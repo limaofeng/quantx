@@ -1,8 +1,6 @@
 import {
   Activity,
   Check,
-  ChevronDown,
-  ChevronRight,
   Database,
   Link2,
   Loader2,
@@ -27,15 +25,14 @@ import {
   signalEventTypes,
   signalEventLabels,
   candidateStatusLabels,
-  signalPathLabels,
-  signalPhaseLabels,
-  signalEventTone,
+  signalCandidateStatusTone,
 } from './signalPresentation';
 import {
   type SignalEvaluationLike,
   type TTradeMonitorLike,
 } from './TTradeLiveMonitor';
 import { TTradeSignalEvidence } from './TTradeSignalEvidence';
+import { TTradeSignalTable } from './TTradeSignalTable';
 import { formatNumber, formatTime } from './utils';
 
 export type CandidateTraceLike = {
@@ -445,14 +442,17 @@ function TTradeSignalDetails({
             'border px-2 py-1 text-ui-micro font-black',
             pending
               ? 'border-amber-400/25 bg-amber-400/[0.06] text-amber-200'
-              : signalEventTone(signal.eventType)
+              : signalCandidateStatusTone(
+                  displaySnapshot?.candidateStatus || '',
+                  signal.eventType
+                )
           )}
         >
           {pending
             ? isLiveAuto
               ? 'LIVE 降级待确认'
               : '等待人工确认'
-            : candidateStatusLabels[snapshot?.candidateStatus || ''] ||
+            : candidateStatusLabels[displaySnapshot?.candidateStatus || ''] ||
               '状态未提供'}
         </span>
       </header>
@@ -660,7 +660,7 @@ export function TTradeSignalsView({
     () =>
       new Map(
         (monitor?.holdings || []).map(holding => [
-          holding.stockCode,
+          holding.stockCode.toUpperCase(),
           holding.instrumentName,
         ])
       ),
@@ -732,9 +732,9 @@ export function TTradeSignalsView({
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/[0.05] px-ui-section py-3">
         <div>
-          <h2 className="text-ui-body font-bold text-slate-100">机会信号</h2>
-          <p className="mt-0.5 text-ui-caption text-slate-600">
-            仅展示候选生命周期、形态迁移和意图关联等真实信号事实
+          <h2 className="text-ui-body font-bold text-slate-100">真实信号</h2>
+          <p className="mt-0.5 text-ui-caption text-slate-400">
+            记录真实机会事件；无交易意图不等于无信号，方向和数量在决策审计中查看
           </p>
         </div>
         <div className="flex items-center gap-2 text-ui-caption">
@@ -938,176 +938,85 @@ export function TTradeSignalsView({
           aria-label="真实信号列表"
         >
           <div className="shrink-0 border-b border-white/[0.05] px-ui-section py-2 text-ui-caption text-slate-500">
-            真实信号来自持久化 opportunity evaluation，不包含普通持仓监控行
+            实盘与回测共用同一信号语义；这里读取持久化机会事件，不混入普通持仓监控行
           </div>
           <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
-            <div style={{ minWidth: 920 }}>
+            {loadingEvaluations && evaluations.length === 0 && (
               <div
-                className="sticky top-0 z-10 grid h-8 items-center gap-3 border-b border-white/[0.05] bg-[#0b1628] px-ui-section text-ui-micro font-black text-slate-600"
-                style={{
-                  gridTemplateColumns:
-                    '28px minmax(140px, 1fr) minmax(130px, .85fr) 100px minmax(180px, 1.2fr) 120px 24px',
-                }}
+                role="status"
+                aria-busy="true"
+                className="flex h-full min-h-64 items-center justify-center text-ui-label text-slate-400"
               >
-                <span />
-                <span>信号 / 标的</span>
-                <span>状态 / 路径</span>
-                <span>机会分</span>
-                <span>首要阻断</span>
-                <span>源时间</span>
-                <span />
+                <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+                读取真实信号…
               </div>
-              {loadingEvaluations && evaluations.length === 0 && (
-                <div
-                  role="status"
-                  aria-busy="true"
-                  className="flex h-full min-h-64 items-center justify-center text-ui-label text-slate-600"
+            )}
+            {!loadingEvaluations && signals.length === 0 && (
+              <div className="flex h-full min-h-64 flex-col items-center justify-center px-ui-empty text-center">
+                <Database className="h-9 w-9 text-slate-700" />
+                <div className="mt-3 text-ui-body font-bold text-slate-300">
+                  暂无真实信号
+                </div>
+                <p className="mt-1 max-w-md text-ui-caption leading-5 text-slate-400">
+                  当前没有候选、形态迁移或意图关联记录。没有交易意图的策略决策请在“决策审计”中查看。
+                </p>
+              </div>
+            )}
+            {signals.length > 0 && (
+              <TTradeSignalTable
+                expandedId={expandedSignalId}
+                instrumentNames={instrumentNames}
+                items={signals}
+                onToggle={toggleSignal}
+                rowAriaLabel={signal =>
+                  `查看信号 ${instrumentNames.get(signal.stockCode.toUpperCase()) || signal.stockCode} ${signalEventLabels[signal.eventType] || signal.eventType}`
+                }
+                renderDetails={signal => (
+                  <TTradeSignalDetails
+                    accountId={accountId}
+                    actionLoading={actionLoading}
+                    canApproveAccount={canApproveAccount}
+                    candidateTrace={candidateTrace}
+                    candidateTraceError={candidateTraceError}
+                    candidateTraceLoading={candidateTraceLoading}
+                    dataTrusted={dataTrusted}
+                    instrumentName={instrumentNames.get(
+                      signal.stockCode.toUpperCase()
+                    )}
+                    isLiveAuto={isLiveAuto}
+                    onApprove={onApprove}
+                    onReject={onReject}
+                    onRequestCandidateTrace={onRequestCandidateTrace}
+                    selectedTrace={selectedTrace}
+                    session={sessionsByIdentity.get(
+                      `${signal.runId}:${signal.stockCode}`
+                    )}
+                    signal={signal}
+                    detailError={evaluationDetailError}
+                    detailLoading={evaluationDetailLoading}
+                    detailSnapshot={
+                      evaluationDetail?.id === signal.id
+                        ? evaluationDetail.signalSnapshot
+                        : null
+                    }
+                  />
+                )}
+              />
+            )}
+            {hasMoreEvaluations && (
+              <div className="p-ui-section">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-control-compact w-full text-ui-caption text-slate-400"
+                  disabled={loadingEvaluations}
+                  onClick={onLoadMoreEvaluations}
                 >
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-                  读取真实信号…
-                </div>
-              )}
-              {!loadingEvaluations && signals.length === 0 && (
-                <div className="flex h-full min-h-64 flex-col items-center justify-center px-ui-empty text-center">
-                  <Database className="h-9 w-9 text-slate-800" />
-                  <div className="mt-3 text-ui-body font-bold text-slate-400">
-                    暂无真实信号
-                  </div>
-                  <p className="mt-1 max-w-md text-ui-caption leading-5 text-slate-600">
-                    当前没有候选、形态迁移或意图关联记录。持仓标的请在“总览”或“仓位与批次”中查看。
-                  </p>
-                </div>
-              )}
-              {signals.map(signal => {
-                const snapshot = signal.signalSnapshot;
-                const expanded = expandedSignalId === signal.id;
-                const name = instrumentNames.get(signal.stockCode);
-                const session = sessionsByIdentity.get(
-                  `${signal.runId}:${signal.stockCode}`
-                );
-                const path = snapshot?.selectedPath
-                  ? signalPathLabels[snapshot.selectedPath] ||
-                    snapshot.selectedPath
-                  : signalPhaseLabels[snapshot?.dominantPhase || ''] ||
-                    '未选择路径';
-                const blocker = snapshot?.topBlockers[0]?.label;
-                return (
-                  <article
-                    key={signal.id}
-                    className={cn(
-                      'border-b border-white/[0.05] bg-[#091422]',
-                      expanded && 'border border-blue-400/25 bg-[#0a1727]'
-                    )}
-                  >
-                    <button
-                      type="button"
-                      aria-label={`查看信号 ${name || signal.stockCode} ${signalEventLabels[signal.eventType] || signal.eventType}`}
-                      aria-expanded={expanded}
-                      aria-controls={`signal-detail-${signal.id}`}
-                      onClick={() => toggleSignal(signal)}
-                      className="grid min-h-12 w-full cursor-pointer items-center gap-3 px-ui-section py-2 text-left text-ui-caption transition-colors hover:bg-blue-500/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70"
-                      style={{
-                        gridTemplateColumns:
-                          '28px minmax(140px, 1fr) minmax(130px, .85fr) 100px minmax(180px, 1.2fr) 120px 24px',
-                      }}
-                    >
-                      <span className="text-slate-600">
-                        {expanded ? (
-                          <ChevronDown className="h-4 w-4" />
-                        ) : (
-                          <ChevronRight className="h-4 w-4" />
-                        )}
-                      </span>
-                      <span className="min-w-0">
-                        <span className="block truncate font-bold text-slate-200">
-                          {signalEventLabels[signal.eventType] ||
-                            signal.eventType}
-                        </span>
-                        <span className="mt-0.5 block truncate font-mono text-ui-micro text-slate-600">
-                          {name ? `${name} · ` : ''}
-                          {signal.stockCode}
-                        </span>
-                      </span>
-                      <span className="min-w-0">
-                        <span
-                          className={cn(
-                            'inline-flex border px-1.5 py-0.5 font-bold',
-                            signalEventTone(signal.eventType)
-                          )}
-                        >
-                          {snapshot?.candidateStatus === 'AWAITING_APPROVAL' &&
-                          isLiveAuto
-                            ? '降级待确认'
-                            : candidateStatusLabels[
-                                snapshot?.candidateStatus || ''
-                              ] || '状态未提供'}
-                        </span>
-                        <span className="mt-1 block truncate text-slate-500">
-                          {path}
-                        </span>
-                      </span>
-                      <span className="font-mono text-slate-300">
-                        {nullableScore(snapshot?.opportunityScore)}
-                        <span className="block text-ui-micro text-slate-600">
-                          阈值 {nullableScore(snapshot?.candidateThreshold)}
-                        </span>
-                      </span>
-                      <span
-                        className={
-                          blocker ? 'text-amber-100' : 'text-slate-600'
-                        }
-                      >
-                        {blocker || '无首要阻断'}
-                      </span>
-                      <span className="font-mono text-ui-micro text-slate-600">
-                        {formatTime(snapshot?.sourceAt || signal.evaluatedAt)}
-                        {signal.coalescedCount > 1 && (
-                          <span className="mt-0.5 block">
-                            合并 ×{signal.coalescedCount}
-                          </span>
-                        )}
-                      </span>
-                      <span className="text-slate-600">›</span>
-                    </button>
-                    {expanded && (
-                      <div id={`signal-detail-${signal.id}`}>
-                        <TTradeSignalDetails
-                          accountId={accountId}
-                          actionLoading={actionLoading}
-                          canApproveAccount={canApproveAccount}
-                          candidateTrace={candidateTrace}
-                          candidateTraceError={candidateTraceError}
-                          candidateTraceLoading={candidateTraceLoading}
-                          dataTrusted={dataTrusted}
-                          instrumentName={name}
-                          isLiveAuto={isLiveAuto}
-                          onApprove={onApprove}
-                          onReject={onReject}
-                          onRequestCandidateTrace={onRequestCandidateTrace}
-                          selectedTrace={selectedTrace}
-                          session={session}
-                          signal={signal}
-                        />
-                      </div>
-                    )}
-                  </article>
-                );
-              })}
-              {hasMoreEvaluations && (
-                <div className="p-ui-section">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    className="h-control-compact w-full text-ui-caption text-slate-400"
-                    disabled={loadingEvaluations}
-                    onClick={onLoadMoreEvaluations}
-                  >
-                    {loadingEvaluations ? '加载中…' : '加载更多信号'}
-                  </Button>
-                </div>
-              )}
-            </div>
+                  {loadingEvaluations ? '检索中…' : '继续检索更早信号'}
+                </Button>
+              </div>
+            )}
           </div>
         </section>
       </div>

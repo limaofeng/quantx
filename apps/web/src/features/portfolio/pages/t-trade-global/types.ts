@@ -145,7 +145,13 @@ export type SettingsForm = {
 };
 
 export type TTradeStudioMode =
-  'MONITOR' | 'SIGNALS' | 'DIAGNOSTICS' | 'POSITIONS' | 'EVENTS' | 'SETTINGS';
+  | 'MONITOR'
+  | 'SIGNALS'
+  | 'AUDIT'
+  | 'DIAGNOSTICS'
+  | 'POSITIONS'
+  | 'EVENTS'
+  | 'SETTINGS';
 
 export type SignalPanelMode = 'PENDING' | 'HISTORY';
 

@@ -1,9 +1,8 @@
-import { ChevronDown, ChevronRight, Link2 } from 'lucide-react';
+import { Link2 } from 'lucide-react';
 import * as React from 'react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { cn } from '@/utils/cn';
 
 import type { ReplayEvidenceController } from '../../hooks/useTTradeReplayEvidence';
 
@@ -19,17 +18,11 @@ import {
 } from './replayEvidenceKeyboard';
 import {
   candidateStatusLabels,
-  nullableScore,
   signalEventLabels,
-  signalEventTone,
   signalPathLabels,
-  signalPhaseLabels,
 } from './signalPresentation';
 import { TTradeSignalEvidence } from './TTradeSignalEvidence';
-import { formatTime } from './utils';
-
-const columns =
-  '24px minmax(140px, 1fr) minmax(130px, 1fr) minmax(150px, 1.1fr) minmax(140px, 1fr) 100px 110px minmax(130px, 1fr)';
+import { TTradeSignalTable } from './TTradeSignalTable';
 
 export function TTradeReplaySignals({
   controller,
@@ -164,172 +157,86 @@ export function TTradeReplaySignals({
           }
         />
         {available && evaluations.length > 0 && (
-          <div style={{ minWidth: 1050 }}>
-            <div
-              className="sticky top-0 z-10 grid h-8 items-center gap-2 border-b border-white/[0.08] bg-[#0F1D30] px-3 text-ui-caption text-slate-400"
-              style={{ gridTemplateColumns: columns }}
-            >
-              {[
-                '',
-                '时间',
-                '标的',
-                tracingEvidence ? '评估事件' : '信号事件',
-                '路径 / 阶段',
-                '机会分 / 阈值',
-                '候选状态',
-                '关联意图',
-              ].map((label, index) => (
-                <span key={index}>{label}</span>
-              ))}
-            </div>
-            {evaluations.map(signal => {
+          <TTradeSignalTable
+            expandedId={
+              evaluations.find(item => item.eventKey === expandedKey)?.id ||
+              null
+            }
+            focusedId={
+              evaluations.find(item => item.eventKey === focusedEventKey)?.id ||
+              null
+            }
+            focusedRowRef={linkedRowRef}
+            instrumentNames={instrumentNames}
+            items={evaluations}
+            onToggle={signal =>
+              setExpandedKey(current =>
+                current === signal.eventKey ? null : signal.eventKey
+              )
+            }
+            rowAriaLabel={signal =>
+              `${signalEventLabels[signal.eventType] || signal.eventType} ${signal.stockCode}`
+            }
+            tracingEvidence={tracingEvidence}
+            renderDetails={signal => {
               const snapshot = signal.signalSnapshot;
-              const expanded = expandedKey === signal.eventKey;
-              const detailId = `replay-evidence-${signal.id}`;
               const name = instrumentNames.get(signal.stockCode.toUpperCase());
               return (
-                <article
-                  key={signal.eventKey}
-                  className={cn(
-                    'border-b border-white/[0.06]',
-                    expanded &&
-                      'bg-blue-500/[0.035] ring-1 ring-inset ring-blue-400/30'
-                  )}
-                >
-                  <button
-                    ref={
-                      focusedEventKey === signal.eventKey
-                        ? linkedRowRef
-                        : undefined
-                    }
-                    type="button"
-                    aria-label={`${signalEventLabels[signal.eventType] || signal.eventType} ${signal.stockCode} ${formatTime(signal.evaluatedAt)}`}
-                    aria-expanded={expanded}
-                    aria-controls={detailId}
-                    onClick={() =>
-                      setExpandedKey(current =>
-                        current === signal.eventKey ? null : signal.eventKey
-                      )
-                    }
-                    className="grid min-h-11 w-full items-center gap-2 px-3 py-2 text-left text-ui-label hover:bg-blue-500/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70"
-                    style={{ gridTemplateColumns: columns }}
-                  >
-                    {expanded ? (
-                      <ChevronDown className="h-3.5 w-3.5 text-blue-300" />
-                    ) : (
-                      <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
-                    )}
-                    <span className="font-mono text-ui-caption text-slate-400">
-                      {formatTime(signal.evaluatedAt)}
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-slate-200">
-                        {name || signal.stockCode}
-                      </span>
-                      {name && (
-                        <span className="block font-mono text-ui-caption text-slate-400">
-                          {signal.stockCode}
-                        </span>
-                      )}
-                    </span>
-                    <span
-                      className={cn(
-                        'w-fit rounded border px-2 py-1 text-ui-caption',
-                        signalEventTone(signal.eventType)
-                      )}
-                    >
+                <div className="space-y-3 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-ui-label font-semibold text-slate-200">
+                      {name || signal.stockCode} ·{' '}
                       {signalEventLabels[signal.eventType] || signal.eventType}
-                      {signal.category === 'CONTEXT' && (
-                        <span className="mt-1 block text-slate-400">
-                          上下文事件 · 非交易信号
-                        </span>
-                      )}
-                    </span>
-                    <span className="text-ui-caption text-slate-300">
-                      {signalPathLabels[snapshot?.selectedPath || ''] ||
-                        '未选择路径'}
-                      <span className="mt-1 block text-slate-400">
-                        {signalPhaseLabels[snapshot?.dominantPhase || ''] ||
-                          '阶段未记录'}
+                    </h3>
+                    <span
+                      title={signal.contentFingerprint}
+                      className="text-ui-caption text-slate-400"
+                    >
+                      事件指纹{' '}
+                      <span className="font-mono">
+                        {signal.contentFingerprint.slice(0, 12)}
                       </span>
                     </span>
-                    <span className="font-mono text-ui-caption text-slate-200">
-                      {nullableScore(snapshot?.opportunityScore)} /{' '}
-                      {nullableScore(snapshot?.candidateThreshold)}
-                    </span>
-                    <span className="text-ui-caption text-slate-300">
-                      {candidateStatusLabels[snapshot?.candidateStatus || ''] ||
-                        '状态未记录'}
-                    </span>
-                    <span
-                      className="truncate font-mono text-ui-caption text-slate-400"
-                      title={signal.linkedIntentId || undefined}
-                    >
-                      {signal.linkedIntentId || '未关联意图'}
-                    </span>
-                  </button>
-                  {expanded && (
-                    <div
-                      id={detailId}
-                      className="space-y-3 border-t border-blue-400/20 p-3"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <h3 className="text-ui-label font-semibold text-slate-200">
-                          {name || signal.stockCode} ·{' '}
-                          {signalEventLabels[signal.eventType] ||
-                            signal.eventType}
-                        </h3>
-                        <span
-                          title={signal.contentFingerprint}
-                          className="text-ui-caption text-slate-400"
-                        >
-                          事件指纹{' '}
-                          <span className="font-mono">
-                            {signal.contentFingerprint.slice(0, 12)}
-                          </span>
-                        </span>
-                      </div>
-                      {snapshot ? (
-                        <TTradeSignalEvidence snapshot={snapshot} />
-                      ) : (
-                        <p className="text-ui-label text-amber-100">
-                          该事件未记录机会快照；事件身份和审计关联仍然保留。
-                        </p>
-                      )}
-                      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-3">
-                        <span className="max-w-full break-all font-mono text-ui-caption text-slate-400">
-                          eventKey · {signal.eventKey}
-                        </span>
-                        <div className="flex gap-2">
-                          {signal.candidateId && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                setSignalFilters({
-                                  candidateId: signal.candidateId,
-                                })
-                              }
-                            >
-                              查看候选链路
-                            </Button>
-                          )}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => onViewAudit(signal.eventKey)}
-                          >
-                            <Link2 className="mr-1.5 h-3.5 w-3.5" />
-                            查看决策审计
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
+                  </div>
+                  {snapshot ? (
+                    <TTradeSignalEvidence snapshot={snapshot} />
+                  ) : (
+                    <p className="text-ui-label text-amber-100">
+                      该事件未记录机会快照；事件身份和审计关联仍然保留。
+                    </p>
                   )}
-                </article>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-3">
+                    <span className="max-w-full break-all font-mono text-ui-caption text-slate-400">
+                      eventKey · {signal.eventKey}
+                    </span>
+                    <div className="flex gap-2">
+                      {signal.candidateId && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            setSignalFilters({
+                              candidateId: signal.candidateId,
+                            })
+                          }
+                        >
+                          查看候选链路
+                        </Button>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => onViewAudit(signal.eventKey)}
+                      >
+                        <Link2 className="mr-1.5 h-3.5 w-3.5" />
+                        查看决策审计
+                      </Button>
+                    </div>
+                  </div>
+                </div>
               );
-            })}
-          </div>
+            }}
+          />
         )}
       </div>
       {available && (

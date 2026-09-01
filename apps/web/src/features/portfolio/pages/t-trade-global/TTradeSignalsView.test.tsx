@@ -264,6 +264,31 @@ describe('TTradeSignalsView approval safety', () => {
     expect(screen.queryByText('持仓 1,000')).not.toBeInTheDocument();
   });
 
+  it('keeps an awaiting candidate amber even when the event type later links an intent', () => {
+    const waiting = snapshot();
+    render(
+      <TTradeSignalsView
+        accountId="account-1"
+        actionLoading={false}
+        canApproveAccount
+        dataTrusted
+        evaluations={[
+          evaluation(waiting, {
+            eventType: 'INTENT_LINKED',
+          }),
+        ]}
+        hasMoreEvaluations={false}
+        loadingEvaluations={false}
+        monitor={monitor(waiting)}
+        onApprove={vi.fn()}
+        onLoadMoreEvaluations={vi.fn()}
+        onReject={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('等待人工确认')).toHaveClass('text-amber-200');
+  });
+
   it('shows a truthful empty state when holdings exist but no signal fact exists', () => {
     const noCandidate = snapshot({
       candidateId: null,

@@ -14,6 +14,12 @@ export const TTradeSignalsView = lazy(() =>
   }))
 );
 
+export const TTradeLiveDecisionAudit = lazy(() =>
+  import('./TTradeLiveDecisionAudit').then(module => ({
+    default: module.TTradeLiveDecisionAudit,
+  }))
+);
+
 export const TTradeSignalDiagnosticsPanel = lazy(() =>
   import('./TTradeSignalDiagnostics').then(module => ({
     default: module.TTradeSignalDiagnosticsPanel,

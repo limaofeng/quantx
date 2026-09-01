@@ -84,3 +84,22 @@ export function signalEventTone(eventType: string) {
   }
   return 'border-blue-400/20 bg-blue-400/5 text-blue-200';
 }
+
+export function signalCandidateStatusTone(
+  candidateStatus: string,
+  eventType: string
+) {
+  if (candidateStatus === 'SUPPRESSED') {
+    return 'border-rose-400/20 bg-rose-400/5 text-rose-200';
+  }
+  if (
+    candidateStatus === 'AWAITING_APPROVAL' ||
+    candidateStatus === 'REARMING'
+  ) {
+    return 'border-amber-400/20 bg-amber-400/5 text-amber-200';
+  }
+  if (candidateStatus === 'NONE') {
+    return 'border-white/10 bg-white/[0.03] text-slate-400';
+  }
+  return signalEventTone(eventType);
+}

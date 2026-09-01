@@ -4,6 +4,7 @@ import {
   BarChart3,
   Clock3,
   FlaskConical,
+  GitBranch,
   ListChecks,
   Loader2,
   Play,
@@ -32,6 +33,16 @@ import {
   useGraphqlWsStatus,
   type GraphqlWsStatus,
 } from '@/core/graphql/ws-status';
+import {
+  mapExecutionTraceView,
+  mapStrategyDecisionView,
+  type ExecutionTraceView,
+  type StrategyDecision,
+} from '@/features/strategies/domain';
+import {
+  StrategyDecisionHistoryQuery,
+  StrategyExecutionTraceQuery,
+} from '@/features/strategies/hooks/strategyInstanceOperations';
 import { useTradingSafety } from '@/features/trading-safety/trading-safety-context';
 import { useFragment as readFragment } from '@/generated/gql/fragment-masking';
 import {
@@ -132,6 +143,7 @@ import type { ReplaySidebarContext } from './t-trade-global/TTradeReplaySidebar'
 import {
   TTradeActivityView,
   TTradeExecutionSettingsPanel,
+  TTradeLiveDecisionAudit,
   TTradePositionsView,
   TTradeReplaySidebar,
   TTradeSignalDiagnosticsPanel,
@@ -180,6 +192,7 @@ const tTradePositionsFallback = (
 const tTradeModes: StudioMode[] = [
   { id: 'MONITOR', icon: Radar, label: '总览' },
   { id: 'SIGNALS', icon: Activity, label: '信号' },
+  { id: 'AUDIT', icon: GitBranch, label: '决策审计' },
   { id: 'DIAGNOSTICS', icon: BarChart3, label: '诊断' },
   { id: 'POSITIONS', icon: WalletCards, label: '仓位与批次' },
   { id: 'EVENTS', icon: ListChecks, label: '运行动态' },
@@ -785,6 +798,50 @@ export function TTradeGlobalPage() {
       activeMode !== 'SIGNALS',
     requestPolicy: 'network-only',
   });
+  const liveDecisionRunId = monitor?.strategyRunId || '';
+  const [liveDecisionResult, refreshLiveDecisions] = useQuery({
+    query: StrategyDecisionHistoryQuery,
+    variables: {
+      instanceId: liveDecisionRunId,
+      cursor: null,
+      limit: 200,
+      backtestId: null,
+    },
+    pause:
+      !liveDecisionRunId ||
+      workspaceMode !== 'REALTIME' ||
+      activeMode !== 'AUDIT',
+    requestPolicy: 'cache-and-network',
+  });
+  const [liveExecutionResult, refreshLiveExecutions] = useQuery({
+    query: StrategyExecutionTraceQuery,
+    variables: {
+      instanceId: liveDecisionRunId,
+      decisionId: null,
+      backtestId: null,
+      cursor: null,
+      limit: 200,
+    },
+    pause:
+      !liveDecisionRunId ||
+      workspaceMode !== 'REALTIME' ||
+      activeMode !== 'AUDIT',
+    requestPolicy: 'cache-and-network',
+  });
+  const liveDecisions = React.useMemo<StrategyDecision[]>(
+    () =>
+      ((liveDecisionResult.data?.strategyDecisionHistory || []) as unknown[])
+        .map(mapStrategyDecisionView)
+        .filter(decision => decision.instanceId === liveDecisionRunId),
+    [liveDecisionResult.data, liveDecisionRunId]
+  );
+  const liveExecutions = React.useMemo<ExecutionTraceView[]>(
+    () =>
+      (
+        (liveExecutionResult.data?.strategyExecutionTrace || []) as unknown[]
+      ).map(mapExecutionTraceView),
+    [liveExecutionResult.data]
+  );
   const signalEvaluationsPage = React.useMemo(() => {
     const page = signalEvaluationsResult.data?.tTradeSignalEvaluations;
     if (!page || page.items.some(item => item.accountId !== accountId)) {
@@ -1153,6 +1210,10 @@ export function TTradeGlobalPage() {
           refreshCandidateTrace({ requestPolicy: 'network-only' });
         }
       }
+      if (activeMode === 'AUDIT' && liveDecisionRunId) {
+        refreshLiveDecisions({ requestPolicy: 'network-only' });
+        refreshLiveExecutions({ requestPolicy: 'network-only' });
+      }
     },
     [
       activeMode,
@@ -1166,15 +1227,47 @@ export function TTradeGlobalPage() {
       refreshCurrentBatches,
       refreshCandidateTrace,
       refreshHistoryBatches,
+      refreshLiveDecisions,
+      refreshLiveExecutions,
       refreshMonitor,
       refreshSignalDiagnostics,
       refreshSignalEvaluations,
       signalAfter,
       signalDiagnosticsResult.fetching,
       signalEvaluationsResult.fetching,
+      liveDecisionRunId,
       selectedTraceForCurrentAccount,
     ]
   );
+
+  React.useEffect(() => {
+    if (
+      workspaceMode !== 'REALTIME' ||
+      activeMode !== 'AUDIT' ||
+      !liveDecisionRunId ||
+      !monitor?.enabled
+    ) {
+      return;
+    }
+    const refreshAudit = () => {
+      if (document.visibilityState !== 'visible') return;
+      refreshLiveDecisions({ requestPolicy: 'network-only' });
+      refreshLiveExecutions({ requestPolicy: 'network-only' });
+    };
+    const interval = window.setInterval(refreshAudit, 5_000);
+    document.addEventListener('visibilitychange', refreshAudit);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshAudit);
+    };
+  }, [
+    activeMode,
+    liveDecisionRunId,
+    monitor?.enabled,
+    refreshLiveDecisions,
+    refreshLiveExecutions,
+    workspaceMode,
+  ]);
 
   const requestAuthoritativeMonitorRefresh = React.useCallback(() => {
     if (!accountId || workspaceMode !== 'REALTIME') return;
@@ -2896,6 +2989,36 @@ export function TTradeGlobalPage() {
     </React.Suspense>
   );
 
+  const auditView = (
+    <React.Suspense
+      fallback={
+        <div
+          className="studio-workspace-surface flex h-full min-h-0 items-center justify-center text-ui-label text-slate-500"
+          role="status"
+        >
+          <Loader2
+            className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+          正在加载决策审计…
+        </div>
+      }
+    >
+      <TTradeLiveDecisionAudit
+        decisions={liveDecisions}
+        error={
+          liveDecisionResult.error?.message ||
+          liveExecutionResult.error?.message
+        }
+        executions={liveExecutions}
+        instrumentNames={positionNamesByCode}
+        loading={liveDecisionResult.fetching || liveExecutionResult.fetching}
+        onRefresh={requestAuthoritativeRefresh}
+        runId={liveDecisionRunId}
+      />
+    </React.Suspense>
+  );
+
   const diagnosticsView = (
     <div className="studio-workspace-surface h-full min-h-0">
       <TTradeSignalDiagnosticsPanel
@@ -3146,6 +3269,8 @@ export function TTradeGlobalPage() {
             monitorView
           ) : activeMode === 'SIGNALS' ? (
             signalsView
+          ) : activeMode === 'AUDIT' ? (
+            auditView
           ) : activeMode === 'DIAGNOSTICS' ? (
             diagnosticsView
           ) : activeMode === 'POSITIONS' ? (
