@@ -473,6 +473,7 @@ describe('TTradeSignalsView approval safety', () => {
 
   it('expands CANARY signals inline and keeps per-signal confirmation', () => {
     const signal = snapshot();
+    const onRequestEvaluationDetail = vi.fn();
     render(
       <TTradeSignalsView
         accountId="account-1"
@@ -486,11 +487,13 @@ describe('TTradeSignalsView approval safety', () => {
         onApprove={vi.fn()}
         onLoadMoreEvaluations={vi.fn()}
         onReject={vi.fn()}
+        onRequestEvaluationDetail={onRequestEvaluationDetail}
       />
     );
 
     expect(screen.getByText('CANARY · 人工确认')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /查看信号 测试股票/ }));
+    expect(onRequestEvaluationDetail).toHaveBeenCalledWith('evaluation-1');
     expect(screen.getByText(/CANARY 仅允许逐笔人工确认/)).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: '确认并提交' })

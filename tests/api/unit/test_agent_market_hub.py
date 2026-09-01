@@ -239,11 +239,10 @@ async def test_market_stream_revalidation_uses_cross_process_lease(
   monkeypatch.setattr(agent_api, "AsyncSessionLocal", Session)
 
   await agent_api._ensure_device_active("device-1")
-  with pytest.raises(Exception, match="控制会话已断开"):
+  with pytest.raises(Exception, match="行情租约已失效或被替换"):
     await agent_api._ensure_device_active("device-2")
   api_heartbeat.instance_id = "api-instance-2"
-  with pytest.raises(Exception, match="控制会话已断开"):
-    await agent_api._ensure_device_active("device-1")
+  await agent_api._ensure_device_active("device-1")
 
   assert checked == ["device-1", "device-2", "device-1"]
 
@@ -277,7 +276,7 @@ async def test_hub_revocation_wakes_control_guard_and_fails_over_market_agent(
   waiter = asyncio.create_task(hub.wait_until_revoked(first, timeout_seconds=1))
   assert await hub.revoke("device-1")
 
-  assert await waiter
+  assert await waiter == agent_hub.QMT_DEVICE_REVOKED
   assert await hub.is_market_device("device-2")
   assert standby.queue.qsize() >= 2
 
@@ -311,7 +310,10 @@ async def test_duplicate_device_connection_replaces_exact_session_generation(
   assert first.revoked.is_set()
   assert not replacement.revoked.is_set()
   assert replacement.capabilities == {"market-data", "live"}
-  assert await hub.wait_until_revoked(first, timeout_seconds=0)
+  assert (
+    await hub.wait_until_revoked(first, timeout_seconds=0)
+    == agent_hub.QMT_CONTROL_SESSION_REPLACED
+  )
   assert not await hub.unregister(first)
   assert await hub.current_session("device-1") is replacement
   assert await hub.is_connected(

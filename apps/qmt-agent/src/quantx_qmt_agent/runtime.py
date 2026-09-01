@@ -1792,6 +1792,16 @@ def _websocket_close_code(exc: BaseException) -> int | None:
   return code if isinstance(code, int) else None
 
 
+def _websocket_close_reason(exc: BaseException) -> str:
+  for direction in ("rcvd", "sent"):
+    close_frame = getattr(exc, direction, None)
+    reason = str(getattr(close_frame, "reason", "") or "").strip()
+    if reason:
+      return reason[:120]
+  reason = str(getattr(exc, "reason", "") or "").strip()
+  return reason[:120]
+
+
 def _parse_expiry(value: Any) -> datetime:
   if not isinstance(value, str):
     raise ValueError("命令缺少 expires_at")
@@ -2039,9 +2049,10 @@ class AgentRuntime:
           # the reconnect backoff for the session that just ended.
           self._control_session_authenticated = False
           logger.warning(
-            "QMT Agent disconnected: error=%s close_code=%s",
+            "QMT Agent disconnected: error=%s close_code=%s close_reason=%s",
             exc.__class__.__name__,
             _websocket_close_code(exc),
+            _websocket_close_reason(exc) or "QMT_CONTROL_TRANSPORT_LOST",
           )
           try:
             await asyncio.wait_for(self._stopped.wait(), timeout=sleep_delay)

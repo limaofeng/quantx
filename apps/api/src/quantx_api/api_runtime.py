@@ -11,7 +11,7 @@ from quantx_infrastructure.database.relational_connection import AsyncSessionLoc
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
 from quantx_infrastructure.services.agent_session_guard import (
   API_HEARTBEAT_COMPONENT,
-  QMT_AGENT_OFFLINE,
+  QMT_API_RESTARTED,
   parse_utc_timestamp,
   utc_iso,
 )
@@ -22,10 +22,15 @@ from quantx_api.auth.tokens import utcnow
 API_INSTANCE_ID = str(uuid.uuid4())
 API_STARTED_AT: datetime = utcnow()
 API_HEARTBEAT_INTERVAL_SECONDS = 15.0
+API_HEARTBEAT_WRITE_TIMEOUT_SECONDS = 5.0
 logger = logging.getLogger(__name__)
 
 
-async def record_api_heartbeat(*, status: str = "READY") -> None:
+async def _write_api_heartbeat(
+  *,
+  status: str,
+  retire_previous_agent_sessions: bool,
+) -> None:
   now = utcnow()
   details = {
     "apiInstanceId": API_INSTANCE_ID,
@@ -66,7 +71,7 @@ async def record_api_heartbeat(*, status: str = "READY") -> None:
       heartbeat.status = status
       heartbeat.details = details
       heartbeat.updated_at = now
-    if replacing_generation:
+    if replacing_generation and retire_previous_agent_sessions:
       agent_heartbeats = list(
         (
           await db.execute(
@@ -86,7 +91,9 @@ async def record_api_heartbeat(*, status: str = "READY") -> None:
             {
               "sessionActive": False,
               "serverReceivedAt": utc_iso(now),
-              "reasonCode": QMT_AGENT_OFFLINE,
+              "reasonCode": QMT_API_RESTARTED,
+              "lastDisconnectReasonCode": QMT_API_RESTARTED,
+              "lastDisconnectedAt": utc_iso(now),
             }
           )
           agent_heartbeat.status = "OFFLINE"
@@ -95,10 +102,31 @@ async def record_api_heartbeat(*, status: str = "READY") -> None:
     await db.commit()
 
 
+async def initialize_api_generation() -> None:
+  """Publish this API generation and retire only sessions owned by an older one."""
+
+  await _write_api_heartbeat(
+    status="READY",
+    retire_previous_agent_sessions=True,
+  )
+
+
+async def record_api_heartbeat(*, status: str = "READY") -> None:
+  """Refresh API observability without mutating Agent session projections."""
+
+  await _write_api_heartbeat(
+    status=status,
+    retire_previous_agent_sessions=False,
+  )
+
+
 async def run_api_heartbeat(stopped) -> None:
   while not stopped.is_set():
     try:
-      await record_api_heartbeat()
+      await asyncio.wait_for(
+        record_api_heartbeat(),
+        timeout=API_HEARTBEAT_WRITE_TIMEOUT_SECONDS,
+      )
     except asyncio.CancelledError:
       raise
     except Exception as exc:

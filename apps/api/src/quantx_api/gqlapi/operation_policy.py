@@ -149,6 +149,7 @@ _register(
     "tTradeSession",
     "tTradeSessions",
     "tTradeSignalDiagnostics",
+    "tTradeSignalEvaluation",
     "tTradeSignalEvaluations",
     "validateTTradeLiveReadiness",
   },

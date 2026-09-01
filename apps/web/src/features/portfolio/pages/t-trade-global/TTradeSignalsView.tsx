@@ -382,6 +382,9 @@ function TTradeSignalDetails({
   selectedTrace,
   session,
   signal,
+  detailError,
+  detailLoading,
+  detailSnapshot,
 }: {
   accountId: string;
   actionLoading: boolean;
@@ -398,12 +401,19 @@ function TTradeSignalDetails({
   selectedTrace?: CandidateTraceSelection | null;
   session?: MonitorSession;
   signal: SignalEvaluationLike;
+  detailError?: string | null;
+  detailLoading?: boolean;
+  detailSnapshot?: SignalSnapshot | null;
 }) {
-  const snapshot = signal.signalSnapshot;
+  const summary = signal.signalSnapshot;
+  const snapshot =
+    detailSnapshot ||
+    (summary && isKnownSignalSnapshot(summary) ? summary : null);
+  const displaySnapshot = snapshot || summary;
   const pending = Boolean(
     session &&
-    snapshot?.candidateStatus === 'AWAITING_APPROVAL' &&
-    snapshot.pendingEntryIntentId
+    displaySnapshot?.candidateStatus === 'AWAITING_APPROVAL' &&
+    displaySnapshot.pendingEntryIntentId
   );
   const compatible = snapshot ? isKnownSignalSnapshot(snapshot) : false;
   const approveAllowed = Boolean(
@@ -411,10 +421,10 @@ function TTradeSignalDetails({
   );
   const traceMatches = Boolean(
     selectedTrace &&
-    snapshot?.candidateId &&
+    displaySnapshot?.candidateId &&
     selectedTrace.accountId === signal.accountId &&
     selectedTrace.strategyRunId === signal.runId &&
-    selectedTrace.candidateId === snapshot.candidateId
+    selectedTrace.candidateId === displaySnapshot.candidateId
   );
 
   return (
@@ -475,9 +485,25 @@ function TTradeSignalDetails({
         </div>
       )}
 
-      {!snapshot ? (
+      {detailLoading && !snapshot ? (
+        <div
+          role="status"
+          aria-busy="true"
+          className="flex items-center border border-cyan-400/15 bg-cyan-400/[0.04] p-3 text-ui-caption text-cyan-100"
+        >
+          <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+          正在读取完整信号证据…
+        </div>
+      ) : detailError && !snapshot ? (
+        <div
+          role="alert"
+          className="border border-rose-400/20 bg-rose-400/[0.04] p-3 text-ui-caption leading-5 text-rose-100"
+        >
+          完整信号证据读取失败：{detailError}
+        </div>
+      ) : !snapshot ? (
         <div className="border border-amber-400/20 bg-amber-400/[0.04] p-3 text-ui-caption leading-5 text-amber-100">
-          该信号记录没有可展示的机会快照；仍保留事件身份用于审计。
+          该信号记录没有可展示的完整机会快照；摘要身份仍保留用于审计。
         </div>
       ) : (
         <>
@@ -569,6 +595,9 @@ export function TTradeSignalsView({
   candidateTraceError,
   candidateTraceLoading = false,
   dataTrusted,
+  evaluationDetail,
+  evaluationDetailError,
+  evaluationDetailLoading = false,
   evaluations,
   evaluationsError,
   focusStockCode,
@@ -580,6 +609,7 @@ export function TTradeSignalsView({
   onFocusHandled,
   onLoadMoreEvaluations,
   onRequestCandidateTrace,
+  onRequestEvaluationDetail,
   onReject,
   selectedTrace,
 }: {
@@ -590,6 +620,12 @@ export function TTradeSignalsView({
   candidateTraceError?: string;
   candidateTraceLoading?: boolean;
   dataTrusted: boolean;
+  evaluationDetail?: {
+    id: string;
+    signalSnapshot?: SignalSnapshot | null;
+  } | null;
+  evaluationDetailError?: string | null;
+  evaluationDetailLoading?: boolean;
   evaluations: readonly SignalEvaluationLike[];
   evaluationsError?: string | null;
   focusStockCode?: string | null;
@@ -601,6 +637,7 @@ export function TTradeSignalsView({
   onFocusHandled?: () => void;
   onLoadMoreEvaluations: () => void;
   onRequestCandidateTrace?: (selection: CandidateTraceSelection | null) => void;
+  onRequestEvaluationDetail?: (evaluationId: string) => void;
   onReject: (session: MonitorSession, snapshot: SignalSnapshot) => void;
   selectedTrace?: CandidateTraceSelection | null;
 }) {
@@ -648,9 +685,12 @@ export function TTradeSignalsView({
   React.useEffect(() => {
     if (!focusStockCode) return;
     const focused = signals.find(item => item.stockCode === focusStockCode);
-    if (focused) setExpandedSignalId(focused.id);
+    if (focused) {
+      setExpandedSignalId(focused.id);
+      onRequestEvaluationDetail?.(focused.id);
+    }
     onFocusHandled?.();
-  }, [focusStockCode, onFocusHandled, signals]);
+  }, [focusStockCode, onFocusHandled, onRequestEvaluationDetail, signals]);
 
   React.useEffect(() => {
     if (
@@ -672,9 +712,9 @@ export function TTradeSignalsView({
 
   const toggleSignal = React.useCallback(
     (signal: SignalEvaluationLike) => {
-      setExpandedSignalId(current =>
-        current === signal.id ? null : signal.id
-      );
+      const opening = expandedSignalId !== signal.id;
+      setExpandedSignalId(opening ? signal.id : null);
+      if (opening) onRequestEvaluationDetail?.(signal.id);
       const candidateId = signal.signalSnapshot?.candidateId;
       if (
         selectedTrace &&

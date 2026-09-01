@@ -5073,8 +5073,11 @@ type Query {
   """游标分页查询做 T 委托和成交事件"""
   tTradeBatchEventsPage(accountId: String!, batchId: String = null, first: Int! = 30, after: String = null): TTradeBatchEventPage!
 
-  """查询 V3 做 T 信号评估证据，默认只返回 MATERIAL"""
-  tTradeSignalEvaluations(accountId: String!, stockCode: String = null, eventKinds: [TTradeSignalEvaluationKind!] = null, startTime: DateTime = null, endTime: DateTime = null, first: Int! = 30, after: String = null): TTradeSignalEvaluationPage!
+  """查询 V3 做 T 信号评估摘要，默认只返回 MATERIAL"""
+  tTradeSignalEvaluations(accountId: String!, stockCode: String = null, eventKinds: [TTradeSignalEvaluationKind!] = null, startTime: DateTime = null, endTime: DateTime = null, first: Int! = 30, after: String = null): TTradeSignalEvaluationSummaryPage!
+
+  """按评估标识查询完整 V3 做 T 信号证据"""
+  tTradeSignalEvaluation(accountId: String!, evaluationId: ID!): TTradeSignalEvaluation
 
   """按候选标识追溯评估、意图、委托、成交与退出计划"""
   tTradeCandidateTrace(accountId: String!, strategyRunId: String!, candidateId: String!): TTradeCandidateTrace
@@ -7947,9 +7950,31 @@ enum TTradeSignalEvaluationKind {
   COALESCED_DIAGNOSTIC
 }
 
-"""做 T 信号评估稳定游标分页"""
-type TTradeSignalEvaluationPage {
-  items: [TTradeSignalEvaluation!]!
+"""持久化做 T 信号评估列表摘要"""
+type TTradeSignalEvaluationSummary {
+  id: ID!
+  eventKey: String!
+  category: String!
+  candidateId: String
+  linkedIntentId: String
+  accountId: String!
+  runId: ID!
+  stockCode: String!
+  eventKind: TTradeSignalEvaluationKind!
+  eventType: String!
+  evaluatedAt: DateTime!
+  windowStartedAt: DateTime
+  windowEndedAt: DateTime
+  coalescedCount: Int!
+  policyVersion: String!
+  schemaVersion: String!
+  contentFingerprint: String!
+  signalSummary: TTradeSignalSnapshotSummary
+}
+
+"""做 T 信号评估摘要稳定游标分页"""
+type TTradeSignalEvaluationSummaryPage {
+  items: [TTradeSignalEvaluationSummary!]!
   pageInfo: PageInfo!
 }
 
@@ -8338,6 +8363,30 @@ type TTradeSignalSnapshot {
 """做 T 信号诊断版本分组"""
 type TTradeSignalVersionGroup {
   policyVersion: String!
+"""做 T 信号评估列表所需的固定大小快照摘要"""
+type TTradeSignalSnapshotSummary {
+  sourceAt: DateTime!
+  sourceTimeMs: String!
+  tickOrdinal: String!
+  continuityGeneration: String!
+  dataHealth: TTradeSignalDataHealth!
+  pullbackPhase: TTradePullbackPhase!
+  momentumPhase: TTradeMomentumPhase!
+  dominantPhase: TTradeDominantPhase!
+  selectedPath: TTradeSignalPath
+  opportunityScore: Float
+  previewThreshold: Float!
+  candidateThreshold: Float!
+  revalidateThreshold: Float!
+  rearmThreshold: Float!
+  topBlocker: TTradeSignalBlocker
+  candidateId: ID
+  candidateStatus: TTradeCandidateStatus!
+  pendingEntryIntentId: ID
+  featureSchemaVersion: String!
+  profileVersion: String
+}
+
   featureSchemaVersion: String!
   profileVersion: String
   count: Int!

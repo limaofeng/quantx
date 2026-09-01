@@ -64,6 +64,7 @@ import {
   TTradeCandidateTraceQuery,
   TTradeGlobalMonitorQuery,
   TTradeSignalDiagnosticsQuery,
+  TTradeSignalEvaluationDetailQuery,
   TTradeSignalEvaluationsQuery,
   TTradeSignalPolicyFieldsFragment,
   TTradeSignalSnapshotFieldsFragment,
@@ -604,6 +605,9 @@ export function TTradeGlobalPage() {
   >(null);
   const [eventAfter, setEventAfter] = React.useState<string | null>(null);
   const [signalAfter, setSignalAfter] = React.useState<string | null>(null);
+  const [requestedSignalDetailId, setRequestedSignalDetailId] = React.useState<
+    string | null
+  >(null);
   const [activitySignalAfter, setActivitySignalAfter] = React.useState<
     string | null
   >(null);
@@ -738,6 +742,19 @@ export function TTradeGlobalPage() {
     pause:
       !accountId || workspaceMode !== 'REALTIME' || activeMode !== 'EVENTS',
     requestPolicy: 'network-only',
+  });
+  const [signalDetailResult] = useQuery({
+    query: TTradeSignalEvaluationDetailQuery,
+    variables: {
+      accountId,
+      evaluationId: requestedSignalDetailId || '',
+    },
+    pause:
+      !accountId ||
+      !requestedSignalDetailId ||
+      workspaceMode !== 'REALTIME' ||
+      !['SIGNALS', 'EVENTS'].includes(activeMode),
+    requestPolicy: 'cache-first',
   });
   const [signalDiagnosticsResult, refreshSignalDiagnostics] = useQuery({
     query: TTradeSignalDiagnosticsQuery,
@@ -907,6 +924,7 @@ export function TTradeGlobalPage() {
     setPositionFocusBatchId(null);
     setSignalEvaluations([]);
     setActivitySignalEvaluations([]);
+    setRequestedSignalDetailId(null);
     setDiagnosticRange(createRollingDiagnosticRange());
     signalRefreshTelemetryRef.current = null;
   }, [accountId]);
@@ -988,10 +1006,7 @@ export function TTradeGlobalPage() {
     const items: SignalEvaluationLike[] = page.items.map(item => ({
       ...item,
       id: String(item.id),
-      signalSnapshot: readFragment(
-        TTradeSignalSnapshotFieldsFragment,
-        item.signalSnapshot
-      ),
+      signalSnapshot: item.signalSummary,
     }));
     setSignalEvaluations(previous => {
       if (!signalAfter) return items;
@@ -1015,10 +1030,7 @@ export function TTradeGlobalPage() {
     const items: ActivitySignalEvaluation[] = page.items.map(item => ({
       ...item,
       id: String(item.id),
-      signalSnapshot: readFragment(
-        TTradeSignalSnapshotFieldsFragment,
-        item.signalSnapshot
-      ),
+      signalSnapshot: item.signalSummary,
     }));
     setActivitySignalEvaluations(previous => {
       if (!activitySignalAfter) return items;
@@ -1030,6 +1042,28 @@ export function TTradeGlobalPage() {
     accountId,
     activitySignalAfter,
     activitySignalsResult.data?.tTradeSignalEvaluations,
+  ]);
+
+  const signalEvaluationDetail = React.useMemo(() => {
+    const item = signalDetailResult.data?.tTradeSignalEvaluation;
+    if (
+      !item ||
+      item.accountId !== accountId ||
+      String(item.id) !== requestedSignalDetailId
+    ) {
+      return null;
+    }
+    return {
+      id: String(item.id),
+      signalSnapshot: readFragment(
+        TTradeSignalSnapshotFieldsFragment,
+        item.signalSnapshot
+      ),
+    };
+  }, [
+    accountId,
+    requestedSignalDetailId,
+    signalDetailResult.data?.tTradeSignalEvaluation,
   ]);
 
   const finishSignalRefreshTelemetry = React.useCallback(() => {
@@ -2722,6 +2756,9 @@ export function TTradeGlobalPage() {
       batches={activityBatches}
       eventError={batchEventsResult.error?.message}
       events={batchEvents}
+      evaluationDetail={signalEvaluationDetail}
+      evaluationDetailError={signalDetailResult.error?.message}
+      evaluationDetailLoading={signalDetailResult.fetching}
       evaluations={activitySignalEvaluations}
       focusedBatchId={activityBatchFilter}
       hasMoreEvents={Boolean(
@@ -2774,6 +2811,7 @@ export function TTradeGlobalPage() {
         loadMoreBatches();
       }}
       onRefresh={requestAuthoritativeRefresh}
+      onRequestEvaluationDetail={setRequestedSignalDetailId}
       onViewBatch={batchId => {
         setPositionFocusBatchId(batchId);
         setInspectedBatchId(batchId);
@@ -2820,6 +2858,9 @@ export function TTradeGlobalPage() {
         }
         candidateTraceLoading={candidateTraceResult.fetching}
         dataTrusted={signalSnapshotTrusted}
+        evaluationDetail={signalEvaluationDetail}
+        evaluationDetailError={signalDetailResult.error?.message}
+        evaluationDetailLoading={signalDetailResult.fetching}
         evaluations={accountBoundSignalEvaluations}
         evaluationsError={signalEvaluationsResult.error?.message}
         focusStockCode={focusedSignalStockCode}

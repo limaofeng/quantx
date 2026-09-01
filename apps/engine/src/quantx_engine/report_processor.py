@@ -1472,7 +1472,6 @@ async def _fail_closed_incomplete_snapshot(
       heartbeat.details = details
       if str(heartbeat.status or "").upper() in {"READY", "RECONCILING"}:
         heartbeat.status = "RECONCILE_REQUIRED"
-      heartbeat.updated_at = utcnow()
     await db.commit()
   if snapshot_failures or authority_failures:
     details = [*snapshot_failures, *authority_failures]
@@ -1658,7 +1657,6 @@ async def _process_delta_report_inner(
           )
           heartbeat.status = QMT_ACCOUNT_MISMATCH
           heartbeat.details = details
-          heartbeat.updated_at = utcnow()
           await mismatch_db.commit()
       raise ValueError(QMT_ACCOUNT_MISMATCH)
     # Parse and snapshot the account groups before any order/trade convergence.
@@ -2006,7 +2004,6 @@ async def _process_delta_report_inner(
                   "completedHandoverAt": observed_at.isoformat(),
                 }
                 heartbeat.details = details
-        heartbeat.updated_at = observed_at
         await db.commit()
 
 

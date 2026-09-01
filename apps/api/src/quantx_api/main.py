@@ -30,7 +30,11 @@ from quantx_api.agent_api import (
   run_trade_command_expiry_sweeper,
 )
 from quantx_api.agent_hub import agent_connection_hub
-from quantx_api.api_runtime import record_api_heartbeat, run_api_heartbeat
+from quantx_api.api_runtime import (
+  initialize_api_generation,
+  record_api_heartbeat,
+  run_api_heartbeat,
+)
 from quantx_api.auth.router import auth_router
 from quantx_api.auth.service import AuthService
 from quantx_api.gqlapi import setup_graphql
@@ -368,7 +372,7 @@ async def lifespan(app: FastAPI):
       exc.__class__.__name__,
     )
 
-  await record_api_heartbeat()
+  await initialize_api_generation()
   api_heartbeat_stopped = asyncio.Event()
   api_heartbeat_task = asyncio.create_task(
     run_api_heartbeat(api_heartbeat_stopped),

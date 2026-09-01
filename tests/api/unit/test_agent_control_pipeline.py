@@ -452,6 +452,11 @@ async def test_reconciling_defers_place_delivery_but_still_allows_cancel(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   session = control_session()
+
+  async def is_connected(*_args, **_kwargs):
+    return True
+
+  monkeypatch.setattr(agent_api.agent_connection_hub, "is_connected", is_connected)
   device = SimpleNamespace(revoked_at=None)
   heartbeat = SimpleNamespace(
     status="RECONCILING",
@@ -514,6 +519,11 @@ async def test_closed_market_gate_defers_live_risk_increase(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   session = control_session()
+
+  async def is_connected(*_args, **_kwargs):
+    return True
+
+  monkeypatch.setattr(agent_api.agent_connection_hub, "is_connected", is_connected)
   device = SimpleNamespace(revoked_at=None)
   heartbeat = SimpleNamespace(
     status="READY",
@@ -567,6 +577,11 @@ async def test_live_risk_increase_delivery_accepts_progressing_market_fence(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   session = control_session()
+
+  async def is_connected(*_args, **_kwargs):
+    return True
+
+  monkeypatch.setattr(agent_api.agent_connection_hub, "is_connected", is_connected)
   device = SimpleNamespace(revoked_at=None)
   heartbeat = SimpleNamespace(
     status="READY",
@@ -651,6 +666,11 @@ async def test_risk_gate_dependency_fluctuation_defers_delivery(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   session = control_session()
+
+  async def is_connected(*_args, **_kwargs):
+    return True
+
+  monkeypatch.setattr(agent_api.agent_connection_hub, "is_connected", is_connected)
   device = SimpleNamespace(revoked_at=None)
   heartbeat = SimpleNamespace(
     status="READY",
@@ -721,6 +741,11 @@ async def test_true_revocation_is_not_masked_by_reconciling_deferral(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   session = control_session()
+
+  async def is_connected(*_args, **_kwargs):
+    return True
+
+  monkeypatch.setattr(agent_api.agent_connection_hub, "is_connected", is_connected)
   device = SimpleNamespace(revoked_at=agent_api.utcnow())
   heartbeat = SimpleNamespace(
     status="RECONCILING",
@@ -762,7 +787,7 @@ async def test_true_revocation_is_not_masked_by_reconciling_deferral(
     },
   )
 
-  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+  with pytest.raises(agent_api.AuthError, match="Agent 设备已撤销"):
     await agent_api._assert_trade_delivery_session(session, command)
 
 

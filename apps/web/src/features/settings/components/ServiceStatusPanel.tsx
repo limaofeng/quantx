@@ -148,6 +148,7 @@ function TargetDetails({
       'XTTRADING_UNAVAILABLE',
       'TRADING_RECONCILING',
       'QMT_AGENT_NOT_RECONCILED',
+      'QMT_CONTROL_DEPENDENCY_UNAVAILABLE',
     ].includes(target.reasonCode ?? '');
   const currentReason = target.reasonCode
     ? monitorReasonPresentation(target.reasonCode, target.name)

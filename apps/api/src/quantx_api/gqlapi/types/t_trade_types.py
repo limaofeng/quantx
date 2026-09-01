@@ -931,9 +931,55 @@ class TTradeSignalEvaluation:
   signal_snapshot: Optional[TTradeSignalSnapshot]
 
 
-@strawberry.type(description="做 T 信号评估稳定游标分页")
-class TTradeSignalEvaluationPage:
-  items: List[TTradeSignalEvaluation]
+@strawberry.type(description="做 T 信号评估列表所需的固定大小快照摘要")
+class TTradeSignalSnapshotSummary:
+  source_at: datetime
+  source_time_ms: str
+  tick_ordinal: str
+  continuity_generation: str
+  data_health: TTradeSignalDataHealth
+  pullback_phase: TTradePullbackPhase
+  momentum_phase: TTradeMomentumPhase
+  dominant_phase: TTradeDominantPhase
+  selected_path: Optional[TTradeSignalPath]
+  opportunity_score: Optional[float]
+  preview_threshold: float
+  candidate_threshold: float
+  revalidate_threshold: float
+  rearm_threshold: float
+  top_blocker: Optional[TTradeSignalBlocker]
+  candidate_id: Optional[strawberry.ID]
+  candidate_status: TTradeCandidateStatus
+  pending_entry_intent_id: Optional[strawberry.ID]
+  feature_schema_version: str
+  profile_version: Optional[str]
+
+
+@strawberry.type(description="持久化做 T 信号评估列表摘要")
+class TTradeSignalEvaluationSummary:
+  id: strawberry.ID
+  event_key: str
+  category: str
+  candidate_id: Optional[str]
+  linked_intent_id: Optional[str]
+  account_id: str
+  run_id: strawberry.ID
+  stock_code: str
+  event_kind: TTradeSignalEvaluationKind
+  event_type: str
+  evaluated_at: datetime
+  window_started_at: Optional[datetime]
+  window_ended_at: Optional[datetime]
+  coalesced_count: int
+  policy_version: str
+  schema_version: str
+  content_fingerprint: str
+  signal_summary: Optional[TTradeSignalSnapshotSummary]
+
+
+@strawberry.type(description="做 T 信号评估摘要稳定游标分页")
+class TTradeSignalEvaluationSummaryPage:
+  items: List[TTradeSignalEvaluationSummary]
   page_info: PageInfo
 
 

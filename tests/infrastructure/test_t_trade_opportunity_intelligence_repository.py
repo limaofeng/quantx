@@ -472,6 +472,101 @@ async def test_evaluation_time_cursor_is_stable_and_account_scoped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_evaluation_summary_projects_scalars_and_full_detail_is_account_scoped() -> (
+  None
+):
+  engine, sessions = await _create_repositories()
+  at = datetime(2026, 8, 23, 10, 0, tzinfo=SHANGHAI)
+  signal_snapshot = {
+    "source_time_ms": "1787440800000",
+    "tick_ordinal": "42",
+    "continuity_generation": "3",
+    "data_health": "READY",
+    "pullback": {"phase": "LOW_STABILIZING"},
+    "momentum": {"phase": "OBSERVING"},
+    "selected_path": "PULLBACK_REBOUND",
+    "opportunity_score": 62.5,
+    "preview_threshold": 45.0,
+    "candidate_threshold": 70.0,
+    "revalidate_threshold": 60.0,
+    "rearm_threshold": 35.0,
+    "top_blockers": [
+      {"code": "SPREAD_WIDE", "label": "价差过宽", "detail": "等待收窄"}
+    ],
+    "candidate_id": "candidate-1",
+    "candidate_status": "LATCHED",
+    "pending_entry_intent_id": "intent-1",
+    "feature_schema_version": "features-v3",
+    "profile_version": "profile-v1",
+    "hard_gates": [{"code": f"gate-{index}"} for index in range(2_000)],
+  }
+  try:
+    async with sessions() as db:
+      repository = TTradeOpportunityEvaluationRepository(db)
+      stored = await repository.append_material(
+        **_evaluation_arguments(
+          at,
+          event_key="material-summary",
+          payload={
+            "signal_snapshot": signal_snapshot,
+            "intent_link": {"intent_id": "intent-1"},
+          },
+        )
+      )
+
+      summaries = await repository.list_evaluation_summaries(
+        account_id="account-1",
+        record_kinds=["MATERIAL"],
+        limit=10,
+      )
+      assert len(summaries) == 1
+      summary = summaries[0]
+      assert summary.id == stored.id
+      assert summary.linked_intent_id == "intent-1"
+      assert summary.signal_summary == {
+        "source_time_ms": "1787440800000",
+        "tick_ordinal": "42",
+        "continuity_generation": "3",
+        "data_health": "READY",
+        "pullback_phase": "LOW_STABILIZING",
+        "momentum_phase": "OBSERVING",
+        "selected_path": "PULLBACK_REBOUND",
+        "opportunity_score": 62.5,
+        "preview_threshold": 45.0,
+        "candidate_threshold": 70.0,
+        "revalidate_threshold": 60.0,
+        "rearm_threshold": 35.0,
+        "top_blocker": {
+          "code": "SPREAD_WIDE",
+          "label": "价差过宽",
+          "detail": "等待收窄",
+        },
+        "candidate_id": "candidate-1",
+        "candidate_status": "LATCHED",
+        "pending_entry_intent_id": "intent-1",
+        "feature_schema_version": "features-v3",
+        "profile_version": "profile-v1",
+      }
+      assert "hard_gates" not in summary.signal_summary
+
+      detail = await repository.get_evaluation(
+        account_id="account-1",
+        evaluation_id=stored.id,
+      )
+      assert detail is not None
+      assert len(detail.payload["signal_snapshot"]["hard_gates"]) == 2_000
+      assert (
+        await repository.get_evaluation(
+          account_id="account-2",
+          evaluation_id=stored.id,
+        )
+        is None
+      )
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_evaluation_and_profile_can_join_a_caller_owned_unit_of_work() -> None:
   engine, sessions = await _create_repositories()
   at = datetime(2026, 8, 23, 10, 0, tzinfo=SHANGHAI)

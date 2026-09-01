@@ -77,11 +77,13 @@ from quantx_infrastructure.services.account_execution_safety_service import (
 )
 from quantx_infrastructure.services.agent_session_guard import (
   AGENT_SERVER_SESSION_PAYLOAD_KEY,
-  API_HEARTBEAT_COMPONENT,
   QMT_ACCOUNT_MISMATCH,
   QMT_AGENT_NOT_RECONCILED,
   QMT_AGENT_OFFLINE,
-  api_instance_is_current,
+  QMT_CONTROL_DEPENDENCY_UNAVAILABLE,
+  QMT_CONTROL_SESSION_REPLACED,
+  QMT_CONTROL_TRANSPORT_LOST,
+  QMT_DEVICE_REVOKED,
   evaluate_agent_session,
   parse_utc_timestamp,
   to_naive_utc,
@@ -213,10 +215,17 @@ _agent_control_cpu_executor = ThreadPoolExecutor(
 
 
 class _AgentControlPipelineError(RuntimeError):
-  def __init__(self, reason: str, *, close_code: int = 1011) -> None:
+  def __init__(
+    self,
+    reason: str,
+    *,
+    close_code: int = 1011,
+    reason_code: str = QMT_CONTROL_TRANSPORT_LOST,
+  ) -> None:
     super().__init__(reason)
     self.reason = reason
     self.close_code = close_code
+    self.reason_code = reason_code
 
 
 class _TradeCommandDeliveryDeferred(RuntimeError):
@@ -238,6 +247,7 @@ _TRANSIENT_DEPENDENCY_ERRORS = _TRANSIENT_DATABASE_ERRORS + (
 @dataclass
 class _AgentDatabaseState:
   device_id: str
+  control_session: AgentControlSession | None = None
   ready: asyncio.Event = field(default_factory=asyncio.Event)
   last_heartbeat_received_monotonic: float = field(default_factory=time.monotonic)
   consecutive_failures: int = 0
@@ -249,15 +259,32 @@ class _AgentDatabaseState:
   def mark_success(self) -> None:
     self.ready.set()
     self.consecutive_failures = 0
+    if self.control_session is not None:
+      self.control_session.dependency_ready = True
+      self.control_session.dependency_failure_count = 0
+      self.control_session.dependency_reason = ""
     self._update_metrics()
 
   def mark_heartbeat_received(self) -> None:
     self.last_heartbeat_received_monotonic = time.monotonic()
+    if self.control_session is not None:
+      self.control_session.last_heartbeat_received_monotonic = (
+        self.last_heartbeat_received_monotonic
+      )
     self._update_metrics()
 
-  def mark_failure(self) -> None:
+  def mark_failure(
+    self,
+    reason: str = QMT_CONTROL_DEPENDENCY_UNAVAILABLE,
+  ) -> None:
     self.ready.clear()
     self.consecutive_failures += 1
+    if self.control_session is not None:
+      self.control_session.dependency_ready = False
+      self.control_session.dependency_failure_count = self.consecutive_failures
+      self.control_session.dependency_reason = str(
+        reason or QMT_CONTROL_DEPENDENCY_UNAVAILABLE
+      )
     self._update_metrics()
 
   def heartbeat_age(self) -> float:
@@ -941,40 +968,41 @@ async def _record_heartbeat(
     if normalized_sent_at is not None
     else None
   )
-  if (
-    establish
-    and await agent_connection_hub.current_session(session.device_id) is not session
-  ):
-    raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
+  if await agent_connection_hub.current_session(session.device_id) is not session:
+    raise AuthError(
+      QMT_CONTROL_SESSION_REPLACED,
+      "Agent 控制会话已被替换",
+    )
   revoked_ids: list[str] = []
   async with AsyncSessionLocal() as db:
     agent = await db.get(AgentDevice, session.device_id)
     if agent is None or agent.revoked_at is not None:
-      raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销")
+      raise AuthError(QMT_DEVICE_REVOKED, "Agent 设备已撤销")
     agent.last_seen_at = now
     heartbeat = await db.get(
       RuntimeComponentHeartbeat,
       f"qmt-agent:{session.device_id}",
       with_for_update=True,
     )
+    if await agent_connection_hub.current_session(session.device_id) is not session:
+      raise AuthError(
+        QMT_CONTROL_SESSION_REPLACED,
+        "Agent 控制会话已被替换",
+      )
     previous_details = dict(heartbeat.details or {}) if heartbeat is not None else {}
     previous_connected_at = parse_utc_timestamp(
       previous_details.get("serverConnectedAt")
     )
     session_connected_at = to_naive_utc(session.server_connected_at)
     if (
-      establish
-      and str(previous_details.get("apiInstanceId") or "") == session.api_instance_id
-      and previous_connected_at is not None
+      previous_connected_at is not None
       and session_connected_at is not None
       and previous_connected_at > session_connected_at
     ):
-      raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被更新连接替换")
-    if not establish and (
-      str(previous_details.get("apiInstanceId") or "") != session.api_instance_id
-      or str(previous_details.get("agentSessionId") or "") != session.agent_session_id
-    ):
-      raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
+      raise AuthError(
+        QMT_CONTROL_SESSION_REPLACED,
+        "Agent 控制会话已被更新连接替换",
+      )
     frozen_capabilities = sorted(session.capabilities)
     agent.capabilities = frozen_capabilities
     requested_status = str(payload.get("status", "READY"))[:32].upper()
@@ -1078,7 +1106,11 @@ async def _record_heartbeat(
     await db.commit()
   for revoked_device_id in revoked_ids:
     await agent_connection_hub.revoke(revoked_device_id)
-async def _mark_session_offline(session: AgentControlSession) -> None:
+async def _mark_session_offline(
+  session: AgentControlSession,
+  *,
+  reason_code: str = QMT_AGENT_OFFLINE,
+) -> None:
   """Persist disconnect only when this is still the authoritative generation."""
   now = utcnow()
   async with AsyncSessionLocal() as db:
@@ -1099,7 +1131,9 @@ async def _mark_session_offline(session: AgentControlSession) -> None:
       {
         "sessionActive": False,
         "serverReceivedAt": utc_iso(now),
-        "reasonCode": QMT_AGENT_OFFLINE,
+        "reasonCode": str(reason_code or QMT_AGENT_OFFLINE)[:64],
+        "lastDisconnectReasonCode": str(reason_code or QMT_AGENT_OFFLINE)[:64],
+        "lastDisconnectedAt": utc_iso(now),
       }
     )
     heartbeat.status = "OFFLINE"
@@ -1113,7 +1147,7 @@ async def _ensure_device_active(
   *,
   lease: MarketSessionLease | None = None,
 ) -> None:
-  """Validate a market lease against Redis and the current API generation."""
+  """Validate the Redis market lease and durable device authorization."""
 
   active_lease = lease or await agent_connection_hub.market_lease(device_id)
   active = bool(
@@ -1121,22 +1155,14 @@ async def _ensure_device_active(
     and await agent_connection_hub.is_market_session(active_lease)
   )
   if not active or active_lease is None:
-    raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销或控制会话已断开")
-  now = utcnow()
+    raise AuthError(
+      QMT_CONTROL_SESSION_REPLACED,
+      "Agent 行情租约已失效或被替换",
+    )
   async with AsyncSessionLocal() as db:
     device = await db.get(AgentDevice, device_id)
-    api_heartbeat = await db.get(
-      RuntimeComponentHeartbeat,
-      API_HEARTBEAT_COMPONENT,
-    )
-  if (
-    device is None
-    or device.revoked_at is not None
-    or active_lease.api_instance_id
-    != str(getattr(api_heartbeat, "instance_id", "") or "")
-    or not api_instance_is_current(api_heartbeat, now=now)
-  ):
-    raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销或控制会话已断开")
+  if device is None or device.revoked_at is not None:
+    raise AuthError(QMT_DEVICE_REVOKED, "Agent 设备已撤销")
 
 
 _PRE_EXECUTION_REJECTION_REASONS = frozenset(
@@ -2356,7 +2382,10 @@ async def _process_message(
     device_id,
     agent_session_id=session.agent_session_id,
   ):
-    raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
+    raise AuthError(
+      QMT_CONTROL_SESSION_REPLACED,
+      "Agent 控制会话已被替换",
+    )
   if envelope.message_type is AgentMessageType.HEARTBEAT:
     if str(envelope.payload.get("device_id", "")) != device_id:
       raise AuthError("UNAUTHENTICATED", "heartbeat 设备不匹配")
@@ -3224,7 +3253,10 @@ async def _send_agent_control_messages(
       device_id,
       agent_session_id=control_session.agent_session_id,
     ):
-      raise AuthError("UNAUTHENTICATED", "Agent 控制会话已被替换")
+      raise AuthError(
+        QMT_CONTROL_SESSION_REPLACED,
+        "Agent 控制会话已被替换",
+      )
     serialized = item.envelope.model_dump_json()
     live_place_order = bool(
       item.envelope.message_type is AgentMessageType.COMMAND
@@ -3236,7 +3268,22 @@ async def _send_agent_control_messages(
       AgentMessageType.COMMAND,
       AgentMessageType.CANCEL_COMMAND,
     }:
-      await _assert_trade_delivery_session(control_session, item.envelope)
+      try:
+        await _assert_trade_delivery_session(control_session, item.envelope)
+      except _TradeCommandDeliveryDeferred as exc:
+        await outbound.complete(item)
+        AGENT_CONTROL_EVENTS.labels(
+          event="delivery",
+          reason=f"physical_send_deferred_{exc.reason}",
+        ).inc()
+        logger.info(
+          "Agent physical trade-command send deferred without disconnect: "
+          "device_id=%s message_id=%s reason=%s",
+          device_id,
+          item.envelope.message_id,
+          exc.reason,
+        )
+        continue
     try:
       if live_place_order:
         async with AsyncSessionLocal() as db:
@@ -3295,6 +3342,14 @@ async def _assert_trade_delivery_session(
 ) -> None:
   """Revalidate durable authority immediately before a trade frame is sent."""
 
+  if not await agent_connection_hub.is_connected(
+    control_session.device_id,
+    agent_session_id=control_session.agent_session_id,
+  ):
+    raise AuthError(
+      QMT_CONTROL_SESSION_REPLACED,
+      "Agent 控制会话已被替换",
+    )
   now = utcnow()
   try:
     async with AsyncSessionLocal() as db:
@@ -3340,21 +3395,31 @@ async def _assert_trade_delivery_session(
     for value in control_session.capabilities
     if str(value).strip()
   }
+  if device is None or device.revoked_at is not None:
+    raise AuthError(QMT_DEVICE_REVOKED, "Agent 设备已撤销")
   if (
-    device is None
-    or device.revoked_at is not None
-    or (
-      not session_state.current
-      and session_state.reason_code != QMT_AGENT_NOT_RECONCILED
-    )
-    or session_state.api_instance_id != control_session.api_instance_id
-    or session_state.agent_session_id != control_session.agent_session_id
-    or account_id not in control_session.authorized_account_ids
+    account_id not in control_session.authorized_account_ids
     or (execution_mode and execution_mode not in capabilities)
   ):
-    raise AuthError("UNAUTHENTICATED", "Agent 交易投递会话已失效")
-  if session_state.reason_code == QMT_AGENT_NOT_RECONCILED:
+    raise _TradeCommandDeliveryDeferred("command_authority_mismatch")
+  escape_command = bool(
+    envelope.message_type is AgentMessageType.CANCEL_COMMAND
+    or command_kind == "EMERGENCY_STOP"
+  )
+  projection_identity_matches = bool(
+    session_state.api_instance_id == control_session.api_instance_id
+    and session_state.agent_session_id == control_session.agent_session_id
+  )
+  if (
+    not escape_command
+    and projection_identity_matches
+    and session_state.reason_code == QMT_AGENT_NOT_RECONCILED
+  ):
     raise _TradeCommandDeliveryDeferred("agent_not_ready_for_command")
+  if not escape_command and (
+    not session_state.current or not projection_identity_matches
+  ):
+    raise _TradeCommandDeliveryDeferred("session_projection_unavailable")
   if live_risk_increase and not market_stream_ready:
     raise _TradeCommandDeliveryDeferred("market_stream_not_ready")
   if live_risk_increase:
@@ -3414,6 +3479,12 @@ async def _process_trade_command_validations(
         envelope=item.envelope,
       )
     except _TradeCommandDeliveryDeferred as exc:
+      if exc.reason in {
+        "delivery_authority_dependency_unavailable",
+        "risk_gate_dependency_unavailable",
+        "session_projection_unavailable",
+      }:
+        database_state.mark_failure(exc.reason)
       AGENT_CONTROL_EVENTS.labels(
         event="delivery",
         reason=f"trade_command_deferred_{exc.reason}",
@@ -3550,49 +3621,47 @@ async def _guard_agent_control_session(
 ) -> None:
   device_id = control_session.device_id
   while True:
-    now = utcnow()
     heartbeat_age = database_state.heartbeat_age()
     database_state._update_metrics()
     if (
       heartbeat_age >= AGENT_CONTROL_HEARTBEAT_STALE_SECONDS
-      and database_state.ready.is_set()
       and inbound.qsize() == 0
     ):
       AGENT_CONTROL_EVENTS.labels(
         event="timeout",
         reason="heartbeat_transport_stale",
       ).inc()
-      raise _AgentControlPipelineError("heartbeat_transport_stale")
+      raise _AgentControlPipelineError(
+        "heartbeat_transport_stale",
+        reason_code=QMT_CONTROL_TRANSPORT_LOST,
+      )
     heartbeat_remaining = AGENT_CONTROL_HEARTBEAT_STALE_SECONDS - heartbeat_age
     timeout_seconds = 5.0 if heartbeat_remaining <= 0 else min(5.0, heartbeat_remaining)
-    revoked = await agent_connection_hub.wait_until_revoked(
+    revocation_reason = await agent_connection_hub.wait_until_revoked(
       control_session,
       timeout_seconds=timeout_seconds,
     )
-    if revoked:
-      raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销")
+    if revocation_reason:
+      raise AuthError(
+        revocation_reason,
+        (
+          "Agent 控制会话已被替换"
+          if revocation_reason == QMT_CONTROL_SESSION_REPLACED
+          else "Agent 设备已撤销"
+        ),
+      )
 
     async def load_authority():
       async with AsyncSessionLocal() as db:
-        return (
-          await db.get(AgentDevice, device_id),
-          await db.get(
-            RuntimeComponentHeartbeat,
-            f"qmt-agent:{device_id}",
-          ),
-          await db.get(
-            RuntimeComponentHeartbeat,
-            API_HEARTBEAT_COMPONENT,
-          ),
-        )
+        return await db.get(AgentDevice, device_id)
 
     try:
-      device, heartbeat, api_heartbeat = await asyncio.wait_for(
+      device = await asyncio.wait_for(
         load_authority(),
         timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
       )
     except _TRANSIENT_DEPENDENCY_ERRORS as exc:
-      database_state.mark_failure()
+      database_state.mark_failure(QMT_CONTROL_DEPENDENCY_UNAVAILABLE)
       AGENT_CONTROL_EVENTS.labels(
         event="dependency",
         reason="session_authority_revalidation_deferred",
@@ -3604,17 +3673,9 @@ async def _guard_agent_control_session(
         exc.__class__.__name__,
       )
       continue
-    details = dict(heartbeat.details or {}) if heartbeat is not None else {}
-    if (
-      device is None
-      or device.revoked_at is not None
-      or str(getattr(api_heartbeat, "instance_id", "") or "")
-      != control_session.api_instance_id
-      or not api_instance_is_current(api_heartbeat, now=now)
-      or str(details.get("apiInstanceId") or "") != control_session.api_instance_id
-      or str(details.get("agentSessionId") or "") != control_session.agent_session_id
-    ):
-      raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销或控制会话已被替换")
+    if device is None or device.revoked_at is not None:
+      raise AuthError(QMT_DEVICE_REVOKED, "Agent 设备已撤销")
+    database_state.mark_success()
 
 
 async def _refresh_agent_market_lease(
@@ -3655,7 +3716,10 @@ async def _run_agent_control_pipeline(
   inbound = _AgentInboundBuffer()
   outbound = _AgentOutboundBuffer()
   validations = _TradeCommandValidationBuffer()
-  database_state = _AgentDatabaseState(device_id=device_id)
+  database_state = _AgentDatabaseState(
+    device_id=device_id,
+    control_session=control_session,
+  )
   tasks = {
     asyncio.create_task(
       _receive_agent_control_messages(
@@ -3809,6 +3873,7 @@ async def _run_agent_control_pipeline(
 @agent_router.websocket("/ws/agent")
 async def agent_websocket(websocket: WebSocket) -> None:
   await websocket.accept()
+  disconnect_reason_code = QMT_CONTROL_TRANSPORT_LOST
   try:
     first = AgentEnvelope.model_validate_json(await websocket.receive_text())
     session = await _authenticate(first)
@@ -3855,18 +3920,47 @@ async def agent_websocket(websocket: WebSocket) -> None:
       control_session=control_session,
       protocol_version=connection_protocol,
     )
-  except WebSocketDisconnect:
-    AGENT_CONTROL_EVENTS.labels(event="close", reason="disconnect").inc()
+  except WebSocketDisconnect as exc:
+    disconnect_reason_code = QMT_CONTROL_TRANSPORT_LOST
+    AGENT_CONTROL_EVENTS.labels(
+      event="close",
+      reason=QMT_CONTROL_TRANSPORT_LOST,
+    ).inc()
+    logger.info(
+      "Agent WebSocket transport closed: code=%s reason_code=%s",
+      getattr(exc, "code", None),
+      disconnect_reason_code,
+    )
     return
   except _AgentControlPipelineError as exc:
-    AGENT_CONTROL_EVENTS.labels(event="close", reason=exc.reason).inc()
-    logger.warning("Agent WebSocket closed: reason=%s", exc.reason)
+    disconnect_reason_code = exc.reason_code
+    AGENT_CONTROL_EVENTS.labels(
+      event="close",
+      reason=disconnect_reason_code,
+    ).inc()
+    logger.warning(
+      "Agent WebSocket closed: reason=%s reason_code=%s",
+      exc.reason,
+      disconnect_reason_code,
+    )
     try:
-      await websocket.close(code=exc.close_code, reason=exc.reason[:120])
+      await websocket.close(
+        code=exc.close_code,
+        reason=disconnect_reason_code[:120],
+      )
     except Exception:
       pass
   except AuthError as exc:
-    AGENT_CONTROL_EVENTS.labels(event="close", reason="auth_error").inc()
+    disconnect_reason_code = str(exc.code or "UNAUTHENTICATED")[:64]
+    AGENT_CONTROL_EVENTS.labels(
+      event="close",
+      reason=disconnect_reason_code,
+    ).inc()
+    close_code = (
+      4409
+      if disconnect_reason_code == QMT_CONTROL_SESSION_REPLACED
+      else 4401
+    )
     try:
       await websocket.send_text(
         _auth_result(
@@ -3877,24 +3971,35 @@ async def agent_websocket(websocket: WebSocket) -> None:
           ),
         ).model_dump_json()
       )
-      await websocket.close(code=4401)
+      await websocket.close(
+        code=close_code,
+        reason=disconnect_reason_code[:120],
+      )
     except Exception:
       pass
   except Exception as exc:
+    disconnect_reason_code = QMT_CONTROL_TRANSPORT_LOST
     AGENT_CONTROL_EVENTS.labels(
       event="close",
-      reason=exc.__class__.__name__,
+      reason=disconnect_reason_code,
     ).inc()
-    logger.warning("Agent WebSocket closed: %s", exc.__class__.__name__)
+    logger.warning(
+      "Agent WebSocket closed: error=%s reason_code=%s",
+      exc.__class__.__name__,
+      disconnect_reason_code,
+    )
     try:
-      await websocket.close(code=4400)
+      await websocket.close(code=1011, reason=disconnect_reason_code)
     except Exception:
       pass
   finally:
     if "control_session" in locals():
       if await agent_connection_hub.unregister(control_session):
         try:
-          await _mark_session_offline(control_session)
+          await _mark_session_offline(
+            control_session,
+            reason_code=disconnect_reason_code,
+          )
         except Exception as exc:
           logger.warning(
             "无法持久化 Agent 离线状态: device=%s error=%s",

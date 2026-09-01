@@ -116,7 +116,8 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeSignalDiagnostics,
   TTradeSignalEvaluation,
   TTradeSignalEvaluationKind,
-  TTradeSignalEvaluationPage,
+  TTradeSignalEvaluationSummary,
+  TTradeSignalEvaluationSummaryPage,
   TTradeSignalFeatures,
   TTradeSignalFsmDwell,
   TTradeSignalFsmTransition,
@@ -131,6 +132,7 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeSignalReason,
   TTradeSignalScoreBucket,
   TTradeSignalSnapshot,
+  TTradeSignalSnapshotSummary,
   TTradeSignalVersionGroup,
   TTradeTimeExitMode,
 )
@@ -808,6 +810,107 @@ class TTradeResolver:
       return None
 
   @classmethod
+  def _signal_snapshot_summary_type(
+    cls,
+    raw: Any,
+  ) -> Optional[TTradeSignalSnapshotSummary]:
+    if raw is None:
+      return None
+    try:
+      payload = dict(raw)
+      source_time_ms = cls._required_decimal_string(
+        payload.get("source_time_ms"),
+        "source_time_ms",
+      )
+      pullback_phase = TTradePullbackPhase(
+        cls._required_text(payload.get("pullback_phase"), "pullback_phase")
+      )
+      momentum_phase = TTradeMomentumPhase(
+        cls._required_text(payload.get("momentum_phase"), "momentum_phase")
+      )
+      selected_path_value = cls._required_text(
+        payload.get("selected_path"),
+        "selected_path",
+      )
+      selected_path = (
+        None
+        if selected_path_value == "NONE"
+        else TTradeSignalPath(selected_path_value)
+      )
+      thresholds = [
+        cls._required_number(payload.get("preview_threshold"), "preview_threshold"),
+        cls._required_number(
+          payload.get("candidate_threshold"),
+          "candidate_threshold",
+        ),
+        cls._required_number(
+          payload.get("revalidate_threshold"),
+          "revalidate_threshold",
+        ),
+        cls._required_number(payload.get("rearm_threshold"), "rearm_threshold"),
+      ]
+      if not (
+        0 <= thresholds[3] < thresholds[0] < thresholds[2] < thresholds[1] <= 100
+      ):
+        raise ValueError("signal summary thresholds are not strictly ordered")
+      opportunity_score = cls._optional_number(payload.get("opportunity_score"))
+      if opportunity_score is not None and not 0 <= opportunity_score <= 100:
+        raise ValueError("signal summary score must be between 0 and 100")
+      top_blocker_raw = payload.get("top_blocker")
+      candidate_id = str(payload.get("candidate_id") or "").strip() or None
+      linked_intent_id = (
+        str(payload.get("pending_entry_intent_id") or "").strip() or None
+      )
+      return TTradeSignalSnapshotSummary(
+        source_at=cls._millis_datetime(source_time_ms, "source_time_ms"),
+        source_time_ms=source_time_ms,
+        tick_ordinal=cls._required_decimal_string(
+          payload.get("tick_ordinal"),
+          "tick_ordinal",
+        ),
+        continuity_generation=cls._required_decimal_string(
+          payload.get("continuity_generation"),
+          "continuity_generation",
+        ),
+        data_health=TTradeSignalDataHealth(
+          cls._required_text(payload.get("data_health"), "data_health")
+        ),
+        pullback_phase=pullback_phase,
+        momentum_phase=momentum_phase,
+        dominant_phase=cls._dominant_phase(
+          selected_path,
+          pullback_phase,
+          momentum_phase,
+        ),
+        selected_path=selected_path,
+        opportunity_score=opportunity_score,
+        preview_threshold=thresholds[0],
+        candidate_threshold=thresholds[1],
+        revalidate_threshold=thresholds[2],
+        rearm_threshold=thresholds[3],
+        top_blocker=(
+          cls._blocker_type(dict(top_blocker_raw)) if top_blocker_raw else None
+        ),
+        candidate_id=strawberry.ID(candidate_id) if candidate_id else None,
+        candidate_status=TTradeCandidateStatus(
+          cls._required_text(payload.get("candidate_status"), "candidate_status")
+        ),
+        pending_entry_intent_id=(
+          strawberry.ID(linked_intent_id) if linked_intent_id else None
+        ),
+        feature_schema_version=cls._required_text(
+          payload.get("feature_schema_version"),
+          "feature_schema_version",
+        ),
+        profile_version=(
+          str(payload.get("profile_version") or "").strip() or None
+        ),
+      )
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:
+      logger.warning("拒绝不完整的做 T V3 信号摘要: %s", exc)
+      return None
+
+  @classmethod
   def _session_type(cls, data: dict) -> TTradeSession:
     payload = cls._with_datetimes(data, "created_at", "updated_at")
     payload["time_exit_mode"] = cls._time_exit_mode(payload.get("time_exit_mode"))
@@ -1444,7 +1547,7 @@ class TTradeResolver:
     end_time: Optional[datetime],
     first: int,
     after: Optional[str],
-  ) -> TTradeSignalEvaluationPage:
+  ) -> TTradeSignalEvaluationSummaryPage:
     if first < 1 or first > 100:
       raise ValueError("做 T 信号评估分页条数必须在 1 到 100 之间")
     if start_time is not None and end_time is not None and start_time > end_time:
@@ -1464,36 +1567,27 @@ class TTradeResolver:
 
     async with AsyncSessionLocal() as db:
       repository = TTradeOpportunityEvaluationRepository(db)
-      batches = [
-        await repository.list_evaluations(
-          account_id=account_id,
-          limit=first + 1,
-          instrument_code=stock_code,
-          record_kind=kind,
-          started_at=start_time,
-          ended_at=end_time,
-          cursor_evaluated_at=cursor_time,
-          cursor_id=cursor_id,
-        )
-        for kind in normalized_kinds
-      ]
-    rows = sorted(
-      (row for batch in batches for row in batch),
-      key=lambda row: (row.evaluated_at, str(row.id)),
-      reverse=True,
-    )
+      rows = await repository.list_evaluation_summaries(
+        account_id=account_id,
+        limit=first + 1,
+        instrument_code=stock_code,
+        record_kinds=normalized_kinds,
+        started_at=start_time,
+        ended_at=end_time,
+        cursor_evaluated_at=cursor_time,
+        cursor_id=cursor_id,
+      )
     has_next_page = len(rows) > first
     rows = rows[:first]
-    items: list[TTradeSignalEvaluation] = []
+    items: list[TTradeSignalEvaluationSummary] = []
     cursors: list[str] = []
     for row in rows:
       evaluated_at = cls._datetime(row.evaluated_at)
       if evaluated_at is None:
         raise ValueError("做 T 信号评估缺少 evaluated_at")
       cursors.append(encode_cursor(evaluated_at, str(row.id)))
-      evidence = dict(row.payload or {})
       items.append(
-        TTradeSignalEvaluation(
+        TTradeSignalEvaluationSummary(
           id=strawberry.ID(str(row.id)),
           event_key=str(row.event_key),
           category=(
@@ -1501,8 +1595,7 @@ class TTradeResolver:
             else "SIGNAL" if str(row.event_type) in SIGNAL_EVENT_TYPES else "CONTEXT"
           ),
           candidate_id=row.candidate_id,
-          linked_intent_id=(evidence.get("intent_link") or {}).get("intent_id")
-          or (evidence.get("signal_snapshot") or {}).get("pending_entry_intent_id"),
+          linked_intent_id=row.linked_intent_id,
           account_id=str(row.account_id),
           run_id=strawberry.ID(str(row.strategy_run_id)),
           stock_code=str(row.instrument_code),
@@ -1515,10 +1608,10 @@ class TTradeResolver:
           policy_version=str(row.policy_version),
           schema_version=str(row.schema_version),
           content_fingerprint=str(row.content_fingerprint),
-          signal_snapshot=cls._signal_snapshot_type(evidence.get("signal_snapshot")),
+          signal_summary=cls._signal_snapshot_summary_type(row.signal_summary),
         )
       )
-    return TTradeSignalEvaluationPage(
+    return TTradeSignalEvaluationSummaryPage(
       items=items,
       page_info=PageInfo(
         has_next_page=has_next_page,
@@ -1526,6 +1619,51 @@ class TTradeResolver:
         start_cursor=cursors[0] if cursors else None,
         end_cursor=cursors[-1] if cursors else None,
       ),
+    )
+
+  @classmethod
+  async def signal_evaluation(
+    cls,
+    account_id: str,
+    evaluation_id: str,
+  ) -> Optional[TTradeSignalEvaluation]:
+    async with AsyncSessionLocal() as db:
+      row = await TTradeOpportunityEvaluationRepository(db).get_evaluation(
+        account_id=account_id,
+        evaluation_id=evaluation_id,
+      )
+    if row is None:
+      return None
+    evaluated_at = cls._datetime(row.evaluated_at)
+    if evaluated_at is None:
+      raise ValueError("做 T 信号评估缺少 evaluated_at")
+    evidence = dict(row.payload or {})
+    return TTradeSignalEvaluation(
+      id=strawberry.ID(str(row.id)),
+      event_key=str(row.event_key),
+      category=(
+        "DIAGNOSTIC"
+        if str(row.record_kind) == T_TRADE_EVALUATION_KIND_DIAGNOSTIC
+        else "SIGNAL"
+        if str(row.event_type) in SIGNAL_EVENT_TYPES
+        else "CONTEXT"
+      ),
+      candidate_id=row.candidate_id,
+      linked_intent_id=(evidence.get("intent_link") or {}).get("intent_id")
+      or (evidence.get("signal_snapshot") or {}).get("pending_entry_intent_id"),
+      account_id=str(row.account_id),
+      run_id=strawberry.ID(str(row.strategy_run_id)),
+      stock_code=str(row.instrument_code),
+      event_kind=TTradeSignalEvaluationKind(str(row.record_kind)),
+      event_type=str(row.event_type),
+      evaluated_at=evaluated_at,
+      window_started_at=cls._datetime(row.window_started_at),
+      window_ended_at=cls._datetime(row.window_ended_at),
+      coalesced_count=int(row.coalesced_count),
+      policy_version=str(row.policy_version),
+      schema_version=str(row.schema_version),
+      content_fingerprint=str(row.content_fingerprint),
+      signal_snapshot=cls._signal_snapshot_type(evidence.get("signal_snapshot")),
     )
 
   @classmethod

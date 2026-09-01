@@ -84,7 +84,7 @@ async def test_superseded_api_process_cannot_overwrite_newer_generation(
     "API_STARTED_AT",
     original_started_at + timedelta(seconds=1),
   )
-  await api_runtime.record_api_heartbeat()
+  await api_runtime.initialize_api_generation()
 
   monkeypatch.setattr(api_runtime, "API_INSTANCE_ID", "api-old")
   monkeypatch.setattr(api_runtime, "API_STARTED_AT", original_started_at)
@@ -100,6 +100,50 @@ async def test_superseded_api_process_cannot_overwrite_newer_generation(
     assert agent_heartbeat is not None
     assert agent_heartbeat.status == "OFFLINE"
     assert agent_heartbeat.details["sessionActive"] is False
-    assert agent_heartbeat.details["reasonCode"] == "QMT_AGENT_OFFLINE"
+    assert agent_heartbeat.details["reasonCode"] == "QMT_API_RESTARTED"
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_periodic_api_heartbeat_does_not_retire_agent_projection(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=[RuntimeComponentHeartbeat.__table__],
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(api_runtime, "AsyncSessionLocal", sessions)
+
+  await api_runtime.initialize_api_generation()
+  async with sessions() as db:
+    db.add(
+      RuntimeComponentHeartbeat(
+        component="qmt-agent:device-1",
+        instance_id="device-1",
+        status="READY",
+        details={
+          "apiInstanceId": api_runtime.API_INSTANCE_ID,
+          "agentSessionId": "session-1",
+          "sessionActive": True,
+        },
+        updated_at=api_runtime.API_STARTED_AT,
+      )
+    )
+    await db.commit()
+
+  await api_runtime.record_api_heartbeat()
+  async with sessions() as db:
+    agent_heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      "qmt-agent:device-1",
+    )
+    assert agent_heartbeat.status == "READY"
+    assert agent_heartbeat.details["sessionActive"] is True
 
   await engine.dispose()

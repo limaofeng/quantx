@@ -666,13 +666,60 @@ export const TTradeSignalEvaluationsQuery = gql(`
         policyVersion
         schemaVersion
         contentFingerprint
-        signalSnapshot {
-          ...Portfolio_TTradeSignalSnapshotFields
+        signalSummary {
+          sourceAt
+          sourceTimeMs
+          tickOrdinal
+          continuityGeneration
+          dataHealth
+          pullbackPhase
+          momentumPhase
+          dominantPhase
+          selectedPath
+          opportunityScore
+          previewThreshold
+          candidateThreshold
+          revalidateThreshold
+          rearmThreshold
+          topBlocker {
+            code
+            label
+            detail
+          }
+          candidateId
+          candidateStatus
+          pendingEntryIntentId
+          featureSchemaVersion
+          profileVersion
         }
       }
       pageInfo {
         hasNextPage
         endCursor
+      }
+    }
+  }
+`);
+
+export const TTradeSignalEvaluationDetailQuery = gql(`
+  query Portfolio_TTradeSignalEvaluationDetail(
+    $accountId: String!
+    $evaluationId: ID!
+  ) {
+    tTradeSignalEvaluation(
+      accountId: $accountId
+      evaluationId: $evaluationId
+    ) {
+      id
+      accountId
+      runId
+      stockCode
+      eventKind
+      eventType
+      evaluatedAt
+      policyVersion
+      signalSnapshot {
+        ...Portfolio_TTradeSignalSnapshotFields
       }
     }
   }

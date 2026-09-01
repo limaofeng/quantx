@@ -119,6 +119,27 @@ const MONITOR_REASON_PRESENTATIONS: Record<string, MonitorReasonPresentation> =
       title: 'QMT Agent 心跳已经过期',
       description: '本机 Agent 曾经在线，但最新心跳已超过允许的新鲜度。',
     },
+    QMT_CONTROL_DEPENDENCY_UNAVAILABLE: {
+      title: 'QMT Agent 控制依赖暂不可用',
+      description:
+        '控制连接仍然在线，但数据库或健康投影暂不可用；新增风险交易已安全暂停。',
+    },
+    QMT_CONTROL_TRANSPORT_LOST: {
+      title: 'QMT Agent 控制传输已中断',
+      description: 'Agent 控制 WebSocket 已真实断开，正在按退避策略重新连接。',
+    },
+    QMT_CONTROL_SESSION_REPLACED: {
+      title: 'QMT Agent 控制会话已被替换',
+      description: '同一登记设备建立了更新的控制连接，旧连接已被精确淘汰。',
+    },
+    QMT_DEVICE_REVOKED: {
+      title: 'QMT Agent 设备授权已撤销',
+      description: '本机 Agent 登记凭据已失效，需要重新登记后才能恢复连接。',
+    },
+    QMT_API_RESTARTED: {
+      title: 'QuantX API 已重启',
+      description: '旧 API 代际的 Agent 会话已结束，Agent 正在连接新的服务代际。',
+    },
     QMT_ACCOUNT_MISMATCH: {
       title: 'QMT Agent 账户与授权账户不一致',
       description: '本机 MiniQMT 当前账户不在本次运行允许的唯一账户范围内。',

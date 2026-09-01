@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +17,10 @@ from quantx_infrastructure.core.data.remote_market_data import (
   MARKET_DATA_CONTROL_CHANNEL,
 )
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
+from quantx_infrastructure.services.agent_session_guard import (
+  QMT_CONTROL_SESSION_REPLACED,
+  QMT_DEVICE_REVOKED,
+)
 
 from quantx_api.api_runtime import API_INSTANCE_ID, API_STARTED_AT
 
@@ -74,6 +79,25 @@ class AgentControlSession:
   server_connected_at: datetime
   remote_address_summary: str
   revoked: asyncio.Event
+  revocation_reason: str | None = None
+  last_heartbeat_received_monotonic: float = field(default_factory=time.monotonic)
+  dependency_ready: bool = True
+  dependency_failure_count: int = 0
+  dependency_reason: str = ""
+
+  def heartbeat_age_seconds(self) -> float:
+    return max(0.0, time.monotonic() - self.last_heartbeat_received_monotonic)
+
+
+@dataclass(frozen=True)
+class AgentControlHealthSnapshot:
+  device_id: str
+  api_instance_id: str
+  agent_session_id: str
+  heartbeat_age_seconds: float
+  dependency_ready: bool
+  dependency_failure_count: int
+  dependency_reason: str
 
 
 class AgentConnectionHub:
@@ -211,10 +235,16 @@ class AgentConnectionHub:
       server_connected_at=connected_at,
       remote_address_summary=remote_address_summary,
       revoked=asyncio.Event(),
+      revocation_reason=None,
+      last_heartbeat_received_monotonic=time.monotonic(),
+      dependency_ready=True,
+      dependency_failure_count=0,
+      dependency_reason="",
     )
     async with self._lock:
       previous = self._sessions.get(device_id)
       if previous is not None:
+        previous.revocation_reason = QMT_CONTROL_SESSION_REPLACED
         previous.revoked.set()
       self._sessions[device_id] = session
       await self._load_active_controls()
@@ -236,12 +266,18 @@ class AgentConnectionHub:
       await self._publish_market_lease(selected)
     return session
 
-  async def revoke(self, device_id: str) -> bool:
+  async def revoke(
+    self,
+    device_id: str,
+    *,
+    reason: str = QMT_DEVICE_REVOKED,
+  ) -> bool:
     """Wake the registered control-session guard after durable revocation."""
     async with self._lock:
       session = self._sessions.get(device_id)
       if session is None:
         return False
+      session.revocation_reason = str(reason or QMT_DEVICE_REVOKED)
       session.revoked.set()
       if self._market_device_id == device_id:
         selected = self._select_market_session()
@@ -256,18 +292,44 @@ class AgentConnectionHub:
     session: AgentControlSession,
     *,
     timeout_seconds: float,
-  ) -> bool:
-    """Wait without touching PostgreSQL; ``True`` also covers replacement."""
+  ) -> str | None:
+    """Return the stable invalidation reason without touching PostgreSQL."""
     async with self._lock:
       current = self._sessions.get(session.device_id)
       if current is not session:
-        return True
+        return session.revocation_reason or QMT_CONTROL_SESSION_REPLACED
       revoked = current.revoked
     try:
       await asyncio.wait_for(revoked.wait(), timeout=max(0.0, timeout_seconds))
     except asyncio.TimeoutError:
-      return False
-    return True
+      return None
+    return session.revocation_reason or QMT_DEVICE_REVOKED
+
+  async def health_snapshots(self) -> list[AgentControlHealthSnapshot]:
+    """Return a safe in-process view of actual control transports."""
+
+    async with self._lock:
+      sessions = [
+        session
+        for session in self._sessions.values()
+        if not session.revoked.is_set()
+      ]
+    return [
+      AgentControlHealthSnapshot(
+        device_id=session.device_id,
+        api_instance_id=session.api_instance_id,
+        agent_session_id=session.agent_session_id,
+        heartbeat_age_seconds=session.heartbeat_age_seconds(),
+        dependency_ready=session.dependency_ready,
+        dependency_failure_count=session.dependency_failure_count,
+        dependency_reason=(
+          session.dependency_reason
+          if not session.dependency_ready
+          else ""
+        ),
+      )
+      for session in sessions
+    ]
 
   async def is_connected(
     self,

@@ -59,8 +59,9 @@ from ..types.t_trade_types import (
   TTradeRolloutTarget,
   TTradeSession,
   TTradeSignalDiagnostics,
+  TTradeSignalEvaluation,
   TTradeSignalEvaluationKind,
-  TTradeSignalEvaluationPage,
+  TTradeSignalEvaluationSummaryPage,
   TTradeSignalPolicyPreviewInput,
   TTradeSignalPolicyPreviewResult,
 )
@@ -126,7 +127,7 @@ class TTradeQuery:
       after,
     )
 
-  @strawberry.field(description="查询 V3 做 T 信号评估证据，默认只返回 MATERIAL")
+  @strawberry.field(description="查询 V3 做 T 信号评估摘要，默认只返回 MATERIAL")
   async def t_trade_signal_evaluations(
     self,
     info: strawberry.types.Info,
@@ -137,7 +138,7 @@ class TTradeQuery:
     end_time: Optional[datetime] = None,
     first: int = 30,
     after: Optional[str] = None,
-  ) -> TTradeSignalEvaluationPage:
+  ) -> TTradeSignalEvaluationSummaryPage:
     return await TTradeResolver.list_signal_evaluations(
       authorized_account_id(info, account_id),
       stock_code=stock_code,
@@ -146,6 +147,18 @@ class TTradeQuery:
       end_time=end_time,
       first=first,
       after=after,
+    )
+
+  @strawberry.field(description="按评估标识查询完整 V3 做 T 信号证据")
+  async def t_trade_signal_evaluation(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    evaluation_id: strawberry.ID,
+  ) -> Optional[TTradeSignalEvaluation]:
+    return await TTradeResolver.signal_evaluation(
+      authorized_account_id(info, account_id),
+      str(evaluation_id),
     )
 
   @strawberry.field(description="按候选标识追溯评估、意图、委托、成交与退出计划")

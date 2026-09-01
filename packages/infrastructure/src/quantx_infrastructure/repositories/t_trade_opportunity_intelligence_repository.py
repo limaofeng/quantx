@@ -6,10 +6,11 @@ import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional
 
-from sqlalchemy import and_, delete, insert, or_, select
+from sqlalchemy import and_, delete, func, insert, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +26,29 @@ _BATCH_APPEND_MAX_ATTEMPTS = 3
 # Sixteen explicit evaluation columns × 256 remains bounded far below
 # PostgreSQL's 32767 bind parameter ceiling.
 _EVALUATION_BATCH_INSERT_CHUNK_SIZE = 256
+
+
+@dataclass(frozen=True)
+class TTradeOpportunityEvaluationSummaryRow:
+  """Scalar-only list projection that never materializes the large evidence JSON."""
+
+  id: str
+  event_key: str
+  account_id: str
+  strategy_run_id: str
+  instrument_code: str
+  candidate_id: Optional[str]
+  evaluated_at: datetime
+  record_kind: str
+  event_type: str
+  window_started_at: Optional[datetime]
+  window_ended_at: Optional[datetime]
+  coalesced_count: int
+  policy_version: str
+  schema_version: str
+  content_fingerprint: str
+  linked_intent_id: Optional[str]
+  signal_summary: Optional[Mapping[str, Any]]
 
 
 class TTradeOpportunityEvaluationRepository:
@@ -241,6 +265,219 @@ class TTradeOpportunityEvaluationRepository:
       .limit(normalized_limit)
     )
     return list(result.scalars().all())
+
+  async def get_evaluation(
+    self,
+    *,
+    account_id: str,
+    evaluation_id: str,
+  ) -> Optional[TTradeOpportunityEvaluation]:
+    """Return one full immutable evidence row inside the authorized account."""
+
+    normalized_account_id = _required_text(account_id, "证券账户", 50)
+    normalized_evaluation_id = _required_text(
+      evaluation_id,
+      "评估标识",
+      36,
+    )
+    result = await self.db.execute(
+      select(TTradeOpportunityEvaluation).where(
+        TTradeOpportunityEvaluation.account_id == normalized_account_id,
+        TTradeOpportunityEvaluation.id == normalized_evaluation_id,
+      )
+    )
+    return result.scalar_one_or_none()
+
+  async def list_evaluation_summaries(
+    self,
+    *,
+    account_id: str,
+    record_kinds: Iterable[str],
+    limit: int = 100,
+    instrument_code: Optional[str] = None,
+    started_at: Optional[datetime] = None,
+    ended_at: Optional[datetime] = None,
+    cursor_evaluated_at: Optional[datetime] = None,
+    cursor_id: Optional[str] = None,
+  ) -> list[TTradeOpportunityEvaluationSummaryRow]:
+    """Page evaluation list metadata and a bounded scalar signal summary.
+
+    The complete payload contains thousands of gates, blockers and score
+    contributions during high-volume diagnostics.  List screens only need a
+    small fixed projection; full evidence is fetched separately by ID.
+    """
+
+    normalized_account_id = _required_text(account_id, "证券账户", 50)
+    normalized_limit = int(limit)
+    if normalized_limit < 1 or normalized_limit > 500:
+      raise ValueError("评估查询条数必须在 1 到 500 之间")
+    if (cursor_evaluated_at is None) != (cursor_id is None):
+      raise ValueError("评估游标必须同时包含 evaluated_at 和 id")
+    normalized_kinds = list(dict.fromkeys(_evaluation_kind(value) for value in record_kinds))
+    if not normalized_kinds:
+      raise ValueError("评估查询必须至少包含一种记录类型")
+
+    conditions = [
+      TTradeOpportunityEvaluation.account_id == normalized_account_id,
+      TTradeOpportunityEvaluation.record_kind.in_(normalized_kinds),
+    ]
+    if instrument_code is not None:
+      conditions.append(
+        TTradeOpportunityEvaluation.instrument_code == _instrument_code(instrument_code)
+      )
+    if started_at is not None:
+      conditions.append(
+        TTradeOpportunityEvaluation.evaluated_at >= _storage_time(started_at)
+      )
+    if ended_at is not None:
+      conditions.append(
+        TTradeOpportunityEvaluation.evaluated_at <= _storage_time(ended_at)
+      )
+    if cursor_evaluated_at is not None and cursor_id is not None:
+      normalized_cursor_at = _storage_time(cursor_evaluated_at)
+      normalized_cursor_id = _required_text(cursor_id, "评估游标标识", 36)
+      conditions.append(
+        or_(
+          TTradeOpportunityEvaluation.evaluated_at < normalized_cursor_at,
+          and_(
+            TTradeOpportunityEvaluation.evaluated_at == normalized_cursor_at,
+            TTradeOpportunityEvaluation.id < normalized_cursor_id,
+          ),
+        )
+      )
+
+    payload = TTradeOpportunityEvaluation.payload
+    snapshot = payload["signal_snapshot"]
+    blocker_code = func.coalesce(
+      snapshot["top_blockers"][0]["code"].as_string(),
+      snapshot["blockers"][0]["code"].as_string(),
+      snapshot["external_blockers"][0]["code"].as_string(),
+    ).label("top_blocker_code")
+    blocker_label = func.coalesce(
+      snapshot["top_blockers"][0]["label"].as_string(),
+      snapshot["blockers"][0]["label"].as_string(),
+      snapshot["external_blockers"][0]["label"].as_string(),
+    ).label("top_blocker_label")
+    blocker_detail = func.coalesce(
+      snapshot["top_blockers"][0]["detail"].as_string(),
+      snapshot["blockers"][0]["detail"].as_string(),
+      snapshot["external_blockers"][0]["detail"].as_string(),
+    ).label("top_blocker_detail")
+    statement = (
+      select(
+        TTradeOpportunityEvaluation.id,
+        TTradeOpportunityEvaluation.event_key,
+        TTradeOpportunityEvaluation.account_id,
+        TTradeOpportunityEvaluation.strategy_run_id,
+        TTradeOpportunityEvaluation.instrument_code,
+        TTradeOpportunityEvaluation.candidate_id,
+        TTradeOpportunityEvaluation.evaluated_at,
+        TTradeOpportunityEvaluation.record_kind,
+        TTradeOpportunityEvaluation.event_type,
+        TTradeOpportunityEvaluation.window_started_at,
+        TTradeOpportunityEvaluation.window_ended_at,
+        TTradeOpportunityEvaluation.coalesced_count,
+        TTradeOpportunityEvaluation.policy_version,
+        TTradeOpportunityEvaluation.schema_version,
+        TTradeOpportunityEvaluation.content_fingerprint,
+        func.coalesce(
+          payload["intent_link"]["intent_id"].as_string(),
+          snapshot["pending_entry_intent_id"].as_string(),
+        ).label("linked_intent_id"),
+        snapshot["source_time_ms"].as_string().label("source_time_ms"),
+        snapshot["tick_ordinal"].as_string().label("tick_ordinal"),
+        snapshot["continuity_generation"].as_string().label(
+          "continuity_generation"
+        ),
+        snapshot["data_health"].as_string().label("data_health"),
+        snapshot["pullback"]["phase"].as_string().label("pullback_phase"),
+        snapshot["momentum"]["phase"].as_string().label("momentum_phase"),
+        snapshot["selected_path"].as_string().label("selected_path"),
+        snapshot["opportunity_score"].as_float().label("opportunity_score"),
+        snapshot["preview_threshold"].as_float().label("preview_threshold"),
+        snapshot["candidate_threshold"].as_float().label("candidate_threshold"),
+        snapshot["revalidate_threshold"].as_float().label(
+          "revalidate_threshold"
+        ),
+        snapshot["rearm_threshold"].as_float().label("rearm_threshold"),
+        blocker_code,
+        blocker_label,
+        blocker_detail,
+        snapshot["candidate_id"].as_string().label("snapshot_candidate_id"),
+        snapshot["candidate_status"].as_string().label("candidate_status"),
+        snapshot["pending_entry_intent_id"].as_string().label(
+          "pending_entry_intent_id"
+        ),
+        snapshot["feature_schema_version"].as_string().label(
+          "feature_schema_version"
+        ),
+        func.coalesce(
+          snapshot["profile_version"].as_string(),
+          snapshot["reference_profile_version"].as_string(),
+        ).label("profile_version"),
+      )
+      .where(*conditions)
+      .order_by(
+        TTradeOpportunityEvaluation.evaluated_at.desc(),
+        TTradeOpportunityEvaluation.id.desc(),
+      )
+      .limit(normalized_limit)
+    )
+    rows = (await self.db.execute(statement)).mappings().all()
+    summaries: list[TTradeOpportunityEvaluationSummaryRow] = []
+    for row in rows:
+      source_time_ms = row["source_time_ms"]
+      signal_summary = None
+      if source_time_ms is not None:
+        top_blocker = None
+        if row["top_blocker_code"] or row["top_blocker_label"]:
+          top_blocker = {
+            "code": row["top_blocker_code"] or "UNKNOWN",
+            "label": row["top_blocker_label"] or "未知阻断",
+            "detail": row["top_blocker_detail"] or "",
+          }
+        signal_summary = {
+          "source_time_ms": source_time_ms,
+          "tick_ordinal": row["tick_ordinal"],
+          "continuity_generation": row["continuity_generation"],
+          "data_health": row["data_health"],
+          "pullback_phase": row["pullback_phase"],
+          "momentum_phase": row["momentum_phase"],
+          "selected_path": row["selected_path"],
+          "opportunity_score": row["opportunity_score"],
+          "preview_threshold": row["preview_threshold"],
+          "candidate_threshold": row["candidate_threshold"],
+          "revalidate_threshold": row["revalidate_threshold"],
+          "rearm_threshold": row["rearm_threshold"],
+          "top_blocker": top_blocker,
+          "candidate_id": row["snapshot_candidate_id"] or row["candidate_id"],
+          "candidate_status": row["candidate_status"],
+          "pending_entry_intent_id": row["pending_entry_intent_id"],
+          "feature_schema_version": row["feature_schema_version"],
+          "profile_version": row["profile_version"],
+        }
+      summaries.append(
+        TTradeOpportunityEvaluationSummaryRow(
+          id=str(row["id"]),
+          event_key=str(row["event_key"]),
+          account_id=str(row["account_id"]),
+          strategy_run_id=str(row["strategy_run_id"]),
+          instrument_code=str(row["instrument_code"]),
+          candidate_id=row["candidate_id"],
+          evaluated_at=row["evaluated_at"],
+          record_kind=str(row["record_kind"]),
+          event_type=str(row["event_type"]),
+          window_started_at=row["window_started_at"],
+          window_ended_at=row["window_ended_at"],
+          coalesced_count=int(row["coalesced_count"]),
+          policy_version=str(row["policy_version"]),
+          schema_version=str(row["schema_version"]),
+          content_fingerprint=str(row["content_fingerprint"]),
+          linked_intent_id=row["linked_intent_id"],
+          signal_summary=signal_summary,
+        )
+      )
+    return summaries
 
   async def iter_run_evaluations(
     self, *, account_id: str, strategy_run_id: str,

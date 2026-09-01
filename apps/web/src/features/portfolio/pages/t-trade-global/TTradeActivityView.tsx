@@ -364,16 +364,25 @@ function FsmTrack({
 }
 
 function HistoricalSignalSnapshot({
+  detailError,
+  detailLoading,
+  detailSnapshot,
   item,
   onViewCurrent,
 }: {
+  detailError?: string | null;
+  detailLoading?: boolean;
+  detailSnapshot?: SignalSnapshot | null;
   item: TTradeActivityItem;
   onViewCurrent: (stockCode: string) => void;
 }) {
   const evaluation = item.signalEvaluation;
-  const snapshot = evaluation?.signalSnapshot;
+  const summary = evaluation?.signalSnapshot;
+  const snapshot =
+    detailSnapshot ||
+    (summary && isKnownSignalSnapshot(summary) ? summary : null);
   const previous = item.previousSignalSnapshot;
-  if (!evaluation || !snapshot) {
+  if (!evaluation) {
     return (
       <div
         id={`${item.id}-snapshot`}
@@ -384,15 +393,38 @@ function HistoricalSignalSnapshot({
       </div>
     );
   }
-  if (!isKnownSignalSnapshot(snapshot)) {
+  if (detailLoading && !snapshot) {
+    return (
+      <div
+        id={`${item.id}-snapshot`}
+        role="status"
+        aria-busy="true"
+        className="flex items-center border-t border-cyan-400/15 p-ui-section text-ui-label text-cyan-100"
+      >
+        <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+        正在读取完整事件快照…
+      </div>
+    );
+  }
+  if (detailError && !snapshot) {
     return (
       <div
         id={`${item.id}-snapshot`}
         role="alert"
         className="border-t border-rose-400/20 bg-rose-400/[0.04] p-ui-section text-ui-label text-rose-100"
       >
-        历史快照 schema
-        与当前客户端不兼容，已阻止展示；请使用原始技术日志排查版本。
+        完整事件快照读取失败：{detailError}
+      </div>
+    );
+  }
+  if (!snapshot) {
+    return (
+      <div
+        id={`${item.id}-snapshot`}
+        role="status"
+        className="border-t border-white/[0.06] p-ui-section text-ui-label text-slate-500"
+      >
+        该事件没有可展示的完整历史信号快照。
       </div>
     );
   }
@@ -900,6 +932,9 @@ function ExecutionEventSnapshot({
 }
 
 function ActivityRow({
+  detailError,
+  detailLoading,
+  detailSnapshot,
   expanded,
   item,
   instrumentName,
@@ -908,6 +943,9 @@ function ActivityRow({
   onViewCurrent,
   sourceMode,
 }: {
+  detailError?: string | null;
+  detailLoading?: boolean;
+  detailSnapshot?: SignalSnapshot | null;
   expanded: boolean;
   item: TTradeActivityItem;
   instrumentName?: string;
@@ -978,7 +1016,13 @@ function ActivityRow({
         )}
       </button>
       {expanded && item.signalEvaluation && (
-        <HistoricalSignalSnapshot item={item} onViewCurrent={onViewCurrent} />
+        <HistoricalSignalSnapshot
+          detailError={detailError}
+          detailLoading={detailLoading}
+          detailSnapshot={detailSnapshot}
+          item={item}
+          onViewCurrent={onViewCurrent}
+        />
       )}
       {expanded && item.batchEvent && (
         <ExecutionEventSnapshot
@@ -998,6 +1042,9 @@ export function TTradeActivityView({
   eventError,
   events,
   evaluations,
+  evaluationDetail,
+  evaluationDetailError,
+  evaluationDetailLoading = false,
   focusedBatchId,
   hasMoreEvents,
   hasMoreSignals,
@@ -1010,6 +1057,7 @@ export function TTradeActivityView({
   onFocusedBatchIdClear,
   onLoadMore,
   onRefresh,
+  onRequestEvaluationDetail,
   onViewBatch,
   onViewCurrent,
   runId,
@@ -1024,6 +1072,9 @@ export function TTradeActivityView({
   eventError?: string | null;
   events: readonly ActivityBatchEvent[];
   evaluations: readonly ActivitySignalEvaluation[];
+  evaluationDetail?: { id: string; signalSnapshot?: SignalSnapshot | null } | null;
+  evaluationDetailError?: string | null;
+  evaluationDetailLoading?: boolean;
   focusedBatchId?: string | null;
   hasMoreEvents: boolean;
   hasMoreSignals: boolean;
@@ -1036,6 +1087,7 @@ export function TTradeActivityView({
   onFocusedBatchIdClear?: () => void;
   onLoadMore: () => void;
   onRefresh: () => void;
+  onRequestEvaluationDetail?: (evaluationId: string) => void;
   onViewBatch: (batchId: string) => void;
   onViewCurrent: (stockCode: string) => void;
   runId?: string | null;
@@ -1372,14 +1424,24 @@ export function TTradeActivityView({
                 {filteredItems.map(item => (
                   <ActivityRow
                     key={item.id}
+                    detailError={evaluationDetailError}
+                    detailLoading={evaluationDetailLoading}
+                    detailSnapshot={
+                      item.signalEvaluation &&
+                      evaluationDetail?.id === item.signalEvaluation.id
+                        ? evaluationDetail.signalSnapshot
+                        : null
+                    }
                     expanded={expandedId === item.id}
                     instrumentName={instrumentNames.get(item.stockCode)}
                     item={item}
-                    onToggle={() =>
-                      setExpandedId(current =>
-                        current === item.id ? null : item.id
-                      )
-                    }
+                    onToggle={() => {
+                      const opening = expandedId !== item.id;
+                      setExpandedId(opening ? item.id : null);
+                      if (opening && item.signalEvaluation) {
+                        onRequestEvaluationDetail?.(item.signalEvaluation.id);
+                      }
+                    }}
                     onViewBatch={onViewBatch}
                     onViewCurrent={onViewCurrent}
                     sourceMode={sourceMode}

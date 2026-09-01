@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -376,8 +377,21 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   async def inside_session(*_args):
     return True
 
-  async def is_connected(*_args, **_kwargs):
-    return True
+  control_identity = {
+    "api_instance_id": "api-instance-1",
+    "agent_session_id": "agent-session-1",
+  }
+
+  async def health_snapshots():
+    return [
+      SimpleNamespace(
+        device_id="device-1",
+        api_instance_id=control_identity["api_instance_id"],
+        agent_session_id=control_identity["agent_session_id"],
+        heartbeat_age_seconds=0.0,
+        dependency_ready=True,
+      )
+    ]
 
   monkeypatch.setattr(
     runtime_status.market_stream_store,
@@ -391,8 +405,8 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   )
   monkeypatch.setattr(
     runtime_status.agent_connection_hub,
-    "is_connected",
-    is_connected,
+    "health_snapshots",
+    health_snapshots,
   )
   now = runtime_status.utcnow()
 
@@ -543,6 +557,10 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   assert components["qmt-agent"]["latestReadyHeartbeatAt"] is not None
 
   current_heartbeat_at = now + timedelta(seconds=2)
+  control_identity.update(
+    api_instance_id="api-instance-2",
+    agent_session_id="agent-session-2",
+  )
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
     heartbeat.updated_at = current_heartbeat_at
@@ -618,7 +636,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_RUNTIME_UNAVAILABLE")
   components = await runtime_status._component_heartbeats()
   assert components["qmt-agent"]["status"] == "blocked"
-  assert components["qmt-agent"]["connectedDevices"] == 0
+  assert components["qmt-agent"]["connectedDevices"] == 1
   assert components["qmt-agent"]["readyDevices"] == 0
   assert components["qmt-agent"]["reasonCode"] == "QMT_RUNTIME_UNAVAILABLE"
   await engine.dispose()
@@ -716,12 +734,21 @@ async def test_ready_heartbeat_cannot_clear_engine_reconciliation_requirement(
       sent_at=now,
       establish=True,
     )
-  with pytest.raises(agent_api.AuthError, match="已被替换"):
+  with pytest.raises(agent_api.AuthError, match="更新连接替换"):
     await agent_api._record_heartbeat(
       stale_session,
       {"status": "READY", "capabilities": ["live"]},
       sent_at=now,
     )
+
+  async def control_is_current(_device_id):
+    return control_session
+
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "current_session",
+    control_is_current,
+  )
   await agent_api._record_heartbeat(
     control_session,
     {

@@ -298,6 +298,38 @@ export type SignalSnapshot = {
   profileFingerprint?: string | null;
 };
 
+export type SignalSnapshotSummary = Pick<
+  SignalSnapshot,
+  | 'sourceAt'
+  | 'sourceTimeMs'
+  | 'tickOrdinal'
+  | 'continuityGeneration'
+  | 'dataHealth'
+  | 'pullbackPhase'
+  | 'momentumPhase'
+  | 'dominantPhase'
+  | 'selectedPath'
+  | 'opportunityScore'
+  | 'previewThreshold'
+  | 'candidateThreshold'
+  | 'revalidateThreshold'
+  | 'rearmThreshold'
+  | 'candidateId'
+  | 'candidateStatus'
+  | 'pendingEntryIntentId'
+  | 'featureSchemaVersion'
+  | 'profileVersion'
+> & {
+  topBlocker?: SignalBlocker | null;
+  topBlockers?: readonly SignalBlocker[];
+};
+
+export function signalSummaryTopBlocker(
+  snapshot?: SignalSnapshotSummary | null
+): SignalBlocker | null {
+  return snapshot?.topBlocker ?? snapshot?.topBlockers?.[0] ?? null;
+}
+
 export type MonitorSession = {
   runId: string;
   stockCode?: string;
@@ -361,21 +393,24 @@ const includes = (values: readonly string[], candidate: unknown): boolean =>
   typeof candidate === 'string' && values.includes(candidate);
 
 export function isKnownSignalSnapshot(
-  snapshot: SignalSnapshot | null | undefined
+  snapshot: unknown
 ): snapshot is SignalSnapshot {
-  if (!snapshot) return false;
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    return false;
+  }
+  const value = snapshot as Partial<SignalSnapshot>;
   return (
-    includes(DATA_HEALTH_VALUES, snapshot.dataHealth) &&
-    includes(PULLBACK_PHASE_VALUES, snapshot.pullbackPhase) &&
-    includes(MOMENTUM_PHASE_VALUES, snapshot.momentumPhase) &&
-    includes(DOMINANT_PHASE_VALUES, snapshot.dominantPhase) &&
-    includes(CANDIDATE_STATUS_VALUES, snapshot.candidateStatus) &&
-    (snapshot.selectedPath == null ||
-      includes(SIGNAL_PATH_VALUES, snapshot.selectedPath)) &&
-    snapshot.stateSchemaVersion === SIGNAL_STATE_SCHEMA_VERSION &&
-    snapshot.featureSchemaVersion === SIGNAL_FEATURE_SCHEMA_VERSION &&
-    typeof snapshot.policyVersion === 'string' &&
-    snapshot.policyVersion.length > 0
+    includes(DATA_HEALTH_VALUES, value.dataHealth) &&
+    includes(PULLBACK_PHASE_VALUES, value.pullbackPhase) &&
+    includes(MOMENTUM_PHASE_VALUES, value.momentumPhase) &&
+    includes(DOMINANT_PHASE_VALUES, value.dominantPhase) &&
+    includes(CANDIDATE_STATUS_VALUES, value.candidateStatus) &&
+    (value.selectedPath == null ||
+      includes(SIGNAL_PATH_VALUES, value.selectedPath)) &&
+    value.stateSchemaVersion === SIGNAL_STATE_SCHEMA_VERSION &&
+    value.featureSchemaVersion === SIGNAL_FEATURE_SCHEMA_VERSION &&
+    typeof value.policyVersion === 'string' &&
+    value.policyVersion.length > 0
   );
 }
 

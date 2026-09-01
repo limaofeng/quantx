@@ -13,6 +13,7 @@ import { NativeSelect } from '@/components/ui/native-select';
 import { cn } from '@/utils/cn';
 
 import { matchesDiagnosticVersion } from './clientTrust';
+import { signalSummaryTopBlocker } from './monitoring';
 import type { SignalEvaluationLike } from './TTradeLiveMonitor';
 import { formatNumber, formatTime } from './utils';
 
@@ -677,7 +678,8 @@ export function TTradeSignalDiagnosticsPanel({
               </span>
               <span className="text-slate-400">
                 {item.eventType} ·{' '}
-                {item.signalSnapshot?.topBlockers[0]?.label || '无首要 blocker'}{' '}
+                {signalSummaryTopBlocker(item.signalSnapshot)?.label ||
+                  '无首要 blocker'}{' '}
                 · policy {item.policyVersion} · feature{' '}
                 {item.signalSnapshot?.featureSchemaVersion || '不可用'} ·
                 profile {item.signalSnapshot?.profileVersion || '无画像'}

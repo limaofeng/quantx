@@ -1094,7 +1094,27 @@ async def test_evaluation_history_uses_stable_keyset_and_material_default(
       content_fingerprint="fingerprint-b",
       event_key="event-b",
       candidate_id="candidate-1",
-      payload={"signal_snapshot": _signal_snapshot()},
+      linked_intent_id="intent-1",
+      signal_summary={
+        "source_time_ms": "1787450400000",
+        "tick_ordinal": "7",
+        "continuity_generation": "2",
+        "data_health": "READY",
+        "pullback_phase": "CANDIDATE_LATCHED",
+        "momentum_phase": "OBSERVING",
+        "selected_path": "PULLBACK_REBOUND",
+        "opportunity_score": 78.0,
+        "preview_threshold": 45.0,
+        "candidate_threshold": 70.0,
+        "revalidate_threshold": 60.0,
+        "rearm_threshold": 35.0,
+        "top_blocker": None,
+        "candidate_id": "candidate-1",
+        "candidate_status": "LATCHED",
+        "pending_entry_intent_id": "intent-1",
+        "feature_schema_version": "features-v3",
+        "profile_version": "profile-v1",
+      },
     ),
     SimpleNamespace(
       id="a",
@@ -1112,10 +1132,13 @@ async def test_evaluation_history_uses_stable_keyset_and_material_default(
       content_fingerprint="fingerprint-a",
       event_key="event-a",
       candidate_id=None,
-      payload={},
+      linked_intent_id=None,
+      signal_summary=None,
     ),
   ]
-  repository = SimpleNamespace(list_evaluations=AsyncMock(return_value=rows))
+  repository = SimpleNamespace(
+    list_evaluation_summaries=AsyncMock(return_value=rows)
+  )
   monkeypatch.setattr(resolver_module, "AsyncSessionLocal", _DbContext)
   monkeypatch.setattr(
     resolver_module,
@@ -1136,14 +1159,14 @@ async def test_evaluation_history_uses_stable_keyset_and_material_default(
   assert page.page_info.has_next_page is True
   assert page.items[0].id == "b"
   assert page.items[0].event_kind is TTradeSignalEvaluationKind.MATERIAL
-  assert page.items[0].signal_snapshot is not None
-  call = repository.list_evaluations.await_args.kwargs
-  assert call["record_kind"] == "MATERIAL"
+  assert page.items[0].signal_summary is not None
+  call = repository.list_evaluation_summaries.await_args.kwargs
+  assert call["record_kinds"] == ["MATERIAL"]
   assert call["instrument_code"] == "600000.SH"
   assert page.page_info.end_cursor is not None
 
-  repository.list_evaluations.reset_mock()
-  repository.list_evaluations.return_value = [rows[1]]
+  repository.list_evaluation_summaries.reset_mock()
+  repository.list_evaluation_summaries.return_value = [rows[1]]
   next_page = await TTradeResolver.list_signal_evaluations(
     "account-1",
     stock_code="600000.SH",
@@ -1154,11 +1177,56 @@ async def test_evaluation_history_uses_stable_keyset_and_material_default(
     after=page.page_info.end_cursor,
   )
 
-  next_call = repository.list_evaluations.await_args.kwargs
+  next_call = repository.list_evaluation_summaries.await_args.kwargs
   assert next_call["cursor_evaluated_at"] == evaluated_at
   assert next_call["cursor_id"] == "b"
   assert next_page.items[0].id == "a"
-  assert next_page.items[0].signal_snapshot is None
+  assert next_page.items[0].signal_summary is None
+
+
+@pytest.mark.asyncio
+async def test_signal_evaluation_detail_is_fetched_by_account_and_id(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  evaluated_at = datetime(2026, 8, 23, 2, 0, tzinfo=timezone.utc)
+  row = SimpleNamespace(
+    id="evaluation-1",
+    account_id="account-1",
+    strategy_run_id="run-1",
+    instrument_code="600000.SH",
+    evaluated_at=evaluated_at,
+    record_kind="MATERIAL",
+    event_type="CANDIDATE_LATCHED",
+    window_started_at=None,
+    window_ended_at=None,
+    coalesced_count=1,
+    policy_version="t_trade_opportunity_v3.0.0",
+    schema_version="3",
+    content_fingerprint="fingerprint-detail",
+    event_key="event-detail",
+    candidate_id="candidate-1",
+    payload={"signal_snapshot": _signal_snapshot()},
+  )
+  repository = SimpleNamespace(get_evaluation=AsyncMock(return_value=row))
+  monkeypatch.setattr(resolver_module, "AsyncSessionLocal", _DbContext)
+  monkeypatch.setattr(
+    resolver_module,
+    "TTradeOpportunityEvaluationRepository",
+    lambda db: repository,
+  )
+
+  detail = await TTradeResolver.signal_evaluation(
+    "account-1",
+    "evaluation-1",
+  )
+
+  assert detail is not None
+  assert detail.id == "evaluation-1"
+  assert detail.signal_snapshot is not None
+  repository.get_evaluation.assert_awaited_once_with(
+    account_id="account-1",
+    evaluation_id="evaluation-1",
+  )
 
 
 @pytest.mark.asyncio

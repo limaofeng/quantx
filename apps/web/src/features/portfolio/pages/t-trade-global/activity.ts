@@ -1,6 +1,9 @@
 import { parseDate } from '@/shared/utils/date';
 
-import type { SignalSnapshot } from './monitoring';
+import {
+  signalSummaryTopBlocker,
+  type SignalSnapshotSummary,
+} from './monitoring';
 
 export type ActivitySignalEvaluation = {
   id: string;
@@ -14,7 +17,7 @@ export type ActivitySignalEvaluation = {
   policyVersion: string;
   title?: string | null;
   summary?: string | null;
-  signalSnapshot?: SignalSnapshot | null;
+  signalSnapshot?: SignalSnapshotSummary | null;
 };
 
 export type ActivityBatchEvent = {
@@ -91,7 +94,7 @@ export type TTradeActivityItem = {
   summary: string;
   searchableText: string;
   signalEvaluation?: ActivitySignalEvaluation;
-  previousSignalSnapshot?: SignalSnapshot | null;
+  previousSignalSnapshot?: SignalSnapshotSummary | null;
   batchEvent?: ActivityBatchEvent;
   executionSnapshot?: ExecutionSnapshot;
   batch?: ActivityBatch;
@@ -249,7 +252,7 @@ function signalSummary(evaluation: ActivitySignalEvaluation): string {
     snapshot.opportunityScore == null
       ? '机会分不可计算'
       : `机会分 ${formatCompactNumber(snapshot.opportunityScore, 1)} / ${formatCompactNumber(snapshot.candidateThreshold, 0)}`;
-  const blocker = snapshot.topBlockers[0]?.label;
+  const blocker = signalSummaryTopBlocker(snapshot)?.label;
   return [score, blocker ? `首要阻断：${blocker}` : null]
     .filter(Boolean)
     .join(' · ');
@@ -330,8 +333,8 @@ export function buildTTradeActivityItems(
   const sortedEvaluations = [...evaluations].sort(
     (left, right) => epoch(right.evaluatedAt) - epoch(left.evaluatedAt)
   );
-  const previousById = new Map<string, SignalSnapshot | null>();
-  const lastSnapshotByRunAndStock = new Map<string, SignalSnapshot>();
+  const previousById = new Map<string, SignalSnapshotSummary | null>();
+  const lastSnapshotByRunAndStock = new Map<string, SignalSnapshotSummary>();
   for (let index = sortedEvaluations.length - 1; index >= 0; index -= 1) {
     const evaluation = sortedEvaluations[index];
     const stockCode = evaluation.stockCode.toUpperCase();

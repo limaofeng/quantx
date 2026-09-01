@@ -41,6 +41,7 @@ import {
   type MonitorHolding,
   type MonitorSession,
   type SignalSnapshot,
+  type SignalSnapshotSummary,
 } from './monitoring';
 import type {
   QuoteHistoryByCode,
@@ -114,7 +115,7 @@ export type SignalEvaluationLike = {
   evaluatedAt: string;
   coalescedCount: number;
   policyVersion: string;
-  signalSnapshot?: SignalSnapshot | null;
+  signalSnapshot?: SignalSnapshotSummary | null;
 };
 
 const healthLabels: Record<string, string> = {
@@ -649,7 +650,7 @@ type SignalTrendMetric = {
   label: string;
   color: string;
   dash?: string;
-  value: (snapshot: SignalSnapshot) => number | null | undefined;
+  value: (snapshot: SignalSnapshotSummary) => number | null | undefined;
 };
 
 type SignalTrendSegment = {
@@ -696,7 +697,10 @@ const signalTrendMetrics: readonly SignalTrendMetric[] = [
   },
 ];
 
-function compareSignalIdentity(left: SignalSnapshot, right: SignalSnapshot) {
+function compareSignalIdentity(
+  left: SignalSnapshotSummary,
+  right: SignalSnapshotSummary
+) {
   for (const [leftValue, rightValue] of [
     [left.continuityGeneration, right.continuityGeneration],
     [left.sourceTimeMs, right.sourceTimeMs],
@@ -713,7 +717,7 @@ function compareSignalIdentity(left: SignalSnapshot, right: SignalSnapshot) {
   return 0;
 }
 
-function signalIdentity(snapshot: SignalSnapshot) {
+function signalIdentity(snapshot: SignalSnapshotSummary) {
   return `${snapshot.continuityGeneration}:${snapshot.sourceTimeMs}:${snapshot.tickOrdinal}`;
 }
 
@@ -724,7 +728,7 @@ function SignalScoreTrend({
   evaluations: readonly SignalEvaluationLike[];
   snapshot: SignalSnapshot;
 }) {
-  const byIdentity = new Map<string, SignalSnapshot>();
+  const byIdentity = new Map<string, SignalSnapshotSummary>();
   for (const evaluation of evaluations) {
     if (evaluation.signalSnapshot) {
       byIdentity.set(

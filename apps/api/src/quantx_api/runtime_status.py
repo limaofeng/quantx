@@ -26,6 +26,7 @@ from quantx_infrastructure.services.agent_session_guard import (
   QMT_AGENT_NOT_RECONCILED,
   QMT_AGENT_OFFLINE,
   QMT_AGENT_STALE,
+  QMT_CONTROL_DEPENDENCY_UNAVAILABLE,
   agent_unready_reason_code,
   evaluate_agent_session,
 )
@@ -105,6 +106,10 @@ async def _database_status() -> dict[str, Any]:
 
 async def _component_heartbeats() -> dict[str, dict[str, Any]]:
   now = utcnow()
+  control_snapshots = await agent_connection_hub.health_snapshots()
+  control_by_device = {
+    snapshot.device_id: snapshot for snapshot in control_snapshots
+  }
   try:
     async with AsyncSessionLocal() as db:
       result = await db.execute(select(RuntimeComponentHeartbeat))
@@ -118,8 +123,20 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "status": "unavailable",
       "error": exc.__class__.__name__,
     }
+    live_transports = [
+      snapshot
+      for snapshot in control_snapshots
+      if snapshot.heartbeat_age_seconds <= HEARTBEAT_TTL.total_seconds()
+    ]
     return {
-      "qmt-agent": {**unavailable, "connectedDevices": 0},
+      "qmt-agent": {
+        **unavailable,
+        "status": "degraded" if live_transports else "unavailable",
+        "connectedDevices": len(live_transports),
+        "onlineDevices": len(live_transports),
+        "readyDevices": 0,
+        "reasonCode": QMT_CONTROL_DEPENDENCY_UNAVAILABLE,
+      },
       "engine": unavailable,
     }
 
@@ -149,22 +166,38 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
   for agent in agents:
     heartbeat = heartbeat_by_component.get(f"qmt-agent:{agent.id}")
     heartbeat_status = str(heartbeat.status or "").upper() if heartbeat else ""
+    control = control_by_device.get(str(agent.id))
     evaluation = evaluate_agent_session(
       heartbeat,
       now=now,
       acceptable_statuses=CONNECTED_AGENT_STATUSES,
     )
-    agent_reason_codes.append(evaluation.reason_code)
-    hub_connected = bool(
-      evaluation.current
-      and await agent_connection_hub.is_connected(
-        str(agent.id),
-        agent_session_id=evaluation.agent_session_id,
-      )
+    transport_alive = bool(
+      control is not None
+      and control.heartbeat_age_seconds <= HEARTBEAT_TTL.total_seconds()
     )
-    if hub_connected:
+    if control is not None and not transport_alive:
+      agent_reason_codes.append(QMT_AGENT_STALE)
+    else:
+      agent_reason_codes.append(evaluation.reason_code)
+    projection_matches = bool(
+      transport_alive
+      and evaluation.current
+      and control is not None
+      and evaluation.api_instance_id == control.api_instance_id
+      and evaluation.agent_session_id == control.agent_session_id
+      and control.dependency_ready
+    )
+    if transport_alive:
       online_agents.append(agent)
-      connected_agents.append((agent, heartbeat_status))
+      connected_agents.append(
+        (
+          agent,
+          heartbeat_status
+          if projection_matches
+          else QMT_CONTROL_DEPENDENCY_UNAVAILABLE,
+        )
+      )
   require_live_agent = bool(settings.enable_real_trading)
 
   def capabilities_for(agent: AgentDevice) -> set[str]:
@@ -190,6 +223,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       heartbeat_by_component[f"qmt-agent:{agent.id}"].updated_at
       for agent, _ in connected_agents
       if str(agent.id) in ready_agent_ids
+      and f"qmt-agent:{agent.id}" in heartbeat_by_component
     ),
     default=None,
   )
@@ -222,7 +256,13 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     agent for agent, status in connected_agents if status in RECONCILING_AGENT_STATUSES
   ]
   connected_agent_reasons = {
-    agent_unready_reason_code(heartbeat_by_component.get(f"qmt-agent:{agent.id}"))
+    (
+      QMT_CONTROL_DEPENDENCY_UNAVAILABLE
+      if status == QMT_CONTROL_DEPENDENCY_UNAVAILABLE
+      else agent_unready_reason_code(
+        heartbeat_by_component.get(f"qmt-agent:{agent.id}")
+      )
+    )
     for agent, status in connected_agents
     if status != "READY"
   }
@@ -230,6 +270,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     (
       reason
       for reason in (
+        QMT_CONTROL_DEPENDENCY_UNAVAILABLE,
         "XTDATA_UNAVAILABLE",
         "XTTRADING_UNAVAILABLE",
         "EMERGENCY_STOP",
