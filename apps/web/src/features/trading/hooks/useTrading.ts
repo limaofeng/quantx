@@ -1,16 +1,37 @@
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useEffect, useState } from 'react';
 import { gql as urqlGql, useQuery, useMutation } from 'urql';
-import type { RequestPolicy } from 'urql';
+import type { CombinedError, RequestPolicy } from 'urql';
 
 import { gql } from '@/generated/gql';
+import type { Trading_ManualOrderAttemptsQuery } from '@/generated/gql/graphql';
 import { KLinePeriod, PageDirection } from '@/generated/gql/graphql';
 
 import {
   ConfirmManualOrderMutation,
-  ManualOrderAttemptQuery,
+  ManualOrderAttemptsQuery,
   ManualOrderCapabilitiesQuery,
   PreviewManualOrderMutation,
 } from '../manualOrderOperations';
+
+export type ManualOrderAttemptFeed =
+  Trading_ManualOrderAttemptsQuery['manualOrderAttempts'];
+export type ManualOrderAttemptItem = ManualOrderAttemptFeed['items'][number];
+
+export interface ManualOrderAttemptsState {
+  asOf: string | null;
+  error: CombinedError | undefined;
+  feed: ManualOrderAttemptFeed | null;
+  hasSuccessfulData: boolean;
+  isRefreshing: boolean;
+  items: ManualOrderAttemptItem[];
+  lastUpdatedAt: string | null;
+  loading: boolean;
+  refresh: () => void;
+  requiresAttentionCount: number;
+  totalCount: number;
+  truncated: boolean;
+  activeCount: number;
+}
 
 function resolveKLinePeriod(period: string): KLinePeriod | undefined {
   return Object.values(KLinePeriod).find(value => value === period);
@@ -363,34 +384,115 @@ export function useConfirmManualOrder() {
   );
 }
 
-export function useManualOrderAttempt(
-  accountId: string | undefined,
-  clientOrderId: string | null
-) {
-  const canQuery = Boolean(accountId && clientOrderId);
+const FAST_MANUAL_ORDER_PHASES = new Set([
+  'QUEUED',
+  'DELIVERED',
+  'AGENT_ACKNOWLEDGED',
+]);
+
+function normalizedManualOrderPhase(value: unknown) {
+  return String(value || '')
+    .trim()
+    .toUpperCase();
+}
+
+function isDocumentVisible() {
+  return (
+    typeof document === 'undefined' || document.visibilityState === 'visible'
+  );
+}
+
+/**
+ * 从服务端恢复手动委托请求，并按阶段自适应刷新。
+ * 请求事实只来自 manualOrderAttempts，不写入 localStorage，也不依赖交易卡片。
+ */
+export function useManualOrderAttempts(
+  accountId?: string,
+  limit = 50
+): ManualOrderAttemptsState {
+  const accountKey = accountId || '';
   const [result, reexecuteQuery] = useQuery({
-    query: ManualOrderAttemptQuery,
-    variables: {
-      accountId: accountId || '',
-      clientOrderId: clientOrderId || '',
-    },
-    pause: !canQuery,
+    query: ManualOrderAttemptsQuery,
+    variables: { accountId: accountId || undefined, limit },
+    pause: !accountId,
     requestPolicy: 'network-only',
   });
+  const [isVisible, setIsVisible] = useState(isDocumentVisible);
+  const [dataAccountKey, setDataAccountKey] = useState(accountKey);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDataAccountKey(accountKey);
+    setLastUpdatedAt(null);
+  }, [accountKey]);
 
   const refresh = useCallback(() => {
-    if (!canQuery) return;
+    if (!accountId) return;
     reexecuteQuery({ requestPolicy: 'network-only' });
-  }, [canQuery, reexecuteQuery]);
+  }, [accountId, reexecuteQuery]);
+
+  useEffect(() => {
+    if (!accountId || typeof document === 'undefined') return;
+    const handleVisibilityChange = () => {
+      const visible = document.visibilityState === 'visible';
+      setIsVisible(visible);
+      if (visible) refresh();
+    };
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [accountId, refresh]);
+
+  const candidateFeed = result.data?.manualOrderAttempts ?? null;
+  const feed =
+    dataAccountKey === accountKey &&
+    (!accountId ||
+      !candidateFeed ||
+      candidateFeed.items.every(item => item.accountId === accountId))
+      ? candidateFeed
+      : null;
+  const items = useMemo(() => feed?.items ?? [], [feed?.items]);
+  const hasFastPhase = items.some(item =>
+    FAST_MANUAL_ORDER_PHASES.has(normalizedManualOrderPhase(item.phase))
+  );
+  const hasReconcilePhase = items.some(
+    item => normalizedManualOrderPhase(item.phase) === 'RECONCILE_REQUIRED'
+  );
+  const pollingInterval = hasFastPhase ? 2_000 : hasReconcilePhase ? 10_000 : 0;
+
+  useEffect(() => {
+    if (!accountId || !isVisible || !feed || pollingInterval <= 0) return;
+    const timer = window.setInterval(refresh, pollingInterval);
+    return () => window.clearInterval(timer);
+  }, [accountId, feed, isVisible, pollingInterval, refresh]);
+
+  useEffect(() => {
+    if (feed?.asOf) setLastUpdatedAt(feed.asOf);
+  }, [feed?.asOf]);
 
   return useMemo(
     () => ({
-      attempt: result.data?.manualOrderAttempt || null,
+      activeCount: feed?.activeCount ?? 0,
+      asOf: feed?.asOf ?? null,
       error: result.error,
+      feed,
+      hasSuccessfulData: feed !== null,
+      isRefreshing: result.fetching && feed !== null,
+      items,
+      lastUpdatedAt: lastUpdatedAt ?? feed?.asOf ?? null,
       loading: result.fetching,
       refresh,
+      requiresAttentionCount: feed?.requiresAttentionCount ?? 0,
+      totalCount: feed?.totalCount ?? 0,
+      truncated: feed?.truncated ?? false,
     }),
-    [refresh, result.data, result.error, result.fetching]
+    [feed, items, lastUpdatedAt, refresh, result.error, result.fetching]
   );
 }
 

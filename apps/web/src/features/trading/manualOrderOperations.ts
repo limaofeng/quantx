@@ -75,28 +75,37 @@ export const ConfirmManualOrderMutation = gql(`
   }
 `);
 
-export const ManualOrderAttemptQuery = gql(`
-  query Trading_ManualOrderAttempt(
-    $accountId: String!
-    $clientOrderId: String!
-  ) {
-    manualOrderAttempt(
-      accountId: $accountId
-      clientOrderId: $clientOrderId
-    ) {
-      accountId
-      clientOrderId
-      brokerOrderId
-      instrumentCode
-      side
-      volume
-      status
-      deliveryStatus
-      statusReason
-      message
-      executionMode
-      createdAt
-      updatedAt
+export const ManualOrderAttemptsQuery = gql(`
+  query Trading_ManualOrderAttempts($accountId: String, $limit: Int = 50) {
+    manualOrderAttempts(accountId: $accountId, limit: $limit) {
+      items {
+        accountId
+        clientOrderId
+        brokerOrderId
+        instrumentCode
+        side
+        orderType
+        limitPrice
+        volume
+        executionMode
+        phase
+        active
+        requiresAttention
+        status
+        deliveryStatus
+        statusReason
+        message
+        createdAt
+        deliveredAt
+        acknowledgedAt
+        expiresAt
+        updatedAt
+      }
+      totalCount
+      activeCount
+      requiresAttentionCount
+      truncated
+      asOf
     }
   }
 `);

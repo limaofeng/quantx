@@ -5,10 +5,10 @@ import { useCurrentAccount } from '@/features/dashboard/hooks';
 import type { ManualOrderType } from '@/features/trading/components/TradingCard/hooks/useFormState';
 import {
   useConfirmManualOrder,
-  useManualOrderAttempt,
   useManualOrderCapabilities,
   usePreviewManualOrder,
 } from '@/features/trading/hooks';
+import type { ManualOrderAttemptItem } from '@/features/trading/hooks/useTrading';
 import {
   ManualOrderExecutionMode,
   ManualOrderPriceType,
@@ -23,12 +23,17 @@ export type ManualOrderPreviewTicket = NonNullable<
   Trading_PreviewManualOrderMutation['previewManualOrder']['preview']
 >;
 
-const TERMINAL_ATTEMPT_STATUSES = new Set([
-  'REJECTED',
-  'EXPIRED',
-  'KILL_SWITCHED',
+const TERMINAL_ATTEMPT_PHASES = new Set([
+  'REJECTED_BEFORE_BROKER',
+  'EXPIRED_BEFORE_BROKER',
+  'CANCELLED_BEFORE_BROKER',
   'RECONCILE_REQUIRED',
 ]);
+
+export interface UseTradingSubmitOptions {
+  manualOrderAttempts?: ManualOrderAttemptItem[];
+  refreshManualOrderAttempts?: () => void;
+}
 
 export interface TradingSubmitRequest {
   executionMode: ManualOrderExecutionMode;
@@ -58,7 +63,8 @@ function errorMessage(error: unknown, fallback: string) {
  */
 export function useTradingSubmit(
   instrumentCode: string,
-  onQueued?: () => void
+  onQueued?: (clientOrderId: string) => void,
+  options: UseTradingSubmitOptions = {}
 ) {
   const { toast } = useToast();
   const { data: accountData } = useCurrentAccount();
@@ -72,13 +78,20 @@ export function useTradingSubmit(
     usePreviewManualOrder();
   const { execute: executeConfirm, loading: confirmLoading } =
     useConfirmManualOrder();
+  const { manualOrderAttempts = [], refreshManualOrderAttempts } = options;
   const [trackedClientOrderId, setTrackedClientOrderId] = useState<
     string | null
   >(null);
-  const {
-    attempt: orderAttempt,
-    refresh: refreshOrderAttempt,
-  } = useManualOrderAttempt(accountId, trackedClientOrderId);
+  const orderAttempt = useMemo(
+    () =>
+      manualOrderAttempts.find(
+        attempt =>
+          attempt.clientOrderId === trackedClientOrderId &&
+          String(attempt.instrumentCode).toUpperCase() ===
+            String(instrumentCode).toUpperCase()
+      ) || null,
+    [instrumentCode, manualOrderAttempts, trackedClientOrderId]
+  );
   const [preview, setPreview] = useState<ManualOrderPreviewTicket | null>(null);
   const [confirmationError, setConfirmationError] = useState('');
   const processingRef = useRef(false);
@@ -91,20 +104,6 @@ export function useTradingSubmit(
     notifiedAttemptRef.current = '';
   }, [accountId, instrumentCode]);
 
-  const attemptStates = [orderAttempt?.status, orderAttempt?.deliveryStatus].map(
-    value => String(value || '').trim().toUpperCase()
-  );
-  const attemptFinished = Boolean(
-    orderAttempt?.brokerOrderId ||
-      attemptStates.some(value => TERMINAL_ATTEMPT_STATUSES.has(value))
-  );
-
-  useEffect(() => {
-    if (!trackedClientOrderId || attemptFinished) return;
-    const timer = window.setInterval(refreshOrderAttempt, 1_000);
-    return () => window.clearInterval(timer);
-  }, [attemptFinished, refreshOrderAttempt, trackedClientOrderId]);
-
   useEffect(() => {
     if (!orderAttempt || orderAttempt.clientOrderId !== trackedClientOrderId) {
       return;
@@ -112,8 +111,8 @@ export function useTradingSubmit(
     const fingerprint = [
       orderAttempt.clientOrderId,
       orderAttempt.brokerOrderId || '',
-      orderAttempt.status,
-      orderAttempt.deliveryStatus,
+      orderAttempt.phase,
+      orderAttempt.statusReason || '',
     ].join(':');
     if (notifiedAttemptRef.current === fingerprint) return;
 
@@ -125,17 +124,12 @@ export function useTradingSubmit(
       });
       return;
     }
-    const normalizedStatus = [
-      orderAttempt.status,
-      orderAttempt.deliveryStatus,
-    ]
-      .map(value => String(value || '').toUpperCase())
-      .find(value => TERMINAL_ATTEMPT_STATUSES.has(value));
-    if (normalizedStatus) {
+    const normalizedPhase = String(orderAttempt.phase || '').toUpperCase();
+    if (TERMINAL_ATTEMPT_PHASES.has(normalizedPhase)) {
       notifiedAttemptRef.current = fingerprint;
       toast({
         title:
-          normalizedStatus === 'RECONCILE_REQUIRED'
+          normalizedPhase === 'RECONCILE_REQUIRED'
             ? '下单结果需要核对'
             : '未生成券商委托',
         description: orderAttempt.message,
@@ -289,14 +283,16 @@ export function useTradingSubmit(
       }
 
       setPreview(null);
-      setTrackedClientOrderId(payload.clientOrderId || null);
+      const clientOrderId = payload.clientOrderId || '';
+      setTrackedClientOrderId(clientOrderId || null);
+      refreshManualOrderAttempts?.();
       toast({
         title: '下单请求已进入队列',
         description:
           payload.message ||
           '尚未生成券商委托；正在等待 QMT Agent 下单前复核和券商回报',
       });
-      onQueued?.();
+      if (clientOrderId) onQueued?.(clientOrderId);
       return true;
     } catch (error) {
       setConfirmationError(errorMessage(error, '委托确认失败，请重新获取预览'));
@@ -304,7 +300,7 @@ export function useTradingSubmit(
     } finally {
       processingRef.current = false;
     }
-  }, [executeConfirm, onQueued, preview, toast]);
+  }, [executeConfirm, onQueued, preview, refreshManualOrderAttempts, toast]);
 
   const dismissPreview = useCallback(() => {
     if (processingRef.current) return;
@@ -325,6 +321,7 @@ export function useTradingSubmit(
       isPreviewing: previewLoading,
       orderAttempt,
       preview,
+      trackedClientOrderId,
     }),
     [
       capabilities,
@@ -338,6 +335,7 @@ export function useTradingSubmit(
       orderAttempt,
       preview,
       previewLoading,
+      trackedClientOrderId,
     ]
   );
 }

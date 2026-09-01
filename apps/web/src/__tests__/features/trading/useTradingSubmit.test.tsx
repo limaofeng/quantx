@@ -2,7 +2,9 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useTradingSubmit } from '@/features/trading/components/TradingCard/hooks/useTradingSubmit';
+import type { ManualOrderAttemptItem } from '@/features/trading/hooks/useTrading';
 import {
+  ManualOrderAttemptPhase,
   ManualOrderExecutionMode,
   ManualOrderPriceType,
   ManualOrderSide,
@@ -11,10 +13,10 @@ import type { Stock } from '@/shared/types';
 
 const mocks = vi.hoisted(() => ({
   confirmManualOrder: vi.fn(),
-  manualOrderAttempt: null as Record<string, unknown> | null,
+  manualOrderAttempts: [] as ManualOrderAttemptItem[],
   onQueued: vi.fn(),
   previewManualOrder: vi.fn(),
-  refreshManualOrderAttempt: vi.fn(),
+  refreshManualOrderAttempts: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -58,15 +60,6 @@ vi.mock('@/features/trading/hooks', () => ({
     },
     error: null,
     loading: false,
-  }),
-  useManualOrderAttempt: (
-    _accountId: string | undefined,
-    clientOrderId: string | null
-  ) => ({
-    attempt: clientOrderId ? mocks.manualOrderAttempt : null,
-    error: null,
-    loading: false,
-    refresh: mocks.refreshManualOrderAttempt,
   }),
   usePreviewManualOrder: () => ({
     execute: mocks.previewManualOrder,
@@ -125,7 +118,10 @@ function SubmitHarness({
 }: {
   orderType?: 'best' | 'limit';
 }) {
-  const submission = useTradingSubmit('688577.SH', mocks.onQueued);
+  const submission = useTradingSubmit('688577.SH', mocks.onQueued, {
+    manualOrderAttempts: mocks.manualOrderAttempts,
+    refreshManualOrderAttempts: mocks.refreshManualOrderAttempts,
+  });
 
   return (
     <>
@@ -156,7 +152,7 @@ function SubmitHarness({
 describe('useTradingSubmit', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.manualOrderAttempt = null;
+    mocks.manualOrderAttempts = [];
     mocks.previewManualOrder.mockResolvedValue({
       data: {
         previewManualOrder: {
@@ -233,21 +229,31 @@ describe('useTradingSubmit', () => {
   });
 
   it('reports an Agent pre-submit rejection as no broker order', async () => {
-    mocks.manualOrderAttempt = {
-      accountId: '300000013250',
-      brokerOrderId: null,
-      clientOrderId: 'client-order-1',
-      createdAt: new Date().toISOString(),
-      deliveryStatus: 'REJECTED',
-      executionMode: ManualOrderExecutionMode.Live,
-      instrumentCode: '688577.SH',
-      message: 'QMT Agent 下单前行情已超过 30 秒，未向券商提交',
-      side: ManualOrderSide.Sell,
-      status: 'REJECTED',
-      statusReason: 'stale live quote',
-      updatedAt: new Date().toISOString(),
-      volume: 420,
-    };
+    mocks.manualOrderAttempts = [
+      {
+        accountId: '300000013250',
+        brokerOrderId: null,
+        clientOrderId: 'client-order-1',
+        createdAt: new Date().toISOString(),
+        deliveryStatus: 'REJECTED',
+        executionMode: ManualOrderExecutionMode.Live,
+        instrumentCode: '688577.SH',
+        limitPrice: '48.76',
+        message: 'QMT Agent 下单前行情已超过 30 秒，未向券商提交',
+        orderType: 'FIX_PRICE',
+        phase: ManualOrderAttemptPhase.RejectedBeforeBroker,
+        active: false,
+        requiresAttention: false,
+        side: ManualOrderSide.Sell,
+        status: 'REJECTED',
+        statusReason: 'stale live quote',
+        updatedAt: new Date().toISOString(),
+        deliveredAt: null,
+        acknowledgedAt: null,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        volume: 420,
+      },
+    ];
     render(<SubmitHarness />);
 
     fireEvent.click(screen.getByRole('button', { name: 'preview' }));

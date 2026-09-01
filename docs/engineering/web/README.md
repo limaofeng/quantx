@@ -69,3 +69,13 @@ Web 交易票据与 iOS 共用服务端手工委托用例：先读取
 - Web 不得以 `placeOrder` 作为手工委托回退路径。
 - 确认成功只表示交易命令进入队列；最终状态以 QMT Agent 上报的券商委托和成交
   回报为准。
+
+持仓页“委托”工作区将下单请求与券商委托分为三个页签：`下单请求`、`当日券商委托`
+和`历史券商委托`。`下单请求`由 `manualOrderAttempts` 从服务端恢复
+`PendingTradeOrder + TradeCommandOutbox`，不会伪造 `Order`；它展示服务端投影阶段、
+原始状态、原因和完整时间线，并允许复制 `clientOrderId` / `brokerOrderId`。
+
+请求阶段按 `QUEUED / DELIVERED / AGENT_ACKNOWLEDGED` 每 2 秒刷新；仅有
+`RECONCILE_REQUIRED` 时每 10 秒刷新，全部终结后停止，页面不可见时暂停。刷新或
+重新登录后仍以服务端列表为准。只有 `BROKER_ORDER_CREATED` 才能打开券商委托关联；
+对账异常显示“结果待核对，禁止重复下单”，不提供自动重试、撤单或猜测性跳转。

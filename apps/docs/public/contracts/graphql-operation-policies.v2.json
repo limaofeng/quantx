@@ -2245,7 +2245,7 @@
         "risk": "READ",
         "stability": "web-internal"
       },
-      "manualOrderAttempt": {
+      "manualOrderAttempts": {
         "audiences": [
           "web",
           "native",

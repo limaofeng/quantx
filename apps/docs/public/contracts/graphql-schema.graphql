@@ -3561,14 +3561,44 @@ type ManualOrderAttempt {
   brokerOrderId: String
   instrumentCode: String!
   side: ManualOrderSide!
+  orderType: String!
+  limitPrice: String!
   volume: Int!
+  executionMode: ManualOrderExecutionMode!
+  phase: ManualOrderAttemptPhase!
+  active: Boolean!
+  requiresAttention: Boolean!
   status: String!
   deliveryStatus: String!
   statusReason: String
   message: String!
-  executionMode: ManualOrderExecutionMode!
   createdAt: DateTime!
+  deliveredAt: DateTime
+  acknowledgedAt: DateTime
+  expiresAt: DateTime
   updatedAt: DateTime!
+}
+
+"""当前用户手动委托请求的有界只读列表"""
+type ManualOrderAttemptFeed {
+  items: [ManualOrderAttempt!]!
+  totalCount: Int!
+  activeCount: Int!
+  requiresAttentionCount: Int!
+  truncated: Boolean!
+  asOf: DateTime!
+}
+
+"""手动委托从排队到券商委托生成的服务端阶段"""
+enum ManualOrderAttemptPhase {
+  QUEUED
+  DELIVERED
+  AGENT_ACKNOWLEDGED
+  BROKER_ORDER_CREATED
+  REJECTED_BEFORE_BROKER
+  EXPIRED_BEFORE_BROKER
+  CANCELLED_BEFORE_BROKER
+  RECONCILE_REQUIRED
 }
 
 """手动委托确认输入"""
@@ -4848,8 +4878,8 @@ type Query {
   """获取当日委托列表"""
   todayOrders(accountId: String = null): [Order!]!
 
-  """查询一次手动委托排队后的 Agent 与券商回报状态"""
-  manualOrderAttempt(clientOrderId: String!, accountId: String = null): ManualOrderAttempt
+  """查询当前账户可恢复的手动委托请求列表"""
+  manualOrderAttempts(accountId: String = null, limit: Int = 50): ManualOrderAttemptFeed!
 
   """获取历史委托列表"""
   historyOrders(startDate: String!, endDate: String!, accountId: String = null): [Order!]!

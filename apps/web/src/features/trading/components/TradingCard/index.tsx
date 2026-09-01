@@ -17,6 +17,7 @@ import type {
   PortfolioSummaryData,
   Position,
 } from '@/features/portfolio/types';
+import type { ManualOrderAttemptItem } from '@/features/trading/hooks/useTrading';
 import {
   ManualOrderExecutionMode,
   ManualOrderPriceType,
@@ -27,6 +28,8 @@ import type { Stock } from '@/shared/types';
 import { formatCurrency } from '@/shared/utils/format';
 import { cn } from '@/utils/cn';
 
+import { getManualOrderPhasePresentation } from '../../manualOrderPresentation';
+
 import { useFormState } from './hooks/useFormState';
 import { useTradingCalculation } from './hooks/useTradingCalculation';
 import { useTradingSubmit } from './hooks/useTradingSubmit';
@@ -36,6 +39,10 @@ interface TradingCardProps {
   holdings: Position[];
   initialStockCode?: string;
   initialSide?: 'BUY' | 'SELL';
+  manualOrderAttempts?: ManualOrderAttemptItem[];
+  onManualOrderAttemptsRefresh?: () => void;
+  onManualOrderQueued?: (clientOrderId: string) => void;
+  onViewManualOrderAttempts?: (clientOrderId: string) => void;
   onSuccess?: () => void;
   onStockSelect?: (stock: Stock | null) => void;
   portfolioSummary?: Pick<PortfolioSummaryData, 'cash'>;
@@ -143,6 +150,10 @@ export function TradingCard({
   holdings,
   initialStockCode,
   initialSide = 'BUY',
+  manualOrderAttempts = [],
+  onManualOrderAttemptsRefresh,
+  onManualOrderQueued,
+  onViewManualOrderAttempts,
   onSuccess,
   onStockSelect,
   portfolioSummary,
@@ -275,10 +286,19 @@ export function TradingCard({
     isPreviewing,
     orderAttempt,
     preview,
-  } = useTradingSubmit(selectedStockCode, () => {
-    resetForm();
-    onSuccess?.();
-  });
+    trackedClientOrderId,
+  } = useTradingSubmit(
+    selectedStockCode,
+    clientOrderId => {
+      onManualOrderQueued?.(clientOrderId);
+      resetForm();
+      onSuccess?.();
+    },
+    {
+      manualOrderAttempts,
+      refreshManualOrderAttempts: onManualOrderAttemptsRefresh,
+    }
+  );
 
   const currentOrderPrice = React.useMemo(() => {
     return (
@@ -753,33 +773,52 @@ export function TradingCard({
           <p className="text-center text-ui-caption text-muted-foreground/50">
             服务端会重新计算合法数量、费用并执行统一风控
           </p>
-          {orderAttempt && (
-            <div
-              role="status"
-              className={cn(
-                'rounded-md border px-2.5 py-2 text-ui-caption leading-relaxed',
-                orderAttempt.brokerOrderId
-                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500'
-                  : [orderAttempt.status, orderAttempt.deliveryStatus].some(
-                        value =>
-                          ['REJECTED', 'EXPIRED', 'KILL_SWITCHED'].includes(
-                            String(value).toUpperCase()
-                          )
-                      )
-                    ? 'border-destructive/30 bg-destructive/10 text-destructive'
-                    : 'border-amber-500/30 bg-amber-500/10 text-amber-500'
-              )}
-            >
-              <div className="font-black">
-                {orderAttempt.brokerOrderId
-                  ? `券商委托 ${orderAttempt.brokerOrderId}`
-                  : '下单状态（尚非券商委托）'}
-              </div>
-              <div className="mt-0.5 text-current/80">
-                {orderAttempt.message}
-              </div>
-            </div>
-          )}
+          {(orderAttempt || trackedClientOrderId) &&
+            (() => {
+              const presentation = getManualOrderPhasePresentation(
+                orderAttempt?.phase
+              );
+              const clientOrderId =
+                orderAttempt?.clientOrderId || trackedClientOrderId || '';
+              return (
+                <div
+                  role="status"
+                  className={cn(
+                    'rounded-md border px-2.5 py-2 text-ui-caption leading-relaxed',
+                    orderAttempt
+                      ? presentation.classes.panel
+                      : 'border-warning/25 bg-warning/5'
+                  )}
+                >
+                  <div
+                    className={cn(
+                      'flex flex-wrap items-center justify-between gap-2 font-black',
+                      orderAttempt ? presentation.classes.text : 'text-warning'
+                    )}
+                  >
+                    <span>
+                      {orderAttempt ? presentation.label : '下单请求已进入队列'}
+                      {orderAttempt?.brokerOrderId
+                        ? ` · ${orderAttempt.brokerOrderId}`
+                        : ''}
+                    </span>
+                    {onViewManualOrderAttempts && clientOrderId && (
+                      <button
+                        type="button"
+                        className="shrink-0 text-ui-micro font-bold text-blue-200 underline-offset-2 hover:underline"
+                        onClick={() => onViewManualOrderAttempts(clientOrderId)}
+                      >
+                        查看下单请求
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-0.5 break-words text-current/80">
+                    {orderAttempt?.message ||
+                      `请求 ${clientOrderId} 已入队，正在从服务端恢复状态`}
+                  </div>
+                </div>
+              );
+            })()}
         </div>
       </form>
       <ManualOrderConfirmationDialog

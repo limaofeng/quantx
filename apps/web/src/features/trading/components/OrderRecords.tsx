@@ -28,6 +28,7 @@ interface OrderRecordsProps {
   accountId?: string;
   viewMode?: 'list' | 'table';
   filterType?: 'active' | 'all' | 'history';
+  highlightOrderId?: string | null;
 }
 
 const CANCELABLE_ORDER_STATUSES = [
@@ -48,10 +49,20 @@ function isOrderCancelable(order: DisplayOrder | undefined) {
   );
 }
 
+function isOrderHighlighted(
+  order: DisplayOrder,
+  highlightOrderId?: string | null
+) {
+  if (!highlightOrderId) return false;
+  const target = String(highlightOrderId);
+  return String(order.id) === target || String(order.sysid || '') === target;
+}
+
 export function OrderRecords({
   accountId,
   viewMode = 'list',
   filterType = 'active',
+  highlightOrderId,
 }: OrderRecordsProps) {
   const [, setLocation] = useLocation();
   const { confirm: confirmDialog } = useAppDialog();
@@ -267,7 +278,11 @@ export function OrderRecords({
                 <tr
                   key={order.id}
                   onContextMenu={event => openAtPointer(event, order)}
-                  className="hover:bg-muted/30 transition-colors group"
+                  className={cn(
+                    'hover:bg-muted/30 transition-colors group',
+                    isOrderHighlighted(order, highlightOrderId) &&
+                      'bg-blue-500/10 ring-1 ring-inset ring-blue-400/50'
+                  )}
                 >
                   <td className="px-3 py-1 text-ui-caption font-mono text-muted-foreground tabular-nums">
                     {order.time}
@@ -363,7 +378,9 @@ export function OrderRecords({
               'relative flex items-center justify-between p-2.5 rounded-panel bg-card dark:bg-slate-900 border border-slate-200/40 dark:border-slate-800/40 text-ui-label shadow-sm hover:shadow hover:bg-card/90 dark:hover:bg-slate-800 transition-all duration-300 group overflow-hidden pl-3',
               order.type === OrderType.Buy
                 ? 'border-l-4 border-l-market-up shadow-market-up/5'
-                : 'border-l-4 border-l-market-down shadow-market-down/5'
+                : 'border-l-4 border-l-market-down shadow-market-down/5',
+              isOrderHighlighted(order, highlightOrderId) &&
+                'bg-blue-500/10 ring-1 ring-inset ring-blue-400/50'
             )}
           >
             <div className="flex flex-col gap-2 z-10 w-full">

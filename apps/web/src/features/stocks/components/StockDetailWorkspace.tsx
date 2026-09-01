@@ -21,6 +21,7 @@ import type {
 } from '@/features/portfolio/types';
 import {
   AccountInfo,
+  ManualOrderAttemptRecords,
   MarketDepth,
   OrderRecords,
   TradeRecords,
@@ -28,6 +29,8 @@ import {
 } from '@/features/trading/components';
 import { ActiveOrders } from '@/features/trading/components/ActiveOrders';
 import { TradingInstrumentHeader } from '@/features/trading/components/TradingInstrumentHeader';
+import type { ManualOrderAttemptsState } from '@/features/trading/hooks';
+import { useManualOrderAttempts } from '@/features/trading/hooks';
 import type { Stock } from '@/shared/types';
 import { cn } from '@/utils/cn';
 
@@ -87,6 +90,7 @@ function isTerminalView(view: StockWorkspaceView) {
 
 function WorkspaceToolbar({
   activeOrderCount,
+  activeManualOrderCount,
   activeView,
   context,
   hasActiveOrders,
@@ -96,6 +100,7 @@ function WorkspaceToolbar({
   stockCode,
 }: {
   activeOrderCount: number;
+  activeManualOrderCount: number;
   activeView: StockWorkspaceView;
   context: StockWorkspaceContext;
   hasActiveOrders: boolean;
@@ -156,8 +161,31 @@ function WorkspaceToolbar({
                   hasActiveOrders ? 'bg-amber-300' : 'bg-slate-600'
                 )}
               />
-              委托 {activeOrderCount}
+              券商委托 {activeOrderCount}
             </span>
+            {context === 'holdings' && (
+              <>
+                <span className="h-3 w-px bg-white/10" />
+                <span
+                  className={cn(
+                    'inline-flex items-center gap-1.5 text-ui-caption font-bold',
+                    activeManualOrderCount > 0
+                      ? 'text-blue-200'
+                      : 'text-slate-500'
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'h-1.5 w-1.5 rounded-full',
+                      activeManualOrderCount > 0
+                        ? 'bg-blue-300'
+                        : 'bg-slate-600'
+                    )}
+                  />
+                  下单请求 {activeManualOrderCount}
+                </span>
+              </>
+            )}
           </div>
 
           {isTerminalView(activeView) && (
@@ -183,18 +211,58 @@ function WorkspaceToolbar({
   );
 }
 
-function OrdersPanel({ accountId }: { accountId?: string }) {
+function OrdersPanel({
+  accountId,
+  attempts,
+  highlightedClientOrderId,
+}: {
+  accountId?: string;
+  attempts: ManualOrderAttemptsState;
+  highlightedClientOrderId?: string | null;
+}) {
+  const [activeTab, setActiveTab] = React.useState('requests');
+  const [selectedBrokerOrderId, setSelectedBrokerOrderId] = React.useState<
+    string | null
+  >(null);
+
+  const handleViewBrokerOrders = React.useCallback((brokerOrderId: string) => {
+    setSelectedBrokerOrderId(brokerOrderId);
+    setActiveTab('today');
+  }, []);
+
+  React.useEffect(() => {
+    setActiveTab('requests');
+    setSelectedBrokerOrderId(null);
+  }, [accountId]);
+
   return (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col p-3">
-      <Tabs defaultValue="today" className="flex min-h-0 flex-1 flex-col">
+      <Tabs
+        value={activeTab}
+        onValueChange={setActiveTab}
+        className="flex min-h-0 flex-1 flex-col"
+      >
         <TabsList className="mb-3 flex h-8 w-fit gap-1 rounded-md border border-white/10 bg-white/[0.04] p-0.5">
+          <TabsTrigger value="requests" className={compactTabTriggerClass}>
+            下单请求
+          </TabsTrigger>
           <TabsTrigger value="today" className={compactTabTriggerClass}>
-            当日委托
+            当日券商委托
           </TabsTrigger>
           <TabsTrigger value="history" className={compactTabTriggerClass}>
-            历史委托
+            历史券商委托
           </TabsTrigger>
         </TabsList>
+        <TabsContent
+          value="requests"
+          className="mt-0 min-h-0 flex-1 overflow-hidden"
+        >
+          <ManualOrderAttemptRecords
+            highlightedClientOrderId={highlightedClientOrderId}
+            onViewBrokerOrders={handleViewBrokerOrders}
+            state={attempts}
+          />
+        </TabsContent>
         <TabsContent
           value="today"
           className="mt-0 min-h-0 flex-1 overflow-hidden"
@@ -202,6 +270,7 @@ function OrdersPanel({ accountId }: { accountId?: string }) {
           <OrderRecords
             accountId={accountId}
             filterType="all"
+            highlightOrderId={selectedBrokerOrderId}
             viewMode="table"
           />
         </TabsContent>
@@ -212,6 +281,7 @@ function OrdersPanel({ accountId }: { accountId?: string }) {
           <OrderRecords
             accountId={accountId}
             filterType="history"
+            highlightOrderId={selectedBrokerOrderId}
             viewMode="table"
           />
         </TabsContent>
@@ -292,7 +362,11 @@ function TradingTerminal({
   holdings,
   initialSide,
   layoutMode,
+  manualOrderAttempts,
+  onManualOrderAttemptsRefresh,
+  onManualOrderQueued,
   onStockSelect,
+  onViewManualOrderAttempts,
   portfolioSummary,
   selectedStock,
   stockCode,
@@ -306,7 +380,13 @@ function TradingTerminal({
   | 'portfolioSummary'
   | 'selectedStock'
   | 'stockCode'
-> & { layoutMode: TradingLayoutMode }) {
+> & {
+  layoutMode: TradingLayoutMode;
+  manualOrderAttempts: ManualOrderAttemptsState['items'];
+  onManualOrderAttemptsRefresh?: () => void;
+  onManualOrderQueued?: (clientOrderId: string) => void;
+  onViewManualOrderAttempts?: (clientOrderId: string) => void;
+}) {
   const [priceUpdate, setPriceUpdate] = React.useState<{
     price: string;
     timestamp: number;
@@ -324,7 +404,11 @@ function TradingTerminal({
         holdings={holdings}
         initialSide={initialSide}
         initialStockCode={stockCode}
+        manualOrderAttempts={manualOrderAttempts}
+        onManualOrderAttemptsRefresh={onManualOrderAttemptsRefresh}
+        onManualOrderQueued={onManualOrderQueued}
         onStockSelect={onStockSelect}
+        onViewManualOrderAttempts={onViewManualOrderAttempts}
         portfolioSummary={portfolioSummary}
         priceUpdate={priceUpdate}
       />
@@ -454,6 +538,19 @@ export function StockDetailWorkspace({
   stockCode,
 }: StockDetailWorkspaceProps) {
   const [layoutMode, setLayoutMode] = React.useState<TradingLayoutMode>('wide');
+  const manualOrderAttempts = useManualOrderAttempts(accountId);
+  const [highlightedClientOrderId, setHighlightedClientOrderId] =
+    React.useState<string | null>(null);
+  const handleManualOrderQueued = React.useCallback((clientOrderId: string) => {
+    setHighlightedClientOrderId(clientOrderId);
+  }, []);
+  const handleViewManualOrderAttempts = React.useCallback(
+    (clientOrderId: string) => {
+      setHighlightedClientOrderId(clientOrderId);
+      if (context === 'holdings') onViewChange('ORDERS');
+    },
+    [context, onViewChange]
+  );
   const disclosures = useStockDisclosures(stockCode, 20);
   const financials = useStockWorkspaceFinancials(stockCode, 12);
   const lastPrice =
@@ -509,7 +606,13 @@ export function StockDetailWorkspace({
       </div>
     );
   } else if (activeView === 'ORDERS') {
-    content = <OrdersPanel accountId={accountId} />;
+    content = (
+      <OrdersPanel
+        accountId={accountId}
+        attempts={manualOrderAttempts}
+        highlightedClientOrderId={highlightedClientOrderId}
+      />
+    );
   } else if (activeView === 'TRADES') {
     content = <TradesPanel accountId={accountId} />;
   } else if (activeView === 'ACCOUNT') {
@@ -531,7 +634,13 @@ export function StockDetailWorkspace({
             holdings={holdings}
             initialSide={initialSide}
             layoutMode={layoutMode}
+            manualOrderAttempts={manualOrderAttempts.items}
+            onManualOrderAttemptsRefresh={manualOrderAttempts.refresh}
+            onManualOrderQueued={handleManualOrderQueued}
             onStockSelect={onStockSelect}
+            onViewManualOrderAttempts={
+              context === 'holdings' ? handleViewManualOrderAttempts : undefined
+            }
             portfolioSummary={portfolioSummary}
             selectedStock={selectedStock}
             stockCode={stockCode}
@@ -569,6 +678,7 @@ export function StockDetailWorkspace({
       />
       <WorkspaceToolbar
         activeOrderCount={activeOrderCount}
+        activeManualOrderCount={manualOrderAttempts.activeCount}
         activeView={activeView}
         context={context}
         hasActiveOrders={hasActiveOrders}

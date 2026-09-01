@@ -1,4 +1,5 @@
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
@@ -17,10 +18,11 @@ from quantx_infrastructure.services.account_execution_safety_service import (
 )
 from quantx_infrastructure.services.order_service import OrderService
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
-from sqlalchemy import select
+from sqlalchemy import and_, case, func, not_, or_, select
 
 from quantx_api.auth.errors import AuthError
 from quantx_api.auth.service import AuthService
+from quantx_api.auth.tokens import utcnow
 from quantx_api.manual_order_runtime import configured_manual_order_execution_mode
 
 from ..account_execution_control import (
@@ -39,6 +41,8 @@ from ..types import (
   CancelOrderInput,
   CancelOrderResult,
   ManualOrderAttempt,
+  ManualOrderAttemptFeed,
+  ManualOrderAttemptPhase,
   ManualOrderConfirmationInput,
   ManualOrderConfirmationResult,
   ManualOrderPreview,
@@ -113,20 +117,112 @@ def _parse_price_type(value: str) -> PriceType:
   raise ValueError("报价类型无效")
 
 
+_MANUAL_ORDER_ACTIVE_PHASES = frozenset(
+  {
+    ManualOrderAttemptPhase.QUEUED,
+    ManualOrderAttemptPhase.DELIVERED,
+    ManualOrderAttemptPhase.AGENT_ACKNOWLEDGED,
+    ManualOrderAttemptPhase.RECONCILE_REQUIRED,
+  }
+)
+_MANUAL_ORDER_RECONCILE_STATES = frozenset({"RECONCILE_REQUIRED"})
+_MANUAL_ORDER_CANCELLED_TERMINAL_STATES = (
+  "CANCELLED",
+  "CANCELED",
+  "KILL_SWITCHED",
+  "CANCELLED_KILL",
+  "CANCELLED_BEFORE_BROKER",
+)
+_MANUAL_ORDER_PRE_BROKER_TERMINAL_STATES = frozenset(
+  {
+    "REJECTED",
+    "EXPIRED",
+    *_MANUAL_ORDER_CANCELLED_TERMINAL_STATES,
+  }
+)
+_MANUAL_ORDER_QUEUED_STATES = frozenset({"QUEUED", "PENDING"})
+_MANUAL_ORDER_ACKNOWLEDGED_STATE = "ACKNOWLEDGED"
+_MANUAL_ORDER_DELIVERED_STATE = "DELIVERED"
+_MANUAL_ORDER_KNOWN_PENDING_STATES = frozenset(
+  {
+    "QUEUED",
+    "PENDING",
+    "SUBMITTED",
+    "PARTIAL_FILLED",
+    "FILLED",
+    "REJECTED",
+    "EXPIRED",
+    "CANCELLED",
+    "CANCELED",
+    "KILL_SWITCHED",
+    "CANCELLED_KILL",
+    "CANCELLED_BEFORE_BROKER",
+    "RECONCILE_REQUIRED",
+  }
+)
+_MANUAL_ORDER_KNOWN_DELIVERY_STATES = frozenset(
+  {
+    "QUEUED",
+    "PENDING",
+    "DELIVERED",
+    "ACKNOWLEDGED",
+    "REJECTED",
+    "EXPIRED",
+    "CANCELLED",
+    "CANCELED",
+    "KILL_SWITCHED",
+    "CANCELLED_KILL",
+    "CANCELLED_BEFORE_BROKER",
+    "RECONCILE_REQUIRED",
+  }
+)
+
+
+@dataclass(frozen=True)
+class _ManualOrderAttemptProjection:
+  phase: ManualOrderAttemptPhase
+  active: bool
+  requires_attention: bool
+  status_reason: Optional[str]
+  message: str
+
+
+def _normalize_manual_order_state(value: object, fallback: str = "") -> str:
+  return str(getattr(value, "value", value) or fallback).strip().upper()
+
+
+def _clean_optional_text(value: object) -> Optional[str]:
+  text = str(value or "").strip()
+  return text or None
+
+
+def _pre_broker_terminal_phase(
+  state: str,
+) -> Optional[ManualOrderAttemptPhase]:
+  if state == "REJECTED":
+    return ManualOrderAttemptPhase.REJECTED_BEFORE_BROKER
+  if state == "EXPIRED":
+    return ManualOrderAttemptPhase.EXPIRED_BEFORE_BROKER
+  if state in _MANUAL_ORDER_CANCELLED_TERMINAL_STATES:
+    return ManualOrderAttemptPhase.CANCELLED_BEFORE_BROKER
+  return None
+
+
 def _manual_order_attempt_message(
   *,
+  phase: ManualOrderAttemptPhase,
   broker_order_id: Optional[str],
   delivery_status: str,
   status: str,
   status_reason: Optional[str],
 ) -> str:
-  if broker_order_id:
+  if phase == ManualOrderAttemptPhase.BROKER_ORDER_CREATED and broker_order_id:
     return f"券商委托已生成：{broker_order_id}；最终状态以券商回报为准"
 
-  normalized_status = str(status or "").upper()
-  normalized_delivery = str(delivery_status or "").upper()
   reason = str(status_reason or "").strip()
-  if normalized_status == "REJECTED" or normalized_delivery == "REJECTED":
+  normalized_status = _normalize_manual_order_state(status)
+  normalized_delivery = _normalize_manual_order_state(delivery_status)
+  if phase == ManualOrderAttemptPhase.REJECTED_BEFORE_BROKER:
     reason_messages = {
       "stale live quote": (
         f"QMT Agent 下单前行情已超过 {LIVE_ORDER_MAX_QUOTE_AGE_SECONDS} 秒"
@@ -138,20 +234,159 @@ def _manual_order_attempt_message(
     }
     detail = reason_messages.get(reason.lower(), reason or "QMT Agent 下单前拒绝")
     return f"{detail}，未向券商提交"
-  if normalized_status == "EXPIRED" or normalized_delivery == "EXPIRED":
-    return "下单命令已过期，未向券商提交"
-  if normalized_status == "KILL_SWITCHED" or normalized_delivery == "KILL_SWITCHED":
-    return "下单命令已被实盘安全开关拦截，未向券商提交"
-  if (
-    normalized_status == "RECONCILE_REQUIRED"
-    or normalized_delivery == "RECONCILE_REQUIRED"
-  ):
-    return "下单结果暂不确定，请先核对券商端，切勿重复提交"
-  if normalized_delivery == "ACKNOWLEDGED":
+  if phase == ManualOrderAttemptPhase.EXPIRED_BEFORE_BROKER:
+    return "下单命令已过期，未生成券商委托"
+  if phase == ManualOrderAttemptPhase.CANCELLED_BEFORE_BROKER:
+    if normalized_status == "KILL_SWITCHED" or normalized_delivery in {
+      "KILL_SWITCHED",
+      "CANCELLED_KILL",
+    }:
+      return "下单请求已被实盘安全开关拦截，未生成券商委托"
+    return "下单请求已取消，未生成券商委托"
+  if phase == ManualOrderAttemptPhase.RECONCILE_REQUIRED:
+    return "结果待核对，禁止重复下单；请先核对券商端"
+  if phase == ManualOrderAttemptPhase.AGENT_ACKNOWLEDGED:
     return "QMT Agent 已接收，尚未取得券商委托回报，请勿重复提交"
-  if normalized_delivery == "DELIVERED":
+  if phase == ManualOrderAttemptPhase.DELIVERED:
     return "下单请求已送达 QMT Agent，尚未生成券商委托"
   return "下单请求已进入可靠队列，尚未生成券商委托"
+
+
+def _project_manual_order_attempt(
+  pending: PendingTradeOrder,
+  outbox: Optional[TradeCommandOutbox],
+) -> _ManualOrderAttemptProjection:
+  """Project the two durable request rows into one conservative phase."""
+
+  pending_status = _normalize_manual_order_state(pending.status, "QUEUED")
+  delivery_status = _normalize_manual_order_state(
+    getattr(outbox, "delivery_status", None), pending_status or "QUEUED"
+  )
+  broker_order_id = _clean_optional_text(pending.broker_order_id)
+  status_reason = _clean_optional_text(
+    pending.status_reason or getattr(outbox, "last_error", None)
+  )
+  raw_delivery_status = getattr(outbox, "delivery_status", None)
+  unknown_pending_state = pending_status not in _MANUAL_ORDER_KNOWN_PENDING_STATES
+  unknown_delivery_state = bool(
+    outbox is not None
+    and raw_delivery_status is not None
+    and delivery_status not in _MANUAL_ORDER_KNOWN_DELIVERY_STATES
+  )
+
+  phase = ManualOrderAttemptPhase.RECONCILE_REQUIRED
+  if (
+    pending_status in _MANUAL_ORDER_RECONCILE_STATES
+    or delivery_status in _MANUAL_ORDER_RECONCILE_STATES
+    or unknown_pending_state
+    or unknown_delivery_state
+  ):
+    phase = ManualOrderAttemptPhase.RECONCILE_REQUIRED
+  elif broker_order_id:
+    phase = ManualOrderAttemptPhase.BROKER_ORDER_CREATED
+  else:
+    pending_terminal = _pre_broker_terminal_phase(pending_status)
+    delivery_terminal = _pre_broker_terminal_phase(delivery_status)
+    if pending_terminal or delivery_terminal:
+      # A pre-broker terminal state is safe only when both durable lifecycle
+      # rows agree.  A pending-only row can still be projected from its own
+      # terminal proof; an unexplained mismatch stays fail-closed.
+      if outbox is None and pending_terminal is not None:
+        phase = pending_terminal
+      elif pending_terminal is not None and pending_terminal == delivery_terminal:
+        phase = pending_terminal
+    elif (
+      delivery_status == _MANUAL_ORDER_ACKNOWLEDGED_STATE
+      and pending_status in _MANUAL_ORDER_QUEUED_STATES
+    ):
+      phase = ManualOrderAttemptPhase.AGENT_ACKNOWLEDGED
+    elif (
+      delivery_status == _MANUAL_ORDER_DELIVERED_STATE
+      and pending_status in _MANUAL_ORDER_QUEUED_STATES
+    ):
+      phase = ManualOrderAttemptPhase.DELIVERED
+    elif (
+      pending_status in _MANUAL_ORDER_QUEUED_STATES
+      and delivery_status in _MANUAL_ORDER_QUEUED_STATES
+    ):
+      phase = ManualOrderAttemptPhase.QUEUED
+
+  if phase == ManualOrderAttemptPhase.RECONCILE_REQUIRED and not status_reason:
+    status_reason = "PendingTradeOrder 与 TradeCommandOutbox 状态组合无法安全解释"
+
+  return _ManualOrderAttemptProjection(
+    phase=phase,
+    active=phase in _MANUAL_ORDER_ACTIVE_PHASES,
+    requires_attention=phase == ManualOrderAttemptPhase.RECONCILE_REQUIRED,
+    status_reason=status_reason,
+    message=_manual_order_attempt_message(
+      phase=phase,
+      broker_order_id=broker_order_id,
+      delivery_status=delivery_status,
+      status=pending_status,
+      status_reason=status_reason,
+    ),
+  )
+
+
+def _latest_datetime(*values: Optional[datetime]) -> Optional[datetime]:
+  present = [value for value in values if value is not None]
+  return max(present) if present else None
+
+
+def _manual_order_attempt_from_rows(
+  pending: PendingTradeOrder,
+  outbox: Optional[TradeCommandOutbox],
+) -> ManualOrderAttempt:
+  projection = _project_manual_order_attempt(pending, outbox)
+  status = _normalize_manual_order_state(pending.status, "QUEUED")
+  delivery_status = _normalize_manual_order_state(
+    getattr(outbox, "delivery_status", None), status
+  )
+  return ManualOrderAttempt(
+    account_id=str(pending.account_id),
+    client_order_id=str(pending.client_order_id),
+    broker_order_id=(
+      _clean_optional_text(pending.broker_order_id)
+      if projection.phase != ManualOrderAttemptPhase.RECONCILE_REQUIRED
+      else None
+    ),
+    instrument_code=str(pending.instrument_code),
+    side=ManualOrderSide(_normalize_manual_order_state(pending.side)),
+    order_type=_normalize_manual_order_state(pending.order_type),
+    limit_price=str(pending.limit_price or "0"),
+    volume=int(pending.volume or 0),
+    execution_mode=ManualOrderExecutionMode(
+      _normalize_manual_order_state(pending.execution_mode, "PAPER")
+    ),
+    phase=projection.phase,
+    active=projection.active,
+    requires_attention=projection.requires_attention,
+    status=status,
+    delivery_status=delivery_status,
+    status_reason=projection.status_reason,
+    message=projection.message,
+    created_at=pending.created_at,
+    delivered_at=getattr(outbox, "delivered_at", None),
+    acknowledged_at=getattr(outbox, "acknowledged_at", None),
+    expires_at=getattr(outbox, "expires_at", None),
+    updated_at=_latest_datetime(
+      pending.updated_at,
+      getattr(outbox, "updated_at", None),
+    )
+    or pending.created_at,
+  )
+
+
+def _manual_order_attempt_sort_key(
+  pending: PendingTradeOrder,
+  outbox: Optional[TradeCommandOutbox],
+) -> tuple[int, float, str]:
+  projection = _project_manual_order_attempt(pending, outbox)
+  phase_rank = 0 if projection.requires_attention else 1 if projection.active else 2
+  created_at = pending.created_at
+  timestamp = created_at.timestamp() if created_at is not None else 0.0
+  return (phase_rank, -timestamp, str(pending.client_order_id))
 
 
 async def _fetch_order(order_id: int, account_id: str) -> Optional[Order]:
@@ -258,69 +493,227 @@ class TradingQuery:
       await _resolve_account_id(info, account_id)
     )
 
-  @strawberry.field(description="查询一次手动委托排队后的 Agent 与券商回报状态")
-  async def manual_order_attempt(
+  @strawberry.field(description="查询当前账户可恢复的手动委托请求列表")
+  async def manual_order_attempts(
     self,
     info: strawberry.types.Info,
-    client_order_id: str,
     account_id: Optional[str] = None,
-  ) -> Optional[ManualOrderAttempt]:
-    normalized_client_order_id = str(client_order_id or "").strip()
-    if not normalized_client_order_id or len(normalized_client_order_id) > 128:
-      raise ValueError("手动委托客户端订单号无效")
+    limit: Optional[int] = 50,
+  ) -> ManualOrderAttemptFeed:
+    effective_limit = 50 if limit is None else limit
+    if (
+      isinstance(effective_limit, bool)
+      or effective_limit < 1
+      or effective_limit > 100
+    ):
+      raise ValueError("手动委托请求列表 limit 必须介于 1 和 100 之间")
+
     principal = principal_from_context(info.context)
     resolved_account_id = await _resolve_account_id(info, account_id)
+    filters = (
+      PendingTradeOrder.account_id == resolved_account_id,
+      PendingTradeOrder.user_id == principal.user_id,
+      PendingTradeOrder.bucket == "manual",
+    )
+    join_condition = and_(
+      TradeCommandOutbox.client_order_id == PendingTradeOrder.client_order_id,
+      TradeCommandOutbox.account_id == resolved_account_id,
+    )
+
+    # The SQL rank keeps reconciliation-required rows visible ahead of recent
+    # terminal rows even when the response is truncated.  The Python key below
+    # remains the final projection ordering authority for the returned rows.
+    pending_status = func.upper(func.coalesce(PendingTradeOrder.status, ""))
+    delivery_status = func.upper(
+      func.coalesce(
+        TradeCommandOutbox.delivery_status,
+        PendingTradeOrder.status,
+        "QUEUED",
+      )
+    )
+    known_pending_states = (
+      "QUEUED",
+      "PENDING",
+      "SUBMITTED",
+      "PARTIAL_FILLED",
+      "FILLED",
+      "REJECTED",
+      "EXPIRED",
+      "CANCELLED",
+      "CANCELED",
+      "KILL_SWITCHED",
+      "CANCELLED_KILL",
+      "CANCELLED_BEFORE_BROKER",
+      "RECONCILE_REQUIRED",
+    )
+    known_delivery_states = (
+      "QUEUED",
+      "PENDING",
+      "DELIVERED",
+      "ACKNOWLEDGED",
+      "REJECTED",
+      "EXPIRED",
+      "CANCELLED",
+      "CANCELED",
+      "KILL_SWITCHED",
+      "CANCELLED_KILL",
+      "CANCELLED_BEFORE_BROKER",
+      "RECONCILE_REQUIRED",
+    )
+    unknown_state = or_(
+      not_(pending_status.in_(known_pending_states)),
+      and_(
+        TradeCommandOutbox.delivery_status.is_not(None),
+        not_(delivery_status.in_(known_delivery_states)),
+      ),
+    )
+    pending_terminal_phase = case(
+      (pending_status == "REJECTED", "REJECTED"),
+      (pending_status == "EXPIRED", "EXPIRED"),
+      (
+        pending_status.in_(
+          _MANUAL_ORDER_CANCELLED_TERMINAL_STATES
+        ),
+        "CANCELLED",
+      ),
+      else_=None,
+    )
+    delivery_terminal_phase = case(
+      (delivery_status == "REJECTED", "REJECTED"),
+      (delivery_status == "EXPIRED", "EXPIRED"),
+      (
+        delivery_status.in_(
+          _MANUAL_ORDER_CANCELLED_TERMINAL_STATES
+        ),
+        "CANCELLED",
+      ),
+      else_=None,
+    )
+    reconcile_state = or_(
+      pending_status == "RECONCILE_REQUIRED",
+      delivery_status == "RECONCILE_REQUIRED",
+      unknown_state,
+      and_(
+        PendingTradeOrder.broker_order_id.is_(None),
+        pending_status.in_(("SUBMITTED", "PARTIAL_FILLED", "FILLED")),
+      ),
+      and_(
+        PendingTradeOrder.broker_order_id.is_(None),
+        or_(
+          and_(
+            pending_status.in_(_MANUAL_ORDER_PRE_BROKER_TERMINAL_STATES),
+            not_(delivery_status.in_(_MANUAL_ORDER_PRE_BROKER_TERMINAL_STATES)),
+          ),
+          and_(
+            delivery_status.in_(_MANUAL_ORDER_PRE_BROKER_TERMINAL_STATES),
+            not_(pending_status.in_(_MANUAL_ORDER_PRE_BROKER_TERMINAL_STATES)),
+          ),
+        ),
+      ),
+      and_(
+        PendingTradeOrder.broker_order_id.is_(None),
+        pending_terminal_phase.is_not(None),
+        delivery_terminal_phase.is_not(None),
+        pending_terminal_phase != delivery_terminal_phase,
+      ),
+    )
+    terminal_state = and_(
+      PendingTradeOrder.broker_order_id.is_(None),
+      pending_terminal_phase.is_not(None),
+      delivery_terminal_phase.is_not(None),
+      pending_terminal_phase == delivery_terminal_phase,
+    )
+    phase_rank = case(
+      (reconcile_state, 0),
+      (
+        or_(
+          PendingTradeOrder.broker_order_id.is_not(None),
+          terminal_state,
+        ),
+        2,
+      ),
+      else_=1,
+    )
+    active_state = or_(
+      reconcile_state,
+      and_(
+        PendingTradeOrder.broker_order_id.is_(None),
+        pending_status.in_(tuple(_MANUAL_ORDER_QUEUED_STATES)),
+        delivery_status.in_(
+          tuple(
+            _MANUAL_ORDER_QUEUED_STATES
+            | {
+              _MANUAL_ORDER_DELIVERED_STATE,
+              _MANUAL_ORDER_ACKNOWLEDGED_STATE,
+            }
+          )
+        ),
+      ),
+    )
+
     async with AsyncSessionLocal() as db:
-      row = (
+      total_count = int(
+        (
+          await db.execute(
+            select(func.count(PendingTradeOrder.client_order_id)).where(*filters)
+          )
+        ).scalar_one()
+      )
+      rows = (
         await db.execute(
           select(PendingTradeOrder, TradeCommandOutbox)
-          .outerjoin(
-            TradeCommandOutbox,
-            TradeCommandOutbox.client_order_id
-            == PendingTradeOrder.client_order_id,
+          .outerjoin(TradeCommandOutbox, join_condition)
+          .where(*filters)
+          .order_by(
+            phase_rank.asc(),
+            PendingTradeOrder.created_at.desc(),
+            PendingTradeOrder.client_order_id.asc(),
           )
-          .where(
-            PendingTradeOrder.client_order_id == normalized_client_order_id,
-            PendingTradeOrder.account_id == resolved_account_id,
-            PendingTradeOrder.user_id == principal.user_id,
-            PendingTradeOrder.bucket == "manual",
-          )
-          .limit(1)
+          .limit(effective_limit)
         )
-      ).one_or_none()
-    if row is None:
-      return None
+      ).all()
 
-    pending, outbox = row
-    delivery_status = str(
-      getattr(outbox, "delivery_status", None) or pending.status or "QUEUED"
-    ).upper()
-    status = str(pending.status or delivery_status).upper()
-    status_reason = str(
-      pending.status_reason or getattr(outbox, "last_error", None) or ""
-    ).strip() or None
-    broker_order_id = str(pending.broker_order_id or "").strip() or None
-    return ManualOrderAttempt(
-      account_id=resolved_account_id,
-      client_order_id=str(pending.client_order_id),
-      broker_order_id=broker_order_id,
-      instrument_code=str(pending.instrument_code),
-      side=ManualOrderSide(str(pending.side).upper()),
-      volume=int(pending.volume or 0),
-      status=status,
-      delivery_status=delivery_status,
-      status_reason=status_reason,
-      message=_manual_order_attempt_message(
-        broker_order_id=broker_order_id,
-        delivery_status=delivery_status,
-        status=status,
-        status_reason=status_reason,
-      ),
-      execution_mode=ManualOrderExecutionMode(
-        str(pending.execution_mode or "paper").upper()
-      ),
-      created_at=pending.created_at,
-      updated_at=pending.updated_at,
+      projected_rows = [
+        (pending, outbox, _manual_order_attempt_from_rows(pending, outbox))
+        for pending, outbox in rows
+      ]
+      # SQL rank handles the bounded read; re-sort the fetched page with the
+      # same pure projection so the phase semantics stay testable and explicit.
+      projected_rows.sort(
+        key=lambda row: _manual_order_attempt_sort_key(row[0], row[1])
+      )
+
+      if total_count > effective_limit:
+        state_counts = (
+          await db.execute(
+            select(
+              func.coalesce(func.sum(case((active_state, 1), else_=0)), 0),
+              func.coalesce(
+                func.sum(case((reconcile_state, 1), else_=0)),
+                0,
+              ),
+            )
+            .outerjoin(TradeCommandOutbox, join_condition)
+            .where(*filters)
+          )
+        ).one()
+        active_count = int(state_counts[0] or 0)
+        requires_attention_count = int(state_counts[1] or 0)
+      else:
+        active_count = sum(
+          int(attempt.active) for _, _, attempt in projected_rows
+        )
+        requires_attention_count = sum(
+          int(attempt.requires_attention) for _, _, attempt in projected_rows
+        )
+
+    return ManualOrderAttemptFeed(
+      items=[attempt for _, _, attempt in projected_rows],
+      total_count=total_count,
+      active_count=active_count,
+      requires_attention_count=requires_attention_count,
+      truncated=total_count > effective_limit,
+      as_of=utcnow(),
     )
 
   @strawberry.field(description="获取历史委托列表")

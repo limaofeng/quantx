@@ -188,6 +188,21 @@ pending Order + outbox
   -> Engine 收敛
 ```
 
+手工委托请求的可恢复读取入口是 `manualOrderAttempts(accountId, limit)`，只返回当前
+用户、解析后的唯一账户和 `bucket = manual` 的 `PendingTradeOrder`，并与同账户的
+`TradeCommandOutbox` 做只读投影。它返回 `ManualOrderAttemptFeed`：`items`、
+`totalCount`、`activeCount`、`requiresAttentionCount`、`truncated` 和 `asOf`；
+`limit` 范围为 1–100，默认 50，排序为需核对、活动请求、已终结请求，再按入队时间
+倒序。超过上限时必须依据 `truncated` 展示截断提示。
+
+`ManualOrderAttempt.phase` 是服务端唯一阶段投影：`QUEUED`、`DELIVERED`、
+`AGENT_ACKNOWLEDGED`、`BROKER_ORDER_CREATED`、`REJECTED_BEFORE_BROKER`、
+`EXPIRED_BEFORE_BROKER`、`CANCELLED_BEFORE_BROKER` 和
+`RECONCILE_REQUIRED`。排队、投递和 ACK 均不代表券商接受；只有无对账异常且已有
+`brokerOrderId` 时才可显示券商委托已生成。状态矛盾、未知状态、无券商 ID 却出现
+成交态，或明确需要对账的记录统一进入 `RECONCILE_REQUIRED`，前端不得自动重试或
+把它猜测关联到券商委托。该查询不修改 Pending、Outbox、Order 或账户事实。
+
 ## GraphQL codegen
 
 schema 或 Web operation 变化后，保持 `web` profile 运行并执行：

@@ -190,8 +190,8 @@ def test_order_entry_capabilities_require_market_read_permission():
   )
 
 
-def test_manual_order_attempt_requires_order_read_permission():
-  assert required_permission("Query", "manualOrderAttempt") == "orders:read"
+def test_manual_order_attempts_requires_order_read_permission():
+  assert required_permission("Query", "manualOrderAttempts") == "orders:read"
 
 
 @pytest.mark.asyncio

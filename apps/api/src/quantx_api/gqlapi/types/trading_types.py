@@ -39,6 +39,18 @@ class ManualOrderExecutionMode(str, Enum):
   LIVE = "LIVE"
 
 
+@strawberry.enum(description="手动委托从排队到券商委托生成的服务端阶段")
+class ManualOrderAttemptPhase(str, Enum):
+  QUEUED = "QUEUED"
+  DELIVERED = "DELIVERED"
+  AGENT_ACKNOWLEDGED = "AGENT_ACKNOWLEDGED"
+  BROKER_ORDER_CREATED = "BROKER_ORDER_CREATED"
+  REJECTED_BEFORE_BROKER = "REJECTED_BEFORE_BROKER"
+  EXPIRED_BEFORE_BROKER = "EXPIRED_BEFORE_BROKER"
+  CANCELLED_BEFORE_BROKER = "CANCELLED_BEFORE_BROKER"
+  RECONCILE_REQUIRED = "RECONCILE_REQUIRED"
+
+
 @strawberry.type(description="订单信息")
 class Order:
   id: str = strawberry.field(description="订单编号")
@@ -223,14 +235,32 @@ class ManualOrderAttempt:
   broker_order_id: Optional[str]
   instrument_code: str
   side: ManualOrderSide
+  order_type: str
+  limit_price: str
   volume: int
+  execution_mode: ManualOrderExecutionMode
+  phase: ManualOrderAttemptPhase
+  active: bool
+  requires_attention: bool
   status: str
   delivery_status: str
   status_reason: Optional[str]
   message: str
-  execution_mode: ManualOrderExecutionMode
   created_at: datetime
+  delivered_at: Optional[datetime]
+  acknowledged_at: Optional[datetime]
+  expires_at: Optional[datetime]
   updated_at: datetime
+
+
+@strawberry.type(description="当前用户手动委托请求的有界只读列表")
+class ManualOrderAttemptFeed:
+  items: List[ManualOrderAttempt]
+  total_count: int
+  active_count: int
+  requires_attention_count: int
+  truncated: bool
+  as_of: datetime
 
 
 @strawberry.type(description="服务端计算的手动委托能力")
