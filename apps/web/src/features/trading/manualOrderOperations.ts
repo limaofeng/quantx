@@ -74,3 +74,29 @@ export const ConfirmManualOrderMutation = gql(`
     }
   }
 `);
+
+export const ManualOrderAttemptQuery = gql(`
+  query Trading_ManualOrderAttempt(
+    $accountId: String!
+    $clientOrderId: String!
+  ) {
+    manualOrderAttempt(
+      accountId: $accountId
+      clientOrderId: $clientOrderId
+    ) {
+      accountId
+      clientOrderId
+      brokerOrderId
+      instrumentCode
+      side
+      volume
+      status
+      deliveryStatus
+      statusReason
+      message
+      executionMode
+      createdAt
+      updatedAt
+    }
+  }
+`);

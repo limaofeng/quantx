@@ -3,6 +3,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
+from quantx_contracts import LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
 from quantx_qmt_agent import clock
 from quantx_qmt_agent.broker import LiveBroker, _LiveReportSink
 from quantx_qmt_agent.miniqmt.local_agent import MiniQmtLocalAgent
@@ -46,6 +47,53 @@ def test_registry_reuses_native_manager_during_reconnect():
   assert registry._managers["account-1"] is manager
   assert reconnect_calls == 1
   assert registry.connection_generation("account-1") == 1
+
+
+def test_live_market_preflight_uses_shared_api_quote_age_boundary(monkeypatch):
+  observed_at = clock.to_shanghai(clock.now_aware()).replace(
+    hour=10,
+    minute=30,
+    second=0,
+    microsecond=0,
+  )
+
+  class MarketManager:
+    quote_age_seconds = 20
+
+    @staticmethod
+    def get_instrument_detail(_stock_code, _complete):
+      return {
+        "InstrumentStatus": "NORMAL",
+        "PriceTick": 0.01,
+        "UpStopPrice": 11.0,
+        "DownStopPrice": 9.0,
+      }
+
+    def get_full_tick(self, stock_codes):
+      quote_time = observed_at - timedelta(seconds=self.quote_age_seconds)
+      return {
+        stock_codes[0]: {
+          "time": int(quote_time.timestamp() * 1000),
+          "lastPrice": 10.0,
+        }
+      }
+
+  market = MarketManager()
+  monkeypatch.setattr(clock, "now_aware", lambda: observed_at)
+  agent = MiniQmtLocalAgent(
+    SimpleNamespace(),
+    market_data_manager=market,
+  )
+
+  assert agent.max_quote_lag_seconds == LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
+  assert agent._market_preflight("600000.SH", 10.0, True)["ok"] is True
+
+  market.quote_age_seconds = LIVE_ORDER_MAX_QUOTE_AGE_SECONDS + 1
+  assert agent._market_preflight("600000.SH", 10.0, True) == {
+    "ok": False,
+    "status": "REJECTED",
+    "reason": "stale live quote",
+  }
 
 
 def test_live_broker_observes_same_manager_health_probe_reconnect():

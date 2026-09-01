@@ -216,6 +216,23 @@ class ManualOrderConfirmationResult:
   status: Optional[str] = None
 
 
+@strawberry.type(description="手动委托从可靠队列到券商回报前的真实状态")
+class ManualOrderAttempt:
+  account_id: str
+  client_order_id: str
+  broker_order_id: Optional[str]
+  instrument_code: str
+  side: ManualOrderSide
+  volume: int
+  status: str
+  delivery_status: str
+  status_reason: Optional[str]
+  message: str
+  execution_mode: ManualOrderExecutionMode
+  created_at: datetime
+  updated_at: datetime
+
+
 @strawberry.type(description="服务端计算的手动委托能力")
 class OrderEntryCapabilities:
   account_id: str

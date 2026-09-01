@@ -9,10 +9,11 @@ import re
 import secrets
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Optional
 
+from quantx_contracts import LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
 from quantx_domain.brokers.base import (
   OrderRequest,
 )
@@ -61,7 +62,7 @@ from .trade_approval import (
 
 MANUAL_ORDER_ACTION = "MANUAL_ORDER"
 _CHALLENGE_LIFETIME = timedelta(seconds=60)
-_MAX_QUOTE_AGE = timedelta(seconds=30)
+_MAX_QUOTE_AGE = timedelta(seconds=LIVE_ORDER_MAX_QUOTE_AGE_SECONDS)
 _BEST_CONFIRMATION_MAX_AGE = timedelta(seconds=10)
 _MAX_ACCOUNT_SNAPSHOT_AGE = timedelta(seconds=90)
 _MAX_TOKEN_LENGTH = 256
@@ -520,6 +521,18 @@ async def _preflight(
         "LIVE_AUTHORIZATION_REJECTED",
         str(exc),
       ) from exc
+
+  now = time_utils.now()
+  market_code = request.instrument_code.rsplit(".", 1)[1]
+  if not await _trading_time_service.is_trading_hours(market_code, now):
+    current_time = now.time()
+    message = (
+      "当前为 A 股午间休市，13:00 后可重新获取委托预览"
+      if time(11, 30) < current_time < time(13, 0)
+      else "当前不在 A 股交易时段，已拒绝生成委托预览"
+    )
+    raise TradeApprovalChallengeError("OUTSIDE_TRADING_HOURS", message)
+
   ticks = await latest_market_quote_cache.get_ticks([request.instrument_code])
   tick = next(
     (
@@ -534,7 +547,6 @@ async def _preflight(
       "QUOTE_UNAVAILABLE", "缺少最新行情，已拒绝生成交易确认"
     )
 
-  now = time_utils.now()
   quote_timestamp = getattr(tick, "time", None)
   quote_age = _snapshot_age(quote_timestamp, now)
   if quote_age is None or quote_age < timedelta(0) or quote_age > _MAX_QUOTE_AGE:

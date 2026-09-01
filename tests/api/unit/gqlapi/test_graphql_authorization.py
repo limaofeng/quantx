@@ -190,6 +190,10 @@ def test_order_entry_capabilities_require_market_read_permission():
   )
 
 
+def test_manual_order_attempt_requires_order_read_permission():
+  assert required_permission("Query", "manualOrderAttempt") == "orders:read"
+
+
 @pytest.mark.asyncio
 async def test_mobile_manual_principal_cannot_call_legacy_direct_order():
   result = await SCHEMA.execute(

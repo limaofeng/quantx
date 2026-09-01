@@ -7,6 +7,7 @@ import { KLinePeriod, PageDirection } from '@/generated/gql/graphql';
 
 import {
   ConfirmManualOrderMutation,
+  ManualOrderAttemptQuery,
   ManualOrderCapabilitiesQuery,
   PreviewManualOrderMutation,
 } from '../manualOrderOperations';
@@ -359,6 +360,37 @@ export function useConfirmManualOrder() {
       loading: result.fetching,
     }),
     [executeMutation, result.fetching]
+  );
+}
+
+export function useManualOrderAttempt(
+  accountId: string | undefined,
+  clientOrderId: string | null
+) {
+  const canQuery = Boolean(accountId && clientOrderId);
+  const [result, reexecuteQuery] = useQuery({
+    query: ManualOrderAttemptQuery,
+    variables: {
+      accountId: accountId || '',
+      clientOrderId: clientOrderId || '',
+    },
+    pause: !canQuery,
+    requestPolicy: 'network-only',
+  });
+
+  const refresh = useCallback(() => {
+    if (!canQuery) return;
+    reexecuteQuery({ requestPolicy: 'network-only' });
+  }, [canQuery, reexecuteQuery]);
+
+  return useMemo(
+    () => ({
+      attempt: result.data?.manualOrderAttempt || null,
+      error: result.error,
+      loading: result.fetching,
+      refresh,
+    }),
+    [refresh, result.data, result.error, result.fetching]
   );
 }
 

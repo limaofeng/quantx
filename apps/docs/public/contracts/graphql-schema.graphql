@@ -3554,6 +3554,23 @@ type LogLine {
   message: String!
 }
 
+"""手动委托从可靠队列到券商回报前的真实状态"""
+type ManualOrderAttempt {
+  accountId: String!
+  clientOrderId: String!
+  brokerOrderId: String
+  instrumentCode: String!
+  side: ManualOrderSide!
+  volume: Int!
+  status: String!
+  deliveryStatus: String!
+  statusReason: String
+  message: String!
+  executionMode: ManualOrderExecutionMode!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
 """手动委托确认输入"""
 input ManualOrderConfirmationInput {
   """预览返回的确认挑战 ID"""
@@ -4824,6 +4841,9 @@ type Query {
 
   """获取当日委托列表"""
   todayOrders(accountId: String = null): [Order!]!
+
+  """查询一次手动委托排队后的 Agent 与券商回报状态"""
+  manualOrderAttempt(clientOrderId: String!, accountId: String = null): ManualOrderAttempt
 
   """获取历史委托列表"""
   historyOrders(startDate: String!, endDate: String!, accountId: String = null): [Order!]!

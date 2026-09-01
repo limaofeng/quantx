@@ -11,8 +11,10 @@ import type { Stock } from '@/shared/types';
 
 const mocks = vi.hoisted(() => ({
   confirmManualOrder: vi.fn(),
+  manualOrderAttempt: null as Record<string, unknown> | null,
   onQueued: vi.fn(),
   previewManualOrder: vi.fn(),
+  refreshManualOrderAttempt: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -56,6 +58,15 @@ vi.mock('@/features/trading/hooks', () => ({
     },
     error: null,
     loading: false,
+  }),
+  useManualOrderAttempt: (
+    _accountId: string | undefined,
+    clientOrderId: string | null
+  ) => ({
+    attempt: clientOrderId ? mocks.manualOrderAttempt : null,
+    error: null,
+    loading: false,
+    refresh: mocks.refreshManualOrderAttempt,
   }),
   usePreviewManualOrder: () => ({
     execute: mocks.previewManualOrder,
@@ -145,6 +156,7 @@ function SubmitHarness({
 describe('useTradingSubmit', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.manualOrderAttempt = null;
     mocks.previewManualOrder.mockResolvedValue({
       data: {
         previewManualOrder: {
@@ -161,7 +173,8 @@ describe('useTradingSubmit', () => {
           challengeId: 'challenge-1',
           clientOrderId: 'client-order-1',
           code: 'MANUAL_ORDER_QUEUED',
-          message: '交易命令已排队；请等待 QMT Agent 券商回报',
+          message:
+            '下单请求已进入可靠队列，尚未生成券商委托；正在等待 QMT Agent 下单前复核和券商回报',
           status: 'QUEUED',
           success: true,
         },
@@ -212,8 +225,39 @@ describe('useTradingSubmit', () => {
     expect(mocks.onQueued).toHaveBeenCalledTimes(1);
     expect(mocks.toast).toHaveBeenCalledWith(
       expect.objectContaining({
-        description: '交易命令已排队；请等待 QMT Agent 券商回报',
-        title: '委托命令已排队',
+        description:
+          '下单请求已进入可靠队列，尚未生成券商委托；正在等待 QMT Agent 下单前复核和券商回报',
+        title: '下单请求已进入队列',
+      })
+    );
+  });
+
+  it('reports an Agent pre-submit rejection as no broker order', async () => {
+    mocks.manualOrderAttempt = {
+      accountId: '300000013250',
+      brokerOrderId: null,
+      clientOrderId: 'client-order-1',
+      createdAt: new Date().toISOString(),
+      deliveryStatus: 'REJECTED',
+      executionMode: ManualOrderExecutionMode.Live,
+      instrumentCode: '688577.SH',
+      message: 'QMT Agent 下单前行情已超过 30 秒，未向券商提交',
+      side: ManualOrderSide.Sell,
+      status: 'REJECTED',
+      statusReason: 'stale live quote',
+      updatedAt: new Date().toISOString(),
+      volume: 420,
+    };
+    render(<SubmitHarness />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'preview' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'confirm' }));
+
+    await waitFor(() =>
+      expect(mocks.toast).toHaveBeenCalledWith({
+        description: 'QMT Agent 下单前行情已超过 30 秒，未向券商提交',
+        title: '未生成券商委托',
+        variant: 'destructive',
       })
     );
   });

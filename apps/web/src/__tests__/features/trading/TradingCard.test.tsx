@@ -42,6 +42,7 @@ vi.mock(
         handleSubmit: mocks.handleSubmit,
         isConfirming: false,
         isPreviewing: false,
+        orderAttempt: null,
         preview: null,
       };
     },

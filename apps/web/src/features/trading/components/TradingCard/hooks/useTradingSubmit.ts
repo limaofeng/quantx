@@ -5,6 +5,7 @@ import { useCurrentAccount } from '@/features/dashboard/hooks';
 import type { ManualOrderType } from '@/features/trading/components/TradingCard/hooks/useFormState';
 import {
   useConfirmManualOrder,
+  useManualOrderAttempt,
   useManualOrderCapabilities,
   usePreviewManualOrder,
 } from '@/features/trading/hooks';
@@ -21,6 +22,13 @@ import { createClientId } from '@/utils/clientId';
 export type ManualOrderPreviewTicket = NonNullable<
   Trading_PreviewManualOrderMutation['previewManualOrder']['preview']
 >;
+
+const TERMINAL_ATTEMPT_STATUSES = new Set([
+  'REJECTED',
+  'EXPIRED',
+  'KILL_SWITCHED',
+  'RECONCILE_REQUIRED',
+]);
 
 export interface TradingSubmitRequest {
   executionMode: ManualOrderExecutionMode;
@@ -64,14 +72,77 @@ export function useTradingSubmit(
     usePreviewManualOrder();
   const { execute: executeConfirm, loading: confirmLoading } =
     useConfirmManualOrder();
+  const [trackedClientOrderId, setTrackedClientOrderId] = useState<
+    string | null
+  >(null);
+  const {
+    attempt: orderAttempt,
+    refresh: refreshOrderAttempt,
+  } = useManualOrderAttempt(accountId, trackedClientOrderId);
   const [preview, setPreview] = useState<ManualOrderPreviewTicket | null>(null);
   const [confirmationError, setConfirmationError] = useState('');
   const processingRef = useRef(false);
+  const notifiedAttemptRef = useRef('');
 
   useEffect(() => {
     setPreview(null);
     setConfirmationError('');
+    setTrackedClientOrderId(null);
+    notifiedAttemptRef.current = '';
   }, [accountId, instrumentCode]);
+
+  const attemptStates = [orderAttempt?.status, orderAttempt?.deliveryStatus].map(
+    value => String(value || '').trim().toUpperCase()
+  );
+  const attemptFinished = Boolean(
+    orderAttempt?.brokerOrderId ||
+      attemptStates.some(value => TERMINAL_ATTEMPT_STATUSES.has(value))
+  );
+
+  useEffect(() => {
+    if (!trackedClientOrderId || attemptFinished) return;
+    const timer = window.setInterval(refreshOrderAttempt, 1_000);
+    return () => window.clearInterval(timer);
+  }, [attemptFinished, refreshOrderAttempt, trackedClientOrderId]);
+
+  useEffect(() => {
+    if (!orderAttempt || orderAttempt.clientOrderId !== trackedClientOrderId) {
+      return;
+    }
+    const fingerprint = [
+      orderAttempt.clientOrderId,
+      orderAttempt.brokerOrderId || '',
+      orderAttempt.status,
+      orderAttempt.deliveryStatus,
+    ].join(':');
+    if (notifiedAttemptRef.current === fingerprint) return;
+
+    if (orderAttempt.brokerOrderId) {
+      notifiedAttemptRef.current = fingerprint;
+      toast({
+        title: '券商委托已生成',
+        description: orderAttempt.message,
+      });
+      return;
+    }
+    const normalizedStatus = [
+      orderAttempt.status,
+      orderAttempt.deliveryStatus,
+    ]
+      .map(value => String(value || '').toUpperCase())
+      .find(value => TERMINAL_ATTEMPT_STATUSES.has(value));
+    if (normalizedStatus) {
+      notifiedAttemptRef.current = fingerprint;
+      toast({
+        title:
+          normalizedStatus === 'RECONCILE_REQUIRED'
+            ? '下单结果需要核对'
+            : '未生成券商委托',
+        description: orderAttempt.message,
+        variant: 'destructive',
+      });
+    }
+  }, [orderAttempt, toast, trackedClientOrderId]);
 
   const handleSubmit = useCallback(
     async (event: React.SyntheticEvent, request: TradingSubmitRequest) => {
@@ -218,10 +289,12 @@ export function useTradingSubmit(
       }
 
       setPreview(null);
+      setTrackedClientOrderId(payload.clientOrderId || null);
       toast({
-        title: '委托命令已排队',
+        title: '下单请求已进入队列',
         description:
-          payload.message || '请等待 QMT Agent 和券商委托回报更新最终状态',
+          payload.message ||
+          '尚未生成券商委托；正在等待 QMT Agent 下单前复核和券商回报',
       });
       onQueued?.();
       return true;
@@ -250,6 +323,7 @@ export function useTradingSubmit(
       handleSubmit,
       isConfirming: confirmLoading,
       isPreviewing: previewLoading,
+      orderAttempt,
       preview,
     }),
     [
@@ -261,6 +335,7 @@ export function useTradingSubmit(
       confirmPreview,
       dismissPreview,
       handleSubmit,
+      orderAttempt,
       preview,
       previewLoading,
     ]

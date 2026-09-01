@@ -2225,6 +2225,18 @@
         "risk": "READ",
         "stability": "web-internal"
       },
+      "manualOrderAttempt": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "marketIndexSnapshots": {
         "audiences": [
           "web",

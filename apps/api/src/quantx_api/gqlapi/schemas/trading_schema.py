@@ -3,8 +3,13 @@ from decimal import Decimal
 from typing import List, Optional
 
 import strawberry
+from quantx_contracts import LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
-from quantx_infrastructure.models import Instrument, PendingTradeOrder
+from quantx_infrastructure.models import (
+  Instrument,
+  PendingTradeOrder,
+  TradeCommandOutbox,
+)
 from quantx_infrastructure.models.enums import OrderStatus, OrderType, PriceType
 from quantx_infrastructure.models.order import Order as OrderModel
 from quantx_infrastructure.services.account_execution_safety_service import (
@@ -33,6 +38,7 @@ from ..trade_approval import TradeApprovalChallengeError
 from ..types import (
   CancelOrderInput,
   CancelOrderResult,
+  ManualOrderAttempt,
   ManualOrderConfirmationInput,
   ManualOrderConfirmationResult,
   ManualOrderPreview,
@@ -105,6 +111,47 @@ def _parse_price_type(value: str) -> PriceType:
     if key in _PRICE_TYPE_ALIASES:
       return _PRICE_TYPE_ALIASES[key]
   raise ValueError("报价类型无效")
+
+
+def _manual_order_attempt_message(
+  *,
+  broker_order_id: Optional[str],
+  delivery_status: str,
+  status: str,
+  status_reason: Optional[str],
+) -> str:
+  if broker_order_id:
+    return f"券商委托已生成：{broker_order_id}；最终状态以券商回报为准"
+
+  normalized_status = str(status or "").upper()
+  normalized_delivery = str(delivery_status or "").upper()
+  reason = str(status_reason or "").strip()
+  if normalized_status == "REJECTED" or normalized_delivery == "REJECTED":
+    reason_messages = {
+      "stale live quote": (
+        f"QMT Agent 下单前行情已超过 {LIVE_ORDER_MAX_QUOTE_AGE_SECONDS} 秒"
+      ),
+      "outside trading session": "QMT Agent 下单前发现当前不在交易时段",
+      "insufficient available volume": "QMT Agent 下单前发现可卖数量不足",
+      "insufficient cash": "QMT Agent 下单前发现可用资金不足",
+      "instrument suspended": "QMT Agent 下单前发现证券已停牌",
+    }
+    detail = reason_messages.get(reason.lower(), reason or "QMT Agent 下单前拒绝")
+    return f"{detail}，未向券商提交"
+  if normalized_status == "EXPIRED" or normalized_delivery == "EXPIRED":
+    return "下单命令已过期，未向券商提交"
+  if normalized_status == "KILL_SWITCHED" or normalized_delivery == "KILL_SWITCHED":
+    return "下单命令已被实盘安全开关拦截，未向券商提交"
+  if (
+    normalized_status == "RECONCILE_REQUIRED"
+    or normalized_delivery == "RECONCILE_REQUIRED"
+  ):
+    return "下单结果暂不确定，请先核对券商端，切勿重复提交"
+  if normalized_delivery == "ACKNOWLEDGED":
+    return "QMT Agent 已接收，尚未取得券商委托回报，请勿重复提交"
+  if normalized_delivery == "DELIVERED":
+    return "下单请求已送达 QMT Agent，尚未生成券商委托"
+  return "下单请求已进入可靠队列，尚未生成券商委托"
 
 
 async def _fetch_order(order_id: int, account_id: str) -> Optional[Order]:
@@ -209,6 +256,71 @@ class TradingQuery:
   ) -> List[Order]:
     return await OrderResolver.get_today_orders(
       await _resolve_account_id(info, account_id)
+    )
+
+  @strawberry.field(description="查询一次手动委托排队后的 Agent 与券商回报状态")
+  async def manual_order_attempt(
+    self,
+    info: strawberry.types.Info,
+    client_order_id: str,
+    account_id: Optional[str] = None,
+  ) -> Optional[ManualOrderAttempt]:
+    normalized_client_order_id = str(client_order_id or "").strip()
+    if not normalized_client_order_id or len(normalized_client_order_id) > 128:
+      raise ValueError("手动委托客户端订单号无效")
+    principal = principal_from_context(info.context)
+    resolved_account_id = await _resolve_account_id(info, account_id)
+    async with AsyncSessionLocal() as db:
+      row = (
+        await db.execute(
+          select(PendingTradeOrder, TradeCommandOutbox)
+          .outerjoin(
+            TradeCommandOutbox,
+            TradeCommandOutbox.client_order_id
+            == PendingTradeOrder.client_order_id,
+          )
+          .where(
+            PendingTradeOrder.client_order_id == normalized_client_order_id,
+            PendingTradeOrder.account_id == resolved_account_id,
+            PendingTradeOrder.user_id == principal.user_id,
+            PendingTradeOrder.bucket == "manual",
+          )
+          .limit(1)
+        )
+      ).one_or_none()
+    if row is None:
+      return None
+
+    pending, outbox = row
+    delivery_status = str(
+      getattr(outbox, "delivery_status", None) or pending.status or "QUEUED"
+    ).upper()
+    status = str(pending.status or delivery_status).upper()
+    status_reason = str(
+      pending.status_reason or getattr(outbox, "last_error", None) or ""
+    ).strip() or None
+    broker_order_id = str(pending.broker_order_id or "").strip() or None
+    return ManualOrderAttempt(
+      account_id=resolved_account_id,
+      client_order_id=str(pending.client_order_id),
+      broker_order_id=broker_order_id,
+      instrument_code=str(pending.instrument_code),
+      side=ManualOrderSide(str(pending.side).upper()),
+      volume=int(pending.volume or 0),
+      status=status,
+      delivery_status=delivery_status,
+      status_reason=status_reason,
+      message=_manual_order_attempt_message(
+        broker_order_id=broker_order_id,
+        delivery_status=delivery_status,
+        status=status,
+        status_reason=status_reason,
+      ),
+      execution_mode=ManualOrderExecutionMode(
+        str(pending.execution_mode or "paper").upper()
+      ),
+      created_at=pending.created_at,
+      updated_at=pending.updated_at,
     )
 
   @strawberry.field(description="获取历史委托列表")
@@ -467,7 +579,7 @@ class TradingMutation:
       return ManualOrderConfirmationResult(
         success=True,
         code="MANUAL_ORDER_QUEUED",
-        message="交易命令已排队；请等待 QMT Agent 券商回报",
+        message="下单请求已进入可靠队列，尚未生成券商委托；正在等待 QMT Agent 下单前复核和券商回报",
         challenge_id=result.challenge_id,
         client_order_id=result.client_order_id,
         status=result.status,

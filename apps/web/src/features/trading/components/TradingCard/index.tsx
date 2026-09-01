@@ -273,6 +273,7 @@ export function TradingCard({
     handleSubmit,
     isConfirming,
     isPreviewing,
+    orderAttempt,
     preview,
   } = useTradingSubmit(selectedStockCode, () => {
     resetForm();
@@ -752,6 +753,33 @@ export function TradingCard({
           <p className="text-center text-ui-caption text-muted-foreground/50">
             服务端会重新计算合法数量、费用并执行统一风控
           </p>
+          {orderAttempt && (
+            <div
+              role="status"
+              className={cn(
+                'rounded-md border px-2.5 py-2 text-ui-caption leading-relaxed',
+                orderAttempt.brokerOrderId
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500'
+                  : [orderAttempt.status, orderAttempt.deliveryStatus].some(
+                        value =>
+                          ['REJECTED', 'EXPIRED', 'KILL_SWITCHED'].includes(
+                            String(value).toUpperCase()
+                          )
+                      )
+                    ? 'border-destructive/30 bg-destructive/10 text-destructive'
+                    : 'border-amber-500/30 bg-amber-500/10 text-amber-500'
+              )}
+            >
+              <div className="font-black">
+                {orderAttempt.brokerOrderId
+                  ? `券商委托 ${orderAttempt.brokerOrderId}`
+                  : '下单状态（尚非券商委托）'}
+              </div>
+              <div className="mt-0.5 text-current/80">
+                {orderAttempt.message}
+              </div>
+            </div>
+          )}
         </div>
       </form>
       <ManualOrderConfirmationDialog

@@ -84,6 +84,7 @@ _register(
     "liquidationOrder",
     "liquidationOrders",
     "liquidationSummary",
+    "manualOrderAttempt",
     "order",
     "redemptionRecords",
     "todayOrders",

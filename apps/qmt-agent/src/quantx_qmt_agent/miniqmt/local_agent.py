@@ -8,6 +8,8 @@ from datetime import datetime, time, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from quantx_contracts import LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
+
 from quantx_qmt_agent import clock
 from quantx_qmt_agent.qmt_types import OrderType, PriceType
 
@@ -180,12 +182,14 @@ class MiniQmtLocalAgent:
     *,
     market_data_manager: Any = None,
     max_report_lag_seconds: int = 90,
-    max_quote_lag_seconds: int = 15,
+    max_quote_lag_seconds: int = LIVE_ORDER_MAX_QUOTE_AGE_SECONDS,
   ) -> None:
     self.trading_manager = trading_manager
     self.market_data_manager = market_data_manager
     self.max_report_lag_seconds = int(max_report_lag_seconds or 30)
-    self.max_quote_lag_seconds = int(max_quote_lag_seconds or 15)
+    self.max_quote_lag_seconds = int(
+      max_quote_lag_seconds or LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
+    )
     self.status = LocalAgentStatus.READY
     self.last_report_time: Optional[datetime] = None
     self.last_full_snapshot: Dict[str, Any] = {}

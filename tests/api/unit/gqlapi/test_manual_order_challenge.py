@@ -108,6 +108,51 @@ async def test_preflight_rejects_mode_that_does_not_match_live_trading(
   assert "不会自动切换执行环境" in rejected.value.message
 
 
+@pytest.mark.asyncio
+async def test_preflight_reports_lunch_break_before_reading_stale_quote(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(manual_order_runtime.settings, "runtime_profile", "web")
+  monkeypatch.setattr(manual_order_runtime.settings, "enable_real_trading", False)
+  monkeypatch.setattr(
+    manual_order_runtime.settings,
+    "real_trading_account_allowlist",
+    [],
+  )
+  lunch_time = datetime(2026, 9, 1, 12, 34, 0)
+  quote_lookup = AsyncMock(side_effect=AssertionError("quote lookup must not run"))
+  hours_check = AsyncMock(return_value=False)
+  monkeypatch.setattr(time_utils, "now", lambda: lunch_time)
+  monkeypatch.setattr(
+    manual_order,
+    "latest_market_quote_cache",
+    SimpleNamespace(get_ticks=quote_lookup),
+  )
+  monkeypatch.setattr(
+    manual_order,
+    "_trading_time_service",
+    SimpleNamespace(is_trading_hours=hours_check),
+  )
+  request = normalize_manual_order_request(
+    account_id="ACCOUNT-1",
+    instrument_code="600000.SH",
+    side="SELL",
+    price_type="LIMIT",
+    volume=100,
+    limit_price=10.5,
+    idempotency_key="lunch-break-preflight",
+    execution_mode="PAPER",
+  )
+
+  with pytest.raises(TradeApprovalChallengeError) as rejected:
+    await manual_order._preflight(request, db=SimpleNamespace())
+
+  assert rejected.value.code == "OUTSIDE_TRADING_HOURS"
+  assert rejected.value.message == "当前为 A 股午间休市，13:00 后可重新获取委托预览"
+  hours_check.assert_awaited_once_with("SH", lunch_time)
+  quote_lookup.assert_not_awaited()
+
+
 _MUTABLE_SNAPSHOT_AT = datetime(2026, 8, 15, 10, 0, 0)
 
 

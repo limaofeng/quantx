@@ -230,6 +230,7 @@ from .strategy_types import (
 from .trading_types import (
   CancelOrderInput,
   CancelOrderResult,
+  ManualOrderAttempt,
   ManualOrderConfirmationInput,
   ManualOrderConfirmationResult,
   ManualOrderPreview,
@@ -297,6 +298,7 @@ __all__ = [
   "OrderMutationResult",
   "CancelOrderInput",
   "CancelOrderResult",
+  "ManualOrderAttempt",
   "ManualOrderConfirmationInput",
   "ManualOrderConfirmationResult",
   "ManualOrderPreview",

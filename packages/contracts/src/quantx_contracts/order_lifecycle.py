@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from enum import Enum
 
+# The API preview and the QMT Agent's final pre-submit check must enforce the
+# same quote-age boundary. A command accepted by the API must not be rejected
+# milliseconds later merely because two runtimes use different thresholds.
+LIVE_ORDER_MAX_QUOTE_AGE_SECONDS = 30
+
 
 class OrderLifecycleStatus(str, Enum):
   QUEUED = "QUEUED"
