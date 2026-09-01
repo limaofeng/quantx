@@ -148,7 +148,7 @@ export function StockHoldingSnapshot({
       </div>
       {!holding && (
         <div className="border-t border-white/5 px-3 py-2 text-ui-caption font-bold text-amber-200">
-          当前标的未持仓，平仓操作不可用。
+          当前标的未持仓，卖出操作不可用。
         </div>
       )}
     </WorkspacePanel>

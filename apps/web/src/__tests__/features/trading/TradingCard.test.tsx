@@ -87,7 +87,11 @@ function makeStock(): Stock {
 
 function setupTradingCard(
   position = makePosition(),
-  portfolioSummary = { cash: 487300 }
+  portfolioSummary = { cash: 487300 },
+  options: {
+    initialSide?: 'BUY' | 'SELL';
+    initialStockCode?: string;
+  } = {}
 ) {
   const selectedStock = makeStock();
 
@@ -100,8 +104,13 @@ function setupTradingCard(
     stocksLoading: false,
   });
 
-  render(
-    <TradingCard holdings={[position]} portfolioSummary={portfolioSummary} />
+  return render(
+    <TradingCard
+      holdings={[position]}
+      initialSide={options.initialSide}
+      initialStockCode={options.initialStockCode}
+      portfolioSummary={portfolioSummary}
+    />
   );
 }
 
@@ -120,10 +129,60 @@ describe('TradingCard', () => {
     mocks.handleSubmit.mockImplementation(event => event.preventDefault());
   });
 
+  it('starts from the requested sell side', () => {
+    const position = makePosition();
+    setupTradingCard(
+      position,
+      { cash: 487300 },
+      {
+        initialSide: 'SELL',
+        initialStockCode: position.stockCode,
+      }
+    );
+
+    expect(screen.getByRole('button', { name: '卖出' })).toHaveClass(
+      'text-white'
+    );
+    expect(
+      screen.getByRole('button', { name: '获取卖出预览' })
+    ).toBeInTheDocument();
+  });
+
+  it('restores the requested sell side when the selected holding changes', () => {
+    const position = makePosition();
+    const view = setupTradingCard(
+      position,
+      { cash: 487300 },
+      {
+        initialSide: 'SELL',
+        initialStockCode: position.stockCode,
+      }
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '买入' }));
+    fireEvent.change(screen.getByPlaceholderText('100'), {
+      target: { value: '100' },
+    });
+
+    view.rerender(
+      <TradingCard
+        holdings={[position]}
+        initialSide="SELL"
+        initialStockCode="000543.SZ"
+        portfolioSummary={{ cash: 487300 }}
+      />
+    );
+
+    expect(screen.getByRole('button', { name: '卖出' })).toHaveClass(
+      'text-white'
+    );
+    expect(screen.getByPlaceholderText('100')).toHaveValue(null);
+  });
+
   it('uses sellable canUseVolume when filling a full close quantity', () => {
     setupTradingCard();
 
-    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+    fireEvent.click(screen.getByRole('button', { name: '卖出' }));
     fireEvent.click(screen.getByRole('button', { name: '全仓' }));
 
     expect(screen.getByPlaceholderText('100')).toHaveValue(420);
@@ -169,7 +228,7 @@ describe('TradingCard', () => {
   it('clears a quantity when switching trading direction', () => {
     setupTradingCard();
 
-    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+    fireEvent.click(screen.getByRole('button', { name: '卖出' }));
     fireEvent.click(screen.getByRole('button', { name: '全仓' }));
     fireEvent.click(screen.getByRole('button', { name: '买入' }));
 
@@ -179,7 +238,7 @@ describe('TradingCard', () => {
   it('leaves manual quantity normalization to the server preview', () => {
     setupTradingCard();
 
-    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+    fireEvent.click(screen.getByRole('button', { name: '卖出' }));
     fireEvent.change(screen.getByPlaceholderText('100'), {
       target: { value: '10000' },
     });
@@ -195,9 +254,9 @@ describe('TradingCard', () => {
       'text-white'
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+    fireEvent.click(screen.getByRole('button', { name: '卖出' }));
 
-    expect(screen.getByRole('button', { name: '获取平仓预览' })).toHaveClass(
+    expect(screen.getByRole('button', { name: '获取卖出预览' })).toHaveClass(
       'bg-market-down',
       'text-white'
     );
@@ -225,7 +284,7 @@ describe('TradingCard', () => {
 
     expect(screen.getByText('LIVE')).toBeVisible();
 
-    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+    fireEvent.click(screen.getByRole('button', { name: '卖出' }));
     expect(screen.getByText('PAPER')).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '买入' }));

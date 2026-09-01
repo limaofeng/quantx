@@ -92,10 +92,8 @@ const resolveDefaultExecutionMode = (
 ) => {
   const liveAllowed = Boolean(
     capabilities?.defaultExecutionMode === ManualOrderExecutionMode.Live &&
-      capabilities.executionModes.includes(ManualOrderExecutionMode.Live) &&
-      (tradeType === 'buy'
-        ? capabilities.canLiveBuy
-        : capabilities.canLiveSell)
+    capabilities.executionModes.includes(ManualOrderExecutionMode.Live) &&
+    (tradeType === 'buy' ? capabilities.canLiveBuy : capabilities.canLiveSell)
   );
   return liveAllowed
     ? ManualOrderExecutionMode.Live
@@ -189,6 +187,7 @@ export function TradingCard({
   } = useStockSearch(holdings);
 
   const normalizedInitialStockCode = normalizeStockCode(initialStockCode);
+  const requestedTradeType = initialSide === 'SELL' ? 'sell' : 'buy';
   const selectedStockCode = getStockCode(selectedStock);
   const selectedHolding = React.useMemo(
     () =>
@@ -205,6 +204,16 @@ export function TradingCard({
     },
     [handleStockSelect, onStockSelect, setPrice]
   );
+
+  React.useEffect(() => {
+    setTradeType(requestedTradeType);
+    setQuantity('');
+  }, [
+    normalizedInitialStockCode,
+    requestedTradeType,
+    setQuantity,
+    setTradeType,
+  ]);
 
   React.useEffect(() => {
     if (!normalizedInitialStockCode) return;
@@ -451,7 +460,7 @@ export function TradingCard({
                 : 'text-muted-foreground hover:text-foreground'
             )}
           >
-            平仓
+            卖出
           </button>
         </div>
       </div>
@@ -736,7 +745,7 @@ export function TradingCard({
                 <span>生成预览中...</span>
               </div>
             ) : (
-              `获取${tradeType === 'buy' ? '买入' : '平仓'}预览`
+              `获取${tradeType === 'buy' ? '买入' : '卖出'}预览`
             )}
           </Button>
           <p className="text-center text-ui-caption text-muted-foreground/50">

@@ -35,9 +35,9 @@ function getUrlSymbol(search: string) {
 }
 
 function getUrlSide(search: string): 'BUY' | 'SELL' {
-  return new URLSearchParams(search).get('side')?.toUpperCase() === 'SELL'
-    ? 'SELL'
-    : 'BUY';
+  return new URLSearchParams(search).get('side')?.toUpperCase() === 'BUY'
+    ? 'BUY'
+    : 'SELL';
 }
 
 function getInitialView(search: string): StockWorkspaceView {
@@ -71,9 +71,14 @@ function makeHoldingStock(holding: Position): Stock {
   };
 }
 
-function buildHoldingsSymbolPath(symbol: string, search: string) {
+function buildHoldingsSymbolPath(
+  symbol: string,
+  search: string,
+  side?: 'BUY' | 'SELL'
+) {
   const params = new URLSearchParams(search);
   params.set('symbol', symbol);
+  if (side) params.set('side', side);
   return `/holdings?${params.toString()}`;
 }
 
@@ -140,10 +145,13 @@ export default function TradingPage() {
 
   const handleHoldingSelect = React.useCallback(
     (holding: Position) => {
-      handleStockSelect(makeHoldingStock(holding));
+      const symbol = normalizeSymbol(holding.stockCode);
+      if (symbol && (symbol !== urlSymbol || initialSide !== 'SELL')) {
+        openStudioTab(buildHoldingsSymbolPath(symbol, search, 'SELL'));
+      }
       setActiveView('ORDER');
     },
-    [handleStockSelect]
+    [initialSide, openStudioTab, search, urlSymbol]
   );
 
   const content = (
