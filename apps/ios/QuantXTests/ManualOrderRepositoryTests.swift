@@ -160,7 +160,6 @@ final class ManualOrderRepositoryTests: XCTestCase {
     )
 
     XCTAssertEqual(capabilities.defaultExecutionMode, .live)
-    XCTAssertEqual(capabilities.selectableExecutionModes, [.paper, .live])
     XCTAssertTrue(
       capabilities.supports(
         direction: .buy,
@@ -170,7 +169,7 @@ final class ManualOrderRepositoryTests: XCTestCase {
     )
   }
 
-  func testCapabilitiesHideLiveWhenServerDoesNotReturnReadyLive() throws {
+  func testCapabilitiesUsePaperWhenServerDoesNotReturnReadyLive() throws {
     let capabilities = try ManualOrderRepository.mapCapabilities(
       makeGraphQLCapabilities(executionModes: [.paper], liveReady: false),
       requestedInstrumentCode: "600519.SH",
@@ -178,8 +177,14 @@ final class ManualOrderRepositoryTests: XCTestCase {
       authorizedAccountIDs: ["ACCOUNT-1"]
     )
 
-    XCTAssertEqual(capabilities.selectableExecutionModes, [.paper])
-    XCTAssertFalse(capabilities.canSelectLive)
+    XCTAssertEqual(capabilities.defaultExecutionMode, .paper)
+    XCTAssertFalse(
+      capabilities.supports(
+        direction: .buy,
+        quoteType: .limit,
+        executionMode: .live
+      )
+    )
   }
 
   func testCapabilitiesFailClosedForUnknownEnum() {

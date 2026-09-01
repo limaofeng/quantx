@@ -102,16 +102,6 @@ struct ManualOrderEntryCapabilities: Equatable, Sendable {
   let liveBlockedReasons: [String]
   let warnings: [String]
 
-  var selectableExecutionModes: [ManualOrderExecutionMode] {
-    var modes: [ManualOrderExecutionMode] = [.paper]
-    if canSelectLive { modes.append(.live) }
-    return modes
-  }
-
-  var canSelectLive: Bool {
-    canManualTrade && executionModes.contains(.live) && liveReady
-  }
-
   func supports(
     direction: ManualOrderDirection,
     quoteType: ManualOrderQuoteType,

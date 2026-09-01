@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Position } from '@/features/portfolio/types';
@@ -21,7 +21,6 @@ const mocks = vi.hoisted(() => ({
     warnings: [],
   },
   handleSubmit: vi.fn(),
-  onQueued: vi.fn(),
   useStockSearch: vi.fn(),
 }));
 
@@ -32,8 +31,7 @@ vi.mock('@/hooks/useStockSearch', () => ({
 vi.mock(
   '@/features/trading/components/TradingCard/hooks/useTradingSubmit',
   () => ({
-    useTradingSubmit: (_instrumentCode: string, onQueued?: () => void) => {
-      mocks.onQueued.mockImplementation(() => onQueued?.());
+    useTradingSubmit: () => {
       return {
         capabilities: mocks.capabilities,
         capabilitiesError: null,
@@ -205,68 +203,43 @@ describe('TradingCard', () => {
     );
   });
 
-  it('uses the PAPER capability default and preserves explicit mode changes', () => {
+  it('does not expose a manual PAPER or LIVE switch', () => {
     setupTradingCard();
 
-    expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
-    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
-      'aria-pressed',
-      'false'
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'LIVE 实盘' }));
-
-    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
-    expect(screen.getByText(/高风险：确认后进入实盘执行链/)).toBeVisible();
-
-    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
-
-    expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'LIVE 实盘' }));
-    act(() => mocks.onQueued());
-
-    expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
+    expect(screen.getByText('PAPER')).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'PAPER 模拟' })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'LIVE 实盘' })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('执行模式')).not.toBeInTheDocument();
   });
 
-  it('follows the LIVE capability default across direction and queue resets', () => {
-    Object.assign(mocks.capabilities, { defaultExecutionMode: 'LIVE' });
+  it('derives the execution mode from capability and direction', () => {
+    Object.assign(mocks.capabilities, {
+      canLiveSell: false,
+      defaultExecutionMode: 'LIVE',
+    });
     setupTradingCard();
 
-    expect(screen.getByText('默认 LIVE')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'PAPER 模拟' }));
-    expect(screen.getByRole('button', { name: 'PAPER 模拟' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
+    expect(screen.getByText('LIVE')).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: '平仓' }));
-    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
+    expect(screen.getByText('PAPER')).toBeVisible();
 
-    act(() => mocks.onQueued());
-    expect(screen.getByRole('button', { name: 'LIVE 实盘' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
+    fireEvent.click(screen.getByRole('button', { name: '买入' }));
+    fireEvent.change(screen.getByPlaceholderText('0.00'), {
+      target: { value: '48.76' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('100'), {
+      target: { value: '420' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '获取买入预览' }));
+
+    expect(mocks.handleSubmit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ executionMode: 'LIVE', tradeType: 'buy' })
     );
   });
 

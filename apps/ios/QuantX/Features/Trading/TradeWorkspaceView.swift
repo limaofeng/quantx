@@ -215,7 +215,6 @@ private struct ManualOrderTicketView: View {
 
   @State private var instrumentCode: String
   @State private var quoteType = ManualOrderQuoteType.limit
-  @State private var executionMode = ManualOrderExecutionMode.paper
   @State private var volumeText = ""
   @State private var limitPriceText = ""
   @State private var previewInProgress = false
@@ -280,12 +279,10 @@ private struct ManualOrderTicketView: View {
     }
     .onChange(of: volumeText) { _, _ in invalidateQueuedState() }
     .onChange(of: limitPriceText) { _, _ in invalidateQueuedState() }
-    .onChange(of: executionMode) { _, _ in invalidateQueuedState() }
     .onChange(of: store.capabilityState) { _, _ in
       normalizeSelectionsForCapabilities()
     }
     .task(id: normalizedInstrumentCode) {
-      executionMode = .paper
       quoteType = .limit
       previewTicket = nil
       store.clearCapabilities()
@@ -369,34 +366,6 @@ private struct ManualOrderTicketView: View {
           capabilities.canManualTrade,
           capabilities.supportedDirections.contains(direction)
         {
-          VStack(alignment: .leading, spacing: 7) {
-            Text("执行模式")
-              .font(.subheadline.weight(.semibold))
-            if capabilities.canSelectLive {
-              Picker("执行模式", selection: $executionMode) {
-                ForEach(capabilities.selectableExecutionModes) { mode in
-                  Text(mode.title).tag(mode)
-                }
-              }
-              .pickerStyle(.segmented)
-              .accessibilityIdentifier("manual-order-execution-mode")
-            } else {
-              Label("模拟盘（默认）", systemImage: "checkmark.shield.fill")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(QuantXTheme.accent)
-            }
-            Text(
-              executionMode == .live
-                ? "高风险：本次预览将明确请求实盘；确认时必须逐次通过 Face ID / Touch ID。"
-                : "默认只进入模拟执行链路，不会切换为实盘。"
-            )
-            .font(.caption)
-            .foregroundStyle(
-              executionMode == .live ? QuantXTheme.warning : QuantXTheme.secondaryText
-            )
-            .fixedSize(horizontal: false, vertical: true)
-          }
-
           VStack(alignment: .leading, spacing: 7) {
             Text("报价方式")
               .font(.subheadline.weight(.semibold))
@@ -629,9 +598,21 @@ private struct ManualOrderTicketView: View {
     ) == true
   }
 
+  private var executionMode: ManualOrderExecutionMode {
+    guard let capabilities = currentCapabilities,
+      capabilities.supports(
+        direction: direction,
+        quoteType: quoteType,
+        executionMode: capabilities.defaultExecutionMode
+      )
+    else {
+      return .paper
+    }
+    return capabilities.defaultExecutionMode
+  }
+
   private func normalizeSelectionsForCapabilities() {
-    guard let capabilities = currentCapabilities else {
-      executionMode = .paper
+    guard currentCapabilities != nil else {
       quoteType = .limit
       return
     }
@@ -639,13 +620,6 @@ private struct ManualOrderTicketView: View {
       quoteType = selectableQuoteTypes.first ?? .limit
       limitPriceText = quoteType == .best ? "" : limitPriceText
     }
-    executionMode = capabilities.supports(
-      direction: direction,
-      quoteType: quoteType,
-      executionMode: capabilities.defaultExecutionMode
-    )
-      ? capabilities.defaultExecutionMode
-      : .paper
   }
 
   private func masked(_ accountID: String) -> String {

@@ -58,7 +58,8 @@ Web 交易票据与 iOS 共用服务端手工委托用例：先读取
 
 - 默认执行模式必须读取 `orderEntryCapabilities.defaultExecutionMode`：账户级
   `liveTrading` 有效且当前买卖方向允许实盘时使用 `LIVE`，否则使用 `PAPER`。
-  用户仍可在 capability 返回的模式范围内显式切换。
+  Web 与 iOS 都不得提供 PAPER/LIVE 手工切换；最终模式只读展示，并在预览请求中
+  显式携带以供服务端校验和审计。
 - `trade:manual` 必须显式授予，不能由 `orders:write` 或管理员身份推导；缺少权限
   时票据保持只读并展示服务端阻断原因。
 - 报价类型只展示 capability 返回的 `LIMIT` 或 `BEST`，不得回退到旧的通用市价

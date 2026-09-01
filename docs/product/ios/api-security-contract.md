@@ -430,7 +430,7 @@ REST `detail` 和 GraphQL `errors[].extensions` 至少包含稳定 `code`、
 | --- | --- | --- |
 | 原生会话保存设备 scope，唯一账户从授权关系实时解析 | 尚缺 TestFlight 五日会话/网络切换观察 | 自动化可验收，G4 保持阻断 |
 | iOS Mutation 已拆分专用 scope，兼容 Web 保留宽权限 | 仍需逐字段发布契约与攻击矩阵全量复核 | 原生不得回退 `mutation:write` |
-| 手工订单已使用 capability 与两阶段挑战 | 尚缺 paper 全场景和受控实盘证据 | 默认模式跟随 capability 的 `liveTrading` 结论；门禁未允许的方向不提供 LIVE |
+| 手工订单已使用 capability 与两阶段挑战 | 尚缺 paper 全场景和受控实盘证据 | 模式只跟随 capability 的 `liveTrading` 结论；原生端不提供 PAPER/LIVE 手工切换 |
 | 清仓组和退出计划精确授权契约已落地 | 条件计划完整编辑体验与真机证据仍需收口 | 不调用兼容 `liquidate*` 直写接口 |
 | 策略移动参数 allowlist、版本、冲突恢复和实盘挑战已通过 iOS 自动化 | 尚缺 stop/DRAINING、真机、paper 与受控实盘证据 | 未完成端到端证据前保持 capability 关闭 |
 | 做 T 入场及账户级窗口/激活/熔断均有设备绑定挑战，iOS 控制已通过目标自动化 | 尚缺完整设置、真机与受控实盘观察 | 原生只调用两阶段接口；回测/PAPER 不参与授权，激活以当前安全状态和显式确认为准 |
