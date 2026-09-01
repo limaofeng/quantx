@@ -81,7 +81,10 @@ def _validate_divid_factor_replacement_audit(
       raise RuntimeError(f"divid factor replacement audit field invalid: {field}")
     return value
 
-  if audit.get("audit_schema_version") != 1:
+  if (
+    type(audit.get("audit_schema_version")) is not int
+    or audit.get("audit_schema_version") != 2
+  ):
     raise RuntimeError("divid factor replacement audit schema is unsupported")
   if count("stock_count") != len(stock_codes):
     raise RuntimeError("divid factor replacement stock count mismatch")
@@ -103,6 +106,32 @@ def _validate_divid_factor_replacement_audit(
     or source_sha256 != persisted_sha256
   ):
     raise RuntimeError("divid factor replacement content digest mismatch")
+  code_audits = audit.get("code_audits")
+  if not isinstance(code_audits, dict) or set(code_audits) != set(stock_codes):
+    raise RuntimeError("divid factor replacement per-code scope mismatch")
+  per_code_total = 0
+  for code in stock_codes:
+    item = code_audits.get(code)
+    if not isinstance(item, dict):
+      raise RuntimeError("divid factor replacement per-code audit is invalid")
+    record_count = item.get("record_count")
+    if (
+      isinstance(record_count, bool)
+      or not isinstance(record_count, int)
+      or record_count < 0
+    ):
+      raise RuntimeError("divid factor replacement per-code count is invalid")
+    code_source_sha256 = str(item.get("source_sha256") or "")
+    code_persisted_sha256 = str(item.get("persisted_sha256") or "")
+    if (
+      len(code_source_sha256) != 64
+      or any(character not in "0123456789abcdef" for character in code_source_sha256)
+      or code_source_sha256 != code_persisted_sha256
+    ):
+      raise RuntimeError("divid factor replacement per-code digest mismatch")
+    per_code_total += record_count
+  if per_code_total != records_received:
+    raise RuntimeError("divid factor replacement per-code count mismatch")
 
 
 async def _persisted_instrument_codes() -> list[str]:

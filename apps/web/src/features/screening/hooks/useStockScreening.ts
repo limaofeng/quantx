@@ -613,7 +613,9 @@ export function useStockScreening() {
       latestRunStatus: status?.latestRunStatus ?? null,
       calculationVersion: page?.calculationVersion,
       calculatedAt: page?.calculatedAt ?? null,
-      hasStaleData: Boolean(page?.hasStaleData),
+      hasStaleData: Boolean(
+        page?.hasStaleData || (page?.snapshotDate && !completeSnapshotIdentity)
+      ),
       isComplete: Boolean(
         status?.isComplete && page?.isComplete && completeSnapshotIdentity
       ),

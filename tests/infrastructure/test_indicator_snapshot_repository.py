@@ -2,6 +2,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
+import quantx_infrastructure.repositories.indicator_snapshot_repository as snapshot_repository_module
 from quantx_infrastructure.core.financial_quality import (
   minimum_required_financial_report_date,
 )
@@ -12,6 +13,7 @@ from quantx_infrastructure.repositories.indicator_snapshot_repository import (
   _effective_roe_quality,
   _normalize_instrument_type,
 )
+from quantx_infrastructure.services.snapshot_fencing import SnapshotFenceLost
 from sqlalchemy.dialects import postgresql
 
 
@@ -105,12 +107,16 @@ class _FakeSession:
   def __init__(self) -> None:
     self.statements = []
     self.commits = 0
+    self.rollbacks = 0
 
   async def execute(self, statement):
     self.statements.append(statement)
 
   async def commit(self):
     self.commits += 1
+
+  async def rollback(self):
+    self.rollbacks += 1
 
 
 class _ScreenResult:
@@ -137,10 +143,24 @@ class _ScreenSession:
 
 
 @pytest.mark.asyncio
-async def test_factor_scope_invalidation_is_exact_and_committed_before_recalculation():
+async def test_factor_scope_invalidation_is_exact_and_committed_before_recalculation(
+  monkeypatch,
+):
+  async def assert_owner(_db, snapshot_run_ids):
+    assert snapshot_run_ids == {date(2026, 5, 20): 7}
+
+  monkeypatch.setattr(
+    snapshot_repository_module,
+    "assert_snapshot_run_owner",
+    assert_owner,
+  )
   session = _FakeSession()
   repo = IndicatorSnapshotRepository(session)
-  await repo.invalidate_factor_scope(["000001.SZ"], [date(2026, 5, 20)])
+  await repo.invalidate_factor_scope(
+    ["000001.SZ"],
+    [date(2026, 5, 20)],
+    snapshot_run_ids={date(2026, 5, 20): 7},
+  )
   assert session.commits == 1
   assert len(session.statements) == 1
   sql = str(
@@ -161,13 +181,45 @@ async def test_factor_scope_invalidation_is_exact_and_committed_before_recalcula
 @pytest.mark.asyncio
 async def test_factor_scope_invalidation_never_expands_empty_scope(codes, dates):
   session = _FakeSession()
-  await IndicatorSnapshotRepository(session).invalidate_factor_scope(codes, dates)
+  await IndicatorSnapshotRepository(session).invalidate_factor_scope(
+    codes,
+    dates,
+    snapshot_run_ids={},
+  )
   assert session.statements == []
   assert session.commits == 0
 
 
 @pytest.mark.asyncio
-async def test_snapshot_bulk_upsert_uses_bounded_multi_row_statements() -> None:
+async def test_snapshot_bulk_upsert_uses_bounded_multi_row_statements(
+  monkeypatch,
+) -> None:
+  guard_calls = []
+
+  async def acquire_guard(_db, **kwargs):
+    guard_calls.append(("acquire", kwargs))
+
+  async def assert_publish_owner(_db, **kwargs):
+    guard_calls.append(("assert", kwargs))
+
+  async def assert_owner(_db, snapshot_run_ids):
+    assert snapshot_run_ids == {date(2026, 7, 29): 9}
+
+  monkeypatch.setattr(
+    snapshot_repository_module,
+    "acquire_snapshot_publish_guard",
+    acquire_guard,
+  )
+  monkeypatch.setattr(
+    snapshot_repository_module,
+    "assert_snapshot_publish_owner",
+    assert_publish_owner,
+  )
+  monkeypatch.setattr(
+    snapshot_repository_module,
+    "assert_snapshot_run_owner",
+    assert_owner,
+  )
   session = _FakeSession()
   repo = IndicatorSnapshotRepository(session)
   count = MAX_BULK_UPSERT_RECORDS * 2 + 1
@@ -181,12 +233,66 @@ async def test_snapshot_bulk_upsert_uses_bounded_multi_row_statements() -> None:
     for index in range(count)
   ]
 
-  saved = await repo.bulk_upsert(records)
+  saved = await repo.bulk_upsert(
+    records,
+    snapshot_run_ids={date(2026, 7, 29): 9},
+    lock_backend_pid=101,
+  )
 
   assert saved == count
   assert len(session.statements) == 3
   assert session.commits == 1
   assert all("ON CONFLICT" in str(statement) for statement in session.statements)
+  assert guard_calls == [
+    (
+      "acquire",
+      {
+        "lock_backend_pid": 101,
+        "snapshot_dates": (date(2026, 7, 29),),
+      },
+    ),
+    (
+      "assert",
+      {
+        "lock_backend_pid": 101,
+        "snapshot_dates": (date(2026, 7, 29),),
+      },
+    ),
+  ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_bulk_upsert_rolls_back_before_writing_when_owner_is_lost(
+  monkeypatch,
+) -> None:
+  async def reject_guard(_db, **_kwargs):
+    raise SnapshotFenceLost("simulated owner loss")
+
+  monkeypatch.setattr(
+    snapshot_repository_module,
+    "acquire_snapshot_publish_guard",
+    reject_guard,
+  )
+  session = _FakeSession()
+  repo = IndicatorSnapshotRepository(session)
+
+  with pytest.raises(SnapshotFenceLost, match="owner loss"):
+    await repo.bulk_upsert(
+      [
+        {
+          "code": "000001.SZ",
+          "snapshot_date": date(2026, 7, 29),
+          "instrument_type": "stock",
+          "name": "平安银行",
+        }
+      ],
+      snapshot_run_ids={date(2026, 7, 29): 9},
+      lock_backend_pid=101,
+    )
+
+  assert session.statements == []
+  assert session.commits == 0
+  assert session.rollbacks == 1
 
 
 @pytest.mark.asyncio

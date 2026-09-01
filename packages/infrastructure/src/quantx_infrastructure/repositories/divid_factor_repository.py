@@ -8,13 +8,23 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Iterable, List, Optional, Sequence
 
-from sqlalchemy import delete, func, insert, select
+from quantx_domain.factors import FACTOR_VERSION
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from quantx_infrastructure.models.daily_signal_run import DailySignalRun
 from quantx_infrastructure.models.divid_factor import DividFactor, DividFactorTable
+from quantx_infrastructure.models.indicator_snapshot import IndicatorSnapshot
 
 FOUR_PLACES = Decimal("0.0001")
 SIX_PLACES = Decimal("0.000001")
+DIVID_FACTOR_WRITE_LOCK_KEY = int.from_bytes(
+  # Keep the deployed replacement key so a rolling restart cannot split the
+  # lock domain between an older authoritative writer and these full writers.
+  hashlib.sha256(b"quantx:divid-factor-replacement-v1").digest()[:8],
+  byteorder="big",
+  signed=True,
+)
 
 
 def canonical_divid_factor_rows(
@@ -118,6 +128,33 @@ class DividFactorRepository:
   def __init__(self, db_session: AsyncSession):
     self.db = db_session
 
+  async def _acquire_write_lock(self) -> None:
+    """Serialize every legacy-table mutation in the current transaction."""
+
+    await self.db.execute(
+      select(func.pg_advisory_xact_lock(DIVID_FACTOR_WRITE_LOCK_KEY))
+    )
+
+  async def _invalidate_published_snapshots(self) -> None:
+    """Revoke every certified snapshot in the same factor-write transaction."""
+
+    await self.db.execute(
+      update(IndicatorSnapshot)
+      .where(IndicatorSnapshot.calculation_version == FACTOR_VERSION)
+      .values(calculation_version=None)
+    )
+    await self.db.execute(
+      update(DailySignalRun)
+      .where(
+        DailySignalRun.signal_version == FACTOR_VERSION,
+        DailySignalRun.status.in_(["success", "scoped_success"]),
+      )
+      .values(
+        status="invalidated",
+        warnings="复权因子已更新，需要重新计算日级因子快照",
+      )
+    )
+
   def _to_model(self, db_factor: DividFactorTable) -> DividFactor:
     return DividFactor(
       id=db_factor.id,
@@ -157,8 +194,14 @@ class DividFactorRepository:
       gugai=factor.gugai,
       dr=factor.dr,
     )
-    self.db.add(db_factor)
-    await self.db.commit()
+    try:
+      await self._acquire_write_lock()
+      self.db.add(db_factor)
+      await self._invalidate_published_snapshots()
+      await self.db.commit()
+    except Exception:
+      await self.db.rollback()
+      raise
     await self.db.refresh(db_factor)
 
     factor.id = db_factor.id
@@ -194,8 +237,17 @@ class DividFactorRepository:
       }
       for f in factors
     ]
-    await self.db.execute(insert(DividFactorTable), payload)
-    await self.db.commit()
+    try:
+      # This append-only method is retained for the two legacy service entry
+      # points. It must share the authoritative replacement lock even though
+      # new QMT ingestion always uses ``replace_range``.
+      await self._acquire_write_lock()
+      await self.db.execute(insert(DividFactorTable), payload)
+      await self._invalidate_published_snapshots()
+      await self.db.commit()
+    except Exception:
+      await self.db.rollback()
+      raise
     return len(payload)
 
   async def replace_range(
@@ -279,6 +331,10 @@ class DividFactorRepository:
       DividFactorTable.ex_date <= end_ex_date,
     )
     try:
+      # The legacy table has no uniqueness constraint.  Serialize every
+      # authoritative replacement transaction so overlapping scopes cannot
+      # both validate against their own uncommitted rows and then form a union.
+      await self._acquire_write_lock()
       prior = (
         await self.db.execute(
           select(
@@ -326,6 +382,7 @@ class DividFactorRepository:
           "divid factor replacement exact-row verification failed: "
           f"expected={len(canonical_expected)} actual={len(canonical_actual)}"
         )
+      await self._invalidate_published_snapshots()
       await self.db.commit()
     except Exception:
       await self.db.rollback()
@@ -333,8 +390,22 @@ class DividFactorRepository:
 
     source_sha256 = divid_factor_rows_sha256(expected_rows)
     persisted_sha256 = divid_factor_rows_sha256(actual_rows)
+    expected_rows_by_code = {code: [] for code in codes}
+    actual_rows_by_code = {code: [] for code in codes}
+    for row in expected_rows:
+      expected_rows_by_code[str(row[0]).strip().upper()].append(row)
+    for row in actual_rows:
+      actual_rows_by_code[str(row[0]).strip().upper()].append(row)
+    code_audits = {
+      code: {
+        "record_count": len(actual_rows_by_code[code]),
+        "source_sha256": divid_factor_rows_sha256(expected_rows_by_code[code]),
+        "persisted_sha256": divid_factor_rows_sha256(actual_rows_by_code[code]),
+      }
+      for code in codes
+    }
     return {
-      "audit_schema_version": 1,
+      "audit_schema_version": 2,
       "stock_count": len(codes),
       "stock_codes_sha256": divid_factor_codes_sha256(codes),
       "prior_count": int(prior[0] or 0),
@@ -345,6 +416,7 @@ class DividFactorRepository:
       "verified_count": len(actual_rows),
       "source_sha256": source_sha256,
       "persisted_sha256": persisted_sha256,
+      "code_audits": code_audits,
       "start_ex_date": start_ex_date,
       "end_ex_date": end_ex_date,
     }
@@ -436,8 +508,14 @@ class DividFactorRepository:
     Returns:
         删除的记录数
     """
-    result = await self.db.execute(
-      delete(DividFactorTable).filter(DividFactorTable.stock_code == stock_code)
-    )
-    await self.db.commit()
+    try:
+      await self._acquire_write_lock()
+      result = await self.db.execute(
+        delete(DividFactorTable).filter(DividFactorTable.stock_code == stock_code)
+      )
+      await self._invalidate_published_snapshots()
+      await self.db.commit()
+    except Exception:
+      await self.db.rollback()
+      raise
     return result.rowcount

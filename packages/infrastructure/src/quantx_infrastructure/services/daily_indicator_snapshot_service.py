@@ -12,6 +12,7 @@ from quantx_infrastructure.repositories.indicator_snapshot_repository import (
   IndicatorSnapshotRepository,
 )
 from quantx_infrastructure.repositories.kline_repository import KLineRepository
+from quantx_infrastructure.services.snapshot_fencing import SnapshotFenceLost
 from quantx_infrastructure.services.snapshot_price_history import (
   load_snapshot_price_history,
 )
@@ -149,8 +150,14 @@ class DailyIndicatorSnapshotService:
     name_map: Dict[str, str],
     float_volume_map: Optional[Dict[str, float]] = None,
     lookback_days: int = 540,
+    snapshot_run_id: int = 0,
+    lock_backend_pid: int = 0,
   ) -> Dict[str, Any]:
     """计算并保存一批标的的单日日级技术指标快照。"""
+    if snapshot_run_id <= 0:
+      raise ValueError("日级快照写入必须绑定有效运行代次")
+    if lock_backend_pid <= 0:
+      raise ValueError("日级快照写入必须绑定数据库锁会话")
     result = await self.compute_and_save_dates_batch(
       codes=codes,
       snapshot_dates=[snapshot_date],
@@ -158,6 +165,8 @@ class DailyIndicatorSnapshotService:
       name_map=name_map,
       float_volume_map=float_volume_map,
       lookback_days=lookback_days,
+      snapshot_run_ids={snapshot_date: snapshot_run_id},
+      lock_backend_pid=lock_backend_pid,
     )
     day_result = result["dates"].get(snapshot_date.isoformat(), {})
     return {
@@ -181,6 +190,8 @@ class DailyIndicatorSnapshotService:
     float_volume_map: Optional[Dict[str, float]] = None,
     lookback_days: int = 540,
     codes_by_snapshot_date: Optional[Dict[date, List[str]]] = None,
+    snapshot_run_ids: Optional[Dict[date, int]] = None,
+    lock_backend_pid: int = 0,
   ) -> Dict[str, Any]:
     """分段读取公共历史区间并生成一个代码批次的多个目标日快照。"""
     dates = sorted(set(snapshot_dates))
@@ -196,6 +207,12 @@ class DailyIndicatorSnapshotService:
     unknown_codes = set().union(*scope_by_date.values()) - code_set if dates else set()
     if unknown_codes:
       raise ValueError("目标日期代码范围必须是当前批次代码的子集")
+    if snapshot_run_ids is None or set(snapshot_run_ids) != set(dates):
+      raise ValueError("日级快照写入代次必须完整覆盖目标日期")
+    if any(int(run_id) <= 0 for run_id in snapshot_run_ids.values()):
+      raise ValueError("日级快照写入代次必须为正整数")
+    if lock_backend_pid <= 0:
+      raise ValueError("日级快照写入必须绑定数据库锁会话")
     result: Dict[str, Any] = {
       "total": sum(len(scope_by_date[target]) for target in dates),
       "saved": 0,
@@ -229,10 +246,16 @@ class DailyIndicatorSnapshotService:
     try:
       async for db in self.db_factory():
         repo = self.snapshot_repo_cls(db)
-        await repo.invalidate_factor_scope(codes, dates)
+        await repo.invalidate_factor_scope(
+          codes,
+          dates,
+          snapshot_run_ids=snapshot_run_ids,
+        )
         break
       else:
         raise RuntimeError("日级因子重算未取得数据库连接")
+    except SnapshotFenceLost:
+      raise
     except Exception as e:
       msg = f"失效旧日级因子资格失败: {e}"
       self.logger.exception(msg)
@@ -372,10 +395,16 @@ class DailyIndicatorSnapshotService:
       try:
         async for db in self.db_factory():
           repo = self.snapshot_repo_cls(db)
-          await repo.bulk_upsert(records)
+          await repo.bulk_upsert(
+            records,
+            snapshot_run_ids=snapshot_run_ids,
+            lock_backend_pid=lock_backend_pid,
+          )
           break
         else:
           raise RuntimeError("日级因子写入未取得数据库连接")
+      except SnapshotFenceLost:
+        raise
       except Exception as e:
         msg = f"批量写入快照失败: {e}"
         self.logger.exception(msg)

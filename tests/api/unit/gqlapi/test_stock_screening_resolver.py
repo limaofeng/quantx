@@ -66,8 +66,19 @@ async def test_intraday_volume_screen_returns_live_breadth_and_rankings(monkeypa
   assert [row.code for row in result.top_losers] == ["000002.SZ"]
 
 
+class FakeDbSession:
+  instances = []
+
+  def __init__(self):
+    self.statements = []
+    self.instances.append(self)
+
+  async def execute(self, statement):
+    self.statements.append(str(statement))
+
+
 async def fake_db_factory():
-  yield object()
+  yield FakeDbSession()
 
 
 async def natural_expected_snapshot_date(today):
@@ -85,11 +96,7 @@ def financial_health(status="SUCCESS"):
     "statement_rows": 100,
     "metric_rows": 100,
     "is_stale": status == "STALE",
-    "warnings": (
-      ["2 只股票未返回受支持的财务四表"]
-      if status != "SUCCESS"
-      else []
-    ),
+    "warnings": (["2 只股票未返回受支持的财务四表"] if status != "SUCCESS" else []),
   }
 
 
@@ -260,10 +267,12 @@ class SnapshotRepoWithSortableRows(SnapshotRepoWithNonFiniteValues):
     SnapshotRepoWithSortableRows.last_sort = sort
     SnapshotRepoWithSortableRows.last_universe = universe
     SnapshotRepoWithSortableRows.last_exclude_st = exclude_st
-    values = {item['factor_id']: item['value'] for item in factor_conditions or []}
-    SnapshotRepoWithSortableRows.last_min_roe = values.get('roe_ttm')
-    SnapshotRepoWithSortableRows.last_min_net_profit_growth = values.get('net_profit_growth_pct')
-    SnapshotRepoWithSortableRows.last_min_yoy_growth = values.get('revenue_growth_pct')
+    values = {item["factor_id"]: item["value"] for item in factor_conditions or []}
+    SnapshotRepoWithSortableRows.last_min_roe = values.get("roe_ttm")
+    SnapshotRepoWithSortableRows.last_min_net_profit_growth = values.get(
+      "net_profit_growth_pct"
+    )
+    SnapshotRepoWithSortableRows.last_min_yoy_growth = values.get("revenue_growth_pct")
     return [
       SimpleNamespace(
         code="000002.SZ",
@@ -364,6 +373,7 @@ class SnapshotRepoWithSuspiciousRoe(SnapshotRepoWithSortableRows):
 async def test_stock_screen_reports_latest_failed_snapshot_run(monkeypatch):
   import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
 
+  FakeDbSession.instances.clear()
   monkeypatch.setattr(stock_screening_module, "get_async_db", fake_db_factory)
   monkeypatch.setattr(
     stock_screening_module,
@@ -388,33 +398,97 @@ async def test_stock_screen_reports_latest_failed_snapshot_run(monkeypatch):
   assert result.is_complete is False
   assert "最近日级因子快照运行未成功" in result.warnings[0]
   assert "批量拉取 K 线失败" in result.warnings[0]
+  assert FakeDbSession.instances[0].statements == [
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+  ]
+
+
+@pytest.mark.asyncio
+async def test_stock_screen_never_publishes_current_version_rows_from_failed_run(
+  monkeypatch,
+):
+  import quantx_api.gqlapi.resolvers.stock_screening as module
+
+  class CurrentFailedRunRepo(FailedRunRepo):
+    async def find_latest(self, snapshot_date=None):
+      run = await super().find_latest(snapshot_date)
+      run.signal_version = "daily-v1"
+      run.snapshot_date = date(2026, 5, 20)
+      return run
+
+  monkeypatch.setattr(module, "get_async_db", fake_db_factory)
+  monkeypatch.setattr(
+    module,
+    "IndicatorSnapshotRepository",
+    SnapshotRepoWithNonFiniteValues,
+  )
+  monkeypatch.setattr(module, "DailySignalRunRepository", CurrentFailedRunRepo)
+  monkeypatch.setattr(
+    StockScreeningResolver,
+    "_expected_snapshot_date",
+    staticmethod(natural_expected_snapshot_date),
+  )
+
+  result = await StockScreeningResolver.stock_screen(StockScreenInput())
+
+  assert result.items == []
+  assert result.total == 0
+  assert result.snapshot_date is None
+  assert result.is_complete is False
+  assert any("运行未成功" in warning for warning in result.warnings)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("require_fresh", [False, True])
-async def test_stock_screen_scoped_success_is_not_full_market_ready(monkeypatch, require_fresh):
+async def test_stock_screen_scoped_success_is_not_full_market_ready(
+  monkeypatch, require_fresh
+):
   import quantx_api.gqlapi.resolvers.stock_screening as module
 
   class ScopedRunRepo(CompletedRunRepo):
     async def find_latest_completed(self, snapshot_date=None):
-      return None
-
-    async def find_latest(self, snapshot_date=None):
       run = await super().find_latest_completed(snapshot_date)
       run.status = "scoped_success"
       return run
 
+    async def find_latest(self, snapshot_date=None):
+      return await self.find_latest_completed(snapshot_date)
+
   monkeypatch.setattr(module, "get_async_db", fake_db_factory)
-  monkeypatch.setattr(module, "IndicatorSnapshotRepository", SnapshotRepoWithNonFiniteValues)
+  monkeypatch.setattr(
+    module, "IndicatorSnapshotRepository", SnapshotRepoWithNonFiniteValues
+  )
   monkeypatch.setattr(module, "DailySignalRunRepository", ScopedRunRepo)
-  monkeypatch.setattr(module, "financial_sync_health", AsyncMock(return_value=financial_health()))
-  monkeypatch.setattr(StockScreeningResolver, "_today", staticmethod(lambda: date(2026, 5, 20)))
-  monkeypatch.setattr(StockScreeningResolver, "_expected_snapshot_date",
-                      staticmethod(natural_expected_snapshot_date))
-  result = await StockScreeningResolver.stock_screen(StockScreenInput(require_fresh=require_fresh))
+  monkeypatch.setattr(
+    module, "financial_sync_health", AsyncMock(return_value=financial_health())
+  )
+  monkeypatch.setattr(
+    StockScreeningResolver, "_today", staticmethod(lambda: date(2026, 5, 20))
+  )
+  monkeypatch.setattr(
+    StockScreeningResolver,
+    "_expected_snapshot_date",
+    staticmethod(natural_expected_snapshot_date),
+  )
+  result = await StockScreeningResolver.stock_screen(
+    StockScreenInput(require_fresh=require_fresh)
+  )
   assert result.is_complete is False
-  assert any("仅完成指定标的范围，不代表全市场已就绪" in warning for warning in result.warnings)
-  assert result.total == (0 if require_fresh else 1)
+  assert any(
+    "仅完成指定标的范围，不代表全市场已就绪" in warning for warning in result.warnings
+  )
+  assert result.total == 0
+
+
+@pytest.mark.asyncio
+async def test_certified_snapshot_reads_use_repeatable_read_only_transaction():
+  import quantx_api.gqlapi.resolvers.stock_screening as module
+
+  db = FakeDbSession()
+
+  await module._begin_certified_snapshot_read(db)
+
+  assert db.statements == ["SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"]
 
 
 @pytest.mark.asyncio
@@ -457,7 +531,10 @@ async def test_stock_screen_sanitizes_non_finite_snapshot_numbers(monkeypatch):
   assert item.ma10_prev is None
   assert item.calculation_version == "daily-v1"
   assert not hasattr(item, "score")
-  assert next(value for value in item.factor_values if value.factor_id == "rsi6").value is None
+  assert (
+    next(value for value in item.factor_values if value.factor_id == "rsi6").value
+    is None
+  )
 
 
 @pytest.mark.asyncio
@@ -496,17 +573,23 @@ async def test_stock_screen_uses_previous_trading_day_on_non_trading_day(monkeyp
   )
 
   result = await StockScreeningResolver.stock_screen(
-    StockScreenInput(factor_conditions=[StockFactorConditionInput(factor_id="roe_ttm", value=5.0)])
+    StockScreenInput(
+      factor_conditions=[StockFactorConditionInput(factor_id="roe_ttm", value=5.0)]
+    )
   )
 
   assert result.snapshot_date == date(2026, 5, 22)
   assert result.has_stale_data is False
   assert not any("今日快照未完成" in warning for warning in result.warnings)
-  assert not any("财务筛选字段尚未进入日级信号快照" in warning for warning in result.warnings)
+  assert not any(
+    "财务筛选字段尚未进入日级信号快照" in warning for warning in result.warnings
+  )
 
 
 @pytest.mark.asyncio
-async def test_stock_screen_passes_financial_filters_and_maps_financial_metrics(monkeypatch):
+async def test_stock_screen_passes_financial_filters_and_maps_financial_metrics(
+  monkeypatch,
+):
   import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
 
   SnapshotRepoWithSortableRows.last_min_roe = None
@@ -609,7 +692,9 @@ async def test_stock_screen_hides_suspicious_roe_but_keeps_quality_audit(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_stock_screen_passes_sort_and_preserves_sorted_repository_order(monkeypatch):
+async def test_stock_screen_passes_sort_and_preserves_sorted_repository_order(
+  monkeypatch,
+):
   import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
 
   SnapshotRepoWithSortableRows.last_sort = None
@@ -652,7 +737,9 @@ async def test_stock_screen_passes_sort_and_preserves_sorted_repository_order(mo
 
 
 @pytest.mark.asyncio
-async def test_stock_screen_preserves_default_repository_order_without_rescoring(monkeypatch):
+async def test_stock_screen_preserves_default_repository_order_without_rescoring(
+  monkeypatch,
+):
   import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
 
   SnapshotRepoWithSortableRows.last_sort = None
@@ -752,7 +839,10 @@ async def test_stock_screen_passes_etf_universe(monkeypatch):
   )
 
   assert SnapshotRepoWithSortableRows.last_universe == "etf"
-  assert next(row for row in result.items if row.code == "000001.SZ").instrument_type == "etf"
+  assert (
+    next(row for row in result.items if row.code == "000001.SZ").instrument_type
+    == "etf"
+  )
 
 
 @pytest.mark.asyncio
@@ -776,17 +866,13 @@ async def test_expected_snapshot_date_uses_1535_cutoff(monkeypatch):
     "_now",
     staticmethod(lambda: stock_screening_module.datetime(2026, 7, 29, 15, 34)),
   )
-  before = await StockScreeningResolver._expected_snapshot_date(
-    date(2026, 7, 29)
-  )
+  before = await StockScreeningResolver._expected_snapshot_date(date(2026, 7, 29))
   monkeypatch.setattr(
     StockScreeningResolver,
     "_now",
     staticmethod(lambda: stock_screening_module.datetime(2026, 7, 29, 15, 35)),
   )
-  after = await StockScreeningResolver._expected_snapshot_date(
-    date(2026, 7, 29)
-  )
+  after = await StockScreeningResolver._expected_snapshot_date(date(2026, 7, 29))
 
   assert before == date(2026, 7, 28)
   assert after == date(2026, 7, 29)
@@ -797,6 +883,8 @@ async def test_snapshot_status_returns_only_dates_after_latest_complete(
   monkeypatch,
 ):
   import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
+
+  FakeDbSession.instances.clear()
 
   class StatusSnapshotRepo:
     def __init__(self, db):
@@ -877,6 +965,9 @@ async def test_snapshot_status_returns_only_dates_after_latest_complete(
     date(2026, 7, 29),
   ]
   assert result.is_complete is False
+  assert FakeDbSession.instances[0].statements == [
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+  ]
 
 
 async def _async_value(value):
@@ -884,16 +975,24 @@ async def _async_value(value):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retained, current, completed, expected_missing, latest_status", [
-  ([27, 28, 29], [29], [29], [27, 28], "success"),
-  ([27, 28, 29], [29], [], [27, 28, 29], "success"),
-  ([27, 28, 29], [], [], [27, 28, 29], "success"),
-  ([], [], [], [29], "success"),
-  ([27, 28, 29], [27, 28, 29], [27, 28, 29], [], "success"),
-  ([27, 28, 29], [29], [], [27, 28, 29], "scoped_success"),
-])
+@pytest.mark.parametrize(
+  "retained, current, completed, expected_missing, latest_status",
+  [
+    ([27, 28, 29], [29], [29], [27, 28], "success"),
+    ([27, 28, 29], [29], [], [27, 28, 29], "success"),
+    ([27, 28, 29], [], [], [27, 28, 29], "success"),
+    ([], [], [], [29], "success"),
+    ([27, 28, 29], [27, 28, 29], [27, 28, 29], [], "success"),
+    ([27, 28, 29], [29], [], [27, 28, 29], "scoped_success"),
+  ],
+)
 async def test_factor_snapshot_status_backfills_retained_old_versions(
-  monkeypatch, retained, current, completed, expected_missing, latest_status,
+  monkeypatch,
+  retained,
+  current,
+  completed,
+  expected_missing,
+  latest_status,
 ):
   import quantx_api.gqlapi.resolvers.stock_screening as module
 
@@ -921,9 +1020,13 @@ async def test_factor_snapshot_status_backfills_retained_old_versions(
       pass
 
     async def find_latest(self, target=None):
-      return SimpleNamespace(snapshot_date=target or date(2026, 7, 29),
-                             signal_version="daily-v1" if current else "old",
-                             status=latest_status, warnings=None, completed_at=None)
+      return SimpleNamespace(
+        snapshot_date=target or date(2026, 7, 29),
+        signal_version="daily-v1" if current else "old",
+        status=latest_status,
+        warnings=None,
+        completed_at=None,
+      )
 
     async def find_latest_completed(self, target=None):
       return await self.find_latest(target) if 29 in completed else None
@@ -939,14 +1042,19 @@ async def test_factor_snapshot_status_backfills_retained_old_versions(
   monkeypatch.setattr(module, "IndicatorSnapshotRepository", Snapshots)
   monkeypatch.setattr(module, "DailySignalRunRepository", Runs)
   monkeypatch.setattr(module, "TradingDateHelper", Calendar)
-  monkeypatch.setattr(StockScreeningResolver, "_expected_snapshot_date",
-                      staticmethod(lambda today: _async_value(date(2026, 7, 29))))
+  monkeypatch.setattr(
+    StockScreeningResolver,
+    "_expected_snapshot_date",
+    staticmethod(lambda today: _async_value(date(2026, 7, 29))),
+  )
   result = await StockScreeningResolver.stock_screen_snapshot_status()
   assert result.missing_snapshot_dates == dates(expected_missing)
   assert result.is_complete is (not expected_missing)
   assert result.latest_run_status == latest_status
   if latest_status == "scoped_success":
-    assert any("仅完成指定标的范围，不代表全市场已就绪" in warning for warning in result.warnings)
+    assert any(
+      "仅完成指定标的范围，不代表全市场已就绪" in warning for warning in result.warnings
+    )
 
 
 @pytest.mark.asyncio

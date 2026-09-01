@@ -44,6 +44,23 @@ def _payload():
   }
 
 
+def _code_audits(*, populated_digest: str = "a" * 64, populated_count: int = 1):
+  empty_digest = hashlib.sha256(b"[]").hexdigest()
+  populated = populated_digest if populated_count else empty_digest
+  return {
+    "000001.SZ": {
+      "record_count": 0,
+      "source_sha256": empty_digest,
+      "persisted_sha256": empty_digest,
+    },
+    "600519.SH": {
+      "record_count": populated_count,
+      "source_sha256": populated,
+      "persisted_sha256": populated,
+    },
+  }
+
+
 @pytest.mark.asyncio
 async def test_uploaded_divid_factors_are_replaced_and_audited(
   tmp_path,
@@ -73,7 +90,7 @@ async def test_uploaded_divid_factors_are_replaced_and_audited(
     async def replace_batch_divid_factors(self, frames, **kwargs):
       calls.append((frames, kwargs))
       return {
-        "audit_schema_version": 1,
+        "audit_schema_version": 2,
         "stock_count": 2,
         "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
           ["000001.SZ", "600519.SH"]
@@ -86,6 +103,7 @@ async def test_uploaded_divid_factors_are_replaced_and_audited(
         "end_ex_date": "20260729",
         "source_sha256": "a" * 64,
         "persisted_sha256": "a" * 64,
+        "code_audits": _code_audits(),
       }
 
   monkeypatch.setattr(
@@ -128,7 +146,7 @@ async def test_empty_divid_factor_result_still_clears_exact_window(
     async def replace_batch_divid_factors(self, frames, **kwargs):
       calls.append((frames, kwargs))
       return {
-        "audit_schema_version": 1,
+        "audit_schema_version": 2,
         "stock_count": 2,
         "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
           ["000001.SZ", "600519.SH"]
@@ -141,6 +159,7 @@ async def test_empty_divid_factor_result_still_clears_exact_window(
         "end_ex_date": "20260729",
         "source_sha256": "a" * 64,
         "persisted_sha256": "a" * 64,
+        "code_audits": _code_audits(populated_count=0),
       }
 
   monkeypatch.setattr(
@@ -186,7 +205,7 @@ async def test_divid_factor_ingestion_rejects_audit_before_completed(
   class FakeService:
     async def replace_batch_divid_factors(self, _frames, **_kwargs):
       return {
-        "audit_schema_version": 1,
+        "audit_schema_version": 2,
         "stock_count": 2,
         "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
           ["000001.SZ", "600519.SH"]
@@ -199,11 +218,53 @@ async def test_divid_factor_ingestion_rejects_audit_before_completed(
         "end_ex_date": "20260729",
         "source_sha256": "a" * 64,
         "persisted_sha256": "b" * 64,
+        "code_audits": _code_audits(),
       }
 
   monkeypatch.setattr(durable_agent_flows, "DividFactorService", FakeService)
 
   with pytest.raises(RuntimeError, match="content digest mismatch"):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+
+@pytest.mark.asyncio
+async def test_divid_factor_ingestion_rejects_incomplete_per_code_audit(
+  tmp_path,
+  monkeypatch,
+):
+  store = FakeStore(
+    request={"expected_chunks": 1, "request_payload": _payload()},
+    manifest=[_transfer(tmp_path, [])],
+  )
+
+  class FakeService:
+    async def replace_batch_divid_factors(self, _frames, **_kwargs):
+      return {
+        "audit_schema_version": 2,
+        "stock_count": 2,
+        "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
+          ["000001.SZ", "600519.SH"]
+        ),
+        "prior_count": 0,
+        "deleted_count": 0,
+        "inserted_count": 0,
+        "verified_count": 0,
+        "start_ex_date": "20200313",
+        "end_ex_date": "20260729",
+        "source_sha256": "a" * 64,
+        "persisted_sha256": "a" * 64,
+        "code_audits": {
+          "600519.SH": {
+            "record_count": 0,
+            "source_sha256": hashlib.sha256(b"[]").hexdigest(),
+            "persisted_sha256": hashlib.sha256(b"[]").hexdigest(),
+          }
+        },
+      }
+
+  monkeypatch.setattr(durable_agent_flows, "DividFactorService", FakeService)
+
+  with pytest.raises(RuntimeError, match="per-code scope mismatch"):
     await durable_agent_flows._ingest_uploaded_request(store, "request-1")
 
 

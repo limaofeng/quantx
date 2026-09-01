@@ -37,6 +37,7 @@ from quantx_infrastructure.services.trading_time_service import (
   TradingDateHelper,
   TradingTimeService,
 )
+from sqlalchemy import text
 
 from ..types.financial_types import FinancialSyncHealthStatus
 from ..types.stock_screening_types import (
@@ -67,6 +68,11 @@ from ..types.stock_screening_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _begin_certified_snapshot_read(db: Any) -> None:
+  """Pin run metadata and snapshot rows to one read-only database snapshot."""
+  await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -145,14 +151,10 @@ class StockScreeningResolver:
     trading_time_service = TradingTimeService()
     try:
       now = StockScreeningResolver._now()
-      if (
-        await trading_time_service.is_trading_day("SH", today)
-        and (
-          today < now.date()
-          or (
-            today == now.date()
-            and now.time() >= StockScreeningResolver.SNAPSHOT_CUTOFF
-          )
+      if await trading_time_service.is_trading_day("SH", today) and (
+        today < now.date()
+        or (
+          today == now.date() and now.time() >= StockScreeningResolver.SNAPSHOT_CUTOFF
         )
       ):
         return today
@@ -165,7 +167,9 @@ class StockScreeningResolver:
   def _stale_snapshot_warning(expected_snapshot_date: date, today: date) -> str:
     if expected_snapshot_date == today:
       return "今日快照未完成，结果来自最近可用因子快照"
-    return f"{expected_snapshot_date.isoformat()} 交易日快照未完成，结果来自最近可用因子快照"
+    return (
+      f"{expected_snapshot_date.isoformat()} 交易日快照未完成，结果来自最近可用因子快照"
+    )
 
   @staticmethod
   async def stock_screen_snapshot_status(
@@ -179,31 +183,40 @@ class StockScreeningResolver:
     warnings: List[str] = []
 
     async for db in get_async_db():
+      await _begin_certified_snapshot_read(db)
       snapshot_repo = IndicatorSnapshotRepository(db)
       run_repo = DailySignalRunRepository(db)
       latest_snapshot_date = await snapshot_repo.get_latest_factor_snapshot_date()
       latest_run = await run_repo.find_latest()
-      successful_expected_run = await run_repo.find_latest_completed(
-        expected_date
-      )
+      successful_expected_run = await run_repo.find_latest_completed(expected_date)
 
       # Existing old-version history defines the retained backfill window, but
       # it must never count as available evidence for the current factor version.
-      retained_dates = set(await snapshot_repo.find_snapshot_dates(window_start, expected_date))
-      snapshot_dates = set(await snapshot_repo.find_factor_snapshot_dates(window_start, expected_date))
-      completed_dates = set(await run_repo.find_completed_dates(window_start, expected_date))
+      retained_dates = set(
+        await snapshot_repo.find_snapshot_dates(window_start, expected_date)
+      )
+      snapshot_dates = set(
+        await snapshot_repo.find_factor_snapshot_dates(window_start, expected_date)
+      )
+      completed_dates = set(
+        await run_repo.find_completed_dates(window_start, expected_date)
+      )
       available_dates = snapshot_dates & completed_dates
       history_anchor = min(retained_dates | snapshot_dates | {expected_date})
       calendar_start = max(window_start, history_anchor)
       if retained_dates or snapshot_dates:
         helper = TradingDateHelper()
         calendar_dates = await helper.get_trading_calendar(
-          "SH", start_date=calendar_start, end_date=expected_date,
+          "SH",
+          start_date=calendar_start,
+          end_date=expected_date,
         )
         trading_dates = sorted(set(calendar_dates) | {expected_date})
       else:
         trading_dates = [expected_date]
-      missing_dates = [target for target in trading_dates if target not in available_dates]
+      missing_dates = [
+        target for target in trading_dates if target not in available_dates
+      ]
 
       if latest_snapshot_date is None:
         warnings.append(f"因子版本 {FACTOR_VERSION} 快照尚未就绪；旧版本日期需要重算")
@@ -215,9 +228,7 @@ class StockScreeningResolver:
         latest_calculated_at = (
           latest_snapshot_run.completed_at
           if latest_snapshot_run is not None
-          else await snapshot_repo.get_latest_calculated_at(
-            latest_snapshot_date
-          )
+          else await snapshot_repo.get_latest_calculated_at(latest_snapshot_date)
         )
 
       if latest_run is not None and latest_run.status in {
@@ -225,15 +236,12 @@ class StockScreeningResolver:
         "partial_failure",
       }:
         warnings.append(
-          "最近快照运行未成功: "
-          f"{latest_run.warnings or latest_run.status}"
+          f"最近快照运行未成功: {latest_run.warnings or latest_run.status}"
         )
       if latest_run is not None and latest_run.status == "scoped_success":
         warnings.append("最近日级因子快照仅完成指定标的范围，不代表全市场已就绪")
       if missing_dates:
-        warnings.append(
-          f"缺少 {len(missing_dates)} 个交易日快照"
-        )
+        warnings.append(f"缺少 {len(missing_dates)} 个交易日快照")
 
       return StockScreenSnapshotStatus(
         latest_snapshot_date=latest_snapshot_date,
@@ -245,9 +253,7 @@ class StockScreeningResolver:
           and successful_expected_run is not None
           and successful_expected_run.signal_version == FACTOR_VERSION
         ),
-        latest_run_status=(
-          latest_run.status if latest_run is not None else None
-        ),
+        latest_run_status=(latest_run.status if latest_run is not None else None),
         latest_calculated_at=latest_calculated_at,
         warnings=warnings,
       )
@@ -259,28 +265,37 @@ class StockScreeningResolver:
     limit = min(max(input.limit or 200, 1), 200)
     offset = min(max(input.offset or 0, 0), 200 * 1000)
     warnings: List[str] = []
-    factor_conditions = normalize_conditions([
-      {"factor_id": item.factor_id, "operator": item.operator,
-       "value": item.value, "value_to": item.value_to}
-      for item in input.factor_conditions or []
-    ])
+    factor_conditions = normalize_conditions(
+      [
+        {
+          "factor_id": item.factor_id,
+          "operator": item.operator,
+          "value": item.value,
+          "value_to": item.value_to,
+        }
+        for item in input.factor_conditions or []
+      ]
+    )
 
     async for db in get_async_db():
+      await _begin_certified_snapshot_read(db)
       snapshot_repo = IndicatorSnapshotRepository(db)
       run_repo = DailySignalRunRepository(db)
 
       today = StockScreeningResolver._today()
-      expected_snapshot_date = await StockScreeningResolver._expected_snapshot_date(today)
+      expected_snapshot_date = await StockScreeningResolver._expected_snapshot_date(
+        today
+      )
       run = await run_repo.find_latest_completed(
         expected_snapshot_date if input.require_fresh else None
       )
-      if run is not None and run.signal_version != FACTOR_VERSION:
+      if run is not None and (
+        run.signal_version != FACTOR_VERSION or run.status != "success"
+      ):
         run = None
-      snapshot_date = run.snapshot_date if run else await snapshot_repo.get_latest_factor_snapshot_date()
+      snapshot_date = run.snapshot_date if run else None
       if run is not None:
         latest_run = run
-      elif snapshot_date is not None:
-        latest_run = await run_repo.find_latest(snapshot_date)
       else:
         latest_run = await run_repo.find_latest()
 
@@ -327,8 +342,14 @@ class StockScreeningResolver:
           warnings=warnings,
         )
 
-      metadata_run = latest_run if latest_run and latest_run.snapshot_date == snapshot_date else run
-      calculated_at = metadata_run.completed_at if metadata_run else await snapshot_repo.get_latest_calculated_at(snapshot_date)
+      metadata_run = (
+        latest_run if latest_run and latest_run.snapshot_date == snapshot_date else run
+      )
+      calculated_at = (
+        metadata_run.completed_at
+        if metadata_run
+        else await snapshot_repo.get_latest_calculated_at(snapshot_date)
+      )
       has_stale_data = snapshot_date != expected_snapshot_date
       if has_stale_data:
         warnings.append(
@@ -340,9 +361,13 @@ class StockScreeningResolver:
       if metadata_run is None:
         warnings.append("未找到因子运行元信息，已回退到快照更新时间")
       elif metadata_run.status == "partial_failure":
-        warnings.append(f"日级因子快照部分完成: {metadata_run.warnings or '部分标的未成功'}")
+        warnings.append(
+          f"日级因子快照部分完成: {metadata_run.warnings or '部分标的未成功'}"
+        )
       elif metadata_run.status == "failed":
-        warnings.append(f"最近日级因子快照运行失败: {metadata_run.warnings or '未保存任何快照'}")
+        warnings.append(
+          f"最近日级因子快照运行失败: {metadata_run.warnings or '未保存任何快照'}"
+        )
       sort = (
         {
           "field": input.sort.field,
@@ -396,13 +421,9 @@ class StockScreeningResolver:
         verified_count=int(financial_quality_counts.get("verified") or 0),
         selectable_count=int(financial_quality_counts.get("selectable") or 0),
         excluded_stale_count=int(financial_quality_counts.get("stale") or 0),
-        excluded_suspicious_count=int(
-          financial_quality_counts.get("suspicious") or 0
-        ),
+        excluded_suspicious_count=int(financial_quality_counts.get("suspicious") or 0),
         excluded_invalid_count=int(financial_quality_counts.get("invalid") or 0),
-        excluded_unverified_count=int(
-          financial_quality_counts.get("unverified") or 0
-        ),
+        excluded_unverified_count=int(financial_quality_counts.get("unverified") or 0),
       )
       financial_filter_active = any(
         item["factor_id"] in {"roe_ttm", "net_profit_growth_pct", "revenue_growth_pct"}
@@ -421,10 +442,16 @@ class StockScreeningResolver:
             + (f"；{detail}" if detail else "")
           )
       if financial_filter_active and total == 0:
-        warnings.append("未找到满足财务指标条件的标的，未公告或质量异常的财报不会通过财务筛选")
-      industry_map = await snapshot_repo.find_industry_names_by_codes([record.code for record in records])
+        warnings.append(
+          "未找到满足财务指标条件的标的，未公告或质量异常的财报不会通过财务筛选"
+        )
+      industry_map = await snapshot_repo.find_industry_names_by_codes(
+        [record.code for record in records]
+      )
       instrument_type_map = (
-        await snapshot_repo.find_instrument_types_by_codes([record.code for record in records])
+        await snapshot_repo.find_instrument_types_by_codes(
+          [record.code for record in records]
+        )
         if hasattr(snapshot_repo, "find_instrument_types_by_codes")
         else {}
       )
@@ -437,12 +464,18 @@ class StockScreeningResolver:
         financial_audit = getattr(record, "financial_audit", None)
         growth_selectable = bool(getattr(record, "financial_growth_selectable", False))
         net_profit_growth = (
-          _finite_optional_float(getattr(financial_metric, "net_profit_quarter_growth_pct", None))
-          if growth_selectable else None
+          _finite_optional_float(
+            getattr(financial_metric, "net_profit_quarter_growth_pct", None)
+          )
+          if growth_selectable
+          else None
         )
         revenue_growth = (
-          _finite_optional_float(getattr(financial_metric, "revenue_quarter_growth_pct", None))
-          if growth_selectable else None
+          _finite_optional_float(
+            getattr(financial_metric, "revenue_quarter_growth_pct", None)
+          )
+          if growth_selectable
+          else None
         )
         raw_roe_quality_status = getattr(
           record,
@@ -469,9 +502,15 @@ class StockScreeningResolver:
             volume_ratio=_finite_optional_float(record.volume_ratio),
             avg_volume_20=_finite_optional_float(record.avg_volume_20),
             avg_volume_5=_finite_optional_float(getattr(record, "avg_volume_5", None)),
-            volume_ratio_5=_finite_optional_float(getattr(record, "volume_ratio_5", None)),
-            avg_amount_20=_finite_optional_float(getattr(record, "avg_amount_20", None)),
-            amount_ratio_20=_finite_optional_float(getattr(record, "amount_ratio_20", None)),
+            volume_ratio_5=_finite_optional_float(
+              getattr(record, "volume_ratio_5", None)
+            ),
+            avg_amount_20=_finite_optional_float(
+              getattr(record, "avg_amount_20", None)
+            ),
+            amount_ratio_20=_finite_optional_float(
+              getattr(record, "amount_ratio_20", None)
+            ),
             turnover_rate_pct=_finite_optional_float(
               getattr(record, "turnover_rate_pct", None)
             ),
@@ -481,7 +520,11 @@ class StockScreeningResolver:
             amount_percentile_60=_finite_optional_float(
               getattr(record, "amount_percentile_60", None)
             ),
-            is_bullish=(current_price > open_price if current_price is not None and open_price is not None else None),
+            is_bullish=(
+              current_price > open_price
+              if current_price is not None and open_price is not None
+              else None
+            ),
             peak_price=_finite_optional_float(record.peak_price),
             days_since_peak=_finite_optional_int(record.days_since_peak),
             price_drop_pct=_finite_optional_float(record.price_drop_pct),
@@ -529,8 +572,11 @@ class StockScreeningResolver:
               StockFactorValue(
                 factor_id=definition.id,
                 value=_finite_optional_float(
-                  (getattr(financial_metric, "roe_ttm", None)
-                   if roe_quality_status is RoeQualityStatus.VALID else None)
+                  (
+                    getattr(financial_metric, "roe_ttm", None)
+                    if roe_quality_status is RoeQualityStatus.VALID
+                    else None
+                  )
                   if definition.id == "roe_ttm"
                   else net_profit_growth
                   if definition.id == "net_profit_growth_pct"
@@ -627,20 +673,12 @@ class StockScreeningResolver:
     )
     flats = len(matched) - advancers - decliners
     top_gainers = sorted(
-      (
-        item
-        for item in matched
-        if _finite_float(item.get("change_pct")) > 0.000001
-      ),
+      (item for item in matched if _finite_float(item.get("change_pct")) > 0.000001),
       key=lambda item: _finite_float(item.get("change_pct")),
       reverse=True,
     )[:10]
     top_losers = sorted(
-      (
-        item
-        for item in matched
-        if _finite_float(item.get("change_pct")) < -0.000001
-      ),
+      (item for item in matched if _finite_float(item.get("change_pct")) < -0.000001),
       key=lambda item: _finite_float(item.get("change_pct")),
     )[:10]
     matched.sort(
@@ -762,8 +800,7 @@ class StockScreeningResolver:
         for run in active_runs:
           strategy = getattr(run, "strategy", None)
           if not strategy or (
-            getattr(strategy, "class_name", "")
-            != LIMIT_UP_BOARD_STRATEGY_CLASS_NAME
+            getattr(strategy, "class_name", "") != LIMIT_UP_BOARD_STRATEGY_CLASS_NAME
             and "打板" not in str(getattr(strategy, "name", ""))
           ):
             continue
@@ -801,9 +838,10 @@ class StockScreeningResolver:
         continue
       if industries and raw.get("industry") not in industries:
         continue
-      if input.min_score is not None and _finite_float(
-        raw.get("radar_score")
-      ) < input.min_score:
+      if (
+        input.min_score is not None
+        and _finite_float(raw.get("radar_score")) < input.min_score
+      ):
         continue
       if search and search not in (
         f"{raw.get('code') or ''} {raw.get('name') or ''}".lower()
@@ -879,12 +917,8 @@ class StockScreeningResolver:
         promotion_score=_finite_float(raw.get("promotion_score")),
         promotion_model_version=str(raw.get("promotion_model_version") or ""),
         exit_policy_version=str(raw.get("exit_policy_version") or ""),
-        promotion_snapshot_version=str(
-          raw.get("promotion_snapshot_version") or ""
-        ),
-        normalized_limit_progress=_finite_float(
-          raw.get("normalized_limit_progress")
-        ),
+        promotion_snapshot_version=str(raw.get("promotion_snapshot_version") or ""),
+        normalized_limit_progress=_finite_float(raw.get("normalized_limit_progress")),
         first_board_close_probability=_finite_float(
           raw.get("first_board_close_probability")
         ),
@@ -915,9 +949,7 @@ class StockScreeningResolver:
             status=str(artifact.status),
             summary=str(artifact.summary or ""),
             catalysts=list(artifact_content.get("catalysts") or []),
-            announcement_risks=list(
-              artifact_content.get("announcement_risks") or []
-            ),
+            announcement_risks=list(artifact_content.get("announcement_risks") or []),
             citations=[str(value) for value in list(artifact.citations or [])],
             data_gaps=list(artifact_content.get("data_gaps") or []),
             confidence_note=str(artifact_content.get("confidence_note") or ""),
@@ -986,15 +1018,21 @@ class StockScreeningResolver:
       score_version=str(projection.get("score_version") or RADAR_SCORE_VERSION),
       promotion_model_version=str(projection.get("promotion_model_version") or ""),
       chain=LimitUpChainSummary(
-        snapshot_version=str(dict(projection.get("chain") or {}).get("snapshot_version") or ""),
+        snapshot_version=str(
+          dict(projection.get("chain") or {}).get("snapshot_version") or ""
+        ),
         max_board_count=_finite_int(
           dict(projection.get("chain") or {}).get("max_board_count")
         ),
         first_board_count=_finite_int(
           dict(projection.get("chain") or {}).get("first_board_count")
         ),
-        sealed_count=_finite_int(dict(projection.get("chain") or {}).get("sealed_count")),
-        broken_count=_finite_int(dict(projection.get("chain") or {}).get("broken_count")),
+        sealed_count=_finite_int(
+          dict(projection.get("chain") or {}).get("sealed_count")
+        ),
+        broken_count=_finite_int(
+          dict(projection.get("chain") or {}).get("broken_count")
+        ),
         break_rate=_finite_float(dict(projection.get("chain") or {}).get("break_rate")),
         promotion_rate=_finite_float(
           dict(projection.get("chain") or {}).get("promotion_rate")
@@ -1034,10 +1072,16 @@ class StockScreeningResolver:
   def stock_factor_catalog() -> List[StockFactorDefinition]:
     return [
       StockFactorDefinition(
-        id=factor.id, label=factor.label, category=factor.category,
-        description=factor.description, unit=factor.unit, lookback=factor.lookback,
-        kind=factor.kind, research_supported=factor.research_supported,
-        unsupported_reason=factor.unsupported_reason, version=factor.version,
+        id=factor.id,
+        label=factor.label,
+        category=factor.category,
+        description=factor.description,
+        unit=factor.unit,
+        lookback=factor.lookback,
+        kind=factor.kind,
+        research_supported=factor.research_supported,
+        unsupported_reason=factor.unsupported_reason,
+        version=factor.version,
         operators=list(factor.operators),
       )
       for factor in FACTOR_DEFINITIONS

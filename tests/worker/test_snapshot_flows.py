@@ -102,23 +102,18 @@ async def test_explicit_snapshot_range_filters_weekend():
 
 
 @pytest.mark.parametrize(
-  ("codes", "expected"),
+  ("sectors", "stock_list", "expected"),
   [
-    (["000001.SZ"], False),
-    (["000001.SZ", "600001.SH"], False),
-    (["510300.SH", "000001.SZ"], True),
+    (None, None, True),
+    (["沪深ETF", "沪深A股"], None, True),
+    (["沪深A股"], None, False),
+    (None, ["000001.SZ"], False),
   ],
 )
-@pytest.mark.asyncio
-async def test_only_exact_full_snapshot_universe_certifies_readiness(
-  monkeypatch, codes, expected
+def test_only_exact_full_snapshot_request_certifies_readiness(
+  sectors, stock_list, expected
 ):
-  resolve = AsyncMock(return_value=[{"code": "000001.SZ"}, {"code": "510300.SH"}])
-  monkeypatch.setattr(indicator_flow, "resolve_instruments", resolve)
-  target = date(2026, 7, 29)
-  assert await indicator_flow._has_full_snapshot_scope(codes, target) is expected
-  assert resolve.await_args.args == (indicator_flow.DEFAULT_SNAPSHOT_SECTORS, None)
-  assert resolve.await_args.kwargs["active_on"] == target
+  assert indicator_flow._requests_full_snapshot_scope(sectors, stock_list) is expected
 
 
 @pytest.mark.asyncio
@@ -196,22 +191,27 @@ async def test_scoped_flow_batches_complete_scope_but_calculates_only_active_cod
       "name": "活动标的",
       "instrument_type": "stock",
       "float_volume": None,
+      "open_date": date(2020, 1, 1),
+      "expire_date": None,
     },
     {
       "code": "000002.SZ",
       "name": "已退市标的",
       "instrument_type": "stock",
       "float_volume": None,
+      "open_date": date(2020, 1, 1),
+      "expire_date": date(2026, 7, 28),
     },
   ]
-  active = [complete[0]]
   resolve_calls = []
 
   async def resolve(scope_sectors, scope_stock_list, **kwargs):
     resolve_calls.append((scope_sectors, scope_stock_list, kwargs))
-    return active if kwargs.get("active_on") == target else complete
+    return complete
 
   batch_calls = []
+  cleanup_calls = []
+  run_cleanup_calls = []
 
   class SnapshotService:
     async def compute_and_save_dates_batch(self, **kwargs):
@@ -238,7 +238,8 @@ async def test_scoped_flow_batches_complete_scope_but_calculates_only_active_cod
       }
 
     async def cleanup_old_snapshots(self, retain_days):
-      return 0
+      cleanup_calls.append(retain_days)
+      raise AssertionError("快照计算 Flow 不应执行全局快照保留清理")
 
   class SessionContext:
     async def __aenter__(self):
@@ -252,7 +253,8 @@ async def test_scoped_flow_batches_complete_scope_but_calculates_only_active_cod
       pass
 
     async def delete_older_than(self, cutoff):
-      return 0
+      run_cleanup_calls.append(cutoff)
+      raise AssertionError("快照计算 Flow 不应执行全局运行记录保留清理")
 
   monkeypatch.setattr(indicator_flow, "get_run_logger", FakeLogger)
   monkeypatch.setattr(
@@ -260,11 +262,9 @@ async def test_scoped_flow_batches_complete_scope_but_calculates_only_active_cod
   )
   monkeypatch.setattr(indicator_flow, "resolve_instruments", resolve)
   monkeypatch.setattr(
-    indicator_flow, "_has_full_snapshot_scope", AsyncMock(return_value=False)
-  )
-  monkeypatch.setattr(
     indicator_flow, "_acquire_snapshot_locks", AsyncMock(return_value={})
   )
+  monkeypatch.setattr(indicator_flow, "_snapshot_lock_backend_pid", lambda _locks: 101)
   monkeypatch.setattr(indicator_flow, "_release_snapshot_locks", AsyncMock())
   monkeypatch.setattr(
     indicator_flow, "_create_signal_runs", AsyncMock(return_value={target: 1})
@@ -285,16 +285,21 @@ async def test_scoped_flow_batches_complete_scope_but_calculates_only_active_cod
   expected_sectors = sectors or indicator_flow.DEFAULT_SNAPSHOT_SECTORS
   assert resolve_calls[0][0:2] == (expected_sectors, stock_list)
   assert resolve_calls[0][2].get("active_on") is None
-  assert resolve_calls[1][0:2] == (expected_sectors, stock_list)
-  assert resolve_calls[1][2]["active_on"] == target
+  assert len(resolve_calls) == 1
   assert [call["codes"] for call in batch_calls] == [
     ["000001.SZ"],
     ["000002.SZ"],
   ]
   assert batch_calls[0]["codes_by_snapshot_date"] == {target: ["000001.SZ"]}
   assert batch_calls[1]["codes_by_snapshot_date"] == {target: []}
+  assert all(call["snapshot_run_ids"] == {target: 1} for call in batch_calls)
+  assert all(call["lock_backend_pid"] == 101 for call in batch_calls)
   assert result["dates"][0]["total_codes"] == 1
   assert result["dates"][0]["saved"] == 1
+  assert result["deleted_old_snapshots"] == 0
+  assert result["deleted_old_runs"] == 0
+  assert cleanup_calls == []
+  assert run_cleanup_calls == []
 
 
 @pytest.mark.parametrize(
@@ -334,6 +339,59 @@ def test_inactive_only_invalidation_error_cannot_certify_complete_snapshot():
     )
     == "partial_failure"
   )
+
+
+def test_result_counter_mismatch_cannot_be_silently_accepted():
+  result = {"saved": 1, "skipped": 0, "failed": 0}
+
+  assert indicator_flow._result_conservation_error(result, 2) == (
+    "快照结果计数不守恒: total=2 processed=1"
+  )
+  assert indicator_flow._result_conservation_error(result, 1) == ""
+
+
+@pytest.mark.asyncio
+async def test_snapshot_lock_rejects_a_reconnected_database_session():
+  class Result:
+    def one(self):
+      return (202, 1, 1)
+
+  class Connection:
+    closed = False
+
+    async def execute(self, statement, parameters):
+      del statement, parameters
+      return Result()
+
+  locks = indicator_flow.SnapshotDatabaseLocks([date(2026, 7, 29)])
+  locks.connection = Connection()
+  locks.backend_pid = 101
+
+  with pytest.raises(indicator_flow.SnapshotLockLost, match="所有权已丢失"):
+    await locks.assert_held()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_lock_cleanup_finishes_and_preserves_cancellation(monkeypatch):
+  started = asyncio.Event()
+  allow_finish = asyncio.Event()
+  finished = asyncio.Event()
+
+  async def release(_locks):
+    started.set()
+    await allow_finish.wait()
+    finished.set()
+
+  monkeypatch.setattr(indicator_flow, "_release_snapshot_locks", release)
+  task = asyncio.create_task(indicator_flow._release_snapshot_locks_safely(object()))
+  await started.wait()
+  task.cancel()
+  await asyncio.sleep(0)
+  allow_finish.set()
+
+  with pytest.raises(asyncio.CancelledError):
+    await task
+  assert finished.is_set()
 
 
 def test_batch_errors_are_attributed_only_to_their_snapshot_date():

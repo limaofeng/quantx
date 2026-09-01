@@ -30,17 +30,19 @@ from quantx_infrastructure.models.divid_factor import DividFactorTable
 from quantx_infrastructure.models.enums import InstrumentType
 from quantx_infrastructure.models.instrument import Instrument
 from quantx_infrastructure.repositories.divid_factor_repository import (
+  DIVID_FACTOR_WRITE_LOCK_KEY,
   divid_factor_codes_sha256,
   divid_factor_rows_sha256,
 )
 from quantx_worker.prefector.flows.divid_factor_sync_flow import (
   divid_factor_sync_flow,
 )
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 OPERATION_VERSION = "qmt-get-divid-factors-v1"
+REPLACEMENT_AUDIT_SCHEMA_VERSION = 2
 BENCHMARK_CODE = "000300.SH"
 UNIVERSE_VERSION = "stock-etf-plus-csi300-v1"
 UNIVERSE_INSTRUMENT_TYPES = (
@@ -71,31 +73,53 @@ RUNNING_RESELECT_AFTER_FAILURES = 3
 RUNNING_STOP_AFTER_FAILURES = 9
 
 
+class CampaignLockLost(RuntimeError):
+  """Raised when the connection-scoped campaign lock can no longer exist."""
+
+
 class CampaignDatabaseLock:
   def __init__(self) -> None:
     self.connection = None
+    self.backend_pid: int | None = None
 
   async def acquire(self) -> None:
-    self.connection = await relational_engine.connect()
-    acquired = await self.connection.scalar(
-      text("SELECT pg_try_advisory_lock(:lock_key)"),
-      {"lock_key": CAMPAIGN_LOCK_KEY},
-    )
+    connection = await relational_engine.connect()
+    try:
+      backend_pid = await connection.scalar(text("SELECT pg_backend_pid()"))
+      acquired = await connection.scalar(
+        text("SELECT pg_try_advisory_lock(:lock_key)"),
+        {"lock_key": CAMPAIGN_LOCK_KEY},
+      )
+    except Exception:
+      await connection.close()
+      raise
     if not acquired:
-      await self.connection.close()
-      self.connection = None
+      await connection.close()
       raise RuntimeError("日线或复权因子 QMT 回填正在运行；请等待其释放全局数据回填锁")
+    if backend_pid is None:
+      await connection.close()
+      raise RuntimeError("无法识别复权因子 campaign 数据库锁会话")
+    self.connection = connection
+    self.backend_pid = int(backend_pid)
 
   async def release(self) -> None:
     if self.connection is None:
       return
     connection = self.connection
+    backend_pid = self.backend_pid
     self.connection = None
+    self.backend_pid = None
     try:
-      if not connection.closed:
+      if not connection.closed and backend_pid is not None:
         await connection.scalar(
-          text("SELECT pg_advisory_unlock(:lock_key)"),
-          {"lock_key": CAMPAIGN_LOCK_KEY},
+          text(
+            "SELECT CASE WHEN pg_backend_pid() = :backend_pid "
+            "THEN pg_advisory_unlock(:lock_key) ELSE false END"
+          ),
+          {
+            "backend_pid": backend_pid,
+            "lock_key": CAMPAIGN_LOCK_KEY,
+          },
         )
     except SQLAlchemyError:
       # PostgreSQL advisory locks are connection-scoped.  A dropped or
@@ -107,6 +131,43 @@ class CampaignDatabaseLock:
         await connection.close()
       except SQLAlchemyError:
         pass
+
+  async def assert_held(self) -> None:
+    connection = self.connection
+    backend_pid = self.backend_pid
+    if connection is None or connection.closed or backend_pid is None:
+      raise CampaignLockLost("复权因子 campaign 数据库锁连接已关闭")
+    try:
+      held = await connection.scalar(
+        text(
+          """
+          SELECT EXISTS (
+            SELECT 1
+            FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND mode = 'ExclusiveLock'
+              AND granted
+              AND pid = pg_backend_pid()
+              AND pid = :backend_pid
+              AND classid::bigint = (
+                (CAST(:lock_key AS bigint) >> 32) & 4294967295
+              )
+              AND objid::bigint = (
+                CAST(:lock_key AS bigint) & 4294967295
+              )
+              AND objsubid = 1
+          )
+          """
+        ),
+        {
+          "backend_pid": backend_pid,
+          "lock_key": CAMPAIGN_LOCK_KEY,
+        },
+      )
+    except SQLAlchemyError as exc:
+      raise CampaignLockLost("复权因子 campaign 数据库锁连接已失效") from exc
+    if held is not True:
+      raise CampaignLockLost("复权因子 campaign 数据库 advisory lock 已丢失")
 
 
 def _date(value: str) -> date:
@@ -254,7 +315,7 @@ async def load_universe(
 def default_state_path(*, start: date, end: date) -> Path:
   return (
     DEFAULT_STATE_DIRECTORY
-    / (f"full-stock-etf-divid-factors-{_compact(start)}-{_compact(end)}.json")
+    / (f"full-stock-etf-divid-factors-audit-v2-{_compact(start)}-{_compact(end)}.json")
   ).resolve()
 
 
@@ -430,7 +491,10 @@ async def verify_completed_request(
   replacement = ingestion_result.get("replacement_audit")
   if not isinstance(replacement, dict):
     raise RuntimeError("复权因子请求缺少范围替换审计")
-  if replacement.get("audit_schema_version") != 1:
+  if (
+    type(replacement.get("audit_schema_version")) is not int
+    or replacement.get("audit_schema_version") != 2
+  ):
     raise RuntimeError("复权因子范围替换审计版本不受支持")
 
   prior_count = audit_count(replacement, "prior_count")
@@ -461,6 +525,26 @@ async def verify_completed_request(
     raise RuntimeError("复权因子范围替换审计摘要无效")
   if source_digest != expected_digest:
     raise RuntimeError("复权因子范围替换源数据与持久化摘要不一致")
+  code_audits = replacement.get("code_audits")
+  if not isinstance(code_audits, dict) or set(code_audits) != set(codes):
+    raise RuntimeError("复权因子范围替换逐代码审计范围不一致")
+  audited_code_counts: dict[str, int] = {}
+  audited_code_digests: dict[str, str] = {}
+  for code in codes:
+    item = code_audits.get(code)
+    if not isinstance(item, dict):
+      raise RuntimeError("复权因子范围替换逐代码审计无效")
+    record_count = audit_count(item, "record_count")
+    code_source_digest = str(item.get("source_sha256") or "")
+    code_persisted_digest = str(item.get("persisted_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", code_source_digest) or (
+      code_source_digest != code_persisted_digest
+    ):
+      raise RuntimeError("复权因子范围替换逐代码摘要不一致")
+    audited_code_counts[code] = record_count
+    audited_code_digests[code] = code_persisted_digest
+  if sum(audited_code_counts.values()) != verified_count:
+    raise RuntimeError("复权因子范围替换逐代码记录数不一致")
 
   expected_chunks = audit_count(request, "expected_chunks")
   received_chunks = audit_count(request, "received_chunks")
@@ -481,6 +565,12 @@ async def verify_completed_request(
     raise RuntimeError("复权因子请求分片记录数与入库审计不一致")
 
   async with AsyncSessionLocal() as db:
+    # Freeze the factor table while recomputing both aggregate and per-code
+    # evidence. Authoritative and legacy writers take the matching exclusive
+    # transaction lock.
+    await db.execute(
+      select(func.pg_advisory_xact_lock_shared(DIVID_FACTOR_WRITE_LOCK_KEY))
+    )
     persisted = (
       await db.execute(
         select(
@@ -513,6 +603,15 @@ async def verify_completed_request(
       "PostgreSQL 复权因子持久化摘要验收失败: "
       f"audited={verified_count} persisted={len(actual_rows)}"
     )
+  actual_rows_by_code = {code: [] for code in codes}
+  for row in actual_rows:
+    actual_rows_by_code[str(row[0]).strip().upper()].append(row)
+  for code in codes:
+    rows = actual_rows_by_code[code]
+    if len(rows) != audited_code_counts[code] or (
+      divid_factor_rows_sha256(rows) != audited_code_digests[code]
+    ):
+      raise RuntimeError(f"PostgreSQL 复权因子逐代码摘要验收失败: {code}")
 
   source_codes = sorted({str(row[0]) for row in actual_rows})
   ex_dates = sorted(str(row[2]) for row in actual_rows)
@@ -523,6 +622,15 @@ async def verify_completed_request(
     "requested_code_count": len(codes),
     "source_code_count": len(source_codes),
     "codes_without_events": len(codes) - len(source_codes),
+    "verified_code_audits": len(audited_code_digests),
+    "code_audits": {
+      code: {
+        "record_count": audited_code_counts[code],
+        "source_sha256": audited_code_digests[code],
+        "persisted_sha256": divid_factor_rows_sha256(actual_rows_by_code[code]),
+      }
+      for code in codes
+    },
     "min_ex_date": ex_dates[0] if ex_dates else "",
     "max_ex_date": ex_dates[-1] if ex_dates else "",
     "source_sha256": expected_digest,
@@ -560,12 +668,15 @@ def _refresh_summary(state: dict[str, Any]) -> None:
 async def _load_or_create_state(
   args: argparse.Namespace,
   state_path: Path,
+  *,
+  persist_new_state: bool = True,
 ) -> dict[str, Any]:
   if state_path.exists():
     state = json.loads(state_path.read_text(encoding="utf-8"))
     expected = {
       "schema_version": SCHEMA_VERSION,
       "operation_version": OPERATION_VERSION,
+      "replacement_audit_schema_version": REPLACEMENT_AUDIT_SCHEMA_VERSION,
       "universe_version": UNIVERSE_VERSION,
       "start_date": _compact(args.start_date),
       "end_date": _compact(args.end_date),
@@ -587,6 +698,7 @@ async def _load_or_create_state(
   )
   identity = {
     "operation_version": OPERATION_VERSION,
+    "replacement_audit_schema_version": REPLACEMENT_AUDIT_SCHEMA_VERSION,
     "universe_version": UNIVERSE_VERSION,
     "start_date": _compact(args.start_date),
     "end_date": _compact(args.end_date),
@@ -604,7 +716,8 @@ async def _load_or_create_state(
     "jobs": build_jobs(codes, args.batch_size),
   }
   _refresh_summary(state)
-  _atomic_write_json(state_path, state)
+  if persist_new_state:
+    _atomic_write_json(state_path, state)
   return state
 
 
@@ -694,12 +807,30 @@ def _persist_state(
 ) -> None:
   if status is not None:
     state["status"] = status
+    if status == "completed":
+      state["completed_at"] = _now_iso()
+    else:
+      state.pop("completed_at", None)
   if error:
     state["last_error"] = error[:2000]
   elif status in {"running", "completed"}:
     state.pop("last_error", None)
   _refresh_summary(state)
   _atomic_write_json(state_path, state)
+
+
+async def _persist_state_while_locked(
+  campaign_lock: CampaignDatabaseLock,
+  state_path: Path,
+  state: dict[str, Any],
+  *,
+  status: str | None = None,
+  error: str = "",
+) -> None:
+  """Persist only after proving this exact PostgreSQL session owns the lock."""
+
+  await campaign_lock.assert_held()
+  _persist_state(state_path, state, status=status, error=error)
 
 
 async def _reverify_completed_jobs(state: dict[str, Any]) -> str:
@@ -759,14 +890,26 @@ async def run(args: argparse.Namespace) -> int:
   campaign_lock = CampaignDatabaseLock()
   await campaign_lock.acquire()
   try:
-    state = await _load_or_create_state(args, state_path)
+    await campaign_lock.assert_held()
+    state = await _load_or_create_state(
+      args,
+      state_path,
+      persist_new_state=False,
+    )
+    await campaign_lock.assert_held()
     failed = _failed_jobs(state)
     if failed and not args.retry_failed:
       error = (
         f"状态账本包含 {len(failed)} 个 failed 作业；"
         "必须显式使用 --retry-failed 才能恢复"
       )
-      _persist_state(state_path, state, status="failed", error=error)
+      await _persist_state_while_locked(
+        campaign_lock,
+        state_path,
+        state,
+        status="failed",
+        error=error,
+      )
       print(
         json.dumps(
           {
@@ -785,7 +928,12 @@ async def run(args: argparse.Namespace) -> int:
       if args.retry_failed
       else []
     )
-    _persist_state(state_path, state, status="running")
+    await _persist_state_while_locked(
+      campaign_lock,
+      state_path,
+      state,
+      status="running",
+    )
     if retried:
       print(
         json.dumps(
@@ -818,11 +966,18 @@ async def run(args: argparse.Namespace) -> int:
       flush=True,
     )
     while True:
+      await campaign_lock.assert_held()
       job = _next_job(state)
       if job is None:
         error = _campaign_incomplete_error(state)
         if error:
-          _persist_state(state_path, state, status="failed", error=error)
+          await _persist_state_while_locked(
+            campaign_lock,
+            state_path,
+            state,
+            status="failed",
+            error=error,
+          )
           print(
             json.dumps(
               {
@@ -836,9 +991,17 @@ async def run(args: argparse.Namespace) -> int:
             flush=True,
           )
           return 2
+        await campaign_lock.assert_held()
         error = await _reverify_completed_jobs(state)
+        await campaign_lock.assert_held()
         if error:
-          _persist_state(state_path, state, status="failed", error=error)
+          await _persist_state_while_locked(
+            campaign_lock,
+            state_path,
+            state,
+            status="failed",
+            error=error,
+          )
           print(
             json.dumps(
               {
@@ -852,10 +1015,20 @@ async def run(args: argparse.Namespace) -> int:
             flush=True,
           )
           return 2
-        _persist_state(state_path, state, status="completed")
+        await _persist_state_while_locked(
+          campaign_lock,
+          state_path,
+          state,
+          status="completed",
+        )
         return 0
       if args.max_jobs is not None and processed >= args.max_jobs:
-        _persist_state(state_path, state, status="paused")
+        await _persist_state_while_locked(
+          campaign_lock,
+          state_path,
+          state,
+          status="paused",
+        )
         return 0
 
       payload = request_payload(state, job)
@@ -881,6 +1054,7 @@ async def run(args: argparse.Namespace) -> int:
             await asyncio.sleep(args.poll_seconds)
             continue
           device_id = await ensure_factor_agent_ready()
+          await campaign_lock.assert_held()
           job["agent_device_id"] = device_id
           job["started_at"] = _now_iso()
         else:
@@ -891,7 +1065,7 @@ async def run(args: argparse.Namespace) -> int:
         job["status"] = "running"
         job["request_key"] = payload["request_key"]
         job.setdefault("attempt_limit", int(args.max_attempts))
-        _persist_state(state_path, state)
+        await _persist_state_while_locked(campaign_lock, state_path, state)
         try:
           result = await divid_factor_sync_flow.fn(
             stock_list=job["codes"],
@@ -901,7 +1075,11 @@ async def run(args: argparse.Namespace) -> int:
             timeout_seconds=args.timeout_seconds,
             request_key=str(payload["request_key"]),
           )
+          await campaign_lock.assert_held()
+        except CampaignLockLost:
+          raise
         except Exception as exc:
+          await campaign_lock.assert_held()
           error = f"{exc.__class__.__name__}: {exc}"
           job["last_error"] = error[:2000]
           transient_failures = int(job.get("transient_failures") or 0) + 1
@@ -921,14 +1099,25 @@ async def run(args: argparse.Namespace) -> int:
             job["attempt"] = int(job.get("attempt") or 0) + 1
             job["status"] = "failed"
             job["failed_at"] = _now_iso()
-            _persist_state(state_path, state, status="failed", error=error)
+            await _persist_state_while_locked(
+              campaign_lock,
+              state_path,
+              state,
+              status="failed",
+              error=error,
+            )
             return 2
           if transient_failures % RUNNING_RESELECT_AFTER_FAILURES == 0:
             job["status"] = "pending"
             job.pop("agent_device_id", None)
           else:
             job["status"] = "running"
-          _persist_state(state_path, state, error=error)
+          await _persist_state_while_locked(
+            campaign_lock,
+            state_path,
+            state,
+            error=error,
+          )
           await asyncio.sleep(args.poll_seconds)
           continue
 
@@ -951,7 +1140,7 @@ async def run(args: argparse.Namespace) -> int:
               "observed_at": job["last_wait_timeout_at"],
             },
           )
-          _persist_state(state_path, state)
+          await _persist_state_while_locked(campaign_lock, state_path, state)
           await asyncio.sleep(args.poll_seconds)
           continue
         if result_status != "completed" or not request_id:
@@ -976,23 +1165,37 @@ async def run(args: argparse.Namespace) -> int:
           if job["attempt"] >= attempt_limit:
             job["status"] = "failed"
             job["failed_at"] = _now_iso()
-            _persist_state(state_path, state, status="failed", error=error)
+            await _persist_state_while_locked(
+              campaign_lock,
+              state_path,
+              state,
+              status="failed",
+              error=error,
+            )
             return 2
           job["status"] = "pending"
-          _persist_state(state_path, state, error=error)
+          await _persist_state_while_locked(
+            campaign_lock,
+            state_path,
+            state,
+            error=error,
+          )
           await asyncio.sleep(args.poll_seconds)
           continue
 
         job["status"] = "verifying"
         job["request_id"] = request_id
         job["request_completed_at"] = _now_iso()
-        _persist_state(state_path, state)
+        await _persist_state_while_locked(campaign_lock, state_path, state)
 
       try:
         audit = await verify_completed_request(
           request_id=request_id,
           expected_payload=payload,
         )
+        await campaign_lock.assert_held()
+      except CampaignLockLost:
+        raise
       except Exception as exc:
         error = f"{exc.__class__.__name__}: {exc}"
         job["last_error"] = error[:2000]
@@ -1016,7 +1219,8 @@ async def run(args: argparse.Namespace) -> int:
           job["failed_at"] = _now_iso()
         else:
           job["status"] = "verifying"
-        _persist_state(
+        await _persist_state_while_locked(
+          campaign_lock,
           state_path,
           state,
           status="failed",
@@ -1031,7 +1235,7 @@ async def run(args: argparse.Namespace) -> int:
       job.pop("last_error", None)
       job.pop("verification_failures", None)
       processed += 1
-      _persist_state(state_path, state)
+      await _persist_state_while_locked(campaign_lock, state_path, state)
       print(
         json.dumps(
           {

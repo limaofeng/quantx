@@ -28,13 +28,16 @@ class InMemorySnapshotRepo:
   def __init__(self, db):
     self.db = db
 
-  async def bulk_upsert(self, records):
+  async def bulk_upsert(self, records, *, snapshot_run_ids, lock_backend_pid):
+    assert snapshot_run_ids
+    assert lock_backend_pid == 101
     for record in records:
       key = (record["code"], record["snapshot_date"])
       self.rows[key] = record
     return len(records)
 
-  async def invalidate_factor_scope(self, codes, snapshot_dates):
+  async def invalidate_factor_scope(self, codes, snapshot_dates, *, snapshot_run_ids):
+    assert snapshot_run_ids
     for (code, target), record in self.rows.items():
       if code in codes and target in snapshot_dates:
         record["calculation_version"] = None
@@ -86,6 +89,40 @@ def make_service(repository):
   )
 
 
+@pytest.mark.asyncio
+async def test_snapshot_run_identity_is_required_before_any_market_read():
+  repository = FakeKLineRepository({"000001.SZ": daily_frame(10)})
+  service = make_service(repository)
+
+  with pytest.raises(ValueError):
+    await service.compute_and_save_batch(
+      codes=["000001.SZ"],
+      snapshot_date=date(2026, 5, 20),
+      instrument_type_map={},
+      name_map={},
+    )
+
+  with pytest.raises(ValueError):
+    await service.compute_and_save_dates_batch(
+      codes=["000001.SZ"],
+      snapshot_dates=[date(2026, 5, 20)],
+      instrument_type_map={},
+      name_map={},
+      snapshot_run_ids={},
+    )
+
+  with pytest.raises(ValueError, match="数据库锁会话"):
+    await service.compute_and_save_dates_batch(
+      codes=["000001.SZ"],
+      snapshot_dates=[date(2026, 5, 20)],
+      instrument_type_map={},
+      name_map={},
+      snapshot_run_ids={date(2026, 5, 20): 1},
+    )
+
+  assert repository.calls == []
+
+
 @pytest.mark.parametrize("inactive_kind", ["no_volume", "suspended"])
 @pytest.mark.asyncio
 async def test_inactive_target_is_audited_skip_not_calculation_failure(inactive_kind):
@@ -105,6 +142,8 @@ async def test_inactive_target_is_audited_skip_not_calculation_failure(inactive_
     snapshot_date=date(2026, 5, 20),
     instrument_type_map={},
     name_map={},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
   )
   assert result["saved"] == 1
   assert result["skipped"] == result["inactive_target"] == 1
@@ -124,6 +163,8 @@ async def test_bad_ohlc_remains_failed_and_past_inactivity_invalidates_windows()
     snapshot_date=date(2026, 5, 20),
     instrument_type_map={},
     name_map={},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
   )
   assert result["saved"] == result["failed"] == 1
   assert result["inactive_target"] == 0
@@ -147,6 +188,8 @@ async def test_rerun_invalidates_old_factor_rows_only_in_requested_scope(changed
     snapshot_dates=[date(2026, 5, 19), date(2026, 5, 20)],
     instrument_type_map={},
     name_map={},
+    snapshot_run_ids={date(2026, 5, 19): 1, date(2026, 5, 20): 2},
+    lock_backend_pid=101,
   )
   changed = daily_frame(10)
   if changed_kind == "no_volume":
@@ -166,6 +209,8 @@ async def test_rerun_invalidates_old_factor_rows_only_in_requested_scope(changed
     snapshot_date=date(2026, 5, 20),
     instrument_type_map={},
     name_map={},
+    snapshot_run_id=3,
+    lock_backend_pid=101,
   )
   assert result["saved"] == 0
   assert len(InMemorySnapshotRepo.rows) == 4  # retain evidence, do not delete
@@ -192,6 +237,8 @@ async def test_same_stock_same_day_upserts_one_snapshot():
     snapshot_date=date(2026, 5, 19),
     instrument_type_map={"000001.SZ": "stock"},
     name_map={"000001.SZ": "平安银行"},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
   )
   repository.market_data = {"000001.SZ": daily_frame(20)}
   second = await service.compute_and_save_batch(
@@ -199,6 +246,8 @@ async def test_same_stock_same_day_upserts_one_snapshot():
     snapshot_date=date(2026, 5, 19),
     instrument_type_map={"000001.SZ": "stock"},
     name_map={"000001.SZ": "平安银行"},
+    snapshot_run_id=2,
+    lock_backend_pid=101,
   )
 
   assert first["saved"] == 1
@@ -220,6 +269,8 @@ async def test_multiple_target_dates_share_one_kline_read():
     instrument_type_map={"000001.SZ": "stock"},
     name_map={"000001.SZ": "平安银行"},
     lookback_days=30,
+    snapshot_run_ids={date(2026, 5, 19): 1, date(2026, 5, 20): 2},
+    lock_backend_pid=101,
   )
 
   assert len(repository.calls) == 1
@@ -249,6 +300,8 @@ async def test_multiple_target_dates_use_each_dates_instrument_lifecycle_scope()
       first_date: ["000001.SZ"],
       second_date: ["000002.SZ"],
     },
+    snapshot_run_ids={first_date: 1, second_date: 2},
+    lock_backend_pid=101,
   )
 
   assert len(repository.calls) == 7
@@ -282,6 +335,8 @@ async def test_inactive_lifecycle_scope_invalidates_stale_row_without_market_rea
     instrument_type_map={"000001.SZ": "stock"},
     name_map={"000001.SZ": "旧生命周期标的"},
     codes_by_snapshot_date={target: []},
+    snapshot_run_ids={target: 1},
+    lock_backend_pid=101,
   )
 
   assert result["total"] == 0
@@ -293,7 +348,7 @@ async def test_inactive_lifecycle_scope_invalidates_stale_row_without_market_rea
 @pytest.mark.asyncio
 async def test_inactive_only_invalidation_failure_is_reported_without_market_read():
   class FailingInvalidationRepo(InMemorySnapshotRepo):
-    async def invalidate_factor_scope(self, codes, snapshot_dates):
+    async def invalidate_factor_scope(self, codes, snapshot_dates, *, snapshot_run_ids):
       raise RuntimeError("database unavailable")
 
   target = date(2026, 5, 20)
@@ -307,6 +362,8 @@ async def test_inactive_only_invalidation_failure_is_reported_without_market_rea
     instrument_type_map={},
     name_map={},
     codes_by_snapshot_date={target: []},
+    snapshot_run_ids={target: 1},
+    lock_backend_pid=101,
   )
 
   assert result["total"] == result["failed"] == 0
@@ -346,6 +403,8 @@ async def test_lifecycle_scoped_errors_are_bound_to_the_affected_dates():
       first_date: ["000001.SZ"],
       second_date: ["000002.SZ"],
     },
+    snapshot_run_ids={first_date: 1, second_date: 2},
+    lock_backend_pid=101,
   )
 
   assert result["dates"][first_date.isoformat()]["errors"] == []
@@ -372,6 +431,8 @@ async def test_long_history_is_read_in_non_overlapping_time_windows():
     snapshot_date=date(2026, 5, 20),
     instrument_type_map={"000001.SZ": "stock"},
     name_map={"000001.SZ": "平安银行"},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
   )
 
   assert len(repository.calls) == 7
@@ -397,6 +458,8 @@ async def test_missing_target_day_does_not_reuse_previous_close():
     snapshot_date=date(2026, 5, 20),
     instrument_type_map={"000001.SZ": "stock"},
     name_map={"000001.SZ": "平安银行"},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
   )
 
   assert result["saved"] == 0
@@ -415,6 +478,8 @@ async def test_batch_reports_influx_read_error_as_systemic_failure():
     snapshot_date=date(2026, 5, 19),
     instrument_type_map={},
     name_map={},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
   )
 
   assert result["saved"] == 0

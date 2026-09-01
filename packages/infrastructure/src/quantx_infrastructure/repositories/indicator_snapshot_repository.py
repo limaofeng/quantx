@@ -3,7 +3,7 @@
 """
 
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from quantx_domain.factors import (
   FACTOR_DEFINITIONS,
@@ -39,6 +39,11 @@ from quantx_infrastructure.models.indicator_snapshot import IndicatorSnapshot
 from quantx_infrastructure.models.instrument import Instrument
 from quantx_infrastructure.models.sector import Sector
 from quantx_infrastructure.models.sector_stock import SectorStock
+from quantx_infrastructure.services.snapshot_fencing import (
+  acquire_snapshot_publish_guard,
+  assert_snapshot_publish_owner,
+  assert_snapshot_run_owner,
+)
 
 ST_NAME_PREFIXES = ("ST", "*ST", "S*ST", "SST", "＊ST", "S＊ST")
 MAX_BULK_UPSERT_RECORDS = 500
@@ -96,7 +101,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
   """技术指标快照仓储"""
 
   model_class = IndicatorSnapshot
- 
+
   def __init__(self, db_session: AsyncSession):
     super().__init__(db_session)
 
@@ -105,37 +110,59 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     stmt = insert(IndicatorSnapshot).values(**data)
     stmt = stmt.on_conflict_do_update(
       index_elements=["code", "snapshot_date"],
-      set_={
-        k: v
-        for k, v in data.items()
-        if k not in ("code", "snapshot_date")
-      },
+      set_={k: v for k, v in data.items() if k not in ("code", "snapshot_date")},
     )
     await self.db.execute(stmt)
 
-  async def bulk_upsert(self, records: List[Dict[str, Any]]) -> int:
+  async def bulk_upsert(
+    self,
+    records: List[Dict[str, Any]],
+    *,
+    snapshot_run_ids: Mapping[date, int],
+    lock_backend_pid: int,
+  ) -> int:
     """Use bounded multi-row statements and commit the complete batch once."""
     if not records:
       return 0
-    for offset in range(0, len(records), MAX_BULK_UPSERT_RECORDS):
-      batch = records[offset : offset + MAX_BULK_UPSERT_RECORDS]
-      insert_stmt = insert(IndicatorSnapshot).values(batch)
-      update_values = {
-        key: getattr(insert_stmt.excluded, key)
-        for key in batch[0]
-        if key not in ("code", "snapshot_date")
-      }
-      update_values["updated_at"] = func.now()
-      stmt = insert_stmt.on_conflict_do_update(
-        index_elements=["code", "snapshot_date"],
-        set_=update_values,
+    snapshot_dates = tuple(sorted(snapshot_run_ids))
+    try:
+      await acquire_snapshot_publish_guard(
+        self.db,
+        lock_backend_pid=lock_backend_pid,
+        snapshot_dates=snapshot_dates,
       )
-      await self.db.execute(stmt)
-    await self.db.commit()
+      await assert_snapshot_run_owner(self.db, snapshot_run_ids)
+      for offset in range(0, len(records), MAX_BULK_UPSERT_RECORDS):
+        batch = records[offset : offset + MAX_BULK_UPSERT_RECORDS]
+        insert_stmt = insert(IndicatorSnapshot).values(batch)
+        update_values = {
+          key: getattr(insert_stmt.excluded, key)
+          for key in batch[0]
+          if key not in ("code", "snapshot_date")
+        }
+        update_values["updated_at"] = func.now()
+        stmt = insert_stmt.on_conflict_do_update(
+          index_elements=["code", "snapshot_date"],
+          set_=update_values,
+        )
+        await self.db.execute(stmt)
+      await assert_snapshot_publish_owner(
+        self.db,
+        lock_backend_pid=lock_backend_pid,
+        snapshot_dates=snapshot_dates,
+      )
+      await self.db.commit()
+    except BaseException:
+      await self.db.rollback()
+      raise
     return len(records)
 
   async def invalidate_factor_scope(
-    self, codes: List[str], snapshot_dates: List[date],
+    self,
+    codes: List[str],
+    snapshot_dates: List[date],
+    *,
+    snapshot_run_ids: Mapping[date, int],
   ) -> None:
     """Fail closed before recomputation, retaining old values for audit/baselines.
 
@@ -144,6 +171,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     """
     if not codes or not snapshot_dates:
       return
+    await assert_snapshot_run_owner(self.db, snapshot_run_ids)
     await self.db.execute(
       update(IndicatorSnapshot)
       .where(
@@ -155,14 +183,10 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     )
     await self.db.commit()
 
-  async def find_by_date(
-    self, snapshot_date: date
-  ) -> List[IndicatorSnapshot]:
+  async def find_by_date(self, snapshot_date: date) -> List[IndicatorSnapshot]:
     """获取某交易日所有标的的快照"""
     result = await self.db.execute(
-      select(IndicatorSnapshot).filter(
-        IndicatorSnapshot.snapshot_date == snapshot_date
-      )
+      select(IndicatorSnapshot).filter(IndicatorSnapshot.snapshot_date == snapshot_date)
     )
     return list(result.scalars().all())
 
@@ -181,22 +205,33 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     return result.scalar_one_or_none()
 
   async def find_snapshot_dates(
-    self, start_date: date, end_date: date, *, calculation_version: Optional[str] = None,
+    self,
+    start_date: date,
+    end_date: date,
+    *,
+    calculation_version: Optional[str] = None,
   ) -> List[date]:
     """返回日期区间内实际存在快照的交易日。"""
-    conditions = [IndicatorSnapshot.snapshot_date >= start_date,
-                  IndicatorSnapshot.snapshot_date <= end_date]
+    conditions = [
+      IndicatorSnapshot.snapshot_date >= start_date,
+      IndicatorSnapshot.snapshot_date <= end_date,
+    ]
     if calculation_version is not None:
       conditions.append(IndicatorSnapshot.calculation_version == calculation_version)
     result = await self.db.execute(
-      select(IndicatorSnapshot.snapshot_date).where(*conditions)
+      select(IndicatorSnapshot.snapshot_date)
+      .where(*conditions)
       .distinct()
       .order_by(IndicatorSnapshot.snapshot_date.asc())
     )
     return list(result.scalars().all())
 
-  async def find_factor_snapshot_dates(self, start_date: date, end_date: date) -> List[date]:
-    return await self.find_snapshot_dates(start_date, end_date, calculation_version=FACTOR_VERSION)
+  async def find_factor_snapshot_dates(
+    self, start_date: date, end_date: date
+  ) -> List[date]:
+    return await self.find_snapshot_dates(
+      start_date, end_date, calculation_version=FACTOR_VERSION
+    )
 
   async def get_latest_calculated_at(self, snapshot_date: date):
     """获取指定快照日期最后更新时间"""
@@ -210,9 +245,11 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
   def _industry_condition(self, names: List[str], include: bool = True):
     if not names:
       return None
-    expanded_names = list(dict.fromkeys(
-      names + [name + "加权" for name in names if not name.endswith("加权")]
-    ))
+    expanded_names = list(
+      dict.fromkeys(
+        names + [name + "加权" for name in names if not name.endswith("加权")]
+      )
+    )
     sector_exists = exists(
       select(SectorStock.id)
       .join(Sector, SectorStock.sector_id == Sector.id)
@@ -268,7 +305,9 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
 
   def _universe_condition(self, universe: str):
     universe = (universe or "stock").lower()
-    snapshot_type = func.lower(func.coalesce(IndicatorSnapshot.instrument_type, "stock"))
+    snapshot_type = func.lower(
+      func.coalesce(IndicatorSnapshot.instrument_type, "stock")
+    )
     if universe == "etf":
       return or_(
         Instrument.type == InstrumentType.ETF,
@@ -285,7 +324,9 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     )
 
   def _stock_type_condition(self):
-    snapshot_type = func.lower(func.coalesce(IndicatorSnapshot.instrument_type, "stock"))
+    snapshot_type = func.lower(
+      func.coalesce(IndicatorSnapshot.instrument_type, "stock")
+    )
     return or_(
       Instrument.type == InstrumentType.STOCK,
       and_(Instrument.type.is_(None), snapshot_type == "stock"),
@@ -295,25 +336,34 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     display_name = func.upper(
       func.trim(func.coalesce(IndicatorSnapshot.name, Instrument.name, ""))
     )
-    return or_(
-      *[display_name.like(f"{prefix}%") for prefix in ST_NAME_PREFIXES]
-    )
+    return or_(*[display_name.like(f"{prefix}%") for prefix in ST_NAME_PREFIXES])
 
   def _exclude_st_condition(self):
     return not_(and_(self._stock_type_condition(), self._st_name_condition()))
 
   async def list_baseline_snapshots(
-    self, snapshot_date: date, *, universe: str = "stock_and_etf", exclude_st: bool = True,
+    self,
+    snapshot_date: date,
+    *,
+    universe: str = "stock_and_etf",
+    exclude_st: bool = True,
   ) -> List[IndicatorSnapshot]:
     """Radar's existing daily baselines are independent of factor-study readiness."""
-    conditions = [IndicatorSnapshot.snapshot_date == snapshot_date, self._universe_condition(universe)]
+    conditions = [
+      IndicatorSnapshot.snapshot_date == snapshot_date,
+      self._universe_condition(universe),
+    ]
     if exclude_st:
       conditions.append(self._exclude_st_condition())
     result = await self.db.execute(
       select(IndicatorSnapshot)
       .outerjoin(Instrument, Instrument.id == IndicatorSnapshot.code)
       .where(*conditions)
-      .order_by(IndicatorSnapshot.change_pct.desc(), IndicatorSnapshot.volume_ratio.desc(), IndicatorSnapshot.code.asc())
+      .order_by(
+        IndicatorSnapshot.change_pct.desc(),
+        IndicatorSnapshot.volume_ratio.desc(),
+        IndicatorSnapshot.code.asc(),
+      )
       .limit(20_000)
     )
     return list(result.scalars().all())
@@ -417,11 +467,22 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       for definition in FACTOR_DEFINITIONS
       if hasattr(IndicatorSnapshot, definition.id)
     }
-    allowed_fields.update({
-      "roe_ttm": effective_roe,
-      "net_profit_growth_pct": case((valid_growth_condition, FinancialMetricSnapshot.net_profit_quarter_growth_pct), else_=None),
-      "revenue_growth_pct": case((valid_growth_condition, FinancialMetricSnapshot.revenue_quarter_growth_pct), else_=None),
-    })
+    allowed_fields.update(
+      {
+        "roe_ttm": effective_roe,
+        "net_profit_growth_pct": case(
+          (
+            valid_growth_condition,
+            FinancialMetricSnapshot.net_profit_quarter_growth_pct,
+          ),
+          else_=None,
+        ),
+        "revenue_growth_pct": case(
+          (valid_growth_condition, FinancialMetricSnapshot.revenue_quarter_growth_pct),
+          else_=None,
+        ),
+      }
+    )
     for item in normalized_conditions:
       field = allowed_fields[item["factor_id"]]
       value = item["value"]
@@ -429,10 +490,15 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       if operator == "between":
         conditions.append(and_(field >= value, field <= item["value_to"]))
       else:
-        conditions.append({
-          "gte": field.__ge__, "lte": field.__le__, "gt": field.__gt__,
-          "lt": field.__lt__, "eq": field.__eq__,
-        }[operator](value))
+        conditions.append(
+          {
+            "gte": field.__ge__,
+            "lte": field.__le__,
+            "gt": field.__gt__,
+            "lt": field.__lt__,
+            "eq": field.__eq__,
+          }[operator](value)
+        )
 
     base = (
       select(
@@ -469,11 +535,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       sort_expression = sort_field.asc() if direction == "asc" else sort_field.desc()
       order_by = [sort_expression.nulls_last(), IndicatorSnapshot.code.asc()]
 
-    stmt = (
-      base.order_by(*order_by)
-      .offset(offset)
-      .limit(limit)
-    )
+    stmt = base.order_by(*order_by).offset(offset).limit(limit)
     result = await self.db.execute(stmt)
     records = []
     for snapshot, financial_metric, roe_quality, financial_audit in result.all():
@@ -487,13 +549,17 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       setattr(snapshot, "financial_audit", financial_audit)
       setattr(snapshot, "roe_quality_status", roe_quality_status)
       setattr(snapshot, "roe_quality_flags", roe_quality_flags)
-      setattr(snapshot, "financial_growth_selectable", bool(
-        financial_metric is not None
-        and financial_audit is not None
-        and financial_audit.status == "SUCCESS"
-        and financial_metric.quality_status in {"valid", "partial"}
-        and financial_metric.report_date >= minimum_report_date
-      ))
+      setattr(
+        snapshot,
+        "financial_growth_selectable",
+        bool(
+          financial_metric is not None
+          and financial_audit is not None
+          and financial_audit.status == "SUCCESS"
+          and financial_metric.quality_status in {"valid", "partial"}
+          and financial_metric.report_date >= minimum_report_date
+        ),
+      )
       records.append(snapshot)
     return records, total
 
@@ -634,9 +700,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       "verified": int(verified_result.scalar_one() or 0),
     }
 
-  async def find_latest_by_code(
-    self, code: str
-  ) -> Optional[IndicatorSnapshot]:
+  async def find_latest_by_code(self, code: str) -> Optional[IndicatorSnapshot]:
     """获取某标的最新一条快照"""
     result = await self.db.execute(
       select(IndicatorSnapshot)
@@ -664,9 +728,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
   async def delete_older_than(self, cutoff_date: date) -> int:
     """删除 cutoff_date 之前的历史数据（保留近 N 天）"""
     result = await self.db.execute(
-      delete(IndicatorSnapshot).where(
-        IndicatorSnapshot.snapshot_date < cutoff_date
-      )
+      delete(IndicatorSnapshot).where(IndicatorSnapshot.snapshot_date < cutoff_date)
     )
     await self.db.commit()
     return result.rowcount

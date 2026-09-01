@@ -126,6 +126,7 @@ describe('useStockScreening result provenance', () => {
     expect(result.current.meta.snapshotDate).toBe('2026-08-28');
     expect(result.current.meta.expectedSnapshotDate).toBe('2026-08-31');
     expect(result.current.meta.isComplete).toBe(false);
+    expect(result.current.meta.hasStaleData).toBe(true);
   });
 
   it('keeps intraday metadata independent of daily snapshot status', () => {

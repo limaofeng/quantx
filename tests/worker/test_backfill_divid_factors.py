@@ -259,10 +259,13 @@ async def test_run_fails_without_silently_resetting_failed_jobs(
     async def acquire(self):
       return None
 
+    async def assert_held(self):
+      return None
+
     async def release(self):
       return None
 
-  async def load_state(_args, _state_path):
+  async def load_state(_args, _state_path, **_kwargs):
     return state
 
   monkeypatch.setattr(module, "CampaignDatabaseLock", Lock)
@@ -318,10 +321,13 @@ async def test_run_resumes_verification_without_repeating_qmt_request(
     async def acquire(self):
       return None
 
+    async def assert_held(self):
+      return None
+
     async def release(self):
       return None
 
-  async def load_state(_args, _state_path):
+  async def load_state(_args, _state_path, **_kwargs):
     return state
 
   async def verify(*, request_id, expected_payload):
@@ -360,6 +366,7 @@ async def test_run_resumes_verification_without_repeating_qmt_request(
   assert state["jobs"][0]["status"] == "completed"
   assert state["jobs"][0]["attempt"] == 2
   assert state["jobs"][0]["request_id"] == "request-1"
+  assert state["completed_at"]
 
 
 @pytest.mark.asyncio
@@ -395,10 +402,13 @@ async def test_repeated_verification_failure_becomes_explicitly_retryable(
     async def acquire(self):
       return None
 
+    async def assert_held(self):
+      return None
+
     async def release(self):
       return None
 
-  async def load_state(_args, _state_path):
+  async def load_state(_args, _state_path, **_kwargs):
     return state
 
   async def fail_verification(**_kwargs):
@@ -468,10 +478,13 @@ async def test_repeated_running_exception_reselects_agent_then_stops(
     async def acquire(self):
       return None
 
+    async def assert_held(self):
+      return None
+
     async def release(self):
       return None
 
-  async def load_state(_args, _state_path):
+  async def load_state(_args, _state_path, **_kwargs):
     return state
 
   async def no_foreign(**_kwargs):
@@ -553,10 +566,13 @@ async def test_timeout_resumes_same_request_and_attempt_without_agent_recheck(
     async def acquire(self):
       return None
 
+    async def assert_held(self):
+      return None
+
     async def release(self):
       return None
 
-  async def load_state(_args, _state_path):
+  async def load_state(_args, _state_path, **_kwargs):
     return state
 
   async def no_foreign(**_kwargs):
@@ -699,7 +715,7 @@ def _completed_factor_request(module, row):
       "records_received": 1,
       "records_saved": 1,
       "replacement_audit": {
-        "audit_schema_version": 1,
+        "audit_schema_version": 2,
         "stock_count": 1,
         "stock_codes_sha256": module.divid_factor_codes_sha256(payload["stock_list"]),
         "prior_count": 0,
@@ -710,6 +726,13 @@ def _completed_factor_request(module, row):
         "end_ex_date": payload["end_time"],
         "source_sha256": digest,
         "persisted_sha256": digest,
+        "code_audits": {
+          "600519.SH": {
+            "record_count": 1,
+            "source_sha256": digest,
+            "persisted_sha256": digest,
+          }
+        },
       },
     },
   }
@@ -740,16 +763,25 @@ async def test_completed_request_uses_durable_audit_after_staging_cleanup(monkey
       return None
 
   class Result:
+    def __init__(self, rows=None):
+      self.rows = rows or []
+
     def all(self):
-      return [row]
+      return self.rows
 
   class Session:
-    async def execute(self, _statement):
-      return Result()
+    def __init__(self):
+      self.statements = []
+
+    async def execute(self, statement):
+      self.statements.append(statement)
+      return Result([] if len(self.statements) == 1 else [row])
+
+  session = Session()
 
   class SessionContext:
     async def __aenter__(self):
-      return Session()
+      return session
 
     async def __aexit__(self, *_args):
       return None
@@ -765,6 +797,15 @@ async def test_completed_request_uses_durable_audit_after_staging_cleanup(monkey
   assert audit["source_record_count"] == 1
   assert audit["persisted_record_count"] == 1
   assert audit["source_sha256"] == audit["persisted_sha256"]
+  assert audit["verified_code_audits"] == 1
+  assert audit["code_audits"] == {
+    "600519.SH": {
+      "record_count": 1,
+      "source_sha256": module.divid_factor_rows_sha256([row]),
+      "persisted_sha256": module.divid_factor_rows_sha256([row]),
+    }
+  }
+  assert "pg_advisory_xact_lock_shared" in str(session.statements[0])
 
 
 @pytest.mark.asyncio
@@ -785,12 +826,19 @@ async def test_completed_request_rejects_database_content_drift(monkeypatch):
       return None
 
   class Result:
+    def __init__(self, rows=None):
+      self.rows = rows or []
+
     def all(self):
-      return [drifted_row]
+      return self.rows
 
   class Session:
+    def __init__(self):
+      self.calls = 0
+
     async def execute(self, _statement):
-      return Result()
+      self.calls += 1
+      return Result([] if self.calls == 1 else [drifted_row])
 
   class SessionContext:
     async def __aenter__(self):
@@ -803,6 +851,60 @@ async def test_completed_request_rejects_database_content_drift(monkeypatch):
   monkeypatch.setattr(module, "AsyncSessionLocal", SessionContext)
 
   with pytest.raises(RuntimeError, match="持久化摘要验收失败"):
+    await module.verify_completed_request(
+      request_id="request-1",
+      expected_payload=payload,
+    )
+
+
+@pytest.mark.asyncio
+async def test_completed_request_rejects_per_code_digest_drift(monkeypatch):
+  module = _load_module()
+  row = _persisted_factor_row()
+  payload, request, manifest = _completed_factor_request(module, row)
+  request["ingestion_result"]["replacement_audit"]["code_audits"]["600519.SH"][
+    "source_sha256"
+  ] = "b" * 64
+  request["ingestion_result"]["replacement_audit"]["code_audits"]["600519.SH"][
+    "persisted_sha256"
+  ] = "b" * 64
+
+  class Store:
+    async def market_data_request(self, _request_id):
+      return request
+
+    async def market_data_transfers(self, _request_id):
+      return manifest
+
+    async def close(self):
+      return None
+
+  class Result:
+    def __init__(self, rows=None):
+      self.rows = rows or []
+
+    def all(self):
+      return self.rows
+
+  class Session:
+    def __init__(self):
+      self.calls = 0
+
+    async def execute(self, _statement):
+      self.calls += 1
+      return Result([] if self.calls == 1 else [row])
+
+  class SessionContext:
+    async def __aenter__(self):
+      return Session()
+
+    async def __aexit__(self, *_args):
+      return None
+
+  monkeypatch.setattr(module, "DurableRuntimeStore", Store)
+  monkeypatch.setattr(module, "AsyncSessionLocal", SessionContext)
+
+  with pytest.raises(RuntimeError, match="逐代码摘要验收失败"):
     await module.verify_completed_request(
       request_id="request-1",
       expected_payload=payload,
@@ -833,6 +935,194 @@ async def test_campaign_lock_release_does_not_mask_closed_connection_error():
 
   assert connection.close_called is True
   assert lock.connection is None
+  assert lock.backend_pid is None
+
+
+@pytest.mark.asyncio
+async def test_campaign_lock_detects_reconnected_backend_pid(monkeypatch):
+  module = _load_module()
+
+  class ReconnectedConnection:
+    closed = False
+
+    def __init__(self):
+      self.backend_pid = 4101
+      self.owns_lock = True
+      self.close_called = False
+
+    async def scalar(self, statement, parameters=None):
+      sql = str(statement)
+      if "pg_try_advisory_lock" in sql:
+        return self.owns_lock
+      if "FROM pg_locks" in sql:
+        assert parameters["lock_key"] == module.CAMPAIGN_LOCK_KEY
+        return self.owns_lock and parameters["backend_pid"] == self.backend_pid
+      if "pg_advisory_unlock" in sql:
+        return parameters["backend_pid"] == self.backend_pid
+      if "pg_backend_pid" in sql:
+        return self.backend_pid
+      raise AssertionError(sql)
+
+    async def close(self):
+      self.close_called = True
+
+  connection = ReconnectedConnection()
+
+  async def connect():
+    return connection
+
+  monkeypatch.setattr(module, "relational_engine", SimpleNamespace(connect=connect))
+  lock = module.CampaignDatabaseLock()
+
+  await lock.acquire()
+  assert lock.backend_pid == 4101
+  await lock.assert_held()
+
+  # SQLAlchemy may transparently reconnect an invalidated AsyncConnection.
+  # A liveness SELECT would succeed, but the session-level lock disappeared.
+  connection.backend_pid = 4102
+  connection.owns_lock = False
+  with pytest.raises(module.CampaignLockLost, match="advisory lock 已丢失"):
+    await lock.assert_held()
+
+  await lock.release()
+  assert connection.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_run_never_persists_after_campaign_lock_loss(monkeypatch, tmp_path):
+  module = _load_module()
+  state = {"status": "pending", "jobs": []}
+
+  class Lock:
+    def __init__(self):
+      self.assertions = 0
+
+    async def acquire(self):
+      return None
+
+    async def assert_held(self):
+      self.assertions += 1
+      if self.assertions >= 2:
+        raise module.CampaignLockLost("simulated reconnect")
+
+    async def release(self):
+      return None
+
+  async def load_state(_args, _state_path, **_kwargs):
+    return state
+
+  def must_not_persist(*_args, **_kwargs):
+    raise AssertionError("lost campaign owner must not write its state ledger")
+
+  monkeypatch.setattr(module, "CampaignDatabaseLock", Lock)
+  monkeypatch.setattr(module, "_load_or_create_state", load_state)
+  monkeypatch.setattr(module, "_persist_state", must_not_persist)
+  args = SimpleNamespace(
+    start_date=date(2020, 3, 13),
+    end_date=date(2026, 8, 31),
+    state_file=str(tmp_path / "factor-state.json"),
+  )
+
+  with pytest.raises(module.CampaignLockLost, match="simulated reconnect"):
+    await module.run(args)
+
+  assert state == {"status": "pending", "jobs": []}
+
+
+@pytest.mark.asyncio
+async def test_run_stops_state_writes_when_lock_is_lost_during_request(
+  monkeypatch,
+  tmp_path,
+):
+  module = _load_module()
+  state = {
+    "run_key": "campaign",
+    "status": "pending",
+    "start_date": "20200313",
+    "end_date": "20260831",
+    "universe": {
+      "universe_version": module.UNIVERSE_VERSION,
+      "stock_count": 1,
+      "etf_count": 0,
+      "market_instrument_count": 1,
+      "requested_code_count": 1,
+    },
+    "jobs": [
+      {
+        "id": "job-1",
+        "codes": ["600519.SH"],
+        "status": "pending",
+        "attempt": 0,
+      }
+    ],
+  }
+  active_lock = None
+  persisted = []
+
+  class Lock:
+    def __init__(self):
+      nonlocal active_lock
+      active_lock = self
+      self.lost = False
+
+    async def acquire(self):
+      return None
+
+    async def assert_held(self):
+      if self.lost:
+        raise module.CampaignLockLost("lost while request was running")
+
+    async def release(self):
+      return None
+
+  async def load_state(_args, _state_path, **_kwargs):
+    return state
+
+  async def no_foreign(**_kwargs):
+    return []
+
+  async def ready():
+    return "device-1"
+
+  async def complete_after_lock_loss(**_kwargs):
+    active_lock.lost = True
+    return {"status": "completed", "request_id": "request-1"}
+
+  def record_persist(_path, current, *, status=None, error=""):
+    persisted.append((status, current["jobs"][0]["status"]))
+    if status is not None:
+      current["status"] = status
+    if error:
+      current["last_error"] = error
+    module._refresh_summary(current)
+
+  monkeypatch.setattr(module, "CampaignDatabaseLock", Lock)
+  monkeypatch.setattr(module, "_load_or_create_state", load_state)
+  monkeypatch.setattr(module, "foreign_active_requests", no_foreign)
+  monkeypatch.setattr(module, "ensure_factor_agent_ready", ready)
+  monkeypatch.setattr(
+    module.divid_factor_sync_flow,
+    "fn",
+    complete_after_lock_loss,
+  )
+  monkeypatch.setattr(module, "_persist_state", record_persist)
+  args = SimpleNamespace(
+    start_date=date(2020, 3, 13),
+    end_date=date(2026, 8, 31),
+    state_file=str(tmp_path / "factor-state.json"),
+    retry_failed=False,
+    max_attempts=3,
+    max_jobs=None,
+    poll_seconds=0.01,
+    timeout_seconds=1,
+  )
+
+  with pytest.raises(module.CampaignLockLost, match="lost while request"):
+    await module.run(args)
+
+  assert persisted == [("running", "pending"), (None, "running")]
+  assert state["jobs"][0].get("request_id") is None
 
 
 def test_default_state_name_identifies_stock_etf_universe():
@@ -843,7 +1133,9 @@ def test_default_state_name_identifies_stock_etf_universe():
     end=date(2026, 8, 31),
   )
 
-  assert state_path.name == ("full-stock-etf-divid-factors-20200313-20260831.json")
+  assert state_path.name == (
+    "full-stock-etf-divid-factors-audit-v2-20200313-20260831.json"
+  )
 
 
 @pytest.mark.asyncio
@@ -908,10 +1200,11 @@ async def test_new_state_identity_and_audit_use_canonical_universe(
 
   state = await module._load_or_create_state(
     args,
-    tmp_path / "stock-etf-v3.json",
+    tmp_path / "stock-etf-v4.json",
   )
 
-  assert state["schema_version"] == 3
+  assert state["schema_version"] == 4
+  assert state["replacement_audit_schema_version"] == 2
   assert state["universe_version"] == module.UNIVERSE_VERSION
   assert state["universe_sha256"] == universe["code_sha256"]
   assert state["universe"] == universe
@@ -949,7 +1242,7 @@ def test_state_universe_audit_rejects_codes_repeated_across_jobs():
 @pytest.mark.asyncio
 async def test_factor_campaign_universe_is_stock_etf_plus_benchmark(monkeypatch):
   module = _load_module()
-  assert module.SCHEMA_VERSION == 3
+  assert module.SCHEMA_VERSION == 4
 
   class Result:
     def __init__(self, *, rows=None, one=None):
