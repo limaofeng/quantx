@@ -442,6 +442,50 @@ def test_risk_checker_rejects_limit_and_t1_sell():
   assert result.code == "insufficient_position"
 
 
+def test_risk_checker_ignores_non_positive_instrument_volume_bounds():
+  checker = TradingRiskChecker()
+  request = OrderRequest(
+    instrument_code="605499.SH",
+    order_type=OrderType.SELL,
+    price_type=PriceType.LIMIT,
+    volume=200,
+    price=125.0,
+  )
+  market = MarketDataSnapshot(
+    instrument_code="605499.SH",
+    timestamp=datetime(2024, 1, 2, 10, 0),
+    price=123.25,
+    limit_up=131.98,
+    limit_down=107.98,
+  )
+  market.min_limit_sell_order_volume = -899_950_320
+  market.max_limit_sell_order_volume = -774_858_172
+
+  decision = asyncio.run(
+    checker.evaluate_order(
+      request,
+      account={"available_cash": 0, "total_asset": 50_000},
+      position={"long_volume": 400, "available_volume": 400},
+      market_data=market,
+    )
+  )
+
+  assert decision.allowed
+  assert decision.final_volume == 200
+
+  market.max_limit_sell_order_volume = 100
+  rejected = asyncio.run(
+    checker.evaluate_order(
+      request,
+      account={"available_cash": 0, "total_asset": 50_000},
+      position={"long_volume": 400, "available_volume": 400},
+      market_data=market,
+    )
+  )
+  assert rejected.allowed is False
+  assert rejected.reason_code == "ABOVE_MAX_VOLUME"
+
+
 def test_order_sizer_builds_order_draft_with_traceable_size_reason():
   intent = TradeIntent(
     strategy_id="s",

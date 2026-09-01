@@ -971,8 +971,7 @@ class TradingRiskChecker:
       if request.order_type == OrderType.SELL
       else "min_limit_order_volume"
     )
-    value = getattr(market_data, attr, None)
-    return int(value) if value else None
+    return _optional_positive_int(getattr(market_data, attr, None))
 
   async def _is_trading_hours(self, timestamp: datetime) -> bool:
     if self.trading_time_service is not None:
@@ -998,8 +997,7 @@ class TradingRiskChecker:
       if request.order_type == OrderType.SELL
       else "max_limit_order_volume"
     )
-    value = getattr(market_data, attr, None)
-    return int(value) if value else None
+    return _optional_positive_int(getattr(market_data, attr, None))
 
 def _risk_metadata_order_state(order_state: Dict[str, Any]) -> Dict[str, Any]:
   return {
@@ -1045,6 +1043,11 @@ def _optional_int(value: Any) -> Optional[int]:
     return int(value)
   except (TypeError, ValueError):
     return None
+
+
+def _optional_positive_int(value: Any) -> Optional[int]:
+  parsed = _optional_int(value)
+  return parsed if parsed is not None and parsed > 0 else None
 
 
 def _min_optional(current: Optional[float], limit: float) -> float:

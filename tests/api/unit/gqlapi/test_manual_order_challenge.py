@@ -1129,4 +1129,26 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
   with pytest.raises(TradeApprovalChallengeError) as rejected:
     await manual_order._preflight(stale_sell)
   assert rejected.value.code == "POSITION_SNAPSHOT_STALE"
+
+  async with session_factory() as db:
+    instrument = await db.get(Instrument, "600000.SH")
+    position = await db.get(Position, "position-row-1")
+    instrument.min_limit_sell_order_volume = -899_950_320
+    instrument.max_limit_sell_order_volume = -774_858_172
+    position.updated_at = time_utils.now()
+    await db.commit()
+
+  sell_with_corrupt_bounds = normalize_manual_order_request(
+    account_id="ACCOUNT-1",
+    instrument_code="600000.SH",
+    side="SELL",
+    price_type="LIMIT",
+    volume=200,
+    limit_price=10.5,
+    idempotency_key="ios-corrupt-sell-bounds-1",
+  )
+  sell_preview = await manual_order._preflight(sell_with_corrupt_bounds)
+  assert sell_preview.requested_volume == 200
+  assert sell_preview.final_volume == 200
+  assert sell_preview.risk_action == "ALLOW"
   await engine.dispose()
