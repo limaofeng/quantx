@@ -33,6 +33,16 @@ _MAX_WARNINGS = 200
 _MAX_PUBLIC_STRING_LENGTH = 1_000
 _MAX_SOURCE_QUERY_ROWS = 2_000
 
+# Discovery is exposed through the generic researchRuns/researchRun queries.
+# Keep every filesystem dimension bounded independently so an artifact root
+# cannot turn one read-only request into an unbounded directory/manifest scan.
+MAX_RESEARCH_DISCOVERY_ENTRIES = 4_096
+MAX_RESEARCH_DISCOVERY_RUNS = 1_024
+MAX_RESEARCH_DISCOVERY_MANIFEST_BYTES = 64 * 1024 * 1024
+MAX_RESEARCH_DISCOVERY_DATA_QUALITY_BYTES = 64 * 1024 * 1024
+_FACTOR_COVERAGE_EVIDENCE_SCHEMA_VERSION = 2
+_LOWER_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+
 _QUALITY_KEYS = frozenset(
   {
     "is_usable",
@@ -227,6 +237,52 @@ class ResearchArtifactError(ValueError):
   """An artifact cannot be safely exposed."""
 
 
+def validate_factor_study_data_quality(value: Any) -> None:
+  """Require a complete, internally consistent schema-v2 factor proof."""
+
+  if not isinstance(value, dict):
+    raise ResearchArtifactError("因子研究数据质量产物必须是 object")
+  coverage = value.get("dividend_factor_coverage")
+  if not isinstance(coverage, dict):
+    raise ResearchArtifactError("因子研究缺少 schema-v2 逐代码复权覆盖证据")
+
+  schema_version = coverage.get("evidence_schema_version")
+  verified_count = coverage.get("verified_code_window_count")
+  evidence_sha256 = coverage.get("evidence_content_sha256")
+  if (
+    coverage.get("is_complete") is not True
+    or type(schema_version) is not int
+    or schema_version != _FACTOR_COVERAGE_EVIDENCE_SCHEMA_VERSION
+    or type(verified_count) is not int
+    or verified_count <= 0
+    or not isinstance(evidence_sha256, str)
+    or _LOWER_SHA256_PATTERN.fullmatch(evidence_sha256) is None
+  ):
+    raise ResearchArtifactError("因子研究复权覆盖证据不是完整 schema-v2 证明")
+
+  code_sets: dict[str, list[str]] = {}
+  for field in ("requested_codes", "covered_codes", "uncovered_codes"):
+    codes = coverage.get(field)
+    if (
+      not isinstance(codes, list)
+      or any(not isinstance(code, str) or not code.strip() for code in codes)
+      or len(codes) != len(set(codes))
+    ):
+      raise ResearchArtifactError("因子研究 schema-v2 复权覆盖代码集合非法")
+    code_sets[field] = codes
+
+  requested_codes = code_sets["requested_codes"]
+  covered_codes = code_sets["covered_codes"]
+  if (
+    not requested_codes
+    or code_sets["uncovered_codes"]
+    or len(covered_codes) != len(requested_codes)
+    or set(covered_codes) != set(requested_codes)
+    or verified_count < len(requested_codes)
+  ):
+    raise ResearchArtifactError("因子研究 schema-v2 复权覆盖代码集合不一致")
+
+
 @dataclass(frozen=True)
 class ResearchRunRecord:
   key: str
@@ -329,14 +385,23 @@ class ResearchArtifactStore:
     safe_quality = _sanitize_data_quality(data_quality)
     safe_metrics = _sanitize_metrics(metrics)
     factor_reports: list[dict[str, Any]] = []
-    if summary.study_id == "factor-study" and metrics is not None:
+    if (
+      summary.study_id == "factor-study"
+      and summary.status == "success"
+      and metrics is not None
+    ):
       from quantx_api.factor_research_artifacts import (
         project_factor_metrics,
         report_reference,
       )
+
       try:
+        self._require_factor_study_publication(summary)
         factor_metrics = project_factor_metrics(metrics)
-        factor_reports = [report_reference(summary, factor_metrics, report) for report in factor_metrics["reports"]]
+        factor_reports = [
+          report_reference(summary, factor_metrics, report)
+          for report in factor_metrics["reports"]
+        ]
       except ResearchArtifactError as exc:
         errors.append(f"因子报告不可用: {exc}")
     return ResearchRunDetailRecord(
@@ -361,31 +426,91 @@ class ResearchArtifactStore:
       logger.warning("Research artifact root is not a safe directory")
       return []
 
-    records: list[ResearchRunRecord] = []
+    entry_count = 0
     try:
-      study_directories = list(self._root.iterdir())
+      study_directories = []
+      for study_directory in self._root.iterdir():
+        entry_count += 1
+        if entry_count > MAX_RESEARCH_DISCOVERY_ENTRIES:
+          raise ResearchArtifactError("研究运行目录扫描达到安全预算")
+        study_directories.append(study_directory)
     except OSError:
       logger.exception("Unable to enumerate research artifact root")
       return []
 
+    run_directories: list[Path] = []
     for study_directory in study_directories:
       if not self._safe_directory(study_directory):
         continue
       try:
-        run_directories = list(study_directory.iterdir())
+        for run_directory in study_directory.iterdir():
+          entry_count += 1
+          if entry_count > MAX_RESEARCH_DISCOVERY_ENTRIES:
+            raise ResearchArtifactError("研究运行目录扫描达到安全预算")
+          run_directories.append(run_directory)
       except OSError:
         logger.warning("Unable to enumerate a research study directory")
         continue
-      for run_directory in run_directories:
-        if not self._safe_directory(run_directory):
+
+    safe_run_directories = [
+      run_directory
+      for run_directory in run_directories
+      if self._safe_directory(run_directory)
+    ]
+    if len(safe_run_directories) > MAX_RESEARCH_DISCOVERY_RUNS:
+      raise ResearchArtifactError("研究运行数量扫描达到安全预算")
+
+    readable_run_directories: list[Path] = []
+    manifest_bytes = 0
+    for run_directory in safe_run_directories:
+      try:
+        manifest_path = self._artifact_path(run_directory, "manifest.json")
+        if _is_link_like(manifest_path) or not manifest_path.is_file():
+          raise ResearchArtifactError("研究运行清单不是常规文件")
+        size = manifest_path.stat().st_size
+        if size > _MAX_MANIFEST_BYTES:
+          raise ResearchArtifactError("研究运行清单超过大小上限")
+      except (OSError, ResearchArtifactError):
+        logger.warning("Skipping an invalid research run manifest")
+        continue
+      if manifest_bytes + size > MAX_RESEARCH_DISCOVERY_MANIFEST_BYTES:
+        raise ResearchArtifactError("研究运行清单扫描达到安全预算")
+      manifest_bytes += size
+      readable_run_directories.append(run_directory)
+
+    # A successful factor run cannot be discovered without reading its complete
+    # data-quality proof. Bound that independent dimension before reading any
+    # manifest so list/detail discovery cannot scale to GiB of JSON.
+    factor_quality_bytes = 0
+    for run_directory in readable_run_directories:
+      if not run_directory.parent.name.startswith("factor-study-"):
+        continue
+      try:
+        quality_path = self._artifact_path(run_directory, "data-quality.json")
+        if not quality_path.exists():
           continue
-        try:
-          record = self._read_summary(run_directory)
-        except (OSError, ResearchArtifactError):
-          logger.warning("Skipping an invalid research run manifest")
+        if _is_link_like(quality_path) or not quality_path.is_file():
           continue
-        if record is not None:
-          records.append(record)
+        quality_bytes = quality_path.stat().st_size
+      except (OSError, ResearchArtifactError):
+        continue
+      if quality_bytes > _MAX_DATA_QUALITY_BYTES:
+        continue
+      if (
+        factor_quality_bytes + quality_bytes > MAX_RESEARCH_DISCOVERY_DATA_QUALITY_BYTES
+      ):
+        raise ResearchArtifactError("因子数据质量产物扫描达到安全预算")
+      factor_quality_bytes += quality_bytes
+
+    records: list[ResearchRunRecord] = []
+    for run_directory in readable_run_directories:
+      try:
+        record = self._read_summary(run_directory)
+      except (OSError, ResearchArtifactError):
+        logger.warning("Skipping an invalid research run manifest")
+        continue
+      if record is not None:
+        records.append(record)
     return records
 
   @staticmethod
@@ -424,6 +549,8 @@ class ResearchArtifactStore:
       or run_directory.parent.name != f"{study_id}-{version}"
     ):
       raise ResearchArtifactError("manifest 研究身份与目录不一致")
+    if study_id == "factor-study" and status == "success":
+      self._read_indexed_factor_data_quality(run_directory, manifest)
 
     key = stable_run_key(study_id=study_id, version=version, run_id=run_id)
     has_metrics = self._safe_artifact_presence(
@@ -445,6 +572,82 @@ class ResearchArtifactStore:
       has_metrics=has_metrics,
       run_directory=run_directory,
     )
+
+  def _require_factor_study_publication(
+    self,
+    summary: ResearchRunRecord,
+  ) -> dict[str, Any]:
+    manifest = self._read_json(
+      summary.run_directory,
+      "manifest.json",
+      max_bytes=_MAX_MANIFEST_BYTES,
+    )
+    identity = (
+      _required_string(manifest, "run_id"),
+      _required_string(manifest, "study_id"),
+      _required_string(manifest, "version"),
+      _required_string(manifest, "status"),
+    )
+    if identity != (
+      summary.run_id,
+      "factor-study",
+      summary.version,
+      "success",
+    ):
+      raise ResearchArtifactError("因子研究运行身份在读取期间发生变化")
+    return self._read_indexed_factor_data_quality(
+      summary.run_directory,
+      manifest,
+    )
+
+  def _read_indexed_factor_data_quality(
+    self,
+    run_directory: Path,
+    manifest: dict[str, Any],
+  ) -> dict[str, Any]:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+      raise ResearchArtifactError("因子研究清单缺少产物索引")
+    entries = [
+      entry
+      for entry in artifacts
+      if isinstance(entry, dict) and entry.get("path") == "data-quality.json"
+    ]
+    if len(entries) != 1:
+      raise ResearchArtifactError("因子研究清单必须唯一索引 data-quality.json")
+    entry = entries[0]
+    declared_bytes = entry.get("bytes")
+    declared_sha256 = entry.get("sha256")
+    if (
+      type(declared_bytes) is not int
+      or not 0 <= declared_bytes <= _MAX_DATA_QUALITY_BYTES
+      or not isinstance(declared_sha256, str)
+      or _LOWER_SHA256_PATTERN.fullmatch(declared_sha256) is None
+    ):
+      raise ResearchArtifactError("因子研究数据质量产物索引无效")
+
+    path = self._artifact_path(run_directory, "data-quality.json")
+    if _is_link_like(path) or not path.is_file():
+      raise ResearchArtifactError("因子研究数据质量产物不是常规文件")
+    try:
+      if path.stat().st_size > _MAX_DATA_QUALITY_BYTES:
+        raise ResearchArtifactError("因子研究数据质量产物超过大小上限")
+      raw = path.read_bytes()
+    except OSError as exc:
+      raise ResearchArtifactError("因子研究数据质量产物不可读") from exc
+    if len(raw) > _MAX_DATA_QUALITY_BYTES or len(raw) != declared_bytes:
+      raise ResearchArtifactError("因子研究数据质量产物大小与清单不一致")
+    if hashlib.sha256(raw).hexdigest() != declared_sha256:
+      raise ResearchArtifactError("因子研究数据质量产物摘要与清单不一致")
+    try:
+      value = json.loads(
+        raw.decode("utf-8"),
+        parse_constant=_reject_json_constant,
+      )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+      raise ResearchArtifactError("因子研究数据质量产物 JSON 格式无效") from exc
+    validate_factor_study_data_quality(value)
+    return value
 
   def _safe_artifact_presence(
     self,
@@ -679,9 +882,7 @@ def _sanitize_data_quality(
     ]
   source_provenance = value.get("source_provenance")
   if isinstance(source_provenance, dict):
-    sanitized["source_provenance"] = _sanitize_source_provenance(
-      source_provenance
-    )
+    sanitized["source_provenance"] = _sanitize_source_provenance(source_provenance)
   return sanitized
 
 

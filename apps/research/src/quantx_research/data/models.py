@@ -152,6 +152,9 @@ class DividendFactorCoverageReport:
   evidence_request_ids: tuple[str, ...] = ()
   latest_completed_at: datetime | None = None
   invalid_evidence_count: int = 0
+  evidence_schema_version: int | None = None
+  verified_code_window_count: int = 0
+  evidence_content_sha256: str | None = None
   warnings: tuple[str, ...] = ()
 
   @property

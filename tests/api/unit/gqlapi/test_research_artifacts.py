@@ -499,6 +499,64 @@ def test_symlinked_study_directory_is_not_enumerated(tmp_path):
   assert total == 0
 
 
+@pytest.mark.parametrize("operation", ["list", "detail"])
+@pytest.mark.parametrize("budget_kind", ["entries", "runs", "manifest_bytes"])
+def test_generic_discovery_fails_closed_when_scan_budget_is_exhausted(
+  tmp_path,
+  monkeypatch,
+  operation,
+  budget_kind,
+):
+  import quantx_api.research_artifacts as artifacts
+
+  first = _write_run(
+    tmp_path,
+    run_id="20260728-120000-aaaaaaaa",
+    completed_at="2026-07-28T12:01:00+00:00",
+  )
+  second = _write_run(
+    tmp_path,
+    run_id="20260729-120000-bbbbbbbb",
+    completed_at="2026-07-29T12:01:00+00:00",
+  )
+  if budget_kind == "entries":
+    # One study entry plus only one of the two run entries fits.
+    monkeypatch.setattr(artifacts, "MAX_RESEARCH_DISCOVERY_ENTRIES", 2)
+  elif budget_kind == "runs":
+    monkeypatch.setattr(artifacts, "MAX_RESEARCH_DISCOVERY_RUNS", 1)
+  else:
+    manifest_bytes = sum(
+      (run_directory / "manifest.json").stat().st_size
+      for run_directory in (first, second)
+    )
+    monkeypatch.setattr(
+      artifacts,
+      "MAX_RESEARCH_DISCOVERY_MANIFEST_BYTES",
+      manifest_bytes - 1,
+    )
+
+  manifest_reads = []
+  original_read = ResearchArtifactStore._read_json
+
+  def tracked_read(self, run_directory, filename, **kwargs):
+    if filename == "manifest.json":
+      manifest_reads.append(run_directory.name)
+    return original_read(self, run_directory, filename, **kwargs)
+
+  monkeypatch.setattr(ResearchArtifactStore, "_read_json", tracked_read)
+  store = ResearchArtifactStore(tmp_path)
+  key = stable_run_key(
+    study_id="volume-shock",
+    version="v1",
+    run_id=first.name,
+  )
+
+  with pytest.raises(ResearchArtifactError, match="安全预算"):
+    store.list_runs() if operation == "list" else store.get_run(key)
+
+  assert manifest_reads == []
+
+
 def test_api_source_does_not_import_research_application():
   api_root = Path(__file__).resolve().parents[4] / "apps" / "api" / "src"
   assert api_root.is_dir()

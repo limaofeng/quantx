@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+MAX_BOOTSTRAP_SAMPLES = 20_000
+
 
 class _StrictModel(BaseModel):
   model_config = ConfigDict(extra="forbid", frozen=True)
@@ -118,7 +120,7 @@ class StatisticsConfig(_StrictModel):
   """Statistical inference settings."""
 
   bootstrap_method: Literal["moving_block"] = "moving_block"
-  bootstrap_samples: int = Field(default=1000, ge=100)
+  bootstrap_samples: int = Field(default=1000, ge=100, le=MAX_BOOTSTRAP_SAMPLES)
   moving_block_length: int | Literal["horizon"] = "horizon"
   random_seed: int = 42
   confidence_level: float = Field(default=0.95, gt=0.5, lt=1.0)

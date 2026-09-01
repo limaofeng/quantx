@@ -279,7 +279,12 @@ def apply_factor_report_fdr(
   # One preregistered family per endpoint includes every requested report,
   # cohort, horizon and return basis. Annual checks are descriptive only.
   family_sizes: dict[str, int] = {}
-  for p_field, q_field in (("p_value", "q_value"), ("mean_p_value", "mean_q_value")):
+  effective_samples: dict[str, dict[str, int]] = {}
+  effective_floors: dict[str, float] = {}
+  for p_field, q_field, samples_field in (
+    ("p_value", "q_value", "bootstrap_effective_samples"),
+    ("mean_p_value", "mean_q_value", "mean_bootstrap_effective_samples"),
+  ):
     for report in reports:
       for row in report["rows"]:
         row[q_field] = None
@@ -296,13 +301,29 @@ def apply_factor_report_fdr(
       corrected = min(corrected, row[p_field] * len(ordered) / rank)
       row[q_field] = corrected
     family_sizes[p_field] = len(ordered)
-  monte_carlo_floor = 1.0 / (config.statistics.bootstrap_samples + 1)
+    counts = [
+      int(row.get(samples_field) or config.statistics.bootstrap_samples)
+      for row in ordered
+    ]
+    if counts:
+      effective_samples[p_field] = {
+        "minimum": min(counts),
+        "maximum": max(counts),
+      }
+      effective_floors[p_field] = max(1.0 / (count + 1) for count in counts)
+    else:
+      effective_samples[p_field] = {"minimum": 0, "maximum": 0}
+  configured_floor = 1.0 / (config.statistics.bootstrap_samples + 1)
+  conservative_floor = max(effective_floors.values(), default=configured_floor)
   largest_family = max(family_sizes.values(), default=0)
   return {
     "bootstrap_samples": config.statistics.bootstrap_samples,
-    "minimum_monte_carlo_p_value": monte_carlo_floor,
+    "minimum_monte_carlo_p_value": configured_floor,
+    "effective_bootstrap_samples_per_family": effective_samples,
+    "effective_monte_carlo_p_value_floor_per_family": effective_floors,
+    "conservative_effective_monte_carlo_p_value_floor": conservative_floor,
     "eligible_tests_per_family": family_sizes,
-    "minimum_isolated_q_value": min(1.0, monte_carlo_floor * largest_family),
+    "minimum_isolated_q_value": min(1.0, conservative_floor * largest_family),
     "fdr_alpha": config.statistics.fdr_alpha,
   }
 
@@ -490,6 +511,9 @@ def _analyze_report(
     samples=config.statistics.bootstrap_samples,
     seed=config.statistics.random_seed,
     confidence_level=config.statistics.confidence_level,
+    allocation_guard=lambda stage, estimated: monitor.guard(
+      stage, estimated_increment_bytes=estimated
+    ),
   )
   latest_date = max(all_dates, default=None)
   periods = ["all", *[str(year) for year in sorted({day.year for day in all_dates})]]
@@ -622,7 +646,7 @@ def _cell_result(
     if sufficient
     else "insufficient_sample"
   )
-  ci = mean_ci = (None, None, None)
+  ci = mean_ci = None
   if inference_status == "available":
     paired = pd.DataFrame(
       {
@@ -635,9 +659,9 @@ def _cell_result(
       "block_length": config.statistics.block_length(horizon),
       "minimum_dates": config.statistics.minimum_inference_dates,
     }
-    ci = bootstrap.infer(paired, "up_lift", **kwargs)
-    mean_ci = bootstrap.infer(paired, "mean_lift", **kwargs)
-    if ci[0] is None:
+    ci = bootstrap.infer_detailed(paired, "up_lift", **kwargs)
+    mean_ci = bootstrap.infer_detailed(paired, "mean_lift", **kwargs)
+    if ci.ci_low is None:
       inference_status = "insufficient_sample"
   return {
     "group": group,
@@ -655,13 +679,17 @@ def _cell_result(
     "baseline_up_rate": float(base_up.mean()) if n else None,
     "up_rate_lift": float((daily_up - base_up).mean()) if n else None,
     "mean_return_lift": float((daily_mean - base_mean).mean()) if n else None,
-    "ci_low": ci[0],
-    "ci_high": ci[1],
-    "p_value": ci[2],
+    "ci_low": ci.ci_low if ci is not None else None,
+    "ci_high": ci.ci_high if ci is not None else None,
+    "p_value": ci.p_value if ci is not None else None,
     "q_value": None,
-    "mean_ci_low": mean_ci[0],
-    "mean_ci_high": mean_ci[1],
-    "mean_p_value": mean_ci[2],
+    "bootstrap_effective_samples": ci.effective_samples if ci is not None else None,
+    "mean_ci_low": mean_ci.ci_low if mean_ci is not None else None,
+    "mean_ci_high": mean_ci.ci_high if mean_ci is not None else None,
+    "mean_p_value": mean_ci.p_value if mean_ci is not None else None,
     "mean_q_value": None,
+    "mean_bootstrap_effective_samples": (
+      mean_ci.effective_samples if mean_ci is not None else None
+    ),
     "inference_status": inference_status,
   }

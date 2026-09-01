@@ -1,10 +1,18 @@
 from datetime import datetime
+from decimal import Decimal
 from itertools import pairwise
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from quantx_research.data import InfrastructureResearchDataSource
+from quantx_infrastructure.repositories.divid_factor_repository import (
+  divid_factor_codes_sha256,
+  divid_factor_rows_sha256,
+)
+from quantx_research.data import (
+  InfrastructureResearchDataSource,
+  build_dividend_factor_coverage_report,
+)
 
 
 class FakeSession:
@@ -36,13 +44,16 @@ class FakeRowsResult:
 
 
 class FakeCoverageSession(FakeSession):
-  def __init__(self, rows) -> None:
+  def __init__(self, *result_sets) -> None:
     super().__init__()
-    self.rows = rows
+    self.result_sets = list(result_sets)
 
   async def execute(self, statement):
-    self.statements.append(str(statement))
-    return FakeRowsResult(self.rows)
+    sql = str(statement)
+    self.statements.append(sql)
+    if sql.startswith("SET TRANSACTION") or "pg_advisory_xact_lock_shared" in sql:
+      return FakeRowsResult([])
+    return FakeRowsResult(self.result_sets.pop(0))
 
 
 class FakeInstrumentRepository:
@@ -167,7 +178,9 @@ async def test_owned_postgres_session_is_read_only_and_rolled_back() -> None:
   async with source:
     pass
 
-  assert session.statements == ["SET TRANSACTION READ ONLY"]
+  assert session.statements == [
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+  ]
   assert session.rolled_back
   assert session.closed
 
@@ -288,36 +301,78 @@ async def test_large_factor_universe_uses_one_bulk_read() -> None:
 
 @pytest.mark.asyncio
 async def test_factor_coverage_reads_completed_durable_database_requests() -> None:
+  factor_row = (
+    "000001.SZ",
+    datetime(2024, 1, 2, 8),
+    "20240102",
+    Decimal("1.0000"),
+    Decimal("0"),
+    Decimal("0"),
+    Decimal("0"),
+    Decimal("0"),
+    Decimal("0"),
+    Decimal("1.100000"),
+  )
+  digest = divid_factor_rows_sha256([factor_row])
+  payload = {
+    "operation": "divid_factors",
+    "source": "qmt-get-divid-factors-v1",
+    "stock_list": ["000001.SZ"],
+    "start_time": "20240101",
+    "end_time": "20240131",
+  }
+  ingestion_result = {
+    "operation": "divid_factors",
+    "records_received": 1,
+    "records_saved": 1,
+    "replacement_audit": {
+      "audit_schema_version": 2,
+      "stock_count": 1,
+      "stock_codes_sha256": divid_factor_codes_sha256(["000001.SZ"]),
+      "prior_count": 0,
+      "deleted_count": 0,
+      "inserted_count": 1,
+      "verified_count": 1,
+      "source_sha256": digest,
+      "persisted_sha256": digest,
+      "start_ex_date": "20240101",
+      "end_ex_date": "20240131",
+      "code_audits": {
+        "000001.SZ": {
+          "record_count": 1,
+          "source_sha256": digest,
+          "persisted_sha256": digest,
+        }
+      },
+    },
+  }
   session = FakeCoverageSession(
     [
       (
         "factor-request",
-        {
-          "operation": "divid_factors",
-          "source": "qmt-get-divid-factors-v1",
-          "stock_list": ["000001.SZ", "000002.SZ"],
-          "start_time": "20240101",
-          "end_time": "20240131",
-        },
+        payload,
         "COMPLETED",
         2,
         2,
         datetime(2024, 2, 1),
+        ingestion_result,
       ),
       (
-        "bars-request",
-        {
-          "operation": "bars",
-          "stock_list": ["000001.SZ"],
-          "start_time": "20240101",
-          "end_time": "20240131",
-        },
+        "legacy-factor-request",
+        payload,
         "COMPLETED",
         1,
         1,
         datetime(2024, 2, 1),
+        {
+          "operation": "divid_factors",
+          "records_received": 0,
+          "records_saved": 0,
+          "replacement_audit": {"audit_schema_version": 1},
+        },
       ),
-    ]
+    ],
+    [factor_row],
   )
   source = InfrastructureResearchDataSource(
     session=session,
@@ -331,6 +386,73 @@ async def test_factor_coverage_reads_completed_durable_database_requests() -> No
     end=datetime(2024, 1, 31),
   )
 
-  assert result["request_id"].tolist() == ["factor-request"]
-  assert result.loc[0, "stock_codes"] == ["000001.SZ", "000002.SZ"]
-  assert result.loc[0, "expected_chunks"] == 2
+  assert result["request_id"].tolist() == [
+    "factor-request",
+    "legacy-factor-request",
+  ]
+  valid = result[result["request_id"] == "factor-request"].iloc[0]
+  assert valid["stock_codes"] == ["000001.SZ"]
+  assert valid["expected_chunks"] == 2
+  assert valid["audit_schema_version"] == 2
+  assert type(valid["audit_schema_version"]) is int
+  assert valid["record_count"] == 1
+  assert type(valid["record_count"]) is int
+  assert valid["content_sha256"] == digest
+  assert valid["current_record_count"] == 1
+  assert valid["current_content_sha256"] == digest
+  assert valid["current_matches"]
+  report = build_dividend_factor_coverage_report(
+    result,
+    requested_codes=["000001.SZ"],
+    requested_start=datetime(2024, 1, 1),
+    requested_end=datetime(2024, 1, 31),
+  )
+  assert report.is_complete
+  assert report.invalid_evidence_count == 1
+  assert "pg_advisory_xact_lock_shared" in session.statements[0]
+  assert "market_data_request" in session.statements[1]
+  assert "divid_factors" in session.statements[2]
+
+
+@pytest.mark.asyncio
+async def test_factor_coverage_rejects_legacy_audit_before_reading_factor_rows() -> (
+  None
+):
+  session = FakeCoverageSession(
+    [
+      (
+        "legacy-factor-request",
+        {
+          "operation": "divid_factors",
+          "source": "qmt-get-divid-factors-v1",
+          "stock_list": ["000001.SZ"],
+          "start_time": "20240101",
+          "end_time": "20240131",
+        },
+        "COMPLETED",
+        1,
+        1,
+        datetime(2024, 2, 1),
+        {
+          "operation": "divid_factors",
+          "records_received": 0,
+          "records_saved": 0,
+          "replacement_audit": {"audit_schema_version": 1},
+        },
+      )
+    ],
+  )
+  source = InfrastructureResearchDataSource(
+    session=session,
+    kline_repository=FakeKLineRepository(),
+  )
+
+  result = await source.load_dividend_factor_coverage(
+    ["000001.SZ"],
+    start=datetime(2024, 1, 1),
+    end=datetime(2024, 1, 31),
+  )
+
+  assert result.loc[0, "audit_schema_version"] == 1
+  assert not result.loc[0, "current_matches"]
+  assert len(session.statements) == 3

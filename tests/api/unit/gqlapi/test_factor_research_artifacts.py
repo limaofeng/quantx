@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -8,7 +9,12 @@ from quantx_api.factor_research_artifacts import (
   FactorResearchArtifactStore,
   canonical_universe,
 )
-from quantx_api.research_artifacts import ResearchArtifactError, stable_run_key
+from quantx_api.research_artifacts import (
+  ResearchArtifactError,
+  ResearchArtifactStore,
+  stable_run_key,
+  validate_factor_study_data_quality,
+)
 
 
 def _condition(factor_id="volume_ratio", value=1.5):
@@ -33,14 +39,32 @@ def _write_factor_run(root, *, conditions=None, run_id="20260901-100000-abcd1234
   path = root / "factor-study-v1" / run_id
   path.mkdir(parents=True)
   key = stable_run_key(study_id="factor-study", version="v1", run_id=run_id)
+  quality = {
+    "is_usable": True,
+    "dividend_factor_coverage": {
+      "is_complete": True,
+      "evidence_schema_version": 2,
+      "verified_code_window_count": 1,
+      "evidence_content_sha256": "b" * 64,
+      "requested_codes": ["000001.SZ"],
+      "covered_codes": ["000001.SZ"],
+      "uncovered_codes": [],
+    },
+  }
+  quality_bytes = json.dumps(quality).encode("utf-8")
+  (path / "data-quality.json").write_bytes(quality_bytes)
   (path / "manifest.json").write_text(json.dumps({
     "run_id": run_id, "study_id": "factor-study", "version": "v1", "status": "success",
     "completed_at": completed_at, "config_hash": "a" * 64,
+    "artifacts": [{
+      "path": "data-quality.json",
+      "bytes": len(quality_bytes),
+      "sha256": hashlib.sha256(quality_bytes).hexdigest(),
+    }],
   }), encoding="utf-8")
   (path / "resolved-config.yaml").write_text(
     "study: factor-study\ndate_range: [2021-08-31, 2026-08-31]\n", encoding="utf-8",
   )
-  (path / "data-quality.json").write_text('{"is_usable":true}', encoding="utf-8")
   row = {
     "group": "joint", "horizon": 1, "return_basis": "close", "period": "all",
     "sample_count": 1000, "stock_count": 20, "date_count": date_count,
@@ -65,6 +89,22 @@ def _write_factor_run(root, *, conditions=None, run_id="20260901-100000-abcd1234
   }
   (path / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
   return key, metrics, path
+
+
+def _write_indexed_quality(path: Path, quality: dict) -> None:
+  quality_bytes = json.dumps(quality).encode("utf-8")
+  (path / "data-quality.json").write_bytes(quality_bytes)
+  manifest_path = path / "manifest.json"
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  entry = next(
+    item for item in manifest["artifacts"]
+    if item["path"] == "data-quality.json"
+  )
+  entry.update(
+    bytes=len(quality_bytes),
+    sha256=hashlib.sha256(quality_bytes).hexdigest(),
+  )
+  manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def test_canonical_universe_preserves_full_bounded_sample_identity():
@@ -277,6 +317,48 @@ def test_report_detail_discovery_fails_closed_before_unbounded_manifest_scan(
   assert manifest_reads == []
 
 
+@pytest.mark.parametrize("operation", ["list", "detail"])
+def test_generic_factor_discovery_bounds_aggregate_data_quality_reads(
+  tmp_path,
+  monkeypatch,
+  operation,
+):
+  import quantx_api.research_artifacts as artifacts
+
+  key, _, first = _write_factor_run(
+    tmp_path,
+    run_id="20260901-100000-abcd1234",
+  )
+  _, _, second = _write_factor_run(
+    tmp_path,
+    run_id="20260902-100000-abcd1234",
+  )
+  quality_bytes = sum(
+    (run_directory / "data-quality.json").stat().st_size
+    for run_directory in (first, second)
+  )
+  monkeypatch.setattr(
+    artifacts,
+    "MAX_RESEARCH_DISCOVERY_DATA_QUALITY_BYTES",
+    quality_bytes - 1,
+  )
+  manifest_reads = []
+  original_read = ResearchArtifactStore._read_json
+
+  def tracked_read(self, run_directory, filename, **kwargs):
+    if filename == "manifest.json":
+      manifest_reads.append(run_directory.name)
+    return original_read(self, run_directory, filename, **kwargs)
+
+  monkeypatch.setattr(ResearchArtifactStore, "_read_json", tracked_read)
+  store = ResearchArtifactStore(tmp_path)
+
+  with pytest.raises(ResearchArtifactError, match="安全预算"):
+    store.list_runs() if operation == "list" else store.get_run(key)
+
+  assert manifest_reads == []
+
+
 @pytest.mark.parametrize("budget_kind", ["runs", "bytes"])
 def test_match_reports_fail_closed_when_scan_budget_is_exhausted(
   tmp_path, monkeypatch, budget_kind,
@@ -362,6 +444,83 @@ def test_invalid_latest_artifact_is_visible_as_error_not_a_match(tmp_path):
   (path / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
   found = FactorResearchArtifactStore(tmp_path).match_reports([_request()])[0]
   assert found["status"] == "ARTIFACT_ERROR"
+
+
+def test_legacy_success_coverage_cannot_publish_or_match_reports(tmp_path):
+  key, _, path = _write_factor_run(tmp_path)
+  quality_path = path / "data-quality.json"
+  quality = json.loads(quality_path.read_text(encoding="utf-8"))
+  coverage = quality["dividend_factor_coverage"]
+  coverage.pop("evidence_schema_version")
+  coverage.pop("verified_code_window_count")
+  coverage.pop("evidence_content_sha256")
+  _write_indexed_quality(path, quality)
+
+  exact = _request()
+  reference = _request(exclude_st=True)
+  reference["request_id"] = "reference"
+  store = FactorResearchArtifactStore(tmp_path)
+  matches = store.match_reports([exact, reference])
+
+  assert [item["status"] for item in matches] == [
+    "ARTIFACT_ERROR",
+    "ARTIFACT_ERROR",
+  ]
+  assert all(not item["reports"] for item in matches)
+  assert store.list_runs(study_id="factor-study")[1] == 0
+  assert store.get_run(key) is None
+  assert ResearchArtifactStore(tmp_path).get_run(key) is None
+  with pytest.raises(ResearchArtifactError, match="无法安全读取"):
+    store.get_factor_report(key, "joint-test")
+
+
+@pytest.mark.parametrize(
+  ("field", "value"),
+  [
+    ("evidence_schema_version", True),
+    ("verified_code_window_count", True),
+    ("verified_code_window_count", 0),
+    ("evidence_content_sha256", "A" * 64),
+    ("evidence_content_sha256", "a" * 63),
+    ("requested_codes", ["000001.SZ", "000001.SZ"]),
+    ("covered_codes", []),
+    ("uncovered_codes", ["000001.SZ"]),
+  ],
+)
+def test_factor_publication_coverage_validator_fails_closed(field, value):
+  coverage = {
+    "is_complete": True,
+    "evidence_schema_version": 2,
+    "verified_code_window_count": 1,
+    "evidence_content_sha256": "a" * 64,
+    "requested_codes": ["000001.SZ"],
+    "covered_codes": ["000001.SZ"],
+    "uncovered_codes": [],
+  }
+  coverage[field] = value
+
+  with pytest.raises(ResearchArtifactError, match="schema-v2"):
+    validate_factor_study_data_quality({"dividend_factor_coverage": coverage})
+
+
+@pytest.mark.parametrize("index_field", ["bytes", "sha256"])
+def test_factor_publication_requires_data_quality_bytes_and_sha_match(
+  tmp_path,
+  index_field,
+):
+  _, _, path = _write_factor_run(tmp_path)
+  manifest_path = path / "manifest.json"
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  entry = manifest["artifacts"][0]
+  entry[index_field] = (
+    entry[index_field] + 1 if index_field == "bytes" else "0" * 64
+  )
+  manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+  result = FactorResearchArtifactStore(tmp_path).match_reports([_request()])[0]
+
+  assert result["status"] == "ARTIFACT_ERROR"
+  assert result["reports"] == []
 
 
 def test_joint_empty_cohort_is_insufficient_even_when_base_coverage_is_large(tmp_path):

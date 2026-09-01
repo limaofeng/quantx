@@ -17,6 +17,7 @@ from quantx_domain.factors import FACTOR_BY_ID, FACTOR_VERSION, normalize_condit
 from quantx_api.research_artifacts import (
   _KEY_PATTERN,
   _MAX_CONFIG_BYTES,
+  _MAX_DATA_QUALITY_BYTES,
   _MAX_MANIFEST_BYTES,
   _SEGMENT_PATTERN,
   ResearchArtifactError,
@@ -354,6 +355,16 @@ class FactorResearchArtifactStore(ResearchArtifactStore):
         if scanned_bytes + manifest_bytes > MAX_FACTOR_MATCH_BYTES:
           return [], scanned_bytes, True, errors_seen
         scanned_bytes += manifest_bytes
+        quality_path = self._artifact_path(run_directory, "data-quality.json")
+        if quality_path.exists():
+          if _is_link_like(quality_path) or not quality_path.is_file():
+            raise ResearchArtifactError("因子数据质量产物不是常规文件")
+          quality_bytes = quality_path.stat().st_size
+          if quality_bytes > _MAX_DATA_QUALITY_BYTES:
+            raise ResearchArtifactError("因子数据质量产物超过大小上限")
+          if scanned_bytes + quality_bytes > MAX_FACTOR_MATCH_BYTES:
+            return [], scanned_bytes, True, errors_seen
+          scanned_bytes += quality_bytes
         record = self._read_summary(run_directory)
       except (OSError, ResearchArtifactError):
         errors_seen = True
@@ -366,6 +377,7 @@ class FactorResearchArtifactStore(ResearchArtifactStore):
   def _metrics(self, summary: ResearchRunRecord, *, rows: bool = False) -> dict:
     # Revalidate the actual artifact before consulting a cross-request cache.
     # Only bounded projections are retained; raw JSON and statistic rows never are.
+    self._require_factor_study_publication(summary)
     path = self._artifact_path(summary.run_directory, "metrics.json")
     if _is_link_like(path) or not path.is_file():
       self._invalidate_summary(path)
@@ -419,11 +431,13 @@ class FactorResearchArtifactStore(ResearchArtifactStore):
   def get_factor_report(self, run_key: str, report_id: str) -> dict | None:
     if not _KEY_PATTERN.fullmatch(run_key) or not _SEGMENT_PATTERN.fullmatch(report_id):
       raise ResearchArtifactError("因子报告身份格式无效")
-    records, _, budget_exhausted, _ = self._discover_match_runs()
+    records, _, budget_exhausted, errors_seen = self._discover_match_runs()
     if budget_exhausted:
       raise ResearchArtifactError("因子报告扫描达到安全预算")
     records = [item for item in records if item.key == run_key]
     if not records:
+      if errors_seen:
+        raise ResearchArtifactError("存在无法安全读取的因子研究产物")
       return None
     if len(records) != 1:
       raise ResearchArtifactError("研究运行 key 不唯一")
@@ -494,6 +508,21 @@ class FactorResearchArtifactStore(ResearchArtifactStore):
         break
       scanned_runs += 1
       try:
+        # _metrics revalidates the indexed coverage proof after discovery.
+        # Charge that second read to the same aggregate lookup budget.
+        quality_path = self._artifact_path(
+          record.run_directory,
+          "data-quality.json",
+        )
+        if _is_link_like(quality_path) or not quality_path.is_file():
+          raise ResearchArtifactError("因子数据质量产物不是常规文件")
+        quality_bytes = quality_path.stat().st_size
+        if quality_bytes > _MAX_DATA_QUALITY_BYTES:
+          raise ResearchArtifactError("因子数据质量产物超过大小上限")
+        if scanned_bytes + quality_bytes > MAX_FACTOR_MATCH_BYTES:
+          budget_exhausted = True
+          break
+        scanned_bytes += quality_bytes
         metrics_path = self._artifact_path(record.run_directory, "metrics.json")
         if _is_link_like(metrics_path) or not metrics_path.is_file():
           raise ResearchArtifactError("因子产物不是常规文件")

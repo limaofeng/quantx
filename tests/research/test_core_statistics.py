@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import quantx_research.core.statistics as statistics_module
 from quantx_research.core import (
   DateBlockBootstrap,
   GroupStatistic,
@@ -67,6 +68,64 @@ def test_date_block_bootstrap_is_deterministic() -> None:
   inference = first.infer(frame, "value")
   assert inference == second.infer(frame, "value")
   assert all(value is not None for value in inference)
+
+
+def test_date_block_bootstrap_chunks_with_a_preallocation_guard(monkeypatch) -> None:
+  frame = pd.DataFrame(
+    {
+      "event_date": pd.date_range("2026-01-01", periods=80).repeat(2),
+      "value": np.linspace(-0.03, 0.05, 160),
+    }
+  )
+  baseline = DateBlockBootstrap(
+    frame["event_date"], samples=257, seed=17, confidence_level=0.95
+  ).infer_detailed(frame, "value")
+  monkeypatch.setattr(statistics_module, "_BOOTSTRAP_CHUNK_TARGET_BYTES", 4_096)
+  guarded_allocations: list[tuple[str, int]] = []
+  chunked = DateBlockBootstrap(
+    frame["event_date"],
+    samples=257,
+    seed=17,
+    confidence_level=0.95,
+    allocation_guard=lambda stage, estimated: guarded_allocations.append(
+      (stage, estimated)
+    ),
+  ).infer_detailed(frame, "value")
+
+  assert chunked.values == pytest.approx(baseline.values)
+  assert chunked.effective_samples == 257
+  assert 0 < chunked.chunk_size < chunked.configured_samples
+  assert len(guarded_allocations) > 1
+  assert all(
+    stage == "date_block_bootstrap_resample" and estimated > 0
+    for stage, estimated in guarded_allocations
+  )
+
+  def reject_allocation(stage: str, estimated: int) -> None:
+    assert stage == "date_block_bootstrap_resample"
+    assert estimated > 0
+    raise RuntimeError("preallocation rejected")
+
+  with pytest.raises(RuntimeError, match="preallocation rejected"):
+    DateBlockBootstrap(
+      frame["event_date"],
+      samples=100,
+      seed=17,
+      confidence_level=0.95,
+      allocation_guard=reject_allocation,
+    ).infer(frame, "value")
+
+
+def test_bootstrap_sample_count_has_a_bounded_upper_limit() -> None:
+  with pytest.raises(ValueError):
+    StudyConfig.model_validate({"statistics": {"bootstrap_samples": 20_001}})
+  with pytest.raises(ValueError, match="between 1 and 20000"):
+    DateBlockBootstrap(
+      pd.Series(pd.date_range("2026-01-01", periods=30)),
+      samples=20_001,
+      seed=42,
+      confidence_level=0.95,
+    )
 
 
 def test_benjamini_hochberg_is_monotone_and_suppresses_small_cells() -> None:

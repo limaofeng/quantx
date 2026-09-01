@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import json
@@ -70,7 +71,8 @@ from quantx_research.staging import (
 FACTOR_STATISTICS_INPUT_SCHEMA_VERSION = 2
 FACTOR_STATISTICS_LEGACY_INPUT_SCHEMA_VERSION = 1
 FACTOR_STATISTICS_ENGINE_IDENTITY_SCHEMA_VERSION = 1
-FACTOR_STATISTICS_ENGINE_VERSION = "factor-statistics-v1"
+FACTOR_STATISTICS_ENGINE_VERSION = "factor-statistics-v2"
+FACTOR_DIVIDEND_COVERAGE_EVIDENCE_SCHEMA_VERSION = 2
 # Keep this list complete whenever the post-sample statistical call chain gains
 # a source module; the frozen sample SHA already binds all earlier data work.
 _FACTOR_STATISTICS_SOURCE_FILES = (
@@ -285,7 +287,8 @@ async def run_factor_study(
       "previous_errors": list(manifest.get("errors", [])),
       "previous_completed_at": manifest.get("completed_at"),
       "previous_elapsed_seconds": manifest.get("elapsed_seconds"),
-      "previous_runtime_memory": quality.get("runtime_memory"),
+      "previous_runtime_memory": manifest.get("runtime_memory")
+      or quality.get("runtime_memory"),
       "previous_git": manifest.get("git"),
       "previous_active_attempt": previous_active_attempt,
       "git": git_state(REPO_ROOT),
@@ -293,6 +296,13 @@ async def run_factor_study(
       "errors": [],
     }
     manifest.setdefault("resume_attempts", []).append(resume_attempt)
+    for terminal_field in (
+      "completed_at",
+      "elapsed_seconds",
+      "failure_kind",
+      "runtime_memory",
+    ):
+      manifest.pop(terminal_field, None)
     manifest.update(
       status="running",
       errors=[],
@@ -373,6 +383,13 @@ async def run_factor_study(
 
       if statistics_identity is None:
         raise RuntimeError("factor-study 统计输入身份未初始化")
+      attempt_task = asyncio.current_task()
+
+      def raise_if_cancelled(stage: str) -> None:
+        if attempt_task is not None and attempt_task.cancelling():
+          raise asyncio.CancelledError(
+            f"task cancellation observed after durable {stage}"
+          )
 
       def record_checkpoint(
         completed: int, total: int, report_id: str, reused: bool
@@ -384,7 +401,13 @@ async def run_factor_study(
           "last_report_reused": reused,
         }
         _atomic_write_json(run_dir / "manifest.json", manifest)
+        raise_if_cancelled("report checkpoint")
 
+      # Give a real task cancellation one cooperative checkpoint after the
+      # frozen inputs are committed and before the long synchronous statistics
+      # phase. SIGINT-driven asyncio cancellation can therefore terminate into
+      # a resumable failed manifest instead of leaking status=running.
+      await asyncio.sleep(0)
       metrics = analyze_factor_partitions(
         partitions,
         config,
@@ -397,6 +420,7 @@ async def run_factor_study(
         checkpoint_identity=statistics_identity,
         on_report_checkpoint=record_checkpoint,
       )
+      raise_if_cancelled("statistics family")
       metrics["config_hash"] = config_hash
       metrics["data_fingerprint"] = quality["data_fingerprint"]
       metrics["warnings"] = list(
@@ -421,7 +445,9 @@ async def run_factor_study(
           table_dir / f"{report['report_id']}.csv",
           pd.DataFrame(report["rows"]),
         )
+        raise_if_cancelled("report table")
       render_factor_report(run_dir)
+      raise_if_cancelled("HTML report")
     manifest["status"] = "success"
   except DividendFactorCoverageError as exc:
     quality["dividend_factor_coverage"] = exc.report.to_dict()
@@ -433,6 +459,13 @@ async def run_factor_study(
   except ResearchPreflightError as exc:
     manifest.update(status="failed_preflight", errors=[str(exc)])
     raise
+  except asyncio.CancelledError as exc:
+    manifest.update(
+      status="failed",
+      failure_kind="cancelled",
+      errors=[f"CancelledError: {exc or 'task cancelled'}"],
+    )
+    raise
   except (KeyboardInterrupt, SystemExit) as exc:
     manifest.update(status="failed", errors=[f"{type(exc).__name__}: {exc}"])
     raise
@@ -443,7 +476,13 @@ async def run_factor_study(
     try:
       finished = datetime.now(timezone.utc)
       runtime_memory = monitor.to_dict()
-      quality["runtime_memory"] = runtime_memory
+      if manifest.get("status") == "running":
+        exc_type, exc, _ = sys.exc_info()
+        label = exc_type.__name__ if exc_type is not None else "BaseException"
+        manifest.update(
+          status="failed",
+          errors=[f"{label}: {exc or 'attempt ended without terminal status'}"],
+        )
       if resume_attempt is not None:
         resume_attempt.update(
           completed_at=finished.isoformat(),
@@ -459,7 +498,15 @@ async def run_factor_study(
         runtime_memory=runtime_memory,
       )
       manifest.pop("active_attempt", None)
-      _atomic_write_json(run_dir / "data-quality.json", quality)
+      if _factor_recovery_inputs_committed(manifest):
+        for recovery_path in (
+          "analysis-sample.parquet",
+          "data-quality.json",
+          "resolved-config.yaml",
+        ):
+          _verify_indexed_artifact(run_dir, manifest, recovery_path)
+      else:
+        _atomic_write_json(run_dir / "data-quality.json", quality)
       manifest["artifacts"] = _factor_artifact_index(run_dir, lease_path=lease.path)
       _atomic_write_json(run_dir / "manifest.json", manifest)
     finally:
@@ -666,6 +713,7 @@ def _load_factor_resume(
     "data-quality.json",
   )
   quality = _read_json_object(quality_path, label="数据质量产物")
+  _validate_resume_dividend_factor_coverage(quality)
   data_fingerprint = str(quality.get("data_fingerprint") or "")
   if not data_fingerprint or manifest.get("data_fingerprint") != data_fingerprint:
     raise ValueError("恢复运行的数据指纹缺失或不一致")
@@ -697,17 +745,15 @@ def _load_factor_resume(
     recorded_identity.get("statistics_engine"), dict
   )
   if legacy_identity:
-    if _statistics_checkpoint_directory_nonempty(run_dir):
+    if _statistics_has_persisted_output(run_dir, manifest):
       raise ValueError(
-        "恢复运行缺少统计引擎身份且已有 statistics-checkpoints；"
-        "拒绝跨统计实现混用检查点"
+        "恢复运行缺少统计引擎身份且已有派生统计产物、进度或索引；"
+        "拒绝跨统计实现混用任何结果"
       )
-    if recorded_identity is None:
-      if _statistics_has_persisted_output(run_dir, manifest):
-        raise ValueError(
-          "恢复运行缺少 statistics_input，且不能证明统计尚未开始；拒绝升级"
-        )
-    elif recorded_identity != _legacy_statistics_identity(identity):
+    if (
+      recorded_identity is not None
+      and recorded_identity != _legacy_statistics_identity(identity)
+    ):
       raise ValueError("恢复运行的旧 statistics_input 身份不一致")
   elif recorded_identity != identity:
     raise ValueError("恢复运行的 statistics_input 身份不一致")
@@ -862,6 +908,8 @@ def _statistics_checkpoint_directory_nonempty(run_dir: Path) -> bool:
 
 
 def _statistics_has_persisted_output(run_dir: Path, manifest: dict[str, Any]) -> bool:
+  if _statistics_checkpoint_directory_nonempty(run_dir):
+    return True
   if manifest.get("statistics_progress") is not None:
     return True
   artifacts = manifest.get("artifacts")
@@ -892,6 +940,29 @@ def _statistics_has_persisted_output(run_dir: Path, manifest: dict[str, Any]) ->
   except OSError:
     return True
   return True
+
+
+def _factor_recovery_inputs_committed(manifest: dict[str, Any]) -> bool:
+  """Whether immutable recovery inputs have already been atomically indexed."""
+  if not isinstance(manifest.get("statistics_input"), dict):
+    return False
+  artifacts = manifest.get("artifacts")
+  if not isinstance(artifacts, list):
+    return False
+  required = {
+    "analysis-sample.parquet",
+    "data-quality.json",
+    "resolved-config.yaml",
+  }
+  counts = {
+    relative_path: sum(
+      1
+      for item in artifacts
+      if isinstance(item, dict) and item.get("path") == relative_path
+    )
+    for relative_path in required
+  }
+  return all(count == 1 for count in counts.values())
 
 
 def _verify_indexed_artifact(
@@ -1006,6 +1077,51 @@ def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
   return value
 
 
+def _validate_resume_dividend_factor_coverage(quality: dict[str, Any]) -> None:
+  """Require a complete, internally consistent schema-v2 coverage proof."""
+
+  coverage = quality.get("dividend_factor_coverage")
+  if not isinstance(coverage, dict):
+    raise ValueError("恢复运行缺少完整 schema-v2 逐代码复权覆盖证据")
+
+  schema_version = coverage.get("evidence_schema_version")
+  verified_count = coverage.get("verified_code_window_count")
+  evidence_sha256 = coverage.get("evidence_content_sha256")
+  if (
+    coverage.get("is_complete") is not True
+    or type(schema_version) is not int
+    or schema_version != FACTOR_DIVIDEND_COVERAGE_EVIDENCE_SCHEMA_VERSION
+    or type(verified_count) is not int
+    or verified_count <= 0
+    or not isinstance(evidence_sha256, str)
+    or len(evidence_sha256) != 64
+    or any(character not in "0123456789abcdef" for character in evidence_sha256)
+  ):
+    raise ValueError("恢复运行的复权覆盖证据不是完整 schema-v2 逐代码证明")
+
+  code_sets: dict[str, list[str]] = {}
+  for field in ("requested_codes", "covered_codes", "uncovered_codes"):
+    value = coverage.get(field)
+    if (
+      not isinstance(value, list)
+      or any(not isinstance(code, str) or not code.strip() for code in value)
+      or len(value) != len(set(value))
+    ):
+      raise ValueError("恢复运行的 schema-v2 复权覆盖代码集合非法")
+    code_sets[field] = value
+
+  requested_codes = code_sets["requested_codes"]
+  covered_codes = code_sets["covered_codes"]
+  if (
+    not requested_codes
+    or code_sets["uncovered_codes"]
+    or len(covered_codes) != len(requested_codes)
+    or set(covered_codes) != set(requested_codes)
+    or verified_count < len(requested_codes)
+  ):
+    raise ValueError("恢复运行的 schema-v2 复权覆盖代码集合不一致")
+
+
 def _atomic_write_json(path: Path, value: Any) -> None:
   temporary = path.with_name(f".{path.name}.partial")
   try:
@@ -1024,6 +1140,84 @@ def _atomic_write_csv(path: Path, frame: pd.DataFrame) -> None:
     temporary.unlink(missing_ok=True)
 
 
+def _read_factor_metrics(path: Path) -> dict[str, Any]:
+  metrics = _read_json_object(path, label="因子研究 metrics")
+  reports = metrics.get("reports")
+  warnings = metrics.get("warnings")
+  if (
+    metrics.get("schema_version") != 1
+    or metrics.get("study_id") != "factor-study"
+    or not isinstance(reports, list)
+    or not reports
+    or not isinstance(warnings, list)
+  ):
+    raise ValueError("因子研究 metrics 结构不完整，拒绝渲染")
+  report_ids: list[str] = []
+  for report in reports:
+    if not isinstance(report, dict):
+      raise ValueError("因子研究 metrics 报告结构不完整，拒绝渲染")
+    report_id = report.get("report_id")
+    if (
+      not isinstance(report_id, str)
+      or not report_id
+      or not isinstance(report.get("rows"), list)
+      or not all(
+        key in report
+        for key in ("definitions", "conditions", "coverage", "distribution")
+      )
+    ):
+      raise ValueError("因子研究 metrics 报告结构不完整，拒绝渲染")
+    report_ids.append(report_id)
+  if len(report_ids) != len(set(report_ids)):
+    raise ValueError("因子研究 metrics 含重复 report_id，拒绝渲染")
+  return metrics
+
+
+def _validate_factor_render_inputs(
+  metrics: dict[str, Any], manifest: dict[str, Any]
+) -> None:
+  for key in ("factor_version", "config_hash", "data_fingerprint"):
+    if metrics.get(key) != manifest.get(key):
+      raise ValueError(f"因子研究 metrics.{key} 与 manifest 不一致，拒绝渲染")
+  progress = manifest.get("statistics_progress")
+  reports = metrics["reports"]
+  if (
+    not isinstance(progress, dict)
+    or progress.get("completed_reports") != progress.get("total_reports")
+    or progress.get("total_reports") != len(reports)
+    or progress.get("last_report_id") != reports[-1].get("report_id")
+  ):
+    raise ValueError("因子研究报告族不完整或与 manifest 进度不一致，拒绝渲染")
+
+
+def _replace_factor_artifact_entry(
+  manifest: dict[str, Any], run_dir: Path, relative_path: str
+) -> None:
+  artifacts = manifest.get("artifacts")
+  if not isinstance(artifacts, list) or not all(
+    isinstance(item, dict) and isinstance(item.get("path"), str) for item in artifacts
+  ):
+    raise ValueError("运行 manifest 缺少 artifact 索引")
+  positions = [
+    index
+    for index, item in enumerate(artifacts)
+    if isinstance(item, dict) and item.get("path") == relative_path
+  ]
+  if len(positions) > 1:
+    raise ValueError(f"运行 manifest artifact 索引重复: {relative_path}")
+  path = run_dir / relative_path
+  entry = {
+    "path": relative_path,
+    "bytes": path.stat().st_size,
+    "sha256": file_sha256(path),
+  }
+  if positions:
+    artifacts[positions[0]] = entry
+  else:
+    artifacts.append(entry)
+    artifacts.sort(key=lambda item: str(item.get("path", "")))
+
+
 def render_factor_existing(run_dir: str | Path) -> Path:
   """Regenerate a completed factor report under the same exclusive run lease."""
   directory = _resolve_factor_resume_directory(Path(run_dir))
@@ -1040,10 +1234,14 @@ def render_factor_existing(run_dir: str | Path) -> Path:
       manifest.get("study_id") != "factor-study" or manifest.get("status") != "success"
     ):
       raise ValueError("只能重新渲染已成功完成的 factor-study 运行")
-    report = render_factor_report(directory)
-    manifest["artifacts"] = _factor_artifact_index(
+    metrics_path, _ = _verify_indexed_artifact(directory, manifest, "metrics.json")
+    metrics = _read_factor_metrics(metrics_path)
+    _validate_factor_render_inputs(metrics, manifest)
+    report = render_factor_report(directory, metrics=metrics)
+    _replace_factor_artifact_entry(
+      manifest,
       directory,
-      lease_path=lease.path,
+      "report.html",
     )
     _atomic_write_json(directory / "manifest.json", manifest)
     return report
@@ -1356,9 +1554,11 @@ def _write_sample(
     temporary.unlink(missing_ok=True)
 
 
-def render_factor_report(run_dir: str | Path) -> Path:
+def render_factor_report(
+  run_dir: str | Path, *, metrics: dict[str, Any] | None = None
+) -> Path:
   directory = Path(run_dir)
-  metrics = json.loads((directory / "metrics.json").read_text(encoding="utf-8"))
+  metrics = metrics or _read_factor_metrics(directory / "metrics.json")
 
   def escape(value: object) -> str:
     return html.escape(str(value), quote=True)

@@ -60,8 +60,11 @@ universe:
 - 移动区块 Bootstrap 的块长不短于收益周期；每个端点分别在本次运行所有
   报告/分组/周期/收益起点的完整检验族内做 BH 校正。样本不足保留描述统计，
   不输出推断结论。年度分段和截至数据末日的滚动 12 个月只作稳定性检查。
-  `metrics.json.inference_resolution` 同时披露 Bootstrap 次数、可达到的最小
-  Monte Carlo p 值、各完整检验族大小，以及孤立最小 p 值对应的 BH q 值下限。
+  Bootstrap 抽样按不超过 32 MiB 目标增量的受控块执行，每块分配前先走物理
+  内存保护；配置最多 20,000 次。每个推断行记录实际有效抽样数，避免重复保存
+  可由 `1/(n+1)` 推导的字段；`metrics.json.inference_resolution` 汇总配置次数、
+  各族有效次数范围、实际 Monte Carlo 分辨率、完整检验族大小，以及孤立最小 p
+  值对应的 BH q 值下限。
   默认 1,000 次抽样面对大检验族时分辨率偏粗；“未显著”不得解释为因子无效，
   也不会为得到显著结果而在运行后临时增加抽样次数。
 - 历史 ST 和行业分类未核验，配置中 `exclude_st=true` 或行业条件会明确
@@ -73,25 +76,41 @@ universe:
 不将整个全市场宽面板装入内存。完整五年研究建议预留至少 20 GiB 临时磁盘，
 运行时间取决于因子数量、股票数量和 Bootstrap 配置。
 
+关系库研究读取使用只读 `REPEATABLE READ` 快照，并在整个读取事务持有复权因子
+共享事务锁。复权覆盖只接受 schema-v2 的逐代码审计，且要求当前 10 列因子行数
+与内容摘要仍和持久化证据一致；仅有请求级完成状态或旧 schema 不能证明覆盖。
+`data-quality.json.dividend_factor_coverage` 会记录
+`evidence_schema_version=2`、`verified_code_window_count` 和
+`evidence_content_sha256`，便于复核本次冻结样本实际使用的覆盖证据。
+
 统计阶段每完成一个报告，会先在运行目录的 `statistics-checkpoints/` 原子
 持久化原始 p 值报告；检查点严格绑定冻结配置指纹、数据指纹、完整
 `analysis-sample.parquet` SHA256、样本行数和因子定义版本，还绑定统计引擎
 schema/version、关键统计源码的逐文件与汇总 SHA256，以及 Python、NumPy、
 Pandas、PyArrow 版本。上述身份同时显示在 manifest；源码或依赖身份变化时
 拒绝复用旧检查点。旧 manifest 缺少统计引擎身份时，仅允许在检查点目录不存在
-或严格为空、且旧统计输入其余字段与当前冻结输入完全一致时升级并从头重算；
-若旧 manifest 连 `statistics_input` 也不存在，还必须没有统计进度、最终产物或
-相关 artifact 索引，才能证明没有可混用的持久化统计结果。
-升级会清除旧统计进度，并在 manifest 和质量警告中留审计记录。只有全部报告收集
+或严格为空、没有任何统计进度、表格、报告、临时/最终产物或相关 artifact 索引，
+且旧统计输入其余字段与当前冻结输入完全一致时升级并从头重算；不因旧
+`statistics_input` 是否存在而放宽派生产物检查，避免新旧统计世代混表。
+升级会在 manifest 和最终报告警告中留审计记录。只有全部报告收集
 完成后，才统一对完整检验族做 BH 校正并生成最终产物。`failed_resource` 或
 普通 `failed` 运行可使用上面的 `--resume-run-dir` 原目录恢复：恢复会重新核验
-冻结配置、Parquet footer、完整样本哈希和已有检查点，不读取行情、不重算因子
-或收益。缺少检查点时只从冻结样本重建临时月分区；已完成报告直接复用。
+冻结配置、data-quality artifact 哈希及其中完整且内部一致的 schema-v2 逐代码复权
+覆盖身份、Parquet footer、完整样本哈希和已有检查点，不读取行情、不重算因子或
+收益。旧 schema、缺少证据摘要、虚假 complete 或代码集合不一致均拒绝恢复。
+缺少检查点时只从冻结样本重建临时月分区；已完成报告直接复用。
 恢复命令不能同时传 `--market-data-archive` 或 `--output-root`，且仍严格执行配置
 中的物理内存保留门槛。运行目录使用包含主机、PID、进程启动时间和 attempt id
 的独占租约防止并发写入；`running` 只有在租约证明确切原进程已不存在时才允许
 安全接管，活动进程、其他主机或无法核验的租约一律拒绝。Ctrl+C 会先把本次
 attempt 收敛为 `failed`，硬终止留下的 stale lease 则由下一次恢复验证后替换。
+
+`factor-study` 在统计身份和三项恢复输入（冻结样本、resolved config、数据质量）
+共同写入 manifest 后，将 `data-quality.json` 视为不可变恢复证据。后续恢复警告
+和逐次运行物理内存遥测只进入最终报告或 manifest，不再重写该文件；即使进程在
+最终 artifact 重建前异常退出，旧 manifest 中的恢复输入 SHA256 仍然有效。重新
+渲染成功运行时先核验已索引的 `metrics.json`、运行身份和完整报告族，并且只更新
+`report.html` 的 artifact 项，不会为其他被外部修改的文件重算并认可新哈希。
 
 数据库读取与 CPU 阶段分离：完成股票特征及来源证据读取后立即退出只读连接，
 再执行全局交易日对齐、前向收益和统计，避免长时间闲置事务在退出时超时。
@@ -210,7 +229,8 @@ Parquet 都先写同目录临时文件，关闭、核对行数后再原子替换
 主线程在每个不超过 65,536 行的可控块前后检查，低于门槛会生成明确的
 `failed_resource`。这不是操作系统级的进程内存上限，但单次不可中断分配已被
 限制在一个有界块内。后台 RSS、最低可用物理内存、reserve breach、分阶段峰值
-和 staging 估算会写入 `data-quality.json`，最终摘要也写入 manifest；资源
+和 staging 估算在量价事件研究中会写入 `data-quality.json`，最终摘要也写入
+manifest；factor-study 按上文不可变恢复证据规则仅写 manifest。资源
 失败仍保留已知的真实样本数、事件数、数据指纹和质量证据。临时
 `.staging-*` 在退出时自动清理。正式全量运行建议额外预留至少 20 GiB 临时
 磁盘。
@@ -254,8 +274,9 @@ Parquet 都先写同目录临时文件，关闭、核对行数后再原子替换
 - `metrics.json`：分组描述、正常量对照、回归、稳健性与推断字段；
 - `tables/`：对应的扁平 CSV；
 - `data-quality.json`：原始异常计数，以及仅由去重后有效、正值、OHLC
-  内部一致且非停牌行计算的历史与边界覆盖，并保存复权因子请求覆盖证明、
-  staging 资源估算和物理内存遥测；
+  内部一致且非停牌行计算的历史与边界覆盖，并保存复权因子请求覆盖证明和
+  staging 资源估算；量价事件研究还保存物理内存遥测，factor-study 的逐次遥测
+  保存在 manifest；
 - `report.html`：只负责展示上述结构化事实。
 
 完整设计与研究口径见

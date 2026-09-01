@@ -20,6 +20,7 @@ from .normalization import (
 
 _INFLUX_TIME_CHUNK_DAYS = 180
 _FACTOR_BULK_THRESHOLD = 50
+_MAX_FACTOR_EVIDENCE_REQUESTS = 4_096
 
 
 @runtime_checkable
@@ -62,9 +63,9 @@ class ResearchDataSource(Protocol):
 class InfrastructureResearchDataSource:
   """复用 QuantX 仓储的只读数据源。
 
-  PostgreSQL 会话在首个查询前执行 ``SET TRANSACTION READ ONLY``，关闭时
-  一律回滚。InfluxDB 适配器只暴露 KLineRepository 的查询方法且禁用缓存，
-  不向研究应用暴露写入或删除接口。
+  PostgreSQL 会话在首个查询前进入只读 ``REPEATABLE READ``，关闭时一律
+  回滚。InfluxDB 适配器只暴露 KLineRepository 的查询方法且禁用缓存，不向
+  研究应用暴露写入或删除接口。
   """
 
   def __init__(
@@ -241,7 +242,7 @@ class InfrastructureResearchDataSource:
     start: date | datetime,
     end: date | datetime,
   ) -> pd.DataFrame:
-    """Read durable database proof for authoritative sparse-factor windows."""
+    """Read schema-v2 evidence and verify it against current factor rows."""
     codes = set(_unique_codes(stock_codes))
     if not codes:
       return pd.DataFrame()
@@ -252,7 +253,29 @@ class InfrastructureResearchDataSource:
 
     session = await self._ensure_relational_ready()
     from quantx_infrastructure.models.agent_runtime import MarketDataRequest
-    from sqlalchemy import select
+    from quantx_infrastructure.models.divid_factor import DividFactorTable
+    from quantx_infrastructure.repositories.divid_factor_repository import (
+      DIVID_FACTOR_WRITE_LOCK_KEY,
+      divid_factor_rows_sha256,
+    )
+    from quantx_infrastructure.services.divid_factor_evidence import (
+      current_rows_match_evidence,
+      parse_divid_factor_evidence,
+    )
+    from sqlalchemy import String, bindparam, cast, func, select
+    from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+
+    # The shared transaction lock prevents an authoritative replacement from
+    # moving between request-audit and current-row reads. REPEATABLE READ also
+    # pins the broader research session to one relational snapshot.
+    await session.execute(
+      select(func.pg_advisory_xact_lock_shared(DIVID_FACTOR_WRITE_LOCK_KEY))
+    )
+    evidence_codes_parameter = bindparam(
+      "research_factor_evidence_codes",
+      value=sorted(codes),
+      type_=ARRAY(String()),
+    )
 
     rows = (
       await session.execute(
@@ -263,10 +286,33 @@ class InfrastructureResearchDataSource:
           MarketDataRequest.expected_chunks,
           MarketDataRequest.received_chunks,
           MarketDataRequest.completed_at,
-        ).where(MarketDataRequest.status == "COMPLETED")
+          MarketDataRequest.ingestion_result,
+        )
+        .where(
+          MarketDataRequest.status == "COMPLETED",
+          MarketDataRequest.request_payload["operation"].as_string() == "divid_factors",
+          MarketDataRequest.request_payload["source"].as_string()
+          == "qmt-get-divid-factors-v1",
+          MarketDataRequest.request_payload["end_time"].as_string()
+          >= start_at.strftime("%Y%m%d"),
+          MarketDataRequest.request_payload["start_time"].as_string()
+          <= end_at.strftime("%Y%m%d"),
+          cast(MarketDataRequest.request_payload["stock_list"], JSONB).op("?|")(
+            evidence_codes_parameter
+          ),
+        )
+        .order_by(
+          MarketDataRequest.completed_at.desc(),
+          MarketDataRequest.request_id.desc(),
+        )
+        .limit(_MAX_FACTOR_EVIDENCE_REQUESTS + 1)
       )
     ).all()
-    evidence: list[dict[str, Any]] = []
+    if len(rows) > _MAX_FACTOR_EVIDENCE_REQUESTS:
+      raise RuntimeError("复权因子覆盖请求超过安全扫描预算")
+
+    parsed_evidence: list[tuple[Any, Any, Any]] = []
+    invalid_evidence: list[dict[str, Any]] = []
     for (
       request_id,
       payload,
@@ -274,33 +320,136 @@ class InfrastructureResearchDataSource:
       expected_chunks,
       received_chunks,
       completed_at,
+      ingestion_result,
     ) in rows:
-      if isinstance(payload, str):
-        try:
-          payload = json.loads(payload)
-        except json.JSONDecodeError:
-          continue
-      if not isinstance(payload, dict):
+      items = parse_divid_factor_evidence(
+        request_id=request_id,
+        request_payload=payload,
+        status=status,
+        expected_chunks=expected_chunks,
+        received_chunks=received_chunks,
+        completed_at=completed_at,
+        ingestion_result=ingestion_result,
+      )
+      if items is not None:
+        parsed_evidence.extend(
+          (item, expected_chunks, received_chunks)
+          for item in items
+          if item.stock_code in codes
+          and item.end_date >= start_at.date()
+          and item.start_date <= end_at.date()
+        )
         continue
-      if str(payload.get("operation") or "") != "divid_factors":
-        continue
-      payload_codes = _unique_codes(payload.get("stock_list") or ())
-      if not codes.intersection(payload_codes):
-        continue
-      evidence.append(
+      payload_object = _json_object(payload)
+      ingestion_object = _json_object(ingestion_result)
+      audit = (
+        ingestion_object.get("replacement_audit")
+        if isinstance(ingestion_object, dict)
+        else None
+      )
+      payload_codes = _unique_codes(
+        payload_object.get("stock_list") or ()
+        if isinstance(payload_object, dict)
+        else ()
+      )
+      invalid_evidence.append(
         {
           "request_id": str(request_id),
-          "source": str(payload.get("source") or ""),
+          "source": str(
+            payload_object.get("source") or ""
+            if isinstance(payload_object, dict)
+            else ""
+          ),
           "status": str(status),
-          "start_date": payload.get("start_time"),
-          "end_date": payload.get("end_time"),
-          "stock_codes": payload_codes,
+          "start_date": (
+            payload_object.get("start_time")
+            if isinstance(payload_object, dict)
+            else None
+          ),
+          "end_date": (
+            payload_object.get("end_time") if isinstance(payload_object, dict) else None
+          ),
+          "stock_codes": sorted(codes.intersection(payload_codes)),
           "expected_chunks": expected_chunks,
           "received_chunks": received_chunks,
           "completed_at": completed_at,
+          "audit_schema_version": (
+            audit.get("audit_schema_version") if isinstance(audit, dict) else None
+          ),
+          "record_count": None,
+          "content_sha256": "",
+          "current_record_count": None,
+          "current_content_sha256": "",
+          "current_matches": False,
         }
       )
-    return pd.DataFrame(evidence)
+
+    if not parsed_evidence:
+      return pd.DataFrame(invalid_evidence, dtype=object)
+    evidence_codes = sorted({item.stock_code for item, _, _ in parsed_evidence})
+    evidence_start = min(item.start_date for item, _, _ in parsed_evidence)
+    evidence_end = max(item.end_date for item, _, _ in parsed_evidence)
+    factor_rows = (
+      await session.execute(
+        select(
+          DividFactorTable.stock_code,
+          DividFactorTable.time,
+          DividFactorTable.ex_date,
+          DividFactorTable.interest,
+          DividFactorTable.stock_bonus,
+          DividFactorTable.stock_gift,
+          DividFactorTable.allot_num,
+          DividFactorTable.allot_price,
+          DividFactorTable.gugai,
+          DividFactorTable.dr,
+        )
+        .where(
+          DividFactorTable.stock_code.in_(evidence_codes),
+          DividFactorTable.ex_date >= evidence_start.strftime("%Y%m%d"),
+          DividFactorTable.ex_date <= evidence_end.strftime("%Y%m%d"),
+        )
+        .order_by(
+          DividFactorTable.stock_code.asc(),
+          DividFactorTable.ex_date.asc(),
+          DividFactorTable.time.asc(),
+        )
+      )
+    ).all()
+    factor_rows = [tuple(row) for row in factor_rows]
+    evidence: list[dict[str, Any]] = []
+    for item, expected_chunks, received_chunks in parsed_evidence:
+      current_rows = [
+        row
+        for row in factor_rows
+        if str(row[0]).strip().upper() == item.stock_code
+        and item.start_date
+        <= datetime.strptime(str(row[2]), "%Y%m%d").date()
+        <= item.end_date
+      ]
+      current_digest = divid_factor_rows_sha256(current_rows)
+      evidence.append(
+        {
+          "request_id": item.request_id,
+          "source": "qmt-get-divid-factors-v1",
+          "status": "COMPLETED",
+          "start_date": item.start_date.strftime("%Y%m%d"),
+          "end_date": item.end_date.strftime("%Y%m%d"),
+          "stock_codes": [item.stock_code],
+          "expected_chunks": expected_chunks,
+          "received_chunks": received_chunks,
+          "completed_at": item.completed_at,
+          "audit_schema_version": 2,
+          "record_count": item.record_count,
+          "content_sha256": item.content_sha256,
+          "current_record_count": len(current_rows),
+          "current_content_sha256": current_digest,
+          "current_matches": current_rows_match_evidence(item, factor_rows),
+        }
+      )
+    # Preserve exact integer schema/count types when legacy invalid rows add
+    # nulls to the same columns; pandas float coercion must not turn schema 2
+    # into 2.0 and make otherwise valid evidence fail closed accidentally.
+    return pd.DataFrame([*evidence, *invalid_evidence], dtype=object)
 
   async def _ensure_relational_ready(self) -> Any:
     if self._read_only_initialized:
@@ -323,8 +472,10 @@ class InfrastructureResearchDataSource:
         )
       from sqlalchemy import text
 
-      # 此语句既启动事务也保证事务内所有 SQL 都无法写库。
-      await self._session.execute(text("SET TRANSACTION READ ONLY"))
+      # 此语句必须是会话首个 SQL：既固定关系库快照，也禁止研究写库。
+      await self._session.execute(
+        text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+      )
     self._read_only_initialized = True
     return self._session
 
@@ -381,6 +532,15 @@ def _unique_codes(codes: Iterable[str]) -> list[str]:
   return list(
     dict.fromkeys(str(code).strip().upper() for code in codes if str(code).strip())
   )
+
+
+def _json_object(value: Any) -> dict[str, Any] | None:
+  if isinstance(value, str):
+    try:
+      value = json.loads(value)
+    except (TypeError, ValueError):
+      return None
+  return value if isinstance(value, dict) else None
 
 
 def _batches(values: Sequence[str], batch_size: int) -> Iterable[Sequence[str]]:

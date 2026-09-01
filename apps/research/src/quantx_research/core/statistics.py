@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 import pandas as pd
 
-from quantx_research.core.config import StudyConfig
+from quantx_research.core.config import MAX_BOOTSTRAP_SAMPLES, StudyConfig
 from quantx_research.core.models import (
   ComparisonStatistic,
   EventCurvePoint,
@@ -17,6 +18,24 @@ from quantx_research.core.models import (
 
 _ReturnKind = Literal["close_response", "next_open"]
 _Benchmark = Literal["absolute", "csi300", "market_equal_weight"]
+_BOOTSTRAP_CHUNK_TARGET_BYTES = 32 * 1024**2
+_BOOTSTRAP_MAX_CHUNK_SAMPLES = 512
+
+
+@dataclass(frozen=True)
+class BootstrapInference:
+  """Inference values plus the effective Monte Carlo resolution."""
+
+  ci_low: float | None
+  ci_high: float | None
+  p_value: float | None
+  configured_samples: int
+  effective_samples: int
+  chunk_size: int
+
+  @property
+  def values(self) -> tuple[float | None, float | None, float | None]:
+    return self.ci_low, self.ci_high, self.p_value
 
 
 @dataclass(frozen=True)
@@ -37,7 +56,12 @@ class DateBlockBootstrap:
     samples: int,
     seed: int,
     confidence_level: float,
+    allocation_guard: Callable[[str, int], object] | None = None,
   ) -> None:
+    if samples <= 0 or samples > MAX_BOOTSTRAP_SAMPLES:
+      raise ValueError(
+        f"bootstrap samples must be between 1 and {MAX_BOOTSTRAP_SAMPLES}"
+      )
     dates = pd.DatetimeIndex(
       pd.to_datetime(event_dates).dropna().unique()
     ).sort_values()
@@ -45,6 +69,7 @@ class DateBlockBootstrap:
     self.samples = samples
     self.seed = seed
     self.confidence_level = confidence_level
+    self.allocation_guard = allocation_guard
 
   def infer(
     self,
@@ -54,50 +79,115 @@ class DateBlockBootstrap:
     block_length: int = 1,
     minimum_dates: int = 30,
   ) -> tuple[float | None, float | None, float | None]:
+    return self.infer_detailed(
+      frame,
+      value_column,
+      block_length=block_length,
+      minimum_dates=minimum_dates,
+    ).values
+
+  def infer_detailed(
+    self,
+    frame: pd.DataFrame,
+    value_column: str,
+    *,
+    block_length: int = 1,
+    minimum_dates: int = 30,
+  ) -> BootstrapInference:
     sample = frame[["event_date", value_column]].copy()
     sample["event_date"] = pd.to_datetime(sample["event_date"], errors="coerce")
     sample[value_column] = pd.to_numeric(sample[value_column], errors="coerce")
     sample = sample[sample["event_date"].notna() & np.isfinite(sample[value_column])]
     if len(sample) < 2 or block_length <= 0:
-      return None, None, None
+      return self._empty_inference()
 
     grouped = sample.groupby("event_date", observed=True)[value_column].agg(
       ["sum", "count"]
     )
     if len(grouped) < minimum_dates:
-      return None, None, None
+      return self._empty_inference()
     # Resample the complete ordered trading-date calendar rather than only
     # dates on which this cell happened to be observed. Missing cell dates
     # contribute zero observations, preserving temporal gaps and clustering.
     dates = self.dates.union(pd.DatetimeIndex(grouped.index)).sort_values()
     if len(dates) < block_length:
-      return None, None, None
+      return self._empty_inference()
     sums = grouped["sum"].reindex(dates, fill_value=0.0).to_numpy(dtype=float)
     counts = grouped["count"].reindex(dates, fill_value=0).to_numpy(dtype=float)
     rng = np.random.default_rng(self.seed)
     date_count = len(dates)
     block_count = int(np.ceil(date_count / block_length))
-    starts = rng.integers(0, date_count, size=(self.samples, block_count))
     offsets = np.arange(block_length, dtype=np.int64)
-    indices = (starts[..., None] + offsets) % date_count
-    indices = indices.reshape(self.samples, -1)[:, :date_count]
-    bootstrap_sums = sums[indices].sum(axis=1)
-    bootstrap_counts = counts[indices].sum(axis=1)
-    valid = bootstrap_counts > 0
-    means = bootstrap_sums[valid] / bootstrap_counts[valid]
-    if not len(means):
-      return None, None, None
+    expanded_index_count = block_count * block_length
+    bytes_per_sample = 8 * (block_count + expanded_index_count + date_count + 8)
+    chunk_size = max(
+      1,
+      min(
+        self.samples,
+        _BOOTSTRAP_MAX_CHUNK_SAMPLES,
+        _BOOTSTRAP_CHUNK_TARGET_BYTES // max(bytes_per_sample, 1),
+      ),
+    )
+    observed_mean = float(sums.sum() / counts.sum())
+    null_sums = sums - observed_mean * counts
+    mean_chunks: list[np.ndarray] = []
+    exceedances = 0
+    effective_samples = 0
+    for first in range(0, self.samples, chunk_size):
+      current = min(chunk_size, self.samples - first)
+      estimated_increment = (
+        current * bytes_per_sample + date_count * 8 * 3 + current * 8 * 8
+      )
+      if self.allocation_guard is not None:
+        self.allocation_guard("date_block_bootstrap_resample", estimated_increment)
+      starts = rng.integers(0, date_count, size=(current, block_count))
+      indices = (starts[..., None] + offsets) % date_count
+      indices = indices.reshape(current, -1)[:, :date_count]
+      bootstrap_sums = sums[indices].sum(axis=1)
+      bootstrap_counts = counts[indices].sum(axis=1)
+      valid = bootstrap_counts > 0
+      if not valid.any():
+        continue
+      valid_counts = bootstrap_counts[valid]
+      chunk_means = bootstrap_sums[valid] / valid_counts
+      mean_chunks.append(chunk_means)
+      effective_samples += len(chunk_means)
+      null_means = null_sums[indices].sum(axis=1)[valid] / valid_counts
+      exceedances += int(np.count_nonzero(np.abs(null_means) >= abs(observed_mean)))
+    if not mean_chunks:
+      return BootstrapInference(
+        None,
+        None,
+        None,
+        configured_samples=self.samples,
+        effective_samples=0,
+        chunk_size=chunk_size,
+      )
+    means = np.concatenate(mean_chunks)
 
     tail = (1.0 - self.confidence_level) / 2.0
     ci_low, ci_high = np.quantile(means, [tail, 1.0 - tail])
-    observed_mean = float(sums.sum() / counts.sum())
-    null_sums = sums - observed_mean * counts
-    null_means = null_sums[indices].sum(axis=1)[valid] / bootstrap_counts[valid]
-    exceedances = int(np.count_nonzero(np.abs(null_means) >= abs(observed_mean)))
     # Centering imposes the zero-mean null; add-one smoothing avoids a finite
     # Monte Carlo draw reporting the impossible value p=0.
-    p_value = (exceedances + 1) / (len(null_means) + 1)
-    return _finite(ci_low), _finite(ci_high), _finite(p_value)
+    p_value = (exceedances + 1) / (effective_samples + 1)
+    return BootstrapInference(
+      _finite(ci_low),
+      _finite(ci_high),
+      _finite(p_value),
+      configured_samples=self.samples,
+      effective_samples=effective_samples,
+      chunk_size=chunk_size,
+    )
+
+  def _empty_inference(self) -> BootstrapInference:
+    return BootstrapInference(
+      None,
+      None,
+      None,
+      configured_samples=self.samples,
+      effective_samples=0,
+      chunk_size=0,
+    )
 
 
 def outcome_specs(events: pd.DataFrame, config: StudyConfig) -> tuple[OutcomeSpec, ...]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import shutil
@@ -110,6 +111,10 @@ def test_factor_config_normalizes_identity_and_rejects_unsupported_filters() -> 
   for payload in (
     {"factor_ids": ["roe_ttm"]},
     {"factor_ids": ["volume_ratio"], "outcomes": {"horizons": [61]}},
+    {
+      "factor_ids": ["volume_ratio"],
+      "statistics": {"bootstrap_samples": 20_001},
+    },
     {"factor_ids": ["volume_ratio"], "universe": {"exclude_st": True}},
     {"factor_ids": ["volume_ratio"], "universe": {"include_industries": ["银行"]}},
     {
@@ -236,8 +241,37 @@ async def test_factor_runner_produces_reproducible_reports_and_keeps_short_outco
   assert len({row["date_count"] for row in all_rows}) == 1
   assert any(row["q_value"] is not None for row in joint["rows"])
   assert metrics["inference_resolution"]["bootstrap_samples"] == 100
+  inferred = [
+    row
+    for report in metrics["reports"]
+    for row in report["rows"]
+    if row["p_value"] is not None
+  ]
+  assert inferred
+  assert all(row["bootstrap_effective_samples"] == 100 for row in inferred)
+  assert (
+    metrics["inference_resolution"]["effective_bootstrap_samples_per_family"][
+      "p_value"
+    ]["minimum"]
+    == 100
+  )
+  quality = json.loads((run_dir / "data-quality.json").read_text(encoding="utf-8"))
+  assert "runtime_memory" not in quality
+  assert manifest["runtime_memory"]["reserve_gib"] == 1
   assert len(list((run_dir / "statistics-checkpoints").glob("report-*.json"))) == 3
   before = (run_dir / "metrics.json").read_bytes()
+  manifest_before = (run_dir / "manifest.json").read_bytes()
+  report_before = (run_dir / "report.html").read_bytes()
+  tampered = before.replace(
+    b'"factor_version": "daily-v1"', b'"factor_version": "daily-v0"'
+  )
+  assert tampered != before
+  (run_dir / "metrics.json").write_bytes(tampered)
+  with pytest.raises(ValueError, match="artifact SHA256"):
+    render_existing(run_dir)
+  assert (run_dir / "manifest.json").read_bytes() == manifest_before
+  assert (run_dir / "report.html").read_bytes() == report_before
+  (run_dir / "metrics.json").write_bytes(before)
   assert render_existing(run_dir).exists()
   assert (run_dir / "metrics.json").read_bytes() == before
   rendered_manifest = json.loads(
@@ -246,6 +280,27 @@ async def test_factor_runner_produces_reproducible_reports_and_keeps_short_outco
   assert ".factor-study-run-lease.json" not in {
     item["path"] for item in rendered_manifest["artifacts"]
   }
+  complete_metrics = (run_dir / "metrics.json").read_bytes()
+  complete_manifest = (run_dir / "manifest.json").read_bytes()
+  incomplete_metrics = json.loads(complete_metrics)
+  incomplete_metrics["reports"].pop()
+  (run_dir / "metrics.json").write_text(
+    json.dumps(incomplete_metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+  )
+  metrics_path = run_dir / "metrics.json"
+  for artifact in rendered_manifest["artifacts"]:
+    if artifact["path"] == "metrics.json":
+      artifact.update(
+        bytes=metrics_path.stat().st_size,
+        sha256=factor_runner_module.file_sha256(metrics_path),
+      )
+  (run_dir / "manifest.json").write_text(
+    json.dumps(rendered_manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+  )
+  with pytest.raises(ValueError, match="报告族不完整"):
+    render_existing(run_dir)
+  (run_dir / "metrics.json").write_bytes(complete_metrics)
+  (run_dir / "manifest.json").write_bytes(complete_manifest)
   active_lease = factor_runner_module._acquire_factor_run_lease(
     run_dir,
     attempt_id="active-render-test",
@@ -445,19 +500,28 @@ async def test_legacy_statistics_identity_upgrades_only_without_checkpoints(
     await run_study(config_path, resume_run_dir=run_dir)
 
   shutil.rmtree(run_dir / "statistics-checkpoints")
-  manifest["statistics_progress"] = {
-    "completed_reports": 7,
-    "total_reports": 32,
-    "last_report_id": "stale-legacy-report",
-    "last_report_reused": True,
-  }
+  with pytest.raises(ValueError, match="派生统计产物"):
+    await run_study(config_path, resume_run_dir=run_dir)
+
   legacy_statistics_input = manifest.pop("statistics_input")
   manifest_path.write_text(
     json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
   )
-  with pytest.raises(ValueError, match="不能证明统计尚未开始"):
+  with pytest.raises(ValueError, match="派生统计产物"):
     await run_study(config_path, resume_run_dir=run_dir)
 
+  (run_dir / "metrics.json").unlink()
+  (run_dir / "report.html").unlink()
+  shutil.rmtree(run_dir / "tables")
+  manifest.pop("statistics_progress")
+  recovery_paths = {
+    "analysis-sample.parquet",
+    "data-quality.json",
+    "resolved-config.yaml",
+  }
+  manifest["artifacts"] = [
+    item for item in manifest["artifacts"] if item["path"] in recovery_paths
+  ]
   manifest["statistics_input"] = legacy_statistics_input
   original_data_end = manifest["statistics_input"]["data_end"]
   manifest["statistics_input"]["data_end"] = "2025-01-02"
@@ -484,13 +548,12 @@ async def test_legacy_statistics_identity_upgrades_only_without_checkpoints(
     "legacy_identity_without_statistics_checkpoints"
   )
   assert (
-    upgraded["statistics_identity_upgrades"][-1]["previous_statistics_progress"][
-      "completed_reports"
-    ]
-    == 7
+    upgraded["statistics_identity_upgrades"][-1]["previous_statistics_progress"] is None
   )
   quality = json.loads((run_dir / "data-quality.json").read_text(encoding="utf-8"))
-  assert any("旧统计输入身份" in warning for warning in quality["warnings"])
+  metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+  assert not any("旧统计输入身份" in warning for warning in quality["warnings"])
+  assert any("旧统计输入身份" in warning for warning in metrics["warnings"])
   assert list((run_dir / "statistics-checkpoints").glob("report-*.json"))
 
 
@@ -527,6 +590,96 @@ async def test_resume_rejects_changed_current_engine_with_or_without_checkpoints
 
   shutil.rmtree(run_dir / "statistics-checkpoints")
   with pytest.raises(ValueError, match="statistics_input 身份不一致"):
+    await run_study(config_path, resume_run_dir=run_dir)
+
+
+def test_factor_resume_requires_consistent_schema_v2_coverage_identity() -> None:
+  valid = {
+    "is_complete": True,
+    "evidence_schema_version": 2,
+    "verified_code_window_count": 2,
+    "evidence_content_sha256": "a" * 64,
+    "requested_codes": ["000001.SZ", "000002.SZ"],
+    "covered_codes": ["000002.SZ", "000001.SZ"],
+    "uncovered_codes": [],
+  }
+  factor_runner_module._validate_resume_dividend_factor_coverage(
+    {"dividend_factor_coverage": valid}
+  )
+
+  malformed: list[dict[str, object]] = [{}]
+  for field, value in (
+    ("is_complete", False),
+    ("evidence_schema_version", True),
+    ("evidence_schema_version", 1),
+    ("verified_code_window_count", True),
+    ("verified_code_window_count", 0),
+    ("verified_code_window_count", 1),
+    ("evidence_content_sha256", "A" * 64),
+    ("evidence_content_sha256", "a" * 63),
+    ("requested_codes", []),
+    ("covered_codes", ["000001.SZ"]),
+    ("uncovered_codes", ["000002.SZ"]),
+  ):
+    candidate = copy.deepcopy(valid)
+    candidate[field] = value
+    malformed.append({"dividend_factor_coverage": candidate})
+  duplicated = copy.deepcopy(valid)
+  duplicated["requested_codes"] = ["000001.SZ", "000001.SZ"]
+  malformed.append({"dividend_factor_coverage": duplicated})
+
+  for quality in malformed:
+    with pytest.raises(ValueError, match="schema-v2"):
+      factor_runner_module._validate_resume_dividend_factor_coverage(quality)
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_indexed_legacy_dividend_coverage_before_statistics(
+  tmp_path: Path, monkeypatch
+) -> None:
+  config_path = _config(tmp_path / "legacy-coverage-factor.yaml")
+  run_dir = await run_study(
+    config_path,
+    source=FakeResearchSource(_market_bars()),
+    output_root=tmp_path / "runs",
+  )
+  manifest_path = run_dir / "manifest.json"
+  quality_path = run_dir / "data-quality.json"
+  sample_path = run_dir / "analysis-sample.parquet"
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  quality = json.loads(quality_path.read_text(encoding="utf-8"))
+  coverage = quality["dividend_factor_coverage"]
+  coverage.pop("evidence_schema_version")
+  coverage.pop("verified_code_window_count")
+  coverage.pop("evidence_content_sha256")
+  quality_path.write_text(
+    json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8"
+  )
+  manifest.update(status="failed_resource", errors=["simulated legacy retry"])
+  for artifact in manifest["artifacts"]:
+    if artifact["path"] == "data-quality.json":
+      artifact.update(
+        bytes=quality_path.stat().st_size,
+        sha256=factor_runner_module.file_sha256(quality_path),
+      )
+  manifest_path.write_text(
+    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+  )
+  indexed = {artifact["path"]: artifact for artifact in manifest["artifacts"]}
+  assert indexed["data-quality.json"]["sha256"] == (
+    factor_runner_module.file_sha256(quality_path)
+  )
+  assert indexed["analysis-sample.parquet"]["sha256"] == (
+    factor_runner_module.file_sha256(sample_path)
+  )
+
+  def must_not_analyze(*args, **kwargs):
+    raise AssertionError("legacy coverage must be rejected before statistics")
+
+  monkeypatch.setattr(
+    factor_runner_module, "analyze_factor_partitions", must_not_analyze
+  )
+  with pytest.raises(ValueError, match="schema-v2"):
     await run_study(config_path, resume_run_dir=run_dir)
 
 
@@ -724,6 +877,73 @@ async def test_keyboard_interrupt_marks_factor_resume_failed_and_releases_lease(
     previous_active_attempt=None,
   )
   probe.release()
+
+
+@pytest.mark.asyncio
+async def test_real_task_cancellation_is_terminal_resumable_and_keeps_quality_frozen(
+  tmp_path: Path, monkeypatch
+) -> None:
+  config_path = _config(tmp_path / "cancelled-factor.yaml")
+  run_dir = await run_study(
+    config_path,
+    source=FakeResearchSource(_market_bars()),
+    output_root=tmp_path / "runs",
+  )
+  manifest_path = run_dir / "manifest.json"
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  manifest.update(status="failed_resource", errors=["simulated retry"])
+  manifest_path.write_text(
+    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+  )
+  (run_dir / "metrics.json").unlink()
+  (run_dir / "report.html").unlink()
+  shutil.rmtree(run_dir / "tables")
+  quality_path = run_dir / "data-quality.json"
+  frozen_quality = quality_path.read_bytes()
+  frozen_quality_sha256 = factor_runner_module.file_sha256(quality_path)
+
+  analyze_partitions = factor_runner_module.analyze_factor_partitions
+  observed_running_manifest: dict[str, object] = {}
+
+  def cancel_after_durable_checkpoint(*args, on_report_checkpoint, **kwargs):
+    observed_running_manifest.update(
+      json.loads(manifest_path.read_text(encoding="utf-8"))
+    )
+    task = asyncio.current_task()
+    assert task is not None
+    task.cancel()
+    on_report_checkpoint(1, 3, "single-change_pct", True)
+    raise AssertionError("checkpoint callback must observe pending task cancellation")
+
+  monkeypatch.setattr(
+    factor_runner_module,
+    "analyze_factor_partitions",
+    cancel_after_durable_checkpoint,
+  )
+  with pytest.raises(asyncio.CancelledError):
+    await asyncio.create_task(run_study(config_path, resume_run_dir=run_dir))
+
+  interrupted = json.loads(manifest_path.read_text(encoding="utf-8"))
+  assert observed_running_manifest["status"] == "running"
+  assert "completed_at" not in observed_running_manifest
+  assert "elapsed_seconds" not in observed_running_manifest
+  assert "runtime_memory" not in observed_running_manifest
+  assert interrupted["status"] == "failed"
+  assert interrupted["failure_kind"] == "cancelled"
+  assert interrupted["resume_attempts"][-1]["status"] == "failed"
+  assert "CancelledError" in interrupted["errors"][0]
+  assert "active_attempt" not in interrupted
+  assert quality_path.read_bytes() == frozen_quality
+  quality_artifact = next(
+    item for item in interrupted["artifacts"] if item["path"] == "data-quality.json"
+  )
+  assert quality_artifact["sha256"] == frozen_quality_sha256
+
+  monkeypatch.setattr(
+    factor_runner_module, "analyze_factor_partitions", analyze_partitions
+  )
+  assert await run_study(config_path, resume_run_dir=run_dir) == run_dir
+  assert json.loads(manifest_path.read_text(encoding="utf-8"))["status"] == "success"
 
 
 @pytest.mark.asyncio

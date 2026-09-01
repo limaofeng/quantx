@@ -104,11 +104,18 @@ class FakeResearchSource:
           "status": "COMPLETED",
           "start_date": pd.Timestamp(start).strftime("%Y%m%d"),
           "end_date": pd.Timestamp(end).strftime("%Y%m%d"),
-          "stock_codes": covered,
+          "stock_codes": [code],
           "expected_chunks": 1,
           "received_chunks": 1,
           "completed_at": pd.Timestamp("2025-07-01"),
+          "audit_schema_version": 2,
+          "record_count": 0,
+          "content_sha256": "a" * 64,
+          "current_record_count": 0,
+          "current_content_sha256": "a" * 64,
+          "current_matches": True,
         }
+        for code in covered
       ]
     )
 
@@ -215,9 +222,7 @@ async def test_runner_generates_reproducible_report_bundle(tmp_path: Path) -> No
   assert validation["valid"] is True
   assert validation["event_count"] >= 3
   assert validation["analysis_sample_count"] > validation["event_count"]
-  assert validation["data_quality"]["source_provenance"]["kind"] == (
-    "test-fixture"
-  )
+  assert validation["data_quality"]["source_provenance"]["kind"] == ("test-fixture")
 
   run_dir = await run_study(
     config,
