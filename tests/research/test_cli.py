@@ -50,6 +50,21 @@ def test_run_cli_accepts_explicit_qmt_market_data_archive() -> None:
   )
 
   assert args.config == Path("study.yaml")
-  assert args.market_data_archive == Path(
-    ".runtime/research-source/full-a-share"
+  assert args.market_data_archive == Path(".runtime/research-source/full-a-share")
+
+
+def test_run_cli_accepts_factor_resume_directory() -> None:
+  args = build_parser().parse_args(
+    [
+      "run",
+      "--config",
+      "factor-study.yaml",
+      "--resume-run-dir",
+      ".runtime/research-runs/factor-study-v1/failed-run",
+    ]
+  )
+
+  assert args.config == Path("factor-study.yaml")
+  assert args.resume_run_dir == Path(
+    ".runtime/research-runs/factor-study-v1/failed-run"
   )

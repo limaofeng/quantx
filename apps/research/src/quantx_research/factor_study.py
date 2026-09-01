@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,9 +26,12 @@ from quantx_domain.factors import (
   condition_mask as shared_condition_mask,
 )
 
+from quantx_research.artifacts import fingerprint, write_json
 from quantx_research.core.statistics import DateBlockBootstrap
 from quantx_research.factor_config import FactorStudyConfig
 from quantx_research.runtime_memory import RuntimeMemoryMonitor
+
+FACTOR_REPORT_CHECKPOINT_SCHEMA_VERSION = 1
 
 WARNINGS = [
   "结果是历史条件关联，不是个股上涨概率预测、因果结论或交易收益。",
@@ -82,6 +86,33 @@ def factor_groups(values: pd.Series, *, binary: bool) -> pd.Series:
 
 def condition_mask(frame: pd.DataFrame, condition: dict[str, object]) -> pd.Series:
   return shared_condition_mask(frame, [condition])
+
+
+def factor_report_specs(
+  config: FactorStudyConfig,
+) -> list[tuple[str, list[str], list[dict[str, object]]]]:
+  requested = [("single", [factor_id], []) for factor_id in config.factor_ids]
+  if config.conditions:
+    requested.append(
+      (
+        "joint",
+        sorted({str(item["factor_id"]) for item in config.conditions}),
+        list(config.conditions),
+      )
+    )
+  return requested
+
+
+def all_factor_report_checkpoints_exist(
+  checkpoint_directory: Path,
+  config: FactorStudyConfig,
+) -> bool:
+  """Cheap precheck used to skip rebuilding transient month partitions."""
+  requested = factor_report_specs(config)
+  return bool(requested) and all(
+    _report_checkpoint_path(checkpoint_directory, index).is_file()
+    for index in range(1, len(requested) + 1)
+  )
 
 
 def add_factor_outcomes(
@@ -149,42 +180,109 @@ def analyze_factor_partitions(
   data_start: str,
   data_end: str,
   calendar: pd.DatetimeIndex | None = None,
+  checkpoint_directory: Path | None = None,
+  checkpoint_identity: dict[str, Any] | None = None,
+  on_report_checkpoint: Callable[[int, int, str, bool], None] | None = None,
 ) -> dict[str, Any]:
+  if (checkpoint_directory is None) != (checkpoint_identity is None):
+    raise ValueError(
+      "checkpoint_directory 与 checkpoint_identity 必须同时设置或同时省略"
+    )
   definitions = {item.id: item for item in FACTOR_DEFINITIONS}
   reports: list[dict[str, Any]] = []
-  requested = [("single", [factor_id], []) for factor_id in config.factor_ids]
-  if config.conditions:
-    requested.append(
-      (
-        "joint",
-        sorted({str(item["factor_id"]) for item in config.conditions}),
-        list(config.conditions),
-      )
-    )
+  requested = factor_report_specs(config)
+  if checkpoint_directory is not None:
+    checkpoint_directory.mkdir(parents=True, exist_ok=True)
   for index, (kind, factor_ids, conditions) in enumerate(requested, start=1):
     monitor.checkpoint("factor_report_start")
-    print(
-      f"factor-study report {index}/{len(requested)}: {kind} {','.join(factor_ids)}",
-      flush=True,
+    checkpoint_path = (
+      _report_checkpoint_path(checkpoint_directory, index)
+      if checkpoint_directory is not None
+      else None
     )
-    with tempfile.TemporaryDirectory(
-      prefix="factor-statistics-", dir=staging_directory
-    ) as scratch:
-      report = _analyze_report(
-        month_partitions,
-        config,
-        kind=kind,
-        factor_ids=factor_ids,
-        conditions=conditions,
-        scratch=Path(scratch),
-        monitor=monitor,
-        calendar=calendar,
+    report_spec = {
+      "kind": kind,
+      "factor_ids": factor_ids,
+      "conditions": conditions,
+    }
+    reused = False
+    if checkpoint_path is not None and checkpoint_path.is_file():
+      report = _load_report_checkpoint(
+        checkpoint_path,
+        expected_identity=checkpoint_identity or {},
+        expected_report_spec=report_spec,
       )
-    report["definitions"] = [asdict(definitions[value]) for value in factor_ids]
+      reused = True
+      print(
+        f"factor-study report {index}/{len(requested)}: reuse {checkpoint_path.name}",
+        flush=True,
+      )
+    else:
+      print(
+        f"factor-study report {index}/{len(requested)}: {kind} {','.join(factor_ids)}",
+        flush=True,
+      )
+      with tempfile.TemporaryDirectory(
+        prefix="factor-statistics-", dir=staging_directory
+      ) as scratch:
+        report = _analyze_report(
+          month_partitions,
+          config,
+          kind=kind,
+          factor_ids=factor_ids,
+          conditions=conditions,
+          scratch=Path(scratch),
+          monitor=monitor,
+          calendar=calendar,
+        )
+      report["definitions"] = [asdict(definitions[value]) for value in factor_ids]
+      if checkpoint_path is not None:
+        _write_report_checkpoint(
+          checkpoint_path,
+          identity=checkpoint_identity or {},
+          report_spec=report_spec,
+          report=report,
+        )
     reports.append(report)
+    if on_report_checkpoint is not None:
+      on_report_checkpoint(index, len(requested), str(report["report_id"]), reused)
+
+  fdr = apply_factor_report_fdr(reports, config=config)
+  warnings = list(WARNINGS)
+  if fdr["minimum_isolated_q_value"] > config.statistics.fdr_alpha:
+    warnings.append(
+      "Bootstrap Monte Carlo 分辨率不足以让单个孤立检验通过本次完整 BH 检验族；"
+      "未显著不能解释为因子无效，详见 inference_resolution。"
+    )
+  return {
+    "schema_version": 1,
+    "study_id": config.study_id,
+    "factor_version": FACTOR_VERSION,
+    "data_start": data_start,
+    "data_end": data_end,
+    # Keep the public artifact shape flat for existing readers.  The report
+    # match key below additionally binds the resolved analysis window.
+    "universe": config.universe.identity(),
+    "horizons": list(config.outcomes.horizons),
+    "return_bases": ["close", "next_open"],
+    "reports": reports,
+    "inference_resolution": fdr,
+    "warnings": warnings,
+  }
+
+
+def apply_factor_report_fdr(
+  reports: list[dict[str, Any]],
+  *,
+  config: FactorStudyConfig,
+) -> dict[str, Any]:
   # One preregistered family per endpoint includes every requested report,
   # cohort, horizon and return basis. Annual checks are descriptive only.
+  family_sizes: dict[str, int] = {}
   for p_field, q_field in (("p_value", "q_value"), ("mean_p_value", "mean_q_value")):
+    for report in reports:
+      for row in report["rows"]:
+        row[q_field] = None
     rows = [
       row
       for report in reports
@@ -197,18 +295,70 @@ def analyze_factor_partitions(
       row = ordered[rank - 1]
       corrected = min(corrected, row[p_field] * len(ordered) / rank)
       row[q_field] = corrected
+    family_sizes[p_field] = len(ordered)
+  monte_carlo_floor = 1.0 / (config.statistics.bootstrap_samples + 1)
+  largest_family = max(family_sizes.values(), default=0)
   return {
-    "schema_version": 1,
-    "study_id": config.study_id,
-    "factor_version": FACTOR_VERSION,
-    "data_start": data_start,
-    "data_end": data_end,
-    "universe": config.universe.identity(),
-    "horizons": list(config.outcomes.horizons),
-    "return_bases": ["close", "next_open"],
-    "reports": reports,
-    "warnings": WARNINGS,
+    "bootstrap_samples": config.statistics.bootstrap_samples,
+    "minimum_monte_carlo_p_value": monte_carlo_floor,
+    "eligible_tests_per_family": family_sizes,
+    "minimum_isolated_q_value": min(1.0, monte_carlo_floor * largest_family),
+    "fdr_alpha": config.statistics.fdr_alpha,
   }
+
+
+def _report_checkpoint_path(directory: Path, index: int) -> Path:
+  return directory / f"report-{index:03d}.json"
+
+
+def _write_report_checkpoint(
+  path: Path,
+  *,
+  identity: dict[str, Any],
+  report_spec: dict[str, Any],
+  report: dict[str, Any],
+) -> None:
+  payload = {
+    "schema_version": FACTOR_REPORT_CHECKPOINT_SCHEMA_VERSION,
+    "identity": identity,
+    "identity_sha256": fingerprint(identity),
+    "report_spec": report_spec,
+    "report_sha256": fingerprint(report),
+    "report": report,
+  }
+  temporary = path.with_name(f".{path.name}.partial")
+  try:
+    write_json(temporary, payload)
+    temporary.replace(path)
+  finally:
+    temporary.unlink(missing_ok=True)
+
+
+def _load_report_checkpoint(
+  path: Path,
+  *,
+  expected_identity: dict[str, Any],
+  expected_report_spec: dict[str, Any],
+) -> dict[str, Any]:
+  try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError) as exc:
+    raise ValueError(f"因子统计检查点不可读: {path}") from exc
+  if payload.get("schema_version") != FACTOR_REPORT_CHECKPOINT_SCHEMA_VERSION:
+    raise ValueError(f"因子统计检查点版本不匹配: {path}")
+  if (
+    payload.get("identity_sha256") != fingerprint(expected_identity)
+    or payload.get("identity") != expected_identity
+  ):
+    raise ValueError(f"因子统计检查点身份不匹配: {path}")
+  if payload.get("report_spec") != expected_report_spec:
+    raise ValueError(f"因子统计检查点报告定义不匹配: {path}")
+  report = payload.get("report")
+  if not isinstance(report, dict) or payload.get("report_sha256") != fingerprint(
+    report
+  ):
+    raise ValueError(f"因子统计检查点内容校验失败: {path}")
+  return report
 
 
 def _analyze_report(
@@ -381,7 +531,7 @@ def _analyze_report(
     )
   for item in distribution.values():
     item["missing_count"] = sample_count - valid_count
-  match_key = report_match_key(kind, factor_ids, conditions, config.universe.identity())
+  match_key = report_match_key(kind, factor_ids, conditions, config.sample_identity)
   return {
     "report_id": f"{kind}-{factor_ids[0]}"
     if kind == "single"

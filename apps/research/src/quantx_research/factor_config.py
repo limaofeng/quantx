@@ -34,12 +34,14 @@ class FactorUniverseConfig(UniverseConfig):
     return self
 
   def identity(self) -> dict[str, object]:
-    return {
-      "instrument_type": self.instrument_type,
-      "exclude_st": self.exclude_st,
-      "include_industries": list(self.include_industries),
-      "exclude_industries": list(self.exclude_industries),
-    }
+    # Every field here can change the rows admitted to a factor report.  Keep
+    # the concrete fixed universe (when present) rather than a coarse
+    # ``restricted_universe`` flag so report identities cannot collide across
+    # materially different samples.
+    identity = self.model_dump(mode="json")
+    if self.stock_codes is not None:
+      identity["stock_codes"] = sorted(self.stock_codes)
+    return identity
 
 
 class FactorOutcomeConfig(OutcomeConfig):
@@ -127,3 +129,15 @@ class FactorStudyConfig(_StrictModel):
   def required_lookback(self) -> int:
     wanted = set(self.required_factor_ids)
     return max(item.lookback for item in FACTOR_DEFINITIONS if item.id in wanted)
+
+  @property
+  def sample_identity(self) -> dict[str, object]:
+    """Canonical identity for every setting that can change report rows."""
+    return {
+      "universe": self.universe.identity(),
+      "date_range": (
+        [value.isoformat() for value in self.date_range]
+        if self.date_range is not None
+        else None
+      ),
+    }

@@ -42,6 +42,14 @@ def build_parser() -> argparse.ArgumentParser:
   run_parser.add_argument("--config", type=Path, required=True)
   run_parser.add_argument("--output-root", type=Path)
   run_parser.add_argument(
+    "--resume-run-dir",
+    type=Path,
+    help=(
+      "仅用于 factor-study：从失败运行的已核验冻结样本和逐报告检查点恢复，"
+      "不重新读取行情"
+    ),
+  )
+  run_parser.add_argument(
     "--market-data-archive",
     type=Path,
     help="从已验证 QMT 日线 archive 读取行情，不依赖 InfluxDB",
@@ -79,6 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
           args.config,
           market_data_archive=args.market_data_archive,
           output_root=args.output_root,
+          resume_run_dir=args.resume_run_dir,
         )
       )
       print(f"研究完成: {run_dir}")

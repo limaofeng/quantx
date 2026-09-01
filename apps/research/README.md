@@ -14,6 +14,7 @@
 uv run --no-sync quantx-research validate --config apps/research/configs/factor_study_smoke.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
 uv run --no-sync quantx-research run --config apps/research/configs/factor_study_smoke.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
 uv run --no-sync quantx-research run --config apps/research/configs/factor_study_v1_20260729.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
+uv run --no-sync quantx-research run --config apps/research/configs/factor_study_v1_20260729.yaml --resume-run-dir .runtime/research-runs/factor-study-v1/<failed-run-id>
 uv run --no-sync quantx-research render --run-dir <factor-study-run-directory>
 ```
 
@@ -59,6 +60,10 @@ universe:
 - 移动区块 Bootstrap 的块长不短于收益周期；每个端点分别在本次运行所有
   报告/分组/周期/收益起点的完整检验族内做 BH 校正。样本不足保留描述统计，
   不输出推断结论。年度分段和截至数据末日的滚动 12 个月只作稳定性检查。
+  `metrics.json.inference_resolution` 同时披露 Bootstrap 次数、可达到的最小
+  Monte Carlo p 值、各完整检验族大小，以及孤立最小 p 值对应的 BH q 值下限。
+  默认 1,000 次抽样面对大检验族时分辨率偏粗；“未显著”不得解释为因子无效，
+  也不会为得到显著结果而在运行后临时增加抽样次数。
 - 历史 ST 和行业分类未核验，配置中 `exclude_st=true` 或行业条件会明确
   拒绝；总体报告只能作为相应当前筛选的参考，不能声称精确匹配。固定股票
   列表或额外上市天数限制也会标记 `coverage.restricted_universe=true`。
@@ -67,6 +72,26 @@ universe:
 历史分批计算，按月保存窄投影；报告逐个计算，精确中位数使用临时数值文件，
 不将整个全市场宽面板装入内存。完整五年研究建议预留至少 20 GiB 临时磁盘，
 运行时间取决于因子数量、股票数量和 Bootstrap 配置。
+
+统计阶段每完成一个报告，会先在运行目录的 `statistics-checkpoints/` 原子
+持久化原始 p 值报告；检查点严格绑定冻结配置指纹、数据指纹、完整
+`analysis-sample.parquet` SHA256、样本行数和因子定义版本，还绑定统计引擎
+schema/version、关键统计源码的逐文件与汇总 SHA256，以及 Python、NumPy、
+Pandas、PyArrow 版本。上述身份同时显示在 manifest；源码或依赖身份变化时
+拒绝复用旧检查点。旧 manifest 缺少统计引擎身份时，仅允许在检查点目录不存在
+或严格为空、且旧统计输入其余字段与当前冻结输入完全一致时升级并从头重算；
+若旧 manifest 连 `statistics_input` 也不存在，还必须没有统计进度、最终产物或
+相关 artifact 索引，才能证明没有可混用的持久化统计结果。
+升级会清除旧统计进度，并在 manifest 和质量警告中留审计记录。只有全部报告收集
+完成后，才统一对完整检验族做 BH 校正并生成最终产物。`failed_resource` 或
+普通 `failed` 运行可使用上面的 `--resume-run-dir` 原目录恢复：恢复会重新核验
+冻结配置、Parquet footer、完整样本哈希和已有检查点，不读取行情、不重算因子
+或收益。缺少检查点时只从冻结样本重建临时月分区；已完成报告直接复用。
+恢复命令不能同时传 `--market-data-archive` 或 `--output-root`，且仍严格执行配置
+中的物理内存保留门槛。运行目录使用包含主机、PID、进程启动时间和 attempt id
+的独占租约防止并发写入；`running` 只有在租约证明确切原进程已不存在时才允许
+安全接管，活动进程、其他主机或无法核验的租约一律拒绝。Ctrl+C 会先把本次
+attempt 收敛为 `failed`，硬终止留下的 stale lease 则由下一次恢复验证后替换。
 
 数据库读取与 CPU 阶段分离：完成股票特征及来源证据读取后立即退出只读连接，
 再执行全局交易日对齐、前向收益和统计，避免长时间闲置事务在退出时超时。
