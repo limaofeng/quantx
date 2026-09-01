@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -85,6 +85,31 @@ def _deployment(value: dict[str, Any]) -> DeploymentFlowRun:
   )
 
 
+_ACTIVE_FLOW_RUN_STATE_TYPES = [
+  "SCHEDULED",
+  "PENDING",
+  "RUNNING",
+  "PAUSED",
+  "CANCELLING",
+]
+
+
+def _reuses_active_run(value: dict[str, Any]) -> bool:
+  """Return whether Prefect will cancel a duplicate singleton run."""
+
+  limit = value.get("concurrency_limit")
+  if isinstance(limit, dict):
+    limit = limit.get("limit")
+  if limit is None:
+    global_limit = value.get("global_concurrency_limit") or {}
+    if isinstance(global_limit, dict):
+      limit = global_limit.get("limit")
+  collision_strategy = str(
+    (value.get("concurrency_options") or {}).get("collision_strategy") or ""
+  ).upper()
+  return limit == 1 and collision_strategy == "CANCEL_NEW"
+
+
 async def _request(
   method: str,
   path: str,
@@ -97,12 +122,39 @@ async def _request(
   return response.json() if response.content else None
 
 
+async def _active_deployment_run(deployment_id: str) -> Optional[dict[str, Any]]:
+  """Return the latest due non-terminal run, excluding future schedules."""
+
+  results = await _request(
+    "POST",
+    "flow_runs/filter",
+    payload={
+      "flow_runs": {
+        "deployment_id": {"any_": [deployment_id]},
+        "state": {"type": {"any_": _ACTIVE_FLOW_RUN_STATE_TYPES}},
+        "expected_start_time": {
+          "before_": datetime.now(timezone.utc).isoformat(),
+        },
+      },
+      "limit": 1,
+      "sort": "EXPECTED_START_TIME_DESC",
+    },
+  )
+  return results[0] if results else None
+
+
 class PrefectResolver:
   @staticmethod
   async def run_deployment(
     id: str,
     parameters: Optional[Dict[str, Any]] = None,
   ) -> FlowRun:
+    deployment = await _request("GET", f"deployments/{id}")
+    if _reuses_active_run(deployment):
+      active_run = await _active_deployment_run(id)
+      if active_run is not None:
+        return _flow_run(active_run)
+
     result = await _request(
       "POST",
       f"deployments/{id}/create_flow_run",

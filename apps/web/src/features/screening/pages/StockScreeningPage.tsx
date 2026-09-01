@@ -14,7 +14,10 @@ import { ScreeningResults } from '../components/ScreeningResults';
 import { ScreeningTopBar } from '../components/ScreeningTopBar';
 import { useFactorResearch } from '../hooks/useFactorResearch';
 import { useStockScreening } from '../hooks/useStockScreening';
-import { buildSnapshotBackfillParameters } from '../snapshotBackfill';
+import {
+  buildSnapshotBackfillParameters,
+  findActiveSnapshotBackfillRun,
+} from '../snapshotBackfill';
 import { type ScreeningCriteria } from '../types';
 
 const SCREENING_BACKFILL_RUNS_QUERY = gql(`
@@ -29,7 +32,10 @@ const SCREENING_BACKFILL_RUNS_QUERY = gql(`
       offset: $offset
     ) {
       items {
+        created
+        expectedStartTime
         id
+        startedAt
         state
       }
     }
@@ -72,32 +78,46 @@ export default function StockScreeningPage() {
   const [verificationAttempt, setVerificationAttempt] = useState(0);
   const handledTerminalRun = useRef<string | null>(null);
 
-  const [{ data: backfillRunsData }, refreshBackfillRuns] = useQuery({
+  const [
+    { data: backfillRunsData, fetching: backfillRunsFetching },
+    refreshBackfillRuns,
+  ] = useQuery({
     query: SCREENING_BACKFILL_RUNS_QUERY,
     variables: {
       deploymentId: snapshotSync.deployment?.id || '',
-      limit: 12,
+      limit: 32,
       offset: 0,
     },
-    pause: !snapshotSync.deployment?.id || !snapshotRunId,
+    pause: !snapshotSync.deployment?.id,
     requestPolicy: 'network-only',
   });
+  const backfillRuns = backfillRunsData?.flowRuns?.items ?? [];
+  const activeBackfillRun = findActiveSnapshotBackfillRun(backfillRuns);
+  const observedRunId = snapshotRunId ?? activeBackfillRun?.id ?? null;
   const trackedRun = backfillRunsData?.flowRuns?.items.find(
-    run => run.id === snapshotRunId
+    run => run.id === observedRunId
   );
 
   useEffect(() => {
-    if (!snapshotRunId || TERMINAL_RUN_STATES.has(snapshotRunState || '')) {
+    if (snapshotRunId || !activeBackfillRun) return;
+    handledTerminalRun.current = null;
+    setSnapshotRunId(activeBackfillRun.id);
+    setSnapshotLogRunId(activeBackfillRun.id);
+    setSnapshotRunState((activeBackfillRun.state || '').toUpperCase());
+  }, [activeBackfillRun, snapshotRunId]);
+
+  useEffect(() => {
+    if (!observedRunId || TERMINAL_RUN_STATES.has(snapshotRunState || '')) {
       return;
     }
     const intervalId = window.setInterval(() => {
       refreshBackfillRuns({ requestPolicy: 'network-only' });
     }, 2000);
     return () => window.clearInterval(intervalId);
-  }, [refreshBackfillRuns, snapshotRunId, snapshotRunState]);
+  }, [observedRunId, refreshBackfillRuns, snapshotRunState]);
 
   useEffect(() => {
-    if (!trackedRun || trackedRun.id !== snapshotRunId) return;
+    if (!trackedRun || trackedRun.id !== observedRunId) return;
     const state = (trackedRun.state || '').toUpperCase();
     setSnapshotRunState(state);
     if (!TERMINAL_RUN_STATES.has(state)) return;
@@ -118,7 +138,7 @@ export default function StockScreeningPage() {
       description: `运行状态：${state}。旧快照结果已保留，可查看日志后重试。`,
       variant: 'destructive',
     });
-  }, [refreshDailyData, snapshotRunId, toast, trackedRun]);
+  }, [observedRunId, refreshDailyData, toast, trackedRun]);
 
   useEffect(() => {
     if (verificationAttempt <= 0) return;
@@ -185,7 +205,14 @@ export default function StockScreeningPage() {
   };
 
   const handleBackfillSnapshot = async () => {
-    if (snapshotRunId || snapshotSync.isSyncing) return;
+    if (
+      snapshotRunId ||
+      activeBackfillRun ||
+      backfillRunsFetching ||
+      snapshotSync.isSyncing
+    ) {
+      return;
+    }
     const dates = [...meta.missingSnapshotDates].sort();
     if (dates.length === 0) {
       toast({
@@ -220,7 +247,8 @@ export default function StockScreeningPage() {
         : 'bg-emerald-400'
       : 'bg-slate-500';
   const snapshotBackfillLoading =
-    Boolean(snapshotRunId) ||
+    Boolean(snapshotRunId || activeBackfillRun) ||
+    backfillRunsFetching ||
     snapshotSync.isSyncing ||
     meta.latestRunStatus === 'running' ||
     isSnapshotStatusLoading;
