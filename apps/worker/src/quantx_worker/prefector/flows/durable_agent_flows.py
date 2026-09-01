@@ -17,6 +17,9 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.broker_position_snapshot import BrokerPositionSnapshot
 from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.repositories.divid_factor_repository import (
+  divid_factor_codes_sha256,
+)
 from quantx_infrastructure.repositories.financial_sync_run_repository import (
   FinancialSyncRunRepository,
 )
@@ -62,6 +65,46 @@ _ARCHIVE_REQUEST_TIMEOUT_SECONDS = 30 * 60
 _MARKET_DATA_INGESTION_RECOVERY_BATCH_SIZE = 20
 
 
+def _validate_divid_factor_replacement_audit(
+  audit: dict[str, Any],
+  *,
+  records_received: int,
+  stock_codes: list[str],
+  start_ex_date: str,
+  end_ex_date: str,
+) -> None:
+  """Reject a factor ingestion before COMPLETED unless exact-row proof holds."""
+
+  def count(field: str) -> int:
+    value = audit.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+      raise RuntimeError(f"divid factor replacement audit field invalid: {field}")
+    return value
+
+  if audit.get("audit_schema_version") != 1:
+    raise RuntimeError("divid factor replacement audit schema is unsupported")
+  if count("stock_count") != len(stock_codes):
+    raise RuntimeError("divid factor replacement stock count mismatch")
+  if audit.get("stock_codes_sha256") != divid_factor_codes_sha256(stock_codes):
+    raise RuntimeError("divid factor replacement stock scope digest mismatch")
+  if audit.get("start_ex_date") != start_ex_date or (
+    audit.get("end_ex_date") != end_ex_date
+  ):
+    raise RuntimeError("divid factor replacement date scope mismatch")
+  if count("prior_count") != count("deleted_count"):
+    raise RuntimeError("divid factor replacement delete count mismatch")
+  if not (records_received == count("inserted_count") == count("verified_count")):
+    raise RuntimeError("divid factor replacement persisted count mismatch")
+  source_sha256 = str(audit.get("source_sha256") or "")
+  persisted_sha256 = str(audit.get("persisted_sha256") or "")
+  if (
+    len(source_sha256) != 64
+    or any(character not in "0123456789abcdef" for character in source_sha256)
+    or source_sha256 != persisted_sha256
+  ):
+    raise RuntimeError("divid factor replacement content digest mismatch")
+
+
 async def _persisted_instrument_codes() -> list[str]:
   store = DurableRuntimeStore()
   try:
@@ -90,11 +133,7 @@ async def _persisted_position_codes() -> list[str]:
       )
     ).scalars()
     return sorted(
-      {
-        str(value).strip().upper()
-        for value in values.all()
-        if str(value or "").strip()
-      }
+      {str(value).strip().upper() for value in values.all() if str(value or "").strip()}
     )
 
 
@@ -131,8 +170,7 @@ async def _fresh_position_archive_universe() -> dict[str, Any]:
         codes.add(normalized_code)
     if len(universes) != 1:
       raise RuntimeError(
-        "持仓 Tick 同步要求唯一完整券商持仓快照: "
-        f"actual={len(universes)}"
+        f"持仓 Tick 同步要求唯一完整券商持仓快照: actual={len(universes)}"
       )
     snapshot, frozen_codes = next(iter(universes.values()))
     if int(snapshot.sequence or 0) <= 0 or str(snapshot.last_error or "").strip():
@@ -146,8 +184,7 @@ async def _fresh_position_archive_universe() -> dict[str, Any]:
       age = (now_utc - observed).total_seconds()
       if age < -5 or age > _ARCHIVE_SNAPSHOT_MAX_AGE_SECONDS:
         raise RuntimeError(
-          "持仓 Tick 同步拒绝陈旧券商持仓快照: "
-          f"field={field} age_seconds={age:.1f}"
+          f"持仓 Tick 同步拒绝陈旧券商持仓快照: field={field} age_seconds={age:.1f}"
         )
     codes = sorted(frozen_codes)
     if len(codes) != int(snapshot.position_count or 0):
@@ -297,6 +334,13 @@ async def _ingest_uploaded_request(
     )
     replacement_audit = await DividFactorService().replace_batch_divid_factors(
       frames,
+      stock_codes=stock_codes,
+      start_ex_date=start_ex_date,
+      end_ex_date=end_ex_date,
+    )
+    _validate_divid_factor_replacement_audit(
+      replacement_audit,
+      records_received=len(records),
       stock_codes=stock_codes,
       start_ex_date=start_ex_date,
       end_ex_date=end_ex_date,
@@ -961,9 +1005,7 @@ async def agent_convergence_flow(
   try:
     agents = await store.component_status("qmt-agent:")
     market_data_device_id = (
-      await store.available_market_data_device()
-      if sync_market_data
-      else None
+      await store.available_market_data_device() if sync_market_data else None
     )
     ready = [
       item
@@ -971,8 +1013,7 @@ async def agent_convergence_flow(
       if item.get("status") == "READY"
       and (
         not sync_market_data
-        or str(item.get("component") or "")
-        == f"qmt-agent:{market_data_device_id}"
+        or str(item.get("component") or "") == f"qmt-agent:{market_data_device_id}"
       )
     ]
     result: dict[str, Any] = {
@@ -1047,8 +1088,7 @@ async def agent_convergence_flow(
   requested_periods = list(transfer.get("requested_periods") or [])
   summaries = list(transfer.get("code_summaries") or [])
   summary_pairs = sorted(
-    (str(item.get("code") or ""), str(item.get("period") or ""))
-    for item in summaries
+    (str(item.get("code") or ""), str(item.get("period") or "")) for item in summaries
   )
   summary_row_count = sum(int(item.get("row_count") or 0) for item in summaries)
   audited_empty_codes = sorted(
@@ -1068,8 +1108,7 @@ async def agent_convergence_flow(
     or empty_codes != audited_empty_codes
   ):
     raise RuntimeError(
-      "持仓 Tick 入库审计与冻结请求不一致: "
-      f"request_id={transfer.get('request_id')}"
+      f"持仓 Tick 入库审计与冻结请求不一致: request_id={transfer.get('request_id')}"
     )
   if records_saved != records_received:
     raise RuntimeError(

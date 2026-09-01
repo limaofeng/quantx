@@ -73,9 +73,19 @@ async def test_uploaded_divid_factors_are_replaced_and_audited(
     async def replace_batch_divid_factors(self, frames, **kwargs):
       calls.append((frames, kwargs))
       return {
+        "audit_schema_version": 1,
+        "stock_count": 2,
+        "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
+          ["000001.SZ", "600519.SH"]
+        ),
+        "prior_count": 0,
         "inserted_count": 1,
         "deleted_count": 0,
         "verified_count": 1,
+        "start_ex_date": "20200313",
+        "end_ex_date": "20260729",
+        "source_sha256": "a" * 64,
+        "persisted_sha256": "a" * 64,
       }
 
   monkeypatch.setattr(
@@ -118,9 +128,19 @@ async def test_empty_divid_factor_result_still_clears_exact_window(
     async def replace_batch_divid_factors(self, frames, **kwargs):
       calls.append((frames, kwargs))
       return {
+        "audit_schema_version": 1,
+        "stock_count": 2,
+        "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
+          ["000001.SZ", "600519.SH"]
+        ),
+        "prior_count": 2,
         "inserted_count": 0,
         "deleted_count": 2,
         "verified_count": 0,
+        "start_ex_date": "20200313",
+        "end_ex_date": "20260729",
+        "source_sha256": "a" * 64,
+        "persisted_sha256": "a" * 64,
       }
 
   monkeypatch.setattr(
@@ -137,6 +157,54 @@ async def test_empty_divid_factor_result_still_clears_exact_window(
   assert result["records_saved"] == 0
   assert calls[0][0] == {}
   assert calls[0][1]["stock_codes"] == ["000001.SZ", "600519.SH"]
+
+
+@pytest.mark.asyncio
+async def test_divid_factor_ingestion_rejects_audit_before_completed(
+  tmp_path,
+  monkeypatch,
+):
+  records = [
+    {
+      "code": "600519.SH",
+      "ex_date": "20200624",
+      "time": 1_592_928_000_000,
+      "interest": 17.025,
+      "stockBonus": 0,
+      "stockGift": 0,
+      "allotNum": 0,
+      "allotPrice": 0,
+      "gugai": 0,
+      "dr": 1.011677,
+    }
+  ]
+  store = FakeStore(
+    request={"expected_chunks": 1, "request_payload": _payload()},
+    manifest=[_transfer(tmp_path, records)],
+  )
+
+  class FakeService:
+    async def replace_batch_divid_factors(self, _frames, **_kwargs):
+      return {
+        "audit_schema_version": 1,
+        "stock_count": 2,
+        "stock_codes_sha256": durable_agent_flows.divid_factor_codes_sha256(
+          ["000001.SZ", "600519.SH"]
+        ),
+        "prior_count": 0,
+        "deleted_count": 0,
+        "inserted_count": 1,
+        "verified_count": 1,
+        "start_ex_date": "20200313",
+        "end_ex_date": "20260729",
+        "source_sha256": "a" * 64,
+        "persisted_sha256": "b" * 64,
+      }
+
+  monkeypatch.setattr(durable_agent_flows, "DividFactorService", FakeService)
+
+  with pytest.raises(RuntimeError, match="content digest mismatch"):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
 
 
 def test_divid_factor_transfer_rejects_unrequested_code():

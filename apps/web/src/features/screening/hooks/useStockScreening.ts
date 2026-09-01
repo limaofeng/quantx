@@ -599,6 +599,11 @@ export function useStockScreening() {
 
     const page = stockScreenResult.data?.stockScreen;
     const status = snapshotStatusResult.status;
+    const completeSnapshotIdentity = Boolean(
+      page?.snapshotDate &&
+      page.snapshotDate === status?.expectedSnapshotDate &&
+      page.snapshotDate === status?.latestSnapshotDate
+    );
     return {
       total: page?.total ?? 0,
       loadedCount: page?.items?.length ?? 0,
@@ -609,7 +614,9 @@ export function useStockScreening() {
       calculationVersion: page?.calculationVersion,
       calculatedAt: page?.calculatedAt ?? null,
       hasStaleData: Boolean(page?.hasStaleData),
-      isComplete: Boolean(status?.isComplete && page?.isComplete),
+      isComplete: Boolean(
+        status?.isComplete && page?.isComplete && completeSnapshotIdentity
+      ),
       warnings: Array.from(
         new Set([
           ...(snapshotStatusResult.error

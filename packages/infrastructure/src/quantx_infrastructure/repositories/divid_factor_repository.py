@@ -2,13 +2,114 @@
 除权除息/复权因子数据仓储（PostgreSQL，异步）
 """
 
+import hashlib
+import json
 from datetime import datetime
-from typing import Any, List, Optional
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, Iterable, List, Optional, Sequence
 
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.models.divid_factor import DividFactor, DividFactorTable
+
+FOUR_PLACES = Decimal("0.0001")
+SIX_PLACES = Decimal("0.000001")
+
+
+def canonical_divid_factor_rows(
+  rows: Iterable[Sequence[Any]],
+) -> list[tuple[str, ...]]:
+  """Return the storage-precision identity for dividend-factor rows."""
+
+  canonical: list[tuple[str, ...]] = []
+  for row in rows:
+    if len(row) != 10:
+      raise ValueError("divid factor audit row must contain exactly 10 values")
+    factor_time = row[1]
+    if not isinstance(factor_time, datetime):
+      raise ValueError("divid factor audit time must be a datetime")
+    if factor_time.tzinfo is not None:
+      raise ValueError("divid factor audit time must be naive Shanghai time")
+    if any(value is None for value in row[3:]):
+      raise ValueError("divid factor audit numeric values must not be null")
+    canonical.append(
+      (
+        str(row[0]).strip().upper(),
+        factor_time.isoformat(timespec="microseconds"),
+        str(row[2]).strip(),
+        format(
+          Decimal(str(row[3] if row[3] is not None else 0)).quantize(
+            FOUR_PLACES,
+            rounding=ROUND_HALF_UP,
+          ),
+          "f",
+        ),
+        format(
+          Decimal(str(row[4] if row[4] is not None else 0)).quantize(
+            FOUR_PLACES,
+            rounding=ROUND_HALF_UP,
+          ),
+          "f",
+        ),
+        format(
+          Decimal(str(row[5] if row[5] is not None else 0)).quantize(
+            FOUR_PLACES,
+            rounding=ROUND_HALF_UP,
+          ),
+          "f",
+        ),
+        format(
+          Decimal(str(row[6] if row[6] is not None else 0)).quantize(
+            FOUR_PLACES,
+            rounding=ROUND_HALF_UP,
+          ),
+          "f",
+        ),
+        format(
+          Decimal(str(row[7] if row[7] is not None else 0)).quantize(
+            FOUR_PLACES,
+            rounding=ROUND_HALF_UP,
+          ),
+          "f",
+        ),
+        format(
+          Decimal(str(row[8] if row[8] is not None else 0)).quantize(
+            FOUR_PLACES,
+            rounding=ROUND_HALF_UP,
+          ),
+          "f",
+        ),
+        format(
+          Decimal(str(row[9] if row[9] is not None else 0)).quantize(
+            SIX_PLACES,
+            rounding=ROUND_HALF_UP,
+          ),
+          "f",
+        ),
+      )
+    )
+  return sorted(canonical, key=lambda row: (row[0], row[2], row[1]))
+
+
+def divid_factor_rows_sha256(rows: Iterable[Sequence[Any]]) -> str:
+  """Hash exact dividend-factor content at PostgreSQL storage precision."""
+
+  encoded = json.dumps(
+    canonical_divid_factor_rows(rows),
+    ensure_ascii=True,
+    separators=(",", ":"),
+  ).encode("utf-8")
+  return hashlib.sha256(encoded).hexdigest()
+
+
+def divid_factor_codes_sha256(stock_codes: Iterable[str]) -> str:
+  """Hash the exact sorted replacement universe."""
+
+  canonical = "\n".join(
+    sorted({str(code).strip().upper() for code in stock_codes if str(code).strip()})
+  )
+  return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class DividFactorRepository:
@@ -113,11 +214,7 @@ class DividFactorRepository:
     one transaction; any mismatch rolls the deletion back.
     """
     codes = sorted(
-      {
-        str(code).strip().upper()
-        for code in stock_codes
-        if str(code).strip()
-      }
+      {str(code).strip().upper() for code in stock_codes if str(code).strip()}
     )
     if not codes:
       raise ValueError("stock_codes must not be empty")
@@ -131,6 +228,7 @@ class DividFactorRepository:
       raise ValueError("end_ex_date precedes start_ex_date")
 
     expected_keys: list[tuple[str, str]] = []
+    expected_rows: list[tuple[Any, ...]] = []
     payload: list[dict[str, Any]] = []
     for factor in factors:
       code = str(factor.stock_code or "").strip().upper()
@@ -144,6 +242,20 @@ class DividFactorRepository:
       if factor.time is None or factor.dr is None or factor.dr <= 0:
         raise ValueError(f"factor time/dr is invalid: {code}/{ex_date}")
       expected_keys.append((code, ex_date))
+      expected_rows.append(
+        (
+          code,
+          factor.time,
+          ex_date,
+          factor.interest,
+          factor.stock_bonus,
+          factor.stock_gift,
+          factor.allot_num,
+          factor.allot_price,
+          factor.gugai,
+          factor.dr,
+        )
+      )
       payload.append(
         {
           "stock_code": code,
@@ -177,13 +289,27 @@ class DividFactorRepository:
         )
       ).one()
       deleted = await self.db.execute(delete(DividFactorTable).where(*scope))
+      if int(deleted.rowcount or 0) != int(prior[0] or 0):
+        raise RuntimeError(
+          "divid factor replacement delete-count verification failed: "
+          f"expected={int(prior[0] or 0)} "
+          f"actual={int(deleted.rowcount or 0)}"
+        )
       if payload:
         await self.db.execute(insert(DividFactorTable), payload)
-      persisted_keys = (
+      persisted_rows = (
         await self.db.execute(
           select(
             DividFactorTable.stock_code,
+            DividFactorTable.time,
             DividFactorTable.ex_date,
+            DividFactorTable.interest,
+            DividFactorTable.stock_bonus,
+            DividFactorTable.stock_gift,
+            DividFactorTable.allot_num,
+            DividFactorTable.allot_price,
+            DividFactorTable.gugai,
+            DividFactorTable.dr,
           )
           .where(*scope)
           .order_by(
@@ -192,29 +318,33 @@ class DividFactorRepository:
           )
         )
       ).all()
-      actual_keys = [
-        (str(stock_code), str(ex_date))
-        for stock_code, ex_date in persisted_keys
-      ]
-      sorted_expected = sorted(expected_keys)
-      if actual_keys != sorted_expected:
+      actual_rows = [tuple(row) for row in persisted_rows]
+      canonical_expected = canonical_divid_factor_rows(expected_rows)
+      canonical_actual = canonical_divid_factor_rows(actual_rows)
+      if canonical_actual != canonical_expected:
         raise RuntimeError(
-          "divid factor replacement exact-key verification failed: "
-          f"expected={len(sorted_expected)} actual={len(actual_keys)}"
+          "divid factor replacement exact-row verification failed: "
+          f"expected={len(canonical_expected)} actual={len(canonical_actual)}"
         )
       await self.db.commit()
     except Exception:
       await self.db.rollback()
       raise
 
+    source_sha256 = divid_factor_rows_sha256(expected_rows)
+    persisted_sha256 = divid_factor_rows_sha256(actual_rows)
     return {
+      "audit_schema_version": 1,
       "stock_count": len(codes),
+      "stock_codes_sha256": divid_factor_codes_sha256(codes),
       "prior_count": int(prior[0] or 0),
       "prior_min_ex_date": str(prior[1] or ""),
       "prior_max_ex_date": str(prior[2] or ""),
       "deleted_count": int(deleted.rowcount or 0),
       "inserted_count": len(payload),
-      "verified_count": len(actual_keys),
+      "verified_count": len(actual_rows),
+      "source_sha256": source_sha256,
+      "persisted_sha256": persisted_sha256,
       "start_ex_date": start_ex_date,
       "end_ex_date": end_ex_date,
     }

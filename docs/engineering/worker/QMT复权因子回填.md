@@ -3,16 +3,19 @@
 ## 目标与边界
 
 本链路通过现有出站 QMT Agent 调用只读
-`xtdata.get_divid_factors`，把沪深股票公司行为因子分批上传并持久化到
-PostgreSQL `divid_factors`。campaign 始终额外包含研究基准
+`xtdata.get_divid_factors`，把沪深股票和 ETF 的公司行为因子分批上传并持久化到
+PostgreSQL `divid_factors`。股票、ETF 是唯一正式默认 universe，campaign 始终
+额外包含研究基准
 `000300.SH`；指数零因子行是合法结果，但仍需完成请求来证明窗口已检查。
 
 - Worker 不导入 `xtquant`，QMT SDK 仍只存在于 `apps/qmt-agent`。
-- Agent 必须同时声明 `market-data`、`divid-factors` 和 `data-only`。
+- Agent 必须同时声明 `market-data`、`divid-factors`，并处于 `live` 或
+  `data-only` 模式。
 - 请求只使用 `market_data_request`，不创建账户、委托或交易命令。
-- 因子是公司行为发生日的稀疏数据；某只股票返回零行是合法结果，不表示
+- 因子是公司行为发生日的稀疏数据；某只股票或 ETF 返回零行是合法结果，不表示
   下载失败。
-- `--code-limit` 只限制股票数，不会移除 `000300.SH` 基准。
+- `--code-limit` 仅用于 smoke，分别限制股票数和 ETF 数，不会移除
+  `000300.SH` 基准。正式 campaign 不得传该参数。
 - 复权因子回填和日线回填共用一个 PostgreSQL advisory lock，禁止两者并发
   占用串行 XTData 请求通道。
 
@@ -32,17 +35,35 @@ time interest stockBonus stockGift allotNum allotPrice gugai dr
 3. 在同一事务中审计原窗口、删除原窗口、插入 QMT 权威结果。
 4. 回读并逐行核对代码、时间、字段值和 PostgreSQL 定点精度；不一致则
    rollback，删除不会单独提交。
-5. 状态账本记录源记录数、实际有事件的股票数、日期范围、分片数、源摘要和
-   持久化摘要。
+5. 在把请求标记为 `COMPLETED` 前，强制核对范围、原有/删除记录数、
+   源/写入记录数和规范化整行 SHA-256；任一项不一致都拒绝完成请求。
+6. 临时上传文件在成功入库后按设计清理。campaign 的后验收只读取持久化的
+   request、分片元数据和 replacement audit，再从 PostgreSQL 独立回读同一
+   精确窗口并重算整行摘要。
 
 旧表没有 `(stock_code, ex_date)` 唯一约束，因此不能安全依赖
-`ON CONFLICT`。精确窗口事务替换同时兼容既有数据库并保证重跑幂等。失败重试
-会增加请求 attempt，已完成请求则从分片和数据库重新验收，不重复盲写。
+`ON CONFLICT`。精确窗口事务替换同时兼容既有数据库并保证重跑幂等。只有
+QMT 请求或传输失败才增加 attempt。请求完成后先把 `request_id` 持久化为
+`verifying`；后验收或状态写盘失败时只重验同一完成请求，不重复下载。
+运行期异常会先用同一幂等键恢复，每三次重新选择一次 Agent，连续九次仍不能
+收敛才停止为 `failed`；历史事件有固定上限。完成请求连续两次无法通过持久化
+验收时也会停止为 `failed`。此时显式 `--retry-failed` 才会放弃旧证明并创建
+新的 attempt。campaign 写为 `completed` 前还会重新验收全部已完成批次，防止
+长跑期间的数据库漂移被旧 state 摘要掩盖。
 
 ## 运行
 
 先确认日线历史回填已经退出，再部署代码并重启 full profile，使 QMT Agent
 加载 `divid_factors` operation。不要在日线回填运行期间重启 Agent。
+`daily-market-data-sync` 的下载请求只包含 `bars`，不会隐式补齐
+`divid_factors`；必须先完成本 campaign，再执行
+`compute_daily_signals=true` 的日级因子快照。
+
+日级因子快照默认覆盖全部沪深股票和 ETF。持久化完成请求必须为每个目标代码
+连续覆盖“最早快照日减 540 个日历日”到“最晚快照日”的闭区间。例如重算
+`20260803..20260831` 的保留窗口，最小复权证明范围是
+`20250209..20260831`。下面的全历史命令从更早的 `20200313` 开始，因此也满足
+该 540 日 lookback。
 
 先用独立状态文件验证一个小批次：
 
@@ -50,31 +71,36 @@ time interest stockBonus stockGift allotNum allotPrice gugai dr
 uv run --package quantx-worker python -u `
   apps/worker/scripts/backfill_divid_factors.py `
   --start-date 20200313 `
-  --end-date 20260730 `
+  --end-date 20260831 `
   --batch-size 5 `
   --code-limit 5 `
   --max-jobs 1 `
   --state-file .runtime/research-backfill/divid-factor-smoke.json
 ```
 
-全沪深股票回填：
+全沪深股票、ETF 和研究基准回填：
 
 ```powershell
 uv run --package quantx-worker python -u `
   apps/worker/scripts/backfill_divid_factors.py `
   --start-date 20200313 `
-  --end-date 20260730 `
+  --end-date 20260831 `
   --batch-size 200 `
   --poll-seconds 3 `
   --state-file `
-    .runtime/research-backfill/full-a-share-divid-factors-20200313-20260730.json
+    .runtime/research-backfill/full-stock-etf-divid-factors-20200313-20260831.json
 ```
+
+未传 `--state-file` 时也会使用上述 `full-stock-etf-divid-factors-<start>-<end>.json`
+命名。正式运行不得沿用旧的 `full-a-share-*` 账本。
 
 同一命令重跑会读取状态账本并从未完成批次继续。状态文件的
 `summary.source_records` 与 `summary.persisted_records` 必须相等，且所有作业
 必须为 `completed`。注意记录数远小于股票交易日数是正常现象。
-包含基准的新 campaign 使用 state schema v2；旧 schema v1 状态不含基准，
-不能继续作为正式研究覆盖证明，应使用新的 state 文件重新发起。
+股票、ETF 和基准的正式 campaign 使用 state schema v3，并记录 universe
+版本、两类标的数量、各自代码摘要和总代码摘要。旧 schema v2 只包含股票与
+基准，不能续跑或作为全市场日级快照的覆盖证明，必须使用新的 state 文件重新
+发起。
 
 研究正式 gate 不读取本地 state 文件，而是查询 PostgreSQL 中持久化的
 `market_data_request`：只接受 `status=COMPLETED`、

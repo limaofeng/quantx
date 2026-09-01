@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import OrderedDict
 from copy import deepcopy
 from datetime import date
@@ -16,6 +17,7 @@ from quantx_domain.factors import FACTOR_BY_ID, FACTOR_VERSION, normalize_condit
 from quantx_api.research_artifacts import (
   _KEY_PATTERN,
   _MAX_CONFIG_BYTES,
+  _MAX_MANIFEST_BYTES,
   _SEGMENT_PATTERN,
   ResearchArtifactError,
   ResearchArtifactStore,
@@ -27,15 +29,29 @@ from quantx_api.research_artifacts import (
 MAX_FACTOR_METRICS_BYTES = 64 * 1024 * 1024
 MAX_FACTOR_REPORTS = 64
 MAX_FACTOR_ROWS = 12_000
+MAX_FACTOR_MATCH_ENTRIES = 512
+MAX_FACTOR_MATCH_RUNS = 128
+MAX_FACTOR_MATCH_BYTES = 256 * 1024 * 1024
 _SUMMARY_CACHE_LIMIT = 32
 _SUMMARY_CACHE_BYTES = 8 * 1024 * 1024
 _SUMMARY_CACHE: OrderedDict[tuple[str, int, int], tuple[dict, int]] = OrderedDict()
 _SUMMARY_CACHE_LOCK = Lock()
 DEFAULT_HORIZONS = list(range(1, 21))
 BASE_UNIVERSE = {
-  "instrument_type": "stock", "exclude_st": False,
-  "include_industries": [], "exclude_industries": [],
+  "instrument_type": "stock",
+  "stock_codes": None,
+  "lookback_years": 5,
+  "end_date": "latest",
+  "benchmark_code": "000300.SH",
+  "minimum_listing_days": 0,
+  "exclude_st": False,
+  "include_industries": [],
+  "exclude_industries": [],
 }
+_UNIVERSE_KEYS = frozenset(BASE_UNIVERSE)
+_STOCK_CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ)$")
+_MAX_UNIVERSE_STOCK_CODES = 10_000
+_MAX_MINIMUM_LISTING_DAYS = 100_000
 _ROW_STRINGS = {"group", "return_basis", "period", "inference_status"}
 _ROW_INTS = {"horizon", "sample_count", "stock_count", "date_count"}
 _ROW_FLOATS = {
@@ -87,12 +103,75 @@ def _projection(value: Any, keys: set[str]) -> dict[str, Any]:
 def canonical_universe(value: Any) -> dict[str, Any]:
   if not isinstance(value, dict):
     raise ResearchArtifactError("研究股票池格式无效")
+  if any(key not in _UNIVERSE_KEYS for key in value):
+    raise ResearchArtifactError("研究股票池包含未知字段")
   instrument_type = value.get("instrument_type", "stock")
   exclude_st = value.get("exclude_st", False)
   if instrument_type not in {"stock", "etf", "stock_and_etf"} or not isinstance(exclude_st, bool):
     raise ResearchArtifactError("研究股票池取值无效")
+
+  raw_stock_codes = value.get("stock_codes")
+  stock_codes = None
+  if raw_stock_codes is not None:
+    if (
+      not isinstance(raw_stock_codes, list)
+      or not 1 <= len(raw_stock_codes) <= _MAX_UNIVERSE_STOCK_CODES
+    ):
+      raise ResearchArtifactError("研究股票列表格式或数量无效")
+    normalized_codes = []
+    for raw_code in raw_stock_codes:
+      if not isinstance(raw_code, str) or len(raw_code) > 16:
+        raise ResearchArtifactError("研究股票代码格式无效")
+      code = raw_code.strip().upper()
+      if not _STOCK_CODE_PATTERN.fullmatch(code):
+        raise ResearchArtifactError("研究股票代码格式无效")
+      normalized_codes.append(code)
+    stock_codes = sorted(set(normalized_codes))
+
+  lookback_years = value.get("lookback_years", 5)
+  if (
+    isinstance(lookback_years, bool)
+    or not isinstance(lookback_years, int)
+    or not 1 <= lookback_years <= 30
+  ):
+    raise ResearchArtifactError("研究回看年数无效")
+
+  raw_end_date = value.get("end_date", "latest")
+  if raw_end_date == "latest":
+    end_date = "latest"
+  elif isinstance(raw_end_date, str) and len(raw_end_date) == 10:
+    try:
+      end_date = date.fromisoformat(raw_end_date).isoformat()
+    except ValueError as exc:
+      raise ResearchArtifactError("研究截止日期无效") from exc
+  elif type(raw_end_date) is date:
+    end_date = raw_end_date.isoformat()
+  else:
+    raise ResearchArtifactError("研究截止日期无效")
+
+  benchmark_code = value.get("benchmark_code", "000300.SH")
+  if not isinstance(benchmark_code, str) or len(benchmark_code) > 16:
+    raise ResearchArtifactError("研究基准代码无效")
+  benchmark_code = benchmark_code.strip().upper()
+  if not _STOCK_CODE_PATTERN.fullmatch(benchmark_code):
+    raise ResearchArtifactError("研究基准代码无效")
+
+  minimum_listing_days = value.get("minimum_listing_days", 0)
+  if (
+    isinstance(minimum_listing_days, bool)
+    or not isinstance(minimum_listing_days, int)
+    or not 0 <= minimum_listing_days <= _MAX_MINIMUM_LISTING_DAYS
+  ):
+    raise ResearchArtifactError("研究最短上市天数无效")
+
   return {
-    "instrument_type": instrument_type, "exclude_st": exclude_st,
+    "instrument_type": instrument_type,
+    "stock_codes": stock_codes,
+    "lookback_years": lookback_years,
+    "end_date": end_date,
+    "benchmark_code": benchmark_code,
+    "minimum_listing_days": minimum_listing_days,
+    "exclude_st": exclude_st,
     "include_industries": sorted(set(_strings(value.get("include_industries", []), 100))),
     "exclude_industries": sorted(set(_strings(value.get("exclude_industries", []), 100))),
   }
@@ -230,6 +309,60 @@ def _history_window_mismatch(config: dict | None) -> str | None:
 
 
 class FactorResearchArtifactStore(ResearchArtifactStore):
+  def _discover_match_runs(
+    self,
+  ) -> tuple[list[ResearchRunRecord], int, bool, bool]:
+    """Discover only the authoritative factor-study directory within hard bounds."""
+    if not self.root.exists():
+      return [], 0, False, False
+    if _is_link_like(self.root) or not self.root.is_dir():
+      return [], 0, False, True
+
+    study_directory = self.root / "factor-study-v1"
+    if not study_directory.exists():
+      return [], 0, False, False
+    if not self._safe_directory(study_directory):
+      return [], 0, False, True
+
+    run_directories = []
+    try:
+      for run_directory in study_directory.iterdir():
+        if len(run_directories) >= MAX_FACTOR_MATCH_ENTRIES:
+          return [], 0, True, False
+        run_directories.append(run_directory)
+    except OSError:
+      return [], 0, False, True
+
+    records = []
+    scanned_bytes = 0
+    errors_seen = False
+    for run_directory in sorted(
+      run_directories,
+      key=lambda path: path.name,
+      reverse=True,
+    ):
+      if not self._safe_directory(run_directory):
+        errors_seen = True
+        continue
+      try:
+        manifest_path = self._artifact_path(run_directory, "manifest.json")
+        if _is_link_like(manifest_path) or not manifest_path.is_file():
+          raise ResearchArtifactError("因子运行清单不是常规文件")
+        manifest_bytes = manifest_path.stat().st_size
+        if manifest_bytes > _MAX_MANIFEST_BYTES:
+          raise ResearchArtifactError("因子运行清单超过大小上限")
+        if scanned_bytes + manifest_bytes > MAX_FACTOR_MATCH_BYTES:
+          return [], scanned_bytes, True, errors_seen
+        scanned_bytes += manifest_bytes
+        record = self._read_summary(run_directory)
+      except (OSError, ResearchArtifactError):
+        errors_seen = True
+        continue
+      if record is not None:
+        records.append(record)
+    records.sort(key=_run_sort_key, reverse=True)
+    return records, scanned_bytes, False, errors_seen
+
   def _metrics(self, summary: ResearchRunRecord, *, rows: bool = False) -> dict:
     # Revalidate the actual artifact before consulting a cross-request cache.
     # Only bounded projections are retained; raw JSON and statistic rows never are.
@@ -286,7 +419,10 @@ class FactorResearchArtifactStore(ResearchArtifactStore):
   def get_factor_report(self, run_key: str, report_id: str) -> dict | None:
     if not _KEY_PATTERN.fullmatch(run_key) or not _SEGMENT_PATTERN.fullmatch(report_id):
       raise ResearchArtifactError("因子报告身份格式无效")
-    records = [item for item in self._discover_runs() if item.key == run_key and item.study_id == "factor-study"]
+    records, _, budget_exhausted, _ = self._discover_match_runs()
+    if budget_exhausted:
+      raise ResearchArtifactError("因子报告扫描达到安全预算")
+    records = [item for item in records if item.key == run_key]
     if not records:
       return None
     if len(records) != 1:
@@ -344,18 +480,52 @@ class FactorResearchArtifactStore(ResearchArtifactStore):
       "command": "uv run --no-sync quantx-research run --config factor-study.json",
       "blockers": item["blockers"],
     } for item in normalized]
-    records = sorted(self._discover_runs(), key=_run_sort_key, reverse=True)
-    errors_seen = False
+    if all(item["unsupported"] for item in normalized):
+      return results
+    records, scanned_bytes, budget_exhausted, errors_seen = (
+      self._discover_match_runs()
+    )
+    scanned_runs = 0
     for record in records:
       if record.study_id != "factor-study" or record.status != "success":
         continue
+      if scanned_runs >= MAX_FACTOR_MATCH_RUNS:
+        budget_exhausted = True
+        break
+      scanned_runs += 1
       try:
+        metrics_path = self._artifact_path(record.run_directory, "metrics.json")
+        if _is_link_like(metrics_path) or not metrics_path.is_file():
+          raise ResearchArtifactError("因子产物不是常规文件")
+        metrics_bytes = metrics_path.stat().st_size
+        if metrics_bytes > MAX_FACTOR_METRICS_BYTES:
+          raise ResearchArtifactError("因子产物超过大小上限")
+        if scanned_bytes + metrics_bytes > MAX_FACTOR_MATCH_BYTES:
+          budget_exhausted = True
+          break
+        scanned_bytes += metrics_bytes
         metrics = self._metrics(record)
       except (OSError, ResearchArtifactError):
         errors_seen = True
         continue
       # Frozen config is small and revalidated on each lookup. Do not let the
       # metrics-only cache conceal a changed, missing or unsafe history window.
+      try:
+        config_path = self._artifact_path(
+          record.run_directory,
+          "resolved-config.yaml",
+        )
+        if _is_link_like(config_path) or not config_path.is_file():
+          raise ResearchArtifactError("冻结研究配置不是常规文件")
+        config_bytes = config_path.stat().st_size
+        if config_bytes > _MAX_CONFIG_BYTES:
+          raise ResearchArtifactError("冻结研究配置超过大小上限")
+        if scanned_bytes + config_bytes > MAX_FACTOR_MATCH_BYTES:
+          budget_exhausted = True
+          break
+        scanned_bytes += config_bytes
+      except (OSError, ResearchArtifactError):
+        errors_seen = True
       history_reason = _history_window_mismatch(self._safe_config(record, []))
       for request, result in zip(normalized, results, strict=True):
         if request["unsupported"]:
@@ -399,11 +569,21 @@ class FactorResearchArtifactStore(ResearchArtifactStore):
             if result["status"] == "MISSING":
               result["status"] = status
               result["reason"] = "；".join(reasons)
-    if errors_seen:
+      if all(
+        request["unsupported"]
+        or result["status"] in {"MATCHED", "DATA_INSUFFICIENT"}
+        for request, result in zip(normalized, results, strict=True)
+      ):
+        break
+    if errors_seen or budget_exhausted:
       for result in results:
         if result["status"] == "MISSING":
           result["status"] = "ARTIFACT_ERROR"
-          result["reason"] = "存在无法安全读取的因子产物，未找到可用匹配报告"
+          result["reason"] = (
+            "因子报告扫描达到安全预算，未在有界范围内找到匹配报告"
+            if budget_exhausted
+            else "存在无法安全读取的因子产物，未找到可用匹配报告"
+          )
     return results
 
   @staticmethod

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 import quantx_worker.prefector.flows.daily_indicator_snapshot_flow as indicator_flow
 import quantx_worker.prefector.flows.daily_market_data_sync_flow as market_flow
+from sqlalchemy.dialects import postgresql
 
 
 class FakeLogger:
@@ -114,8 +115,186 @@ async def test_only_exact_full_snapshot_universe_certifies_readiness(
 ):
   resolve = AsyncMock(return_value=[{"code": "000001.SZ"}, {"code": "510300.SH"}])
   monkeypatch.setattr(indicator_flow, "resolve_instruments", resolve)
-  assert await indicator_flow._has_full_snapshot_scope(codes) is expected
+  target = date(2026, 7, 29)
+  assert await indicator_flow._has_full_snapshot_scope(codes, target) is expected
   assert resolve.await_args.args == (indicator_flow.DEFAULT_SNAPSHOT_SECTORS, None)
+  assert resolve.await_args.kwargs["active_on"] == target
+
+
+@pytest.mark.asyncio
+async def test_snapshot_instrument_scope_is_active_on_target_date(monkeypatch):
+  class Result:
+    def all(self):
+      return []
+
+  class Session:
+    statement = None
+
+    async def execute(self, statement):
+      self.statement = statement
+      return Result()
+
+  class SessionContext:
+    def __init__(self, session):
+      self.session = session
+
+    async def __aenter__(self):
+      return self.session
+
+    async def __aexit__(self, exc_type, exc, traceback):
+      return False
+
+  session = Session()
+  monkeypatch.setattr(
+    indicator_flow,
+    "AsyncSessionLocal",
+    lambda: SessionContext(session),
+  )
+
+  await indicator_flow.resolve_instruments(
+    indicator_flow.DEFAULT_SNAPSHOT_SECTORS,
+    None,
+    allowed_types={
+      indicator_flow.InstrumentType.STOCK,
+      indicator_flow.InstrumentType.ETF,
+    },
+    active_on=date(2026, 7, 29),
+  )
+
+  sql = " ".join(
+    str(
+      session.statement.compile(
+        dialect=postgresql.dialect(),
+        compile_kwargs={"literal_binds": True},
+      )
+    ).split()
+  )
+  assert (
+    "(instruments.open_date IS NULL OR instruments.open_date <= '2026-07-29')" in sql
+  )
+  assert (
+    "(instruments.expire_date IS NULL OR instruments.expire_date >= '2026-07-29')"
+    in sql
+  )
+
+
+@pytest.mark.parametrize(
+  ("sectors", "stock_list"),
+  [
+    (None, ["000001.SZ", "000002.SZ"]),
+    (["银行"], None),
+  ],
+)
+@pytest.mark.asyncio
+async def test_scoped_flow_batches_complete_scope_but_calculates_only_active_codes(
+  monkeypatch, sectors, stock_list
+):
+  target = date(2026, 7, 29)
+  complete = [
+    {
+      "code": "000001.SZ",
+      "name": "活动标的",
+      "instrument_type": "stock",
+      "float_volume": None,
+    },
+    {
+      "code": "000002.SZ",
+      "name": "已退市标的",
+      "instrument_type": "stock",
+      "float_volume": None,
+    },
+  ]
+  active = [complete[0]]
+  resolve_calls = []
+
+  async def resolve(scope_sectors, scope_stock_list, **kwargs):
+    resolve_calls.append((scope_sectors, scope_stock_list, kwargs))
+    return active if kwargs.get("active_on") == target else complete
+
+  batch_calls = []
+
+  class SnapshotService:
+    async def compute_and_save_dates_batch(self, **kwargs):
+      batch_calls.append(kwargs)
+      active_count = len(kwargs["codes_by_snapshot_date"][target])
+      day = {
+        "total": active_count,
+        "saved": active_count,
+        "skipped": 0,
+        "failed": 0,
+        "missing_target": 0,
+        "inactive_target": 0,
+        "insufficient_history": 0,
+        "errors": [],
+      }
+      return {
+        "total": active_count,
+        "saved": active_count,
+        "skipped": 0,
+        "failed": 0,
+        "errors": [],
+        "systemic_failure": False,
+        "dates": {target.isoformat(): day},
+      }
+
+    async def cleanup_old_snapshots(self, retain_days):
+      return 0
+
+  class SessionContext:
+    async def __aenter__(self):
+      return object()
+
+    async def __aexit__(self, exc_type, exc, traceback):
+      return False
+
+  class SignalRunRepository:
+    def __init__(self, db):
+      pass
+
+    async def delete_older_than(self, cutoff):
+      return 0
+
+  monkeypatch.setattr(indicator_flow, "get_run_logger", FakeLogger)
+  monkeypatch.setattr(
+    indicator_flow, "resolve_snapshot_dates", AsyncMock(return_value=[target])
+  )
+  monkeypatch.setattr(indicator_flow, "resolve_instruments", resolve)
+  monkeypatch.setattr(
+    indicator_flow, "_has_full_snapshot_scope", AsyncMock(return_value=False)
+  )
+  monkeypatch.setattr(
+    indicator_flow, "_acquire_snapshot_locks", AsyncMock(return_value={})
+  )
+  monkeypatch.setattr(indicator_flow, "_release_snapshot_locks", AsyncMock())
+  monkeypatch.setattr(
+    indicator_flow, "_create_signal_runs", AsyncMock(return_value={target: 1})
+  )
+  monkeypatch.setattr(indicator_flow, "_finish_signal_run", AsyncMock())
+  monkeypatch.setattr(indicator_flow, "DailyIndicatorSnapshotService", SnapshotService)
+  monkeypatch.setattr(indicator_flow, "AsyncSessionLocal", SessionContext)
+  monkeypatch.setattr(indicator_flow, "DailySignalRunRepository", SignalRunRepository)
+
+  result = await indicator_flow.daily_indicator_snapshot_flow.fn(
+    sectors=sectors,
+    stock_list=stock_list,
+    start_time="20260729",
+    end_time="20260729",
+    batch_size=1,
+  )
+
+  expected_sectors = sectors or indicator_flow.DEFAULT_SNAPSHOT_SECTORS
+  assert resolve_calls[0][0:2] == (expected_sectors, stock_list)
+  assert resolve_calls[0][2].get("active_on") is None
+  assert resolve_calls[1][0:2] == (expected_sectors, stock_list)
+  assert resolve_calls[1][2]["active_on"] == target
+  assert [call["codes"] for call in batch_calls] == [
+    ["000001.SZ"],
+    ["000002.SZ"],
+  ]
+  assert batch_calls[0]["codes_by_snapshot_date"] == {target: ["000001.SZ"]}
+  assert batch_calls[1]["codes_by_snapshot_date"] == {target: []}
+  assert result["dates"][0]["total_codes"] == 1
+  assert result["dates"][0]["saved"] == 1
 
 
 @pytest.mark.parametrize(
@@ -142,6 +321,62 @@ def test_unknown_missing_target_cannot_certify_complete_snapshot(full_scope):
     indicator_flow._run_status(10, 0, full_scope=full_scope, missing_target=1)
     == "partial_failure"
   )
+
+
+def test_inactive_only_invalidation_error_cannot_certify_complete_snapshot():
+  assert (
+    indicator_flow._run_status(
+      10,
+      0,
+      full_scope=True,
+      missing_target=0,
+      has_errors=True,
+    )
+    == "partial_failure"
+  )
+
+
+def test_batch_errors_are_attributed_only_to_their_snapshot_date():
+  first = date(2026, 7, 28)
+  second = date(2026, 7, 29)
+  aggregate = {
+    "saved": 0,
+    "skipped": 0,
+    "failed": 0,
+    "missing_target": 0,
+    "inactive_target": 0,
+    "insufficient_history": 0,
+    "errors": [],
+  }
+  batch_result = {
+    "errors": ["000002.SZ 2026-07-29 指标计算失败"],
+    "dates": {
+      first.isoformat(): {
+        "saved": 1,
+        "skipped": 0,
+        "failed": 0,
+        "missing_target": 0,
+        "inactive_target": 0,
+        "insufficient_history": 0,
+        "errors": [],
+      },
+      second.isoformat(): {
+        "saved": 0,
+        "skipped": 0,
+        "failed": 1,
+        "missing_target": 0,
+        "inactive_target": 0,
+        "insufficient_history": 0,
+        "errors": ["000002.SZ 2026-07-29 指标计算失败"],
+      },
+    },
+  }
+
+  indicator_flow._merge_batch_date_result(aggregate, batch_result, first)
+
+  assert aggregate["saved"] == 1
+  assert aggregate["failed"] == 0
+  assert aggregate["errors"] == []
 
 
 @pytest.mark.asyncio

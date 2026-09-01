@@ -180,11 +180,24 @@ class DailyIndicatorSnapshotService:
     name_map: Dict[str, str],
     float_volume_map: Optional[Dict[str, float]] = None,
     lookback_days: int = 540,
+    codes_by_snapshot_date: Optional[Dict[date, List[str]]] = None,
   ) -> Dict[str, Any]:
     """分段读取公共历史区间并生成一个代码批次的多个目标日快照。"""
     dates = sorted(set(snapshot_dates))
+    code_set = set(codes)
+    scope_by_date = {
+      target: (
+        set(codes_by_snapshot_date.get(target, []))
+        if codes_by_snapshot_date is not None
+        else set(codes)
+      )
+      for target in dates
+    }
+    unknown_codes = set().union(*scope_by_date.values()) - code_set if dates else set()
+    if unknown_codes:
+      raise ValueError("目标日期代码范围必须是当前批次代码的子集")
     result: Dict[str, Any] = {
-      "total": len(codes) * len(dates),
+      "total": sum(len(scope_by_date[target]) for target in dates),
       "saved": 0,
       "skipped": 0,
       "failed": 0,
@@ -192,13 +205,14 @@ class DailyIndicatorSnapshotService:
       "systemic_failure": False,
       "dates": {
         target.isoformat(): {
-          "total": len(codes),
+          "total": len(scope_by_date[target]),
           "saved": 0,
           "skipped": 0,
           "failed": 0,
           "missing_target": 0,
           "inactive_target": 0,
           "insufficient_history": 0,
+          "errors": [],
         }
         for target in dates
       },
@@ -206,23 +220,47 @@ class DailyIndicatorSnapshotService:
     if not codes or not dates:
       return result
 
+    # A rerun can turn a formerly valid bar into missing/inactive/bad data.
+    # Remove factor eligibility for the complete requested batch before any
+    # fallible work.  This deliberately includes codes that are inactive on a
+    # target date, because an older run may have written them before lifecycle
+    # metadata was known or corrected.  Only freshly successful, active records
+    # below regain the current version; historical values are retained for audit.
     try:
-      # A rerun can turn a formerly valid bar into missing/inactive/bad data.
-      # Remove its factor eligibility before any fallible work; only freshly
-      # successful records below regain the current version. Other scopes and
-      # the historical values themselves are retained.
       async for db in self.db_factory():
-        await self.snapshot_repo_cls(db).invalidate_factor_scope(codes, dates)
+        repo = self.snapshot_repo_cls(db)
+        await repo.invalidate_factor_scope(codes, dates)
         break
       else:
         raise RuntimeError("日级因子重算未取得数据库连接")
+    except Exception as e:
+      msg = f"失效旧日级因子资格失败: {e}"
+      self.logger.exception(msg)
+      result["failed"] = result["total"]
+      result["systemic_failure"] = True
+      result["errors"].append(msg)
+      for target in dates:
+        day_result = result["dates"][target.isoformat()]
+        day_result["failed"] = len(scope_by_date[target])
+        # Invalidation also owns inactive stale rows, so every target date is
+        # affected even when its active count for this batch is zero.
+        day_result["errors"].append(msg)
+      return result
+
+    active_codes = [
+      code for code in codes if any(code in scope_by_date[target] for target in dates)
+    ]
+    if not active_codes:
+      return result
+
+    try:
       history_start = datetime.combine(
         dates[0] - timedelta(days=lookback_days),
         time.min,
       )
       history_end = datetime.combine(dates[-1], time.max)
       market_data = self._load_daily_batch(
-        codes=codes,
+        codes=active_codes,
         start=history_start,
         end=history_end,
       )
@@ -244,8 +282,12 @@ class DailyIndicatorSnapshotService:
       result["failed"] = result["total"]
       result["systemic_failure"] = True
       result["errors"].append(msg)
-      for day_result in result["dates"].values():
-        day_result["failed"] = len(codes)
+      for target in dates:
+        if not scope_by_date[target]:
+          continue
+        day_result = result["dates"][target.isoformat()]
+        day_result["failed"] = len(scope_by_date[target])
+        day_result["errors"].append(msg)
       return result
 
     if not isinstance(market_data, dict):
@@ -254,15 +296,22 @@ class DailyIndicatorSnapshotService:
       result["failed"] = result["total"]
       result["systemic_failure"] = True
       result["errors"].append(msg)
-      for day_result in result["dates"].values():
-        day_result["failed"] = len(codes)
+      for target in dates:
+        if not scope_by_date[target]:
+          continue
+        day_result = result["dates"][target.isoformat()]
+        day_result["failed"] = len(scope_by_date[target])
+        day_result["errors"].append(msg)
       return result
 
     records: List[Dict[str, Any]] = []
-    for code in codes:
+    for code in active_codes:
+      code_dates = [target for target in dates if code in scope_by_date[target]]
+      if not code_dates:
+        continue
       df = market_data.get(code)
       if df is None or getattr(df, "empty", True):
-        for target in dates:
+        for target in code_dates:
           day_result = result["dates"][target.isoformat()]
           day_result["skipped"] += 1
           day_result["missing_target"] += 1
@@ -277,11 +326,13 @@ class DailyIndicatorSnapshotService:
       except Exception as e:
         msg = f"{code} K 线格式异常: {e}"
         result["errors"].append(msg)
-        for target in dates:
-          result["dates"][target.isoformat()]["failed"] += 1
+        for target in code_dates:
+          day_result = result["dates"][target.isoformat()]
+          day_result["failed"] += 1
+          day_result["errors"].append(msg)
         continue
 
-      for target in dates:
+      for target in code_dates:
         day_result = result["dates"][target.isoformat()]
         if not bool((frame["_trade_date"] == target).any()):
           day_result["skipped"] += 1
@@ -310,7 +361,9 @@ class DailyIndicatorSnapshotService:
         )
         if snap is None:
           day_result["failed"] += 1
-          result["errors"].append(f"{code} {target.isoformat()} 指标计算失败")
+          msg = f"{code} {target.isoformat()} 指标计算失败"
+          result["errors"].append(msg)
+          day_result["errors"].append(msg)
         else:
           records.append(snap)
           day_result["saved"] += 1
@@ -329,6 +382,8 @@ class DailyIndicatorSnapshotService:
         result["systemic_failure"] = True
         result["errors"].append(msg)
         for day_result in result["dates"].values():
+          if day_result["saved"]:
+            day_result["errors"].append(msg)
           day_result["failed"] += day_result["saved"]
           day_result["saved"] = 0
 

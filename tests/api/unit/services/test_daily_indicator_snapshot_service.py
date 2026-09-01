@@ -228,6 +228,133 @@ async def test_multiple_target_dates_share_one_kline_read():
 
 
 @pytest.mark.asyncio
+async def test_multiple_target_dates_use_each_dates_instrument_lifecycle_scope():
+  InMemorySnapshotRepo.rows = {}
+  repository = FakeKLineRepository(
+    {
+      "000001.SZ": daily_frame(10),
+      "000002.SZ": daily_frame(20),
+    }
+  )
+  service = make_service(repository)
+  first_date = date(2026, 5, 19)
+  second_date = date(2026, 5, 20)
+
+  result = await service.compute_and_save_dates_batch(
+    codes=["000001.SZ", "000002.SZ"],
+    snapshot_dates=[first_date, second_date],
+    instrument_type_map={"000001.SZ": "stock", "000002.SZ": "stock"},
+    name_map={"000001.SZ": "股票一", "000002.SZ": "股票二"},
+    codes_by_snapshot_date={
+      first_date: ["000001.SZ"],
+      second_date: ["000002.SZ"],
+    },
+  )
+
+  assert len(repository.calls) == 7
+  assert result["total"] == result["saved"] == 2
+  assert result["dates"][first_date.isoformat()]["total"] == 1
+  assert result["dates"][second_date.isoformat()]["total"] == 1
+  assert set(InMemorySnapshotRepo.rows) == {
+    ("000001.SZ", first_date),
+    ("000002.SZ", second_date),
+  }
+
+
+@pytest.mark.asyncio
+async def test_inactive_lifecycle_scope_invalidates_stale_row_without_market_read():
+  from quantx_domain.factors import FACTOR_VERSION
+
+  target = date(2026, 5, 20)
+  InMemorySnapshotRepo.rows = {
+    ("000001.SZ", target): {
+      "code": "000001.SZ",
+      "snapshot_date": target,
+      "calculation_version": FACTOR_VERSION,
+    }
+  }
+  repository = FakeKLineRepository({"000001.SZ": daily_frame(10)})
+  service = make_service(repository)
+
+  result = await service.compute_and_save_dates_batch(
+    codes=["000001.SZ"],
+    snapshot_dates=[target],
+    instrument_type_map={"000001.SZ": "stock"},
+    name_map={"000001.SZ": "旧生命周期标的"},
+    codes_by_snapshot_date={target: []},
+  )
+
+  assert result["total"] == 0
+  assert result["saved"] == result["skipped"] == result["failed"] == 0
+  assert repository.calls == []
+  assert InMemorySnapshotRepo.rows[("000001.SZ", target)]["calculation_version"] is None
+
+
+@pytest.mark.asyncio
+async def test_inactive_only_invalidation_failure_is_reported_without_market_read():
+  class FailingInvalidationRepo(InMemorySnapshotRepo):
+    async def invalidate_factor_scope(self, codes, snapshot_dates):
+      raise RuntimeError("database unavailable")
+
+  target = date(2026, 5, 20)
+  repository = FakeKLineRepository({"000001.SZ": daily_frame(10)})
+  service = make_service(repository)
+  service.snapshot_repo_cls = FailingInvalidationRepo
+
+  result = await service.compute_and_save_dates_batch(
+    codes=["000001.SZ"],
+    snapshot_dates=[target],
+    instrument_type_map={},
+    name_map={},
+    codes_by_snapshot_date={target: []},
+  )
+
+  assert result["total"] == result["failed"] == 0
+  assert result["systemic_failure"] is True
+  assert "database unavailable" in result["errors"][0]
+  assert result["dates"][target.isoformat()]["errors"] == result["errors"]
+  assert repository.calls == []
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_scoped_errors_are_bound_to_the_affected_dates():
+  InMemorySnapshotRepo.rows = {}
+  good = daily_frame(10)
+  bad = daily_frame(20).drop(columns=["time"])
+  service = make_service(FakeKLineRepository({"000001.SZ": good, "000002.SZ": bad}))
+
+  async def pass_through_history(frames):
+    return {
+      code: (
+        frame.sort_values("time").drop_duplicates("time", keep="last")
+        if "time" in frame.columns
+        else frame
+      )
+      for code, frame in frames.items()
+    }
+
+  service.price_history_loader = pass_through_history
+  first_date = date(2026, 5, 19)
+  second_date = date(2026, 5, 20)
+
+  result = await service.compute_and_save_dates_batch(
+    codes=["000001.SZ", "000002.SZ"],
+    snapshot_dates=[first_date, second_date],
+    instrument_type_map={},
+    name_map={},
+    codes_by_snapshot_date={
+      first_date: ["000001.SZ"],
+      second_date: ["000002.SZ"],
+    },
+  )
+
+  assert result["dates"][first_date.isoformat()]["errors"] == []
+  assert result["dates"][second_date.isoformat()]["errors"] == [
+    "000002.SZ K 线格式异常: K 线缺少 time 字段"
+  ]
+
+
+@pytest.mark.asyncio
 async def test_long_history_is_read_in_non_overlapping_time_windows():
   InMemorySnapshotRepo.rows = {}
   frame = daily_frame(10)

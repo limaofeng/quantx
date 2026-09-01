@@ -118,8 +118,9 @@ async def resolve_instruments(
   stock_list: Optional[list[str]],
   *,
   allowed_types: Optional[set[InstrumentType]] = None,
+  active_on: Optional[date] = None,
 ) -> list[dict[str, Any]]:
-  """从 PostgreSQL instruments / sector_stocks 解析实际标的。"""
+  """从 PostgreSQL 解析范围，并按目标日排除明确未上市或已退市标的。"""
   requested_types = allowed_types or {
     InstrumentType.STOCK,
     InstrumentType.ETF,
@@ -177,6 +178,12 @@ async def resolve_instruments(
       if scope_conditions:
         stmt = stmt.where(or_(*scope_conditions))
 
+    if active_on is not None:
+      stmt = stmt.where(
+        or_(Instrument.open_date.is_(None), Instrument.open_date <= active_on),
+        or_(Instrument.expire_date.is_(None), Instrument.expire_date >= active_on),
+      )
+
     rows = (await db.execute(stmt.order_by(Instrument.id.asc()))).all()
   return [
     {
@@ -225,22 +232,28 @@ async def _release_snapshot_locks(
     await redis.eval(_LOCK_RELEASE_SCRIPT, 1, key, token)
 
 
-async def _has_full_snapshot_scope(codes: list[str]) -> bool:
+async def _has_full_snapshot_scope(codes: list[str], target_date: date) -> bool:
   """Only the exact default market set may certify whole-day readiness."""
   complete = await resolve_instruments(
     DEFAULT_SNAPSHOT_SECTORS,
     None,
     allowed_types={InstrumentType.STOCK, InstrumentType.ETF},
+    active_on=target_date,
   )
   return bool(complete) and set(codes) == {item["code"] for item in complete}
 
 
 def _run_status(
-  saved: int, failed: int, *, full_scope: bool, missing_target: int
+  saved: int,
+  failed: int,
+  *,
+  full_scope: bool,
+  missing_target: int,
+  has_errors: bool = False,
 ) -> str:
   if saved <= 0:
     return "failed"
-  if failed > 0 or missing_target > 0:
+  if failed > 0 or missing_target > 0 or has_errors:
     return "partial_failure"
   return "success" if full_scope else "scoped_success"
 
@@ -261,9 +274,28 @@ def _run_warnings(result: dict[str, Any], errors: list[str]) -> str:
   return "; ".join(warnings)
 
 
+def _merge_batch_date_result(
+  aggregate: dict[str, Any],
+  batch_result: dict[str, Any],
+  target: date,
+) -> None:
+  """Merge only counters and errors belonging to one snapshot date."""
+  target_result = batch_result["dates"][target.isoformat()]
+  for key in (
+    "saved",
+    "skipped",
+    "failed",
+    "missing_target",
+    "inactive_target",
+    "insufficient_history",
+  ):
+    aggregate[key] += int(target_result[key])
+  aggregate["errors"].extend(target_result.get("errors", []))
+
+
 async def _create_signal_runs(
   snapshot_dates: list[date],
-  total_codes: int,
+  total_codes: dict[date, int],
 ) -> dict[date, int]:
   run_ids: dict[date, int] = {}
   for target in snapshot_dates:
@@ -275,7 +307,7 @@ async def _create_signal_runs(
           "score_version": "score-v1",
           "status": "running",
           "started_at": time_utils.now(),
-          "total_codes": total_codes,
+          "total_codes": total_codes[target],
         }
       )
       run_ids[target] = run.id
@@ -330,16 +362,46 @@ async def daily_indicator_snapshot_flow(
   target_dates = await resolve_snapshot_dates(start_time, end_time)
   if not target_dates:
     raise ValueError("指定范围内没有交易日")
+
+  # Keep the complete requested scope separate from each date's active
+  # universe.  The complete scope is needed to invalidate a stale current-
+  # version row that an earlier run wrote before instrument lifecycle metadata
+  # was available or corrected.  Only active instruments below are counted or
+  # sent through market-data calculation.
   instruments = await resolve_instruments(
     sectors or DEFAULT_SNAPSHOT_SECTORS,
     stock_list,
     allowed_types={InstrumentType.STOCK, InstrumentType.ETF},
   )
   if not instruments:
-    raise RuntimeError("PostgreSQL 中没有匹配的股票或 ETF 标的")
+    raise RuntimeError("未找到匹配的股票或 ETF 请求范围")
 
-  codes = [item["code"] for item in instruments]
-  full_scope = await _has_full_snapshot_scope(codes)
+  instruments_by_date: dict[date, list[dict[str, Any]]] = {}
+  for target in target_dates:
+    instruments_by_date[target] = await resolve_instruments(
+      sectors or DEFAULT_SNAPSHOT_SECTORS,
+      stock_list,
+      allowed_types={InstrumentType.STOCK, InstrumentType.ETF},
+      active_on=target,
+    )
+  skipped_dates = [target for target in target_dates if not instruments_by_date[target]]
+  if skipped_dates:
+    logger.info(
+      "快照日期没有生命周期内的目标标的，仅失效旧行: %s",
+      [target.isoformat() for target in skipped_dates],
+    )
+
+  target_codes = {
+    target: [item["code"] for item in instruments_by_date[target]]
+    for target in target_dates
+  }
+  instruments_by_code = {item["code"]: item for item in instruments}
+  codes = sorted(instruments_by_code)
+  full_scope = {
+    target: await _has_full_snapshot_scope(target_codes[target], target)
+    for target in target_dates
+  }
+  instruments = [instruments_by_code[code] for code in codes]
   name_map = {item["code"]: item["name"] for item in instruments}
   instrument_type_map = {item["code"]: item["instrument_type"] for item in instruments}
   float_volume_map = {
@@ -370,15 +432,21 @@ async def daily_indicator_snapshot_flow(
     for target in target_dates
   }
   try:
-    run_ids = await _create_signal_runs(target_dates, len(codes))
+    total_codes = {target: len(target_codes[target]) for target in target_dates}
+    run_ids = await _create_signal_runs(target_dates, total_codes)
     service = DailyIndicatorSnapshotService()
     for batch_index, batch in enumerate(_chunks(codes, batch_size), start=1):
+      batch_set = set(batch)
       batch_result = await service.compute_and_save_dates_batch(
         codes=batch,
         snapshot_dates=target_dates,
         instrument_type_map=instrument_type_map,
         name_map=name_map,
         float_volume_map=float_volume_map,
+        codes_by_snapshot_date={
+          target: [code for code in target_codes[target] if code in batch_set]
+          for target in target_dates
+        },
       )
       logger.info(
         "指标批次 %s 完成: codes=%s saved=%s skipped=%s failed=%s",
@@ -389,18 +457,7 @@ async def daily_indicator_snapshot_flow(
         batch_result["failed"],
       )
       for target in target_dates:
-        target_result = batch_result["dates"][target.isoformat()]
-        aggregate = date_results[target]
-        for key in (
-          "saved",
-          "skipped",
-          "failed",
-          "missing_target",
-          "inactive_target",
-          "insufficient_history",
-        ):
-          aggregate[key] += int(target_result[key])
-        aggregate["errors"].extend(batch_result["errors"])
+        _merge_batch_date_result(date_results[target], batch_result, target)
 
     reports = []
     for target in target_dates:
@@ -408,8 +465,9 @@ async def daily_indicator_snapshot_flow(
       status = _run_status(
         target_result["saved"],
         target_result["failed"],
-        full_scope=full_scope,
+        full_scope=full_scope[target],
         missing_target=target_result["missing_target"],
+        has_errors=bool(target_result["errors"]),
       )
       warnings = _run_warnings(target_result, target_result["errors"])
       if status == "scoped_success":
@@ -426,14 +484,14 @@ async def daily_indicator_snapshot_flow(
         run_ids[target],
         started_at=started_at,
         status=status,
-        total_codes=len(codes),
+        total_codes=total_codes[target],
         result=target_result,
         warnings=warnings,
       )
       report = {
         "snapshot_date": target.isoformat(),
         "status": status,
-        "total_codes": len(codes),
+        "total_codes": total_codes[target],
         **{
           key: target_result[key]
           for key in (
@@ -477,13 +535,13 @@ async def daily_indicator_snapshot_flow(
     for target, run_id in run_ids.items():
       target_result = date_results[target]
       if target_result["saved"] <= 0 and target_result["failed"] <= 0:
-        target_result["failed"] = len(codes)
+        target_result["failed"] = len(target_codes[target])
       try:
         await _finish_signal_run(
           run_id,
           started_at=started_at,
           status="failed",
-          total_codes=len(codes),
+          total_codes=len(target_codes[target]),
           result=target_result,
           warnings=f"系统性失败: {exc}",
         )

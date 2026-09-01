@@ -6,6 +6,7 @@ from quantx_api.factor_research_artifacts import (
   BASE_UNIVERSE,
   DEFAULT_HORIZONS,
   FactorResearchArtifactStore,
+  canonical_universe,
 )
 from quantx_api.research_artifacts import ResearchArtifactError, stable_run_key
 
@@ -26,7 +27,8 @@ def _request(*, conditions=None, exclude_st=False, factor_ids=None, kind="joint"
 
 def _write_factor_run(root, *, conditions=None, run_id="20260901-100000-abcd1234",
                       completed_at="2026-09-01T10:00:00+08:00", factor_version="daily-v1",
-                      kind="joint", date_count=100, horizons=None, stock_codes=None):
+                      kind="joint", date_count=100, horizons=None, stock_codes=None,
+                      universe=None):
   conditions = conditions if conditions is not None else [_condition()]
   path = root / "factor-study-v1" / run_id
   path.mkdir(parents=True)
@@ -56,12 +58,72 @@ def _write_factor_run(root, *, conditions=None, run_id="20260901-100000-abcd1234
     "distribution": [], "rows": [row], "warnings": ["不是个股预测概率"],
   }
   metrics = {
-    "schema_version": 1, "factor_version": factor_version, "universe": BASE_UNIVERSE,
+    "schema_version": 1, "factor_version": factor_version,
+    "universe": universe or BASE_UNIVERSE,
     "horizons": horizons or DEFAULT_HORIZONS, "return_bases": ["close", "next_open"],
     "data_start": "2021-09-01", "data_end": "2026-08-31", "reports": [report], "warnings": [],
   }
   (path / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
   return key, metrics, path
+
+
+def test_canonical_universe_preserves_full_bounded_sample_identity():
+  assert canonical_universe({}) == BASE_UNIVERSE
+  assert canonical_universe({
+    "stock_codes": [" 600000.sh", "000001.SZ", "600000.SH"],
+    "lookback_years": 8,
+    "end_date": "2026-08-31",
+    "benchmark_code": "000905.sh",
+    "minimum_listing_days": 120,
+  }) == {
+    **BASE_UNIVERSE,
+    "stock_codes": ["000001.SZ", "600000.SH"],
+    "lookback_years": 8,
+    "end_date": "2026-08-31",
+    "benchmark_code": "000905.SH",
+    "minimum_listing_days": 120,
+  }
+
+
+@pytest.mark.parametrize("universe", [
+  {"stock_codes": []},
+  {"stock_codes": ["../../secret"]},
+  {"lookback_years": 31},
+  {"end_date": "2026-02-30"},
+  {"benchmark_code": "../../secret"},
+  {"minimum_listing_days": True},
+  {"minimum_listing_days": 100_001},
+  {"unknown_identity": "ignored-before"},
+])
+def test_canonical_universe_rejects_unbounded_or_unknown_identity(universe):
+  with pytest.raises(ResearchArtifactError):
+    canonical_universe(universe)
+
+
+@pytest.mark.parametrize(
+  ("run_universe", "request_universe"),
+  [
+    (
+      {**BASE_UNIVERSE, "stock_codes": ["000001.SZ"]},
+      {**BASE_UNIVERSE, "stock_codes": ["000002.SZ"]},
+    ),
+    (
+      {**BASE_UNIVERSE, "minimum_listing_days": 120},
+      BASE_UNIVERSE,
+    ),
+  ],
+)
+def test_different_stock_or_listing_day_universe_is_never_an_exact_match(
+  tmp_path, run_universe, request_universe,
+):
+  _write_factor_run(tmp_path, universe=run_universe)
+  request = _request()
+  request["universe"] = request_universe
+
+  found = FactorResearchArtifactStore(tmp_path).match_reports([request])[0]
+
+  assert found["status"] == "MISSING"
+  assert found["reports"] == []
 
 
 def test_match_normalizes_order_and_deduplicates_without_ignoring_thresholds(tmp_path):
@@ -117,6 +179,130 @@ def test_exact_default_report_precedes_newer_reference_run(tmp_path):
   assert found["reports"][0]["match_status"] == "MATCHED"
   assert found["reports"][1]["match_status"] == "REFERENCE_ONLY"
   assert found["reports"][1]["match_reason"]
+
+
+def test_match_stops_after_latest_exact_result(tmp_path, monkeypatch):
+  from quantx_api.research_artifacts import ResearchArtifactStore
+
+  _write_factor_run(
+    tmp_path,
+    conditions=[_condition(value=2)],
+    run_id="20260901-100000-abcd1234",
+    completed_at="2026-09-01T10:00:00+08:00",
+  )
+  _write_factor_run(
+    tmp_path,
+    run_id="20260902-100000-abcd1234",
+    completed_at="2026-09-02T10:00:00+08:00",
+  )
+  original_read = ResearchArtifactStore._read_json
+  metric_reads = []
+
+  def tracked_read(self, run_directory, filename, **kwargs):
+    if filename == "metrics.json":
+      metric_reads.append(run_directory.name)
+    return original_read(self, run_directory, filename, **kwargs)
+
+  monkeypatch.setattr(ResearchArtifactStore, "_read_json", tracked_read)
+  found = FactorResearchArtifactStore(tmp_path).match_reports([_request()])[0]
+
+  assert found["status"] == "MATCHED"
+  assert metric_reads == ["20260902-100000-abcd1234"]
+
+
+def test_match_discovery_fails_closed_before_unbounded_manifest_scan(
+  tmp_path, monkeypatch,
+):
+  import quantx_api.factor_research_artifacts as artifacts
+  from quantx_api.research_artifacts import ResearchArtifactStore
+
+  _write_factor_run(
+    tmp_path,
+    run_id="20260901-100000-abcd1234",
+    completed_at="2026-09-01T10:00:00+08:00",
+  )
+  _write_factor_run(
+    tmp_path,
+    run_id="20260902-100000-abcd1234",
+    completed_at="2026-09-02T10:00:00+08:00",
+  )
+  manifest_reads = []
+  original_read = ResearchArtifactStore._read_json
+
+  def tracked_read(self, run_directory, filename, **kwargs):
+    if filename == "manifest.json":
+      manifest_reads.append(run_directory.name)
+    return original_read(self, run_directory, filename, **kwargs)
+
+  monkeypatch.setattr(artifacts, "MAX_FACTOR_MATCH_ENTRIES", 1)
+  monkeypatch.setattr(ResearchArtifactStore, "_read_json", tracked_read)
+
+  found = FactorResearchArtifactStore(tmp_path).match_reports([_request()])[0]
+
+  assert found["status"] == "ARTIFACT_ERROR"
+  assert "安全预算" in found["reason"]
+  assert manifest_reads == []
+
+
+def test_report_detail_discovery_fails_closed_before_unbounded_manifest_scan(
+  tmp_path, monkeypatch,
+):
+  import quantx_api.factor_research_artifacts as artifacts
+  from quantx_api.research_artifacts import ResearchArtifactStore
+
+  key, _, _ = _write_factor_run(
+    tmp_path,
+    run_id="20260901-100000-abcd1234",
+    completed_at="2026-09-01T10:00:00+08:00",
+  )
+  _write_factor_run(
+    tmp_path,
+    run_id="20260902-100000-abcd1234",
+    completed_at="2026-09-02T10:00:00+08:00",
+  )
+  manifest_reads = []
+  original_read = ResearchArtifactStore._read_json
+
+  def tracked_read(self, run_directory, filename, **kwargs):
+    if filename == "manifest.json":
+      manifest_reads.append(run_directory.name)
+    return original_read(self, run_directory, filename, **kwargs)
+
+  monkeypatch.setattr(artifacts, "MAX_FACTOR_MATCH_ENTRIES", 1)
+  monkeypatch.setattr(ResearchArtifactStore, "_read_json", tracked_read)
+
+  with pytest.raises(ResearchArtifactError, match="安全预算"):
+    FactorResearchArtifactStore(tmp_path).get_factor_report(key, "joint-test")
+
+  assert manifest_reads == []
+
+
+@pytest.mark.parametrize("budget_kind", ["runs", "bytes"])
+def test_match_reports_fail_closed_when_scan_budget_is_exhausted(
+  tmp_path, monkeypatch, budget_kind,
+):
+  import quantx_api.factor_research_artifacts as artifacts
+
+  _write_factor_run(
+    tmp_path,
+    conditions=[_condition(value=2)],
+    run_id="20260902-100000-abcd1234",
+    completed_at="2026-09-02T10:00:00+08:00",
+  )
+  _write_factor_run(
+    tmp_path,
+    run_id="20260901-100000-abcd1234",
+    completed_at="2026-09-01T10:00:00+08:00",
+  )
+  if budget_kind == "runs":
+    monkeypatch.setattr(artifacts, "MAX_FACTOR_MATCH_RUNS", 1)
+  else:
+    monkeypatch.setattr(artifacts, "MAX_FACTOR_MATCH_BYTES", 1)
+
+  found = FactorResearchArtifactStore(tmp_path).match_reports([_request()])[0]
+
+  assert found["status"] == "ARTIFACT_ERROR"
+  assert "安全预算" in found["reason"]
 
 
 @pytest.mark.parametrize("date_range, expected", [
@@ -272,6 +458,10 @@ async def test_factor_queries_are_typed_and_readonly(tmp_path, monkeypatch, auth
   """, variable_values={"key": key}, context_value=authorized_graphql_context)
   assert result.errors is None
   assert result.data["stockFactorReportMatches"][0]["status"] == "MATCHED"
+  assert (
+    result.data["stockFactorReportMatches"][0]["configJson"]["universe"]
+    == BASE_UNIVERSE
+  )
   assert result.data["factorReport"]["rows"][0]["upRate"] == 0.52
   assert result.data["researchRun"]["factorReports"][0]["reportId"] == "joint-test"
   assert not any("score" in value.lower() for value in result.data["stockFactorCatalog"][0])

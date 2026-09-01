@@ -101,6 +101,33 @@ describe('useStockScreening result provenance', () => {
     expect(result.current.meta.latestRunStatus).toBe('partial_failure');
   });
 
+  it('does not mark an old result page complete when status is complete for a newer date', () => {
+    statusMock.mockReturnValue({
+      status: {
+        ...partialStatus,
+        latestSnapshotDate: '2026-08-31',
+        expectedSnapshotDate: '2026-08-31',
+        missingSnapshotDates: [],
+        latestRunStatus: 'success',
+        isComplete: true,
+      },
+      fetching: false,
+      refresh: vi.fn(),
+    });
+    mockDailyPage({
+      ...completedPage,
+      snapshotDate: '2026-08-28',
+      hasStaleData: false,
+      isComplete: true,
+    });
+
+    const { result } = renderHook(() => useStockScreening());
+
+    expect(result.current.meta.snapshotDate).toBe('2026-08-28');
+    expect(result.current.meta.expectedSnapshotDate).toBe('2026-08-31');
+    expect(result.current.meta.isComplete).toBe(false);
+  });
+
   it('keeps intraday metadata independent of daily snapshot status', () => {
     const { result } = renderHook(() => useStockScreening());
     act(() => result.current.runScreening({ screeningMode: 'INTRADAY' }));
