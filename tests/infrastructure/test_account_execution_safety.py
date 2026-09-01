@@ -7,10 +7,12 @@ def _readiness(
   *,
   failed: set[str] | None = None,
   standby: set[str] | None = None,
+  transient: set[str] | None = None,
   authorization_state: str = "ENABLED",
 ):
   failed = failed or set()
   standby = standby or set()
+  transient = transient or set()
   checks = [
     ("SERVER_REAL_TRADING_ENABLED", "AUTOMATION"),
     ("T_TRADE_LIVE_ENABLED", "AUTOMATION"),
@@ -41,13 +43,21 @@ def _readiness(
       {
         "code": code,
         "status": (
-          "FAILED" if code in failed else "STANDBY" if code in standby else "PASSED"
+          "FAILED"
+          if code in failed
+          else "STANDBY"
+          if code in standby
+          else "TRANSIENT"
+          if code in transient
+          else "PASSED"
         ),
         "message": (
           f"{code} failed"
           if code in failed
           else f"{code} standby"
           if code in standby
+          else f"{code} syncing"
+          if code in transient
           else ""
         ),
         "scope": scope,
@@ -79,15 +89,26 @@ def test_missing_account_window_is_a_healthy_reduce_only_state() -> None:
 
 
 def test_closed_market_standby_is_healthy_and_non_blocking() -> None:
-  status = project_account_execution_safety(
-    _readiness(standby={"MARKET_STREAM_READY"})
-  )
+  status = project_account_execution_safety(_readiness(standby={"MARKET_STREAM_READY"}))
 
   assert status["health_status"] == "HEALTHY"
   assert status["execution_mode"] == "TRADING"
   assert status["can_increase_risk"] is True
   assert status["blocked_reasons"] == []
   assert status["summary"] == "账户状态与买入条件正常；当前休市待机"
+
+
+def test_market_catchup_is_healthy_but_blocks_risk_increase() -> None:
+  status = project_account_execution_safety(
+    _readiness(transient={"MARKET_STREAM_READY"})
+  )
+
+  assert status["health_status"] == "HEALTHY"
+  assert status["execution_mode"] == "REDUCE_ONLY"
+  assert status["can_reduce_risk"] is True
+  assert status["can_increase_risk"] is False
+  assert status["can_activate_automation"] is False
+  assert status["blocked_reasons"] == ["MARKET_STREAM_READY syncing"]
 
 
 def test_stale_snapshot_blocks_both_execution_capabilities() -> None:

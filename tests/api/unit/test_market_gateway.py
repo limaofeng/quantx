@@ -74,7 +74,16 @@ async def test_ready_supply_needs_neither_engine_nor_trading_account(supply):
       engine_state=engine,
       trading_session=True,
     )
-    assert readiness.status is MarketStreamReadinessStatus.FAILED
+    assert not readiness.tradable_now
+  assert (
+    classify_authoritative_market_stream_readiness(
+      stream_state=state,
+      freshness_lease=lease,
+      engine_state=replace(state, stream_id="old"),
+      trading_session=True,
+    ).status
+    is MarketStreamReadinessStatus.FAILED
+  )
 
 
 async def test_offline_socket_cannot_reuse_redis_ready(supply, monkeypatch):

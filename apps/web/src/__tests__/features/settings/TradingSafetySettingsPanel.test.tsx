@@ -55,7 +55,7 @@ const mocks = vi.hoisted(() => ({
     }>,
     checks: [] as Array<{
       code: string;
-      status: 'PASSED' | 'STANDBY' | 'FAILED';
+      status: 'PASSED' | 'STANDBY' | 'TRANSIENT' | 'FAILED';
       message: string;
       scope: string;
     }>,
@@ -117,6 +117,7 @@ describe('TradingSafetySettingsPanel', () => {
                     sampleCount: 120,
                     passedCount: 0,
                     standbyCount: 120,
+                    transientCount: 0,
                     failedCount: 0,
                     unknownCount: 0,
                   },
@@ -171,6 +172,29 @@ describe('TradingSafetySettingsPanel', () => {
     expect(screen.queryByText('需处理')).not.toBeInTheDocument();
   });
 
+  it('presents market catchup as transient without calling it an incident', () => {
+    mocks.safety.checks = [
+      {
+        code: 'MARKET_STREAM_READY',
+        status: 'TRANSIENT',
+        message: 'Engine 正在追赶全市场行情水位：落后 6 批',
+        scope: 'INCREASE_RISK',
+      },
+    ];
+
+    render(<TradingSafetySettingsPanel />);
+
+    expect(
+      screen.getByRole('article', { name: '全市场行情链路：同步中' })
+    ).toBeInTheDocument();
+    expect(screen.getByText('行情链路有 1 项正在同步')).toBeInTheDocument();
+    expect(screen.getByText('0 项通过 · 1 项同步中')).toBeInTheDocument();
+    expect(
+      screen.getByText('同步追赶期间继续阻止增仓，但不形成异常事件。')
+    ).toBeInTheDocument();
+    expect(screen.queryByText('需处理')).not.toBeInTheDocument();
+  });
+
   it('creates a preview on an insecure LAN origin without Web Crypto', async () => {
     vi.stubGlobal('crypto', undefined);
     render(<TradingSafetySettingsPanel />);
@@ -205,7 +229,7 @@ describe('TradingSafetySettingsPanel', () => {
       screen.getByText('所选范围内没有确认的准入异常。')
     ).toBeInTheDocument();
     expect(
-      screen.getByText('休市待机属于预期状态，不会在这里形成事件。')
+      screen.getByText('同步追赶和休市待机属于预期状态，不会在这里形成事件。')
     ).toBeInTheDocument();
     expect(
       screen.queryByRole('article', { name: /全市场行情链路/ })

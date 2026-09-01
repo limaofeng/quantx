@@ -71,7 +71,7 @@ async def live_trading_runtime_status() -> dict[str, Any]:
   blocked_checks = [
     str(item.get("code") or "")
     for item in list(safety.get("checks") or [])
-    if str(item.get("status") or "").upper() == "FAILED"
+    if str(item.get("status") or "").upper() in {"TRANSIENT", "FAILED"}
     and str(item.get("code") or "")
   ]
   if market_status != "READY":

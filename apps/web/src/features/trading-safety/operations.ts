@@ -85,6 +85,7 @@ export const AccountExecutionSafetyHistoryQuery = gql(`
           sampleCount
           passedCount
           standbyCount
+          transientCount
           failedCount
           unknownCount
         }

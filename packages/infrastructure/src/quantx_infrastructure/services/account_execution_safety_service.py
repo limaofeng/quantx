@@ -133,6 +133,13 @@ def _normalized_check_status(value: object) -> str:
   return MarketStreamReadinessStatus.FAILED.value
 
 
+def _blocks_risk_increase(value: object) -> bool:
+  return _normalized_check_status(value) in {
+    MarketStreamReadinessStatus.TRANSIENT.value,
+    MarketStreamReadinessStatus.FAILED.value,
+  }
+
+
 def project_account_execution_safety(readiness: dict[str, Any]) -> dict[str, Any]:
   """Project capabilities from account-owned checks only.
 
@@ -157,9 +164,15 @@ def project_account_execution_safety(readiness: dict[str, Any]) -> dict[str, Any
     for item in checks
     if item["status"] == MarketStreamReadinessStatus.STANDBY.value
   ]
+  transient_checks = [
+    item
+    for item in checks
+    if item["status"] == MarketStreamReadinessStatus.TRANSIENT.value
+  ]
+  blocking_checks = failed_checks + transient_checks
   authorization_state = str(readiness.get("authorization_state") or "DISABLED").upper()
   activation_failures = [
-    item for item in failed_checks if item.get("code") != _AUTHORIZATION_CHECK
+    item for item in blocking_checks if item.get("code") != _AUTHORIZATION_CHECK
   ]
   reduction_failures = [
     item
@@ -171,7 +184,7 @@ def project_account_execution_safety(readiness: dict[str, Any]) -> dict[str, Any
   ]
   can_reduce_risk = not reduction_failures
   can_activate_automation = not activation_failures
-  can_increase_risk = not failed_checks
+  can_increase_risk = not blocking_checks
 
   if authorization_state == "KILLED":
     health_status, execution_mode = "KILLED", "KILLED"
@@ -187,7 +200,7 @@ def project_account_execution_safety(readiness: dict[str, Any]) -> dict[str, Any
   blocked_reasons = _unique_messages(
     [
       str(item.get("message") or item.get("code") or "账户实盘门禁未通过")
-      for item in failed_checks
+      for item in blocking_checks
     ]
   )
   if authorization_state == "KILLED":
@@ -636,9 +649,11 @@ class AccountExecutionSafetyService:
       and agent_heartbeat_current
       and str(agent.status).upper() == "READY"
     )
+    agent_market_stream_status = str(
+      agent_details.get("marketStreamStatus") or "OFFLINE"
+    ).upper()
     agent_market_stream_ready = bool(
-      agent_heartbeat_current
-      and str(agent_details.get("marketStreamStatus") or "").upper() == "READY"
+      agent_heartbeat_current and agent_market_stream_status == "READY"
     )
     with timing.phase("market"):
       market_stream_readiness = (
@@ -646,16 +661,15 @@ class AccountExecutionSafetyService:
         if agent_market_stream_ready
         else None
       )
-    market_stream_check_status = (
-      market_stream_readiness.status.value
-      if market_stream_readiness is not None
-      else MarketStreamReadinessStatus.FAILED.value
-    )
-    market_stream_check_message = (
-      market_stream_readiness.message
-      if market_stream_readiness is not None
-      else "QMT Agent 全市场行情流尚未进入 READY"
-    )
+    if market_stream_readiness is not None:
+      market_stream_check_status = market_stream_readiness.status.value
+      market_stream_check_message = market_stream_readiness.message
+    elif agent_heartbeat_current and agent_market_stream_status == "SYNCING":
+      market_stream_check_status = MarketStreamReadinessStatus.TRANSIENT.value
+      market_stream_check_message = "QMT Agent 正在建立全市场行情权威流"
+    else:
+      market_stream_check_status = MarketStreamReadinessStatus.FAILED.value
+      market_stream_check_message = "QMT Agent 全市场行情流尚未进入 READY"
     if multiple_ready_live_agents:
       live_agent_blocked_reason = (
         "同一账户检测到多个就绪 live QMT Agent，必须先恢复唯一会话"
@@ -712,15 +726,13 @@ class AccountExecutionSafetyService:
       new_external_order_count = max(
         0,
         int(
-          reconciliation_summary.get("newExternalOrderCount", external_order_count)
-          or 0
+          reconciliation_summary.get("newExternalOrderCount", external_order_count) or 0
         ),
       )
       new_external_trade_count = max(
         0,
         int(
-          reconciliation_summary.get("newExternalTradeCount", external_trade_count)
-          or 0
+          reconciliation_summary.get("newExternalTradeCount", external_trade_count) or 0
         ),
       )
       working_external_order_count = max(
@@ -826,12 +838,9 @@ class AccountExecutionSafetyService:
       (
         "SNAPSHOT_RECONCILED",
         bool(
-          control
-          and control.reconcile_status == "READY"
-          and position_snapshot_current
+          control and control.reconcile_status == "READY" and position_snapshot_current
         ),
-        position_snapshot_error
-        or "资金、持仓、委托和成交快照尚未完成对账",
+        position_snapshot_error or "资金、持仓、委托和成交快照尚未完成对账",
         "OBSERVATION",
       ),
       (
@@ -972,9 +981,7 @@ class AccountExecutionSafetyService:
       "external_order_count": external_order_count,
       "external_trade_count": external_trade_count,
       "controlled_window_snapshot_id": controlled_window_snapshot_id or None,
-      "controlled_window_started_at": to_naive_utc(
-        control.controlled_window_started_at
-      )
+      "controlled_window_started_at": to_naive_utc(control.controlled_window_started_at)
       if control and control.controlled_window_started_at
       else None,
       "new_external_order_count": new_external_order_count,
@@ -1038,14 +1045,11 @@ class AccountExecutionSafetyService:
           and account_id in dict(payload.get("positions_by_account") or {})
           and account_id
           not in {
-            str(value)
-            for value in list(payload.get("unavailable_accounts") or [])
+            str(value) for value in list(payload.get("unavailable_accounts") or [])
           }
           and all(
             dict(
-              dict(payload.get("section_completeness_by_account") or {}).get(
-                account_id
-              )
+              dict(payload.get("section_completeness_by_account") or {}).get(account_id)
               or {}
             ).get(section)
             is True
@@ -1145,8 +1149,7 @@ class AccountExecutionSafetyService:
     failures = [
       item["message"]
       for item in readiness["checks"]
-      if item["code"] in required_codes
-      and item["status"] == MarketStreamReadinessStatus.FAILED.value
+      if item["code"] in required_codes and _blocks_risk_increase(item["status"])
     ]
     if failures:
       raise ValueError("；".join(failures))
@@ -1246,7 +1249,7 @@ class AccountExecutionSafetyService:
         item["message"]
         for item in readiness["checks"]
         if item["code"] != _AUTHORIZATION_CHECK
-        and item["status"] == MarketStreamReadinessStatus.FAILED.value
+        and _blocks_risk_increase(item["status"])
       ]
       if failures:
         raise ValueError("；".join(failures))

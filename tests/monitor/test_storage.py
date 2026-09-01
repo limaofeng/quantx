@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+import aiosqlite
 import pytest
 from quantx_contracts import (
   ACCOUNT_EXECUTION_SAFETY_CHECK_CODES,
@@ -13,6 +14,39 @@ from quantx_monitor.models import (
   ProbeResult,
 )
 from quantx_monitor.storage import MonitorStorage
+
+
+@pytest.mark.asyncio
+async def test_schema_v3_migration_adds_transient_rollup_count(tmp_path):
+  storage = MonitorStorage(tmp_path / "monitor-v2.sqlite3")
+  storage._db = await aiosqlite.connect(storage.path)
+  try:
+    await storage._db.executescript(
+      """
+      CREATE TABLE safety_hourly_rollups (
+        check_code TEXT NOT NULL,
+        hour_start REAL NOT NULL,
+        sample_count INTEGER NOT NULL,
+        passed_count INTEGER NOT NULL,
+        standby_count INTEGER NOT NULL,
+        failed_count INTEGER NOT NULL,
+        unknown_count INTEGER NOT NULL,
+        PRIMARY KEY (check_code, hour_start)
+      );
+      PRAGMA user_version=2;
+      """
+    )
+
+    await storage._migrate_to_v3()
+
+    columns = await (
+      await storage._db.execute("PRAGMA table_info(safety_hourly_rollups)")
+    ).fetchall()
+    version = await (await storage._db.execute("PRAGMA user_version")).fetchone()
+    assert "transient_count" in {str(row[1]) for row in columns}
+    assert int(version[0]) == 3
+  finally:
+    await storage.close()
 
 
 def result(
@@ -56,6 +90,8 @@ def safety_outcome(
             or status is AccountSafetyCheckStatus.PASSED
             else "MARKET_CLOSED_STANDBY"
             if status is AccountSafetyCheckStatus.STANDBY
+            else "MARKET_STREAM_CATCHING_UP"
+            if status is AccountSafetyCheckStatus.TRANSIENT
             else "MARKET_STREAM_READY_FAILED"
           ),
           public_message=(
@@ -64,6 +100,8 @@ def safety_outcome(
             or status is AccountSafetyCheckStatus.PASSED
             else "当前休市"
             if status is AccountSafetyCheckStatus.STANDBY
+            else "行情链路正在同步追赶"
+            if status is AccountSafetyCheckStatus.TRANSIENT
             else "行情链路未收敛"
           ),
         )
@@ -279,7 +317,7 @@ async def test_unavailable_latency_exception_is_scoped_to_qmt_agent(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_safety_failed_opens_immediately_unknown_preserves_and_standby_resolves(
+async def test_safety_failed_requires_confirmation_unknown_preserves_and_standby_resolves(
   tmp_path,
 ):
   storage = MonitorStorage(tmp_path / "monitor.sqlite3")
@@ -290,13 +328,23 @@ async def test_safety_failed_opens_immediately_unknown_preserves_and_standby_res
       [],
       safety_outcome(started, AccountSafetyCheckStatus.FAILED),
     )
+    first_failed_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert first_failed_state["status"] == "failed"
+    assert first_failed_state["active_incident_id"] is None
+
+    await storage.record_cycle(
+      [],
+      safety_outcome(
+        started + timedelta(seconds=30),
+        AccountSafetyCheckStatus.FAILED,
+      ),
+    )
     failed_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
-    assert failed_state["status"] == "failed"
     assert failed_state["active_incident_id"] is not None
 
     await storage.record_cycle(
       [],
-      safety_outcome(started + timedelta(seconds=30), None),
+      safety_outcome(started + timedelta(seconds=60), None),
     )
     unknown_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
     assert unknown_state["status"] == "unknown"
@@ -305,7 +353,7 @@ async def test_safety_failed_opens_immediately_unknown_preserves_and_standby_res
     await storage.record_cycle(
       [],
       safety_outcome(
-        started + timedelta(seconds=60),
+        started + timedelta(seconds=90),
         AccountSafetyCheckStatus.STANDBY,
       ),
     )
@@ -315,11 +363,87 @@ async def test_safety_failed_opens_immediately_unknown_preserves_and_standby_res
 
     incidents = await storage.account_safety_incidents(
       since=started.timestamp() - 1,
-      now=(started + timedelta(seconds=90)).timestamp(),
+      now=(started + timedelta(seconds=120)).timestamp(),
     )
     assert len(incidents) == 1
+    assert incidents[0]["opened_at"] == pytest.approx(started.timestamp())
     assert incidents[0]["resolved_at"] == pytest.approx(
-      (started + timedelta(seconds=60)).timestamp()
+      (started + timedelta(seconds=90)).timestamp()
     )
+  finally:
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_safety_transient_neither_opens_nor_resolves_an_incident(tmp_path):
+  storage = MonitorStorage(tmp_path / "monitor-transient.sqlite3")
+  await storage.open(["account-safety-observer"])
+  started = datetime(2026, 8, 27, 5, 0, tzinfo=timezone.utc)
+  try:
+    await storage.record_cycle(
+      [],
+      safety_outcome(started, AccountSafetyCheckStatus.TRANSIENT),
+    )
+    transient_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert transient_state["status"] == "transient"
+    assert transient_state["active_incident_id"] is None
+
+    await storage.record_cycle(
+      [],
+      safety_outcome(
+        started + timedelta(seconds=30),
+        AccountSafetyCheckStatus.FAILED,
+      ),
+    )
+    first_failed_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert first_failed_state["active_incident_id"] is None
+
+    await storage.record_cycle(
+      [],
+      safety_outcome(
+        started + timedelta(seconds=60),
+        AccountSafetyCheckStatus.FAILED,
+      ),
+    )
+    failed_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert failed_state["active_incident_id"] is not None
+
+    await storage.record_cycle(
+      [],
+      safety_outcome(
+        started + timedelta(seconds=90),
+        AccountSafetyCheckStatus.TRANSIENT,
+      ),
+    )
+    catching_up_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert catching_up_state["status"] == "transient"
+    assert catching_up_state["active_incident_id"] == failed_state["active_incident_id"]
+
+    await storage.record_cycle(
+      [],
+      safety_outcome(
+        started + timedelta(seconds=120),
+        AccountSafetyCheckStatus.PASSED,
+      ),
+    )
+    recovered_state = (await storage.account_safety_states())["MARKET_STREAM_READY"]
+    assert recovered_state["active_incident_id"] is None
+
+    history = await storage.account_safety_history(
+      "MARKET_STREAM_READY",
+      since=started.timestamp(),
+      now=(started + timedelta(seconds=120)).timestamp(),
+      bucket_seconds=150,
+      interval_seconds=30,
+      use_rollups=False,
+    )
+    assert history[0]["transientCount"] == 2
+    assert history[0]["failedCount"] == 2
+    assert history[0]["status"] == "failed"
+    incidents = await storage.account_safety_incidents(
+      since=started.timestamp(),
+      now=(started + timedelta(seconds=150)).timestamp(),
+    )
+    assert len(incidents) == 1
   finally:
     await storage.close()

@@ -138,29 +138,37 @@ function presentGate(
   const freshness = getFreshness(check, safety, now);
   const failed = check.status === AccountExecutionSafetyCheckStatus.Failed;
   const standby = check.status === AccountExecutionSafetyCheckStatus.Standby;
+  const transient =
+    check.status === AccountExecutionSafetyCheckStatus.Transient;
   const tone: GateTone = failed
     ? 'danger'
-    : standby
-      ? 'standby'
-      : freshness?.tone === 'expired'
-        ? 'danger'
-        : freshness?.tone === 'warning'
-          ? 'warning'
-          : 'success';
+    : transient
+      ? 'warning'
+      : standby
+        ? 'standby'
+        : freshness?.tone === 'expired'
+          ? 'danger'
+          : freshness?.tone === 'warning'
+            ? 'warning'
+            : 'success';
   const statusLabel = failed
     ? '需处理'
-    : standby
-      ? '休市待机'
-      : freshness?.tone === 'expired'
-        ? '已过期'
-        : freshness?.tone === 'warning'
-          ? '即将过期'
-          : '通过';
+    : transient
+      ? '同步中'
+      : standby
+        ? '休市待机'
+        : freshness?.tone === 'expired'
+          ? '已过期'
+          : freshness?.tone === 'warning'
+            ? '即将过期'
+            : '通过';
 
   return {
     check,
     description:
-      failed || standby ? check.message : presentation.passedDescription,
+      failed || transient || standby
+        ? check.message
+        : presentation.passedDescription,
     freshness,
     label: presentation.label,
     statusLabel,
@@ -185,12 +193,16 @@ function formatCountSummary(gates: readonly PresentedGate[]) {
   const standby = gates.filter(
     gate => gate.check.status === AccountExecutionSafetyCheckStatus.Standby
   ).length;
+  const transient = gates.filter(
+    gate => gate.check.status === AccountExecutionSafetyCheckStatus.Transient
+  ).length;
   const failed = gates.filter(
     gate => gate.check.status === AccountExecutionSafetyCheckStatus.Failed
   ).length;
   return [
     passed ? `${passed} 通过` : null,
     standby ? `${standby} 待机` : null,
+    transient ? `${transient} 同步中` : null,
     failed ? `${failed} 异常` : null,
   ]
     .filter(Boolean)
@@ -415,6 +427,9 @@ export function AccountExecutionGateCurrentView({
   const standbyCount = gates.filter(
     gate => gate.check.status === AccountExecutionSafetyCheckStatus.Standby
   ).length;
+  const transientCount = gates.filter(
+    gate => gate.check.status === AccountExecutionSafetyCheckStatus.Transient
+  ).length;
   const passedCount = gates.filter(
     gate => gate.check.status === AccountExecutionSafetyCheckStatus.Passed
   ).length;
@@ -423,21 +438,26 @@ export function AccountExecutionGateCurrentView({
   ).length;
   const summaryTone: GateTone = failedCount
     ? 'danger'
-    : standbyCount
-      ? 'standby'
-      : freshnessWarnings
-        ? 'warning'
-        : 'success';
+    : transientCount
+      ? 'warning'
+      : standbyCount
+        ? 'standby'
+        : freshnessWarnings
+          ? 'warning'
+          : 'success';
   const summaryHeadline = failedCount
     ? `准入检查存在 ${failedCount} 项异常`
-    : standbyCount
-      ? '准入链路正常，当前休市待机'
-      : freshnessWarnings
-        ? `${freshnessWarnings} 项时效即将到期`
-        : '账户实盘准入检查全部通过';
+    : transientCount
+      ? `行情链路有 ${transientCount} 项正在同步`
+      : standbyCount
+        ? '准入链路正常，当前休市待机'
+        : freshnessWarnings
+          ? `${freshnessWarnings} 项时效即将到期`
+          : '账户实盘准入检查全部通过';
   const summaryCounts = [
     `${passedCount} 项通过`,
     standbyCount ? `${standbyCount} 项待机` : null,
+    transientCount ? `${transientCount} 项同步中` : null,
     failedCount ? `${failedCount} 项异常` : null,
   ]
     .filter(Boolean)
@@ -587,6 +607,12 @@ export function AccountExecutionGateCurrentView({
         <p className="flex items-center gap-1.5 text-ui-label text-blue-200/80">
           <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
           休市待机属于预期状态，不计入异常。
+        </p>
+      )}
+      {transientCount > 0 && failedCount === 0 && (
+        <p className="flex items-center gap-1.5 text-ui-label text-amber-200/80">
+          <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
+          同步追赶期间继续阻止增仓，但不形成异常事件。
         </p>
       )}
     </div>

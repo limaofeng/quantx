@@ -47,6 +47,11 @@ const historyStatusPresentation: Record<
     dot: 'bg-primary',
     label: '休市待机',
   },
+  [AccountSafetyHistoryStatus.Transient]: {
+    badge: 'border-warning/25 bg-warning/10 text-warning',
+    dot: 'bg-warning',
+    label: '同步中',
+  },
   [AccountSafetyHistoryStatus.Failed]: {
     badge: 'border-rose-400/25 bg-rose-400/10 text-rose-300',
     dot: 'bg-rose-400',
@@ -466,7 +471,7 @@ export function AccountExecutionSafetyHistoryView({
                   异常事件
                 </h3>
                 <p className="mt-1 text-ui-label leading-5 text-slate-500">
-                  只有明确失败才形成事件；休市待机和未观测不计入异常。
+                  只有连续两次确认的明确失败才形成事件；同步追赶、休市待机和未观测不计入异常。
                 </p>
               </div>
               {incidents.length === 0 ? (
@@ -480,7 +485,7 @@ export function AccountExecutionSafetyHistoryView({
                       所选范围内没有确认的准入异常。
                     </p>
                     <p className="mt-1 text-ui-caption text-slate-500">
-                      休市待机属于预期状态，不会在这里形成事件。
+                      同步追赶和休市待机属于预期状态，不会在这里形成事件。
                     </p>
                   </div>
                 </div>

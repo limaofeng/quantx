@@ -225,6 +225,12 @@ local previous_sequence = tonumber(ARGV[2])
 local incoming = cjson.decode(ARGV[3])
 local incoming_status = tostring(incoming['status'] or '')
 local current_status = tostring(current['status'] or '')
+if current_status ~= 'SYNCING' and current_status ~= 'READY' then
+  return 'STATUS_MISMATCH'
+end
+if tonumber(incoming['generation'] or 0) ~= tonumber(current['generation'] or 0) then
+  return 'GENERATION_MISMATCH'
+end
 if tonumber(current['sequence'] or 0) ~= previous_sequence then
   return 'SEQUENCE_MISMATCH'
 end
@@ -253,6 +259,57 @@ redis.call('SET', KEYS[3], ARGV[5], 'PX', ARGV[6])
 return 'OK'
 """
 
+_MARKET_STREAM_COMMIT_SMALL_DELTA_SCRIPT = """
+-- quantx_market_commit_small_delta_v2
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return 'MISSING_STATE'
+end
+local current = cjson.decode(raw)
+if tostring(current['stream_id'] or '') ~= ARGV[1] then
+  return 'STREAM_MISMATCH'
+end
+local previous_sequence = tonumber(ARGV[2])
+local incoming = cjson.decode(ARGV[3])
+local incoming_status = tostring(incoming['status'] or '')
+local current_status = tostring(current['status'] or '')
+if current_status ~= 'SYNCING' and current_status ~= 'READY' then
+  return 'STATUS_MISMATCH'
+end
+if tonumber(incoming['generation'] or 0) ~= tonumber(current['generation'] or 0) then
+  return 'GENERATION_MISMATCH'
+end
+if tonumber(current['sequence'] or 0) ~= previous_sequence then
+  return 'SEQUENCE_MISMATCH'
+end
+if tostring(current['commit_phase'] or 'IDLE') ~= 'IDLE' then
+  return 'COMMIT_IN_PROGRESS'
+end
+if tonumber(incoming['sequence'] or 0) ~= previous_sequence + 1 then
+  return 'PENDING_SEQUENCE_MISMATCH'
+end
+if current_status == 'SYNCING'
+  and previous_sequence == 1
+  and incoming_status ~= 'SYNCING' then
+  return 'PHASE_MISMATCH'
+end
+if current_status == 'SYNCING'
+  and previous_sequence == 2
+  and incoming_status ~= 'READY' then
+  return 'PHASE_MISMATCH'
+end
+if current_status == 'READY' and incoming_status ~= 'READY' then
+  return 'PHASE_MISMATCH'
+end
+for index = 7, #ARGV, 2 do
+  redis.call('HSET', KEYS[2], ARGV[index], ARGV[index + 1])
+end
+redis.call('SET', KEYS[1], ARGV[3])
+redis.call('PUBLISH', KEYS[3], ARGV[4])
+redis.call('SET', KEYS[4], ARGV[5], 'PX', ARGV[6])
+return 'OK'
+"""
+
 _MARKET_STREAM_READ_STATE_FRESHNESS_SCRIPT = """
 -- quantx_market_read_state_freshness_v2
 local state = redis.call('GET', KEYS[1])
@@ -260,6 +317,17 @@ local freshness = redis.call('GET', KEYS[2])
 if not state then state = false end
 if not freshness then freshness = false end
 return {state, freshness}
+"""
+
+_MARKET_STREAM_READ_READINESS_SNAPSHOT_SCRIPT = """
+-- quantx_market_read_readiness_snapshot_v2
+local state = redis.call('GET', KEYS[1])
+local freshness = redis.call('GET', KEYS[2])
+local engine = redis.call('GET', KEYS[3])
+if not state then state = false end
+if not freshness then freshness = false end
+if not engine then engine = false end
+return {state, freshness, engine}
 """
 
 
@@ -761,33 +829,57 @@ class MarketStreamStore:
         pending_sequence=batch.sequence,
         reason=current.reason,
       )
-      if not resuming_delta:
-        begin_result = await redis.eval(
-          _MARKET_STREAM_BEGIN_DELTA_SCRIPT,
-          1,
+      commit_small_delta = bool(
+        not resuming_delta and len(encoded_ticks) <= MARKET_STREAM_DELTA_CHUNK_SIZE
+      )
+      if commit_small_delta:
+        tick_arguments: list[bytes] = []
+        for code, tick in encoded_ticks.items():
+          tick_arguments.extend((code, tick))
+        result = await redis.eval(
+          _MARKET_STREAM_COMMIT_SMALL_DELTA_SCRIPT,
+          4,
           self.keyspace.state_key,
+          self.keyspace.latest_key,
+          self.keyspace.batch_channel,
+          self.keyspace.freshness_key,
           batch.stream_id,
           str(batch.sequence - 1),
-          applying_state.to_bytes(),
+          state_payload,
+          committed_payload,
+          freshness_payload,
+          str(MARKET_STREAM_FRESHNESS_TTL_MILLISECONDS),
+          *tick_arguments,
         )
-        _require_commit_success(begin_result, kind=batch.kind)
-      entries = iter(encoded_ticks.items())
-      while chunk := list(islice(entries, MARKET_STREAM_DELTA_CHUNK_SIZE)):
-        await redis.hset(self.keyspace.latest_key, mapping=dict(chunk))
-      result = await redis.eval(
-        _MARKET_STREAM_COMMIT_DELTA_SCRIPT,
-        3,
-        self.keyspace.state_key,
-        self.keyspace.batch_channel,
-        self.keyspace.freshness_key,
-        batch.stream_id,
-        str(batch.sequence - 1),
-        state_payload,
-        committed_payload,
-        freshness_payload,
-        str(MARKET_STREAM_FRESHNESS_TTL_MILLISECONDS),
-      )
-      _require_commit_success(result, kind=batch.kind)
+        _require_commit_success(result, kind=batch.kind)
+      else:
+        if not resuming_delta:
+          begin_result = await redis.eval(
+            _MARKET_STREAM_BEGIN_DELTA_SCRIPT,
+            1,
+            self.keyspace.state_key,
+            batch.stream_id,
+            str(batch.sequence - 1),
+            applying_state.to_bytes(),
+          )
+          _require_commit_success(begin_result, kind=batch.kind)
+        entries = iter(encoded_ticks.items())
+        while chunk := list(islice(entries, MARKET_STREAM_DELTA_CHUNK_SIZE)):
+          await redis.hset(self.keyspace.latest_key, mapping=dict(chunk))
+        result = await redis.eval(
+          _MARKET_STREAM_COMMIT_DELTA_SCRIPT,
+          3,
+          self.keyspace.state_key,
+          self.keyspace.batch_channel,
+          self.keyspace.freshness_key,
+          batch.stream_id,
+          str(batch.sequence - 1),
+          state_payload,
+          committed_payload,
+          freshness_payload,
+          str(MARKET_STREAM_FRESHNESS_TTL_MILLISECONDS),
+        )
+        _require_commit_success(result, kind=batch.kind)
       if self._active_stream_id == batch.stream_id:
         self._source_times.update(accepted_source_times)
         self._materialized_codes.update(changed)
@@ -864,6 +956,31 @@ class MarketStreamStore:
     return (
       MarketStreamState.from_bytes(result[0]),
       MarketStreamFreshnessLease.from_bytes(result[1]),
+    )
+
+  async def readiness_snapshot(
+    self,
+  ) -> tuple[
+    MarketStreamState | None,
+    MarketStreamFreshnessLease | None,
+    MarketStreamState | None,
+  ]:
+    """Read API state, freshness and Engine watermark from one Redis instant."""
+
+    redis = await self.redis()
+    result = await redis.eval(
+      _MARKET_STREAM_READ_READINESS_SNAPSHOT_SCRIPT,
+      3,
+      self.keyspace.state_key,
+      self.keyspace.freshness_key,
+      self.keyspace.engine_state_key,
+    )
+    if not isinstance(result, (list, tuple)) or len(result) != 3:
+      raise ValueError("invalid market stream readiness Redis result")
+    return (
+      MarketStreamState.from_bytes(result[0]),
+      MarketStreamFreshnessLease.from_bytes(result[1]),
+      MarketStreamState.from_bytes(result[2]),
     )
 
   async def load_snapshot(

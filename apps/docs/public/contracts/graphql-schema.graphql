@@ -163,6 +163,7 @@ type AccountExecutionSafetyCheck {
 enum AccountExecutionSafetyCheckStatus {
   PASSED
   STANDBY
+  TRANSIENT
   FAILED
 }
 
@@ -200,6 +201,7 @@ type AccountSafetyHistoryPoint {
   sampleCount: Int!
   passedCount: Int!
   standbyCount: Int!
+  transientCount: Int!
   failedCount: Int!
   unknownCount: Int!
 }
@@ -217,6 +219,7 @@ enum AccountSafetyHistoryRange {
 enum AccountSafetyHistoryStatus {
   PASSED
   STANDBY
+  TRANSIENT
   FAILED
   UNKNOWN
 }

@@ -239,3 +239,61 @@ async def test_incident_pages_exclude_late_persistence_of_earlier_probes(tmp_pat
         assert response.status_code == 422
   finally:
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_account_safety_counts_are_not_truncated_with_incident_rows(tmp_path):
+  storage = MonitorStorage(tmp_path / "safety-counts.sqlite3")
+  await storage.open(target.target_id for target in TARGETS)
+  now = datetime.now(timezone.utc)
+  epoch = now.timestamp()
+  try:
+    assert storage._db is not None
+    await storage._db.executemany(
+      """
+      INSERT INTO safety_check_incidents (
+        check_code, opened_at, resolved_at, opened_reason_code,
+        last_reason_code, opened_message, last_message,
+        last_confirmed_failed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      """,
+      [
+        (
+          "MARKET_STREAM_READY",
+          epoch - index,
+          epoch - index + 0.5,
+          "MARKET_STREAM_READY_FAILED",
+          "MARKET_STREAM_READY_FAILED",
+          "行情链路失败",
+          "行情链路失败",
+          epoch - index,
+        )
+        for index in range(1, 206)
+      ],
+    )
+    await storage._db.commit()
+    settings = MonitorSettings(
+      MONITOR_DATABASE_PATH=tmp_path / "safety-counts.sqlite3",
+      MONITOR_CHECK_INTERVAL_SECONDS=30,
+    )
+    runtime = SimpleNamespace(storage=storage, settings=settings)
+    app = FastAPI()
+    app.include_router(build_router(runtime))
+
+    async with httpx.AsyncClient(
+      transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+      response = await client.get(
+        "/monitor/internal/api/v1/account-safety/history?range=24h"
+      )
+
+    assert response.status_code == 200
+    payload = response.json()
+    market = next(
+      item for item in payload["checks"] if item["code"] == "MARKET_STREAM_READY"
+    )
+    assert market["incidentCount"] == 205
+    assert len(payload["incidents"]) == 200
+    assert payload["incidentsTruncated"] is True
+  finally:
+    await storage.close()

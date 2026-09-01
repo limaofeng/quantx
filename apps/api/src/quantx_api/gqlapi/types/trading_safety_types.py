@@ -19,6 +19,7 @@ class AccountExecutionHealthStatus(Enum):
 class AccountExecutionSafetyCheckStatus(Enum):
   PASSED = "PASSED"
   STANDBY = "STANDBY"
+  TRANSIENT = "TRANSIENT"
   FAILED = "FAILED"
 
 
@@ -35,6 +36,7 @@ class AccountSafetyHistoryRange(Enum):
 class AccountSafetyHistoryStatus(Enum):
   PASSED = "PASSED"
   STANDBY = "STANDBY"
+  TRANSIENT = "TRANSIENT"
   FAILED = "FAILED"
   UNKNOWN = "UNKNOWN"
 
@@ -47,6 +49,7 @@ class AccountSafetyHistoryPoint:
   sample_count: int
   passed_count: int
   standby_count: int
+  transient_count: int
   failed_count: int
   unknown_count: int
 

@@ -76,3 +76,36 @@ async def test_observation_rejects_incomplete_check_results(monkeypatch):
   )
   with pytest.raises(RuntimeError, match="missing check"):
     await observation.account_safety_observation_snapshot()
+
+
+@pytest.mark.asyncio
+async def test_observation_projects_market_catchup_without_an_incident_status(
+  monkeypatch,
+):
+  monkeypatch.setattr(
+    observation.settings, "real_trading_account_allowlist", ["account-a"]
+  )
+  monkeypatch.setattr(
+    observation.AccountExecutionSafetyService,
+    "checks",
+    AsyncMock(
+      return_value=[
+        {
+          "code": code,
+          "status": "TRANSIENT" if code == "MARKET_STREAM_READY" else "PASSED",
+          "scope": "INCREASE_RISK",
+          "message": (
+            "Engine 正在追赶全市场行情水位" if code == "MARKET_STREAM_READY" else ""
+          ),
+        }
+        for code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES
+      ]
+    ),
+  )
+
+  snapshot = await observation.account_safety_observation_snapshot()
+  market = next(item for item in snapshot.checks if item.code == "MARKET_STREAM_READY")
+
+  assert market.status.value == "TRANSIENT"
+  assert market.reason_code == "MARKET_STREAM_CATCHING_UP"
+  assert "追赶" in market.public_message

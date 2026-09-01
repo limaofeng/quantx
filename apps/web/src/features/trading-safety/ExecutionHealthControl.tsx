@@ -434,12 +434,14 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
   const executionLabel = unknown
     ? '安全关闭'
     : accountExecutionModeLabel(safety?.executionMode);
-  const failedChecks =
+  const blockedChecks =
     safety?.checks.filter(
-      check => check.status === AccountExecutionSafetyCheckStatus.Failed
+      check =>
+        check.status === AccountExecutionSafetyCheckStatus.Failed ||
+        check.status === AccountExecutionSafetyCheckStatus.Transient
     ) ?? [];
   const blockedReason = accountSafetyReason(
-    safety?.blockedReasons[0] || failedChecks[0]?.message
+    safety?.blockedReasons[0] || blockedChecks[0]?.message
   );
   const orderChainHealthy = Boolean(
     safety &&

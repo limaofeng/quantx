@@ -120,6 +120,15 @@ class FakeRedis:
       state_key, freshness_key = args
       return [self.values.get(state_key), self.values.get(freshness_key)]
 
+    if "quantx_market_read_readiness_snapshot_v2" in script:
+      assert numkeys == 3
+      state_key, freshness_key, engine_state_key = args
+      return [
+        self.values.get(state_key),
+        self.values.get(freshness_key),
+        self.values.get(engine_state_key),
+      ]
+
     if "quantx_market_mark_syncing_v2" in script:
       assert numkeys == 3
       (
@@ -197,11 +206,55 @@ class FakeRedis:
         return b"MISSING_STATE"
       if current.stream_id != stream_id:
         return b"STREAM_MISMATCH"
+      if current.status not in {"SYNCING", "READY"}:
+        return b"STATUS_MISMATCH"
       if current.commit_phase != "IDLE":
         return b"COMMIT_IN_PROGRESS"
       if current.sequence != int(previous_sequence):
         return b"SEQUENCE_MISMATCH"
       self.values[state_key] = state_payload
+      return b"OK"
+
+    if "quantx_market_commit_small_delta_v2" in script:
+      assert numkeys == 4
+      state_key, latest_key, channel, freshness_key = args[:4]
+      (
+        stream_id,
+        previous_sequence,
+        state_payload,
+        payload,
+        freshness_payload,
+        freshness_ttl,
+      ) = args[4:10]
+      current = MarketStreamState.from_bytes(self.values.get(state_key))
+      if current is None:
+        return b"MISSING_STATE"
+      if current.stream_id != stream_id:
+        return b"STREAM_MISMATCH"
+      if current.status not in {"SYNCING", "READY"}:
+        return b"STATUS_MISMATCH"
+      if current.commit_phase != "IDLE":
+        return b"COMMIT_IN_PROGRESS"
+      if current.sequence != int(previous_sequence):
+        return b"SEQUENCE_MISMATCH"
+      incoming = MarketStreamState.from_bytes(state_payload)
+      if incoming.generation != current.generation:
+        return b"GENERATION_MISMATCH"
+      if incoming.sequence != current.sequence + 1:
+        return b"PENDING_SEQUENCE_MISMATCH"
+      tick_arguments = args[10:]
+      assert len(tick_arguments) % 2 == 0
+      latest = self.hashes.setdefault(latest_key, {})
+      latest.update(
+        {
+          tick_arguments[index]: tick_arguments[index + 1]
+          for index in range(0, len(tick_arguments), 2)
+        }
+      )
+      self.values[state_key] = state_payload
+      self.published.append((channel, payload))
+      self.values[freshness_key] = freshness_payload
+      self.expirations[freshness_key] = int(freshness_ttl)
       return b"OK"
 
     if "quantx_market_commit_delta_v2" in script:
@@ -220,12 +273,16 @@ class FakeRedis:
         return b"MISSING_STATE"
       if current.stream_id != stream_id:
         return b"STREAM_MISMATCH"
+      if current.status not in {"SYNCING", "READY"}:
+        return b"STATUS_MISMATCH"
       previous = int(previous_sequence)
       if current.commit_phase != "APPLYING":
         return b"COMMIT_PHASE_MISMATCH"
       if current.sequence != previous:
         return b"SEQUENCE_MISMATCH"
       incoming = MarketStreamState.from_bytes(state_payload)
+      if incoming.generation != current.generation:
+        return b"GENERATION_MISMATCH"
       if current.pending_sequence != incoming.sequence:
         return b"PENDING_SEQUENCE_MISMATCH"
       self.values[state_key] = state_payload
@@ -389,12 +446,22 @@ async def test_store_requires_snapshot_then_commits_before_binary_publish() -> N
     MarketBatchKind.DELTA,
     {"600000.SH": {"lastPrice": 10.2, "time": 120}},
   )
+  observed_commit_phases: list[str] = []
+
+  async def observe_before_atomic_delta() -> None:
+    observed = await store.state()
+    assert observed is not None
+    observed_commit_phases.append(observed.commit_phase)
+
+  redis.before_eval = observe_before_atomic_delta
   await store.write_batch(update, update.to_bytes())
   loaded = await store.load_snapshot()
   assert loaded is not None
   state, latest = loaded
   assert state.status == "READY"
   assert state.sequence == 4
+  assert state.commit_phase == "IDLE"
+  assert observed_commit_phases == ["IDLE"]
   assert latest["600000.SH"]["lastPrice"] == 10.2
   _, freshness = await store.state_with_freshness()
   assert freshness == MarketStreamFreshnessLease(
@@ -407,6 +474,25 @@ async def test_store_requires_snapshot_then_commits_before_binary_publish() -> N
     (MARKET_STREAM_BATCH_CHANNEL, confirmation.to_bytes()),
     (MARKET_STREAM_BATCH_CHANNEL, update.to_bytes()),
   ]
+  await store.write_engine_state(
+    status="READY",
+    stream_id=state.stream_id,
+    generation=state.generation,
+    sequence=state.sequence,
+    captured_at=state.captured_at,
+    instrument_count=state.instrument_count,
+    universe_count=state.universe_count,
+    universe_hash=state.universe_hash,
+  )
+  (
+    readiness_state,
+    readiness_freshness,
+    readiness_engine,
+  ) = await store.readiness_snapshot()
+  assert readiness_state == state
+  assert readiness_freshness == freshness
+  assert readiness_engine is not None
+  assert readiness_engine.sequence == state.sequence
 
 
 @pytest.mark.asyncio
@@ -913,6 +999,44 @@ async def test_stale_delta_writer_cannot_modify_new_stream_state_hash_or_publish
   assert store._active_stream_id == "new-stream"
   assert store._active_codes == frozenset()
   assert store._source_times == {}
+
+
+@pytest.mark.asyncio
+async def test_atomic_delta_cannot_resurrect_an_offline_stream() -> None:
+  redis = FakeRedis()
+  store = MarketStreamStore(redis)
+  await store.mark_syncing("stream-1")
+  snapshot = make_batch(
+    1,
+    MarketBatchKind.SNAPSHOT,
+    {"600000.SH": {"lastPrice": 10.0, "time": 100}},
+  )
+  await store.write_batch(snapshot, snapshot.to_bytes())
+  for sequence in (2, 3):
+    barrier = make_batch(sequence, MarketBatchKind.DELTA, {})
+    await store.write_batch(barrier, barrier.to_bytes())
+  latest_before = dict(redis.hashes[MARKET_STREAM_LATEST_KEY])
+  published_before = list(redis.published)
+
+  async def stop_stream() -> None:
+    assert await store.mark_offline("stream-1", reason="connection closed")
+
+  redis.before_eval = stop_stream
+  update = make_batch(
+    4,
+    MarketBatchKind.DELTA,
+    {"600000.SH": {"lastPrice": 10.2, "time": 120}},
+  )
+
+  with pytest.raises(ValueError, match="CAS rejected: STATUS_MISMATCH"):
+    await store.write_batch(update, update.to_bytes())
+
+  state = await store.state()
+  assert state is not None
+  assert state.status == "OFFLINE"
+  assert state.sequence == 3
+  assert redis.hashes[MARKET_STREAM_LATEST_KEY] == latest_before
+  assert redis.published == published_before
 
 
 @pytest.mark.asyncio

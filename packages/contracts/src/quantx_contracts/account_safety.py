@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-ACCOUNT_SAFETY_OBSERVATION_SCHEMA_VERSION = 1
+ACCOUNT_SAFETY_OBSERVATION_SCHEMA_VERSION = 2
 ACCOUNT_EXECUTION_SAFETY_CHECK_CODES: tuple[str, ...] = (
   "SERVER_REAL_TRADING_ENABLED",
   "ACCOUNT_ALLOWLISTED",
@@ -37,6 +37,7 @@ ACCOUNT_EXECUTION_SAFETY_CHECK_CODE_SET = frozenset(
 class AccountSafetyCheckStatus(StrEnum):
   PASSED = "PASSED"
   STANDBY = "STANDBY"
+  TRANSIENT = "TRANSIENT"
   FAILED = "FAILED"
 
 
@@ -71,7 +72,7 @@ class AccountSafetyObservationSnapshot(BaseModel):
 
   model_config = ConfigDict(extra="forbid")
 
-  schema_version: Literal[1] = ACCOUNT_SAFETY_OBSERVATION_SCHEMA_VERSION
+  schema_version: Literal[2] = ACCOUNT_SAFETY_OBSERVATION_SCHEMA_VERSION
   status: Literal["ready", "disabled"]
   observed_at: datetime
   checks: list[AccountSafetyCheckObservation] = Field(max_length=18)
@@ -90,5 +91,7 @@ class AccountSafetyObservationSnapshot(BaseModel):
       if codes:
         raise ValueError("disabled account-safety snapshots must not include checks")
     elif codes != ACCOUNT_EXECUTION_SAFETY_CHECK_CODES:
-      raise ValueError("ready account-safety snapshots must contain every check in order")
+      raise ValueError(
+        "ready account-safety snapshots must contain every check in order"
+      )
     return self

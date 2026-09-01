@@ -48,7 +48,7 @@ async def test_probe_accepts_only_the_complete_versioned_snapshot():
 @pytest.mark.asyncio
 async def test_probe_turns_a_schema_mismatch_into_unknown_observation_source():
   async def handler(_request: httpx.Request) -> httpx.Response:
-    return httpx.Response(200, json={"schema_version": 2})
+    return httpx.Response(200, json={"schema_version": 1})
 
   async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
     outcome = await AccountSafetyProbe("http://api", 1).run(client)

@@ -20,7 +20,7 @@ from .models import (
   percentile,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 HOUR_SECONDS = 3600
 
 
@@ -57,6 +57,9 @@ class MonitorStorage:
     elif current_version < 2:
       await self._migrate_to_v2()
       current_version = 2
+    if current_version < 3:
+      await self._migrate_to_v3()
+      current_version = 3
     for target_id in self._target_ids:
       await self._db.execute(
         """
@@ -181,6 +184,7 @@ class MonitorStorage:
         sample_count INTEGER NOT NULL,
         passed_count INTEGER NOT NULL,
         standby_count INTEGER NOT NULL,
+        transient_count INTEGER NOT NULL,
         failed_count INTEGER NOT NULL,
         unknown_count INTEGER NOT NULL,
         PRIMARY KEY (check_code, hour_start)
@@ -188,7 +192,7 @@ class MonitorStorage:
       CREATE INDEX ix_safety_hourly_rollups_time
         ON safety_hourly_rollups (hour_start);
 
-      PRAGMA user_version=2;
+      PRAGMA user_version=3;
       """
     )
     await self._db.commit()
@@ -247,6 +251,17 @@ class MonitorStorage:
       CREATE INDEX IF NOT EXISTS ix_safety_hourly_rollups_time
         ON safety_hourly_rollups (hour_start);
       PRAGMA user_version=2;
+      """
+    )
+    await self._db.commit()
+
+  async def _migrate_to_v3(self) -> None:
+    assert self._db is not None
+    await self._db.executescript(
+      """
+      ALTER TABLE safety_hourly_rollups
+        ADD COLUMN transient_count INTEGER NOT NULL DEFAULT 0;
+      PRAGMA user_version=3;
       """
     )
     await self._db.commit()
@@ -335,24 +350,28 @@ class MonitorStorage:
       if status == AccountSafetyHistoryStatus.FAILED.value:
         last_confirmed_at = checked_at
         if active_incident_id is None:
-          cursor = await self._db.execute(
-            """
-            INSERT INTO safety_check_incidents (
-              check_code, opened_at, opened_reason_code, last_reason_code,
-              opened_message, last_message, last_confirmed_failed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-              check_code,
-              checked_at,
-              reason_code,
-              reason_code,
-              public_message,
-              public_message,
-              checked_at,
-            ),
-          )
-          active_incident_id = cursor.lastrowid
+          if str(row["status"]) == AccountSafetyHistoryStatus.FAILED.value:
+            opened_at = float(row["checked_at"] or checked_at)
+            opened_reason_code = row["reason_code"] or reason_code
+            opened_message = str(row["public_message"] or public_message)
+            cursor = await self._db.execute(
+              """
+              INSERT INTO safety_check_incidents (
+                check_code, opened_at, opened_reason_code, last_reason_code,
+                opened_message, last_message, last_confirmed_failed_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              """,
+              (
+                check_code,
+                opened_at,
+                opened_reason_code,
+                reason_code,
+                opened_message,
+                public_message,
+                checked_at,
+              ),
+            )
+            active_incident_id = cursor.lastrowid
         else:
           await self._db.execute(
             """
@@ -802,6 +821,7 @@ class MonitorStorage:
           ("sampleCount", "sample_count"),
           ("passedCount", "passed_count"),
           ("standbyCount", "standby_count"),
+          ("transientCount", "transient_count"),
           ("failedCount", "failed_count"),
           ("unknownCount", "unknown_count"),
         ):
@@ -825,6 +845,7 @@ class MonitorStorage:
         status_key = {
           "passed": "passedCount",
           "standby": "standbyCount",
+          "transient": "transientCount",
           "failed": "failedCount",
           "unknown": "unknownCount",
         }[str(row["status"])]
@@ -848,6 +869,7 @@ class MonitorStorage:
       "sampleCount": 0,
       "passedCount": 0,
       "standbyCount": 0,
+      "transientCount": 0,
       "failedCount": 0,
       "unknownCount": 0,
     }
@@ -860,6 +882,8 @@ class MonitorStorage:
   ) -> dict[str, Any]:
     if item["failedCount"]:
       status = AccountSafetyHistoryStatus.FAILED
+    elif item["transientCount"]:
+      status = AccountSafetyHistoryStatus.TRANSIENT
     elif item["passedCount"] or item["standbyCount"]:
       status = (
         AccountSafetyHistoryStatus.STANDBY
@@ -868,7 +892,12 @@ class MonitorStorage:
       )
     else:
       status = AccountSafetyHistoryStatus.UNKNOWN
-    confirmed = item["passedCount"] + item["standbyCount"] + item["failedCount"]
+    confirmed = (
+      item["passedCount"]
+      + item["standbyCount"]
+      + item["transientCount"]
+      + item["failedCount"]
+    )
     item["status"] = status.value
     item["coveragePct"] = min(100.0, confirmed / expected_samples * 100)
     return item
@@ -896,6 +925,28 @@ class MonitorStorage:
       )
     ).fetchall()
     return [dict(row) for row in rows]
+
+  async def account_safety_incident_counts(
+    self,
+    *,
+    since: float,
+    now: float,
+  ) -> dict[str, int]:
+    """Count all overlapping incidents without the history row limit."""
+
+    assert self._db is not None
+    rows = await (
+      await self._db.execute(
+        """
+        SELECT check_code, COUNT(*) AS incident_count
+        FROM safety_check_incidents
+        WHERE opened_at <= ? AND (resolved_at IS NULL OR resolved_at >= ?)
+        GROUP BY check_code
+        """,
+        (now, since),
+      )
+    ).fetchall()
+    return {str(row["check_code"]): int(row["incident_count"] or 0) for row in rows}
 
   async def rollup_and_retain(
     self,
@@ -1053,8 +1104,8 @@ class MonitorStorage:
       """
       INSERT OR REPLACE INTO safety_hourly_rollups (
         check_code, hour_start, sample_count, passed_count, standby_count,
-        failed_count, unknown_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        transient_count, failed_count, unknown_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       """,
       (
         check_code,
@@ -1062,6 +1113,7 @@ class MonitorStorage:
         len(rows),
         counts["passed"],
         counts["standby"],
+        counts["transient"],
         counts["failed"],
         counts["unknown"],
       ),

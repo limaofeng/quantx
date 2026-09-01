@@ -121,8 +121,7 @@ class AccountExecutionSafetyResolver:
     return AccountSafetyHistory(
       available=bool(payload.get("available")),
       range=history_range,
-      generated_at=_aware(payload.get("generatedAt"))
-      or datetime.now(timezone.utc),
+      generated_at=_aware(payload.get("generatedAt")) or datetime.now(timezone.utc),
       first_observed_at=_aware(payload.get("firstObservedAt")),
       last_observed_at=_aware(payload.get("lastObservedAt")),
       observer_fresh=bool(payload.get("observerFresh")),
@@ -166,6 +165,7 @@ class AccountExecutionSafetyResolver:
           sample_count=int(point.get("sampleCount") or 0),
           passed_count=int(point.get("passedCount") or 0),
           standby_count=int(point.get("standbyCount") or 0),
+          transient_count=int(point.get("transientCount") or 0),
           failed_count=int(point.get("failedCount") or 0),
           unknown_count=int(point.get("unknownCount") or 0),
         )
@@ -182,9 +182,7 @@ class AccountExecutionSafetyResolver:
       check_code=str(item.get("checkCode") or ""),
       opened_at=opened_at,
       resolved_at=_aware(item.get("resolvedAt")),
-      last_confirmed_failed_at=(
-        _aware(item.get("lastConfirmedFailedAt")) or opened_at
-      ),
+      last_confirmed_failed_at=(_aware(item.get("lastConfirmedFailedAt")) or opened_at),
       active=bool(item.get("active")),
       observation_fresh=bool(item.get("observationFresh")),
       opened_reason_code=str(item.get("openedReasonCode") or "UNKNOWN"),

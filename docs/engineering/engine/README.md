@@ -289,5 +289,7 @@ Pub/Sub 缺批时 Hub 从 Redis 最新全量快照收敛，不重放可能过时
 sequence 2 连续性屏障提交后仍保持 `SYNCING`。Agent 收到其 ACK 后强制发送
 sequence 3 readiness-confirm（可为空），只有该批次被同一 Redis CAS 提交后，
 API、Engine 与 freshness lease 的 stream/sequence 才完全一致，Hub 才首次向
-消费者分发完整中央快照；之后真实有序回调从 sequence 4 开始。任一水位或租约
-不一致时，策略、条件清仓和自动退出等实时交易动作保持关闭。
+消费者分发完整中央快照；之后真实有序回调从 sequence 4 开始。同一
+stream/generation 下 API 暂时领先且 Engine 最近 3 秒仍持续推进时，账户准入投影为
+`TRANSIENT`，实时增仓动作保持关闭但 Monitor 不创建事故；推进停止、身份不一致、
+水位回退或租约过期才投影为 `FAILED`。

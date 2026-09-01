@@ -141,6 +141,109 @@ def test_authoritative_market_readiness_is_passed_only_during_a_fresh_session() 
   assert readiness.tradable_now
 
 
+def test_authoritative_market_readiness_marks_recent_engine_progress_as_transient() -> (
+  None
+):
+  observed_at = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
+  stream = SimpleNamespace(
+    status="READY",
+    commit_phase="IDLE",
+    generation=7,
+    sequence=125,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(milliseconds=50),
+  )
+  freshness = SimpleNamespace(stream_id="stream-1", sequence=125)
+  engine = SimpleNamespace(
+    status="READY",
+    generation=7,
+    sequence=119,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(milliseconds=1500),
+  )
+
+  readiness = classify_authoritative_market_stream_readiness(
+    stream_state=stream,
+    freshness_lease=freshness,
+    engine_state=engine,
+    trading_session=True,
+    observed_at=observed_at,
+  )
+
+  assert readiness.status is MarketStreamReadinessStatus.TRANSIENT
+  assert readiness.sequence_lag == 6
+  assert readiness.progress_age_seconds == pytest.approx(1.5)
+  assert not readiness.tradable_now
+  assert "落后 6 批" in readiness.message
+
+
+def test_authoritative_market_readiness_fails_when_engine_progress_stalls() -> None:
+  observed_at = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
+  stream = SimpleNamespace(
+    status="READY",
+    commit_phase="IDLE",
+    generation=7,
+    sequence=125,
+    stream_id="stream-1",
+    updated_at=observed_at,
+  )
+  freshness = SimpleNamespace(stream_id="stream-1", sequence=125)
+  engine = SimpleNamespace(
+    status="READY",
+    generation=7,
+    sequence=119,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(seconds=4),
+  )
+
+  readiness = classify_authoritative_market_stream_readiness(
+    stream_state=stream,
+    freshness_lease=freshness,
+    engine_state=engine,
+    trading_session=True,
+    observed_at=observed_at,
+  )
+
+  assert readiness.status is MarketStreamReadinessStatus.FAILED
+  assert not readiness.tradable_now
+  assert "长时间未收敛" in readiness.message
+
+
+def test_authoritative_market_readiness_marks_short_atomic_commit_as_transient() -> (
+  None
+):
+  observed_at = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
+  stream = SimpleNamespace(
+    status="READY",
+    commit_phase="APPLYING",
+    pending_sequence=126,
+    generation=7,
+    sequence=125,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(milliseconds=20),
+  )
+  freshness = SimpleNamespace(stream_id="stream-1", sequence=125)
+  engine = SimpleNamespace(
+    status="READY",
+    generation=7,
+    sequence=125,
+    stream_id="stream-1",
+    updated_at=observed_at - timedelta(milliseconds=50),
+  )
+
+  readiness = classify_authoritative_market_stream_readiness(
+    stream_state=stream,
+    freshness_lease=freshness,
+    engine_state=engine,
+    trading_session=True,
+    observed_at=observed_at,
+  )
+
+  assert readiness.status is MarketStreamReadinessStatus.TRANSIENT
+  assert not readiness.tradable_now
+  assert "原子提交" in readiness.message
+
+
 def test_authoritative_market_readiness_is_standby_while_market_is_closed() -> None:
   stream = SimpleNamespace(
     status="READY",
@@ -298,11 +401,17 @@ async def _status(
         message=(
           "当前休市，权威水位已收敛"
           if market_status is MarketStreamReadinessStatus.STANDBY
+          else "Engine 正在追赶全市场行情水位"
+          if market_status is MarketStreamReadinessStatus.TRANSIENT
           else "全市场行情未就绪"
           if market_status is MarketStreamReadinessStatus.FAILED
           else ""
         ),
-        converged=market_status is not MarketStreamReadinessStatus.FAILED,
+        converged=market_status
+        in {
+          MarketStreamReadinessStatus.PASSED,
+          MarketStreamReadinessStatus.STANDBY,
+        },
         freshness_current=market_status is MarketStreamReadinessStatus.PASSED,
         trading_session=market_status is MarketStreamReadinessStatus.PASSED,
       )
@@ -388,16 +497,21 @@ async def test_external_activity_explains_confirmation_without_relaxing_gates(
     workingExternalOrderCount=working_orders,
   )
 
-  result = await _status(monkeypatch, [(
-    control,
-    SimpleNamespace(status="READY", updated_at=fixed_utcnow),
-    _device("device-1"),
-    agent,
-    0,
-    None,
-    0,
-    0,
-  )])
+  result = await _status(
+    monkeypatch,
+    [
+      (
+        control,
+        SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+        _device("device-1"),
+        agent,
+        0,
+        None,
+        0,
+        0,
+      )
+    ],
+  )
 
   checks = {item["code"]: item for item in result["checks"]}
   assert checks["NO_EXTERNAL_BROKER_ACTIVITY"]["status"] == "FAILED"
@@ -471,7 +585,7 @@ async def test_account_status_blocks_increase_until_market_stream_is_ready(
   checks = {item["code"]: item for item in result["checks"]}
 
   assert result["can_increase_risk"] is False
-  assert checks["MARKET_STREAM_READY"]["status"] == "FAILED"
+  assert checks["MARKET_STREAM_READY"]["status"] == "TRANSIENT"
   assert "QMT Agent" in checks["MARKET_STREAM_READY"]["message"]
 
 
@@ -503,6 +617,38 @@ async def test_account_status_rejects_agent_ready_claim_without_server_watermark
 
   assert result["can_increase_risk"] is False
   assert checks["MARKET_STREAM_READY"]["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_account_status_keeps_transient_market_catchup_fail_closed(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+) -> None:
+  rows = [
+    (
+      _control(fixed_utcnow),
+      SimpleNamespace(status="READY", updated_at=fixed_utcnow),
+      _device("device-1"),
+      _agent(fixed_utcnow),
+      _api(fixed_utcnow),
+      0,
+      None,
+      0,
+      0,
+    )
+  ]
+
+  result = await _status(
+    monkeypatch,
+    rows,
+    market_status=MarketStreamReadinessStatus.TRANSIENT,
+  )
+  checks = {item["code"]: item for item in result["checks"]}
+
+  assert checks["MARKET_STREAM_READY"]["status"] == "TRANSIENT"
+  assert result["can_increase_risk"] is False
+  assert result["can_reduce_risk"] is True
+  assert "追赶" in result["blocked_reasons"][0]
 
 
 @pytest.mark.asyncio

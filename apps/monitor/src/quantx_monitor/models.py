@@ -21,6 +21,7 @@ class MonitorStatus(StrEnum):
 class AccountSafetyHistoryStatus(StrEnum):
   PASSED = "passed"
   STANDBY = "standby"
+  TRANSIENT = "transient"
   FAILED = "failed"
   UNKNOWN = "unknown"
 

@@ -364,14 +364,14 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     instrument_count=5_000,
   )
 
-  async def state_with_freshness():
-    return stream_state, MarketStreamFreshnessLease(
-      stream_id=stream_state.stream_id,
-      sequence=stream_state.sequence,
-    )
+  current_freshness = MarketStreamFreshnessLease(
+    stream_id=stream_state.stream_id,
+    sequence=stream_state.sequence,
+  )
+  current_engine_state = stream_state
 
-  async def engine_state():
-    return stream_state
+  async def readiness_snapshot():
+    return stream_state, current_freshness, current_engine_state
 
   async def inside_session(*_args):
     return True
@@ -381,13 +381,8 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
 
   monkeypatch.setattr(
     runtime_status.market_stream_store,
-    "state_with_freshness",
-    state_with_freshness,
-  )
-  monkeypatch.setattr(
-    runtime_status.market_stream_store,
-    "engine_state",
-    engine_state,
+    "readiness_snapshot",
+    readiness_snapshot,
   )
   monkeypatch.setattr(
     runtime_status.TradingTimeService,
@@ -471,15 +466,11 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
   assert components["engine"]["status"] == "ready"
   assert "market-data" not in components
 
-  monkeypatch.setattr(
-    runtime_status.market_stream_store,
-    "engine_state",
-    AsyncMock(return_value=replace(stream_state, sequence=4)),
-  )
+  current_engine_state = replace(stream_state, sequence=4)
   components = await runtime_status._component_heartbeats()
   assert components["engine"]["status"] == "degraded"
   assert components["engine"]["reasonCode"] == "ENGINE_MARKET_NOT_READY"
-  monkeypatch.setattr(runtime_status.market_stream_store, "engine_state", engine_state)
+  current_engine_state = stream_state
 
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
@@ -552,14 +543,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     heartbeat.status = "READY"
     await db.commit()
 
-  async def state_without_freshness():
-    return stream_state, None
-
-  monkeypatch.setattr(
-    runtime_status.market_stream_store,
-    "state_with_freshness",
-    state_without_freshness,
-  )
+  current_freshness = None
   components = await runtime_status._component_heartbeats()
   assert components["engine"]["marketConsumption"]["status"] == "stale"
   assert components["engine"]["marketConsumption"]["readinessStatus"] == "failed"

@@ -266,12 +266,12 @@ def build_router(runtime: RuntimeView) -> APIRouter:
       now=now,
       limit=201,
     )
+    incident_counts = await runtime.storage.account_safety_incident_counts(
+      since=since,
+      now=now,
+    )
     incidents_truncated = len(incident_rows) > 200
     incident_rows = incident_rows[:200]
-    incident_counts: dict[str, int] = {}
-    for row in incident_rows:
-      code = str(row["check_code"])
-      incident_counts[code] = incident_counts.get(code, 0) + 1
 
     checks: list[dict[str, object]] = []
     for code in ACCOUNT_EXECUTION_SAFETY_CHECK_CODES:

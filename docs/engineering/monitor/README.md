@@ -52,9 +52,11 @@ P50/P95，不将其解释为行情传输延迟。不再采集重复的 `market-d
 账户实盘准入采用单向见证模型：API 内的 `AccountExecutionSafetyService` 是唯一
 判定者，Monitor 每 30 秒从 API 回环地址读取一次完整、脱敏且不含账户标识的准入
 快照，只负责留痕。Monitor 不复算门禁、不向主系统回写状态，它自身不可用时也不会
-改变账户交易能力。准入状态固定为 `passed / standby / failed / unknown`：明确
-`failed` 立即打开异常，`passed` 或 `standby` 关闭异常，采集或协议中断记为
-`unknown` 且不打开或关闭既有异常。`standby` 表示休市等正常待机，不属于异常。
+改变账户交易能力。准入状态固定为
+`passed / standby / transient / failed / unknown`：连续两次明确 `failed` 才打开异常，
+`passed` 或 `standby` 关闭异常；`transient` 表示原子提交或 Engine 水位持续推进中的
+短暂追赶，仍阻止增仓，但不打开或关闭既有异常；采集或协议中断记为 `unknown`，
+同样不打开或关闭既有异常。`standby` 表示休市等正常待机，不属于异常。
 
 状态词汇固定为 `healthy / degraded / unavailable / unknown / disabled`。连续两次
 `unavailable` 才打开事故；事故打开后连续两次 `healthy` 才关闭。第一次失败和
@@ -71,7 +73,8 @@ SQLite 使用 WAL、事务写入和版本化 schema：
 - 每次检测保存观测状态、去抖后的有效状态、耗时、HTTP 状态码和稳定原因码；
 - 活动事故与关闭时间持久化，Monitor 重启后继续沿用连续计数和事故状态。
 - 准入原始样本同样保留 90 天，小时汇总和异常事件保留 365 天；准入历史与普通
-  服务状态使用独立表和状态机。
+  服务状态使用独立表和状态机；检查项的事故计数使用完整时间窗口聚合，不受最近
+  200 条事件展示上限影响。
 
 统一 `backup` 在历史库存在时通过 SQLite online backup API 写入
 `monitor/quantx-monitor.sqlite3`，`restore-verify` 会校验清单、哈希和

@@ -56,7 +56,10 @@ Market Gateway 的供给健康快照，不触发 API 的账户、Engine 或 Pref
   不依赖账户交易能力或 Engine；休市时允许租约自然过期，但连接与快照仍须有效。
 - Engine 的消费水位、新鲜度与收敛检查归 `engine.marketConsumption`；消费异常使
   就绪的引擎组件降级，不会让正常的行情供给变红。实盘准入仍独立校验 Agent、
-  行情供给和 Engine 完整权威水位，休市为 `STANDBY`，未收敛始终失败。
+  行情供给和 Engine 完整权威水位。常见小 DELTA 在一个 Lua 内原子更新 Hash、状态、
+  freshness 与广播；大 DELTA 的短暂 `APPLYING` 或同一 stream/generation 下持续推进的
+  Engine 追赶记为仍阻止增仓的 `TRANSIENT`，不会形成 Monitor 异常。停滞、过期、
+  水位回退或身份不一致仍 fail-closed 为 `FAILED`；休市收敛后为 `STANDBY`。
 
 ## GraphQL 耗时跟踪
 

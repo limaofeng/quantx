@@ -30,6 +30,17 @@ def test_ready_observation_requires_every_check_in_canonical_order():
     )
 
 
+def test_observation_contract_uses_transient_aware_schema_version():
+  snapshot = AccountSafetyObservationSnapshot(
+    status="ready",
+    observed_at=datetime.now(timezone.utc),
+    checks=_checks(),
+  )
+
+  assert snapshot.schema_version == 2
+  assert AccountSafetyCheckStatus.TRANSIENT.value == "TRANSIENT"
+
+
 def test_standby_requires_a_public_reason():
   with pytest.raises(ValidationError, match="require a public reason"):
     AccountSafetyCheckObservation(

@@ -8,7 +8,10 @@ from typing import Any
 
 import httpx
 from pydantic import ValidationError
-from quantx_contracts import AccountSafetyObservationSnapshot
+from quantx_contracts import (
+  ACCOUNT_SAFETY_OBSERVATION_SCHEMA_VERSION,
+  AccountSafetyObservationSnapshot,
+)
 
 from ..models import AccountSafetyProbeOutcome, MonitorStatus, ProbeResult, utc_now
 
@@ -60,7 +63,7 @@ class AccountSafetyProbe:
         ACCOUNT_SAFETY_PROTOCOL_ERROR,
         status_code=response.status_code,
       )
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != ACCOUNT_SAFETY_OBSERVATION_SCHEMA_VERSION:
       return self._failure(
         checked_at,
         ACCOUNT_SAFETY_SCHEMA_MISMATCH,

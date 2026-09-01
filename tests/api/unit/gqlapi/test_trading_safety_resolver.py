@@ -44,6 +44,18 @@ def test_account_execution_health_status_is_a_closed_business_enum():
   assert safety.checks[0].status is AccountExecutionSafetyCheckStatus.STANDBY
 
 
+def test_account_execution_safety_accepts_transient_market_catchup():
+  payload = _payload("HEALTHY")
+  payload["checks"][0]["status"] = "TRANSIENT"
+  payload["checks"][0]["message"] = "Engine 正在追赶全市场行情水位"
+  payload["can_increase_risk"] = False
+  payload["execution_mode"] = "REDUCE_ONLY"
+
+  safety = AccountExecutionSafetyResolver.from_payload(payload)
+
+  assert safety.checks[0].status is AccountExecutionSafetyCheckStatus.TRANSIENT
+
+
 @pytest.mark.parametrize("transient_status", ["CHECK", "CHECKING"])
 def test_account_execution_health_rejects_query_process_states(
   transient_status: str,
@@ -73,7 +85,19 @@ async def test_history_maps_monitor_observations_without_account_data(monkeypatc
           "publicMessage": "当前休市",
           "coveragePct": 100,
           "incidentCount": 0,
-          "points": [],
+          "points": [
+            {
+              "start": "2026-08-27T04:00:00Z",
+              "status": "transient",
+              "coveragePct": 100,
+              "sampleCount": 1,
+              "passedCount": 0,
+              "standbyCount": 0,
+              "transientCount": 1,
+              "failedCount": 0,
+              "unknownCount": 0,
+            }
+          ],
         }
       ],
       "incidents": [],
@@ -92,3 +116,5 @@ async def test_history_maps_monitor_observations_without_account_data(monkeypatc
   assert history.available is True
   assert history.checks[0].current_status is AccountSafetyHistoryStatus.STANDBY
   assert history.checks[0].incident_count == 0
+  assert history.checks[0].points[0].status is AccountSafetyHistoryStatus.TRANSIENT
+  assert history.checks[0].points[0].transient_count == 1
