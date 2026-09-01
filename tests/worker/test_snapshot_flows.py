@@ -919,6 +919,7 @@ async def test_skip_download_only_runs_snapshot_flow(monkeypatch):
       "dates": [{"snapshot_date": "2026-07-29", "status": "success"}],
     }
   )
+  probability = AsyncMock(return_value={"status": "success", "runs": []})
   monkeypatch.setattr(
     market_flow,
     "resolve_instruments",
@@ -943,6 +944,11 @@ async def test_skip_download_only_runs_snapshot_flow(monkeypatch):
     "daily_indicator_snapshot_flow",
     indicator,
   )
+  monkeypatch.setattr(
+    market_flow,
+    "stock_probability_inference_flow",
+    probability,
+  )
 
   monkeypatch.setattr(market_flow, "get_run_logger", FakeLogger)
   result = await market_flow.daily_market_data_sync_flow.fn(
@@ -957,3 +963,5 @@ async def test_skip_download_only_runs_snapshot_flow(monkeypatch):
   assert result["status"] == "success"
   request.assert_not_awaited()
   indicator.assert_awaited_once()
+  probability.assert_awaited_once_with(as_of="2026-07-29")
+  assert result["probability_inference"]["status"] == "success"

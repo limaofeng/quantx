@@ -1,0 +1,132 @@
+query StockProbabilityCandidates($input: StockProbabilityCandidateInput!) {
+  stockProbabilityCandidates(input: $input) {
+    total
+    limit
+    offset
+    asOf
+    targetDate
+    activeModelVersion
+    showingShadow
+    warnings
+    items {
+      code
+      name
+      asOf
+      targetDate
+      cutoffAt
+      modelVersion
+      labelVersion
+      indicatorVersion
+      factorSetVersion
+      factorSetHash
+      calibratorVersion
+      candidateRuleVersion
+      predictionRunKey
+      factorSnapshotSha256
+      stage
+      isShadow
+      calibratedProbability
+      rawScore
+      logisticProbability
+      lightgbmProbability
+      rank
+      confidence
+      candidateLevel
+      factorCompleteness
+      oodFit
+      reasons
+      risks
+      calibrationBucket {
+        index
+        sampleCount
+        realizedRate
+      }
+    }
+  }
+}
+
+query StockPredictionRunStatus($asOf: Date) {
+  stockPredictionRunStatus(asOf: $asOf) {
+    asOf
+    hasActiveModel
+    warnings
+    runs {
+      runKey
+      modelVersion
+      stage
+      asOf
+      targetDate
+      cutoffAt
+      status
+      startedAt
+      completedAt
+      predictionCount
+      candidateCount
+      factorSnapshotSha256
+      candidateRuleVersion
+      errorCode
+      errorMessage
+      warnings
+    }
+  }
+}
+
+query StockSelectionModels {
+  stockSelectionModels {
+    modelVersion
+    runKey
+    selectedFamily
+    artifactManifestSha256
+    stage
+    indicatorVersion
+    factorSetVersion
+    factorSetHash
+    labelVersion
+    calibratorVersion
+    trainingStart
+    trainingEnd
+    calibrationStart
+    calibrationEnd
+    testStart
+    testEnd
+    historicalUniverseComplete
+    effectGatePassed
+    metrics
+    gates
+    evidence
+    approvedBy
+    approvedAt
+    stateVersion
+    createdAt
+    updatedAt
+  }
+}
+
+mutation RegisterStockSelectionModel($runKey: String!) {
+  registerStockSelectionModel(runKey: $runKey) {
+    modelVersion
+    stage
+    stateVersion
+    gates
+  }
+}
+
+mutation SetStockSelectionModelStage(
+  $modelVersion: String!
+  $stage: StockSelectionModelStage!
+  $expectedVersion: Int!
+) {
+  setStockSelectionModelStage(
+    modelVersion: $modelVersion
+    stage: $stage
+    expectedVersion: $expectedVersion
+  ) {
+    modelVersion
+    stage
+    stateVersion
+    historicalUniverseComplete
+    effectGatePassed
+    approvedBy
+    approvedAt
+  }
+}

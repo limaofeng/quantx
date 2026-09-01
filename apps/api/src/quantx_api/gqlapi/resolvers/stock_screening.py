@@ -3,9 +3,9 @@ import math
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 
-from quantx_domain.factors import (
-  FACTOR_DEFINITIONS,
-  FACTOR_VERSION,
+from quantx_domain.indicators import (
+  INDICATOR_DEFINITIONS,
+  INDICATOR_VERSION,
   normalize_conditions,
 )
 from quantx_infrastructure.core.assistant_strategy_policy import (
@@ -58,8 +58,8 @@ from ..types.stock_screening_types import (
   LimitUpRadarSummary,
   LimitUpResearchArtifactType,
   RoeQualityStatus,
-  StockFactorDefinition,
-  StockFactorValue,
+  StockIndicatorDefinition,
+  StockIndicatorValue,
   StockScreenFinancialHealth,
   StockScreenInput,
   StockScreenItem,
@@ -166,9 +166,9 @@ class StockScreeningResolver:
   @staticmethod
   def _stale_snapshot_warning(expected_snapshot_date: date, today: date) -> str:
     if expected_snapshot_date == today:
-      return "今日快照未完成，结果来自最近可用因子快照"
+      return "今日快照未完成，结果来自最近可用指标快照"
     return (
-      f"{expected_snapshot_date.isoformat()} 交易日快照未完成，结果来自最近可用因子快照"
+      f"{expected_snapshot_date.isoformat()} 交易日快照未完成，结果来自最近可用指标快照"
     )
 
   @staticmethod
@@ -186,17 +186,17 @@ class StockScreeningResolver:
       await _begin_certified_snapshot_read(db)
       snapshot_repo = IndicatorSnapshotRepository(db)
       run_repo = DailySignalRunRepository(db)
-      latest_snapshot_date = await snapshot_repo.get_latest_factor_snapshot_date()
+      latest_snapshot_date = await snapshot_repo.get_latest_indicator_snapshot_date()
       latest_run = await run_repo.find_latest()
       successful_expected_run = await run_repo.find_latest_completed(expected_date)
 
       # Existing old-version history defines the retained backfill window, but
-      # it must never count as available evidence for the current factor version.
+      # it must never count as available evidence for the current indicator version.
       retained_dates = set(
         await snapshot_repo.find_snapshot_dates(window_start, expected_date)
       )
       snapshot_dates = set(
-        await snapshot_repo.find_factor_snapshot_dates(window_start, expected_date)
+        await snapshot_repo.find_indicator_snapshot_dates(window_start, expected_date)
       )
       completed_dates = set(
         await run_repo.find_completed_dates(window_start, expected_date)
@@ -219,7 +219,9 @@ class StockScreeningResolver:
       ]
 
       if latest_snapshot_date is None:
-        warnings.append(f"因子版本 {FACTOR_VERSION} 快照尚未就绪；旧版本日期需要重算")
+        warnings.append(
+          f"指标版本 {INDICATOR_VERSION} 快照尚未就绪；旧版本日期需要重算"
+        )
         latest_calculated_at = (
           latest_run.completed_at if latest_run is not None else None
         )
@@ -239,7 +241,7 @@ class StockScreeningResolver:
           f"最近快照运行未成功: {latest_run.warnings or latest_run.status}"
         )
       if latest_run is not None and latest_run.status == "scoped_success":
-        warnings.append("最近日级因子快照仅完成指定标的范围，不代表全市场已就绪")
+        warnings.append("最近日级指标快照仅完成指定标的范围，不代表全市场已就绪")
       if missing_dates:
         warnings.append(f"缺少 {len(missing_dates)} 个交易日快照")
 
@@ -251,7 +253,7 @@ class StockScreeningResolver:
           not missing_dates
           and latest_snapshot_date == expected_date
           and successful_expected_run is not None
-          and successful_expected_run.signal_version == FACTOR_VERSION
+          and successful_expected_run.signal_version == INDICATOR_VERSION
         ),
         latest_run_status=(latest_run.status if latest_run is not None else None),
         latest_calculated_at=latest_calculated_at,
@@ -265,15 +267,15 @@ class StockScreeningResolver:
     limit = min(max(input.limit or 200, 1), 200)
     offset = min(max(input.offset or 0, 0), 200 * 1000)
     warnings: List[str] = []
-    factor_conditions = normalize_conditions(
+    indicator_conditions = normalize_conditions(
       [
         {
-          "factor_id": item.factor_id,
+          "indicator_id": item.indicator_id,
           "operator": item.operator,
           "value": item.value,
           "value_to": item.value_to,
         }
-        for item in input.factor_conditions or []
+        for item in input.indicator_conditions or []
       ]
     )
 
@@ -290,7 +292,7 @@ class StockScreeningResolver:
         expected_snapshot_date if input.require_fresh else None
       )
       if run is not None and (
-        run.signal_version != FACTOR_VERSION or run.status != "success"
+        run.signal_version != INDICATOR_VERSION or run.status != "success"
       ):
         run = None
       snapshot_date = run.snapshot_date if run else None
@@ -300,13 +302,13 @@ class StockScreeningResolver:
         latest_run = await run_repo.find_latest()
 
       if latest_run is not None and latest_run.status == "scoped_success":
-        warnings.append("最近日级因子快照仅完成指定标的范围，不代表全市场已就绪")
+        warnings.append("最近日级指标快照仅完成指定标的范围，不代表全市场已就绪")
 
       if input.require_fresh and (
         run is None or snapshot_date != expected_snapshot_date
       ):
         warnings.append(
-          f"{expected_snapshot_date.isoformat()} 交易日因子快照尚未完成，"
+          f"{expected_snapshot_date.isoformat()} 交易日指标快照尚未完成，"
           "requireFresh=true 时不返回上次快照结果"
         )
         return StockScreenPage(
@@ -315,7 +317,7 @@ class StockScreeningResolver:
           limit=limit,
           offset=offset,
           snapshot_date=snapshot_date,
-          calculation_version=FACTOR_VERSION,
+          calculation_version=INDICATOR_VERSION,
           calculated_at=None,
           has_stale_data=True,
           is_complete=False,
@@ -325,17 +327,19 @@ class StockScreeningResolver:
       if snapshot_date is None:
         if latest_run and latest_run.status in {"failed", "partial_failure"}:
           warnings.append(
-            f"最近日级因子快照运行未成功: {latest_run.warnings or latest_run.status}"
+            f"最近日级指标快照运行未成功: {latest_run.warnings or latest_run.status}"
           )
         if not warnings:
-          warnings.append(f"因子版本 {FACTOR_VERSION} 快照尚未就绪，请执行日级快照重算")
+          warnings.append(
+            f"指标版本 {INDICATOR_VERSION} 快照尚未就绪，请执行日级快照重算"
+          )
         return StockScreenPage(
           items=[],
           total=0,
           limit=limit,
           offset=offset,
           snapshot_date=None,
-          calculation_version=FACTOR_VERSION,
+          calculation_version=INDICATOR_VERSION,
           calculated_at=None,
           has_stale_data=True,
           is_complete=False,
@@ -359,14 +363,14 @@ class StockScreeningResolver:
           )
         )
       if metadata_run is None:
-        warnings.append("未找到因子运行元信息，已回退到快照更新时间")
+        warnings.append("未找到指标运行元信息，已回退到快照更新时间")
       elif metadata_run.status == "partial_failure":
         warnings.append(
-          f"日级因子快照部分完成: {metadata_run.warnings or '部分标的未成功'}"
+          f"日级指标快照部分完成: {metadata_run.warnings or '部分标的未成功'}"
         )
       elif metadata_run.status == "failed":
         warnings.append(
-          f"最近日级因子快照运行失败: {metadata_run.warnings or '未保存任何快照'}"
+          f"最近日级指标快照运行失败: {metadata_run.warnings or '未保存任何快照'}"
         )
       sort = (
         {
@@ -376,9 +380,9 @@ class StockScreeningResolver:
         if input.sort
         else None
       )
-      records, total = await snapshot_repo.screen_factor_snapshots(
+      records, total = await snapshot_repo.screen_indicator_snapshots(
         snapshot_date=snapshot_date,
-        factor_conditions=factor_conditions,
+        indicator_conditions=indicator_conditions,
         include_industries=input.include_industries,
         exclude_industries=input.exclude_industries,
         sort=sort,
@@ -426,8 +430,9 @@ class StockScreeningResolver:
         excluded_unverified_count=int(financial_quality_counts.get("unverified") or 0),
       )
       financial_filter_active = any(
-        item["factor_id"] in {"roe_ttm", "net_profit_growth_pct", "revenue_growth_pct"}
-        for item in factor_conditions
+        item["indicator_id"]
+        in {"roe_ttm", "net_profit_growth_pct", "revenue_growth_pct"}
+        for item in indicator_conditions
       )
       if financial_filter_active:
         if financial_health_data["status"] != "SUCCESS":
@@ -568,9 +573,9 @@ class StockScreeningResolver:
             financial_quality_flags=list(
               getattr(record, "roe_quality_flags", None) or []
             ),
-            factor_values=[
-              StockFactorValue(
-                factor_id=definition.id,
+            indicator_values=[
+              StockIndicatorValue(
+                indicator_id=definition.id,
                 value=_finite_optional_float(
                   (
                     getattr(financial_metric, "roe_ttm", None)
@@ -585,9 +590,9 @@ class StockScreeningResolver:
                   else getattr(record, definition.id, None)
                 ),
               )
-              for definition in FACTOR_DEFINITIONS
+              for definition in INDICATOR_DEFINITIONS
             ],
-            calculation_version=FACTOR_VERSION,
+            calculation_version=INDICATOR_VERSION,
             calculated_at=calculated_at,
             has_stale_data=has_stale_data,
           )
@@ -599,14 +604,14 @@ class StockScreeningResolver:
         limit=limit,
         offset=offset,
         snapshot_date=snapshot_date,
-        calculation_version=FACTOR_VERSION,
+        calculation_version=INDICATOR_VERSION,
         calculated_at=calculated_at,
         has_stale_data=has_stale_data,
         is_complete=(
           not has_stale_data
           and metadata_run is not None
           and metadata_run.status == "success"
-          and metadata_run.signal_version == FACTOR_VERSION
+          and metadata_run.signal_version == INDICATOR_VERSION
         ),
         warnings=warnings,
         financial_health=financial_health,
@@ -1069,9 +1074,9 @@ class StockScreeningResolver:
     return []
 
   @staticmethod
-  def stock_factor_catalog() -> List[StockFactorDefinition]:
+  def stock_indicator_catalog() -> List[StockIndicatorDefinition]:
     return [
-      StockFactorDefinition(
+      StockIndicatorDefinition(
         id=factor.id,
         label=factor.label,
         category=factor.category,
@@ -1084,5 +1089,5 @@ class StockScreeningResolver:
         version=factor.version,
         operators=list(factor.operators),
       )
-      for factor in FACTOR_DEFINITIONS
+      for factor in INDICATOR_DEFINITIONS
     ]

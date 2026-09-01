@@ -11,7 +11,7 @@ from ..types import (
   LimitUpLifecycleSnapshotType,
   LimitUpRadarInput,
   LimitUpRadarPage,
-  StockFactorDefinition,
+  StockIndicatorDefinition,
   StockScreenInput,
   StockScreenPage,
   StockScreenSnapshotStatus,
@@ -20,7 +20,7 @@ from ..types import (
 
 @strawberry.type(description="条件选股查询")
 class StockScreeningQuery:
-  @strawberry.field(description="基于当前版本日级因子快照执行条件交集选股")
+  @strawberry.field(description="基于当前版本日级指标快照执行条件交集选股")
   async def stock_screen(self, input: StockScreenInput) -> StockScreenPage:
     return await StockScreeningResolver.stock_screen(input)
 
@@ -29,13 +29,9 @@ class StockScreeningQuery:
     self,
     lookback_days: int = 30,
   ) -> StockScreenSnapshotStatus:
-    return await StockScreeningResolver.stock_screen_snapshot_status(
-      lookback_days
-    )
+    return await StockScreeningResolver.stock_screen_snapshot_status(lookback_days)
 
-  @strawberry.field(
-    description="基于 QMT Agent 全市场实时行情执行盘中量能筛选"
-  )
+  @strawberry.field(description="基于 QMT Agent 全市场实时行情执行盘中量能筛选")
   async def intraday_volume_screen(
     self, input: IntradayVolumeScreenInput
   ) -> IntradayVolumeScreenPage:
@@ -78,6 +74,6 @@ class StockScreeningQuery:
   ) -> List[LimitUpLifecycleSnapshotType]:
     return await StockScreeningResolver.limit_up_lifecycle(code, trade_date)
 
-  @strawberry.field(description="获取选股与历史研究共用的版本化因子目录")
-  def stock_factor_catalog(self) -> List[StockFactorDefinition]:
-    return StockScreeningResolver.stock_factor_catalog()
+  @strawberry.field(description="获取选股与历史研究共用的版本化指标目录")
+  def stock_indicator_catalog(self) -> List[StockIndicatorDefinition]:
+    return StockScreeningResolver.stock_indicator_catalog()

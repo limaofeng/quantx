@@ -37,7 +37,7 @@ import { cn } from '@/utils/cn';
 
 import {
   type ScreeningMode,
-  type FactorDefinition,
+  type IndicatorDefinition,
   type StockScreenSortDirection,
   type StockScreenSortField,
   type StockScreenSortState,
@@ -54,7 +54,7 @@ interface ScreeningResultsProps {
   onSortChange?: (sort: StockScreenSortState | null) => void;
   activeMode?: ScreeningMode;
   onRetry?: () => void;
-  selectedFactors?: FactorDefinition[];
+  selectedIndicators?: IndicatorDefinition[];
 }
 
 interface ScreeningColumn {
@@ -69,7 +69,7 @@ interface ScreeningColumn {
   widthClass: string;
 }
 
-const DAILY_COLUMNS: ScreeningColumn[] = [
+const INDICATOR_COLUMNS: ScreeningColumn[] = [
   {
     alwaysFrozen: true,
     defaultDirection: 'ASC',
@@ -279,6 +279,79 @@ const INTRADAY_COLUMNS: ScreeningColumn[] = [
   },
 ];
 
+const PROBABILITY_COLUMNS: ScreeningColumn[] = [
+  {
+    alwaysFrozen: true,
+    id: 'identity',
+    label: '代码 / 名称',
+    width: 240,
+    widthClass: 'min-w-[240px] w-[240px]',
+  },
+  {
+    align: 'right',
+    id: 'probabilityRank',
+    label: '全市场排名',
+    width: 100,
+    widthClass: 'min-w-[100px] w-[100px]',
+  },
+  {
+    align: 'right',
+    id: 'probability',
+    label: '次日上涨概率',
+    width: 120,
+    widthClass: 'min-w-[120px] w-[120px]',
+  },
+  {
+    align: 'right',
+    id: 'confidence',
+    label: '可信度',
+    width: 100,
+    widthClass: 'min-w-[100px] w-[100px]',
+  },
+  {
+    align: 'center',
+    id: 'candidateLevel',
+    label: '等级 / 阶段',
+    width: 120,
+    widthClass: 'min-w-[120px] w-[120px]',
+  },
+  {
+    align: 'right',
+    id: 'modelBlend',
+    label: 'LR / LightGBM',
+    width: 150,
+    widthClass: 'min-w-[150px] w-[150px]',
+  },
+  {
+    align: 'right',
+    id: 'probabilityQuality',
+    label: '完整度 / OOD',
+    width: 150,
+    widthClass: 'min-w-[150px] w-[150px]',
+  },
+  {
+    align: 'right',
+    id: 'calibration',
+    label: '校准桶历史',
+    width: 180,
+    widthClass: 'min-w-[180px] w-[180px]',
+  },
+  {
+    id: 'probabilityRisks',
+    label: '解释 / 风险',
+    width: 260,
+    widthClass: 'min-w-[260px] w-[260px]',
+  },
+  {
+    align: 'right',
+    id: 'actions',
+    label: '',
+    locked: true,
+    width: 92,
+    widthClass: 'min-w-[92px] w-[92px]',
+  },
+];
+
 const DEFAULT_FROZEN_COLUMN_IDS = ['identity'] as const;
 
 const OPPOSITE_DIRECTION: Record<
@@ -327,25 +400,28 @@ export function ScreeningResults({
   error,
   sort,
   onSortChange,
-  activeMode = 'DAILY',
+  activeMode = 'INDICATOR',
   onRetry,
-  selectedFactors = [],
+  selectedIndicators = [],
 }: ScreeningResultsProps) {
   const isIntradayMode = activeMode === 'INTRADAY';
+  const isProbabilityMode = activeMode === 'PROBABILITY';
   const columns = isIntradayMode
     ? INTRADAY_COLUMNS
-    : [
-        ...DAILY_COLUMNS.slice(0, 3),
-        ...selectedFactors.map(factor => ({
-          id: `factor:${factor.id}`,
-          label: `${factor.label}${factor.unit ? ` (${factor.unit})` : ''}`,
-          sortField: factor.id,
-          width: 140,
-          widthClass: 'min-w-[140px] w-[140px]',
-          align: 'right' as const,
-        })),
-        ...DAILY_COLUMNS.slice(3),
-      ];
+    : isProbabilityMode
+      ? PROBABILITY_COLUMNS
+      : [
+          ...INDICATOR_COLUMNS.slice(0, 3),
+          ...selectedIndicators.map(indicator => ({
+            id: `indicator:${indicator.id}`,
+            label: `${indicator.label}${indicator.unit ? ` (${indicator.unit})` : ''}`,
+            sortField: indicator.id,
+            width: 140,
+            widthClass: 'min-w-[140px] w-[140px]',
+            align: 'right' as const,
+          })),
+          ...INDICATOR_COLUMNS.slice(3),
+        ];
   const [warningsExpanded, setWarningsExpanded] = useState(false);
   const { toast } = useToast();
   const [, setLocation] = useLocation();
@@ -364,16 +440,20 @@ export function ScreeningResults({
   } = useStudioMenu<ScreeningColumn>();
 
   const displayData = results ?? [];
-  const showDailyEmptyState =
+  const showNonIntradayEmptyState =
     !isIntradayMode && !screeningLoading && !error && displayData.length === 0;
   const isDailySnapshotUnavailable =
-    meta?.snapshotDate === null && !meta.isComplete;
+    !isProbabilityMode && meta?.snapshotDate === null && !meta.isComplete;
+  const isProbabilityBatchUnavailable =
+    isProbabilityMode && meta?.snapshotDate === null;
   const loadedCount = meta?.loadedCount ?? displayData.length;
   const intradayStaleRowCount =
     meta?.intradayStaleRowCount ??
     displayData.filter(stock => stock.isStale).length;
   const hasNotice =
-    (error?.length ?? 0) > 0 || (meta?.warnings?.length ?? 0) > 0;
+    (error?.length ?? 0) > 0 ||
+    (meta?.warnings?.length ?? 0) > 0 ||
+    Boolean(isProbabilityMode && meta?.probabilityShowingShadow);
 
   const handleAction = (action: string, code: string, name: string) => {
     toast({
@@ -590,12 +670,14 @@ export function ScreeningResults({
     const baseCellClass =
       'overflow-hidden whitespace-nowrap border-b border-r border-white/5 px-3 py-1.5';
 
-    if (column.id.startsWith('factor:')) {
-      const factorId = column.id.slice(7);
-      const value = stock.factorValues?.find(
-        factor => factor.factorId === factorId
+    if (column.id.startsWith('indicator:')) {
+      const indicatorId = column.id.slice('indicator:'.length);
+      const value = stock.indicatorValues?.find(
+        indicator => indicator.indicatorId === indicatorId
       )?.value;
-      const definition = selectedFactors.find(factor => factor.id === factorId);
+      const definition = selectedIndicators.find(
+        indicator => indicator.id === indicatorId
+      );
       return (
         <td
           key={column.id}
@@ -606,7 +688,7 @@ export function ScreeningResults({
             table.getFrozenClass(column, 'bg-[#08101d]')
           )}
           title={
-            value == null ? '因子历史不足或输入缺失' : definition?.description
+            value == null ? '指标历史不足或输入缺失' : definition?.description
           }
         >
           {value == null
@@ -688,6 +770,147 @@ export function ScreeningResults({
             {formatPercent(stock.changePct, true)}
           </td>
         );
+      case 'probabilityRank':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-right font-mono font-semibold text-slate-200',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            {stock.probabilityRank == null ? '--' : `#${stock.probabilityRank}`}
+          </td>
+        );
+      case 'probability':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-right font-mono font-bold text-cyan-200',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            {stock.calibratedProbability == null
+              ? '--'
+              : `${(stock.calibratedProbability * 100).toFixed(2)}%`}
+          </td>
+        );
+      case 'confidence':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-right font-mono text-slate-300',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            {stock.confidence == null
+              ? '--'
+              : `${(stock.confidence * 100).toFixed(1)}%`}
+          </td>
+        );
+      case 'candidateLevel':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-center',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            <span
+              className={cn(
+                'inline-flex rounded border px-2 py-0.5 font-mono text-ui-caption',
+                stock.isShadowCandidate
+                  ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+                  : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+              )}
+            >
+              {stock.candidateLevel ?? '--'} · {stock.probabilityStage ?? '--'}
+            </span>
+          </td>
+        );
+      case 'modelBlend':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-right font-mono text-slate-300',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            {stock.logisticProbability == null ||
+            stock.lightgbmProbability == null
+              ? '--'
+              : `${(stock.logisticProbability * 100).toFixed(1)}% / ${(stock.lightgbmProbability * 100).toFixed(1)}%`}
+          </td>
+        );
+      case 'probabilityQuality':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-right font-mono text-slate-300',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            {stock.factorCompleteness == null || stock.oodFit == null
+              ? '--'
+              : `${(stock.factorCompleteness * 100).toFixed(1)}% / ${(stock.oodFit * 100).toFixed(1)}%`}
+          </td>
+        );
+      case 'calibration':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-right font-mono text-slate-400',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            n={stock.calibrationBucketSamples ?? 0} · 实现率{' '}
+            {stock.calibrationBucketRealizedRate == null
+              ? '--'
+              : `${(stock.calibrationBucketRealizedRate * 100).toFixed(1)}%`}
+          </td>
+        );
+      case 'probabilityRisks': {
+        const reasons = stock.probabilityReasons ?? [];
+        const risks = stock.probabilityRisks ?? [];
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-ui-caption text-slate-400',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+            title={`解释：${reasons.join('；') || '--'}\n风险：${risks.join('；') || '--'}\n运行：${stock.probabilityRunKey ?? '--'}\n规则：${stock.probabilityRuleVersion ?? '--'}\n因子哈希：${stock.probabilityFactorSetHash ?? '--'}\n快照哈希：${stock.probabilityFactorSnapshotSha256 ?? '--'}`}
+          >
+            <span
+              className={risks.length ? 'text-amber-200' : 'text-slate-400'}
+            >
+              {risks[0] ?? reasons[0] ?? '无额外风险标记'}
+            </span>
+          </td>
+        );
+      }
       case 'kdj':
       case 'rsi': {
         const values =
@@ -1099,7 +1322,7 @@ export function ScreeningResults({
                     未找到符合条件的股票
                   </p>
                   <p className="text-ui-label">
-                    请尝试放宽筛选条件；缺失因子值不会当作零值参与筛选
+                    请尝试放宽筛选条件；缺失指标值不会当作零值参与筛选
                   </p>
                 </div>
               </div>
@@ -1107,7 +1330,11 @@ export function ScreeningResults({
           </tr>
         )
       }
-      getRowKey={stock => stock.code}
+      getRowKey={stock =>
+        isProbabilityMode
+          ? `${stock.probabilityModelVersion ?? 'unknown'}:${stock.code}`
+          : stock.code
+      }
       isColumnSorted={column =>
         Boolean(column.sortField && sort?.field === column.sortField)
       }
@@ -1122,7 +1349,7 @@ export function ScreeningResults({
               </p>
             </div>
           </div>
-        ) : showDailyEmptyState ? (
+        ) : showNonIntradayEmptyState ? (
           <div
             role="status"
             data-testid="screening-daily-empty-state"
@@ -1134,14 +1361,20 @@ export function ScreeningResults({
               </div>
               <div className="space-y-1">
                 <p className="font-bold text-slate-300">
-                  {isDailySnapshotUnavailable
-                    ? '因子快照尚未就绪'
-                    : '未找到符合条件的股票'}
+                  {isProbabilityBatchUnavailable
+                    ? '概率预测批次尚未就绪'
+                    : isDailySnapshotUnavailable
+                      ? '指标快照尚未就绪'
+                      : '未找到符合条件的股票'}
                 </p>
                 <p className="text-ui-label">
-                  {isDailySnapshotUnavailable
-                    ? '完成日级因子快照重算后显示结果；旧版快照不参与当前筛选'
-                    : '请尝试放宽筛选条件；缺失因子值不会当作零值参与筛选'}
+                  {isProbabilityBatchUnavailable
+                    ? '需要先登记并发布模型，再由认证日快照后的推理任务原子发布候选'
+                    : isDailySnapshotUnavailable
+                      ? '完成日级指标快照重算后显示结果；旧版快照不参与当前筛选'
+                      : isProbabilityMode
+                        ? '没有标的同时满足资格、概率、可信度与排名门槛；系统不会向下补位'
+                        : '请尝试放宽筛选条件；缺失指标值不会当作零值参与筛选'}
                 </p>
               </div>
             </div>
@@ -1151,6 +1384,18 @@ export function ScreeningResults({
       notice={
         hasNotice ? (
           <div className="space-y-2 border-b border-amber-500/20 bg-amber-500/[0.08] px-ui-section py-3 text-ui-label text-amber-100">
+            {isProbabilityMode && meta?.probabilityShowingShadow && (
+              <div
+                role="status"
+                className="flex items-start gap-2 rounded border border-amber-400/30 bg-amber-400/10 p-2 font-semibold text-amber-100"
+              >
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  SHADOW
+                  研究结果：本页正在显示影子模型候选，不可视为已发布信号，更不会自动下单。
+                </span>
+              </div>
+            )}
             {error && (
               <div
                 role="alert"
@@ -1417,6 +1662,38 @@ export function ScreeningResults({
                 陈旧行 {intradayStaleRowCount}
               </Badge>
             </>
+          ) : isProbabilityMode ? (
+            <>
+              <Badge
+                variant="outline"
+                className={cn(
+                  'font-mono text-ui-caption font-normal',
+                  meta?.probabilityShowingShadow
+                    ? 'border-amber-400/30 bg-amber-500/10 text-amber-200'
+                    : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
+                )}
+              >
+                {!meta?.probabilityModelVersion
+                  ? '未就绪'
+                  : meta.probabilityShowingShadow
+                    ? 'SHADOW'
+                    : 'ACTIVE'}{' '}
+                · {meta?.probabilityModelVersion ?? '模型未就绪'}
+              </Badge>
+              <Badge
+                variant="outline"
+                className="font-mono text-ui-caption font-normal text-slate-400"
+              >
+                预测 {meta?.snapshotDate ?? '--'} →{' '}
+                {meta?.probabilityTargetDate ?? '--'}
+              </Badge>
+              <Badge
+                variant="outline"
+                className="text-ui-caption font-normal text-slate-400"
+              >
+                研究候选 · 不连接交易
+              </Badge>
+            </>
           ) : (
             <>
               <Badge
@@ -1428,7 +1705,7 @@ export function ScreeningResults({
                     : 'text-slate-400'
                 )}
               >
-                因子 {meta?.calculationVersion || '未就绪'} · 快照{' '}
+                指标 {meta?.calculationVersion || '未就绪'} · 快照{' '}
                 {meta?.snapshotDate || '--'} ·{' '}
                 {meta?.hasStaleData ? '最近可用' : '新鲜'}
               </Badge>

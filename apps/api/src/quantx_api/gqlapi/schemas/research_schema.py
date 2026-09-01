@@ -5,37 +5,42 @@ from typing import Optional
 import strawberry
 from anyio import to_thread
 
-from quantx_api.factor_research_artifacts import FactorResearchArtifactStore
-from quantx_api.gqlapi.types.factor_research_types import (
-  FactorReportDetail,
-  StockFactorReportMatch,
-  StockFactorReportRequestInput,
+from quantx_api.gqlapi.types.indicator_research_types import (
+  IndicatorReportDetail,
+  StockIndicatorReportMatch,
+  StockIndicatorReportRequestInput,
 )
 from quantx_api.gqlapi.types.research_types import (
   ResearchRunDetail,
   ResearchRunPage,
   ResearchRunSummary,
 )
+from quantx_api.indicator_research_artifacts import IndicatorResearchArtifactStore
 from quantx_api.research_artifacts import ResearchArtifactStore
 
 
-@strawberry.type(description="离线因子研究结果查询")
+@strawberry.type(description="离线指标研究结果查询")
 class ResearchQuery:
-  @strawberry.field(description="批量匹配单因子及当前条件交集的历史研究报告")
-  async def stock_factor_report_matches(
-    self, requests: list[StockFactorReportRequestInput],
-  ) -> list[StockFactorReportMatch]:
+  @strawberry.field(description="批量匹配单指标及当前条件交集的历史研究报告")
+  async def stock_indicator_report_matches(
+    self,
+    requests: list[StockIndicatorReportRequestInput],
+  ) -> list[StockIndicatorReportMatch]:
     records = await to_thread.run_sync(
-      lambda: FactorResearchArtifactStore().match_reports([item.as_request() for item in requests])
+      lambda: IndicatorResearchArtifactStore().match_reports(
+        [item.as_request() for item in requests]
+      )
     )
-    return [StockFactorReportMatch.from_record(item) for item in records]
+    return [StockIndicatorReportMatch.from_record(item) for item in records]
 
-  @strawberry.field(description="只读打开一份因子研究报告；不会启动分析命令")
-  async def factor_report(self, run_key: str, report_id: str) -> Optional[FactorReportDetail]:
+  @strawberry.field(description="只读打开一份指标研究报告；不会启动分析命令")
+  async def indicator_report(
+    self, run_key: str, report_id: str
+  ) -> Optional[IndicatorReportDetail]:
     record = await to_thread.run_sync(
-      lambda: FactorResearchArtifactStore().get_factor_report(run_key, report_id)
+      lambda: IndicatorResearchArtifactStore().get_indicator_report(run_key, report_id)
     )
-    return FactorReportDetail.from_record(record) if record is not None else None
+    return IndicatorReportDetail.from_record(record) if record is not None else None
 
   @strawberry.field(description="分页列出已完成的研究运行")
   async def research_runs(

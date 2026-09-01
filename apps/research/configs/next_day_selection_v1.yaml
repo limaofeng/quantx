@@ -1,0 +1,51 @@
+study: next-day-selection
+version: v1
+random_seed: 20260901
+data:
+  date_range: [2021-07-29, 2026-07-29]
+  benchmark_code: 000300.SH
+  minimum_listing_days: 252
+  # Set one verified QMT archive for an air-gapped run; null reads the audited
+  # research data source.  A prebuilt panel is intended for deterministic tests.
+  market_data_archive: null
+  verified_panel_path: null
+  # These three point-in-time histories are not yet available in QuantX.  Their
+  # absence is explicit and blocks ACTIVE while still allowing SHADOW evidence.
+  historical_st_membership_path: null
+  historical_industry_membership_path: null
+  historical_delisting_status_path: null
+walk_forward:
+  frozen_test_months: 12
+  minimum_training_months: 30
+  calibration_months: 6
+  validation_months: 1
+logistic:
+  c_values: [0.1, 1.0, 10.0]
+  max_iter: 1000
+lightgbm:
+  num_leaves: [15, 31]
+  reg_lambda: [1.0, 5.0]
+  learning_rate: 0.03
+  n_estimators: 500
+  min_child_samples: 100
+  subsample: 0.8
+  colsample_bytree: 0.8
+calibration:
+  bins: 10
+  isotonic_minimum_positives: 20000
+  isotonic_minimum_relative_brier_improvement: 0.01
+evaluation:
+  bootstrap_samples: 2000
+candidate_gate:
+  brier_skill_minimum: 0.0
+  ece_maximum: 0.03
+  minimum_probability: 0.6
+  minimum_factor_completeness: 0.9
+  minimum_valid_history: 252
+  level_a_size: 20
+  level_b_size: 30
+runtime:
+  batch_size: 100
+  minimum_available_memory_gib: 8
+  memory_sample_interval_seconds: 0.25
+  output_root: .runtime/research-runs

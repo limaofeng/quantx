@@ -24,7 +24,7 @@ class IndicatorSnapshot(Base, TimestampMixin):
   calculation_version = Column(
     String(40),
     nullable=True,
-    comment="日级因子计算版本；旧记录未标记，不得视为当前版本",
+    comment="日级指标计算版本；旧记录未标记，不得视为当前版本",
   )
   kdj_cross_up = Column(Float, comment="KDJ向上交叉，0/1；历史不足为空")
   ma_cross_up = Column(Float, comment="MA5上穿MA10，0/1；历史不足为空")
@@ -43,6 +43,10 @@ class IndicatorSnapshot(Base, TimestampMixin):
   change_pct = Column(Float, comment="涨跌幅 %")
   volume = Column(Float, comment="成交量（手）")
   amount = Column(Float, comment="成交额")
+  valid_history_count = Column(
+    Integer,
+    comment="截至快照日的有效 OHLC 与正成交量交易日数",
+  )
 
   # ── 量比 ─────────────────────────────────────────
   volume_ratio = Column(Float, comment="量比 = 当日量 / 近20日均量")

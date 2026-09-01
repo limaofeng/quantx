@@ -24,7 +24,7 @@ from quantx_research.runner import (
 def build_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(
     prog="quantx-research",
-    description="QuantX 离线只读因子与事件研究",
+    description="QuantX 离线只读指标、概率模型与事件研究",
   )
   subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     "--resume-run-dir",
     type=Path,
     help=(
-      "仅用于 factor-study：从失败运行的已核验冻结样本和逐报告检查点恢复，"
+      "仅用于 indicator-study：从失败运行的已核验冻结样本和逐报告检查点恢复，"
       "不重新读取行情"
     ),
   )
@@ -59,6 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
     "render", help="从已有结构化产物重新生成 HTML 报告"
   )
   render_parser.add_argument("--run-dir", type=Path, required=True)
+
+  train_selection_parser = subparsers.add_parser(
+    "train-next-day-selection",
+    help="手工训练并评估次日开盘至收盘上涨概率模型",
+  )
+  train_selection_parser.add_argument("--config", type=Path, required=True)
+  train_selection_parser.add_argument("--output-root", type=Path)
   return parser
 
 
@@ -96,6 +103,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "render":
       report = render_existing(args.run_dir)
       print(f"报告已重新生成: {report}")
+      return 0
+    if args.command == "train-next-day-selection":
+      from quantx_research.next_day_selection_training import (
+        train_next_day_selection,
+      )
+
+      run_dir = asyncio.run(
+        train_next_day_selection(
+          args.config,
+          output_root=args.output_root,
+        )
+      )
+      print(f"模型研究完成: {run_dir}")
+      print(f"发布证据: {run_dir / 'metrics.json'}")
       return 0
   except ResearchResourceError as exc:
     if exc.run_dir is not None:

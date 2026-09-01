@@ -22,6 +22,7 @@ import {
   ResearchErrorState,
   ResearchLoadingState,
   ResearchStatusBadge,
+  SelectionModelRegistry,
 } from '../components';
 import { useResearchRuns } from '../hooks';
 import { buildResearchRunPath, isSmallSample } from '../model';
@@ -42,7 +43,8 @@ export interface ResearchRunListItem {
 
 const STUDY_LABELS: Record<string, string> = {
   'volume-shock': '异常放量 × 价格位置',
-  'factor-study': '单因子与条件交集研究',
+  'indicator-study': '单指标与条件交集研究',
+  'next-day-selection': '次日上涨概率模型训练',
 };
 
 const FILTERS = [
@@ -79,7 +81,7 @@ function QualityBadge({ run }: { run: ResearchRunListItem }) {
     );
   }
   if (
-    run.studyId !== 'factor-study' &&
+    run.studyId !== 'indicator-study' &&
     isSmallSample(run.version, run.eventCount)
   ) {
     return (
@@ -189,7 +191,7 @@ export function ResearchRunsView({
                   <td className="px-ui-section py-3">
                     <Link
                       href={href}
-                      className="cursor-pointer font-bold text-slate-200 outline-none transition-colors hover:text-blue-300 focus-visible:rounded focus-visible:ring-2 focus-visible:ring-blue-500"
+                      className="cursor-pointer font-bold text-slate-200 outline-none transition-colors hover:text-blue-300 focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       {STUDY_LABELS[run.studyId] || run.studyId}
                     </Link>
@@ -248,7 +250,8 @@ export default function ResearchCenterPage() {
             <h1 className="text-ui-body font-black text-slate-100">研究中心</h1>
           </div>
           <p className="mt-1 text-ui-caption text-slate-500">
-            查看最近 100 次离线因子研究的可复现结果、样本质量与统计检验。
+            查看最近 100
+            次离线指标研究与概率模型训练的可复现结果、样本质量和统计证据。
           </p>
         </div>
         <Select value={studyId} onValueChange={setStudyId}>
@@ -257,7 +260,12 @@ export default function ResearchCenterPage() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部研究类型</SelectItem>
-            <SelectItem value="factor-study">单因子与条件交集研究</SelectItem>
+            <SelectItem value="indicator-study">
+              单指标与条件交集研究
+            </SelectItem>
+            <SelectItem value="next-day-selection">
+              次日上涨概率模型训练
+            </SelectItem>
             <SelectItem value="volume-shock">异常放量 × 价格位置</SelectItem>
           </SelectContent>
         </Select>
@@ -294,6 +302,8 @@ export default function ResearchCenterPage() {
           刷新
         </button>
       </header>
+
+      <SelectionModelRegistry />
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {error ? (

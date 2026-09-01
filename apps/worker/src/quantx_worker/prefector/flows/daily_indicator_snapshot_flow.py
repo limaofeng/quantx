@@ -8,13 +8,15 @@ from typing import Any, Iterable, Optional
 
 from prefect import flow, get_run_logger
 from prefect.runtime import flow_run as flow_run_runtime
-from quantx_domain.factors import FACTOR_VERSION
+from quantx_domain.indicators import INDICATOR_VERSION
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.database.relational_connection import (
   engine as relational_engine,
 )
+from quantx_infrastructure.models.agent_runtime import MarketDataRequest
 from quantx_infrastructure.models.enums import InstrumentType
+from quantx_infrastructure.models.indicator_snapshot import IndicatorSnapshot
 from quantx_infrastructure.models.instrument import Instrument
 from quantx_infrastructure.models.sector import Sector
 from quantx_infrastructure.models.sector_stock import SectorStock
@@ -493,7 +495,7 @@ def _run_status(
 def _run_warnings(result: dict[str, Any], errors: list[str]) -> str:
   warnings = []
   if result["saved"] <= 0:
-    warnings.append("未保存任何日级因子快照")
+    warnings.append("未保存任何日级指标快照")
   if result["missing_target"]:
     warnings.append(f"{result['missing_target']} 只标的目标日无行情")
   if result["inactive_target"]:
@@ -545,7 +547,7 @@ async def _create_signal_runs(
       run = await DailySignalRunRepository(db).create_run(
         {
           "snapshot_date": target,
-          "signal_version": FACTOR_VERSION,
+          "signal_version": INDICATOR_VERSION,
           "score_version": "score-v1",
           "status": "running",
           "started_at": time_utils.now(),
@@ -749,7 +751,7 @@ async def daily_indicator_snapshot_flow(
           filter(
             None,
             [
-              "仅完成指定标的，不代表全市场因子快照就绪",
+              "仅完成指定标的，不代表全市场指标快照就绪",
               warnings,
             ],
           )

@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { ScreeningResults } from '@/features/screening/components/ScreeningResults';
 import { ScreeningTopBar } from '@/features/screening/components/ScreeningTopBar';
-import { type ScreeningCriteria } from '@/features/screening/types';
+import {
+  type ScreeningCriteria,
+  type ScreeningMode,
+} from '@/features/screening/types';
 
 vi.mock('@/features/watchlist/hooks', () => ({
   useWatchlistWorkspace: () => ({
@@ -14,25 +17,31 @@ vi.mock('@/features/watchlist/hooks', () => ({
 }));
 
 function renderTopBar({
-  mode = 'DAILY',
+  mode = 'INDICATOR',
   latestRunStatus = 'success',
   isComplete = false,
   snapshotBackfillLoading = false,
   hasPendingChanges = false,
+  probabilityModels = [],
 }: {
-  mode?: 'DAILY' | 'INTRADAY';
+  mode?: ScreeningMode;
   latestRunStatus?: string;
   isComplete?: boolean;
   snapshotBackfillLoading?: boolean;
   hasPendingChanges?: boolean;
+  probabilityModels?: Array<{
+    modelVersion: string;
+    stage: 'ACTIVE' | 'SHADOW';
+  }>;
 } = {}) {
   const onBackfillSnapshot = vi.fn();
   const onOpenAdvancedData = vi.fn();
   render(
     <ScreeningTopBar
-      factors={[]}
+      indicators={[]}
       onRetryCatalog={vi.fn()}
-      onOpenFactorReport={vi.fn()}
+      probabilityModels={probabilityModels}
+      onOpenIndicatorReport={vi.fn()}
       onOpenJointReport={vi.fn()}
       screeningCriteria={{ screeningMode: mode }}
       setScreeningCriteria={vi.fn()}
@@ -111,6 +120,26 @@ describe('ScreeningTopBar snapshot recovery', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('keeps probability mode fixed to read-only ordinary A-share candidates', () => {
+    renderTopBar({
+      mode: 'PROBABILITY',
+      probabilityModels: [
+        { modelVersion: 'active-model', stage: 'ACTIVE' },
+        { modelVersion: 'shadow-model', stage: 'SHADOW' },
+      ],
+    });
+
+    expect(screen.getByText('固定研究范围')).toBeInTheDocument();
+    expect(screen.getByText(/仅沪深普通 A 股/)).toBeInTheDocument();
+    expect(screen.getByLabelText('最低校准概率')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '候选模型' })).toBeEnabled();
+    expect(screen.getByText('A 级 · 全市场排名 1–20')).toBeInTheDocument();
+    expect(screen.getByText(/不会创建策略实例或订单/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: '立即补算' })
+    ).not.toBeInTheDocument();
+  });
+
   it('shows only real intraday controls and a pending-change cue', () => {
     renderTopBar({ mode: 'INTRADAY', hasPendingChanges: true });
 
@@ -130,18 +159,16 @@ describe('ScreeningTopBar snapshot recovery', () => {
   it('keeps result columns on the active mode until the draft is run', () => {
     function DraftApplyHarness() {
       const [criteria, setCriteria] = useState<ScreeningCriteria>({
-        screeningMode: 'DAILY',
+        screeningMode: 'INDICATOR',
       });
-      const [activeMode, setActiveMode] = useState<'DAILY' | 'INTRADAY'>(
-        'DAILY'
-      );
+      const [activeMode, setActiveMode] = useState<ScreeningMode>('INDICATOR');
 
       return (
         <div>
           <ScreeningTopBar
-            factors={[]}
+            indicators={[]}
             onRetryCatalog={vi.fn()}
-            onOpenFactorReport={vi.fn()}
+            onOpenIndicatorReport={vi.fn()}
             onOpenJointReport={vi.fn()}
             screeningCriteria={criteria}
             setScreeningCriteria={setCriteria}
@@ -156,7 +183,7 @@ describe('ScreeningTopBar snapshot recovery', () => {
               warnings: [],
             }}
             onRunScreening={() =>
-              setActiveMode(criteria.screeningMode ?? 'DAILY')
+              setActiveMode(criteria.screeningMode ?? 'INDICATOR')
             }
             screeningLoading={false}
             onReset={vi.fn()}
@@ -164,7 +191,7 @@ describe('ScreeningTopBar snapshot recovery', () => {
             onOpenAdvancedData={vi.fn()}
             snapshotBackfillLoading={false}
             hasPendingChanges={
-              activeMode !== (criteria.screeningMode ?? 'DAILY')
+              activeMode !== (criteria.screeningMode ?? 'INDICATOR')
             }
           />
           <ScreeningResults

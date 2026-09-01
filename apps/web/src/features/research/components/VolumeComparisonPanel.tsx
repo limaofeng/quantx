@@ -548,7 +548,7 @@ export function VolumeComparisonPanel({
                     {percent(interaction.ci_low)},{' '}
                     {percent(interaction.ci_high)}
                     ]，覆盖 {interaction.unique_dates}{' '}
-                    个有效交易日；未通过完整确认条件，不作为有效因子结论。
+                    个有效交易日；未通过完整确认条件，不作为有效指标结论。
                   </>
                 ) : (
                   '当前口径缺少 high-minus-low 差上差，无法判断价格位置是否改变放量效应。'

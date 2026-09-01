@@ -11,7 +11,7 @@ from quantx_api.research_artifacts import (
   ResearchRunRecord,
 )
 
-from .factor_research_types import FactorReportReference
+from .indicator_research_types import IndicatorReportReference
 
 
 @strawberry.type(description="一次已完成的离线研究运行")
@@ -78,7 +78,12 @@ class ResearchRunDetail:
   robustness: JSON = strawberry.field(description="稳健性检验结果")
   warnings: list[str] = strawberry.field(description="研究方法与结果告警")
   artifact_errors: list[str] = strawberry.field(description="产物读取告警")
-  factor_reports: list[FactorReportReference] = strawberry.field(description="本次运行生成的单因子及联合报告")
+  indicator_reports: list[IndicatorReportReference] = strawberry.field(
+    description="本次运行生成的单指标及联合报告"
+  )
+  selection_metrics: Optional[JSON] = strawberry.field(
+    description="次日概率模型经严格白名单校验的训练与冻结测试证据"
+  )
 
   @staticmethod
   def from_record(record: ResearchRunDetailRecord) -> "ResearchRunDetail":
@@ -94,5 +99,8 @@ class ResearchRunDetail:
       robustness=record.robustness,
       warnings=record.warnings,
       artifact_errors=list(record.artifact_errors),
-      factor_reports=[FactorReportReference(**item) for item in record.factor_reports],
+      indicator_reports=[
+        IndicatorReportReference(**item) for item in record.indicator_reports
+      ],
+      selection_metrics=record.selection_metrics,
     )

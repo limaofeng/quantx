@@ -7,16 +7,18 @@ import strawberry
 from .financial_types import FinancialSyncHealthStatus
 
 
-@strawberry.input(description="日级因子条件，多个条件取交集")
-class StockFactorConditionInput:
-  factor_id: str = strawberry.field(description="因子目录中的唯一标识")
-  operator: str = strawberry.field(default="gte", description="操作符: gte/lte/gt/lt/eq/between")
+@strawberry.input(description="日级指标条件，多个条件取交集")
+class StockIndicatorConditionInput:
+  indicator_id: str = strawberry.field(description="指标目录中的唯一标识")
+  operator: str = strawberry.field(
+    default="gte", description="操作符: gte/lte/gt/lt/eq/between"
+  )
   value: float = strawberry.field(description="比较值")
   value_to: Optional[float] = strawberry.field(default=None, description="区间结束值")
 
 
-@strawberry.type(description="共用于日级筛选与历史研究的因子定义")
-class StockFactorDefinition:
+@strawberry.type(description="共用于日级筛选与历史研究的指标定义")
+class StockIndicatorDefinition:
   id: str
   label: str
   category: str
@@ -30,9 +32,9 @@ class StockFactorDefinition:
   operators: List[str]
 
 
-@strawberry.type(description="因子数值；数据不足时为 null，不伪造中性值")
-class StockFactorValue:
-  factor_id: str
+@strawberry.type(description="指标数值；数据不足时为 null，不伪造中性值")
+class StockIndicatorValue:
+  indicator_id: str
   value: Optional[float]
 
 
@@ -60,7 +62,7 @@ class RoeQualityStatus(Enum):
 
 @strawberry.input(description="条件选股排序输入")
 class StockScreenSortInput:
-  field: str = strawberry.field(description="因子标识，或 code/name")
+  field: str = strawberry.field(description="指标标识，或 code/name")
   direction: StockScreenSortDirection = strawberry.field(
     default=StockScreenSortDirection.DESC,
     description="排序方向",
@@ -69,10 +71,14 @@ class StockScreenSortInput:
 
 @strawberry.input(description="条件选股输入")
 class StockScreenInput:
-  include_industries: Optional[List[str]] = strawberry.field(default=None, description="包含行业")
-  exclude_industries: Optional[List[str]] = strawberry.field(default=None, description="排除行业")
-  factor_conditions: Optional[List[StockFactorConditionInput]] = strawberry.field(
-    default=None, description="因子条件，全部必须满足"
+  include_industries: Optional[List[str]] = strawberry.field(
+    default=None, description="包含行业"
+  )
+  exclude_industries: Optional[List[str]] = strawberry.field(
+    default=None, description="排除行业"
+  )
+  indicator_conditions: Optional[List[StockIndicatorConditionInput]] = strawberry.field(
+    default=None, description="指标条件，全部必须满足"
   )
   universe: StockScreenUniverse = strawberry.field(
     default=StockScreenUniverse.STOCK,
@@ -82,8 +88,12 @@ class StockScreenInput:
     default=True,
     description="是否排除 ST/*ST 风险警示股票",
   )
-  require_fresh: bool = strawberry.field(default=False, description="是否要求当日全市场因子快照完成")
-  sort: Optional[StockScreenSortInput] = strawberry.field(default=None, description="排序配置")
+  require_fresh: bool = strawberry.field(
+    default=False, description="是否要求当日全市场指标快照完成"
+  )
+  sort: Optional[StockScreenSortInput] = strawberry.field(
+    default=None, description="排序配置"
+  )
   limit: int = strawberry.field(default=200, description="每页数量，最大200")
   offset: int = strawberry.field(default=0, description="偏移量")
 
@@ -141,7 +151,7 @@ class StockScreenItem:
   financial_as_of_date: Optional[date]
   financial_verified_at: Optional[datetime]
   financial_quality_flags: List[str]
-  factor_values: List[StockFactorValue]
+  indicator_values: List[StockIndicatorValue]
   calculation_version: str
   calculated_at: Optional[datetime]
   has_stale_data: bool
@@ -191,15 +201,33 @@ class IntradayVolumeScreenInput:
     default=StockScreenUniverse.STOCK,
     description="标的范围：默认股票，可切换 ETF 或股票+ETF",
   )
-  include_industries: Optional[List[str]] = strawberry.field(default=None, description="包含行业")
-  exclude_industries: Optional[List[str]] = strawberry.field(default=None, description="排除行业")
-  exclude_st: bool = strawberry.field(default=True, description="是否排除 ST/*ST 风险警示股票")
-  min_volume_pace_ratio: Optional[float] = strawberry.field(default=None, description="最小盘中量能进度倍数")
-  min_amount_pace_ratio: Optional[float] = strawberry.field(default=None, description="最小盘中成交额进度倍数")
-  min_last_5m_volume_ratio: Optional[float] = strawberry.field(default=None, description="最小近5分钟放量倍数")
-  min_intraday_turnover_rate: Optional[float] = strawberry.field(default=None, description="最小盘中换手率 %")
-  min_depth_imbalance_5: Optional[float] = strawberry.field(default=None, description="最小五档盘口量失衡")
-  stale_after_seconds: int = strawberry.field(default=10, description="超过该秒数未更新标记为 stale")
+  include_industries: Optional[List[str]] = strawberry.field(
+    default=None, description="包含行业"
+  )
+  exclude_industries: Optional[List[str]] = strawberry.field(
+    default=None, description="排除行业"
+  )
+  exclude_st: bool = strawberry.field(
+    default=True, description="是否排除 ST/*ST 风险警示股票"
+  )
+  min_volume_pace_ratio: Optional[float] = strawberry.field(
+    default=None, description="最小盘中量能进度倍数"
+  )
+  min_amount_pace_ratio: Optional[float] = strawberry.field(
+    default=None, description="最小盘中成交额进度倍数"
+  )
+  min_last_5m_volume_ratio: Optional[float] = strawberry.field(
+    default=None, description="最小近5分钟放量倍数"
+  )
+  min_intraday_turnover_rate: Optional[float] = strawberry.field(
+    default=None, description="最小盘中换手率 %"
+  )
+  min_depth_imbalance_5: Optional[float] = strawberry.field(
+    default=None, description="最小五档盘口量失衡"
+  )
+  stale_after_seconds: int = strawberry.field(
+    default=10, description="超过该秒数未更新标记为 stale"
+  )
   limit: int = strawberry.field(default=200, description="每页数量，最大200")
   offset: int = strawberry.field(default=0, description="偏移量")
 
@@ -275,7 +303,9 @@ class LimitUpRadarInput:
     default=None,
     description="包含行业",
   )
-  min_score: Optional[float] = strawberry.field(default=None, description="最低雷达评分")
+  min_score: Optional[float] = strawberry.field(
+    default=None, description="最低雷达评分"
+  )
   search: Optional[str] = strawberry.field(default=None, description="代码或名称搜索")
   sort_field: LimitUpRadarSortField = strawberry.field(
     default=LimitUpRadarSortField.SCORE,

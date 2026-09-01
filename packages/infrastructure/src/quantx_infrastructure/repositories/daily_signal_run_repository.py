@@ -3,7 +3,7 @@
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from quantx_domain.factors import FACTOR_VERSION
+from quantx_domain.indicators import INDICATOR_VERSION
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -25,13 +25,13 @@ def _latest_current_success() -> ColumnElement[bool]:
     select(func.max(candidate.id))
     .where(
       candidate.snapshot_date == DailySignalRun.snapshot_date,
-      candidate.signal_version == FACTOR_VERSION,
+      candidate.signal_version == INDICATOR_VERSION,
     )
     .correlate(DailySignalRun)
     .scalar_subquery()
   )
   return and_(
-    DailySignalRun.signal_version == FACTOR_VERSION,
+    DailySignalRun.signal_version == INDICATOR_VERSION,
     DailySignalRun.status == "success",
     DailySignalRun.id == latest_id,
   )
@@ -52,7 +52,9 @@ class DailySignalRunRepository(BaseRepository[DailySignalRun]):
     await self.db.refresh(run)
     return run
 
-  async def update_run(self, run_id: int, data: Dict[str, Any]) -> Optional[DailySignalRun]:
+  async def update_run(
+    self, run_id: int, data: Dict[str, Any]
+  ) -> Optional[DailySignalRun]:
     run = await self.find_by_id(run_id)
     if run is None:
       return None
@@ -90,10 +92,8 @@ class DailySignalRunRepository(BaseRepository[DailySignalRun]):
     result = await self.db.execute(stmt)
     return result.scalar_one_or_none()
 
-  async def find_completed_dates(
-    self, start_date: date, end_date: date
-  ) -> List[date]:
-    """只返回当前因子版本最后一次运行成功的交易日。"""
+  async def find_completed_dates(self, start_date: date, end_date: date) -> List[date]:
+    """只返回当前指标版本最后一次运行成功的交易日。"""
     result = await self.db.execute(
       select(DailySignalRun.snapshot_date)
       .where(
@@ -109,9 +109,7 @@ class DailySignalRunRepository(BaseRepository[DailySignalRun]):
   async def delete_older_than(self, cutoff_date: date) -> int:
     """清理保留窗口以前的运行日志。"""
     result = await self.db.execute(
-      delete(DailySignalRun).where(
-        DailySignalRun.snapshot_date < cutoff_date
-      )
+      delete(DailySignalRun).where(DailySignalRun.snapshot_date < cutoff_date)
     )
     await self.db.commit()
     return int(result.rowcount or 0)

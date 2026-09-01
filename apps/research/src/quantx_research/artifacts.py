@@ -179,12 +179,14 @@ def create_run_directory(
 def runtime_metadata() -> dict[str, Any]:
   dependency_names = (
     "jinja2",
+    "lightgbm",
     "numpy",
     "pandas",
     "pyarrow",
     "pydantic",
     "pyyaml",
     "quantx-infrastructure",
+    "scikit-learn",
   )
   dependencies: dict[str, str | None] = {}
   for name in dependency_names:

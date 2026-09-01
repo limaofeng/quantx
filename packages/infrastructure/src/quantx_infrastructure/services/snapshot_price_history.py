@@ -1,4 +1,4 @@
-"""Read-only, proven corporate-action history for daily factor snapshots."""
+"""Read-only, proven corporate-action history for daily indicator snapshots."""
 
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ async def load_snapshot_price_history(
   async with aclosing(db_factory()) as sessions:
     db = await anext(sessions, None)
     if db is None:
-      raise RuntimeError("无法打开日级因子数据会话")
+      raise RuntimeError("无法打开日级指标数据会话")
     # Keep request evidence and the exact factor rows in one stable read
     # interval. Every factor-table writer takes the matching exclusive xact
     # lock, so replacement cannot slip between the two SELECTs.
@@ -168,7 +168,7 @@ async def load_snapshot_price_history(
         )
     if not candidates:
       raise ValueError(
-        f"日级因子计算有{len(frames)}只标的缺少 schema-v2 复权因子窗口证明；请先补齐历史数据"
+        f"日级指标计算有{len(frames)}只标的缺少 schema-v2 复权因子窗口证明；请先补齐历史数据"
       )
     evidence_codes = sorted({item.stock_code for item in candidates})
     evidence_start = min(item.start_date for item in candidates)
@@ -199,7 +199,7 @@ async def load_snapshot_price_history(
     covered = covered_codes(verified, code_bounds)
     if covered != set(frames):
       raise ValueError(
-        f"日级因子计算有{len(set(frames) - covered)}只标的缺少与当前数据库一致的复权因子窗口证明；请先补齐历史数据"
+        f"日级指标计算有{len(set(frames) - covered)}只标的缺少与当前数据库一致的复权因子窗口证明；请先补齐历史数据"
       )
     by_code: dict[str, list] = {code: [] for code in covered}
     for row in rows:

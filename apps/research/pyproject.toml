@@ -8,12 +8,14 @@ version = "0.1.0"
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "jinja2>=3.1.0",
+  "lightgbm>=4.5.0,<5",
   "numpy>=1.26.0",
   "pandas>=2.2.0",
   "pyarrow>=15.0.0",
   "pydantic>=2.0",
   "pyyaml>=6.0",
   "quantx-infrastructure",
+  "scikit-learn>=1.5.0,<2",
 ]
 
 [project.scripts]

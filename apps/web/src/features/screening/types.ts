@@ -1,17 +1,18 @@
 export type StockScreenUniverse = 'STOCK' | 'ETF' | 'STOCK_AND_ETF';
-export type ScreeningMode = 'DAILY' | 'INTRADAY';
+export type ScreeningMode = 'INDICATOR' | 'PROBABILITY' | 'INTRADAY';
+export type CandidateLevel = 'A' | 'B';
 export type RoeQualityStatus =
   'VALID' | 'STALE' | 'SUSPICIOUS' | 'INVALID' | 'UNVERIFIED';
 
-export type FactorOperator = 'eq' | 'gte' | 'lte' | 'gt' | 'lt' | 'between';
-export interface FactorCondition {
-  factorId: string;
-  operator: FactorOperator;
+export type IndicatorOperator = 'eq' | 'gte' | 'lte' | 'gt' | 'lt' | 'between';
+export interface IndicatorCondition {
+  indicatorId: string;
+  operator: IndicatorOperator;
   value: number | null;
   valueTo?: number | null;
 }
 
-export interface FactorDefinition {
+export interface IndicatorDefinition {
   id: string;
   label: string;
   category: string;
@@ -33,7 +34,11 @@ export interface ScreeningCriteria {
   includeIndustries?: string[];
   excludeIndustries?: string[];
 
-  factorConditions?: FactorCondition[];
+  indicatorConditions?: IndicatorCondition[];
+  probabilityMinimum?: number;
+  probabilityLevels?: CandidateLevel[];
+  probabilityModelVersion?: string | null;
+  probabilitySearch?: string;
   intradayVolumePaceMin?: number;
   intradayAmountPaceMin?: number;
   intradayLast5mVolumeRatioMin?: number;
@@ -121,9 +126,34 @@ export interface StockScreeningResult {
 
   intradaySignals?: string[];
   calculationVersion?: string;
-  factorValues?: Array<{ factorId: string; value?: number | null }>;
+  indicatorValues?: Array<{ indicatorId: string; value?: number | null }>;
   calculatedAt?: string | null;
   hasStaleData?: boolean;
+
+  // Next-day probability research candidate (never a trade signal)
+  calibratedProbability?: number;
+  rawScore?: number;
+  logisticProbability?: number;
+  lightgbmProbability?: number;
+  probabilityRank?: number;
+  confidence?: number;
+  candidateLevel?: CandidateLevel;
+  probabilityModelVersion?: string;
+  probabilityRunKey?: string;
+  probabilityFactorSetHash?: string;
+  probabilityRuleVersion?: string;
+  probabilityFactorSnapshotSha256?: string | null;
+  probabilityStage?:
+    'CANDIDATE' | 'SHADOW' | 'ACTIVE' | 'SUSPENDED' | 'RETIRED';
+  isShadowCandidate?: boolean;
+  probabilityAsOf?: string;
+  probabilityTargetDate?: string;
+  factorCompleteness?: number;
+  oodFit?: number;
+  probabilityReasons?: string[];
+  probabilityRisks?: string[];
+  calibrationBucketSamples?: number;
+  calibrationBucketRealizedRate?: number | null;
 }
 
 export interface StockScreeningMeta {
@@ -142,6 +172,9 @@ export interface StockScreeningMeta {
   intradayScannerRunning?: boolean;
   intradayUpdatedAt?: string | null;
   intradayStaleRowCount?: number;
+  probabilityShowingShadow?: boolean;
+  probabilityModelVersion?: string | null;
+  probabilityTargetDate?: string | null;
 }
 
 export interface StockScreenFinancialHealth {

@@ -22,6 +22,9 @@ from quantx_worker.prefector.flows.daily_indicator_snapshot_flow import (
   resolve_instruments,
 )
 from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
+from quantx_worker.prefector.flows.stock_probability_inference_flow import (
+  stock_probability_inference_flow,
+)
 
 DEFAULT_MARKET_SECTORS = ["沪深A股", "沪深ETF", "沪深指数"]
 SUPPORTED_PERIODS = {"tick", "1m", "1d"}
@@ -349,6 +352,7 @@ async def daily_market_data_sync_flow(
     }
 
   indicator_result: Optional[dict[str, Any]] = None
+  probability_result: Optional[dict[str, Any]] = None
   if compute_daily_signals:
     indicator_result = await daily_indicator_snapshot_flow(
       sectors=sectors or ["沪深A股", "沪深ETF"],
@@ -367,6 +371,17 @@ async def daily_market_data_sync_flow(
       raise RuntimeError(
         f"日级指标快照未全部成功: {', '.join(failed_dates) or 'unknown'}"
       )
+    completed_dates = [
+      str(item["snapshot_date"])
+      for item in indicator_result.get("dates", [])
+      if item.get("status") == "success"
+    ]
+    if completed_dates:
+      probability_result = await stock_probability_inference_flow(
+        as_of=max(completed_dates)
+      )
+      if probability_result.get("status") == "failed":
+        raise RuntimeError("次日上涨概率推理存在失败模型，已保留失败运行证据")
 
   return {
     "status": "success",
@@ -377,5 +392,6 @@ async def daily_market_data_sync_flow(
     "skip_download": skip_download,
     "transfer": transfer,
     "indicator_snapshot": indicator_result,
+    "probability_inference": probability_result,
     "completed_at": time_utils.now().isoformat(),
   }

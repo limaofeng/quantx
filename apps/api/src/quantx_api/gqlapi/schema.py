@@ -32,6 +32,8 @@ from .schemas import (
   ResearchQuery,
   SectorQuery,
   StockScreeningQuery,
+  StockSelectionMutation,
+  StockSelectionQuery,
   StrategyMutation,
   StrategyQuery,
   TradingMutation,
@@ -99,6 +101,7 @@ class Query(
   SectorQuery,
   HolidayQuery,
   StockScreeningQuery,
+  StockSelectionQuery,
   WatchlistQuery,
   TTradeQuery,
   ResearchQuery,
@@ -143,6 +146,7 @@ class Mutation(
   WatchlistMutation,
   TTradeMutation,
   NotificationMutation,
+  StockSelectionMutation,
 ):
   pass
 

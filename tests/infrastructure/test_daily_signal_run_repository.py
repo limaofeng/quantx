@@ -1,10 +1,10 @@
-"""A rerun must revoke an earlier whole-day factor readiness certificate."""
+"""A rerun must revoke an earlier whole-day indicator readiness certificate."""
 
 from datetime import date, datetime
 
 import pytest
 import pytest_asyncio
-from quantx_domain.factors import FACTOR_VERSION
+from quantx_domain.indicators import INDICATOR_VERSION
 from quantx_infrastructure.models.daily_signal_run import DailySignalRun
 from quantx_infrastructure.repositories.daily_signal_run_repository import (
   DailySignalRunRepository,
@@ -27,7 +27,7 @@ async def session():
     await engine.dispose()
 
 
-def _run(run_id, status, *, target=TARGET, version=FACTOR_VERSION, clock=None):
+def _run(run_id, status, *, target=TARGET, version=INDICATOR_VERSION, clock=None):
   stamp = clock or datetime(2026, 8, 31, 16)
   return DailySignalRun(
     id=run_id,
@@ -42,15 +42,21 @@ def _run(run_id, status, *, target=TARGET, version=FACTOR_VERSION, clock=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("new_status", ["running", "failed", "partial_failure", "scoped_success"])
-async def test_newer_attempt_hides_historical_success_for_both_queries(session, new_status):
+@pytest.mark.parametrize(
+  "new_status", ["running", "failed", "partial_failure", "scoped_success"]
+)
+async def test_newer_attempt_hides_historical_success_for_both_queries(
+  session, new_status
+):
   # Even an older run with later caller timestamps cannot regain authority.
   older = _run(10, "success", clock=datetime(2026, 9, 1, 18))
-  session.add_all([
-    older,
-    _run(11, new_status),
-    _run(12, "success", target=PREVIOUS),
-  ])
+  session.add_all(
+    [
+      older,
+      _run(11, new_status),
+      _run(12, "success", target=PREVIOUS),
+    ]
+  )
   await session.commit()
   older.updated_at = older.completed_at = datetime(2026, 9, 2, 18)
   await session.commit()
@@ -66,13 +72,17 @@ async def test_newer_attempt_hides_historical_success_for_both_queries(session, 
 @pytest.mark.parametrize("old_status", ["success", "running", "failed"])
 @pytest.mark.parametrize("current_status", ["success", "failed"])
 async def test_later_old_version_run_neither_revokes_nor_restores_current_readiness(
-  session, old_status, current_status,
+  session,
+  old_status,
+  current_status,
 ):
-  session.add_all([
-    _run(1, "success"),
-    _run(2, current_status),
-    _run(3, old_status, version="daily-old"),
-  ])
+  session.add_all(
+    [
+      _run(1, "success"),
+      _run(2, current_status),
+      _run(3, old_status, version="daily-old"),
+    ]
+  )
   await session.commit()
   repository = DailySignalRunRepository(session)
   completed = await repository.find_latest_completed(TARGET)
@@ -85,14 +95,18 @@ async def test_later_old_version_run_neither_revokes_nor_restores_current_readin
 
 
 @pytest.mark.asyncio
-async def test_new_whole_market_success_restores_readiness_without_duplicate_dates(session):
-  session.add_all([
-    _run(1, "success"),
-    _run(2, "failed"),
-    _run(3, "running"),
-    _run(4, "scoped_success"),
-    _run(5, "success"),
-  ])
+async def test_new_whole_market_success_restores_readiness_without_duplicate_dates(
+  session,
+):
+  session.add_all(
+    [
+      _run(1, "success"),
+      _run(2, "failed"),
+      _run(3, "running"),
+      _run(4, "scoped_success"),
+      _run(5, "success"),
+    ]
+  )
   await session.commit()
   repository = DailySignalRunRepository(session)
 

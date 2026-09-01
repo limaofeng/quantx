@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
-from quantx_domain.factors import FACTOR_VERSION, calculate_factor_frame
+from quantx_domain.indicators import INDICATOR_VERSION, calculate_indicator_frame
 
 from quantx_infrastructure.database.relational_connection import get_async_db
 from quantx_infrastructure.repositories.indicator_snapshot_repository import (
@@ -57,8 +57,8 @@ def build_snapshot_record(
   """Build one versioned snapshot from validated point-in-time price history."""
   if df.empty:
     return None
-  factors = calculate_factor_frame(df, trading_dates=trading_dates).iloc[-1]
-  if pd.isna(factors["current_price"]):
+  indicators = calculate_indicator_frame(df, trading_dates=trading_dates).iloc[-1]
+  if pd.isna(indicators["current_price"]):
     return None
   current = df.iloc[-1]
   snap: Dict[str, Any] = {
@@ -66,10 +66,20 @@ def build_snapshot_record(
     "instrument_type": instrument_type,
     "name": name,
     "snapshot_date": snapshot_date,
-    "calculation_version": FACTOR_VERSION,
+    "calculation_version": INDICATOR_VERSION,
     "matched_signals": [],
   }
-  for key, value in factors.items():
+  valid_history = pd.Series(True, index=df.index)
+  for column in ("open", "high", "low", "close"):
+    values = pd.to_numeric(df.get(column), errors="coerce")
+    valid_history &= values.notna() & values.gt(0)
+  volume_history = pd.to_numeric(df.get("volume"), errors="coerce")
+  valid_history &= volume_history.notna() & volume_history.gt(0)
+  if "suspend_flag" in df:
+    suspended = pd.to_numeric(df["suspend_flag"], errors="coerce").fillna(0)
+    valid_history &= suspended.ne(1)
+  snap["valid_history_count"] = int(valid_history.sum())
+  for key, value in indicators.items():
     snap[key] = None if pd.isna(value) else float(value)
   for source, target in (
     ("open", "open_price"),
@@ -239,7 +249,7 @@ class DailyIndicatorSnapshotService:
       return result
 
     # A rerun can turn a formerly valid bar into missing/inactive/bad data.
-    # Remove factor eligibility for the complete requested batch before any
+    # Remove indicator eligibility for the complete requested batch before any
     # fallible work.  This deliberately includes codes that are inactive on a
     # target date, because an older run may have written them before lifecycle
     # metadata was known or corrected.  Only freshly successful, active records
@@ -248,9 +258,9 @@ class DailyIndicatorSnapshotService:
       async with aclosing(self.db_factory()) as sessions:
         db = await anext(sessions, None)
         if db is None:
-          raise RuntimeError("日级因子重算未取得数据库连接")
+          raise RuntimeError("日级指标重算未取得数据库连接")
         repo = self.snapshot_repo_cls(db)
-        await repo.invalidate_factor_scope(
+        await repo.invalidate_indicator_scope(
           codes,
           dates,
           snapshot_run_ids=snapshot_run_ids,
@@ -258,7 +268,7 @@ class DailyIndicatorSnapshotService:
     except SnapshotFenceLost:
       raise
     except Exception as e:
-      msg = f"失效旧日级因子资格失败: {e}"
+      msg = f"失效旧日级指标资格失败: {e}"
       self.logger.exception(msg)
       result["failed"] = result["total"]
       result["systemic_failure"] = True
@@ -299,9 +309,9 @@ class DailyIndicatorSnapshotService:
         end_date=history_end.date(),
       )
       if not market_calendar:
-        raise ValueError("日级因子计算缺少交易日历")
+        raise ValueError("日级指标计算缺少交易日历")
     except Exception as e:
-      msg = f"准备或读取日级因子历史数据失败: {e}"
+      msg = f"准备或读取日级指标历史数据失败: {e}"
       self.logger.exception(msg)
       result["failed"] = result["total"]
       result["systemic_failure"] = True
@@ -328,17 +338,11 @@ class DailyIndicatorSnapshotService:
         day_result["errors"].append(msg)
       return result
 
-    records: List[Dict[str, Any]] = []
+    prepared_frames: Dict[str, pd.DataFrame] = {}
+    frame_errors: Dict[str, str] = {}
     for code in active_codes:
-      code_dates = [target for target in dates if code in scope_by_date[target]]
-      if not code_dates:
-        continue
       df = market_data.get(code)
       if df is None or getattr(df, "empty", True):
-        for target in code_dates:
-          day_result = result["dates"][target.isoformat()]
-          day_result["skipped"] += 1
-          day_result["missing_target"] += 1
         continue
       try:
         frame = df.copy()
@@ -355,16 +359,23 @@ class DailyIndicatorSnapshotService:
           day_result["failed"] += 1
           day_result["errors"].append(msg)
         continue
+      frame = prepared_frames.get(code)
+      if frame is None:
+        for target in code_dates:
+          day_result = result["dates"][target.isoformat()]
+          day_result["skipped"] += 1
+          day_result["missing_target"] += 1
+        continue
 
       for target in code_dates:
         day_result = result["dates"][target.isoformat()]
-        if not bool((frame["_trade_date"] == target).any()):
-          day_result["skipped"] += 1
-          day_result["missing_target"] += 1
-          continue
         target_frame = frame.loc[frame["_trade_date"] <= target].drop(
           columns=["_trade_date"]
         )
+        if target_frame.empty:
+          day_result["skipped"] += 1
+          day_result["missing_target"] += 1
+          continue
         current = target_frame.iloc[-1]
         volume = pd.to_numeric(current.get("volume"), errors="coerce")
         suspended = pd.to_numeric(current.get("suspend_flag", 0), errors="coerce")
@@ -397,7 +408,7 @@ class DailyIndicatorSnapshotService:
         async with aclosing(self.db_factory()) as sessions:
           db = await anext(sessions, None)
           if db is None:
-            raise RuntimeError("日级因子写入未取得数据库连接")
+            raise RuntimeError("日级指标写入未取得数据库连接")
           repo = self.snapshot_repo_cls(db)
           await repo.bulk_upsert(
             records,
@@ -437,7 +448,7 @@ class DailyIndicatorSnapshotService:
       async with aclosing(self.db_factory()) as sessions:
         db = await anext(sessions, None)
         if db is None:
-          raise RuntimeError("清理日级因子快照未取得数据库连接")
+          raise RuntimeError("清理日级指标快照未取得数据库连接")
         repo = self.snapshot_repo_cls(db)
         deleted = await repo.delete_older_than(cutoff)
         self.logger.info("已清理 %s 条 %s 之前的快照", deleted, cutoff)

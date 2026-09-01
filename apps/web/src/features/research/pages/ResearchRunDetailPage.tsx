@@ -28,12 +28,14 @@ import {
   VolumeComparisonPanel,
   WarningStrip,
 } from '../components';
-import { FactorStudyRun } from '../components/FactorStudyRun';
+import { IndicatorStudyRun } from '../components/IndicatorStudyRun';
+import { NextDaySelectionRun } from '../components/NextDaySelectionRun';
 import { useResearchRun } from '../hooks';
 import { isSmallSample, readResearchRunKey } from '../model';
 
 const STUDY_LABELS: Record<string, string> = {
   'volume-shock': '异常放量 × 价格位置',
+  'next-day-selection': '次日上涨概率模型训练',
 };
 
 function formatDuration(value?: number | null) {
@@ -100,7 +102,7 @@ export default function ResearchRunDetailPage() {
     );
   }
 
-  if (!detail || !parsed) {
+  if (!detail) {
     return (
       <main className="studio-workspace-surface h-full overflow-y-auto">
         <ResearchEmptyState
@@ -125,9 +127,21 @@ export default function ResearchRunDetailPage() {
     );
   }
 
+  if (summary.studyId === 'indicator-study')
+    return <IndicatorStudyRun run={detail} />;
+  if (summary.studyId === 'next-day-selection')
+    return <NextDaySelectionRun run={detail} />;
+  if (!parsed) {
+    return (
+      <main className="studio-workspace-surface h-full overflow-y-auto">
+        <ResearchEmptyState
+          title="研究产物不可读取"
+          description="运行存在，但当前版本无法解析其研究产物。"
+        />
+      </main>
+    );
+  }
   const quality = parsed.dataQuality;
-  if (summary.studyId === 'factor-study')
-    return <FactorStudyRun run={detail} />;
   const qualityWarnings = quality?.warnings || [];
   const artifactErrors = Array.from(
     new Set([
@@ -190,7 +204,7 @@ export default function ResearchRunDetailPage() {
             <strong>小样本 / Smoke 运行：</strong>
             当前仅有 {formatInteger(summary.eventCount)}{' '}
             个事件，用于验证数据与报告链路，
-            不应据此判断因子有效性或形成交易结论。
+            不应据此判断指标有效性或形成交易结论。
           </WarningStrip>
         )}
         {artifactErrors.length > 0 && (

@@ -8,7 +8,7 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Iterable, List, Optional, Sequence
 
-from quantx_domain.factors import FACTOR_VERSION
+from quantx_domain.indicators import INDICATOR_VERSION
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -140,18 +140,18 @@ class DividFactorRepository:
 
     await self.db.execute(
       update(IndicatorSnapshot)
-      .where(IndicatorSnapshot.calculation_version == FACTOR_VERSION)
+      .where(IndicatorSnapshot.calculation_version == INDICATOR_VERSION)
       .values(calculation_version=None)
     )
     await self.db.execute(
       update(DailySignalRun)
       .where(
-        DailySignalRun.signal_version == FACTOR_VERSION,
+        DailySignalRun.signal_version == INDICATOR_VERSION,
         DailySignalRun.status.in_(["success", "scoped_success"]),
       )
       .values(
         status="invalidated",
-        warnings="复权因子已更新，需要重新计算日级因子快照",
+        warnings="复权因子已更新，需要重新计算日级指标快照",
       )
     )
 

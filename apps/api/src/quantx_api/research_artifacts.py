@@ -40,7 +40,7 @@ MAX_RESEARCH_DISCOVERY_ENTRIES = 4_096
 MAX_RESEARCH_DISCOVERY_RUNS = 1_024
 MAX_RESEARCH_DISCOVERY_MANIFEST_BYTES = 64 * 1024 * 1024
 MAX_RESEARCH_DISCOVERY_DATA_QUALITY_BYTES = 64 * 1024 * 1024
-_FACTOR_COVERAGE_EVIDENCE_SCHEMA_VERSION = 2
+_INDICATOR_COVERAGE_EVIDENCE_SCHEMA_VERSION = 2
 _LOWER_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 _QUALITY_KEYS = frozenset(
@@ -237,14 +237,14 @@ class ResearchArtifactError(ValueError):
   """An artifact cannot be safely exposed."""
 
 
-def validate_factor_study_data_quality(value: Any) -> None:
-  """Require a complete, internally consistent schema-v2 factor proof."""
+def validate_indicator_study_data_quality(value: Any) -> None:
+  """Require a complete, internally consistent schema-v2 indicator proof."""
 
   if not isinstance(value, dict):
-    raise ResearchArtifactError("因子研究数据质量产物必须是 object")
+    raise ResearchArtifactError("指标研究数据质量产物必须是 object")
   coverage = value.get("dividend_factor_coverage")
   if not isinstance(coverage, dict):
-    raise ResearchArtifactError("因子研究缺少 schema-v2 逐代码复权覆盖证据")
+    raise ResearchArtifactError("指标研究缺少 schema-v2 逐代码复权覆盖证据")
 
   schema_version = coverage.get("evidence_schema_version")
   verified_count = coverage.get("verified_code_window_count")
@@ -252,13 +252,13 @@ def validate_factor_study_data_quality(value: Any) -> None:
   if (
     coverage.get("is_complete") is not True
     or type(schema_version) is not int
-    or schema_version != _FACTOR_COVERAGE_EVIDENCE_SCHEMA_VERSION
+    or schema_version != _INDICATOR_COVERAGE_EVIDENCE_SCHEMA_VERSION
     or type(verified_count) is not int
     or verified_count <= 0
     or not isinstance(evidence_sha256, str)
     or _LOWER_SHA256_PATTERN.fullmatch(evidence_sha256) is None
   ):
-    raise ResearchArtifactError("因子研究复权覆盖证据不是完整 schema-v2 证明")
+    raise ResearchArtifactError("指标研究复权覆盖证据不是完整 schema-v2 证明")
 
   code_sets: dict[str, list[str]] = {}
   for field in ("requested_codes", "covered_codes", "uncovered_codes"):
@@ -268,7 +268,7 @@ def validate_factor_study_data_quality(value: Any) -> None:
       or any(not isinstance(code, str) or not code.strip() for code in codes)
       or len(codes) != len(set(codes))
     ):
-      raise ResearchArtifactError("因子研究 schema-v2 复权覆盖代码集合非法")
+      raise ResearchArtifactError("指标研究 schema-v2 复权覆盖代码集合非法")
     code_sets[field] = codes
 
   requested_codes = code_sets["requested_codes"]
@@ -280,7 +280,7 @@ def validate_factor_study_data_quality(value: Any) -> None:
     or set(covered_codes) != set(requested_codes)
     or verified_count < len(requested_codes)
   ):
-    raise ResearchArtifactError("因子研究 schema-v2 复权覆盖代码集合不一致")
+    raise ResearchArtifactError("指标研究 schema-v2 复权覆盖代码集合不一致")
 
 
 @dataclass(frozen=True)
@@ -313,7 +313,8 @@ class ResearchRunDetailRecord:
   robustness: dict[str, list[dict[str, Any]]]
   warnings: list[str]
   artifact_errors: tuple[str, ...]
-  factor_reports: tuple[dict[str, Any], ...] = ()
+  indicator_reports: tuple[dict[str, Any], ...] = ()
+  selection_metrics: dict[str, Any] | None = None
 
 
 class ResearchArtifactStore:
@@ -356,16 +357,11 @@ class ResearchArtifactStore:
     return records[offset : offset + limit], len(records)
 
   def get_run(self, key: str) -> ResearchRunDetailRecord | None:
-    if not _KEY_PATTERN.fullmatch(key):
-      raise ResearchArtifactError("研究运行 key 格式无效")
-    matches = [item for item in self._discover_runs() if item.key == key]
-    if not matches:
+    summary = self.get_summary(key)
+    if summary is None:
       return None
-    if len(matches) > 1:
-      raise ResearchArtifactError("研究运行 key 不唯一")
-    summary = matches[0]
-    errors: list[str] = []
 
+    errors: list[str] = []
     data_quality = self._load_optional_json(
       summary.run_directory,
       "data-quality.json",
@@ -384,26 +380,39 @@ class ResearchArtifactStore:
 
     safe_quality = _sanitize_data_quality(data_quality)
     safe_metrics = _sanitize_metrics(metrics)
-    factor_reports: list[dict[str, Any]] = []
+    indicator_reports: list[dict[str, Any]] = []
+    selection_metrics: dict[str, Any] | None = None
     if (
-      summary.study_id == "factor-study"
+      summary.study_id == "indicator-study"
       and summary.status == "success"
       and metrics is not None
     ):
-      from quantx_api.factor_research_artifacts import (
-        project_factor_metrics,
+      from quantx_api.indicator_research_artifacts import (
+        project_indicator_metrics,
         report_reference,
       )
 
       try:
-        self._require_factor_study_publication(summary)
-        factor_metrics = project_factor_metrics(metrics)
-        factor_reports = [
-          report_reference(summary, factor_metrics, report)
-          for report in factor_metrics["reports"]
+        self._require_indicator_study_publication(summary)
+        indicator_metrics = project_indicator_metrics(metrics)
+        indicator_reports = [
+          report_reference(summary, indicator_metrics, report)
+          for report in indicator_metrics["reports"]
         ]
       except ResearchArtifactError as exc:
-        errors.append(f"因子报告不可用: {exc}")
+        errors.append(f"指标报告不可用: {exc}")
+    if summary.study_id == "next-day-selection" and summary.status == "success":
+      try:
+        from quantx_infrastructure.services.stock_selection_artifacts import (
+          SelectionArtifactError,
+          load_selection_artifact,
+        )
+
+        bundle = load_selection_artifact(summary.run_directory)
+        safe_quality = bundle.data_quality
+        selection_metrics = bundle.metrics
+      except (SelectionArtifactError, OSError, ValueError) as exc:
+        errors.append(f"概率模型证据不可用: {exc}")
     return ResearchRunDetailRecord(
       summary=summary,
       data_quality=safe_quality,
@@ -416,8 +425,20 @@ class ResearchArtifactStore:
       robustness=safe_metrics["robustness"],
       warnings=safe_metrics["warnings"],
       artifact_errors=tuple(errors),
-      factor_reports=tuple(factor_reports),
+      indicator_reports=tuple(indicator_reports),
+      selection_metrics=selection_metrics,
     )
+
+  def get_summary(self, key: str) -> ResearchRunRecord | None:
+    """Resolve one stable run key without projecting study-specific metrics."""
+    if not _KEY_PATTERN.fullmatch(key):
+      raise ResearchArtifactError("研究运行 key 格式无效")
+    matches = [item for item in self._discover_runs() if item.key == key]
+    if not matches:
+      return None
+    if len(matches) > 1:
+      raise ResearchArtifactError("研究运行 key 不唯一")
+    return matches[0]
 
   def _discover_runs(self) -> list[ResearchRunRecord]:
     if not self._root.exists():
@@ -478,12 +499,12 @@ class ResearchArtifactStore:
       manifest_bytes += size
       readable_run_directories.append(run_directory)
 
-    # A successful factor run cannot be discovered without reading its complete
+    # A successful indicator run cannot be discovered without reading its complete
     # data-quality proof. Bound that independent dimension before reading any
     # manifest so list/detail discovery cannot scale to GiB of JSON.
-    factor_quality_bytes = 0
+    indicator_quality_bytes = 0
     for run_directory in readable_run_directories:
-      if not run_directory.parent.name.startswith("factor-study-"):
+      if not run_directory.parent.name.startswith("indicator-study-"):
         continue
       try:
         quality_path = self._artifact_path(run_directory, "data-quality.json")
@@ -497,10 +518,11 @@ class ResearchArtifactStore:
       if quality_bytes > _MAX_DATA_QUALITY_BYTES:
         continue
       if (
-        factor_quality_bytes + quality_bytes > MAX_RESEARCH_DISCOVERY_DATA_QUALITY_BYTES
+        indicator_quality_bytes + quality_bytes
+        > MAX_RESEARCH_DISCOVERY_DATA_QUALITY_BYTES
       ):
-        raise ResearchArtifactError("因子数据质量产物扫描达到安全预算")
-      factor_quality_bytes += quality_bytes
+        raise ResearchArtifactError("指标数据质量产物扫描达到安全预算")
+      indicator_quality_bytes += quality_bytes
 
     records: list[ResearchRunRecord] = []
     for run_directory in readable_run_directories:
@@ -515,7 +537,7 @@ class ResearchArtifactStore:
 
   @staticmethod
   def _metrics_limit(study_id: str) -> int:
-    return 64 * 1024 * 1024 if study_id == "factor-study" else _MAX_METRICS_BYTES
+    return 64 * 1024 * 1024 if study_id == "indicator-study" else _MAX_METRICS_BYTES
 
   def _safe_directory(self, path: Path) -> bool:
     if not _SEGMENT_PATTERN.fullmatch(path.name):
@@ -549,7 +571,7 @@ class ResearchArtifactStore:
       or run_directory.parent.name != f"{study_id}-{version}"
     ):
       raise ResearchArtifactError("manifest 研究身份与目录不一致")
-    if study_id == "factor-study" and status == "success":
+    if study_id == "indicator-study" and status == "success":
       self._read_indexed_factor_data_quality(run_directory, manifest)
 
     key = stable_run_key(study_id=study_id, version=version, run_id=run_id)
@@ -573,7 +595,7 @@ class ResearchArtifactStore:
       run_directory=run_directory,
     )
 
-  def _require_factor_study_publication(
+  def _require_indicator_study_publication(
     self,
     summary: ResearchRunRecord,
   ) -> dict[str, Any]:
@@ -590,11 +612,11 @@ class ResearchArtifactStore:
     )
     if identity != (
       summary.run_id,
-      "factor-study",
+      "indicator-study",
       summary.version,
       "success",
     ):
-      raise ResearchArtifactError("因子研究运行身份在读取期间发生变化")
+      raise ResearchArtifactError("指标研究运行身份在读取期间发生变化")
     return self._read_indexed_factor_data_quality(
       summary.run_directory,
       manifest,
@@ -607,14 +629,14 @@ class ResearchArtifactStore:
   ) -> dict[str, Any]:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
-      raise ResearchArtifactError("因子研究清单缺少产物索引")
+      raise ResearchArtifactError("指标研究清单缺少产物索引")
     entries = [
       entry
       for entry in artifacts
       if isinstance(entry, dict) and entry.get("path") == "data-quality.json"
     ]
     if len(entries) != 1:
-      raise ResearchArtifactError("因子研究清单必须唯一索引 data-quality.json")
+      raise ResearchArtifactError("指标研究清单必须唯一索引 data-quality.json")
     entry = entries[0]
     declared_bytes = entry.get("bytes")
     declared_sha256 = entry.get("sha256")
@@ -624,29 +646,29 @@ class ResearchArtifactStore:
       or not isinstance(declared_sha256, str)
       or _LOWER_SHA256_PATTERN.fullmatch(declared_sha256) is None
     ):
-      raise ResearchArtifactError("因子研究数据质量产物索引无效")
+      raise ResearchArtifactError("指标研究数据质量产物索引无效")
 
     path = self._artifact_path(run_directory, "data-quality.json")
     if _is_link_like(path) or not path.is_file():
-      raise ResearchArtifactError("因子研究数据质量产物不是常规文件")
+      raise ResearchArtifactError("指标研究数据质量产物不是常规文件")
     try:
       if path.stat().st_size > _MAX_DATA_QUALITY_BYTES:
-        raise ResearchArtifactError("因子研究数据质量产物超过大小上限")
+        raise ResearchArtifactError("指标研究数据质量产物超过大小上限")
       raw = path.read_bytes()
     except OSError as exc:
-      raise ResearchArtifactError("因子研究数据质量产物不可读") from exc
+      raise ResearchArtifactError("指标研究数据质量产物不可读") from exc
     if len(raw) > _MAX_DATA_QUALITY_BYTES or len(raw) != declared_bytes:
-      raise ResearchArtifactError("因子研究数据质量产物大小与清单不一致")
+      raise ResearchArtifactError("指标研究数据质量产物大小与清单不一致")
     if hashlib.sha256(raw).hexdigest() != declared_sha256:
-      raise ResearchArtifactError("因子研究数据质量产物摘要与清单不一致")
+      raise ResearchArtifactError("指标研究数据质量产物摘要与清单不一致")
     try:
       value = json.loads(
         raw.decode("utf-8"),
         parse_constant=_reject_json_constant,
       )
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
-      raise ResearchArtifactError("因子研究数据质量产物 JSON 格式无效") from exc
-    validate_factor_study_data_quality(value)
+      raise ResearchArtifactError("指标研究数据质量产物 JSON 格式无效") from exc
+    validate_indicator_study_data_quality(value)
     return value
 
   def _safe_artifact_presence(

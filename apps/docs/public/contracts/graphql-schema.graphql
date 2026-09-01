@@ -1835,69 +1835,6 @@ type ExitPlanView {
   updatedAt: DateTime
 }
 
-"""单因子或联合因子的安全结构化研究报告"""
-type FactorReportDetail {
-  reference: FactorReportReference!
-  factorVersion: String!
-  universe: JSON!
-  horizons: [Int!]!
-  returnBases: [String!]!
-  conditions: JSON!
-  definitions: JSON!
-  coverage: JSON!
-  distribution: JSON!
-  rows: [FactorReportRow!]!
-  warnings: [String!]!
-  artifactErrors: [String!]!
-  configJson: JSON
-}
-
-"""可快捷打开的因子报告及研究数据边界"""
-type FactorReportReference {
-  runKey: String!
-  reportId: String!
-  kind: String!
-  factorIds: [String!]!
-  studyId: String!
-  version: String!
-  runId: String!
-  completedAt: DateTime
-  dataStart: String
-  dataEnd: String
-  configHash: String
-  warnings: [String!]!
-  matchStatus: String
-  matchReason: String
-}
-
-"""一个分组、观察周期及收益口径的描述统计与日期配对推断"""
-type FactorReportRow {
-  group: String!
-  horizon: Int!
-  returnBasis: String!
-  period: String!
-  sampleCount: Int!
-  stockCount: Int!
-  dateCount: Int!
-  upRate: Float
-  meanReturn: Float
-  medianReturn: Float
-  dateEqualUpRate: Float
-  dateEqualMeanReturn: Float
-  baselineUpRate: Float
-  upRateLift: Float
-  meanReturnLift: Float
-  ciLow: Float
-  ciHigh: Float
-  pValue: Float
-  qValue: Float
-  meanCiLow: Float
-  meanCiHigh: Float
-  meanPValue: Float
-  meanQValue: Float
-  inferenceStatus: String!
-}
-
 """资产负债表核心字段"""
 type FinancialBalanceSheetData {
   """标的代码"""
@@ -2255,6 +2192,69 @@ type HolidayMutationResult {
 type HolidayQueryResult {
   items: [Holiday!]!
   total: Int!
+}
+
+"""单指标或联合指标的安全结构化研究报告"""
+type IndicatorReportDetail {
+  reference: IndicatorReportReference!
+  indicatorVersion: String!
+  universe: JSON!
+  horizons: [Int!]!
+  returnBases: [String!]!
+  conditions: JSON!
+  definitions: JSON!
+  coverage: JSON!
+  distribution: JSON!
+  rows: [IndicatorReportRow!]!
+  warnings: [String!]!
+  artifactErrors: [String!]!
+  configJson: JSON
+}
+
+"""可快捷打开的指标报告及研究数据边界"""
+type IndicatorReportReference {
+  runKey: String!
+  reportId: String!
+  kind: String!
+  indicatorIds: [String!]!
+  studyId: String!
+  version: String!
+  runId: String!
+  completedAt: DateTime
+  dataStart: String
+  dataEnd: String
+  configHash: String
+  warnings: [String!]!
+  matchStatus: String
+  matchReason: String
+}
+
+"""一个分组、观察周期及收益口径的描述统计与日期配对推断"""
+type IndicatorReportRow {
+  group: String!
+  horizon: Int!
+  returnBasis: String!
+  period: String!
+  sampleCount: Int!
+  stockCount: Int!
+  dateCount: Int!
+  upRate: Float
+  meanReturn: Float
+  medianReturn: Float
+  dateEqualUpRate: Float
+  dateEqualMeanReturn: Float
+  baselineUpRate: Float
+  upRateLift: Float
+  meanReturnLift: Float
+  ciLow: Float
+  ciHigh: Float
+  pValue: Float
+  qValue: Float
+  meanCiLow: Float
+  meanCiHigh: Float
+  meanPValue: Float
+  meanQValue: Float
+  inferenceStatus: String!
 }
 
 """金融产品基本信息"""
@@ -4115,6 +4115,12 @@ type Mutation {
 
   """注销当前安装并丢弃尚未发送的推送意图"""
   unregisterPushDevice(input: UnregisterPushDeviceInput!): UnregisterPushDeviceResult!
+
+  """从已完成研究运行登记 CANDIDATE 模型"""
+  registerStockSelectionModel(runKey: String!): StockSelectionModel!
+
+  """按乐观锁人工切换模型发布阶段"""
+  setStockSelectionModelStage(modelVersion: String!, stage: StockSelectionModelStage!, expectedVersion: Int!): StockSelectionModel!
 }
 
 """解锁后解析的非敏感路由；业务终态仍由目标 Query 重新读取"""
@@ -5034,7 +5040,7 @@ type Query {
   """获取指定市场年度的节假日列表"""
   holidays(market: String! = "CN", year: Int = null): HolidayQueryResult!
 
-  """基于当前版本日级因子快照执行条件交集选股"""
+  """基于当前版本日级指标快照执行条件交集选股"""
   stockScreen(input: StockScreenInput!): StockScreenPage!
 
   """获取选股日级快照完整性及缺失交易日"""
@@ -5052,8 +5058,20 @@ type Query {
   """读取指定交易日的首板生命周期快照"""
   limitUpLifecycle(code: String!, tradeDate: Date!): [LimitUpLifecycleSnapshotType!]!
 
-  """获取选股与历史研究共用的版本化因子目录"""
-  stockFactorCatalog: [StockFactorDefinition!]!
+  """获取选股与历史研究共用的版本化指标目录"""
+  stockIndicatorCatalog: [StockIndicatorDefinition!]!
+
+  """列出人工登记的概率模型版本"""
+  stockSelectionModels: [StockSelectionModel!]!
+
+  """读取一个概率模型版本及效果门禁"""
+  stockSelectionModel(version: String!): StockSelectionModel
+
+  """读取概率模型日推理状态；不会触发推理"""
+  stockPredictionRunStatus(asOf: Date = null): StockPredictionRunStatusPage!
+
+  """读取只读次日上涨概率候选；不创建交易意图"""
+  stockProbabilityCandidates(input: StockProbabilityCandidateInput!): StockProbabilityCandidatePage!
 
   """获取全部自选股列表"""
   watchlist(accountId: String = null): [WatchlistItem!]!
@@ -5127,11 +5145,11 @@ type Query {
   """分页查询做 T 历史回放批次"""
   tTradeReplayCycles(runId: String!, offset: Int! = 0, limit: Int! = 50): TTradeReplayCyclePage!
 
-  """批量匹配单因子及当前条件交集的历史研究报告"""
-  stockFactorReportMatches(requests: [StockFactorReportRequestInput!]!): [StockFactorReportMatch!]!
+  """批量匹配单指标及当前条件交集的历史研究报告"""
+  stockIndicatorReportMatches(requests: [StockIndicatorReportRequestInput!]!): [StockIndicatorReportMatch!]!
 
-  """只读打开一份因子研究报告；不会启动分析命令"""
-  factorReport(runKey: String!, reportId: String!): FactorReportDetail
+  """只读打开一份指标研究报告；不会启动分析命令"""
+  indicatorReport(runKey: String!, reportId: String!): IndicatorReportDetail
 
   """分页列出已完成的研究运行"""
   researchRuns(limit: Int! = 50, offset: Int! = 0, status: String = null, studyId: String = null): ResearchRunPage!
@@ -5351,8 +5369,11 @@ type ResearchRunDetail {
   """产物读取告警"""
   artifactErrors: [String!]!
 
-  """本次运行生成的单因子及联合报告"""
-  factorReports: [FactorReportReference!]!
+  """本次运行生成的单指标及联合报告"""
+  indicatorReports: [IndicatorReportReference!]!
+
+  """次日概率模型经严格白名单校验的训练与冻结测试证据"""
+  selectionMetrics: JSON
 }
 
 """离线研究运行分页结果"""
@@ -5548,6 +5569,12 @@ type StockAnnouncement {
   rawPayload: JSON!
 }
 
+"""只读候选层级"""
+enum StockCandidateLevel {
+  A
+  B
+}
+
 """单票公告与回购摘要"""
 type StockDisclosureSummary {
   """证券代码"""
@@ -5575,10 +5602,10 @@ type StockDisclosureSummary {
   repurchaseEvents: [StockRepurchaseEvent!]!
 }
 
-"""日级因子条件，多个条件取交集"""
-input StockFactorConditionInput {
-  """因子目录中的唯一标识"""
-  factorId: String!
+"""日级指标条件，多个条件取交集"""
+input StockIndicatorConditionInput {
+  """指标目录中的唯一标识"""
+  indicatorId: String!
 
   """操作符: gte/lte/gt/lt/eq/between"""
   operator: String! = "gte"
@@ -5590,8 +5617,8 @@ input StockFactorConditionInput {
   valueTo: Float = null
 }
 
-"""共用于日级筛选与历史研究的因子定义"""
-type StockFactorDefinition {
+"""共用于日级筛选与历史研究的指标定义"""
+type StockIndicatorDefinition {
   id: String!
   label: String!
   category: String!
@@ -5606,32 +5633,123 @@ type StockFactorDefinition {
 }
 
 """匹配状态与离线研究配置；不启动研究任务"""
-type StockFactorReportMatch {
+type StockIndicatorReportMatch {
   requestId: String!
   status: String!
   reason: String
-  reports: [FactorReportReference!]!
+  reports: [IndicatorReportReference!]!
   configJson: JSON!
   command: String!
   blockers: [String!]!
 }
 
-"""一个单因子或当前条件交集的报告查询"""
-input StockFactorReportRequestInput {
+"""一个单指标或当前条件交集的报告查询"""
+input StockIndicatorReportRequestInput {
   requestId: String!
   kind: String!
-  factorIds: [String!]!
-  conditions: [StockFactorConditionInput!] = null
+  indicatorIds: [String!]!
+  conditions: [StockIndicatorConditionInput!] = null
   universe: StockScreenUniverse! = STOCK
   excludeSt: Boolean! = true
   includeIndustries: [String!] = null
   excludeIndustries: [String!] = null
 }
 
-"""因子数值；数据不足时为 null，不伪造中性值"""
-type StockFactorValue {
-  factorId: String!
+"""指标数值；数据不足时为 null，不伪造中性值"""
+type StockIndicatorValue {
+  indicatorId: String!
   value: Float
+}
+
+"""一次模型日推理运行"""
+type StockPredictionRunStatus {
+  runKey: String!
+  modelVersion: String!
+  stage: StockSelectionModelStage!
+  asOf: Date!
+  targetDate: Date!
+  cutoffAt: DateTime!
+  status: String!
+  startedAt: DateTime!
+  completedAt: DateTime
+  predictionCount: Int!
+  candidateCount: Int!
+  factorSnapshotSha256: String
+  candidateRuleVersion: String!
+  errorCode: String
+  errorMessage: String
+  warnings: [String!]!
+}
+
+"""指定日期的模型日推理状态"""
+type StockPredictionRunStatusPage {
+  asOf: Date
+  runs: [StockPredictionRunStatus!]!
+  hasActiveModel: Boolean!
+  warnings: [String!]!
+}
+
+"""概率校准桶的历史支持"""
+type StockProbabilityCalibrationBucket {
+  index: Int!
+  sampleCount: Int!
+  realizedRate: Float
+}
+
+"""只读次日上涨概率候选"""
+type StockProbabilityCandidate {
+  code: String!
+  name: String!
+  asOf: Date!
+  targetDate: Date!
+  cutoffAt: DateTime!
+  modelVersion: String!
+  labelVersion: String!
+  indicatorVersion: String!
+  factorSetVersion: String!
+  factorSetHash: String!
+  calibratorVersion: String!
+  candidateRuleVersion: String!
+  predictionRunKey: String!
+  factorSnapshotSha256: String
+  stage: StockSelectionModelStage!
+  isShadow: Boolean!
+  calibratedProbability: Float!
+  rawScore: Float!
+  logisticProbability: Float!
+  lightgbmProbability: Float!
+  rank: Int!
+  confidence: Float!
+  candidateLevel: StockCandidateLevel!
+  factorCompleteness: Float!
+  oodFit: Float!
+  reasons: [String!]!
+  risks: [String!]!
+  calibrationBucket: StockProbabilityCalibrationBucket!
+}
+
+"""概率候选只读查询"""
+input StockProbabilityCandidateInput {
+  asOf: Date = null
+  modelVersion: String = null
+  levels: [StockCandidateLevel!] = null
+  minimumProbability: Float = null
+  search: String = null
+  limit: Int! = 50
+  offset: Int! = 0
+}
+
+"""概率候选分页结果"""
+type StockProbabilityCandidatePage {
+  items: [StockProbabilityCandidate!]!
+  total: Int!
+  limit: Int!
+  offset: Int!
+  asOf: Date
+  targetDate: Date
+  activeModelVersion: String
+  showingShadow: Boolean!
+  warnings: [String!]!
 }
 
 """股票行情报价"""
@@ -5753,8 +5871,8 @@ input StockScreenInput {
   """排除行业"""
   excludeIndustries: [String!] = null
 
-  """因子条件，全部必须满足"""
-  factorConditions: [StockFactorConditionInput!] = null
+  """指标条件，全部必须满足"""
+  indicatorConditions: [StockIndicatorConditionInput!] = null
 
   """标的范围：默认股票，可切换 ETF 或股票+ETF"""
   universe: StockScreenUniverse! = STOCK
@@ -5762,7 +5880,7 @@ input StockScreenInput {
   """是否排除 ST/*ST 风险警示股票"""
   excludeSt: Boolean! = true
 
-  """是否要求当日全市场因子快照完成"""
+  """是否要求当日全市场指标快照完成"""
   requireFresh: Boolean! = false
 
   """排序配置"""
@@ -5828,7 +5946,7 @@ type StockScreenItem {
   financialAsOfDate: Date
   financialVerifiedAt: DateTime
   financialQualityFlags: [String!]!
-  factorValues: [StockFactorValue!]!
+  indicatorValues: [StockIndicatorValue!]!
   calculationVersion: String!
   calculatedAt: DateTime
   hasStaleData: Boolean!
@@ -5868,7 +5986,7 @@ enum StockScreenSortDirection {
 
 """条件选股排序输入"""
 input StockScreenSortInput {
-  """因子标识，或 code/name"""
+  """指标标识，或 code/name"""
   field: String!
 
   """排序方向"""
@@ -5880,6 +5998,45 @@ enum StockScreenUniverse {
   STOCK
   ETF
   STOCK_AND_ETF
+}
+
+"""次日上涨概率模型版本及发布证据"""
+type StockSelectionModel {
+  modelVersion: String!
+  runKey: String!
+  selectedFamily: String!
+  artifactManifestSha256: String!
+  stage: StockSelectionModelStage!
+  indicatorVersion: String!
+  factorSetVersion: String!
+  factorSetHash: String!
+  labelVersion: String!
+  calibratorVersion: String!
+  trainingStart: Date!
+  trainingEnd: Date!
+  calibrationStart: Date!
+  calibrationEnd: Date!
+  testStart: Date!
+  testEnd: Date!
+  historicalUniverseComplete: Boolean!
+  effectGatePassed: Boolean!
+  metrics: JSON!
+  gates: JSON!
+  evidence: JSON!
+  approvedBy: String!
+  approvedAt: DateTime
+  stateVersion: Int!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""人工控制的概率模型发布阶段"""
+enum StockSelectionModelStage {
+  CANDIDATE
+  SHADOW
+  ACTIVE
+  SUSPENDED
+  RETIRED
 }
 
 """策略模板信息"""

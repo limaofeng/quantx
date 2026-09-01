@@ -9,10 +9,10 @@ import { useToast } from '@/hooks/use-toast';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn';
 
-import { FactorReportDrawer } from '../components/FactorReportDrawer';
+import { IndicatorReportDrawer } from '../components/IndicatorReportDrawer';
 import { ScreeningResults } from '../components/ScreeningResults';
 import { ScreeningTopBar } from '../components/ScreeningTopBar';
-import { useFactorResearch } from '../hooks/useFactorResearch';
+import { useIndicatorResearch } from '../hooks/useIndicatorResearch';
 import { useStockScreening } from '../hooks/useStockScreening';
 import {
   buildSnapshotBackfillParameters,
@@ -68,6 +68,10 @@ export default function StockScreeningPage() {
     runScreening,
     resetCriteria,
     availableIndustries,
+    probabilityModels,
+    probabilityModelsError,
+    probabilityModelsLoading,
+    refreshProbabilityModels,
     refreshDailyData,
     isSnapshotStatusLoading,
     retry,
@@ -135,7 +139,7 @@ export default function StockScreeningPage() {
     refreshDailyData();
     toast({
       title: '选股快照补算失败',
-      description: `运行状态：${state}。旧快照结果已保留，可查看日志后重试。`,
+      description: `运行状态：${state}。本次日期的旧快照资格已失效，可查看日志后重试。`,
       variant: 'destructive',
     });
   }, [observedRunId, refreshDailyData, toast, trackedRun]);
@@ -179,12 +183,12 @@ export default function StockScreeningPage() {
   const [localCriteria, setLocalCriteria] =
     useState<ScreeningCriteria>(screeningCriteria);
   const [reportFocus, setReportFocus] = useState<string | null>(null);
-  const factorResearch = useFactorResearch(
+  const indicatorResearch = useIndicatorResearch(
     localCriteria,
     reportFocus?.startsWith('single:') ? reportFocus.slice(7) : null
   );
   useEffect(() => {
-    if (localCriteria.screeningMode === 'INTRADAY') setReportFocus(null);
+    if (localCriteria.screeningMode !== 'INDICATOR') setReportFocus(null);
   }, [localCriteria.screeningMode]);
 
   // Sync local criteria when global criteria resets/changes
@@ -231,11 +235,14 @@ export default function StockScreeningPage() {
     setSnapshotLogRunId(runId);
     setSnapshotRunState('PENDING');
   };
-  const activeFactorCount = new Set(
-    (localCriteria.factorConditions ?? []).map(condition => condition.factorId)
+  const activeIndicatorCount = new Set(
+    (localCriteria.indicatorConditions ?? []).map(
+      condition => condition.indicatorId
+    )
   ).size;
   const activeIndustryCount = localCriteria.includeIndustries?.length || 0;
   const isIntradayMode = activeMode === 'INTRADAY';
+  const isProbabilityMode = activeMode === 'PROBABILITY';
   const loadedCount = meta.loadedCount ?? results?.length ?? 0;
   const snapshotTone = isIntradayMode
     ? meta.calculatedAt
@@ -281,12 +288,16 @@ export default function StockScreeningPage() {
               snapshotBackfillLoading={snapshotBackfillLoading}
               snapshotRunState={snapshotRunState}
               hasPendingChanges={hasPendingChanges}
-              factors={factorResearch.factors}
-              catalogLoading={factorResearch.catalogLoading}
-              catalogError={factorResearch.catalogError?.message}
-              onRetryCatalog={factorResearch.refresh}
-              onOpenFactorReport={factorId =>
-                setReportFocus(`single:${factorId}`)
+              indicators={indicatorResearch.indicators}
+              catalogLoading={indicatorResearch.catalogLoading}
+              catalogError={indicatorResearch.catalogError?.message}
+              onRetryCatalog={indicatorResearch.refresh}
+              probabilityModels={probabilityModels}
+              probabilityModelsError={probabilityModelsError}
+              probabilityModelsLoading={probabilityModelsLoading}
+              onRetryProbabilityModels={refreshProbabilityModels}
+              onOpenIndicatorReport={indicatorId =>
+                setReportFocus(`single:${indicatorId}`)
               }
               onOpenJointReport={() => setReportFocus('joint')}
             />
@@ -301,25 +312,26 @@ export default function StockScreeningPage() {
                 activeMode={activeMode}
                 onRetry={retry}
                 error={error?.message}
-                selectedFactors={factorResearch.factors.filter(factor =>
-                  screeningCriteria.factorConditions?.some(
-                    condition => condition.factorId === factor.id
-                  )
+                selectedIndicators={indicatorResearch.indicators.filter(
+                  indicator =>
+                    screeningCriteria.indicatorConditions?.some(
+                      condition => condition.indicatorId === indicator.id
+                    )
                 )}
               />
             </div>
           </div>
-          <FactorReportDrawer
+          <IndicatorReportDrawer
             focus={reportFocus}
             onClose={() => setReportFocus(null)}
             criteria={localCriteria}
-            factors={factorResearch.factors}
-            match={factorResearch.matches.find(
+            indicators={indicatorResearch.indicators}
+            match={indicatorResearch.matches.find(
               match => match.requestId === reportFocus
             )}
-            loading={factorResearch.loading}
-            error={factorResearch.error?.message}
-            onRefresh={factorResearch.refresh}
+            loading={indicatorResearch.loading}
+            error={indicatorResearch.error?.message}
+            onRefresh={indicatorResearch.refresh}
             pending={hasPendingChanges}
           />
         </div>
@@ -328,7 +340,11 @@ export default function StockScreeningPage() {
         <>
           <span className="inline-flex items-center gap-2">
             <span className={cn('h-1.5 w-1.5 rounded-full', snapshotTone)} />
-            {isIntradayMode ? '盘中选股' : '选股'}
+            {isIntradayMode
+              ? '盘中选股'
+              : isProbabilityMode
+                ? '次日概率候选'
+                : '指标选股'}
           </span>
           <span className="text-slate-700">|</span>
           <span>
@@ -346,11 +362,28 @@ export default function StockScreeningPage() {
             <span className="text-slate-700">|</span>
             <span>5 秒刷新</span>
           </>
+        ) : isProbabilityMode ? (
+          <>
+            <span className="inline-flex items-center gap-2">
+              <Filter className="h-3 w-3 text-cyan-300" />
+              {!meta.probabilityModelVersion
+                ? '未就绪'
+                : meta.probabilityShowingShadow
+                  ? 'SHADOW'
+                  : 'ACTIVE'}
+            </span>
+            <span className="text-slate-700">|</span>
+            <span className="font-mono">
+              {meta.probabilityModelVersion ?? '模型未就绪'}
+            </span>
+            <span className="text-slate-700">|</span>
+            <span>只读研究候选</span>
+          </>
         ) : (
           <>
             <span className="inline-flex items-center gap-2">
               <Filter className="h-3 w-3 text-blue-300" />
-              因子 {activeFactorCount}
+              指标 {activeIndicatorCount}
             </span>
             <span className="text-slate-700">|</span>
             <span>行业 {activeIndustryCount}</span>

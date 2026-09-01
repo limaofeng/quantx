@@ -36,7 +36,9 @@ class InMemorySnapshotRepo:
       self.rows[key] = record
     return len(records)
 
-  async def invalidate_factor_scope(self, codes, snapshot_dates, *, snapshot_run_ids):
+  async def invalidate_indicator_scope(
+    self, codes, snapshot_dates, *, snapshot_run_ids
+  ):
     assert snapshot_run_ids
     for (code, target), record in self.rows.items():
       if code in codes and target in snapshot_dates:
@@ -175,8 +177,10 @@ async def test_bad_ohlc_remains_failed_and_past_inactivity_invalidates_windows()
   "changed_kind", ["no_volume", "suspended", "missing", "bad", "read_error"]
 )
 @pytest.mark.asyncio
-async def test_rerun_invalidates_old_factor_rows_only_in_requested_scope(changed_kind):
-  from quantx_domain.factors import FACTOR_VERSION
+async def test_rerun_invalidates_old_indicator_rows_only_in_requested_scope(
+  changed_kind,
+):
+  from quantx_domain.indicators import INDICATOR_VERSION
 
   InMemorySnapshotRepo.rows = {}
   repository = FakeKLineRepository(
@@ -223,7 +227,7 @@ async def test_rerun_invalidates_old_factor_rows_only_in_requested_scope(changed
     ("000002.SZ", date(2026, 5, 19)),
     ("000002.SZ", date(2026, 5, 20)),
   ]:
-    assert InMemorySnapshotRepo.rows[key]["calculation_version"] == FACTOR_VERSION
+    assert InMemorySnapshotRepo.rows[key]["calculation_version"] == INDICATOR_VERSION
 
 
 @pytest.mark.asyncio
@@ -345,14 +349,14 @@ async def test_multiple_target_dates_use_each_dates_instrument_lifecycle_scope()
 
 @pytest.mark.asyncio
 async def test_inactive_lifecycle_scope_invalidates_stale_row_without_market_read():
-  from quantx_domain.factors import FACTOR_VERSION
+  from quantx_domain.indicators import INDICATOR_VERSION
 
   target = date(2026, 5, 20)
   InMemorySnapshotRepo.rows = {
     ("000001.SZ", target): {
       "code": "000001.SZ",
       "snapshot_date": target,
-      "calculation_version": FACTOR_VERSION,
+      "calculation_version": INDICATOR_VERSION,
     }
   }
   repository = FakeKLineRepository({"000001.SZ": daily_frame(10)})
@@ -377,7 +381,9 @@ async def test_inactive_lifecycle_scope_invalidates_stale_row_without_market_rea
 @pytest.mark.asyncio
 async def test_inactive_only_invalidation_failure_is_reported_without_market_read():
   class FailingInvalidationRepo(InMemorySnapshotRepo):
-    async def invalidate_factor_scope(self, codes, snapshot_dates, *, snapshot_run_ids):
+    async def invalidate_indicator_scope(
+      self, codes, snapshot_dates, *, snapshot_run_ids
+    ):
       raise RuntimeError("database unavailable")
 
   target = date(2026, 5, 20)

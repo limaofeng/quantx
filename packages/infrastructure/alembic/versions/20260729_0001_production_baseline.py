@@ -65,6 +65,11 @@ POST_BASELINE_TABLES = {
   "limit_up_research_artifacts",
   "limit_up_research_jobs",
   "limit_up_radar_events",
+  "stock_candidate_rule_versions",
+  "stock_candidates",
+  "stock_prediction_runs",
+  "stock_predictions",
+  "stock_selection_model_versions",
   "limit_up_board_assistant_configs",
   "limit_up_board_assistant_projections",
   "limit_up_board_candidate_arms",
@@ -87,6 +92,14 @@ POST_BASELINE_TABLES = {
   "watchlist_group_memberships",
 }
 POST_BASELINE_COLUMNS = {
+  "indicator_snapshots": {
+    "boll_near_lower",
+    "boll_near_upper",
+    "calculation_version",
+    "kdj_cross_up",
+    "ma_cross_up",
+    "valid_history_count",
+  },
   "agent_devices": {
     "replaces_device_id",
   },

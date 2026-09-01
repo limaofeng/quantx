@@ -5,9 +5,9 @@
 from datetime import date
 from typing import Any, Dict, List, Mapping, Optional
 
-from quantx_domain.factors import (
-  FACTOR_DEFINITIONS,
-  FACTOR_VERSION,
+from quantx_domain.indicators import (
+  INDICATOR_DEFINITIONS,
+  INDICATOR_VERSION,
   normalize_conditions,
 )
 from sqlalchemy import and_, case, delete, exists, func, not_, or_, select, update
@@ -157,7 +157,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       raise
     return len(records)
 
-  async def invalidate_factor_scope(
+  async def invalidate_indicator_scope(
     self,
     codes: List[str],
     snapshot_dates: List[date],
@@ -167,7 +167,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     """Fail closed before recomputation, retaining old values for audit/baselines.
 
     Commit separately from the later upsert so a read/calculation/write failure
-    cannot resurrect a previously valid factor row for this exact target scope.
+    cannot resurrect a previously valid indicator row for this exact target scope.
     """
     if not codes or not snapshot_dates:
       return
@@ -177,7 +177,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       .where(
         IndicatorSnapshot.code.in_(codes),
         IndicatorSnapshot.snapshot_date.in_(snapshot_dates),
-        IndicatorSnapshot.calculation_version == FACTOR_VERSION,
+        IndicatorSnapshot.calculation_version == INDICATOR_VERSION,
       )
       .values(calculation_version=None)
     )
@@ -195,11 +195,11 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     result = await self.db.execute(select(func.max(IndicatorSnapshot.snapshot_date)))
     return result.scalar_one_or_none()
 
-  async def get_latest_factor_snapshot_date(self) -> Optional[date]:
-    """日级因子选股只读取当前定义版本，不能借用雷达历史基线。"""
+  async def get_latest_indicator_snapshot_date(self) -> Optional[date]:
+    """日级指标选股只读取当前定义版本，不能借用雷达历史基线。"""
     result = await self.db.execute(
       select(func.max(IndicatorSnapshot.snapshot_date)).where(
-        IndicatorSnapshot.calculation_version == FACTOR_VERSION
+        IndicatorSnapshot.calculation_version == INDICATOR_VERSION
       )
     )
     return result.scalar_one_or_none()
@@ -226,11 +226,11 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     )
     return list(result.scalars().all())
 
-  async def find_factor_snapshot_dates(
+  async def find_indicator_snapshot_dates(
     self, start_date: date, end_date: date
   ) -> List[date]:
     return await self.find_snapshot_dates(
-      start_date, end_date, calculation_version=FACTOR_VERSION
+      start_date, end_date, calculation_version=INDICATOR_VERSION
     )
 
   async def get_latest_calculated_at(self, snapshot_date: date):
@@ -348,7 +348,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     universe: str = "stock_and_etf",
     exclude_st: bool = True,
   ) -> List[IndicatorSnapshot]:
-    """Radar's existing daily baselines are independent of factor-study readiness."""
+    """Radar's existing daily baselines are independent of indicator-study readiness."""
     conditions = [
       IndicatorSnapshot.snapshot_date == snapshot_date,
       self._universe_condition(universe),
@@ -368,10 +368,10 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     )
     return list(result.scalars().all())
 
-  async def screen_factor_snapshots(
+  async def screen_indicator_snapshots(
     self,
     snapshot_date: date,
-    factor_conditions: Optional[List[Dict[str, Any]]] = None,
+    indicator_conditions: Optional[List[Dict[str, Any]]] = None,
     include_industries: Optional[List[str]] = None,
     exclude_industries: Optional[List[str]] = None,
     sort: Optional[Dict[str, str]] = None,
@@ -383,10 +383,10 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     """基于已落库日级快照做条件选股。"""
     conditions = [
       IndicatorSnapshot.snapshot_date == snapshot_date,
-      IndicatorSnapshot.calculation_version == FACTOR_VERSION,
+      IndicatorSnapshot.calculation_version == INDICATOR_VERSION,
       self._universe_condition(universe),
     ]
-    normalized_conditions = normalize_conditions(factor_conditions or [])
+    normalized_conditions = normalize_conditions(indicator_conditions or [])
 
     include_condition = self._industry_condition(include_industries or [], True)
     if include_condition is not None:
@@ -464,7 +464,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     )
     allowed_fields = {
       definition.id: getattr(IndicatorSnapshot, definition.id)
-      for definition in FACTOR_DEFINITIONS
+      for definition in INDICATOR_DEFINITIONS
       if hasattr(IndicatorSnapshot, definition.id)
     }
     allowed_fields.update(
@@ -484,7 +484,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       }
     )
     for item in normalized_conditions:
-      field = allowed_fields[item["factor_id"]]
+      field = allowed_fields[item["indicator_id"]]
       value = item["value"]
       operator = item["operator"]
       if operator == "between":
@@ -575,7 +575,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     """Count effective ROE states for the requested screening universe."""
     conditions = [
       IndicatorSnapshot.snapshot_date == snapshot_date,
-      IndicatorSnapshot.calculation_version == FACTOR_VERSION,
+      IndicatorSnapshot.calculation_version == INDICATOR_VERSION,
       self._universe_condition(universe),
     ]
     include_condition = self._industry_condition(include_industries or [], True)

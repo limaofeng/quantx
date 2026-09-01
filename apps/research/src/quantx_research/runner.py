@@ -102,10 +102,10 @@ async def validate_study(
   source: ResearchDataSource | None = None,
   market_data_archive: str | Path | None = None,
 ) -> dict[str, Any]:
-  if _configured_study(config_path) == "factor-study":
-    from quantx_research.factor_runner import validate_factor_study
+  if _configured_study(config_path) == "indicator-study":
+    from quantx_research.indicator_runner import validate_indicator_study
 
-    return await validate_factor_study(
+    return await validate_indicator_study(
       config_path,
       source=source,
       market_data_archive=market_data_archive,
@@ -193,10 +193,10 @@ async def run_study(
   now: datetime | None = None,
   resume_run_dir: str | Path | None = None,
 ) -> Path:
-  if _configured_study(config_path) == "factor-study":
-    from quantx_research.factor_runner import run_factor_study
+  if _configured_study(config_path) == "indicator-study":
+    from quantx_research.indicator_runner import run_indicator_study
 
-    return await run_factor_study(
+    return await run_indicator_study(
       config_path,
       source=source,
       market_data_archive=market_data_archive,
@@ -205,7 +205,7 @@ async def run_study(
       resume_run_dir=resume_run_dir,
     )
   if resume_run_dir is not None:
-    raise ValueError("resume_run_dir 当前只支持 factor-study")
+    raise ValueError("resume_run_dir 当前只支持 indicator-study")
   if _configured_study(config_path) == "first-board-promotion":
     if source is not None or market_data_archive is not None:
       raise ValueError(
@@ -444,10 +444,10 @@ def _remove_partial_output_artifacts(run_dir: Path) -> list[str]:
 def render_existing(run_dir: str | Path) -> Path:
   directory = Path(run_dir)
   manifest = _read_json(directory / "manifest.json")
-  if manifest.get("study_id") == "factor-study":
-    from quantx_research.factor_runner import render_factor_existing
+  if manifest.get("study_id") == "indicator-study":
+    from quantx_research.indicator_runner import render_indicator_existing
 
-    return render_factor_existing(directory)
+    return render_indicator_existing(directory)
   if manifest.get("study_id") == "first-board-promotion":
     from quantx_research.first_board_runner import render_first_board_existing
 

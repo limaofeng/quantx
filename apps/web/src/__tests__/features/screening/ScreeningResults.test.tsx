@@ -43,7 +43,7 @@ const baseStock: StockScreeningResult = {
   ma5: 6.2,
   ma10: 6.1,
   ma20: 5.9,
-  calculationVersion: 'daily-v1',
+  calculationVersion: 'daily-indicator-v1',
   middleBand: 6.1,
   name: '浙能电力',
   openPrice: 6.1,
@@ -59,7 +59,48 @@ const baseStock: StockScreeningResult = {
 };
 
 describe('ScreeningResults', () => {
-  it('shows missing daily factors as unavailable and preserves a selected zero factor with canonical sorting', () => {
+  it('shows a non-trading warning and probability evidence for SHADOW candidates', () => {
+    render(
+      <ScreeningResults
+        activeMode="PROBABILITY"
+        screeningLoading={false}
+        results={[
+          {
+            ...baseStock,
+            calibratedProbability: 0.68,
+            confidence: 0.78,
+            candidateLevel: 'A',
+            probabilityRank: 3,
+            logisticProbability: 0.66,
+            lightgbmProbability: 0.7,
+            factorCompleteness: 0.98,
+            oodFit: 0.92,
+            probabilityStage: 'SHADOW',
+            isShadowCandidate: true,
+            probabilityReasons: ['CANDIDATE_LEVEL_A'],
+            probabilityRisks: [],
+            probabilityModelVersion: 'next-day-up-v1-0123456789abcdef',
+          },
+        ]}
+        meta={{
+          total: 1,
+          missingSnapshotDates: [],
+          hasStaleData: false,
+          isComplete: true,
+          warnings: [],
+          probabilityShowingShadow: true,
+          probabilityModelVersion: 'next-day-up-v1-0123456789abcdef',
+        }}
+      />
+    );
+
+    expect(screen.getByText(/SHADOW 研究结果/)).toBeInTheDocument();
+    expect(screen.getByText(/更不会自动下单/)).toBeInTheDocument();
+    expect(screen.getByText('68.00%')).toBeInTheDocument();
+    expect(screen.getByText('A · SHADOW')).toBeInTheDocument();
+  });
+
+  it('shows missing daily indicators as unavailable and preserves a selected zero indicator with canonical sorting', () => {
     const onSortChange = vi.fn();
     render(
       <ScreeningResults
@@ -78,10 +119,12 @@ describe('ScreeningResults', () => {
             volumeRatio: null,
             priceDropPct: null,
             daysSincePeak: null,
-            factorValues: [{ factorId: 'consecutive_down_days', value: 0 }],
+            indicatorValues: [
+              { indicatorId: 'consecutive_down_days', value: 0 },
+            ],
           },
         ]}
-        selectedFactors={[
+        selectedIndicators={[
           {
             id: 'consecutive_down_days',
             label: '连续下跌天数',
@@ -91,7 +134,7 @@ describe('ScreeningResults', () => {
             lookback: 21,
             kind: 'numeric',
             operators: ['gte'],
-            version: 'daily-v1',
+            version: 'daily-indicator-v1',
             researchSupported: true,
           },
         ]}
@@ -101,7 +144,7 @@ describe('ScreeningResults', () => {
     expect(screen.getByText('0.00')).toBeInTheDocument();
     expect(screen.getAllByText('--').length).toBeGreaterThan(3);
     fireEvent.click(
-      screen.getByTestId('screening-sort-factor:consecutive_down_days')
+      screen.getByTestId('screening-sort-indicator:consecutive_down_days')
     );
     expect(onSortChange).toHaveBeenLastCalledWith({
       direction: 'DESC',
@@ -450,8 +493,8 @@ describe('ScreeningResults', () => {
     );
 
     const emptyState = screen.getByTestId('screening-daily-empty-state');
-    expect(emptyState).toHaveTextContent('因子快照尚未就绪');
-    expect(emptyState).toHaveTextContent('完成日级因子快照重算后显示结果');
+    expect(emptyState).toHaveTextContent('指标快照尚未就绪');
+    expect(emptyState).toHaveTextContent('完成日级指标快照重算后显示结果');
     expect(screen.queryByText('未找到符合条件的股票')).not.toBeInTheDocument();
     expect(emptyState.closest('table')).toBeNull();
     expect(emptyState).toHaveClass('absolute', 'inset-0');
@@ -479,7 +522,7 @@ describe('ScreeningResults', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       '未找到符合条件的股票'
     );
-    expect(screen.queryByText('因子快照尚未就绪')).not.toBeInTheDocument();
+    expect(screen.queryByText('指标快照尚未就绪')).not.toBeInTheDocument();
   });
 
   it('does not change the intraday empty state based on daily snapshot metadata', () => {
@@ -503,7 +546,7 @@ describe('ScreeningResults', () => {
     expect(
       screen.queryByTestId('screening-daily-empty-state')
     ).not.toBeInTheDocument();
-    expect(screen.queryByText('因子快照尚未就绪')).not.toBeInTheDocument();
+    expect(screen.queryByText('指标快照尚未就绪')).not.toBeInTheDocument();
   });
 
   it('does not announce an empty daily result while screening is loading', () => {

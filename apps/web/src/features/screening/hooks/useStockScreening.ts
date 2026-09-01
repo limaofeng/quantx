@@ -4,13 +4,18 @@ import { useQuery } from 'urql';
 import { gql } from '@/generated/gql';
 import {
   GetSectorsDocument,
+  StockCandidateLevel as GqlStockCandidateLevel,
+  StockSelectionModelsDocument,
+  StockSelectionModelStage as GqlStockSelectionModelStage,
+  StockProbabilityCandidatesDocument,
+  type StockProbabilityCandidatesQuery,
   type GetSectorsQuery,
   type GetSectorsQueryVariables,
   StockScreenSortDirection as GqlStockScreenSortDirection,
   StockScreenUniverse as GqlStockScreenUniverse,
 } from '@/generated/gql/graphql';
 
-import { validateFactorConditions } from '../factorModel';
+import { validateIndicatorConditions } from '../indicatorModel';
 import {
   type ScreeningCriteria,
   type ScreeningMode,
@@ -99,7 +104,7 @@ const STOCK_SCREEN_QUERY = gql(`
         financialVerifiedAt
         financialQualityFlags
         calculationVersion
-        factorValues { factorId value }
+        indicatorValues { indicatorId value }
         calculatedAt
         hasStaleData
       }
@@ -146,10 +151,12 @@ function normalizeIndustryName(name: string): string {
 }
 
 export const DEFAULT_CRITERIA: ScreeningCriteria = {
-  screeningMode: 'DAILY',
+  screeningMode: 'INDICATOR',
   universe: 'STOCK',
   excludeST: true,
-  factorConditions: [],
+  indicatorConditions: [],
+  probabilityMinimum: 0.6,
+  probabilityLevels: ['A', 'B'],
   requireFresh: false,
 };
 export const DEFAULT_SORT: StockScreenSortState = {
@@ -238,8 +245,8 @@ export function buildStockScreenInput(
 ) {
   const universe = criteria.universe ?? 'STOCK';
   const effectiveSort = sort ?? DEFAULT_SORT;
-  const validationError = validateFactorConditions(
-    criteria.factorConditions ?? []
+  const validationError = validateIndicatorConditions(
+    criteria.indicatorConditions ?? []
   );
   if (validationError) throw new Error(validationError);
   return {
@@ -247,12 +254,14 @@ export function buildStockScreenInput(
       universe === 'STOCK' ? (criteria.includeIndustries ?? []) : [],
     excludeIndustries:
       universe === 'STOCK' ? (criteria.excludeIndustries ?? []) : [],
-    factorConditions: (criteria.factorConditions ?? []).map(condition => ({
-      factorId: condition.factorId,
-      operator: condition.operator,
-      value: condition.value!,
-      valueTo: condition.operator === 'between' ? condition.valueTo : null,
-    })),
+    indicatorConditions: (criteria.indicatorConditions ?? []).map(
+      condition => ({
+        indicatorId: condition.indicatorId,
+        operator: condition.operator,
+        value: condition.value!,
+        valueTo: condition.operator === 'between' ? condition.valueTo : null,
+      })
+    ),
     universe: UNIVERSE_INPUT[universe],
     excludeSt: criteria.excludeST !== false,
     requireFresh: Boolean(criteria.requireFresh),
@@ -292,6 +301,28 @@ function buildIntradayVolumeScreenInput(criteria: ScreeningCriteria) {
     ),
     staleAfterSeconds: 15,
     limit: 200,
+    offset: 0,
+  };
+}
+
+function buildProbabilityCandidateInput(criteria: ScreeningCriteria) {
+  const levelInput = {
+    A: GqlStockCandidateLevel.A,
+    B: GqlStockCandidateLevel.B,
+  } as const;
+  return {
+    asOf: null,
+    modelVersion: criteria.probabilityModelVersion || null,
+    levels: (criteria.probabilityLevels ?? ['A', 'B']).map(
+      level => levelInput[level]
+    ),
+    minimumProbability:
+      typeof criteria.probabilityMinimum === 'number' &&
+      Number.isFinite(criteria.probabilityMinimum)
+        ? criteria.probabilityMinimum
+        : 0.6,
+    search: criteria.probabilitySearch?.trim() || null,
+    limit: 50,
     offset: 0,
   };
 }
@@ -418,10 +449,79 @@ function mapIntradayItemToResult(
   };
 }
 
+function mapProbabilityItemToResult(
+  item: StockProbabilityCandidatesQuery['stockProbabilityCandidates']['items'][number]
+): StockScreeningResult {
+  return {
+    code: item.code,
+    name: item.name,
+    instrumentType: 'stock',
+    currentPrice: null,
+    openPrice: null,
+    changePct: null,
+    volume: null,
+    volumeRatio: null,
+    avgVolume20: null,
+    isBullish: null,
+    peakPrice: null,
+    daysSincePeak: null,
+    priceDropPct: null,
+    lowPrice: null,
+    daysSinceLow: null,
+    priceRisePct: null,
+    consecutiveDownDays: null,
+    consecutiveDownPct: null,
+    k: null,
+    d: null,
+    j: null,
+    rsi6: null,
+    rsi12: null,
+    rsi24: null,
+    upperBand: null,
+    middleBand: null,
+    lowerBand: null,
+    ma5: null,
+    ma10: null,
+    ma20: null,
+    calibratedProbability: item.calibratedProbability,
+    rawScore: item.rawScore,
+    logisticProbability: item.logisticProbability,
+    lightgbmProbability: item.lightgbmProbability,
+    probabilityRank: item.rank,
+    confidence: item.confidence,
+    candidateLevel:
+      item.candidateLevel === GqlStockCandidateLevel.A ? 'A' : 'B',
+    probabilityModelVersion: item.modelVersion,
+    probabilityRunKey: item.predictionRunKey,
+    probabilityFactorSetHash: item.factorSetHash,
+    probabilityRuleVersion: item.candidateRuleVersion,
+    probabilityFactorSnapshotSha256: item.factorSnapshotSha256,
+    probabilityStage:
+      item.stage === GqlStockSelectionModelStage.Active
+        ? 'ACTIVE'
+        : item.stage === GqlStockSelectionModelStage.Shadow
+          ? 'SHADOW'
+          : item.stage === GqlStockSelectionModelStage.Suspended
+            ? 'SUSPENDED'
+            : item.stage === GqlStockSelectionModelStage.Retired
+              ? 'RETIRED'
+              : 'CANDIDATE',
+    isShadowCandidate: item.isShadow,
+    probabilityAsOf: item.asOf,
+    probabilityTargetDate: item.targetDate,
+    factorCompleteness: item.factorCompleteness,
+    oodFit: item.oodFit,
+    probabilityReasons: item.reasons,
+    probabilityRisks: item.risks,
+    calibrationBucketSamples: item.calibrationBucket.sampleCount,
+    calibrationBucketRealizedRate: item.calibrationBucket.realizedRate,
+  };
+}
+
 export function useStockScreening() {
   const [screeningCriteria, setScreeningCriteria] =
     useState<ScreeningCriteria>(DEFAULT_CRITERIA);
-  const [activeMode, setActiveMode] = useState<ScreeningMode>('DAILY');
+  const [activeMode, setActiveMode] = useState<ScreeningMode>('INDICATOR');
   const [sort, setSort] = useState<StockScreenSortState | null>(DEFAULT_SORT);
   const [queryInput, setQueryInput] = useState(() =>
     buildStockScreenInput(DEFAULT_CRITERIA, null)
@@ -429,16 +529,21 @@ export function useStockScreening() {
   const [intradayInput, setIntradayInput] = useState(() =>
     buildIntradayVolumeScreenInput(DEFAULT_CRITERIA)
   );
+  const [probabilityInput, setProbabilityInput] = useState(() =>
+    buildProbabilityCandidateInput(DEFAULT_CRITERIA)
+  );
   const isIntradayMode = activeMode === 'INTRADAY';
+  const isProbabilityMode = activeMode === 'PROBABILITY';
+  const isIndicatorMode = activeMode === 'INDICATOR';
 
   const [stockScreenResult, reexecuteStockScreen] = useQuery({
     query: STOCK_SCREEN_QUERY,
     variables: { input: queryInput },
-    pause: isIntradayMode,
+    pause: !isIndicatorMode,
     requestPolicy: 'cache-and-network',
   });
   const snapshotStatusResult = useStockScreenSnapshotStatus({
-    pause: isIntradayMode,
+    pause: !isIndicatorMode,
   });
 
   const [intradayVolumeResult, reexecuteIntradayVolume] = useQuery({
@@ -446,6 +551,16 @@ export function useStockScreening() {
     variables: { input: intradayInput },
     pause: !isIntradayMode,
     requestPolicy: 'network-only',
+  });
+  const [probabilityResult, reexecuteProbability] = useQuery({
+    query: StockProbabilityCandidatesDocument,
+    variables: { input: probabilityInput },
+    pause: !isProbabilityMode,
+    requestPolicy: 'cache-and-network',
+  });
+  const [selectionModelsResult, reexecuteSelectionModels] = useQuery({
+    query: StockSelectionModelsDocument,
+    requestPolicy: 'cache-and-network',
   });
 
   const [gnSectorsResult] = useQuery<GetSectorsQuery, GetSectorsQueryVariables>(
@@ -471,7 +586,7 @@ export function useStockScreening() {
 
   useEffect(() => {
     if (
-      isIntradayMode ||
+      !isIndicatorMode ||
       snapshotStatusResult.status?.latestRunStatus !== 'running'
     ) {
       return;
@@ -481,7 +596,7 @@ export function useStockScreening() {
     }, 3000);
     return () => window.clearInterval(intervalId);
   }, [
-    isIntradayMode,
+    isIndicatorMode,
     snapshotStatusResult,
     snapshotStatusResult.refresh,
     snapshotStatusResult.status?.latestRunStatus,
@@ -510,7 +625,37 @@ export function useStockScreening() {
     return Array.from(deduped.values());
   }, [gnSectorsResult.data?.sectors?.items]);
 
+  const probabilityModels = useMemo(
+    () =>
+      (selectionModelsResult.data?.stockSelectionModels ?? [])
+        .filter(
+          model =>
+            model.stage === GqlStockSelectionModelStage.Active ||
+            model.stage === GqlStockSelectionModelStage.Shadow
+        )
+        .map(model => ({
+          modelVersion: model.modelVersion,
+          stage:
+            model.stage === GqlStockSelectionModelStage.Active
+              ? ('ACTIVE' as const)
+              : ('SHADOW' as const),
+        }))
+        .sort((left, right) =>
+          left.stage === right.stage
+            ? left.modelVersion.localeCompare(right.modelVersion)
+            : left.stage === 'ACTIVE'
+              ? -1
+              : 1
+        ),
+    [selectionModelsResult.data?.stockSelectionModels]
+  );
+
   const results = useMemo<StockScreeningResult[]>(() => {
+    if (isProbabilityMode) {
+      return (
+        probabilityResult.data?.stockProbabilityCandidates?.items ?? []
+      ).map(mapProbabilityItemToResult);
+    }
     if (isIntradayMode) {
       const items =
         intradayVolumeResult.data?.intradayVolumeScreen?.items ?? [];
@@ -567,11 +712,35 @@ export function useStockScreening() {
   }, [
     intradayVolumeResult.data?.intradayVolumeScreen?.items,
     isIntradayMode,
+    isProbabilityMode,
+    probabilityResult.data?.stockProbabilityCandidates?.items,
     sort,
     stockScreenResult.data?.stockScreen?.items,
   ]);
 
   const meta = useMemo<StockScreeningMeta>(() => {
+    if (isProbabilityMode) {
+      const page = probabilityResult.data?.stockProbabilityCandidates;
+      return {
+        total: page?.total ?? 0,
+        loadedCount: page?.items.length ?? 0,
+        snapshotDate: page?.asOf ?? null,
+        expectedSnapshotDate: page?.asOf ?? null,
+        missingSnapshotDates: [],
+        latestRunStatus: page ? 'SUCCESS' : null,
+        calculationVersion: page?.items[0]?.factorSetVersion,
+        calculatedAt: page?.items[0]?.cutoffAt ?? null,
+        hasStaleData: false,
+        isComplete: Boolean(page?.asOf),
+        warnings: page?.warnings ?? [],
+        financialHealth: null,
+        probabilityShowingShadow: Boolean(page?.showingShadow),
+        probabilityModelVersion: page?.showingShadow
+          ? (page.items[0]?.modelVersion ?? probabilityInput.modelVersion)
+          : (page?.activeModelVersion ?? page?.items[0]?.modelVersion ?? null),
+        probabilityTargetDate: page?.targetDate ?? null,
+      };
+    }
     if (isIntradayMode) {
       const page = intradayVolumeResult.data?.intradayVolumeScreen;
       const intradayItems = page?.items ?? [];
@@ -633,17 +802,25 @@ export function useStockScreening() {
   }, [
     intradayVolumeResult.data?.intradayVolumeScreen,
     isIntradayMode,
+    isProbabilityMode,
+    probabilityInput.modelVersion,
+    probabilityResult.data?.stockProbabilityCandidates,
     snapshotStatusResult.error,
     snapshotStatusResult.status,
     stockScreenResult.data?.stockScreen,
   ]);
 
   const runScreening = (criteria: ScreeningCriteria = screeningCriteria) => {
-    const nextMode = criteria.screeningMode ?? 'DAILY';
+    const nextMode = criteria.screeningMode ?? 'INDICATOR';
     setScreeningCriteria(criteria);
     setActiveMode(nextMode);
-    setQueryInput(buildStockScreenInput(criteria, sort));
-    setIntradayInput(buildIntradayVolumeScreenInput(criteria));
+    if (nextMode === 'INDICATOR') {
+      setQueryInput(buildStockScreenInput(criteria, sort));
+    } else if (nextMode === 'PROBABILITY') {
+      setProbabilityInput(buildProbabilityCandidateInput(criteria));
+    } else {
+      setIntradayInput(buildIntradayVolumeScreenInput(criteria));
+    }
   };
 
   const applySort = (nextSort: StockScreenSortState | null) => {
@@ -653,10 +830,11 @@ export function useStockScreening() {
 
   const resetCriteria = () => {
     setScreeningCriteria(DEFAULT_CRITERIA);
-    setActiveMode('DAILY');
+    setActiveMode('INDICATOR');
     setSort(DEFAULT_SORT);
     setQueryInput(buildStockScreenInput(DEFAULT_CRITERIA, null));
     setIntradayInput(buildIntradayVolumeScreenInput(DEFAULT_CRITERIA));
+    setProbabilityInput(buildProbabilityCandidateInput(DEFAULT_CRITERIA));
   };
 
   const refreshDailyData = useCallback(() => {
@@ -669,8 +847,18 @@ export function useStockScreening() {
       reexecuteIntradayVolume({ requestPolicy: 'network-only' });
       return;
     }
+    if (isProbabilityMode) {
+      reexecuteProbability({ requestPolicy: 'network-only' });
+      return;
+    }
     reexecuteStockScreen({ requestPolicy: 'network-only' });
-  }, [isIntradayMode, reexecuteIntradayVolume, reexecuteStockScreen]);
+  }, [
+    isIntradayMode,
+    isProbabilityMode,
+    reexecuteIntradayVolume,
+    reexecuteProbability,
+    reexecuteStockScreen,
+  ]);
 
   return {
     screeningCriteria,
@@ -682,13 +870,22 @@ export function useStockScreening() {
     applySort,
     error: isIntradayMode
       ? intradayVolumeResult.error
-      : stockScreenResult.error,
+      : isProbabilityMode
+        ? probabilityResult.error
+        : stockScreenResult.error,
     isLoading: isIntradayMode
       ? intradayVolumeResult.fetching && !intradayVolumeResult.data
-      : stockScreenResult.fetching,
+      : isProbabilityMode
+        ? probabilityResult.fetching && !probabilityResult.data
+        : stockScreenResult.fetching,
     runScreening,
     resetCriteria,
     availableIndustries,
+    probabilityModels,
+    probabilityModelsError: selectionModelsResult.error?.message,
+    probabilityModelsLoading: selectionModelsResult.fetching,
+    refreshProbabilityModels: () =>
+      reexecuteSelectionModels({ requestPolicy: 'network-only' }),
     refreshDailyData,
     isSnapshotStatusLoading: snapshotStatusResult.fetching,
     retry,

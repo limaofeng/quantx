@@ -10,7 +10,7 @@ from quantx_api.gqlapi.types import (
   LimitUpRadarInput,
   LimitUpRadarSortField,
   LimitUpRadarStage,
-  StockFactorConditionInput,
+  StockIndicatorConditionInput,
   StockScreenInput,
   StockScreenSortDirection,
   StockScreenSortInput,
@@ -104,7 +104,7 @@ class EmptySnapshotRepo:
   def __init__(self, db):
     self.db = db
 
-  async def get_latest_factor_snapshot_date(self):
+  async def get_latest_indicator_snapshot_date(self):
     return None
 
 
@@ -130,16 +130,16 @@ class SnapshotRepoWithNonFiniteValues:
   def __init__(self, db):
     self.db = db
 
-  async def get_latest_factor_snapshot_date(self):
+  async def get_latest_indicator_snapshot_date(self):
     return date(2026, 5, 20)
 
   async def get_latest_calculated_at(self, snapshot_date):
     return None
 
-  async def screen_factor_snapshots(
+  async def screen_indicator_snapshots(
     self,
     snapshot_date,
-    factor_conditions=None,
+    indicator_conditions=None,
     include_industries=None,
     exclude_industries=None,
     sort=None,
@@ -195,7 +195,7 @@ class CompletedRunRepo:
   async def find_latest_completed(self, snapshot_date=None):
     return SimpleNamespace(
       snapshot_date=date(2026, 5, 20),
-      signal_version="daily-v1",
+      signal_version="daily-indicator-v1",
       score_version="score-v1",
       status="success",
       completed_at=None,
@@ -215,7 +215,7 @@ class CompletedRunRepoForWeekend:
       return None
     return SimpleNamespace(
       snapshot_date=date(2026, 5, 22),
-      signal_version="daily-v1",
+      signal_version="daily-indicator-v1",
       score_version="score-v1",
       status="success",
       completed_at=None,
@@ -227,7 +227,7 @@ class CompletedRunRepoForWeekend:
 
 
 class SnapshotRepoForWeekend(SnapshotRepoWithNonFiniteValues):
-  async def get_latest_factor_snapshot_date(self):
+  async def get_latest_indicator_snapshot_date(self):
     return date(2026, 5, 22)
 
 
@@ -252,10 +252,10 @@ class SnapshotRepoWithSortableRows(SnapshotRepoWithNonFiniteValues):
       "unverified": 1,
     }
 
-  async def screen_factor_snapshots(
+  async def screen_indicator_snapshots(
     self,
     snapshot_date,
-    factor_conditions=None,
+    indicator_conditions=None,
     include_industries=None,
     exclude_industries=None,
     sort=None,
@@ -267,7 +267,9 @@ class SnapshotRepoWithSortableRows(SnapshotRepoWithNonFiniteValues):
     SnapshotRepoWithSortableRows.last_sort = sort
     SnapshotRepoWithSortableRows.last_universe = universe
     SnapshotRepoWithSortableRows.last_exclude_st = exclude_st
-    values = {item["factor_id"]: item["value"] for item in factor_conditions or []}
+    values = {
+      item["indicator_id"]: item["value"] for item in indicator_conditions or []
+    }
     SnapshotRepoWithSortableRows.last_min_roe = values.get("roe_ttm")
     SnapshotRepoWithSortableRows.last_min_net_profit_growth = values.get(
       "net_profit_growth_pct"
@@ -361,8 +363,8 @@ class SnapshotRepoWithSortableRows(SnapshotRepoWithNonFiniteValues):
 
 
 class SnapshotRepoWithSuspiciousRoe(SnapshotRepoWithSortableRows):
-  async def screen_factor_snapshots(self, *args, **kwargs):
-    records, total = await super().screen_factor_snapshots(*args, **kwargs)
+  async def screen_indicator_snapshots(self, *args, **kwargs):
+    records, total = await super().screen_indicator_snapshots(*args, **kwargs)
     record = records[1]
     record.roe_quality_status = "SUSPICIOUS"
     record.roe_quality_flags = ["extreme_roe_ttm"]
@@ -396,7 +398,7 @@ async def test_stock_screen_reports_latest_failed_snapshot_run(monkeypatch):
   assert result.total == 0
   assert result.snapshot_date is None
   assert result.is_complete is False
-  assert "最近日级因子快照运行未成功" in result.warnings[0]
+  assert "最近日级指标快照运行未成功" in result.warnings[0]
   assert "批量拉取 K 线失败" in result.warnings[0]
   assert FakeDbSession.instances[0].statements == [
     "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
@@ -412,7 +414,7 @@ async def test_stock_screen_never_publishes_current_version_rows_from_failed_run
   class CurrentFailedRunRepo(FailedRunRepo):
     async def find_latest(self, snapshot_date=None):
       run = await super().find_latest(snapshot_date)
-      run.signal_version = "daily-v1"
+      run.signal_version = "daily-indicator-v1"
       run.snapshot_date = date(2026, 5, 20)
       return run
 
@@ -529,10 +531,10 @@ async def test_stock_screen_sanitizes_non_finite_snapshot_numbers(monkeypatch):
   assert item.low_price is None
   assert item.ma5_prev is None
   assert item.ma10_prev is None
-  assert item.calculation_version == "daily-v1"
+  assert item.calculation_version == "daily-indicator-v1"
   assert not hasattr(item, "score")
   assert (
-    next(value for value in item.factor_values if value.factor_id == "rsi6").value
+    next(value for value in item.indicator_values if value.indicator_id == "rsi6").value
     is None
   )
 
@@ -574,7 +576,9 @@ async def test_stock_screen_uses_previous_trading_day_on_non_trading_day(monkeyp
 
   result = await StockScreeningResolver.stock_screen(
     StockScreenInput(
-      factor_conditions=[StockFactorConditionInput(factor_id="roe_ttm", value=5.0)]
+      indicator_conditions=[
+        StockIndicatorConditionInput(indicator_id="roe_ttm", value=5.0)
+      ]
     )
   )
 
@@ -624,10 +628,10 @@ async def test_stock_screen_passes_financial_filters_and_maps_financial_metrics(
 
   result = await StockScreeningResolver.stock_screen(
     StockScreenInput(
-      factor_conditions=[
-        StockFactorConditionInput(factor_id="roe_ttm", value=5.0),
-        StockFactorConditionInput(factor_id="net_profit_growth_pct", value=10.0),
-        StockFactorConditionInput(factor_id="revenue_growth_pct", value=3.0),
+      indicator_conditions=[
+        StockIndicatorConditionInput(indicator_id="roe_ttm", value=5.0),
+        StockIndicatorConditionInput(indicator_id="net_profit_growth_pct", value=10.0),
+        StockIndicatorConditionInput(indicator_id="revenue_growth_pct", value=3.0),
       ],
     )
   )
@@ -890,10 +894,10 @@ async def test_snapshot_status_returns_only_dates_after_latest_complete(
     def __init__(self, db):
       self.db = db
 
-    async def get_latest_factor_snapshot_date(self):
+    async def get_latest_indicator_snapshot_date(self):
       return date(2026, 7, 22)
 
-    async def find_factor_snapshot_dates(self, start_date, end_date):
+    async def find_indicator_snapshot_dates(self, start_date, end_date):
       return [date(2026, 7, 22)]
 
     async def find_snapshot_dates(self, start_date, end_date):
@@ -986,7 +990,7 @@ async def _async_value(value):
     ([27, 28, 29], [29], [], [27, 28, 29], "scoped_success"),
   ],
 )
-async def test_factor_snapshot_status_backfills_retained_old_versions(
+async def test_indicator_snapshot_status_backfills_retained_old_versions(
   monkeypatch,
   retained,
   current,
@@ -1003,13 +1007,13 @@ async def test_factor_snapshot_status_backfills_retained_old_versions(
     def __init__(self, db):
       pass
 
-    async def get_latest_factor_snapshot_date(self):
+    async def get_latest_indicator_snapshot_date(self):
       return max(dates(current)) if current else None
 
     async def find_snapshot_dates(self, start, end):
       return dates(retained)
 
-    async def find_factor_snapshot_dates(self, start, end):
+    async def find_indicator_snapshot_dates(self, start, end):
       return dates(current)
 
     async def get_latest_calculated_at(self, target):
@@ -1022,7 +1026,7 @@ async def test_factor_snapshot_status_backfills_retained_old_versions(
     async def find_latest(self, target=None):
       return SimpleNamespace(
         snapshot_date=target or date(2026, 7, 29),
-        signal_version="daily-v1" if current else "old",
+        signal_version="daily-indicator-v1" if current else "old",
         status=latest_status,
         warnings=None,
         completed_at=None,

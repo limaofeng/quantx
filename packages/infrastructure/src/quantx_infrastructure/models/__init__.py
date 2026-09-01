@@ -132,6 +132,13 @@ from .stock_disclosure import (
   StockAnnouncement,
   StockRepurchaseEvent,
 )
+from .stock_selection import (
+  StockCandidate,
+  StockCandidateRuleVersion,
+  StockPrediction,
+  StockPredictionRun,
+  StockSelectionModelVersion,
+)
 from .strategy import Strategy
 from .strategy_backtest import StrategyBacktest
 from .strategy_decision_trace_record import StrategyDecisionTraceRecord
@@ -299,4 +306,9 @@ __all__ = [
   "StockAnnouncement",
   "StockRepurchaseEvent",
   "AnnouncementSyncRun",
+  "StockSelectionModelVersion",
+  "StockPredictionRun",
+  "StockPrediction",
+  "StockCandidateRuleVersion",
+  "StockCandidate",
 ]

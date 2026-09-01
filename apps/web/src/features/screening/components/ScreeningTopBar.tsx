@@ -23,15 +23,15 @@ import {
 import { cn } from '@/utils/cn';
 
 import {
-  FACTOR_OPERATOR_LABELS,
-  FACTOR_TEMPLATES,
-  describeFactorCondition,
-  validateFactorConditions,
-} from '../factorModel';
+  INDICATOR_OPERATOR_LABELS,
+  INDICATOR_TEMPLATES,
+  describeIndicatorCondition,
+  validateIndicatorConditions,
+} from '../indicatorModel';
 import type {
-  FactorCondition,
-  FactorDefinition,
-  FactorOperator,
+  IndicatorCondition,
+  IndicatorDefinition,
+  IndicatorOperator,
   ScreeningCriteria,
   ScreeningMode,
   StockScreenUniverse,
@@ -55,11 +55,18 @@ interface ScreeningTopBarProps {
   snapshotBackfillLoading: boolean;
   snapshotRunState?: string | null;
   hasPendingChanges?: boolean;
-  factors: FactorDefinition[];
+  indicators: IndicatorDefinition[];
   catalogLoading?: boolean;
   catalogError?: string;
   onRetryCatalog: () => void;
-  onOpenFactorReport: (factorId: string) => void;
+  probabilityModels?: Array<{
+    modelVersion: string;
+    stage: 'ACTIVE' | 'SHADOW';
+  }>;
+  probabilityModelsLoading?: boolean;
+  probabilityModelsError?: string;
+  onRetryProbabilityModels?: () => void;
+  onOpenIndicatorReport: (indicatorId: string) => void;
   onOpenJointReport: () => void;
 }
 
@@ -89,12 +96,16 @@ function Section({
 function NumberField({
   id,
   label,
+  max,
+  min,
   value,
   onChange,
   step = '0.1',
 }: {
   id: string;
   label: string;
+  max?: number;
+  min?: number;
   value?: number;
   onChange: (value: number | undefined) => void;
   step?: string;
@@ -107,6 +118,8 @@ function NumberField({
       <Input
         id={id}
         type="number"
+        max={max}
+        min={min}
         step={step}
         value={value ?? ''}
         onChange={event =>
@@ -167,37 +180,44 @@ export function ScreeningTopBar({
   snapshotBackfillLoading,
   snapshotRunState,
   hasPendingChanges = false,
-  factors,
+  indicators,
   catalogLoading,
   catalogError,
   onRetryCatalog,
-  onOpenFactorReport,
+  probabilityModels = [],
+  probabilityModelsLoading = false,
+  probabilityModelsError,
+  onRetryProbabilityModels,
+  onOpenIndicatorReport,
   onOpenJointReport,
 }: ScreeningTopBarProps) {
   const [industrySearch, setIndustrySearch] = useState('');
-  const [factorSearch, setFactorSearch] = useState('');
-  const mode = screeningCriteria.screeningMode ?? 'DAILY';
+  const [indicatorSearch, setIndicatorSearch] = useState('');
+  const mode = screeningCriteria.screeningMode ?? 'INDICATOR';
   const intraday = mode === 'INTRADAY';
+  const probability = mode === 'PROBABILITY';
+  const indicatorMode = mode === 'INDICATOR';
   const universe = screeningCriteria.universe ?? 'STOCK';
-  const conditions = screeningCriteria.factorConditions ?? [];
-  const conditionError = validateFactorConditions(conditions);
+  const conditions = screeningCriteria.indicatorConditions ?? [];
+  const conditionError = validateIndicatorConditions(conditions);
   const selectedIndustries = screeningCriteria.includeIndustries ?? [];
   const filteredIndustries = availableIndustries.filter(item =>
     item.includes(industrySearch.trim())
   );
-  const filteredFactors = factors.filter(factor =>
-    `${factor.label} ${factor.id} ${factor.category}`
+  const filteredIndicators = indicators.filter(indicator =>
+    `${indicator.label} ${indicator.id} ${indicator.category}`
       .toLowerCase()
-      .includes(factorSearch.trim().toLowerCase())
+      .includes(indicatorSearch.trim().toLowerCase())
   );
-  const distinctFactors = new Set(conditions.map(item => item.factorId)).size;
+  const distinctIndicators = new Set(conditions.map(item => item.indicatorId))
+    .size;
   const update = <K extends keyof ScreeningCriteria>(
     key: K,
     value: ScreeningCriteria[K]
   ) => setScreeningCriteria(previous => ({ ...previous, [key]: value }));
-  const updateCondition = (index: number, patch: Partial<FactorCondition>) =>
+  const updateCondition = (index: number, patch: Partial<IndicatorCondition>) =>
     update(
-      'factorConditions',
+      'indicatorConditions',
       conditions.map((condition, position) =>
         position === index ? { ...condition, ...patch } : condition
       )
@@ -231,12 +251,13 @@ export function ScreeningTopBar({
       <header className="shrink-0 border-b border-white/10 p-ui-section">
         <h1 className="mb-3 flex items-center gap-2 text-ui-title font-semibold">
           <SlidersHorizontal className="h-4 w-4 text-blue-400" />
-          {intraday ? '盘中选股' : '因子选股'}
+          {intraday ? '盘中选股' : probability ? '次日概率候选' : '指标选股'}
         </h1>
         <ChoiceGroup
           label="选股模式"
           options={[
-            { label: '日级', value: 'DAILY' },
+            { label: '指标', value: 'INDICATOR' },
+            { label: '次日概率', value: 'PROBABILITY' },
             { label: '盘中', value: 'INTRADAY' },
           ]}
           value={mode}
@@ -254,17 +275,30 @@ export function ScreeningTopBar({
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-ui-section custom-scrollbar">
         <Section label="筛选范围">
-          <ChoiceGroup
-            label="股票范围"
-            options={[
-              { label: 'A 股', value: 'STOCK' },
-              { label: 'ETF', value: 'ETF' },
-              { label: '股票 + ETF', value: 'STOCK_AND_ETF' },
-            ]}
-            value={universe}
-            onChange={value => updateUniverse(value as StockScreenUniverse)}
-          />
-          {!intraday && universe === 'STOCK' && (
+          {probability ? (
+            <div className="space-y-2 rounded-md border border-amber-400/20 bg-amber-400/5 p-3 text-ui-label text-slate-300">
+              <p className="font-medium text-amber-200">固定研究范围</p>
+              <p>
+                仅沪深普通 A 股；自动排除当前
+                ST、停牌、退市整理和数据不完整标的。
+              </p>
+              <p className="text-ui-caption text-slate-400">
+                候选只用于研究与人工决策，不会创建策略实例或订单。
+              </p>
+            </div>
+          ) : (
+            <ChoiceGroup
+              label="股票范围"
+              options={[
+                { label: 'A 股', value: 'STOCK' },
+                { label: 'ETF', value: 'ETF' },
+                { label: '股票 + ETF', value: 'STOCK_AND_ETF' },
+              ]}
+              value={universe}
+              onChange={value => updateUniverse(value as StockScreenUniverse)}
+            />
+          )}
+          {indicatorMode && universe === 'STOCK' && (
             <label className="flex items-center gap-2 text-ui-label">
               <input
                 type="checkbox"
@@ -275,7 +309,7 @@ export function ScreeningTopBar({
               排除当前 ST
             </label>
           )}
-          {universe === 'STOCK' && (
+          {!probability && universe === 'STOCK' && (
             <details>
               <summary className="cursor-pointer text-ui-label text-slate-400 focus-visible:outline-blue-400">
                 行业（包含）· 已选 {selectedIndustries.length}
@@ -345,17 +379,175 @@ export function ScreeningTopBar({
               onChange={value => update('intradayDepthImbalanceMin', value)}
             />
           </Section>
+        ) : probability ? (
+          <>
+            <Section label="候选阈值">
+              <NumberField
+                id="screening-probability-minimum"
+                label="最低校准概率"
+                min={0}
+                max={1}
+                step="0.01"
+                value={screeningCriteria.probabilityMinimum}
+                onChange={value => update('probabilityMinimum', value)}
+              />
+              <p className="text-ui-caption text-slate-400">
+                正式候选最低为 0.60；更低输入不会绕过服务端资格门槛。
+              </p>
+              <div className="space-y-2">
+                <span className="text-ui-label text-slate-400">候选等级</span>
+                {(['A', 'B'] as const).map(level => {
+                  const levels = screeningCriteria.probabilityLevels ?? [
+                    'A',
+                    'B',
+                  ];
+                  return (
+                    <label
+                      key={level}
+                      className="flex items-center gap-2 text-ui-label"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={levels.includes(level)}
+                        onChange={event =>
+                          update(
+                            'probabilityLevels',
+                            event.target.checked
+                              ? Array.from(new Set([...levels, level])).sort()
+                              : levels.filter(item => item !== level)
+                          )
+                        }
+                        className="accent-blue-500"
+                      />
+                      {level} 级 ·{' '}
+                      {level === 'A' ? '全市场排名 1–20' : '全市场排名 21–50'}
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="screening-probability-search"
+                  className="block text-ui-label text-slate-400"
+                >
+                  代码 / 名称
+                </label>
+                <Input
+                  id="screening-probability-search"
+                  value={screeningCriteria.probabilitySearch ?? ''}
+                  placeholder="例如 600519"
+                  onChange={event =>
+                    update('probabilitySearch', event.target.value)
+                  }
+                />
+              </div>
+            </Section>
+            <Section label="模型与数据">
+              <div className="space-y-1.5">
+                <label className="block text-ui-label text-slate-400">
+                  候选模型
+                </label>
+                <Select
+                  value={
+                    screeningCriteria.probabilityModelVersion ??
+                    '__AUTO_ACTIVE__'
+                  }
+                  onValueChange={value =>
+                    update(
+                      'probabilityModelVersion',
+                      value === '__AUTO_ACTIVE__' ? undefined : value
+                    )
+                  }
+                >
+                  <SelectTrigger
+                    aria-label="候选模型"
+                    disabled={
+                      probabilityModelsLoading && probabilityModels.length === 0
+                    }
+                  >
+                    <SelectValue placeholder="选择 ACTIVE 或 SHADOW 模型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__AUTO_ACTIVE__">
+                      自动（ACTIVE 优先）
+                    </SelectItem>
+                    {probabilityModels.map(model => (
+                      <SelectItem
+                        key={model.modelVersion}
+                        value={model.modelVersion}
+                      >
+                        {model.stage} · {model.modelVersion}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {probabilityModelsLoading && (
+                  <p className="text-ui-caption text-slate-500">
+                    加载模型目录…
+                  </p>
+                )}
+                {probabilityModelsError && (
+                  <div className="flex items-center justify-between gap-2 text-ui-caption text-rose-300">
+                    <span>模型目录加载失败</span>
+                    {onRetryProbabilityModels && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={onRetryProbabilityModels}
+                      >
+                        重试
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {!probabilityModelsLoading &&
+                  !probabilityModelsError &&
+                  probabilityModels.length === 0 && (
+                    <p className="text-ui-caption text-amber-200">
+                      尚无 ACTIVE 或 SHADOW
+                      模型；请先在研究中心登记并人工切换阶段。
+                    </p>
+                  )}
+              </div>
+              <div
+                role="status"
+                className={cn(
+                  'space-y-1 text-ui-label',
+                  meta.probabilityShowingShadow
+                    ? 'text-amber-200'
+                    : 'text-slate-300'
+                )}
+              >
+                <p>
+                  {!meta.probabilityModelVersion
+                    ? '尚无可展示模型'
+                    : meta.probabilityShowingShadow
+                      ? '当前展示影子模型候选'
+                      : '当前展示已激活模型候选'}
+                </p>
+                <p className="break-all font-mono text-ui-caption text-slate-400">
+                  {meta.probabilityModelVersion ?? '尚无可展示模型'}
+                </p>
+                <p className="font-mono text-ui-caption text-slate-400">
+                  预测日 {meta.snapshotDate ?? '--'} · 目标日{' '}
+                  {meta.probabilityTargetDate ?? '--'}
+                </p>
+              </div>
+            </Section>
+          </>
         ) : (
           <>
-            <Section label={`因子条件 · ${conditions.length} 条 AND`}>
+            <Section label={`指标条件 · ${conditions.length} 条 AND`}>
               <details>
                 <summary className="cursor-pointer text-ui-label text-blue-300 focus-visible:outline-blue-400">
                   条件模板（展开查看实际阈值）
                 </summary>
                 <div className="mt-2 space-y-2">
-                  {FACTOR_TEMPLATES.filter(template =>
+                  {INDICATOR_TEMPLATES.filter(template =>
                     template.conditions.every(condition =>
-                      factors.some(factor => factor.id === condition.factorId)
+                      indicators.some(
+                        indicator => indicator.id === condition.indicatorId
+                      )
                     )
                   ).map(template => (
                     <div
@@ -366,7 +558,7 @@ export function ScreeningTopBar({
                         size="sm"
                         variant="outline"
                         onClick={() =>
-                          update('factorConditions', [
+                          update('indicatorConditions', [
                             ...conditions,
                             ...template.conditions.map(condition => ({
                               ...condition,
@@ -378,10 +570,10 @@ export function ScreeningTopBar({
                       </Button>
                       {template.conditions.map(condition => (
                         <p
-                          key={condition.factorId}
+                          key={condition.indicatorId}
                           className="mt-1 text-ui-caption text-slate-400"
                         >
-                          {describeFactorCondition(condition, factors)}
+                          {describeIndicatorCondition(condition, indicators)}
                         </p>
                       ))}
                     </div>
@@ -390,37 +582,39 @@ export function ScreeningTopBar({
               </details>
               {!conditions.length && (
                 <p className="text-ui-label text-slate-400">
-                  未预选因子。添加数值范围或二值条件，所有条件取交集。
+                  未预选指标。添加数值范围或二值条件，所有条件取交集。
                 </p>
               )}
               {conditions.map((condition, index) => {
-                const factor = factors.find(
-                  item => item.id === condition.factorId
+                const indicator = indicators.find(
+                  item => item.id === condition.indicatorId
                 );
                 return (
                   <div
-                    key={`${condition.factorId}:${index}`}
+                    key={`${condition.indicatorId}:${index}`}
                     className="space-y-2 rounded-md border border-white/10 p-2"
                   >
                     <div className="flex items-center gap-1">
                       <span className="min-w-0 flex-1 text-ui-label font-medium">
-                        {factor?.label ?? condition.factorId}
+                        {indicator?.label ?? condition.indicatorId}
                       </span>
                       <Button
                         size="icon"
                         variant="ghost"
-                        aria-label={`查看 ${factor?.label ?? condition.factorId} 报告`}
-                        onClick={() => onOpenFactorReport(condition.factorId)}
+                        aria-label={`查看 ${indicator?.label ?? condition.indicatorId} 报告`}
+                        onClick={() =>
+                          onOpenIndicatorReport(condition.indicatorId)
+                        }
                       >
                         <BookOpen className="h-4 w-4" />
                       </Button>
                       <Button
                         size="icon"
                         variant="ghost"
-                        aria-label={`移除 ${factor?.label ?? condition.factorId} 条件`}
+                        aria-label={`移除 ${indicator?.label ?? condition.indicatorId} 条件`}
                         onClick={() =>
                           update(
-                            'factorConditions',
+                            'indicatorConditions',
                             conditions.filter(
                               (_, position) => position !== index
                             )
@@ -430,7 +624,7 @@ export function ScreeningTopBar({
                         <X className="h-4 w-4" />
                       </Button>
                     </div>
-                    {factor?.kind === 'binary' ? (
+                    {indicator?.kind === 'binary' ? (
                       <Select
                         value={String(condition.value ?? 1)}
                         onValueChange={value =>
@@ -441,7 +635,7 @@ export function ScreeningTopBar({
                           })
                         }
                       >
-                        <SelectTrigger aria-label={`${factor.label} 条件`}>
+                        <SelectTrigger aria-label={`${indicator.label} 条件`}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -455,21 +649,21 @@ export function ScreeningTopBar({
                           value={condition.operator}
                           onValueChange={operator =>
                             updateCondition(index, {
-                              operator: operator as FactorOperator,
+                              operator: operator as IndicatorOperator,
                             })
                           }
                         >
                           <SelectTrigger
-                            aria-label={`${factor?.label ?? condition.factorId} 比较方式`}
+                            aria-label={`${indicator?.label ?? condition.indicatorId} 比较方式`}
                           >
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {Object.entries(FACTOR_OPERATOR_LABELS)
+                            {Object.entries(INDICATOR_OPERATOR_LABELS)
                               .filter(
                                 ([operator]) =>
-                                  !factor?.operators.length ||
-                                  factor.operators.includes(operator)
+                                  !indicator?.operators.length ||
+                                  indicator.operators.includes(operator)
                               )
                               .map(([operator, label]) => (
                                 <SelectItem key={operator} value={operator}>
@@ -482,7 +676,7 @@ export function ScreeningTopBar({
                           <Input
                             type="number"
                             step="any"
-                            aria-label={`${factor?.label ?? condition.factorId} ${condition.operator === 'between' ? '下限' : '数值'}`}
+                            aria-label={`${indicator?.label ?? condition.indicatorId} ${condition.operator === 'between' ? '下限' : '数值'}`}
                             value={condition.value ?? ''}
                             onChange={event =>
                               updateCondition(index, {
@@ -498,7 +692,7 @@ export function ScreeningTopBar({
                             <Input
                               type="number"
                               step="any"
-                              aria-label={`${factor?.label ?? condition.factorId} 上限`}
+                              aria-label={`${indicator?.label ?? condition.indicatorId} 上限`}
                               value={condition.valueTo ?? ''}
                               onChange={event =>
                                 updateCondition(index, {
@@ -512,12 +706,12 @@ export function ScreeningTopBar({
                             />
                           )}
                           <span className="text-ui-caption text-slate-400">
-                            {factor?.unit}
+                            {indicator?.unit}
                           </span>
                         </div>
                       </>
                     )}
-                    {factor && !factor.researchSupported && (
+                    {indicator && !indicator.researchSupported && (
                       <p className="text-ui-caption text-amber-200">
                         可选股；历史研究未覆盖
                       </p>
@@ -530,7 +724,7 @@ export function ScreeningTopBar({
                   {conditionError}
                 </p>
               )}
-              {distinctFactors >= 1 && (
+              {distinctIndicators >= 1 && (
                 <Button
                   variant="outline"
                   className="w-full"
@@ -538,26 +732,26 @@ export function ScreeningTopBar({
                   onClick={onOpenJointReport}
                 >
                   <BookOpen className="mr-2 h-4 w-4" />
-                  {distinctFactors >= 2
+                  {distinctIndicators >= 2
                     ? '查看当前组合报告'
                     : '查看当前条件报告'}
                 </Button>
               )}
             </Section>
-            <Section label="因子目录">
+            <Section label="指标目录">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
                 <Input
-                  aria-label="搜索因子"
+                  aria-label="搜索指标"
                   placeholder="名称、类别或指标代码"
-                  value={factorSearch}
-                  onChange={event => setFactorSearch(event.target.value)}
+                  value={indicatorSearch}
+                  onChange={event => setIndicatorSearch(event.target.value)}
                   className="pl-9"
                 />
               </div>
-              {catalogLoading && !factors.length && (
+              {catalogLoading && !indicators.length && (
                 <p role="status" className="text-ui-label text-slate-400">
-                  正在读取因子目录…
+                  正在读取指标目录…
                 </p>
               )}
               {catalogError && (
@@ -568,42 +762,44 @@ export function ScreeningTopBar({
                   </Button>
                 </div>
               )}
-              {!catalogLoading && !catalogError && !filteredFactors.length && (
-                <p className="text-ui-label text-slate-400">没有匹配的因子</p>
-              )}
-              {filteredFactors.map(factor => (
+              {!catalogLoading &&
+                !catalogError &&
+                !filteredIndicators.length && (
+                  <p className="text-ui-label text-slate-400">没有匹配的指标</p>
+                )}
+              {filteredIndicators.map(indicator => (
                 <div
-                  key={factor.id}
+                  key={indicator.id}
                   className="flex items-center gap-1 border-b border-white/5 pb-2"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="text-ui-label text-slate-200">
-                      {factor.label}
+                      {indicator.label}
                     </div>
                     <div className="text-ui-caption text-slate-400">
-                      {factor.category} · {factor.lookback} 日 ·{' '}
-                      {factor.researchSupported ? '量价研究' : '研究待覆盖'}
+                      {indicator.category} · {indicator.lookback} 日 ·{' '}
+                      {indicator.researchSupported ? '量价研究' : '研究待覆盖'}
                     </div>
                   </div>
                   <Button
                     size="icon"
                     variant="ghost"
-                    aria-label={`查看 ${factor.label} 报告`}
-                    onClick={() => onOpenFactorReport(factor.id)}
+                    aria-label={`查看 ${indicator.label} 报告`}
+                    onClick={() => onOpenIndicatorReport(indicator.id)}
                   >
                     <BookOpen className="h-4 w-4" />
                   </Button>
                   <Button
                     size="icon"
                     variant="ghost"
-                    aria-label={`添加 ${factor.label} 条件`}
+                    aria-label={`添加 ${indicator.label} 条件`}
                     onClick={() =>
-                      update('factorConditions', [
+                      update('indicatorConditions', [
                         ...conditions,
                         {
-                          factorId: factor.id,
-                          operator: factor.kind === 'binary' ? 'eq' : 'gte',
-                          value: factor.kind === 'binary' ? 1 : null,
+                          indicatorId: indicator.id,
+                          operator: indicator.kind === 'binary' ? 'eq' : 'gte',
+                          value: indicator.kind === 'binary' ? 1 : null,
                         },
                       ])
                     }
@@ -645,7 +841,7 @@ export function ScreeningTopBar({
                       : '快照未完整就绪'}
                 <div className="mt-1 font-mono text-ui-caption">
                   {meta.snapshotDate ?? '--'} ·{' '}
-                  {meta.calculationVersion ?? '因子版本未就绪'}
+                  {meta.calculationVersion ?? '指标版本未就绪'}
                 </div>
                 {!meta.isComplete && (
                   <div>
@@ -701,7 +897,9 @@ export function ScreeningTopBar({
         <p className="mb-2 text-ui-caption text-slate-400">
           {hasPendingChanges
             ? '当前草稿 · 应用后更新结果'
-            : '结果对应已应用条件（全部为 AND）'}
+            : probability
+              ? '结果来自已发布的完整预测批次'
+              : '结果对应已应用条件（全部为 AND）'}
         </p>
         <div className="flex gap-2">
           <Button variant="outline" onClick={onReset}>
@@ -710,7 +908,10 @@ export function ScreeningTopBar({
           <Button
             className="flex-1"
             disabled={
-              screeningLoading || (!intraday && Boolean(conditionError))
+              screeningLoading ||
+              (indicatorMode && Boolean(conditionError)) ||
+              (probability &&
+                !(screeningCriteria.probabilityLevels ?? []).length)
             }
             onClick={onRunScreening}
           >
@@ -718,7 +919,9 @@ export function ScreeningTopBar({
               ? '筛选中…'
               : intraday
                 ? '开始盘中扫描'
-                : '应用筛选'}
+                : probability
+                  ? '刷新概率候选'
+                  : '应用筛选'}
           </Button>
         </div>
       </footer>

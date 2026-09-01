@@ -3,37 +3,37 @@
 `quantx-research` 是 QuantX 的离线只读研究应用。它不属于常规 API、Engine
 或 Worker 运行链路，也不会触发行情同步或写入业务数据库。
 
-## 日级因子与条件交集研究
+## 日级指标与条件交集研究
 
-`study: factor-study` 使用 `quantx_domain.factors` 的同一份版本化定义、
-因子计算和条件比较。每日快照与历史研究不再各自解释“量比”“连续下跌”或
-交叉指标。首版覆盖目录中 `research_supported=true` 的量价因子；财务和
-换手率因子暂不具备已核验的历史覆盖，指定它们时会明确拒绝研究配置。
+`study: indicator-study` 使用 `quantx_domain.indicators` 的同一份版本化定义、
+指标计算和条件比较。每日快照与历史研究不再各自解释“量比”“连续下跌”或
+交叉指标。首版覆盖目录中 `research_supported=true` 的量价指标；财务和
+换手率指标暂不具备已核验的历史覆盖，指定它们时会明确拒绝研究配置。
 
 ```powershell
-uv run --no-sync quantx-research validate --config apps/research/configs/factor_study_smoke.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
-uv run --no-sync quantx-research run --config apps/research/configs/factor_study_smoke.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
-uv run --no-sync quantx-research run --config apps/research/configs/factor_study_v1_20260729.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
-uv run --no-sync quantx-research run --config apps/research/configs/factor_study_v1_20260729.yaml --resume-run-dir .runtime/research-runs/factor-study-v1/<failed-run-id>
-uv run --no-sync quantx-research render --run-dir <factor-study-run-directory>
+uv run --no-sync quantx-research validate --config apps/research/configs/indicator_study_smoke.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
+uv run --no-sync quantx-research run --config apps/research/configs/indicator_study_smoke.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
+uv run --no-sync quantx-research run --config apps/research/configs/indicator_study_v1_20260729.yaml --market-data-archive .runtime/research-source/full-a-share-v2-20200313-20260729
+uv run --no-sync quantx-research run --config apps/research/configs/indicator_study_v1_20260729.yaml --resume-run-dir .runtime/research-runs/indicator-study-v1/<failed-run-id>
+uv run --no-sync quantx-research render --run-dir <indicator-study-run-directory>
 ```
 
-`factor_study_v1.yaml` 默认研究最近五年；`latest` 根据已经持久化的基准日线
+`indicator_study_v1.yaml` 默认研究最近五年；`latest` 根据已经持久化的基准日线
 解析，不采用电脑当天日期。运行前将实际起止日冻结在 `resolved-config.yaml`
-并纳入配置指纹。`factor_study_v1_20260729.yaml` 固定使用现有 archive 可验证
-窗口，包含全部首批量价因子的单独报告及一个明确标注为验收示例的交集报告；
+并纳入配置指纹。`indicator_study_v1_20260729.yaml` 固定使用现有 archive 可验证
+窗口，包含全部首批量价指标的单独报告及一个明确标注为验收示例的交集报告；
 示例阈值不表示最优条件或投资建议。
 
-最小配置如下；`factor_ids` 指定要生成总体分组报告的因子，`conditions`
+最小配置如下；`indicator_ids` 指定要生成总体分组报告的指标，`conditions`
 指定一个精确条件交集，可以只填其中之一。
 
 ```yaml
-study: factor-study
+study: indicator-study
 version: v1
-factor_ids: [volume_ratio, change_pct]
+indicator_ids: [volume_ratio, change_pct]
 conditions:
-  - {factor_id: volume_ratio, operator: between, value: 0.8, value_to: 1.5}
-  - {factor_id: change_pct, operator: lt, value: 0}
+  - {indicator_id: volume_ratio, operator: between, value: 0.8, value_to: 1.5}
+  - {indicator_id: change_pct, operator: lt, value: 0}
 universe:
   instrument_type: stock
   exclude_st: false
@@ -41,7 +41,7 @@ universe:
   exclude_industries: []
 ```
 
-- 数值操作符为 `gte/lte/gt/lt/eq/between`；区间两端包含，二值因子仅允许
+- 数值操作符为 `gte/lte/gt/lt/eq/between`；区间两端包含，二值指标仅允许
   `eq: 0/1`。零是合法阈值。条件排序及重复不改变规范化身份。
 - 默认观察未来连续 1–20 个交易日，可配置 `outcomes.horizons`，上限 60。
   主口径是 `C(T+h)/C(T)-1`，辅助口径是 `C(T+h)/O(T+1)-1`；第 1 日的
@@ -50,9 +50,9 @@ universe:
   行、结构化统计最多 64 MiB；超出时明确要求拆分配置，不发布无法查看的报告。
 - 全市场交易日历对齐，不把停牌后的下一条行情顺延成次日；每个期限独立
   判断收益是否完整，不因缺少 20 日结果排除已有的 1 日结果。
-- 单因子按每日截面五分位分组，相同值不拆组；常量截面只有一个有效分组。
-  二值因子按真假分组。取值分布的上下限是跨日观测范围，并非固定条件阈值。
-- 联合报告比较交集、各单独条件及基准。全部条件先使用共同有效因子样本，
+- 单指标按每日截面五分位分组，相同值不拆组；常量截面只有一个有效分组。
+  二值指标按真假分组。取值分布的上下限是跨日观测范围，并非固定条件阈值。
+- 联合报告比较交集、各单独条件及基准。全部条件先使用共同有效指标样本，
   再为每个收益期限限定交集可观察的日期，各组采用同一日期支持。
 - 报告同时提供股票日合并上涨比例、均值和精确中位数，以及日期等权上涨
   比例、均值、同日基准差异、样本股票数和日期数。置信区间针对日期等权的
@@ -65,7 +65,7 @@ universe:
   可由 `1/(n+1)` 推导的字段；`metrics.json.inference_resolution` 汇总配置次数、
   各族有效次数范围、实际 Monte Carlo 分辨率、完整检验族大小，以及孤立最小 p
   值对应的 BH q 值下限。
-  默认 1,000 次抽样面对大检验族时分辨率偏粗；“未显著”不得解释为因子无效，
+  默认 1,000 次抽样面对大检验族时分辨率偏粗；“未显著”不得解释为指标无效，
   也不会为得到显著结果而在运行后临时增加抽样次数。
 - 历史 ST 和行业分类未核验，配置中 `exclude_st=true` 或行业条件会明确
   拒绝；总体报告只能作为相应当前筛选的参考，不能声称精确匹配。固定股票
@@ -74,7 +74,7 @@ universe:
 研究仍使用现有只读数据适配器、复权覆盖证明和物理内存保护。按完整股票
 历史分批计算，按月保存窄投影；报告逐个计算，精确中位数使用临时数值文件，
 不将整个全市场宽面板装入内存。完整五年研究建议预留至少 20 GiB 临时磁盘，
-运行时间取决于因子数量、股票数量和 Bootstrap 配置。
+运行时间取决于指标数量、股票数量和 Bootstrap 配置。
 
 关系库研究读取使用只读 `REPEATABLE READ` 快照，并在整个读取事务持有复权因子
 共享事务锁。复权覆盖只接受 schema-v2 的逐代码审计，且要求当前 10 列因子行数
@@ -85,7 +85,7 @@ universe:
 
 统计阶段每完成一个报告，会先在运行目录的 `statistics-checkpoints/` 原子
 持久化原始 p 值报告；检查点严格绑定冻结配置指纹、数据指纹、完整
-`analysis-sample.parquet` SHA256、样本行数和因子定义版本，还绑定统计引擎
+`analysis-sample.parquet` SHA256、样本行数和指标定义版本，还绑定统计引擎
 schema/version、关键统计源码的逐文件与汇总 SHA256，以及 Python、NumPy、
 Pandas、PyArrow 版本。上述身份同时显示在 manifest；源码或依赖身份变化时
 拒绝复用旧检查点。旧 manifest 缺少统计引擎身份时，仅允许在检查点目录不存在
@@ -96,7 +96,7 @@ Pandas、PyArrow 版本。上述身份同时显示在 manifest；源码或依赖
 完成后，才统一对完整检验族做 BH 校正并生成最终产物。`failed_resource` 或
 普通 `failed` 运行可使用上面的 `--resume-run-dir` 原目录恢复：恢复会重新核验
 冻结配置、data-quality artifact 哈希及其中完整且内部一致的 schema-v2 逐代码复权
-覆盖身份、Parquet footer、完整样本哈希和已有检查点，不读取行情、不重算因子或
+覆盖身份、Parquet footer、完整样本哈希和已有检查点，不读取行情、不重算指标或
 收益。旧 schema、缺少证据摘要、虚假 complete 或代码集合不一致均拒绝恢复。
 缺少检查点时只从冻结样本重建临时月分区；已完成报告直接复用。
 恢复命令不能同时传 `--market-data-archive` 或 `--output-root`，且仍严格执行配置
@@ -105,7 +105,7 @@ Pandas、PyArrow 版本。上述身份同时显示在 manifest；源码或依赖
 安全接管，活动进程、其他主机或无法核验的租约一律拒绝。Ctrl+C 会先把本次
 attempt 收敛为 `failed`，硬终止留下的 stale lease 则由下一次恢复验证后替换。
 
-`factor-study` 在统计身份和三项恢复输入（冻结样本、resolved config、数据质量）
+`indicator-study` 在统计身份和三项恢复输入（冻结样本、resolved config、数据质量）
 共同写入 manifest 后，将 `data-quality.json` 视为不可变恢复证据。后续恢复警告
 和逐次运行物理内存遥测只进入最终报告或 manifest，不再重写该文件；即使进程在
 最终 artifact 重建前异常退出，旧 manifest 中的恢复输入 SHA256 仍然有效。重新
@@ -114,13 +114,41 @@ attempt 收敛为 `failed`，硬终止留下的 stale lease 则由下一次恢�
 
 数据库读取与 CPU 阶段分离：完成股票特征及来源证据读取后立即退出只读连接，
 再执行全局交易日对齐、前向收益和统计，避免长时间闲置事务在退出时超时。
-计算因子时同样传入基准交易日历；物理缺失的一根行情与显式不可用行情保持
+计算指标时同样传入基准交易日历；物理缺失的一根行情与显式不可用行情保持
 一致，不把缺失交易日两边的数据拼成一个完整滚动窗口。
 
 产物包括一个不可变运行身份、配置/数据指纹、`analysis-sample.parquet`、
 包含 `reports[]` 的 `metrics.json`、逐报告 CSV、质量报告及 HTML。每个报告
 有独立 `report_id`，包含定义版本、规范化条件、覆盖、分组和多周期统计。
 页面只查找已有产物，不创建研究任务，也不显示校准后的个股预测概率。
+
+## 次日上涨概率模型研究
+
+`study: next-day-selection` 是独立的手工训练入口。它复用认证日级指标，构造
+横截面模型因子，并预测 T+1 开盘到收盘收益是否大于零。它不由 Worker 自动
+训练，不发布策略或交易信号。
+
+```powershell
+uv run --frozen quantx-research train-next-day-selection --config apps/research/configs/next_day_selection_v1.yaml
+```
+
+默认配置使用五年窗口，最后 12 个月为冻结测试集；之前 48 个月按至少
+30 月训练、6 月校准、1 月验证进行逐月 walk-forward。Logistic 与 LightGBM
+按验证 Brier 选择，差异不超过 0.5% 时优先 Logistic。Platt 是默认校准器；
+只有正样本至少 20,000 且 Isotonic 相对改善 Brier 至少 1% 时才使用 Isotonic。
+
+成功运行只生成 JSON、LightGBM 文本和 Parquet 安全产物。模型登记会重新核验
+manifest 的文件大小与 SHA-256，拒绝路径链接、Pickle/Joblib、非有限模型参数和
+越界校准器；暴露到研究中心的指标与数据质量经过白名单投影，不包含本地数据路径。
+
+训练输出安全 JSON、LightGBM 原生文本、Parquet 和哈希 manifest，禁止 pickle、
+joblib 等 Python 对象反序列化。冻结测试至少记录 Brier/BSS、Log Loss、ECE、
+ROC AUC、PR AUC、日期等权 Top20/Top50、区块 Bootstrap 区间和年度稳定性。
+模型只能在研究中心人工登记和变更阶段；历史 ST、行业、退市状态未完整时，
+即使效果门禁通过也只能用于 CANDIDATE/SHADOW，不能晋级 ACTIVE。
+
+完整契约见
+[`docs/次日上涨概率选股软件_完整功能设计方案.md`](../../docs/次日上涨概率选股软件_完整功能设计方案.md)。
 
 默认研究配置：
 
@@ -230,7 +258,7 @@ Parquet 都先写同目录临时文件，关闭、核对行数后再原子替换
 `failed_resource`。这不是操作系统级的进程内存上限，但单次不可中断分配已被
 限制在一个有界块内。后台 RSS、最低可用物理内存、reserve breach、分阶段峰值
 和 staging 估算在量价事件研究中会写入 `data-quality.json`，最终摘要也写入
-manifest；factor-study 按上文不可变恢复证据规则仅写 manifest。资源
+manifest；indicator-study 按上文不可变恢复证据规则仅写 manifest。资源
 失败仍保留已知的真实样本数、事件数、数据指纹和质量证据。临时
 `.staging-*` 在退出时自动清理。正式全量运行建议额外预留至少 20 GiB 临时
 磁盘。
@@ -275,7 +303,7 @@ manifest；factor-study 按上文不可变恢复证据规则仅写 manifest。�
 - `tables/`：对应的扁平 CSV；
 - `data-quality.json`：原始异常计数，以及仅由去重后有效、正值、OHLC
   内部一致且非停牌行计算的历史与边界覆盖，并保存复权因子请求覆盖证明和
-  staging 资源估算；量价事件研究还保存物理内存遥测，factor-study 的逐次遥测
+  staging 资源估算；量价事件研究还保存物理内存遥测，indicator-study 的逐次遥测
   保存在 manifest；
 - `report.html`：只负责展示上述结构化事实。
 

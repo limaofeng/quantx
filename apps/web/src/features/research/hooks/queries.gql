@@ -47,11 +47,11 @@ query ResearchRun($key: String!) {
       artifactErrors
     }
     analysisSampleCount
-    factorReports {
+    indicatorReports {
       runKey
       reportId
       kind
-      factorIds
+      indicatorIds
       studyId
       version
       runId
@@ -61,6 +61,7 @@ query ResearchRun($key: String!) {
       configHash
       warnings
     }
+    selectionMetrics
     dataQuality
     eventCurve
     interactionHeatmap

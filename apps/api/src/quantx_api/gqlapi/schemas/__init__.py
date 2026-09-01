@@ -30,6 +30,7 @@ from .realtime_schema import RealtimeSubscription
 from .research_schema import ResearchQuery
 from .sector_schema import SectorQuery
 from .stock_screening_schema import StockScreeningQuery
+from .stock_selection_schema import StockSelectionMutation, StockSelectionQuery
 from .strategy_schema import StrategyMutation, StrategyQuery
 from .t_trade_schema import TTradeMutation, TTradeQuery
 from .trading_schema import TradingMutation, TradingQuery
@@ -57,6 +58,8 @@ __all__ = [
   "EntryPlanSubscription",
   "FinancialQuery",
   "StockScreeningQuery",
+  "StockSelectionQuery",
+  "StockSelectionMutation",
   "WatchlistQuery",
   "WatchlistMutation",
   "TradingQuery",

@@ -78,7 +78,7 @@ async def test_snapshot_fence_locks_dates_before_validating_latest_run_generatio
   assert str(second.toordinal()) in second_lock
   assert "max(daily_signal_runs.id)" in owner_query
   assert "daily_signal_runs.snapshot_date IN" in owner_query
-  assert "daily_signal_runs.signal_version = 'daily-v1'" in owner_query
+  assert "daily_signal_runs.signal_version = 'daily-indicator-v1'" in owner_query
 
 
 @pytest.mark.asyncio

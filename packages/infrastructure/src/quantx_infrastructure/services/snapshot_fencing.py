@@ -6,7 +6,7 @@ import hashlib
 from datetime import date
 from typing import Mapping
 
-from quantx_domain.factors import FACTOR_VERSION
+from quantx_domain.indicators import INDICATOR_VERSION
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -133,7 +133,7 @@ async def assert_snapshot_run_owner(
       select(DailySignalRun.snapshot_date, func.max(DailySignalRun.id))
       .where(
         DailySignalRun.snapshot_date.in_(expected),
-        DailySignalRun.signal_version == FACTOR_VERSION,
+        DailySignalRun.signal_version == INDICATOR_VERSION,
       )
       .group_by(DailySignalRun.snapshot_date)
     )

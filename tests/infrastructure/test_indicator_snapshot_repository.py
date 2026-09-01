@@ -143,7 +143,7 @@ class _ScreenSession:
 
 
 @pytest.mark.asyncio
-async def test_factor_scope_invalidation_is_exact_and_committed_before_recalculation(
+async def test_indicator_scope_invalidation_is_exact_and_committed_before_recalculation(
   monkeypatch,
 ):
   async def assert_owner(_db, snapshot_run_ids):
@@ -156,7 +156,7 @@ async def test_factor_scope_invalidation_is_exact_and_committed_before_recalcula
   )
   session = _FakeSession()
   repo = IndicatorSnapshotRepository(session)
-  await repo.invalidate_factor_scope(
+  await repo.invalidate_indicator_scope(
     ["000001.SZ"],
     [date(2026, 5, 20)],
     snapshot_run_ids={date(2026, 5, 20): 7},
@@ -172,16 +172,16 @@ async def test_factor_scope_invalidation_is_exact_and_committed_before_recalcula
   assert "calculation_version=NULL" in sql
   assert "indicator_snapshots.code IN ('000001.SZ')" in sql
   assert "indicator_snapshots.snapshot_date IN ('2026-05-20')" in sql
-  assert "indicator_snapshots.calculation_version = 'daily-v1'" in sql
+  assert "indicator_snapshots.calculation_version = 'daily-indicator-v1'" in sql
 
 
 @pytest.mark.parametrize(
   "codes,dates", [([], [date(2026, 5, 20)]), (["000001.SZ"], [])]
 )
 @pytest.mark.asyncio
-async def test_factor_scope_invalidation_never_expands_empty_scope(codes, dates):
+async def test_indicator_scope_invalidation_never_expands_empty_scope(codes, dates):
   session = _FakeSession()
-  await IndicatorSnapshotRepository(session).invalidate_factor_scope(
+  await IndicatorSnapshotRepository(session).invalidate_indicator_scope(
     codes,
     dates,
     snapshot_run_ids={},
@@ -300,9 +300,9 @@ async def test_roe_filter_sort_and_count_share_strict_quality_joins() -> None:
   session = _ScreenSession()
   repo = IndicatorSnapshotRepository(session)
 
-  rows, total = await repo.screen_factor_snapshots(
+  rows, total = await repo.screen_indicator_snapshots(
     snapshot_date=date(2026, 5, 20),
-    factor_conditions=[{"factor_id": "roe_ttm", "operator": "gte", "value": 5.0}],
+    indicator_conditions=[{"indicator_id": "roe_ttm", "operator": "gte", "value": 5.0}],
     sort={"field": "roe_ttm", "direction": "desc"},
     limit=20,
     offset=40,
@@ -329,17 +329,17 @@ async def test_roe_filter_sort_and_count_share_strict_quality_joins() -> None:
 
 
 @pytest.mark.asyncio
-async def test_factor_filters_keep_zero_and_version_boundary_and_default_order():
+async def test_indicator_filters_keep_zero_and_version_boundary_and_default_order():
   session = _ScreenSession()
-  await IndicatorSnapshotRepository(session).screen_factor_snapshots(
+  await IndicatorSnapshotRepository(session).screen_indicator_snapshots(
     snapshot_date=date(2026, 5, 20),
-    factor_conditions=[
-      {"factor_id": "consecutive_down_days", "operator": "eq", "value": 0}
+    indicator_conditions=[
+      {"indicator_id": "consecutive_down_days", "operator": "eq", "value": 0}
     ],
   )
   compiled = session.statements[-1].compile(dialect=postgresql.dialect())
   assert "calculation_version" in str(compiled)
-  assert "daily-v1" in compiled.params.values()
+  assert "daily-indicator-v1" in compiled.params.values()
   assert 0 in compiled.params.values()
   order = str(compiled).split("ORDER BY")[-1]
   assert "change_pct DESC NULLS LAST, indicator_snapshots.code ASC" in order
@@ -350,23 +350,23 @@ async def test_factor_filters_keep_zero_and_version_boundary_and_default_order()
 @pytest.mark.parametrize(
   "condition",
   [
-    {"factor_id": "unknown", "operator": "gte", "value": 1},
-    {"factor_id": "rsi12", "operator": "gt_or_eq", "value": 1},
-    {"factor_id": "rsi12", "operator": "between", "value": 70, "value_to": 30},
+    {"indicator_id": "unknown", "operator": "gte", "value": 1},
+    {"indicator_id": "rsi12", "operator": "gt_or_eq", "value": 1},
+    {"indicator_id": "rsi12", "operator": "between", "value": 70, "value_to": 30},
   ],
 )
-async def test_factor_repository_rejects_invalid_conditions(condition):
+async def test_indicator_repository_rejects_invalid_conditions(condition):
   session = _ScreenSession()
   with pytest.raises(ValueError):
-    await IndicatorSnapshotRepository(session).screen_factor_snapshots(
+    await IndicatorSnapshotRepository(session).screen_indicator_snapshots(
       snapshot_date=date(2026, 5, 20),
-      factor_conditions=[condition],
+      indicator_conditions=[condition],
     )
   assert session.statements == []
 
 
 @pytest.mark.asyncio
-async def test_radar_baseline_reads_are_independent_of_factor_version_readiness():
+async def test_radar_baseline_reads_are_independent_of_indicator_version_readiness():
   session = _ScreenSession()
   repo = IndicatorSnapshotRepository(session)
   await repo.get_latest_snapshot_date()
@@ -377,15 +377,15 @@ async def test_radar_baseline_reads_are_independent_of_factor_version_readiness(
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert "calculation_version =" not in sql
   session.statements.clear()
-  await repo.get_latest_factor_snapshot_date()
-  await repo.find_factor_snapshot_dates(date(2026, 5, 19), date(2026, 5, 20))
+  await repo.get_latest_indicator_snapshot_date()
+  await repo.find_indicator_snapshot_dates(date(2026, 5, 19), date(2026, 5, 20))
   for statement in session.statements:
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert "calculation_version =" in sql
 
 
 @pytest.mark.asyncio
-async def test_completed_factor_runs_exclude_scoped_success_without_changing_radar_reads():
+async def test_completed_indicator_runs_exclude_scoped_success_without_changing_radar_reads():
   from quantx_infrastructure.repositories.daily_signal_run_repository import (
     DailySignalRunRepository,
   )
@@ -398,4 +398,4 @@ async def test_completed_factor_runs_exclude_scoped_success_without_changing_rad
     compiled = statement.compile(dialect=postgresql.dialect())
     assert "success" in compiled.params.values()
     assert "scoped_success" not in compiled.params.values()
-    assert "daily-v1" in compiled.params.values()
+    assert "daily-indicator-v1" in compiled.params.values()

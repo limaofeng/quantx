@@ -4,8 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStockScreening } from '@/features/screening/hooks/useStockScreening';
 import {
   IntradayVolumeScreenDocument,
+  StockProbabilityCandidatesDocument,
   StockScreenDocument,
   type IntradayVolumeScreenQuery,
+  type StockProbabilityCandidatesQuery,
   type StockScreenQuery,
   type StockScreenSnapshotStatusQuery,
 } from '@/generated/gql/graphql';
@@ -24,7 +26,7 @@ const completedPage: StockScreenQuery['stockScreen'] = {
   offset: 0,
   snapshotDate: '2026-08-28',
   calculatedAt: '2026-08-28T15:30:00+08:00',
-  calculationVersion: 'daily-v1',
+  calculationVersion: 'daily-indicator-v1',
   hasStaleData: true,
   isComplete: true,
   warnings: [],
@@ -49,6 +51,18 @@ const intradayPage: IntradayVolumeScreenQuery['intradayVolumeScreen'] = {
   isScannerRunning: true,
   warnings: [],
 };
+const shadowProbabilityPage: StockProbabilityCandidatesQuery['stockProbabilityCandidates'] =
+  {
+    items: [],
+    total: 0,
+    limit: 50,
+    offset: 0,
+    asOf: '2026-08-31',
+    targetDate: null,
+    activeModelVersion: 'active-model',
+    showingShadow: true,
+    warnings: ['模型 shadow-model 最新运行状态为 FAILED，未复用旧候选'],
+  };
 
 function mockDailyPage(page: StockScreenQuery['stockScreen']) {
   const reexecute = vi.fn();
@@ -59,7 +73,9 @@ function mockDailyPage(page: StockScreenQuery['stockScreen']) {
           ? { stockScreen: page }
           : query === IntradayVolumeScreenDocument
             ? { intradayVolumeScreen: intradayPage }
-            : {},
+            : query === StockProbabilityCandidatesDocument
+              ? { stockProbabilityCandidates: shadowProbabilityPage }
+              : {},
       fetching: false,
     },
     reexecute,
@@ -138,5 +154,21 @@ describe('useStockScreening result provenance', () => {
     expect(result.current.meta.intradayUpdatedAt).toBe(intradayPage.updatedAt);
     expect(result.current.meta.latestRunStatus).toBeNull();
     expect(result.current.meta.missingSnapshotDates).toEqual([]);
+  });
+
+  it('shows the requested shadow model instead of the unrelated active version', () => {
+    const { result } = renderHook(() => useStockScreening());
+    act(() =>
+      result.current.runScreening({
+        screeningMode: 'PROBABILITY',
+        probabilityModelVersion: 'shadow-model',
+      })
+    );
+
+    expect(result.current.meta.probabilityShowingShadow).toBe(true);
+    expect(result.current.meta.probabilityModelVersion).toBe('shadow-model');
+    expect(result.current.meta.warnings).toEqual(
+      shadowProbabilityPage.warnings
+    );
   });
 });
