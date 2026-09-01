@@ -1,6 +1,7 @@
 """日级技术指标快照服务。"""
 
 import logging
+from contextlib import aclosing
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -244,16 +245,16 @@ class DailyIndicatorSnapshotService:
     # metadata was known or corrected.  Only freshly successful, active records
     # below regain the current version; historical values are retained for audit.
     try:
-      async for db in self.db_factory():
+      async with aclosing(self.db_factory()) as sessions:
+        db = await anext(sessions, None)
+        if db is None:
+          raise RuntimeError("日级因子重算未取得数据库连接")
         repo = self.snapshot_repo_cls(db)
         await repo.invalidate_factor_scope(
           codes,
           dates,
           snapshot_run_ids=snapshot_run_ids,
         )
-        break
-      else:
-        raise RuntimeError("日级因子重算未取得数据库连接")
     except SnapshotFenceLost:
       raise
     except Exception as e:
@@ -393,16 +394,16 @@ class DailyIndicatorSnapshotService:
 
     if records:
       try:
-        async for db in self.db_factory():
+        async with aclosing(self.db_factory()) as sessions:
+          db = await anext(sessions, None)
+          if db is None:
+            raise RuntimeError("日级因子写入未取得数据库连接")
           repo = self.snapshot_repo_cls(db)
           await repo.bulk_upsert(
             records,
             snapshot_run_ids=snapshot_run_ids,
             lock_backend_pid=lock_backend_pid,
           )
-          break
-        else:
-          raise RuntimeError("日级因子写入未取得数据库连接")
       except SnapshotFenceLost:
         raise
       except Exception as e:
@@ -433,7 +434,10 @@ class DailyIndicatorSnapshotService:
     """删除保留期之前的快照记录。"""
     cutoff = date.today() - timedelta(days=retain_days)
     try:
-      async for db in self.db_factory():
+      async with aclosing(self.db_factory()) as sessions:
+        db = await anext(sessions, None)
+        if db is None:
+          raise RuntimeError("清理日级因子快照未取得数据库连接")
         repo = self.snapshot_repo_cls(db)
         deleted = await repo.delete_older_than(cutoff)
         self.logger.info("已清理 %s 条 %s 之前的快照", deleted, cutoff)

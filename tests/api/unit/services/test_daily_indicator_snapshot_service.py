@@ -258,6 +258,35 @@ async def test_same_stock_same_day_upserts_one_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_snapshot_db_sessions_close_before_the_next_stage():
+  InMemorySnapshotRepo.rows = {}
+  events = []
+
+  async def tracked_db_factory():
+    events.append("open")
+    try:
+      yield object()
+    finally:
+      events.append("close")
+
+  repository = FakeKLineRepository({"000001.SZ": daily_frame(10)})
+  service = make_service(repository)
+  service.db_factory = tracked_db_factory
+
+  result = await service.compute_and_save_batch(
+    codes=["000001.SZ"],
+    snapshot_date=date(2026, 5, 20),
+    instrument_type_map={"000001.SZ": "stock"},
+    name_map={"000001.SZ": "平安银行"},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
+  )
+
+  assert result["saved"] == 1
+  assert events == ["open", "close", "open", "close"]
+
+
+@pytest.mark.asyncio
 async def test_multiple_target_dates_share_one_kline_read():
   InMemorySnapshotRepo.rows = {}
   repository = FakeKLineRepository({"000001.SZ": daily_frame(10)})

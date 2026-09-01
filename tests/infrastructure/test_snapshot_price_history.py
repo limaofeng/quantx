@@ -209,9 +209,14 @@ async def test_snapshot_loader_accepts_exact_audited_empty_factor_window():
       return Result([])
 
   session = Session()
+  session_closed = False
 
   async def db_factory():
-    yield session
+    nonlocal session_closed
+    try:
+      yield session
+    finally:
+      session_closed = True
 
   frame = pd.DataFrame(
     {
@@ -228,6 +233,7 @@ async def test_snapshot_loader_accepts_exact_audited_empty_factor_window():
   assert result["000001.SZ"]["close"].tolist() == [10, 11]
   assert len(session.statements) == 3
   assert "pg_advisory_xact_lock_shared" in str(session.statements[0])
+  assert session_closed is True
 
 
 def test_per_code_evidence_survives_an_overlapping_rewrite_of_another_code():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -102,7 +103,10 @@ async def load_snapshot_price_history(
     value=sorted(code_bounds),
     type_=ARRAY(String()),
   )
-  async for db in db_factory():
+  async with aclosing(db_factory()) as sessions:
+    db = await anext(sessions, None)
+    if db is None:
+      raise RuntimeError("无法打开日级因子数据会话")
     # Keep request evidence and the exact factor rows in one stable read
     # interval. Every factor-table writer takes the matching exclusive xact
     # lock, so replacement cannot slip between the two SELECTs.
@@ -206,4 +210,3 @@ async def load_snapshot_price_history(
       ):
         by_code[code].append((when, ratio))
     return {code: adjust_price_frame(frames[code], by_code[code]) for code in covered}
-  raise RuntimeError("无法打开日级因子数据会话")
