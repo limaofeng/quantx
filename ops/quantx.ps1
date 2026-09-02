@@ -97,6 +97,7 @@ $DefaultQmtCondaEnvironment = "xtquant-demo"
 $ApiPort = 18081
 $MarketGatewayPort = 18082
 $AgentWebSocketPingTimeoutSeconds = 960
+$QmtAgentStartupReadyTimeoutSeconds = 60
 $script:RuntimeProfile = ""
 $script:RuntimeAgentMode = ""
 $script:RuntimeConfiguredAccount = ""
@@ -1124,6 +1125,16 @@ function Wait-DevCaddyReady {
     -Url "http://127.0.0.1:8080/docs/"
 }
 
+function ConvertTo-MaskedAccountId {
+  param([string]$Value)
+
+  $normalized = ([string]$Value).Trim()
+  if ($normalized.Length -le 4) {
+    return "*" * $normalized.Length
+  }
+  return "***" + $normalized.Substring($normalized.Length - 4)
+}
+
 function Show-QmtAgentRuntimeHealth {
   try {
     $runtime = Invoke-RestMethod `
@@ -1170,11 +1181,12 @@ function Wait-QmtAgentRuntimeReady {
     [Parameter(Mandatory = $true)][string]$AccountId,
     [Parameter(Mandatory = $true)][object]$ProcessEntry,
     [Parameter(Mandatory = $true)][datetime]$LaunchStartedAt,
-    [int]$TimeoutSeconds = 60
+    [int]$TimeoutSeconds = $QmtAgentStartupReadyTimeoutSeconds
   )
 
   $launchBoundary = $LaunchStartedAt.ToUniversalTime()
   $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+  $expectedMaskedAccountId = ConvertTo-MaskedAccountId -Value $AccountId
   do {
     if (-not (Get-TrackedProcess -Entry $ProcessEntry)) {
       Write-Warning (
@@ -1215,7 +1227,7 @@ function Wait-QmtAgentRuntimeReady {
         [int]$qmt.readyDevices -ge 1 -and
         $modes -contains "live" -and
         $protocols -contains "1.1" -and
-        $accounts -contains $AccountId -and
+        $accounts -contains $expectedMaskedAccountId -and
         $snapshotAge -le 90 -and
         $null -ne $latestReadyHeartbeatAt -and
         $latestReadyHeartbeatAt -ge $launchBoundary -and
@@ -1847,7 +1859,8 @@ function Invoke-Up {
         $liveRuntimeReady = Wait-QmtAgentRuntimeReady `
           -AccountId $liveAccount `
           -ProcessEntry $qmtProcessEntry `
-          -LaunchStartedAt $qmtProcessLaunchStartedAt
+          -LaunchStartedAt $qmtProcessLaunchStartedAt `
+          -TimeoutSeconds $QmtAgentStartupReadyTimeoutSeconds
       } elseif ($qmtAgentLaunchAllowed) {
         Show-QmtAgentRuntimeHealth
       }
@@ -1864,7 +1877,8 @@ function Invoke-Up {
   if (-not $liveRuntimeReady) {
     throw (
       "QuantX services remain running, but the live QMT Agent did not become " +
-      "READY with a fresh snapshot within 60 seconds. Complete the MiniQMT " +
+      "READY with a fresh snapshot within $QmtAgentStartupReadyTimeoutSeconds " +
+      "seconds. Complete the MiniQMT " +
       "login and run .\ops\quantx.ps1 status; then rerun " +
       ".\ops\quantx.ps1 up -Environment dev -Profile web if the processes " +
       "were stopped manually."

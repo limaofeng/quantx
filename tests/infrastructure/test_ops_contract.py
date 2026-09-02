@@ -595,6 +595,13 @@ def test_qmt_ready_wait_requires_live_process_and_current_launch_heartbeat() -> 
       1,
     )[1].split("function Invoke-CaddyRecovery", 1)[0]
   )
+  masked_account_helper = (
+    "function ConvertTo-MaskedAccountId"
+    + script.split(
+      "function ConvertTo-MaskedAccountId",
+      1,
+    )[1].split("function Show-QmtAgentRuntimeHealth", 1)[0]
+  )
   command = f"""
 $ErrorActionPreference = "Stop"
 $WarningPreference = "SilentlyContinue"
@@ -614,6 +621,7 @@ function Invoke-RestMethod {{
   return $script:healthPayload
 }}
 function Show-QmtAgentRuntimeHealth {{}}
+{masked_account_helper}
 function Start-Sleep {{ param([int]$Seconds) }}
 {wait_function}
 $launchStartedAt = [datetime]::Parse(
@@ -625,7 +633,10 @@ $entry = [pscustomobject]@{{
   startedAt = "2026-08-20T04:00:00Z"
 }}
 function Set-TestHealth {{
-  param([string]$HeartbeatAt)
+  param(
+    [string]$HeartbeatAt,
+    [string]$ReportedAccountId = "***NT-1"
+  )
   $script:healthPayload = [pscustomobject]@{{
     components = [pscustomobject]@{{
       qmtAgent = [pscustomobject]@{{
@@ -633,7 +644,7 @@ function Set-TestHealth {{
         readyDevices = 1
         modes = @("live")
         protocolVersions = @("1.1")
-        accountIds = @("ACCOUNT-1")
+        accountIds = @($ReportedAccountId)
         latestSnapshotAgeSeconds = 1
         latestReadyHeartbeatAt = $HeartbeatAt
       }}
@@ -659,10 +670,19 @@ $current = Wait-QmtAgentRuntimeReady `
   -ProcessEntry $entry `
   -LaunchStartedAt $launchStartedAt `
   -TimeoutSeconds 0
+Set-TestHealth `
+  -HeartbeatAt "2026-08-20T04:00:01Z" `
+  -ReportedAccountId "***NT-2"
+$wrongSuffix = Wait-QmtAgentRuntimeReady `
+  -AccountId "ACCOUNT-1" `
+  -ProcessEntry $entry `
+  -LaunchStartedAt $launchStartedAt `
+  -TimeoutSeconds 0
 [ordered]@{{
   dead = $dead
   prior = $prior
   current = $current
+  wrongSuffix = $wrongSuffix
   healthCalls = $script:healthCalls
 }} | ConvertTo-Json -Compress
 """
@@ -680,8 +700,74 @@ $current = Wait-QmtAgentRuntimeReady `
     "dead": False,
     "prior": False,
     "current": True,
-    "healthCalls": 2,
+    "wrongSuffix": False,
+    "healthCalls": 3,
   }
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell QMT account masking")
+def test_qmt_account_masking_matches_health_contract_for_short_values() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+  helper = (
+    "function ConvertTo-MaskedAccountId"
+    + script.split(
+      "function ConvertTo-MaskedAccountId",
+      1,
+    )[1].split("function Show-QmtAgentRuntimeHealth", 1)[0]
+  )
+  command = f"""
+$ErrorActionPreference = "Stop"
+{helper}
+@(
+  (ConvertTo-MaskedAccountId -Value "  "),
+  (ConvertTo-MaskedAccountId -Value " 1 "),
+  (ConvertTo-MaskedAccountId -Value " 1234 "),
+  (ConvertTo-MaskedAccountId -Value " 12345 "),
+  (ConvertTo-MaskedAccountId -Value " broker-account-5678 ")
+) | ConvertTo-Json -Compress
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert json.loads(result.stdout.strip()) == [
+    "",
+    "*",
+    "****",
+    "***2345",
+    "***5678",
+  ]
+
+
+def test_qmt_startup_timeout_and_snapshot_freshness_use_separate_contracts() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  wait_function = script.split(
+    "function Wait-QmtAgentRuntimeReady",
+    1,
+  )[1].split("function Invoke-CaddyRecovery", 1)[0]
+  invoke_up = script.split("function Invoke-Up", 1)[1].split(
+    "function Invoke-Down",
+    1,
+  )[0]
+
+  assert "$QmtAgentStartupReadyTimeoutSeconds = 60" in script
+  assert "[int]$TimeoutSeconds = $QmtAgentStartupReadyTimeoutSeconds" in wait_function
+  assert "-TimeoutSeconds $QmtAgentStartupReadyTimeoutSeconds" in invoke_up
+  assert (
+    "READY with a fresh snapshot within $QmtAgentStartupReadyTimeoutSeconds "
+    in invoke_up
+  )
+  assert "within 60 seconds" not in invoke_up
+  assert "$snapshotAge -le 90" in wait_function
+  assert "$snapshotAge -le $QmtAgentStartupReadyTimeoutSeconds" not in wait_function
 
 
 def test_agent_websocket_timeout_exceeds_native_watchdog() -> None:

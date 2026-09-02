@@ -1,7 +1,7 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0 已完成；P1-01/P1-03 地基已完成，P1 原子切换仍 `BLOCKED`）<br>
-> 版本：1.7<br>
+> 状态：`IN_PROGRESS`（P0 已完成；P1 维护演练门已解除，P1-02/P1-04..06 待完成）<br>
+> 版本：1.8<br>
 > 日期：2026-09-03<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
@@ -156,7 +156,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | 阶段 | 范围 | 状态 | 强前置 | 退出门摘要 | 证据 |
 |---|---|---|---|---|---|
 | P0 | 基线冻结与契约清点 | `DONE` | 文档基线 | 清单、policy、只读审计、405 + 9 审计单测基线齐全 | [P0 冻结基线](多标的做T助手P0冻结基线.md) |
-| P1 | Owner 与协议 1.2 | `BLOCKED` | P0；P1-01 强类型地基与 P1-03 fail-closed Router 已完成但尚未接入回报链；PAPER legacy 义务已受控收敛且 P1 readiness=true；protocol 1.2 只读切换 preflight 与权威备份完整隔离恢复已通过，实际停服/部署/恢复后全量快照对账尚未执行 | 单 owner/单 payload、既有路径等价；实际维护窗口演练未完成 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`、真实库 ready=true；备份完整隔离恢复至 head、QMT journal 与 Monitor 均通过；P0 audit blockers=`0` |
+| P1 | Owner 与协议 1.2 | `IN_PROGRESS` | P0；P1-01 强类型地基与 P1-03 fail-closed Router 已完成但尚未接入回报链；PAPER legacy 义务已受控收敛且 P1 readiness=true；停服、停服态备份、迁移、标准 full/live 恢复、全量快照对账和隔离恢复演练已通过 | 单 owner/单 payload、既有路径等价；P1-02/P1-04..06 尚未完成 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`、真实库 ready=true；停服态备份完整恢复至 head，QMT journal 与 Monitor 均通过；标准 full/live 冷启动 exit=`0`；P0 audit blockers=`0` |
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `NOT_STARTED` | P1 | 无第二真源，故障恢复通过 | 待补 |
 | P3 | 独立 T runtime 与精确行情归约 | `NOT_STARTED` | P1 | 无 StrategyRun、新旧规则 shadow 等价 | 待补 |
 | P4 | 分配、PAPER 与跨域准入 | `NOT_STARTED` | P2 + P3 | 整批原子、PAPER 闭环、无真实订单 | 待补 |
@@ -187,8 +187,9 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 13 个基线测试文件为 `405 passed, 8 warnings, 16.20s`（合计 `405 + 9`）。因此 P0 阶段为 `DONE`。
 P0 初始冻结时 P1 readiness 为 `false`：开发库当时仍有 2 条 terminal-run `AWAITING_APPROVAL`/缺
 candidate identity、2 条 nonterminal intent、1 条 `ERROR` orphan outstanding T ExitPlan。上述 PAPER
-legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=`true`。当前 P1 仅继续受实际
-protocol 1.2 停服、部署和恢复后全量快照对账演练约束。
+legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=`true`。维护窗口已实际完成
+停组件、停服态备份、迁移、标准 full/live 恢复、全量快照对账和备份隔离恢复演练，P1 已转为
+`IN_PROGRESS`；目标 protocol 1.2 的真实切换仍只能在 P1-02/P1-04..06 原子实现完成后执行。
 
 ### P1：公共 `ExecutionOwnerRef` 与协议 1.2 原子升级
 
@@ -402,30 +403,33 @@ npm run build
 | 2026-09-03 | `TTA-P1-01` | `DONE` | contracts/domain 单一 `ExecutionOwnerType`、`ExecutionEnvironment` 与 frozen `ExecutionOwnerRef`；普通 StrategyRun/MANUAL_COMMAND adapter；跨包类型 identity 检查；聚焦 Ruff、domain boundary 与 pytest | commit：`97f180dd76d593b98a0180a6bf8f3a7fac8bbb8f`；`52 passed, 8 warnings`；未改 Agent protocol、数据库或运行时下单链，P1 阶段仍未通过退出门 |
 | 2026-09-03 | `TTA-P1-03` | `DONE` | 纯 application `OwnerRuntimeRouter/Registry`、不可变事件/目标/结果、六类 owner 精确分派及 owner/environment 冲突反向测试 | commit：`9918d811b5e7d182abb3574fe0c69a2568c4104f`；Ruff 通过，`38 passed, 1 warning`；尚未接入 report processor，接入与恢复等价性归入 P1-02/P1-06 |
 | 2026-09-03 | `TTA-P1-GATE-01` | `DONE` | 默认只读、显式确认和精确数量双门禁的 PAPER legacy reconciliation；`SERIALIZABLE` + advisory lock 后在同一事务重验完整 durable chain；聚焦 Ruff 与 pytest | commit：`281ff74a2966df450991fcd2fedf8628e6a2d806`；`34 passed, 8 warnings`；受控 apply：approvals=`2`、plans=`1`；复验 safe=`0`、blocked=`0`、unsettled inbox=`0`；P0 audit blockers=`0`、P1 readiness=`true` |
-| 2026-09-03 | `TTA-P1-GATE-02` | `DONE` | protocol 1.2 只读切换 preflight；复用 P0 审计并校验实际 contracts 1.1、冻结目标 1.2、queued/unknown/inbox，事务始终回滚；runbook 步骤仅作确定性模拟 | commit：本提交；Ruff 通过，`20 passed, 1 warning`；真实库首次在 unsettled inbox=`1` 时 fail-closed，收敛后复验 ready=`true`；`actualCutover=false`，未停服、备份或部署 |
-| 2026-09-03 | `TTA-P1-GATE-03` | `DONE` | `ops/quantx.ps1 backup -Environment dev` 权威备份与 `restore-verify` 完整隔离恢复；修复 0045 对 pre-Alembic `create_all` 三表的严格接管和 6 个 naive-UTC 时间列原子转换；收紧 schema `status/check/assert`，结构与 revision 必须同时健康 | commit：本提交；迁移单测 `15 passed`，schema/restore 合同 `17 passed`；6.8GB PostgreSQL 归档两次完整恢复至 `20260902_0045`，最终 missing tables/columns 均为空；QMT journal integrity=`ok`、pending reports=`0`，Monitor=`valid`；实际停服/部署演练仍未执行 |
+| 2026-09-03 | `TTA-P1-GATE-02` | `DONE` | protocol 1.2 只读切换 preflight；复用 P0 审计并校验实际 contracts 1.1、冻结目标 1.2、queued/unknown/inbox，事务始终回滚；runbook 步骤仅作确定性模拟 | commit：`7cbe5228fc11e1d4d36a578d6ea83ac12da044e7`；Ruff 通过，`20 passed, 1 warning`；真实库首次在 unsettled inbox=`1` 时 fail-closed，收敛后复验 ready=`true`；`actualCutover=false`，未停服、备份或部署 |
+| 2026-09-03 | `TTA-P1-GATE-03` | `DONE` | `ops/quantx.ps1 backup -Environment dev` 权威备份与 `restore-verify` 完整隔离恢复；修复 0045 对 pre-Alembic `create_all` 三表的严格接管和 6 个 naive-UTC 时间列原子转换；收紧 schema `status/check/assert`，结构与 revision 必须同时健康 | commit：`5c7527e7642491439ddaa70dff34edb2c2a6f8a9`；迁移单测 `15 passed`，schema/restore 合同 `17 passed`；6.8GB PostgreSQL 归档两次完整恢复至 `20260902_0045`，最终 missing tables/columns 均为空；QMT journal integrity=`ok`、pending reports=`0`，Monitor=`valid` |
+| 2026-09-03 | `TTA-P1-GATE-04` | `DONE` | 实际维护窗口按顺序停止主服务、创建停服态权威备份、将开发库从 `20260901_0044` 迁移至 `20260902_0045`、用标准 full/live 入口恢复，并复跑 verify、P0 audit 与 P1 preflight；停服态备份随后完整隔离恢复 | 主服务停止期间 Monitor 保持在线；恢复后 QMT/marketData READY、protocol=`1.1`、快照新鲜；P0 blocker=`0`、P1 ready=true、queued/unknown/inbox 均为 `0`；隔离恢复 missing tables/columns 均为空，QMT journal integrity=`ok`、pending reports=`0`，Monitor=`valid` |
+| 2026-09-03 | `TTA-P1-GATE-05` | `DONE` | 修复标准启动器用完整账户号比较健康接口脱敏账户标识、导致 READY 永不命中的契约错误；新增与 API 一致的纯脱敏函数和错误尾号反向测试，保留服务端完整账户集合校验为精确权威 | ops 契约 `38 passed`、Ruff 与 `git diff --check` 通过；标准 `up -Environment dev -Profile web` 冷启动 exit=`0`，随后 status 显示 full/live、QMT 与 marketData READY，gateway/schema verify 通过 |
 
 后续每条 `DONE` 证据应包含 commit、验证命令及结果摘要；若输出过长，链接到仓库内稳定测试报告，
 不粘贴包含账户、设备或券商敏感信息的日志。
 
 ## 10. 当前状态与下一动作
 
-当前结论：**P0 已完成，P1-01 强类型 owner 地基、P1-03 fail-closed Router 与 PAPER legacy
-reconciliation 工具已完成；当前运行仍是系统架构文档描述的 StrategyRun + protocol 1.1 As-Is，
-P1 原子切换 `BLOCKED`。** 新类型尚未接入公共持久化和 Agent 命令链，不代表 protocol 1.2 已上线。
+当前结论：**P0 已完成，P1-01 强类型 owner 地基、P1-03 fail-closed Router、PAPER legacy
+reconciliation 和实际维护窗口演练均已完成；当前运行仍是系统架构文档描述的 StrategyRun +
+protocol 1.1 As-Is，P1 原子切换为 `IN_PROGRESS`。** 新类型尚未接入公共持久化和 Agent 命令链，
+不代表 protocol 1.2 已上线。
 真实库已在精确数量门和同事务重验下收敛 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate
 identity 记录与 1 条 `ERROR` orphan outstanding T ExitPlan；复验 P0 blocker=`0`、P1 readiness=true。
-protocol 1.2 只读切换 preflight 已在真实库通过，权威备份也已完成两次全量隔离恢复验证；该验证
-修复了 0045 重复建表与 schema gate 假通过问题，但没有伪称实际停服、部署或恢复后全量快照对账
-已经发生。实际维护窗口演练尚未完成，因此 P1 阶段仍为 `BLOCKED`。
+protocol 1.2 只读切换 preflight 已在真实库通过；在线备份和停服态备份均已完成全量隔离恢复，
+实际维护窗口也完成了停服、迁移、标准 full/live 恢复和全量快照对账。演练没有伪称 protocol 1.2
+已部署：`actualCutover=false` 仍是事实，目标协议切换属于尚未完成的 P1-04/P1-05。
 
-下一动作固定为逐条 reconcile 和切换演练，不能直接改协议：
+下一动作固定为完成 P1 原子实现与目标协议切换，不能把中间态部署为双协议：
 
-1. 在工作树可安全重启的维护窗口执行 protocol 1.2 实际演练：停止新命令、收敛 inbox、复跑只读
-   preflight、停组件后创建新鲜备份、模拟原子部署并恢复后完成全量快照对账；已完成的在线备份/
-   隔离恢复仅证明恢复链可用，不能替代该维护窗口演练；已投递命令不回滚、不重编码、不重发。
-2. 切换前再次运行 `python ops\t-assistant-p0-audit.py --format markdown --require-ready`；只有 readiness=true
-   且演练完成后，才执行 P1-02..06 的数据库、公共链、Router、protocol 1.2 和客户端原子升级。
+1. 完成 P1-02/P1-04..06：数据库与公共命令/回报链原子采用单一 owner，接入 Router，将 Agent、
+   API、Engine、GraphQL/Web 和文档一次性切换到唯一 protocol 1.2，并完成等价、幂等和乱序恢复测试。
+2. 目标切换前再次运行 `python ops\t-assistant-p0-audit.py --format markdown --require-ready` 和只读
+   preflight；停止新命令、排空 1.1 未投递 outbox、收敛 inbox、创建新鲜停服态备份后才部署。
+   已投递或结果未知命令只 reconcile，不回滚、不重编码、不重发。
 
 ## 11. 变更记录
 
@@ -439,3 +443,4 @@ protocol 1.2 只读切换 preflight 已在真实库通过，权威备份也已�
 | 1.5 | 2026-09-03 | 受控收敛 2 条 PAPER stale approval 与 1 条 PAPER orphan ExitPlan；复验 P0 blocker 为零、P1 readiness=true，P1 仅余 protocol 1.2 切换演练门。 |
 | 1.6 | 2026-09-03 | 完成 protocol 1.2 只读切换 preflight 与瞬时 inbox fail-closed 复验；真实库最终 ready=true，但未把模拟步骤记为实际停服、备份或部署，P1 仍等待实际维护窗口演练。 |
 | 1.7 | 2026-09-03 | 完成权威备份的两次全量隔离恢复验证；0045 严格接管 pre-Alembic 三表并原子修正 naive-UTC 时间列，schema gate 改为结构与 revision 双门。恢复至 head、QMT journal 和 Monitor 均通过；实际停服/部署/恢复后全量快照对账仍未执行。 |
+| 1.8 | 2026-09-03 | 完成实际维护窗口的停服态备份、迁移、标准 full/live 恢复、全量快照对账与隔离恢复；修复启动器将完整账户号与健康接口脱敏值比较而永不命中 READY 的契约错误。维护演练门解除，P1 转为 `IN_PROGRESS`；protocol 1.2 仍待 P1-02/P1-04..06 原子实现和真实切换。 |
