@@ -1,7 +1,7 @@
 # QuantX 多标的做 T 助手新架构设计
 
 > 状态：目标架构，待实施<br>
-> 版本：1.0<br>
+> 版本：1.1<br>
 > 日期：2026-09-02<br>
 > 适用范围：QuantX Windows Dev、个人单账户、A 股正向做 T
 
@@ -42,6 +42,11 @@ LightGBM 作为可插拔的候选排序器引入：
 - `ACTIVE` 模型不可用时停止新的 ENTRY，不允许静默退回规则排序；
 - 已有退出计划不依赖 LightGBM，继续优先执行。
 
+模型与规则采用双时间尺度，但不形成两套交易路径：模型只消费**已经结束的 1 分钟
+Feature Bar**，在分钟完成时预计算跨标的机会质量；V3 规则仍消费因果有界 Tick，候选
+进入执行前再用最新已接受 Tick 做确定性重验。第一版使用跨标的共享模型，模型输出只参与
+候选排序，不直接映射仓位、订单参数或退出动作。
+
 ## 2. 设计目标与非目标
 
 ### 2.1 目标
@@ -65,6 +70,9 @@ LightGBM 作为可插拔的候选排序器引入：
 - 不新建做 T 专用 SELL FSM；退出继续由公共 `ExitPlanBook` 管理。
 - 不新建第二套现金、库存或订单真源。
 - 不使用 Worker RPC 或远程模型服务处理逐 Tick 推理。
+- 不让模型直接计算目标仓位、下单数量、订单类型或追价参数。
+- 不在第一版引入在线学习、LSTM、Transformer 或端到端 Tick 模型。
+- 不假定 miniQMT 一定提供稳定 Level-2 字段；依赖深度盘口的特征必须受能力清单和质量门禁控制。
 - 不在第一阶段引入相关性矩阵、复杂优化器或强化学习。个人账户先使用并发数、总暴露、
   单票和行业集中度等可解释约束。
 
@@ -117,6 +125,10 @@ LightGBM 作为可插拔的候选排序器引入：
 | 策略状态混有候选、订单、成交和退出摘要 | 状态恢复和真源边界不清晰 | 分离机会 FSM、意图、订单、ExitPlan 和批次投影 |
 | `TTradeStatus` 同时描述信号与执行 | 容易形成第二套订单/退出状态机 | 执行状态由权威表派生，策略只保留候选与冷却 |
 | 规则分只能做单票判断 | 无法量化跨票相对机会质量 | 可选 LightGBM 排序器，规则仍掌握资格与门禁 |
+| 模型输入时点与粒度未冻结 | 形成中 BAR 或逐 Tick 推理容易泄露、抖动且难回放 | 完整 1 分钟评分，Tick 只负责规则和执行重验 |
+| 模型输出仅表述为泛化“上涨概率” | 与正向做 T 的成本、路径和止损顺序脱节 | 固定 `p_target_before_stop` 的 `TModelScore` 契约 |
+| 只围绕候选结果训练 | 会把 V3 既有筛选偏差学进模型 | 全完整分钟 observation anchors + 成本调整 first-touch 标签 |
+| 预先把 LightGBM 当成答案 | 不能证明复杂度带来增量 | 同数据比较 RULE_ONLY、Logistic、LightGBM 和 challengers |
 | 单票回测可各自假设可用现金 | 多标的结果可能隐含重复使用现金 | 使用单一共享账户的组合回测时间线 |
 
 ## 5. 目标逻辑架构
@@ -138,6 +150,13 @@ stream/generation/sequence 连续性、完整 fence、数据健康
             │
             ├──────────────► ExitPlanBook
             │                活跃退出优先评估
+            │
+            ├──────────────► TModelFeatureBarBuilder
+            │                只封闭已结束的 1 分钟 Feature Bar
+            │                         │
+            │                         ▼
+            │                InProcessModelScorer
+            │                跨标的批量推理、写最新 TModelScoreCache
             ▼
 TDecisionSnapshotBuilder
 冻结决策时点、watermark、市场/行业上下文和标的快照
@@ -160,7 +179,8 @@ record_trade_intents（整批持久化，PORTFOLIO_PENDING）
             │
             ▼
 OpportunityScorer
-RULE_ONLY / SHADOW / ACTIVE LightGBM
+规则分 + 关联同一时点可用的最新 TModelScore
+RULE_ONLY / SHADOW / ACTIVE
             │
             ▼
 PortfolioTCoordinator
@@ -172,8 +192,12 @@ ALLOW / CAP / DELAY / REJECT
             │
             ├── CANARY ──► AWAITING_APPROVAL ──► 实时重验
             └── LIVE ────► 自动受理
-                              │
-                              ▼
+                               │
+                               ▼
+EntryExecutionGate
+最新已接受 Tick：ALLOW / DELAY / REJECT
+                               │
+                               ▼
 TradeIntentProcessor → OrderSizer → RiskChecker
                               │
                               ▼
@@ -391,6 +415,54 @@ TDecisionSnapshot
 - 合并跨度超过策略窗口允许值时视为连续性丢失并 rewarm；
 - 不得用 UI 的 latest-only 行情队列承载交易决策。
 
+### 7.5 双时间尺度数据路径
+
+规则、模型和执行使用同一条已接受行情流，但各自采用适合其职责的时间粒度：
+
+| 层 | 输入粒度 | 职责 | 禁止行为 |
+|---|---|---|---|
+| V3 标的规则 | 已接受 Tick + 点时市场/行业上下文 | 窗口、FSM、硬门禁、候选 | 等待未来 Tick 或读取账户 |
+| 模型评分 | 已封闭的 1 分钟 Feature Bar | 估计候选在冻结 horizon 内的相对质量 | 使用正在形成的分钟或逐 Tick 远程推理 |
+| 执行重验 | 最新已接受 Tick + 候选/模型绑定 | 判断候选是否仍可进入公共执行链 | 读取账户、产生新方向、直接定量或替代风控 |
+
+`TModelFeatureBarBuilder` 从 `WholeQuoteHub` 的连续 Tick 构造专用 Feature Bar。它不是
+普通 OHLCV 的简单别名，还可包含该分钟内基于实际可用字段计算的 spread、深度、成交活跃度、
+价格路径和数据覆盖率统计。只有 watermark 已越过分钟结束、对应 generation 连续且关键字段
+质量合格时，Feature Bar 才能从 `FORMING` 原子转换为 `COMPLETE`。`FORMING`、未来补齐或
+使用后验修正的数据一律不能进入在线评分。
+
+完整 Bar 至少携带以下可重放身份：
+
+```text
+TModelFeatureBar
+  feature_bar_id
+  instrument_code
+  interval_start / interval_end / market_session
+  stream_id / continuity_generation / source_fence_range
+  feature_schema_version / capability_manifest_version
+  feature_values / feature_coverage / feature_vector_hash
+  market_context_as_of / sector_context_as_of
+  status = COMPLETE
+```
+
+滚动特征只能由当前及更早的完整 Bar 构造，并额外生成 `feature_window_hash`；重启恢复或回测
+若不能重建相同 hash，则对应分数无效。
+
+模型在每个完整分钟结束后，对当时 Universe 中满足基础数据质量的标的做一次进程内批量推理，
+把最新结果写入可重建的 `TModelScoreCache`。任一候选只允许关联满足以下条件的分数：
+
+```text
+score.model_as_of <= opportunity.observed_at
+score.source_bar_end <= opportunity.observed_at
+opportunity.observed_at - score.model_as_of <= model_score_max_age
+score.feature_schema_version == active_feature_schema_version
+score.model_version == active_model_version
+```
+
+市场、行业和画像可以使用更慢的时点数据，但必须携带独立 `as_of`、版本和 freshness，不能
+通过分钟聚合把过期公共上下文伪装成新鲜数据。V3 规则不等待下一分钟模型更新；模型分数陈旧时，
+`SHADOW` 只记录不可用，`ACTIVE` 则阻断该候选的新 ENTRY。
+
 ## 8. 每周期决策流程
 
 ### 8.1 顺序
@@ -404,12 +476,13 @@ TDecisionSnapshot
 4. 在隔离状态副本上计算各 SymbolTEngine
 5. 按 instrument_code 确定性合并状态和候选
 6. 整批持久化 BUY TradeIntent 提案与候选证据
-7. OpportunityScorer 计算规则/模型排序证据
+7. OpportunityScorer 关联规则分与同一时点可用的最新 TModelScore
 8. PortfolioTCoordinator 生成 TAllocationDecision
 9. 淘汰或延迟的意图写终态原因
 10. 选中意图进入 CANARY 审批或 LIVE 自动路由
-11. OrderSizer、Risk、AccountCapacityService 最终复核
-12. 原子创建 pending/correlation/outbox 后才能投递
+11. EntryExecutionGate 用最新已接受 Tick 做最后机会重验
+12. OrderSizer、Risk、AccountCapacityService 最终复核
+13. 原子创建 pending/correlation/outbox 后才能投递
 ```
 
 退出先于入场的含义是优先处理风险和本地状态，不是假定 SELL 一定先于 BUY 在券商成交。
@@ -577,6 +650,7 @@ TAllocationDecision
   account_snapshot_id
   portfolio_policy_version
   scorer_mode / model_version
+  model_score_id / model_as_of
   blockers[]
   created_at
 ```
@@ -622,7 +696,35 @@ Coordinator 选中的候选进入 `AWAITING_APPROVAL`，但不提前占用真实
 LIVE 自动模式只跳过人工点击，不跳过任何候选、组合、风控、容量和最终入队复核。
 自动授权必须精确绑定配置、策略/模型版本、账户执行窗口和额度。
 
-### 10.3 不新增第二套 Reservation 真源
+### 10.3 `EntryExecutionGate`
+
+CANARY 确认或 LIVE 自动受理后、进入 `TradeIntentProcessor` 前，统一执行一个轻量且确定性的
+`EntryExecutionGate`。它使用最新已接受 Tick 判断“原候选现在是否仍值得送入公共执行链”，
+只输出：
+
+```text
+ALLOW | DELAY | REJECT
+```
+
+第一版检查项包括：
+
+- candidate/intent TTL、fingerprint、config/policy/model 绑定是否仍有效；
+- quote 是否新鲜、generation 是否连续、相对候选参考价是否超出允许偏离；
+- spread 是否异常扩大，当前盘口是否仍满足冻结的最低可执行性条件；
+- `ACTIVE` 下绑定的 `TModelScore` 在当前时点是否仍新鲜且 schema/model 版本一致；
+- 只有能力清单声明字段存在且质量合格时，才使用深度或 imbalance 条件。
+
+Gate 不能改变 BUY/SELL 方向，不能重新生成候选，不能输出最终数量、订单类型或追价价格，
+也不能替代 OrderSizer、RiskChecker 和 `AccountCapacityService`。`DELAY` 只能持续到原 intent
+TTL；收到后续行情后必须从候选有效性、模型分数和组合额度重新走完整路径，不能在 Gate 内
+循环追价。若候选形成后出现了新的完整分钟分数，不得把新分数静默替换进旧 allocation；必须
+生成新的 scorer/allocation 证据或使旧候选失效。
+
+每个数据源版本都要冻结 `MarketDataCapabilityManifest`，区分 required/optional 字段。required
+字段缺失时按稳定原因码 `DELAY/REJECT`；optional 字段缺失时只停用显式依赖它的规则，禁止
+伪造零深度、零 imbalance 或用未来数据补齐。
+
+### 10.4 不新增第二套 Reservation 真源
 
 参考设计中的 `Cash & Inventory Reservation` 映射到 QuantX 已有
 `AccountCapacityService` 和 durable pending/outbox/保护义务，不新增一个会与账户快照
@@ -642,7 +744,7 @@ LIVE 自动模式只跳过人工点击，不跳过任何候选、组合、风控
 
 这个“预占”是 QuantX 对本地未被券商快照覆盖义务的持久化扣减，不伪装成券商冻结。
 
-### 10.4 释放规则
+### 10.5 释放规则
 
 - BUY 部分成交：只按真实成交量消费现金并建立等量退出保护，未成交部分继续占用。
 - 明确拒绝/撤销且有权威零成交证明：释放未成交现金和库存义务。
@@ -736,7 +838,7 @@ LightGBM 不参与退出触发。已有风险保护不能因模型、候选池�
 ### 13.1 可以并行的部分
 
 - 不同 `SymbolTEngine` 的纯特征和 FSM reduction；
-- LightGBM 对同一候选批次的向量化推理；
+- `InProcessModelScorer` 对同一完整分钟 Universe 的向量化推理；
 - 不改变状态的诊断和 UI 投影构建。
 
 ### 13.2 必须串行的部分
@@ -762,12 +864,18 @@ LightGBM 不参与退出触发。已有风险保护不能因模型、候选池�
 进程内 `t_trade_account_coordination_lock` 用于把配置与审批线性化，但不是持久化真源。
 最终交易安全仍依赖数据库事务、账户控制行锁和既定全链锁序。
 
-## 14. LightGBM 设计
+## 14. 模型评分设计（LightGBM 主候选）
 
 ### 14.1 定位
 
-LightGBM 的目标不是替代 V3 规则，而是提高“多个合格候选中谁更值得优先使用有限资金”
-的排序质量。
+模型的目标不是替代 V3 规则，而是提高“多个合格候选中谁更值得优先使用有限资金”的
+排序质量。LightGBM 是第一版首选的非线性候选，因为它适合中等规模表格特征、推理快且
+容易固化；它不是预先指定的永久 champion，必须在同一数据契约下稳定胜过规则排序和
+Logistic Regression 才能晋升。
+
+第一版的权威预测语义是：正向做 T ENTRY 后，在冻结 horizon 内，成本调整后的目标 barrier
+先于下行 barrier 被触达的校准概率；它不是没有执行含义的 `p_up` 或通用涨跌方向。模型只
+比较已经通过规则资格的候选质量，不改变正向做 T 的方向定义。
 
 推荐模式：
 
@@ -791,83 +899,193 @@ LightGBM 的目标不是替代 V3 规则，而是提高“多个合格候选中�
 
 ### 14.3 特征
 
-特征必须在决策时点可得，并固定 `feature_schema_version`。可使用：
+在线模型输入固定为已封闭的 1 分钟 `TModelFeatureBar`，特征必须在
+`source_bar_end/model_as_of` 时可得，并固定 `feature_schema_version`、字段顺序、缺失值
+语义和归一化参数。原始 Tick 只用于构造分钟内统计，不直接触发一次模型推理。可使用：
 
-- V3 回撤、反弹、速度、加速度、VWAP 偏离、量能和盘口特征；
-- 数据健康和窗口完整度；
-- 标的历史流动性和当前 spread/depth；
+- 价格收益、路径回撤/反弹、速度、加速度、VWAP 偏离和 realized volatility；
+- 分钟内成交活跃度、spread 分布、盘口变化和数据覆盖率；
+- 数据健康、窗口完整度和可用字段 bitmap；
+- 标的点时历史流动性和当前可执行性；
 - 大盘、行业和概念的时点环境；
 - 日内时间、距午休/收盘时间；
 - 只使用决策前数据计算的参考画像。
 
+跨标的输入优先使用无量纲、可比较的收益、波动、流动性分位数或相对量，不把不同价格和
+成交规模直接混在一起。任何 spread/depth/imbalance 特征都必须受
+`MarketDataCapabilityManifest` 控制；数据源不提供或质量不足时，应使用不含该字段的新
+schema/model 版本，不能用常数伪造“正常盘口”。
+
 禁止特征：
 
-- 未来价格、未来完整 BAR、未来复权因子；
+- 未来价格、正在形成或未来才完整的 BAR、未来复权因子；
 - 最终是否成交、最终成交价或实际分配金额；
 - 当前账户可用现金、排序名次和 active batch 压力；
 - 人工是否点击确认；
+- 第一版中的原始 `instrument_code`、名称或可让模型直接记忆标的身份的字段；
 - 训练期之后才产生的模型、策略或画像版本信息。
 
 排除账户特征可以避免模型把历史资金分配策略学成“机会质量”，并使同一分数可跨账户
 状态和回测场景比较。
 
-### 14.4 标签与样本
+### 14.4 `TModelScore` 契约
+
+模型输出必须是稳定、可审计的值对象，不能只在 metadata 中塞一个含义不明的浮点数：
+
+```text
+TModelScore
+  score_id
+  instrument_code
+  model_as_of
+  source_feature_bar_id / source_bar_end
+  feature_window_hash
+  horizon_seconds
+  p_target_before_stop
+  expected_net_edge_bps?        # 可选独立回归头
+  expected_mfe_bps? / expected_mae_bps?
+  score_status
+  feature_coverage
+  out_of_distribution_status
+  feature_schema_version
+  label_spec_version
+  model_id / model_version / model_type
+  calibration_version
+```
+
+`p_target_before_stop` 是第一版唯一必需、可参与排序的模型语义。预期净 edge、MFE 和 MAE
+只能由独立、版本化的模型头产生，缺失时为空，不能把同一字段在不同版本中改成另一种含义。
+不定义笼统 `confidence`；概率校准、特征覆盖率、分布外状态和 freshness 分开表达。
+
+`source_bar_end` 表示特征数据截止时点，`model_as_of` 表示分数完成计算并对决策路径可见的
+时点；二者不能混为一个时间戳，否则回测会忽略真实推理延迟。
+
+`score_status` 只描述推理是否成功及特征是否足够；freshness 和 schema compatibility 在候选
+关联时计算。`out_of_distribution_status` 独立表达 `IN_DISTRIBUTION/WARN/BLOCK`，第一版
+ACTIVE 只接受 `IN_DISTRIBUTION`，不能把 OOD 警告折成一个看似精确的低概率。
+
+`TModelScore` 不能携带账户金额、目标仓位、订单价格或 BUY/SELL 动作。Coordinator 只接收
+`score_status=VALID` 且满足第 7.5 节时点约束的分数；其他状态保留审计，但不得参与 ACTIVE
+排序。
+
+### 14.5 标签与样本
 
 当前 `t_trade_candidate_outcomes` 适合评估已形成候选的 60/300/900 秒表现，但只用
 候选或已执行样本训练会产生选择偏差。训练数据必须覆盖所有满足基础数据质量的、按
 固定规则抽样的 observation anchor，包括没有形成候选的负样本。
 
+第一版 observation anchor 固定为每个合格 `COMPLETE` Feature Bar 的可用时点，与在线评分
+一一对应；不把每个 Tick 当成独立训练样本。候选在 `model_score_max_age` 内关联最近 anchor
+的分数，candidate outcome 仅用于事后比较规则筛选效果，不能反过来定义训练样本集合。
+
 每个模型版本必须冻结：
 
 - anchor 抽样规则；
-- 预测 horizon；
-- 保守成交、手续费、印花税、过户费和滑点模型；
-- 正样本阈值；
-- 未成交、停牌、涨跌停和数据缺失的标签处理；
+- 唯一主预测 horizon；
+- ENTRY 可执行价格、目标 barrier、下行 barrier 和 barrier 触达顺序；
+- 手续费、印花税、过户费、spread 和滑点模型；
+- 未成交、停牌、涨跌停、午休/收盘和数据缺失的标签处理；
 - 重叠样本去重或权重规则。
 
-第一阶段建议预测：在冻结 horizon 和保守执行假设下，ENTRY 后可实现净正 edge 的
-校准概率。后续如需预测预期净 edge 或 MAE，必须使用独立标签和版本，不能在同一个
-字段中改变语义。
+第一阶段主标签使用成本调整的 first-touch/barrier 定义：从 anchor 后第一个可执行 BUY
+价格开始，目标 barrier 至少覆盖往返费用、spread、滑点和最小业务 edge；下行 barrier
+表达候选失效或最大容忍不利路径。在 horizon 内按真实事件顺序分类：
 
-### 14.5 训练与验证
+```text
+TARGET_FIRST    # 先触达净目标
+STOP_FIRST      # 先触达下行 barrier
+NO_TOUCH        # horizon 内均未触达
+UNAVAILABLE     # 无法建立可执行入口或路径数据不可靠
+```
+
+只有 `TARGET_FIRST` 是主正类；其余类别的训练权重和纳入规则写入 `label_spec_version`。
+若同一聚合 BAR 内目标和止损都被触达，必须用有序 Tick 还原先后；无法还原时主训练集标记
+`UNAVAILABLE`，并在悲观的 `STOP_FIRST` 敏感性回测中单独报告，禁止默认目标先到。
+
+未来最大上涨幅度 MFE 或未来收盘涨跌本身都不能作为“可实现做 T 成功”的充分标签，因为
+它们忽略路径顺序、可执行价格和成本。MFE/MAE 仍作为辅助回归目标和诊断指标保留。第一版
+只晋升一个冻结的主 horizon；60/300/900 秒结果可继续用于研究和稳定性分析，不能事后选择
+表现最好的 horizon 再宣称为线上目标。
+
+### 14.6 跨标的共享模型
+
+第一版采用一个覆盖当前可交易 Universe 的 pooled model，而不是“每票训练一个模型”。单票
+日内有效样本通常过少，独立模型容易记住少量行情阶段，且不同票分数不可直接比较；共享模型
+更符合 PortfolioTCoordinator 的跨票排序目标。
+
+共享训练必须满足：
+
+- 用收益、波动、成交活跃度和流动性等相对尺度归一化，不依赖绝对股价或成交量级；
+- 行业、指数和画像均使用 point-in-time 版本，不用今天的分类回填历史；
+- 第一版不输入原始 `instrument_code`，避免模型靠身份记忆历史均值；
+- 验证同时报告全体、逐标的、行业、流动性桶和市场 regime 指标，并关注 worst-group；
+- 新标的、低覆盖标的和分布外样本通过 `feature_coverage/OOD` 保守阻断或降级，不猜测分数。
+
+只有在某一标的积累了预先规定的独立 OOS 样本，且单票校准在多个时间窗稳定优于共享模型时，
+才允许评估单票校准层或专用模型；它仍必须输出同一 `TModelScore` 契约，不能另开执行路径。
+
+### 14.7 统一模型基准梯队
+
+所有候选模型必须使用同一 observation anchors、Feature Bar、标签、时间切分、校准和共享账户
+组合回测，禁止为某个算法单独选择更有利的数据窗。第一版基准梯队为：
+
+| 层级 | 模型 | 作用与准入条件 |
+|---|---|---|
+| 必选基线 | Logistic Regression | 验证特征是否有稳定线性信息，是任何复杂模型晋升的最低比较对象 |
+| 首选非线性候选 | LightGBM | 预期的首个线上 challenger；需稳定赢过规则与 Logistic |
+| 同级 challenger | XGBoost | 用于检验提升是否来自树模型共性，而非某个实现的偶然参数 |
+| 补充稳健性 | ExtraTrees | 检查非平滑交互及特征依赖，默认研究/对照用途 |
+| 条件候选 | CatBoost | 只有存在经过论证的点时类别特征且样本足够时才引入 |
+| 后续 regime | HMM | 只可作为 shadow 市场状态特征，不能替代确定性环境层和风险门禁 |
+| 后续序列模型 | TCN | 仅在表格模型已有稳定 OOS 增益、序列样本和延迟预算充分后评估 |
+
+第一版明确不引入在线学习、LSTM、Transformer 或强化学习。算法复杂度本身不是晋升理由；
+如果 Logistic 或 RULE_ONLY 在组合费用后更稳定，应保持简单方案。
+
+### 14.8 训练与验证
 
 训练运行在 Worker/Research，不在 Engine：
 
-1. 生成因果 feature/label 数据集和 manifest；
-2. 使用按时间切分的 purged walk-forward；embargo 至少覆盖最大标签 horizon；
-3. 在每个验证窗内独立校准概率，禁止用全量数据校准；
-4. 同时训练简单基线，例如 Logistic Regression；
-5. 比较 Brier/log loss、AUC、Precision@K/NDCG@K；
-6. 使用共享账户组合回测比较费用后收益、回撤、换手、容量拒绝和行业集中度；
-7. 只有相对规则排序和简单基线有稳定增益，才允许成为 challenger；
-8. 人工审核后才能从 challenger 晋升 champion/ACTIVE。
+1. 生成因果 feature/label 数据集、数据能力清单和 manifest；
+2. 为全部模型冻结同一训练、验证和测试 observation id 集合；
+3. 使用按时间切分的 purged walk-forward；embargo 至少覆盖最大标签 horizon；
+4. 在每个验证窗内独立校准概率，禁止用全量数据校准；
+5. 比较 Brier/log loss、AUC、Precision@K/NDCG@K 和校准曲线；
+6. 分别报告标的、行业、流动性桶、市场 regime、时间窗和 worst-group 稳定性；
+7. 使用共享账户组合回测比较费用后收益、回撤、换手、容量拒绝和行业集中度；
+8. 检查特征覆盖、分布漂移、排名漂移、推理延迟和不可用比例；
+9. 只有相对规则排序和 Logistic 基线有跨窗、跨组稳定增益，才允许成为 challenger；
+10. 人工审核后才能从 challenger 晋升 champion/ACTIVE。
 
-不能只用随机 train/test split，也不能只报告分类准确率。
+不能只用随机 train/test split、单一总样本 AUC 或分类准确率决定晋升。模型若靠少数高频标的
+贡献全部收益、在某个行业或 regime 显著失效，即使总体指标更高也不能直接 ACTIVE。
 
-### 14.6 模型制品
+### 14.9 模型制品
 
 复用 QuantX 已有安全模型制品方法，但不复用下一日选股模型本身。制品至少包含：
 
 ```text
 model_id / model_version
-model_type = LIGHTGBM
+model_type
 feature_schema_version / feature_order
 label_spec_version
+primary_horizon_seconds
+market_data_capability_manifest_version
+universe_policy / out_of_distribution_policy
 training_data_cutoff
 walk_forward_windows
 calibration_type / calibration_parameters
-validation_metrics
+validation_metrics / group_stability_metrics
 portfolio_backtest_metrics
 policy_compatibility
 artifact_sha256
 status = CHALLENGER | CHAMPION | RETIRED
 ```
 
-Engine 只加载经校验的 LightGBM 原生安全格式和显式校准参数，不加载任意 pickle。
-启动、配置变更和模型晋升时预加载；逐周期推理只调用内存 scorer。
+Engine 只加载与 `model_type` 对应的 allowlist 安全格式、显式特征顺序和校准参数，不加载
+任意 pickle。没有安全、确定性运行时格式的 benchmark 只能停留在 Research。启动、配置变更
+和模型晋升时预加载并完成固定样本自检；在线只在完整分钟结束后调用进程内 scorer。
 
-### 14.7 排序融合
+### 14.10 排序融合
 
 规则资格永远先执行。排序分采用版本化、可回放的明确公式，例如：
 
@@ -877,20 +1095,22 @@ RULE_ONLY:
 
 SHADOW:
   execution_rank_score = normalized_rule_score
-  shadow_ml_score = calibrated_probability
+  shadow_ml_score = p_target_before_stop
 
 ACTIVE:
   rank_score = versioned_blend(
       normalized_rule_score,
-      calibrated_probability,
-      explicit_liquidity_penalty,
-      explicit_cost_penalty,
+      p_target_before_stop,
   )
 ```
 
-融合权重属于模型/portfolio policy 版本，不允许在运行中隐式变化。每个 material candidate
-保存规则分、模型原始分、校准分、最终 rank score 和有限的 top feature contribution；
-普通 Tick 不逐笔计算或持久化 SHAP。
+融合权重属于模型/portfolio policy 版本，不允许在运行中隐式变化。标签已经显式计入成本时，
+不得再无依据重复扣一次 cost penalty；如未来引入预期净 edge 或当前可执行性惩罚，必须说明其
+独立信息、冻结公式并升级 policy 版本。
+
+每个 material candidate 保存规则分、`score_id`、模型原始分、校准概率、最终 rank score 和
+有限的 top feature contribution；普通 Tick 不逐笔计算或持久化 SHAP。模型分数不直接映射
+`target_amount` 或数量，额度仍由 Coordinator 和公共执行链决定。
 
 ## 15. 回测设计
 
@@ -921,11 +1141,19 @@ stable source identity
 每次撮合、ExitPlan 评估和策略决策后，必须等待 Broker 回报串行收敛，再处理下一行情。
 相同完成时刻遵守现有 Tick/BAR 因果顺序。
 
+回测必须复用实盘的 `TModelFeatureBarBuilder` 和 `InProcessModelScorer`：有序 Tick 驱动 V3
+规则、EntryExecutionGate、Broker 撮合和 barrier 路径；只有 watermark 越过分钟结束后才产生
+`COMPLETE` Feature Bar 和新 `TModelScore`。同一时间戳的 minute-complete、snapshot 和 broker
+事件使用冻结的优先级，确保一个候选能否看到该分钟分数与实盘一致。不得用回测框架预先计算的
+整日 BAR 表直接注入在线决策。
+
 ### 15.3 模型的时间因果
 
 - 固定模型回测要求 `training_data_cutoff < backtest_start`；
 - walk-forward 回测只允许在每个训练窗结束后生成下一窗模型；
 - 任何模型、校准器、画像和行业映射都按当时可用版本加载；
+- 每次评分只读取当时已经 `COMPLETE` 的 Feature Bar，形成中的分钟不可见；
+- 标签生成器属于离线评估路径，未来 barrier 结果不得进入 runtime snapshot 或 scorer；
 - 缺失当时版本时阻断该段模型回测，不得用当前模型回填历史。
 
 ### 15.4 结果
@@ -934,9 +1162,11 @@ stable source identity
 
 - 每周期候选数、选中数和淘汰原因；
 - rule/ML 排名一致率和 Top-K 命中；
+- `p_target_before_stop` 的校准、分组稳定性、OOD 和模型不可用比例；
 - 资金使用率、现金缓冲和容量拒绝率；
 - 最大并发批次、单票和行业暴露；
 - 费用后每轮 PnL、持有时间、MFE/MAE；
+- EntryExecutionGate 的 ALLOW/DELAY/REJECT 数量、延迟后过期率和避免的不利成交；
 - 因模型排序相对规则排序产生的增量收益和增量回撤；
 - 数据健康、模型不可用和期末未闭环数量。
 
@@ -949,6 +1179,8 @@ stable source identity
 | 标的行情窗口和 FSM 热状态 | Engine 内存 | 可重建；检查点只保存保守恢复投影 |
 | 做 T 配置与版本 | `t_trade_global_configs` | 单账户唯一配置 |
 | 标的 Universe | 权威持仓快照 + Monitor 投影 | 策略不得自行选股 |
+| 完整 1 分钟 Feature Bar | 因果行情历史 + 固定 builder/schema 生成 | 在线热缓存可重建，`FORMING` 不可评分 |
+| 最新 `TModelScore` | 模型制品 + 完整 Feature Bar 的派生缓存 | material 候选关联的分数必须持久化为审计证据 |
 | material 机会证据 | `t_trade_opportunity_evaluations` | append-only、幂等 event key |
 | 参考画像 | `t_trade_instrument_profiles` | 点时版本化 |
 | 候选结果 | `t_trade_candidate_outcomes` | 用于候选评估，不单独充当完整训练集 |
@@ -960,7 +1192,7 @@ stable source identity
 | 自动退出 | `auto_exit_plans` | `ExitPlanBook` 只是运行热缓存 |
 | 仓位归因 | `BucketLedger` | locked_core/core/swing |
 | 做 T 轮次展示 | `TTradeBatch` + 事件 | 可重建运营投影，不反向驱动真源 |
-| LightGBM 模型 | 版本化模型制品与 manifest | Engine 内存只读加载 |
+| 评分模型 | 版本化模型制品与 manifest | Engine 内存只读加载，LightGBM 为首选 challenger |
 
 ### 16.2 普通 Tick 写入原则
 
@@ -969,14 +1201,16 @@ stable source identity
 - 数据健康或 FSM 的重要转换；
 - candidate 创建、过期、抑制和审批绑定；
 - TradeIntent；
-- scorer/Coordinator 决策；
+- material candidate 关联的 `TModelScore`、scorer/Coordinator 决策；
+- EntryExecutionGate 的 `ALLOW/DELAY/REJECT`；
 - 审批、风险和容量裁决；
 - pending/outbox；
 - 委托、成交、ExitPlan 和批次事件；
 - 模型模式或版本变更。
 
-BACKTEST 的普通热状态和无意图 material 评估继续使用 `DAY_BATCH`，但真正候选、意图
-和模拟成交必须即时成为幂等事实。
+在线不逐 Tick 持久化 Feature Bar、模型分数或 SHAP。SHADOW 的全 observation-anchor 分数和
+BACKTEST 的普通热状态、无意图 material 评估可以使用 `DAY_BATCH`，但真正候选绑定的分数、
+意图、Gate 决策和模拟成交必须即时成为幂等事实。
 
 ### 16.3 建议补充的关联字段
 
@@ -986,8 +1220,10 @@ BACKTEST 的普通热状态和无意图 material 评估继续使用 `DAY_BATCH`�
 cycle_id
 opportunity_id
 candidate_id / fingerprint
+model_score_id / source_feature_bar_id
 intent_id
 allocation_decision_id
+entry_gate_decision_id
 strategy_run_id
 t_batch_id
 exit_plan_id
@@ -1006,10 +1242,14 @@ trace_id
 | 行情 stream/generation 变化 | 清空相关窗口，停止新候选 | 仅在新鲜行情恢复后继续评估 | 完整 fence + rewarm |
 | 单票 quote 陈旧 | 只阻断该票 | 该票退出暂停，不用旧价触发 | 新鲜 Tick 后恢复 |
 | 市场/行业上下文陈旧 | 按 policy 阻断或保守降级并审计 | 不改变既有退出规则 | 新版本上下文 |
+| 1 分钟 Feature Bar 未封闭/不连续 | 不生成新模型分数；规则路径按自身健康度运行 | 不影响 | 完整新分钟 + rewarm |
 | Engine 关键消费者 lagging | 阻断新 ENTRY | 保持可见并 fail-closed | resync 后 rewarm |
 | 账户快照陈旧/不完整 | 全部拒绝 | 不猜测可卖量；必要时 reconcile | 新合法完整快照 |
 | Coordinator 异常 | 整周期不提交分配 | 不影响已有退出 | 同 cycle 幂等重试或终态拒绝 |
 | `ACTIVE` 模型缺失/校验失败 | 全部 `MODEL_UNAVAILABLE`，不静默降级 | 不影响 | 修复同版本或显式切 RULE_ONLY |
+| `ACTIVE` 分数陈旧/schema 不匹配/OOD | 只阻断受影响候选，保存稳定原因 | 不影响 | 合法新分数或显式模式切换 |
+| 数据源 required 盘口字段缺失 | 依 capability policy `DELAY/REJECT`，不伪造数值 | 不影响既有退出规则 | 字段恢复或切换经过验证的无该字段 schema |
+| EntryExecutionGate 发现价差/价格偏离 | `DELAY/REJECT`，不得追价或直接改量 | 不影响 | TTL 内重新走 scorer/Coordinator，否则过期 |
 | 提案已持久化、协调前崩溃 | 不路由 | 不影响 | TTL 内用最新事实重验，否则过期 |
 | 容量事务提交前崩溃 | 没有 outbox，不得下单 | 不影响 | 幂等重试 |
 | outbox 已投递、结果未知 | 保持占用并 reconcile | 同公共订单契约 | QMT 快照/回报证明 |
@@ -1029,9 +1269,11 @@ market fence
   -> TDecisionSnapshot/cycle_id
   -> Symbol feature + FSM evaluation
   -> candidate/opportunity
-  -> rule score / ml score
+  -> complete Feature Bar / TModelScore
+  -> rule score / scorer evidence
   -> portfolio rank/allocation
   -> approval/revalidation
+  -> EntryExecutionGate
   -> sizing/risk/capacity
   -> intent/order/outbox
   -> QMT order/trade reports
@@ -1049,9 +1291,11 @@ market fence
 - decision cycle lag、耗时和合并 fence 数；
 - 每 symbol quote age、window warmup 和 data health；
 - 每周期 evaluated/candidate/selected/rejected 数；
-- scorer 模式、模型版本、推理耗时和错误数；
-- rule 与 ML 排名漂移、score 分布漂移；
+- Feature Bar complete/invalid 数、完成延迟和字段覆盖率；
+- scorer 模式、模型版本、score freshness、推理耗时、OOD 和错误数；
+- rule 与 ML 排名漂移、概率校准和 score 分布漂移；
 - Coordinator 额度使用、行业暴露和淘汰原因；
+- EntryExecutionGate 的动作、价格偏离、spread 异常和 TTL 过期；
 - 审批过期和确认后容量拒绝；
 - active batch、ExitPlan、reconcile 和 sticky error；
 - outbox 投递、ORDER/TRADE 延迟和乱序收敛。
@@ -1060,7 +1304,7 @@ market fence
 
 做 T 助手页面应把三类信息分开：
 
-1. **机会**：标的、路径、数据健康、rule/ML 分、排名、TTL、淘汰原因；
+1. **机会**：标的、路径、数据健康、rule/ML 分、模型 as-of/覆盖率、排名、TTL、淘汰原因；
 2. **组合**：总额度、已规划/已占用、现金缓冲、并发、单票和行业暴露；
 3. **轮次**：ENTRY、ExitPlan、成交、净收益、异常和 reconcile。
 
@@ -1074,7 +1318,8 @@ market fence
 packages/domain/src/quantx_domain/trading/
   t_trade_opportunity_engine.py      # 继续作为纯 SymbolTEngine reducer
   t_trade_portfolio_coordinator.py   # 新增纯组合协调算法和契约
-  t_trade_scoring.py                 # scorer 输入/输出和值对象，不做 I/O
+  t_trade_scoring.py                 # FeatureBar/TModelScore/scorer 值对象，不做 I/O
+  t_trade_entry_execution_gate.py    # 纯 ALLOW/DELAY/REJECT 重验
 
 packages/application/src/quantx_application/t_trade_v3/
   contracts.py                       # snapshot/opportunity/allocation 契约
@@ -1083,11 +1328,13 @@ packages/application/src/quantx_application/t_trade_v3/
 
 packages/infrastructure/src/quantx_infrastructure/
   services/t_trade_lightgbm_scorer.py
+  services/t_trade_model_artifact_loader.py
   repositories/t_trade_allocation_decision_repository.py
   models/t_trade_allocation_decision.py
 
 apps/engine/src/quantx_engine/
   t_trade_decision_snapshot.py       # 从 WholeQuoteHub 构建冻结快照
+  t_trade_model_runtime.py           # 完整分钟 builder、批量推理和 score cache
   t_trade_decision_runtime.py        # 周期、排序、协调和路由编排
   t_trade_global_monitor.py          # 只保留配置/Universe/生命周期
 ```
@@ -1126,6 +1373,7 @@ ExitPlan 状态机不得继续堆入该类。
 - 原子切换为 `PORTFOLIO_PENDING -> TAllocationDecision -> 审批/路由`。
 - 删除旧的“候选直接审批”路径和重复账户布尔门禁。
 - CANARY 逐笔人工确认，确认时走最新组合和最终容量重验。
+- 引入确定性 EntryExecutionGate；先记录 shadow action，再成为公共 ENTRY 必经门。
 
 ### 阶段 4：共享账户组合回测
 
@@ -1133,16 +1381,18 @@ ExitPlan 状态机不得继续堆入该类。
 - 对照 LIVE 的 snapshot、coordinator、OrderSizer、Risk 和 ExitPlan。
 - 通过无重复资金、无超老仓、无未来数据验收。
 
-### 阶段 5：LightGBM SHADOW
+### 阶段 5：模型数据、统一基准与 SHADOW
 
-- 生成全 observation anchor 训练集和严格 walk-forward 结果。
-- Engine 内安全加载 champion artifact，记录 shadow score。
+- 冻结完整 1 分钟 Feature Bar、能力清单、first-touch 标签和全 observation-anchor 数据集。
+- 在相同 purged walk-forward 窗口比较 RULE_ONLY、Logistic、LightGBM 及必要 challengers。
+- 先使用无原始 symbol identity 的跨标的共享模型，并报告 worst-group 稳定性。
+- Engine 内安全加载经批准 artifact，记录带 as-of、coverage 和 OOD 的 shadow score。
 - 至少覆盖不同波动环境和足够完整 T 轮次后再评估晋升。
 
-### 阶段 6：LightGBM ACTIVE 灰度
+### 阶段 6：模型 ACTIVE 灰度
 
-- 人工晋升模型和配置版本；先低额度 CANARY，再受控 LIVE。
-- ACTIVE 不可用时阻断新 ENTRY。
+- 只有稳定胜过规则和 Logistic 的模型才可人工晋升；先低额度 CANARY，再受控 LIVE。
+- ACTIVE 模型、分数、schema 或 freshness 不合法时阻断受影响的新 ENTRY。
 - 退出、回报收敛和账户安全链与模型完全解耦。
 
 ### 切换规则
@@ -1165,7 +1415,20 @@ ExitPlan 状态机不得继续堆入该类。
 - 行业、并发、总暴露、现金缓冲和单票上限的 ALLOW/CAP/REJECT 正确。
 - LightGBM 只能改变合格候选之间的排序，不能使硬门禁失败者入选。
 
-### 21.2 应用与并发测试
+### 21.2 模型数据与验证测试
+
+- `FORMING` 分钟永远不能生成在线分数；watermark 和 generation 满足后只封闭一次。
+- 相同 Tick、capability manifest 和 schema 在 LIVE/BACKTEST 生成相同 Feature Bar hash。
+- 候选只能关联 `model_as_of/source_bar_end <= observed_at` 且未过期的同版本分数。
+- SHADOW 分数缺失不改变规则排序；ACTIVE 缺失、陈旧、schema mismatch 或 OOD 稳定阻断。
+- first-touch 标签用有序 Tick 判定 barrier 先后；无法判定的同 BAR 双触达为 `UNAVAILABLE`，
+  并存在独立悲观敏感性回测。
+- MFE/MAE 与 `p_target_before_stop` 字段语义相互独立，版本切换不能复用同名字段改义。
+- Logistic、LightGBM 和 challengers 使用完全相同的 observation ids、时间窗、embargo 和成本。
+- 跨标的模型不含原始 symbol identity，并输出逐标的/行业/regime/worst-group 稳定性。
+- miniQMT 不具备可选 Level-2 字段时选择经过验证的无该字段 schema，不生成伪造数值。
+
+### 21.3 应用与并发测试
 
 - 同周期多个 TradeIntent 先整批持久化，再产生 allocation decision。
 - 两个候选竞争同一份现金时只有账户事务允许的数量进入 outbox。
@@ -1173,10 +1436,14 @@ ExitPlan 状态机不得继续堆入该类。
 - 配置更新、人工确认和市场周期并发时不存在旧候选穿透。
 - Coordinator 崩溃恢复不会重复审批或重复路由。
 - ACTIVE 模型失败不静默切换，所有新 ENTRY 有稳定阻断原因。
+- 候选形成后出现新分钟分数时，旧 allocation 不会被静默换分；必须重走 scorer/Coordinator。
 - ExitPlan SELL 在本地调度上优先于新 ENTRY。
 
-### 21.3 执行与回报测试
+### 21.4 执行与回报测试
 
+- EntryExecutionGate 的 `DELAY` 不超过 intent TTL，重试重新校验候选、模型和组合额度。
+- Gate 不能改变方向、数量、订单类型或绕过 OrderSizer/Risk/Capacity。
+- quote 陈旧、价格偏离、spread 异常和 required 字段缺失产生稳定动作与原因码。
 - BUY 部分成交只激活等量 ExitPlan 和库存置换义务。
 - ORDER `FILLED` 先到不提前释放容量。
 - REJECT/CANCEL 只有权威零成交证明才释放。
@@ -1185,16 +1452,17 @@ ExitPlan 状态机不得继续堆入该类。
 - 外部卖出侵占老仓时进入 reconcile，不自动缩量。
 - QMT `command_ack` 不推进 ENTRY/EXIT 成交。
 
-### 21.4 回测测试
+### 21.5 回测测试
 
 - 多标的共享现金，不能重复使用同一笔资金。
 - 同时事件的稳定排序与实盘 snapshot 规则一致。
 - T+1、涨跌停、停牌、费用、滑点和部分成交都走公共 Broker。
 - 每次行情后先收敛回报再处理下一事件。
 - 训练 cutoff 和 feature availability 无未来泄露。
+- 完整分钟、模型评分、Tick 规则、Gate 和 Broker 事件顺序与 LIVE 一致。
 - RULE_ONLY、SHADOW、ACTIVE 使用固定 artifact 可重复得到相同结果。
 
-### 21.5 上线验收
+### 21.6 上线验收
 
 必须同时满足：
 
@@ -1207,14 +1475,17 @@ ExitPlan 状态机不得继续堆入该类。
 7. 回测和实盘使用同一个 `StrategyBase.step(SNAPSHOT)`、Coordinator 和 scorer 语义。
 8. Engine/QMT 断线、乱序回报和重启恢复测试通过。
 9. 活动退出计划在所有 ENTRY/模型故障场景下仍保持唯一所有者和可恢复性。
+10. ACTIVE 只读取完整分钟模型分数，Gate 只做重验且模型从不直接定仓或下单。
 
 ## 22. 最终架构判断
 
-“每标的一 T Engine + 全账户统一协调”方向是合理的，但必须按 QuantX 边界做三项修正：
+“每标的一 T Engine + 全账户统一协调”方向是合理的，但必须按 QuantX 边界做四项修正：
 
 1. `SymbolTEngine` 只输出机会质量，不能申请具体股数、读取现金或下单。
-2. `PortfolioTCoordinator` 只做排名和预算上限，最终合法数量及容量仍由公共执行链决定。
-3. 所谓 ExecutionManager、ReservationManager 和 TRound 不应在 QuantX 中复制成第二套真源，
+2. 模型只用完整 1 分钟特征输出可校准的候选质量，Tick 继续负责 V3 规则和执行重验；模型
+   不直接定仓、不替代硬门禁。
+3. `PortfolioTCoordinator` 只做排名和预算上限，最终合法数量及容量仍由公共执行链决定。
+4. 所谓 ExecutionManager、ReservationManager 和 TRound 不应在 QuantX 中复制成第二套真源，
    而应分别映射到现有 `TradeIntentProcessor/OrderSizer/Risk`、
    `AccountCapacityService`、`TTradeBatch + ExitPlan + durable order facts`。
 
