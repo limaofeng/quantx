@@ -227,6 +227,41 @@ npm run docs:contracts
 发布文件位于 `/docs/contracts/`，包括 GraphQL SDL、v2 operation policy、
 Client OpenAPI 与 Web OpenAPI。运行时只在 Dev 内部端口提供调试文档。
 
+## 次日概率训练 GraphQL
+
+研究工作台的公开训练边界为以下只读查询和研究写入 mutation：
+
+```text
+stockSelectionTrainingCapabilities
+stockSelectionDatasetVersions(limit, offset)
+previewStockSelectionTraining(input)
+stockSelectionTrainingRuns(status, runKind, limit, offset)
+stockSelectionTrainingRun(runId)
+stockSelectionTrainingComparison(runIds)       # 2–5 个同坐标运行
+
+startStockSelectionDevelopmentTraining(input, previewFingerprint, idempotencyKey)
+startStockSelectionFinalEvaluation(parentRunId, idempotencyKey)
+cancelStockSelectionTrainingRun(runId, expectedVersion, idempotencyKey)
+```
+
+`StockSelectionTrainingInput` 只接受 typed dataset/date/universe、backend 与 resource
+字段；模型族、时间切分和效果门禁是服务端冻结配置。提交前必须使用当前输入得到的
+`previewFingerprint`，预检 `blockers` 非空或后端 capability 不满足时，服务端和
+Web 都拒绝提交。所有创建请求的 `created_by` 从认证 principal 的 `user_id`
+派生，不能由客户端传入。
+
+运行列表和详情只投影阶段、进度、hash、脱敏环境、指标/门禁摘要、队列原因和受控
+错误。`source_reference`、文件路径、secret、raw exception 和 artifact directory
+不属于公共 schema。活动运行由 Web 每 5 秒轮询；取消带状态版本和幂等键。
+
+登记有双重门禁：数据库 `run_key` 是唯一真源，且对应安全目录中的严格 schema-v2
+产物必须是 `FINAL_EVALUATION`、`SUCCEEDED`、hash/identity 一致、`registerable`
+为真，结论只能是 `SHADOW_ELIGIBLE` 或 `ACTIVE_ELIGIBLE`。`DEVELOPMENT`、
+`BLOCKED`、失败、重复或不完整证据均不能作为模型 bundle；人工 registry/stage
+mutation 仍需 `ADMIN`。训练查询的 operation policy 为 `market:read` +
+`WEB_ONLY`/`web-internal`，训练 mutation 为 `operations:write` +
+`WEB_ONLY`/`web-internal`/`NON_TRADING_WRITE`，这些写入不会创建交易意图。
+
 ## 卖出管理 GraphQL
 
 统一读取入口为 `exitPlans`、`exitPlan`、`exitPlanEvents`、

@@ -192,10 +192,27 @@ _register(
     "stockPredictionRunStatus",
     "stockSelectionModel",
     "stockSelectionModels",
+    "stockSelectionTrainingCapabilities",
+    "stockSelectionDatasetVersions",
+    "previewStockSelectionTraining",
+    "stockSelectionTrainingRuns",
+    "stockSelectionTrainingRun",
+    "stockSelectionTrainingComparison",
     "ticks",
     "tradingCalendar",
   },
 )
+for _field in {
+  "stockSelectionTrainingCapabilities",
+  "stockSelectionDatasetVersions",
+  "previewStockSelectionTraining",
+  "stockSelectionTrainingRuns",
+  "stockSelectionTrainingRun",
+  "stockSelectionTrainingComparison",
+}:
+  _key = ("Query", normalize_field_name(_field))
+  _policy = _POLICIES[_key]
+  _POLICIES[_key] = replace(_policy, audiences=WEB_ONLY, stability="web-internal")
 _register(
   "Query",
   "system-status:read",
@@ -439,6 +456,9 @@ _register(
     "setDeploymentScheduleActive",
     "registerStockSelectionModel",
     "setStockSelectionModelStage",
+    "startStockSelectionDevelopmentTraining",
+    "startStockSelectionFinalEvaluation",
+    "cancelStockSelectionTrainingRun",
   },
   audiences=WEB_ONLY,
   stability="web-internal",
@@ -456,6 +476,19 @@ _register(
   stability="web-internal",
   risk="ADMIN",
 )
+for _field in {
+  "startStockSelectionDevelopmentTraining",
+  "startStockSelectionFinalEvaluation",
+  "cancelStockSelectionTrainingRun",
+}:
+  _key = ("Mutation", normalize_field_name(_field))
+  _policy = _POLICIES[_key]
+  _POLICIES[_key] = replace(
+    _policy,
+    audiences=WEB_ONLY,
+    stability="web-internal",
+    risk="NON_TRADING_WRITE",
+  )
 _register(
   "Mutation",
   "assistant:write",

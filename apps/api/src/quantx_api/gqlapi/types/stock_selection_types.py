@@ -194,3 +194,225 @@ class StockPredictionRunStatusPage:
   runs: list[StockPredictionRunStatus]
   has_active_model: bool
   warnings: list[str]
+
+
+# ---------------------------------------------------------------------------
+# Web initiated training projections
+# ---------------------------------------------------------------------------
+#
+# Training is a research-only workflow.  These types deliberately keep the
+# user-editable request small and typed while allowing the read-only evidence
+# sections to evolve behind a bounded JSON projection.  In particular, no
+# filesystem source reference or raw worker exception is part of this public
+# contract.
+
+
+@strawberry.enum(description="次日概率训练运行类型")
+class StockSelectionTrainingRunKind(Enum):
+  DEVELOPMENT = "DEVELOPMENT"
+  FINAL_EVALUATION = "FINAL_EVALUATION"
+
+
+@strawberry.enum(description="次日概率训练运行状态")
+class StockSelectionTrainingRunStatus(Enum):
+  QUEUED = "QUEUED"
+  RUNNING = "RUNNING"
+  SUCCEEDED = "SUCCEEDED"
+  FAILED = "FAILED"
+  CANCELLED = "CANCELLED"
+
+
+@strawberry.enum(description="次日概率训练阶段")
+class StockSelectionTrainingPhase(Enum):
+  PREFLIGHT = "PREFLIGHT"
+  DATASET_BUILD = "DATASET_BUILD"
+  WALK_FORWARD = "WALK_FORWARD"
+  FINAL_FIT = "FINAL_FIT"
+  CALIBRATION = "CALIBRATION"
+  FROZEN_TEST = "FROZEN_TEST"
+  ARTIFACT_PUBLISH = "ARTIFACT_PUBLISH"
+
+
+@strawberry.enum(description="次日概率训练请求后端")
+class StockSelectionTrainingBackend(Enum):
+  AUTO = "AUTO"
+  CPU = "CPU"
+  GPU_REQUIRED = "GPU_REQUIRED"
+
+
+@strawberry.enum(description="次日概率训练解析后的后端")
+class StockSelectionResolvedBackend(Enum):
+  CPU = "CPU"
+  LIGHTGBM_OPENCL_GPU = "LIGHTGBM_OPENCL_GPU"
+
+
+@strawberry.enum(description="次日概率训练 GPU 资格状态")
+class StockSelectionTrainingGpuStatus(Enum):
+  CPU_AVAILABLE = "CPU_AVAILABLE"
+  GPU_UNAVAILABLE_BUILD = "GPU_UNAVAILABLE_BUILD"
+  GPU_UNAVAILABLE_RUNTIME = "GPU_UNAVAILABLE_RUNTIME"
+  GPU_INSUFFICIENT_MEMORY = "GPU_INSUFFICIENT_MEMORY"
+  GPU_UNQUALIFIED = "GPU_UNQUALIFIED"
+  GPU_AVAILABLE = "GPU_AVAILABLE"
+
+
+@strawberry.enum(description="次日概率训练发布结论")
+class StockSelectionTrainingConclusion(Enum):
+  BLOCKED = "BLOCKED"
+  SHADOW_ELIGIBLE = "SHADOW_ELIGIBLE"
+  ACTIVE_ELIGIBLE = "ACTIVE_ELIGIBLE"
+
+
+@strawberry.enum(description="次日概率训练股票范围")
+class StockSelectionTrainingUniverseKind(Enum):
+  ORDINARY_A_SHARE = "ORDINARY_A_SHARE"
+  CERTIFIED_INDEX = "CERTIFIED_INDEX"
+  EXPLICIT = "EXPLICIT"
+
+
+@strawberry.input(description="经过认证的次日概率训练股票范围")
+class StockSelectionTrainingUniverseInput:
+  kind: StockSelectionTrainingUniverseKind = StockSelectionTrainingUniverseKind.ORDINARY_A_SHARE
+  stock_codes: Optional[list[str]] = None
+  index_code: Optional[str] = None
+  benchmark_code: str = "000300.SH"
+  minimum_listing_days: int = 252
+
+
+@strawberry.input(description="次日概率训练请求；模型参数使用系统冻结预设")
+class StockSelectionTrainingInput:
+  dataset_version: str
+  date_start: Optional[date] = None
+  date_end: Optional[date] = None
+  universe: Optional[StockSelectionTrainingUniverseInput] = None
+  requested_backend: StockSelectionTrainingBackend = StockSelectionTrainingBackend.CPU
+  bootstrap_samples: int = 2000
+  worker_batch_size: int = 100
+  random_seed: int = 20260901
+  note: str = ""
+
+
+@strawberry.type(description="次日概率训练资源估算")
+class StockSelectionTrainingResourceEstimate:
+  memory_mib: int
+  disk_mib: int
+  gpu_memory_mib: int
+  estimated_minutes: int
+  duration_level: str
+  sample_count: int
+  stock_count: int
+  trading_day_count: int
+  fold_count: int
+
+
+@strawberry.type(description="次日概率训练逐月 walk-forward fold")
+class StockSelectionTrainingFold:
+  train_start: date
+  train_end: date
+  calibration_start: date
+  calibration_end: date
+  validation_start: date
+  validation_end: date
+  validation_month: date
+
+
+@strawberry.type(description="次日概率训练能力与脱敏环境摘要")
+class StockSelectionTrainingCapabilities:
+  cpu_available: bool
+  gpu_status: StockSelectionTrainingGpuStatus
+  fresh: bool
+  updated_at: Optional[datetime]
+  available_memory_mib: Optional[int]
+  environment_requirement_hash: Optional[str]
+  qualification: JSON
+  environment_summary: JSON
+
+
+@strawberry.type(description="已认证的次日概率训练数据集版本")
+class StockSelectionDatasetVersion:
+  dataset_version: str
+  status: str
+  source_kind: str
+  date_start: date
+  date_end: date
+  universe_spec: JSON
+  indicator_version: str
+  factor_set_version: str
+  factor_set_hash: str
+  label_version: str
+  manifest_sha256: str
+  sample_count: int
+  stock_count: int
+  trading_day_count: int
+  quality_summary: JSON
+  created_at: datetime
+
+
+@strawberry.type(description="次日概率训练预检证据")
+class StockSelectionTrainingPreview:
+  preview_fingerprint: str
+  dataset_version: str
+  requested_backend: StockSelectionTrainingBackend
+  resolved_backend: StockSelectionResolvedBackend
+  folds: list[StockSelectionTrainingFold]
+  coverage: JSON
+  leakage: JSON
+  resource_estimate: StockSelectionTrainingResourceEstimate
+  shadow_reasons: list[str]
+  blockers: list[str]
+  warnings: list[str]
+  capability: JSON
+  spec_hash: str
+  coordinate_hash: str
+  can_submit: bool
+
+
+@strawberry.type(description="次日概率训练运行及安全证据投影")
+class StockSelectionTrainingRun:
+  run_id: str
+  run_key: Optional[str]
+  run_kind: StockSelectionTrainingRunKind
+  parent_run_id: Optional[str]
+  status: StockSelectionTrainingRunStatus
+  phase: StockSelectionTrainingPhase
+  completed_units: int
+  total_units: int
+  requested_at: datetime
+  started_at: Optional[datetime]
+  completed_at: Optional[datetime]
+  cancel_requested_at: Optional[datetime]
+  state_version: int
+  dataset_version: Optional[str]
+  requested_backend: Optional[StockSelectionTrainingBackend]
+  resolved_backend: Optional[StockSelectionResolvedBackend]
+  spec_hash: Optional[str]
+  environment_requirement_hash: Optional[str]
+  coordinate_hash: Optional[str]
+  experiment_group_hash: Optional[str]
+  artifact_manifest_sha256: Optional[str]
+  environment_evidence: JSON
+  metrics_summary: JSON
+  gate_summary: JSON
+  conclusion: Optional[StockSelectionTrainingConclusion]
+  registerable: bool
+  queue_reason: Optional[str]
+  error_code: Optional[str]
+  error_message: Optional[str]
+
+
+@strawberry.type(description="次日概率训练运行分页")
+class StockSelectionTrainingRunPage:
+  items: list[StockSelectionTrainingRun]
+  total: int
+  limit: int
+  offset: int
+
+
+@strawberry.type(description="同坐标次日概率最终评估对比")
+class StockSelectionTrainingComparison:
+  comparable: bool
+  mismatch_fields: list[str]
+  mismatched_fields: JSON
+  runs: list[StockSelectionTrainingRun]
+  metrics: JSON
+  gates: JSON

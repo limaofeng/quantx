@@ -4153,6 +4153,15 @@ type Mutation {
 
   """按乐观锁人工切换模型发布阶段"""
   setStockSelectionModelStage(modelVersion: String!, stage: StockSelectionModelStage!, expectedVersion: Int!): StockSelectionModel!
+
+  """启动一次 DEVELOPMENT 次日概率训练"""
+  startStockSelectionDevelopmentTraining(input: StockSelectionTrainingInput!, previewFingerprint: String!, idempotencyKey: String!): StockSelectionTrainingRun!
+
+  """启动一次基于 DEVELOPMENT 的 FINAL_EVALUATION"""
+  startStockSelectionFinalEvaluation(parentRunId: String!, idempotencyKey: String!): StockSelectionTrainingRun!
+
+  """请求取消一次尚未完成的次日概率训练"""
+  cancelStockSelectionTrainingRun(runId: String!, expectedVersion: Int!, idempotencyKey: String!): StockSelectionTrainingRun!
 }
 
 """解锁后解析的非敏感路由；业务终态仍由目标 Query 重新读取"""
@@ -5105,6 +5114,24 @@ type Query {
   """读取只读次日上涨概率候选；不创建交易意图"""
   stockProbabilityCandidates(input: StockProbabilityCandidateInput!): StockProbabilityCandidatePage!
 
+  """读取训练 worker 能力与脱敏环境摘要"""
+  stockSelectionTrainingCapabilities: StockSelectionTrainingCapabilities!
+
+  """列出可用于训练的认证数据集版本"""
+  stockSelectionDatasetVersions(limit: Int! = 100, offset: Int! = 0): [StockSelectionDatasetVersion!]!
+
+  """预览次日概率训练请求；不会创建运行"""
+  previewStockSelectionTraining(input: StockSelectionTrainingInput!): StockSelectionTrainingPreview!
+
+  """读取次日概率训练运行列表"""
+  stockSelectionTrainingRuns(status: StockSelectionTrainingRunStatus = null, runKind: StockSelectionTrainingRunKind = null, limit: Int! = 50, offset: Int! = 0): StockSelectionTrainingRunPage!
+
+  """读取一个次日概率训练运行"""
+  stockSelectionTrainingRun(runId: String!): StockSelectionTrainingRun
+
+  """比较 2 到 5 个训练运行的同坐标证据"""
+  stockSelectionTrainingComparison(runIds: [String!]!): StockSelectionTrainingComparison!
+
   """获取全部自选股列表"""
   watchlist(accountId: String = null): [WatchlistItem!]!
 
@@ -6032,6 +6059,26 @@ enum StockScreenUniverse {
   STOCK_AND_ETF
 }
 
+"""已认证的次日概率训练数据集版本"""
+type StockSelectionDatasetVersion {
+  datasetVersion: String!
+  status: String!
+  sourceKind: String!
+  dateStart: Date!
+  dateEnd: Date!
+  universeSpec: JSON!
+  indicatorVersion: String!
+  factorSetVersion: String!
+  factorSetHash: String!
+  labelVersion: String!
+  manifestSha256: String!
+  sampleCount: Int!
+  stockCount: Int!
+  tradingDayCount: Int!
+  qualitySummary: JSON!
+  createdAt: DateTime!
+}
+
 """次日上涨概率模型版本及发布证据"""
 type StockSelectionModel {
   modelVersion: String!
@@ -6069,6 +6116,197 @@ enum StockSelectionModelStage {
   ACTIVE
   SUSPENDED
   RETIRED
+}
+
+"""次日概率训练解析后的后端"""
+enum StockSelectionResolvedBackend {
+  CPU
+  LIGHTGBM_OPENCL_GPU
+}
+
+"""次日概率训练请求后端"""
+enum StockSelectionTrainingBackend {
+  AUTO
+  CPU
+  GPU_REQUIRED
+}
+
+"""次日概率训练能力与脱敏环境摘要"""
+type StockSelectionTrainingCapabilities {
+  cpuAvailable: Boolean!
+  gpuStatus: StockSelectionTrainingGpuStatus!
+  fresh: Boolean!
+  updatedAt: DateTime
+  availableMemoryMib: Int
+  environmentRequirementHash: String
+  qualification: JSON!
+  environmentSummary: JSON!
+}
+
+"""同坐标次日概率最终评估对比"""
+type StockSelectionTrainingComparison {
+  comparable: Boolean!
+  mismatchFields: [String!]!
+  mismatchedFields: JSON!
+  runs: [StockSelectionTrainingRun!]!
+  metrics: JSON!
+  gates: JSON!
+}
+
+"""次日概率训练发布结论"""
+enum StockSelectionTrainingConclusion {
+  BLOCKED
+  SHADOW_ELIGIBLE
+  ACTIVE_ELIGIBLE
+}
+
+"""次日概率训练逐月 walk-forward fold"""
+type StockSelectionTrainingFold {
+  trainStart: Date!
+  trainEnd: Date!
+  calibrationStart: Date!
+  calibrationEnd: Date!
+  validationStart: Date!
+  validationEnd: Date!
+  validationMonth: Date!
+}
+
+"""次日概率训练 GPU 资格状态"""
+enum StockSelectionTrainingGpuStatus {
+  CPU_AVAILABLE
+  GPU_UNAVAILABLE_BUILD
+  GPU_UNAVAILABLE_RUNTIME
+  GPU_INSUFFICIENT_MEMORY
+  GPU_UNQUALIFIED
+  GPU_AVAILABLE
+}
+
+"""次日概率训练请求；模型参数使用系统冻结预设"""
+input StockSelectionTrainingInput {
+  datasetVersion: String!
+  dateStart: Date = null
+  dateEnd: Date = null
+  universe: StockSelectionTrainingUniverseInput = null
+  requestedBackend: StockSelectionTrainingBackend! = CPU
+  bootstrapSamples: Int! = 2000
+  workerBatchSize: Int! = 100
+  randomSeed: Int! = 20260901
+  note: String! = ""
+}
+
+"""次日概率训练阶段"""
+enum StockSelectionTrainingPhase {
+  PREFLIGHT
+  DATASET_BUILD
+  WALK_FORWARD
+  FINAL_FIT
+  CALIBRATION
+  FROZEN_TEST
+  ARTIFACT_PUBLISH
+}
+
+"""次日概率训练预检证据"""
+type StockSelectionTrainingPreview {
+  previewFingerprint: String!
+  datasetVersion: String!
+  requestedBackend: StockSelectionTrainingBackend!
+  resolvedBackend: StockSelectionResolvedBackend!
+  folds: [StockSelectionTrainingFold!]!
+  coverage: JSON!
+  leakage: JSON!
+  resourceEstimate: StockSelectionTrainingResourceEstimate!
+  shadowReasons: [String!]!
+  blockers: [String!]!
+  warnings: [String!]!
+  capability: JSON!
+  specHash: String!
+  coordinateHash: String!
+  canSubmit: Boolean!
+}
+
+"""次日概率训练资源估算"""
+type StockSelectionTrainingResourceEstimate {
+  memoryMib: Int!
+  diskMib: Int!
+  gpuMemoryMib: Int!
+  estimatedMinutes: Int!
+  durationLevel: String!
+  sampleCount: Int!
+  stockCount: Int!
+  tradingDayCount: Int!
+  foldCount: Int!
+}
+
+"""次日概率训练运行及安全证据投影"""
+type StockSelectionTrainingRun {
+  runId: String!
+  runKey: String
+  runKind: StockSelectionTrainingRunKind!
+  parentRunId: String
+  status: StockSelectionTrainingRunStatus!
+  phase: StockSelectionTrainingPhase!
+  completedUnits: Int!
+  totalUnits: Int!
+  requestedAt: DateTime!
+  startedAt: DateTime
+  completedAt: DateTime
+  cancelRequestedAt: DateTime
+  stateVersion: Int!
+  datasetVersion: String
+  requestedBackend: StockSelectionTrainingBackend
+  resolvedBackend: StockSelectionResolvedBackend
+  specHash: String
+  environmentRequirementHash: String
+  coordinateHash: String
+  experimentGroupHash: String
+  artifactManifestSha256: String
+  environmentEvidence: JSON!
+  metricsSummary: JSON!
+  gateSummary: JSON!
+  conclusion: StockSelectionTrainingConclusion
+  registerable: Boolean!
+  queueReason: String
+  errorCode: String
+  errorMessage: String
+}
+
+"""次日概率训练运行类型"""
+enum StockSelectionTrainingRunKind {
+  DEVELOPMENT
+  FINAL_EVALUATION
+}
+
+"""次日概率训练运行分页"""
+type StockSelectionTrainingRunPage {
+  items: [StockSelectionTrainingRun!]!
+  total: Int!
+  limit: Int!
+  offset: Int!
+}
+
+"""次日概率训练运行状态"""
+enum StockSelectionTrainingRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+"""经过认证的次日概率训练股票范围"""
+input StockSelectionTrainingUniverseInput {
+  kind: StockSelectionTrainingUniverseKind! = ORDINARY_A_SHARE
+  stockCodes: [String!] = null
+  indexCode: String = null
+  benchmarkCode: String! = "000300.SH"
+  minimumListingDays: Int! = 252
+}
+
+"""次日概率训练股票范围"""
+enum StockSelectionTrainingUniverseKind {
+  ORDINARY_A_SHARE
+  CERTIFIED_INDEX
+  EXPLICIT
 }
 
 """策略模板信息"""

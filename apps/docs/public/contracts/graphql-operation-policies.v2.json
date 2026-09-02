@@ -211,6 +211,16 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "cancelStockSelectionTrainingRun": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "web-internal"
+      },
       "cancelTTradeOrder": {
         "audiences": [
           "web",
@@ -1297,6 +1307,26 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "startStockSelectionDevelopmentTraining": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "web-internal"
+      },
+      "startStockSelectionFinalEvaluation": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "web-internal"
+      },
       "startStrategy": {
         "audiences": [
           "web",
@@ -2376,6 +2406,16 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "previewStockSelectionTraining": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
       "qmtAgentConnection": {
         "audiences": [
           "web"
@@ -2566,6 +2606,16 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "stockSelectionDatasetVersions": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
       "stockSelectionModel": {
         "audiences": [
           "web",
@@ -2589,6 +2639,46 @@
         ],
         "risk": "READ",
         "stability": "supported"
+      },
+      "stockSelectionTrainingCapabilities": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "stockSelectionTrainingComparison": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "stockSelectionTrainingRun": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "stockSelectionTrainingRuns": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
       },
       "strategies": {
         "audiences": [
