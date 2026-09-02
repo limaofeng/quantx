@@ -1,7 +1,7 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
 > 状态：`IN_PROGRESS`（P0 已完成；P1-01/P1-03 地基已完成，P1 原子切换仍 `BLOCKED`）<br>
-> 版本：1.3<br>
+> 版本：1.4<br>
 > 日期：2026-09-03<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
@@ -156,7 +156,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | 阶段 | 范围 | 状态 | 强前置 | 退出门摘要 | 证据 |
 |---|---|---|---|---|---|
 | P0 | 基线冻结与契约清点 | `DONE` | 文档基线 | 清单、policy、只读审计、405 + 9 审计单测基线齐全 | [P0 冻结基线](多标的做T助手P0冻结基线.md) |
-| P1 | Owner 与协议 1.2 | `BLOCKED` | P0；P1-01 强类型地基与 P1-03 fail-closed Router 已完成但尚未接入回报链；当前开发库仍有 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate identity、2 条 nonterminal intent、1 条 `ERROR` orphan outstanding T ExitPlan；protocol 1.2 切换演练尚未完成 | 单 owner/单 payload、既有路径等价；前置义务和切换演练未清零 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 聚焦测试 `52 passed`；P1-03 聚焦测试 `38 passed`；P1 readiness=false |
+| P1 | Owner 与协议 1.2 | `BLOCKED` | P0；P1-01 强类型地基与 P1-03 fail-closed Router 已完成但尚未接入回报链；PAPER legacy reconciliation 已通过真实库 dry-run，但尚未受控 apply；protocol 1.2 切换演练尚未完成 | 单 owner/单 payload、既有路径等价；前置义务和切换演练未清零 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 聚焦测试 `52 passed`；P1-03 聚焦测试 `38 passed`；reconciliation `34 passed`、dry-run `2 approvals + 1 plan`；P1 readiness=false |
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `NOT_STARTED` | P1 | 无第二真源，故障恢复通过 | 待补 |
 | P3 | 独立 T runtime 与精确行情归约 | `NOT_STARTED` | P1 | 无 StrategyRun、新旧规则 shadow 等价 | 待补 |
 | P4 | 分配、PAPER 与跨域准入 | `NOT_STARTED` | P2 + P3 | 整批原子、PAPER 闭环、无真实订单 | 待补 |
@@ -399,24 +399,26 @@ npm run build
 | 2026-09-03 | `DOC-003` | `DONE` | [文档中心](../README.md)、[交易文档索引](../trading/README.md)、[系统架构](../architecture/系统架构设计.md) | 建立双向索引与 As-Is/To-Be 边界 |
 | 2026-09-03 | `TTA-P0-01..07 / P0` | `DONE` | [P0 冻结基线](多标的做T助手P0冻结基线.md)；`python ops\t-assistant-p0-audit.py --format markdown`；审计工具单测 `9 passed`；legacy T intent owner reference invalid=`295`（`292 EXPIRED`、`2 AWAITING_APPROVAL`、`1 FILLED`；run 存在但 owner reference 未通过规则）；13 个基线测试文件 | commit：`46d05bfbb4d00d97144ffa887e619827e5fcf62f`；`405 passed, 8 warnings, 16.20s` + `9 passed`；P1 readiness=false，P1 阻塞事实已记录 |
 | 2026-09-03 | `TTA-P1-01` | `DONE` | contracts/domain 单一 `ExecutionOwnerType`、`ExecutionEnvironment` 与 frozen `ExecutionOwnerRef`；普通 StrategyRun/MANUAL_COMMAND adapter；跨包类型 identity 检查；聚焦 Ruff、domain boundary 与 pytest | commit：`97f180dd76d593b98a0180a6bf8f3a7fac8bbb8f`；`52 passed, 8 warnings`；未改 Agent protocol、数据库或运行时下单链，P1 阶段仍未通过退出门 |
-| 2026-09-03 | `TTA-P1-03` | `DONE` | 纯 application `OwnerRuntimeRouter/Registry`、不可变事件/目标/结果、六类 owner 精确分派及 owner/environment 冲突反向测试 | commit：本提交；Ruff 通过，`38 passed, 1 warning`；尚未接入 report processor，接入与恢复等价性归入 P1-02/P1-06 |
+| 2026-09-03 | `TTA-P1-03` | `DONE` | 纯 application `OwnerRuntimeRouter/Registry`、不可变事件/目标/结果、六类 owner 精确分派及 owner/environment 冲突反向测试 | commit：`9918d811b5e7d182abb3574fe0c69a2568c4104f`；Ruff 通过，`38 passed, 1 warning`；尚未接入 report processor，接入与恢复等价性归入 P1-02/P1-06 |
+| 2026-09-03 | `TTA-P1-GATE-01` | `DONE` | 默认只读、显式确认和精确数量双门禁的 PAPER legacy reconciliation；`SERIALIZABLE` + advisory lock 后在同一事务重验完整 durable chain；聚焦 Ruff 与 pytest | commit：本提交；`34 passed, 8 warnings`；真实库 dry-run：safe approvals=`2`、safe plans=`1`、blocked=`0`、unsettled inbox=`0`、ready=`true`；本提交未 apply |
 
 后续每条 `DONE` 证据应包含 commit、验证命令及结果摘要；若输出过长，链接到仓库内稳定测试报告，
 不粘贴包含账户、设备或券商敏感信息的日志。
 
 ## 10. 当前状态与下一动作
 
-当前结论：**P0 已完成，P1-01 强类型 owner 地基与 P1-03 fail-closed Router 已完成；当前运行仍是系统架构文档描述的
-StrategyRun + protocol 1.1 As-Is，P1 原子切换 `BLOCKED`。** 新类型尚未接入公共持久化和 Agent
-命令链，不代表 protocol 1.2 已上线。P1 readiness=false，阻塞事实为：
-开发库有 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate identity、2 条 nonterminal intent、
-1 条 `ERROR` orphan outstanding T ExitPlan，且 protocol 1.2 切换演练尚未完成。
+当前结论：**P0 已完成，P1-01 强类型 owner 地基、P1-03 fail-closed Router 与 PAPER legacy
+reconciliation 工具已完成；当前运行仍是系统架构文档描述的 StrategyRun + protocol 1.1 As-Is，
+P1 原子切换 `BLOCKED`。** 新类型尚未接入公共持久化和 Agent 命令链，不代表 protocol 1.2 已上线。
+真实库 dry-run 已证明 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate identity 记录与 1 条
+`ERROR` orphan outstanding T ExitPlan 满足 PAPER、零 durable broker chain 和原子修复门，但尚未
+执行 apply；protocol 1.2 切换演练也尚未完成，因此 P1 readiness 仍为 false。
 
 下一动作固定为逐条 reconcile 和切换演练，不能直接改协议：
 
-1. 对 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate identity、2 条 nonterminal intent 和
-   1 条 `ERROR` orphan outstanding T ExitPlan，逐条使用 broker full snapshot + Agent inbox + durable
-   order/correlation/fill/batch/ExitPlan chain 证明后再终态化或迁移；禁止批量 SQL 猜 owner、删除或重发。
+1. 使用 dry-run 已冻结的精确数量门，在 `SERIALIZABLE` 维护事务内重新证明 2 条审批和 1 条孤儿
+   ExitPlan 的 Agent inbox + durable order/correlation/fill/batch/ExitPlan chain 后受控 apply；任一事实
+   漂移则整批回滚，禁止猜 owner、删除或重发。
 2. 演练 protocol 1.2 维护窗口：停止新命令、收敛 inbox、确认 1.1 queued/unknown 为零、只读审计、
    停组件备份、原子部署和全量快照对账；已投递命令不回滚、不重编码、不重发。
 3. 重跑 `python ops\t-assistant-p0-audit.py --format markdown --require-ready`；只有 readiness=true
@@ -430,3 +432,4 @@ StrategyRun + protocol 1.1 As-Is，P1 原子切换 `BLOCKED`。** 新类型尚�
 | 1.1 | 2026-09-03 | P0 冻结、分层清单、只读审计和基线证据完成；进度更新为 1/9，P1 因存量 owner/ExitPlan/审批义务及 protocol 1.2 切换演练未完成而阻塞。 |
 | 1.2 | 2026-09-03 | 完成 P1-01：contracts/domain 使用单一强类型 owner 契约并保留普通策略与人工命令适配；未提前切换数据库、Agent protocol 或实盘链路，P1 阶段仍因存量义务与切换演练阻塞。 |
 | 1.3 | 2026-09-03 | 完成 P1-03 最小 OwnerRuntimeRouter/Registry 及 fail-closed 反向测试；组件尚未接入当前 protocol 1.1 回报链，P1 阶段仍保持阻塞。 |
+| 1.4 | 2026-09-03 | 完成默认只读、PAPER-only、精确数量门禁的 legacy reconciliation 工具及真实库 dry-run；尚未执行数据修复，P1 仍由存量义务与 protocol 1.2 切换演练阻塞。 |
