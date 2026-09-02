@@ -137,7 +137,10 @@ from .stock_selection import (
   StockCandidateRuleVersion,
   StockPrediction,
   StockPredictionRun,
+  StockSelectionDatasetVersion,
   StockSelectionModelVersion,
+  StockSelectionTrainingRun,
+  StockSelectionTrainingSpec,
 )
 from .strategy import Strategy
 from .strategy_backtest import StrategyBacktest
@@ -307,6 +310,9 @@ __all__ = [
   "StockRepurchaseEvent",
   "AnnouncementSyncRun",
   "StockSelectionModelVersion",
+  "StockSelectionDatasetVersion",
+  "StockSelectionTrainingSpec",
+  "StockSelectionTrainingRun",
   "StockPredictionRun",
   "StockPrediction",
   "StockCandidateRuleVersion",

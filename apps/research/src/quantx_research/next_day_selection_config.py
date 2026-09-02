@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from quantx_research.core.config import RuntimeConfig, _StrictModel
 
@@ -16,6 +16,13 @@ class SelectionDataConfig(_StrictModel):
   date_range: tuple[date, date]
   market_data_archive: Path | None = None
   verified_panel_path: Path | None = None
+  # ``universe_kind`` is the only Research-side universe discriminator.  The
+  # certified manifest projects it to ``universe_spec.kind``; do not infer a
+  # kind from whether a symbol narrowing happens to be present.
+  universe_kind: Literal["ORDINARY_A_SHARE", "CERTIFIED_INDEX", "EXPLICIT"] = (
+    "ORDINARY_A_SHARE"
+  )
+  index_code: str | None = None
   benchmark_code: str = "000300.SH"
   stock_codes: tuple[str, ...] | None = None
   minimum_listing_days: int = Field(default=252, ge=252)
@@ -23,12 +30,68 @@ class SelectionDataConfig(_StrictModel):
   historical_industry_membership_path: Path | None = None
   historical_delisting_status_path: Path | None = None
 
+  @field_validator("benchmark_code")
+  @classmethod
+  def validate_benchmark_code(cls, value: str) -> str:
+    normalized = str(value).strip().upper()
+    if not normalized or len(normalized) != 9 or normalized[6] != ".":
+      raise ValueError("benchmark_code must use the canonical 000000.SH/SZ form")
+    if normalized[7:] not in {"SH", "SZ"} or not normalized[:6].isdigit():
+      raise ValueError("benchmark_code must use the canonical 000000.SH/SZ form")
+    return normalized
+
+  @field_validator("index_code")
+  @classmethod
+  def validate_index_code(cls, value: str | None) -> str | None:
+    if value is None:
+      return None
+    normalized = str(value).strip().upper()
+    if (
+      len(normalized) != 9
+      or normalized[6] != "."
+      or not normalized[:6].isdigit()
+      or normalized[7:] not in {"SH", "SZ"}
+    ):
+      raise ValueError("index_code must use the canonical 000000.SH/SZ form")
+    return normalized
+
+  @field_validator("stock_codes")
+  @classmethod
+  def validate_stock_codes(
+    cls, value: tuple[str, ...] | None
+  ) -> tuple[str, ...] | None:
+    if value is None:
+      return None
+    normalized = tuple(str(code).strip().upper() for code in value)
+    if not normalized or any(
+      len(code) != 9
+      or code[6] != "."
+      or not code[:6].isdigit()
+      or code[7:] not in {"SH", "SZ"}
+      for code in normalized
+    ):
+      raise ValueError("stock_codes must use canonical 000000.SH/SZ codes")
+    if len(set(normalized)) != len(normalized):
+      raise ValueError("stock_codes must not contain duplicates")
+    return normalized
+
   @model_validator(mode="after")
   def validate_sources(self) -> "SelectionDataConfig":
     if self.date_range[1] < self.date_range[0]:
       raise ValueError("date_range end must not precede start")
     if self.market_data_archive is not None and self.verified_panel_path is not None:
       raise ValueError("market_data_archive 与 verified_panel_path 只能设置一个")
+    if self.universe_kind == "CERTIFIED_INDEX":
+      if self.index_code is None:
+        raise ValueError("CERTIFIED_INDEX requires index_code")
+      if self.index_code != self.benchmark_code:
+        raise ValueError("CERTIFIED_INDEX index_code must equal benchmark_code")
+      if self.stock_codes is not None:
+        raise ValueError("CERTIFIED_INDEX must not contain stock_codes")
+    elif self.index_code is not None:
+      raise ValueError("index_code is only valid for CERTIFIED_INDEX")
+    if self.universe_kind == "EXPLICIT" and not self.stock_codes:
+      raise ValueError("EXPLICIT universe requires stock_codes")
     return self
 
   @property
@@ -63,6 +126,15 @@ class LightGbmGridConfig(_StrictModel):
   min_child_samples: Literal[100] = 100
   subsample: Literal[0.8] = 0.8
   colsample_bytree: Literal[0.8] = 0.8
+  # ``max_bin`` is part of the experiment coordinate.  It must be identical
+  # for CPU and OpenCL runs so a backend change cannot silently become a model
+  # parameter change.
+  max_bin: Literal[63] = 63
+  # This is an environment/system preset rather than a user-editable model
+  # form field.  It is nevertheless persisted in the immutable resolved spec.
+  gpu_use_dp: bool = False
+  gpu_platform_id: int | None = Field(default=None, ge=0)
+  gpu_device_id: int | None = Field(default=None, ge=0)
 
 
 class CalibrationConfig(_StrictModel):
@@ -97,6 +169,7 @@ class NextDaySelectionConfig(_StrictModel):
   evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
   candidate_gate: CandidateGateConfig = Field(default_factory=CandidateGateConfig)
   runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+  requested_backend: Literal["AUTO", "CPU", "GPU_REQUIRED"] = "CPU"
 
   @property
   def study_id(self) -> str:

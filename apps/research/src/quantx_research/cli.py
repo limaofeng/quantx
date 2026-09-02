@@ -65,7 +65,78 @@ def build_parser() -> argparse.ArgumentParser:
     help="手工训练并评估次日开盘至收盘上涨概率模型",
   )
   train_selection_parser.add_argument("--config", type=Path, required=True)
+  train_selection_parser.add_argument(
+    "--run-kind",
+    choices=("DEVELOPMENT", "FINAL_EVALUATION"),
+    required=True,
+    help="DEVELOPMENT 只做验证；FINAL_EVALUATION 只使用已锁定开发运行",
+  )
+  train_selection_parser.add_argument(
+    "--dataset-dir",
+    dest="dataset_directory",
+    type=Path,
+    required=True,
+    help="quantx-research certify-next-day-selection-dataset 生成的目录",
+  )
   train_selection_parser.add_argument("--output-root", type=Path)
+  train_selection_parser.add_argument("--run-id")
+  train_selection_parser.add_argument(
+    "--parent-run-dir",
+    type=Path,
+    help="FINAL_EVALUATION 必须提供成功 DEVELOPMENT 运行目录",
+  )
+  for name, help_text in (
+    ("--spec-hash", "数据库锁定的 spec 小写 SHA-256"),
+    ("--coordinate-hash", "数据库锁定的 coordinate 小写 SHA-256"),
+    ("--environment-requirement-hash", "数据库锁定的环境要求小写 SHA-256"),
+  ):
+    train_selection_parser.add_argument(name, required=True, help=help_text)
+  train_selection_parser.add_argument(
+    "--frozen-test-access-count", type=_non_negative_int, default=0
+  )
+
+  certify_parser = subparsers.add_parser(
+    "certify-next-day-selection-dataset",
+    help="从受审计数据构造一次不可变次日选股训练面板",
+  )
+  certify_parser.add_argument("--config", type=Path, required=True)
+  certify_parser.add_argument("--dataset-version", required=True)
+  certify_parser.add_argument("--market-data-archive", type=Path)
+  certify_parser.add_argument("--output-root", type=Path)
+
+  qualify_parser = subparsers.add_parser(
+    "qualify-lightgbm-gpu",
+    help="用认证黄金面板执行 LightGBM OpenCL CPU/GPU 资格验证",
+  )
+  qualify_parser.add_argument("--dataset-dir", type=Path, required=True)
+  qualify_parser.add_argument(
+    "--output",
+    type=Path,
+    help="资格证书输出路径；省略时使用默认 .runtime/research-gpu 路径",
+  )
+  qualify_parser.add_argument("--requirement-hash")
+  qualify_parser.add_argument(
+    "--build-evidence",
+    type=Path,
+    required=True,
+    help="build-lightgbm-opencl-wheel.ps1 生成的 schema-v1 build evidence JSON",
+  )
+
+  probe_parser = subparsers.add_parser(
+    "probe-lightgbm-gpu",
+    help=argparse.SUPPRESS,
+  )
+  probe_parser.add_argument(
+    "--json",
+    action="store_true",
+    help=argparse.SUPPRESS,
+  )
+
+  job_parser = subparsers.add_parser(
+    "run-next-day-selection-job",
+    help=argparse.SUPPRESS,
+  )
+  job_parser.add_argument("--request-file", type=Path, required=True)
   return parser
 
 
@@ -109,15 +180,74 @@ def main(argv: Sequence[str] | None = None) -> int:
         train_next_day_selection,
       )
 
+      if args.run_kind == "FINAL_EVALUATION" and args.parent_run_dir is None:
+        raise ValueError("FINAL_EVALUATION 必须提供 --parent-run-dir")
+      if args.run_kind == "DEVELOPMENT" and args.parent_run_dir is not None:
+        raise ValueError("DEVELOPMENT 不接受 --parent-run-dir")
+
       run_dir = asyncio.run(
         train_next_day_selection(
           args.config,
+          run_kind=args.run_kind,
+          dataset_directory=args.dataset_directory,
           output_root=args.output_root,
+          run_id=args.run_id,
+          parent_run_directory=args.parent_run_dir,
+          spec_hash=args.spec_hash,
+          coordinate_hash=args.coordinate_hash,
+          environment_requirement_hash=args.environment_requirement_hash,
+          frozen_test_access_count=args.frozen_test_access_count,
         )
       )
       print(f"模型研究完成: {run_dir}")
-      print(f"发布证据: {run_dir / 'metrics.json'}")
+      print(f"发布证据: {run_dir / 'manifest.json'}")
       return 0
+    if args.command == "certify-next-day-selection-dataset":
+      from quantx_research.next_day_selection_dataset import (
+        certify_next_day_selection_dataset,
+      )
+
+      dataset_dir = asyncio.run(
+        certify_next_day_selection_dataset(
+          args.config,
+          dataset_version=args.dataset_version,
+          market_data_archive=args.market_data_archive,
+          output_root=args.output_root,
+        )
+      )
+      print(f"认证数据集已生成: {dataset_dir}")
+      return 0
+    if args.command == "qualify-lightgbm-gpu":
+      from quantx_research.next_day_selection_gpu import qualify_lightgbm_gpu
+
+      evidence = qualify_lightgbm_gpu(
+        args.dataset_dir,
+        args.output,
+        requirement_hash=args.requirement_hash,
+        build_evidence=args.build_evidence,
+      )
+      print(f"GPU 资格状态: {evidence['status']}")
+      from quantx_research.next_day_selection_gpu import _default_qualification_path
+
+      print(f"资格证据: {args.output or _default_qualification_path()}")
+      return 0 if evidence["status"] == "GPU_AVAILABLE" else 2
+    if args.command == "probe-lightgbm-gpu":
+      from quantx_research.next_day_selection_gpu import probe_lightgbm_gpu
+
+      print(
+        json.dumps(
+          probe_lightgbm_gpu(),
+          ensure_ascii=False,
+          sort_keys=True,
+          separators=(",", ":"),
+          allow_nan=False,
+        )
+      )
+      return 0
+    if args.command == "run-next-day-selection-job":
+      from quantx_research.next_day_selection_job import main as run_job
+
+      return int(run_job(["--request-file", str(args.request_file)]))
   except ResearchResourceError as exc:
     if exc.run_dir is not None:
       print(f"研究因资源保护停止，诊断产物: {exc.run_dir}", file=sys.stderr)
@@ -135,6 +265,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"研究运行失败: {type(exc).__name__}: {exc}", file=sys.stderr)
     return 1
   return 1
+
+
+def _non_negative_int(value: str) -> int:
+  parsed = int(value)
+  if parsed < 0:
+    raise argparse.ArgumentTypeError("必须是不小于 0 的整数")
+  return parsed
 
 
 def _summarize_validation_for_console(

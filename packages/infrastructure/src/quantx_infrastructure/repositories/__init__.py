@@ -38,6 +38,12 @@ from .managed_plan_repository import (
 )
 from .order_repository import OrderRepository
 from .position_repository import PositionRepository
+from .stock_selection_training_repository import (
+  StockSelectionTrainingRepository,
+  TrainingNotFound,
+  TrainingRepositoryError,
+  TrainingStateConflict,
+)
 from .strategy_decision_trace_repository import StrategyDecisionTraceRepository
 from .strategy_performance_sample_repository import StrategyPerformanceSampleRepository
 from .strategy_repository import StrategyRepository
@@ -70,6 +76,10 @@ __all__ = [
   "PositionRepository",
   "StrategyRepository",
   "StrategyRunRepository",
+  "StockSelectionTrainingRepository",
+  "TrainingNotFound",
+  "TrainingRepositoryError",
+  "TrainingStateConflict",
   "StrategyDecisionTraceRepository",
   "TradeIntentRepository",
   "TTradeGlobalConfigRepository",

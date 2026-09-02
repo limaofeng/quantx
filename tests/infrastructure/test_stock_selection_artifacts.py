@@ -13,6 +13,7 @@ from quantx_domain.selection_factors import (
   selection_feature_columns,
 )
 from quantx_domain.selection_model import CALIBRATOR_VERSION
+from quantx_domain.stock_selection_training import build_training_time_split
 from quantx_infrastructure.services.stock_selection_artifacts import (
   SelectionArtifactError,
   file_sha256,
@@ -28,6 +29,9 @@ def _write_json(path: Path, value: object) -> None:
 
 def _valid_artifact(directory: Path) -> Path:
   directory.mkdir()
+  split = build_training_time_split(
+    [f"{year:04d}-{month:02d}" for year, month in ((2021 + index // 12, index % 12 + 1) for index in range(49))]
+  )
   columns = list(selection_feature_columns())
   mappings = {
     "imputation_values": {column: 0.0 for column in columns},
@@ -55,7 +59,11 @@ def _valid_artifact(directory: Path) -> Path:
     "top20_lift_ci_lower_positive": True,
     "historical_universe_complete": True,
     "effect_gate_passed": True,
+    "unbiased_frozen_evidence": True,
     "active_eligible": True,
+    "access_evidence_valid": True,
+    "conclusion": "ACTIVE_ELIGIBLE",
+    "registerable": True,
   }
   bins = [
     {
@@ -80,9 +88,19 @@ def _valid_artifact(directory: Path) -> Path:
   }
   model_version = "next-day-up-v1-0123456789abcdef"
   metrics = {
-    "schema_version": 1,
+    "schema_version": 2,
     "model_version": model_version,
     "selected_family": "LOGISTIC",
+    "spec_hash": "a" * 64,
+    "config_hash": "c" * 64,
+    "coordinate_hash": "b" * 64,
+    "calibrator_version": CALIBRATOR_VERSION,
+    "training_start": "2021-01-01",
+    "training_end": "2023-07-31",
+    "calibration_start": "2023-08-01",
+    "calibration_end": "2024-01-31",
+    "test_start": "2024-02-01",
+    "test_end": "2025-01-31",
     "validation": {
       "fold_count": 12,
       "logistic_brier": 0.2,
@@ -90,8 +108,8 @@ def _valid_artifact(directory: Path) -> Path:
       "untrusted_extra": "must not escape",
     },
     "frozen_test": {
-      "start": "2025-09-01",
-      "end": "2026-08-31",
+      "start": "2024-02-01",
+      "end": "2025-01-31",
       "probability": {
         "sample_count": 1000,
         "positive_count": 500,
@@ -116,25 +134,104 @@ def _valid_artifact(directory: Path) -> Path:
           "top20_up_rate_lift": 0.12,
         }
       ],
+      "access_count": 1,
+    },
+    "probability_disagreement": {
+      "mean_absolute_difference": 0.01,
+      "median_absolute_difference": 0.01,
+      "max_absolute_difference": 0.05,
+      "fraction_at_least_5pct": 0.01,
     },
     "gates": gates,
+    "conclusion": "ACTIVE_ELIGIBLE",
+    "registerable": True,
   }
   data_fingerprint = "d" * 64
+  dataset_manifest_sha256 = "e" * 64
+  training_panel_sha256 = "f" * 64
+  environment_requirement_hash = "9" * 64
+  environment = {
+    "python": "3.13.9",
+    "platform": "Windows-11",
+    "pandas": "2.3.0",
+    "numpy": "2.0.0",
+    "dependencies": {"lightgbm": "4.7.0", "numpy": "2.0.0"},
+    "environment_requirement_hash": environment_requirement_hash,
+    "qualification_version": None,
+    "requirement_hash": None,
+    "evidence_sha256": None,
+    "gpu": None,
+    "opencl": None,
+  }
+  telemetry = {
+    "wall_time_seconds": 1.0,
+    "process_cpu_time_seconds": 0.5,
+    "runtime_memory": {
+      "physical_only": True,
+      "reserve_gib": 1.0,
+      "peak_process_rss_gib": 1.0,
+      "sampling_error": None,
+    },
+    "gpu": {
+      "sampling_available": False,
+      "sample_count": 0,
+      "peak_memory_fraction": None,
+      "peak_used_memory_mib": None,
+      "minimum_available_memory_mib": None,
+    },
+    "qualification": {
+      "status": "CPU_AVAILABLE",
+      "acceleration": None,
+      "minimum_sample_count": None,
+      "peak_memory_fraction": None,
+      "gates_passed": True,
+      "evidence_sha256": None,
+    },
+    "lightgbm": {
+      "backend": "CPU",
+      "device_type": "cpu",
+      "max_bin": 63,
+      "gpu_use_dp": False,
+      "parameters": {
+        "LOGISTIC": {"C": 1.0},
+        "LIGHTGBM": {"num_leaves": 15, "reg_lambda": 1.0},
+      },
+    },
+    "environment": environment,
+  }
   files: dict[str, object] = {
     "metrics.json": metrics,
     "data-quality.json": {
+      "schema_version": 2,
+      "dataset_manifest_sha256": dataset_manifest_sha256,
+      "source_training_panel_sha256": training_panel_sha256,
       "source": {"kind": "verified-panel", "path": "C:/secret/panel.parquet"},
-      "historical_universe": {"complete": True, "reason": None, "coverage": 1.0},
+      "historical_universe": {"complete": True, "reason": None, "coverage": {"complete": True, "ratio": 1.0}},
       "data_fingerprint": data_fingerprint,
       "sample_count": 1000,
       "stock_count": 100,
       "date_count": 240,
       "data_start": "2021-09-01",
       "data_end": "2026-08-31",
+      "trading_day_count": 240,
+      "date_start": "2021-01-01",
+      "date_end": "2025-01-31",
+      "training_start": "2021-01-01",
+      "training_end": "2023-07-31",
+      "calibration_start": "2023-08-01",
+      "calibration_end": "2024-01-31",
+      "test_start": "2024-02-01",
+      "test_end": "2025-01-31",
+      "coverage": {"complete": True},
+      "leakage_checks": {"passed": True},
     },
     "factor-schema.json": factor_schema_manifest(),
     "model-runtime.json": {
+      "schema_version": 2,
       "selected_family": "LOGISTIC",
+      "backend": "CPU",
+      "max_bin": 63,
+      "gpu_use_dp": False,
       "families": {
         "LOGISTIC": {
           "family": "LOGISTIC",
@@ -169,6 +266,8 @@ def _valid_artifact(directory: Path) -> Path:
   for name, value in files.items():
     _write_json(directory / name, value)
   (directory / "lightgbm.txt").write_text("tree\n", encoding="utf-8")
+  (directory / "resolved-config.yaml").write_text("requested_backend: CPU\nresolved_backend: CPU\n", encoding="utf-8")
+  (directory / "test-predictions.parquet").write_bytes(b"PARQUET-EVIDENCE")
   artifacts = [
     {
       "path": path.name,
@@ -180,10 +279,12 @@ def _valid_artifact(directory: Path) -> Path:
   _write_json(
     directory / "manifest.json",
     {
-      "schema_version": 1,
+      "schema_version": 2,
       "study_id": "next-day-selection",
       "version": "v1",
-      "status": "success",
+      "run_id": directory.name,
+      "run_kind": "FINAL_EVALUATION",
+      "status": "SUCCEEDED",
       "model_version": model_version,
       "selected_family": "LOGISTIC",
       "indicator_version": INDICATOR_VERSION,
@@ -192,14 +293,26 @@ def _valid_artifact(directory: Path) -> Path:
       "label_version": LABEL_VERSION,
       "calibrator_version": CALIBRATOR_VERSION,
       "config_hash": "c" * 64,
+      "spec_hash": "a" * 64,
+      "coordinate_hash": "b" * 64,
+      "dataset_manifest_sha256": dataset_manifest_sha256,
+      "training_panel_sha256": training_panel_sha256,
       "data_fingerprint": data_fingerprint,
-      "training_start": "2021-09-01",
-      "training_end": "2025-02-28",
-      "calibration_start": "2025-03-01",
-      "calibration_end": "2025-08-31",
-      "test_start": "2025-09-01",
-      "test_end": "2026-08-31",
+      "environment_requirement_hash": environment_requirement_hash,
+      "requested_backend": "CPU",
+      "resolved_backend": "CPU",
+      "environment": environment,
+      "telemetry": telemetry,
+      "training_start": "2021-01-01",
+      "training_end": "2023-07-31",
+      "calibration_start": "2023-08-01",
+      "calibration_end": "2024-01-31",
+      "test_start": "2024-02-01",
+      "test_end": "2025-01-31",
+      "split": split.as_dict(),
       "gates": gates,
+      "conclusion": "ACTIVE_ELIGIBLE",
+      "registerable": True,
       "artifacts": artifacts,
     },
   )
@@ -278,4 +391,73 @@ def test_selection_artifact_loader_rejects_impossible_calibration_counts(
   _refresh_manifest_hash(directory, "calibrators.json")
 
   with pytest.raises(SelectionArtifactError, match="正样本数超过总样本数"):
+    load_selection_artifact(directory)
+
+
+def test_selection_artifact_loader_rejects_legacy_schema_v1(
+  tmp_path: Path,
+) -> None:
+  directory = _valid_artifact(tmp_path / "run")
+  manifest_path = directory / "manifest.json"
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  manifest["schema_version"] = 1
+  _write_json(manifest_path, manifest)
+
+  with pytest.raises(SelectionArtifactError, match="身份或状态无效"):
+    load_selection_artifact(directory)
+
+
+def test_selection_artifact_loader_rejects_development_bundle(
+  tmp_path: Path,
+) -> None:
+  directory = _valid_artifact(tmp_path / "run")
+  manifest_path = directory / "manifest.json"
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  manifest["run_kind"] = "DEVELOPMENT"
+  _write_json(manifest_path, manifest)
+
+  with pytest.raises(SelectionArtifactError, match="DEVELOPMENT"):
+    load_selection_artifact(directory)
+
+
+@pytest.mark.parametrize(
+  ("mutation", "match"),
+  [
+    (lambda manifest: manifest.pop("telemetry"), "telemetry"),
+    (
+      lambda manifest: manifest["telemetry"]["gpu"].update(
+        {"peak_used_memory_mib": 1.0}
+      ),
+      "伪造 GPU",
+    ),
+    (
+      lambda manifest: manifest["telemetry"]["lightgbm"].update({"max_bin": 127}),
+      "max_bin",
+    ),
+    (
+      lambda manifest: manifest["telemetry"]["qualification"].update(
+        {"gates_passed": False}
+      ),
+      "CPU 成功运行资格",
+    ),
+    (
+      lambda manifest: manifest["telemetry"]["qualification"].update(
+        {"status": "GPU_UNAVAILABLE_RUNTIME"}
+      ),
+      "CPU 成功运行资格",
+    ),
+  ],
+)
+def test_selection_artifact_loader_rejects_invalid_runtime_evidence(
+  tmp_path: Path,
+  mutation,
+  match: str,
+) -> None:
+  directory = _valid_artifact(tmp_path / "run")
+  manifest_path = directory / "manifest.json"
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  mutation(manifest)
+  _write_json(manifest_path, manifest)
+
+  with pytest.raises(SelectionArtifactError, match=match):
     load_selection_artifact(directory)

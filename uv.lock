@@ -3224,6 +3224,7 @@ dependencies = [
     { name = "prefect" },
     { name = "quantx-application" },
     { name = "quantx-infrastructure" },
+    { name = "quantx-research" },
 ]
 
 [package.metadata]
@@ -3232,6 +3233,7 @@ requires-dist = [
     { name = "prefect", specifier = ">=3.6.10" },
     { name = "quantx-application", editable = "packages/application" },
     { name = "quantx-infrastructure", editable = "packages/infrastructure" },
+    { name = "quantx-research", editable = "apps/research" },
 ]
 
 [[package]]

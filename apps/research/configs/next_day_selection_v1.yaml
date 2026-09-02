@@ -3,6 +3,8 @@ version: v1
 random_seed: 20260901
 data:
   date_range: [2021-07-29, 2026-07-29]
+  universe_kind: ORDINARY_A_SHARE
+  index_code: null
   benchmark_code: 000300.SH
   minimum_listing_days: 252
   # Set one verified QMT archive for an air-gapped run; null reads the audited
@@ -30,6 +32,11 @@ lightgbm:
   min_child_samples: 100
   subsample: 0.8
   colsample_bytree: 0.8
+  max_bin: 63
+  # System preset; not exposed as an arbitrary form control.
+  gpu_use_dp: false
+  gpu_platform_id: null
+  gpu_device_id: null
 calibration:
   bins: 10
   isotonic_minimum_positives: 20000
@@ -49,3 +56,4 @@ runtime:
   minimum_available_memory_gib: 8
   memory_sample_interval_seconds: 0.25
   output_root: .runtime/research-runs
+requested_backend: CPU

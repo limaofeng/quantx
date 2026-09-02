@@ -183,3 +183,15 @@ deployments:
       - cron: "* * * * *"
         timezone: Asia/Shanghai
     version: "0.1.0"
+  - name: stock-selection-training-dispatch
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/stock_selection_training_flow.py:stock_selection_training_dispatch_flow
+    work_pool: *quantx_process_pool
+    description: 每分钟收敛用户手工提交的次日上涨概率训练任务；交易关键时段只排队
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 120
+    schedules:
+      - cron: "* * * * *"
+        timezone: Asia/Shanghai
+    version: "0.1.0"
