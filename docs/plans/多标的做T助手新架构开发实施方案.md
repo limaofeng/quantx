@@ -1,11 +1,11 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`PLANNED`（设计与追踪基线已建立，开发尚未开始）<br>
-> 版本：1.0<br>
+> 状态：`IN_PROGRESS`（P0 已完成；P1 及后续阶段尚未实施，P1 当前 `BLOCKED`）<br>
+> 版本：1.1<br>
 > 日期：2026-09-03<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
-> 开发实施进度：0 / 9 个阶段门完成（0%）
+> 开发实施进度：1 / 9 个阶段门完成（11.1%）
 
 ## 1. 目的与使用方式
 
@@ -155,8 +155,8 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 
 | 阶段 | 范围 | 状态 | 强前置 | 退出门摘要 | 证据 |
 |---|---|---|---|---|---|
-| P0 | 基线冻结与契约清点 | `NOT_STARTED` | 文档基线 | 清单、policy、基线测试齐全 | 待补 |
-| P1 | Owner 与协议 1.2 | `NOT_STARTED` | P0 | 单 owner/单 payload，既有路径等价 | 待补 |
+| P0 | 基线冻结与契约清点 | `DONE` | 文档基线 | 清单、policy、只读审计、405 + 9 审计单测基线齐全 | [P0 冻结基线](多标的做T助手P0冻结基线.md) |
+| P1 | Owner 与协议 1.2 | `BLOCKED` | P0；当前开发库仍有 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate identity、2 条 nonterminal intent、1 条 `ERROR` orphan outstanding T ExitPlan；protocol 1.2 切换演练尚未完成 | 单 owner/单 payload、既有路径等价；前置义务和切换演练未清零 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1 readiness=false |
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `NOT_STARTED` | P1 | 无第二真源，故障恢复通过 | 待补 |
 | P3 | 独立 T runtime 与精确行情归约 | `NOT_STARTED` | P1 | 无 StrategyRun、新旧规则 shadow 等价 | 待补 |
 | P4 | 分配、PAPER 与跨域准入 | `NOT_STARTED` | P2 + P3 | 整批原子、PAPER 闭环、无真实订单 | 待补 |
@@ -171,18 +171,23 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 
 前置：目标设计 v2.2 与本方案已评审。
 
-- [ ] `TTA-P0-01` 冻结旧做 T StrategyRun 的新增功能，只允许安全修复和义务排空。
-- [ ] `TTA-P0-02` 按 DB、contracts、domain、application、infrastructure、Engine、API、Worker、
+- [x] `TTA-P0-01` 冻结旧做 T StrategyRun 的新增功能，只允许安全修复和义务排空。
+- [x] `TTA-P0-02` 按 DB、contracts、domain、application、infrastructure、Engine、API、Worker、
   QMT Agent、GraphQL/Web 分组清点所有 run identity 假设和迁移目标。
-- [ ] `TTA-P0-03` 建立 legacy owner/候选/审批/pending/outbox/order/fill/batch/ExitPlan/未知结果
+- [x] `TTA-P0-03` 建立 legacy owner/候选/审批/pending/outbox/order/fill/batch/ExitPlan/未知结果
   只读一致性报告，不修改不确定记录。
-- [ ] `TTA-P0-04` 冻结 protocol 1.2 owner payload、数据库约束、reason code 和迁移切换步骤。
-- [ ] `TTA-P0-05` 冻结逐 Tick lag/ring、snapshot freshness、cycle/allocation lease 与 TTL 的硬阈值。
-- [ ] `TTA-P0-06` 冻结跨域风险增加优先级、ENTRY/EXIT order policy、14:50 ENTRY cutoff、
+- [x] `TTA-P0-04` 冻结 protocol 1.2 owner payload、数据库约束、reason code 和迁移切换步骤。
+- [x] `TTA-P0-05` 冻结逐 Tick lag/ring、snapshot freshness、cycle/allocation lease 与 TTL 的硬阈值。
+- [x] `TTA-P0-06` 冻结跨域风险增加优先级、ENTRY/EXIT order policy、14:50 ENTRY cutoff、
   最短退出窗口、收盘缓冲、隔夜上限和人工灰度退出门。
-- [ ] `TTA-P0-07` 保存 V3、普通策略、ExitPlan、T+1、乱序回报和 QMT 断连基线测试证据。
+- [x] `TTA-P0-07` 保存 V3、普通策略、ExitPlan、T+1、乱序回报和 QMT 断连基线测试证据。
 
-退出门：上述清单均有 owner、精确代码落点、测试和决策记录；没有 `TBD` 会改变后续安全语义。
+退出门：上述清单均已有 owner、精确代码落点、测试和决策记录，详见[P0 冻结基线](多标的做T助手P0冻结基线.md)。
+只读审计命令为 `python ops\t-assistant-p0-audit.py --format markdown`，审计工具单测为 `9 passed`，
+13 个基线测试文件为 `405 passed, 8 warnings, 16.20s`（合计 `405 + 9`）。因此 P0 阶段为 `DONE`；P1 readiness 仍为
+`false`，当前 P1 `BLOCKED` 的原因是开发库仍有 2 条 terminal-run `AWAITING_APPROVAL`/缺
+candidate identity、2 条 nonterminal intent、1 条 `ERROR` orphan outstanding T ExitPlan，且 protocol
+1.2 切换演练尚未完成。
 
 ### P1：公共 `ExecutionOwnerRef` 与协议 1.2 原子升级
 
@@ -381,6 +386,7 @@ npm run build
 | 只看总可卖量破坏底仓 | core/locked_core 被错误置换 | bucket priority、protected floor、事务内审计 | `OPEN` |
 | 收盘未成交被错误假设为闭环 | 隔夜暴露、重复批次 | cutoff、overnight carry、次日原 plan 恢复 | `OPEN` |
 | 模型复杂度提前阻塞安全核心 | 延迟 RULE_ONLY 交付 | P8 后置；SHADOW/ACTIVE 独立门禁 | `OPEN` |
+| 当前 legacy owner/ExitPlan/审批义务阻断 P1 | 猜 owner、误终态化或切换中重复下单 | 开发库有 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate identity、2 条 nonterminal intent、1 条 `ERROR` orphan outstanding T ExitPlan；逐条使用 broker full snapshot + durable chain reconcile，未完成前 fail-closed | `OPEN` |
 
 新风险必须追加，不能覆盖历史行。关闭风险时记录对应 task、测试和 commit。
 
@@ -391,25 +397,31 @@ npm run build
 | 2026-09-03 | `DOC-001` | `DONE` | [目标设计 v2.2](../architecture/多标的做T助手新架构设计.md) | 补齐不变量、恢复、准入、收盘和数据库约束 |
 | 2026-09-03 | `DOC-002` | `DONE` | 本方案 v1.0 | 建立依赖、阶段门、状态和证据台账 |
 | 2026-09-03 | `DOC-003` | `DONE` | [文档中心](../README.md)、[交易文档索引](../trading/README.md)、[系统架构](../architecture/系统架构设计.md) | 建立双向索引与 As-Is/To-Be 边界 |
+| 2026-09-03 | `TTA-P0-01..07 / P0` | `DONE` | [P0 冻结基线](多标的做T助手P0冻结基线.md)；`python ops\t-assistant-p0-audit.py --format markdown`；审计工具单测 `9 passed`；legacy T intent owner reference invalid=`295`（`292 EXPIRED`、`2 AWAITING_APPROVAL`、`1 FILLED`；run 存在但 owner reference 未通过规则）；13 个基线测试文件 | commit：本提交；`405 passed, 8 warnings, 16.20s` + `9 passed`；P1 readiness=false，P1 阻塞事实已记录 |
 
 后续每条 `DONE` 证据应包含 commit、验证命令及结果摘要；若输出过长，链接到仓库内稳定测试报告，
 不粘贴包含账户、设备或券商敏感信息的日志。
 
 ## 10. 当前状态与下一动作
 
-当前结论：**设计与开发追踪基线已完成；实现尚未开始，当前运行仍是系统架构文档描述的
-StrategyRun + protocol 1.1 As-Is。**
+当前结论：**P0 已完成；后续实现尚未开始，当前运行仍是系统架构文档描述的
+StrategyRun + protocol 1.1 As-Is，P1 切换 `BLOCKED`。** P1 readiness=false，阻塞事实为：
+开发库有 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate identity、2 条 nonterminal intent、
+1 条 `ERROR` orphan outstanding T ExitPlan，且 protocol 1.2 切换演练尚未完成。
 
-下一动作固定为 P0，不直接开始建表或修改协议：
+下一动作固定为逐条 reconcile 和切换演练，不能直接改协议：
 
-1. 生成分层 identity 假设清单；
-2. 生成 legacy 活动义务只读一致性报告；
-3. 冻结协议 1.2、order/admission/close policy 和硬阈值；
-4. 记录当前基线测试结果；
-5. P0 评审通过后，才创建 P1 的精确代码变更清单。
+1. 对 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate identity、2 条 nonterminal intent 和
+   1 条 `ERROR` orphan outstanding T ExitPlan，逐条使用 broker full snapshot + Agent inbox + durable
+   order/correlation/fill/batch/ExitPlan chain 证明后再终态化或迁移；禁止批量 SQL 猜 owner、删除或重发。
+2. 演练 protocol 1.2 维护窗口：停止新命令、收敛 inbox、确认 1.1 queued/unknown 为零、只读审计、
+   停组件备份、原子部署和全量快照对账；已投递命令不回滚、不重编码、不重发。
+3. 重跑 `python ops\t-assistant-p0-audit.py --format markdown --require-ready`；只有 readiness=true
+   且演练完成后，才建立 P1 精确代码变更清单并进入 owner/protocol 原子升级。
 
 ## 11. 变更记录
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | 1.0 | 2026-09-03 | 初版；建立 9 阶段依赖、前后置任务、状态词汇、验证矩阵、风险和证据台账 |
+| 1.1 | 2026-09-03 | P0 冻结、分层清单、只读审计和基线证据完成；进度更新为 1/9，P1 因存量 owner/ExitPlan/审批义务及 protocol 1.2 切换演练未完成而阻塞。 |
