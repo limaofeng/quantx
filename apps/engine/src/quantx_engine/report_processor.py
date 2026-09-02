@@ -139,7 +139,10 @@ _ORDER_STATUS_NAMES = {
   255: "PENDING",
 }
 
-_SNAPSHOT_PROMOTABLE_HEARTBEAT_STATUSES = {"RECONCILING"}
+_SNAPSHOT_PROMOTABLE_HEARTBEAT_STATUSES = {
+  "RECONCILING",
+  "RECONCILE_REQUIRED",
+}
 _AUTOMATIC_RECONCILIATION_KINDS = {
   BROKER_EXECUTION_AFTER_RELEASE,
   "CANCEL_REQUEST_PENDING",
@@ -198,10 +201,13 @@ class PendingOrderUpdate:
 
 
 def _snapshot_can_promote_heartbeat(status: Any) -> bool:
-  """Only reconciliation snapshots may promote an Agent heartbeat.
+  """Only server-owned reconciliation states may be promoted by a snapshot.
 
   A delayed snapshot must never mask a newer runtime failure such as a lost
-  XTTrading or XTData connection.
+  XTTrading or XTData connection.  ``RECONCILE_REQUIRED`` is included because
+  Engine itself assigns it after a blocked full snapshot; once an operator has
+  repaired the discrepancy, a strictly newer clean full snapshot is the only
+  proof allowed to restore the Agent to ``READY``.
   """
   return str(status or "").strip().upper() in _SNAPSHOT_PROMOTABLE_HEARTBEAT_STATUSES
 

@@ -4,7 +4,15 @@ import pytest
 from quantx_engine.report_processor import _snapshot_can_promote_heartbeat
 
 
-@pytest.mark.parametrize("status", ["RECONCILING", "reconciling"])
+@pytest.mark.parametrize(
+  "status",
+  [
+    "RECONCILING",
+    "reconciling",
+    "RECONCILE_REQUIRED",
+    "reconcile_required",
+  ],
+)
 def test_reconciliation_snapshot_may_promote_agent_heartbeat(
   status: str,
 ) -> None:

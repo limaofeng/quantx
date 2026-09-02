@@ -956,8 +956,13 @@ async def test_clean_snapshot_keeps_broker_release_quarantine_until_explicit_rep
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "heartbeat_status",
+  ["RECONCILING", "RECONCILE_REQUIRED"],
+)
 async def test_ready_reconciliation_atomically_completes_agent_handover(
   monkeypatch: pytest.MonkeyPatch,
+  heartbeat_status: str,
 ) -> None:
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   tables = [
@@ -1061,7 +1066,7 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
         RuntimeComponentHeartbeat(
           component="qmt-agent:device-new",
           instance_id="device-new",
-          status="RECONCILING",
+          status=heartbeat_status,
           details=_session_details("new-session"),
           updated_at=now,
         ),
