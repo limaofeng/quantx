@@ -246,6 +246,8 @@ function PlanCard({
   const invalidOwner = plan.executionOwner === 'INVALID_OWNER';
   const pending =
     plan.status === 'EXIT_PENDING' || Boolean(plan.pendingClientOrderId);
+  const recoveryLocked = Boolean(plan.recoveryAction);
+  const requiresRebuild = plan.recoveryAction === 'CANCEL_AND_REBUILD';
   const rules = Array.isArray(plan.rules) ? plan.rules : [];
   const authorizationExpiresAt = plan.autoExitAuthorizationExpiresAt
     ? new Date(plan.autoExitAuthorizationExpiresAt).getTime()
@@ -374,7 +376,7 @@ function PlanCard({
               </Button>
             </>
           )}
-          {!terminal && (
+          {!terminal && !recoveryLocked && (
             <Button
               disabled={busy || pending || invalidOwner}
               onClick={() => onToggle(plan)}
@@ -386,7 +388,7 @@ function PlanCard({
               {plan.enabled ? '暂停' : '恢复'}
             </Button>
           )}
-          {!terminal && (
+          {!terminal && !recoveryLocked && (
             <Button
               disabled={busy || invalidOwner}
               onClick={() => onEvaluate(plan)}
@@ -398,17 +400,20 @@ function PlanCard({
               立即检查
             </Button>
           )}
-          {plan.canEditRules && !terminal && !invalidOwner && (
-            <Button
-              disabled={busy || pending || invalidOwner}
-              onClick={() => onEdit(plan)}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              编辑计划
-            </Button>
-          )}
+          {plan.canEditRules &&
+            !terminal &&
+            !invalidOwner &&
+            !recoveryLocked && (
+              <Button
+                disabled={busy || pending || invalidOwner}
+                onClick={() => onEdit(plan)}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                编辑计划
+              </Button>
+            )}
           {plan.editRoute && !plan.canEditRules && (
             <Button
               onClick={() => onNavigate(plan.editRoute || '/liquidation')}
@@ -422,14 +427,19 @@ function PlanCard({
           )}
           {!terminal && (
             <Button
-              disabled={busy || pending || invalidOwner}
+              disabled={
+                busy ||
+                pending ||
+                invalidOwner ||
+                plan.recoveryAction === 'COMPLETE_RECONCILIATION'
+              }
               onClick={() => onCancel(plan)}
               size="sm"
               type="button"
               variant="destructive"
             >
               <XCircle />
-              取消
+              {requiresRebuild ? '取消旧计划' : '取消'}
             </Button>
           )}
         </div>
@@ -1296,15 +1306,41 @@ export function ExitPlansPanel({
     rejectResult.fetching;
   const run = async (
     action: () => Promise<{ error?: Error }>,
-    title: string
+    title: string,
+    successDescription?: string
   ) => {
     const result = await action();
     toast({
-      description: result.error?.message,
+      description: result.error?.message || successDescription,
       title: result.error ? `${title}失败` : title,
       variant: result.error ? 'destructive' : 'default',
     });
     plans.refetch({ requestPolicy: 'network-only' });
+  };
+  const cancelExitPlan = async (plan: ExitPlan) => {
+    const rebuilding = plan.recoveryAction === 'CANCEL_AND_REBUILD';
+    if (rebuilding) {
+      const accepted = await confirmDialog({
+        title: '取消旧计划并准备重建？',
+        description:
+          '券商事实修复已经完成，但旧计划保留隔离审计，不能继续恢复。取消后不会立即卖出；请再点击“手动添加计划”，按最新持仓重新创建并单独确认实盘授权。',
+        confirmText: '取消旧计划',
+        cancelText: '暂不处理',
+        variant: 'warning',
+      });
+      if (!accepted) return;
+    }
+    await run(
+      () =>
+        cancelPlan({
+          configVersion: plan.configVersion,
+          planId: plan.planId,
+        }),
+      rebuilding ? '旧卖出计划已取消' : '卖出计划已取消',
+      rebuilding
+        ? '请点击“手动添加计划”，按最新持仓重新创建；自动实盘卖出仍需重新授权。'
+        : undefined
+    );
   };
   const setPlanEnabled = async (plan: ExitPlan) => {
     const enabled = !plan.enabled;
@@ -1453,16 +1489,7 @@ export function ExitPlansPanel({
               busy={busy}
               instrumentName={instrumentNames.get(plan.instrumentCode)}
               key={plan.planId}
-              onCancel={item =>
-                void run(
-                  () =>
-                    cancelPlan({
-                      configVersion: item.configVersion,
-                      planId: item.planId,
-                    }),
-                  '卖出计划已取消'
-                )
-              }
+              onCancel={item => void cancelExitPlan(item)}
               onConfirmIntent={item => void approvePendingIntent(item)}
               onEvaluate={item =>
                 void run(

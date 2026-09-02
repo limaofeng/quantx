@@ -63,4 +63,22 @@ describe('buildExitPlanNotices', () => {
       },
     ]);
   });
+
+  it('shows the actionable rebuild instruction instead of an internal sticky code', () => {
+    expect(
+      buildExitPlanNotices({
+        dataQuality: 'GOOD',
+        lastError: 'QUARANTINE_REPAIRED:intent-old',
+        recoveryMessage:
+          '隔离委托已完成券商事实修复。旧计划不能恢复；请取消旧计划，再按最新持仓重新创建并授权。',
+      })
+    ).toEqual([
+      {
+        key: 'plan-recovery',
+        message:
+          '隔离委托已完成券商事实修复。旧计划不能恢复；请取消旧计划，再按最新持仓重新创建并授权。',
+        tone: 'warning',
+      },
+    ]);
+  });
 });

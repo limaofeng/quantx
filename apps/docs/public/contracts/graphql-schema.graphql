@@ -1831,6 +1831,8 @@ type ExitPlanView {
   pendingIntentId: String
   lastEvaluatedAt: DateTime
   lastError: String
+  recoveryAction: String
+  recoveryMessage: String
   createdAt: DateTime
   updatedAt: DateTime
 }

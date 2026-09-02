@@ -789,6 +789,69 @@ async def test_monitor_owned_manual_update_is_committed_without_runtime_mutation
 
 
 @pytest.mark.asyncio
+async def test_monitor_owned_sticky_plan_cannot_be_disguised_by_rule_update(
+  migration_database,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  record = _legacy_manual_record(
+    plan_id="monitor-repaired-plan",
+    source_type="MANUAL_POSITION",
+    run_id="",
+    status=ExitPlanStatus.ERROR,
+    enabled=False,
+    exited_volume=0,
+  )
+  plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+  plan.error_message = "QUARANTINE_REPAIRED:intent-old"
+  plan.status = ExitPlanStatus.ERROR
+  record.plan_state = plan.to_dict()
+  record.last_error = "QUARANTINE_REPAIRED:intent-old"
+  record.strategy_run_id = None
+  async with migration_database() as db:
+    db.add(record)
+    await db.commit()
+
+  async def locked_scope(db, **_kwargs):
+    current = await db.get(AutoExitPlanRecord, record.plan_id)
+    return LockedExitPlanScope(
+      position=SimpleNamespace(volume=100, can_use_volume=100),
+      plans=[current],
+      target_plan=current,
+    )
+
+  monkeypatch.setattr(auto_module, "lock_exit_plan_scope", locked_scope)
+  service = AutoExitPlanService(_RuntimeManager())
+
+  with pytest.raises(ValueError, match="EXIT_PLAN_REBUILD_REQUIRED"):
+    await service.update_manual_exit_plan(
+      {
+        "account_id": "account-1",
+        "plan_id": record.plan_id,
+        "config_version": 1,
+        "protected_volume": 100,
+        "execution_mode": "paper",
+        "rules": [
+          {
+            "rule_id": "stop",
+            "strategy": "STOP_PRICE",
+            "parameters": {"stop_price": 9.7},
+          }
+        ],
+      },
+      command_id="command-update-repaired",
+    )
+
+  async with migration_database() as db:
+    stored = await db.get(AutoExitPlanRecord, record.plan_id)
+    assert stored is not None
+    assert stored.config_version == 1
+    assert stored.status == ExitPlanStatus.ERROR.value
+    stored_plan = ExitPlan.from_dict(dict(stored.plan_state or {}))
+    assert stored_plan.status == ExitPlanStatus.ERROR
+    assert stored_plan.error_message == "QUARANTINE_REPAIRED:intent-old"
+
+
+@pytest.mark.asyncio
 async def test_manual_plan_migration_detaches_pending_plan_without_losing_links(
   migration_database,
 ) -> None:

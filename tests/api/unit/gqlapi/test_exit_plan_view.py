@@ -11,13 +11,14 @@ from quantx_api.gqlapi.types.liquidation_types import (
 def _plan_state(
   managed_runtime_command_id=None,
   *,
+  error_message=None,
   source_type="MANUAL_POSITION",
   strategy_run_id=None,
 ):
   metadata = {}
   if managed_runtime_command_id is not None:
     metadata["managed_runtime_command_id"] = managed_runtime_command_id
-  return {
+  state = {
     "template": {
       "account_id": "account-1",
       "instrument_code": "600000.SH",
@@ -28,6 +29,9 @@ def _plan_state(
       "source_type": source_type,
     }
   }
+  if error_message is not None:
+    state["error_message"] = error_message
+  return state
 
 
 @pytest.mark.parametrize(
@@ -180,3 +184,67 @@ def test_exit_plan_rules_are_editable_only_for_monitor_owned_manual_plan(
   )
 
   assert view.can_edit_rules is can_edit
+
+
+def test_repaired_quarantine_projects_an_actionable_rebuild_instead_of_resume(
+  monkeypatch,
+):
+  monkeypatch.setattr(
+    liquidation_types,
+    "ExitPlanView",
+    lambda **fields: SimpleNamespace(**fields),
+  )
+  model = _view_model(
+    source_type="MANUAL_POSITION",
+    strategy_run_id=None,
+  )
+  model.enabled = False
+  model.status = "PAUSED"
+  model.last_error = "MARKET_DATA_STALE"
+  model.plan_state = _plan_state(
+    error_message="QUARANTINE_REPAIRED:intent-old",
+    source_type="MANUAL_POSITION",
+    strategy_run_id=None,
+  )
+
+  view = ExitPlanView.from_model(model)
+
+  assert view.enabled is False
+  assert view.status == "ERROR"
+  assert view.can_edit_rules is False
+  assert view.last_error == "QUARANTINE_REPAIRED:intent-old"
+  assert view.recovery_action == "CANCEL_AND_REBUILD"
+  assert view.recovery_message == (
+    "隔离委托已完成券商事实修复。旧计划不能恢复；请取消旧计划，"
+    "再按最新持仓重新创建并授权。"
+  )
+
+
+def test_exit_plan_view_requires_reconciliation_before_rebuild(
+  monkeypatch,
+) -> None:
+  monkeypatch.setattr(
+    liquidation_types,
+    "ExitPlanView",
+    lambda **fields: SimpleNamespace(**fields),
+  )
+  model = _view_model(
+    source_type="MANUAL_POSITION",
+    strategy_run_id=None,
+  )
+  model.enabled = False
+  model.status = "ERROR"
+  model.last_error = "ACCOUNT_WIDE_STALE_SELL:intent-old"
+  model.plan_state = _plan_state(
+    error_message="ACCOUNT_WIDE_STALE_SELL:intent-old",
+    source_type="MANUAL_POSITION",
+    strategy_run_id=None,
+  )
+
+  view = ExitPlanView.from_model(model)
+
+  assert view.recovery_action == "COMPLETE_RECONCILIATION"
+  assert view.recovery_message == (
+    "计划存在尚未解除的券商事实隔离，不能恢复、立即检查或修改；"
+    "请先完成账户对账，再取消旧计划并按最新持仓重建。"
+  )

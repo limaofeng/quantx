@@ -7,6 +7,7 @@ from enum import Enum
 from typing import List, Optional
 
 import strawberry
+from quantx_domain.trading.exit_plan import is_sticky_exit_plan_error
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder as ConditionalOrderModel,
@@ -320,6 +321,8 @@ class ExitPlanView:
   pending_intent_id: Optional[str]
   last_evaluated_at: Optional[datetime]
   last_error: Optional[str]
+  recovery_action: Optional[str]
+  recovery_message: Optional[str]
   created_at: Optional[datetime]
   updated_at: Optional[datetime]
 
@@ -329,6 +332,37 @@ class ExitPlanView:
     template = dict(state.get("template") or {})
     metadata = dict(template.get("metadata") or {})
     execution_owner = _exit_plan_execution_owner(model)
+    state_error = str(state.get("error_message") or "").strip()
+    record_error = str(model.last_error or "").strip()
+    effective_error = (
+      state_error
+      if is_sticky_exit_plan_error(state_error)
+      else record_error or state_error
+    )
+    reconciliation_locked = is_sticky_exit_plan_error(effective_error)
+    can_rebuild = bool(
+      effective_error.startswith("QUARANTINE_REPAIRED:")
+      and execution_owner == "EXIT_PLAN_MONITOR"
+      and str(model.source_type or "").upper() == "MANUAL_POSITION"
+      and not model.pending_client_order_id
+      and not str(state.get("pending_intent_id") or "").strip()
+      and not str(state.get("pending_order_id") or "").strip()
+    )
+    if can_rebuild:
+      recovery_action = "CANCEL_AND_REBUILD"
+      recovery_message = (
+        "隔离委托已完成券商事实修复。旧计划不能恢复；请取消旧计划，"
+        "再按最新持仓重新创建并授权。"
+      )
+    elif reconciliation_locked:
+      recovery_action = "COMPLETE_RECONCILIATION"
+      recovery_message = (
+        "计划存在尚未解除的券商事实隔离，不能恢复、立即检查或修改；"
+        "请先完成账户对账，再取消旧计划并按最新持仓重建。"
+      )
+    else:
+      recovery_action = None
+      recovery_message = None
     cost_basis = dict(
       getattr(model, "cost_basis_snapshot", None)
       or metadata.get("cost_basis")
@@ -357,8 +391,8 @@ class ExitPlanView:
       source_type=model.source_type,
       source_id=model.source_id,
       strategy_run_id=model.strategy_run_id,
-      enabled=bool(model.enabled),
-      status=model.status,
+      enabled=bool(model.enabled) and not reconciliation_locked,
+      status="ERROR" if reconciliation_locked else model.status,
       execution_mode=model.execution_mode,
       auto_exit_authorized=bool(model.auto_exit_authorized),
       auto_exit_authorization_config_version=getattr(
@@ -389,6 +423,7 @@ class ExitPlanView:
       can_edit_rules=(
         execution_owner == "EXIT_PLAN_MONITOR"
         and str(model.source_type or "").upper() == "MANUAL_POSITION"
+        and not reconciliation_locked
       ),
       edit_route=source_routes.get(model.source_type),
       phase=str(model.phase or "WAITING_ARM"),
@@ -404,7 +439,9 @@ class ExitPlanView:
       pending_client_order_id=model.pending_client_order_id,
       pending_intent_id=str(state.get("pending_intent_id") or "") or None,
       last_evaluated_at=model.last_evaluated_at,
-      last_error=model.last_error,
+      last_error=effective_error or None,
+      recovery_action=recovery_action,
+      recovery_message=recovery_message,
       created_at=model.created_at,
       updated_at=model.updated_at,
     )

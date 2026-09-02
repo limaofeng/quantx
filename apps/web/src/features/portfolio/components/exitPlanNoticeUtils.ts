@@ -14,6 +14,7 @@ export interface ExitPlanNoticeSource {
   lastError?: string | null;
   pendingClientOrderId?: string | null;
   pendingIntentId?: string | null;
+  recoveryMessage?: string | null;
 }
 
 const knownErrorMessages: Record<string, string> = {
@@ -108,7 +109,21 @@ export function buildExitPlanNotices(
     });
   }
 
-  if (source.lastError && !marketClosed && !streamNotReady && !marketStale) {
+  if (source.recoveryMessage) {
+    push({
+      key: 'plan-recovery',
+      message: source.recoveryMessage,
+      tone: 'warning',
+    });
+  }
+
+  if (
+    source.lastError &&
+    !source.recoveryMessage &&
+    !marketClosed &&
+    !streamNotReady &&
+    !marketStale
+  ) {
     push({
       key: 'plan-error',
       message: readableMessage(source.lastError),

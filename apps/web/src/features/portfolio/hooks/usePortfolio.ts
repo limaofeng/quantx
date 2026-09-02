@@ -428,6 +428,8 @@ export const ExitPlansQuery = gql(`
       pendingIntentId
       lastEvaluatedAt
       lastError
+      recoveryAction
+      recoveryMessage
       createdAt
       updatedAt
     }

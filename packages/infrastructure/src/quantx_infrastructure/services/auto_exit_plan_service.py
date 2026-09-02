@@ -3934,6 +3934,11 @@ class AutoExitPlanService:
         return record
       if current_version != expected_version:
         raise ValueError(f"CONFIG_VERSION_CONFLICT: current={current_version}")
+      if _is_sticky_exit_plan_error(plan.error_message or record.last_error):
+        raise ValueError(
+          "EXIT_PLAN_REBUILD_REQUIRED:旧卖出计划已进入券商事实隔离，"
+          "不能修改或恢复；请取消后按最新持仓重建"
+        )
       if plan.status == ExitPlanStatus.EXIT_PENDING or plan.pending_order_id:
         raise ValueError("已有卖出委托待成交，暂不能修改计划")
       if plan.status in {ExitPlanStatus.COMPLETED, ExitPlanStatus.CANCELLED}:
@@ -4176,6 +4181,11 @@ class AutoExitPlanService:
         runtime_plan = ExitPlan.from_dict(plan.to_dict())
         updated_record = record
       else:
+        if _is_sticky_exit_plan_error(plan.error_message or record.last_error):
+          raise ValueError(
+            "EXIT_PLAN_REBUILD_REQUIRED:旧卖出计划已进入券商事实隔离，"
+            "不能修改或恢复；请取消后按最新持仓重建"
+          )
         if plan.status == ExitPlanStatus.EXIT_PENDING or plan.pending_order_id:
           raise ValueError("已有卖出委托待成交，暂不能修改计划")
         if plan.status in {ExitPlanStatus.COMPLETED, ExitPlanStatus.CANCELLED}:

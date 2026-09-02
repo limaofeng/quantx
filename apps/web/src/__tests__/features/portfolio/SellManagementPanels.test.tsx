@@ -79,6 +79,8 @@ function makePlan(instrumentCode: string) {
     phase: 'WAITING_ARM',
     planId: `plan-${instrumentCode}`,
     protectedVolume: 400,
+    recoveryAction: null,
+    recoveryMessage: null,
     remainingVolume: 400,
     rules: [],
     sourceId: 'manual',
@@ -174,6 +176,52 @@ describe('ExitPlansPanel', () => {
 
     expect(screen.getByText(/执行归属\s*全局计划监控/)).toBeVisible();
     expect(screen.getByRole('button', { name: '编辑计划' })).toBeEnabled();
+  });
+
+  it('only exposes cancellation after a repaired plan requires rebuilding', () => {
+    mocks.exitPlans = [
+      {
+        ...makePlan('302132.SZ'),
+        canEditRules: false,
+        enabled: false,
+        lastError: 'QUARANTINE_REPAIRED:intent-old',
+        recoveryAction: 'CANCEL_AND_REBUILD',
+        recoveryMessage:
+          '隔离委托已完成券商事实修复。旧计划不能恢复；请取消旧计划，再按最新持仓重新创建并授权。',
+        status: 'ERROR',
+      },
+    ];
+    render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
+
+    expect(screen.getByText(/旧计划不能恢复/)).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: '恢复' })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: '立即检查' })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: '编辑计划' })
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '取消旧计划' })).toBeEnabled();
+  });
+
+  it('keeps cancellation disabled until broker reconciliation is complete', () => {
+    mocks.exitPlans = [
+      {
+        ...makePlan('302132.SZ'),
+        canEditRules: false,
+        enabled: false,
+        recoveryAction: 'COMPLETE_RECONCILIATION',
+        recoveryMessage:
+          '计划存在尚未解除的券商事实隔离，请先完成账户对账。',
+        status: 'ERROR',
+      },
+    ];
+    render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
+
+    expect(screen.queryByRole('button', { name: '恢复' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled();
   });
 
   it('labels an invalid owner and fails closed on plan operations', () => {
