@@ -344,6 +344,8 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
   captured: dict[str, object] = {}
 
   async def source_panel(config, staging):
+    (staging / "features").mkdir()
+    (staging / "features" / "part.parquet").write_bytes(b"temporary")
     return panel, pd.DatetimeIndex(panel["event_date"].unique()), {"kind": "test"}
 
   async def certify(values):
@@ -369,11 +371,33 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
     )
   )
   manifest = dataset_module.load_certified_dataset_manifest(output)
+  assert {path.name for path in output.iterdir()} == {
+    "data-quality.json",
+    "manifest.json",
+    "training-panel.parquet",
+  }
   assert manifest["status"] == "CERTIFIED"
   assert manifest["source_reference"] == "certified-v1"
   assert manifest["training_panel_sha256"] == file_sha256(output / "training-panel.parquet")
   assert tuple(captured) == dataset_module._CERTIFICATION_FIELDS
   assert captured["manifest_sha256"] == manifest["manifest_sha256"]
+
+
+def test_failed_published_dataset_cleanup_accepts_matching_manifest_with_extras(
+  tmp_path: Path,
+) -> None:
+  directory = tmp_path / "datasets" / "failed-v1"
+  directory.mkdir(parents=True)
+  manifest_sha256 = "a" * 64
+  (directory / "manifest.json").write_text(
+    json.dumps({"manifest_sha256": manifest_sha256}),
+    encoding="utf-8",
+  )
+  (directory / "temporary-part.parquet").write_bytes(b"partial")
+
+  dataset_module._remove_published_dataset_if_exact(directory, manifest_sha256)
+
+  assert not directory.exists()
 
 
 def test_dataset_certification_db_failure_removes_new_directory(

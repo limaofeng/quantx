@@ -497,7 +497,9 @@ class StockSelectionTrainingRepository:
     now: datetime | None = None,
   ) -> RuntimeComponentHeartbeat:
     row = await self.db.get(RuntimeComponentHeartbeat, COMPONENT_NAME)
-    timestamp = _as_utc(now or _utcnow(), "now")
+    aware_timestamp = _as_utc(now or _utcnow(), "now")
+    assert aware_timestamp is not None
+    timestamp = aware_timestamp.replace(tzinfo=None)
     safe_details = _safe_capability_json(dict(details or {}))
     safe_details = dict(_validate_json(safe_details, "capability details"))
     if row is None:
@@ -516,6 +518,9 @@ class StockSelectionTrainingRepository:
       row.updated_at = timestamp
     await self.db.commit()
     await self.db.refresh(row)
+    # API normalization makes timestamps aware; detach first so a later query
+    # cannot autoflush that projection back into PostgreSQL's naive column.
+    self.db.expunge(row)
     return _normalize_row_timestamps(row)
 
   # ---------------------------------------------------------------------

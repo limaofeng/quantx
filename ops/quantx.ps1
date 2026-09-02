@@ -240,6 +240,29 @@ function Resolve-AiRuntimePython {
   return Resolve-Python
 }
 
+function Resolve-WorkerPython {
+  $workspacePython = Join-Path $Root ".venv\Scripts\python.exe"
+  if (-not (Test-Path -LiteralPath $workspacePython -PathType Leaf)) {
+    throw (
+      "The Prefect Worker requires the workspace Python environment. " +
+      "Run uv sync before starting the full profile."
+    )
+  }
+  return [System.IO.Path]::GetFullPath($workspacePython)
+}
+
+function Assert-WorkerRuntime {
+  param([Parameter(Mandatory = $true)][string]$Python)
+
+  & $Python -c "import prefect, quantx_research, quantx_worker" 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    throw (
+      "The workspace Python environment is missing Worker or Research " +
+      "dependencies. Run uv sync before starting the full profile."
+    )
+  }
+}
+
 function Resolve-Node {
   $configured = [Environment]::GetEnvironmentVariable("QUANTX_NODE_EXE")
   if ($configured) {
@@ -1588,6 +1611,7 @@ function Invoke-Up {
   )
   $python = Resolve-Python
   $aiRuntimePython = Resolve-AiRuntimePython
+  $workerPython = $null
   $node = Resolve-Node
   $qmtPython = $null
   $agentMode = Set-DevTradingModeEnvironment
@@ -1602,6 +1626,8 @@ function Invoke-Up {
     $liveAccount = [string]$liveAccounts[0]
   }
   if ($Profile -eq "full") {
+    $workerPython = Resolve-WorkerPython
+    Assert-WorkerRuntime -Python $workerPython
     # API health aggregation and Prefect CLI/Worker must share the same
     # canonical API base from the moment each process is spawned.
     Initialize-PrefectEnvironment
@@ -1764,11 +1790,11 @@ function Invoke-Up {
         -Name "External Prefect Server" `
         -Url "$env:PREFECT_API_URL/health" `
         -TimeoutSeconds 90
-      Invoke-PrefectPreparation -Python $python
+      Invoke-PrefectPreparation -Python $workerPython
       $poolName = Get-PrefectWorkerPool
       Start-ManagedProcess `
         -Name "worker" `
-        -Executable $python `
+        -Executable $workerPython `
         -Arguments @(
           "-m", "prefect", "worker", "start",
           "--pool", $poolName

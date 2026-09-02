@@ -407,11 +407,15 @@ def _remove_published_dataset_if_exact(directory: Path, manifest_sha256: str) ->
     return
   if not directory.exists() or _is_link_like(directory) or not directory.is_dir():
     return
+  manifest_path = directory / _MANIFEST_NAME
   try:
-    verified = load_certified_dataset_manifest(directory)
-  except (OSError, ValueError, TypeError):
+    _reject_symlink_components(manifest_path)
+    if _is_link_like(manifest_path) or not manifest_path.is_file():
+      return
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
     return
-  if verified.get("manifest_sha256") != manifest_sha256:
+  if not isinstance(manifest, dict) or manifest.get("manifest_sha256") != manifest_sha256:
     return
   _safe_remove_tree(directory)
 
@@ -447,8 +451,11 @@ async def certify_next_day_selection_dataset(
     # once, which makes its label/factor semantics immutable.
     from quantx_research.next_day_selection_training import _source_panel
 
-    raw_panel, calendar, source_quality = await _source_panel(config, staging)
+    source_staging = staging / "source"
+    source_staging.mkdir()
+    raw_panel, calendar, source_quality = await _source_panel(config, source_staging)
     panel, universe_quality = prepare_training_panel(raw_panel, calendar, config)
+    _safe_remove_tree(source_staging)
     if config.data.universe_kind == "CERTIFIED_INDEX" and not universe_quality.get("complete"):
       raise ValueError("CERTIFIED_INDEX 必须具备完整 point-in-time universe 证据")
     panel_path = staging / _PANEL_NAME

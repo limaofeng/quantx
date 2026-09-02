@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
@@ -249,6 +250,16 @@ def test_capability_probe_uses_the_installed_research_cli_protocol(monkeypatch) 
   assert flow_module._probe_capability() == payload
   assert calls[0][0] == ["quantx-research", "probe-lightgbm-gpu", "--json"]
   assert calls[0][1]["timeout"] == 10
+
+
+def test_research_cli_uses_the_worker_interpreter_module_protocol(monkeypatch) -> None:
+  monkeypatch.setattr(sys, "executable", "workspace-python")
+
+  assert flow_module._research_cli_command() == [
+    "workspace-python",
+    "-m",
+    "quantx_research.cli",
+  ]
 
 
 def test_spawn_uses_low_priority_and_exact_research_entrypoint(tmp_path, monkeypatch) -> None:

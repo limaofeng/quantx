@@ -8,8 +8,8 @@ import json
 import math
 import os
 import re
-import shutil
 import subprocess
+import sys
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -72,12 +72,9 @@ async def _maybe_await(value: Any) -> Any:
 
 
 def _research_cli_command() -> list[str]:
-  """Locate the installed Research protocol executable without importing it."""
+  """Run the isolated Research protocol with the Worker's own interpreter."""
 
-  executable = shutil.which("quantx-research")
-  if not executable:
-    raise RuntimeError("Research protocol executable is unavailable")
-  return [executable]
+  return [sys.executable, "-m", "quantx_research.cli"]
 
 
 def _probe_capability() -> dict[str, Any]:

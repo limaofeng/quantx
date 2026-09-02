@@ -185,9 +185,14 @@ def test_dev_runtime_defaults_to_full_profile() -> None:
 
   assert '[string]$Profile = "full",' in script
   assert "function Resolve-AiRuntimePython" in script
+  assert "function Resolve-WorkerPython" in script
+  assert "function Assert-WorkerRuntime" in script
   assert '"QUANTX_AI_RUNTIME_PYTHON_EXE"' in script
   assert 'Join-Path $Root ".venv\\Scripts\\python.exe"' in script
   assert "-Executable $aiRuntimePython" in script
+  assert "Invoke-PrefectPreparation -Python $workerPython" in script
+  assert "-Executable $workerPython" in script
+  assert "Assert-WorkerRuntime -Python $workerPython" in script
 
 
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell dev launch matrix")

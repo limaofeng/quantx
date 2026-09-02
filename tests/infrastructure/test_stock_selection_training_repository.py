@@ -110,6 +110,41 @@ async def session_factory():
 
 
 @pytest.mark.asyncio
+async def test_capability_heartbeat_persists_naive_utc_and_returns_aware_utc() -> None:
+  class Session:
+    persisted_updated_at = None
+    expunged = False
+
+    async def get(self, _model, _key):
+      return None
+
+    def add(self, row):
+      self.persisted_updated_at = row.updated_at
+
+    async def commit(self):
+      return None
+
+    async def refresh(self, _row):
+      return None
+
+    def expunge(self, _row):
+      self.expunged = True
+
+  session = Session()
+  now = datetime(2026, 9, 3, 2, 30, tzinfo=timezone.utc)
+
+  heartbeat = await StockSelectionTrainingRepository(session).upsert_capability_heartbeat(
+    status="GPU_UNAVAILABLE_BUILD",
+    details={"gpu_status": "GPU_UNAVAILABLE_BUILD"},
+    now=now,
+  )
+
+  assert session.persisted_updated_at == now.replace(tzinfo=None)
+  assert session.expunged is True
+  assert heartbeat.updated_at == now
+
+
+@pytest.mark.asyncio
 async def test_certification_and_queue_insertion_are_idempotent(session_factory) -> None:
   async with session_factory() as db:
     repository = StockSelectionTrainingRepository(db)

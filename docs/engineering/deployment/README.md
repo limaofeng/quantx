@@ -18,6 +18,11 @@ production、WinSW、Kubernetes、release 安装或 macOS 服务端部署路径�
 Vite、VitePress、Prefect Worker，并在 QMT 登记和运行时预检通过后启动同机
 QMT Agent。只有明确需要关闭实盘连接时才使用：
 
+Prefect Worker 及其隔离启动的 Research 子进程固定使用仓库 `.venv`；启动前会
+校验 `prefect`、`quantx_worker` 和 `quantx_research` 均可导入。QMT Agent 继续独占
+`xtquant-demo` 环境。两者不得合并，以免研究/GPU 依赖污染券商运行时；`.venv`
+缺失或依赖不完整时先在仓库根目录执行 `uv sync`。
+
 ```powershell
 .\ops\quantx.ps1 up -Environment dev -Profile web -Mode data-only
 ```
