@@ -73,3 +73,255 @@ query ResearchRun($key: String!) {
     artifactErrors
   }
 }
+
+query StockSelectionTrainingCapabilities {
+  stockSelectionTrainingCapabilities {
+    cpuAvailable
+    gpuStatus
+    fresh
+    updatedAt
+    availableMemoryMib
+    environmentRequirementHash
+    qualification
+    environmentSummary
+  }
+}
+
+query StockSelectionDatasetVersions($limit: Int = 100, $offset: Int = 0) {
+  stockSelectionDatasetVersions(limit: $limit, offset: $offset) {
+    datasetVersion
+    status
+    sourceKind
+    dateStart
+    dateEnd
+    universeSpec
+    indicatorVersion
+    factorSetVersion
+    factorSetHash
+    labelVersion
+    manifestSha256
+    sampleCount
+    stockCount
+    tradingDayCount
+    qualitySummary
+    createdAt
+  }
+}
+
+query PreviewStockSelectionTraining($input: StockSelectionTrainingInput!) {
+  previewStockSelectionTraining(input: $input) {
+    previewFingerprint
+    datasetVersion
+    requestedBackend
+    resolvedBackend
+    folds {
+      trainStart
+      trainEnd
+      calibrationStart
+      calibrationEnd
+      validationStart
+      validationEnd
+      validationMonth
+    }
+    coverage
+    leakage
+    resourceEstimate {
+      memoryMib
+      diskMib
+      gpuMemoryMib
+      estimatedMinutes
+      durationLevel
+      sampleCount
+      stockCount
+      tradingDayCount
+      foldCount
+    }
+    shadowReasons
+    blockers
+    warnings
+    capability
+    specHash
+    coordinateHash
+    canSubmit
+  }
+}
+
+query StockSelectionTrainingRuns(
+  $status: StockSelectionTrainingRunStatus
+  $runKind: StockSelectionTrainingRunKind
+  $limit: Int = 50
+  $offset: Int = 0
+) {
+  stockSelectionTrainingRuns(
+    status: $status
+    runKind: $runKind
+    limit: $limit
+    offset: $offset
+  ) {
+    items {
+      runId
+      runKey
+      runKind
+      parentRunId
+      status
+      phase
+      completedUnits
+      totalUnits
+      requestedAt
+      startedAt
+      completedAt
+      cancelRequestedAt
+      stateVersion
+      datasetVersion
+      requestedBackend
+      resolvedBackend
+      specHash
+      environmentRequirementHash
+      coordinateHash
+      experimentGroupHash
+      artifactManifestSha256
+      environmentEvidence
+      metricsSummary
+      gateSummary
+      conclusion
+      registerable
+      queueReason
+      errorCode
+      errorMessage
+    }
+    total
+    limit
+    offset
+  }
+}
+
+query StockSelectionTrainingRun($runId: String!) {
+  stockSelectionTrainingRun(runId: $runId) {
+    runId
+    runKey
+    runKind
+    parentRunId
+    status
+    phase
+    completedUnits
+    totalUnits
+    requestedAt
+    startedAt
+    completedAt
+    cancelRequestedAt
+    stateVersion
+    datasetVersion
+    requestedBackend
+    resolvedBackend
+    specHash
+    environmentRequirementHash
+    coordinateHash
+    experimentGroupHash
+    artifactManifestSha256
+    environmentEvidence
+    metricsSummary
+    gateSummary
+    conclusion
+    registerable
+    queueReason
+    errorCode
+    errorMessage
+  }
+}
+
+query StockSelectionTrainingComparison($runIds: [String!]!) {
+  stockSelectionTrainingComparison(runIds: $runIds) {
+    comparable
+    mismatchFields
+    mismatchedFields
+    runs {
+      runId
+      runKey
+      runKind
+      status
+      phase
+      datasetVersion
+      coordinateHash
+      conclusion
+      registerable
+      gateSummary
+      metricsSummary
+    }
+    metrics
+    gates
+  }
+}
+
+mutation StartStockSelectionDevelopmentTraining(
+  $input: StockSelectionTrainingInput!
+  $previewFingerprint: String!
+  $idempotencyKey: String!
+) {
+  startStockSelectionDevelopmentTraining(
+    input: $input
+    previewFingerprint: $previewFingerprint
+    idempotencyKey: $idempotencyKey
+  ) {
+    runId
+    runKey
+    runKind
+    status
+    phase
+    stateVersion
+    datasetVersion
+    requestedBackend
+    resolvedBackend
+    coordinateHash
+    registerable
+    errorCode
+    errorMessage
+  }
+}
+
+mutation StartStockSelectionFinalEvaluation(
+  $parentRunId: String!
+  $idempotencyKey: String!
+) {
+  startStockSelectionFinalEvaluation(
+    parentRunId: $parentRunId
+    idempotencyKey: $idempotencyKey
+  ) {
+    runId
+    runKey
+    runKind
+    status
+    phase
+    stateVersion
+    datasetVersion
+    requestedBackend
+    resolvedBackend
+    coordinateHash
+    registerable
+    errorCode
+    errorMessage
+  }
+}
+
+mutation CancelStockSelectionTrainingRun(
+  $runId: String!
+  $expectedVersion: Int!
+  $idempotencyKey: String!
+) {
+  cancelStockSelectionTrainingRun(
+    runId: $runId
+    expectedVersion: $expectedVersion
+    idempotencyKey: $idempotencyKey
+  ) {
+    runId
+    runKey
+    runKind
+    status
+    phase
+    completedUnits
+    totalUnits
+    stateVersion
+    cancelRequestedAt
+    errorCode
+    errorMessage
+  }
+}

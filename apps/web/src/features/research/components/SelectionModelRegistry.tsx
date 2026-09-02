@@ -294,8 +294,7 @@ export function SelectionModelRegistry() {
         )}
         {!modelsResult.fetching && models.length === 0 ? (
           <p className="text-ui-caption text-slate-500">
-            尚未登记模型。训练仍由本地 CLI
-            手动执行；页面不会启动训练或自动切换模型。
+            尚未登记模型。请先通过训练工作台提交研究作业；模型登记、阶段切换与发布仍由人工审核，页面不会自动发布模型。
           </p>
         ) : (
           <div className="flex max-h-72 gap-3 overflow-auto pb-1 custom-scrollbar">

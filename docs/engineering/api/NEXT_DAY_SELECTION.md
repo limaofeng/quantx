@@ -18,11 +18,76 @@
 - ACTIVE 效果门禁为 Brier Skill > 0、ECE ≤ 3%、Top20 上涨率提升区间下界 > 0，
   并要求 point-in-time 历史 ST、行业、退市状态完整。
 
-从仓库根目录手工训练：
+### Web 训练工作台契约
+
+`/research` 的训练工作台是研究操作面。它先读取认证数据集和脱敏 worker
+capability，再通过 `previewStockSelectionTraining(input)` 固化一次预检指纹；只有
+`blockers` 为空、预检仍为当前配置且解析后的后端明确显示时，才允许提交
+`startStockSelectionDevelopmentTraining(input, previewFingerprint, idempotencyKey)`。
+请求范围、日期、后端和资源参数使用 GraphQL typed input；模型族、冻结切分和评估
+门禁继续由服务端冻结配置决定，不能由浏览器覆盖。
+
+提交后的运行通过 `stockSelectionTrainingRuns` / `stockSelectionTrainingRun` 读取，
+页面对活动运行每 5 秒轮询并展示阶段、完成单元、队列原因、可脱敏错误和取消状态。
+取消必须提交 `expectedVersion` 与幂等键。`DEVELOPMENT` 成功只代表开发证据完成，
+界面必须显式显示它不是最终评估，也不能直接作为日推理 bundle。
+
+只有 `startStockSelectionFinalEvaluation(parentRunId, idempotencyKey)` 产生的
+`FINAL_EVALUATION + SUCCEEDED` 运行，且 hash/identity、固定切分、证据和门禁全部
+一致，结论为 `SHADOW_ELIGIBLE` 或 `ACTIVE_ELIGIBLE` 并标记 `registerable`，才可
+通过 `registerStockSelectionModel(runKey)` 进入人工 registry。DB 中的 `run_key` 是
+登记真源；运行目录必须是 `.runtime/research-runs/<run_id>` 的安全子目录。
+
+最终评估详情分开展示 probability、ranking、data、stability、disagreement 和
+gates 证据。缺失证据表示“不可用”，不能转换成零或通过门禁。公共 GraphQL 投影
+不包含 `source_reference`、本地路径、密钥或原始 worker 异常；只读 evidence JSON
+也必须经过白名单化和长度限制。
+
+同坐标对比使用 `stockSelectionTrainingComparison(runIds)`，只接受 2–5 个运行；
+坐标、数据集、后端或实验身份不一致时返回 mismatch 并禁止把结果当作同一实验比较。
+
+训练查询使用 `market:read`、`WEB_ONLY`、`web-internal`；训练 mutation 使用
+`operations:write`、`WEB_ONLY`、`web-internal`、`NON_TRADING_WRITE`。登记和人工
+阶段切换仍为 `ADMIN`，且不会因训练工作台开放而改变交易权限。
+
+从仓库根目录手工执行唯一流程：先认证黄金面板，再（需要 GPU 时）构建并认证
+OpenCL wheel，随后用数据库锁定的三个哈希分别运行 DEVELOPMENT 和
+FINAL_EVALUATION。哈希必须原样来自已接受的请求；Research 不会依据运行路径或
+本地配置重算坐标：
 
 ```powershell
-uv run --frozen quantx-research train-next-day-selection --config apps/research/configs/next_day_selection_v1.yaml
+uv run --frozen quantx-research certify-next-day-selection-dataset `
+  --config apps/research/configs/next_day_selection_v1.yaml `
+  --dataset-version next-day-selection-v1
+
+.\ops\windows\build-lightgbm-opencl-wheel.ps1 `
+  -SourceDirectory F:\src\LightGBM -OutputDirectory F:\src\LightGBM\dist
+
+uv run --frozen quantx-research qualify-lightgbm-gpu `
+  --dataset-dir .runtime\research-datasets\next-day-selection-v1 `
+  --build-evidence F:\src\LightGBM\dist\lightgbm-opencl-build-evidence.json
+
+uv run --frozen quantx-research train-next-day-selection `
+  --config apps/research/configs/next_day_selection_v1.yaml `
+  --run-kind DEVELOPMENT --dataset-dir .runtime\research-datasets\next-day-selection-v1 `
+  --output-root .runtime\research-runs --run-id next-day-selection-development `
+  --spec-hash <64-lowercase-hex> --coordinate-hash <64-lowercase-hex> `
+  --environment-requirement-hash <64-lowercase-hex>
+
+uv run --frozen quantx-research train-next-day-selection `
+  --config apps/research/configs/next_day_selection_v1.yaml `
+  --run-kind FINAL_EVALUATION --dataset-dir .runtime\research-datasets\next-day-selection-v1 `
+  --output-root .runtime\research-runs --run-id next-day-selection-final `
+  --parent-run-dir .runtime\research-runs\next-day-selection-development `
+  --spec-hash <64-lowercase-hex> --coordinate-hash <64-lowercase-hex> `
+  --environment-requirement-hash <64-lowercase-hex> --frozen-test-access-count 1
 ```
+
+`qualify-lightgbm-gpu` 只接受构建脚本生成的 schema-v1 build-evidence，并要求
+LightGBM 4.7.0、`USE_GPU=ON`、wheel SHA-256、真实重复性、CPU reload 和训练期间
+显存峰值采样全部满足门禁；无法采样峰值时状态为 `GPU_UNQUALIFIED`。CPU-only
+wheel 显式报告 `GPU_UNAVAILABLE_BUILD`：`AUTO` 使用 CPU，`GPU_REQUIRED` 失败，
+CPU-only 路径不触碰 GPU 初始化。
 
 ## 安全产物
 

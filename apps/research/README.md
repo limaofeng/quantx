@@ -128,9 +128,52 @@ attempt 收敛为 `failed`，硬终止留下的 stale lease 则由下一次恢�
 横截面模型因子，并预测 T+1 开盘到收盘收益是否大于零。它不由 Worker 自动
 训练，不发布策略或交易信号。
 
+训练必须按 `certify → DEVELOPMENT → FINAL_EVALUATION` 的顺序执行；运行 spec 的
+`spec_hash`、`coordinate_hash` 和 `environment_requirement_hash` 必须来自已接受的
+数据库锁定请求，Research 不会从本地配置重新计算它们：
+
 ```powershell
-uv run --frozen quantx-research train-next-day-selection --config apps/research/configs/next_day_selection_v1.yaml
+uv run --frozen quantx-research certify-next-day-selection-dataset `
+  --config apps/research/configs/next_day_selection_v1.yaml `
+  --dataset-version next-day-selection-v1
+
+.\ops\windows\build-lightgbm-opencl-wheel.ps1 `
+  -SourceDirectory F:\src\LightGBM `
+  -OutputDirectory F:\src\LightGBM\dist
+
+uv run --frozen quantx-research qualify-lightgbm-gpu `
+  --dataset-dir .runtime\research-datasets\next-day-selection-v1 `
+  --build-evidence F:\src\LightGBM\dist\lightgbm-opencl-build-evidence.json
+
+uv run --frozen quantx-research train-next-day-selection `
+  --config apps/research/configs/next_day_selection_v1.yaml `
+  --run-kind DEVELOPMENT `
+  --dataset-dir .runtime\research-datasets\next-day-selection-v1 `
+  --output-root .runtime\research-runs `
+  --run-id next-day-selection-development `
+  --spec-hash <64-lowercase-hex> `
+  --coordinate-hash <64-lowercase-hex> `
+  --environment-requirement-hash <64-lowercase-hex>
+
+uv run --frozen quantx-research train-next-day-selection `
+  --config apps/research/configs/next_day_selection_v1.yaml `
+  --run-kind FINAL_EVALUATION `
+  --dataset-dir .runtime\research-datasets\next-day-selection-v1 `
+  --output-root .runtime\research-runs `
+  --run-id next-day-selection-final `
+  --parent-run-dir .runtime\research-runs\next-day-selection-development `
+  --spec-hash <64-lowercase-hex> `
+  --coordinate-hash <64-lowercase-hex> `
+  --environment-requirement-hash <64-lowercase-hex> `
+  --frozen-test-access-count 1
 ```
+
+OpenCL wheel 构建仅使用官方 pip build backend 的 CMake config-settings
+`cmake.define.USE_GPU=ON`，并输出带 wheel SHA-256、工具链和 schema-v1 的
+build-evidence。GPU 资格证书还必须通过真实重复性、CPU reload、显存采样和
+概率/排名门禁；采样不到训练期间显存峰值时保持 `GPU_UNQUALIFIED`。CPU-only
+LightGBM 的语义是 `GPU_UNAVAILABLE_BUILD`：`AUTO` 解析为 CPU，
+`GPU_REQUIRED` 失败，CPU 路径不会初始化 GPU。
 
 默认配置使用五年窗口，最后 12 个月为冻结测试集；之前 48 个月按至少
 30 月训练、6 月校准、1 月验证进行逐月 walk-forward。Logistic 与 LightGBM

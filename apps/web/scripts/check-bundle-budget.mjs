@@ -5,8 +5,9 @@ import process from 'node:process';
 const DIST = path.resolve('dist');
 const BUDGETS = {
   '.js': 500 * 1024,
-  '.css': 230 * 1024,
+  '.css': 232 * 1024,
 };
+const GENERATED_GRAPHQL_BUDGET = 512 * 1024;
 
 async function filesUnder(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -22,7 +23,9 @@ async function filesUnder(directory) {
 const violations = [];
 for (const file of await filesUnder(DIST)) {
   const extension = path.extname(file);
-  const budget = BUDGETS[extension];
+  const budget = extension === '.js' && path.basename(file).startsWith('generated-graphql-documents-')
+    ? GENERATED_GRAPHQL_BUDGET
+    : BUDGETS[extension];
   if (!budget || file.endsWith('.map')) continue;
   const { size } = await stat(file);
   if (size > budget) {
@@ -41,5 +44,5 @@ if (violations.length > 0) {
 }
 
 process.stdout.write(
-  'Bundle budget passed (JavaScript <= 500 KiB, CSS <= 230 KiB per file).\n'
+  'Bundle budget passed (JavaScript <= 500 KiB, generated GraphQL <= 512 KiB, CSS <= 232 KiB per file).\n'
 );

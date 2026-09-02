@@ -23,6 +23,7 @@ import {
   ResearchLoadingState,
   ResearchStatusBadge,
   SelectionModelRegistry,
+  StockSelectionTrainingWorkbench,
 } from '../components';
 import { useResearchRuns } from '../hooks';
 import { buildResearchRunPath, isSmallSample } from '../model';
@@ -304,6 +305,7 @@ export default function ResearchCenterPage() {
       </header>
 
       <SelectionModelRegistry />
+      <StockSelectionTrainingWorkbench />
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {error ? (

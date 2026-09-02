@@ -7,6 +7,8 @@ export * from './RegressionTable';
 export * from './ResearchStatusBadge';
 export * from './ResearchSurface';
 export * from './SelectionModelRegistry';
+export { default as StockSelectionTrainingWorkbench } from './StockSelectionTrainingWorkbench';
+export { TrainingPreviewSummary } from './StockSelectionTrainingWorkbench';
 export * from './RobustnessSummary';
 export * from './SourceProvenancePanel';
 export * from './VolumeComparisonPanel';
