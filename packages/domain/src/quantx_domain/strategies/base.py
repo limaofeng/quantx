@@ -18,6 +18,10 @@ from quantx_domain.enums import (
   StrategyInstrumentUniverseMode,
   StrategyRunMode,
 )
+from quantx_domain.execution_owner import (
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 
 if TYPE_CHECKING:
   from quantx_domain.schemas import ParameterSchema
@@ -135,11 +139,7 @@ class TradeIntentExecutionMode(str, Enum):
   MANUAL_CONFIRM = "MANUAL_CONFIRM"
 
 
-class TradeIntentOriginType(str, Enum):
-  """The audited business owner that created one trade intent."""
-
-  STRATEGY_RUN = "STRATEGY_RUN"
-  MANUAL_COMMAND = "MANUAL_COMMAND"
+TradeIntentOriginType = ExecutionOwnerType
 
 
 @dataclass(frozen=True)
@@ -155,6 +155,10 @@ class StrategyRunIntentOrigin:
   def __post_init__(self) -> None:
     if not str(self.run_id or "").strip() or not str(self.strategy_id or "").strip():
       raise ValueError("strategy-run intent origin requires run_id and strategy_id")
+
+  @property
+  def execution_ref(self) -> ExecutionOwnerRef:
+    return ExecutionOwnerRef.strategy_run(self.run_id)
 
 
 @dataclass(frozen=True)
@@ -172,6 +176,10 @@ class ManualCommandIntentOrigin:
       self.action_type or ""
     ).strip():
       raise ValueError("manual-command intent origin requires command_id and action_type")
+
+  @property
+  def execution_ref(self) -> ExecutionOwnerRef:
+    return ExecutionOwnerRef.manual_command(self.command_id)
 
 
 TradeIntentOrigin = StrategyRunIntentOrigin | ManualCommandIntentOrigin

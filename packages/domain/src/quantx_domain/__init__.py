@@ -5,6 +5,11 @@ Prefect, and QMT dependencies. Applications adapt persistence models into
 these values.
 """
 
+from .execution_owner import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from .stock_selection_training import (
   BackendDecision,
   BackendResolutionError,
@@ -42,6 +47,9 @@ __all__ = [
   "StrategyInput",
   "StrategyOutput",
   "TradeIntent",
+  "ExecutionEnvironment",
+  "ExecutionOwnerRef",
+  "ExecutionOwnerType",
   "BackendDecision",
   "BackendResolutionError",
   "GateConclusion",

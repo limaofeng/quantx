@@ -60,6 +60,11 @@ from .agent_health import (
   QmtAgentMode,
   QmtAgentReconciliationStatus,
 )
+from .execution_owner import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from .market_stream import (
   MARKET_STREAM_MARKETS,
   MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
@@ -89,6 +94,9 @@ __all__ = [
   "AccountSafetyCheckObservation",
   "AccountSafetyCheckStatus",
   "AccountSafetyObservationSnapshot",
+  "ExecutionEnvironment",
+  "ExecutionOwnerRef",
+  "ExecutionOwnerType",
   "HISTORICAL_BAR_NO_DATA_REASON",
   "HISTORICAL_BAR_SUMMARY_RECORD_TYPE",
   "HISTORICAL_BAR_TRANSFER_SCHEMA_VERSION",

@@ -39,6 +39,11 @@ from .environment import (
 from .environment import (
   MarketContextSnapshot as EnvironmentSnapshot,
 )
+from .execution_owner import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from .exit_plan import (
   EXIT_PLAN_BOOK_STATE_KEY,
   ExitDecision,
@@ -184,6 +189,9 @@ __all__ = [
   "DecisionTraceLogger",
   "EnvironmentLayer",
   "EnvironmentSnapshot",
+  "ExecutionEnvironment",
+  "ExecutionOwnerRef",
+  "ExecutionOwnerType",
   "CausalPriceObservation",
   "EntryAuthorizationMode",
   "EntryBaselineSnapshot",
