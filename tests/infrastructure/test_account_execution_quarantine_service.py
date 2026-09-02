@@ -36,6 +36,8 @@ from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.account_execution_quarantine_service import (
   BROKER_EXECUTION_AFTER_RELEASE,
+  LIVE_PLACE_PHYSICAL_GATE_REJECTED,
+  QUARANTINE_CANCEL_REQUIRED_METADATA_KEY,
   QUARANTINE_REASON_METADATA_KEY,
   QUARANTINE_REPAIR_REQUIRED_METADATA_KEY,
   AccountExecutionQuarantineService,
@@ -526,6 +528,84 @@ async def _seed(
   )
   await db.commit()
   return plan
+
+
+async def _seed_physical_gate_rejection(
+  db,
+  *,
+  tamper: str = "",
+) -> AccountExecutionControlEvent:
+  await _seed(db, owner_kind="monitor", delivered=False)
+  plan, intent, pending, outbox = _other_plan_command(delivered=True)
+  rejected_at = utcnow()
+  outbox.delivered_at = rejected_at - timedelta(seconds=1)
+  outbox.delivery_status = "RECONCILE_REQUIRED"
+  outbox.last_error = "physical_delivery_exit_plan_final_gate_rejected"
+  intent.status = "QUEUED"
+  pending.status = "CANCEL_REQUESTED"
+  pending.status_reason = "physical delivery final gate rejected"
+  pending.request_metadata = {
+    **dict(pending.request_metadata or {}),
+    QUARANTINE_CANCEL_REQUIRED_METADATA_KEY: True,
+    QUARANTINE_REPAIR_REQUIRED_METADATA_KEY: True,
+    QUARANTINE_REASON_METADATA_KEY: "PHYSICAL_DELIVERY_GATE_REJECTED",
+  }
+  if tamper == "attempts":
+    outbox.attempts = 2
+  elif tamper == "acknowledged":
+    outbox.acknowledged_at = rejected_at
+  elif tamper == "source_sequence":
+    pending.last_source_sequence = 1
+  elif tamper == "outbox_error":
+    outbox.last_error = "different failure"
+  elif tamper:
+    raise AssertionError(f"unsupported physical-gate tamper: {tamper}")
+
+  control = await db.get(
+    AccountExecutionControl,
+    ACCOUNT_ID,
+    with_for_update=True,
+  )
+  assert control is not None
+  control.authorization_state = "PAUSED"
+  control.reconcile_status = "RECONCILE_REQUIRED"
+  control.state_version = int(control.state_version or 0) + 1
+  control.paused_reason = json.dumps(
+    [
+      {
+        "kind": "QUARANTINED_ORDER_REPAIR_REQUIRED",
+        "business_id": OTHER_CLIENT_ORDER_ID,
+        "reason": "PHYSICAL_DELIVERY_GATE_REJECTED",
+      }
+    ]
+  )
+  event = AccountExecutionControlEvent(
+    event_id=f"physical-delivery-quarantine:{OTHER_PLACE_MESSAGE_ID}",
+    account_id=ACCOUNT_ID,
+    event_type=LIVE_PLACE_PHYSICAL_GATE_REJECTED,
+    previous_state="ENABLED",
+    next_state="PAUSED",
+    created_at=rejected_at,
+    details={
+      "triggerPlanId": OTHER_PLAN_ID,
+      "triggerIntentId": OTHER_INTENT_ID,
+      "reason": "exit-plan intent status changed",
+      "commandDispositions": [
+        {
+          "clientOrderId": OTHER_CLIENT_ORDER_ID,
+          "messageId": OTHER_PLACE_MESSAGE_ID,
+          "planId": OTHER_PLAN_ID,
+          "intentId": OTHER_INTENT_ID,
+          "ownerKind": "UNKNOWN",
+          "disposition": "PHYSICAL_DELIVERY_GATE_REJECTED",
+          "repairReason": "PHYSICAL_DELIVERY_GATE_REJECTED",
+        }
+      ],
+    },
+  )
+  db.add_all([plan, intent, pending, outbox, event])
+  await db.commit()
+  return event
 
 
 @pytest.mark.asyncio
@@ -2140,6 +2220,95 @@ async def test_account_quarantine_does_not_reopen_historical_terminal_live_sells
         )
       )
       assert cancel_count == 0
+
+
+@pytest.mark.asyncio
+async def test_physical_gate_rejection_repairs_as_proven_zero_fill() -> None:
+  async with _database() as sessions:
+    async with sessions() as db:
+      event = await _seed_physical_gate_rejection(db)
+      snapshot_at = event.created_at + timedelta(seconds=2)
+      snapshot = _full_snapshot_payload(
+        snapshot_id="physical-gate-repair-snapshot",
+        source_sequence=1,
+        reported_at=snapshot_at,
+      )
+      await _store_full_snapshot(db, snapshot, received_at=snapshot_at)
+      control = await db.get(AccountExecutionControl, ACCOUNT_ID)
+      assert control is not None
+      service = AccountExecutionQuarantineService(db)
+      candidates = await service.list_quarantined_orders(
+        account_id=ACCOUNT_ID,
+        control=control,
+      )
+      candidate = next(
+        item
+        for item in candidates
+        if item["client_order_id"] == OTHER_CLIENT_ORDER_ID
+      )
+      assert candidate["repairable"] is True
+      assert candidate["blocked_reason"] == ""
+
+      repaired = await service.repair_quarantined_order(
+        account_id=ACCOUNT_ID,
+        client_order_id=OTHER_CLIENT_ORDER_ID,
+        quarantine_reason="PHYSICAL_DELIVERY_GATE_REJECTED",
+        snapshot_id="physical-gate-repair-snapshot",
+        expected_state_version=int(control.state_version or 0),
+        actor_id=USER_ID,
+        operator_reason="verified physical send was never attempted",
+        operation_id="physical-gate-zero-fill-repair",
+      )
+      assert repaired.applied is True
+      assert repaired.broker_terminal_status == "RECONCILED_ZERO_FILL"
+      assert repaired.cumulative_filled_volume == 0
+      await db.commit()
+
+      pending = await db.get(PendingTradeOrder, OTHER_CLIENT_ORDER_ID)
+      intent = await db.get(TradeIntentRecord, OTHER_INTENT_ID)
+      plan = await db.get(AutoExitPlanRecord, OTHER_PLAN_ID)
+      outbox = await db.get(TradeCommandOutbox, OTHER_PLACE_MESSAGE_ID)
+      assert pending is not None and pending.status == "CANCELLED"
+      assert intent is not None and intent.status == "RECONCILED_ZERO_FILL"
+      assert plan is not None and plan.enabled is False and plan.status == "ERROR"
+      assert plan.pending_client_order_id is None
+      assert outbox is not None
+      assert outbox.delivery_status == "CANCELLED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "tamper",
+  ["attempts", "acknowledged", "source_sequence", "outbox_error"],
+)
+async def test_physical_gate_zero_fill_proof_fails_closed_after_mutation(
+  tamper: str,
+) -> None:
+  async with _database() as sessions:
+    async with sessions() as db:
+      event = await _seed_physical_gate_rejection(db, tamper=tamper)
+      snapshot_at = event.created_at + timedelta(seconds=2)
+      snapshot = _full_snapshot_payload(
+        snapshot_id=f"physical-gate-tampered-{tamper}",
+        source_sequence=1,
+        reported_at=snapshot_at,
+      )
+      await _store_full_snapshot(db, snapshot, received_at=snapshot_at)
+      control = await db.get(AccountExecutionControl, ACCOUNT_ID)
+      assert control is not None
+      candidates = await AccountExecutionQuarantineService(
+        db
+      ).list_quarantined_orders(
+        account_id=ACCOUNT_ID,
+        control=control,
+      )
+      candidate = next(
+        item
+        for item in candidates
+        if item["client_order_id"] == OTHER_CLIENT_ORDER_ID
+      )
+      assert candidate["repairable"] is False
+      assert candidate["blocked_reason"] == "BROKER_TERMINAL_EVIDENCE_REQUIRED"
 
 
 @pytest.mark.asyncio

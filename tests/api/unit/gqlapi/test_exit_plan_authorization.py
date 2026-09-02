@@ -73,6 +73,9 @@ from quantx_infrastructure.services import (
 from quantx_infrastructure.services import (
   trade_intent_processor as trade_intent_processor_module,
 )
+from quantx_infrastructure.services.account_execution_quarantine_service import (
+  AccountExecutionQuarantineService,
+)
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.engine_command_service import EngineCommandReceipt
 from quantx_infrastructure.services.exit_plan_authorization_service import (
@@ -1892,9 +1895,11 @@ async def test_physical_send_rechecks_exit_plan_position_after_command_claim(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("projected_status", ["APPROVED", "QUEUED"])
 async def test_physical_send_allows_one_legal_exit_plan_frame(
   authorization_database,
   monkeypatch: pytest.MonkeyPatch,
+  projected_status: str,
 ):
   intent_id = "intent-physical-send-positive"
   metadata, _challenge_id = await _mark_manual_intent_approved(
@@ -1915,6 +1920,9 @@ async def test_physical_send_allows_one_legal_exit_plan_frame(
       policy_version=1,
       request_metadata=metadata,
     )
+    intent = await db.get(TradeIntentRecord, intent_id, with_for_update=True)
+    assert intent is not None
+    intent.status = projected_status
     await db.commit()
 
   monkeypatch.setattr(agent_api, "AsyncSessionLocal", authorization_database)
@@ -1969,7 +1977,7 @@ async def test_physical_send_allows_one_legal_exit_plan_frame(
     plan = await db.get(AutoExitPlanRecord, "plan-1")
     assert command is not None and command.delivery_status == "DELIVERED"
     assert pending is not None and pending.status == "QUEUED"
-    assert intent is not None and intent.status == "APPROVED"
+    assert intent is not None and intent.status == projected_status
     assert plan is not None
     assert str(dict(plan.plan_state or {}).get("pending_intent_id") or "") == intent_id
 
@@ -2011,6 +2019,29 @@ async def test_exact_auto_exit_final_gate_allows_sized_volume_below_intent_targe
       require_risk_reducing_live_authorization=True,
       authorization_user_id="user-1",
     )
+    intent = await db.get(TradeIntentRecord, intent_id, with_for_update=True)
+    command = await db.get(
+      TradeCommandOutbox,
+      queued.message_id,
+      with_for_update=True,
+    )
+    assert intent is not None and command is not None
+    intent.status = "QUEUED"
+    command.delivery_status = "DELIVERED"
+    command.delivered_at = utcnow()
+    command.attempts = 1
+    expected_payload = dict(command.payload or {})
+    await db.commit()
+
+  async with authorization_database() as db:
+    delivery = await AccountExecutionQuarantineService(
+      db
+    ).lock_command_for_physical_send(
+      message_id=queued.message_id,
+      expected_payload=expected_payload,
+    )
+    assert delivery.command is not None
+    assert delivery.blocked_reason == ""
 
   assert queued.status == "QUEUED"
   async with authorization_database() as db:

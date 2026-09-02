@@ -1256,6 +1256,119 @@ async def test_exit_plan_delivered_expiry_remains_reconcile_required(
 
 
 @pytest.mark.asyncio
+async def test_managed_entry_physical_cancel_proof_converges_zero_fill(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  message_id = "managed-entry-physical-cancel-message"
+  client_order_id = "managed-entry-physical-cancel-order"
+  intent_id = "managed-entry-physical-cancel-intent"
+  now = utcnow()
+  async with session_factory() as db:
+    intent_metadata = {"entry_plan_id": "run-1", "execution_mode": "AUTO"}
+    command = TradeCommandOutbox(
+      message_id=message_id,
+      client_order_id=client_order_id,
+      idempotency_key="managed-entry-physical-cancel",
+      device_id="device-1",
+      account_id="account-1",
+      payload={
+        "command_kind": "PLACE_ORDER",
+        "client_order_id": client_order_id,
+        "account_id": "account-1",
+        "execution_mode": "live",
+        "instrument_code": "600000.SH",
+        "side": "BUY",
+        "volume": 100,
+        "intent_id": intent_id,
+        "strategy_run_id": "run-1",
+        "request_metadata": intent_metadata,
+        "expires_at": (now + timedelta(minutes=5)).isoformat(),
+      },
+      delivery_status="DELIVERED",
+      delivered_at=now,
+      expires_at=now + timedelta(minutes=5),
+      attempts=1,
+    )
+    pending = PendingTradeOrder(
+      client_order_id=client_order_id,
+      user_id="user-1",
+      account_id="account-1",
+      instrument_code="600000.SH",
+      side="BUY",
+      order_type="FIX_PRICE",
+      limit_price="10.50",
+      volume=100,
+      status="CANCEL_REQUESTED",
+      status_reason="ENTRY_PLAN_CANCELLED",
+      execution_mode="live",
+      strategy_run_id="run-1",
+      strategy_order_id="managed-entry-physical-cancel-strategy-order",
+      intent_id=intent_id,
+      bucket="core",
+      request_metadata=intent_metadata,
+    )
+    db.add_all(
+      [
+        TradeIntentRecord(
+          id=intent_id,
+          strategy_run_id="run-1",
+          owner_type="STRATEGY_RUN",
+          owner_id="run-1",
+          account_id="account-1",
+          strategy_id="ashare_managed_entry_plan",
+          instrument_code="600000.SH",
+          direction="BUY",
+          bucket="core",
+          reason="MANAGED_ENTRY",
+          status="QUEUED",
+          target_volume=100,
+          limit_price_hint=10.5,
+          executed_volume=0,
+          intent_metadata=intent_metadata,
+        ),
+        StrategyOrderCorrelation(
+          id="managed-entry-physical-cancel-correlation",
+          client_order_id=client_order_id,
+          account_id="account-1",
+          strategy_run_id="run-1",
+          strategy_order_id="managed-entry-physical-cancel-strategy-order",
+          intent_id=intent_id,
+          bucket="core",
+          execution_mode="live",
+          trace_id="managed-entry-physical-cancel-trace",
+          request_metadata=intent_metadata,
+        ),
+        pending,
+        command,
+      ]
+    )
+    await db.flush()
+    staged = await agent_api._transition_place_order_command(
+      db,
+      command=command,
+      requested_status="EXPIRED",
+      reason=agent_api.PHYSICAL_SEND_CANCELLED_REASON,
+      now=utcnow(),
+      pre_execution_proven=True,
+    )
+    assert staged is True
+    await db.commit()
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, message_id)
+    pending = await db.get(PendingTradeOrder, client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    [event] = list((await db.execute(select(StrategyRuntimeEvent))).scalars().all())
+    assert outbox is not None and outbox.delivery_status == "EXPIRED"
+    assert outbox.last_error == agent_api.PHYSICAL_SEND_CANCELLED_REASON
+    assert pending is not None and pending.status == "EXPIRED"
+    assert intent is not None and intent.status == "RECONCILED_ZERO_FILL"
+    assert event.payload["report"]["status"] == "RECONCILED_ZERO_FILL"
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_managed_entry_queued_expiry_proves_zero_fill(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

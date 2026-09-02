@@ -70,6 +70,7 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import market_data_staging as _market_data_staging
 from quantx_infrastructure.services.account_execution_quarantine_service import (
+  PHYSICAL_SEND_CANCELLED_REASON,
   AccountExecutionQuarantineService,
 )
 from quantx_infrastructure.services.account_execution_safety_service import (
@@ -1175,6 +1176,7 @@ _PRE_EXECUTION_REJECTION_REASONS = frozenset(
     "local_emergency_stop",
     "invalid_command_payload",
     "invalid_command_expiry",
+    PHYSICAL_SEND_CANCELLED_REASON,
     # MiniQMTBroker rejects these before calling XTTrader.order_stock().
     "miniQMT trading connection unavailable",
     "miniQMT disconnected",
@@ -1405,6 +1407,11 @@ async def _transition_place_order_command(
       and pending is not None
       and (
         str(pending.status or "").upper() == "QUEUED"
+        or (
+          normalized_status == "EXPIRED"
+          and reason == PHYSICAL_SEND_CANCELLED_REASON
+          and str(pending.status or "").upper() == "CANCEL_REQUESTED"
+        )
         or (
           normalized_status == "EXPIRED"
           and reason == "command_expired"
@@ -3293,6 +3300,24 @@ async def _send_agent_control_messages(
             message_id=item.envelope.message_id,
             expected_payload=item.envelope.payload,
           )
+          if send_lock.pre_execution_terminal_command is not None:
+            staged_runtime_event = await _transition_place_order_command(
+              db,
+              command=send_lock.pre_execution_terminal_command,
+              requested_status=send_lock.pre_execution_terminal_status,
+              reason=send_lock.pre_execution_terminal_reason,
+              now=utcnow(),
+              pre_execution_proven=True,
+            )
+            await db.commit()
+            if staged_runtime_event:
+              await _wake_runtime_event_consumer()
+            await outbound.complete(item)
+            AGENT_CONTROL_EVENTS.labels(
+              event="delivery",
+              reason="live_place_physical_send_cancelled",
+            ).inc()
+            continue
           if send_lock.command is None:
             if send_lock.commit_required:
               # The physical EXIT_PLAN final gate sealed a claimed DELIVERED

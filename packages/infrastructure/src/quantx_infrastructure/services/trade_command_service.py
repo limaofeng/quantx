@@ -267,6 +267,7 @@ class TradeCommandService:
     instrument_code: str,
     volume: int,
     request_metadata: Mapping[str, Any],
+    allow_queued_intent_projection: bool = False,
   ) -> tuple[
     AutoExitPlanRecord,
     TradeIntentRecord,
@@ -315,6 +316,14 @@ class TradeCommandService:
     plan_state = dict(plan.plan_state or {})
     exact_auto = bool(intent_metadata.get("exact_auto_exit_authorized"))
     expected_intent_status = "PENDING" if exact_auto else "APPROVED"
+    allowed_intent_statuses = {expected_intent_status}
+    if allow_queued_intent_projection:
+      # TradingService returns only after the exact Pending/outbox rows commit.
+      # TradeIntentProcessor then projects that accepted command as QUEUED in a
+      # separate transaction, which may win the race with the physical writer.
+      # The physical gate has already re-locked and matched those durable rows,
+      # so QUEUED is the only legitimate post-enqueue status accepted here.
+      allowed_intent_statuses.add("QUEUED")
     plan_status = str(plan.status or "").strip().upper()
     target_volume = int(intent.target_volume or 0)
     remaining_volume = max(0, int(plan.remaining_volume or 0))
@@ -358,7 +367,8 @@ class TradeCommandService:
       or str(intent.instrument_code or "").strip().upper()
       != normalized_instrument
       or str(intent.direction or "").strip().upper() != "SELL"
-      or str(intent.status or "").strip().upper() != expected_intent_status
+      or str(intent.status or "").strip().upper()
+      not in allowed_intent_statuses
     )
     plan_not_routable = (
       not bool(plan.enabled)
@@ -436,6 +446,7 @@ class TradeCommandService:
         "CANCELED",
         "REJECTED",
         "EXPIRED",
+        "CANCEL_REQUESTED",
         "RECONCILE_REQUIRED",
         "RECONCILED_ZERO_FILL",
       }
@@ -475,6 +486,7 @@ class TradeCommandService:
       instrument_code=str(payload.get("instrument_code") or ""),
       volume=requested_volume,
       request_metadata=metadata,
+      allow_queued_intent_projection=True,
     )
 
   @staticmethod

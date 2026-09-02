@@ -12,10 +12,12 @@ from quantx_contracts import AgentMessageType
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
   AgentDevice,
+  PendingTradeOrder,
   RuntimeComponentHeartbeat,
   TradeCommandOutbox,
 )
 from quantx_infrastructure.services.account_execution_quarantine_service import (
+  PHYSICAL_SEND_CANCELLED_REASON,
   AccountExecutionQuarantineService,
 )
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
@@ -35,6 +37,7 @@ async def _trade_command_database():
     AgentDevice.__table__,
     AccountExecutionControl.__table__,
     RuntimeComponentHeartbeat.__table__,
+    PendingTradeOrder.__table__,
     TradeCommandOutbox.__table__,
   )
   async with engine.begin() as connection:
@@ -387,6 +390,83 @@ async def test_live_buy_physical_gate_keeps_account_lock_without_sell_validation
       assert delivery.command is not None
       assert delivery.command.message_id == message_id
       assert not delivery.blocked_reason
+      await db.rollback()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.parametrize(
+  ("attempts", "locally_terminal"),
+  [(1, True), (2, False)],
+)
+async def test_live_buy_physical_gate_honors_cancel_committed_before_socket_write(
+  attempts: int,
+  locally_terminal: bool,
+) -> None:
+  now = agent_api.utcnow()
+  message_id = f"physical-cancelled-live-buy-{attempts}"
+  client_order_id = f"physical-cancelled-live-buy-order-{attempts}"
+  async with _trade_command_database() as sessions:
+    async with sessions() as db:
+      command = _command(
+        message_id=message_id,
+        client_order_id=client_order_id,
+        kind="PLACE_ORDER",
+        created_at=now,
+        status="DELIVERED",
+        delivered_at=now,
+      )
+      command.attempts = attempts
+      command.payload = {
+        **dict(command.payload),
+        "side": "BUY",
+        "instrument_code": "600000.SH",
+        "intent_id": "cancelled-buy-intent",
+        "volume": 100,
+      }
+      db.add_all(
+        [
+          AccountExecutionControl(
+            account_id="account-1",
+            authorization_state="ENABLED",
+            reconcile_status="READY",
+          ),
+          PendingTradeOrder(
+            client_order_id=client_order_id,
+            user_id="user-1",
+            account_id="account-1",
+            instrument_code="600000.SH",
+            side="BUY",
+            order_type="LIMIT",
+            limit_price="10.00",
+            volume=100,
+            status="CANCEL_REQUESTED",
+            execution_mode="live",
+            intent_id="cancelled-buy-intent",
+            request_metadata={},
+          ),
+          command,
+        ]
+      )
+      await db.commit()
+
+      delivery = await AccountExecutionQuarantineService(
+        db
+      ).lock_command_for_physical_send(
+        message_id=message_id,
+        expected_payload=command.payload,
+      )
+      assert delivery.command is None
+      if locally_terminal:
+        assert delivery.pre_execution_terminal_command is not None
+        assert delivery.pre_execution_terminal_status == "EXPIRED"
+        assert delivery.pre_execution_terminal_reason == PHYSICAL_SEND_CANCELLED_REASON
+        assert delivery.blocked_reason == "PLACE_CANCELLED_BEFORE_PHYSICAL_SEND"
+      else:
+        assert delivery.pre_execution_terminal_command is None
+        assert delivery.blocked_reason == (
+          "PLACE_CANCEL_REQUIRES_BROKER_RECONCILIATION"
+        )
       await db.rollback()
 
 

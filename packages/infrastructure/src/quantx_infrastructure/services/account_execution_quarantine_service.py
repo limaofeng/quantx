@@ -65,6 +65,9 @@ _QUARANTINE_EVENT_PREFIX = "broker-release-quarantine:"
 _QUARANTINE_CANCEL_REASON = "account quarantined after broker execution"
 _LOCAL_OUTBOX_CANCEL_SOURCE = "LOCAL_OUTBOX_CANCEL"
 _LOCAL_OUTBOX_CANCEL_REASON = "EXIT_PLAN_QUARANTINE_CANCELLED_BEFORE_AGENT_DELIVERY"
+_PHYSICAL_GATE_OUTBOX_ERROR = "physical_delivery_exit_plan_final_gate_rejected"
+_PHYSICAL_GATE_PENDING_REASON = "physical delivery final gate rejected"
+PHYSICAL_SEND_CANCELLED_REASON = "command_cancelled_before_physical_send"
 QUARANTINED_ORDER_REPAIRED = "QUARANTINED_ORDER_REPAIRED"
 LIVE_PLACE_PHYSICAL_GATE_REJECTED = "LIVE_PLACE_PHYSICAL_GATE_REJECTED"
 _REPAIRABLE_QUARANTINE_REASONS = frozenset(
@@ -116,6 +119,9 @@ class TradeCommandDeliveryLock:
   command: TradeCommandOutbox | None
   blocked_reason: str = ""
   commit_required: bool = False
+  pre_execution_terminal_command: TradeCommandOutbox | None = None
+  pre_execution_terminal_status: str = ""
+  pre_execution_terminal_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -214,6 +220,60 @@ def _never_delivered(
     and not str(pending.broker_order_id or "").strip()
     and int(pending.last_source_sequence or 0) == 0
     and pending.last_source_event_at is None
+  )
+
+
+def _physical_gate_pre_execution_proven(
+  *,
+  event: AccountExecutionControlEvent,
+  disposition: Mapping[str, Any],
+  pending: PendingTradeOrder | None,
+  outbox: TradeCommandOutbox | None,
+) -> bool:
+  """Prove that a claimed PLACE frame was rejected before socket write.
+
+  ``DELIVERED`` is the durable queue-claim marker written by ``_next_command``;
+  it is not itself proof that ``websocket.send_text`` ran.  This exact event is
+  created only when the physical writer's final validation returns before that
+  call.  Require the complete unchanged claim/quarantine shape so later broker
+  evidence or lifecycle mutation revokes the local zero-fill proof.
+  """
+
+  if pending is None or outbox is None:
+    return False
+  metadata = dict(pending.request_metadata or {})
+  delivered_at = outbox.delivered_at
+  return bool(
+    str(event.event_type or "").strip().upper()
+    == LIVE_PLACE_PHYSICAL_GATE_REJECTED
+    and str(event.event_id or "")
+    == f"physical-delivery-quarantine:{outbox.message_id}"
+    and str(
+      disposition.get("repairReason") or disposition.get("disposition") or ""
+    )
+    .strip()
+    .upper()
+    == "PHYSICAL_DELIVERY_GATE_REJECTED"
+    and str(disposition.get("messageId") or "") == str(outbox.message_id or "")
+    and str(disposition.get("clientOrderId") or "")
+    == str(outbox.client_order_id or "")
+    and str(outbox.delivery_status or "").strip().upper()
+    == "RECONCILE_REQUIRED"
+    and str(outbox.last_error or "") == _PHYSICAL_GATE_OUTBOX_ERROR
+    and delivered_at is not None
+    and to_naive_utc(delivered_at) <= to_naive_utc(event.created_at)
+    and outbox.acknowledged_at is None
+    and int(outbox.attempts or 0) == 1
+    and str(pending.client_order_id or "") == str(outbox.client_order_id or "")
+    and str(pending.status or "").strip().upper() == "CANCEL_REQUESTED"
+    and str(pending.status_reason or "") == _PHYSICAL_GATE_PENDING_REASON
+    and not str(pending.broker_order_id or "").strip()
+    and int(pending.last_source_sequence or 0) == 0
+    and pending.last_source_event_at is None
+    and metadata.get(QUARANTINE_CANCEL_REQUIRED_METADATA_KEY) is True
+    and metadata.get(QUARANTINE_REPAIR_REQUIRED_METADATA_KEY) is True
+    and str(metadata.get(QUARANTINE_REASON_METADATA_KEY) or "")
+    == "PHYSICAL_DELIVERY_GATE_REJECTED"
   )
 
 
@@ -740,6 +800,52 @@ class AccountExecutionQuarantineService:
       or str(control.reconcile_status or "").strip().upper() != "READY"
     ):
       return TradeCommandDeliveryLock(None, "ACCOUNT_RECONCILE_REQUIRED")
+    pending = await self.db.get(
+      PendingTradeOrder,
+      str(command.client_order_id or ""),
+      with_for_update=True,
+      populate_existing=True,
+    )
+    if pending is not None:
+      try:
+        payload_volume = int(payload.get("volume") or 0)
+      except (TypeError, ValueError, OverflowError):
+        payload_volume = -1
+      pending_binding_exact = bool(
+        str(pending.client_order_id or "")
+        == str(payload.get("client_order_id") or command.client_order_id or "")
+        and str(pending.account_id or "") == str(command.account_id or "")
+        and str(pending.execution_mode or "").strip().lower() == "live"
+        and str(pending.side or "").strip().upper()
+        == str(payload.get("side") or "").strip().upper()
+        and str(pending.instrument_code or "").strip().upper()
+        == str(payload.get("instrument_code") or "").strip().upper()
+        and str(pending.intent_id or "") == str(payload.get("intent_id") or "")
+        and int(pending.volume or 0) == payload_volume
+      )
+      if not pending_binding_exact:
+        return TradeCommandDeliveryLock(None, "PLACE_PENDING_BINDING_CHANGED")
+      if str(pending.status or "").strip().upper() == "CANCEL_REQUESTED":
+        first_claim_pre_execution_proven = bool(
+          int(command.attempts or 0) == 1
+          and command.delivered_at is not None
+          and command.acknowledged_at is None
+          and not str(pending.broker_order_id or "").strip()
+          and int(pending.last_source_sequence or 0) == 0
+          and pending.last_source_event_at is None
+        )
+        if first_claim_pre_execution_proven:
+          return TradeCommandDeliveryLock(
+            None,
+            "PLACE_CANCELLED_BEFORE_PHYSICAL_SEND",
+            pre_execution_terminal_command=command,
+            pre_execution_terminal_status="EXPIRED",
+            pre_execution_terminal_reason=PHYSICAL_SEND_CANCELLED_REASON,
+          )
+        return TradeCommandDeliveryLock(
+          None,
+          "PLACE_CANCEL_REQUIRES_BROKER_RECONCILIATION",
+        )
     side = str(payload.get("side") or "").strip().upper()
     if side == "BUY":
       # LIVE buys share the account/quarantine linearization point, while
@@ -766,7 +872,7 @@ class AccountExecutionQuarantineService:
         populate_existing=True,
       )
       command.delivery_status = "RECONCILE_REQUIRED"
-      command.last_error = "physical_delivery_exit_plan_final_gate_rejected"
+      command.last_error = _PHYSICAL_GATE_OUTBOX_ERROR
       cancel_message_id = ""
       plan_id = ""
       intent_id = ""
@@ -779,7 +885,7 @@ class AccountExecutionQuarantineService:
           QUARANTINE_REASON_METADATA_KEY: "PHYSICAL_DELIVERY_GATE_REJECTED",
         }
         pending.status = "CANCEL_REQUESTED"
-        pending.status_reason = "physical delivery final gate rejected"
+        pending.status_reason = _PHYSICAL_GATE_PENDING_REASON
         broker_order_id = str(pending.broker_order_id or "").strip()
         if broker_order_id:
           try:
@@ -840,6 +946,13 @@ class AccountExecutionQuarantineService:
                   "ownerKind": "UNKNOWN",
                   "disposition": "PHYSICAL_DELIVERY_GATE_REJECTED",
                   "repairReason": "PHYSICAL_DELIVERY_GATE_REJECTED",
+                  "preExecutionProven": True,
+                  "physicalSendAttempted": False,
+                  "claimedDeliveryAt": (
+                    command.delivered_at.isoformat()
+                    if command.delivered_at is not None
+                    else None
+                  ),
                   "cancelMessageId": cancel_message_id or None,
                 }
               ],
@@ -1018,6 +1131,7 @@ class AccountExecutionQuarantineService:
     outbox: TradeCommandOutbox | None,
     intent: TradeIntentRecord | None,
     previous_delivery_status: str = "",
+    local_pre_execution_zero_fill_proven: bool = False,
   ) -> tuple[str, int]:
     client_order_id = str(client_order_id or "")
     broker_order_id = str(broker_order_id or "")
@@ -1073,6 +1187,11 @@ class AccountExecutionQuarantineService:
       if status == "FILLED" and cumulative == 0:
         raise ValueError("FILLED 委托不能作为零成交隔离修复证明")
       return status, cumulative
+
+    if local_pre_execution_zero_fill_proven:
+      if broker_order_id or durable_execution or trades:
+        raise ValueError("物理发送前拒绝证明与券商执行事实冲突")
+      return "RECONCILED_ZERO_FILL", 0
 
     may_have_left = bool(
       str(previous_delivery_status or "").strip().upper()
@@ -1302,6 +1421,14 @@ class AccountExecutionQuarantineService:
                 intent=intent,
                 previous_delivery_status=str(
                   disposition.get("previousDeliveryStatus") or ""
+                ),
+                local_pre_execution_zero_fill_proven=(
+                  _physical_gate_pre_execution_proven(
+                    event=event,
+                    disposition=disposition,
+                    pending=pending,
+                    outbox=outbox,
+                  )
                 ),
               )
             except ValueError:
@@ -1582,6 +1709,14 @@ class AccountExecutionQuarantineService:
       intent=intent,
       previous_delivery_status=str(
         disposition.get("previousDeliveryStatus") or ""
+      ),
+      local_pre_execution_zero_fill_proven=(
+        _physical_gate_pre_execution_proven(
+          event=source_event,
+          disposition=disposition,
+          pending=pending,
+          outbox=outbox,
+        )
       ),
     )
     repaired_as_zero_fill = bool(

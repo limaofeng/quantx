@@ -240,6 +240,10 @@ outbox→account 反向锁；迟到 `command_processing` 或 accepted ACK 只记
 复活或改写已隔离 PLACE_ORDER。全链统一锁序为
 `AccountExecutionControl → TradeCommandOutbox → PendingTradeOrder → StrategyOrderCorrelation`
 ` → TradeIntentRecord → AutoExitPlanRecord`。
+物理发送终检在入队门禁状态外，只额外接受 `QUEUED` 这一种入队后意图投影。若买单或
+卖单的取消请求先于
+第一次 WebSocket 写入提交，终检必须阻止缓存帧并按可证明的本地零成交收敛；存在重投、
+Agent ACK、broker order id 或来源事件时，该本地证明失效，只能继续券商对账。
 
 只要 `CANCEL_REQUESTED` 尚未由券商终态收敛，完整快照必须持续报告
 `CANCEL_REQUEST_PENDING` 并保持账户 `PAUSED / RECONCILE_REQUIRED`。即使旧委托已经
@@ -247,7 +251,10 @@ outbox→account 反向锁；迟到 `command_processing` 或 accepted ACK 只记
 选择服务端列出的精确隔离订单，通过两阶段
 `REPAIR_QUARANTINED_ORDER` 挑战绑定
 `client_order_id / quarantine_reason / snapshot_id / state_version`。服务端在统一锁序内
-重验最新完整快照、原隔离事件、计划/意图/订单绑定和权威终态或已收敛成交，修复后只会
+重验最新完整快照、原隔离事件、计划/意图/订单绑定和权威终态或已收敛成交。物理发送
+终检在 WebSocket 写入前拒绝的 PLACE_ORDER 可使用其精确终检事件、唯一一次队列 claim、
+无 Agent ACK、无 broker order id、无来源序号以及更新完整快照中无订单/成交的组合证明
+收敛为零成交；任一字段变化或出现后续券商事实都必须撤销该本地证明。修复后只会
 终结精确 pending 并写审计事件；计划仍保持 sticky `ERROR`，账户仍保持
 `PAUSED / RECONCILE_REQUIRED`，且把该修复快照设为新的新鲜度边界。只有之后一张严格
 更新且无冲突的完整快照，才可把账户降为 `DISABLED / READY`；它不会恢复交易权限，
