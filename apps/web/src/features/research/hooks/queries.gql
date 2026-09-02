@@ -74,6 +74,54 @@ query ResearchRun($key: String!) {
   }
 }
 
+query ResearchLifecycleRuns(
+  $filter: ResearchLifecycleRunFilter
+  $limit: Int = 50
+  $offset: Int = 0
+) {
+  researchLifecycleRuns(filter: $filter, limit: $limit, offset: $offset) {
+    items {
+      id
+      runId
+      studyId
+      stage
+      status
+      requestedAt
+      startedAt
+      completedAt
+      updatedAt
+      target
+      artifact {
+        key
+        version
+        eventCount
+        elapsedSeconds
+        configHash
+        hasMetrics
+        artifactErrors
+      }
+      training {
+        runKey
+        datasetVersion
+        requestedBackend
+        resolvedBackend
+        phase
+        completedUnits
+        totalUnits
+        conclusion
+        registerable
+        canStartFinal
+        queueReason
+        errorCode
+        errorMessage
+      }
+    }
+    total
+    limit
+    offset
+  }
+}
+
 query StockSelectionTrainingCapabilities {
   stockSelectionTrainingCapabilities {
     cpuAvailable

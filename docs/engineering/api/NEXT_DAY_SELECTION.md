@@ -139,5 +139,15 @@ GraphQL。研究详情的 `selectionMetrics` 使用同一严格加载器，不�
 优先，也可显式查看任一 SHADOW。SHADOW 始终显示非交易横幅。`/research`
 同时展示安全训练证据和模型人工发布注册表。
 
+研究中心的跨研究类型运行列表以 `researchLifecycleRuns` 为唯一权威连接。它在
+服务端合并离线研究产物与次日概率训练运行，使用 `ResearchLifecycleRunFilter`
+统一按研究类型、阶段、状态、`updatedAt` 的 UTC 日期闭区间和运行标识/版本/数据集
+搜索；服务端完成去重、`updatedAt DESC, id ASC` 稳定排序以及全局 `offset/limit`
+分页，`total` 是过滤后的完整总数。离线产物使用 `artifact:<key>` 身份并投影为
+`RESEARCH_EVIDENCE`，训练运行使用 `training:<runId>` 身份并投影为
+`TRAINING_RUN`；同一 `next-day-selection` `runId` 的数据库训练记录优先于磁盘
+产物。每行只返回一个类型特定摘要，路径、私有 spec JSON 和原始异常不会进入公共
+契约。
+
 接口变化后必须经 Caddy 公共端点运行 `npm run codegen`，再执行根级 check、lint、
 test、build 和 `npm run docs:contracts`。

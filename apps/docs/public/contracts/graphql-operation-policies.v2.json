@@ -2438,6 +2438,16 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "researchLifecycleRuns": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
       "researchRun": {
         "audiences": [
           "web",

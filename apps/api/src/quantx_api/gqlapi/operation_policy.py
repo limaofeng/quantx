@@ -177,6 +177,7 @@ _register(
     "orderEntryCapabilities",
     "researchRun",
     "researchRuns",
+    "researchLifecycleRuns",
     "rootSectors",
     "sector",
     "sectorStats",
@@ -209,6 +210,7 @@ for _field in {
   "stockSelectionTrainingRuns",
   "stockSelectionTrainingRun",
   "stockSelectionTrainingComparison",
+  "researchLifecycleRuns",
 }:
   _key = ("Query", normalize_field_name(_field))
   _policy = _POLICIES[_key]

@@ -63,6 +63,11 @@ describe('router configuration', () => {
     expect(getPageTitle('/settings/data/000001')).toBe('数据详情');
     expect(getPageTitle('/system/flow-runs/flow-1')).toBe('任务详情');
     expect(getPageTitle('/research')).toBe('研究中心');
+    expect(getPageTitle('/research/training')).toBe('模型训练');
+    expect(getPageTitle('/research/training/new')).toBe('新建模型训练');
+    expect(getPageTitle('/research/training/runs/run-1')).toBe('训练运行详情');
+    expect(getPageTitle('/research/runs')).toBe('实验运行');
+    expect(getPageTitle('/research/models')).toBe('模型库');
     expect(
       getPageTitle('/research/volume-shock/smoke-v1/runs/20260729-211642')
     ).toBe('研究 60729-211642');
@@ -80,6 +85,12 @@ describe('router configuration', () => {
     );
     expect(indexOf('/research/:studyId/:version/runs/:runId')).toBeLessThan(
       indexOf('/research')
+    );
+    expect(indexOf('/research/training/new')).toBeLessThan(
+      indexOf('/research/training')
+    );
+    expect(indexOf('/research/training/runs/:runId')).toBeLessThan(
+      indexOf('/research/:studyId/:version/runs/:runId')
     );
     expect(indexOf('/settings/data/market')).toBeLessThan(
       indexOf('/settings/data/:stockCode')

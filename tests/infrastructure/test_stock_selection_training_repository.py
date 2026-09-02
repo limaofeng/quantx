@@ -127,6 +127,35 @@ async def test_certification_and_queue_insertion_are_idempotent(session_factory)
 
 
 @pytest.mark.asyncio
+async def test_index_joins_specs_and_applies_lifecycle_filters(session_factory) -> None:
+  async with session_factory() as db:
+    repository = StockSelectionTrainingRepository(db)
+    await repository.certify_dataset(DATASET)
+    spec = await repository.create_spec(spec_values("index-spec"))
+    run = await repository.create_run(run_values(spec.spec_id, "index-run", "index-idem"))
+    run.status = "SUCCEEDED"
+    run.run_key = "index-run-key"
+    run.requested_at = datetime(2026, 2, 2, 23, 59, tzinfo=timezone.utc)
+    run.started_at = datetime(2026, 2, 3, 0, 1, tzinfo=timezone.utc)
+    run.completed_at = datetime(2026, 2, 3, 12, 0, tzinfo=timezone.utc)
+    await db.commit()
+
+    rows = await repository.list_runs_for_index(
+      statuses=["SUCCEEDED"],
+      run_kinds=["DEVELOPMENT"],
+      date_from=date(2026, 2, 3),
+      date_to=date(2026, 2, 3),
+      search="DATASET-V1",
+    )
+
+    assert len(rows) == 1
+    indexed_run, indexed_spec = rows[0]
+    assert indexed_run.run_id == "index-run"
+    assert indexed_spec.spec_id == "index-spec"
+    assert indexed_spec.dataset_version == "dataset-v1"
+
+
+@pytest.mark.asyncio
 async def test_development_creation_is_atomic_and_idempotent(session_factory) -> None:
   async with session_factory() as db:
     repository = StockSelectionTrainingRepository(db)

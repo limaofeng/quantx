@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import type { ResearchLifecycleRun } from '@/generated/gql/graphql';
+
 const nullableFiniteNumber = z.number().finite().nullable();
 
 const eventCurvePointSchema = z.object({
@@ -280,6 +282,23 @@ export function buildResearchRunPath(
 ) {
   const path = `/research/${encodeURIComponent(studyId)}/${encodeURIComponent(version)}/runs/${encodeURIComponent(runId)}`;
   return `${path}?key=${encodeURIComponent(key)}`;
+}
+
+export function researchLifecycleRunHref(run: ResearchLifecycleRun) {
+  if (run.target === 'TRAINING_RUN') {
+    return run.runId
+      ? `/research/training/runs/${encodeURIComponent(run.runId)}`
+      : null;
+  }
+  if (run.target === 'RESEARCH_EVIDENCE' && run.artifact) {
+    return buildResearchRunPath(
+      run.studyId,
+      run.artifact.version,
+      run.runId,
+      run.artifact.key
+    );
+  }
+  return null;
 }
 
 export function readResearchRunKey(search: string) {

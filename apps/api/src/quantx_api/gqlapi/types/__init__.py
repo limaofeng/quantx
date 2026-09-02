@@ -151,7 +151,19 @@ from .portfolio_types import (
   DailyAssetSnapshot,
   Position,
 )
-from .research_types import ResearchRunDetail, ResearchRunPage, ResearchRunSummary
+from .research_types import (
+  ResearchLifecycleArtifactSummary,
+  ResearchLifecycleRun,
+  ResearchLifecycleRunConnection,
+  ResearchLifecycleRunFilter,
+  ResearchLifecycleRunStage,
+  ResearchLifecycleRunStatus,
+  ResearchLifecycleRunTarget,
+  ResearchLifecycleTrainingSummary,
+  ResearchRunDetail,
+  ResearchRunPage,
+  ResearchRunSummary,
+)
 from .sector import Sector, SectorQueryResult, SectorStats
 from .stock_screening_types import (
   FirstBoardPromotionFactor,
@@ -322,6 +334,14 @@ __all__ = [
   "ResearchRunSummary",
   "ResearchRunPage",
   "ResearchRunDetail",
+  "ResearchLifecycleRunStage",
+  "ResearchLifecycleRunStatus",
+  "ResearchLifecycleRunTarget",
+  "ResearchLifecycleRunFilter",
+  "ResearchLifecycleArtifactSummary",
+  "ResearchLifecycleTrainingSummary",
+  "ResearchLifecycleRun",
+  "ResearchLifecycleRunConnection",
   "Order",
   "Trade",
   "OrderInput",

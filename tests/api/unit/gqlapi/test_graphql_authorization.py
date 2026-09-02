@@ -7,6 +7,7 @@ import strawberry
 from quantx_api.auth.errors import unauthenticated
 from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi.app import AuthenticatedGraphQLRouter
+from quantx_api.gqlapi.operation_policy import operation_policy
 from quantx_api.gqlapi.security import (
   AuthorizationExtension,
   required_permission,
@@ -262,6 +263,7 @@ async def test_native_session_can_use_dedicated_control_scope():
     ("Query", "stockScreenSnapshotStatus", "market:read"),
     ("Query", "researchRuns", "market:read"),
     ("Query", "researchRun", "market:read"),
+    ("Query", "researchLifecycleRuns", "market:read"),
     ("Query", "tTradeBatchesPage", "strategy:read"),
     ("Query", "tTradeBatchEventsPage", "strategy:read"),
     ("Query", "tTradeSignalEvaluations", "strategy:read"),
@@ -284,6 +286,12 @@ def test_new_portfolio_and_t_trade_fields_have_explicit_permissions(
   permission: str,
 ):
   assert required_permission(operation, field_name) == permission
+
+
+def test_research_lifecycle_index_is_web_internal_only():
+  policy = operation_policy("Query", "researchLifecycleRuns")
+  assert policy.audiences == ("web",)
+  assert policy.stability == "web-internal"
 
 
 def test_high_risk_mutations_require_domain_write_and_trade_approval():

@@ -199,6 +199,20 @@ function getTabTitle(pathname: string, search = '') {
     return stockCode ? `个股 ${stockCode}` : '个股详情';
   }
 
+  if (pathname === '/research/training') return '模型训练';
+  if (pathname === '/research/training/new') return '新建模型训练';
+  if (pathname === '/research/runs') return '实验运行';
+  if (pathname === '/research/models') return '模型库';
+
+  if (pathname.startsWith('/research/training/runs/')) {
+    const parts = normalizePath(pathname).split('/').filter(Boolean);
+    const encodedRunId = parts[3];
+    if (!encodedRunId) return '训练运行详情';
+    const runId = safeDecodeURIComponent(encodedRunId);
+    const suffix = runId.length > 12 ? runId.slice(-12) : runId;
+    return `训练运行详情 ${suffix}`;
+  }
+
   if (pathname.startsWith('/research/')) {
     const parts = normalizePath(pathname).split('/').filter(Boolean);
     const encodedRunId = parts[4];

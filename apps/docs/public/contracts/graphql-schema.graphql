@@ -5216,6 +5216,9 @@ type Query {
   """按不透明稳定 key 获取一次研究运行详情"""
   researchRun(key: String!): ResearchRunDetail
 
+  """跨研究类型读取统一生命周期运行连接"""
+  researchLifecycleRuns(filter: ResearchLifecycleRunFilter = null, limit: Int! = 50, offset: Int! = 0): ResearchLifecycleRunConnection!
+
   """按随机事件标识解析当前会话可访问的非敏感路由"""
   notificationEventRoute(eventId: ID!): NotificationEventRoute
 }
@@ -5392,6 +5395,90 @@ input ReorderWatchlistItemsInput {
 
   """资金账号"""
   accountId: String = null
+}
+
+"""离线研究产物的安全摘要"""
+type ResearchLifecycleArtifactSummary {
+  key: String!
+  version: String!
+  eventCount: Int
+  elapsedSeconds: Float
+  configHash: String
+  hasMetrics: Boolean!
+  artifactErrors: [String!]!
+}
+
+"""统一研究生命周期运行"""
+type ResearchLifecycleRun {
+  id: String!
+  runId: String!
+  studyId: String!
+  stage: ResearchLifecycleRunStage!
+  status: ResearchLifecycleRunStatus!
+  requestedAt: DateTime
+  startedAt: DateTime
+  completedAt: DateTime
+  updatedAt: DateTime
+  target: ResearchLifecycleRunTarget!
+  artifact: ResearchLifecycleArtifactSummary
+  training: ResearchLifecycleTrainingSummary
+}
+
+"""统一研究生命周期运行连接"""
+type ResearchLifecycleRunConnection {
+  items: [ResearchLifecycleRun!]!
+  total: Int!
+  limit: Int!
+  offset: Int!
+}
+
+"""统一研究运行索引筛选条件"""
+input ResearchLifecycleRunFilter {
+  studyId: String = null
+  stages: [ResearchLifecycleRunStage!] = null
+  statuses: [ResearchLifecycleRunStatus!] = null
+  dateFrom: Date = null
+  dateTo: Date = null
+  search: String = null
+}
+
+"""统一研究运行生命周期阶段"""
+enum ResearchLifecycleRunStage {
+  RESEARCH
+  DEVELOPMENT
+  FINAL_EVALUATION
+}
+
+"""统一研究运行状态"""
+enum ResearchLifecycleRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+"""统一研究运行目标"""
+enum ResearchLifecycleRunTarget {
+  RESEARCH_EVIDENCE
+  TRAINING_RUN
+}
+
+"""次日概率训练运行的安全摘要"""
+type ResearchLifecycleTrainingSummary {
+  runKey: String
+  datasetVersion: String
+  requestedBackend: StockSelectionTrainingBackend
+  resolvedBackend: StockSelectionResolvedBackend
+  phase: StockSelectionTrainingPhase!
+  completedUnits: Int!
+  totalUnits: Int!
+  conclusion: StockSelectionTrainingConclusion
+  registerable: Boolean!
+  canStartFinal: Boolean!
+  queueReason: String
+  errorCode: String
+  errorMessage: String
 }
 
 """一次离线研究运行的安全统计投影"""

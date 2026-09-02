@@ -14,7 +14,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -263,6 +263,33 @@ def _safe_error_message(value: Any) -> str:
   text = re.sub(r"(?i)(password|secret|token|credential|api[_ -]?key)\s*[:=]\s*[^\s,;]+", r"\1=[REDACTED]", text)
   text = re.sub(r"[\r\n\t]+", " ", text)
   return text.strip()[:512]
+
+
+def _index_filter_values(
+  values: str | Sequence[str] | None,
+) -> tuple[str, ...] | None:
+  """Normalize optional enum filters for the read-only index query."""
+
+  if values is None:
+    return None
+  source = [values] if isinstance(values, str) else values
+  normalized = tuple(
+    item
+    for item in (str(value).strip().upper() for value in source or ())
+    if item
+  )
+  return normalized or None
+
+
+def _index_like_pattern(value: str) -> str:
+  """Build a case-insensitive SQL LIKE pattern with literal user input."""
+
+  escaped = (
+    value.replace("\\", "\\\\")
+    .replace("%", "\\%")
+    .replace("_", "\\_")
+  )
+  return f"%{escaped}%"
 
 
 def _same_fact(left: Any, right: Any) -> bool:
@@ -951,6 +978,105 @@ class StockSelectionTrainingRepository:
       .limit(max(1, min(int(limit), 500)))
     )
     return [_normalize_row_timestamps(row) for row in result.scalars().all()]
+
+  async def list_runs_for_index(
+    self,
+    *,
+    statuses: Sequence[str] | None = None,
+    run_kinds: Sequence[str] | None = None,
+    status: str | None = None,
+    run_kind: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    search: str | None = None,
+  ) -> list[tuple[StockSelectionTrainingRun, StockSelectionTrainingSpec]]:
+    """Read every training run/spec pair needed by the unified run index.
+
+    The index must apply one global ordering and pagination after merging the
+    database and artifact sources.  Consequently this method deliberately has
+    no limit/offset arguments.  It also joins the immutable spec in the same
+    SQL statement so callers never need an N+1 ``get_spec`` lookup per run.
+    """
+
+    status_values = _index_filter_values(statuses if statuses is not None else status)
+    run_kind_values = _index_filter_values(
+      run_kinds if run_kinds is not None else run_kind
+    )
+    normalized_search = str(search or "").strip()
+    if len(normalized_search) > 128:
+      raise TrainingRepositoryError("search must be at most 128 characters")
+    if date_from is not None and date_to is not None and date_from > date_to:
+      raise TrainingRepositoryError("date_from cannot be later than date_to")
+
+    updated_at = func.coalesce(
+      StockSelectionTrainingRun.completed_at,
+      StockSelectionTrainingRun.cancel_requested_at,
+      StockSelectionTrainingRun.started_at,
+      StockSelectionTrainingRun.requested_at,
+    )
+    statement = (
+      select(StockSelectionTrainingRun, StockSelectionTrainingSpec)
+      .join(
+        StockSelectionTrainingSpec,
+        StockSelectionTrainingSpec.spec_id == StockSelectionTrainingRun.spec_id,
+      )
+    )
+    if status_values:
+      statement = statement.where(StockSelectionTrainingRun.status.in_(status_values))
+    if run_kind_values:
+      statement = statement.where(StockSelectionTrainingRun.run_kind.in_(run_kind_values))
+    if date_from is not None:
+      start_at = datetime.combine(date_from, datetime.min.time(), tzinfo=timezone.utc)
+      statement = statement.where(updated_at >= start_at)
+    if date_to is not None:
+      end_at = datetime.combine(
+        date_to + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+      )
+      statement = statement.where(updated_at < end_at)
+    if normalized_search:
+      search_pattern = _index_like_pattern(normalized_search.lower())
+      statement = statement.where(
+        or_(
+          func.lower(StockSelectionTrainingRun.run_id).like(search_pattern, escape="\\"),
+          func.lower(StockSelectionTrainingRun.run_key).like(search_pattern, escape="\\"),
+          func.lower(StockSelectionTrainingRun.parent_run_id).like(
+            search_pattern,
+            escape="\\",
+          ),
+          func.lower(StockSelectionTrainingRun.run_kind).like(
+            search_pattern,
+            escape="\\",
+          ),
+          func.lower(StockSelectionTrainingSpec.dataset_version).like(
+            search_pattern,
+            escape="\\",
+          ),
+        )
+      )
+
+    result = await self.db.execute(
+      statement.order_by(updated_at.desc().nullslast(), StockSelectionTrainingRun.run_id.asc())
+    )
+    return [
+      (_normalize_row_timestamps(run), spec)
+      for run, spec in result.all()
+    ]
+
+  async def list_run_ids_for_index(self) -> list[str]:
+    """Read all durable run identities for cross-source artifact dedupe.
+
+    This is a single set-based identity query.  It deliberately has no
+    filters because the API must suppress a stale artifact even when the
+    corresponding authoritative DB row is excluded by the caller's final
+    stage, status, date, or search filter.
+    """
+
+    result = await self.db.execute(
+      select(StockSelectionTrainingRun.run_id)
+    )
+    return [str(run_id) for run_id in result.scalars().all() if run_id is not None]
 
   async def count_runs(
     self,

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -118,6 +119,38 @@ def _write_run(
       json.dumps(metrics),
       encoding="utf-8",
     )
+  return run_dir
+
+
+def _write_flat_training_run(
+  root: Path,
+  *,
+  run_id: str,
+  status: str,
+  study_id: str = "next-day-selection",
+  manifest_run_id: str | None = None,
+  completed_at: str | None = "2026-07-29T12:01:00+00:00",
+  metrics: bool = False,
+) -> Path:
+  run_dir = root / run_id
+  run_dir.mkdir(parents=True)
+  manifest = {
+    "run_id": manifest_run_id or run_id,
+    "study_id": study_id,
+    "version": "training-v1",
+    "status": status,
+    "started_at": "2026-07-29T12:00:00+00:00",
+    "completed_at": completed_at,
+    "event_count": 7,
+    "elapsed_seconds": 42.5,
+    "config_hash": "a" * 64,
+  }
+  (run_dir / "manifest.json").write_text(
+    json.dumps(manifest),
+    encoding="utf-8",
+  )
+  if metrics:
+    (run_dir / "metrics.json").write_text("{}", encoding="utf-8")
   return run_dir
 
 
@@ -315,6 +348,81 @@ def test_store_discovers_and_filters_resource_failures(tmp_path):
   assert failure_total == 1
   assert failures[0].run_directory == resource_failure
   assert store.get_run(resources[0].key) is not None
+
+
+def test_index_discovers_flat_training_manifests_without_changing_legacy_list(
+  tmp_path,
+):
+  succeeded_dir = _write_flat_training_run(
+    tmp_path,
+    run_id="training-succeeded",
+    status="SUCCEEDED",
+    completed_at="2026-07-29T12:01:00+00:00",
+    metrics=True,
+  )
+  failed_dir = _write_flat_training_run(
+    tmp_path,
+    run_id="training-failed",
+    status="FAILED",
+    completed_at=None,
+  )
+
+  store = ResearchArtifactStore(tmp_path)
+  indexed = store.list_runs_for_index()
+  by_run_id = {item.run_id: item for item in indexed}
+
+  assert set(by_run_id) == {"training-succeeded", "training-failed"}
+  succeeded = by_run_id["training-succeeded"]
+  assert succeeded.status == "success"
+  assert succeeded.study_id == "next-day-selection"
+  assert succeeded.version == "training-v1"
+  assert succeeded.started_at == datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+  assert succeeded.completed_at == datetime(2026, 7, 29, 12, 1, tzinfo=timezone.utc)
+  assert succeeded.event_count == 7
+  assert succeeded.elapsed_seconds == 42.5
+  assert succeeded.config_hash == "a" * 64
+  assert succeeded.has_metrics is True
+  assert succeeded.run_directory == succeeded_dir
+  assert succeeded.key == stable_run_key(
+    study_id="next-day-selection",
+    version="training-v1",
+    run_id="training-succeeded",
+  )
+
+  failed = by_run_id["training-failed"]
+  assert failed.status == "failed"
+  assert failed.completed_at is None
+  assert failed.started_at == datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+  assert failed.has_metrics is False
+  assert failed.run_directory == failed_dir
+
+  # The compatibility query remains nested-layout-only; a flat training
+  # directory must not be accidentally exposed by legacy researchRuns.
+  items, total = store.list_runs()
+  assert items == []
+  assert total == 0
+
+
+def test_index_ignores_unsafe_identity_and_nonterminal_flat_manifests(tmp_path):
+  _write_flat_training_run(
+    tmp_path,
+    run_id="training-running",
+    status="RUNNING",
+  )
+  _write_flat_training_run(
+    tmp_path,
+    run_id="training-unsafe-study",
+    status="FAILED",
+    study_id="../private",
+  )
+  _write_flat_training_run(
+    tmp_path,
+    run_id="training-mismatched-id",
+    status="SUCCEEDED",
+    manifest_run_id="another-run",
+  )
+
+  assert ResearchArtifactStore(tmp_path).list_runs_for_index() == []
 
 
 def test_detail_exposes_only_whitelisted_quality_and_metric_fields(tmp_path):

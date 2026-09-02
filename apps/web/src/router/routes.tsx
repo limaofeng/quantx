@@ -264,6 +264,51 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'detail',
   }),
   route({
+    path: '/research/training/new',
+    title: '新建模型训练',
+    importer: toDefaultExport(
+      () => import('@/features/research/pages/ResearchTrainingNewPage'),
+      'default'
+    ),
+    skeleton: 'form',
+  }),
+  route({
+    path: '/research/training/runs/:runId',
+    title: '训练运行详情',
+    importer: toDefaultExport(
+      () => import('@/features/research/pages/ResearchTrainingRunPage'),
+      'default'
+    ),
+    skeleton: 'detail',
+  }),
+  route({
+    path: '/research/training',
+    title: '模型训练',
+    importer: toDefaultExport(
+      () => import('@/features/research/pages/ResearchTrainingPage'),
+      'default'
+    ),
+    skeleton: 'table',
+  }),
+  route({
+    path: '/research/runs',
+    title: '实验运行',
+    importer: toDefaultExport(
+      () => import('@/features/research/pages/ResearchRunsPage'),
+      'default'
+    ),
+    skeleton: 'table',
+  }),
+  route({
+    path: '/research/models',
+    title: '模型库',
+    importer: toDefaultExport(
+      () => import('@/features/research/pages/ResearchModelsPage'),
+      'default'
+    ),
+    skeleton: 'table',
+  }),
+  route({
     path: '/research/:studyId/:version/runs/:runId',
     title: pathname => {
       const runId = normalizePath(pathname).split('/').filter(Boolean)[4];

@@ -79,7 +79,7 @@ export default function ResearchRunDetailPage() {
         <ResearchErrorState
           message="链接缺少服务端签发的研究结果标识，请从研究中心重新打开。"
           onRetry={() => {
-            window.location.href = '/research';
+            window.location.href = '/research/runs';
           }}
         />
       </main>
@@ -120,7 +120,7 @@ export default function ResearchRunDetailPage() {
         <ResearchErrorState
           message="链接中的研究身份与服务端返回结果不一致，请从研究中心重新打开。"
           onRetry={() => {
-            window.location.href = '/research';
+            window.location.href = '/research/runs';
           }}
         />
       </main>
@@ -163,8 +163,8 @@ export default function ResearchRunDetailPage() {
       <header className="studio-workspace-surface sticky top-0 z-20 border-b border-white/[0.06] px-ui-section py-3 backdrop-blur">
         <div className="studio-content-width mx-auto flex flex-wrap items-center gap-3">
           <Link
-            href="/research"
-            aria-label="返回研究中心"
+            href="/research/runs"
+            aria-label="返回实验运行"
             className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-white/10 text-slate-500 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <ArrowLeft className="h-3.5 w-3.5" />

@@ -1,12 +1,10 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
-import {
-  TrainingPreviewSummary,
-} from '@/features/research/components/StockSelectionTrainingWorkbench';
+import { TrainingPreviewSummary } from '@/features/research/components/training/TrainingPreviewSummary';
 import { createPendingIdempotencyKeys } from '@/features/research/idempotency';
 
-describe('StockSelectionTrainingWorkbench preview contract', () => {
+describe('TrainingPreviewSummary preview contract', () => {
   it('announces a blocked preview and keeps the submit state disabled', () => {
     render(
       <TrainingPreviewSummary
@@ -18,11 +16,16 @@ describe('StockSelectionTrainingWorkbench preview contract', () => {
     );
 
     expect(screen.getByRole('alert')).toHaveTextContent('提交已禁用');
-    expect(screen.getByRole('alert')).toHaveTextContent('GPU_REQUIRED 当前不可用');
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'GPU_REQUIRED 当前不可用'
+    );
     expect(screen.getByLabelText('存在预检阻塞')).toBeInTheDocument();
     expect(screen.getByText('CPU · 已锁定')).toBeInTheDocument();
     expect(screen.getByText('资源估算需要重新确认')).toBeInTheDocument();
-    expect(screen.getByRole('alert').parentElement).toHaveAttribute('aria-live', 'polite');
+    expect(screen.getByRole('alert').parentElement).toHaveAttribute(
+      'aria-live',
+      'polite'
+    );
   });
 
   it('announces the clear state when all preview blockers are gone', () => {
@@ -36,7 +39,9 @@ describe('StockSelectionTrainingWorkbench preview contract', () => {
     );
 
     expect(screen.getByLabelText('预检通过')).toBeInTheDocument();
-    expect(screen.getByText('LIGHTGBM_OPENCL_GPU · 已锁定')).toBeInTheDocument();
+    expect(
+      screen.getByText('LIGHTGBM_OPENCL_GPU · 已锁定')
+    ).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -63,7 +68,13 @@ describe('StockSelectionTrainingWorkbench preview contract', () => {
           folds: [],
           coverage: {},
           leakage: {},
-          resourceEstimate: { memoryMib: 256, diskMib: 64, gpuMemoryMib: 128, estimatedMinutes: 1, durationLevel: 'LOW' },
+          resourceEstimate: {
+            memoryMib: 256,
+            diskMib: 64,
+            gpuMemoryMib: 128,
+            estimatedMinutes: 1,
+            durationLevel: 'LOW',
+          },
           shadowReasons: [],
           blockers: [],
           warnings: [],
@@ -71,9 +82,17 @@ describe('StockSelectionTrainingWorkbench preview contract', () => {
       />
     );
 
-    expect(screen.getByTestId('training-preview-evidence')).toHaveTextContent('正样本比例');
-    expect(screen.getByTestId('training-preview-evidence')).toHaveTextContent('不可用');
-    expect(screen.getByTestId('training-preview-evidence')).toHaveTextContent('内存 / 显存 / 磁盘');
-    expect(screen.getByTestId('training-preview-evidence')).toHaveTextContent('AUTO / CPU');
+    expect(screen.getByTestId('training-preview-evidence')).toHaveTextContent(
+      '正样本比例'
+    );
+    expect(screen.getByTestId('training-preview-evidence')).toHaveTextContent(
+      '不可用'
+    );
+    expect(screen.getByTestId('training-preview-evidence')).toHaveTextContent(
+      '内存 / 显存 / 磁盘'
+    );
+    expect(screen.getByTestId('training-preview-evidence')).toHaveTextContent(
+      'AUTO / CPU'
+    );
   });
 });

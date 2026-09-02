@@ -105,6 +105,41 @@ describe('studio workspace tabs', () => {
     expect(detailTab.path).toContain('?key=opaque-key');
   });
 
+  it('labels research center routes independently from evidence details', () => {
+    expect(buildStudioWorkspaceTab('/research/training')).toMatchObject({
+      name: '模型训练',
+      path: '/research/training',
+    });
+    expect(
+      buildStudioWorkspaceTab('/research/training/?stage=FINAL')
+    ).toMatchObject({
+      name: '模型训练',
+      path: '/research/training?stage=FINAL',
+    });
+    expect(
+      buildStudioWorkspaceTab('/research/training/new/?from=training')
+    ).toMatchObject({
+      name: '新建模型训练',
+      path: '/research/training/new?from=training',
+    });
+    expect(
+      buildStudioWorkspaceTab('/research/runs/?status=RUNNING')
+    ).toMatchObject({
+      name: '实验运行',
+      path: '/research/runs?status=RUNNING',
+    });
+    expect(buildStudioWorkspaceTab('/research/models/')).toMatchObject({
+      name: '模型库',
+      path: '/research/models',
+    });
+    expect(
+      buildStudioWorkspaceTab('/research/training/runs/run-1234567890123').name
+    ).toBe('训练运行详情 234567890123');
+    expect(
+      buildStudioWorkspaceTab('/research/volume-shock/smoke-v1/runs/run-1').name
+    ).toBe('研究 run-1');
+  });
+
   it('keeps malformed research run ids safe in workspace titles', () => {
     expect(
       buildStudioWorkspaceTab('/research/volume-shock/v1/runs/%?key=opaque-key')

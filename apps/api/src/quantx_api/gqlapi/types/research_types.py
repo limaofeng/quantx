@@ -1,6 +1,7 @@
 """GraphQL projections for offline research results."""
 
-from datetime import datetime
+from datetime import date, datetime
+from enum import Enum
 from typing import Optional
 
 import strawberry
@@ -10,8 +11,170 @@ from quantx_api.research_artifacts import (
   ResearchRunDetailRecord,
   ResearchRunRecord,
 )
+from quantx_api.research_run_index import (
+  ResearchLifecycleArtifactRecord,
+  ResearchLifecycleRunRecord,
+  ResearchLifecycleTrainingRecord,
+)
 
 from .indicator_research_types import IndicatorReportReference
+from .stock_selection_types import (
+  StockSelectionResolvedBackend,
+  StockSelectionTrainingBackend,
+  StockSelectionTrainingConclusion,
+  StockSelectionTrainingPhase,
+)
+
+
+@strawberry.enum(description="统一研究运行生命周期阶段")
+class ResearchLifecycleRunStage(Enum):
+  RESEARCH = "RESEARCH"
+  DEVELOPMENT = "DEVELOPMENT"
+  FINAL_EVALUATION = "FINAL_EVALUATION"
+
+
+@strawberry.enum(description="统一研究运行状态")
+class ResearchLifecycleRunStatus(Enum):
+  QUEUED = "QUEUED"
+  RUNNING = "RUNNING"
+  SUCCEEDED = "SUCCEEDED"
+  FAILED = "FAILED"
+  CANCELLED = "CANCELLED"
+
+
+@strawberry.enum(description="统一研究运行目标")
+class ResearchLifecycleRunTarget(Enum):
+  RESEARCH_EVIDENCE = "RESEARCH_EVIDENCE"
+  TRAINING_RUN = "TRAINING_RUN"
+
+
+@strawberry.input(description="统一研究运行索引筛选条件")
+class ResearchLifecycleRunFilter:
+  study_id: Optional[str] = None
+  stages: Optional[list[ResearchLifecycleRunStage]] = None
+  statuses: Optional[list[ResearchLifecycleRunStatus]] = None
+  date_from: Optional[date] = None
+  date_to: Optional[date] = None
+  search: Optional[str] = None
+
+
+@strawberry.type(description="离线研究产物的安全摘要")
+class ResearchLifecycleArtifactSummary:
+  key: str
+  version: str
+  event_count: Optional[int]
+  elapsed_seconds: Optional[float]
+  config_hash: Optional[str]
+  has_metrics: bool
+  artifact_errors: list[str]
+
+  @staticmethod
+  def from_record(record: ResearchLifecycleArtifactRecord) -> "ResearchLifecycleArtifactSummary":
+    return ResearchLifecycleArtifactSummary(
+      key=record.key,
+      version=record.version,
+      event_count=record.event_count,
+      elapsed_seconds=record.elapsed_seconds,
+      config_hash=record.config_hash,
+      has_metrics=record.has_metrics,
+      artifact_errors=list(record.artifact_errors),
+    )
+
+
+@strawberry.type(description="次日概率训练运行的安全摘要")
+class ResearchLifecycleTrainingSummary:
+  run_key: Optional[str]
+  dataset_version: Optional[str]
+  requested_backend: Optional[StockSelectionTrainingBackend]
+  resolved_backend: Optional[StockSelectionResolvedBackend]
+  phase: StockSelectionTrainingPhase
+  completed_units: int
+  total_units: int
+  conclusion: Optional[StockSelectionTrainingConclusion]
+  registerable: bool
+  can_start_final: bool
+  queue_reason: Optional[str]
+  error_code: Optional[str]
+  error_message: Optional[str]
+
+  @staticmethod
+  def from_record(record: ResearchLifecycleTrainingRecord) -> "ResearchLifecycleTrainingSummary":
+    return ResearchLifecycleTrainingSummary(
+      run_key=record.run_key,
+      dataset_version=record.dataset_version,
+      requested_backend=(
+        StockSelectionTrainingBackend(record.requested_backend)
+        if record.requested_backend is not None
+        else None
+      ),
+      resolved_backend=(
+        StockSelectionResolvedBackend(record.resolved_backend)
+        if record.resolved_backend is not None
+        else None
+      ),
+      phase=StockSelectionTrainingPhase(record.phase),
+      completed_units=record.completed_units,
+      total_units=record.total_units,
+      conclusion=(
+        StockSelectionTrainingConclusion(record.conclusion)
+        if record.conclusion is not None
+        else None
+      ),
+      registerable=record.registerable,
+      can_start_final=record.can_start_final,
+      queue_reason=record.queue_reason,
+      error_code=record.error_code,
+      error_message=record.error_message,
+    )
+
+
+@strawberry.type(description="统一研究生命周期运行")
+class ResearchLifecycleRun:
+  id: str
+  run_id: str
+  study_id: str
+  stage: ResearchLifecycleRunStage
+  status: ResearchLifecycleRunStatus
+  requested_at: Optional[datetime]
+  started_at: Optional[datetime]
+  completed_at: Optional[datetime]
+  updated_at: Optional[datetime]
+  target: ResearchLifecycleRunTarget
+  artifact: Optional[ResearchLifecycleArtifactSummary]
+  training: Optional[ResearchLifecycleTrainingSummary]
+
+  @staticmethod
+  def from_record(record: ResearchLifecycleRunRecord) -> "ResearchLifecycleRun":
+    return ResearchLifecycleRun(
+      id=record.id,
+      run_id=record.run_id,
+      study_id=record.study_id,
+      stage=ResearchLifecycleRunStage(record.stage),
+      status=ResearchLifecycleRunStatus(record.status),
+      requested_at=record.requested_at,
+      started_at=record.started_at,
+      completed_at=record.completed_at,
+      updated_at=record.updated_at,
+      target=ResearchLifecycleRunTarget(record.target),
+      artifact=(
+        ResearchLifecycleArtifactSummary.from_record(record.artifact)
+        if record.artifact is not None
+        else None
+      ),
+      training=(
+        ResearchLifecycleTrainingSummary.from_record(record.training)
+        if record.training is not None
+        else None
+      ),
+    )
+
+
+@strawberry.type(description="统一研究生命周期运行连接")
+class ResearchLifecycleRunConnection:
+  items: list[ResearchLifecycleRun]
+  total: int
+  limit: int
+  offset: int
 
 
 @strawberry.type(description="一次已完成的离线研究运行")

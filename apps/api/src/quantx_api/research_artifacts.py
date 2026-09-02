@@ -356,6 +356,17 @@ class ResearchArtifactStore:
     records.sort(key=_run_sort_key, reverse=True)
     return records[offset : offset + limit], len(records)
 
+  def list_runs_for_index(self) -> list[ResearchRunRecord]:
+    """Read all bounded artifact summaries for the unified lifecycle index.
+
+    Unlike the legacy paginated query, the index caller owns the global merge
+    and pagination.  The existing discovery budgets remain hard limits, while
+    filesystem enumeration failures are surfaced instead of being converted
+    into an empty result.
+    """
+
+    return self._discover_runs(strict=True, include_flat=True)
+
   def get_run(self, key: str) -> ResearchRunDetailRecord | None:
     summary = self.get_summary(key)
     if summary is None:
@@ -440,11 +451,18 @@ class ResearchArtifactStore:
       raise ResearchArtifactError("研究运行 key 不唯一")
     return matches[0]
 
-  def _discover_runs(self) -> list[ResearchRunRecord]:
+  def _discover_runs(
+    self,
+    *,
+    strict: bool = False,
+    include_flat: bool = False,
+  ) -> list[ResearchRunRecord]:
     if not self._root.exists():
       return []
     if _is_link_like(self._root) or not self._root.is_dir():
       logger.warning("Research artifact root is not a safe directory")
+      if strict:
+        raise ResearchArtifactError("研究运行产物根目录不安全")
       return []
 
     entry_count = 0
@@ -455,35 +473,48 @@ class ResearchArtifactStore:
         if entry_count > MAX_RESEARCH_DISCOVERY_ENTRIES:
           raise ResearchArtifactError("研究运行目录扫描达到安全预算")
         study_directories.append(study_directory)
-    except OSError:
+    except OSError as exc:
       logger.exception("Unable to enumerate research artifact root")
+      if strict:
+        raise ResearchArtifactError("研究运行产物根目录不可读") from exc
       return []
 
-    run_directories: list[Path] = []
+    run_directories: list[tuple[Path, bool]] = []
     for study_directory in study_directories:
       if not self._safe_directory(study_directory):
         continue
+      if include_flat:
+        try:
+          manifest_path = self._artifact_path(study_directory, "manifest.json")
+          if manifest_path.is_file() and not _is_link_like(manifest_path):
+            run_directories.append((study_directory, True))
+            continue
+        except (OSError, ResearchArtifactError) as exc:
+          if strict:
+            raise ResearchArtifactError("研究运行产物清单不可读") from exc
       try:
         for run_directory in study_directory.iterdir():
           entry_count += 1
           if entry_count > MAX_RESEARCH_DISCOVERY_ENTRIES:
             raise ResearchArtifactError("研究运行目录扫描达到安全预算")
-          run_directories.append(run_directory)
-      except OSError:
+          run_directories.append((run_directory, False))
+      except OSError as exc:
         logger.warning("Unable to enumerate a research study directory")
+        if strict:
+          raise ResearchArtifactError("研究运行产物目录不可读") from exc
         continue
 
     safe_run_directories = [
-      run_directory
-      for run_directory in run_directories
+      (run_directory, is_flat)
+      for run_directory, is_flat in run_directories
       if self._safe_directory(run_directory)
     ]
     if len(safe_run_directories) > MAX_RESEARCH_DISCOVERY_RUNS:
       raise ResearchArtifactError("研究运行数量扫描达到安全预算")
 
-    readable_run_directories: list[Path] = []
+    readable_run_directories: list[tuple[Path, bool]] = []
     manifest_bytes = 0
-    for run_directory in safe_run_directories:
+    for run_directory, _is_flat in safe_run_directories:
       try:
         manifest_path = self._artifact_path(run_directory, "manifest.json")
         if _is_link_like(manifest_path) or not manifest_path.is_file():
@@ -497,14 +528,25 @@ class ResearchArtifactStore:
       if manifest_bytes + size > MAX_RESEARCH_DISCOVERY_MANIFEST_BYTES:
         raise ResearchArtifactError("研究运行清单扫描达到安全预算")
       manifest_bytes += size
-      readable_run_directories.append(run_directory)
+      readable_run_directories.append((run_directory, _is_flat))
 
     # A successful indicator run cannot be discovered without reading its complete
     # data-quality proof. Bound that independent dimension before reading any
     # manifest so list/detail discovery cannot scale to GiB of JSON.
     indicator_quality_bytes = 0
-    for run_directory in readable_run_directories:
-      if not run_directory.parent.name.startswith("indicator-study-"):
+    for run_directory, is_flat in readable_run_directories:
+      is_indicator_run = run_directory.parent.name.startswith("indicator-study-")
+      if is_flat:
+        try:
+          flat_manifest = self._read_json(
+            run_directory,
+            "manifest.json",
+            max_bytes=_MAX_MANIFEST_BYTES,
+          )
+        except (OSError, ResearchArtifactError):
+          continue
+        is_indicator_run = flat_manifest.get("study_id") == "indicator-study"
+      if not is_indicator_run:
         continue
       try:
         quality_path = self._artifact_path(run_directory, "data-quality.json")
@@ -525,9 +567,13 @@ class ResearchArtifactStore:
       indicator_quality_bytes += quality_bytes
 
     records: list[ResearchRunRecord] = []
-    for run_directory in readable_run_directories:
+    for run_directory, is_flat in readable_run_directories:
       try:
-        record = self._read_summary(run_directory)
+        record = self._read_summary(
+          run_directory,
+          allow_flat=include_flat and is_flat,
+          normalize_status=include_flat and is_flat,
+        )
       except (OSError, ResearchArtifactError):
         logger.warning("Skipping an invalid research run manifest")
         continue
@@ -550,13 +596,24 @@ class ResearchArtifactStore:
       return False
     return resolved.is_relative_to(self._root)
 
-  def _read_summary(self, run_directory: Path) -> ResearchRunRecord | None:
+  def _read_summary(
+    self,
+    run_directory: Path,
+    *,
+    allow_flat: bool = False,
+    normalize_status: bool = False,
+  ) -> ResearchRunRecord | None:
     manifest = self._read_json(
       run_directory,
       "manifest.json",
       max_bytes=_MAX_MANIFEST_BYTES,
     )
     status = _required_string(manifest, "status")
+    if normalize_status:
+      status = {
+        "SUCCEEDED": "success",
+        "FAILED": "failed",
+      }.get(status, status)
     if status not in _FINAL_STATUSES:
       return None
     run_id = _required_string(manifest, "run_id")
@@ -566,10 +623,9 @@ class ResearchArtifactStore:
       _SEGMENT_PATTERN.fullmatch(item) for item in (run_id, study_id, version)
     ):
       raise ResearchArtifactError("manifest 研究身份字段格式无效")
-    if (
-      run_id != run_directory.name
-      or run_directory.parent.name != f"{study_id}-{version}"
-    ):
+    if run_id != run_directory.name:
+      raise ResearchArtifactError("manifest 研究运行 ID 与目录不一致")
+    if not allow_flat and run_directory.parent.name != f"{study_id}-{version}":
       raise ResearchArtifactError("manifest 研究身份与目录不一致")
     if study_id == "indicator-study" and status == "success":
       self._read_indexed_factor_data_quality(run_directory, manifest)
