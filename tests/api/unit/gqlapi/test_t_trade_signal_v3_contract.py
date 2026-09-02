@@ -16,8 +16,11 @@ from quantx_api.gqlapi.resolvers.t_trade import (
 from quantx_api.gqlapi.schema import schema
 from quantx_api.gqlapi.types.t_trade_types import (
   TTradeCandidateApprovalExpectationInput,
+  TTradeDominantPhase,
   TTradeExternalEntryInput,
   TTradeGlobalSettingsInput,
+  TTradeMomentumPhase,
+  TTradePullbackPhase,
   TTradeReplayPortfolioInput,
   TTradeReplayPortfolioSource,
   TTradeReplayStartInput,
@@ -149,6 +152,40 @@ def test_snapshot_maps_enums_nulls_versions_and_decimal_source_identity() -> Non
   assert snapshot.momentum.preview is False
   assert snapshot.momentum.candidate_ready is False
   assert snapshot.hard_gates[0].passed is True
+
+
+@pytest.mark.parametrize(
+  ("selected_path", "pullback_phase", "momentum_phase", "expected"),
+  [
+    (
+      TTradeSignalPath.PULLBACK_REBOUND,
+      TTradePullbackPhase.PULLBACK_FORMING,
+      TTradeMomentumPhase.BASELINING,
+      TTradeDominantPhase.PULLBACK_FORMING,
+    ),
+    (
+      TTradeSignalPath.MOMENTUM_ACCELERATION,
+      TTradePullbackPhase.OBSERVING,
+      TTradeMomentumPhase.MOMENTUM_BUILDING,
+      TTradeDominantPhase.MOMENTUM_BUILDING,
+    ),
+  ],
+)
+def test_snapshot_does_not_duplicate_branch_phase_prefix(
+  selected_path: TTradeSignalPath,
+  pullback_phase: TTradePullbackPhase,
+  momentum_phase: TTradeMomentumPhase,
+  expected: TTradeDominantPhase,
+) -> None:
+  raw = _signal_snapshot()
+  raw["selected_path"] = selected_path.value
+  raw["pullback"]["phase"] = pullback_phase.value
+  raw["momentum"]["phase"] = momentum_phase.value
+
+  snapshot = TTradeResolver._signal_snapshot_type(raw)
+
+  assert snapshot is not None
+  assert snapshot.dominant_phase is expected
 
 
 @pytest.mark.parametrize(

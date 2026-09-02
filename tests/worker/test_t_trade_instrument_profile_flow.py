@@ -133,11 +133,41 @@ async def test_profile_flow_materializes_each_explicit_instrument(monkeypatch) -
   assert result["status"] == "success"
   assert result["saved"] == 2
   assert result["failed"] == 0
-  assert len(page_calls) == 2
+  assert len(page_calls) == 2 * profile_flow.PROFILE_LOOKBACK_CALENDAR_DAYS
   assert save_profile_mock.await_count == 2
   assert {
     call.kwargs["instrument_code"] for call in save_profile_mock.await_args_list
   } == {"600000.SH", "000001.SZ"}
+
+
+@pytest.mark.asyncio
+async def test_profile_tick_query_is_split_into_bounded_calendar_windows() -> None:
+  calls = []
+
+  class _MarketData:
+    async def iter_tick_pages(self, **kwargs):
+      calls.append(kwargs)
+      yield [kwargs["start_time"]]
+
+  pages = [
+    page
+    async for page in profile_flow._iter_profile_tick_pages(
+      service=_MarketData(),
+      stock_code="600000.SH",
+      start_time=datetime(2026, 6, 2, 9, 30),
+      end_time=datetime(2026, 6, 4, 15, 0),
+      page_size=10_000,
+      max_pages=1_024,
+      max_source_ticks=2_000_000,
+    )
+  ]
+
+  assert len(pages) == 3
+  assert [(call["start_time"], call["end_time"]) for call in calls] == [
+    (datetime(2026, 6, 2, 9, 30), datetime(2026, 6, 2, 23, 59, 59, 999999)),
+    (datetime(2026, 6, 3), datetime(2026, 6, 3, 23, 59, 59, 999999)),
+    (datetime(2026, 6, 4), datetime(2026, 6, 4, 15, 0)),
+  ]
 
 
 @pytest.mark.asyncio
@@ -194,7 +224,7 @@ async def test_profile_flow_classifies_repository_integrity_as_failed(monkeypatc
   assert result["failed"] == 1
   assert result["insufficient"] == 0
   assert result["saved"] == 0
-  save_profile.assert_not_awaited()
+  save_profile.assert_awaited_once()
 
 
 @pytest.mark.asyncio

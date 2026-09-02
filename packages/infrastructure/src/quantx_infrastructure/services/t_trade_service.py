@@ -217,6 +217,23 @@ class TTradeService:
       return []
 
     state = dict(persisted_state or {})
+    live_state = self._live_strategy_state(run_id)
+    if live_state is not None:
+      # RuntimeState deliberately stores a compact opportunity checkpoint, but
+      # the bound strategy keeps the complete latest evaluation in memory.
+      # The Engine-owned monitor is the public live read path, so use that
+      # strategy-owned state while the run is resident and retain any
+      # executor-owned top-level fields that are not part of the strategy.
+      persisted_instruments = dict(state.get("instrument_states") or {})
+      live_instruments = dict(live_state.get("instrument_states") or {})
+      state = {
+        **state,
+        **live_state,
+        "instrument_states": {
+          **persisted_instruments,
+          **live_instruments,
+        },
+      }
     run_status = run.status.value if run.status else "unknown"
     error_message = run.error_message
 
@@ -238,6 +255,23 @@ class TTradeService:
       for code in codes
     ]
     return sessions
+
+  def _live_strategy_state(self, run_id: str) -> Optional[Dict[str, Any]]:
+    """Return the complete in-memory strategy state for an Engine-owned run."""
+
+    if self._runtime_manager is None:
+      return None
+    get_run = getattr(self._runtime_manager, "get_run", None)
+    if not callable(get_run):
+      return None
+    runtime = get_run(run_id)
+    strategy = getattr(runtime, "strategy", None) if runtime is not None else None
+    state = getattr(strategy, "state", None)
+    to_dict = getattr(state, "to_dict", None)
+    if not callable(to_dict):
+      return None
+    snapshot = to_dict()
+    return dict(snapshot) if isinstance(snapshot, Mapping) else None
 
   async def list_sessions(
     self,

@@ -626,9 +626,15 @@ class TTradeResolver:
     momentum_phase: TTradeMomentumPhase,
   ) -> TTradeDominantPhase:
     if selected_path == TTradeSignalPath.PULLBACK_REBOUND:
-      return TTradeDominantPhase(f"PULLBACK_{pullback_phase.value}")
+      phase = pullback_phase.value
+      return TTradeDominantPhase(
+        phase if phase.startswith("PULLBACK_") else f"PULLBACK_{phase}"
+      )
     if selected_path == TTradeSignalPath.MOMENTUM_ACCELERATION:
-      return TTradeDominantPhase(f"MOMENTUM_{momentum_phase.value}")
+      phase = momentum_phase.value
+      return TTradeDominantPhase(
+        phase if phase.startswith("MOMENTUM_") else f"MOMENTUM_{phase}"
+      )
     return TTradeDominantPhase.NONE
 
   @classmethod

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
@@ -31,6 +32,7 @@ from sqlalchemy import select
 
 PROFILE_CUTOFF = time(15, 0)
 PROFILE_LOOKBACK_CALENDAR_DAYS = 60
+PROFILE_QUERY_CHUNK_CALENDAR_DAYS = 1
 
 
 def _parse_date(value: str) -> date:
@@ -111,6 +113,48 @@ async def resolve_profile_instruments(
   )
 
 
+async def _iter_profile_tick_pages(
+  *,
+  service: HistoricalMarketDataService,
+  stock_code: str,
+  start_time: datetime,
+  end_time: datetime,
+  page_size: int,
+  max_pages: int,
+  max_source_ticks: int,
+) -> AsyncIterator[list[Any]]:
+  """Read profile history in bounded calendar windows.
+
+  InfluxDB 3 Core limits how many Parquet files one query may plan.  A single
+  60-day predicate can exceed that limit even when the caller only requests
+  one page, so the profile flow must keep each source query bounded just like
+  the Engine replay path does.
+  """
+
+  if end_time < start_time:
+    raise ValueError("profile Tick query end precedes start")
+  current_date = start_time.date()
+  final_date = end_time.date()
+  while current_date <= final_date:
+    chunk_last_date = min(
+      current_date
+      + timedelta(days=PROFILE_QUERY_CHUNK_CALENDAR_DAYS - 1),
+      final_date,
+    )
+    chunk_start = max(start_time, datetime.combine(current_date, time.min))
+    chunk_end = min(end_time, datetime.combine(chunk_last_date, time.max))
+    async for page in service.iter_tick_pages(
+      stock_code=stock_code,
+      start_time=chunk_start,
+      end_time=chunk_end,
+      page_size=page_size,
+      max_pages=max_pages,
+      max_source_ticks=max_source_ticks,
+    ):
+      yield page
+    current_date = chunk_last_date + timedelta(days=1)
+
+
 @flow(
   name="做T标的画像",
   description="收盘后从完整历史 Tick 物化 D-1 有状态机会引擎画像",
@@ -154,7 +198,8 @@ async def t_trade_instrument_profile_flow(
   errors: list[str] = []
   for code in instruments:
     try:
-      pages = market_data.iter_tick_pages(
+      pages = _iter_profile_tick_pages(
+        service=market_data,
         stock_code=code,
         start_time=start_at,
         end_time=as_of,

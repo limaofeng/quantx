@@ -181,6 +181,83 @@ def test_session_projection_maps_only_server_signal_snapshot():
   assert missing["signal_snapshot"] is None
 
 
+@pytest.mark.asyncio
+async def test_run_sessions_uses_complete_live_strategy_state_over_compact_checkpoint():
+  now = datetime(2026, 8, 13, 10, 5, tzinfo=timezone.utc)
+  run = SimpleNamespace(
+    id="run-live-state",
+    strategy=SimpleNamespace(class_name="AshareIntradayTAssistantStrategy"),
+    instruments=["600000.SH"],
+    status=SimpleNamespace(value="running"),
+    mode=StrategyRunMode.PAPER,
+    parameters={"account_id": "account-1"},
+    created_at=now,
+    updated_at=now,
+    error_message=None,
+  )
+  complete_snapshot = {
+    "instrument_code": "600000.SH",
+    "trade_date": "2026-08-13",
+    "evaluated_at_ms": int(now.timestamp() * 1000),
+    "source_time_ms": int(now.timestamp() * 1000),
+    "tick_ordinal": 3,
+    "continuity_generation": "generation-1",
+    "data_health": "READY",
+    "features": {"sample_count": 25},
+    "pullback": {"phase": "REBOUND_CONFIRMING"},
+    "momentum": {"phase": "BASELINING"},
+    "selected_path": "NONE",
+    "preview_threshold": 55.0,
+    "candidate_threshold": 72.0,
+    "revalidate_threshold": 60.0,
+    "rearm_threshold": 45.0,
+    "signal_version": 7,
+    "candidate_state_version": 7,
+    "policy_version": "policy-v3",
+    "config_version": 3,
+    "feature_schema_version": "1",
+  }
+  live_state = {
+    "instrument_states": {
+      "600000.SH": {
+        "status": "OBSERVING",
+        "last_price": 10.5,
+        "opportunity": {"latest_evaluation": complete_snapshot},
+      }
+    }
+  }
+  runtime = SimpleNamespace(
+    strategy=SimpleNamespace(
+      state=SimpleNamespace(to_dict=lambda: live_state),
+    )
+  )
+  manager = SimpleNamespace(get_run=lambda _run_id: runtime)
+  service = TTradeService(manager)
+  service._load_persisted_run = AsyncMock(
+    return_value=(
+      run,
+      {
+        "instrument_states": {
+          "600000.SH": {
+            "status": "OBSERVING",
+            "opportunity": {
+              "latest_evaluation": {
+                "instrument_code": "600000.SH",
+                "data_health": "INSUFFICIENT",
+              }
+            },
+          }
+        }
+      },
+    )
+  )
+
+  sessions = await service.get_run_sessions("run-live-state")
+
+  assert sessions[0]["signal_snapshot"] == complete_snapshot
+  assert sessions[0]["last_price"] == 10.5
+
+
 def test_signal_policy_normalization_assigns_deterministic_version():
   first = TTradeService._normalize_signal_policy(signal_policy(candidate_score=74.0))
   second = TTradeService._normalize_signal_policy(signal_policy(candidate_score=74.0))
