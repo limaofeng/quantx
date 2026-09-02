@@ -17,6 +17,8 @@
 
 | 文档 | 定位 |
 |---|---|
+| [目标：多标的做 T 助手新架构设计](../architecture/多标的做T助手新架构设计.md) | `TAssistantConfig + TAssistantExecution`、逐 Tick 精确归约、组合协调、公共 owner/ExitPlan/容量链的 To-Be；不代表当前已实现 |
+| [多标的做 T 助手新架构开发实施方案](../plans/多标的做T助手新架构开发实施方案.md) | 目标架构的前置/后置依赖、9 个阶段门、状态矩阵、验证和提交证据；开发进度唯一追踪入口 |
 | [持仓做 T 有状态机会引擎 V3 实施规格](../plans/持仓做T有状态机会引擎V3实施规格.md) | 做 T 入场信号的有状态规则引擎：数据健康、双 FSM、评分/门禁、episode、候选、真源、GraphQL、Web/iOS、测试与迁移 |
 | [A 股动态天平双仓策略实现落地规格与迁移计划](../plans/A股动态天平双仓策略实现落地规格与迁移计划.md) | 从当前 Python 策略框架迁移到 `StrategyBase.step()`、`TradeIntent`、`OrderRiskDecision` 和 `BucketLedger` 的破坏性实施路线 |
 | [A 股建仓/加仓托管计划模块设计与落地规格](../plans/A股建仓加仓托管计划模块设计与落地规格.md) | 固定单标的建仓/加仓托管的 EntryPlan 领域、状态机、授权、GraphQL、前端工作台和分阶段实施规格 |
@@ -409,6 +411,16 @@ internal/strategies/ashare_dynamic_balance_dual_bucket/
 1. [系统架构设计](../architecture/系统架构设计.md)
 2. [A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md)
 3. [A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md)
+
+### 做多标的做 T 新架构
+
+先读：
+
+1. [系统架构设计（当前 As-Is）](../architecture/系统架构设计.md)
+2. [多标的做 T 助手新架构设计（目标 To-Be）](../architecture/多标的做T助手新架构设计.md)
+3. [多标的做 T 助手新架构开发实施方案（状态与顺序）](../plans/多标的做T助手新架构开发实施方案.md)
+4. [持仓做 T 有状态机会引擎 V3 实施规格（标的规则）](../plans/持仓做T有状态机会引擎V3实施规格.md)
+5. [A 股自动退出计划与卖出策略契约](contracts/A股自动退出计划与卖出策略契约.md)
 
 ---
 

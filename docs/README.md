@@ -10,6 +10,8 @@
   默认交互色、金融语义色与可访问性规则。
 - [工程文档](engineering/README.md)：Web、API、Engine、Worker、QMT Agent 与部署。
 - [系统架构设计](architecture/系统架构设计.md)
+- [目标：多标的做 T 助手新架构设计](architecture/多标的做T助手新架构设计.md)
+- [多标的做 T 助手新架构开发实施方案](plans/多标的做T助手新架构开发实施方案.md)
 - [A 股个人量化开发文档索引](trading/README.md)
 - [A 股三层协作与执行契约](trading/contracts/A股三层协作与执行契约.md)
 - [A 股交易域数据结构与状态机](trading/contracts/A股交易域数据结构与状态机.md)

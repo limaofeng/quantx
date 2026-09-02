@@ -192,6 +192,14 @@ Codex 生成的截图、trace 和 video 放在根目录 `.codex_screenshots/`，
 2. `docs/trading/contracts/A股三层协作与执行契约.md`
 3. `docs/trading/contracts/A股交易域数据结构与状态机.md`
 
+多标的做 T 架构或迁移：
+
+1. `docs/architecture/系统架构设计.md`
+2. `docs/architecture/多标的做T助手新架构设计.md`
+3. `docs/plans/多标的做T助手新架构开发实施方案.md`
+4. `docs/plans/持仓做T有状态机会引擎V3实施规格.md`
+5. `docs/trading/contracts/A股自动退出计划与卖出策略契约.md`
+
 实盘、QMT Agent 或多进程：
 
 1. `docs/architecture/系统架构设计.md`
