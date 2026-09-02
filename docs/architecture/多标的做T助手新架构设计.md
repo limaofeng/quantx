@@ -1,7 +1,7 @@
 # QuantX 多标的做 T 助手新架构设计
 
 > 状态：目标架构，待实施<br>
-> 版本：1.1<br>
+> 版本：2.0<br>
 > 日期：2026-09-02<br>
 > 适用范围：QuantX Windows Dev、个人单账户、A 股正向做 T
 
@@ -10,6 +10,12 @@
 新的做 T 助手采用以下结构：
 
 ```text
+一个账户级 TAssistantConfig
+          +
+一个可产生实盘 ENTRY 的 LIVE TAssistantExecution
+          +
+每个 PAPER/BACKTEST 场景一个隔离执行
+          +
 每标的一个 SymbolTEngine
           +
 全账户一个 PortfolioTCoordinator
@@ -24,14 +30,32 @@ QuantX 现有统一风控、容量预占、订单、退出计划和回报收敛�
 > 库存和风险额度，由 `PortfolioTCoordinator` 判断；最终合法数量和是否能下单，
 > 仍由统一执行链判断。
 
-本设计保留一个账户级做 T `StrategyRun`，但只把它当作 QuantX 的运行信封：承载
-`StrategyBase.step(StrategyInput)`、运行模式、回测身份、状态检查点、回报路由和
-`ExitPlanBook` 所有权。它不是多标的领域模型，也不负责账户资金分配。
+目标架构**不依赖 `StrategyRun`**。`StrategyRun` 的现有实现冻结，只继续服务已经真正属于
+“用户启动一个策略实例”的旧功能和迁移中的存量做 T 义务；不再为了做 T、买入/卖出计划或
+打板助手向它增加字段、状态、分支和兼容入口。
 
-保留 `StrategyRun` 是从目标边界重新评估后的选择，不是因为现有实现无法修改。
-彻底移除它并不能改善多标的信号质量或资金竞争，却会要求同时重建
-`TradeIntent` 所有权、退出计划所有权、回测运行、审批恢复和委托/成交回报路由。
-如果未来这些公共契约整体替换，做 T 的标的内核和组合协调器仍可原样复用。
+做 T 自己的稳定配置聚合是 `TAssistantConfig`，一次可恢复执行的业务 owner 是
+`TAssistantExecution`。后者承载 PAPER/LIVE/BACKTEST 环境、冻结配置、决策周期、检查点、
+审批恢复和回测结果归属，但不充当多标的领域模型，也不保存账户真相。公共交易链统一使用：
+
+```text
+ExecutionOwnerRef
+  owner_type = T_ASSISTANT_EXECUTION | STRATEGY_RUN | EXIT_PLAN | MANUAL_COMMAND
+  owner_id
+```
+
+做 T 的 BUY 意图以 `T_ASSISTANT_EXECUTION` 为 owner；真实 BUY 成交建立的退出计划随后成为
+SELL 意图的 `EXIT_PLAN` owner，并保留 `source_execution_ref` 回指原做 T 执行。普通策略仍可
+使用 `STRATEGY_RUN`，但公共执行、审批、ExitPlan 和回报收敛不再假定 owner 必然是它。
+
+`StrategyBase.step(StrategyInput)` 仍是 LIVE/BACKTEST 共用的纯决策入口；移除的是
+`StrategyRun` 所有权依赖，不是策略纯函数边界。`StrategyInput` 和 `TradeIntent` 的目标契约
+改为携带 `execution_ref`，由 `TAssistantDecisionRuntime` 调用薄的
+`AshareIntradayTAssistantStrategy` 内核。
+
+做 T 是围绕既有持仓完成“先买后卖”的交易过程，不新增第三个仓位桶。账户层以版本化
+`TTradingEnvelope` 约束每个标的允许增加的 T 暴露；它由组合层根据持仓策略、账户快照和
+本地未覆盖义务计算，绝不进入 `SymbolTEngine` 或模型特征。
 
 LightGBM 作为可插拔的候选排序器引入：
 
@@ -42,9 +66,16 @@ LightGBM 作为可插拔的候选排序器引入：
 - `ACTIVE` 模型不可用时停止新的 ENTRY，不允许静默退回规则排序；
 - 已有退出计划不依赖 LightGBM，继续优先执行。
 
-模型与规则采用双时间尺度，但不形成两套交易路径：模型只消费**已经结束的 1 分钟
-Feature Bar**，在分钟完成时预计算跨标的机会质量；V3 规则仍消费因果有界 Tick，候选
-进入执行前再用最新已接受 Tick 做确定性重验。第一版使用跨标的共享模型，模型输出只参与
+模型能力不另造一套训练系统。做 T 复用 QuantX 已实现的“不可变数据集/训练配置、
+DEVELOPMENT 与 FINAL_EVALUATION 隔离、Worker 后台运行、CPU/GPU 资格证据、安全制品、
+发布门禁和人工激活”能力，但使用做 T 自己的分钟特征、first-touch 标签、组合回测和
+`TModelScore` 契约。训练运行和 `TAssistantExecution` 完全分离；线上只绑定已发布的模型
+artifact，不绑定训练 run。
+
+市场资格、模型与规则采用三时间尺度，但不形成多套交易路径：日级点时画像只决定基础可交易
+资格，模型只消费**已经结束的 1 分钟 Feature Bar**并预计算跨标的机会质量；V3 规则仍消费
+因果有界 Tick，候选进入执行前再用最新已接受 Tick 做确定性重验。第一版使用跨标的共享模型，
+模型输出只参与
 候选排序，不直接映射仓位、订单参数或退出动作。
 
 ## 2. 设计目标与非目标
@@ -60,10 +91,15 @@ Feature Bar**，在分钟完成时预计算跨标的机会质量；V3 规则仍�
 7. 每次候选、排名、淘汰、限额、拒绝、部分成交和退出都可审计、可回放。
 8. 在不复制 QuantX 已有交易能力的前提下，复用 QMT Agent、OrderSizer、风控、
    `AccountCapacityService`、`ExitPlanBook`、durable outbox/inbox 和回报收敛。
+9. 做 T 的配置、执行、周期、标的状态和回测结果拥有独立真源，不以 `StrategyRun` 或
+   `StrategyRunState.custom_state` 作为目标持久化容器。
+10. 为后续买入/卖出计划和打板助手沉淀通用 owner、意图受理、执行链、退出计划及模型
+    发布能力，同时保持各功能自己的配置、执行和领域状态。
 
 ### 2.2 非目标
 
 - 不支持反向做 T；第一阶段只支持先买后卖的正向做 T。
+- 不把做 T 创建成 `locked_core/core/swing` 之外的第三个仓位桶。
 - 不增加多账户、多租户或账户路由抽象。
 - 不让每个标的创建独立 QMT 会话、独立资金池或独立执行服务。
 - 不在 Engine、API 或 Worker 中直接导入 `miniqmt` / `xtquant`。
@@ -72,9 +108,13 @@ Feature Bar**，在分钟完成时预计算跨标的机会质量；V3 规则仍�
 - 不使用 Worker RPC 或远程模型服务处理逐 Tick 推理。
 - 不让模型直接计算目标仓位、下单数量、订单类型或追价参数。
 - 不在第一版引入在线学习、LSTM、Transformer 或端到端 Tick 模型。
+- 第一版模型训练只允许人工发起，不做定时自动重训、自动登记或自动发布。
 - 不假定 miniQMT 一定提供稳定 Level-2 字段；依赖深度盘口的特征必须受能力清单和质量门禁控制。
 - 不在第一阶段引入相关性矩阵、复杂优化器或强化学习。个人账户先使用并发数、总暴露、
   单票和行业集中度等可解释约束。
+- 不重写普通策略的 `StrategyRun`；只把公共交易基础设施从“只能由 StrategyRun 拥有”改为
+  “可由明确的业务执行 owner 拥有”。
+- 不让离线训练 run 充当实盘执行身份，也不因 GPU 训练可用而给 Engine/QMT 增加 GPU 依赖。
 
 ## 3. 必须保持的 QuantX 硬边界
 
@@ -92,6 +132,10 @@ Feature Bar**，在分钟完成时预计算跨标的机会质量；V3 规则仍�
 8. PostgreSQL 是业务状态真源；Redis 只做唤醒、广播和可重建缓存。
 9. 仓位归因继续使用 `locked_core/core/swing`；`locked_core` 默认不作为做 T 卖出来源。
 10. 每次不买、少买、卖出、拒绝、延迟、熔断和模型阻断都必须有稳定原因码。
+11. 公共执行事实只依赖稳定 `ExecutionOwnerRef`；`StrategyRun` 只是允许的 owner 类型之一，
+    不得再作为做 T 的隐式必填外键。
+12. 做 T LIVE 与 BACKTEST 继续调用同一个 `StrategyBase.step(StrategyInput)`、同一个
+    `PortfolioTCoordinator` 和同一个 scorer 语义；执行身份由 `TAssistantExecution` 提供。
 
 相关权威文档：
 
@@ -105,7 +149,7 @@ Feature Bar**，在分钟完成时预计算跨标的机会质量；V3 规则仍�
 
 当前实现已经具备值得保留的基础：
 
-- 一个账户级动态持仓做 T 运行；
+- 一个账户级动态持仓做 T `StrategyRun`（只作为现状基线，不延续为目标所有者）；
 - 每标的独立 `instrument_states`；
 - 因果有界 Tick 窗口；
 - `DataHealth`、回撤反弹和动量加速双 FSM；
@@ -119,6 +163,8 @@ Feature Bar**，在分钟完成时预计算跨标的机会质量；V3 规则仍�
 
 | 当前问题 | 影响 | 目标修正 |
 |---|---|---|
+| 做 T 配置、执行和恢复绑定 `StrategyRun` | 新功能被策略生命周期、字段和外键牵制 | 新增 `TAssistantExecution`，公共链改用 `ExecutionOwnerRef` |
+| 每标的状态集中在 `StrategyRunState.custom_state/instrument_states` | 大 JSON 争用、局部恢复和周期原子性困难 | 独立 `TAssistantSymbolState` + `TDecisionCycle` + material 事件 |
 | 行情按标的逐 Tick 进入决策 | 同一时段候选缺少一致比较基准 | 使用带 watermark 的 `TDecisionSnapshot` |
 | 候选产生后直接进入意图/审批 | 多只股票同时出现机会时缺少统一排名 | 增加持久意图受理后的 `PortfolioTCoordinator` |
 | 账户限制表现为单候选布尔门禁 | 只能回答能不能买，不能回答优先买谁、给多少 | 输出可审计 `TAllocationDecision` |
@@ -128,8 +174,9 @@ Feature Bar**，在分钟完成时预计算跨标的机会质量；V3 规则仍�
 | 模型输入时点与粒度未冻结 | 形成中 BAR 或逐 Tick 推理容易泄露、抖动且难回放 | 完整 1 分钟评分，Tick 只负责规则和执行重验 |
 | 模型输出仅表述为泛化“上涨概率” | 与正向做 T 的成本、路径和止损顺序脱节 | 固定 `p_target_before_stop` 的 `TModelScore` 契约 |
 | 只围绕候选结果训练 | 会把 V3 既有筛选偏差学进模型 | 全完整分钟 observation anchors + 成本调整 first-touch 标签 |
-| 预先把 LightGBM 当成答案 | 不能证明复杂度带来增量 | 同数据比较 RULE_ONLY、Logistic、LightGBM 和 challengers |
+| 预先把 LightGBM 当成答案 | 不能证明复杂度带来增量 | 同数据比较 RULE_ONLY、Logistic 和 LightGBM |
 | 单票回测可各自假设可用现金 | 多标的结果可能隐含重复使用现金 | 使用单一共享账户的组合回测时间线 |
+| 模型训练、登记和线上绑定语义未分层 | 训练成功可能被误解为可以直接实盘 | 复用不可变训练与发布门禁；执行只绑定已发布 artifact |
 
 ## 5. 目标逻辑架构
 
@@ -148,8 +195,8 @@ API Agent Hub / Market Stream Transport
 Engine WholeQuoteHub / Market Data Gateway
 stream/generation/sequence 连续性、完整 fence、数据健康
             │
-            ├──────────────► ExitPlanBook
-            │                活跃退出优先评估
+            ├──────────────► OwnerRuntimeRegistry / ExitPlanBook
+            │                按 ExecutionOwnerRef 恢复，活动退出优先评估
             │
             ├──────────────► TModelFeatureBarBuilder
             │                只封闭已结束的 1 分钟 Feature Bar
@@ -162,8 +209,12 @@ TDecisionSnapshotBuilder
 冻结决策时点、watermark、市场/行业上下文和标的快照
             │
             ▼
-AshareIntradayTAssistantStrategy.step(SNAPSHOT)
-运行信封内的薄编排适配器
+TAssistantDecisionRuntime
+TAssistantExecution 周期调度、检查点和幂等提交
+            │
+            ▼
+AshareIntradayTAssistantStrategy.step(StrategyInput[SNAPSHOT, execution_ref])
+无 StrategyRun 的薄纯决策适配器
             │
             ▼
 SymbolTEngineRegistry
@@ -175,12 +226,12 @@ SymbolTEngineRegistry
 TOpportunity / BUY TradeIntent 提案批次
             │
             ▼
-record_trade_intents（整批持久化，PORTFOLIO_PENDING）
-            │
-            ▼
 OpportunityScorer
 规则分 + 关联同一时点可用的最新 TModelScore
 RULE_ONLY / SHADOW / ACTIVE
+            │
+            ▼
+周期状态 + 评分证据 + BUY TradeIntent 原子受理（ALLOCATION_PENDING）
             │
             ▼
 PortfolioTCoordinator
@@ -190,8 +241,8 @@ PortfolioTCoordinator
 TAllocationDecision
 ALLOW / CAP / DELAY / REJECT
             │
-            ├── CANARY ──► AWAITING_APPROVAL ──► 实时重验
-            └── LIVE ────► 自动受理
+            ├── CANARY_CONFIRM ► AWAITING_APPROVAL ──► 实时重验
+            └── LIVE/AUTO ► 自动受理
                                │
                                ▼
 EntryExecutionGate
@@ -212,7 +263,7 @@ PendingTradeOrder + Correlation + TradeCommandOutbox
 miniQMT 委托/成交回报
                               │
                               ▼
-AgentReportInbox → ReportProcessor → RuntimeStateManager
+AgentReportInbox → ReportProcessor → OwnerRuntimeRouter
 Portfolio/BucketLedger/ExitPlan/TTradeBatch 投影收敛
 ```
 
@@ -222,62 +273,211 @@ Portfolio/BucketLedger/ExitPlan/TTradeBatch 投影收敛
 
 ## 6. 运行与所有权边界
 
-### 6.1 `StrategyRun` 只作为运行信封
+### 6.1 `StrategyRun` 去留评估与最终选择
 
-每个账户和执行环境最多一个活动做 T `StrategyRun`。它负责：
+两种方案的真实代价如下：
 
-- PAPER/LIVE/BACKTEST 模式和冻结参数；
-- `StrategyBase.step()` 调用与状态检查点；
-- runtime event 串行消费；
-- 人工审批候选的恢复身份；
-- 入场来源 `ExitPlan` 的唯一运行绑定；
-- 回测版本和结果归属。
+| 方案 | 优点 | 缺点 |
+|---|---|---|
+| 保留做 T `StrategyRun` | 可直接复用现有 `run_id`、检查点、审批、ExitPlan 和回报路由 | 做 T 生命周期被策略生命周期绑住；大 JSON 状态和外键继续扩张；买入/卖出计划、打板助手容易被迫伪装成策略；冻结 `StrategyRun` 无法实现 |
+| 独立 `TAssistantExecution` | 业务所有权清晰；配置、周期、标的状态和回测可独立演进；公共执行链可被其他功能复用 | 必须一次性升级意图 owner、ExitPlan 来源、审批恢复、回报路由和回测归属；迁移期要安全排空旧义务 |
+
+最终选择第二种。原因不是信号算法需要一个新名字，而是**运行身份本来就是做 T 业务域的
+稳定事实**。让公共链只认识 `StrategyRun`，会让任何非策略功能都承担错误的生命周期语义。
+
+边界冻结如下：
+
+- 不删除普通策略仍在使用的 `StrategyRun` 表和执行器；
+- 不再给 `StrategyRun` 增加做 T 专用 cadence、状态、关联表或恢复分支；
+- 新做 T 执行不创建 `StrategyRun`，也不把其 id 填入 `strategy_run_id`；
+- 存量做 T `StrategyRun` 只允许 `DRAINING` 和回报收敛，不再产生新 ENTRY；
+- 旧义务归零后删除做 T 专用桥接代码，不保留长期双 owner 协议。
+
+### 6.2 `TAssistantConfig`：稳定业务配置
+
+`TAssistantConfig` 是一个账户的做 T 助手配置聚合。现有 `t_trade_global_configs` 可原子演进为
+它的当前控制/head 表，但必须移除 `strategy_run_id` 依赖。完整结构为：
+
+```text
+TAssistantConfigHead                  # t_trade_global_configs
+  config_id / account_id / state_version
+  enabled
+  desired_environment = PAPER | LIVE
+  active_config_version_id
+
+TAssistantConfigVersion              # t_assistant_config_versions，append-only
+  config_version_id / config_id / version
+  config_schema_version / canonical_payload / config_snapshot_hash
+  entry_authorization_policy     # CANARY_CONFIRM / AUTO 授权边界
+  universe_policy
+  symbol_rule_policy
+  portfolio_policy
+  t_trading_envelope_policy
+  entry_execution_gate_policy
+  exit_plan_template_policy
+  scorer_mode                    # RULE_ONLY / SHADOW / ACTIVE
+  model_runtime_binding?
+  created_at
+```
+
+head 表达当前是否启用、下一活动执行使用 PAPER 还是 LIVE，以及指向哪个 policy 版本；BACKTEST
+由独立回测命令选择，不修改 head。版本表保存完整可重放 payload，不能只存 hash 后依赖当前
+settings 还原历史。配置是用户意图和版本真源，不表示某个进程正在运行，也不保存行情窗口、
+订单、成交或账户余额。任何会改变候选、额度、ExitPlan 或模型排序语义的调整都追加新版本，
+再以乐观锁切换 head；payload 只能由 typed command 按 `config_schema_version` 规范化生成，不能
+接受任意 JSON；旧候选不得跨版本执行。
+
+### 6.3 `TAssistantExecution`：做 T 自己的可恢复执行身份
+
+`TAssistantExecution` 是做 T 运行时、审批和回测的持久身份：
+
+```text
+TAssistantExecution
+  execution_id
+  config_id / config_version_id / frozen_config_version / config_snapshot_hash
+  account_id
+  environment = PAPER | LIVE | BACKTEST
+  entry_authorization = CANARY_CONFIRM | AUTO
+  status = CREATED | WARMING | RUNNING | DRAINING
+           | STOPPED | FAILED | RECONCILE_REQUIRED
+  policy_version / feature_schema_version
+  scorer_mode / model_runtime_binding?
+  universe_revision
+  last_assigned_cycle_sequence / last_committed_cycle_sequence
+  checkpoint_revision
+  started_at / drain_requested_at / completed_at
+  state_version
+```
+
+不能直接用 `config_id` 充当 owner：同一配置可能产生多次 PAPER/BACKTEST，也可能在 LIVE
+successor 切换时同时存在 RUNNING 与 DRAINING 执行；只有 execution id 能无歧义归属审批、订单、
+ExitPlan 和回报。
+
+它负责：
+
+- 冻结一次执行所用的配置、策略内核、policy、feature schema 和模型 artifact 身份；
+- 调度 `StrategyBase.step()` 并给每个 material 决策周期分配稳定序号；
+- 串行提交周期状态、material 事件和意图提案；
+- 恢复人工审批、DRAINING、ExitPlan 来源和委托/成交回报路由；
+- 归属 PAPER/LIVE 报告或共享账户 BACKTEST 版本。
+
+生命周期、successor、RECONCILE、审批恢复和 owner 路由产生的 material 变化同时追加到
+`t_assistant_execution_events`；事件以 `(execution_id, event_key)` 幂等，引用原 inbox/report
+identity，但不复制或替代券商事实。
 
 它不负责：
 
-- 在股票之间分配现金；
-- 计算真实可卖量或最终下单数量；
-- 保存券商账户真相；
-- 为每只股票复制订单管理器；
-- 充当一个包含大量 `if symbol == ...` 的巨型 T 引擎。
+- 在股票之间分配现金或计算最终数量；
+- 保存真实现金、可卖量、冻结量、委托或成交真相；
+- 充当所有标的状态的大 JSON 容器；
+- 拥有训练任务或模型注册表。
 
-不采用“每标的一 `StrategyRun`”。那会把一个账户的退出所有权、审批恢复、共享资金
-和回测身份切碎，并增加无收益的运行生命周期数量。
+`STOPPED/FAILED` 只允许在没有未决审批、pending/outbox、结果未知订单、活动 batch 和 ExitPlan 后
+进入。运行时自身故障但仍有交易义务时只能 `DRAINING` 或 `RECONCILE_REQUIRED`；owner 路由和
+退出调度必须继续存在，不能用终态隐藏未完成义务。
+`execution_id` 永不复用；一旦被意图、订单、计划或报告引用，终态 execution 只归档不硬删除。
 
-### 6.2 `TTradeGlobalMonitorService`
+进入 `DRAINING` 的同一事务要阻断新 cycle/approval/EXECUTION_READY 路由，并将尚未形成
+pending/outbox 的候选和意图按稳定原因终结；已经创建 durable pending/outbox 或结果未知的命令
+继续由原 owner 收敛，不能因 successor 出现而撤销、复制或改挂。
+
+个人单账户下，同一时刻最多有一个能产生真实 ENTRY 的 LIVE 执行。PAPER 与 LIVE 必须使用
+隔离的意图、订单、ExitPlan 和投影命名空间，不能共享 pending/outbox；BACKTEST 可以有多个
+历史版本，但每个版本都拥有独立 execution id、时钟、Broker 和持久化结果，不接入实盘路由。
+
+`environment`、`entry_authorization` 和模型 `scorer_mode` 是三条独立轴：只有
+`environment=LIVE + entry_authorization=AUTO` 才允许免人工确认发送真实订单；
+`CANARY_CONFIRM` 表示
+LIVE 环境仍需逐笔确认，不再用同一个“LIVE 模式”同时表达券商环境和授权方式。
+
+### 6.4 `ExecutionOwnerRef`：公共链唯一所有权契约
+
+目标域类型为：
+
+```text
+ExecutionOwnerType =
+  STRATEGY_RUN
+  | T_ASSISTANT_EXECUTION
+  | EXIT_PLAN
+  | MANUAL_COMMAND
+
+ExecutionOwnerRef
+  owner_type: ExecutionOwnerType
+  owner_id: non-empty stable id
+```
+
+这里不预埋尚未设计的 owner 类型。买入/卖出计划、打板助手开始独立设计时，再在同一轮代码、
+契约、文档和测试中加入各自的明确类型。
+
+公共契约按以下方式调整：
+
+- 新增执行中性的 `ExecutionEnvironment=PAPER/LIVE/BACKTEST`；`StrategyRunMode` 只保留在普通
+  StrategyRun adapter 内，不再渗入做 T domain。
+- `StrategyContext.run_id/mode` 改为 `execution_ref/environment`，logger、幂等键和恢复键都使用
+  owner ref；普通策略构造 context 时由 adapter 映射原 run。
+- `StrategyInput.run_id` 改为强类型 `execution_ref`；`strategy_id` 继续标识纯决策内核。
+- `TradeIntent` 移除必填 top-level `run_id`；origin 必须含 `execution_ref` 和 producer identity，
+  不能依靠 metadata 中的字符串 owner。普通策略适配器把当前 run 映射为 `STRATEGY_RUN`。
+- `TradeIntentRecord`、审批记录、pending、correlation、outbox 和运行事件保存
+  `owner_type + owner_id`，不再要求 `strategy_run_id` 非空。
+- `TradeCommandPayload` 删除 `strategy_name/strategy_run_id/strategy_order_id`；
+  `ExecutionOwnerRef`、producer、intent、batch 和 source execution 保留在服务端 durable
+  outbox/correlation，不发送给 QMT Agent。Agent 只依赖 `client_order_id` 和下单所需执行字段，
+  回报再由服务端 correlation 找回 owner。这是 breaking Agent contract，目标协议升级为 `1.2`，
+  Engine/API/QMT Agent 同步原子切换，不发送 1.1/1.2 双 payload。
+- 若 miniQMT API 需要策略名形态的参数，协议只提供不含业务 owner 的稳定 `order_label`；
+  `request_metadata` 使用 allowlist，不能把已删除的 run/owner/intent/batch 字段重新塞回去形成旁路。
+- ENTRY 成交建立 `ExitPlan` 时保存 `source_execution_ref`。计划产生 SELL 时，SELL 的
+  `execution_ref` 为 `EXIT_PLAN/plan_id`，同时保留 source execution、batch 和 role 供回报收敛。
+- `TTradeBatch` 保存 `source_execution_ref=T_ASSISTANT_EXECUTION/execution_id`，但仍只是由
+  intent/order/trade/ExitPlan 派生的运营投影。
+- `OwnerRuntimeRouter` 依据 owner 类型把 ORDER/TRADE/RECONCILE 事件路由到对应执行或计划，
+  未知类型、缺失 owner、owner 与相关记录冲突时 fail-closed。
+
+数据库中的多态 owner 字段不伪装成跨表外键；应用层必须校验 owner 类型、目标存在性和状态，
+各业务表内部继续使用真实外键。迁移完成后公共链只有这一套强类型 owner 契约。
+
+### 6.5 `TTradeGlobalMonitorService`
 
 全局 Monitor 继续是 Engine 内的配置和动态 Universe 管理器，只负责：
 
-- 一个账户的启停、模式、忽略名单和配置版本；
+- 一个账户的启停、entry authorization、忽略名单和配置版本；
 - 从权威持仓快照生成外部 Universe；
-- 向运行发送 `RECONCILE`，完成标的加入、draining 和移除；
-- 配置变更时阻止旧候选并触发 rewarm；
-- 保证活动退出计划完成前运行只能进入 `DRAINING`。
+- 向 `TAssistantExecution` 发送 `RECONCILE`，完成标的加入、draining 和移除；
+- Universe revision 变化时让受影响标的失效旧候选并 rewarm；
+- 配置、policy、schema 或模型 binding 变化时让当前执行停止新 ENTRY，并按冻结新版本创建
+  successor，不原地修改 execution；
+- 保证活动退出计划完成前执行只能进入 `DRAINING`。
 
-它不运行标的信号，不排名候选，不下单。
+它不创建 `StrategyRun`，不运行标的信号，不排名候选，不下单。
 
-### 6.3 `SymbolTEngineRegistry`
+运行 Universe 至少是“当前持仓标的 ∪ 未决 intent/order/batch/ExitPlan 标的”。日级资格、忽略名单
+或配置变化只能阻断新 ENTRY，不能让仍有交易义务的标的从 registry 和退出调度中消失。
 
-Registry 在一个运行内按 `instrument_code` 管理逻辑上的一标的一引擎：
+### 6.6 `SymbolTEngineRegistry` 与独立标的状态
+
+Registry 在一个 `TAssistantExecution` 内按 `instrument_code` 管理逻辑上的一标的一引擎：
 
 ```text
 SymbolTEngineRegistry
-  000001.SZ -> SymbolTEngine(state_A)
-  002594.SZ -> SymbolTEngine(state_B)
-  688552.SH -> SymbolTEngine(state_C)
+  000001.SZ -> SymbolTEngine(TAssistantSymbolState A)
+  002594.SZ -> SymbolTEngine(TAssistantSymbolState B)
+  688552.SH -> SymbolTEngine(TAssistantSymbolState C)
 ```
 
-每个引擎的输入、窗口、FSM、候选、版本和冷却完全隔离。Registry 只接受 Universe
-Provider 给出的标的，不自行选股。
+每个引擎的输入、窗口、FSM、候选、版本和冷却完全隔离。material 状态检查点写入独立
+`TAssistantSymbolState(execution_id, instrument_code, revision)`，而不是写回一个
+`StrategyRunState.instrument_states` 大对象。Registry 只接受 Universe Provider 给出的标的，
+不自行选股。
 
 Registry 生命周期：
 
 - `WARMING`：新加入或连续性丢失，构造完整因果窗口；
 - `ACTIVE`：数据健康，允许产生机会；
 - `DRAINING`：不产生新 ENTRY，但保留审计和活动批次关联；
-- `RETIRED`：没有持仓、候选、意图、批次或退出计划后才可清理。
+- `RETIRED`：没有候选、意图、批次或退出计划关联后才可清理。
 
-### 6.4 `SymbolTEngine`
+### 6.7 `SymbolTEngine`
 
 `SymbolTEngine` 只回答：
 
@@ -296,12 +496,12 @@ Registry 生命周期：
 
 - 账户可用现金；
 - 账户总资产和 T 总额度；
-- 其他股票候选；
+- `TTradingEnvelope`、其他股票候选或组合排名；
 - 真实可卖量、冻结量和当日买入量；
 - 最终下单数量；
 - 订单、成交或退出计划的权威状态。
 
-### 6.5 `PortfolioTCoordinator`
+### 6.8 `PortfolioTCoordinator`
 
 Coordinator 是 Engine/application 层的账户级纯协调器。它读取一份不可变的
 `PortfolioTDecisionSnapshot`，回答：
@@ -311,11 +511,8 @@ Coordinator 是 Engine/application 层的账户级纯协调器。它读取一份
 它负责：
 
 - 候选过滤与确定性排序；
-- T 总资金池和现金缓冲；
-- 最大活动批次数；
-- 单票 T 上限；
-- 总 T 暴露上限；
-- 行业集中度；
+- T 总资金池、`TTradingEnvelope` 和现金缓冲；
+- 最大活动批次数、单票 T 上限、总 T 暴露上限和行业集中度；
 - 同标的单活动批次；
 - 已有待审批、待下单、活动 ENTRY/EXIT 和保护义务；
 - 输出每个候选的排名、动作、预算上限和原因。
@@ -325,21 +522,63 @@ Coordinator 是 Engine/application 层的账户级纯协调器。它读取一份
 - 生成新的买卖方向；
 - 修改候选形态状态；
 - 计算最终股数；
-- 把估算的现金或库存当作最终入队凭证；
+- 把估算的现金、库存或 envelope 当作最终入队凭证；
 - 直接创建 QMT 命令。
 
-### 6.6 公共执行组件
+### 6.9 `TTradingEnvelope`：账户层做 T 边界，不是新仓位桶
+
+`TTradingEnvelope` 是绑定账户快照的不可变规划值，由 application/portfolio 层构建，只交给
+Coordinator、OrderSizer 和容量复核：
+
+```text
+TTradingEnvelope
+  envelope_id / execution_id / instrument_code
+  as_of / account_snapshot_id / input_fingerprint
+  config_version / envelope_policy_version
+  observed_position_projection
+    locked_core / core / swing
+  protected_old_position_floor
+  max_incremental_t_amount
+  planning_entry_volume_ceiling
+  planning_replaceable_old_volume_ceiling
+  positive_t_eligible
+  reason_codes[]
+```
+
+其中 volume 和 amount 都只是本次快照下的规划上限，不是可卖量真源，也不形成预占。最终数量
+仍由最新完整账户快照、本地未覆盖义务、OrderSizer、Risk 和 `AccountCapacityService` 在账户锁
+内重算。`input_fingerprint` 发生变化时必须产生新 envelope 和新 allocation，不能覆盖旧证据。
+`protected_old_position_floor` 至少覆盖全部 `locked_core` 和配置要求保留的核心仓，
+`planning_replaceable_old_volume_ceiling` 只能从昨日可卖老仓扣除该 floor 及已有保护义务后得到。
+
+做 T 不依赖未来的买入/卖出计划功能才能运行。没有外部持仓计划时，envelope 只按冻结的
+`t_trading_envelope_policy`、当前三层持仓和账户义务保守计算；若将来存在版本化持仓边界，
+portfolio 层可把它作为一个输入进一步收紧保护底仓，但不能放宽做 T 或公共风控上限，也不能
+把该计划变成 `TAssistantExecution` 的 owner。
+
+资格分成两层：
+
+- `TTradabilityProfile`：账户无关、point-in-time 的日级流动性、振幅、价差、历史覆盖和数据能力；
+  可供 Universe 和 Symbol 层读取，但只决定新 ENTRY 资格，不移除已有交易义务。
+- `TTradingEnvelope`：账户相关的持仓、保护底仓、可规划暴露和本地义务；只能在组合/执行层读取。
+
+第一阶段只支持正向 T，不在 envelope 中预埋反向 T、融券或负目标仓位字段。需要反向 T 时应
+另行定义库存、方向、T+1 和退出契约。
+
+### 6.10 公共执行组件
 
 以下能力继续复用，不为做 T 复制：
 
 | 能力 | 权威组件 |
 |---|---|
+| 纯决策入口 | `StrategyBase.step(StrategyInput)`，输入携带 `ExecutionOwnerRef` |
 | 合法数量和整手 | `OrderSizer` |
 | 交易时段、停牌、涨跌停、T+1、订单风控 | `RiskChecker` / 交易域 |
 | 最终现金和老仓容量 | `AccountCapacityService` |
 | 订单持久化和可靠投递 | `PendingTradeOrder` / `TradeCommandOutbox` |
 | 券商下单和本地保护 | QMT Agent |
 | 委托与成交事实 | QMT Agent 报告 + `AgentReportInbox` |
+| owner 路由与恢复 | `OwnerRuntimeRouter` / `OwnerRuntimeRegistry` |
 | 自动退出 | `ExitPlanBook` / `auto_exit_plans` |
 | 仓位归因和置换 | `BucketLedger` / `T1SubstitutionPlan` |
 | 一轮做 T 的运营投影 | `TTradeBatch` + `TTradeBatchEvent` |
@@ -362,6 +601,7 @@ Coordinator 是 Engine/application 层的账户级纯协调器。它读取一份
 
 ```text
 TDecisionSnapshot
+  execution_ref = T_ASSISTANT_EXECUTION / execution_id
   cycle_id
   decision_time
   trade_date
@@ -369,10 +609,12 @@ TDecisionSnapshot
   continuity_generation
   fence_sequence
   universe_revision
-  config_version
+  config_version / config_snapshot_hash
   policy_version
   feature_schema_version
-  model_mode / model_version
+  scorer_mode / model_runtime_binding_hash? / model_authorization_revision?
+  model_id? / model_version? / artifact_sha256?
+  model_score_cache_revision? / model_score_visibility_watermark?
   market_context
     as_of
     health
@@ -391,7 +633,8 @@ TDecisionSnapshot
 - 交易时段、涨跌停价、停牌、ST 等静态/时点事实；
 - 主行业和概念映射及其版本；
 - 外部 Universe 的 `eligible/draining/ignored` 事实；
-- 只读的标的画像和参数版本。
+- 只读的标的画像和参数版本；
+- 当前 cache view 下该标的最新 `visible_model_outcome_ref?`（score id/status/revision）；
 
 它不向 `SymbolTEngine` 暴露现金、真实可卖量和其他标的状态。
 
@@ -405,6 +648,10 @@ TDecisionSnapshot
 6. 重复或乱序 source identity 不推进状态，也不产生普通数据库写入。
 7. ENTRY 可以对连续完整 fence 做有界合并，但必须记录被合并的 fence 范围；
    活跃 EXIT 仍按公共退出计划的关键行情路径优先评估。
+8. snapshot 必须绑定当前 `TAssistantExecution`、冻结配置哈希和 owner；任何不一致都在进入
+   `StrategyBase.step()` 前被 builder 拒绝。
+9. scorer 与 snapshot 并发时，以冻结的 `model_score_cache_revision` 为可见边界；快照创建后
+   才完成的分数只能进入下一 cycle，不能改变当前 cycle 的候选排名。
 
 ### 7.4 决策节奏
 
@@ -415,12 +662,13 @@ TDecisionSnapshot
 - 合并跨度超过策略窗口允许值时视为连续性丢失并 rewarm；
 - 不得用 UI 的 latest-only 行情队列承载交易决策。
 
-### 7.5 双时间尺度数据路径
+### 7.5 三时间尺度数据路径
 
 规则、模型和执行使用同一条已接受行情流，但各自采用适合其职责的时间粒度：
 
 | 层 | 输入粒度 | 职责 | 禁止行为 |
 |---|---|---|---|
+| 基础市场资格 | 上一可用交易日及当时已知的 point-in-time 日级画像 | 流动性、振幅、价差、历史覆盖和数据能力资格 | 读取账户持仓/现金，或用今天才知道的分类回填历史 |
 | V3 标的规则 | 已接受 Tick + 点时市场/行业上下文 | 窗口、FSM、硬门禁、候选 | 等待未来 Tick 或读取账户 |
 | 模型评分 | 已封闭的 1 分钟 Feature Bar | 估计候选在冻结 horizon 内的相对质量 | 使用正在形成的分钟或逐 Tick 远程推理 |
 | 执行重验 | 最新已接受 Tick + 候选/模型绑定 | 判断候选是否仍可进入公共执行链 | 读取账户、产生新方向、直接定量或替代风控 |
@@ -449,19 +697,67 @@ TModelFeatureBar
 若不能重建相同 hash，则对应分数无效。
 
 模型在每个完整分钟结束后，对当时 Universe 中满足基础数据质量的标的做一次进程内批量推理，
-把最新结果写入可重建的 `TModelScoreCache`。任一候选只允许关联满足以下条件的分数：
+把最新结果按一个原子 revision 写入可重建的 `TModelScoreCache`。每次批量发布产生稳定
+`score_cache_revision`、输入 Feature Bar manifest hash 和可见 score id 集合；batch manifest 对
+每个计划评分的标的都记录 `VALID` 或明确的 `UNAVAILABLE/ERROR`，不能以静默缺行伪装成完整
+批次。系统级推理失败不发布新 revision。任一候选只允许关联 snapshot 已冻结且满足以下条件的分数：
 
 ```text
 score.model_as_of <= opportunity.observed_at
 score.source_bar_end <= opportunity.observed_at
 opportunity.observed_at - score.model_as_of <= model_score_max_age
-score.feature_schema_version == active_feature_schema_version
-score.model_version == active_model_version
+score.feature_schema_version == snapshot.feature_schema_version
+score.model_version == snapshot.model_version
+score.cache_revision <= snapshot.model_score_cache_revision
+score.artifact_sha256 == snapshot.artifact_sha256
+score.model_authorization_revision == snapshot.model_authorization_revision
+score.score_id == snapshot.symbol[instrument].visible_model_outcome_ref.score_id
 ```
+
+候选只能读取该标的在冻结 cache view 下的**最新可见 outcome**。如果较新的批次明确记录
+`UNAVAILABLE/ERROR`，不得回退到更早的 VALID score；SHADOW 记录缺失，ACTIVE 按稳定原因阻断。
 
 市场、行业和画像可以使用更慢的时点数据，但必须携带独立 `as_of`、版本和 freshness，不能
 通过分钟聚合把过期公共上下文伪装成新鲜数据。V3 规则不等待下一分钟模型更新；模型分数陈旧时，
 `SHADOW` 只记录不可用，`ACTIVE` 则阻断该候选的新 ENTRY。
+
+### 7.6 `TDecisionCycle` 与 material 原子提交
+
+`cycle_id` 不是日志标签，而是稳定、可幂等恢复的决策身份；`cycle_sequence` 才表达 execution
+内的单调顺序：
+
+```text
+TDecisionCycle
+  cycle_id / execution_id / cycle_sequence
+  snapshot_hash / fence_range
+  score_cache_revision / model_runtime_binding_hash
+  evaluated_symbol_count / material_symbol_count / proposed_intent_count
+  status = PREPARED | COMMITTED | ABORTED
+  input_manifest_hash / output_manifest_hash
+  committed_at / abort_reason
+```
+
+`cycle_id` 由 execution、fence/source identity、冻结配置/binding 和 canonical decision payload
+hash 构成；该 payload hash 明确排除 cycle id、trace id 等自引用/诊断字段。完全相同输入的重试
+命中同一 cycle，任一事实水位变化都产生新 id。
+
+发现 material 输出后，由 execution 的 durable allocator 在一个小事务中分配一次
+`cycle_sequence` 并插入带 input manifest 的 `PREPARED` cycle；序号允许因回滚或崩溃出现空洞，
+但绝不复用。后续 material 事务把同一行转成 `COMMITTED`。恢复时超时的 `PREPARED` 行转为
+`ABORTED`，不能拿同一序号或 cycle id 配另一份 snapshot。
+
+无 material 变化的普通行情周期只保留有界内存诊断，不强制逐 Tick 写库。只要发生候选创建、
+候选状态转换、material 数据健康转换或 TradeIntent 提案，就必须在一个数据库事务中：
+
+1. 以预期 revision 校验并更新本周期发生 material 变化的 `TAssistantSymbolState`；
+2. 追加机会/状态证据和对应 `TModelScore` 绑定；
+3. 整批受理该周期的 `TradeIntent`；
+4. 条件更新 PREPARED cycle 的输出 manifest 和 `COMMITTED` 事实；
+5. 推进 `TAssistantExecution.last_committed_cycle_sequence`。
+
+任一步失败都不得提交任何标的状态或意图。尤其禁止先把 candidate 状态推进为“已提案”，崩溃后
+却没有可恢复的 intent。revision 冲突或事实水位变化时，旧 cycle 记为 `ABORTED`，使用新 cycle、
+新 snapshot 和新 fingerprint 重算，不能覆盖原证据。
 
 ## 8. 每周期决策流程
 
@@ -471,15 +767,15 @@ score.model_version == active_model_version
 
 ```text
 1. 冻结 TDecisionSnapshot
-2. 对活动 ExitPlan 做优先评估
-3. 调用唯一 StrategyBase.step(SNAPSHOT)
-4. 在隔离状态副本上计算各 SymbolTEngine
+2. OwnerRuntimeRegistry 对活动 ExitPlan 做优先评估
+3. TAssistantDecisionRuntime 以 execution_ref 调用唯一 StrategyBase.step(SNAPSHOT)
+4. step 内在隔离状态副本上计算各 SymbolTEngine
 5. 按 instrument_code 确定性合并状态和候选
-6. 整批持久化 BUY TradeIntent 提案与候选证据
-7. OpportunityScorer 关联规则分与同一时点可用的最新 TModelScore
+6. OpportunityScorer 关联规则分与 snapshot 可见的最新 TModelScore
+7. 原子提交 material 标的状态、评分证据与 BUY TradeIntent 提案
 8. PortfolioTCoordinator 生成 TAllocationDecision
 9. 淘汰或延迟的意图写终态原因
-10. 选中意图进入 CANARY 审批或 LIVE 自动路由
+10. 选中意图进入 CANARY_CONFIRM 审批或 LIVE/AUTO 自动路由
 11. EntryExecutionGate 用最新已接受 Tick 做最后机会重验
 12. OrderSizer、Risk、AccountCapacityService 最终复核
 13. 原子创建 pending/correlation/outbox 后才能投递
@@ -542,27 +838,40 @@ TOpportunity
 - 最终限价和订单类型；
 - 已冻结或已预占状态。
 
-为了继续遵守“策略只输出 `TradeIntent[]`”，薄策略适配器会把通过标的内硬门禁的
+为了继续遵守“策略只输出 `TradeIntent[]` 和算法状态补丁”，薄策略适配器会把通过标的内硬门禁的
 `TOpportunity` 映射为标准 BUY `TradeIntent` 提案。`target_amount` 只是冻结配置中的
 单机会申请上限，不是实际分配，也不承诺可以成交。候选完整证据放在结构化 metadata
-和机会评估记录中。
+和机会评估记录中。意图的强类型 origin 为：
+
+```text
+execution_ref = T_ASSISTANT_EXECUTION / execution_id
+producer_id = ashare-intraday-t-assistant
+opportunity_id / candidate_id / cycle_id
+```
 
 ### 8.4 意图先持久化再协调
 
 所有策略输出的候选意图必须先经过统一 `record_trade_intents` 整批持久化，初始状态为
-`PORTFOLIO_PENDING`。Coordinator 不处理只存在于内存或日志中的候选。
+`ALLOCATION_PENDING`。若冻结的 ACTIVE binding 下模型分数不可用，意图与证据仍在同一 cycle
+事务中持久化，但直接以 `REJECTED/MODEL_*` 终结，不进入 Coordinator。Coordinator 不处理只
+存在于内存或日志中的候选，也不处理 scorer 已阻断的意图。
 
-建议意图生命周期增加：
+意图生命周期不复制 `ALLOW/CAP/DELAY/REJECT`。这些是一次组合裁决的动作，属于不可变的
+`TAllocationDecision`，不是订单或意图状态。目标生命周期为：
 
 ```text
-PORTFOLIO_PENDING
-  ├─ ALLOCATED -> AWAITING_APPROVAL / APPROVED
-  ├─ CAPPED    -> AWAITING_APPROVAL / APPROVED
-  ├─ DELAYED   -> EXPIRED 或在明确重验后重新参与
-  └─ REJECTED  -> 终态
+ALLOCATION_PENDING
+  ├─ ALLOW/CAP  -> AWAITING_APPROVAL | EXECUTION_READY
+  ├─ DELAY      -> ALLOCATION_PENDING（旧 decision 终结，新 attempt 才能重验）
+  └─ REJECT     -> REJECTED
+
+AWAITING_APPROVAL -> EXECUTION_READY | EXPIRED | REJECTED
+EXECUTION_READY   -> EXECUTION_PENDING | EXPIRED | REJECTED
 ```
 
-每次动作保存 `allocation_decision_id`、决策周期、排名、额度、账户快照身份和原因码。
+每次 allocation attempt 保存新的 `allocation_decision_id`、决策周期、排名、额度、账户快照身份、
+envelope 指纹、义务 watermark 和原因码。`CAP` 只改变 `allocated_amount_cap`。账户事实、模型分数
+或候选绑定变化时必须新建 decision，不能原地改写旧 decision。
 未选中候选不对用户暴露为可确认订单，也不能进入 OrderSizer。
 
 ### 8.5 必须原子调整的公共契约
@@ -571,20 +880,31 @@ PORTFOLIO_PENDING
 `StrategyCadence.SNAPSHOT`，不能把账户级冻结快照伪装成某一只股票的普通 `TICK`。
 该 cadence 只用于外部 Universe 已经确定的账户级动态标的策略：
 
-- `StrategyInput.market_data` 携带一个 `TDecisionSnapshot`；
-- `StrategyInput.instrument_code` 固定为空字符串，不放账户标识；具体标的只出现在
-  snapshot item 和输出 `TradeIntent.instrument_code` 中；
+- `StrategyInput.execution_ref` 固定为当前 `TAssistantExecution`，不再要求 `run_id`；
+- `StrategyInput.market_data` 在 Python 类型和运行时 validator 中都必须是
+  `TDecisionSnapshot`，不能接收任意 dict/`Any` 后再猜字段；
+- 策略元数据固定 `INSTRUMENT_SCOPE=MULTI`、`INSTRUMENT_UNIVERSE_MODE=ACCOUNT_HOLDINGS`，
+  `StrategyInput.instrument_code=None`；具体标的只出现在 snapshot item 和输出
+  `TradeIntent.instrument_code` 中，不再用空字符串表达账户级输入；
 - `StrategyInput.market_data_context` 只描述本 cycle 的 stream/generation/fence 健康，
   每票 source identity 和 freshness 保留在各自 snapshot item；
 - `StrategyInput` 不携带 `PortfolioTDecisionSnapshot`，保证策略不读取账户；
-- 一个 step 返回该 cycle 的全部候选 TradeIntent 和一个原子状态补丁；
+- 一个 step 返回该 cycle 的全部候选 TradeIntent 和按标的拆分的
+  `SymbolRuntimeStatePatch(instrument_code, expected_revision, patch)`；执行级 patch 只能保存
+  账户无关的算法水位，不能再写一个完整 `instrument_states` map；
+- `StrategyOutput` 为 MULTI/SNAPSHOT 增加 typed `symbol_state_patches[]`；现有
+  `runtime_state_patch` 只表达 execution 级算法水位，二者都继续经过禁止账户真相的递归校验；
+- 做 T 内核不得通过 `StrategyStateProxy` callback 把状态旁路写入 `StrategyRunState`；runtime
+  从 `TAssistantSymbolState` 构造只读输入，只应用 step 明确返回的 patch；
 - 固定标的策略继续使用原有 `TICK/BAR`，不改变一实例一标的约束。
 
 同时需要原子更新：
 
-- `TradeIntentRecord` 的 `PORTFOLIO_PENDING/ALLOCATED/CAPPED` 生命周期；
+- `StrategyInput`、`TradeIntentOrigin` 与公共关联表的 `ExecutionOwnerRef`；
+- `TradeIntentRecord` 的 `ALLOCATION_PENDING` 生命周期，`CAP` 只留在 allocation decision；
 - `TAllocationDecision` 持久化和 GraphQL 只读投影；
-- Engine 的整批意图受理、协调恢复与 TTL 终结；
+- `TAssistantExecution/TAssistantSymbolState/TDecisionCycle` 的条件写入、整批意图受理、
+  协调恢复与 TTL 终结；
 - LIVE/BACKTEST 的 snapshot scheduler；
 - 相应 contracts、客户端类型、文档和测试。
 
@@ -596,8 +916,10 @@ PORTFOLIO_PENDING
 
 `PortfolioTDecisionSnapshot` 由 Engine/application 层从权威投影构建，至少包含：
 
+- `execution_ref`、cycle id、配置/策略/模型绑定和 snapshot hash；
 - 账户执行控制、kill switch 和 reconcile 状态；
 - 最新合法完整账户快照 id/hash/as_of；
+- 本周期每标的 `TTradingEnvelope` 及其 input fingerprint；
 - 可用资金及快照尚未覆盖的本地 BUY 义务；
 - 每标的老仓可卖量及未覆盖的订单、T 批次、保护计划占用；
 - 活动 `TTradeBatch`、待审批和待下单意图；
@@ -605,6 +927,10 @@ PORTFOLIO_PENDING
 - 主行业映射和已有 T 暴露；
 - 全局、单票和行业上限；
 - 现金缓冲和最大并发批次数。
+
+快照还必须固化 `local_obligation_watermark`，覆盖未被账户快照观察到的 pending、outbox、
+活动批次、审批和 ExitPlan 义务。Coordinator 重试时若账户 snapshot id、envelope fingerprint 或
+obligation watermark 任一变化，必须建立新的 allocation attempt，不能复用旧计算结果。
 
 该快照只提供给 Coordinator、OrderSizer 和风控，不传给 `SymbolTEngine`。
 
@@ -638,6 +964,7 @@ OrderSizer 和最终容量事务计算。
 ```text
 TAllocationDecision
   decision_id
+  execution_id / allocation_attempt
   cycle_id
   intent_id
   candidate_id
@@ -648,6 +975,10 @@ TAllocationDecision
   requested_amount_ceiling
   allocated_amount_cap
   account_snapshot_id
+  account_snapshot_hash
+  t_trading_envelope_id / envelope_input_fingerprint
+  local_obligation_watermark
+  portfolio_input_fingerprint
   portfolio_policy_version
   scorer_mode / model_version
   model_score_id / model_as_of
@@ -656,11 +987,16 @@ TAllocationDecision
 ```
 
 `allocated_amount_cap` 是 OrderSizer 的上限输入，不是冻结资金。账户事实可能在下一毫秒
-变化，因此最终命令入队时必须重新复核。
+变化，因此最终命令入队时必须重新复核。decision 一经写入不可修改；同一 intent 的后续重验
+使用递增 `allocation_attempt` 和新 decision id。
+
+同一 cycle/attempt 的全部 decisions 与对应 intent 状态转换在一个事务中提交，并条件校验
+`portfolio_input_fingerprint` 和 intent version。任何冲突都不得留下“前几个已 ALLOW、后几个
+没有 decision”的半批结果；旧 attempt 终结后以新 portfolio snapshot 重新计算。
 
 ### 9.4 组合约束优先级
 
-建议优先级从高到低为：
+第一版固定优先级从高到低为：
 
 1. 账户隔离、kill switch、reconcile 和数据完整性；
 2. 已有退出、撤单和隔离修复义务；
@@ -673,16 +1009,34 @@ TAllocationDecision
 行业采用唯一主行业做硬约束。概念板块存在重叠，第一阶段只做解释或软惩罚，不把多个
 概念额度简单相加，以免重复计算风险。
 
+### 9.5 LIVE 最终准入必须保持排名顺序
+
+Coordinator 的冻结分配不等于最终容量提交。一个 cycle 中被 `ALLOW/CAP` 的 LIVE 候选必须按
+冻结排序键进入一个有序批次事务：
+
+1. 先按 rank 顺序完成 Gate，失效候选留下明确终态；不在批内用新分数或新候选补位；
+2. 一次锁定账户控制、相关持仓和义务，校验 account snapshot、全部 envelope 与 obligation
+   watermark 仍等于 allocation 输入；
+3. 在同一事务内按 rank 顺序执行 OrderSizer/Risk/Capacity；每个已受理候选产生的本地义务立即
+   进入本事务的后续候选计算，但这只是事务内计算，不是第二套余额真源；
+4. 整批创建带 `admission_batch_id/rank` 的 intent transition、pending/correlation/outbox 和必要
+   batch 投影后一次提交；同账户 outbox 按该顺序投递，但不承诺券商成交顺序；
+5. 外部事实或版本冲突使整批回滚，并用新 snapshot/allocation attempt 重算；
+6. 不能把候选扔给互相独立的异步任务，让抢锁顺序决定赢家；幂等重放命中原批次结果。
+
+CANARY_CONFIRM 等待人工期间不长期占用资金。确认后必须使用最新账户事实、envelope、模型绑定和组合
+约束创建新 allocation attempt；不能把数分钟前的排名或额度当成最终准入凭证。
+
 ## 10. 审批、OrderSizer 与原子容量预占
 
-### 10.1 CANARY
+### 10.1 CANARY_CONFIRM
 
 Coordinator 选中的候选进入 `AWAITING_APPROVAL`，但不提前占用真实资金或老仓库存。
 原因是人工确认可能延迟，长期预占会阻塞其他机会。
 
 确认时必须重新校验：
 
-- candidate id/fingerprint/state/config/policy/model 版本；
+- execution ref、candidate id/fingerprint/state/config/policy/model 版本；
 - TTL 和最新规则硬门禁；
 - 最新 quote、允许偏离和行情连续性；
 - 最新账户执行控制和完整快照；
@@ -691,14 +1045,16 @@ Coordinator 选中的候选进入 `AWAITING_APPROVAL`，但不提前占用真实
 
 确认不是成交承诺。确认后仍可能被 `CAP/REJECT/RECONCILE_REQUIRED`。
 
-### 10.2 LIVE
+### 10.2 LIVE/AUTO
 
-LIVE 自动模式只跳过人工点击，不跳过任何候选、组合、风控、容量和最终入队复核。
-自动授权必须精确绑定配置、策略/模型版本、账户执行窗口和额度。
+`environment=LIVE + entry_authorization=AUTO` 只跳过人工点击，不跳过任何候选、组合、风控、
+容量和最终入队复核。
+自动授权必须精确绑定 `TAssistantExecution`、配置、决策内核/模型版本、账户执行窗口和额度。
 
 ### 10.3 `EntryExecutionGate`
 
-CANARY 确认或 LIVE 自动受理后、进入 `TradeIntentProcessor` 前，统一执行一个轻量且确定性的
+CANARY_CONFIRM 确认或 LIVE/AUTO 自动受理后、进入 `TradeIntentProcessor` 前，统一执行一个
+轻量且确定性的
 `EntryExecutionGate`。它使用最新已接受 Tick 判断“原候选现在是否仍值得送入公共执行链”，
 只输出：
 
@@ -730,7 +1086,7 @@ TTL；收到后续行情后必须从候选有效性、模型分数和组合额�
 `AccountCapacityService` 和 durable pending/outbox/保护义务，不新增一个会与账户快照
 竞争的独立余额账本。
 
-最终 ENTRY 入队事务必须：
+最终 ENTRY 入队批次事务必须：
 
 1. 锁定 `AccountExecutionControl`，再按现有统一锁序读取标的持仓和相关义务；
 2. 重新验证协议 1.1 完整账户快照、新鲜度、hash 和分区完整性；
@@ -738,7 +1094,7 @@ TTL；收到后续行情后必须从候选有效性、模型分数和组合额�
 4. 由 OrderSizer 得到最终合法整手数量；
 5. 校验 BUY 最坏价格和费用下的资金上限；
 6. 校验同等数量、未被占用的昨日老仓可卖库存；
-7. 在同一事务创建或更新 TradeIntent、PendingTradeOrder、Correlation、
+7. 在同一事务创建或更新带 `ExecutionOwnerRef` 的 TradeIntent、PendingTradeOrder、Correlation、
    `TTradeBatch` 运营投影和 `TradeCommandOutbox`；
 8. 事务提交后才允许 API Hub 投递。
 
@@ -760,7 +1116,7 @@ TTL；收到后续行情后必须从候选有效性、模型分数和组合额�
 “一轮做 T”是重要业务概念，但 QuantX 已经有多个各自权威的事实：
 
 - BUY/SELL `TradeIntentRecord`；
-- `PendingTradeOrder` 和 `StrategyOrderCorrelation`；
+- `PendingTradeOrder` 和公共 `OrderCorrelation`；
 - QMT 委托与成交回报；
 - `BucketLedger` 和 `T1SubstitutionPlan`；
 - `auto_exit_plans`；
@@ -773,8 +1129,8 @@ TTL；收到后续行情后必须从候选有效性、模型分数和组合额�
 
 ```text
 CANDIDATE
-  -> PORTFOLIO_PENDING
-  -> ALLOCATED / AWAITING_APPROVAL
+  -> ALLOCATION_PENDING
+  -> AWAITING_APPROVAL / EXECUTION_READY
   -> ENTRY_QUEUED
   -> ENTRY_SUBMITTED
   -> ENTRY_PARTIAL / ENTRY_FILLED
@@ -794,6 +1150,8 @@ ERROR
 ```
 
 `TTradeBatch.status` 只能由上述权威事实派生，不得反向推进订单或 ExitPlan。
+每个 batch 保存 `source_execution_ref=T_ASSISTANT_EXECUTION/execution_id`；它不需要也不得伪造
+`strategy_run_id`。
 
 ### 11.3 正向 T+1 置换
 
@@ -825,10 +1183,17 @@ ERROR
 1. ENTRY BUY 意图附带冻结的 `ExitPlanTemplate`。
 2. 只有真实 BUY 成交回报激活保护数量。
 3. PAPER/LIVE 的 `auto_exit_plans` 是唯一持久化退出真源。
-4. 同一做 T `StrategyRun` 的 `ExitPlanBook` 在 ENTRY 决策前优先评估活动计划。
+4. `OwnerRuntimeRegistry` 按 `source_execution_ref` 恢复对应的 `ExitPlanBook`；活动计划在新
+   ENTRY 决策前优先评估。
 5. 命中规则后产生标准 SELL `TradeIntent`，继续经过 OrderSizer、风控和 Broker。
-6. SELL 的 owner 固定为 `EXIT_PLAN`，并保留 run、batch 和 role 用于回报收敛。
-7. 运行停止新 ENTRY 时进入 `DRAINING`，活动计划完成前不得普通停止。
+6. SELL 的 owner 固定为 `EXIT_PLAN/plan_id`，并保留 `source_execution_ref`、batch 和 role
+   用于回报收敛。
+7. `TAssistantExecution` 停止新 ENTRY 时进入 `DRAINING`，活动计划完成前不得普通停止或
+   创建替代执行接管同一计划。
+
+目标做 T 内核不再依赖策略类上的 `OWNS_RUNTIME_EXIT_PLAN_BOOK` 来暗示 StrategyRun 所有权；
+ExitPlan 恢复能力由 `OwnerRuntimeRegistry` 根据 `ExecutionOwnerRef/source_execution_ref` 明确
+注册。普通 StrategyRun 策略需要 ExitPlanBook 时通过自己的 owner adapter 保持原行为。
 
 LightGBM 不参与退出触发。已有风险保护不能因模型、候选池、Coordinator 或训练服务
 异常而停止。
@@ -848,12 +1213,12 @@ LightGBM 不参与退出触发。已有风险保护不能因模型、候选池�
 - 一个账户的组合分配提交；
 - 审批、配置变更和候选失效；
 - 账户容量最终复核、pending/outbox 创建；
-- 同一 `StrategyRun` 的 runtime event 应用；
+- 同一 `ExecutionOwnerRef` 的 runtime event 应用；
 - QMT 回报对 Portfolio、BucketLedger、ExitPlan 和批次投影的收敛。
 
 ### 13.3 账户任务优先级
 
-同一账户本地调度建议使用：
+同一账户本地调度固定使用：
 
 1. 隔离、对账、撤单和紧急停止；
 2. 活动 ExitPlan 的 SELL；
@@ -936,24 +1301,26 @@ schema/model 版本，不能用常数伪造“正常盘口”。
 TModelScore
   score_id
   instrument_code
+  score_cache_revision / model_runtime_binding_hash
   model_as_of
   source_feature_bar_id / source_bar_end
   feature_window_hash
   horizon_seconds
   p_target_before_stop
-  expected_net_edge_bps?        # 可选独立回归头
-  expected_mfe_bps? / expected_mae_bps?
   score_status
   feature_coverage
   out_of_distribution_status
   feature_schema_version
   label_spec_version
   model_id / model_version / model_type
+  artifact_manifest_sha256
+  model_authorization_revision
   calibration_version
 ```
 
-`p_target_before_stop` 是第一版唯一必需、可参与排序的模型语义。预期净 edge、MFE 和 MAE
-只能由独立、版本化的模型头产生，缺失时为空，不能把同一字段在不同版本中改成另一种含义。
+`p_target_before_stop` 是第一版唯一存在、可参与排序的线上模型语义。预期净 edge、MFE 和 MAE
+只作为离线标签/诊断，不预建 nullable runtime 字段。将来只有在独立模型头和真实使用场景通过
+评审后才升级契约，不能把同一字段在不同版本中改成另一种含义。
 不定义笼统 `confidence`；概率校准、特征覆盖率、分布外状态和 freshness 分开表达。
 
 `source_bar_end` 表示特征数据截止时点，`model_as_of` 表示分数完成计算并对决策路径可见的
@@ -1023,45 +1390,45 @@ UNAVAILABLE     # 无法建立可执行入口或路径数据不可靠
 只有在某一标的积累了预先规定的独立 OOS 样本，且单票校准在多个时间窗稳定优于共享模型时，
 才允许评估单票校准层或专用模型；它仍必须输出同一 `TModelScore` 契约，不能另开执行路径。
 
-### 14.7 统一模型基准梯队
+### 14.7 第一版模型基准
 
 所有候选模型必须使用同一 observation anchors、Feature Bar、标签、时间切分、校准和共享账户
-组合回测，禁止为某个算法单独选择更有利的数据窗。第一版基准梯队为：
+组合回测，禁止为某个算法单独选择更有利的数据窗。第一版只比较三个明确基准：
 
 | 层级 | 模型 | 作用与准入条件 |
 |---|---|---|
-| 必选基线 | Logistic Regression | 验证特征是否有稳定线性信息，是任何复杂模型晋升的最低比较对象 |
-| 首选非线性候选 | LightGBM | 预期的首个线上 challenger；需稳定赢过规则与 Logistic |
-| 同级 challenger | XGBoost | 用于检验提升是否来自树模型共性，而非某个实现的偶然参数 |
-| 补充稳健性 | ExtraTrees | 检查非平滑交互及特征依赖，默认研究/对照用途 |
-| 条件候选 | CatBoost | 只有存在经过论证的点时类别特征且样本足够时才引入 |
-| 后续 regime | HMM | 只可作为 shadow 市场状态特征，不能替代确定性环境层和风险门禁 |
-| 后续序列模型 | TCN | 仅在表格模型已有稳定 OOS 增益、序列样本和延迟预算充分后评估 |
+| 规则对照 | RULE_ONLY | 证明模型相对现有可解释规则是否真的带来组合增量 |
+| 概率基线 | Logistic Regression | 验证特征是否有稳定线性信息，是 LightGBM 的最低比较对象 |
+| 非线性候选 | LightGBM | 只有稳定赢过规则与 Logistic 才可进入 SHADOW/ACTIVE 评审 |
 
-第一版明确不引入在线学习、LSTM、Transformer 或强化学习。算法复杂度本身不是晋升理由；
-如果 Logistic 或 RULE_ONLY 在组合费用后更稳定，应保持简单方案。
+不预建其他模型 adapter、状态或配置。若 Logistic 或 RULE_ONLY 在组合费用后更稳定，应保持
+简单方案；将来增加模型家族必须由新的证据和独立契约变更驱动。
 
 ### 14.8 训练与验证
 
 训练运行在 Worker/Research，不在 Engine：
 
-1. 生成因果 feature/label 数据集、数据能力清单和 manifest；
-2. 为全部模型冻结同一训练、验证和测试 observation id 集合；
-3. 使用按时间切分的 purged walk-forward；embargo 至少覆盖最大标签 horizon；
+1. 生成不可变、因果的 feature/label 数据集、数据能力清单和 manifest；
+2. 预检覆盖、泄漏、资源、requested/resolved backend，并锁定 training spec hash；
+3. `DEVELOPMENT` 为全部模型冻结同一训练/验证 observation id，使用 purged walk-forward，
+   embargo 至少覆盖最大标签 horizon；
 4. 在每个验证窗内独立校准概率，禁止用全量数据校准；
-5. 比较 Brier/log loss、AUC、Precision@K/NDCG@K 和校准曲线；
-6. 分别报告标的、行业、流动性桶、市场 regime、时间窗和 worst-group 稳定性；
-7. 使用共享账户组合回测比较费用后收益、回撤、换手、容量拒绝和行业集中度；
-8. 检查特征覆盖、分布漂移、排名漂移、推理延迟和不可用比例；
-9. 只有相对规则排序和 Logistic 基线有跨窗、跨组稳定增益，才允许成为 challenger；
-10. 人工审核后才能从 challenger 晋升 champion/ACTIVE。
+5. 用户锁定开发配置后，`FINAL_EVALUATION` 才能访问一次冻结测试 observation ids；
+6. 比较 Brier/log loss、AUC、Precision@K/NDCG@K 和校准曲线；
+7. 分别报告标的、行业、流动性桶、市场 regime、时间窗和 worst-group 稳定性；
+8. 使用共享账户组合回测比较费用后收益、回撤、换手、容量拒绝和行业集中度；
+9. 检查特征覆盖、分布漂移、排名漂移、CPU 推理延迟和不可用比例；
+10. 只有成功 FINAL_EVALUATION 且安全制品、门禁与冻结测试证据完整，才允许人工登记；
+11. 只有相对规则排序和 Logistic 基线有跨窗、跨组稳定增益，才具备 ACTIVE 资格；
+12. 人工审核和新配置/执行绑定后才会影响实盘排序。
 
 不能只用随机 train/test split、单一总样本 AUC 或分类准确率决定晋升。模型若靠少数高频标的
 贡献全部收益、在某个行业或 regime 显著失效，即使总体指标更高也不能直接 ACTIVE。
 
-### 14.9 模型制品
+### 14.9 做 T 模型制品与运行时绑定
 
-复用 QuantX 已有安全模型制品方法，但不复用下一日选股模型本身。制品至少包含：
+复用 QuantX 已有安全模型制品方法，但不复用次日上涨模型、标签、数据表或日级候选。做 T
+制品至少包含：
 
 ```text
 model_id / model_version
@@ -1078,14 +1445,201 @@ validation_metrics / group_stability_metrics
 portfolio_backtest_metrics
 policy_compatibility
 artifact_sha256
-status = CHALLENGER | CHAMPION | RETIRED
 ```
 
 Engine 只加载与 `model_type` 对应的 allowlist 安全格式、显式特征顺序和校准参数，不加载
 任意 pickle。没有安全、确定性运行时格式的 benchmark 只能停留在 Research。启动、配置变更
 和模型晋升时预加载并完成固定样本自检；在线只在完整分钟结束后调用进程内 scorer。
 
-### 14.10 排序融合
+FINAL training run 保存完整 `gate_conclusion=BLOCKED/SHADOW_ELIGIBLE/ACTIVE_ELIGIBLE`。
+只有允许登记的结果才创建 `TModelVersion`；注册表引用不可变 artifact，复制其
+`SHADOW_ELIGIBLE/ACTIVE_ELIGIBLE` 结论，并另存可变 `registry_stage` 和 `state_version`。
+阶段切换只更新注册表授权，不重写 artifact 或训练证据。
+
+训练 run 不是线上 identity。`TAssistantConfig` 只绑定：
+
+```text
+TModelRuntimeBinding
+  model_id / model_version
+  registry_stage
+  registry_authorization_revision
+  artifact_manifest_sha256
+  feature_schema_version / label_spec_version / calibration_version
+  portfolio_policy_compatibility_hash
+  runtime_self_test_manifest_hash / self_test_tolerance_policy_version
+  binding_hash
+```
+
+一个执行只读取启动时冻结的 binding。新模型激活、模型模式切换或 schema 变化必须先验证制品并
+产生新配置版本，再创建能产生新 ENTRY 的 successor `TAssistantExecution`；旧执行进入
+`DRAINING`，继续完成已有 ExitPlan。不得在运行中把相同 model id 的文件原地替换，也不得让
+scorer cache 跨 binding revision 复用。
+
+binding 冻结不等于忽略安全撤销。每次批量评分和 snapshot 构建都要验证注册表当前
+authorization revision：`SHADOW` 只能绑定允许影子运行的版本，`ACTIVE` 必须仍是唯一 ACTIVE
+且 gate 为 `ACTIVE_ELIGIBLE`。模型被 `SUSPENDED/RETIRED` 或 revision 改变后，原 execution
+立即停止新 ENTRY；它只能等待显式新配置/successor，不能继续使用旧授权，也不能热换模型。
+这里“停止新 ENTRY”的边界是禁止再创建新的 durable pending/outbox；已经提交的 outbox 或结果
+未知委托继续按公共订单契约收敛，不能因模型撤权而删除命令或假定零成交。
+
+### 14.10 复用现有模型能力的边界
+
+QuantX 已经在次日上涨概率训练工作台中实现了以下可复用能力：
+
+- 认证、不可变的数据集 manifest 和 SHA-256；
+- 不可变训练 spec、稳定 hash 和环境要求 hash；
+- `DEVELOPMENT` 与 `FINAL_EVALUATION` 分离，记录冻结测试访问证据；
+- Web/API 只提交与观察，Worker/Prefect 在隔离子进程中训练；
+- 阶段/完成单元进度、幂等提交、取消、并发限制和重启恢复；
+- requested/resolved backend、脱敏环境证据和 CPU/GPU 资格验证；
+- 安全 artifact manifest、人工登记、乐观锁阶段切换和发布门禁。
+
+参考当前权威实现说明：
+
+- [次日上涨概率网页模型训练与 GPU 加速实施计划](../plans/次日上涨概率网页模型训练与GPU加速实施计划.md)
+- [次日上涨概率只读候选工程契约](../engineering/api/NEXT_DAY_SELECTION.md)
+
+实现基线已经存在于 `quantx_domain.stock_selection_training`、
+`quantx_application.stock_selection_training`、`stock_selection_training_flow.py` 和
+`stock_selection_artifacts.py`。做 T 应从这些实现抽取已验证的强类型公共原语，不能复制一套
+名字不同但语义相同的训练生命周期和安全加载器。
+
+做 T 首期只抽取下列小而稳定的公共 building blocks，不建立一个包含任意任务 JSON 的“万能
+模型平台”：
+
+```text
+ImmutableDatasetManifest
+ImmutableTrainingSpec / stable_hash
+TrainingRunLifecycle / Progress / Cancellation
+DevelopmentFinalIsolation
+ModelGateConclusion
+SafeArtifactManifestVerifier
+ModelBackendQualificationEvidence
+PublishedModelIdentity / RuntimeSelfTest
+```
+
+次日上涨与做 T 各自保留强类型数据集、标签、指标、注册表和 GraphQL 投影。做 T 新增自己的：
+
+```text
+TModelDatasetVersion
+TModelTrainingSpec
+TModelTrainingRun
+TModelVersion
+```
+
+其中 dataset version 固化 Feature Bar schema、observation ids、capability manifest、point-in-time
+Universe、标签和成本版本；training spec 固化 DEVELOPMENT/FINAL、purged walk-forward、embargo、
+模型网格、校准、评估、requested/resolved backend 和 seed；training run 只表达排队、执行、取消、
+证据和结果，不拥有任何实盘 execution。
+
+training run 状态固定为 `QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED`，训练 phase 单独表达
+`PREFLIGHT`、`DATASET_BUILD`、`WALK_FORWARD`、`FINAL_FIT`、`CALIBRATION`、`FROZEN_TEST`、
+`PORTFOLIO_EVALUATION` 和 `ARTIFACT_PUBLISH`。取消请求是独立事实，不再增加一组混杂状态。
+
+职责边界固定为：
+
+| 组件 | 做 T 模型职责 | 禁止 |
+|---|---|---|
+| Web | 预检、提交、进度、报告、比较、人工登记/晋升 | 传服务器路径、任意参数 JSON 或直接激活交易 |
+| API | typed contract、幂等命令、状态真源和脱敏投影 | 训练、加载模型进行交易推理 |
+| Worker/Research | 数据集、训练、校准、walk-forward、冻结测试、组合评估、安全制品 | 读取实盘账户、访问 XTData/QMT、下单或修改执行配置 |
+| Engine | 验证并只读加载已发布 artifact，完整分钟 CPU 批量推理 | 启动训练、在线学习、写回模型或 RPC 逐 Tick 推理 |
+| QMT Agent | 无模型职责 | 接收训练命令或加载模型 |
+
+训练数据只来自已持久化、可审计的 QuantX 历史行情与点时资料；Worker/Research 不直接访问
+XTData/QMT，也不为缺失历史使用当前截面回填。
+
+做 T 训练与现有模型训练共用一个本机高资源队列：同时最多一个高资源 run；full/live 连续交易
+时段只允许提交并保持 `QUEUED`，不启动训练子进程。取消只在数据分片、fold、模型家族和制品等
+安全检查点生效；进度使用 phase 与 `completed_units/total_units`，不伪造耗时百分比。API、Engine
+或 QMT 重启不能改变数据库 training run 真源。
+
+模型对比只允许 coordinate hash 完全相同：dataset manifest、observation ids、时间切分、Universe、
+feature/label/cost/evaluation 版本任一不同都返回 mismatch，不能只挑一个指标宣称胜负。CPU/GPU
+backend 作为环境证据展示，不改变实验坐标。
+
+### 14.11 三组状态不能混用
+
+模型需要三组正交状态：
+
+| 状态轴 | 值 | 回答的问题 |
+|---|---|---|
+| 训练证据结论 | `BLOCKED / SHADOW_ELIGIBLE / ACTIVE_ELIGIBLE` | 证据是否具备登记或 ACTIVE 资格 |
+| 注册表阶段 | `CANDIDATE / SHADOW / ACTIVE / SUSPENDED / RETIRED` | 人工已把哪个发布 artifact 放到哪个阶段 |
+| 做 T scorer 模式 | `RULE_ONLY / SHADOW / ACTIVE` | 本次 `TAssistantExecution` 是否计算模型、是否影响排序 |
+
+`ACTIVE_ELIGIBLE` 不会自动变为 registry `ACTIVE`，训练成功也不会修改做 T 配置。registry
+`ACTIVE` 只有被新 `TModelRuntimeBinding` 和新执行显式采用后才影响交易。Research 中的
+challenger/champion 只是模型比较角色，不作为第四组线上生命周期状态。
+
+只有 `FINAL_EVALUATION + SUCCEEDED` 才可登记 `CANDIDATE`；`BLOCKED` 不可登记，
+`SHADOW_ELIGIBLE` 最高只能进入 `SHADOW`，`ACTIVE_ELIGIBLE` 才可由人工晋升 `ACTIVE`。
+做 T 注册表最多一个 ACTIVE；激活新版本必须在一个事务中暂停旧 ACTIVE，并使用 state version
+防止并发覆盖。单独的注册表 mutation 不得静默修改任何正在运行的 execution。
+
+若当前 RUNNING execution 绑定了旧 ACTIVE，禁止只切注册表后继续运行。要么先显式停止新 ENTRY，
+要么使用“模型激活 + 新配置 + predecessor DRAINING + successor WARMING”的组合用例和统一锁序；
+不能出现新模型已 ACTIVE、旧 execution 仍按旧授权继续入场的窗口。
+
+评分批次读取 registry revision 后再发布 cache；若阶段在推理期间变化，本批次失败且不发布
+部分 score revision。`RULE_ONLY` 不需要 model binding；`SHADOW/ACTIVE` 必须满足上述阶段与
+门禁映射。
+
+做 T 发布门禁必须版本化，并至少覆盖：
+
+- artifact、数据泄漏、point-in-time Universe、Feature Bar/标签覆盖和冻结测试有效性；
+- Brier/log loss、校准误差、Top-K/rank lift 及按交易日 bootstrap 的置信区间；
+- 标的、行业、流动性、regime、时间窗和 worst-group 稳定性；
+- 相对 RULE_ONLY 和 Logistic 的费用后共享账户增量收益、回撤、换手和容量拒绝；
+- Engine CPU 推理延迟、不可用率、OOD、schema 和固定样本自检。
+
+门禁阈值属于版本化系统 policy，Web 不能为某次运行降低。冻结测试被重复查看、历史 Universe
+证据不完整或组合评估不足时最多 `SHADOW_ELIGIBLE`，不得伪装成无偏 ACTIVE 证据。
+
+### 14.12 GPU 只用于经资格验证的离线训练
+
+做 T 复用现有 `CPU/AUTO/GPU_REQUIRED` 后端解析、Windows LightGBM OpenCL 构建证据和 GPU
+资格验证代码，但必须用做 T 自己的黄金数据面板重新确认概率、Top-K、组合门禁和性能。规则为：
+
+- Logistic 始终使用 CPU；requested/resolved GPU 只影响 LightGBM 训练；
+- Windows Dev 只接受经认证的 LightGBM OpenCL GPU wheel，不引入 CUDA/WSL 第二运行形态；
+- `CPU` 从不初始化 GPU；`GPU_REQUIRED` 不满足资格时预检失败；
+- `AUTO` 只有资格证据、显存预算、样本规模和可重复加速收益都合格时才解析为 GPU；
+- resolved backend 在提交前明示并写入不可变 spec，排队后 GPU 失败使该 run 失败，不在同一
+  run 中静默改用 CPU；
+- CPU/GPU 使用相同数据、切分、seed 和显式 LightGBM 参数，GPU 训练结果必须能由 CPU Engine
+  安全加载并通过固定样本与质量容差；
+- qualification evidence 必须绑定 LightGBM/OpenCL wheel SHA、编译能力、设备、重复性、CPU
+  reload、端到端耗时和峰值显存；初始预算沿用“峰值显存不超过可用显存 80%、可重复端到端
+  加速至少 20%”的公共门禁，概率/Top-K/组合容差由做 T 黄金面板版本化且不得翻转发布结论；
+- 当前环境若报告 `GPU_UNAVAILABLE_BUILD`，正常使用 CPU，不影响 full/live 和已发布模型。
+
+GPU 不进入 Engine、API 或 QMT Agent。线上分钟级 pooled inference 默认使用 CPU；只有真实
+SLA 数据证明 CPU 无法满足且有独立架构评审时，才设计 GPU inference，不预埋运行时降级分支。
+
+### 14.13 安全制品和原子发布
+
+运行目录只接受 manifest 索引、路径位于允许根目录且 SHA-256/字节数匹配的普通文件；拒绝
+路径穿越、符号链接/联接点、Pickle/Joblib、非有限数、非法预处理尺度、越界校准器和未在
+allowlist 中的模型格式。首期只允许安全 JSON 与 LightGBM 文本模型；训练面板 Parquet 不由
+Engine 反序列化为模型。
+Web/GraphQL 只返回 artifact id、hash 和白名单化证据，不返回本地根目录、文件路径、设备序列号、
+账户信息或原始 Worker 异常。
+
+人工切换 registry 阶段使用 `state_version` 乐观锁。创建 successor execution 前必须：
+
+1. 加载并完整校验 manifest、artifact、schema、calibration 和 policy compatibility；
+2. 用固定样本运行 CPU self-test；输入/期望证据由 manifest hash 固定，预测在版本化数值容差内
+   一致，且排序、OOD 和门禁结论不得翻转；
+3. 预热 scorer 并建立新的空 cache revision；
+4. 按统一锁序锁定注册表、当前配置和活动 execution，在同一事务中切换 registry ACTIVE、写入
+   新配置/binding、将 predecessor 置为 DRAINING，并创建 successor WARMING；
+5. successor 完成行情和 scorer 预热后才进入 RUNNING；此前保持无新 ENTRY，旧退出继续运行。
+
+任何步骤失败都保持旧配置/执行不变；若旧执行已经进入 DRAINING，则 fail-closed，不临时回切
+未审核模型。ACTIVE runtime artifact 缺失或损坏时阻断新 ENTRY，已有退出完全不受影响。
+
+### 14.14 排序融合
 
 规则资格永远先执行。排序分采用版本化、可回放的明确公式，例如：
 
@@ -1118,6 +1672,7 @@ ACTIVE:
 
 多标的做 T 回测必须只有一个 `BacktestPortfolio`：
 
+- 每个回测版本创建独立 `TAssistantExecution(environment=BACKTEST)`，不创建 `StrategyRun`；
 - 所有标的共享现金、冻结和 T 总暴露；
 - 所有 BUY/SELL 共享订单队列和容量；
 - 老仓库存、当日买入和 T+1 按标的记录；
@@ -1170,6 +1725,16 @@ stable source identity
 - 因模型排序相对规则排序产生的增量收益和增量回撤；
 - 数据健康、模型不可用和期末未闭环数量。
 
+### 15.5 回测身份与结果真源
+
+`TAssistantBacktestVersion` 保存 execution id、冻结 config/policy/model binding、数据 manifest、
+时间线规则、Broker 参数、代码版本和结果 manifest。训练用组合评估必须引用明确 backtest
+version；训练 run 只引用结果，不能拥有或修改回测事实。
+
+LIVE、PAPER、BACKTEST 都通过同一 `StrategyBase.step(StrategyInput)`，区别只来自冻结的
+`execution_ref/environment`、时钟、Broker 和外部事实适配器。BACKTEST owner 不得进入实盘审批、
+pending、outbox 或 QMT 路由；PAPER 也不得与 LIVE 共用这些记录的唯一键或容量义务。
+
 ## 16. 状态真源与持久化
 
 ### 16.1 真源矩阵
@@ -1177,14 +1742,20 @@ stable source identity
 | 数据 | 真源 | 备注 |
 |---|---|---|
 | 标的行情窗口和 FSM 热状态 | Engine 内存 | 可重建；检查点只保存保守恢复投影 |
-| 做 T 配置与版本 | `t_trade_global_configs` | 单账户唯一配置 |
+| 做 T 配置与版本 | `t_trade_global_configs` head + append-only `t_assistant_config_versions` | 单账户唯一 head；无 `strategy_run_id` |
+| 做 T 执行身份与生命周期 | `t_assistant_executions` | PAPER/LIVE/BACKTEST 独立 owner |
+| 做 T execution material 事件 | append-only `t_assistant_execution_events` | owner 路由与生命周期审计；不替代 inbox |
+| 标的 material 算法状态 | `t_assistant_symbol_states` | `(execution_id, instrument_code)` 独立 revision |
+| material 决策周期 | `t_assistant_decision_cycles` | snapshot/output manifest 与原子提交事实 |
 | 标的 Universe | 权威持仓快照 + Monitor 投影 | 策略不得自行选股 |
+| 做 T 规划边界 | append-only `t_trade_envelopes` | 只持久化 material snapshot；不是余额或预占真源 |
 | 完整 1 分钟 Feature Bar | 因果行情历史 + 固定 builder/schema 生成 | 在线热缓存可重建，`FORMING` 不可评分 |
-| 最新 `TModelScore` | 模型制品 + 完整 Feature Bar 的派生缓存 | material 候选关联的分数必须持久化为审计证据 |
+| 最新 `TModelScoreCache` | Engine 内存，由 model artifact + 完整 Feature Bar 重建 | 只读 cache view，不是持久化真源 |
+| material 模型分数证据 | append-only `t_trade_model_scores` | 只保存候选绑定或审计要求的 score/outcome |
 | material 机会证据 | `t_trade_opportunity_evaluations` | append-only、幂等 event key |
 | 参考画像 | `t_trade_instrument_profiles` | 点时版本化 |
 | 候选结果 | `t_trade_candidate_outcomes` | 用于候选评估，不单独充当完整训练集 |
-| TradeIntent | `strategy_trade_intents` | 候选提案也必须先受理 |
+| TradeIntent | 公共 `trade_intents`（由现有 `strategy_trade_intents` 原子迁移） | 强类型 owner；候选提案也必须先受理 |
 | 组合分配决策 | 新增持久化 `t_trade_allocation_decisions` | 一条候选一条动作和原因 |
 | 最终账户容量 | 完整 QMT 快照 + 本地未覆盖义务 | `AccountCapacityService` 事务计算 |
 | pending/outbox | 对应持久化业务表 | 命令可靠投递真源 |
@@ -1192,7 +1763,9 @@ stable source identity
 | 自动退出 | `auto_exit_plans` | `ExitPlanBook` 只是运行热缓存 |
 | 仓位归因 | `BucketLedger` | locked_core/core/swing |
 | 做 T 轮次展示 | `TTradeBatch` + 事件 | 可重建运营投影，不反向驱动真源 |
-| 评分模型 | 版本化模型制品与 manifest | Engine 内存只读加载，LightGBM 为首选 challenger |
+| 做 T 回测版本/结果 | `t_assistant_backtest_versions` + result manifest | 引用 BACKTEST execution；不接入实盘路由 |
+| 做 T 模型训练 | `t_trade_model_dataset_versions` / `t_trade_model_training_specs` / `t_trade_model_training_runs` | Worker 真源；与交易 execution 分离 |
+| 评分模型 | `t_trade_model_versions` + 版本化制品与 manifest | Engine 只读加载冻结 binding |
 
 ### 16.2 普通 Tick 写入原则
 
@@ -1206,34 +1779,52 @@ stable source identity
 - 审批、风险和容量裁决；
 - pending/outbox；
 - 委托、成交、ExitPlan 和批次事件；
-- 模型模式或版本变更。
+- scorer mode、model binding 或 registry authorization 变更。
 
 在线不逐 Tick 持久化 Feature Bar、模型分数或 SHAP。SHADOW 的全 observation-anchor 分数和
 BACKTEST 的普通热状态、无意图 material 评估可以使用 `DAY_BATCH`，但真正候选绑定的分数、
 意图、Gate 决策和模拟成交必须即时成为幂等事实。
 
-### 16.3 建议补充的关联字段
+### 16.3 端到端关联字段
 
 为了端到端回放，相关投影和事件应能够关联：
 
 ```text
 cycle_id
+cycle_sequence / execution_id
+execution_owner_type / execution_owner_id
+producer_id / execution_environment
 opportunity_id
 candidate_id / fingerprint
 model_score_id / source_feature_bar_id
+model_runtime_binding_hash / score_cache_revision
 intent_id
 allocation_decision_id
 entry_gate_decision_id
-strategy_run_id
+admission_batch_id / admission_rank
 t_batch_id
 exit_plan_id
+source_execution_owner_type / source_execution_owner_id
 client_order_id / broker_order_id
-policy / config / feature / profile / model versions
+policy / config_version_id / feature / profile / model versions
 account_snapshot_id
+envelope_input_fingerprint / local_obligation_watermark
 trace_id
 ```
 
 不要求每张表复制所有字段，但必须通过稳定外键或业务键无歧义连接。
+
+`strategy_run_id` 只允许保留在尚未排空的 legacy `STRATEGY_RUN` 记录中；任何新
+`T_ASSISTANT_EXECUTION` 记录都不能同时写一个伪造或兼容用 run id。公共表完成 owner 迁移后，
+删除“缺失 owner 时默认 STRATEGY_RUN”的 default 和 fallback。
+
+### 16.4 执行环境隔离
+
+- LIVE intent/order/outbox 只能由 LIVE execution 创建，且必须通过实盘能力门。
+- PAPER 使用独立 Broker 和事实表/命名空间，不消耗 LIVE `AccountCapacityService` 义务。
+- BACKTEST 只写回测存储，不创建公共实盘 approval、pending 或 outbox。
+- environment 是 execution 的冻结字段；不能通过更新一行把 PAPER/BACKTEST 原地变成 LIVE。
+- owner、environment 与目标表不匹配时在 repository 和路由边界双重拒绝。
 
 ## 17. 故障与恢复语义
 
@@ -1246,8 +1837,8 @@ trace_id
 | Engine 关键消费者 lagging | 阻断新 ENTRY | 保持可见并 fail-closed | resync 后 rewarm |
 | 账户快照陈旧/不完整 | 全部拒绝 | 不猜测可卖量；必要时 reconcile | 新合法完整快照 |
 | Coordinator 异常 | 整周期不提交分配 | 不影响已有退出 | 同 cycle 幂等重试或终态拒绝 |
-| `ACTIVE` 模型缺失/校验失败 | 全部 `MODEL_UNAVAILABLE`，不静默降级 | 不影响 | 修复同版本或显式切 RULE_ONLY |
-| `ACTIVE` 分数陈旧/schema 不匹配/OOD | 只阻断受影响候选，保存稳定原因 | 不影响 | 合法新分数或显式模式切换 |
+| `ACTIVE` 模型缺失/校验失败 | 全部 `MODEL_UNAVAILABLE`，不静默降级 | 不影响 | 修复同版本，或以新配置创建 RULE_ONLY successor |
+| `ACTIVE` 分数陈旧/schema 不匹配/OOD | 只阻断受影响候选，保存稳定原因 | 不影响 | 合法新分数，或新配置的 RULE_ONLY successor |
 | 数据源 required 盘口字段缺失 | 依 capability policy `DELAY/REJECT`，不伪造数值 | 不影响既有退出规则 | 字段恢复或切换经过验证的无该字段 schema |
 | EntryExecutionGate 发现价差/价格偏离 | `DELAY/REJECT`，不得追价或直接改量 | 不影响 | TTL 内重新走 scorer/Coordinator，否则过期 |
 | 提案已持久化、协调前崩溃 | 不路由 | 不影响 | TTL 内用最新事实重验，否则过期 |
@@ -1255,23 +1846,28 @@ trace_id
 | outbox 已投递、结果未知 | 保持占用并 reconcile | 同公共订单契约 | QMT 快照/回报证明 |
 | ORDER 先于 TRADE | 不提前释放 | 不提前完成 | 等成交累计量收敛 |
 | 迟到成交或释放后反证 | 账户隔离，禁止新 ENTRY | 精确计划 sticky ERROR | 显式修复和新快照 |
-| Engine 重启且有活动 ExitPlan | 禁止新建替代运行 | 恢复同一 run 所有权 | durable inbox + plan reload |
+| Engine 重启且有活动 ExitPlan | 禁止新建替代执行接管 | 按相同 owner/source execution 恢复 | durable inbox + owner registry + plan reload |
+| execution 状态检查点落后于 material cycle | 不从旧状态重复提案 | 不影响 | 以已提交 cycle/intent 为准重放 symbol state |
+| successor 启动失败 | predecessor 已 DRAINING 时继续阻断新 ENTRY | predecessor ExitPlan 正常运行 | 修复 binding 后创建新 successor，不原地篡改 |
+| 模型训练/FINAL 失败 | 不改变当前 execution 或 registry | 不影响 | 修复后创建新训练 run；不能接管交易 execution |
 
-任何恢复都不能通过创建第二个 StrategyRun、第二个 ExitPlan 或重发不同 intent 来“绕过”
-不确定状态。
+任何恢复都不能通过创建第二个 `TAssistantExecution` 接管未决 ENTRY、创建第二个 ExitPlan 或
+重发不同 intent 来“绕过”不确定状态。legacy 做 T `StrategyRun` 也必须由原 owner 排空，不能
+把结果未知的旧义务转挂到新 execution。
 
 ## 18. 审计、可观测性与 UI 投影
 
 ### 18.1 一次机会的审计链
 
 ```text
-market fence
-  -> TDecisionSnapshot/cycle_id
+ExecutionOwnerRef / TAssistantExecution
+  -> market fence
+  -> TDecisionSnapshot/cycle_id/output manifest
   -> Symbol feature + FSM evaluation
   -> candidate/opportunity
   -> complete Feature Bar / TModelScore
   -> rule score / scorer evidence
-  -> portfolio rank/allocation
+  -> TTradingEnvelope / portfolio rank/allocation
   -> approval/revalidation
   -> EntryExecutionGate
   -> sizing/risk/capacity
@@ -1289,6 +1885,7 @@ market fence
 至少监控：
 
 - decision cycle lag、耗时和合并 fence 数；
+- execution 状态、owner 路由错误、cycle commit/abort 和 symbol revision 冲突；
 - 每 symbol quote age、window warmup 和 data health；
 - 每周期 evaluated/candidate/selected/rejected 数；
 - Feature Bar complete/invalid 数、完成延迟和字段覆盖率；
@@ -1299,8 +1896,9 @@ market fence
 - 审批过期和确认后容量拒绝；
 - active batch、ExitPlan、reconcile 和 sticky error；
 - outbox 投递、ORDER/TRADE 延迟和乱序收敛。
+- 模型训练 DEVELOPMENT/FINAL、backend、门禁和 artifact 状态单独监控，不混入交易运行状态。
 
-### 18.3 UI 建议
+### 18.3 UI 投影
 
 做 T 助手页面应把三类信息分开：
 
@@ -1308,34 +1906,73 @@ market fence
 2. **组合**：总额度、已规划/已占用、现金缓冲、并发、单票和行业暴露；
 3. **轮次**：ENTRY、ExitPlan、成交、净收益、异常和 reconcile。
 
+页面顶部另行展示 `TAssistantExecution`、冻结 config/model binding、RUNNING/DRAINING 状态和
+source owner；研究页展示训练 run 与发布门禁。两者不能共用一个“运行成功”状态。
+
 不得把“模型高分”“已分配预算”“已批准”和“已成交”用一个状态或同一种颜色表示。
 
-## 19. 代码落点建议
+## 19. 代码落点
 
 不新增微服务，优先在现有边界内重构：
 
 ```text
 packages/domain/src/quantx_domain/trading/
+  execution_owner.py                # ExecutionOwnerRef 与当前明确 owner 类型
+  t_assistant_execution.py          # 配置/执行/周期/标的状态生命周期
   t_trade_opportunity_engine.py      # 继续作为纯 SymbolTEngine reducer
   t_trade_portfolio_coordinator.py   # 新增纯组合协调算法和契约
+  t_trading_envelope.py              # 账户快照绑定的只读规划边界
   t_trade_scoring.py                 # FeatureBar/TModelScore/scorer 值对象，不做 I/O
   t_trade_entry_execution_gate.py    # 纯 ALLOW/DELAY/REJECT 重验
 
 packages/application/src/quantx_application/t_trade_v3/
   contracts.py                       # snapshot/opportunity/allocation 契约
   ports.py                           # scorer、证据和分配存储端口
-  use_cases.py                       # 决策周期受理、协调和恢复用例
+  execution_use_cases.py             # 创建/接续/draining/recovery
+  decision_cycle_use_cases.py        # 周期原子受理、协调和恢复
+
+packages/application/src/quantx_application/trading/
+  owner_runtime_router.py            # 公共 owner 事件路由，不含做 T 算法
+
+packages/application/src/quantx_application/model_ops/
+  manifests.py                       # 不可变 manifest/spec/hash 公共原语
+  training_lifecycle.py              # DEVELOPMENT/FINAL、进度、取消、门禁
+  artifact_verification.py           # 安全制品与 runtime self-test 端口
 
 packages/infrastructure/src/quantx_infrastructure/
   services/t_trade_lightgbm_scorer.py
   services/t_trade_model_artifact_loader.py
+  repositories/t_assistant_config_repository.py
+  repositories/t_assistant_execution_repository.py
+  repositories/t_assistant_execution_event_repository.py
+  repositories/t_assistant_decision_cycle_repository.py
+  repositories/t_assistant_symbol_state_repository.py
+  repositories/t_trade_envelope_repository.py
   repositories/t_trade_allocation_decision_repository.py
+  repositories/t_trade_model_score_repository.py
+  repositories/t_assistant_backtest_repository.py
+  models/t_assistant_config_version.py
+  models/t_assistant_execution.py
+  models/t_assistant_execution_event.py
+  models/t_assistant_decision_cycle.py
+  models/t_assistant_symbol_state.py
+  models/t_trade_envelope.py
   models/t_trade_allocation_decision.py
+  models/t_trade_model_score.py
+  models/t_assistant_backtest_version.py
+  models/t_trade_model_training.py
+
+apps/research/src/quantx_research/
+  t_trade_model_dataset.py           # 做 T 专用 observation/label 数据集
+  t_trade_model_training.py          # 训练、校准、验证、组合评估与制品
+
+apps/worker/src/quantx_worker/prefector/flows/
+  t_trade_model_training_flow.py     # 隔离后台训练、取消和证据收敛
 
 apps/engine/src/quantx_engine/
   t_trade_decision_snapshot.py       # 从 WholeQuoteHub 构建冻结快照
   t_trade_model_runtime.py           # 完整分钟 builder、批量推理和 score cache
-  t_trade_decision_runtime.py        # 周期、排序、协调和路由编排
+  t_assistant_decision_runtime.py    # 无 StrategyRun 的周期、排序、协调编排
   t_trade_global_monitor.py          # 只保留配置/Universe/生命周期
 ```
 
@@ -1343,76 +1980,145 @@ apps/engine/src/quantx_engine/
 算法状态、输出候选 BUY TradeIntent 和退出模板。账户事实、组合排名、真实成交量和
 ExitPlan 状态机不得继续堆入该类。
 
-上述文件名是目标职责建议，不要求为目录美观进行无价值拆分。若现有模块能清晰承担同一
+公共 owner 和 model-ops 模块只容纳已经被两个真实功能验证的最小原语。做 T 的 Feature Bar、
+标签、Coordinator、执行生命周期和 GraphQL 不下沉成泛化框架；次日上涨模型也不迁入做 T
+表。避免为了“复用”制造弱类型 `feature_json/task_type` 总表。
+
+上述文件名表达目标职责，不要求为目录美观进行无价值拆分。若现有模块能清晰承担同一
 职责，可以原地重构；同一能力只能保留一条权威路径。
 
 ## 20. 迁移路线
 
-### 阶段 0：冻结契约和基线
+### 阶段 0：冻结 `StrategyRun` 做 T 扩展并建立迁移基线
 
-- 固定当前 V3 规则、候选、审批、TTradeBatch 和 ExitPlan 行为测试。
-- 为当前实盘/回测记录补齐 cycle、candidate、intent、batch、plan 关联基线。
-- 明确新意图状态和 `TAllocationDecision` schema。
-- 不改变活动批次和退出计划。
+- 冻结当前做 T `StrategyRun` 的 schema 和功能；除安全修复外，不再在其上实现新能力。
+- 固定 V3 规则、候选、审批、TTradeBatch、ExitPlan、T+1 置换和乱序回报测试。
+- 清点所有隐式 `run_id/strategy_run_id/owner_type=STRATEGY_RUN` 假设，包括 intent、审批、
+  correlation、pending/outbox、ExitPlan、回报路由、Worker 画像和 GraphQL。
+- 为存量活动候选、订单、batch、plan 和结果未知义务建立可查询清单及 owner 一致性检查。
+- 明确切换开关只能停止旧路径新 ENTRY，不能停止旧 ExitPlan 和回报收敛。
 
-### 阶段 1：快照与标的内核解耦
+### 阶段 1：公共 `ExecutionOwnerRef` 原子升级
 
-- 引入 `TDecisionSnapshotBuilder` 和 account T universe snapshot。
-- 把当前每标的 V3 逻辑收敛为无共享可变状态的 reducer。
-- `StrategyBase.step(SNAPSHOT)` 成为 LIVE/BACKTEST 同一批量入口。
-- 规则输出与旧实现逐事件对比，保持规则等价。
+- 先冻结新命令创建并排空所有未投递 1.1 outbox；已投递但结果未知的命令必须通过 QMT
+  快照/回报完成 reconcile。不能重写或用 1.2 payload 重发一条可能已经到达券商的 1.1 命令。
+- 在 domain 中加入强类型 `ExecutionOwnerRef` 及当前四种明确 owner。
+- 将 `StrategyInput`、`TradeIntentOrigin`、意图、审批、correlation、pending/outbox、ExitPlan
+  source 和回报路由切换为 owner ref。
+- 现有普通策略记录按原 `run_id` 回填为 `STRATEGY_RUN`，人工命令和 ExitPlan 使用各自 owner；
+  不改变其业务行为。
+- 将 `strategy_trade_intents`、`strategy_order_correlations` 原子重命名/演进为公共
+  `trade_intents`、`order_correlations`，删除默认 `owner_type=STRATEGY_RUN` 和 owner 缺失
+  fallback。
+- 建立 `OwnerRuntimeRouter/Registry`；未知 owner、owner 冲突和 source ref 缺失全部 fail-closed。
+- 同一发布中更新数据库、`packages/contracts`、domain/application/infrastructure、Engine、API、
+  QMT Agent、GraphQL、Web、文档和测试；Agent 协议原子升级为 1.2，不长期支持新旧两套 owner
+  写入或双 payload。
 
-### 阶段 2：组合协调影子运行
+完成标志：普通 StrategyRun、人工命令和 ExitPlan 全部通过新 owner 契约，行为等价；公共链已能
+接受 `T_ASSISTANT_EXECUTION`，但尚未让新做 T 路径下单。
 
-- 持久化所有 material 候选和 allocation shadow decision。
-- 旧路径仍决定是否进入审批；新 Coordinator 只比较，不执行。
-- 验证排序确定性、额度计算和重启恢复，不建立双订单路径。
+### 阶段 2：建立独立做 T 执行域和快照内核
 
-### 阶段 3：Coordinator 成为唯一候选准入
+- 把 `t_trade_global_configs` 演进为无 `strategy_run_id` 的 config head，新增 append-only
+  `t_assistant_config_versions`；旧 `mode` 明确迁移为 `desired_environment`，旧 settings 先按 typed
+  schema 规范化为一个完整初始版本再切换 head；旧 `LIVE_AUTO` 映射为 `AUTO`，其他人工确认
+  路径映射为 `CANARY_CONFIRM`，`BACKTEST_AUTO` 不进入活动 config。
+- 新增 `TAssistantExecution`、append-only execution events、`TAssistantSymbolState`、
+  `TDecisionCycle` 和 envelope 持久化。
+- 引入 `TDecisionSnapshotBuilder`、`StrategyCadence.SNAPSHOT` 和强类型 snapshot validator。
+- 把每标的 V3 逻辑收敛为无共享可变状态的 reducer；输出按标的 revision 的算法 patch。
+- 将做 T 内核中的 `context.run_id/input.run_id/strategy_run_id` identity 和 metadata 全部替换为
+  `execution_ref`，candidate/intent 幂等键改由 execution + causal fingerprint 构成。
+- 禁用做 T 的 `StrategyStateProxy -> StrategyRunState` 持久化 callback 和
+  `OWNS_RUNTIME_EXIT_PLAN_BOOK` 所有权暗示。
+- `TAssistantDecisionRuntime` 通过 `execution_ref` 调用 `StrategyBase.step(SNAPSHOT)`，不创建
+  StrategyRun。
+- material 标的状态、机会证据、score 绑定、意图提案和 cycle manifest 按第 7.6 节原子提交。
+- 与旧实现逐 cycle 比较规则结果；新路径使用隔离的 PAPER execution/intent 记录 shadow evidence，
+  不创建 LIVE approval/order/outbox，也不计入 LIVE 容量义务。
 
-- 原子切换为 `PORTFOLIO_PENDING -> TAllocationDecision -> 审批/路由`。
-- 删除旧的“候选直接审批”路径和重复账户布尔门禁。
-- CANARY 逐笔人工确认，确认时走最新组合和最终容量重验。
-- 引入确定性 EntryExecutionGate；先记录 shadow action，再成为公共 ENTRY 必经门。
+### 阶段 3：组合协调与执行门影子运行
 
-### 阶段 4：共享账户组合回测
+- 构建 point-in-time `TTradabilityProfile`、账户绑定 `TTradingEnvelope` 和
+  `PortfolioTDecisionSnapshot`。
+- 持久化 allocation shadow decision，验证排序确定性、额度、账户水位指纹和重启恢复。
+- 引入 `EntryExecutionGate` 的 shadow action，覆盖 quote、spread、TTL、schema 和模型绑定重验。
+- 旧路径仍是唯一新 ENTRY 来源；新路径不得持有真实容量或创建第二个订单。
 
-- 统一多标的时间线、现金、库存、费用、T+1 和回报收敛。
-- 对照 LIVE 的 snapshot、coordinator、OrderSizer、Risk 和 ExitPlan。
-- 通过无重复资金、无超老仓、无未来数据验收。
+### 阶段 4：新 owner 成为唯一做 T ENTRY 来源
 
-### 阶段 5：模型数据、统一基准与 SHADOW
+切换在一个维护窗口按以下顺序完成：
 
+1. 禁止旧做 T `StrategyRun` 产生新 candidate/intent，并将其标记 `DRAINING`；
+2. 取消或终结尚未批准且可安全失效的旧候选，冻结旧 owner 义务清单；
+3. 未决订单、结果未知命令、已成交 batch 和 ExitPlan 继续由原 `STRATEGY_RUN` owner 收敛，
+   不迁 id、不复制 plan、不改挂 owner；
+4. 账户完整快照、inbox、pending/outbox 和 owner 一致性检查通过后，创建唯一能产生新 ENTRY 的
+   `TAssistantExecution`；
+5. 新 Coordinator 以 `ALLOCATION_PENDING -> TAllocationDecision -> 审批/EXECUTION_READY`
+   成为唯一准入路径，CANARY_CONFIRM 确认后仍重新 allocation 和最终容量复核；
+6. 旧 owner 的义务作为新 Coordinator 可见的本地占用；同标的旧活动 batch 存在时，新候选拒绝；
+7. 旧做 T owner 义务归零后删除 StrategyRun 专用做 T 调度、状态和 fallback。
+
+短期允许一个只 DRAINING 的旧 owner 与一个可产生 ENTRY 的新 owner 并存；不允许两个 owner
+同时产生新 ENTRY，也不允许新 owner 接管结果未知的旧订单。
+
+### 阶段 5：共享账户组合回测
+
+- 每个版本创建 `TAssistantExecution(environment=BACKTEST)`，统一多标的时间线、现金、库存、费用、
+  T+1 和回报收敛。
+- 旧 StrategyRun 做 T 回测只读保留原历史身份，不改挂到新 execution，也不作为新模型门禁证据。
+- 对照 LIVE 的 snapshot、step、Coordinator、Gate、OrderSizer、Risk 和 ExitPlan。
+- 通过无重复资金、无超老仓、无未来数据、执行环境隔离和结果可重放验收。
+
+### 阶段 6：模型能力复用、训练与 SHADOW
+
+- 抽取已经由次日上涨训练验证过的 manifest/spec/lifecycle/gate/artifact/backend 公共原语。
+- 新建做 T 强类型 dataset/spec/training run/model registry，不复用次日上涨数据和模型。
 - 冻结完整 1 分钟 Feature Bar、能力清单、first-touch 标签和全 observation-anchor 数据集。
-- 在相同 purged walk-forward 窗口比较 RULE_ONLY、Logistic、LightGBM 及必要 challengers。
-- 先使用无原始 symbol identity 的跨标的共享模型，并报告 worst-group 稳定性。
-- Engine 内安全加载经批准 artifact，记录带 as-of、coverage 和 OOD 的 shadow score。
-- 至少覆盖不同波动环境和足够完整 T 轮次后再评估晋升。
+- 通过 DEVELOPMENT -> 锁定配置 -> 一次 FINAL_EVALUATION，在相同 purged walk-forward 窗口
+  比较 RULE_ONLY、Logistic 和 LightGBM。
+- GPU 仅在做 T 黄金面板重新资格验证后作为离线 resolved backend；在线 Engine 保持 CPU。
+- Engine 安全加载人工登记的 SHADOW artifact，记录带 as-of、cache revision、coverage 和 OOD
+  的 shadow score，不改变规则排序。
 
-### 阶段 6：模型 ACTIVE 灰度
+### 阶段 7：模型 ACTIVE 灰度
 
-- 只有稳定胜过规则和 Logistic 的模型才可人工晋升；先低额度 CANARY，再受控 LIVE。
-- ACTIVE 模型、分数、schema 或 freshness 不合法时阻断受影响的新 ENTRY。
-- 退出、回报收敛和账户安全链与模型完全解耦。
+- 只有 `ACTIVE_ELIGIBLE` 且人工进入 registry ACTIVE 的模型才可创建 ACTIVE binding。
+- 先创建低额度 `CANARY_CONFIRM` successor execution，完成规定闭环后再以新配置创建受控
+  `entry_authorization=AUTO` successor。
+- ACTIVE artifact、分数、schema、binding 或 freshness 不合法时阻断受影响的新 ENTRY，禁止
+  同 execution 静默退回 RULE_ONLY。
+- 退出、回报收敛和账户安全链与训练和 scorer 故障完全解耦。
 
 ### 切换规则
 
-- 不长期保留旧/新两套候选准入协议。
+- 不长期保留旧/新两套 owner、候选准入或状态写入协议。
 - 每个阶段完成后原子更新代码、契约、GraphQL、文档和测试。
 - 旧未确认候选在配置或 feature schema 切换时失效。
-- 已成交 `TTradeBatch`、BucketLedger 和 ExitPlan 必须由同一运行安全完成。
-- 活动退出未完成时不得通过创建新 run 逃避 `DRAINING`。
+- 已成交 `TTradeBatch`、BucketLedger 和 ExitPlan 必须由原 `ExecutionOwnerRef` 安全完成。
+- 活动退出未完成时不得通过创建新 execution 逃避原 owner 的 `DRAINING`。
+- 不为新做 T execution 生成假的 StrategyRun，也不把训练 run id 写入交易表。
+- 数据迁移必须先验证精确目标和 owner 一致性；任何不确定记录进入 reconcile，不能猜测回填。
 
 ## 21. 测试与验收
 
 ### 21.1 领域测试
 
+- `TAssistantConfig` 与 `TAssistantExecution` 生命周期独立，创建做 T execution 不创建
+  `StrategyRun`。
+- config version payload/hash 可重放且不可修改；head 乐观锁切换不会改变旧 execution 的冻结版本。
+- 同一账户最多一个能产生真实 ENTRY 的 LIVE execution；DRAINING predecessor 只能完成旧义务。
+- `ExecutionOwnerRef` 拒绝空 id、未知类型和 owner/目标冲突，普通 StrategyRun 适配后行为等价。
 - 两个 symbol 使用相同 Tick 序列时状态完全独立。
 - 一个 symbol 的乱序、gap、rewarm 不改变其他 symbol 状态。
 - 同一快照输入得到字节级稳定的候选排序和原因码。
 - 候选不包含现金、可卖量和最终数量。
 - Coordinator 对相同输入输出稳定；tie-break 与输入容器顺序无关。
 - 行业、并发、总暴露、现金缓冲和单票上限的 ALLOW/CAP/REJECT 正确。
+- `TTradingEnvelope` 绑定账户快照和 input fingerprint，不能进入 SymbolTEngine 或模型输入；
+  它的 planning ceiling 不能被当作最终可卖量或预占。
 - LightGBM 只能改变合格候选之间的排序，不能使硬门禁失败者入选。
 
 ### 21.2 模型数据与验证测试
@@ -1420,24 +2126,35 @@ ExitPlan 状态机不得继续堆入该类。
 - `FORMING` 分钟永远不能生成在线分数；watermark 和 generation 满足后只封闭一次。
 - 相同 Tick、capability manifest 和 schema 在 LIVE/BACKTEST 生成相同 Feature Bar hash。
 - 候选只能关联 `model_as_of/source_bar_end <= observed_at` 且未过期的同版本分数。
+- snapshot 冻结 score cache revision 后，随后完成的异步分数不能进入当前 cycle。
 - SHADOW 分数缺失不改变规则排序；ACTIVE 缺失、陈旧、schema mismatch 或 OOD 稳定阻断。
 - first-touch 标签用有序 Tick 判定 barrier 先后；无法判定的同 BAR 双触达为 `UNAVAILABLE`，
   并存在独立悲观敏感性回测。
-- MFE/MAE 与 `p_target_before_stop` 字段语义相互独立，版本切换不能复用同名字段改义。
-- Logistic、LightGBM 和 challengers 使用完全相同的 observation ids、时间窗、embargo 和成本。
+- MFE/MAE 只作为离线指标，不能写入或改义 `p_target_before_stop`。
+- Logistic 与 LightGBM 使用完全相同的 observation ids、时间窗、embargo 和成本。
 - 跨标的模型不含原始 symbol identity，并输出逐标的/行业/regime/worst-group 稳定性。
 - miniQMT 不具备可选 Level-2 字段时选择经过验证的无该字段 schema，不生成伪造数值。
+- dataset/spec/hash 不可变；DEVELOPMENT 不能登记，FINAL_EVALUATION 不能静默重复使用冻结测试。
+- `BLOCKED/SHADOW_ELIGIBLE/ACTIVE_ELIGIBLE`、registry stage 与 scorer mode 不可混写或自动推进。
+- manifest SHA/size、路径、symlink、Pickle/Joblib、非有限数和 runtime self-test 校验失败时不可登记。
+- CPU/AUTO/GPU_REQUIRED 解析可重放；排队后的 GPU 失败不静默转 CPU，GPU 训练模型可由 CPU
+  Engine 安全加载。
 
 ### 21.3 应用与并发测试
 
-- 同周期多个 TradeIntent 先整批持久化，再产生 allocation decision。
+- material cycle 的 symbol state、机会证据和多个 TradeIntent 要么整批提交，要么全部不提交。
+- candidate 状态不能在 intent 缺失时单独推进；revision 冲突创建新 cycle，不覆盖旧证据。
 - 两个候选竞争同一份现金时只有账户事务允许的数量进入 outbox。
 - 两只股票竞争总并发最后一个名额时结果确定且可审计。
+- LIVE 最终准入严格保持冻结排名顺序，不能由并发抢锁决定赢家。
+- CANARY_CONFIRM 确认后使用新 account/envelope/obligation snapshot 创建新 allocation attempt。
 - 配置更新、人工确认和市场周期并发时不存在旧候选穿透。
 - Coordinator 崩溃恢复不会重复审批或重复路由。
 - ACTIVE 模型失败不静默切换，所有新 ENTRY 有稳定阻断原因。
 - 候选形成后出现新分钟分数时，旧 allocation 不会被静默换分；必须重走 scorer/Coordinator。
 - ExitPlan SELL 在本地调度上优先于新 ENTRY。
+- OwnerRuntimeRouter 将 T assistant、普通策略、人工命令和 ExitPlan 报告精确路由；未知 owner
+  不默认成 StrategyRun。
 
 ### 21.4 执行与回报测试
 
@@ -1451,6 +2168,8 @@ ExitPlan 状态机不得继续堆入该类。
 - 同标的活动批次存在时新候选被拒绝。
 - 外部卖出侵占老仓时进入 reconcile，不自动缩量。
 - QMT `command_ack` 不推进 ENTRY/EXIT 成交。
+- protocol 1.2 command 不携带 StrategyRun 或业务 owner；服务端 correlation 缺失/冲突时拒绝
+  路由，QMT 回报仍只表达券商事实。
 
 ### 21.5 回测测试
 
@@ -1461,33 +2180,69 @@ ExitPlan 状态机不得继续堆入该类。
 - 训练 cutoff 和 feature availability 无未来泄露。
 - 完整分钟、模型评分、Tick 规则、Gate 和 Broker 事件顺序与 LIVE 一致。
 - RULE_ONLY、SHADOW、ACTIVE 使用固定 artifact 可重复得到相同结果。
+- PAPER、LIVE、BACKTEST 的 intent/order/ExitPlan/outbox 命名空间隔离，environment 不能原地升级。
 
-### 21.6 上线验收
+### 21.6 迁移测试
+
+- owner backfill 后普通策略、人工命令和 ExitPlan 的既有行为等价。
+- Engine/API/QMT Agent 原子切到 protocol 1.2；不存在 1.1 command 加 metadata owner 的旁路。
+- 新 `T_ASSISTANT_EXECUTION` 全链没有伪造 `strategy_run_id`，owner 缺失不触发 legacy fallback。
+- 切换窗口后 legacy 做 T owner 不再产生新 ENTRY，但 ORDER/TRADE/ExitPlan 仍可完整收敛。
+- 结果未知的旧 pending/outbox、部分成交 batch 和 ExitPlan 不会被改挂、复制或由新 owner 重发。
+- DRAINING 旧 owner 的本地义务对新 Coordinator 可见，同标的冲突被拒绝。
+- 旧义务归零后删除做 T StrategyRun 专用路径，数据库和应用不再双写 owner。
+
+### 21.7 上线验收
 
 必须同时满足：
 
-1. 没有任何 SymbolTEngine 读取账户或调用执行服务。
-2. 没有第二套现金/库存余额和第二套 SELL FSM。
-3. 所有候选均能还原同一个 cycle snapshot。
-4. 所有未执行候选都有明确淘汰原因。
-5. 最终命令入队重新校验完整 QMT 快照和本地未覆盖义务。
-6. 至少完成规定数量的 CANARY 闭环且无重复单、超现金、超老仓或 T+1 违规。
-7. 回测和实盘使用同一个 `StrategyBase.step(SNAPSHOT)`、Coordinator 和 scorer 语义。
-8. Engine/QMT 断线、乱序回报和重启恢复测试通过。
-9. 活动退出计划在所有 ENTRY/模型故障场景下仍保持唯一所有者和可恢复性。
-10. ACTIVE 只读取完整分钟模型分数，Gate 只做重验且模型从不直接定仓或下单。
+1. 新做 T 配置、execution、cycle、symbol state、intent、batch 和 ExitPlan 来源不依赖
+   `StrategyRun/strategy_run_id`。
+2. 公共执行链使用强类型 `ExecutionOwnerRef`，没有 metadata-only owner、默认 StrategyRun 或
+   owner 缺失 fallback。
+3. 没有任何 SymbolTEngine 或模型读取账户、envelope 或调用执行服务。
+4. material cycle 的状态、证据和意图原子提交；所有候选均能还原 snapshot 与 score watermark。
+5. 没有第二套现金/库存余额、Reservation 真源和 SELL FSM。
+6. 所有未执行候选都有明确淘汰原因，`CAP` 只存在于 allocation decision。
+7. 最终命令按确定排名进入账户锁，并重新校验完整 QMT 快照和本地未覆盖义务。
+8. 至少完成规定数量的 CANARY_CONFIRM 闭环且无重复单、超现金、超老仓或 T+1 违规。
+9. 回测和实盘使用同一个 `StrategyBase.step(SNAPSHOT)`、Coordinator、Gate 和 scorer 语义。
+10. PAPER/LIVE/BACKTEST 隔离；切换后唯一 READY QMT Agent 使用 protocol 1.2，Engine/QMT
+    断线、乱序回报和重启恢复测试通过。
+11. 活动退出计划在所有 ENTRY、切换和模型故障场景下仍保持原 owner、唯一计划和可恢复性。
+12. DEVELOPMENT/FINAL、发布门禁、安全制品和人工 binding 闭环通过；训练 run 不改变交易配置。
+13. ACTIVE 只读取完整分钟、冻结 cache revision 的 CPU 模型分数；模型不直接定仓或下单。
+14. legacy 做 T owner 已排空并移除专用入口；普通 StrategyRun 策略不受独立做 T 架构影响。
 
 ## 22. 最终架构判断
 
-“每标的一 T Engine + 全账户统一协调”方向是合理的，但必须按 QuantX 边界做四项修正：
+“每标的一 T Engine + 全账户统一协调”方向是合理的，但必须按 QuantX 边界做以下修正：
 
-1. `SymbolTEngine` 只输出机会质量，不能申请具体股数、读取现金或下单。
-2. 模型只用完整 1 分钟特征输出可校准的候选质量，Tick 继续负责 V3 规则和执行重验；模型
+1. 做 T 由 `TAssistantConfig + TAssistantExecution` 拥有，不再依赖 `StrategyRun`；公共链只依赖
+   `ExecutionOwnerRef`。
+2. `SymbolTEngine` 只输出机会质量，不能申请具体股数、读取现金或下单。
+3. `TTradingEnvelope` 只在组合/执行层表达账户快照下的规划边界，不形成第三仓位桶或第二真源。
+4. 模型只用完整 1 分钟特征输出可校准的候选质量，Tick 继续负责 V3 规则和执行重验；模型
    不直接定仓、不替代硬门禁。
-3. `PortfolioTCoordinator` 只做排名和预算上限，最终合法数量及容量仍由公共执行链决定。
-4. 所谓 ExecutionManager、ReservationManager 和 TRound 不应在 QuantX 中复制成第二套真源，
+5. `PortfolioTCoordinator` 只做排名和预算上限，最终合法数量及容量仍由公共执行链决定。
+6. 所谓 ExecutionManager、ReservationManager 和 TRound 不应在 QuantX 中复制成第二套真源，
    而应分别映射到现有 `TradeIntentProcessor/OrderSizer/Risk`、
    `AccountCapacityService`、`TTradeBatch + ExitPlan + durable order facts`。
+7. 模型训练复用现有不可变数据/spec、DEVELOPMENT/FINAL、Worker、GPU 资格、安全 artifact 和
+   发布门禁能力；做 T 保留自己的特征、标签、组合评估、注册表与 runtime binding。
+
+后续买入/卖出计划和打板助手应复用的只有公共地基：
+
+| 可复用 | 各功能必须独立拥有 |
+|---|---|
+| `ExecutionOwnerRef`、OwnerRuntimeRouter、TradeIntent 受理 | 配置聚合与 execution 生命周期 |
+| 审批、OrderSizer、Risk、AccountCapacityService | 决策输入、领域状态、原因码和 UI 语义 |
+| pending/outbox/inbox、QMT 报告收敛 | 候选/计划/打板规则与业务约束 |
+| ExitPlan、BucketLedger、T+1、审计关联 | 各自的回测结果与发布授权 |
+| 模型训练公共原语、安全制品和发布门禁 | 各自的特征、标签、模型指标和 runtime binding |
+
+它们不应复用 `TAssistantExecution`，更不应回到 `StrategyRun`；每个功能使用自己的明确 owner，
+再接入同一公共执行和模型能力。
 
 按本设计落地后，系统获得真正的多标的机会竞争和共享资金调度，同时继续保留 QuantX
 最重要的安全属性：策略纯净、账户状态唯一、订单可靠投递、QMT 回报为真、T+1 合法、
