@@ -1,7 +1,7 @@
 # QuantX 多标的做 T 助手新架构设计
 
 > 状态：目标架构，待实施<br>
-> 版本：2.0<br>
+> 版本：2.1<br>
 > 日期：2026-09-02<br>
 > 适用范围：QuantX Windows Dev、个人单账户、A 股正向做 T
 
@@ -40,13 +40,16 @@ QuantX 现有统一风控、容量预占、订单、退出计划和回报收敛�
 
 ```text
 ExecutionOwnerRef
-  owner_type = T_ASSISTANT_EXECUTION | STRATEGY_RUN | EXIT_PLAN | MANUAL_COMMAND
+  owner_type = T_ASSISTANT_EXECUTION | ENTRY_PLAN | BOARD_ASSISTANT_EXECUTION
+             | STRATEGY_RUN | EXIT_PLAN | MANUAL_COMMAND
   owner_id
 ```
 
 做 T 的 BUY 意图以 `T_ASSISTANT_EXECUTION` 为 owner；真实 BUY 成交建立的退出计划随后成为
-SELL 意图的 `EXIT_PLAN` owner，并保留 `source_execution_ref` 回指原做 T 执行。普通策略仍可
-使用 `STRATEGY_RUN`，但公共执行、审批、ExitPlan 和回报收敛不再假定 owner 必然是它。
+SELL 意图的 `EXIT_PLAN` owner，并保留 `source_execution_ref` 回指原做 T 执行。所有来源的
+PAPER/LIVE ExitPlan 由独立公共 `ExitPlanRuntime` 调度，source execution 不再为了执行 SELL
+长期存活。普通策略仍可使用 `STRATEGY_RUN`，但公共执行、审批、ExitPlan 和回报收敛不再假定
+owner 必然是它。
 
 `StrategyBase.step(StrategyInput)` 仍是 LIVE/BACKTEST 共用的纯决策入口；移除的是
 `StrategyRun` 所有权依赖，不是策略纯函数边界。`StrategyInput` 和 `TradeIntent` 的目标契约
@@ -90,11 +93,11 @@ artifact，不绑定训练 run。
 6. PAPER、LIVE 和 BACKTEST 复用同一套标的规则、排序、组合协调和执行语义。
 7. 每次候选、排名、淘汰、限额、拒绝、部分成交和退出都可审计、可回放。
 8. 在不复制 QuantX 已有交易能力的前提下，复用 QMT Agent、OrderSizer、风控、
-   `AccountCapacityService`、`ExitPlanBook`、durable outbox/inbox 和回报收敛。
+   `AccountCapacityService`、`ExitPlanRuntime`、durable outbox/inbox 和回报收敛。
 9. 做 T 的配置、执行、周期、标的状态和回测结果拥有独立真源，不以 `StrategyRun` 或
    `StrategyRunState.custom_state` 作为目标持久化容器。
-10. 为后续买入/卖出计划和打板助手沉淀通用 owner、意图受理、执行链、退出计划及模型
-    发布能力，同时保持各功能自己的配置、执行和领域状态。
+10. 与买入/卖出计划和打板助手共享通用 owner、意图受理、执行链、退出计划及模型运维原语，
+    同时保持各功能自己的配置、执行和领域状态。
 
 ### 2.2 非目标
 
@@ -103,7 +106,7 @@ artifact，不绑定训练 run。
 - 不增加多账户、多租户或账户路由抽象。
 - 不让每个标的创建独立 QMT 会话、独立资金池或独立执行服务。
 - 不在 Engine、API 或 Worker 中直接导入 `miniqmt` / `xtquant`。
-- 不新建做 T 专用 SELL FSM；退出继续由公共 `ExitPlanBook` 管理。
+- 不新建做 T 专用 SELL FSM；退出继续由公共 `ExitPlan/ExitPlanRuntime` 管理。
 - 不新建第二套现金、库存或订单真源。
 - 不使用 Worker RPC 或远程模型服务处理逐 Tick 推理。
 - 不让模型直接计算目标仓位、下单数量、订单类型或追价参数。
@@ -195,8 +198,8 @@ API Agent Hub / Market Stream Transport
 Engine WholeQuoteHub / Market Data Gateway
 stream/generation/sequence 连续性、完整 fence、数据健康
             │
-            ├──────────────► OwnerRuntimeRegistry / ExitPlanBook
-            │                按 ExecutionOwnerRef 恢复，活动退出优先评估
+            ├──────────────► ExitPlanRuntime
+            │                按 EXIT_PLAN owner 恢复，活动退出优先评估
             │
             ├──────────────► TModelFeatureBarBuilder
             │                只封闭已结束的 1 分钟 Feature Bar
@@ -350,15 +353,15 @@ TAssistantExecution
 ```
 
 不能直接用 `config_id` 充当 owner：同一配置可能产生多次 PAPER/BACKTEST，也可能在 LIVE
-successor 切换时同时存在 RUNNING 与 DRAINING 执行；只有 execution id 能无歧义归属审批、订单、
-ExitPlan 和回报。
+successor 切换时同时存在 RUNNING 与 DRAINING 执行；只有 execution id 能无歧义归属审批、ENTRY
+订单、ExitPlan 来源和 BUY 回报。
 
 它负责：
 
 - 冻结一次执行所用的配置、策略内核、policy、feature schema 和模型 artifact 身份；
 - 调度 `StrategyBase.step()` 并给每个 material 决策周期分配稳定序号；
 - 串行提交周期状态、material 事件和意图提案；
-- 恢复人工审批、DRAINING、ExitPlan 来源和委托/成交回报路由；
+- 恢复人工审批、DRAINING、下游 ExitPlan 来源关联和自身 BUY 委托/成交回报路由；
 - 归属 PAPER/LIVE 报告或共享账户 BACKTEST 版本。
 
 生命周期、successor、RECONCILE、审批恢复和 owner 路由产生的 material 变化同时追加到
@@ -372,9 +375,10 @@ identity，但不复制或替代券商事实。
 - 充当所有标的状态的大 JSON 容器；
 - 拥有训练任务或模型注册表。
 
-`STOPPED/FAILED` 只允许在没有未决审批、pending/outbox、结果未知订单、活动 batch 和 ExitPlan 后
-进入。运行时自身故障但仍有交易义务时只能 `DRAINING` 或 `RECONCILE_REQUIRED`；owner 路由和
-退出调度必须继续存在，不能用终态隐藏未完成义务。
+`STOPPED/FAILED` 只允许在没有未决审批、pending/outbox 和结果未知 BUY 订单后进入。已由真实
+BUY fill 激活的 `TTradeBatch/ExitPlan` 是独立下游事实，由公共 `ExitPlanRuntime` 和持久投影继续
+收敛，不要求 source execution 保持活动；终态 execution 仍必须可查询，不能硬删除或隐藏下游
+义务。运行时自身故障但仍有自身 BUY 义务时只能 `DRAINING` 或 `RECONCILE_REQUIRED`。
 `execution_id` 永不复用；一旦被意图、订单、计划或报告引用，终态 execution 只归档不硬删除。
 
 进入 `DRAINING` 的同一事务要阻断新 cycle/approval/EXECUTION_READY 路由，并将尚未形成
@@ -398,6 +402,8 @@ LIVE 环境仍需逐笔确认，不再用同一个“LIVE 模式”同时表达�
 ExecutionOwnerType =
   STRATEGY_RUN
   | T_ASSISTANT_EXECUTION
+  | ENTRY_PLAN
+  | BOARD_ASSISTANT_EXECUTION
   | EXIT_PLAN
   | MANUAL_COMMAND
 
@@ -406,8 +412,9 @@ ExecutionOwnerRef
   owner_id: non-empty stable id
 ```
 
-这里不预埋尚未设计的 owner 类型。买入/卖出计划、打板助手开始独立设计时，再在同一轮代码、
-契约、文档和测试中加入各自的明确类型。
+`ENTRY_PLAN` 和 `BOARD_ASSISTANT_EXECUTION` 分别来自已经完成的独立领域设计；不增加
+`MANAGED_PLAN/ASSISTANT/AUTOMATION` 等弱类型 owner。未来新业务 owner 仍需在同一轮代码、契约、
+文档和测试中明确加入。
 
 公共契约按以下方式调整：
 
@@ -447,12 +454,13 @@ ExecutionOwnerRef
 - Universe revision 变化时让受影响标的失效旧候选并 rewarm；
 - 配置、policy、schema 或模型 binding 变化时让当前执行停止新 ENTRY，并按冻结新版本创建
   successor，不原地修改 execution；
-- 保证活动退出计划完成前执行只能进入 `DRAINING`。
+- 保证 source execution 的未决 BUY 义务完成前只能进入 `DRAINING`；已激活 ExitPlan 独立执行。
 
 它不创建 `StrategyRun`，不运行标的信号，不排名候选，不下单。
 
-运行 Universe 至少是“当前持仓标的 ∪ 未决 intent/order/batch/ExitPlan 标的”。日级资格、忽略名单
-或配置变化只能阻断新 ENTRY，不能让仍有交易义务的标的从 registry 和退出调度中消失。
+运行 Universe 至少是“当前持仓标的 ∪ 当前 execution 未决 BUY intent/order 标的”。全账户已有
+batch/ExitPlan 义务通过公共 obligation snapshot 提供给 Coordinator，不要求继续留在 source
+registry。日级资格、忽略名单或配置变化只能阻断新 ENTRY，不能隐藏公共交易义务。
 
 ### 6.6 `SymbolTEngineRegistry` 与独立标的状态
 
@@ -474,8 +482,9 @@ Registry 生命周期：
 
 - `WARMING`：新加入或连续性丢失，构造完整因果窗口；
 - `ACTIVE`：数据健康，允许产生机会；
-- `DRAINING`：不产生新 ENTRY，但保留审计和活动批次关联；
-- `RETIRED`：没有候选、意图、批次或退出计划关联后才可清理。
+- `DRAINING`：不产生新 ENTRY，但保留审计并收敛该 execution 自身未决 BUY 义务；
+- `RETIRED`：没有候选、未决 BUY、工作买单或结果未知 owner 事件后即可清理热状态；历史 batch 和
+  ExitPlan 仍可保留 source ref，不反向阻止 symbol state 退休。
 
 ### 6.7 `SymbolTEngine`
 
@@ -578,8 +587,8 @@ portfolio 层可把它作为一个输入进一步收紧保护底仓，但不能�
 | 订单持久化和可靠投递 | `PendingTradeOrder` / `TradeCommandOutbox` |
 | 券商下单和本地保护 | QMT Agent |
 | 委托与成交事实 | QMT Agent 报告 + `AgentReportInbox` |
-| owner 路由与恢复 | `OwnerRuntimeRouter` / `OwnerRuntimeRegistry` |
-| 自动退出 | `ExitPlanBook` / `auto_exit_plans` |
+| owner 路由与恢复 | `OwnerRuntimeRouter` / 强类型 owner repository registry |
+| 自动退出 | `ExitPlanRuntime` / `auto_exit_plans`；`ExitPlanBook` 只作纯规则执行器 |
 | 仓位归因和置换 | `BucketLedger` / `T1SubstitutionPlan` |
 | 一轮做 T 的运营投影 | `TTradeBatch` + `TTradeBatchEvent` |
 
@@ -767,7 +776,7 @@ hash 构成；该 payload hash 明确排除 cycle id、trace id 等自引用/诊
 
 ```text
 1. 冻结 TDecisionSnapshot
-2. OwnerRuntimeRegistry 对活动 ExitPlan 做优先评估
+2. 公共 ExitPlanRuntime 对活动 ExitPlan 做优先评估
 3. TAssistantDecisionRuntime 以 execution_ref 调用唯一 StrategyBase.step(SNAPSHOT)
 4. step 内在隔离状态副本上计算各 SymbolTEngine
 5. 按 instrument_code 确定性合并状态和候选
@@ -1183,17 +1192,18 @@ ERROR
 1. ENTRY BUY 意图附带冻结的 `ExitPlanTemplate`。
 2. 只有真实 BUY 成交回报激活保护数量。
 3. PAPER/LIVE 的 `auto_exit_plans` 是唯一持久化退出真源。
-4. `OwnerRuntimeRegistry` 按 `source_execution_ref` 恢复对应的 `ExitPlanBook`；活动计划在新
-   ENTRY 决策前优先评估。
+4. 公共 `ExitPlanRuntime` 按 `EXIT_PLAN/plan_id` 恢复并评估活动计划；
+   `source_execution_ref` 只作来源审计、冲突检查和结果投影。
 5. 命中规则后产生标准 SELL `TradeIntent`，继续经过 OrderSizer、风控和 Broker。
 6. SELL 的 owner 固定为 `EXIT_PLAN/plan_id`，并保留 `source_execution_ref`、batch 和 role
    用于回报收敛。
-7. `TAssistantExecution` 停止新 ENTRY 时进入 `DRAINING`，活动计划完成前不得普通停止或
-   创建替代执行接管同一计划。
+7. `TAssistantExecution` 停止新 ENTRY 时进入 `DRAINING`，自身未决 BUY 义务归零后可以
+   `STOPPED`；活动 ExitPlan 由自身 owner 继续，任何 successor 都不得接管或复制该计划。
 
-目标做 T 内核不再依赖策略类上的 `OWNS_RUNTIME_EXIT_PLAN_BOOK` 来暗示 StrategyRun 所有权；
-ExitPlan 恢复能力由 `OwnerRuntimeRegistry` 根据 `ExecutionOwnerRef/source_execution_ref` 明确
-注册。普通 StrategyRun 策略需要 ExitPlanBook 时通过自己的 owner adapter 保持原行为。
+目标做 T 内核不再依赖策略类上的 `OWNS_RUNTIME_EXIT_PLAN_BOOK`，也不在 PAPER/LIVE source
+execution 内保存 ExitPlan 热缓存。`ExitPlanRuntime` 调用公共纯退出策略，以
+`ExecutionOwnerRef(EXIT_PLAN, plan_id)` 生成 SELL；普通 StrategyRun 的真实 BUY fill 同样只作为
+source ref，不再形成另一条退出执行路径。
 
 LightGBM 不参与退出触发。已有风险保护不能因模型、候选池、Coordinator 或训练服务
 异常而停止。
@@ -1472,8 +1482,8 @@ TModelRuntimeBinding
 
 一个执行只读取启动时冻结的 binding。新模型激活、模型模式切换或 schema 变化必须先验证制品并
 产生新配置版本，再创建能产生新 ENTRY 的 successor `TAssistantExecution`；旧执行进入
-`DRAINING`，继续完成已有 ExitPlan。不得在运行中把相同 model id 的文件原地替换，也不得让
-scorer cache 跨 binding revision 复用。
+`DRAINING`，只完成自身未决 BUY 义务，已有 ExitPlan 由公共 runtime 独立继续。不得在运行中把
+相同 model id 的文件原地替换，也不得让 scorer cache 跨 binding revision 复用。
 
 binding 冻结不等于忽略安全撤销。每次批量评分和 snapshot 构建都要验证注册表当前
 authorization revision：`SHADOW` 只能绑定允许影子运行的版本，`ACTIVE` 必须仍是唯一 ACTIVE
@@ -1760,7 +1770,7 @@ pending、outbox 或 QMT 路由；PAPER 也不得与 LIVE 共用这些记录的�
 | 最终账户容量 | 完整 QMT 快照 + 本地未覆盖义务 | `AccountCapacityService` 事务计算 |
 | pending/outbox | 对应持久化业务表 | 命令可靠投递真源 |
 | 委托/成交 | QMT 报告 + inbox/业务表 | 唯一实盘成交真源 |
-| 自动退出 | `auto_exit_plans` | `ExitPlanBook` 只是运行热缓存 |
+| 自动退出 | `auto_exit_plans` + 公共 `ExitPlanRuntime` | source execution 不保存 PAPER/LIVE 热缓存 |
 | 仓位归因 | `BucketLedger` | locked_core/core/swing |
 | 做 T 轮次展示 | `TTradeBatch` + 事件 | 可重建运营投影，不反向驱动真源 |
 | 做 T 回测版本/结果 | `t_assistant_backtest_versions` + result manifest | 引用 BACKTEST execution；不接入实盘路由 |
@@ -1846,14 +1856,15 @@ trace_id
 | outbox 已投递、结果未知 | 保持占用并 reconcile | 同公共订单契约 | QMT 快照/回报证明 |
 | ORDER 先于 TRADE | 不提前释放 | 不提前完成 | 等成交累计量收敛 |
 | 迟到成交或释放后反证 | 账户隔离，禁止新 ENTRY | 精确计划 sticky ERROR | 显式修复和新快照 |
-| Engine 重启且有活动 ExitPlan | 禁止新建替代执行接管 | 按相同 owner/source execution 恢复 | durable inbox + owner registry + plan reload |
+| Engine 重启且有活动 ExitPlan | 禁止新建替代计划或改挂来源 | 按 `EXIT_PLAN/plan_id` 独立恢复 | durable inbox + ExitPlanRuntime + plan reload |
 | execution 状态检查点落后于 material cycle | 不从旧状态重复提案 | 不影响 | 以已提交 cycle/intent 为准重放 symbol state |
-| successor 启动失败 | predecessor 已 DRAINING 时继续阻断新 ENTRY | predecessor ExitPlan 正常运行 | 修复 binding 后创建新 successor，不原地篡改 |
+| successor 启动失败 | predecessor 已 DRAINING 时继续阻断新 ENTRY | 公共 ExitPlanRuntime 正常运行 | 修复 binding 后创建新 successor，不原地篡改 |
 | 模型训练/FINAL 失败 | 不改变当前 execution 或 registry | 不影响 | 修复后创建新训练 run；不能接管交易 execution |
 
 任何恢复都不能通过创建第二个 `TAssistantExecution` 接管未决 ENTRY、创建第二个 ExitPlan 或
-重发不同 intent 来“绕过”不确定状态。legacy 做 T `StrategyRun` 也必须由原 owner 排空，不能
-把结果未知的旧义务转挂到新 execution。
+重发不同 intent 来“绕过”不确定状态。legacy 做 T `StrategyRun` 的未决 BUY 也必须由原 owner
+排空，不能把结果未知的旧义务转挂到新 execution；已激活 ExitPlan 保留自身 owner 和原 source
+ref，由公共 runtime 继续。
 
 ## 18. 审计、可观测性与 UI 投影
 
@@ -2002,7 +2013,7 @@ ExitPlan 状态机不得继续堆入该类。
 
 - 先冻结新命令创建并排空所有未投递 1.1 outbox；已投递但结果未知的命令必须通过 QMT
   快照/回报完成 reconcile。不能重写或用 1.2 payload 重发一条可能已经到达券商的 1.1 命令。
-- 在 domain 中加入强类型 `ExecutionOwnerRef` 及当前四种明确 owner。
+- 在 domain 中加入强类型 `ExecutionOwnerRef` 及当前六种明确 owner。
 - 将 `StrategyInput`、`TradeIntentOrigin`、意图、审批、correlation、pending/outbox、ExitPlan
   source 和回报路由切换为 owner ref。
 - 现有普通策略记录按原 `run_id` 回填为 `STRATEGY_RUN`，人工命令和 ExitPlan 使用各自 owner；
@@ -2052,14 +2063,16 @@ ExitPlan 状态机不得继续堆入该类。
 
 1. 禁止旧做 T `StrategyRun` 产生新 candidate/intent，并将其标记 `DRAINING`；
 2. 取消或终结尚未批准且可安全失效的旧候选，冻结旧 owner 义务清单；
-3. 未决订单、结果未知命令、已成交 batch 和 ExitPlan 继续由原 `STRATEGY_RUN` owner 收敛，
-   不迁 id、不复制 plan、不改挂 owner；
+3. 未决 BUY 订单和结果未知命令继续由原 `STRATEGY_RUN` owner 收敛；已成交 batch 对应的
+   ExitPlan 保留原 source ref，但由 `EXIT_PLAN/plan_id` 和公共 ExitPlanRuntime 独立收敛，
+   不迁 id、不复制 plan、不改挂 source；
 4. 账户完整快照、inbox、pending/outbox 和 owner 一致性检查通过后，创建唯一能产生新 ENTRY 的
    `TAssistantExecution`；
 5. 新 Coordinator 以 `ALLOCATION_PENDING -> TAllocationDecision -> 审批/EXECUTION_READY`
    成为唯一准入路径，CANARY_CONFIRM 确认后仍重新 allocation 和最终容量复核；
 6. 旧 owner 的义务作为新 Coordinator 可见的本地占用；同标的旧活动 batch 存在时，新候选拒绝；
-7. 旧做 T owner 义务归零后删除 StrategyRun 专用做 T 调度、状态和 fallback。
+7. 旧做 T owner 自身 BUY 义务归零后删除 StrategyRun 专用做 T 调度、状态和 fallback；下游
+   ExitPlan 不阻止旧 run 终态，但必须继续对新 Coordinator 可见。
 
 短期允许一个只 DRAINING 的旧 owner 与一个可产生 ENTRY 的新 owner 并存；不允许两个 owner
 同时产生新 ENTRY，也不允许新 owner 接管结果未知的旧订单。
@@ -2097,8 +2110,10 @@ ExitPlan 状态机不得继续堆入该类。
 - 不长期保留旧/新两套 owner、候选准入或状态写入协议。
 - 每个阶段完成后原子更新代码、契约、GraphQL、文档和测试。
 - 旧未确认候选在配置或 feature schema 切换时失效。
-- 已成交 `TTradeBatch`、BucketLedger 和 ExitPlan 必须由原 `ExecutionOwnerRef` 安全完成。
-- 活动退出未完成时不得通过创建新 execution 逃避原 owner 的 `DRAINING`。
+- 已成交 `TTradeBatch`、BucketLedger 和 ExitPlan 必须保持原 plan owner、source ref 和事实身份；
+  source execution 终态不能删除或接管下游计划。
+- 活动退出不阻止创建 successor，但必须进入全账户 obligation snapshot，不能通过新 execution
+  重复占用同标的库存或复制 ExitPlan。
 - 不为新做 T execution 生成假的 StrategyRun，也不把训练 run id 写入交易表。
 - 数据迁移必须先验证精确目标和 owner 一致性；任何不确定记录进入 reconcile，不能猜测回填。
 
@@ -2109,7 +2124,8 @@ ExitPlan 状态机不得继续堆入该类。
 - `TAssistantConfig` 与 `TAssistantExecution` 生命周期独立，创建做 T execution 不创建
   `StrategyRun`。
 - config version payload/hash 可重放且不可修改；head 乐观锁切换不会改变旧 execution 的冻结版本。
-- 同一账户最多一个能产生真实 ENTRY 的 LIVE execution；DRAINING predecessor 只能完成旧义务。
+- 同一账户最多一个能产生真实 ENTRY 的 LIVE execution；DRAINING predecessor 只能完成自身旧
+  BUY 义务，ExitPlan 由公共 runtime 独立完成。
 - `ExecutionOwnerRef` 拒绝空 id、未知类型和 owner/目标冲突，普通 StrategyRun 适配后行为等价。
 - 两个 symbol 使用相同 Tick 序列时状态完全独立。
 - 一个 symbol 的乱序、gap、rewarm 不改变其他 symbol 状态。
@@ -2153,8 +2169,8 @@ ExitPlan 状态机不得继续堆入该类。
 - ACTIVE 模型失败不静默切换，所有新 ENTRY 有稳定阻断原因。
 - 候选形成后出现新分钟分数时，旧 allocation 不会被静默换分；必须重走 scorer/Coordinator。
 - ExitPlan SELL 在本地调度上优先于新 ENTRY。
-- OwnerRuntimeRouter 将 T assistant、普通策略、人工命令和 ExitPlan 报告精确路由；未知 owner
-  不默认成 StrategyRun。
+- OwnerRuntimeRouter 将做 T、EntryPlan、打板助手、普通策略、人工命令和 ExitPlan 报告精确
+  路由；未知 owner 不默认成 StrategyRun。
 
 ### 21.4 执行与回报测试
 
@@ -2187,7 +2203,8 @@ ExitPlan 状态机不得继续堆入该类。
 - owner backfill 后普通策略、人工命令和 ExitPlan 的既有行为等价。
 - Engine/API/QMT Agent 原子切到 protocol 1.2；不存在 1.1 command 加 metadata owner 的旁路。
 - 新 `T_ASSISTANT_EXECUTION` 全链没有伪造 `strategy_run_id`，owner 缺失不触发 legacy fallback。
-- 切换窗口后 legacy 做 T owner 不再产生新 ENTRY，但 ORDER/TRADE/ExitPlan 仍可完整收敛。
+- 切换窗口后 legacy 做 T owner 不再产生新 ENTRY；其 BUY ORDER/TRADE 由原 owner 收敛，已有
+  ExitPlan 由 `EXIT_PLAN/plan_id` 收敛并保留 legacy source ref。
 - 结果未知的旧 pending/outbox、部分成交 batch 和 ExitPlan 不会被改挂、复制或由新 owner 重发。
 - DRAINING 旧 owner 的本地义务对新 Coordinator 可见，同标的冲突被拒绝。
 - 旧义务归零后删除做 T StrategyRun 专用路径，数据库和应用不再双写 owner。
@@ -2209,7 +2226,8 @@ ExitPlan 状态机不得继续堆入该类。
 9. 回测和实盘使用同一个 `StrategyBase.step(SNAPSHOT)`、Coordinator、Gate 和 scorer 语义。
 10. PAPER/LIVE/BACKTEST 隔离；切换后唯一 READY QMT Agent 使用 protocol 1.2，Engine/QMT
     断线、乱序回报和重启恢复测试通过。
-11. 活动退出计划在所有 ENTRY、切换和模型故障场景下仍保持原 owner、唯一计划和可恢复性。
+11. 活动退出计划在所有 ENTRY、切换和模型故障场景下仍保持原 plan owner、source ref、唯一计划
+    和可恢复性，且不依赖 source execution 存活。
 12. DEVELOPMENT/FINAL、发布门禁、安全制品和人工 binding 闭环通过；训练 run 不改变交易配置。
 13. ACTIVE 只读取完整分钟、冻结 cache revision 的 CPU 模型分数；模型不直接定仓或下单。
 14. legacy 做 T owner 已排空并移除专用入口；普通 StrategyRun 策略不受独立做 T 架构影响。
@@ -2231,18 +2249,24 @@ ExitPlan 状态机不得继续堆入该类。
 7. 模型训练复用现有不可变数据/spec、DEVELOPMENT/FINAL、Worker、GPU 资格、安全 artifact 和
    发布门禁能力；做 T 保留自己的特征、标签、组合评估、注册表与 runtime binding。
 
-后续买入/卖出计划和打板助手应复用的只有公共地基：
+对应的独立设计见：
+
+- [买入/卖出计划独立领域新架构设计](买入卖出计划新架构设计.md)
+- [打板助手独立领域新架构设计](打板助手新架构设计.md)
+
+三个领域只复用以下公共地基：
 
 | 可复用 | 各功能必须独立拥有 |
 |---|---|
-| `ExecutionOwnerRef`、OwnerRuntimeRouter、TradeIntent 受理 | 配置聚合与 execution 生命周期 |
+| `ExecutionOwnerRef`、OwnerRuntimeRouter、TradeIntent 受理 | 配置聚合与 plan/execution 生命周期 |
 | 审批、OrderSizer、Risk、AccountCapacityService | 决策输入、领域状态、原因码和 UI 语义 |
 | pending/outbox/inbox、QMT 报告收敛 | 候选/计划/打板规则与业务约束 |
-| ExitPlan、BucketLedger、T+1、审计关联 | 各自的回测结果与发布授权 |
+| `ExitPlanRuntime`、BucketLedger、T+1、审计关联 | 各自的回测结果与发布授权 |
 | 模型训练公共原语、安全制品和发布门禁 | 各自的特征、标签、模型指标和 runtime binding |
 
-它们不应复用 `TAssistantExecution`，更不应回到 `StrategyRun`；每个功能使用自己的明确 owner，
-再接入同一公共执行和模型能力。
+买入计划使用 `ENTRY_PLAN/plan_id`，打板助手使用
+`BOARD_ASSISTANT_EXECUTION/execution_id`；它们不应复用 `TAssistantExecution`，更不应回到
+`StrategyRun`。所有真实 BUY fill 创建的 ExitPlan 再以 `EXIT_PLAN/plan_id` 独立执行。
 
 按本设计落地后，系统获得真正的多标的机会竞争和共享资金调度，同时继续保留 QuantX
 最重要的安全属性：策略纯净、账户状态唯一、订单可靠投递、QMT 回报为真、T+1 合法、
