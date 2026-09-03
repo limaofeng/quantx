@@ -118,9 +118,12 @@ def active_record(*, plan_id="existing-plan", volume=200, pending=False):
     bucket="manual",
     source_type="MANUAL_POSITION",
     source_id=plan_id,
+    source_execution_owner_type="MANUAL_COMMAND",
+    source_execution_owner_id=plan_id,
+    source_execution_environment="PAPER",
     enabled=True,
     status=plan.status.value,
-    execution_mode="paper",
+    environment="PAPER",
     auto_exit_authorized=False,
     config_version=1,
     protected_volume=volume,
@@ -260,7 +263,8 @@ async def test_capacity_shortfall_revokes_authority_and_emits_audit_events(
   first = active_record(plan_id="capacity-plan-a", volume=300)
   second = active_record(plan_id="capacity-plan-b", volume=300)
   for record in (first, second):
-    record.execution_mode = "live"
+    record.environment = "LIVE"
+    record.source_execution_environment = "LIVE"
     record.auto_exit_authorized = True
     record.auto_exit_authorization_fingerprint = "f" * 64
     record.auto_exit_authorization_config_version = 1
@@ -449,7 +453,7 @@ def pending_plan(*, volume=300):
     ExitPlanTemplate(
       plan_id="manual-position:condition-1",
       source_type="MANUAL_POSITION",
-      source_id="condition-1",
+      source_id="manual-position:condition-1",
       account_id="account-a",
       instrument_code="600000.SH",
       bucket="manual",
@@ -486,6 +490,24 @@ def install_monitor_report_fakes(monkeypatch, *, volume=1000):
   pending = SimpleNamespace(
     client_order_id="client-1",
     broker_order_id="101",
+    account_id="account-a",
+    owner_type="EXIT_PLAN",
+    owner_id=plan.plan_id,
+    environment="PAPER",
+    instrument_code="600000.SH",
+    side="SELL",
+    order_type="FIX_PRICE",
+    limit_price="10",
+    volume=volume,
+    strategy_run_id=None,
+    strategy_order_id="strategy-order-1",
+    intent_id=plan.pending_intent_id,
+    batch_id=None,
+    bucket="manual",
+    t_trade_role=None,
+    risk_decision_id=None,
+    trace_id="trace-1",
+    substitution_plan=None,
     status="SUBMITTED",
     request_metadata={
       "exit_plan_id": plan.plan_id,
@@ -604,9 +626,12 @@ def strategy_exit_record(
     source_type=plan.template.source_type,
     source_id=plan.template.source_id,
     strategy_run_id="managed-plan",
+    source_execution_owner_type="STRATEGY_RUN",
+    source_execution_owner_id="managed-plan",
+    source_execution_environment="LIVE",
     enabled=enabled,
     status=plan.status.value,
-    execution_mode="live",
+    environment="LIVE",
     auto_exit_authorized=authorized,
     auto_exit_authorization_fingerprint="fingerprint" if authorized else None,
     auto_exit_authorization_config_version=(config_version if authorized else None),
@@ -713,8 +738,22 @@ async def test_pending_submission_is_recovered_from_durable_command():
   plan = pending_plan()
   pending = PendingTradeOrder(
     client_order_id="client-1",
+    user_id="user-1",
     account_id="account-a",
+    owner_type="EXIT_PLAN",
+    owner_id=plan.plan_id,
+    environment="PAPER",
+    instrument_code="600000.SH",
+    side="SELL",
+    order_type="FIX_PRICE",
+    limit_price="10",
+    volume=plan.pending_requested_volume,
     intent_id="intent-1",
+    strategy_run_id=None,
+    strategy_order_id="strategy-order-1",
+    bucket="manual",
+    trace_id="trace-1",
+    request_metadata={},
     status="PENDING",
   )
   record = SimpleNamespace(account_id="account-a", last_error="previous")
@@ -743,9 +782,12 @@ async def test_reserved_exit_intent_is_rerouted_once_with_original_identity(
     strategy_run_id=None,
     owner_type="EXIT_PLAN",
     owner_id=plan.plan_id,
+    environment="PAPER",
+    idempotency_key="intent-1-key",
     account_id=record.account_id,
     instrument_code=record.instrument_code,
     direction="SELL",
+    bucket="manual",
     status="RESERVED",
     target_volume=plan.pending_requested_volume,
     intent_metadata={
@@ -838,10 +880,21 @@ async def test_monitor_terminal_local_proof_releases_exact_zero_fill_intent(
   record.strategy_run_id = None
   pending = PendingTradeOrder(
     client_order_id="client-expired",
+    user_id="user-1",
     account_id=record.account_id,
+    owner_type="EXIT_PLAN",
+    owner_id=plan.plan_id,
+    environment="PAPER",
     instrument_code=record.instrument_code,
     side="SELL",
+    order_type="FIX_PRICE",
+    limit_price="10",
+    volume=300,
     intent_id=plan.pending_intent_id,
+    strategy_run_id=None,
+    strategy_order_id="strategy-order-1",
+    bucket="manual",
+    trace_id="trace-expired",
     status=pending_status,
     request_metadata={"exit_plan_id": plan.plan_id},
   )
@@ -850,9 +903,12 @@ async def test_monitor_terminal_local_proof_releases_exact_zero_fill_intent(
     strategy_run_id=None,
     owner_type="EXIT_PLAN",
     owner_id=plan.plan_id,
+    environment="PAPER",
+    idempotency_key="intent-1-key",
     account_id=record.account_id,
     instrument_code=record.instrument_code,
     direction="SELL",
+    bucket="manual",
     status="RECONCILED_ZERO_FILL",
     intent_metadata={
       "owner_type": "EXIT_PLAN",
@@ -899,10 +955,21 @@ async def test_monitor_evaluation_recovers_exit_pending_before_all_market_gates(
   record.pending_client_order_id = "client-expired"
   pending = PendingTradeOrder(
     client_order_id="client-expired",
+    user_id="user-1",
     account_id=record.account_id,
+    owner_type="EXIT_PLAN",
+    owner_id=plan.plan_id,
+    environment="PAPER",
     instrument_code=record.instrument_code,
     side="SELL",
+    order_type="FIX_PRICE",
+    limit_price="10",
+    volume=300,
     intent_id=plan.pending_intent_id,
+    strategy_run_id=None,
+    strategy_order_id="strategy-order-1",
+    bucket="manual",
+    trace_id="trace-expired",
     status="EXPIRED",
     request_metadata={"exit_plan_id": plan.plan_id},
   )
@@ -911,9 +978,12 @@ async def test_monitor_evaluation_recovers_exit_pending_before_all_market_gates(
     strategy_run_id=None,
     owner_type="EXIT_PLAN",
     owner_id=plan.plan_id,
+    environment="PAPER",
+    idempotency_key="intent-1-key",
     account_id=record.account_id,
     instrument_code=record.instrument_code,
     direction="SELL",
+    bucket="manual",
     status="RECONCILED_ZERO_FILL",
     intent_metadata={
       "owner_type": "EXIT_PLAN",

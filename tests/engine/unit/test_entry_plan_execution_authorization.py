@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.base import OrderRequest, OrderType, PriceType
 from quantx_domain.strategies.ashare_managed_entry_plan import (
   AshareManagedEntryPlanStrategy,
@@ -133,6 +134,8 @@ def _request() -> OrderRequest:
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=100,
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    environment=ExecutionEnvironment.LIVE,
     price=100,
     metadata={"intent_id": "intent-1"},
   )

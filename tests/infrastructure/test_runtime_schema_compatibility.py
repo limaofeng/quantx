@@ -1,6 +1,7 @@
 import pytest
 import sqlalchemy
 from quantx_infrastructure.database.relational import (
+  _ensure_compat_columns,
   _prepare_runtime_message_boxes,
 )
 from sqlalchemy import create_engine, inspect, text
@@ -52,6 +53,47 @@ def test_existing_report_inbox_receives_retry_columns(monkeypatch) -> None:
     in statements
   )
   assert "ADD COLUMN next_attempt_at TIMESTAMP" in statements
+  assert "ADD COLUMN protocol_version" not in statements
+
+
+def test_missing_report_protocol_column_uses_current_default(monkeypatch) -> None:
+  inspector = FakeInspector()
+  monkeypatch.setattr(sqlalchemy, "inspect", lambda connection: inspector)
+  connection = FakeConnection()
+
+  _ensure_compat_columns(connection)
+
+  assert (
+    "ADD COLUMN protocol_version VARCHAR(16) NOT NULL DEFAULT '1.2'"
+    in "\n".join(connection.statements)
+  )
+
+
+def test_existing_report_protocol_default_is_promoted_without_rewriting_rows(
+  monkeypatch,
+) -> None:
+  class LegacyProtocolInspector(FakeInspector):
+    def get_columns(self, table_name: str) -> list[dict]:
+      columns = super().get_columns(table_name)
+      columns.append(
+        {
+          "name": "protocol_version",
+          "nullable": False,
+          "default": "'1.0'::character varying",
+        }
+      )
+      return columns
+
+  inspector = LegacyProtocolInspector()
+  monkeypatch.setattr(sqlalchemy, "inspect", lambda connection: inspector)
+  connection = FakeConnection()
+
+  _ensure_compat_columns(connection)
+
+  assert (
+    "ALTER TABLE agent_report_inbox ALTER COLUMN protocol_version "
+    "SET DEFAULT '1.2'"
+  ) in "\n".join(connection.statements)
 
 
 def test_draft_market_data_tables_are_renamed_without_losing_rows() -> None:

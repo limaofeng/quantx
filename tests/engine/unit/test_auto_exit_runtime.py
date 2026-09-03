@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.brokers.base import PriceType
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
@@ -554,8 +555,11 @@ async def test_dedicated_trade_marker_reloads_canonical_before_callback(
     trade_type="SELL",
     price=9.8,
     volume=40,
+    execution_ref=ExecutionOwnerRef(
+      ExecutionOwnerType.EXIT_PLAN,
+      canonical.plan_id,
+    ),
     metadata={
-      "exit_plan_id": canonical.plan_id,
       "exit_rule_id": "stop",
       "intent_id": "intent-1",
       "runtime_event_key": "trade:account-1:trade-1",
@@ -626,10 +630,14 @@ async def test_engine_registers_filled_entry_and_routes_generic_exit_intent():
   routed = executor._process_trade_intent.await_args.args[1]
   assert routed.direction == TradeIntentDirection.SELL
   assert routed.target_volume == 100
-  assert routed.metadata["exit_plan_id"] == template.plan_id
-  assert routed.metadata["owner_type"] == "EXIT_PLAN"
-  assert routed.metadata["owner_id"] == template.plan_id
-  assert routed.metadata["strategy_run_id"] == runtime.run_id
+  assert routed.execution_ref == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    template.plan_id,
+  )
+  assert "exit_plan_id" not in routed.metadata
+  assert "owner_type" not in routed.metadata
+  assert "owner_id" not in routed.metadata
+  assert "strategy_run_id" not in routed.metadata
   assert routed.metadata["exit_rule_type"] == ExitRuleType.HARD_STOP.value
   assert routed.metadata["allow_t1_substitution"] is False
   assert routed.max_price_deviation_bps == 30.0
@@ -738,10 +746,14 @@ async def test_strategy_owned_exit_stays_in_runtime_when_monitor_is_running(
   executor._process_trade_intent.assert_awaited_once()
   routed = executor._process_trade_intent.await_args.args[1]
   assert routed.direction == TradeIntentDirection.SELL
-  assert routed.metadata["exit_plan_id"] == template.plan_id
-  assert routed.metadata["owner_type"] == "EXIT_PLAN"
-  assert routed.metadata["owner_id"] == template.plan_id
-  assert routed.metadata["strategy_run_id"] == runtime.run_id
+  assert routed.execution_ref == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    template.plan_id,
+  )
+  assert "exit_plan_id" not in routed.metadata
+  assert "owner_type" not in routed.metadata
+  assert "owner_id" not in routed.metadata
+  assert "strategy_run_id" not in routed.metadata
 
 
 @pytest.mark.asyncio
@@ -769,8 +781,11 @@ async def test_local_pre_broker_rejected_exit_returns_plan_to_monitoring():
       order_id=None,
       status="REJECTED",
       filled_volume=0,
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        template.plan_id,
+      ),
       metadata={
-        "exit_plan_id": template.plan_id,
         "intent_id": "exit-intent-1",
         "execution_terminal_source": "LOCAL_PRE_BROKER_REJECTION",
       },
@@ -865,8 +880,12 @@ async def test_t_trade_market_exit_reaches_runtime_broker_as_market_order(
   routed_request = runtime.broker.place_order.await_args.args[0]
   assert routed_request.price_type is PriceType.MARKET
   assert routed_request.metadata["price_type"] == "MARKET"
-  assert routed_request.metadata["exit_plan_id"] == "exit-plan-1"
-  assert routed_request.metadata["strategy_run_id"] == runtime.run_id
+  assert "exit_plan_id" not in routed_request.metadata
+  assert routed_request.execution_ref == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    "exit-plan-1",
+  )
+  assert "strategy_run_id" not in routed_request.metadata
 
 
 @pytest.mark.asyncio
@@ -888,7 +907,6 @@ async def test_generic_exit_uses_terminal_actual_fill_target_after_sizing():
   )
   runtime.exit_plan_book.mark_intent(decision, "exit-intent-sized")
   metadata = {
-    "exit_plan_id": template.plan_id,
     "exit_rule_id": decision.rule_id,
     "intent_id": "exit-intent-sized",
   }
@@ -899,6 +917,10 @@ async def test_generic_exit_uses_terminal_actual_fill_target_after_sizing():
       order_id="order-sized",
       status="FILLED",
       filled_volume=40,
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        template.plan_id,
+      ),
       metadata=metadata,
     ),
   )
@@ -915,6 +937,10 @@ async def test_generic_exit_uses_terminal_actual_fill_target_after_sizing():
       trade_type="SELL",
       price=9.8,
       volume=40,
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        template.plan_id,
+      ),
       metadata=metadata,
     ),
   )
@@ -1058,9 +1084,13 @@ async def test_t_trade_rapid_reversal_routes_urgent_protective_market_exit():
   assert routed.metadata["price_type"] == "MARKET"
   assert routed.metadata["price_reference"] == "BID"
   assert routed.metadata["protected_limit"] is False
-  assert routed.metadata["owner_type"] == "EXIT_PLAN"
-  assert routed.metadata["owner_id"] == template.plan_id
-  assert routed.metadata["strategy_run_id"] == runtime.run_id
+  assert routed.execution_ref == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    template.plan_id,
+  )
+  assert "owner_type" not in routed.metadata
+  assert "owner_id" not in routed.metadata
+  assert "strategy_run_id" not in routed.metadata
   assert routed.metadata["t_trade_role"] == "exit"
   assert routed.metadata["t_batch_id"] == "t-batch-1"
   assert routed.priority == TradeIntentPriority.URGENT

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from quantx_contracts.agent import PROTOCOL_VERSION as CONTRACT_PROTOCOL_VERSION
 from quantx_infrastructure.services import t_assistant_p1_cutover_rehearsal as rehearsal
 
 
@@ -84,7 +84,7 @@ def _audit_report(
   *,
   ready: Any = True,
   missing_tables: int = 0,
-  current_protocol: str = CONTRACT_PROTOCOL_VERSION,
+  current_protocol: str = rehearsal.CURRENT_PROTOCOL_VERSION,
   target_protocol: str = rehearsal.TARGET_PROTOCOL_VERSION,
   legacy_config_count: int | None = 1,
   queued_count: int | None = 0,
@@ -354,6 +354,67 @@ def test_markdown_and_require_ready_cli_gate() -> None:
   assert rehearsal.exit_code_for_report(report, require_ready=False) == 0
 
 
+def test_terminal_exit_intent_gate_blocks_cutover_until_repaired() -> None:
+  report = rehearsal._build_report(
+    _audit_report(),
+    unsettled_inbox_count=0,
+    exit_intent_report={
+      "safeExitIntentCount": 1,
+      "blockedExitIntentCount": 0,
+      "safeExitIntentIds": ["intent-1"],
+      "reasonCodes": [],
+    },
+    target_contract_source={"protocol_version": "1.2"},
+  )
+
+  assert report["readyForCutover"] is False
+  assert rehearsal.TERMINAL_EXIT_PLAN_UNROUTED_INTENT in report["reasonCodes"]
+  assert report["observed"]["terminalExitPlanUnroutedIntentCount"] == 1
+  check = next(
+    item
+    for item in report["checks"]
+    if item["code"] == rehearsal.TERMINAL_EXIT_PLAN_UNROUTED_INTENT
+  )
+  assert check["count"] == 1
+  assert check["safeIntentIds"] == ["intent-1"]
+  assert rehearsal.exit_code_for_report(report, require_ready=True) == 2
+
+
+@pytest.mark.asyncio
+async def test_inspection_reuses_terminal_exit_detector_for_cutover_gate(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  connection = _FakeConnection(unsettled_count=0)
+  connection.dialect = SimpleNamespace(name="sqlite")
+
+  async def fake_audit(_connection: Any) -> dict[str, Any]:
+    return _audit_report()
+
+  async def fake_exit_detector(
+    _connection: Any,
+    *,
+    legacy_schema: bool,
+  ) -> dict[str, Any]:
+    assert legacy_schema is False
+    return {
+      "safeExitIntentCount": 1,
+      "blockedExitIntentCount": 0,
+      "safeExitIntentIds": ["intent-1"],
+      "reasonCodes": [],
+    }
+
+  monkeypatch.setattr(rehearsal.p0_audit, "audit_connection", fake_audit)
+  monkeypatch.setattr(
+    rehearsal.p1_reconcile,
+    "inspect_terminal_exit_plan_unrouted_intents",
+    fake_exit_detector,
+  )
+
+  report = await rehearsal.inspect_connection(connection)
+  assert report["readyForCutover"] is False
+  assert report["observed"]["terminalExitPlanUnroutedIntentCount"] == 1
+
+
 def test_cli_renders_json_and_markdown_without_real_database(
   monkeypatch: pytest.MonkeyPatch,
   capsys: pytest.CaptureFixture[str],
@@ -361,8 +422,10 @@ def test_cli_renders_json_and_markdown_without_real_database(
   report = _build_cli_report()
   connection = _FakeConnection()
   engine = _FakeEngine(connection)
+  calls: list[dict[str, Any]] = []
 
-  async def fake_run(_engine: Any) -> dict[str, Any]:
+  async def fake_run(_engine: Any, **kwargs: Any) -> dict[str, Any]:
+    calls.append(kwargs)
     return report
 
   monkeypatch.setattr(rehearsal, "run_rehearsal", fake_run)
@@ -379,13 +442,21 @@ def test_cli_renders_json_and_markdown_without_real_database(
   assert rehearsal.main(["--database-url", "postgresql+asyncpg://fake", "--require-ready"]) == 2
   json_output = capsys.readouterr().out
   assert json.loads(json_output)["readyForCutover"] is False
+  assert calls[-1]["legacy_schema"] is True
 
   monkeypatch.setattr(rehearsal, "run_rehearsal", fake_run)
   assert rehearsal.main(
-    ["--database-url", "postgresql+asyncpg://fake", "--format", "markdown"]
+    [
+      "--database-url",
+      "postgresql+asyncpg://fake",
+      "--format",
+      "markdown",
+      "--target-0046",
+    ]
   ) == 0
   markdown_output = capsys.readouterr().out
   assert "Protocol 1.2 cutover rehearsal" in markdown_output
+  assert calls[-1]["legacy_schema"] is False
 
 
 def _build_cli_report() -> dict[str, Any]:

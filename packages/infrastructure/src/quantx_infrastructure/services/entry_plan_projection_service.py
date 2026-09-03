@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
+from quantx_contracts import ExecutionOwnerType
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
@@ -912,9 +913,20 @@ class EntryPlanProjectionService:
   def _intent_view(row: TradeIntentRecord) -> dict[str, Any]:
     metadata = _mapping(row.intent_metadata)
     expires_at_ms = _integer(_mapping(metadata.get("expiry_policy")).get("expire_at_ms"))
+    owner_type = str(row.owner_type or "").strip().upper()
+    owner_id = str(row.owner_id or "").strip()
+    strategy_run_id = str(row.strategy_run_id or "").strip()
+    entry_plan_id = str(metadata.get("entry_plan_id") or "").strip()
+    if (
+      owner_type != ExecutionOwnerType.STRATEGY_RUN.value
+      or not owner_id
+      or strategy_run_id != owner_id
+      or not entry_plan_id
+    ):
+      entry_plan_id = ""
     return {
       "intent_id": str(row.id),
-      "plan_id": str(metadata.get("entry_plan_id") or row.owner_id or row.strategy_run_id or ""),
+      "plan_id": entry_plan_id,
       "instrument_code": str(row.instrument_code or ""),
       "bucket": str(row.bucket or "core"),
       "reason_code": str(row.reason or ""),

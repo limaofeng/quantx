@@ -7,14 +7,30 @@ import json
 import logging
 import math
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import md5, sha256
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
+from quantx_application.trading import (
+  OWNER_ENVIRONMENT_CONFLICT,
+  OWNER_TARGET_CONFLICT,
+  OWNER_TARGET_NOT_FOUND,
+  OwnerRuntimeEvent,
+  OwnerRuntimeEventKind,
+  OwnerRuntimeRegistry,
+  OwnerRuntimeRouter,
+  OwnerRuntimeRoutingError,
+  OwnerRuntimeTarget,
+)
 from quantx_contracts import (
+  PROTOCOL_VERSION,
   TERMINAL_ORDER_STATUSES,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
   can_transition_order_status,
   normalize_order_status,
   snapshot_account_authority_is_authoritative,
@@ -28,6 +44,7 @@ from quantx_domain.brokers.base import (
   TradeRecord,
 )
 from quantx_domain.clock import to_naive_utc, utcnow
+from quantx_domain.trading.exit_plan import ExitPlan
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.redis_pubsub import (
   AGENT_REPORT_WAKE_CHANNEL,
@@ -42,9 +59,9 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   AgentReportInbox,
   OperationalAlert,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
-  StrategyOrderCorrelation,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
   TTradeBatch,
@@ -58,6 +75,7 @@ from quantx_infrastructure.repositories.account_repository import AccountReposit
 from quantx_infrastructure.services.account_execution_quarantine_service import (
   BROKER_EXECUTION_AFTER_RELEASE,
   QUARANTINE_CANCEL_REQUIRED_METADATA_KEY,
+  QUARANTINE_REASON_METADATA_KEY,
   QUARANTINE_RECONCILE_REQUIRED_METADATA_KEY,
   QUARANTINE_REPAIR_REQUIRED_METADATA_KEY,
   AccountExecutionQuarantineService,
@@ -73,12 +91,6 @@ from quantx_infrastructure.services.auto_exit_plan_service import (
 )
 from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationService,
-)
-from quantx_infrastructure.services.exit_plan_execution_owner import (
-  MANAGED_EXIT_STRATEGY_OWNER,
-  MONITOR_OWNER,
-  RUNTIME_BOOK_OWNER,
-  durable_exit_plan_owner_kind,
 )
 from quantx_infrastructure.services.exit_plan_zero_fill_safety import (
   ZERO_FILL_CONTRADICTION_ORDER_STATUSES,
@@ -104,7 +116,7 @@ from quantx_infrastructure.services.trade_intent_processor import (
 )
 from quantx_infrastructure.services.trade_service import TradeService
 from sqlalchemy import and_, or_, select, update
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, MultipleResultsFound
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import aliased
 
@@ -124,6 +136,15 @@ _RETRYABLE_DATABASE_SQLSTATES = frozenset({"55P03", "40P01", "40001"})
 # is performed only while this lock is held, so it cannot reclaim an event that
 # this process is still applying.
 _runtime_event_drain_lock = asyncio.Lock()
+
+# Runtime handlers for non-StrategyRun owners must use the same transaction as
+# the event application marker.  The drain keeps the session in this context
+# while calling the router; direct/unit callers get a short-lived session in
+# ``_apply_runtime_event`` instead.
+_runtime_event_db: ContextVar[Any | None] = ContextVar(
+  "quantx_runtime_event_db",
+  default=None,
+)
 
 _ORDER_STATUS_NAMES = {
   48: "PENDING",
@@ -147,7 +168,7 @@ _AUTOMATIC_RECONCILIATION_KINDS = {
   BROKER_EXECUTION_AFTER_RELEASE,
   "CANCEL_REQUEST_PENDING",
   "MISSING_WORKING_ORDER",
-  "PROTOCOL_1_1_REQUIRED",
+  "PROTOCOL_1_2_REQUIRED",
   "PENDING_ORDER_RECONCILE_REQUIRED",
   "QUARANTINED_ORDER_REPAIR_REQUIRED",
   "QUARANTINE_REPAIR_AWAITING_FRESH_SNAPSHOT",
@@ -164,7 +185,239 @@ _SPECIAL_RUNTIME_ORDER_STATUSES = {
   "RECONCILE_REQUIRED",
   "RECONCILED_ZERO_FILL",
 }
+_RUNTIME_OWNER_METADATA_KEYS = frozenset(
+  {
+    "owner_type",
+    "owner_id",
+    "environment",
+    "execution_environment",
+    "execution_mode",
+    "execution_owner",
+    "execution_owner_type",
+    "execution_owner_id",
+    "execution_owner_environment",
+    "source_execution_owner_type",
+    "source_execution_owner_id",
+    "source_execution_environment",
+    "source_owner_type",
+    "source_owner_id",
+    "source_environment",
+    "strategy_run_id",
+    "run_id",
+    "runtime_run_id",
+    "client_order_id",
+    "broker_order_id",
+    "order_id",
+    "execution_id",
+    "traded_id",
+    "trade_id",
+    "strategy_order_id",
+    "intent_id",
+  }
+)
 _ZERO_FILL_RECONCILABLE_ORDER_STATUSES = {"CANCELLED", "EXPIRED"}
+PROTOCOL_1_2_REQUIRED = "PROTOCOL_1_2_REQUIRED"
+
+
+def _require_current_protocol(protocol_version: Any) -> None:
+  """Allow only the current Agent report contract into Engine convergence."""
+
+  if str(protocol_version or "") != PROTOCOL_VERSION:
+    raise ValueError(PROTOCOL_1_2_REQUIRED)
+
+
+def _durable_owner_triple(value: object) -> tuple[str, str, str] | None:
+  """Read one canonical owner/environment triple from durable columns."""
+
+  missing = object()
+  source_owner_type = getattr(value, "source_execution_owner_type", missing)
+  source_owner_id = getattr(value, "source_execution_owner_id", missing)
+  source_environment = getattr(value, "source_execution_environment", missing)
+  has_source_projection = any(
+    item is not missing
+    for item in (source_owner_type, source_owner_id, source_environment)
+  )
+
+  # TTradeBatch and AutoExitPlanRecord retain their source owner under the
+  # explicit source_execution_* columns.  A source projection is therefore
+  # all-or-nothing and canonical; never fill one missing source field from a
+  # generic field, strategy_run_id, or JSON metadata.  Their direct
+  # ``environment`` is an independent proof column and must agree with the
+  # source environment rather than being silently mixed into the triple.
+  if has_source_projection:
+    if (
+      source_owner_type is missing
+      or source_owner_id is missing
+      or source_environment is missing
+      or source_owner_type is None
+      or source_owner_id is None
+      or source_environment is None
+    ):
+      return None
+    owner_type = source_owner_type
+    owner_id = source_owner_id
+    environment = source_environment
+    direct_environment = getattr(value, "environment", missing)
+  else:
+    owner_type = getattr(value, "owner_type", None)
+    owner_id = getattr(value, "owner_id", None)
+    environment = getattr(value, "environment", None)
+    direct_environment = missing
+
+  try:
+    owner_type_value = ExecutionOwnerType(
+      str(getattr(owner_type, "value", owner_type) or "").strip().upper()
+    ).value
+    environment_value = ExecutionEnvironment(
+      str(getattr(environment, "value", environment) or "").strip().upper()
+    ).value
+    if direct_environment is not missing:
+      if direct_environment is None:
+        return None
+      direct_environment_value = ExecutionEnvironment(
+        str(getattr(direct_environment, "value", direct_environment) or "")
+        .strip()
+        .upper()
+      ).value
+      if direct_environment_value != environment_value:
+        return None
+  except (TypeError, ValueError):
+    return None
+  if not isinstance(owner_id, str) or not owner_id or owner_id != owner_id.strip():
+    return None
+  strategy_run_id = str(getattr(value, "strategy_run_id", "") or "").strip()
+  if strategy_run_id and (
+    owner_type_value != ExecutionOwnerType.STRATEGY_RUN.value
+    or strategy_run_id != owner_id
+  ):
+    return None
+  # ``strategy_run_id`` is an optional denormalized consistency witness.  The
+  # typed owner columns remain authoritative, so a missing witness must not
+  # make an otherwise complete STRATEGY_RUN triple unroutable.
+  return owner_type_value, owner_id, environment_value
+
+
+def _owner_chain_triple(*values: object) -> tuple[str, str, str] | None:
+  """Prove exact owner/environment equality across durable projections."""
+
+  triples: list[tuple[str, str, str]] = []
+  for value in values:
+    if value is None:
+      continue
+    triple = _durable_owner_triple(value)
+    if triple is None:
+      return None
+    triples.append(triple)
+  if not triples or any(triple != triples[0] for triple in triples[1:]):
+    return None
+  return triples[0]
+
+
+def _durable_exit_plan_sell_binding(
+  pending: PendingTradeOrder,
+  correlation: OrderCorrelation | None = None,
+) -> bool | None:
+  """Classify an EXIT_PLAN sell from durable owner columns only.
+
+  Request metadata is retained as an optional consistency witness.  It may
+  reject a contradictory row, but it can never select an owner or authorize a
+  terminal replay.  ``None`` denotes a durable/metadata conflict and callers
+  must leave the row untouched.
+  """
+
+  pending_owner = _durable_owner_triple(pending)
+  if pending_owner is None or pending_owner[0] != ExecutionOwnerType.EXIT_PLAN.value:
+    return False
+  if str(pending.side or "").upper() != "SELL":
+    return False
+  if correlation is not None and _durable_owner_triple(correlation) != pending_owner:
+    return None
+  metadata_values = [pending.request_metadata]
+  if correlation is not None:
+    metadata_values.append(getattr(correlation, "request_metadata", None))
+  for raw_metadata in metadata_values:
+    metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+    metadata_owner_type = str(metadata.get("owner_type") or "").strip().upper()
+    metadata_owner_id = str(metadata.get("owner_id") or "").strip()
+    metadata_plan_id = str(metadata.get("exit_plan_id") or "").strip()
+    if metadata_owner_type and metadata_owner_type != pending_owner[0]:
+      return None
+    if metadata_owner_id and metadata_owner_id != pending_owner[1]:
+      return None
+    if metadata_plan_id and metadata_plan_id != pending_owner[1]:
+      return None
+  return True
+
+
+def _canonical_order_side(value: object) -> str:
+  normalized = str(getattr(value, "value", value) or "").strip().upper()
+  if normalized in {"BUY", "23", "ORDER_BUY"}:
+    return "BUY"
+  if normalized in {"SELL", "24", "ORDER_SELL"}:
+    return "SELL"
+  return ""
+
+
+def _exact_intent_binding(
+  pending: PendingTradeOrder,
+  correlation: OrderCorrelation,
+  intent: TradeIntentRecord | None,
+) -> bool:
+  """Require the optional intent projection to be a complete order witness."""
+
+  raw_pending_intent_id = str(pending.intent_id or "")
+  raw_correlation_intent_id = str(correlation.intent_id or "")
+  pending_intent_id = raw_pending_intent_id.strip()
+  correlation_intent_id = raw_correlation_intent_id.strip()
+  if (
+    raw_pending_intent_id != pending_intent_id
+    or raw_correlation_intent_id != correlation_intent_id
+  ):
+    return False
+  if pending_intent_id != correlation_intent_id:
+    return False
+  owner = _owner_chain_triple(pending, correlation)
+  if owner is None:
+    return False
+  # Manual commands may intentionally be represented by a pending/correlation
+  # pair without a synthetic TradeIntentRecord.  Every other owner requires
+  # the durable intent projection; its absence is not a routable state.
+  if not correlation_intent_id:
+    return owner[0] == ExecutionOwnerType.MANUAL_COMMAND.value and intent is None
+  if intent is None or str(intent.id or "").strip() != correlation_intent_id:
+    return False
+  if _owner_chain_triple(pending, correlation, intent) != owner:
+    return False
+  if str(intent.account_id or "") != str(pending.account_id or ""):
+    return False
+  if (
+    str(intent.instrument_code or "").strip().upper()
+    != str(pending.instrument_code or "").strip().upper()
+  ):
+    return False
+  pending_side = _canonical_order_side(pending.side)
+  intent_direction = _canonical_order_side(intent.direction)
+  return bool(pending_side and pending_side == intent_direction)
+
+
+def _owner_ref_environment(value: object) -> tuple[ExecutionOwnerRef, ExecutionEnvironment] | None:
+  triple = _durable_owner_triple(value)
+  if triple is None:
+    return None
+  owner_type, owner_id, environment = triple
+  try:
+    return ExecutionOwnerRef(owner_type, owner_id), ExecutionEnvironment(environment)
+  except (TypeError, ValueError):
+    return None
+
+
+def _wire_execution_mode(environment: object) -> str:
+  try:
+    return ExecutionEnvironment(
+      str(getattr(environment, "value", environment) or "").strip().upper()
+    ).value.lower()
+  except (TypeError, ValueError):
+    return ""
 
 
 class RetryableReportError(RuntimeError):
@@ -521,7 +774,7 @@ _REQUIRED_SNAPSHOT_SECTIONS = ("account", "positions", "orders", "trades")
 def _complete_snapshot_account_ids(
   payload: dict[str, Any],
 ) -> Optional[set[str]]:
-  """Validate the unique protocol-1.1 full-snapshot completeness contract."""
+  """Validate the unique protocol-1.2 full-snapshot completeness contract."""
 
   unavailable_accounts = payload.get("unavailable_accounts")
   section_completeness = payload.get("section_completeness_by_account")
@@ -626,7 +879,7 @@ def _authoritative_full_snapshot_account_ids(
 ) -> Optional[set[str]]:
   """Return covered accounts when a payload can promote a full snapshot."""
 
-  if payload.get("is_complete") is not True or str(protocol_version) != "1.1":
+  if payload.get("is_complete") is not True or str(protocol_version) != PROTOCOL_VERSION:
     return None
   snapshot_id = str(payload.get("snapshot_id") or "").strip()
   snapshot_hash = str(payload.get("snapshot_hash") or "")
@@ -737,8 +990,12 @@ async def _invalidate_monitor_snapshot_zero_fill_proof(
 ) -> None:
   """Fail closed one exact EXIT_PLAN binding contradicted by broker evidence."""
 
-  pending_metadata = dict(pending.request_metadata or {})
-  plan_id = str(pending_metadata.get("exit_plan_id") or "").strip()
+  pending_owner = _durable_owner_triple(pending)
+  if _durable_exit_plan_sell_binding(pending) is not True or pending_owner is None:
+    return
+  # The persisted EXIT_PLAN owner id is authoritative.  Metadata can only
+  # provide the optional conflict check performed above.
+  plan_id = pending_owner[1]
   intent_id = str(pending.intent_id or "").strip()
   if (
     not plan_id
@@ -798,14 +1055,26 @@ async def _update_pending(
     pending = await db.get(PendingTradeOrder, client_order_id)
     if pending is None:
       return PendingOrderUpdate(False)
-    pending_owner = dict(pending.request_metadata or {})
-    is_exit_plan_sell = bool(
-      str(pending.side or "").upper() == "SELL"
-      and str(pending_owner.get("exit_plan_id") or "").strip()
-      and str(pending_owner.get("owner_type") or "").upper() == "EXIT_PLAN"
-      and str(pending_owner.get("owner_id") or "")
-      == str(pending_owner.get("exit_plan_id") or "")
+    # A client order id is the service-owned causal identity.  Prove the
+    # broker fact against the durable correlation and owner chain before
+    # touching pending status or cancellation state.  In particular, a
+    # broker id supplied alongside the client id must match the correlation;
+    # it is never allowed to select a different owner.
+    correlation = await _correlation_for_report(
+      db,
+      client_order_id=str(client_order_id),
+      broker_order_id=str(broker_order_id or ""),
+      allow_broker_fallback=False,
     )
+    if correlation is None:
+      return PendingOrderUpdate(False)
+    durable_exit_binding = _durable_exit_plan_sell_binding(pending, correlation)
+    if durable_exit_binding is None:
+      # A contradictory metadata witness or owner chain is a quarantine-only
+      # condition.  It must not influence report routing or terminal replay
+      # handling, so leave the pending row untouched.
+      return PendingOrderUpdate(False)
+    is_exit_plan_sell = durable_exit_binding
     if (
       not execution_evidence
       and is_exit_plan_sell
@@ -896,23 +1165,20 @@ async def _update_pending(
       pending.status_reason = (f"ignored non-monotonic status {proposed_status}")[:256]
     else:
       pending.status_reason = (reason or "")[:256] or None
-    correlation = (
-      await db.execute(
-        select(StrategyOrderCorrelation).where(
-          StrategyOrderCorrelation.client_order_id == client_order_id
-        )
-      )
-    ).scalar_one_or_none()
     if correlation is not None and broker_order_id:
       correlation.broker_order_id = broker_order_id
     if cancel_requested and not proposed_terminal and broker_order_id:
       try:
+        owner_binding = _owner_ref_environment(pending)
+        if owner_binding is None:
+          raise AgentUnavailableError("取消命令缺少有效 owner/environment 绑定")
         await TradeCommandService(db).enqueue_cancel(
           user_id=str(pending.user_id),
           account_id=str(pending.account_id),
           broker_order_id=str(broker_order_id),
           idempotency_key=(f"entry-plan-cancel:{client_order_id}:{broker_order_id}"),
-          execution_mode=str(pending.execution_mode or "paper").lower(),
+          execution_ref=owner_binding[0],
+          environment=owner_binding[1],
           commit_transaction=False,
         )
       except AgentUnavailableError:
@@ -945,17 +1211,39 @@ async def _update_pending_by_broker(
   if broker_order_id is None:
     return PendingOrderUpdate(False)
   async with AsyncSessionLocal() as db:
-    pending = (
+    pending_candidates = (
       await db.execute(
         select(PendingTradeOrder).where(
           PendingTradeOrder.broker_order_id == str(broker_order_id)
         )
       )
-    ).scalar_one_or_none()
-    if pending is None:
+    ).scalars().all()
+    if len(pending_candidates) != 1:
+      return PendingOrderUpdate(False)
+    pending = pending_candidates[0]
+    # Broker identity is a fallback only when the report has no client id.
+    # Resolve the existing durable mapping and prove the exact owner chain
+    # before applying any status transition.
+    correlation = await _correlation_for_report(
+      db,
+      client_order_id="",
+      broker_order_id=str(broker_order_id),
+      allow_broker_fallback=True,
+    )
+    if (
+      correlation is None
+      or str(correlation.client_order_id or "")
+      != str(pending.client_order_id or "")
+    ):
+      return PendingOrderUpdate(False)
+    durable_exit_binding = _durable_exit_plan_sell_binding(pending, correlation)
+    if durable_exit_binding is None:
+      # Do not let a metadata-only owner witness select a different lifecycle
+      # when the report arrived without its client order id.
       return PendingOrderUpdate(False)
     if (
-      not execution_evidence
+      durable_exit_binding
+      and not execution_evidence
       and await is_exact_finalized_exit_order_replay(
         db,
         client_order_id=str(pending.client_order_id or ""),
@@ -1028,6 +1316,9 @@ async def _update_pending_by_broker(
       )
     if cancel_requested and not proposed_terminal:
       try:
+        owner_binding = _owner_ref_environment(pending)
+        if owner_binding is None:
+          raise AgentUnavailableError("取消命令缺少有效 owner/environment 绑定")
         await TradeCommandService(db).enqueue_cancel(
           user_id=str(pending.user_id),
           account_id=str(pending.account_id),
@@ -1035,7 +1326,8 @@ async def _update_pending_by_broker(
           idempotency_key=(
             f"entry-plan-cancel:{pending.client_order_id}:{broker_order_id}"
           ),
-          execution_mode=str(pending.execution_mode or "paper").lower(),
+          execution_ref=owner_binding[0],
+          environment=owner_binding[1],
           commit_transaction=False,
         )
       except AgentUnavailableError:
@@ -1051,7 +1343,12 @@ async def _update_pending_by_broker(
     )
 
 
-async def _process_order_report(payload: dict[str, Any]) -> None:
+async def _process_order_report(
+  payload: dict[str, Any],
+  *,
+  protocol_version: str = PROTOCOL_VERSION,
+) -> None:
+  _require_current_protocol(protocol_version)
   order = _body(payload, "order")
   cumulative_filled_volume = _reported_cumulative_fill(order)
   cumulative_fill_state = _reported_cumulative_fill_state(order)
@@ -1108,7 +1405,12 @@ async def _process_order_report(payload: dict[str, Any]) -> None:
     )
 
 
-async def _process_execution_report(payload: dict[str, Any]) -> None:
+async def _process_execution_report(
+  payload: dict[str, Any],
+  *,
+  protocol_version: str = PROTOCOL_VERSION,
+) -> None:
+  _require_current_protocol(protocol_version)
   trade = _body(payload, "execution")
   broker_order_id = trade.get("order_id") or trade.get("broker_order_id")
   if broker_order_id is None:
@@ -1207,9 +1509,12 @@ async def _consume_exact_auto_entry_fill(
           )
         )
       ).scalar_one_or_none()
+    pending_owner = _durable_owner_triple(pending) if pending is not None else None
     if (
       pending is None
-      or str(pending.execution_mode or "").lower() != "live"
+      or pending_owner is None
+      or pending_owner[0] != ExecutionOwnerType.STRATEGY_RUN.value
+      or pending_owner[2] != ExecutionEnvironment.LIVE.value
       or str(pending.side or "").upper() != "BUY"
     ):
       return
@@ -1223,7 +1528,7 @@ async def _consume_exact_auto_entry_fill(
       raise ValueError("LIVE 自动买入成交账户或标的与权威命令不匹配")
     metadata = dict(pending.request_metadata or {})
     plan_id = str(metadata.get("entry_plan_id") or "")
-    run_id = str(pending.strategy_run_id or "")
+    run_id = pending_owner[1]
     grant_id = str(metadata.get("auto_entry_authorization_grant_id") or "")
     if not plan_id or not grant_id:
       return
@@ -1490,8 +1795,9 @@ async def _process_delta_report(
   device_id: str,
   payload: dict[str, Any],
   *,
-  protocol_version: str = "1.0",
+  protocol_version: str = PROTOCOL_VERSION,
 ) -> None:
+  _require_current_protocol(protocol_version)
   full_attempt_state: dict[str, set[str]] = {}
   try:
     await _process_delta_report_inner(
@@ -1501,7 +1807,7 @@ async def _process_delta_report(
       _full_attempt_state=full_attempt_state,
     )
   except Exception:
-    # Once a protocol-1.1 full payload has passed identity/completeness
+    # Once a protocol-1.2 full payload has passed identity/completeness
     # validation, *any* later failure (including order/trade convergence,
     # sequence conversion, position promotion, or rollout projection) must
     # invalidate the snapshot.  This closes the old-complete/new-complete
@@ -1559,9 +1865,10 @@ async def _process_delta_report_inner(
   device_id: str,
   payload: dict[str, Any],
   *,
-  protocol_version: str = "1.0",
+  protocol_version: str = PROTOCOL_VERSION,
   _full_attempt_state: Optional[dict[str, set[str]]] = None,
 ) -> None:
+  _require_current_protocol(protocol_version)
   full_attempt_state = _full_attempt_state if _full_attempt_state is not None else {}
   stale_full_accounts: set[str] = set()
   full_attempt_state["stale_accounts"] = stale_full_accounts
@@ -1581,7 +1888,7 @@ async def _process_delta_report_inner(
   identity_valid = False
   if declared_complete:
     if not snapshot_id or len(snapshot_hash) != 64:
-      snapshot_identity_error = "完整账户快照缺少协议 1.1 身份"
+      snapshot_identity_error = "完整账户快照缺少协议 1.2 身份"
     else:
       hash_input = _snapshot_hash_input(payload)
       expected_hash = sha256(
@@ -1598,7 +1905,7 @@ async def _process_delta_report_inner(
         identity_valid = True
   authoritative = bool(
     declared_complete
-    and protocol_version == "1.1"
+    and protocol_version == PROTOCOL_VERSION
     and complete_account_ids is not None
     and identity_valid
   )
@@ -1681,9 +1988,9 @@ async def _process_delta_report_inner(
       if account_id:
         full_snapshot_groups[account_id] = list(payload.get("positions") or [])
   if full_snapshot_attempt and not authoritative:
-    if protocol_version != "1.1":
+    if protocol_version != PROTOCOL_VERSION:
       failure_kind = "SNAPSHOT_PROTOCOL_INVALID"
-      failure_reason = "PROTOCOL_1_1_REQUIRED"
+      failure_reason = "PROTOCOL_1_2_REQUIRED"
     elif snapshot_identity_error:
       failure_kind = "SNAPSHOT_IDENTITY_INVALID"
       failure_reason = (
@@ -2355,7 +2662,7 @@ async def _snapshot_discrepancies(
         await db.execute(
           select(PendingTradeOrder).where(
             PendingTradeOrder.account_id == account_id,
-            PendingTradeOrder.execution_mode == "live",
+            PendingTradeOrder.environment == ExecutionEnvironment.LIVE.value,
           )
         )
       )
@@ -2533,6 +2840,7 @@ async def _snapshot_discrepancies(
 
 
 async def _process(report: AgentReportInbox) -> None:
+  _require_current_protocol(report.protocol_version)
   if report.message_type == "order_report":
     await _process_order_report(report.payload)
   elif report.message_type == "execution_report":
@@ -2541,7 +2849,7 @@ async def _process(report: AgentReportInbox) -> None:
     await _process_delta_report(
       report.device_id,
       report.payload,
-      protocol_version=str(report.protocol_version or "1.0"),
+      protocol_version=str(report.protocol_version or ""),
     )
   else:
     raise ValueError(f"未知 Agent report 类型: {report.message_type}")
@@ -2639,7 +2947,7 @@ def _safe_snapshot_failure_time(value: Any) -> datetime:
 
 
 def _parse_authoritative_snapshot_sequence(payload: dict[str, Any]) -> int:
-  """Require an explicit positive integer generation for protocol-1.1 full data."""
+  """Require an explicit positive integer generation for protocol-1.2 full data."""
 
   if "source_sequence" in payload:
     raw_value = payload.get("source_sequence")
@@ -2701,7 +3009,7 @@ def _reported_cumulative_fill_state(report: Mapping[str, Any]) -> str:
 
 async def _terminal_order_fill_projection(
   db,
-  correlation: StrategyOrderCorrelation,
+  correlation: OrderCorrelation,
   intent: TradeIntentRecord,
   *,
   current_order: Optional[dict[str, Any]] = None,
@@ -2835,7 +3143,7 @@ def _report_items(report: AgentReportInbox) -> list[tuple[str, dict[str, Any]]]:
 def _authoritative_snapshot_identity(
   report: AgentReportInbox,
 ) -> Optional[tuple[str, str]]:
-  """Return a verified protocol 1.1 full-snapshot identity.
+  """Return a verified protocol 1.2 full-snapshot identity.
 
   ``_process_delta_report`` performs the same validation before updating the
   account rollout.  Repeating it here prevents a direct or replayed staging
@@ -2845,7 +3153,7 @@ def _authoritative_snapshot_identity(
   payload = dict(report.payload or {})
   if (
     report.message_type != "delta_report"
-    or str(report.protocol_version or "") != "1.1"
+    or str(report.protocol_version or "") != PROTOCOL_VERSION
     or payload.get("is_complete") is not True
   ):
     return None
@@ -2932,7 +3240,7 @@ async def _full_snapshot_zero_fill_items(
 
   A terminal order report alone is deliberately insufficient: QMT execution
   reports may arrive after it.  The proof is emitted only after a verified
-  protocol 1.1 full snapshot has become the account's READY reconciliation
+  protocol 1.2 full snapshot has become the account's READY reconciliation
   checkpoint and both snapshot and durable execution stores are empty for the
   order.  The resulting synthetic ORDER event is replayable and auditable.
   """
@@ -3021,14 +3329,16 @@ async def _full_snapshot_zero_fill_items(
       db,
       client_order_id=client_order_id,
       broker_order_id=broker_order_id,
+      allow_broker_fallback=True,
     )
-    if correlation is not None:
-      correlation = await db.get(
-        StrategyOrderCorrelation,
-        correlation.id,
-        with_for_update=True,
-        populate_existing=True,
-      )
+    if correlation is None:
+      continue
+    correlation = await db.get(
+      OrderCorrelation,
+      correlation.id,
+      with_for_update=True,
+      populate_existing=True,
+    )
     pending = await db.get(
       PendingTradeOrder,
       client_order_id,
@@ -3037,12 +3347,14 @@ async def _full_snapshot_zero_fill_items(
     )
     if pending is None:
       continue
+    owner_triple = _owner_chain_triple(pending, correlation)
+    if owner_triple is None:
+      continue
+    owner_type, owner_id, _environment = owner_triple
     pending_metadata = dict(pending.request_metadata or {})
-    correlation_metadata = (
-      dict(correlation.request_metadata or {}) if correlation is not None else {}
+    run_id = (
+      owner_id if owner_type == ExecutionOwnerType.STRATEGY_RUN.value else ""
     )
-    request_metadata = {**pending_metadata, **correlation_metadata}
-    run_id = str(pending.strategy_run_id or "").strip()
     if (
       str(pending.account_id or "") != account_id
       or str(pending.instrument_code or "").upper() != instrument_code
@@ -3060,7 +3372,7 @@ async def _full_snapshot_zero_fill_items(
     intent_id = str(pending.intent_id or "").strip()
     if not intent_id:
       continue
-    if correlation is not None and (
+    if (
       str(correlation.client_order_id or "") != client_order_id
       or str(correlation.broker_order_id or "") != broker_order_id
       or str(correlation.account_id or "") != account_id
@@ -3088,15 +3400,21 @@ async def _full_snapshot_zero_fill_items(
       or not executed_price.is_finite()
       or executed_price > 0
       or intent.executed_time is not None
+      or _owner_chain_triple(pending, correlation, intent) != owner_triple
     ):
       continue
 
-    entry_plan_id = str(request_metadata.get("entry_plan_id") or "").strip()
+    # ``entry_plan_id`` is business evidence for the StrategyRun BUY path;
+    # the owner itself was already proven by the durable triple above.
+    entry_plan_id = str(intent_metadata.get("entry_plan_id") or "").strip()
+    pending_entry_plan_id = str(pending_metadata.get("entry_plan_id") or "").strip()
+    if pending_entry_plan_id and pending_entry_plan_id != entry_plan_id:
+      continue
     managed_entry_owner = bool(
-      correlation is not None
+      owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+      and correlation is not None
       and entry_plan_id
       and run_id
-      and run_id == str(correlation.strategy_run_id or "")
       and str(intent.strategy_run_id or "") == run_id
       and str(pending.side or "").upper() == "BUY"
       and str(intent.direction or "").upper() == "BUY"
@@ -3105,19 +3423,25 @@ async def _full_snapshot_zero_fill_items(
 
     exit_plan_record = None
     exit_owner_kind = ""
-    pending_exit_plan_id = str(pending_metadata.get("exit_plan_id") or "").strip()
+    # EXIT_PLAN ownership is selected only from the durable pending/
+    # correlation triple.  Metadata exit_plan_id can reject a contradictory
+    # projection, but it cannot supply the plan id or turn a StrategyRun into
+    # an EXIT_PLAN owner.
+    durable_exit_binding = _durable_exit_plan_sell_binding(pending, correlation)
+    if durable_exit_binding is None:
+      continue
+    pending_exit_plan_id = (
+      owner_id if owner_type == ExecutionOwnerType.EXIT_PLAN.value else ""
+    )
     intent_exit_plan_id = str(intent_metadata.get("exit_plan_id") or "").strip()
     if (
-      pending_exit_plan_id
-      and pending_exit_plan_id == intent_exit_plan_id
-      and str(pending.side or "").upper() == "SELL"
+      durable_exit_binding
+      and pending_exit_plan_id
       and str(intent.direction or "").upper() == "SELL"
-      and str(intent.owner_type or "").upper() == "EXIT_PLAN"
-      and str(intent.owner_id or "") == pending_exit_plan_id
-      and str(pending_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
-      and str(pending_metadata.get("owner_id") or "") == pending_exit_plan_id
-      and str(intent_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
-      and str(intent_metadata.get("owner_id") or "") == pending_exit_plan_id
+      and _durable_owner_triple(intent) == owner_triple
+      and (
+        not intent_exit_plan_id or intent_exit_plan_id == pending_exit_plan_id
+      )
     ):
       exit_plan_record = await db.get(
         AutoExitPlanRecord,
@@ -3126,7 +3450,6 @@ async def _full_snapshot_zero_fill_items(
         populate_existing=True,
       )
       if exit_plan_record is not None:
-        durable_owner_kind = durable_exit_plan_owner_kind(exit_plan_record)
         plan_state = dict(exit_plan_record.plan_state or {})
         template = dict(plan_state.get("template") or {})
         state_pending_intent_id = str(
@@ -3142,41 +3465,18 @@ async def _full_snapshot_zero_fill_items(
           str(exit_plan_record.account_id or "") == account_id
           and str(exit_plan_record.instrument_code or "").upper()
           == instrument_code
-          and str(exit_plan_record.strategy_run_id or "") == run_id
+          and str(exit_plan_record.environment or "").upper()
+          == owner_triple[2]
           and str(template.get("plan_id") or "") == pending_exit_plan_id
           and str(template.get("account_id") or "") == account_id
           and str(template.get("instrument_code") or "").upper()
           == instrument_code
-          and str(template.get("run_id") or "") == run_id
           and state_pending_intent_id == intent_id
           and state_pending_order_id in {"", client_order_id}
           and record_pending_order_id in {"", client_order_id}
-          and str(intent.strategy_run_id or "") == run_id
         )
-        if (
-          plan_binding_exact
-          and run_id
-          and durable_owner_kind
-          in {RUNTIME_BOOK_OWNER, MANAGED_EXIT_STRATEGY_OWNER}
-        ):
-          if (
-            correlation is not None
-            and str(correlation.strategy_run_id or "") == run_id
-            and str(correlation_metadata.get("owner_type") or "").upper()
-            == "EXIT_PLAN"
-            and str(correlation_metadata.get("owner_id") or "")
-            == pending_exit_plan_id
-            and str(correlation_metadata.get("exit_plan_id") or "")
-            == pending_exit_plan_id
-          ):
-            exit_owner_kind = "STRATEGY_RUN"
-        elif (
-          plan_binding_exact
-          and not run_id
-          and correlation is None
-          and durable_owner_kind == MONITOR_OWNER
-        ):
-          exit_owner_kind = "MONITOR"
+        if plan_binding_exact:
+          exit_owner_kind = "EXIT_PLAN"
 
     if not managed_entry_owner and not exit_owner_kind:
       continue
@@ -3258,7 +3558,7 @@ async def _full_snapshot_zero_fill_items(
       continue
 
     audit = {
-      "source": "QMT_PROTOCOL_1_1_FULL_SNAPSHOT",
+      "source": "QMT_PROTOCOL_1_2_FULL_SNAPSHOT",
       "snapshot_id": snapshot_id,
       "snapshot_hash": snapshot_hash,
       "snapshot_at": rollout.last_snapshot_at.isoformat(),
@@ -3271,12 +3571,8 @@ async def _full_snapshot_zero_fill_items(
     if exit_owner_kind:
       audit.update(
         {
-          "owner_type": "EXIT_PLAN",
-          "owner_id": pending_exit_plan_id,
           "exit_plan_id": pending_exit_plan_id,
           "intent_id": intent_id,
-          "strategy_run_id": run_id,
-          "execution_owner": exit_owner_kind,
           "account_id": account_id,
           "instrument_code": instrument_code,
           "client_order_id": client_order_id,
@@ -3321,50 +3617,96 @@ async def _correlation_for_report(
   *,
   client_order_id: str,
   broker_order_id: str,
-) -> Optional[StrategyOrderCorrelation]:
-  clauses = []
-  if client_order_id:
-    clauses.append(StrategyOrderCorrelation.client_order_id == client_order_id)
-  if broker_order_id:
-    clauses.append(StrategyOrderCorrelation.broker_order_id == broker_order_id)
-  if not clauses:
+  allow_broker_fallback: bool = False,
+) -> Optional[OrderCorrelation]:
+  normalized_client_order_id = str(client_order_id or "").strip()
+  normalized_broker_order_id = str(broker_order_id or "").strip()
+  if not normalized_client_order_id and not normalized_broker_order_id:
     return None
-  candidate = (
-    await db.execute(
-      select(
-        StrategyOrderCorrelation.id,
-        StrategyOrderCorrelation.client_order_id,
-        StrategyOrderCorrelation.account_id,
-        StrategyOrderCorrelation.execution_mode,
-      ).where(or_(*clauses))
-    )
-  ).one_or_none()
+
+  # Client identity is the service-owned causal key.  A broker id is only a
+  # fact-side fallback (for reports that omit client_order_id or an
+  # authoritative reconciliation snapshot); it must never override a
+  # supplied client identity.
+  candidate = None
+  if normalized_client_order_id:
+    try:
+      candidate = (
+        await db.execute(
+          select(OrderCorrelation).where(
+            OrderCorrelation.client_order_id == normalized_client_order_id
+          )
+        )
+      ).scalar_one_or_none()
+    except MultipleResultsFound:
+      # A corrupted client identity is not routable.  Do not choose an
+      # arbitrary row from a duplicate durable mapping.
+      return None
+  if candidate is None and normalized_broker_order_id and (
+    not normalized_client_order_id or allow_broker_fallback
+  ):
+    try:
+      broker_candidates = (
+        await db.execute(
+          select(OrderCorrelation).where(
+            OrderCorrelation.broker_order_id == normalized_broker_order_id
+          )
+        )
+      ).scalars().all()
+    except MultipleResultsFound:
+      # Defensive for result adapters that still collapse duplicate scalar
+      # rows through scalar_one_or_none().
+      return None
+    if len(broker_candidates) > 1:
+      return None
+    candidate = broker_candidates[0] if broker_candidates else None
   if candidate is None:
     return None
-  correlation_id, resolved_client_order_id, account_id, execution_mode = candidate
+  raw_client_order_id = str(candidate.client_order_id or "")
+  resolved_client_order_id = raw_client_order_id.strip()
+  if not resolved_client_order_id:
+    return None
+  if raw_client_order_id != resolved_client_order_id:
+    return None
+  if normalized_client_order_id and resolved_client_order_id != normalized_client_order_id:
+    return None
+  if (
+    normalized_broker_order_id
+    and candidate.broker_order_id
+    and str(candidate.broker_order_id) != normalized_broker_order_id
+  ):
+    return None
   await AccountExecutionQuarantineService(db).lock_client_order_for_lifecycle(
-    client_order_id=str(resolved_client_order_id or "")
+    client_order_id=resolved_client_order_id
   )
   # This establishes the shared account/outbox -> pending -> correlation
   # order before any expiry, intent, or plan projection helper can run.
   pending = await db.get(
     PendingTradeOrder,
-    str(resolved_client_order_id or ""),
+    resolved_client_order_id,
     with_for_update=True,
     populate_existing=True,
   )
-  correlation = await db.get(
-    StrategyOrderCorrelation,
-    str(correlation_id or ""),
-    with_for_update=True,
-    populate_existing=True,
-  )
+  correlation = await db.get(OrderCorrelation, candidate.id, with_for_update=True)
+  intent = None
+  if correlation is not None and correlation.intent_id:
+    intent = await db.get(
+      TradeIntentRecord,
+      correlation.intent_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
   if (
     pending is None
     or correlation is None
-    or str(correlation.client_order_id or "") != str(resolved_client_order_id or "")
-    or str(correlation.account_id or "") != str(account_id or "")
-    or str(correlation.execution_mode or "") != str(execution_mode or "")
+    or str(correlation.client_order_id or "") != resolved_client_order_id
+    or str(correlation.account_id or "") != str(pending.account_id or "")
+    or str(correlation.intent_id or "") != str(pending.intent_id or "")
+    or (
+      intent is not None
+      and str(intent.account_id or "") != str(pending.account_id or "")
+    )
+    or not _exact_intent_binding(pending, correlation, intent)
   ):
     return None
   return correlation
@@ -3372,7 +3714,7 @@ async def _correlation_for_report(
 
 async def _command_expired_entry_zero_fill_reconciliation(
   db,
-  correlation: StrategyOrderCorrelation,
+  correlation: OrderCorrelation,
   item: dict[str, Any],
 ) -> Optional[dict[str, Any]]:
   """Prove an Agent command-expiry error happened before Broker.execute()."""
@@ -3412,7 +3754,13 @@ async def _command_expired_entry_zero_fill_reconciliation(
   plan_id = str(
     request_metadata.get("entry_plan_id") or intent_metadata.get("entry_plan_id") or ""
   ).strip()
-  run_id = str(pending.strategy_run_id or "").strip()
+  owner_triple = _owner_chain_triple(pending, correlation, intent)
+  if owner_triple is None:
+    return None
+  owner_type, owner_id, _environment = owner_triple
+  run_id = (
+    owner_id if owner_type == ExecutionOwnerType.STRATEGY_RUN.value else ""
+  )
   try:
     executed_volume = int(intent.executed_volume or 0)
     executed_price = Decimal(str(intent.executed_price or 0))
@@ -3420,9 +3768,8 @@ async def _command_expired_entry_zero_fill_reconciliation(
     return None
   if (
     not plan_id
+    or owner_type != ExecutionOwnerType.STRATEGY_RUN.value
     or not run_id
-    or run_id != str(correlation.strategy_run_id or "")
-    or run_id != str(intent.strategy_run_id or "")
     or str(pending.side or "").upper() != "BUY"
     or str(intent.direction or "").upper() != "BUY"
     or str(intent_metadata.get("entry_plan_id") or "") != plan_id
@@ -3481,9 +3828,15 @@ async def _command_expired_entry_zero_fill_reconciliation(
 
 def _runtime_business_key(
   event_type: str,
-  correlation: StrategyOrderCorrelation,
+  correlation: OrderCorrelation,
   item: dict[str, Any],
 ) -> str:
+  owner_triple = _durable_owner_triple(correlation)
+  if owner_triple is None:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  owner_type, owner_id, environment = owner_triple
+  client_order_id = str(correlation.client_order_id or "")
+  account_id = str(getattr(correlation, "account_id", "") or "")
   broker_order_id = str(item.get("order_id") or item.get("broker_order_id") or "")
   if event_type == "TRADE":
     execution_id = str(item.get("execution_id") or item.get("traded_id") or "")
@@ -3492,7 +3845,25 @@ def _runtime_business_key(
         f"{broker_order_id}:{item.get('traded_time')}:"
         f"{item.get('traded_price')}:{item.get('traded_volume')}"
       )
-    return f"trade:{correlation.account_id}:{execution_id}"[:192]
+    canonical_components = (
+      event_type,
+      owner_type,
+      owner_id,
+      environment,
+      account_id,
+      client_order_id,
+      broker_order_id,
+      execution_id,
+    )
+    # Execution ids are broker-scoped facts, not globally unique across every
+    # owner/account.  Hash the complete canonical tuple so long owner/client/
+    # execution ids cannot be truncated into a business-key collision.
+    canonical = json.dumps(
+      [str(value) for value in canonical_components],
+      ensure_ascii=False,
+      separators=(",", ":"),
+    )
+    return f"trade:{sha256(canonical.encode('utf-8')).hexdigest()}"
   cumulative_fill = _reported_cumulative_fill(item)
   fill_field_present = any(key in item for key in ("traded_volume", "filled_volume"))
   fill_component = (
@@ -3500,33 +3871,64 @@ def _runtime_business_key(
     if cumulative_fill is None
     else str(int(cumulative_fill))
   )
-  return (
-    f"order:{correlation.client_order_id}:{broker_order_id}:"
-    f"{_normalized_order_status(item.get('effective_order_status') or item.get('status') or item.get('order_status'))}:"
-    f"{fill_component}"
-  )[:192]
+  canonical_components = (
+    event_type,
+    owner_type,
+    owner_id,
+    environment,
+    account_id,
+    client_order_id,
+    broker_order_id,
+    _normalized_order_status(
+      item.get("effective_order_status")
+      or item.get("status")
+      or item.get("order_status")
+    ),
+    fill_component,
+  )
+  canonical = json.dumps(
+    [str(value) for value in canonical_components],
+    ensure_ascii=False,
+    separators=(",", ":"),
+  )
+  return f"order:{sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
 def _event_payload(
-  correlation: StrategyOrderCorrelation,
+  correlation: OrderCorrelation,
   item: dict[str, Any],
   *,
   business_key: str,
 ) -> dict[str, Any]:
+  owner_triple = _durable_owner_triple(correlation)
+  if owner_triple is None:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  environment = owner_triple[2]
+  # Owner identity is carried by StrategyRuntimeEvent's typed columns.  Do
+  # not duplicate it into JSON metadata where a consumer could mistake a
+  # stale/request-supplied value for routing authority.
+  request_metadata = {
+    key: value
+    for key, value in dict(correlation.request_metadata or {}).items()
+    if str(key).strip().lower() not in _RUNTIME_OWNER_METADATA_KEYS
+  }
   metadata = {
-    **dict(correlation.request_metadata or {}),
-    "strategy_run_id": correlation.strategy_run_id,
-    "strategy_order_id": correlation.strategy_order_id,
-    "intent_id": correlation.intent_id,
+    **request_metadata,
+    "intent_id": getattr(correlation, "intent_id", None),
     "t_batch_id": correlation.batch_id or "",
     "bucket": correlation.bucket,
     "t_trade_role": str(correlation.t_trade_role or "").lower(),
     "risk_decision_id": correlation.risk_decision_id or "",
     "trace_id": correlation.trace_id,
     "substitution_plan": correlation.substitution_plan,
-    "execution_mode": correlation.execution_mode,
+    "execution_mode": _wire_execution_mode(environment),
     "runtime_event_key": business_key,
   }
+  if (
+    str(getattr(correlation, "owner_type", "") or "").strip().upper()
+    == ExecutionOwnerType.STRATEGY_RUN.value
+  ):
+    metadata["strategy_order_id"] = getattr(correlation, "strategy_order_id", None)
   zero_fill_reconciliation = item.get("zero_fill_reconciliation")
   if isinstance(zero_fill_reconciliation, dict):
     metadata["qmt_zero_fill_reconciliation"] = dict(zero_fill_reconciliation)
@@ -3538,12 +3940,17 @@ def _event_payload(
 
 async def _project_trade_intent_event(
   db,
-  correlation: StrategyOrderCorrelation,
+  correlation: OrderCorrelation,
   *,
   event_type: str,
   item: dict[str, Any],
 ) -> Optional[dict[str, Any]]:
   """Project one uniquely staged broker event into durable intent audit truth."""
+  # MANUAL_COMMAND correlations intentionally have no strategy intent/order
+  # identity.  They still produce durable runtime events, but there is no
+  # intent projection to mutate and no fabricated surrogate is permitted.
+  if not correlation.intent_id:
+    return None
   intent = await db.get(TradeIntentRecord, correlation.intent_id, with_for_update=True)
   if intent is None:
     return None
@@ -3848,14 +4255,25 @@ async def _reconcile_t_trade_batch_after_runtime_event(
   batch = await db.get(TTradeBatch, batch_id)
   if batch is None:
     return
+  event_owner = _durable_owner_triple(event)
+  batch_owner = _durable_owner_triple(batch)
+  if event_owner is None or batch_owner != event_owner:
+    # A T-trade projection is a separate owner/environment obligation.  A
+    # mismatched batch must remain untouched even when the runtime event is
+    # otherwise routable.
+    return
   correlation = (
     await db.execute(
-      select(StrategyOrderCorrelation).where(
-        StrategyOrderCorrelation.client_order_id == event.client_order_id
+      select(OrderCorrelation).where(
+        OrderCorrelation.client_order_id == event.client_order_id
       )
     )
   ).scalar_one_or_none()
   terminal_projection = None
+  if correlation is None or _durable_owner_triple(correlation) != event_owner:
+    return
+  if not correlation.intent_id:
+    correlation = None
   if correlation is not None:
     intent = await db.get(TradeIntentRecord, correlation.intent_id)
     if intent is not None:
@@ -3940,6 +4358,7 @@ async def _insert_runtime_event(db, event: StrategyRuntimeEvent) -> None:
 
 
 async def _stage_runtime_events(report: AgentReportInbox) -> None:
+  _require_current_protocol(report.protocol_version)
   from .strategy_manager import strategy_manager
 
   executor = strategy_manager.executor
@@ -4000,6 +4419,9 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
           db,
           client_order_id=client_order_id,
           broker_order_id=broker_order_id,
+          allow_broker_fallback=(
+            not bool(client_order_id) or authoritative_identity is not None
+          ),
         )
         if correlation is None:
           continue
@@ -4020,14 +4442,26 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
               "zero_fill_reconciliation": command_expiry_reconciliation,
             }
           )
-        run_id = correlation.strategy_run_id
-        affected_run_ids.add(run_id)
-        if arm_barrier is not None and run_id not in barrier_checked_runs:
+        owner_triple = _durable_owner_triple(correlation)
+        if owner_triple is None:
+          # The report is already durable in AgentReportInbox.  A malformed
+          # owner binding remains reconcile-only and must not be projected by
+          # guessing from strategy_run_id or payload metadata.
+          continue
+        owner_type, owner_id, environment = owner_triple
+        run_id = (
+          owner_id if owner_type == ExecutionOwnerType.STRATEGY_RUN.value else ""
+        )
+        if run_id:
+          affected_run_ids.add(run_id)
+        if arm_barrier is not None and run_id and run_id not in barrier_checked_runs:
           earliest_backlog_key = (
             await db.execute(
               select(StrategyRuntimeEvent.business_key)
               .where(
-                StrategyRuntimeEvent.strategy_run_id == run_id,
+                StrategyRuntimeEvent.owner_type == owner_type,
+                StrategyRuntimeEvent.owner_id == owner_id,
+                StrategyRuntimeEvent.environment == environment,
                 StrategyRuntimeEvent.application_status != "APPLIED",
               )
               .order_by(
@@ -4113,8 +4547,12 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
           )
         ).scalar_one_or_none()
         if existing is not None:
-          if existing.application_status != "APPLIED" and arm_barrier is not None:
-            arm_barrier(existing.strategy_run_id, existing.business_key)
+          if (
+            existing.application_status != "APPLIED"
+            and arm_barrier is not None
+            and owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+          ):
+            arm_barrier(owner_id, existing.business_key)
           continue
         created_at = utcnow()
         if last_staged_at is not None and created_at <= last_staged_at:
@@ -4123,7 +4561,10 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
         runtime_event = StrategyRuntimeEvent(
           event_id=str(uuid.uuid4()),
           business_key=business_key,
-          strategy_run_id=run_id,
+          owner_type=owner_type,
+          owner_id=owner_id,
+          environment=environment,
+          strategy_run_id=run_id or None,
           client_order_id=correlation.client_order_id,
           broker_order_id=broker_order_id or None,
           event_type=event_type,
@@ -4136,15 +4577,21 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
           application_attempts=0,
           created_at=created_at,
         )
-        if arm_barrier is not None:
-          arm_barrier(run_id, business_key)
+        if (
+          arm_barrier is not None
+          and owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+        ):
+          arm_barrier(owner_id, business_key)
         try:
           await _insert_runtime_event(db, runtime_event)
         except IntegrityError:
           # Another producer won the durable business-key race. Its event and
           # projections are authoritative; do not apply this report twice.
-          if arm_barrier is not None:
-            arm_barrier(run_id, business_key)
+          if (
+            arm_barrier is not None
+            and owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+          ):
+            arm_barrier(owner_id, business_key)
           continue
         terminal_projection = await _project_trade_intent_event(
           db,
@@ -4154,7 +4601,7 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
         )
         if correlation.batch_id:
           batch = await db.get(TTradeBatch, correlation.batch_id)
-          if batch is not None:
+          if batch is not None and _durable_owner_triple(batch) == owner_triple:
             await _project_t_trade_event(
               batch,
               event_type=event_type,
@@ -4187,36 +4634,566 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
       await refresh_barrier(run_id)
 
 
-async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
-  from .strategy_manager import strategy_manager
+def _runtime_event_report(event: OwnerRuntimeEvent) -> dict[str, Any]:
+  payload = event.payload
+  raw_report = payload.get("report") if isinstance(payload, Mapping) else None
+  return dict(raw_report) if isinstance(raw_report, Mapping) else {}
 
-  payload = dict(event.payload or {})
-  report = dict(payload.get("report") or {})
-  metadata = {
-    **dict(payload.get("metadata") or {}),
-    "runtime_event_key": event.business_key,
-  }
-  order_id = str(metadata.get("strategy_order_id") or "")
-  side = str(report.get("side") or report.get("order_type") or "").upper()
-  order_type = OrderType.SELL if side in {"SELL", "24", "ORDER_SELL"} else OrderType.BUY
-  if event.event_type == "ORDER":
-    authoritative_cumulative_fill = _reported_cumulative_fill(report)
-    request = OrderRequest(
-      instrument_code=str(
-        report.get("stock_code")
-        or report.get("instrument_code")
-        or metadata.get("instrument_code")
+
+def _runtime_event_client_order_id(event: OwnerRuntimeEvent) -> str:
+  """Read the staged model's direct client identity, never owner metadata."""
+
+  payload = event.payload
+  if not isinstance(payload, Mapping):
+    return ""
+  return str(payload.get("client_order_id") or "").strip()
+
+
+def _runtime_event_broker_order_id(event: OwnerRuntimeEvent) -> str:
+  payload = event.payload
+  if not isinstance(payload, Mapping):
+    return ""
+  return str(payload.get("broker_order_id") or "").strip()
+
+
+async def _exact_runtime_order_binding(
+  db,
+  *,
+  target: OwnerRuntimeTarget,
+  event: OwnerRuntimeEvent,
+) -> tuple[PendingTradeOrder, OrderCorrelation]:
+  """Load one client-primary pending/correlation owner chain.
+
+  Broker ids are facts attached to an already selected client order.  They
+  cannot select a second order or owner, even for a report that contains both
+  ids.
+  """
+
+  client_order_id = _runtime_event_client_order_id(event)
+  if not client_order_id:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  # ``OrderCorrelation.id`` is an opaque UUID.  The client order id is a
+  # unique causal key, but it is not the ORM primary key and must be resolved
+  # explicitly before proving the owner chain.
+  try:
+    correlation = (
+      await db.execute(
+        select(OrderCorrelation)
+        .where(OrderCorrelation.client_order_id == client_order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+      )
+    ).scalar_one_or_none()
+  except MultipleResultsFound as exc:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT) from exc
+  if correlation is None:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_NOT_FOUND)
+  pending = await db.get(
+    PendingTradeOrder,
+    client_order_id,
+    with_for_update=True,
+    populate_existing=True,
+  )
+  intent = None
+  if correlation.intent_id:
+    intent = await db.get(
+      TradeIntentRecord,
+      correlation.intent_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+  if pending is None:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_NOT_FOUND)
+  owner = (
+    target.execution_ref.owner_type.value,
+    target.execution_ref.owner_id,
+    target.environment.value,
+  )
+  if (
+    _durable_owner_triple(correlation) != owner
+    or _durable_owner_triple(pending) != owner
+    or str(correlation.account_id or "") != str(pending.account_id or "")
+    or str(correlation.client_order_id or "") != client_order_id
+    or str(correlation.intent_id or "") != str(pending.intent_id or "")
+    or (
+      correlation.broker_order_id
+      and pending.broker_order_id
+      and str(correlation.broker_order_id)
+      != str(pending.broker_order_id)
+    )
+    or not _exact_intent_binding(pending, correlation, intent)
+  ):
+    if correlation.intent_id and intent is None:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_NOT_FOUND)
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  broker_order_id = _runtime_event_broker_order_id(event)
+  if (
+    broker_order_id
+    and correlation.broker_order_id
+    and str(correlation.broker_order_id) != broker_order_id
+  ):
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  if (
+    broker_order_id
+    and pending.broker_order_id
+    and str(pending.broker_order_id) != broker_order_id
+  ):
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  report = _runtime_event_report(event)
+  reported_client_order_id = str(report.get("client_order_id") or "").strip()
+  if reported_client_order_id and reported_client_order_id != client_order_id:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  reported_broker_order_id = str(
+    report.get("order_id") or report.get("broker_order_id") or ""
+  ).strip()
+  if (
+    reported_broker_order_id
+    and broker_order_id
+    and reported_broker_order_id != broker_order_id
+  ):
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  if (
+    reported_broker_order_id
+    and correlation.broker_order_id
+    and str(correlation.broker_order_id) != reported_broker_order_id
+  ):
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  if (
+    reported_broker_order_id
+    and pending.broker_order_id
+    and str(pending.broker_order_id) != reported_broker_order_id
+  ):
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  reported_account = str(report.get("account_id") or "").strip()
+  if reported_account and reported_account != str(pending.account_id or ""):
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  reported_instrument = str(
+    report.get("stock_code") or report.get("instrument_code") or ""
+  ).strip().upper()
+  if (
+    reported_instrument
+    and reported_instrument != str(pending.instrument_code or "").strip().upper()
+  ):
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  return pending, correlation
+
+
+class _ExitPlanRuntimeHandler:
+  """P1 EXIT_PLAN bridge over the already durable report projections.
+
+  P1 does not introduce a second ExitPlan runtime book.  ORDER/TRADE report
+  projections are performed by the existing report/AutoExitPlan services and
+  staging transaction; this handler proves their exact plan/order binding so
+  the owner event can be consumed and checkpointed without applying it twice.
+  The independent ExitPlan runtime consumer remains a P2 boundary.
+  """
+
+  def __init__(self, db) -> None:
+    self._db = db
+
+  async def resolve(
+    self,
+    execution_ref: ExecutionOwnerRef,
+  ) -> OwnerRuntimeTarget | None:
+    record = await self._db.get(AutoExitPlanRecord, execution_ref.owner_id)
+    if record is None:
+      return None
+    source_owner = _durable_owner_triple(record)
+    if source_owner is None:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    try:
+      environment = ExecutionEnvironment(
+        str(getattr(record.environment, "value", record.environment) or "")
+        .strip()
+        .upper()
+      )
+    except (TypeError, ValueError) as exc:
+      raise OwnerRuntimeRoutingError(OWNER_ENVIRONMENT_CONFLICT) from exc
+    if source_owner[2] != environment.value:
+      raise OwnerRuntimeRoutingError(OWNER_ENVIRONMENT_CONFLICT)
+    try:
+      plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+    except (KeyError, TypeError, ValueError) as exc:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT) from exc
+    if (
+      plan.plan_id != execution_ref.owner_id
+      or str(plan.template.account_id or "") != str(record.account_id or "")
+      or str(plan.template.instrument_code or "").upper()
+      != str(record.instrument_code or "").upper()
+      or str(plan.template.bucket or "") != str(record.bucket or "")
+      or (
+        str(record.strategy_run_id or "").strip()
+        and str(plan.template.run_id or "").strip()
+        != str(record.strategy_run_id or "").strip()
+      )
+    ):
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    return OwnerRuntimeTarget(execution_ref, environment)
+
+  async def apply(
+    self,
+    target: OwnerRuntimeTarget,
+    event: OwnerRuntimeEvent,
+  ) -> None:
+    pending, correlation = await _exact_runtime_order_binding(
+      self._db,
+      target=target,
+      event=event,
+    )
+    record = await self._db.get(
+      AutoExitPlanRecord,
+      target.execution_ref.owner_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+    if record is None:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_NOT_FOUND)
+    source_owner = _durable_owner_triple(record)
+    owner = (
+      target.execution_ref.owner_type.value,
+      target.execution_ref.owner_id,
+      target.environment.value,
+    )
+    if (
+      source_owner is None
+      or source_owner[2] != target.environment.value
+      or str(record.account_id or "") != str(pending.account_id or "")
+      or str(record.instrument_code or "").upper()
+      != str(pending.instrument_code or "").upper()
+      or _durable_exit_plan_sell_binding(pending, correlation) is not True
+    ):
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    try:
+      plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+      projected_status = str(
+        getattr(plan.status, "value", plan.status) or ""
+      ).upper()
+      projected_exited_volume = int(plan.exited_volume or 0)
+      projected_remaining_volume = int(plan.remaining_volume)
+      record_exited_volume = int(record.exited_volume or 0)
+      record_remaining_volume = int(record.remaining_volume or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT) from exc
+    pending_order_ids = {
+      str(pending.client_order_id or "").strip(),
+      str(pending.broker_order_id or "").strip(),
+    }
+    if (
+      plan.plan_id != target.execution_ref.owner_id
+      or str(plan.template.account_id or "") != str(record.account_id or "")
+      or str(plan.template.instrument_code or "").upper()
+      != str(record.instrument_code or "").upper()
+      or str(plan.template.bucket or "") != str(record.bucket or "")
+      or (
+        str(record.strategy_run_id or "").strip()
+        and str(plan.template.run_id or "").strip()
+        != str(record.strategy_run_id or "").strip()
+      )
+      or str(record.status or "").upper() != projected_status
+      or record_exited_volume != projected_exited_volume
+      or record_remaining_volume != projected_remaining_volume
+      or (
+        plan.pending_intent_id
+        and str(plan.pending_intent_id) != str(pending.intent_id or "")
+      )
+      or (
+        plan.pending_order_id
+        and str(plan.pending_order_id).strip() not in pending_order_ids
+      )
+      or (
+        record.pending_client_order_id
+        and str(record.pending_client_order_id).strip() not in pending_order_ids
+      )
+      or (
+        int(plan.pending_requested_volume or 0) > 0
+        and int(plan.pending_requested_volume or 0) != int(pending.volume or 0)
+      )
+    ):
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    # The direct owner id comes from the event/ref and the pending/correlation
+    # rows.  A plan's source owner is an origin fact and is intentionally not
+    # compared with the EXIT_PLAN execution owner.
+    if _durable_owner_triple(correlation) != owner:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    report = _runtime_event_report(event)
+    if event.event_kind is OwnerRuntimeEventKind.ORDER:
+      status = _normalized_order_status(
+        report.get("effective_order_status")
+        or report.get("status")
+        or report.get("order_status")
+      )
+      if not status:
+        raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    elif event.event_kind is OwnerRuntimeEventKind.TRADE:
+      if not str(
+        report.get("execution_id")
+        or report.get("traded_id")
+        or report.get("trade_id")
         or ""
-      ),
+      ).strip():
+        raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    # No state is changed here: this is the explicit P1 consumer boundary.
+    # Existing report projections already ran from the inbox and are guarded
+    # by their own durable business keys; the runtime event marker is the
+    # idempotency boundary for this owner route.
+
+
+class _ManualCommandRuntimeHandler:
+  """Consume manual-command report events after pending reconciliation."""
+
+  def __init__(self, db) -> None:
+    self._db = db
+
+  async def resolve(
+    self,
+    execution_ref: ExecutionOwnerRef,
+  ) -> OwnerRuntimeTarget | None:
+    rows = (
+      await self._db.execute(
+        select(OrderCorrelation).where(
+          OrderCorrelation.owner_type == execution_ref.owner_type.value,
+          OrderCorrelation.owner_id == execution_ref.owner_id,
+        )
+      )
+    ).scalars().all()
+    if not rows:
+      return None
+    triples = {_durable_owner_triple(row) for row in rows}
+    if None in triples or len(triples) != 1:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    _owner_type, _owner_id, environment = next(iter(triples))
+    try:
+      canonical_environment = ExecutionEnvironment(environment)
+    except (TypeError, ValueError) as exc:
+      raise OwnerRuntimeRoutingError(OWNER_ENVIRONMENT_CONFLICT) from exc
+    return OwnerRuntimeTarget(execution_ref, canonical_environment)
+
+  async def apply(
+    self,
+    target: OwnerRuntimeTarget,
+    event: OwnerRuntimeEvent,
+  ) -> None:
+    await _exact_runtime_order_binding(
+      self._db,
+      target=target,
+      event=event,
+    )
+    if event.event_kind is OwnerRuntimeEventKind.TRADE:
+      report = _runtime_event_report(event)
+      if not str(
+        report.get("execution_id")
+        or report.get("traded_id")
+        or report.get("trade_id")
+        or ""
+      ).strip():
+        raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+
+
+class _StrategyRunRuntimeHandler:
+  """Explicit adapter for the existing StrategyExecutor consumer only."""
+
+  def __init__(self, executor: Any, db) -> None:
+    self._executor = executor
+    self._db = db
+
+  async def resolve(
+    self,
+    execution_ref: ExecutionOwnerRef,
+  ) -> OwnerRuntimeTarget | None:
+    run_id = execution_ref.owner_id
+    runtime = getattr(self._executor, "runs", {}).get(run_id)
+    if runtime is None:
+      # A missing StrategyRun is a stable routing failure, not a reason to
+      # redirect the event to another run or to a generic fallback consumer.
+      return None
+    runtime = self._executor.require_durable_event_consumer(run_id)
+    mode = getattr(getattr(runtime, "context", None), "mode", None)
+    try:
+      environment = ExecutionEnvironment(
+        str(getattr(mode, "value", mode) or "").strip().upper()
+      )
+    except (TypeError, ValueError) as exc:
+      raise OwnerRuntimeRoutingError(OWNER_ENVIRONMENT_CONFLICT) from exc
+    return OwnerRuntimeTarget(execution_ref, environment)
+
+  async def apply(
+    self,
+    target: OwnerRuntimeTarget,
+    event: OwnerRuntimeEvent,
+  ) -> None:
+    pending, correlation = await _exact_runtime_order_binding(
+      self._db,
+      target=target,
+      event=event,
+    )
+    owner = (
+      target.execution_ref.owner_type.value,
+      target.execution_ref.owner_id,
+      target.environment.value,
+    )
+    if (
+      _durable_owner_triple(pending) != owner
+      or _durable_owner_triple(correlation) != owner
+    ):
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    strategy_order_id = str(correlation.strategy_order_id or "").strip()
+    if (
+      not strategy_order_id
+      or str(pending.strategy_order_id or "").strip() != strategy_order_id
+      or not str(correlation.intent_id or "").strip()
+      or str(pending.intent_id or "").strip()
+      != str(correlation.intent_id or "").strip()
+    ):
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    if event.event_kind is OwnerRuntimeEventKind.TRADE:
+      report = _runtime_event_report(event)
+      if not str(
+        report.get("execution_id")
+        or report.get("traded_id")
+        or report.get("trade_id")
+        or ""
+      ).strip():
+        raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    elif event.event_kind is not OwnerRuntimeEventKind.ORDER:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    await _apply_strategy_run_runtime_event(
+      self._executor,
+      target.execution_ref.owner_id,
+      event,
+      pending=pending,
+      correlation=correlation,
+    )
+
+
+async def _apply_strategy_run_runtime_event(
+  executor: Any,
+  run_id: str,
+  event: OwnerRuntimeEvent,
+  *,
+  pending: PendingTradeOrder,
+  correlation: OrderCorrelation,
+) -> None:
+  payload = dict(event.payload or {})
+  report = _runtime_event_report(event)
+  raw_metadata = payload.get("metadata")
+  event_metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+  metadata = {
+    key: value
+    for key, value in event_metadata.items()
+    if str(key).strip().lower() not in _RUNTIME_OWNER_METADATA_KEYS
+  }
+  correlation_owner = _durable_owner_triple(correlation)
+  if correlation_owner is None:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  order_id = str(correlation.strategy_order_id or "").strip()
+  intent_id = str(correlation.intent_id or "").strip()
+  instrument_code = str(pending.instrument_code or "").strip().upper()
+  try:
+    requested_volume = int(pending.volume or 0)
+  except (TypeError, ValueError, OverflowError) as exc:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT) from exc
+  if not order_id or not intent_id or not instrument_code or requested_volume <= 0:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+
+  durable_side = str(pending.side or "").strip().upper()
+  if durable_side in {"BUY", "23", "ORDER_BUY"}:
+    order_type = OrderType.BUY
+  elif durable_side in {"SELL", "24", "ORDER_SELL"}:
+    order_type = OrderType.SELL
+  else:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  reported_side = str(
+    report.get("side") or report.get("order_type") or ""
+  ).strip().upper()
+  if reported_side:
+    reported_order_type = (
+      OrderType.BUY
+      if reported_side in {"BUY", "23", "ORDER_BUY"}
+      else OrderType.SELL
+      if reported_side in {"SELL", "24", "ORDER_SELL"}
+      else None
+    )
+    if reported_order_type is None or reported_order_type is not order_type:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+
+  metadata.update(
+    {
+      # ``strategy_run_id`` is retained only as a callback scope fact for the
+      # existing T-trade paper-fill validator, not as a routing identity.
+      "strategy_run_id": run_id,
+      "account_id": str(pending.account_id or ""),
+      "strategy_order_id": order_id,
+      "intent_id": intent_id,
+      "instrument_code": instrument_code,
+      "side": durable_side,
+      "t_batch_id": correlation.batch_id or "",
+      "bucket": correlation.bucket,
+      "t_trade_role": str(correlation.t_trade_role or "").lower(),
+      "risk_decision_id": correlation.risk_decision_id or "",
+      "trace_id": correlation.trace_id,
+      "substitution_plan": correlation.substitution_plan,
+      "execution_mode": _wire_execution_mode(correlation_owner[2]),
+      "runtime_event_key": str(
+        payload.get("business_key") or event.event_id
+      ).strip()
+      or event.event_id,
+    }
+  )
+
+  def report_number(
+    keys: tuple[str, ...],
+    *,
+    default: int | float,
+  ) -> int | float:
+    integer = all(
+      key in {"order_volume", "traded_volume", "filled_volume", "volume"}
+      for key in keys
+    )
+    raw_value: Any = default
+    for key in keys:
+      if key in report and report.get(key) is not None:
+        raw_value = report.get(key)
+        break
+    if integer and isinstance(raw_value, bool):
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    try:
+      number = float(raw_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT) from exc
+    if not math.isfinite(number) or number < 0:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    if integer and not number.is_integer():
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    return int(number) if integer else number
+
+  if event.event_kind == OwnerRuntimeEventKind.ORDER:
+    authoritative_cumulative_fill = _reported_cumulative_fill(report)
+    order_volume = int(
+      report_number(
+        ("order_volume", "volume"),
+        default=requested_volume,
+      )
+    )
+    order_price = float(
+      report_number(
+        ("price", "limit_price"),
+        default=float(pending.limit_price or 0.0),
+      )
+    )
+    traded_price = float(
+      report_number(
+        ("traded_price",),
+        default=order_price,
+      )
+    )
+    request = OrderRequest(
+      instrument_code=instrument_code,
       order_type=order_type,
       price_type=PriceType.LIMIT,
-      volume=int(
-        report.get("order_volume")
-        or report.get("volume")
-        or metadata.get("requested_entry_volume")
-        or 0
-      ),
-      price=float(report.get("price") or report.get("limit_price") or 0.0),
+      volume=order_volume,
+      execution_ref=event.execution_ref,
+      environment=event.environment,
+      price=order_price,
       metadata=metadata,
     )
     status_name = _normalized_order_status(
@@ -4240,33 +5217,40 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
       # confused with an explicit broker zero when the strategy/ExitPlanBook
       # decides whether a terminal order can release its pending intent.
       filled_volume=authoritative_cumulative_fill,
-      filled_amount=float(report.get("traded_price") or 0.0)
-      * int(authoritative_cumulative_fill or 0),
-      avg_price=float(report.get("traded_price") or 0.0),
+      filled_amount=traded_price * int(authoritative_cumulative_fill or 0),
+      avg_price=traded_price,
       error_message=str(report.get("status_msg") or ""),
       last_update_time=_parse_report_time(
         report.get("updated_at") or report.get("order_time")
       ),
     )
-    await strategy_manager.executor.apply_durable_order_report(
-      event.strategy_run_id,
-      order,
-    )
+    await executor.apply_durable_order_report(run_id, order)
     return
 
-  price = float(report.get("traded_price") or report.get("price") or 0.0)
-  volume = int(report.get("traded_volume") or report.get("volume") or 0)
+  if event.event_kind is not OwnerRuntimeEventKind.TRADE:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  price = float(
+    report_number(
+      ("traded_price", "price"),
+      default=float(pending.limit_price or 0.0),
+    )
+  )
+  volume = int(
+    report_number(
+      ("traded_volume", "volume"),
+      default=0,
+    )
+  )
   trade = TradeRecord(
     trade_id=str(
-      report.get("execution_id") or report.get("traded_id") or event.business_key
+      report.get("execution_id")
+      or report.get("traded_id")
+      or report.get("trade_id")
+      or payload.get("business_key")
+      or event.event_id
     ),
     order_id=order_id,
-    instrument_code=str(
-      report.get("stock_code")
-      or report.get("instrument_code")
-      or metadata.get("instrument_code")
-      or ""
-    ),
+    instrument_code=instrument_code,
     trade_type=order_type,
     price=price,
     volume=volume,
@@ -4276,11 +5260,70 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
       report.get("traded_time") or report.get("trade_time")
     ),
     metadata=metadata,
+    execution_ref=event.execution_ref,
+    environment=event.environment,
   )
-  await strategy_manager.executor.apply_durable_trade_report(
-    event.strategy_run_id,
-    trade,
+  await executor.apply_durable_trade_report(run_id, trade)
+
+
+async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
+  """Route a durable event through the explicit owner registry boundary."""
+
+  from .strategy_manager import strategy_manager
+
+  owner_identity = _owner_ref_environment(event)
+  if owner_identity is None:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+  execution_ref, environment = owner_identity
+  try:
+    event_kind = OwnerRuntimeEventKind(event.event_type)
+  except (TypeError, ValueError) as exc:
+    raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT) from exc
+  event_payload = dict(event.payload or {})
+  # ``StrategyRuntimeEvent.client_order_id`` is the durable causal identity.
+  # Carry it as a direct event fact for every handler; never ask a handler to
+  # discover an order from owner metadata.
+  event_payload["client_order_id"] = str(event.client_order_id or "")
+  event_payload["broker_order_id"] = str(event.broker_order_id or "")
+  # The durable business key is another direct event fact.  It lets the
+  # StrategyExecutor retain its audit/idempotency context without trusting a
+  # JSON metadata copy that may have been supplied by the request producer.
+  event_payload["business_key"] = str(getattr(event, "business_key", "") or "")
+  runtime_event = OwnerRuntimeEvent(
+    event_id=event.event_id,
+    event_kind=event_kind,
+    execution_ref=execution_ref,
+    environment=environment,
+    payload=event_payload,
   )
+
+  async def route(db) -> None:
+    registry = OwnerRuntimeRegistry()
+    registry.register(
+      ExecutionOwnerType.STRATEGY_RUN,
+      _StrategyRunRuntimeHandler(strategy_manager.executor, db),
+    )
+    registry.register(
+      ExecutionOwnerType.EXIT_PLAN,
+      _ExitPlanRuntimeHandler(db),
+    )
+    registry.register(
+      ExecutionOwnerType.MANUAL_COMMAND,
+      _ManualCommandRuntimeHandler(db),
+    )
+    await OwnerRuntimeRouter(registry).route(runtime_event)
+
+  db = _runtime_event_db.get()
+  if db is None:
+    async with AsyncSessionLocal() as owned_db:
+      try:
+        await route(owned_db)
+        await owned_db.commit()
+      except Exception:
+        await owned_db.rollback()
+        raise
+    return
+  await route(db)
 
 
 async def _drain_runtime_events() -> None:
@@ -4298,7 +5341,7 @@ async def _drain_runtime_events_locked() -> None:
   from .strategy_executor import RuntimeConsumerUnavailable
   from .strategy_manager import strategy_manager
 
-  blocked_run_ids: set[str] = set()
+  blocked_owner_keys: set[tuple[str, str, str]] = set()
   first_retry_error: Optional[RetryableReportError] = None
   while True:
     async with AsyncSessionLocal() as db:
@@ -4306,7 +5349,9 @@ async def _drain_runtime_events_locked() -> None:
       unapplied_earlier_event = (
         select(earlier_event.event_id)
         .where(
-          earlier_event.strategy_run_id == StrategyRuntimeEvent.strategy_run_id,
+          earlier_event.owner_type == StrategyRuntimeEvent.owner_type,
+          earlier_event.owner_id == StrategyRuntimeEvent.owner_id,
+          earlier_event.environment == StrategyRuntimeEvent.environment,
           earlier_event.application_status != "APPLIED",
           or_(
             earlier_event.created_at < StrategyRuntimeEvent.created_at,
@@ -4322,9 +5367,18 @@ async def _drain_runtime_events_locked() -> None:
         StrategyRuntimeEvent.application_status == "PENDING",
         ~unapplied_earlier_event,
       )
-      if blocked_run_ids:
+      if blocked_owner_keys:
         statement = statement.where(
-          StrategyRuntimeEvent.strategy_run_id.not_in(blocked_run_ids)
+          and_(
+            *(
+              or_(
+                StrategyRuntimeEvent.owner_type != owner_type,
+                StrategyRuntimeEvent.owner_id != owner_id,
+                StrategyRuntimeEvent.environment != environment,
+              )
+              for owner_type, owner_id, environment in blocked_owner_keys
+            )
+          )
         )
       event = (
         await db.execute(
@@ -4340,24 +5394,41 @@ async def _drain_runtime_events_locked() -> None:
         if first_retry_error is not None:
           raise first_retry_error
         return
-      require_consumer = getattr(
-        strategy_manager.executor,
-        "require_durable_event_consumer",
-        None,
+      owner_identity = _owner_ref_environment(event)
+      event_owner_key = (
+        (
+          owner_identity[0].owner_type.value,
+          owner_identity[0].owner_id,
+          owner_identity[1].value,
+        )
+        if owner_identity is not None
+        else (
+          str(getattr(event, "owner_type", "") or ""),
+          str(getattr(event, "owner_id", "") or ""),
+          str(getattr(event, "environment", "") or ""),
+        )
       )
-      if require_consumer is not None:
-        try:
-          require_consumer(event.strategy_run_id)
-        except RuntimeConsumerUnavailable:
-          blocked_run_ids.add(event.strategy_run_id)
-          continue
+      if (
+        owner_identity is not None
+        and owner_identity[0].owner_type == ExecutionOwnerType.STRATEGY_RUN
+      ):
+        require_consumer = getattr(
+          strategy_manager.executor,
+          "require_durable_event_consumer",
+          None,
+        )
+        if require_consumer is not None:
+          try:
+            require_consumer(owner_identity[0].owner_id)
+          except RuntimeConsumerUnavailable:
+            blocked_owner_keys.add(event_owner_key)
+            continue
       prior_attempts = int(event.application_attempts or 0)
       prior_error = event.application_error
       event.application_status = "PROCESSING"
       event.application_attempts = prior_attempts + 1
       await db.commit()
       event_id = event.event_id
-      event_run_id = event.strategy_run_id
     try:
       async with AsyncSessionLocal() as db:
         event = await db.get(StrategyRuntimeEvent, event_id)
@@ -4368,10 +5439,23 @@ async def _drain_runtime_events_locked() -> None:
           "arm_durable_event_barrier",
           None,
         )
-        if arm_barrier is not None:
-          arm_barrier(event.strategy_run_id, event.business_key)
-        await _apply_runtime_event(event)
-        await _reconcile_t_trade_batch_after_runtime_event(db, event)
+        owner_identity = _owner_ref_environment(event)
+        if (
+          owner_identity is not None
+          and owner_identity[0].owner_type == ExecutionOwnerType.STRATEGY_RUN
+          and arm_barrier is not None
+        ):
+          arm_barrier(owner_identity[0].owner_id, event.business_key)
+        runtime_db_token = _runtime_event_db.set(db)
+        try:
+          await _apply_runtime_event(event)
+        finally:
+          _runtime_event_db.reset(runtime_db_token)
+        if (
+          owner_identity is not None
+          and owner_identity[0].owner_type == ExecutionOwnerType.STRATEGY_RUN
+        ):
+          await _reconcile_t_trade_batch_after_runtime_event(db, event)
         event.application_status = "APPLIED"
         event.applied_at = utcnow()
         event.application_error = None
@@ -4381,9 +5465,13 @@ async def _drain_runtime_events_locked() -> None:
           "advance_durable_event_barrier",
           None,
         )
-        if advance_barrier is not None:
+        if (
+          advance_barrier is not None
+          and owner_identity is not None
+          and owner_identity[0].owner_type == ExecutionOwnerType.STRATEGY_RUN
+        ):
           await advance_barrier(
-            event.strategy_run_id,
+            owner_identity[0].owner_id,
             event.business_key,
           )
     except RuntimeConsumerUnavailable:
@@ -4397,7 +5485,7 @@ async def _drain_runtime_events_locked() -> None:
           event.application_attempts = prior_attempts
           event.application_error = prior_error
           await db.commit()
-      blocked_run_ids.add(event_run_id)
+      blocked_owner_keys.add(event_owner_key)
       continue
     except Exception as exc:
       async with AsyncSessionLocal() as db:
@@ -4409,13 +5497,18 @@ async def _drain_runtime_events_locked() -> None:
           batch_id = str(
             event_metadata.get("t_batch_id") or event_metadata.get("batch_id") or ""
           )
-          if batch_id:
+          event_owner = _durable_owner_triple(event)
+          if batch_id and event_owner is not None:
             batch = await db.get(TTradeBatch, batch_id)
-            if batch is not None and batch.status != "CLOSED":
+            if (
+              batch is not None
+              and _durable_owner_triple(batch) == event_owner
+              and batch.status != "CLOSED"
+            ):
               batch.status = "RECONCILE_REQUIRED"
               batch.exception_reason = f"策略运行时事件应用失败：{str(exc)[:1000]}"
           await db.commit()
-      blocked_run_ids.add(event_run_id)
+      blocked_owner_keys.add(event_owner_key)
       if first_retry_error is None:
         first_retry_error = RetryableReportError(str(exc))
         first_retry_error.__cause__ = exc
@@ -4464,7 +5557,7 @@ async def _supersede_obsolete_pending_full_snapshots(
   payload = dict(oldest.payload or {})
   if (
     oldest.message_type != "delta_report"
-    or str(oldest.protocol_version or "") != "1.1"
+    or str(oldest.protocol_version or "") != PROTOCOL_VERSION
     or payload.get("is_complete") is not True
     or _authoritative_snapshot_identity(oldest) is None
   ):
@@ -4475,7 +5568,7 @@ async def _supersede_obsolete_pending_full_snapshots(
     .where(
       AgentReportInbox.device_id == oldest.device_id,
       AgentReportInbox.message_type == "delta_report",
-      AgentReportInbox.protocol_version == "1.1",
+      AgentReportInbox.protocol_version == PROTOCOL_VERSION,
       AgentReportInbox.processing_status == "PENDING",
       AgentReportInbox.received_at > oldest.received_at,
       or_(
@@ -4496,7 +5589,7 @@ async def _supersede_obsolete_pending_full_snapshots(
     .where(
       AgentReportInbox.device_id == oldest.device_id,
       AgentReportInbox.message_type == "delta_report",
-      AgentReportInbox.protocol_version == "1.1",
+      AgentReportInbox.protocol_version == PROTOCOL_VERSION,
       AgentReportInbox.processing_status == "PENDING",
       AgentReportInbox.received_at < newer.received_at,
       AgentReportInbox.payload["is_complete"].as_boolean().is_(True),
@@ -4521,14 +5614,196 @@ async def _supersede_obsolete_pending_full_snapshots(
   return superseded_count
 
 
+def _report_client_order_ids(payload: Mapping[str, Any]) -> set[str]:
+  """Collect bounded client ids for legacy quarantine bookkeeping only."""
+
+  client_order_ids: set[str] = set()
+
+  def add(value: Any) -> None:
+    normalized = str(value or "").strip()
+    if normalized and len(normalized) <= 128:
+      client_order_ids.add(normalized)
+
+  add(payload.get("client_order_id"))
+  for nested_name in ("order", "execution"):
+    nested = payload.get(nested_name)
+    if isinstance(nested, Mapping):
+      add(nested.get("client_order_id"))
+  for collection_name in (
+    "orders",
+    "trades",
+    "order_errors",
+    "cancel_errors",
+  ):
+    values = payload.get(collection_name)
+    if not isinstance(values, list):
+      continue
+    for item in values:
+      if isinstance(item, Mapping):
+        add(item.get("client_order_id"))
+  return client_order_ids
+
+
+async def _quarantine_unsupported_protocol_report(
+  db: Any,
+  report: AgentReportInbox,
+) -> None:
+  """Dead-letter one legacy report and seal its durable execution scope."""
+
+  protocol_version = str(report.protocol_version or "")
+  error = (
+    f"{PROTOCOL_1_2_REQUIRED}: unsupported Agent report protocol "
+    f"{protocol_version or 'MISSING'}"
+  )
+  quarantined_at = utcnow()
+  report.processing_status = "FAILED"
+  report.processing_attempts = max(1, int(report.processing_attempts or 0))
+  report.processing_error = error
+  report.processed_at = quarantined_at
+  report.next_attempt_at = None
+
+  payload = dict(report.payload or {})
+  try:
+    account_ids = {
+      account_id
+      for account_id in _report_account_ids(payload)
+      if len(account_id) <= 50
+    }
+  except (RetryableReportError, TypeError, ValueError):
+    account_ids = set()
+
+  for client_order_id in _report_client_order_ids(payload):
+    pending = await db.get(
+      PendingTradeOrder,
+      client_order_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+    if pending is None:
+      continue
+    pending_account_id = str(pending.account_id or "").strip()
+    if pending_account_id and len(pending_account_id) <= 50:
+      account_ids.add(pending_account_id)
+    pending_metadata = dict(pending.request_metadata or {})
+    pending_metadata.update(
+      {
+        QUARANTINE_RECONCILE_REQUIRED_METADATA_KEY: True,
+        QUARANTINE_REPAIR_REQUIRED_METADATA_KEY: True,
+        QUARANTINE_REASON_METADATA_KEY: PROTOCOL_1_2_REQUIRED,
+      }
+    )
+    pending.request_metadata = pending_metadata
+    pending.status = "RECONCILE_REQUIRED"
+    pending.status_reason = error[:256]
+    outbox = (
+      await db.execute(
+        select(TradeCommandOutbox)
+        .where(TradeCommandOutbox.client_order_id == client_order_id)
+        .limit(1)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+      )
+    ).scalar_one_or_none()
+    if outbox is not None:
+      outbox.delivery_status = "RECONCILE_REQUIRED"
+      outbox.last_error = error[:256]
+
+  for account_id in sorted(account_ids):
+    control = await db.get(
+      AccountExecutionControl,
+      account_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+    if control is None:
+      control = AccountExecutionControl(account_id=account_id)
+      db.add(control)
+      await db.flush()
+    previous_state = str(control.authorization_state or "DISABLED")
+    if previous_state != "KILLED":
+      control.authorization_state = "PAUSED"
+    control.reconcile_status = "RECONCILE_REQUIRED"
+    control.state_version = max(1, int(control.state_version or 1)) + 1
+    control.paused_reason = json.dumps(
+      [
+        {
+          "kind": PROTOCOL_1_2_REQUIRED,
+          "messageId": str(report.message_id or ""),
+          "protocolVersion": protocol_version or None,
+          "quarantinedAt": quarantined_at.isoformat(),
+        }
+      ],
+      ensure_ascii=False,
+      separators=(",", ":"),
+    )[:2000]
+    event_id = f"protocol-rejected:{report.message_id}:{account_id}"[:128]
+    existing_event = await db.get(AccountExecutionControlEvent, event_id)
+    if existing_event is None:
+      db.add(
+        AccountExecutionControlEvent(
+          event_id=event_id,
+          account_id=account_id,
+          event_type=PROTOCOL_1_2_REQUIRED,
+          previous_state=previous_state,
+          next_state=str(control.authorization_state or ""),
+          details={
+            "messageId": str(report.message_id or ""),
+            "messageType": str(report.message_type or ""),
+            "protocolVersion": protocol_version or None,
+          },
+          created_at=quarantined_at,
+        )
+      )
+
+  for account_id in sorted(account_ids) or [None]:
+    await OperationalAlertService(db).raise_alert(
+      severity="SEV2",
+      source="ENGINE",
+      code="AGENT_REPORT_DEAD_LETTER",
+      account_id=account_id,
+      business_id=str(report.message_id or "") or None,
+      message=(
+        f"Agent report protocol rejected: {report.message_type} / "
+        f"{protocol_version or 'MISSING'}"
+      ),
+      details={
+        "message_id": str(report.message_id or ""),
+        "message_type": str(report.message_type or ""),
+        "protocol_version": protocol_version or None,
+        "reason_code": PROTOCOL_1_2_REQUIRED,
+      },
+      commit=False,
+    )
+  await db.commit()
+
+
 async def _claim() -> Optional[str]:
   now = utcnow()
   async with AsyncSessionLocal() as db:
     while True:
+      legacy_result = await db.execute(
+        select(AgentReportInbox)
+        .where(
+          AgentReportInbox.processing_status == "PENDING",
+          or_(
+            AgentReportInbox.protocol_version != PROTOCOL_VERSION,
+            AgentReportInbox.protocol_version.is_(None),
+          ),
+        )
+        .order_by(AgentReportInbox.received_at)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+      )
+      legacy_report = legacy_result.scalar_one_or_none()
+      if legacy_report is not None:
+        await _quarantine_unsupported_protocol_report(db, legacy_report)
+        now = utcnow()
+        continue
       result = await db.execute(
         select(AgentReportInbox)
         .where(
           AgentReportInbox.processing_status == "PENDING",
+          AgentReportInbox.protocol_version == PROTOCOL_VERSION,
           or_(
             AgentReportInbox.next_attempt_at.is_(None),
             AgentReportInbox.next_attempt_at <= now,
@@ -4672,7 +5947,7 @@ async def _supersede_prior_snapshot_failures(
 ) -> int:
   """Close obsolete snapshot dead letters after newer state converges.
 
-  Complete protocol 1.1 snapshots are authoritative account-state checkpoints.
+  Complete protocol 1.2 snapshots are authoritative account-state checkpoints.
   Once a newer checkpoint for the same device and accounts succeeds, an older
   failed complete snapshot or fact-free unavailable observation no longer
   represents an unresolved state gap. Partial broker facts and incremental
@@ -4682,7 +5957,7 @@ async def _supersede_prior_snapshot_failures(
   current_accounts = _report_account_ids(payload)
   if (
     report.message_type != "delta_report"
-    or str(report.protocol_version or "") != "1.1"
+    or str(report.protocol_version or "") != PROTOCOL_VERSION
     or not bool(payload.get("is_complete"))
     or _authoritative_snapshot_identity(report) is None
     or not current_accounts
@@ -4695,7 +5970,7 @@ async def _supersede_prior_snapshot_failures(
           AgentReportInbox.device_id == report.device_id,
           AgentReportInbox.message_id != report.message_id,
           AgentReportInbox.message_type == "delta_report",
-          AgentReportInbox.protocol_version == "1.1",
+          AgentReportInbox.protocol_version == PROTOCOL_VERSION,
           AgentReportInbox.processing_status == "FAILED",
           AgentReportInbox.received_at <= report.received_at,
         )
@@ -4738,7 +6013,7 @@ async def _supersede_prior_snapshot_failures(
       resolved_by="SYSTEM_RECONCILIATION",
       resolved_at=resolved_at,
       resolution=(
-        "后续协议 1.1 完整账户快照已成功收敛；旧失败快照或无交易事实的不可用观测"
+        "后续协议 1.2 完整账户快照已成功收敛；旧失败快照或无交易事实的不可用观测"
         f"已由权威状态取代，原始失败记录保留。快照：{payload['snapshot_id']}"
       ),
     )

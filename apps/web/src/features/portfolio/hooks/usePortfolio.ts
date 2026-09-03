@@ -398,13 +398,20 @@ export const ExitPlansQuery = gql(`
       strategyRunId
       enabled
       status
-      executionMode
+      environment
       autoExitAuthorized
       autoExitAuthorizationConfigVersion
       autoExitAuthorizationExpiresAt
       configVersion
       stateVersion
-      executionOwner
+      executionOwner {
+        ownerType
+        ownerId
+      }
+      sourceExecutionOwner {
+        ownerType
+        ownerId
+      }
       completionStrategy
       completionNote
       protectedVolume
@@ -754,7 +761,6 @@ export const UpdateManualExitPlanMutation = gql(`
       status
       configVersion
       protectedVolume
-      executionMode
       autoExitAuthorized
       rules
       metadata

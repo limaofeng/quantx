@@ -84,10 +84,13 @@ def _legacy_manual_record(
     bucket="manual",
     source_type=source_type,
     source_id=plan_id,
-    strategy_run_id=run_id,
+    strategy_run_id=run_id or None,
+    source_execution_owner_type=("STRATEGY_RUN" if run_id else "MANUAL_COMMAND"),
+    source_execution_owner_id=run_id or plan_id,
+    source_execution_environment="LIVE",
     enabled=enabled,
     status=status.value,
-    execution_mode="live",
+    environment="LIVE",
     auto_exit_authorized=True,
     auto_exit_authorization_fingerprint="f" * 64,
     auto_exit_authorization_config_version=1,
@@ -899,9 +902,11 @@ async def test_manual_plan_migration_detaches_pending_plan_without_losing_links(
     db.add(
       TradeIntentRecord(
         id=intent_id,
-        strategy_run_id=run_id,
-        owner_type="STRATEGY_RUN",
-        owner_id=run_id,
+        strategy_run_id=None,
+        owner_type="EXIT_PLAN",
+        owner_id=plan_id,
+        environment="LIVE",
+        idempotency_key=f"exit-plan:{intent_id}",
         account_id="account-1",
         instrument_code="600000.SH",
         direction="SELL",
@@ -942,7 +947,7 @@ async def test_manual_plan_migration_detaches_pending_plan_without_losing_links(
     assert intent is not None
     assert intent.owner_type == "EXIT_PLAN"
     assert intent.owner_id == plan_id
-    assert intent.strategy_run_id == run_id
+    assert intent.strategy_run_id is None
     assert run is not None and run.status == StrategyRunStatus.STOPPED
     assert managed is not None and managed.current_run_id is None
     assert managed.status == "MIGRATED_TO_MONITOR"

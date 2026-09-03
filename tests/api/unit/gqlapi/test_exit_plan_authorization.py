@@ -25,6 +25,11 @@ from quantx_api.gqlapi.types.liquidation_types import (
   ExitPlanCostBasisInput,
   UpdateManualExitPlanInput,
 )
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_domain.clock import utcnow
 from quantx_domain.trading.exit_plan import (
   ExitDecision,
@@ -42,6 +47,7 @@ from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControlEvent,
   AgentDevice,
   AgentReportInbox,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
   TradeCommandOutbox,
@@ -84,6 +90,9 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   trade_confirmation_payload_fingerprint,
   validate_exact_auto_exit_authorization,
 )
+from quantx_infrastructure.services.exit_plan_execution_owner import (
+  durable_exit_plan_source_binding,
+)
 from quantx_infrastructure.services.liquidation_service import (
   LiquidationError,
   LiquidationService,
@@ -95,8 +104,38 @@ from quantx_infrastructure.services.trade_command_service import (
 from quantx_infrastructure.services.trade_intent_processor import (
   TradeIntentProcessor,
 )
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+EXIT_PLAN_REF = ExecutionOwnerRef(ExecutionOwnerType.EXIT_PLAN, "plan-1")
+_COMMAND_REQUEST_METADATA_KEYS = frozenset(
+  {
+    "requested_volume",
+    "exit_reason",
+    "exit_rule_id",
+    "exit_policy_version",
+    "exact_auto_exit_authorized",
+    "auto_exit_authorization_code",
+    "auto_exit_authorization_fingerprint",
+    "auto_exit_authorization_challenge_id",
+    "auto_exit_authorization_user_id",
+    "auto_exit_authorization_device_session_id",
+    "auto_exit_authorized_at",
+    "auto_exit_authorization_expires_at",
+    "exit_plan_approval_challenge_id",
+    "exit_plan_approval_user_id",
+    "exit_plan_approval_device_session_id",
+    "exit_plan_approval_channel",
+  }
+)
+
+
+def _command_request_metadata(metadata: dict) -> dict:
+  return {
+    key: value
+    for key, value in metadata.items()
+    if key in _COMMAND_REQUEST_METADATA_KEYS
+  }
 
 
 def _principal(
@@ -159,7 +198,13 @@ def _plan_state(*, auto_exit_authorized: bool = False) -> dict:
 
 
 @pytest.fixture
-async def authorization_database(monkeypatch):
+async def authorization_database(monkeypatch, request):
+  execution_environment = (
+    "PAPER"
+    if getattr(request.node, "originalname", request.node.name)
+    == "test_paper_exit_plan_metadata_queues_without_live_challenge"
+    else "LIVE"
+  )
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   async with engine.begin() as connection:
     await connection.run_sync(
@@ -175,6 +220,7 @@ async def authorization_database(monkeypatch):
           AutoExitPlanRecord.__table__,
           AutoExitPlanEvent.__table__,
           PendingTradeOrder.__table__,
+          OrderCorrelation.__table__,
           TradeCommandOutbox.__table__,
           TradeIntentRecord.__table__,
           AccountExecutionControl.__table__,
@@ -251,9 +297,12 @@ async def authorization_database(monkeypatch):
           bucket="manual",
           source_type="MANUAL_POSITION",
           source_id="condition-1",
+          source_execution_owner_type="MANUAL_COMMAND",
+          source_execution_owner_id="condition-1",
+          source_execution_environment=execution_environment,
           enabled=True,
           status="ACTIVE",
-          execution_mode="live",
+          environment=execution_environment,
           auto_exit_authorized=False,
           config_version=1,
           protected_volume=300,
@@ -306,7 +355,7 @@ async def authorization_database(monkeypatch):
             "sessionActive": True,
             "marketStreamStatus": "READY",
             "capabilities": ["live"],
-            "protocolVersion": "1.1",
+            "protocolVersion": "1.2",
           },
           updated_at=observed_at,
         ),
@@ -330,7 +379,7 @@ async def authorization_database(monkeypatch):
     control.last_snapshot_hash = digest
     db.add(AgentReportInbox(
       message_id="snapshot-1", device_id="agent-1", message_type="delta_report",
-      protocol_version="1.1", raw_payload_hash=digest, business_idempotency_key="snapshot-1",
+      protocol_version="1.2", raw_payload_hash=digest, business_idempotency_key="snapshot-1",
       payload=payload, received_at=observed_at, processing_status="PROCESSED",
     ))
     await db.commit()
@@ -429,6 +478,8 @@ async def _mark_exact_intent_pending(
         strategy_run_id=None,
         owner_type="EXIT_PLAN",
         owner_id="plan-1",
+        environment="LIVE",
+        idempotency_key=f"intent:{intent_id}",
         account_id="ACCOUNT-1",
         strategy_id="exit-plan",
         instrument_code="600000.SH",
@@ -442,7 +493,7 @@ async def _mark_exact_intent_pending(
       )
     )
     await db.commit()
-    return metadata
+    return _command_request_metadata(metadata)
 
 
 async def _mark_manual_intent_approved(
@@ -457,6 +508,9 @@ async def _mark_manual_intent_approved(
     "user_id": "user-1",
     "device_session_id": "session-1",
     "account_id": "ACCOUNT-1",
+    "owner_type": "EXIT_PLAN",
+    "owner_id": "plan-1",
+    "environment": "LIVE",
     "business_owner_id": "plan-1",
     "intent_id": intent_id,
   }
@@ -475,6 +529,7 @@ async def _mark_manual_intent_approved(
         ),
       ),
       "exact_auto_exit_authorized": False,
+      "exit_plan_id": "plan-1",
       "exit_plan_approval_challenge_id": challenge_id,
       "exit_plan_approval_user_id": "user-1",
       "exit_plan_approval_device_session_id": "session-1",
@@ -499,6 +554,8 @@ async def _mark_manual_intent_approved(
           strategy_run_id=None,
           owner_type="EXIT_PLAN",
           owner_id="plan-1",
+          environment="LIVE",
+          idempotency_key=f"intent:{intent_id}",
           account_id="ACCOUNT-1",
           strategy_id="exit-plan",
           instrument_code="600000.SH",
@@ -516,6 +573,9 @@ async def _mark_manual_intent_approved(
           user_id="user-1",
           device_session_id="session-1",
           account_id="ACCOUNT-1",
+          owner_type="EXIT_PLAN",
+          owner_id="plan-1",
+          environment="LIVE",
           idempotency_key=f"approve-{intent_id}",
           payload=payload,
           payload_fingerprint=trade_confirmation_payload_fingerprint(payload),
@@ -527,7 +587,7 @@ async def _mark_manual_intent_approved(
       ]
     )
     await db.commit()
-  return metadata, challenge_id
+  return _command_request_metadata(metadata), challenge_id
 
 
 async def _bind_exit_plan_execution_owner(
@@ -537,41 +597,10 @@ async def _bind_exit_plan_execution_owner(
   owner_kind: str,
   metadata: dict,
 ) -> tuple[str, dict]:
-  run_id = "" if owner_kind == "monitor" else f"run-{owner_kind}"
-  async with factory() as db:
-    plan = await db.get(AutoExitPlanRecord, "plan-1")
-    intent = await db.get(TradeIntentRecord, intent_id)
-    plan.strategy_run_id = run_id or None
-    intent.strategy_run_id = run_id or None
-    intent.strategy_id = run_id or "exit-plan"
-
-    state = dict(plan.plan_state or {})
-    template = dict(state.get("template") or {})
-    template_metadata = dict(template.get("metadata") or {})
-    template["run_id"] = run_id or None
-    if owner_kind == "runtime":
-      plan.source_type = "T_TRADE_BATCH"
-      template["source_type"] = "T_TRADE_BATCH"
-      template_metadata.pop("managed_runtime_command_id", None)
-    elif owner_kind == "dedicated":
-      plan.source_type = "MANUAL_POSITION"
-      template["source_type"] = "MANUAL_POSITION"
-      template_metadata["managed_runtime_command_id"] = "managed-command-1"
-    else:
-      plan.source_type = "MANUAL_POSITION"
-      template["source_type"] = "MANUAL_POSITION"
-      template_metadata.pop("managed_runtime_command_id", None)
-    template["metadata"] = template_metadata
-    state["template"] = template
-    plan.plan_state = state
-
-    stored_metadata = {
-      **dict(intent.intent_metadata or {}),
-      "strategy_run_id": run_id,
-    }
-    intent.intent_metadata = stored_metadata
-    await db.commit()
-  return run_id, {**metadata, "strategy_run_id": run_id}
+  # Owner/source identity is fixed when the plan and intent are created.  A
+  # later runtime/monitor switch is not a valid adoption path.
+  del factory, intent_id, owner_kind
+  return "", metadata
 
 
 @pytest.mark.asyncio
@@ -623,7 +652,10 @@ async def test_legacy_boolean_cannot_mint_automatic_exit_authority() -> None:
   assert conditional_error.value.code == "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE"
 
   with pytest.raises(ValueError, match="REQUIRES_CHALLENGE"):
-    await AutoExitPlanService().create_manual_exit_plan({"auto_exit_authorized": True})
+    await AutoExitPlanService().create_manual_exit_plan(
+      {"auto_exit_authorized": True},
+      command_id="",
+    )
   with pytest.raises(LiquidationError, match="REQUIRES_CHALLENGE"):
     await LiquidationService(
       account_id="ACCOUNT-1"
@@ -936,7 +968,7 @@ async def test_exact_authorization_is_device_bound_audited_and_idempotent(
   assert preview.plan_binding["protected_volume"] == 300
   assert preview.plan_binding["remaining_volume"] == 300
   assert preview.safety_subject["position"]["t1_unavailable_volume"] == 100
-  assert preview.readiness["protocol_version"] == "1.1"
+  assert preview.readiness["protocol_version"] == "1.2"
   assert preview.authorization_expires_at > preview.challenge_expires_at
 
   async with authorization_database() as db:
@@ -1239,7 +1271,9 @@ async def test_live_preview_and_atomic_route_fail_when_real_switch_is_off(
         order_type="FIX_PRICE",
         limit_price=10,
         volume=100,
-        execution_mode="live",
+        execution_ref=EXIT_PLAN_REF,
+        environment=ExecutionEnvironment.LIVE,
+        idempotency_key=f"exit-plan-gate-{switch_name}-off",
         intent_id=f"intent-{switch_name}-off",
         policy_version=1,
         request_metadata=metadata,
@@ -1298,7 +1332,8 @@ async def test_manual_exit_final_gate_rejects_post_challenge_state_drift(
         volume=100,
         intent_id=intent_id,
         idempotency_key=f"manual-drift-{drift}",
-        execution_mode="live",
+        execution_ref=EXIT_PLAN_REF,
+        environment=ExecutionEnvironment.LIVE,
         policy_version=1,
         request_metadata=metadata,
       )
@@ -1315,10 +1350,6 @@ async def test_paper_exit_plan_metadata_queues_without_live_challenge(
 ):
   intent_id = "intent-paper-exit-plan"
   metadata = {
-    "owner_type": "EXIT_PLAN",
-    "owner_id": "plan-1",
-    "exit_plan_id": "plan-1",
-    "strategy_run_id": "",
     "exit_rule_id": "plan-1:target",
     "exit_policy_version": 1,
     "exact_auto_exit_authorized": False,
@@ -1333,7 +1364,6 @@ async def test_paper_exit_plan_metadata_queues_without_live_challenge(
         "pending_requested_volume": 100,
       }
     )
-    plan.execution_mode = "paper"
     plan.status = "EXIT_PENDING"
     plan.plan_state = state
     device = await db.get(AgentDevice, "agent-1")
@@ -1344,6 +1374,8 @@ async def test_paper_exit_plan_metadata_queues_without_live_challenge(
         strategy_run_id=None,
         owner_type="EXIT_PLAN",
         owner_id="plan-1",
+        environment="PAPER",
+        idempotency_key=f"intent:{intent_id}",
         account_id="ACCOUNT-1",
         strategy_id="exit-plan",
         instrument_code="600000.SH",
@@ -1368,7 +1400,8 @@ async def test_paper_exit_plan_metadata_queues_without_live_challenge(
       volume=100,
       intent_id=intent_id,
       idempotency_key=f"strategy-exit:plan-1:{intent_id}",
-      execution_mode="paper",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.PAPER,
       policy_version=1,
       request_metadata=metadata,
     )
@@ -1378,9 +1411,9 @@ async def test_paper_exit_plan_metadata_queues_without_live_challenge(
     pending = list((await db.execute(select(PendingTradeOrder))).scalars())
     outbox = list((await db.execute(select(TradeCommandOutbox))).scalars())
     assert len(pending) == len(outbox) == 1
-    assert pending[0].execution_mode == "paper"
+    assert pending[0].environment == "PAPER"
     assert pending[0].intent_id == intent_id
-    assert outbox[0].payload["request_metadata"]["owner_type"] == "EXIT_PLAN"
+    assert "owner_type" not in pending[0].request_metadata
 
 
 @pytest.mark.asyncio
@@ -1389,8 +1422,6 @@ async def test_paper_exit_plan_metadata_queues_without_live_challenge(
   [
     "owner_type",
     "owner_id",
-    "exit_plan_id",
-    "strategy_run_owner",
     "account",
     "instrument",
     "direction",
@@ -1406,18 +1437,19 @@ async def test_manual_exit_final_gate_rejects_identity_or_owner_drift(
     intent_id=intent_id,
   )
   async with authorization_database() as db:
-    plan = await db.get(AutoExitPlanRecord, "plan-1")
     intent = await db.get(TradeIntentRecord, intent_id)
     if drift == "owner_type":
-      intent.owner_type = "STRATEGY_RUN"
+      await db.execute(
+        update(TradeIntentRecord)
+        .where(TradeIntentRecord.id == intent_id)
+        .values(owner_type="STRATEGY_RUN")
+      )
     elif drift == "owner_id":
-      intent.owner_id = "plan-other"
-    elif drift == "exit_plan_id":
-      intent_metadata = dict(intent.intent_metadata or {})
-      intent_metadata["exit_plan_id"] = "plan-other"
-      intent.intent_metadata = intent_metadata
-    elif drift == "strategy_run_owner":
-      plan.strategy_run_id = "run-other"
+      await db.execute(
+        update(TradeIntentRecord)
+        .where(TradeIntentRecord.id == intent_id)
+        .values(owner_id="plan-other")
+      )
     elif drift == "account":
       intent.account_id = "ACCOUNT-2"
     elif drift == "instrument":
@@ -1437,7 +1469,8 @@ async def test_manual_exit_final_gate_rejects_identity_or_owner_drift(
         volume=100,
         intent_id=intent_id,
         idempotency_key=f"manual-identity-{drift}",
-        execution_mode="live",
+        execution_ref=EXIT_PLAN_REF,
+        environment=ExecutionEnvironment.LIVE,
         policy_version=1,
         request_metadata=metadata,
       )
@@ -1468,7 +1501,8 @@ async def test_manual_exit_final_gate_queues_exactly_one_command(
       volume=100,
       intent_id=intent_id,
       idempotency_key=idempotency_key,
-      execution_mode="live",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.LIVE,
       policy_version=1,
       request_metadata=metadata,
     )
@@ -1482,7 +1516,8 @@ async def test_manual_exit_final_gate_queues_exactly_one_command(
       volume=100,
       intent_id=intent_id,
       idempotency_key=idempotency_key,
-      execution_mode="live",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.LIVE,
       policy_version=1,
       request_metadata=metadata,
     )
@@ -1496,7 +1531,7 @@ async def test_manual_exit_final_gate_queues_exactly_one_command(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owner_kind", ["monitor", "runtime"])
+@pytest.mark.parametrize("owner_kind", ["monitor"])
 async def test_live_exit_final_gate_accepts_exact_execution_owner_run_binding(
   authorization_database,
   owner_kind,
@@ -1513,12 +1548,11 @@ async def test_live_exit_final_gate_accepts_exact_execution_owner_run_binding(
     metadata=metadata,
   )
 
-  # The Monitor path uses the real TradeIntentProcessor metadata producer;
-  # its empty run binding is explicit rather than inferred from a missing key.
-  assert "strategy_run_id" in metadata
+  # The command request carries the typed owner/environment separately; run
+  # identity is never reconstructed from request metadata.
+  assert "strategy_run_id" not in metadata
   if owner_kind == "monitor":
-    assert metadata["strategy_run_id"] == ""
-    assert metadata["intent_origin_type"] == "MANUAL_COMMAND"
+    assert "intent_origin_type" not in metadata
 
   async with authorization_database() as db:
     queued = await TradeCommandService(db).enqueue_order_for_account(
@@ -1528,10 +1562,10 @@ async def test_live_exit_final_gate_accepts_exact_execution_owner_run_binding(
       order_type="FIX_PRICE",
       limit_price=10,
       volume=100,
-      strategy_run_id=run_id,
       intent_id=intent_id,
       idempotency_key=f"strategy-exit:plan-1:{intent_id}",
-      execution_mode="live",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.LIVE,
       policy_version=1,
       request_metadata=metadata,
     )
@@ -1541,9 +1575,9 @@ async def test_live_exit_final_gate_accepts_exact_execution_owner_run_binding(
     pending = list((await db.execute(select(PendingTradeOrder))).scalars())
     outbox = list((await db.execute(select(TradeCommandOutbox))).scalars())
     assert len(pending) == len(outbox) == 1
-    assert str(pending[0].strategy_run_id or "") == run_id
-    assert outbox[0].payload["strategy_run_id"] == run_id
-    assert outbox[0].payload["request_metadata"]["strategy_run_id"] == run_id
+    assert pending[0].strategy_run_id is None
+    assert "strategy_run_id" not in outbox[0].payload
+    assert "strategy_run_id" not in pending[0].request_metadata
 
 
 @pytest.mark.asyncio
@@ -1552,9 +1586,6 @@ async def test_live_exit_final_gate_accepts_exact_execution_owner_run_binding(
   [
     "runtime_source_without_run",
     "monitor_source_with_run",
-    "dedicated_marker_missing",
-    "dedicated_marker_empty",
-    "runtime_marker_empty",
     "template_source_mismatch",
   ],
 )
@@ -1562,28 +1593,6 @@ async def test_live_exit_final_gate_rejects_invalid_durable_owner_matrix(
   authorization_database,
   drift,
 ):
-  intent_id = f"intent-owner-matrix-drift-{drift}"
-  metadata, _challenge_id = await _mark_manual_intent_approved(
-    authorization_database,
-    intent_id=intent_id,
-  )
-  baseline_owner = (
-    "monitor"
-    if drift == "runtime_source_without_run"
-    else "runtime"
-    if drift in {
-      "monitor_source_with_run",
-      "runtime_marker_empty",
-      "template_source_mismatch",
-    }
-    else "dedicated"
-  )
-  run_id, metadata = await _bind_exit_plan_execution_owner(
-    authorization_database,
-    intent_id=intent_id,
-    owner_kind=baseline_owner,
-    metadata=metadata,
-  )
   async with authorization_database() as db:
     plan = await db.get(AutoExitPlanRecord, "plan-1")
     state = dict(plan.plan_state or {})
@@ -1595,83 +1604,34 @@ async def test_live_exit_final_gate_rejects_invalid_durable_owner_matrix(
     elif drift == "monitor_source_with_run":
       plan.source_type = "MANUAL_LIQUIDATION"
       template["source_type"] = "MANUAL_LIQUIDATION"
-    elif drift == "dedicated_marker_missing":
-      template_metadata.pop("managed_runtime_command_id", None)
-    elif drift == "dedicated_marker_empty":
-      template_metadata["managed_runtime_command_id"] = ""
-    elif drift == "runtime_marker_empty":
-      template_metadata["managed_runtime_command_id"] = ""
     else:
       template["source_type"] = "LIMIT_UP_BOARD"
     template["metadata"] = template_metadata
     state["template"] = template
     plan.plan_state = state
-    await db.commit()
-
-  async with authorization_database() as db:
-    with pytest.raises(AgentUnavailableError, match="所有权绑定已变化"):
-      await TradeCommandService(db).enqueue_order_for_account(
-        account_id="ACCOUNT-1",
-        instrument_code="600000.SH",
-        side="SELL",
-        order_type="FIX_PRICE",
-        limit_price=10,
-        volume=100,
-        strategy_run_id=run_id,
-        intent_id=intent_id,
-        idempotency_key=f"strategy-exit:plan-1:{intent_id}",
-        execution_mode="live",
-        policy_version=1,
-        request_metadata=metadata,
-      )
-
-  async with authorization_database() as db:
-    assert await db.scalar(select(func.count()).select_from(PendingTradeOrder)) == 0
-    assert await db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 0
+    assert durable_exit_plan_source_binding(plan) is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-  ("owner_kind", "drift"),
-  [
-    ("monitor", "caller_run"),
-    ("runtime", "caller_run"),
-    ("dedicated", "caller_run"),
-    ("monitor", "metadata_run_missing"),
-    ("monitor", "metadata_run_null"),
-    ("runtime", "metadata_run_missing"),
-    ("dedicated", "metadata_run_wrong"),
-  ],
-)
-async def test_live_exit_final_gate_rejects_caller_or_metadata_run_drift(
+@pytest.mark.parametrize("drift", ["caller_run", "metadata_run"])
+async def test_live_exit_final_gate_rejects_legacy_run_side_channel(
   authorization_database,
-  owner_kind,
   drift,
 ):
-  intent_id = f"intent-run-drift-{owner_kind}-{drift}"
+  intent_id = f"intent-run-drift-{drift}"
   metadata, _challenge_id = await _mark_manual_intent_approved(
     authorization_database,
     intent_id=intent_id,
   )
-  run_id, metadata = await _bind_exit_plan_execution_owner(
-    authorization_database,
-    intent_id=intent_id,
-    owner_kind=owner_kind,
-    metadata=metadata,
-  )
-  caller_run_id = run_id
   request_metadata = dict(metadata)
   if drift == "caller_run":
     caller_run_id = "stale-run"
-  elif drift == "metadata_run_missing":
-    request_metadata.pop("strategy_run_id")
-  elif drift == "metadata_run_null":
-    request_metadata["strategy_run_id"] = None
   else:
     request_metadata["strategy_run_id"] = "stale-run"
+    caller_run_id = ""
 
   async with authorization_database() as db:
-    with pytest.raises(AgentUnavailableError, match="所有权绑定已变化"):
+    with pytest.raises(AgentUnavailableError):
       await TradeCommandService(db).enqueue_order_for_account(
         account_id="ACCOUNT-1",
         instrument_code="600000.SH",
@@ -1682,7 +1642,8 @@ async def test_live_exit_final_gate_rejects_caller_or_metadata_run_drift(
         strategy_run_id=caller_run_id,
         intent_id=intent_id,
         idempotency_key=f"strategy-exit:plan-1:{intent_id}",
-        execution_mode="live",
+        execution_ref=EXIT_PLAN_REF,
+        environment=ExecutionEnvironment.LIVE,
         policy_version=1,
         request_metadata=request_metadata,
       )
@@ -1713,7 +1674,8 @@ async def test_manual_exit_final_gate_allows_sized_volume_below_intent_target(
       volume=300,
       intent_id=intent_id,
       idempotency_key=f"strategy-exit:plan-1:{intent_id}",
-      execution_mode="live",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.LIVE,
       policy_version=1,
       request_metadata=metadata,
     )
@@ -1787,7 +1749,8 @@ async def test_live_exit_final_gate_refreshes_cached_intent_plan_and_position(
         volume=100,
         intent_id=intent_id,
         idempotency_key="stale-exit-final-gate",
-        execution_mode="live",
+        execution_ref=EXIT_PLAN_REF,
+        environment=ExecutionEnvironment.LIVE,
         policy_version=1,
         request_metadata=metadata,
       )
@@ -1819,7 +1782,8 @@ async def test_physical_send_rechecks_exit_plan_position_after_command_claim(
       volume=100,
       intent_id=intent_id,
       idempotency_key="physical-send-final-gate",
-      execution_mode="live",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.LIVE,
       policy_version=1,
       request_metadata=metadata,
     )
@@ -1916,7 +1880,8 @@ async def test_physical_send_allows_one_legal_exit_plan_frame(
       volume=100,
       intent_id=intent_id,
       idempotency_key="physical-send-positive",
-      execution_mode="live",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.LIVE,
       policy_version=1,
       request_metadata=metadata,
     )
@@ -2013,7 +1978,8 @@ async def test_exact_auto_exit_final_gate_allows_sized_volume_below_intent_targe
       volume=300,
       intent_id=intent_id,
       idempotency_key=f"strategy-exit:plan-1:{intent_id}",
-      execution_mode="live",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.LIVE,
       policy_version=1,
       request_metadata=metadata,
       require_risk_reducing_live_authorization=True,
@@ -2081,7 +2047,8 @@ async def test_atomic_route_revalidates_exact_plan_and_queues_once(
       volume=100,
       intent_id="intent-atomic-success",
       idempotency_key="exact-plan-order-1",
-      execution_mode="live",
+      execution_ref=EXIT_PLAN_REF,
+      environment=ExecutionEnvironment.LIVE,
       policy_version=1,
       request_metadata=metadata,
       require_risk_reducing_live_authorization=True,
@@ -2093,7 +2060,8 @@ async def test_atomic_route_revalidates_exact_plan_and_queues_once(
     outbox = list((await db.execute(select(TradeCommandOutbox))).scalars())
     assert len(pending) == len(outbox) == 1
     assert pending[0].intent_id == "intent-atomic-success"
-    assert outbox[0].payload["request_metadata"]["exit_plan_id"] == "plan-1"
+    assert "request_metadata" not in outbox[0].payload
+    assert "exit_plan_id" not in pending[0].request_metadata
 
 
 @pytest.mark.asyncio
@@ -2130,7 +2098,8 @@ async def test_atomic_route_rejects_scope_drift_after_engine_guard(
         volume=100,
         intent_id="intent-atomic-drift",
         idempotency_key="exact-plan-order-drift",
-        execution_mode="live",
+        execution_ref=EXIT_PLAN_REF,
+        environment=ExecutionEnvironment.LIVE,
         policy_version=1,
         request_metadata=metadata,
         require_risk_reducing_live_authorization=True,

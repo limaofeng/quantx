@@ -22,7 +22,7 @@ const mocks = vi.hoisted(() => ({
     engineStatus: 'READY',
     agentStatus: 'READY',
     agentMode: 'live',
-    protocolVersion: '1.1',
+    protocolVersion: '1.2',
     reconcileStatus: 'READY',
     killSwitch: false,
     blockedReasons: ['尚未基于最新完整快照建立账户实盘窗口'],

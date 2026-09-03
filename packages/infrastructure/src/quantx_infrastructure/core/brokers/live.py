@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.base import (
   AccountInfo,
   BrokerBase,
@@ -21,11 +22,33 @@ from quantx_domain.brokers.base import (
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.services.trade_command_service import (
   AgentUnavailableError,
+  require_stable_command_key,
 )
 from quantx_infrastructure.services.trade_intent_processor import (
   local_pre_broker_zero_fill_metadata,
 )
 from quantx_infrastructure.services.trading_service import InvalidOrderError
+
+_WIRE_IDENTITY_METADATA_KEYS = frozenset(
+  {
+    "owner_type",
+    "owner_id",
+    "environment",
+    "execution_environment",
+    "execution_owner_type",
+    "execution_owner_id",
+    "source_execution_owner_type",
+    "source_execution_owner_id",
+    "source_execution_environment",
+    "strategy_run_id",
+    "exit_plan_id",
+    "strategy_name",
+    "remark",
+    "order_remark",
+    "idempotency_key",
+    "trace_id",
+  }
+)
 
 
 class LiveBroker(BrokerBase):
@@ -96,6 +119,14 @@ class LiveBroker(BrokerBase):
     if not self.is_connected:
       return self._create_rejected_order(request, "未连接到交易系统")
 
+    try:
+      _, _, stable_idempotency_key = require_stable_command_key(
+        (request.metadata or {}).get("idempotency_key"),
+        (request.metadata or {}).get("trace_id"),
+      )
+    except AgentUnavailableError as exc:
+      return self._create_rejected_order(request, str(exc))
+
     # 风控检查
     if self.enable_risk_control:
       try:
@@ -128,6 +159,12 @@ class LiveBroker(BrokerBase):
     )
 
     try:
+      if not isinstance(request.execution_ref, ExecutionOwnerRef):
+        raise AgentUnavailableError("EXECUTION_OWNER_REQUIRED")
+      if not isinstance(request.environment, ExecutionEnvironment):
+        raise AgentUnavailableError("EXECUTION_ENVIRONMENT_REQUIRED")
+      if request.environment is not ExecutionEnvironment.LIVE:
+        raise AgentUnavailableError("LIVE_BROKER_REQUIRES_LIVE_ENVIRONMENT")
       # Crossing this call means a database commit may already have succeeded
       # even if the caller later observes an exception. Only typed validation
       # failures below are guaranteed to have rolled the transaction back.
@@ -137,17 +174,20 @@ class LiveBroker(BrokerBase):
         order_volume=request.volume,
         price_type=xt_price_type,
         price=request.price,
-        strategy_name=request.metadata.get("strategy_name", ""),
-        order_remark=request.metadata.get("remark", ""),
-        idempotency_key=str(
-          request.metadata.get("idempotency_key")
-          or request.metadata.get("trace_id")
-          or internal_order_id
-        ),
+        idempotency_key=stable_idempotency_key,
         execution_context={
-          **dict(request.metadata or {}),
+          **{
+            key: value
+            for key, value in dict(request.metadata or {}).items()
+            if str(key).strip().lower() not in _WIRE_IDENTITY_METADATA_KEYS
+          },
           "strategy_order_id": internal_order_id,
         },
+        # The request is the sole dispatch authority.  A LiveBroker instance
+        # is intentionally not bound to any strategy/run owner because one
+        # account broker serves strategy, manual, and managed-exit commands.
+        execution_ref=request.execution_ref,
+        environment=request.environment,
       )
       if not isinstance(result, dict) or not result.get("success"):
         message = result.get("message") if isinstance(result, dict) else "下单失败"
@@ -282,7 +322,7 @@ class LiveBroker(BrokerBase):
       } - {""}
       pending = list((await db.scalars(select(PendingTradeOrder).where(
         PendingTradeOrder.account_id == self.account_id,
-        PendingTradeOrder.execution_mode == "live",
+        PendingTradeOrder.environment == "LIVE",
         (PendingTradeOrder.broker_order_id.in_(observed)
          | PendingTradeOrder.client_order_id.in_(observed_clients)),
       ))).all())
@@ -405,14 +445,12 @@ class LiveBroker(BrokerBase):
     return mapping.get(order_type, XTOrderType.BUY)
 
   def _convert_price_type(self, price_type: PriceType) -> Any:
-    """转换价格类型到 XTQuant"""
+    """Convert the sole supported price type to XTQuant."""
     from quantx_infrastructure.models.enums import PriceType as XTPriceType
 
-    mapping = {
-      PriceType.LIMIT: XTPriceType.FIX_PRICE,
-      PriceType.MARKET: XTPriceType.MARKET_CONVERT_5_LIMIT,
-    }
-    return mapping.get(price_type, XTPriceType.MARKET_CONVERT_5_LIMIT)
+    if price_type is not PriceType.LIMIT:
+      raise ValueError("实盘仅支持固定限价委托")
+    return XTPriceType.FIX_PRICE
 
   def _convert_order_status(self, external_status: Any) -> OrderStatus:
     """转换外部订单状态"""
@@ -446,6 +484,13 @@ class LiveBroker(BrokerBase):
     """转换外部订单到内部格式"""
     from quantx_infrastructure.models.enums import OrderType as ExternalOrderType
 
+    # An external lookup has no safe way to reconstruct ownership.  The local
+    # order created at enqueue time is the only typed source; callers should
+    # never receive a fabricated/default StrategyRun request here.
+    original = self.orders.get(internal_id)
+    if original is None:
+      raise AgentUnavailableError("ORDER_OWNER_UNAVAILABLE")
+
     order_type = (
       OrderType.BUY
       if external_order.type == ExternalOrderType.BUY
@@ -458,6 +503,8 @@ class LiveBroker(BrokerBase):
         order_type=order_type,
         price_type=PriceType.LIMIT,
         volume=external_order.volume,
+        execution_ref=original.request.execution_ref,
+        environment=original.request.environment,
         price=external_order.price,
       ),
       status=self._convert_order_status(external_order.status),

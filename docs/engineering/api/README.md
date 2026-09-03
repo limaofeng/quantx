@@ -17,7 +17,7 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 `127.0.0.1:18081`。常用端点包括 `/graphql`、`/health/live`、
 `/health/ready`、`/health/components` 和 `/ws/agent`。原生客户端在线
 文档位于 `/docs/`；FastAPI 开发 Swagger 只在内部 API 端口的
-`/_dev/api-docs` 提供。QMT Agent 的交易连接使用 `/ws/agent`，
+`/_dev/api-docs` 提供。QMT Agent 的交易连接使用唯一 protocol `1.2` 的 `/ws/agent`，
 唯一沪深行情连接使用 `/ws/agent/market` 和 `quantx.market.v2`。统一开发者中心覆盖 Web、原生客户端与
 第三方 API。
 

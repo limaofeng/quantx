@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import pytest
+from quantx_contracts import ExecutionOwnerRef
 from quantx_domain.enums import StrategyRunMode
 from quantx_domain.strategies.ashare_managed_entry_plan import (
   ENTRY_PLAN_ENABLED_KEY,
@@ -25,6 +26,7 @@ from quantx_domain.trading.entry_plan import (
 )
 
 NOW = datetime(2026, 8, 20, 10, 0)
+ENTRY_EXECUTION_REF = ExecutionOwnerRef.strategy_run("run-1")
 
 
 def plan_parameters(*, mode="INCREMENTAL_AMOUNT_CNY", target_value=30_000):
@@ -127,7 +129,7 @@ async def test_strategy_maps_manual_rule_to_incremental_target_amount_only():
   assert intent.target_amount == 20_000
   assert intent.target_position_pct is None
   assert intent.target_volume is None
-  assert intent.metadata["owner_type"] == "STRATEGY_RUN"
+  assert intent.execution_ref == ENTRY_EXECUTION_REF
   assert intent.metadata["entry_plan_id"] == "run-1"
   assert (
     output.runtime_state_patch.set[MANAGED_ENTRY_STATE_KEY]["pending_intent_id"]
@@ -267,6 +269,7 @@ async def test_order_terminal_before_trade_keeps_pending_until_real_trade_report
       filled_volume=300,
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert order_patch is not None
@@ -283,6 +286,7 @@ async def test_order_terminal_before_trade_keeps_pending_until_real_trade_report
       volume=300,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "trade-1"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert trade_patch is not None
@@ -299,6 +303,7 @@ async def test_order_terminal_before_trade_keeps_pending_until_real_trade_report
         volume=300,
         trade_time=NOW,
         metadata={**metadata, "trade_id": "trade-1"},
+        execution_ref=ENTRY_EXECUTION_REF,
       )
     )
     is None
@@ -319,6 +324,7 @@ async def test_terminal_expected_fill_waits_for_all_execution_reports():
       status="FILLED",
       metadata={**metadata, "traded_volume": 400},
       timestamp=NOW,
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert order_patch is not None
@@ -335,6 +341,7 @@ async def test_terminal_expected_fill_waits_for_all_execution_reports():
       volume=100,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "multi-fill-1"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert first is not None
@@ -353,6 +360,7 @@ async def test_terminal_expected_fill_waits_for_all_execution_reports():
         volume=100,
         trade_time=NOW,
         metadata={**metadata, "trade_id": "multi-fill-1"},
+        execution_ref=ENTRY_EXECUTION_REF,
       )
     )
     is None
@@ -370,6 +378,7 @@ async def test_terminal_expected_fill_waits_for_all_execution_reports():
       volume=200,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "multi-fill-2"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert second is not None
@@ -386,6 +395,7 @@ async def test_terminal_expected_fill_waits_for_all_execution_reports():
       volume=100,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "multi-fill-3"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert final is not None
@@ -405,6 +415,7 @@ async def test_terminal_expected_fill_waits_for_all_execution_reports():
         volume=100,
         trade_time=NOW,
         metadata={**metadata, "trade_id": "multi-fill-3"},
+        execution_ref=ENTRY_EXECUTION_REF,
       )
     )
     is None
@@ -427,6 +438,7 @@ async def test_filled_zero_report_does_not_turn_first_late_execution_into_barrie
       filled_volume=0,
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert terminal is not None
@@ -443,6 +455,7 @@ async def test_filled_zero_report_does_not_turn_first_late_execution_into_barrie
       volume=100,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "zero-then-late-1"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert first is not None
@@ -460,6 +473,7 @@ async def test_filled_zero_report_does_not_turn_first_late_execution_into_barrie
       volume=200,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "zero-then-late-2"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert final is not None
@@ -488,6 +502,7 @@ async def test_cancel_terminal_before_late_fill_stays_cancelled_after_settlement
       filled_volume=300,
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert order_patch is not None
@@ -504,6 +519,7 @@ async def test_cancel_terminal_before_late_fill_stays_cancelled_after_settlement
       volume=300,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "late-cancel-fill"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
 
@@ -539,6 +555,7 @@ async def test_expiry_fill_before_terminal_stays_draining_then_expires():
       volume=300,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "fill-before-expiry-terminal"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert trade_patch is not None
@@ -554,6 +571,7 @@ async def test_expiry_fill_before_terminal_stays_draining_then_expires():
       filled_volume=300,
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
 
@@ -587,6 +605,7 @@ async def test_cancel_zero_fill_reconcile_finishes_cancelled_without_rearming():
       filled_volume=0,
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   assert first is not None
@@ -601,6 +620,7 @@ async def test_cancel_zero_fill_reconcile_finishes_cancelled_without_rearming():
       status="RECONCILED_ZERO_FILL",
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
 
@@ -635,6 +655,7 @@ async def test_late_fill_that_reaches_absolute_target_completes_terminal_request
       filled_volume=300,
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
   trade_patch = await item.on_trade(
@@ -646,6 +667,7 @@ async def test_late_fill_that_reaches_absolute_target_completes_terminal_request
       volume=300,
       trade_time=NOW,
       metadata={**metadata, "trade_id": "target-fill"},
+      execution_ref=ENTRY_EXECUTION_REF,
     )
   )
 
@@ -719,6 +741,7 @@ async def test_old_entry_fill_is_accounted_without_consuming_current_pending():
     price=10, volume=100, trade_time=NOW,
     metadata={**intent.metadata, "intent_id": "old-intent",
               "entry_stage_id": "old-stage", "trade_id": "late-old-fill"},
+    execution_ref=ENTRY_EXECUTION_REF,
   )
 
   patch = await item.on_trade(event)

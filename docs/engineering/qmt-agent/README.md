@@ -124,7 +124,7 @@ reason 和截断后的安全错误文本。行情租约失败可直接区分 Red
 服务端使用的会话元数据和认证时冻结的
 `authorizedAccountIds`；该元数据不改变线协议，也不参与 Agent 原始 payload hash。
 
-交易控制、心跳与订单回报走协议 `1.1` 的 `/ws/agent`；沪深实时行情独占
+交易控制、心跳与订单回报走唯一支持的协议 `1.2` 的 `/ws/agent`；沪深实时行情独占
 `/ws/agent/market`，子协议固定为 `quantx.market.v2`。该端点由独立的 Market
 Gateway 进程承载，控制面 API 重启不会中断行情提交。Agent 只建立一个
 原生 `subscribe_whole_quote(a股代码列表 + 沪深指数代码列表)`。显式代码表来自
@@ -137,6 +137,24 @@ K 线仍由主连接下发 `subscribe_quote` 控制，不得从 tick 合成；�
 发布或 Redis 抖动只能丢弃旧行情，不能阻塞控制心跳、命令确认或 broker 回报。
 低优先文本发送一旦超时，Agent 必须废弃并重连该行情 WebSocket，禁止在取消中的
 send 后复用连接；独立控制 WebSocket 不受影响。
+
+协议 `1.2` 不携带业务 owner。服务端在持久化的 intent、pending、correlation、
+`trade_command_outbox` 和 runtime event 中保存并校验
+`ExecutionOwnerRef(owner_type, owner_id)` 与 execution environment，再将已证明的
+命令投递给 Agent。控制 wire 的字段集合是封闭的：`PLACE_ORDER` 只有 10 个字段
+（`command_kind`、`client_order_id`、`account_id`、`execution_mode`、`instrument_code`、
+`side`、`price_type`、`limit_price`、`volume`、`expires_at`）；`CANCEL_ORDER` 只有 6 个
+字段（`command_kind`、`client_order_id`、`account_id`、`execution_mode`、
+`broker_order_id`、`expires_at`）。PLACE 仅接受 `BUY/SELL`、`FIX_PRICE` 和有限正数
+`limit_price`。调用 XTTrading 时 `strategy_name` 固定为空字符串，`order_remark` 固定为
+`qx:` 加 `client_order_id` 的前 20 个字符；remark 只用于本地可审计关联，不替代服务端
+owner/correlation。
+
+`command_ack` 仅表示投递或 Agent 本地前置处理结果，不表示券商受理或成交。ORDER、
+EXECUTION、DELTA 报告只表达 Agent 观察到的券商事实和快照身份；Agent 通过本地 journal
+保存并重放原消息，API 必须先写 `agent_report_inbox`，再由 Engine 按 durable correlation
+和 owner/environment 路由收敛。报告没有可证明的关联、owner/environment 冲突或未知 owner
+时保持 fail-closed，不从 remark、StrategyRun 或其他 metadata 猜测归属。
 
 主控制连接的 API receiver 不执行命令或行情数据库轮询；收到的帧先进入相互独立、
 按字节和条数限制的 heartbeat、command-ack 和 durable report lane，慢完整快照

@@ -5,6 +5,7 @@ from datetime import timedelta
 from hashlib import sha256
 
 import pytest
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_domain.clock import utcnow
 from quantx_engine import report_processor
 from quantx_infrastructure.database.relational_base import Base
@@ -18,6 +19,8 @@ from quantx_infrastructure.models.auth import AuthUser
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+LEGACY_PROTOCOL_VERSION = "1.0"
 
 
 def _snapshot(now, *, complete: bool, sequence: int, account_id="account-1"):
@@ -117,7 +120,7 @@ async def reports(monkeypatch):
           message_id=message_id,
           device_id="device-1",
           message_type="delta_report",
-          protocol_version="1.1",
+          protocol_version=PROTOCOL_VERSION,
           raw_payload_hash="a" * 64,
           business_idempotency_key=message_id,
           payload=_snapshot(received_at, complete=complete, sequence=sequence),
@@ -265,7 +268,7 @@ async def test_recovery_requires_matching_scope_and_newer_authoritative_evidence
     elif case == "different_device":
       old.device_id = "device-2"
     elif case == "old_protocol":
-      old.protocol_version = "1.0"
+      old.protocol_version = LEGACY_PROTOCOL_VERSION
     elif case == "newer_received":
       old.received_at = current.received_at + timedelta(seconds=1)
     elif case == "incremental_report":

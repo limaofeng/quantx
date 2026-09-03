@@ -4,10 +4,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api.auth.principal import Principal
+from quantx_api.gqlapi.schema import schema
 from quantx_api.gqlapi.schemas import trading_schema
-from quantx_api.gqlapi.types import CancelOrderInput
+from quantx_api.gqlapi.types import CancelOrderInput, OrderInput
 from quantx_infrastructure.core.utils import time_utils
-from quantx_infrastructure.models.enums import OrderStatus
+from quantx_infrastructure.models.enums import OrderStatus, PriceType
 from quantx_infrastructure.services import order_service as order_service_module
 from quantx_infrastructure.services.order_service import OrderService
 
@@ -22,6 +23,21 @@ def _principal() -> Principal:
     permissions=frozenset({"trade:manual"}),
     authorized_account_ids=("ACCOUNT-1",),
   )
+
+
+def test_order_input_does_not_expose_legacy_identity_labels():
+  assert "strategy_name" not in OrderInput.__annotations__
+  assert "order_remark" not in OrderInput.__annotations__
+  order_input_sdl = schema.as_str().split("input OrderInput", 1)[1].split("}", 1)[0]
+  assert "strategyName" not in order_input_sdl
+  assert "orderRemark" not in order_input_sdl
+
+
+@pytest.mark.parametrize("legacy_value", ["LIMIT", "MARKET", "BEST"])
+def test_place_order_accepts_only_fixed_price(legacy_value):
+  with pytest.raises(ValueError, match="FIX_PRICE"):
+    trading_schema._parse_price_type(legacy_value)
+  assert trading_schema._parse_price_type("FIX_PRICE") is PriceType.FIX_PRICE
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,11 @@
 """Durable QMT-agent, component-heartbeat, and message-box models."""
 
+from quantx_contracts import PROTOCOL_VERSION
 from sqlalchemy import (
   JSON,
   BigInteger,
   Boolean,
+  CheckConstraint,
   Column,
   DateTime,
   Float,
@@ -18,6 +20,10 @@ from sqlalchemy import (
 )
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
+from quantx_infrastructure.models.execution_owner import (
+  SOURCE_EXECUTION_FIELDS,
+  register_identity_immutability,
+)
 
 
 class AgentDevice(Base, TimestampMixin):
@@ -103,6 +109,19 @@ class EngineCommandOutbox(Base, TimestampMixin):
 class TradeCommandOutbox(Base, TimestampMixin):
   __tablename__ = "trade_command_outbox"
   __table_args__ = (
+    CheckConstraint(
+      "owner_type IN ('STRATEGY_RUN','T_ASSISTANT_EXECUTION','ENTRY_PLAN',"
+      "'BOARD_ASSISTANT_EXECUTION','EXIT_PLAN','MANUAL_COMMAND')",
+      name="ck_trade_command_owner_type",
+    ),
+    CheckConstraint(
+      "length(owner_id) > 0 AND owner_id = trim(owner_id)",
+      name="ck_trade_command_owner_id",
+    ),
+    CheckConstraint(
+      "environment IN ('PAPER','LIVE','BACKTEST')",
+      name="ck_trade_command_environment",
+    ),
     UniqueConstraint("client_order_id", name="uq_trade_command_client_order"),
     UniqueConstraint("idempotency_key", name="uq_trade_command_idempotency"),
     Index("ix_trade_command_delivery", "device_id", "delivery_status", "created_at"),
@@ -131,6 +150,9 @@ class TradeCommandOutbox(Base, TimestampMixin):
     nullable=False,
   )
   account_id = Column(String(50), nullable=False, index=True)
+  owner_type = Column(String(32), nullable=False)
+  owner_id = Column(String(128), nullable=False)
+  environment = Column(String(16), nullable=False)
   payload = Column(JSON, nullable=False)
   delivery_status = Column(String(24), nullable=False, default="QUEUED")
   delivered_at = Column(DateTime, nullable=True)
@@ -154,6 +176,33 @@ class PendingTradeOrder(Base, TimestampMixin):
 
   __tablename__ = "pending_trade_orders"
   __table_args__ = (
+    CheckConstraint(
+      "owner_type IN ('STRATEGY_RUN','T_ASSISTANT_EXECUTION','ENTRY_PLAN',"
+      "'BOARD_ASSISTANT_EXECUTION','EXIT_PLAN','MANUAL_COMMAND')",
+      name="ck_pending_trade_order_owner_type",
+    ),
+    CheckConstraint(
+      "length(owner_id) > 0 AND owner_id = trim(owner_id)",
+      name="ck_pending_trade_order_owner_id",
+    ),
+    CheckConstraint(
+      "environment IN ('PAPER','LIVE','BACKTEST')",
+      name="ck_pending_trade_order_environment",
+    ),
+    CheckConstraint(
+      "strategy_run_id IS NULL OR (owner_type = 'STRATEGY_RUN' "
+      "AND owner_id = strategy_run_id)",
+      name="ck_pending_trade_order_strategy_run_owner",
+    ),
+    CheckConstraint(
+      "(owner_type = 'STRATEGY_RUN' AND intent_id IS NOT NULL "
+      "AND strategy_order_id IS NOT NULL) OR "
+      "(owner_type = 'EXIT_PLAN' AND intent_id IS NOT NULL "
+      "AND strategy_order_id IS NULL) OR "
+      "(owner_type = 'MANUAL_COMMAND' AND intent_id IS NULL "
+      "AND strategy_order_id IS NULL)",
+      name="ck_pending_trade_order_strategy_identity",
+    ),
     Index(
       "ix_pending_trade_order_account_batch_client",
       "account_id",
@@ -170,6 +219,9 @@ class PendingTradeOrder(Base, TimestampMixin):
     index=True,
   )
   account_id = Column(String(50), nullable=False, index=True)
+  owner_type = Column(String(32), nullable=False)
+  owner_id = Column(String(128), nullable=False)
+  environment = Column(String(16), nullable=False)
   instrument_code = Column(String(20), nullable=False)
   side = Column(String(16), nullable=False)
   order_type = Column(String(24), nullable=False)
@@ -178,7 +230,6 @@ class PendingTradeOrder(Base, TimestampMixin):
   status = Column(String(24), nullable=False, default="QUEUED")
   broker_order_id = Column(String(128), nullable=True, index=True)
   status_reason = Column(String(256), nullable=True)
-  execution_mode = Column(String(16), nullable=False, default="paper")
   strategy_run_id = Column(String(36), nullable=True, index=True)
   strategy_order_id = Column(String(128), nullable=True, index=True)
   intent_id = Column(String(128), nullable=True, index=True)
@@ -193,13 +244,40 @@ class PendingTradeOrder(Base, TimestampMixin):
   last_source_event_at = Column(DateTime, nullable=True)
 
 
-class StrategyOrderCorrelation(Base, TimestampMixin):
+class OrderCorrelation(Base, TimestampMixin):
   """Restart-safe mapping between a strategy order and broker reports."""
 
-  __tablename__ = "strategy_order_correlations"
+  __tablename__ = "order_correlations"
   __table_args__ = (
-    UniqueConstraint("client_order_id", name="uq_strategy_order_client"),
-    Index("ix_strategy_order_run_batch", "strategy_run_id", "batch_id"),
+    CheckConstraint(
+      "owner_type IN ('STRATEGY_RUN','T_ASSISTANT_EXECUTION','ENTRY_PLAN',"
+      "'BOARD_ASSISTANT_EXECUTION','EXIT_PLAN','MANUAL_COMMAND')",
+      name="ck_order_correlation_owner_type",
+    ),
+    CheckConstraint(
+      "length(owner_id) > 0 AND owner_id = trim(owner_id)",
+      name="ck_order_correlation_owner_id",
+    ),
+    CheckConstraint(
+      "environment IN ('PAPER','LIVE','BACKTEST')",
+      name="ck_order_correlation_environment",
+    ),
+    CheckConstraint(
+      "strategy_run_id IS NULL OR (owner_type = 'STRATEGY_RUN' "
+      "AND owner_id = strategy_run_id)",
+      name="ck_order_correlation_strategy_run_owner",
+    ),
+    CheckConstraint(
+      "(owner_type = 'STRATEGY_RUN' AND intent_id IS NOT NULL "
+      "AND strategy_order_id IS NOT NULL) OR "
+      "(owner_type = 'EXIT_PLAN' AND intent_id IS NOT NULL "
+      "AND strategy_order_id IS NULL) OR "
+      "(owner_type = 'MANUAL_COMMAND' AND intent_id IS NULL "
+      "AND strategy_order_id IS NULL)",
+      name="ck_order_correlation_strategy_identity",
+    ),
+    UniqueConstraint("client_order_id", name="uq_order_correlation_client"),
+    Index("ix_order_correlation_owner_batch", "owner_type", "owner_id", "batch_id"),
   )
 
   id = Column(String(36), primary_key=True)
@@ -210,13 +288,17 @@ class StrategyOrderCorrelation(Base, TimestampMixin):
   )
   broker_order_id = Column(String(128), nullable=True, index=True)
   account_id = Column(String(50), nullable=False, index=True)
-  strategy_run_id = Column(String(36), nullable=False, index=True)
-  strategy_order_id = Column(String(128), nullable=False)
-  intent_id = Column(String(128), nullable=False)
+  owner_type = Column(String(32), nullable=False)
+  owner_id = Column(String(128), nullable=False)
+  environment = Column(String(16), nullable=False)
+  strategy_run_id = Column(String(36), nullable=True, index=True)
+  # Manual commands are first-class correlations and do not fabricate a
+  # strategy order or intent identity.
+  strategy_order_id = Column(String(128), nullable=True)
+  intent_id = Column(String(128), nullable=True)
   batch_id = Column(String(36), nullable=True, index=True)
   bucket = Column(String(32), nullable=False)
   t_trade_role = Column(String(16), nullable=True)
-  execution_mode = Column(String(16), nullable=False)
   risk_decision_id = Column(String(128), nullable=True)
   trace_id = Column(String(128), nullable=False)
   substitution_plan = Column(JSON, nullable=True)
@@ -228,6 +310,24 @@ class StrategyRuntimeEvent(Base):
 
   __tablename__ = "strategy_runtime_events"
   __table_args__ = (
+    CheckConstraint(
+      "owner_type IN ('STRATEGY_RUN','T_ASSISTANT_EXECUTION','ENTRY_PLAN',"
+      "'BOARD_ASSISTANT_EXECUTION','EXIT_PLAN','MANUAL_COMMAND')",
+      name="ck_strategy_runtime_event_owner_type",
+    ),
+    CheckConstraint(
+      "length(owner_id) > 0 AND owner_id = trim(owner_id)",
+      name="ck_strategy_runtime_event_owner_id",
+    ),
+    CheckConstraint(
+      "environment IN ('PAPER','LIVE','BACKTEST')",
+      name="ck_strategy_runtime_event_environment",
+    ),
+    CheckConstraint(
+      "strategy_run_id IS NULL OR (owner_type = 'STRATEGY_RUN' "
+      "AND owner_id = strategy_run_id)",
+      name="ck_strategy_runtime_event_strategy_run_owner",
+    ),
     UniqueConstraint("business_key", name="uq_strategy_runtime_event_business"),
     Index("ix_strategy_runtime_event_apply", "application_status", "created_at"),
     Index(
@@ -237,8 +337,9 @@ class StrategyRuntimeEvent(Base):
       "event_id",
     ),
     Index(
-      "ix_strategy_runtime_event_run_created",
-      "strategy_run_id",
+      "ix_strategy_runtime_event_owner_created",
+      "owner_type",
+      "owner_id",
       "created_at",
       "event_id",
     ),
@@ -246,7 +347,10 @@ class StrategyRuntimeEvent(Base):
 
   event_id = Column(String(36), primary_key=True)
   business_key = Column(String(192), nullable=False)
-  strategy_run_id = Column(String(36), nullable=False, index=True)
+  owner_type = Column(String(32), nullable=False)
+  owner_id = Column(String(128), nullable=False)
+  environment = Column(String(16), nullable=False)
+  strategy_run_id = Column(String(36), nullable=True, index=True)
   client_order_id = Column(String(128), nullable=False, index=True)
   broker_order_id = Column(String(128), nullable=True, index=True)
   event_type = Column(String(24), nullable=False)
@@ -263,6 +367,29 @@ class TTradeBatch(Base, TimestampMixin):
 
   __tablename__ = "t_trade_batches"
   __table_args__ = (
+    CheckConstraint(
+      "source_execution_owner_type IN ('STRATEGY_RUN','T_ASSISTANT_EXECUTION',"
+      "'ENTRY_PLAN','BOARD_ASSISTANT_EXECUTION','EXIT_PLAN','MANUAL_COMMAND')",
+      name="ck_t_trade_batch_source_owner_type",
+    ),
+    CheckConstraint(
+      "length(source_execution_owner_id) > 0 AND "
+      "source_execution_owner_id = trim(source_execution_owner_id)",
+      name="ck_t_trade_batch_source_owner_id",
+    ),
+    CheckConstraint(
+      "source_execution_environment IN ('PAPER','LIVE','BACKTEST')",
+      name="ck_t_trade_batch_source_environment",
+    ),
+    CheckConstraint(
+      "source_execution_environment = environment",
+      name="ck_t_trade_batch_source_environment_match",
+    ),
+    CheckConstraint(
+      "strategy_run_id IS NULL OR (source_execution_owner_type = 'STRATEGY_RUN' "
+      "AND source_execution_owner_id = strategy_run_id)",
+      name="ck_t_trade_batch_strategy_run_owner",
+    ),
     Index("ix_t_trade_batch_account_status", "account_id", "status"),
     Index(
       "ix_t_trade_batch_account_updated",
@@ -270,7 +397,11 @@ class TTradeBatch(Base, TimestampMixin):
       "updated_at",
       "batch_id",
     ),
-    Index("ix_t_trade_batch_account_mode", "account_id", "execution_mode"),
+    Index(
+      "ix_t_trade_batch_account_environment",
+      "account_id",
+      "environment",
+    ),
     Index(
       "ix_t_trade_batch_account_closed",
       "account_id",
@@ -288,7 +419,10 @@ class TTradeBatch(Base, TimestampMixin):
   batch_id = Column(String(36), primary_key=True)
   account_id = Column(String(50), nullable=False, index=True)
   instrument_code = Column(String(20), nullable=False, index=True)
-  strategy_run_id = Column(String(36), nullable=False, index=True)
+  strategy_run_id = Column(String(36), nullable=True, index=True)
+  source_execution_owner_type = Column(String(32), nullable=False)
+  source_execution_owner_id = Column(String(128), nullable=False)
+  source_execution_environment = Column(String(16), nullable=False)
   status = Column(String(32), nullable=False, default="AWAITING_ENTRY_APPROVAL")
   entry_intent_id = Column(String(128), nullable=True)
   exit_intent_id = Column(String(128), nullable=True)
@@ -307,7 +441,7 @@ class TTradeBatch(Base, TimestampMixin):
   trailing_floor_pct = Column(Float, nullable=True)
   exit_reason = Column(String(64), nullable=True)
   exception_reason = Column(Text, nullable=True)
-  execution_mode = Column(String(16), nullable=True)
+  environment = Column(String(16), nullable=False)
   metrics_origin = Column(String(24), nullable=True)
   entry_filled_at = Column(DateTime, nullable=True)
   last_exit_filled_at = Column(DateTime, nullable=True)
@@ -432,7 +566,7 @@ class AgentReportInbox(Base):
     index=True,
   )
   message_type = Column(String(32), nullable=False)
-  protocol_version = Column(String(16), nullable=False, default="1.0")
+  protocol_version = Column(String(16), nullable=False, default=PROTOCOL_VERSION)
   client_order_id = Column(String(128), nullable=True, index=True)
   raw_payload_hash = Column(String(64), nullable=False)
   business_idempotency_key = Column(String(128), nullable=False)
@@ -548,3 +682,14 @@ class MarketDataTransfer(Base):
   compressed = Column(Boolean, nullable=False, default=True)
   storage_reference = Column(String(512), nullable=False)
   received_at = Column(DateTime, nullable=False)
+
+
+for _identity_model in (
+  PendingTradeOrder,
+  OrderCorrelation,
+  TradeCommandOutbox,
+  StrategyRuntimeEvent,
+):
+  register_identity_immutability(_identity_model)
+register_identity_immutability(TTradeBatch, fields=SOURCE_EXECUTION_FIELDS)
+del _identity_model

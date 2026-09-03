@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import quantx_engine.strategy_executor as strategy_executor_module
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.backtest import BacktestBroker
 from quantx_domain.brokers.base import (
   OrderRequest,
@@ -275,6 +276,8 @@ async def test_t_trade_replay_market_exit_waits_for_next_tick_and_uses_bid_depth
       order_type=OrderType.SELL,
       price_type=PriceType.MARKET,
       volume=100,
+      execution_ref=ExecutionOwnerRef.strategy_run("replay-run"),
+      environment=ExecutionEnvironment.BACKTEST,
       price=9.99,
     )
   )
@@ -363,6 +366,8 @@ async def test_ordinary_backtest_keeps_immediate_market_order_semantics(
       order_type=OrderType.SELL,
       price_type=PriceType.MARKET,
       volume=100,
+      execution_ref=ExecutionOwnerRef.strategy_run("replay-run"),
+      environment=ExecutionEnvironment.BACKTEST,
       price=10.0,
     )
   )

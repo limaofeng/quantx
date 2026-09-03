@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
+
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 
 MANUAL_PLAN_SOURCE = "MANUAL_POSITION"
 MANUAL_LIQUIDATION_SOURCE = "MANUAL_LIQUIDATION"
@@ -49,13 +51,15 @@ def managed_runtime_command_id(record: Any) -> str:
   ).strip()
 
 
-def durable_exit_plan_owner_kind(record: Any) -> str:
-  """Classify the only owner allowed by the canonical durable source matrix.
+def durable_exit_plan_source_binding(
+  record: Any,
+) -> Optional[tuple[ExecutionOwnerRef, ExecutionEnvironment]]:
+  """Return the source owner/environment proved by an ExitPlan row.
 
-  The projection row and embedded domain template must describe the same plan.
-  PAPER/LIVE ownership is derived only from the durable ``strategy_run_id``
-  and source matrix. Legacy managed-runtime markers are migration inputs;
-  they never hide an unbound manual plan from the global monitor.
+  The source matrix is intentionally finite.  ``strategy_run_id`` is only a
+  nullable witness: it can agree with a STRATEGY_RUN source, but it can never
+  classify a row by itself.  Template fields are checked as forward evidence
+  for the same matrix and never as an owner fallback.
   """
 
   plan_id = str(getattr(record, "plan_id", None) or "").strip()
@@ -64,31 +68,104 @@ def durable_exit_plan_owner_kind(record: Any) -> str:
     getattr(record, "instrument_code", None) or ""
   ).strip().upper()
   source_type = str(getattr(record, "source_type", None) or "").strip().upper()
-  run_id = str(getattr(record, "strategy_run_id", None) or "").strip()
+  source_id = str(getattr(record, "source_id", None) or "").strip()
+  group_id = str(getattr(record, "group_id", None) or "").strip()
   template = exit_plan_template(record)
+  template_plan_id = str(template.get("plan_id") or "").strip()
+  template_account_id = str(template.get("account_id") or "").strip()
+  template_instrument_code = str(
+    template.get("instrument_code") or ""
+  ).strip().upper()
+  template_source_type = str(template.get("source_type") or "").strip().upper()
+  template_source_id = str(template.get("source_id") or "").strip()
+  template_run_id = str(template.get("run_id") or "").strip()
   if not (
     plan_id
     and account_id
     and instrument_code
     and source_type
-    and str(template.get("plan_id") or "").strip() == plan_id
-    and str(template.get("account_id") or "").strip() == account_id
-    and str(template.get("instrument_code") or "").strip().upper()
-    == instrument_code
-    and str(template.get("source_type") or "").strip().upper() == source_type
-    and str(template.get("run_id") or "").strip() == run_id
+    and source_id
+    and template_plan_id == plan_id
+    and template_account_id == account_id
+    and template_instrument_code == instrument_code
+    and template_source_type == source_type
+    and template_source_id == source_id
   ):
-    return INVALID_OWNER
-
-  if not run_id:
-    return (
-      MONITOR_OWNER
-      if source_type in MONITOR_EXIT_PLAN_SOURCE_TYPES
-      else INVALID_OWNER
+    return None
+  try:
+    owner = ExecutionOwnerRef(
+      ExecutionOwnerType(
+        str(getattr(record, "source_execution_owner_type", "") or "").upper()
+      ),
+      str(getattr(record, "source_execution_owner_id", "") or ""),
     )
-  if (
-    source_type in RUNTIME_EXIT_PLAN_SOURCE_TYPES
-    and not has_managed_runtime_command_marker(record)
+    source_environment = ExecutionEnvironment(
+      str(getattr(record, "source_execution_environment", "") or "").upper()
+    )
+    environment = ExecutionEnvironment(
+      str(getattr(record, "environment", "") or "").upper()
+    )
+  except (TypeError, ValueError):
+    return None
+  if source_environment is not environment:
+    return None
+  witness_run_id = str(getattr(record, "strategy_run_id", None) or "").strip()
+  if witness_run_id and (
+    owner.owner_type is not ExecutionOwnerType.STRATEGY_RUN
+    or owner.owner_id != witness_run_id
   ):
-    return RUNTIME_BOOK_OWNER
-  return INVALID_OWNER
+    return None
+  if source_type in RUNTIME_EXIT_PLAN_SOURCE_TYPES:
+    if (
+      owner.owner_type is not ExecutionOwnerType.STRATEGY_RUN
+      or not template_run_id
+      or owner.owner_id != template_run_id
+      or (witness_run_id and witness_run_id != owner.owner_id)
+    ):
+      return None
+  elif source_type == MANUAL_PLAN_SOURCE:
+    if (
+      owner.owner_type is not ExecutionOwnerType.MANUAL_COMMAND
+      or not owner.owner_id
+      or template_run_id
+      or witness_run_id
+    ):
+      return None
+  elif source_type == MANUAL_LIQUIDATION_SOURCE:
+    if (
+      owner.owner_type is not ExecutionOwnerType.MANUAL_COMMAND
+      or not group_id
+      or owner.owner_id != group_id
+      or template_run_id
+      or witness_run_id
+    ):
+      return None
+  else:
+    return None
+  return owner, environment
+
+
+def durable_exit_plan_owner_kind(record: Any) -> str:
+  """Classify the only owner allowed by the canonical durable source matrix.
+
+  The projection row, source execution triple, and embedded domain template
+  must describe the same plan.  The source execution triple is the only owner
+  authority; ``strategy_run_id`` is only a nullable consistency witness.
+  Legacy managed-runtime markers are migration inputs and never repair an
+  incomplete source binding.
+  """
+
+  source_type = str(getattr(record, "source_type", None) or "").strip().upper()
+  binding = durable_exit_plan_source_binding(record)
+  if binding is None:
+    return INVALID_OWNER
+  owner, _environment = binding
+  if owner.owner_type is ExecutionOwnerType.MANUAL_COMMAND:
+    return MONITOR_OWNER
+  if source_type not in RUNTIME_EXIT_PLAN_SOURCE_TYPES:
+    return INVALID_OWNER
+  return (
+    MANAGED_EXIT_STRATEGY_OWNER
+    if has_managed_runtime_command_marker(record)
+    else RUNTIME_BOOK_OWNER
+  )

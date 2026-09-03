@@ -10,6 +10,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+
 
 class OrderType(Enum):
   """订单类型"""
@@ -49,10 +51,21 @@ class OrderRequest:
   order_type: OrderType
   price_type: PriceType
   volume: int
+  # A request is the ownership boundary for every broker dispatch.  These are
+  # deliberately required instead of being inferred from broker instance
+  # state or request metadata.
+  execution_ref: ExecutionOwnerRef
+  environment: ExecutionEnvironment
   price: float = 0.0
   stop_price: float = 0.0
   strategy_id: Optional[str] = None
   metadata: Dict[str, Any] = field(default_factory=dict)
+
+  def __post_init__(self) -> None:
+    if not isinstance(self.execution_ref, ExecutionOwnerRef):
+      raise TypeError("OrderRequest requires a typed execution_ref")
+    if not isinstance(self.environment, ExecutionEnvironment):
+      raise TypeError("OrderRequest requires a typed execution environment")
 
 
 @dataclass
@@ -119,6 +132,8 @@ class TradeRecord:
   commission: float
   trade_time: datetime
   metadata: Dict[str, Any] = field(default_factory=dict)
+  execution_ref: Optional[ExecutionOwnerRef] = None
+  environment: Optional[ExecutionEnvironment] = None
 
 
 class BrokerBase(ABC):

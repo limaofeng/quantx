@@ -146,10 +146,23 @@ const statusLabels: Record<string, string> = {
 };
 
 const executionOwnerLabels: Record<string, string> = {
-  EXIT_PLAN_MONITOR: '全局计划监控',
-  INVALID_OWNER: '执行归属无效',
-  STRATEGY_RUNTIME: '原入场 / 做 T 运行',
+  STRATEGY_RUN: '策略运行',
+  T_ASSISTANT_EXECUTION: '做 T 助手执行',
+  ENTRY_PLAN: '建仓计划',
+  BOARD_ASSISTANT_EXECUTION: '打板助手执行',
+  EXIT_PLAN: '退出计划',
+  MANUAL_COMMAND: '人工命令',
 };
+
+const executionEnvironmentLabels: Record<string, string> = {
+  PAPER: '模拟执行',
+  LIVE: '实盘执行',
+  BACKTEST: '回测执行',
+};
+
+function executionOwnerLabel(ownerType: string) {
+  return executionOwnerLabels[ownerType] || `未知执行归属（${ownerType}）`;
+}
 
 function useExitPlans(accountId: string, instrumentCode?: string) {
   const [result, refetch] = useQuery({
@@ -243,7 +256,9 @@ function PlanCard({
   plan: ExitPlan;
 }) {
   const terminal = plan.status === 'COMPLETED' || plan.status === 'CANCELLED';
-  const invalidOwner = plan.executionOwner === 'INVALID_OWNER';
+  const ownerBindingInvalid =
+    plan.executionOwner.ownerType !== 'EXIT_PLAN' ||
+    plan.executionOwner.ownerId !== plan.planId;
   const pending =
     plan.status === 'EXIT_PENDING' || Boolean(plan.pendingClientOrderId);
   const recoveryLocked = Boolean(plan.recoveryAction);
@@ -253,7 +268,7 @@ function PlanCard({
     ? new Date(plan.autoExitAuthorizationExpiresAt).getTime()
     : 0;
   const liveAuthorizationActive =
-    plan.executionMode === 'live' &&
+    plan.environment === 'LIVE' &&
     plan.autoExitAuthorized &&
     plan.autoExitAuthorizationConfigVersion === plan.configVersion &&
     authorizationExpiresAt > Date.now();
@@ -286,7 +301,7 @@ function PlanCard({
             >
               {statusLabels[plan.status] || plan.status}
             </span>
-            {plan.executionMode === 'live' ? (
+            {plan.environment === 'LIVE' ? (
               <span
                 className={cn(
                   'rounded border px-2 py-0.5 text-ui-caption font-black',
@@ -301,7 +316,8 @@ function PlanCard({
               </span>
             ) : (
               <span className="rounded border border-slate-500/30 px-2 py-0.5 text-ui-caption font-black text-slate-400">
-                模拟执行
+                {executionEnvironmentLabels[plan.environment] ||
+                  `未知环境（${plan.environment}）`}
               </span>
             )}
           </div>
@@ -311,8 +327,11 @@ function PlanCard({
             <span>剩余 {plan.remainingVolume.toLocaleString()} 股</span>
             <span>版本 v{plan.configVersion}</span>
             <span>
-              执行归属{' '}
-              {executionOwnerLabels[plan.executionOwner] || plan.executionOwner}
+              执行归属 {executionOwnerLabel(plan.executionOwner.ownerType)}
+            </span>
+            <span>
+              来源归属{' '}
+              {executionOwnerLabel(plan.sourceExecutionOwner.ownerType)}
             </span>
             <span>状态修订 r{plan.stateVersion}</span>
           </div>
@@ -332,7 +351,7 @@ function PlanCard({
               );
             })}
           </div>
-          {invalidOwner ? (
+          {ownerBindingInvalid ? (
             <p
               className="mt-2 text-ui-caption font-bold text-rose-300"
               role="alert"
@@ -344,7 +363,7 @@ function PlanCard({
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
           <Button
-            disabled={busy || invalidOwner}
+            disabled={busy || ownerBindingInvalid}
             onClick={() => onReplay(plan)}
             size="sm"
             type="button"
@@ -356,7 +375,7 @@ function PlanCard({
           {plan.pendingIntentId && !plan.pendingClientOrderId && (
             <>
               <Button
-                disabled={busy || invalidOwner}
+                disabled={busy || ownerBindingInvalid}
                 onClick={() => onConfirmIntent(plan)}
                 size="sm"
                 type="button"
@@ -365,7 +384,7 @@ function PlanCard({
                 预览并确认 SELL
               </Button>
               <Button
-                disabled={busy || invalidOwner}
+                disabled={busy || ownerBindingInvalid}
                 onClick={() => onRejectIntent(plan)}
                 size="sm"
                 type="button"
@@ -378,7 +397,7 @@ function PlanCard({
           )}
           {!terminal && !recoveryLocked && (
             <Button
-              disabled={busy || pending || invalidOwner}
+              disabled={busy || pending || ownerBindingInvalid}
               onClick={() => onToggle(plan)}
               size="sm"
               type="button"
@@ -390,7 +409,7 @@ function PlanCard({
           )}
           {!terminal && !recoveryLocked && (
             <Button
-              disabled={busy || invalidOwner}
+              disabled={busy || ownerBindingInvalid}
               onClick={() => onEvaluate(plan)}
               size="sm"
               type="button"
@@ -402,10 +421,10 @@ function PlanCard({
           )}
           {plan.canEditRules &&
             !terminal &&
-            !invalidOwner &&
+            !ownerBindingInvalid &&
             !recoveryLocked && (
               <Button
-                disabled={busy || pending || invalidOwner}
+                disabled={busy || pending || ownerBindingInvalid}
                 onClick={() => onEdit(plan)}
                 size="sm"
                 type="button"
@@ -414,7 +433,7 @@ function PlanCard({
                 编辑计划
               </Button>
             )}
-          {plan.editRoute && !plan.canEditRules && (
+          {plan.editRoute && !plan.canEditRules && !ownerBindingInvalid && (
             <Button
               onClick={() => onNavigate(plan.editRoute || '/liquidation')}
               size="sm"
@@ -430,7 +449,7 @@ function PlanCard({
               disabled={
                 busy ||
                 pending ||
-                invalidOwner ||
+                ownerBindingInvalid ||
                 plan.recoveryAction === 'COMPLETE_RECONCILIATION'
               }
               onClick={() => onCancel(plan)}
@@ -600,7 +619,7 @@ export function ManualPlanEditor({
         : {};
     setInstrumentCode(editingPlan.instrumentCode);
     setProtectedVolume(String(editingPlan.protectedVolume));
-    setExecutionMode(editingPlan.executionMode === 'live' ? 'live' : 'paper');
+    setExecutionMode(editingPlan.environment === 'LIVE' ? 'live' : 'paper');
     setRequestLiveAuthorization(editingPlan.autoExitAuthorized);
     setRemark(typeof metadata.remark === 'string' ? metadata.remark : '');
     setRules(

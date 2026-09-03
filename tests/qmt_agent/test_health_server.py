@@ -56,7 +56,7 @@ async def test_health_ready_returns_sanitized_ready_snapshot() -> None:
   payload = response.json()
   assert payload["status"] == "ready"
   assert payload["reason_code"] is None
-  assert payload["protocol_version"] == "1.1"
+  assert payload["protocol_version"] == "1.2"
   assert payload["xttrading_status"] == "connected"
   serialized = response.text.lower()
   for forbidden in (

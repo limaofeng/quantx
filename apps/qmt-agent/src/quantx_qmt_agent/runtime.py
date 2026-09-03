@@ -34,6 +34,7 @@ from quantx_contracts import (
   MARKET_STREAM_MARKETS,
   MARKET_STREAM_SUBPROTOCOL,
   MAX_MARKET_STREAM_FRAME_BYTES,
+  PROTOCOL_VERSION,
   AgentEnvelope,
   AgentMessageType,
   CancelCommandPayload,
@@ -3063,11 +3064,6 @@ class AgentRuntime:
           ),
         )
         client_order_id = correlations.get(str(broker_order_id))
-        if not client_order_id:
-          client_order_id = self.journal.client_order_id_for_report(
-            broker_order_id=broker_order_id,
-            order_remark=str(item.get("order_remark") or ""),
-          )
         if client_order_id:
           item["client_order_id"] = client_order_id
           self.journal.reconcile_processing_order(
@@ -3095,7 +3091,20 @@ class AgentRuntime:
       )
       now = time.monotonic()
       for serialized in serialized_reports:
-        message_id = str(orjson.loads(serialized).get("message_id") or "")
+        try:
+          report_envelope = AgentEnvelope.model_validate_json(serialized)
+        except (TypeError, ValueError, ValidationError):
+          # A pre-upgrade journal row is retained for reconciliation/audit and
+          # must never be rewritten or retransmitted as the current protocol.
+          logger.warning("Skipping incompatible historical journal report")
+          continue
+        if report_envelope.protocol_version != PROTOCOL_VERSION:
+          logger.warning(
+            "Skipping historical journal report with protocol=%s",
+            report_envelope.protocol_version,
+          )
+          continue
+        message_id = report_envelope.message_id
         if (
           not message_id
           or message_id in self._reports_inflight
@@ -5114,7 +5123,6 @@ class AgentRuntime:
         and not emergency_command
         and envelope.message_type is not AgentMessageType.CANCEL_COMMAND
         and str(payload.get("side") or "").upper() != "SELL"
-        and str(payload.get("t_trade_role") or "").upper() != "EXIT"
         and self._market_stream_status != "READY"
       ):
         rejection = "market_stream_not_ready"

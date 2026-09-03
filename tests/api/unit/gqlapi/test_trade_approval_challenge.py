@@ -10,6 +10,11 @@ from quantx_api.gqlapi.trade_approval import (
   TradeApprovalChallengeError,
   TradeApprovalChallengeService,
 )
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_domain.trading.exit_plan import (
   ExitExecutionPolicy,
   ExitPlanTemplate,
@@ -36,6 +41,23 @@ EXIT_PLAN_ID = "t-exit-t-batch-1"
 INSTRUMENT_CODE = "600000.SH"
 SELL_PLAN_ID = "exit-plan-1"
 SELL_INTENT_ID = "exit-intent-1"
+
+
+def _strategy_execution_binding(run_id: str = RUN_ID) -> dict:
+  return {
+    "execution_ref": ExecutionOwnerRef.strategy_run(run_id),
+    "environment": ExecutionEnvironment.PAPER,
+  }
+
+
+def _exit_plan_execution_binding(plan_id: str = SELL_PLAN_ID) -> dict:
+  return {
+    "execution_ref": ExecutionOwnerRef(
+      ExecutionOwnerType.EXIT_PLAN,
+      plan_id,
+    ),
+    "environment": ExecutionEnvironment.PAPER,
+  }
 
 
 class _Result:
@@ -162,6 +184,8 @@ def _record(*, ttl_ms: int = 60_000) -> TradeIntentRecord:
     strategy_run_id=RUN_ID,
     owner_type="STRATEGY_RUN",
     owner_id=RUN_ID,
+    environment=ExecutionEnvironment.PAPER.value,
+    idempotency_key="intent-1",
     account_id=ACCOUNT_ID,
     strategy_id="strategy-1",
     instrument_code=INSTRUMENT_CODE,
@@ -209,6 +233,8 @@ def _exit_plan_record(*, ttl_ms: int = 60_000) -> TradeIntentRecord:
     strategy_run_id=RUN_ID,
     owner_type="EXIT_PLAN",
     owner_id=SELL_PLAN_ID,
+    environment=ExecutionEnvironment.PAPER.value,
+    idempotency_key="exit-intent-1",
     account_id=ACCOUNT_ID,
     strategy_id="managed-exit-plan",
     instrument_code=INSTRUMENT_CODE,
@@ -334,14 +360,16 @@ async def test_exit_plan_consume_atomically_binds_one_stable_engine_command(
     principal=_principal(),
     action=EXIT_PLAN_SELL_APPROVAL,
     account_id=ACCOUNT_ID,
-    business_owner_id=SELL_PLAN_ID,
+    **_exit_plan_execution_binding(),
     intent_id=SELL_INTENT_ID,
   )
 
   assert len(database.challenges) == 1
   challenge = database.challenges[0]
   assert challenge.id == preview.challenge_id
-  assert challenge.payload["business_owner_id"] == SELL_PLAN_ID
+  assert challenge.payload["owner_type"] == ExecutionOwnerType.EXIT_PLAN.value
+  assert challenge.payload["owner_id"] == SELL_PLAN_ID
+  assert challenge.payload["environment"] == ExecutionEnvironment.PAPER.value
   assert challenge.payload["intent_id"] == SELL_INTENT_ID
 
   database.fail_commit_once = True
@@ -350,7 +378,7 @@ async def test_exit_plan_consume_atomically_binds_one_stable_engine_command(
       principal=_principal(),
       action=EXIT_PLAN_SELL_APPROVAL,
       account_id=ACCOUNT_ID,
-      business_owner_id=SELL_PLAN_ID,
+      **_exit_plan_execution_binding(),
       intent_id=SELL_INTENT_ID,
       confirmation_token=preview.confirmation_token,
       **_exit_plan_command_kwargs(),
@@ -363,7 +391,7 @@ async def test_exit_plan_consume_atomically_binds_one_stable_engine_command(
     principal=_principal(),
     action=EXIT_PLAN_SELL_APPROVAL,
     account_id=ACCOUNT_ID,
-    business_owner_id=SELL_PLAN_ID,
+    **_exit_plan_execution_binding(),
     intent_id=SELL_INTENT_ID,
     confirmation_token=preview.confirmation_token,
     **_exit_plan_command_kwargs(),
@@ -373,7 +401,7 @@ async def test_exit_plan_consume_atomically_binds_one_stable_engine_command(
     principal=_principal(),
     action=EXIT_PLAN_SELL_APPROVAL,
     account_id=ACCOUNT_ID,
-    business_owner_id=SELL_PLAN_ID,
+    **_exit_plan_execution_binding(),
     intent_id=SELL_INTENT_ID,
     confirmation_token=preview.confirmation_token,
     **_exit_plan_command_kwargs(),
@@ -425,7 +453,7 @@ async def test_exit_plan_challenge_rejects_context_mismatch_without_outbox(
     principal=_principal(),
     action=EXIT_PLAN_SELL_APPROVAL,
     account_id=ACCOUNT_ID,
-    business_owner_id=SELL_PLAN_ID,
+    **_exit_plan_execution_binding(),
     intent_id=SELL_INTENT_ID,
   )
   principal = _principal()
@@ -449,7 +477,7 @@ async def test_exit_plan_challenge_rejects_context_mismatch_without_outbox(
       principal=principal,
       action=EXIT_PLAN_SELL_APPROVAL,
       account_id=account_id,
-      business_owner_id=run_id,
+      **_exit_plan_execution_binding(run_id),
       intent_id=intent_id,
       confirmation_token=preview.confirmation_token,
       **_exit_plan_command_kwargs(),
@@ -469,7 +497,7 @@ async def test_challenge_replay_returns_stable_operation_identity(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
 
@@ -517,7 +545,7 @@ async def test_challenge_replay_returns_stable_operation_identity(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     **_approval_command_kwargs(),
@@ -529,7 +557,7 @@ async def test_challenge_replay_returns_stable_operation_identity(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     **_approval_command_kwargs(),
@@ -547,14 +575,14 @@ async def test_consumed_challenge_replays_after_intent_terminal_state(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
   challenge_id = await TradeApprovalChallengeService.consume(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     **_approval_command_kwargs(),
@@ -565,7 +593,7 @@ async def test_consumed_challenge_replays_after_intent_terminal_state(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     **_approval_command_kwargs(),
@@ -583,14 +611,14 @@ async def test_issue_does_not_replace_consumed_challenge_while_result_is_unknown
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
   challenge_id = await TradeApprovalChallengeService.consume(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     **_approval_command_kwargs(),
@@ -601,7 +629,7 @@ async def test_issue_does_not_replace_consumed_challenge_while_result_is_unknown
       principal=_principal(),
       action=T_TRADE_ENTRY_APPROVAL,
       account_id="ACCOUNT-1",
-      business_owner_id="run-1",
+      **_strategy_execution_binding(),
       intent_id="intent-1",
     )
 
@@ -620,14 +648,14 @@ async def test_new_preview_invalidates_older_unconsumed_token_and_has_one_outbox
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
   second = await TradeApprovalChallengeService.issue(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
 
@@ -637,7 +665,7 @@ async def test_new_preview_invalidates_older_unconsumed_token_and_has_one_outbox
       principal=_principal(),
       action=T_TRADE_ENTRY_APPROVAL,
       account_id="ACCOUNT-1",
-      business_owner_id="run-1",
+      **_strategy_execution_binding(),
       intent_id="intent-1",
       confirmation_token=first.confirmation_token,
       **_approval_command_kwargs(command_key="replaced-token-command"),
@@ -648,7 +676,7 @@ async def test_new_preview_invalidates_older_unconsumed_token_and_has_one_outbox
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=second.confirmation_token,
     **_approval_command_kwargs(command_key="active-token-command"),
@@ -665,7 +693,7 @@ async def test_consume_binds_approval_outbox_before_marking_challenge_consumed(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
   payload = {
@@ -682,7 +710,7 @@ async def test_consume_binds_approval_outbox_before_marking_challenge_consumed(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     command_type="T_TRADE_APPROVE_ENTRY",
@@ -712,7 +740,7 @@ async def test_consume_binds_approval_outbox_before_marking_challenge_consumed(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     command_type="T_TRADE_APPROVE_ENTRY",
@@ -737,7 +765,7 @@ async def test_consume_commit_failure_rolls_back_challenge_and_outbox_together(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
   payload = {"intent_id": "intent-1", "expected_candidate_id": "candidate-1"}
@@ -748,7 +776,7 @@ async def test_consume_commit_failure_rolls_back_challenge_and_outbox_together(
       principal=_principal(),
       action=T_TRADE_ENTRY_APPROVAL,
       account_id="ACCOUNT-1",
-      business_owner_id="run-1",
+      **_strategy_execution_binding(),
       intent_id="intent-1",
       confirmation_token=preview.confirmation_token,
       command_type="T_TRADE_APPROVE_ENTRY",
@@ -763,7 +791,7 @@ async def test_consume_commit_failure_rolls_back_challenge_and_outbox_together(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     command_type="T_TRADE_APPROVE_ENTRY",
@@ -785,7 +813,7 @@ async def test_factory_binds_final_challenge_id_to_one_stable_outbox(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
   payload = {"intent_id": "intent-1", "expected_candidate_id": "candidate-1"}
@@ -794,7 +822,7 @@ async def test_factory_binds_final_challenge_id_to_one_stable_outbox(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     command_type="T_TRADE_APPROVE_ENTRY",
@@ -809,7 +837,7 @@ async def test_factory_binds_final_challenge_id_to_one_stable_outbox(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=preview.confirmation_token,
     command_type="T_TRADE_APPROVE_ENTRY",
@@ -836,14 +864,14 @@ async def test_terminal_rejection_allows_new_challenge_and_preserves_old_token(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
   await TradeApprovalChallengeService.consume(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=first.confirmation_token,
     command_type="T_TRADE_APPROVE_ENTRY",
@@ -861,7 +889,7 @@ async def test_terminal_rejection_allows_new_challenge_and_preserves_old_token(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
 
@@ -870,7 +898,7 @@ async def test_terminal_rejection_allows_new_challenge_and_preserves_old_token(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
     confirmation_token=first.confirmation_token,
     command_type="T_TRADE_APPROVE_ENTRY",
@@ -891,7 +919,7 @@ async def test_challenge_rejects_another_authenticated_device(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
 
@@ -900,7 +928,7 @@ async def test_challenge_rejects_another_authenticated_device(
       principal=_principal(device_session_id="device-session-2"),
       action=T_TRADE_ENTRY_APPROVAL,
       account_id="ACCOUNT-1",
-      business_owner_id="run-1",
+      **_strategy_execution_binding(),
       intent_id="intent-1",
       confirmation_token=preview.confirmation_token,
       **_approval_command_kwargs(),
@@ -917,7 +945,7 @@ async def test_challenge_fails_closed_when_intent_changes(
     principal=_principal(),
     action=T_TRADE_ENTRY_APPROVAL,
     account_id="ACCOUNT-1",
-    business_owner_id="run-1",
+    **_strategy_execution_binding(),
     intent_id="intent-1",
   )
   record.target_volume = 200
@@ -927,7 +955,7 @@ async def test_challenge_fails_closed_when_intent_changes(
       principal=_principal(),
       action=T_TRADE_ENTRY_APPROVAL,
       account_id="ACCOUNT-1",
-      business_owner_id="run-1",
+      **_strategy_execution_binding(),
       intent_id="intent-1",
       confirmation_token=preview.confirmation_token,
       **_approval_command_kwargs(),
@@ -950,7 +978,7 @@ async def test_challenge_fails_closed_when_exit_template_is_missing(
       principal=_principal(),
       action=T_TRADE_ENTRY_APPROVAL,
       account_id=ACCOUNT_ID,
-      business_owner_id=RUN_ID,
+      **_strategy_execution_binding(RUN_ID),
       intent_id=INTENT_ID,
     )
 
@@ -973,7 +1001,7 @@ async def test_challenge_fails_closed_when_exit_template_is_invalid(
       principal=_principal(),
       action=T_TRADE_ENTRY_APPROVAL,
       account_id=ACCOUNT_ID,
-      business_owner_id=RUN_ID,
+      **_strategy_execution_binding(RUN_ID),
       intent_id=INTENT_ID,
     )
 

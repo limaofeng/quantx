@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.clock import utcnow
 from quantx_domain.trading.entry_plan import ManagedEntryPlanConfig
 from quantx_engine import report_processor
@@ -108,13 +109,20 @@ def _ready_rollout() -> SimpleNamespace:
 @pytest.mark.asyncio
 async def test_enqueue_detects_managed_auto_entry_from_persisted_intent() -> None:
   persisted_intent = SimpleNamespace(
+    id="intent-1",
     direction="BUY",
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
     intent_metadata={
       "execution_mode": "AUTO",
       "entry_plan_id": "run-1",
     },
   )
-  db = SimpleNamespace(get=AsyncMock(return_value=persisted_intent))
+  db = SimpleNamespace(
+    get=AsyncMock(return_value=persisted_intent),
+    execute=AsyncMock(return_value=_Result(None)),
+  )
   service = TradeCommandService(db)
   device = SimpleNamespace(id="device-1", user_id="authorized-user")
   service._exact_auto_entry_device = AsyncMock(return_value=device)
@@ -131,7 +139,9 @@ async def test_enqueue_detects_managed_auto_entry_from_persisted_intent() -> Non
     order_type="FIX_PRICE",
     limit_price=100,
     volume=100,
-    execution_mode="live",
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    environment=ExecutionEnvironment.LIVE,
+    idempotency_key="entry-gate-auto",
     strategy_run_id="run-1",
     intent_id="intent-1",
     bucket="swing",
@@ -151,13 +161,20 @@ async def test_enqueue_detects_managed_auto_entry_from_persisted_intent() -> Non
 @pytest.mark.asyncio
 async def test_enqueue_keeps_managed_manual_entry_on_existing_path() -> None:
   persisted_intent = SimpleNamespace(
+    id="intent-1",
     direction="BUY",
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
     intent_metadata={
       "execution_mode": "MANUAL_CONFIRM",
       "entry_plan_id": "run-1",
     },
   )
-  db = SimpleNamespace(get=AsyncMock(return_value=persisted_intent))
+  db = SimpleNamespace(
+    get=AsyncMock(return_value=persisted_intent),
+    execute=AsyncMock(return_value=_Result(None)),
+  )
   service = TradeCommandService(db)
   device = SimpleNamespace(id="device-1", user_id="manual-user")
   service._exact_auto_entry_device = AsyncMock()
@@ -175,7 +192,9 @@ async def test_enqueue_keeps_managed_manual_entry_on_existing_path() -> None:
     order_type="FIX_PRICE",
     limit_price=100,
     volume=100,
-    execution_mode="live",
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    environment=ExecutionEnvironment.LIVE,
+    idempotency_key="entry-gate-manual",
     strategy_run_id="run-1",
     intent_id="intent-1",
     bucket="swing",
@@ -195,7 +214,11 @@ async def test_managed_auto_entry_fails_closed_when_durable_plan_is_disabled(
   parameters = _managed_entry_parameters()
   parameters["entry_plan_enabled"] = False
   persisted_intent = SimpleNamespace(
+    id="intent-1",
     direction="BUY",
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
     intent_metadata={
       "execution_mode": "AUTO",
       "entry_plan_id": "run-1",
@@ -218,7 +241,7 @@ async def test_managed_auto_entry_fails_closed_when_durable_plan_is_disabled(
 
   db = SimpleNamespace(
     get=get,
-    execute=AsyncMock(return_value=_Result((run, strategy))),
+    execute=AsyncMock(side_effect=[_Result(None), _Result((run, strategy))]),
   )
   monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
   monkeypatch.setattr(
@@ -237,7 +260,9 @@ async def test_managed_auto_entry_fails_closed_when_durable_plan_is_disabled(
       order_type="FIX_PRICE",
       limit_price=Decimal("100"),
       volume=100,
-      execution_mode="live",
+      execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+      environment=ExecutionEnvironment.LIVE,
+      idempotency_key="entry-gate-disabled",
       strategy_run_id="run-1",
       intent_id="intent-1",
       bucket="swing",
@@ -918,7 +943,7 @@ async def test_second_gate_rechecks_authoritative_plan_snapshot_and_position(
   )
   heartbeat = SimpleNamespace(
     status="READY",
-    details={"capabilities": ["live"], "protocolVersion": "1.1"},
+    details={"capabilities": ["live"], "protocolVersion": "1.2"},
   )
 
   class Result:
@@ -1061,7 +1086,9 @@ class _ReportDatabase:
 @pytest.mark.asyncio
 async def test_only_live_buy_trade_consumes_exact_entry_grant(monkeypatch) -> None:
   pending = SimpleNamespace(
-    execution_mode="live",
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
     side="BUY",
     account_id="account-1",
     strategy_run_id="run-1",
@@ -1111,7 +1138,7 @@ async def test_only_live_buy_trade_consumes_exact_entry_grant(monkeypatch) -> No
   assert consume.await_args.kwargs["filled_amount_cny"] == 10_000
   assert consume.await_args.kwargs["trade_business_key"].endswith(":trade-1")
 
-  pending.execution_mode = "paper"
+  pending.environment = "PAPER"
   await report_processor._consume_exact_auto_entry_fill(
     {"client_order_id": "client-1"},
     {
@@ -1120,7 +1147,7 @@ async def test_only_live_buy_trade_consumes_exact_entry_grant(monkeypatch) -> No
       "traded_volume": 100,
     },
   )
-  pending.execution_mode = "live"
+  pending.environment = "LIVE"
   pending.side = "SELL"
   await report_processor._consume_exact_auto_entry_fill(
     {"client_order_id": "client-1"},

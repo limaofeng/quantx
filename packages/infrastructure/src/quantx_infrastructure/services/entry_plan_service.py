@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.base import OrderRequest, OrderType, PriceType
 from quantx_domain.strategies.ashare_managed_entry_plan import (
   ENTRY_PLAN_ENABLED_KEY,
@@ -45,8 +46,8 @@ from quantx_infrastructure.database.relational_connection import AsyncSessionLoc
 from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
+  OrderCorrelation,
   PendingTradeOrder,
-  StrategyOrderCorrelation,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
 )
@@ -772,6 +773,10 @@ class EntryPlanService:
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=draft.sized_volume,
+      execution_ref=ExecutionOwnerRef.strategy_run(runtime.run_id),
+      environment=ExecutionEnvironment(
+        str(getattr(runtime.context.mode, "value", runtime.context.mode)).upper()
+      ),
       price=order_price,
       strategy_id=str(runtime.strategy_id),
       metadata={
@@ -1413,10 +1418,10 @@ class EntryPlanService:
         .limit(1)
       )
       correlation = await db.scalar(
-        select(StrategyOrderCorrelation.id)
+        select(OrderCorrelation.id)
         .where(
-          StrategyOrderCorrelation.strategy_run_id == plan_id,
-          StrategyOrderCorrelation.intent_id == intent_id,
+          OrderCorrelation.strategy_run_id == plan_id,
+          OrderCorrelation.intent_id == intent_id,
         )
         .with_for_update()
         .limit(1)

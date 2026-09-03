@@ -43,6 +43,7 @@ async def test_monitor_only_evaluates_manual_plans(monkeypatch) -> None:
         "account_id": "account-1",
         "instrument_code": "600000.SH",
         "source_type": source_type,
+        "source_id": plan_id,
         "run_id": run_id,
         "metadata": dict(metadata or {}),
       }
@@ -53,6 +54,12 @@ async def test_monitor_only_evaluates_manual_plans(monkeypatch) -> None:
     enabled=True,
     strategy_run_id=None,
     source_type="MANUAL_LIQUIDATION",
+    source_id="manual-plan",
+    group_id="manual-group",
+    source_execution_owner_type="MANUAL_COMMAND",
+    source_execution_owner_id="manual-group",
+    source_execution_environment="PAPER",
+    environment="PAPER",
     plan_state=plan_state(
       plan_id="manual-plan",
       source_type="MANUAL_LIQUIDATION",
@@ -93,6 +100,12 @@ async def test_monitor_only_evaluates_manual_plans(monkeypatch) -> None:
     enabled=True,
     strategy_run_id=None,
     source_type="MANUAL_POSITION",
+    source_id="unbound-dedicated-plan",
+    group_id=None,
+    source_execution_owner_type="MANUAL_COMMAND",
+    source_execution_owner_id="unbound-dedicated-plan",
+    source_execution_environment="PAPER",
+    environment="PAPER",
     plan_state=plan_state(
       plan_id="unbound-dedicated-plan",
       source_type="MANUAL_POSITION",

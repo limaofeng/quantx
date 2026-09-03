@@ -746,10 +746,11 @@ class LocalJournal:
       if mapped:
         return mapped
 
-    prefix = str(order_remark or "")
-    if prefix.startswith("qx:"):
-      prefix = prefix[3:]
-    if not prefix:
+    remark = str(order_remark or "")
+    if not remark.startswith("qx:"):
+      return None
+    prefix = remark[3:]
+    if len(prefix) != 20:
       return None
 
     return self._remark_prefix_to_client.get(prefix)

@@ -49,6 +49,8 @@ LIVE_FULL_SNAPSHOT_PARTITIONS = (
   "cancelable_orders",
   "trades",
 )
+_ORDER_REMARK_PREFIX = "qx:"
+_ORDER_REMARK_CLIENT_ID_LENGTH = 20
 
 
 def _fresh_snapshot_account_status(manager: Any) -> tuple[int | None, bool]:
@@ -229,7 +231,7 @@ def enrich_report_payload(
   message_type: AgentMessageType,
   payload: dict[str, Any],
 ) -> dict[str, Any]:
-  """Add protocol 1.1 report ordering and snapshot identity metadata."""
+  """Add protocol 1.2 report ordering and snapshot identity metadata."""
   value = dict(payload)
   sequence = int(
     value.get("source_sequence") or value.get("sequence") or time.time_ns()
@@ -267,6 +269,15 @@ def _as_dict(value: Any) -> dict[str, Any]:
     for key, item in fields.items()
     if not key.startswith("_") and not callable(item)
   }
+
+
+def _stable_order_remark(client_order_id: Any) -> str:
+  """Build the only miniQMT remark from the durable client order identity."""
+
+  normalized = str(client_order_id or "")
+  if not normalized:
+    raise ValueError("client_order_id is required for order remark")
+  return f"{_ORDER_REMARK_PREFIX}{normalized[:_ORDER_REMARK_CLIENT_ID_LENGTH]}"
 
 
 def _json_safe(value: Any) -> Any:
@@ -704,19 +715,45 @@ class SimulatorBroker:
   def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
     if self.data_only:
       return {"accepted": False, "reason": "data_only_agent"}
-    kind = str(payload.get("command_kind", ""))
+    kind = str(payload["command_kind"])
     if kind == "CANCEL_ORDER":
       return {
         "accepted": True,
         "reason": "",
         "reports": [],
       }
+    if kind != "PLACE_ORDER":
+      return {
+        "accepted": False,
+        "reason": "invalid_command_kind",
+        "reports": [],
+      }
     client_order_id = str(payload["client_order_id"])
     broker_id = int(hashlib.sha256(client_order_id.encode()).hexdigest()[:12], 16)
     broker_id %= 2_000_000_000
-    side = str(payload.get("side", "BUY")).upper()
+    side = str(payload["side"]).upper()
+    if side not in {"BUY", "SELL"}:
+      return {
+        "accepted": False,
+        "reason": "invalid_order_side",
+        "reports": [],
+      }
     volume = int(payload["volume"])
-    price = float(payload.get("limit_price") or 0)
+    price = float(payload["limit_price"])
+    if price <= 0:
+      return {
+        "accepted": False,
+        "reason": "invalid_limit_price",
+        "reports": [],
+      }
+    price_type = str(payload["price_type"]).upper()
+    if price_type != "FIX_PRICE":
+      return {
+        "accepted": False,
+        "reason": "invalid_order_price_type",
+        "reports": [],
+      }
+    order_remark = _stable_order_remark(client_order_id)
     now = int(time.time())
     order = {
       "client_order_id": client_order_id,
@@ -735,8 +772,8 @@ class SimulatorBroker:
         "traded_price": 0,
         "order_status": 50,
         "status_msg": "simulator accepted",
-        "strategy_name": payload.get("strategy_name", ""),
-        "order_remark": payload.get("order_remark", ""),
+        "strategy_name": "",
+        "order_remark": order_remark,
       },
     }
     execution = {
@@ -753,8 +790,8 @@ class SimulatorBroker:
         "traded_price": price,
         "traded_volume": volume,
         "traded_amount": price * volume,
-        "strategy_name": payload.get("strategy_name", ""),
-        "order_remark": payload.get("order_remark", ""),
+        "strategy_name": "",
+        "order_remark": order_remark,
       },
     }
     terminal_order = {
@@ -2105,13 +2142,8 @@ class LiveBroker:
           "reason": "local_reconciliation_required",
           "reports": [],
         }
-      command = dict(payload)
-      command["order_type"] = payload.get("side")
-      command["price_type"] = payload.get("order_type")
-      command["price"] = float(payload.get("limit_price") or 0)
-      command["order_remark"] = f"qx:{str(payload['client_order_id'])[:20]}"
       self._advance_trading_mutation()
-      result = agent.place_order(command)
+      result = agent.place_order(payload)
       return {
         "accepted": bool(result.get("success")),
         "reason": str(result.get("message") or ""),

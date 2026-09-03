@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   PendingTradeOrder,
@@ -53,13 +54,18 @@ async def test_persisted_obligation_survives_missing_runtime(obligations, kind):
       limit_price="10",
       volume=100,
       status="RECONCILE_REQUIRED",
-      execution_mode="live",
-      strategy_run_id="run",
+      owner_type="STRATEGY_RUN",
+      owner_id="run",
+      environment="LIVE",
+      strategy_order_id="strategy-order-1",
+      intent_id="intent-1",
     ),
     "report": lambda: StrategyRuntimeEvent(
       event_id="event",
       business_key="trade:1",
-      strategy_run_id="run",
+      owner_type="STRATEGY_RUN",
+      owner_id="run",
+      environment="LIVE",
       client_order_id="order",
       event_type="TRADE",
       payload={},
@@ -68,9 +74,12 @@ async def test_persisted_obligation_survives_missing_runtime(obligations, kind):
     ),
     "intent": lambda: TradeIntentRecord(
       id="intent",
-      strategy_run_id="run",
+      owner_type="STRATEGY_RUN",
+      owner_id="run",
+      environment="LIVE",
       instrument_code="600000.SH",
       direction="BUY",
+      idempotency_key="intent-1",
       status="AWAITING_APPROVAL",
     ),
     "protection": lambda: AutoExitPlanRecord(
@@ -78,6 +87,10 @@ async def test_persisted_obligation_survives_missing_runtime(obligations, kind):
       account_id="account",
       instrument_code="600000.SH",
       strategy_run_id="run",
+      source_execution_owner_type="STRATEGY_RUN",
+      source_execution_owner_id="run",
+      source_execution_environment="LIVE",
+      environment="LIVE",
       source_type="STRATEGY",
       source_id="run",
       status="ERROR",
@@ -89,6 +102,10 @@ async def test_persisted_obligation_survives_missing_runtime(obligations, kind):
     "batch": lambda: TTradeBatch(
       batch_id="batch",
       strategy_run_id="run",
+      source_execution_owner_type="STRATEGY_RUN",
+      source_execution_owner_id="run",
+      source_execution_environment="LIVE",
+      environment="LIVE",
       account_id="account",
       instrument_code="600000.SH",
       status="ERROR",
@@ -103,8 +120,13 @@ async def test_persisted_obligation_survives_missing_runtime(obligations, kind):
   async with obligations() as db:
     db.add(records[kind]())
     await db.commit()
-    assert await runtime_obligation_blocker(db, "run")
-    assert await runtime_obligation_blocker(db, "other-run") is None
+    owner = ExecutionOwnerRef.strategy_run("run")
+    other_owner = ExecutionOwnerRef.strategy_run("other-run")
+    assert await runtime_obligation_blocker(db, owner, ExecutionEnvironment.LIVE)
+    assert (
+      await runtime_obligation_blocker(db, other_owner, ExecutionEnvironment.LIVE)
+      is None
+    )
 
 
 @pytest.mark.asyncio
@@ -121,9 +143,19 @@ async def test_settled_orders_do_not_block_stop(obligations):
         limit_price="10",
         volume=100,
         status="CANCELLED",
-        execution_mode="live",
-        strategy_run_id="run",
+        owner_type="STRATEGY_RUN",
+        owner_id="run",
+        environment="LIVE",
+        strategy_order_id="strategy-order-1",
+        intent_id="intent-1",
       )
     )
     await db.commit()
-    assert await runtime_obligation_blocker(db, "run") is None
+    assert (
+      await runtime_obligation_blocker(
+        db,
+        ExecutionOwnerRef.strategy_run("run"),
+        ExecutionEnvironment.LIVE,
+      )
+      is None
+    )

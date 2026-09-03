@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import timedelta
+from datetime import timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from quantx_api import agent_api
-from quantx_contracts import AgentEnvelope, AgentMessageType
+from quantx_contracts import (
+  AgentEnvelope,
+  AgentMessageType,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+)
 from quantx_domain.clock import utcnow
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
@@ -33,9 +39,9 @@ from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   AgentReportInbox,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
-  StrategyOrderCorrelation,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
   TTradeBatch,
@@ -45,7 +51,14 @@ from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanEvent,
   AutoExitPlanRecord,
 )
+from quantx_infrastructure.models.enums import (
+  StrategyRunMode as PersistedStrategyRunMode,
+)
+from quantx_infrastructure.models.enums import (
+  StrategyRunStatus,
+)
 from quantx_infrastructure.models.order import Order
+from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import (
@@ -60,7 +73,7 @@ from quantx_qmt_agent.broker import SimulatorBroker
 from quantx_qmt_agent.credentials import DeviceConfiguration
 from quantx_qmt_agent.journal import LocalJournal
 from quantx_qmt_agent.runtime import AgentRuntime
-from sqlalchemy import func, select
+from sqlalchemy import JSON, func, select
 from sqlalchemy.ext.asyncio import (
   AsyncSession,
   async_sessionmaker,
@@ -69,9 +82,10 @@ from sqlalchemy.ext.asyncio import (
 
 TABLES = [
   AuthUser.__table__,
+  StrategyRun.__table__,
   AgentDevice.__table__,
   PendingTradeOrder.__table__,
-  StrategyOrderCorrelation.__table__,
+  OrderCorrelation.__table__,
   TradeCommandOutbox.__table__,
   StrategyRuntimeEvent.__table__,
   TTradeBatch.__table__,
@@ -123,6 +137,10 @@ async def _database(
     database_url,
     connect_args={"timeout": 10},
   )
+  # PostgreSQL stores StrategyRun.instruments as ARRAY(String), while this
+  # integration suite uses SQLite.  The production ORM still reads the same
+  # JSON-compatible list; only the test DDL needs a SQLite-native type.
+  StrategyRun.__table__.c.instruments.type = JSON()
   async with engine.begin() as connection:
     await connection.run_sync(
       lambda sync_connection: Base.metadata.create_all(
@@ -164,6 +182,17 @@ async def _database(
         display_name="Integration",
         password_hash="unused",
         permissions=[],
+      )
+    )
+    db.add(
+      StrategyRun(
+        id="run-1",
+        name="integration-run",
+        strategy_id=1,
+        parameters={"account_id": "account-1"},
+        status=StrategyRunStatus.RUNNING,
+        mode=PersistedStrategyRunMode.PAPER,
+        instruments=["600000.SH"],
       )
     )
     db.add(
@@ -216,6 +245,8 @@ async def _enqueue_order(
       order_type="FIX_PRICE",
       limit_price=Decimal("10.50"),
       volume=100,
+      execution_ref=ExecutionOwnerRef.manual_command("pipeline-command-1"),
+      environment=ExecutionEnvironment.PAPER,
       idempotency_key="pipeline-request-1",
     )
 
@@ -230,21 +261,19 @@ async def _enqueue_strategy_order(
   batch_id = None if managed_entry else f"batch-{idempotency_key}"
   strategy_run_id = "run-1"
   request_metadata = (
-    {
-      "instrument_code": "600000.SH",
-      "entry_plan_id": strategy_run_id,
-      "execution_mode": "AUTO",
-    }
+    {"entry_plan_id": strategy_run_id}
     if managed_entry
-    else {"instrument_code": "600000.SH"}
+    else {"origin": "T_TRADE"}
   )
   async with session_factory() as db:
     db.add(
       TradeIntentRecord(
         id=intent_id,
-        strategy_run_id=strategy_run_id if managed_entry else None,
+        strategy_run_id=strategy_run_id,
         owner_type="STRATEGY_RUN",
         owner_id=strategy_run_id,
+        environment=ExecutionEnvironment.PAPER.value,
+        idempotency_key=idempotency_key,
         account_id="account-1",
         strategy_id=("ashare_managed_entry_plan" if managed_entry else "t-trade"),
         instrument_code="600000.SH",
@@ -261,7 +290,7 @@ async def _enqueue_strategy_order(
             "execution_mode": "AUTO",
           }
           if managed_entry
-          else {"t_trade_role": "entry"}
+          else {"t_trade_role": "entry", "t_batch_id": batch_id}
         ),
       )
     )
@@ -274,10 +303,10 @@ async def _enqueue_strategy_order(
       order_type="FIX_PRICE",
       limit_price=Decimal("10.50"),
       volume=100,
-      strategy_name=("ashare_managed_entry_plan" if managed_entry else "t-trade"),
       trace_id=f"trace-{idempotency_key}",
       idempotency_key=idempotency_key,
-      execution_mode="paper",
+      execution_ref=ExecutionOwnerRef.strategy_run(strategy_run_id),
+      environment=ExecutionEnvironment.PAPER,
       strategy_run_id=strategy_run_id,
       strategy_order_id=f"strategy-order-{idempotency_key}",
       intent_id=intent_id,
@@ -300,55 +329,13 @@ async def _enqueue_exit_plan_order(
   intent_id = f"exit-intent-{owner_kind}"
   has_runtime_owner = owner_kind == "runtime"
   strategy_run_id = f"exit-run-{owner_kind}" if has_runtime_owner else ""
-  strategy_name = (
+  strategy_key = (
     "ashare_intraday_t_assistant"
     if owner_kind == "runtime"
     else "auto_exit_monitor"
   )
-  metadata = {
-    "owner_type": "EXIT_PLAN",
-    "owner_id": plan_id,
-    "exit_plan_id": plan_id,
-  }
+  metadata = {"origin": "EXIT_PLAN_TEST"}
   async with session_factory() as db:
-    db.add(
-      TradeIntentRecord(
-        id=intent_id,
-        strategy_run_id=strategy_run_id or None,
-        owner_type="EXIT_PLAN",
-        owner_id=plan_id,
-        account_id="account-1",
-        strategy_id=strategy_name,
-        instrument_code="600000.SH",
-        direction="SELL",
-        bucket="swing" if owner_kind == "runtime" else "manual",
-        reason="AUTO_EXIT_TEST",
-        status="PENDING",
-        target_volume=100,
-        limit_price_hint=10.5,
-        executed_volume=0,
-        intent_metadata=metadata,
-      )
-    )
-    await db.flush()
-    queued = await TradeCommandService(db).enqueue_order(
-      user_id="user-1",
-      account_id="account-1",
-      instrument_code="600000.SH",
-      side="SELL",
-      order_type="FIX_PRICE",
-      limit_price=Decimal("10.50"),
-      volume=100,
-      strategy_name=strategy_name,
-      trace_id=f"trace-{owner_kind}",
-      idempotency_key=f"exit-plan-expiry-{owner_kind}",
-      execution_mode="paper",
-      strategy_run_id=strategy_run_id,
-      strategy_order_id=(f"strategy-order-{owner_kind}" if has_runtime_owner else ""),
-      intent_id=intent_id,
-      bucket="swing" if owner_kind == "runtime" else "manual",
-      request_metadata=metadata,
-    )
     source_type = (
       "T_TRADE_BATCH" if owner_kind == "runtime" else "MANUAL_POSITION"
     )
@@ -372,11 +359,27 @@ async def _enqueue_exit_plan_order(
       )
     )
     plan.register_entry_fill(volume=100, price=10.0)
-    plan.pending_intent_id = intent_id
-    plan.pending_order_id = queued.client_order_id
-    plan.pending_rule_id = f"{plan_id}:target"
-    plan.pending_requested_volume = 100
-    plan.status = ExitPlanStatus.EXIT_PENDING
+    db.add(
+      TradeIntentRecord(
+        id=intent_id,
+        strategy_run_id=None,
+        owner_type="EXIT_PLAN",
+        owner_id=plan_id,
+        environment=ExecutionEnvironment.PAPER.value,
+        idempotency_key=f"exit-plan-expiry-{owner_kind}",
+        account_id="account-1",
+        strategy_id=strategy_key,
+        instrument_code="600000.SH",
+        direction="SELL",
+        bucket="swing" if owner_kind == "runtime" else "manual",
+        reason="AUTO_EXIT_TEST",
+        status="PENDING",
+        target_volume=100,
+        limit_price_hint=10.5,
+        executed_volume=0,
+        intent_metadata=metadata,
+      )
+    )
     db.add(
       AutoExitPlanRecord(
         plan_id=plan_id,
@@ -386,19 +389,72 @@ async def _enqueue_exit_plan_order(
         source_type=source_type,
         source_id=plan_id,
         strategy_run_id=strategy_run_id or None,
+        source_execution_owner_type=(
+          "STRATEGY_RUN" if has_runtime_owner else "MANUAL_COMMAND"
+        ),
+        source_execution_owner_id=(
+          strategy_run_id if has_runtime_owner else plan_id
+        ),
+        source_execution_environment=ExecutionEnvironment.PAPER.value,
         enabled=True,
-        status=ExitPlanStatus.EXIT_PENDING.value,
-        execution_mode="paper",
+        status=ExitPlanStatus.ACTIVE.value,
+        environment=ExecutionEnvironment.PAPER.value,
         config_version=1,
         state_version=1,
         protected_volume=100,
         exited_volume=0,
         remaining_volume=100,
         entry_avg_price=10.0,
-        pending_client_order_id=queued.client_order_id,
+        pending_client_order_id=None,
         plan_state=plan.to_dict(),
       )
     )
+    await db.flush()
+    queued = await TradeCommandService(db).enqueue_order(
+      user_id="user-1",
+      account_id="account-1",
+      instrument_code="600000.SH",
+      side="SELL",
+      order_type="FIX_PRICE",
+      limit_price=Decimal("10.50"),
+      volume=100,
+      trace_id=f"trace-{owner_kind}",
+      idempotency_key=f"exit-plan-expiry-{owner_kind}",
+      execution_ref=ExecutionOwnerRef(
+        "EXIT_PLAN",
+        plan_id,
+      ),
+      environment=ExecutionEnvironment.PAPER,
+      intent_id=intent_id,
+      bucket="swing" if owner_kind == "runtime" else "manual",
+      request_metadata=metadata,
+      commit_transaction=False,
+    )
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    correlation = (
+      await db.execute(
+        select(OrderCorrelation).where(
+          OrderCorrelation.client_order_id == queued.client_order_id
+        )
+      )
+    ).scalar_one()
+    assert pending is not None
+    assert pending.strategy_run_id is None
+    assert pending.strategy_order_id is None
+    assert pending.intent_id == intent_id
+    assert correlation.strategy_run_id is None
+    assert correlation.strategy_order_id is None
+    assert correlation.intent_id == intent_id
+    plan.pending_intent_id = intent_id
+    plan.pending_order_id = queued.client_order_id
+    plan.pending_rule_id = f"{plan_id}:target"
+    plan.pending_requested_volume = 100
+    plan.status = ExitPlanStatus.EXIT_PENDING
+    record = await db.get(AutoExitPlanRecord, plan_id, with_for_update=True)
+    assert record is not None
+    record.status = ExitPlanStatus.EXIT_PENDING.value
+    record.pending_client_order_id = queued.client_order_id
+    record.plan_state = plan.to_dict()
     await db.commit()
   return queued, intent_id
 
@@ -546,6 +602,89 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
 
 
 @pytest.mark.asyncio
+async def test_report_inbox_keeps_reused_execution_id_for_distinct_orders(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+
+  async def ignore_report_wakeup(*_args, **_kwargs) -> int:
+    return 1
+
+  monkeypatch.setattr(agent_api.redis_pubsub, "publish", ignore_report_wakeup)
+
+  def execution_report(
+    message_id: str,
+    client_order_id: str,
+    *,
+    broker_field: str,
+    broker_order_id: object,
+  ) -> AgentEnvelope:
+    return AgentEnvelope(
+      message_id=message_id,
+      message_type=AgentMessageType.EXECUTION_REPORT,
+      payload={
+        "client_order_id": client_order_id,
+        "execution": {
+          "account_id": "account-1",
+          broker_field: broker_order_id,
+          "execution_id": "reused-execution-1",
+          "traded_volume": 100,
+          "traded_price": 10,
+        },
+      },
+    )
+
+  first = await agent_api._record_report(
+    _control_session(),
+    execution_report(
+      "report-distinct-order-1",
+      "client-order-1",
+      broker_field="order_id",
+      broker_order_id=123,
+    ),
+    received_at=agent_api.utcnow(),
+  )
+  second = await agent_api._record_report(
+    _control_session(),
+    execution_report(
+      "report-distinct-order-2",
+      " client-order-2 ",
+      broker_field="broker_order_id",
+      broker_order_id=" 124 ",
+    ),
+    received_at=agent_api.utcnow(),
+  )
+  replay = await agent_api._record_report(
+    _control_session(),
+    execution_report(
+      "report-distinct-order-2-replay",
+      " client-order-2 ",
+      broker_field="broker_order_id",
+      broker_order_id=" 124 ",
+    ),
+    received_at=agent_api.utcnow(),
+  )
+
+  async with session_factory() as db:
+    reports = (
+      await db.execute(
+        select(AgentReportInbox).order_by(AgentReportInbox.message_id)
+      )
+    ).scalars().all()
+
+  assert first.accepted and not first.duplicate
+  assert second.accepted and not second.duplicate
+  assert replay.accepted and replay.duplicate
+  assert len(reports) == 2
+  assert {report.client_order_id for report in reports} == {
+    "client-order-1",
+    "client-order-2",
+  }
+  assert len({report.business_idempotency_key for report in reports}) == 2
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_trade_frame_is_blocked_when_device_is_revoked_after_poll(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -560,7 +699,7 @@ async def test_trade_frame_is_blocked_when_device_is_revoked_after_poll(
     device.revoked_at = utcnow()
     await db.commit()
 
-  with pytest.raises(agent_api.AuthError, match="交易投递会话已失效"):
+  with pytest.raises(agent_api.AuthError, match="Agent 控制会话已被替换"):
     await agent_api._assert_trade_delivery_session(_control_session(), command)
 
   await engine.dispose()
@@ -593,13 +732,38 @@ async def test_live_buy_frame_revalidates_market_and_account_safety_before_send(
   )
   session = _control_session()
   session.capabilities = {"live"}
+
+  async def current_session(_device_id: str):
+    return session
+
+  async def is_connected(_device_id: str, *, agent_session_id: str = "") -> bool:
+    return agent_session_id == session.agent_session_id
+
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "current_session",
+    current_session,
+  )
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "is_connected",
+    is_connected,
+  )
   command = AgentEnvelope(
     message_type=AgentMessageType.COMMAND,
     payload={
       "command_kind": "PLACE_ORDER",
+      "client_order_id": "live-buy-command",
       "account_id": "account-1",
       "execution_mode": "live",
+      "instrument_code": "600000.SH",
       "side": "BUY",
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.50",
+      "volume": 100,
+      "expires_at": (
+        (utcnow() + timedelta(minutes=5)).replace(tzinfo=timezone.utc).isoformat()
+      ),
     },
   )
 
@@ -826,10 +990,20 @@ async def test_pre_execution_rejection_closes_pending_order_and_cancel_ack_is_de
   async with session_factory() as db:
     order_outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    correlation = await db.scalar(
+      select(OrderCorrelation).where(
+        OrderCorrelation.client_order_id == queued.client_order_id
+      )
+    )
+    assert pending is not None and correlation is not None
+    pending.broker_order_id = "broker-order-1"
+    correlation.broker_order_id = "broker-order-1"
     cancel = await TradeCommandService(db).enqueue_cancel(
       user_id="user-1",
       account_id="account-1",
       broker_order_id="broker-order-1",
+      execution_ref=ExecutionOwnerRef.manual_command("pipeline-command-1"),
+      environment=ExecutionEnvironment.PAPER,
       idempotency_key="cancel-request-1",
     )
     assert order_outbox is not None
@@ -967,12 +1141,9 @@ async def test_exit_plan_queued_expiry_proves_zero_fill_for_exact_owner(
     assert intent.intent_metadata["command_lifecycle_status"] == "EXPIRED"
     assert intent.intent_metadata["command_lifecycle_previous_status"] == "QUEUED"
     assert intent.intent_metadata["command_lifecycle_message_id"] == queued.message_id
-    if owner_kind == "monitor":
-      assert events == []
-    else:
-      assert len(events) == 1
-      assert events[0].payload["report"]["status"] == "RECONCILED_ZERO_FILL"
-      assert events[0].payload["metadata"]["intent_id"] == intent_id
+    assert len(events) == 1
+    assert events[0].payload["report"]["status"] == "RECONCILED_ZERO_FILL"
+    assert events[0].payload["metadata"]["intent_id"] == intent_id
   await engine.dispose()
 
 
@@ -1094,17 +1265,14 @@ async def test_exit_plan_accepted_ack_invalidates_local_outbox_zero_fill_proof(
     )
     assert len(plan.reconciled_zero_fill_intent_ids) == 21
     assert plan.reconciled_zero_fill_intent_ids[0] == intent_id
-    if owner_kind == "monitor":
-      assert events == []
-    else:
-      assert any(
-        event.payload["report"].get("status") == "RECONCILE_REQUIRED"
-        and event.payload["metadata"].get("zero_fill_proof_invalidation", {}).get(
-          "released"
-        )
-        is True
-        for event in events
+    assert any(
+      event.payload["report"].get("status") == "RECONCILE_REQUIRED"
+      and event.payload["metadata"].get("zero_fill_proof_invalidation", {}).get(
+        "released"
       )
+      is True
+      for event in events
+    )
 
     # A later raw broker terminal cannot resurrect the invalidated local proof
     # during startup recovery.
@@ -1155,11 +1323,8 @@ async def test_exit_plan_agent_pre_execution_rejection_proves_zero_fill(
     assert intent.intent_metadata["command_lifecycle_previous_status"] == (
       "DELIVERED"
     )
-    if owner_kind == "monitor":
-      assert events == []
-    else:
-      assert len(events) == 1
-      assert events[0].payload["report"]["status"] == "RECONCILED_ZERO_FILL"
+    assert len(events) == 1
+    assert events[0].payload["report"]["status"] == "RECONCILED_ZERO_FILL"
   await engine.dispose()
 
 
@@ -1247,11 +1412,8 @@ async def test_exit_plan_delivered_expiry_remains_reconcile_required(
     assert pending is not None and pending.status == "RECONCILE_REQUIRED"
     assert intent is not None and intent.status == "RECONCILE_REQUIRED"
     assert "execution_terminal_source" not in dict(intent.intent_metadata or {})
-    if owner_kind == "monitor":
-      assert events == []
-    else:
-      assert len(events) == 1
-      assert events[0].payload["report"]["status"] == "RECONCILE_REQUIRED"
+    assert len(events) == 1
+    assert events[0].payload["report"]["status"] == "RECONCILE_REQUIRED"
   await engine.dispose()
 
 
@@ -1276,15 +1438,19 @@ async def test_managed_entry_physical_cancel_proof_converges_zero_fill(
         "command_kind": "PLACE_ORDER",
         "client_order_id": client_order_id,
         "account_id": "account-1",
-        "execution_mode": "live",
+        "execution_mode": "paper",
         "instrument_code": "600000.SH",
         "side": "BUY",
+        "price_type": "FIX_PRICE",
+        "limit_price": "10.50",
         "volume": 100,
-        "intent_id": intent_id,
-        "strategy_run_id": "run-1",
-        "request_metadata": intent_metadata,
-        "expires_at": (now + timedelta(minutes=5)).isoformat(),
+        "expires_at": (
+          (now + timedelta(minutes=5)).replace(tzinfo=timezone.utc).isoformat()
+        ),
       },
+      owner_type="STRATEGY_RUN",
+      owner_id="run-1",
+      environment="PAPER",
       delivery_status="DELIVERED",
       delivered_at=now,
       expires_at=now + timedelta(minutes=5),
@@ -1301,12 +1467,14 @@ async def test_managed_entry_physical_cancel_proof_converges_zero_fill(
       volume=100,
       status="CANCEL_REQUESTED",
       status_reason="ENTRY_PLAN_CANCELLED",
-      execution_mode="live",
+      owner_type="STRATEGY_RUN",
+      owner_id="run-1",
+      environment="PAPER",
       strategy_run_id="run-1",
       strategy_order_id="managed-entry-physical-cancel-strategy-order",
       intent_id=intent_id,
       bucket="core",
-      request_metadata=intent_metadata,
+      request_metadata={"entry_plan_id": "run-1"},
     )
     db.add_all(
       [
@@ -1315,6 +1483,8 @@ async def test_managed_entry_physical_cancel_proof_converges_zero_fill(
           strategy_run_id="run-1",
           owner_type="STRATEGY_RUN",
           owner_id="run-1",
+          environment="PAPER",
+          idempotency_key="managed-entry-physical-cancel",
           account_id="account-1",
           strategy_id="ashare_managed_entry_plan",
           instrument_code="600000.SH",
@@ -1327,17 +1497,19 @@ async def test_managed_entry_physical_cancel_proof_converges_zero_fill(
           executed_volume=0,
           intent_metadata=intent_metadata,
         ),
-        StrategyOrderCorrelation(
+        OrderCorrelation(
           id="managed-entry-physical-cancel-correlation",
           client_order_id=client_order_id,
           account_id="account-1",
+          owner_type="STRATEGY_RUN",
+          owner_id="run-1",
+          environment="PAPER",
           strategy_run_id="run-1",
           strategy_order_id="managed-entry-physical-cancel-strategy-order",
           intent_id=intent_id,
           bucket="core",
-          execution_mode="live",
           trace_id="managed-entry-physical-cancel-trace",
-          request_metadata=intent_metadata,
+          request_metadata={"entry_plan_id": "run-1"},
         ),
         pending,
         command,
@@ -1463,7 +1635,11 @@ async def test_managed_entry_agent_expiry_ack_and_error_report_replay_one_zero_f
     assert outbox.last_error == "command_expired"
     assert pending is not None and pending.status == "EXPIRED"
     assert intent is not None and intent.status == "RECONCILED_ZERO_FILL"
-    assert len(events) == 1
+    assert len(events) == 2
+    assert [event.payload["report"]["status"] for event in events] == [
+      "RECONCILED_ZERO_FILL",
+      "EXPIRED",
+    ]
     assert events[0].business_key == (
       f"order:{queued.client_order_id}::RECONCILED_ZERO_FILL:0"
     )
@@ -1554,6 +1730,7 @@ async def test_managed_entry_reconnect_expiry_closes_prior_reconcile_gate(
     assert [event.payload["report"]["status"] for event in events] == [
       "RECONCILE_REQUIRED",
       "RECONCILED_ZERO_FILL",
+      "EXPIRED",
     ]
   await engine.dispose()
 
@@ -1748,6 +1925,16 @@ async def test_expired_delivered_strategy_command_fails_closed_for_reconciliatio
   received = []
 
   class CapturingExecutor:
+    def __init__(self) -> None:
+      self.runs = {
+        "run-1": SimpleNamespace(
+          context=SimpleNamespace(mode=StrategyRunMode.PAPER),
+        )
+      }
+
+    def require_durable_event_consumer(self, run_id):
+      return self.runs[run_id]
+
     async def apply_durable_order_report(self, run_id, order) -> None:
       received.append((run_id, order))
 
@@ -1772,8 +1959,8 @@ async def test_queued_expiry_with_broker_evidence_cannot_be_declared_unexecuted(
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
     correlation = await db.scalar(
-      select(StrategyOrderCorrelation).where(
-        StrategyOrderCorrelation.client_order_id == queued.client_order_id
+      select(OrderCorrelation).where(
+        OrderCorrelation.client_order_id == queued.client_order_id
       )
     )
     assert outbox is not None and pending is not None and correlation is not None
@@ -1811,8 +1998,8 @@ async def test_missing_durable_command_link_never_clears_strategy_gate(
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
     correlation = await db.scalar(
-      select(StrategyOrderCorrelation).where(
-        StrategyOrderCorrelation.client_order_id == queued.client_order_id
+      select(OrderCorrelation).where(
+        OrderCorrelation.client_order_id == queued.client_order_id
       )
     )
     assert outbox is not None and pending is not None and correlation is not None
@@ -1833,7 +2020,7 @@ async def test_missing_durable_command_link_never_clears_strategy_gate(
     )
     assert outbox is not None
     assert outbox.delivery_status == "RECONCILE_REQUIRED"
-    assert "durable_pre_execution_proof_missing" in str(outbox.last_error)
+    assert str(outbox.last_error) == "OWNER_BINDING_CONFLICT"
     assert event_count == 0
     if missing_row == "correlation":
       assert pending is not None and pending.status == "RECONCILE_REQUIRED"
@@ -2069,21 +2256,14 @@ async def test_reconnect_snapshot_and_rejected_command_are_replay_safe(
     payload={
       "command_kind": "PLACE_ORDER",
       "client_order_id": "client-expired",
-      "instance_id": "manual",
       "account_id": "account-1",
+      "execution_mode": "paper",
       "instrument_code": "600000.SH",
       "side": "BUY",
-      "order_type": "FIX_PRICE",
+      "price_type": "FIX_PRICE",
       "limit_price": "10.50",
       "volume": 100,
-      "bucket": "manual",
-      "risk_decision_id": "risk-1",
-      "trace_id": "trace-1",
       "expires_at": (utcnow() - timedelta(seconds=1)).isoformat() + "Z",
-      "reason_tags": [],
-      "substitution_plan": None,
-      "strategy_name": "",
-      "order_remark": "",
     },
   )
   first_socket = CapturingSocket()

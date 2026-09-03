@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_domain.clock import utcnow
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
@@ -23,9 +24,10 @@ from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
+  AgentDevice,
   AgentReportInbox,
+  OrderCorrelation,
   PendingTradeOrder,
-  StrategyOrderCorrelation,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
   TTradeBatch,
@@ -158,6 +160,9 @@ def _reconcile_trade_fixture(run_id: str):
   event = StrategyRuntimeEvent(
     event_id=f"runtime-event-{run_id}",
     business_key=f"trade:execution-{run_id}",
+    owner_type="STRATEGY_RUN",
+    owner_id=run_id,
+    environment="LIVE",
     strategy_run_id=run_id,
     client_order_id=f"client-{run_id}",
     broker_order_id="456",
@@ -180,6 +185,142 @@ def _reconcile_trade_fixture(run_id: str):
   return context, strategy, event, batch_id, plan_id
 
 
+async def _runtime_binding_database(
+  monkeypatch: pytest.MonkeyPatch,
+  *,
+  run_id: str,
+  orders: list[dict[str, object]],
+):
+  """Build the typed durable order chain used by direct runtime consumers."""
+
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AuthUser.__table__,
+    AgentDevice.__table__,
+    AccountExecutionControl.__table__,
+    PendingTradeOrder.__table__,
+    OrderCorrelation.__table__,
+    TradeCommandOutbox.__table__,
+    TradeIntentRecord.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  user_id = f"user-{run_id}"
+  device_id = f"device-{run_id}"
+  async with sessions() as db:
+    db.add(
+      AuthUser(
+        id=user_id,
+        username=f"runtime-{run_id}",
+        display_name=f"Runtime {run_id}",
+        password_hash="unused",
+        permissions=[],
+      )
+    )
+    db.add(
+      AgentDevice(
+        id=device_id,
+        user_id=user_id,
+        name=f"agent-{run_id}",
+        secret_hash="x" * 64,
+        authorized_account_ids=["account-1"],
+        capabilities=["live"],
+      )
+    )
+    for order in orders:
+      client_order_id = str(order["client_order_id"])
+      intent_id = str(order["intent_id"])
+      strategy_order_id = str(order.get("strategy_order_id") or "")
+      broker_order_id = str(order.get("broker_order_id") or "") or None
+      volume = int(order.get("volume") or 200)
+      batch_id = str(order.get("batch_id") or "") or None
+      bucket = str(order.get("bucket") or "swing")
+      t_trade_role = str(order.get("t_trade_role") or "ENTRY")
+      db.add(
+        TradeIntentRecord(
+          id=intent_id,
+          idempotency_key=f"{intent_id}-key",
+          strategy_run_id=run_id,
+          owner_type="STRATEGY_RUN",
+          owner_id=run_id,
+          environment="LIVE",
+          account_id="account-1",
+          instrument_code="600000.SH",
+          direction=str(order.get("side") or "BUY"),
+          bucket=bucket,
+          reason="T_RUNTIME",
+          target_volume=volume,
+          status="PENDING",
+        )
+      )
+      db.add(
+        PendingTradeOrder(
+          client_order_id=client_order_id,
+          user_id=user_id,
+          account_id="account-1",
+          owner_type="STRATEGY_RUN",
+          owner_id=run_id,
+          environment="LIVE",
+          instrument_code="600000.SH",
+          side=str(order.get("side") or "BUY"),
+          order_type="FIX_PRICE",
+          limit_price="10",
+          volume=volume,
+          status="SUBMITTED",
+          broker_order_id=broker_order_id,
+          strategy_run_id=run_id,
+          strategy_order_id=strategy_order_id or None,
+          intent_id=intent_id,
+          batch_id=batch_id,
+          bucket=bucket,
+          t_trade_role=t_trade_role,
+          request_metadata={"instrument_code": "600000.SH"},
+        )
+      )
+      db.add(
+        OrderCorrelation(
+          id=f"correlation-{client_order_id}",
+          client_order_id=client_order_id,
+          broker_order_id=broker_order_id,
+          account_id="account-1",
+          owner_type="STRATEGY_RUN",
+          owner_id=run_id,
+          environment="LIVE",
+          strategy_run_id=run_id,
+          strategy_order_id=strategy_order_id or None,
+          intent_id=intent_id,
+          batch_id=batch_id,
+          bucket=bucket,
+          t_trade_role=t_trade_role,
+          trace_id=f"trace-{client_order_id}",
+          request_metadata={"instrument_code": "600000.SH"},
+        )
+      )
+      db.add(
+        TradeCommandOutbox(
+          message_id=f"message-{client_order_id}",
+          client_order_id=client_order_id,
+          idempotency_key=f"command-{client_order_id}",
+          device_id=device_id,
+          account_id="account-1",
+          owner_type="STRATEGY_RUN",
+          owner_id=run_id,
+          environment="LIVE",
+          payload={"command_kind": "PLACE_ORDER", "execution_mode": "live"},
+          expires_at=utcnow() + timedelta(minutes=5),
+        )
+      )
+    await db.commit()
+  return engine, sessions
+
+
 @pytest.mark.asyncio
 async def test_strategy_report_events_are_durable_and_applied_once(
   monkeypatch: pytest.MonkeyPatch,
@@ -189,7 +330,7 @@ async def test_strategy_report_events_are_durable_and_applied_once(
     AuthUser.__table__,
     AccountExecutionControl.__table__,
     PendingTradeOrder.__table__,
-    StrategyOrderCorrelation.__table__,
+    OrderCorrelation.__table__,
     StrategyRuntimeEvent.__table__,
     TradeCommandOutbox.__table__,
     TTradeBatch.__table__,
@@ -218,6 +359,8 @@ async def test_strategy_report_events_are_durable_and_applied_once(
     db.add(
       TradeIntentRecord(
         id="intent-1",
+        idempotency_key="intent-1-key",
+        environment="LIVE",
         owner_type="STRATEGY_RUN",
         owner_id="run-1",
         account_id="account-1",
@@ -240,7 +383,9 @@ async def test_strategy_report_events_are_durable_and_applied_once(
         limit_price=str(Decimal("10.50")),
         volume=100,
         status="QUEUED",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        environment="LIVE",
         strategy_run_id="run-1",
         strategy_order_id="order-1",
         intent_id="intent-1",
@@ -251,7 +396,7 @@ async def test_strategy_report_events_are_durable_and_applied_once(
       )
     )
     db.add(
-      StrategyOrderCorrelation(
+      OrderCorrelation(
         id="correlation-1",
         client_order_id="client-1",
         account_id="account-1",
@@ -261,7 +406,9 @@ async def test_strategy_report_events_are_durable_and_applied_once(
         batch_id="batch-1",
         bucket="swing",
         t_trade_role="ENTRY",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        environment="LIVE",
         trace_id="trace-1",
         request_metadata={"instrument_code": "600000.SH"},
       )
@@ -272,6 +419,10 @@ async def test_strategy_report_events_are_durable_and_applied_once(
         account_id="account-1",
         instrument_code="600000.SH",
         strategy_run_id="run-1",
+        source_execution_owner_type="STRATEGY_RUN",
+        source_execution_owner_id="run-1",
+        source_execution_environment="LIVE",
+        environment="LIVE",
         target_volume=100,
         status="ENTRY_QUEUED",
       )
@@ -282,6 +433,7 @@ async def test_strategy_report_events_are_durable_and_applied_once(
     message_id="report-order",
     device_id="device-1",
     message_type="order_report",
+    protocol_version=PROTOCOL_VERSION,
     client_order_id="client-1",
     raw_payload_hash="hash-order",
     business_idempotency_key="business-order",
@@ -305,6 +457,7 @@ async def test_strategy_report_events_are_durable_and_applied_once(
     message_id="report-trade",
     device_id="device-1",
     message_type="execution_report",
+    protocol_version=PROTOCOL_VERSION,
     client_order_id="client-1",
     raw_payload_hash="hash-trade",
     business_idempotency_key="business-trade",
@@ -376,7 +529,7 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
     AuthUser.__table__,
     AccountExecutionControl.__table__,
     PendingTradeOrder.__table__,
-    StrategyOrderCorrelation.__table__,
+    OrderCorrelation.__table__,
     StrategyRuntimeEvent.__table__,
     TradeCommandOutbox.__table__,
     TTradeBatch.__table__,
@@ -417,6 +570,8 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
       db.add(
         TradeIntentRecord(
           id=intent_id,
+          idempotency_key=f"{intent_id}-key",
+          environment="LIVE",
           owner_type="STRATEGY_RUN",
           owner_id=f"run-{role.lower()}-gap",
           account_id="account-1",
@@ -439,7 +594,9 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
           limit_price=str(Decimal("10.00")),
           volume=100,
           status=terminal_status,
-          execution_mode="live",
+          owner_type="STRATEGY_RUN",
+          owner_id=f"run-{role.lower()}-gap",
+          environment="LIVE",
           strategy_run_id=f"run-{role.lower()}-gap",
           strategy_order_id=f"order-{role.lower()}-gap",
           intent_id=intent_id,
@@ -450,7 +607,7 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
         )
       )
       db.add(
-        StrategyOrderCorrelation(
+        OrderCorrelation(
           id=f"correlation-{role.lower()}-gap",
           client_order_id=client_id,
           account_id="account-1",
@@ -460,7 +617,9 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
           batch_id=batch_id,
           bucket="swing",
           t_trade_role=role,
-          execution_mode="live",
+          owner_type="STRATEGY_RUN",
+          owner_id=f"run-{role.lower()}-gap",
+          environment="LIVE",
           trace_id=f"trace-{role.lower()}-gap",
           request_metadata={"instrument_code": "600000.SH"},
         )
@@ -471,6 +630,10 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
           account_id="account-1",
           instrument_code="600000.SH",
           strategy_run_id=f"run-{role.lower()}-gap",
+          source_execution_owner_type="STRATEGY_RUN",
+          source_execution_owner_id=f"run-{role.lower()}-gap",
+          source_execution_environment="LIVE",
+          environment="LIVE",
           target_volume=100,
           entry_filled_volume=100 if role == "EXIT" else 0,
           entry_avg_price=10.0 if role == "EXIT" else 0.0,
@@ -491,6 +654,7 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
       message_id=f"report-{role.lower()}-terminal",
       device_id="device-1",
       message_type="order_report",
+      protocol_version=PROTOCOL_VERSION,
       client_order_id=client_id,
       raw_payload_hash=f"hash-{role.lower()}-terminal",
       business_idempotency_key=f"business-{role.lower()}-terminal",
@@ -525,6 +689,7 @@ async def test_terminal_order_projection_waits_for_trade_volume_before_final_sta
       message_id=f"report-{execution_id}",
       device_id="device-1",
       message_type="execution_report",
+      protocol_version=PROTOCOL_VERSION,
       client_order_id=client_id,
       raw_payload_hash=f"hash-{execution_id}",
       business_idempotency_key=f"business-{execution_id}",
@@ -652,7 +817,7 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
     AuthUser.__table__,
     AccountExecutionControl.__table__,
     PendingTradeOrder.__table__,
-    StrategyOrderCorrelation.__table__,
+    OrderCorrelation.__table__,
     StrategyRuntimeEvent.__table__,
     TradeCommandOutbox.__table__,
     TTradeBatch.__table__,
@@ -782,6 +947,8 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
     db.add(
       TradeIntentRecord(
         id=intent_id,
+        idempotency_key=f"{intent_id}-key",
+        environment="LIVE",
         owner_type="STRATEGY_RUN",
         owner_id=runtime.run_id,
         account_id="account-1",
@@ -804,7 +971,9 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
         limit_price=str(Decimal("10.00")),
         volume=200,
         status="QUEUED",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id=runtime.run_id,
+        environment="LIVE",
         strategy_run_id=runtime.run_id,
         strategy_order_id="strategy-order-partial",
         intent_id=intent_id,
@@ -815,7 +984,7 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
       )
     )
     db.add(
-      StrategyOrderCorrelation(
+      OrderCorrelation(
         id="correlation-partial",
         client_order_id="client-partial",
         account_id="account-1",
@@ -825,7 +994,9 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
         batch_id=batch_id,
         bucket="swing",
         t_trade_role="ENTRY",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id=runtime.run_id,
+        environment="LIVE",
         trace_id="trace-partial",
         request_metadata=request_metadata,
       )
@@ -836,6 +1007,10 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
         account_id="account-1",
         instrument_code="600000.SH",
         strategy_run_id=runtime.run_id,
+        source_execution_owner_type="STRATEGY_RUN",
+        source_execution_owner_id=runtime.run_id,
+        source_execution_environment="LIVE",
+        environment="LIVE",
         target_volume=200,
         status="ENTRY_QUEUED",
       )
@@ -846,6 +1021,7 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
     message_id="report-cancelled-partial",
     device_id="device-1",
     message_type="delta_report",
+    protocol_version=PROTOCOL_VERSION,
     client_order_id="client-partial",
     raw_payload_hash="hash-cancelled-partial",
     business_idempotency_key="business-cancelled-partial",
@@ -991,6 +1167,7 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
       message_id="report-stage-commit-failure",
       device_id="device-1",
       message_type="order_report",
+      protocol_version=PROTOCOL_VERSION,
       client_order_id="client-partial",
       raw_payload_hash="hash-stage-commit-failure",
       business_idempotency_key="business-stage-commit-failure",
@@ -999,7 +1176,7 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
         "order": {
           "client_order_id": "client-partial",
           "account_id": "account-1",
-          "order_id": 789,
+          "order_id": 456,
           "stock_code": "600000.SH",
           "order_type": 23,
           "order_status": "SUBMITTED",
@@ -1043,9 +1220,8 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
       "_insert_runtime_event",
       original_insert_runtime_event,
     )
-    assert runtime.durable_event_barrier_key == (
-      "order:client-partial:789:SUBMITTED:0"
-    )
+    assert runtime.durable_event_barrier_key.startswith("order:")
+    assert len(runtime.durable_event_barrier_key) == len("order:") + 64
     await report_processor._refresh_runtime_event_barriers()
     assert refresh_attempts == 2
     assert runtime.durable_event_barrier_key is None
@@ -1072,6 +1248,7 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
       message_id="report-late-submitted",
       device_id="device-1",
       message_type="order_report",
+      protocol_version=PROTOCOL_VERSION,
       client_order_id="client-partial",
       raw_payload_hash="hash-late-submitted",
       business_idempotency_key="business-late-submitted",
@@ -1182,6 +1359,12 @@ async def test_same_timestamp_runtime_events_follow_event_id_barrier_order(
       lambda sync_connection: Base.metadata.create_all(
         sync_connection,
         tables=[
+          AuthUser.__table__,
+          AgentDevice.__table__,
+          PendingTradeOrder.__table__,
+          OrderCorrelation.__table__,
+          TradeCommandOutbox.__table__,
+          TradeIntentRecord.__table__,
           StrategyRuntimeEvent.__table__,
           StrategyRunState.__table__,
           StrategyRunPosition.__table__,
@@ -1235,9 +1418,12 @@ async def test_same_timestamp_runtime_events_follow_event_id_barrier_order(
     return StrategyRuntimeEvent(
       event_id=event_id,
       business_key=business_key,
+      owner_type="STRATEGY_RUN",
+      owner_id=context.run_id,
+      environment="LIVE",
       strategy_run_id=context.run_id,
       client_order_id="client-tied",
-      broker_order_id=event_id,
+      broker_order_id="broker-tied",
       event_type="ORDER",
       payload={
         "report": {
@@ -1250,7 +1436,7 @@ async def test_same_timestamp_runtime_events_follow_event_id_barrier_order(
         },
         "metadata": {
           "instrument_code": "600000.SH",
-          "strategy_order_id": f"strategy-{event_id}",
+          "strategy_order_id": f"spoof-{event_id}",
           "runtime_event_key": business_key,
         },
       },
@@ -1262,6 +1448,95 @@ async def test_same_timestamp_runtime_events_follow_event_id_barrier_order(
   lexically_later = make_event("z-inserted-first", "order:tied:z")
   lexically_earlier = make_event("a-inserted-second", "order:tied:a")
   async with sessions() as db:
+    db.add(
+      AuthUser(
+        id="user-tied",
+        username="runtime-tied",
+        display_name="Runtime Tied",
+        password_hash="unused",
+        permissions=[],
+      )
+    )
+    db.add(
+      AgentDevice(
+        id="device-tied",
+        user_id="user-tied",
+        name="tied-agent",
+        secret_hash="x" * 64,
+        authorized_account_ids=["account-1"],
+        capabilities=["live"],
+      )
+    )
+    db.add(
+      TradeIntentRecord(
+        id="intent-tied",
+        idempotency_key="intent-tied-key",
+        strategy_run_id=context.run_id,
+        owner_type="STRATEGY_RUN",
+        owner_id=context.run_id,
+        environment="LIVE",
+        account_id="account-1",
+        instrument_code="600000.SH",
+        direction="BUY",
+        bucket="swing",
+        reason="T_ENTRY",
+        target_volume=100,
+        status="PENDING",
+      )
+    )
+    db.add(
+      PendingTradeOrder(
+        client_order_id="client-tied",
+        user_id="user-tied",
+        account_id="account-1",
+        owner_type="STRATEGY_RUN",
+        owner_id=context.run_id,
+        environment="LIVE",
+        instrument_code="600000.SH",
+        side="BUY",
+        order_type="FIX_PRICE",
+        limit_price="10",
+        volume=100,
+        status="SUBMITTED",
+        broker_order_id="broker-tied",
+        strategy_run_id=context.run_id,
+        strategy_order_id="strategy-tied",
+        intent_id="intent-tied",
+        bucket="swing",
+        request_metadata={"instrument_code": "600000.SH"},
+      )
+    )
+    db.add(
+      OrderCorrelation(
+        id="correlation-tied",
+        client_order_id="client-tied",
+        broker_order_id="broker-tied",
+        account_id="account-1",
+        owner_type="STRATEGY_RUN",
+        owner_id=context.run_id,
+        environment="LIVE",
+        strategy_run_id=context.run_id,
+        strategy_order_id="strategy-tied",
+        intent_id="intent-tied",
+        bucket="swing",
+        trace_id="trace-tied",
+        request_metadata={"instrument_code": "600000.SH"},
+      )
+    )
+    db.add(
+      TradeCommandOutbox(
+        message_id="message-tied",
+        client_order_id="client-tied",
+        idempotency_key="command-tied-key",
+        device_id="device-tied",
+        account_id="account-1",
+        owner_type="STRATEGY_RUN",
+        owner_id=context.run_id,
+        environment="LIVE",
+        payload={"command_kind": "PLACE_ORDER", "execution_mode": "live"},
+        expires_at=utcnow() + timedelta(minutes=5),
+      )
+    )
     db.add(
       StrategyRunState(
         run_id=context.run_id,
@@ -1311,6 +1586,21 @@ async def test_durable_callback_failure_rolls_back_and_balances_queue(
 ) -> None:
   context, strategy, event, _batch_id, plan_id = _reconcile_trade_fixture(
     "callback-rollback"
+  )
+  engine, _sessions = await _runtime_binding_database(
+    monkeypatch,
+    run_id=context.run_id,
+    orders=[
+      {
+        "client_order_id": event.client_order_id,
+        "intent_id": "intent-callback-rollback",
+        "strategy_order_id": "order-callback-rollback",
+        "broker_order_id": "456",
+        "volume": 200,
+        "batch_id": "batch-callback-rollback",
+        "t_trade_role": "ENTRY",
+      }
+    ],
   )
   executor = StrategyExecutor()
   runtime = StrategyRuntime(
@@ -1377,6 +1667,7 @@ async def test_durable_callback_failure_rolls_back_and_balances_queue(
     runtime.status = ExecutionStatus.STOPPED
     runtime.event_task.cancel()
     await asyncio.gather(runtime.event_task, return_exceptions=True)
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -1386,11 +1677,29 @@ async def test_durable_order_callback_failure_restores_entry_reservation(
   context, strategy, trade_event, _batch_id, _plan_id = _reconcile_trade_fixture(
     "order-reservation-rollback"
   )
+  engine, _sessions = await _runtime_binding_database(
+    monkeypatch,
+    run_id=context.run_id,
+    orders=[
+      {
+        "client_order_id": "client-order-reservation-rollback",
+        "intent_id": "intent-order-reservation-rollback",
+        "strategy_order_id": "order-order-reservation-rollback",
+        "broker_order_id": "456",
+        "volume": 200,
+        "batch_id": "batch-order-reservation-rollback",
+        "t_trade_role": "ENTRY",
+      }
+    ],
+  )
   metadata = dict(trade_event.payload["metadata"])
   intent_id = str(metadata["intent_id"])
   order_event = StrategyRuntimeEvent(
     event_id="runtime-event-order-reservation-rollback",
     business_key="order:client-order-reservation-rollback:456:CANCELLED:0",
+    owner_type="STRATEGY_RUN",
+    owner_id=context.run_id,
+    environment="LIVE",
     strategy_run_id=context.run_id,
     client_order_id="client-order-reservation-rollback",
     broker_order_id="456",
@@ -1463,6 +1772,7 @@ async def test_durable_order_callback_failure_restores_entry_reservation(
     runtime.status = ExecutionStatus.STOPPED
     runtime.event_task.cancel()
     await asyncio.gather(runtime.event_task, return_exceptions=True)
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -1472,6 +1782,30 @@ async def test_durable_checkpoint_failure_retries_without_reapplying_callback(
 ) -> None:
   context, strategy, event, _batch_id, plan_id = _reconcile_trade_fixture(
     "checkpoint-retry"
+  )
+  engine, sessions = await _runtime_binding_database(
+    monkeypatch,
+    run_id=context.run_id,
+    orders=[
+      {
+        "client_order_id": event.client_order_id,
+        "intent_id": "intent-checkpoint-retry",
+        "strategy_order_id": "order-checkpoint-retry",
+        "broker_order_id": "456",
+        "volume": 200,
+        "batch_id": "batch-checkpoint-retry",
+        "t_trade_role": "ENTRY",
+      },
+      {
+        "client_order_id": "client-after-barrier",
+        "intent_id": "intent-checkpoint-later",
+        "strategy_order_id": "order-checkpoint-later",
+        "broker_order_id": None,
+        "volume": 200,
+        "batch_id": "batch-checkpoint-retry",
+        "t_trade_role": "ENTRY",
+      },
+    ],
   )
   executor = StrategyExecutor()
   runtime = StrategyRuntime(
@@ -1538,6 +1872,9 @@ async def test_durable_checkpoint_failure_retries_without_reapplying_callback(
   later_event = StrategyRuntimeEvent(
     event_id="runtime-event-after-barrier",
     business_key="order:client-after-barrier::SUBMITTED:0",
+    owner_type="STRATEGY_RUN",
+    owner_id=context.run_id,
+    environment="LIVE",
     strategy_run_id=context.run_id,
     client_order_id="client-after-barrier",
     broker_order_id=None,
@@ -1605,6 +1942,7 @@ async def test_durable_checkpoint_failure_retries_without_reapplying_callback(
     runtime.status = ExecutionStatus.STOPPED
     runtime.event_task.cancel()
     await asyncio.gather(runtime.event_task, return_exceptions=True)
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -1621,7 +1959,13 @@ async def test_runtime_event_checkpoint_failure_returns_event_to_pending(
       lambda sync_connection: Base.metadata.create_all(
         sync_connection,
         tables=[
-          StrategyOrderCorrelation.__table__,
+          AuthUser.__table__,
+          AgentDevice.__table__,
+          AccountExecutionControl.__table__,
+          PendingTradeOrder.__table__,
+          OrderCorrelation.__table__,
+          TradeCommandOutbox.__table__,
+          TradeIntentRecord.__table__,
           StrategyRuntimeEvent.__table__,
           TTradeBatch.__table__,
         ],
@@ -1677,6 +2021,97 @@ async def test_runtime_event_checkpoint_failure_returns_event_to_pending(
   )
 
   async with sessions() as db:
+    db.add(
+      AuthUser(
+        id="user-drain-retry",
+        username="runtime-drain-retry",
+        display_name="Runtime Drain Retry",
+        password_hash="unused",
+        permissions=[],
+      )
+    )
+    db.add(
+      AgentDevice(
+        id="device-drain-retry",
+        user_id="user-drain-retry",
+        name="drain-retry-agent",
+        secret_hash="x" * 64,
+        authorized_account_ids=["account-1"],
+        capabilities=["live"],
+      )
+    )
+    db.add(
+      TradeIntentRecord(
+        id="intent-drain-retry",
+        idempotency_key="intent-drain-retry-key",
+        strategy_run_id=context.run_id,
+        owner_type="STRATEGY_RUN",
+        owner_id=context.run_id,
+        environment="LIVE",
+        account_id="account-1",
+        instrument_code="600000.SH",
+        direction="BUY",
+        bucket="swing",
+        reason="T_RUNTIME",
+        target_volume=200,
+        status="PENDING",
+      )
+    )
+    db.add(
+      PendingTradeOrder(
+        client_order_id=event.client_order_id,
+        user_id="user-drain-retry",
+        account_id="account-1",
+        owner_type="STRATEGY_RUN",
+        owner_id=context.run_id,
+        environment="LIVE",
+        instrument_code="600000.SH",
+        side="BUY",
+        order_type="FIX_PRICE",
+        limit_price="10",
+        volume=200,
+        status="SUBMITTED",
+        broker_order_id="456",
+        strategy_run_id=context.run_id,
+        strategy_order_id="order-drain-retry",
+        intent_id="intent-drain-retry",
+        batch_id=batch_id,
+        bucket="swing",
+        t_trade_role="ENTRY",
+      )
+    )
+    db.add(
+      OrderCorrelation(
+        id="correlation-drain-retry",
+        client_order_id=event.client_order_id,
+        broker_order_id="456",
+        account_id="account-1",
+        owner_type="STRATEGY_RUN",
+        owner_id=context.run_id,
+        environment="LIVE",
+        strategy_run_id=context.run_id,
+        strategy_order_id="order-drain-retry",
+        intent_id="intent-drain-retry",
+        batch_id=batch_id,
+        bucket="swing",
+        t_trade_role="ENTRY",
+        trace_id="trace-drain-retry",
+      )
+    )
+    db.add(
+      TradeCommandOutbox(
+        message_id="message-drain-retry",
+        client_order_id=event.client_order_id,
+        idempotency_key="command-drain-retry-key",
+        device_id="device-drain-retry",
+        account_id="account-1",
+        owner_type="STRATEGY_RUN",
+        owner_id=context.run_id,
+        environment="LIVE",
+        payload={"command_kind": "PLACE_ORDER", "execution_mode": "live"},
+        expires_at=utcnow() + timedelta(minutes=5),
+      )
+    )
     db.add(event)
     db.add(
       TTradeBatch(
@@ -1684,6 +2119,10 @@ async def test_runtime_event_checkpoint_failure_returns_event_to_pending(
         account_id="account-1",
         instrument_code="600000.SH",
         strategy_run_id=context.run_id,
+        source_execution_owner_type="STRATEGY_RUN",
+        source_execution_owner_id=context.run_id,
+        source_execution_environment="LIVE",
+        environment="LIVE",
         target_volume=200,
         entry_filled_volume=100,
         entry_avg_price=10.0,

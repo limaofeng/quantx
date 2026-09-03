@@ -1,11 +1,11 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0 已完成；P1 维护演练门已解除，P1-02/P1-04..06 待完成）<br>
-> 版本：1.8<br>
+> 状态：`DONE`（P0、P1 已完成；P2/P3 前置已解除，后续阶段尚未开始）<br>
+> 版本：1.9<br>
 > 日期：2026-09-03<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
-> 开发实施进度：1 / 9 个阶段门完成（11.1%）
+> 开发实施进度：2 / 9 个阶段门完成（22.2%）
 
 ## 1. 目的与使用方式
 
@@ -156,9 +156,9 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | 阶段 | 范围 | 状态 | 强前置 | 退出门摘要 | 证据 |
 |---|---|---|---|---|---|
 | P0 | 基线冻结与契约清点 | `DONE` | 文档基线 | 清单、policy、只读审计、405 + 9 审计单测基线齐全 | [P0 冻结基线](多标的做T助手P0冻结基线.md) |
-| P1 | Owner 与协议 1.2 | `IN_PROGRESS` | P0；P1-01 强类型地基与 P1-03 fail-closed Router 已完成但尚未接入回报链；PAPER legacy 义务已受控收敛且 P1 readiness=true；停服、停服态备份、迁移、标准 full/live 恢复、全量快照对账和隔离恢复演练已通过 | 单 owner/单 payload、既有路径等价；P1-02/P1-04..06 尚未完成 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`、真实库 ready=true；停服态备份完整恢复至 head，QMT journal 与 Monitor 均通过；标准 full/live 冷启动 exit=`0`；P0 audit blockers=`0` |
-| P2 | 公共 ExitPlan/容量/准入安全地基 | `NOT_STARTED` | P1 | 无第二真源，故障恢复通过 | 待补 |
-| P3 | 独立 T runtime 与精确行情归约 | `NOT_STARTED` | P1 | 无 StrategyRun、新旧规则 shadow 等价 | 待补 |
+| P1 | Owner 与协议 1.2 | `DONE` | P0；P1-01..06 均已完成；PAPER legacy 义务已受控收敛；停服、停服态备份、迁移、标准 full/live 恢复、全量快照对账和隔离恢复演练已通过 | 单一 `ExecutionOwnerRef`、单一 protocol 1.2 payload、既有路径等价；未知/冲突 owner 与结果未知均 fail-closed；无双协议 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`；0046/0047 schema gate 通过；owner 空值 `0`、8 个身份不可变触发器通过；最新 1.2 快照 `PROCESSED`、旧失败快照 `SUPERSEDED`；标准 full/live 冷启动 exit=`0`，`liveTrading=ENABLED`，QMT/marketData/Monitor READY、快照约 3 秒，gateway/schema verify 通过 |
+| P2 | 公共 ExitPlan/容量/准入安全地基 | `NOT_STARTED` | `P1 DONE`（前置已解除） | 无第二真源，故障恢复通过 | 待补 |
+| P3 | 独立 T runtime 与精确行情归约 | `NOT_STARTED` | `P1 DONE`（前置已解除） | 无 StrategyRun、新旧规则 shadow 等价 | 待补 |
 | P4 | 分配、PAPER 与跨域准入 | `NOT_STARTED` | P2 + P3 | 整批原子、PAPER 闭环、无真实订单 | 待补 |
 | P5 | 共享账户回测 | `NOT_STARTED` | P4 | 无重复资金/未来数据，结果可重放 | 待补 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
@@ -188,24 +188,26 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 P0 初始冻结时 P1 readiness 为 `false`：开发库当时仍有 2 条 terminal-run `AWAITING_APPROVAL`/缺
 candidate identity、2 条 nonterminal intent、1 条 `ERROR` orphan outstanding T ExitPlan。上述 PAPER
 legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=`true`。维护窗口已实际完成
-停组件、停服态备份、迁移、标准 full/live 恢复、全量快照对账和备份隔离恢复演练，P1 已转为
-`IN_PROGRESS`；目标 protocol 1.2 的真实切换仍只能在 P1-02/P1-04..06 原子实现完成后执行。
+停组件、停服态备份、迁移、标准 full/live 恢复、全量快照对账和备份隔离恢复演练。以上是 P1 中间态
+历史记录；随后 P1-02/P1-04..06 已在同一原子发布中完成，当前唯一在线 Agent 控制协议为 1.2。
 
 ### P1：公共 `ExecutionOwnerRef` 与协议 1.2 原子升级
 
 前置：P0 `DONE`，维护窗口和结果未知命令处置流程可执行。
 
 - [x] `TTA-P1-01` 在 domain/contracts 建立强类型 `ExecutionOwnerRef` 与明确 owner enum。
-- [ ] `TTA-P1-02` 原子演进 intent、approval、pending、correlation、outbox、ExitPlan source 和回报
+- [x] `TTA-P1-02` 原子演进 intent、approval、pending、correlation、outbox、ExitPlan source 和回报
   路由表；回填普通策略/人工命令，删除默认 StrategyRun fallback。
 - [x] `TTA-P1-03` 建立最小 `OwnerRuntimeRouter`，未知、冲突或失联 owner 一律 fail-closed。
-- [ ] `TTA-P1-04` 将 Agent 命令/报告契约切换到 protocol 1.2；先排空未投递 1.1 outbox，未知结果
+- [x] `TTA-P1-04` 将 Agent 命令/报告契约切换到 protocol 1.2；先排空未投递 1.1 outbox，未知结果
   只 reconcile，禁止换 payload 重发。
-- [ ] `TTA-P1-05` 同步 API、Engine、QMT Agent、GraphQL、Web、codegen 和客户端文档。
-- [ ] `TTA-P1-06` 验证普通 StrategyRun、MANUAL_COMMAND 与 EXIT_PLAN 行为等价、幂等和乱序恢复。
+- [x] `TTA-P1-05` 同步 API、Engine、QMT Agent、GraphQL、Web、codegen 和客户端文档。
+- [x] `TTA-P1-06` 验证普通 StrategyRun、MANUAL_COMMAND 与 EXIT_PLAN 行为等价、幂等和乱序恢复。
 
-退出门：运行时只产生一个 owner 协议和一个 Agent payload；不存在 metadata-only owner、双写或
-默认 StrategyRun；尚未允许新 T owner 下真实订单。
+退出门：运行时只使用一个 owner 协议和一个 Agent payload；不存在 metadata-only owner、双写或
+默认 StrategyRun fallback。当前 Router 仅注册 `STRATEGY_RUN`、`EXIT_PLAN`、`MANUAL_COMMAND`；
+`T_ASSISTANT_EXECUTION`、`ENTRY_PLAN`、`BOARD_ASSISTANT_EXECUTION` 等未注册或未知/冲突 owner
+仍 fail-closed，P2/P3 完成前不允许新 T runtime 产生真实订单。
 
 ### P2：公共退出、容量与风险增加准入地基
 
@@ -317,7 +319,8 @@ legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=
 
 ### 6.1 绝对禁止提前打开的能力
 
-- P1 未完成：禁止新 T owner 进入公共下单链。
+- P1 已完成但 P2/P3 未完成：公共 owner/protocol 地基已上线，仍禁止
+  `T_ASSISTANT_EXECUTION` 新 runtime 产生真实订单；未注册或无法证明的 owner 继续 fail-closed。
 - P2/P3 未完成：禁止 P4 产生任何真实容量义务。
 - P5 未完成：禁止 LIVE。
 - P6 未完成：禁止 AUTO。
@@ -335,7 +338,7 @@ legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=
 ### 6.3 文档后置更新门
 
 只有阶段行为已经在默认 Windows Dev 基线生效，才更新 As-Is 文档。目标设计和本方案可以提前
-描述未来状态，但必须保持“目标/计划”标签。protocol 1.2 切换后需同时更新：
+描述未来状态，但必须保持“目标/计划”标签。protocol 1.2 已切换并成为当前默认基线；本轮同步更新：
 
 - `docs/architecture/系统架构设计.md`；
 - `docs/engineering/qmt-agent/README.md`；
@@ -380,8 +383,8 @@ npm run build
 
 | 风险 | 影响 | 预防/处置 | 状态 |
 |---|---|---|---|
-| `strategy_run_id` 跨层耦合范围大 | 漏改导致伪 owner 或回报失联 | P0 分层清点，P1 原子升级和 fallback 反向测试 | `OPEN` |
-| protocol 1.1/1.2 切换存在未知命令 | 重发可能重复下单 | 停新命令、排空未投递、未知只 reconcile | `OPEN` |
+| `strategy_run_id` 跨层耦合范围大 | 漏改导致伪 owner 或回报失联 | P0 分层清点；P1-02/P1-06 已将 intent、pending、correlation、outbox、runtime event 和 ExitPlan source 切换为强类型 owner，并以 owner/environment 冲突反向测试守住边界 | `CLOSED`（`TTA-P1-02`, `TTA-P1-06`） |
+| protocol 1.1/1.2 切换存在未知命令 | 重发可能重复下单 | P1-04/P1-05/P1-06 已完成停新命令、未知只 reconcile、唯一 protocol 1.2；最新未知结果为 `0`，无双协议/双 payload | `CLOSED`（`TTA-P1-04..06`） |
 | 决策触发合并误丢 Tick | FSM/candidate 与回测不一致 | reducer 与 trigger 分层、cursor/gap/ring 强测试 | `OPEN` |
 | cycle 与 allocation 恢复身份混淆 | 重复提案或半批 | decision key 与 attempt 分离、durable claim/fence | `OPEN` |
 | 做 T 内部排名不覆盖跨域 BUY | 账户锁赢家由调度偶然性决定 | 公共 risk-increase admission sequencer | `OPEN` |
@@ -407,29 +410,35 @@ npm run build
 | 2026-09-03 | `TTA-P1-GATE-03` | `DONE` | `ops/quantx.ps1 backup -Environment dev` 权威备份与 `restore-verify` 完整隔离恢复；修复 0045 对 pre-Alembic `create_all` 三表的严格接管和 6 个 naive-UTC 时间列原子转换；收紧 schema `status/check/assert`，结构与 revision 必须同时健康 | commit：`5c7527e7642491439ddaa70dff34edb2c2a6f8a9`；迁移单测 `15 passed`，schema/restore 合同 `17 passed`；6.8GB PostgreSQL 归档两次完整恢复至 `20260902_0045`，最终 missing tables/columns 均为空；QMT journal integrity=`ok`、pending reports=`0`，Monitor=`valid` |
 | 2026-09-03 | `TTA-P1-GATE-04` | `DONE` | 实际维护窗口按顺序停止主服务、创建停服态权威备份、将开发库从 `20260901_0044` 迁移至 `20260902_0045`、用标准 full/live 入口恢复，并复跑 verify、P0 audit 与 P1 preflight；停服态备份随后完整隔离恢复 | 主服务停止期间 Monitor 保持在线；恢复后 QMT/marketData READY、protocol=`1.1`、快照新鲜；P0 blocker=`0`、P1 ready=true、queued/unknown/inbox 均为 `0`；隔离恢复 missing tables/columns 均为空，QMT journal integrity=`ok`、pending reports=`0`，Monitor=`valid` |
 | 2026-09-03 | `TTA-P1-GATE-05` | `DONE` | 修复标准启动器用完整账户号比较健康接口脱敏账户标识、导致 READY 永不命中的契约错误；新增与 API 一致的纯脱敏函数和错误尾号反向测试，保留服务端完整账户集合校验为精确权威 | ops 契约 `38 passed`、Ruff 与 `git diff --check` 通过；标准 `up -Environment dev -Profile web` 冷启动 exit=`0`，随后 status 显示 full/live、QMT 与 marketData READY，gateway/schema verify 通过 |
+| 2026-09-03 | `TTA-P1-02 / TTA-P1-04..06 / P1` | `DONE` | owner migration 已贯穿 intent、pending、correlation、outbox、runtime event 与 ExitPlan source；Agent 命令/报告、API、Engine、QMT Agent、GraphQL/Web 与客户端已原子切换到唯一 protocol 1.2。Router 当前仅注册 `STRATEGY_RUN`、`EXIT_PLAN`、`MANUAL_COMMAND`，未知/未注册/冲突 owner fail-closed；PLACE_ORDER 固定 10 字段、CANCEL_ORDER 固定 6 字段，均为 `FIX_PRICE` 正数限价（PLACE）；QMT `strategy_name=''`、remark 为 `qx:` 加 client order id 前 20 字符；ACK 仅投递，回报 inbox-first | 0046 owner migration、0047 vendor `order_sysid` widen 正式成功，schema head=`0047`；0046 preflight 的 intents=`2879`、pending=`3`、outbox=`4`、plans=`13`、challenges=`29`，owner 空值=`0`，8 个身份不可变触发器通过；迁移前受控修复 1 条 terminal ExitPlan orphan intent；最新 1.2 snapshots=`PROCESSED`、旧失败=`SUPERSEDED`、unknown result=`0`、无双协议；标准 full/live 冷启动 exit=`0`，`liveTrading=ENABLED`，QMT/marketData/Monitor READY，快照约 3 秒，gateway/schema verify 通过；最终恢复点为 `2026-09-03T09:03:06Z`。commit：本轮 P1 原子收口提交（由主任务提交） |
 
 后续每条 `DONE` 证据应包含 commit、验证命令及结果摘要；若输出过长，链接到仓库内稳定测试报告，
 不粘贴包含账户、设备或券商敏感信息的日志。
 
+台账中的 `TTA-P1-GATE-02`、`TTA-P1-GATE-04` 行记录的是切换前维护演练时的历史事实，
+其中的 `actualCutover=false` 与 `protocol=1.1` 不代表当前 As-Is；历史原始载荷和失败原因
+仍按审计要求保留。当前基线以本行 closeout 证据及下文“当前状态与下一动作”为准。
+
 ## 10. 当前状态与下一动作
 
-当前结论：**P0 已完成，P1-01 强类型 owner 地基、P1-03 fail-closed Router、PAPER legacy
-reconciliation 和实际维护窗口演练均已完成；当前运行仍是系统架构文档描述的 StrategyRun +
-protocol 1.1 As-Is，P1 原子切换为 `IN_PROGRESS`。** 新类型尚未接入公共持久化和 Agent 命令链，
-不代表 protocol 1.2 已上线。
-真实库已在精确数量门和同事务重验下收敛 2 条 terminal-run `AWAITING_APPROVAL`/缺 candidate
-identity 记录与 1 条 `ERROR` orphan outstanding T ExitPlan；复验 P0 blocker=`0`、P1 readiness=true。
-protocol 1.2 只读切换 preflight 已在真实库通过；在线备份和停服态备份均已完成全量隔离恢复，
-实际维护窗口也完成了停服、迁移、标准 full/live 恢复和全量快照对账。演练没有伪称 protocol 1.2
-已部署：`actualCutover=false` 仍是事实，目标协议切换属于尚未完成的 P1-04/P1-05。
+当前结论：**P0、P1 均已完成。** P1 原子切换后，唯一在线 Agent 控制协议为 `1.2`；
+`ExecutionOwnerRef` 已贯穿 intent、pending、correlation、outbox、runtime event 和 ExitPlan
+source，`strategy_run_id` 仅作为 StrategyRun 的可选一致性见证，不能再作为默认 owner fallback。
+当前 Router 仅注册 `STRATEGY_RUN`、`EXIT_PLAN`、`MANUAL_COMMAND`；未知、未注册或 owner/environment
+冲突均 fail-closed，`T_ASSISTANT_EXECUTION`、`ENTRY_PLAN`、`BOARD_ASSISTANT_EXECUTION` 尚未
+成为可产生真实订单的 runtime。P1 运行证据、schema current=`0047`、owner 空值=`0`、快照
+收敛和 full/live 冷启动结果见上方 closeout 台账；维护演练中的 1.1/`actualCutover=false`
+是历史记录，不覆盖当前 As-Is。
 
-下一动作固定为完成 P1 原子实现与目标协议切换，不能把中间态部署为双协议：
+下一动作进入 P2/P3，二者可并行开发，但都不得把目标能力写成当前事实：
 
-1. 完成 P1-02/P1-04..06：数据库与公共命令/回报链原子采用单一 owner，接入 Router，将 Agent、
-   API、Engine、GraphQL/Web 和文档一次性切换到唯一 protocol 1.2，并完成等价、幂等和乱序恢复测试。
-2. 目标切换前再次运行 `python ops\t-assistant-p0-audit.py --format markdown --require-ready` 和只读
-   preflight；停止新命令、排空 1.1 未投递 outbox、收敛 inbox、创建新鲜停服态备份后才部署。
-   已投递或结果未知命令只 reconcile，不回滚、不重编码、不重发。
+1. P2：实现公共 `ExitPlanRuntime`、容量/obligation watermark、跨域风险增加准入顺序、版本化
+   Entry/Exit policy 及其故障恢复测试；继续保持唯一账户事实、owner 绑定和退出独立恢复。
+2. P3：实现独立 `TAssistantExecution`、逐 Tick `SymbolMarketStateReducer`、delta ring/gap/
+   rewarm、snapshot cadence、cycle material 与隔离 PAPER shadow；在 P3 完成前不开放新的
+   T owner 真实订单。
+3. P4 仍须等待 P2 与 P3 同时 `DONE`；P1 的 protocol/owner 合同只作为后续阶段的稳定前置，
+   不启动双协议或旧 owner 旁路。
 
 ## 11. 变更记录
 
@@ -444,3 +453,4 @@ protocol 1.2 只读切换 preflight 已在真实库通过；在线备份和停�
 | 1.6 | 2026-09-03 | 完成 protocol 1.2 只读切换 preflight 与瞬时 inbox fail-closed 复验；真实库最终 ready=true，但未把模拟步骤记为实际停服、备份或部署，P1 仍等待实际维护窗口演练。 |
 | 1.7 | 2026-09-03 | 完成权威备份的两次全量隔离恢复验证；0045 严格接管 pre-Alembic 三表并原子修正 naive-UTC 时间列，schema gate 改为结构与 revision 双门。恢复至 head、QMT journal 和 Monitor 均通过；实际停服/部署/恢复后全量快照对账仍未执行。 |
 | 1.8 | 2026-09-03 | 完成实际维护窗口的停服态备份、迁移、标准 full/live 恢复、全量快照对账与隔离恢复；修复启动器将完整账户号与健康接口脱敏值比较而永不命中 READY 的契约错误。维护演练门解除，P1 转为 `IN_PROGRESS`；protocol 1.2 仍待 P1-02/P1-04..06 原子实现和真实切换。 |
+| 1.9 | 2026-09-03 | P1 closeout：P1-02/P1-04..06 完成，owner identity 贯穿公共持久化与回报链，唯一 Agent protocol 1.2 已在标准 full/live 基线生效；0046/0047、快照收敛、无未知结果、无双协议与冷启动证据已登记。P2/P3 前置解除，下一步转入 P2/P3。 |

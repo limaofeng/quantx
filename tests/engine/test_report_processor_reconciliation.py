@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_domain.clock import utcnow
 from quantx_engine import report_processor
 from quantx_infrastructure.database.relational_base import Base
@@ -16,9 +17,10 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   AgentReportInbox,
   OperationalAlert,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
-  StrategyOrderCorrelation,
+  TradeCommandOutbox,
 )
 from quantx_infrastructure.models.auth import AuthUser
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
@@ -75,6 +77,9 @@ def test_runtime_order_key_distinguishes_missing_invalid_and_explicit_zero_fill(
   correlation = SimpleNamespace(
     account_id="account-1",
     client_order_id="client-1",
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
   )
   order = {
     "order_id": 101,
@@ -93,9 +98,10 @@ def test_runtime_order_key_distinguishes_missing_invalid_and_explicit_zero_fill(
     {**order, "traded_volume": 0},
   )
 
-  assert missing.endswith(":CANCELLED:MISSING")
-  assert invalid.endswith(":CANCELLED:INVALID")
-  assert explicit_zero.endswith(":CANCELLED:0")
+  assert all(
+    key.startswith("order:") and len(key) == len("order:") + 64
+    for key in (missing, invalid, explicit_zero)
+  )
   assert len({missing, invalid, explicit_zero}) == 3
 
 
@@ -103,18 +109,14 @@ def test_runtime_order_key_distinguishes_missing_invalid_and_explicit_zero_fill(
 async def test_runtime_order_event_preserves_missing_cumulative_fill(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  from quantx_engine.strategy_manager import strategy_manager
-
   apply_order = AsyncMock()
-  monkeypatch.setattr(
-    strategy_manager.executor,
-    "apply_durable_order_report",
-    apply_order,
-  )
   event = SimpleNamespace(
-    strategy_run_id="run-1",
-    event_type="ORDER",
-    business_key="order:client-1:101:CANCELLED:MISSING",
+    event_kind=report_processor.OwnerRuntimeEventKind.ORDER,
+    event_id="runtime-order-missing-fill",
+    execution_ref=report_processor.ExecutionOwnerRef(
+      "STRATEGY_RUN", "run-1"
+    ),
+    environment=report_processor.ExecutionEnvironment.LIVE,
     payload={
       "metadata": {
         "strategy_order_id": "strategy-order-1",
@@ -130,8 +132,40 @@ async def test_runtime_order_event_preserves_missing_cumulative_fill(
       },
     },
   )
-
-  await report_processor._apply_runtime_event(event)
+  pending = SimpleNamespace(
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
+    strategy_run_id="run-1",
+    account_id="account-1",
+    instrument_code="600000.SH",
+    side="SELL",
+    volume=100,
+    limit_price="10",
+  )
+  correlation = SimpleNamespace(
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
+    strategy_run_id="run-1",
+    client_order_id="client-1",
+    strategy_order_id="strategy-order-1",
+    intent_id="intent-1",
+    batch_id=None,
+    bucket="swing",
+    t_trade_role=None,
+    risk_decision_id=None,
+    trace_id="trace-1",
+    substitution_plan=None,
+  )
+  executor = SimpleNamespace(apply_durable_order_report=apply_order)
+  await report_processor._apply_strategy_run_runtime_event(
+    executor,
+    "run-1",
+    event,
+    pending=pending,
+    correlation=correlation,
+  )
 
   order = apply_order.await_args.args[1]
   assert order.filled_volume is None
@@ -144,8 +178,10 @@ async def test_stale_order_sequence_does_not_propagate_to_exit_plan(
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   tables = [
     AuthUser.__table__,
+    AccountExecutionControl.__table__,
+    TradeCommandOutbox.__table__,
     PendingTradeOrder.__table__,
-    StrategyOrderCorrelation.__table__,
+    OrderCorrelation.__table__,
     TradeIntentRecord.__table__,
   ]
   async with engine.begin() as connection:
@@ -191,7 +227,9 @@ async def test_stale_order_sequence_does_not_propagate_to_exit_plan(
         volume=1_000,
         status="PARTIAL_FILLED",
         broker_order_id="101",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        environment="LIVE",
         strategy_run_id="run-1",
         strategy_order_id="strategy-order-1",
         intent_id="intent-1",
@@ -201,7 +239,24 @@ async def test_stale_order_sequence_does_not_propagate_to_exit_plan(
       )
     )
     db.add(
-      StrategyOrderCorrelation(
+      TradeIntentRecord(
+        id="intent-1",
+        idempotency_key="intent-1-key",
+        strategy_run_id="run-1",
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        environment="LIVE",
+        account_id="account-1",
+        instrument_code="600000.SH",
+        direction="SELL",
+        bucket="swing",
+        reason="REPORT_RECONCILIATION",
+        target_volume=1_000,
+        status="PARTIAL_FILLED",
+      )
+    )
+    db.add(
+    OrderCorrelation(
         id="correlation-1",
         client_order_id="client-1",
         broker_order_id="101",
@@ -210,7 +265,9 @@ async def test_stale_order_sequence_does_not_propagate_to_exit_plan(
         strategy_order_id="strategy-order-1",
         intent_id="intent-1",
         bucket="swing",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        environment="LIVE",
         trace_id="trace-1",
         request_metadata={"exit_plan_id": "plan-1"},
       )
@@ -251,8 +308,10 @@ async def test_order_without_client_id_uses_broker_correlation_for_exit_plan(
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   tables = [
     AuthUser.__table__,
+    AccountExecutionControl.__table__,
+    TradeCommandOutbox.__table__,
     PendingTradeOrder.__table__,
-    StrategyOrderCorrelation.__table__,
+    OrderCorrelation.__table__,
     TradeIntentRecord.__table__,
   ]
   async with engine.begin() as connection:
@@ -297,7 +356,9 @@ async def test_order_without_client_id_uses_broker_correlation_for_exit_plan(
         volume=1_000,
         status="SUBMITTED",
         broker_order_id="101",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        environment="LIVE",
         strategy_run_id="run-1",
         strategy_order_id="strategy-order-1",
         intent_id="intent-1",
@@ -307,7 +368,24 @@ async def test_order_without_client_id_uses_broker_correlation_for_exit_plan(
       )
     )
     db.add(
-      StrategyOrderCorrelation(
+      TradeIntentRecord(
+        id="intent-1",
+        idempotency_key="intent-1-key",
+        strategy_run_id="run-1",
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        environment="LIVE",
+        account_id="account-1",
+        instrument_code="600000.SH",
+        direction="SELL",
+        bucket="swing",
+        reason="REPORT_RECONCILIATION",
+        target_volume=1_000,
+        status="SUBMITTED",
+      )
+    )
+    db.add(
+      OrderCorrelation(
         id="correlation-1",
         client_order_id="client-1",
         broker_order_id="101",
@@ -316,7 +394,9 @@ async def test_order_without_client_id_uses_broker_correlation_for_exit_plan(
         strategy_order_id="strategy-order-1",
         intent_id="intent-1",
         bucket="swing",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        environment="LIVE",
         trace_id="trace-1",
         request_metadata={"exit_plan_id": "plan-1"},
       )
@@ -666,7 +746,7 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
   await report_processor._process_delta_report(
     "device-1",
     payload,
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   snapshot_discrepancies.assert_awaited_once_with(
@@ -1107,7 +1187,7 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
   await report_processor._process_delta_report(
     "device-new",
     payload,
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   async with sessions() as db:
@@ -1248,7 +1328,7 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
       }
     ],
     "trades": [],
-    # Deliberately omit the protocol-1.1 section-completeness proof.
+    # Deliberately omit the current-protocol section-completeness proof.
     "unavailable_accounts": [],
   }
   if include_completeness:
@@ -1278,14 +1358,14 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
       await report_processor._process_delta_report(
         "device-1",
         payload,
-        protocol_version="1.1",
+        protocol_version=PROTOCOL_VERSION,
       )
   else:
     with pytest.raises(ValueError, match="权威证明"):
       await report_processor._process_delta_report(
         "device-1",
         payload,
-        protocol_version="1.1",
+        protocol_version=PROTOCOL_VERSION,
       )
 
   assert observed_gate_statuses == []
@@ -1425,7 +1505,7 @@ async def test_authoritative_snapshot_account_mismatch_fails_closed_once(
     await report_processor._process_delta_report(
       "device-1",
       payload,
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
     )
 
   position_service.mark_snapshot_failure.assert_awaited_once_with(
@@ -1555,7 +1635,7 @@ async def test_new_authoritative_snapshot_supersedes_old_snapshot_dead_letter(
         message_id=old_id,
         device_id="device-1",
         message_type="delta_report",
-        protocol_version="1.1",
+        protocol_version=PROTOCOL_VERSION,
         raw_payload_hash="a" * 64,
         business_idempotency_key="old-snapshot",
         payload=full_payload("snapshot-old", 1),
@@ -1570,7 +1650,7 @@ async def test_new_authoritative_snapshot_supersedes_old_snapshot_dead_letter(
         message_id=current_id,
         device_id="device-1",
         message_type="delta_report",
-        protocol_version="1.1",
+        protocol_version=PROTOCOL_VERSION,
         raw_payload_hash="b" * 64,
         business_idempotency_key="current-snapshot",
         payload=full_payload("snapshot-current", 2),
@@ -1696,7 +1776,7 @@ async def test_claim_coalesces_old_full_snapshots_without_skipping_deltas(
           message_id=old_id,
           device_id="device-claim",
           message_type="delta_report",
-          protocol_version="1.1",
+          protocol_version=PROTOCOL_VERSION,
           raw_payload_hash="a" * 64,
           business_idempotency_key="old-full",
           payload=full_snapshot(old_id, 1),
@@ -1708,7 +1788,7 @@ async def test_claim_coalesces_old_full_snapshots_without_skipping_deltas(
           message_id=delta_id,
           device_id="device-claim",
           message_type="delta_report",
-          protocol_version="1.1",
+          protocol_version=PROTOCOL_VERSION,
           raw_payload_hash="b" * 64,
           business_idempotency_key="interleaved-delta",
           payload={"account_id": "account-1", "position_deltas": []},
@@ -1720,7 +1800,7 @@ async def test_claim_coalesces_old_full_snapshots_without_skipping_deltas(
           message_id=newest_id,
           device_id="device-claim",
           message_type="delta_report",
-          protocol_version="1.1",
+          protocol_version=PROTOCOL_VERSION,
           raw_payload_hash="c" * 64,
           business_idempotency_key="newest-full",
           payload=full_snapshot(newest_id, 2),
@@ -1747,3 +1827,315 @@ async def test_claim_coalesces_old_full_snapshots_without_skipping_deltas(
     assert newest_report is not None
     assert newest_report.processing_status == "PROCESSING"
   await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_claim_quarantines_legacy_order_and_execution_reports(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """Legacy inbox rows are dead-lettered and never enter normal convergence."""
+
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AuthUser.__table__,
+    AgentDevice.__table__,
+    AgentReportInbox.__table__,
+    AccountExecutionControl.__table__,
+    AccountExecutionControlEvent.__table__,
+    OperationalAlert.__table__,
+    PendingTradeOrder.__table__,
+    TradeCommandOutbox.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  now = utcnow()
+  order_client_id = "legacy-client-order"
+  execution_client_id = "legacy-client-execution"
+  async with sessions() as db:
+    db.add(
+      AuthUser(
+        id="user-protocol",
+        username="protocol-test",
+        display_name="Protocol Test",
+        password_hash="unused",
+        permissions=[],
+      )
+    )
+    db.add(
+      AgentDevice(
+        id="device-protocol",
+        user_id="user-protocol",
+        name="protocol-agent",
+        secret_hash="x" * 64,
+        authorized_account_ids=["account-1"],
+        capabilities=["live"],
+      )
+    )
+    db.add(
+      AccountExecutionControl(
+        account_id="account-1",
+        authorization_state="ENABLED",
+        reconcile_status="READY",
+        state_version=1,
+      )
+    )
+    for client_order_id, broker_order_id, strategy_order_id, intent_id in (
+      (order_client_id, "9101", "legacy-order", "legacy-intent-order"),
+      (execution_client_id, "9102", "legacy-execution", "legacy-intent-execution"),
+    ):
+      db.add(
+        PendingTradeOrder(
+          client_order_id=client_order_id,
+          user_id="user-protocol",
+          account_id="account-1",
+          owner_type="STRATEGY_RUN",
+          owner_id="legacy-run",
+          environment="LIVE",
+          instrument_code="600000.SH",
+          side="SELL",
+          order_type="FIX_PRICE",
+          limit_price="10",
+          volume=100,
+          status="SUBMITTED",
+          broker_order_id=broker_order_id,
+          strategy_run_id="legacy-run",
+          strategy_order_id=strategy_order_id,
+          intent_id=intent_id,
+          bucket="core",
+          request_metadata={"request_kind": "legacy-test"},
+        )
+      )
+      db.add(
+        TradeCommandOutbox(
+          message_id=f"message-{client_order_id}",
+          client_order_id=client_order_id,
+          idempotency_key=f"idempotency-{client_order_id}",
+          device_id="device-protocol",
+          account_id="account-1",
+          owner_type="STRATEGY_RUN",
+          owner_id="legacy-run",
+          environment="LIVE",
+          payload={"command_kind": "PLACE_ORDER", "client_order_id": client_order_id},
+          delivery_status="DELIVERED",
+          expires_at=now,
+        )
+      )
+    db.add(
+      AgentReportInbox(
+        message_id="legacy-order-report",
+        device_id="device-protocol",
+        message_type="order_report",
+        protocol_version="1.0",
+        client_order_id=order_client_id,
+        raw_payload_hash="a" * 64,
+        business_idempotency_key="legacy-order-business",
+        payload={
+          "client_order_id": order_client_id,
+          "order": {
+            "account_id": "account-1",
+            "client_order_id": order_client_id,
+            "order_id": 9101,
+          },
+        },
+        received_at=now,
+        processing_status="PENDING",
+      )
+    )
+    db.add(
+      AgentReportInbox(
+        message_id="legacy-execution-report",
+        device_id="device-protocol",
+        message_type="execution_report",
+        protocol_version="1.1",
+        client_order_id=execution_client_id,
+        raw_payload_hash="b" * 64,
+        business_idempotency_key="legacy-execution-business",
+        payload={
+          "client_order_id": execution_client_id,
+          "execution": {
+            "account_id": "account-1",
+            "client_order_id": execution_client_id,
+            "order_id": 9102,
+            "execution_id": "legacy-execution-1",
+          },
+        },
+        received_at=now + timedelta(seconds=1),
+        processing_status="PENDING",
+      )
+    )
+    await db.commit()
+
+  assert await report_processor._claim() is None
+
+  async with sessions() as db:
+    reports = list(
+      (
+        await db.execute(
+          select(AgentReportInbox).order_by(AgentReportInbox.message_id)
+        )
+      )
+      .scalars()
+      .all()
+    )
+    assert [report.processing_status for report in reports] == ["FAILED", "FAILED"]
+    assert all(
+      report_processor.PROTOCOL_1_2_REQUIRED in str(report.processing_error)
+      for report in reports
+    )
+    pending = list(
+      (
+        await db.execute(
+          select(PendingTradeOrder).order_by(PendingTradeOrder.client_order_id)
+        )
+      )
+      .scalars()
+      .all()
+    )
+    assert [item.status for item in pending] == [
+      "RECONCILE_REQUIRED",
+      "RECONCILE_REQUIRED",
+    ]
+    outbox = list(
+      (
+        await db.execute(
+          select(TradeCommandOutbox).order_by(TradeCommandOutbox.client_order_id)
+        )
+      )
+      .scalars()
+      .all()
+    )
+    assert [item.delivery_status for item in outbox] == [
+      "RECONCILE_REQUIRED",
+      "RECONCILE_REQUIRED",
+    ]
+    control = await db.get(AccountExecutionControl, "account-1")
+    assert control is not None
+    assert control.reconcile_status == "RECONCILE_REQUIRED"
+    assert control.authorization_state == "PAUSED"
+    control_events = list(
+      (await db.execute(select(AccountExecutionControlEvent))).scalars().all()
+    )
+    assert len(control_events) == 2
+    alerts = list((await db.execute(select(OperationalAlert))).scalars().all())
+    assert len(alerts) == 2
+    assert all(alert.code == "AGENT_REPORT_DEAD_LETTER" for alert in alerts)
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol_version", ["1.0", "1.1"])
+async def test_order_report_rejects_legacy_protocol(
+  monkeypatch: pytest.MonkeyPatch,
+  protocol_version: str,
+) -> None:
+  upsert = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "OrderService",
+    lambda _account_id: SimpleNamespace(upsert_report=upsert),
+  )
+  with pytest.raises(ValueError, match=report_processor.PROTOCOL_1_2_REQUIRED):
+    await report_processor._process_order_report(
+      {"order": {"order_id": 1}},
+      protocol_version=protocol_version,
+    )
+  upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_order_report_accepts_current_protocol(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  upsert = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "OrderService",
+    lambda _account_id: SimpleNamespace(upsert_report=upsert),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_update_pending",
+    AsyncMock(return_value=report_processor.PendingOrderUpdate(False)),
+  )
+  await report_processor._process_order_report(
+    {
+      "client_order_id": "current-client",
+      "order": {"order_id": 1, "account_id": "account-1"},
+    },
+    protocol_version=PROTOCOL_VERSION,
+  )
+  upsert.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol_version", ["1.0", "1.1"])
+async def test_execution_report_rejects_legacy_protocol(
+  monkeypatch: pytest.MonkeyPatch,
+  protocol_version: str,
+) -> None:
+  get_order = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "OrderService",
+    lambda _account_id: SimpleNamespace(get_order_by_id=get_order),
+  )
+  with pytest.raises(ValueError, match=report_processor.PROTOCOL_1_2_REQUIRED):
+    await report_processor._process_execution_report(
+      {"execution": {"order_id": 1}},
+      protocol_version=protocol_version,
+    )
+  get_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execution_report_accepts_current_protocol(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  get_order = AsyncMock(return_value=SimpleNamespace(sysid="sys-1", type=23))
+  upsert = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "OrderService",
+    lambda _account_id: SimpleNamespace(get_order_by_id=get_order),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "TradeService",
+    lambda _account_id: SimpleNamespace(upsert_report=upsert),
+  )
+  monkeypatch.setattr(report_processor, "_consume_exact_auto_entry_fill", AsyncMock())
+  monkeypatch.setattr(
+    report_processor,
+    "AutoExitPlanService",
+    lambda: SimpleNamespace(
+      apply_order_event_for_report=AsyncMock(),
+      apply_execution_for_report=AsyncMock(),
+    ),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_update_pending",
+    AsyncMock(return_value=report_processor.PendingOrderUpdate(False)),
+  )
+  await report_processor._process_execution_report(
+    {
+      "client_order_id": "current-client",
+      "execution": {
+        "account_id": "account-1",
+        "order_id": 1,
+        "execution_id": "execution-1",
+        "traded_volume": 1,
+        "traded_price": 10,
+      },
+    },
+    protocol_version=PROTOCOL_VERSION,
+  )
+  get_order.assert_awaited_once_with(1)
+  upsert.assert_awaited_once()

@@ -1372,6 +1372,29 @@ type EntryTargetModeCapability {
   description: String!
 }
 
+"""公共执行事实所属的唯一环境"""
+enum ExecutionEnvironment {
+  PAPER
+  LIVE
+  BACKTEST
+}
+
+"""公共执行身份引用"""
+type ExecutionOwnerRef {
+  ownerType: ExecutionOwnerType!
+  ownerId: String!
+}
+
+"""公共执行身份的唯一 owner 类型"""
+enum ExecutionOwnerType {
+  STRATEGY_RUN
+  T_ASSISTANT_EXECUTION
+  ENTRY_PLAN
+  BOARD_ASSISTANT_EXECUTION
+  EXIT_PLAN
+  MANUAL_COMMAND
+}
+
 """策略意图到成交的执行跟踪视图"""
 type ExecutionTraceView {
   id: String!
@@ -1801,13 +1824,14 @@ type ExitPlanView {
   strategyRunId: String
   enabled: Boolean!
   status: String!
-  executionMode: String!
+  environment: ExecutionEnvironment!
   autoExitAuthorized: Boolean!
   autoExitAuthorizationConfigVersion: Int
   autoExitAuthorizationExpiresAt: DateTime
   configVersion: Int!
   stateVersion: Int!
-  executionOwner: String!
+  executionOwner: ExecutionOwnerRef!
+  sourceExecutionOwner: ExecutionOwnerRef!
   completionStrategy: String
   completionNote: String
   protectedVolume: Int!
@@ -4314,7 +4338,7 @@ input OrderInput {
   """委托类型: BUY/SELL"""
   type: String!
 
-  """报价类型: LIMIT/MARKET/BEST"""
+  """报价类型: FIX_PRICE"""
   priceType: String!
 
   """委托数量"""
@@ -4322,12 +4346,6 @@ input OrderInput {
 
   """委托价格"""
   price: Float!
-
-  """策略名称"""
-  strategyName: String
-
-  """订单备注"""
-  orderRemark: String
 
   """调用方生成的业务幂等键"""
   idempotencyKey: String = null
@@ -8874,9 +8892,6 @@ type TTradeSignalSnapshot {
   profileFingerprint: String
 }
 
-"""做 T 信号诊断版本分组"""
-type TTradeSignalVersionGroup {
-  policyVersion: String!
 """做 T 信号评估列表所需的固定大小快照摘要"""
 type TTradeSignalSnapshotSummary {
   sourceAt: DateTime!
@@ -8901,6 +8916,9 @@ type TTradeSignalSnapshotSummary {
   profileVersion: String
 }
 
+"""做 T 信号诊断版本分组"""
+type TTradeSignalVersionGroup {
+  policyVersion: String!
   featureSchemaVersion: String!
   profileVersion: String
   count: Int!
@@ -9042,7 +9060,8 @@ type TradeApprovalPreview {
   confirmationToken: String!
   action: String!
   accountId: String!
-  runId: String!
+  executionOwner: ExecutionOwnerRef!
+  environment: ExecutionEnvironment!
   intentId: String!
   instrumentCode: String!
   side: String!

@@ -14,6 +14,8 @@ import uuid
 from datetime import datetime, time
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
+
 from quantx_domain.clock import SHANGHAI
 from quantx_domain.enums import (
   StrategyCategory,
@@ -1357,7 +1359,13 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         and str(opportunity.get("candidate_status", "") or "")
         == CandidateStatus.LATCHED.value
       )
-      event_exit_plan_id = str(event.metadata.get("exit_plan_id", "") or "")
+      event_execution_ref = event.execution_ref
+      event_exit_plan_id = (
+        event_execution_ref.owner_id
+        if isinstance(event_execution_ref, ExecutionOwnerRef)
+        and event_execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN
+        else ""
+      )
       state_exit_plan_id = str(state.get("exit_plan_id", "") or "")
       if is_exact_latched_entry_compensation:
         # The Engine emits this synthetic terminal callback only when the
@@ -1490,7 +1498,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         if isinstance(exit_plan_template, dict)
         else ""
       )
-      exit_plan_id = str(metadata.get("exit_plan_id") or template_plan_id or "")
+      # The template is entry business lineage.  The execution owner of this
+      # entry fill is the typed STRATEGY_RUN ref, never a metadata plan alias.
+      exit_plan_id = template_plan_id
       if batch_id and not state.get("batch_id"):
         state["batch_id"] = batch_id
       if exit_plan_id and not state.get("exit_plan_id"):

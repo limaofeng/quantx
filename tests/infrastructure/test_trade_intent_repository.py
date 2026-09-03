@@ -11,6 +11,10 @@ def _existing_v3_intent(**overrides):
   values = {
     "id": "intent-v3",
     "strategy_run_id": "run-1",
+    "owner_type": "STRATEGY_RUN",
+    "owner_id": "run-1",
+    "environment": "PAPER",
+    "idempotency_key": "intent-v3",
     "account_id": "account-1",
     "strategy_id": "1",
     "instrument_code": "600000.SH",
@@ -38,6 +42,10 @@ def _incoming_v3_intent(**overrides):
   values = {
     "id": "intent-v3",
     "strategy_run_id": "run-1",
+    "owner_type": "STRATEGY_RUN",
+    "owner_id": "run-1",
+    "environment": "PAPER",
+    "idempotency_key": "intent-v3",
     "account_id": "account-1",
     "strategy_id": "1",
     "instrument_code": "600000.SH",
@@ -129,11 +137,11 @@ async def test_v3_recovery_query_filters_protocol_and_is_exactly_run_scoped() ->
   assert rows == [valid]
   statement = db.execute.await_args.args[0]
   sql = str(statement)
-  assert "strategy_trade_intents.strategy_run_id" in sql
-  assert "strategy_trade_intents.direction" in sql
-  assert "strategy_trade_intents.status" in sql
-  assert "strategy_trade_intents.id" in sql
-  assert "strategy_trade_intents.notes IN" not in sql
+  assert "trade_intents.strategy_run_id" in sql
+  assert "trade_intents.direction" in sql
+  assert "trade_intents.status" in sql
+  assert "trade_intents.id" in sql
+  assert "trade_intents.notes IN" not in sql
   assert "LIMIT" in sql
   assert "run-1" in statement.compile().params.values()
 
@@ -168,5 +176,5 @@ async def test_delete_for_strategy_run_joins_caller_transaction() -> None:
   assert deleted == 3
   db.commit.assert_not_awaited()
   statement = db.execute.await_args.args[0]
-  assert "strategy_trade_intents.strategy_run_id" in str(statement)
+  assert "trade_intents.strategy_run_id" in str(statement)
   assert "run-1" in statement.compile().params.values()

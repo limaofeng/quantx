@@ -1,23 +1,47 @@
 import asyncio
 import hashlib
-from datetime import timedelta
+from datetime import timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from quantx_contracts import CancelCommandPayload
+from quantx_contracts import (
+  CancelCommandPayload,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+)
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.database.relational_base import Base
-from quantx_infrastructure.models.agent_runtime import AgentDevice, TradeCommandOutbox
+from quantx_infrastructure.models.agent_runtime import (
+  AgentDevice,
+  OrderCorrelation,
+  PendingTradeOrder,
+  TradeCommandOutbox,
+)
 from quantx_infrastructure.models.auth import AuthUser
-from quantx_infrastructure.services.trade_command_service import TradeCommandService
+from quantx_infrastructure.services.trade_command_service import (
+  AgentUnavailableError,
+  TradeCommandService,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 TABLES = [
   AuthUser.__table__,
   AgentDevice.__table__,
+  PendingTradeOrder.__table__,
+  OrderCorrelation.__table__,
   TradeCommandOutbox.__table__,
 ]
+
+CANCEL_OWNER = ExecutionOwnerRef.manual_command("manual-cancel-retry")
+
+
+def _set_expiry(row: TradeCommandOutbox, expires_at) -> None:
+  row.expires_at = expires_at
+  row.payload = {
+    **dict(row.payload or {}),
+    "expires_at": expires_at.replace(tzinfo=timezone.utc).isoformat(),
+  }
 
 
 async def _database(path: str = ":memory:"):
@@ -45,6 +69,40 @@ async def _database(path: str = ":memory:"):
       )
     )
     await db.commit()
+    db.add(
+      PendingTradeOrder(
+        client_order_id="place-client-1",
+        user_id="user-1",
+        account_id="account-1",
+        owner_type=CANCEL_OWNER.owner_type.value,
+        owner_id=CANCEL_OWNER.owner_id,
+        environment=ExecutionEnvironment.PAPER.value,
+        instrument_code="600000.SH",
+        side="BUY",
+        order_type="FIX_PRICE",
+        limit_price="10",
+        volume=100,
+        status="SUBMITTED",
+        broker_order_id="broker-order-1",
+        bucket="manual",
+        request_metadata={},
+      )
+    )
+    db.add(
+      OrderCorrelation(
+        id="place-correlation-1",
+        client_order_id="place-client-1",
+        broker_order_id="broker-order-1",
+        account_id="account-1",
+        owner_type=CANCEL_OWNER.owner_type.value,
+        owner_id=CANCEL_OWNER.owner_id,
+        environment=ExecutionEnvironment.PAPER.value,
+        bucket="manual",
+        trace_id="place-trace-1",
+        request_metadata={},
+      )
+    )
+    await db.commit()
   return sessions, engine
 
 
@@ -58,18 +116,22 @@ async def test_expired_never_delivered_cancel_reuses_same_attempt_safely() -> No
         user_id="user-1",
         account_id="account-1",
         broker_order_id="broker-order-1",
+        execution_ref=CANCEL_OWNER,
+        environment=ExecutionEnvironment.PAPER,
         idempotency_key="cancel-business-1",
       )
       original = await db.get(TradeCommandOutbox, first.message_id)
       assert original is not None
       original.delivery_status = "EXPIRED"
-      original.expires_at = utcnow() - timedelta(seconds=1)
+      _set_expiry(original, utcnow() - timedelta(seconds=1))
       await db.commit()
 
       retried = await service.enqueue_cancel(
         user_id="user-1",
         account_id="account-1",
         broker_order_id="broker-order-1",
+        execution_ref=CANCEL_OWNER,
+        environment=ExecutionEnvironment.PAPER,
         idempotency_key="cancel-business-1",
       )
 
@@ -79,12 +141,104 @@ async def test_expired_never_delivered_cancel_reuses_same_attempt_safely() -> No
       assert revived.delivery_status == "QUEUED"
       assert revived.expires_at > utcnow()
       assert revived.idempotency_key == hashlib.sha256(
-        b"cancel:user-1:account-1:cancel-business-1"
+        b"cancel:user-1:account-1:PAPER:MANUAL_COMMAND:manual-cancel-retry:"
+        b"cancel-business-1"
       ).hexdigest()
       assert CancelCommandPayload.model_validate(revived.payload)
       assert "cancel_attempt" not in revived.payload
       assert "cancel_business_identity" not in revived.payload
       assert await db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 1
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_requires_unique_authoritative_target_chain() -> None:
+  sessions, engine = await _database()
+  try:
+    async with sessions() as db:
+      service = TradeCommandService(db)
+      with pytest.raises(AgentUnavailableError, match="TARGET_UNPROVEN"):
+        await service.enqueue_cancel(
+          user_id="user-1",
+          account_id="account-1",
+          broker_order_id="unknown-broker-order",
+          execution_ref=CANCEL_OWNER,
+          environment=ExecutionEnvironment.PAPER,
+          idempotency_key="cancel-unproven-target",
+        )
+
+      with pytest.raises(AgentUnavailableError, match="OWNER_CONFLICT"):
+        await service.enqueue_cancel(
+          user_id="user-1",
+          account_id="account-1",
+          broker_order_id="broker-order-1",
+          execution_ref=ExecutionOwnerRef.manual_command("different-owner"),
+          environment=ExecutionEnvironment.PAPER,
+          idempotency_key="cancel-owner-mismatch",
+        )
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancel_retry_same_key_cannot_switch_broker_target() -> None:
+  sessions, engine = await _database()
+  try:
+    async with sessions() as db:
+      service = TradeCommandService(db)
+      await service.enqueue_cancel(
+        user_id="user-1",
+        account_id="account-1",
+        broker_order_id="broker-order-1",
+        execution_ref=CANCEL_OWNER,
+        environment=ExecutionEnvironment.PAPER,
+        idempotency_key="cancel-target-switch",
+      )
+      db.add(
+        PendingTradeOrder(
+          client_order_id="place-client-2",
+          user_id="user-1",
+          account_id="account-1",
+          owner_type=CANCEL_OWNER.owner_type.value,
+          owner_id=CANCEL_OWNER.owner_id,
+          environment=ExecutionEnvironment.PAPER.value,
+          instrument_code="600001.SH",
+          side="BUY",
+          order_type="FIX_PRICE",
+          limit_price="11",
+          volume=100,
+          status="SUBMITTED",
+          broker_order_id="broker-order-2",
+          bucket="manual",
+          request_metadata={},
+        )
+      )
+      db.add(
+        OrderCorrelation(
+          id="place-correlation-2",
+          client_order_id="place-client-2",
+          broker_order_id="broker-order-2",
+          account_id="account-1",
+          owner_type=CANCEL_OWNER.owner_type.value,
+          owner_id=CANCEL_OWNER.owner_id,
+          environment=ExecutionEnvironment.PAPER.value,
+          bucket="manual",
+          trace_id="place-trace-2",
+          request_metadata={},
+        )
+      )
+      await db.commit()
+
+      with pytest.raises(AgentUnavailableError, match="IDEMPOTENCY_KEY_CONFLICT"):
+        await service.enqueue_cancel(
+          user_id="user-1",
+          account_id="account-1",
+          broker_order_id="broker-order-2",
+          execution_ref=CANCEL_OWNER,
+          environment=ExecutionEnvironment.PAPER,
+          idempotency_key="cancel-target-switch",
+        )
   finally:
     await engine.dispose()
 
@@ -99,19 +253,23 @@ async def test_uncertain_cancel_attempt_creates_new_deterministic_identity() -> 
         user_id="user-1",
         account_id="account-1",
         broker_order_id="broker-order-1",
+        execution_ref=CANCEL_OWNER,
+        environment=ExecutionEnvironment.PAPER,
         idempotency_key="cancel-business-2",
       )
       original = await db.get(TradeCommandOutbox, first.message_id)
       assert original is not None
       original.delivery_status = "DELIVERED"
       original.delivered_at = utcnow()
-      original.expires_at = utcnow() - timedelta(seconds=1)
+      _set_expiry(original, utcnow() - timedelta(seconds=1))
       await db.commit()
 
       retried = await service.enqueue_cancel(
         user_id="user-1",
         account_id="account-1",
         broker_order_id="broker-order-1",
+        execution_ref=CANCEL_OWNER,
+        environment=ExecutionEnvironment.PAPER,
         idempotency_key="cancel-business-2",
       )
 
@@ -144,6 +302,8 @@ async def test_nonexpired_dispatched_cancel_remains_the_only_active_attempt(
         user_id="user-1",
         account_id="account-1",
         broker_order_id="broker-order-1",
+        execution_ref=CANCEL_OWNER,
+        environment=ExecutionEnvironment.PAPER,
         idempotency_key="cancel-business-active",
       )
       original = await db.get(TradeCommandOutbox, first.message_id)
@@ -152,13 +312,15 @@ async def test_nonexpired_dispatched_cancel_remains_the_only_active_attempt(
       original.delivered_at = utcnow()
       if delivery_status == "ACKNOWLEDGED":
         original.acknowledged_at = utcnow()
-      original.expires_at = utcnow() + timedelta(minutes=1)
+      _set_expiry(original, utcnow() + timedelta(minutes=1))
       await db.commit()
 
       repeated = await service.enqueue_cancel(
         user_id="user-1",
         account_id="account-1",
         broker_order_id="broker-order-1",
+        execution_ref=CANCEL_OWNER,
+        environment=ExecutionEnvironment.PAPER,
         idempotency_key="cancel-business-active",
       )
 
@@ -166,12 +328,14 @@ async def test_nonexpired_dispatched_cancel_remains_the_only_active_attempt(
       assert repeated.status == delivery_status
       assert await db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 1
 
-      original.expires_at = utcnow() - timedelta(seconds=1)
+      _set_expiry(original, utcnow() - timedelta(seconds=1))
       await db.commit()
       after_deadline = await service.enqueue_cancel(
         user_id="user-1",
         account_id="account-1",
         broker_order_id="broker-order-1",
+        execution_ref=CANCEL_OWNER,
+        environment=ExecutionEnvironment.PAPER,
         idempotency_key="cancel-business-active",
       )
 
@@ -209,12 +373,16 @@ async def test_concurrent_cancel_requests_leave_only_one_active_attempt(
           user_id="user-1",
           account_id="account-1",
           broker_order_id="broker-order-1",
+          execution_ref=CANCEL_OWNER,
+          environment=ExecutionEnvironment.PAPER,
           idempotency_key="cancel-business-concurrent",
         ),
         second_service.enqueue_cancel(
           user_id="user-1",
           account_id="account-1",
           broker_order_id="broker-order-1",
+          execution_ref=CANCEL_OWNER,
+          environment=ExecutionEnvironment.PAPER,
           idempotency_key="cancel-business-concurrent",
         ),
       )
@@ -234,7 +402,8 @@ async def test_concurrent_cancel_requests_leave_only_one_active_attempt(
       )
       assert len(active) == 1
       assert active[0].idempotency_key == hashlib.sha256(
-        b"cancel:user-1:account-1:cancel-business-concurrent"
+        b"cancel:user-1:account-1:PAPER:MANUAL_COMMAND:manual-cancel-retry:"
+        b"cancel-business-concurrent"
       ).hexdigest()
       assert CancelCommandPayload.model_validate(active[0].payload)
   finally:

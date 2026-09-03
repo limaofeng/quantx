@@ -47,20 +47,34 @@ async def environment_database():
 
 
 def plan(key, mode, run, volume):
+  environment = mode.upper()
   return AutoExitPlanRecord(
     plan_id=key,
     source_id=key,
     source_type="ENTRY_PLAN",
     account_id="account",
     instrument_code="600000.SH",
-    execution_mode=mode,
+    source_execution_owner_type="STRATEGY_RUN",
+    source_execution_owner_id=run,
+    source_execution_environment=environment,
+    environment=environment,
     strategy_run_id=run,
     enabled=True,
     status="ACTIVE",
     protected_volume=volume,
     remaining_volume=volume,
     entry_avg_price=10,
-    plan_state={},
+    plan_state={
+      "template": {
+        "plan_id": key,
+        "account_id": "account",
+        "instrument_code": "600000.SH",
+        "source_type": "ENTRY_PLAN",
+        "source_id": key,
+        "run_id": run,
+        "metadata": {},
+      },
+    },
   )
 
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import TradeConfirmationChallenge
@@ -54,7 +55,7 @@ _PREPARATION_GATE_CODES = frozenset(
     "ENGINE_READY",
     "LIVE_AGENT_READY",
     "AGENT_MODE_LIVE",
-    "PROTOCOL_1_1",
+    f"PROTOCOL_{PROTOCOL_VERSION.replace('.', '_')}",
     "EXECUTION_CONTROL_CONFIGURED",
     "T_TRADE_ROLLOUT_CONFIGURED",
     "T_TRADE_ROLLOUT_LIMITS_CONFIGURED",
@@ -498,7 +499,7 @@ def _validate_action_readiness(
   if (
     int(readiness.get("ready_live_agent_count") or 0) != 1
     or str(readiness.get("agent_mode") or "").lower() != "live"
-    or str(readiness.get("protocol_version") or "") != "1.1"
+    or str(readiness.get("protocol_version") or "") != PROTOCOL_VERSION
     or str(readiness.get("reconcile_status") or "").upper() != "READY"
     or bool(readiness.get("kill_switch"))
   ):

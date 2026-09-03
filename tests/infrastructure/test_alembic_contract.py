@@ -54,6 +54,9 @@ def test_baseline_clone_excludes_schema_owned_by_later_revisions() -> None:
 
   metadata = revision._baseline_metadata()
   assert not (set(metadata.tables) & revision.POST_BASELINE_TABLES)
+  # The immutable baseline must retain the pre-0047 vendor-ID width.
+  assert metadata.tables["orders"].c.order_sysid.type.length == 10
+  assert metadata.tables["trades"].c.order_sysid.type.length == 10
   for table_name, column_names in revision.POST_BASELINE_COLUMNS.items():
     table = metadata.tables[table_name]
     assert not (set(table.c.keys()) & column_names)
@@ -103,6 +106,7 @@ def test_table_comment_revision_covers_metadata_and_refuses_downgrade(
   import quantx_infrastructure.models  # noqa: F401
   from quantx_infrastructure.database.relational_base import Base
   from quantx_infrastructure.models.divid_factor import DividFactorTable
+  from quantx_infrastructure.models.table_comments import TABLE_COMMENTS
 
   revision = _load_revision(
     "20260730_0003_table_comments.py",
@@ -119,7 +123,14 @@ def test_table_comment_revision_covers_metadata_and_refuses_downgrade(
 
   assert revision.down_revision == "20260729_0002"
   assert DividFactorTable.__table__.name == "divid_factors"
-  assert set(revision.TABLE_COMMENTS) <= set(Base.metadata.tables)
+  historical_table_names = {
+    "strategy_trade_intents": "trade_intents",
+    "strategy_order_correlations": "order_correlations",
+  }
+  assert {
+    historical_table_names.get(table_name, table_name)
+    for table_name in revision.TABLE_COMMENTS
+  } <= set(Base.metadata.tables)
   revision.upgrade()
   assert calls == list(revision.REQUIRED_TABLE_COMMENTS.items())
   assert len(statements) == len(revision.OPTIONAL_TABLE_COMMENTS)
@@ -131,7 +142,10 @@ def test_table_comment_revision_covers_metadata_and_refuses_downgrade(
   for table_name, comment in revision.TABLE_COMMENTS.items():
     if table_name in later_comment_overrides:
       continue
-    assert Base.metadata.tables[table_name].comment == comment
+    current_table_name = historical_table_names.get(table_name, table_name)
+    assert Base.metadata.tables[current_table_name].comment == (
+      TABLE_COMMENTS.get(current_table_name) or comment
+    )
     assert re.search(r"[\u4e00-\u9fff]", comment)
   with pytest.raises(RuntimeError, match="downgrades"):
     revision.downgrade()

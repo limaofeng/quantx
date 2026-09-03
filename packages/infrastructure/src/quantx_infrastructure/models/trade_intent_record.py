@@ -2,6 +2,7 @@
 
 from sqlalchemy import (
   JSON,
+  CheckConstraint,
   Column,
   DateTime,
   Float,
@@ -10,17 +11,44 @@ from sqlalchemy import (
   Integer,
   String,
   Text,
+  UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
 from quantx_infrastructure.database.relational_base import BaseModel, TimestampMixin
+from quantx_infrastructure.models.execution_owner import register_identity_immutability
 
 
 class TradeIntentRecord(BaseModel, TimestampMixin):
-  """策略交易意图记录表 - 记录策略输出意图及后续执行状态。"""
+  """公共交易意图事实；owner/environment 是不可缺省的业务身份。"""
 
-  __tablename__ = "strategy_trade_intents"
+  __tablename__ = "trade_intents"
   __table_args__ = (
+    UniqueConstraint(
+      "environment",
+      "owner_type",
+      "owner_id",
+      "idempotency_key",
+      name="uq_trade_intent_owner_idempotency",
+    ),
+    CheckConstraint(
+      "owner_type IN ('STRATEGY_RUN','T_ASSISTANT_EXECUTION','ENTRY_PLAN',"
+      "'BOARD_ASSISTANT_EXECUTION','EXIT_PLAN','MANUAL_COMMAND')",
+      name="ck_trade_intent_owner_type",
+    ),
+    CheckConstraint(
+      "length(owner_id) > 0 AND owner_id = trim(owner_id)",
+      name="ck_trade_intent_owner_id",
+    ),
+    CheckConstraint(
+      "environment IN ('PAPER','LIVE','BACKTEST')",
+      name="ck_trade_intent_environment",
+    ),
+    CheckConstraint(
+      "strategy_run_id IS NULL OR (owner_type = 'STRATEGY_RUN' "
+      "AND owner_id = strategy_run_id)",
+      name="ck_trade_intent_strategy_run_owner",
+    ),
     Index(
       "ix_trade_intent_run_reason_direction_created",
       "strategy_run_id",
@@ -45,8 +73,10 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
 
   id = Column(String(36), primary_key=True)  # UUID，重写基类的id
   strategy_run_id = Column(String(36), ForeignKey("strategy_runs.id"), nullable=True)
-  owner_type = Column(String(32), nullable=False, default="STRATEGY_RUN")
-  owner_id = Column(String(128), nullable=False, default="")
+  owner_type = Column(String(32), nullable=False)
+  owner_id = Column(String(128), nullable=False)
+  environment = Column(String(16), nullable=False)
+  idempotency_key = Column(String(128), nullable=False)
   account_id = Column(String(50), nullable=True)
   strategy_id = Column(String(64), nullable=True)
   instrument_code = Column(String(20), nullable=False)  # 标的代码
@@ -82,6 +112,8 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
       "strategy_run_id": self.strategy_run_id,
       "owner_type": self.owner_type,
       "owner_id": self.owner_id,
+      "environment": self.environment,
+      "idempotency_key": self.idempotency_key,
       "account_id": self.account_id,
       "strategy_id": self.strategy_id,
       "instrument_code": self.instrument_code,
@@ -107,3 +139,6 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
       "created_at": self.created_at.isoformat() if self.created_at else None,
       "updated_at": self.updated_at.isoformat() if self.updated_at else None,
     }
+
+
+register_identity_immutability(TradeIntentRecord)

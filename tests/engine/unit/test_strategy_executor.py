@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import quantx_engine.strategy_executor as strategy_executor_module
 from quantx_application.t_trade_v3 import MaterializeEvaluationAfterCAS
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.base import (
   OrderRequest,
   OrderResponse,
@@ -2381,6 +2382,8 @@ class TestStrategyExecutor:
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=100,
+      execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+      environment=ExecutionEnvironment.PAPER,
       price=10.0,
       metadata={
         "order_expire_at_ms": int(timestamp.timestamp() * 1000) - 1,
@@ -2426,6 +2429,8 @@ class TestStrategyExecutor:
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=500,
+      execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+      environment=ExecutionEnvironment.PAPER,
       price=10.0,
       metadata={"intent_id": "intent-1", "bucket": "swing"},
     )
@@ -2468,6 +2473,8 @@ class TestStrategyExecutor:
         "remaining_volume": 400,
         "submit_time": "2024-01-02T09:59:00",
         "last_update_time": None,
+        "execution_ref": ExecutionOwnerRef.strategy_run("run-1"),
+        "environment": ExecutionEnvironment.PAPER,
         "metadata": {"intent_id": "intent-1", "bucket": "swing"},
       }
     ]

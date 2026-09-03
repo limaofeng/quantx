@@ -5,6 +5,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.backtest import BacktestBroker
 from quantx_domain.brokers.base import (
   OrderRequest,
@@ -37,6 +38,8 @@ from quantx_domain.trading import (
 from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 
 pytestmark = pytest.mark.unit
+
+_ORDER_OWNER = ExecutionOwnerRef.strategy_run("trading-domain-test-run")
 
 
 def test_ashare_volume_normalization():
@@ -326,6 +329,8 @@ def test_runtime_state_applies_corporate_action_to_positions_and_buckets():
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=200,
+      execution_ref=_ORDER_OWNER,
+      environment=ExecutionEnvironment.BACKTEST,
       price=10.0,
       metadata={"bucket": "swing"},
     ),
@@ -409,6 +414,8 @@ def test_risk_checker_rejects_limit_and_t1_sell():
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=100,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=111.0,
   )
   result = asyncio.run(
@@ -422,6 +429,8 @@ def test_risk_checker_rejects_limit_and_t1_sell():
     order_type=OrderType.SELL,
     price_type=PriceType.LIMIT,
     volume=100,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=100.0,
   )
   result = asyncio.run(
@@ -449,6 +458,8 @@ def test_risk_checker_ignores_non_positive_instrument_volume_bounds():
     order_type=OrderType.SELL,
     price_type=PriceType.LIMIT,
     volume=200,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=125.0,
   )
   market = MarketDataSnapshot(
@@ -566,6 +577,8 @@ def test_order_risk_decision_caps_buy_by_context_caps():
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=1000,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=10.0,
   )
   decision = asyncio.run(
@@ -603,6 +616,8 @@ def test_order_risk_decision_rejects_buy_when_only_reduce():
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=100,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=10.0,
   )
   decision = asyncio.run(
@@ -632,6 +647,8 @@ def test_order_risk_layer_rejects_missing_market_data_when_strict():
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=100,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=10.0,
   )
 
@@ -654,6 +671,8 @@ def test_order_risk_layer_rejects_missing_limit_data_when_strict():
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=100,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=10.0,
   )
   market_data = MarketDataSnapshot(
@@ -836,6 +855,8 @@ def test_order_risk_layer_delays_swing_buy_in_panic():
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=100,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=10.0,
     metadata={"bucket": "swing"},
   )
@@ -867,6 +888,8 @@ def test_order_risk_layer_outputs_t1_substitution_plan():
     order_type=OrderType.SELL,
     price_type=PriceType.LIMIT,
     volume=800,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=10.0,
     metadata={"bucket": "swing"},
   )
@@ -908,6 +931,8 @@ def test_order_risk_layer_does_not_substitute_when_exit_plan_forbids_it():
     order_type=OrderType.SELL,
     price_type=PriceType.LIMIT,
     volume=800,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=10.0,
     metadata={
       "bucket": "swing",
@@ -950,6 +975,8 @@ def test_order_risk_layer_delays_t1_when_no_old_inventory():
     order_type=OrderType.SELL,
     price_type=PriceType.LIMIT,
     volume=800,
+    execution_ref=_ORDER_OWNER,
+    environment=ExecutionEnvironment.BACKTEST,
     price=10.0,
     metadata={"bucket": "swing"},
   )
@@ -1104,6 +1131,8 @@ def test_backtest_broker_blocks_limit_locked_market_orders():
         order_type=OrderType.BUY,
         price_type=PriceType.MARKET,
         volume=100,
+        execution_ref=_ORDER_OWNER,
+        environment=ExecutionEnvironment.BACKTEST,
         price=11.0,
       )
     )
@@ -1140,6 +1169,8 @@ def test_backtest_broker_expires_short_lived_limit_order_before_next_fill():
         order_type=OrderType.BUY,
         price_type=PriceType.LIMIT,
         volume=100,
+        execution_ref=_ORDER_OWNER,
+        environment=ExecutionEnvironment.BACKTEST,
         price=10.01,
         metadata={"order_expire_at_ms": int(submitted_at.timestamp() * 1000) + 1000},
       )
@@ -1182,6 +1213,8 @@ def test_backtest_broker_caps_fill_to_executable_book_depth():
         order_type=OrderType.BUY,
         price_type=PriceType.LIMIT,
         volume=1000,
+        execution_ref=_ORDER_OWNER,
+        environment=ExecutionEnvironment.BACKTEST,
         price=10.01,
       )
     )

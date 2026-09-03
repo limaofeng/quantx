@@ -29,7 +29,7 @@ def _ready_agent_health(**overrides) -> QmtAgentHealthSnapshot:
     "status": QmtAgentHealthStatus.READY,
     "reason_code": None,
     "agent_version": "0.1.0",
-    "protocol_version": "1.1",
+    "protocol_version": "1.2",
     "mode": QmtAgentMode.LIVE,
     "uptime_seconds": 1234.5,
     "control_connection_status": QmtAgentControlConnectionStatus.CONNECTED,
@@ -140,26 +140,92 @@ def test_protocol_rejects_timezone_naive_sent_at() -> None:
 def test_trade_command_requires_timezone_aware_expiry() -> None:
   with pytest.raises(ValidationError):
     TradeCommandPayload(
+      command_kind="PLACE_ORDER",
       client_order_id="client-1",
-      instance_id="strategy-1",
       account_id="account-1",
+      execution_mode="paper",
       instrument_code="600000.SH",
       side="BUY",
+      price_type="FIX_PRICE",
       limit_price="10.50",
       volume=100,
-      bucket="swing",
-      risk_decision_id="risk-1",
-      trace_id="trace-1",
       expires_at=datetime.now(),
+    )
+
+
+def test_protocol_12_place_order_has_exact_fixed_limit_wire_fields() -> None:
+  payload = TradeCommandPayload(
+    command_kind="PLACE_ORDER",
+    client_order_id="client-1",
+    account_id="account-1",
+    execution_mode="paper",
+    instrument_code="600000.SH",
+    side="BUY",
+    price_type="FIX_PRICE",
+    limit_price="10.50",
+    volume=100,
+    expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+  )
+
+  assert set(payload.model_dump()) == {
+    "command_kind",
+    "client_order_id",
+    "account_id",
+    "execution_mode",
+    "instrument_code",
+    "side",
+    "price_type",
+    "limit_price",
+    "volume",
+    "expires_at",
+  }
+  assert payload.limit_price == "10.50"
+  assert isinstance(payload.limit_price, str)
+
+  with pytest.raises(ValidationError):
+    TradeCommandPayload(
+      command_kind="PLACE_ORDER",
+      client_order_id="client-1",
+      account_id="account-1",
+      execution_mode="paper",
+      instrument_code="600000.SH",
+      side="BUY",
+      price_type="MARKET",
+      limit_price="10.50",
+      volume=100,
+      expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+
+
+@pytest.mark.parametrize(
+  "limit_price",
+  ["0", "-0.01", "NaN", "Infinity", "not-a-number"],
+)
+def test_protocol_12_place_order_rejects_invalid_limit_price(
+  limit_price: str,
+) -> None:
+  with pytest.raises(ValidationError, match="finite positive"):
+    TradeCommandPayload(
+      command_kind="PLACE_ORDER",
+      client_order_id="client-1",
+      account_id="account-1",
+      execution_mode="paper",
+      instrument_code="600000.SH",
+      side="BUY",
+      price_type="FIX_PRICE",
+      limit_price=limit_price,
+      volume=100,
+      expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
 
 
 def test_cancel_command_round_trip() -> None:
   payload = CancelCommandPayload(
+    command_kind="CANCEL_ORDER",
     client_order_id="cancel-1",
     account_id="account-1",
+    execution_mode="paper",
     broker_order_id="123",
-    trace_id="trace-1",
     expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
   )
   envelope = AgentEnvelope(
@@ -169,9 +235,17 @@ def test_cancel_command_round_trip() -> None:
   restored = AgentEnvelope.model_validate_json(envelope.model_dump_json())
   assert restored.message_id == envelope.message_id
   assert restored.message_type is AgentMessageType.CANCEL_COMMAND
+  assert set(payload.model_dump()) == {
+    "command_kind",
+    "client_order_id",
+    "account_id",
+    "execution_mode",
+    "broker_order_id",
+    "expires_at",
+  }
 
 
-def test_protocol_11_order_report_is_strongly_typed() -> None:
+def test_protocol_12_order_report_is_strongly_typed() -> None:
   envelope = AgentEnvelope(
     protocol_version=PROTOCOL_VERSION,
     message_type=AgentMessageType.ORDER_REPORT,

@@ -22,11 +22,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from quantx_infrastructure.services import t_assistant_p0_audit as p0_audit
+from quantx_infrastructure.services import t_assistant_p1_reconcile as p1_reconcile
 
 P1_CUTOVER_REHEARSAL_SCHEMA_VERSION = 1
 REHEARSAL_SCOPE = "P1_PROTOCOL_12_CUTOVER_REHEARSAL"
-CURRENT_PROTOCOL_VERSION = CONTRACT_PROTOCOL_VERSION
-TARGET_PROTOCOL_VERSION = "1.2"
+LEGACY_PROTOCOL_VERSION = "1.1"
+RUNNING_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSION
+CURRENT_PROTOCOL_VERSION = RUNNING_PROTOCOL_VERSION
+TARGET_PROTOCOL_VERSION = CONTRACT_PROTOCOL_VERSION
 
 REHEARSAL_STATE_SEQUENCE = (
   "BLOCK_NEW_COMMANDS",
@@ -52,9 +55,19 @@ READ_ONLY_ROLLBACK_FAILED = "READ_ONLY_ROLLBACK_FAILED"
 
 PROTOCOL_11_OUTBOX_NOT_DRAINED = "PROTOCOL_11_OUTBOX_NOT_DRAINED"
 PROTOCOL_11_RESULT_UNKNOWN = "PROTOCOL_11_RESULT_UNKNOWN"
+TERMINAL_EXIT_PLAN_UNROUTED_INTENT = (
+  p1_reconcile.TERMINAL_EXIT_PLAN_UNROUTED_INTENT
+)
+TERMINAL_EXIT_INTENT_GATE_UNKNOWN = "TERMINAL_EXIT_INTENT_GATE_UNKNOWN"
 
 _UNSET = object()
 _TERMINAL_INBOX_STATUSES = ("PROCESSED", "SUPERSEDED")
+LEGACY_REQUIRED_TABLES = tuple(
+  "strategy_trade_intents" if table == "trade_intents"
+  else "strategy_order_correlations" if table == "order_correlations"
+  else table
+  for table in p0_audit.REQUIRED_TABLES
+)
 _TARGET_VERSION_PATTERN = re.compile(
   r"(?:TARGET_PROTOCOL_VERSION|PROTOCOL_VERSION)\s*=\s*['\"]([^'\"]+)['\"]"
 )
@@ -78,6 +91,8 @@ _SAFE_REASON_CODES = frozenset(
     READ_ONLY_ROLLBACK_FAILED,
     PROTOCOL_11_OUTBOX_NOT_DRAINED,
     PROTOCOL_11_RESULT_UNKNOWN,
+    TERMINAL_EXIT_PLAN_UNROUTED_INTENT,
+    TERMINAL_EXIT_INTENT_GATE_UNKNOWN,
     *(
       spec.code
       for spec in p0_audit.AUDIT_CHECK_SPECS
@@ -166,13 +181,21 @@ def _status_for_presence(value: int | None) -> str:
   return "BLOCKED" if value == 0 else "PASSED"
 
 
-def _safe_protocol(value: Any) -> str | None:
+def _safe_protocol(
+  value: Any,
+  *,
+  accepted_versions: set[str] | None = None,
+) -> str | None:
   """Accept only an exact protocol string for a configuration fact."""
 
+  accepted = accepted_versions or {
+    CURRENT_PROTOCOL_VERSION,
+    TARGET_PROTOCOL_VERSION,
+  }
   return (
     value
     if isinstance(value, str)
-    and value in {CURRENT_PROTOCOL_VERSION, TARGET_PROTOCOL_VERSION}
+    and value in accepted
     else None
   )
 
@@ -216,6 +239,142 @@ async def _unsettled_inbox_count(connection: AsyncConnection) -> int | None:
     )
   )
   return _strict_count(_result_scalar(result))
+
+
+async def _legacy_0045_audit_connection(
+  connection: AsyncConnection,
+) -> dict[str, Any]:
+  """Audit only the explicitly supported pre-0046 schema shape.
+
+  This is a cutover input, not a runtime compatibility path.  The target P0
+  audit continues to query only trade_intents/order_correlations and protocol
+  1.2; this function exists so the read-only rehearsal can drain a real 0045
+  database before 0046 renames the tables.
+  """
+
+  table_names = ", ".join(f"'{name}'" for name in LEGACY_REQUIRED_TABLES)
+  table_result = await connection.execute(
+    text(
+      """
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name IN (__legacy_table_names__)
+      """.replace("__legacy_table_names__", table_names)
+    )
+  )
+  existing_tables = {
+    str(row.get("table_name"))
+    for row in table_result.mappings().all()
+    if row.get("table_name") is not None
+  }
+  missing_tables = [
+    table for table in LEGACY_REQUIRED_TABLES if table not in existing_tables
+  ]
+  checks: list[dict[str, Any]] = []
+  if missing_tables:
+    checks.append(
+      {
+        "code": P0_REQUIRED_TABLES_MISSING,
+        "severity": "BLOCKER",
+        "count": len(missing_tables),
+        "blocksP1": True,
+        "missingTables": missing_tables,
+      }
+    )
+    return {
+      "schemaVersion": p0_audit.P0_SCHEMA_VERSION,
+      "scope": p0_audit.AUDIT_SCOPE,
+      "currentProtocol": LEGACY_PROTOCOL_VERSION,
+      "targetProtocol": TARGET_PROTOCOL_VERSION,
+      "readyForP1": False,
+      "summary": {"blockerCount": 1, "warningCount": 0, "checkCount": 1},
+      "checks": checks,
+      "requiredTables": list(LEGACY_REQUIRED_TABLES),
+      "schema": "LEGACY_0045",
+    }
+
+  async def count(query: str) -> int | None:
+    try:
+      return _strict_count(_result_scalar(await connection.execute(text(query))))
+    except Exception:  # noqa: BLE001 - aggregate-only fail-closed result
+      return None
+
+  legacy_t_predicate = """
+    (
+      UPPER(COALESCE(command.payload ->> 't_trade_role', '')) IN ('ENTRY', 'EXIT')
+      OR UPPER(COALESCE(command.payload ->> 'strategy_name', '')) =
+        'ASHAREINTRADAYTASSISTANTSTRATEGY'
+      OR EXISTS (
+        SELECT 1
+        FROM strategy_order_correlations AS correlation
+        WHERE correlation.client_order_id = command.client_order_id
+          AND UPPER(COALESCE(correlation.t_trade_role, '')) IN ('ENTRY', 'EXIT')
+      )
+    )
+  """
+  checks.extend(
+    [
+      {
+        "code": "P0_ENABLED_LEGACY_CONFIG_COUNT",
+        "severity": "FACT",
+        "count": await count(
+          "SELECT COUNT(*) AS count_value "
+          "FROM t_trade_global_configs WHERE enabled IS TRUE"
+        ),
+      },
+      {
+        "code": "P0_QUEUED_PROTOCOL_11_T_COMMAND",
+        "severity": "BLOCKER",
+        "count": await count(
+          "SELECT COUNT(*) AS count_value "
+          "FROM trade_command_outbox AS command "
+          f"WHERE {legacy_t_predicate} "
+          "AND UPPER(command.delivery_status) = 'QUEUED'"
+        ),
+      },
+      {
+        "code": "P0_UNKNOWN_RESULT_PROTOCOL_11_T_COMMAND",
+        "severity": "BLOCKER",
+        "count": await count(
+          "SELECT COUNT(*) AS count_value "
+          "FROM trade_command_outbox AS command "
+          f"WHERE {legacy_t_predicate} "
+          "AND UPPER(command.delivery_status) IN "
+          "('DELIVERED', 'ACKNOWLEDGED', 'RECONCILE_REQUIRED') "
+          "AND NOT EXISTS ("
+          "SELECT 1 FROM pending_trade_orders AS pending "
+          "WHERE pending.client_order_id = command.client_order_id "
+          "AND UPPER(pending.status) IN "
+          "('FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED')"
+          ")"
+        ),
+      },
+    ]
+  )
+  return {
+    "schemaVersion": p0_audit.P0_SCHEMA_VERSION,
+    "scope": p0_audit.AUDIT_SCOPE,
+    "currentProtocol": LEGACY_PROTOCOL_VERSION,
+    "targetProtocol": TARGET_PROTOCOL_VERSION,
+    "readyForP1": all(
+      item["count"] == 0
+      or (item["code"] == "P0_ENABLED_LEGACY_CONFIG_COUNT" and item["count"] == 1)
+      for item in checks
+    ),
+    "summary": {
+      "blockerCount": sum(
+        1
+        for item in checks
+        if item["severity"] == "BLOCKER" and item["count"] not in (None, 0)
+      ),
+      "warningCount": 0,
+      "checkCount": len(checks),
+    },
+    "checks": checks,
+    "requiredTables": list(LEGACY_REQUIRED_TABLES),
+    "schema": "LEGACY_0045",
+  }
 
 
 def _reason_for_p0_check(code: str) -> str:
@@ -280,9 +439,11 @@ def _build_report(
   audit_report: Mapping[str, Any],
   *,
   unsettled_inbox_count: int | None,
+  exit_intent_report: Mapping[str, Any] | None = None,
   configured_protocol: Any = _UNSET,
   target_contract_source: Any = _UNSET,
   extra_reasons: Iterable[str] = (),
+  running_protocol: str = CURRENT_PROTOCOL_VERSION,
 ) -> dict[str, Any]:
   """Build an aggregate-only, deidentified rehearsal report."""
 
@@ -330,9 +491,40 @@ def _build_report(
   elif unsettled_inbox_count:
     reasons.add(UNSETTLED_AGENT_INBOX)
 
+  exit_safe_count: int | None = None
+  exit_blocked_count: int | None = None
+  exit_safe_ids: list[str] = []
+  exit_blocked_ids: list[str] = []
+  if exit_intent_report is not None:
+    exit_safe_count = _strict_count(exit_intent_report.get("safeExitIntentCount"))
+    exit_blocked_count = _strict_count(
+      exit_intent_report.get("blockedExitIntentCount")
+    )
+    raw_safe_ids = exit_intent_report.get("safeExitIntentIds")
+    if isinstance(raw_safe_ids, (list, tuple, set, frozenset)):
+      exit_safe_ids = sorted(
+        {str(value) for value in raw_safe_ids if isinstance(value, str) and value}
+      )
+    raw_blocked_ids = exit_intent_report.get("blockedExitIntentIds")
+    if isinstance(raw_blocked_ids, (list, tuple, set, frozenset)):
+      exit_blocked_ids = sorted(
+        {str(value) for value in raw_blocked_ids if isinstance(value, str) and value}
+      )
+    if exit_safe_count is None or exit_blocked_count is None:
+      reasons.add(TERMINAL_EXIT_INTENT_GATE_UNKNOWN)
+    elif exit_safe_count or exit_blocked_count:
+      reasons.add(TERMINAL_EXIT_PLAN_UNROUTED_INTENT)
+    if exit_intent_report.get("reasonCodes") and not (
+      exit_safe_count or exit_blocked_count
+    ):
+      reasons.add(TERMINAL_EXIT_INTENT_GATE_UNKNOWN)
+
   raw_audit_current = audit_report.get("currentProtocol", _UNSET)
-  audit_current = _safe_protocol(raw_audit_current)
-  if audit_current != CURRENT_PROTOCOL_VERSION:
+  audit_current = _safe_protocol(
+    raw_audit_current,
+    accepted_versions={running_protocol, TARGET_PROTOCOL_VERSION},
+  )
+  if audit_current != running_protocol:
     reasons.add(
       PROTOCOL_STATUS_UNKNOWN
       if audit_current is None
@@ -344,8 +536,11 @@ def _build_report(
     if configured_protocol is _UNSET
     else configured_protocol
   )
-  configured = _safe_protocol(raw_configured)
-  if configured != CURRENT_PROTOCOL_VERSION or raw_configured != CURRENT_PROTOCOL_VERSION:
+  configured = _safe_protocol(
+    raw_configured,
+    accepted_versions={running_protocol, TARGET_PROTOCOL_VERSION},
+  )
+  if configured != running_protocol or raw_configured != running_protocol:
     reasons.add(
       PROTOCOL_STATUS_UNKNOWN
       if configured is None
@@ -413,8 +608,8 @@ def _build_report(
       "code": "CURRENT_PROTOCOL",
       "status": (
         "PASSED"
-        if audit_current == CURRENT_PROTOCOL_VERSION
-        and configured == CURRENT_PROTOCOL_VERSION
+        if audit_current == running_protocol
+        and configured == running_protocol
         else "UNKNOWN"
       ),
       "count": None,
@@ -442,6 +637,32 @@ def _build_report(
       "count": None,
       "source": "OBSERVED_SOURCE",
     },
+    {
+      "code": TERMINAL_EXIT_PLAN_UNROUTED_INTENT,
+      "status": (
+        "UNKNOWN"
+        if exit_intent_report is not None
+        and (exit_safe_count is None or exit_blocked_count is None)
+        else "BLOCKED"
+        if exit_intent_report is not None
+        and (exit_safe_count or exit_blocked_count)
+        else "PASSED"
+        if exit_intent_report is not None
+        else "NOT_CHECKED"
+      ),
+      "count": (
+        None
+        if exit_intent_report is None
+        or exit_safe_count is None
+        or exit_blocked_count is None
+        else exit_safe_count + exit_blocked_count
+      ),
+      "safeCount": exit_safe_count,
+      "blockedCount": exit_blocked_count,
+      "safeIntentIds": exit_safe_ids,
+      "blockedIntentIds": exit_blocked_ids,
+      "source": "P1_RECONCILE_DETECTOR",
+    },
   ]
   observed = {
     "p0Ready": p0_ready,
@@ -460,6 +681,15 @@ def _build_report(
       else None
     ),
     "targetContractSourceAvailable": target_available,
+    "terminalExitPlanUnroutedIntentCount": (
+      None
+      if exit_safe_count is None or exit_blocked_count is None
+      else exit_safe_count + exit_blocked_count
+    ),
+    "terminalExitPlanUnroutedIntentSafeCount": exit_safe_count,
+    "terminalExitPlanUnroutedIntentBlockedCount": exit_blocked_count,
+    "safeExitIntentIds": exit_safe_ids,
+    "blockedExitIntentIds": exit_blocked_ids,
   }
   return {
     "schemaVersion": P1_CUTOVER_REHEARSAL_SCHEMA_VERSION,
@@ -484,11 +714,16 @@ async def inspect_connection(
   *,
   configured_protocol: Any = _UNSET,
   target_contract_source: Any = _UNSET,
+  legacy_schema: bool = False,
 ) -> dict[str, Any]:
   """Inspect one open connection without changing it."""
 
   try:
-    audit_report = await p0_audit.audit_connection(connection)
+    audit_report = (
+      await _legacy_0045_audit_connection(connection)
+      if legacy_schema
+      else await p0_audit.audit_connection(connection)
+    )
   except Exception:  # noqa: BLE001 - no raw database errors cross this boundary
     return _build_report(
       {},
@@ -496,6 +731,9 @@ async def inspect_connection(
       configured_protocol=configured_protocol,
       target_contract_source=target_contract_source,
       extra_reasons=(P0_AUDIT_UNAVAILABLE,),
+      running_protocol=(
+        LEGACY_PROTOCOL_VERSION if legacy_schema else CURRENT_PROTOCOL_VERSION
+      ),
     )
   if not isinstance(audit_report, Mapping):
     return _build_report(
@@ -504,6 +742,9 @@ async def inspect_connection(
       configured_protocol=configured_protocol,
       target_contract_source=target_contract_source,
       extra_reasons=(P0_AUDIT_UNAVAILABLE,),
+      running_protocol=(
+        LEGACY_PROTOCOL_VERSION if legacy_schema else CURRENT_PROTOCOL_VERSION
+      ),
     )
 
   missing_count = _missing_table_count(audit_report)
@@ -514,11 +755,32 @@ async def inspect_connection(
       unsettled = await _unsettled_inbox_count(connection)
     except Exception:  # noqa: BLE001 - unknown inbox status is a blocker
       unsettled = None
+  exit_intent_report: Mapping[str, Any] | None = None
+  # Small test doubles do not expose a SQLAlchemy dialect.  Real connections
+  # always do, and are the only connections on which the detector is needed.
+  if getattr(connection, "dialect", None) is not None and not missing_count:
+    try:
+      exit_intent_report = (
+        await p1_reconcile.inspect_terminal_exit_plan_unrouted_intents(
+          connection,
+          legacy_schema=legacy_schema,
+        )
+      )
+    except Exception:  # noqa: BLE001 - readiness must fail closed
+      exit_intent_report = {
+        "safeExitIntentCount": None,
+        "blockedExitIntentCount": None,
+        "reasonCodes": [TERMINAL_EXIT_INTENT_GATE_UNKNOWN],
+      }
   return _build_report(
     audit_report,
     unsettled_inbox_count=unsettled,
+    exit_intent_report=exit_intent_report,
     configured_protocol=configured_protocol,
     target_contract_source=target_contract_source,
+    running_protocol=(
+      LEGACY_PROTOCOL_VERSION if legacy_schema else CURRENT_PROTOCOL_VERSION
+    ),
   )
 
 
@@ -527,6 +789,7 @@ async def run_rehearsal(
   *,
   configured_protocol: Any = _UNSET,
   target_contract_source: Any = _UNSET,
+  legacy_schema: bool = False,
 ) -> dict[str, Any]:
   """Run a PostgreSQL read-only rehearsal and unconditionally roll it back."""
 
@@ -543,6 +806,7 @@ async def run_rehearsal(
           connection,
           configured_protocol=configured_protocol,
           target_contract_source=target_contract_source,
+          legacy_schema=legacy_schema,
         )
       except Exception:  # noqa: BLE001 - report only stable reason codes
         report = _build_report(
@@ -551,6 +815,9 @@ async def run_rehearsal(
           configured_protocol=configured_protocol,
           target_contract_source=target_contract_source,
           extra_reasons=(P0_AUDIT_UNAVAILABLE,),
+          running_protocol=(
+            LEGACY_PROTOCOL_VERSION if legacy_schema else CURRENT_PROTOCOL_VERSION
+          ),
         )
       finally:
         try:
@@ -565,6 +832,9 @@ async def run_rehearsal(
       configured_protocol=configured_protocol,
       target_contract_source=target_contract_source,
       extra_reasons=(P0_AUDIT_UNAVAILABLE,),
+      running_protocol=(
+        LEGACY_PROTOCOL_VERSION if legacy_schema else CURRENT_PROTOCOL_VERSION
+      ),
     )
 
   if report is None:
@@ -574,6 +844,9 @@ async def run_rehearsal(
       configured_protocol=configured_protocol,
       target_contract_source=target_contract_source,
       extra_reasons=(P0_AUDIT_UNAVAILABLE,),
+      running_protocol=(
+        LEGACY_PROTOCOL_VERSION if legacy_schema else CURRENT_PROTOCOL_VERSION
+      ),
     )
   if not rolled_back:
     report["reasonCodes"] = sorted(
@@ -623,6 +896,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     f"| Queued protocol 1.1 outbox | {observed.get('queuedProtocol11OutboxCount', 'unknown')} |",
     f"| Protocol 1.1 unknown result | {observed.get('protocol11UnknownResultCount', 'unknown')} |",
     f"| Unsettled Agent inbox | {observed.get('unsettledAgentInboxCount', 'unknown')} |",
+    f"| Terminal ExitPlan unrouted intents | {observed.get('terminalExitPlanUnroutedIntentCount', 'unknown')} |",
     f"| Configured protocol | {observed.get('configuredProtocol', 'unknown')} |",
     "",
     "## Simulated state sequence",
@@ -662,7 +936,14 @@ async def _run_cli(args: argparse.Namespace) -> int:
 
     engine = create_async_engine(database_url, pool_pre_ping=True)
     try:
-      report = await run_rehearsal(engine)
+      # The pre-cutover rehearsal is the default CLI operation: it is the
+      # command operators run while the database is still at 0045.  The
+      # target-schema P0 audit is an explicit post-migration verification so
+      # this tool cannot accidentally inspect the wrong table shape.
+      report = await run_rehearsal(
+        engine,
+        legacy_schema=not args.target_0046,
+      )
     finally:
       await engine.dispose()
   except Exception:  # noqa: BLE001 - never print raw or secret-bearing errors
@@ -683,6 +964,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
   parser.add_argument("--database-url", default=None)
   parser.add_argument("--format", choices=("json", "markdown"), default="json")
   parser.add_argument("--require-ready", action="store_true")
+  schema_group = parser.add_mutually_exclusive_group()
+  schema_group.add_argument(
+    "--legacy-0045",
+    action="store_true",
+    help="explicitly select the pre-0046 schema (the default)",
+  )
+  schema_group.add_argument(
+    "--target-0046",
+    action="store_true",
+    help="inspect the canonical 0046 schema for post-cutover verification",
+  )
   return parser
 
 
@@ -698,6 +990,8 @@ __all__ = [
   "CONFIGURATION_MISSING",
   "CONFIGURATION_STATUS_UNKNOWN",
   "CURRENT_PROTOCOL_VERSION",
+  "LEGACY_PROTOCOL_VERSION",
+  "LEGACY_REQUIRED_TABLES",
   "INBOX_STATUS_UNKNOWN",
   "P0_AUDIT_UNAVAILABLE",
   "P0_READINESS_NOT_MET",
@@ -711,6 +1005,8 @@ __all__ = [
   "READ_ONLY_ROLLBACK_FAILED",
   "REHEARSAL_SCOPE",
   "REHEARSAL_STATE_SEQUENCE",
+  "TERMINAL_EXIT_INTENT_GATE_UNKNOWN",
+  "TERMINAL_EXIT_PLAN_UNROUTED_INTENT",
   "TARGET_PROTOCOL_VERSION",
   "UNSETTLED_AGENT_INBOX",
   "build_argument_parser",

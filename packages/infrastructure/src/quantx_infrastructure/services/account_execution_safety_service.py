@@ -15,6 +15,9 @@ from typing import Any
 
 from quantx_contracts import (
   ACCOUNT_EXECUTION_SAFETY_CHECK_CODE_SET,
+  PROTOCOL_VERSION,
+  ExecutionEnvironment,
+  ExecutionOwnerType,
   snapshot_account_authority_is_authoritative,
 )
 from quantx_domain.clock import to_naive_utc, utcnow
@@ -29,6 +32,7 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   AgentReportInbox,
   OperationalAlert,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
   TradeCommandOutbox,
@@ -70,7 +74,7 @@ _RISK_REDUCTION_CHECKS = frozenset(
     "ENGINE_READY",
     "LIVE_AGENT_READY",
     "AGENT_MODE_LIVE",
-    "PROTOCOL_1_1",
+    "PROTOCOL_1_2",
     "EXECUTION_CONTROL_CONFIGURED",
     "SNAPSHOT_RECONCILED",
     "SNAPSHOT_FRESH",
@@ -824,9 +828,9 @@ class AccountExecutionSafetyService:
         "OBSERVATION",
       ),
       (
-        "PROTOCOL_1_1",
-        reported_protocol_version == "1.1",
-        "账户观察与真实下单均要求 Agent 协议 1.1",
+        "PROTOCOL_1_2",
+        reported_protocol_version == PROTOCOL_VERSION,
+        f"账户观察与真实下单均要求 Agent 协议 {PROTOCOL_VERSION}",
         "OBSERVATION",
       ),
       (
@@ -1004,7 +1008,7 @@ class AccountExecutionSafetyService:
           select(AgentReportInbox)
           .where(
             AgentReportInbox.message_type == "delta_report",
-            AgentReportInbox.protocol_version == "1.1",
+            AgentReportInbox.protocol_version == PROTOCOL_VERSION,
             AgentReportInbox.processing_status == "PROCESSED",
           )
           .order_by(AgentReportInbox.received_at.desc())
@@ -1140,7 +1144,7 @@ class AccountExecutionSafetyService:
       "ENGINE_READY",
       "LIVE_AGENT_READY",
       "AGENT_MODE_LIVE",
-      "PROTOCOL_1_1",
+      "PROTOCOL_1_2",
       "SNAPSHOT_RECONCILED",
       "SNAPSHOT_FRESH",
       "SNAPSHOT_ACTIVITY_CLASSIFIED",
@@ -1325,6 +1329,7 @@ class AccountExecutionSafetyService:
         await db.execute(
           select(PendingTradeOrder).where(
             PendingTradeOrder.account_id == account_id,
+            PendingTradeOrder.environment == ExecutionEnvironment.LIVE.value,
             PendingTradeOrder.status.in_(
               ("QUEUED", "PENDING", "SUBMITTED", "PARTIAL_FILLED")
             ),
@@ -1337,7 +1342,10 @@ class AccountExecutionSafetyService:
     source_commands = (
       (
         await db.execute(
-          select(TradeCommandOutbox).where(TradeCommandOutbox.account_id == account_id)
+          select(TradeCommandOutbox).where(
+            TradeCommandOutbox.account_id == account_id,
+            TradeCommandOutbox.environment == ExecutionEnvironment.LIVE.value,
+          )
         )
       )
       .scalars()
@@ -1348,6 +1356,29 @@ class AccountExecutionSafetyService:
       for row in source_commands
       if row.payload.get("command_kind") == "PLACE_ORDER"
     }
+    pending_client_ids = [
+      str(row.client_order_id)
+      for row in pending_orders
+      if str(row.client_order_id or "").strip()
+    ]
+    correlations_by_client: dict[str, list[OrderCorrelation]] = {}
+    if pending_client_ids:
+      correlation_rows = (
+        (
+          await db.execute(
+            select(OrderCorrelation).where(
+              OrderCorrelation.account_id == account_id,
+              OrderCorrelation.client_order_id.in_(pending_client_ids),
+            )
+          )
+        )
+        .scalars()
+        .all()
+      )
+      for correlation in correlation_rows:
+        correlations_by_client.setdefault(
+          str(correlation.client_order_id), []
+        ).append(correlation)
     device_ids: set[str] = set()
     for command in source_commands:
       if command.payload.get("command_kind") != "PLACE_ORDER":
@@ -1372,6 +1403,9 @@ class AccountExecutionSafetyService:
             ).hexdigest(),
             device_id=device_id,
             account_id=account_id,
+            owner_type=ExecutionOwnerType.MANUAL_COMMAND.value,
+            owner_id=str(event_id),
+            environment=ExecutionEnvironment.LIVE.value,
             payload={
               "command_kind": "EMERGENCY_STOP",
               "client_order_id": client_order_id,
@@ -1395,6 +1429,146 @@ class AccountExecutionSafetyService:
       source = command_by_client.get(pending.client_order_id)
       if source is None:
         continue
+      correlations = correlations_by_client.get(
+        str(pending.client_order_id), []
+      )
+      if len(correlations) != 1:
+        pending.status = "RECONCILE_REQUIRED"
+        pending.status_reason = (
+          "account hard kill requires one authoritative order correlation"
+        )
+        continue
+      correlation = correlations[0]
+      source_owner = (
+        str(source.owner_type or ""),
+        str(source.owner_id or ""),
+        str(source.environment or "").upper(),
+      )
+      pending_owner = (
+        str(pending.owner_type or ""),
+        str(pending.owner_id or ""),
+        str(pending.environment or "").upper(),
+      )
+      if source_owner != pending_owner:
+        raise ValueError("账户 hard kill 委托 owner/environment 不一致")
+      if (
+        str(correlation.client_order_id or "")
+        != str(pending.client_order_id or "")
+        or str(correlation.broker_order_id or "").strip()
+        != str(pending.broker_order_id or "").strip()
+        or str(correlation.account_id or "") != account_id
+        or (
+          str(correlation.owner_type or "").strip().upper()
+          != pending_owner[0].strip().upper()
+        )
+        or str(correlation.owner_id or "").strip() != pending_owner[1].strip()
+        or str(correlation.environment or "").strip().upper()
+        != pending_owner[2].strip().upper()
+      ):
+        pending.status = "RECONCILE_REQUIRED"
+        pending.status_reason = (
+          "account hard kill order correlation owner binding mismatch"
+        )
+        continue
+      pending_strategy_run_id = str(pending.strategy_run_id or "").strip()
+      correlation_strategy_run_id = str(
+        correlation.strategy_run_id or ""
+      ).strip()
+      if (
+        (
+          pending_strategy_run_id
+          and (
+            pending_owner[0].strip().upper() != "STRATEGY_RUN"
+            or pending_strategy_run_id != pending_owner[1].strip()
+          )
+        )
+        or (
+          correlation_strategy_run_id
+          and (
+            str(correlation.owner_type or "").strip().upper()
+            != "STRATEGY_RUN"
+            or correlation_strategy_run_id
+            != str(correlation.owner_id or "").strip()
+          )
+        )
+        or pending_strategy_run_id != correlation_strategy_run_id
+        or str(correlation.strategy_order_id or "").strip()
+        != str(pending.strategy_order_id or "").strip()
+        or str(correlation.intent_id or "").strip()
+        != str(pending.intent_id or "").strip()
+        or str(correlation.batch_id or "").strip()
+        != str(pending.batch_id or "").strip()
+        or str(correlation.bucket or "").strip()
+        != str(pending.bucket or "").strip()
+        or str(correlation.t_trade_role or "").strip().upper()
+        != str(pending.t_trade_role or "").strip().upper()
+        or str(correlation.risk_decision_id or "").strip()
+        != str(pending.risk_decision_id or "").strip()
+        or str(correlation.trace_id or "").strip()
+        != str(pending.trace_id or "").strip()
+        or dict(correlation.substitution_plan or {})
+        != dict(pending.substitution_plan or {})
+        or dict(correlation.request_metadata or {})
+        != dict(pending.request_metadata or {})
+      ):
+        pending.status = "RECONCILE_REQUIRED"
+        pending.status_reason = (
+          "account hard kill durable order chain binding mismatch"
+        )
+        continue
+      source_payload = dict(source.payload or {})
+      try:
+        source_volume = int(source_payload.get("volume"))
+      except (TypeError, ValueError, OverflowError):
+        source_volume = -1
+      try:
+        source_expires_at = datetime.fromisoformat(
+          str(source_payload.get("expires_at") or "")
+          .strip()
+          .replace("Z", "+00:00")
+        )
+        source_expiry_matches = (
+          to_naive_utc(source_expires_at) == to_naive_utc(source.expires_at)
+        )
+      except (AttributeError, TypeError, ValueError):
+        source_expiry_matches = False
+      if (
+        set(source_payload)
+        != {
+          "command_kind",
+          "client_order_id",
+          "account_id",
+          "execution_mode",
+          "instrument_code",
+          "side",
+          "price_type",
+          "limit_price",
+          "volume",
+          "expires_at",
+        }
+        or str(source_payload.get("command_kind") or "").strip().upper()
+        != "PLACE_ORDER"
+        or str(source_payload.get("client_order_id") or "")
+        != str(pending.client_order_id or "")
+        or str(source_payload.get("account_id") or "") != account_id
+        or str(source_payload.get("execution_mode") or "").strip().lower()
+        != pending_owner[2].strip().lower()
+        or str(source_payload.get("instrument_code") or "").strip().upper()
+        != str(pending.instrument_code or "").strip().upper()
+        or str(source_payload.get("side") or "").strip().upper()
+        != str(pending.side or "").strip().upper()
+        or str(source_payload.get("price_type") or "").strip().upper()
+        != "FIX_PRICE"
+        or str(source_payload.get("limit_price") or "").strip()
+        != str(pending.limit_price or "").strip()
+        or source_volume != int(pending.volume or 0)
+        or not source_expiry_matches
+      ):
+        pending.status = "RECONCILE_REQUIRED"
+        pending.status_reason = (
+          "account hard kill PLACE payload binding mismatch"
+        )
+        continue
       cancel_key = f"{source.device_id}:{pending.broker_order_id}"
       if cancel_key in cancellation_keys:
         continue
@@ -1412,13 +1586,15 @@ class AccountExecutionSafetyService:
           ).hexdigest(),
           device_id=source.device_id,
           account_id=account_id,
+          owner_type=source_owner[0],
+          owner_id=source_owner[1],
+          environment=source_owner[2],
           payload={
             "command_kind": "CANCEL_ORDER",
             "client_order_id": client_order_id,
             "account_id": account_id,
-            "execution_mode": pending.execution_mode,
+            "execution_mode": source_owner[2].lower(),
             "broker_order_id": str(pending.broker_order_id),
-            "trace_id": event_id,
             "expires_at": expires_at.isoformat() + "Z",
           },
           delivery_status="QUEUED",

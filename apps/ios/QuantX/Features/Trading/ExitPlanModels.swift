@@ -74,15 +74,17 @@ indirect enum ExitPlanStructuredValue: Equatable, Sendable {
   }
 }
 
-enum ExitPlanExecutionMode: Equatable, Sendable {
+enum ExecutionEnvironment: Equatable, Sendable {
   case paper
   case live
+  case backtest
   case unknown(String)
 
   init(serverValue: String) {
     switch serverValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
     case "PAPER": self = .paper
     case "LIVE": self = .live
+    case "BACKTEST": self = .backtest
     case let value: self = .unknown(value)
     }
   }
@@ -91,6 +93,7 @@ enum ExitPlanExecutionMode: Equatable, Sendable {
     switch self {
     case .paper: "模拟（PAPER）"
     case .live: "实盘（LIVE）"
+    case .backtest: "回测（BACKTEST）"
     case .unknown(let value): "未知模式（\(value.isEmpty ? "空值" : value)）"
     }
   }
@@ -128,30 +131,44 @@ enum ExitPlanStatus: Equatable, Sendable {
   }
 }
 
-enum ExitPlanExecutionOwner: Equatable, Sendable {
-  case strategyRuntime
-  case exitPlanMonitor
-  case invalidOwner
+enum ExecutionOwnerType: Equatable, Sendable {
+  case strategyRun
+  case tAssistantExecution
+  case entryPlan
+  case boardAssistantExecution
+  case exitPlan
+  case manualCommand
   case unknown(String)
 
   init(serverValue: String) {
     let normalized = serverValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
     switch normalized {
-    case "STRATEGY_RUNTIME": self = .strategyRuntime
-    case "EXIT_PLAN_MONITOR": self = .exitPlanMonitor
-    case "INVALID_OWNER": self = .invalidOwner
+    case "STRATEGY_RUN": self = .strategyRun
+    case "T_ASSISTANT_EXECUTION": self = .tAssistantExecution
+    case "ENTRY_PLAN": self = .entryPlan
+    case "BOARD_ASSISTANT_EXECUTION": self = .boardAssistantExecution
+    case "EXIT_PLAN": self = .exitPlan
+    case "MANUAL_COMMAND": self = .manualCommand
     default: self = .unknown(normalized)
     }
   }
 
   var title: String {
     switch self {
-    case .strategyRuntime: "原入场 / 做 T 运行"
-    case .exitPlanMonitor: "全局计划监控"
-    case .invalidOwner: "执行归属无效"
+    case .strategyRun: "策略运行"
+    case .tAssistantExecution: "做 T 助手执行"
+    case .entryPlan: "建仓计划"
+    case .boardAssistantExecution: "打板助手执行"
+    case .exitPlan: "退出计划"
+    case .manualCommand: "人工命令"
     case .unknown(let value): "未知执行归属（\(value.isEmpty ? "空值" : value)）"
     }
   }
+}
+
+struct ExecutionOwnerRef: Equatable, Sendable {
+  let ownerType: ExecutionOwnerType
+  let ownerID: String
 }
 
 enum ExitPlanAuthorizationState: Equatable, Sendable {
@@ -164,7 +181,7 @@ enum ExitPlanAuthorizationState: Equatable, Sendable {
 
   var title: String {
     switch self {
-    case .notApplicable: "PAPER 无需实盘授权"
+    case .notApplicable: "当前环境无需实盘授权"
     case .authorized: "精确自动授权有效"
     case .expired: "自动授权已到期"
     case .staleVersion: "授权版本已失效"
@@ -185,13 +202,14 @@ struct ExitPlanItem: Equatable, Identifiable, Sendable {
   let strategyRunID: String?
   let enabled: Bool
   let status: ExitPlanStatus
-  let executionMode: ExitPlanExecutionMode
+  let environment: ExecutionEnvironment
   let autoExitAuthorized: Bool
   let autoExitAuthorizationConfigVersion: Int?
   let autoExitAuthorizationExpiresAt: Date?
   let configVersion: Int
   let stateVersion: Int
-  let executionOwner: ExitPlanExecutionOwner
+  let executionOwner: ExecutionOwnerRef
+  let sourceExecutionOwner: ExecutionOwnerRef
   let completionStrategy: String?
   let completionNote: String?
   let protectedVolume: Int
@@ -212,6 +230,8 @@ struct ExitPlanItem: Equatable, Identifiable, Sendable {
   let pendingIntentID: String?
   let lastEvaluatedAt: Date?
   let lastError: String?
+  let recoveryAction: String?
+  let recoveryMessage: String?
   let createdAt: Date?
   let updatedAt: Date?
 
@@ -220,11 +240,13 @@ struct ExitPlanItem: Equatable, Identifiable, Sendable {
   }
 
   func authorizationState(at now: Date) -> ExitPlanAuthorizationState {
-    switch executionMode {
+    switch environment {
     case .paper:
       return .notApplicable
     case .unknown:
       return .unknownMode
+    case .backtest:
+      return .notApplicable
     case .live:
       guard autoExitAuthorized else {
         if let expiresAt = autoExitAuthorizationExpiresAt, expiresAt <= now {
@@ -362,7 +384,7 @@ struct ExitPlanAuthorizationReview: Equatable, Identifiable, Sendable {
   let instrumentCode: String
   let bucket: String
   let sourceType: String
-  let executionMode: ExitPlanExecutionMode
+  let environment: ExecutionEnvironment
   let configVersion: Int
   let protectedVolume: Int
   let exitedVolume: Int

@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from quantx_contracts import (
+  PROTOCOL_VERSION,
+  ExecutionEnvironment,
+  ExecutionOwnerType,
+)
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.account import Account
@@ -214,11 +219,11 @@ async def _live_readiness_binding(
     heartbeat is None
     or str(heartbeat.status or "").upper() != "READY"
     or "live" not in reported_capabilities
-    or protocol_version != "1.1"
+    or protocol_version != PROTOCOL_VERSION
   ):
     raise TradeApprovalChallengeError(
       "LIVE_AGENT_NOT_READY",
-      "自动实盘退出要求唯一 READY、live、协议 1.1 的 QMT Agent",
+      f"自动实盘退出要求唯一 READY、live、协议 {PROTOCOL_VERSION} 的 QMT Agent",
     )
 
   account_stmt = select(Account).where(
@@ -272,6 +277,9 @@ def _challenge_payload(
 ) -> dict[str, Any]:
   return {
     "action": EXIT_PLAN_AUTHORIZATION_ACTION,
+    "owner_type": ExecutionOwnerType.EXIT_PLAN.value,
+    "owner_id": request.plan_id,
+    "environment": ExecutionEnvironment.LIVE.value,
     "request": request.payload(),
     "plan_binding": plan_binding,
     "safety_subject": safety_subject,
@@ -370,6 +378,9 @@ class ExitPlanAuthorizationChallengeService:
         user_id=principal.user_id,
         device_session_id=principal.device_session_id,
         account_id=request.account_id,
+        owner_type=ExecutionOwnerType.EXIT_PLAN.value,
+        owner_id=request.plan_id,
+        environment=ExecutionEnvironment.LIVE.value,
         idempotency_key=request.idempotency_key,
         payload=payload,
         payload_fingerprint=signed_payload_fingerprint(payload),

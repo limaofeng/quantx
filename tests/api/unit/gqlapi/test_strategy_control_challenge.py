@@ -20,6 +20,7 @@ from quantx_api.gqlapi.types.strategy_types import (
   StrategyControlAction,
   StrategyControlPreviewInput,
 )
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.enums import StrategyRunMode, StrategyRunStatus
 
@@ -77,7 +78,7 @@ def _readiness(*, server_enabled: bool = True):
     "agent_device_id": "agent-1",
     "ready_live_agent_count": 1,
     "agent_mode": "live",
-    "protocol_version": "1.1",
+    "protocol_version": PROTOCOL_VERSION,
     "reconcile_status": "READY",
     "kill_switch": False,
     "policy_version": 2,

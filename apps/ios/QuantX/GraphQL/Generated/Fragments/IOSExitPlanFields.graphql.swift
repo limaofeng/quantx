@@ -7,7 +7,7 @@
 extension QuantXAPI {
   nonisolated struct IOSExitPlanFields: QuantXAPI.SelectionSet, Fragment {
     static var fragmentDefinition: StaticString {
-      #"fragment IOSExitPlanFields on ExitPlanView { __typename planId groupId accountId instrumentCode bucket sourceType sourceId strategyRunId enabled status executionMode autoExitAuthorized autoExitAuthorizationConfigVersion autoExitAuthorizationExpiresAt configVersion stateVersion executionOwner completionStrategy completionNote protectedVolume exitedVolume remainingVolume entryAvgPrice rules metadata canEditRules editRoute phase dataQuality lastDecision peakPrice peakDrawdownPct trailingFloorPct pendingClientOrderId pendingIntentId lastEvaluatedAt lastError createdAt updatedAt }"#
+      #"fragment IOSExitPlanFields on ExitPlanView { __typename planId groupId accountId instrumentCode bucket sourceType sourceId strategyRunId enabled status environment autoExitAuthorized autoExitAuthorizationConfigVersion autoExitAuthorizationExpiresAt configVersion stateVersion executionOwner { __typename ownerType ownerId } sourceExecutionOwner { __typename ownerType ownerId } completionStrategy completionNote protectedVolume exitedVolume remainingVolume entryAvgPrice rules metadata canEditRules editRoute phase dataQuality lastDecision peakPrice peakDrawdownPct trailingFloorPct pendingClientOrderId pendingIntentId lastEvaluatedAt lastError recoveryAction recoveryMessage createdAt updatedAt }"#
     }
 
     let __data: DataDict
@@ -26,13 +26,14 @@ extension QuantXAPI {
       .field("strategyRunId", String?.self),
       .field("enabled", Bool.self),
       .field("status", String.self),
-      .field("executionMode", String.self),
+      .field("environment", GraphQLEnum<QuantXAPI.ExecutionEnvironment>.self),
       .field("autoExitAuthorized", Bool.self),
       .field("autoExitAuthorizationConfigVersion", Int?.self),
       .field("autoExitAuthorizationExpiresAt", QuantXAPI.DateTime?.self),
       .field("configVersion", Int.self),
       .field("stateVersion", Int.self),
-      .field("executionOwner", String.self),
+      .field("executionOwner", ExecutionOwner.self),
+      .field("sourceExecutionOwner", SourceExecutionOwner.self),
       .field("completionStrategy", String?.self),
       .field("completionNote", String?.self),
       .field("protectedVolume", Int.self),
@@ -53,6 +54,8 @@ extension QuantXAPI {
       .field("pendingIntentId", String?.self),
       .field("lastEvaluatedAt", QuantXAPI.DateTime?.self),
       .field("lastError", String?.self),
+      .field("recoveryAction", String?.self),
+      .field("recoveryMessage", String?.self),
       .field("createdAt", QuantXAPI.DateTime?.self),
       .field("updatedAt", QuantXAPI.DateTime?.self),
     ] }
@@ -70,13 +73,14 @@ extension QuantXAPI {
     var strategyRunId: String? { __data["strategyRunId"] }
     var enabled: Bool { __data["enabled"] }
     var status: String { __data["status"] }
-    var executionMode: String { __data["executionMode"] }
+    var environment: GraphQLEnum<QuantXAPI.ExecutionEnvironment> { __data["environment"] }
     var autoExitAuthorized: Bool { __data["autoExitAuthorized"] }
     var autoExitAuthorizationConfigVersion: Int? { __data["autoExitAuthorizationConfigVersion"] }
     var autoExitAuthorizationExpiresAt: QuantXAPI.DateTime? { __data["autoExitAuthorizationExpiresAt"] }
     var configVersion: Int { __data["configVersion"] }
     var stateVersion: Int { __data["stateVersion"] }
-    var executionOwner: String { __data["executionOwner"] }
+    var executionOwner: ExecutionOwner { __data["executionOwner"] }
+    var sourceExecutionOwner: SourceExecutionOwner { __data["sourceExecutionOwner"] }
     var completionStrategy: String? { __data["completionStrategy"] }
     var completionNote: String? { __data["completionNote"] }
     var protectedVolume: Int { __data["protectedVolume"] }
@@ -97,8 +101,48 @@ extension QuantXAPI {
     var pendingIntentId: String? { __data["pendingIntentId"] }
     var lastEvaluatedAt: QuantXAPI.DateTime? { __data["lastEvaluatedAt"] }
     var lastError: String? { __data["lastError"] }
+    var recoveryAction: String? { __data["recoveryAction"] }
+    var recoveryMessage: String? { __data["recoveryMessage"] }
     var createdAt: QuantXAPI.DateTime? { __data["createdAt"] }
     var updatedAt: QuantXAPI.DateTime? { __data["updatedAt"] }
+
+    /// IOSExitPlanFields.ExecutionOwner
+    nonisolated struct ExecutionOwner: QuantXAPI.SelectionSet {
+      let __data: DataDict
+      init(_dataDict: DataDict) { __data = _dataDict }
+
+      static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.ExecutionOwnerRef }
+      static var __selections: [ApolloAPI.Selection] { [
+        .field("__typename", String.self),
+        .field("ownerType", GraphQLEnum<QuantXAPI.ExecutionOwnerType>.self),
+        .field("ownerId", String.self),
+      ] }
+      static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
+        IOSExitPlanFields.ExecutionOwner.self
+      ] }
+
+      var ownerType: GraphQLEnum<QuantXAPI.ExecutionOwnerType> { __data["ownerType"] }
+      var ownerId: String { __data["ownerId"] }
+    }
+
+    /// IOSExitPlanFields.SourceExecutionOwner
+    nonisolated struct SourceExecutionOwner: QuantXAPI.SelectionSet {
+      let __data: DataDict
+      init(_dataDict: DataDict) { __data = _dataDict }
+
+      static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.ExecutionOwnerRef }
+      static var __selections: [ApolloAPI.Selection] { [
+        .field("__typename", String.self),
+        .field("ownerType", GraphQLEnum<QuantXAPI.ExecutionOwnerType>.self),
+        .field("ownerId", String.self),
+      ] }
+      static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
+        IOSExitPlanFields.SourceExecutionOwner.self
+      ] }
+
+      var ownerType: GraphQLEnum<QuantXAPI.ExecutionOwnerType> { __data["ownerType"] }
+      var ownerId: String { __data["ownerId"] }
+    }
   }
 
 }

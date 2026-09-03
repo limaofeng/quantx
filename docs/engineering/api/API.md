@@ -160,6 +160,24 @@ XTData/XTTrading 心跳只上传 `CONNECTED / DISCONNECTED / DISABLED` 和受控
 原因码，不上传 QMT 路径、端口、设备密钥或原始异常堆栈。该 Web 页面不提供
 本机进程启动、重连或 MiniQMT 控制能力。
 
+`/ws/agent` 当前只接受 Agent 控制协议 `1.2`，不保留 1.1/1.2 双协议或
+metadata-only owner 旁路。业务 owner 不进入 Agent wire：API/Engine 在持久化的
+intent、pending、correlation、`trade_command_outbox` 和 runtime event 中保存并校验
+`ExecutionOwnerRef(owner_type, owner_id)` 与 execution environment；`auto_exit_plans`
+和 `TTradeBatch` 保存不可变 source execution owner。当前可路由的 runtime owner 仅为
+`STRATEGY_RUN`、`EXIT_PLAN`、`MANUAL_COMMAND`，未知、未注册或 owner/environment 冲突
+均 fail-closed。
+
+Agent 命令 payload 是封闭契约：`PLACE_ORDER` 固定 10 个字段
+（`command_kind`、`client_order_id`、`account_id`、`execution_mode`、`instrument_code`、
+`side`、`price_type`、`limit_price`、`volume`、`expires_at`）；`CANCEL_ORDER` 固定 6 个
+字段（`command_kind`、`client_order_id`、`account_id`、`execution_mode`、
+`broker_order_id`、`expires_at`）。PLACE 只接受 `BUY/SELL`、`FIX_PRICE` 和有限正数
+`limit_price`。QMT 原生调用使用空 `strategy_name`，remark 为 `qx:` 加
+`client_order_id` 前 20 个字符。`command_ack` 只表示投递或 Agent 本地前置处理结果，
+不表示券商受理或成交；ORDER/EXECUTION/DELTA 报告先进入持久化
+`agent_report_inbox`，再由 Engine 依据 durable correlation 和 owner/environment 收敛。
+
 ## 系统设置 GraphQL
 
 `aiRuntimeSettings` 使用 `system-status:read`，返回全局非敏感期望配置、

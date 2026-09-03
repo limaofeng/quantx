@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import quantx_infrastructure.services.liquidation_service as liquidation_module
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_infrastructure.models.enums import AccountType, OrderType, PriceType
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder,
@@ -87,7 +88,10 @@ class TestLiquidationService:
     self, liquidation_service
   ):
     """测试未确认风险的一键清仓"""
-    result = await liquidation_service.liquidate_all_positions(confirm=False)
+    result = await liquidation_service.liquidate_all_positions(
+      confirm=False,
+      command_id="batch-confirmation-missing",
+    )
 
     assert not result.success
     assert "必须确认风险" in result.message
@@ -102,11 +106,30 @@ class TestLiquidationService:
     ) as mock_get_liquidatable:
       mock_get_liquidatable.return_value = []
 
-      result = await liquidation_service.liquidate_all_positions(confirm=True)
+      result = await liquidation_service.liquidate_all_positions(
+        confirm=True,
+        command_id="batch-no-positions",
+      )
 
       assert result.success
       assert result.total_positions == 0
       assert "没有可清仓的持仓" in result.message
+
+  @pytest.mark.asyncio
+  async def test_liquidate_all_positions_rejects_missing_command_id_before_lookup(
+    self, liquidation_service
+  ):
+    with patch.object(
+      liquidation_service, "_get_liquidatable_positions"
+    ) as mock_get_liquidatable:
+      result = await liquidation_service.liquidate_all_positions(
+        confirm=True,
+        command_id="",
+      )
+
+    assert not result.success
+    assert "MANUAL_LIQUIDATION_COMMAND_ID_MISSING" in result.message
+    mock_get_liquidatable.assert_not_awaited()
 
   @pytest.mark.asyncio
   async def test_liquidate_all_positions_success(
@@ -120,6 +143,9 @@ class TestLiquidationService:
       patch.object(
         liquidation_service, "_liquidate_single_position"
       ) as mock_liquidate_single,
+      patch.object(
+        liquidation_service, "_get_verified_latest_price", return_value=15.0
+      ),
     ):
       mock_get_liquidatable.return_value = [mock_position]
       mock_liquidate_single.return_value = {
@@ -131,7 +157,10 @@ class TestLiquidationService:
         "message": "清仓委托已提交",
       }
 
-      result = await liquidation_service.liquidate_all_positions(confirm=True)
+      result = await liquidation_service.liquidate_all_positions(
+        confirm=True,
+        command_id="batch-liquidation-1",
+      )
 
       assert result.success
       assert result.total_positions == 1
@@ -139,12 +168,17 @@ class TestLiquidationService:
       assert result.failed_positions == 0
       assert "清仓委托提交完成" in result.message
       assert "成功1个" in result.message
+      routed = mock_liquidate_single.await_args.kwargs
+      assert routed["command_id"] == "batch-liquidation-1:000001.SZ"
+      assert routed["limit_price"] == 15.0
 
   @pytest.mark.asyncio
   async def test_liquidate_position_without_confirmation(self, liquidation_service):
     """测试未确认风险的个股清仓"""
     result = await liquidation_service.liquidate_position(
-      stock_code="000001.SZ", confirm=False
+      stock_code="000001.SZ",
+      confirm=False,
+      command_id="position-confirmation-missing",
     )
 
     assert not result["success"]
@@ -157,11 +191,28 @@ class TestLiquidationService:
       mock_get_position.return_value = None
 
       result = await liquidation_service.liquidate_position(
-        stock_code="000001.SZ", confirm=True
+        stock_code="000001.SZ",
+        confirm=True,
+        command_id="position-not-found",
       )
 
       assert not result["success"]
       assert "未找到股票" in result["message"]
+
+  @pytest.mark.asyncio
+  async def test_liquidate_position_rejects_missing_command_id_before_lookup(
+    self, liquidation_service
+  ):
+    with patch.object(liquidation_service, "_get_position") as mock_get_position:
+      result = await liquidation_service.liquidate_position(
+        stock_code="000001.SZ",
+        confirm=True,
+        command_id="",
+      )
+
+    assert not result["success"]
+    assert result["error"] == "MANUAL_LIQUIDATION_COMMAND_ID_MISSING"
+    mock_get_position.assert_not_awaited()
 
   @pytest.mark.asyncio
   async def test_liquidate_position_insufficient_volume(
@@ -172,7 +223,9 @@ class TestLiquidationService:
       mock_get_position.return_value = mock_zero_position
 
       result = await liquidation_service.liquidate_position(
-        stock_code="000002.SZ", confirm=True
+        stock_code="000002.SZ",
+        confirm=True,
+        command_id="position-no-volume",
       )
 
       assert not result["success"]
@@ -186,6 +239,9 @@ class TestLiquidationService:
       patch.object(
         liquidation_service, "_liquidate_single_position"
       ) as mock_liquidate_single,
+      patch.object(
+        liquidation_service, "_get_verified_latest_price", return_value=15.0
+      ),
     ):
       mock_get_position.return_value = mock_position
       mock_liquidate_single.return_value = {
@@ -197,12 +253,17 @@ class TestLiquidationService:
       }
 
       result = await liquidation_service.liquidate_position(
-        stock_code="000001.SZ", confirm=True
+        stock_code="000001.SZ",
+        confirm=True,
+        command_id="position-liquidation-1",
       )
 
       assert result["success"]
       assert result["stock_code"] == "000001.SZ"
       assert result["volume"] == 1000
+      routed = mock_liquidate_single.await_args.kwargs
+      assert routed["command_id"] == "position-liquidation-1"
+      assert routed["limit_price"] == 15.0
 
   @pytest.mark.asyncio
   async def test_redeem_cleared_position_still_has_position(
@@ -273,7 +334,11 @@ class TestLiquidationService:
         "message": "下单成功",
       }
 
-      result = await liquidation_service._liquidate_single_position(mock_position)
+      result = await liquidation_service._liquidate_single_position(
+        mock_position,
+        command_id="test-liquidation-command",
+        limit_price=14.98,
+      )
 
       assert result["success"]
       assert result["stock_code"] == "000001.SZ"
@@ -284,11 +349,14 @@ class TestLiquidationService:
         stock_code="000001.SZ",
         order_type=OrderType.SELL,
         order_volume=1000,
-        price_type=PriceType.MARKET_CONVERT_5_LIMIT,
-        price=0,
-        strategy_name="清仓操作",
-        order_remark="清仓: 000001.SZ",
+        price_type=PriceType.FIX_PRICE,
+        price=14.98,
         close_position=True,
+        idempotency_key="manual-liquidation:test-liquidation-command",
+        execution_ref=ExecutionOwnerRef.manual_command(
+          "test-liquidation-command"
+        ),
+        environment=ExecutionEnvironment.PAPER,
       )
 
   @pytest.mark.asyncio
@@ -306,13 +374,44 @@ class TestLiquidationService:
       }
 
       result = await liquidation_service._liquidate_single_position(
-        mock_position, max_retry=2
+        mock_position,
+        max_retry=2,
+        command_id="retry-liquidation-command",
+        limit_price=14.98,
       )
 
       assert not result["success"]
       assert result["stock_code"] == "000001.SZ"
       assert "已重试2次" in result["message"]
       assert mock_place_order.call_count == 2
+      first_call = mock_place_order.call_args_list[0].kwargs
+      second_call = mock_place_order.call_args_list[1].kwargs
+      assert first_call["idempotency_key"] == second_call["idempotency_key"]
+      assert first_call["execution_ref"] == second_call["execution_ref"]
+      assert first_call["environment"] is ExecutionEnvironment.PAPER
+      assert first_call["price_type"] is PriceType.FIX_PRICE
+      assert first_call["price"] > 0
+
+  @pytest.mark.asyncio
+  async def test_liquidate_single_position_rejects_missing_latest_price(
+    self, liquidation_service, mock_position
+  ):
+    with patch.object(
+      liquidation_service.trading_service, "place_order"
+    ) as mock_place_order:
+      result = await liquidation_service._liquidate_single_position(
+        mock_position,
+        command_id="missing-price-command",
+        limit_price=None,
+      )
+
+    assert result == {
+      "success": False,
+      "stock_code": "000001.SZ",
+      "error": "LIQUIDATION_LATEST_PRICE_UNAVAILABLE",
+      "message": "清仓命令缺少经过校验的最新限价",
+    }
+    mock_place_order.assert_not_called()
 
   @pytest.mark.asyncio
   async def test_get_liquidatable_positions_filters_zero_volume(
@@ -588,6 +687,9 @@ class TestLiquidationService:
     assert result.submitted
     assert result.order_id == "order-1"
     assert mock_submit.call_count == 1
+    routed = mock_submit.await_args.kwargs
+    assert routed["command_id"] == "conditional-liquidation:condition-1"
+    assert routed["limit_price"] == 11.0
     assert any(payload.get("enabled") is False for _, payload in updates)
     assert any(payload.get("status") == "SUBMITTED" for _, payload in updates)
 

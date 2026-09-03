@@ -14,6 +14,7 @@ from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
+  OrderCorrelation,
   PendingTradeOrder,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
@@ -631,6 +632,24 @@ class TTradeOperationsService:
         for row in source_commands
         if row.payload.get("command_kind") == "PLACE_ORDER"
       }
+      correlations_by_client: dict[str, list[OrderCorrelation]] = {}
+      if t_client_order_ids:
+        correlation_rows = (
+          (
+            await db.execute(
+              select(OrderCorrelation).where(
+                OrderCorrelation.account_id == account_id,
+                OrderCorrelation.client_order_id.in_(t_client_order_ids),
+              )
+            )
+          )
+          .scalars()
+          .all()
+        )
+        for correlation in correlation_rows:
+          correlations_by_client.setdefault(
+            str(correlation.client_order_id), []
+          ).append(correlation)
       for command in command_by_client.values():
         if command.delivery_status == "QUEUED":
           command.delivery_status = "CANCELLED_KILL"
@@ -645,6 +664,141 @@ class TTradeOperationsService:
           continue
         source = command_by_client.get(pending.client_order_id)
         if source is None:
+          continue
+        correlations = correlations_by_client.get(
+          str(pending.client_order_id), []
+        )
+        if len(correlations) != 1:
+          pending.status = "RECONCILE_REQUIRED"
+          pending.status_reason = (
+            "T-trade stop requires one authoritative order correlation"
+          )
+          continue
+        correlation = correlations[0]
+        if (
+          str(source.owner_type or "") != str(pending.owner_type or "")
+          or str(source.owner_id or "") != str(pending.owner_id or "")
+          or str(source.environment or "").upper()
+          != str(pending.environment or "").upper()
+        ):
+          raise ValueError("T-trade 停止委托 owner/environment 不一致")
+        if (
+          str(correlation.client_order_id or "")
+          != str(pending.client_order_id or "")
+          or str(correlation.broker_order_id or "").strip()
+          != str(pending.broker_order_id or "").strip()
+          or str(correlation.account_id or "") != account_id
+          or str(correlation.owner_type or "").strip().upper()
+          != str(pending.owner_type or "").strip().upper()
+          or str(correlation.owner_id or "").strip()
+          != str(pending.owner_id or "").strip()
+          or str(correlation.environment or "").strip().upper()
+          != str(pending.environment or "").strip().upper()
+        ):
+          pending.status = "RECONCILE_REQUIRED"
+          pending.status_reason = (
+            "T-trade stop order correlation owner binding mismatch"
+          )
+          continue
+        pending_strategy_run_id = str(pending.strategy_run_id or "").strip()
+        correlation_strategy_run_id = str(
+          correlation.strategy_run_id or ""
+        ).strip()
+        if (
+          (
+            pending_strategy_run_id
+            and (
+              str(pending.owner_type or "").strip().upper() != "STRATEGY_RUN"
+              or pending_strategy_run_id != str(pending.owner_id or "").strip()
+            )
+          )
+          or (
+            correlation_strategy_run_id
+            and (
+              str(correlation.owner_type or "").strip().upper()
+              != "STRATEGY_RUN"
+              or correlation_strategy_run_id
+              != str(correlation.owner_id or "").strip()
+            )
+          )
+          or pending_strategy_run_id != correlation_strategy_run_id
+          or str(correlation.strategy_order_id or "").strip()
+          != str(pending.strategy_order_id or "").strip()
+          or str(correlation.intent_id or "").strip()
+          != str(pending.intent_id or "").strip()
+          or str(correlation.batch_id or "").strip()
+          != str(pending.batch_id or "").strip()
+          or str(correlation.bucket or "").strip()
+          != str(pending.bucket or "").strip()
+          or str(correlation.t_trade_role or "").strip().upper()
+          != str(pending.t_trade_role or "").strip().upper()
+          or str(correlation.risk_decision_id or "").strip()
+          != str(pending.risk_decision_id or "").strip()
+          or str(correlation.trace_id or "").strip()
+          != str(pending.trace_id or "").strip()
+          or dict(correlation.substitution_plan or {})
+          != dict(pending.substitution_plan or {})
+          or dict(correlation.request_metadata or {})
+          != dict(pending.request_metadata or {})
+        ):
+          pending.status = "RECONCILE_REQUIRED"
+          pending.status_reason = (
+            "T-trade stop durable order chain binding mismatch"
+          )
+          continue
+        source_payload = dict(source.payload or {})
+        try:
+          source_volume = int(source_payload.get("volume"))
+        except (TypeError, ValueError, OverflowError):
+          source_volume = -1
+        try:
+          source_expires_at = datetime.fromisoformat(
+            str(source_payload.get("expires_at") or "")
+            .strip()
+            .replace("Z", "+00:00")
+          )
+          source_expiry_matches = (
+            to_naive_utc(source_expires_at)
+            == to_naive_utc(source.expires_at)
+          )
+        except (AttributeError, TypeError, ValueError):
+          source_expiry_matches = False
+        if (
+          set(source_payload)
+          != {
+            "command_kind",
+            "client_order_id",
+            "account_id",
+            "execution_mode",
+            "instrument_code",
+            "side",
+            "price_type",
+            "limit_price",
+            "volume",
+            "expires_at",
+          }
+          or str(source_payload.get("command_kind") or "").strip().upper()
+          != "PLACE_ORDER"
+          or str(source_payload.get("client_order_id") or "")
+          != str(pending.client_order_id or "")
+          or str(source_payload.get("account_id") or "") != account_id
+          or str(source_payload.get("execution_mode") or "").strip().lower()
+          != str(pending.environment or "").strip().lower()
+          or str(source_payload.get("instrument_code") or "").strip().upper()
+          != str(pending.instrument_code or "").strip().upper()
+          or str(source_payload.get("side") or "").strip().upper()
+          != str(pending.side or "").strip().upper()
+          or str(source_payload.get("price_type") or "").strip().upper()
+          != "FIX_PRICE"
+          or str(source_payload.get("limit_price") or "").strip()
+          != str(pending.limit_price or "").strip()
+          or source_volume != int(pending.volume or 0)
+          or not source_expiry_matches
+        ):
+          pending.status = "RECONCILE_REQUIRED"
+          pending.status_reason = (
+            "T-trade stop PLACE payload binding mismatch"
+          )
           continue
         cancel_key = f"{source.device_id}:{pending.broker_order_id}"
         if cancel_key in cancellation_keys:
@@ -663,13 +817,15 @@ class TTradeOperationsService:
             ).hexdigest(),
             device_id=source.device_id,
             account_id=account_id,
+            owner_type=str(source.owner_type or ""),
+            owner_id=str(source.owner_id or ""),
+            environment=str(source.environment or "").upper(),
             payload={
               "command_kind": "CANCEL_ORDER",
               "client_order_id": client_order_id,
               "account_id": account_id,
-              "execution_mode": pending.execution_mode,
+              "execution_mode": str(pending.environment or "").upper().lower(),
               "broker_order_id": str(pending.broker_order_id),
-              "trace_id": stop_event_id,
               "expires_at": expires_at.isoformat() + "Z",
             },
             delivery_status="QUEUED",
@@ -776,7 +932,11 @@ class TTradeOperationsService:
       if str(value or "").strip().lower() in {"paper", "live"}
     }
     if execution_modes:
-      query = query.where(TTradeBatch.execution_mode.in_(execution_modes))
+      query = query.where(
+        TTradeBatch.environment.in_(
+          tuple(value.upper() for value in execution_modes)
+        )
+      )
 
     result_groups = {
       str(value or "").strip().upper()
@@ -956,7 +1116,7 @@ class TTradeOperationsService:
       "trailing_floor_pct": row.trailing_floor_pct,
       "exit_reason": row.exit_reason,
       "exception_reason": row.exception_reason,
-      "execution_mode": row.execution_mode,
+      "execution_mode": str(row.environment or "").upper().lower(),
       "metrics_origin": row.metrics_origin,
       "entry_filled_at": row.entry_filled_at,
       "closed_at": row.closed_at,
@@ -1084,7 +1244,7 @@ class TTradeOperationsService:
         "REJECTED",
       }:
         raise ValueError("当前委托状态不可撤")
-      mode = pending.execution_mode
+      mode = str(pending.environment or "").upper().lower()
     return await TradingService(
       account_id=account_id,
       execution_mode=mode,

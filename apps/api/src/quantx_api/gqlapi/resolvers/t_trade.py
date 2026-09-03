@@ -13,6 +13,7 @@ from typing import Any, List, Mapping, Optional
 
 import strawberry
 from graphql import GraphQLError
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_domain.trading.t_trade_opportunity_engine import OpportunityPolicy
 from quantx_infrastructure.core.t_trade_replay_evidence import SIGNAL_EVENT_TYPES
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -1176,7 +1177,7 @@ class TTradeResolver:
       if code in {
         "LIVE_AGENT_READY",
         "AGENT_MODE_LIVE",
-        "PROTOCOL_1_1",
+        f"PROTOCOL_{PROTOCOL_VERSION.replace('.', '_')}",
       }:
         check.update(
           {

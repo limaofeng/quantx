@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from quantx_api import agent_api, runtime_status
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_contracts.market_health import MARKET_GATEWAY_HTTP_TIMEOUT_SECONDS
 from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamFreshnessLease,
@@ -442,7 +443,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
         instance_id="instance-1",
         status="RECONCILE_REQUIRED",
         details={
-          "protocolVersion": "1.1",
+          "protocolVersion": PROTOCOL_VERSION,
           "marketStreamStatus": "READY",
           "apiInstanceId": "api-instance-1",
           "agentSessionId": "agent-session-1",
@@ -467,7 +468,7 @@ async def test_qmt_agent_component_is_degraded_until_trade_reconciliation(
     "degradedDevices": 0,
     "registeredDevices": 1,
     "modes": ["live"],
-    "protocolVersions": ["1.1"],
+    "protocolVersions": [PROTOCOL_VERSION],
     "accountIds": ["***nt-1"],
     "latestSnapshotAgeSeconds": None,
     "latestReadyHeartbeatAt": None,
@@ -755,7 +756,7 @@ async def test_ready_heartbeat_cannot_clear_engine_reconciliation_requirement(
       "status": "READY",
       "capabilities": ["paper"],
       "agent_version": "test",
-      "protocol_version": "1.1",
+      "protocol_version": PROTOCOL_VERSION,
     },
     sent_at=now,
   )
@@ -764,7 +765,7 @@ async def test_ready_heartbeat_cannot_clear_engine_reconciliation_requirement(
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
     device = await db.get(AgentDevice, "device-1")
     assert heartbeat.status == server_status
-    assert heartbeat.details["protocolVersion"] == "1.1"
+    assert heartbeat.details["protocolVersion"] == PROTOCOL_VERSION
     assert heartbeat.details["reasonCode"] == server_status
     assert heartbeat.details["capabilities"] == ["live", "market-data"]
     assert device.capabilities == ["live", "market-data"]

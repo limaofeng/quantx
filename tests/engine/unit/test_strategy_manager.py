@@ -316,7 +316,10 @@ class TestStrategyManager:
     self, strategy_manager
   ):
     """Engine 重启后内存运行态缺失时，停止动作仍应幂等收敛数据库状态。"""
-    persisted_run = SimpleNamespace(status=StrategyRunStatus.RUNNING)
+    persisted_run = SimpleNamespace(
+      status=StrategyRunStatus.RUNNING,
+      mode=StrategyRunMode.PAPER,
+    )
     repository = AsyncMock()
     repository.find_run_by_id.return_value = persisted_run
     session = AsyncMock()
@@ -354,7 +357,10 @@ class TestStrategyManager:
   ):
     """终态运行不应被回退或重写，但停止请求应视为已完成。"""
     repository = AsyncMock()
-    repository.find_run_by_id.return_value = SimpleNamespace(status=terminal_status)
+    repository.find_run_by_id.return_value = SimpleNamespace(
+      status=terminal_status,
+      mode=StrategyRunMode.PAPER,
+    )
     session = AsyncMock()
     session.scalar.return_value = None
 
@@ -378,7 +384,10 @@ class TestStrategyManager:
     self, strategy_manager, status
   ):
     repository = AsyncMock()
-    repository.find_run_by_id.return_value = SimpleNamespace(status=status)
+    repository.find_run_by_id.return_value = SimpleNamespace(
+      status=status,
+      mode=StrategyRunMode.PAPER,
+    )
     with (
       patch("quantx_engine.strategy_manager.get_async_db") as mock_db,
       patch("quantx_engine.strategy_manager.StrategyRunRepository", return_value=repository),

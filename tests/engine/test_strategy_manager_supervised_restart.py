@@ -144,6 +144,8 @@ async def test_stop_start_restores_same_run_with_heartbeat_and_consumer(
   )
   runtime.data_adapter = AsyncMock()
   runtime.state_manager = SimpleNamespace(
+    get_account=lambda: {},
+    get_all_positions=lambda: {},
     update_account=lambda **_kwargs: None,
     update_position=lambda *_args, **_kwargs: None,
   )

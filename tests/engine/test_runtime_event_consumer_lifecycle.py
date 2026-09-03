@@ -22,6 +22,9 @@ def _event(
   return StrategyRuntimeEvent(
     event_id=event_id,
     business_key=f"order:{event_id}",
+    owner_type="STRATEGY_RUN",
+    owner_id=run_id,
+    environment="PAPER",
     strategy_run_id=run_id,
     client_order_id=f"client:{event_id}",
     broker_order_id=event_id,

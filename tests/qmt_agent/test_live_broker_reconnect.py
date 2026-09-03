@@ -105,9 +105,9 @@ def test_live_market_preflight_only_expires_quote_derived_orders(monkeypatch):
   assert agent._command_preflight(
     {
       "execution_mode": "live",
-      "order_type": "BUY",
+      "side": "BUY",
       "price_type": "FIX_PRICE",
-      "price": 10.0,
+      "limit_price": 10.0,
     },
     "600000.SH",
     100,
@@ -115,16 +115,16 @@ def test_live_market_preflight_only_expires_quote_derived_orders(monkeypatch):
   assert agent._command_preflight(
     {
       "execution_mode": "live",
-      "order_type": "BUY",
+      "side": "BUY",
       "price_type": "MARKET_PEER_PRICE_FIRST",
-      "price": 10.0,
+      "limit_price": 10.0,
     },
     "600000.SH",
     100,
   ) == {
     "ok": False,
     "status": "REJECTED",
-    "reason": "stale live quote",
+    "reason": "invalid order price type",
   }
 
 
@@ -318,7 +318,7 @@ def test_live_broker_rejects_new_orders_until_generation_is_reconciled():
       "client_order_id": "client-1",
       "command_kind": "PLACE_ORDER",
       "side": "BUY",
-      "order_type": "LIMIT",
+      "price_type": "FIX_PRICE",
       "limit_price": 10,
     }
   )
@@ -347,7 +347,7 @@ def test_live_broker_rejects_new_orders_until_generation_is_reconciled():
       "client_order_id": "client-2",
       "command_kind": "PLACE_ORDER",
       "side": "BUY",
-      "order_type": "LIMIT",
+      "price_type": "FIX_PRICE",
       "limit_price": 10,
     }
   )

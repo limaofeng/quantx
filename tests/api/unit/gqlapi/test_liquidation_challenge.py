@@ -10,6 +10,7 @@ from quantx_api.gqlapi.liquidation_approval import (
 )
 from quantx_api.gqlapi.schema import schema
 from quantx_api.gqlapi.trade_approval import TradeApprovalChallengeError
+from quantx_contracts import ExecutionEnvironment
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.account import Account
@@ -183,6 +184,9 @@ async def test_paper_challenge_binds_snapshot_and_queues_engine_command_once(
   async with liquidation_database() as db:
     challenge = await db.get(TradeConfirmationChallenge, preview.challenge_id)
     assert challenge.payload["execution_mode"] == "PAPER"
+    assert challenge.owner_type == "MANUAL_COMMAND"
+    assert challenge.owner_id == preview.group_id
+    assert challenge.environment == ExecutionEnvironment.PAPER.value
     assert challenge.payload["snapshot"]["items"][0]["max_protected_volume"] == 300
     assert preview.confirmation_token not in str(challenge.payload)
     assert preview.confirmation_token not in challenge.token_digest
@@ -502,7 +506,9 @@ async def test_liquidation_preview_and_confirmation_isolate_execution_environmen
           limit_price="10",
           volume=100,
           status="QUEUED",
-          execution_mode=other_mode,
+          owner_type="MANUAL_COMMAND",
+          owner_id="pending-sell-1",
+          environment=other_mode.upper(),
           bucket="manual",
           request_metadata={},
         )
@@ -515,7 +521,10 @@ async def test_liquidation_preview_and_confirmation_isolate_execution_environmen
           source_type="MANUAL_POSITION",
           account_id="ACCOUNT-1",
           instrument_code="600000.SH",
-          execution_mode=other_mode,
+          source_execution_owner_type="EXIT_PLAN",
+          source_execution_owner_id="other-plan",
+          source_execution_environment=other_mode.upper(),
+          environment=other_mode.upper(),
           status="ACTIVE",
           enabled=True,
           protected_volume=100,

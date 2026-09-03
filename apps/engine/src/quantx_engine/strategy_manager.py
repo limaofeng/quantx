@@ -24,6 +24,7 @@ import uuid
 from datetime import date, datetime, time, timedelta
 from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Type
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.strategies.base import (
   BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
   StrategyBase,
@@ -3066,7 +3067,20 @@ class StrategyManager:
         runtime_obligation_blocker,
       )
 
-      blocker = await runtime_obligation_blocker(db, run_id)
+      try:
+        execution_environment = ExecutionEnvironment(
+          str(getattr(getattr(run, "mode", None), "value", run.mode))
+          .strip()
+          .upper()
+        )
+      except (AttributeError, TypeError, ValueError):
+        self.logger.warning("策略运行 %s 缺少有效执行环境，拒绝停止", run_id)
+        return False
+      blocker = await runtime_obligation_blocker(
+        db,
+        ExecutionOwnerRef.strategy_run(run_id),
+        execution_environment,
+      )
       if blocker:
         self.logger.warning("拒绝停止未恢复的策略运行 %s: %s", run_id, blocker)
         return False

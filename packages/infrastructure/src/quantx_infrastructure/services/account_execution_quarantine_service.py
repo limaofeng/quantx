@@ -12,10 +12,15 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from quantx_contracts import snapshot_account_authority_is_authoritative
+from quantx_contracts import (
+  PROTOCOL_VERSION,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  snapshot_account_authority_is_authoritative,
+)
 from quantx_domain.clock import to_naive_utc, utcnow
 from quantx_domain.trading.exit_plan import (
   ExitPlan,
@@ -30,8 +35,8 @@ from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
   AccountExecutionControlEvent,
   AgentReportInbox,
+  OrderCorrelation,
   PendingTradeOrder,
-  StrategyOrderCorrelation,
   TradeCommandOutbox,
 )
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
@@ -44,9 +49,6 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
 )
 from quantx_infrastructure.services.exit_plan_execution_owner import (
   INVALID_OWNER,
-  MANAGED_EXIT_STRATEGY_OWNER,
-  MONITOR_OWNER,
-  RUNTIME_BOOK_OWNER,
   durable_exit_plan_owner_kind,
 )
 
@@ -97,6 +99,30 @@ _PENDING_TERMINAL_STATUSES = frozenset(
   }
 )
 _REPAIR_ZERO_FILL_SOURCE = "EXPLICIT_QUARANTINE_REPAIR_ZERO_FILL"
+_PLACE_ORDER_PAYLOAD_KEYS = frozenset(
+  {
+    "command_kind",
+    "client_order_id",
+    "account_id",
+    "execution_mode",
+    "instrument_code",
+    "side",
+    "price_type",
+    "limit_price",
+    "volume",
+    "expires_at",
+  }
+)
+_DURABLE_OWNER_TYPES = frozenset(
+  {
+    "STRATEGY_RUN",
+    "T_ASSISTANT_EXECUTION",
+    "ENTRY_PLAN",
+    "BOARD_ASSISTANT_EXECUTION",
+    "EXIT_PLAN",
+    "MANUAL_COMMAND",
+  }
+)
 
 
 @dataclass(frozen=True)
@@ -150,17 +176,24 @@ def _is_exact_current_plan_order(
   plan: AutoExitPlanRecord,
   current_pending_intent_id: str,
 ) -> bool:
-  metadata = dict(pending.request_metadata or {})
+  try:
+    domain_plan = ExitPlan.from_dict(dict(plan.plan_state or {}))
+  except (KeyError, TypeError, ValueError):
+    return False
   return bool(
     str(pending.intent_id or "") == current_pending_intent_id
+    and str(plan.pending_client_order_id or "")
+    == str(pending.client_order_id or "")
+    and str(domain_plan.pending_intent_id or "") == current_pending_intent_id
+    and str(domain_plan.pending_order_id or "")
+    == str(pending.client_order_id or "")
     and str(pending.account_id or "") == str(plan.account_id or "")
     and str(pending.instrument_code or "").strip().upper()
     == str(plan.instrument_code or "").strip().upper()
     and str(pending.side or "").strip().upper() == "SELL"
-    and str(pending.execution_mode or "").strip().lower() == "live"
-    and str(metadata.get("owner_type") or "").strip().upper() == "EXIT_PLAN"
-    and str(metadata.get("owner_id") or "").strip() == str(plan.plan_id or "")
-    and str(metadata.get("exit_plan_id") or "").strip() == str(plan.plan_id or "")
+    and str(pending.environment or "").strip().upper() == "LIVE"
+    and str(pending.owner_type or "").strip().upper() == "EXIT_PLAN"
+    and str(pending.owner_id or "").strip() == str(plan.plan_id or "")
   )
 
 
@@ -170,21 +203,34 @@ def _is_exact_place_order(
   pending: PendingTradeOrder,
 ) -> bool:
   payload = dict(outbox.payload or {})
-  metadata = dict(payload.get("request_metadata") or {})
-  pending_metadata = dict(pending.request_metadata or {})
+  if set(payload) != _PLACE_ORDER_PAYLOAD_KEYS:
+    return False
+  if not str(payload.get("expires_at") or "").strip():
+    return False
+  expected_limit_price = str(pending.limit_price or "").strip()
+  payload_limit_price = str(payload.get("limit_price") or "").strip()
+  try:
+    volume_matches = int(payload.get("volume")) == int(pending.volume)
+  except (TypeError, ValueError):
+    volume_matches = False
   return bool(
     str(outbox.client_order_id or "") == str(pending.client_order_id or "")
     and str(outbox.account_id or "") == str(pending.account_id or "")
     and str(payload.get("command_kind") or "").strip().upper() == "PLACE_ORDER"
     and str(payload.get("execution_mode") or "").strip().lower() == "live"
     and str(payload.get("account_id") or "") == str(pending.account_id or "")
-    and str(payload.get("intent_id") or "") == str(pending.intent_id or "")
+    and str(payload.get("instrument_code") or "").strip().upper()
+    == str(pending.instrument_code or "").strip().upper()
     and str(payload.get("side") or "").strip().upper() == "SELL"
-    and str(metadata.get("owner_type") or "").strip().upper() == "EXIT_PLAN"
-    and str(metadata.get("owner_id") or "").strip()
-    == str(pending_metadata.get("owner_id") or "").strip()
-    and str(metadata.get("exit_plan_id") or "").strip()
-    == str(pending_metadata.get("exit_plan_id") or "").strip()
+    and str(payload.get("price_type") or "").strip().upper()
+    == "FIX_PRICE"
+    and str(pending.order_type or "").strip().upper() == "FIX_PRICE"
+    and payload_limit_price == expected_limit_price
+    and volume_matches
+    and str(outbox.owner_type or "").strip().upper() == "EXIT_PLAN"
+    and str(outbox.owner_id or "").strip() == str(pending.owner_id or "").strip()
+    and str(outbox.environment or "").strip().upper() == "LIVE"
+    and str(pending.owner_type or "").strip().upper() == "EXIT_PLAN"
   )
 
 
@@ -199,11 +245,262 @@ def _is_live_place_sell(outbox: TradeCommandOutbox) -> bool:
   )
 
 
+def _is_exact_place_payload(
+  outbox: TradeCommandOutbox,
+  *,
+  pending: PendingTradeOrder,
+) -> bool:
+  """Validate a current-protocol PLACE frame against its pending row."""
+
+  payload = dict(outbox.payload or {})
+  if set(payload) != _PLACE_ORDER_PAYLOAD_KEYS:
+    return False
+  try:
+    payload_volume = int(payload.get("volume"))
+  except (TypeError, ValueError, OverflowError):
+    return False
+  try:
+    payload_expires_at = datetime.fromisoformat(
+      str(payload.get("expires_at") or "").strip().replace("Z", "+00:00")
+    )
+    durable_expires_at = outbox.expires_at
+    if durable_expires_at.tzinfo is None:
+      durable_expires_at = durable_expires_at.replace(tzinfo=timezone.utc)
+    else:
+      durable_expires_at = durable_expires_at.astimezone(timezone.utc)
+    if payload_expires_at.tzinfo is None:
+      payload_expires_at = payload_expires_at.replace(tzinfo=timezone.utc)
+    else:
+      payload_expires_at = payload_expires_at.astimezone(timezone.utc)
+  except (AttributeError, TypeError, ValueError):
+    return False
+  return bool(
+    str(payload.get("command_kind") or "").strip().upper() == "PLACE_ORDER"
+    and str(payload.get("client_order_id") or "")
+    == str(outbox.client_order_id or "")
+    == str(pending.client_order_id or "")
+    and str(payload.get("account_id") or "")
+    == str(outbox.account_id or "")
+    == str(pending.account_id or "")
+    and str(payload.get("execution_mode") or "").strip().lower() == "live"
+    and str(payload.get("instrument_code") or "").strip().upper()
+    == str(pending.instrument_code or "").strip().upper()
+    and str(payload.get("side") or "").strip().upper()
+    == str(pending.side or "").strip().upper()
+    and str(payload.get("price_type") or "").strip().upper() == "FIX_PRICE"
+    and str(pending.order_type or "").strip().upper() == "FIX_PRICE"
+    and str(payload.get("limit_price") or "").strip()
+    == str(pending.limit_price or "").strip()
+    and payload_volume == int(pending.volume or 0)
+    and payload_expires_at == durable_expires_at
+    and str(outbox.owner_type or "").strip().upper()
+    == str(pending.owner_type or "").strip().upper()
+    and str(outbox.owner_id or "").strip()
+    == str(pending.owner_id or "").strip()
+    and str(outbox.environment or "").strip().upper()
+    == str(pending.environment or "").strip().upper()
+    == "LIVE"
+  )
+
+
 def _pending_owner(pending: PendingTradeOrder) -> tuple[str, str]:
-  metadata = dict(pending.request_metadata or {})
+  if str(pending.owner_type or "").strip().upper() != "EXIT_PLAN":
+    return "", str(pending.intent_id or "").strip()
   return (
-    str(metadata.get("exit_plan_id") or metadata.get("owner_id") or "").strip(),
+    str(pending.owner_id or "").strip(),
     str(pending.intent_id or "").strip(),
+  )
+
+
+def _typed_plan_pending_intent_id(
+  record: AutoExitPlanRecord | None,
+  *,
+  client_order_id: str,
+) -> str:
+  """Read an orphan order's intent only from the plan's typed pending link."""
+
+  if record is None or str(record.pending_client_order_id or "") != client_order_id:
+    return ""
+  if (
+    str(record.source_execution_owner_type or "").strip().upper()
+    not in _DURABLE_OWNER_TYPES
+    or str(record.environment or "").strip().upper() != "LIVE"
+    or str(record.source_execution_environment or "").strip().upper() != "LIVE"
+  ):
+    return ""
+  try:
+    domain_plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+  except (KeyError, TypeError, ValueError):
+    return ""
+  if (
+    str(domain_plan.pending_order_id or "") != client_order_id
+    or not str(domain_plan.pending_intent_id or "").strip()
+  ):
+    return ""
+  return str(domain_plan.pending_intent_id).strip()
+
+
+def _typed_exit_plan_chain_valid(
+  record: AutoExitPlanRecord,
+  *,
+  pending: PendingTradeOrder,
+  intent: TradeIntentRecord,
+  correlation: OrderCorrelation | None,
+  plan_id: str,
+  intent_id: str,
+  require_correlation: bool = True,
+) -> bool:
+  """Prove an EXIT_PLAN chain exclusively from durable identity columns."""
+
+  source_type = str(
+    getattr(record, "source_execution_owner_type", "") or ""
+  ).strip().upper()
+  source_id = str(
+    getattr(record, "source_execution_owner_id", "") or ""
+  ).strip()
+  source_environment = str(
+    getattr(record, "source_execution_environment", "") or ""
+  ).strip().upper()
+  record_environment = str(getattr(record, "environment", "") or "").strip().upper()
+  if not (
+    durable_exit_plan_owner_kind(record) != INVALID_OWNER
+    and source_type
+    and source_id
+    and source_environment == record_environment == "LIVE"
+    and str(record.plan_id or "") == plan_id
+    and (
+      (
+        not str(record.strategy_run_id or "").strip()
+        or (
+          source_type == "STRATEGY_RUN"
+          and source_id == str(record.strategy_run_id or "").strip()
+        )
+      )
+    )
+  ):
+    return False
+  if not (
+    str(pending.client_order_id or "")
+    and str(pending.owner_type or "").strip().upper() == "EXIT_PLAN"
+    and str(pending.owner_id or "").strip() == plan_id
+    and str(pending.environment or "").strip().upper() == "LIVE"
+    and str(pending.intent_id or "").strip() == intent_id
+    and str(intent.id or "") == intent_id
+    and str(intent.owner_type or "").strip().upper() == "EXIT_PLAN"
+    and str(intent.owner_id or "").strip() == plan_id
+    and str(intent.environment or "").strip().upper() == "LIVE"
+    and intent.strategy_run_id is None
+  ):
+    return False
+  if correlation is None:
+    return not require_correlation
+  return bool(
+    str(correlation.client_order_id or "") == str(pending.client_order_id or "")
+    and str(correlation.account_id or "") == str(pending.account_id or "")
+    and str(correlation.intent_id or "") == intent_id
+    and str(correlation.owner_type or "").strip().upper() == "EXIT_PLAN"
+    and str(correlation.owner_id or "").strip() == plan_id
+    and str(correlation.environment or "").strip().upper() == "LIVE"
+    and correlation.strategy_run_id is None
+  )
+
+
+def _physical_durable_binding_exact(
+  *,
+  pending: PendingTradeOrder,
+  correlation: OrderCorrelation | None,
+  intent: TradeIntentRecord | None,
+) -> bool:
+  """Prove the typed identity behind a PLACE frame before socket I/O.
+
+  A manual command may intentionally have no intent row, but every other
+  owner must have one.  The strategy-run column is only a nullable legacy
+  witness: when present it must agree with a STRATEGY_RUN owner, while a new
+  non-strategy owner must not carry it.
+  """
+
+  owner_type = str(pending.owner_type or "").strip().upper()
+  owner_id = str(pending.owner_id or "").strip()
+  environment = str(pending.environment or "").strip().upper()
+  if (
+    owner_type not in _DURABLE_OWNER_TYPES
+    or not owner_id
+    or environment != "LIVE"
+  ):
+    return False
+  pending_strategy_run_id = str(pending.strategy_run_id or "").strip()
+  if pending_strategy_run_id and (
+    owner_type != "STRATEGY_RUN" or pending_strategy_run_id != owner_id
+  ):
+    return False
+
+  if correlation is None:
+    return False
+  correlation_owner_type = str(correlation.owner_type or "").strip().upper()
+  correlation_owner_id = str(correlation.owner_id or "").strip()
+  correlation_environment = str(correlation.environment or "").strip().upper()
+  correlation_strategy_run_id = str(correlation.strategy_run_id or "").strip()
+  if correlation_strategy_run_id and (
+    correlation_owner_type != "STRATEGY_RUN"
+    or correlation_strategy_run_id != correlation_owner_id
+  ):
+    return False
+  if not (
+    str(correlation.client_order_id or "") == str(pending.client_order_id or "")
+    and str(correlation.account_id or "") == str(pending.account_id or "")
+    and correlation_owner_type == owner_type
+    and correlation_owner_id == owner_id
+    and correlation_environment == environment
+    and str(correlation.strategy_run_id or "").strip()
+    == pending_strategy_run_id
+    and str(correlation.strategy_order_id or "").strip()
+    == str(pending.strategy_order_id or "").strip()
+    and str(correlation.batch_id or "").strip()
+    == str(pending.batch_id or "").strip()
+    and str(correlation.bucket or "").strip()
+    == str(pending.bucket or "").strip()
+    and str(correlation.t_trade_role or "").strip().upper()
+    == str(pending.t_trade_role or "").strip().upper()
+    and str(correlation.risk_decision_id or "").strip()
+    == str(pending.risk_decision_id or "").strip()
+    and str(correlation.trace_id or "").strip()
+    == str(pending.trace_id or "").strip()
+    and dict(correlation.substitution_plan or {})
+    == dict(pending.substitution_plan or {})
+    and dict(correlation.request_metadata or {})
+    == dict(pending.request_metadata or {})
+  ):
+    return False
+
+  pending_intent_id = str(pending.intent_id or "").strip()
+  correlation_intent_id = str(correlation.intent_id or "").strip()
+  if correlation_intent_id != pending_intent_id:
+    return False
+  if not pending_intent_id:
+    return owner_type == "MANUAL_COMMAND" and intent is None
+  if intent is None:
+    return False
+
+  intent_owner_type = str(intent.owner_type or "").strip().upper()
+  intent_owner_id = str(intent.owner_id or "").strip()
+  intent_environment = str(intent.environment or "").strip().upper()
+  intent_strategy_run_id = str(intent.strategy_run_id or "").strip()
+  if intent_strategy_run_id and (
+    intent_owner_type != "STRATEGY_RUN"
+    or intent_strategy_run_id != intent_owner_id
+  ):
+    return False
+  return bool(
+    str(intent.id or "") == pending_intent_id
+    and str(intent.account_id or "") == str(pending.account_id or "")
+    and str(intent.instrument_code or "").strip().upper()
+    == str(pending.instrument_code or "").strip().upper()
+    and str(intent.direction or "").strip().upper()
+    == str(pending.side or "").strip().upper()
+    and intent_owner_type == owner_type
+    and intent_owner_id == owner_id
+    and intent_environment == environment
+    and str(intent.bucket or "").strip() == str(pending.bucket or "").strip()
   )
 
 
@@ -450,7 +747,7 @@ def _release_account_wide_locally_cancelled_pending(
   *,
   pending: PendingTradeOrder,
   intent: TradeIntentRecord,
-  correlation: StrategyOrderCorrelation | None,
+  correlation: OrderCorrelation | None,
 ) -> bool:
   """Release another plan's exact command proven not to have left the API."""
 
@@ -461,42 +758,24 @@ def _release_account_wide_locally_cancelled_pending(
     domain_plan = ExitPlan.from_dict(dict(record.plan_state or {}))
   except (KeyError, TypeError, ValueError):
     return False
-  metadata = dict(pending.request_metadata or {})
-  intent_metadata = dict(intent.intent_metadata or {})
   owner_kind = durable_exit_plan_owner_kind(record)
-  record_run_id = str(record.strategy_run_id or "")
-  pending_run_id = str(pending.strategy_run_id or "")
-  intent_run_id = str(intent.strategy_run_id or "")
-  correlation_run_id = (
-    str(correlation.strategy_run_id or "") if correlation is not None else ""
-  )
-  runtime_binding_valid = bool(
-    owner_kind == MONITOR_OWNER
-    and not record_run_id
-    and not pending_run_id
-    and not intent_run_id
-    and correlation is None
-  ) or bool(
-    owner_kind in {RUNTIME_BOOK_OWNER, MANAGED_EXIT_STRATEGY_OWNER}
-    and record_run_id
-    and pending_run_id == record_run_id
-    and intent_run_id == record_run_id
-    and correlation is not None
-    and correlation_run_id == record_run_id
-    and str(metadata.get("strategy_run_id") or "") == record_run_id
-    and str(intent_metadata.get("strategy_run_id") or "") == record_run_id
-    and str(dict(correlation.request_metadata or {}).get("strategy_run_id") or "")
-    == record_run_id
-  )
   if not (
     owner_kind != INVALID_OWNER
-    and runtime_binding_valid
+    and _typed_exit_plan_chain_valid(
+      record,
+      pending=pending,
+      intent=intent,
+      correlation=correlation,
+      plan_id=plan_id,
+      intent_id=intent_id,
+      require_correlation=False,
+    )
     and
     str(record.plan_id or "") == plan_id
     and str(record.account_id or "") == str(pending.account_id or "")
     and str(record.instrument_code or "").strip().upper()
     == str(pending.instrument_code or "").strip().upper()
-    and str(record.execution_mode or "").strip().lower() == "live"
+    and str(record.environment or "").strip().upper() == "LIVE"
     and domain_plan.plan_id == plan_id
     and str(domain_plan.template.account_id or "")
     == str(pending.account_id or "")
@@ -516,33 +795,6 @@ def _release_account_wide_locally_cancelled_pending(
     == str(pending.instrument_code or "").strip().upper()
     and str(intent.direction or "").strip().upper() == "SELL"
     and max(0, int(intent.executed_volume or 0)) == 0
-    and str(metadata.get("owner_type") or "").strip().upper() == "EXIT_PLAN"
-    and str(metadata.get("owner_id") or "") == plan_id
-    and str(metadata.get("exit_plan_id") or "") == plan_id
-    and str(intent_metadata.get("owner_type") or "").strip().upper()
-    == "EXIT_PLAN"
-    and str(intent_metadata.get("owner_id") or "") == plan_id
-    and str(intent_metadata.get("exit_plan_id") or "") == plan_id
-    and (
-      correlation is None
-      or (
-        str(correlation.client_order_id or "")
-        == str(pending.client_order_id or "")
-        and str(correlation.account_id or "") == str(pending.account_id or "")
-        and str(correlation.intent_id or "") == intent_id
-        and str(correlation.execution_mode or "").strip().lower() == "live"
-        and str(dict(correlation.request_metadata or {}).get("owner_type") or "")
-        .strip()
-        .upper()
-        == "EXIT_PLAN"
-        and str(dict(correlation.request_metadata or {}).get("owner_id") or "")
-        == plan_id
-        and str(
-          dict(correlation.request_metadata or {}).get("exit_plan_id") or ""
-        )
-        == plan_id
-      )
-    )
   ):
     return False
 
@@ -571,6 +823,7 @@ def _release_account_wide_locally_cancelled_pending(
   record.last_error = sticky_error
   record.state_version = max(1, int(record.state_version or 1)) + 1
   clear_exact_auto_exit_authorization(record, bump_state_version=False)
+  intent_metadata = dict(intent.intent_metadata or {})
   intent.intent_metadata = {
     **intent_metadata,
     "execution_terminal_source": _LOCAL_OUTBOX_CANCEL_SOURCE,
@@ -587,7 +840,7 @@ def _mark_account_wide_pending_sticky(
   *,
   pending: PendingTradeOrder,
   intent: TradeIntentRecord,
-  correlation: StrategyOrderCorrelation | None,
+  correlation: OrderCorrelation | None,
 ) -> bool:
   """Fail-close another plan whose LIVE SELL may already have left the API."""
 
@@ -598,43 +851,22 @@ def _mark_account_wide_pending_sticky(
     domain_plan = ExitPlan.from_dict(dict(record.plan_state or {}))
   except (KeyError, TypeError, ValueError):
     return False
-  metadata = dict(pending.request_metadata or {})
-  intent_metadata = dict(intent.intent_metadata or {})
-  correlation_metadata = (
-    dict(correlation.request_metadata or {}) if correlation is not None else {}
-  )
   owner_kind = durable_exit_plan_owner_kind(record)
-  record_run_id = str(record.strategy_run_id or "")
-  pending_run_id = str(pending.strategy_run_id or "")
-  intent_run_id = str(intent.strategy_run_id or "")
-  correlation_run_id = (
-    str(correlation.strategy_run_id or "") if correlation is not None else ""
-  )
-  runtime_binding_valid = bool(
-    owner_kind == MONITOR_OWNER
-    and not record_run_id
-    and not pending_run_id
-    and not intent_run_id
-    and correlation is None
-  ) or bool(
-    owner_kind in {RUNTIME_BOOK_OWNER, MANAGED_EXIT_STRATEGY_OWNER}
-    and record_run_id
-    and pending_run_id == record_run_id
-    and intent_run_id == record_run_id
-    and correlation is not None
-    and correlation_run_id == record_run_id
-    and str(metadata.get("strategy_run_id") or "") == record_run_id
-    and str(intent_metadata.get("strategy_run_id") or "") == record_run_id
-    and str(correlation_metadata.get("strategy_run_id") or "") == record_run_id
-  )
   if not (
     owner_kind != INVALID_OWNER
-    and runtime_binding_valid
+    and _typed_exit_plan_chain_valid(
+      record,
+      pending=pending,
+      intent=intent,
+      correlation=correlation,
+      plan_id=plan_id,
+      intent_id=intent_id,
+    )
     and str(record.plan_id or "") == plan_id
     and str(record.account_id or "") == str(pending.account_id or "")
     and str(record.instrument_code or "").strip().upper()
     == str(pending.instrument_code or "").strip().upper()
-    and str(record.execution_mode or "").strip().lower() == "live"
+    and str(record.environment or "").strip().upper() == "LIVE"
     and domain_plan.plan_id == plan_id
     and str(domain_plan.template.account_id or "")
     == str(pending.account_id or "")
@@ -653,27 +885,6 @@ def _mark_account_wide_pending_sticky(
     and str(intent.instrument_code or "").strip().upper()
     == str(pending.instrument_code or "").strip().upper()
     and str(intent.direction or "").strip().upper() == "SELL"
-    and str(metadata.get("owner_type") or "").strip().upper() == "EXIT_PLAN"
-    and str(metadata.get("owner_id") or "") == plan_id
-    and str(metadata.get("exit_plan_id") or "") == plan_id
-    and str(intent_metadata.get("owner_type") or "").strip().upper()
-    == "EXIT_PLAN"
-    and str(intent_metadata.get("owner_id") or "") == plan_id
-    and str(intent_metadata.get("exit_plan_id") or "") == plan_id
-    and (
-      correlation is None
-      or (
-        str(correlation.client_order_id or "")
-        == str(pending.client_order_id or "")
-        and str(correlation.account_id or "") == str(pending.account_id or "")
-        and str(correlation.intent_id or "") == intent_id
-        and str(correlation.execution_mode or "").strip().lower() == "live"
-        and str(correlation_metadata.get("owner_type") or "").strip().upper()
-        == "EXIT_PLAN"
-        and str(correlation_metadata.get("owner_id") or "") == plan_id
-        and str(correlation_metadata.get("exit_plan_id") or "") == plan_id
-      )
-    )
   ):
     return False
 
@@ -800,31 +1011,33 @@ class AccountExecutionQuarantineService:
       or str(control.reconcile_status or "").strip().upper() != "READY"
     ):
       return TradeCommandDeliveryLock(None, "ACCOUNT_RECONCILE_REQUIRED")
+    def seal_unproven_binding(reason: str) -> TradeCommandDeliveryLock:
+      command.delivery_status = "RECONCILE_REQUIRED"
+      command.last_error = "physical_delivery_owner_binding_missing"
+      if pending is not None:
+        pending.status = "RECONCILE_REQUIRED"
+        pending.status_reason = reason
+      if control is not None:
+        control.reconcile_status = "RECONCILE_REQUIRED"
+        if str(control.authorization_state or "").upper() != "KILLED":
+          control.authorization_state = "PAUSED"
+        control.state_version = max(1, int(control.state_version or 1)) + 1
+      return TradeCommandDeliveryLock(
+        None,
+        reason,
+        commit_required=True,
+      )
     pending = await self.db.get(
       PendingTradeOrder,
       str(command.client_order_id or ""),
       with_for_update=True,
       populate_existing=True,
     )
+    if pending is None:
+      return seal_unproven_binding("PLACE_PENDING_BINDING_MISSING")
     if pending is not None:
-      try:
-        payload_volume = int(payload.get("volume") or 0)
-      except (TypeError, ValueError, OverflowError):
-        payload_volume = -1
-      pending_binding_exact = bool(
-        str(pending.client_order_id or "")
-        == str(payload.get("client_order_id") or command.client_order_id or "")
-        and str(pending.account_id or "") == str(command.account_id or "")
-        and str(pending.execution_mode or "").strip().lower() == "live"
-        and str(pending.side or "").strip().upper()
-        == str(payload.get("side") or "").strip().upper()
-        and str(pending.instrument_code or "").strip().upper()
-        == str(payload.get("instrument_code") or "").strip().upper()
-        and str(pending.intent_id or "") == str(payload.get("intent_id") or "")
-        and int(pending.volume or 0) == payload_volume
-      )
-      if not pending_binding_exact:
-        return TradeCommandDeliveryLock(None, "PLACE_PENDING_BINDING_CHANGED")
+      if not _is_exact_place_payload(command, pending=pending):
+        return seal_unproven_binding("PLACE_PENDING_BINDING_CHANGED")
       if str(pending.status or "").strip().upper() == "CANCEL_REQUESTED":
         first_claim_pre_execution_proven = bool(
           int(command.attempts or 0) == 1
@@ -846,6 +1059,35 @@ class AccountExecutionQuarantineService:
           None,
           "PLACE_CANCEL_REQUIRES_BROKER_RECONCILIATION",
         )
+    correlations = list(
+      (
+        await self.db.execute(
+          select(OrderCorrelation)
+          .where(OrderCorrelation.client_order_id == pending.client_order_id)
+          .with_for_update()
+        )
+      )
+      .scalars()
+      .all()
+    )
+    intent = (
+      await self.db.get(
+        TradeIntentRecord,
+        str(pending.intent_id or ""),
+        with_for_update=True,
+        populate_existing=True,
+      )
+      if str(pending.intent_id or "").strip()
+      else None
+    )
+    correlation = correlations[0] if len(correlations) == 1 else None
+    durable_binding_exact = _physical_durable_binding_exact(
+      pending=pending,
+      correlation=correlation,
+      intent=intent,
+    )
+    if not durable_binding_exact:
+      return seal_unproven_binding("PLACE_DURABLE_BINDING_MISSING")
     side = str(payload.get("side") or "").strip().upper()
     if side == "BUY":
       # LIVE buys share the account/quarantine linearization point, while
@@ -896,7 +1138,13 @@ class AccountExecutionQuarantineService:
               idempotency_key=(
                 f"entry-plan-cancel:{pending.client_order_id}:{broker_order_id}"
               ),
-              execution_mode="live",
+              execution_ref=ExecutionOwnerRef(
+                str(pending.owner_type or ""),
+                str(pending.owner_id or ""),
+              ),
+              environment=ExecutionEnvironment(
+                str(pending.environment or "").strip().upper()
+              ),
               commit_transaction=False,
             )
           except AgentUnavailableError:
@@ -988,7 +1236,7 @@ class AccountExecutionQuarantineService:
       await self.db.execute(
         select(
           PendingTradeOrder.account_id,
-          PendingTradeOrder.execution_mode,
+          PendingTradeOrder.environment,
         ).where(
           PendingTradeOrder.client_order_id == normalized_client_order_id
         )
@@ -1071,7 +1319,7 @@ class AccountExecutionQuarantineService:
           select(AgentReportInbox)
           .where(
             AgentReportInbox.message_type == "delta_report",
-            AgentReportInbox.protocol_version == "1.1",
+            AgentReportInbox.protocol_version == PROTOCOL_VERSION,
             AGENT_REPORT_SNAPSHOT_ID == snapshot_id,
           )
           .order_by(AgentReportInbox.received_at.desc())
@@ -1305,7 +1553,7 @@ class AccountExecutionQuarantineService:
           pending_metadata = dict(pending.request_metadata or {})
           if (
             str(pending.account_id or "") != normalized_account_id
-            or str(pending.execution_mode or "").lower() != "live"
+            or str(pending.environment or "").upper() != "LIVE"
             or str(pending_metadata.get(QUARANTINE_REASON_METADATA_KEY) or "")
             != reason
             or not pending_metadata.get(QUARANTINE_REPAIR_REQUIRED_METADATA_KEY)
@@ -1369,17 +1617,17 @@ class AccountExecutionQuarantineService:
             await self.db.get(TradeIntentRecord, intent_id) if intent_id else None
           )
           payload = dict(outbox.payload or {}) if outbox is not None else {}
-          payload_metadata = dict(payload.get("request_metadata") or {})
           binding_exact = bool(
             record is not None
             and intent is not None
             and str(record.account_id or "") == normalized_account_id
-            and str(record.execution_mode or "").lower() == "live"
+            and str(record.environment or "").upper() == "LIVE"
             and durable_exit_plan_owner_kind(record) != INVALID_OWNER
             and str(intent.id or "") == intent_id
             and str(intent.account_id or "") == normalized_account_id
             and str(intent.owner_type or "").upper() == "EXIT_PLAN"
             and str(intent.owner_id or "") == plan_id
+            and str(intent.environment or "").upper() == "LIVE"
             and (
               outbox is None
               or (
@@ -1392,13 +1640,9 @@ class AccountExecutionQuarantineService:
                   payload.get("client_order_id") or outbox.client_order_id or ""
                 )
                 == client_order_id
-                and str(payload.get("intent_id") or "") == intent_id
-                and str(
-                  payload_metadata.get("exit_plan_id")
-                  or payload_metadata.get("owner_id")
-                  or ""
-                )
-                == plan_id
+                and str(outbox.owner_type or "").upper() == "EXIT_PLAN"
+                and str(outbox.owner_id or "") == plan_id
+                and str(outbox.environment or "").upper() == "LIVE"
               )
             )
           )
@@ -1593,9 +1837,9 @@ class AccountExecutionQuarantineService:
     )
     correlation = (
       await self.db.execute(
-        select(StrategyOrderCorrelation)
+        select(OrderCorrelation)
         .where(
-          StrategyOrderCorrelation.client_order_id
+          OrderCorrelation.client_order_id
           == normalized_client_order_id
         )
         .limit(1)
@@ -1629,7 +1873,7 @@ class AccountExecutionQuarantineService:
       raise ValueError("隔离修复缺少事件固化的 durable plan/intent")
     if not (
       str(record.account_id or "") == normalized_account_id
-      and str(record.execution_mode or "").lower() == "live"
+      and str(record.environment or "").upper() == "LIVE"
       and str(intent.id or "") == intent_id
       and str(intent.account_id or "") == normalized_account_id
       and str(intent.owner_type or "").upper() == "EXIT_PLAN"
@@ -1638,7 +1882,6 @@ class AccountExecutionQuarantineService:
     ):
       raise ValueError("隔离修复的 durable owner 绑定不可证明")
     payload = dict(outbox.payload or {}) if outbox is not None else {}
-    payload_metadata = dict(payload.get("request_metadata") or {})
     if outbox is not None and not (
       str(payload.get("command_kind") or "").upper() == "PLACE_ORDER"
       and str(payload.get("execution_mode") or "").lower() == "live"
@@ -1647,13 +1890,9 @@ class AccountExecutionQuarantineService:
       == normalized_account_id
       and str(payload.get("client_order_id") or outbox.client_order_id or "")
       == normalized_client_order_id
-      and str(payload.get("intent_id") or "") == intent_id
-      and str(
-        payload_metadata.get("exit_plan_id")
-        or payload_metadata.get("owner_id")
-        or ""
-      )
-      == plan_id
+      and str(outbox.owner_type or "").upper() == "EXIT_PLAN"
+      and str(outbox.owner_id or "") == plan_id
+      and str(outbox.environment or "").upper() == "LIVE"
     ):
       raise ValueError("隔离修复的 PLACE payload owner 绑定不可证明")
 
@@ -1661,7 +1900,7 @@ class AccountExecutionQuarantineService:
       pending_metadata = dict(pending.request_metadata or {})
       if not (
         str(pending.account_id or "") == normalized_account_id
-        and str(pending.execution_mode or "").lower() == "live"
+        and str(pending.environment or "").upper() == "LIVE"
         and str(pending.side or "").upper() == "SELL"
         and str(pending_metadata.get(QUARANTINE_REASON_METADATA_KEY) or "")
         == normalized_reason
@@ -1796,7 +2035,8 @@ class AccountExecutionQuarantineService:
       pending.instrument_code = str(record.instrument_code or "")
       pending.intent_id = intent_id
       pending.side = "SELL"
-      pending.execution_mode = "live"
+      if str(pending.environment or "").strip().upper() != "LIVE":
+        raise ValueError("隔离修复的 pending 执行环境不可变且必须为 LIVE")
       if broker_terminal_status == "RECONCILED_ZERO_FILL":
         pending.status = "CANCELLED"
         pending.status_reason = _REPAIR_ZERO_FILL_SOURCE
@@ -1806,7 +2046,8 @@ class AccountExecutionQuarantineService:
     if correlation is not None:
       correlation.account_id = normalized_account_id
       correlation.intent_id = intent_id
-      correlation.execution_mode = "live"
+      if str(correlation.environment or "").strip().upper() != "LIVE":
+        raise ValueError("隔离修复的 correlation 执行环境不可变且必须为 LIVE")
     if outbox is not None:
       outbox.delivery_status = (
         "CANCELLED"
@@ -1947,7 +2188,7 @@ class AccountExecutionQuarantineService:
     normalized_evidence_key = str(evidence_key or "").strip()
     if not account_id or not plan_id or not normalized_evidence_key:
       raise ValueError("账户隔离缺少账户、计划或 broker 证据身份")
-    if str(plan.execution_mode or "").strip().lower() != "live":
+    if str(plan.environment or "").strip().upper() != "LIVE":
       raise ValueError("broker 释放反证账户隔离只适用于 LIVE 退出计划")
     if str(plan.status or "").strip().upper() != "ERROR" or bool(plan.enabled):
       raise ValueError("账户隔离要求退出计划已完成精确失效并进入 ERROR")
@@ -1989,7 +2230,7 @@ class AccountExecutionQuarantineService:
             PendingTradeOrder.account_id == account_id,
             PendingTradeOrder.intent_id == current_pending_intent_id,
             PendingTradeOrder.side == "SELL",
-            PendingTradeOrder.execution_mode == "live",
+            PendingTradeOrder.environment == "LIVE",
           )
         )
       )
@@ -2088,13 +2329,13 @@ class AccountExecutionQuarantineService:
     correlations = list(
       (
         await self.db.execute(
-          select(StrategyOrderCorrelation)
+          select(OrderCorrelation)
           .where(
-            StrategyOrderCorrelation.client_order_id.in_(
+            OrderCorrelation.client_order_id.in_(
               pending_client_order_ids or ["__none__"]
             )
           )
-          .order_by(StrategyOrderCorrelation.client_order_id)
+          .order_by(OrderCorrelation.client_order_id)
           .with_for_update()
           .execution_options(populate_existing=True)
         )
@@ -2127,13 +2368,23 @@ class AccountExecutionQuarantineService:
         if (owner_plan_id := _pending_owner(item)[0]) and owner_plan_id != plan_id
       }
     )
+    outbox_plan_ids = sorted(
+      {
+        str(item.owner_id or "").strip()
+        for item in active_outboxes
+        if str(item.owner_type or "").strip().upper() == "EXIT_PLAN"
+        and str(item.owner_id or "").strip()
+        and str(item.owner_id or "").strip() != plan_id
+      }
+    )
+    plan_lookup_ids = sorted(set(pending_plan_ids) | set(outbox_plan_ids))
     other_plans: list[AutoExitPlanRecord] = []
-    if pending_plan_ids:
+    if plan_lookup_ids:
       other_plans = list(
         (
           await self.db.execute(
             select(AutoExitPlanRecord)
-            .where(AutoExitPlanRecord.plan_id.in_(pending_plan_ids))
+            .where(AutoExitPlanRecord.plan_id.in_(plan_lookup_ids))
             .order_by(AutoExitPlanRecord.plan_id)
             .with_for_update()
             .execution_options(populate_existing=True)
@@ -2177,7 +2428,13 @@ class AccountExecutionQuarantineService:
             f"entry-plan-cancel:{pending.client_order_id}:"
             f"{durable_broker_order_id}"
           ),
-          execution_mode="live",
+          execution_ref=ExecutionOwnerRef(
+            str(pending.owner_type or ""),
+            str(pending.owner_id or ""),
+          ),
+          environment=ExecutionEnvironment(
+            str(pending.environment or "").strip().upper()
+          ),
           commit_transaction=False,
         )
       except AgentUnavailableError:
@@ -2194,9 +2451,32 @@ class AccountExecutionQuarantineService:
       client_order_id = str(outbox.client_order_id or "")
       if client_order_id in pending_by_client:
         continue
-      payload = dict(outbox.payload or {})
-      metadata = dict(payload.get("request_metadata") or {})
       previous_delivery_status = str(outbox.delivery_status or "").upper()
+      orphan_plan_id = (
+        str(outbox.owner_id or "").strip()
+        if str(outbox.owner_type or "").strip().upper() == "EXIT_PLAN"
+        else ""
+      )
+      orphan_record = plan_by_id.get(orphan_plan_id)
+      orphan_intent_id = _typed_plan_pending_intent_id(
+        orphan_record,
+        client_order_id=client_order_id,
+      )
+      if orphan_intent_id:
+        orphan_intent = await self.db.get(
+          TradeIntentRecord,
+          orphan_intent_id,
+          with_for_update=True,
+          populate_existing=True,
+        )
+        if not (
+          orphan_intent is not None
+          and str(orphan_intent.owner_type or "").strip().upper() == "EXIT_PLAN"
+          and str(orphan_intent.owner_id or "").strip() == orphan_plan_id
+          and str(orphan_intent.account_id or "").strip() == account_id
+          and str(orphan_intent.environment or "").strip().upper() == "LIVE"
+        ):
+          orphan_intent_id = ""
       outbox.delivery_status = "RECONCILE_REQUIRED"
       outbox.last_error = "quarantine_place_order_pending_missing"
       reconcile_required.append(client_order_id)
@@ -2204,10 +2484,8 @@ class AccountExecutionQuarantineService:
         {
           "clientOrderId": client_order_id,
           "messageId": str(outbox.message_id),
-          "planId": str(
-            metadata.get("exit_plan_id") or metadata.get("owner_id") or ""
-          ),
-          "intentId": str(payload.get("intent_id") or ""),
+          "planId": orphan_plan_id,
+          "intentId": orphan_intent_id,
           "ownerKind": INVALID_OWNER,
           "previousDeliveryStatus": previous_delivery_status,
           "disposition": "PLACE_ORDER_BINDING_MISSING",
@@ -2232,7 +2510,8 @@ class AccountExecutionQuarantineService:
         "ownerKind": owner_kind,
       }
       trigger_candidate = bool(
-        owner_plan_id == plan_id and owner_intent_id == current_pending_intent_id
+        client_order_id in trigger_pending_client_ids
+        or (owner_plan_id == plan_id and owner_intent_id == current_pending_intent_id)
       )
       exact_trigger = bool(
         trigger_candidate

@@ -20,6 +20,8 @@ from datetime import date, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
+
 from quantx_infrastructure.core.utils import time_utils
 
 if TYPE_CHECKING:
@@ -76,6 +78,19 @@ _TERMINAL_TRADE_INTENT_STATUSES = frozenset(
         "RECONCILED_ZERO_FILL",
         "REJECTED",
         "SUPPRESSED",
+    }
+)
+_TRADE_INTENT_OWNER_METADATA_KEYS = frozenset(
+    {
+        "owner_type",
+        "owner_id",
+        "environment",
+        "execution_environment",
+        "execution_owner_type",
+        "execution_owner_id",
+        "source_execution_owner_type",
+        "source_execution_owner_id",
+        "strategy_run_id",
     }
 )
 _MANAGER_OWNED_CUSTOM_STATE_KEYS = frozenset(
@@ -217,6 +232,7 @@ class RuntimeStateManager:
 
     # 回测模式配置
     is_backtest: bool = False  # 是否为回测模式
+    execution_environment: ExecutionEnvironment = ExecutionEnvironment.PAPER
     backtest_id: Optional[str] = None  # 回测记录ID (StrategyBacktest.id)
     _backtest_storage: Optional["BacktestResultStorage"] = field(default=None, repr=False)
     _backtest_finalized_path: Optional[str] = field(default=None, repr=False)
@@ -344,6 +360,12 @@ class RuntimeStateManager:
         from quantx_domain.trading.bucket_ledger import BucketLedger
         from quantx_domain.trading.decision_trace import DecisionTraceLogger
 
+        if isinstance(self.execution_environment, str):
+            self.execution_environment = ExecutionEnvironment(
+                self.execution_environment.upper()
+            )
+        elif not isinstance(self.execution_environment, ExecutionEnvironment):
+            raise TypeError("RuntimeStateManager requires a typed execution environment")
         self.logger = logging.getLogger(f"StateManager-{self.run_id[:8]}")
         self._bucket_ledger = BucketLedger(run_id=self.run_id)
         self._decision_trace_logger = DecisionTraceLogger()
@@ -2316,6 +2338,9 @@ class RuntimeStateManager:
     @staticmethod
     def _manual_trade_intent_from_record(record: Any) -> "TradeIntent":
         from quantx_domain.strategies.base import (
+            ExitPlanIntentOrigin,
+            ManualCommandIntentOrigin,
+            StrategyRunIntentOrigin,
             TradeIntent,
             TradeIntentExecutionMode,
         )
@@ -2328,9 +2353,48 @@ class RuntimeStateManager:
             if isinstance(created_at_raw, str) and created_at_raw
             else record.created_at
         )
+        try:
+            execution_ref = ExecutionOwnerRef(
+                ExecutionOwnerType(str(record.owner_type or "").upper()),
+                str(record.owner_id or ""),
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeStateRestoreError(
+                "恢复交易意图缺少有效执行归属"
+            ) from exc
+        run_id = (
+            str(record.strategy_run_id or "")
+            if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN
+            else ""
+        )
+        strategy_id = str(record.strategy_id or "") if run_id else ""
+        if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+            origin = StrategyRunIntentOrigin(
+                run_id=run_id,
+                strategy_id=strategy_id,
+            )
+        elif execution_ref.owner_type is ExecutionOwnerType.MANUAL_COMMAND:
+            origin = ManualCommandIntentOrigin(
+                command_id=execution_ref.owner_id,
+                action_type=str(metadata.get("manual_action_type") or "MANUAL"),
+                liquidation_group_id=str(
+                    metadata.get("liquidation_group_id") or ""
+                )
+                or None,
+            )
+        elif execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN:
+            origin = ExitPlanIntentOrigin(
+                plan_id=execution_ref.owner_id,
+            )
+        else:
+            raise RuntimeStateRestoreError(
+                "恢复交易意图暂不支持该执行归属类型"
+            )
         return TradeIntent(
-            strategy_id=str(record.strategy_id or ""),
-            run_id=str(record.strategy_run_id),
+            strategy_id=strategy_id,
+            run_id=run_id,
+            execution_ref=execution_ref,
+            origin=origin,
             instrument_code=str(record.instrument_code),
             direction=str(record.direction),
             bucket=str(record.bucket or "core"),
@@ -4170,7 +4234,23 @@ class RuntimeStateManager:
                 record_run_id = str(
                     getattr(record, "strategy_run_id", "") or ""
                 ).strip()
-                if record_id != intent_id or record_run_id != self.run_id:
+                record_owner_type = str(
+                    getattr(record, "owner_type", "") or ""
+                ).strip().upper()
+                if record_owner_type not in {
+                    owner_type.value for owner_type in ExecutionOwnerType
+                }:
+                    raise RuntimeStateRestoreError(
+                        "交易意图持久化记录缺少有效执行归属: "
+                        f"run_id={self.run_id}, intent_id={intent_id}"
+                    )
+                if (
+                    record_owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+                    and record_run_id != self.run_id
+                ) or (
+                    record_owner_type != ExecutionOwnerType.STRATEGY_RUN.value
+                    and record_run_id
+                ) or record_id != intent_id:
                     raise RuntimeStateRestoreError(
                         "交易意图持久化记录所有权不匹配: "
                         f"run_id={self.run_id}, intent_id={intent_id}"
@@ -4207,7 +4287,7 @@ class RuntimeStateManager:
     ) -> None:
         """Keep active intents and only a bounded LRU of durable history.
 
-        ``strategy_trade_intents`` (or the backtest event storage) remains the
+        ``trade_intents`` (or the backtest event storage) remains the
         historical source of truth.  Runtime memory is needed for in-flight
         lifecycle updates, especially cumulative partial fills, so statuses
         are evicted only when they are explicitly known to be terminal.
@@ -4267,32 +4347,34 @@ class RuntimeStateManager:
             raise RuntimeError("交易意图数据库会话不可用")
 
     def _trade_intent_record_data(self, intent, *, status: str) -> Dict[str, Any]:
-        metadata = dict(getattr(intent, "metadata", {}) or {})
-        origin = getattr(intent, "origin", None)
-        origin_type = _enum_value(getattr(origin, "origin_type", "STRATEGY_RUN"))
-        if origin_type == "MANUAL_COMMAND":
+        raw_metadata = dict(getattr(intent, "metadata", {}) or {})
+        metadata = {
+            key: value
+            for key, value in raw_metadata.items()
+            if str(key).strip().lower() not in _TRADE_INTENT_OWNER_METADATA_KEYS
+        }
+        execution_ref = getattr(intent, "execution_ref", None)
+        if not isinstance(execution_ref, ExecutionOwnerRef):
+            raise ValueError("交易意图必须携带强类型执行归属")
+        owner_type = execution_ref.owner_type.value
+        owner_id = execution_ref.owner_id
+        if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+            strategy_run_id = owner_id
+        else:
             strategy_run_id = None
-            owner_type = "MANUAL_COMMAND"
-            owner_id = str(getattr(origin, "command_id", "") or "")
-            metadata.setdefault("manual_action_type", getattr(origin, "action_type", ""))
+        origin = getattr(intent, "origin", None)
+        origin_type = _enum_value(
+            getattr(origin, "origin_type", execution_ref.owner_type.value)
+        )
+        if execution_ref.owner_type is ExecutionOwnerType.MANUAL_COMMAND:
+            metadata.setdefault(
+                "manual_action_type", getattr(origin, "action_type", "")
+            )
             metadata.setdefault(
                 "liquidation_group_id",
                 getattr(origin, "liquidation_group_id", None),
             )
-        else:
-            strategy_run_id = str(
-                getattr(origin, "run_id", None)
-                or getattr(intent, "run_id", self.run_id)
-                or self.run_id
-            )
-            requested_owner_type = str(metadata.get("owner_type") or "").upper()
-            requested_owner_id = str(metadata.get("owner_id") or "")
-            if requested_owner_type == "EXIT_PLAN" and requested_owner_id:
-                owner_type = "EXIT_PLAN"
-                owner_id = requested_owner_id
-            else:
-                owner_type = "STRATEGY_RUN"
-                owner_id = strategy_run_id
+        elif origin is not None:
             metadata.setdefault("plan_id", getattr(origin, "plan_id", None))
         metadata.setdefault("origin_type", origin_type)
         metadata.setdefault(
@@ -4311,6 +4393,15 @@ class RuntimeStateManager:
             "strategy_run_id": strategy_run_id,
             "owner_type": owner_type,
             "owner_id": owner_id,
+            "environment": (
+                ExecutionEnvironment.BACKTEST.value
+                if self.is_backtest
+                else self.execution_environment.value
+            ),
+            "idempotency_key": str(
+                raw_metadata.get("idempotency_key")
+                or f"intent:{owner_type}:{owner_id}:{getattr(intent, 'intent_id', '')}"
+            ),
             "account_id": str(metadata.get("account_id") or "").strip() or None,
             "strategy_id": str(getattr(intent, "strategy_id", "") or ""),
             "instrument_code": str(getattr(intent, "instrument_code", "") or ""),
@@ -4336,6 +4427,8 @@ class RuntimeStateManager:
             "strategy_run_id",
             "owner_type",
             "owner_id",
+            "environment",
+            "idempotency_key",
             "account_id",
             "strategy_id",
             "instrument_code",

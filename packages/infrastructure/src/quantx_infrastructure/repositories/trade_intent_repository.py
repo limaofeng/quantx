@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.database.relational_base import BaseRepository
+from quantx_infrastructure.models.execution_owner import validate_owner_environment
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 
 _V3_MANUAL_RECOVERY_MAX_ROWS = 4096
@@ -25,6 +26,68 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     if "metadata" in payload:
       payload["intent_metadata"] = payload.pop("metadata")
     return payload
+
+  @staticmethod
+  def _prepare_create_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the closed owner/idempotency projection before persistence.
+
+    The ORM columns intentionally have no Python defaults.  Keeping this
+    check at the repository boundary makes omitted owner data fail before a
+    session is mutated, and prevents callers from smuggling enum instances or
+    non-canonical environments into the durable fact.
+    """
+
+    payload = dict(data or {})
+    owner_type, owner_id, environment = validate_owner_environment(
+      payload.get("owner_type"),
+      payload.get("owner_id"),
+      payload.get("environment"),
+    )
+    idempotency_key = payload.get("idempotency_key")
+    if (
+      not isinstance(idempotency_key, str)
+      or not idempotency_key
+      or idempotency_key != idempotency_key.strip()
+      or len(idempotency_key) > 128
+      or any(
+        ord(character) <= 31 or ord(character) == 127
+        for character in idempotency_key
+      )
+    ):
+      raise ValueError("IDEMPOTENCY_KEY_INVALID")
+    payload["owner_type"] = owner_type
+    payload["owner_id"] = owner_id
+    payload["environment"] = environment
+    return payload
+
+  @staticmethod
+  def _validate_immutable_owner_update(
+    existing: TradeIntentRecord,
+    incoming: Dict[str, Any],
+  ) -> None:
+    owner_fields = {
+      field
+      for field in ("owner_type", "owner_id", "environment")
+      if field in incoming
+    }
+    if not owner_fields:
+      return
+    if owner_fields != {"owner_type", "owner_id", "environment"}:
+      raise ValueError("OWNER_ENVIRONMENT_IMMUTABLE")
+    owner_type, owner_id, environment = validate_owner_environment(
+      incoming.get("owner_type"),
+      incoming.get("owner_id"),
+      incoming.get("environment"),
+    )
+    incoming["owner_type"] = owner_type
+    incoming["owner_id"] = owner_id
+    incoming["environment"] = environment
+    if (owner_type, owner_id, environment) != (
+      existing.owner_type,
+      existing.owner_id,
+      existing.environment,
+    ):
+      raise ValueError("OWNER_ENVIRONMENT_IMMUTABLE")
 
   async def find_by_id(self, intent_id: str) -> Optional[TradeIntentRecord]:
     """根据ID获取交易意图。"""
@@ -208,7 +271,9 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
 
   async def create_intent(self, intent_data: Dict[str, Any]) -> TradeIntentRecord:
     """创建交易意图记录。"""
-    intent = TradeIntentRecord(**self._normalize_payload(intent_data))
+    intent = TradeIntentRecord(
+      **self._prepare_create_payload(self._normalize_payload(intent_data))
+    )
     self.db.add(intent)
     await self.db.commit()
     await self.db.refresh(intent)
@@ -232,7 +297,10 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     self, intent_data: List[Dict[str, Any]]
   ) -> List[TradeIntentRecord]:
     """Accept a complete strategy output in one transaction, or accept none."""
-    normalized = [self._normalize_payload(item) for item in intent_data]
+    normalized = [
+      self._prepare_create_payload(self._normalize_payload(item))
+      for item in intent_data
+    ]
     ids = [str(item.get("id") or "").strip() for item in normalized]
     if any(not value for value in ids) or len(set(ids)) != len(ids):
       raise ValueError("交易意图标识不能为空或重复")
@@ -268,6 +336,8 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     immutable_fields = (
       "owner_type",
       "owner_id",
+      "environment",
+      "idempotency_key",
       "strategy_run_id",
       "account_id",
       "strategy_id",
@@ -309,7 +379,14 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     """更新交易意图记录。"""
     intent = await self.find_by_id(intent_id)
     if intent:
-      for key, value in self._normalize_payload(intent_data).items():
+      normalized = self._normalize_payload(intent_data)
+      self._validate_immutable_owner_update(intent, normalized)
+      if (
+        "idempotency_key" in normalized
+        and normalized["idempotency_key"] != intent.idempotency_key
+      ):
+        raise ValueError("IDEMPOTENCY_KEY_IMMUTABLE")
+      for key, value in normalized.items():
         setattr(intent, key, value)
       await self.db.commit()
       await self.db.refresh(intent)
@@ -321,6 +398,12 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     """更新交易意图状态。"""
     intent = await self.find_by_id(intent_id)
     if intent:
+      self._validate_immutable_owner_update(intent, updates)
+      if (
+        "idempotency_key" in updates
+        and updates["idempotency_key"] != intent.idempotency_key
+      ):
+        raise ValueError("IDEMPOTENCY_KEY_IMMUTABLE")
       intent.status = status
       for key, value in updates.items():
         setattr(intent, key, value)
@@ -356,7 +439,9 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
   ) -> List[TradeIntentRecord]:
     """批量创建交易意图。"""
     intents = [
-      TradeIntentRecord(**self._normalize_payload(intent_data))
+      TradeIntentRecord(
+        **self._prepare_create_payload(self._normalize_payload(intent_data))
+      )
       for intent_data in intents_data
     ]
     self.db.add_all(intents)

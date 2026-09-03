@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import TradeConfirmationChallenge
@@ -213,7 +214,7 @@ def _validate_readiness(readiness: dict[str, Any]) -> None:
     or binding["kill_switch"]
     or binding["ready_live_agent_count"] != 1
     or binding["agent_mode"].lower() != "live"
-    or binding["protocol_version"] != "1.1"
+    or binding["protocol_version"] != PROTOCOL_VERSION
   ):
     raise TradeApprovalChallengeError(
       "STRATEGY_LIVE_NOT_READY",

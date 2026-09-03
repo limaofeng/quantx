@@ -12,6 +12,8 @@ from datetime import date, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 
+from quantx_contracts import ExecutionEnvironment
+
 from quantx_domain import clock as time_utils
 from quantx_domain.enums import (
   StrategyInstrumentScope,
@@ -182,7 +184,42 @@ class ManualCommandIntentOrigin:
     return ExecutionOwnerRef.manual_command(self.command_id)
 
 
-TradeIntentOrigin = StrategyRunIntentOrigin | ManualCommandIntentOrigin
+@dataclass(frozen=True)
+class ExitPlanIntentOrigin:
+  """Explicit adapter for a managed ExitPlan execution owner.
+
+  ``source_execution_ref`` is lineage only (normally the strategy run that
+  evaluated the plan).  It can never replace the EXIT_PLAN execution owner.
+  """
+
+  plan_id: str
+  source_execution_ref: Optional[ExecutionOwnerRef] = None
+  origin_type: TradeIntentOriginType = field(
+    default=TradeIntentOriginType.EXIT_PLAN,
+    init=False,
+  )
+
+  def __post_init__(self) -> None:
+    if not str(self.plan_id or "").strip():
+      raise ValueError("exit-plan intent origin requires plan_id")
+    if self.source_execution_ref is not None and not isinstance(
+      self.source_execution_ref, ExecutionOwnerRef
+    ):
+      raise TypeError("exit-plan source execution ref must be ExecutionOwnerRef")
+    if self.source_execution_ref is not None and self.source_execution_ref.owner_type not in {
+      ExecutionOwnerType.STRATEGY_RUN,
+      ExecutionOwnerType.MANUAL_COMMAND,
+    }:
+      raise ValueError("exit-plan source execution ref has invalid owner type")
+
+  @property
+  def execution_ref(self) -> ExecutionOwnerRef:
+    return ExecutionOwnerRef(ExecutionOwnerType.EXIT_PLAN, self.plan_id)
+
+
+TradeIntentOrigin = (
+  StrategyRunIntentOrigin | ManualCommandIntentOrigin | ExitPlanIntentOrigin
+)
 
 
 FORBIDDEN_RUNTIME_STATE_FIELDS = {
@@ -380,6 +417,10 @@ class TradeIntent:
   intent_id: str = field(default_factory=lambda: str(uuid.uuid4()))
   created_at: datetime = field(default_factory=time_utils.now)
   origin: Optional[TradeIntentOrigin] = None
+  # Construction remains ergonomic for ordinary strategy callers, but the
+  # post-init boundary always materializes this as a typed, immutable owner
+  # fact.  No metadata value participates in that materialization.
+  execution_ref: Optional[ExecutionOwnerRef] = field(default=None, kw_only=True)
 
   def __post_init__(self) -> None:
     if isinstance(self.direction, str):
@@ -392,20 +433,68 @@ class TradeIntent:
       self.execution_mode = TradeIntentExecutionMode(self.execution_mode)
     if self.intent_type is None:
       self.intent_type = self._infer_intent_type()
+    if self.execution_ref is not None and not isinstance(
+      self.execution_ref, ExecutionOwnerRef
+    ):
+      raise TypeError("TradeIntent execution_ref must be ExecutionOwnerRef")
     if self.origin is None:
-      self.origin = StrategyRunIntentOrigin(
-        run_id=self.run_id,
-        strategy_id=self.strategy_id,
-        plan_id=str(self.metadata.get("plan_id") or "") or None,
-      )
+      if self.execution_ref is None:
+        # Explicit adapter for the historical ordinary strategy constructor.
+        # It is based only on the constructor's run identity, never metadata.
+        self.origin = StrategyRunIntentOrigin(
+          run_id=self.run_id,
+          strategy_id=self.strategy_id,
+          plan_id=str(self.metadata.get("plan_id") or "") or None,
+        )
+      elif self.execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+        if self.run_id and self.run_id != self.execution_ref.owner_id:
+          raise ValueError("TradeIntent execution owner conflicts with run identity")
+        if self.run_id and self.strategy_id:
+          self.origin = StrategyRunIntentOrigin(
+            run_id=self.run_id,
+            strategy_id=self.strategy_id,
+            plan_id=str(self.metadata.get("plan_id") or "") or None,
+          )
+      elif self.execution_ref.owner_type is ExecutionOwnerType.MANUAL_COMMAND:
+        if self.run_id or self.strategy_id:
+          raise ValueError(
+            "manual-command TradeIntent cannot carry a strategy run identity"
+          )
+      elif self.execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN:
+        raise ValueError("EXIT_PLAN TradeIntent requires an explicit origin adapter")
     elif isinstance(self.origin, StrategyRunIntentOrigin):
       if self.run_id != self.origin.run_id or self.strategy_id != self.origin.strategy_id:
         raise ValueError("TradeIntent strategy origin conflicts with run identity")
     elif isinstance(self.origin, ManualCommandIntentOrigin):
       if self.run_id or self.strategy_id:
         raise ValueError("manual-command TradeIntent cannot carry a strategy run identity")
+    elif isinstance(self.origin, ExitPlanIntentOrigin):
+      if self.execution_ref is not None and self.execution_ref != self.origin.execution_ref:
+        raise ValueError("TradeIntent execution owner conflicts with ExitPlan origin")
+      if self.execution_ref is None:
+        self.execution_ref = self.origin.execution_ref
     else:
       raise ValueError("TradeIntent origin is invalid")
+
+    origin_ref = (
+      self.origin.execution_ref
+      if self.origin is not None
+      else None
+    )
+    if self.execution_ref is None:
+      if origin_ref is None:
+        raise ValueError("TradeIntent requires a typed execution owner")
+      self.execution_ref = origin_ref
+    elif origin_ref is not None and self.execution_ref != origin_ref:
+      raise ValueError("TradeIntent execution owner conflicts with origin")
+    if self.execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if self.run_id and self.run_id != self.execution_ref.owner_id:
+        raise ValueError("StrategyRun owner must match TradeIntent run_id")
+    elif self.execution_ref.owner_type is ExecutionOwnerType.MANUAL_COMMAND:
+      if self.run_id or self.strategy_id:
+        raise ValueError(
+          "manual-command TradeIntent cannot carry a strategy run identity"
+        )
 
     if self.direction in {TradeIntentDirection.BUY, TradeIntentDirection.SELL}:
       if not self.instrument_code:
@@ -513,6 +602,8 @@ class OrderStateEvent:
   filled_volume: Optional[int] = None
   metadata: Dict[str, Any] = field(default_factory=dict)
   timestamp: Optional[datetime] = None
+  execution_ref: Optional[ExecutionOwnerRef] = None
+  environment: Optional[ExecutionEnvironment] = None
 
   @classmethod
   def from_raw(cls, source: Any) -> "OrderStateEvent":
@@ -529,6 +620,8 @@ class OrderStateEvent:
       filled_volume=(int(filled_volume) if filled_volume is not None else None),
       metadata=dict(metadata),
       timestamp=_extract(source, "last_update_time") or _extract(source, "submit_time"),
+      execution_ref=_extract(request, "execution_ref"),
+      environment=_extract(request, "environment"),
     )
 
 
@@ -543,6 +636,8 @@ class TradeExecutionEvent:
   volume: int
   trade_time: Optional[datetime] = None
   metadata: Dict[str, Any] = field(default_factory=dict)
+  execution_ref: Optional[ExecutionOwnerRef] = None
+  environment: Optional[ExecutionEnvironment] = None
 
   @classmethod
   def from_raw(cls, source: Any) -> "TradeExecutionEvent":
@@ -554,6 +649,8 @@ class TradeExecutionEvent:
       volume=int(_extract(source, "volume", 0) or 0),
       trade_time=_extract(source, "trade_time"),
       metadata=dict(_extract(source, "metadata", {}) or {}),
+      execution_ref=_extract(source, "execution_ref"),
+      environment=_extract(source, "environment"),
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.brokers.base import (
   OrderRequest,
 )
@@ -14,8 +15,7 @@ from quantx_domain.brokers.base import (
   PriceType as BrokerPriceType,
 )
 from quantx_domain.strategies.base import (
-  ManualCommandIntentOrigin,
-  StrategyRunIntentOrigin,
+  ExitPlanIntentOrigin,
   TradeIntent,
   TradeIntentDirection,
   TradeIntentPriority,
@@ -45,6 +45,34 @@ MARKET_DATA_STREAM_NOT_READY = "MARKET_DATA_STREAM_NOT_READY"
 LOCAL_PRE_BROKER_ZERO_FILL_SOURCE = "LOCAL_PRE_BROKER_REJECTION"
 LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE = "LOCAL_OUTBOX_EXPIRED"
 LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE = "LOCAL_AGENT_PRE_EXECUTION_REJECTION"
+_OWNER_METADATA_KEYS = frozenset(
+  {
+    "owner_type",
+    "owner_id",
+    "environment",
+    "execution_environment",
+    "execution_owner_type",
+    "execution_owner_id",
+    "source_execution_owner_type",
+    "source_execution_owner_id",
+    "source_execution_environment",
+    "strategy_run_id",
+    "exit_plan_id",
+    "strategy_name",
+    "remark",
+    "order_remark",
+  }
+)
+
+
+def _without_owner_metadata(metadata: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+  """Keep business evidence while removing duplicate identity claims."""
+
+  return {
+    key: value
+    for key, value in dict(metadata or {}).items()
+    if str(key).strip().lower() not in _OWNER_METADATA_KEYS
+  }
 
 
 def local_pre_broker_zero_fill_metadata(
@@ -73,8 +101,6 @@ class TradeIntentProcessor:
     manual_command_id = str(plan.group_id or plan.source_id or plan.plan_id)
     is_strategy_run = bool(run_id)
     return {
-      "owner_type": "EXIT_PLAN",
-      "owner_id": plan.plan_id,
       "intent_origin_type": (
         "STRATEGY_RUN" if is_strategy_run else "MANUAL_COMMAND"
       ),
@@ -89,9 +115,7 @@ class TradeIntentProcessor:
         )
       ),
       "account_id": plan.account_id,
-      "strategy_run_id": run_id,
       "requested_volume": int(decision.volume),
-      "exit_plan_id": plan.plan_id,
       "exit_rule_id": decision.rule_id,
       "exit_rule_type": decision.rule_type,
       "exit_reason": decision.reason,
@@ -118,15 +142,22 @@ class TradeIntentProcessor:
       if (
         str(existing.owner_type or "").upper() != "EXIT_PLAN"
         or str(existing.owner_id or "") != str(plan.plan_id)
+        or str(existing.environment or "").upper()
+        != str(plan.environment or "").upper()
+        or existing.strategy_run_id is not None
+        or str(existing.idempotency_key or "")
+        != f"strategy-exit:{plan.plan_id}:{intent_id}"
       ):
         raise ValueError("退出卖出意图标识已被其他业务对象占用")
       return
     db.add(
       TradeIntentRecord(
         id=intent_id,
-        strategy_run_id=plan.strategy_run_id,
+        strategy_run_id=None,
         owner_type="EXIT_PLAN",
         owner_id=str(plan.plan_id),
+        environment=str(plan.environment or "").strip().upper(),
+        idempotency_key=f"strategy-exit:{plan.plan_id}:{intent_id}",
         account_id=plan.account_id,
         strategy_id=str(plan.strategy_run_id or "") or None,
         instrument_code=plan.instrument_code,
@@ -154,9 +185,10 @@ class TradeIntentProcessor:
     limit_price: float,
     market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
+    plan_environment = ExecutionEnvironment(str(plan.environment or "").upper())
     authorization_code = "PAPER_NOT_REQUIRED"
-    exact_auto_authorized = plan.execution_mode != "live"
-    if plan.execution_mode == "live":
+    exact_auto_authorized = plan_environment is not ExecutionEnvironment.LIVE
+    if plan_environment is ExecutionEnvironment.LIVE:
       if bool(plan.auto_exit_authorized):
         authorization = await AutoExitAuthorizationGuard.validate_or_invalidate(
           plan.plan_id
@@ -174,35 +206,35 @@ class TradeIntentProcessor:
       "exact_auto_exit_authorized": bool(exact_auto_authorized),
       "auto_exit_authorization_user_id": (
         str(plan.auto_exit_authorization_user_id or "")
-        if exact_auto_authorized and plan.execution_mode == "live"
+        if exact_auto_authorized and plan_environment is ExecutionEnvironment.LIVE
         else ""
       ),
       "auto_exit_authorization_fingerprint": (
         str(plan.auto_exit_authorization_fingerprint or "")
-        if exact_auto_authorized and plan.execution_mode == "live"
+        if exact_auto_authorized and plan_environment is ExecutionEnvironment.LIVE
         else ""
       ),
       "auto_exit_authorization_challenge_id": (
         str(plan.auto_exit_authorization_challenge_id or "")
-        if exact_auto_authorized and plan.execution_mode == "live"
+        if exact_auto_authorized and plan_environment is ExecutionEnvironment.LIVE
         else ""
       ),
       "auto_exit_authorization_device_session_id": (
         str(plan.auto_exit_authorization_device_session_id or "")
-        if exact_auto_authorized and plan.execution_mode == "live"
+        if exact_auto_authorized and plan_environment is ExecutionEnvironment.LIVE
         else ""
       ),
       "auto_exit_authorized_at": (
         plan.auto_exit_authorized_at.isoformat()
         if exact_auto_authorized
-        and plan.execution_mode == "live"
+        and plan_environment is ExecutionEnvironment.LIVE
         and plan.auto_exit_authorized_at is not None
         else ""
       ),
       "auto_exit_authorization_expires_at": (
         plan.auto_exit_authorization_expires_at.isoformat()
         if exact_auto_authorized
-        and plan.execution_mode == "live"
+        and plan_environment is ExecutionEnvironment.LIVE
         and plan.auto_exit_authorization_expires_at is not None
         else ""
       ),
@@ -211,17 +243,18 @@ class TradeIntentProcessor:
       intent_id=intent_id,
       strategy_id=run_id,
       run_id=run_id,
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        str(plan.plan_id),
+      ),
       origin=(
-        StrategyRunIntentOrigin(
-          run_id=run_id,
-          strategy_id=run_id,
-          plan_id=plan.plan_id,
-        )
-        if is_strategy_run
-        else ManualCommandIntentOrigin(
-          command_id=manual_command_id,
-          action_type=str(metadata["manual_action_type"]),
-          liquidation_group_id=str(plan.group_id or "") or None,
+        ExitPlanIntentOrigin(
+          plan_id=str(plan.plan_id),
+          source_execution_ref=(
+            ExecutionOwnerRef.strategy_run(run_id)
+            if is_strategy_run
+            else ExecutionOwnerRef.manual_command(manual_command_id)
+          ),
         )
       ),
       instrument_code=plan.instrument_code,
@@ -231,7 +264,7 @@ class TradeIntentProcessor:
       priority=TradeIntentPriority.HIGH,
       target_volume=int(decision.volume),
       limit_price_hint=limit_price,
-      metadata=metadata,
+      metadata=_without_owner_metadata(metadata),
       trace_id=intent_id,
     )
     if not self._market_is_ready(market_ready):
@@ -247,7 +280,7 @@ class TradeIntentProcessor:
       )
       return self._market_not_ready_result(intent.intent_id)
     approval_required = (
-      plan.execution_mode == "live" and not exact_auto_authorized
+      plan_environment is ExecutionEnvironment.LIVE and not exact_auto_authorized
     )
     await self._create_intent_record(
       plan,
@@ -281,8 +314,24 @@ class TradeIntentProcessor:
     market_ready: Optional[Callable[[], bool]] = None,
     approval_audit: Optional[Mapping[str, Any]] = None,
   ) -> dict[str, Any]:
-    if str(dict(record.intent_metadata or {}).get("exit_plan_id") or "") != plan.plan_id:
-      raise ValueError("卖出意图不属于该退出计划")
+    plan_environment = ExecutionEnvironment(str(plan.environment or "").upper())
+    try:
+      record_owner = ExecutionOwnerRef(
+        ExecutionOwnerType(str(record.owner_type or "").upper()),
+        str(record.owner_id or ""),
+      )
+      record_environment = ExecutionEnvironment(
+        str(record.environment or "").upper()
+      )
+    except (TypeError, ValueError) as exc:
+      raise ValueError("退出卖出意图缺少有效强类型执行归属") from exc
+    if (
+      record_owner.owner_type is not ExecutionOwnerType.EXIT_PLAN
+      or record_owner.owner_id != str(plan.plan_id)
+      or record_environment is not plan_environment
+      or record.strategy_run_id is not None
+    ):
+      raise ValueError("退出卖出意图执行归属与退出计划不匹配")
     durable_status = str(record.status or "").upper()
     if durable_status not in {"AWAITING_APPROVAL", "APPROVED", "PENDING"} or (
       record.direction != "SELL"
@@ -350,19 +399,15 @@ class TradeIntentProcessor:
       intent_id=record.id,
       strategy_id=str(record.strategy_id or "") if record_run_id else "",
       run_id=record_run_id,
+      execution_ref=record_owner,
       origin=(
-        StrategyRunIntentOrigin(
-          run_id=record_run_id,
-          strategy_id=str(record.strategy_id or record_run_id),
-          plan_id=plan.plan_id,
-        )
-        if record_run_id
-        else ManualCommandIntentOrigin(
-          command_id=str(record.owner_id),
-          action_type=str(
-            record_metadata.get("manual_action_type") or "LIQUIDATE_POSITIONS"
+        ExitPlanIntentOrigin(
+          plan_id=str(plan.plan_id),
+          source_execution_ref=(
+            ExecutionOwnerRef.strategy_run(record_run_id)
+            if record_run_id
+            else None
           ),
-          liquidation_group_id=str(plan.group_id or "") or None,
         )
       ),
       instrument_code=record.instrument_code,
@@ -402,10 +447,19 @@ class TradeIntentProcessor:
     if not self._market_is_ready(market_ready):
       await self._reject_market_not_ready(intent)
       return self._market_not_ready_result(intent.intent_id)
+    plan_environment = ExecutionEnvironment(str(plan.environment or "").upper())
+    execution_ref = intent.execution_ref
+    if (
+      not isinstance(execution_ref, ExecutionOwnerRef)
+      or execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
+      or execution_ref.owner_id != str(plan.plan_id)
+    ):
+      raise ValueError("退出计划路由缺少匹配的 EXIT_PLAN 执行归属")
+    route_metadata = _without_owner_metadata(intent.metadata)
     service = TradingService(
       account_id=plan.account_id,
       account_type=AccountType.STOCK,
-      execution_mode=plan.execution_mode,
+      execution_mode=plan_environment.value.lower(),
     )
     try:
       account_model = await service.get_account_info()
@@ -460,7 +514,7 @@ class TradeIntentProcessor:
         status="REJECTED",
         notes="ZERO_SIZED_VOLUME",
         metadata=local_pre_broker_zero_fill_metadata(
-          {**intent.metadata, "size_reasons": draft.size_reason_codes},
+          {**route_metadata, "size_reasons": draft.size_reason_codes},
           reason="ZERO_SIZED_VOLUME",
         ),
       )
@@ -474,10 +528,12 @@ class TradeIntentProcessor:
       order_type=BrokerOrderType.SELL,
       price_type=BrokerPriceType.LIMIT,
       volume=draft.sized_volume,
+      execution_ref=intent.execution_ref,
+      environment=plan_environment,
       price=normalized_price,
       strategy_id=str(plan.strategy_run_id or "exit-plan"),
       metadata={
-        **intent.metadata,
+        **route_metadata,
         "intent_id": intent.intent_id,
         "order_draft_id": draft.draft_id,
         "order_draft_size_reasons": draft.size_reason_codes,
@@ -487,7 +543,7 @@ class TradeIntentProcessor:
       rules,
       strict_market_data=True,
       strict_limit_data=True,
-      enforce_trading_hours=plan.execution_mode == "live",
+      enforce_trading_hours=plan_environment is ExecutionEnvironment.LIVE,
     ).evaluate_order(
       request,
       account=account,
@@ -505,7 +561,7 @@ class TradeIntentProcessor:
         notes=risk.reason_detail,
         metadata=local_pre_broker_zero_fill_metadata(
           {
-            **intent.metadata,
+            **route_metadata,
             "risk_action": risk.action.value,
             "risk_reason_code": risk.reason_code,
             "risk_tags": risk.risk_tags,
@@ -529,18 +585,18 @@ class TradeIntentProcessor:
       order_volume=final_volume,
       price_type=PriceType.FIX_PRICE,
       price=normalized_price,
-      strategy_name="卖出管理",
-      order_remark=f"退出计划: {plan.instrument_code}",
       close_position=final_volume >= int(getattr(position, "volume", 0) or 0),
       idempotency_key=f"strategy-exit:{plan.plan_id}:{intent.intent_id}",
       execution_context={
-        **intent.metadata,
+        **route_metadata,
         "trace_id": intent.intent_id,
         "intent_id": intent.intent_id,
         "risk_decision_id": risk.risk_decision_id,
         "risk_action": risk.action.value,
         "risk_reason_code": risk.reason_code,
       },
+      execution_ref=execution_ref,
+      environment=plan_environment,
     )
     client_order_id = str(
       result.get("client_order_id") or result.get("order_id") or ""
@@ -551,7 +607,7 @@ class TradeIntentProcessor:
       order_id=client_order_id or None,
       risk_decision_id=risk.risk_decision_id,
       metadata={
-        **intent.metadata,
+        **route_metadata,
         "sized_volume": final_volume,
         "client_order_id": client_order_id,
         "risk_action": risk.action.value,
@@ -568,6 +624,19 @@ class TradeIntentProcessor:
     status: str,
     notes: Optional[str] = None,
   ) -> None:
+    execution_ref = intent.execution_ref
+    owner_type = (
+      execution_ref.owner_type.value
+      if isinstance(execution_ref, ExecutionOwnerRef)
+      else ""
+    )
+    owner_id = execution_ref.owner_id if isinstance(execution_ref, ExecutionOwnerRef) else ""
+    plan_environment = ExecutionEnvironment(str(plan.environment or "").upper())
+    if (
+      owner_type != ExecutionOwnerType.EXIT_PLAN.value
+      or owner_id != str(plan.plan_id)
+    ):
+      raise ValueError("退出卖出意图缺少显式 EXIT_PLAN 所有权")
     async with AsyncSessionLocal() as db:
       record = await db.scalar(
         select(TradeIntentRecord)
@@ -577,9 +646,11 @@ class TradeIntentProcessor:
       if record is None:
         record = TradeIntentRecord(
           id=intent.intent_id,
-          strategy_run_id=plan.strategy_run_id,
-          owner_type=str(intent.metadata.get("owner_type") or "STRATEGY_RUN"),
-          owner_id=str(intent.metadata.get("owner_id") or ""),
+          strategy_run_id=None,
+          owner_type=owner_type,
+          owner_id=owner_id,
+          environment=plan_environment.value,
+          idempotency_key=f"strategy-exit:{owner_id}:{intent.intent_id}",
           account_id=plan.account_id,
           strategy_id=str(intent.strategy_id or "") or None,
           instrument_code=intent.instrument_code,
@@ -593,7 +664,7 @@ class TradeIntentProcessor:
           limit_price_hint=intent.limit_price_hint,
           trace_id=intent.trace_id,
           status=status,
-          intent_metadata=dict(intent.metadata or {}),
+          intent_metadata=_without_owner_metadata(intent.metadata),
           notes=notes,
         )
         db.add(record)
@@ -601,13 +672,17 @@ class TradeIntentProcessor:
         if (
           str(record.owner_type or "").upper() != "EXIT_PLAN"
           or str(record.owner_id or "")
-          != str(intent.metadata.get("owner_id") or "")
+          != owner_id
+          or record.strategy_run_id is not None
+          or str(record.environment or "").upper()
+          != plan_environment.value
+          or str(record.idempotency_key or "")
+          != f"strategy-exit:{owner_id}:{intent.intent_id}"
           or str(record.instrument_code or "").upper()
           != str(intent.instrument_code or "").upper()
           or str(record.direction or "").upper() != "SELL"
         ):
           raise ValueError("退出卖出意图持久化身份冲突")
-        record.strategy_run_id = plan.strategy_run_id
         record.account_id = plan.account_id
         record.strategy_id = str(intent.strategy_id or "") or None
         record.bucket = intent.bucket
@@ -619,7 +694,7 @@ class TradeIntentProcessor:
         record.limit_price_hint = intent.limit_price_hint
         record.trace_id = intent.trace_id
         record.status = status
-        record.intent_metadata = dict(intent.metadata or {})
+        record.intent_metadata = _without_owner_metadata(intent.metadata)
         record.notes = notes
       await db.commit()
 
@@ -647,7 +722,7 @@ class TradeIntentProcessor:
       notes=MARKET_DATA_STREAM_NOT_READY,
       metadata=local_pre_broker_zero_fill_metadata(
         {
-          **dict(intent.metadata or {}),
+          **_without_owner_metadata(intent.metadata),
           "market_data_gate": MARKET_DATA_STREAM_NOT_READY,
         },
         reason=MARKET_DATA_STREAM_NOT_READY,
@@ -662,7 +737,7 @@ class TradeIntentProcessor:
         return
       for key, value in updates.items():
         if key == "metadata":
-          record.intent_metadata = dict(value or {})
+          record.intent_metadata = _without_owner_metadata(value)
         else:
           setattr(record, key, value)
       await db.commit()

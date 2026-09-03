@@ -142,7 +142,8 @@ def test_stats_uses_cached_integrity_and_counts(tmp_path) -> None:
 
 def test_structured_correlation_cache_updates_without_json_rescan(tmp_path) -> None:
   journal = LocalJournal(tmp_path / "journal.sqlite3")
-  journal.begin_command("command-1", {"client_order_id": "client-order-1"})
+  client_order_id = "client-order-1234567"
+  journal.begin_command("command-1", {"client_order_id": client_order_id})
   with journal.connection:
     journal.connection.execute(
       "UPDATE commands SET payload_json = '{broken' WHERE message_id = ?",
@@ -154,10 +155,12 @@ def test_structured_correlation_cache_updates_without_json_rescan(tmp_path) -> N
   )
 
   assert journal.client_order_id_for_report(broker_order_id=12345) == (
-    "client-order-1"
+    client_order_id
   )
-  assert journal.client_order_id_for_report(order_remark="qx:client-order-1") == (
-    "client-order-1"
+  assert journal.client_order_id_for_report(
+    order_remark=f"qx:{client_order_id[:20]}"
+  ) == (
+    client_order_id
   )
 
 

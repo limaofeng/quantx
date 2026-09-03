@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import AsyncIterator, List, Optional
 
 import strawberry
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_infrastructure.services.runtime_subscription_bridge import (
   runtime_subscription_bridge,
 )
@@ -39,6 +40,28 @@ def _single_entry_account(info: strawberry.types.Info) -> str:
   if len(principal.authorized_account_ids) != 1:
     raise forbidden("建仓/加仓托管只允许当前唯一资金账户")
   return principal.require_account()
+
+
+def _entry_intent_execution_binding(plan: EntryPlan) -> tuple[
+  ExecutionOwnerRef, ExecutionEnvironment
+]:
+  """Bind the legacy EntryPlan intent to its explicit StrategyRun owner.
+
+  EntryPlan intents are still produced by the ordinary strategy adapter in P1;
+  the plan projection is the durable source of the run/environment pair.  No
+  metadata or action-name inference is allowed here.
+  """
+
+  run_id = str(getattr(plan, "run_id", "") or "").strip()
+  if not run_id:
+    raise ValueError("建仓计划缺少明确的 StrategyRun")
+  try:
+    environment = ExecutionEnvironment(
+      str(getattr(plan, "environment", "") or "").strip().upper()
+    )
+  except (TypeError, ValueError) as exc:
+    raise ValueError("建仓计划缺少有效执行环境") from exc
+  return ExecutionOwnerRef.strategy_run(run_id), environment
 
 
 @strawberry.type
@@ -245,6 +268,7 @@ class EntryPlanMutation:
     principal.require_permission("trade:approve")
     account_id = _single_entry_account(info)
     plan = await EntryPlanResolver._require_plan(account_id, str(plan_id))
+    execution_ref, execution_environment = _entry_intent_execution_binding(plan)
     preview = await EntryPlanResolver.preview_intent(
       account_id, str(plan_id), str(intent_id)
     )
@@ -254,7 +278,8 @@ class EntryPlanMutation:
       principal=principal,
       action=STRATEGY_TRADE_INTENT_APPROVAL,
       account_id=account_id,
-      business_owner_id=str(plan.run_id),
+      execution_ref=execution_ref,
+      environment=execution_environment,
       intent_id=str(intent_id),
     )
     preview.challenge_id = challenge.challenge_id
@@ -275,12 +300,14 @@ class EntryPlanMutation:
     principal.require_permission("trade:approve")
     account_id = _single_entry_account(info)
     plan = await EntryPlanResolver._require_plan(account_id, str(plan_id))
+    execution_ref, execution_environment = _entry_intent_execution_binding(plan)
     try:
       challenge_id = await TradeApprovalChallengeService.consume(
         principal=principal,
         action=STRATEGY_TRADE_INTENT_APPROVAL,
         account_id=account_id,
-        business_owner_id=str(plan.run_id),
+        execution_ref=execution_ref,
+        environment=execution_environment,
         intent_id=str(intent_id),
         confirmation_token=confirmation_token,
       )

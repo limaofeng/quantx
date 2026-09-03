@@ -40,6 +40,7 @@ extension QuantXAPI {
       "ExitPlanHoldingCapacity": QuantXAPI.Objects.ExitPlanHoldingCapacity,
       "ExitPlanRuleCapability": QuantXAPI.Objects.ExitPlanRuleCapability,
       "ExitPlanView": QuantXAPI.Objects.ExitPlanView,
+      "ExecutionOwnerRef": QuantXAPI.Objects.ExecutionOwnerRef,
       "Instrument": QuantXAPI.Objects.Instrument,
       "KLineData": QuantXAPI.Objects.KLineData,
       "LiquidationConfirmationResult": QuantXAPI.Objects.LiquidationConfirmationResult,

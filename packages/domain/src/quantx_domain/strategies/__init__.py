@@ -12,6 +12,7 @@ from .ashare_managed_entry_plan import AshareManagedEntryPlanStrategy
 from .ashare_managed_exit_plan import AshareManagedExitPlanStrategy
 from .ashare_supermarket import AshareSupermarketStrategy
 from .base import (
+  ExitPlanIntentOrigin,
   ManualApprovalRecoveryCandidate,
   ManualCommandIntentOrigin,
   MarketDataContext,
@@ -46,6 +47,7 @@ __all__ = [
   "MarketDataSession",
   "ManualApprovalRecoveryCandidate",
   "ManualCommandIntentOrigin",
+  "ExitPlanIntentOrigin",
   "StrategyInput",
   "StrategyOutput",
   "StrategyRunIntentOrigin",

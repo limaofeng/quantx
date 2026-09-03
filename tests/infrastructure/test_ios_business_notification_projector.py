@@ -158,7 +158,8 @@ async def _seed_registration(
   await db.flush()
 
 
-def _exit_plan(now, *, execution_mode: str = "paper"):
+def _exit_plan(now, *, environment: str = "PAPER"):
+  environment = environment.upper()
   return AutoExitPlanRecord(
     plan_id="plan-1",
     account_id=ACCOUNT_ID,
@@ -166,9 +167,12 @@ def _exit_plan(now, *, execution_mode: str = "paper"):
     bucket="manual",
     source_type="MANUAL_POSITION",
     source_id="position-1",
+    source_execution_owner_type="MANUAL_COMMAND",
+    source_execution_owner_id="position-1",
+    source_execution_environment=environment,
     enabled=True,
     status="ACTIVE",
-    execution_mode=execution_mode,
+    environment=environment,
     auto_exit_authorized=False,
     config_version=1,
     protected_volume=100,
@@ -188,12 +192,16 @@ def _intent(
   owner_id: str = "plan-1",
   owner_type: str = "EXIT_PLAN",
   strategy_run_id: str | None = None,
+  environment: str = "PAPER",
 ):
+  environment = environment.upper()
   return TradeIntentRecord(
     id=intent_id,
     strategy_run_id=strategy_run_id,
     owner_type=owner_type,
     owner_id=owner_id,
+    environment=environment,
+    idempotency_key=f"{owner_type.lower()}:{intent_id}",
     account_id=ACCOUNT_ID,
     strategy_id="exit-plan",
     instrument_code="600000.SH",
@@ -209,11 +217,15 @@ def _intent(
   )
 
 
-def _pending_order(now, *, execution_mode: str = "paper"):
+def _pending_order(now, *, environment: str = "PAPER"):
+  environment = environment.upper()
   return PendingTradeOrder(
     client_order_id="client-order-1",
     user_id="user-1",
     account_id=ACCOUNT_ID,
+    owner_type="STRATEGY_RUN",
+    owner_id="strategy-run-1",
+    environment=environment,
     instrument_code="600000.SH",
     side="SELL",
     order_type="LIMIT",
@@ -221,7 +233,9 @@ def _pending_order(now, *, execution_mode: str = "paper"):
     volume=100,
     status="FILLED",
     broker_order_id="broker-order-sensitive",
-    execution_mode=execution_mode,
+    strategy_run_id="strategy-run-1",
+    strategy_order_id="strategy-order-1",
+    intent_id="paper-intent",
     bucket="active",
     request_metadata={"amount": 1000},
     last_source_sequence=2,
@@ -236,6 +250,9 @@ def _runtime_event(now, *, status: str = "APPLIED"):
     event_id="runtime-event-1",
     business_key="trade:broker-order-sensitive:execution-sensitive",
     strategy_run_id="strategy-run-1",
+    owner_type="STRATEGY_RUN",
+    owner_id="strategy-run-1",
+    environment="PAPER",
     client_order_id="client-order-1",
     broker_order_id="broker-order-sensitive",
     event_type="TRADE",
@@ -513,9 +530,9 @@ async def test_action_and_order_allow_paper_but_exclude_backtest(
   now = utcnow()
   async with projection_database() as db:
     await _seed_registration(db, now=now)
-    db.add(_exit_plan(now, execution_mode="paper"))
+    db.add(_exit_plan(now, environment="paper"))
     db.add(_intent("paper-intent", now))
-    db.add(_pending_order(now, execution_mode="paper"))
+    db.add(_pending_order(now, environment="paper"))
     db.add(_runtime_event(now))
     db.add(
       _intent(
@@ -524,6 +541,7 @@ async def test_action_and_order_allow_paper_but_exclude_backtest(
         strategy_run_id="backtest-run",
         owner_type="STRATEGY_RUN",
         owner_id="backtest-run",
+        environment="BACKTEST",
       )
     )
     await db.execute(

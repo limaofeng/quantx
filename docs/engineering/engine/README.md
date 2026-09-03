@@ -34,7 +34,7 @@ Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 
 普通策略、做 T 和买卖计划的最终 LIVE 容量由
 `quantx_infrastructure.services.account_capacity_service.AccountCapacityService`
-统一核验。新命令以同一份已处理的协议 1.1 完整快照为基准，保留未被快照覆盖的
+统一核验。新命令以同一份已处理的协议 1.2 完整快照为基准，保留未被快照覆盖的
 本地订单占用和退出保护义务。保护量调整和批量清仓使用与命令入队一致的锁顺序：
 先锁账户控制行，再锁标的持仓行及保护计划。不能从
 不同时间的账户/持仓查询拼出可用容量，也不能用晚于快照的订单终态释放旧快照的占用。
@@ -44,18 +44,24 @@ PAPER Broker 只恢复本运行模拟资产，模拟计划与 LIVE 保护量、�
 API 授权预览、确认与 Engine 创建计划均使用相同的环境隔离规则。
 
 `StrategyExecutor._process_strategy_output` 对整批 `TradeIntent` 先完成严格持久化，
-再安装可审批意图或进入执行路由。普通策略和专用助手没有两种受理标准。买入计划的
-ORDER/TRADE 必须匹配 run、计划、BUY 方向、intent 和入场阶段；同计划旧入场成交可以
-补记累计事实，但退出 SELL 或旧委托终态不能清空当前 BUY pending。
+再安装可审批意图或进入执行路由。普通策略和专用助手没有两种受理标准。当前公共链以
+`ExecutionOwnerRef(owner_type, owner_id)` 加 execution environment 作为唯一身份；
+intent、pending、correlation、`trade_command_outbox` 和 runtime event 都保存该身份，
+`auto_exit_plans`/`TTradeBatch` 保存不可变 source execution owner。`strategy_run_id`
+仅是 StrategyRun 的可选一致性见证，不能作为缺失 owner 时的 fallback。买入计划的
+ORDER/TRADE 还必须匹配 owner、计划、BUY 方向、intent 和入场阶段；同计划旧入场成交
+可以补记累计事实，但退出 SELL 或旧委托终态不能清空当前 BUY pending。
 
-订单/成交回报由 `business_key` 唯一的 `strategy_runtime_events`
-串行进入策略。TradeIntent 和做 T 批次投影与该事件的首次落库在
-同一事务内完成；Engine 回调后再把 event marker、资金、持仓和策略状态作为
-一个 RuntimeState 快照提交，并在同一收敛过程中更新 PAPER/LIVE
-`auto_exit_plans` 真源，最后才把事件设为 `APPLIED`。回测的 `ExitPlanBook`
-仍随隔离运行状态保存。回调异常会回滚当次内存效果；快照提交失败、结果不确定，
-或启动时存在未应用事件时，runtime 安装同业务键屏障，丢弃新的
-tick/kline 决策并拒绝人工确认，直到同事件幂等收敛。
+订单/成交回报由 `business_key` 唯一的 `strategy_runtime_events` 串行进入对应 owner
+runtime。当前 `OwnerRuntimeRouter` 仅注册 `STRATEGY_RUN`、`EXIT_PLAN`、
+`MANUAL_COMMAND`；`T_ASSISTANT_EXECUTION`、`ENTRY_PLAN`、
+`BOARD_ASSISTANT_EXECUTION` 等未注册 owner，或 owner/environment/来源链冲突，均
+fail-closed。TradeIntent 和做 T 批次投影与该事件的首次落库在同一事务内完成；Engine
+回调后再把 event marker、资金、持仓和策略状态作为一个 RuntimeState 快照提交，并在
+同一收敛过程中更新 PAPER/LIVE `auto_exit_plans` 真源，最后才把事件设为 `APPLIED`。
+回测的 `ExitPlanBook` 仍随隔离运行状态保存。回调异常会回滚当次内存效果；快照提交失败、
+结果不确定，或启动时存在未应用事件时，runtime 安装同业务键屏障，丢弃新的 tick/kline
+决策并拒绝人工确认，直到同事件幂等收敛。
 
 同一运行的 durable event 严格按 `(created_at, event_id)` 串行推进。暂停、停止或
 尚未启动的运行没有可用消费者时，事件保持 `PENDING` 且不消耗失败次数；消费者
@@ -72,6 +78,13 @@ tick/kline 决策并拒绝人工确认，直到同事件幂等收敛。
 RuntimeState 版本更新使用数据库原子 CAS。每次 Engine 快照带 manager-owned attempt
 token；提交结果不确定时以数据库 token 和版本为准采纳已提交结果，外部写入赢得
 CAS 时只合并其归属字段并保留 Engine dirty state，随后基于新版本继续保存。
+
+发往 Agent 的 protocol 1.2 wire payload 不携带业务 owner 或 StrategyRun 字段。Engine
+只把已经在 durable owner 链上证明过的命令投递出去：`PLACE_ORDER` 为固定 10 字段，
+`CANCEL_ORDER` 为固定 6 字段；两者都必须带与 owner environment 一致的
+`execution_mode`。PLACE 的 side 仅为 `BUY/SELL`，`price_type` 仅为 `FIX_PRICE`，
+`limit_price` 必须是有限正数。Agent 的 `command_ack` 仍只是投递/本地前置处理结果；
+成交状态只能由 report inbox 中的 ORDER/EXECUTION/完整 DELTA 事实收敛。
 
 PAPER/LIVE 做 T 策略把有界、因果 tick 观察窗保留在内存热路径；普通 tick、
 滚动窗口、评分、指标和诊断不得逐 tick 写数据库。策略 RuntimeState 只在上午
@@ -124,7 +137,7 @@ tick 循环不执行数据库 I/O；错误或取消必须 seal 已处理前缀�
 完整账户快照的对账按灰度阶段处理。`SHADOW` 是手工交易共存的准备阶段：QMT
 客户端产生且没有 QuantX 关联 ID 的委托/成交会作为外部活动持久化并计数，
 不会阻止账户事实收敛；`CANARY / LIVE` 中出现同类活动则暂停自动执行。成功的
-新协议 1.1 完整快照会把同设备、同账户范围内较旧的完整快照死信标记为
+新协议 1.2 完整快照会把同设备、同账户范围内较旧的完整快照死信标记为
 `SUPERSEDED`，并闭环对应告警，但保留原始失败审计记录。没有资金、持仓、委托、
 成交或订单错误事实的旧不可用观测，也可在更新的权威完整快照成功后闭环：必须有
 明确的不可用账户和全分区失败证明，且来源时间与序号都严格早于新快照。含部分
@@ -136,7 +149,7 @@ tick 循环不执行数据库 I/O；错误或取消必须 seal 已处理前缀�
 应用失败沿用最多 10 次尝试的死信上限，其他数据库错误仍保持失败，不无限重试。
 完成记录写入重试不重新应用报告；数据库错误诊断只保留异常类型和 SQLSTATE，
 不把 SQL 或绑定的账户数据写入报告错误和告警。
-协议 1.1 的权威条件同时包括哈希、全部分区完整性和逐账户状态证明；状态必须在采集
+协议 1.2 的权威条件同时包括哈希、全部分区完整性和逐账户状态证明；状态必须在采集
 全过程稳定为 `OK(0)` 或 `CLOSED(6)`。缺失或不合格的状态证明按不完整快照
 fail-closed：只更新失败/陈旧标记并暂停账户执行，不处理其中的资金、持仓、委托或
 成交，不删除当前持仓，也不刷新最后成功快照时间与 `READY` 对账状态。下一份合法
@@ -264,12 +277,12 @@ Agent ACK、broker order id 或来源事件时，该本地证明失效，只能�
 `state_version` 和最终锁内刷新；同一 Broker 事实缺少 execution id 时使用稳定内容指纹，
 不得用随机身份破坏幂等。
 
-做 T 的保护 SELL 使用 `MARKET` 执行偏好：LiveBroker 转为
-`MARKET_CONVERT_5_LIMIT`，QMT Agent 对沪/北市场与深市分别映射为
-`MARKET_SH_CONVERT_5_CANCEL` 和 `MARKET_SZ_CONVERT_5_CANCEL`，即五档即时成交、
-剩余撤销。SELL intent 固定由退出计划拥有：`owner_type=EXIT_PLAN`、
-`owner_id=plan_id`，并保留 `strategy_run_id`、`t_batch_id` 与
-`t_trade_role=exit` 供原运行收敛批次。
+Agent 当前只接受 `FIX_PRICE` 固定价限价委托；因此保护 SELL 在进入公共命令边界前
+必须已经解析为有限正数 `limit_price`，不会向 QMT 发送市价零值或未定义的价格类型。
+SELL intent 固定由退出计划拥有：`owner_type=EXIT_PLAN`、`owner_id=plan_id`，并在
+计划/批次上保留不可变 `source_execution_owner_type/source_execution_owner_id/
+source_execution_environment`；`strategy_run_id` 仅在来源确为 `STRATEGY_RUN` 时作为
+一致性见证。
 
 未预授权退出的预览—确认挑战绑定精确的计划、意图、账户、设备与版本；挑战消费、
 Engine command outbox 创建和幂等业务键在同一事务中提交。`command_ack` 只表示
@@ -277,7 +290,7 @@ Engine command outbox 创建和幂等业务键在同一事务中提交。`comman
 `owner_type=EXIT_PLAN` 的 SELL 在通用执行器进入 Broker 前都强制使用
 `strategy-exit:{plan_id}:{intent_id}`，Monitor 崩溃重放也只能命中同一条
 持久命令。LIVE SELL 的最终入队事务还会重新校验计划投影与内嵌模板的
-`plan/account/instrument/source/run` 完全一致，并按来源、运行和托管命令标记的
+`plan/account/instrument/source owner/environment` 完全一致，并按来源 owner、运行和托管命令标记的
 正向矩阵确认唯一执行 owner；任一错配或未知来源都不能生成 QMT outbox。
 Agent 真正领取普通 PLACE_ORDER 前还会重新锁定账户执行控制和该 outbox：账户未完成
 对账、命令已被隔离或命令载荷在候选发现后发生变化时均不投递；撤单和紧急停止仍走

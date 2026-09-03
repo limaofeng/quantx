@@ -9,6 +9,30 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
+def test_execution_idempotency_identity_includes_normalized_order_ids() -> None:
+  envelope = AgentEnvelope(
+    message_type=AgentMessageType.EXECUTION_REPORT,
+    payload={
+      "client_order_id": " client-1 ",
+      "execution": {
+        "account_id": "account-1",
+        "client_order_id": "nested-client-1",
+        "broker_order_id": " broker-1 ",
+        "traded_id": " traded-1 ",
+        "traded_volume": 100,
+        "traded_price": 10,
+      },
+    },
+  )
+
+  assert agent_api._body_for_report_idempotency(envelope) == {
+    "account_id": "account-1",
+    "client_order_id": "client-1",
+    "broker_order_id": "broker-1",
+    "execution_id": "traded-1",
+  }
+
+
 @pytest.mark.asyncio
 async def test_same_execution_with_new_message_id_is_acknowledged_once(
   monkeypatch,

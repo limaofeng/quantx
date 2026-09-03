@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api import agent_api
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_domain.clock import to_naive_utc, utcnow
 from quantx_domain.enums import StrategyRunMode
 from quantx_domain.strategies.ashare_managed_entry_plan import (
@@ -34,9 +35,9 @@ from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControlEvent,
   AgentDevice,
   AgentReportInbox,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
-  StrategyOrderCorrelation,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
 )
@@ -124,7 +125,7 @@ def _snapshot_report(
     message_id=f"snapshot-report-{snapshot_id}",
     device_id="device-1",
     message_type="delta_report",
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
     client_order_id=None,
     raw_payload_hash="a" * 64,
     business_idempotency_key=f"snapshot:{snapshot_id}",
@@ -139,7 +140,7 @@ def _terminal_report(terminal_status: str) -> AgentReportInbox:
     message_id=f"terminal-report-{terminal_status}",
     device_id="device-1",
     message_type="order_report",
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
     client_order_id="client-1",
     raw_payload_hash="b" * 64,
     business_idempotency_key=f"terminal:{terminal_status}",
@@ -168,7 +169,7 @@ def _late_exit_trade_report(*, execution_id: str, volume: int = 20) -> AgentRepo
     message_id=f"late-exit-trade-{execution_id}",
     device_id="device-1",
     message_type="execution_report",
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
     client_order_id="client-1",
     raw_payload_hash="d" * 64,
     business_idempotency_key=f"late-exit-trade:{execution_id}",
@@ -225,7 +226,7 @@ async def _database(monkeypatch: pytest.MonkeyPatch):
     AgentDevice.__table__,
     RuntimeComponentHeartbeat.__table__,
     PendingTradeOrder.__table__,
-    StrategyOrderCorrelation.__table__,
+    OrderCorrelation.__table__,
     StrategyRuntimeEvent.__table__,
     AccountExecutionControl.__table__,
     AccountExecutionControlEvent.__table__,
@@ -281,9 +282,11 @@ async def _seed_managed_order(
     db.add(
       TradeIntentRecord(
         id="intent-1",
+        idempotency_key="intent-1-key",
         strategy_run_id="plan-1",
         owner_type="STRATEGY_RUN",
         owner_id="plan-1",
+        environment="LIVE",
         account_id="account-1",
         instrument_code="605499.SH",
         direction="BUY",
@@ -309,7 +312,9 @@ async def _seed_managed_order(
         volume=100,
         status=terminal_status,
         broker_order_id="9001",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id="plan-1",
+        environment="LIVE",
         strategy_run_id="plan-1",
         strategy_order_id="strategy-order-1",
         intent_id="intent-1",
@@ -320,7 +325,7 @@ async def _seed_managed_order(
       )
     )
     db.add(
-      StrategyOrderCorrelation(
+    OrderCorrelation(
         id="correlation-1",
         client_order_id="client-1",
         broker_order_id="9001",
@@ -329,7 +334,9 @@ async def _seed_managed_order(
         strategy_order_id="strategy-order-1",
         intent_id="intent-1",
         bucket="core",
-        execution_mode="live",
+        owner_type="STRATEGY_RUN",
+        owner_id="plan-1",
+        environment="LIVE",
         trace_id="trace-1",
         request_metadata={
           **entry_metadata,
@@ -364,7 +371,7 @@ def _pending_exit_plan(*, strategy_run_id: str, dedicated: bool = False) -> Exit
       account_id="account-1",
       instrument_code="605499.SH",
       bucket="swing" if strategy_run_id else "manual",
-      run_id=strategy_run_id,
+      run_id="" if dedicated else strategy_run_id,
       metadata=(
         {"managed_runtime_command_id": "managed-command-1"}
         if dedicated
@@ -394,9 +401,11 @@ async def _seed_exit_plan_order(
   *,
   snapshot: AgentReportInbox,
   strategy_run_id: str,
+  environment: str = "LIVE",
   wrong_correlation_binding: bool = False,
   executed_volume: int = 0,
   dedicated: bool = False,
+  source_owner_type: str | None = None,
 ) -> None:
   snapshot_at = to_naive_utc(
     datetime.fromisoformat(snapshot.payload["source_event_at"])
@@ -407,6 +416,14 @@ async def _seed_exit_plan_order(
   )
   plan_id = plan.plan_id
   intent_id = plan.pending_intent_id
+  resolved_source_owner_type = source_owner_type or (
+    "MANUAL_COMMAND" if dedicated or not strategy_run_id else "STRATEGY_RUN"
+  )
+  source_run_id = (
+    strategy_run_id
+    if resolved_source_owner_type == "STRATEGY_RUN" and not dedicated
+    else ""
+  )
   owner_metadata = {
     "owner_type": "EXIT_PLAN",
     "owner_id": plan_id,
@@ -414,7 +431,7 @@ async def _seed_exit_plan_order(
     "account_id": "account-1",
     "instrument_code": "605499.SH",
     "intent_id": intent_id,
-    "strategy_run_id": strategy_run_id,
+    "strategy_run_id": source_run_id,
   }
   async with sessions() as db:
     db.add(
@@ -434,10 +451,17 @@ async def _seed_exit_plan_order(
         bucket=plan.template.bucket,
         source_type=plan.template.source_type,
         source_id=plan.template.source_id,
-        strategy_run_id=strategy_run_id or None,
+        strategy_run_id=source_run_id or None,
+        source_execution_owner_type=resolved_source_owner_type,
+        source_execution_owner_id=(
+          plan_id
+          if resolved_source_owner_type != "STRATEGY_RUN"
+          else strategy_run_id
+        ),
+        source_execution_environment=environment,
         enabled=True,
         status=plan.status.value,
-        execution_mode="live",
+        environment=environment,
         auto_exit_authorized=False,
         config_version=1,
         state_version=1,
@@ -452,11 +476,13 @@ async def _seed_exit_plan_order(
     db.add(
       TradeIntentRecord(
         id=intent_id,
-        strategy_run_id=strategy_run_id or None,
+        idempotency_key=f"{intent_id}-key",
+        strategy_run_id=None,
         owner_type="EXIT_PLAN",
         owner_id=plan_id,
+        environment=environment,
         account_id="account-1",
-        strategy_id=strategy_run_id or None,
+        strategy_id=source_run_id or None,
         instrument_code="605499.SH",
         direction="SELL",
         bucket=plan.template.bucket,
@@ -481,35 +507,37 @@ async def _seed_exit_plan_order(
         volume=100,
         status="CANCELLED",
         broker_order_id="9001",
-        execution_mode="live",
-        strategy_run_id=strategy_run_id or None,
-        strategy_order_id="strategy-exit-order-1" if strategy_run_id else None,
+        owner_type="EXIT_PLAN",
+        owner_id=plan_id,
+        environment=environment,
+        strategy_run_id=None,
         intent_id=intent_id,
         bucket=plan.template.bucket,
+        trace_id="exit-trace-1",
         request_metadata=dict(owner_metadata),
         last_source_sequence=10,
         last_source_event_at=snapshot_at,
       )
     )
-    if strategy_run_id:
-      correlation_metadata = dict(owner_metadata)
-      if wrong_correlation_binding:
-        correlation_metadata["owner_id"] = "other-exit-plan"
-      db.add(
-        StrategyOrderCorrelation(
-          id="exit-correlation-1",
-          client_order_id="client-1",
-          broker_order_id="9001",
-          account_id="account-1",
-          strategy_run_id=strategy_run_id,
-          strategy_order_id="strategy-exit-order-1",
-          intent_id=intent_id,
-          bucket=plan.template.bucket,
-          execution_mode="live",
-          trace_id="exit-trace-1",
-          request_metadata=correlation_metadata,
-        )
+    correlation_metadata = dict(owner_metadata)
+    if wrong_correlation_binding:
+      correlation_metadata["owner_id"] = "other-exit-plan"
+    db.add(
+      OrderCorrelation(
+        id="exit-correlation-1",
+        client_order_id="client-1",
+        broker_order_id="9001",
+        account_id="account-1",
+        strategy_run_id=None,
+        intent_id=intent_id,
+        bucket=plan.template.bucket,
+        owner_type="EXIT_PLAN",
+        owner_id=plan_id,
+        environment=environment,
+        trace_id="exit-trace-1",
+        request_metadata=correlation_metadata,
       )
+    )
     db.add(
       AccountExecutionControl(
         account_id="account-1",
@@ -594,9 +622,11 @@ async def _seed_delivered_replacement_and_live_agent(
         ),
         TradeIntentRecord(
           id="exit-intent-2",
-          strategy_run_id=strategy_run_id or None,
+          idempotency_key="exit-intent-2-key",
+          strategy_run_id=None,
           owner_type="EXIT_PLAN",
           owner_id="exit-plan-1",
+          environment="LIVE",
           account_id="account-1",
           strategy_id=strategy_run_id or None,
           instrument_code="605499.SH",
@@ -619,11 +649,27 @@ async def _seed_delivered_replacement_and_live_agent(
           volume=80,
           status="DELIVERED",
           broker_order_id="9002",
-          execution_mode="live",
-          strategy_run_id=strategy_run_id or None,
-          strategy_order_id=("strategy-exit-order-2" if strategy_run_id else None),
+          owner_type="EXIT_PLAN",
+          owner_id="exit-plan-1",
+          environment="LIVE",
+          strategy_run_id=None,
           intent_id="exit-intent-2",
           bucket="swing" if strategy_run_id else "manual",
+          trace_id="exit-trace-2",
+          request_metadata=dict(owner_metadata),
+        ),
+        OrderCorrelation(
+          id="replacement-correlation-1",
+          client_order_id="client-2",
+          broker_order_id="9002",
+          account_id="account-1",
+          owner_type="EXIT_PLAN",
+          owner_id="exit-plan-1",
+          environment="LIVE",
+          strategy_run_id=None,
+          intent_id="exit-intent-2",
+          bucket="swing" if strategy_run_id else "manual",
+          trace_id="exit-trace-2",
           request_metadata=dict(owner_metadata),
         ),
         TradeCommandOutbox(
@@ -632,6 +678,9 @@ async def _seed_delivered_replacement_and_live_agent(
           idempotency_key="replacement-place",
           device_id="device-1",
           account_id="account-1",
+          owner_type="EXIT_PLAN",
+          owner_id="exit-plan-1",
+          environment="LIVE",
           payload={
             "command_kind": "PLACE_ORDER",
             "client_order_id": "client-2",
@@ -795,7 +844,6 @@ async def test_full_snapshot_proves_zero_fill_and_replays_idempotently(
     terminal_status=terminal_status,
     snapshot=snapshot,
   )
-
   try:
     # The first terminal broker report is not a zero-fill proof because an
     # execution report may still follow it.
@@ -850,12 +898,25 @@ async def test_full_snapshot_proves_zero_fill_and_replays_idempotently(
     await report_processor._recover_stuck_runtime_events()
     await report_processor._stage_runtime_events(snapshot)
     async with sessions() as db:
-      zero_event = await db.scalar(
-        select(StrategyRuntimeEvent).where(
-          StrategyRuntimeEvent.business_key.like(
-            "%:RECONCILED_ZERO_FILL:0"
+      zero_event = next(
+        (
+          event
+          for event in (
+            await db.execute(
+              select(StrategyRuntimeEvent).order_by(
+                StrategyRuntimeEvent.created_at,
+                StrategyRuntimeEvent.event_id,
+              )
+            )
+          ).scalars()
+          if (
+            dict(dict(event.payload or {}).get("report") or {}).get(
+              "effective_order_status"
+            )
+            == "RECONCILED_ZERO_FILL"
           )
-        )
+        ),
+        None,
       )
       assert zero_event is not None
       assert zero_event.application_status == "PENDING"
@@ -869,6 +930,17 @@ async def test_full_snapshot_proves_zero_fill_and_replays_idempotently(
     async def capture_order(_run_id, order):
       captured_orders.append(order)
 
+    runtime = type(
+      "RuntimeStub",
+      (),
+      {"context": type("ContextStub", (), {"mode": "LIVE"})()},
+    )()
+    monkeypatch.setitem(strategy_manager.executor.runs, "plan-1", runtime)
+    monkeypatch.setattr(
+      strategy_manager.executor,
+      "require_durable_event_consumer",
+      lambda _run_id: runtime,
+    )
     monkeypatch.setattr(
       strategy_manager.executor,
       "apply_durable_order_report",
@@ -996,10 +1068,10 @@ async def test_full_snapshot_proves_strategy_owned_exit_zero_fill_end_to_end(
       audit = zero_events[0].payload["metadata"][
         "qmt_zero_fill_reconciliation"
       ]
-      assert audit["execution_owner"] == "STRATEGY_RUN"
+      assert "execution_owner" not in audit
       assert audit["exit_plan_id"] == "exit-plan-1"
       assert audit["intent_id"] == "exit-intent-1"
-      assert audit["strategy_run_id"] == "exit-run-1"
+      assert "strategy_run_id" not in audit
       assert audit["client_order_id"] == "client-1"
       assert audit["broker_order_id"] == "9001"
       intent = await db.get(TradeIntentRecord, "exit-intent-1")
@@ -1030,18 +1102,18 @@ async def test_full_snapshot_proves_monitor_exit_and_recovery_releases_plan(
       intent = await db.get(TradeIntentRecord, "exit-intent-1")
       assert intent.status == "RECONCILED_ZERO_FILL"
       audit = intent.intent_metadata["qmt_zero_fill_reconciliation"]
-      assert audit["execution_owner"] == "MONITOR"
+      assert "execution_owner" not in audit
       assert audit["exit_plan_id"] == "exit-plan-1"
-      assert audit["strategy_run_id"] == ""
+      assert "strategy_run_id" not in audit
       reconciled_at = audit["reconciled_at"]
       assert (
         await db.scalar(select(func.count()).select_from(StrategyRuntimeEvent))
-        == 0
+        == 2
       )
 
-    # Monitor has no StrategyOrderCorrelation/runtime event. Replaying the
-    # same snapshot remains idempotent, and its own pending-order recovery
-    # consumes the authoritative intent proof before any market gate.
+    # The typed EXIT_PLAN correlation owns one durable runtime event. Replaying
+    # the same snapshot remains idempotent, and pending-order recovery consumes
+    # the authoritative intent proof before any market gate.
     await report_processor._stage_runtime_events(snapshot)
     async with sessions() as db:
       intent = await db.get(TradeIntentRecord, "exit-intent-1")
@@ -1113,6 +1185,42 @@ async def test_full_snapshot_exit_zero_fill_proof_rejects_unsafe_binding_or_fill
       assert intent.status != "RECONCILED_ZERO_FILL"
       assert int(intent.executed_volume or 0) == executed_volume
       assert "qmt_zero_fill_reconciliation" not in intent.intent_metadata
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "source_owner_type",
+  ["T_ASSISTANT_EXECUTION", "ENTRY_PLAN", "BOARD_ASSISTANT_EXECUTION"],
+)
+async def test_exit_zero_fill_binding_rejects_non_exit_source_owner(
+  monkeypatch: pytest.MonkeyPatch,
+  source_owner_type: str,
+) -> None:
+  engine, sessions = await _database(monkeypatch)
+  snapshot = _exit_snapshot_report(
+    snapshot_id=f"unsupported-exit-source-{source_owner_type}"
+  )
+  await _seed_exit_plan_order(
+    sessions,
+    snapshot=snapshot,
+    strategy_run_id="",
+    source_owner_type=source_owner_type,
+  )
+
+  try:
+    async with sessions() as db:
+      result = await exit_plan_zero_fill_safety.invalidate_exit_plan_zero_fill_proof(
+        db,
+        client_order_id="client-1",
+        evidence_kind="ORDER",
+        evidence_status="ACCEPTED",
+        evidence_key="unsupported-source-evidence",
+        broker_order_id="9001",
+        source_sequence=11,
+      )
+    assert result.exact_binding is False
   finally:
     await engine.dispose()
 
@@ -1436,6 +1544,9 @@ async def test_released_order_late_accepted_ack_cancels_after_broker_id_arrives(
           idempotency_key="released-place",
           device_id="device-1",
           account_id="account-1",
+          owner_type="EXIT_PLAN",
+          owner_id="exit-plan-1",
+          environment="LIVE",
           payload={
             "command_kind": "PLACE_ORDER",
             "client_order_id": "client-1",
@@ -1669,7 +1780,19 @@ async def test_released_local_proof_late_working_burns_every_exit_owner(
           for event in events
         )
       else:
-        assert events == []
+        # A monitor has no StrategyRun runtime, but its SELL still has the
+        # first-class EXIT_PLAN owner and therefore stages the same durable
+        # report events as every other ExitPlan source.
+        assert len(events) == 2
+        assert all(
+          event.owner_type == "EXIT_PLAN" and event.owner_id == "exit-plan-1"
+          for event in events
+        )
+        assert any(
+          event.payload["report"].get("effective_order_status")
+          == "RECONCILED_ZERO_FILL"
+          for event in events
+        )
   finally:
     await engine.dispose()
 
@@ -1684,6 +1807,7 @@ async def test_paper_exit_invalidation_does_not_quarantine_live_account(
     sessions,
     snapshot=snapshot,
     strategy_run_id="exit-run-paper",
+    environment="PAPER",
   )
   quarantine = AsyncMock()
   monkeypatch.setattr(
@@ -1706,8 +1830,6 @@ async def test_paper_exit_invalidation_does_not_quarantine_live_account(
         with_for_update=True,
       )
       assert record is not None and pending is not None
-      record.execution_mode = "paper"
-      pending.execution_mode = "paper"
       await db.commit()
     await _release_exit_plan_zero_fill(sessions, add_next_intent=True)
 
@@ -1921,7 +2043,7 @@ async def test_late_execution_prevents_full_snapshot_zero_fill_proof(
     message_id="late-fill-report",
     device_id="device-1",
     message_type="execution_report",
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
     client_order_id="client-1",
     raw_payload_hash="c" * 64,
     business_idempotency_key="late-fill:1",
@@ -2106,7 +2228,16 @@ async def test_conflicting_snapshot_fill_fields_fail_closed(
       event = next(
         item
         for item in events
-        if item.business_key.endswith(":CANCELLED:100")
+        if (
+          dict(dict(item.payload or {}).get("report") or {}).get(
+            "filled_volume"
+          )
+          == 100
+          and dict(dict(item.payload or {}).get("report") or {}).get(
+            "effective_order_status"
+          )
+          == "CANCELLED"
+        )
       )
       assert (
         event.payload["report"]["effective_order_status"] == "CANCELLED"

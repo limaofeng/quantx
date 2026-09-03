@@ -2,6 +2,8 @@
 关系型数据库管理
 """
 
+from quantx_contracts import PROTOCOL_VERSION
+
 from .relational_base import (
   Base,
   BaseModel,
@@ -134,7 +136,12 @@ def _prepare_runtime_message_boxes(connection):
 
 
 def _ensure_compat_columns(connection):
-  """Apply the small additive migrations required by create-all deployments."""
+  """Apply current canonical additive columns required by create-all.
+
+  This hook is deliberately not a legacy-schema compatibility layer.  The
+  adoption migration owns legacy-to-canonical renames; create-all only fills
+  current model columns needed by a newly created or already-canonical table.
+  """
   from sqlalchemy import inspect, text
 
   inspector = inspect(connection)
@@ -165,7 +172,9 @@ def _ensure_compat_columns(connection):
       for column in inspector.get_columns("pending_trade_orders")
     }
     pending_additions = {
-      "execution_mode": "VARCHAR(16) NOT NULL DEFAULT 'paper'",
+      "owner_type": "VARCHAR(32)",
+      "owner_id": "VARCHAR(128)",
+      "environment": "VARCHAR(16)",
       "strategy_run_id": "VARCHAR(36)",
       "strategy_order_id": "VARCHAR(128)",
       "intent_id": "VARCHAR(128)",
@@ -207,7 +216,10 @@ def _ensure_compat_columns(connection):
       column["name"] for column in inspector.get_columns("t_trade_batches")
     }
     batch_additions = {
-      "execution_mode": "VARCHAR(16)",
+      "source_execution_owner_type": "VARCHAR(32)",
+      "source_execution_owner_id": "VARCHAR(128)",
+      "source_execution_environment": "VARCHAR(16)",
+      "environment": "VARCHAR(16)",
       "metrics_origin": "VARCHAR(24)",
       "entry_filled_at": "TIMESTAMP",
       "last_exit_filled_at": "TIMESTAMP",
@@ -233,8 +245,8 @@ def _ensure_compat_columns(connection):
   )
   ensure_index(
     "t_trade_batches",
-    "ix_t_trade_batch_account_mode",
-    "account_id, execution_mode",
+    "ix_t_trade_batch_account_environment",
+    "account_id, environment",
   )
   ensure_index(
     "t_trade_batches",
@@ -257,7 +269,7 @@ def _ensure_compat_columns(connection):
     "account_id, updated_at, batch_id",
   )
   ensure_index(
-    "strategy_trade_intents",
+    "trade_intents",
     "ix_trade_intent_run_reason_direction_created",
     "strategy_run_id, reason, direction, created_at, id",
   )
@@ -281,9 +293,29 @@ def _ensure_compat_columns(connection):
       connection.execute(
         text(
           "ALTER TABLE agent_report_inbox "
-          "ADD COLUMN protocol_version VARCHAR(16) NOT NULL DEFAULT '1.0'"
+          f"ADD COLUMN protocol_version VARCHAR(16) NOT NULL DEFAULT '{PROTOCOL_VERSION}'"
         )
       )
+    else:
+      protocol_column = next(
+        (
+          column
+          for column in inspect(connection).get_columns("agent_report_inbox")
+          if column["name"] == "protocol_version"
+        ),
+        None,
+      )
+      current_default = str(
+        protocol_column.get("default") if protocol_column is not None else ""
+      )
+      if PROTOCOL_VERSION not in current_default:
+        if str(getattr(getattr(connection, "dialect", None), "name", "")) != "sqlite":
+          connection.execute(
+            text(
+              "ALTER TABLE agent_report_inbox "
+              f"ALTER COLUMN protocol_version SET DEFAULT '{PROTOCOL_VERSION}'"
+            )
+          )
 async def create_tables():
   """创建表"""
   import quantx_infrastructure.models  # noqa: F401  # 确保所有模型注册到 Base.metadata

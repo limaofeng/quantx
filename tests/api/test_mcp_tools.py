@@ -1,3 +1,4 @@
+import hashlib
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -105,6 +106,29 @@ async def test_create_order_returns_queued_trade_command(monkeypatch) -> None:
     "message": "Order command queued",
   }
   assert enqueue.await_args.kwargs["idempotency_key"] == "mcp-request-1"
+  assert enqueue.await_args.kwargs["execution_ref"].owner_id == (
+    "mcp-command:"
+    + hashlib.sha256("account-1:mcp-request-1".encode("utf-8")).hexdigest()
+  )
+  assert "strategy_name" not in enqueue.await_args.kwargs
+  assert "order_remark" not in enqueue.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_create_order_requires_stable_idempotency_key() -> None:
+  result = await OrderTools()._create_order(
+    {
+      "account_id": "account-1",
+      "symbol": "000001.SZ",
+      "side": "buy",
+      "quantity": 100,
+      "type": "limit",
+      "price": 12.5,
+    }
+  )
+
+  assert result["status"] == "error"
+  assert "idempotency_key" in result["error"]
 
 
 @pytest.mark.asyncio

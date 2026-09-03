@@ -9,13 +9,20 @@ fragment IOSExitPlanFields on ExitPlanView {
   strategyRunId
   enabled
   status
-  executionMode
+  environment
   autoExitAuthorized
   autoExitAuthorizationConfigVersion
   autoExitAuthorizationExpiresAt
   configVersion
   stateVersion
-  executionOwner
+  executionOwner {
+    ownerType
+    ownerId
+  }
+  sourceExecutionOwner {
+    ownerType
+    ownerId
+  }
   completionStrategy
   completionNote
   protectedVolume
@@ -36,6 +43,8 @@ fragment IOSExitPlanFields on ExitPlanView {
   pendingIntentId
   lastEvaluatedAt
   lastError
+  recoveryAction
+  recoveryMessage
   createdAt
   updatedAt
 }

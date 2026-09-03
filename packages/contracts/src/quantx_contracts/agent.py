@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Dict, List, Literal, Mapping, Optional, Type
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-PROTOCOL_VERSION = "1.1"
-SUPPORTED_PROTOCOL_VERSIONS = frozenset({"1.0", PROTOCOL_VERSION})
+PROTOCOL_VERSION = "1.2"
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION})
 
 
 class QmtAccountStatus(int, Enum):
@@ -320,31 +321,27 @@ class AgentEnvelope(BaseModel):
 class TradeCommandPayload(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  command_kind: Literal["PLACE_ORDER"] = "PLACE_ORDER"
+  command_kind: Literal["PLACE_ORDER"]
   client_order_id: str = Field(min_length=1)
-  instance_id: str = Field(min_length=1)
   account_id: str = Field(min_length=1)
-  execution_mode: Literal["paper", "live"] = "paper"
+  execution_mode: Literal["paper", "live"]
   instrument_code: str = Field(min_length=1)
-  side: str
-  order_type: str = "LIMIT"
-  limit_price: str
+  side: Literal["BUY", "SELL"]
+  price_type: Literal["FIX_PRICE"]
+  limit_price: str = Field(min_length=1)
   volume: int = Field(gt=0)
-  bucket: str
-  risk_decision_id: str
-  trace_id: str
   expires_at: datetime
-  reason_tags: List[str] = Field(default_factory=list)
-  substitution_plan: Optional[Dict[str, Any]] = None
-  strategy_name: str = ""
-  strategy_run_id: str = ""
-  strategy_order_id: str = ""
-  intent_id: str = ""
-  batch_id: str = ""
-  t_trade_role: Literal["", "ENTRY", "EXIT"] = ""
-  policy_version: int = Field(default=0, ge=0)
-  request_metadata: Dict[str, Any] = Field(default_factory=dict)
-  order_remark: str = ""
+
+  @field_validator("limit_price")
+  @classmethod
+  def require_finite_positive_limit_price(cls, value: str) -> str:
+    try:
+      price = Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+      raise ValueError("limit_price must be a finite positive decimal string") from exc
+    if not price.is_finite() or price <= 0:
+      raise ValueError("limit_price must be a finite positive decimal string")
+    return value
 
   @field_validator("expires_at")
   @classmethod
@@ -357,12 +354,11 @@ class TradeCommandPayload(BaseModel):
 class CancelCommandPayload(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  command_kind: Literal["CANCEL_ORDER"] = "CANCEL_ORDER"
+  command_kind: Literal["CANCEL_ORDER"]
   client_order_id: str = Field(min_length=1)
   account_id: str = Field(min_length=1)
-  execution_mode: Literal["paper", "live"] = "paper"
+  execution_mode: Literal["paper", "live"]
   broker_order_id: str = Field(min_length=1)
-  trace_id: str = Field(min_length=1)
   expires_at: datetime
 
   @field_validator("expires_at")

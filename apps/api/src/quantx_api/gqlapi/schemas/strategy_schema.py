@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Optional
 
 import strawberry
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from strawberry.scalars import JSON
 
 from ..resolvers.strategies import StrategyResolver
@@ -76,6 +77,26 @@ async def _authorize_native_strategy_run(
     # Use the shared authorization error rather than revealing whether a
     # cross-account run identifier exists.
     principal_from_context(info.context).require_account(bound_account_id)
+
+
+async def _strategy_run_execution_environment(
+  run_id: str,
+) -> ExecutionEnvironment:
+  """Resolve the canonical environment from the StrategyRun itself.
+
+  Approval callers must provide a complete owner/environment binding.  The
+  strategy run mode is the durable source for this legacy StrategyRun-backed
+  path; intent metadata is deliberately not consulted.
+  """
+
+  run = await StrategyResolver.get_strategy_run(run_id)
+  if run is None:
+    raise ValueError("策略运行不存在")
+  raw_mode = getattr(run.mode, "value", run.mode)
+  try:
+    return ExecutionEnvironment(str(raw_mode or "").strip().upper())
+  except (TypeError, ValueError) as exc:
+    raise ValueError("策略运行缺少有效执行环境") from exc
 
 
 @strawberry.type(description="策略相关查询")
@@ -577,11 +598,13 @@ class StrategyMutation:
     try:
       account_id = await StrategyResolver.strategy_run_account_id(run_id)
       resolved_account_id = authorized_account_id(info, account_id)
+      execution_environment = await _strategy_run_execution_environment(run_id)
       preview = await TradeApprovalChallengeService.issue(
         principal=principal,
         action=STRATEGY_TRADE_INTENT_APPROVAL,
         account_id=resolved_account_id,
-        business_owner_id=run_id,
+        execution_ref=ExecutionOwnerRef.strategy_run(run_id),
+        environment=execution_environment,
         intent_id=intent_id,
       )
       return TradeApprovalPreviewResult(
@@ -608,11 +631,13 @@ class StrategyMutation:
     try:
       account_id = await StrategyResolver.strategy_run_account_id(run_id)
       resolved_account_id = authorized_account_id(info, account_id)
+      execution_environment = await _strategy_run_execution_environment(run_id)
       challenge_id = await TradeApprovalChallengeService.consume(
         principal=principal,
         action=STRATEGY_TRADE_INTENT_APPROVAL,
         account_id=resolved_account_id,
-        business_owner_id=run_id,
+        execution_ref=ExecutionOwnerRef.strategy_run(run_id),
+        environment=execution_environment,
         intent_id=intent_id,
         confirmation_token=confirmation_token,
       )

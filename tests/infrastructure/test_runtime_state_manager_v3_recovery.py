@@ -5,6 +5,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from quantx_contracts import ExecutionOwnerRef
 from quantx_infrastructure.core import runtime_state_manager as state_manager_module
 from quantx_infrastructure.core.runtime_state_manager import (
   RuntimeStateManager,
@@ -29,6 +30,10 @@ def _record(*, account_id: str = "account-1", run_id: str = "run-1"):
   values = {
     "id": "intent-1",
     "strategy_run_id": run_id,
+    "owner_type": "STRATEGY_RUN",
+    "owner_id": run_id,
+    "environment": "PAPER",
+    "idempotency_key": f"intent:{run_id}:intent-1",
     "account_id": account_id,
     "strategy_id": "1",
     "instrument_code": "600000.SH",
@@ -63,6 +68,7 @@ def _v3_intent(intent_id: str) -> SimpleNamespace:
   return SimpleNamespace(
     intent_id=intent_id,
     run_id="run-1",
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
     strategy_id="strategy-1",
     instrument_code="600000.SH",
     direction="BUY",
@@ -84,6 +90,10 @@ def _durable_v3_intent_record() -> SimpleNamespace:
   snapshot = {
     "id": "late-fill-intent",
     "strategy_run_id": "run-1",
+    "owner_type": "STRATEGY_RUN",
+    "owner_id": "run-1",
+    "environment": "PAPER",
+    "idempotency_key": "intent:run-1:late-fill-intent",
     "account_id": "account-1",
     "strategy_id": "strategy-1",
     "instrument_code": "600000.SH",
@@ -107,6 +117,8 @@ def _durable_v3_intent_record() -> SimpleNamespace:
   record = SimpleNamespace(
     id=snapshot["id"],
     strategy_run_id=snapshot["strategy_run_id"],
+    owner_type=snapshot["owner_type"],
+    owner_id=snapshot["owner_id"],
     executed_time=executed_time,
   )
   record.to_dict = lambda: {

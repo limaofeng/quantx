@@ -237,7 +237,7 @@ class AutoExitPlanRepository:
       select(AutoExitPlanRecord)
       .where(AutoExitPlanRecord.account_id == account_id)
       .where(AutoExitPlanRecord.instrument_code == instrument_code)
-      .where(AutoExitPlanRecord.execution_mode == mode)
+      .where(AutoExitPlanRecord.environment == mode.upper())
       .where(AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES))
       .order_by(AutoExitPlanRecord.created_at, AutoExitPlanRecord.plan_id)
     )

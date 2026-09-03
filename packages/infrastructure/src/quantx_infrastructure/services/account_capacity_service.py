@@ -14,7 +14,11 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from quantx_contracts import snapshot_account_authority_is_authoritative
+from quantx_contracts import (
+  PROTOCOL_VERSION,
+  ExecutionEnvironment,
+  snapshot_account_authority_is_authoritative,
+)
 from quantx_domain.clock import to_naive_utc
 from quantx_domain.trading.exit_plan import estimate_buy_fee_cny
 from sqlalchemy import or_, select
@@ -57,7 +61,7 @@ async def load_authoritative_account_snapshot(
     select(AgentReportInbox)
     .where(
       AgentReportInbox.message_type == "delta_report",
-      AgentReportInbox.protocol_version == "1.1",
+      AgentReportInbox.protocol_version == PROTOCOL_VERSION,
       AgentReportInbox.processing_status == "PROCESSED",
       AgentReportInbox.payload["snapshot_id"].as_string() == snapshot_id,
       AgentReportInbox.payload["snapshot_hash"].as_string() == expected_hash,
@@ -184,7 +188,7 @@ class AccountCapacityService:
         await self.db.scalars(
           select(PendingTradeOrder).where(
             PendingTradeOrder.account_id == account_id,
-            PendingTradeOrder.execution_mode == "live",
+            PendingTradeOrder.environment == ExecutionEnvironment.LIVE.value,
             or_(
               PendingTradeOrder.status.notin_(_TERMINAL),
               PendingTradeOrder.updated_at >= trading_day_start,
@@ -265,7 +269,7 @@ class AccountCapacityService:
           select(TTradeBatch).where(
             TTradeBatch.account_id == account_id,
             TTradeBatch.instrument_code == instrument_code,
-            TTradeBatch.execution_mode == "live",
+            TTradeBatch.environment == ExecutionEnvironment.LIVE.value,
           )
         )
       ).all()
@@ -319,8 +323,8 @@ class AccountCapacityService:
       working_exit = sum(
         remaining[item.client_order_id]
         for item in pending
-        if str(dict(item.request_metadata or {}).get("exit_plan_id") or "")
-        == plan.plan_id
+        if str(item.owner_type or "").upper() == "EXIT_PLAN"
+        and str(item.owner_id or "") == str(plan.plan_id)
         and str(item.side).upper() == "SELL"
       )
       claims += max(0, int(plan.remaining_volume or 0) - working_exit)

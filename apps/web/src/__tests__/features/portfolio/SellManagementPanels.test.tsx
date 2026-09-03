@@ -63,8 +63,11 @@ function makePlan(instrumentCode: string) {
     editRoute: null,
     enabled: true,
     entryAvgPrice: 28.3628,
-    executionMode: 'live',
-    executionOwner: 'EXIT_PLAN_MONITOR',
+    environment: 'LIVE',
+    executionOwner: {
+      ownerId: `plan-${instrumentCode}`,
+      ownerType: 'EXIT_PLAN',
+    },
     exitedVolume: 0,
     groupId: null,
     instrumentCode,
@@ -83,6 +86,10 @@ function makePlan(instrumentCode: string) {
     recoveryMessage: null,
     remainingVolume: 400,
     rules: [],
+    sourceExecutionOwner: {
+      ownerId: 'manual-command-1',
+      ownerType: 'MANUAL_COMMAND',
+    },
     sourceId: 'manual',
     sourceType: 'MANUAL_POSITION',
     status: 'ACTIVE',
@@ -151,30 +158,46 @@ describe('ExitPlansPanel', () => {
     mocks.exitPlans = [
       {
         ...makePlan('300917.SZ'),
-        executionOwner: 'STRATEGY_RUNTIME',
+        executionOwner: {
+          ownerId: 'plan-300917.SZ',
+          ownerType: 'EXIT_PLAN',
+        },
+        sourceExecutionOwner: {
+          ownerId: 't-run-1',
+          ownerType: 'STRATEGY_RUN',
+        },
         sourceType: 'T_TRADE_BATCH',
         strategyRunId: 't-run-1',
       },
     ];
     render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
 
-    expect(screen.getByText(/执行归属\s*原入场 \/ 做 T 运行/)).toBeVisible();
+    expect(screen.getByText(/执行归属\s*退出计划/)).toBeVisible();
+    expect(screen.getByText(/来源归属\s*策略运行/)).toBeVisible();
     expect(screen.getByText('状态修订 r7')).toBeVisible();
   });
 
-  it('shows manual plans as monitor-owned and editable', () => {
+  it('shows manual plans as exit-plan-owned and editable', () => {
     mocks.exitPlans = [
       {
         ...makePlan('300917.SZ'),
         canEditRules: true,
-        executionOwner: 'EXIT_PLAN_MONITOR',
+        executionOwner: {
+          ownerId: 'plan-300917.SZ',
+          ownerType: 'EXIT_PLAN',
+        },
+        sourceExecutionOwner: {
+          ownerId: 'manual-command-1',
+          ownerType: 'MANUAL_COMMAND',
+        },
         sourceType: 'MANUAL_POSITION',
         strategyRunId: null,
       },
     ];
     render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
 
-    expect(screen.getByText(/执行归属\s*全局计划监控/)).toBeVisible();
+    expect(screen.getByText(/执行归属\s*退出计划/)).toBeVisible();
+    expect(screen.getByText(/来源归属\s*人工命令/)).toBeVisible();
     expect(screen.getByRole('button', { name: '编辑计划' })).toBeEnabled();
   });
 
@@ -213,29 +236,49 @@ describe('ExitPlansPanel', () => {
         canEditRules: false,
         enabled: false,
         recoveryAction: 'COMPLETE_RECONCILIATION',
-        recoveryMessage:
-          '计划存在尚未解除的券商事实隔离，请先完成账户对账。',
+        recoveryMessage: '计划存在尚未解除的券商事实隔离，请先完成账户对账。',
         status: 'ERROR',
       },
     ];
     render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
 
-    expect(screen.queryByRole('button', { name: '恢复' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: '恢复' })
+    ).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '取消' })).toBeDisabled();
   });
 
-  it('labels an invalid owner and fails closed on plan operations', () => {
+  it('uses server recovery and edit capabilities for operation gates', () => {
+    mocks.exitPlans = [
+      {
+        ...makePlan('300917.SZ'),
+        canEditRules: false,
+        recoveryAction: 'COMPLETE_RECONCILIATION',
+        recoveryMessage: '计划需要先完成账户对账。',
+      },
+    ];
+    render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled();
+    expect(
+      screen.queryByRole('button', { name: '编辑计划' })
+    ).not.toBeInTheDocument();
+  });
+
+  it('fails closed when the execution owner does not identify the plan', () => {
     mocks.exitPlans = [
       {
         ...makePlan('300917.SZ'),
         canEditRules: true,
-        executionOwner: 'INVALID_OWNER',
+        executionOwner: {
+          ownerId: 'another-plan',
+          ownerType: 'EXIT_PLAN',
+        },
         pendingIntentId: 'intent-1',
       },
     ];
     render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
 
-    expect(screen.getByText(/执行归属\s*执行归属无效/)).toBeVisible();
     expect(screen.getByText('执行归属校验失败，计划操作已停用')).toBeVisible();
     expect(screen.getByRole('button', { name: '回放测试' })).toBeDisabled();
     expect(

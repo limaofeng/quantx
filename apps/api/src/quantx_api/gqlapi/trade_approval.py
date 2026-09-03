@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
 
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.utils import time_utils
@@ -70,7 +75,8 @@ class TradeApprovalPreviewData:
   confirmation_token: str
   action: str
   account_id: str
-  run_id: str
+  execution_owner: ExecutionOwnerRef
+  environment: ExecutionEnvironment
   intent_id: str
   instrument_code: str
   side: str
@@ -136,15 +142,17 @@ def _intent_expiry(record: TradeIntentRecord) -> Optional[datetime]:
 
 def _intent_subject_payload(record: TradeIntentRecord) -> dict[str, Any]:
   metadata = dict(record.intent_metadata or {})
-  # The legacy strategy/exit approval path still uses this slot because the
-  # Engine validates those challenge audits from the intent snapshot.  T-trade
-  # approvals use the independent TradeConfirmationChallenge table below.
+  # The strategy-backed approval path still uses this slot because the Engine
+  # validates the consumed challenge audit from the intent snapshot.  Owner
+  # identity is always taken from durable columns and supplied explicitly by
+  # the caller; metadata is excluded from owner resolution.
   metadata.pop(_CHALLENGE_METADATA_KEY, None)
   return {
     "id": record.id,
     "run_id": record.strategy_run_id,
     "owner_type": record.owner_type,
     "owner_id": record.owner_id,
+    "environment": record.environment,
     "account_id": record.account_id,
     "instrument_code": record.instrument_code,
     "direction": record.direction,
@@ -223,6 +231,52 @@ def validate_persistent_trade_challenge(
       "CONFIRMATION_CONTEXT_MISMATCH",
       "确认凭据不属于当前用户、设备会话、账户或交易动作",
     )
+  if action in {
+    "MANUAL_ORDER",
+    "LIQUIDATION_GROUP",
+    STRATEGY_TRADE_INTENT_APPROVAL,
+    T_TRADE_ENTRY_APPROVAL,
+    EXIT_PLAN_SELL_APPROVAL,
+    "ENTRY_PLAN_AUTHORIZATION",
+    "EXIT_PLAN_AUTHORIZATION",
+  }:
+    try:
+      # The liquidation-group producer predates the shared payload projection
+      # and signs its group_id/execution_mode fields.  Keep those fields as
+      # the action-specific binding while still requiring the durable row to
+      # carry the exact MANUAL_COMMAND triple; no metadata or fallback owner
+      # is accepted.
+      if action == "LIQUIDATION_GROUP":
+        payload_owner = ExecutionOwnerRef(
+          ExecutionOwnerType.MANUAL_COMMAND,
+          str(payload.get("group_id") or ""),
+        )
+        payload_environment = ExecutionEnvironment(
+          str(payload.get("execution_mode") or "").upper()
+        )
+      else:
+        payload_owner = ExecutionOwnerRef(
+          str(payload.get("owner_type") or ""),
+          str(payload.get("owner_id") or ""),
+        )
+        payload_environment = ExecutionEnvironment(
+          str(payload.get("environment") or "").upper()
+        )
+    except (TypeError, ValueError) as exc:
+      raise TradeApprovalChallengeError(
+        "CONFIRMATION_CONTEXT_MISMATCH",
+        "确认凭据缺少明确的执行归属或环境",
+      ) from exc
+    if (
+      str(challenge.owner_type or "").upper() != payload_owner.owner_type.value
+      or str(challenge.owner_id or "") != payload_owner.owner_id
+      or str(challenge.environment or "").upper()
+      != payload_environment.value
+    ):
+      raise TradeApprovalChallengeError(
+        "CONFIRMATION_CONTEXT_MISMATCH",
+        "确认凭据执行归属或环境已变化",
+      )
   if not hmac.compare_digest(
     str(challenge.token_digest or ""),
     challenge_token_digest(confirmation_token),
@@ -266,24 +320,28 @@ def _validate_pending_intent(
   record: Optional[TradeIntentRecord],
   *,
   action: str,
-  business_owner_id: str,
+  execution_ref: ExecutionOwnerRef,
+  environment: ExecutionEnvironment,
   intent_id: str,
 ) -> TradeIntentRecord:
-  is_exit_plan = action == EXIT_PLAN_SELL_APPROVAL
-  belongs_to_owner = bool(
-    record
-    and (
-      (
-        is_exit_plan
-        and record.owner_type == "EXIT_PLAN"
-        and record.owner_id == business_owner_id
-      )
-      or (
-        not is_exit_plan and record.strategy_run_id == business_owner_id
-      )
+  allowed_owner_types = {
+    T_TRADE_ENTRY_APPROVAL: frozenset({ExecutionOwnerType.STRATEGY_RUN}),
+    STRATEGY_TRADE_INTENT_APPROVAL: frozenset({ExecutionOwnerType.STRATEGY_RUN}),
+    EXIT_PLAN_SELL_APPROVAL: frozenset({ExecutionOwnerType.EXIT_PLAN}),
+  }
+  allowed = allowed_owner_types.get(action)
+  if allowed is None or execution_ref.owner_type not in allowed:
+    raise TradeApprovalChallengeError(
+      "UNSUPPORTED_APPROVAL_ACTION",
+      "当前确认动作不支持该执行归属",
     )
-  )
-  if record is None or record.id != intent_id or not belongs_to_owner:
+  if (
+    record is None
+    or record.id != intent_id
+    or str(record.owner_type or "").upper() != execution_ref.owner_type.value
+    or str(record.owner_id or "") != execution_ref.owner_id
+    or str(record.environment or "").upper() != environment.value
+  ):
     raise TradeApprovalChallengeError(
       "INTENT_NOT_FOUND",
       "交易信号不存在或不属于当前业务对象",
@@ -293,7 +351,9 @@ def _validate_pending_intent(
       "INTENT_NOT_AWAITING_APPROVAL",
       "交易信号已处理、已过期或不再等待确认",
     )
-  expected_direction = "SELL" if is_exit_plan else "BUY"
+  expected_direction = (
+    "SELL" if action == EXIT_PLAN_SELL_APPROVAL else "BUY"
+  )
   if str(record.direction or "").upper() != expected_direction:
     raise TradeApprovalChallengeError(
       "UNSUPPORTED_APPROVAL_ACTION",
@@ -311,7 +371,8 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    business_owner_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     intent_id: str,
   ) -> TradeApprovalPreviewData:
     """Keep the Engine-managed strategy/exit approval contract intact.
@@ -336,7 +397,8 @@ class TradeApprovalChallengeService:
       record = _validate_pending_intent(
         result.scalar_one_or_none(),
         action=action,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
       )
       if record.account_id and record.account_id != normalized_account_id:
@@ -362,13 +424,19 @@ class TradeApprovalChallengeService:
         "user_id": principal.user_id,
         "device_session_id": principal.device_session_id,
         "account_id": normalized_account_id,
-        "business_owner_id": business_owner_id,
+        "owner_type": execution_ref.owner_type.value,
+        "owner_id": execution_ref.owner_id,
+        "environment": environment.value,
         "intent_id": intent_id,
         "intent_fingerprint": _intent_fingerprint(record),
         "created_at": _aware_shanghai(now).isoformat(),
         "expires_at": _aware_shanghai(challenge_expires_at).isoformat(),
         "consumed_at": None,
       }
+      if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+        # Existing Engine strategy/managed-entry validation consumes this
+        # audit field.  It is never used to resolve or infer the owner.
+        challenge["run_id"] = execution_ref.owner_id
       metadata[_CHALLENGE_METADATA_KEY] = challenge
       record.intent_metadata = metadata
       await db.commit()
@@ -390,7 +458,8 @@ class TradeApprovalChallengeService:
         confirmation_token=raw_token,
         action=action,
         account_id=normalized_account_id,
-        run_id=business_owner_id,
+        execution_owner=execution_ref,
+        environment=environment,
         intent_id=intent_id,
         instrument_code=str(record.instrument_code or ""),
         side=str(record.direction or ""),
@@ -417,7 +486,8 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    business_owner_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     intent_id: str,
     confirmation_token: str,
   ) -> str:
@@ -434,7 +504,8 @@ class TradeApprovalChallengeService:
       record = _validate_pending_intent(
         result.scalar_one_or_none(),
         action=action,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
       )
       if record.account_id and record.account_id != normalized_account_id:
@@ -449,9 +520,13 @@ class TradeApprovalChallengeService:
         "user_id": principal.user_id,
         "device_session_id": principal.device_session_id,
         "account_id": normalized_account_id,
-        "business_owner_id": business_owner_id,
+        "owner_type": execution_ref.owner_type.value,
+        "owner_id": execution_ref.owner_id,
+        "environment": environment.value,
         "intent_id": intent_id,
       }
+      if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+        expected_bindings["run_id"] = execution_ref.owner_id
       if not challenge or any(
         str(challenge.get(key) or "") != str(value)
         for key, value in expected_bindings.items()
@@ -542,7 +617,8 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    business_owner_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     intent_id: str,
     intent_fingerprint: str,
   ) -> dict[str, Any]:
@@ -551,7 +627,9 @@ class TradeApprovalChallengeService:
       "user_id": principal.user_id,
       "device_session_id": principal.device_session_id,
       "account_id": account_id,
-      "business_owner_id": business_owner_id,
+      "owner_type": execution_ref.owner_type.value,
+      "owner_id": execution_ref.owner_id,
+      "environment": environment.value,
       "intent_id": intent_id,
       "intent_fingerprint": intent_fingerprint,
     }
@@ -564,7 +642,8 @@ class TradeApprovalChallengeService:
     user_id: str,
     device_session_id: str,
     account_id: str,
-    business_owner_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     intent_id: str,
   ) -> bool:
     payload = dict(challenge.payload or {})
@@ -573,7 +652,9 @@ class TradeApprovalChallengeService:
       "user_id": user_id,
       "device_session_id": device_session_id,
       "account_id": account_id,
-      "business_owner_id": business_owner_id,
+      "owner_type": execution_ref.owner_type.value,
+      "owner_id": execution_ref.owner_id,
+      "environment": environment.value,
       "intent_id": intent_id,
     }
     return all(
@@ -588,7 +669,8 @@ class TradeApprovalChallengeService:
     action: str,
     user_id: str,
     account_id: str,
-    business_owner_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     intent_id: str,
   ) -> bool:
     """Match an operation independently of the issuing device.
@@ -604,7 +686,9 @@ class TradeApprovalChallengeService:
       "action": action,
       "user_id": user_id,
       "account_id": account_id,
-      "business_owner_id": business_owner_id,
+      "owner_type": execution_ref.owner_type.value,
+      "owner_id": execution_ref.owner_id,
+      "environment": environment.value,
       "intent_id": intent_id,
     }
     return all(
@@ -652,7 +736,8 @@ class TradeApprovalChallengeService:
     record: TradeIntentRecord,
     action: str,
     account_id: str,
-    business_owner_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     intent_id: str,
     confirmation_token: str,
     signal_expires_at: Optional[datetime],
@@ -702,7 +787,8 @@ class TradeApprovalChallengeService:
       confirmation_token=confirmation_token,
       action=action,
       account_id=account_id,
-      run_id=business_owner_id,
+      execution_owner=execution_ref,
+      environment=environment,
       intent_id=intent_id,
       instrument_code=str(record.instrument_code or ""),
       side=str(record.direction or ""),
@@ -744,7 +830,8 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    business_owner_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     intent_id: str,
   ) -> TradeApprovalPreviewData:
     if action not in _DURABLE_COMMAND_APPROVAL_ACTIONS:
@@ -752,7 +839,8 @@ class TradeApprovalChallengeService:
         principal=principal,
         action=action,
         account_id=account_id,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
       )
     normalized_account_id = principal.require_account(account_id)
@@ -783,10 +871,10 @@ class TradeApprovalChallengeService:
             TradeConfirmationChallenge.user_id == principal.user_id,
             TradeConfirmationChallenge.account_id == normalized_account_id,
             TradeConfirmationChallenge.action == action,
-            TradeConfirmationChallenge.payload[
-              "business_owner_id"
-            ].as_string()
-            == business_owner_id,
+            TradeConfirmationChallenge.owner_type
+            == execution_ref.owner_type.value,
+            TradeConfirmationChallenge.owner_id == execution_ref.owner_id,
+            TradeConfirmationChallenge.environment == environment.value,
             TradeConfirmationChallenge.payload["intent_id"].as_string()
             == intent_id,
           )
@@ -804,7 +892,8 @@ class TradeApprovalChallengeService:
             action=action,
             user_id=principal.user_id,
             account_id=normalized_account_id,
-            business_owner_id=business_owner_id,
+            execution_ref=execution_ref,
+            environment=environment,
             intent_id=intent_id,
           )
         ),
@@ -837,7 +926,8 @@ class TradeApprovalChallengeService:
             action=action,
             user_id=principal.user_id,
             account_id=normalized_account_id,
-            business_owner_id=business_owner_id,
+            execution_ref=execution_ref,
+            environment=environment,
             intent_id=intent_id,
           )
         ):
@@ -850,7 +940,8 @@ class TradeApprovalChallengeService:
       record = _validate_pending_intent(
         raw_record,
         action=action,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
       )
       signal_expires_at = _intent_expiry(record)
@@ -867,7 +958,8 @@ class TradeApprovalChallengeService:
         principal=principal,
         action=action,
         account_id=normalized_account_id,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
         intent_fingerprint=_intent_fingerprint(record),
       )
@@ -882,6 +974,9 @@ class TradeApprovalChallengeService:
         user_id=principal.user_id,
         device_session_id=principal.device_session_id,
         account_id=normalized_account_id,
+        owner_type=execution_ref.owner_type.value,
+        owner_id=execution_ref.owner_id,
+        environment=environment.value,
         idempotency_key=str(uuid.uuid4()),
         payload=payload,
         payload_fingerprint=signed_payload_fingerprint(payload),
@@ -900,7 +995,8 @@ class TradeApprovalChallengeService:
         record=record,
         action=action,
         account_id=normalized_account_id,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
         confirmation_token=raw_token,
         signal_expires_at=signal_expires_at,
@@ -913,7 +1009,8 @@ class TradeApprovalChallengeService:
     principal: Principal,
     action: str,
     account_id: str,
-    business_owner_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     intent_id: str,
     confirmation_token: str,
     command_type: Optional[str] = None,
@@ -934,7 +1031,8 @@ class TradeApprovalChallengeService:
         principal=principal,
         action=action,
         account_id=account_id,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
         confirmation_token=token,
       )
@@ -965,26 +1063,21 @@ class TradeApprovalChallengeService:
         .with_for_update()
       )
       record = result.scalar_one_or_none()
-      is_exit_plan = action == EXIT_PLAN_SELL_APPROVAL
-      belongs_to_owner = bool(
-        record
-        and (
-          (
-            is_exit_plan
-            and record.owner_type == "EXIT_PLAN"
-            and record.owner_id == business_owner_id
-          )
-          or (
-            not is_exit_plan
-            and record.strategy_run_id == business_owner_id
-          )
+      try:
+        _validate_pending_intent(
+          record,
+          action=action,
+          execution_ref=execution_ref,
+          environment=environment,
+          intent_id=intent_id,
         )
-      )
-      if record is None or record.id != intent_id or not belongs_to_owner:
-        raise TradeApprovalChallengeError(
-          "INTENT_NOT_FOUND",
-          "交易信号不存在或不属于当前业务对象",
-        )
+      except TradeApprovalChallengeError as exc:
+        # A consumed challenge is the durable operation identity.  A retry
+        # after the Engine has advanced the intent must still be able to read
+        # the same command; retain all identity/direction checks while
+        # allowing only the expected status transition.
+        if exc.code != "INTENT_NOT_AWAITING_APPROVAL":
+          raise
       if record.account_id and record.account_id != normalized_account_id:
         raise TradeApprovalChallengeError(
           "CONFIRMATION_CONTEXT_MISMATCH",
@@ -998,10 +1091,10 @@ class TradeApprovalChallengeService:
             TradeConfirmationChallenge.user_id == principal.user_id,
             TradeConfirmationChallenge.account_id == normalized_account_id,
             TradeConfirmationChallenge.action == action,
-            TradeConfirmationChallenge.payload[
-              "business_owner_id"
-            ].as_string()
-            == business_owner_id,
+            TradeConfirmationChallenge.owner_type
+            == execution_ref.owner_type.value,
+            TradeConfirmationChallenge.owner_id == execution_ref.owner_id,
+            TradeConfirmationChallenge.environment == environment.value,
             TradeConfirmationChallenge.payload["intent_id"].as_string()
             == intent_id,
             TradeConfirmationChallenge.token_digest == token_digest,
@@ -1036,7 +1129,8 @@ class TradeApprovalChallengeService:
         user_id=principal.user_id,
         device_session_id=principal.device_session_id,
         account_id=normalized_account_id,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
       ):
         raise TradeApprovalChallengeError(
@@ -1133,7 +1227,8 @@ class TradeApprovalChallengeService:
       record = _validate_pending_intent(
         record,
         action=action,
-        business_owner_id=business_owner_id,
+        execution_ref=execution_ref,
+        environment=environment,
         intent_id=intent_id,
       )
       expires_at = _parse_local_datetime(challenge.expires_at)

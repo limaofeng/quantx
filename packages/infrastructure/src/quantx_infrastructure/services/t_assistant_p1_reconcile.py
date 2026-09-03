@@ -1,10 +1,10 @@
-"""Fail-closed maintenance for the pre-P1 PAPER T-assistant obligations.
+"""Fail-closed maintenance for the P1 execution-owner legacy obligations.
 
 This module is intentionally a one-shot maintenance tool.  It does not add a
 new owner, alter the Agent contract, or call a broker.  ``inspect_connection``
 only discovers and proves aggregate facts.  ``apply_reconciliation`` opens a
 new transaction, takes the maintenance fence, repeats discovery, and mutates
-only the two proven PAPER legacy record types as one batch.
+only the proven legacy record types as one batch.
 
 The implementation uses small SQL projections instead of ORM objects.  That
 keeps the read side usable against both PostgreSQL and the SQLite test store,
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
-from sqlalchemy import insert, text, update
+from sqlalchemy import JSON, Column, MetaData, String, Table, Text, insert, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from quantx_infrastructure.models.auto_exit_plan import (
@@ -34,29 +34,75 @@ from quantx_infrastructure.models.auto_exit_plan import (
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 
 P1_SCHEMA_VERSION = 1
-RECONCILE_SCOPE = "P1_PAPER_LEGACY_RECONCILE"
-CONFIRMATION_WORD = "P1_PAPER_LEGACY_RECONCILE"
+RECONCILE_SCOPE = "P1_EXECUTION_OWNER_LEGACY_RECONCILE"
+CONFIRMATION_WORD = "P1_EXECUTION_OWNER_RECONCILE"
 APPROVAL_REASON = "P1_PAPER_STALE_APPROVAL_RECONCILED_ZERO_FILL"
 PLAN_REASON = "P1_PAPER_ORPHAN_PLAN_RECONCILED"
+EXIT_INTENT_REASON = (
+  "P1_TERMINAL_EXIT_PLAN_UNROUTED_INTENT_RECONCILED_ZERO_FILL"
+)
+TERMINAL_EXIT_PLAN_UNROUTED_INTENT = "TERMINAL_EXIT_PLAN_UNROUTED_INTENT"
+RECONCILE_DATABASE_ERROR = "RECONCILE_DATABASE_ERROR"
 PLAN_EVENT_TYPE = "PLAN_CANCELLED"
 PLAN_EVENT_KEY_PREFIX = "p1-paper-orphan-reconciled:"
 STRATEGY_CLASS = "AshareIntradayTAssistantStrategy"
 PAPER_MODE = "paper"
 ACTIVE_RUN_STATUSES = frozenset({"PENDING", "RUNNING", "PAUSED"})
 TERMINAL_PLAN_STATUSES = frozenset({"COMPLETED", "CANCELLED"})
+TERMINAL_INTENT_STATUSES = frozenset(
+  {
+    "FILLED",
+    "CANCELLED",
+    "CANCELED",
+    "REJECTED",
+    "EXPIRED",
+    "FAILED",
+    "SUPPRESSED",
+    "RECONCILED_ZERO_FILL",
+  }
+)
+PRE_BROKER_EXIT_INTENT_STATUSES = frozenset(
+  {"PENDING", "APPROVED", "AWAITING_APPROVAL", "DELAYED"}
+)
 
 REQUIRED_TABLES = (
   "strategies",
   "strategy_runs",
-  "strategy_trade_intents",
+  "trade_intents",
   "pending_trade_orders",
-  "strategy_order_correlations",
+  "order_correlations",
   "trade_command_outbox",
   "strategy_runtime_events",
   "t_trade_batches",
   "auto_exit_plans",
   "auto_exit_plan_events",
   "agent_report_inbox",
+)
+
+
+@dataclass(frozen=True)
+class _TableNames:
+  """The one schema projection selected by this maintenance invocation."""
+
+  intent: str
+  correlation: str
+  plan_environment: str
+
+
+CANONICAL_TABLES = _TableNames(
+  intent="trade_intents",
+  correlation="order_correlations",
+  plan_environment="environment",
+)
+LEGACY_TABLES = _TableNames(
+  intent="strategy_trade_intents",
+  correlation="strategy_order_correlations",
+  plan_environment="execution_mode",
+)
+TABLE_DISCOVERY_NAMES = tuple(
+  dict.fromkeys(
+    (*REQUIRED_TABLES, LEGACY_TABLES.intent, LEGACY_TABLES.correlation)
+  )
 )
 
 
@@ -76,6 +122,20 @@ class _ApprovalCandidate:
   run_id: str
   metadata: dict[str, Any]
   created_at: datetime
+  intent_table: str = CANONICAL_TABLES.intent
+
+
+@dataclass(frozen=True)
+class _ExitIntentCandidate:
+  """A directly proven, pre-broker ExitPlan intent requiring zero-fill repair."""
+
+  intent_id: str
+  plan_id: str
+  status: str
+  account_id: str
+  instrument_code: str
+  metadata: dict[str, Any]
+  intent_table: str = CANONICAL_TABLES.intent
 
 
 @dataclass(frozen=True)
@@ -94,6 +154,9 @@ class _Discovery:
   blocked_approval_count: int
   safe_plans: tuple[_PlanCandidate, ...]
   blocked_plan_count: int
+  safe_exit_intents: tuple[_ExitIntentCandidate, ...]
+  blocked_exit_intent_count: int
+  blocked_exit_intent_ids: tuple[str, ...]
   unsettled_inbox_count: int
   missing_tables: tuple[str, ...]
   reason_codes: tuple[str, ...]
@@ -442,7 +505,7 @@ def _event_payload_is_target(payload: Any, *, reason: str, config_version: int) 
   )
 
 
-def _approval_row_sql(*, for_update: bool) -> str:
+def _approval_row_sql(*, for_update: bool, intent_table: str) -> str:
   suffix = " FOR UPDATE OF intent, run, strategy" if for_update else ""
   return (
     "SELECT intent.id AS intent_id, intent.strategy_run_id AS run_id, "
@@ -453,7 +516,7 @@ def _approval_row_sql(*, for_update: bool) -> str:
     "intent.metadata AS intent_metadata, intent.created_at AS created_at, "
     "run.status AS run_status, run.mode AS run_mode, "
     "strategy.class_name AS strategy_class "
-    "FROM strategy_trade_intents AS intent "
+    f"FROM {intent_table} AS intent "
     "JOIN strategy_runs AS run ON run.id = intent.strategy_run_id "
     "JOIN strategies AS strategy ON strategy.id = run.strategy_id "
     "WHERE strategy.class_name = :strategy_class "
@@ -463,30 +526,34 @@ def _approval_row_sql(*, for_update: bool) -> str:
   )
 
 
-_PLAN_ROW_SQL = (
-  "SELECT plan.plan_id, plan.account_id, plan.instrument_code, plan.source_type, "
-  "plan.source_id, plan.strategy_run_id, plan.enabled, plan.status, "
-  "plan.execution_mode, plan.remaining_volume, plan.pending_client_order_id, "
-  "plan.auto_exit_authorized, plan.auto_exit_authorization_fingerprint, "
-  "plan.auto_exit_authorization_config_version, plan.auto_exit_authorized_at, "
-  "plan.auto_exit_authorization_expires_at, "
-  "plan.auto_exit_authorization_challenge_id, plan.auto_exit_authorization_user_id, "
-  "plan.auto_exit_authorization_device_session_id, plan.config_version, "
-  "plan.state_version, plan.plan_state, plan.last_error, "
-  "run.id AS associated_run_id, "
-  "(SELECT COUNT(*) FROM strategy_runs AS run_count "
-  "WHERE run_count.id = plan.strategy_run_id) AS associated_run_count, "
-  "(SELECT COUNT(*) FROM strategies AS strategy_count "
-  "JOIN strategy_runs AS run_count "
-  "ON run_count.strategy_id = strategy_count.id "
-  "WHERE run_count.id = plan.strategy_run_id) AS associated_strategy_count "
-  "FROM auto_exit_plans AS plan "
-  "LEFT JOIN strategy_runs AS run ON run.id = plan.strategy_run_id "
-  "WHERE UPPER(CAST(plan.source_type AS TEXT)) = 'T_TRADE_BATCH' "
-  "AND UPPER(CAST(plan.status AS TEXT)) NOT IN ('COMPLETED', 'CANCELLED') "
-  "AND COALESCE(plan.remaining_volume, 0) > 0 "
-  "ORDER BY plan.plan_id"
-)
+def _plan_row_sql(*, plan_environment_column: str, for_update: bool) -> str:
+  suffix = " FOR UPDATE OF plan" if for_update else ""
+  return (
+    "SELECT plan.plan_id, plan.account_id, plan.instrument_code, plan.source_type, "
+    "plan.source_id, plan.strategy_run_id, plan.enabled, plan.status, "
+    f"plan.{plan_environment_column} AS environment, "
+    "plan.remaining_volume, plan.pending_client_order_id, "
+    "plan.auto_exit_authorized, plan.auto_exit_authorization_fingerprint, "
+    "plan.auto_exit_authorization_config_version, plan.auto_exit_authorized_at, "
+    "plan.auto_exit_authorization_expires_at, "
+    "plan.auto_exit_authorization_challenge_id, plan.auto_exit_authorization_user_id, "
+    "plan.auto_exit_authorization_device_session_id, plan.config_version, "
+    "plan.state_version, plan.plan_state, plan.last_error, "
+    "run.id AS associated_run_id, "
+    "(SELECT COUNT(*) FROM strategy_runs AS run_count "
+    "WHERE run_count.id = plan.strategy_run_id) AS associated_run_count, "
+    "(SELECT COUNT(*) FROM strategies AS strategy_count "
+    "JOIN strategy_runs AS run_count "
+    "ON run_count.strategy_id = strategy_count.id "
+    "WHERE run_count.id = plan.strategy_run_id) AS associated_strategy_count "
+    "FROM auto_exit_plans AS plan "
+    "LEFT JOIN strategy_runs AS run ON run.id = plan.strategy_run_id "
+    "WHERE UPPER(CAST(plan.source_type AS TEXT)) = 'T_TRADE_BATCH' "
+    "AND UPPER(CAST(plan.status AS TEXT)) NOT IN ('COMPLETED', 'CANCELLED') "
+    "AND COALESCE(plan.remaining_volume, 0) > 0 "
+    "ORDER BY plan.plan_id"
+    + suffix
+  )
 
 
 async def _query_rows(
@@ -503,7 +570,7 @@ async def _query_rows(
 
 
 async def _existing_tables(connection: AsyncConnection) -> set[str]:
-  table_names = ", ".join(f"'{name}'" for name in REQUIRED_TABLES)
+  table_names = ", ".join(f"'{name}'" for name in TABLE_DISCOVERY_NAMES)
   if _dialect_name(connection).startswith("sqlite"):
     statement = (
       "SELECT name AS table_name FROM sqlite_master "
@@ -527,6 +594,40 @@ async def _existing_tables(connection: AsyncConnection) -> set[str]:
   return values
 
 
+def _select_table_names(existing: set[str]) -> tuple[_TableNames | None, tuple[str, ...], str | None]:
+  """Select exactly one persisted schema projection for this maintenance run.
+
+  0046 renames the two legacy tables in place.  The maintenance command is
+  allowed to inspect either side of that migration, but a partially renamed
+  database is ambiguous and must not be treated as a compatibility surface.
+  """
+
+  if CANONICAL_TABLES.intent in existing or CANONICAL_TABLES.correlation in existing:
+    if (
+      CANONICAL_TABLES.intent in existing
+      and CANONICAL_TABLES.correlation in existing
+      and LEGACY_TABLES.intent not in existing
+      and LEGACY_TABLES.correlation not in existing
+    ):
+      return CANONICAL_TABLES, (), None
+    if (
+      LEGACY_TABLES.intent in existing
+      or LEGACY_TABLES.correlation in existing
+    ):
+      return None, (), "TABLE_NAME_PROJECTION_CONFLICT"
+    return None, (), "REQUIRED_TABLES_MISSING"
+  if LEGACY_TABLES.intent in existing or LEGACY_TABLES.correlation in existing:
+    if (
+      LEGACY_TABLES.intent in existing
+      and LEGACY_TABLES.correlation in existing
+      and CANONICAL_TABLES.intent not in existing
+      and CANONICAL_TABLES.correlation not in existing
+    ):
+      return LEGACY_TABLES, (), None
+    return None, (), "TABLE_NAME_PROJECTION_CONFLICT"
+  return None, (CANONICAL_TABLES.intent, CANONICAL_TABLES.correlation), None
+
+
 async def _inbox_unsettled_count(connection: AsyncConnection) -> int:
   result = await connection.execute(
     text(
@@ -538,7 +639,11 @@ async def _inbox_unsettled_count(connection: AsyncConnection) -> int:
   return _normalise_count(_result_scalar(result))
 
 
-async def _durable_rows(connection: AsyncConnection) -> dict[str, list[dict[str, Any]]]:
+async def _durable_rows(
+  connection: AsyncConnection,
+  *,
+  tables: _TableNames,
+) -> dict[str, list[dict[str, Any]]]:
   return {
     "pending": await _query_rows(
       connection,
@@ -547,8 +652,8 @@ async def _durable_rows(connection: AsyncConnection) -> dict[str, list[dict[str,
     ),
     "correlation": await _query_rows(
       connection,
-      "SELECT client_order_id, strategy_run_id, intent_id, batch_id, "
-      "request_metadata FROM strategy_order_correlations",
+      f"SELECT client_order_id, strategy_run_id, intent_id, batch_id, "
+      f"request_metadata FROM {tables.correlation}",
     ),
     "outbox": await _query_rows(
       connection,
@@ -560,8 +665,8 @@ async def _durable_rows(connection: AsyncConnection) -> dict[str, list[dict[str,
     ),
     "intent": await _query_rows(
       connection,
-      "SELECT id, owner_id, strategy_run_id, order_id, metadata "
-      "FROM strategy_trade_intents",
+      f"SELECT id, owner_id, strategy_run_id, order_id, metadata "
+      f"FROM {tables.intent}",
     ),
   }
 
@@ -571,6 +676,7 @@ def _approval_proof(
   *,
   now: datetime,
   durable: Mapping[str, Sequence[Mapping[str, Any]]],
+  intent_table: str = CANONICAL_TABLES.intent,
 ) -> tuple[_ApprovalCandidate | None, str | None]:
   intent_id = _clean_text(row.get("intent_id"))
   run_id = _clean_text(row.get("run_id"))
@@ -621,7 +727,384 @@ def _approval_proof(
       for item in rows
     ):
       return None, "APPROVAL_DURABLE_CHAIN_PRESENT"
-  return _ApprovalCandidate(intent_id, run_id, metadata, created_at), None
+  return _ApprovalCandidate(
+    intent_id,
+    run_id,
+    metadata,
+    created_at,
+    intent_table,
+  ), None
+
+
+def _exit_intent_row_sql(*, tables: _TableNames, for_update: bool) -> str:
+  # ``plan`` is on the nullable side of this left join; PostgreSQL rejects
+  # ``FOR UPDATE OF plan``.  The serializable transaction plus maintenance
+  # advisory lock protects the plan-side absence/terminal proof, while the
+  # intent row itself is locked for the mutation.
+  suffix = " FOR UPDATE OF intent" if for_update else ""
+  intent_environment = (
+    "NULL AS intent_environment"
+    if tables.intent == LEGACY_TABLES.intent
+    else "intent.environment AS intent_environment"
+  )
+  return (
+    "SELECT intent.id AS intent_id, intent.owner_type, intent.owner_id, "
+    f"{intent_environment}, intent.account_id AS intent_account_id, "
+    "intent.instrument_code AS intent_instrument_code, intent.direction, "
+    "intent.status AS intent_status, intent.order_id, intent.executed_volume, "
+    "intent.metadata AS intent_metadata, plan.plan_id, "
+    "plan.account_id AS plan_account_id, plan.instrument_code AS plan_instrument_code, "
+    "plan.status AS plan_status, "
+    f"plan.{tables.plan_environment} AS plan_environment, "
+    "plan.plan_state AS plan_state "
+    f"FROM {tables.intent} AS intent "
+    "LEFT JOIN auto_exit_plans AS plan ON plan.plan_id = intent.owner_id "
+    "WHERE UPPER(CAST(intent.owner_type AS TEXT)) = 'EXIT_PLAN' "
+    "AND (plan.plan_id IS NULL OR "
+    "UPPER(CAST(plan.status AS TEXT)) IN ('COMPLETED', 'CANCELLED')) "
+    "AND (intent.status IS NULL OR UPPER(CAST(intent.status AS TEXT)) NOT IN "
+    "('FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED', 'FAILED', "
+    "'SUPPRESSED', 'RECONCILED_ZERO_FILL')) "
+    "ORDER BY plan.plan_id, intent.id"
+    + suffix
+  )
+
+
+async def _exit_intent_rows(
+  connection: AsyncConnection,
+  *,
+  tables: _TableNames,
+  for_update: bool,
+) -> list[dict[str, Any]]:
+  return await _query_rows(
+    connection,
+    _exit_intent_row_sql(
+      tables=tables,
+      for_update=for_update and _is_postgresql(connection),
+    ),
+  )
+
+
+async def _exit_intent_durable_rows(
+  connection: AsyncConnection,
+  *,
+  tables: _TableNames,
+) -> dict[str, list[dict[str, Any]]]:
+  """Read only durable intent links used by the terminal-exit proof.
+
+  These projections intentionally omit owner metadata.  The direct intent
+  columns and the documented top-level payload identity are the only links
+  that can prove a command was routed.
+  """
+
+  owner_columns = (
+    "NULL AS owner_type, NULL AS owner_id"
+    if tables.intent == LEGACY_TABLES.intent
+    else "owner_type, owner_id"
+  )
+  return {
+    "pending": await _query_rows(
+      connection,
+      "SELECT client_order_id, intent_id, "
+      f"{owner_columns}, request_metadata FROM pending_trade_orders",
+    ),
+    "correlation": await _query_rows(
+      connection,
+      f"SELECT client_order_id, intent_id, {owner_columns}, request_metadata "
+      f"FROM {tables.correlation}",
+    ),
+    "outbox": await _query_rows(
+      connection,
+      f"SELECT client_order_id, {owner_columns}, payload FROM trade_command_outbox",
+    ),
+    "runtime": await _query_rows(
+      connection,
+      f"SELECT client_order_id, {owner_columns}, payload "
+      "FROM strategy_runtime_events",
+    ),
+  }
+
+
+_PAYLOAD_MISSING = object()
+
+
+def _direct_payload_value(payload: Any, key: str) -> tuple[Any, bool]:
+  """Return one top-level payload value and whether the payload is ambiguous."""
+
+  decoded = _decode_json(payload)
+  if not isinstance(decoded, Mapping):
+    return _PAYLOAD_MISSING, payload not in (None, "", b"", bytearray())
+  if key not in decoded:
+    return _PAYLOAD_MISSING, False
+  value = decoded[key]
+  if value is None or (
+    isinstance(value, (str, int, float)) and not isinstance(value, bool)
+  ):
+    return value, False
+  return _PAYLOAD_MISSING, True
+
+
+def _payload_has_ambiguous_intent(
+  payload: Any,
+  *,
+  intent_id: str,
+  direct_keys: Sequence[str],
+) -> tuple[bool, bool]:
+  """Return ``(direct_match, ambiguous_match)`` for one durable payload."""
+
+  direct_match = False
+  decoded = _decode_json(payload)
+  if not isinstance(decoded, Mapping):
+    return False, payload not in (None, "", b"", bytearray())
+  for key in direct_keys:
+    value, ambiguous = _direct_payload_value(decoded, key)
+    if ambiguous:
+      return False, True
+    if value is not _PAYLOAD_MISSING and _clean_text(value) == intent_id:
+      direct_match = True
+  identities = _payload_identity_values(decoded)
+  nested_values = identities.get("intent", set())
+  direct_values = {
+    _clean_text(decoded.get(key))
+    for key in direct_keys
+    if key in decoded and decoded.get(key) is not None
+  }
+  if len(nested_values) > 1 or nested_values - direct_values:
+    # A nested metadata identity is not a durable command link.  Keep it as
+    # an ambiguity so uncertain or conflicting evidence cannot become a zero
+    # fill.
+    return False, True
+  return direct_match, False
+
+
+def _exit_intent_durable_evidence(
+  intent_id: str,
+  plan_id: str,
+  durable: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> tuple[bool, bool]:
+  """Check direct durable links, distinguishing evidence from ambiguity."""
+
+  ambiguous = False
+  for row in durable.get("pending", ()):
+    owner_type = _upper(row.get("owner_type"))
+    owner_id = _clean_text(row.get("owner_id"))
+    if owner_type == "EXIT_PLAN" and owner_id == plan_id:
+      ambiguous = True
+    if _clean_text(row.get("intent_id")) == intent_id:
+      return True, False
+    _, row_ambiguous = _payload_has_ambiguous_intent(
+      row.get("request_metadata"),
+      intent_id=intent_id,
+      direct_keys=("intent_id",),
+    )
+    ambiguous = ambiguous or row_ambiguous
+  for row in durable.get("correlation", ()):
+    owner_type = _upper(row.get("owner_type"))
+    owner_id = _clean_text(row.get("owner_id"))
+    if owner_type == "EXIT_PLAN" and owner_id == plan_id:
+      ambiguous = True
+    if _clean_text(row.get("intent_id")) == intent_id:
+      return True, False
+    _, row_ambiguous = _payload_has_ambiguous_intent(
+      row.get("request_metadata"),
+      intent_id=intent_id,
+      direct_keys=("intent_id",),
+    )
+    ambiguous = ambiguous or row_ambiguous
+  for row in durable.get("outbox", ()):
+    owner_type = _upper(row.get("owner_type"))
+    owner_id = _clean_text(row.get("owner_id"))
+    if owner_type == "EXIT_PLAN" and owner_id == plan_id:
+      ambiguous = True
+    direct_match, row_ambiguous = _payload_has_ambiguous_intent(
+      row.get("payload"),
+      intent_id=intent_id,
+      direct_keys=("intent_id",),
+    )
+    if direct_match:
+      return True, False
+    ambiguous = ambiguous or row_ambiguous
+  for row in durable.get("runtime", ()):
+    owner_type = _upper(row.get("owner_type"))
+    owner_id = _clean_text(row.get("owner_id"))
+    if owner_type == "EXIT_PLAN" and owner_id == plan_id:
+      ambiguous = True
+    if _clean_text(row.get("client_order_id")) == intent_id:
+      return True, False
+    direct_match, row_ambiguous = _payload_has_ambiguous_intent(
+      row.get("payload"),
+      intent_id=intent_id,
+      direct_keys=("intent_id", "client_order_id"),
+    )
+    if direct_match:
+      return True, False
+    ambiguous = ambiguous or row_ambiguous
+  return False, ambiguous
+
+
+def _exit_intent_proof(
+  row: Mapping[str, Any],
+  *,
+  durable: Mapping[str, Sequence[Mapping[str, Any]]],
+  intent_table: str,
+) -> tuple[_ExitIntentCandidate | None, str | None]:
+  """Prove a terminal ExitPlan intent was never routed to a broker."""
+
+  intent_id = _clean_text(row.get("intent_id"))
+  plan_id = _clean_text(row.get("plan_id"))
+  if not intent_id or not plan_id:
+    return None, "EXIT_INTENT_IDENTITY_MISSING"
+  if _upper(row.get("owner_type")) != "EXIT_PLAN" or _clean_text(
+    row.get("owner_id")
+  ) != plan_id:
+    return None, "EXIT_INTENT_OWNER_CONFLICT"
+  if _upper(row.get("direction")) != "SELL":
+    return None, "EXIT_INTENT_DIRECTION_CONFLICT"
+  if _upper(row.get("plan_status")) not in TERMINAL_PLAN_STATUSES:
+    return None, "EXIT_PLAN_NOT_TERMINAL"
+  account_id = _clean_text(row.get("plan_account_id"))
+  instrument_code = _clean_text(row.get("plan_instrument_code"))
+  if not account_id or not instrument_code:
+    return None, "EXIT_INTENT_PLAN_IDENTITY_MISSING"
+  if _clean_text(row.get("intent_account_id")) != account_id:
+    return None, "EXIT_INTENT_ACCOUNT_CONFLICT"
+  if _upper(row.get("intent_instrument_code")) != _upper(instrument_code):
+    return None, "EXIT_INTENT_INSTRUMENT_CONFLICT"
+  plan_environment = _upper(row.get("plan_environment"))
+  intent_environment = _upper(row.get("intent_environment"))
+  if plan_environment not in {"PAPER", "LIVE"}:
+    return None, "EXIT_INTENT_ENVIRONMENT_INVALID"
+  if intent_table == LEGACY_TABLES.intent:
+    intent_environment = plan_environment
+  elif intent_environment not in {"PAPER", "LIVE"}:
+    return None, "EXIT_INTENT_ENVIRONMENT_INVALID"
+  if plan_environment != intent_environment:
+    return None, "EXIT_INTENT_ENVIRONMENT_CONFLICT"
+  intent_status = _upper(row.get("intent_status"))
+  if intent_status in TERMINAL_INTENT_STATUSES:
+    return None, "EXIT_INTENT_ALREADY_TERMINAL"
+  if intent_status not in PRE_BROKER_EXIT_INTENT_STATUSES:
+    return None, "EXIT_INTENT_STATUS_AMBIGUOUS"
+  if not _blank(row.get("order_id")):
+    return None, "EXIT_INTENT_ORDER_PRESENT"
+  volume = _nonnegative_number(row.get("executed_volume"))
+  if volume is None:
+    return None, "EXIT_INTENT_EXECUTION_FIELD_INVALID"
+  if volume > 0:
+    return None, "EXIT_INTENT_EXECUTION_PRESENT"
+  state = _mapping(row.get("plan_state"))
+  if state is None:
+    return None, "EXIT_PLAN_STATE_UNPARSEABLE"
+  pending_intent_id = _clean_text(state.get("pending_intent_id"))
+  if pending_intent_id == intent_id:
+    return None, "EXIT_PLAN_PENDING_INTENT_MATCH"
+  durable_match, durable_ambiguous = _exit_intent_durable_evidence(
+    intent_id,
+    plan_id,
+    durable,
+  )
+  if durable_match:
+    return None, "EXIT_INTENT_DURABLE_CHAIN_PRESENT"
+  if durable_ambiguous:
+    return None, "EXIT_INTENT_DURABLE_EVIDENCE_AMBIGUOUS"
+  return (
+    _ExitIntentCandidate(
+      intent_id=intent_id,
+      plan_id=plan_id,
+      status=intent_status,
+      account_id=account_id,
+      instrument_code=instrument_code,
+      metadata=_mapping(row.get("intent_metadata")) or {},
+      intent_table=intent_table,
+    ),
+    None,
+  )
+
+
+async def _discover_exit_intents(
+  connection: AsyncConnection,
+  *,
+  tables: _TableNames,
+  for_update: bool,
+) -> tuple[
+  tuple[_ExitIntentCandidate, ...],
+  int,
+  tuple[str, ...],
+  tuple[str, ...],
+]:
+  """Discover terminal-exit orphan intents with one shared proof path."""
+
+  rows = await _exit_intent_rows(
+    connection,
+    tables=tables,
+    for_update=for_update,
+  )
+  durable = await _exit_intent_durable_rows(connection, tables=tables)
+  safe: list[_ExitIntentCandidate] = []
+  blocked_ids: list[str] = []
+  reasons: set[str] = set()
+  for row in rows:
+    candidate, reason = _exit_intent_proof(
+      row,
+      durable=durable,
+      intent_table=tables.intent,
+    )
+    if candidate is not None:
+      safe.append(candidate)
+      continue
+    intent_id = _clean_text(row.get("intent_id"))
+    if intent_id:
+      blocked_ids.append(intent_id)
+    if reason:
+      reasons.add(reason)
+  return (
+    tuple(safe),
+    len(rows) - len(safe),
+    tuple(sorted(set(blocked_ids))),
+    tuple(sorted(reasons)),
+  )
+
+
+async def inspect_terminal_exit_plan_unrouted_intents(
+  connection: AsyncConnection,
+  *,
+  legacy_schema: bool = False,
+) -> dict[str, Any]:
+  """Expose the exact detector for cutover readiness without mutating state."""
+
+  existing = await _existing_tables(connection)
+  tables = LEGACY_TABLES if legacy_schema else CANONICAL_TABLES
+  required = (
+    tables.intent,
+    tables.correlation,
+    "pending_trade_orders",
+    "trade_command_outbox",
+    "strategy_runtime_events",
+    "auto_exit_plans",
+  )
+  missing = tuple(table for table in required if table not in existing)
+  if missing:
+    return {
+      "safeExitIntentCount": 0,
+      "blockedExitIntentCount": 0,
+      "safeExitIntentIds": [],
+      "blockedExitIntentIds": [],
+      "reasonCodes": ["REQUIRED_TABLES_MISSING"],
+      "missingTables": list(missing),
+    }
+  safe, blocked_count, blocked_ids, reasons = await _discover_exit_intents(
+    connection,
+    tables=tables,
+    for_update=False,
+  )
+  return {
+    "safeExitIntentCount": len(safe),
+    "blockedExitIntentCount": blocked_count,
+    "safeExitIntentIds": sorted(candidate.intent_id for candidate in safe),
+    "blockedExitIntentIds": list(blocked_ids),
+    "reasonCodes": list(reasons),
+    "missingTables": [],
+  }
 
 
 def _plan_state_is_pending(plan: Any, state: Mapping[str, Any]) -> bool:
@@ -739,7 +1222,7 @@ def _plan_proof(
     return None, "PLAN_IDENTITY_MISSING"
   if _upper(row.get("status")) in TERMINAL_PLAN_STATUSES:
     return None, "PLAN_ALREADY_TERMINAL"
-  if _upper(row.get("execution_mode")) != _upper(PAPER_MODE):
+  if _upper(row.get("environment")) != _upper(PAPER_MODE):
     return None, "PLAN_NOT_PAPER"
   if _as_bool(row.get("enabled")) is not False:
     return None, "PLAN_ENABLED"
@@ -812,32 +1295,50 @@ async def _discover(
   for_update: bool,
 ) -> _Discovery:
   existing = await _existing_tables(connection)
-  missing = tuple(name for name in REQUIRED_TABLES if name not in existing)
-  if missing:
+  tables, _, table_reason = _select_table_names(existing)
+  missing_names = [name for name in REQUIRED_TABLES if name not in existing]
+  if tables is LEGACY_TABLES:
+    missing_names = [
+      name
+      for name in missing_names
+      if name not in {CANONICAL_TABLES.intent, CANONICAL_TABLES.correlation}
+    ]
+  missing = tuple(missing_names)
+  if missing or tables is None:
+    reason = table_reason or "REQUIRED_TABLES_MISSING"
     return _Discovery(
       safe_approvals=(),
       blocked_approval_count=0,
       safe_plans=(),
       blocked_plan_count=0,
+      safe_exit_intents=(),
+      blocked_exit_intent_count=0,
+      blocked_exit_intent_ids=(),
       unsettled_inbox_count=0,
       missing_tables=missing,
-      reason_codes=("REQUIRED_TABLES_MISSING",),
+      reason_codes=(reason,),
     )
 
   approval_rows = await _query_rows(
     connection,
-    _approval_row_sql(for_update=for_update and _is_postgresql(connection)),
+    _approval_row_sql(
+      for_update=for_update and _is_postgresql(connection),
+      intent_table=tables.intent,
+    ),
     {"strategy_class": STRATEGY_CLASS},
   )
   plan_rows = await _query_rows(
     connection,
-    _PLAN_ROW_SQL + (" FOR UPDATE OF plan" if for_update and _is_postgresql(connection) else ""),
+    _plan_row_sql(
+      plan_environment_column=tables.plan_environment,
+      for_update=for_update and _is_postgresql(connection),
+    ),
   )
   # In apply mode candidate rows are locked before the durable evidence is
   # read.  At READ COMMITTED this prevents a concurrent writer from adding an
   # order/correlation after an absence check but before the mutation.
   unsettled = await _inbox_unsettled_count(connection)
-  durable = await _durable_rows(connection)
+  durable = await _durable_rows(connection, tables=tables)
   batches = await _query_rows(
     connection,
     "SELECT batch_id FROM t_trade_batches",
@@ -847,7 +1348,12 @@ async def _discover(
   blocked_approvals = 0
   approval_reason_codes: set[str] = set()
   for row in approval_rows:
-    candidate, reason = _approval_proof(row, now=now, durable=durable)
+    candidate, reason = _approval_proof(
+      row,
+      now=now,
+      durable=durable,
+      intent_table=tables.intent,
+    )
     if candidate is not None:
       safe_approvals.append(candidate)
       continue
@@ -873,11 +1379,26 @@ async def _discover(
     if reason:
       plan_reason_codes.add(reason)
 
-  reasons: set[str] = set(approval_reason_codes) | plan_reason_codes
+  (
+    safe_exit_intents,
+    blocked_exit_intents,
+    blocked_exit_intent_ids,
+    exit_reason_codes,
+  ) = await _discover_exit_intents(
+    connection,
+    tables=tables,
+    for_update=for_update,
+  )
+
+  reasons: set[str] = (
+    set(approval_reason_codes) | plan_reason_codes | set(exit_reason_codes)
+  )
   if blocked_approvals:
     reasons.add("BLOCKED_APPROVALS")
   if blocked_plans:
     reasons.add("BLOCKED_PLANS")
+  if blocked_exit_intents:
+    reasons.add("BLOCKED_EXIT_INTENTS")
   if unsettled:
     reasons.add("UNSETTLED_AGENT_INBOX")
   return _Discovery(
@@ -885,6 +1406,9 @@ async def _discover(
     blocked_approval_count=blocked_approvals,
     safe_plans=tuple(safe_plans),
     blocked_plan_count=blocked_plans,
+    safe_exit_intents=tuple(safe_exit_intents),
+    blocked_exit_intent_count=blocked_exit_intents,
+    blocked_exit_intent_ids=tuple(sorted(set(blocked_exit_intent_ids))),
     unsettled_inbox_count=unsettled,
     missing_tables=(),
     reason_codes=tuple(sorted(reasons)),
@@ -898,6 +1422,7 @@ def _report(
   applied: bool,
   expected_approval_count: int | None = None,
   expected_plan_count: int | None = None,
+  expected_exit_intent_count: int | None = None,
   extra_reasons: Iterable[str] = (),
 ) -> dict[str, Any]:
   reasons = set(discovery.reason_codes)
@@ -909,6 +1434,7 @@ def _report(
     not discovery.missing_tables
     and discovery.blocked_approval_count == 0
     and discovery.blocked_plan_count == 0
+    and discovery.blocked_exit_intent_count == 0
     and discovery.unsettled_inbox_count == 0
     and not extra
   )
@@ -920,6 +1446,13 @@ def _report(
     "blockedApprovalCount": discovery.blocked_approval_count,
     "safePlanCount": len(discovery.safe_plans),
     "blockedPlanCount": discovery.blocked_plan_count,
+    "safeExitIntentCount": len(discovery.safe_exit_intents),
+    "blockedExitIntentCount": discovery.blocked_exit_intent_count,
+    "safeExitIntentIds": sorted(
+      candidate.intent_id for candidate in discovery.safe_exit_intents
+    ),
+    "blockedExitIntentIds": list(discovery.blocked_exit_intent_ids),
+    "terminalExitPlanUnroutedIntentAction": TERMINAL_EXIT_PLAN_UNROUTED_INTENT,
     "unsettledInboxCount": discovery.unsettled_inbox_count,
     "applied": bool(applied),
     "readyToApply": bool(ready),
@@ -927,7 +1460,32 @@ def _report(
     "missingTables": list(discovery.missing_tables),
     "expectedApprovalCount": expected_approval_count,
     "expectedPlanCount": expected_plan_count,
+    "expectedExitIntentCount": expected_exit_intent_count,
   }
+
+
+_LEGACY_INTENT_METADATA = MetaData()
+_LEGACY_INTENT_TABLE = Table(
+  LEGACY_TABLES.intent,
+  _LEGACY_INTENT_METADATA,
+  Column("id", String(128)),
+  Column("owner_type", String(32)),
+  Column("owner_id", String(128)),
+  Column("environment", String(16)),
+  Column("account_id", String(50)),
+  Column("instrument_code", String(20)),
+  Column("status", String(32)),
+  Column("metadata", JSON),
+  Column("notes", Text),
+)
+
+
+def _intent_mutation_table(table_name: str) -> Table:
+  if table_name == TradeIntentRecord.__table__.name:
+    return TradeIntentRecord.__table__
+  if table_name == LEGACY_TABLES.intent:
+    return _LEGACY_INTENT_TABLE
+  raise P1ReconcileError("INTENT_TABLE_PROJECTION_UNKNOWN")
 
 
 async def inspect_connection(
@@ -935,7 +1493,7 @@ async def inspect_connection(
   *,
   now: datetime | None = None,
 ) -> dict[str, Any]:
-  """Inspect one connection without changing it or exposing business IDs."""
+  """Inspect one connection without changing it."""
 
   discovery = await _discover(
     connection,
@@ -985,7 +1543,7 @@ async def _mutate(
   discovery: _Discovery,
   *,
   now: datetime,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
   """Apply a previously proven *same-transaction* discovery atomically."""
 
   intent_table = TradeIntentRecord.__table__
@@ -994,7 +1552,9 @@ async def _mutate(
   audit_at = _utc_iso(now)
   intent_count = 0
   plan_count = 0
+  exit_intent_count = 0
   for candidate in discovery.safe_approvals:
+    intent_table = _intent_mutation_table(candidate.intent_table)
     metadata = copy.deepcopy(candidate.metadata)
     metadata.update(
       {
@@ -1018,6 +1578,35 @@ async def _mutate(
     if getattr(result, "rowcount", 1) != 1:
       raise P1ReconcileError("APPROVAL_CANDIDATE_CHANGED")
     intent_count += 1
+
+  for candidate in discovery.safe_exit_intents:
+    intent_table = _intent_mutation_table(candidate.intent_table)
+    metadata = copy.deepcopy(candidate.metadata)
+    metadata.update(
+      {
+        "execution_terminal_source": "T_ASSISTANT_P1_MAINTENANCE",
+        "execution_terminal_action": TERMINAL_EXIT_PLAN_UNROUTED_INTENT,
+        "execution_terminal_reason": EXIT_INTENT_REASON,
+        "execution_terminal_at": audit_at,
+      }
+    )
+    result = await connection.execute(
+      update(intent_table)
+      .where(intent_table.c.id == candidate.intent_id)
+      .where(intent_table.c.status == candidate.status)
+      .where(intent_table.c.owner_type == "EXIT_PLAN")
+      .where(intent_table.c.owner_id == candidate.plan_id)
+      .where(intent_table.c.account_id == candidate.account_id)
+      .where(intent_table.c.instrument_code == candidate.instrument_code)
+      .values(
+        status="RECONCILED_ZERO_FILL",
+        notes=EXIT_INTENT_REASON,
+        **{"metadata": metadata},
+      )
+    )
+    if getattr(result, "rowcount", 1) != 1:
+      raise P1ReconcileError("EXIT_INTENT_CANDIDATE_CHANGED")
+    exit_intent_count += 1
 
   for candidate in discovery.safe_plans:
     state = copy.deepcopy(candidate.state)
@@ -1063,7 +1652,7 @@ async def _mutate(
         )
       )
     plan_count += 1
-  return intent_count, plan_count
+  return intent_count, plan_count, exit_intent_count
 
 
 async def apply_reconciliation(
@@ -1072,9 +1661,10 @@ async def apply_reconciliation(
   confirmation: str,
   expected_approval_count: int,
   expected_plan_count: int,
+  expected_exit_intent_count: int,
   now: datetime | None = None,
 ) -> dict[str, Any]:
-  """Re-discover, prove, and atomically repair PAPER legacy obligations."""
+  """Re-discover, prove, and atomically repair legacy obligations."""
 
   if confirmation != CONFIRMATION_WORD:
     raise P1ReconcileError("CONFIRMATION_REQUIRED")
@@ -1084,7 +1674,15 @@ async def apply_reconciliation(
     raise P1ReconcileError("EXPECTED_APPROVAL_COUNT_REQUIRED")
   if not isinstance(expected_plan_count, int) or isinstance(expected_plan_count, bool):
     raise P1ReconcileError("EXPECTED_PLAN_COUNT_REQUIRED")
-  if expected_approval_count < 0 or expected_plan_count < 0:
+  if not isinstance(expected_exit_intent_count, int) or isinstance(
+    expected_exit_intent_count, bool
+  ):
+    raise P1ReconcileError("EXPECTED_EXIT_INTENT_COUNT_REQUIRED")
+  if (
+    expected_approval_count < 0
+    or expected_plan_count < 0
+    or expected_exit_intent_count < 0
+  ):
     raise P1ReconcileError("EXPECTED_COUNT_INVALID")
 
   checked_at = _utc_now(now)
@@ -1100,12 +1698,15 @@ async def apply_reconciliation(
         mismatch_reasons.append("EXPECTED_APPROVAL_COUNT_MISMATCH")
       if len(discovery.safe_plans) != expected_plan_count:
         mismatch_reasons.append("EXPECTED_PLAN_COUNT_MISMATCH")
+      if len(discovery.safe_exit_intents) != expected_exit_intent_count:
+        mismatch_reasons.append("EXPECTED_EXIT_INTENT_COUNT_MISMATCH")
       report = _report(
         discovery,
         mode="apply",
         applied=False,
         expected_approval_count=expected_approval_count,
         expected_plan_count=expected_plan_count,
+        expected_exit_intent_count=expected_exit_intent_count,
         extra_reasons=mismatch_reasons,
       )
       if not report["readyToApply"] or mismatch_reasons:
@@ -1113,12 +1714,16 @@ async def apply_reconciliation(
         return report
       await _mutate(connection, discovery, now=checked_at)
       await transaction.commit()
+      # Re-discover after commit so an applied report cannot claim that the
+      # repaired intent is still an outstanding candidate.
+      post_discovery = await _discover(connection, now=checked_at, for_update=False)
       return _report(
-        discovery,
+        post_discovery,
         mode="apply",
         applied=True,
         expected_approval_count=expected_approval_count,
         expected_plan_count=expected_plan_count,
+        expected_exit_intent_count=expected_exit_intent_count,
       )
     except Exception:
       await transaction.rollback()
@@ -1132,6 +1737,7 @@ async def reconcile(
   confirmation: str | None = None,
   expected_approval_count: int | None = None,
   expected_plan_count: int | None = None,
+  expected_exit_intent_count: int | None = None,
   now: datetime | None = None,
 ) -> dict[str, Any]:
   """Unified API: dry-run by default, gated apply when explicitly requested."""
@@ -1144,11 +1750,14 @@ async def reconcile(
     raise P1ReconcileError("EXPECTED_APPROVAL_COUNT_REQUIRED")
   if expected_plan_count is None:
     raise P1ReconcileError("EXPECTED_PLAN_COUNT_REQUIRED")
+  if expected_exit_intent_count is None:
+    raise P1ReconcileError("EXPECTED_EXIT_INTENT_COUNT_REQUIRED")
   return await apply_reconciliation(
     engine,
     confirmation=confirmation,
     expected_approval_count=expected_approval_count,
     expected_plan_count=expected_plan_count,
+    expected_exit_intent_count=expected_exit_intent_count,
     now=now,
   )
 
@@ -1158,7 +1767,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
 
   reasons = ", ".join(str(item) for item in report.get("reasonCodes", ())) or "none"
   lines = [
-    "# T assistant P1 PAPER legacy reconciliation",
+    "# T assistant P1 execution-owner legacy reconciliation",
     "",
     f"- Scope: `{report.get('scope', RECONCILE_SCOPE)}`",
     f"- Mode: `{report.get('mode', 'dry-run')}`",
@@ -1166,6 +1775,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     f"blocked approvals: `{report.get('blockedApprovalCount', 0)}`",
     f"- Safe plans: `{report.get('safePlanCount', 0)}`; "
     f"blocked plans: `{report.get('blockedPlanCount', 0)}`",
+    f"- Safe terminal ExitPlan intents: `{report.get('safeExitIntentCount', 0)}`; "
+    f"blocked terminal ExitPlan intents: `{report.get('blockedExitIntentCount', 0)}`",
     f"- Unsettled Agent inbox: `{report.get('unsettledInboxCount', 0)}`",
     f"- Ready to apply: `{str(bool(report.get('readyToApply'))).lower()}`",
     f"- Applied: `{str(bool(report.get('applied'))).lower()}`",
@@ -1175,7 +1786,18 @@ def render_markdown(report: Mapping[str, Any]) -> str:
 
 
 def _gate_error_report(code: str, *, mode: str = "apply") -> dict[str, Any]:
-  discovery = _Discovery((), 0, (), 0, 0, (), ())
+  discovery = _Discovery(
+    safe_approvals=(),
+    blocked_approval_count=0,
+    safe_plans=(),
+    blocked_plan_count=0,
+    safe_exit_intents=(),
+    blocked_exit_intent_count=0,
+    blocked_exit_intent_ids=(),
+    unsettled_inbox_count=0,
+    missing_tables=(),
+    reason_codes=(),
+  )
   return _report(discovery, mode=mode, applied=False, extra_reasons=(code,))
 
 
@@ -1188,6 +1810,8 @@ async def _run_cli(args: argparse.Namespace) -> int:
       missing = "EXPECTED_APPROVAL_COUNT_REQUIRED"
     elif args.expected_plan_count is None:
       missing = "EXPECTED_PLAN_COUNT_REQUIRED"
+    elif args.expected_exit_intent_count is None:
+      missing = "EXPECTED_EXIT_INTENT_COUNT_REQUIRED"
     if missing:
       report = _gate_error_report(missing)
       output = render_markdown(report) if args.format == "markdown" else json.dumps(
@@ -1213,14 +1837,15 @@ async def _run_cli(args: argparse.Namespace) -> int:
         confirmation=args.confirmation,
         expected_approval_count=args.expected_approval_count,
         expected_plan_count=args.expected_plan_count,
+        expected_exit_intent_count=args.expected_exit_intent_count,
       )
     finally:
       await engine.dispose()
   except P1ReconcileError as exc:
     print(f"P1 reconciliation failed: {exc.code}", file=sys.stderr)
     return 2
-  except Exception as exc:  # noqa: BLE001 - never print secret-bearing DB errors
-    print(f"P1 reconciliation failed: {type(exc).__name__}", file=sys.stderr)
+  except Exception:  # noqa: BLE001 - never print secret-bearing DB errors
+    print(f"P1 reconciliation failed: {RECONCILE_DATABASE_ERROR}", file=sys.stderr)
     return 1
 
   if args.format == "markdown":
@@ -1234,7 +1859,7 @@ async def _run_cli(args: argparse.Namespace) -> int:
 
 def build_argument_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(
-    description="Dry-run or explicitly gated PAPER legacy T-assistant reconciliation"
+    description="Dry-run or explicitly gated P1 execution-owner reconciliation"
   )
   parser.add_argument("--database-url", default=None)
   parser.add_argument("--format", choices=("json", "markdown"), default="json")
@@ -1258,6 +1883,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     type=int,
     default=None,
   )
+  parser.add_argument(
+    "--expect-exit-intent-count",
+    dest="expected_exit_intent_count",
+    type=int,
+    default=None,
+  )
   parser.add_argument("--require-ready", action="store_true")
   return parser
 
@@ -1269,16 +1900,20 @@ def main(argv: Iterable[str] | None = None) -> int:
 __all__ = [
   "APPROVAL_REASON",
   "CONFIRMATION_WORD",
+  "EXIT_INTENT_REASON",
+  "TERMINAL_EXIT_PLAN_UNROUTED_INTENT",
   "PLAN_EVENT_KEY_PREFIX",
   "PLAN_EVENT_TYPE",
   "PLAN_REASON",
   "P1ReconcileError",
   "P1_SCHEMA_VERSION",
+  "RECONCILE_DATABASE_ERROR",
   "RECONCILE_SCOPE",
   "REQUIRED_TABLES",
   "apply_reconciliation",
   "build_argument_parser",
   "inspect_connection",
+  "inspect_terminal_exit_plan_unrouted_intents",
   "main",
   "reconcile",
   "render_markdown",

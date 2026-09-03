@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.base import OrderRequest, OrderStatus, OrderType, PriceType
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.core.brokers.live import LiveBroker
@@ -12,6 +13,8 @@ from quantx_infrastructure.services.trade_command_service import (
 from quantx_infrastructure.services.trade_intent_processor import (
   LOCAL_PRE_BROKER_ZERO_FILL_SOURCE,
 )
+
+_OWNER = ExecutionOwnerRef.manual_command("live-broker-test-command")
 
 
 class _TradingService:
@@ -39,8 +42,10 @@ def _sell_request(*, price: float = 10.0, volume: int = 100) -> OrderRequest:
     order_type=OrderType.SELL,
     price_type=PriceType.LIMIT,
     volume=volume,
+    execution_ref=_OWNER,
+    environment=ExecutionEnvironment.LIVE,
     price=price,
-    metadata={"intent_id": "intent-1"},
+    metadata={"intent_id": "intent-1", "idempotency_key": "live-broker-test"},
   )
 
 
@@ -117,8 +122,10 @@ async def test_local_risk_rejection_is_authoritative_zero_fill() -> None:
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=100,
+    execution_ref=_OWNER,
+    environment=ExecutionEnvironment.LIVE,
     price=10.0,
-    metadata={"intent_id": "intent-1"},
+    metadata={"intent_id": "intent-1", "idempotency_key": "live-broker-buy-test"},
   )
 
   order = await broker.place_order(request)
@@ -171,6 +178,78 @@ async def test_agent_unavailable_is_authoritative_pre_enqueue_zero_fill() -> Non
     LOCAL_PRE_BROKER_ZERO_FILL_SOURCE
   )
   assert request.metadata["execution_terminal_reason"] == "没有就绪 QMT Agent"
+
+
+@pytest.mark.asyncio
+async def test_missing_request_idempotency_key_is_rejected_before_trading_service() -> None:
+  broker = LiveBroker(account_id="account-1", enable_risk_control=False)
+  service = _TradingService()
+  broker.trading_service = service
+  broker.is_connected = True
+  request = _sell_request()
+  request.metadata.pop("idempotency_key")
+
+  order = await broker.place_order(request)
+
+  assert order.status is OrderStatus.REJECTED
+  assert "IDEMPOTENCY_KEY_REQUIRED" in request.metadata["execution_terminal_reason"]
+  assert not hasattr(service, "place_order")
+
+
+@pytest.mark.asyncio
+async def test_request_metadata_cannot_create_wire_identity() -> None:
+  class RecordingTradingService:
+    def __init__(self) -> None:
+      self.calls: list[dict] = []
+
+    async def place_order(self, **kwargs):
+      self.calls.append(dict(kwargs))
+      return {
+        "success": True,
+        "client_order_id": "client-live-1",
+        "status": "QUEUED",
+      }
+
+  broker = LiveBroker(account_id="account-1", enable_risk_control=False)
+  service = RecordingTradingService()
+  broker.trading_service = service
+  broker.is_connected = True
+  request = _sell_request()
+  request.metadata.update(
+    {
+      "owner_type": "EXIT_PLAN",
+      "owner_id": "forged-plan",
+      "environment": "PAPER",
+      "strategy_run_id": "forged-run",
+      "exit_plan_id": "forged-plan",
+      "strategy_name": "forged-strategy",
+      "remark": "forged-remark",
+    }
+  )
+
+  order = await broker.place_order(request)
+
+  assert order.status is OrderStatus.PENDING
+  call = service.calls[0]
+  assert call["execution_ref"] == _OWNER
+  assert call["environment"] is ExecutionEnvironment.LIVE
+  assert "strategy_name" not in call
+  assert "order_remark" not in call
+  assert call["execution_context"]["strategy_order_id"] == order.order_id
+  assert all(
+    key not in call["execution_context"]
+    for key in (
+      "owner_type",
+      "owner_id",
+      "environment",
+      "strategy_run_id",
+      "exit_plan_id",
+      "strategy_name",
+      "remark",
+      "idempotency_key",
+      "trace_id",
+    )
+  )
 
 
 @pytest.mark.asyncio

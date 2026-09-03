@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from math import isfinite
 from typing import Any, Mapping, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerType
 from quantx_domain.clock import utcnow
 from quantx_domain.trading.exit_plan import ExitPlanTemplate
 from quantx_domain.trading.market_rules import AShareMarketRules
@@ -221,11 +222,19 @@ async def validate_consumed_exit_plan_sell_challenge(
     or str(challenge.user_id or "") != actor_id
     or str(challenge.device_session_id or "") != device_session_id
     or str(challenge.account_id or "") != str(account_id)
+    or str(challenge.owner_type or "").upper() != ExecutionOwnerType.EXIT_PLAN.value
+    or str(challenge.owner_id or "") != str(plan_id)
+    or str(challenge.environment or "").upper()
+    != str(intent.environment or "").upper()
     or str(payload.get("action") or "") != EXIT_PLAN_SELL_APPROVAL_ACTION
     or str(payload.get("user_id") or "") != actor_id
     or str(payload.get("device_session_id") or "") != device_session_id
     or str(payload.get("account_id") or "") != str(account_id)
-    or str(payload.get("business_owner_id") or "") != str(plan_id)
+    or str(payload.get("owner_type") or "").upper()
+    != ExecutionOwnerType.EXIT_PLAN.value
+    or str(payload.get("owner_id") or "") != str(plan_id)
+    or str(payload.get("environment") or "").upper()
+    != str(intent.environment or "").upper()
     or str(payload.get("intent_id") or "") != str(intent_id)
     or not hmac.compare_digest(
       str(challenge.payload_fingerprint or ""),
@@ -313,8 +322,8 @@ def _normalized_t_trade_exit_template(
     raise ValueError("T_TRADE_EXIT_PLAN_TEMPLATE_INVALID") from exc
   template.pop("auto_exit_authorized", None)
 
-  account_id = str(record.account_id or metadata.get("account_id") or "").strip()
-  run_id = str(record.strategy_run_id or metadata.get("strategy_run_id") or "").strip()
+  account_id = str(record.account_id or "").strip()
+  run_id = str(record.owner_id or "").strip()
   instrument_code = str(record.instrument_code or "").strip().upper()
   batch_id = str(metadata.get("t_batch_id") or "").strip()
   plan_id = str(metadata.get("exit_plan_id") or "").strip()
@@ -345,7 +354,14 @@ def _normalized_t_trade_exit_template(
       "exit",
     ),
   }
-  if not account_id or not run_id or not instrument_code or not batch_id or not plan_id:
+  if (
+    str(record.owner_type or "").upper() != ExecutionOwnerType.STRATEGY_RUN.value
+    or not account_id
+    or not run_id
+    or not instrument_code
+    or not batch_id
+    or not plan_id
+  ):
     raise ValueError("T_TRADE_EXIT_AUTHORIZATION_IDENTITY_MISSING")
   if any(str(actual or "") != str(wanted or "") for actual, wanted in expected.values()):
     raise ValueError("T_TRADE_EXIT_AUTHORIZATION_IDENTITY_MISMATCH")
@@ -391,8 +407,8 @@ def build_t_trade_entry_exit_authorization_envelope(
     volume_ceiling = normalized_requested
   else:
     volume_ceiling = computed_ceiling
-  account_id = str(record.account_id or metadata.get("account_id") or "").strip()
-  run_id = str(record.strategy_run_id or metadata.get("strategy_run_id") or "").strip()
+  account_id = str(record.account_id or "").strip()
+  run_id = str(record.owner_id or "").strip()
   subject = {
     "schema_version": _T_TRADE_EXIT_AUTHORIZATION_SCHEMA_VERSION,
     "account_id": account_id,
@@ -433,7 +449,9 @@ def bind_t_trade_exit_authorization_to_challenge_payload(
   expected_payload = {
     "action": T_TRADE_ENTRY_APPROVAL_ACTION,
     "account_id": envelope.subject["account_id"],
-    "business_owner_id": envelope.subject["strategy_run_id"],
+    "owner_type": ExecutionOwnerType.STRATEGY_RUN.value,
+    "owner_id": envelope.subject["strategy_run_id"],
+    "environment": str(record.environment or "").upper(),
     "intent_id": envelope.subject["entry_intent_id"],
   }
   if any(
@@ -462,7 +480,7 @@ def _template_binding(record: AutoExitPlanRecord) -> dict[str, Any]:
     "strategy_run_id": str(record.strategy_run_id or ""),
     "enabled": bool(record.enabled),
     "status": str(record.status or "").upper(),
-    "execution_mode": str(record.execution_mode or "").lower(),
+    "execution_mode": str(record.environment or "").upper().lower(),
     "config_version": int(record.config_version or 0),
     "protected_volume": max(0, int(record.protected_volume or 0)),
     "exited_volume": max(0, int(record.exited_volume or 0)),
@@ -481,7 +499,7 @@ def require_authorizable_live_plan(
     raise ValueError("EXIT_PLAN_NOT_FOUND")
   if str(record.account_id) != str(account_id):
     raise ValueError("ACCOUNT_SCOPE_MISMATCH")
-  if str(record.execution_mode or "").lower() != "live":
+  if str(record.environment or "").upper() != ExecutionEnvironment.LIVE.value:
     raise ValueError("LIVE_EXIT_PLAN_REQUIRED")
   if int(record.config_version or 0) != int(expected_config_version):
     raise ValueError("CONFIG_VERSION_CONFLICT")
@@ -512,7 +530,7 @@ async def build_exit_plan_authorization_snapshot(
 ) -> ExitPlanAuthorizationSnapshot:
   """Build the stable LIVE plan/position/T+1/protection subject to be signed."""
 
-  if str(record.execution_mode or "").lower() != "live":
+  if str(record.environment or "").upper() != ExecutionEnvironment.LIVE.value:
     raise ValueError("LIVE_EXIT_PLAN_REQUIRED")
 
   scope = locked_scope
@@ -543,7 +561,7 @@ async def build_exit_plan_authorization_snapshot(
           .where(
             AutoExitPlanRecord.account_id == record.account_id,
             AutoExitPlanRecord.instrument_code == record.instrument_code,
-            AutoExitPlanRecord.execution_mode == "live",
+            AutoExitPlanRecord.environment == ExecutionEnvironment.LIVE.value,
             AutoExitPlanRecord.plan_id != record.plan_id,
             AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES),
           )
@@ -566,7 +584,7 @@ async def build_exit_plan_authorization_snapshot(
     .where(
       PendingTradeOrder.account_id == record.account_id,
       PendingTradeOrder.instrument_code == record.instrument_code,
-      PendingTradeOrder.execution_mode == "live",
+      PendingTradeOrder.environment == ExecutionEnvironment.LIVE.value,
       PendingTradeOrder.side == "SELL",
       PendingTradeOrder.status.in_(ACTIVE_PENDING_SELL_STATUSES),
     )
@@ -686,7 +704,7 @@ def grant_exact_auto_exit_authorization(
   authorization_expires_at: datetime,
   bump_state_version: bool = True,
 ) -> None:
-  if str(record.execution_mode or "").lower() != "live":
+  if str(record.environment or "").upper() != ExecutionEnvironment.LIVE.value:
     raise ValueError("LIVE_EXIT_PLAN_REQUIRED")
   if not fingerprint or len(fingerprint) != 64:
     raise ValueError("INVALID_AUTHORIZATION_FINGERPRINT")
@@ -856,11 +874,18 @@ async def derive_exact_auto_exit_authorization_from_t_trade_entry(
     "user_id": str(challenge.user_id),
     "device_session_id": str(challenge.device_session_id),
     "account_id": str(challenge.account_id),
-    "business_owner_id": str(intent.strategy_run_id or ""),
+    "owner_type": str(intent.owner_type or "").upper(),
+    "owner_id": str(intent.owner_id or ""),
+    "environment": str(intent.environment or "").upper(),
     "intent_id": str(intent.id),
   }
   if (
     str(challenge.action or "") != T_TRADE_ENTRY_APPROVAL_ACTION
+    or str(challenge.owner_type or "").upper()
+    != str(intent.owner_type or "").upper()
+    or str(challenge.owner_id or "") != str(intent.owner_id or "")
+    or str(challenge.environment or "").upper()
+    != str(intent.environment or "").upper()
     or challenge.consumed_at is None
     or any(
       str(payload.get(key) or "") != expected
@@ -1150,7 +1175,7 @@ async def validate_exact_auto_exit_authorization(
       "LEGACY_BOOLEAN_AUTHORIZATION_REJECTED",
       "旧布尔授权不具备自动实盘权限",
     )
-  if str(record.execution_mode or "").lower() != "live":
+  if str(record.environment or "").upper() != ExecutionEnvironment.LIVE.value:
     return ExitPlanAuthorizationValidation(
       False,
       "LIVE_EXIT_PLAN_REQUIRED",

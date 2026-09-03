@@ -121,20 +121,23 @@ final class ExitPlanWorkspace: ObservableObject {
     guard plan.accountID == binding.identity.activeAccountID else {
       return "退出计划不属于当前唯一主账户"
     }
-    switch plan.executionOwner {
-    case .strategyRuntime, .exitPlanMonitor:
-      break
-    case .invalidOwner:
-      return "服务端审计判定执行归属无效，已阻断自动退出授权"
-    case .unknown:
-      return "服务端返回未知执行归属，已阻断自动退出授权"
+    guard
+      plan.executionOwner.ownerType == .exitPlan,
+      plan.executionOwner.ownerID == plan.id
+    else {
+      return "服务端返回的执行归属不是 EXIT_PLAN，已阻断自动退出授权"
+    }
+    if let recoveryAction = plan.recoveryAction {
+      return plan.recoveryMessage
+        ?? "服务端要求先完成恢复动作：\(recoveryAction)"
     }
     guard let current = currentPlan(id: plan.id), current.configVersion == plan.configVersion else {
       return "计划版本已变化，请刷新并重新进入详情"
     }
-    guard plan.executionMode == .live else {
-      return switch plan.executionMode {
+    guard plan.environment == .live else {
+      return switch plan.environment {
       case .paper: "PAPER 计划不需要实盘自动授权"
+      case .backtest: "BACKTEST 计划不需要实盘自动授权"
       case .unknown: "服务端返回未知执行模式，已阻断授权"
       case .live: ""
       }

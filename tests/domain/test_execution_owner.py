@@ -1,8 +1,11 @@
 import pytest
 import quantx_contracts
 from quantx_domain.strategies.base import (
+  ExitPlanIntentOrigin,
   ManualCommandIntentOrigin,
   StrategyRunIntentOrigin,
+  TradeIntent,
+  TradeIntentDirection,
   TradeIntentOriginType,
 )
 from quantx_domain.trading.execution_owner import (
@@ -81,3 +84,44 @@ def test_existing_origins_project_the_strong_owner_ref() -> None:
 
   assert strategy.execution_ref == ExecutionOwnerRef.strategy_run("run-1")
   assert manual.execution_ref == ExecutionOwnerRef.manual_command("command-1")
+
+
+def test_trade_intent_owner_is_typed_and_metadata_cannot_redirect_it() -> None:
+  ordinary = TradeIntent(
+    strategy_id="strategy-1",
+    run_id="run-1",
+    instrument_code="000001.SZ",
+    direction=TradeIntentDirection.BUY,
+    bucket="core",
+    reason="TEST",
+    target_volume=100,
+    metadata={"owner_type": "EXIT_PLAN", "owner_id": "forged-plan"},
+  )
+  assert ordinary.execution_ref == ExecutionOwnerRef.strategy_run("run-1")
+
+  exit_intent = TradeIntent(
+    strategy_id="strategy-1",
+    run_id="run-1",
+    instrument_code="000001.SZ",
+    direction=TradeIntentDirection.SELL,
+    bucket="core",
+    reason="EXIT",
+    target_volume=100,
+    execution_ref=ExecutionOwnerRef("EXIT_PLAN", "plan-1"),
+    origin=ExitPlanIntentOrigin(
+      plan_id="plan-1",
+      source_execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    ),
+  )
+  assert exit_intent.execution_ref == ExecutionOwnerRef("EXIT_PLAN", "plan-1")
+  with pytest.raises(ValueError, match="explicit origin adapter"):
+    TradeIntent(
+      strategy_id="strategy-1",
+      run_id="run-1",
+      instrument_code="000001.SZ",
+      direction=TradeIntentDirection.SELL,
+      bucket="core",
+      reason="EXIT",
+      target_volume=100,
+      execution_ref=ExecutionOwnerRef("EXIT_PLAN", "plan-1"),
+    )

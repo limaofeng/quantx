@@ -8,10 +8,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api import agent_api
-from quantx_contracts import AgentMessageType
+from quantx_contracts import (
+  AgentMessageType,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+)
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
   AgentDevice,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
   TradeCommandOutbox,
@@ -38,6 +43,7 @@ async def _trade_command_database():
     AccountExecutionControl.__table__,
     RuntimeComponentHeartbeat.__table__,
     PendingTradeOrder.__table__,
+    OrderCorrelation.__table__,
     TradeCommandOutbox.__table__,
   )
   async with engine.begin() as connection:
@@ -77,22 +83,43 @@ def _command(
   status: str = "QUEUED",
   delivered_at=None,
 ) -> TradeCommandOutbox:
+  expires_at = created_at + timedelta(minutes=5)
+  wire_expires_at = expires_at.isoformat() + "Z"
+  if kind == "PLACE_ORDER":
+    payload = {
+      "command_kind": kind,
+      "client_order_id": client_order_id,
+      "account_id": "account-1",
+      "execution_mode": "live",
+      "instrument_code": "600000.SH",
+      "side": "BUY",
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.00",
+      "volume": 100,
+      "expires_at": wire_expires_at,
+    }
+  else:
+    payload = {
+      "command_kind": kind,
+      "client_order_id": client_order_id,
+      "account_id": "account-1",
+      "execution_mode": "live",
+      "broker_order_id": "broker-order-1",
+      "expires_at": wire_expires_at,
+    }
   return TradeCommandOutbox(
     message_id=message_id,
     client_order_id=client_order_id,
     idempotency_key=f"key:{client_order_id}",
     device_id=DEVICE_ID,
     account_id="account-1",
-    payload={
-      "command_kind": kind,
-      "client_order_id": client_order_id,
-      "account_id": "account-1",
-      "execution_mode": "live",
-      "expires_at": (created_at + timedelta(minutes=5)).isoformat() + "Z",
-    },
+    owner_type="MANUAL_COMMAND",
+    owner_id=client_order_id,
+    environment="LIVE",
+    payload=payload,
     delivery_status=status,
     delivered_at=delivered_at,
-    expires_at=created_at + timedelta(minutes=5),
+    expires_at=expires_at,
     attempts=1 if delivered_at is not None else 0,
     created_at=created_at,
     updated_at=created_at,
@@ -241,6 +268,36 @@ async def test_cancel_is_created_selected_and_revalidated_while_reconciling(
             },
             updated_at=now,
           ),
+          PendingTradeOrder(
+            client_order_id="cancel-target-order",
+            user_id="user-1",
+            account_id="account-1",
+            owner_type="MANUAL_COMMAND",
+            owner_id="manual-cancel-test",
+            environment="LIVE",
+            instrument_code="600000.SH",
+            side="BUY",
+            order_type="FIX_PRICE",
+            limit_price="10.00",
+            volume=100,
+            status="SUBMITTED",
+            broker_order_id="broker-order-1",
+            bucket="manual",
+            trace_id="cancel-target-trace",
+            request_metadata={},
+          ),
+          OrderCorrelation(
+            id="cancel-target-correlation",
+            client_order_id="cancel-target-order",
+            broker_order_id="broker-order-1",
+            account_id="account-1",
+            owner_type="MANUAL_COMMAND",
+            owner_id="manual-cancel-test",
+            environment="LIVE",
+            bucket="manual",
+            trace_id="cancel-target-trace",
+            request_metadata={},
+          ),
         ]
       )
       await db.commit()
@@ -248,7 +305,8 @@ async def test_cancel_is_created_selected_and_revalidated_while_reconciling(
         user_id="user-1",
         account_id="account-1",
         broker_order_id="broker-order-1",
-        execution_mode="live",
+        execution_ref=ExecutionOwnerRef.manual_command("manual-cancel-test"),
+        environment=ExecutionEnvironment.LIVE,
       )
 
     session = _control_session(now)
@@ -257,6 +315,11 @@ async def test_cancel_is_created_selected_and_revalidated_while_reconciling(
     assert envelope is not None
     assert envelope.message_id == queued.message_id
     assert envelope.message_type is AgentMessageType.CANCEL_COMMAND
+    monkeypatch.setattr(
+      agent_api.agent_connection_hub,
+      "is_connected",
+      AsyncMock(return_value=True),
+    )
     await agent_api._assert_trade_delivery_session(session, envelope)
 
 
@@ -346,12 +409,13 @@ async def test_live_buy_physical_gate_keeps_account_lock_without_sell_validation
 ) -> None:
   now = agent_api.utcnow()
   message_id = "physical-send-live-buy"
+  client_order_id = "physical-send-live-buy-order"
   async with _trade_command_database() as sessions:
     monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
     async with sessions() as db:
       command = _command(
         message_id=message_id,
-        client_order_id="physical-send-live-buy-order",
+        client_order_id=client_order_id,
         kind="PLACE_ORDER",
         created_at=now,
         status="DELIVERED",
@@ -374,6 +438,36 @@ async def test_live_buy_physical_gate_keeps_account_lock_without_sell_validation
             account_id="account-1",
             authorization_state="ENABLED",
             reconcile_status="READY",
+          ),
+          PendingTradeOrder(
+            client_order_id=client_order_id,
+            user_id="user-1",
+            account_id="account-1",
+            owner_type="MANUAL_COMMAND",
+            owner_id=client_order_id,
+            environment="LIVE",
+            instrument_code="600000.SH",
+            side="BUY",
+            order_type="FIX_PRICE",
+            limit_price="10.00",
+            volume=100,
+            status="SUBMITTED",
+            broker_order_id="broker-order-buy",
+            bucket="manual",
+            trace_id="physical-send-live-buy-trace",
+            request_metadata={},
+          ),
+          OrderCorrelation(
+            id="physical-send-live-buy-correlation",
+            client_order_id=client_order_id,
+            broker_order_id="broker-order-buy",
+            account_id="account-1",
+            owner_type="MANUAL_COMMAND",
+            owner_id=client_order_id,
+            environment="LIVE",
+            bucket="manual",
+            trace_id="physical-send-live-buy-trace",
+            request_metadata={},
           ),
           command,
         ]
@@ -421,7 +515,6 @@ async def test_live_buy_physical_gate_honors_cancel_committed_before_socket_writ
         **dict(command.payload),
         "side": "BUY",
         "instrument_code": "600000.SH",
-        "intent_id": "cancelled-buy-intent",
         "volume": 100,
       }
       db.add_all(
@@ -435,14 +528,29 @@ async def test_live_buy_physical_gate_honors_cancel_committed_before_socket_writ
             client_order_id=client_order_id,
             user_id="user-1",
             account_id="account-1",
+            owner_type="MANUAL_COMMAND",
+            owner_id=client_order_id,
+            environment="LIVE",
             instrument_code="600000.SH",
             side="BUY",
-            order_type="LIMIT",
+            order_type="FIX_PRICE",
             limit_price="10.00",
             volume=100,
             status="CANCEL_REQUESTED",
-            execution_mode="live",
-            intent_id="cancelled-buy-intent",
+            bucket="manual",
+            trace_id=f"{client_order_id}-trace",
+            request_metadata={},
+          ),
+          OrderCorrelation(
+            id=f"{client_order_id}-correlation",
+            client_order_id=client_order_id,
+            broker_order_id=None,
+            account_id="account-1",
+            owner_type="MANUAL_COMMAND",
+            owner_id=client_order_id,
+            environment="LIVE",
+            bucket="manual",
+            trace_id=f"{client_order_id}-trace",
             request_metadata={},
           ),
           command,

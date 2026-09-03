@@ -1,4 +1,4 @@
-"""Command-line entry point for the gated PAPER legacy reconciliation."""
+"""Command-line entry point for the gated P1 execution-owner reconciliation."""
 
 from __future__ import annotations
 

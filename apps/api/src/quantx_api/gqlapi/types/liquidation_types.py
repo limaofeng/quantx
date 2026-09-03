@@ -7,6 +7,15 @@ from enum import Enum
 from typing import List, Optional
 
 import strawberry
+from quantx_contracts import (
+  ExecutionEnvironment as ContractExecutionEnvironment,
+)
+from quantx_contracts import (
+  ExecutionOwnerRef as ContractExecutionOwnerRef,
+)
+from quantx_contracts import (
+  ExecutionOwnerType,
+)
 from quantx_domain.trading.exit_plan import is_sticky_exit_plan_error
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.liquidation import (
@@ -14,19 +23,35 @@ from quantx_infrastructure.models.liquidation import (
 )
 from quantx_infrastructure.services.exit_plan_execution_owner import (
   MONITOR_OWNER,
-  RUNTIME_BOOK_OWNER,
   durable_exit_plan_owner_kind,
+  durable_exit_plan_source_binding,
 )
 from strawberry.scalars import JSON
 
+from .execution_owner_types import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+)
 
-def _exit_plan_execution_owner(model: AutoExitPlanRecord) -> str:
-  owner_kind = durable_exit_plan_owner_kind(model)
-  if owner_kind == MONITOR_OWNER:
-    return "EXIT_PLAN_MONITOR"
-  if owner_kind == RUNTIME_BOOK_OWNER:
-    return "STRATEGY_RUNTIME"
-  return "INVALID_OWNER"
+
+def _exit_plan_execution_binding(
+  model: AutoExitPlanRecord,
+) -> tuple[ExecutionOwnerRef, ExecutionEnvironment]:
+  """Project an ExitPlan's canonical owner and persisted environment."""
+
+  plan_id = str(getattr(model, "plan_id", "") or "").strip()
+  try:
+    environment = ContractExecutionEnvironment(
+      str(getattr(model, "environment", "") or "").strip().upper()
+    )
+  except (TypeError, ValueError) as exc:
+    raise ValueError("退出计划缺少有效执行环境") from exc
+  return (
+    ExecutionOwnerRef.from_contract(
+      ContractExecutionOwnerRef(ExecutionOwnerType.EXIT_PLAN, plan_id)
+    ),
+    ExecutionEnvironment(environment),
+  )
 
 
 @strawberry.enum(description="移动端清仓范围")
@@ -291,13 +316,14 @@ class ExitPlanView:
   strategy_run_id: Optional[str]
   enabled: bool
   status: str
-  execution_mode: str
+  environment: ExecutionEnvironment
   auto_exit_authorized: bool
   auto_exit_authorization_config_version: Optional[int]
   auto_exit_authorization_expires_at: Optional[datetime]
   config_version: int
   state_version: int
-  execution_owner: str
+  execution_owner: ExecutionOwnerRef
+  source_execution_owner: ExecutionOwnerRef
   completion_strategy: Optional[str]
   completion_note: Optional[str]
   protected_volume: int
@@ -331,7 +357,15 @@ class ExitPlanView:
     state = dict(model.plan_state or {})
     template = dict(state.get("template") or {})
     metadata = dict(template.get("metadata") or {})
-    execution_owner = _exit_plan_execution_owner(model)
+    execution_owner_kind = durable_exit_plan_owner_kind(model)
+    execution_owner, environment = _exit_plan_execution_binding(model)
+    source_binding = durable_exit_plan_source_binding(model)
+    if source_binding is None:
+      raise ValueError("退出计划缺少有效 source execution owner")
+    source_owner, source_environment = source_binding
+    if source_environment.value != str(environment.value):
+      raise ValueError("退出计划 source execution environment 不一致")
+    source_execution_owner = ExecutionOwnerRef.from_contract(source_owner)
     state_error = str(state.get("error_message") or "").strip()
     record_error = str(model.last_error or "").strip()
     effective_error = (
@@ -342,7 +376,7 @@ class ExitPlanView:
     reconciliation_locked = is_sticky_exit_plan_error(effective_error)
     can_rebuild = bool(
       effective_error.startswith("QUARANTINE_REPAIRED:")
-      and execution_owner == "EXIT_PLAN_MONITOR"
+      and execution_owner_kind == MONITOR_OWNER
       and str(model.source_type or "").upper() == "MANUAL_POSITION"
       and not model.pending_client_order_id
       and not str(state.get("pending_intent_id") or "").strip()
@@ -393,7 +427,7 @@ class ExitPlanView:
       strategy_run_id=model.strategy_run_id,
       enabled=bool(model.enabled) and not reconciliation_locked,
       status="ERROR" if reconciliation_locked else model.status,
-      execution_mode=model.execution_mode,
+      environment=environment,
       auto_exit_authorized=bool(model.auto_exit_authorized),
       auto_exit_authorization_config_version=getattr(
         model, "auto_exit_authorization_config_version", None
@@ -404,6 +438,7 @@ class ExitPlanView:
       config_version=int(model.config_version or 0),
       state_version=max(1, int(getattr(model, "state_version", 1) or 1)),
       execution_owner=execution_owner,
+      source_execution_owner=source_execution_owner,
       completion_strategy=getattr(model, "completion_strategy", None),
       completion_note=(
         "本次持仓快照已处理完成；后续新增持仓未纳入本次清仓"
@@ -421,7 +456,7 @@ class ExitPlanView:
       rules=list(template.get("rules") or []),
       metadata=metadata,
       can_edit_rules=(
-        execution_owner == "EXIT_PLAN_MONITOR"
+        execution_owner_kind == MONITOR_OWNER
         and str(model.source_type or "").upper() == "MANUAL_POSITION"
         and not reconciliation_locked
       ),

@@ -5,11 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
+  AgentDevice,
   AgentReportInbox,
+  OrderCorrelation,
   PendingTradeOrder,
   TradeCommandOutbox,
   TTradeBatch,
@@ -18,6 +21,7 @@ from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.trade import Trade
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.account_capacity_service import (
   AccountCapacityService,
   buy_cash_required,
@@ -42,10 +46,13 @@ async def capacity_db():
           for model in (
             AccountExecutionControl,
             AgentReportInbox,
+            AgentDevice,
             PendingTradeOrder,
+            OrderCorrelation,
             TradeCommandOutbox,
             TTradeBatch,
             AutoExitPlanRecord,
+            TradeIntentRecord,
             Order,
             Trade,
             Position,
@@ -102,7 +109,7 @@ async def snapshot(db, *, cash=10000, volume=1000, orders=None):
         message_id="snapshot",
         device_id="device",
         message_type="delta_report",
-        protocol_version="1.1",
+        protocol_version="1.2",
         raw_payload_hash=digest,
         business_idempotency_key="snapshot",
         payload=payload,
@@ -120,15 +127,23 @@ def pending(key="first", **kwargs):
     client_order_id=key,
     user_id="user",
     account_id="account",
+    owner_type="MANUAL_COMMAND",
+    owner_id=f"manual-{key}",
+    environment=ExecutionEnvironment.LIVE.value,
     instrument_code="600000.SH",
     side="BUY",
     order_type="FIX_PRICE",
     limit_price="10",
     volume=600,
     status="QUEUED",
-    execution_mode="live",
   )
   values.update(kwargs)
+  if (
+    str(values.get("strategy_run_id") or "").strip()
+    and values.get("owner_type") == "MANUAL_COMMAND"
+  ):
+    values["owner_type"] = "STRATEGY_RUN"
+    values["owner_id"] = str(values["strategy_run_id"])
   return PendingTradeOrder(**values)
 
 
@@ -147,7 +162,9 @@ async def test_cash_claim_survives_old_snapshot_including_later_fills(
     )
   )
   # PAPER commands never spend any part of the LIVE account.
-  capacity_db.add(pending("paper", volume=100000, execution_mode="paper"))
+  capacity_db.add(
+    pending("paper", volume=100000, environment=ExecutionEnvironment.PAPER.value)
+  )
   await capacity_db.commit()
   capacity = await AccountCapacityService(capacity_db).read(
     control, instrument_code="600000.SH"
@@ -213,7 +230,10 @@ async def test_t_order_terminal_before_fill_projection_keeps_old_inventory_claim
         account_id="account",
         instrument_code="600000.SH",
         strategy_run_id="run",
-        execution_mode="live",
+        source_execution_owner_type="STRATEGY_RUN",
+        source_execution_owner_id="run",
+        source_execution_environment=ExecutionEnvironment.LIVE.value,
+        environment=ExecutionEnvironment.LIVE.value,
         entry_filled_volume=0,
         exit_filled_volume=0,
       ),
@@ -280,7 +300,10 @@ async def test_plan_t_batch_and_queued_sell_share_inventory(capacity_db):
         account_id="account",
         instrument_code="600000.SH",
         strategy_run_id="run",
-        execution_mode="live",
+        source_execution_owner_type="STRATEGY_RUN",
+        source_execution_owner_id="run",
+        source_execution_environment=ExecutionEnvironment.LIVE.value,
+        environment=ExecutionEnvironment.LIVE.value,
         entry_filled_volume=100,
         exit_filled_volume=0,
       ),
@@ -290,7 +313,10 @@ async def test_plan_t_batch_and_queued_sell_share_inventory(capacity_db):
         source_id="exit",
         account_id="account",
         instrument_code="600000.SH",
-        execution_mode="live",
+        source_execution_owner_type="MANUAL_COMMAND",
+        source_execution_owner_id="exit",
+        source_execution_environment=ExecutionEnvironment.LIVE.value,
+        environment=ExecutionEnvironment.LIVE.value,
         status="ERROR",
         protected_volume=400,
         remaining_volume=400,
@@ -308,7 +334,13 @@ async def test_plan_t_batch_and_queued_sell_share_inventory(capacity_db):
 
 @pytest.mark.asyncio
 async def test_missing_durable_intent_cannot_create_pending_or_outbox():
-  db = SimpleNamespace(get=AsyncMock(return_value=None), add=AsyncMock())
+  db = SimpleNamespace(
+    get=AsyncMock(return_value=None),
+    execute=AsyncMock(
+      return_value=SimpleNamespace(scalar_one_or_none=lambda: None)
+    ),
+    add=AsyncMock(),
+  )
   service = TradeCommandService(db)
   with pytest.raises(AgentUnavailableError, match="TRADE_INTENT_NOT_ACCEPTED"):
     await service.enqueue_order(
@@ -319,6 +351,9 @@ async def test_missing_durable_intent_cannot_create_pending_or_outbox():
       order_type="FIX_PRICE",
       limit_price=Decimal(10),
       volume=100,
+      execution_ref=ExecutionOwnerRef.strategy_run("run"),
+      environment=ExecutionEnvironment.PAPER,
+      idempotency_key="missing-intent-key",
       strategy_run_id="run",
       strategy_order_id="order",
       intent_id="missing",
@@ -341,6 +376,9 @@ async def test_durable_intent_cannot_route_for_a_different_owner_scope(changes):
   accepted = SimpleNamespace(
     **{
       "strategy_run_id": "run",
+      "owner_type": "STRATEGY_RUN",
+      "owner_id": "run",
+      "environment": ExecutionEnvironment.PAPER.value,
       "account_id": "account",
       "instrument_code": "600000.SH",
       "direction": "BUY",
@@ -348,7 +386,14 @@ async def test_durable_intent_cannot_route_for_a_different_owner_scope(changes):
       **changes,
     }
   )
-  db = SimpleNamespace(get=AsyncMock(return_value=accepted), add=AsyncMock())
+  db = SimpleNamespace(
+    get=AsyncMock(return_value=accepted),
+    execute=AsyncMock(
+      return_value=SimpleNamespace(scalar_one_or_none=lambda: None)
+    ),
+    scalar=AsyncMock(return_value=None),
+    add=AsyncMock(),
+  )
   with pytest.raises(AgentUnavailableError, match="TRADE_INTENT_SCOPE_MISMATCH"):
     await TradeCommandService(db).enqueue_order(
       user_id="user",
@@ -358,6 +403,9 @@ async def test_durable_intent_cannot_route_for_a_different_owner_scope(changes):
       order_type="FIX_PRICE",
       limit_price=Decimal(10),
       volume=100,
+      execution_ref=ExecutionOwnerRef.strategy_run("run"),
+      environment=ExecutionEnvironment.PAPER,
+      idempotency_key="scope-mismatch-key",
       strategy_run_id="run",
       strategy_order_id="order",
       intent_id="intent",
@@ -368,10 +416,22 @@ async def test_durable_intent_cannot_route_for_a_different_owner_scope(changes):
 
 @pytest.mark.asyncio
 async def test_t_entry_cannot_remove_its_role_to_bypass_old_share_capacity():
-  db = SimpleNamespace(add=AsyncMock())
+  db = SimpleNamespace(
+    execute=AsyncMock(
+      return_value=SimpleNamespace(scalar_one_or_none=lambda: None)
+    ),
+    add=AsyncMock(),
+  )
   service = TradeCommandService(db)
   service._require_durable_order_intent = AsyncMock(
     return_value=SimpleNamespace(
+      owner_type="STRATEGY_RUN",
+      owner_id="run",
+      environment=ExecutionEnvironment.PAPER.value,
+      account_id="account",
+      instrument_code="600000.SH",
+      direction="BUY",
+      bucket="swing",
       intent_metadata={"t_trade_role": "ENTRY", "t_batch_id": "batch"},
     )
   )
@@ -384,6 +444,9 @@ async def test_t_entry_cannot_remove_its_role_to_bypass_old_share_capacity():
       order_type="FIX_PRICE",
       limit_price=Decimal(10),
       volume=100,
+      execution_ref=ExecutionOwnerRef.strategy_run("run"),
+      environment=ExecutionEnvironment.PAPER,
+      idempotency_key="t-entry-role-key",
       strategy_run_id="run",
       strategy_order_id="order",
       intent_id="intent",
@@ -393,14 +456,14 @@ async def test_t_entry_cannot_remove_its_role_to_bypass_old_share_capacity():
 
 
 @pytest.mark.asyncio
-async def test_live_market_buy_cannot_claim_cash_without_an_executable_price_cap():
+async def test_live_market_buy_is_rejected_by_fixed_price_protocol():
   db = SimpleNamespace(add=AsyncMock())
   service = TradeCommandService(db)
   service._require_live_authorization = AsyncMock(
     return_value=SimpleNamespace(account_id="account")
   )
   with pytest.raises(
-    AgentUnavailableError, match="ACCOUNT_CAPACITY_LIMIT_PRICE_REQUIRED"
+    AgentUnavailableError, match="仅支持 FIX_PRICE"
   ):
     await service.enqueue_order(
       user_id="user",
@@ -410,7 +473,9 @@ async def test_live_market_buy_cannot_claim_cash_without_an_executable_price_cap
       order_type="LATEST_PRICE",
       limit_price=Decimal(10),
       volume=100,
-      execution_mode="live",
+      execution_ref=ExecutionOwnerRef.manual_command("manual-price-cap"),
+      environment=ExecutionEnvironment.LIVE,
+      idempotency_key="live-price-key",
     )
   db.add.assert_not_called()
 
@@ -419,21 +484,70 @@ async def test_live_market_buy_cannot_claim_cash_without_an_executable_price_cap
 async def test_accepted_entry_retry_recovers_without_reserving_cash_again(capacity_db):
   control = await snapshot(capacity_db, cash=0)
   service = TradeCommandService(capacity_db)
+  expires_at = utcnow()
   capacity_db.add_all(
     [
-      pending(intent_id="intent", strategy_run_id="run", strategy_order_id="order"),
+      pending(
+        intent_id="intent",
+        strategy_run_id="run",
+        strategy_order_id="order",
+        trace_id="retry-trace",
+      ),
+      TradeIntentRecord(
+        id="intent",
+        strategy_run_id="run",
+        owner_type="STRATEGY_RUN",
+        owner_id="run",
+        environment=ExecutionEnvironment.LIVE.value,
+        idempotency_key="intent-key",
+        account_id="account",
+        instrument_code="600000.SH",
+        direction="BUY",
+        bucket="manual",
+        intent_metadata={},
+      ),
+      OrderCorrelation(
+        id="correlation",
+        client_order_id="first",
+        account_id="account",
+        owner_type="STRATEGY_RUN",
+        owner_id="run",
+        environment=ExecutionEnvironment.LIVE.value,
+        strategy_run_id="run",
+        strategy_order_id="order",
+        intent_id="intent",
+        bucket="manual",
+        trace_id="retry-trace",
+        request_metadata={},
+      ),
       TradeCommandOutbox(
         message_id="message",
         client_order_id="first",
         account_id="account",
         device_id="device",
+        owner_type="STRATEGY_RUN",
+        owner_id="run",
+        environment=ExecutionEnvironment.LIVE.value,
         delivery_status="DELIVERED",
-        expires_at=utcnow(),
-        payload={},
+        expires_at=expires_at,
+        payload={
+          "command_kind": "PLACE_ORDER",
+          "client_order_id": "first",
+          "account_id": "account",
+          "execution_mode": "live",
+          "instrument_code": "600000.SH",
+          "side": "BUY",
+          "price_type": "FIX_PRICE",
+          "limit_price": "10",
+          "volume": 600,
+          "expires_at": expires_at.isoformat() + "Z",
+        },
         idempotency_key=service.order_idempotency_digest(
           user_id="user",
           account_id="account",
           idempotency_key="original",
+          execution_ref=ExecutionOwnerRef.strategy_run("run"),
+          environment=ExecutionEnvironment.LIVE,
         ),
       ),
     ]
@@ -450,7 +564,8 @@ async def test_accepted_entry_retry_recovers_without_reserving_cash_again(capaci
     order_type="FIX_PRICE",
     limit_price=Decimal(10),
     volume=600,
-    execution_mode="live",
+    execution_ref=ExecutionOwnerRef.strategy_run("run"),
+    environment=ExecutionEnvironment.LIVE,
     intent_id="intent",
     strategy_run_id="run",
     strategy_order_id="order",

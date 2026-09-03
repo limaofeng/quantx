@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import pytest
+from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.enums import StrategyRunMode
 from quantx_domain.strategies.ashare_managed_exit_plan import (
   EXIT_PLAN_ENABLED_KEY,
@@ -9,12 +10,12 @@ from quantx_domain.strategies.ashare_managed_exit_plan import (
   AshareManagedExitPlanStrategy,
 )
 from quantx_domain.strategies.base import (
+  ExitPlanIntentOrigin,
   ManualCommandIntentOrigin,
   OrderStateEvent,
   StrategyCadence,
   StrategyContext,
   StrategyInput,
-  StrategyRunIntentOrigin,
   TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
@@ -104,9 +105,13 @@ async def test_fixed_exit_strategy_emits_stable_plan_origin_and_state_patch():
   assert intent.direction == TradeIntentDirection.SELL
   assert intent.execution_mode == TradeIntentExecutionMode.AUTO
   assert intent.run_id == "run-v3"
-  assert isinstance(intent.origin, StrategyRunIntentOrigin)
+  assert isinstance(intent.origin, ExitPlanIntentOrigin)
   assert intent.origin.plan_id == "exit-plan-1"
-  assert intent.metadata["exit_plan_id"] == "exit-plan-1"
+  assert intent.execution_ref == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    "exit-plan-1",
+  )
+  assert "exit_plan_id" not in intent.metadata
   assert output.runtime_state_patch is not None
   assert (
     output.runtime_state_patch.set[MANAGED_EXIT_RUNTIME_KEY]["pending_intent_id"]
@@ -121,8 +126,12 @@ async def test_live_strategy_requests_auto_and_leaves_authorization_to_engine():
   [intent] = (await strategy.step(_input())).trade_intents
 
   assert intent.execution_mode == TradeIntentExecutionMode.AUTO
-  assert intent.metadata["owner_type"] == "EXIT_PLAN"
-  assert intent.metadata["owner_id"] == "exit-plan-1"
+  assert intent.execution_ref == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    "exit-plan-1",
+  )
+  assert "owner_type" not in intent.metadata
+  assert "owner_id" not in intent.metadata
 
 
 @pytest.mark.asyncio
@@ -138,6 +147,7 @@ async def test_managed_exit_waits_for_terminal_cumulative_fill_to_converge():
       filled_volume=400,
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=intent.execution_ref,
     )
   )
   pending = strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)
@@ -153,6 +163,7 @@ async def test_managed_exit_waits_for_terminal_cumulative_fill_to_converge():
       volume=400,
       trade_time=NOW,
       metadata=metadata,
+      execution_ref=intent.execution_ref,
     )
   )
   settled = strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)
@@ -174,6 +185,7 @@ async def test_managed_exit_only_releases_local_rejection_with_explicit_proof():
       filled_volume=0,
       metadata=metadata,
       timestamp=NOW,
+      execution_ref=intent.execution_ref,
     )
   )
   blocked = strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)
@@ -190,6 +202,7 @@ async def test_managed_exit_only_releases_local_rejection_with_explicit_proof():
         "execution_terminal_source": "LOCAL_PRE_BROKER_REJECTION",
       },
       timestamp=NOW,
+      execution_ref=intent.execution_ref,
     )
   )
   released = strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)

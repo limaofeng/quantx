@@ -53,8 +53,15 @@ def _event(owner_type=ExecutionOwnerType.STRATEGY_RUN, owner_id="owner-1", **ove
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owner_type", tuple(ExecutionOwnerType))
-async def test_all_owner_types_route_to_their_registered_handler(owner_type):
+@pytest.mark.parametrize(
+  "owner_type",
+  (
+    ExecutionOwnerType.STRATEGY_RUN,
+    ExecutionOwnerType.EXIT_PLAN,
+    ExecutionOwnerType.MANUAL_COMMAND,
+  ),
+)
+async def test_registered_owner_types_route_to_their_registered_handler(owner_type):
   owner = ExecutionOwnerRef(owner_type, "owner-1")
   target = OwnerRuntimeTarget(owner, ExecutionEnvironment.LIVE)
   handler = RecordingHandler(target=target)
@@ -97,7 +104,7 @@ async def test_unregistered_owner_fails_closed_without_apply():
 
 def test_registry_rejects_invalid_and_duplicate_handlers():
   registry = OwnerRuntimeRegistry()
-  owner_type = ExecutionOwnerType.ENTRY_PLAN
+  owner_type = ExecutionOwnerType.STRATEGY_RUN
 
   with pytest.raises(OwnerRuntimeRoutingError) as captured:
     registry.register("ENTRY_PLAN", RecordingHandler())
@@ -112,6 +119,24 @@ def test_registry_rejects_invalid_and_duplicate_handlers():
   with pytest.raises(OwnerRuntimeRoutingError) as captured:
     registry.register(owner_type, handler)
   assert captured.value.code == OWNER_HANDLER_DUPLICATE
+
+
+@pytest.mark.parametrize(
+  "owner_type",
+  (
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    ExecutionOwnerType.ENTRY_PLAN,
+    ExecutionOwnerType.BOARD_ASSISTANT_EXECUTION,
+  ),
+)
+def test_registry_rejects_future_owner_types(owner_type):
+  registry = OwnerRuntimeRegistry()
+
+  with pytest.raises(OwnerRuntimeRoutingError) as captured:
+    registry.register(owner_type, RecordingHandler())
+
+  assert captured.value.code == OWNER_HANDLER_INVALID
+  assert registry.registered_owner_types == ()
 
 
 @pytest.mark.asyncio

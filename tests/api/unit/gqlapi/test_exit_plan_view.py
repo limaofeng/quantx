@@ -4,7 +4,13 @@ import pytest
 from quantx_api.gqlapi.types import liquidation_types
 from quantx_api.gqlapi.types.liquidation_types import (
   ExitPlanView,
-  _exit_plan_execution_owner,
+)
+from quantx_infrastructure.services.exit_plan_execution_owner import (
+  INVALID_OWNER,
+  MANAGED_EXIT_STRATEGY_OWNER,
+  MONITOR_OWNER,
+  RUNTIME_BOOK_OWNER,
+  durable_exit_plan_owner_kind,
 )
 
 
@@ -14,6 +20,7 @@ def _plan_state(
   error_message=None,
   source_type="MANUAL_POSITION",
   strategy_run_id=None,
+  source_id="source-1",
 ):
   metadata = {}
   if managed_runtime_command_id is not None:
@@ -27,6 +34,7 @@ def _plan_state(
       "rules": [],
       "run_id": strategy_run_id,
       "source_type": source_type,
+      "source_id": source_id,
     }
   }
   if error_message is not None:
@@ -37,22 +45,22 @@ def _plan_state(
 @pytest.mark.parametrize(
   ("source_type", "strategy_run_id", "managed_runtime_command_id", "expected"),
   [
-    ("MANUAL_POSITION", None, None, "EXIT_PLAN_MONITOR"),
-    ("MANUAL_LIQUIDATION", None, None, "EXIT_PLAN_MONITOR"),
-    ("T_TRADE_BATCH", "t-run-1", None, "STRATEGY_RUNTIME"),
-    ("LIMIT_UP_BOARD", "board-run-1", None, "STRATEGY_RUNTIME"),
+    ("MANUAL_POSITION", None, None, MONITOR_OWNER),
+    ("MANUAL_LIQUIDATION", None, None, MONITOR_OWNER),
+    ("T_TRADE_BATCH", "t-run-1", None, RUNTIME_BOOK_OWNER),
+    ("LIMIT_UP_BOARD", "board-run-1", None, RUNTIME_BOOK_OWNER),
     (
       "FIRST_BOARD_PROMOTION_V2",
       "first-board-run-1",
       None,
-      "STRATEGY_RUNTIME",
+      RUNTIME_BOOK_OWNER,
     ),
-    ("ENTRY_PLAN", "entry-run-1", None, "STRATEGY_RUNTIME"),
+    ("ENTRY_PLAN", "entry-run-1", None, RUNTIME_BOOK_OWNER),
     (
-      "MANUAL_POSITION",
+      "T_TRADE_BATCH",
       "managed-exit-run-1",
       "create-command-1",
-      "INVALID_OWNER",
+      MANAGED_EXIT_STRATEGY_OWNER,
     ),
   ],
 )
@@ -70,12 +78,25 @@ def test_exit_plan_execution_owner_accepts_only_positive_matrix(
       managed_runtime_command_id,
       source_type=source_type,
       strategy_run_id=strategy_run_id,
+      source_id="source-1",
     ),
     source_type=source_type,
+    source_id="source-1",
+    group_id="source-1" if source_type == "MANUAL_LIQUIDATION" else None,
     strategy_run_id=strategy_run_id,
+    source_execution_owner_type=(
+      "MANUAL_COMMAND"
+      if source_type in {"MANUAL_POSITION", "MANUAL_LIQUIDATION"}
+      else "STRATEGY_RUN"
+    ),
+    source_execution_owner_id=(
+      "source-1" if source_type.startswith("MANUAL") else str(strategy_run_id or "")
+    ),
+    source_execution_environment="PAPER",
+    environment="PAPER",
   )
 
-  assert _exit_plan_execution_owner(model) == expected
+  assert durable_exit_plan_owner_kind(model) == expected
 
 
 @pytest.mark.parametrize(
@@ -104,15 +125,38 @@ def test_exit_plan_execution_owner_rejects_mismatches_and_unknown_sources(
       managed_runtime_command_id,
       source_type=source_type,
       strategy_run_id=strategy_run_id,
+      source_id="source-1",
     ),
     source_type=source_type,
+    source_id="source-1",
+    group_id="source-1" if source_type == "MANUAL_LIQUIDATION" else None,
     strategy_run_id=strategy_run_id,
+    source_execution_owner_type=(
+      "MANUAL_COMMAND"
+      if source_type in {"MANUAL_POSITION", "MANUAL_LIQUIDATION"}
+      else "STRATEGY_RUN"
+    ),
+    source_execution_owner_id=(
+      "source-1"
+      if str(source_type or "").startswith("MANUAL")
+      else str(strategy_run_id or "bad-run")
+    ),
+    source_execution_environment="PAPER",
+    environment="PAPER",
   )
 
-  assert _exit_plan_execution_owner(model) == "INVALID_OWNER"
+  assert durable_exit_plan_owner_kind(model) == INVALID_OWNER
 
 
 def _view_model(*, source_type, strategy_run_id, managed_runtime_command_id=None):
+  runtime_source = source_type in {
+    "T_TRADE_BATCH",
+    "LIMIT_UP_BOARD",
+    "FIRST_BOARD_PROMOTION_V2",
+    "ENTRY_PLAN",
+  }
+  source_id = str(strategy_run_id or "") if runtime_source else "source-1"
+  source_owner_type = "STRATEGY_RUN" if runtime_source else "MANUAL_COMMAND"
   return SimpleNamespace(
     account_id="account-1",
     auto_exit_authorized=False,
@@ -126,7 +170,7 @@ def _view_model(*, source_type, strategy_run_id, managed_runtime_command_id=None
     data_quality="PRICE_UNAVAILABLE",
     enabled=True,
     entry_avg_price=10.0,
-    execution_mode="paper",
+    environment="PAPER",
     exited_volume=0,
     group_id=None,
     instrument_code="600000.SH",
@@ -142,13 +186,17 @@ def _view_model(*, source_type, strategy_run_id, managed_runtime_command_id=None
       managed_runtime_command_id,
       source_type=source_type,
       strategy_run_id=strategy_run_id,
+      source_id=source_id,
     ),
     protected_volume=100,
     remaining_volume=100,
-    source_id="source-1",
+    source_id=source_id,
     source_type=source_type,
     status="ACTIVE",
     strategy_run_id=strategy_run_id,
+    source_execution_owner_type=source_owner_type,
+    source_execution_owner_id=source_id,
+    source_execution_environment="PAPER",
     trailing_floor_pct=None,
     updated_at=None,
   )
@@ -157,7 +205,7 @@ def _view_model(*, source_type, strategy_run_id, managed_runtime_command_id=None
 @pytest.mark.parametrize(
   ("source_type", "strategy_run_id", "managed_runtime_command_id", "can_edit"),
   [
-    ("MANUAL_POSITION", "managed-run-1", "create-command-1", False),
+    ("T_TRADE_BATCH", "managed-run-1", "create-command-1", False),
     ("MANUAL_POSITION", None, None, True),
     ("MANUAL_POSITION", None, "orphaned-create-command-1", True),
     ("T_TRADE_BATCH", "t-run-1", None, False),

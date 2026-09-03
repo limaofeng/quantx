@@ -194,7 +194,7 @@ struct TTradeControlView: View {
         statusRow(
           title: "协议",
           value: snapshot.protocolVersion.isEmpty ? "未上报" : snapshot.protocolVersion,
-          passed: snapshot.protocolVersion == "1.1"
+          passed: snapshot.protocolVersion == "1.2"
         )
         statusRow(
           title: "账户对账",

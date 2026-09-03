@@ -13,7 +13,12 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Optional
 
-from quantx_contracts import LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
+from quantx_contracts import (
+  LIVE_ORDER_MAX_QUOTE_AGE_SECONDS,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_domain.brokers.base import (
   OrderRequest,
 )
@@ -23,7 +28,11 @@ from quantx_domain.brokers.base import (
 from quantx_domain.brokers.base import (
   PriceType as DomainPriceType,
 )
-from quantx_domain.strategies.base import TradeIntent, TradeIntentDirection
+from quantx_domain.strategies.base import (
+  ManualCommandIntentOrigin,
+  TradeIntent,
+  TradeIntentDirection,
+)
 from quantx_domain.trading.market_rules import AShareMarketRules, MarketDataSnapshot
 from quantx_domain.trading.order_sizer import OrderSizer
 from quantx_domain.trading.risk_checker import RiskAction, TradingRiskChecker
@@ -366,9 +375,17 @@ def _stable_risk_decision_id(challenge_id: str) -> str:
 def _challenge_payload(
   request: ManualOrderRequestData,
   preflight: ManualOrderPreflightData,
+  *,
+  owner_id: str,
 ) -> dict[str, Any]:
   return {
     **request.payload(),
+    # The signed payload carries the same durable identity as the challenge
+    # row.  It is binding evidence only; confirmation still validates the
+    # durable owner/environment columns and never infers them from metadata.
+    "owner_type": ExecutionOwnerType.MANUAL_COMMAND.value,
+    "owner_id": owner_id,
+    "environment": request.execution_mode,
     "preview_reference_price": _canonical_number(preflight.reference_price),
     "preview_quote_timestamp": preflight.quote_timestamp.isoformat(
       timespec="microseconds"
@@ -492,7 +509,15 @@ async def _preflight(
   db: Any = None,
   lock_mutable_rows: bool = False,
   risk_decision_id: Optional[str] = None,
+  owner_id: str,
 ) -> ManualOrderPreflightData:
+  normalized_owner_id = str(owner_id or "").strip()
+  if not normalized_owner_id:
+    raise TradeApprovalChallengeError(
+      "CONFIRMATION_CONTEXT_MISMATCH",
+      "手动委托缺少持久化确认挑战归属",
+    )
+  manual_execution_ref = ExecutionOwnerRef.manual_command(normalized_owner_id)
   configured_mode = configured_manual_order_execution_mode(request.account_id)
   if request.execution_mode != configured_mode:
     configured_label = "LIVE 实盘" if configured_mode == "LIVE" else "PAPER 模拟"
@@ -507,6 +532,7 @@ async def _preflight(
         db=owned_db,
         lock_mutable_rows=lock_mutable_rows,
         risk_decision_id=risk_decision_id,
+        owner_id=normalized_owner_id,
       )
 
   rollout = None
@@ -635,8 +661,13 @@ async def _preflight(
   domain_side = DomainOrderType(request.side)
   available_volume = int(getattr(position, "can_use_volume", 0) or 0)
   intent = TradeIntent(
-    strategy_id="manual-order",
-    run_id="manual-order",
+    strategy_id="",
+    run_id="",
+    execution_ref=manual_execution_ref,
+    origin=ManualCommandIntentOrigin(
+      command_id=normalized_owner_id,
+      action_type=MANUAL_ORDER_ACTION,
+    ),
     instrument_code=request.instrument_code,
     direction=TradeIntentDirection(request.side),
     bucket="manual",
@@ -663,6 +694,8 @@ async def _preflight(
     order_type=domain_side,
     price_type=domain_price_type,
     volume=draft.sized_volume,
+    execution_ref=manual_execution_ref,
+    environment=ExecutionEnvironment(request.execution_mode),
     price=price,
     metadata={"bucket": "manual", "origin": "MANUAL_ORDER"},
   )
@@ -832,10 +865,11 @@ class ManualOrderChallengeService:
     preflight = await _preflight(
       request,
       risk_decision_id=risk_decision_id,
+      owner_id=challenge_id,
     )
     if preflight.risk_decision_id != risk_decision_id:
       preflight = replace(preflight, risk_decision_id=risk_decision_id)
-    payload = _challenge_payload(request, preflight)
+    payload = _challenge_payload(request, preflight, owner_id=challenge_id)
     raw_token = secrets.token_urlsafe(48)
     now = time_utils.now()
     challenge = TradeConfirmationChallenge(
@@ -844,6 +878,9 @@ class ManualOrderChallengeService:
       user_id=principal.user_id,
       device_session_id=principal.device_session_id,
       account_id=request.account_id,
+      owner_type="MANUAL_COMMAND",
+      owner_id=challenge_id,
+      environment=request.execution_mode,
       idempotency_key=request.idempotency_key,
       payload=payload,
       payload_fingerprint=signed_payload_fingerprint(payload),
@@ -931,6 +968,26 @@ class ManualOrderChallengeService:
           raise TradeApprovalChallengeError(
             "CONFIRMATION_CONTEXT_MISMATCH", "确认期间订单内容发生变化"
           )
+        try:
+          challenge_owner = ExecutionOwnerRef(
+            str(challenge.owner_type or ""),
+            str(challenge.owner_id or ""),
+          )
+          challenge_environment = ExecutionEnvironment(
+            str(challenge.environment or "").upper()
+          )
+        except (TypeError, ValueError) as exc:
+          raise TradeApprovalChallengeError(
+            "CONFIRMATION_CONTEXT_MISMATCH", "确认挑战缺少有效执行归属"
+          ) from exc
+        if (
+          challenge_owner.owner_type.value != "MANUAL_COMMAND"
+          or challenge_owner.owner_id != challenge.id
+          or challenge_environment.value != locked_request.execution_mode
+        ):
+          raise TradeApprovalChallengeError(
+            "CONFIRMATION_CONTEXT_MISMATCH", "确认挑战执行归属已变化"
+          )
         if challenge.consumed_at is not None:
           return await ManualOrderChallengeService._existing_result(
             db=db,
@@ -961,6 +1018,7 @@ class ManualOrderChallengeService:
           db=db,
           lock_mutable_rows=True,
           risk_decision_id=risk_decision_id,
+          owner_id=challenge.id,
         )
         _validate_snapshot_binding(payload, preflight)
         _validate_risk_binding(payload, preflight)
@@ -973,16 +1031,19 @@ class ManualOrderChallengeService:
           account_id=request.account_id,
           instrument_code=request.instrument_code,
           side=request.side,
-          order_type=(
-            "FIX_PRICE" if request.price_type == "LIMIT" else "MARKET_PEER_PRICE_FIRST"
+          order_type="FIX_PRICE",
+          limit_price=Decimal(
+            str(
+              request.limit_price
+              if request.price_type == "LIMIT"
+              else preflight.reference_price
+            )
           ),
-          limit_price=Decimal(str(request.limit_price or 0)),
           volume=preflight.final_volume,
-          strategy_name="manual-order",
-          order_remark="QuantX 手动委托",
+          execution_ref=challenge_owner,
+          environment=challenge_environment,
           trace_id=challenge.id,
           idempotency_key=_command_idempotency_key(challenge.id, request),
-          execution_mode=request.execution_mode.lower(),
           bucket="manual",
           manual_live=request.execution_mode == "LIVE",
           risk_decision_id=risk_decision_id,
@@ -1063,6 +1124,8 @@ class ManualOrderChallengeService:
       user_id=str(challenge.user_id),
       account_id=request.account_id,
       idempotency_key=_command_idempotency_key(str(challenge.id), request),
+      execution_ref=ExecutionOwnerRef.manual_command(str(challenge.id)),
+      environment=ExecutionEnvironment(request.execution_mode),
     )
     outbox = (
       await db.execute(

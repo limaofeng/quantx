@@ -40,9 +40,9 @@ export const accountExecutionGatePresentation = {
     label: '全市场行情链路',
     passedDescription: 'Agent、API 与 Engine 已完成权威三阶段同步。',
   },
-  PROTOCOL_1_1: {
+  PROTOCOL_1_2: {
     label: '通信协议版本',
-    passedDescription: 'QMT 代理使用兼容的 1.1 协议。',
+    passedDescription: 'QMT 代理使用唯一支持的 1.2 协议。',
   },
   EXECUTION_CONTROL_CONFIGURED: {
     label: '账户执行控制',

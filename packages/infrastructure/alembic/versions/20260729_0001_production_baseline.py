@@ -18,6 +18,7 @@ from sqlalchemy import (
   Column,
   DateTime,
   ForeignKeyConstraint,
+  Index,
   MetaData,
   String,
   UniqueConstraint,
@@ -128,6 +129,26 @@ POST_BASELINE_COLUMNS = {
   },
   "strategy_trade_intents": {
     "account_id",
+    "environment",
+    "idempotency_key",
+    "owner_id",
+    "owner_type",
+  },
+  "pending_trade_orders": {
+    "owner_id",
+    "owner_type",
+  },
+  "strategy_order_correlations": {
+    "owner_id",
+    "owner_type",
+  },
+  "trade_command_outbox": {
+    "environment",
+    "owner_id",
+    "owner_type",
+  },
+  "strategy_runtime_events": {
+    "environment",
     "owner_id",
     "owner_type",
   },
@@ -137,14 +158,17 @@ POST_BASELINE_COLUMNS = {
   "t_trade_batches": {
     "closed_at",
     "commission_rate",
+    "environment",
     "entry_filled_at",
-    "execution_mode",
     "last_exit_filled_at",
     "metrics_origin",
     "minimum_commission",
     "stamp_tax_rate",
     "terminal_at",
     "transfer_fee_rate",
+    "source_execution_environment",
+    "source_execution_owner_id",
+    "source_execution_owner_type",
   },
   "stock_announcements": {
     "content_fetched_at",
@@ -177,9 +201,13 @@ POST_BASELINE_INDEXES = {
 def _baseline_metadata() -> MetaData:
   """Clone only the schema that belonged to the immutable baseline."""
   metadata = MetaData()
+  table_names = {
+    "trade_intents": "strategy_trade_intents",
+    "order_correlations": "strategy_order_correlations",
+  }
   for table in Base.metadata.tables.values():
     if table.key not in POST_BASELINE_TABLES:
-      table.to_metadata(metadata)
+      table.to_metadata(metadata, name=table_names.get(table.key))
 
   # The live model now stores account-wide facts in
   # ``account_execution_controls``. Reconstruct the columns that were part of
@@ -238,6 +266,21 @@ def _baseline_metadata() -> MetaData:
     for index in list(table.indexes):
       if index.name in index_names:
         table.indexes.remove(index)
+  # The owner/environment checks belong to the adoption revision, never to
+  # this historical clone.  CheckConstraint.columns is empty for textual
+  # checks, so the column-based pruning above cannot remove them.
+  for table_key in (
+    "strategy_trade_intents",
+    "pending_trade_orders",
+    "strategy_order_correlations",
+    "trade_command_outbox",
+    "strategy_runtime_events",
+    "t_trade_batches",
+  ):
+    table = metadata.tables[table_key]
+    for constraint in list(table.constraints):
+      if isinstance(constraint, CheckConstraint):
+        table.constraints.remove(constraint)
   # ``group_name`` was part of the immutable watchlist baseline.  It is
   # intentionally absent from the live model after 20260823_0031, so restore
   # this historical-only column in the clone used for the fingerprint check.
@@ -253,7 +296,66 @@ def _baseline_metadata() -> MetaData:
     columns.insert(note_index, group_entry)
   # Revision 20260813_0010 makes strategy ownership optional for plan-owned
   # intents; the immutable baseline still required a strategy run.
+  # The baseline predates the canonical table names and owner/environment
+  # projection.  Restore the historical column names and nullability inside
+  # this clone only; the live ORM metadata remains canonical.
+  def rename_column(table_key: str, old_name: str, new_name: str) -> None:
+    table = metadata.tables[table_key]
+    column = table.c[old_name]
+    column.name = new_name
+    column.key = new_name
+    for index, entry in enumerate(table._columns._collection):
+      if entry[1] is column:
+        table._columns._collection[index] = (new_name, column, entry[2])
+        break
+    table._columns._index.clear()
+    for index, entry in enumerate(table._columns._collection):
+      table._columns._index[index] = (entry[0], entry[1])
+      table._columns._index[entry[0]] = (entry[0], entry[1])
+
+  rename_column("strategy_order_correlations", "environment", "execution_mode")
+  rename_column("pending_trade_orders", "environment", "execution_mode")
+  def move_column(table_key: str, column_name: str, target_index: int) -> None:
+    table = metadata.tables[table_key]
+    collection = table._columns._collection
+    current_index = next(
+      index for index, entry in enumerate(collection) if entry[0] == column_name
+    )
+    entry = collection.pop(current_index)
+    collection.insert(target_index, entry)
+    table._columns._index.clear()
+    for index, item in enumerate(collection):
+      table._columns._index[index] = (item[0], item[1])
+      table._columns._index[item[0]] = (item[0], item[1])
+
+  move_column("strategy_order_correlations", "execution_mode", 10)
+  move_column("pending_trade_orders", "execution_mode", 11)
   metadata.tables["strategy_trade_intents"].c.strategy_run_id.nullable = False
+  metadata.tables["strategy_order_correlations"].c.strategy_run_id.nullable = False
+  metadata.tables["strategy_order_correlations"].c.strategy_order_id.nullable = False
+  metadata.tables["strategy_order_correlations"].c.intent_id.nullable = False
+  metadata.tables["strategy_runtime_events"].c.strategy_run_id.nullable = False
+  metadata.tables["t_trade_batches"].c.strategy_run_id.nullable = False
+  # Revision 0047 widens vendor order IDs in the live schema; keep the
+  # immutable pre-0047 clone at its historical width for the locked hash.
+  metadata.tables["orders"].c.order_sysid.type = String(length=10)
+  metadata.tables["trades"].c.order_sysid.type = String(length=10)
+  for constraint in metadata.tables["strategy_order_correlations"].constraints:
+    if isinstance(constraint, UniqueConstraint) and {
+      column.name for column in constraint.columns
+    } == {"client_order_id"}:
+      constraint.name = "uq_strategy_order_client"
+
+  # Canonical indexes replaced these baseline indexes.  Recreate the exact
+  # historical names/columns in the clone so the locked fingerprint remains
+  # a check on the original schema rather than on current ORM naming.
+  order_correlations = metadata.tables["strategy_order_correlations"]
+  if not any(index.name == "ix_strategy_order_run_batch" for index in order_correlations.indexes):
+    Index(
+      "ix_strategy_order_run_batch",
+      order_correlations.c.strategy_run_id,
+      order_correlations.c.batch_id,
+    )
   return metadata
 
 

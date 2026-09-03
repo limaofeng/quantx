@@ -10,6 +10,10 @@ import {
   PreviewExitPlanAuthorizationMutation,
   UpdateManualExitPlanMutation,
 } from '@/features/portfolio/hooks/usePortfolio';
+import {
+  ExecutionEnvironment,
+  ExecutionOwnerType,
+} from '@/generated/gql/graphql';
 
 const mocks = vi.hoisted(() => ({
   confirmAuthorization: vi.fn(),
@@ -75,8 +79,11 @@ function makeEditingPlan(): EditingPlan {
     editRoute: null,
     enabled: true,
     entryAvgPrice: 12.5,
-    executionMode: 'paper',
-    executionOwner: 'EXIT_PLAN_MONITOR',
+    environment: ExecutionEnvironment.Paper,
+    executionOwner: {
+      ownerId: 'plan-update-1',
+      ownerType: ExecutionOwnerType.ExitPlan,
+    },
     exitedVolume: 0,
     groupId: null,
     instrumentCode: '601318.SH',
@@ -104,6 +111,10 @@ function makeEditingPlan(): EditingPlan {
       },
     ],
     sourceId: 'manual',
+    sourceExecutionOwner: {
+      ownerId: 'manual-command-1',
+      ownerType: ExecutionOwnerType.ManualCommand,
+    },
     sourceType: 'MANUAL_POSITION',
     stateVersion: 8,
     status: 'ACTIVE',

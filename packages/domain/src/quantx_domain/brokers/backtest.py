@@ -523,6 +523,8 @@ class BacktestBroker(BrokerBase):
       commission=commission,
       trade_time=self.current_time or time_utils.now(),
       metadata={**dict(request.metadata or {}), "costs": costs},
+      execution_ref=request.execution_ref,
+      environment=request.environment,
     )
     self.trades.append(trade)
 

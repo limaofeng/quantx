@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta
 
 import pytest
-from quantx_domain.brokers.base import OrderRequest, OrderType, PriceType
 from quantx_infrastructure.core.evolution import (
   EvolutionCandidate,
   EvolutionTask,
@@ -94,15 +93,15 @@ def test_local_agent_places_and_cancels_orders_through_preflight():
   agent = MiniQmtLocalAgent(manager)
 
   result = agent.place_order(
-    OrderRequest(
-      instrument_code="000001.SZ",
-      order_type=OrderType.BUY,
-      price_type=PriceType.LIMIT,
-      volume=100,
-      price=10.0,
-      strategy_id="strategy",
-      metadata={"order_remark": "intent-1"},
-    )
+    {
+      "client_order_id": "123",
+      "instrument_code": "000001.SZ",
+      "side": "BUY",
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.0",
+      "volume": 100,
+      "execution_mode": "paper",
+    }
   )
   cancel_result = agent.cancel_order("123")
 

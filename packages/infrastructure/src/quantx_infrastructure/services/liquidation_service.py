@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.trading.exit_plan import (
   ExitEvaluationContext,
   ExitPlanBook,
@@ -127,6 +128,32 @@ class LiquidationService:
     )
     self.position_service = PositionService()
     self.market_rules = AShareMarketRules()
+
+  @staticmethod
+  def _require_command_id(command_id: str) -> str:
+    """Validate the caller-owned identity used for manual liquidation."""
+
+    if not isinstance(command_id, str):
+      raise LiquidationError("MANUAL_LIQUIDATION_COMMAND_ID_INVALID")
+    normalized = command_id.strip()
+    if not normalized:
+      raise LiquidationError("MANUAL_LIQUIDATION_COMMAND_ID_MISSING")
+    if len(normalized) > 128:
+      raise LiquidationError("MANUAL_LIQUIDATION_COMMAND_ID_INVALID")
+    try:
+      ExecutionOwnerRef.manual_command(normalized)
+    except (TypeError, ValueError) as exc:
+      raise LiquidationError("MANUAL_LIQUIDATION_COMMAND_ID_INVALID") from exc
+    return normalized
+
+  @classmethod
+  def _derive_batch_command_id(cls, command_id: str, stock_code: str) -> str:
+    """Derive one stable owner id per symbol from a caller-owned batch id."""
+
+    derived = f"{command_id}:{stock_code}"
+    if len(derived) > 128:
+      raise LiquidationError("MANUAL_LIQUIDATION_COMMAND_ID_INVALID")
+    return cls._require_command_id(derived)
 
   async def list_conditional_liquidation_orders(
     self,
@@ -497,8 +524,8 @@ class LiquidationService:
       max_retry=1,
       target_volume=sell_volume,
       close_position=close_position,
-      strategy_name="条件清仓单",
-      order_remark=f"条件清仓: {order.stock_code}",
+      command_id=f"conditional-liquidation:{order.id}",
+      limit_price=latest_price,
     )
     if result.get("success"):
       order_id = result.get("order_id")
@@ -660,7 +687,7 @@ class LiquidationService:
     return sizing.calculate(available)
 
   async def liquidate_all_positions(
-    self, confirm: bool = False, max_retry: int = 3
+    self, confirm: bool = False, max_retry: int = 3, *, command_id: str
   ) -> LiquidationResult:
     """
     一键清仓 - 清空所有持仓
@@ -678,6 +705,7 @@ class LiquidationService:
       # 风险确认检查
       if not confirm:
         raise LiquidationError("必须确认风险才能执行一键清仓操作")
+      normalized_command_id = self._require_command_id(command_id)
 
       # 获取所有可清仓持仓
       liquidatable_positions = await self._get_liquidatable_positions()
@@ -690,10 +718,21 @@ class LiquidationService:
 
       logger.info(f"开始一键清仓，共{result.total_positions}个持仓")
 
-      # 批量清仓
+      # The caller-owned batch id is the retry identity.  Each symbol gets a
+      # stable derived owner so one batch can safely contain multiple orders.
       for position in liquidatable_positions:
         try:
-          liquidation_result = await self._liquidate_single_position(position, max_retry)
+          position_command_id = self._derive_batch_command_id(
+            normalized_command_id,
+            str(position.stock_code).strip().upper(),
+          )
+          latest_price = await self._get_verified_latest_price(position)
+          liquidation_result = await self._liquidate_single_position(
+            position,
+            max_retry,
+            command_id=position_command_id,
+            limit_price=latest_price,
+          )
 
           if liquidation_result["success"]:
             result.liquidated_positions += 1
@@ -729,7 +768,7 @@ class LiquidationService:
       return result
 
   async def liquidate_position(
-    self, stock_code: str, confirm: bool = False, max_retry: int = 3
+    self, stock_code: str, confirm: bool = False, max_retry: int = 3, *, command_id: str
   ) -> Dict[str, Any]:
     """
     个股清仓 - 清空指定股票的持仓
@@ -746,6 +785,7 @@ class LiquidationService:
       # 风险确认检查
       if not confirm:
         raise LiquidationError("必须确认风险才能执行清仓操作")
+      normalized_command_id = self._require_command_id(command_id)
 
       # 获取持仓信息
       position = await self._get_position(stock_code)
@@ -760,8 +800,14 @@ class LiquidationService:
 
       logger.info(f"开始清仓股票: {stock_code}, 数量: {position.can_use_volume}")
 
-      # 执行清仓
-      return await self._liquidate_single_position(position, max_retry)
+      # Reuse the caller-owned command id across retries of this request.
+      latest_price = await self._get_verified_latest_price(position)
+      return await self._liquidate_single_position(
+        position,
+        max_retry,
+        command_id=normalized_command_id,
+        limit_price=latest_price,
+      )
 
     except Exception as e:
       error_msg = f"个股清仓失败 - 股票: {stock_code}, 错误: {str(e)}"
@@ -908,8 +954,8 @@ class LiquidationService:
     *,
     target_volume: Optional[int] = None,
     close_position: Optional[bool] = None,
-    strategy_name: str = "清仓操作",
-    order_remark: Optional[str] = None,
+    command_id: str,
+    limit_price: Optional[float] = None,
   ) -> Dict[str, Any]:
     """
     清仓单个持仓
@@ -923,6 +969,41 @@ class LiquidationService:
     """
     retry_count = 0
     last_error = None
+    normalized_command_id = str(command_id or "").strip()
+    if not normalized_command_id:
+      return {
+        "success": False,
+        "stock_code": position.stock_code,
+        "error": "MANUAL_LIQUIDATION_COMMAND_ID_MISSING",
+        "message": "清仓命令缺少稳定命令标识",
+      }
+    normalized_price = self._optional_float(limit_price)
+    if normalized_price is None or normalized_price <= 0:
+      return {
+        "success": False,
+        "stock_code": position.stock_code,
+        "error": "LIQUIDATION_LATEST_PRICE_UNAVAILABLE",
+        "message": "清仓命令缺少经过校验的最新限价",
+      }
+    try:
+      raw_environment = getattr(self.trading_service, "environment", "PAPER")
+      execution_environment = ExecutionEnvironment(
+        str(
+          getattr(raw_environment, "value", raw_environment)
+          or ""
+        ).upper()
+      )
+    except (TypeError, ValueError) as exc:
+      raise LiquidationError("清仓命令缺少有效执行环境") from exc
+    try:
+      execution_ref = ExecutionOwnerRef.manual_command(normalized_command_id)
+    except (TypeError, ValueError):
+      return {
+        "success": False,
+        "stock_code": position.stock_code,
+        "error": "MANUAL_LIQUIDATION_COMMAND_ID_INVALID",
+        "message": "清仓命令的稳定命令标识无效",
+      }
 
     while retry_count < max_retry:
       try:
@@ -937,11 +1018,12 @@ class LiquidationService:
           stock_code=position.stock_code,
           order_type=OrderType.SELL,
           order_volume=close_volume,
-          price_type=PriceType.MARKET_CONVERT_5_LIMIT,
-          price=0,  # 市价单
-          strategy_name=strategy_name,
-          order_remark=order_remark or f"清仓: {position.stock_code}",
+          price_type=PriceType.FIX_PRICE,
+          price=normalized_price,
           close_position=is_close_position,
+          idempotency_key=f"manual-liquidation:{normalized_command_id}",
+          execution_ref=execution_ref,
+          environment=execution_environment,
         )
 
         if order_result["success"]:
@@ -1010,6 +1092,27 @@ class LiquidationService:
       return None
     latest_price = self._optional_float(getattr(position, "last_price", None))
     return latest_price if latest_price and latest_price > 0 else None
+
+  async def _get_verified_latest_price(
+    self,
+    position: Optional[Position],
+  ) -> Optional[float]:
+    """Read a fresh, positive quote before constructing a fixed-price sell."""
+
+    stock_code = str(getattr(position, "stock_code", "") or "").strip().upper()
+    if not stock_code:
+      return None
+    try:
+      latest_tick = await market_data_service.get_latest_price(stock_code)
+    except Exception as exc:
+      logger.warning("清仓获取最新价失败: %s, %s", stock_code, exc)
+      return None
+    latest_price = self._optional_float(
+      getattr(latest_tick, "last_price", None)
+      if latest_tick is not None
+      else None
+    )
+    return latest_price if latest_price is not None and latest_price > 0 else None
 
   def _validate_conditional_order_payload(
     self,

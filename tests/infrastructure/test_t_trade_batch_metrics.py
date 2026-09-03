@@ -15,7 +15,7 @@ from quantx_infrastructure.services.t_trade_batch_metrics import (
 
 def _batch(**overrides):
   values = {
-    "execution_mode": "live",
+    "environment": "LIVE",
     "metrics_origin": METRIC_ORIGIN_RULE_ESTIMATE,
     "entry_filled_volume": 100,
     "entry_avg_price": 10.0,

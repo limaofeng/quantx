@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from quantx_api.gqlapi.schemas import agent_schema
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamState,
 )
@@ -112,7 +113,7 @@ async def test_qmt_connection_keeps_ready_incumbent_during_handover(
         status="READY",
         details={
           "agentVersion": "1.4.0",
-          "protocolVersion": "1.1",
+          "protocolVersion": PROTOCOL_VERSION,
           "xtdataStatus": "CONNECTED",
           "xttradingStatus": "CONNECTED",
           "readyAccounts": ["account-1"],
@@ -186,7 +187,7 @@ async def test_qmt_connection_keeps_ready_incumbent_during_handover(
   assert result.current.xtdata_status == "CONNECTED"
   assert result.current.market_stream.instrument_count == 5822
   assert result.current.market_stream.ack_latency_ms == 186.4
-  assert result.current.diagnostics.protocol_version == "1.1"
+  assert result.current.diagnostics.protocol_version == PROTOCOL_VERSION
   assert result.current.last_seen_at is not None
   assert result.current.last_seen_at.tzinfo is timezone.utc
   assert result.handover_status == "RECONCILING"

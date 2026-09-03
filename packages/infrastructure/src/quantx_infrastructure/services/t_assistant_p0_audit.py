@@ -22,8 +22,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 P0_SCHEMA_VERSION = 1
-CURRENT_PROTOCOL_VERSION = "1.1"
-TARGET_PROTOCOL_VERSION = "1.2"
+LEGACY_PROTOCOL_VERSION = "1.1"
+CURRENT_PROTOCOL_VERSION = "1.2"
+TARGET_PROTOCOL_VERSION = CURRENT_PROTOCOL_VERSION
 TARGET_OWNER_TYPES = (
   "STRATEGY_RUN",
   "T_ASSISTANT_EXECUTION",
@@ -39,9 +40,9 @@ REQUIRED_TABLES = (
   "strategy_runs",
   "strategies",
   "strategy_run_states",
-  "strategy_trade_intents",
+  "trade_intents",
   "pending_trade_orders",
-  "strategy_order_correlations",
+  "order_correlations",
   "trade_command_outbox",
   "strategy_runtime_events",
   "t_trade_batches",
@@ -167,10 +168,22 @@ _T_RUN_ANY_CTE = """
 """
 _T_COMMAND_PREDICATE = f"""
   (
-    UPPER(COALESCE(command.payload ->> 't_trade_role', '')) IN ('ENTRY', 'EXIT')
-    OR UPPER(COALESCE(command.payload ->> 'strategy_name', '')) =
-      'ASHAREINTRADAYTASSISTANTSTRATEGY'
-    OR command.payload ->> 'strategy_run_id' IN ({_T_RUN_ANY_CTE})
+    command.owner_type = 'STRATEGY_RUN'
+    AND command.owner_id IN ({_T_RUN_ANY_CTE})
+    AND (
+      EXISTS (
+        SELECT 1
+        FROM pending_trade_orders AS pending
+        WHERE pending.client_order_id = command.client_order_id
+          AND UPPER(COALESCE(pending.t_trade_role, '')) IN ('ENTRY', 'EXIT')
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM order_correlations AS correlation
+        WHERE correlation.client_order_id = command.client_order_id
+          AND UPPER(COALESCE(correlation.t_trade_role, '')) IN ('ENTRY', 'EXIT')
+      )
+    )
   )
 """
 
@@ -237,7 +250,7 @@ WHERE UPPER(COALESCE(instrument_state.value -> 'opportunity' ->> 'candidate_stat
 
 _AWAITING_APPROVAL_SQL = """
 SELECT COUNT(*) AS count_value
-FROM strategy_trade_intents AS intent
+FROM trade_intents AS intent
 JOIN strategy_runs AS run ON run.id = intent.strategy_run_id
 JOIN strategies AS strategy ON strategy.id = run.strategy_id
 WHERE strategy.class_name = 'AshareIntradayTAssistantStrategy'
@@ -272,7 +285,7 @@ WHERE (
 
 _TERMINAL_RUN_AWAITING_APPROVAL_SQL = f"""
 SELECT COUNT(*) AS count_value
-FROM strategy_trade_intents AS intent
+FROM trade_intents AS intent
 JOIN strategy_runs AS run ON run.id = intent.strategy_run_id
 JOIN strategies AS strategy ON strategy.id = run.strategy_id
 WHERE strategy.class_name = 'AshareIntradayTAssistantStrategy'
@@ -282,7 +295,7 @@ WHERE strategy.class_name = 'AshareIntradayTAssistantStrategy'
 
 _APPROVAL_IDENTITY_MISSING_SQL = """
 SELECT COUNT(*) AS count_value
-FROM strategy_trade_intents AS intent
+FROM trade_intents AS intent
 JOIN strategy_runs AS run ON run.id = intent.strategy_run_id
 JOIN strategies AS strategy ON strategy.id = run.strategy_id
 WHERE strategy.class_name = 'AshareIntradayTAssistantStrategy'
@@ -298,7 +311,7 @@ WHERE strategy.class_name = 'AshareIntradayTAssistantStrategy'
 
 _NONTERMINAL_INTENT_SQL = f"""
 SELECT COUNT(*) AS count_value
-FROM strategy_trade_intents AS intent
+FROM trade_intents AS intent
 JOIN strategy_runs AS run ON run.id = intent.strategy_run_id
 JOIN strategies AS strategy ON strategy.id = run.strategy_id
 WHERE strategy.class_name = 'AshareIntradayTAssistantStrategy'
@@ -354,7 +367,7 @@ FROM pending_trade_orders AS pending
 JOIN ({_T_RUN_ANY_CTE}) AS t_run ON t_run.id = pending.strategy_run_id
 LEFT JOIN trade_command_outbox AS command
   ON command.client_order_id = pending.client_order_id
-LEFT JOIN strategy_order_correlations AS correlation
+LEFT JOIN order_correlations AS correlation
   ON correlation.client_order_id = pending.client_order_id
 WHERE UPPER(pending.status) NOT IN ({_sql_list(_TERMINAL_PENDING_STATUSES)})
   AND (command.message_id IS NULL OR correlation.id IS NULL)
@@ -362,7 +375,7 @@ WHERE UPPER(pending.status) NOT IN ({_sql_list(_TERMINAL_PENDING_STATUSES)})
 
 _CORRELATION_PENDING_CONFLICT_SQL = f"""
 SELECT COUNT(*) AS count_value
-FROM strategy_order_correlations AS correlation
+FROM order_correlations AS correlation
 JOIN pending_trade_orders AS pending
   ON pending.client_order_id = correlation.client_order_id
 JOIN ({_T_RUN_ANY_CTE}) AS t_run ON t_run.id = pending.strategy_run_id
@@ -373,7 +386,7 @@ WHERE (
     OR correlation.batch_id IS DISTINCT FROM pending.batch_id
     OR correlation.bucket IS DISTINCT FROM pending.bucket
     OR correlation.t_trade_role IS DISTINCT FROM pending.t_trade_role
-    OR correlation.execution_mode IS DISTINCT FROM pending.execution_mode
+    OR correlation.environment IS DISTINCT FROM pending.environment
     OR correlation.risk_decision_id IS DISTINCT FROM pending.risk_decision_id
     OR correlation.trace_id IS DISTINCT FROM pending.trace_id
   )
@@ -384,7 +397,16 @@ SELECT COUNT(*) AS count_value
 FROM trade_command_outbox AS command
 WHERE {_T_COMMAND_PREDICATE}
   AND UPPER(command.delivery_status) = 'QUEUED'
-  AND COALESCE(command.payload ->> 'protocol_version', '1.1') = '1.1'
+  AND command.payload ?| ARRAY[
+    'protocol_version',
+    'strategy_name',
+    't_trade_role',
+    'strategy_run_id',
+    'strategy_order_id',
+    'intent_id',
+    'batch_id',
+    'trace_id'
+  ]
 """
 
 _UNKNOWN_RESULT_PROTOCOL_11_SQL = f"""
@@ -394,7 +416,16 @@ WHERE {_T_COMMAND_PREDICATE}
   AND UPPER(command.delivery_status) IN (
     'DELIVERED', 'ACKNOWLEDGED', 'RECONCILE_REQUIRED'
   )
-  AND COALESCE(command.payload ->> 'protocol_version', '1.1') = '1.1'
+  AND command.payload ?| ARRAY[
+    'protocol_version',
+    'strategy_name',
+    't_trade_role',
+    'strategy_run_id',
+    'strategy_order_id',
+    'intent_id',
+    'batch_id',
+    'trace_id'
+  ]
   AND NOT EXISTS (
     SELECT 1
     FROM pending_trade_orders AS pending
@@ -495,7 +526,7 @@ WHERE {_OUTSTANDING_T_EXIT_PLAN_FILTER}
 
 _LEGACY_T_INTENT_OWNER_INVALID_SQL = f"""
 SELECT COUNT(*) AS count_value
-FROM strategy_trade_intents AS intent
+FROM trade_intents AS intent
 JOIN strategy_runs AS run ON run.id = intent.strategy_run_id
 JOIN strategies AS strategy ON strategy.id = run.strategy_id
 WHERE strategy.class_name = 'AshareIntradayTAssistantStrategy'

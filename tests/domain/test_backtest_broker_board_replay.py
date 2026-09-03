@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.backtest import BacktestBroker
 from quantx_domain.brokers.base import (
   OrderRequest,
@@ -9,6 +10,8 @@ from quantx_domain.brokers.base import (
   PriceType,
 )
 from quantx_domain.trading.market_rules import MarketDataSnapshot
+
+_OWNER = ExecutionOwnerRef.strategy_run("backtest-test-run")
 
 
 def _book(timestamp, *, asks=None, ask_volumes=None, price=10.0):
@@ -60,6 +63,8 @@ async def test_strict_market_order_cannot_fill_on_signal_tick_and_uses_book_vwap
       order_type=OrderType.BUY,
       price_type=PriceType.MARKET,
       volume=150,
+      execution_ref=_OWNER,
+      environment=ExecutionEnvironment.BACKTEST,
       price=10.1,
     )
   )
@@ -90,6 +95,8 @@ async def test_strict_orders_share_one_ticks_visible_book_capacity():
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=100,
+      execution_ref=_OWNER,
+      environment=ExecutionEnvironment.BACKTEST,
       price=10.0,
     )
   )
@@ -99,6 +106,8 @@ async def test_strict_orders_share_one_ticks_visible_book_capacity():
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=100,
+      execution_ref=_OWNER,
+      environment=ExecutionEnvironment.BACKTEST,
       price=10.0,
     )
   )
@@ -129,6 +138,8 @@ async def test_strict_depth_never_falls_back_to_total_tick_volume():
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=100,
+      execution_ref=_OWNER,
+      environment=ExecutionEnvironment.BACKTEST,
       price=10.0,
     )
   )
@@ -158,6 +169,8 @@ async def test_sealed_limit_has_no_queue_credit():
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=100,
+      execution_ref=_OWNER,
+      environment=ExecutionEnvironment.BACKTEST,
       price=11.0,
     )
   )
@@ -191,6 +204,8 @@ async def test_deferred_orders_reserve_shared_cash_before_fill():
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=100,
+      execution_ref=_OWNER,
+      environment=ExecutionEnvironment.BACKTEST,
       price=10.0,
     )
   )
@@ -200,6 +215,8 @@ async def test_deferred_orders_reserve_shared_cash_before_fill():
       order_type=OrderType.BUY,
       price_type=PriceType.LIMIT,
       volume=100,
+      execution_ref=_OWNER,
+      environment=ExecutionEnvironment.BACKTEST,
       price=10.0,
     )
   )

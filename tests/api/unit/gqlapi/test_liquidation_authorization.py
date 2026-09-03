@@ -11,6 +11,7 @@ from quantx_api.gqlapi.trade_approval import (
   TradeApprovalDispatchData,
 )
 from quantx_api.gqlapi.types.liquidation_types import PositionLiquidationResult
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_infrastructure.services import trade_command_service
 
 
@@ -117,6 +118,14 @@ async def test_confirm_exit_intent_binds_durable_challenge_to_engine_command(
       idempotency_key="exit-plan-confirm:challenge-1",
     )
 
+  async def execution_binding(plan_id, account_id):
+    assert plan_id == "exit-plan-1"
+    assert account_id == "AUTHORIZED-ACCOUNT"
+    return (
+      ExecutionOwnerRef(ExecutionOwnerType.EXIT_PLAN, plan_id),
+      ExecutionEnvironment.LIVE,
+    )
+
   async def existing_engine_request(message_id, command_type):
     assert message_id == "message-1"
     assert command_type == "EXIT_PLAN_CONFIRM_INTENT"
@@ -133,6 +142,10 @@ async def test_confirm_exit_intent_binds_durable_challenge_to_engine_command(
     LiquidationResolver,
     "exit_plan_account_id",
     exit_plan_account_id,
+  )
+  monkeypatch.setattr(
+    "quantx_api.gqlapi.schemas.liquidation_schema._exit_plan_execution_binding",
+    execution_binding,
   )
   monkeypatch.setattr(TradeApprovalChallengeService, "consume", consume)
   monkeypatch.setattr(
@@ -173,7 +186,11 @@ async def test_confirm_exit_intent_binds_durable_challenge_to_engine_command(
   }
   assert captured["action"] == EXIT_PLAN_SELL_APPROVAL
   assert captured["account_id"] == "AUTHORIZED-ACCOUNT"
-  assert captured["business_owner_id"] == "exit-plan-1"
+  assert captured["execution_ref"] == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    "exit-plan-1",
+  )
+  assert captured["environment"] is ExecutionEnvironment.LIVE
   assert captured["intent_id"] == "exit-intent-1"
   assert captured["confirmation_token"] == "confirmation-token-1"
   assert captured["command_type"] == "EXIT_PLAN_CONFIRM_INTENT"

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from quantx_contracts import ExecutionOwnerRef
 from quantx_domain.enums import StrategyRunMode
 from quantx_domain.strategies.ashare_managed_entry_plan import (
   ENTRY_PLAN_ENABLED_KEY,
@@ -1634,6 +1635,7 @@ async def test_service_cancel_persists_terminal_request_before_late_fill() -> No
   await item.on_order(
     OrderStateEvent(
       order_id="order-1",
+      execution_ref=ExecutionOwnerRef.strategy_run("plan-1"),
       status="CANCELLED",
       filled_volume=100,
       metadata=metadata,
@@ -1643,6 +1645,7 @@ async def test_service_cancel_persists_terminal_request_before_late_fill() -> No
   trade_patch = await item.on_trade(
     TradeExecutionEvent(
       order_id="order-1",
+      execution_ref=ExecutionOwnerRef.strategy_run("plan-1"),
       instrument_code="605499.SH",
       trade_type="BUY",
       price=125,

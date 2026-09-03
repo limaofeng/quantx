@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_contracts import ExecutionEnvironment
 from quantx_domain.clock import utcnow
 from quantx_domain.trading.exit_plan import (
   ExitPlan,
@@ -26,9 +27,9 @@ from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControlEvent,
   AgentDevice,
   AgentReportInbox,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
-  StrategyOrderCorrelation,
   TradeCommandOutbox,
 )
 from quantx_infrastructure.models.auth import AuthUser
@@ -42,7 +43,7 @@ from quantx_infrastructure.services.account_execution_quarantine_service import 
   QUARANTINE_REPAIR_REQUIRED_METADATA_KEY,
   AccountExecutionQuarantineService,
 )
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -69,7 +70,7 @@ async def _database():
     AuthUser.__table__,
     AgentDevice.__table__,
     RuntimeComponentHeartbeat.__table__,
-    StrategyOrderCorrelation.__table__,
+    OrderCorrelation.__table__,
     AccountExecutionControl.__table__,
     AccountExecutionControlEvent.__table__,
     AgentReportInbox.__table__,
@@ -92,11 +93,20 @@ async def _database():
     await engine.dispose()
 
 
-def _plan(*, owner_kind: str) -> AutoExitPlanRecord:
+def _plan(
+  *,
+  owner_kind: str,
+  environment: str = ExecutionEnvironment.LIVE.value,
+) -> AutoExitPlanRecord:
   source_type, strategy_run_id = {
     "monitor": ("MANUAL_LIQUIDATION", None),
     "runtime": ("T_TRADE_BATCH", "runtime-run-1"),
-    "dedicated": ("MANUAL_POSITION", "managed-exit-run-1"),
+    "dedicated": ("MANUAL_POSITION", None),
+  }[owner_kind]
+  source_owner_type, source_owner_id = {
+    "monitor": ("MANUAL_COMMAND", "group-monitor"),
+    "runtime": ("STRATEGY_RUN", "runtime-run-1"),
+    "dedicated": ("MANUAL_COMMAND", "source-dedicated"),
   }[owner_kind]
   domain_plan = ExitPlan(
     template=ExitPlanTemplate(
@@ -135,7 +145,10 @@ def _plan(*, owner_kind: str) -> AutoExitPlanRecord:
     strategy_run_id=strategy_run_id,
     enabled=False,
     status="ERROR",
-    execution_mode="live",
+    source_execution_owner_type=source_owner_type,
+    source_execution_owner_id=source_owner_id,
+    source_execution_environment=environment,
+    environment=environment,
     config_version=2,
     protected_volume=100,
     exited_volume=0,
@@ -143,60 +156,67 @@ def _plan(*, owner_kind: str) -> AutoExitPlanRecord:
     entry_avg_price=10.0,
     cost_basis_snapshot={},
     plan_state=domain_plan.to_dict(),
+    group_id="group-monitor" if owner_kind == "monitor" else None,
     pending_client_order_id=CLIENT_ORDER_ID,
     state_version=7,
     last_error="ZERO_FILL_PROOF_INVALIDATED_AFTER_RELEASE:old-intent",
   )
 
 
-def _pending(*, broker_order_id: str = "") -> PendingTradeOrder:
-  metadata = {
-    "owner_type": "EXIT_PLAN",
-    "owner_id": PLAN_ID,
-    "exit_plan_id": PLAN_ID,
-  }
+def _pending(
+  *,
+  broker_order_id: str = "",
+  environment: str = ExecutionEnvironment.LIVE.value,
+) -> PendingTradeOrder:
+  metadata = {"exit_rule_id": f"{PLAN_ID}:manual"}
   return PendingTradeOrder(
     client_order_id=CLIENT_ORDER_ID,
     user_id=USER_ID,
     account_id=ACCOUNT_ID,
+    owner_type="EXIT_PLAN",
+    owner_id=PLAN_ID,
     instrument_code="600000.SH",
     side="SELL",
-    order_type="LIMIT",
+    order_type="FIX_PRICE",
     limit_price="10.00",
     volume=100,
     status="DELIVERED" if broker_order_id else "QUEUED",
     broker_order_id=broker_order_id or None,
-    execution_mode="live",
-    strategy_run_id="runtime-run-1",
+    environment=environment,
+    strategy_run_id=None,
     strategy_order_id="strategy-order-current",
     intent_id=CURRENT_INTENT_ID,
     bucket="swing",
+    trace_id="trace-current",
     request_metadata=metadata,
   )
 
 
-def _place_outbox(*, delivered: bool) -> TradeCommandOutbox:
+def _place_outbox(
+  *,
+  delivered: bool,
+  environment: str = ExecutionEnvironment.LIVE.value,
+) -> TradeCommandOutbox:
   now = utcnow()
-  metadata = {
-    "owner_type": "EXIT_PLAN",
-    "owner_id": PLAN_ID,
-    "exit_plan_id": PLAN_ID,
-  }
   return TradeCommandOutbox(
     message_id=PLACE_MESSAGE_ID,
     client_order_id=CLIENT_ORDER_ID,
     idempotency_key="place-current-exit",
     device_id=DEVICE_ID,
     account_id=ACCOUNT_ID,
+    owner_type="EXIT_PLAN",
+    owner_id=PLAN_ID,
+    environment=environment,
     payload={
       "command_kind": "PLACE_ORDER",
       "client_order_id": CLIENT_ORDER_ID,
       "account_id": ACCOUNT_ID,
-      "execution_mode": "live",
+      "execution_mode": environment.lower(),
       "instrument_code": "600000.SH",
       "side": "SELL",
-      "intent_id": CURRENT_INTENT_ID,
-      "request_metadata": metadata,
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.00",
+      "volume": 100,
       "expires_at": (now + timedelta(minutes=5)).isoformat() + "Z",
     },
     delivery_status="DELIVERED" if delivered else "QUEUED",
@@ -223,10 +243,14 @@ def _other_plan_command(
     "runtime": ("T_TRADE_BATCH", "other-runtime-run", {}),
     "dedicated": (
       "MANUAL_POSITION",
-      "other-managed-run",
+      "",
       {"managed_runtime_command_id": "other-managed-command"},
     ),
   }[owner_kind]
+  source_owner_type = (
+    "STRATEGY_RUN" if owner_kind == "runtime" else "MANUAL_COMMAND"
+  )
+  source_owner_id = strategy_run_id or "source-other"
   domain_plan = ExitPlan(
     template=ExitPlanTemplate(
       plan_id=OTHER_PLAN_ID,
@@ -254,12 +278,7 @@ def _other_plan_command(
     pending_rule_id=f"{OTHER_PLAN_ID}:manual",
     pending_requested_volume=200,
   )
-  metadata = {
-    "owner_type": "EXIT_PLAN",
-    "owner_id": OTHER_PLAN_ID,
-    "exit_plan_id": OTHER_PLAN_ID,
-    "strategy_run_id": strategy_run_id,
-  }
+  metadata = {"exit_rule_id": f"{OTHER_PLAN_ID}:manual"}
   now = utcnow()
   return (
     AutoExitPlanRecord(
@@ -270,9 +289,12 @@ def _other_plan_command(
       source_type=source_type,
       source_id="source-other",
       strategy_run_id=strategy_run_id or None,
+      source_execution_owner_type=source_owner_type,
+      source_execution_owner_id=source_owner_id,
+      source_execution_environment=ExecutionEnvironment.LIVE.value,
       enabled=True,
       status="EXIT_PENDING",
-      execution_mode="live",
+      environment=ExecutionEnvironment.LIVE.value,
       config_version=1,
       protected_volume=200,
       exited_volume=0,
@@ -310,25 +332,30 @@ def _other_plan_command(
       target_volume=200,
       status="APPROVED",
       executed_volume=0,
-      strategy_run_id=strategy_run_id or None,
+      environment=ExecutionEnvironment.LIVE.value,
+      idempotency_key=f"{OTHER_INTENT_ID}:idempotency",
+      strategy_run_id=None,
       intent_metadata=metadata,
     ),
     PendingTradeOrder(
       client_order_id=OTHER_CLIENT_ORDER_ID,
       user_id=USER_ID,
       account_id=ACCOUNT_ID,
+      owner_type="EXIT_PLAN",
+      owner_id=OTHER_PLAN_ID,
       instrument_code="600001.SH",
       side="SELL",
-      order_type="LIMIT",
+      order_type="FIX_PRICE",
       limit_price="8.00",
       volume=200,
       status="DELIVERED" if delivered else "QUEUED",
       broker_order_id=broker_order_id or None,
-      execution_mode="live",
-      strategy_run_id=strategy_run_id or None,
+      environment=ExecutionEnvironment.LIVE.value,
+      strategy_run_id=None,
       strategy_order_id="strategy-order-other",
       intent_id=OTHER_INTENT_ID,
       bucket="swing",
+      trace_id=f"trace-{owner_kind}",
       request_metadata=metadata,
     ),
     TradeCommandOutbox(
@@ -337,6 +364,9 @@ def _other_plan_command(
       idempotency_key="place-other-exit",
       device_id=DEVICE_ID,
       account_id=ACCOUNT_ID,
+      owner_type="EXIT_PLAN",
+      owner_id=OTHER_PLAN_ID,
+      environment=ExecutionEnvironment.LIVE.value,
       payload={
         "command_kind": "PLACE_ORDER",
         "client_order_id": OTHER_CLIENT_ORDER_ID,
@@ -344,10 +374,9 @@ def _other_plan_command(
         "execution_mode": "live",
         "instrument_code": "600001.SH",
         "side": "SELL",
+        "price_type": "FIX_PRICE",
+        "limit_price": "8.00",
         "volume": 200,
-        "intent_id": OTHER_INTENT_ID,
-        "strategy_run_id": strategy_run_id,
-        "request_metadata": metadata,
         "expires_at": (now + timedelta(minutes=5)).isoformat() + "Z",
       },
       delivery_status="DELIVERED" if delivered else "QUEUED",
@@ -358,29 +387,24 @@ def _other_plan_command(
   )
 
 
-def _other_correlation(owner_kind: str) -> StrategyOrderCorrelation | None:
-  run_id = {
-    "monitor": "",
-    "runtime": "other-runtime-run",
-    "dedicated": "other-managed-run",
-  }[owner_kind]
-  if not run_id:
-    return None
-  metadata = {
-    "owner_type": "EXIT_PLAN",
-    "owner_id": OTHER_PLAN_ID,
-    "exit_plan_id": OTHER_PLAN_ID,
-    "strategy_run_id": run_id,
-  }
-  return StrategyOrderCorrelation(
+def _other_correlation(
+  owner_kind: str,
+  *,
+  broker_order_id: str = "",
+) -> OrderCorrelation | None:
+  metadata = {"exit_rule_id": f"{OTHER_PLAN_ID}:manual"}
+  return OrderCorrelation(
     id=f"correlation-{owner_kind}",
     client_order_id=OTHER_CLIENT_ORDER_ID,
+    broker_order_id=broker_order_id or None,
     account_id=ACCOUNT_ID,
-    strategy_run_id=run_id,
+    owner_type="EXIT_PLAN",
+    owner_id=OTHER_PLAN_ID,
+    environment=ExecutionEnvironment.LIVE.value,
+    strategy_run_id=None,
     strategy_order_id="strategy-order-other",
     intent_id=OTHER_INTENT_ID,
     bucket="swing",
-    execution_mode="live",
     trace_id=f"trace-{owner_kind}",
     request_metadata=metadata,
   )
@@ -443,7 +467,7 @@ async def _store_full_snapshot(db, payload: dict, *, received_at: datetime) -> N
       message_id=f"snapshot-inbox-{snapshot_id}",
       device_id=DEVICE_ID,
       message_type="delta_report",
-      protocol_version="1.1",
+      protocol_version="1.2",
       raw_payload_hash=snapshot_hash,
       business_idempotency_key=f"snapshot:{snapshot_id}",
       payload=payload,
@@ -471,9 +495,10 @@ async def _seed(
   owner_kind: str,
   delivered: bool,
   broker_order_id: str = "",
+  environment: str = ExecutionEnvironment.LIVE.value,
 ) -> AutoExitPlanRecord:
   now = utcnow()
-  plan = _plan(owner_kind=owner_kind)
+  plan = _plan(owner_kind=owner_kind, environment=environment)
   db.add_all(
     [
       AuthUser(
@@ -522,8 +547,41 @@ async def _seed(
         controlled_window_external_trade_ids=["baseline-trade"],
       ),
       plan,
-      _pending(broker_order_id=broker_order_id),
-      _place_outbox(delivered=delivered),
+      TradeIntentRecord(
+        id=CURRENT_INTENT_ID,
+        owner_type="EXIT_PLAN",
+        owner_id=PLAN_ID,
+        environment=environment,
+        idempotency_key=f"{CURRENT_INTENT_ID}:idempotency",
+        account_id=ACCOUNT_ID,
+        instrument_code="600000.SH",
+        direction="SELL",
+        bucket="swing",
+        reason="current plan exit",
+        priority="HIGH",
+        target_volume=100,
+        status="APPROVED",
+        executed_volume=0,
+        strategy_run_id=None,
+        intent_metadata={"exit_rule_id": f"{PLAN_ID}:manual"},
+      ),
+      _pending(broker_order_id=broker_order_id, environment=environment),
+      OrderCorrelation(
+        id="correlation-current",
+        client_order_id=CLIENT_ORDER_ID,
+        broker_order_id=broker_order_id or None,
+        account_id=ACCOUNT_ID,
+        owner_type="EXIT_PLAN",
+        owner_id=PLAN_ID,
+        environment=environment,
+        strategy_run_id=None,
+        strategy_order_id="strategy-order-current",
+        intent_id=CURRENT_INTENT_ID,
+        bucket="swing",
+        trace_id="trace-current",
+        request_metadata={"exit_rule_id": f"{PLAN_ID}:manual"},
+      ),
+      _place_outbox(delivered=delivered, environment=environment),
     ]
   )
   await db.commit()
@@ -867,7 +925,7 @@ async def test_delivered_replacement_sell_preserves_evidence_and_queues_one_canc
       assert cancel.payload["broker_order_id"] == "broker-current"
       expected_key = hashlib.sha256(
         (
-          f"cancel:{USER_ID}:{ACCOUNT_ID}:"
+          f"cancel:{USER_ID}:{ACCOUNT_ID}:LIVE:EXIT_PLAN:{PLAN_ID}:"
           f"entry-plan-cancel:{CLIENT_ORDER_ID}:broker-current"
         ).encode("utf-8")
       ).hexdigest()
@@ -1388,10 +1446,14 @@ async def test_full_snapshot_only_blocks_live_cancel_requests(
   async with _database() as sessions:
     monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
     async with sessions() as db:
-      await _seed(db, owner_kind="monitor", delivered=True)
+      await _seed(
+        db,
+        owner_kind="monitor",
+        delivered=True,
+        environment=execution_mode.upper(),
+      )
       pending = await db.get(PendingTradeOrder, CLIENT_ORDER_ID)
       assert pending is not None
-      pending.execution_mode = execution_mode
       pending.status = "CANCEL_REQUESTED"
       await db.commit()
 
@@ -1460,6 +1522,9 @@ async def test_clean_snapshot_never_revives_an_account_wide_stale_live_sell() ->
         idempotency_key="other-live-sell-key",
         device_id=DEVICE_ID,
         account_id=ACCOUNT_ID,
+        owner_type="EXIT_PLAN",
+        owner_id=OTHER_PLAN_ID,
+        environment=ExecutionEnvironment.LIVE.value,
         payload={
           "command_kind": "PLACE_ORDER",
           "client_order_id": "other-live-sell",
@@ -1543,18 +1608,19 @@ async def test_quarantined_replacement_never_revives_after_clean_snapshot_and_re
       place = await db.get(TradeCommandOutbox, PLACE_MESSAGE_ID)
       assert pending is not None and place is not None
       if mismatch == "pending":
-        pending.request_metadata = {
-          **dict(pending.request_metadata or {}),
-          "owner_id": "different-plan",
-        }
+        await db.execute(
+          update(PendingTradeOrder)
+          .where(PendingTradeOrder.client_order_id == CLIENT_ORDER_ID)
+          .values(owner_id="different-plan")
+        )
+        await db.refresh(pending)
       elif mismatch == "outbox":
-        place.payload = {
-          **dict(place.payload or {}),
-          "request_metadata": {
-            **dict(dict(place.payload or {}).get("request_metadata") or {}),
-            "owner_id": "different-plan",
-          },
-        }
+        await db.execute(
+          update(TradeCommandOutbox)
+          .where(TradeCommandOutbox.message_id == PLACE_MESSAGE_ID)
+          .values(owner_id="different-plan")
+        )
+        await db.refresh(place)
       elif mismatch == "plan":
         domain_plan = ExitPlan.from_dict(dict(plan.plan_state or {}))
         domain_plan.pending_order_id = "different-client-order"
@@ -1638,18 +1704,19 @@ async def test_quarantine_mismatch_stays_sticky_across_late_working_and_snapshot
       place = await db.get(TradeCommandOutbox, PLACE_MESSAGE_ID)
       assert pending is not None and place is not None
       if mismatch == "pending":
-        pending.request_metadata = {
-          **dict(pending.request_metadata or {}),
-          "owner_id": "different-plan",
-        }
+        await db.execute(
+          update(PendingTradeOrder)
+          .where(PendingTradeOrder.client_order_id == CLIENT_ORDER_ID)
+          .values(owner_id="different-plan")
+        )
+        await db.refresh(pending)
       elif mismatch == "outbox":
-        place.payload = {
-          **dict(place.payload or {}),
-          "request_metadata": {
-            **dict(dict(place.payload or {}).get("request_metadata") or {}),
-            "owner_id": "different-plan",
-          },
-        }
+        await db.execute(
+          update(TradeCommandOutbox)
+          .where(TradeCommandOutbox.message_id == PLACE_MESSAGE_ID)
+          .values(owner_id="different-plan")
+        )
+        await db.refresh(place)
       else:
         domain_plan = ExitPlan.from_dict(dict(plan.plan_state or {}))
         domain_plan.pending_order_id = "different-client-order"
@@ -1686,7 +1753,12 @@ async def test_quarantine_mismatch_stays_sticky_across_late_working_and_snapshot
         == "CANCEL_ORDER"
       ]
       assert pending is not None and pending.status == expected_pending_status
-      assert pending.broker_order_id == f"broker-sticky-{mismatch}"
+      if mismatch == "pending":
+        # A conflicting typed owner/correlation chain is not a routable broker
+        # fact; the report must remain untouched until explicit repair.
+        assert pending.broker_order_id is None
+      else:
+        assert pending.broker_order_id == f"broker-sticky-{mismatch}"
       assert place is not None and place.delivery_status == "RECONCILE_REQUIRED"
       assert len(cancels) == expected_cancel_count
 
@@ -1874,12 +1946,19 @@ async def test_delivery_refreshes_cached_ready_control_after_concurrent_quaranti
           idempotency_key="cached-ready-other-place",
           device_id=DEVICE_ID,
           account_id=ACCOUNT_ID,
+          owner_type="EXIT_PLAN",
+          owner_id=OTHER_PLAN_ID,
+          environment=ExecutionEnvironment.LIVE.value,
           payload={
             "command_kind": "PLACE_ORDER",
             "client_order_id": "cached-ready-other-client",
             "account_id": ACCOUNT_ID,
             "execution_mode": "live",
             "side": "SELL",
+            "instrument_code": "600001.SH",
+            "price_type": "FIX_PRICE",
+            "limit_price": "8.00",
+            "volume": 200,
             "expires_at": (now + timedelta(minutes=5)).isoformat() + "Z",
           },
           delivery_status="QUEUED",
@@ -2038,7 +2117,7 @@ async def test_account_quarantine_seals_every_other_delivered_live_sell_and_canc
         owner_kind=owner_kind,
       )
       db.add_all([other_plan, other_intent, other_pending, other_outbox])
-      correlation = _other_correlation(owner_kind)
+      correlation = _other_correlation(owner_kind, broker_order_id="broker-other")
       if correlation is not None:
         db.add(correlation)
       await db.commit()
@@ -2157,7 +2236,9 @@ async def test_account_quarantine_seals_live_sell_outbox_without_pending_project
         "clientOrderId": OTHER_CLIENT_ORDER_ID,
         "messageId": OTHER_PLACE_MESSAGE_ID,
         "planId": OTHER_PLAN_ID,
-        "intentId": OTHER_INTENT_ID,
+        # An orphan outbox has no durable intent relation.  The retained
+        # business metadata cannot manufacture one for quarantine routing.
+        "intentId": "",
         "ownerKind": "INVALID",
         "previousDeliveryStatus": "QUEUED",
         "disposition": "PLACE_ORDER_BINDING_MISSING",

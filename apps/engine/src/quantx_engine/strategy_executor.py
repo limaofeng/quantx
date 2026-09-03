@@ -42,6 +42,11 @@ from quantx_application.t_trade_v3 import (
   TTradeAccountFacts,
   compute_t_trade_account_facts,
 )
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_contracts.market_stream import (
   MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
   MARKET_STREAM_MAX_FUTURE_SKEW_SECONDS,
@@ -62,6 +67,7 @@ from quantx_domain.strategies.ashare_managed_exit_plan import (
 )
 from quantx_domain.strategies.base import (
   BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
+  ExitPlanIntentOrigin,
   ManualApprovalRecoveryCandidate,
   MarketDataContext,
   MarketDataSession,
@@ -145,8 +151,8 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import ExecutionMetrics, KLine
 from quantx_infrastructure.models.agent_runtime import (
+  OrderCorrelation,
   PendingTradeOrder,
-  StrategyOrderCorrelation,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
 )
@@ -211,6 +217,24 @@ from .t_trade_observability import (
   t_trade_runtime_observability,
 )
 from .t_trade_phase_one_baseline import TTradePhaseOneBaselineAccumulator
+
+_EXECUTION_OWNER_METADATA_KEYS = frozenset(
+  {
+    "owner_type",
+    "owner_id",
+    "environment",
+    "execution_environment",
+    "execution_owner_type",
+    "execution_owner_id",
+    "source_execution_owner_type",
+    "source_execution_owner_id",
+    "strategy_run_id",
+    "exit_plan_id",
+    "strategy_name",
+    "remark",
+    "order_remark",
+  }
+)
 
 if TYPE_CHECKING:
   from quantx_infrastructure.core.market_data_manager import MarketDataManager
@@ -3490,6 +3514,9 @@ class StrategyExecutor:
         log_dir=os.path.join("logs", "strategy", runtime.context.mode.value),
         enable_reserve=enable_reserve,
         is_backtest=(runtime.context.mode == StrategyRunMode.BACKTEST),
+        execution_environment=ExecutionEnvironment(
+          str(runtime.context.mode.value).upper()
+        ),
       )
 
       if runtime.context.mode == StrategyRunMode.BACKTEST:
@@ -6605,6 +6632,16 @@ class StrategyExecutor:
     intent = TradeIntent(
       strategy_id=plan.template.strategy_id or str(runtime.strategy_id),
       run_id=plan.template.run_id or runtime.run_id,
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        str(plan.plan_id),
+      ),
+      origin=ExitPlanIntentOrigin(
+        plan_id=str(plan.plan_id),
+        source_execution_ref=ExecutionOwnerRef.strategy_run(
+          plan.template.run_id or runtime.run_id
+        ),
+      ),
       instrument_code=plan.template.instrument_code,
       direction=TradeIntentDirection.SELL,
       bucket=plan.template.bucket,
@@ -6617,9 +6654,6 @@ class StrategyExecutor:
       metadata={
         **dict(plan.template.metadata or {}),
         "t_batch_id": batch_id,
-        "exit_plan_id": plan.plan_id,
-        "owner_type": "EXIT_PLAN",
-        "owner_id": plan.plan_id,
         "exit_rule_id": rule_id,
         "exit_rule_type": "BACKTEST_END_FORCE_CLOSE",
         "exit_reason": "BACKTEST_END_FORCE_CLOSE",
@@ -7695,6 +7729,18 @@ class StrategyExecutor:
       intent_id=str(item.get("intent_id") or ""),
       strategy_id=str(item.get("strategy_id") or ""),
       run_id=str(item.get("strategy_run_id") or ""),
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        str(item.get("plan_id") or ""),
+      ),
+      origin=ExitPlanIntentOrigin(
+        plan_id=str(item.get("plan_id") or ""),
+        source_execution_ref=(
+          ExecutionOwnerRef.strategy_run(str(item.get("strategy_run_id") or ""))
+          if str(item.get("strategy_run_id") or "")
+          else None
+        ),
+      ),
       instrument_code=str(item.get("instrument_code") or ""),
       direction=TradeIntentDirection.SELL,
       bucket=str(item.get("bucket") or "swing"),
@@ -7820,17 +7866,25 @@ class StrategyExecutor:
       if intent.instrument_code == instrument_code
       and (
         only_plan_id is None
-        or str(dict(intent.metadata or {}).get("exit_plan_id") or "")
-        == only_plan_id
+        or (
+          isinstance(intent.execution_ref, ExecutionOwnerRef)
+          and intent.execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN
+          and intent.execution_ref.owner_id == only_plan_id
+        )
       )
     ]
     for intent in candidates:
       runtime.exit_plan_recovery_intents.pop(intent.intent_id, None)
       metadata = dict(intent.metadata or {})
+      if (
+        not isinstance(intent.execution_ref, ExecutionOwnerRef)
+        or intent.execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
+      ):
+        raise RuntimeError("恢复意图缺少 EXIT_PLAN 执行归属")
+      plan_id = intent.execution_ref.owner_id
       if str(metadata.get("exit_plan_recovery_durable_status") or "") == "APPROVED":
         failure = self._approval_failure(runtime, intent)
         if failure is not None:
-          plan_id = str(metadata.get("exit_plan_id") or "")
           terminal_metadata = local_pre_broker_zero_fill_metadata(
             {
               **metadata,
@@ -7881,13 +7935,12 @@ class StrategyExecutor:
       if intent.instrument_code == instrument_code
     ]
     for intent in candidates:
-      metadata = dict(intent.metadata or {})
-      plan_id = str(metadata.get("exit_plan_id") or "").strip()
       if (
-        str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
-        or str(metadata.get("owner_id") or "") != plan_id
+        not isinstance(intent.execution_ref, ExecutionOwnerRef)
+        or intent.execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
       ):
         raise RuntimeError("独立卖出恢复意图缺少精确 ExitPlan 所有权")
+      plan_id = intent.execution_ref.owner_id
       if (
         runtime.context.mode == StrategyRunMode.LIVE
         and intent.execution_mode == TradeIntentExecutionMode.AUTO
@@ -8566,6 +8619,16 @@ class StrategyExecutor:
       intent = TradeIntent(
         strategy_id=plan.template.strategy_id or str(runtime.strategy_id),
         run_id=plan.template.run_id or runtime.run_id,
+        execution_ref=ExecutionOwnerRef(
+          ExecutionOwnerType.EXIT_PLAN,
+          str(plan.plan_id),
+        ),
+        origin=ExitPlanIntentOrigin(
+          plan_id=str(plan.plan_id),
+          source_execution_ref=ExecutionOwnerRef.strategy_run(
+            plan.template.run_id or runtime.run_id
+          ),
+        ),
         instrument_code=plan.template.instrument_code,
         direction=TradeIntentDirection.SELL,
         bucket=plan.template.bucket,
@@ -8577,12 +8640,8 @@ class StrategyExecutor:
         max_price_deviation_bps=execution.max_slippage_bps,
         metadata={
           **dict(plan.template.metadata or {}),
-          "owner_type": "EXIT_PLAN",
-          "owner_id": plan.plan_id,
-          "intent_origin_type": "STRATEGY_RUN",
+          "intent_origin_type": "EXIT_PLAN",
           "account_id": plan.template.account_id,
-          "strategy_run_id": runtime.run_id,
-          "exit_plan_id": plan.plan_id,
           "exit_rule_id": decision.rule_id,
           "exit_rule_type": decision.rule_type,
           "exit_reason": decision.reason,
@@ -8615,7 +8674,10 @@ class StrategyExecutor:
       intents.append(intent)
 
     intents_by_plan = {
-      str(intent.metadata.get("exit_plan_id") or ""): intent for intent in intents
+      intent.execution_ref.owner_id: intent
+      for intent in intents
+      if isinstance(intent.execution_ref, ExecutionOwnerRef)
+      and intent.execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN
     }
     changed_plan_ids = {
       plan_id
@@ -8638,7 +8700,10 @@ class StrategyExecutor:
           decision_tags=["auto_exit_plan_triggered"],
           trace_payload={
             "exit_plan_ids": [
-              str(intent.metadata.get("exit_plan_id") or "") for intent in intents
+              intent.execution_ref.owner_id
+              for intent in intents
+              if isinstance(intent.execution_ref, ExecutionOwnerRef)
+              and intent.execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN
             ]
           },
         ),
@@ -8670,10 +8735,20 @@ class StrategyExecutor:
     identity = f"{plan_id}\0{runtime_event_key}".encode("utf-8")
     return f"strategy-exit-runtime-event:{hashlib.sha256(identity).hexdigest()}"
 
+  @staticmethod
+  def _typed_exit_plan_id(event: Any) -> str:
+    owner = getattr(event, "execution_ref", None)
+    if (
+      isinstance(owner, ExecutionOwnerRef)
+      and owner.owner_type is ExecutionOwnerType.EXIT_PLAN
+    ):
+      return owner.owner_id
+    return ""
+
   async def _deduplicated_managed_exit_runtime_event(
     self,
     runtime: StrategyRuntime,
-    metadata: Mapping[str, Any],
+    event: Any,
   ) -> Optional[RuntimeStatePatch]:
     """Reload a dedicated plan fact already committed before a crash.
 
@@ -8688,7 +8763,14 @@ class StrategyExecutor:
       or runtime.strategy is None
     ):
       return None
-    plan_id = str(dict(metadata or {}).get("exit_plan_id") or "").strip()
+    event_owner = getattr(event, "execution_ref", None)
+    if not (
+      isinstance(event_owner, ExecutionOwnerRef)
+      and event_owner.owner_type is ExecutionOwnerType.EXIT_PLAN
+    ):
+      return None
+    metadata = dict(getattr(event, "metadata", {}) or {})
+    plan_id = event_owner.owner_id
     event_business_key = self._exit_plan_runtime_event_business_key(
       plan_id,
       metadata,
@@ -8726,9 +8808,13 @@ class StrategyExecutor:
     self, runtime: StrategyRuntime, event: OrderStateEvent
   ) -> None:
     metadata = dict(event.metadata or {})
-    plan_id = str(metadata.get("exit_plan_id", "") or "")
-    if not plan_id:
+    event_owner = getattr(event, "execution_ref", None)
+    if not (
+      isinstance(event_owner, ExecutionOwnerRef)
+      and event_owner.owner_type is ExecutionOwnerType.EXIT_PLAN
+    ):
       return
+    plan_id = event_owner.owner_id
     event_business_key = self._exit_plan_runtime_event_business_key(plan_id, metadata)
     if event_business_key and await AutoExitPlanService().strategy_plan_event_applied(
       plan_id=plan_id,
@@ -8804,10 +8890,12 @@ class StrategyExecutor:
     trade_type = str(event.trade_type or "").upper()
     changed = False
     entry_authorizations_by_plan: dict[str, Mapping[str, Any]] = {}
-    plan_id = str(
-      metadata.get("exit_plan_id")
-      or dict(metadata.get("exit_plan_template") or {}).get("plan_id")
-      or ""
+    event_owner = getattr(event, "execution_ref", None)
+    plan_id = (
+      event_owner.owner_id
+      if isinstance(event_owner, ExecutionOwnerRef)
+      and event_owner.owner_type is ExecutionOwnerType.EXIT_PLAN
+      else ""
     )
     event_business_key = self._exit_plan_runtime_event_business_key(plan_id, metadata)
     if event_business_key and await AutoExitPlanService().strategy_plan_event_applied(
@@ -8837,8 +8925,7 @@ class StrategyExecutor:
         }
       plan_id = registered_plan.plan_id
       changed = True
-    elif trade_type == "SELL" and metadata.get("exit_plan_id"):
-      plan_id = str(metadata["exit_plan_id"])
+    elif trade_type == "SELL" and plan_id:
       zero_fill_invalidation = metadata.get("zero_fill_proof_invalidation")
       if (
         isinstance(zero_fill_invalidation, Mapping)
@@ -8915,7 +9002,7 @@ class StrategyExecutor:
     try:
       replay_patch = await self._deduplicated_managed_exit_runtime_event(
         runtime,
-        event.metadata,
+        event,
       )
       if replay_patch is not None:
         return replay_patch
@@ -8929,7 +9016,7 @@ class StrategyExecutor:
           patch,
           evaluated_at=event.timestamp or runtime.context.current_time,
           event_business_key=self._exit_plan_runtime_event_business_key(
-            str(dict(event.metadata or {}).get("exit_plan_id") or ""),
+            self._typed_exit_plan_id(event),
             dict(event.metadata or {}),
           ),
         )
@@ -8957,7 +9044,7 @@ class StrategyExecutor:
     try:
       replay_patch = await self._deduplicated_managed_exit_runtime_event(
         runtime,
-        event.metadata,
+        event,
       )
       if replay_patch is not None:
         return replay_patch
@@ -8970,7 +9057,7 @@ class StrategyExecutor:
           patch,
           evaluated_at=event.trade_time or runtime.context.current_time,
           event_business_key=self._exit_plan_runtime_event_business_key(
-            str(dict(event.metadata or {}).get("exit_plan_id") or ""),
+            self._typed_exit_plan_id(event),
             dict(event.metadata or {}),
           ),
         )
@@ -9060,6 +9147,8 @@ class StrategyExecutor:
       "last_update_time": self._serialize_datetime(
         self._get_value(order, "last_update_time")
       ),
+      "execution_ref": self._get_value(request, "execution_ref"),
+      "environment": self._get_value(request, "environment"),
       "metadata": dict(self._get_value(request, "metadata", {}) or {}),
     }
 
@@ -11345,11 +11434,12 @@ class StrategyExecutor:
       metadata = dict(intent.metadata or {})
       if intent.direction != TradeIntentDirection.SELL:
         continue
-      plan_id = str(metadata.get("exit_plan_id") or "").strip()
-      if str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN":
+      if (
+        not isinstance(intent.execution_ref, ExecutionOwnerRef)
+        or intent.execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
+      ):
         continue
-      if not plan_id or str(metadata.get("owner_id") or "") != plan_id:
-        raise ValueError("退出意图缺少精确 ExitPlan 所有权绑定")
+      plan_id = intent.execution_ref.owner_id
       # The runtime ExitPlanBook already performed this guard while reserving
       # its intent.  Dedicated managed-exit strategies enter here instead.
       if "auto_exit_authorization_code" in metadata:
@@ -11416,7 +11506,11 @@ class StrategyExecutor:
     owned_intents = [
       intent
       for intent in intent_list
-      if str(dict(intent.metadata or {}).get("exit_plan_id") or "") == plan.plan_id
+      if (
+        isinstance(intent.execution_ref, ExecutionOwnerRef)
+        and intent.execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN
+        and intent.execution_ref.owner_id == plan.plan_id
+      )
     ]
     if len(owned_intents) != len(intent_list) or len(owned_intents) > 1:
       raise ValueError("独立卖出策略输出包含不属于当前计划的交易意图")
@@ -12264,6 +12358,30 @@ class StrategyExecutor:
     instrument_code = str(getattr(trade, "instrument_code", "") or "").strip().upper()
     trade_id = str(getattr(trade, "trade_id", "") or "").strip()
     order_id = str(getattr(trade, "order_id", "") or "").strip()
+    order_for_trade: Any = None
+    trade_execution_ref = getattr(trade, "execution_ref", None)
+    trade_environment = getattr(trade, "environment", None)
+    # Simulator callbacks carry the typed owner directly.  A callback-shaped
+    # test/durable adapter may only expose its originating typed order; that
+    # order is the sole permitted reconstruction source (never metadata).
+    if not isinstance(trade_execution_ref, ExecutionOwnerRef) or not isinstance(
+      trade_environment, ExecutionEnvironment
+    ):
+      get_order = getattr(runtime.broker, "get_order", None)
+      if callable(get_order) and order_id:
+        order_for_trade = await get_order(order_id)
+      request = getattr(order_for_trade, "request", None)
+      if not isinstance(trade_execution_ref, ExecutionOwnerRef):
+        trade_execution_ref = getattr(request, "execution_ref", None)
+      if not isinstance(trade_environment, ExecutionEnvironment):
+        trade_environment = getattr(request, "environment", None)
+    if (
+      not isinstance(trade_execution_ref, ExecutionOwnerRef)
+      or trade_execution_ref.owner_type is not ExecutionOwnerType.STRATEGY_RUN
+      or trade_execution_ref.owner_id != runtime.run_id
+      or trade_environment is not ExecutionEnvironment.PAPER
+    ):
+      raise ValueError("做 T PAPER 成交缺少匹配的强类型执行归属")
     role = str(metadata.get("t_trade_role") or "").strip().upper()
     candidate_fingerprint = str(metadata.get("candidate_fingerprint") or "").strip()
     policy_version = str(metadata.get("policy_version") or "").strip()
@@ -12277,7 +12395,6 @@ class StrategyExecutor:
       or not candidate_fingerprint
       or not policy_version
       or not intent_id
-      or str(metadata.get("strategy_run_id") or "").strip() != runtime.run_id
       or str(metadata.get("account_id") or "").strip() != account_id
       or str(metadata.get("instrument_code") or "").strip().upper() != instrument_code
     ):
@@ -12316,7 +12433,9 @@ class StrategyExecutor:
     entry_complete: Optional[bool] = None
     entry_target_volume: Optional[int] = None
     if role == "ENTRY":
-      order = await runtime.broker.get_order(order_id)
+      order = order_for_trade
+      if order is None:
+        order = await runtime.broker.get_order(order_id)
       requested_volume = int(getattr(getattr(order, "request", None), "volume", 0) or 0)
       if requested_volume <= 0:
         raise ValueError("做 T PAPER 入场成交缺少委托目标数量")
@@ -12328,7 +12447,6 @@ class StrategyExecutor:
       )
 
     persisted_metadata = {
-      "strategy_run_id": runtime.run_id,
       "account_id": account_id,
       "instrument_code": instrument_code,
       "candidate_id": candidate_id,
@@ -12349,6 +12467,8 @@ class StrategyExecutor:
       "amount": amount,
       "commission": commission,
       "trade_time": trade_time.isoformat(),
+      "execution_ref": trade_execution_ref.to_dict(),
+      "environment": trade_environment.value,
       "metadata": persisted_metadata,
       "entry_complete": entry_complete,
       "entry_target_volume": entry_target_volume,
@@ -12364,6 +12484,17 @@ class StrategyExecutor:
     if int(fact.get("schema_version") or 0) != 1:
       raise ValueError("做 T PAPER 成交 outbox schema 不受支持")
     metadata = dict(fact.get("metadata") or {})
+    try:
+      execution_ref = ExecutionOwnerRef.from_mapping(fact["execution_ref"])
+      environment = ExecutionEnvironment(fact["environment"])
+    except (KeyError, TypeError, ValueError) as exc:
+      raise ValueError("做 T PAPER 成交 outbox 缺少强类型执行归属") from exc
+    if (
+      execution_ref.owner_type is not ExecutionOwnerType.STRATEGY_RUN
+      or execution_ref.owner_id != runtime.run_id
+      or environment is not ExecutionEnvironment.PAPER
+    ):
+      raise ValueError("做 T PAPER 成交 outbox 作用域不匹配")
     trade_id = str(fact.get("trade_id") or "").strip()
     expected_key = f"paper-fill:{runtime.run_id}:{trade_id}"
     if str(fact.get("fact_key") or "").strip() != expected_key:
@@ -12394,8 +12525,7 @@ class StrategyExecutor:
         "做 T PAPER 成交 outbox 缺少候选身份字段: " + ",".join(missing_identity_fields)
       )
     if (
-      str(metadata.get("strategy_run_id") or "").strip() != runtime.run_id
-      or str(metadata.get("account_id") or "").strip() != account_id
+      str(metadata.get("account_id") or "").strip() != account_id
       or str(metadata.get("instrument_code") or "").strip().upper() != instrument_code
     ):
       raise ValueError("做 T PAPER 成交 outbox 作用域不匹配")
@@ -12450,6 +12580,8 @@ class StrategyExecutor:
         commission=commission,
         trade_time=trade_time,
         metadata=metadata,
+        execution_ref=execution_ref,
+        environment=environment,
       ),
       entry_complete,
       entry_target_volume,
@@ -14393,10 +14525,10 @@ class StrategyExecutor:
             }
           )
 
-      intent_metadata = dict(intent.metadata or {})
       if (
         intent.direction == TradeIntentDirection.SELL
-        and str(intent_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
+        and isinstance(intent.execution_ref, ExecutionOwnerRef)
+        and intent.execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN
       ):
         audit = dict(approval_audit or {})
         intent.metadata.update(
@@ -14534,8 +14666,8 @@ class StrategyExecutor:
         # recovered by restarting the whole Engine.
         if (
           intent.direction == TradeIntentDirection.SELL
-          and str(dict(intent.metadata or {}).get("owner_type") or "").upper()
-          == "EXIT_PLAN"
+          and isinstance(intent.execution_ref, ExecutionOwnerRef)
+          and intent.execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN
         ):
           runtime.pending_approvals[intent_id] = intent
         raise
@@ -14606,10 +14738,18 @@ class StrategyExecutor:
       runtime.context.mode != StrategyRunMode.LIVE
       or
       intent.direction != TradeIntentDirection.SELL
-      or str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
+      or not isinstance(intent.execution_ref, ExecutionOwnerRef)
+      or intent.execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
     ):
       return None
-    plan_id = str(expected_exit_plan_id or metadata.get("exit_plan_id") or "").strip()
+    plan_id = str(
+      expected_exit_plan_id or intent.execution_ref.owner_id
+    ).strip()
+    if plan_id != intent.execution_ref.owner_id:
+      return (
+        "EXIT_PLAN_INTENT_BINDING_MISMATCH",
+        "卖出意图不属于当前退出计划，请刷新后重试",
+      )
     account_id = str(
       metadata.get("account_id")
       or runtime.context.parameters.get("account_id")
@@ -15297,8 +15437,6 @@ class StrategyExecutor:
     if kind == "RECONCILED_ZERO_FILL":
       metadata = {
         **dict(truth.get("metadata") or {}),
-        "owner_type": "STRATEGY_RUN",
-        "owner_id": runtime.run_id,
         "strategy_run_id": runtime.run_id,
         "side": "BUY",
         "entry_plan_id": StrategyExecutor._managed_plan_id(runtime),
@@ -15323,6 +15461,13 @@ class StrategyExecutor:
           order_id=None,
           status="RECONCILED_ZERO_FILL",
           timestamp=self._runtime_now(runtime),
+          execution_ref=ExecutionOwnerRef.strategy_run(runtime.run_id),
+          environment=ExecutionEnvironment(
+            str(
+              getattr(runtime.context.mode, "value", runtime.context.mode)
+              or ""
+            ).upper()
+          ),
           metadata=metadata,
         ),
         raise_on_error=True,
@@ -15377,6 +15522,9 @@ class StrategyExecutor:
     """Lock every durable order artifact before proving an approved intent is empty."""
 
     account_id = str(runtime.context.parameters.get("account_id") or "")
+    runtime_environment = ExecutionEnvironment(
+      str(getattr(runtime.context.mode, "value", runtime.context.mode)).upper()
+    )
     async with AsyncSessionLocal() as db:
       intent = await db.get(
         TradeIntentRecord,
@@ -15432,10 +15580,10 @@ class StrategyExecutor:
       correlations = list(
         (
           await db.execute(
-            select(StrategyOrderCorrelation)
+            select(OrderCorrelation)
             .where(
-              StrategyOrderCorrelation.strategy_run_id == runtime.run_id,
-              StrategyOrderCorrelation.intent_id == intent_id,
+              OrderCorrelation.strategy_run_id == runtime.run_id,
+              OrderCorrelation.intent_id == intent_id,
             )
             .with_for_update()
           )
@@ -15449,8 +15597,11 @@ class StrategyExecutor:
             select(TradeCommandOutbox)
             .where(
               TradeCommandOutbox.account_id == account_id,
-              TradeCommandOutbox.payload["strategy_run_id"].as_string()
-              == runtime.run_id,
+              TradeCommandOutbox.owner_type
+              == ExecutionOwnerType.STRATEGY_RUN.value,
+              TradeCommandOutbox.owner_id == runtime.run_id,
+              TradeCommandOutbox.environment
+              == runtime_environment.value,
               TradeCommandOutbox.payload["intent_id"].as_string() == intent_id,
             )
             .with_for_update()
@@ -15464,6 +15615,11 @@ class StrategyExecutor:
           await db.execute(
             select(StrategyRuntimeEvent)
             .where(
+              StrategyRuntimeEvent.owner_type
+              == ExecutionOwnerType.STRATEGY_RUN.value,
+              StrategyRuntimeEvent.owner_id == runtime.run_id,
+              StrategyRuntimeEvent.environment
+              == runtime_environment.value,
               StrategyRuntimeEvent.strategy_run_id == runtime.run_id,
               StrategyRuntimeEvent.payload["metadata"]["intent_id"].as_string()
               == intent_id,
@@ -15755,13 +15911,11 @@ class StrategyExecutor:
     plan_id = str(expected_exit_plan_id or "").strip()
     if not plan_id:
       return None
-    metadata = dict(intent.metadata or {})
     if (
       intent.direction != TradeIntentDirection.SELL
-      or str(intent.run_id or "") != runtime.run_id
-      or str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
-      or str(metadata.get("owner_id") or "") != plan_id
-      or str(metadata.get("exit_plan_id") or "") != plan_id
+      or not isinstance(intent.execution_ref, ExecutionOwnerRef)
+      or intent.execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
+      or intent.execution_ref.owner_id != plan_id
     ):
       return (
         "EXIT_PLAN_INTENT_BINDING_MISMATCH",
@@ -16492,7 +16646,13 @@ class StrategyExecutor:
         continue
       metadata = order["metadata"]
       key = str(metadata.get("t_batch_id") or "")
-      plan_id = str(metadata.get("exit_plan_id") or "")
+      execution_ref = order.get("execution_ref")
+      plan_id = (
+        execution_ref.owner_id
+        if isinstance(execution_ref, ExecutionOwnerRef)
+        and execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN
+        else ""
+      )
       # Open SELL quantity is already deducted from position.available_volume.
       if key in batches:
         batches[key] = max(0, batches[key] - int(order["remaining_volume"]))
@@ -17053,8 +17213,9 @@ class StrategyExecutor:
       and intent.execution_mode == TradeIntentExecutionMode.AUTO
       and str(metadata.get("entry_plan_id") or "")
       == StrategyExecutor._managed_plan_id(runtime)
-      and str(metadata.get("owner_type") or "") == "STRATEGY_RUN"
-      and str(metadata.get("owner_id") or "") == runtime.run_id
+      and isinstance(intent.execution_ref, ExecutionOwnerRef)
+      and intent.execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN
+      and intent.execution_ref.owner_id == runtime.run_id
     )
 
   @staticmethod
@@ -17457,20 +17618,25 @@ class StrategyExecutor:
         if order_ttl_ms > 0
         else 0
       )
-      request = OrderRequest(
-        instrument_code=intent.instrument_code,
-        order_type=order_type,
-        price_type=(
-          PriceType.MARKET
-          if str((intent.metadata or {}).get("price_type", "LIMIT")).upper() == "MARKET"
-          else PriceType.LIMIT
-        ),
-        volume=draft.sized_volume,
-        price=price,
-        strategy_id=str(runtime.strategy_id),
-        metadata={
-          **(intent.metadata or {}),
-          "strategy_run_id": runtime.run_id,
+      execution_ref = intent.execution_ref
+      if not isinstance(execution_ref, ExecutionOwnerRef):
+        raise ValueError("交易意图缺少强类型执行归属")
+      try:
+        execution_environment = ExecutionEnvironment(
+          str(
+            getattr(runtime.context.mode, "value", runtime.context.mode)
+            or ""
+          ).upper()
+        )
+      except (TypeError, ValueError) as exc:
+        raise ValueError("交易意图缺少有效执行环境") from exc
+      request_metadata = {
+        key: value
+        for key, value in dict(intent.metadata or {}).items()
+        if str(key).strip().lower() not in _EXECUTION_OWNER_METADATA_KEYS
+      }
+      request_metadata.update(
+        {
           "strategy_order_id": "",
           "execution_mode": runtime.context.mode.value,
           "intent_id": intent.intent_id,
@@ -17483,24 +17649,30 @@ class StrategyExecutor:
           "approval_ttl_ms": intent.approval_ttl_ms,
           "order_ttl_ms": order_ttl_ms,
           "order_expire_at_ms": order_expire_at_ms,
-        },
+        }
+      )
+      request = OrderRequest(
+        instrument_code=intent.instrument_code,
+        order_type=order_type,
+        price_type=(
+          PriceType.MARKET
+          if str((intent.metadata or {}).get("price_type", "LIMIT")).upper() == "MARKET"
+          else PriceType.LIMIT
+        ),
+        volume=draft.sized_volume,
+        execution_ref=execution_ref,
+        environment=execution_environment,
+        price=price,
+        strategy_id=str(runtime.strategy_id),
+        metadata=request_metadata,
       )
       if intent.direction == TradeIntentDirection.SELL:
-        exit_plan_id = str(intent.metadata.get("exit_plan_id") or "").strip()
-        owner_type = str(intent.metadata.get("owner_type") or "").strip().upper()
-        owner_id = str(intent.metadata.get("owner_id") or "").strip()
-        if exit_plan_id or owner_type == "EXIT_PLAN":
-          if (
-            not exit_plan_id
-            or owner_type != "EXIT_PLAN"
-            or owner_id != exit_plan_id
-          ):
-            raise ValueError("退出卖单缺少精确 ExitPlan 所有权绑定")
+        if execution_ref.owner_type is ExecutionOwnerType.EXIT_PLAN:
           # Dedicated managed-exit recovery must replay the same durable
           # broker command after a crash.  Never trust a template-provided key
           # and never fall back to LiveBroker's random internal order ID.
           request.metadata["idempotency_key"] = (
-            f"strategy-exit:{exit_plan_id}:{intent.intent_id}"
+            f"strategy-exit:{execution_ref.owner_id}:{intent.intent_id}"
           )
 
       checker = TradingRiskChecker(
@@ -17814,6 +17986,13 @@ class StrategyExecutor:
           },
           error_message=str(e),
           metadata=failure_metadata,
+          execution_ref=getattr(intent, "execution_ref", None),
+          environment=ExecutionEnvironment(
+            str(
+              getattr(runtime.context.mode, "value", runtime.context.mode)
+              or ""
+            ).upper()
+          ),
         ),
       )
       self._runtime_log(runtime, "ERROR", f"处理交易意图失败: {e}")

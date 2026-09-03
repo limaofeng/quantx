@@ -244,6 +244,7 @@ def summarize_strategy_input(input_obj: Any) -> Dict[str, Any]:
 
 
 def summarize_intent(intent: Any) -> Dict[str, Any]:
+  execution_ref = getattr(intent, "execution_ref", None)
   return {
     "intent_id": getattr(intent, "intent_id", None),
     "trace_id": getattr(intent, "trace_id", None),
@@ -263,5 +264,10 @@ def summarize_intent(intent: Any) -> Dict[str, Any]:
     ),
     "approval_ttl_ms": getattr(intent, "approval_ttl_ms", None),
     "max_price_deviation_bps": getattr(intent, "max_price_deviation_bps", None),
+    "execution_ref": (
+      execution_ref.to_dict()
+      if hasattr(execution_ref, "to_dict")
+      else None
+    ),
     "metadata": dict(getattr(intent, "metadata", {}) or {}),
   }

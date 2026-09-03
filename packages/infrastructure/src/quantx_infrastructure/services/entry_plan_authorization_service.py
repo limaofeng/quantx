@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Mapping, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerType
 from quantx_domain.trading.entry_plan import ManagedEntryPlanConfig
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -403,6 +404,9 @@ class EntryPlanAuthorizationService:
     )
     payload = {
       "action": ENTRY_PLAN_AUTHORIZATION_ACTION,
+      "owner_type": ExecutionOwnerType.ENTRY_PLAN.value,
+      "owner_id": normalized.plan_id,
+      "environment": ExecutionEnvironment.LIVE.value,
       "scope": _scope_payload(normalized),
       "user_id": user_id,
       "device_session_id": device_session_id,
@@ -420,6 +424,9 @@ class EntryPlanAuthorizationService:
       user_id=user_id,
       device_session_id=device_session_id,
       account_id=str(account_id),
+      owner_type=ExecutionOwnerType.ENTRY_PLAN.value,
+      owner_id=normalized.plan_id,
+      environment=ExecutionEnvironment.LIVE.value,
       idempotency_key=str(idempotency_key).strip(),
       payload=payload,
       payload_fingerprint=_canonical(payload),
@@ -484,6 +491,9 @@ class EntryPlanAuthorizationService:
     payload = dict(challenge.payload or {})
     expected = {
       "action": ENTRY_PLAN_AUTHORIZATION_ACTION,
+      "owner_type": ExecutionOwnerType.ENTRY_PLAN.value,
+      "owner_id": normalized.plan_id,
+      "environment": ExecutionEnvironment.LIVE.value,
       "scope": _scope_payload(normalized),
       "user_id": user_id,
       "device_session_id": device_session_id,
@@ -497,6 +507,9 @@ class EntryPlanAuthorizationService:
       or str(challenge.user_id) != user_id
       or str(challenge.device_session_id) != device_session_id
       or str(challenge.account_id) != str(account_id)
+      or str(challenge.owner_type or "") != ExecutionOwnerType.ENTRY_PLAN.value
+      or str(challenge.owner_id or "") != normalized.plan_id
+      or str(challenge.environment or "") != ExecutionEnvironment.LIVE.value
     ):
       raise EntryPlanAuthorizationError(
         "AUTHORIZATION_SCOPE_CHANGED",

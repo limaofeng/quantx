@@ -4,14 +4,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
   AgentDevice,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
-  StrategyOrderCorrelation,
   TradeCommandOutbox,
   TTradeBatch,
 )
@@ -30,7 +31,7 @@ TABLES = [
   AuthUser.__table__,
   AgentDevice.__table__,
   PendingTradeOrder.__table__,
-  StrategyOrderCorrelation.__table__,
+  OrderCorrelation.__table__,
   TTradeBatch.__table__,
   TradeCommandOutbox.__table__,
   TradeIntentRecord.__table__,
@@ -235,7 +236,8 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
     limit_price=Decimal("10"),
     volume=100,
     idempotency_key="manual-1",
-    execution_mode="live",
+    execution_ref=ExecutionOwnerRef.manual_command("manual-1"),
+    environment=ExecutionEnvironment.LIVE,
     manual_live=manual_live,
     commit_transaction=False,
   )
@@ -418,6 +420,8 @@ async def test_trade_command_business_key_is_deduplicated() -> None:
       order_type="FIX_PRICE",
       limit_price=Decimal("10"),
       volume=100,
+      execution_ref=ExecutionOwnerRef.manual_command("manual-order-1"),
+      environment=ExecutionEnvironment.PAPER,
       idempotency_key="ui-request-1",
     )
     second = await service.enqueue_order(
@@ -428,6 +432,8 @@ async def test_trade_command_business_key_is_deduplicated() -> None:
       order_type="FIX_PRICE",
       limit_price=Decimal("10"),
       volume=100,
+      execution_ref=ExecutionOwnerRef.manual_command("manual-order-1"),
+      environment=ExecutionEnvironment.PAPER,
       idempotency_key="ui-request-1",
     )
 
@@ -460,16 +466,54 @@ async def test_cancel_command_business_key_is_deduplicated() -> None:
       )
     )
     await db.commit()
+    db.add(
+      PendingTradeOrder(
+        client_order_id="place-client-1",
+        user_id="user-1",
+        account_id="account-1",
+        owner_type="MANUAL_COMMAND",
+        owner_id="manual-cancel-1",
+        environment="PAPER",
+        instrument_code="600000.SH",
+        side="BUY",
+        order_type="FIX_PRICE",
+        limit_price="10",
+        volume=100,
+        status="SUBMITTED",
+        broker_order_id="broker-order-1",
+        bucket="manual",
+        request_metadata={},
+      )
+    )
+    db.add(
+      OrderCorrelation(
+        id="place-correlation-1",
+        client_order_id="place-client-1",
+        broker_order_id="broker-order-1",
+        account_id="account-1",
+        owner_type="MANUAL_COMMAND",
+        owner_id="manual-cancel-1",
+        environment="PAPER",
+        bucket="manual",
+        trace_id="place-trace-1",
+        request_metadata={},
+      )
+    )
+    await db.commit()
     service = TradeCommandService(db)
     first = await service.enqueue_cancel(
       user_id="user-1",
       account_id="account-1",
       broker_order_id="broker-order-1",
+      execution_ref=ExecutionOwnerRef.manual_command("manual-cancel-1"),
+      environment=ExecutionEnvironment.PAPER,
     )
     second = await service.enqueue_cancel(
       user_id="user-1",
       account_id="account-1",
       broker_order_id="broker-order-1",
+      execution_ref=ExecutionOwnerRef.manual_command("manual-cancel-1"),
+      environment=ExecutionEnvironment.PAPER,
     )
 
     assert second == first
@@ -510,9 +554,41 @@ async def test_data_only_agent_cannot_receive_trade_commands() -> None:
         order_type="FIX_PRICE",
         limit_price=Decimal("10"),
         volume=100,
+        execution_ref=ExecutionOwnerRef.manual_command("manual-data-only-1"),
+        environment=ExecutionEnvironment.PAPER,
+        idempotency_key="manual-data-only-key",
       )
 
   await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "owner_type",
+  [
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    ExecutionOwnerType.ENTRY_PLAN,
+    ExecutionOwnerType.BOARD_ASSISTANT_EXECUTION,
+  ],
+)
+async def test_enqueue_rejects_unregistered_runtime_owner(owner_type) -> None:
+  service = TradeCommandService(SimpleNamespace())
+
+  with pytest.raises(AgentUnavailableError, match="OWNER_UNREGISTERED"):
+    await service.enqueue_order(
+      user_id="user-1",
+      account_id="account-1",
+      instrument_code="600000.SH",
+      side="BUY",
+      order_type="FIX_PRICE",
+      limit_price=Decimal("10"),
+      volume=100,
+      execution_ref=ExecutionOwnerRef(owner_type, "owner-1"),
+      environment=ExecutionEnvironment.PAPER,
+      idempotency_key="unregistered-owner-key",
+      strategy_order_id="strategy-order-1",
+      intent_id="intent-1",
+    )
 
 
 @pytest.mark.asyncio
@@ -537,6 +613,7 @@ async def test_strategy_order_context_is_preserved_without_manual_bucket() -> No
     db.get = get
     db.add(TradeIntentRecord(
       id="intent-1", strategy_run_id="run-1", owner_type="STRATEGY_RUN", owner_id="run-1",
+      environment="PAPER", idempotency_key="intent-1",
       account_id="account-1", instrument_code="600000.SH", direction="BUY", bucket="swing",
       intent_metadata={"t_trade_role": "entry", "t_batch_id": "batch-1"},
     ))
@@ -559,6 +636,9 @@ async def test_strategy_order_context_is_preserved_without_manual_bucket() -> No
       order_type="FIX_PRICE",
       limit_price=Decimal("10.50"),
       volume=100,
+      execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+      environment=ExecutionEnvironment.PAPER,
+      idempotency_key="strategy-context-key",
       strategy_run_id="run-1",
       strategy_order_id="strategy-order-1",
       intent_id="intent-1",
@@ -567,25 +647,37 @@ async def test_strategy_order_context_is_preserved_without_manual_bucket() -> No
       t_trade_role="entry",
       risk_decision_id="risk-1",
       substitution_plan={"source_bucket": "core", "volume": 100},
-      request_metadata={"instrument_code": "600000.SH", "config_version": 3},
+      request_metadata={"config_version": 3},
     )
 
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
     correlation = (
       await db.execute(
-        select(StrategyOrderCorrelation).where(
-          StrategyOrderCorrelation.client_order_id == queued.client_order_id
+        select(OrderCorrelation).where(
+          OrderCorrelation.client_order_id == queued.client_order_id
         )
       )
     ).scalar_one()
     batch = await db.get(TTradeBatch, "batch-1")
 
     assert outbox.payload["execution_mode"] == "paper"
-    assert outbox.payload["bucket"] == "swing"
-    assert outbox.payload["batch_id"] == "batch-1"
-    assert outbox.payload["substitution_plan"]["source_bucket"] == "core"
+    assert set(outbox.payload) == {
+      "command_kind",
+      "client_order_id",
+      "account_id",
+      "execution_mode",
+      "instrument_code",
+      "side",
+      "price_type",
+      "limit_price",
+      "volume",
+      "expires_at",
+    }
     assert pending.strategy_run_id == "run-1"
+    assert pending.environment == "PAPER"
+    assert pending.batch_id == "batch-1"
+    assert pending.substitution_plan["source_bucket"] == "core"
     assert correlation.strategy_order_id == "strategy-order-1"
     assert correlation.t_trade_role == "ENTRY"
     assert batch.status == "ENTRY_QUEUED"
@@ -624,6 +716,8 @@ async def test_paper_command_never_routes_to_live_only_agent() -> None:
         order_type="FIX_PRICE",
         limit_price=Decimal("10"),
         volume=100,
-        execution_mode="paper",
+        execution_ref=ExecutionOwnerRef.manual_command("manual-paper-1"),
+        environment=ExecutionEnvironment.PAPER,
+        idempotency_key="manual-paper-key",
       )
   await engine.dispose()

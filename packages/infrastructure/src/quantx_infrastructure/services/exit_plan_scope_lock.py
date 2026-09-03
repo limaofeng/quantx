@@ -125,7 +125,7 @@ async def lock_exit_plan_scope(
   repo = AutoExitPlanRepository(db)
   initial = await repo.find_by_id(target_plan_id) if target_plan_id else None
   mode = execution_mode or (
-    str(initial.execution_mode) if initial is not None else "live"
+    str(initial.environment).lower() if initial is not None else "live"
   )
   mode = mode.lower()
   run_id = strategy_run_id or (
@@ -173,7 +173,7 @@ async def lock_exit_plan_scope(
   if target is not None and (
     target.account_id != account_id
     or target.instrument_code != instrument_code
-    or target.execution_mode != mode
+    or str(target.environment or "").upper() != mode.upper()
     or (mode == "paper" and str(target.strategy_run_id or "") != run_id)
   ):
     raise ValueError("退出计划与库存执行环境不一致")

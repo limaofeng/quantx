@@ -39,7 +39,7 @@ class Order(Base, TimestampMixin):
   """ 证券代码 """
 
   sysid = Column(
-    "order_sysid", String(10), unique=True, nullable=False, comment="柜台编号"
+    "order_sysid", String(32), unique=True, nullable=False, comment="柜台编号"
   )
   """ 柜台编号 """
 

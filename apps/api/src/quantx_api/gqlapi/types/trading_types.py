@@ -147,11 +147,9 @@ class OrderInput:
   account_id: Optional[str] = strawberry.field(description="资金账号", default=None)
   stock_code: str = strawberry.field(description="股票代码")
   type: str = strawberry.field(description="委托类型: BUY/SELL")
-  price_type: str = strawberry.field(description="报价类型: LIMIT/MARKET/BEST")
+  price_type: str = strawberry.field(description="报价类型: FIX_PRICE")
   volume: int = strawberry.field(description="委托数量")
   price: float = strawberry.field(description="委托价格")
-  strategy_name: Optional[str] = strawberry.field(description="策略名称")
-  order_remark: Optional[str] = strawberry.field(description="订单备注")
   idempotency_key: Optional[str] = strawberry.field(
     description="调用方生成的业务幂等键",
     default=None,

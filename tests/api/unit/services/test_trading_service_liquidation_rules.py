@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_infrastructure.models.enums import InstrumentType, OrderType, PriceType
 from quantx_infrastructure.services.trading_service import (
   InvalidOrderError,
@@ -81,8 +82,11 @@ async def test_market_order_returns_queued_client_order_without_broker_id():
       stock_code="000001.SZ",
       order_type=OrderType.BUY,
       order_volume=100,
-      price_type=PriceType.MARKET_CONVERT_5_LIMIT,
-      price=0,
+      price_type=PriceType.FIX_PRICE,
+      price=10,
+      idempotency_key="trading-service-paper",
+      execution_ref=ExecutionOwnerRef.manual_command("trading-service-test"),
+      environment=ExecutionEnvironment.PAPER,
     )
 
   assert result == {
@@ -106,4 +110,91 @@ async def test_invalid_volume_is_rejected_before_command_queue_access():
       order_volume=0,
       price_type=PriceType.FIX_PRICE,
       price=10,
+      idempotency_key="trading-service-invalid",
+      execution_ref=ExecutionOwnerRef.manual_command("trading-service-invalid"),
+      environment=ExecutionEnvironment.PAPER,
     )
+
+
+@pytest.mark.asyncio
+async def test_place_order_rejects_missing_idempotency_key_before_queue_access():
+  service = TradingService(account_id="account-1")
+  with pytest.raises(InvalidOrderError, match="IDEMPOTENCY_KEY_REQUIRED"):
+    await service.place_order(
+      stock_code="000001.SZ",
+      order_type=OrderType.BUY,
+      order_volume=100,
+      price_type=PriceType.FIX_PRICE,
+      price=10,
+      idempotency_key="",
+      execution_ref=ExecutionOwnerRef.manual_command("trading-service-missing"),
+      environment=ExecutionEnvironment.PAPER,
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_strategy_orders_rejects_missing_key_without_partial_enqueue():
+  service = TradingService(account_id="account-1")
+  place_order = AsyncMock()
+  with patch.object(service, "place_order", place_order):
+    with pytest.raises(InvalidOrderError, match="每个订单提供稳定"):
+      await service.execute_strategy_orders(
+        "strategy-1",
+        [
+          {
+            "stock_code": "000001.SZ",
+            "order_type": OrderType.BUY,
+            "quantity": 100,
+            "price": 10,
+            "idempotency_key": "batch-1-order-1",
+          },
+          {
+            "stock_code": "000002.SZ",
+            "order_type": OrderType.BUY,
+            "quantity": 100,
+            "price": 10,
+          },
+        ],
+        execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+        environment=ExecutionEnvironment.PAPER,
+      )
+  place_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_strategy_orders_passes_distinct_explicit_batch_keys():
+  service = TradingService(account_id="account-1")
+  place_order = AsyncMock(
+    side_effect=[
+      {"success": True, "status": "QUEUED"},
+      {"success": True, "status": "QUEUED"},
+    ]
+  )
+  with patch.object(service, "place_order", place_order):
+    result = await service.execute_strategy_orders(
+      "strategy-1",
+      [
+        {
+          "stock_code": "000001.SZ",
+          "order_type": OrderType.BUY,
+          "quantity": 100,
+          "price": 10,
+          "idempotency_key": "batch-1-order-1",
+        },
+        {
+          "stock_code": "000001.SZ",
+          "order_type": OrderType.BUY,
+          "quantity": 100,
+          "price": 10,
+          "idempotency_key": "batch-2-order-1",
+        },
+      ],
+      execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+      environment=ExecutionEnvironment.PAPER,
+    )
+
+  assert result["success_count"] == 2
+  assert [call.kwargs["idempotency_key"] for call in place_order.await_args_list] == [
+    "batch-1-order-1",
+    "batch-2-order-1",
+  ]

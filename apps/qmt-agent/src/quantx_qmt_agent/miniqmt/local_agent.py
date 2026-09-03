@@ -28,6 +28,8 @@ _QMT_ORDER_STATUS_NAMES = {
 }
 _ACTIVE_QMT_ORDER_STATUSES = {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
 _ASHARE_SESSION_CLOSE = time(15, 0)
+_ORDER_REMARK_PREFIX = "qx:"
+_ORDER_REMARK_CLIENT_ID_LENGTH = 20
 
 
 def _normalized_qmt_order_status(value: Any) -> str:
@@ -207,13 +209,11 @@ class MiniQmtLocalAgent:
 
     data = _command_data(command)
     data.update({key: value for key, value in overrides.items() if value is not None})
-    stock_code = str(
-      data.get("stock_code")
-      or data.get("instrument_code")
-      or data.get("code")
-      or ""
-    )
-    volume = int(data.get("order_volume", data.get("volume", data.get("quantity", 0))) or 0)
+    stock_code = str(data.get("instrument_code") or "")
+    try:
+      volume = int(data.get("volume") or 0)
+    except (TypeError, ValueError):
+      volume = 0
     if not stock_code or volume <= 0:
       return {"success": False, "preflight": preflight, "message": "invalid order command"}
     command_check = self._command_preflight(data, stock_code, volume)
@@ -224,16 +224,34 @@ class MiniQmtLocalAgent:
         "message": command_check.get("reason"),
       }
 
+    client_order_id = str(data.get("client_order_id") or "")
+    if not client_order_id:
+      return {
+        "success": False,
+        "preflight": command_check,
+        "message": "invalid order command",
+      }
+    try:
+      limit_price = float(data.get("limit_price") or 0.0)
+      miniqmt_price_type = _to_miniqmt_price_type(data.get("price_type"))
+      miniqmt_order_type = _to_miniqmt_order_type(data.get("side"))
+    except (TypeError, ValueError):
+      return {
+        "success": False,
+        "preflight": command_check,
+        "message": "invalid order command",
+      }
+
     result = _safe_call_with_args(
       self.trading_manager,
       "place_order",
       stock_code,
-      _to_miniqmt_order_type(data.get("order_type")),
+      miniqmt_order_type,
       volume,
-      _to_miniqmt_price_type(data.get("price_type"), data.get("price", 0.0)),
-      float(data.get("price", 0.0) or 0.0),
-      str(data.get("strategy_name", data.get("strategy_id", "")) or ""),
-      str(data.get("order_remark", data.get("remark", "")) or ""),
+      miniqmt_price_type,
+      limit_price,
+      "",
+      _stable_order_remark(client_order_id),
       default={"success": False, "message": "miniQMT place_order unavailable"},
     )
     if isinstance(result, dict):
@@ -249,22 +267,42 @@ class MiniQmtLocalAgent:
   ) -> Dict[str, Any]:
     if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", stock_code.upper()):
       return {"ok": False, "status": "REJECTED", "reason": "invalid A-share code"}
-    side = str(data.get("order_type") or "").split(".")[-1].upper()
-    if side not in {"BUY", "SELL", "23", "24"}:
+    side = str(data.get("side") or "").split(".")[-1].upper()
+    if side not in {"BUY", "SELL"}:
       return {"ok": False, "status": "REJECTED", "reason": "invalid order side"}
-    is_buy = side in {"BUY", "23"}
+    is_buy = side == "BUY"
     if is_buy and volume % 100 != 0:
       return {
         "ok": False,
         "status": "REJECTED",
         "reason": "buy volume must be a board lot",
       }
-    price = float(data.get("price") or data.get("limit_price") or 0.0)
+    try:
+      price = float(data.get("limit_price") or 0.0)
+    except (TypeError, ValueError):
+      price = 0.0
     if price <= 0:
       return {
         "ok": False,
         "status": "REJECTED",
         "reason": "invalid protected limit price",
+      }
+
+    price_type_value = data.get("price_type")
+    raw_price_type = str(price_type_value or "").upper()
+    if raw_price_type != "FIX_PRICE":
+      return {
+        "ok": False,
+        "status": "REJECTED",
+        "reason": "invalid order price type",
+      }
+    try:
+      _to_miniqmt_price_type(price_type_value)
+    except (TypeError, ValueError):
+      return {
+        "ok": False,
+        "status": "REJECTED",
+        "reason": "invalid order price type",
       }
 
     if str(data.get("execution_mode") or "").lower() == "live":
@@ -279,13 +317,7 @@ class MiniQmtLocalAgent:
           "status": "REJECTED",
           "reason": "outside trading session",
         }
-      price_type_value = data.get("price_type")
-      raw_price_type = str(
-        getattr(price_type_value, "name", price_type_value) or ""
-      ).upper()
-      fixed_price = raw_price_type in {"LIMIT", "FIX", "FIX_PRICE"} or (
-        not raw_price_type and price > 0
-      )
+      fixed_price = True
       market_check = self._market_preflight(
         stock_code,
         price,
@@ -804,9 +836,6 @@ def _command_data(command: Any) -> Dict[str, Any]:
     data = asdict(command)
   else:
     data = _to_dict(command)
-  metadata = data.get("metadata")
-  if isinstance(metadata, dict):
-    data.update({key: value for key, value in metadata.items() if key not in data})
   return data
 
 
@@ -818,32 +847,31 @@ def _normalize_order_id(order_id: Any) -> Any:
 
 
 def _to_miniqmt_order_type(value: Any) -> Any:
-  text = str(getattr(value, "value", value) or "").upper()
-  if text.endswith("SELL") or text == "SELL":
+  text = str(getattr(value, "value", value) or "").upper().split(".")[-1]
+  if text == "SELL" or text.endswith("SELL"):
     name = "SELL"
-  else:
+  elif text == "BUY" or text.endswith("BUY"):
     name = "BUY"
+  else:
+    raise ValueError("unsupported order side")
   return getattr(OrderType, name)
 
 
 def _to_miniqmt_price_type(value: Any, price: Any = 0.0) -> Any:
-  text = str(getattr(value, "value", value) or "").upper()
-  if not text:
-    text = "FIX_PRICE" if float(price or 0.0) > 0 else "LATEST_PRICE"
-  if text in {"LIMIT", "FIX", "FIX_PRICE"}:
-    name = "FIX_PRICE"
-  elif text in {"MARKET_CONVERT_5_LIMIT", "MARKET_CONVERT_5_CANCEL"}:
-    # The shared execution path uses MARKET_CONVERT_5_LIMIT as its portable
-    # protective-market name. TradingManager resolves it to the exchange-
-    # specific SH/SZ five-level immediate-or-cancel order type.
-    name = "MARKET_CONVERT_5_LIMIT"
-  elif text in {"MARKET_PEER_PRICE_FIRST", "PEER_PRICE_FIRST"}:
-    name = "MARKET_PEER_PRICE_FIRST"
-  elif text in {"MARKET_MINE_PRICE_FIRST", "MINE_PRICE_FIRST"}:
-    name = "MARKET_MINE_PRICE_FIRST"
-  else:
-    name = "LATEST_PRICE"
-  return getattr(PriceType, name)
+  del price
+  text = str(getattr(value, "name", getattr(value, "value", value)) or "").upper()
+  if text != "FIX_PRICE":
+    raise ValueError("unsupported order price type")
+  return PriceType.FIX_PRICE
+
+
+def _stable_order_remark(client_order_id: Any) -> str:
+  """Build the only miniQMT remark from the durable client order identity."""
+
+  normalized = str(client_order_id or "")
+  if not normalized:
+    raise ValueError("client_order_id is required for order remark")
+  return f"{_ORDER_REMARK_PREFIX}{normalized[:_ORDER_REMARK_CLIENT_ID_LENGTH]}"
 
 
 def _to_dict(item: Any) -> Dict[str, Any]:

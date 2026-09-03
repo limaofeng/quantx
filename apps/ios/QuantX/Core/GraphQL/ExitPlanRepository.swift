@@ -30,6 +30,11 @@ protocol ExitPlanLoading: AnyObject {
   ) async throws -> ExitPlanAuthorizationConfirmation
 }
 
+struct ExitPlanRawExecutionOwner: Sendable {
+  let ownerType: String
+  let ownerID: String
+}
+
 struct ExitPlanRawPlan: Sendable {
   let planID: String
   let groupID: String?
@@ -41,13 +46,14 @@ struct ExitPlanRawPlan: Sendable {
   let strategyRunID: String?
   let enabled: Bool
   let status: String
-  let executionMode: String
+  let environment: String
   let autoExitAuthorized: Bool
   let autoExitAuthorizationConfigVersion: Int?
   let autoExitAuthorizationExpiresAt: String?
   let configVersion: Int
   let stateVersion: Int
-  let executionOwner: String
+  let executionOwner: ExitPlanRawExecutionOwner
+  let sourceExecutionOwner: ExitPlanRawExecutionOwner
   let completionStrategy: String?
   let completionNote: String?
   let protectedVolume: Int
@@ -68,6 +74,8 @@ struct ExitPlanRawPlan: Sendable {
   let pendingIntentID: String?
   let lastEvaluatedAt: String?
   let lastError: String?
+  let recoveryAction: String?
+  let recoveryMessage: String?
   let createdAt: String?
   let updatedAt: String?
 }
@@ -223,13 +231,16 @@ final class ExitPlanRepository: ExitPlanLoading {
   ) async throws -> ExitPlanAuthorizationTicket {
     try Self.validate(context)
     try Self.validate(plan: plan, context: context)
-    guard plan.executionMode == .live else {
+    guard plan.environment == .live else {
       throw ExitPlanWorkspaceError.invalidRequest("只有明确的 LIVE 退出计划需要自动实盘授权")
     }
-    guard
-      plan.executionOwner == .strategyRuntime || plan.executionOwner == .exitPlanMonitor
-    else {
-      throw ExitPlanWorkspaceError.invalidRequest("退出计划执行归属无效或未知，不能自动授权")
+    guard plan.executionOwner.ownerType == .exitPlan else {
+      throw ExitPlanWorkspaceError.invalidRequest("退出计划执行归属不是 EXIT_PLAN，不能自动授权")
+    }
+    guard plan.recoveryAction == nil else {
+      throw ExitPlanWorkspaceError.invalidRequest(
+        plan.recoveryMessage ?? "退出计划需要先完成服务端恢复动作"
+      )
     }
     guard plan.status.isAuthorizable, plan.remainingVolume > 0 else {
       throw ExitPlanWorkspaceError.invalidRequest("只有仍有保护量的活动计划可以授权")
@@ -340,13 +351,20 @@ extension ExitPlanRepository {
         strategyRunID: fragment.strategyRunId,
         enabled: fragment.enabled,
         status: fragment.status,
-        executionMode: fragment.executionMode,
+        environment: fragment.environment.value?.rawValue ?? "UNKNOWN",
         autoExitAuthorized: fragment.autoExitAuthorized,
         autoExitAuthorizationConfigVersion: fragment.autoExitAuthorizationConfigVersion,
         autoExitAuthorizationExpiresAt: fragment.autoExitAuthorizationExpiresAt,
         configVersion: fragment.configVersion,
         stateVersion: fragment.stateVersion,
-        executionOwner: fragment.executionOwner,
+        executionOwner: ExitPlanRawExecutionOwner(
+          ownerType: fragment.executionOwner.ownerType.value?.rawValue ?? "UNKNOWN",
+          ownerID: fragment.executionOwner.ownerId
+        ),
+        sourceExecutionOwner: ExitPlanRawExecutionOwner(
+          ownerType: fragment.sourceExecutionOwner.ownerType.value?.rawValue ?? "UNKNOWN",
+          ownerID: fragment.sourceExecutionOwner.ownerId
+        ),
         completionStrategy: fragment.completionStrategy,
         completionNote: fragment.completionNote,
         protectedVolume: fragment.protectedVolume,
@@ -367,6 +385,8 @@ extension ExitPlanRepository {
         pendingIntentID: fragment.pendingIntentId,
         lastEvaluatedAt: fragment.lastEvaluatedAt,
         lastError: fragment.lastError,
+        recoveryAction: fragment.recoveryAction,
+        recoveryMessage: fragment.recoveryMessage,
         createdAt: fragment.createdAt,
         updatedAt: fragment.updatedAt
       ),
@@ -402,11 +422,32 @@ extension ExitPlanRepository {
       field: "strategyRunId",
       maximumLength: 160
     )
-    let executionOwner = ExitPlanExecutionOwner(serverValue: raw.executionOwner)
+    let environment = ExecutionEnvironment(serverValue: raw.environment)
+    let executionOwnerType = ExecutionOwnerType(serverValue: raw.executionOwner.ownerType)
+    let sourceExecutionOwnerType = ExecutionOwnerType(
+      serverValue: raw.sourceExecutionOwner.ownerType
+    )
+    let executionOwnerID = try required(
+      raw.executionOwner.ownerID,
+      field: "executionOwner.ownerId",
+      maximumLength: 160
+    )
+    let sourceExecutionOwnerID = try required(
+      raw.sourceExecutionOwner.ownerID,
+      field: "sourceExecutionOwner.ownerId",
+      maximumLength: 160
+    )
+    let executionOwner = ExecutionOwnerRef(
+      ownerType: executionOwnerType,
+      ownerID: executionOwnerID
+    )
+    let sourceExecutionOwner = ExecutionOwnerRef(
+      ownerType: sourceExecutionOwnerType,
+      ownerID: sourceExecutionOwnerID
+    )
     let phase = try required(raw.phase, field: "phase", maximumLength: 80)
     let dataQuality = try required(raw.dataQuality, field: "dataQuality", maximumLength: 80)
     let status = ExitPlanStatus(serverValue: raw.status)
-    let executionMode = ExitPlanExecutionMode(serverValue: raw.executionMode)
     guard
       raw.configVersion > 0,
       raw.configVersion <= Int(Int32.max),
@@ -427,25 +468,16 @@ extension ExitPlanRepository {
     else {
       throw ExitPlanWorkspaceError.invalidResponse
     }
-    let entryRuntimeSources: Set<String> = [
-      "T_TRADE_BATCH", "LIMIT_UP_BOARD", "FIRST_BOARD_PROMOTION_V2", "ENTRY_PLAN",
-    ]
-    let monitorSources: Set<String> = [
-      "MANUAL_POSITION", "MANUAL_LIQUIDATION",
-    ]
-    switch executionOwner {
-    case .strategyRuntime
-      where strategyRunID != nil && entryRuntimeSources.contains(sourceType.uppercased()):
-      break
-    case .exitPlanMonitor
-      where strategyRunID == nil && monitorSources.contains(sourceType.uppercased()):
-      break
-    case .invalidOwner, .unknown:
-      // The API deliberately projects invalid/unknown ownership for audit. Keep
-      // the plan visible, while the workspace blocks every authorization action.
-      break
-    default:
+    guard executionOwner.ownerType == .exitPlan, executionOwner.ownerID == planID else {
       throw ExitPlanWorkspaceError.invalidResponse
+    }
+    if let strategyRunID {
+      guard
+        sourceExecutionOwner.ownerType == .strategyRun,
+        sourceExecutionOwner.ownerID == strategyRunID
+      else {
+        throw ExitPlanWorkspaceError.invalidResponse
+      }
     }
     let authorizationExpiry = try optionalDate(
       raw.autoExitAuthorizationExpiresAt,
@@ -453,7 +485,7 @@ extension ExitPlanRepository {
     )
     if raw.autoExitAuthorized {
       guard
-        executionMode == .live,
+        environment == .live,
         raw.autoExitAuthorizationConfigVersion != nil,
         authorizationExpiry != nil
       else {
@@ -471,13 +503,14 @@ extension ExitPlanRepository {
       strategyRunID: strategyRunID,
       enabled: raw.enabled,
       status: status,
-      executionMode: executionMode,
+      environment: environment,
       autoExitAuthorized: raw.autoExitAuthorized,
       autoExitAuthorizationConfigVersion: raw.autoExitAuthorizationConfigVersion,
       autoExitAuthorizationExpiresAt: authorizationExpiry,
       configVersion: raw.configVersion,
       stateVersion: raw.stateVersion,
       executionOwner: executionOwner,
+      sourceExecutionOwner: sourceExecutionOwner,
       completionStrategy: optional(raw.completionStrategy, maximumLength: 80),
       completionNote: optional(raw.completionNote, maximumLength: 500),
       protectedVolume: raw.protectedVolume,
@@ -498,6 +531,8 @@ extension ExitPlanRepository {
       pendingIntentID: optional(raw.pendingIntentID, maximumLength: 160),
       lastEvaluatedAt: try optionalDate(raw.lastEvaluatedAt, field: "lastEvaluatedAt"),
       lastError: optional(raw.lastError, maximumLength: 500),
+      recoveryAction: optional(raw.recoveryAction, maximumLength: 120),
+      recoveryMessage: optional(raw.recoveryMessage, maximumLength: 500),
       createdAt: try optionalDate(raw.createdAt, field: "createdAt"),
       updatedAt: try optionalDate(raw.updatedAt, field: "updatedAt")
     )
@@ -674,10 +709,10 @@ extension ExitPlanRepository {
   ) throws -> ExitPlanAuthorizationTicket {
     try validate(context)
     try validate(plan: plan, context: context)
-    let mode = ExitPlanExecutionMode(serverValue: raw.executionMode)
+    let environment = ExecutionEnvironment(serverValue: raw.executionMode)
     guard
-      plan.executionMode == .live,
-      mode == .live,
+      plan.environment == .live,
+      environment == .live,
       raw.accountID == context.activeAccountID,
       raw.accountID == plan.accountID,
       raw.planID == plan.id,
@@ -771,7 +806,7 @@ extension ExitPlanRepository {
       instrumentCode: raw.instrumentCode,
       bucket: raw.bucket,
       sourceType: raw.sourceType,
-      executionMode: mode,
+      environment: environment,
       configVersion: raw.configVersion,
       protectedVolume: raw.protectedVolume,
       exitedVolume: raw.exitedVolume,

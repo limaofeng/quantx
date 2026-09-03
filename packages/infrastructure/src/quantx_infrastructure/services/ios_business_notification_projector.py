@@ -241,7 +241,7 @@ class IosBusinessNotificationProjector:
       .where(
         AutoExitPlanRecord.plan_id == TradeIntentRecord.owner_id,
         AutoExitPlanRecord.account_id == TradeIntentRecord.account_id,
-        func.upper(AutoExitPlanRecord.execution_mode).in_(("PAPER", "LIVE")),
+        func.upper(AutoExitPlanRecord.environment).in_(("PAPER", "LIVE")),
       )
       .exists()
     )
@@ -316,7 +316,7 @@ class IosBusinessNotificationProjector:
           StrategyRuntimeEvent.event_type.in_(("ORDER", "TRADE")),
           StrategyRuntimeEvent.applied_at.is_not(None),
           StrategyRuntimeEvent.applied_at >= now - _ORDER_TTL,
-          func.upper(PendingTradeOrder.execution_mode).in_(("PAPER", "LIVE")),
+          func.upper(PendingTradeOrder.environment).in_(("PAPER", "LIVE")),
           _not_projected(
             _SOURCE_RUNTIME_EVENT,
             StrategyRuntimeEvent.event_id,
@@ -379,7 +379,7 @@ class IosBusinessNotificationProjector:
         .where(
           AutoExitPlanEvent.event_type.in_(_EXIT_PLAN_RISK_EVENTS),
           AutoExitPlanEvent.created_at >= now - _RISK_TTL,
-          func.upper(AutoExitPlanRecord.execution_mode).in_(("PAPER", "LIVE")),
+          func.upper(AutoExitPlanRecord.environment).in_(("PAPER", "LIVE")),
           _not_projected(
             _SOURCE_EXIT_PLAN_EVENT,
             AutoExitPlanEvent.event_id,

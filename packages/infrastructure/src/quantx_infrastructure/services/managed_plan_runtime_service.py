@@ -6,6 +6,7 @@ import json
 import uuid
 from typing import Any, Callable, Mapping, Optional, Type
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.strategies.base import StrategyBase, StrategyRunMode
 from sqlalchemy import select
 
@@ -871,4 +872,19 @@ class ManagedPlanRuntimeService:
       )
       if active_managed_owner is not None:
         return False
-      return await runtime_obligation_blocker(db, run_id) is None
+      try:
+        execution_environment = ExecutionEnvironment(
+          str(getattr(getattr(persisted, "mode", None), "value", persisted.mode))
+          .strip()
+          .upper()
+        )
+      except (AttributeError, TypeError, ValueError):
+        return False
+      return (
+        await runtime_obligation_blocker(
+          db,
+          ExecutionOwnerRef.strategy_run(run_id),
+          execution_environment,
+        )
+        is None
+      )

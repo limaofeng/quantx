@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.brokers.base import (
   OrderRequest,
   OrderResponse,
@@ -41,6 +42,8 @@ from quantx_infrastructure.services.t_trade_candidate_outcome_service import (
   TTradeCandidateOutcomePersistenceFacade,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+_PAPER_OWNER = ExecutionOwnerRef.strategy_run("run-1")
 
 
 def _candidate_event() -> dict:
@@ -141,6 +144,8 @@ async def test_executor_side_channel_is_restart_safe_and_arms_on_full_entry() ->
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=200,
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    environment=ExecutionEnvironment.BACKTEST,
   )
   order = OrderResponse(
     order_id="order-1",
@@ -183,6 +188,8 @@ async def test_executor_side_channel_is_restart_safe_and_arms_on_full_entry() ->
     amount=1_000.0,
     commission=2.0,
     trade_time=datetime.fromtimestamp(1_001),
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    environment=ExecutionEnvironment.BACKTEST,
     metadata=metadata,
   )
   await executor._record_t_trade_candidate_fill(
@@ -200,6 +207,8 @@ async def test_executor_side_channel_is_restart_safe_and_arms_on_full_entry() ->
     amount=1_020.0,
     commission=3.0,
     trade_time=datetime.fromtimestamp(1_002),
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    environment=ExecutionEnvironment.BACKTEST,
     metadata=metadata,
   )
   await executor._record_t_trade_candidate_fill(
@@ -384,6 +393,8 @@ async def test_paper_candidate_fill_uses_simulator_order_and_fee_facts() -> None
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=200,
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    environment=ExecutionEnvironment.PAPER,
   )
   order = OrderResponse(
     order_id="order-paper-1",
@@ -407,9 +418,10 @@ async def test_paper_candidate_fill_uses_simulator_order_and_fee_facts() -> None
     amount=2_020.0,
     commission=5.0,
     trade_time=datetime.fromtimestamp(1_001),
+    execution_ref=_PAPER_OWNER,
+    environment=ExecutionEnvironment.PAPER,
     metadata={
       "account_id": "account-1",
-      "strategy_run_id": "run-1",
       "instrument_code": "600000.SH",
       "candidate_id": "candidate-1",
       "candidate_fingerprint": "a" * 64,
@@ -463,6 +475,8 @@ async def test_paper_fill_outbox_replays_once_after_process_restart() -> None:
     order_type=OrderType.BUY,
     price_type=PriceType.LIMIT,
     volume=200,
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    environment=ExecutionEnvironment.PAPER,
   )
   order = OrderResponse(
     order_id="order-paper-restart",
@@ -485,9 +499,10 @@ async def test_paper_fill_outbox_replays_once_after_process_restart() -> None:
     amount=2_020.0,
     commission=5.0,
     trade_time=datetime.fromtimestamp(1_001),
+    execution_ref=_PAPER_OWNER,
+    environment=ExecutionEnvironment.PAPER,
     metadata={
       "account_id": "account-1",
-      "strategy_run_id": "run-1",
       "instrument_code": "600000.SH",
       "candidate_id": "candidate-1",
       "candidate_fingerprint": "a" * 64,
@@ -563,7 +578,6 @@ async def test_paper_fill_outbox_replay_orders_reversed_storage_facts_entry_befo
 
   def fact(*, trade_id: str, role: str, at: int) -> dict:
     metadata = {
-      "strategy_run_id": "run-1",
       "account_id": "account-1",
       "instrument_code": "600000.SH",
       "candidate_id": "candidate-1",
@@ -585,6 +599,8 @@ async def test_paper_fill_outbox_replay_orders_reversed_storage_facts_entry_befo
       "amount": 1_000.0,
       "commission": 1.0,
       "trade_time": datetime.fromtimestamp(at).isoformat(),
+      "execution_ref": _PAPER_OWNER.to_dict(),
+      "environment": ExecutionEnvironment.PAPER.value,
       "metadata": metadata,
       "entry_complete": True if entry else None,
       "entry_target_volume": 100 if entry else None,
@@ -647,8 +663,9 @@ async def test_corrupt_paper_fill_fact_is_not_acknowledged() -> None:
     "amount": 1_000.0,
     "commission": 1.0,
     "trade_time": datetime.fromtimestamp(1_001).isoformat(),
+    "execution_ref": _PAPER_OWNER.to_dict(),
+    "environment": ExecutionEnvironment.PAPER.value,
     "metadata": {
-      "strategy_run_id": "run-1",
       "account_id": "account-1",
       "instrument_code": "600000.SH",
       # candidate_id intentionally missing: this fact must never be treated
@@ -759,9 +776,10 @@ async def test_paper_fill_build_failure_fail_stops_before_a_later_tick_can_check
     amount=1_000.0,
     commission=1.0,
     trade_time=datetime.fromtimestamp(1_001),
+    execution_ref=ExecutionOwnerRef.strategy_run(context.run_id),
+    environment=ExecutionEnvironment.PAPER,
     metadata={
       "account_id": "account-1",
-      "strategy_run_id": context.run_id,
       "instrument_code": "600000.SH",
       "candidate_id": "candidate-1",
       # candidate_fingerprint deliberately missing so fact construction fails

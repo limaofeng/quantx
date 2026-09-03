@@ -158,7 +158,7 @@ final class ExitPlanWorkspaceTests: XCTestCase {
   }
 
   func testPaperPlanAndUnknownModeStayReadOnlyWithoutPreviewRequest() async {
-    for plan in [makePlan(mode: .paper), makePlan(mode: .unknown("FUTURE"))] {
+    for plan in [makePlan(environment: .paper), makePlan(environment: .unknown("FUTURE"))] {
       let repository = ExitPlanLoaderSpy(plan: plan)
       let harness = makeHarness(repository: repository)
       await harness.store.refresh()
@@ -174,22 +174,42 @@ final class ExitPlanWorkspaceTests: XCTestCase {
     }
   }
 
-  func testInvalidOrUnknownExecutionOwnerStaysVisibleButCannotBeAuthorized() async {
-    for owner in [ExitPlanExecutionOwner.invalidOwner, .unknown("FUTURE_OWNER")] {
-      let repository = ExitPlanLoaderSpy(plan: makePlan(executionOwner: owner))
-      let harness = makeHarness(repository: repository)
-      await harness.store.refresh()
-      let loaded = harness.store.listState.snapshot!.plans[0]
+  func testNonExitPlanExecutionOwnerCannotBeAuthorized() async {
+    let repository = ExitPlanLoaderSpy(
+      plan: makePlan(
+        executionOwner: ExecutionOwnerRef(ownerType: .strategyRun, ownerID: "run-1")
+      )
+    )
+    let harness = makeHarness(repository: repository)
+    await harness.store.refresh()
+    let loaded = harness.store.listState.snapshot!.plans[0]
 
-      XCTAssertNotNil(harness.store.authorizationUnavailableReason(for: loaded))
-      do {
-        try await harness.store.previewAuthorization(for: loaded)
-        XCTFail("无效或未知执行归属不得请求自动退出授权")
-      } catch {
-        XCTAssertNotNil(error as? ExitPlanWorkspaceError)
-      }
-      XCTAssertEqual(repository.previewCount, 0)
+    XCTAssertNotNil(harness.store.authorizationUnavailableReason(for: loaded))
+    do {
+      try await harness.store.previewAuthorization(for: loaded)
+      XCTFail("非 EXIT_PLAN 执行归属不得请求自动退出授权")
+    } catch {
+      XCTAssertNotNil(error as? ExitPlanWorkspaceError)
     }
+    XCTAssertEqual(repository.previewCount, 0)
+  }
+
+  func testRecoveryActionFromServerBlocksAuthorization() async {
+    let repository = ExitPlanLoaderSpy(
+      plan: makePlan(
+        recoveryAction: "COMPLETE_RECONCILIATION",
+        recoveryMessage: "计划需要先完成账户对账。"
+      )
+    )
+    let harness = makeHarness(repository: repository)
+    await harness.store.refresh()
+    let loaded = harness.store.listState.snapshot!.plans[0]
+
+    XCTAssertEqual(
+      harness.store.authorizationUnavailableReason(for: loaded),
+      "计划需要先完成账户对账。"
+    )
+    XCTAssertEqual(repository.previewCount, 0)
   }
 
   private func makeHarness(
@@ -229,9 +249,18 @@ final class ExitPlanWorkspaceTests: XCTestCase {
   }
 
   private func makePlan(
-    mode: ExitPlanExecutionMode = .live,
+    environment: ExecutionEnvironment = .live,
     configVersion: Int = 7,
-    executionOwner: ExitPlanExecutionOwner = .exitPlanMonitor
+    executionOwner: ExecutionOwnerRef = ExecutionOwnerRef(
+      ownerType: .exitPlan,
+      ownerID: "plan-1"
+    ),
+    sourceExecutionOwner: ExecutionOwnerRef = ExecutionOwnerRef(
+      ownerType: .manualCommand,
+      ownerID: "source-1"
+    ),
+    recoveryAction: String? = nil,
+    recoveryMessage: String? = nil
   ) -> ExitPlanItem {
     ExitPlanItem(
       id: "plan-1",
@@ -244,13 +273,14 @@ final class ExitPlanWorkspaceTests: XCTestCase {
       strategyRunID: nil,
       enabled: true,
       status: .active,
-      executionMode: mode,
+      environment: environment,
       autoExitAuthorized: false,
       autoExitAuthorizationConfigVersion: nil,
       autoExitAuthorizationExpiresAt: nil,
       configVersion: configVersion,
       stateVersion: 9,
       executionOwner: executionOwner,
+      sourceExecutionOwner: sourceExecutionOwner,
       completionStrategy: "UNTIL_SNAPSHOT_CLEARED",
       completionNote: nil,
       protectedVolume: 500,
@@ -271,6 +301,8 @@ final class ExitPlanWorkspaceTests: XCTestCase {
       pendingIntentID: nil,
       lastEvaluatedAt: nil,
       lastError: nil,
+      recoveryAction: recoveryAction,
+      recoveryMessage: recoveryMessage,
       createdAt: nil,
       updatedAt: Date()
     )
@@ -364,7 +396,7 @@ private final class ExitPlanLoaderSpy: ExitPlanLoading {
       instrumentCode: plan.instrumentCode,
       bucket: plan.bucket,
       sourceType: plan.sourceType,
-      executionMode: .live,
+      environment: .live,
       configVersion: plan.configVersion,
       protectedVolume: plan.protectedVolume,
       exitedVolume: plan.exitedVolume,

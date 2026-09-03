@@ -30,6 +30,13 @@ OWNER_HANDLER_UNREGISTERED = "OWNER_HANDLER_UNREGISTERED"
 OWNER_TARGET_NOT_FOUND = "OWNER_TARGET_NOT_FOUND"
 OWNER_TARGET_CONFLICT = "OWNER_TARGET_CONFLICT"
 OWNER_ENVIRONMENT_CONFLICT = "OWNER_ENVIRONMENT_CONFLICT"
+_REGISTERABLE_RUNTIME_OWNER_TYPES = frozenset(
+  {
+    ExecutionOwnerType.STRATEGY_RUN,
+    ExecutionOwnerType.EXIT_PLAN,
+    ExecutionOwnerType.MANUAL_COMMAND,
+  }
+)
 
 
 class OwnerRuntimeRoutingError(Exception):
@@ -225,6 +232,8 @@ class OwnerRuntimeRegistry:
     handler: OwnerRuntimeHandler,
   ) -> None:
     if not isinstance(owner_type, ExecutionOwnerType):
+      raise OwnerRuntimeRoutingError(OWNER_HANDLER_INVALID)
+    if owner_type not in _REGISTERABLE_RUNTIME_OWNER_TYPES:
       raise OwnerRuntimeRoutingError(OWNER_HANDLER_INVALID)
     if not _is_handler(handler):
       raise OwnerRuntimeRoutingError(OWNER_HANDLER_INVALID)

@@ -11,6 +11,7 @@ from decimal import ROUND_FLOOR, Decimal
 from math import isfinite
 from typing import Any, Callable, Iterable, Mapping, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.strategies.ashare_managed_exit_plan import (
   EXIT_PLAN_ENABLED_KEY,
   MANAGED_EXIT_PLAN_KEY,
@@ -101,6 +102,7 @@ from quantx_infrastructure.services.exit_plan_execution_owner import (
   RUNTIME_BOOK_OWNER,
   RUNTIME_EXIT_PLAN_SOURCE_TYPES,
   durable_exit_plan_owner_kind,
+  durable_exit_plan_source_binding,
   has_managed_runtime_command_marker,
   managed_runtime_command_id,
 )
@@ -183,6 +185,27 @@ _T_TRADE_AUTHORIZATION_DEFERRED_CODES = frozenset(
     "T_TRADE_EXIT_SAFETY_SNAPSHOT_UNAVAILABLE",
   }
 )
+_EXIT_OWNER_METADATA_KEYS = frozenset(
+  {
+    "owner_type",
+    "owner_id",
+    "environment",
+    "execution_environment",
+    "execution_owner_type",
+    "execution_owner_id",
+    "source_execution_owner_type",
+    "source_execution_owner_id",
+    "strategy_run_id",
+  }
+)
+
+
+def _without_exit_owner_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
+  return {
+    key: item
+    for key, item in dict(value or {}).items()
+    if str(key).strip().lower() not in _EXIT_OWNER_METADATA_KEYS
+  }
 
 
 @dataclass(frozen=True)
@@ -325,15 +348,13 @@ def _is_exact_exit_plan_intent(
   """Verify that one durable SELL belongs to exactly one exit plan owner."""
 
   plan_id = str(record.plan_id or "")
-  metadata = dict(intent.intent_metadata or {})
   return bool(
     str(intent.id or "") == str(expected_intent_id or "")
     and str(intent.owner_type or "").upper() == "EXIT_PLAN"
     and str(intent.owner_id or "") == plan_id
-    and str(metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
-    and str(metadata.get("owner_id") or "") == plan_id
-    and str(metadata.get("exit_plan_id") or "") == plan_id
-    and str(intent.strategy_run_id or "") == str(expected_strategy_run_id or "")
+    and intent.strategy_run_id is None
+    and str(intent.environment or "").upper()
+    == str(record.environment or "").upper()
     and str(intent.account_id or "") == str(record.account_id or "")
     and str(intent.instrument_code or "").upper()
     == str(record.instrument_code or "").upper()
@@ -527,7 +548,7 @@ class AutoExitPlanService:
       strategy_class=AshareManagedExitPlanStrategy,
       mode=(
         StrategyRunMode.LIVE
-        if str(record.execution_mode or "").lower() == "live"
+        if str(record.environment or "").upper() == ExecutionEnvironment.LIVE.value
         else StrategyRunMode.PAPER
       ),
       name=f"卖出托管-{record.instrument_code}",
@@ -597,7 +618,7 @@ class AutoExitPlanService:
       strategy_class=AshareManagedExitPlanStrategy,
       mode=(
         StrategyRunMode.LIVE
-        if str(record.execution_mode or "").lower() == "live"
+        if str(record.environment or "").upper() == ExecutionEnvironment.LIVE.value
         else StrategyRunMode.PAPER
       ),
       name=f"卖出托管-{record.instrument_code}-v{plan.template.config_version}",
@@ -1739,7 +1760,14 @@ class AutoExitPlanService:
         record = await db.get(AutoExitPlanRecord, str(expected_plan_id or "").strip())
         if record is None:
           raise RuntimeError("退出计划不存在")
-        if str(record.strategy_run_id or "") != str(strategy_run_id or "").strip():
+        source_binding = durable_exit_plan_source_binding(record)
+        if source_binding is None:
+          raise RuntimeError("退出计划 source execution owner 不完整")
+        source_owner, _source_environment = source_binding
+        if (
+          source_owner.owner_type is not ExecutionOwnerType.STRATEGY_RUN
+          or source_owner.owner_id != str(strategy_run_id or "").strip()
+        ):
           raise RuntimeError("退出计划与预期 StrategyRun 绑定不一致")
         durable_owner = durable_exit_plan_owner_kind(record)
         if durable_owner == MANAGED_EXIT_STRATEGY_OWNER:
@@ -1773,18 +1801,17 @@ class AutoExitPlanService:
           raise RuntimeError("退出卖单存在但缺少对应的持久化 EXIT_PLAN 意图")
         return None
 
-      metadata = dict(intent.intent_metadata or {})
       if (
         str(intent.id or "") != normalized_intent_id
         or str(intent.owner_type or "").upper() != "EXIT_PLAN"
         or str(intent.owner_id or "") != str(record.plan_id)
-        or str(intent.strategy_run_id or "")
-        != str(record.strategy_run_id or "")
+        or intent.strategy_run_id is not None
+        or str(intent.environment or "").upper()
+        != str(record.environment or "").upper()
         or str(intent.account_id or "") != normalized_account_id
         or str(intent.instrument_code or "").upper()
         != str(record.instrument_code or "").upper()
         or str(intent.direction or "").upper() != "SELL"
-        or str(metadata.get("exit_plan_id") or "") != str(record.plan_id)
       ):
         raise RuntimeError("退出意图与计划、运行、账户或 SELL 所有权不一致")
       if not orders:
@@ -1793,7 +1820,11 @@ class AutoExitPlanService:
         raise RuntimeError("同一退出意图重复绑定多个待处理卖单")
       order = orders[0]
       if (
-        str(order.strategy_run_id or "") != str(record.strategy_run_id or "")
+        str(order.owner_type or "").upper() != "EXIT_PLAN"
+        or str(order.owner_id or "") != str(record.plan_id)
+        or str(order.environment or "").upper()
+        != str(record.environment or "").upper()
+        or order.strategy_run_id is not None
         or str(order.account_id or "") != normalized_account_id
         or str(order.intent_id or "") != normalized_intent_id
         or str(order.side or "").upper() != "SELL"
@@ -1803,7 +1834,7 @@ class AutoExitPlanService:
         raise RuntimeError("待处理卖单与退出意图的运行、账户或标的不一致")
       return {
         "plan_id": str(record.plan_id),
-        "strategy_run_id": str(order.strategy_run_id or ""),
+        "strategy_run_id": "",
         "intent_id": str(order.intent_id or ""),
         "account_id": str(order.account_id or ""),
         "instrument_code": str(order.instrument_code or ""),
@@ -1814,7 +1845,7 @@ class AutoExitPlanService:
         "order_type": str(order.order_type or ""),
         "limit_price": str(order.limit_price or ""),
         "volume": int(order.volume or 0),
-        "execution_mode": str(order.execution_mode or "").lower(),
+        "execution_mode": str(order.environment or "").upper().lower(),
       }
 
   async def strategy_plan_event_applied(
@@ -1901,7 +1932,10 @@ class AutoExitPlanService:
           strategy_run_id=normalized_run_id,
           enabled=durable_plan.status != ExitPlanStatus.PAUSED,
           status=durable_plan.status.value,
-          execution_mode=normalized_mode,
+          environment=normalized_mode.upper(),
+          source_execution_owner_type=ExecutionOwnerType.STRATEGY_RUN.value,
+          source_execution_owner_id=normalized_run_id,
+          source_execution_environment=normalized_mode.upper(),
           auto_exit_authorized=False,
           config_version=int(durable_plan.template.config_version),
           state_version=1,
@@ -2120,7 +2154,7 @@ class AutoExitPlanService:
         .where(
           AutoExitPlanRecord.account_id == normalized_account,
           AutoExitPlanRecord.source_type == T_TRADE_BATCH_SOURCE,
-          AutoExitPlanRecord.execution_mode == "live",
+          AutoExitPlanRecord.environment == ExecutionEnvironment.LIVE.value,
           AutoExitPlanRecord.enabled == True,  # noqa: E712
           AutoExitPlanRecord.status.in_(("ACTIVE", "PARTIALLY_EXITED")),
           AutoExitPlanRecord.remaining_volume > 0,
@@ -2145,7 +2179,7 @@ class AutoExitPlanService:
           record is None
           or str(record.account_id or "") != normalized_account
           or str(record.source_type or "").upper() != T_TRADE_BATCH_SOURCE
-          or str(record.execution_mode or "").lower() != "live"
+          or str(record.environment or "").upper() != ExecutionEnvironment.LIVE.value
           or not bool(record.enabled)
           or str(record.status or "").upper()
           not in {"ACTIVE", "PARTIALLY_EXITED"}
@@ -2262,7 +2296,10 @@ class AutoExitPlanService:
     """Derive the LIVE exit grant in the same plan-state transaction."""
 
     context = dict(entry_authorization or {})
-    if str(record.execution_mode or "").lower() != "live" or not context:
+    if (
+      str(record.environment or "").upper() != ExecutionEnvironment.LIVE.value
+      or not context
+    ):
       return None
     result = await derive_exact_auto_exit_authorization_from_t_trade_entry(
       db,
@@ -2313,7 +2350,7 @@ class AutoExitPlanService:
     """Validate the immutable plan/run/SELL identity before any state CAS."""
 
     intent_id = str(getattr(intent, "intent_id", "") or "").strip()
-    metadata = dict(getattr(intent, "metadata", {}) or {})
+    execution_ref = getattr(intent, "execution_ref", None)
     direction_value = getattr(getattr(intent, "direction", None), "value", None)
     direction = str(
       direction_value
@@ -2324,15 +2361,24 @@ class AutoExitPlanService:
       not intent_id
       or intent_id != str(expected_intent_id or "").strip()
       or direction != "SELL"
-      or str(getattr(intent, "run_id", "") or "")
-      != str(record.strategy_run_id or "")
+      or not isinstance(execution_ref, ExecutionOwnerRef)
+      or execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
+      or execution_ref.owner_id != str(record.plan_id)
       or str(getattr(intent, "instrument_code", "") or "").upper()
       != str(record.instrument_code or "").upper()
-      or str(metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
-      or str(metadata.get("owner_id") or "") != str(record.plan_id)
-      or str(metadata.get("exit_plan_id") or "") != str(record.plan_id)
     ):
       raise ValueError("退出意图必须与待提交状态绑定同一 SELL/EXIT_PLAN 所有权")
+    source_binding = durable_exit_plan_source_binding(record)
+    if source_binding is None:
+      raise ValueError("退出计划缺少有效 source execution owner")
+    source_owner, _environment = source_binding
+    source_run_id = str(getattr(record, "strategy_run_id", None) or "").strip()
+    intent_run_id = str(getattr(intent, "run_id", None) or "").strip()
+    if source_owner.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if source_run_id and intent_run_id != source_run_id:
+        raise ValueError("退出意图与 source StrategyRun 不匹配")
+    elif intent_run_id:
+      raise ValueError("手动来源退出意图不得携带 StrategyRun 身份")
     return intent_id
 
   @staticmethod
@@ -2348,7 +2394,9 @@ class AutoExitPlanService:
       intent,
       expected_intent_id=str(getattr(intent, "intent_id", "") or ""),
     )
-    metadata = dict(getattr(intent, "metadata", {}) or {})
+    metadata = _without_exit_owner_metadata(
+      dict(getattr(intent, "metadata", {}) or {})
+    )
     metadata.setdefault(
       "approval_ttl_ms",
       getattr(intent, "approval_ttl_ms", None),
@@ -2363,18 +2411,18 @@ class AutoExitPlanService:
     )
     existing = await db.get(TradeIntentRecord, intent_id)
     if existing is not None:
-      existing_metadata = dict(existing.intent_metadata or {})
       if (
         str(existing.owner_type or "").upper() != "EXIT_PLAN"
         or str(existing.owner_id or "") != str(record.plan_id)
-        or str(existing.strategy_run_id or "")
-        != str(record.strategy_run_id or "")
+        or existing.strategy_run_id is not None
+        or str(existing.environment or "").upper()
+        != str(record.environment or "").upper()
+        or str(existing.idempotency_key or "")
+        != f"strategy-exit:{record.plan_id}:{intent_id}"
         or str(existing.account_id or "") != str(record.account_id or "")
         or str(existing.instrument_code or "").upper()
         != str(record.instrument_code or "").upper()
         or str(existing.direction or "").upper() != "SELL"
-        or str(existing_metadata.get("exit_plan_id") or "")
-        != str(record.plan_id)
       ):
         raise ValueError("退出意图幂等键已绑定其他业务所有者")
       return
@@ -2389,9 +2437,11 @@ class AutoExitPlanService:
     db.add(
       TradeIntentRecord(
         id=intent_id,
-        strategy_run_id=str(record.strategy_run_id or "") or None,
+        strategy_run_id=None,
         owner_type="EXIT_PLAN",
         owner_id=str(record.plan_id),
+        environment=str(record.environment or "").upper(),
+        idempotency_key=f"strategy-exit:{record.plan_id}:{intent_id}",
         account_id=str(record.account_id),
         strategy_id=str(getattr(intent, "strategy_id", "") or "") or None,
         instrument_code=str(getattr(intent, "instrument_code", "") or ""),
@@ -2629,17 +2679,15 @@ class AutoExitPlanService:
             .with_for_update()
           )
           if intent is not None and str(intent.direction or "").upper() == "SELL":
-            intent.owner_type = "EXIT_PLAN"
-            intent.owner_id = str(record.plan_id)
-            intent_metadata = dict(intent.intent_metadata or {})
-            intent_metadata.update(
-              {
-                "owner_type": "EXIT_PLAN",
-                "owner_id": str(record.plan_id),
-                "exit_plan_id": str(record.plan_id),
-              }
-            )
-            intent.intent_metadata = intent_metadata
+            if (
+              str(intent.owner_type or "").upper() != "EXIT_PLAN"
+              or str(intent.owner_id or "") != str(record.plan_id)
+              or str(intent.environment or "").upper()
+              != str(record.environment or "").upper()
+            ):
+              raise RuntimeError(
+                "退出计划迁移发现 SELL 意图 owner/environment 不一致，必须先对账"
+              )
 
         run_stopped = False
         if old_run_id:
@@ -2800,7 +2848,10 @@ class AutoExitPlanService:
             strategy_run_id=normalized_run_id,
             enabled=plan.status != ExitPlanStatus.PAUSED,
             status=plan.status.value,
-            execution_mode=self._execution_mode(execution_mode),
+            environment=self._execution_mode(execution_mode).upper(),
+            source_execution_owner_type=ExecutionOwnerType.STRATEGY_RUN.value,
+            source_execution_owner_id=normalized_run_id,
+            source_execution_environment=self._execution_mode(execution_mode).upper(),
             auto_exit_authorized=False,
             config_version=int(template.config_version),
             protected_volume=int(plan.entry_filled_volume or 0),
@@ -3065,8 +3116,10 @@ class AutoExitPlanService:
     )
 
   @staticmethod
-  def _manual_command_id(value: Any) -> str:
+  def _manual_command_id(value: Any, *, required: bool = False) -> str:
     command_id = str(value or "").strip()
+    if required and not command_id:
+      raise ValueError("人工计划 command_id 不能为空")
     if len(command_id) > 128:
       raise ValueError("人工计划 command_id 不能超过 128 个字符")
     return command_id
@@ -3151,7 +3204,7 @@ class AutoExitPlanService:
       strategy_class=AshareManagedExitPlanStrategy,
       mode=(
         StrategyRunMode.LIVE
-        if str(record.execution_mode or "").lower() == "live"
+        if str(record.environment or "").upper() == ExecutionEnvironment.LIVE.value
         else StrategyRunMode.PAPER
       ),
       name=(
@@ -3287,6 +3340,13 @@ class AutoExitPlanService:
       or str(record.account_id or "") != str(payload.get("account_id") or "").strip()
       or str(record.instrument_code or "").upper()
       != str(payload.get("instrument_code") or "").strip().upper()
+      or str(record.source_execution_owner_type or "").upper()
+      != ExecutionOwnerType.MANUAL_COMMAND.value
+      or str(record.source_execution_owner_id or "") != command_id
+      or str(record.source_execution_environment or "").upper()
+      != self._execution_mode(payload.get("execution_mode")).upper()
+      or str(record.environment or "").upper()
+      != self._execution_mode(payload.get("execution_mode")).upper()
       or int(record.config_version or 0) != 1
       or int(plan.template.config_version or 0) != 1
       or not self._manual_command_matches(
@@ -3737,7 +3797,7 @@ class AutoExitPlanService:
     self,
     payload: Mapping[str, Any],
     *,
-    command_id: str = "",
+    command_id: str,
   ) -> AutoExitPlanRecord:
     """Create an operator-owned plan while atomically claiming holding capacity."""
 
@@ -3749,33 +3809,32 @@ class AutoExitPlanService:
     instrument_code = str(payload.get("instrument_code") or "").strip().upper()
     if not account_id or not instrument_code:
       raise ValueError("人工计划必须指定账户和股票")
-    normalized_command_id = self._manual_command_id(command_id)
+    normalized_command_id = self._manual_command_id(command_id, required=True)
     command_fingerprint = self._manual_command_fingerprint(payload)
     deterministic_plan_id = self._manual_plan_id_for_command(normalized_command_id)
     requested_plan_id = str(payload.get("plan_id") or "").strip()
-    if deterministic_plan_id and requested_plan_id and (
+    if requested_plan_id and (
       requested_plan_id != deterministic_plan_id
     ):
       raise ValueError("EXIT_COMMAND_REPLAY_CONFLICT:创建计划标识与命令不一致")
-    plan_id = deterministic_plan_id or requested_plan_id or (
-      f"manual-position:{uuid.uuid4()}"
-    )
-    if normalized_command_id:
-      existing = await self._load_manual_plan_record(plan_id)
-      if existing is not None:
-        return await self._converge_replayed_manual_create(
-          existing,
-          payload=payload,
-          command_id=normalized_command_id,
-          command_fingerprint=command_fingerprint,
-        )
+    plan_id = deterministic_plan_id
+    existing = await self._load_manual_plan_record(plan_id)
+    if existing is not None:
+      return await self._converge_replayed_manual_create(
+        existing,
+        payload=payload,
+        command_id=normalized_command_id,
+        command_fingerprint=command_fingerprint,
+      )
+    execution_mode = self._execution_mode(payload.get("execution_mode"))
+    durable_environment = execution_mode.upper()
     async with AsyncSessionLocal() as db:
       scope = await lock_exit_plan_scope(
         db,
         account_id=account_id,
         instrument_code=instrument_code,
         target_plan_id=plan_id,
-        execution_mode=self._execution_mode(payload.get("execution_mode")),
+        execution_mode=execution_mode,
       )
       position = scope.position
       if position is None or int(position.volume or 0) <= 0:
@@ -3835,7 +3894,10 @@ class AutoExitPlanService:
         source_id=template.source_id,
         strategy_run_id=None,
         enabled=desired_enabled,
-        execution_mode=self._execution_mode(payload.get("execution_mode")),
+        environment=durable_environment,
+        source_execution_owner_type=ExecutionOwnerType.MANUAL_COMMAND.value,
+        source_execution_owner_id=normalized_command_id,
+        source_execution_environment=durable_environment,
         auto_exit_authorized=False,
         config_version=1,
         protected_volume=requested,
@@ -4015,7 +4077,10 @@ class AutoExitPlanService:
       record.strategy_run_id = None
       record.protected_volume = protected_volume
       record.remaining_volume = desired_remaining
-      if self._execution_mode(payload.get("execution_mode", record.execution_mode)) != record.execution_mode:
+      requested_environment = self._execution_mode(
+        payload.get("execution_mode", record.environment)
+      )
+      if requested_environment.upper() != str(record.environment or "").upper():
         raise ValueError("执行环境创建后不可切换，请为新环境创建独立计划")
       clear_exact_auto_exit_authorization(record, bump_state_version=False)
       self._sync_record(record, plan)
@@ -4258,7 +4323,10 @@ class AutoExitPlanService:
         record.config_version = next_version
         record.protected_volume = protected_volume
         record.remaining_volume = desired_remaining
-        if self._execution_mode(payload.get("execution_mode", record.execution_mode)) != record.execution_mode:
+        requested_environment = self._execution_mode(
+          payload.get("execution_mode", record.environment)
+        )
+        if requested_environment.upper() != str(record.environment or "").upper():
           raise ValueError("执行环境创建后不可切换，请为新环境创建独立计划")
         clear_exact_auto_exit_authorization(record, bump_state_version=False)
         runtime_plan = ExitPlan.from_dict(plan.to_dict())
@@ -4454,7 +4522,9 @@ class AutoExitPlanService:
         pending_sell_stmt = (
           select(PendingTradeOrder)
           .where(PendingTradeOrder.account_id == account_id)
-          .where(PendingTradeOrder.execution_mode == "live")
+          .where(
+            PendingTradeOrder.environment == ExecutionEnvironment.LIVE.value
+          )
           .where(PendingTradeOrder.side == "SELL")
           .where(PendingTradeOrder.status.in_(ACTIVE_ORDER_STATUSES))
           .with_for_update()
@@ -4652,7 +4722,10 @@ class AutoExitPlanService:
           source_type=MANUAL_LIQUIDATION_SOURCE,
           source_id=plan_id,
           enabled=True,
-          execution_mode=execution_mode,
+          environment=execution_mode.upper(),
+          source_execution_owner_type=ExecutionOwnerType.MANUAL_COMMAND.value,
+          source_execution_owner_id=group_id,
+          source_execution_environment=execution_mode.upper(),
           auto_exit_authorized=False,
           config_version=1,
           completion_strategy=completion,
@@ -4788,6 +4861,7 @@ class AutoExitPlanService:
       raise ValueError("动态止盈需要有效的固定保护数量和持仓成本")
     policy = normalize_dynamic_policy(order.dynamic_policy)
     plan_id = str(order.exit_plan_id or f"manual-position:{order.id}")
+    execution_mode = self._execution_mode(order.execution_mode)
     async with AsyncSessionLocal() as db:
       repo = AutoExitPlanRepository(db)
       scope = await lock_exit_plan_scope(
@@ -4795,6 +4869,7 @@ class AutoExitPlanService:
         account_id=order.account_id,
         instrument_code=order.stock_code,
         target_plan_id=plan_id,
+        execution_mode=execution_mode,
       )
       position = scope.position or position
       record = scope.plan(plan_id)
@@ -4846,6 +4921,10 @@ class AutoExitPlanService:
           bucket="manual",
           source_type="MANUAL_POSITION",
           source_id=str(order.id),
+          source_execution_owner_type=ExecutionOwnerType.MANUAL_COMMAND.value,
+          source_execution_owner_id=str(order.id),
+          source_execution_environment=execution_mode.upper(),
+          environment=execution_mode.upper(),
           protected_volume=volume,
           exited_volume=0,
           remaining_volume=volume,
@@ -4856,7 +4935,8 @@ class AutoExitPlanService:
       record.account_id = order.account_id
       record.instrument_code = order.stock_code
       record.enabled = bool(order.enabled)
-      record.execution_mode = str(order.execution_mode or "paper").lower()
+      if str(record.environment or "").upper() != execution_mode.upper():
+        raise ValueError("执行环境创建后不可切换，请为新环境创建独立计划")
       record.auto_exit_authorized = False
       record.config_version = config_version
       record.protected_volume = volume
@@ -5268,8 +5348,9 @@ class AutoExitPlanService:
         broker_order_id=broker_order_id,
       )
       plan_id = (
-        str((pending.request_metadata or {}).get("exit_plan_id") or "")
-        if pending
+        str(pending.owner_id or "")
+        if pending is not None
+        and str(pending.owner_type or "").upper() == "EXIT_PLAN"
         else ""
       )
       if not plan_id:
@@ -5283,9 +5364,12 @@ class AutoExitPlanService:
       if not is_monitor_owned_exit_plan(record):
         raise RuntimeError("EXIT_PLAN_OWNER_INVALID:全局 Monitor 无权消费该委托回报")
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+      intent_id = str(pending.intent_id or "") if pending is not None else ""
+      if not intent_id:
+        return
       ExitPlanBook([plan]).apply_order_event(
         plan_id=plan_id,
-        intent_id=str((pending.request_metadata or {}).get("intent_id") or ""),
+        intent_id=intent_id,
         status=status,
         order_id=broker_order_id or client_order_id,
         timestamp_ms=int(time_utils.now().timestamp() * 1000),
@@ -5334,8 +5418,9 @@ class AutoExitPlanService:
         broker_order_id=broker_order_id,
       )
       plan_id = (
-        str((pending.request_metadata or {}).get("exit_plan_id") or "")
-        if pending
+        str(pending.owner_id or "")
+        if pending is not None
+        and str(pending.owner_type or "").upper() == "EXIT_PLAN"
         else ""
       )
       if not plan_id:
@@ -5359,12 +5444,15 @@ class AutoExitPlanService:
       if not is_monitor_owned_exit_plan(record):
         raise RuntimeError("EXIT_PLAN_OWNER_INVALID:全局 Monitor 无权消费该成交回报")
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+      intent_id = str(pending.intent_id or "") if pending is not None else ""
+      if not intent_id:
+        return
       ExitPlanBook([plan]).apply_exit_fill(
         plan_id=plan_id,
         volume=volume,
         price=price,
         rule_id=str((pending.request_metadata or {}).get("exit_rule_id") or ""),
-        intent_id=str((pending.request_metadata or {}).get("intent_id") or ""),
+        intent_id=intent_id,
       )
       self._sync_record(record, plan)
       await self._append_event(
@@ -5592,9 +5680,16 @@ class AutoExitPlanService:
         raise ValueError("退出计划或卖出意图不存在")
       if not is_monitor_owned_exit_plan(record):
         raise ValueError("EXIT_PLAN_OWNER_CHANGED")
-      metadata = dict(intent.intent_metadata or {})
-      if str(metadata.get("exit_plan_id") or "") != plan_id:
+      if (
+        str(intent.owner_type or "").upper() != ExecutionOwnerType.EXIT_PLAN.value
+        or str(intent.owner_id or "") != str(record.plan_id)
+        or intent.strategy_run_id is not None
+        or str(intent.environment or "").upper()
+        != str(record.environment or "").upper()
+        or str(intent.id or "") != str(intent_id)
+      ):
         raise ValueError("卖出意图不属于该退出计划")
+      metadata = dict(intent.intent_metadata or {})
       if intent.status != "AWAITING_APPROVAL":
         raise ValueError("卖出意图已处理或不再等待确认")
       intent.status = "REJECTED"
@@ -5830,8 +5925,12 @@ class AutoExitPlanService:
             expected_intent_id=str(plan.pending_intent_id or ""),
             expected_strategy_run_id=str(record.strategy_run_id or ""),
           )
-          and str((pending.request_metadata or {}).get("exit_plan_id") or "")
-          == str(record.plan_id or "")
+          and str(pending.owner_type or "").upper()
+          == ExecutionOwnerType.EXIT_PLAN.value
+          and str(pending.owner_id or "") == str(record.plan_id or "")
+          and str(pending.environment or "").upper()
+          == str(record.environment or "").upper()
+          and pending.strategy_run_id is None
           and str(pending.instrument_code or "").upper()
           == str(record.instrument_code or "").upper()
           and str(pending.side or "").upper() == "SELL"

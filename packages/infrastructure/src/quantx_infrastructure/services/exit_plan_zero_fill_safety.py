@@ -7,14 +7,20 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_domain.clock import utcnow
 from quantx_domain.trading.exit_plan import ExitPlan, ExitPlanStatus, ExitPlanTemplate
 from sqlalchemy import select
+from sqlalchemy.exc import MultipleResultsFound
 
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
+  OrderCorrelation,
   PendingTradeOrder,
-  StrategyOrderCorrelation,
   TradeCommandOutbox,
 )
 from quantx_infrastructure.models.auto_exit_plan import (
@@ -25,10 +31,15 @@ from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.account_execution_quarantine_service import (
   QUARANTINE_CANCEL_REQUIRED_METADATA_KEY,
   QUARANTINE_REASON_METADATA_KEY,
+  QUARANTINE_RECONCILE_REQUIRED_METADATA_KEY,
+  QUARANTINE_REPAIR_REQUIRED_METADATA_KEY,
   AccountExecutionQuarantineService,
 )
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   clear_exact_auto_exit_authorization,
+)
+from quantx_infrastructure.services.exit_plan_execution_owner import (
+  durable_exit_plan_source_binding,
 )
 from quantx_infrastructure.services.trade_intent_processor import (
   LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE,
@@ -82,7 +93,7 @@ class _LockedExitPlanBinding:
   plan: ExitPlan
   pending: PendingTradeOrder
   intent: TradeIntentRecord
-  correlation: Optional[StrategyOrderCorrelation]
+  correlation: Optional[OrderCorrelation]
 
 
 def zero_fill_invalidation_error(intent_id: str) -> str:
@@ -101,87 +112,167 @@ def exit_plan_runtime_event_marker_key(plan_id: str, runtime_event_key: str) -> 
   return f"strategy-exit-runtime-event:{hashlib.sha256(identity).hexdigest()}"
 
 
+def _typed_owner_environment(value: Any) -> Optional[tuple[str, str, str]]:
+  """Return one durable owner/environment triple, or reject it.
+
+  This helper deliberately reads only typed persistence columns.  In
+  particular, request metadata is not an identity source for zero-fill
+  invalidation: metadata can be retained as an audit witness, but it cannot
+  select a plan or make an otherwise incomplete binding exact.
+  """
+
+  try:
+    owner = ExecutionOwnerRef(
+      getattr(value, "owner_type", None),
+      getattr(value, "owner_id", None),
+    )
+    environment = ExecutionEnvironment(getattr(value, "environment", None))
+  except (TypeError, ValueError):
+    return None
+  return owner.owner_type.value, owner.owner_id, environment.value
+
+
+def _typed_source_execution(
+  record: AutoExitPlanRecord,
+) -> Optional[tuple[str, str, str, str]]:
+  """Validate a plan's durable source owner and nullable run witness.
+
+  ``strategy_run_id`` is a nullable witness, not a source-owner fallback.  A
+  non-null witness must agree with a STRATEGY_RUN source triple; when it is
+  null, the source triple still has to be complete and is never inferred from
+  the plan template or request metadata.
+  """
+
+  binding = durable_exit_plan_source_binding(record)
+  if binding is None:
+    return None
+  source_owner, environment = binding
+  strategy_run_id = str(getattr(record, "strategy_run_id", None) or "")
+  return (
+    source_owner.owner_type.value,
+    source_owner.owner_id,
+    environment.value,
+    strategy_run_id,
+  )
+
+
+_PENDING_LIFECYCLE_METADATA_KEYS = frozenset(
+  {
+    QUARANTINE_CANCEL_REQUIRED_METADATA_KEY,
+    QUARANTINE_RECONCILE_REQUIRED_METADATA_KEY,
+    QUARANTINE_REPAIR_REQUIRED_METADATA_KEY,
+    QUARANTINE_REASON_METADATA_KEY,
+    "account_execution_quarantine_repaired",
+    "execution_terminal_source",
+    "execution_terminal_reason",
+    "execution_terminal_at",
+    "reconciled_zero_fill_intent_id",
+    "command_lifecycle_status",
+    "command_lifecycle_previous_status",
+    "command_lifecycle_message_id",
+  }
+)
+
+
+def _immutable_request_metadata(value: Any) -> dict[str, Any]:
+  """Project the immutable request witness from a mutable pending row."""
+
+  if not isinstance(value, Mapping):
+    return {}
+  return {
+    key: item
+    for key, item in dict(value).items()
+    if key not in _PENDING_LIFECYCLE_METADATA_KEYS
+  }
+
+
 async def _locked_exact_binding(
   db: Any,
   *,
   client_order_id: str,
 ) -> Optional[_LockedExitPlanBinding]:
-  candidate = (
-    await db.execute(
-      select(
-        PendingTradeOrder.account_id,
-        PendingTradeOrder.execution_mode,
-        PendingTradeOrder.side,
-        PendingTradeOrder.intent_id,
-        PendingTradeOrder.request_metadata,
-      ).where(
-        PendingTradeOrder.client_order_id == str(client_order_id or "")
-      )
-    )
-  ).one_or_none()
-  if candidate is None:
-    return None
-  account_id, execution_mode, side, intent_id, request_metadata = candidate
-  candidate_metadata = dict(request_metadata or {})
-  candidate_plan_id = str(candidate_metadata.get("exit_plan_id") or "").strip()
+  requested_client_order_id = str(client_order_id or "")
   if (
-    not candidate_plan_id
-    or not str(intent_id or "").strip()
-    or str(side or "").upper() != "SELL"
-    or str(candidate_metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
-    or str(candidate_metadata.get("owner_id") or "") != candidate_plan_id
+    not requested_client_order_id
+    or requested_client_order_id != requested_client_order_id.strip()
   ):
     return None
-  live_order = str(execution_mode or "").strip().lower() == "live"
-  control = None
-  place_outbox = None
-  if live_order:
-    control = await db.get(
-      AccountExecutionControl,
-      str(account_id or ""),
-      with_for_update=True,
-      populate_existing=True,
-    )
-    if control is None:
-      return None
-    place_outbox = (
+
+  # The pending order is the first durable link keyed by client_order_id.  Its
+  # typed EXIT_PLAN owner supplies the plan key; request metadata is never
+  # consulted to choose that owner.
+  pending_result = await db.execute(
+    select(PendingTradeOrder)
+    .where(PendingTradeOrder.client_order_id == requested_client_order_id)
+    .with_for_update()
+    .execution_options(populate_existing=True)
+  )
+  pending = pending_result.scalar_one_or_none()
+  if pending is None:
+    return None
+  pending_owner = _typed_owner_environment(pending)
+  if pending_owner is None:
+    return None
+  pending_owner_type, plan_id, pending_environment = pending_owner
+  if (
+    pending_owner_type != ExecutionOwnerType.EXIT_PLAN.value
+    or str(pending.client_order_id or "") != requested_client_order_id
+    or str(pending.side or "") != "SELL"
+    or not str(pending.account_id or "")
+    or not str(pending.instrument_code or "")
+    or not str(pending.intent_id or "")
+    or pending.strategy_order_id is not None
+    or pending.strategy_run_id is not None
+  ):
+    return None
+  intent_id = str(pending.intent_id)
+
+  # Delivered/contradictory evidence is valid only when the exact durable
+  # correlation exists.  Query by its unique client_order_id, not by its UUID
+  # primary key, and fail closed on corrupted duplicate rows.
+  try:
+    correlation = (
       await db.execute(
-        select(TradeCommandOutbox)
-        .where(TradeCommandOutbox.client_order_id == str(client_order_id or ""))
-        .limit(1)
+        select(OrderCorrelation)
+        .where(OrderCorrelation.client_order_id == requested_client_order_id)
         .with_for_update()
         .execution_options(populate_existing=True)
       )
     ).scalar_one_or_none()
-  pending = await db.get(
-    PendingTradeOrder,
-    str(client_order_id or ""),
-    with_for_update=True,
-    populate_existing=True,
-  )
-  if pending is None:
+  except MultipleResultsFound:
     return None
-  pending_metadata = dict(pending.request_metadata or {})
-  plan_id = str(pending_metadata.get("exit_plan_id") or "").strip()
-  intent_id = str(pending.intent_id or "").strip()
-  if (
-    not plan_id
-    or not intent_id
-    or str(pending.side or "").upper() != "SELL"
-    or str(pending_metadata.get("owner_type") or "").upper() != "EXIT_PLAN"
-    or str(pending_metadata.get("owner_id") or "") != plan_id
-  ):
+  if correlation is None:
+    return None
+  correlation_owner = _typed_owner_environment(correlation)
+  if correlation_owner is None:
     return None
 
-  correlation = (
-    await db.execute(
-      select(StrategyOrderCorrelation)
-      .where(StrategyOrderCorrelation.client_order_id == pending.client_order_id)
-      .limit(1)
-      .with_for_update()
-      .execution_options(populate_existing=True)
+  # LIVE binding also locks the account gate and any durable PLACE command.
+  # The outbox row is optional for already persisted/replayed evidence, but if
+  # present it must carry the same typed identity.
+  control = None
+  place_outbox = None
+  if pending_environment == ExecutionEnvironment.LIVE.value:
+    control = await db.get(
+      AccountExecutionControl,
+      str(pending.account_id),
+      with_for_update=True,
+      populate_existing=True,
     )
-  ).scalar_one_or_none()
+    if control is None or str(control.account_id or "") != str(pending.account_id):
+      return None
+    try:
+      place_outbox = (
+        await db.execute(
+          select(TradeCommandOutbox)
+          .where(TradeCommandOutbox.client_order_id == requested_client_order_id)
+          .with_for_update()
+          .execution_options(populate_existing=True)
+        )
+      ).scalar_one_or_none()
+    except MultipleResultsFound:
+      return None
+
   intent = await db.get(
     TradeIntentRecord,
     intent_id,
@@ -196,57 +287,82 @@ async def _locked_exact_binding(
   )
   if intent is None or record is None:
     return None
+  source_execution = _typed_source_execution(record)
+  if source_execution is None:
+    return None
+  _, _, record_environment, _ = source_execution
+  if record_environment != pending_environment:
+    return None
+
+  intent_owner = _typed_owner_environment(intent)
+  if intent_owner is None:
+    return None
   try:
     plan = ExitPlan.from_dict(dict(record.plan_state or {}))
   except (KeyError, TypeError, ValueError):
     return None
   template = plan.template
-  intent_metadata = dict(intent.intent_metadata or {})
-  run_id = str(record.strategy_run_id or "").strip()
-  if not (
-    plan.plan_id == plan_id
-    and str(template.account_id or "") == str(record.account_id or "")
-    and str(template.instrument_code or "").upper()
-    == str(record.instrument_code or "").upper()
-    and str(template.run_id or "").strip() == run_id
-    and str(record.account_id or "") == str(pending.account_id or "")
-    and str(record.instrument_code or "").upper()
-    == str(pending.instrument_code or "").upper()
-    and str(intent.id or "") == intent_id
-    and str(intent.owner_type or "").upper() == "EXIT_PLAN"
-    and str(intent.owner_id or "") == plan_id
-    and str(intent.account_id or "") == str(pending.account_id or "")
-    and str(intent.instrument_code or "").upper()
-    == str(pending.instrument_code or "").upper()
-    and str(intent.direction or "").upper() == "SELL"
-    and str(intent_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
-    and str(intent_metadata.get("owner_id") or "") == plan_id
-    and str(intent_metadata.get("exit_plan_id") or "") == plan_id
+  if str(template.bucket or "") != str(record.bucket or ""):
+    return None
+
+  expected_owner = (
+    ExecutionOwnerType.EXIT_PLAN.value,
+    plan_id,
+    pending_environment,
+  )
+  if (
+    pending_owner != expected_owner
+    or correlation_owner != expected_owner
+    or intent_owner != expected_owner
+    or str(correlation.client_order_id or "") != requested_client_order_id
+    or str(correlation.account_id or "") != str(pending.account_id or "")
+    or str(correlation.intent_id or "") != intent_id
+    or str(correlation.strategy_order_id or "")
+    != str(pending.strategy_order_id or "")
+    or str(correlation.batch_id or "") != str(pending.batch_id or "")
+    or str(correlation.bucket or "") != str(pending.bucket or "")
+    or str(correlation.t_trade_role or "") != str(pending.t_trade_role or "")
+    or str(correlation.risk_decision_id or "")
+    != str(pending.risk_decision_id or "")
+    or str(correlation.trace_id or "") != str(pending.trace_id or "")
+    or correlation.substitution_plan != pending.substitution_plan
+    or _immutable_request_metadata(correlation.request_metadata)
+    != _immutable_request_metadata(pending.request_metadata)
+    or correlation.strategy_run_id is not None
+    or correlation.strategy_order_id is not None
+    or intent.strategy_run_id is not None
+    or str(record.plan_id or "") != plan_id
+    or plan.plan_id != plan_id
+    or str(record.account_id or "") != str(pending.account_id or "")
+    or str(record.instrument_code or "") != str(pending.instrument_code or "")
+    or str(template.account_id or "") != str(pending.account_id or "")
+    or str(template.instrument_code or "") != str(pending.instrument_code or "")
+    or str(intent.id or "") != intent_id
+    or str(intent.account_id or "") != str(pending.account_id or "")
+    or str(intent.instrument_code or "") != str(pending.instrument_code or "")
+    or str(intent.direction or "") != "SELL"
   ):
     return None
-  if run_id:
-    correlation_metadata = (
-      dict(correlation.request_metadata or {}) if correlation is not None else {}
-    )
-    if not (
-      correlation is not None
-      and str(pending.strategy_run_id or "") == run_id
-      and str(intent.strategy_run_id or "") == run_id
-      and str(correlation.strategy_run_id or "") == run_id
-      and str(correlation.intent_id or "") == intent_id
-      and str(correlation.account_id or "") == str(record.account_id or "")
-      and str(correlation.client_order_id or "")
-      == str(pending.client_order_id or "")
-      and str(correlation_metadata.get("owner_type") or "").upper()
-      == "EXIT_PLAN"
-      and str(correlation_metadata.get("owner_id") or "") == plan_id
-      and str(correlation_metadata.get("exit_plan_id") or "") == plan_id
+
+  pending_broker_order_id = str(pending.broker_order_id or "")
+  correlation_broker_order_id = str(correlation.broker_order_id or "")
+  # ACK/early lifecycle rows may durably know the broker id on only one side;
+  # a pair of present ids, however, is an immutable exact fact and must agree.
+  if (
+    pending_broker_order_id
+    and correlation_broker_order_id
+    and pending_broker_order_id != correlation_broker_order_id
+  ):
+    return None
+  if place_outbox is not None:
+    outbox_owner = _typed_owner_environment(place_outbox)
+    if (
+      outbox_owner != expected_owner
+      or str(place_outbox.client_order_id or "") != requested_client_order_id
+      or str(place_outbox.account_id or "") != str(pending.account_id or "")
     ):
       return None
-  elif correlation is not None or str(pending.strategy_run_id or "") or str(
-    intent.strategy_run_id or ""
-  ):
-    return None
+
   return _LockedExitPlanBinding(
     control=control,
     place_outbox=place_outbox,
@@ -377,7 +493,13 @@ async def _queue_released_evidence_cancel(
       idempotency_key=(
         f"entry-plan-cancel:{pending.client_order_id}:{durable_broker_order_id}"
       ),
-      execution_mode="live",
+      execution_ref=ExecutionOwnerRef(
+        str(pending.owner_type or ""),
+        str(pending.owner_id or ""),
+      ),
+      environment=ExecutionEnvironment(
+        str(pending.environment or "").strip().upper()
+      ),
       commit_transaction=False,
     )
   except AgentUnavailableError:
@@ -549,7 +671,7 @@ async def invalidate_exit_plan_zero_fill_proof(
     )
 
   evidence_cancel_message_id = ""
-  if released and str(record.execution_mode or "").strip().lower() == "live":
+  if released and str(record.environment or "").strip().upper() == "LIVE":
     evidence_cancel_message_id = await _queue_released_evidence_cancel(
       db,
       binding=binding,
@@ -627,7 +749,7 @@ async def invalidate_exit_plan_zero_fill_proof(
     record.status = ExitPlanStatus.ERROR.value
     record.enabled = False
     record.last_error = error_code
-    if str(record.execution_mode or "").strip().lower() == "live":
+    if str(record.environment or "").strip().upper() == "LIVE":
       await AccountExecutionQuarantineService(
         db
       ).quarantine_released_exit_plan(
@@ -669,7 +791,7 @@ async def invalidate_exit_plan_zero_fill_proof(
 async def runtime_zero_fill_invalidation(
   db: Any,
   *,
-  correlation: StrategyOrderCorrelation,
+  correlation: OrderCorrelation,
 ) -> Optional[dict[str, Any]]:
   """Return an exact invalidation marker eligible for runtime reconciliation."""
 
@@ -696,7 +818,7 @@ async def runtime_zero_fill_invalidation(
 async def mark_released_zero_fill_runtime_order_canonicalized(
   db: Any,
   *,
-  correlation: StrategyOrderCorrelation,
+  correlation: OrderCorrelation,
   runtime_event_key: str,
 ) -> bool:
   """Mark a staged ORDER already committed into the canonical ERROR aggregate."""

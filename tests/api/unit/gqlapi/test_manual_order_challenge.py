@@ -13,7 +13,11 @@ from quantx_api.gqlapi.manual_order import (
   normalize_manual_order_request,
 )
 from quantx_api.gqlapi.trade_approval import TradeApprovalChallengeError
-from quantx_contracts import LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
+from quantx_contracts import (
+  LIVE_ORDER_MAX_QUOTE_AGE_SECONDS,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+)
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_base import Base
@@ -103,7 +107,7 @@ async def test_preflight_rejects_mode_that_does_not_match_live_trading(
   )
 
   with pytest.raises(TradeApprovalChallengeError) as rejected:
-    await manual_order._preflight(request)
+    await manual_order._preflight(request, owner_id="mode-mismatch-owner")
 
   assert rejected.value.code == "EXECUTION_MODE_MISMATCH"
   assert "不会自动切换执行环境" in rejected.value.message
@@ -146,12 +150,28 @@ async def test_preflight_reports_lunch_break_before_reading_stale_quote(
   )
 
   with pytest.raises(TradeApprovalChallengeError) as rejected:
-    await manual_order._preflight(request, db=SimpleNamespace())
+    await manual_order._preflight(
+      request,
+      db=SimpleNamespace(),
+      owner_id="lunch-break-owner",
+    )
 
   assert rejected.value.code == "OUTSIDE_TRADING_HOURS"
   assert rejected.value.message == "当前为 A 股午间休市，13:00 后可重新获取委托预览"
   hours_check.assert_awaited_once_with("SH", lunch_time)
   quote_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_preflight_requires_a_confirmation_challenge_owner_id():
+  request = _request(key="owner-required-preflight")
+
+  with pytest.raises(TypeError):
+    await manual_order._preflight(request)
+
+  with pytest.raises(TradeApprovalChallengeError) as rejected:
+    await manual_order._preflight(request, owner_id="  ")
+  assert rejected.value.code == "CONFIRMATION_CONTEXT_MISMATCH"
 
 
 _MUTABLE_SNAPSHOT_AT = datetime(2026, 8, 15, 10, 0, 0)
@@ -297,13 +317,13 @@ async def test_manual_order_challenge_is_bound_consumed_once_and_queues_once(
   assert preflight_calls == 2
   assert len(queued_calls) == 1
   assert queued_calls[0]["manual_live"] is True
-  assert queued_calls[0]["execution_mode"] == "live"
+  assert queued_calls[0]["environment"] is ExecutionEnvironment.LIVE
   assert queued_calls[0]["commit_transaction"] is False
   assert queued_calls[0]["risk_decision_id"] == manual_order._stable_risk_decision_id(
     preview.challenge_id
   )
-  assert queued_calls[0]["strategy_name"] == "manual-order"
-  assert queued_calls[0]["order_remark"] == "QuantX 手动委托"
+  assert "strategy_name" not in queued_calls[0]
+  assert "order_remark" not in queued_calls[0]
   assert queued_calls[0]["reason_tags"] == ["MANUAL_ORDER", "OK"]
   assert queued_calls[0]["request_metadata"]["origin"] == "MANUAL_ORDER"
   assert queued_calls[0]["idempotency_key"] == (
@@ -366,7 +386,7 @@ async def test_paper_confirmation_never_requests_manual_live_routing(
   )
 
   assert request.execution_mode == "PAPER"
-  assert queued_calls[0]["execution_mode"] == "paper"
+  assert queued_calls[0]["environment"] is ExecutionEnvironment.PAPER
   assert queued_calls[0]["manual_live"] is False
 
 
@@ -402,6 +422,8 @@ async def test_consumed_confirmation_recovers_committed_outbox_after_timeout(
     idempotency_key=(
       f"manual-order:{preview.challenge_id}:ios-timeout-1"
     ),
+    execution_ref=ExecutionOwnerRef.manual_command(preview.challenge_id),
+    environment=ExecutionEnvironment.LIVE,
   )
   async with challenge_database() as db:
     stored = await db.get(TradeConfirmationChallenge, preview.challenge_id)
@@ -414,6 +436,9 @@ async def test_consumed_confirmation_recovers_committed_outbox_after_timeout(
         idempotency_key=digest,
         device_id="qmt-device-1",
         account_id="ACCOUNT-1",
+        owner_type="MANUAL_COMMAND",
+        owner_id=preview.challenge_id,
+        environment=ExecutionEnvironment.LIVE.value,
         payload={"command_kind": "PLACE_ORDER"},
         delivery_status="QUEUED",
         expires_at=time_utils.now() + timedelta(minutes=2),
@@ -509,8 +534,8 @@ async def test_shenzhen_best_order_uses_exact_qmt_peer_price_contract(
   )
 
   assert len(queued_calls) == 1
-  assert queued_calls[0]["order_type"] == "MARKET_PEER_PRICE_FIRST"
-  assert queued_calls[0]["limit_price"] == Decimal("0")
+  assert queued_calls[0]["order_type"] == "FIX_PRICE"
+  assert queued_calls[0]["limit_price"] == Decimal("10.5")
 
 
 @pytest.mark.asyncio
@@ -929,6 +954,8 @@ async def test_final_commit_failure_rolls_back_consumption_and_outbox_for_retry(
       user_id=kwargs["user_id"],
       account_id=kwargs["account_id"],
       idempotency_key=kwargs["idempotency_key"],
+      execution_ref=kwargs["execution_ref"],
+      environment=kwargs["environment"],
     )
     service.db.add(
       TradeCommandOutbox(
@@ -937,6 +964,9 @@ async def test_final_commit_failure_rolls_back_consumption_and_outbox_for_retry(
         idempotency_key=digest,
         device_id="qmt-device-1",
         account_id="ACCOUNT-1",
+        owner_type=kwargs["execution_ref"].owner_type.value,
+        owner_id=kwargs["execution_ref"].owner_id,
+        environment=kwargs["environment"].value,
         payload={"command_kind": "PLACE_ORDER"},
         delivery_status="QUEUED",
         expires_at=time_utils.now() + timedelta(minutes=2),
@@ -1117,7 +1147,10 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     ["ACCOUNT-1"],
   )
 
-  result = await manual_order._preflight(_request())
+  result = await manual_order._preflight(
+    _request(),
+    owner_id="realtime-status-owner-1",
+  )
   assert result.reference_price == 10.5
   assert result.estimated_amount == 1050.0
   assert result.estimated_fees is None
@@ -1131,7 +1164,8 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     seconds=LIVE_ORDER_MAX_QUOTE_AGE_SECONDS + 1
   )
   stale_limit = await manual_order._preflight(
-    _request(key="ios-inactive-limit-preview-1")
+    _request(key="ios-inactive-limit-preview-1"),
+    owner_id="realtime-status-owner-2",
   )
   assert stale_limit.reference_price == 10.5
   assert any("限价委托仍按填写价格确认" in item for item in stale_limit.warnings)
@@ -1147,7 +1181,10 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     execution_mode="LIVE",
   )
   with pytest.raises(TradeApprovalChallengeError) as stale_best:
-    await manual_order._preflight(stale_best_request)
+    await manual_order._preflight(
+      stale_best_request,
+      owner_id="realtime-status-owner-3",
+    )
   assert stale_best.value.code == "QUOTE_STALE"
   assert "对手方最优价" in stale_best.value.message
   tick.time = time_utils.now()
@@ -1165,6 +1202,7 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
   capped = await manual_order._preflight(
     capped_request,
     risk_decision_id="risk-cap-1",
+    owner_id="realtime-status-owner-4",
   )
   assert capped_request.execution_mode == "PAPER"
   assert capped.rollout_snapshot_id.startswith("paper-")
@@ -1178,7 +1216,10 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
 
   manual_order._trading_time_service.is_trading_hours.return_value = False
   with pytest.raises(TradeApprovalChallengeError) as outside_hours:
-    await manual_order._preflight(_request(key="ios-hours-1"))
+    await manual_order._preflight(
+      _request(key="ios-hours-1"),
+      owner_id="realtime-status-owner-5",
+    )
   assert outside_hours.value.code == "OUTSIDE_TRADING_HOURS"
   manual_order._trading_time_service.is_trading_hours.return_value = True
 
@@ -1194,7 +1235,10 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     execution_mode="LIVE",
   )
   with pytest.raises(TradeApprovalChallengeError) as limit_up:
-    await manual_order._preflight(limit_up_request)
+    await manual_order._preflight(
+      limit_up_request,
+      owner_id="realtime-status-owner-6",
+    )
   assert limit_up.value.code == "LIMIT_UP_BLOCKED"
   tick.last_price = 10.0
 
@@ -1208,7 +1252,10 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     account.updated_at = time_utils.now()
     await db.commit()
   with pytest.raises(TradeApprovalChallengeError) as fee_buffer:
-    await manual_order._preflight(_request(key="ios-fee-buffer-1"))
+    await manual_order._preflight(
+      _request(key="ios-fee-buffer-1"),
+      owner_id="realtime-status-owner-7",
+    )
   assert fee_buffer.value.code == "INSUFFICIENT_CASH"
   async with session_factory() as db:
     account = (
@@ -1250,7 +1297,10 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     execution_mode="LIVE",
   )
   with pytest.raises(TradeApprovalChallengeError) as rejected:
-    await manual_order._preflight(stale_sell)
+    await manual_order._preflight(
+      stale_sell,
+      owner_id="realtime-status-owner-8",
+    )
   assert rejected.value.code == "POSITION_SNAPSHOT_STALE"
 
   async with session_factory() as db:
@@ -1271,7 +1321,10 @@ async def test_preflight_uses_realtime_status_instead_of_persisted_trading_flag(
     idempotency_key="ios-corrupt-sell-bounds-1",
     execution_mode="LIVE",
   )
-  sell_preview = await manual_order._preflight(sell_with_corrupt_bounds)
+  sell_preview = await manual_order._preflight(
+    sell_with_corrupt_bounds,
+    owner_id="realtime-status-owner-9",
+  )
   assert sell_preview.requested_volume == 200
   assert sell_preview.final_volume == 200
   assert sell_preview.risk_action == "ALLOW"

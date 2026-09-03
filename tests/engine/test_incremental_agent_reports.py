@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_engine import report_processor
 from quantx_engine.t_trade_coordination import t_trade_account_coordination_lock
 
@@ -192,7 +193,7 @@ async def test_complete_delta_still_applies_authoritative_snapshot(
   await report_processor._process_delta_report(
     "device-1",
     payload,
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   assert calls.delta == []
@@ -265,7 +266,7 @@ async def test_failed_status_incomplete_snapshot_never_mutates_account_facts(
         }
       },
     },
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   fail_closed.assert_awaited_once()
@@ -310,7 +311,7 @@ async def test_incomplete_partition_keeps_valid_status_diagnostic_distinct(
       },
       "snapshot_authority_by_account": _snapshot_authority(),
     },
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   fail_closed.assert_awaited_once()
@@ -623,7 +624,7 @@ async def test_oversized_full_scope_fails_closed_to_authenticated_device_scope(
     await report_processor._process_delta_report(
       "device-1",
       payload,
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
     )
 
   assert marker_calls == [
@@ -706,7 +707,7 @@ async def test_stale_full_duplicate_does_not_replay_business_sections(
   await report_processor._process_delta_report(
     "device-1",
     payload,
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   assert calls.apply == 0
@@ -749,7 +750,7 @@ async def test_incremental_trade_does_not_manufacture_filled_order_status(
         }
       ],
     },
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   [call] = process_execution.await_args_list
@@ -807,7 +808,7 @@ async def test_stale_full_duplicate_does_not_stage_runtime_zero_fill_event() -> 
 
   report = SimpleNamespace(
     message_type="delta_report",
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
     payload=payload,
   )
 
@@ -935,7 +936,7 @@ async def test_full_snapshot_keeps_monitor_out_until_final_rollout_projection(
   await report_processor._process_delta_report(
     "device-1",
     payload,
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
   await asyncio.sleep(0)
 
@@ -1066,7 +1067,7 @@ async def test_prepared_full_snapshot_same_sequence_can_resume_to_complete(
   await report_processor._process_delta_report(
     "device-1",
     payload,
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   assert "prepare" in calls
@@ -1313,7 +1314,7 @@ async def test_failed_newer_full_generation_blocks_intermediate_sequence(
     await report_processor._process_delta_report(
       "device-1",
       payload(7, "snapshot-7"),
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
     )
 
   assert state == {
@@ -1329,7 +1330,7 @@ async def test_failed_newer_full_generation_blocks_intermediate_sequence(
   await report_processor._process_delta_report(
     "device-1",
     payload(6, "snapshot-6"),
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
   assert state["sequence"] == 7
   assert state["is_complete"] is False
@@ -1339,7 +1340,7 @@ async def test_failed_newer_full_generation_blocks_intermediate_sequence(
   await report_processor._process_delta_report(
     "device-1",
     payload(7, "snapshot-7-retry"),
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
   assert state == {
     "sequence": 7,
@@ -1424,7 +1425,7 @@ async def test_delta_incomplete_marker_rejects_same_sequence_old_full_snapshot(
   await report_processor._process_delta_report(
     "device-1",
     payload,
-    protocol_version="1.1",
+    protocol_version=PROTOCOL_VERSION,
   )
 
   prepare.assert_not_awaited()
@@ -1476,7 +1477,7 @@ async def test_invalid_authoritative_snapshot_time_still_fails_closed(
     await report_processor._process_delta_report(
       "device-1",
       payload,
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
     )
 
   fail_closed.assert_awaited_once()
@@ -1535,7 +1536,7 @@ async def test_invalid_authoritative_sequence_still_fails_closed(
     await report_processor._process_delta_report(
       "device-1",
       payload,
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
     )
 
   fail_closed.assert_awaited_once()

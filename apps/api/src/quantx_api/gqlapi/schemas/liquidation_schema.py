@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import AsyncIterator, List, Optional
 
 import strawberry
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
 from quantx_infrastructure.services.exit_plan_notifications import (
   EXIT_PLAN_UPDATE_CHANNEL,
@@ -89,6 +90,28 @@ from ..types.trade_approval_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _exit_plan_execution_binding(
+  plan_id: str,
+  account_id: str,
+) -> tuple[ExecutionOwnerRef, ExecutionEnvironment]:
+  """Resolve the canonical EXIT_PLAN owner and persisted environment."""
+
+  normalized_plan_id = str(plan_id or "").strip()
+  record = await LiquidationResolver._load_exit_plan(
+    normalized_plan_id,
+    account_id=account_id,
+  )
+  if record is None:
+    raise ValueError("退出计划不存在或不属于当前账户")
+  try:
+    environment = ExecutionEnvironment(
+      str(getattr(record, "environment", "") or "").strip().upper()
+    )
+  except (TypeError, ValueError) as exc:
+    raise ValueError("退出计划缺少有效执行环境") from exc
+  return ExecutionOwnerRef(ExecutionOwnerType.EXIT_PLAN, normalized_plan_id), environment
 
 
 @strawberry.type(description="卖出管理与统一退出计划订阅")
@@ -723,13 +746,15 @@ class LiquidationMutation:
     owner = await LiquidationResolver.exit_plan_account_id(plan_id)
     account_id = authorized_account_id(info, owner)
     try:
+      execution_ref, execution_environment = await _exit_plan_execution_binding(
+        plan_id, account_id
+      )
       preview = await TradeApprovalChallengeService.issue(
         principal=principal_from_context(info.context),
         action=EXIT_PLAN_SELL_APPROVAL,
         account_id=account_id,
-        # EXIT_PLAN approvals bind the challenge to the business owner, not to
-        # its optional execution runtime.  The runtime is routing lineage only.
-        business_owner_id=plan_id,
+        execution_ref=execution_ref,
+        environment=execution_environment,
         intent_id=intent_id,
       )
       return TradeApprovalPreviewResult(
@@ -756,11 +781,15 @@ class LiquidationMutation:
     challenge_id: Optional[str] = None
     try:
       principal = principal_from_context(info.context)
+      execution_ref, execution_environment = await _exit_plan_execution_binding(
+        plan_id, account_id
+      )
       dispatch = await TradeApprovalChallengeService.consume(
         principal=principal,
         action=EXIT_PLAN_SELL_APPROVAL,
         account_id=account_id,
-        business_owner_id=plan_id,
+        execution_ref=execution_ref,
+        environment=execution_environment,
         intent_id=intent_id,
         confirmation_token=confirmation_token,
         command_type="EXIT_PLAN_CONFIRM_INTENT",

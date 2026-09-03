@@ -30,6 +30,11 @@ from .common_types import (
   PageInfo,
 )
 from .divid_factor_types import DividFactorData
+from .execution_owner_types import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from .financial_types import (
   FinancialBalanceSheetData,
   FinancialCapitalData,
@@ -464,6 +469,9 @@ __all__ = [
   "HolidayQueryResult",
   "HolidayMutationResult",
   "DividFactorData",
+  "ExecutionOwnerType",
+  "ExecutionEnvironment",
+  "ExecutionOwnerRef",
   "FinancialIncomeStatementData",
   "FinancialBalanceSheetData",
   "FinancialCashFlowData",

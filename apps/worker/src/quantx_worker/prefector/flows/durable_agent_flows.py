@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 from datetime import date, datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from typing import Any, Optional
 import pandas as pd
 from prefect import flow, get_run_logger
 from prefect.runtime import flow_run as flow_run_runtime
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_infrastructure import DurableRuntimeStore
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -1192,11 +1194,18 @@ async def bond_repo_trade_command_flow(
       account_id=str(account_id).strip(),
       instrument_code=str(instrument_code).strip().upper(),
       side="SELL",
-      order_type="LIMIT",
+      order_type="FIX_PRICE",
       limit_price=rate,
       volume=int(volume),
-      strategy_name="bond-repo-worker",
-      order_remark="QuantX国债逆回购",
+      execution_ref=ExecutionOwnerRef.manual_command(
+        "bond-repo:"
+        + hashlib.sha256(
+          (
+            f"{str(account_id).strip()}:{str(idempotency_key).strip()}"
+          ).encode("utf-8")
+        ).hexdigest()
+      ),
+      environment=ExecutionEnvironment.PAPER,
       trace_id=str(idempotency_key).strip(),
       idempotency_key=str(idempotency_key).strip(),
     )

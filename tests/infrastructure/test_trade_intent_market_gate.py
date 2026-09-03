@@ -3,8 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.strategies.base import (
-  ManualCommandIntentOrigin,
+  ExitPlanIntentOrigin,
   TradeIntent,
   TradeIntentDirection,
   TradeIntentPriority,
@@ -61,15 +62,19 @@ async def test_route_rechecks_market_gate_immediately_before_place_order(
       account_id="account-1",
       instrument_code="600000.SH",
       strategy_run_id=None,
-      execution_mode="paper",
+      environment=ExecutionEnvironment.PAPER.value,
     ),
     intent=TradeIntent(
       intent_id="intent-1",
       strategy_id="",
       run_id="",
-      origin=ManualCommandIntentOrigin(
-        command_id="liquidation-command-1",
-        action_type="LIQUIDATE_POSITIONS",
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        "plan-1",
+      ),
+      origin=ExitPlanIntentOrigin(
+        plan_id="plan-1",
+        source_execution_ref=None,
       ),
       instrument_code="600000.SH",
       direction=TradeIntentDirection.SELL,
@@ -160,26 +165,32 @@ async def test_route_uses_canonical_exit_plan_idempotency_key(
       account_id="account-1",
       instrument_code="600000.SH",
       strategy_run_id=None,
-      execution_mode="paper",
+      environment=ExecutionEnvironment.PAPER.value,
     ),
     intent=TradeIntent(
       intent_id="intent-1",
       strategy_id="",
       run_id="",
-      origin=ManualCommandIntentOrigin(
-        command_id="liquidation-command-1",
-        action_type="LIQUIDATE_POSITIONS",
-      ),
       instrument_code="600000.SH",
       direction=TradeIntentDirection.SELL,
       bucket="manual",
       reason="target_reached",
       priority=TradeIntentPriority.HIGH,
       target_volume=100,
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        "plan-1",
+      ),
+      origin=ExitPlanIntentOrigin(
+        plan_id="plan-1",
+        source_execution_ref=None,
+      ),
       metadata={
         "owner_type": "EXIT_PLAN",
         "owner_id": "plan-1",
         "exit_plan_id": "plan-1",
+        "strategy_name": "legacy-strategy-label",
+        "remark": "legacy-order-remark",
       },
     ),
     context=ExitEvaluationContext(
@@ -205,4 +216,23 @@ async def test_route_uses_canonical_exit_plan_idempotency_key(
   assert result["success"] is True
   assert place_order.await_args.kwargs["idempotency_key"] == (
     "strategy-exit:plan-1:intent-1"
+  )
+  assert place_order.await_args.kwargs["execution_ref"] == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    "plan-1",
+  )
+  assert place_order.await_args.kwargs["environment"] is ExecutionEnvironment.PAPER
+  assert "strategy_name" not in place_order.await_args.kwargs
+  assert "order_remark" not in place_order.await_args.kwargs
+  assert all(
+    key not in place_order.await_args.kwargs["execution_context"]
+    for key in (
+      "owner_type",
+      "owner_id",
+      "exit_plan_id",
+      "strategy_name",
+      "remark",
+      "order_remark",
+      "strategy_run_id",
+    )
   )

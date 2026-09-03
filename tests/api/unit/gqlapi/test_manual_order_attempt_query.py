@@ -47,7 +47,7 @@ def _pending(
     bucket="manual",
     client_order_id=client_order_id,
     created_at=created,
-    execution_mode="live",
+    environment="LIVE",
     instrument_code="688577.SH",
     limit_price="12.34",
     order_type="FIX_PRICE",

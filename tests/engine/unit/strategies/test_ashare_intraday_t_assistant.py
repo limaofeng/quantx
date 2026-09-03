@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
   TTradeStatus,
@@ -1311,6 +1312,11 @@ async def test_first_exit_report_adopts_intent_from_matching_exit_plan():
     OrderStateEvent(
       order_id="exit-order-first-report",
       status="RECONCILE_REQUIRED",
+      execution_ref=ExecutionOwnerRef(
+        "EXIT_PLAN",
+        "exit-plan-first-report",
+      ),
+      environment=ExecutionEnvironment.PAPER,
       metadata={
         "intent_id": "exit-intent-first-report",
         "t_trade_role": "exit",

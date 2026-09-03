@@ -103,7 +103,7 @@ struct ExitPlanWorkspaceView: View {
   }
 
   private func summary(_ snapshot: ExitPlanListSnapshot) -> some View {
-    let live = snapshot.plans.filter { $0.executionMode == .live }
+    let live = snapshot.plans.filter { $0.environment == .live }
     let awaiting = live.filter {
       if case .authorized = $0.authorizationState { return false }
       return $0.status.isAuthorizable && $0.remainingVolume > 0
@@ -142,7 +142,7 @@ private struct ExitPlanRow: View {
             Text("\(plan.bucket) · \(plan.sourceType)")
               .font(.caption)
               .foregroundStyle(QuantXTheme.secondaryText)
-            Text("\(plan.executionOwner.title) · 状态 r\(plan.stateVersion)")
+            Text("\(plan.executionOwner.ownerType.title) · 状态 r\(plan.stateVersion)")
               .font(.caption2)
               .foregroundStyle(QuantXTheme.secondaryText)
           }
@@ -188,9 +188,9 @@ private struct ExitPlanRow: View {
       color: statusColor
     )
     StatusBadge(
-      title: plan.executionMode.title,
-      systemImage: plan.executionMode == .live ? "bolt.shield.fill" : "doc.text.fill",
-      color: plan.executionMode == .live ? QuantXTheme.warning : QuantXTheme.accent
+      title: plan.environment.title,
+      systemImage: plan.environment == .live ? "bolt.shield.fill" : "doc.text.fill",
+      color: plan.environment == .live ? QuantXTheme.warning : QuantXTheme.accent
     )
   }
 
@@ -330,8 +330,8 @@ private struct ExitPlanDetailView: View {
       )
     case .notApplicable:
       QuantXStatusBanner(
-        title: "PAPER 计划",
-        message: "不会进入实盘自动退出。当前 iOS 专用配置写契约未开放，本页保持只读。",
+        title: "\(plan.environment.title) 计划",
+        message: "当前环境不会进入实盘自动退出。当前 iOS 专用配置写契约未开放，本页保持只读。",
         status: .unavailable
       )
     case .expired(let expiredAt):
@@ -373,25 +373,35 @@ private struct ExitPlanDetailView: View {
         ExitPlanKeyValueRow(label: "仓位桶", value: plan.bucket)
         ExitPlanKeyValueRow(label: "来源", value: plan.sourceType)
         ExitPlanKeyValueRow(label: "状态", value: plan.status.title)
-        ExitPlanKeyValueRow(label: "执行模式", value: plan.executionMode.title)
-        ExitPlanKeyValueRow(label: "执行归属", value: plan.executionOwner.title)
+        ExitPlanKeyValueRow(label: "执行环境", value: plan.environment.title)
+        ExitPlanKeyValueRow(label: "执行归属", value: plan.executionOwner.ownerType.title)
+        ExitPlanKeyValueRow(
+          label: "执行归属 ID",
+          value: plan.executionOwner.ownerID,
+          monospaced: true
+        )
+        ExitPlanKeyValueRow(
+          label: "来源归属",
+          value: plan.sourceExecutionOwner.ownerType.title
+        )
+        ExitPlanKeyValueRow(
+          label: "来源归属 ID",
+          value: plan.sourceExecutionOwner.ownerID,
+          monospaced: true
+        )
         ExitPlanKeyValueRow(label: "状态修订", value: "r\(plan.stateVersion)")
         if case .unknown = plan.status {
           Label("服务端返回未知状态；客户端只展示，不推断可操作性。", systemImage: "questionmark.diamond.fill")
             .font(.caption)
             .foregroundStyle(QuantXTheme.warning)
         }
-        switch plan.executionOwner {
-        case .invalidOwner:
-          Label("执行归属审计失败；计划保持可见，但自动授权入口已关闭。", systemImage: "exclamationmark.shield.fill")
-            .font(.caption)
-            .foregroundStyle(QuantXTheme.warning)
-        case .unknown:
-          Label("客户端不认识此执行归属；计划保持只读并禁止授权。", systemImage: "questionmark.diamond.fill")
-            .font(.caption)
-            .foregroundStyle(QuantXTheme.warning)
-        case .strategyRuntime, .exitPlanMonitor:
-          EmptyView()
+        if let recoveryAction = plan.recoveryAction {
+          Label(
+            plan.recoveryMessage ?? "服务端要求先完成恢复动作：\(recoveryAction)",
+            systemImage: "exclamationmark.shield.fill"
+          )
+          .font(.caption)
+          .foregroundStyle(QuantXTheme.warning)
         }
       }
     }
@@ -558,7 +568,7 @@ private struct ExitPlanDetailView: View {
 
   @ViewBuilder
   private func authorizationAction(_ plan: ExitPlanItem) -> some View {
-    if plan.executionMode == .live {
+    if plan.environment == .live {
       QuantXCard {
         VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
           SectionTitle(title: "自动实盘退出授权", subtitle: "预览不会创建委托")
@@ -670,7 +680,7 @@ private struct ExitPlanAuthorizationSheet: View {
         ExitPlanKeyValueRow(label: "标的", value: review.instrumentCode, monospaced: true)
         ExitPlanKeyValueRow(label: "计划 ID", value: review.planID, monospaced: true)
         ExitPlanKeyValueRow(label: "计划版本", value: "v\(review.configVersion)")
-        ExitPlanKeyValueRow(label: "执行模式", value: review.executionMode.title)
+        ExitPlanKeyValueRow(label: "执行环境", value: review.environment.title)
         ExitPlanKeyValueRow(label: "仓位桶", value: review.bucket)
         ExitPlanKeyValueRow(label: "来源", value: review.sourceType)
         ExitPlanKeyValueRow(label: "保护数量", value: "\(review.protectedVolume) 股")

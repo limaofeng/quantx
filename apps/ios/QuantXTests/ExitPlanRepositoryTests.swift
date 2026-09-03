@@ -6,15 +6,18 @@ import XCTest
 final class ExitPlanRepositoryTests: XCTestCase {
   func testPlanMappingRequiresExactUniqueAccountAndPreservesUnknownEnums() throws {
     var raw = makeRawPlan()
-    raw = replacing(raw, status: "FUTURE_STATE", executionMode: "FUTURE_MODE")
+    raw = replacing(raw, status: "FUTURE_STATE", environment: "FUTURE_MODE")
 
     let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
 
     XCTAssertEqual(plan.accountID, "ACCOUNT-1")
     XCTAssertEqual(plan.status, .unknown("FUTURE_STATE"))
-    XCTAssertEqual(plan.executionMode, .unknown("FUTURE_MODE"))
+    XCTAssertEqual(plan.environment, .unknown("FUTURE_MODE"))
     XCTAssertEqual(plan.stateVersion, 9)
-    XCTAssertEqual(plan.executionOwner, .exitPlanMonitor)
+    XCTAssertEqual(
+      plan.executionOwner,
+      ExecutionOwnerRef(ownerType: .exitPlan, ownerID: "plan-1")
+    )
     XCTAssertEqual(plan.rules.topLevelFields.first?.key, "rules")
   }
 
@@ -29,10 +32,14 @@ final class ExitPlanRepositoryTests: XCTestCase {
     }
   }
 
-  func testPlanMappingRejectsExecutionOwnerThatConflictsWithRunLineage() {
+  func testPlanMappingRejectsNonExitPlanExecutionOwner() {
     XCTAssertThrowsError(
       try ExitPlanRepository.mapPlan(
-        replacing(makeRawPlan(), executionOwner: "STRATEGY_RUNTIME"),
+        replacing(
+          makeRawPlan(),
+          executionOwnerType: "STRATEGY_RUN",
+          sourceExecutionOwnerType: "STRATEGY_RUN"
+        ),
         context: makeContext()
       )
     ) { error in
@@ -40,60 +47,102 @@ final class ExitPlanRepositoryTests: XCTestCase {
     }
   }
 
-  func testPlanMappingKeepsInvalidManagedRuntimeVisibleForAudit() throws {
+  func testPlanMappingKeepsUnknownSourceOwnerVisibleForAudit() throws {
     let raw = replacing(
       makeRawPlan(),
-      strategyRunID: "managed-exit-run-1",
-      executionOwner: "INVALID_OWNER"
+      sourceExecutionOwnerType: "FUTURE_OWNER"
     )
 
     let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
 
-    XCTAssertEqual(plan.executionOwner, .invalidOwner)
-    XCTAssertEqual(plan.strategyRunID, "managed-exit-run-1")
+    XCTAssertEqual(
+      plan.executionOwner,
+      ExecutionOwnerRef(ownerType: .exitPlan, ownerID: "plan-1")
+    )
+    XCTAssertEqual(
+      plan.sourceExecutionOwner,
+      ExecutionOwnerRef(ownerType: .unknown("FUTURE_OWNER"), ownerID: "source-1")
+    )
+    XCTAssertNil(plan.strategyRunID)
   }
 
-  func testPlanMappingAcceptsOriginalEntryRuntimeOwner() throws {
+  func testPlanMappingAcceptsStrategyRunSourceOwner() throws {
     let raw = replacing(
       makeRawPlan(),
       sourceType: "T_TRADE_BATCH",
       strategyRunID: "t-run-1",
-      executionOwner: "STRATEGY_RUNTIME"
+      executionOwnerType: "EXIT_PLAN",
+      sourceExecutionOwnerType: "STRATEGY_RUN"
     )
 
     let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
 
-    XCTAssertEqual(plan.executionOwner, .strategyRuntime)
+    XCTAssertEqual(plan.executionOwner.ownerType, .exitPlan)
+    XCTAssertEqual(plan.sourceExecutionOwner.ownerType, .strategyRun)
     XCTAssertEqual(plan.strategyRunID, "t-run-1")
   }
 
-  func testPlanMappingAcceptsFirstBoardPromotionRuntimeOwner() throws {
+  func testPlanMappingAllowsStrategyRunSourceOwnerWithoutLegacyWitness() throws {
+    let plan = try ExitPlanRepository.mapPlan(
+      replacing(
+        makeRawPlan(),
+        sourceExecutionOwnerType: "STRATEGY_RUN",
+        sourceExecutionOwnerID: "source-run-1"
+      ),
+      context: makeContext()
+    )
+
+    XCTAssertNil(plan.strategyRunID)
+    XCTAssertEqual(plan.sourceExecutionOwner.ownerType, .strategyRun)
+    XCTAssertEqual(plan.sourceExecutionOwner.ownerID, "source-run-1")
+  }
+
+  func testPlanMappingAcceptsStrategyRunSourceOwnerForBoardPromotion() throws {
     let raw = replacing(
       makeRawPlan(),
       sourceType: "FIRST_BOARD_PROMOTION_V2",
       strategyRunID: "first-board-run-1",
-      executionOwner: "STRATEGY_RUNTIME"
+      executionOwnerType: "EXIT_PLAN",
+      sourceExecutionOwnerType: "STRATEGY_RUN"
     )
 
     let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
 
-    XCTAssertEqual(plan.executionOwner, .strategyRuntime)
+    XCTAssertEqual(plan.executionOwner.ownerType, .exitPlan)
+    XCTAssertEqual(plan.sourceExecutionOwner.ownerType, .strategyRun)
     XCTAssertEqual(plan.strategyRunID, "first-board-run-1")
   }
 
-  func testPlanMappingAcceptsManualLiquidationMonitorOwner() throws {
+  func testPlanMappingAcceptsManualCommandSourceOwner() throws {
     let raw = replacing(makeRawPlan(), sourceType: "MANUAL_LIQUIDATION")
 
     let plan = try ExitPlanRepository.mapPlan(raw, context: makeContext())
 
-    XCTAssertEqual(plan.executionOwner, .exitPlanMonitor)
+    XCTAssertEqual(plan.executionOwner.ownerType, .exitPlan)
+    XCTAssertEqual(plan.sourceExecutionOwner.ownerType, .manualCommand)
     XCTAssertNil(plan.strategyRunID)
   }
 
-  func testPlanMappingRejectsMonitorOwnerForNonmanualSource() {
+  func testPlanMappingUsesTypedSourceOwnerForNonmanualSource() throws {
+    let plan = try ExitPlanRepository.mapPlan(
+      replacing(
+        makeRawPlan(),
+        sourceType: "T_TRADE_BATCH",
+        sourceExecutionOwnerType: "T_ASSISTANT_EXECUTION",
+        sourceExecutionOwnerID: "t-execution-1"
+      ),
+      context: makeContext()
+    )
+
+    XCTAssertEqual(plan.executionOwner.ownerType, .exitPlan)
+    XCTAssertEqual(plan.sourceExecutionOwner.ownerType, .tAssistantExecution)
+    XCTAssertEqual(plan.sourceExecutionOwner.ownerID, "t-execution-1")
+  }
+
+  func testPlanMappingRejectsUnknownExecutionOwner() {
     XCTAssertThrowsError(
       try ExitPlanRepository.mapPlan(
-        replacing(makeRawPlan(), sourceType: "T_TRADE_BATCH"),
+        replacing(makeRawPlan(), executionOwnerType: "FUTURE_OWNER"),
         context: makeContext()
       )
     ) { error in
@@ -101,18 +150,15 @@ final class ExitPlanRepositoryTests: XCTestCase {
     }
   }
 
-  func testPlanMappingKeepsInvalidAndUnknownOwnerProjectionsVisible() throws {
-    let invalid = try ExitPlanRepository.mapPlan(
-      replacing(makeRawPlan(), executionOwner: "INVALID_OWNER"),
-      context: makeContext()
-    )
-    let unknown = try ExitPlanRepository.mapPlan(
-      replacing(makeRawPlan(), executionOwner: "FUTURE_OWNER"),
-      context: makeContext()
-    )
-
-    XCTAssertEqual(invalid.executionOwner, .invalidOwner)
-    XCTAssertEqual(unknown.executionOwner, .unknown("FUTURE_OWNER"))
+  func testPlanMappingRejectsExecutionOwnerIdThatDoesNotMatchPlan() {
+    XCTAssertThrowsError(
+      try ExitPlanRepository.mapPlan(
+        replacing(makeRawPlan(), executionOwnerID: "another-plan"),
+        context: makeContext()
+      )
+    ) { error in
+      XCTAssertEqual(error as? ExitPlanWorkspaceError, .invalidResponse)
+    }
   }
 
   func testPlanMappingRejectsOverlongRunIdentityInsteadOfTreatingItAsMissing() {
@@ -132,7 +178,7 @@ final class ExitPlanRepositoryTests: XCTestCase {
   func testPlanMappingRejectsMalformedExactAuthorizationFields() {
     let raw = replacing(
       makeRawPlan(),
-      executionMode: "paper",
+      environment: "paper",
       autoExitAuthorized: true,
       authorizationVersion: 7,
       authorizationExpiry: "2027-01-20T00:00:00Z"
@@ -289,13 +335,20 @@ final class ExitPlanRepositoryTests: XCTestCase {
       strategyRunID: nil,
       enabled: true,
       status: "ACTIVE",
-      executionMode: "live",
+      environment: "live",
       autoExitAuthorized: false,
       autoExitAuthorizationConfigVersion: nil,
       autoExitAuthorizationExpiresAt: nil,
       configVersion: 7,
       stateVersion: 9,
-      executionOwner: "EXIT_PLAN_MONITOR",
+      executionOwner: ExitPlanRawExecutionOwner(
+        ownerType: "EXIT_PLAN",
+        ownerID: "plan-1"
+      ),
+      sourceExecutionOwner: ExitPlanRawExecutionOwner(
+        ownerType: "MANUAL_COMMAND",
+        ownerID: "source-1"
+      ),
       completionStrategy: "UNTIL_SNAPSHOT_CLEARED",
       completionNote: nil,
       protectedVolume: 500,
@@ -322,6 +375,8 @@ final class ExitPlanRepositoryTests: XCTestCase {
       pendingIntentID: nil,
       lastEvaluatedAt: "2027-01-10T00:00:00Z",
       lastError: nil,
+      recoveryAction: nil,
+      recoveryMessage: nil,
       createdAt: "2027-01-01T00:00:00Z",
       updatedAt: "2027-01-10T00:00:00Z"
     )
@@ -375,9 +430,12 @@ final class ExitPlanRepositoryTests: XCTestCase {
     accountID: String? = nil,
     sourceType: String? = nil,
     status: String? = nil,
-    executionMode: String? = nil,
+    environment: String? = nil,
     strategyRunID: String? = nil,
-    executionOwner: String? = nil,
+    executionOwnerType: String? = nil,
+    executionOwnerID: String? = nil,
+    sourceExecutionOwnerType: String? = nil,
+    sourceExecutionOwnerID: String? = nil,
     autoExitAuthorized: Bool? = nil,
     authorizationVersion: Int? = nil,
     authorizationExpiry: String? = nil
@@ -393,7 +451,7 @@ final class ExitPlanRepositoryTests: XCTestCase {
       strategyRunID: strategyRunID ?? raw.strategyRunID,
       enabled: raw.enabled,
       status: status ?? raw.status,
-      executionMode: executionMode ?? raw.executionMode,
+      environment: environment ?? raw.environment,
       autoExitAuthorized: autoExitAuthorized ?? raw.autoExitAuthorized,
       autoExitAuthorizationConfigVersion: authorizationVersion
         ?? raw.autoExitAuthorizationConfigVersion,
@@ -401,7 +459,14 @@ final class ExitPlanRepositoryTests: XCTestCase {
         ?? raw.autoExitAuthorizationExpiresAt,
       configVersion: raw.configVersion,
       stateVersion: raw.stateVersion,
-      executionOwner: executionOwner ?? raw.executionOwner,
+      executionOwner: ExitPlanRawExecutionOwner(
+        ownerType: executionOwnerType ?? raw.executionOwner.ownerType,
+        ownerID: executionOwnerID ?? raw.executionOwner.ownerID
+      ),
+      sourceExecutionOwner: ExitPlanRawExecutionOwner(
+        ownerType: sourceExecutionOwnerType ?? raw.sourceExecutionOwner.ownerType,
+        ownerID: sourceExecutionOwnerID ?? raw.sourceExecutionOwner.ownerID
+      ),
       completionStrategy: raw.completionStrategy,
       completionNote: raw.completionNote,
       protectedVolume: raw.protectedVolume,
@@ -422,6 +487,8 @@ final class ExitPlanRepositoryTests: XCTestCase {
       pendingIntentID: raw.pendingIntentID,
       lastEvaluatedAt: raw.lastEvaluatedAt,
       lastError: raw.lastError,
+      recoveryAction: raw.recoveryAction,
+      recoveryMessage: raw.recoveryMessage,
       createdAt: raw.createdAt,
       updatedAt: raw.updatedAt
     )

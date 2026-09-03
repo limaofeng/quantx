@@ -7,6 +7,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from quantx_engine import report_processor
 from quantx_engine.strategy_executor import StrategyExecutor
+from quantx_infrastructure.models.agent_runtime import (
+  OrderCorrelation,
+  PendingTradeOrder,
+)
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.trade_command_service import (
   QueuedTradeCommand,
@@ -26,18 +30,26 @@ class _Result:
     return self._values[0] if self._values else None
 
 
-def _pending(*, broker_order_id: str | None) -> SimpleNamespace:
+def _pending(
+  *,
+  broker_order_id: str | None,
+  owner_type: str = "STRATEGY_RUN",
+  owner_id: str = "plan-1",
+  strategy_run_id: str | None = "plan-1",
+) -> SimpleNamespace:
   return SimpleNamespace(
     client_order_id="client-1",
     user_id="user-1",
     account_id="account-1",
+    owner_type=owner_type,
+    owner_id=owner_id,
+    environment="LIVE",
     instrument_code="605499.SH",
     side="BUY",
     status="SUBMITTED" if broker_order_id else "QUEUED",
     status_reason=None,
     broker_order_id=broker_order_id,
-    execution_mode="live",
-    strategy_run_id="plan-1",
+    strategy_run_id=strategy_run_id,
     strategy_order_id="strategy-order-1",
     intent_id="intent-1",
     request_metadata={"entry_plan_id": "plan-1"},
@@ -71,7 +83,12 @@ async def test_broker_backed_cancel_stays_requested_until_terminal_report() -> N
 
 @pytest.mark.asyncio
 async def test_never_delivered_order_can_cancel_locally() -> None:
-  pending = _pending(broker_order_id=None)
+  pending = _pending(
+    broker_order_id=None,
+    owner_type="MANUAL_COMMAND",
+    owner_id="manual:client-1",
+    strategy_run_id=None,
+  )
   pending.request_metadata = {}
   outbox = SimpleNamespace(client_order_id="client-1", delivery_status="QUEUED")
   db = SimpleNamespace(
@@ -101,6 +118,9 @@ async def test_local_cancel_durably_terminalizes_managed_entry_intent() -> None:
   outbox = SimpleNamespace(client_order_id="client-1", delivery_status="QUEUED")
   intent = SimpleNamespace(
     strategy_run_id="plan-1",
+    owner_type="STRATEGY_RUN",
+    owner_id="plan-1",
+    environment="LIVE",
     direction="BUY",
     status="PENDING",
     executed_volume=0,
@@ -162,6 +182,9 @@ async def test_local_cancel_does_not_claim_zero_fill_with_execution_fact(
   outbox = SimpleNamespace(client_order_id="client-1", delivery_status="QUEUED")
   intent_values = {
     "strategy_run_id": "plan-1",
+    "owner_type": "STRATEGY_RUN",
+    "owner_id": "plan-1",
+    "environment": "LIVE",
     "direction": "BUY",
     "status": "PENDING",
     "executed_volume": 0,
@@ -211,6 +234,9 @@ async def test_local_cancel_does_not_ignore_pending_broker_source_fact(
   outbox = SimpleNamespace(client_order_id="client-1", delivery_status="QUEUED")
   intent = SimpleNamespace(
     strategy_run_id="plan-1",
+    owner_type="STRATEGY_RUN",
+    owner_id="plan-1",
+    environment="LIVE",
     direction="BUY",
     status="PENDING",
     executed_volume=0,
@@ -411,6 +437,25 @@ async def test_local_cancel_notifies_strategy_as_reconciled_zero_fill(
 class _ReportDb:
   def __init__(self, pending: SimpleNamespace) -> None:
     self.pending = pending
+    self.correlation = SimpleNamespace(
+      id="correlation-1",
+      client_order_id="client-1",
+      broker_order_id=None,
+      account_id="account-1",
+      owner_type="STRATEGY_RUN",
+      owner_id="plan-1",
+      environment="LIVE",
+      strategy_run_id="plan-1",
+      strategy_order_id="strategy-order-1",
+      intent_id="intent-1",
+      batch_id=None,
+      bucket="manual",
+      t_trade_role=None,
+      risk_decision_id=None,
+      trace_id=None,
+      substitution_plan=None,
+      request_metadata={},
+    )
     self.commit = AsyncMock()
 
   async def __aenter__(self):
@@ -419,11 +464,15 @@ class _ReportDb:
   async def __aexit__(self, *_args):
     return False
 
-  async def get(self, _model, _key):
-    return self.pending
+  async def get(self, model, _key, **_kwargs):
+    if model is PendingTradeOrder:
+      return self.pending
+    if model is OrderCorrelation:
+      return self.correlation
+    return None
 
   async def execute(self, _statement):
-    return _Result([])
+    return _Result([self.correlation])
 
 
 @pytest.mark.asyncio
@@ -446,6 +495,11 @@ async def test_late_fill_does_not_finish_cancel_before_broker_terminal(
 
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", lambda: database)
   monkeypatch.setattr(report_processor, "TradeCommandService", _TradeCommands)
+  monkeypatch.setattr(
+    report_processor,
+    "_correlation_for_report",
+    AsyncMock(return_value=database.correlation),
+  )
 
   await report_processor._update_pending(
     "client-1",

@@ -19,6 +19,7 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeSignalPolicyInput,
   TTradeTimeExitMode,
 )
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_domain.trading.t_trade_opportunity_engine import OpportunityPolicy
 from quantx_infrastructure.models.enums import StrategyRunMode
 from quantx_infrastructure.services.engine_command_service import EngineCommandReceipt
@@ -281,7 +282,7 @@ async def test_global_monitor_masks_stale_ready_projection_when_session_is_offli
         "agent_status": "READY",
         "agent_device_id": "stale-device",
         "agent_mode": "live",
-        "protocol_version": "1.1",
+        "protocol_version": PROTOCOL_VERSION,
         "can_approve": True,
         "can_activate_live": True,
         "blocked_reasons": [],

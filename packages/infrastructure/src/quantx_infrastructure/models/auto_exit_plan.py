@@ -15,6 +15,10 @@ from sqlalchemy import (
 )
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
+from quantx_infrastructure.models.execution_owner import (
+  SOURCE_EXECUTION_FIELDS,
+  register_identity_immutability,
+)
 
 
 class AutoExitPlanRecord(Base, TimestampMixin):
@@ -61,6 +65,29 @@ class AutoExitPlanRecord(Base, TimestampMixin):
       "state_version >= 1",
       name="ck_auto_exit_plan_state_version",
     ),
+    CheckConstraint(
+      "source_execution_owner_type IN ('STRATEGY_RUN','T_ASSISTANT_EXECUTION',"
+      "'ENTRY_PLAN','BOARD_ASSISTANT_EXECUTION','EXIT_PLAN','MANUAL_COMMAND')",
+      name="ck_auto_exit_plan_source_owner_type",
+    ),
+    CheckConstraint(
+      "length(source_execution_owner_id) > 0 AND "
+      "source_execution_owner_id = trim(source_execution_owner_id)",
+      name="ck_auto_exit_plan_source_owner_id",
+    ),
+    CheckConstraint(
+      "source_execution_environment IN ('PAPER','LIVE','BACKTEST')",
+      name="ck_auto_exit_plan_source_environment",
+    ),
+    CheckConstraint(
+      "source_execution_environment = environment",
+      name="ck_auto_exit_plan_source_environment_match",
+    ),
+    CheckConstraint(
+      "strategy_run_id IS NULL OR (source_execution_owner_type = 'STRATEGY_RUN' "
+      "AND source_execution_owner_id = strategy_run_id)",
+      name="ck_auto_exit_plan_strategy_run_owner",
+    ),
   )
 
   plan_id = Column(String(128), primary_key=True)
@@ -71,9 +98,12 @@ class AutoExitPlanRecord(Base, TimestampMixin):
   source_id = Column(String(128), nullable=False)
   group_id = Column(String(36), nullable=True)
   strategy_run_id = Column(String(36), nullable=True, index=True)
+  source_execution_owner_type = Column(String(32), nullable=False)
+  source_execution_owner_id = Column(String(128), nullable=False)
+  source_execution_environment = Column(String(16), nullable=False)
   enabled = Column(Boolean, nullable=False, default=True)
   status = Column(String(32), nullable=False, default="ACTIVE")
-  execution_mode = Column(String(16), nullable=False, default="paper")
+  environment = Column(String(16), nullable=False)
   auto_exit_authorized = Column(Boolean, nullable=False, default=False)
   auto_exit_authorization_fingerprint = Column(String(64), nullable=True)
   auto_exit_authorization_config_version = Column(Integer, nullable=True)
@@ -124,3 +154,9 @@ class AutoExitPlanEvent(Base):
   event_type = Column(String(48), nullable=False)
   payload = Column(JSON, nullable=False, default=dict)
   created_at = Column(DateTime, nullable=False)
+
+
+register_identity_immutability(
+  AutoExitPlanRecord,
+  fields=SOURCE_EXECUTION_FIELDS,
+)

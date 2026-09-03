@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerType
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -421,7 +422,7 @@ async def _build_snapshot(
       select(AutoExitPlanRecord)
       .where(AutoExitPlanRecord.account_id == request.account_id)
       .where(AutoExitPlanRecord.instrument_code.in_(selected_codes or ("",)))
-      .where(AutoExitPlanRecord.execution_mode == "live")
+      .where(AutoExitPlanRecord.environment == ExecutionEnvironment.LIVE.value)
       .where(AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES))
       .order_by(AutoExitPlanRecord.instrument_code, AutoExitPlanRecord.created_at)
     )
@@ -435,7 +436,7 @@ async def _build_snapshot(
       select(PendingTradeOrder)
       .where(PendingTradeOrder.account_id == request.account_id)
       .where(PendingTradeOrder.instrument_code.in_(selected_codes or ("",)))
-      .where(PendingTradeOrder.execution_mode == "live")
+      .where(PendingTradeOrder.environment == ExecutionEnvironment.LIVE.value)
       .where(PendingTradeOrder.side == "SELL")
       .where(PendingTradeOrder.status.in_(_ACTIVE_PENDING_SELL_STATUSES))
       .order_by(PendingTradeOrder.instrument_code, PendingTradeOrder.created_at)
@@ -621,6 +622,9 @@ class LiquidationChallengeService:
         user_id=principal.user_id,
         device_session_id=principal.device_session_id,
         account_id=request.account_id,
+        owner_type=ExecutionOwnerType.MANUAL_COMMAND.value,
+        owner_id=group_id,
+        environment=ExecutionEnvironment(request.execution_mode).value,
         idempotency_key=request.idempotency_key,
         payload=payload,
         payload_fingerprint=signed_payload_fingerprint(payload),

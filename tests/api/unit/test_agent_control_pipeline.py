@@ -7,7 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 from quantx_api import agent_api
-from quantx_contracts import AgentEnvelope, AgentMessageType, ReportAckPayload
+from quantx_contracts import (
+  PROTOCOL_VERSION,
+  AgentEnvelope,
+  AgentMessageType,
+  ReportAckPayload,
+)
 from quantx_infrastructure.services.market_stream_readiness import (
   classify_authoritative_market_stream_readiness,
 )
@@ -246,7 +251,7 @@ async def test_database_pollers_do_not_block_report_reception(
     agent_api._run_agent_control_pipeline(
       websocket,
       control_session=control_session(),
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
     )
   )
   await websocket.received.put(
@@ -292,7 +297,7 @@ async def test_report_ack_waits_for_durable_recording(
   processor = asyncio.create_task(
     agent_api._process_agent_control_messages(
       control_session=control_session(),
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
       inbound=inbound,
       outbound=outbound,
       database_state=agent_api._AgentDatabaseState("device-1"),
@@ -494,15 +499,24 @@ async def test_reconciling_defers_place_delivery_but_still_allows_cancel(
       "command_kind": "PLACE_ORDER",
       "account_id": "account-1",
       "execution_mode": "live",
+      "client_order_id": "client-order-1",
+      "instrument_code": "000001.SZ",
       "side": "BUY",
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.00",
+      "volume": 100,
+      "expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
     },
   )
   cancel = AgentEnvelope(
     message_type=AgentMessageType.CANCEL_COMMAND,
     payload={
       "command_kind": "CANCEL_ORDER",
+      "client_order_id": "cancel-client-order-1",
       "account_id": "account-1",
       "execution_mode": "live",
+      "broker_order_id": "broker-order-1",
+      "expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
     },
   )
 
@@ -561,7 +575,13 @@ async def test_closed_market_gate_defers_live_risk_increase(
       "command_kind": "PLACE_ORDER",
       "account_id": "account-1",
       "execution_mode": "live",
+      "client_order_id": "client-order-2",
+      "instrument_code": "000001.SZ",
       "side": "BUY",
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.00",
+      "volume": 100,
+      "expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
     },
   )
 
@@ -654,7 +674,13 @@ async def test_live_risk_increase_delivery_accepts_progressing_market_fence(
       "command_kind": "PLACE_ORDER",
       "account_id": "account-1",
       "execution_mode": "live",
+      "client_order_id": "client-order-3",
+      "instrument_code": "000001.SZ",
       "side": "BUY",
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.00",
+      "volume": 100,
+      "expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
     },
   )
 
@@ -725,7 +751,13 @@ async def test_risk_gate_dependency_fluctuation_defers_delivery(
       "command_kind": "PLACE_ORDER",
       "account_id": "account-1",
       "execution_mode": "live",
+      "client_order_id": "client-order-4",
+      "instrument_code": "000001.SZ",
       "side": "BUY",
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.00",
+      "volume": 100,
+      "expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
     },
   )
 
@@ -783,7 +815,13 @@ async def test_true_revocation_is_not_masked_by_reconciling_deferral(
       "command_kind": "PLACE_ORDER",
       "account_id": "account-1",
       "execution_mode": "live",
+      "client_order_id": "client-order-5",
+      "instrument_code": "000001.SZ",
       "side": "BUY",
+      "price_type": "FIX_PRICE",
+      "limit_price": "10.00",
+      "volume": 100,
+      "expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
     },
   )
 
@@ -908,7 +946,7 @@ async def test_slow_place_validation_cannot_block_later_high_priority_command(
     asyncio.create_task(
       agent_api._poll_agent_trade_commands(
         control_session=session,
-        protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
         validations=validations,
         database_state=database_state,
       )
@@ -1090,7 +1128,7 @@ async def test_full_durable_lane_rejects_immediately_without_blocking_heartbeat(
   processor = asyncio.create_task(
     agent_api._process_agent_control_messages(
       control_session=control_session(),
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
       inbound=inbound,
       outbound=outbound,
       database_state=state,
@@ -1138,7 +1176,7 @@ async def test_receiver_nacks_overflowed_report_and_keeps_heartbeat_lane_live() 
     agent_api._receive_agent_control_messages(
       websocket,
       device_id="device-1",
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
       inbound=inbound,
       outbound=outbound,
       database_state=state,
@@ -1195,7 +1233,7 @@ async def test_stale_inbound_message_is_processed_without_disconnect(
   processor = asyncio.create_task(
     agent_api._process_agent_control_messages(
       control_session=control_session(),
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
       inbound=inbound,
       outbound=outbound,
       database_state=agent_api._AgentDatabaseState("device-1"),
@@ -1234,7 +1272,7 @@ async def test_transient_database_timeout_sends_no_ack_and_pauses_pollers(
   processor = asyncio.create_task(
     agent_api._process_agent_control_messages(
       control_session=control_session(),
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
       inbound=inbound,
       outbound=outbound,
       database_state=state,
@@ -1289,7 +1327,7 @@ async def test_transient_database_timeout_retries_same_report_without_disconnect
   processor = asyncio.create_task(
     agent_api._process_agent_control_messages(
       control_session=control_session(),
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
       inbound=inbound,
       outbound=outbound,
       database_state=state,
@@ -1323,7 +1361,7 @@ async def test_control_receiver_rejects_market_event_frames() -> None:
     await agent_api._receive_agent_control_messages(
       websocket,
       device_id="device-1",
-      protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
       inbound=inbound,
       outbound=outbound,
       database_state=state,
@@ -1381,7 +1419,7 @@ async def test_slow_full_snapshot_cannot_block_command_ack_lane(
     asyncio.create_task(
       agent_api._process_agent_control_messages(
         control_session=control_session(),
-        protocol_version="1.1",
+      protocol_version=PROTOCOL_VERSION,
         inbound=inbound,
         outbound=outbound,
         database_state=state,

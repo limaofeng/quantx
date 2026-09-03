@@ -24,11 +24,13 @@ final class ExitPlanModelsTests: XCTestCase {
 
   func testUnknownServerEnumsRemainVisibleButFailClosed() {
     let status = ExitPlanStatus(serverValue: "future_state")
-    let mode = ExitPlanExecutionMode(serverValue: "future_mode")
+    let environment = ExecutionEnvironment(serverValue: "future_mode")
+    let ownerType = ExecutionOwnerType(serverValue: "future_owner")
 
     XCTAssertEqual(status.title, "未知状态（FUTURE_STATE）")
     XCTAssertFalse(status.isAuthorizable)
-    XCTAssertEqual(mode.title, "未知模式（FUTURE_MODE）")
+    XCTAssertEqual(environment.title, "未知模式（FUTURE_MODE）")
+    XCTAssertEqual(ownerType.title, "未知执行归属（FUTURE_OWNER）")
   }
 
   func testAuthorizationStateRequiresLiveFlagExactVersionAndFutureExpiry() {
@@ -63,7 +65,7 @@ final class ExitPlanModelsTests: XCTestCase {
 
   func testPaperNeverPresentsLiveAuthorizationEvenWithMalformedFlag() {
     let plan = makePlan(
-      mode: .paper,
+      environment: .paper,
       autoExitAuthorized: true,
       authorizationVersion: 7,
       authorizationExpiry: Date().addingTimeInterval(60),
@@ -87,7 +89,7 @@ final class ExitPlanModelsTests: XCTestCase {
       instrumentCode: "600519.SH",
       bucket: "core",
       sourceType: "MANUAL_POSITION",
-      executionMode: .live,
+      environment: .live,
       configVersion: 7,
       protectedVolume: 500,
       exitedVolume: 100,
@@ -116,7 +118,7 @@ final class ExitPlanModelsTests: XCTestCase {
   }
 
   private func makePlan(
-    mode: ExitPlanExecutionMode = .live,
+    environment: ExecutionEnvironment = .live,
     autoExitAuthorized: Bool = false,
     authorizationVersion: Int? = nil,
     authorizationExpiry: Date? = nil,
@@ -135,13 +137,17 @@ final class ExitPlanModelsTests: XCTestCase {
       strategyRunID: nil,
       enabled: true,
       status: .active,
-      executionMode: mode,
+      environment: environment,
       autoExitAuthorized: autoExitAuthorized,
       autoExitAuthorizationConfigVersion: authorizationVersion,
       autoExitAuthorizationExpiresAt: authorizationExpiry,
       configVersion: configVersion,
       stateVersion: 9,
-      executionOwner: .exitPlanMonitor,
+      executionOwner: ExecutionOwnerRef(ownerType: .exitPlan, ownerID: "plan-1"),
+      sourceExecutionOwner: ExecutionOwnerRef(
+        ownerType: .manualCommand,
+        ownerID: "source-1"
+      ),
       completionStrategy: "UNTIL_SNAPSHOT_CLEARED",
       completionNote: nil,
       protectedVolume: protected,
@@ -162,6 +168,8 @@ final class ExitPlanModelsTests: XCTestCase {
       pendingIntentID: nil,
       lastEvaluatedAt: nil,
       lastError: nil,
+      recoveryAction: nil,
+      recoveryMessage: nil,
       createdAt: nil,
       updatedAt: nil
     )

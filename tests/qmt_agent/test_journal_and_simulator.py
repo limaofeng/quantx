@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 
@@ -61,6 +62,27 @@ def test_journal_resolves_early_callback_from_local_order_remark(tmp_path) -> No
     broker_order_id=123456,
     order_remark=f"qx:{client_order_id[:20]}",
   ) == client_order_id
+
+
+@pytest.mark.parametrize(
+  "order_remark",
+  [
+    "client-order-1234567890-unique",
+    "qx:short",
+    "qx:" + "x" * 21,
+    "qx:" + "x" * 20 + "suffix",
+  ],
+)
+def test_journal_rejects_noncanonical_order_remarks(
+  tmp_path,
+  order_remark: str,
+) -> None:
+  journal = LocalJournal(tmp_path / "journal.sqlite3")
+  journal.begin_command(
+    "message-1",
+    {"client_order_id": "x" * 20 + "-client", "volume": 100},
+  )
+  assert journal.client_order_id_for_report(order_remark=order_remark) is None
 
 
 def test_snapshot_reconciles_interrupted_order_without_resubmission(
@@ -305,10 +327,13 @@ async def test_live_callback_sink_persists_reports_before_websocket_send(
 def test_simulator_execution_is_partial_until_authoritative_filled_order() -> None:
   result = SimulatorBroker({"account-1"}, data_only=False).execute(
     {
+      "command_kind": "PLACE_ORDER",
       "client_order_id": "sim-order-1",
       "account_id": "account-1",
+      "execution_mode": "paper",
       "instrument_code": "600000.SH",
       "side": "SELL",
+      "price_type": "FIX_PRICE",
       "volume": 400,
       "limit_price": 10.5,
     }
@@ -323,6 +348,72 @@ def test_simulator_execution_is_partial_until_authoritative_filled_order() -> No
   terminal = result["reports"][2][1]["order"]
   assert terminal["order_status"] == 56
   assert terminal["traded_volume"] == 400
+  assert terminal["strategy_name"] == ""
+  assert terminal["order_remark"] == "qx:sim-order-1"
+
+
+def test_simulator_rejects_market_price_type() -> None:
+  result = SimulatorBroker({"account-1"}, data_only=False).execute(
+    {
+      "command_kind": "PLACE_ORDER",
+      "client_order_id": "sim-market-order",
+      "account_id": "account-1",
+      "execution_mode": "paper",
+      "instrument_code": "600000.SH",
+      "side": "BUY",
+      "price_type": "MARKET",
+      "volume": 100,
+      "limit_price": 10.5,
+    }
+  )
+
+  assert result == {
+    "accepted": False,
+    "reason": "invalid_order_price_type",
+    "reports": [],
+  }
+
+
+@pytest.mark.asyncio
+async def test_report_flush_keeps_historical_protocol_11_rows_reconciliation_only(
+  tmp_path,
+) -> None:
+  journal = LocalJournal(tmp_path / "journal.sqlite3")
+  runtime = AgentRuntime(
+    configuration=DeviceConfiguration(
+      api_url="http://127.0.0.1:8080",
+      device_id="device-1",
+    ),
+    device_secret="unused",
+    mode="data-only",
+    allowed_accounts=set(),
+    broker=SimulatorBroker(set(), data_only=True),
+    journal=journal,
+    market_spool_base_directory=tmp_path,
+  )
+  legacy = json.dumps(
+    {
+      "protocol_version": "1.1",
+      "message_id": "legacy-report",
+      "message_type": "order_report",
+      "sent_at": "2026-09-03T01:00:00+00:00",
+      "payload": {},
+    },
+  )
+  journal.add_report("legacy-report", legacy)
+
+  class Socket:
+    def __init__(self) -> None:
+      self.sent: list[str] = []
+
+    async def send(self, serialized: str) -> None:
+      self.sent.append(serialized)
+
+  socket = Socket()
+  await runtime._flush_reports(socket)
+
+  assert socket.sent == []
+  assert journal.pending_reports() == [legacy]
 
 
 def test_local_market_streamer_is_idempotent_and_resets() -> None:

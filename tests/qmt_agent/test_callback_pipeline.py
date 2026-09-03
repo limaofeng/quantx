@@ -407,7 +407,7 @@ def test_callback_gap_blocks_new_order_but_not_cancel() -> None:
       "command_kind": "PLACE_ORDER",
       "client_order_id": "client-1",
       "side": "BUY",
-      "order_type": "LIMIT",
+      "price_type": "FIX_PRICE",
       "limit_price": 10,
     }
   )

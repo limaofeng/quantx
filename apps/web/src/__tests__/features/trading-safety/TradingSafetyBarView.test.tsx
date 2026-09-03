@@ -39,7 +39,7 @@ describe('TradingSafetyBar', () => {
             killSwitch: false,
             newExternalOrderCount: 0,
             newExternalTradeCount: 0,
-            protocolVersion: '1.1',
+            protocolVersion: '1.2',
             quarantinedOrders: [],
             queueDelaySeconds: 0,
             queuedCommandCount: 0,

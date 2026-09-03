@@ -388,7 +388,7 @@ class XTTradingManager:
         stock_code: 股票代码
         order_type: 订单类型（买入/卖出）
         quantity: 数量
-        price: 价格（市价单可传0）
+        price: 固定价限价委托价格
         price_type: 价格类型
 
     Returns:
@@ -398,14 +398,11 @@ class XTTradingManager:
       if not self.is_connected:
         raise TradingConnectionError("交易连接未建立")
 
-      inside_price_type = price_type.value
-      if price_type == PriceType.MARKET_CONVERT_5_LIMIT:
-        # MiniQMT uses the Shanghai constant for both Shanghai and Beijing
-        # stock-market five-level IOC orders.
-        if stock_code.endswith((".SH", ".BJ")):
-          inside_price_type = xtconstant.MARKET_SH_CONVERT_5_CANCEL
-        elif stock_code.endswith(".SZ"):
-          inside_price_type = xtconstant.MARKET_SZ_CONVERT_5_CANCEL
+      if price_type != PriceType.FIX_PRICE:
+        raise InvalidOrderError("仅支持 FIX_PRICE 固定价限价委托")
+      if price <= 0:
+        raise InvalidOrderError("固定价限价委托必须指定正数价格")
+      inside_price_type = xtconstant.FIX_PRICE
 
       order_id = self.xttrader.order_stock(
         account=self.acc,
@@ -413,8 +410,8 @@ class XTTradingManager:
         order_type=order_type.value,
         order_volume=order_volume,
         price_type=inside_price_type,
-        price=price if price_type == PriceType.FIX_PRICE else 0.0,
-        strategy_name=strategy_name,
+        price=price,
+        strategy_name="",
         order_remark=order_remark,
       )
 

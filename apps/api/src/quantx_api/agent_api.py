@@ -39,12 +39,16 @@ from quantx_contracts import (
   PROTOCOL_VERSION,
   AgentEnvelope,
   AgentMessageType,
+  CancelCommandPayload,
   CommandAckPayload,
+  ExecutionEnvironment,
+  ExecutionOwnerType,
   MarketBatchKind,
   MarketControlType,
   MarketStreamBatch,
   MarketStreamControl,
   ReportAckPayload,
+  TradeCommandPayload,
 )
 from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamStore,
@@ -60,9 +64,9 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentReportInbox,
   MarketDataRequest,
   MarketDataTransfer,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
-  StrategyOrderCorrelation,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
   TTradeBatch,
@@ -962,6 +966,9 @@ async def _record_heartbeat(
   sent_at: datetime | None = None,
   establish: bool = False,
 ) -> None:
+  heartbeat_protocol = str(payload.get("protocol_version") or PROTOCOL_VERSION)
+  if heartbeat_protocol != PROTOCOL_VERSION:
+    raise ValueError(f"Agent heartbeat requires protocol {PROTOCOL_VERSION}")
   now = utcnow()
   normalized_sent_at = to_naive_utc(sent_at)
   heartbeat_delay_seconds = (
@@ -1204,8 +1211,129 @@ _PRE_EXECUTION_REJECTION_REASONS = frozenset(
 )
 
 
+def _durable_owner_triple(value: object) -> tuple[str, str, str] | None:
+  """Return the canonical owner/environment columns from one durable row.
+
+  Owner identity is deliberately read only from typed durable columns.  The
+  metadata JSON carried by old rows is audit context and is never a source of
+  routing authority.
+  """
+
+  owner_type = getattr(value, "owner_type", None)
+  owner_id = getattr(value, "owner_id", None)
+  environment = getattr(value, "environment", None)
+  try:
+    owner_type_value = ExecutionOwnerType(
+      str(getattr(owner_type, "value", owner_type) or "").strip().upper()
+    ).value
+    environment_value = ExecutionEnvironment(
+      str(getattr(environment, "value", environment) or "").strip().upper()
+    ).value
+  except (TypeError, ValueError):
+    return None
+  if not isinstance(owner_id, str) or not owner_id or owner_id != owner_id.strip():
+    return None
+  strategy_run_id = str(getattr(value, "strategy_run_id", "") or "").strip()
+  if strategy_run_id and (
+    owner_type_value != ExecutionOwnerType.STRATEGY_RUN.value
+    or strategy_run_id != owner_id
+  ):
+    return None
+  return owner_type_value, owner_id, environment_value
+
+
+def _durable_owner_chain_matches(
+  *values: object,
+) -> bool:
+  """Require every available durable execution row to share one owner triple."""
+
+  triples: list[tuple[str, str, str]] = []
+  for value in values:
+    if value is None:
+      continue
+    triple = _durable_owner_triple(value)
+    if triple is None:
+      return False
+    triples.append(triple)
+  return bool(triples) and all(triple == triples[0] for triple in triples[1:])
+
+
+def _wire_execution_mode(environment: object) -> str:
+  """Project the canonical uppercase durable environment to the wire mode."""
+
+  try:
+    return ExecutionEnvironment(
+      str(getattr(environment, "value", environment) or "").strip().upper()
+    ).value.lower()
+  except (TypeError, ValueError):
+    return ""
+
+
 def _is_place_order(command: TradeCommandOutbox) -> bool:
   return str((command.payload or {}).get("command_kind") or "").upper() == "PLACE_ORDER"
+
+
+def _validated_command_payload(command: TradeCommandOutbox) -> dict[str, Any] | None:
+  """Validate and project one durable command to the exact 1.2 wire shape.
+
+  The owner triple belongs to the durable outbox row and is intentionally not
+  projected to QMT.  A malformed/legacy row is not repaired by copying owner
+  metadata into a new payload; callers leave it reconcile-only.
+  """
+
+  raw_payload = command.payload
+  if not isinstance(raw_payload, dict):
+    return None
+  command_kind = str(raw_payload.get("command_kind") or "").strip().upper()
+  payload_model: Any
+  if command_kind == "PLACE_ORDER":
+    payload_model = TradeCommandPayload
+  elif command_kind == "CANCEL_ORDER":
+    payload_model = CancelCommandPayload
+  elif command_kind == "EMERGENCY_STOP":
+    # Emergency stop is a control escape hatch, not an order payload.  Keep
+    # its historical minimal fields while refusing owner/legacy projections.
+    if set(raw_payload) - {
+      "command_kind",
+      "client_order_id",
+      "account_id",
+      "reason",
+      "expires_at",
+    }:
+      return None
+    if any(
+      not str(raw_payload.get(key) or "").strip()
+      for key in ("client_order_id", "account_id", "expires_at")
+    ):
+      return None
+    projected = {
+      "command_kind": "EMERGENCY_STOP",
+      "client_order_id": str(raw_payload["client_order_id"]),
+      "account_id": str(raw_payload["account_id"]),
+      "reason": str(raw_payload.get("reason") or ""),
+      "expires_at": raw_payload["expires_at"],
+    }
+    payload_model = None
+  else:
+    return None
+  if payload_model is None:
+    canonical = projected
+  else:
+    try:
+      canonical = payload_model.model_validate(raw_payload).model_dump(mode="json")
+    except (TypeError, ValueError):
+      return None
+  owner_triple = _durable_owner_triple(command)
+  if owner_triple is None:
+    return None
+  _owner_type, _owner_id, environment = owner_triple
+  if str(canonical.get("account_id") or "") != str(command.account_id or ""):
+    return None
+  if command_kind != "EMERGENCY_STOP" and (
+    str(canonical.get("execution_mode") or "").upper() != environment
+  ):
+    return None
+  return canonical
 
 
 async def _stage_command_runtime_event(
@@ -1213,7 +1341,7 @@ async def _stage_command_runtime_event(
   *,
   command: TradeCommandOutbox,
   pending: PendingTradeOrder,
-  correlation: StrategyOrderCorrelation | None,
+  correlation: OrderCorrelation | None,
   status: str,
   reason: str,
   now: datetime,
@@ -1221,6 +1349,28 @@ async def _stage_command_runtime_event(
 ) -> bool:
   if correlation is None:
     return False
+  intent = None
+  if pending.intent_id:
+    intent = await db.get(TradeIntentRecord, pending.intent_id)
+  if correlation.intent_id and intent is None:
+    return False
+  if (
+    not _durable_owner_chain_matches(command, pending, correlation, intent)
+    or (
+      not correlation.intent_id
+      and str(getattr(correlation, "owner_type", "")).upper()
+      != ExecutionOwnerType.MANUAL_COMMAND.value
+    )
+  ):
+    return False
+  owner_type, owner_id, environment = _durable_owner_triple(correlation) or (
+    "",
+    "",
+    "",
+  )
+  strategy_run_id = (
+    owner_id if owner_type == ExecutionOwnerType.STRATEGY_RUN.value else None
+  )
   normalized_status = str(status or "").upper()
   business_key = (
     f"command:{pending.client_order_id}:RECONCILE_REQUIRED"
@@ -1234,11 +1384,24 @@ async def _stage_command_runtime_event(
   )
   if existing is not None:
     return False
+  # The durable event columns are the sole owner/environment authority.  Old
+  # correlation rows may still carry identity projections in their JSON
+  # metadata; keep that metadata only as non-identity audit context so a new
+  # runtime event cannot publish two competing facts.
+  identity_metadata_keys = {
+    "owner_type",
+    "owner_id",
+    "environment",
+    "execution_mode",
+    "strategy_run_id",
+  }
   metadata = {
-    **dict(correlation.request_metadata or {}),
-    "strategy_run_id": correlation.strategy_run_id,
-    "strategy_order_id": correlation.strategy_order_id,
-    "intent_id": correlation.intent_id,
+    key: value
+    for key, value in dict(correlation.request_metadata or {}).items()
+    if key not in identity_metadata_keys
+  }
+  metadata.update({
+    "intent_id": getattr(correlation, "intent_id", None) or "",
     "instrument_code": pending.instrument_code,
     "t_batch_id": correlation.batch_id or "",
     "bucket": correlation.bucket,
@@ -1246,18 +1409,27 @@ async def _stage_command_runtime_event(
     "risk_decision_id": correlation.risk_decision_id or "",
     "trace_id": correlation.trace_id,
     "substitution_plan": correlation.substitution_plan,
-    "execution_mode": correlation.execution_mode,
     "approval_reason": reason,
     "runtime_event_key": business_key,
     "command_message_id": command.message_id,
     "command_lifecycle_status": str(pending.status or "").upper(),
-  }
+  })
+  if (
+    str(getattr(correlation, "owner_type", "") or "").strip().upper()
+    == ExecutionOwnerType.STRATEGY_RUN.value
+  ):
+    metadata["strategy_order_id"] = (
+      getattr(correlation, "strategy_order_id", None) or ""
+    )
   if zero_fill_invalidation:
     metadata["zero_fill_proof_invalidation"] = dict(zero_fill_invalidation)
   event = StrategyRuntimeEvent(
     event_id=str(uuid.uuid4()),
     business_key=business_key,
-    strategy_run_id=correlation.strategy_run_id,
+    owner_type=owner_type,
+    owner_id=owner_id,
+    environment=environment,
+    strategy_run_id=strategy_run_id,
     client_order_id=correlation.client_order_id,
     broker_order_id=correlation.broker_order_id,
     event_type="ORDER",
@@ -1343,8 +1515,8 @@ async def _transition_place_order_command(
   )
   correlation = (
     await db.execute(
-      select(StrategyOrderCorrelation)
-      .where(StrategyOrderCorrelation.client_order_id == command.client_order_id)
+      select(OrderCorrelation)
+      .where(OrderCorrelation.client_order_id == command.client_order_id)
       .with_for_update()
     )
   ).scalar_one_or_none()
@@ -1360,6 +1532,22 @@ async def _transition_place_order_command(
     batch = await db.get(TTradeBatch, pending.batch_id, with_for_update=True)
 
   normalized_status = str(requested_status or "").upper()
+  owner_chain_valid = bool(
+    pending is not None
+    and correlation is not None
+    and _durable_owner_chain_matches(command, pending, correlation, intent)
+    and (
+      bool(correlation.intent_id)
+      or str(getattr(correlation, "owner_type", "")).upper()
+      == ExecutionOwnerType.MANUAL_COMMAND.value
+    )
+  )
+  if not owner_chain_valid:
+    # A lifecycle outcome with contradictory or incomplete durable ownership
+    # cannot safely be attributed.  Preserve the command for reconciliation;
+    # never recover an owner from metadata, a run id, or the wire payload.
+    normalized_status = "RECONCILE_REQUIRED"
+    reason = "OWNER_BINDING_CONFLICT"
   previous_command_status = str(command.delivery_status or "").upper()
   role = str(pending.t_trade_role or "").upper() if pending is not None else ""
   batch_fill_volume = 0
@@ -1460,25 +1648,38 @@ async def _transition_place_order_command(
     and str(intent_metadata.get("entry_plan_id") or "") == entry_plan_id
     and intent_zero_execution
   )
-  request_exit_plan_id = str(request_metadata.get("exit_plan_id") or "").strip()
-  intent_exit_plan_id = str(intent_metadata.get("exit_plan_id") or "").strip()
+  pending_owner = _durable_owner_triple(pending) if pending is not None else None
+  intent_owner = _durable_owner_triple(intent) if intent is not None else None
+  correlation_owner = (
+    _durable_owner_triple(correlation) if correlation is not None else None
+  )
+  request_exit_plan_id = (
+    pending_owner[1]
+    if pending_owner is not None
+    and pending_owner[0] == ExecutionOwnerType.EXIT_PLAN.value
+    else ""
+  )
+  intent_exit_plan_id = (
+    intent_owner[1]
+    if intent_owner is not None
+    and intent_owner[0] == ExecutionOwnerType.EXIT_PLAN.value
+    else ""
+  )
   exact_exit_plan_binding = bool(
     request_exit_plan_id
     and request_exit_plan_id == intent_exit_plan_id
+    and pending_owner is not None
+    and intent_owner == pending_owner
+    and pending_owner[0] == ExecutionOwnerType.EXIT_PLAN.value
+    and (
+      correlation_owner is None or correlation_owner == pending_owner
+    )
     and pending is not None
     and intent is not None
     and str(pending.side or "").upper() == "SELL"
     and str(intent.direction or "").upper() == "SELL"
     and str(intent.owner_type or "").upper() == "EXIT_PLAN"
     and str(intent.owner_id or "") == request_exit_plan_id
-    and str(intent_metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
-    and str(intent_metadata.get("owner_id") or "") == request_exit_plan_id
-    and str(pending_request_metadata.get("owner_type") or "").upper()
-    == "EXIT_PLAN"
-    and str(pending_request_metadata.get("owner_id") or "")
-    == request_exit_plan_id
-    and str(pending_request_metadata.get("exit_plan_id") or "")
-    == request_exit_plan_id
     and str(intent.account_id or "") == str(pending.account_id or "")
     and str(intent.instrument_code or "").upper()
     == str(pending.instrument_code or "").upper()
@@ -1490,12 +1691,6 @@ async def _transition_place_order_command(
         and str(correlation.account_id or "") == str(pending.account_id or "")
         and str(correlation.strategy_run_id or "")
         == str(pending.strategy_run_id or "")
-        and str(correlation_request_metadata.get("owner_type") or "").upper()
-        == "EXIT_PLAN"
-        and str(correlation_request_metadata.get("owner_id") or "")
-        == request_exit_plan_id
-        and str(correlation_request_metadata.get("exit_plan_id") or "")
-        == request_exit_plan_id
       )
     )
     and intent_zero_execution
@@ -1928,9 +2123,10 @@ def _prepare_report_persistence(
   device_id: str,
   envelope: AgentEnvelope,
 ) -> _PreparedReportPersistence:
+  if envelope.protocol_version != PROTOCOL_VERSION:
+    raise ValueError(f"Agent report requires protocol {PROTOCOL_VERSION}")
   wire_payload = envelope.payload
-  if envelope.protocol_version == PROTOCOL_VERSION:
-    envelope.validate_payload()
+  envelope.validate_payload()
   canonical_payload = json.dumps(
     wire_payload,
     sort_keys=True,
@@ -1988,6 +2184,8 @@ async def _record_report(
   received_at: datetime,
   frame_bytes: int = 0,
 ) -> ReportAckPayload:
+  if envelope.protocol_version != PROTOCOL_VERSION:
+    raise ValueError(f"Agent report requires protocol {PROTOCOL_VERSION}")
   wire_payload = envelope.payload
   if AGENT_SERVER_SESSION_PAYLOAD_KEY in wire_payload:
     raise ValueError("Agent report contains a reserved server field")
@@ -2011,7 +2209,7 @@ async def _record_report(
     device_id=session.device_id,
     message_type=envelope.message_type.value,
     protocol_version=envelope.protocol_version,
-    client_order_id=str(wire_payload.get("client_order_id", "")) or None,
+    client_order_id=_report_client_order_id(wire_payload, envelope.message_type),
     raw_payload_hash=prepared.payload_hash,
     business_idempotency_key=prepared.business_idempotency_key,
     payload=payload,
@@ -2074,6 +2272,43 @@ async def _record_report(
   return ack
 
 
+def _normalized_report_identity(value: Any) -> str | None:
+  """Normalize one current 1.2 report identity value for stable hashing."""
+
+  normalized = str(value).strip() if value is not None else ""
+  return normalized or None
+
+
+def _first_report_identity(*values: Any) -> str | None:
+  for value in values:
+    normalized = _normalized_report_identity(value)
+    if normalized is not None:
+      return normalized
+  return None
+
+
+def _report_broker_order_id(
+  payload: dict[str, Any],
+  message_type: AgentMessageType,
+) -> str | None:
+  """Read the broker id from the typed nested 1.2 order/execution body."""
+
+  nested_key = (
+    "order"
+    if message_type is AgentMessageType.ORDER_REPORT
+    else "execution"
+    if message_type is AgentMessageType.EXECUTION_REPORT
+    else ""
+  )
+  nested = payload.get(nested_key) if nested_key else None
+  if not isinstance(nested, dict):
+    nested = payload
+  return _first_report_identity(
+    nested.get("order_id"),
+    nested.get("broker_order_id"),
+  )
+
+
 def _body_for_report_idempotency(
   envelope: AgentEnvelope,
   *,
@@ -2085,7 +2320,20 @@ def _body_for_report_idempotency(
     body = execution if isinstance(execution, dict) else payload
     identity = {
       "account_id": body.get("account_id"),
-      "execution_id": body.get("execution_id") or body.get("traded_id"),
+      # Protocol 1.2 carries the service-owned client id at the payload level;
+      # retain the nested spelling accepted by the typed execution body too.
+      "client_order_id": _report_client_order_id(
+        payload,
+        AgentMessageType.EXECUTION_REPORT,
+      ),
+      "broker_order_id": _report_broker_order_id(
+        payload,
+        AgentMessageType.EXECUTION_REPORT,
+      ),
+      "execution_id": _first_report_identity(
+        body.get("execution_id"),
+        body.get("traded_id"),
+      ),
     }
     if not identity["execution_id"]:
       identity["payload_hash"] = hashlib.sha256(
@@ -2125,11 +2373,29 @@ def _body_for_report_idempotency(
   }
 
 
+def _report_client_order_id(
+  payload: dict[str, Any],
+  message_type: AgentMessageType,
+) -> str | None:
+  nested_key = (
+    "order"
+    if message_type is AgentMessageType.ORDER_REPORT
+    else "execution"
+    if message_type is AgentMessageType.EXECUTION_REPORT
+    else ""
+  )
+  nested = payload.get(nested_key) if nested_key else None
+  nested_value = nested.get("client_order_id") if isinstance(nested, dict) else None
+  return _first_report_identity(payload.get("client_order_id"), nested_value)
+
+
 async def _next_command(
   control_session: AgentControlSession,
   *,
   protocol_version: str = PROTOCOL_VERSION,
 ) -> Optional[AgentEnvelope]:
+  if protocol_version != PROTOCOL_VERSION:
+    raise ValueError(f"Agent command delivery requires protocol {PROTOCOL_VERSION}")
   device_id = control_session.device_id
   now = utcnow()
   redelivery_before = now - timedelta(seconds=TRADE_COMMAND_REDELIVERY_SECONDS)
@@ -2214,6 +2480,16 @@ async def _next_command(
     if command is None:
       await db.commit()
       return None
+    projected_payload = _validated_command_payload(command)
+    if projected_payload is None:
+      # Never rewrite an already delivered command into a new protocol shape:
+      # its broker-side outcome remains a reconciliation fact.  A queued
+      # malformed row is quarantined locally and will not be retried.
+      if str(command.delivery_status or "").upper() == "QUEUED":
+        command.delivery_status = "RECONCILE_REQUIRED"
+        command.last_error = "INVALID_PROTOCOL_1_2_COMMAND_PAYLOAD"
+      await db.commit()
+      return None
     device = await db.get(AgentDevice, device_id)
     if device is None or device.revoked_at is not None:
       await db.commit()
@@ -2257,7 +2533,7 @@ async def _next_command(
         else AgentMessageType.COMMAND
       ),
       sent_at=sent_at,
-      payload=command.payload,
+      payload=projected_payload,
     )
 
 
@@ -3367,6 +3643,28 @@ async def _assert_trade_delivery_session(
 ) -> None:
   """Revalidate durable authority immediately before a trade frame is sent."""
 
+  if envelope.protocol_version != PROTOCOL_VERSION:
+    raise _TradeCommandDeliveryDeferred("protocol_version_mismatch")
+  command_kind = str(envelope.payload.get("command_kind") or "").strip().upper()
+  try:
+    if envelope.message_type is AgentMessageType.COMMAND and command_kind == "PLACE_ORDER":
+      TradeCommandPayload.model_validate(envelope.payload)
+    elif envelope.message_type is AgentMessageType.CANCEL_COMMAND and command_kind == "CANCEL_ORDER":
+      CancelCommandPayload.model_validate(envelope.payload)
+    elif envelope.message_type is AgentMessageType.COMMAND and command_kind == "EMERGENCY_STOP":
+      if set(envelope.payload) - {
+        "command_kind",
+        "client_order_id",
+        "account_id",
+        "reason",
+        "expires_at",
+      }:
+        raise ValueError("unexpected emergency-stop payload field")
+    else:
+      raise ValueError("unsupported protocol-1.2 command shape")
+  except (TypeError, ValueError) as exc:
+    raise _TradeCommandDeliveryDeferred("invalid_command_payload") from exc
+
   if not await agent_connection_hub.is_connected(
     control_session.device_id,
     agent_session_id=control_session.agent_session_id,
@@ -3406,7 +3704,6 @@ async def _assert_trade_delivery_session(
     envelope.message_type is AgentMessageType.COMMAND
     and str(envelope.payload.get("command_kind") or "").upper() == "PLACE_ORDER"
     and str(envelope.payload.get("side") or "").upper() != "SELL"
-    and str(envelope.payload.get("t_trade_role") or "").upper() != "EXIT"
   )
   market_stream_ready = bool(
     str(dict(getattr(heartbeat, "details", None) or {}).get("marketStreamStatus") or "")

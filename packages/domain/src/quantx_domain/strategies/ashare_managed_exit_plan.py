@@ -6,18 +6,20 @@ import math
 from datetime import datetime
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
+
 from quantx_domain.enums import StrategyInstrumentScope
 from quantx_domain.schemas import ParameterProperty, ParameterSchema
 from quantx_domain.state_schema import StateProperty, StateSchema
 from quantx_domain.strategies.base import (
   BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
+  ExitPlanIntentOrigin,
   OrderStateEvent,
   RuntimeStatePatch,
   StrategyBase,
   StrategyCadence,
   StrategyInput,
   StrategyOutput,
-  StrategyRunIntentOrigin,
   TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
@@ -227,7 +229,12 @@ class AshareManagedExitPlanStrategy(StrategyBase):
   async def on_order(self, event: OrderStateEvent) -> Optional[RuntimeStatePatch]:
     metadata = dict(event.metadata or {})
     plan = self._current_plan()
-    if str(metadata.get("exit_plan_id") or "") != plan.plan_id:
+    owner = event.execution_ref
+    if not (
+      isinstance(owner, ExecutionOwnerRef)
+      and owner.owner_type is ExecutionOwnerType.EXIT_PLAN
+      and owner.owner_id == plan.plan_id
+    ):
       return None
     intent_id = str(metadata.get("exit_intent_id") or plan.pending_intent_id or "")
     if not intent_id:
@@ -276,7 +283,9 @@ class AshareManagedExitPlanStrategy(StrategyBase):
     metadata = dict(event.metadata or {})
     plan = self._current_plan()
     if (
-      str(metadata.get("exit_plan_id") or "") != plan.plan_id
+      not isinstance(event.execution_ref, ExecutionOwnerRef)
+      or event.execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
+      or event.execution_ref.owner_id != plan.plan_id
       or event.instrument_code != plan.template.instrument_code
       or "SELL" not in str(event.trade_type or "").upper()
     ):
@@ -350,10 +359,13 @@ class AshareManagedExitPlanStrategy(StrategyBase):
     return TradeIntent(
       strategy_id=input.strategy_id,
       run_id=input.run_id,
-      origin=StrategyRunIntentOrigin(
-        run_id=input.run_id,
-        strategy_id=input.strategy_id,
-        plan_id=plan.plan_id,
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        str(plan.plan_id),
+      ),
+      origin=ExitPlanIntentOrigin(
+        plan_id=str(plan.plan_id),
+        source_execution_ref=ExecutionOwnerRef.strategy_run(input.run_id),
       ),
       instrument_code=input.instrument_code,
       direction=TradeIntentDirection.SELL,
@@ -370,11 +382,8 @@ class AshareManagedExitPlanStrategy(StrategyBase):
       max_price_deviation_bps=execution.max_slippage_bps,
       metadata={
         **dict(plan.template.metadata or {}),
-        "owner_type": "EXIT_PLAN",
-        "owner_id": plan.plan_id,
-        "intent_origin_type": "STRATEGY_RUN",
+        "intent_origin_type": "EXIT_PLAN",
         "plan_id": plan.plan_id,
-        "exit_plan_id": plan.plan_id,
         "exit_intent_id": intent_id,
         "exit_rule_id": decision.rule_id,
         "exit_rule_type": decision.rule_type,

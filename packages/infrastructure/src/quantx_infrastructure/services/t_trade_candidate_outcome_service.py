@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
+from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.trading.t_trade_candidate_outcome import (
   DEFAULT_CANDIDATE_OUTCOME_HORIZONS_SECONDS,
   CandidateExecutionFill,
@@ -301,9 +302,14 @@ class TTradeCandidateOutcomeService:
     normalized_role = str(role).upper()
     metadata_instrument = _optional_text(metadata.get("instrument_code"))
     trade_instrument = _optional_text(getattr(trade, "instrument_code", None))
+    execution_ref = getattr(trade, "execution_ref", None)
+    metadata_run_id = _optional_text(metadata.get("strategy_run_id"))
     if (
       normalized_role not in {"ENTRY", "EXIT"}
-      or _optional_text(metadata.get("strategy_run_id")) != normalized_run_id
+      or not isinstance(execution_ref, ExecutionOwnerRef)
+      or execution_ref.owner_type is not ExecutionOwnerType.STRATEGY_RUN
+      or execution_ref.owner_id != normalized_run_id
+      or (metadata_run_id is not None and metadata_run_id != normalized_run_id)
       or _optional_text(metadata.get("account_id"))
       != _optional_text(getattr(row, "account_id", None))
       or metadata_instrument is None

@@ -10,6 +10,10 @@ from ..trade_approval import (
   TradeApprovalPreviewData,
   TTradeAutoExitAuthorizationPreviewData,
 )
+from .execution_owner_types import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+)
 
 
 @strawberry.type(description="做 T 买入确认同时覆盖的精确自动退出范围")
@@ -36,7 +40,8 @@ class TradeApprovalPreview:
   confirmation_token: str
   action: str
   account_id: str
-  run_id: str
+  execution_owner: ExecutionOwnerRef
+  environment: ExecutionEnvironment
   intent_id: str
   instrument_code: str
   side: str
@@ -56,8 +61,12 @@ class TradeApprovalPreview:
   def from_data(data: TradeApprovalPreviewData) -> "TradeApprovalPreview":
     values = vars(data).copy()
     authorization = values.pop("t_trade_auto_exit_authorization", None)
+    execution_owner = values.pop("execution_owner")
+    environment = values.pop("environment")
     return TradeApprovalPreview(
       **values,
+      execution_owner=ExecutionOwnerRef.from_contract(execution_owner),
+      environment=ExecutionEnvironment(environment),
       t_trade_auto_exit_authorization=(
         TTradeAutoExitAuthorizationPreview.from_data(authorization)
         if authorization is not None

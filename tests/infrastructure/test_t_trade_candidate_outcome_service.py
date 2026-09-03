@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from quantx_contracts import ExecutionOwnerRef
 from quantx_domain.trading.t_trade_candidate_outcome import (
   CandidateOutcomeState,
   CandidateOutcomeStatus,
@@ -321,6 +322,7 @@ async def test_trade_adapter_reads_broker_trade_id_price_volume_and_commission()
       volume=100,
       commission=3.5,
       instrument_code="600000.SH",
+      execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
       metadata={
         "account_id": "account-1",
         "strategy_run_id": "run-1",
@@ -358,6 +360,7 @@ async def test_live_placeholder_commission_is_not_authoritative_fee_truth() -> N
       volume=100,
       commission=0.0,
       instrument_code="600000.SH",
+      execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
       metadata={
         "account_id": "account-1",
         "strategy_run_id": "run-1",
@@ -393,6 +396,7 @@ async def test_primary_trade_adapter_rejects_cross_scope_candidate_metadata() ->
         trade_id="trade-cross-scope",
         trade_time=datetime.fromtimestamp(1_001),
         instrument_code="600000.SH",
+        execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
         price=10.0,
         volume=100,
         commission=3.5,
@@ -577,6 +581,8 @@ def _repair_intent(
     strategy_run_id="run-1",
     owner_type="STRATEGY_RUN",
     owner_id="run-1",
+    environment="LIVE",
+    idempotency_key=f"intent:{intent_id}",
     account_id=account_id,
     instrument_code=instrument_code,
     direction="BUY",
@@ -615,6 +621,9 @@ def _repair_runtime_event(
   return StrategyRuntimeEvent(
     event_id=event_id,
     business_key=f"trade:{event_id}",
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
     strategy_run_id="run-1",
     client_order_id=f"client-{event_id}",
     broker_order_id="1001",
@@ -760,6 +769,7 @@ async def test_live_primary_path_rejects_cross_scope_intent_before_freezing_entr
         trade_id="trade-live-cross-scope",
         trade_time=datetime(2026, 8, 23, 1, 31, tzinfo=timezone.utc),
         instrument_code="600000.SH",
+        execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
         price=10.0,
         volume=100,
         commission=0.0,

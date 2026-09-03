@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
+from quantx_contracts import ExecutionOwnerRef
+
 from quantx_domain.enums import StrategyInstrumentScope
 from quantx_domain.schemas import ParameterProperty, ParameterSchema
 from quantx_domain.state_schema import StateProperty, StateSchema
@@ -236,6 +238,7 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
     intent = TradeIntent(
       strategy_id=input.strategy_id,
       run_id=input.run_id,
+      execution_ref=ExecutionOwnerRef.strategy_run(input.run_id),
       origin=StrategyRunIntentOrigin(
         run_id=input.run_id,
         strategy_id=input.strategy_id,
@@ -258,8 +261,6 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
         "expire_at_ms": config.completion_policy.expire_at_ms,
       },
       metadata={
-        "owner_type": "STRATEGY_RUN",
-        "owner_id": input.run_id,
         "strategy_run_id": input.run_id,
         "intent_id": decision.intent_id,
         "side": "BUY",
@@ -323,7 +324,11 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
 
   async def on_order(self, event: OrderStateEvent) -> Optional[RuntimeStatePatch]:
     metadata = dict(event.metadata or {})
-    if not self._owns_entry_event(metadata):
+    if not self._owns_entry_event(
+      metadata,
+      execution_ref=event.execution_ref
+      or getattr(event.request, "execution_ref", None),
+    ):
       return None
     status = str(event.status or "").split(".")[-1].upper()
     if status not in TERMINAL_ORDER_STATUSES:
@@ -349,7 +354,10 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
 
   async def on_trade(self, event: TradeExecutionEvent) -> Optional[RuntimeStatePatch]:
     metadata = dict(event.metadata or {})
-    if not self._owns_entry_event(metadata):
+    if not self._owns_entry_event(
+      metadata,
+      execution_ref=event.execution_ref,
+    ):
       return None
     if event.instrument_code != self._require_config().instrument_code:
       return None
@@ -397,12 +405,17 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
       ],
     )
 
-  def _owns_entry_event(self, metadata: Mapping[str, Any]) -> bool:
+  def _owns_entry_event(
+    self,
+    metadata: Mapping[str, Any],
+    *,
+    execution_ref: Optional[ExecutionOwnerRef],
+  ) -> bool:
     """An exit retains entry lineage, but never owns the entry state machine."""
     return bool(
-      metadata.get("owner_type") == "STRATEGY_RUN"
-      and metadata.get("owner_id") == self.context.run_id
-      and metadata.get("strategy_run_id") == self.context.run_id
+      isinstance(execution_ref, ExecutionOwnerRef)
+      and execution_ref.owner_type.value == "STRATEGY_RUN"
+      and execution_ref.owner_id == self.context.run_id
       and metadata.get("entry_plan_id") == self._plan_id()
       and metadata.get("side") == "BUY"
       and metadata.get("intent_id")

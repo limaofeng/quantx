@@ -108,6 +108,8 @@ def _entry_intent(*, filled_volume: int = 100) -> TradeIntentRecord:
     strategy_run_id=RUN_ID,
     owner_type="STRATEGY_RUN",
     owner_id=RUN_ID,
+    environment="LIVE",
+    idempotency_key=f"t-entry:{INTENT_ID}",
     account_id=ACCOUNT_ID,
     strategy_id="t-trade-strategy",
     instrument_code=INSTRUMENT,
@@ -154,9 +156,12 @@ def _exit_plan_record(*, protected_volume: int = 100) -> AutoExitPlanRecord:
     source_type="T_TRADE_BATCH",
     source_id=BATCH_ID,
     strategy_run_id=RUN_ID,
+    source_execution_owner_type="STRATEGY_RUN",
+    source_execution_owner_id=RUN_ID,
+    source_execution_environment="LIVE",
     enabled=True,
     status="ACTIVE",
-    execution_mode="live",
+    environment="LIVE",
     auto_exit_authorized=False,
     config_version=3,
     state_version=1,
@@ -207,6 +212,9 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
       "device_session_id": "session-1",
       "account_id": ACCOUNT_ID,
       "business_owner_id": RUN_ID,
+      "owner_type": "STRATEGY_RUN",
+      "owner_id": RUN_ID,
+      "environment": "LIVE",
       "intent_id": INTENT_ID,
       "intent_fingerprint": "entry-intent-fingerprint",
     },
@@ -266,7 +274,10 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
           target_volume=100,
           entry_filled_volume=100,
           entry_avg_price=9.99,
-          execution_mode="live",
+          source_execution_owner_type="STRATEGY_RUN",
+          source_execution_owner_id=RUN_ID,
+          source_execution_environment="LIVE",
+          environment="LIVE",
           policy_version=3,
         ),
         TradeConfirmationChallenge(
@@ -275,6 +286,9 @@ async def authorization_database(monkeypatch: pytest.MonkeyPatch):
           user_id="user-1",
           device_session_id="session-1",
           account_id=ACCOUNT_ID,
+          owner_type="STRATEGY_RUN",
+          owner_id=RUN_ID,
+          environment="LIVE",
           idempotency_key="t-entry-confirmation",
           payload=challenge_payload,
           payload_fingerprint=trade_confirmation_payload_fingerprint(
@@ -306,18 +320,24 @@ async def test_live_authorization_snapshot_excludes_paper_protections_and_sells(
     paper_plan = _exit_plan_record(protected_volume=10_000)
     paper_plan.plan_id = "paper-protection"
     paper_plan.source_id = "paper-batch"
-    paper_plan.execution_mode = "paper"
+    paper_plan.source_execution_environment = "PAPER"
+    paper_plan.environment = "PAPER"
     paper_sell = PendingTradeOrder(
       client_order_id="paper-sell",
       user_id="user-1",
       account_id=ACCOUNT_ID,
+      owner_type="STRATEGY_RUN",
+      owner_id=RUN_ID,
+      environment="PAPER",
+      strategy_run_id=RUN_ID,
+      strategy_order_id="paper-order",
+      intent_id=INTENT_ID,
       instrument_code=INSTRUMENT,
       side="SELL",
       order_type="FIX_PRICE",
       limit_price="10",
       volume=10_000,
       status="QUEUED",
-      execution_mode="paper",
     )
     db.add_all([paper_plan, paper_sell])
     await db.flush()
@@ -335,13 +355,18 @@ async def test_live_authorization_snapshot_excludes_paper_protections_and_sells(
       client_order_id="live-sell",
       user_id="user-1",
       account_id=ACCOUNT_ID,
+      owner_type="STRATEGY_RUN",
+      owner_id=RUN_ID,
+      environment="LIVE",
+      strategy_run_id=RUN_ID,
+      strategy_order_id="live-order",
+      intent_id=INTENT_ID,
       instrument_code=INSTRUMENT,
       side="SELL",
       order_type="FIX_PRICE",
       limit_price="10",
       volume=100,
       status="QUEUED",
-      execution_mode="live",
     )
     db.add_all([live_plan, live_sell])
     await db.flush()

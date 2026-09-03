@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from quantx_api import live_runtime_status
+from quantx_contracts import PROTOCOL_VERSION
 
 
 def _configure_live(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,7 +60,7 @@ async def test_live_status_requires_account_safety_and_ready_market_stream(
         "can_increase_risk": False,
         "agent_status": "READY",
         "agent_mode": "live",
-        "protocol_version": "1.1",
+        "protocol_version": PROTOCOL_VERSION,
         "reconcile_status": "RECONCILED",
         "reconciliation_age_seconds": 12.5,
         "checked_at": now,
@@ -113,7 +114,7 @@ async def test_live_status_is_enabled_only_when_all_effective_gates_pass(
         "can_increase_risk": True,
         "agent_status": "READY",
         "agent_mode": "live",
-        "protocol_version": "1.1",
+        "protocol_version": PROTOCOL_VERSION,
         "reconcile_status": "RECONCILED",
         "reconciliation_age_seconds": 3.0,
         "checked_at": now,
@@ -141,7 +142,7 @@ async def test_live_status_is_enabled_only_when_all_effective_gates_pass(
   assert result["executionMode"] == "TRADING"
   assert result["agentStatus"] == "READY"
   assert result["agentMode"] == "live"
-  assert result["protocolVersion"] == "1.1"
+  assert result["protocolVersion"] == PROTOCOL_VERSION
   assert result["reconciliationStatus"] == "RECONCILED"
   assert result["marketStreamStatus"] == "READY"
   assert result["backupAgeSeconds"] == 30.0
@@ -162,7 +163,7 @@ async def test_live_status_does_not_treat_closed_market_standby_as_blocked(
         "can_increase_risk": True,
         "agent_status": "READY",
         "agent_mode": "live",
-        "protocol_version": "1.1",
+        "protocol_version": PROTOCOL_VERSION,
         "reconcile_status": "READY",
         "checked_at": now,
         "last_backup_at": now,

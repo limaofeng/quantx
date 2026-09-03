@@ -53,7 +53,7 @@ const gateGroups: readonly GateGroup[] = [
       'LIVE_AGENT_READY',
       'AGENT_MODE_LIVE',
       'MARKET_STREAM_READY',
-      'PROTOCOL_1_1',
+      'PROTOCOL_1_2',
     ],
   },
   {

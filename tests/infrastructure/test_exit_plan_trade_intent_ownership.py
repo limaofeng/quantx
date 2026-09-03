@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.trading.exit_plan import ExitDecision, ExitEvaluationContext
 from quantx_infrastructure.services.trade_intent_processor import (
   TradeIntentProcessor,
@@ -26,7 +27,7 @@ async def test_sell_intent_is_owned_by_exit_plan(strategy_run_id) -> None:
     source_id="t-batch-1" if strategy_run_id else "manual-plan-1",
     group_id=None,
     completion_strategy=None,
-    execution_mode="paper",
+    environment="PAPER",
     auto_exit_authorized=False,
     auto_exit_authorization_user_id=None,
     auto_exit_authorization_fingerprint=None,
@@ -58,8 +59,12 @@ async def test_sell_intent_is_owned_by_exit_plan(strategy_run_id) -> None:
   )
 
   persisted_intent = processor._create_intent_record.await_args.args[1]
-  assert persisted_intent.metadata["owner_type"] == "EXIT_PLAN"
-  assert persisted_intent.metadata["owner_id"] == plan.plan_id
-  assert persisted_intent.metadata["exit_plan_id"] == plan.plan_id
+  assert persisted_intent.execution_ref == ExecutionOwnerRef(
+    ExecutionOwnerType.EXIT_PLAN,
+    plan.plan_id,
+  )
+  assert "owner_type" not in persisted_intent.metadata
+  assert "owner_id" not in persisted_intent.metadata
+  assert "exit_plan_id" not in persisted_intent.metadata
   assert persisted_intent.run_id == (strategy_run_id or "")
   processor._route.assert_awaited_once()

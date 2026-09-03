@@ -1,10 +1,15 @@
+import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
 import strawberry
-from quantx_contracts import LIVE_ORDER_MAX_QUOTE_AGE_SECONDS
+from quantx_contracts import (
+  LIVE_ORDER_MAX_QUOTE_AGE_SECONDS,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+)
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import (
   Instrument,
@@ -67,17 +72,33 @@ from ..types.trading_types import (
   OrderEntryCapabilities,
 )
 
-_PRICE_TYPE_ALIASES = {
-  "LIMIT": PriceType.FIX_PRICE,
-  "FIX_PRICE": PriceType.FIX_PRICE,
-  "MARKET": PriceType.MARKET_CONVERT_5_LIMIT,
-  "MARKET_CONVERT_5_LIMIT": PriceType.MARKET_CONVERT_5_LIMIT,
-  "LATEST": PriceType.LATEST_PRICE,
-  "LATEST_PRICE": PriceType.LATEST_PRICE,
-  "BEST": PriceType.MARKET_PEER_PRICE_FIRST,
-  "MARKET_PEER_PRICE_FIRST": PriceType.MARKET_PEER_PRICE_FIRST,
-  "MARKET_MINE_PRICE_FIRST": PriceType.MARKET_MINE_PRICE_FIRST,
-}
+
+def _manual_command_owner_id(
+  *,
+  user_id: str,
+  account_id: str,
+  idempotency_key: str,
+  environment: ExecutionEnvironment,
+) -> str:
+  """Derive one stable MANUAL_COMMAND owner for a caller's command key.
+
+  Request fields deliberately do not participate in this identity.  Reusing
+  an idempotency key with a changed request must remain in the same durable
+  idempotency namespace so the command layer can return the existing command
+  (or reject the conflicting request), never create a second owner.
+  """
+
+  manual_seed = "|".join(
+    (
+      user_id,
+      account_id,
+      str(getattr(environment, "value", environment)).strip().upper(),
+      idempotency_key,
+    )
+  )
+  return "manual-order:" + hashlib.sha256(
+    manual_seed.encode("utf-8")
+  ).hexdigest()
 
 
 async def _resolve_account_id(
@@ -108,13 +129,11 @@ def _parse_order_type(value: str) -> OrderType:
 
 
 def _parse_price_type(value: str) -> PriceType:
-  if isinstance(value, PriceType):
+  if isinstance(value, PriceType) and value is PriceType.FIX_PRICE:
     return value
-  if isinstance(value, str):
-    key = value.strip().upper()
-    if key in _PRICE_TYPE_ALIASES:
-      return _PRICE_TYPE_ALIASES[key]
-  raise ValueError("报价类型无效")
+  if isinstance(value, str) and value.strip().upper() == "FIX_PRICE":
+    return PriceType.FIX_PRICE
+  raise ValueError("报价类型必须是 FIX_PRICE")
 
 
 _MANUAL_ORDER_ACTIVE_PHASES = frozenset(
@@ -357,7 +376,7 @@ def _manual_order_attempt_from_rows(
     limit_price=str(pending.limit_price or "0"),
     volume=int(pending.volume or 0),
     execution_mode=ManualOrderExecutionMode(
-      _normalize_manual_order_state(pending.execution_mode, "PAPER")
+      _normalize_manual_order_state(pending.environment, "PAPER")
     ),
     phase=projection.phase,
     active=projection.active,
@@ -1001,6 +1020,25 @@ class TradingMutation:
       order_type = _parse_order_type(input.type)
       price_type = _parse_price_type(input.price_type)
       principal = principal_from_context(info.context)
+      execution_environment = ExecutionEnvironment(
+        configured_manual_order_execution_mode(account_id)
+      )
+      idempotency_key = str(input.idempotency_key or "").strip()
+      if not idempotency_key or len(idempotency_key) > 128:
+        return OrderMutationResult(
+          success=False,
+          message="手工下单必须提供不超过 128 个字符的稳定幂等键",
+          order_id=None,
+          client_order_id=None,
+          status="REJECTED",
+          order=None,
+        )
+      manual_owner_id = _manual_command_owner_id(
+        user_id=principal.user_id,
+        account_id=account_id,
+        idempotency_key=idempotency_key,
+        environment=execution_environment,
+      )
       async with AsyncSessionLocal() as db:
         queued = await TradeCommandService(db).enqueue_order(
           user_id=principal.user_id,
@@ -1010,9 +1048,10 @@ class TradingMutation:
           order_type=price_type.name,
           limit_price=Decimal(str(input.price or 0)),
           volume=input.volume,
-          strategy_name=input.strategy_name or "",
-          order_remark=input.order_remark or "",
-          idempotency_key=input.idempotency_key or "",
+          idempotency_key=idempotency_key,
+          execution_ref=ExecutionOwnerRef.manual_command(manual_owner_id),
+          environment=execution_environment,
+          manual_live=execution_environment is ExecutionEnvironment.LIVE,
         )
       return OrderMutationResult(
         success=True,
@@ -1109,13 +1148,28 @@ class TradingMutation:
             order_id=input.order_id,
             status="REJECTED",
           )
-        execution_mode = str(getattr(pending, "execution_mode", None) or "live").lower()
+        try:
+          pending_execution_ref = ExecutionOwnerRef(
+            str(pending.owner_type or ""),
+            str(pending.owner_id or ""),
+          )
+          pending_environment = ExecutionEnvironment(
+            str(pending.environment or "").upper()
+          )
+        except (TypeError, ValueError) as exc:
+          return CancelOrderResult(
+            success=False,
+            message=f"订单缺少有效执行归属：{exc}",
+            order_id=input.order_id,
+            status="REJECTED",
+          )
         queued = await TradeCommandService(db).enqueue_cancel(
           user_id=current.user_id,
           account_id=account_id,
           broker_order_id=str(input.order_id),
           idempotency_key=idempotency_key,
-          execution_mode=execution_mode,
+          execution_ref=pending_execution_ref,
+          environment=pending_environment,
           commit_transaction=False,
         )
         await db.commit()

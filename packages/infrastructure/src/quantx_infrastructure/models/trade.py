@@ -51,7 +51,7 @@ class Trade(Base, TimestampMixin):
   )
   """ 委托编号 """
 
-  order_sysid = Column(String(10), nullable=False, comment="柜台编号")
+  order_sysid = Column(String(32), nullable=False, comment="柜台编号")
   """ 柜台编号 """
 
   order_type = Column(Integer, nullable=False, comment="委托类型")

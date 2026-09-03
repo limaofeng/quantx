@@ -5,6 +5,7 @@ This module defines all available MCP tools and their handlers.
 Each tool category is organized into a separate class.
 """
 
+import hashlib
 import logging
 import uuid
 from datetime import datetime
@@ -1658,10 +1659,16 @@ class OrderTools:
                         "idempotency_key": {
                             "type": "string",
                             "description": "Stable caller key for safe retries",
-                            "optional": True
+                            "optional": False
                         }
                     },
-                    "required": ["symbol", "side", "quantity", "account_id"]
+                    "required": [
+                        "symbol",
+                        "side",
+                        "quantity",
+                        "account_id",
+                        "idempotency_key",
+                    ]
                 }
             ),
             Tool(
@@ -1754,6 +1761,7 @@ class OrderTools:
         try:
             from decimal import Decimal
 
+            from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
             from quantx_infrastructure.database.relational_connection import (
                 AsyncSessionLocal,
             )
@@ -1764,17 +1772,30 @@ class OrderTools:
             account_id = str(args.get("account_id") or "").strip()
             if not account_id:
                 return {"status": "error", "error": "account_id is required"}
+            idempotency_key = str(args.get("idempotency_key") or "").strip()
+            if not idempotency_key or len(idempotency_key) > 128:
+                return {
+                    "status": "error",
+                    "error": "idempotency_key is required and must be at most 128 characters",
+                }
+            # The owner is the stable caller command identity.  Request fields
+            # are deliberately excluded so a retry with the same key can be
+            # rejected as a mismatch instead of creating a second owner.
+            owner_id = "mcp-command:" + hashlib.sha256(
+                f"{account_id}:{idempotency_key}".encode("utf-8")
+            ).hexdigest()
             async with AsyncSessionLocal() as db:
                 queued = await TradeCommandService(db).enqueue_order_for_account(
                     account_id=account_id,
                     instrument_code=str(args["symbol"]),
                     side=str(args["side"]).upper(),
-                    order_type=str(args.get("type", "limit")).upper(),
+                    order_type="FIX_PRICE",
                     limit_price=Decimal(str(args.get("price") or 0)),
                     volume=int(args["quantity"]),
-                    strategy_name="mcp",
-                    order_remark="queued by MCP",
-                    idempotency_key=str(args.get("idempotency_key") or ""),
+                    idempotency_key=idempotency_key,
+                    execution_ref=ExecutionOwnerRef.manual_command(owner_id),
+                    environment=ExecutionEnvironment.PAPER,
+                    request_metadata={"origin": "MCP_ORDER"},
                 )
             return {
                 "status": queued.status,
@@ -1793,21 +1814,48 @@ class OrderTools:
     async def _cancel_order(self, args: dict) -> dict:
         """Cancel order"""
         try:
+            from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
             from quantx_infrastructure.database.relational_connection import (
                 AsyncSessionLocal,
             )
+            from quantx_infrastructure.models import PendingTradeOrder
             from quantx_infrastructure.services.trade_command_service import (
                 TradeCommandService,
             )
+            from sqlalchemy import select
 
             account_id = str(args.get("account_id") or "").strip()
             if not account_id:
                 return {"status": "error", "error": "account_id is required"}
             async with AsyncSessionLocal() as db:
+                pending = (
+                    await db.execute(
+                        select(PendingTradeOrder)
+                        .where(
+                            PendingTradeOrder.account_id == account_id,
+                            PendingTradeOrder.broker_order_id
+                            == str(args["order_id"]),
+                        )
+                        .order_by(PendingTradeOrder.updated_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if pending is None:
+                    return {
+                        "status": "error",
+                        "error": "order is not linked to a durable QuantX command",
+                    }
                 queued = await TradeCommandService(db).enqueue_cancel_for_account(
                     account_id=account_id,
                     broker_order_id=str(args["order_id"]),
                     idempotency_key=str(args.get("idempotency_key") or ""),
+                    execution_ref=ExecutionOwnerRef(
+                        str(pending.owner_type or ""),
+                        str(pending.owner_id or ""),
+                    ),
+                    environment=ExecutionEnvironment(
+                        str(pending.environment or "").upper()
+                    ),
                 )
             return {
                 "status": queued.status,

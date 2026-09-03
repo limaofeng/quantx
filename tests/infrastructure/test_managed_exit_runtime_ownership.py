@@ -19,16 +19,32 @@ def _record(
     "account_id": "account-1",
     "instrument_code": "600000.SH",
     "source_type": source_type,
+    "source_id": "source-1",
     "run_id": run_id,
     "metadata": dict(metadata or {}),
   }
   template.update(dict(template_overrides or {}))
+  source_owner_type = (
+    "STRATEGY_RUN"
+    if run_id and source_type in {"T_TRADE_BATCH", "ENTRY_PLAN"}
+    else "STRATEGY_RUN"
+    if run_id
+    else "MANUAL_COMMAND"
+  )
+  source_owner_id = run_id or "source-1"
+  group_id = "source-1" if source_type == "MANUAL_LIQUIDATION" else None
   return SimpleNamespace(
     plan_id="plan-1",
     account_id="account-1",
     instrument_code="600000.SH",
+    source_id="source-1",
+    group_id=group_id,
     source_type=source_type,
     strategy_run_id=run_id or None,
+    source_execution_owner_type=source_owner_type,
+    source_execution_owner_id=source_owner_id,
+    source_execution_environment="LIVE",
+    environment="LIVE",
     plan_state={"template": template},
     last_error=None,
   )
@@ -91,7 +107,7 @@ def test_runtime_book_rejects_any_managed_command_marker(command_id: str) -> Non
   runtime = SimpleNamespace(strategy_class=RuntimeBookOwner, strategy=None)
   service = AutoExitPlanService(SimpleNamespace(get_run=lambda _run_id: runtime))
 
-  with pytest.raises(RuntimeError, match="不得携带独立卖出托管命令"):
+  with pytest.raises(RuntimeError, match="未知执行所有者"):
     service._strategy_owner_kind(
       _record(
         source_type="T_TRADE_BATCH",

@@ -6,6 +6,7 @@ import logging
 from decimal import Decimal
 from typing import Any, Dict, List
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from sqlalchemy import select
 
 from quantx_infrastructure.database.connection import get_async_db
@@ -25,7 +26,11 @@ from quantx_infrastructure.models.instrument import Instrument
 from quantx_infrastructure.repositories.account_repository import AccountRepository
 from quantx_infrastructure.services.order_service import OrderService
 from quantx_infrastructure.services.position_service import PositionService
-from quantx_infrastructure.services.trade_command_service import TradeCommandService
+from quantx_infrastructure.services.trade_command_service import (
+  AgentUnavailableError,
+  TradeCommandService,
+  require_stable_command_key,
+)
 
 logger = logging.getLogger(__name__)
 DEFAULT_ACCOUNT_ID = "300000013250"
@@ -55,6 +60,7 @@ class TradingService:
     self.account_id = account_id or DEFAULT_ACCOUNT_ID
     self.account_type = account_type
     self.execution_mode = execution_mode.strip().lower()
+    self.environment = ExecutionEnvironment(self.execution_mode.upper())
     self.order_service = OrderService(self.account_id)
     self.position_service = PositionService()
 
@@ -75,22 +81,64 @@ class TradingService:
     stock_code: str,
     order_type: OrderType = OrderType.BUY,
     order_volume: int = 100,
-    price_type: PriceType = PriceType.MARKET_CONVERT_5_LIMIT,
+    price_type: PriceType = PriceType.FIX_PRICE,
     price: float = 0,
-    strategy_name: str = "",
-    order_remark: str = "",
     close_position: bool = False,
-    idempotency_key: str = "",
     execution_context: Dict[str, Any] | None = None,
+    *,
+    idempotency_key: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
   ) -> Dict[str, Any]:
     del close_position
+    try:
+      idempotency_key, _, _ = require_stable_command_key(idempotency_key)
+    except AgentUnavailableError as exc:
+      raise InvalidOrderError(str(exc)) from exc
     if order_type not in (OrderType.BUY, OrderType.SELL):
       raise InvalidOrderError("订单类型必须是 BUY 或 SELL")
     if order_volume <= 0:
       raise InvalidOrderError("订单数量必须大于 0")
-    if price_type == PriceType.FIX_PRICE and price <= 0:
+    if price_type != PriceType.FIX_PRICE:
+      raise InvalidOrderError("仅支持 FIX_PRICE 固定价限价委托")
+    if price <= 0:
       raise InvalidOrderError("限价委托必须指定有效价格")
     context = dict(execution_context or {})
+    # Execution identity and routing links are projected through typed
+    # arguments.  Only the explicit evidence allowlist is persisted as JSON;
+    # this prevents a caller from smuggling owner/run/intent fields into the
+    # request metadata side channel.
+    request_metadata = {
+      key: value
+      for key, value in context.items()
+      if key
+      not in {
+        "owner_type",
+        "owner_id",
+        "source_execution_owner_type",
+        "source_execution_owner_id",
+        "source_execution_environment",
+        "environment",
+        "execution_environment",
+        "execution_mode",
+        "strategy_run_id",
+        "strategy_order_id",
+        "intent_id",
+        "batch_id",
+        "t_batch_id",
+        "idempotency_key",
+        "client_order_id",
+        "broker_order_id",
+        "account_id",
+        "instrument_code",
+        "exit_plan_id",
+        "order_type",
+        "side",
+        "bucket",
+        "t_trade_role",
+        "trace_id",
+      }
+    }
     async with AsyncSessionLocal() as db:
       queued = await TradeCommandService(db).enqueue_order_for_account(
         account_id=self.account_id,
@@ -99,12 +147,15 @@ class TradingService:
         order_type=price_type.name,
         limit_price=Decimal(str(price)),
         volume=order_volume,
-        strategy_name=strategy_name,
-        order_remark=order_remark,
         trace_id=str(context.get("trace_id") or ""),
         idempotency_key=idempotency_key,
-        execution_mode=self.execution_mode,
-        strategy_run_id=str(context.get("strategy_run_id") or ""),
+        execution_ref=execution_ref,
+        environment=environment,
+        strategy_run_id=(
+          execution_ref.owner_id
+          if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN
+          else ""
+        ),
         strategy_order_id=str(context.get("strategy_order_id") or ""),
         intent_id=str(context.get("intent_id") or ""),
         batch_id=str(
@@ -124,7 +175,7 @@ class TradingService:
           or context.get("config_version")
           or 0
         ),
-        request_metadata=context,
+        request_metadata=request_metadata,
         require_risk_reducing_live_authorization=bool(
           context.get("exact_auto_exit_authorized")
         ),
@@ -145,14 +196,18 @@ class TradingService:
     user_id: str,
     order_id: int,
     idempotency_key: str = "",
+    *,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
   ) -> Dict[str, Any]:
     del user_id
     async with AsyncSessionLocal() as db:
       queued = await TradeCommandService(db).enqueue_cancel_for_account(
         account_id=self.account_id,
         broker_order_id=str(order_id),
+        execution_ref=execution_ref,
+        environment=environment,
         idempotency_key=idempotency_key,
-        execution_mode=self.execution_mode,
       )
     return {
       "success": True,
@@ -173,13 +228,22 @@ class TradingService:
       if pending is None or pending.account_id != self.account_id:
         return {"success": False, "message": "找不到待处理交易命令"}
       if pending.broker_order_id:
+        pending_owner_type = str(pending.owner_type or "")
+        pending_owner_id = str(pending.owner_id or "")
+        pending_environment = ExecutionEnvironment(
+          str(pending.environment or "").upper()
+        )
         queued = await TradeCommandService(db).enqueue_cancel_for_account(
           account_id=self.account_id,
           broker_order_id=pending.broker_order_id,
           idempotency_key=(
             f"cancel-client-order:{client_order_id}:{pending.broker_order_id}"
           ),
-          execution_mode=self.execution_mode,
+          execution_ref=ExecutionOwnerRef(
+            pending_owner_type,
+            pending_owner_id,
+          ),
+          environment=pending_environment,
         )
         return {
           "success": True,
@@ -249,20 +313,34 @@ class TradingService:
     self,
     strategy_id: str,
     orders: List[Dict[str, Any]],
+    *,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
   ) -> Dict[str, Any]:
+    if execution_ref.owner_type is not ExecutionOwnerType.STRATEGY_RUN:
+      raise InvalidOrderError(
+        "策略委托必须显式使用 STRATEGY_RUN execution owner"
+      )
+    normalized_idempotency_keys: list[str] = []
+    for order in orders:
+      try:
+        _, _, stable_key = require_stable_command_key(order.get("idempotency_key"))
+      except (AttributeError, AgentUnavailableError) as exc:
+        raise InvalidOrderError(
+          "策略委托必须为每个订单提供稳定 idempotency_key"
+        ) from exc
+      normalized_idempotency_keys.append(stable_key)
     results = []
-    for index, order in enumerate(orders):
+    for order, idempotency_key in zip(orders, normalized_idempotency_keys):
       result = await self.place_order(
         stock_code=order["stock_code"],
         order_type=order["order_type"],
         order_volume=order["quantity"],
         price_type=order.get("price_type", PriceType.FIX_PRICE),
         price=order.get("price", 0),
-        strategy_name=strategy_id,
-        idempotency_key=str(
-          order.get("idempotency_key")
-          or f"strategy:{strategy_id}:{index}:{order['stock_code']}"
-        ),
+        idempotency_key=idempotency_key,
+        execution_ref=execution_ref,
+        environment=environment,
       )
       results.append(result)
     success_count = sum(1 for result in results if result["success"])

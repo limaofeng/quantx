@@ -9,7 +9,14 @@ from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal
 from typing import Any, Mapping
 
-from quantx_contracts import CancelCommandPayload
+from quantx_contracts import (
+  PROTOCOL_VERSION,
+  CancelCommandPayload,
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+  TradeCommandPayload,
+)
 from quantx_domain.clock import to_naive_utc, utcnow
 from quantx_domain.strategies.ashare_managed_entry_plan import (
   ENTRY_PLAN_ENABLED_KEY,
@@ -30,9 +37,9 @@ from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
   AgentDevice,
+  OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
-  StrategyOrderCorrelation,
   StrategyRuntimeEvent,
   TradeCommandOutbox,
   TTradeBatch,
@@ -44,6 +51,7 @@ from quantx_infrastructure.models.entry_plan_authorization import (
 from quantx_infrastructure.models.enums import AccountType
 from quantx_infrastructure.models.enums import OrderStatus as PersistedOrderStatus
 from quantx_infrastructure.models.enums import OrderType as PersistedOrderType
+from quantx_infrastructure.models.execution_owner import validate_owner_environment
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder,
   ConditionalLiquidationStatus,
@@ -70,10 +78,6 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   validate_consumed_exit_plan_sell_challenge,
   validate_exact_auto_exit_authorization,
 )
-from quantx_infrastructure.services.exit_plan_execution_owner import (
-  INVALID_OWNER,
-  durable_exit_plan_owner_kind,
-)
 from quantx_infrastructure.services.market_stream_readiness import (
   authoritative_market_stream_tradable,
 )
@@ -84,6 +88,43 @@ from quantx_infrastructure.services.t_trade_batch_metrics import (
 
 class AgentUnavailableError(RuntimeError):
   pass
+
+
+MAX_STABLE_COMMAND_KEY_LENGTH = 128
+
+
+def require_stable_command_key(
+  idempotency_key: str | None,
+  trace_id: str | None = None,
+) -> tuple[str, str, str]:
+  """Require a caller-owned key before creating a durable order command.
+
+  ``trace_id`` is accepted only as the explicit correlation key when
+  no idempotency key was supplied.  Neither value may be synthesized from a
+  request payload or a transport-generated order id.
+  """
+
+  if idempotency_key is not None and not isinstance(idempotency_key, str):
+    raise AgentUnavailableError("IDEMPOTENCY_KEY_INVALID:稳定幂等键必须是字符串")
+  if trace_id is not None and not isinstance(trace_id, str):
+    raise AgentUnavailableError("TRACE_ID_INVALID:稳定追踪键必须是字符串")
+  normalized_idempotency_key = (idempotency_key or "").strip()
+  normalized_trace_id = (trace_id or "").strip()
+  for field_name, value in (
+    ("IDEMPOTENCY_KEY", normalized_idempotency_key),
+    ("TRACE_ID", normalized_trace_id),
+  ):
+    if len(value) > MAX_STABLE_COMMAND_KEY_LENGTH:
+      raise AgentUnavailableError(
+        f"{field_name}_INVALID:稳定键不得超过 "
+        f"{MAX_STABLE_COMMAND_KEY_LENGTH} 个字符"
+      )
+  stable_key = normalized_idempotency_key or normalized_trace_id
+  if not stable_key:
+    raise AgentUnavailableError(
+      "IDEMPOTENCY_KEY_REQUIRED:必须提供稳定 idempotency_key 或 trace_id"
+    )
+  return normalized_idempotency_key, normalized_trace_id, stable_key
 
 
 _AUTHORITATIVE_ENTRY_WORKING_STATUSES = (
@@ -105,6 +146,123 @@ _AUTHORITATIVE_ENTRY_TERMINAL_STATUSES = {
 
 _ROUTABLE_EXIT_PLAN_STATUSES = frozenset(
   {"ACTIVE", "PARTIALLY_EXITED", "EXIT_PENDING"}
+)
+_REGISTERED_RUNTIME_OWNER_TYPES = frozenset(
+  {
+    ExecutionOwnerType.STRATEGY_RUN.value,
+    ExecutionOwnerType.EXIT_PLAN.value,
+    ExecutionOwnerType.MANUAL_COMMAND.value,
+  }
+)
+
+# ``request_metadata`` is an audit/evidence projection, not a second command
+# identity.  Identity fields belong to the typed columns/arguments below and
+# are rejected at this boundary instead of being copied into JSON and later
+# used as a routing fallback.
+_REQUEST_METADATA_IDENTITY_KEYS = frozenset(
+  {
+    "owner_type",
+    "owner_id",
+    "source_execution_owner_type",
+    "source_execution_owner_id",
+    "source_execution_environment",
+    "environment",
+    "execution_environment",
+    "execution_mode",
+    "strategy_run_id",
+    "strategy_order_id",
+    "intent_id",
+    "batch_id",
+    "t_batch_id",
+    "idempotency_key",
+    "client_order_id",
+    "broker_order_id",
+    "account_id",
+    "instrument_code",
+    "exit_plan_id",
+    "order_remark",
+    "strategy_name",
+  }
+)
+_REQUEST_METADATA_ALLOWLIST = frozenset(
+  {
+    "origin",
+    "challenge_id",
+    "payload_fingerprint",
+    "quote_timestamp",
+    "quote_fingerprint",
+    "reference_price",
+    "requested_volume",
+    "final_volume",
+    "requested_entry_volume",
+    "rollout_snapshot_id",
+    "rollout_snapshot_hash",
+    "rollout_snapshot_at",
+    "account_updated_at",
+    "position_updated_at",
+    "instrument_updated_at",
+    "position_snapshot_sequence",
+    "position_snapshot_source",
+    "position_snapshot_reported_at",
+    "position_snapshot_received_at",
+    "position_snapshot_count",
+    "total_asset_cny",
+    "position_volume",
+    "market_value_cny",
+    "account_snapshot_version",
+    "risk_action",
+    "risk_decision_id",
+    "risk_reason_code",
+    "risk_reason_detail",
+    "risk_tags",
+    "reason_tags",
+    "substitution_plan",
+    "config_version",
+    "entry_config_version",
+    "entry_plan_id",
+    "entry_plan_fingerprint",
+    "entry_rule_fingerprint",
+    "auto_entry_authorization_grant_id",
+    "auto_entry_plan_fingerprint",
+    "auto_entry_rule_fingerprint",
+    "exact_auto_entry_authorized",
+    "protected_limit_price",
+    "exit_plan_template",
+    "exit_reason",
+    "exit_rule_id",
+    "exit_policy_version",
+    "exit_policy_fingerprint",
+    "exit_rule_fingerprint",
+    "exit_plan_source_type",
+    "exit_plan_source_id",
+    "auto_exit_authorization_code",
+    "auto_exit_authorization_fingerprint",
+    "auto_exit_authorization_challenge_id",
+    "auto_exit_authorization_user_id",
+    "auto_exit_authorization_device_session_id",
+    "auto_exit_authorized_at",
+    "auto_exit_authorization_expires_at",
+    "exit_plan_approval_challenge_id",
+    "exit_plan_approval_user_id",
+    "exit_plan_approval_device_session_id",
+    "exit_plan_approval_channel",
+    "exact_auto_exit_authorized",
+    "policy_version",
+    "account_capacity",
+    "execution_terminal_source",
+    "execution_terminal_reason",
+    "reconciled_zero_fill_intent_id",
+    "managed_runtime_command_id",
+    "conditional_order_id",
+    "runtime_event_key",
+    "entry_stage_id",
+    "entry_plan_note",
+    "commission_rate",
+    "minimum_commission",
+    "min_commission",
+    "stamp_tax_rate",
+    "transfer_fee_rate",
+  }
 )
 
 
@@ -133,14 +291,441 @@ class TradeCommandService:
     self.db = db
 
   @staticmethod
+  def _require_execution_identity(
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
+  ) -> tuple[ExecutionOwnerRef, ExecutionEnvironment, str, str, str]:
+    """Validate the one explicit identity accepted by command creation.
+
+    Owner and environment are deliberately not reconstructed from request
+    metadata, legacy run fields, traces, buckets, or caller flags.  The
+    command boundary receives the already validated value objects and only
+    projects them to their canonical durable/wire representations here.
+    """
+
+    if not isinstance(execution_ref, ExecutionOwnerRef):
+      raise ValueError("EXECUTION_OWNER_REQUIRED")
+    if not isinstance(environment, ExecutionEnvironment):
+      raise ValueError("EXECUTION_ENVIRONMENT_REQUIRED")
+    owner_type, owner_id, canonical_environment = validate_owner_environment(
+      execution_ref.owner_type,
+      execution_ref.owner_id,
+      environment,
+    )
+    # The value-object and persistence validators intentionally share the same
+    # closed enum.  Keep this assertion explicit so a future enum change cannot
+    # silently create a mixed identity representation.
+    if owner_type is None or owner_id is None or canonical_environment is None:
+      raise ValueError("EXECUTION_OWNER_REQUIRED")
+    canonical_ref = ExecutionOwnerRef(owner_type, owner_id)
+    canonical_env = ExecutionEnvironment(canonical_environment)
+    return (
+      canonical_ref,
+      canonical_env,
+      canonical_ref.owner_type.value,
+      canonical_ref.owner_id,
+      canonical_env.value,
+    )
+
+  @staticmethod
+  def _wire_execution_mode(environment: ExecutionEnvironment) -> str:
+    """Map canonical durable environment to the lower-case wire value."""
+
+    if environment not in {
+      ExecutionEnvironment.PAPER,
+      ExecutionEnvironment.LIVE,
+    }:
+      raise ValueError("交易命令仅支持 PAPER 或 LIVE execution environment")
+    return environment.value.lower()
+
+  @staticmethod
+  def _wire_price_type(order_type: Any) -> str:
+    """Validate the sole current-protocol order price type."""
+
+    value = str(getattr(order_type, "value", order_type) or "").strip().upper()
+    if value != "FIX_PRICE":
+      raise AgentUnavailableError(
+        f"协议 {PROTOCOL_VERSION} PLACE_ORDER 仅支持 FIX_PRICE 限价委托"
+      )
+    return value
+
+  @staticmethod
+  def _normalize_strategy_identity(
+    owner_type: str,
+    owner_id: str,
+    strategy_run_id: str | None,
+    strategy_order_id: str | None,
+  ) -> tuple[str, str]:
+    """Normalize the legacy strategy witness columns for one owner.
+
+    ``strategy_run_id`` and ``strategy_order_id`` are a pair of denormalized
+    witnesses for ``STRATEGY_RUN`` only.  EXIT_PLAN and MANUAL_COMMAND use
+    their typed owner (and, for EXIT_PLAN, ``intent_id``) as the durable
+    identity; accepting either strategy witness for those owners would create
+    a row that cannot satisfy the database identity constraint.
+    """
+
+    normalized_run_id = str(strategy_run_id or "").strip()
+    normalized_order_id = str(strategy_order_id or "").strip()
+    if owner_type == ExecutionOwnerType.STRATEGY_RUN.value:
+      if normalized_run_id and normalized_run_id != owner_id:
+        raise AgentUnavailableError(
+          "TRADE_COMMAND_OWNER_CONFLICT:显式 owner 与 strategy_run_id 不一致"
+        )
+      if not normalized_order_id:
+        raise AgentUnavailableError(
+          "TRADE_COMMAND_OWNER_CONFLICT:STRATEGY_RUN 命令必须绑定 strategy_order_id"
+        )
+      return owner_id, normalized_order_id
+    if normalized_run_id or normalized_order_id:
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_OWNER_CONFLICT:非 STRATEGY_RUN 命令不得携带 strategy_run_id/strategy_order_id"
+      )
+    return "", ""
+
+  @staticmethod
+  def _sanitize_request_metadata(
+    metadata: Mapping[str, Any] | None,
+  ) -> dict[str, Any]:
+    """Validate the non-identity JSON projection at the command boundary."""
+
+    if metadata is None:
+      return {}
+    if not isinstance(metadata, Mapping):
+      raise AgentUnavailableError("TRADE_COMMAND_METADATA_INVALID:必须是对象")
+    rejected = sorted(
+      {
+        str(key)
+        for key in metadata
+        if not isinstance(key, str)
+        or key in _REQUEST_METADATA_IDENTITY_KEYS
+        or key not in _REQUEST_METADATA_ALLOWLIST
+      }
+    )
+    if rejected:
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_METADATA_KEY_REJECTED:" + ",".join(rejected)
+      )
+    return dict(metadata)
+
+  @staticmethod
   def order_idempotency_digest(
-    *, user_id: str, account_id: str, idempotency_key: str
+    *,
+    user_id: str,
+    account_id: str,
+    idempotency_key: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
   ) -> str:
-    """Return the persisted business key used to recover queued order results."""
+    """Return the owner-scoped key used to recover queued order results."""
+
+    _, _, normalized_key = require_stable_command_key(idempotency_key)
+    _canonical_ref, _canonical_env, owner_type, owner_id, environment_value = (
+      TradeCommandService._require_execution_identity(execution_ref, environment)
+    )
 
     return hashlib.sha256(
-      f"order:{user_id}:{account_id}:{idempotency_key.strip()}".encode("utf-8")
+      (
+        f"order:{user_id}:{account_id}:{environment_value}:"
+        f"{owner_type}:{owner_id}:{normalized_key}"
+      ).encode("utf-8")
     ).hexdigest()
+
+  @staticmethod
+  def _idempotent_order_matches_request(
+    existing: TradeCommandOutbox,
+    *,
+    account_id: str,
+    owner_type: str,
+    owner_id: str,
+    environment: str,
+    instrument_code: str,
+    side: str,
+    order_type: str,
+    limit_price: Decimal,
+    volume: int,
+  ) -> bool:
+    """Prove that an idempotent retry is the same immutable order request."""
+
+    if (
+      str(getattr(existing, "account_id", "") or "") != account_id
+      or str(getattr(existing, "owner_type", "") or "") != owner_type
+      or str(getattr(existing, "owner_id", "") or "") != owner_id
+      or str(getattr(existing, "environment", "") or "") != environment
+    ):
+      return False
+    payload = dict(getattr(existing, "payload", None) or {})
+    if set(payload) != {
+      "command_kind",
+      "client_order_id",
+      "account_id",
+      "execution_mode",
+      "instrument_code",
+      "side",
+      "price_type",
+      "limit_price",
+      "volume",
+      "expires_at",
+    }:
+      return False
+    if (
+      str(payload.get("command_kind") or "").strip().upper()
+      != "PLACE_ORDER"
+      or str(payload.get("client_order_id") or "")
+      != str(getattr(existing, "client_order_id", "") or "")
+      or str(payload.get("account_id") or "") != account_id
+      or str(payload.get("execution_mode") or "").strip().upper()
+      != environment
+      or str(payload.get("instrument_code") or "").strip().upper()
+      != instrument_code
+      or str(payload.get("side") or "").strip().upper() != side
+      or str(payload.get("price_type") or "").strip().upper() != order_type
+    ):
+      return False
+    try:
+      validated_payload = TradeCommandPayload.model_validate(payload)
+      existing_limit_price = Decimal(str(payload.get("limit_price")))
+      existing_volume = int(payload.get("volume"))
+      payload_expires_at = validated_payload.expires_at
+      durable_expires_at = existing.expires_at
+      if durable_expires_at.tzinfo is None:
+        durable_expires_at = durable_expires_at.replace(tzinfo=timezone.utc)
+      else:
+        durable_expires_at = durable_expires_at.astimezone(timezone.utc)
+      if payload_expires_at.tzinfo is None:
+        payload_expires_at = payload_expires_at.replace(tzinfo=timezone.utc)
+      else:
+        payload_expires_at = payload_expires_at.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError, ArithmeticError):
+      return False
+    return (
+      existing_limit_price == limit_price
+      and existing_volume == volume
+      and payload_expires_at == durable_expires_at
+    )
+
+  async def _idempotent_order_chain_matches_request(
+    self,
+    existing: TradeCommandOutbox,
+    *,
+    user_id: str,
+    account_id: str,
+    owner_type: str,
+    owner_id: str,
+    environment: str,
+    instrument_code: str,
+    side: str,
+    order_type: str,
+    limit_price: Decimal,
+    volume: int,
+    strategy_run_id: str,
+    strategy_order_id: str,
+    intent_id: str,
+    batch_id: str,
+    bucket: str,
+    t_trade_role: str,
+    risk_decision_id: str,
+    trace_id: str,
+    substitution_plan: Mapping[str, Any] | None,
+    request_metadata: Mapping[str, Any],
+  ) -> bool:
+    """Prove an idempotent retry is the same complete durable command chain."""
+
+    try:
+      normalized_strategy_run_id, normalized_strategy_order_id = (
+        self._normalize_strategy_identity(
+          owner_type,
+          owner_id,
+          strategy_run_id,
+          strategy_order_id,
+        )
+      )
+    except AgentUnavailableError:
+      return False
+
+    if not self._idempotent_order_matches_request(
+      existing,
+      account_id=account_id,
+      owner_type=owner_type,
+      owner_id=owner_id,
+      environment=environment,
+      instrument_code=instrument_code,
+      side=side,
+      order_type=order_type,
+      limit_price=limit_price,
+      volume=volume,
+    ):
+      return False
+    pending_rows = list(
+      (
+        await self.db.execute(
+          select(PendingTradeOrder)
+          .where(PendingTradeOrder.client_order_id == existing.client_order_id)
+          .with_for_update()
+        )
+      )
+      .scalars()
+      .all()
+    )
+    correlation_rows = list(
+      (
+        await self.db.execute(
+          select(OrderCorrelation)
+          .where(OrderCorrelation.client_order_id == existing.client_order_id)
+          .with_for_update()
+        )
+      )
+      .scalars()
+      .all()
+    )
+    if len(pending_rows) != 1 or len(correlation_rows) != 1:
+      return False
+    pending = pending_rows[0]
+    correlation = correlation_rows[0]
+    normalized_intent_id = str(intent_id or "").strip()
+    normalized_batch_id = str(batch_id or "").strip()
+    normalized_bucket = str(bucket or "manual").strip()
+    normalized_role = str(t_trade_role or "").strip().upper()
+    normalized_risk_decision_id = str(risk_decision_id or "").strip()
+    if (
+      str(pending.user_id or "") != str(user_id or "")
+      or str(pending.account_id or "") != account_id
+      or str(pending.owner_type or "").strip().upper() != owner_type
+      or str(pending.owner_id or "").strip() != owner_id
+      or str(pending.environment or "").strip().upper() != environment
+      or str(pending.instrument_code or "").strip().upper() != instrument_code
+      or str(pending.side or "").strip().upper() != side
+      or str(pending.order_type or "").strip().upper() != order_type
+      or Decimal(str(pending.limit_price)) != limit_price
+      or int(pending.volume or 0) != volume
+      or str(pending.strategy_run_id or "").strip() != normalized_strategy_run_id
+      or str(pending.strategy_order_id or "").strip() != normalized_strategy_order_id
+      or str(pending.intent_id or "").strip() != normalized_intent_id
+      or str(pending.batch_id or "").strip() != normalized_batch_id
+      or str(pending.bucket or "manual").strip() != normalized_bucket
+      or str(pending.t_trade_role or "").strip().upper() != normalized_role
+      or str(pending.risk_decision_id or "").strip() != normalized_risk_decision_id
+      or dict(pending.substitution_plan or {}) != dict(substitution_plan or {})
+    ):
+      return False
+    if (
+      str(correlation.client_order_id or "") != str(pending.client_order_id or "")
+      or str(correlation.account_id or "") != account_id
+      or str(correlation.owner_type or "").strip().upper() != owner_type
+      or str(correlation.owner_id or "").strip() != owner_id
+      or str(correlation.environment or "").strip().upper() != environment
+      or str(correlation.strategy_run_id or "").strip()
+      != normalized_strategy_run_id
+      or str(correlation.strategy_order_id or "").strip()
+      != normalized_strategy_order_id
+      or str(correlation.intent_id or "").strip() != normalized_intent_id
+      or str(correlation.batch_id or "").strip() != normalized_batch_id
+      or str(correlation.bucket or "manual").strip() != normalized_bucket
+      or str(correlation.t_trade_role or "").strip().upper() != normalized_role
+      or str(correlation.risk_decision_id or "").strip()
+      != normalized_risk_decision_id
+      or str(correlation.trace_id or "").strip()
+      != str(pending.trace_id or "").strip()
+      or dict(correlation.substitution_plan or {})
+      != dict(pending.substitution_plan or {})
+      or dict(correlation.request_metadata or {})
+      != dict(pending.request_metadata or {})
+    ):
+      return False
+    if trace_id and str(pending.trace_id or "").strip() != str(trace_id).strip():
+      return False
+    expected_metadata = dict(request_metadata or {})
+    stored_metadata = dict(pending.request_metadata or {})
+    for key in set(expected_metadata) | set(stored_metadata):
+      if key == "account_capacity":
+        continue
+      if stored_metadata.get(key) != expected_metadata.get(key):
+        return False
+    if normalized_intent_id:
+      intent = await self.db.get(
+        TradeIntentRecord,
+        normalized_intent_id,
+        with_for_update=True,
+        populate_existing=True,
+      )
+      if intent is None:
+        return False
+      intent_strategy_run_id = str(intent.strategy_run_id or "").strip()
+      if intent_strategy_run_id and (
+        owner_type != ExecutionOwnerType.STRATEGY_RUN.value
+        or intent_strategy_run_id != owner_id
+      ):
+        return False
+      if (
+        str(intent.id or "") != normalized_intent_id
+        or str(intent.owner_type or "").strip().upper() != owner_type
+        or str(intent.owner_id or "").strip() != owner_id
+        or str(intent.environment or "").strip().upper() != environment
+        or str(intent.account_id or "") != account_id
+        or str(intent.instrument_code or "").strip().upper() != instrument_code
+        or str(intent.direction or "").strip().upper() != side
+        or str(intent.bucket or "").strip() != normalized_bucket
+      ):
+        return False
+    elif owner_type != ExecutionOwnerType.MANUAL_COMMAND.value:
+      return False
+    return True
+
+  @staticmethod
+  def _cancel_attempt_matches_request(
+    attempt: TradeCommandOutbox,
+    *,
+    account_id: str,
+    owner_type: str,
+    owner_id: str,
+    environment: str,
+    broker_order_id: str,
+  ) -> bool:
+    """Prove one immutable CANCEL attempt targets the requested order."""
+
+    payload = dict(getattr(attempt, "payload", None) or {})
+    if set(payload) != {
+      "command_kind",
+      "client_order_id",
+      "account_id",
+      "execution_mode",
+      "broker_order_id",
+      "expires_at",
+    }:
+      return False
+    if (
+      str(getattr(attempt, "account_id", "") or "") != account_id
+      or str(getattr(attempt, "owner_type", "") or "").strip().upper()
+      != owner_type
+      or str(getattr(attempt, "owner_id", "") or "").strip() != owner_id
+      or str(getattr(attempt, "environment", "") or "").strip().upper()
+      != environment
+      or str(payload.get("command_kind") or "").strip().upper()
+      != "CANCEL_ORDER"
+      or str(payload.get("client_order_id") or "")
+      != str(getattr(attempt, "client_order_id", "") or "")
+      or str(payload.get("account_id") or "") != account_id
+      or str(payload.get("execution_mode") or "").strip().lower()
+      != environment.lower()
+      or str(payload.get("broker_order_id") or "").strip() != broker_order_id
+    ):
+      return False
+    try:
+      payload_expires_at = datetime.fromisoformat(
+        str(payload.get("expires_at") or "").strip().replace("Z", "+00:00")
+      )
+      if payload_expires_at.tzinfo is None:
+        payload_expires_at = payload_expires_at.replace(tzinfo=timezone.utc)
+      else:
+        payload_expires_at = payload_expires_at.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+      return False
+    durable_expires_at = attempt.expires_at
+    if durable_expires_at.tzinfo is None:
+      durable_expires_at = durable_expires_at.replace(tzinfo=timezone.utc)
+    else:
+      durable_expires_at = durable_expires_at.astimezone(timezone.utc)
+    return payload_expires_at == durable_expires_at
 
   @staticmethod
   def _heartbeat_fresh(
@@ -262,7 +847,8 @@ class TradeCommandService:
     locked_intent: TradeIntentRecord,
     plan_id: str,
     intent_id: str,
-    strategy_run_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     account_id: str,
     instrument_code: str,
     volume: int,
@@ -286,9 +872,18 @@ class TradeCommandService:
     normalized_intent_id = str(intent_id or "").strip()
     normalized_account_id = str(account_id or "").strip()
     normalized_instrument = str(instrument_code or "").strip().upper()
-    metadata = dict(request_metadata or {})
+    canonical_ref, canonical_environment, owner_type, owner_id, _ = (
+      self._require_execution_identity(execution_ref, environment)
+    )
     if not normalized_plan_id or not normalized_intent_id:
       raise AgentUnavailableError("退出计划卖单缺少精确计划或意图绑定")
+
+    if (
+      canonical_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
+      or owner_id != normalized_plan_id
+      or canonical_environment is not ExecutionEnvironment.LIVE
+    ):
+      raise AgentUnavailableError("退出计划卖单必须使用 LIVE EXIT_PLAN 所有权")
 
     if str(locked_intent.id or "") != normalized_intent_id:
       raise AgentUnavailableError("退出计划卖单意图锁与请求绑定不匹配")
@@ -329,40 +924,19 @@ class TradeCommandService:
     remaining_volume = max(0, int(plan.remaining_volume or 0))
     available_volume = max(0, int(position.can_use_volume or 0))
     position_volume = max(0, int(position.volume or 0))
-    plan_run_id = str(plan.strategy_run_id or "")
-    intent_run_id = str(intent.strategy_run_id or "")
-    caller_run_id = str(strategy_run_id or "")
-    raw_metadata_run_id = metadata.get("strategy_run_id")
-    metadata_run_id = (
-      raw_metadata_run_id if isinstance(raw_metadata_run_id, str) else ""
-    )
-
     owner_binding_invalid = (
-      durable_exit_plan_owner_kind(plan) == INVALID_OWNER
+      owner_type != "EXIT_PLAN"
+      or owner_id != normalized_plan_id
       or str(intent.owner_type or "").strip().upper() != "EXIT_PLAN"
       or str(intent.owner_id or "").strip() != normalized_plan_id
-      or str(intent_metadata.get("owner_type") or "").strip().upper()
-      != "EXIT_PLAN"
-      or str(intent_metadata.get("owner_id") or "").strip()
-      != normalized_plan_id
-      or str(intent_metadata.get("exit_plan_id") or "").strip()
-      != normalized_plan_id
-      or str(metadata.get("owner_type") or "").strip().upper()
-      != "EXIT_PLAN"
-      or str(metadata.get("owner_id") or "").strip() != normalized_plan_id
-      or str(metadata.get("exit_plan_id") or "").strip()
-      != normalized_plan_id
-      or "strategy_run_id" not in metadata
-      or not isinstance(raw_metadata_run_id, str)
-      or intent_run_id != plan_run_id
-      or caller_run_id != plan_run_id
-      or metadata_run_id != plan_run_id
+      or str(getattr(intent, "environment", "")).strip().upper()
+      != canonical_environment.value
     )
     identity_invalid = (
       str(plan.account_id or "") != normalized_account_id
       or str(plan.instrument_code or "").strip().upper()
       != normalized_instrument
-      or str(plan.execution_mode or "").strip().lower() != "live"
+      or str(plan.environment or "").strip().upper() != "LIVE"
       or str(intent.account_id or "") != normalized_account_id
       or str(intent.instrument_code or "").strip().upper()
       != normalized_instrument
@@ -407,7 +981,6 @@ class TradeCommandService:
     """
 
     payload = dict(command.payload or {})
-    metadata = dict(payload.get("request_metadata") or {})
     if not (
       str(payload.get("command_kind") or "").strip().upper() == "PLACE_ORDER"
       and str(payload.get("execution_mode") or "").strip().lower() == "live"
@@ -415,7 +988,6 @@ class TradeCommandService:
     ):
       raise AgentUnavailableError("物理投递门禁仅接受 LIVE PLACE SELL")
     client_order_id = str(payload.get("client_order_id") or "").strip()
-    intent_id = str(payload.get("intent_id") or "").strip()
     pending = await self.db.get(
       PendingTradeOrder,
       client_order_id,
@@ -424,6 +996,22 @@ class TradeCommandService:
     )
     if pending is None:
       raise AgentUnavailableError("卖单物理投递缺少 Pending 投影")
+    command_environment = str(getattr(command, "environment", "") or "").upper()
+    command_owner_type = str(getattr(command, "owner_type", "") or "").upper()
+    command_owner_id = str(getattr(command, "owner_id", "") or "")
+    pending_environment = str(getattr(pending, "environment", "") or "").upper()
+    pending_owner_type = str(getattr(pending, "owner_type", "") or "").upper()
+    pending_owner_id = str(getattr(pending, "owner_id", "") or "")
+    intent_id = str(getattr(pending, "intent_id", "") or "").strip()
+    if (
+      command_environment != "LIVE"
+      or pending_environment != command_environment
+      or pending_owner_type != command_owner_type
+      or pending_owner_id != command_owner_id
+      or not command_owner_type
+      or not command_owner_id
+    ):
+      raise AgentUnavailableError("卖单物理投递 owner/environment 绑定已变化")
     try:
       requested_volume = int(payload.get("volume") or 0)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -433,7 +1021,7 @@ class TradeCommandService:
       and str(command.account_id or "") == str(payload.get("account_id") or "")
       and str(pending.client_order_id or "") == client_order_id
       and str(pending.account_id or "") == str(command.account_id or "")
-      and str(pending.execution_mode or "").strip().lower() == "live"
+      and str(pending.environment or "").strip().upper() == "LIVE"
       and str(pending.side or "").strip().upper() == "SELL"
       and str(pending.intent_id or "") == intent_id
       and str(pending.instrument_code or "").strip().upper()
@@ -453,11 +1041,6 @@ class TradeCommandService:
     ):
       raise AgentUnavailableError("卖单 Pending 绑定或状态已变化")
 
-    caller_claims_exit_plan = bool(
-      str(metadata.get("owner_type") or "").strip().upper() == "EXIT_PLAN"
-      or str(metadata.get("exit_plan_id") or "").strip()
-      or bool(metadata.get("exact_auto_exit_authorized"))
-    )
     intent = (
       await self.db.get(
         TradeIntentRecord,
@@ -469,23 +1052,26 @@ class TradeCommandService:
       else None
     )
     persisted_exit_plan_sell = bool(
-      intent is not None
-      and str(intent.owner_type or "").strip().upper() == "EXIT_PLAN"
+      command_owner_type == ExecutionOwnerType.EXIT_PLAN.value
     )
-    if caller_claims_exit_plan != persisted_exit_plan_sell:
-      raise AgentUnavailableError("卖单物理投递 EXIT_PLAN 所有权已变化")
     if not persisted_exit_plan_sell:
       return
+    if intent is None:
+      raise AgentUnavailableError("退出计划物理投递缺少持久化意图")
 
     await self._lock_and_validate_live_exit_plan_sell(
       locked_intent=intent,
-      plan_id=str(metadata.get("exit_plan_id") or ""),
+      plan_id=command_owner_id,
       intent_id=intent_id,
-      strategy_run_id=str(payload.get("strategy_run_id") or ""),
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        command_owner_id,
+      ),
+      environment=ExecutionEnvironment.LIVE,
       account_id=str(command.account_id or ""),
       instrument_code=str(payload.get("instrument_code") or ""),
       volume=requested_volume,
-      request_metadata=metadata,
+      request_metadata=dict(getattr(pending, "request_metadata", None) or {}),
       allow_queued_intent_projection=True,
     )
 
@@ -554,7 +1140,6 @@ class TradeCommandService:
       order
       for order in other_orders
       if str(order.strategy_run_id or "") == plan_id
-      or str(dict(order.request_metadata or {}).get("entry_plan_id") or "") == plan_id
     ]
     plan_pending_amount = sum(
       (
@@ -716,10 +1301,8 @@ class TradeCommandService:
     for order in instrument_orders:
       side = str(order.side or "").upper()
       status = str(order.status or "").upper()
-      metadata = dict(getattr(order, "request_metadata", None) or {})
       belongs_to_plan = (
         str(getattr(order, "strategy_run_id", "") or "") == strategy_run_id
-        or str(metadata.get("entry_plan_id") or "") == plan_id
       )
       if side == "SELL" or status == "RECONCILE_REQUIRED":
         raise AgentUnavailableError("同标的存在卖单或待对账委托，禁止继续买入")
@@ -771,7 +1354,7 @@ class TradeCommandService:
       .where(
         AutoExitPlanRecord.account_id == account_id,
         AutoExitPlanRecord.instrument_code == instrument_code,
-        AutoExitPlanRecord.execution_mode == "live",
+        AutoExitPlanRecord.environment == "LIVE",
         or_(
           AutoExitPlanRecord.status == "EXIT_PENDING",
           AutoExitPlanRecord.pending_client_order_id.is_not(None),
@@ -870,16 +1453,16 @@ class TradeCommandService:
     if not uncovered_orders and not represented_unknown:
       return
 
-    correlations_by_broker_id: dict[str, list[StrategyOrderCorrelation]] = {}
+    correlations_by_broker_id: dict[str, list[OrderCorrelation]] = {}
     if uncovered_orders:
       broker_order_ids = tuple(str(order.id) for order in uncovered_orders)
       correlations = list(
         (
           await self.db.execute(
-            select(StrategyOrderCorrelation)
+            select(OrderCorrelation)
             .where(
-              StrategyOrderCorrelation.account_id == account_id,
-              StrategyOrderCorrelation.broker_order_id.in_(broker_order_ids),
+              OrderCorrelation.account_id == account_id,
+              OrderCorrelation.broker_order_id.in_(broker_order_ids),
             )
             .with_for_update()
           )
@@ -894,10 +1477,8 @@ class TradeCommandService:
 
     conflicts: list[tuple[PersistedOrder, bool]] = []
     for order, pending in represented_unknown:
-      metadata = dict(getattr(pending, "request_metadata", None) or {})
       belongs_to_plan = (
         str(getattr(pending, "strategy_run_id", "") or "") == strategy_run_id
-        or str(metadata.get("entry_plan_id") or "") == plan_id
       )
       conflicts.append((order, not belongs_to_plan))
     for order in uncovered_orders:
@@ -905,11 +1486,9 @@ class TradeCommandService:
       belongs_to_plan = False
       if len(correlations) == 1:
         correlation = correlations[0]
-        metadata = dict(correlation.request_metadata or {})
         belongs_to_plan = (
           str(order.stock_code or "") == instrument_code
           and str(correlation.strategy_run_id or "") == strategy_run_id
-          and str(metadata.get("entry_plan_id") or "") == plan_id
         )
       conflicts.append((order, not belongs_to_plan))
 
@@ -978,8 +1557,8 @@ class TradeCommandService:
     correlations = list(
       (
         await self.db.execute(
-          select(StrategyOrderCorrelation).where(
-            StrategyOrderCorrelation.broker_order_id.in_(broker_order_ids)
+          select(OrderCorrelation).where(
+            OrderCorrelation.broker_order_id.in_(broker_order_ids)
           )
         )
       )
@@ -1024,11 +1603,10 @@ class TradeCommandService:
     if str(side or "").upper() != "BUY":
       raise AgentUnavailableError("精确自动建仓门禁只能用于 LIVE BUY")
     control = await self._require_auto_entry_live_snapshot(account_id)
-    plan_id = str(request_metadata.get("entry_plan_id") or "").strip()
     grant_id = str(
       request_metadata.get("auto_entry_authorization_grant_id") or ""
     ).strip()
-    if not plan_id or not str(strategy_run_id or "").strip() or not grant_id:
+    if not str(strategy_run_id or "").strip() or not grant_id:
       raise AgentUnavailableError("自动买入命令缺少精确计划与 grant 绑定")
 
     run_row = (
@@ -1049,13 +1627,13 @@ class TradeCommandService:
       if isinstance(binding, Mapping):
         bound_plan_id = str(binding.get("plan_id") or "").strip()
     bound_plan_id = bound_plan_id or str(getattr(run, "id", strategy_run_id))
+    plan_id = bound_plan_id
     if (
       strategy.class_name != "AshareManagedEntryPlanStrategy"
       or self._enum_value(run.mode) != "live"
       or self._enum_value(run.status) != "running"
       or parameters.get(ENTRY_PLAN_ENABLED_KEY) is not True
       or list(run.instruments or []) != [instrument_code]
-      or bound_plan_id != plan_id
     ):
       raise AgentUnavailableError("建仓计划已暂停、终止或不再绑定当前标的")
     try:
@@ -1159,7 +1737,7 @@ class TradeCommandService:
           select(PendingTradeOrder)
           .where(
             PendingTradeOrder.account_id == account_id,
-            PendingTradeOrder.execution_mode == "live",
+            PendingTradeOrder.environment == "LIVE",
             PendingTradeOrder.status.in_(
               (
                 "QUEUED",
@@ -1217,7 +1795,7 @@ class TradeCommandService:
       requested_volume=volume,
     )
     if any(
-      str(dict(item.request_metadata or {}).get("entry_plan_id") or "") == plan_id
+      str(item.strategy_run_id or "") == str(strategy_run_id)
       and str(item.intent_id or "") != str(intent_id)
       and str(item.side or "").upper() == "BUY"
       for item in active_pending
@@ -1320,9 +1898,11 @@ class TradeCommandService:
       heartbeat is None
       or str(heartbeat.status or "").upper() != "READY"
       or "live" not in capabilities
-      or str(details.get("protocolVersion") or "") != "1.1"
+      or str(details.get("protocolVersion") or "") != PROTOCOL_VERSION
     ):
-      raise AgentUnavailableError("自动买入要求唯一 READY、live、协议 1.1 的 QMT Agent")
+      raise AgentUnavailableError(
+        f"自动买入要求唯一 READY、live、协议 {PROTOCOL_VERSION} 的 QMT Agent"
+      )
     return device
 
   async def _managed_manual_entry_device(
@@ -1446,7 +2026,7 @@ class TradeCommandService:
           select(PendingTradeOrder)
           .where(
             PendingTradeOrder.account_id == account_id,
-            PendingTradeOrder.execution_mode == "live",
+            PendingTradeOrder.environment == "LIVE",
             PendingTradeOrder.status.in_(
               (
                 "QUEUED",
@@ -1540,8 +2120,10 @@ class TradeCommandService:
       f"qmt-agent:{device.id}",
     )
     details = dict(heartbeat.details or {}) if heartbeat is not None else {}
-    if str(details.get("protocolVersion") or "") != "1.1":
-      raise AgentUnavailableError("逐笔确认买入要求协议 1.1 的就绪 QMT Agent")
+    if str(details.get("protocolVersion") or "") != PROTOCOL_VERSION:
+      raise AgentUnavailableError(
+        f"逐笔确认买入要求协议 {PROTOCOL_VERSION} 的就绪 QMT Agent"
+      )
     return device
 
   async def _device_for(
@@ -1643,13 +2225,47 @@ class TradeCommandService:
     instrument_code: str,
     side: str,
     execution_mode: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     strategy_run_id: str,
     strategy_order_id: str,
     intent_id: str,
     batch_id: str,
     bucket: str,
   ) -> TradeIntentRecord | None:
-    if not any((strategy_run_id, strategy_order_id, intent_id, batch_id)):
+    canonical_ref, canonical_environment, owner_type, owner_id, _ = (
+      self._require_execution_identity(execution_ref, environment)
+    )
+    normalized_strategy_run_id, normalized_strategy_order_id = (
+      self._normalize_strategy_identity(
+        owner_type,
+        owner_id,
+        strategy_run_id,
+        strategy_order_id,
+      )
+    )
+    strategy_run_id = normalized_strategy_run_id
+    strategy_order_id = normalized_strategy_order_id
+    normalized_intent_id = str(intent_id or "").strip()
+    if owner_type == ExecutionOwnerType.STRATEGY_RUN.value and not normalized_intent_id:
+      raise AgentUnavailableError(
+        "TRADE_INTENT_REQUIRED:STRATEGY_RUN 委托必须绑定已持久化意图"
+      )
+    if owner_type == ExecutionOwnerType.EXIT_PLAN.value and not normalized_intent_id:
+      raise AgentUnavailableError(
+        "TRADE_INTENT_REQUIRED:EXIT_PLAN 委托必须绑定已持久化意图"
+      )
+    if owner_type == ExecutionOwnerType.MANUAL_COMMAND.value and normalized_intent_id:
+      raise AgentUnavailableError(
+        "TRADE_INTENT_OWNER_CONFLICT:MANUAL_COMMAND 委托不得绑定 intent_id"
+      )
+    intent_id = normalized_intent_id
+
+    # A command without a persisted intent is valid for an explicitly scoped
+    # manual/direct command.  Any supplied intent linkage, however, must be
+    # proved against the same owner/environment; it is never used to infer
+    # either value.
+    if not any((strategy_order_id, intent_id, batch_id)):
       return None
     if not intent_id:
       raise AgentUnavailableError("TRADE_INTENT_REQUIRED:策略委托必须绑定已持久化意图")
@@ -1662,14 +2278,30 @@ class TradeCommandService:
     if intent is None:
       raise AgentUnavailableError("TRADE_INTENT_NOT_ACCEPTED:策略意图尚未持久化受理")
     if (
-      str(intent.strategy_run_id or "") != strategy_run_id
-      or str(intent.instrument_code) != instrument_code
+      str(intent.owner_type or "").upper() != owner_type
+      or str(intent.owner_id or "") != owner_id
+      or str(getattr(intent, "environment", "")).upper()
+      != canonical_environment.value
+      or str(intent.instrument_code or "") != instrument_code
       or str(intent.direction).upper() != side.upper()
       or str(intent.bucket) != bucket
       or (intent.account_id and str(intent.account_id) != account_id)
     ):
       raise AgentUnavailableError(
         "TRADE_INTENT_SCOPE_MISMATCH:委托与持久化意图归属不一致"
+      )
+    if owner_type == ExecutionOwnerType.STRATEGY_RUN.value:
+      if strategy_run_id and strategy_run_id != owner_id:
+        raise AgentUnavailableError(
+          "TRADE_INTENT_SCOPE_MISMATCH:策略运行与 owner 不一致"
+        )
+      if intent.strategy_run_id and str(intent.strategy_run_id) != owner_id:
+        raise AgentUnavailableError(
+          "TRADE_INTENT_SCOPE_MISMATCH:策略意图缺少匹配 strategy_run_id"
+        )
+    elif intent.strategy_run_id is not None:
+      raise AgentUnavailableError(
+        "TRADE_INTENT_OWNER_CONFLICT:非 STRATEGY_RUN 意图不得携带 strategy_run_id"
       )
     if str(intent.status).upper() in {
       "FILLED",
@@ -1680,12 +2312,10 @@ class TradeCommandService:
       "RECONCILED_ZERO_FILL",
     }:
       raise AgentUnavailableError("TRADE_INTENT_TERMINAL:终态意图不可再次下单")
-    if intent.owner_type == "STRATEGY_RUN":
-      run = await self.db.get(StrategyRun, strategy_run_id)
+    if owner_type == ExecutionOwnerType.STRATEGY_RUN.value:
+      run = await self.db.get(StrategyRun, owner_id)
       if (
-        not strategy_run_id
-        or not strategy_order_id
-        or str(intent.owner_id) != strategy_run_id
+        not strategy_order_id
         or run is None
         or self._enum_value(run.mode) != execution_mode
         or str(dict(run.parameters or {}).get("account_id") or "") != account_id
@@ -1693,20 +2323,19 @@ class TradeCommandService:
         raise AgentUnavailableError(
           "TRADE_INTENT_SCOPE_MISMATCH:策略运行与委托执行环境不一致"
         )
-    elif intent.owner_type == "EXIT_PLAN":
-      plan = await self.db.get(AutoExitPlanRecord, intent.owner_id)
+    elif owner_type == ExecutionOwnerType.EXIT_PLAN.value:
+      plan = await self.db.get(AutoExitPlanRecord, owner_id)
       if (
         plan is None
         or str(plan.account_id) != account_id
-        or str(plan.execution_mode) != execution_mode
+        or str(plan.environment or "").strip().upper() != canonical_environment.value
         or str(plan.instrument_code) != instrument_code
-        or str(plan.strategy_run_id or "") != strategy_run_id
+        or str(getattr(plan, "source_execution_environment", "")).upper()
+        != canonical_environment.value
       ):
         raise AgentUnavailableError(
           "TRADE_INTENT_SCOPE_MISMATCH:退出计划与委托执行环境不一致"
         )
-    else:
-      raise AgentUnavailableError("TRADE_INTENT_OWNER_INVALID:不支持的持久化意图所有权")
     existing = await self.db.scalar(
       select(PendingTradeOrder.client_order_id)
       .where(
@@ -1774,11 +2403,10 @@ class TradeCommandService:
     order_type: str,
     limit_price: Decimal,
     volume: int,
-    strategy_name: str = "",
-    order_remark: str = "",
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
+    idempotency_key: str,
     trace_id: str = "",
-    idempotency_key: str = "",
-    execution_mode: str = "paper",
     strategy_run_id: str = "",
     strategy_order_id: str = "",
     intent_id: str = "",
@@ -1794,23 +2422,72 @@ class TradeCommandService:
     commit_transaction: bool = True,
     _locked_live_control: AccountExecutionControl | None = None,
   ) -> QueuedTradeCommand:
+    idempotency_key, trace_id, raw_idempotency_key = require_stable_command_key(
+      idempotency_key,
+      trace_id,
+    )
+    (
+      canonical_ref,
+      canonical_environment,
+      owner_type,
+      owner_id,
+      canonical_environment_value,
+    ) = self._require_execution_identity(execution_ref, environment)
+    if owner_type not in _REGISTERED_RUNTIME_OWNER_TYPES:
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_OWNER_UNREGISTERED:当前 owner 尚未注册 runtime handler"
+      )
+    normalized_mode = self._wire_execution_mode(canonical_environment)
+    normalized_side = str(side or "").strip().upper()
+    normalized_instrument = str(instrument_code or "").strip().upper()
+    normalized_order_type = self._wire_price_type(order_type)
+    if batch_id and owner_type != ExecutionOwnerType.STRATEGY_RUN.value:
+      raise AgentUnavailableError("TRADE_COMMAND_OWNER_CONFLICT:TTrade 批次必须归属 STRATEGY_RUN")
     if volume <= 0:
       raise ValueError("委托数量必须大于 0")
-    normalized_mode = execution_mode.strip().lower()
-    if normalized_mode not in {"paper", "live"}:
-      raise ValueError("交易命令 execution_mode 必须是 paper 或 live")
+    if not normalized_side:
+      raise ValueError("委托方向不能为空")
+    if not normalized_instrument:
+      raise ValueError("委托标的不能为空")
+    try:
+      normalized_limit_price = Decimal(str(limit_price))
+    except (TypeError, ValueError, ArithmeticError) as exc:
+      raise ValueError("限价委托价格无效") from exc
+    if not normalized_limit_price.is_finite() or normalized_limit_price <= 0:
+      raise ValueError(
+        f"协议 {PROTOCOL_VERSION} PLACE_ORDER 必须使用正数限价"
+      )
     normalized_role = t_trade_role.strip().upper()
     if normalized_role not in {"", "ENTRY", "EXIT"}:
       raise ValueError("做 T 订单角色必须是 ENTRY 或 EXIT")
     if (
       normalized_role
-      and side.upper() != {"ENTRY": "BUY", "EXIT": "SELL"}[normalized_role]
+      and normalized_side != {"ENTRY": "BUY", "EXIT": "SELL"}[normalized_role]
     ):
       raise AgentUnavailableError("TRADE_INTENT_SCOPE_MISMATCH:做T角色与委托方向不一致")
-    immutable_metadata = dict(request_metadata or {})
+    immutable_metadata = self._sanitize_request_metadata(request_metadata)
+    strategy_run_id, strategy_order_id = self._normalize_strategy_identity(
+      owner_type,
+      owner_id,
+      strategy_run_id,
+      strategy_order_id,
+    )
+    if manual_live and owner_type != ExecutionOwnerType.MANUAL_COMMAND.value:
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_OWNER_CONFLICT:manual_live 只能用于 MANUAL_COMMAND"
+      )
     if manual_live and normalized_mode != "live":
       raise ValueError("手动实盘授权只能用于 live 交易命令")
-    risk_reducing = normalized_role == "EXIT" or side.upper() == "SELL"
+    risk_reducing = normalized_role == "EXIT" or normalized_side == "SELL"
+    if risk_decision_id:
+      immutable_metadata.setdefault("risk_decision_id", str(risk_decision_id))
+    if reason_tags:
+      immutable_metadata.setdefault(
+        "reason_tags",
+        sorted({str(value).strip() for value in reason_tags if str(value).strip()}),
+      )
+    if substitution_plan is not None:
+      immutable_metadata.setdefault("substitution_plan", substitution_plan)
     if _locked_live_control is not None:
       if normalized_mode != "live" or str(_locked_live_control.account_id or "") != str(
         account_id or ""
@@ -1829,40 +2506,66 @@ class TradeCommandService:
         risk_reducing=risk_reducing,
       )
 
-    raw_idempotency_key = idempotency_key.strip() or trace_id.strip()
-    if raw_idempotency_key:
-      business_idempotency_key = self.order_idempotency_digest(
+    business_idempotency_key = self.order_idempotency_digest(
+      user_id=user_id,
+      account_id=account_id,
+      idempotency_key=raw_idempotency_key,
+      execution_ref=canonical_ref,
+      environment=canonical_environment,
+    )
+    existing = (
+      await self.db.execute(
+        select(TradeCommandOutbox).where(
+          TradeCommandOutbox.idempotency_key == business_idempotency_key
+        ).with_for_update()
+      )
+    ).scalar_one_or_none()
+    if existing is not None:
+      if not await self._idempotent_order_chain_matches_request(
+        existing,
         user_id=user_id,
         account_id=account_id,
-        idempotency_key=raw_idempotency_key,
+        owner_type=owner_type,
+        owner_id=owner_id,
+        environment=canonical_environment_value,
+        instrument_code=normalized_instrument,
+        side=normalized_side,
+        order_type=normalized_order_type,
+        limit_price=normalized_limit_price,
+        volume=volume,
+        strategy_run_id=strategy_run_id,
+        strategy_order_id=strategy_order_id,
+        intent_id=intent_id,
+        batch_id=batch_id,
+        bucket=bucket,
+        t_trade_role=normalized_role,
+        risk_decision_id=risk_decision_id,
+        trace_id=trace_id,
+        substitution_plan=substitution_plan,
+        request_metadata=immutable_metadata,
+      ):
+        raise AgentUnavailableError(
+          "IDEMPOTENCY_KEY_CONFLICT:同一幂等键对应不同交易请求"
+        )
+      return QueuedTradeCommand(
+        existing.client_order_id,
+        existing.message_id,
+        existing.delivery_status,
       )
-      existing = (
-        await self.db.execute(
-          select(TradeCommandOutbox).where(
-            TradeCommandOutbox.idempotency_key == business_idempotency_key
-          )
-        )
-      ).scalar_one_or_none()
-      if existing is not None:
-        return QueuedTradeCommand(
-          existing.client_order_id,
-          existing.message_id,
-          existing.delivery_status,
-        )
-    else:
-      business_idempotency_key = f"generated:{uuid.uuid4()}"
 
     if (
-      normalized_mode == "live" and side.upper() == "BUY" and order_type != "FIX_PRICE"
+      normalized_mode == "live" and normalized_side == "BUY" and normalized_order_type != "FIX_PRICE"
     ):
       raise AgentUnavailableError(
         "ACCOUNT_CAPACITY_LIMIT_PRICE_REQUIRED:实盘买入必须使用有价格上限的限价委托"
       )
     accepted_intent = await self._require_durable_order_intent(
       account_id=account_id,
-      instrument_code=instrument_code,
-      side=side,
+      instrument_code=normalized_instrument,
+      side=normalized_side,
       execution_mode=normalized_mode,
+      execution_ref=canonical_ref,
+      environment=canonical_environment,
       strategy_run_id=strategy_run_id,
       strategy_order_id=strategy_order_id,
       intent_id=intent_id,
@@ -1891,9 +2594,16 @@ class TradeCommandService:
             batch is not None
             and (
               batch.account_id != account_id
-              or batch.instrument_code != instrument_code
-              or batch.strategy_run_id != strategy_run_id
-              or batch.execution_mode != normalized_mode
+              or batch.instrument_code != normalized_instrument
+              or batch.strategy_run_id != owner_id
+              or str(batch.environment or "").strip().upper()
+              != canonical_environment_value
+              or str(getattr(batch, "source_execution_owner_type", "") or "")
+              != owner_type
+              or str(getattr(batch, "source_execution_owner_id", "") or "")
+              != owner_id
+              or str(getattr(batch, "source_execution_environment", "") or "")
+              != canonical_environment_value
             )
           )
         ):
@@ -1904,8 +2614,8 @@ class TradeCommandService:
       immutable_metadata["account_capacity"] = await self._require_account_capacity(
         _locked_live_control,
         instrument_code=instrument_code,
-        side=side,
-        limit_price=limit_price,
+        side=normalized_side,
+        limit_price=normalized_limit_price,
         volume=volume,
         intent=accepted_intent,
         batch_id=batch_id,
@@ -1922,56 +2632,46 @@ class TradeCommandService:
     client_order_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())
     expires_at = now + timedelta(minutes=2)
-    payload: dict[str, Any] = {
-      "command_kind": "PLACE_ORDER",
-      "client_order_id": client_order_id,
-      "account_id": account_id,
-      "execution_mode": normalized_mode,
-      "instance_id": strategy_name or "manual",
-      "instrument_code": instrument_code,
-      "side": side,
-      "order_type": order_type,
-      "limit_price": str(limit_price),
-      "volume": volume,
-      "strategy_name": strategy_name,
-      "bucket": bucket or "manual",
-      "order_remark": order_remark,
-      "trace_id": trace_id or message_id,
-      "risk_decision_id": risk_decision_id or trace_id or message_id,
-      "reason_tags": sorted(
-        {
-          str(value).strip()
-          for value in (
-            list(reason_tags) if reason_tags is not None else ["queued-command"]
-          )
-          if str(value).strip()
-        }
-      ),
-      "substitution_plan": substitution_plan,
-      "strategy_run_id": strategy_run_id,
-      "strategy_order_id": strategy_order_id,
-      "intent_id": intent_id,
-      "batch_id": batch_id,
-      "t_trade_role": normalized_role,
-      "policy_version": max(0, int(policy_version or 0)),
-      "request_metadata": immutable_metadata,
-      "expires_at": expires_at.isoformat() + "Z",
-    }
+    wire_expires_at = expires_at.replace(tzinfo=timezone.utc)
+    payload = TradeCommandPayload(
+      command_kind="PLACE_ORDER",
+      client_order_id=client_order_id,
+      account_id=account_id,
+      execution_mode=normalized_mode,
+      instrument_code=normalized_instrument,
+      side=normalized_side,
+      price_type=normalized_order_type,
+      limit_price=str(normalized_limit_price),
+      volume=volume,
+      expires_at=wire_expires_at,
+    ).model_dump(mode="json")
+    projected_strategy_run_id = (
+      owner_id if owner_type == ExecutionOwnerType.STRATEGY_RUN.value else None
+    )
+    # Every PLACE gets one durable correlation.  Non-strategy commands keep
+    # strategy identities nullable; the explicit owner is their durable
+    # identity and no synthetic strategy projection is allowed.
+    projected_strategy_order_id = (
+      strategy_order_id if owner_type == ExecutionOwnerType.STRATEGY_RUN.value else None
+    )
+    projected_intent_id = str(intent_id or "").strip() or None
     self.db.add(
       PendingTradeOrder(
         client_order_id=client_order_id,
         user_id=user_id,
         account_id=account_id,
-        instrument_code=instrument_code,
-        side=side,
-        order_type=order_type,
-        limit_price=str(limit_price),
+        owner_type=owner_type,
+        owner_id=owner_id,
+        environment=canonical_environment_value,
+        instrument_code=normalized_instrument,
+        side=normalized_side,
+        order_type=normalized_order_type,
+        limit_price=str(normalized_limit_price),
         volume=volume,
         status="QUEUED",
-        execution_mode=normalized_mode,
-        strategy_run_id=strategy_run_id or None,
-        strategy_order_id=strategy_order_id or None,
-        intent_id=intent_id or None,
+        strategy_run_id=projected_strategy_run_id,
+        strategy_order_id=projected_strategy_order_id,
+        intent_id=projected_intent_id,
         batch_id=batch_id or None,
         bucket=bucket or "manual",
         t_trade_role=normalized_role or None,
@@ -1981,74 +2681,81 @@ class TradeCommandService:
         request_metadata=immutable_metadata,
       )
     )
-    if strategy_run_id and strategy_order_id and intent_id:
-      self.db.add(
-        StrategyOrderCorrelation(
-          id=str(uuid.uuid4()),
-          client_order_id=client_order_id,
-          account_id=account_id,
-          strategy_run_id=strategy_run_id,
-          strategy_order_id=strategy_order_id,
-          intent_id=intent_id,
-          batch_id=batch_id or None,
-          bucket=bucket or "manual",
-          t_trade_role=normalized_role or None,
-          execution_mode=normalized_mode,
-          risk_decision_id=risk_decision_id or None,
-          trace_id=trace_id or message_id,
-          substitution_plan=substitution_plan,
-          request_metadata=immutable_metadata,
-        )
+    self.db.add(
+      OrderCorrelation(
+        id=str(uuid.uuid4()),
+        client_order_id=client_order_id,
+        account_id=account_id,
+        owner_type=owner_type,
+        owner_id=owner_id,
+        environment=canonical_environment_value,
+        strategy_run_id=projected_strategy_run_id,
+        strategy_order_id=projected_strategy_order_id,
+        intent_id=projected_intent_id,
+        batch_id=batch_id or None,
+        bucket=bucket or "manual",
+        t_trade_role=normalized_role or None,
+        risk_decision_id=risk_decision_id or None,
+        trace_id=trace_id or message_id,
+        substitution_plan=substitution_plan,
+        request_metadata=immutable_metadata,
       )
-      if batch_id:
-        batch = await self.db.get(TTradeBatch, batch_id)
-        if batch is None:
+    )
+    if batch_id:
+      batch = await self.db.get(TTradeBatch, batch_id)
+      if batch is None:
+        cost_snapshot = extract_t_trade_cost_snapshot(immutable_metadata)
+        batch = TTradeBatch(
+          batch_id=batch_id,
+          account_id=account_id,
+          instrument_code=normalized_instrument,
+          strategy_run_id=owner_id,
+          source_execution_owner_type=owner_type,
+          source_execution_owner_id=owner_id,
+          source_execution_environment=canonical_environment_value,
+          target_volume=volume,
+          environment=canonical_environment_value,
+          metrics_origin="RULE_ESTIMATE",
+          commission_rate=(
+            cost_snapshot.commission_rate if cost_snapshot is not None else None
+          ),
+          minimum_commission=(
+            cost_snapshot.minimum_commission if cost_snapshot is not None else None
+          ),
+          stamp_tax_rate=(
+            cost_snapshot.stamp_tax_rate if cost_snapshot is not None else None
+          ),
+          transfer_fee_rate=(
+            cost_snapshot.transfer_fee_rate if cost_snapshot is not None else None
+          ),
+          policy_version=max(0, int(policy_version or 0)),
+        )
+        self.db.add(batch)
+      if normalized_role == "ENTRY":
+        # Entry creation freezes the execution and cost model.  Exit orders
+        # must not rewrite a batch using later global settings.
+        if str(batch.environment or "").strip().upper() != canonical_environment_value:
+          raise AgentUnavailableError(
+            "TRADE_INTENT_SCOPE_MISMATCH:TTrade 批次执行环境不可变"
+          )
+        batch.metrics_origin = batch.metrics_origin or "RULE_ESTIMATE"
+        if batch.commission_rate is None:
           cost_snapshot = extract_t_trade_cost_snapshot(immutable_metadata)
-          batch = TTradeBatch(
-            batch_id=batch_id,
-            account_id=account_id,
-            instrument_code=instrument_code,
-            strategy_run_id=strategy_run_id,
-            target_volume=volume,
-            execution_mode=normalized_mode,
-            metrics_origin="RULE_ESTIMATE",
-            commission_rate=(
-              cost_snapshot.commission_rate if cost_snapshot is not None else None
-            ),
-            minimum_commission=(
-              cost_snapshot.minimum_commission if cost_snapshot is not None else None
-            ),
-            stamp_tax_rate=(
-              cost_snapshot.stamp_tax_rate if cost_snapshot is not None else None
-            ),
-            transfer_fee_rate=(
-              cost_snapshot.transfer_fee_rate if cost_snapshot is not None else None
-            ),
-            policy_version=max(0, int(policy_version or 0)),
-          )
-          self.db.add(batch)
-        if normalized_role == "ENTRY":
-          # Entry creation freezes the execution and cost model.  Exit orders
-          # must not rewrite a batch using later global settings.
-          batch.execution_mode = batch.execution_mode or normalized_mode
-          batch.metrics_origin = batch.metrics_origin or "RULE_ESTIMATE"
-          if batch.commission_rate is None:
-            cost_snapshot = extract_t_trade_cost_snapshot(immutable_metadata)
-            if cost_snapshot is not None:
-              batch.commission_rate = cost_snapshot.commission_rate
-              batch.minimum_commission = cost_snapshot.minimum_commission
-              batch.stamp_tax_rate = cost_snapshot.stamp_tax_rate
-              batch.transfer_fee_rate = cost_snapshot.transfer_fee_rate
-          batch.entry_intent_id = intent_id
-          batch.entry_client_order_id = client_order_id
-          batch.status = "ENTRY_QUEUED"
-        elif normalized_role == "EXIT":
-          batch.exit_intent_id = intent_id
-          batch.exit_client_order_id = client_order_id
-          batch.exit_reason = batch.exit_reason or (
-            str(immutable_metadata.get("exit_reason") or "").strip() or None
-          )
-          batch.status = "EXIT_TRIGGERED"
+          if cost_snapshot is not None:
+            batch.commission_rate = cost_snapshot.commission_rate
+            batch.minimum_commission = cost_snapshot.minimum_commission
+            batch.stamp_tax_rate = cost_snapshot.stamp_tax_rate
+            batch.transfer_fee_rate = cost_snapshot.transfer_fee_rate
+        batch.entry_intent_id = intent_id or None
+        batch.entry_client_order_id = client_order_id
+        batch.status = "ENTRY_QUEUED"
+      elif normalized_role == "EXIT":
+        batch.exit_intent_id = intent_id or None
+        batch.exit_client_order_id = client_order_id
+        batch.exit_reason = batch.exit_reason or (
+          str(immutable_metadata.get("exit_reason") or "").strip() or None
+        )
+        batch.status = "EXIT_TRIGGERED"
     self.db.add(
       TradeCommandOutbox(
         message_id=message_id,
@@ -2056,6 +2763,9 @@ class TradeCommandService:
         idempotency_key=business_idempotency_key,
         device_id=device.id,
         account_id=account_id,
+        owner_type=owner_type,
+        owner_id=owner_id,
+        environment=canonical_environment_value,
         payload=payload,
         delivery_status="QUEUED",
         expires_at=expires_at,
@@ -2076,11 +2786,37 @@ class TradeCommandService:
         await self.db.execute(
           select(TradeCommandOutbox).where(
             TradeCommandOutbox.idempotency_key == business_idempotency_key
-          )
+          ).with_for_update()
         )
       ).scalar_one_or_none()
       if existing is None:
         raise
+      if not await self._idempotent_order_chain_matches_request(
+        existing,
+        user_id=user_id,
+        account_id=account_id,
+        owner_type=owner_type,
+        owner_id=owner_id,
+        environment=canonical_environment_value,
+        instrument_code=normalized_instrument,
+        side=normalized_side,
+        order_type=normalized_order_type,
+        limit_price=normalized_limit_price,
+        volume=volume,
+        strategy_run_id=strategy_run_id,
+        strategy_order_id=strategy_order_id,
+        intent_id=intent_id,
+        batch_id=batch_id,
+        bucket=bucket,
+        t_trade_role=normalized_role,
+        risk_decision_id=risk_decision_id,
+        trace_id=trace_id,
+        substitution_plan=substitution_plan,
+        request_metadata=immutable_metadata,
+      ):
+        raise AgentUnavailableError(
+          "IDEMPOTENCY_KEY_CONFLICT:同一幂等键对应不同交易请求"
+        )
       return QueuedTradeCommand(
         existing.client_order_id,
         existing.message_id,
@@ -2097,11 +2833,10 @@ class TradeCommandService:
     order_type: str,
     limit_price: Decimal,
     volume: int,
-    strategy_name: str = "",
-    order_remark: str = "",
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
+    idempotency_key: str,
     trace_id: str = "",
-    idempotency_key: str = "",
-    execution_mode: str = "paper",
     strategy_run_id: str = "",
     strategy_order_id: str = "",
     intent_id: str = "",
@@ -2115,8 +2850,30 @@ class TradeCommandService:
     require_risk_reducing_live_authorization: bool = False,
     authorization_user_id: str = "",
   ) -> QueuedTradeCommand:
-    normalized_execution_mode = str(execution_mode or "paper").lower()
-    metadata = dict(request_metadata or {})
+    idempotency_key, trace_id, raw_idempotency_key = require_stable_command_key(
+      idempotency_key,
+      trace_id,
+    )
+    metadata = self._sanitize_request_metadata(request_metadata)
+    (
+      canonical_ref,
+      canonical_environment,
+      owner_type,
+      owner_id,
+      _canonical_environment_value,
+    ) = self._require_execution_identity(execution_ref, environment)
+    normalized_execution_mode = self._wire_execution_mode(canonical_environment)
+    strategy_run_id, strategy_order_id = self._normalize_strategy_identity(
+      owner_type,
+      owner_id,
+      strategy_run_id,
+      strategy_order_id,
+    )
+    normalized_side = str(side or "").strip().upper()
+    normalized_instrument = str(instrument_code or "").strip().upper()
+    normalized_order_type = self._wire_price_type(order_type)
+    if batch_id and owner_type != ExecutionOwnerType.STRATEGY_RUN.value:
+      raise AgentUnavailableError("TRADE_COMMAND_OWNER_CONFLICT:TTrade 批次必须归属 STRATEGY_RUN")
     locked_live_control = (
       await self._require_live_authorization(
         str(account_id),
@@ -2128,7 +2885,6 @@ class TradeCommandService:
     )
     # Recover an accepted command before checking a grant or capacity again.
     # Its own reservation (or a subsequently consumed grant) is not a new buy.
-    raw_idempotency_key = idempotency_key.strip() or trace_id.strip()
     if intent_id and raw_idempotency_key:
       prior = (
         await self.db.execute(
@@ -2141,6 +2897,7 @@ class TradeCommandService:
             PendingTradeOrder.account_id == account_id,
             PendingTradeOrder.intent_id == intent_id,
           )
+          .with_for_update()
         )
       ).one_or_none()
       if prior is not None:
@@ -2149,22 +2906,34 @@ class TradeCommandService:
           user_id=pending.user_id,
           account_id=account_id,
           idempotency_key=raw_idempotency_key,
+          execution_ref=canonical_ref,
+          environment=canonical_environment,
         ):
           raise AgentUnavailableError(
             "TRADE_INTENT_ALREADY_ROUTED:意图已有委托，请使用原幂等键重试"
           )
-        if (
-          pending.execution_mode != normalized_execution_mode
-          or pending.instrument_code != instrument_code
-          or str(pending.side).upper() != side.upper()
-          or pending.order_type != order_type
-          or Decimal(str(pending.limit_price)) != Decimal(str(limit_price))
-          or pending.volume != volume
-          or str(pending.strategy_run_id or "") != strategy_run_id
-          or str(pending.strategy_order_id or "") != strategy_order_id
-          or str(pending.batch_id or "") != batch_id
-          or str(pending.bucket or "manual") != (bucket or "manual")
-          or str(pending.t_trade_role or "").upper() != t_trade_role.upper()
+        if not await self._idempotent_order_chain_matches_request(
+          outbox,
+          user_id=str(pending.user_id or ""),
+          account_id=account_id,
+          owner_type=owner_type,
+          owner_id=owner_id,
+          environment=canonical_environment.value,
+          instrument_code=normalized_instrument,
+          side=normalized_side,
+          order_type=normalized_order_type,
+          limit_price=Decimal(str(limit_price)),
+          volume=volume,
+          strategy_run_id=strategy_run_id,
+          strategy_order_id=strategy_order_id,
+          intent_id=intent_id,
+          batch_id=batch_id,
+          bucket=bucket,
+          t_trade_role=t_trade_role,
+          risk_decision_id=risk_decision_id,
+          trace_id=trace_id,
+          substitution_plan=substitution_plan,
+          request_metadata=metadata,
         ):
           raise AgentUnavailableError(
             "TRADE_COMMAND_RETRY_MISMATCH:重试必须保留已受理委托的数量和归属"
@@ -2189,12 +2958,7 @@ class TradeCommandService:
       if live_sell_intent is not None
       else {}
     )
-    caller_claims_exit_plan = bool(
-      str(metadata.get("owner_type") or "").upper() == "EXIT_PLAN"
-      or str(metadata.get("exit_plan_id") or "").strip()
-      or bool(metadata.get("exact_auto_exit_authorized"))
-      or require_risk_reducing_live_authorization
-    )
+    caller_claims_exit_plan = owner_type == ExecutionOwnerType.EXIT_PLAN.value
     persisted_exit_plan_sell = bool(
       live_sell_intent is not None
       and str(live_sell_intent.owner_type or "").upper() == "EXIT_PLAN"
@@ -2214,11 +2978,12 @@ class TradeCommandService:
         live_sell_metadata,
       ) = await self._lock_and_validate_live_exit_plan_sell(
         locked_intent=live_sell_intent,
-        plan_id=str(metadata.get("exit_plan_id") or ""),
+        plan_id=owner_id,
         intent_id=str(intent_id or ""),
-        strategy_run_id=str(strategy_run_id or ""),
+        execution_ref=canonical_ref,
+        environment=canonical_environment,
         account_id=str(account_id),
-        instrument_code=str(instrument_code),
+        instrument_code=normalized_instrument,
         volume=int(volume),
         request_metadata=metadata,
       )
@@ -2226,7 +2991,7 @@ class TradeCommandService:
       persisted_exit_plan_sell and live_sell_metadata.get("exact_auto_exit_authorized")
     )
     if requires_exact_exit_authorization:
-      authorization_plan_id = str(metadata.get("exit_plan_id") or "").strip()
+      authorization_plan_id = owner_id
       authorization_fingerprint = str(
         metadata.get("auto_exit_authorization_fingerprint") or ""
       ).strip()
@@ -2234,7 +2999,11 @@ class TradeCommandService:
         raise AgentUnavailableError("精确自动退出门禁只能用于 LIVE 风险降低卖单")
       if not str(authorization_user_id or "").strip():
         raise AgentUnavailableError("自动退出授权缺少确认用户绑定")
-      if not authorization_plan_id or not authorization_fingerprint:
+      if (
+        not authorization_plan_id
+        or authorization_plan_id != str(locked_exit_plan.plan_id if locked_exit_plan else "")
+        or not authorization_fingerprint
+      ):
         raise AgentUnavailableError("自动退出命令缺少精确计划授权绑定")
       plan = locked_exit_plan
       if (
@@ -2285,14 +3054,14 @@ class TradeCommandService:
         heartbeat is None
         or str(heartbeat.status or "").upper() != "READY"
         or "live" not in capabilities
-        or str(details.get("protocolVersion") or "") != "1.1"
+      or str(details.get("protocolVersion") or "") != PROTOCOL_VERSION
       ):
         raise AgentUnavailableError(
-          "自动退出要求唯一 READY、live、协议 1.1 的 QMT Agent"
+          f"自动退出要求唯一 READY、live、协议 {PROTOCOL_VERSION} 的 QMT Agent"
         )
     else:
       if persisted_exit_plan_sell:
-        manual_plan_id = str(live_sell_metadata.get("exit_plan_id") or "").strip()
+        manual_plan_id = owner_id
         try:
           await validate_consumed_exit_plan_sell_challenge(
             self.db,
@@ -2325,15 +3094,19 @@ class TradeCommandService:
       is_managed_auto_entry = bool(
         persisted_intent is not None
         and str(persisted_intent.direction or "").upper() == "BUY"
+        and str(persisted_intent.owner_type or "").upper()
+        == ExecutionOwnerType.STRATEGY_RUN.value
+        and str(persisted_intent.owner_id or "") == str(strategy_run_id or "")
         and str(persisted_metadata.get("execution_mode") or "").upper() == "AUTO"
-        and str(persisted_metadata.get("entry_plan_id") or "")
       )
       is_managed_manual_entry = bool(
         persisted_intent is not None
         and str(persisted_intent.direction or "").upper() == "BUY"
+        and str(persisted_intent.owner_type or "").upper()
+        == ExecutionOwnerType.STRATEGY_RUN.value
+        and str(persisted_intent.owner_id or "") == str(strategy_run_id or "")
         and str(persisted_metadata.get("execution_mode") or "").upper()
         == "MANUAL_CONFIRM"
-        and str(persisted_metadata.get("entry_plan_id") or "")
       )
       if is_managed_auto_entry:
         device = await self._exact_auto_entry_device(
@@ -2365,16 +3138,15 @@ class TradeCommandService:
     return await self.enqueue_order(
       user_id=device.user_id,
       account_id=account_id,
-      instrument_code=instrument_code,
-      side=side,
-      order_type=order_type,
+      instrument_code=normalized_instrument,
+      side=normalized_side,
+      order_type=normalized_order_type,
       limit_price=limit_price,
       volume=volume,
-      strategy_name=strategy_name,
-      order_remark=order_remark,
+      execution_ref=canonical_ref,
+      environment=canonical_environment,
       trace_id=trace_id,
       idempotency_key=idempotency_key,
-      execution_mode=normalized_execution_mode,
       strategy_run_id=strategy_run_id,
       strategy_order_id=strategy_order_id,
       intent_id=intent_id,
@@ -2384,7 +3156,7 @@ class TradeCommandService:
       risk_decision_id=risk_decision_id,
       substitution_plan=substitution_plan,
       policy_version=policy_version,
-      request_metadata=request_metadata,
+      request_metadata=metadata,
       _locked_live_control=locked_live_control,
     )
 
@@ -2394,13 +3166,91 @@ class TradeCommandService:
     user_id: str,
     account_id: str,
     broker_order_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     idempotency_key: str = "",
-    execution_mode: str = "paper",
     commit_transaction: bool = True,
   ) -> QueuedTradeCommand:
+    canonical_ref, canonical_environment, owner_type, owner_id, environment_value = (
+      self._require_execution_identity(execution_ref, environment)
+    )
+    normalized_broker_order_id = str(broker_order_id or "").strip()
+    if not normalized_broker_order_id:
+      raise AgentUnavailableError("TRADE_COMMAND_TARGET_MISSING:撤单目标不能为空")
+    pending_candidates = list(
+      (
+        await self.db.execute(
+          select(PendingTradeOrder)
+          .where(
+            PendingTradeOrder.account_id == account_id,
+            PendingTradeOrder.broker_order_id == normalized_broker_order_id,
+          )
+          .with_for_update()
+        )
+      )
+      .scalars()
+      .all()
+    )
+    if len(pending_candidates) != 1:
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_TARGET_UNPROVEN:撤单目标必须唯一命中持久化委托"
+      )
+    target_pending = pending_candidates[0]
+    pending_owner_type = str(target_pending.owner_type or "").strip().upper()
+    pending_owner_id = str(target_pending.owner_id or "").strip()
+    pending_environment = str(target_pending.environment or "").strip().upper()
+    pending_strategy_run_id = str(target_pending.strategy_run_id or "").strip()
+    if pending_strategy_run_id and (
+      pending_owner_type != ExecutionOwnerType.STRATEGY_RUN.value
+      or pending_strategy_run_id != pending_owner_id
+    ):
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_TARGET_UNPROVEN:撤单目标 strategy_run 见证不一致"
+      )
+    if (
+      str(target_pending.user_id or "") != str(user_id or "")
+      or pending_owner_type != owner_type
+      or pending_owner_id != owner_id
+      or pending_environment != environment_value
+    ):
+      raise AgentUnavailableError("TRADE_COMMAND_OWNER_CONFLICT:撤单目标归属不一致")
+    correlations = list(
+      (
+        await self.db.execute(
+          select(OrderCorrelation)
+          .where(
+            OrderCorrelation.account_id == account_id,
+            OrderCorrelation.broker_order_id == normalized_broker_order_id,
+          )
+          .with_for_update()
+        )
+      )
+      .scalars()
+      .all()
+    )
+    if len(correlations) != 1:
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_TARGET_UNPROVEN:撤单目标 correlation 不唯一"
+      )
+    correlation = correlations[0]
+    if (
+      str(correlation.client_order_id or "")
+      != str(target_pending.client_order_id or "")
+      or str(correlation.account_id or "") != str(target_pending.account_id or "")
+      or str(correlation.broker_order_id or "") != normalized_broker_order_id
+      or str(correlation.owner_type or "").strip().upper() != pending_owner_type
+      or str(correlation.owner_id or "").strip() != pending_owner_id
+      or str(correlation.environment or "").strip().upper()
+      != pending_environment
+    ):
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_TARGET_UNPROVEN:撤单目标 correlation 归属不一致"
+      )
+    normalized_execution_mode = self._wire_execution_mode(canonical_environment)
     cancel_business_identity = hashlib.sha256(
       (
-        f"cancel:{user_id}:{account_id}:{idempotency_key.strip() or broker_order_id}"
+        f"cancel:{user_id}:{account_id}:{environment_value}:{owner_type}:{owner_id}:"
+        f"{idempotency_key.strip() or normalized_broker_order_id}"
       ).encode("utf-8")
     ).hexdigest()
     cancel_retry_prefix = f"{cancel_business_identity}:attempt:"
@@ -2431,6 +3281,25 @@ class TradeCommandService:
       .scalars()
       .all()
     )
+    for attempt in attempts:
+      if (
+        str(getattr(attempt, "owner_type", "") or "") != owner_type
+        or str(getattr(attempt, "owner_id", "") or "") != owner_id
+        or str(getattr(attempt, "environment", "") or "").upper()
+        != environment_value
+      ):
+        raise AgentUnavailableError("TRADE_COMMAND_OWNER_CONFLICT:取消重试归属不一致")
+      if not self._cancel_attempt_matches_request(
+        attempt,
+        account_id=account_id,
+        owner_type=owner_type,
+        owner_id=owner_id,
+        environment=environment_value,
+        broker_order_id=normalized_broker_order_id,
+      ):
+        raise AgentUnavailableError(
+          "IDEMPOTENCY_KEY_CONFLICT:同一取消幂等键对应不同目标"
+        )
     now = utcnow()
     active_attempt = next(
       (
@@ -2468,13 +3337,12 @@ class TradeCommandService:
     )
     if safely_reusable is not None:
       expires_at = now + timedelta(minutes=2)
-      reusable_payload = dict(safely_reusable.payload or {})
       safely_reusable.payload = CancelCommandPayload(
+        command_kind="CANCEL_ORDER",
         client_order_id=str(safely_reusable.client_order_id or ""),
         account_id=str(safely_reusable.account_id or ""),
-        execution_mode=str(reusable_payload.get("execution_mode") or "paper"),
-        broker_order_id=str(reusable_payload.get("broker_order_id") or ""),
-        trace_id=str(reusable_payload.get("trace_id") or safely_reusable.message_id),
+        execution_mode=normalized_execution_mode,
+        broker_order_id=normalized_broker_order_id,
         expires_at=expires_at.replace(tzinfo=timezone.utc),
       ).model_dump(mode="json")
       safely_reusable.delivery_status = "QUEUED"
@@ -2510,18 +3378,18 @@ class TradeCommandService:
     device = await self._device_for(
       user_id=user_id,
       account_id=account_id,
-      execution_mode=execution_mode,
+      execution_mode=normalized_execution_mode,
       allow_degraded_cancel=True,
     )
     client_order_id = f"cancel:{uuid.uuid4()}"
     message_id = str(uuid.uuid4())
     expires_at = now + timedelta(minutes=2)
     payload = CancelCommandPayload(
+      command_kind="CANCEL_ORDER",
       client_order_id=client_order_id,
       account_id=account_id,
-      execution_mode=execution_mode,
-      broker_order_id=str(broker_order_id),
-      trace_id=message_id,
+      execution_mode=normalized_execution_mode,
+      broker_order_id=normalized_broker_order_id,
       expires_at=expires_at.replace(tzinfo=timezone.utc),
     ).model_dump(mode="json")
     command = TradeCommandOutbox(
@@ -2530,6 +3398,9 @@ class TradeCommandService:
       idempotency_key=business_idempotency_key,
       device_id=device.id,
       account_id=account_id,
+      owner_type=owner_type,
+      owner_id=owner_id,
+      environment=environment_value,
       payload=payload,
       delivery_status="QUEUED",
       expires_at=expires_at,
@@ -2544,12 +3415,26 @@ class TradeCommandService:
         existing_attempts = list(
           (
             await self.db.execute(
-              select(TradeCommandOutbox).where(cancel_attempt_selector)
+              select(TradeCommandOutbox)
+              .where(cancel_attempt_selector)
+              .with_for_update()
             )
           )
           .scalars()
           .all()
         )
+        for attempt in existing_attempts:
+          if not self._cancel_attempt_matches_request(
+            attempt,
+            account_id=account_id,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            environment=environment_value,
+            broker_order_id=normalized_broker_order_id,
+          ):
+            raise AgentUnavailableError(
+              "IDEMPOTENCY_KEY_CONFLICT:同一取消幂等键对应不同目标"
+            )
         existing = next(
           (
             attempt
@@ -2579,12 +3464,26 @@ class TradeCommandService:
         existing_attempts = list(
           (
             await self.db.execute(
-              select(TradeCommandOutbox).where(cancel_attempt_selector)
+              select(TradeCommandOutbox)
+              .where(cancel_attempt_selector)
+              .with_for_update()
             )
           )
           .scalars()
           .all()
         )
+        for attempt in existing_attempts:
+          if not self._cancel_attempt_matches_request(
+            attempt,
+            account_id=account_id,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            environment=environment_value,
+            broker_order_id=normalized_broker_order_id,
+          ):
+            raise AgentUnavailableError(
+              "IDEMPOTENCY_KEY_CONFLICT:同一取消幂等键对应不同目标"
+            )
         existing = next(
           (
             attempt
@@ -2700,7 +3599,11 @@ class TradeCommandService:
           account_id=str(order.account_id),
           broker_order_id=broker_order_id,
           idempotency_key=(f"entry-plan-cancel:{client_order_id}:{broker_order_id}"),
-          execution_mode=str(order.execution_mode or "paper").lower(),
+          execution_ref=ExecutionOwnerRef(
+            str(order.owner_type or ""),
+            str(order.owner_id or ""),
+          ),
+          environment=ExecutionEnvironment(str(order.environment or "").upper()),
           commit_transaction=False,
         )
       else:
@@ -2724,17 +3627,22 @@ class TradeCommandService:
             )
             if intent is not None:
               result_request_metadata = intent_metadata
-          pending_metadata = dict(order.request_metadata or {})
           has_managed_entry_marker = bool(
-            str(pending_metadata.get("entry_plan_id") or "").strip()
-            or str(intent_metadata.get("entry_plan_id") or "").strip()
+            str(order.strategy_run_id or "").strip()
+            or (
+              intent is not None
+              and str(intent.owner_type or "").upper()
+              == ExecutionOwnerType.STRATEGY_RUN.value
+            )
           )
           is_bound_managed_entry = bool(
             intent is not None
             and str(intent.strategy_run_id or "") == strategy_run_id
+            and str(intent.owner_type or "").upper()
+            == ExecutionOwnerType.STRATEGY_RUN.value
+            and str(intent.owner_id or "") == strategy_run_id
             and str(intent.direction or "").upper() == "BUY"
-            and str(intent_metadata.get("entry_plan_id") or "").strip()
-            == str(pending_metadata.get("entry_plan_id") or "").strip()
+            and str(order.strategy_run_id or "") == strategy_run_id
           )
           try:
             executed_volume = int(intent.executed_volume or 0) if intent else 0
@@ -2807,14 +3715,20 @@ class TradeCommandService:
     *,
     account_id: str,
     broker_order_id: str,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     idempotency_key: str = "",
-    execution_mode: str = "paper",
   ) -> QueuedTradeCommand:
+    _canonical_ref, canonical_environment, _owner_type, _owner_id, _ = (
+      self._require_execution_identity(execution_ref, environment)
+    )
+    execution_mode = self._wire_execution_mode(canonical_environment)
     device = await self._device_for_account(account_id, execution_mode)
     return await self.enqueue_cancel(
       user_id=device.user_id,
       account_id=account_id,
       broker_order_id=broker_order_id,
+      execution_ref=execution_ref,
+      environment=canonical_environment,
       idempotency_key=idempotency_key,
-      execution_mode=execution_mode,
     )

@@ -7,6 +7,8 @@ import random
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+
 from quantx_domain import clock as time_utils
 
 from .backtest import BacktestBroker
@@ -240,6 +242,8 @@ class SimulatorBroker(BacktestBroker):
       filled_volume,
       amount,
       commission,
+      execution_ref=request.execution_ref,
+      environment=request.environment,
       metadata=dict(request.metadata or {}),
     )
     self.trades.append(trade)
@@ -291,6 +295,9 @@ class SimulatorBroker(BacktestBroker):
     volume: int,
     amount: float,
     commission: float,
+    *,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
     metadata: Optional[Dict[str, Any]] = None,
   ) -> Any:
     """创建成交记录"""
@@ -307,6 +314,8 @@ class SimulatorBroker(BacktestBroker):
       commission=commission,
       trade_time=time_utils.now(),
       metadata=dict(metadata or {}),
+      execution_ref=execution_ref,
+      environment=environment,
     )
 
   async def update_realtime_price(

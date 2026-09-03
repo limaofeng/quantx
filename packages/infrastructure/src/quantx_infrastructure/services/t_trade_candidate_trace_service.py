@@ -11,8 +11,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.models.agent_runtime import (
+  OrderCorrelation,
   PendingTradeOrder,
-  StrategyOrderCorrelation,
   TTradeBatch,
 )
 from quantx_infrastructure.models.auto_exit_plan import (
@@ -580,30 +580,30 @@ class TTradeCandidateTraceService:
     intent_ids: set[str],
     batch_ids: set[str],
     client_order_ids: set[str],
-  ) -> list[StrategyOrderCorrelation]:
+  ) -> list[OrderCorrelation]:
     links = []
     if intent_ids:
-      links.append(StrategyOrderCorrelation.intent_id.in_(tuple(intent_ids)))
+      links.append(OrderCorrelation.intent_id.in_(tuple(intent_ids)))
     if batch_ids:
-      links.append(StrategyOrderCorrelation.batch_id.in_(tuple(batch_ids)))
+      links.append(OrderCorrelation.batch_id.in_(tuple(batch_ids)))
     if client_order_ids:
       links.append(
-        StrategyOrderCorrelation.client_order_id.in_(tuple(client_order_ids))
+        OrderCorrelation.client_order_id.in_(tuple(client_order_ids))
       )
     if not links:
       return []
     rows = list(
       (
         await self.db.execute(
-          select(StrategyOrderCorrelation)
+          select(OrderCorrelation)
           .where(
-            StrategyOrderCorrelation.account_id == account_id,
-            StrategyOrderCorrelation.strategy_run_id == strategy_run_id,
+            OrderCorrelation.account_id == account_id,
+            OrderCorrelation.strategy_run_id == strategy_run_id,
             or_(*links),
           )
           .order_by(
-            StrategyOrderCorrelation.created_at,
-            StrategyOrderCorrelation.id,
+            OrderCorrelation.created_at,
+            OrderCorrelation.id,
           )
           .limit(self._stage_row_limit + 1)
         )
@@ -741,7 +741,7 @@ def _events(
   intents: Sequence[TradeIntentRecord],
   batches: Sequence[TTradeBatch],
   pending_orders: Sequence[PendingTradeOrder],
-  correlations: Sequence[StrategyOrderCorrelation],
+  correlations: Sequence[OrderCorrelation],
   orders: Sequence[Order],
   trades: Sequence[Trade],
   plans: Sequence[AutoExitPlanRecord],
@@ -876,7 +876,7 @@ def _events(
             "order_type": row.order_type,
             "limit_price": row.limit_price,
             "volume": row.volume,
-            "execution_mode": row.execution_mode,
+            "environment": str(row.environment or "").upper(),
             "bucket": row.bucket,
             "t_trade_role": row.t_trade_role,
             "status_reason": row.status_reason,
@@ -906,7 +906,7 @@ def _events(
           {
             "bucket": row.bucket,
             "t_trade_role": row.t_trade_role,
-            "execution_mode": row.execution_mode,
+            "environment": str(row.environment or "").upper(),
           }
         ),
       )
@@ -977,7 +977,7 @@ def _events(
             "phase": row.phase,
             "data_quality": row.data_quality,
             "enabled": row.enabled,
-            "execution_mode": row.execution_mode,
+            "environment": str(row.environment or "").upper(),
             "protected_volume": row.protected_volume,
             "exited_volume": row.exited_volume,
             "remaining_volume": row.remaining_volume,
@@ -1017,7 +1017,7 @@ def _missing_reasons(
   relevant_intents: Sequence[TradeIntentRecord],
   batches: Sequence[TTradeBatch],
   pending_orders: Sequence[PendingTradeOrder],
-  correlations: Sequence[StrategyOrderCorrelation],
+  correlations: Sequence[OrderCorrelation],
   orders: Sequence[Order],
   trades: Sequence[Trade],
   plans: Sequence[AutoExitPlanRecord],

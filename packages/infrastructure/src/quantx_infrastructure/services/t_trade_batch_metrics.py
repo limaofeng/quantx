@@ -151,7 +151,7 @@ def calculate_t_trade_batch_metrics(
 
   result = incomplete_t_trade_batch_metrics(origin=_metric_origin(batch))
   costs = t_trade_cost_snapshot_from_batch(batch)
-  execution_mode = str(getattr(batch, "execution_mode", None) or "").lower()
+  execution_mode = str(getattr(batch, "environment", None) or "").lower()
   entry_filled_at = getattr(batch, "entry_filled_at", None)
   if costs is None or execution_mode not in {"paper", "live"}:
     return result

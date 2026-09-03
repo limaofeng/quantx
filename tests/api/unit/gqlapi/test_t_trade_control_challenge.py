@@ -13,6 +13,7 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeControlAction,
   TTradeRolloutTarget,
 )
+from quantx_contracts import PROTOCOL_VERSION
 from quantx_infrastructure.models.agent_runtime import TTradeRolloutEvent
 
 
@@ -53,7 +54,7 @@ def _readiness(*, failed: set[str] | None = None):
     "snapshot_hash": "a" * 64,
     "ready_live_agent_count": 1,
     "agent_mode": "live",
-    "protocol_version": "1.1",
+    "protocol_version": PROTOCOL_VERSION,
     "reconcile_status": "READY",
     "kill_switch": False,
     "controlled_window_active": True,

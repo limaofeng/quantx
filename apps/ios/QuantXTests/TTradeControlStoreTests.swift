@@ -291,7 +291,7 @@ final class TTradeControlStoreTests: XCTestCase {
     stage: String = "SHADOW",
     status: String = "READY",
     agentStatus: String = "READY",
-    protocolVersion: String = "1.1",
+    protocolVersion: String = "1.2",
     ready: Bool = true,
     checks: [TTradeSafetyCheck] = [
       TTradeSafetyCheck(

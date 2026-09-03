@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import List, Optional
 
 import strawberry
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 
 from quantx_api.monitoring.metrics import record_t_trade_client_event
 
@@ -75,6 +76,31 @@ from ..types.trading_safety_types import (
   AccountSafetyHistory,
   AccountSafetyHistoryRange,
 )
+
+
+async def _t_trade_execution_binding(
+  run_id: str,
+) -> tuple[ExecutionOwnerRef, ExecutionEnvironment]:
+  """Map the existing V3 T session to the only P1 owner it may use.
+
+  P1 does not authorize the future T_ASSISTANT_EXECUTION owner.  The current
+  V3 session is therefore explicitly represented as STRATEGY_RUN/run_id, with
+  its persisted session mode providing the environment.
+  """
+
+  normalized_run_id = str(run_id or "").strip()
+  if not normalized_run_id:
+    raise ValueError("做 T 会话缺少明确的 StrategyRun")
+  session = await TTradeResolver.get_session(normalized_run_id)
+  if session is None:
+    raise ValueError("做 T 会话不存在")
+  try:
+    environment = ExecutionEnvironment(
+      str(getattr(session, "mode", "") or "").strip().upper()
+    )
+  except (TypeError, ValueError) as exc:
+    raise ValueError("做 T 会话缺少有效执行环境") from exc
+  return ExecutionOwnerRef.strategy_run(normalized_run_id), environment
 
 
 @strawberry.type(description="持仓做 T 查询")
@@ -463,11 +489,13 @@ class TTradeMutation:
     try:
       owner_account_id = await TTradeResolver.session_account_id(run_id)
       resolved_account_id = authorized_account_id(info, owner_account_id)
+      execution_ref, execution_environment = await _t_trade_execution_binding(run_id)
       preview = await TradeApprovalChallengeService.issue(
         principal=principal,
         action=T_TRADE_ENTRY_APPROVAL,
         account_id=resolved_account_id,
-        business_owner_id=run_id,
+        execution_ref=execution_ref,
+        environment=execution_environment,
         intent_id=intent_id,
       )
       return TradeApprovalPreviewResult(
@@ -497,6 +525,7 @@ class TTradeMutation:
     try:
       owner_account_id = await TTradeResolver.session_account_id(run_id)
       resolved_account_id = authorized_account_id(info, owner_account_id)
+      execution_ref, execution_environment = await _t_trade_execution_binding(run_id)
       command_payload = TTradeResolver.approval_command_payload(
         run_id,
         intent_id,
@@ -509,7 +538,8 @@ class TTradeMutation:
         principal=principal,
         action=T_TRADE_ENTRY_APPROVAL,
         account_id=resolved_account_id,
-        business_owner_id=run_id,
+        execution_ref=execution_ref,
+        environment=execution_environment,
         intent_id=intent_id,
         confirmation_token=confirmation_token,
         command_type="T_TRADE_APPROVE_ENTRY",
