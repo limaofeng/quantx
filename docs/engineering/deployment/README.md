@@ -1,7 +1,11 @@
 # Windows Dev 运行与运维
 
-QuantX 是个人单账户项目，只维护 Windows 工作区中的 `dev` 运行形态。不存在
-production、WinSW、Kubernetes、release 安装或 macOS 服务端部署路径。
+QuantX 是个人单账户项目，生产/实盘运行端为 Windows，当前开发环境也为 Windows。
+当前启动器只实现 `dev` 配置；生产运行端不代表支持 `-Environment production`。
+后续计划迁移开发环境到 macOS，届时单独确定服务拓扑、测试数据隔离与启动流程；
+QMT 和券商运行时仍留在 Windows。当前不提供 macOS 启动器、WinSW、Kubernetes
+或 release 安装路径。跨机器访问使用实际运行端的 Caddy 地址，不能将远端地址
+替换成开发机的 localhost。平台边界以根 `AGENTS.md` 为准。
 
 ## 唯一启动入口
 

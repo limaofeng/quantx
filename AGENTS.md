@@ -1,26 +1,14 @@
 # QuantX Agent 记忆文件
 
-进入本项目后先读本文件，再按任务范围阅读对应代码和文档。
+按任务范围读取代码和下列文档入口；局部修复不要求通读架构和计划。已授权范围内完成实现、必要验证和修复，不在第一版实现后提前停下。
 
-## Monorepo 结构
+## 代码与文档入口
 
-- `apps/api/`：FastAPI、REST、Strawberry GraphQL、Agent WebSocket Hub。
-- `apps/docs/`：VitePress 客户端开发文档与发布契约。
-- `apps/web/`：Vite + React + TypeScript。
-- `apps/engine/`：策略、做 T、条件清仓、热缓存与订单回报收敛。
-- `apps/monitor/`：独立可用性、延迟、事故历史与状态页只读 API。
-- `apps/worker/`：Prefect flows、tasks、部署入口。
-- `apps/qmt-agent/`：唯一允许访问 XTData/XTTrading 的出站 Agent。
-- `packages/contracts/`：版本化 Agent 协议、DTO 和公共枚举。
-- `packages/domain/`：纯交易域、策略、风控、仓位和回测 broker。
-- `packages/application/`：用例、端口接口、命令路由和状态推进。
-- `packages/infrastructure/`：数据库、Repository、行情适配和持久化消息箱。
-- `ops/`：Windows Dev Caddy 和统一运维入口。
-- `docs/engineering/`：按 API、Engine、Worker、QMT Agent、部署组织的工程文档。
-
-Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
-`quantx_application`、`quantx_infrastructure`、`quantx_engine`、
-`quantx_monitor`、`quantx_worker` 和 `quantx_qmt_agent`。
+- `apps/`：API、Web、Docs、Engine、Monitor、Worker、QMT Agent 等独立进程/客户端。
+- `packages/contracts`：协议与 DTO；`domain`：纯交易域；`application`：用例与端口；
+  `infrastructure`：数据库、适配器和消息箱。
+- `ops/`：当前 Windows 统一运维入口；`docs/engineering/`：各组件工程文档。
+- Python 包名为 `quantx_<组件名>`；从目标组件及其直接依赖开始定位。
 
 ## 设计与维护准则
 
@@ -33,61 +21,49 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 
 ## 统一运行方式
 
-当前权威运行基线（2026-08-28）：**只支持 Windows Dev，Dev 默认即个人单账户
-实盘**。不要为普通
-开发启动显式传 `-Mode`；以下第一条命令必须解析为 `profile=full`、
-`agentMode=live`。只有明确需要禁用实盘时，才允许使用
-`-Mode data-only`。
+平台约定（2026-09-07）：生产/实盘运行端为 **Windows**；当前开发环境也为
+**Windows**。后续计划将开发环境迁移到 **macOS**，目前尚未启用该开发拓扑。
+这里的生产指实际交易运行端；当前启动器仍只接受 `-Environment dev`，不得据此
+传入不存在的 `production` 参数或改变实盘门禁。
 
-开发环境只从仓库根目录运行：
+普通开发启动不显式传 `-Mode`，必须解析为 `profile=full`、`agentMode=live`。
+只有明确需要禁用实盘时，才使用 `-Mode data-only`。
 
+未来迁移时保留以下边界，不为未来迁移提前实现双启动器或兼容层：
+- QMT/XTData/XTTrading 和券商运行时始终在 Windows，设备密钥仍留在该机。
+- 纯域、contracts 和不依赖 QMT 的开发工具保持平台无关；Windows 进程、路径和
+  凭据管理隔离在运行适配与运维层，不散落到业务逻辑。
+- macOS 开发机与 Windows 运行端的服务分布、数据隔离、启动及验收方式需在迁移
+  任务中明确。不得默认让 Mac 测试访问 Windows 实盘状态或启动另一份 Engine。
+- 若 Mac 使用 Windows 后端，使用该运行端的 Caddy 公共地址；`127.0.0.1` 仅指
+  当前执行命令的机器，不能因换开发机就替换已确认的远端地址。
+
+当前 Windows 命令从仓库根目录执行：
 ```powershell
 .\ops\quantx.ps1 up -Environment dev -Profile web
-.\ops\quantx.ps1 up -Environment dev -Profile web -Mode data-only
 .\ops\quantx.ps1 status
 .\ops\quantx.ps1 logs
 .\ops\quantx.ps1 down
-.\ops\quantx.ps1 up -Environment dev -Component monitor
-.\ops\quantx.ps1 status -Environment dev -Component monitor
 ```
+标准实盘重启顺序为 `down` → 上述 `up` → `status`。Monitor 独立使用
+`-Component monitor` 管理，普通 up/down 不启停它。
 
-标准 Dev 实盘重启顺序：
-
-```powershell
-.\ops\quantx.ps1 down
-.\ops\quantx.ps1 up -Environment dev -Profile web
-.\ops\quantx.ps1 status
-```
-
-- 普通开发 `up`（包括未显式指定模式的 `-Profile web`）统一提升为
-  `full/live`，启动 Caddy、API、Engine、Vite、VitePress 和 Prefect Worker；
-  QMT Agent 在本机登记与运行时预检通过后启动。Prefect Server 使用外部服务。
-- Monitor 使用独立状态文件、SQLite 历史库和生命周期；普通 `up/down` 不启停它，
-  以保证主服务离线期间仍能观测。开发时用 `-Component monitor` 单独管理。
-- `live` 优先使用 `-AccountId`，未传时从本机环境中的唯一账户配置自动解析。
-  `-Mode data-only` 是唯一的显式非实盘入口，并同时关闭服务端实盘能力门。
-  数据库、Redis 和 InfluxDB 继续复用开发配置，不为实盘另装一套。
-- 除非用户明确要求纯行情模式，否则 Codex、自动化脚本和人工运维不得把普通
-  dev 启动、恢复或验收静默降级为 `-Mode data-only`。若 QMT 登记或本地运行时
-  预检失败，启动器必须保持 `profile=full`、`agentMode=live`，在 API/Engine
-  启动前关闭全部服务端与 Agent 实盘能力门并清空实盘账户允许列表，跳过 QMT
-  子进程，以显式 `DEGRADED / BLOCKED` 状态继续启动非 QMT 服务。该状态允许使用
-  已持久化历史行情做回测，但不得伪装成 QMT `ready`；恢复 QMT 后必须整体重启。
-- 开发 Caddy 是唯一公开入口，监听所有本机 IPv4 接口的 `8080`；本机使用
-  `http://127.0.0.1:8080`，局域网统一使用 `http://192.168.5.6:8080`。
-- API 只监听 `127.0.0.1:18081`，Vite 使用 `5250`，VitePress 使用
-  `5251`。Prefect API 固定通过 `PREFECT_API_URL` 连接外部服务，默认
-  `http://192.168.5.6:30420/api`，Worker 使用 `quantx-pool`。
-- PostgreSQL、InfluxDB、Redis、Prefect Server 是外部服务，只检查，
-  不自动启停。
-- 不得绕过统一入口单独手工启动 QMT Agent，否则同一设备的重复 Agent 会争用
-  会话并可能触发行情分片冲突。完整 Dev 实盘验收的 `status` 必须显示
-  `Runtime profile=full`、`agentMode=live`、唯一账户、`liveTrading=ENABLED`、
-  QMT Agent `ready`、协议 `1.1` 和小于 90 秒的新鲜快照；降级启动则必须显示
-  `DEGRADED`、QMT `BLOCKED` 与 `liveTrading=DISABLED`。
-- 不得恢复 macOS 启动器、独立 QMT Agent 启动器、production 环境、WinSW、
-  Kubernetes、release 安装/回滚或 API 内的子进程管理。个人项目只有当前
-  Windows 工作区的 `dev` 运行形态。
+- 普通 up 保持 full/live；唯一账户来自显式 `-AccountId` 或本机唯一账户配置。
+  不得静默改为 data-only。QMT 预检失败时，在 API/Engine 启动前关闭服务端与
+  Agent 实盘能力门、清空账户允许列表并跳过 QMT 子进程；非 QMT 服务继续启动，
+  显示 DEGRADED / QMT BLOCKED / liveTrading=DISABLED。可用持久化行情回测，
+  不得伪装 QMT ready；恢复 QMT 后整体重启。
+- 完整实盘验收必须显示 Runtime profile=full、agentMode=live、唯一账户、
+  liveTrading=ENABLED、QMT ready、当前 `quantx_contracts.agent.PROTOCOL_VERSION`
+  定义的协议版本和小于 90 秒的新鲜快照。
+- Caddy 是唯一公开入口：Windows 本机 `http://127.0.0.1:8080`，当前局域网
+  `http://192.168.5.6:8080`。API 内部端口 18081，Vite 5250，VitePress 5251。
+- PostgreSQL、InfluxDB、Redis、Prefect Server 是外部服务，只检查、不自动启停；
+  Prefect API 由 PREFECT_API_URL 指定，当前默认 `http://192.168.5.6:30420/api`，
+  Worker pool 为 quantx-pool。data-only 继续复用开发数据服务，不另建实盘套件。
+- 不绕过统一入口独立启动 QMT Agent，不恢复 API 子进程管理、WinSW、Kubernetes
+  或 release 安装/回滚。当前启动器只支持 dev，macOS 开发流程留待迁移任务实现。
+- 运维与启动任务按需查阅 `docs/engineering/deployment/README.md`。
 
 ## 进程和依赖边界
 
@@ -99,6 +75,12 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 - QMT Agent 只依赖 contracts，不导入服务端 ORM、Repository 或策略。
 - `apps/api`、`apps/engine`、`apps/worker` 禁止导入 `miniqmt` 或 `xtquant`。
 - Redis 只用于唤醒与广播，数据库消息箱和业务表才是状态真源。
+
+## 技能与外部研究
+
+项目维护的技能以 `.codex/skills` 为准；`.agents/skills` 是本机安装的外部研究技能。
+外部研究输出不能充当 QuantX 账户、订单、成交或风控真源。研究请求不授权交易执行。
+`.agents/vendors` 和临时验证目录中的 AGENTS.md 仅是来源/历史快照，不作为当前规则。
 
 ## GraphQL 与前端
 
@@ -121,7 +103,7 @@ npm run build
 
 ## 测试
 
-根边界测试：
+全测试目录（按影响范围决定是否需要全量运行）：
 
 ```powershell
 python -m pytest tests/
@@ -134,7 +116,10 @@ python -m pytest tests/api/unit/
 python -m pytest tests/api/integration/
 ```
 
-单元测试优先，集成测试谨慎。E2E/真实交易测试默认禁止。真实交易必须同时
+优先运行受影响的单元测试；通过后仅在新改动或新证据需要时扩大验证。
+普通 pytest 由 `tests/conftest.py` 选择专用测试库并关闭实盘门禁，可在任务范围内
+自主执行和修复本次引起的失败；不得将这一授权扩展到 E2E 或真实交易。
+集成测试先确认其外部状态影响。E2E/真实交易测试默认禁止。真实交易必须同时
 显式满足 `ENV=testing`、`ENABLE_REAL_TRADING=true`、账户白名单和
 `QMT_REAL_TRADING_ENABLED=true`。项目只在 `ENV=testing` 的 Dev 实盘门禁下运行。
 
@@ -184,7 +169,9 @@ Codex 生成的截图、trace 和 video 放在根目录 `.codex_screenshots/`，
 - 券商账号、密码、QMT 配置和设备密钥不得进入服务端数据库、日志、异常
   堆栈或网络消息；设备密钥存 Windows Credential Manager。
 
-## 文档阅读顺序
+## 按需文档入口
+
+只读与变更相关的文档和章节；已有足够上下文时不重复加载。
 
 交易域、执行链路或策略接口：
 

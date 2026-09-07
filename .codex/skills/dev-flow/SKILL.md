@@ -1,6 +1,6 @@
 ---
 name: dev-flow
-description: Use only when the user explicitly invokes $dev-flow for feature work; the current task's primary agent owns discovery, planning, design, decomposition, review, and testing, while Luna max subagents execute bounded implementation. Do not trigger for ordinary uninvoked feature requests, pure explanation requests, or pure diagnosis requests.
+description: Use only when explicitly invoked as $dev-flow to have the primary agent design and verify bounded Luna implementation tasks.
 ---
 
 # Dev Flow
@@ -18,12 +18,12 @@ not write implementation code or edit implementation files.
 ### Primary agent
 
 - Before any implementation delegation, read the repository instructions and
-  all task-relevant documentation and skills, inspect the affected code, and
+  the documentation and skills needed for the affected scope, inspect the affected code, and
   check existing working-tree changes.
 - Own repository discovery, requirements clarification, planning,
   architecture, UX, contract design, task decomposition, coordination,
   combined-diff review, and final testing.
-- Form the complete executable design before any implementation delegation.
+- Define the interfaces, constraints and acceptance criteria needed for the next bounded delegation. Refine later work from implementation evidence.
 - Give each implementation subagent a complete, executable task package. The
   package must be self-contained because a model override cannot rely on the
   full conversation history.
@@ -81,7 +81,7 @@ substitute another model or write the implementation in the primary agent.
    the design or task package, sends the fix as a revised follow-up task to the
    same implementation subagent using the available agent follow-up mechanism,
    and repeats review and acceptance.
-8. After approval, use the dedicated commit subagent described below.
+8. After the primary agent approves the verified diff, use the dedicated commit subagent described below.
 9. Verify the resulting commit and confirm unrelated working-tree changes were
    not modified.
 
@@ -111,19 +111,10 @@ the primary agent also loads `../quantx-graphql-codegen/SKILL.md` and designs an
 atomic contract switch. Any tracked codegen output is produced by an
 implementation subagent; the primary agent performs the final validation.
 
-## Windows Host Scope
+## Platform and product scope
 
-When development runs on a Windows host, apply this scope to frontend and client
-work:
-
-- Treat the Web experience as desktop-only. Mobile layouts, mobile breakpoints,
-  touch ergonomics, and phone-browser compatibility are outside acceptance
-  scope unless the user explicitly adds them.
-- Treat the omitted mobile work as an explicit scope waiver when applying
-  `frontend-design-to-code`; use desktop previews and browser verification.
-- Do not refactor, modernize, or update `apps/ios/**` merely to mirror Windows or
-  Web work, and do not run iOS-specific checks for that reason.
-- Do not remove existing mobile or iOS behavior unnecessarily. If a required
-  shared-contract change cannot be completed safely without an iOS change,
-  report the conflict and request direction instead of silently expanding the
-  task.
+Follow root AGENTS.md: current development and production runtime are Windows; future
+macOS development does not move QMT off Windows or authorize a second live runtime.
+Desktop-first Web work follows the existing design system. Device acceptance scope is
+determined by the requested product behavior, not the developer OS. Do not modify iOS
+or remove mobile behavior merely because the task is executed on Windows or macOS.
