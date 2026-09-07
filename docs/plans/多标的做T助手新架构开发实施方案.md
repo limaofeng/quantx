@@ -1,11 +1,11 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0—P3 已完成；P4 未启动，本轮不进入 P4）<br>
+> 状态：`IN_PROGRESS`（P0—P3 已完成；P4 进行中，尚未通过退出门）<br>
 > 版本：2.2<br>
 > 日期：2026-09-03<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
-> 开发实施进度：2 / 9 个阶段门完成（22.2%）
+> 开发实施进度：4 / 9 个阶段门完成（44.4%）
 
 ## 1. 目的与使用方式
 
@@ -159,7 +159,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P1 | Owner 与协议 1.2 | `DONE` | P0；P1-01..06 均已完成；PAPER legacy 义务已受控收敛；停服、停服态备份、迁移、标准 full/live 恢复、全量快照对账和隔离恢复演练已通过 | 单一 `ExecutionOwnerRef`、单一 protocol 1.2 payload、既有路径等价；未知/冲突 owner 与结果未知均 fail-closed；无双协议 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`；0046/0047 schema gate 通过；owner 空值 `0`、8 个身份不可变触发器通过；最新 1.2 快照 `PROCESSED`、旧失败快照 `SUPERSEDED`；标准 full/live 冷启动 exit=`0`，`liveTrading=ENABLED`，QMT/marketData/Monitor READY、快照约 3 秒，gateway/schema verify 通过 |
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `DONE` | `P1 DONE`；实现、恢复测试与 Windows 运行验收完成 | 无第二真源，故障恢复通过 | 0048/0050 实库与隔离恢复通过；BUY 整链 39 项及根回归，见 §10 |
 | P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
-| P4 | 分配、PAPER 与跨域准入 | `NOT_STARTED` | P2 + P3 | 整批原子、PAPER 闭环、无真实订单 | 待补 |
+| P4 | 分配、PAPER 与跨域准入 | `IN_PROGRESS` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 应用层快照/分配/Gate 首批验证通过；持久化、整链及前端待验收，见 §10 |
 | P5 | 共享账户回测 | `NOT_STARTED` | P4 | 无重复资金/未来数据，结果可重放 | 待补 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
 | P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
@@ -460,7 +460,7 @@ npm run build
 
 ## 10. 当前状态与下一动作
 
-当前结论：**P0—P3 已完成；P2/P3 代码、隔离迁移、实际业务库 0050 和清空功能数据后的 Windows 运行验收已完成。本轮止于 P3，不进入 P4。** P1 原子切换后，Agent 控制协议为 `1.2`；
+交接基线（P3 收尾时）：**P0—P3 已完成；P2/P3 代码、隔离迁移、实际业务库 0050 和清空功能数据后的 Windows 运行验收已完成。当批止于 P3。当前 P4 进展见本节末检查点。** P1 原子切换后，Agent 控制协议为 `1.2`；
 `ExecutionOwnerRef` 已贯穿 intent、pending、correlation、outbox、runtime event 和 ExitPlan
 source，`strategy_run_id` 仅作为 StrategyRun 的可选一致性见证，不能再作为默认 owner fallback。
 当前 Router 仅注册 `STRATEGY_RUN`、`EXIT_PLAN`、`MANUAL_COMMAND`；未知、未注册或 owner/environment
@@ -521,6 +521,42 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   BUY 整链 39 项、迁移 26 项；最后快照修复定向两文件 38 项通过，全部候选 Python
   Ruff 通过；补齐首次订阅缓存引用负测后两文件共 39 项通过。PAPER 有绑定的行为由隔离测试证明，空配置线上仅证明正常启动与零订单，
   不将空配置运行冒充真实候选对比或真实交易测试。运行时与文档作为同一收尾批次提交。
+
+### P4 当前检查点（2026-09-07，应用层契约批次）
+
+- 已核对 P2/P3 阶段表、§10 运行及隔离迁移记录与提交
+  `70c590fba`、`4c43f9ee7`、`fb309e115`；P4 前置成立。页首先前 2/9 为未同步统计，
+  按阶段表纠正为 4/9，没有重新开展 P2/P3 全量或实盘验收。
+- 新增 `packages/application/src/quantx_application/t_trade_v3/portfolio_snapshot.py`：
+  immutable evidence cut、envelope、portfolio snapshot；带时区时点和 UTC hash，保护
+  locked_core/core floor、未覆盖义务、全账户行业聚合及有限 Decimal；派生上限不可单独覆盖。
+- 新增同目录 `portfolio_allocation.py`：标准已受理 intent 的只读引用输入、稳定六字段排序、
+  ALLOW/CAP/DELAY/REJECT、行业/现金/总额/并发/单票约束、最低交易规划量、TTL 与 next eligible。
+  计算结果没有资金预占或最终股数；decision cycle 与递增 allocation attempt 分离。
+- 新增同目录 `entry_execution_gate.py`：重新读取的 accepted Tick、config/policy/schema/
+  fingerprint/capability binding、generation/ring、TTL、价差/价格偏离与能力质量重验。
+  仅 RULE_ONLY PAPER，未开放 LIVE、模型模式或真实订单。
+- 对应 `tests/application/test_t_portfolio_snapshot.py`、`test_t_portfolio_allocation.py`、
+  `test_t_entry_execution_gate.py` 覆盖到达顺序全排列、非候选行业存量、CAP 原因、延期到期、
+  输入篡改/未来时点/混合环境与 owner、Gate 最新行情和缺失能力；复审后补齐
+  原 next eligible 不提前、候选规则/Gate 独立 policy 版本、NaN/布尔时点与序号拒绝、
+  账户熔断具体原因码。
+  `.venv/Scripts/python.exe -m pytest tests/application tests/domain/test_t_assistant_execution.py
+  tests/domain/test_t_assistant_market_state.py -o 'addopts=-ra --import-mode=importlib' -q
+  --tb=short -p no:cacheprovider`：**273 passed**；六个新增 Python 文件 Ruff 与 format --check 通过。
+  首次扩大命令误指不存在的 `tests/domain/test_risk_increase_admission.py`，未收集测试；
+  已纠正命令，不计入通过证据。
+- 本批仅应用层契约验证，**六项 P4 task 均未勾选 DONE**。尚需：同一数据库事务切面 adapter、
+  cycle 内标准 `ALLOCATION_PENDING` 原子受理、allocation 持久化/唯一约束/lease/CAS/recovery、
+  PostgreSQL 隔离验证、公共有序 admission 与 PAPER Broker/事实/ExitPlan 闭环，以及 GraphQL/Web。
+  尚未改 GraphQL，未执行 codegen/Web 检查；未迁移业务库、启停服务、执行 E2E 或真实交易。
+- 接入审计已定位：公共 intent repository 现有 intake 内部 commit，不能直接放入 cycle savepoint；
+  admission 为 LIVE adapter，同 producer 排名尚不携带 allocation rank；公共 ExitPlan SELL 路由
+  仍读取 LIVE Position/TradingService，PAPER 必须先实现隔离事实与 Broker adapter 才能接线。
+  不把本批纯函数测试当作环境隔离或 PostgreSQL 原子性证据，不提前更新 As-Is 已生效行为。
+- 当前工作树已有其他 API/Web、Worker、快照和退出历史改动，非本任务所有；本批只批准上述
+  六个新文件与本方案，由专用 Git 子代理提交，不混入其他文件。提交记录由 Git 历史定位
+  `feat(t-assistant): add P4 portfolio planning and entry gate contracts`。
 
 ## 11. 变更记录
 
