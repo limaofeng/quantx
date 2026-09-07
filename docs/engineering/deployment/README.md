@@ -120,6 +120,30 @@ QMT Agent 的 token 只用于建立新连接；后台刷新不会主动拆除健
 .\ops\quantx.ps1 verify -Environment dev
 ```
 
+`restore-verify` 启动时输出验证 ID；阶段状态与脱敏日志持续写入
+`.runtime/restore-verifications/<ID>/status.json` 和 `verification.log`。正常执行期间
+等待原进程退出，或按需读取这个小状态文件与日志尾部，不反复读取整库或重启验证。
+`COPY bytes_processed` 是当前 COPY 操作的计数，不能当作整库总量或可靠百分比。
+
+数据导入完整、但 schema 检查/升级失败时，保留该隔离数据库供修复后重试：
+
+```powershell
+.\ops\quantx.ps1 restore-verify -Environment dev -BackupPath <原目录> -RestoreVerificationId <ID>
+```
+
+重试要求备份路径、manifest 指纹和数据库服务器一致，并重新校验备份文件校验和。
+只跳过已成功的数据导入；重新执行 schema 检查/升级和 QMT journal、Monitor 完整性
+检查，不把阶段通过当作整体验收完成。同一个 ID 不能并发执行，也不能重复执行已通过
+的验证。部分导入失败会清理本次创建的临时库，不可复用。
+
+schema 验证成功后临时 PostgreSQL 库会清理；后续 journal/Monitor 失败仍留下日志，
+但这个已清理的数据库不能按 ID 复用。失败保留的隔离库占用磁盘，需要在成功重试后
+自动清理，或在明确放弃该验证时由运维确认清理。不要手工编辑状态文件或对保留库
+运行无关写入。重试验证的是当前保留状态，不能替代必须从原始备份重新开始的迁移测试。
+
+先以小规模、覆盖迁移约束的数据运行定向测试，再做最终完整恢复验收。失败先查看
+脱敏日志，不用再次全量恢复来获取第一次遗漏的错误输出。
+
 `down` 只停止 `.runtime/state` 中记录且 PID/启动时间匹配的进程，不终止未受
 QuantX 管理的进程。
 

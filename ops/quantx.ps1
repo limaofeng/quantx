@@ -33,6 +33,8 @@ param(
 
   [string]$BackupPath = "",
 
+  [string]$RestoreVerificationId = "",
+
   [switch]$SkipExternal,
 
   [switch]$StampExisting
@@ -2683,8 +2685,94 @@ function Remove-RestoreVerificationScratchDatabase {
   }
 }
 
+function Save-RestoreVerificationProgress {
+  $script:RestoreProgress.updatedAt = [DateTime]::UtcNow.ToString("o")
+  $script:RestoreProgress | ConvertTo-Json -Depth 4 |
+    Set-Content -LiteralPath $script:RestoreProgressPath -Encoding utf8
+}
+
+function Protect-RestoreVerificationOutput {
+  param([AllowEmptyString()][string]$Text)
+  foreach ($secret in $script:RestoreSecrets) {
+    if ($secret) { $Text = $Text.Replace($secret, "[REDACTED]") }
+  }
+  $Text = [regex]::Replace($Text, '(?i)(postgres(?:ql)?(?:\+asyncpg)?://)[^\s@]+@', '$1[REDACTED]@')
+  return [regex]::Replace($Text, '\b\d{10,}\b', '[REDACTED]')
+}
+
 function Invoke-RestoreVerify {
+  param([string]$VerificationId = "")
+
   Import-QuantXEnvironment
+  if (-not $BackupPath.Trim()) { throw "restore-verify requires -BackupPath." }
+  if ($VerificationId -and $VerificationId -cnotmatch '^[0-9a-f]{16}$') {
+    throw "Invalid restore verification ID."
+  }
+  $resume = [bool]$VerificationId
+  if (-not $resume) { $VerificationId = [guid]::NewGuid().ToString('N').Substring(0, 16) }
+  $source = [IO.Path]::GetFullPath($BackupPath)
+  $manifestHash = (Get-FileHash -LiteralPath (Join-Path $source "manifest.json") -Algorithm SHA256).Hash
+  $connection = Get-PostgreSqlConnectionParts
+  $directory = Join-Path (Join-Path $Runtime "restore-verifications") $VerificationId
+  New-Item -ItemType Directory -Path $directory -Force | Out-Null
+  # An exclusive handle prevents two invocations from migrating/cleaning the same DB.
+  $lock = [IO.File]::Open((Join-Path $directory "active.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+  try {
+    $script:RestoreProgressPath = Join-Path $directory "status.json"
+    $script:RestoreLogPath = Join-Path $directory "verification.log"
+    $script:RestoreSecrets = @(
+      $connection.Password
+      [uri]::EscapeDataString([string]$connection.Password)
+      Get-ChildItem Env: | Where-Object { $_.Name -match '(?i)password|secret|token|api_key|account' } |
+        ForEach-Object { if ($_.Value.Length -ge 4) { $_.Value; [uri]::EscapeDataString($_.Value) } }
+    ) | Sort-Object -Unique | Sort-Object Length -Descending
+    if ($resume) {
+      $script:RestoreProgress = Get-Content -LiteralPath $script:RestoreProgressPath -Raw | ConvertFrom-Json
+      if (
+        $script:RestoreProgress.id -cne $VerificationId -or
+        $script:RestoreProgress.source -ne $source -or
+        $script:RestoreProgress.manifestHash -cne $manifestHash -or
+        $script:RestoreProgress.host -ne $connection.Host -or
+        [string]$script:RestoreProgress.port -ne [string]$connection.Port -or
+        $script:RestoreProgress.status -eq "passed" -or
+        -not ($script:RestoreProgress.restoreCompleted -and $script:RestoreProgress.retained)
+      ) { throw "Verification cannot resume: backup, server, or completed restore evidence does not match." }
+    } else {
+      $script:RestoreProgress = [ordered]@{
+        id = $VerificationId; source = $source; manifestHash = $manifestHash
+        host = $connection.Host; port = $connection.Port
+        status = "running"; phase = "archive"; restoreCompleted = $false
+        postgresVerified = $false; retained = $false; updatedAt = ""
+      }
+    }
+    $script:RestoreProgress.status = "running"
+    $script:RestoreProgress.postgresVerified = $false
+    Save-RestoreVerificationProgress
+    Write-Host "Restore verification ID=$VerificationId; status=$script:RestoreProgressPath; log=$script:RestoreLogPath"
+    try {
+      Invoke-RestoreVerifyCore -Connection $connection *>&1 | ForEach-Object {
+        $line = Protect-RestoreVerificationOutput -Text ([string]$_)
+        Add-Content -LiteralPath $script:RestoreLogPath -Value $line -Encoding utf8
+      }
+      $script:RestoreProgress.status = "passed"
+      $script:RestoreProgress.phase = "complete"
+      Write-Host "Restore verification passed: $VerificationId"
+    } catch {
+      $script:RestoreProgress.status = "failed"
+      $detail = Protect-RestoreVerificationOutput -Text ($_ | Out-String)
+      Add-Content -LiteralPath $script:RestoreLogPath -Value $detail -Encoding utf8
+      throw "Restore verification failed in phase '$($script:RestoreProgress.phase)'; see $script:RestoreLogPath (ID=$VerificationId)."
+    } finally {
+      Save-RestoreVerificationProgress
+    }
+  } finally {
+    $lock.Dispose()
+    $script:RestoreSecrets = @()
+  }
+}
+
+function Invoke-RestoreVerifyCore {
+  param([Parameter(Mandatory = $true)][psobject]$Connection)
   if (-not $BackupPath.Trim()) {
     throw "restore-verify requires -BackupPath."
   }
@@ -2718,12 +2806,9 @@ function Invoke-RestoreVerify {
     throw "PostgreSQL backup archive validation failed."
   }
 
-  $connection = Get-PostgreSqlConnectionParts
   $createdb = Resolve-PostgreSqlTool -Name "createdb"
   $dropdb = Resolve-PostgreSqlTool -Name "dropdb"
-  $scratchDatabase = "quantx_restore_verify_$(
-    [guid]::NewGuid().ToString('N').Substring(0, 16)
-  )"
+  $scratchDatabase = "quantx_restore_verify_$($script:RestoreProgress.id)"
   if (-not (Test-RestoreVerificationScratchDatabaseName -Name $scratchDatabase)) {
     throw "Generated restore verification database name is unsafe."
   }
@@ -2733,32 +2818,39 @@ function Invoke-RestoreVerify {
   $previousDatabaseUrl = $env:DATABASE_URL
   $previousPythonPath = $env:PYTHONPATH
   $previousRoot = $env:QUANTX_ROOT
-  $scratchCreated = $false
+  $scratchCreated = [bool]$script:RestoreProgress.retained
   try {
     $env:PGPASSWORD = $connection.Password
-    & $createdb `
-      --host $connection.Host `
-      --port ([string]$connection.Port) `
-      --username $connection.User `
-      --template template0 `
-      --encoding UTF8 `
-      $scratchDatabase
-    if ($LASTEXITCODE -ne 0) {
-      throw "Could not create the isolated restore verification database."
-    }
-    $scratchCreated = $true
+    if (-not $script:RestoreProgress.restoreCompleted) {
+      $script:RestoreProgress.phase = "restore"
+      Save-RestoreVerificationProgress
+      & $createdb `
+        --host $connection.Host `
+        --port ([string]$connection.Port) `
+        --username $connection.User `
+        --template template0 `
+        --encoding UTF8 `
+        $scratchDatabase
+      if ($LASTEXITCODE -ne 0) {
+        throw "Could not create the isolated restore verification database."
+      }
+      $scratchCreated = $true
 
-    & $pgRestore `
-      --host $connection.Host `
-      --port ([string]$connection.Port) `
-      --username $connection.User `
-      --dbname $scratchDatabase `
-      --exit-on-error `
-      --no-owner `
-      --no-privileges `
-      $archive
-    if ($LASTEXITCODE -ne 0) {
-      throw "PostgreSQL backup could not be restored into isolation."
+      & $pgRestore `
+        --host $connection.Host `
+        --port ([string]$connection.Port) `
+        --username $connection.User `
+        --dbname $scratchDatabase `
+        --exit-on-error `
+        --no-owner `
+        --no-privileges `
+        $archive
+      if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL backup could not be restored into isolation."
+      }
+      $script:RestoreProgress.restoreCompleted = $true
+      $script:RestoreProgress.retained = $true
+      Save-RestoreVerificationProgress
     }
 
     $encodedUser = [uri]::EscapeDataString($connection.User)
@@ -2782,21 +2874,37 @@ function Invoke-RestoreVerify {
     )
     $env:PYTHONPATH = Get-WorkspacePythonPath
     $env:QUANTX_ROOT = $applicationRoot
+    $script:RestoreProgress.phase = "schema"
+    Save-RestoreVerificationProgress
     Invoke-RestoreVerificationSchemaGate `
       -Python $python `
       -ApplicationRoot $applicationRoot
+    $script:RestoreProgress.postgresVerified = $true
+    Save-RestoreVerificationProgress
   } finally {
     $env:DATABASE_URL = $previousDatabaseUrl
     $env:PYTHONPATH = $previousPythonPath
     $env:QUANTX_ROOT = $previousRoot
-    Remove-RestoreVerificationScratchDatabase `
-      -DropDatabase $dropdb `
-      -Connection $connection `
-      -ScratchDatabase $scratchDatabase `
-      -ScratchCreated $scratchCreated
-    $env:PGPASSWORD = $previousPassword
+    try {
+      if ($script:RestoreProgress.postgresVerified -or -not $script:RestoreProgress.restoreCompleted) {
+        Remove-RestoreVerificationScratchDatabase `
+          -DropDatabase $dropdb `
+          -Connection $connection `
+          -ScratchDatabase $scratchDatabase `
+          -ScratchCreated $scratchCreated
+        if ($scratchCreated) {
+          $script:RestoreProgress.retained = ($LASTEXITCODE -ne 0)
+        }
+      } else {
+        Write-Host "Retained isolated database $scratchDatabase for explicit resume by verification ID."
+      }
+    } finally {
+      $env:PGPASSWORD = $previousPassword
+    }
   }
 
+  $script:RestoreProgress.phase = "journal"
+  Save-RestoreVerificationProgress
   $journal = Join-Path $source "qmt-agent\idempotency.sqlite3"
   if (-not (Test-Path -LiteralPath $journal -PathType Leaf)) {
     throw "QMT Agent journal backup is missing."
@@ -2819,6 +2927,8 @@ function Invoke-RestoreVerify {
   }
 
   $monitorDatabase = Join-Path $source "monitor\quantx-monitor.sqlite3"
+  $script:RestoreProgress.phase = "monitor"
+  Save-RestoreVerificationProgress
   if (Test-Path -LiteralPath $monitorDatabase -PathType Leaf) {
     & $python -c (
       "import sqlite3,sys;" +
@@ -2955,7 +3065,7 @@ switch ($Command) {
   "bootstrap" { Invoke-Bootstrap }
   "doctor" { Invoke-Doctor }
   "backup" { Invoke-Backup }
-  "restore-verify" { Invoke-RestoreVerify }
+  "restore-verify" { Invoke-RestoreVerify -VerificationId $RestoreVerificationId }
   "migrate" { Invoke-Migrate }
   "verify" { Invoke-Verify }
 }

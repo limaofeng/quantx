@@ -20,10 +20,13 @@ def _powershell() -> str:
 
 def _function_source(start: str, end: str) -> str:
   script = SCRIPT_PATH.read_text(encoding="utf-8")
-  return f"function {start}" + script.split(f"function {start}", 1)[1].split(
-    f"function {end}",
-    1,
-  )[0]
+  return (
+    f"function {start}"
+    + script.split(f"function {start}", 1)[1].split(
+      f"function {end}",
+      1,
+    )[0]
+  )
 
 
 def _run_powershell(command: str) -> subprocess.CompletedProcess[str]:
@@ -144,7 +147,9 @@ try {{
 
 
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell restore verification gate")
-def test_restore_verify_schema_gate_fails_when_isolated_upgrade_or_check_fails() -> None:
+def test_restore_verify_schema_gate_fails_when_isolated_upgrade_or_check_fails() -> (
+  None
+):
   schema_gate = _function_source(
     "Get-RestoreVerificationSchemaStatus",
     "Remove-RestoreVerificationScratchDatabase",
@@ -209,9 +214,10 @@ function Invoke-Scenario {{
     "-m quantx_infrastructure.database.schema_control status",
     "-m alembic -c C:\\release\\alembic.ini upgrade head",
   ]
-  assert "Isolated restored database Alembic upgrade failed" in payload[
-    "upgradeFailure"
-  ]["error"]
+  assert (
+    "Isolated restored database Alembic upgrade failed"
+    in payload["upgradeFailure"]["error"]
+  )
   assert payload["checkFailure"]["commands"] == [
     "-m quantx_infrastructure.database.schema_control status",
     "-m alembic -c C:\\release\\alembic.ini upgrade head",
@@ -221,8 +227,10 @@ function Invoke-Scenario {{
 
 
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell restore verification cleanup")
-def test_restore_verify_upgrade_failure_still_drops_only_the_created_scratch_database(
+@pytest.mark.parametrize("failure_kind", ["schema", "restore", "create"])
+def test_restore_verify_upgrade_failure_keeps_scratch_and_resumes_without_import(
   tmp_path: Path,
+  failure_kind: str,
 ) -> None:
   dump = tmp_path / "postgres.dump"
   dump.write_bytes(b"restore verification test archive")
@@ -236,6 +244,9 @@ def test_restore_verify_upgrade_failure_still_drops_only_the_created_scratch_dat
     ]
   }
   (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+  journal = tmp_path / "qmt-agent" / "idempotency.sqlite3"
+  journal.parent.mkdir()
+  journal.write_bytes(b"mock journal")
 
   restore_functions = _function_source(
     "Test-RestoreVerificationScratchDatabaseName",
@@ -249,11 +260,17 @@ Set-StrictMode -Version Latest
 $BackupPath = '{backup_path}'
 $Environment = "dev"
 $Root = '{root_path}'
+$Runtime = Join-Path $BackupPath 'runtime'
 $CurrentReleaseLink = ""
 {restore_functions}
 $script:createCalls = [Collections.Generic.List[string]]::new()
 $script:dropCalls = [Collections.Generic.List[string]]::new()
 $script:pythonCalls = [Collections.Generic.List[string]]::new()
+$script:restoreCalls = 0
+$script:upgradeExit = 31
+$script:failureKind = '{failure_kind}'
+$script:serverHost = '127.0.0.1'
+$env:RESTORE_TEST_TOKEN = 'same-password'
 function Import-QuantXEnvironment {{}}
 function Resolve-PostgreSqlTool {{
   param([Parameter(Mandatory = $true)][string]$Name)
@@ -266,7 +283,7 @@ function Resolve-PostgreSqlTool {{
 }}
 function Get-PostgreSqlConnectionParts {{
   return [pscustomobject]@{{
-    Host = "127.0.0.1"
+    Host = $script:serverHost
     Port = 5432
     User = "quantx"
     Password = "test-password"
@@ -281,11 +298,12 @@ function Get-QmtAgentPythonPath {{ return "" }}
 function Test-CreateDatabase {{
   param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Remaining)
   $script:createCalls.Add((@($Remaining | ForEach-Object {{ [string]$_ }}) -join " "))
-  $global:LASTEXITCODE = 0
+  $global:LASTEXITCODE = if ($script:failureKind -eq 'create') {{ 9 }} else {{ 0 }}
 }}
 function Test-PgRestore {{
   param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Remaining)
-  $global:LASTEXITCODE = 0
+  if ($Remaining -contains '--dbname') {{ $script:restoreCalls++ }}
+  $global:LASTEXITCODE = if ($script:failureKind -eq 'restore' -and $Remaining -contains '--dbname') {{ 7 }} else {{ 0 }}
 }}
 function Test-DropDatabase {{
   param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Remaining)
@@ -302,7 +320,12 @@ function Test-Python {{
     return
   }}
   if ($rendered -like "-m alembic *") {{
-    $global:LASTEXITCODE = 31
+    Write-Output 'migration diagnostic test-password same-password postgresql://user:other-secret@localhost/test'
+    $global:LASTEXITCODE = $script:upgradeExit
+    return
+  }}
+  if ($rendered -eq '-m quantx_infrastructure.database.schema_control check' -or $rendered -like '-c *') {{
+    $global:LASTEXITCODE = 0
     return
   }}
   throw "Unexpected test Python invocation: $rendered"
@@ -317,11 +340,44 @@ try {{
 }} finally {{
   $InformationPreference = $previousInformationPreference
 }}
+$firstState = Get-Content -LiteralPath $script:RestoreProgressPath -Raw | ConvertFrom-Json
+$firstDrops = $script:dropCalls.Count
+$firstLog = Get-Content -LiteralPath $script:RestoreLogPath -Raw
+$script:upgradeExit = 0
+$script:failureKind = ''
+$rejections = [Collections.Generic.List[string]]::new()
+if ('{failure_kind}' -eq 'schema') {{
+  $script:serverHost = 'another-server'
+  try {{ Invoke-RestoreVerify -VerificationId $firstState.id 6>$null }} catch {{ $rejections.Add($_.Exception.Message) }}
+  $script:serverHost = '127.0.0.1'
+  $manifestFile = Join-Path $BackupPath 'manifest.json'
+  $originalManifest = [IO.File]::ReadAllText($manifestFile)
+  [IO.File]::AppendAllText($manifestFile, ' ')
+  try {{ Invoke-RestoreVerify -VerificationId $firstState.id 6>$null }} catch {{ $rejections.Add($_.Exception.Message) }}
+  [IO.File]::WriteAllText($manifestFile, $originalManifest)
+  try {{ Invoke-RestoreVerify -VerificationId '../invalid' 6>$null }} catch {{ $rejections.Add($_.Exception.Message) }}
+  $activeLock = [IO.File]::Open((Join-Path (Split-Path $script:RestoreProgressPath) 'active.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+  try {{
+    try {{ Invoke-RestoreVerify -VerificationId $firstState.id 6>$null }} catch {{ $rejections.Add($_.Exception.Message) }}
+  }} finally {{ $activeLock.Dispose() }}
+  Invoke-RestoreVerify -VerificationId $firstState.id 6>$null
+}} else {{
+  try {{ Invoke-RestoreVerify -VerificationId $firstState.id 6>$null }} catch {{ $rejections.Add($_.Exception.Message) }}
+  Invoke-RestoreVerify 6>$null
+}}
+$finalState = Get-Content -LiteralPath $script:RestoreProgressPath -Raw | ConvertFrom-Json
+try {{ Invoke-RestoreVerify -VerificationId $finalState.id 6>$null }} catch {{ $rejections.Add($_.Exception.Message) }}
 [ordered]@{{
   error = $caughtError
   creates = @($script:createCalls)
   drops = @($script:dropCalls)
   pythonCalls = @($script:pythonCalls)
+  firstState = $firstState
+  firstDrops = $firstDrops
+  firstLog = $firstLog
+  finalState = $finalState
+  restoreCalls = $script:restoreCalls
+  rejections = @($rejections)
 }} | ConvertTo-Json -Compress
 """
 
@@ -329,21 +385,47 @@ try {{
 
   assert result.returncode == 0, result.stderr
   payload = json.loads(result.stdout.strip())
-  assert "Isolated restored database Alembic upgrade failed" in payload["error"]
-  assert len(payload["creates"]) == 1
-  assert len(payload["drops"]) == 1
-  created_name = payload["creates"][0].split()[-1]
-  dropped_name = payload["drops"][0].split()[-1]
+  assert payload["firstState"]["status"] == "failed"
+  assert "test-password" not in payload["firstLog"]
+  assert "other-secret" not in payload["firstLog"]
+  assert "same-password" not in payload["firstLog"]
+  assert payload["finalState"]["status"] == "passed"
+  assert payload["finalState"]["retained"] is False
+  if failure_kind == "schema":
+    assert "failed in phase 'schema'" in payload["error"]
+    assert payload["firstState"]["retained"] is True
+    assert payload["firstDrops"] == 0
+    assert "Isolated restored database Alembic upgrade failed" in payload["firstLog"]
+    assert "migration diagnostic" in payload["firstLog"]
+    assert payload["restoreCalls"] == 1
+    assert len(payload["creates"]) == len(payload["drops"]) == 1
+    assert len(payload["rejections"]) == 5
+    assert "does not match" in payload["rejections"][0]
+    assert "does not match" in payload["rejections"][1]
+    assert "Invalid restore verification ID" in payload["rejections"][2]
+    assert payload["pythonCalls"][:2] == [
+      "-m quantx_infrastructure.database.schema_control status",
+      f"-m alembic -c {ROOT}\\alembic.ini upgrade head",
+    ]
+  else:
+    assert "failed in phase 'restore'" in payload["error"]
+    assert payload["firstState"]["retained"] is False
+    assert len(payload["rejections"]) == 2
+    assert "does not match" in payload["rejections"][0]
+    assert len(payload["creates"]) == 2
+    assert payload["firstDrops"] == (1 if failure_kind == "restore" else 0)
+    assert len(payload["drops"]) == (2 if failure_kind == "restore" else 1)
+    assert payload["restoreCalls"] == (2 if failure_kind == "restore" else 1)
+  created_name = payload["creates"][-1].split()[-1]
+  dropped_name = payload["drops"][-1].split()[-1]
   assert created_name == dropped_name
   assert re.fullmatch(r"quantx_restore_verify_[0-9a-f]{16}", created_name)
-  assert payload["pythonCalls"] == [
-    "-m quantx_infrastructure.database.schema_control status",
-    f"-m alembic -c {ROOT}\\alembic.ini upgrade head",
-  ]
 
 
-def test_restore_verify_contract_keeps_the_upgrade_isolated_and_journal_check_afterward() -> None:
-  restore = _function_source("Invoke-RestoreVerify", "Invoke-MigrateAtRoot")
+def test_restore_verify_contract_keeps_the_upgrade_isolated_and_journal_check_afterward() -> (
+  None
+):
+  restore = _function_source("Invoke-RestoreVerifyCore", "Invoke-MigrateAtRoot")
   gate = _function_source(
     "Invoke-RestoreVerificationSchemaGate",
     "Remove-RestoreVerificationScratchDatabase",
