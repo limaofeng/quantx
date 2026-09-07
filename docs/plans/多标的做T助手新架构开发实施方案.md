@@ -787,6 +787,25 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   不能每 Tick 复用旧分配。最终 ranked runtime、显式 PAPER seed/readiness、跨标的 source time
   与受理时间分离、实际多标的完整重放及 GraphQL/Web 尚未完成，P4 继续 IN_PROGRESS。
 
+### P4 公共 PAPER 退出路由检查点（2026-09-07，组件验收）
+
+- 原候选/组合协调器/最终 review 已提交 `49707bad3b3a7a14e6d14262e82eb2ba65dfd872`。
+  公共 `ExitPlanRuntime` 的 T PAPER 评估与确认使用同 execution 的持仓及已接受完整 QUOTE，
+  不先读取 LIVE Position。PAPER context.timestamp 是评估时点，原行情时间继续用于新鲜度，
+  不把较早行情时间回填为卖单提交时间。
+- `TradeIntentProcessor` 在 TradingService/Agent 路由前明确分流到公共 Capacity/Sizer/严格
+  Risk/PaperLedger，使用真实券商可卖量与独立 sell cap、execution 冻结 core floor。
+  同一事务的真实 receipt sink 独占委托/成交/计划收敛；成功后不再人为补写 PENDING。
+  恢复只认同 scope PaperOrder，来源 STOPPED 不阻止已承诺的公共退出。
+- 主代理已复核前节 **349 passed** 中的公共链及 Engine 新旧测试，复用最终 PG
+  **1 passed/55.17 秒/73153 exit=0** 的真实公共受理、重复恢复、成交关闭和 core floor
+  合法订单进入 sink 后故障回滚证据。另补闭市 RESERVED 延期公共事件，固定业务键保证重复
+  调用仅一条 `EXIT_INTENT_DEFERRED`，保留保护与 RESERVED、零卖单；主代理定向 **1 passed**
+  （1.62 秒）。相关 Ruff 与最终审核通过，批准公共退出 8 个代码/测试文件与本检查点提交。
+- 尚未据此验收行情调度。跨标的 source time 与本地受理时间需要下一原子协议批次；旧来源
+  存续经济义务的 Engine 行情 pump、最终 ranked entry dispatcher 及多标的整链仍在推进。
+  未完成 GraphQL/Web，P4 保持 IN_PROGRESS，没有业务库/服务启停/真实交易操作。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

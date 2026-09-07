@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerType
 from quantx_domain.trading.exit_plan import ExitEvaluationContext
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -18,7 +19,11 @@ from quantx_infrastructure.services.auto_exit_plan_service import (
   AutoExitPlanService,
 )
 from quantx_infrastructure.services.exit_plan_execution_owner import (
+  durable_exit_plan_source_binding,
   is_public_exit_plan_runtime_eligible,
+)
+from quantx_infrastructure.services.exit_plan_scope_lock import (
+  lock_exit_plan_scope_for_plan,
 )
 from quantx_infrastructure.services.intraday_volume_scanner import (
   intraday_volume_scanner,
@@ -109,9 +114,7 @@ class ExitPlanRuntime:
           account_id=account_id,
           instrument_code=instrument_code,
         )
-        plans = [
-          plan for plan in plans if is_public_exit_plan_runtime_eligible(plan)
-        ]
+        plans = [plan for plan in plans if is_public_exit_plan_runtime_eligible(plan)]
     plans.sort(key=self._plan_priority_key)
     if not plans:
       return []
@@ -124,19 +127,7 @@ class ExitPlanRuntime:
     service = AutoExitPlanService()
     for record in plans:
       try:
-        async with AsyncSessionLocal() as db:
-          position = await PositionRepository(db).find_by_stock_code(
-            record.instrument_code,
-            account_id=record.account_id,
-          )
-        context = self.context_from_state(
-          (
-            states.get(record.instrument_code)
-            if self._market_data_ready()
-            else None
-          ),
-          now=time_utils.now(),
-        )
+        position, context = await self._evaluation_inputs(record, states=states)
         result = await service.evaluate_and_submit(
           plan_id=record.plan_id,
           context=context,
@@ -197,23 +188,12 @@ class ExitPlanRuntime:
         raise ValueError("退出计划不存在")
       if not is_public_exit_plan_runtime_eligible(record):
         raise ValueError("EXIT_PLAN_OWNER_CHANGED")
-      position = await PositionRepository(db).find_by_stock_code(
-        record.instrument_code,
-        account_id=record.account_id,
-      )
     if not self.scanner.is_running:
       await self.scanner.start()
     self.scanner.touch()
     market_session_open = await self.scanner.hub.is_trading_session()
     states = self._ready_states()
-    context = self.context_from_state(
-      (
-        states.get(record.instrument_code)
-        if self._market_data_ready()
-        else None
-      ),
-      now=time_utils.now(),
-    )
+    position, context = await self._evaluation_inputs(record, states=states)
     return await AutoExitPlanService().confirm_exit_intent(
       plan_id=plan_id,
       intent_id=intent_id,
@@ -222,6 +202,70 @@ class ExitPlanRuntime:
       market_session_open=market_session_open,
       market_ready=self._market_data_ready,
       approval_audit=approval_audit,
+    )
+
+  async def _evaluation_inputs(self, record, *, states):
+    binding = durable_exit_plan_source_binding(record)
+    if binding is None:
+      raise ValueError("EXIT_PLAN_OWNER_CHANGED")
+    owner, environment = binding
+    now = time_utils.now()
+    if owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+      if environment is not ExecutionEnvironment.PAPER:
+        raise ValueError("T_ASSISTANT_EXIT_ENVIRONMENT_UNSUPPORTED")
+      from quantx_infrastructure.services.paper_exit_execution import (
+        read_paper_exit_market,
+      )
+
+      async with AsyncSessionLocal() as db:
+        scope = await lock_exit_plan_scope_for_plan(db, record.plan_id)
+        if (
+          scope.target_plan is None
+          or durable_exit_plan_source_binding(scope.target_plan) != binding
+        ):
+          raise ValueError("EXIT_PLAN_OWNER_CHANGED")
+        market = await read_paper_exit_market(
+          db,
+          execution_id=owner.owner_id,
+          instrument_code=record.instrument_code,
+          now=time_utils.to_utc(now),
+        )
+        position = scope.position
+      if not self._market_data_ready():
+        return position, self.context_from_state(None, now=now)
+      return position, self.context_from_paper_market(market, now=now)
+    async with AsyncSessionLocal() as db:
+      position = await PositionRepository(db).find_by_stock_code(
+        record.instrument_code,
+        account_id=record.account_id,
+      )
+    return position, self.context_from_state(
+      states.get(record.instrument_code) if self._market_data_ready() else None,
+      now=now,
+    )
+
+  @staticmethod
+  def context_from_paper_market(market, *, now):
+    timestamp = time_utils.to_shanghai(market.timestamp)
+    age = (time_utils.to_shanghai(now) - timestamp).total_seconds()
+    if age < 0:
+      raise ValueError("PAPER_EXIT_QUOTE_FROM_FUTURE")
+    bid_volume, ask_volume = sum(market.bid_vol), sum(market.ask_vol)
+    total = bid_volume + ask_volume
+    return ExitEvaluationContext(
+      timestamp=time_utils.to_shanghai(now),
+      current_price=market.price,
+      bid_price=market.bid_price[0],
+      ask_price=market.ask_price[0],
+      limit_up=market.limit_up,
+      limit_down=market.limit_down,
+      price_tick=market.price_tick,
+      cumulative_volume=market.volume,
+      cumulative_amount=market.amount,
+      depth_imbalance_5=(bid_volume - ask_volume) / total if total else None,
+      market_data_age_seconds=age,
+      volume_data_age_seconds=age,
+      source="PAPER_ACCEPTED_QUOTE",
     )
 
   def _market_data_ready(self) -> bool:

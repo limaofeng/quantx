@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
@@ -31,6 +32,7 @@ from quantx_domain.trading.exit_plan import ExitDecision, ExitEvaluationContext
 from quantx_domain.trading.t_order_policy import TExitOrderPolicy
 from sqlalchemy import select
 
+from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import PendingTradeOrder
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
@@ -168,6 +170,7 @@ class TradeIntentProcessor:
     decision: ExitDecision,
     intent_id: str,
     limit_price: float,
+    created_at: Optional[datetime] = None,
   ) -> None:
     """Persist the business intent in the same transaction as plan pending state."""
 
@@ -184,6 +187,14 @@ class TradeIntentProcessor:
       ):
         raise ValueError("退出卖出意图标识已被其他业务对象占用")
       return
+    metadata = TradeIntentProcessor._exit_intent_metadata(plan, decision)
+    if (
+      plan.environment == "PAPER"
+      and plan.source_execution_owner_type == "T_ASSISTANT_EXECUTION"
+    ):
+      metadata["intent_created_at"] = time_utils.to_utc(
+        created_at or time_utils.now()
+      ).isoformat()
     db.add(
       TradeIntentRecord(
         id=intent_id,
@@ -203,7 +214,7 @@ class TradeIntentProcessor:
         limit_price_hint=limit_price,
         trace_id=intent_id,
         status="RESERVED",
-        intent_metadata=TradeIntentProcessor._exit_intent_metadata(plan, decision),
+        intent_metadata=metadata,
         notes="EXIT_PLAN_ATOMIC_RESERVATION",
       )
     )
@@ -220,6 +231,20 @@ class TradeIntentProcessor:
     market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
     plan_environment = ExecutionEnvironment(str(plan.environment or "").upper())
+    from quantx_infrastructure.services.paper_exit_execution import (
+      execute_paper_exit,
+      is_t_paper_exit,
+    )
+
+    if is_t_paper_exit(plan):
+      async with AsyncSessionLocal() as db, db.begin():
+        return await execute_paper_exit(
+          db,
+          plan_id=plan.plan_id,
+          intent_id=intent_id,
+          now=context.timestamp,
+          market_ready=market_ready,
+        )
     authorization_code = "PAPER_NOT_REQUIRED"
     exact_auto_authorized = plan_environment is not ExecutionEnvironment.LIVE
     if plan_environment is ExecutionEnvironment.LIVE:
@@ -350,6 +375,10 @@ class TradeIntentProcessor:
     approval_audit: Optional[Mapping[str, Any]] = None,
   ) -> dict[str, Any]:
     plan_environment = ExecutionEnvironment(str(plan.environment or "").upper())
+    from quantx_infrastructure.services.paper_exit_execution import is_t_paper_exit
+
+    if is_t_paper_exit(plan):
+      raise ValueError("PAPER_EXIT_APPROVAL_NOT_APPLICABLE")
     try:
       record_owner = ExecutionOwnerRef(
         ExecutionOwnerType(str(record.owner_type or "").upper()),
@@ -499,6 +528,11 @@ class TradeIntentProcessor:
     ):
       raise ValueError("退出计划路由缺少匹配的 EXIT_PLAN 执行归属")
     route_metadata = _without_owner_metadata(intent.metadata)
+    if (
+      plan_environment is ExecutionEnvironment.PAPER
+      and source_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+    ):
+      raise ValueError("PAPER_EXIT_REQUIRES_DURABLE_LEDGER")
     if str(plan.source_type or "").upper() == "T_TRADE_BATCH":
       route_metadata.update(
         {

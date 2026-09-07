@@ -805,7 +805,12 @@ async def test_pending_submission_is_recovered_from_durable_command():
     request_metadata={},
     status="PENDING",
   )
-  record = SimpleNamespace(account_id="account-a", last_error="previous")
+  record = SimpleNamespace(
+    account_id="account-a", last_error="previous", environment="PAPER",
+    source_execution_owner_type="MANUAL_COMMAND",
+    source_execution_owner_id="manual-position:condition-1",
+    source_execution_environment="PAPER",
+  )
 
   recovered = await AutoExitPlanService._recover_pending_submission(
     FakeDb(pending), record, plan
@@ -1156,7 +1161,12 @@ async def test_orphaned_intent_is_released_for_retry_after_timeout():
   plan.rule_state["__runtime__"] = {
     "pending_marked_at": (datetime.now() - timedelta(seconds=11)).isoformat()
   }
-  record = SimpleNamespace(account_id="account-a", last_error=None)
+  record = SimpleNamespace(
+    account_id="account-a", last_error=None, environment="PAPER",
+    source_execution_owner_type="MANUAL_COMMAND",
+    source_execution_owner_id="manual-position:condition-1",
+    source_execution_environment="PAPER",
+  )
 
   recovered = await AutoExitPlanService._recover_pending_submission(
     FakeDb(None), record, plan

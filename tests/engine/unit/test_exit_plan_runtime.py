@@ -213,6 +213,35 @@ async def test_runtime_evaluates_every_valid_source_independent_of_source_run(
   monkeypatch.setattr(runtime_module, "AutoExitPlanRepository", PlanRepository)
   monkeypatch.setattr(runtime_module, "PositionRepository", Positions)
   monkeypatch.setattr(runtime_module, "AutoExitPlanService", lambda: service)
+  from quantx_domain.trading.market_rules import MarketDataSnapshot
+  from quantx_infrastructure.services import paper_exit_execution
+
+  paper_scope = AsyncMock(
+    return_value=SimpleNamespace(
+      target_plan=independent_t_plan,
+      position=SimpleNamespace(volume=200, can_use_volume=200),
+    )
+  )
+  monkeypatch.setattr(runtime_module, "lock_exit_plan_scope_for_plan", paper_scope)
+  monkeypatch.setattr(
+    paper_exit_execution,
+    "read_paper_exit_market",
+    AsyncMock(
+      return_value=MarketDataSnapshot(
+        instrument_code="600000.SH",
+        timestamp=now,
+        price=10.0,
+        bid_price=[9.99] * 5,
+        ask_price=[10.0] * 5,
+        bid_vol=[100] * 5,
+        ask_vol=[100] * 5,
+        limit_up=11,
+        limit_down=9,
+        volume=1000,
+        amount=10000,
+      )
+    ),
+  )
 
   results = await ExitPlanRuntime(scanner=scanner).evaluate_all_active_plans()
 
@@ -225,6 +254,12 @@ async def test_runtime_evaluates_every_valid_source_independent_of_source_run(
     "unbound-dedicated-plan",
   ]
   assert evaluate_and_submit.await_count == 4
+  paper_scope.assert_awaited_once()
+  assert evaluate_and_submit.await_args_list[0].kwargs["position"].volume == 200
+  assert (
+    evaluate_and_submit.await_args_list[0].kwargs["context"].source
+    == "PAPER_ACCEPTED_QUOTE"
+  )
   assert evaluate_and_submit.await_args_list[2].kwargs["plan_id"] == "strategy-plan"
 
 
@@ -306,9 +341,7 @@ async def test_damaged_first_plan_does_not_starve_later_exit(
       )
     },
   )
-  evaluate = AsyncMock(
-    side_effect=[RuntimeError("corrupted plan"), {"success": True}]
-  )
+  evaluate = AsyncMock(side_effect=[RuntimeError("corrupted plan"), {"success": True}])
   record_failure = AsyncMock()
   service = SimpleNamespace(
     evaluate_and_submit=evaluate,

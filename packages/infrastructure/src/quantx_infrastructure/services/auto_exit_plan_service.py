@@ -5242,6 +5242,23 @@ class AutoExitPlanService:
         if reserved_intent is not None and str(
           reserved_intent.status or ""
         ).upper() == "RESERVED":
+          from quantx_infrastructure.services.paper_exit_execution import (
+            is_t_paper_exit,
+          )
+
+          if is_t_paper_exit(record) and not market_session_open:
+            await self._append_event(
+              db,
+              business_key=f"exit-intent-deferred:{plan_id}:{plan.pending_intent_id}:MARKET_SESSION_CLOSED",
+              plan_id=plan_id,
+              event_type="EXIT_INTENT_DEFERRED",
+              payload={
+                "intent_id": plan.pending_intent_id,
+                "reason_code": "MARKET_SESSION_CLOSED",
+              },
+            )
+            await db.commit()
+            return None
           pending_rule = next(
             (
               rule
@@ -5833,6 +5850,7 @@ class AutoExitPlanService:
         decision=decision,
         intent_id=intent_id,
         limit_price=price,
+        created_at=context.timestamp,
       )
       await db.commit()
 
@@ -5899,6 +5917,13 @@ class AutoExitPlanService:
       )
       return result
 
+    from quantx_infrastructure.services.paper_exit_execution import is_t_paper_exit
+
+    if is_t_paper_exit(record):
+      # The committed PAPER ledger already delivered ORDER before TRADE through
+      # the public sink in its transaction. Never overwrite it with PENDING.
+      return result
+
     client_order_id = str(result.get("client_order_id") or result.get("order_id") or "")
     async with AsyncSessionLocal() as db:
       stored = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
@@ -5942,6 +5967,13 @@ class AutoExitPlanService:
 
   @staticmethod
   async def _recover_pending_submission(db, record, plan: ExitPlan) -> bool:
+    from quantx_infrastructure.services.paper_exit_execution import (
+      is_t_paper_exit,
+      recover_paper_exit,
+    )
+
+    if is_t_paper_exit(record):
+      return await recover_paper_exit(db, record, plan)
     pending = (
       await db.execute(
         select(PendingTradeOrder)
@@ -6036,6 +6068,25 @@ class AutoExitPlanService:
     self, plan_id: str, intent_id: str, error: str
   ) -> None:
     async with AsyncSessionLocal() as db:
+      from quantx_infrastructure.services.paper_exit_execution import (
+        is_t_paper_exit,
+        release_paper_exit,
+      )
+
+      initial = await AutoExitPlanRepository(db).find_by_id(plan_id)
+      if initial is not None and is_t_paper_exit(initial):
+        scope = await lock_exit_plan_scope_for_plan(db, plan_id)
+        record = scope.plan(plan_id)
+        plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+        changed = await release_paper_exit(
+          db, record, plan, intent_id=intent_id, reason=error
+        )
+        if not changed:
+          return
+        self._sync_record(record, plan)
+        record.last_error = error[:2000]
+        await db.commit()
+        return
       record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
       if record is None:
         return
