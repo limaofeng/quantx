@@ -629,6 +629,44 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   下一批 `paper_execution.py` 与 `paper_broker_matching.py` 正在实现，不纳入本批提交。
   本批提交主题为 `feat(t-assistant): recover fenced allocations and enforce sizing caps`。
 
+### P4 PAPER 账本组件验收检查点（2026-09-07，整链仍未完成）
+
+- 已提交 allocation 恢复/sizing 批次：`e6a962963ed4303fa468144a24dca24ec80edd98`。
+- 新增有界 `paper_broker_matching.py`：复用 BacktestBroker 严格五档撮合、费用与 T+1，
+  显式 await，无随机后台任务或 Broker callback。checkpoint schema 2 仅保留经济状态、
+  活动委托和每标的最新行情，历史幂等由 PAPER 事实表承担；1000 Tick 与 40 个终态订单
+  的测试阻止历史进入检查点持续膨胀。
+- 同一个公共 admission sequencer/repository 已支持 PAPER execution scope；LIVE/PAPER
+  查询、attempt、fingerprint 隔离；T 组按已提交 allocation 的 group/rank 排序，prepare/
+  commit 使用相同来源。修复长寿命 Session 的 intent 过期缓存，以及真实 PG 暴露的
+  item insert 早于 intent binding update 的 flush 顺序，未放宽数据库绑定约束。
+- 0053 与 `models/paper_execution.py` 建立独立账户、event、order、fill 事实表及
+  PAPER admission scope；包括 seed 不可变、revision/hash 链、receipt 双向引用与新 BUY
+  当前授权检查。最新 `QUANTX_RUN_MIGRATION_GATE=true` 下运行
+  `tests/infrastructure/test_paper_scope_postgresql.py`：**3 passed**（77.66 秒，26916 exit=0），
+  证明 baseline→0053、公共 PAPER admission、正向 order/两次 partial fill 的分事务恢复、
+  历史幂等、回报 sink 异常回滚、空成交 quote 事件链、半账拒绝、缺失 fill receipt/
+  失效和过期授权拒绝，及 LIVE 五张事实/控制表零写入；测试 schema 已清理确认。
+  首次 68428 因上述 flush 顺序失败，此后已修；不将此用例称为真实订单/成交/ExitPlan闭环。
+- matcher/ledger/PAPER admission/既有 LIVE admission/Alembic/Engine admission 六文件
+  最终组合复验 **93 passed**（9.50 秒，24154 exit=0），相关 Ruff 通过。
+  使用仓库 .venv 与前述 pytest 参数。最终 ledger 修复后 PG 正向订单/成交/恢复用例
+  定向复验 **1 passed**（26.30 秒，98108 exit=0），其余未受影响的 PG 证据复用上述结果。
+- `paper_execution_ledger.py` 在同一 savepoint 中落 PAPER facts、账户/桶账并 await
+  必填异步 receipt sink，失败全回滚。测试 sink 只证明事务边界，尚非公共 ExitPlan 闭环。
+  sizing/risk 输入复用真实 OrderDraft/OrderRiskDecision，不自造 evidence 协议。
+- 审计暴露的新 BUY 原授权 TTL 与 Decimal CAP 精确边界已修复并复核；0053 已增加
+  新 BUY 提交时间必须处于 decision 与 admission 有效窗，历史订单更新不追溯撤销。
+  ledger 账户互斥尚不是最终排名门，不能宣称锁顺序已经保证 admission 排名。
+- 账本组件已通过最终审核，批准提交；最终排名门与公共 receipt sink 未据此验收。
+- 下一步：把 sink 接入公共 intent /
+  TTradeBatch / ExitPlan 收敛，补权威 portfolio snapshot reader、最终按 rank 的公共
+  admission/Capacity/Gate runtime，再完成 GraphQL/Web 与实际 Caddy codegen 门。
+  P4 保持 IN_PROGRESS；本轮未启停服务、操作业务库或执行真实交易。
+  公共 plan 持久化核心正在按 execution owner 解耦：复用同一 AutoExitPlanService /
+  ExitPlanBook / CAS，T PAPER 不伪造 StrategyRun、不从 LIVE Position 取数。卖出 receipt
+  先应用订单累计成交再应用逐笔成交；后续买入 partial fill 必须保留计划 pending/暂停状态。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

@@ -10,6 +10,7 @@ from sqlalchemy import (
   String,
   Text,
   UniqueConstraint,
+  text,
 )
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
@@ -21,8 +22,9 @@ class AccountRiskIncreaseAdmissionBatch(Base, TimestampMixin):
   __tablename__ = "account_risk_increase_admission_batches"
   __table_args__ = (
     CheckConstraint(
-      "environment = 'LIVE'",
-      name="ck_risk_admission_batch_live",
+      "(environment = 'LIVE' AND paper_execution_id IS NULL) OR "
+      "(environment = 'PAPER' AND paper_execution_id IS NOT NULL)",
+      name="ck_risk_admission_batch_scope",
     ),
     CheckConstraint(
       "status IN ('PREPARED','COMMITTED','SUPERSEDED','EXPIRED','FAILED')",
@@ -32,18 +34,22 @@ class AccountRiskIncreaseAdmissionBatch(Base, TimestampMixin):
       "attempt >= 1",
       name="ck_risk_admission_batch_attempt",
     ),
-    UniqueConstraint(
+    Index(
+      "uq_risk_admission_batch_attempt",
       "account_id",
       "environment",
-      "input_fingerprint",
       "attempt",
-      name="uq_risk_admission_batch_input_attempt",
+      unique=True,
+      postgresql_where=text("environment = 'LIVE'"),
+      sqlite_where=text("environment = 'LIVE'"),
     ),
-    UniqueConstraint(
-      "account_id",
-      "environment",
+    Index(
+      "uq_risk_admission_paper_attempt",
+      "paper_execution_id",
       "attempt",
-      name="uq_risk_admission_batch_attempt",
+      unique=True,
+      postgresql_where=text("environment = 'PAPER'"),
+      sqlite_where=text("environment = 'PAPER'"),
     ),
     Index(
       "ix_risk_admission_batch_recovery",
@@ -57,6 +63,11 @@ class AccountRiskIncreaseAdmissionBatch(Base, TimestampMixin):
   admission_batch_id = Column(String(36), primary_key=True)
   account_id = Column(String(50), nullable=False)
   environment = Column(String(16), nullable=False, default="LIVE")
+  paper_execution_id = Column(
+    String(36),
+    ForeignKey("paper_execution_accounts.execution_id", ondelete="RESTRICT"),
+    nullable=True,
+  )
   attempt = Column(Integer, nullable=False)
   policy_version = Column(String(64), nullable=False)
   account_snapshot_id = Column(String(128), nullable=False)

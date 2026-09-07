@@ -43,7 +43,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _install(connection, schema):
+def _install(connection, schema, head):
   connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
   connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
   connection.exec_driver_sql("SET LOCAL statement_timeout = '60s'")
@@ -52,13 +52,13 @@ def _install(connection, schema):
   )
   with Operations.context(MigrationContext.configure(connection)):
     for revision in reversed(
-      list(scripts.walk_revisions(base="base", head="20260907_0052"))
+      list(scripts.walk_revisions(base="base", head=head))
     ):
       revision.module.upgrade()
 
 
 @asynccontextmanager
-async def _sessions():
+async def _sessions(*, head="20260907_0052"):
   root = create_async_engine(os.environ["DATABASE_URL"], echo=False)
   database = root.url.database or ""
   assert database != "quantx" and (
@@ -69,7 +69,7 @@ async def _sessions():
   installed = False
   try:
     async with root.begin() as connection:
-      await connection.run_sync(_install, schema)
+      await connection.run_sync(_install, schema, head)
     installed = True
     scoped = create_async_engine(
       os.environ["DATABASE_URL"],

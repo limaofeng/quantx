@@ -124,6 +124,12 @@ from .liquidation import (
 )
 from .managed_plan import ManagedPlanConfigRevision, ManagedPlanRecord
 from .order import Order
+from .paper_execution import (
+  PaperExecutionAccountRecord,
+  PaperExecutionEventRecord,
+  PaperExecutionFillRecord,
+  PaperExecutionOrderRecord,
+)
 from .position import Position
 from .risk_increase_admission import (
   AccountRiskIncreaseAdmissionBatch,
@@ -265,6 +271,10 @@ __all__ = [
   "TTradeRolloutEvent",
   "TTradeCandidateOutcome",
   "TAllocationBatchRecord",
+  "PaperExecutionAccountRecord",
+  "PaperExecutionEventRecord",
+  "PaperExecutionFillRecord",
+  "PaperExecutionOrderRecord",
   "TAllocationDecisionRecord",
   "TAssistantConfigVersionRecord",
   "TAssistantDecisionCycleRecord",

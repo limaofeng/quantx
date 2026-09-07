@@ -37,6 +37,10 @@ EXPECTED_METADATA_SHA256 = (
 # Models added by revisions after this immutable baseline must not affect its
 # fingerprint or be created early when bootstrapping an empty database.
 POST_BASELINE_TABLES = {
+  "paper_execution_accounts",
+  "paper_execution_events",
+  "paper_execution_orders",
+  "paper_execution_fills",
   "t_allocation_batches",
   "t_allocation_decisions",
   "account_risk_increase_admission_batches",

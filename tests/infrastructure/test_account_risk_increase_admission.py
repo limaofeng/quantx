@@ -106,7 +106,6 @@ def test_two_domains_have_same_winner_when_arrival_order_is_reversed() -> None:
 async def prepared(admission_db, *, now: datetime):
   owners = [
     "STRATEGY_RUN",
-    "T_ASSISTANT_EXECUTION",
     "BOARD_ASSISTANT_EXECUTION",
     "ENTRY_PLAN",
     "MANUAL_COMMAND",
@@ -122,6 +121,17 @@ async def prepared(admission_db, *, now: datetime):
     obligation_watermark="b" * 64,
     now=now,
   )
+
+
+async def test_live_t_ready_without_allocation_is_not_admitted(admission_db):
+  now = datetime(2026, 9, 3, 10)
+  admission_db.add(intent("unbound-t", "T_ASSISTANT_EXECUTION", now))
+  await admission_db.commit()
+  with pytest.raises(ValueError, match="RISK_ADMISSION_T_ALLOCATION_REQUIRED"):
+    await AccountRiskIncreaseAdmissionSequencer(admission_db).prepare_batch(
+      account_id="account", account_snapshot_id="snapshot", account_snapshot_hash="a"*64,
+      obligation_watermark="b"*64, now=now,
+    )
 
 
 @pytest.mark.asyncio
@@ -145,10 +155,9 @@ async def test_prepare_persists_stable_cross_domain_rank(admission_db) -> None:
     "MANUAL_COMMAND",
     "ENTRY_PLAN",
     "BOARD_ASSISTANT_EXECUTION",
-    "T_ASSISTANT_EXECUTION",
     "STRATEGY_RUN",
   ]
-  assert [item.admission_rank for item in items] == [1, 2, 3, 4, 5]
+  assert [item.admission_rank for item in items] == [1, 2, 3, 4]
   assert batch.expires_at == now + timedelta(seconds=ADMISSION_TTL_SECONDS)
 
 
