@@ -59,7 +59,10 @@ from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_reposit
 from quantx_infrastructure.repositories.trade_intent_repository import (
   TradeIntentRepository,
 )
-from quantx_infrastructure.services.trade_intent_intake import trade_intent_record_data
+from quantx_infrastructure.services.trade_intent_intake import (
+  trade_intent_material_from_payload,
+  trade_intent_record_data,
+)
 
 T_CYCLE_LEASE_CONFLICT = "T_CYCLE_LEASE_CONFLICT"
 T_CYCLE_INPUT_STALE = "T_CYCLE_INPUT_STALE"
@@ -109,7 +112,22 @@ class TAssistantDecisionCycleRepository:
       TAssistantDecisionCycleRecord.cycle_id == cycle_id
     )
     if for_update:
-      statement = statement.with_for_update()
+      # All cycle writers, including allocation recovery, use execution first.
+      # The unlocked identity probe is safe because cycle ownership is immutable.
+      execution_id = await self.db.scalar(
+        select(TAssistantDecisionCycleRecord.execution_id).where(
+          TAssistantDecisionCycleRecord.cycle_id == cycle_id
+        )
+      )
+      if execution_id is None:
+        return None
+      await self.db.scalar(
+        select(TAssistantExecutionRecord)
+        .where(TAssistantExecutionRecord.execution_id == execution_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+      )
+      statement = statement.with_for_update().execution_options(populate_existing=True)
     result = await self.db.execute(statement)
     return result.scalar_one_or_none()
 
@@ -565,7 +583,12 @@ class TAssistantDecisionCycleRepository:
         str(item.get("event_key") or "") for item in evidence_rows
       ],
       "accepted_intents": [
-        {"intent_id": payload["id"], "intake_hash": stable_manifest_hash(payload)}
+        {
+          "intent_id": payload["id"],
+          "intake_hash": stable_manifest_hash(
+            trade_intent_material_from_payload(payload)
+          ),
+        }
         for payload in intent_payloads
       ],
       "execution_event_keys": [event.event_key for event in events],

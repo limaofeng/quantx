@@ -597,6 +597,38 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   不纳入本批。提交由专用 Git 子代理执行，历史主题
   `feat(t-assistant): persist atomic intent intake and allocation constraints`。
 
+### P4 allocation 恢复与数量上限批次（2026-09-07）
+
+- 上批提交 `8e3c543ee62ad36c2900176dae75790e6921356c`；本批新增
+  `repositories/t_allocation_repository.py`、`services/t_allocation_serialization.py`
+  与对应测试。prepare/claim/renew/commit/expire/supersede/recovery 只 flush；整批提交在
+  savepoint 内重算分配、先落全部 decision，再推进全部 intent version/status。
+  eligible 集合、原始意图材料、最新 RUNNING/READY、source/intent 双 TTL 均复验；
+  RULE_ONLY 固定 `rank_score = rule_score / 100`，rule score 绑定原机会证据。
+- 主审修复：P3 与 allocation 共用 execution→cycle 锁序；原始受理 hash 只包含不可变
+  producer 材料，排除合法 notes/risk/order annotations。0052 增量迁移保护全部对应
+  producer metadata 与请求字段，避免执行中的兄弟 intent 阻断 DELAY 后续 attempt。
+- 共享 `OrderSizer.draft_intent(..., allocated_amount_cap=...)` 使用含佣金及过户费的
+  现金上限限制合法整手，不修改原请求；保留具体缩量/不足一手原因。未传 cap 的既有调用
+  语义保持不变；更高申报门槛仍由公共 RiskChecker 校验。
+- 验证：`QUANTX_RUN_MIGRATION_GATE=true`、仓库 `.venv/Scripts/python.exe -m pytest
+  tests/infrastructure/test_p4_allocation_postgresql.py -o 'addopts=-ra --import-mode=importlib'
+  -q --tb=short -p no:cacheprovider --maxfail=1`：**5 passed**（100.28 秒，36741 exit=0）。
+  每例专用测试库随机 schema，baseline→0052；覆盖三连接 prepare/claim 唯一赢家、
+  新进程对象接管旧 lease/fence、半批异常后重试、DELAY 第二 attempt/CAP 历史保留、
+  兄弟 intent 注释、producer 篡改拒绝、TTL/supersede/环境串写及真实 P3 prepare 交叉锁。
+  每例结束后仅清理自己的测试 schema 并确认不存在，未写业务库。
+- 定向扩大回归：application 的 snapshot/allocation/Gate 三文件、infrastructure 的
+  allocation/atomic intake/runtime repository/intent acceptance/runtime recovery/Alembic
+  六文件、Engine PAPER shadow 与新 sizing 文件共 **298 passed**；另既有
+  `tests/domain/test_positive_t_order_capacity.py` **5 passed**。均使用上述 pytest 参数；
+  本批十个 Python 文件 Ruff 通过。首次 PG 的 3/4 项证据被上述最终五项整改复验替代。
+- 当前验证只证明 allocation 持久化、恢复和共享 sizing 接口；账户 snapshot/义务真源
+  adapter、公共 admission 最终排名、隔离 PAPER ledger/Broker/成交/ExitPlan 和只读
+  GraphQL/Web 尚未完成，P4 不标 DONE。未改本任务 GraphQL、未启停服务或真实下单。
+  下一批 `paper_execution.py` 与 `paper_broker_matching.py` 正在实现，不纳入本批提交。
+  本批提交主题为 `feat(t-assistant): recover fenced allocations and enforce sizing caps`。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

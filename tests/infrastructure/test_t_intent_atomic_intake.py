@@ -32,6 +32,7 @@ from quantx_infrastructure.repositories.trade_intent_repository import (
 )
 from quantx_infrastructure.services.trade_intent_intake import (
   trade_intent_initial_material,
+  trade_intent_material_from_payload,
   trade_intent_record_data,
 )
 from sqlalchemy import func, select
@@ -70,7 +71,9 @@ async def test_initial_intake_material_survives_float_database_round_trip(sessio
         allocation_version=0,
       )
       assert type(expected["target_amount"]) is float
-      assert trade_intent_initial_material(record) == expected
+      assert trade_intent_initial_material(
+        record
+      ) == trade_intent_material_from_payload(expected)
 
 
 def _intent(execution, *, intent_id="intent-1", cycle_id="intake-cycle"):

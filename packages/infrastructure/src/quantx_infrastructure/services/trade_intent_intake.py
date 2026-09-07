@@ -143,44 +143,70 @@ def _finite_float(value: Any) -> float | None:
   return result
 
 
-def trade_intent_initial_material(record: Any) -> Dict[str, Any]:
-  """Reconstruct the original T-cycle intake, excluding later allocation state.
+T_INTENT_PRODUCER_METADATA_KEYS = (
+  "source_execution_ref",
+  "instrument_code",
+  "candidate_id",
+  "candidate_fingerprint",
+  "policy_version",
+  "feature_schema_version",
+  "source_time_ms",
+  "tick_ordinal",
+  "opportunity_score",
+  "requested_entry_amount",
+  "t_trade_role",
+  "t_batch_id",
+  "exit_plan_id",
+  "exit_plan_template",
+  "origin_type",
+  "plan_id",
+  "execution_mode",
+  "approval_ttl_ms",
+  "expiry_policy",
+  "max_price_deviation_bps",
+  "intent_created_at",
+)
+_T_INTENT_MATERIAL_FIELDS = (
+  "id",
+  "strategy_run_id",
+  "owner_type",
+  "owner_id",
+  "environment",
+  "idempotency_key",
+  "account_id",
+  "strategy_id",
+  "instrument_code",
+  "direction",
+  "bucket",
+  "reason",
+  "priority",
+  "intent_type",
+  "confidence",
+  "target_amount",
+  "target_position_pct",
+  "target_volume",
+  "limit_price_hint",
+  "trace_id",
+  "allocation_cycle_id",
+)
 
-  Allocation does not modify producer metadata or intent material. Keeping this
-  projection next to the sole serializer prevents repository-specific hashes.
-  """
-  payload = {
-    key: getattr(record, key)
-    for key in (
-      "id",
-      "strategy_run_id",
-      "owner_type",
-      "owner_id",
-      "environment",
-      "idempotency_key",
-      "account_id",
-      "strategy_id",
-      "instrument_code",
-      "direction",
-      "bucket",
-      "reason",
-      "priority",
-      "intent_type",
-      "confidence",
-      "target_amount",
-      "target_position_pct",
-      "target_volume",
-      "limit_price_hint",
-      "trace_id",
-      "notes",
-      "allocation_cycle_id",
-    )
-  }
+
+def trade_intent_material_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+  """Immutable producer evidence; execution annotations are a separate concern."""
+  material = {key: payload.get(key) for key in _T_INTENT_MATERIAL_FIELDS}
   for key in ("confidence", "target_amount", "target_position_pct", "limit_price_hint"):
-    payload[key] = _finite_float(payload[key])
-  payload.update(
-    metadata=dict(record.intent_metadata),
+    material[key] = _finite_float(material[key])
+  metadata = dict(payload.get("metadata") or {})
+  material.update(
+    metadata={key: metadata.get(key) for key in T_INTENT_PRODUCER_METADATA_KEYS},
     status="ALLOCATION_PENDING",
     allocation_version=0,
   )
-  return payload
+  return material
+
+
+def trade_intent_initial_material(record: Any) -> Dict[str, Any]:
+  """Recover original standard T intent evidence without later risk/order traces."""
+  payload = {key: getattr(record, key) for key in _T_INTENT_MATERIAL_FIELDS}
+  payload["metadata"] = record.intent_metadata
+  return trade_intent_material_from_payload(payload)

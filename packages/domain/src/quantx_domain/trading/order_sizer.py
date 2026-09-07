@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from quantx_domain.brokers.base import OrderType
 from quantx_domain.strategies.base import TradeIntent
 
+from .exit_plan import estimate_buy_fee_cny
 from .market_rules import AShareMarketRules
 
 
@@ -41,7 +43,27 @@ class OrderSizer:
     price: float,
     account: Dict[str, Any],
     position: Optional[Dict[str, Any]] = None,
+    *,
+    allocated_amount_cap: Decimal | float | int | None = None,
   ) -> OrderDraft:
+    allocation_cap = None
+    if allocated_amount_cap is not None:
+      if isinstance(allocated_amount_cap, bool) or not isinstance(
+        allocated_amount_cap, (Decimal, float, int)
+      ):
+        raise ValueError("ALLOCATION_AMOUNT_CAP_INVALID")
+      allocation_cap = Decimal(str(allocated_amount_cap))
+      if not allocation_cap.is_finite() or allocation_cap < 0:
+        raise ValueError("ALLOCATION_AMOUNT_CAP_INVALID")
+      if order_type is not OrderType.BUY:
+        raise ValueError("ALLOCATION_AMOUNT_CAP_REQUIRES_BUY")
+      if (
+        isinstance(price, bool)
+        or not isinstance(price, (Decimal, float, int))
+        or not Decimal(str(price)).is_finite()
+        or price <= 0
+      ):
+        raise ValueError("ALLOCATION_AMOUNT_CAP_PRICE_INVALID")
     metadata = dict(intent.metadata or {})
     requested_volume = intent.target_volume or _optional_int(
       metadata.get("requested_volume", metadata.get("volume"))
@@ -82,10 +104,19 @@ class OrderSizer:
         # Positive T must be exit-capable using old shares under T+1. This is
         # an execution fact supplied by the portfolio, never strategy metadata.
         holding = dict(position or {})
-        capacity = max(0, int(holding.get("t_trade_exit_capacity", max(
-          0, int(holding.get("available_volume", 0))
-          - int(holding.get("locked_core_available_volume", 0)),
-        ))))
+        capacity = max(
+          0,
+          int(
+            holding.get(
+              "t_trade_exit_capacity",
+              max(
+                0,
+                int(holding.get("available_volume", 0))
+                - int(holding.get("locked_core_available_volume", 0)),
+              ),
+            )
+          ),
+        )
         capped = min(sized_volume, self.rules.normalize_buy_volume(capacity))
         if capped != sized_volume:
           reason_codes.append("T_TRADE_OLD_INVENTORY_CAP")
@@ -106,6 +137,38 @@ class OrderSizer:
     else:
       sized_volume = 0
       reason_codes.append("UNSUPPORTED_ORDER_TYPE")
+
+    if allocation_cap is not None:
+      # Allocation is a cash ceiling including the same conservative buy fees
+      # used by account capacity. Preserve the intent and its requested draft.
+      def cash_required(volume: int) -> Decimal:
+        return Decimal(str(price)) * volume + Decimal(
+          str(estimate_buy_fee_cny(price=price, volume=volume))
+        )
+
+      low, high = 0, sized_volume // self.rules.lot_size
+      while low < high:
+        middle = (low + high + 1) // 2
+        if cash_required(middle * self.rules.lot_size) <= allocation_cap:
+          low = middle
+        else:
+          high = middle - 1
+      capped_volume = low * self.rules.lot_size
+      if capped_volume < sized_volume:
+        reason_codes.append("ALLOCATION_AMOUNT_CAP")
+        if capped_volume == 0:
+          reason_codes.append("MIN_LOT_EXCEEDS_ALLOCATION_BUDGET")
+      sized_volume = capped_volume
+      metadata.update(
+        allocated_amount_cap=str(allocation_cap),
+        allocation_estimated_fee_cny=str(
+          estimate_buy_fee_cny(
+            price=price,
+            volume=sized_volume,
+          )
+        ),
+        allocation_cash_required=str(cash_required(sized_volume)),
+      )
 
     if sized_volume <= 0:
       if (
@@ -140,9 +203,7 @@ class OrderSizer:
     account: Dict[str, Any],
     position: Optional[Dict[str, Any]] = None,
   ) -> int:
-    return self.draft_intent(
-      intent, order_type, price, account, position
-    ).sized_volume
+    return self.draft_intent(intent, order_type, price, account, position).sized_volume
 
   def _target_buy_volume(
     self,
