@@ -1,17 +1,19 @@
 """Acquire and freeze historical source pages before shared-account execution.
 
-Callers inject the existing HistoricalMarketDataService and TradingCalendarService
+Callers inject the existing HistoricalMarketDataService and TradingDateHelper
 with their explicitly selected data environment. This module never discovers or
 starts a service, connects to QMT, or writes back to either source.
 """
 
 from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite
+from numbers import Integral, Real
 from pathlib import Path
 from uuid import uuid4
 
 from quantx_domain.clock import SHANGHAI
 from quantx_domain.trading.market_rules import MarketDataSnapshot
+from quantx_domain.trading.market_session import classify_market_data_session
 from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
 from quantx_domain.trading.t_assistant_market_state import AcceptedTMarketTick
 from quantx_domain.trading.t_trade import normalize_ashare_cumulative_volume
@@ -39,6 +41,17 @@ FIELDS = (
   "up_stop_price",
   "down_stop_price",
 )
+
+
+def _archive_value(value):
+  """Arrow/pandas missing numerics are null archive facts, never fake prices."""
+  if isinstance(value, (list, tuple)):
+    return [_archive_value(v) for v in value]
+  if isinstance(value, Real) and not isinstance(value, bool):
+    if not isfinite(value):
+      return None
+    return int(value) if isinstance(value, Integral) else float(value)
+  return value
 
 
 def _event(row, *, stream_id, sequence, symbol_sequence, latency_ms):
@@ -114,6 +127,8 @@ class FrozenBacktestDataset:
   @property
   def input_manifest(self):
     material = self.manifest["material"]
+    if material["status"] == "REFERENCE_REQUIRED":
+      raise ValueError("BACKTEST_DATA_REFERENCE_REQUIRED")
     if material["status"] != "FROZEN":
       raise ValueError("BACKTEST_DATA_ACQUISITION_INCOMPLETE")
     parts = [p for p in material["parts"] if p["code"] in self.instruments]
@@ -130,6 +145,8 @@ class FrozenBacktestDataset:
 
   def events(self):
     material = self.manifest["material"]
+    if material["status"] == "REFERENCE_REQUIRED":
+      raise ValueError("BACKTEST_DATA_REFERENCE_REQUIRED")
     if material["status"] != "FROZEN":
       raise ValueError("BACKTEST_DATA_ACQUISITION_INCOMPLETE")
     counts = {code: 0 for code in self.instruments}
@@ -152,6 +169,9 @@ class FrozenBacktestDataset:
         rows.extend(content["rows"])
       rows.sort(key=lambda r: (r["source_time_ms"], r["tick_ordinal"], r["stock_code"]))
       for row in rows:
+        source_at = datetime.fromtimestamp(row["source_time_ms"] / 1000, SHANGHAI)
+        if not classify_market_data_session(source_at).is_continuous:
+          continue
         sequence += 1
         counts[row["stock_code"]] += 1
         yield _event(
@@ -173,6 +193,9 @@ async def acquire_backtest_dataset(
   end: date,
   root: Path,
   latency_ms: int,
+  stop_on_error: bool = False,
+  on_partition=None,
+  preserve_raw: bool = False,
 ):
   """Persist incomplete acquisition evidence without changing the sample range.
 
@@ -196,10 +219,11 @@ async def acquire_backtest_dataset(
   )
   if not days or days != sorted(set(days)) or min(days) < start or max(days) > end:
     raise ValueError("BACKTEST_CALENDAR_INVALID")
-  parts, failures = [], []
+  parts, failures, references = [], [], []
   for day in days:
     for symbol_index, code in enumerate(sorted(instruments)):
       rows, previous = [], None
+      missing_references = {}
       reason = None
       try:
         async for page in history.iter_tick_pages(
@@ -209,7 +233,38 @@ async def acquire_backtest_dataset(
         ):
           for tick in page:
             row = {key: getattr(tick, key) for key in FIELDS}
+            if preserve_raw:
+              row = {key: _archive_value(value) for key, value in row.items()}
+              row["last_close"] = _archive_value(getattr(tick, "last_close", None))
             identity = (row["source_time_ms"], row["tick_ordinal"])
+            if preserve_raw:
+              if (
+                row["stock_code"] != code
+                or type(identity[0]) is not int
+                or identity[0] <= 0
+                or type(identity[1]) is not int
+                or identity[1] < 0
+                or (previous is not None and identity <= previous)
+              ):
+                raise ValueError("BACKTEST_SOURCE_IDENTITY_INVALID")
+              source_at = datetime.fromtimestamp(identity[0] / 1000, SHANGHAI)
+              if source_at.date() != day:
+                raise ValueError("BACKTEST_SOURCE_OUTSIDE_REQUEST")
+              if not classify_market_data_session(source_at).is_continuous:
+                rows.append(row)
+                previous = identity
+                continue
+              missing = [
+                key
+                for key in ("price_tick", "up_stop_price", "down_stop_price")
+                if row[key] is None or row[key] <= 0
+              ]
+              if missing:
+                for key in missing:
+                  missing_references[key] = missing_references.get(key, 0) + 1
+                rows.append(row)
+                previous = identity
+                continue
             if (
               row["stock_code"] != code
               or type(identity[0]) is not int
@@ -254,6 +309,10 @@ async def acquire_backtest_dataset(
             "rows_seen": len(rows),
           }
         )
+      if missing_references:
+        references.append(
+          {"day": day.isoformat(), "code": code, "missing_fields": missing_references}
+        )
       content = {"rows": rows}
       filename = f"ticks-{day.isoformat()}-{symbol_index}.json"
       TAssistantBacktestStore._create(directory / filename, content)
@@ -268,8 +327,17 @@ async def acquire_backtest_dataset(
           "first_ms": min(times) if times else None,
           "last_ms": max(times) if times else None,
           "source_exhausted": reason is None,
+          "missing_reference_fields": missing_references,
         }
       )
+      if on_partition is not None:
+        on_partition(
+          {**parts[-1], "reason": reason or ("EMPTY_SOURCE" if not rows else None)}
+        )
+      if reason and stop_on_error:
+        break
+    if reason and stop_on_error:
+      break
   material = {
     "schema_version": "backtest-tick-dataset.v1",
     "source_version": source_version,
@@ -281,8 +349,16 @@ async def acquire_backtest_dataset(
     "ordering": ["source_time_ms", "tick_ordinal", "instrument_code"],
     "parts": parts,
     "failures": failures,
-    "status": "INCOMPLETE" if failures else "FROZEN",
+    "status": "INCOMPLETE"
+    if failures
+    else "REFERENCE_REQUIRED"
+    if references
+    else "FROZEN",
+    "reference_requirements": references,
+    "preserve_raw": preserve_raw,
+    "replay_session_policy": "CONTINUOUS_ONLY.v1",
     "strategy_sample_approval": "NOT_CONFIRMED",
+    "unattempted_partitions": len(days) * len(instruments) - len(parts),
   }
   TAssistantBacktestStore._create(
     directory / "dataset.json",

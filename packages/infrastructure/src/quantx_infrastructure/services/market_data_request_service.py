@@ -296,6 +296,7 @@ async def request_agent_market_data(
   payload: dict[str, Any],
   timeout_seconds: float = 600,
   idempotency_scope: str = "",
+  retry_failed_requests: bool = True,
 ) -> dict[str, Any]:
   """Request, ingest, and terminally converge one idempotent XTData transfer."""
   store = DurableRuntimeStore()
@@ -328,7 +329,7 @@ async def request_agent_market_data(
         # A request created during this invocation already received one fresh
         # Agent attempt.  Return its concrete failure instead of spinning and
         # producing an unbounded retry chain in one caller deadline.
-        if request_id in newly_queued_retry_ids:
+        if not retry_failed_requests or request_id in newly_queued_retry_ids:
           return {
             "status": "failed",
             "request_id": request_id,

@@ -983,7 +983,7 @@ runtime。P1 运行证据、owner 空值=`0`、快照
 ### P5-C 工程准备与最终交接（2026-09-07，P5 未 DONE）
 
 - 已完成：历史数据获取接口 `acquire_backtest_dataset` 注入现有 HistoricalMarketDataService
-  与 TradingCalendarService，逐标的/交易日遍历严格分页，冻结原始五档、源身份、日历、
+  与 TradingDateHelper，逐标的/交易日遍历严格分页，冻结原始五档、源身份、日历、
   成交量口径、延迟、分区hash与源遍历结果。缺字段、重复/乱序、缺涨跌停、源中断保留
   INCOMPLETE 证据，禁止补造或回放；异常只保留安全错误码，不保存连接细节。
   存储遍历/字段检查不冒充已确认的统计样本完整性门；完整性阈值仍属正式评估条件。
@@ -1033,6 +1033,38 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   `.codex_screenshots/p5-formal-preflight.log`。复用其余有效工程证据，未进行全量回归。
 - 提交：本检查点所在 `fix(t-assistant): gate formal backtests on explicit data qualification`。
   当前未通过门仍为正式口径/访问范围确认及其后的真实数据评估，P5保持IN_PROGRESS，P6阻断。
+
+### P5-C 2026年8月缓存获取（2026-09-08）
+
+- 用户确认本轮取数区间2026-08-01～2026-08-31；标的为当前持仓8只加分众传媒、招商银行、
+  平安银行，共11只：000001.SZ、000543.SZ、002027.SZ、002594.SZ、302132.SZ、600036.SH、
+  605499.SH、688213.SH、688552.SH、688577.SH、689009.SH。仅使用持仓标的，不复制真实账户
+  数量、现金或成本。此前一年/200交易日建议不适用于本轮；策略准入数值仍未确认。
+- 正式程序入口 `ops/t-assistant-backtest-data.py`：经HistoricalMarketDataService严格分页读取
+  持久化Tick缓存和TradingDateHelper日历；本进程关闭Influx自动重试，首个源错误即停。
+  支持首票/首日probe和单个缺口的标准行情队列补采，不直接导入或调用miniqmt/xtquant。
+- 实际发现并修复：历史缓存的price_tick/up_stop_price/down_stop_price为缺失值，并含集合
+  竞价零成交价。原入口把原始归档与可执行校验混用，首条即失败。新增显式原始归档模式，
+  缺失数值保存为null，保留last_close及原始盘口，标记REFERENCE_REQUIRED；执行入口仍拒绝
+  缺参考资料的归档，未推测或填造涨跌停价。回放使用公共连续交易时段分类。
+- 单日验证：皖能电力2026-08-03从缓存完整读取4597条；4503条连续交易时段记录缺参考字段。
+  整月盘点一次完成：21交易日×11标的=231分区，162分区有记录，69分区为空，共722131条。
+  这里“有记录”不等于完整有效交易日。各标的数据条数/有记录日数：
+  000001 0/0；000543 57894/13；002027 77816/16；002594 93237/19；302132 85107/19；
+  600036 0/0；605499 95395/19；688213 93657/19；688552 71046/19；688577 55547/19；689009 92432/19。
+- 冻结缓存目录 `.runtime/backtests/p5-202608/datasets/8a22c19e-09e3-412d-b4cb-579901907d56`，
+  manifest hash `a27f848adbd1594706d3808ef28501f987a47bf97054904184bb3a0120e933e1`；
+  status=INCOMPLETE，所有计划分区均已尝试，无未盘点分区。原始JSON与manifest不提交Git。
+- 缺口试采：平安银行2026-08-31缓存为空，使用标准durable行情请求，关闭FAILED重开/换代。
+  请求 `d3ffe20a-f46f-4a5e-8912-ec8b2da36a84` 首次等待60秒超时，续等同一幂等请求120秒
+  仍未完成；最后观察为DELIVERED，Agent日志确认joined queued or active upload，未创建
+  第二条请求。无上传/入库结果，不能据此断言历史期限限制。不再重发或扩大补采，保留句柄。
+- 验证：获取/评估相关17项通过，标准行情队列及禁止失败重试相关16项通过；Ruff通过。
+  证据 `.codex_screenshots/p5-august-cache-acquisition.log`、`p5-august-supplement-*.log`、
+  `p5-cache-acquisition-tests.log`、`p5-cache-gateway-tests.log`。
+- 提交：本检查点所在 `feat(t-assistant): acquire August tick archives through cache gateway`。
+  阻碍：69个缓存缺口、历史执行参考字段缺失、补采请求未返回；正式回测/准入未运行，P5仍
+  IN_PROGRESS、P6阻断。未启停服务、未执行真实交易，其他工作树改动保留。
 
 ## 11. 变更记录
 
