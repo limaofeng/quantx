@@ -176,7 +176,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `DONE` | `P1 DONE`；实现、恢复测试与 Windows 运行验收完成 | 无第二真源，故障恢复通过 | 0048/0050 实库与隔离恢复通过；BUY 整链 39 项及根回归，见 §10 |
 | P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
 | P4 | 分配、PAPER 与跨域准入 | `DONE` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 六项实现、隔离 PG 闭环/故障门及实际 Caddy/Web 契约检查完成，业务库 0056；证据见 §10 |
-| P5 | 共享账户回测 | `IN_PROGRESS` | P4 | 无重复资金/未来数据，结果可重放 | P5-A 最小整链通过；P5-B/C 待完成，策略准入未确认 |
+| P5 | 共享账户回测 | `IN_PROGRESS` | P4 | 无重复资金/未来数据，结果可重放 | P5-A/B 工程整链与边界通过；P5-C 准入未确认 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
 | P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
 | P8 | 模型 SHADOW/ACTIVE | `NOT_STARTED` | P5；ACTIVE 依赖 P7 | OOS 增量、门禁、人工发布闭环 | 待补 |
@@ -293,9 +293,9 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 前置：P4 `DONE`。
 
 - [x] `TTA-P5-01` 每次回测使用 BACKTEST execution、单一时钟、共享现金/库存/费用和 Broker。
-- [ ] `TTA-P5-02` LIVE/BACKTEST 复用同一 step、reducer、Coordinator、Gate、OrderSizer、Risk、
+- [x] `TTA-P5-02` LIVE/BACKTEST 复用同一 step、reducer、Coordinator、Gate、OrderSizer、Risk、
   Capacity、ExitPlan 和回报收敛语义。
-- [ ] `TTA-P5-03` 加入多标的同时信号、部分成交、T+1 substitution、截止时间与 overnight carry。
+- [x] `TTA-P5-03` 加入多标的同时信号、部分成交、T+1 substitution、截止时间与 overnight carry。
 - [ ] `TTA-P5-04` 证明无未来数据、无重复资金、无超老仓、结果 hash 可重放，并对比旧单票假设。
 
 范围：本阶段只交付 RULE_ONLY。复用已实现的公共规则与执行语义，但不得将 PAPER
@@ -967,6 +967,18 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   剩余：P5-B 边界与中断恢复验收，数据获取/评估准备；TTA-P5-02整阶段复用门待边界验证后勾选。
 - 成本：本任务总token、缓存输入、非缓存输入、输出token与精确起始耗时均无可用任务级计量，
   记为未知；不以账户共享额度百分比换算token。
+
+### P5-B 边界检查点（2026-09-07）
+
+- P5-A 提交 `d10e99e68`。P5-B 实际公共链路新增13项定向测试全部通过：同时信号稳定排名、
+  现金不足只选一票、部分成交累计最低费用只收一次、老仓置换后核心仓归因保持、恰好100股
+  老仓不重复占用、保护核心仓禁止入场、14:50前撤BUY再撮合、截止后不入场、隔夜日历/收盘
+  mark/库存结算、异环境与异execution/未知ExitPlan拒单、未来profile/行情及重复源身份拒绝。
+- 在部分BUY已收敛和SELL已提交两个位置注入中断，恢复逐帧核对原hash链，最终均4订单/6成交；
+  输入代码版本变化拒绝恢复。日志 `.codex_screenshots/p5-b-boundaries.log`。本批仅新增边界测试，
+  复用P5-A公共规则回归；无需数据库/服务/E2E/真实交易。
+- 提交：本检查点所在 `test(t-assistant): verify shared-account backtest boundaries`。
+  剩余：P5-C数据获取与评估准备、旧单票假设对照；实际策略准入阈值用户暂不确认，P5/P6门不开放。
 
 ## 11. 变更记录
 
