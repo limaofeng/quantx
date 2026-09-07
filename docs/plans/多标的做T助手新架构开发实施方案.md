@@ -1,6 +1,6 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0—P4 已完成；P5—P8 尚未开始）<br>
+> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程实施中；P6—P8 尚未开始）<br>
 > 版本：2.4<br>
 > 日期：2026-09-07<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
@@ -176,7 +176,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `DONE` | `P1 DONE`；实现、恢复测试与 Windows 运行验收完成 | 无第二真源，故障恢复通过 | 0048/0050 实库与隔离恢复通过；BUY 整链 39 项及根回归，见 §10 |
 | P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
 | P4 | 分配、PAPER 与跨域准入 | `DONE` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 六项实现、隔离 PG 闭环/故障门及实际 Caddy/Web 契约检查完成，业务库 0056；证据见 §10 |
-| P5 | 共享账户回测 | `NOT_STARTED` | P4 | 无重复资金/未来数据，结果可重放 | 待补 |
+| P5 | 共享账户回测 | `IN_PROGRESS` | P4 | 无重复资金/未来数据，结果可重放 | P5-A 最小整链通过；P5-B/C 待完成，策略准入未确认 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
 | P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
 | P8 | 模型 SHADOW/ACTIVE | `NOT_STARTED` | P5；ACTIVE 依赖 P7 | OOS 增量、门禁、人工发布闭环 | 待补 |
@@ -292,7 +292,7 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 
 前置：P4 `DONE`。
 
-- [ ] `TTA-P5-01` 每次回测使用 BACKTEST execution、单一时钟、共享现金/库存/费用和 Broker。
+- [x] `TTA-P5-01` 每次回测使用 BACKTEST execution、单一时钟、共享现金/库存/费用和 Broker。
 - [ ] `TTA-P5-02` LIVE/BACKTEST 复用同一 step、reducer、Coordinator、Gate、OrderSizer、Risk、
   Capacity、ExitPlan 和回报收敛语义。
 - [ ] `TTA-P5-03` 加入多标的同时信号、部分成交、T+1 substitution、截止时间与 overnight carry。
@@ -945,6 +945,28 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   OrderSizer/Risk/Capacity、ExitPlan 与回报语义；参考实际双标的 replay 和 0056 负测。
   PAPER ledger 的 execution scope、双时钟和显式 seed 不可改名冒充 BACKTEST；下一任务仅按
   P5-A 明确 BACKTEST 端口与共享账户时钟，不自动扩展评估或模型范围。
+
+### P5-A 共享账户最小整链检查点（2026-09-07）
+
+- 前置：P4 完整退出记录已在 `f96f41749` 提交，复用 §10 既有验收。用户授权连续完成
+  P5-A/B/C，批次只作验证/提交边界；本次始终单代理，不进入 P6。
+- 接口：`BacktestRequest` / `execute_backtest` 每次新建 BACKTEST execution 与冻结版本；
+  `TAssistantBacktestStore` 仅使用独立本地目录，保存 config/data/code/Broker/时间线/初始资产
+  manifest、串行收敛帧 hash 链及结果。恢复核对冻结输入并重放已提交前缀，不重写既有事实。
+- `TAssistantBacktestRuntime` 复用 StrategyBase.step/reducer、allocator、公共 admission 排序、
+  Gate、OrderSizer/Risk、老仓 claim、日内估值和 ExitPlanBook；共用一个 BacktestBroker 和
+  BucketLedger。纯候选投影和库存 claim 从 PAPER 数据库适配器移出后两端引用同一实现。
+  Gate 新增明确绑定 frozen BACKTEST execution 的入口；原 PAPER 入口仍拒绝 BACKTEST。
+- 验证：实际双标的规则信号→买入→原止盈退出，共4订单，现金/费用与库存守恒；逆序输入
+  稳定重排后逐帧一致，独立 execution 经济 hash 一致，同 execution 恢复结果一致。
+  相关回归185通过/1跳过（既有隔离PG迁移门）；费用适配后受影响167项通过。
+  日志 `.codex_screenshots/p5-a-targeted.log`、`p5-a-final.log`；未操作业务库、服务或真实交易。
+- P5-C：用户明确“先完成工程，暂不确认策略准入阈值”；先前建议不视为已确认标准。
+  数据获取纳入功能范围，不再要求用户预先提供离线文件。P5-C实际准入与P6仍阻断。
+- 提交：本检查点所在 `feat(t-assistant): add isolated shared-account backtest execution`。
+  剩余：P5-B 边界与中断恢复验收，数据获取/评估准备；TTA-P5-02整阶段复用门待边界验证后勾选。
+- 成本：本任务总token、缓存输入、非缓存输入、输出token与精确起始耗时均无可用任务级计量，
+  记为未知；不以账户共享额度百分比换算token。
 
 ## 11. 变更记录
 

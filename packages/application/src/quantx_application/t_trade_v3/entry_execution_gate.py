@@ -203,6 +203,30 @@ class EntryExecutionGate:
 
   @staticmethod
   def evaluate(request: EntryExecutionGateInput) -> EntryExecutionGateResult:
+    return EntryExecutionGate._evaluate(request, ExecutionEnvironment.PAPER)
+
+  @staticmethod
+  def evaluate_backtest(
+    request: EntryExecutionGateInput, *, execution
+  ) -> EntryExecutionGateResult:
+    """Explicit frozen BACKTEST binding; the PAPER entry point stays PAPER-only."""
+    if (
+      execution.environment is not ExecutionEnvironment.BACKTEST
+      or request.execution_environment is not ExecutionEnvironment.BACKTEST
+      or request.frozen_binding.config_version_id != execution.config_version_id
+      or request.frozen_binding.config_snapshot_hash != execution.config_snapshot_hash
+      or request.frozen_binding.policy_version != execution.policy_version
+      or request.frozen_binding.feature_schema_version
+      != execution.feature_schema_version
+      or execution.scorer_mode is not TAssistantScorerMode.RULE_ONLY
+    ):
+      raise ValueError("T_ENTRY_BACKTEST_EXECUTION_BINDING_INVALID")
+    return EntryExecutionGate._evaluate(request, ExecutionEnvironment.BACKTEST)
+
+  @staticmethod
+  def _evaluate(
+    request: EntryExecutionGateInput, environment: ExecutionEnvironment
+  ) -> EntryExecutionGateResult:
     r = request
     candidate = r.candidate
     binding = r.frozen_binding
@@ -216,7 +240,7 @@ class EntryExecutionGate:
       rejects.append("T_ENTRY_CANDIDATE_INVALID")
     if r.candidate_ring_generation != r.latest_ring_generation:
       rejects.append("T_ENTRY_MARKET_DISCONTINUITY")
-    if r.execution_environment is not ExecutionEnvironment.PAPER:
+    if r.execution_environment is not environment:
       rejects.append("T_ENTRY_ENVIRONMENT_UNSUPPORTED")
     if (
       binding.scorer_mode is not TAssistantScorerMode.RULE_ONLY

@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 from quantx_domain.brokers.base import OrderType
 from quantx_domain.strategies.base import TradeIntent
 
-from .exit_plan import estimate_buy_fee_cny
+from .exit_plan import TradingCostPolicy, estimate_buy_fee_cny
 from .market_rules import AShareMarketRules
 
 
@@ -33,8 +33,14 @@ class OrderDraft:
 
 
 class OrderSizer:
-  def __init__(self, rules: Optional[AShareMarketRules] = None) -> None:
+  def __init__(
+    self,
+    rules: Optional[AShareMarketRules] = None,
+    *,
+    costs: Optional[TradingCostPolicy] = None,
+  ) -> None:
     self.rules = rules or AShareMarketRules()
+    self.costs = costs or TradingCostPolicy()
 
   def draft_intent(
     self,
@@ -158,7 +164,7 @@ class OrderSizer:
       # used by account capacity. Preserve the intent and its requested draft.
       def cash_required(volume: int) -> Decimal:
         return Decimal(str(price)) * volume + Decimal(
-          str(estimate_buy_fee_cny(price=price, volume=volume))
+          str(estimate_buy_fee_cny(price=price, volume=volume, costs=self.costs))
         )
 
       low, high = 0, sized_volume // self.rules.lot_size
@@ -180,6 +186,7 @@ class OrderSizer:
           estimate_buy_fee_cny(
             price=price,
             volume=sized_volume,
+            costs=self.costs,
           )
         ),
         allocation_cash_required=str(cash_required(sized_volume)),
