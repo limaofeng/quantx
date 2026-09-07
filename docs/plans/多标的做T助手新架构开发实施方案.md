@@ -726,6 +726,26 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   拒绝，随后高优先级受理、刷新账户水位后低优先级才可受理：**1 passed**（27.32 秒，
   24029 exit=0）。相关 Ruff 与最终审核通过，批准排名门组件提交，未称 dispatcher 完成。
 
+### P4 权威组合读取验收检查点（2026-09-07，整链仍未完成）
+
+- 排名门已提交 `19c424abaa498aded0cae485f87588f9e9f66e79`。本批新增
+  `portfolio_reference.py`、`daily_t_valuation.py`、`PaperPortfolioSnapshotReader` 及对应测试，
+  从真实 PAPER 账本/公共义务、冻结配置、显式行业与交易日历证据构造标准组合快照。
+- cut 使用来源可用性时间；当前控制/intent/batch/plan 的未来变更不能穿越旧 cut。
+  移除伪造 batch 身份；已平仓历史保留归因但不再强求新行情或无关行业映射。
+  未提交 allocation/claim 不污染自身输入，真实 read→prepare→跨会话 claim→commit 可恢复。
+- 行情事件改为明确引用与正式收盘窗口查询，26 个历史事件下只加载 3 个必要事件。
+  0054 增加对应 scope/type/time 索引；没有业务数据库迁移。CAS `updated_at` 修为 UTC
+  可用性，避免上海 naive 时间误作未来八小时；该 repository 中其他历史删除改动不属本任务。
+- 主代理组合回归 **158 passed、2 skipped**（9.89 秒，61347 exit=0）；跳过的两个 PG gate
+  已单独在真实隔离 schema 从 baseline→0054 运行：**2 passed**（51.10 秒，71128 exit=0），
+  覆盖真实剩余义务/部分成交/日损益，以及原始待分配→prepare→重启恢复→claim→ALLOW提交，
+  并核对实际索引定义。最初 PG fixture 的 aware→naive 绑定错误已按列类型修复；schema已清理。
+  相关 Ruff、审计整改与主代理最终审核通过，批准本读取组件提交。
+- P4 仍 IN_PROGRESS。下一批要把这些组件接入公共按排名 dispatcher、最新 EntryExecutionGate
+  与 Sizer/Risk/Capacity 最终事务；补 PAPER ExitPlanRuntime/TradeIntentProcessor 路由及停止
+  source 后仍需撮合退出的行情接线，再完成实际 StrategyBase.step 多标的重放与 GraphQL/Web。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

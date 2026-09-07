@@ -1021,6 +1021,31 @@ obligation watermark 任一变化，必须建立新的 allocation attempt，不�
 
 该快照只提供给 Coordinator、OrderSizer 和风控，不传给 `SymbolTEngine`。
 
+P4 PAPER 的来源约束：
+
+- 配置取 execution 绑定的不可变 config version，校验原始 hash 及其在 cut 前已存在。
+  `portfolio_policy` 和 `t_trading_envelope_policy` 的上限字段必须完整，不能由缺省值放宽。
+  `portfolio_policy.industry_classification` 固化 `version/as_of/effective_from/mappings`，
+  mappings 为规范证券代码到主行业的唯一映射，覆盖候选和全账户非候选持仓/义务；缺失拒绝。
+- `portfolio_policy.trading_calendar` 固化 `version/as_of/valid_from/valid_through/trading_dates/complete`。
+  日历证据在 cut 前已知、覆盖当前和上一交易日且 complete=true；已发布日历中的未来开市日期
+  不属于未来行情。不能从节假日表缺记录推断日历完整，不能用周末近似代替已声明交易日。
+- 价格使用同 PAPER scope 的已接受 QUOTE 事实及其时间和 input hash；独立初始持仓可用显式
+  seed snapshot 的价格与原 as_of，均受 `mark_max_age_seconds` 约束，不能重打时间戳。
+  隔夜 T 余额必须有明确上一交易日正式收盘的有效 mark；缺失时停止新仓规划。
+- 当日 T 成本账以日初未退出 T 数量×前一交易日收盘价重置，按事件 revision 与成交索引重放。
+  BUY 成本包含实际费用，SELL 按当时移动加权成本释放。已实现＋未实现损益必须等于
+  当日卖出现金流－买入现金流－实际费用＋期末 T 市值－日初 T 市值。种子旧仓和历史浮盈
+  不重复计入当日 T 收益，不使用 BacktestBroker 的占位 daily_pnl。
+- 公共 Capacity 对实际订单扣一次剩余现金与旧仓义务；未下单 READY/APPROVAL 的 cap 仅为
+  协调规划义务，已有订单后由订单剩余金额替代。若 envelope 使用扣除卖单冻结后的可卖量，
+  其未覆盖保护量仅包含尚未由该冻结覆盖的额外认领，不能再次扣同一 pending SELL。
+- 读取时间负责前视、新鲜度和交易日验证；证据 cut 的时间取已验证来源可用性时间的最大值。
+  同一 cycle 与真实来源未变化时，重读应得到相同输入指纹。当前 intent 引用的已提交分配
+  属于义务证据；本次 PREPARED allocation 和 claim/lease 属于协调状态，不进入自身输入水位。
+- 行情事件只读取当前快照/行情与成交明确引用的事实，以及上一交易日正式收盘窗口。
+  全历史链的不可变和整笔提交约束由数据库保持，不在每次规划时扫描或锁全部历史 Tick。
+
 ### 9.2 确定性算法
 
 初始实现使用可解释的贪心分配，不引入复杂求解器：

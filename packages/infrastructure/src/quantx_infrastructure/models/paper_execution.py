@@ -56,6 +56,9 @@ class PaperExecutionEventRecord(Base):
   __table_args__ = (
     UniqueConstraint("execution_id", "revision", name="uq_paper_event_revision"),
     UniqueConstraint("execution_id", "event_key", name="uq_paper_event_key"),
+    Index(
+      "ix_paper_event_scope_type_time", "execution_id", "event_type", "occurred_at"
+    ),
     CheckConstraint("environment = 'PAPER'", name="ck_paper_event_environment"),
     CheckConstraint("revision >= 1", name="ck_paper_event_revision"),
     CheckConstraint(

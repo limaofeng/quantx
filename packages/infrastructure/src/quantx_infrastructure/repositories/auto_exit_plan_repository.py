@@ -303,7 +303,7 @@ class AutoExitPlanRepository:
     values.update(
       {
         "state_version": version + 1,
-        "updated_at": time_utils.now().replace(tzinfo=None),
+        "updated_at": time_utils.to_utc(time_utils.now()).replace(tzinfo=None),
       }
     )
     result = await self.db.execute(

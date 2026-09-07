@@ -9,6 +9,7 @@ from quantx_domain.trading.exit_plan import (
   ExitRuleSpec,
   ExitRuleType,
 )
+from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   AutoExitPlanConcurrencyError,
@@ -73,6 +74,30 @@ async def _sessions():
 
 
 @pytest.mark.asyncio
+async def test_compare_and_swap_records_utc_availability_from_shanghai_clock(
+  monkeypatch,
+):
+  monkeypatch.setattr(time_utils, "now", lambda: datetime(2026, 9, 3, 10, 30))
+  engine, sessions = await _sessions()
+  try:
+    plan = _plan()
+    async with sessions() as db:
+      row = _record(plan)
+      row.created_at = row.updated_at = datetime(2026, 9, 3, 1)
+      db.add(row)
+      await db.commit()
+      plan.peak_price = 11
+      await AutoExitPlanRepository(db).compare_and_swap_state(
+        plan_id=plan.plan_id, expected_state_version=1, plan_state=plan.to_dict()
+      )
+    async with sessions() as db:
+      row = await db.get(AutoExitPlanRecord, plan.plan_id)
+      assert row.updated_at == datetime(2026, 9, 3, 2, 30)
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_repository_loads_authoritative_states_for_strategy_run() -> None:
   engine, sessions = await _sessions()
   try:
@@ -94,9 +119,7 @@ async def test_repository_loads_authoritative_states_for_strategy_run() -> None:
       ]
       assert all(row.state_version == 1 for row in rows)
       assert (
-        await AutoExitPlanRepository(db).find_for_strategy_run(
-          "run-1", statuses=[]
-        )
+        await AutoExitPlanRepository(db).find_for_strategy_run("run-1", statuses=[])
         == []
       )
       with pytest.raises(ValueError, match="策略运行标识"):
@@ -192,7 +215,9 @@ async def test_compare_and_swap_is_idempotent_and_rejects_stale_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compare_and_swap_rejects_stale_configuration_without_mutating_it() -> None:
+async def test_compare_and_swap_rejects_stale_configuration_without_mutating_it() -> (
+  None
+):
   engine, sessions = await _sessions()
   try:
     async with sessions() as db:
