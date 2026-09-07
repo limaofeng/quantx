@@ -19,6 +19,11 @@ from .contracts import (
   SignalPolicyChangeRequest,
   SignalPolicyConfigSnapshot,
 )
+from .decision_cycle_use_cases import (
+  TAssistantCyclePolicy,
+  decision_key_for_snapshot,
+)
+from .execution_use_cases import TAssistantExecutionLifecycle
 from .ports import (
   D1ReferenceProfilePort,
   OpportunityEvaluationMaterializerPort,
@@ -54,8 +59,11 @@ __all__ = [
   "SignalPolicyChangeRequest",
   "SignalPolicyConfigSnapshot",
   "TTradeAccountFacts",
+  "TAssistantCyclePolicy",
+  "TAssistantExecutionLifecycle",
   "T_TRADE_ACCOUNT_SNAPSHOT_STALE",
   "T_TRADE_ACCOUNT_SNAPSHOT_TOO_LARGE",
   "compute_t_trade_account_facts",
+  "decision_key_for_snapshot",
   "normalize_signal_policy",
 ]

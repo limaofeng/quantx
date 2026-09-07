@@ -100,6 +100,58 @@ async def test_market_order_returns_queued_client_order_without_broker_id():
 
 
 @pytest.mark.asyncio
+async def test_t_exit_policy_version_is_audit_evidence_not_numeric_config() -> None:
+  service = TradingService(account_id="account-1")
+  queued = SimpleNamespace(client_order_id="client-exit", status="QUEUED")
+
+  class SessionContext:
+    async def __aenter__(self):
+      return object()
+
+    async def __aexit__(self, *_):
+      return None
+
+  with patch(
+    "quantx_infrastructure.services.trading_service.AsyncSessionLocal",
+    return_value=SessionContext(),
+  ), patch(
+    "quantx_infrastructure.services.trading_service.TradeCommandService"
+  ) as command_service:
+    command_service.return_value.enqueue_order_for_account = AsyncMock(
+      return_value=queued
+    )
+    await service.place_order(
+      stock_code="600000.SH",
+      order_type=OrderType.SELL,
+      order_volume=100,
+      price_type=PriceType.FIX_PRICE,
+      price=9.97,
+      idempotency_key="public-t-exit",
+      execution_ref=ExecutionOwnerRef("EXIT_PLAN", "exit-plan-1"),
+      environment=ExecutionEnvironment.PAPER,
+      execution_context={
+        "intent_id": "intent-exit",
+        "t_batch_id": "batch-1",
+        "t_trade_role": "exit",
+        "config_version": 7,
+        "exit_policy_version": "TExitOrderPolicy.v1",
+        "t_exit_order_policy_version": "TExitOrderPolicy.v1",
+      },
+    )
+
+  request = command_service.return_value.enqueue_order_for_account.await_args.kwargs
+  assert request["batch_id"] == "batch-1"
+  assert request["t_trade_role"] == "exit"
+  assert request["policy_version"] == 7
+  assert request["request_metadata"]["exit_policy_version"] == (
+    "TExitOrderPolicy.v1"
+  )
+  assert request["request_metadata"]["t_exit_order_policy_version"] == (
+    "TExitOrderPolicy.v1"
+  )
+
+
+@pytest.mark.asyncio
 async def test_invalid_volume_is_rejected_before_command_queue_access():
   service = TradingService(account_id="account-1")
 

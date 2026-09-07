@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import hmac
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal
+from time import monotonic
 from typing import Any, Mapping
 
 from quantx_contracts import (
@@ -17,15 +20,25 @@ from quantx_contracts import (
   ExecutionOwnerType,
   TradeCommandPayload,
 )
+from quantx_domain.brokers.base import OrderRequest, OrderType, PriceType
 from quantx_domain.clock import to_naive_utc, utcnow
 from quantx_domain.strategies.ashare_managed_entry_plan import (
   ENTRY_PLAN_ENABLED_KEY,
 )
+from quantx_domain.strategies.base import ExitPlanIntentOrigin, TradeIntent
 from quantx_domain.trading.entry_plan import (
   EntryAuthorizationMode,
   EntryEnvironment,
   EntryTargetMode,
   ManagedEntryPlanConfig,
+)
+from quantx_domain.trading.market_rules import MarketDataSnapshot
+from quantx_domain.trading.order_sizer import OrderSizer
+from quantx_domain.trading.risk_checker import ContextRiskLayer, TradingRiskChecker
+from quantx_domain.trading.t_order_policy import (
+  TEntryOrderPolicy,
+  TExitOrderPolicy,
+  TOrderPolicyResult,
 )
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -58,14 +71,27 @@ from quantx_infrastructure.models.liquidation import (
 )
 from quantx_infrastructure.models.order import Order as PersistedOrder
 from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.models.risk_increase_admission import (
+  AccountRiskIncreaseAdmissionBatch,
+  AccountRiskIncreaseAdmissionItem,
+)
 from quantx_infrastructure.models.strategy import Strategy
 from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.strategy_run_state import StrategyRunState
 from quantx_infrastructure.models.trade import Trade
+from quantx_infrastructure.models.trade_confirmation_challenge import (
+  TradeConfirmationChallenge,
+)
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.account_capacity_service import (
   AccountCapacityService,
   buy_cash_required,
+)
+from quantx_infrastructure.services.account_risk_increase_admission import (
+  ADMISSION_LEASE_SECONDS,
+  ADMISSION_RENEW_INTERVAL_SECONDS,
+  AccountRiskIncreaseAdmissionSequencer,
+  AdmissionBatchClaim,
 )
 from quantx_infrastructure.services.agent_session_guard import (
   evaluate_agent_session,
@@ -75,11 +101,18 @@ from quantx_infrastructure.services.entry_plan_authorization_service import (
   scope_from_managed_entry_config,
 )
 from quantx_infrastructure.services.exit_plan_authorization_service import (
+  T_TRADE_ENTRY_APPROVAL_ACTION,
+  T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY,
+  build_t_trade_entry_exit_authorization_envelope,
+  trade_confirmation_payload_fingerprint,
   validate_consumed_exit_plan_sell_challenge,
   validate_exact_auto_exit_authorization,
 )
 from quantx_infrastructure.services.market_stream_readiness import (
   authoritative_market_stream_tradable,
+)
+from quantx_infrastructure.services.t_order_lifecycle_state import (
+  t_order_lifecycle_active,
 )
 from quantx_infrastructure.services.t_trade_batch_metrics import (
   extract_t_trade_cost_snapshot,
@@ -91,6 +124,7 @@ class AgentUnavailableError(RuntimeError):
 
 
 MAX_STABLE_COMMAND_KEY_LENGTH = 128
+RISK_ADMISSION_COLLECTION_WINDOW_SECONDS = 0.05
 
 
 def require_stable_command_key(
@@ -227,6 +261,10 @@ _REQUEST_METADATA_ALLOWLIST = frozenset(
     "auto_entry_rule_fingerprint",
     "exact_auto_entry_authorized",
     "protected_limit_price",
+    "price_type",
+    "price_reference",
+    "protected_limit",
+    "max_exit_slippage_bps",
     "exit_plan_template",
     "exit_reason",
     "exit_rule_id",
@@ -262,6 +300,31 @@ _REQUEST_METADATA_ALLOWLIST = frozenset(
     "min_commission",
     "stamp_tax_rate",
     "transfer_fee_rate",
+    "t_entry_order_policy_version",
+    "t_exit_order_policy_version",
+    "t_exit_order_ttl_seconds",
+    "t_exit_total_ttl_seconds",
+    "t_exit_max_replace_count",
+    "t_exit_max_slippage_bps",
+    "t_order_reference_price",
+    "t_order_price_tick",
+    "t_order_limit_up",
+    "t_order_limit_down",
+    "t_order_cage_upper",
+    "t_order_cage_lower",
+    "t_order_original_created_at",
+    "t_order_replace_count",
+  }
+)
+_GENERATED_ORDER_METADATA_KEYS = frozenset(
+  {
+    "account_capacity",
+    "admission_batch_id",
+    "admission_rank",
+    "admission_policy_version",
+    "admission_input_fingerprint",
+    "t_order_original_created_at",
+    "t_order_replace_count",
   }
 )
 
@@ -399,6 +462,7 @@ class TradeCommandService:
         for key in metadata
         if not isinstance(key, str)
         or key in _REQUEST_METADATA_IDENTITY_KEYS
+        or key in _GENERATED_ORDER_METADATA_KEYS
         or key not in _REQUEST_METADATA_ALLOWLIST
       }
     )
@@ -637,7 +701,7 @@ class TradeCommandService:
     expected_metadata = dict(request_metadata or {})
     stored_metadata = dict(pending.request_metadata or {})
     for key in set(expected_metadata) | set(stored_metadata):
-      if key == "account_capacity":
+      if key in _GENERATED_ORDER_METADATA_KEYS:
         continue
       if stored_metadata.get(key) != expected_metadata.get(key):
         return False
@@ -762,6 +826,61 @@ class TradeCommandService:
       or not await authoritative_market_stream_tradable()
     ):
       raise AgentUnavailableError("当前不具备交易时段内的新鲜权威全市场行情")
+
+  async def _preview_live_authorization(
+    self,
+    account_id: str,
+    *,
+    risk_reducing: bool,
+    require_controlled_window: bool = False,
+  ) -> AccountExecutionControl:
+    """Validate non-locking gates before a BUY enters durable admission."""
+
+    if not settings.enable_real_trading:
+      raise AgentUnavailableError("服务端真实交易总开关未启用")
+    if account_id not in set(settings.real_trading_account_allowlist or []):
+      raise AgentUnavailableError("账户不在服务端真实交易白名单")
+    control = await self.db.get(
+      AccountExecutionControl,
+      account_id,
+      populate_existing=True,
+    )
+    if control is None:
+      raise AgentUnavailableError("账户尚未配置独立执行控制与对账状态")
+    state = str(control.authorization_state or "DISABLED").upper()
+    if not risk_reducing and state == "KILLED":
+      raise AgentUnavailableError("账户交易 kill switch 已触发，禁止买入或加仓")
+    if not risk_reducing and state != "ENABLED":
+      raise AgentUnavailableError("账户买入权限未启用")
+    if str(control.reconcile_status or "").upper() != "READY":
+      raise AgentUnavailableError("账户资金、持仓、委托和成交快照尚未完成对账")
+    snapshot_id = str(control.last_snapshot_id or "")
+    snapshot_hash = str(control.last_snapshot_hash or "")
+    snapshot_at = (
+      to_naive_utc(control.last_snapshot_at)
+      if control.last_snapshot_at is not None
+      else None
+    )
+    snapshot_age = (
+      (utcnow() - snapshot_at).total_seconds() if snapshot_at is not None else None
+    )
+    if (
+      not snapshot_id
+      or len(snapshot_hash) != 64
+      or snapshot_age is None
+      or snapshot_age < 0
+      or snapshot_age > self.MANUAL_RECONCILIATION_MAX_AGE_SECONDS
+    ):
+      raise AgentUnavailableError("账户完整对账快照缺失或已超过 90 秒")
+    if require_controlled_window and not risk_reducing:
+      if not bool(control.controlled_window_active):
+        raise AgentUnavailableError("手动买入需要基于最新快照建立账户实盘窗口")
+      if (
+        str(control.controlled_window_snapshot_id or "") != snapshot_id
+        or str(control.controlled_window_snapshot_hash or "") != snapshot_hash
+      ):
+        raise AgentUnavailableError("账户实盘窗口快照与最新完整快照不一致")
+    return control
 
   async def _require_manual_live_authorization(
     self,
@@ -1667,7 +1786,7 @@ class TradeCommandService:
       or str(intent.instrument_code or "") != instrument_code
       or str(intent.direction or "").upper() != "BUY"
       or str(intent.bucket or "").lower() != config.bucket
-      or str(intent.status or "").upper() != "PENDING"
+      or str(intent.status or "").upper() not in {"PENDING", "EXECUTION_READY"}
       or str(intent_metadata.get("execution_mode") or "").upper() != "AUTO"
       or str(intent_metadata.get("entry_plan_id") or "") != plan_id
       or int(intent_metadata.get("entry_config_version") or 0) != config.config_version
@@ -1973,7 +2092,7 @@ class TradeCommandService:
       or str(intent.strategy_run_id or "") != strategy_run_id
       or str(intent.instrument_code or "") != instrument_code
       or str(intent.direction or "").upper() != "BUY"
-      or str(intent.status or "").upper() != "APPROVED"
+      or str(intent.status or "").upper() not in {"APPROVED", "EXECUTION_READY"}
       or str(intent_metadata.get("entry_plan_id") or "") != bound_plan_id
       or int(intent_metadata.get("entry_config_version") or 0) != config.config_version
       or str(intent_metadata.get("execution_mode") or "").upper() != "MANUAL_CONFIRM"
@@ -2232,6 +2351,7 @@ class TradeCommandService:
     intent_id: str,
     batch_id: str,
     bucket: str,
+    t_order_parent_client_id: str = "",
   ) -> TradeIntentRecord | None:
     canonical_ref, canonical_environment, owner_type, owner_id, _ = (
       self._require_execution_identity(execution_ref, environment)
@@ -2254,10 +2374,6 @@ class TradeCommandService:
     if owner_type == ExecutionOwnerType.EXIT_PLAN.value and not normalized_intent_id:
       raise AgentUnavailableError(
         "TRADE_INTENT_REQUIRED:EXIT_PLAN 委托必须绑定已持久化意图"
-      )
-    if owner_type == ExecutionOwnerType.MANUAL_COMMAND.value and normalized_intent_id:
-      raise AgentUnavailableError(
-        "TRADE_INTENT_OWNER_CONFLICT:MANUAL_COMMAND 委托不得绑定 intent_id"
       )
     intent_id = normalized_intent_id
 
@@ -2290,6 +2406,7 @@ class TradeCommandService:
       raise AgentUnavailableError(
         "TRADE_INTENT_SCOPE_MISMATCH:委托与持久化意图归属不一致"
       )
+    exit_plan: AutoExitPlanRecord | None = None
     if owner_type == ExecutionOwnerType.STRATEGY_RUN.value:
       if strategy_run_id and strategy_run_id != owner_id:
         raise AgentUnavailableError(
@@ -2324,29 +2441,49 @@ class TradeCommandService:
           "TRADE_INTENT_SCOPE_MISMATCH:策略运行与委托执行环境不一致"
         )
     elif owner_type == ExecutionOwnerType.EXIT_PLAN.value:
-      plan = await self.db.get(AutoExitPlanRecord, owner_id)
+      exit_plan = await self.db.get(AutoExitPlanRecord, owner_id)
       if (
-        plan is None
-        or str(plan.account_id) != account_id
-        or str(plan.environment or "").strip().upper() != canonical_environment.value
-        or str(plan.instrument_code) != instrument_code
-        or str(getattr(plan, "source_execution_environment", "")).upper()
+        exit_plan is None
+        or str(exit_plan.account_id) != account_id
+        or str(exit_plan.environment or "").strip().upper()
+        != canonical_environment.value
+        or str(exit_plan.instrument_code) != instrument_code
+        or str(
+          getattr(exit_plan, "source_execution_environment", "")
+        ).upper()
         != canonical_environment.value
       ):
         raise AgentUnavailableError(
           "TRADE_INTENT_SCOPE_MISMATCH:退出计划与委托执行环境不一致"
+        )
+      if batch_id and (
+        str(exit_plan.source_type or "").strip().upper() != "T_TRADE_BATCH"
+        or str(exit_plan.source_id or "") != str(batch_id)
+      ):
+        raise AgentUnavailableError(
+          "TRADE_INTENT_SCOPE_MISMATCH:公共退出计划与做T批次来源不一致"
         )
     existing = await self.db.scalar(
       select(PendingTradeOrder.client_order_id)
       .where(
         PendingTradeOrder.intent_id == intent_id,
       )
+      .order_by(PendingTradeOrder.t_order_attempt.desc())
       .limit(1)
     )
     if existing is not None:
-      raise AgentUnavailableError(
-        "TRADE_INTENT_ALREADY_ROUTED:意图已有委托，请使用原幂等键重试"
-      )
+      parent = await self.db.get(PendingTradeOrder, t_order_parent_client_id) if t_order_parent_client_id else None
+      if not (
+        parent is not None and existing == t_order_parent_client_id
+        and parent.intent_id == intent_id and parent.account_id == account_id
+        and parent.owner_type == owner_type and parent.owner_id == owner_id
+        and parent.environment == canonical_environment.value
+        and parent.batch_id == batch_id and parent.instrument_code == instrument_code
+        and parent.side == side and t_order_lifecycle_active(parent, utcnow())
+      ):
+        raise AgentUnavailableError(
+          "TRADE_INTENT_ALREADY_ROUTED:意图已有委托，请使用原幂等键重试"
+        )
     return intent
 
   async def _require_account_capacity(
@@ -2362,6 +2499,42 @@ class TradeCommandService:
     t_trade_role: str,
   ) -> dict[str, Any]:
     try:
+      intent_metadata = dict(getattr(intent, "intent_metadata", None) or {})
+      envelope = intent_metadata.get("t_trading_envelope")
+      envelope = dict(envelope) if isinstance(envelope, Mapping) else {}
+      bucket_inventory = envelope.get("observed_position_projection")
+      bucket_inventory = (
+        dict(bucket_inventory) if isinstance(bucket_inventory, Mapping) else None
+      )
+      if (
+        side.upper() == "BUY"
+        and t_trade_role == "ENTRY"
+        and intent is not None
+        and str(intent.owner_type or "").upper()
+        == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
+        and bucket_inventory is None
+      ):
+        raise ValueError(
+          "T_TRADING_ENVELOPE_REQUIRED:新做T ENTRY 缺少冻结桶级容量证据"
+        )
+      protected_old_floor = max(
+        0,
+        int(envelope.get("protected_old_position_floor", 0) or 0),
+      )
+      locked_available = 0
+      if bucket_inventory is not None:
+        locked_value = bucket_inventory.get("locked_core")
+        locked_available = max(
+          0,
+          int(
+            (
+              locked_value.get("available_volume", 0)
+              if isinstance(locked_value, Mapping)
+              else locked_value
+            )
+            or 0
+          ),
+        )
       capacity = await AccountCapacityService(self.db).read(
         control,
         instrument_code=instrument_code,
@@ -2369,6 +2542,9 @@ class TradeCommandService:
         if intent is not None and intent.owner_type == "EXIT_PLAN"
         else "",
         own_batch_id=batch_id if t_trade_role == "EXIT" else "",
+        bucket_inventory=bucket_inventory,
+        protected_core_floor=max(0, protected_old_floor - locked_available),
+        allow_core_claim=bool(envelope.get("allow_core_claim", False)),
       )
       if side.upper() == "BUY":
         required = buy_cash_required(limit_price, volume)
@@ -2391,7 +2567,398 @@ class TradeCommandService:
       "available_cash": str(capacity.available_cash),
       "available_volume": capacity.available_volume,
       "unclaimed_volume": capacity.unclaimed_volume,
+      "obligation_watermark": capacity.obligation_watermark,
+      "available_by_bucket": dict(capacity.available_by_bucket),
+      "unclaimed_by_bucket": dict(capacity.unclaimed_by_bucket),
+      "protected_old_position_floor": capacity.protected_old_position_floor,
+      "old_inventory_claim_allocation": dict(
+        capacity.old_inventory_claim_allocation
+      ),
     }
+
+  @staticmethod
+  def _require_t_order_new_policy(
+    *,
+    role: str,
+    order_type: str,
+    limit_price: Decimal,
+    intent: TradeIntentRecord | None,
+    request_metadata: Mapping[str, Any],
+  ) -> dict[str, Any]:
+    """Re-evaluate the frozen v1 policy at the final LIVE command boundary."""
+
+    normalized_role = str(role or "").strip().upper()
+    if not normalized_role:
+      return {}
+    if str(order_type or "").strip().upper() != "FIX_PRICE":
+      raise AgentUnavailableError("T_ORDER_FIX_PRICE_REQUIRED")
+    policy = TEntryOrderPolicy() if normalized_role == "ENTRY" else TExitOrderPolicy()
+    evidence = {
+      **dict(getattr(intent, "intent_metadata", None) or {}),
+      **dict(request_metadata or {}),
+    }
+    version_key = (
+      "t_entry_order_policy_version"
+      if normalized_role == "ENTRY"
+      else "t_exit_order_policy_version"
+    )
+    if str(evidence.get(version_key) or "") != policy.version:
+      raise AgentUnavailableError("T_ORDER_POLICY_VERSION_REQUIRED")
+    try:
+      result = policy.decide_new(
+        now=time_utils.now(),
+        reference_price=evidence.get("t_order_reference_price"),
+        price_tick=evidence.get("t_order_price_tick"),
+        limit_up=evidence.get("t_order_limit_up"),
+        limit_down=evidence.get("t_order_limit_down"),
+        cage_upper=evidence.get("t_order_cage_upper"),
+        cage_lower=evidence.get("t_order_cage_lower"),
+      )
+    except (ArithmeticError, TypeError, ValueError) as exc:
+      raise AgentUnavailableError("T_ORDER_POLICY_EVIDENCE_INVALID") from exc
+    if not result.allowed:
+      raise AgentUnavailableError(result.reason_code)
+    protected_limit = result.limit_price
+    if protected_limit is None or (
+      normalized_role == "ENTRY" and limit_price > protected_limit
+    ) or (
+      normalized_role == "EXIT" and limit_price < protected_limit
+    ):
+      raise AgentUnavailableError("T_ORDER_PROTECTED_LIMIT_VIOLATED")
+    return {
+      version_key: policy.version,
+      "t_order_reference_price": str(evidence["t_order_reference_price"]),
+      "t_order_price_tick": str(evidence["t_order_price_tick"]),
+      "protected_limit_price": str(protected_limit),
+    }
+
+  @staticmethod
+  def _place_order_expires_at(now: datetime, *, t_trade_role: str) -> datetime:
+    role = str(t_trade_role or "").strip().upper()
+    if role == "ENTRY":
+      return now + timedelta(seconds=TEntryOrderPolicy().order_ttl_seconds)
+    if role == "EXIT":
+      return now + timedelta(seconds=TExitOrderPolicy().order_ttl_seconds)
+    return now + timedelta(minutes=2)
+
+  async def evaluate_t_order_replacement(
+    self,
+    *,
+    client_order_id: str,
+    now: datetime,
+    reference_price: Decimal,
+    price_tick: Decimal,
+    limit_up: Decimal | None = None,
+    limit_down: Decimal | None = None,
+    cage_upper: Decimal | None = None,
+    cage_lower: Decimal | None = None,
+  ) -> TOrderPolicyResult:
+    """Authorize cancel-replace only from converged durable order facts.
+
+    An UNKNOWN result or an unconfirmed cancellation can only reconcile; it
+    can never produce a replacement authorization.
+    """
+
+    pending = await self.db.get(
+      PendingTradeOrder,
+      str(client_order_id or ""),
+      with_for_update=True,
+    )
+    if pending is None or str(pending.t_trade_role or "").upper() not in {
+      "ENTRY",
+      "EXIT",
+    }:
+      raise AgentUnavailableError("T_ORDER_REPLACE_SOURCE_INVALID")
+    metadata = dict(pending.request_metadata or {})
+    policy = (
+      TEntryOrderPolicy()
+      if str(pending.t_trade_role).upper() == "ENTRY"
+      else TExitOrderPolicy()
+    )
+    version_key = (
+      "t_entry_order_policy_version"
+      if str(pending.t_trade_role).upper() == "ENTRY"
+      else "t_exit_order_policy_version"
+    )
+    if str(metadata.get(version_key) or "") != policy.version:
+      raise AgentUnavailableError("T_ORDER_POLICY_VERSION_REQUIRED")
+    status = str(pending.status or "").strip().upper()
+    broker_order_id = str(pending.broker_order_id or "").strip()
+    result_unknown = status in {"UNKNOWN", "RECONCILE_REQUIRED"}
+    authoritative_terminal = False
+    filled_volume = 0
+    if broker_order_id and broker_order_id.isdecimal():
+      broker_order = await self.db.get(PersistedOrder, int(broker_order_id))
+      correlation = await self.db.scalar(select(OrderCorrelation).where(
+        OrderCorrelation.client_order_id == pending.client_order_id,
+      ))
+      unapplied = await self.db.scalar(select(StrategyRuntimeEvent.event_id).where(
+        StrategyRuntimeEvent.client_order_id == pending.client_order_id,
+        StrategyRuntimeEvent.application_status != "APPLIED",
+      ).limit(1))
+      trades = list(
+        (
+          await self.db.scalars(
+            select(Trade).where(
+              Trade.order_id == int(broker_order_id),
+              Trade.account_id == pending.account_id,
+              Trade.stock_code == pending.instrument_code,
+            )
+          )
+        ).all()
+      )
+      filled_volume = sum(max(0, int(trade.volume or 0)) for trade in trades)
+      authoritative_terminal = bool(
+        broker_order is not None
+        and correlation is not None
+        and str(correlation.broker_order_id or "") == broker_order_id
+        and all(
+          getattr(correlation, field) == getattr(pending, field)
+          for field in ("account_id", "owner_type", "owner_id", "environment", "intent_id", "batch_id", "t_trade_role")
+        )
+        and broker_order.account_id == pending.account_id
+        and broker_order.stock_code == pending.instrument_code
+        and int(broker_order.type) == int(
+          PersistedOrderType.BUY if pending.side == "BUY" else PersistedOrderType.SELL
+        )
+        and int(broker_order.volume or 0) == int(pending.volume or 0)
+        and 0 <= filled_volume <= int(pending.volume or 0)
+        and all(int(trade.volume or 0) > 0 for trade in trades)
+        and int(broker_order.status) in _AUTHORITATIVE_ENTRY_TERMINAL_STATUSES
+        and int(broker_order.traded_volume or 0) == filled_volume
+        and not unapplied
+        and (filled_volume > 0 or status == "RECONCILED_ZERO_FILL")
+      )
+    original_created_at = getattr(pending, "t_order_original_created_at", None) or pending.created_at
+    raw_original = metadata.get("t_order_original_created_at")
+    if raw_original and getattr(pending, "t_order_original_created_at", None) is None:
+      try:
+        original_created_at = datetime.fromisoformat(str(raw_original))
+      except ValueError as exc:
+        raise AgentUnavailableError("T_ORDER_POLICY_EVIDENCE_INVALID") from exc
+    if original_created_at is None:
+      raise AgentUnavailableError("T_ORDER_POLICY_EVIDENCE_INVALID")
+    if getattr(pending, "t_order_original_created_at", None) is not None:
+      original_created_at = to_naive_utc(original_created_at).replace(tzinfo=timezone.utc)
+    prior_created_at = pending.created_at
+    if getattr(pending, "t_order_original_created_at", None) is not None:
+      prior_created_at = to_naive_utc(prior_created_at).replace(tzinfo=timezone.utc)
+    return policy.decide_replace(
+      now=now,
+      original_created_at=original_created_at,
+      prior_order_created_at=prior_created_at,
+      replace_count=max(0, int(getattr(pending, "t_order_attempt", 0) or 0)),
+      requested_volume=int(pending.volume or 0),
+      authoritative_filled_volume=filled_volume,
+      prior_order_authoritative_terminal=authoritative_terminal,
+      result_unknown=result_unknown,
+      cancel_unconfirmed=not authoritative_terminal,
+      reference_price=reference_price,
+      price_tick=price_tick,
+      limit_up=limit_up,
+      limit_down=limit_down,
+      cage_upper=cage_upper,
+      cage_lower=cage_lower,
+    )
+
+  async def retire_t_order_staged_request(self, pending: PendingTradeOrder) -> None:
+    """Close an unsent replacement READY request before finalizing its intent.
+
+    Caller has decided the original lifecycle is over and owns the account
+    coordinator. Preserve its request and admission items as audit evidence;
+    supersede a PREPARED batch so an already claimed old dispatcher cannot send.
+    """
+    intent = await self.db.get(TradeIntentRecord, pending.intent_id, with_for_update=True)
+    if intent is None or intent.status not in {"PENDING", "APPROVED", "EXECUTION_READY"}:
+      return
+    metadata = dict(intent.intent_metadata or {})
+    staged = dict(metadata.get("risk_increase_order_request") or {})
+    if staged.get("t_order_parent_client_id") != pending.client_order_id:
+      return
+    successor = await self.db.scalar(select(PendingTradeOrder.client_order_id).where(
+      PendingTradeOrder.t_order_parent_client_id == pending.client_order_id,
+    ))
+    if successor is not None:
+      return
+    batch_id = str(intent.admission_batch_id or "")
+    if batch_id:
+      batch = await self.db.get(AccountRiskIncreaseAdmissionBatch, batch_id, with_for_update=True)
+      if batch is None or batch.status == "COMMITTED":
+        raise AgentUnavailableError("T_ORDER_STAGED_ADMISSION_RECONCILE_REQUIRED")
+      if batch.status == "PREPARED":
+        batch.status = "SUPERSEDED"
+        batch.terminal_reason = "T_ORDER_LIFECYCLE_ENDED_BEFORE_DISPATCH"
+    metadata["t_order_staged_request_terminal_reason"] = "T_ORDER_LIFECYCLE_ENDED_BEFORE_DISPATCH"
+    intent.intent_metadata = metadata
+    intent.status = "EXECUTION_PENDING"
+
+  async def replace_t_order(
+    self,
+    *,
+    client_order_id: str,
+    quote_at: datetime,
+    reference_price: Decimal,
+    price_tick: Decimal,
+    limit_up: Decimal,
+    limit_down: Decimal,
+    market_data: MarketDataSnapshot,
+  ) -> QueuedTradeCommand:
+    """Continue one active intent through its proved next order attempt.
+
+    Reuses the complete public authorization/capacity/admission boundary. The
+    old Pending/Correlation/Outbox remain immutable evidence of that attempt.
+    """
+    now = utcnow()
+    if not 0 <= (now - to_naive_utc(quote_at)).total_seconds() <= 2:
+      raise AgentUnavailableError("T_ORDER_QUOTE_STALE")
+    pending = await self.db.get(PendingTradeOrder, client_order_id, with_for_update=True)
+    if pending is None or not t_order_lifecycle_active(pending, now):
+      raise AgentUnavailableError("T_ORDER_LIFECYCLE_INACTIVE")
+    successor = await self.db.scalar(select(PendingTradeOrder).where(
+      PendingTradeOrder.t_order_parent_client_id == client_order_id,
+    ))
+    if successor is not None:
+      outbox = await self.db.scalar(select(TradeCommandOutbox).where(
+        TradeCommandOutbox.client_order_id == successor.client_order_id,
+      ))
+      if outbox is None:
+        raise AgentUnavailableError("T_ORDER_REPLACE_CHAIN_INCOMPLETE")
+      return QueuedTradeCommand(outbox.client_order_id, outbox.message_id, outbox.delivery_status)
+    if (
+      market_data.instrument_code != pending.instrument_code
+      or market_data.timestamp is None
+      or to_naive_utc(market_data.timestamp) != to_naive_utc(quote_at)
+      or not market_data.is_trading or market_data.suspended
+    ):
+      raise AgentUnavailableError("T_ORDER_MARKET_EVIDENCE_INVALID")
+    result = await self.evaluate_t_order_replacement(
+      client_order_id=client_order_id, now=now.replace(tzinfo=timezone.utc),
+      reference_price=reference_price, price_tick=price_tick,
+      limit_up=limit_up, limit_down=limit_down,
+    )
+    if not result.allowed:
+      raise AgentUnavailableError(result.reason_code)
+    intent = await self.db.get(TradeIntentRecord, pending.intent_id, with_for_update=True)
+    if intent is None or str(intent.status).upper() in {
+      "FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "RECONCILED_ZERO_FILL",
+    }:
+      raise AgentUnavailableError("T_ORDER_INTENT_RELEASED")
+    metadata = {
+      key: value for key, value in dict(pending.request_metadata or {}).items()
+      if key in _REQUEST_METADATA_ALLOWLIST and key not in _GENERATED_ORDER_METADATA_KEYS
+    }
+    metadata.update({
+      "quote_timestamp": to_naive_utc(quote_at).replace(tzinfo=timezone.utc).isoformat(),
+      "t_order_reference_price": str(reference_price),
+      "t_order_price_tick": str(price_tick),
+      "t_order_limit_up": str(limit_up),
+      "t_order_limit_down": str(limit_down),
+      "protected_limit_price": str(result.limit_price),
+    })
+    intent_metadata = dict(intent.intent_metadata or {})
+    account = await self.db.scalar(select(Account).where(Account.account_id == pending.account_id))
+    position = await self.db.scalar(select(Position).where(
+      Position.account_id == pending.account_id,
+      Position.stock_code == pending.instrument_code,
+    ))
+    if account is None or position is None:
+      raise AgentUnavailableError("T_ORDER_REPLACE_SNAPSHOT_MISSING")
+    account_state = account.to_dict()
+    position_state = {
+      **position.to_dict(), "available_volume": int(position.can_use_volume or 0),
+      "total_volume": int(position.volume or 0),
+    }
+    run = await self.db.get(StrategyRun, pending.owner_id) if pending.owner_type == "STRATEGY_RUN" else None
+    if pending.t_trade_role == "ENTRY" and (
+      run is None or self._enum_value(run.status) != "running"
+    ):
+      raise AgentUnavailableError("T_ORDER_ENTRY_SOURCE_STOPPED")
+    caps = ContextRiskLayer().build_caps(
+      portfolio_state={"account": account_state},
+      parameters=dict(run.parameters or {}) if run is not None else {},
+      instrument_code=pending.instrument_code,
+    )
+    proposal = TradeIntent(
+      strategy_id=str(intent.strategy_id or ""), run_id=str(pending.strategy_run_id or ""),
+      instrument_code=pending.instrument_code, direction=pending.side,
+      bucket=pending.bucket, reason=str(intent.reason or "T_ORDER_REPLACE"),
+      target_volume=result.remaining_volume, intent_id=pending.intent_id,
+      execution_ref=ExecutionOwnerRef(pending.owner_type, pending.owner_id),
+      origin=ExitPlanIntentOrigin(pending.owner_id) if pending.owner_type == "EXIT_PLAN" else None,
+      metadata={"bucket": pending.bucket},
+    )
+    draft = OrderSizer().draft_intent(
+      proposal, OrderType(pending.side), float(result.limit_price), account_state, position_state,
+    )
+    request = OrderRequest(
+      instrument_code=pending.instrument_code, order_type=OrderType(pending.side),
+      price_type=PriceType.LIMIT, volume=draft.sized_volume, price=float(result.limit_price),
+      execution_ref=proposal.execution_ref, environment=ExecutionEnvironment(pending.environment),
+      metadata={"bucket": pending.bucket},
+    )
+    risk = await TradingRiskChecker(strict_market_data=True, strict_limit_data=True).evaluate_order(
+      request, account=account_state, position=position_state, market_data=market_data,
+      current_time=now.replace(tzinfo=timezone.utc), risk_caps=caps.to_dict(),
+    )
+    if not risk.allowed or not 0 < risk.final_volume <= result.remaining_volume:
+      raise AgentUnavailableError(f"T_ORDER_REPLACE_RISK:{risk.reason_code}")
+    metadata.update({
+      "risk_decision_id": risk.risk_decision_id,
+      "risk_action": risk.action.value, "risk_reason_code": risk.reason_code,
+      "risk_reason_detail": risk.reason_detail,
+    })
+    staged = dict(intent_metadata.get("risk_increase_order_request") or {})
+    already_staged = staged.get("t_order_parent_client_id") == client_order_id
+    if not already_staged:
+      previous_admission_id = str(getattr(intent, "admission_batch_id", "") or "")
+      if previous_admission_id:
+        previous_admission = await self.db.get(
+          AccountRiskIncreaseAdmissionBatch, previous_admission_id, with_for_update=True,
+        )
+        if previous_admission is None or str(previous_admission.status) not in {
+          "COMMITTED", "SUPERSEDED", "EXPIRED", "FAILED",
+        }:
+          raise AgentUnavailableError("T_ORDER_REPLACE_ADMISSION_UNFINISHED")
+      # Preserve completed admission batches/items as audit facts; only the
+      # intent's current admission projection advances to the fresh attempt.
+      intent_metadata.pop("risk_increase_order_request", None)
+      previous_zero_fill = intent_metadata.pop("qmt_zero_fill_reconciliation", None)
+      if previous_zero_fill is not None:
+        pending.request_metadata = {
+          **dict(pending.request_metadata or {}),
+          "qmt_zero_fill_reconciliation": previous_zero_fill,
+        }
+      intent.intent_metadata = intent_metadata
+      intent.admission_batch_id = None
+      intent.admission_rank = None
+      intent.admission_policy_version = None
+      intent.admission_input_fingerprint = None
+      exact_auto = bool(intent_metadata.get("exact_auto_exit_authorized") or intent_metadata.get("exact_auto_entry_authorized"))
+      intent.status = "PENDING" if exact_auto else "APPROVED"
+    attempt = int(pending.t_order_attempt) + 1
+    key = (
+      f"strategy-exit:{pending.owner_id}:{pending.intent_id}:replace:{attempt}"
+      if pending.t_trade_role == "EXIT"
+      else f"t-order:{pending.intent_id}:replace:{attempt}"
+    )
+    return await self.enqueue_order_for_account(
+      account_id=pending.account_id, instrument_code=pending.instrument_code,
+      side=pending.side, order_type="FIX_PRICE", limit_price=result.limit_price,
+      volume=risk.final_volume,
+      execution_ref=ExecutionOwnerRef(pending.owner_type, pending.owner_id),
+      environment=ExecutionEnvironment(pending.environment),
+      idempotency_key=key, trace_id=str(pending.trace_id or ""),
+      strategy_run_id=str(pending.strategy_run_id or ""),
+      strategy_order_id=str(pending.strategy_order_id or ""),
+      intent_id=pending.intent_id, batch_id=pending.batch_id,
+      bucket=pending.bucket, t_trade_role=pending.t_trade_role,
+      risk_decision_id=risk.risk_decision_id,
+      substitution_plan=pending.substitution_plan,
+      policy_version=int(metadata.get("config_version") or metadata.get("policy_version") or 0),
+      request_metadata=metadata,
+      authorization_user_id=str(metadata.get("auto_exit_authorization_user_id") or ""),
+      _t_order_parent_client_id=client_order_id,
+    )
 
   async def enqueue_order(
     self,
@@ -2421,6 +2988,10 @@ class TradeCommandService:
     reason_tags: list[str] | None = None,
     commit_transaction: bool = True,
     _locked_live_control: AccountExecutionControl | None = None,
+    _admission_batch_id: str = "",
+    _admission_rank: int = 0,
+    _admission_fence_token: str = "",
+    _t_order_parent_client_id: str = "",
   ) -> QueuedTradeCommand:
     idempotency_key, trace_id, raw_idempotency_key = require_stable_command_key(
       idempotency_key,
@@ -2441,8 +3012,6 @@ class TradeCommandService:
     normalized_side = str(side or "").strip().upper()
     normalized_instrument = str(instrument_code or "").strip().upper()
     normalized_order_type = self._wire_price_type(order_type)
-    if batch_id and owner_type != ExecutionOwnerType.STRATEGY_RUN.value:
-      raise AgentUnavailableError("TRADE_COMMAND_OWNER_CONFLICT:TTrade 批次必须归属 STRATEGY_RUN")
     if volume <= 0:
       raise ValueError("委托数量必须大于 0")
     if not normalized_side:
@@ -2465,6 +3034,16 @@ class TradeCommandService:
       and normalized_side != {"ENTRY": "BUY", "EXIT": "SELL"}[normalized_role]
     ):
       raise AgentUnavailableError("TRADE_INTENT_SCOPE_MISMATCH:做T角色与委托方向不一致")
+    if batch_id and not (
+      owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+      or (
+        owner_type == ExecutionOwnerType.EXIT_PLAN.value
+        and normalized_role == "EXIT"
+      )
+    ):
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_OWNER_CONFLICT:TTrade 批次必须归属 ENTRY 来源或公共 EXIT_PLAN"
+      )
     immutable_metadata = self._sanitize_request_metadata(request_metadata)
     strategy_run_id, strategy_order_id = self._normalize_strategy_identity(
       owner_type,
@@ -2488,19 +3067,30 @@ class TradeCommandService:
       )
     if substitution_plan is not None:
       immutable_metadata.setdefault("substitution_plan", substitution_plan)
+    admission_required = (
+      normalized_mode == "live"
+      and normalized_side == "BUY"
+      and not _admission_batch_id
+    )
+    if admission_required:
+      await self._preview_live_authorization(
+        account_id,
+        risk_reducing=False,
+        require_controlled_window=manual_live,
+      )
     if _locked_live_control is not None:
       if normalized_mode != "live" or str(_locked_live_control.account_id or "") != str(
         account_id or ""
       ):
         raise ValueError("预锁账户控制与 LIVE 命令不匹配")
-    elif manual_live:
+    elif manual_live and not admission_required:
       # This lock must precede the outbox lookup/insert to match the account
       # hard-kill control -> pending/outbox lock order.
       _locked_live_control = await self._require_manual_live_authorization(
         account_id,
         risk_reducing=risk_reducing,
       )
-    elif normalized_mode == "live":
+    elif normalized_mode == "live" and not admission_required:
       _locked_live_control = await self._require_live_authorization(
         account_id,
         risk_reducing=risk_reducing,
@@ -2521,6 +3111,19 @@ class TradeCommandService:
       )
     ).scalar_one_or_none()
     if existing is not None:
+      retry_intent_id = intent_id
+      if (
+        normalized_mode == "live"
+        and normalized_side == "BUY"
+        and owner_type == ExecutionOwnerType.MANUAL_COMMAND.value
+        and not str(retry_intent_id or "").strip()
+      ):
+        retry_intent_id = str(
+          uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"quantx:risk-increase:{business_idempotency_key}",
+          )
+        )
       if not await self._idempotent_order_chain_matches_request(
         existing,
         user_id=user_id,
@@ -2535,7 +3138,7 @@ class TradeCommandService:
         volume=volume,
         strategy_run_id=strategy_run_id,
         strategy_order_id=strategy_order_id,
-        intent_id=intent_id,
+        intent_id=retry_intent_id,
         batch_id=batch_id,
         bucket=bucket,
         t_trade_role=normalized_role,
@@ -2571,6 +3174,7 @@ class TradeCommandService:
       intent_id=intent_id,
       batch_id=batch_id,
       bucket=bucket,
+      t_order_parent_client_id=_t_order_parent_client_id,
     )
     if normalized_role and accepted_intent is None:
       raise AgentUnavailableError(
@@ -2586,7 +3190,67 @@ class TradeCommandService:
           "TRADE_INTENT_SCOPE_MISMATCH:做T角色或批次与持久化意图不一致"
         )
       if normalized_role:
+        prior_t_order = await self.db.scalar(
+          select(PendingTradeOrder)
+          .where(
+            PendingTradeOrder.account_id == account_id,
+            PendingTradeOrder.environment == canonical_environment_value,
+            PendingTradeOrder.batch_id == batch_id,
+            PendingTradeOrder.t_trade_role == normalized_role,
+          )
+          .order_by(PendingTradeOrder.created_at.desc())
+          .limit(1)
+        )
+        if prior_t_order is not None and not _t_order_parent_client_id:
+          raise AgentUnavailableError(
+            "T_ORDER_REPLACE_PROOF_REQUIRED:已有同批次同角色订单，禁止用新意图重置生命周期"
+          )
+        if _t_order_parent_client_id:
+          try:
+            quote_at = datetime.fromisoformat(str(immutable_metadata["quote_timestamp"]))
+          except (KeyError, TypeError, ValueError) as exc:
+            raise AgentUnavailableError("T_ORDER_QUOTE_STALE") from exc
+          if not 0 <= (utcnow() - to_naive_utc(quote_at)).total_seconds() <= 2:
+            raise AgentUnavailableError("T_ORDER_QUOTE_STALE")
+          if (
+            prior_t_order is None
+            or prior_t_order.client_order_id != _t_order_parent_client_id
+            or prior_t_order.intent_id != intent_id
+            or prior_t_order.owner_type != owner_type
+            or prior_t_order.owner_id != owner_id
+            or not t_order_lifecycle_active(prior_t_order, utcnow())
+          ):
+            raise AgentUnavailableError("T_ORDER_REPLACE_SOURCE_INVALID")
+          replacement = await self.evaluate_t_order_replacement(
+            client_order_id=_t_order_parent_client_id,
+            now=utcnow().replace(tzinfo=timezone.utc),
+            reference_price=Decimal(str(immutable_metadata.get("t_order_reference_price") or 0)),
+            price_tick=Decimal(str(immutable_metadata.get("t_order_price_tick") or 0)),
+            limit_up=immutable_metadata.get("t_order_limit_up"),
+            limit_down=immutable_metadata.get("t_order_limit_down"),
+            cage_upper=immutable_metadata.get("t_order_cage_upper"),
+            cage_lower=immutable_metadata.get("t_order_cage_lower"),
+          )
+          if not replacement.allowed:
+            raise AgentUnavailableError(replacement.reason_code)
+          if not 0 < volume <= replacement.remaining_volume or normalized_limit_price != replacement.limit_price:
+            raise AgentUnavailableError("T_ORDER_REPLACE_REQUEST_MISMATCH")
         batch = await self.db.get(TTradeBatch, batch_id, with_for_update=True)
+        if owner_type == ExecutionOwnerType.EXIT_PLAN.value:
+          exit_plan = await self.db.get(AutoExitPlanRecord, owner_id)
+          expected_source_owner_type = str(
+            getattr(exit_plan, "source_execution_owner_type", "") or ""
+          )
+          expected_source_owner_id = str(
+            getattr(exit_plan, "source_execution_owner_id", "") or ""
+          )
+          expected_source_environment = str(
+            getattr(exit_plan, "source_execution_environment", "") or ""
+          )
+        else:
+          expected_source_owner_type = owner_type
+          expected_source_owner_id = owner_id
+          expected_source_environment = canonical_environment_value
         if (
           not batch_id
           or (normalized_role == "EXIT" and batch is None)
@@ -2595,23 +3259,82 @@ class TradeCommandService:
             and (
               batch.account_id != account_id
               or batch.instrument_code != normalized_instrument
-              or batch.strategy_run_id != owner_id
               or str(batch.environment or "").strip().upper()
               != canonical_environment_value
               or str(getattr(batch, "source_execution_owner_type", "") or "")
-              != owner_type
+              != expected_source_owner_type
               or str(getattr(batch, "source_execution_owner_id", "") or "")
-              != owner_id
+              != expected_source_owner_id
               or str(getattr(batch, "source_execution_environment", "") or "")
-              != canonical_environment_value
+              != expected_source_environment
+              or (
+                owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+                and batch.strategy_run_id != owner_id
+              )
             )
           )
         ):
           raise AgentUnavailableError(
             "TRADE_INTENT_SCOPE_MISMATCH:做T批次与委托归属不一致"
           )
+    if admission_required:
+      staged_intent_id = await self._stage_risk_increase_order_request(
+        accepted_intent=accepted_intent,
+        business_idempotency_key=business_idempotency_key,
+        user_id=user_id,
+        account_id=account_id,
+        instrument_code=normalized_instrument,
+        owner_type=owner_type,
+        owner_id=owner_id,
+        environment=canonical_environment_value,
+        idempotency_key=raw_idempotency_key,
+        trace_id=trace_id,
+        strategy_run_id=strategy_run_id,
+        strategy_order_id=strategy_order_id,
+        batch_id=batch_id,
+        bucket=bucket,
+        t_trade_role=normalized_role,
+        risk_decision_id=risk_decision_id,
+        substitution_plan=substitution_plan,
+        policy_version=policy_version,
+        order_type=normalized_order_type,
+        limit_price=normalized_limit_price,
+        volume=volume,
+        request_metadata=immutable_metadata,
+        manual_live=manual_live,
+        t_order_parent_client_id=_t_order_parent_client_id,
+      )
+      await asyncio.sleep(RISK_ADMISSION_COLLECTION_WINDOW_SECONDS)
+      try:
+        dispatched = await self.dispatch_ready_risk_increase_orders(
+          account_id=account_id,
+          processing_owner=f"trade-command:{owner_type}:{owner_id}",
+        )
+      except Exception as exc:
+        await self.db.rollback()
+        contention_codes = (
+          "RISK_ADMISSION_LEASE_HELD",
+          "RISK_ADMISSION_READY_SET_CHANGED",
+          "RISK_ADMISSION_BATCH_ALREADY_COMMITTED",
+          "RISK_ADMISSION_EMPTY_BATCH",
+          "RISK_ADMISSION_INTENT_ALREADY_ASSIGNED",
+        )
+        if isinstance(exc, IntegrityError) or any(
+          code in str(exc) for code in contention_codes
+        ):
+          queued = await self._await_queued_risk_increase_order(staged_intent_id)
+          if queued is not None:
+            return queued
+        raise
+      queued = dispatched.get(staged_intent_id)
+      if queued is None:
+        queued = await self._queued_risk_increase_order(staged_intent_id)
+      if queued is None:
+        raise AgentUnavailableError("RISK_ADMISSION_DISPATCH_INCOMPLETE")
+      return queued
+    admission_capacity: dict[str, Any] | None = None
     if _locked_live_control is not None:
-      immutable_metadata["account_capacity"] = await self._require_account_capacity(
+      admission_capacity = await self._require_account_capacity(
         _locked_live_control,
         instrument_code=instrument_code,
         side=normalized_side,
@@ -2621,6 +3344,46 @@ class TradeCommandService:
         batch_id=batch_id,
         t_trade_role=normalized_role,
       )
+      immutable_metadata["account_capacity"] = admission_capacity
+    if normalized_mode == "live" and normalized_side == "BUY":
+      await self._require_risk_increase_admission(
+        intent=accepted_intent,
+        admission_batch_id=_admission_batch_id,
+        admission_rank=_admission_rank,
+        admission_fence_token=_admission_fence_token,
+      )
+      immutable_metadata.update(
+        {
+          "admission_batch_id": _admission_batch_id,
+          "admission_rank": int(_admission_rank),
+          "admission_policy_version": str(
+            getattr(accepted_intent, "admission_policy_version", "") or ""
+          ),
+          "admission_input_fingerprint": str(
+            getattr(accepted_intent, "admission_input_fingerprint", "") or ""
+          ),
+        }
+      )
+    if normalized_mode == "live" and normalized_role:
+      immutable_metadata.update(
+        self._require_t_order_new_policy(
+          role=normalized_role,
+          order_type=normalized_order_type,
+          limit_price=normalized_limit_price,
+          intent=accepted_intent,
+          request_metadata=immutable_metadata,
+        )
+      )
+      immutable_metadata.setdefault(
+        "t_order_original_created_at",
+        time_utils.now().isoformat(),
+      )
+      immutable_metadata.setdefault("t_order_replace_count", 0)
+      if _t_order_parent_client_id:
+        immutable_metadata["t_order_original_created_at"] = (
+          prior_t_order.t_order_original_created_at.replace(tzinfo=timezone.utc).isoformat()
+        )
+        immutable_metadata["t_order_replace_count"] = prior_t_order.t_order_attempt + 1
     device = await self._device_for(
       user_id=user_id,
       account_id=account_id,
@@ -2631,7 +3394,13 @@ class TradeCommandService:
     now = utcnow()
     client_order_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())
-    expires_at = now + timedelta(minutes=2)
+    expires_at = self._place_order_expires_at(
+      now,
+      t_trade_role=normalized_role,
+    )
+    if _t_order_parent_client_id:
+      policy = TEntryOrderPolicy() if normalized_role == "ENTRY" else TExitOrderPolicy()
+      expires_at = min(expires_at, prior_t_order.t_order_original_created_at + timedelta(seconds=policy.total_ttl_seconds))
     wire_expires_at = expires_at.replace(tzinfo=timezone.utc)
     payload = TradeCommandPayload(
       command_kind="PLACE_ORDER",
@@ -2675,6 +3444,12 @@ class TradeCommandService:
         batch_id=batch_id or None,
         bucket=bucket or "manual",
         t_trade_role=normalized_role or None,
+        t_order_attempt=(prior_t_order.t_order_attempt + 1 if _t_order_parent_client_id else 0),
+        t_order_parent_client_id=_t_order_parent_client_id or None,
+        t_order_original_created_at=(
+          prior_t_order.t_order_original_created_at if _t_order_parent_client_id
+          else now if normalized_role and normalized_mode == "live" else None
+        ),
         risk_decision_id=risk_decision_id or None,
         trace_id=trace_id or message_id,
         substitution_plan=substitution_plan,
@@ -2704,6 +3479,10 @@ class TradeCommandService:
     if batch_id:
       batch = await self.db.get(TTradeBatch, batch_id)
       if batch is None:
+        if normalized_role != "ENTRY" or owner_type != "STRATEGY_RUN":
+          raise AgentUnavailableError(
+            "TRADE_INTENT_SCOPE_MISMATCH:公共退出计划缺少持久化做T批次"
+          )
         cost_snapshot = extract_t_trade_cost_snapshot(immutable_metadata)
         batch = TTradeBatch(
           batch_id=batch_id,
@@ -2824,6 +3603,648 @@ class TradeCommandService:
       )
     return QueuedTradeCommand(client_order_id, message_id, "QUEUED")
 
+  async def _require_risk_increase_admission(
+    self,
+    *,
+    intent: TradeIntentRecord | None,
+    admission_batch_id: str,
+    admission_rank: int,
+    admission_fence_token: str,
+  ) -> None:
+    """Require the public durable admission claim for every LIVE BUY."""
+
+    if intent is None:
+      raise AgentUnavailableError("RISK_ADMISSION_INTENT_REQUIRED")
+    if str(intent.status or "").upper() != "EXECUTION_READY":
+      raise AgentUnavailableError("RISK_ADMISSION_INTENT_NOT_READY")
+    if not admission_batch_id or admission_rank <= 0 or not admission_fence_token:
+      raise AgentUnavailableError("RISK_ADMISSION_REQUIRED")
+    if (
+      str(intent.admission_batch_id or "") != admission_batch_id
+      or int(intent.admission_rank or 0) != int(admission_rank)
+      or not str(intent.admission_policy_version or "")
+      or not str(intent.admission_input_fingerprint or "")
+    ):
+      raise AgentUnavailableError("RISK_ADMISSION_INTENT_CONFLICT")
+    batch = await self.db.get(
+      AccountRiskIncreaseAdmissionBatch,
+      admission_batch_id,
+      with_for_update=True,
+    )
+    item = await self.db.scalar(
+      select(AccountRiskIncreaseAdmissionItem).where(
+        AccountRiskIncreaseAdmissionItem.admission_batch_id == admission_batch_id,
+        AccountRiskIncreaseAdmissionItem.intent_id == str(intent.id),
+      )
+    )
+    if (
+      batch is None
+      or item is None
+      or str(batch.status or "") != "PREPARED"
+      or str(batch.processing_fence_token or "") != admission_fence_token
+      or int(item.admission_rank or 0) != int(admission_rank)
+      or str(item.owner_type or "") != str(intent.owner_type or "")
+      or str(item.owner_id or "") != str(intent.owner_id or "")
+    ):
+      raise AgentUnavailableError("RISK_ADMISSION_CLAIM_CONFLICT")
+
+  async def _stage_risk_increase_order_request(
+    self,
+    *,
+    accepted_intent: TradeIntentRecord | None,
+    business_idempotency_key: str,
+    user_id: str,
+    account_id: str,
+    instrument_code: str,
+    owner_type: str,
+    owner_id: str,
+    environment: str,
+    idempotency_key: str,
+    trace_id: str,
+    strategy_run_id: str,
+    strategy_order_id: str,
+    batch_id: str,
+    bucket: str,
+    t_trade_role: str,
+    risk_decision_id: str,
+    substitution_plan: Mapping[str, Any] | None,
+    policy_version: int,
+    order_type: str,
+    limit_price: Decimal,
+    volume: int,
+    request_metadata: Mapping[str, Any],
+    manual_live: bool = False,
+    t_order_parent_client_id: str = "",
+  ) -> str:
+    """Persist one complete READY request before entering the account queue."""
+
+    intent = accepted_intent
+    if intent is None:
+      if owner_type != ExecutionOwnerType.MANUAL_COMMAND.value:
+        raise AgentUnavailableError("RISK_ADMISSION_INTENT_REQUIRED")
+      intent_id = str(
+        uuid.uuid5(
+          uuid.NAMESPACE_URL,
+          f"quantx:risk-increase:{business_idempotency_key}",
+        )
+      )
+      intent = await self.db.get(
+        TradeIntentRecord,
+        intent_id,
+        with_for_update=True,
+        populate_existing=True,
+      )
+      if intent is None:
+        intent = TradeIntentRecord(
+          id=intent_id,
+          strategy_run_id=None,
+          owner_type=owner_type,
+          owner_id=owner_id,
+          environment=environment,
+          idempotency_key=f"risk-increase:{business_idempotency_key}",
+          account_id=account_id,
+          strategy_id=None,
+          instrument_code=instrument_code,
+          direction="BUY",
+          bucket=bucket,
+          reason="MANUAL_RISK_INCREASE",
+          priority="URGENT",
+          target_volume=int(volume),
+          limit_price_hint=float(limit_price),
+          trace_id=trace_id or None,
+          status="EXECUTION_READY",
+          intent_metadata={},
+        )
+        self.db.add(intent)
+    if (
+      str(intent.account_id or "") != account_id
+      or str(intent.instrument_code or "").upper() != instrument_code
+      or str(intent.direction or "").upper() != "BUY"
+      or str(intent.owner_type or "").upper() != owner_type
+      or str(intent.owner_id or "") != owner_id
+      or str(intent.environment or "").upper() != environment
+    ):
+      raise AgentUnavailableError("RISK_ADMISSION_INTENT_CONFLICT")
+    if str(intent.status or "").upper() not in {
+      "PENDING",
+      "APPROVED",
+      "EXECUTION_READY",
+    }:
+      raise AgentUnavailableError("RISK_ADMISSION_INTENT_NOT_READY")
+    durable_request = {
+      "version": "risk-increase-order-request.v1",
+      "user_id": str(user_id),
+      "account_id": account_id,
+      "instrument_code": instrument_code,
+      "owner_type": owner_type,
+      "owner_id": owner_id,
+      "environment": environment,
+      "idempotency_key": idempotency_key,
+      "trace_id": trace_id,
+      "strategy_run_id": strategy_run_id,
+      "strategy_order_id": strategy_order_id,
+      "intent_id": str(intent.id),
+      "batch_id": batch_id,
+      "bucket": bucket,
+      "t_trade_role": t_trade_role,
+      "risk_decision_id": risk_decision_id,
+      "substitution_plan": dict(substitution_plan or {}),
+      "policy_version": int(policy_version or 0),
+      "order_type": order_type,
+      "limit_price": str(limit_price),
+      "volume": int(volume),
+      "request_metadata": dict(request_metadata or {}),
+      "manual_live": bool(manual_live),
+      "t_order_parent_client_id": t_order_parent_client_id,
+    }
+    metadata = dict(intent.intent_metadata or {})
+    existing_request = metadata.get("risk_increase_order_request")
+    if existing_request is not None and dict(existing_request) != durable_request:
+      previous = dict(existing_request)
+      # This request has not crossed the Pending/Outbox boundary. The caller
+      # has re-proved the same terminal parent and rerun sizing/risk/authority.
+      # Keep the current admission pointer until prepare_batch atomically
+      # supersedes its stale fingerprint and ranks the fresh complete READY set.
+      stable_fields = (
+        "user_id", "account_id", "instrument_code", "owner_type", "owner_id",
+        "environment", "idempotency_key", "trace_id", "strategy_run_id",
+        "strategy_order_id", "intent_id", "batch_id", "bucket", "t_trade_role",
+        "t_order_parent_client_id",
+      )
+      if not t_order_parent_client_id or any(
+        previous.get(field) != durable_request.get(field) for field in stable_fields
+      ):
+        raise AgentUnavailableError("RISK_ADMISSION_ORDER_REQUEST_CONFLICT")
+    metadata["risk_increase_order_request"] = durable_request
+    intent.intent_metadata = metadata
+    intent.status = "EXECUTION_READY"
+    await self.db.commit()
+    return str(intent.id)
+
+  @staticmethod
+  def _ready_order_request(intent: TradeIntentRecord) -> dict[str, Any]:
+    intent_metadata = dict(intent.intent_metadata or {})
+    raw = intent_metadata.pop("risk_increase_order_request", None)
+    request = dict(raw) if isinstance(raw, Mapping) else {}
+    if request.get("version") != "risk-increase-order-request.v1":
+      raise AgentUnavailableError("RISK_ADMISSION_ORDER_REQUEST_MISSING")
+    expected = {
+      "account_id": str(intent.account_id or ""),
+      "instrument_code": str(intent.instrument_code or "").upper(),
+      "owner_type": str(intent.owner_type or "").upper(),
+      "owner_id": str(intent.owner_id or ""),
+      "environment": str(intent.environment or "").upper(),
+      "intent_id": str(intent.id),
+      "bucket": str(intent.bucket or ""),
+    }
+    if any(str(request.get(key) or "") != value for key, value in expected.items()):
+      raise AgentUnavailableError("RISK_ADMISSION_ORDER_REQUEST_CONFLICT")
+    return {
+      "user_id": str(request.get("user_id") or ""),
+      "account_id": expected["account_id"],
+      "instrument_code": expected["instrument_code"],
+      "order_type": str(request.get("order_type") or ""),
+      "limit_price": Decimal(str(request.get("limit_price") or "0")),
+      "volume": int(request.get("volume") or 0),
+      "execution_ref": ExecutionOwnerRef(
+        ExecutionOwnerType(expected["owner_type"]),
+        expected["owner_id"],
+      ),
+      "idempotency_key": str(request.get("idempotency_key") or ""),
+      "trace_id": str(request.get("trace_id") or ""),
+      "strategy_run_id": str(request.get("strategy_run_id") or ""),
+      "strategy_order_id": str(request.get("strategy_order_id") or ""),
+      "intent_id": expected["intent_id"],
+      "batch_id": str(request.get("batch_id") or ""),
+      "bucket": expected["bucket"],
+      "t_trade_role": str(request.get("t_trade_role") or ""),
+      "risk_decision_id": str(request.get("risk_decision_id") or ""),
+      "substitution_plan": dict(request.get("substitution_plan") or {}),
+      "policy_version": int(request.get("policy_version") or 0),
+      "request_metadata": {
+        **{
+          key: value for key, value in intent_metadata.items()
+          if key in _REQUEST_METADATA_ALLOWLIST and key not in _GENERATED_ORDER_METADATA_KEYS
+        },
+        **dict(request.get("request_metadata") or {}),
+      },
+      "manual_live": bool(request.get("manual_live")),
+      "_t_order_parent_client_id": str(request.get("t_order_parent_client_id") or ""),
+    }
+
+  async def _t_entry_device(
+    self, *, intent: TradeIntentRecord, account_id: str,
+    instrument_code: str, volume: int, limit_price: Decimal,
+  ) -> AgentDevice:
+    """Revalidate T's own consumed confirmation or LIVE_AUTO rollout authority."""
+    metadata = dict(intent.intent_metadata or {})
+    if (
+      intent.owner_type != "STRATEGY_RUN" or intent.environment != "LIVE"
+      or intent.direction != "BUY" or intent.account_id != account_id
+      or intent.instrument_code != instrument_code
+      or str(metadata.get("t_trade_role") or "").upper() != "ENTRY"
+      or not str(metadata.get("t_batch_id") or "")
+      or intent.status not in {"APPROVED", "EXECUTION_READY"}
+    ):
+      raise AgentUnavailableError("T_ENTRY_AUTHORIZATION_SCOPE_INVALID")
+    run = await self.db.get(StrategyRun, intent.owner_id)
+    if (
+      run is None or self._enum_value(run.status) != "running"
+      or self._enum_value(run.mode) != "live"
+      or str(dict(run.parameters or {}).get("account_id") or "") != account_id
+    ):
+      raise AgentUnavailableError("T_ENTRY_SOURCE_NOT_RUNNING")
+    try:
+      envelope = build_t_trade_entry_exit_authorization_envelope(intent)
+    except (TypeError, ValueError) as exc:
+      raise AgentUnavailableError("T_ENTRY_AUTHORIZATION_SCOPE_INVALID") from exc
+    subject = envelope.subject
+    actor_id = ""
+    if str(metadata.get("approval_mode") or "").upper() == "LIVE_AUTO":
+      from quantx_infrastructure.services.t_trade_operations_service import (
+        TTradeOperationsService,
+      )
+
+      readiness = await TTradeOperationsService().readiness(account_id)
+      if not (
+        str(readiness.get("stage") or "").upper() == "LIVE"
+        and readiness.get("rollout_enabled") and readiness.get("automation_ready")
+        and readiness.get("can_approve") and not readiness.get("kill_switch")
+      ):
+        raise AgentUnavailableError("LIVE_AUTO_AUTHORITY_NOT_READY")
+    else:
+      actor_id = str(metadata.get("t_trade_entry_approval_user_id") or "")
+      session_id = str(metadata.get("t_trade_entry_approval_device_session_id") or "")
+      challenge_id = str(metadata.get("t_trade_entry_approval_challenge_id") or "")
+      challenge = await self.db.get(TradeConfirmationChallenge, challenge_id) if challenge_id else None
+      if challenge is None or not actor_id or not session_id:
+        raise AgentUnavailableError("T_TRADE_ENTRY_DEVICE_CHALLENGE_REQUIRED")
+      payload = dict(challenge.payload or {})
+      binding = dict(payload.get(T_TRADE_EXIT_AUTHORIZATION_BINDING_KEY) or {})
+      expected = {
+        "action": T_TRADE_ENTRY_APPROVAL_ACTION, "user_id": actor_id,
+        "device_session_id": session_id, "account_id": account_id,
+        "owner_type": "STRATEGY_RUN", "owner_id": str(intent.owner_id),
+        "environment": "LIVE", "intent_id": str(intent.id),
+      }
+      try:
+        payload_fingerprint = trade_confirmation_payload_fingerprint(payload)
+        bound_subject = dict(binding.get("subject") or {})
+        envelope = build_t_trade_entry_exit_authorization_envelope(
+          intent, max_protected_volume=int(bound_subject.get("max_protected_volume") or 0),
+        )
+      except (TypeError, ValueError) as exc:
+        raise AgentUnavailableError("T_ENTRY_CHALLENGE_INVALID") from exc
+      if (
+        challenge.consumed_at is None or challenge.expires_at is None
+        or to_naive_utc(challenge.expires_at) <= utcnow()
+        or any(str(getattr(challenge, key, "") or "") != expected[key]
+               for key in ("action", "user_id", "device_session_id", "account_id", "owner_type", "owner_id", "environment"))
+        or any(str(payload.get(key) or "") != value for key, value in expected.items())
+        or not hmac.compare_digest(str(challenge.payload_fingerprint or ""), payload_fingerprint)
+        or envelope.subject != bound_subject
+        or not hmac.compare_digest(envelope.fingerprint, str(binding.get("fingerprint") or ""))
+      ):
+        raise AgentUnavailableError("T_ENTRY_CHALLENGE_INVALID")
+      subject = envelope.subject
+    filled = max(0, int(intent.executed_volume or 0))
+    if volume <= 0 or filled + int(volume) > int(subject["max_protected_volume"]):
+      raise AgentUnavailableError("T_ENTRY_AUTHORIZED_VOLUME_EXCEEDED")
+    reference = Decimal(str(subject.get("entry_reference_price") or 0))
+    deviation = Decimal(str(subject.get("entry_max_price_deviation_bps") or 0))
+    if reference <= 0 or limit_price > reference * (1 + deviation / Decimal(10000)):
+      raise AgentUnavailableError("T_ENTRY_AUTHORIZED_PRICE_EXCEEDED")
+    return (
+      await self._device_for(user_id=actor_id, account_id=account_id, execution_mode="live")
+      if actor_id else await self._device_for_account(account_id, "live")
+    )
+
+  async def _revalidate_ready_order_request(
+    self,
+    *,
+    intent: TradeIntentRecord,
+    request: Mapping[str, Any],
+  ) -> None:
+    """Repeat producer-specific mutable gates inside the admission lock."""
+
+    execution_ref = request.get("execution_ref")
+    if (
+      not isinstance(execution_ref, ExecutionOwnerRef)
+      or execution_ref.owner_type is not ExecutionOwnerType.STRATEGY_RUN
+    ):
+      return
+    metadata = dict(request.get("request_metadata") or {})
+    if str(dict(intent.intent_metadata or {}).get("t_trade_role") or "").upper() == "ENTRY":
+      device = await self._t_entry_device(
+        intent=intent, account_id=str(request.get("account_id") or ""),
+        instrument_code=str(request.get("instrument_code") or ""),
+        volume=int(request.get("volume") or 0),
+        limit_price=Decimal(str(request.get("limit_price") or 0)),
+      )
+      if str(device.user_id or "") != str(request.get("user_id") or ""):
+        raise AgentUnavailableError("RISK_ADMISSION_ENTRY_DEVICE_CHANGED")
+      return
+    execution_mode = str(metadata.get("execution_mode") or "").upper()
+    if not str(metadata.get("entry_plan_id") or ""):
+      return
+    common = {
+      "account_id": str(request.get("account_id") or ""),
+      "instrument_code": str(request.get("instrument_code") or ""),
+      "limit_price": Decimal(str(request.get("limit_price") or "0")),
+      "volume": int(request.get("volume") or 0),
+      "strategy_run_id": execution_ref.owner_id,
+      "intent_id": str(intent.id),
+      "bucket": str(request.get("bucket") or ""),
+      "policy_version": int(request.get("policy_version") or 0),
+    }
+    if execution_mode == "AUTO":
+      device = await self._exact_auto_entry_device(
+        **common,
+        side="BUY",
+        request_metadata=metadata,
+      )
+    elif execution_mode == "MANUAL_CONFIRM":
+      device = await self._managed_manual_entry_device(
+        **common,
+        intent=intent,
+      )
+    else:
+      raise AgentUnavailableError("RISK_ADMISSION_ENTRY_MODE_INVALID")
+    if str(device.user_id or "") != str(request.get("user_id") or ""):
+      raise AgentUnavailableError("RISK_ADMISSION_ENTRY_DEVICE_CHANGED")
+
+  async def dispatch_ready_risk_increase_orders(
+    self,
+    *,
+    account_id: str,
+    processing_owner: str,
+  ) -> dict[str, QueuedTradeCommand]:
+    """Collect the whole READY set and enqueue it in deterministic rank order."""
+
+    ready = list(
+      (
+        await self.db.scalars(
+          select(TradeIntentRecord)
+          .where(
+            TradeIntentRecord.account_id == str(account_id),
+            TradeIntentRecord.environment == ExecutionEnvironment.LIVE.value,
+            TradeIntentRecord.direction == "BUY",
+            TradeIntentRecord.status == "EXECUTION_READY",
+          )
+          .order_by(
+            TradeIntentRecord.created_at,
+            TradeIntentRecord.owner_type,
+            TradeIntentRecord.owner_id,
+            TradeIntentRecord.id,
+          )
+        )
+      ).all()
+    )
+    if not ready:
+      return {}
+    requests = [self._ready_order_request(intent) for intent in ready]
+    # This is a non-locking preview.  The account execution-control row is
+    # locked and revalidated only after the READY set has a committed batch
+    # and processing fence.
+    control = await self._preview_live_authorization(
+      str(account_id),
+      risk_reducing=False,
+      require_controlled_window=any(
+        bool(request.get("manual_live")) for request in requests
+      ),
+    )
+    for intent, request in zip(ready, requests, strict=True):
+      await self._revalidate_ready_order_request(
+        intent=intent,
+        request=request,
+      )
+    watermarks = {
+      (
+        await AccountCapacityService(self.db).read(
+          control,
+          instrument_code=str(request["instrument_code"]),
+          lock_rows=False,
+        )
+      ).obligation_watermark
+      for request in requests
+    }
+    if len(watermarks) != 1:
+      raise AgentUnavailableError("RISK_ADMISSION_INPUT_CHANGED")
+    obligation_watermark = next(iter(watermarks))
+    sequencer = AccountRiskIncreaseAdmissionSequencer(self.db)
+    batch = await sequencer.prepare_batch(
+      account_id=str(account_id),
+      account_snapshot_id=str(control.last_snapshot_id or ""),
+      account_snapshot_hash=str(control.last_snapshot_hash or ""),
+      obligation_watermark=obligation_watermark,
+      intent_ids=[str(intent.id) for intent in ready],
+      commit=True,
+    )
+    claim = await sequencer.claim_batch(
+      admission_batch_id=str(batch.admission_batch_id),
+      processing_owner=str(processing_owner or "risk-admission-dispatcher"),
+      commit=True,
+    )
+    queued = await self.enqueue_risk_increase_admission_batch(
+      claim=claim,
+      order_requests=requests,
+      account_snapshot_id=str(control.last_snapshot_id or ""),
+      account_snapshot_hash=str(control.last_snapshot_hash or ""),
+      obligation_watermark=obligation_watermark,
+    )
+    ranked_items = await self.db.scalars(
+      select(AccountRiskIncreaseAdmissionItem)
+      .where(
+        AccountRiskIncreaseAdmissionItem.admission_batch_id
+        == claim.admission_batch_id
+      )
+      .order_by(AccountRiskIncreaseAdmissionItem.admission_rank)
+    )
+    return {
+      str(item.intent_id): result
+      for item, result in zip(ranked_items.all(), queued, strict=True)
+    }
+
+  async def _queued_risk_increase_order(
+    self,
+    intent_id: str,
+  ) -> QueuedTradeCommand | None:
+    row = (
+      await self.db.execute(
+        select(PendingTradeOrder, TradeCommandOutbox)
+        .join(
+          TradeCommandOutbox,
+          TradeCommandOutbox.client_order_id == PendingTradeOrder.client_order_id,
+        )
+        .where(PendingTradeOrder.intent_id == str(intent_id))
+        .where(PendingTradeOrder.status.in_(("QUEUED", "PENDING", "DELIVERED", "SUBMITTED", "ACCEPTED", "PARTIAL_FILLED", "PARTIALLY_FILLED")))
+        .order_by(PendingTradeOrder.t_order_attempt.desc())
+        .limit(1)
+      )
+    ).one_or_none()
+    if row is None:
+      return None
+    pending, outbox = row
+    return QueuedTradeCommand(
+      str(pending.client_order_id),
+      str(outbox.message_id),
+      str(outbox.delivery_status),
+    )
+
+  async def _await_queued_risk_increase_order(
+    self,
+    intent_id: str,
+  ) -> QueuedTradeCommand | None:
+    """Let a concurrent dispatcher winner publish the durable result.
+
+    A held 10-second lease is not an error for the producer that staged the
+    same intent.  Polling is bounded by that frozen lease: after it expires a
+    background or caller dispatcher may take over on the next attempt.
+    """
+
+    deadline = monotonic() + ADMISSION_LEASE_SECONDS
+    while True:
+      queued = await self._queued_risk_increase_order(intent_id)
+      if queued is not None:
+        return queued
+      if monotonic() >= deadline:
+        return None
+      await asyncio.sleep(RISK_ADMISSION_COLLECTION_WINDOW_SECONDS)
+
+  async def enqueue_risk_increase_admission_batch(
+    self,
+    *,
+    claim: AdmissionBatchClaim,
+    order_requests: list[Mapping[str, Any]],
+    account_snapshot_id: str,
+    account_snapshot_hash: str,
+    obligation_watermark: str,
+  ) -> list[QueuedTradeCommand]:
+    """Atomically enqueue one ranked LIVE BUY batch under its fence token."""
+
+    batch_identity = await self.db.get(
+      AccountRiskIncreaseAdmissionBatch,
+      claim.admission_batch_id,
+    )
+    if batch_identity is None:
+      raise AgentUnavailableError("RISK_ADMISSION_BATCH_NOT_FOUND")
+    requires_manual_window = any(
+      bool(request.get("manual_live")) for request in order_requests
+    )
+    control = (
+      await self._require_manual_live_authorization(
+        str(batch_identity.account_id),
+        risk_reducing=False,
+      )
+      if requires_manual_window
+      else await self._require_live_authorization(
+        str(batch_identity.account_id),
+        risk_reducing=False,
+      )
+    )
+    batch = await self.db.get(
+      AccountRiskIncreaseAdmissionBatch,
+      claim.admission_batch_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+    if batch is None or str(batch.account_id) != str(control.account_id):
+      raise AgentUnavailableError("RISK_ADMISSION_BATCH_ACCOUNT_CONFLICT")
+    items = list(
+      (
+        await self.db.scalars(
+          select(AccountRiskIncreaseAdmissionItem)
+          .where(
+            AccountRiskIncreaseAdmissionItem.admission_batch_id
+            == claim.admission_batch_id
+          )
+          .order_by(AccountRiskIncreaseAdmissionItem.admission_rank)
+          .with_for_update()
+        )
+      ).all()
+    )
+    requests_by_intent = {
+      str(request.get("intent_id") or ""): dict(request)
+      for request in order_requests
+    }
+    if (
+      len(requests_by_intent) != len(order_requests)
+      or set(requests_by_intent) != {str(item.intent_id) for item in items}
+    ):
+      raise AgentUnavailableError("RISK_ADMISSION_ORDER_MANIFEST_CONFLICT")
+    if not items:
+      raise AgentUnavailableError("RISK_ADMISSION_EMPTY_BATCH")
+    instrument_codes = sorted(
+      {
+        str(request.get("instrument_code") or "").strip().upper()
+        for request in requests_by_intent.values()
+      }
+    )
+    if not instrument_codes or any(not code for code in instrument_codes):
+      raise AgentUnavailableError("RISK_ADMISSION_INSTRUMENT_REQUIRED")
+    capacity_watermarks = {
+      (
+        await AccountCapacityService(self.db).read(
+          control,
+          instrument_code=instrument_code,
+        )
+      ).obligation_watermark
+      for instrument_code in instrument_codes
+    }
+    if (
+      str(control.last_snapshot_id or "") != str(account_snapshot_id or "")
+      or str(control.last_snapshot_hash or "").lower()
+      != str(account_snapshot_hash or "").lower()
+      or capacity_watermarks != {str(obligation_watermark or "").lower()}
+    ):
+      raise AgentUnavailableError("RISK_ADMISSION_INPUT_CHANGED")
+    results: list[QueuedTradeCommand] = []
+    try:
+      last_renewed_at = monotonic()
+      for item in items:
+        current_monotonic = monotonic()
+        if (
+          current_monotonic - last_renewed_at
+          >= ADMISSION_RENEW_INTERVAL_SECONDS
+        ):
+          await AccountRiskIncreaseAdmissionSequencer(self.db).renew_claim(
+            admission_batch_id=claim.admission_batch_id,
+            fence_token=claim.fence_token,
+            commit=False,
+          )
+          last_renewed_at = current_monotonic
+        request = requests_by_intent[str(item.intent_id)]
+        request.update(
+          {
+            "environment": ExecutionEnvironment.LIVE,
+            "side": "BUY",
+            "commit_transaction": False,
+            "_locked_live_control": control,
+            "_admission_batch_id": claim.admission_batch_id,
+            "_admission_rank": int(item.admission_rank),
+            "_admission_fence_token": claim.fence_token,
+          }
+        )
+        results.append(await self.enqueue_order(**request))
+      await AccountRiskIncreaseAdmissionSequencer(self.db).commit_batch(
+        admission_batch_id=claim.admission_batch_id,
+        fence_token=claim.fence_token,
+        account_snapshot_id=account_snapshot_id,
+        account_snapshot_hash=account_snapshot_hash,
+        obligation_watermark=obligation_watermark,
+        commit=False,
+      )
+      for item in items:
+        intent = await self.db.get(TradeIntentRecord, item.intent_id)
+        if intent is None:
+          raise AgentUnavailableError("RISK_ADMISSION_INTENT_NOT_FOUND")
+        intent.status = "EXECUTION_PENDING"
+      await self.db.commit()
+      return results
+    except Exception:
+      await self.db.rollback()
+      raise
+
   async def enqueue_order_for_account(
     self,
     *,
@@ -2843,6 +4264,7 @@ class TradeCommandService:
     batch_id: str = "",
     bucket: str = "manual",
     t_trade_role: str = "",
+    _t_order_parent_client_id: str = "",
     risk_decision_id: str = "",
     substitution_plan: dict[str, Any] | None = None,
     policy_version: int = 0,
@@ -2872,15 +4294,26 @@ class TradeCommandService:
     normalized_side = str(side or "").strip().upper()
     normalized_instrument = str(instrument_code or "").strip().upper()
     normalized_order_type = self._wire_price_type(order_type)
-    if batch_id and owner_type != ExecutionOwnerType.STRATEGY_RUN.value:
-      raise AgentUnavailableError("TRADE_COMMAND_OWNER_CONFLICT:TTrade 批次必须归属 STRATEGY_RUN")
+    normalized_role = str(t_trade_role or "").strip().upper()
+    if batch_id and not (
+      owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+      or (
+        owner_type == ExecutionOwnerType.EXIT_PLAN.value
+        and normalized_role == "EXIT"
+      )
+    ):
+      raise AgentUnavailableError(
+        "TRADE_COMMAND_OWNER_CONFLICT:TTrade 批次必须归属 ENTRY 来源或公共 EXIT_PLAN"
+      )
+    stage_before_account_lock = (
+      normalized_execution_mode == "live" and normalized_side == "BUY"
+    )
     locked_live_control = (
       await self._require_live_authorization(
         str(account_id),
-        risk_reducing=str(side or "").upper() == "SELL"
-        or str(t_trade_role).upper() == "EXIT",
+        risk_reducing=normalized_side == "SELL" or normalized_role == "EXIT",
       )
-      if normalized_execution_mode == "live"
+      if normalized_execution_mode == "live" and not stage_before_account_lock
       else None
     )
     # Recover an accepted command before checking a grant or capacity again.
@@ -2896,11 +4329,12 @@ class TradeCommandService:
           .where(
             PendingTradeOrder.account_id == account_id,
             PendingTradeOrder.intent_id == intent_id,
+            PendingTradeOrder.t_order_attempt == 0,
           )
           .with_for_update()
         )
       ).one_or_none()
-      if prior is not None:
+      if prior is not None and not _t_order_parent_client_id:
         pending, outbox = prior
         if outbox.idempotency_key != self.order_idempotency_digest(
           user_id=pending.user_id,
@@ -3098,6 +4532,7 @@ class TradeCommandService:
         == ExecutionOwnerType.STRATEGY_RUN.value
         and str(persisted_intent.owner_id or "") == str(strategy_run_id or "")
         and str(persisted_metadata.get("execution_mode") or "").upper() == "AUTO"
+        and str(persisted_metadata.get("t_trade_role") or "").upper() != "ENTRY"
       )
       is_managed_manual_entry = bool(
         persisted_intent is not None
@@ -3107,8 +4542,14 @@ class TradeCommandService:
         and str(persisted_intent.owner_id or "") == str(strategy_run_id or "")
         and str(persisted_metadata.get("execution_mode") or "").upper()
         == "MANUAL_CONFIRM"
+        and str(persisted_metadata.get("t_trade_role") or "").upper() != "ENTRY"
       )
-      if is_managed_auto_entry:
+      if persisted_intent is not None and str(persisted_metadata.get("t_trade_role") or "").upper() == "ENTRY":
+        device = await self._t_entry_device(
+          intent=persisted_intent, account_id=account_id,
+          instrument_code=instrument_code, limit_price=Decimal(str(limit_price)), volume=volume,
+        )
+      elif is_managed_auto_entry:
         device = await self._exact_auto_entry_device(
           account_id=account_id,
           instrument_code=instrument_code,
@@ -3158,6 +4599,7 @@ class TradeCommandService:
       policy_version=policy_version,
       request_metadata=metadata,
       _locked_live_control=locked_live_control,
+      _t_order_parent_client_id=_t_order_parent_client_id,
     )
 
   async def enqueue_cancel(
@@ -3686,6 +5128,12 @@ class TradeCommandService:
               intent.notes = reason_code
               intent_metadata["execution_terminal_reason"] = reason_code
               intent_metadata["execution_terminal_source"] = "LOCAL_OUTBOX_CANCEL"
+              order.request_metadata = {
+                **dict(order.request_metadata or {}),
+                "execution_terminal_source": "LOCAL_OUTBOX_CANCEL",
+                "execution_terminal_reason": reason_code,
+                "command_lifecycle_message_id": outbox.message_id,
+              }
               intent.intent_metadata = intent_metadata
               result_request_metadata = intent_metadata
         elif client_order_id in runtime_event_client_ids:

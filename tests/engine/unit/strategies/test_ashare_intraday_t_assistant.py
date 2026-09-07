@@ -61,6 +61,43 @@ def test_backtest_data_requirements_are_strict_and_require_depth():
   }
 
 
+def test_exit_plan_book_ownership_is_explicitly_backtest_only():
+  assert AshareIntradayTAssistantStrategy.OWNS_RUNTIME_EXIT_PLAN_BOOK is False
+  assert make_strategy(mode=StrategyRunMode.PAPER).OWNS_RUNTIME_EXIT_PLAN_BOOK is False
+  assert make_strategy(mode=StrategyRunMode.LIVE).OWNS_RUNTIME_EXIT_PLAN_BOOK is False
+  assert make_strategy(mode=StrategyRunMode.BACKTEST).OWNS_RUNTIME_EXIT_PLAN_BOOK is True
+
+
+def test_t_exit_template_uses_immutable_v1_order_policy() -> None:
+  strategy = make_strategy()
+  strategy.context.parameters.update(
+    {
+      "max_exit_slippage_bps": 199,
+      "global_config_version": 27,
+    }
+  )
+
+  template = strategy.build_exit_plan_template(
+    instrument_code="600000.SH",
+    batch_id="batch-1",
+    plan_id="t-exit-batch-1",
+  )
+
+  assert template.execution.price_reference.value == "BID"
+  assert template.execution.price_type == "FIX_PRICE"
+  assert template.execution.protected_limit is True
+  assert template.execution.max_slippage_bps == 30
+  assert template.metadata["exit_policy_version"] == "TExitOrderPolicy.v1"
+  assert template.metadata["t_exit_order_policy_version"] == (
+    "TExitOrderPolicy.v1"
+  )
+  assert template.metadata["t_exit_order_ttl_seconds"] == 30
+  assert template.metadata["t_exit_total_ttl_seconds"] == 90
+  assert template.metadata["t_exit_max_replace_count"] == 2
+  assert template.metadata["t_exit_max_slippage_bps"] == 30
+  assert template.metadata["exit_plan_config_version"] == 27
+
+
 def make_tick(
   timestamp: datetime,
   price: float,
@@ -454,10 +491,10 @@ async def test_multi_instrument_manual_entry_then_trailing_auto_exit():
   assert decision.reason == "TRAILING_FLOOR_REACHED"
   assert decision.volume == 100
   assert entry_intent.metadata["exit_plan_template"]["execution"]["price_type"] == (
-    "MARKET"
+    "FIX_PRICE"
   )
   assert (
-    entry_intent.metadata["exit_plan_template"]["execution"]["protected_limit"] is False
+    entry_intent.metadata["exit_plan_template"]["execution"]["protected_limit"] is True
   )
 
 

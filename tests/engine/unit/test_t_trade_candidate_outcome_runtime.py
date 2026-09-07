@@ -41,6 +41,7 @@ from quantx_infrastructure.services.t_trade_candidate_outcome_service import (
   CandidateOutcomeReconciliationResult,
   TTradeCandidateOutcomePersistenceFacade,
 )
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 _PAPER_OWNER = ExecutionOwnerRef.strategy_run("run-1")
@@ -135,6 +136,12 @@ def _inactive_outcome_state(instrument_code: str = "600000.SH") -> SimpleNamespa
 async def test_executor_side_channel_is_restart_safe_and_arms_on_full_entry() -> None:
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   async with engine.begin() as connection:
+    await connection.execute(
+      text("CREATE TABLE strategy_runs (id VARCHAR(36) PRIMARY KEY, mode VARCHAR(20))")
+    )
+    await connection.execute(
+      text("INSERT INTO strategy_runs (id, mode) VALUES ('run-1', 'BACKTEST')")
+    )
     await connection.run_sync(TTradeCandidateOutcome.__table__.create)
   sessions = async_sessionmaker(engine, expire_on_commit=False)
   facade = TTradeCandidateOutcomePersistenceFacade(sessions)

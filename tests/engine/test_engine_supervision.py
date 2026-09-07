@@ -119,7 +119,7 @@ async def test_runtime_owner_watchdog_propagates_dead_consumer(monkeypatch) -> N
   monkeypatch.setattr(
     engine_main,
     "AutoExitPlanService",
-    lambda _manager: FailingAudit(),
+    lambda: FailingAudit(),
   )
 
   with pytest.raises(RuntimeError, match="消费任务未运行"):
@@ -127,7 +127,7 @@ async def test_runtime_owner_watchdog_propagates_dead_consumer(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_runtime_owner_watchdog_rejects_dead_manual_monitor(
+async def test_runtime_owner_watchdog_rejects_dead_public_exit_plan_runtime(
   monkeypatch,
 ) -> None:
   stopped = asyncio.Event()
@@ -139,15 +139,41 @@ async def test_runtime_owner_watchdog_rejects_dead_manual_monitor(
   monkeypatch.setattr(
     engine_main,
     "AutoExitPlanService",
-    lambda _manager: PassingAudit(),
+    lambda: PassingAudit(),
   )
   monkeypatch.setattr(
     engine_main,
-    "exit_plan_monitor",
+    "exit_plan_runtime",
     SimpleNamespace(is_running=False),
   )
 
-  with pytest.raises(RuntimeError, match="manual-plan consumer"):
+  with pytest.raises(RuntimeError, match="public plan consumer"):
+    await engine_main._runtime_owner_watchdog(stopped)
+
+
+@pytest.mark.asyncio
+async def test_runtime_owner_watchdog_rejects_dead_admission_dispatcher(
+  monkeypatch,
+) -> None:
+  stopped = asyncio.Event()
+
+  class PassingAudit:
+    async def audit_active_runtime_owned_plans(self):
+      return {"examined": 0, "verified": []}
+
+  monkeypatch.setattr(engine_main, "AutoExitPlanService", lambda: PassingAudit())
+  monkeypatch.setattr(
+    engine_main,
+    "exit_plan_runtime",
+    SimpleNamespace(is_running=True),
+  )
+  monkeypatch.setattr(
+    engine_main,
+    "risk_increase_admission_runtime",
+    SimpleNamespace(is_running=False),
+  )
+
+  with pytest.raises(RuntimeError, match="admission dispatcher"):
     await engine_main._runtime_owner_watchdog(stopped)
 
 
@@ -170,7 +196,7 @@ async def test_strategy_startup_restores_runs_before_owner_audit(
   monkeypatch.setattr(engine_main, "strategy_manager", manager)
   service = ExitPlanService()
   # AutoExitPlanService is constructed synchronously in production.
-  monkeypatch.setattr(engine_main, "AutoExitPlanService", lambda current: service)
+  monkeypatch.setattr(engine_main, "AutoExitPlanService", lambda: service)
 
   result = await engine_main._start_and_reconcile_runtime_exit_plans()
 
@@ -213,12 +239,12 @@ async def test_owner_audit_failure_degrades_only_trading_runtime(
   monkeypatch.setattr(
     engine_main,
     "AutoExitPlanService",
-    lambda _manager: FailingPreflight(),
+    lambda: FailingPreflight(),
   )
   monkeypatch.setattr(engine_main, "_pause_owner_audit_accounts", pause_and_stop)
   monkeypatch.setattr(
     engine_main,
-    "exit_plan_monitor",
+    "exit_plan_runtime",
     SimpleNamespace(is_running=False, start=unexpected_start),
   )
   state = engine_main.EngineOperationalState()

@@ -18,7 +18,6 @@ from quantx_domain.strategies.base import (
   StrategyRunMode,
   TradeExecutionEvent,
   TradeIntentDirection,
-  TradeIntentExecutionMode,
   TradeIntentPriority,
 )
 from quantx_domain.trading.exit_plan import (
@@ -102,7 +101,7 @@ class ExecutionStateManager(FakeStateManager):
 def make_runtime():
   context = StrategyContext(
     run_id="run-auto-exit",
-    mode=StrategyRunMode.PAPER,
+    mode=StrategyRunMode.BACKTEST,
     instruments=["600000.SH"],
     parameters={},
   )
@@ -266,7 +265,7 @@ def make_managed_exit_runtime():
 
 
 @pytest.mark.asyncio
-async def test_dedicated_auto_exit_crash_gap_is_restored_for_one_route(monkeypatch):
+async def test_source_runtime_does_not_restore_public_exit_pending_intent(monkeypatch):
   runtime = make_managed_exit_runtime()
   executor = StrategyExecutor()
   recovery = {
@@ -296,37 +295,12 @@ async def test_dedicated_auto_exit_crash_gap_is_restored_for_one_route(monkeypat
 
   await executor._restore_runtime_exit_plan_intents(runtime)
 
-  restored = runtime.exit_plan_recovery_intents["exit-intent-1"]
-  assert restored.execution_mode == TradeIntentExecutionMode.AUTO
-  assert restored.metadata["exit_plan_recovery_durable_status"] == "PENDING"
-
-  executor._process_trade_intent = AsyncMock()
-  market_data = MarketDataSnapshot(
-    instrument_code="600000.SH",
-    price=9.8,
-    bid_price=[9.79],
-    ask_price=[9.8],
-  )
-  await executor._process_auto_exit_plans(
-    runtime,
-    instrument_code="600000.SH",
-    timestamp=datetime(2026, 8, 29, 10, 0),
-    market_data=market_data,
-  )
-  executor._process_trade_intent.assert_awaited_once_with(runtime, restored)
   assert runtime.exit_plan_recovery_intents == {}
-
-  await executor._process_auto_exit_plans(
-    runtime,
-    instrument_code="600000.SH",
-    timestamp=datetime(2026, 8, 29, 10, 0, 1),
-    market_data=market_data,
-  )
-  executor._process_trade_intent.assert_awaited_once()
+  AutoExitPlanService.load_managed_pending_exit_intent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_dedicated_auto_exit_recovery_retries_after_route_failure(monkeypatch):
+async def test_source_runtime_never_retries_public_exit_route(monkeypatch):
   runtime = make_managed_exit_runtime()
   executor = StrategyExecutor()
   recovery = {
@@ -354,34 +328,8 @@ async def test_dedicated_auto_exit_recovery_retries_after_route_failure(monkeypa
     AsyncMock(return_value=recovery),
   )
   await executor._restore_runtime_exit_plan_intents(runtime)
-  restored = runtime.exit_plan_recovery_intents["exit-intent-1"]
-  executor._process_trade_intent = AsyncMock(
-    side_effect=[RuntimeError("temporary route failure"), None]
-  )
-  market_data = MarketDataSnapshot(
-    instrument_code="600000.SH",
-    price=9.8,
-    bid_price=[9.79],
-    ask_price=[9.8],
-  )
-
-  with pytest.raises(RuntimeError, match="temporary route failure"):
-    await executor._process_auto_exit_plans(
-      runtime,
-      instrument_code="600000.SH",
-      timestamp=datetime(2026, 8, 29, 10, 0),
-      market_data=market_data,
-    )
-  assert runtime.exit_plan_recovery_intents == {"exit-intent-1": restored}
-
-  await executor._process_auto_exit_plans(
-    runtime,
-    instrument_code="600000.SH",
-    timestamp=datetime(2026, 8, 29, 10, 0, 1),
-    market_data=market_data,
-  )
-  assert executor._process_trade_intent.await_count == 2
   assert runtime.exit_plan_recovery_intents == {}
+  AutoExitPlanService.load_managed_pending_exit_intent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -468,7 +416,7 @@ async def test_replayed_exit_confirmation_fails_closed_on_durable_binding_error(
 
 
 @pytest.mark.asyncio
-async def test_dedicated_canonical_reload_restores_plan_version_and_strategy_state(
+async def test_source_runtime_reload_does_not_restore_public_plan_state(
   monkeypatch,
 ):
   runtime = make_managed_exit_runtime()
@@ -501,11 +449,10 @@ async def test_dedicated_canonical_reload_restores_plan_version_and_strategy_sta
 
   await StrategyExecutor()._load_runtime_exit_plan_book(runtime)
 
-  assert runtime.exit_plan_state_versions == {"manual-plan-1": 7}
+  assert runtime.exit_plan_state_versions == {}
   assert runtime.exit_plan_book.plans == {}
-  assert runtime.strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)["template"][
-    "plan_id"
-  ] == "manual-plan-1"
+  assert runtime.strategy.state.get(MANAGED_EXIT_RUNTIME_KEY) == {}
+  AutoExitPlanService.load_managed_runtime_plan.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -613,7 +560,7 @@ async def test_engine_registers_filled_entry_and_routes_generic_exit_intent():
   plan = runtime.exit_plan_book.plans[template.plan_id]
   assert plan.status == ExitPlanStatus.ACTIVE
   assert plan.entry_filled_volume == 100
-  assert EXIT_PLAN_BOOK_STATE_KEY not in runtime.state_manager.custom
+  assert EXIT_PLAN_BOOK_STATE_KEY in runtime.state_manager.custom
 
   await executor._process_auto_exit_plans(
     runtime,
@@ -645,7 +592,7 @@ async def test_engine_registers_filled_entry_and_routes_generic_exit_intent():
 
 
 @pytest.mark.asyncio
-async def test_strategy_live_auto_exit_carries_complete_exact_authorization_audit(
+async def test_strategy_live_runtime_never_evaluates_public_exit_plan(
   monkeypatch,
 ):
   executor = make_executor()
@@ -690,27 +637,17 @@ async def test_strategy_live_auto_exit_carries_complete_exact_authorization_audi
     ),
   )
 
-  routed = executor._process_trade_intent.await_args.args[1]
-  assert routed.execution_mode == TradeIntentExecutionMode.AUTO
-  assert routed.metadata["exact_auto_exit_authorized"] is True
-  assert routed.metadata["auto_exit_authorization_user_id"] == "user-1"
-  assert routed.metadata["auto_exit_authorization_fingerprint"] == "f" * 64
-  assert routed.metadata["auto_exit_authorization_challenge_id"] == "challenge-1"
-  assert routed.metadata["auto_exit_authorization_device_session_id"] == "session-1"
-  assert routed.metadata["auto_exit_authorized_at"] == authorized_at.isoformat()
-  assert routed.metadata["auto_exit_authorization_expires_at"] == (
-    expires_at.isoformat()
-  )
+  executor._process_trade_intent.assert_not_awaited()
+  AutoExitAuthorizationGuard.validate_or_invalidate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_strategy_owned_exit_stays_in_runtime_when_monitor_is_running(
+async def test_strategy_source_never_competes_with_public_exit_runtime(
   monkeypatch,
 ):
-  import quantx_engine.exit_plan_monitor as monitor_module
-
   executor = make_executor()
   runtime = make_runtime()
+  runtime.context.mode = StrategyRunMode.PAPER
   template = make_template()
   runtime.exit_plan_book.register_entry_fill(
     template,
@@ -723,11 +660,6 @@ async def test_strategy_owned_exit_stays_in_runtime_when_monitor_is_running(
     AutoExitPlanService,
     "sync_strategy_plan_book",
     sync_strategy_plan_book,
-  )
-  monkeypatch.setattr(
-    monitor_module.exit_plan_monitor,
-    "_task",
-    SimpleNamespace(done=lambda: False),
   )
 
   await executor._process_auto_exit_plans(
@@ -743,17 +675,7 @@ async def test_strategy_owned_exit_stays_in_runtime_when_monitor_is_running(
   )
 
   sync_strategy_plan_book.assert_not_awaited()
-  executor._process_trade_intent.assert_awaited_once()
-  routed = executor._process_trade_intent.await_args.args[1]
-  assert routed.direction == TradeIntentDirection.SELL
-  assert routed.execution_ref == ExecutionOwnerRef(
-    ExecutionOwnerType.EXIT_PLAN,
-    template.plan_id,
-  )
-  assert "exit_plan_id" not in routed.metadata
-  assert "owner_type" not in routed.metadata
-  assert "owner_id" not in routed.metadata
-  assert "strategy_run_id" not in routed.metadata
+  executor._process_trade_intent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -951,7 +873,7 @@ async def test_generic_exit_uses_terminal_actual_fill_target_after_sizing():
 
 
 @pytest.mark.asyncio
-async def test_active_exit_plan_prevents_normal_pause_and_stop():
+async def test_public_exit_plan_does_not_prevent_source_pause_and_stop():
   executor = make_executor()
   runtime = make_runtime()
   runtime.status = ExecutionStatus.RUNNING
@@ -960,11 +882,7 @@ async def test_active_exit_plan_prevents_normal_pause_and_stop():
     volume=100,
     price=10.0,
   )
-  executor.runs[runtime.run_id] = runtime
-
-  assert await executor.pause(runtime.run_id) is False
-  assert await executor.stop(runtime.run_id) is False
-  assert runtime.status == ExecutionStatus.RUNNING
+  assert executor._runtime_lifecycle_blocker(runtime) is None
 
 
 @pytest.mark.asyncio
@@ -1038,7 +956,7 @@ async def test_limit_up_break_uses_configured_instrument_limits_and_routes_urgen
 
 
 @pytest.mark.asyncio
-async def test_t_trade_rapid_reversal_routes_urgent_protective_market_exit():
+async def test_t_trade_rapid_reversal_routes_v1_protected_fixed_price_exit():
   executor = make_executor()
   runtime = make_runtime()
   runtime.context.parameters.update(
@@ -1074,6 +992,8 @@ async def test_t_trade_rapid_reversal_routes_urgent_protective_market_exit():
         price=last,
         bid_price=[bid],
         ask_price=[last],
+        limit_down=29.25,
+        price_tick=0.01,
       ),
     )
 
@@ -1081,9 +1001,10 @@ async def test_t_trade_rapid_reversal_routes_urgent_protective_market_exit():
   assert routed.metadata["exit_rule_type"] == (
     ExitRuleType.RAPID_PROFIT_REVERSAL.value
   )
-  assert routed.metadata["price_type"] == "MARKET"
+  assert routed.metadata["price_type"] == "FIX_PRICE"
   assert routed.metadata["price_reference"] == "BID"
-  assert routed.metadata["protected_limit"] is False
+  assert routed.metadata["protected_limit"] is True
+  assert routed.metadata["t_exit_order_policy_version"] == "TExitOrderPolicy.v1"
   assert routed.execution_ref == ExecutionOwnerRef(
     ExecutionOwnerType.EXIT_PLAN,
     template.plan_id,
@@ -1094,11 +1015,14 @@ async def test_t_trade_rapid_reversal_routes_urgent_protective_market_exit():
   assert routed.metadata["t_trade_role"] == "exit"
   assert routed.metadata["t_batch_id"] == "t-batch-1"
   assert routed.priority == TradeIntentPriority.URGENT
-  assert routed.limit_price_hint == pytest.approx(29.28)
+  # BID1 - 30bps would be 29.19 after tick normalization, so the exchange
+  # lower boundary is the authoritative protected price.
+  assert routed.limit_price_hint == pytest.approx(29.25)
 
 
 def test_limit_price_derivation_is_backtest_only_and_explicit():
   runtime = make_runtime()
+  runtime.context.mode = StrategyRunMode.PAPER
   runtime.context.parameters["backtest_limit_rate"] = 0.10
 
   assert StrategyExecutor._backtest_limit_rate(runtime) is None

@@ -5,8 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Mapping, Optional
 
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_domain.trading.t_trade_candidate_outcome import (
   CANDIDATE_OUTCOME_SCHEMA_VERSION,
   CandidateOutcomeState,
@@ -17,6 +22,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.models.strategy_run import StrategyRun
+from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
 from quantx_infrastructure.models.t_trade_candidate_outcome import (
   TTradeCandidateOutcome,
 )
@@ -48,6 +55,7 @@ class TTradeCandidateOutcomeRepository:
       raise ValueError("策略运行标识不能为空")
     result = await self.db.execute(
       delete(TTradeCandidateOutcome).where(
+        TTradeCandidateOutcome.owner_type == ExecutionOwnerType.STRATEGY_RUN.value,
         TTradeCandidateOutcome.strategy_run_id == normalized_run_id
       )
     )
@@ -63,8 +71,28 @@ class TTradeCandidateOutcomeRepository:
   ) -> Optional[TTradeCandidateOutcome]:
     result = await self.db.execute(
       select(TTradeCandidateOutcome).where(
+        TTradeCandidateOutcome.owner_type == ExecutionOwnerType.STRATEGY_RUN.value,
         TTradeCandidateOutcome.strategy_run_id == strategy_run_id,
         TTradeCandidateOutcome.candidate_id == candidate_id,
+      )
+    )
+    return result.scalar_one_or_none()
+
+  async def get_for_owner(
+    self,
+    *,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object],
+    execution_environment: ExecutionEnvironment | str,
+    candidate_id: str,
+  ) -> Optional[TTradeCandidateOutcome]:
+    owner = _owner_ref(execution_ref)
+    environment = _environment(execution_environment, owner=owner)
+    result = await self.db.execute(
+      select(TTradeCandidateOutcome).where(
+        TTradeCandidateOutcome.owner_type == owner.owner_type.value,
+        TTradeCandidateOutcome.owner_id == owner.owner_id,
+        TTradeCandidateOutcome.environment == environment,
+        TTradeCandidateOutcome.candidate_id == str(candidate_id).strip(),
       )
     )
     return result.scalar_one_or_none()
@@ -76,6 +104,7 @@ class TTradeCandidateOutcomeRepository:
     instrument_code: str | None = None,
   ) -> list[TTradeCandidateOutcome]:
     statement = select(TTradeCandidateOutcome).where(
+      TTradeCandidateOutcome.owner_type == ExecutionOwnerType.STRATEGY_RUN.value,
       TTradeCandidateOutcome.strategy_run_id == strategy_run_id,
       or_(
         TTradeCandidateOutcome.status == CandidateOutcomeStatus.OBSERVING.value,
@@ -85,6 +114,37 @@ class TTradeCandidateOutcomeRepository:
     if instrument_code is not None:
       statement = statement.where(
         TTradeCandidateOutcome.instrument_code == instrument_code
+      )
+    result = await self.db.execute(
+      statement.order_by(
+        TTradeCandidateOutcome.source_time_ms,
+        TTradeCandidateOutcome.tick_ordinal,
+      )
+    )
+    return list(result.scalars().all())
+
+  async def list_observing_for_owner(
+    self,
+    *,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object],
+    execution_environment: ExecutionEnvironment | str,
+    instrument_code: str | None = None,
+  ) -> list[TTradeCandidateOutcome]:
+    owner = _owner_ref(execution_ref)
+    environment = _environment(execution_environment, owner=owner)
+    statement = select(TTradeCandidateOutcome).where(
+      TTradeCandidateOutcome.owner_type == owner.owner_type.value,
+      TTradeCandidateOutcome.owner_id == owner.owner_id,
+      TTradeCandidateOutcome.environment == environment,
+      or_(
+        TTradeCandidateOutcome.status == CandidateOutcomeStatus.OBSERVING.value,
+        TTradeCandidateOutcome.post_fill_status == "OBSERVING",
+      ),
+    )
+    if instrument_code is not None:
+      statement = statement.where(
+        TTradeCandidateOutcome.instrument_code
+        == str(instrument_code).strip().upper()
       )
     result = await self.db.execute(
       statement.order_by(
@@ -119,7 +179,43 @@ class TTradeCandidateOutcomeRepository:
         f"候选结果终态分页大小必须在 1..{_MAX_UNFINALIZED_PAGE_SIZE} 之间"
       )
     conditions = [
+      TTradeCandidateOutcome.owner_type == ExecutionOwnerType.STRATEGY_RUN.value,
       TTradeCandidateOutcome.strategy_run_id == normalized_run_id,
+      or_(
+        TTradeCandidateOutcome.status == CandidateOutcomeStatus.OBSERVING.value,
+        TTradeCandidateOutcome.post_fill_status.in_(("WAITING_ENTRY", "OBSERVING")),
+      ),
+    ]
+    normalized_cursor = str(after_candidate_id or "").strip()
+    if normalized_cursor:
+      conditions.append(TTradeCandidateOutcome.candidate_id > normalized_cursor)
+    result = await self.db.execute(
+      select(TTradeCandidateOutcome)
+      .where(*conditions)
+      .order_by(TTradeCandidateOutcome.candidate_id)
+      .limit(normalized_limit)
+    )
+    return list(result.scalars().all())
+
+  async def list_unfinalized_for_owner(
+    self,
+    *,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object],
+    execution_environment: ExecutionEnvironment | str,
+    after_candidate_id: str | None,
+    limit: int,
+  ) -> list[TTradeCandidateOutcome]:
+    owner = _owner_ref(execution_ref)
+    environment = _environment(execution_environment, owner=owner)
+    normalized_limit = int(limit)
+    if not 1 <= normalized_limit <= _MAX_UNFINALIZED_PAGE_SIZE:
+      raise ValueError(
+        f"候选结果终态分页大小必须在 1..{_MAX_UNFINALIZED_PAGE_SIZE} 之间"
+      )
+    conditions = [
+      TTradeCandidateOutcome.owner_type == owner.owner_type.value,
+      TTradeCandidateOutcome.owner_id == owner.owner_id,
+      TTradeCandidateOutcome.environment == environment,
       or_(
         TTradeCandidateOutcome.status == CandidateOutcomeStatus.OBSERVING.value,
         TTradeCandidateOutcome.post_fill_status.in_(("WAITING_ENTRY", "OBSERVING")),
@@ -160,6 +256,7 @@ class TTradeCandidateOutcomeRepository:
       raise ValueError("候选结果诊断条数必须在 1 到 50001 之间")
     conditions = [
       TTradeCandidateOutcome.account_id == normalized_account,
+      TTradeCandidateOutcome.owner_type == "STRATEGY_RUN",
       TTradeCandidateOutcome.candidate_at >= start,
       TTradeCandidateOutcome.candidate_at <= end,
     ]
@@ -189,13 +286,21 @@ class TTradeCandidateOutcomeRepository:
     *,
     account_id: str,
     state: CandidateOutcomeState,
+    execution_environment: str | None = None,
     commit: bool = True,
   ) -> TTradeCandidateOutcome:
     normalized_account = str(account_id or "").strip()
     if not normalized_account:
       raise ValueError("候选结果缺少证券账户")
-    existing = await self.get(
-      strategy_run_id=state.definition.strategy_run_id,
+    definition = state.definition
+    owner, environment = await self._resolve_definition_scope(
+      definition,
+      explicit_environment=execution_environment,
+      account_id=normalized_account,
+    )
+    existing = await self.get_for_owner(
+      execution_ref=owner,
+      execution_environment=environment,
       candidate_id=state.definition.candidate_id,
     )
     payload = state.to_dict()
@@ -205,9 +310,11 @@ class TTradeCandidateOutcomeRepository:
         raise ValueError("同一候选标识对应的证券账户不一致")
       _verify_frozen_identity(existing, state)
       return existing
-    definition = state.definition
     row = TTradeCandidateOutcome(
       account_id=normalized_account,
+      owner_type=owner.owner_type.value,
+      owner_id=owner.owner_id,
+      environment=environment,
       strategy_run_id=definition.strategy_run_id,
       instrument_code=definition.instrument_code,
       candidate_id=definition.candidate_id,
@@ -238,8 +345,9 @@ class TTradeCandidateOutcomeRepository:
       await self.db.commit()
     except IntegrityError:
       await self.db.rollback()
-      existing = await self.get(
-        strategy_run_id=definition.strategy_run_id,
+      existing = await self.get_for_owner(
+        execution_ref=owner,
+        execution_environment=environment,
         candidate_id=definition.candidate_id,
       )
       if existing is None:
@@ -258,6 +366,10 @@ class TTradeCandidateOutcomeRepository:
     expected_version: int,
     commit: bool = True,
   ) -> TTradeCandidateOutcome:
+    owner, environment = await self._resolve_definition_scope(
+      state.definition,
+      explicit_environment=state.definition.execution_environment,
+    )
     payload = state.to_dict()
     fingerprint = _fingerprint(payload)
     values = {
@@ -277,7 +389,9 @@ class TTradeCandidateOutcomeRepository:
     result = await self.db.execute(
       update(TTradeCandidateOutcome)
       .where(
-        TTradeCandidateOutcome.strategy_run_id == state.definition.strategy_run_id,
+        TTradeCandidateOutcome.owner_type == owner.owner_type.value,
+        TTradeCandidateOutcome.owner_id == owner.owner_id,
+        TTradeCandidateOutcome.environment == environment,
         TTradeCandidateOutcome.candidate_id == state.definition.candidate_id,
         TTradeCandidateOutcome.state_version == expected_version,
       )
@@ -286,8 +400,9 @@ class TTradeCandidateOutcomeRepository:
     if result.rowcount != 1:
       if commit:
         await self.db.rollback()
-      current = await self.get(
-        strategy_run_id=state.definition.strategy_run_id,
+      current = await self.get_for_owner(
+        execution_ref=owner,
+        execution_environment=environment,
         candidate_id=state.definition.candidate_id,
       )
       if current is not None and current.content_fingerprint == fingerprint:
@@ -297,8 +412,9 @@ class TTradeCandidateOutcomeRepository:
       )
     if commit:
       await self.db.commit()
-    current = await self.get(
-      strategy_run_id=state.definition.strategy_run_id,
+    current = await self.get_for_owner(
+      execution_ref=owner,
+      execution_environment=environment,
       candidate_id=state.definition.candidate_id,
     )
     if current is None:
@@ -307,7 +423,82 @@ class TTradeCandidateOutcomeRepository:
 
   @staticmethod
   def state_from_row(row: TTradeCandidateOutcome) -> CandidateOutcomeState:
-    return CandidateOutcomeState.from_dict(row.state)
+    payload = dict(row.state)
+    definition = dict(payload.get("definition") or {})
+    definition.update(
+      execution_ref={
+        "owner_type": str(row.owner_type),
+        "owner_id": str(row.owner_id),
+      },
+      execution_environment=str(row.environment),
+      strategy_run_id=(str(row.strategy_run_id) if row.strategy_run_id else None),
+    )
+    payload["definition"] = definition
+    return CandidateOutcomeState.from_dict(payload)
+
+  async def _resolve_definition_scope(
+    self,
+    definition: object,
+    *,
+    explicit_environment: ExecutionEnvironment | str | None,
+    account_id: str | None = None,
+  ) -> tuple[ExecutionOwnerRef, str]:
+    owner = _owner_ref(getattr(definition, "execution_ref", None))
+    definition_environment = getattr(definition, "execution_environment", None)
+    if (
+      explicit_environment is not None
+      and definition_environment is not None
+      and ExecutionEnvironment(explicit_environment)
+      is not ExecutionEnvironment(definition_environment)
+    ):
+      raise ValueError("候选结果 execution environment 与冻结定义不一致")
+    raw_environment = explicit_environment or definition_environment
+    if owner.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if raw_environment is not None:
+        environment = _environment(raw_environment, owner=owner)
+      else:
+        result = await self.db.execute(
+          select(TTradeCandidateOutcome.environment).where(
+            TTradeCandidateOutcome.owner_type
+            == ExecutionOwnerType.STRATEGY_RUN.value,
+            TTradeCandidateOutcome.owner_id == owner.owner_id,
+            TTradeCandidateOutcome.candidate_id
+            == str(getattr(definition, "candidate_id", "")),
+          )
+        )
+        persisted_environment = result.scalar_one_or_none()
+        environment = (
+          _environment(persisted_environment, owner=owner)
+          if persisted_environment is not None
+          else await self._strategy_run_environment(owner.owner_id)
+        )
+    else:
+      environment = _environment(raw_environment, owner=owner)
+      result = await self.db.execute(
+        select(
+          TAssistantExecutionRecord.account_id,
+          TAssistantExecutionRecord.environment,
+        ).where(TAssistantExecutionRecord.execution_id == owner.owner_id)
+      )
+      persisted = result.one_or_none()
+      if persisted is None:
+        raise ValueError("T assistant execution 不存在")
+      persisted_account, persisted_environment = persisted
+      if str(persisted_environment).upper() != environment or (
+        account_id is not None and str(persisted_account) != account_id
+      ):
+        raise ValueError("T assistant execution 与候选结果账户或 environment 不一致")
+    return owner, environment
+
+  async def _strategy_run_environment(self, strategy_run_id: str) -> str:
+    result = await self.db.execute(
+      select(StrategyRun.mode).where(StrategyRun.id == strategy_run_id)
+    )
+    mode = result.scalar_one_or_none()
+    environment = str(getattr(mode, "value", mode) or "").upper()
+    if environment not in {"PAPER", "LIVE", "BACKTEST"}:
+      raise ValueError("策略运行无法证明候选结果 execution environment")
+    return environment
 
 
 def _verify_frozen_identity(
@@ -316,6 +507,14 @@ def _verify_frozen_identity(
 ) -> None:
   definition = state.definition
   expected = (
+    definition.execution_ref.owner_type.value,
+    definition.execution_ref.owner_id,
+    (
+      definition.execution_environment.value
+      if definition.execution_environment is not None
+      else row.environment
+    ),
+    definition.strategy_run_id,
     definition.candidate_fingerprint,
     definition.instrument_code,
     definition.source_time_ms,
@@ -328,6 +527,10 @@ def _verify_frozen_identity(
     definition.profile_fingerprint,
   )
   actual = (
+    row.owner_type,
+    row.owner_id,
+    row.environment,
+    row.strategy_run_id,
     row.candidate_fingerprint,
     row.instrument_code,
     row.source_time_ms,
@@ -341,6 +544,40 @@ def _verify_frozen_identity(
   )
   if actual != expected:
     raise ValueError("同一候选标识对应的冻结身份不一致")
+
+
+def _owner_ref(
+  value: ExecutionOwnerRef | Mapping[str, object] | None,
+) -> ExecutionOwnerRef:
+  if isinstance(value, ExecutionOwnerRef):
+    owner = value
+  elif isinstance(value, Mapping):
+    owner = ExecutionOwnerRef.from_mapping(value)
+  else:
+    raise ValueError("候选结果缺少 execution_ref")
+  if owner.owner_type not in {
+    ExecutionOwnerType.STRATEGY_RUN,
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+  }:
+    raise ValueError("候选结果 owner_type 无效")
+  return owner
+
+
+def _environment(
+  value: ExecutionEnvironment | str | None,
+  *,
+  owner: ExecutionOwnerRef,
+) -> str:
+  try:
+    environment = ExecutionEnvironment(value)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("候选结果 execution environment 无效") from exc
+  if (
+    owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+    and environment is not ExecutionEnvironment.PAPER
+  ):
+    raise ValueError("P3 T assistant 候选结果只能写入 PAPER namespace")
+  return environment.value
 
 
 def _fingerprint(payload: dict) -> str:

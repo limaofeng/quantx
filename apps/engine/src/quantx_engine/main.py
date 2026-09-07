@@ -39,15 +39,17 @@ from sqlalchemy import text
 
 from .command_processor import run_command_consumer
 from .conditional_liquidation import conditional_liquidation_monitor
-from .exit_plan_monitor import exit_plan_monitor
+from .exit_plan_runtime import exit_plan_runtime
 from .limit_up_board_runtime import limit_up_board_assistant
 from .realtime_manager import realtime_manager
 from .report_processor import run_report_consumer
+from .risk_increase_admission_runtime import risk_increase_admission_runtime
 from .strategy_manager import strategy_manager
 from .subscription_bridge import (
   run_market_query_bridge,
   run_subscription_bridge,
 )
+from .t_order_lifecycle import run_t_order_lifecycle
 from .t_trade_observability import t_trade_runtime_observability
 from .t_trade_runtime import t_trade_global_monitor
 from .warm_cache import intraday_warm_cache
@@ -220,25 +222,27 @@ async def _lease_watchdog(stopped: asyncio.Event, lock_connection) -> None:
 
 
 async def _runtime_owner_watchdog(stopped: asyncio.Event) -> None:
-  """Continuously enforce that every active run-owned plan has a consumer."""
+  """Continuously enforce that every active public plan has its sole consumer."""
 
-  service = AutoExitPlanService(strategy_manager)
+  service = AutoExitPlanService()
   while not stopped.is_set():
     await service.audit_active_runtime_owned_plans()
-    if not exit_plan_monitor.is_running:
+    if not exit_plan_runtime.is_running:
       raise ActiveRuntimeExitPlanOwnerAuditError(
         [
           ActiveRuntimeExitPlanOwnerAuditFailure(
             plan_id="",
             strategy_run_id="",
             account_id="",
-            owner_kind="MONITOR",
-            reason_code="MANUAL_MONITOR_STOPPED",
-            message="ExitPlanMonitor manual-plan consumer is not running",
+            owner_kind="PUBLIC_EXIT_PLAN_RUNTIME",
+            reason_code="EXIT_PLAN_RUNTIME_STOPPED",
+            message="ExitPlanRuntime public plan consumer is not running",
             stage="runtime",
           )
         ]
       )
+    if not risk_increase_admission_runtime.is_running:
+      raise RuntimeError("public LIVE BUY admission dispatcher is not running")
     try:
       await asyncio.wait_for(
         stopped.wait(),
@@ -249,10 +253,10 @@ async def _runtime_owner_watchdog(stopped: asyncio.Event) -> None:
 
 
 async def _start_and_reconcile_runtime_exit_plans() -> dict[str, object]:
-  """Restore strategy-owned runs after the manual-plan migration barrier."""
+  """Restore source runtimes independently, then re-audit public plans."""
 
   await strategy_manager.start()
-  service = AutoExitPlanService(strategy_manager)
+  service = AutoExitPlanService()
   audit = await service.audit_active_runtime_owned_plans()
   if audit["examined"]:
     logger.info(
@@ -464,11 +468,12 @@ async def _trading_runtime_supervisor(
     conditional_started = False
     t_trade_started = False
     limit_up_board_started = False
+    admission_started = False
     owner_failure: ActiveRuntimeExitPlanOwnerAuditError | None = None
     try:
-      service = AutoExitPlanService(strategy_manager)
+      service = AutoExitPlanService()
       await service.preflight_active_runtime_owned_plans()
-      await exit_plan_monitor.start()
+      await exit_plan_runtime.start()
       exit_plan_started = True
       strategy_start_attempted = True
       startup = await _start_and_reconcile_runtime_exit_plans()
@@ -482,16 +487,16 @@ async def _trading_runtime_supervisor(
       except asyncio.TimeoutError:
         pass
       second_audit = await service.audit_active_runtime_owned_plans()
-      if not exit_plan_monitor.is_running:
+      if not exit_plan_runtime.is_running:
         raise ActiveRuntimeExitPlanOwnerAuditError(
           [
             ActiveRuntimeExitPlanOwnerAuditFailure(
               plan_id="",
               strategy_run_id="",
               account_id="",
-              owner_kind="MONITOR",
-              reason_code="MANUAL_MONITOR_STOPPED",
-              message="ExitPlanMonitor manual-plan consumer is not running",
+              owner_kind="PUBLIC_EXIT_PLAN_RUNTIME",
+              reason_code="EXIT_PLAN_RUNTIME_STOPPED",
+              message="ExitPlanRuntime public plan consumer is not running",
               stage="startup",
             )
           ]
@@ -502,8 +507,14 @@ async def _trading_runtime_supervisor(
       t_trade_started = True
       await limit_up_board_assistant.start()
       limit_up_board_started = True
+      await risk_increase_admission_runtime.start()
+      admission_started = True
       operational_state.mark_ready(second_audit)
       cycle_tasks = [
+        asyncio.create_task(
+          run_t_order_lifecycle(cycle_stopped),
+          name="t-order-lifecycle",
+        ),
         asyncio.create_task(
           _relay_parent_stop(stopped, cycle_stopped),
           name="engine-trading-stop-relay",
@@ -558,6 +569,11 @@ async def _trading_runtime_supervisor(
           "limit-up board assistant",
           limit_up_board_assistant.stop,
         )
+      if admission_started or risk_increase_admission_runtime.is_running:
+        await _stop_component(
+          "risk-increase admission runtime",
+          risk_increase_admission_runtime.stop,
+        )
       if t_trade_started:
         await _stop_component("t-trade monitor", t_trade_global_monitor.stop)
       if conditional_started:
@@ -569,8 +585,8 @@ async def _trading_runtime_supervisor(
         getattr(strategy_manager, "running", False)
       ):
         await _stop_component("strategy manager", strategy_manager.stop)
-      if exit_plan_started or exit_plan_monitor.is_running:
-        await _stop_component("exit plan monitor", exit_plan_monitor.stop)
+      if exit_plan_started or exit_plan_runtime.is_running:
+        await _stop_component("exit plan runtime", exit_plan_runtime.stop)
 
     if owner_failure is None or stopped.is_set():
       return
@@ -663,7 +679,11 @@ async def run_engine() -> None:
       "conditional liquidation monitor",
       conditional_liquidation_monitor.stop,
     )
-    await _stop_component("exit plan monitor", exit_plan_monitor.stop)
+    await _stop_component("exit plan runtime", exit_plan_runtime.stop)
+    await _stop_component(
+      "risk-increase admission runtime",
+      risk_increase_admission_runtime.stop,
+    )
     await _stop_component("strategy manager", strategy_manager.stop)
     await _stop_component("intraday warm cache", intraday_warm_cache.shutdown)
     await _stop_component("limit-up radar", limit_up_radar_monitor.stop)

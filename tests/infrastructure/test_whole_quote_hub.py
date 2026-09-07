@@ -520,6 +520,59 @@ async def test_critical_callback_failure_closes_realtime_gate() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("subscribe_after_snapshot", [False, True])
+async def test_snapshot_delivery_does_not_alias_mutable_latest_cache(
+  subscribe_after_snapshot: bool,
+) -> None:
+  store = FakeStore()
+  hub = WholeQuoteHub(store=store, trading_time_service=AlwaysClosed())
+  received = []
+  if subscribe_after_snapshot:
+    assert await hub._hydrate_from_store()
+  handle = await hub.subscribe_batches(received.append)
+  try:
+    if not subscribe_after_snapshot:
+      assert await hub._hydrate_from_store()
+    # A delta replaces a cache entry before its asynchronous authority check.
+    # The queued snapshot must keep its original price and lineage.
+    hub._apply_tick("600000.SH", {"lastPrice": 11.0, "time": 3_000}, None)
+    await asyncio.sleep(0)
+    assert received[0]["600000.SH"]["market_stream_sequence"] == 1
+    assert received[0]["600000.SH"]["lastPrice"] == 10.0
+  finally:
+    await hub.unsubscribe(handle)
+
+
+@pytest.mark.asyncio
+async def test_critical_callback_failure_restarts_from_authoritative_snapshot() -> None:
+  store = FakeStore()
+  hub = WholeQuoteHub(store=store, trading_time_service=AlwaysClosed())
+  recovered = asyncio.Event()
+  calls = 0
+
+  def fail_once(_data):
+    nonlocal calls
+    calls += 1
+    if calls == 1:
+      raise RuntimeError("consumer failed once")
+    recovered.set()
+
+  handle = await hub.subscribe_batches(fail_once)
+  try:
+    await hub._dispatch({"600000.SH": {"lastPrice": 10.0}})
+    for _ in range(10):
+      if hub.consumer_status(handle) is QuoteConsumerStatus.LAGGING:
+        break
+      await asyncio.sleep(0)
+    assert await hub._recover_lagging_consumers() is True
+    await asyncio.wait_for(recovered.wait(), timeout=1.0)
+    assert hub.consumer_status(handle) is QuoteConsumerStatus.READY
+    assert hub.status is WholeQuoteStatus.READY
+  finally:
+    await hub.unsubscribe(handle)
+
+
+@pytest.mark.asyncio
 async def test_large_snapshot_preparation_is_offloaded(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

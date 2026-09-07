@@ -1,4 +1,4 @@
-"""Authoritative Engine monitor for manual exit plans without a StrategyRun."""
+"""Single authoritative Engine runtime for every PAPER/LIVE ExitPlan."""
 
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ from quantx_infrastructure.repositories.auto_exit_plan_repository import (
 from quantx_infrastructure.repositories.position_repository import PositionRepository
 from quantx_infrastructure.services.auto_exit_plan_service import (
   AutoExitPlanService,
-  is_monitor_owned_exit_plan,
+)
+from quantx_infrastructure.services.exit_plan_execution_owner import (
+  is_public_exit_plan_runtime_eligible,
 )
 from quantx_infrastructure.services.intraday_volume_scanner import (
   intraday_volume_scanner,
@@ -25,8 +27,8 @@ from quantx_infrastructure.services.intraday_volume_scanner import (
 logger = logging.getLogger(__name__)
 
 
-class ExitPlanMonitor:
-  """Evaluate only positively classified manual plans without a StrategyRun."""
+class ExitPlanRuntime:
+  """Schedule plans by their own EXIT_PLAN identity, never by source runtime."""
 
   def __init__(
     self,
@@ -39,6 +41,7 @@ class ExitPlanMonitor:
     self._task: Optional[asyncio.Task] = None
     self._stopping = asyncio.Event()
     self.market_data_gate_rejections = 0
+    self.plan_evaluation_failures = 0
     self._market_gate_blocked = False
 
   @property
@@ -56,8 +59,8 @@ class ExitPlanMonitor:
       logger.info("统一退出计划历史状态迁移完成: %s", migrated)
     await self.scanner.start()
     self._stopping = asyncio.Event()
-    self._task = asyncio.create_task(self._run(), name="ExitPlanMonitor")
-    logger.info("统一退出计划监控器已启动")
+    self._task = asyncio.create_task(self._run(), name="ExitPlanRuntime")
+    logger.info("公共 ExitPlanRuntime 已启动")
 
   async def stop(self) -> None:
     self._stopping.set()
@@ -68,7 +71,7 @@ class ExitPlanMonitor:
       await self._task
     except asyncio.CancelledError:
       pass
-    logger.info("统一退出计划监控器已停止")
+    logger.info("公共 ExitPlanRuntime 已停止")
 
   async def _run(self) -> None:
     while not self._stopping.is_set():
@@ -98,7 +101,7 @@ class ExitPlanMonitor:
           [plan]
           if plan is not None
           and plan.enabled
-          and is_monitor_owned_exit_plan(plan)
+          and is_public_exit_plan_runtime_eligible(plan)
           else []
         )
       else:
@@ -106,7 +109,10 @@ class ExitPlanMonitor:
           account_id=account_id,
           instrument_code=instrument_code,
         )
-        plans = [plan for plan in plans if is_monitor_owned_exit_plan(plan)]
+        plans = [
+          plan for plan in plans if is_public_exit_plan_runtime_eligible(plan)
+        ]
+    plans.sort(key=self._plan_priority_key)
     if not plans:
       return []
     if not self.scanner.is_running:
@@ -117,33 +123,65 @@ class ExitPlanMonitor:
     results: list[dict] = []
     service = AutoExitPlanService()
     for record in plans:
-      async with AsyncSessionLocal() as db:
-        position = await PositionRepository(db).find_by_stock_code(
-          record.instrument_code,
-          account_id=record.account_id,
+      try:
+        async with AsyncSessionLocal() as db:
+          position = await PositionRepository(db).find_by_stock_code(
+            record.instrument_code,
+            account_id=record.account_id,
+          )
+        context = self.context_from_state(
+          (
+            states.get(record.instrument_code)
+            if self._market_data_ready()
+            else None
+          ),
+          now=time_utils.now(),
         )
-      context = self.context_from_state(
-        (
-          states.get(record.instrument_code)
-          if self._market_data_ready()
-          else None
-        ),
-        now=time_utils.now(),
-      )
-      result = await service.evaluate_and_submit(
-        plan_id=record.plan_id,
-        context=context,
-        position=position,
-        market_session_open=market_session_open,
-        market_ready=self._market_data_ready,
-      )
-      results.append(
-        {
-          "plan_id": record.plan_id,
-          "submitted": bool(result and result.get("success")),
-          "result": result,
-        }
-      )
+        result = await service.evaluate_and_submit(
+          plan_id=record.plan_id,
+          context=context,
+          position=position,
+          market_session_open=market_session_open,
+          market_ready=self._market_data_ready,
+        )
+        results.append(
+          {
+            "plan_id": record.plan_id,
+            "submitted": bool(result and result.get("success")),
+            "result": result,
+          }
+        )
+      except asyncio.CancelledError:
+        raise
+      except Exception as exc:
+        self.plan_evaluation_failures += 1
+        logger.exception(
+          "公共退出计划单票评估失败，继续后续计划: plan_id=%s",
+          record.plan_id,
+        )
+        try:
+          await service.record_runtime_evaluation_failure(
+            plan_id=str(record.plan_id),
+            error=exc,
+          )
+        except asyncio.CancelledError:
+          raise
+        except Exception:
+          logger.exception(
+            "公共退出计划失败审计落库失败: plan_id=%s",
+            record.plan_id,
+          )
+        results.append(
+          {
+            "plan_id": record.plan_id,
+            "submitted": False,
+            "result": {
+              "success": False,
+              "error": "EXIT_PLAN_RUNTIME_EVALUATION_FAILED",
+              "error_type": type(exc).__name__,
+            },
+          }
+        )
     return results
 
   async def confirm_exit_intent(
@@ -157,7 +195,7 @@ class ExitPlanMonitor:
       record = await AutoExitPlanRepository(db).find_by_id(plan_id)
       if record is None:
         raise ValueError("退出计划不存在")
-      if not is_monitor_owned_exit_plan(record):
+      if not is_public_exit_plan_runtime_eligible(record):
         raise ValueError("EXIT_PLAN_OWNER_CHANGED")
       position = await PositionRepository(db).find_by_stock_code(
         record.instrument_code,
@@ -208,6 +246,27 @@ class ExitPlanMonitor:
     return {}
 
   @staticmethod
+  def _plan_priority_key(record) -> tuple:
+    state = dict(getattr(record, "plan_state", None) or {})
+    template = dict(state.get("template") or {})
+    rules = list(template.get("rules") or [])
+    highest_priority = max(
+      (
+        int(rule.get("priority", 0) or 0)
+        for rule in rules
+        if isinstance(rule, dict) and bool(rule.get("enabled", True))
+      ),
+      default=0,
+    )
+    return (
+      str(getattr(record, "account_id", "") or ""),
+      str(getattr(record, "instrument_code", "") or ""),
+      -highest_priority,
+      getattr(record, "created_at", None) or datetime.min,
+      str(getattr(record, "plan_id", "") or ""),
+    )
+
+  @staticmethod
   def context_from_state(state, *, now: datetime) -> ExitEvaluationContext:
     if state is None or state.updated_at is None:
       return ExitEvaluationContext(
@@ -243,4 +302,4 @@ class ExitPlanMonitor:
     )
 
 
-exit_plan_monitor = ExitPlanMonitor()
+exit_plan_runtime = ExitPlanRuntime()

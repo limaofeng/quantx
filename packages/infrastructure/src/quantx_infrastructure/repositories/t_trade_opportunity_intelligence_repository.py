@@ -10,11 +10,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional
 
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from sqlalchemy import and_, delete, func, insert, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.models.strategy_run import StrategyRun
+from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
   T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
   T_TRADE_EVALUATION_KIND_MATERIAL,
@@ -35,7 +42,7 @@ class TTradeOpportunityEvaluationSummaryRow:
   id: str
   event_key: str
   account_id: str
-  strategy_run_id: str
+  strategy_run_id: Optional[str]
   instrument_code: str
   candidate_id: Optional[str]
   evaluated_at: datetime
@@ -72,6 +79,8 @@ class TTradeOpportunityEvaluationRepository:
     normalized_run_id = _required_text(strategy_run_id, "策略运行标识", 36)
     result = await self.db.execute(
       delete(TTradeOpportunityEvaluation).where(
+        TTradeOpportunityEvaluation.owner_type
+        == ExecutionOwnerType.STRATEGY_RUN.value,
         TTradeOpportunityEvaluation.strategy_run_id == normalized_run_id
       )
     )
@@ -91,7 +100,9 @@ class TTradeOpportunityEvaluationRepository:
     *,
     event_key: str,
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: Optional[str] = None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     instrument_code: str,
     evaluated_at: datetime,
     event_type: str,
@@ -105,6 +116,7 @@ class TTradeOpportunityEvaluationRepository:
       event_key=event_key,
       account_id=account_id,
       strategy_run_id=strategy_run_id,
+      execution_ref=execution_ref,
       instrument_code=instrument_code,
       evaluated_at=evaluated_at,
       record_kind=T_TRADE_EVALUATION_KIND_MATERIAL,
@@ -116,6 +128,7 @@ class TTradeOpportunityEvaluationRepository:
       schema_version=schema_version,
       payload=payload,
       metrics=metrics,
+      execution_environment=execution_environment,
       commit=commit,
     )
 
@@ -124,7 +137,9 @@ class TTradeOpportunityEvaluationRepository:
     *,
     event_key: str,
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: Optional[str] = None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     instrument_code: str,
     evaluated_at: datetime,
     event_type: str,
@@ -141,6 +156,7 @@ class TTradeOpportunityEvaluationRepository:
       event_key=event_key,
       account_id=account_id,
       strategy_run_id=strategy_run_id,
+      execution_ref=execution_ref,
       instrument_code=instrument_code,
       evaluated_at=evaluated_at,
       record_kind=T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
@@ -152,6 +168,7 @@ class TTradeOpportunityEvaluationRepository:
       schema_version=schema_version,
       payload=payload,
       metrics=metrics,
+      execution_environment=execution_environment,
       commit=commit,
     )
 
@@ -178,6 +195,16 @@ class TTradeOpportunityEvaluationRepository:
         event_key=record.get("event_key"),
         account_id=record.get("account_id"),
         strategy_run_id=record.get("strategy_run_id"),
+        execution_ref=record.get("execution_ref")
+        or (
+          {
+            "owner_type": record.get("owner_type"),
+            "owner_id": record.get("owner_id"),
+          }
+          if record.get("owner_type") is not None
+          or record.get("owner_id") is not None
+          else None
+        ),
         instrument_code=record.get("instrument_code"),
         evaluated_at=record.get("evaluated_at"),
         record_kind=record.get("record_kind"),
@@ -190,6 +217,9 @@ class TTradeOpportunityEvaluationRepository:
         payload=record.get("payload"),
         metrics=record.get("metrics"),
       )
+      item["environment"] = _optional_environment(
+        record.get("execution_environment") or record.get("environment")
+      )
       event_key = str(item["event_key"])
       if event_key in seen_event_keys:
         raise ValueError("批量做 T 机会评估不能包含重复事件键")
@@ -197,6 +227,7 @@ class TTradeOpportunityEvaluationRepository:
       prepared.append(item)
     if not prepared:
       return []
+    await self._complete_execution_scopes(prepared)
     return await self._append_prepared_many(prepared)
 
   async def list_evaluations(
@@ -221,7 +252,10 @@ class TTradeOpportunityEvaluationRepository:
     if (cursor_evaluated_at is None) != (cursor_id is None):
       raise ValueError("评估游标必须同时包含 evaluated_at 和 id")
 
-    conditions = [TTradeOpportunityEvaluation.account_id == normalized_account_id]
+    conditions = [
+      TTradeOpportunityEvaluation.account_id == normalized_account_id,
+      TTradeOpportunityEvaluation.owner_type == "STRATEGY_RUN",
+    ]
     if instrument_code is not None:
       conditions.append(
         TTradeOpportunityEvaluation.instrument_code == _instrument_code(instrument_code)
@@ -283,10 +317,56 @@ class TTradeOpportunityEvaluationRepository:
     result = await self.db.execute(
       select(TTradeOpportunityEvaluation).where(
         TTradeOpportunityEvaluation.account_id == normalized_account_id,
+        TTradeOpportunityEvaluation.owner_type == "STRATEGY_RUN",
         TTradeOpportunityEvaluation.id == normalized_evaluation_id,
       )
     )
     return result.scalar_one_or_none()
+
+  async def list_evaluations_for_owner(
+    self,
+    *,
+    account_id: str,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object],
+    execution_environment: ExecutionEnvironment | str,
+    limit: int = 100,
+    instrument_code: Optional[str] = None,
+    record_kind: Optional[str] = None,
+  ) -> list[TTradeOpportunityEvaluation]:
+    """Read the canonical owner namespace without exposing it to legacy APIs."""
+
+    owner, witness = _normalize_execution_owner(execution_ref, None)
+    if witness is not None and owner.owner_type is not ExecutionOwnerType.STRATEGY_RUN:
+      raise AssertionError("unreachable execution owner witness")
+    environment = _required_environment(execution_environment, owner=owner)
+    normalized_limit = int(limit)
+    if not 1 <= normalized_limit <= 500:
+      raise ValueError("评估查询条数必须在 1 到 500 之间")
+    conditions = [
+      TTradeOpportunityEvaluation.account_id
+      == _required_text(account_id, "证券账户", 50),
+      TTradeOpportunityEvaluation.owner_type == owner.owner_type.value,
+      TTradeOpportunityEvaluation.owner_id == owner.owner_id,
+      TTradeOpportunityEvaluation.environment == environment,
+    ]
+    if instrument_code is not None:
+      conditions.append(
+        TTradeOpportunityEvaluation.instrument_code == _instrument_code(instrument_code)
+      )
+    if record_kind is not None:
+      conditions.append(
+        TTradeOpportunityEvaluation.record_kind == _evaluation_kind(record_kind)
+      )
+    result = await self.db.execute(
+      select(TTradeOpportunityEvaluation)
+      .where(*conditions)
+      .order_by(
+        TTradeOpportunityEvaluation.evaluated_at.desc(),
+        TTradeOpportunityEvaluation.id.desc(),
+      )
+      .limit(normalized_limit)
+    )
+    return list(result.scalars().all())
 
   async def list_evaluation_summaries(
     self,
@@ -319,6 +399,7 @@ class TTradeOpportunityEvaluationRepository:
 
     conditions = [
       TTradeOpportunityEvaluation.account_id == normalized_account_id,
+      TTradeOpportunityEvaluation.owner_type == "STRATEGY_RUN",
       TTradeOpportunityEvaluation.record_kind.in_(normalized_kinds),
     ]
     if instrument_code is not None:
@@ -461,7 +542,11 @@ class TTradeOpportunityEvaluationRepository:
           id=str(row["id"]),
           event_key=str(row["event_key"]),
           account_id=str(row["account_id"]),
-          strategy_run_id=str(row["strategy_run_id"]),
+          strategy_run_id=(
+            str(row["strategy_run_id"])
+            if row["strategy_run_id"] is not None
+            else None
+          ),
           instrument_code=str(row["instrument_code"]),
           candidate_id=row["candidate_id"],
           evaluated_at=row["evaluated_at"],
@@ -503,7 +588,8 @@ class TTradeOpportunityEvaluationRepository:
     *,
     event_key: str,
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: Optional[str],
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None,
     instrument_code: str,
     evaluated_at: datetime,
     record_kind: str,
@@ -515,12 +601,14 @@ class TTradeOpportunityEvaluationRepository:
     schema_version: str,
     payload: dict[str, Any],
     metrics: Optional[dict[str, Any]],
+    execution_environment: Optional[str],
     commit: bool,
   ) -> TTradeOpportunityEvaluation:
     prepared = _prepare_evaluation(
       event_key=event_key,
       account_id=account_id,
       strategy_run_id=strategy_run_id,
+      execution_ref=execution_ref,
       instrument_code=instrument_code,
       evaluated_at=evaluated_at,
       record_kind=record_kind,
@@ -533,6 +621,8 @@ class TTradeOpportunityEvaluationRepository:
       payload=payload,
       metrics=metrics,
     )
+    prepared["environment"] = _optional_environment(execution_environment)
+    await self._complete_execution_scopes([prepared])
     existing = await self._get_by_event_key(str(prepared["event_key"]))
     if existing is not None:
       return _same_evaluation_or_raise(
@@ -670,6 +760,57 @@ class TTradeOpportunityEvaluationRepository:
       )
     )
     return {str(row.event_key): row for row in result.scalars().all()}
+
+  async def _complete_execution_scopes(
+    self,
+    prepared: list[dict[str, Any]],
+  ) -> None:
+    missing = [
+      item
+      for item in prepared
+      if not item.get("environment")
+      and item["owner_type"] == ExecutionOwnerType.STRATEGY_RUN.value
+    ]
+    environments: dict[str, str] = {}
+    if missing:
+      run_ids = tuple(sorted({str(item["owner_id"]) for item in missing}))
+      result = await self.db.execute(
+        select(StrategyRun.id, StrategyRun.mode).where(StrategyRun.id.in_(run_ids))
+      )
+      environments = {
+        str(run_id): str(getattr(mode, "value", mode) or "").upper()
+        for run_id, mode in result.all()
+      }
+    assistant_items = [
+      item
+      for item in prepared
+      if item["owner_type"] == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
+    ]
+    assistant_scopes: dict[str, tuple[str, str]] = {}
+    if assistant_items:
+      execution_ids = tuple(sorted({str(item["owner_id"]) for item in assistant_items}))
+      result = await self.db.execute(
+        select(
+          TAssistantExecutionRecord.execution_id,
+          TAssistantExecutionRecord.account_id,
+          TAssistantExecutionRecord.environment,
+        ).where(TAssistantExecutionRecord.execution_id.in_(execution_ids))
+      )
+      assistant_scopes = {
+        str(execution_id): (str(account_id), str(environment).upper())
+        for execution_id, account_id, environment in result.all()
+      }
+    for item in prepared:
+      owner = ExecutionOwnerRef(item["owner_type"], str(item["owner_id"]))
+      environment = item.get("environment") or environments.get(owner.owner_id)
+      if environment is None:
+        raise ValueError("execution owner 无法证明做 T 评估 environment")
+      item["environment"] = _required_environment(environment, owner=owner)
+      if owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+        persisted_scope = assistant_scopes.get(owner.owner_id)
+        if persisted_scope != (str(item["account_id"]), str(item["environment"])):
+          raise ValueError("T assistant execution 与评估账户或 environment 不一致")
+      item["content_fingerprint"] = _evaluation_fingerprint(item)
 
 
 class TTradeInstrumentProfileRepository:
@@ -853,6 +994,7 @@ def _prepare_evaluation(
   event_key: Any,
   account_id: Any,
   strategy_run_id: Any,
+  execution_ref: ExecutionOwnerRef | Mapping[str, object] | None,
   instrument_code: Any,
   evaluated_at: Any,
   record_kind: Any,
@@ -869,7 +1011,10 @@ def _prepare_evaluation(
 
   normalized_key = _required_text(event_key, "评估事件键", 160)
   normalized_account_id = _required_text(account_id, "证券账户", 50)
-  normalized_run_id = _required_text(strategy_run_id, "策略运行标识", 36)
+  owner, normalized_run_id = _normalize_execution_owner(
+    execution_ref,
+    strategy_run_id,
+  )
   normalized_instrument = _instrument_code(instrument_code)
   normalized_evaluated_at = _storage_time(evaluated_at)
   normalized_kind = _evaluation_kind(record_kind)
@@ -906,27 +1051,11 @@ def _prepare_evaluation(
     coalesced_count=normalized_count,
   )
 
-  fingerprint = _sha256(
-    {
-      "account_id": normalized_account_id,
-      "strategy_run_id": normalized_run_id,
-      "instrument_code": normalized_instrument,
-      "candidate_id": normalized_candidate_id,
-      "evaluated_at": normalized_evaluated_at,
-      "record_kind": normalized_kind,
-      "event_type": normalized_event_type,
-      "window_started_at": normalized_window_started_at,
-      "window_ended_at": normalized_window_ended_at,
-      "coalesced_count": normalized_count,
-      "policy_version": normalized_policy_version,
-      "schema_version": normalized_schema_version,
-      "payload": normalized_payload,
-      "metrics": normalized_metrics,
-    }
-  )
   return {
     "event_key": normalized_key,
     "account_id": normalized_account_id,
+    "owner_type": owner.owner_type.value,
+    "owner_id": owner.owner_id,
     "strategy_run_id": normalized_run_id,
     "instrument_code": normalized_instrument,
     "candidate_id": normalized_candidate_id,
@@ -938,7 +1067,6 @@ def _prepare_evaluation(
     "coalesced_count": normalized_count,
     "policy_version": normalized_policy_version,
     "schema_version": normalized_schema_version,
-    "content_fingerprint": fingerprint,
     "payload": normalized_payload,
     "metrics": normalized_metrics,
   }
@@ -950,7 +1078,14 @@ def _evaluation_row(
   return TTradeOpportunityEvaluation(
     event_key=str(prepared["event_key"]),
     account_id=str(prepared["account_id"]),
-    strategy_run_id=str(prepared["strategy_run_id"]),
+    owner_type=str(prepared["owner_type"]),
+    owner_id=str(prepared["owner_id"]),
+    environment=str(prepared["environment"]),
+    strategy_run_id=(
+      str(prepared["strategy_run_id"])
+      if prepared["strategy_run_id"] is not None
+      else None
+    ),
     instrument_code=str(prepared["instrument_code"]),
     candidate_id=prepared["candidate_id"],
     evaluated_at=prepared["evaluated_at"],
@@ -974,6 +1109,95 @@ def _same_evaluation_or_raise(
   if existing.content_fingerprint != fingerprint:
     raise ValueError("做 T 机会评估事件键碰撞且内容不一致")
   return existing
+
+
+def _normalize_execution_owner(
+  execution_ref: ExecutionOwnerRef | Mapping[str, object] | None,
+  strategy_run_id: Any,
+) -> tuple[ExecutionOwnerRef, str | None]:
+  run_id = str(strategy_run_id or "").strip() or None
+  if run_id is not None and len(run_id) > 36:
+    raise ValueError("策略运行标识长度不能超过 36")
+  owner = execution_ref
+  if owner is None:
+    if run_id is None:
+      raise ValueError("做 T 机会评估缺少 execution_ref")
+    owner = ExecutionOwnerRef.strategy_run(run_id)
+  elif isinstance(owner, Mapping):
+    owner = ExecutionOwnerRef.from_mapping(owner)
+  elif not isinstance(owner, ExecutionOwnerRef):
+    raise ValueError("做 T 机会评估 execution_ref 无效")
+  if owner.owner_type not in {
+    ExecutionOwnerType.STRATEGY_RUN,
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+  }:
+    raise ValueError("做 T 机会评估 owner_type 无效")
+  if owner.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+    if run_id is None:
+      run_id = owner.owner_id
+    elif run_id != owner.owner_id:
+      raise ValueError("strategy_run_id witness 与 execution_ref 不一致")
+    if len(run_id) > 36:
+      raise ValueError("策略运行标识长度不能超过 36")
+  elif run_id is not None:
+    raise ValueError("T assistant evaluation 不得携带 strategy_run_id witness")
+  return owner, run_id
+
+
+def _optional_environment(value: Any) -> str | None:
+  if value is None or value == "":
+    return None
+  try:
+    return ExecutionEnvironment(value).value
+  except (TypeError, ValueError) as exc:
+    raise ValueError("做 T 机会评估 execution environment 无效") from exc
+
+
+def _required_environment(
+  value: Any,
+  *,
+  owner: ExecutionOwnerRef,
+) -> str:
+  environment = _optional_environment(value)
+  if environment is None:
+    raise ValueError("做 T 机会评估缺少 execution environment")
+  if (
+    owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+    and environment != ExecutionEnvironment.PAPER.value
+  ):
+    raise ValueError("P3 T assistant evaluation 只能写入 PAPER namespace")
+  return environment
+
+
+def _evaluation_fingerprint(prepared: Mapping[str, Any]) -> str:
+  identity = (
+    {"strategy_run_id": prepared["strategy_run_id"]}
+    if prepared["owner_type"] == ExecutionOwnerType.STRATEGY_RUN.value
+    else {
+      "owner_type": prepared["owner_type"],
+      "owner_id": prepared["owner_id"],
+      "environment": prepared["environment"],
+      "strategy_run_id": None,
+    }
+  )
+  return _sha256(
+    {
+      "account_id": prepared["account_id"],
+      **identity,
+      "instrument_code": prepared["instrument_code"],
+      "candidate_id": prepared["candidate_id"],
+      "evaluated_at": prepared["evaluated_at"],
+      "record_kind": prepared["record_kind"],
+      "event_type": prepared["event_type"],
+      "window_started_at": prepared["window_started_at"],
+      "window_ended_at": prepared["window_ended_at"],
+      "coalesced_count": prepared["coalesced_count"],
+      "policy_version": prepared["policy_version"],
+      "schema_version": prepared["schema_version"],
+      "payload": prepared["payload"],
+      "metrics": prepared["metrics"],
+    }
+  )
 
 
 def _evaluation_candidate_id(payload: dict[str, Any]) -> str | None:

@@ -19,6 +19,7 @@ from quantx_domain.grid_book import build_grid_book_from_parameters
 from quantx_domain.strategies.base import (
   OrderStateEvent,
   StrategyCadence,
+  StrategyContext,
   StrategyInput,
   TradeExecutionEvent,
   TradeIntentDirection,
@@ -27,16 +28,6 @@ from quantx_domain.strategies.pullback_grid import PullbackGridStrategy
 from quantx_infrastructure.models.kline import KLine
 
 pytestmark = pytest.mark.unit
-
-
-@dataclass
-class DummyContext:
-  run_id: str
-  mode: str
-  instruments: list[str]
-  parameters: dict
-  initial_capital: float = 1_000_000
-  current_time: Optional[datetime] = None
 
 
 @dataclass
@@ -73,11 +64,12 @@ def make_strategy(
   }
   parameters.update(extra_parameters or {})
   return PullbackGridStrategy(
-    DummyContext(
+    StrategyContext(
       run_id="grid-run",
       mode="backtest",
       instruments=["000001.SZ"],
       parameters=parameters,
+      initial_capital=1_000_000,
     )
   )
 

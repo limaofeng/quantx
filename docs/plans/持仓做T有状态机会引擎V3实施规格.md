@@ -1133,6 +1133,20 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 
 机器学习仍保留为下一阶段，不计入本轮 V3 已完成范围。
 
+### 21.1 P3 独立 PAPER shadow 迁移说明（2026-09-03）
+
+V3 规则内核继续作为唯一逐标的纯 reducer；P3 新路径不再把多标的状态写回
+`StrategyRunState.instrument_states`，而是由独立 `TAssistantExecution` 通过
+`StrategyBase.step(StrategyInput[SNAPSHOT])` 调用同一内核。Engine supervisor 以
+CRITICAL 模式消费 WholeQuoteHub accepted Tick，按 capture fence 构建快照，并将逐标的
+state/cursor、material opportunity evidence、shadow proposal 与旧 V3 对比结果原子提交到
+PAPER execution/cycle namespace。
+
+该迁移阶段只观察和比较：`T_ASSISTANT_EXECUTION` 未注册公共命令 handler，不创建
+StrategyRun，不进入 approval、trade intent、pending order 或 Agent outbox。退出模板已统一为
+`TExitOrderPolicy.v1` 的 BID1/FIX_PRICE/protected-limit/最多 30bps；但 P3 shadow 只保存模板提案，
+不会执行订单。LIVE/PAPER 真实入场仍等待 P4 的 portfolio allocation 与公共 admission 闭环。
+
 ## 22. 机器学习后续计划
 
 ### 22.1 前置条件

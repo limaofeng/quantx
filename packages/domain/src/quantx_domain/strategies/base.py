@@ -36,6 +36,7 @@ class StrategyCadence(str, Enum):
 
   BAR = "BAR"
   TICK = "TICK"
+  SNAPSHOT = "SNAPSHOT"
   ORDER = "ORDER"
   TRADE = "TRADE"
   RECONCILE = "RECONCILE"
@@ -208,6 +209,9 @@ class ExitPlanIntentOrigin:
       raise TypeError("exit-plan source execution ref must be ExecutionOwnerRef")
     if self.source_execution_ref is not None and self.source_execution_ref.owner_type not in {
       ExecutionOwnerType.STRATEGY_RUN,
+      ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+      ExecutionOwnerType.ENTRY_PLAN,
+      ExecutionOwnerType.BOARD_ASSISTANT_EXECUTION,
       ExecutionOwnerType.MANUAL_COMMAND,
     }:
       raise ValueError("exit-plan source execution ref has invalid owner type")
@@ -217,8 +221,39 @@ class ExitPlanIntentOrigin:
     return ExecutionOwnerRef(ExecutionOwnerType.EXIT_PLAN, self.plan_id)
 
 
+@dataclass(frozen=True)
+class TAssistantExecutionIntentOrigin:
+  """Explicit origin for an independent T-assistant ENTRY proposal."""
+
+  execution_id: str
+  producer_id: str
+  opportunity_id: Optional[str] = None
+  candidate_id: Optional[str] = None
+  cycle_id: Optional[str] = None
+  origin_type: TradeIntentOriginType = field(
+    default=TradeIntentOriginType.T_ASSISTANT_EXECUTION,
+    init=False,
+  )
+
+  def __post_init__(self) -> None:
+    if not str(self.execution_id or "").strip():
+      raise ValueError("T-assistant intent origin requires execution_id")
+    if not str(self.producer_id or "").strip():
+      raise ValueError("T-assistant intent origin requires producer_id")
+
+  @property
+  def execution_ref(self) -> ExecutionOwnerRef:
+    return ExecutionOwnerRef(
+      ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+      self.execution_id,
+    )
+
+
 TradeIntentOrigin = (
-  StrategyRunIntentOrigin | ManualCommandIntentOrigin | ExitPlanIntentOrigin
+  StrategyRunIntentOrigin
+  | TAssistantExecutionIntentOrigin
+  | ManualCommandIntentOrigin
+  | ExitPlanIntentOrigin
 )
 
 
@@ -396,7 +431,7 @@ class TradeIntent:
   """策略层唯一交易语义输出。"""
 
   strategy_id: str
-  run_id: str
+  run_id: str = field(default="", kw_only=True)
   instrument_code: str
   direction: TradeIntentDirection
   bucket: str
@@ -468,6 +503,15 @@ class TradeIntent:
     elif isinstance(self.origin, ManualCommandIntentOrigin):
       if self.run_id or self.strategy_id:
         raise ValueError("manual-command TradeIntent cannot carry a strategy run identity")
+    elif isinstance(self.origin, TAssistantExecutionIntentOrigin):
+      if self.run_id:
+        raise ValueError(
+          "T-assistant TradeIntent cannot carry a strategy run identity"
+        )
+      if self.execution_ref is not None and self.execution_ref != self.origin.execution_ref:
+        raise ValueError("TradeIntent execution owner conflicts with T-assistant origin")
+      if self.execution_ref is None:
+        self.execution_ref = self.origin.execution_ref
     elif isinstance(self.origin, ExitPlanIntentOrigin):
       if self.execution_ref is not None and self.execution_ref != self.origin.execution_ref:
         raise ValueError("TradeIntent execution owner conflicts with ExitPlan origin")
@@ -494,6 +538,15 @@ class TradeIntent:
       if self.run_id or self.strategy_id:
         raise ValueError(
           "manual-command TradeIntent cannot carry a strategy run identity"
+        )
+    elif self.execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+      if self.run_id:
+        raise ValueError(
+          "T-assistant TradeIntent cannot carry a strategy run identity"
+        )
+      if not isinstance(self.origin, TAssistantExecutionIntentOrigin):
+        raise ValueError(
+          "T-assistant TradeIntent requires an explicit origin adapter"
         )
 
     if self.direction in {TradeIntentDirection.BUY, TradeIntentDirection.SELL}:
@@ -535,11 +588,11 @@ class StrategyInput:
   bar_period 是指标窗口所属周期。分钟输入不得隐式推进日线窗口。
   """
 
-  run_id: str
+  run_id: str = field(default="", kw_only=True)
   strategy_id: str
   timestamp: datetime
   cadence: StrategyCadence
-  instrument_code: str
+  instrument_code: Optional[str]
   input_id: str = field(default_factory=lambda: str(uuid.uuid4()))
   trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
   market_data: Any = None
@@ -555,6 +608,7 @@ class StrategyInput:
   open_orders: List[Any] = field(default_factory=list)
   strategy_state: Dict[str, Any] = field(default_factory=dict)
   parameters: Dict[str, Any] = field(default_factory=dict)
+  execution_ref: Optional[ExecutionOwnerRef] = field(default=None, kw_only=True)
 
   @property
   def bar_period(self) -> str:
@@ -575,6 +629,49 @@ class StrategyInput:
   def __post_init__(self) -> None:
     if isinstance(self.cadence, str):
       self.cadence = StrategyCadence(self.cadence)
+    if self.execution_ref is not None and not isinstance(
+      self.execution_ref, ExecutionOwnerRef
+    ):
+      raise TypeError("StrategyInput execution_ref must be ExecutionOwnerRef")
+    if self.execution_ref is None:
+      if not str(self.run_id or "").strip():
+        raise ValueError("StrategyInput requires execution_ref when run_id is absent")
+      self.execution_ref = ExecutionOwnerRef.strategy_run(self.run_id)
+    elif self.execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if self.run_id != self.execution_ref.owner_id:
+        raise ValueError("StrategyInput execution owner conflicts with run_id")
+    elif self.run_id:
+      raise ValueError("non-StrategyRun StrategyInput cannot carry run_id")
+
+    if self.cadence is StrategyCadence.SNAPSHOT:
+      from quantx_domain.trading.t_assistant_market_state import TDecisionSnapshot
+
+      if self.instrument_code is not None:
+        raise ValueError("SNAPSHOT StrategyInput instrument_code must be None")
+      if not isinstance(self.market_data, TDecisionSnapshot):
+        raise TypeError("SNAPSHOT StrategyInput market_data must be TDecisionSnapshot")
+      if self.execution_ref != self.market_data.execution_ref:
+        raise ValueError("SNAPSHOT StrategyInput execution owner mismatch")
+
+
+@dataclass(frozen=True)
+class SymbolRuntimeStatePatch:
+  """One independent symbol-state CAS patch returned by a SNAPSHOT strategy."""
+
+  instrument_code: str
+  expected_revision: int
+  patch: RuntimeStatePatch
+  material: bool = False
+
+  def __post_init__(self) -> None:
+    code = str(self.instrument_code or "").strip().upper()
+    if not code:
+      raise ValueError("symbol state patch requires instrument_code")
+    if self.expected_revision < 0:
+      raise ValueError("symbol state patch expected_revision must be non-negative")
+    if not isinstance(self.patch, RuntimeStatePatch):
+      raise TypeError("symbol state patch requires RuntimeStatePatch")
+    object.__setattr__(self, "instrument_code", code)
 
 
 @dataclass
@@ -584,6 +681,7 @@ class StrategyOutput:
   trade_intents: List[TradeIntent] = field(default_factory=list)
   exit_plan_commands: List["ExitPlanCommand"] = field(default_factory=list)
   runtime_state_patch: Optional[RuntimeStatePatch] = None
+  symbol_state_patches: List[SymbolRuntimeStatePatch] = field(default_factory=list)
   decision_tags: List[str] = field(default_factory=list)
   trace_payload: Dict[str, Any] = field(default_factory=dict)
 
@@ -908,7 +1006,7 @@ class _StateSilentContext:
 class StrategyContext:
   """策略运行上下文"""
 
-  run_id: str
+  run_id: str = field(default="", kw_only=True)
   mode: StrategyRunMode
   instruments: List[str]
   parameters: Dict[str, Any]
@@ -918,6 +1016,8 @@ class StrategyContext:
   current_time: Optional[datetime] = None
   backtest_id: Optional[str] = None  # 回测记录ID (StrategyBacktest.id，仅回测模式)
   backtest_version: Optional[int] = None  # 回测版本号，仅回测模式
+  execution_ref: Optional[ExecutionOwnerRef] = field(default=None, kw_only=True)
+  environment: Optional[ExecutionEnvironment] = field(default=None, kw_only=True)
 
   def __post_init__(self) -> None:
     if isinstance(self.mode, str):
@@ -929,6 +1029,27 @@ class StrategyContext:
           self.mode = StrategyRunMode[self.mode.upper()]
         except KeyError as exc:
           raise ValueError(f"Invalid strategy run mode: {mode_value}") from exc
+    if self.execution_ref is not None and not isinstance(
+      self.execution_ref, ExecutionOwnerRef
+    ):
+      raise TypeError("StrategyContext execution_ref must be ExecutionOwnerRef")
+    if self.execution_ref is None:
+      if not str(self.run_id or "").strip():
+        raise ValueError("StrategyContext requires execution_ref when run_id is absent")
+      self.execution_ref = ExecutionOwnerRef.strategy_run(self.run_id)
+    elif self.execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if self.execution_ref.owner_id != self.run_id:
+        raise ValueError("StrategyContext execution owner conflicts with run_id")
+    elif self.run_id:
+      raise ValueError("non-StrategyRun StrategyContext cannot carry run_id")
+
+    resolved_environment = ExecutionEnvironment(self.mode.value.upper())
+    if self.environment is None:
+      self.environment = resolved_environment
+    elif isinstance(self.environment, str):
+      self.environment = ExecutionEnvironment(self.environment.upper())
+    if self.environment is not resolved_environment:
+      raise ValueError("StrategyContext environment conflicts with mode")
 
 
 class StrategyBase(ABC):
@@ -943,7 +1064,9 @@ class StrategyBase(ABC):
     self.context = context
     self.is_initialized = False
     self.is_running = False
-    self.logger = logging.getLogger(f"Strategy-{context.run_id}")
+    self.logger = logging.getLogger(
+      f"Strategy-{context.execution_ref.owner_type.value}-{context.execution_ref.owner_id}"
+    )
     self.trade_intents: List[TradeIntent] = []
     self.positions: Dict[str, float] = {}
     self.orders: List[Dict[str, Any]] = []

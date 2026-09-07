@@ -1,5 +1,8 @@
 # QuantX Engine
 
+> 2026-09-07：公共 ExitPlanRuntime、admission 与独立 PAPER shadow 已在业务库 0050
+> 和清空功能数据后的 Windows full/live 基线上完成启动验收；新 T owner 仍无真实订单 handler。
+
 `apps/engine` 独占策略管理器、自动退出计划、条件清仓、全局做 T、热缓存和
 Agent 回报收敛。它使用 PostgreSQL advisory lock 保证同数据库只运行一个
 实例，并定期写入组件心跳。
@@ -27,6 +30,16 @@ Engine-owned 动态策略的标的范围由 `InstrumentUniverseProviderRegistry`
 `reconcile_run_instruments` 串行进入
 `StrategyBase.step(RECONCILE)`；Provider 不订阅行情，策略也不读取账户或选池数据源。
 
+独立做 T PAPER shadow 由 Engine 启动的 `TAssistantPaperShadowSupervisor` 持有一个
+WholeQuoteHub `CRITICAL` consumer。它为每个标的维护独立 accepted sequence/ring/cursor，
+同时把 Hub 全局 sequence 仅作为 capture fence；callback 失败或队列溢出时 Hub 关闭
+READY，并从权威全量快照重建后重启 consumer。supervisor 从 D-1 profile 真源装载逐标的
+画像，以 `StrategyBase.step(SNAPSHOT)` 运行同一 V3 reducer，再在一个 fenced cycle 事务中
+提交 symbol state、机会证据、PAPER proposal 和与 legacy StrategyRun 精确 source/fence 对比
+事件。启动时残留的 `PREPARED` cycle 只能按有效 lease 续接，否则以精确 claim fence 转为
+`ABORTED_STALE`。该 owner 未注册公共命令 handler，不写 approval、intent、pending、订单、
+成交、authorization 或 Agent outbox；它不是当前 LIVE 入场 producer。
+
 Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 前者承载 API 发起的策略、做 T 和清仓控制命令，后者承载 Agent 上报的原始
 订单、成交、持仓与对账结果。进程重启后会恢复超时的 `PROCESSING` 消息，
@@ -39,9 +52,20 @@ Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 先锁账户控制行，再锁标的持仓行及保护计划。不能从
 不同时间的账户/持仓查询拼出可用容量，也不能用晚于快照的订单终态释放旧快照的占用。
 LIVE BUY 使用有资金上限的限价；正向做 T 的 BUY 还受未占用老仓可卖量限制。
+所有 LIVE BUY 先持久化为账户级 `EXECUTION_READY`，由
+`AccountRiskIncreaseAdmissionSequencer` 收集当前 READY 集合，按冻结业务优先级、
+创建时间和稳定 identity 排序。排序与 commit-visible durable batch/claim/fence 均发生在
+`AccountExecutionControl FOR UPDATE` 之前；随后才按 rank 逐项进入最终账户锁，复核 Capacity
+并创建 pending/correlation/outbox。Engine 启动屏障与 3 秒后台扫描共同恢复崩溃后残留的
+`EXECUTION_READY/PREPARED`；并发 dispatcher 输家读取赢家已提交的订单结果。直接调用不得
+绕过公共 claim。
 PAPER Broker 只恢复本运行模拟资产，模拟计划与 LIVE 保护量、授权和容量隔离。
 无运行的 PAPER 退出/清仓计划只在创建时冻结持仓样本，之后不读取 LIVE 资产补仓；
 API 授权预览、确认与 Engine 创建计划均使用相同的环境隔离规则。
+做 T 退出模板、公共 ExitPlan 路由和最终 TradeCommand 门统一使用
+`TExitOrderPolicy.v1`：BID、FIX_PRICE、30bps、单委托 30 秒、总窗口 90 秒、最多 replace
+2 次。`max_exit_slippage_bps` 等普通策略参数不能改变该版本；计划 config version 与
+order-policy version 分字段保存。
 
 `StrategyExecutor._process_strategy_output` 对整批 `TradeIntent` 先完成严格持久化，
 再安装可审批意图或进入执行路由。普通策略和专用助手没有两种受理标准。当前公共链以
@@ -176,19 +200,17 @@ Redis 只用于唤醒消费者，以及向 API 发布行情、策略与交易事
 唤醒后仍会从数据库重新读取投影。订单必须先持久化 pending 状态和
 `trade_command_outbox`，才能由 API Hub 下发给 Agent。
 
-自动卖出由 Engine 的 `ExitPlanBook` 统一承载。它是运行时内部组件，不是一个
-独立的“卖出策略”服务。入场策略在 BUY 意图中附带
+自动卖出由 Engine 的公共 `ExitPlanRuntime` 统一承载。入场策略在 BUY 意图中附带
 `ExitPlanTemplate`，只有真实 BUY 成交回报会激活计划。Engine 在策略
-`step()` 之前评估退出规则，将命中的计划转换成标准 SELL `TradeIntent`，
+运行之外评估退出规则，将命中的计划转换成标准 SELL `TradeIntent`，
 继续经过 OrderSizer、后置风控、Broker 和成交回报收敛。做 T 仅负责入场
-信号和退出模板；同一个做 T `StrategyRun` 内的 `ExitPlanBook` 负责退出评估，
-绝不为做 T 新建退出策略。PAPER/LIVE 计划以
-`auto_exit_plans` 为唯一持久化真源，运行内 `ExitPlanBook` 只是热缓存；回测
-保持内存计划。完整契约见
+信号和退出模板；source execution 终态不影响既有退出义务。PAPER/LIVE 计划以
+`auto_exit_plans` 为唯一持久化真源，不再保留 source 私有热缓存；BACKTEST
+保持隔离内存 `ExitPlanBook`。完整契约见
 [A 股自动退出计划与卖出策略契约](../../trading/contracts/A股自动退出计划与卖出策略契约.md)。
 
 手工持仓的部分动态止盈也由 Engine 承载。此类 `MANUAL_POSITION` 计划不创建
-StrategyRun，由全局 `ExitPlanMonitor` 从 `WholeQuoteHub` 中央快照读取价格、累计
+StrategyRun，由公共 `ExitPlanRuntime` 从 `WholeQuoteHub` 中央快照读取价格、累计
 成交量和五档盘口，执行
 `ADAPTIVE_VOLUME_PRICE_TRAILING`。量能陈旧会降级到价格模式，价格陈旧则
 暂停；触发后持久化 pending 委托，逐笔成交通过 `agent_report_inbox` 幂等
@@ -197,31 +219,28 @@ StrategyRun，由全局 `ExitPlanMonitor` 从 `WholeQuoteHub` 中央快照读取
 Engine 使用 PostgreSQL advisory lock 保证同一数据库只有一个实例取得执行
 权，并持续写入 `runtime_component_heartbeats`，供 API 就绪检查使用。
 
-持久化 `ExitPlanMonitor` 每秒只扫描 `auto_exit_plans` 中没有运行绑定的
-`MANUAL_POSITION / MANUAL_LIQUIDATION`，并消费 `WholeQuoteHub` 全市场批次；历史
-托管运行命令标记由启动迁移清除，不改变 `strategy_run_id` 为空即归 Monitor 的规则。
-`T_TRADE_BATCH / LIMIT_UP_BOARD / FIRST_BOARD_PROMOTION_V2 / ENTRY_PLAN`
-等入场来源计划由原 `StrategyRun` 在自身串行行情队列、策略 `step()` 之前评估。
-用户新建的人工托管 `MANUAL_POSITION` 与清仓计划都由 Monitor 执行。Engine 启动
-迁移会先停止旧专用退出运行、保留计划状态和订单血缘，再恢复策略运行；持续看门狗
-负责发现孤儿或错配所有者。所有权审计保持 fail-closed，但故障域只覆盖交易运行域：
+持久化 `ExitPlanRuntime` 每秒扫描所有 owner/template/environment 绑定一致的 PAPER/LIVE
+活动计划，并消费 `WholeQuoteHub` 全市场批次；人工计划、旧 StrategyRun source 和新的
+T/打板/买入计划 source 使用同一消费路径。历史托管运行命令标记只作为迁移输入，
+不参与当前所有权判断。持续看门狗负责发现公共 runtime 停止或错配 owner。所有权审计
+保持 fail-closed，但 source execution 已终态不是错误，故障域只覆盖交易运行域：
 Engine 先启动 heartbeat、Agent report 收敛、订阅桥和行情查询桥；审计失败时停止
-StrategyManager、人工计划 Monitor、自动交易监控和命令 consumer，把 Engine heartbeat
+StrategyManager、ExitPlanRuntime、自动交易监控和命令 consumer，把 Engine heartbeat
 标记为 `DEGRADED / ACTIVE_RUNTIME_EXIT_PLAN_OWNER_AUDIT_FAILED`，并幂等地将受影响账户
 置为 `PAUSED / RECONCILE_REQUIRED`、清空 controlled window。核心数据面和 PostgreSQL
 租约继续运行，因此 QMT 完整快照、控制会话和行情租约不会被孤儿计划拖入重启循环。
 持久化预检通过后仍需连续两个运行态审计周期健康，才启动命令 consumer；账户授权不
-自动恢复，必须完成显式对账。Monitor 不接管执行。API 对人工计划的
+自动恢复，必须完成显式对账。API 对人工计划的
 创建、修改、启停、取消、立即评估和批量清仓全部写入
 `engine_command_outbox`；Engine 在账户＋股票锁内校验 `config_version`、保护量
 冲突和待成交 SELL。共享命令服务在写入和轮询时自行拥有短会话；调用取消也必须
 等会话关闭、连接归还后再传播，不改变命令的持久化、幂等或处理状态。承载活跃
-入场来源计划的原运行只能 `DRAINING`，不得普通
-停止；原运行异常时只能恢复同一个运行，不得另建退出策略。
+source execution 只在自身 BUY approval/pending/outbox/unknown 未收敛时阻止终态；活动
+ExitPlan/TTradeBatch 继续进入 account-wide obligation watermark，但由公共 runtime 独立恢复。
 
 退出计划运行态使用独立单调 `state_version` 做数据库 CAS；配置变更继续使用
 `config_version`，两者不得混用。一次规则命中时，计划的 `pending_intent_id` 与同
-ID、同 `plan_id/run_id/account_id` 的 SELL `TradeIntent` 必须在一个事务中提交；
+ID、同 `plan_id/account_id` 且 `strategy_run_id=NULL` 的 SELL `TradeIntent` 必须在一个事务中提交；
 任何版本竞争、绑定不一致或意图写入失败都整体回滚。重启恢复时，已有
 `PendingTradeOrder` 的意图只等待回报，不再次路由；命令结果落盘前崩溃后的重放
 返回既有订单。普通 `CANCELLED / REJECTED / EXPIRED` 即使累计成交量为零，也不能

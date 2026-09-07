@@ -9,6 +9,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
+
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
@@ -68,6 +74,23 @@ _BLOCKER_LABELS = {
   "COOLDOWN_ACTIVE": "做 T 冷却期尚未结束",
   "ENTRY_CUTOFF_REACHED": "已到新入场截止时间",
 }
+
+
+@dataclass(frozen=True)
+class _EvaluationExecutionScope:
+  execution_ref: ExecutionOwnerRef
+  execution_environment: ExecutionEnvironment | None
+  strategy_run_id: str | None
+
+  @property
+  def stream_id(self) -> str:
+    if self.strategy_run_id is not None:
+      return self.strategy_run_id
+    assert self.execution_environment is not None
+    return (
+      f"{self.execution_ref.owner_type.value}:"
+      f"{self.execution_ref.owner_id}:{self.execution_environment.value}"
+    )
 _BLOCKER_PRIORITY = {
   "CONTINUITY_GENERATION_CHANGED": 0,
   "QUOTE_STALE": 1,
@@ -182,15 +205,23 @@ class TTradeOpportunityRuntimeService:
     *,
     event: dict[str, Any],
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     repository: Optional[TTradeOpportunityEvaluationRepository] = None,
   ) -> Any:
+    scope = _execution_scope(
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
+      strategy_run_id=strategy_run_id,
+    )
+    event = _scoped_event(event, scope)
     record_kind = str(event.get("record_kind") or "").upper()
     if record_kind == T_TRADE_EVALUATION_KIND_DIAGNOSTIC:
       return await self._coalesce_diagnostic(
         event=event,
         account_id=account_id,
-        strategy_run_id=strategy_run_id,
+        strategy_run_id=scope.stream_id,
         repository=repository,
       )
     if record_kind != T_TRADE_EVALUATION_KIND_MATERIAL:
@@ -200,7 +231,7 @@ class TTradeOpportunityRuntimeService:
     # for this stream before the transition itself is appended.
     await self._flush_closed_diagnostic(
       account_id=account_id,
-      strategy_run_id=strategy_run_id,
+      strategy_run_id=scope.stream_id,
       instrument_code=str(event.get("instrument_code") or "").upper(),
       through_ms=_positive_int(event.get("evaluated_at_ms"), "评估时间"),
       source_time_ms=_event_source_time_ms(event),
@@ -209,7 +240,7 @@ class TTradeOpportunityRuntimeService:
     normalized = self._normalize_evaluation_event(
       event,
       account_id=account_id,
-      strategy_run_id=strategy_run_id,
+      strategy_run_id=scope.stream_id,
     )
     if repository is not None:
       return await self._append_evaluation(repository, normalized)
@@ -226,7 +257,9 @@ class TTradeOpportunityRuntimeService:
     *,
     events: Sequence[Mapping[str, Any]],
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
   ) -> CheckpointBatchReceipt:
     """Persist one closed checkpoint boundary with a single append-many UoW.
 
@@ -239,9 +272,15 @@ class TTradeOpportunityRuntimeService:
     """
 
     normalized_account = _required_text(account_id, "证券账户")
-    normalized_run = _required_text(strategy_run_id, "策略运行标识")
+    scope = _execution_scope(
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
+      strategy_run_id=strategy_run_id,
+    )
+    normalized_run = scope.stream_id
+    scoped_events = [_scoped_event(event, scope) for event in events]
     normalized_events = self._validated_checkpoint_events(
-      events,
+      scoped_events,
       account_id=normalized_account,
       strategy_run_id=normalized_run,
     )
@@ -355,7 +394,9 @@ class TTradeOpportunityRuntimeService:
     self,
     *,
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     repository: Optional[TTradeOpportunityEvaluationRepository] = None,
   ) -> list[Any]:
     """Flush the final open windows at a deterministic runtime boundary."""
@@ -363,6 +404,8 @@ class TTradeOpportunityRuntimeService:
     receipt = await self.flush_diagnostics_with_receipt(
       account_id=account_id,
       strategy_run_id=strategy_run_id,
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
       repository=repository,
     )
     return list(receipt.records)
@@ -371,13 +414,19 @@ class TTradeOpportunityRuntimeService:
     self,
     *,
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     repository: Optional[TTradeOpportunityEvaluationRepository] = None,
   ) -> CheckpointBatchReceipt:
     """Flush final windows and identify every raw event now durable."""
 
     normalized_account = _required_text(account_id, "证券账户")
-    normalized_run = _required_text(strategy_run_id, "策略运行标识")
+    normalized_run = _execution_scope(
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
+      strategy_run_id=strategy_run_id,
+    ).stream_id
     async with self._diagnostic_lock:
       keys = sorted(
         key
@@ -436,15 +485,13 @@ class TTradeOpportunityRuntimeService:
       if event_key in source_keys:
         raise ValueError("checkpoint batch requires unique evaluation event_key values")
       source_keys.add(event_key)
-      for source_field, expected, label in (
-        ("account_id", account_id, "证券账户"),
-        ("strategy_run_id", strategy_run_id, "策略运行标识"),
+      if "account_id" in event and (
+        _required_text(event.get("account_id"), "证券账户") != account_id
       ):
-        if (
-          source_field in event
-          and _required_text(event.get(source_field), label) != expected
-        ):
-          raise ValueError(f"checkpoint batch {source_field} does not match scope")
+        raise ValueError("checkpoint batch account_id does not match scope")
+      event_scope = _scope_from_event(event)
+      if event_scope.stream_id != strategy_run_id:
+        raise ValueError("checkpoint batch execution_ref does not match scope")
 
       record_kind = str(event.get("record_kind") or "").upper()
       if record_kind not in {
@@ -913,6 +960,12 @@ class TTradeOpportunityRuntimeService:
       "event_key": event["event_key"],
       "account_id": event["account_id"],
       "strategy_run_id": event["strategy_run_id"],
+      "execution_ref": ExecutionOwnerRef.from_mapping(event["execution_ref"]),
+      "execution_environment": (
+        ExecutionEnvironment(event["execution_environment"])
+        if event["execution_environment"] is not None
+        else None
+      ),
       "instrument_code": event["instrument_code"],
       "evaluated_at": event["evaluated_at"],
       "event_type": event["event_type"],
@@ -942,6 +995,9 @@ class TTradeOpportunityRuntimeService:
       T_TRADE_OPPORTUNITY_EVALUATION_EVENT
     ):
       raise ValueError("不是可物化的做 T 机会评估事件")
+    scope = _scope_from_event(event)
+    if scope.stream_id != strategy_run_id:
+      raise ValueError("做 T 机会评估 execution_ref 与运行作用域不一致")
     snapshot = event.get("signal_snapshot")
     if not isinstance(snapshot, dict):
       raise ValueError("做 T 机会评估缺少完整 signal_snapshot")
@@ -970,7 +1026,13 @@ class TTradeOpportunityRuntimeService:
     normalized: dict[str, Any] = {
       "event_key": _required_text(event.get("event_key"), "评估事件键"),
       "account_id": _required_text(account_id, "证券账户"),
-      "strategy_run_id": _required_text(strategy_run_id, "策略运行标识"),
+      "execution_ref": scope.execution_ref.to_dict(),
+      "execution_environment": (
+        scope.execution_environment.value
+        if scope.execution_environment is not None
+        else None
+      ),
+      "strategy_run_id": scope.strategy_run_id,
       "instrument_code": _required_text(
         event.get("instrument_code"), "证券代码"
       ).upper(),
@@ -1071,6 +1133,91 @@ def _event_source_time_ms(event: dict[str, Any]) -> int:
     raise ValueError("行情源时间无效") from exc
   if normalized < 0:
     raise ValueError("行情源时间不能小于零")
+  return normalized
+
+
+def _execution_scope(
+  *,
+  execution_ref: ExecutionOwnerRef | Mapping[str, object] | None,
+  execution_environment: ExecutionEnvironment | str | None,
+  strategy_run_id: str | None,
+) -> _EvaluationExecutionScope:
+  run_id = str(strategy_run_id or "").strip() or None
+  owner = execution_ref
+  if owner is None:
+    if run_id is None:
+      raise ValueError("做 T 机会评估缺少 execution_ref")
+    owner = ExecutionOwnerRef.strategy_run(run_id)
+  elif isinstance(owner, Mapping):
+    owner = ExecutionOwnerRef.from_mapping(owner)
+  elif not isinstance(owner, ExecutionOwnerRef):
+    raise ValueError("做 T 机会评估 execution_ref 无效")
+  if owner.owner_type not in {
+    ExecutionOwnerType.STRATEGY_RUN,
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+  }:
+    raise ValueError("做 T 机会评估 owner_type 无效")
+  if owner.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+    if run_id is None:
+      run_id = owner.owner_id
+    elif run_id != owner.owner_id:
+      raise ValueError("strategy_run_id witness 与 execution_ref 不一致")
+  elif run_id is not None:
+    raise ValueError("T assistant evaluation 不得携带 strategy_run_id witness")
+  environment: ExecutionEnvironment | None = None
+  if execution_environment is not None:
+    try:
+      environment = ExecutionEnvironment(execution_environment)
+    except (TypeError, ValueError) as exc:
+      raise ValueError("做 T 机会评估 execution environment 无效") from exc
+  if (
+    owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+    and environment is not ExecutionEnvironment.PAPER
+  ):
+    raise ValueError("P3 T assistant evaluation 只能写入 PAPER namespace")
+  return _EvaluationExecutionScope(owner, environment, run_id)
+
+
+def _scope_from_event(event: Mapping[str, Any]) -> _EvaluationExecutionScope:
+  return _execution_scope(
+    execution_ref=event.get("execution_ref"),
+    execution_environment=event.get("execution_environment"),
+    strategy_run_id=event.get("strategy_run_id"),
+  )
+
+
+def _scoped_event(
+  event: Mapping[str, Any],
+  scope: _EvaluationExecutionScope,
+) -> dict[str, Any]:
+  normalized = dict(event)
+  existing_ref = normalized.get("execution_ref")
+  existing_run = str(normalized.get("strategy_run_id") or "").strip() or None
+  existing_environment = normalized.get("execution_environment")
+  if existing_ref is not None:
+    parsed = (
+      existing_ref
+      if isinstance(existing_ref, ExecutionOwnerRef)
+      else ExecutionOwnerRef.from_mapping(existing_ref)
+    )
+    if parsed != scope.execution_ref:
+      raise ValueError("做 T 机会评估 event execution_ref 与调用作用域不一致")
+  if existing_run is not None and existing_run != scope.strategy_run_id:
+    raise ValueError("做 T 机会评估 event strategy_run_id witness 不一致")
+  if existing_environment is not None:
+    try:
+      parsed_environment = ExecutionEnvironment(existing_environment)
+    except (TypeError, ValueError) as exc:
+      raise ValueError("做 T 机会评估 event environment 无效") from exc
+    if parsed_environment is not scope.execution_environment:
+      raise ValueError("做 T 机会评估 event environment 与调用作用域不一致")
+  normalized["execution_ref"] = scope.execution_ref.to_dict()
+  normalized["execution_environment"] = (
+    scope.execution_environment.value
+    if scope.execution_environment is not None
+    else None
+  )
+  normalized["strategy_run_id"] = scope.strategy_run_id
   return normalized
 
 

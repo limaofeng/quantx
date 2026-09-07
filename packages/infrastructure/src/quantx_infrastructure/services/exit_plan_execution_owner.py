@@ -27,6 +27,34 @@ MONITOR_OWNER = "MONITOR"
 RUNTIME_BOOK_OWNER = "RUNTIME_BOOK"
 MANAGED_EXIT_STRATEGY_OWNER = "MANAGED_EXIT_STRATEGY"
 INVALID_OWNER = "INVALID"
+PUBLIC_EXIT_PLAN_RUNTIME_OWNER = "PUBLIC_EXIT_PLAN_RUNTIME"
+
+_RUNTIME_SOURCE_OWNER_TYPES = {
+  "T_TRADE_BATCH": frozenset(
+    {
+      ExecutionOwnerType.STRATEGY_RUN,
+      ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    }
+  ),
+  "LIMIT_UP_BOARD": frozenset(
+    {
+      ExecutionOwnerType.STRATEGY_RUN,
+      ExecutionOwnerType.BOARD_ASSISTANT_EXECUTION,
+    }
+  ),
+  "FIRST_BOARD_PROMOTION_V2": frozenset(
+    {
+      ExecutionOwnerType.STRATEGY_RUN,
+      ExecutionOwnerType.BOARD_ASSISTANT_EXECUTION,
+    }
+  ),
+  "ENTRY_PLAN": frozenset(
+    {
+      ExecutionOwnerType.STRATEGY_RUN,
+      ExecutionOwnerType.ENTRY_PLAN,
+    }
+  ),
+}
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -79,6 +107,7 @@ def durable_exit_plan_source_binding(
   template_source_type = str(template.get("source_type") or "").strip().upper()
   template_source_id = str(template.get("source_id") or "").strip()
   template_run_id = str(template.get("run_id") or "").strip()
+  template_metadata = _mapping(template.get("metadata"))
   if not (
     plan_id
     and account_id
@@ -116,11 +145,28 @@ def durable_exit_plan_source_binding(
   ):
     return None
   if source_type in RUNTIME_EXIT_PLAN_SOURCE_TYPES:
-    if (
-      owner.owner_type is not ExecutionOwnerType.STRATEGY_RUN
-      or not template_run_id
-      or owner.owner_id != template_run_id
-      or (witness_run_id and witness_run_id != owner.owner_id)
+    if owner.owner_type not in _RUNTIME_SOURCE_OWNER_TYPES[source_type]:
+      return None
+    if owner.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if (
+        not template_run_id
+        or owner.owner_id != template_run_id
+        or (witness_run_id and witness_run_id != owner.owner_id)
+      ):
+        return None
+    elif (
+      template_run_id
+      or witness_run_id
+      or str(template_metadata.get("source_execution_owner_type") or "")
+      .strip()
+      .upper()
+      != owner.owner_type.value
+      or str(template_metadata.get("source_execution_owner_id") or "").strip()
+      != owner.owner_id
+      or str(template_metadata.get("source_execution_environment") or "")
+      .strip()
+      .upper()
+      != environment.value
     ):
       return None
   elif source_type == MANUAL_PLAN_SOURCE:
@@ -143,6 +189,19 @@ def durable_exit_plan_source_binding(
   else:
     return None
   return owner, environment
+
+
+def is_public_exit_plan_runtime_eligible(record: Any) -> bool:
+  """Return whether one durable PAPER/LIVE plan may be owned by the runtime."""
+
+  binding = durable_exit_plan_source_binding(record)
+  if binding is None:
+    return False
+  _owner, environment = binding
+  return environment in {
+    ExecutionEnvironment.PAPER,
+    ExecutionEnvironment.LIVE,
+  }
 
 
 def durable_exit_plan_owner_kind(record: Any) -> str:

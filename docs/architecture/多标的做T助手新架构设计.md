@@ -1207,6 +1207,19 @@ ENTRY 的下单类型、限价边界、最大存活时间、撤单与有限次 c
 模型或 UI 临时决定追价。任何 replace 都复用原 intent/owner/correlation 链，先证明旧委托的
 权威状态再创建新命令；结果未知时禁止 replace。
 
+这里复用的是仍活动的原 intent，已经完成并释放的 intent 不得重新启用。公共执行器以
+`t_order_attempt=0` 标记首单；替单按单调编号保留前单 client identity，每个 attempt 有独立
+Pending/Correlation/Outbox，沿用同一 owner/intent/batch/trace 和原始 UTC 起点。单个 attempt
+终态不会释放整个 intent；原窗口截止、次数耗尽或截止时点到达后，仍须先收敛全部 attempt
+的权威成交才能完成生命周期。BUY 替单重新进入账户风险增加排序，历史 admission item 保留
+作为审计，当前 intent 投影仅指向正在使用的准入批次。
+尚未生成替单 Pending/Outbox 的 READY 请求若行情过期，必须用新行情完整重跑数量、风险与
+原授权校验；仅刷新同一 attempt 的未投递请求，不能直接重放旧报价。旧 PREPARED 准入绑定
+保留到公共 sequencer 根据新 material fingerprint 原子作废并重新排序，最终提交再次核对
+fingerprint。已生成的 Outbox payload 不得更改。做 T ENTRY 的手动授权来自已消费、签名匹配的
+原做 T 设备挑战与退出保护范围；LIVE_AUTO 重新核验原做 T rollout 权限，不使用建仓计划的
+managed-entry grant。实际委托撤单时点取单笔 30 秒与原 ENTRY 60 秒/EXIT 90 秒窗口的较早值。
+
 ### 10.4 不新增第二套 Reservation 真源
 
 参考设计中的 `Cash & Inventory Reservation` 映射到 QuantX 已有

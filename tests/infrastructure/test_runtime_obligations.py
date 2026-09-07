@@ -40,7 +40,7 @@ async def obligations():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-  "kind", ["order", "report", "intent", "protection", "batch", "reservation"]
+  "kind", ["order", "report", "intent", "reservation"]
 )
 async def test_persisted_obligation_survives_missing_runtime(obligations, kind):
   records = {
@@ -150,6 +150,57 @@ async def test_settled_orders_do_not_block_stop(obligations):
         intent_id="intent-1",
       )
     )
+    await db.commit()
+    assert (
+      await runtime_obligation_blocker(
+        db,
+        ExecutionOwnerRef.strategy_run("run"),
+        ExecutionEnvironment.LIVE,
+      )
+      is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["protection", "batch"])
+async def test_downstream_exit_obligation_does_not_hold_source_runtime_open(
+  obligations,
+  kind,
+):
+  records = {
+    "protection": AutoExitPlanRecord(
+      plan_id="exit",
+      account_id="account",
+      instrument_code="600000.SH",
+      strategy_run_id="run",
+      source_execution_owner_type="STRATEGY_RUN",
+      source_execution_owner_id="run",
+      source_execution_environment="LIVE",
+      environment="LIVE",
+      source_type="T_TRADE_BATCH",
+      source_id="batch",
+      status="ERROR",
+      enabled=False,
+      remaining_volume=100,
+      protected_volume=100,
+      entry_avg_price=10,
+    ),
+    "batch": TTradeBatch(
+      batch_id="batch",
+      strategy_run_id="run",
+      source_execution_owner_type="STRATEGY_RUN",
+      source_execution_owner_id="run",
+      source_execution_environment="LIVE",
+      environment="LIVE",
+      account_id="account",
+      instrument_code="600000.SH",
+      status="ERROR",
+      entry_filled_volume=100,
+      exit_filled_volume=0,
+    ),
+  }
+  async with obligations() as db:
+    db.add(records[kind])
     await db.commit()
     assert (
       await runtime_obligation_blocker(

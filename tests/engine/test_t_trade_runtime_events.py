@@ -4,6 +4,7 @@ import asyncio
 from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from quantx_contracts import PROTOCOL_VERSION
@@ -38,6 +39,7 @@ from quantx_infrastructure.models.strategy_run_state import (
   StrategyRunState,
 )
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.services import auto_exit_plan_service as exit_service_module
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -50,6 +52,41 @@ def _in_memory_strategy_exit_plan_store(monkeypatch: pytest.MonkeyPatch) -> None
   states: dict[tuple[str, str], dict] = {}
   versions: dict[tuple[str, str], int] = {}
   applied_events: set[tuple[str, str]] = set()
+
+  class PublicPlanSession:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def scalar(self, statement):
+      params = statement.compile().params
+      key = (str(params.get("plan_id_1")), str(params.get("business_key_1")))
+      return "applied" if key in applied_events else None
+
+  class PublicPlanRepository:
+    def __init__(self, _db):
+      pass
+
+    async def find_by_id(self, plan_id):
+      for (run_id, stored_id), state in states.items():
+        if stored_id == plan_id:
+          template = state["template"]
+          return SimpleNamespace(
+            plan_id=plan_id, plan_state=deepcopy(state),
+            state_version=versions[(run_id, plan_id)], strategy_run_id=run_id,
+            source_execution_owner_type="STRATEGY_RUN",
+            source_execution_owner_id=run_id,
+            source_execution_environment="LIVE", environment="LIVE",
+            account_id=template["account_id"], instrument_code=template["instrument_code"],
+            source_type=template["source_type"], source_id=template["source_id"],
+            group_id=template.get("group_id"),
+          )
+      return None
+
+  monkeypatch.setattr(exit_service_module, "AsyncSessionLocal", PublicPlanSession)
+  monkeypatch.setattr(exit_service_module, "AutoExitPlanRepository", PublicPlanRepository)
 
   async def strategy_plan_event_applied(
     _service,
@@ -1144,7 +1181,9 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
     assert state["exit_plan_id"] == plan_id
     assert state["entry_filled_volume"] == 100
     assert state["entry_avg_price"] == pytest.approx(10.0)
-    assert runtime.exit_plan_book.plans[plan_id].entry_filled_volume == 100
+    public_book, _ = await AutoExitPlanService().load_strategy_plan_book(strategy_run_id=context.run_id)
+    assert public_book["plans"][plan_id]["entry_filled_volume"] == 100
+    assert plan_id not in runtime.exit_plan_book.plans
 
     async with sessions() as db:
       assert (
@@ -1335,7 +1374,9 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
     fresh_state = fresh_strategy.state["instrument_states"]["600000.SH"]
     assert replayed_trades == 0
     assert fresh_state["entry_filled_volume"] == 100
-    assert fresh_runtime.exit_plan_book.plans[plan_id].entry_filled_volume == 100
+    public_book, _ = await AutoExitPlanService().load_strategy_plan_book(strategy_run_id=context.run_id)
+    assert public_book["plans"][plan_id]["entry_filled_volume"] == 100
+    assert plan_id not in fresh_runtime.exit_plan_book.plans
     assert restored_manager.get_position("600000.SH")["long_volume"] == 100
   finally:
     for active_runtime in (runtime, fresh_runtime):
@@ -1656,7 +1697,9 @@ async def test_durable_callback_failure_rolls_back_and_balances_queue(
     state = strategy.state["instrument_states"]["600000.SH"]
     assert state["entry_filled_volume"] == 100
     assert runtime.state_manager.get_position("600000.SH")["long_volume"] == 100
-    assert runtime.exit_plan_book.plans[plan_id].entry_filled_volume == 100
+    public_book, _ = await AutoExitPlanService().load_strategy_plan_book(strategy_run_id=context.run_id)
+    assert public_book["plans"][plan_id]["entry_filled_volume"] == 100
+    assert plan_id not in runtime.exit_plan_book.plans
     assert runtime.state_manager.has_applied_runtime_event(event.business_key)
     assert runtime.durable_event_barrier_key is None
 
@@ -1937,7 +1980,9 @@ async def test_durable_checkpoint_failure_retries_without_reapplying_callback(
     assert processed_ticks == 1
     assert state["entry_filled_volume"] == 100
     assert state_manager.get_position("600000.SH")["long_volume"] == 100
-    assert runtime.exit_plan_book.plans[plan_id].entry_filled_volume == 100
+    public_book, _ = await AutoExitPlanService().load_strategy_plan_book(strategy_run_id=context.run_id)
+    assert public_book["plans"][plan_id]["entry_filled_volume"] == 100
+    assert plan_id not in runtime.exit_plan_book.plans
   finally:
     runtime.status = ExecutionStatus.STOPPED
     runtime.event_task.cancel()

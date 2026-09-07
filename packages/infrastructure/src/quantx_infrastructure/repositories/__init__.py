@@ -38,6 +38,7 @@ from .managed_plan_repository import (
 )
 from .order_repository import OrderRepository
 from .position_repository import PositionRepository
+from .risk_increase_admission_repository import RiskIncreaseAdmissionRepository
 from .stock_selection_training_repository import (
   StockSelectionTrainingRepository,
   TrainingNotFound,
@@ -48,6 +49,23 @@ from .strategy_decision_trace_repository import StrategyDecisionTraceRepository
 from .strategy_performance_sample_repository import StrategyPerformanceSampleRepository
 from .strategy_repository import StrategyRepository
 from .strategy_run_repository import StrategyRunRepository
+from .t_assistant_config_repository import (
+  TAssistantConfigConflict,
+  TAssistantConfigRepository,
+)
+from .t_assistant_decision_cycle_repository import (
+  TAssistantCycleClaim,
+  TAssistantCycleConflict,
+  TAssistantDecisionCycleRepository,
+)
+from .t_assistant_execution_repository import (
+  TAssistantExecutionConflict,
+  TAssistantExecutionRepository,
+)
+from .t_assistant_symbol_state_repository import (
+  TAssistantSymbolStateConflict,
+  TAssistantSymbolStateRepository,
+)
 from .t_trade_candidate_outcome_repository import (
   CandidateOutcomeConcurrencyError,
   TTradeCandidateOutcomeRepository,
@@ -74,6 +92,7 @@ __all__ = [
   "ClosedPositionCycleRepository",
   "OrderRepository",
   "PositionRepository",
+  "RiskIncreaseAdmissionRepository",
   "StrategyRepository",
   "StrategyRunRepository",
   "StockSelectionTrainingRepository",
@@ -85,6 +104,15 @@ __all__ = [
   "TTradeGlobalConfigRepository",
   "CandidateOutcomeConcurrencyError",
   "TTradeCandidateOutcomeRepository",
+  "TAssistantConfigConflict",
+  "TAssistantConfigRepository",
+  "TAssistantCycleClaim",
+  "TAssistantCycleConflict",
+  "TAssistantDecisionCycleRepository",
+  "TAssistantExecutionConflict",
+  "TAssistantExecutionRepository",
+  "TAssistantSymbolStateConflict",
+  "TAssistantSymbolStateRepository",
   "TTradeInstrumentProfileRepository",
   "TTradeOpportunityEvaluationRepository",
   "WatchlistRepository",

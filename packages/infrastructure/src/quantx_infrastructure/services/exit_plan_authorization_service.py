@@ -21,6 +21,7 @@ from quantx_contracts import ExecutionEnvironment, ExecutionOwnerType
 from quantx_domain.clock import utcnow
 from quantx_domain.trading.exit_plan import ExitPlanTemplate
 from quantx_domain.trading.market_rules import AShareMarketRules
+from quantx_domain.trading.t_order_policy import TExitOrderPolicy
 from sqlalchemy import select
 
 from quantx_infrastructure.config.settings import settings
@@ -368,9 +369,26 @@ def _normalized_t_trade_exit_template(
   if int(template.get("config_version") or 0) <= 0:
     raise ValueError("T_TRADE_EXIT_CONFIG_VERSION_INVALID")
   execution = dict(template.get("execution") or {})
+  order_policy = TExitOrderPolicy()
   if (
-    str(execution.get("price_type") or "").upper() != "MARKET"
+    str(execution.get("price_reference") or "").upper() != "BID"
+    or str(execution.get("price_type") or "").upper() != "FIX_PRICE"
+    or execution.get("protected_limit") is not True
+    or float(execution.get("max_slippage_bps") or 0)
+    != float(order_policy.max_slippage_bps)
     or str(execution.get("execution_mode") or "").upper() != "AUTO"
+    or str(template_metadata.get("exit_policy_version") or "")
+    != order_policy.version
+    or str(template_metadata.get("t_exit_order_policy_version") or "")
+    != order_policy.version
+    or int(template_metadata.get("t_exit_order_ttl_seconds") or 0)
+    != order_policy.order_ttl_seconds
+    or int(template_metadata.get("t_exit_total_ttl_seconds") or 0)
+    != order_policy.total_ttl_seconds
+    or int(template_metadata.get("t_exit_max_replace_count") or -1)
+    != order_policy.max_replace_count
+    or int(template_metadata.get("t_exit_max_slippage_bps") or 0)
+    != order_policy.max_slippage_bps
   ):
     raise ValueError("T_TRADE_EXIT_EXECUTION_POLICY_INVALID")
   if not list(template.get("rules") or []):

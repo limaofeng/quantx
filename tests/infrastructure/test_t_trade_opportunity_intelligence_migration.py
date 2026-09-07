@@ -80,7 +80,14 @@ def test_revision_atomically_adds_only_the_two_authoritative_tables(
     migration_columns = {
       argument.name for argument in args if isinstance(argument, sa.Column)
     }
-    assert migration_columns == set(model.__table__.columns.keys())
+    post_revision_columns = (
+      {"owner_type", "owner_id", "environment"}
+      if table_name == "t_trade_opportunity_evaluations"
+      else set()
+    )
+    assert migration_columns == (
+      set(model.__table__.columns.keys()) - post_revision_columns
+    )
     assert kwargs["comment"] == model.__table__.comment
 
   evaluation_args, _ = created_tables["t_trade_opportunity_evaluations"]

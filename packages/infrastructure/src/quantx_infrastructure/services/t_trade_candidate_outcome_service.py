@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
-from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_domain.trading.t_trade_candidate_outcome import (
   DEFAULT_CANDIDATE_OUTCOME_HORIZONS_SECONDS,
   CandidateExecutionFill,
@@ -96,6 +100,13 @@ class _CandidateOutcomeRepairRejected(ValueError):
     self.code = code
 
 
+@dataclass(frozen=True)
+class _CandidateExecutionScope:
+  execution_ref: ExecutionOwnerRef
+  execution_environment: ExecutionEnvironment | None
+  strategy_run_id: str | None
+
+
 class TTradeCandidateOutcomeService:
   """Persist causal facts through a caller-owned repository/session."""
 
@@ -121,13 +132,20 @@ class TTradeCandidateOutcomeService:
     self,
     *,
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     event: Mapping[str, Any],
   ) -> CandidateOutcomeState | None:
     """Freeze a candidate definition once; repeated materialization is safe."""
 
     if str(event.get("record_kind") or "").upper() != "MATERIAL":
       return None
+    scope = _candidate_scope(
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
+      strategy_run_id=strategy_run_id,
+    )
     snapshot = dict(event.get("signal_snapshot") or {})
     candidate_id = _optional_text(snapshot.get("candidate_id"))
     candidate_fingerprint = _optional_text(snapshot.get("candidate_fingerprint"))
@@ -138,7 +156,7 @@ class TTradeCandidateOutcomeService:
     definition = CandidateOutcomeDefinition(
       candidate_id=candidate_id,
       candidate_fingerprint=candidate_fingerprint,
-      strategy_run_id=_required_text(strategy_run_id, "策略运行标识"),
+      strategy_run_id=scope.strategy_run_id,
       instrument_code=_required_text(
         event.get("instrument_code") or snapshot.get("instrument_code"),
         "证券代码",
@@ -159,15 +177,22 @@ class TTradeCandidateOutcomeService:
       profile_fingerprint=_optional_text(snapshot.get("profile_fingerprint")),
       horizons_seconds=self.horizons_seconds,
       max_observation_gap_ms=self.max_observation_gap_ms,
+      execution_ref=scope.execution_ref,
+      execution_environment=scope.execution_environment,
     )
     state = start_candidate_outcome(definition)
-    row = await self.repository.create_or_get(account_id=account_id, state=state)
+    create_kwargs: dict[str, Any] = {"account_id": account_id, "state": state}
+    if scope.execution_environment is not None:
+      create_kwargs["execution_environment"] = scope.execution_environment
+    row = await self.repository.create_or_get(**create_kwargs)
     return self.repository.state_from_row(row)
 
   async def observe_tick(
     self,
     *,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     instrument_code: str,
     source_time_ms: int,
     tick_ordinal: int,
@@ -177,10 +202,12 @@ class TTradeCandidateOutcomeService:
   ) -> list[CandidateOutcomeState]:
     """Advance all open candidates for one run/instrument from one real Tick."""
 
-    rows = await self.repository.list_observing(
+    scope = _candidate_scope(
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
       strategy_run_id=strategy_run_id,
-      instrument_code=instrument_code,
     )
+    rows = await _list_observing(self.repository, scope, instrument_code)
     advanced: list[CandidateOutcomeState] = []
     observation = CandidatePriceObservation(
       source_time_ms=int(source_time_ms),
@@ -205,9 +232,8 @@ class TTradeCandidateOutcomeService:
         except CandidateOutcomeConcurrencyError:
           if attempt + 1 >= _CANDIDATE_CAS_MAX_ATTEMPTS:
             raise
-          current_row = await self.repository.get(
-            strategy_run_id=strategy_run_id,
-            candidate_id=str(current_row.candidate_id),
+          current_row = await _get_outcome(
+            self.repository, scope, str(current_row.candidate_id)
           )
           if current_row is None:
             raise RuntimeError("候选结果并发更新后无法重新读取")
@@ -220,7 +246,9 @@ class TTradeCandidateOutcomeService:
   async def record_fill(
     self,
     *,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     candidate_id: str,
     fill_id: str,
     role: str,
@@ -231,10 +259,12 @@ class TTradeCandidateOutcomeService:
     entry_complete: bool = False,
     entry_target_volume: int | None = None,
   ) -> CandidateOutcomeState | None:
-    current_row = await self.repository.get(
+    scope = _candidate_scope(
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
       strategy_run_id=strategy_run_id,
-      candidate_id=candidate_id,
     )
+    current_row = await _get_outcome(self.repository, scope, candidate_id)
     if current_row is None:
       return None
     fill = CandidateExecutionFill(
@@ -263,10 +293,7 @@ class TTradeCandidateOutcomeService:
       except CandidateOutcomeConcurrencyError:
         if attempt + 1 >= _CANDIDATE_CAS_MAX_ATTEMPTS:
           raise
-        current_row = await self.repository.get(
-          strategy_run_id=strategy_run_id,
-          candidate_id=candidate_id,
-        )
+        current_row = await _get_outcome(self.repository, scope, candidate_id)
         if current_row is None:
           raise RuntimeError("候选结果并发更新后无法重新读取")
         continue
@@ -358,7 +385,9 @@ class TTradeCandidateOutcomeService:
   async def finalize_run(
     self,
     *,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     finalized_at_ms: int,
   ) -> CandidateOutcomeFinalizationResult:
     """Fail closed in fixed keyset pages without retaining finalized states.
@@ -369,15 +398,20 @@ class TTradeCandidateOutcomeService:
     still open is surfaced for retry instead of being silently skipped.
     """
 
-    normalized_run_id = _required_text(strategy_run_id, "策略运行标识")
+    scope = _candidate_scope(
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
+      strategy_run_id=strategy_run_id,
+    )
     normalized_finalized_at_ms = _non_negative_int(finalized_at_ms, "终态时间")
     after_candidate_id: str | None = None
     finalized_count = 0
     concurrently_finalized_count = 0
     page_count = 0
     while True:
-      rows = await self.repository.list_unfinalized(
-        strategy_run_id=normalized_run_id,
+      rows = await _list_unfinalized(
+        self.repository,
+        scope,
         after_candidate_id=after_candidate_id,
         limit=self.finalize_page_size,
       )
@@ -397,10 +431,7 @@ class TTradeCandidateOutcomeService:
             expected_version=int(row.state_version),
           )
         except CandidateOutcomeConcurrencyError:
-          current = await self.repository.get(
-            strategy_run_id=normalized_run_id,
-            candidate_id=candidate_id,
-          )
+          current = await _get_outcome(self.repository, scope, candidate_id)
           if current is None or _outcome_row_needs_finalization(current):
             raise
           concurrently_finalized_count += 1
@@ -439,7 +470,9 @@ class TTradeCandidateOutcomePersistenceFacade:
     self,
     *,
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     event: Mapping[str, Any],
   ) -> CandidateOutcomeState | None:
     async with self.session_factory() as db:
@@ -448,6 +481,8 @@ class TTradeCandidateOutcomePersistenceFacade:
       ).seed_material_event(
         account_id=account_id,
         strategy_run_id=strategy_run_id,
+        execution_ref=execution_ref,
+        execution_environment=execution_environment,
         event=event,
       )
 
@@ -656,20 +691,127 @@ class TTradeCandidateOutcomePersistenceFacade:
   async def finalize_run(
     self,
     *,
-    strategy_run_id: str,
+    strategy_run_id: str | None,
+    execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None,
+    execution_environment: ExecutionEnvironment | str | None = None,
     finalized_at_ms: int,
   ) -> CandidateOutcomeFinalizationResult:
-    normalized_run_id = _required_text(strategy_run_id, "策略运行标识")
+    scope = _candidate_scope(
+      execution_ref=execution_ref,
+      execution_environment=execution_environment,
+      strategy_run_id=strategy_run_id,
+    )
     async with self.session_factory() as db:
       result = await TTradeCandidateOutcomeService(
         TTradeCandidateOutcomeRepository(db),
         finalize_page_size=self.finalize_page_size,
       ).finalize_run(
-        strategy_run_id=normalized_run_id,
+        strategy_run_id=scope.strategy_run_id,
+        execution_ref=scope.execution_ref,
+        execution_environment=scope.execution_environment,
         finalized_at_ms=finalized_at_ms,
       )
-    self._repair_cursors.pop(normalized_run_id, None)
+    if scope.strategy_run_id is not None:
+      self._repair_cursors.pop(scope.strategy_run_id, None)
     return result
+
+
+def _candidate_scope(
+  *,
+  execution_ref: ExecutionOwnerRef | Mapping[str, object] | None,
+  execution_environment: ExecutionEnvironment | str | None,
+  strategy_run_id: str | None,
+) -> _CandidateExecutionScope:
+  run_id = str(strategy_run_id or "").strip() or None
+  owner = execution_ref
+  if owner is None:
+    if run_id is None:
+      raise ValueError("候选结果缺少 execution_ref")
+    owner = ExecutionOwnerRef.strategy_run(run_id)
+  elif isinstance(owner, Mapping):
+    owner = ExecutionOwnerRef.from_mapping(owner)
+  elif not isinstance(owner, ExecutionOwnerRef):
+    raise ValueError("候选结果 execution_ref 无效")
+  if owner.owner_type not in {
+    ExecutionOwnerType.STRATEGY_RUN,
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+  }:
+    raise ValueError("候选结果 owner_type 无效")
+  if owner.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+    if run_id is None:
+      run_id = owner.owner_id
+    elif run_id != owner.owner_id:
+      raise ValueError("strategy_run_id witness 与 execution_ref 不一致")
+  elif run_id is not None:
+    raise ValueError("T assistant 候选结果不得携带 strategy_run_id witness")
+  environment: ExecutionEnvironment | None = None
+  if execution_environment is not None:
+    try:
+      environment = ExecutionEnvironment(execution_environment)
+    except (TypeError, ValueError) as exc:
+      raise ValueError("候选结果 execution environment 无效") from exc
+  if owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+    if environment is not ExecutionEnvironment.PAPER:
+      raise ValueError("P3 T assistant 候选结果只能写入 PAPER namespace")
+  return _CandidateExecutionScope(owner, environment, run_id)
+
+
+async def _get_outcome(
+  repository: TTradeCandidateOutcomeRepository,
+  scope: _CandidateExecutionScope,
+  candidate_id: str,
+) -> Any:
+  if scope.execution_environment is None:
+    assert scope.strategy_run_id is not None
+    return await repository.get(
+      strategy_run_id=scope.strategy_run_id,
+      candidate_id=candidate_id,
+    )
+  return await repository.get_for_owner(
+    execution_ref=scope.execution_ref,
+    execution_environment=scope.execution_environment,
+    candidate_id=candidate_id,
+  )
+
+
+async def _list_observing(
+  repository: TTradeCandidateOutcomeRepository,
+  scope: _CandidateExecutionScope,
+  instrument_code: str,
+) -> list[Any]:
+  if scope.execution_environment is None:
+    assert scope.strategy_run_id is not None
+    return await repository.list_observing(
+      strategy_run_id=scope.strategy_run_id,
+      instrument_code=instrument_code,
+    )
+  return await repository.list_observing_for_owner(
+    execution_ref=scope.execution_ref,
+    execution_environment=scope.execution_environment,
+    instrument_code=instrument_code,
+  )
+
+
+async def _list_unfinalized(
+  repository: TTradeCandidateOutcomeRepository,
+  scope: _CandidateExecutionScope,
+  *,
+  after_candidate_id: str | None,
+  limit: int,
+) -> list[Any]:
+  if scope.execution_environment is None:
+    assert scope.strategy_run_id is not None
+    return await repository.list_unfinalized(
+      strategy_run_id=scope.strategy_run_id,
+      after_candidate_id=after_candidate_id,
+      limit=limit,
+    )
+  return await repository.list_unfinalized_for_owner(
+    execution_ref=scope.execution_ref,
+    execution_environment=scope.execution_environment,
+    after_candidate_id=after_candidate_id,
+    limit=limit,
+  )
 
 
 def _outcome_row_needs_finalization(row: Any) -> bool:
@@ -728,6 +870,8 @@ async def _repair_applied_trade_event(
     await db.execute(
       select(TTradeOpportunityEvaluation)
       .where(
+        TTradeOpportunityEvaluation.owner_type
+        == ExecutionOwnerType.STRATEGY_RUN.value,
         TTradeOpportunityEvaluation.strategy_run_id == strategy_run_id,
         TTradeOpportunityEvaluation.instrument_code == instrument_code,
         TTradeOpportunityEvaluation.record_kind == T_TRADE_EVALUATION_KIND_MATERIAL,
@@ -796,6 +940,8 @@ async def _repair_applied_trade_event(
     seeded = await service.seed_material_event(
       account_id=str(evaluation_account),
       strategy_run_id=strategy_run_id,
+      execution_ref=ExecutionOwnerRef.strategy_run(strategy_run_id),
+      execution_environment=str(evaluation.environment),
       event={
         "record_kind": T_TRADE_EVALUATION_KIND_MATERIAL,
         "instrument_code": instrument_code,

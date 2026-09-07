@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from quantx_infrastructure.models.agent_runtime import (
   PendingTradeOrder,
   StrategyRuntimeEvent,
-  TTradeBatch,
 )
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.strategy_run_state import StrategyRunState
@@ -55,7 +54,7 @@ async def runtime_obligation_blocker(
     return "执行环境无效，拒绝释放运行时义务"
   canonical_owner_type = execution_ref.owner_type.value
   canonical_owner_id = execution_ref.owner_id
-  checks = (
+  checks = [
     (
       select(PendingTradeOrder.client_order_id).where(
         _owner_columns(
@@ -105,46 +104,24 @@ async def runtime_obligation_blocker(
       ),
       "仍有持久化交易意图等待审批或执行收敛",
     ),
-    (
-      select(AutoExitPlanRecord.plan_id).where(
-        (
-          _owner_columns(
-            AutoExitPlanRecord,
-            owner_type=canonical_owner_type,
-            owner_id=canonical_owner_id,
-            environment=canonical_environment,
-            source=True,
-          )
-          if canonical_owner_type != "EXIT_PLAN"
-          else and_(
-            AutoExitPlanRecord.plan_id == canonical_owner_id,
-            AutoExitPlanRecord.environment == canonical_environment,
-          )
-        ),
-        or_(
-          AutoExitPlanRecord.pending_client_order_id.is_not(None),
-          (
-            (AutoExitPlanRecord.remaining_volume > 0)
-            & AutoExitPlanRecord.status.notin_(["COMPLETED", "CANCELLED"])
+  ]
+  if canonical_owner_type == "EXIT_PLAN":
+    checks.append(
+      (
+        select(AutoExitPlanRecord.plan_id).where(
+          AutoExitPlanRecord.plan_id == canonical_owner_id,
+          AutoExitPlanRecord.environment == canonical_environment,
+          or_(
+            AutoExitPlanRecord.pending_client_order_id.is_not(None),
+            (
+              (AutoExitPlanRecord.remaining_volume > 0)
+              & AutoExitPlanRecord.status.notin_(["COMPLETED", "CANCELLED"])
+            ),
           ),
         ),
-      ),
-      "仍有未解除的退出保护义务",
-    ),
-    (
-      select(TTradeBatch.batch_id).where(
-        _owner_columns(
-          TTradeBatch,
-          owner_type=canonical_owner_type,
-          owner_id=canonical_owner_id,
-          environment=canonical_environment,
-          source=True,
-        ),
-        TTradeBatch.entry_filled_volume > TTradeBatch.exit_filled_volume,
-      ),
-      "仍有未平衡的做 T 批次",
-    ),
-  )
+        "仍有未解除的退出保护义务",
+      )
+    )
   for query, reason in checks:
     if await db.scalar(query.limit(1)) is not None:
       return reason

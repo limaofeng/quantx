@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.clock import utcnow
+from quantx_domain.trading.t_order_policy import TOrderPolicyDecision
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
@@ -71,6 +72,32 @@ async def test_manual_live_authorization_requires_global_gate_and_allowlist(
       "account-1",
       risk_reducing=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_live_admission_preview_validates_without_account_row_lock(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  db = SimpleNamespace(get=AsyncMock(return_value=_ready_control()))
+  service = TradeCommandService(db)
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(
+    command_module.settings,
+    "real_trading_account_allowlist",
+    ["account-1"],
+  )
+
+  await service._preview_live_authorization(
+    "account-1",
+    risk_reducing=False,
+    require_controlled_window=True,
+  )
+
+  db.get.assert_awaited_once_with(
+    AccountExecutionControl,
+    "account-1",
+    populate_existing=True,
+  )
 
   monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
   monkeypatch.setattr(command_module.settings, "real_trading_account_allowlist", [])
@@ -188,17 +215,21 @@ async def test_manual_sell_still_rejects_stale_reconciliation(monkeypatch) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manual_live", [True, False])
-async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
+async def test_direct_manual_live_buy_stages_then_uses_public_dispatcher(
   monkeypatch, manual_live,
 ) -> None:
   events: list[str] = []
 
   async def get(_model, _key, **kwargs):
-    assert kwargs == {
-      "with_for_update": True,
-      "populate_existing": True,
-    }
-    events.append("rollout-lock")
+    if kwargs.get("with_for_update"):
+      assert kwargs == {
+        "with_for_update": True,
+        "populate_existing": True,
+      }
+      events.append("rollout-lock")
+    else:
+      assert kwargs == {"populate_existing": True}
+      events.append("rollout-preview")
     return _ready_control()
 
   class Result:
@@ -220,6 +251,20 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
   service._device_for = AsyncMock(return_value=SimpleNamespace(id="device-1"))
   service._require_live_market_stream_ready = AsyncMock()
   service._require_account_capacity = AsyncMock(return_value={"snapshot_id": "snapshot-1"})
+  staged_id = "00000000-0000-0000-0000-000000000501"
+  queued = command_module.QueuedTradeCommand("client-1", "message-1", "QUEUED")
+
+  async def stage(**_kwargs):
+    events.append("ready-committed")
+    return staged_id
+
+  async def dispatch(**_kwargs):
+    events.append("batch-claimed")
+    await service._require_live_authorization("account-1", risk_reducing=False)
+    return {staged_id: queued}
+
+  service._stage_risk_increase_order_request = AsyncMock(side_effect=stage)
+  service.dispatch_ready_risk_increase_orders = AsyncMock(side_effect=dispatch)
   monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
   monkeypatch.setattr(
     command_module.settings,
@@ -227,7 +272,7 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
     ["account-1"],
   )
 
-  await service.enqueue_order(
+  result = await service.enqueue_order(
     user_id="user-1",
     account_id="account-1",
     instrument_code="600000.SH",
@@ -242,7 +287,107 @@ async def test_manual_live_enqueue_locks_rollout_before_outbox_lookup(
     commit_transaction=False,
   )
 
-  assert events[:2] == ["rollout-lock", "outbox-lookup"]
+  assert result == queued
+  assert events == [
+    "rollout-preview",
+    "outbox-lookup",
+    "ready-committed",
+    "batch-claimed",
+    "rollout-lock",
+  ]
+  service._stage_risk_increase_order_request.assert_awaited_once()
+  service.dispatch_ready_risk_increase_orders.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_public_admission_dispatch_failure_rolls_back_without_direct_enqueue(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class Result:
+    @staticmethod
+    def scalar_one_or_none():
+      return None
+
+  db = SimpleNamespace(
+    get=AsyncMock(return_value=_ready_control()),
+    execute=AsyncMock(return_value=Result()),
+    rollback=AsyncMock(),
+  )
+  service = TradeCommandService(db)
+  service._preview_live_authorization = AsyncMock(return_value=_ready_control())
+  service._stage_risk_increase_order_request = AsyncMock(return_value="intent-1")
+  service.dispatch_ready_risk_increase_orders = AsyncMock(
+    side_effect=RuntimeError("dispatch crashed")
+  )
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(
+    command_module.settings,
+    "real_trading_account_allowlist",
+    ["account-1"],
+  )
+
+  with pytest.raises(RuntimeError, match="dispatch crashed"):
+    await service.enqueue_order(
+      user_id="user-1",
+      account_id="account-1",
+      instrument_code="600000.SH",
+      side="BUY",
+      order_type="FIX_PRICE",
+      limit_price=Decimal("10"),
+      volume=100,
+      idempotency_key="manual-failure",
+      execution_ref=ExecutionOwnerRef.manual_command("manual-failure"),
+      environment=ExecutionEnvironment.LIVE,
+      manual_live=True,
+    )
+
+  db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dispatch_loser_returns_winner_queued_order(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class Result:
+    @staticmethod
+    def scalar_one_or_none():
+      return None
+
+  db = SimpleNamespace(
+    execute=AsyncMock(return_value=Result()),
+    rollback=AsyncMock(),
+  )
+  service = TradeCommandService(db)
+  service._preview_live_authorization = AsyncMock(return_value=_ready_control())
+  service._stage_risk_increase_order_request = AsyncMock(return_value="intent-1")
+  service.dispatch_ready_risk_increase_orders = AsyncMock(
+    side_effect=ValueError("RISK_ADMISSION_LEASE_HELD")
+  )
+  winner = command_module.QueuedTradeCommand("client-1", "message-1", "QUEUED")
+  service._await_queued_risk_increase_order = AsyncMock(return_value=winner)
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(
+    command_module.settings,
+    "real_trading_account_allowlist",
+    ["account-1"],
+  )
+
+  result = await service.enqueue_order(
+    user_id="user-1",
+    account_id="account-1",
+    instrument_code="600000.SH",
+    side="BUY",
+    order_type="FIX_PRICE",
+    limit_price=Decimal("10"),
+    volume=100,
+    idempotency_key="manual-concurrent",
+    execution_ref=ExecutionOwnerRef.manual_command("manual-concurrent"),
+    environment=ExecutionEnvironment.LIVE,
+    manual_live=True,
+  )
+
+  assert result == winner
+  service._await_queued_risk_increase_order.assert_awaited_once_with("intent-1")
 
 
 @pytest.mark.asyncio
@@ -269,6 +414,121 @@ async def test_live_buy_requires_authoritative_ready_market_stream(
 
   authoritative_ready.return_value = True
   await service._require_live_market_stream_ready(SimpleNamespace(id="device-1"))
+
+
+def test_live_t_entry_create_gate_enforces_v1_cutoff_and_protected_limit(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  intent = SimpleNamespace(
+    intent_metadata={
+      "t_entry_order_policy_version": "TEntryOrderPolicy.v1",
+      "t_order_reference_price": "10",
+      "t_order_price_tick": "0.01",
+      "t_order_limit_up": "11",
+    }
+  )
+  monkeypatch.setattr(
+    command_module.time_utils,
+    "now",
+    lambda: datetime(2026, 9, 3, 6, 49, tzinfo=timezone.utc),
+  )
+
+  evidence = TradeCommandService._require_t_order_new_policy(
+    role="ENTRY",
+    order_type="FIX_PRICE",
+    limit_price=Decimal("10.03"),
+    intent=intent,
+    request_metadata={},
+  )
+  assert evidence["protected_limit_price"] == "10.03"
+
+  with pytest.raises(AgentUnavailableError, match="PROTECTED_LIMIT"):
+    TradeCommandService._require_t_order_new_policy(
+      role="ENTRY",
+      order_type="FIX_PRICE",
+      limit_price=Decimal("10.04"),
+      intent=intent,
+      request_metadata={},
+    )
+
+  monkeypatch.setattr(
+    command_module.time_utils,
+    "now",
+    lambda: datetime(2026, 9, 3, 6, 50, tzinfo=timezone.utc),
+  )
+  with pytest.raises(AgentUnavailableError, match="T_ENTRY_CUTOFF_REACHED"):
+    TradeCommandService._require_t_order_new_policy(
+      role="ENTRY",
+      order_type="FIX_PRICE",
+      limit_price=Decimal("10.03"),
+      intent=intent,
+      request_metadata={},
+    )
+
+
+def test_t_order_new_policy_secondary_gate_rejects_market_order() -> None:
+  with pytest.raises(AgentUnavailableError, match="T_ORDER_FIX_PRICE_REQUIRED"):
+    TradeCommandService._require_t_order_new_policy(
+      role="EXIT",
+      order_type="MARKET",
+      limit_price=Decimal("9.97"),
+      intent=None,
+      request_metadata={},
+    )
+
+
+def test_t_entry_and_exit_wire_expiry_are_both_frozen_at_30_seconds() -> None:
+  now = datetime(2026, 9, 3, 2)
+
+  assert TradeCommandService._place_order_expires_at(
+    now,
+    t_trade_role="ENTRY",
+  ) == now + timedelta(seconds=30)
+  assert TradeCommandService._place_order_expires_at(
+    now,
+    t_trade_role="EXIT",
+  ) == now + timedelta(seconds=30)
+  assert TradeCommandService._place_order_expires_at(
+    now,
+    t_trade_role="",
+  ) == now + timedelta(minutes=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("status", "reason"),
+  [
+    ("UNKNOWN", "ORDER_RESULT_UNKNOWN"),
+    ("CANCEL_PENDING", "ORDER_CANCEL_UNCONFIRMED"),
+  ],
+)
+async def test_t_replace_gate_never_replaces_unknown_or_unconfirmed_order(
+  status: str,
+  reason: str,
+) -> None:
+  created = datetime(2026, 9, 3, 10)
+  pending = SimpleNamespace(
+    t_trade_role="ENTRY",
+    status=status,
+    broker_order_id="",
+    created_at=created,
+    volume=100,
+    request_metadata={
+      "t_entry_order_policy_version": "TEntryOrderPolicy.v1",
+      "t_order_replace_count": 0,
+    },
+  )
+  db = SimpleNamespace(get=AsyncMock(return_value=pending))
+
+  result = await TradeCommandService(db).evaluate_t_order_replacement(
+    client_order_id="client-1",
+    now=created + timedelta(seconds=31),
+    reference_price=Decimal("10"),
+    price_tick=Decimal("0.01"),
+  )
+
+  assert result.decision is TOrderPolicyDecision.WAIT_AUTHORITATIVE_TERMINAL
+  assert result.reason_code == reason
 
 
 @pytest.mark.asyncio
@@ -682,6 +942,217 @@ async def test_strategy_order_context_is_preserved_without_manual_bucket() -> No
     assert correlation.t_trade_role == "ENTRY"
     assert batch.status == "ENTRY_QUEUED"
   await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_public_t_exit_reaches_final_policy_and_pending_role(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class Result:
+    @staticmethod
+    def scalar_one_or_none():
+      return None
+
+  plan = SimpleNamespace(
+    plan_id="exit-plan-1",
+    source_type="T_TRADE_BATCH",
+    source_id="batch-1",
+    source_execution_owner_type="STRATEGY_RUN",
+    source_execution_owner_id="run-1",
+    source_execution_environment="LIVE",
+  )
+  batch = SimpleNamespace(
+    batch_id="batch-1",
+    account_id="account-1",
+    instrument_code="600000.SH",
+    strategy_run_id="run-1",
+    environment="LIVE",
+    source_execution_owner_type="STRATEGY_RUN",
+    source_execution_owner_id="run-1",
+    source_execution_environment="LIVE",
+    exit_reason=None,
+    status="ENTRY_FILLED",
+  )
+  intent = SimpleNamespace(
+    id="intent-exit",
+    owner_type="EXIT_PLAN",
+    owner_id="exit-plan-1",
+    status="APPROVED",
+    intent_metadata={
+      "t_trade_role": "exit",
+      "t_batch_id": "batch-1",
+      "t_exit_order_policy_version": "TExitOrderPolicy.v1",
+      "t_order_reference_price": "10",
+      "t_order_price_tick": "0.01",
+      "t_exit_order_ttl_seconds": 30,
+      "t_exit_total_ttl_seconds": 90,
+      "t_exit_max_replace_count": 2,
+      "t_exit_max_slippage_bps": 30,
+      "price_type": "FIX_PRICE",
+      "exit_reason": "HARD_STOP",
+    },
+  )
+  added: list[object] = []
+
+  async def get(model, key, **_kwargs):
+    if model is TTradeBatch and key == "batch-1":
+      return batch
+    if model is command_module.AutoExitPlanRecord and key == "exit-plan-1":
+      return plan
+    return None
+
+  db = SimpleNamespace(
+    get=get,
+    execute=AsyncMock(return_value=Result()),
+    scalar=AsyncMock(return_value=None),
+    add=added.append,
+    flush=AsyncMock(),
+  )
+  service = TradeCommandService(db)
+  service._require_durable_order_intent = AsyncMock(return_value=intent)
+  service._require_account_capacity = AsyncMock(
+    return_value={"snapshot_id": "snapshot-1"}
+  )
+  service._device_for = AsyncMock(
+    return_value=SimpleNamespace(id="device-live", user_id="user-1")
+  )
+  service._require_live_market_stream_ready = AsyncMock()
+  monkeypatch.setattr(
+    command_module.time_utils,
+    "now",
+    lambda: datetime(2026, 9, 3, 10, tzinfo=timezone(timedelta(hours=8))),
+  )
+  fixed_utc = datetime(2026, 9, 3, 2)
+  monkeypatch.setattr(command_module, "utcnow", lambda: fixed_utc)
+
+  await service.enqueue_order(
+    user_id="user-1",
+    account_id="account-1",
+    instrument_code="600000.SH",
+    side="SELL",
+    order_type="FIX_PRICE",
+    limit_price=Decimal("9.97"),
+    volume=100,
+    execution_ref=ExecutionOwnerRef(ExecutionOwnerType.EXIT_PLAN, "exit-plan-1"),
+    environment=ExecutionEnvironment.LIVE,
+    idempotency_key="public-t-exit",
+    intent_id="intent-exit",
+    batch_id="batch-1",
+    bucket="swing",
+    t_trade_role="exit",
+    request_metadata={
+      "t_exit_order_policy_version": "TExitOrderPolicy.v1",
+      "t_order_reference_price": "10",
+      "t_order_price_tick": "0.01",
+      "t_exit_order_ttl_seconds": 30,
+      "t_exit_total_ttl_seconds": 90,
+      "t_exit_max_replace_count": 2,
+      "t_exit_max_slippage_bps": 30,
+      "price_type": "FIX_PRICE",
+      "exit_reason": "HARD_STOP",
+    },
+    commit_transaction=False,
+    _locked_live_control=SimpleNamespace(account_id="account-1"),
+  )
+
+  pending = next(item for item in added if isinstance(item, PendingTradeOrder))
+  correlation = next(item for item in added if isinstance(item, OrderCorrelation))
+  outbox = next(item for item in added if isinstance(item, TradeCommandOutbox))
+  assert pending.owner_type == "EXIT_PLAN"
+  assert pending.batch_id == "batch-1"
+  assert pending.t_trade_role == "EXIT"
+  assert pending.request_metadata["t_exit_order_policy_version"] == (
+    "TExitOrderPolicy.v1"
+  )
+  assert pending.request_metadata["t_exit_order_ttl_seconds"] == 30
+  assert pending.request_metadata["t_exit_total_ttl_seconds"] == 90
+  assert pending.request_metadata["t_exit_max_replace_count"] == 2
+  assert pending.order_type == "FIX_PRICE"
+  assert pending.request_metadata["price_type"] == pending.order_type
+  assert correlation.batch_id == "batch-1"
+  assert correlation.t_trade_role == "EXIT"
+  assert correlation.request_metadata["price_type"] == pending.order_type
+  assert outbox.expires_at == fixed_utc + timedelta(seconds=30)
+  assert datetime.fromisoformat(outbox.payload["expires_at"]) == (
+    fixed_utc + timedelta(seconds=30)
+  ).replace(tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_direct_public_t_exit_rejects_market_order() -> None:
+  class Result:
+    @staticmethod
+    def scalar_one_or_none():
+      return None
+
+  batch = SimpleNamespace(
+    account_id="account-1",
+    instrument_code="600000.SH",
+    strategy_run_id="run-1",
+    environment="LIVE",
+    source_execution_owner_type="STRATEGY_RUN",
+    source_execution_owner_id="run-1",
+    source_execution_environment="LIVE",
+  )
+  plan = SimpleNamespace(
+    source_execution_owner_type="STRATEGY_RUN",
+    source_execution_owner_id="run-1",
+    source_execution_environment="LIVE",
+  )
+  intent = SimpleNamespace(
+    owner_type="EXIT_PLAN",
+    owner_id="exit-plan-1",
+    status="APPROVED",
+    intent_metadata={
+      "t_trade_role": "exit",
+      "t_batch_id": "batch-1",
+      "t_exit_order_policy_version": "TExitOrderPolicy.v1",
+    },
+  )
+
+  async def get(model, key, **_kwargs):
+    if model is TTradeBatch and key == "batch-1":
+      return batch
+    if model is command_module.AutoExitPlanRecord and key == "exit-plan-1":
+      return plan
+    return None
+
+  service = TradeCommandService(
+    SimpleNamespace(
+      get=get,
+      execute=AsyncMock(return_value=Result()),
+      scalar=AsyncMock(return_value=None),
+    )
+  )
+  service._require_durable_order_intent = AsyncMock(return_value=intent)
+  service._require_account_capacity = AsyncMock(return_value={})
+
+  with pytest.raises(AgentUnavailableError) as rejected:
+    await service.enqueue_order(
+      user_id="user-1",
+      account_id="account-1",
+      instrument_code="600000.SH",
+      side="SELL",
+      order_type="MARKET",
+      limit_price=Decimal("9.97"),
+      volume=100,
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.EXIT_PLAN,
+        "exit-plan-1",
+      ),
+      environment=ExecutionEnvironment.LIVE,
+      idempotency_key="public-t-exit-market",
+      intent_id="intent-exit",
+      batch_id="batch-1",
+      bucket="swing",
+      t_trade_role="exit",
+      request_metadata={
+        "t_exit_order_policy_version": "TExitOrderPolicy.v1",
+      },
+      commit_transaction=False,
+      _locked_live_control=SimpleNamespace(account_id="account-1"),
+    )
+  assert "FIX_PRICE" in str(rejected.value)
 
 
 @pytest.mark.asyncio

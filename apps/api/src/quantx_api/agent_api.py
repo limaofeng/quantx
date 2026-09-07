@@ -1549,6 +1549,19 @@ async def _transition_place_order_command(
     normalized_status = "RECONCILE_REQUIRED"
     reason = "OWNER_BINDING_CONFLICT"
   previous_command_status = str(command.delivery_status or "").upper()
+  from quantx_infrastructure.services.t_order_lifecycle_state import (
+    t_order_lifecycle_pending,
+  )
+
+  t_lifecycle_open = t_order_lifecycle_pending(pending)
+  if (
+    getattr(pending, "t_order_original_created_at", None) is not None
+    and not t_lifecycle_open
+    and normalized_status in {"EXPIRED", "REJECTED"}
+    and normalized_status == str(pending.status or "").upper()
+    and reason == str(pending.status_reason or "")
+  ):
+    return False
   role = str(pending.t_trade_role or "").upper() if pending is not None else ""
   batch_fill_volume = 0
   if role == "ENTRY" and batch is not None:
@@ -1615,6 +1628,24 @@ async def _transition_place_order_command(
       and (not pending.intent_id or (intent is not None and intent_zero_execution))
     )
   )
+  if t_lifecycle_open:
+    # Prior attempts may already have real fills in the same intent/batch.
+    # Only this command's pre-execution proof decides this attempt's zero.
+    safe_pre_execution_state = bool(
+      owner_chain_valid
+      and pre_execution_proven
+      and not pending.broker_order_id
+      and not correlation.broker_order_id
+      and (
+        str(pending.status or "").upper() in {"QUEUED", "CANCEL_REQUESTED"}
+        or (
+          str(pending.status or "").upper() in {"EXPIRED", "REJECTED"}
+          and str(pending.status_reason or "") == reason
+          and dict(pending.request_metadata or {}).get("execution_terminal_source")
+          in {LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE, LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE}
+        )
+      )
+    )
   if normalized_status in {"EXPIRED", "REJECTED"} and not safe_pre_execution_state:
     normalized_status = "RECONCILE_REQUIRED"
     reason = f"{reason}:durable_pre_execution_proof_missing"[:256]
@@ -1778,8 +1809,24 @@ async def _transition_place_order_command(
 
   pending.status = normalized_status
   pending.status_reason = reason[:256] or None
+  if t_lifecycle_open and normalized_status in {"EXPIRED", "REJECTED"} and safe_pre_execution_state:
+    pending.request_metadata = {
+      **dict(pending.request_metadata or {}),
+      "execution_terminal_source": (
+        LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE
+        if command.delivered_at is None and reason == "command_expired_before_delivery"
+        else LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE
+      ),
+      "execution_terminal_reason": reason,
+      "execution_terminal_at": now.isoformat(),
+      "command_lifecycle_message_id": str(command.message_id),
+    }
   if intent is not None:
-    intent.status = strategy_status
+    if t_lifecycle_open and normalized_status != "RECONCILE_REQUIRED":
+      if str(intent.status or "") not in {"PENDING", "APPROVED", "EXECUTION_READY", "EXECUTION_PENDING"}:
+        intent.status = "PARTIAL_FILLED" if intent_executed_volume > 0 else "QUEUED"
+    else:
+      intent.status = strategy_status
     intent.notes = reason[:2000] or intent.notes
     if normalized_status == "RECONCILE_REQUIRED" and str(
       intent_metadata.get("execution_terminal_source") or ""
@@ -1801,7 +1848,7 @@ async def _transition_place_order_command(
         }
       }
       intent.intent_metadata = intent_metadata
-    if managed_entry_zero_fill or exit_plan_zero_fill:
+    if (managed_entry_zero_fill or exit_plan_zero_fill) and not t_lifecycle_open:
       if not replayed_exit_plan_zero_fill:
         intent.intent_metadata = {
           **intent_metadata,
@@ -1818,12 +1865,13 @@ async def _transition_place_order_command(
           "command_lifecycle_message_id": str(command.message_id or ""),
           "execution_terminal_at": now.isoformat(),
         }
-  await _project_command_batch_status(
-    db,
-    pending=pending,
-    status=normalized_status,
-    reason=reason,
-  )
+  if not t_lifecycle_open or normalized_status == "RECONCILE_REQUIRED":
+    await _project_command_batch_status(
+      db,
+      pending=pending,
+      status=normalized_status,
+      reason=reason,
+    )
   return await _stage_command_runtime_event(
     db,
     command=command,

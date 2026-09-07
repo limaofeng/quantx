@@ -11,6 +11,12 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
+
 CANDIDATE_OUTCOME_SCHEMA_VERSION = "1"
 DEFAULT_CANDIDATE_OUTCOME_HORIZONS_SECONDS = (60, 300, 900)
 
@@ -42,7 +48,7 @@ class PostFillOutcomeStatus(str, Enum):
 class CandidateOutcomeDefinition:
   candidate_id: str
   candidate_fingerprint: str
-  strategy_run_id: str
+  strategy_run_id: str | None
   instrument_code: str
   source_time_ms: int
   tick_ordinal: int
@@ -54,12 +60,13 @@ class CandidateOutcomeDefinition:
   profile_fingerprint: str | None = None
   horizons_seconds: tuple[int, ...] = DEFAULT_CANDIDATE_OUTCOME_HORIZONS_SECONDS
   max_observation_gap_ms: int = 60_000
+  execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None
+  execution_environment: ExecutionEnvironment | str | None = None
 
   def __post_init__(self) -> None:
     required = {
       "candidate_id": self.candidate_id,
       "candidate_fingerprint": self.candidate_fingerprint,
-      "strategy_run_id": self.strategy_run_id,
       "instrument_code": self.instrument_code,
       "continuity_generation": self.continuity_generation,
       "policy_version": self.policy_version,
@@ -67,6 +74,43 @@ class CandidateOutcomeDefinition:
     }
     if any(not str(value).strip() for value in required.values()):
       raise ValueError("候选结果定义缺少必填身份或版本字段")
+    run_id = str(self.strategy_run_id or "").strip() or None
+    owner = self.execution_ref
+    if owner is None:
+      if run_id is None:
+        raise ValueError("候选结果定义缺少 execution_ref")
+      owner = ExecutionOwnerRef.strategy_run(run_id)
+    elif isinstance(owner, Mapping):
+      owner = ExecutionOwnerRef.from_mapping(owner)
+    elif not isinstance(owner, ExecutionOwnerRef):
+      raise ValueError("候选结果 execution_ref 无效")
+    if owner.owner_type not in {
+      ExecutionOwnerType.STRATEGY_RUN,
+      ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    }:
+      raise ValueError("候选结果 owner_type 无效")
+    if owner.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if run_id is None:
+        run_id = owner.owner_id
+      elif run_id != owner.owner_id:
+        raise ValueError("候选结果 strategy_run_id witness 与 owner 不一致")
+    elif run_id is not None:
+      raise ValueError("T assistant 候选结果不得携带 strategy_run_id witness")
+
+    environment = self.execution_environment
+    if environment is not None:
+      try:
+        environment = ExecutionEnvironment(environment)
+      except (TypeError, ValueError) as exc:
+        raise ValueError("候选结果 execution_environment 无效") from exc
+    if (
+      owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+      and environment is not ExecutionEnvironment.PAPER
+    ):
+      raise ValueError("P3 T assistant 候选结果只能属于 PAPER execution")
+    object.__setattr__(self, "execution_ref", owner)
+    object.__setattr__(self, "execution_environment", environment)
+    object.__setattr__(self, "strategy_run_id", run_id)
     if self.source_time_ms < 0 or self.tick_ordinal < 0:
       raise ValueError("候选结果源时间与序号不得为负数")
     if self.reference_price <= 0:
@@ -216,6 +260,12 @@ class CandidateOutcomeState:
 
   def to_dict(self) -> dict[str, Any]:
     payload = asdict(self)
+    payload["definition"]["execution_ref"] = self.definition.execution_ref.to_dict()
+    payload["definition"]["execution_environment"] = (
+      self.definition.execution_environment.value
+      if self.definition.execution_environment is not None
+      else None
+    )
     payload["status"] = self.status.value
     payload["unavailable_reason"] = (
       self.unavailable_reason.value if self.unavailable_reason else None
@@ -233,6 +283,11 @@ class CandidateOutcomeState:
   @classmethod
   def from_dict(cls, payload: Mapping[str, Any]) -> CandidateOutcomeState:
     definition_payload = dict(payload["definition"])
+    raw_execution_ref = definition_payload.get("execution_ref")
+    if raw_execution_ref is not None:
+      definition_payload["execution_ref"] = ExecutionOwnerRef.from_mapping(
+        raw_execution_ref
+      )
     definition_payload["horizons_seconds"] = tuple(
       int(value) for value in definition_payload["horizons_seconds"]
     )

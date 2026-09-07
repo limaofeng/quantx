@@ -2,8 +2,8 @@
 
 ## 1. 目标
 
-自动卖出是 Engine 的公共交易能力，但 `ExitPlanBook` 必须嵌入唯一执行者的运行
-内部，而不是在运行外另起一条卖出主路径。任何入场功能只负责回答“为什么买、
+自动卖出是 Engine 的公共交易能力。PAPER/LIVE 由独立 `ExitPlanRuntime` 消费
+`auto_exit_plans` 唯一真源；`ExitPlanBook` 只保留为 BACKTEST 内存适配器。任何入场功能只负责回答“为什么买、
 买什么”，成交后由统一的
 `ExitPlan` 回答“何时卖、卖多少、如何遵守 T+1、如何委托”。
 
@@ -15,10 +15,10 @@
   和成交回报收敛。
 - PAPER/LIVE 退出计划统一持久化在 `auto_exit_plans`，策略参数升级不得丢失
   已成交数量、峰值、追踪止盈底线和待成交卖单。
-- 做 T、打板和托管入场产生的计划必须恢复到其原 `StrategyRun`，不得创建第二个
-  退出策略或把计划转交给另一个执行者。
-- 用户独立创建的 `MANUAL_POSITION` 计划可以拥有专用托管卖出运行；它不是入场
-  运行的替身，也绝不能接管做 T 计划。
+- 做 T、打板、买入计划、普通策略和人工计划统一恢复到 `ExitPlanRuntime`；source
+  execution 可以先终态，仍存续的退出义务不得反向阻塞或复活 source runtime。
+- 来源执行身份只用于不可变归因和审计；所有 PAPER/LIVE 卖出执行身份均为
+  `EXIT_PLAN/<plan_id>`，不得按 `strategy_run_id` 再建第二条消费路径。
 
 ## 2. 四层卖出策略
 
@@ -95,11 +95,13 @@ T+1 置换不得是系统隐式默认行为。卖出意图会携带
 确认上限，但不得延长授权有效期。模板变化、超量成交、授权过期或外部导入的
 入场没有原确认信封时，退出计划必须等待单独人工授权。
 
-做 T 保护退出的 `price_type=MARKET` 在 LiveBroker 中映射为
-`MARKET_CONVERT_5_LIMIT`，QMT Agent 再按市场映射为沪/北市场
-`MARKET_SH_CONVERT_5_CANCEL` 或深市 `MARKET_SZ_CONVERT_5_CANCEL`。其语义是
-五档即时成交、剩余撤销；方向固定为 `STOCK_SELL`、委托价传 `0`，不得静默
-退化为普通固定价卖出。
+做 T 保护退出固定使用 `TExitOrderPolicy.v1`：只允许 `FIX_PRICE`，以 BID1 为
+参考，最多向下 30bps，并受价格 tick、跌停价和适用的价格笼子下界约束。单笔
+委托 30 秒、总退出窗口 90 秒，最多 replace 2 次；撤单未确认或订单结果未知时
+只能对账，禁止 replace。不得为做 T 退出保留 MARKET/五档转限的第二种生产语义。
+`ExitPlanTemplate.execution` 和 metadata 必须直接由该版本化 policy 投影，策略参数
+不得覆盖 30bps、30 秒、90 秒或 2 次 replace；计划配置版本另存为
+`exit_plan_config_version/config_version`，不得冒充 `exit_policy_version`。
 
 ### 2.5 冻结成本依据 `ExitCostBasisSnapshot`
 
@@ -126,14 +128,20 @@ T+1 置换不得是系统隐式默认行为。卖出意图会携带
 入场策略输出 BUY TradeIntent + ExitPlanTemplate
   -> OrderSizer / Risk / Broker
   -> 真实 BUY TradeExecutionEvent
-  -> 持久化 auto_exit_plans 并刷新所属运行的 ExitPlanBook 热缓存
+  -> 持久化 auto_exit_plans（source execution 可独立终态）
   -> ACTIVE
-  -> 行情到达，所属 StrategyRun 在 step() 前评估 ExitRuleSpec
+  -> ExitPlanRuntime 消费权威行情并评估 ExitRuleSpec
   -> 生成 SELL TradeIntent
   -> OrderSizer / Risk / Broker
   -> 真实 SELL TradeExecutionEvent
   -> PARTIALLY_EXITED / COMPLETED
 ```
+
+人工导入已成交做 T 买单时，`TTradeBatch`、导入来源账本、策略持久状态补丁和公共
+`auto_exit_plans` 必须在同一数据库事务中提交；只有提交成功后才更新驻留策略镜像。
+任一持久步骤失败必须整体回滚，不能留下仅存在于内存的批次或缺少退出计划的导入记录。
+由该公共计划生成 SELL 时必须携带 `t_trade_role=EXIT` 和原 `t_batch_id`，使最终命令边界
+再次执行冻结的 `TExitOrderPolicy.v1` 并把角色/批次写入 pending 与 correlation。
 
 主要状态：
 
@@ -151,16 +159,24 @@ T+1 置换不得是系统隐式默认行为。卖出意图会携带
 证明、从未投递的本地消息箱过期/取消证明、明确未越过 Broker 边界的本地拒绝证明，
 或 Agent 明确声明尚未执行的拒绝/过期证明后才能释放；已投递但没有明确未执行证明的
 命令只能进入 `RECONCILE_REQUIRED`。后续 accepted ACK、Broker 委托或成交等相反
-证据必须撤销本地证明。同一 intent ID 不得再次使用；若之后仍收到该 intent 的迟到
+证据必须撤销本地证明。已经终结并释放的 intent ID 不得再次使用；若之后仍收到该 intent 的迟到
 成交，必须先累计真实成交，再将计划置为 `ERROR` 并阻断新的 SELL。
 已完成 intent 的更高序号终态委托重放，如果权威累计成交量不大于已经持久化的真实
 成交量，只推进回报水位，不得误判为矛盾；工作态回退、累计成交增长或新成交才触发
 fail-closed。由证明失效或旧 intent 错配形成的安全 `ERROR` 禁止普通启用/恢复，
 只能在显式 Broker 对账确认旧委托完全收敛后解除。
 
-所有 `owner_type=EXIT_PLAN` 的 SELL 在进入 Broker 前必须由 Engine 覆盖为确定性
-幂等键 `strategy-exit:{plan_id}:{intent_id}`。Monitor 恢复同一 intent 时必须返回
-既有持久订单，不得因进程重建或 Broker 内部订单号变化产生第二笔 SELL。
+所有 `owner_type=EXIT_PLAN` 的首笔 SELL 在进入 Broker 前必须由 Engine 覆盖为确定性
+幂等键 `strategy-exit:{plan_id}:{intent_id}`。仍活动的做 T intent 可以在原 90 秒窗口内，
+按 `TExitOrderPolicy.v1` 创建最多两次替单，替单键固定为
+`strategy-exit:{plan_id}:{intent_id}:replace:{n}`（`n=1,2`）。每次替单保留原 owner、
+intent、batch 与 trace；PendingTradeOrder 保存从零开始的 `t_order_attempt`、前一
+`t_order_parent_client_id` 与不可延长的 UTC `t_order_original_created_at`，每个 attempt
+拥有自己的 client/correlation/outbox。数据库保证同 intent/attempt 唯一且前单至多一个后继。
+旧单权威终态、累计成交与已应用成交明细完全对齐之前不得替单；零成交仍需上述独立证明。
+生命周期未完成时，单个 attempt 终态不释放 intent/ExitPlan pending；旧 attempt 的迟到回报
+只能推进该单证据与累计真实成交，不得终结新单。整个原 intent 的全部 attempt 收敛后才能
+最终释放。ExitPlanRuntime 恢复同一 attempt 必须返回既有持久订单，不得因重启生成新 attempt。
 最终入队事务必须再次校验 `auto_exit_plans` 投影与内嵌模板的计划、账户、标的、
 来源和运行身份完全一致，并按本节正向 owner 矩阵核验来源与 run；历史托管命令
 标记不再参与 PAPER/LIVE 所有权判定。
@@ -168,38 +184,37 @@ fail-closed。由证明失效或旧 intent 错配形成的安全 `ERROR` 禁止�
 ## 4. 状态所有权
 
 `StrategyBase` 只拥有信号和入场业务状态。PAPER/LIVE 的
-`auto_exit_plans` 是退出计划唯一持久化真源，所属运行的 `ExitPlanBook` 只是
-串行行情路径中的热缓存；回测使用隔离的内存 `ExitPlanBook`，不写计划表。
+`auto_exit_plans` 是退出计划唯一持久化真源，不再向 source runtime 的
+`ExitPlanBook` 双写；回测使用隔离的内存 `ExitPlanBook`，不写计划表。
 `StrategyRunState.custom_state.auto_exit_plan_book` 不再作为 PAPER/LIVE 的恢复
 来源，也不得与计划表长期双写。
 
-计划执行所有权由来源与运行绑定共同唯一确定：
+计划来源由不可变 source execution 绑定确定，执行所有权统一如下：
 
-- 入场来源
-  `T_TRADE_BATCH / LIMIT_UP_BOARD / FIRST_BOARD_PROMOTION_V2 / ENTRY_PLAN`：`strategy_run_id`
-  必须指向产生 BUY 的原 `StrategyRun`，同一运行的内部 `ExitPlanBook` 在
-  `step()` 前评估并生成 SELL。做 T 不得创建额外退出策略。
-- 人工来源 `MANUAL_POSITION / MANUAL_LIQUIDATION`：`strategy_run_id` 必须为空，
-  统一由全局 `ExitPlanMonitor` 评估。历史托管运行命令标记只是一次性迁移输入，
-  不得隐藏无运行绑定的人工计划。
-- 人工来源仍绑定运行、入场来源缺少运行或未知来源均为 `INVALID_OWNER`，必须在
-  启动迁移或所有权审计中阻断。
+- 入场来源 `T_TRADE_BATCH / LIMIT_UP_BOARD / FIRST_BOARD_PROMOTION_V2 / ENTRY_PLAN`
+  必须保存与模板完全一致的 source owner/environment；旧来源可为 `STRATEGY_RUN`，
+  新来源分别允许明确的 `T_ASSISTANT_EXECUTION / BOARD_ASSISTANT_EXECUTION /
+  ENTRY_PLAN`，但 `EXIT_PLAN` 不得自指为 source。
+- 人工来源 `MANUAL_POSITION / MANUAL_LIQUIDATION` 由 `MANUAL_COMMAND` 见证，
+  `strategy_run_id` 必须为空。历史托管命令标记只是迁移输入，不能决定运行时所有权。
+- 以上合法计划全部由 `ExitPlanRuntime` 执行；行级 owner 与模板 source 三元组缺失、
+  未知、冲突或环境不一致均为 `INVALID_OWNER` 并 fail-closed。
 
-Engine 所有权审计与持续看门狗会发现活动计划的运行缺失、异常、状态陈旧或来源
-错配；全局 Monitor 不负责兜底，也不得接管、复制或执行它。入场原运行异常时应
-阻断新 BUY 并恢复同一个运行；恢复失败
-时保持退出计划可见且 fail-closed，不得另建退出策略。
+Engine 所有权审计与持续看门狗验证公共 runtime、计划投影和 source 绑定；source
+execution 缺失或已终态不是退出失败条件。公共 runtime 不运行、计划绑定冲突或
+回报水位不可判定时阻断新风险增加，已有退出计划保持可见并由同一 runtime 恢复。
 
 PAPER/LIVE 计划的运行态由单调 `state_version` 做 CAS，规则配置由
 `config_version` 管理。规则命中导致 `pending_intent_id` 从空变为非空时，必须在
-同一数据库事务写入同 ID、同计划、同运行、同账户的 SELL `TradeIntent`；缺失、
-错绑、重复运行绑定或版本竞争必须整体回滚。运行热缓存 CAS 失败后必须重新加载
+同一数据库事务写入同 ID、同计划、同账户的 SELL `TradeIntent`；缺失、
+错绑、重复 owner 或版本竞争必须整体回滚。CAS 失败后必须重新加载
 权威计划再重放同一行情事实，不能覆盖另一执行者的更新。
 
 策略可以：
 
 - 在 BUY `TradeIntent.metadata.exit_plan_template` 中附带退出模板。
-- 从 `StrategyInput.exit_plans` 读取只读投影，用于 UI 和自身业务状态展示。
+- BACKTEST 可从 `StrategyInput.exit_plans` 读取内存投影；PAPER/LIVE source 不读取
+  私有计划簿，展示从公共投影查询。
 - 输出 `ExitPlanCommand` 更新规则、暂停、恢复或取消计划。
 
 策略不得：
@@ -209,10 +224,9 @@ PAPER/LIVE 计划的运行态由单调 `state_version` 做 CAS，规则配置由
 - 自行计算真实可卖量或绕过统一风控。
 - 因入场功能停止而静默丢弃仍有剩余数量的退出计划。
 
-承载活跃退出计划的运行必须保持退出监控。Engine 会拒绝普通暂停或停止
-请求；产品层停止入场功能时，应进入 `DRAINING`，停止新 BUY，待计划完成
-后再停止运行。仅 Engine 进程关闭时允许强制释放运行，计划状态已经持久化并
-将在恢复后继续。做 T 服务也会拒绝停止仍有活跃批次的运行。
+source execution 只需收敛自身 BUY approval、pending、outbox 和未知结果即可终态；
+活动 ExitPlan/TTradeBatch 仍进入账户级 obligation watermark 和同票准入占用，但不阻止
+source 停止。ExitPlanRuntime 在 Engine 重启后按计划表和回报事实独立继续。
 
 ## 5. 当前功能映射
 
@@ -231,9 +245,9 @@ PAPER/LIVE 计划的运行态由单调 `state_version` 做 CAS，规则配置由
 - `ALL_REMAINING`。
 - `ALLOW_SAME_INSTRUMENT_SUBSTITUTION`。
 
-做 T 策略不再直接输出自动 SELL。它只创建/更新计划并消费退出投影；同一个
-做 T `StrategyRun` 在调用策略 `step()` 前使用 Engine 公共 `ExitPlanBook` 评估
-退出并生成 SELL。全局 `ExitPlanMonitor` 不参与做 T 计划执行。
+做 T source 不直接输出自动 SELL。真实 BUY fill 注册公共计划后，由
+`ExitPlanRuntime` 评估并生成 `EXIT_PLAN/<plan_id>` SELL；source 停止不影响计划恢复。
+BACKTEST 仍可通过内存 `ExitPlanBook` 重放同一规则语义。
 
 ### 5.2 条件清仓
 
@@ -256,9 +270,8 @@ whole-quote，综合峰值回撤、15/60 秒价格变化、累计成交量速度
 最后一笔合法收盘行情记为陈旧故障，也不得在等待态生成或确认卖出意图。
 下一交易时段开始后，必须先收到新鲜行情并恢复权威流 `READY` 才能继续评估。
 
-手工持仓动态计划和策略入场计划都持久化在 `auto_exit_plans`。用户新建的前者不
-创建 StrategyRun，统一由 `ExitPlanMonitor` 执行；后者绑定原入场运行，并在原运行
-每次 `step()` 前评估。三条入口共享同一个规则、计划
+手工持仓动态计划和策略入场计划都持久化在 `auto_exit_plans`，统一由
+`ExitPlanRuntime` 执行。各入口共享同一个规则、计划
 状态机和成交回报语义。已有未完成卖出委托时
 拒绝创建或修改；触发后使用买一价减保护滑点的限价委托。只有 QMT Agent 的
 真实委托/成交回报才能推进
@@ -297,11 +310,9 @@ execution=BID_PROTECTED_LIMIT
 
 `/liquidation` 的产品名称统一为“卖出管理”，固定承载“退出计划、持仓清仓、
 卖出历史”，不另建任务中心。模拟盘和实盘的非回测计划统一持久化到
-`auto_exit_plans`；回测仍使用内存 `ExitPlanBook`。入场来源计划始终由其
-`strategy_run_id` 对应的原运行执行；原运行在活跃计划完成前进入 `DRAINING`
-而不能普通停止。用户新建的 `MANUAL_POSITION` 由专用人工托管卖出运行执行；
-`ExitPlanMonitor` 只扫描并执行合法的无运行人工来源，不接管任何入场来源或绑定
-未完成的托管计划。
+`auto_exit_plans`；回测仍使用内存 `ExitPlanBook`。所有合法来源计划都由公共
+`ExitPlanRuntime` 执行，source runtime 可在自身 BUY 义务收敛后先停止；不存在人工计划、
+入场来源或托管运行之间的第二消费路径。
 
 人工计划创建、更新与启停接口要求调用方提供不超过 128 字符的业务幂等键。同一
 网络重试必须复用原键；一次新的人工操作必须生成新键。服务端用账户、计划、操作
@@ -326,9 +337,9 @@ execution=BID_PROTECTED_LIMIT
 和成交事实保持不变。系统不得自动缩减任一计划数量，用户必须在处理冲突后按
 最新持仓显式重新对账。
 
-无论计划是否绑定策略运行，退出 SELL 都先写入 `strategy_trade_intents`，使用
-`owner_type=EXIT_PLAN`、`owner_id=plan_id`，同时保留 `strategy_run_id` 用于回报
-路由，再执行 OrderSizer、T+1/可卖量、涨跌停、后置风控和数据库消息箱投递。
+无论 source execution 是否仍运行，退出 SELL 都先写入 `trade_intents`，使用
+`owner_type=EXIT_PLAN`、`owner_id=plan_id` 且 `strategy_run_id=NULL`，再执行
+OrderSizer、T+1/可卖量、涨跌停、后置风控和数据库消息箱投递。
 实盘未预授权 SELL 进入
 `AWAITING_APPROVAL`，必须通过设备绑定的预览—确认挑战后重新经过实时风控；
 拒绝则释放 pending 意图并恢复计划监控。挑战必须精确绑定
@@ -346,12 +357,12 @@ Engine 热缓存或 owner 中；历史上已有持久化终态的 SELL 不得被
 
 - outbox 为 `QUEUED`，且 `attempts=0`、从未写入 `delivered_at/acknowledged_at`、没有
   Broker id 或来源序号时，才允许以 `LOCAL_OUTBOX_CANCEL` 证明本地零成交；outbox 与
-  pending 本地取消，`ExitPlanBook` 释放当前 pending，但保留原 sticky `ERROR`。
+  pending 本地取消，公共计划 CAS 释放当前 pending，但保留原 sticky `ERROR`。
 - PLACE_ORDER 已投递、有 Broker 事实或任一绑定不完整时，不得伪造零成交；原命令转为
   `RECONCILE_REQUIRED` 且永不重投，精确 pending 记为 `CANCEL_REQUESTED`。有 Broker
   id 时生成唯一幂等撤单；没有 id 时等待后续权威委托回报取得身份，首个补齐身份的
   ORDER 回报生成同一撤单，重复回报不得重复生成。
-- 跨计划本地零成交释放必须逐条证明 durable owner、run、plan、intent 和 correlation
+- 跨计划本地零成交释放必须逐条证明 durable owner、source、plan、intent 和 correlation
   绑定；成功后该计划停用、清除旧自动授权并进入 sticky `ERROR`。绑定不完整时不得
   猜测释放，必须保留为显式修复对象。
 - 普通命令领取、ACK 收敛和物理 WebSocket 发送都先锁账户、再按 `message_id` 锁 outbox

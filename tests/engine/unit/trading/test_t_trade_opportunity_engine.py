@@ -318,6 +318,29 @@ def test_pullback_fsm_latches_one_stable_candidate_per_episode():
   assert next_result.evaluation.candidate_fingerprint == candidate.fingerprint
 
 
+def test_candidate_creation_waits_until_execution_readiness_allows_it():
+  state, _ = _reduce_all(_pullback_samples()[:4])
+  blocked = reduce_opportunity(
+    state,
+    _pullback_samples()[4],
+    reference_profile=PROFILE,
+    allow_candidate_creation=False,
+  )
+
+  assert blocked.candidate_created is None
+  assert blocked.state.candidate is None
+  assert blocked.state.candidate_status is CandidateStatus.NONE
+
+  ready = reduce_opportunity(
+    blocked.state,
+    _sample(26, 99.34, 5, amount=1_160_000, volume=11_600),
+    reference_profile=PROFILE,
+    allow_candidate_creation=True,
+  )
+  assert ready.candidate_created is not None
+  assert ready.state.candidate_status is CandidateStatus.LATCHED
+
+
 def test_lower_low_restarts_pullback_stabilization_without_changing_episode():
   state, _ = _reduce_all(_pullback_samples()[:4])
   episode_id = state.pullback.episode_id

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from quantx_contracts import ExecutionOwnerRef
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.trading.t_trade_candidate_outcome import (
   CandidateOutcomeState,
   CandidateOutcomeStatus,
@@ -41,6 +41,11 @@ class _Repository:
   async def get(self, *, strategy_run_id: str, candidate_id: str):
     return self.rows.get((strategy_run_id, candidate_id))
 
+  async def get_for_owner(
+    self, *, execution_ref, execution_environment, candidate_id: str
+  ):
+    return self.rows.get((execution_ref.owner_id, candidate_id))
+
   async def list_observing(
     self,
     *,
@@ -55,12 +60,39 @@ class _Repository:
       and (instrument_code is None or row.instrument_code == instrument_code)
     ]
 
-  async def create_or_get(self, *, account_id: str, state: CandidateOutcomeState):
-    key = (state.definition.strategy_run_id, state.definition.candidate_id)
+  async def list_observing_for_owner(
+    self, *, execution_ref, execution_environment, instrument_code=None
+  ):
+    return [
+      row
+      for row in self.rows.values()
+      if row.owner_type == execution_ref.owner_type.value
+      and row.owner_id == execution_ref.owner_id
+      and row.environment == execution_environment.value
+      and (row.status == "OBSERVING" or row.post_fill_status == "OBSERVING")
+      and (instrument_code is None or row.instrument_code == instrument_code)
+    ]
+
+  async def create_or_get(
+    self,
+    *,
+    account_id: str,
+    state: CandidateOutcomeState,
+    execution_environment=None,
+  ):
+    owner = state.definition.execution_ref
+    key = (owner.owner_id, state.definition.candidate_id)
     row = self.rows.get(key)
     if row is None:
       row = SimpleNamespace(
         account_id=account_id,
+        owner_type=owner.owner_type.value,
+        owner_id=owner.owner_id,
+        environment=(
+          execution_environment.value
+          if execution_environment is not None
+          else "PAPER"
+        ),
         strategy_run_id=key[0],
         candidate_id=key[1],
         instrument_code=state.definition.instrument_code,
@@ -96,8 +128,29 @@ class _Repository:
     self.unfinalized_page_sizes.append(len(rows))
     return rows
 
+  async def list_unfinalized_for_owner(
+    self,
+    *,
+    execution_ref,
+    execution_environment,
+    after_candidate_id,
+    limit,
+  ):
+    return [
+      row
+      for row in sorted(self.rows.values(), key=lambda item: item.candidate_id)
+      if row.owner_type == execution_ref.owner_type.value
+      and row.owner_id == execution_ref.owner_id
+      and row.environment == execution_environment.value
+      and (after_candidate_id is None or row.candidate_id > after_candidate_id)
+      and (
+        row.status == "OBSERVING"
+        or row.post_fill_status in {"WAITING_ENTRY", "OBSERVING"}
+      )
+    ][:limit]
+
   async def save(self, *, state: CandidateOutcomeState, expected_version: int):
-    key = (state.definition.strategy_run_id, state.definition.candidate_id)
+    key = (state.definition.execution_ref.owner_id, state.definition.candidate_id)
     row = self.rows[key]
     assert row.state_version == expected_version
     row.state = deepcopy(state.to_dict())
@@ -120,6 +173,8 @@ class _ConflictOnceRepository(_Repository):
     if self.conflicts_remaining:
       self.conflicts_remaining -= 1
       key = (state.definition.strategy_run_id, state.definition.candidate_id)
+      if state.definition.strategy_run_id is None:
+        key = (state.definition.execution_ref.owner_id, state.definition.candidate_id)
       self.rows[key].state_version += 1
       raise CandidateOutcomeConcurrencyError("concurrent fact won")
     return await super().save(state=state, expected_version=expected_version)
@@ -232,6 +287,42 @@ async def test_seed_is_restart_safe_and_observation_resumes_from_repository() ->
   assert states[0].status is CandidateOutcomeStatus.MATURED
   assert states[0].horizons[0].observed_price == pytest.approx(10.1)
   assert states[0].horizons[1].observed_price == pytest.approx(10.2)
+
+
+@pytest.mark.asyncio
+async def test_paper_t_assistant_seed_and_observe_use_owner_scope_without_run_witness():
+  repository = _Repository()
+  service = TTradeCandidateOutcomeService(
+    repository, horizons_seconds=(1,), max_observation_gap_ms=1_500
+  )
+  owner = ExecutionOwnerRef(
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    "execution-1",
+  )
+
+  seeded = await service.seed_material_event(
+    account_id="account-1",
+    strategy_run_id=None,
+    execution_ref=owner,
+    execution_environment=ExecutionEnvironment.PAPER,
+    event=_event(),
+  )
+  states = await service.observe_tick(
+    strategy_run_id=None,
+    execution_ref=owner,
+    execution_environment=ExecutionEnvironment.PAPER,
+    instrument_code="600000.SH",
+    source_time_ms=1_001_000,
+    tick_ordinal=11,
+    continuity_generation="3",
+    price=10.1,
+  )
+
+  assert seeded is not None
+  assert seeded.definition.strategy_run_id is None
+  assert seeded.definition.execution_ref == owner
+  assert states[0].status is CandidateOutcomeStatus.MATURED
+  assert ("execution-1", "candidate-1") in repository.rows
 
 
 @pytest.mark.asyncio
@@ -554,6 +645,9 @@ def _repair_evaluation(
     id=f"evaluation-{candidate_id}",
     event_key=f"run-1:{instrument_code}:{candidate_id}",
     account_id=account_id,
+    owner_type="STRATEGY_RUN",
+    owner_id="run-1",
+    environment="LIVE",
     strategy_run_id="run-1",
     instrument_code=instrument_code,
     candidate_id=candidate_id,
@@ -759,6 +853,8 @@ async def test_live_primary_path_rejects_cross_scope_intent_before_freezing_entr
   await facade.seed_material_event(
     account_id="account-1",
     strategy_run_id="run-1",
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    execution_environment=ExecutionEnvironment.PAPER,
     event=_event(),
   )
 

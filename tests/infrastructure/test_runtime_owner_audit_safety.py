@@ -3,6 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from quantx_domain.trading.exit_plan import (
+  ExitPlanBook,
+  ExitPlanTemplate,
+  ExitRuleSpec,
+  ExitRuleType,
+)
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
@@ -58,6 +64,28 @@ def _runtime_plan(*, plan_id: str, run_id: str) -> AutoExitPlanRecord:
   account_id = "account-live"
   instrument_code = "600000.SH"
   source_type = "T_TRADE_BATCH"
+  template = ExitPlanTemplate(
+    plan_id=plan_id,
+    account_id=account_id,
+    instrument_code=instrument_code,
+    bucket="swing",
+    source_type=source_type,
+    source_id=plan_id,
+    run_id=run_id,
+    strategy_id="1",
+    rules=[
+      ExitRuleSpec(
+        rule_id="hard-stop",
+        strategy=ExitRuleType.HARD_STOP,
+        parameters={"stop_loss_pct": -2.0},
+      )
+    ],
+  )
+  plan = ExitPlanBook().register_entry_fill(
+    template,
+    volume=100,
+    price=10.0,
+  )
   return AutoExitPlanRecord(
     plan_id=plan_id,
     account_id=account_id,
@@ -79,22 +107,12 @@ def _runtime_plan(*, plan_id: str, run_id: str) -> AutoExitPlanRecord:
     exited_volume=0,
     remaining_volume=100,
     entry_avg_price=10.0,
-    plan_state={
-      "template": {
-        "plan_id": plan_id,
-        "account_id": account_id,
-        "instrument_code": instrument_code,
-        "source_type": source_type,
-        "source_id": plan_id,
-        "run_id": run_id,
-        "metadata": {},
-      }
-    },
+    plan_state=plan.to_dict(),
   )
 
 
 @pytest.mark.asyncio
-async def test_preflight_reports_missing_strategy_run_structurally(
+async def test_preflight_does_not_require_source_strategy_run_to_remain_live(
   owner_audit_database,
 ) -> None:
   run_id = "00000000-0000-0000-0000-000000000101"
@@ -103,23 +121,9 @@ async def test_preflight_reports_missing_strategy_run_structurally(
     await db.commit()
 
   service = AutoExitPlanService(SimpleNamespace(get_run=lambda _run_id: None))
-  with pytest.raises(ActiveRuntimeExitPlanOwnerAuditError) as captured:
-    await service.preflight_active_runtime_owned_plans()
-
-  assert captured.value.to_dict() == {
-    "reasonCode": "ACTIVE_RUNTIME_EXIT_PLAN_OWNER_AUDIT_FAILED",
-    "accountIds": ["account-live"],
-    "failures": [
-      {
-        "planId": "plan-orphan",
-        "strategyRunId": run_id,
-        "accountId": "account-live",
-        "ownerKind": "RUNTIME_BOOK",
-        "reasonCode": "STRATEGY_RUN_MISSING",
-        "message": "退出计划绑定的 StrategyRun 持久化记录不存在",
-        "stage": "preflight",
-      }
-    ],
+  assert await service.preflight_active_runtime_owned_plans() == {
+    "examined": 1,
+    "verified": ["plan-orphan"],
   }
 
 
@@ -129,7 +133,9 @@ async def test_owner_audit_pause_is_durable_and_idempotent(
 ) -> None:
   run_id = "00000000-0000-0000-0000-000000000102"
   async with owner_audit_database() as db:
-    db.add(_runtime_plan(plan_id="plan-unsafe", run_id=run_id))
+    invalid = _runtime_plan(plan_id="plan-unsafe", run_id=run_id)
+    invalid.plan_state["template"]["run_id"] = "different-run"
+    db.add(invalid)
     db.add(
       AccountExecutionControl(
         account_id="account-live",
@@ -189,7 +195,7 @@ async def test_preflight_recovers_after_durable_run_is_repaired(
         name="repaired runtime",
         strategy_id=1,
         parameters={},
-        status=StrategyRunStatus.RUNNING,
+        status=StrategyRunStatus.STOPPED,
         mode=StrategyRunMode.LIVE,
         instruments=["600000.SH"],
       )

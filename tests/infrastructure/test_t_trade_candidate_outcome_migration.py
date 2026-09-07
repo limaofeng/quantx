@@ -116,7 +116,10 @@ def test_revision_matches_model_columns_constraints_and_indexes(monkeypatch) -> 
   migration_columns = {
     argument.name for argument in arguments if isinstance(argument, sa.Column)
   }
-  assert migration_columns == set(TTradeCandidateOutcome.__table__.columns.keys())
+  assert migration_columns == (
+    set(TTradeCandidateOutcome.__table__.columns.keys())
+    - {"owner_type", "owner_id", "environment"}
+  )
   assert kwargs["comment"] == TTradeCandidateOutcome.__table__.comment
   constraints = {
     argument.name

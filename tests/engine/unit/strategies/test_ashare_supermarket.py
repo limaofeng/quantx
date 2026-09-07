@@ -5,7 +5,6 @@ import sys
 import types
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 import pandas as pd
 import pytest
@@ -28,23 +27,12 @@ if "strawberry" not in sys.modules:
 from quantx_domain.strategies.ashare_supermarket import AshareSupermarketStrategy
 from quantx_domain.strategies.base import (
   StrategyCadence,
+  StrategyContext,
   StrategyInput,
   TradeExecutionEvent,
 )
 
 pytestmark = pytest.mark.unit
-
-
-@dataclass
-class DummyContext:
-  run_id: str
-  mode: str
-  instruments: list[str]
-  parameters: dict
-  initial_capital: float = 1_000_000
-  backtest_start_time: Optional[datetime] = None
-  backtest_end_time: Optional[datetime] = None
-  current_time: Optional[datetime] = None
 
 
 @dataclass
@@ -62,11 +50,12 @@ class DummyBar:
 
 
 def make_strategy(params=None):
-  context = DummyContext(
+  context = StrategyContext(
     run_id="test-run",
     mode="backtest",
     instruments=["000001.SZ"],
     parameters=params or {},
+    initial_capital=1_000_000,
   )
   return AshareSupermarketStrategy(context)
 

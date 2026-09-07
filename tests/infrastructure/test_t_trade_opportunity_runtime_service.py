@@ -6,6 +6,7 @@ import pytest
 import quantx_infrastructure.database.connection as database_connection
 import quantx_infrastructure.repositories.trade_intent_repository as intent_repository
 import quantx_infrastructure.services.t_trade_opportunity_runtime_service as opportunity_runtime_service_module
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.strategies.base import (
   TradeIntent,
   TradeIntentDirection,
@@ -77,6 +78,8 @@ async def test_materialize_material_evaluation_uses_stable_snapshot_payload():
   assert kwargs["event_key"] == event["event_key"]
   assert kwargs["instrument_code"] == "600000.SH"
   assert kwargs["event_type"] == "CANDIDATE_LATCHED"
+  assert kwargs["execution_ref"] == ExecutionOwnerRef.strategy_run("run-1")
+  assert kwargs["execution_environment"] is None
   assert kwargs["payload"] == {
     "signal_snapshot": {
       **_snapshot(),
@@ -96,6 +99,49 @@ async def test_materialize_material_evaluation_uses_stable_snapshot_payload():
     },
     "external_blockers": ["T_TRADE_RECONCILIATION_REQUIRED"],
   }
+
+
+@pytest.mark.asyncio
+async def test_materialize_paper_shadow_forwards_owner_without_run_witness():
+  repository = SimpleNamespace(append_material=AsyncMock())
+  service = TTradeOpportunityRuntimeService()
+  owner = ExecutionOwnerRef(
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    "execution-1",
+  )
+  event = {
+    "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+    "event_key": "execution-1:600000.SH:shadow-material",
+    "record_kind": "MATERIAL",
+    "event_type": "CANDIDATE_LATCHED",
+    "instrument_code": "600000.SH",
+    "evaluated_at_ms": 1_724_300_000_000,
+    "signal_snapshot": _snapshot(),
+  }
+
+  await service.materialize_evaluation(
+    event=event,
+    account_id="account-1",
+    strategy_run_id=None,
+    execution_ref=owner,
+    execution_environment=ExecutionEnvironment.PAPER,
+    repository=repository,
+  )
+
+  kwargs = repository.append_material.await_args.kwargs
+  assert kwargs["execution_ref"] == owner
+  assert kwargs["execution_environment"] is ExecutionEnvironment.PAPER
+  assert kwargs["strategy_run_id"] is None
+
+  with pytest.raises(ValueError, match="不得携带 strategy_run_id"):
+    await service.materialize_evaluation(
+      event=event,
+      account_id="account-1",
+      strategy_run_id="execution-1",
+      execution_ref=owner,
+      execution_environment=ExecutionEnvironment.PAPER,
+      repository=repository,
+    )
 
 
 @pytest.mark.asyncio
@@ -422,6 +468,7 @@ async def test_checkpoint_batch_closes_its_own_segments_without_crossing_materia
     events=[before, material, after],
     account_id="account-1",
     strategy_run_id="run-1",
+    execution_environment=ExecutionEnvironment.PAPER,
   )
 
   assert receipt.persisted_event_keys == (
@@ -458,6 +505,7 @@ async def test_checkpoint_batch_rejects_unsupported_kind_without_touching_window
       events=[event],
       account_id="account-1",
       strategy_run_id="run-1",
+      execution_environment=ExecutionEnvironment.PAPER,
     )
 
   assert service._diagnostic_windows == {}
@@ -528,6 +576,7 @@ async def test_checkpoint_batch_mixes_diagnostics_and_material_in_one_commit_and
       events=events,
       account_id="account-1",
       strategy_run_id="run-1",
+      execution_environment=ExecutionEnvironment.PAPER,
     )
 
     assert session_yields == 1
@@ -547,6 +596,7 @@ async def test_checkpoint_batch_mixes_diagnostics_and_material_in_one_commit_and
       events=events,
       account_id="account-1",
       strategy_run_id="run-1",
+      execution_environment=ExecutionEnvironment.PAPER,
     )
 
     assert replay_receipt.persisted_event_keys == receipt.persisted_event_keys
@@ -615,6 +665,7 @@ async def test_checkpoint_batch_failure_has_no_partial_commit_and_retries_preagg
         events=events,
         account_id="account-1",
         strategy_run_id="run-1",
+        execution_environment=ExecutionEnvironment.PAPER,
       )
 
     assert service._diagnostic_windows == {}
@@ -625,6 +676,7 @@ async def test_checkpoint_batch_failure_has_no_partial_commit_and_retries_preagg
       events=events,
       account_id="account-1",
       strategy_run_id="run-1",
+      execution_environment=ExecutionEnvironment.PAPER,
     )
 
     assert receipt.persisted_event_keys == (first["event_key"], second["event_key"])
@@ -636,6 +688,7 @@ async def test_checkpoint_batch_failure_has_no_partial_commit_and_retries_preagg
       events=events,
       account_id="account-1",
       strategy_run_id="run-1",
+      execution_environment=ExecutionEnvironment.PAPER,
     )
 
     assert replay_receipt.records[0].coalesced_count == 18

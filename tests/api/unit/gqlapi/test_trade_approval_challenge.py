@@ -23,6 +23,7 @@ from quantx_domain.trading.exit_plan import (
   ExitRuleType,
   ExitT1Policy,
 )
+from quantx_domain.trading.t_order_policy import TExitOrderPolicy
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
 from quantx_infrastructure.models.trade_confirmation_challenge import (
@@ -139,6 +140,7 @@ class _Database:
 
 
 def _exit_plan_template() -> dict:
+  policy = TExitOrderPolicy()
   return ExitPlanTemplate(
     plan_id=EXIT_PLAN_ID,
     source_type="T_TRADE_BATCH",
@@ -159,9 +161,9 @@ def _exit_plan_template() -> dict:
     t1_policy=ExitT1Policy.ALLOW_SAME_INSTRUMENT_SUBSTITUTION,
     execution=ExitExecutionPolicy(
       price_reference=ExitPriceReference.BID,
-      price_type="MARKET",
-      protected_limit=False,
-      max_slippage_bps=30,
+      price_type="FIX_PRICE",
+      protected_limit=True,
+      max_slippage_bps=policy.max_slippage_bps,
       urgency="PROTECTIVE_EXIT",
       execution_mode="AUTO",
     ),
@@ -171,7 +173,12 @@ def _exit_plan_template() -> dict:
       "strategy_run_id": RUN_ID,
       "instrument_code": INSTRUMENT_CODE,
       "t_batch_id": T_BATCH_ID,
-      "exit_policy_version": 3,
+      "exit_policy_version": policy.version,
+      "t_exit_order_policy_version": policy.version,
+      "t_exit_order_ttl_seconds": policy.order_ttl_seconds,
+      "t_exit_total_ttl_seconds": policy.total_ttl_seconds,
+      "t_exit_max_replace_count": policy.max_replace_count,
+      "t_exit_max_slippage_bps": policy.max_slippage_bps,
     },
     auto_exit_authorized=False,
   ).to_dict()
@@ -514,9 +521,7 @@ async def test_challenge_replay_returns_stable_operation_identity(
   assert authorization.rules == _exit_plan_template()["rules"]
   assert authorization.t1_policy == "ALLOW_SAME_INSTRUMENT_SUBSTITUTION"
   assert authorization.execution_policy == _exit_plan_template()["execution"]
-  assert authorization.execution_semantics == (
-    "MiniQMT STOCK_SELL；沪深五档即时成交剩余撤销；委托价 0"
-  )
+  assert authorization.execution_semantics == "按退出计划的限价与保护价策略执行"
   assert authorization.authorization_expires_at > preview.challenge_expires_at
   assert any("自动卖出" in warning for warning in preview.warnings)
 
@@ -983,6 +988,34 @@ async def test_challenge_fails_closed_when_exit_template_is_missing(
     )
 
   assert database.challenges == []
+  assert database.commits == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_field", ["market_order", "unprotected", "config_as_policy"])
+async def test_challenge_rejects_legacy_t_exit_policy(
+  configured_challenge_service, legacy_field,
+):
+  record, database = configured_challenge_service
+  template = record.intent_metadata["exit_plan_template"]
+  if legacy_field == "market_order":
+    template["execution"]["price_type"] = "MARKET"
+  elif legacy_field == "unprotected":
+    template["execution"]["protected_limit"] = False
+  else:
+    template["metadata"]["exit_policy_version"] = template["config_version"]
+
+  with pytest.raises(ValueError, match="T_TRADE_EXIT_EXECUTION_POLICY_INVALID"):
+    await TradeApprovalChallengeService.issue(
+      principal=_principal(),
+      action=T_TRADE_ENTRY_APPROVAL,
+      account_id=ACCOUNT_ID,
+      **_strategy_execution_binding(RUN_ID),
+      intent_id=INTENT_ID,
+    )
+
+  assert database.challenges == []
+  assert database.commands == []
   assert database.commits == 0
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
+from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
   T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
   TTradeInstrumentProfile,
@@ -21,10 +23,39 @@ SHANGHAI = timezone(timedelta(hours=8))
 async def _create_repositories():
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   async with engine.begin() as connection:
+    await connection.run_sync(TAssistantExecutionRecord.__table__.create)
     await connection.run_sync(TTradeOpportunityEvaluation.__table__.create)
     await connection.run_sync(TTradeInstrumentProfile.__table__.create)
   sessions = async_sessionmaker(engine, expire_on_commit=False)
   return engine, sessions
+
+
+def _paper_execution() -> TAssistantExecutionRecord:
+  at = datetime(2026, 9, 3, 9, 30, tzinfo=SHANGHAI)
+  return TAssistantExecutionRecord(
+    execution_id="execution-1",
+    config_id="config-1",
+    config_version_id="config-version-1",
+    frozen_config_version=1,
+    config_snapshot_hash="a" * 64,
+    account_id="account-1",
+    environment="PAPER",
+    entry_authorization="MANUAL_CONFIRM",
+    rollout_stage="CANARY",
+    status="WARMING",
+    entry_readiness="WARMING",
+    entry_readiness_reasons=["T_REWARM_REQUIRED"],
+    entry_readiness_as_of=at,
+    policy_version="policy-v3",
+    feature_schema_version=1,
+    scorer_mode="RULE_ONLY",
+    model_runtime_binding=None,
+    universe_revision=0,
+    last_assigned_cycle_sequence=0,
+    last_committed_cycle_sequence=0,
+    checkpoint_revision=0,
+    state_version=1,
+  )
 
 
 def _evaluation_arguments(
@@ -39,6 +70,7 @@ def _evaluation_arguments(
     "event_key": event_key,
     "account_id": account_id,
     "strategy_run_id": "run-1",
+    "execution_environment": "PAPER",
     "instrument_code": instrument_code,
     "evaluated_at": at,
     "event_type": "STATE_TRANSITION",
@@ -131,6 +163,62 @@ async def test_material_evaluation_is_append_only_idempotent_and_collision_safe(
 
       assert not hasattr(repository, "update")
       assert not hasattr(repository, "delete")
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_paper_t_assistant_evaluation_uses_owner_namespace_and_stays_legacy_hidden():
+  engine, sessions = await _create_repositories()
+  at = datetime(2026, 9, 3, 10, 0, tzinfo=SHANGHAI)
+  owner = ExecutionOwnerRef(
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    "execution-1",
+  )
+  try:
+    async with sessions() as db:
+      db.add(_paper_execution())
+      await db.commit()
+      repository = TTradeOpportunityEvaluationRepository(db)
+      row = await repository.append_material(
+        event_key="shadow-material-1",
+        account_id="account-1",
+        strategy_run_id=None,
+        execution_ref=owner,
+        execution_environment=ExecutionEnvironment.PAPER,
+        instrument_code="600000.SH",
+        evaluated_at=at,
+        event_type="STATE_TRANSITION",
+        policy_version="policy-v3",
+        schema_version="evaluation-v1",
+        payload={"signal_snapshot": {"candidate_id": "candidate-1"}},
+      )
+
+      assert row.owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
+      assert row.owner_id == "execution-1"
+      assert row.environment == ExecutionEnvironment.PAPER.value
+      assert row.strategy_run_id is None
+      assert await repository.list_evaluations_for_owner(
+        account_id="account-1",
+        execution_ref=owner,
+        execution_environment=ExecutionEnvironment.PAPER,
+      ) == [row]
+      assert await repository.list_evaluations(account_id="account-1") == []
+
+      with pytest.raises(ValueError, match="不得携带 strategy_run_id"):
+        await repository.append_material(
+          event_key="shadow-invalid-witness",
+          account_id="account-1",
+          strategy_run_id="execution-1",
+          execution_ref=owner,
+          execution_environment=ExecutionEnvironment.PAPER,
+          instrument_code="600000.SH",
+          evaluated_at=at,
+          event_type="STATE_TRANSITION",
+          policy_version="policy-v3",
+          schema_version="evaluation-v1",
+          payload={"signal_snapshot": {"candidate_id": "candidate-2"}},
+        )
   finally:
     await engine.dispose()
 

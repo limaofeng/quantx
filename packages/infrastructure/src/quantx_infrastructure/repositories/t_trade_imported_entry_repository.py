@@ -26,8 +26,16 @@ class TTradeImportedEntryRepository(BaseRepository[TTradeImportedEntry]):
     ).order_by(TTradeImportedEntry.created_at.desc()))
     return list(result.scalars().all())
 
-  async def save(self, entry: TTradeImportedEntry) -> TTradeImportedEntry:
+  async def save(
+    self,
+    entry: TTradeImportedEntry,
+    *,
+    commit: bool = True,
+  ) -> TTradeImportedEntry:
     self.db.add(entry)
-    await self.db.commit()
-    await self.db.refresh(entry)
+    if commit:
+      await self.db.commit()
+      await self.db.refresh(entry)
+    else:
+      await self.db.flush()
     return entry

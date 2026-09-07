@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping, Optional, Protocol, Sequence
 
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.trading.t_trade_opportunity_engine import (
   OpportunityReferenceProfile,
 )
@@ -38,7 +39,9 @@ class OpportunityEvaluationMaterializerPort(Protocol):
     *,
     event: Mapping[str, Any],
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: Optional[str],
+    execution_ref: ExecutionOwnerRef,
+    execution_environment: ExecutionEnvironment | None,
   ) -> Any: ...
 
   async def materialize_checkpoint_batch(
@@ -46,7 +49,9 @@ class OpportunityEvaluationMaterializerPort(Protocol):
     *,
     events: Sequence[Mapping[str, Any]],
     account_id: str,
-    strategy_run_id: str,
+    strategy_run_id: Optional[str],
+    execution_ref: ExecutionOwnerRef,
+    execution_environment: ExecutionEnvironment | None,
   ) -> Any: ...
 
 

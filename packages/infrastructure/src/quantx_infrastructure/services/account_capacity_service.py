@@ -1,18 +1,22 @@
-"""Account-wide LIVE capacity, evaluated under the execution-control row lock.
+"""Account-wide LIVE capacity and stable obligation watermark.
 
 Broker free balances already exclude orders present in that exact snapshot.
 Only commands absent from it are additional reservations. A later fill does not
 release that reservation against an older snapshot: the cash has been spent.
+
+The final order transaction uses ``lock_rows=True``.  The admission dispatcher
+uses the read-only preview before it has ranked and durably claimed the READY
+set; it must not enter the account execution-control lock first.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from quantx_contracts import (
   PROTOCOL_VERSION,
@@ -27,12 +31,15 @@ from quantx_infrastructure.models.agent_runtime import (
   AccountExecutionControl,
   AgentReportInbox,
   PendingTradeOrder,
+  TradeCommandOutbox,
   TTradeBatch,
 )
+from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.enums import OrderType
 from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.trade import Trade
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   AutoExitPlanRepository,
 )
@@ -132,6 +139,79 @@ class AccountCapacity:
   available_cash: Decimal
   available_volume: int
   unclaimed_volume: int
+  obligation_watermark: str = ""
+  available_by_bucket: Mapping[str, int] = field(default_factory=dict)
+  unclaimed_by_bucket: Mapping[str, int] = field(default_factory=dict)
+  protected_old_position_floor: int = 0
+  old_inventory_claim_allocation: Mapping[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OldInventoryClaimResult:
+  claimable_volume: int
+  unclaimed_volume: int
+  protected_floor: int
+  allocation: Mapping[str, int]
+  unclaimed_by_bucket: Mapping[str, int]
+
+
+def allocate_old_inventory_claims(
+  *,
+  available_by_bucket: Mapping[str, int],
+  required_claim_qty: int,
+  protected_core_floor: int = 0,
+  allow_core_claim: bool = False,
+) -> OldInventoryClaimResult:
+  """Apply the frozen swing -> core -> never locked_core claim order."""
+
+  available = {
+    name: max(0, int(available_by_bucket.get(name, 0) or 0))
+    for name in ("locked_core", "core", "swing")
+  }
+  protected_core = max(0, int(protected_core_floor or 0))
+  core_claimable = (
+    max(0, available["core"] - protected_core) if allow_core_claim else 0
+  )
+  claimable = available["swing"] + core_claimable
+  remaining_claim = max(0, int(required_claim_qty or 0))
+  swing_claim = min(remaining_claim, available["swing"])
+  remaining_claim -= swing_claim
+  core_claim = min(remaining_claim, core_claimable)
+  remaining_claim -= core_claim
+  if remaining_claim > 0:
+    raise ValueError(
+      "T_TRADE_BUCKET_CAPACITY_EXCEEDED:旧仓认领将侵占保护底仓或 locked_core"
+    )
+  return OldInventoryClaimResult(
+    claimable_volume=claimable,
+    unclaimed_volume=max(0, claimable - int(required_claim_qty or 0)),
+    protected_floor=available["locked_core"] + min(
+      protected_core, available["core"]
+    ),
+    allocation={"swing": swing_claim, "core": core_claim, "locked_core": 0},
+    unclaimed_by_bucket={
+      "swing": max(0, available["swing"] - swing_claim),
+      "core": max(0, core_claimable - core_claim),
+      "locked_core": 0,
+    },
+  )
+
+
+def _bucket_available_volume(value: Any) -> int:
+  if isinstance(value, Mapping):
+    return max(0, int(value.get("available_volume", 0) or 0))
+  return max(0, int(value or 0))
+
+
+def _obligation_watermark(payload: Mapping[str, Any]) -> str:
+  return hashlib.sha256(
+    json.dumps(
+      payload,
+      sort_keys=True,
+      separators=(",", ":"),
+      default=str,
+    ).encode()
+  ).hexdigest()
 
 
 class AccountCapacityService:
@@ -145,16 +225,32 @@ class AccountCapacityService:
     instrument_code: str,
     own_plan_id: str = "",
     own_batch_id: str = "",
+    bucket_inventory: Mapping[str, Any] | None = None,
+    protected_core_floor: int = 0,
+    allow_core_claim: bool = False,
+    lock_rows: bool = True,
   ) -> AccountCapacity:
-    payload = await load_authoritative_account_snapshot(self.db, control)
     account_id = str(control.account_id)
-    await self.db.scalar(
-      select(Position)
-      .where(
+    locked_control = await self.db.get(
+      AccountExecutionControl,
+      account_id,
+      with_for_update=lock_rows,
+    )
+    if locked_control is None:
+      raise ValueError("ACCOUNT_CAPACITY_CONTROL_MISSING:账户执行控制不存在")
+    if (
+      str(locked_control.last_snapshot_id or "") != str(control.last_snapshot_id or "")
+      or str(locked_control.last_snapshot_hash or "").lower()
+      != str(control.last_snapshot_hash or "").lower()
+    ):
+      raise ValueError("ACCOUNT_CAPACITY_SNAPSHOT_CHANGED:账户快照水位已变化")
+    payload = await load_authoritative_account_snapshot(self.db, locked_control)
+    position_stmt = select(Position).where(
         Position.account_id == account_id,
         Position.stock_code == instrument_code,
       )
-      .with_for_update()
+    await self.db.scalar(
+      position_stmt.with_for_update() if lock_rows else position_stmt
     )
     account = next(
       item for item in payload["accounts"] if item["account_id"] == account_id
@@ -179,21 +275,24 @@ class AccountCapacityService:
       for item in payload.get("orders", [])
       if item.get("account_id") == account_id
     } - {""}
-    snapshot_at = to_naive_utc(control.last_snapshot_at)
+    snapshot_at = to_naive_utc(locked_control.last_snapshot_at)
     trading_day_start = (snapshot_at + timedelta(hours=8)).replace(
       hour=0, minute=0, second=0, microsecond=0
     ) - timedelta(hours=8)
+    pending_stmt = (
+      select(PendingTradeOrder).where(
+        PendingTradeOrder.account_id == account_id,
+        PendingTradeOrder.environment == ExecutionEnvironment.LIVE.value,
+        or_(
+          PendingTradeOrder.status.notin_(_TERMINAL),
+          PendingTradeOrder.updated_at >= trading_day_start,
+        ),
+      ).order_by(PendingTradeOrder.client_order_id)
+    )
     pending = list(
       (
         await self.db.scalars(
-          select(PendingTradeOrder).where(
-            PendingTradeOrder.account_id == account_id,
-            PendingTradeOrder.environment == ExecutionEnvironment.LIVE.value,
-            or_(
-              PendingTradeOrder.status.notin_(_TERMINAL),
-              PendingTradeOrder.updated_at >= trading_day_start,
-            ),
-          )
+          pending_stmt.with_for_update() if lock_rows else pending_stmt
         )
       ).all()
     )
@@ -245,13 +344,14 @@ class AccountCapacityService:
 
     # Broker-originated orders may arrive outside QuantX. Unobserved ones must
     # also consume capacity; correlated orders above are counted only once.
+    external_stmt = select(Order).where(
+      Order.account_id == account_id,
+      Order.time >= trading_day_start,
+    ).order_by(Order.id)
     external = list(
       (
         await self.db.scalars(
-          select(Order).where(
-            Order.account_id == account_id,
-            Order.time >= trading_day_start,
-          )
+          external_stmt.with_for_update() if lock_rows else external_stmt
         )
       ).all()
     )
@@ -263,17 +363,22 @@ class AccountCapacityService:
       elif item.stock_code == instrument_code:
         available_volume -= int(item.volume)
 
-    batches = list(
+    batch_stmt = select(TTradeBatch).where(
+      TTradeBatch.account_id == account_id,
+      TTradeBatch.environment == ExecutionEnvironment.LIVE.value,
+    ).order_by(TTradeBatch.batch_id)
+    account_batches = list(
       (
         await self.db.scalars(
-          select(TTradeBatch).where(
-            TTradeBatch.account_id == account_id,
-            TTradeBatch.instrument_code == instrument_code,
-            TTradeBatch.environment == ExecutionEnvironment.LIVE.value,
-          )
+          batch_stmt.with_for_update() if lock_rows else batch_stmt
         )
       ).all()
     )
+    batches = [
+      item
+      for item in account_batches
+      if str(item.instrument_code or "").upper() == instrument_code.upper()
+    ]
     claims = 0
     for batch in batches:
       if batch.batch_id == own_batch_id:
@@ -313,6 +418,30 @@ class AccountCapacityService:
     plans = await AutoExitPlanRepository(self.db).find_reserving(
       account_id=account_id,
       instrument_code=instrument_code,
+      for_update=lock_rows,
+      execution_mode="live",
+    )
+    plan_stmt = (
+      select(AutoExitPlanRecord)
+      .where(
+        AutoExitPlanRecord.account_id == account_id,
+        AutoExitPlanRecord.environment == ExecutionEnvironment.LIVE.value,
+        AutoExitPlanRecord.status.in_(
+          ("PENDING_ENTRY", "ACTIVE", "EXIT_PENDING", "PARTIALLY_EXITED", "PAUSED", "ERROR")
+        ),
+      )
+      .order_by(
+        AutoExitPlanRecord.instrument_code,
+        AutoExitPlanRecord.created_at,
+        AutoExitPlanRecord.plan_id,
+      )
+    )
+    account_plans = list(
+      (
+        await self.db.scalars(
+          plan_stmt.with_for_update() if lock_rows else plan_stmt
+        )
+      ).all()
     )
     batch_ids = {batch.batch_id for batch in batches}
     for plan in plans:
@@ -328,9 +457,153 @@ class AccountCapacityService:
         and str(item.side).upper() == "SELL"
       )
       claims += max(0, int(plan.remaining_volume or 0) - working_exit)
+    outbox_stmt = (
+      select(TradeCommandOutbox)
+      .where(
+        TradeCommandOutbox.account_id == account_id,
+        TradeCommandOutbox.environment == ExecutionEnvironment.LIVE.value,
+        TradeCommandOutbox.delivery_status.notin_(
+          ("ACKNOWLEDGED", "FAILED", "CANCELLED", "EXPIRED")
+        ),
+      )
+      .order_by(TradeCommandOutbox.message_id)
+    )
+    outbox = list(
+      (
+        await self.db.scalars(
+          outbox_stmt.with_for_update() if lock_rows else outbox_stmt
+        )
+      ).all()
+    )
+    ready_stmt = (
+      select(TradeIntentRecord)
+      .where(
+        TradeIntentRecord.account_id == account_id,
+        TradeIntentRecord.environment == ExecutionEnvironment.LIVE.value,
+        TradeIntentRecord.status.in_(
+          ("ALLOCATION_PENDING", "AWAITING_APPROVAL", "EXECUTION_READY")
+        ),
+      )
+      .order_by(TradeIntentRecord.id)
+    )
+    ready_intents = list(
+      (
+        await self.db.scalars(
+          ready_stmt.with_for_update() if lock_rows else ready_stmt
+        )
+      ).all()
+    )
+    watermark_payload = {
+      "version": "account-obligation-watermark.v1",
+      "account_snapshot_id": str(locked_control.last_snapshot_id or ""),
+      "account_snapshot_hash": str(locked_control.last_snapshot_hash or "").lower(),
+      "pending": [
+        {
+          "client_order_id": str(item.client_order_id),
+          "owner_type": str(item.owner_type),
+          "owner_id": str(item.owner_id),
+          "side": str(item.side).upper(),
+          "instrument_code": str(item.instrument_code).upper(),
+          "volume": int(item.volume or 0),
+          "status": str(item.status).upper(),
+          "broker_order_id": str(item.broker_order_id or ""),
+          "last_source_sequence": int(item.last_source_sequence or 0),
+        }
+        for item in pending
+      ],
+      "outbox": [
+        {
+          "message_id": str(item.message_id),
+          "client_order_id": str(item.client_order_id),
+          "owner_type": str(item.owner_type),
+          "owner_id": str(item.owner_id),
+          "delivery_status": str(item.delivery_status).upper(),
+          "attempts": int(item.attempts or 0),
+        }
+        for item in outbox
+      ],
+      "external_orders": [
+        {
+          "order_id": str(item.id),
+          "side": str(getattr(item.type, "value", item.type)),
+          "instrument_code": str(item.stock_code or "").upper(),
+          "price": str(item.price or 0),
+          "volume": int(item.volume or 0),
+        }
+        for item in external
+        if str(item.id) not in observed_orders | broker_ids
+      ],
+      "batches": [
+        {
+          "batch_id": str(item.batch_id),
+          "status": str(item.status).upper(),
+          "entry_filled": int(item.entry_filled_volume or 0),
+          "exit_filled": int(item.exit_filled_volume or 0),
+          "version": int(item.version or 0),
+        }
+        for item in account_batches
+      ],
+      "exit_plans": [
+        {
+          "plan_id": str(item.plan_id),
+          "status": str(item.status).upper(),
+          "remaining_volume": int(item.remaining_volume or 0),
+          "state_version": int(item.state_version or 0),
+        }
+        for item in account_plans
+      ],
+      "ready_intents": [
+        {
+          "intent_id": str(item.id),
+          "owner_type": str(item.owner_type),
+          "owner_id": str(item.owner_id),
+          "status": str(item.status).upper(),
+        }
+        for item in ready_intents
+      ],
+    }
+    available_by_bucket: dict[str, int] = {}
+    unclaimed_by_bucket: dict[str, int] = {}
+    protected_floor = 0
+    claim_allocation: Mapping[str, int] = {}
+    unclaimed_volume = max(0, available_volume - claims)
+    if bucket_inventory is not None:
+      available_by_bucket = {
+        name: _bucket_available_volume(bucket_inventory.get(name))
+        for name in ("locked_core", "core", "swing")
+      }
+      if sum(available_by_bucket.values()) > available_volume:
+        raise ValueError(
+          "ACCOUNT_CAPACITY_BUCKET_PROJECTION_INVALID:桶级可用量超过权威可卖量"
+        )
+      bucket_claim = allocate_old_inventory_claims(
+        available_by_bucket=available_by_bucket,
+        required_claim_qty=claims,
+        protected_core_floor=protected_core_floor,
+        allow_core_claim=allow_core_claim,
+      )
+      unclaimed_volume = min(unclaimed_volume, bucket_claim.unclaimed_volume)
+      unclaimed_by_bucket = dict(bucket_claim.unclaimed_by_bucket)
+      protected_floor = bucket_claim.protected_floor
+      claim_allocation = dict(bucket_claim.allocation)
     return AccountCapacity(
-      snapshot_id=str(control.last_snapshot_id),
+      snapshot_id=str(locked_control.last_snapshot_id),
       available_cash=max(Decimal(0), available_cash),
       available_volume=max(0, available_volume),
-      unclaimed_volume=max(0, available_volume - claims),
+      unclaimed_volume=unclaimed_volume,
+      obligation_watermark=_obligation_watermark(watermark_payload),
+      available_by_bucket=available_by_bucket,
+      unclaimed_by_bucket=unclaimed_by_bucket,
+      protected_old_position_floor=protected_floor,
+      old_inventory_claim_allocation=claim_allocation,
     )
+
+
+__all__ = [
+  "AccountCapacity",
+  "AccountCapacityService",
+  "OldInventoryClaimResult",
+  "allocate_old_inventory_claims",
+  "buy_cash_required",
+  "load_authoritative_account_snapshot",
+]

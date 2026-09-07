@@ -35,6 +35,9 @@ from .t_trade_v3 import (
   SignalPolicyChangePlanner,
   SignalPolicyChangeRequest,
   SignalPolicyConfigSnapshot,
+  TAssistantCyclePolicy,
+  TAssistantExecutionLifecycle,
+  decision_key_for_snapshot,
   normalize_signal_policy,
 )
 from .trade_commands import (
@@ -78,5 +81,8 @@ __all__ = [
   "SignalPolicyChangePlanner",
   "SignalPolicyChangeRequest",
   "SignalPolicyConfigSnapshot",
+  "TAssistantCyclePolicy",
+  "TAssistantExecutionLifecycle",
   "normalize_signal_policy",
+  "decision_key_for_snapshot",
 ]

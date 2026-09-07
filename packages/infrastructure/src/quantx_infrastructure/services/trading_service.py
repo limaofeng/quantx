@@ -170,9 +170,8 @@ class TradingService:
           else None
         ),
         policy_version=int(
-          context.get("exit_policy_version")
+          context.get("config_version")
           or context.get("entry_config_version")
-          or context.get("config_version")
           or 0
         ),
         request_metadata=request_metadata,

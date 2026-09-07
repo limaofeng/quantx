@@ -44,7 +44,7 @@ from quantx_domain.brokers.base import (
   TradeRecord,
 )
 from quantx_domain.clock import to_naive_utc, utcnow
-from quantx_domain.trading.exit_plan import ExitPlan
+from quantx_domain.trading.exit_plan import ExitPlan, ExitPlanBook
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.redis_pubsub import (
   AGENT_REPORT_WAKE_CHANNEL,
@@ -105,6 +105,9 @@ from quantx_infrastructure.services.order_service import OrderService
 from quantx_infrastructure.services.position_service import PositionService
 from quantx_infrastructure.services.runtime_subscription_bridge import (
   TRADING_EVENT_CHANNEL,
+)
+from quantx_infrastructure.services.t_order_lifecycle_state import (
+  t_order_lifecycle_pending,
 )
 from quantx_infrastructure.services.trade_command_service import (
   AgentUnavailableError,
@@ -3016,6 +3019,13 @@ async def _terminal_order_fill_projection(
 ) -> Optional[dict[str, Any]]:
   """Return the terminal order target and execution-report progress for one intent."""
   pending = await db.get(PendingTradeOrder, correlation.client_order_id)
+  if current_order and current_order.get("t_order_lifecycle_finalized"):
+    return {
+      "status": _normalized_order_status(current_order.get("effective_order_status")),
+      "expected": int(current_order.get("traded_volume") or 0),
+      "received": max(0, int(intent.executed_volume or 0)),
+      "role": str(correlation.t_trade_role or "").upper(),
+    }
   terminal_reports: list[tuple[dict[str, Any], str]] = []
   if current_order is None:
     candidates = (
@@ -3034,6 +3044,8 @@ async def _terminal_order_fill_projection(
     ).scalars()
     for candidate in candidates:
       candidate_report = dict(dict(candidate.payload or {}).get("report") or {})
+      if candidate_report.get("t_order_lifecycle_finalized"):
+        continue
       candidate_status = _normalized_order_status(
         candidate_report.get("effective_order_status")
         or candidate_report.get("status")
@@ -3058,6 +3070,18 @@ async def _terminal_order_fill_projection(
   if not terminal_reports:
     return None
   received = max(0, int(intent.executed_volume or 0))
+  if getattr(pending, "t_order_original_created_at", None) is not None:
+    executions = (await db.execute(
+      select(StrategyRuntimeEvent).where(
+        StrategyRuntimeEvent.client_order_id == correlation.client_order_id,
+        StrategyRuntimeEvent.event_type == "TRADE",
+      )
+    )).scalars()
+    received = sum(
+      max(0, int(dict(dict(event.payload or {}).get("report") or {}).get("traded_volume")
+                 or dict(dict(event.payload or {}).get("report") or {}).get("volume") or 0))
+      for event in executions
+    )
   role = str(correlation.t_trade_role or "").strip().upper()
   selected: Optional[dict[str, Any]] = None
   for report, status in terminal_reports:
@@ -3954,6 +3978,15 @@ async def _project_trade_intent_event(
   intent = await db.get(TradeIntentRecord, correlation.intent_id, with_for_update=True)
   if intent is None:
     return None
+  lifecycle_pending = await db.get(PendingTradeOrder, correlation.client_order_id)
+  lifecycle_open = t_order_lifecycle_pending(lifecycle_pending)
+  previous_intent_status = str(intent.status or "")
+  lifecycle_finished = bool(
+    getattr(lifecycle_pending, "t_order_original_created_at", None) is not None
+    and not lifecycle_open
+  )
+  if lifecycle_finished and event_type == "ORDER":
+    return {"lifecycle_finalized_replay": True}
   intent_metadata = dict(intent.intent_metadata or {})
   if str(intent_metadata.get("execution_terminal_source") or "").upper() in {
     LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE,
@@ -4017,6 +4050,17 @@ async def _project_trade_intent_event(
       intent.notes = (
         str(item.get("effective_status_reason") or item.get("status_msg") or "") or None
       )
+    if lifecycle_open:
+      # Broker ORDER terminal is per attempt. Only the lifecycle coordinator
+      # can close the original intent after every attempt's fills converge.
+      if not (projection and int(projection["expected"]) > int(projection["received"])):
+        intent.status = (
+          previous_intent_status
+          if previous_intent_status in {"PENDING", "APPROVED", "EXECUTION_READY", "EXECUTION_PENDING"}
+          else "PARTIAL_FILLED" if int(intent.executed_volume or 0) else "QUEUED"
+        )
+      if projection is not None:
+        projection["lifecycle_open"] = True
     return projection
 
   fill_volume = max(0, int(item.get("traded_volume") or item.get("volume") or 0))
@@ -4033,11 +4077,17 @@ async def _project_trade_intent_event(
   intent.executed_time = to_naive_utc(
     _parse_report_time(item.get("traded_time") or item.get("trade_time"))
   )
+  if lifecycle_finished:
+    intent.status = "RECONCILE_REQUIRED"
+    intent.notes = "T_ORDER_EXECUTION_AFTER_LIFECYCLE_FINALIZED"
+    return None
   pending = await db.get(PendingTradeOrder, correlation.client_order_id)
   requested_volume = max(
     0,
     int((pending.volume if pending is not None else None) or intent.target_volume or 0),
   )
+  if getattr(pending, "t_order_original_created_at", None) is not None:
+    requested_volume = max(0, int(intent.target_volume or requested_volume))
   invalidation = item.get("zero_fill_proof_invalidation")
   if isinstance(invalidation, Mapping) and str(
     invalidation.get("error_code") or ""
@@ -4063,7 +4113,200 @@ async def _project_trade_intent_event(
       if requested_volume > 0 and total_volume >= requested_volume
       else "PARTIAL_FILLED"
     )
+  if lifecycle_open and not (
+    projection and int(projection["expected"]) > int(projection["received"])
+  ):
+    intent.status = (
+      previous_intent_status
+      if previous_intent_status in {"PENDING", "APPROVED", "EXECUTION_READY", "EXECUTION_PENDING"}
+      else "PARTIAL_FILLED" if total_volume else "QUEUED"
+    )
   return projection
+
+
+async def finalize_t_order_lifecycle(db, pending: PendingTradeOrder) -> bool:
+  """Close one original T intent only after all attempts have durable proof.
+
+  The caller holds the account coordinator and commits this transaction. A
+  StrategyRun receives one durable aggregate terminal notification; broker
+  attempt reports themselves remain immutable, separate evidence.
+  """
+  if not t_order_lifecycle_pending(pending):
+    return False
+  intent = await db.get(TradeIntentRecord, pending.intent_id, with_for_update=True)
+  if intent is None:
+    return False
+  if str(intent.status or "") in {"PENDING", "APPROVED", "EXECUTION_READY"}:
+    return False
+  attempts = list((await db.scalars(
+    select(PendingTradeOrder).where(
+      PendingTradeOrder.intent_id == pending.intent_id,
+      PendingTradeOrder.account_id == pending.account_id,
+    ).order_by(PendingTradeOrder.t_order_attempt).with_for_update()
+  )).all())
+  if not attempts or attempts[-1].client_order_id != pending.client_order_id:
+    return False
+  total = 0
+  last_correlation = None
+  seen_broker_ids: set[str] = set()
+  for index, attempt in enumerate(attempts):
+    if (
+      int(attempt.t_order_attempt or 0) != index
+      or _durable_owner_triple(attempt) != _durable_owner_triple(intent)
+      or str(attempt.instrument_code) != str(pending.instrument_code)
+      or str(attempt.t_trade_role) != str(pending.t_trade_role)
+      or str(attempt.side) != str(pending.side)
+      or str(attempt.bucket or "") != str(pending.bucket or "")
+      or str(attempt.batch_id or "") != str(pending.batch_id or "")
+      or attempt.t_order_original_created_at != attempts[0].t_order_original_created_at
+      or str(attempt.status or "") not in _FILL_TERMINAL_ORDER_STATUSES | {"RECONCILED_ZERO_FILL"}
+      or (index and attempt.t_order_parent_client_id != attempts[index - 1].client_order_id)
+    ):
+      return False
+    correlation = await db.scalar(select(OrderCorrelation).where(
+      OrderCorrelation.client_order_id == attempt.client_order_id,
+    ))
+    if correlation is None or not _exact_intent_binding(attempt, correlation, intent):
+      return False
+    last_correlation = correlation
+    unapplied = await db.scalar(select(StrategyRuntimeEvent.event_id).where(
+      StrategyRuntimeEvent.client_order_id == attempt.client_order_id,
+      StrategyRuntimeEvent.application_status != "APPLIED",
+    ).limit(1))
+    if unapplied:
+      return False
+    broker_id = str(attempt.broker_order_id or "")
+    if not broker_id:
+      if correlation.broker_order_id:
+        return False
+      metadata = dict(attempt.request_metadata or {})
+      source = str(metadata.get("execution_terminal_source") or "")
+      if (
+        str(attempt.status or "") not in {"EXPIRED", "REJECTED", "CANCELLED", "RECONCILED_ZERO_FILL"}
+        or source not in {
+          LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE,
+          LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE,
+          "LOCAL_OUTBOX_CANCEL",
+        }
+      ):
+        return False
+      command_id = str(metadata.get("command_lifecycle_message_id") or "")
+      command = await db.get(TradeCommandOutbox, command_id) if command_id else None
+      if (
+        command is None
+        or str(command.client_order_id) != str(attempt.client_order_id)
+        or str(command.account_id) != str(attempt.account_id)
+        or _durable_owner_triple(command) != _durable_owner_triple(attempt)
+        or str(command.delivery_status or "") != str(attempt.status or "")
+      ):
+        return False
+      payload = dict(command.payload or {})
+      if (
+        str(payload.get("command_kind") or "") != "PLACE_ORDER"
+        or str(payload.get("client_order_id") or "") != str(attempt.client_order_id)
+        or str(payload.get("account_id") or "") != str(attempt.account_id)
+        or str(payload.get("instrument_code") or "") != str(attempt.instrument_code)
+        or str(payload.get("side") or "") != str(attempt.side)
+        or int(payload.get("volume") or 0) != int(attempt.volume or 0)
+      ):
+        return False
+      if source == LOCAL_AGENT_PRE_EXECUTION_ZERO_FILL_SOURCE:
+        if (
+          str(command.delivery_status) not in {"EXPIRED", "REJECTED"}
+          or
+          command.acknowledged_at is None
+          or str(command.last_error or "") != str(metadata.get("execution_terminal_reason") or "")
+          or not str(command.last_error or "")
+        ):
+          return False
+      elif command.delivered_at is not None or command.acknowledged_at is not None:
+        return False
+      elif source == LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE and (
+        str(command.delivery_status) != "EXPIRED"
+        or command.expires_at is None
+        or to_naive_utc(command.expires_at) > to_naive_utc(utcnow())
+      ):
+        return False
+      elif source == "LOCAL_OUTBOX_CANCEL" and str(command.delivery_status) != "CANCELLED":
+        return False
+      continue
+    if not broker_id.isdecimal() or broker_id in seen_broker_ids:
+      return False
+    seen_broker_ids.add(broker_id)
+    order = await db.get(Order, int(broker_id))
+    trades = list((await db.scalars(select(Trade).where(
+      Trade.order_id == int(broker_id),
+      Trade.account_id == attempt.account_id,
+      Trade.stock_code == attempt.instrument_code,
+    ))).all())
+    filled = sum(max(0, int(trade.volume or 0)) for trade in trades)
+    if (
+      order is None
+      or str(correlation.broker_order_id or "") != broker_id
+      or str(order.account_id) != str(attempt.account_id)
+      or str(order.stock_code) != str(attempt.instrument_code)
+      or int(order.volume or 0) != int(attempt.volume or 0)
+      or _normalized_order_status(order.status) not in _FILL_TERMINAL_ORDER_STATUSES
+      or int(order.traded_volume or 0) != filled
+      or (filled == 0 and str(attempt.status) != "RECONCILED_ZERO_FILL")
+    ):
+      return False
+    total += filled
+  if total != int(intent.executed_volume or 0):
+    return False
+  requested = int(attempts[0].volume or 0)
+  if total > requested:
+    return False
+  status = "RECONCILED_ZERO_FILL" if total == 0 else "FILLED" if total == requested else "CANCELLED"
+  owner_type, owner_id, environment = _durable_owner_triple(pending)
+  if owner_type == ExecutionOwnerType.EXIT_PLAN.value:
+    record = await db.get(AutoExitPlanRecord, owner_id, with_for_update=True)
+    if record is None:
+      return False
+    if (
+      str(record.account_id) != str(pending.account_id)
+      or str(record.instrument_code) != str(pending.instrument_code)
+      or str(record.environment) != environment
+    ):
+      return False
+    plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+    if plan.pending_intent_id != pending.intent_id or int(plan.pending_filled_volume or 0) != total:
+      return False
+    ExitPlanBook([plan]).apply_order_event(
+      plan_id=owner_id, intent_id=pending.intent_id,
+      status=status, cumulative_filled_volume=total,
+    )
+    AutoExitPlanService._sync_record(record, plan)
+    await AutoExitPlanService()._append_event(
+      db, business_key=f"t-order-lifecycle:{pending.intent_id}",
+      plan_id=owner_id, event_type="ORDER_LIFECYCLE_FINALIZED",
+      payload={"intent_id": pending.intent_id, "status": status, "filled_volume": total},
+    )
+  elif owner_type == ExecutionOwnerType.STRATEGY_RUN.value:
+    business_key = f"t-order-lifecycle:{pending.intent_id}"
+    report = {
+      "effective_order_status": status,
+      "traded_volume": total,
+      "order_volume": requested,
+      "t_order_lifecycle_finalized": True,
+    }
+    db.add(StrategyRuntimeEvent(
+      event_id=str(uuid.uuid4()), business_key=business_key,
+      owner_type=owner_type, owner_id=owner_id, environment=environment,
+      strategy_run_id=owner_id, client_order_id=pending.client_order_id,
+      broker_order_id=pending.broker_order_id, event_type="ORDER",
+      payload=_event_payload(last_correlation, report, business_key=business_key),
+      application_status="PENDING", application_attempts=0, created_at=utcnow(),
+    ))
+  else:
+    return False
+  intent.status = status
+  intent.notes = "T_ORDER_LIFECYCLE_FINALIZED"
+  for attempt in attempts:
+    attempt.request_metadata = {
+      **dict(attempt.request_metadata or {}), "t_order_lifecycle_finished": True,
+    }
+  return True
 
 
 async def _project_t_trade_event(
@@ -4074,6 +4317,8 @@ async def _project_t_trade_event(
   item: dict[str, Any],
   terminal_projection: Optional[dict[str, Any]] = None,
 ) -> None:
+  if terminal_projection and terminal_projection.get("lifecycle_finalized_replay"):
+    return
   previous_projection = (
     batch.status,
     batch.exception_reason,
@@ -4099,6 +4344,8 @@ async def _project_t_trade_event(
       batch.entry_broker_order_id = broker_order_id or batch.entry_broker_order_id
     elif role == "EXIT":
       batch.exit_broker_order_id = broker_order_id or batch.exit_broker_order_id
+    if terminal_projection and terminal_projection.get("lifecycle_open"):
+      status = "PARTIAL_FILLED" if int(terminal_projection["received"]) else "SUBMITTED"
     if status == "RECONCILE_REQUIRED":
       batch.status = "RECONCILE_REQUIRED"
       batch.exception_reason = str(
@@ -4779,13 +5026,11 @@ async def _exact_runtime_order_binding(
 
 
 class _ExitPlanRuntimeHandler:
-  """P1 EXIT_PLAN bridge over the already durable report projections.
+  """Verify the single durable ExitPlan projection before marking owner apply.
 
-  P1 does not introduce a second ExitPlan runtime book.  ORDER/TRADE report
-  projections are performed by the existing report/AutoExitPlan services and
-  staging transaction; this handler proves their exact plan/order binding so
-  the owner event can be consumed and checkpointed without applying it twice.
-  The independent ExitPlan runtime consumer remains a P2 boundary.
+  ORDER/TRADE plan CAS is applied exactly once by AutoExitPlanService before
+  routing.  This handler only proves the resulting plan/order binding, so the
+  owner event marker cannot apply the same fill a second time.
   """
 
   def __init__(self, db) -> None:
@@ -4878,6 +5123,19 @@ class _ExitPlanRuntimeHandler:
       str(pending.client_order_id or "").strip(),
       str(pending.broker_order_id or "").strip(),
     }
+    requested_volume = int(pending.volume or 0)
+    if getattr(pending, "t_order_original_created_at", None) is not None:
+      attempts = list((await self._db.scalars(select(PendingTradeOrder).where(
+        PendingTradeOrder.intent_id == pending.intent_id,
+        PendingTradeOrder.account_id == pending.account_id,
+      ).order_by(PendingTradeOrder.t_order_attempt))).all())
+      if not attempts or any(_durable_owner_triple(row) != owner for row in attempts):
+        raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+      requested_volume = int(attempts[0].volume or 0)
+      for attempt in attempts:
+        pending_order_ids.update({
+          str(attempt.client_order_id or ""), str(attempt.broker_order_id or ""),
+        })
     if (
       plan.plan_id != target.execution_ref.owner_id
       or str(plan.template.account_id or "") != str(record.account_id or "")
@@ -4906,7 +5164,7 @@ class _ExitPlanRuntimeHandler:
       )
       or (
         int(plan.pending_requested_volume or 0) > 0
-        and int(plan.pending_requested_volume or 0) != int(pending.volume or 0)
+        and int(plan.pending_requested_volume or 0) != requested_volume
       )
     ):
       raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
@@ -4932,8 +5190,7 @@ class _ExitPlanRuntimeHandler:
         or ""
       ).strip():
         raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
-    # No state is changed here: this is the explicit P1 consumer boundary.
-    # Existing report projections already ran from the inbox and are guarded
+    # No state is changed here: public report projections already ran from the inbox and are guarded
     # by their own durable business keys; the runtime event marker is the
     # idempotency boundary for this owner route.
 
@@ -5201,6 +5458,14 @@ async def _apply_strategy_run_runtime_event(
       or report.get("status")
       or report.get("order_status")
     )
+    if getattr(pending, "t_order_original_created_at", None) is not None:
+      is_finalization = bool(report.get("t_order_lifecycle_finalized"))
+      if not t_order_lifecycle_pending(pending) and not is_finalization:
+        # A delayed old-attempt ORDER cannot re-open or close the run again.
+        return
+      if not is_finalization:
+        status_name = "SUBMITTED"
+        metadata["t_order_attempt"] = int(pending.t_order_attempt or 0)
     order_status: OrderStatus | str = (
       status_name
       if status_name in _SPECIAL_RUNTIME_ORDER_STATUSES

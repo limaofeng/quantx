@@ -2,12 +2,13 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+import quantx_infrastructure.services.t_trade_service as t_trade_service_module
 from quantx_application.t_trade_v3 import normalize_signal_policy
 from quantx_domain.trading.t_trade_opportunity_engine import OpportunityPolicy
-from quantx_infrastructure.models.enums import StrategyRunMode
+from quantx_infrastructure.models.enums import OrderStatus, OrderType, StrategyRunMode
 from quantx_infrastructure.services.t_trade_service import TTradeService
 
 
@@ -19,6 +20,255 @@ def signal_policy(**overrides):
 
 def test_t_trade_parameters_accept_safe_defaults():
   TTradeService._validate_parameters({}, StrategyRunMode.PAPER)
+
+
+def _external_import_harness(
+  monkeypatch,
+  *,
+  plan_error: Exception | None = None,
+  locked_order_overrides: dict | None = None,
+):
+  patch = SimpleNamespace(
+    set={
+      "instrument_states": {
+        "600000.SH": {
+          "batch_id": "batch-external",
+          "exit_plan_id": "t-exit-batch-external",
+          "exit_policy_snapshot": {},
+        }
+      }
+    },
+    unset=[],
+    append_events=[{"type": "T_TRADE_EXTERNAL_ENTRY_IMPORTED"}],
+  )
+
+  class Template:
+    @staticmethod
+    def to_dict():
+      return {"plan_id": "t-exit-batch-external"}
+
+  class Strategy:
+    @staticmethod
+    def import_external_entry(*_args):
+      return patch
+
+    @staticmethod
+    def build_exit_plan_template(**_kwargs):
+      return Template()
+
+  monkeypatch.setattr(
+    t_trade_service_module,
+    "AshareIntradayTAssistantStrategy",
+    Strategy,
+  )
+  strategy = Strategy()
+  state_record = SimpleNamespace(
+    custom_state={"instrument_states": {}, "runtime_events": []},
+    version=4,
+  )
+  order = SimpleNamespace(
+    account_id="account-1",
+    type=OrderType.BUY,
+    status=OrderStatus.SUCCEEDED,
+    traded_volume=100,
+    traded_price=10.0,
+    stock_code="600000.SH",
+    time=datetime(2026, 9, 3, 10),
+  )
+  locked_order = SimpleNamespace(**vars(order))
+  for key, value in dict(locked_order_overrides or {}).items():
+    setattr(locked_order, key, value)
+  added: list[object] = []
+  db = SimpleNamespace(
+    get=AsyncMock(side_effect=[order, locked_order]),
+    scalar=AsyncMock(return_value=state_record),
+    add=added.append,
+    commit=AsyncMock(),
+    rollback=AsyncMock(),
+  )
+
+  async def get_db():
+    yield db
+
+  monkeypatch.setattr(t_trade_service_module, "get_async_db", get_db)
+  imported_repo = SimpleNamespace(
+    find_source=AsyncMock(return_value=None),
+    save=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    t_trade_service_module,
+    "TTradeImportedEntryRepository",
+    lambda _db: imported_repo,
+  )
+  register = AsyncMock(side_effect=plan_error)
+  monkeypatch.setattr(
+    t_trade_service_module,
+    "AutoExitPlanService",
+    lambda: SimpleNamespace(register_strategy_entry_fill=register),
+  )
+  apply_patch = Mock()
+  runtime = SimpleNamespace(
+    strategy=strategy,
+    state_manager=SimpleNamespace(
+      checkpoint_strategy_state_changes=AsyncMock(return_value=True)
+    ),
+    context=SimpleNamespace(
+      parameters={"account_id": "account-1"},
+      mode=SimpleNamespace(value="paper"),
+    ),
+  )
+  manager = SimpleNamespace(
+    get_run=lambda _run_id: runtime,
+    executor=SimpleNamespace(publish_external_durable_state=apply_patch),
+  )
+  service = TTradeService(manager)
+  service.get_session = AsyncMock(return_value={"status": "MONITORING"})
+  return service, db, imported_repo, register, apply_patch, state_record, added
+
+
+@pytest.mark.asyncio
+async def test_external_import_commits_plan_ledger_and_state_before_hot_patch(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  service, db, repo, register, apply_patch, state_record, added = (
+    _external_import_harness(monkeypatch)
+  )
+
+  result = await service.import_external_entry(
+    "run-1",
+    "account-1",
+    "101",
+    account_coordination_held=True,
+  )
+
+  assert result["code"] == "EXTERNAL_ENTRY_IMPORTED"
+  register.assert_awaited_once()
+  assert register.await_args.kwargs["db"] is db
+  assert register.await_args.kwargs["commit"] is False
+  assert register.await_args.kwargs["event_business_key"].startswith(
+    "strategy-external-entry:run-1:order:101:"
+  )
+  repo.save.assert_awaited_once()
+  assert repo.save.await_args.kwargs["commit"] is False
+  db.commit.assert_awaited_once()
+  db.rollback.assert_not_awaited()
+  assert state_record.version == 5
+  assert added[0].batch_id == "batch-external"
+  assert added[0].status == "ENTRY_FILLED"
+  apply_patch.assert_called_once()
+  assert apply_patch.call_args.kwargs == {
+    "durable_state_version": 5,
+    "durable_custom_state": state_record.custom_state,
+  }
+  assert db.get.await_args_list[1].kwargs == {
+    "with_for_update": True,
+    "populate_existing": True,
+  }
+
+
+@pytest.mark.asyncio
+async def test_external_import_plan_failure_rolls_back_without_hot_state_ghost(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  service, db, repo, register, apply_patch, _state_record, _added = (
+    _external_import_harness(
+      monkeypatch,
+      plan_error=RuntimeError("public plan persistence failed"),
+    )
+  )
+
+  with pytest.raises(RuntimeError, match="public plan persistence failed"):
+    await service.import_external_entry(
+      "run-1",
+      "account-1",
+      "101",
+      account_coordination_held=True,
+    )
+
+  register.assert_awaited_once()
+  repo.save.assert_not_awaited()
+  db.commit.assert_not_awaited()
+  db.rollback.assert_awaited_once()
+  apply_patch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_external_import_rejects_order_changed_before_write_lock(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  service, db, repo, register, apply_patch, _state_record, _added = (
+    _external_import_harness(
+      monkeypatch,
+      locked_order_overrides={"traded_volume": 200},
+    )
+  )
+
+  with pytest.raises(RuntimeError, match="导入事务前已变化"):
+    await service.import_external_entry(
+      "run-1",
+      "account-1",
+      "101",
+      account_coordination_held=True,
+    )
+
+  db.rollback.assert_awaited_once()
+  register.assert_not_awaited()
+  repo.save.assert_not_awaited()
+  apply_patch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_external_import_requires_account_coordination_lock(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  service, db, _repo, register, apply_patch, _state_record, _added = (
+    _external_import_harness(monkeypatch)
+  )
+
+  with pytest.raises(RuntimeError, match="必须持有账户协调锁"):
+    await service.import_external_entry("run-1", "account-1", "101")
+
+  db.get.assert_not_awaited()
+  register.assert_not_awaited()
+  apply_patch.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order_id", ["101", "00101", "+101"])
+async def test_external_import_retry_uses_ledger_without_recreating_batch(monkeypatch, order_id):
+  service, db, repo, register, apply_patch, state_record, added = (
+    _external_import_harness(monkeypatch)
+  )
+  repo.find_source.return_value = SimpleNamespace(strategy_run_id="run-1")
+  result = await service.import_external_entry(
+    "run-1", "account-1", order_id, account_coordination_held=True
+  )
+  assert result["success"] is True
+  assert state_record.version == 4
+  assert added == []
+  db.commit.assert_not_awaited()
+  register.assert_not_awaited()
+  apply_patch.assert_not_called()
+  repo.save.assert_not_awaited()
+  repo.find_source.assert_awaited_once_with("account-1", "order:101")
+
+
+@pytest.mark.asyncio
+async def test_external_import_publication_failure_keeps_durable_recovery_image(monkeypatch):
+  service, db, repo, register, apply_patch, state_record, added = (
+    _external_import_harness(monkeypatch)
+  )
+  apply_patch.side_effect = RuntimeError("publication failed")
+  with pytest.raises(RuntimeError, match="publication failed"):
+    await service.import_external_entry(
+      "run-1", "account-1", "101", account_coordination_held=True
+    )
+  db.commit.assert_awaited_once()
+  db.rollback.assert_not_awaited()
+  assert state_record.version == 5
+  assert state_record.custom_state["instrument_states"]["600000.SH"]["batch_id"] == added[0].batch_id
+  repo.save.assert_awaited_once()
+  register.assert_awaited_once()
 
 
 def test_t_trade_parameters_require_floor_below_target():

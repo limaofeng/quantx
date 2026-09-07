@@ -1098,6 +1098,12 @@ async def test_restore_filled_intent_waits_for_idempotent_inbox_replay(
     "persist_strategy_plan_state",
     persist_plan_state,
   )
+  register_public_fill = AsyncMock(return_value=({}, 2))
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "register_strategy_entry_fill",
+    register_public_fill,
+  )
   executor = StrategyExecutor()
   context = StrategyContext(
     run_id="run-filled-recovery",
@@ -1125,6 +1131,7 @@ async def test_restore_filled_intent_waits_for_idempotent_inbox_replay(
     batch_id=batch_id,
     plan_id=plan_id,
   )
+  metadata["runtime_event_key"] = "trade:filled-before-snapshot:100"
   policy = runtime.strategy._exit_policy_snapshot()
   runtime.strategy.state.update(
     {
@@ -1201,7 +1208,10 @@ async def test_restore_filled_intent_waits_for_idempotent_inbox_replay(
   assert state["reconciliation_reason"] == ""
   assert state["entry_filled_volume"] == 200
   assert state["entry_avg_price"] == pytest.approx(10.5)
-  assert runtime.exit_plan_book.plans[plan_id].entry_filled_volume == 200
+  # PAPER/LIVE no longer mutates a source-private book; the public durable
+  # runtime receives the fill exactly once under the report business key.
+  assert runtime.exit_plan_book.plans[plan_id].entry_filled_volume == 100
+  register_public_fill.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1215,6 +1225,12 @@ async def test_restore_cancelled_partial_fill_keeps_open_lot_and_blocks_new_entr
     AutoExitPlanService,
     "persist_strategy_plan_state",
     persist_plan_state,
+  )
+  register_public_fill = AsyncMock(return_value=({}, 1))
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "register_strategy_entry_fill",
+    register_public_fill,
   )
   executor = StrategyExecutor()
   context = StrategyContext(
@@ -1244,6 +1260,7 @@ async def test_restore_cancelled_partial_fill_keeps_open_lot_and_blocks_new_entr
     batch_id=batch_id,
     plan_id=plan_id,
   )
+  metadata["runtime_event_key"] = "trade:cancelled-partial:100"
   runtime.strategy.state.update(
     {
       "instrument_states": {

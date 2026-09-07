@@ -48,9 +48,10 @@ from quantx_engine.warm_cache import (
 )
 
 from .conditional_liquidation import conditional_liquidation_monitor
-from .exit_plan_monitor import exit_plan_monitor
+from .exit_plan_runtime import exit_plan_runtime
 from .limit_up_board_replay_service import LimitUpBoardReplayService
 from .limit_up_board_runtime import limit_up_board_assistant
+from .t_trade_coordination import t_trade_account_coordination_lock
 from .t_trade_runtime import t_trade_global_monitor
 
 logger = logging.getLogger(__name__)
@@ -355,7 +356,7 @@ async def _dispatch(
       )
     }
   if command_type == "EXIT_PLAN_CREATE_MANUAL":
-    record = await AutoExitPlanService(strategy_manager).create_manual_exit_plan(
+    record = await AutoExitPlanService().create_manual_exit_plan(
       payload,
       command_id=str(command_id or ""),
     )
@@ -365,7 +366,7 @@ async def _dispatch(
       "config_version": record.config_version,
     }
   if command_type == "EXIT_PLAN_UPDATE_MANUAL":
-    record = await AutoExitPlanService(strategy_manager).update_manual_exit_plan(
+    record = await AutoExitPlanService().update_manual_exit_plan(
       payload,
       command_id=str(command_id or ""),
     )
@@ -380,7 +381,7 @@ async def _dispatch(
       instrument_code=str(payload["instrument_code"]),
     )
   if command_type == "EXIT_PLAN_SET_ENABLED":
-    record = await AutoExitPlanService(strategy_manager).set_enabled(
+    record = await AutoExitPlanService().set_enabled(
       str(payload["plan_id"]),
       bool(payload["enabled"]),
       account_id=payload.get("account_id"),
@@ -392,7 +393,7 @@ async def _dispatch(
       "config_version": record.config_version if record else None,
     }
   if command_type == "EXIT_PLAN_CANCEL":
-    record = await AutoExitPlanService(strategy_manager).cancel(
+    record = await AutoExitPlanService().cancel(
       str(payload["plan_id"]),
       str(payload.get("reason") or "USER_CANCELLED"),
       account_id=payload.get("account_id"),
@@ -412,27 +413,20 @@ async def _dispatch(
       and str(exit_record.account_id) != str(payload.get("account_id"))
     ):
       raise ValueError("退出计划不存在或不属于当前账户")
-    if not exit_record.strategy_run_id:
-      results = await exit_plan_monitor.evaluate_all_active_plans(
-        account_id=str(exit_record.account_id),
-        instrument_code=str(exit_record.instrument_code),
-        plan_id=str(exit_record.plan_id),
-      )
-      if not results:
-        raise ValueError("退出计划未在监控，不能立即检查")
-      return _json_value(
-        {
-          "success": True,
-          "code": "EXIT_PLAN_EVALUATED",
-          "plan_id": str(exit_record.plan_id),
-          "result": results[0].get("result"),
-        }
-      )
+    results = await exit_plan_runtime.evaluate_all_active_plans(
+      account_id=str(exit_record.account_id),
+      instrument_code=str(exit_record.instrument_code),
+      plan_id=str(exit_record.plan_id),
+    )
+    if not results:
+      raise ValueError("退出计划未在公共 runtime 中，不能立即检查")
     return _json_value(
-      await AutoExitPlanService(strategy_manager).evaluate_now(
-        str(payload["plan_id"]),
-        account_id=str(payload.get("account_id") or ""),
-      )
+      {
+        "success": True,
+        "code": "EXIT_PLAN_EVALUATED",
+        "plan_id": str(exit_record.plan_id),
+        "result": results[0].get("result"),
+      }
     )
   if command_type == "EXIT_PLAN_LIQUIDATE_POSITIONS":
     return _json_value(
@@ -445,16 +439,8 @@ async def _dispatch(
       )
     if exit_record is None:
       raise ValueError("退出计划不存在")
-    if not exit_record.strategy_run_id:
-      return _json_value(
-        await exit_plan_monitor.confirm_exit_intent(
-          plan_id=str(payload["plan_id"]),
-          intent_id=str(payload["intent_id"]),
-          approval_audit=dict(payload.get("approval_audit") or {}),
-        )
-      )
     return _json_value(
-      await AutoExitPlanService(strategy_manager).confirm_managed_intent(
+      await exit_plan_runtime.confirm_exit_intent(
         plan_id=str(payload["plan_id"]),
         intent_id=str(payload["intent_id"]),
         approval_audit=dict(payload.get("approval_audit") or {}),
@@ -467,18 +453,11 @@ async def _dispatch(
       )
     if exit_record is None:
       raise ValueError("退出计划不存在")
-    if exit_record.strategy_run_id:
-      await AutoExitPlanService(strategy_manager).reject_managed_intent(
-        plan_id=str(payload["plan_id"]),
-        intent_id=str(payload["intent_id"]),
-        reason=str(payload.get("reason") or "USER_REJECTED"),
-      )
-    else:
-      await AutoExitPlanService().reject_exit_intent(
-        plan_id=str(payload["plan_id"]),
-        intent_id=str(payload["intent_id"]),
-        reason=str(payload.get("reason") or "USER_REJECTED"),
-      )
+    await AutoExitPlanService().reject_exit_intent(
+      plan_id=str(payload["plan_id"]),
+      intent_id=str(payload["intent_id"]),
+      reason=str(payload.get("reason") or "USER_REJECTED"),
+    )
     return {"success": True}
   if command_type == "WARM_CACHE_REFRESH_SOURCES":
     await intraday_warm_cache.refresh_source_symbols()
@@ -534,13 +513,21 @@ async def _dispatch(
       await t_trade_service.reject_entry(payload["run_id"], payload["intent_id"])
     )
   if command_type == "T_TRADE_IMPORT_EXTERNAL_ENTRY":
-    return _json_value(
-      await t_trade_service.import_external_entry(
-        payload["run_id"],
-        payload["account_id"],
-        payload["order_id"],
+    async with t_trade_account_coordination_lock(payload["account_id"]):
+      async def import_external_entry():
+        return await t_trade_service.import_external_entry(
+          payload["run_id"],
+          payload["account_id"],
+          payload["order_id"],
+          account_coordination_held=True,
+        )
+
+      return _json_value(
+        await strategy_manager.executor.execute_serialized_t_external_import(
+          payload["run_id"],
+          import_external_entry,
+        )
       )
-    )
   if command_type == "T_TRADE_SYNC_SOURCE_ORDERS":
     return _json_value(await t_trade_service.sync_source_orders(payload["account_id"]))
   if command_type == "T_TRADE_STOP_SESSION":

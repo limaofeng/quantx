@@ -12,6 +12,11 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping, Optional
 
+from quantx_contracts import (
+  ExecutionEnvironment,
+  ExecutionOwnerRef,
+  ExecutionOwnerType,
+)
 from quantx_domain.trading.t_trade_opportunity_engine import (
   OpportunityReferenceProfile,
 )
@@ -93,8 +98,10 @@ class PostCasEvaluationInput:
 
   event: Mapping[str, Any]
   account_id: str
-  strategy_run_id: str
+  strategy_run_id: Optional[str]
   cas_committed: bool
+  execution_ref: ExecutionOwnerRef | Mapping[str, object] | None = None
+  execution_environment: ExecutionEnvironment | str | None = None
 
   def __post_init__(self) -> None:
     if not isinstance(self.event, Mapping):
@@ -102,13 +109,45 @@ class PostCasEvaluationInput:
     if not isinstance(self.cas_committed, bool):
       raise TypeError("cas_committed must be bool")
     account_id = str(self.account_id or "").strip()
-    run_id = str(self.strategy_run_id or "").strip()
+    run_id = str(self.strategy_run_id or "").strip() or None
     if not account_id:
       raise ValueError("account_id is required")
-    if not run_id:
-      raise ValueError("strategy_run_id is required")
+    owner = self.execution_ref
+    if owner is None:
+      if run_id is None:
+        raise ValueError("execution_ref is required")
+      owner = ExecutionOwnerRef.strategy_run(run_id)
+    elif isinstance(owner, Mapping):
+      owner = ExecutionOwnerRef.from_mapping(owner)
+    elif not isinstance(owner, ExecutionOwnerRef):
+      raise ValueError("execution_ref is invalid")
+    if owner.owner_type not in {
+      ExecutionOwnerType.STRATEGY_RUN,
+      ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    }:
+      raise ValueError("evaluation owner_type is invalid")
+    if owner.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if run_id is None:
+        run_id = owner.owner_id
+      elif run_id != owner.owner_id:
+        raise ValueError("strategy_run_id witness conflicts with execution_ref")
+    elif run_id is not None:
+      raise ValueError("T assistant evaluation cannot carry strategy_run_id")
+    environment = self.execution_environment
+    if environment is not None:
+      try:
+        environment = ExecutionEnvironment(environment)
+      except (TypeError, ValueError) as exc:
+        raise ValueError("execution_environment is invalid") from exc
+    if (
+      owner.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+      and environment is not ExecutionEnvironment.PAPER
+    ):
+      raise ValueError("P3 T assistant evaluation must use PAPER")
     object.__setattr__(self, "account_id", account_id)
     object.__setattr__(self, "strategy_run_id", run_id)
+    object.__setattr__(self, "execution_ref", owner)
+    object.__setattr__(self, "execution_environment", environment)
     object.__setattr__(self, "event", dict(self.event))
 
 

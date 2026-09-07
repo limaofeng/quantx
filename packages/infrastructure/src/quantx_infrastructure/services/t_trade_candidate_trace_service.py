@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from quantx_contracts import ExecutionOwnerType
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -403,6 +404,8 @@ class TTradeCandidateTraceService:
           select(TTradeOpportunityEvaluation)
           .where(
             TTradeOpportunityEvaluation.account_id == account_id,
+            TTradeOpportunityEvaluation.owner_type
+            == ExecutionOwnerType.STRATEGY_RUN.value,
             TTradeOpportunityEvaluation.strategy_run_id == strategy_run_id,
             TTradeOpportunityEvaluation.record_kind == T_TRADE_EVALUATION_KIND_MATERIAL,
             TTradeOpportunityEvaluation.candidate_id == candidate_id,

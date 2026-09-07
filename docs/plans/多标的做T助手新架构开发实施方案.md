@@ -1,6 +1,6 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0、P1 已完成；P2/P3 实现与聚焦验证后正在最终审计）<br>
+> 状态：`IN_PROGRESS`（P0—P3 已完成；P4 未启动，本轮不进入 P4）<br>
 > 版本：2.2<br>
 > 日期：2026-09-03<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
@@ -157,8 +157,8 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 |---|---|---|---|---|---|
 | P0 | 基线冻结与契约清点 | `DONE` | 文档基线 | 清单、policy、只读审计、405 + 9 审计单测基线齐全 | [P0 冻结基线](多标的做T助手P0冻结基线.md) |
 | P1 | Owner 与协议 1.2 | `DONE` | P0；P1-01..06 均已完成；PAPER legacy 义务已受控收敛；停服、停服态备份、迁移、标准 full/live 恢复、全量快照对账和隔离恢复演练已通过 | 单一 `ExecutionOwnerRef`、单一 protocol 1.2 payload、既有路径等价；未知/冲突 owner 与结果未知均 fail-closed；无双协议 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`；0046/0047 schema gate 通过；owner 空值 `0`、8 个身份不可变触发器通过；最新 1.2 快照 `PROCESSED`、旧失败快照 `SUPERSEDED`；标准 full/live 冷启动 exit=`0`，`liveTrading=ENABLED`，QMT/marketData/Monitor READY、快照约 3 秒，gateway/schema verify 通过 |
-| P2 | 公共 ExitPlan/容量/准入安全地基 | `IN_PROGRESS` | `P1 DONE`；P2-01..06 实现与聚焦验证完成，等待最终审计/提交 | 无第二真源，故障恢复通过 | `ExitPlanRuntime`、0048 admission schema、order policy 与聚焦回归 |
-| P3 | 独立 T runtime 与精确行情归约 | `IN_PROGRESS` | `P1 DONE`；实现与首轮聚焦验证完成，最终审计整改中 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 与 P3 首轮聚焦回归 `319 passed`；最终二审 blocker 尚未清零 |
+| P2 | 公共 ExitPlan/容量/准入安全地基 | `DONE` | `P1 DONE`；实现、恢复测试与 Windows 运行验收完成 | 无第二真源，故障恢复通过 | 0048/0050 实库与隔离恢复通过；BUY 整链 39 项及根回归，见 §10 |
+| P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
 | P4 | 分配、PAPER 与跨域准入 | `NOT_STARTED` | P2 + P3 | 整批原子、PAPER 闭环、无真实订单 | 待补 |
 | P5 | 共享账户回测 | `NOT_STARTED` | P4 | 无重复资金/未来数据，结果可重放 | 待补 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
@@ -220,16 +220,16 @@ legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=
 - [x] `TTA-P2-03` 建立 `AccountRiskIncreaseAdmissionSequencer` 与 durable admission batch，覆盖
   做 T、打板、买入计划、普通策略和人工 BUY 的稳定次序；READY 先于账户执行锁持久化，
   batch/claim 提交可见后才按 rank 进入最终账户锁，Engine 启动与后台扫描恢复 READY/PREPARED。
-- [ ] `TTA-P2-04` 建立版本化 `TEntryOrderPolicy/TExitOrderPolicy` 与结果未知禁止 replace 门；
+- [x] `TTA-P2-04` 建立版本化 `TEntryOrderPolicy/TExitOrderPolicy` 与结果未知禁止 replace 门；
   2026-09-06 复核：FIX_PRICE/30 秒命令有效期、工作单超时撤单、同一活动意图有限替换
-  与总窗口恢复已实现并通过聚焦回归，仍待独立链路复审及默认运行基线验收；判定 helper
+  与总窗口恢复已实现，独立 BUY 整链复验和默认运行基线已完成；判定 helper
   或禁止全部替换不能单独证明该任务完成。
 - [x] `TTA-P2-05` 只为本阶段已经存在的公共 intent/outbox、ExitPlan、admission batch/item
   加入 owner、身份一致性与唯一约束，迁移前先做影子冲突检查；cycle 表约束归 P3-05，
   尚未创建的 allocation batch/decision 约束归 P4-03，不提前创建 P4 表。
-- [ ] `TTA-P2-06` 覆盖部分成交、ORDER/TRADE 乱序、迟到成交、撤单失败、未知结果、退出独立恢复
+- [x] `TTA-P2-06` 覆盖部分成交、ORDER/TRADE 乱序、迟到成交、撤单失败、未知结果、退出独立恢复
   与跨域抢锁故障测试；订单生命周期及外部导入发布失败的代级持久化封禁已补聚焦验证，
-  仍待扩大回归与最终验收。
+  扩大回归与最终验收已完成，保留根测试唯一无关基线失败说明。
 
 退出门：现金/库存真源仍唯一；跨域 BUY 顺序确定；退出、容量和命令恢复不依赖做 T runtime。
 
@@ -237,23 +237,23 @@ legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=
 
 前置：P1 `DONE`；P2 可并行但 P4 前必须完成。
 
-- [ ] `TTA-P3-01` 实现 `TAssistantConfigVersion/TAssistantExecution`、生命周期、entry readiness、
+- [x] `TTA-P3-01` 实现 `TAssistantConfigVersion/TAssistantExecution`、生命周期、entry readiness、
   rollout stage、events 和 partial unique LIVE producer 约束。
-- [ ] `TTA-P3-02` 实现独立 `TAssistantSymbolState` 与逐 Tick `SymbolMarketStateReducer`；每个 accepted
+- [x] `TTA-P3-02` 实现独立 `TAssistantSymbolState` 与逐 Tick `SymbolMarketStateReducer`；每个 accepted
   Tick 按 source identity 恰好归约一次。
-- [ ] `TTA-P3-03` 实现 delta ring/cursor/generation/gap/lag 处理；覆盖时 fail-closed 并 rewarm。
-- [ ] `TTA-P3-04` 实现强类型 `StrategyCadence.SNAPSHOT`、输入 validator、symbol patches 和
+- [x] `TTA-P3-03` 实现 delta ring/cursor/generation/gap/lag 处理；覆盖时 fail-closed 并 rewarm。
+- [x] `TTA-P3-04` 实现强类型 `StrategyCadence.SNAPSHOT`、输入 validator、symbol patches 和
   `execution_ref`，移除做 T 对 StrategyRunState callback 的依赖。
-- [ ] `TTA-P3-05` 实现 `decision_key`、cycle identity/attempt 唯一约束、processing fence/lease、
+- [x] `TTA-P3-05` 实现 `decision_key`、cycle identity/attempt 唯一约束、processing fence/lease、
   material 原子提交、续接与 `ABORTED_STALE`。
-- [ ] `TTA-P3-06` 在隔离 PAPER namespace 与旧 V3 逐 cycle shadow 对比，禁止 approval/outbox。
+- [x] `TTA-P3-06` 在隔离 PAPER namespace 与旧 V3 逐 cycle shadow 对比，禁止 approval/outbox。
 
-退出门：尚未通过最终复审。二审 blocker 的实现整改已覆盖 callback 故障恢复、非 READY
+退出门：已通过最终复审。二审 blocker 的实现整改已覆盖 callback 故障恢复、非 READY
 候选延迟、同 source/fence 规则比较、PREPARED startup recovery、逐标的 sequence、config
 successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL baseline→0050
 隔离升级/触发器负向验证已通过。2026-09-06 复审发现并修复 material 后置校验的半写入问题，
-同 execution 周期同步回退热游标的问题已修复并补齐重启与 generation/universe/config 边界测试；仍须通过最终全量回归、只读复审及默认
-运行基线验收，之后才能将本阶段改为 `DONE`。
+同 execution 周期同步回退热游标的问题已修复并补齐重启与 generation/universe/config 边界测试；
+根回归、只读复审及默认运行验收已完成，根测试唯一无关基线失败见 §10。
 
 ### P4：组合分配、跨域准入与 RULE_ONLY PAPER
 
@@ -460,7 +460,7 @@ npm run build
 
 ## 10. 当前状态与下一动作
 
-当前结论：**P0、P1 已完成；P2/P3 完整备份的隔离迁移验证已通过，本批提交迁移相关文件，不代表 P2/P3 整体完成。** P1 原子切换后，Agent 控制协议为 `1.2`；
+当前结论：**P0—P3 已完成；P2/P3 代码、隔离迁移、实际业务库 0050 和清空功能数据后的 Windows 运行验收已完成。本轮止于 P3，不进入 P4。** P1 原子切换后，Agent 控制协议为 `1.2`；
 `ExecutionOwnerRef` 已贯穿 intent、pending、correlation、outbox、runtime event 和 ExitPlan
 source，`strategy_run_id` 仅作为 StrategyRun 的可选一致性见证，不能再作为默认 owner fallback。
 当前 Router 仅注册 `STRATEGY_RUN`、`EXIT_PLAN`、`MANUAL_COMMAND`；未知、未注册或 owner/environment
@@ -492,8 +492,35 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   本批最终四文件定向回归 `26 passed`，候选提交 Python 文件 Ruff 与 `git diff --check` 均通过；
   只读复查实际业务库仍为 `20260903_0047`，本批没有对它实施迁移。
 - 本批提交范围为迁移、对应 ORM 契约、定向测试和本检查点；其余 P2/P3 运行时与用户既有改动不混入。
-  **不修改开发/实盘库，不启停交易服务，不进入 P4。** 实际数据库迁移及 Windows 运行验收为下一阶段；
-  P2/P3 阶段仍保持 `IN_PROGRESS`，不得提前开放新 T owner 真实订单。
+  隔离批次提交为 `70c590fba`；当批没有修改业务库或启停交易服务，不代表 P2/P3 整体完成。
+
+当前运行验收批次：
+
+- 用户已确认继续实际业务库 `quantx` 迁移及标准 full/live 冷启动验收；不进入 P4，
+  不开放新 T owner 真实下单，不执行真实交易测试，保留用户无关改动。
+- 统一 `migrate -Environment dev` 句柄 `61526` exit=0：业务库已到 `20260906_0050`，
+  缺表/缺列为空，孤立机会诊断实际删除 77632 条；迁移前完整备份为
+  `.runtime/backups/20260907T052803Z`。脱敏日志为
+  `.runtime/reports/p2-p3-deployment/migration-20260907-132801.log`。
+- 首次标准 full/live 启动成功，QMT/行情 ready、协议 1.2、快照 23 秒；后续发现
+  PAPER shadow 快照映射与可变缓存共用引用，后续 delta 覆盖来源序号导致 callback 失败。
+  已用定向测试复现并隔离快照映射，行情中心与 PAPER shadow 两文件 `38 passed`。
+- 用户暂停本任务后，在独立清理任务授权清空 53 张功能表（1929743 条），同时清理
+  279 条相关控制命令与 5 条功能确认；保留券商事实、账户资产与原始回报。
+  清理证据 `.runtime/reports/feature-data-reset-20260907/result.json`；不得重跑 reset.py
+  或恢复旧业务配置来验收。清理后主服务停止、Monitor 独立在线；当前重新启动验收，
+  不复用清理前在线状态，不重复全量备份/恢复，也不创建真实交易填充功能数据。
+- 清理后标准启动句柄 `75493` exit=0，日志
+  `.runtime/reports/p2-p3-deployment/startup-after-reset-20260907.log`：
+  full/live、唯一账户、实盘门禁开启、QMT/行情 ready、协议 1.2、快照 3.223 秒。
+  Caddy 健康复查 Engine/marketConsumption ready、runtimeSafety READY、ownerAudit passed。
+  公共 ExitPlanRuntime、admission dispatcher 和 PAPER shadow CRITICAL consumer 均启动；
+  schema check 再验通过，135 表、无缺表缺列。只自动登记 8 个策略定义，运行实例、
+  T 配置/execution/cycle、退出计划、trade intent 均为 0；没有恢复旧配置或产生新 T 订单。
+- 最终验证复用上方根回归 `5240 passed, 1 failed`（唯一失败为无关研究边界基线）、
+  BUY 整链 39 项、迁移 26 项；最后快照修复定向两文件 38 项通过，全部候选 Python
+  Ruff 通过；补齐首次订阅缓存引用负测后两文件共 39 项通过。PAPER 有绑定的行为由隔离测试证明，空配置线上仅证明正常启动与零订单，
+  不将空配置运行冒充真实候选对比或真实交易测试。运行时与文档作为同一收尾批次提交。
 
 ## 11. 变更记录
 

@@ -233,6 +233,8 @@ class MaterializeEvaluationAfterCAS:
         event=request.event,
         account_id=request.account_id,
         strategy_run_id=request.strategy_run_id,
+        execution_ref=request.execution_ref,
+        execution_environment=request.execution_environment,
       )
     except Exception as exc:
       raise EvaluationMaterializationError(event_key, exc) from exc
@@ -270,11 +272,16 @@ class MaterializeEvaluationAfterCAS:
       return ()
     account_id = normalized[0].account_id
     strategy_run_id = normalized[0].strategy_run_id
+    execution_ref = normalized[0].execution_ref
+    execution_environment = normalized[0].execution_environment
     if any(
-      request.account_id != account_id or request.strategy_run_id != strategy_run_id
+      request.account_id != account_id
+      or request.execution_ref != execution_ref
+      or request.execution_environment != execution_environment
+      or request.strategy_run_id != strategy_run_id
       for request in normalized
     ):
-      raise ValueError("checkpoint batch must share account_id and strategy_run_id")
+      raise ValueError("checkpoint batch must share one execution owner scope")
     events = [dict(request.event) for request in normalized]
     if any(
       str(event.get("record_kind") or "").upper()
@@ -289,6 +296,8 @@ class MaterializeEvaluationAfterCAS:
         events=events,
         account_id=account_id,
         strategy_run_id=strategy_run_id,
+        execution_ref=execution_ref,
+        execution_environment=execution_environment,
       )
     except Exception as exc:
       raise EvaluationMaterializationError(event_keys[0], exc) from exc

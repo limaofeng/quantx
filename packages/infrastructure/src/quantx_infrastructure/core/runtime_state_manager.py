@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Optional
 
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 
@@ -260,6 +260,7 @@ class RuntimeStateManager:
     _last_snapshot_attempt_revision: int = field(default=-1, repr=False)
     _snapshot_cas_conflicts: int = field(default=0, repr=False)
     _last_snapshot_failure_code: Optional[str] = field(default=None, repr=False)
+    _external_publication_failed: bool = field(default=False, repr=False)
     _last_snapshot_reconciliation_outcome: Optional[str] = field(
         default=None,
         repr=False,
@@ -396,6 +397,9 @@ class RuntimeStateManager:
 
     async def stop(self) -> None:
         """停止状态管理器"""
+        if self._external_publication_failed:
+            await self.abort_without_final_snapshot()
+            raise RuntimeError("外部持久状态发布失败，禁止保存最终快照")
         self._running = False
 
         # 取消后台任务
@@ -847,6 +851,8 @@ class RuntimeStateManager:
     ) -> bool:
         """Drain strategy deltas and durably checkpoint them before routing resumes."""
 
+        if self._external_publication_failed:
+            return False
         if not await self.drain_strategy_state_changes(
             timeout_seconds=timeout_seconds,
         ):
@@ -2109,6 +2115,8 @@ class RuntimeStateManager:
         failures are never represented as an empty state because PAPER/LIVE
         callers must not continue from fabricated account and position facts.
         """
+        if self._external_publication_failed and self._state_sync_strategy is not None:
+            raise RuntimeStateRestoreError("外部状态发布失败，必须停止旧策略源后完整恢复")
         self._invalidate_position_snapshot_cache()
         if self._state_sync_strategy is None:
             self._state_sync_durable_strategy_snapshot = None
@@ -2207,6 +2215,9 @@ class RuntimeStateManager:
                 f"状态恢复查询失败: run_id={self.run_id}"
             ) from e
 
+        if self._external_publication_failed and not found:
+            raise RuntimeStateRestoreError("外部已提交状态缺失，禁止解除持久化围栏")
+        self._external_publication_failed = False
         return RuntimeStateRestoreResult(
             status=(
                 RuntimeStateRestoreStatus.RESTORED
@@ -2846,8 +2857,58 @@ class RuntimeStateManager:
             return False
         return True
 
+    def fence_external_durable_publication(self) -> None:
+        """Fence this generation before it attempts to publish committed state."""
+        self._external_publication_failed = True
+        self._last_snapshot_failure_code = "EXTERNAL_STATE_PUBLICATION_FAILED"
+
+    def adopt_external_durable_state_version(
+        self,
+        version: int,
+        *,
+        custom_state: Dict[str, Any],
+        publish: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        """Advance CAS after a caller atomically persisted an external patch.
+
+        The caller has already committed the complete durable custom-state
+        image.  Validate the next version before publishing the corresponding
+        hot image, then advance the coordinator only after publication
+        succeeds.  A validation or publication failure leaves both resident
+        views unchanged; no second persistence side effect is allowed here.
+        """
+
+        self.fence_external_durable_publication()
+        durable_version = int(version or 0)
+        current_version = int(self._state.get("version", 0) or 0)
+        if durable_version != current_version + 1:
+            raise RuntimeError(
+                "external durable state version is not the next runtime CAS: "
+                f"run_id={self.run_id}, current={current_version}, "
+                f"durable={durable_version}"
+            )
+        durable_custom = copy.deepcopy(custom_state)
+        strategy_custom = {
+            key: copy.deepcopy(value)
+            for key, value in durable_custom.items()
+            if key not in _MANAGER_OWNED_CUSTOM_STATE_KEYS
+        }
+        publish(strategy_custom)
+        self._state["custom"] = durable_custom
+        self._state_sync_durable_strategy_snapshot = {
+            key: copy.deepcopy(value)
+            for key, value in durable_custom.items()
+            if key not in _STATE_SYNC_PRESERVED_CUSTOM_STATE_KEYS
+        }
+        self._state["version"] = durable_version
+        self._external_publication_failed = False
+        self._last_snapshot_failure_code = None
+
     async def save_snapshot(self) -> bool:
         """保存状态快照到数据库"""
+        if self._external_publication_failed:
+            self._last_snapshot_failure_code = "EXTERNAL_STATE_PUBLICATION_FAILED"
+            return False
         if not self.persist_enabled or (
             not self._dirty
             and not self._pending_decision_trace_records
@@ -2855,6 +2916,9 @@ class RuntimeStateManager:
         ):
             return True
         async with self._snapshot_lock:
+            if self._external_publication_failed:
+                self._last_snapshot_failure_code = "EXTERNAL_STATE_PUBLICATION_FAILED"
+                return False
             if self._pending_trace_commit_unknown_attempts:
                 self._last_snapshot_failure_code = None
                 if not await self._resolve_pending_trace_commit_unknown_attempts():
@@ -2884,6 +2948,7 @@ class RuntimeStateManager:
                     self.run_id,
                 )
                 return False
+
             try:
                 from quantx_infrastructure.database.connection import get_async_db
                 from quantx_infrastructure.repositories.strategy_decision_trace_repository import (

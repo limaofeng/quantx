@@ -12,13 +12,16 @@ from quantx_application.t_trade_v3 import normalize_signal_policy
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
 )
+from sqlalchemy import select
 
 from quantx_infrastructure.core.assistant_strategy_policy import (
   T_TRADE_STRATEGY_CLASS_NAME,
 )
 from quantx_infrastructure.database.connection import get_async_db
+from quantx_infrastructure.models.agent_runtime import TTradeBatch
 from quantx_infrastructure.models.enums import OrderStatus, OrderType, StrategyRunMode
 from quantx_infrastructure.models.order import Order
+from quantx_infrastructure.models.strategy_run_state import StrategyRunState
 from quantx_infrastructure.models.t_trade_imported_entry import TTradeImportedEntry
 from quantx_infrastructure.repositories.strategy_repository import StrategyRepository
 from quantx_infrastructure.repositories.strategy_run_repository import (
@@ -30,6 +33,7 @@ from quantx_infrastructure.repositories.strategy_run_state_repository import (
 from quantx_infrastructure.repositories.t_trade_imported_entry_repository import (
   TTradeImportedEntryRepository,
 )
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.order_service import OrderService
 from quantx_infrastructure.services.t_trade_signal_diagnostics_service import (
   TTradeSignalDiagnosticsService,
@@ -393,9 +397,45 @@ class TTradeService:
       "session": await self.get_session(run_id, stock_code=stock_code),
     }
 
+  @staticmethod
+  def _external_entry_order_material(order: Any) -> tuple[Any, ...]:
+    return (
+      str(getattr(order, "account_id", "") or ""),
+      int(getattr(order, "type", 0) or 0),
+      int(getattr(order, "status", 0) or 0),
+      str(getattr(order, "stock_code", "") or "").upper(),
+      int(getattr(order, "traded_volume", 0) or 0),
+      float(getattr(order, "traded_price", 0.0) or 0.0),
+      getattr(order, "time", None),
+    )
+
+  @staticmethod
+  def _require_importable_external_entry_order(order: Any, account_id: str) -> None:
+    if order is None:
+      raise ValueError("未找到该笔委托，请先同步委托记录")
+    if str(getattr(order, "account_id", "") or "") != account_id:
+      raise ValueError("委托账户与做 T 监控账户不一致")
+    if int(getattr(order, "type", 0) or 0) != int(OrderType.BUY):
+      raise ValueError("只能将买入委托加入做 T 助手")
+    if int(getattr(order, "status", 0) or 0) != int(OrderStatus.SUCCEEDED):
+      raise ValueError("只能将已成交委托加入做 T 助手")
+    if int(getattr(order, "traded_volume", 0) or 0) <= 0:
+      raise ValueError("已成交委托的成交数量必须大于 0")
+    if float(getattr(order, "traded_price", 0.0) or 0.0) <= 0:
+      raise ValueError("已成交委托的成交均价必须大于 0")
+    if getattr(order, "time", None) is None:
+      raise ValueError("外部成交缺少权威成交时间")
+
   async def import_external_entry(
-    self, run_id: str, account_id: str, order_id: str
+    self,
+    run_id: str,
+    account_id: str,
+    order_id: str,
+    *,
+    account_coordination_held: bool = False,
   ) -> Dict[str, Any]:
+    if not account_coordination_held:
+      raise RuntimeError("做 T 外部成交必须持有账户协调锁")
     strategy_manager = self._require_runtime_manager()
     runtime = strategy_manager.get_run(run_id)
     if (
@@ -414,20 +454,34 @@ class TTradeService:
       numeric_order_id = int(normalized_order_id)
     except ValueError as exc:
       raise ValueError("委托编号格式不正确") from exc
+    normalized_order_id = str(numeric_order_id)
+    source_id = f"order:{normalized_order_id}"
     async for db in get_async_db():
       order = await db.get(Order, numeric_order_id)
+      imported = await TTradeImportedEntryRepository(db).find_source(
+        account_id, source_id
+      )
       break
-    if order is None:
-      raise ValueError("未找到该笔委托，请先同步委托记录")
-    if str(getattr(order, "account_id", "") or "") != account_id:
-      raise ValueError("委托账户与做 T 监控账户不一致")
-    if int(getattr(order, "type", 0) or 0) != int(OrderType.BUY):
-      raise ValueError("只能将买入委托加入做 T 助手")
-    if int(getattr(order, "status", 0) or 0) != int(OrderStatus.SUCCEEDED):
-      raise ValueError("只能将已成交委托加入做 T 助手")
-    if int(getattr(order, "traded_volume", 0) or 0) <= 0:
-      raise ValueError("已成交委托的成交数量必须大于 0")
-    source_id = f"order:{normalized_order_id}"
+    self._require_importable_external_entry_order(order, account_id)
+    if imported is not None:
+      if str(imported.strategy_run_id) != run_id:
+        raise ValueError("该笔委托已经加入其他做 T 策略运行")
+      # Retry after restart: the run has restored the durable snapshot. Do
+      # not recreate its batch/plan or checkpoint a new import over that state.
+      return {
+        "success": True,
+        "code": "EXTERNAL_ENTRY_IMPORTED",
+        "message": "已成交买入委托已加入做 T 自动退出监控",
+        "session": await self.get_session(run_id, order.stock_code),
+      }
+    initial_order_material = self._external_entry_order_material(order)
+    checkpoint = getattr(
+      getattr(runtime, "state_manager", None),
+      "checkpoint_strategy_state_changes",
+      None,
+    )
+    if not callable(checkpoint) or not await checkpoint():
+      raise RuntimeError("做 T 外部成交前无法建立持久化策略状态检查点")
     patch = runtime.strategy.import_external_entry(
       str(getattr(order, "stock_code", "") or ""),
       int(getattr(order, "traded_volume", 0) or 0),
@@ -437,38 +491,114 @@ class TTradeService:
     batch_id = str(
       patch.set["instrument_states"][order.stock_code].get("batch_id", "") or ""
     )
+    imported_state = dict(patch.set["instrument_states"][order.stock_code] or {})
+    exit_plan_template = runtime.strategy.build_exit_plan_template(
+      instrument_code=order.stock_code,
+      batch_id=batch_id,
+      plan_id=str(imported_state.get("exit_plan_id", "") or ""),
+      policy=dict(imported_state.get("exit_policy_snapshot") or {}),
+    )
+    trade_time = getattr(order, "time", None)
     async for db in get_async_db():
+      locked_order = await db.get(
+        Order,
+        numeric_order_id,
+        with_for_update=True,
+        populate_existing=True,
+      )
+      try:
+        self._require_importable_external_entry_order(locked_order, account_id)
+        if (
+          self._external_entry_order_material(locked_order)
+          != initial_order_material
+        ):
+          raise RuntimeError("外部成交委托在导入事务前已变化")
+      except Exception:
+        await db.rollback()
+        raise
       repo = TTradeImportedEntryRepository(db)
       if await repo.find_source(account_id, source_id):
         raise ValueError("该笔委托已经加入做 T 助手")
-      await repo.save(
-        TTradeImportedEntry(
-          account_id=account_id,
-          source_trade_id=source_id,
-          source_order_id=normalized_order_id,
-          source_trade_time=getattr(order, "time", None),
-          stock_code=order.stock_code,
+      state_record = await db.scalar(
+        select(StrategyRunState)
+        .where(StrategyRunState.run_id == run_id)
+        .with_for_update()
+      )
+      if state_record is None:
+        raise RuntimeError("做 T 外部成交缺少持久化策略状态")
+      durable_state = dict(state_record.custom_state or {})
+      for key, value in dict(patch.set or {}).items():
+        durable_state[str(key)] = value
+      for key in list(patch.unset or []):
+        durable_state.pop(str(key), None)
+      runtime_events = list(durable_state.get("runtime_events") or [])
+      runtime_events.extend(dict(event) for event in list(patch.append_events or []))
+      durable_state["runtime_events"] = runtime_events[-200:]
+      state_record.custom_state = durable_state
+      state_record.version = max(1, int(state_record.version or 0)) + 1
+      durable_state_version = int(state_record.version)
+      execution_environment = str(runtime.context.mode.value).upper()
+      try:
+        db.add(
+          TTradeBatch(
+            batch_id=batch_id,
+            account_id=account_id,
+            instrument_code=str(order.stock_code).upper(),
+            strategy_run_id=run_id,
+            source_execution_owner_type="STRATEGY_RUN",
+            source_execution_owner_id=run_id,
+            source_execution_environment=execution_environment,
+            status="ENTRY_FILLED",
+            target_volume=int(order.traded_volume or 0),
+            entry_filled_volume=int(order.traded_volume or 0),
+            entry_avg_price=float(order.traded_price or 0.0),
+            environment=execution_environment,
+            metrics_origin="EXTERNAL_IMPORT",
+            entry_filled_at=trade_time,
+            policy_version=0,
+          )
+        )
+        await AutoExitPlanService().register_strategy_entry_fill(
+          strategy_run_id=run_id,
+          exit_plan_template=exit_plan_template.to_dict(),
           volume=int(order.traded_volume or 0),
           price=float(order.traded_price or 0.0),
-          strategy_run_id=run_id,
-          batch_id=batch_id,
-          status="IMPORTED",
+          trade_time=trade_time,
+          execution_mode=str(runtime.context.mode.value),
+          event_business_key=(
+            f"strategy-external-entry:{run_id}:{source_id}:{batch_id}"
+          ),
+          db=db,
+          commit=False,
         )
-      )
+        await repo.save(
+          TTradeImportedEntry(
+            account_id=account_id,
+            source_trade_id=source_id,
+            source_order_id=normalized_order_id,
+            source_trade_time=trade_time,
+            stock_code=order.stock_code,
+            volume=int(order.traded_volume or 0),
+            price=float(order.traded_price or 0.0),
+            strategy_run_id=run_id,
+            batch_id=batch_id,
+            status="IMPORTED",
+          ),
+          commit=False,
+        )
+        await db.commit()
+      except Exception:
+        await db.rollback()
+        raise
       break
-    strategy_manager.executor.apply_external_state_patch(run_id, patch)
-    imported_state = dict(patch.set["instrument_states"][order.stock_code] or {})
-    await strategy_manager.executor.register_external_exit_plan(
+    # The public plan, import ledger, and durable state patch are visible as
+    # one transaction.  Only then may the resident strategy mirror that fact;
+    # a durable failure therefore cannot leave an in-memory ghost batch.
+    strategy_manager.executor.publish_external_durable_state(
       run_id,
-      runtime.strategy.build_exit_plan_template(
-        instrument_code=order.stock_code,
-        batch_id=batch_id,
-        plan_id=str(imported_state.get("exit_plan_id", "") or ""),
-        policy=dict(imported_state.get("exit_policy_snapshot") or {}),
-      ),
-      volume=int(order.traded_volume or 0),
-      price=float(order.traded_price or 0.0),
-      trade_time=getattr(order, "time", None),
+      patch,
+      durable_state_version=durable_state_version,
+      durable_custom_state=durable_state,
     )
     return {
       "success": True,

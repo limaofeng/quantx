@@ -27,6 +27,26 @@ from quantx_engine.t_trade_global_monitor import (
 from quantx_infrastructure.services.t_trade_service import TTradeService
 
 
+@pytest.fixture(autouse=True)
+def isolate_monitor_readiness_from_external_database(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """Unit tests must not open the workspace asyncpg pool as a fallback."""
+
+  monkeypatch.setattr(
+    monitor_module,
+    "TTradeOperationsService",
+    lambda: SimpleNamespace(
+      readiness=AsyncMock(side_effect=RuntimeError("readiness unavailable"))
+    ),
+  )
+  monkeypatch.setattr(
+    monitor_module.t_trade_monitor_projection_service,
+    "save",
+    AsyncMock(side_effect=lambda _account_id, payload: payload),
+  )
+
+
 def signal_policy(**overrides):
   payload = OpportunityPolicy().to_dict()
   payload.update(overrides)
@@ -135,6 +155,19 @@ def test_global_settings_expose_one_nested_signal_policy_contract():
   }
   assert "signal_lookback_seconds" not in settings
   assert "momentum_window_seconds" not in settings
+
+
+@pytest.mark.asyncio
+async def test_monitor_owns_shadow_consumer_lifecycle() -> None:
+  shadow = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+  service = TTradeGlobalMonitorService(paper_shadow_supervisor=shadow)
+  service._load_all_configs = AsyncMock(return_value=[])
+
+  await service.start()
+  await service.stop()
+
+  shadow.start.assert_awaited_once_with()
+  shadow.stop.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

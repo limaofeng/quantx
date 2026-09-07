@@ -115,7 +115,9 @@ async def test_never_delivered_order_can_cancel_locally() -> None:
 @pytest.mark.asyncio
 async def test_local_cancel_durably_terminalizes_managed_entry_intent() -> None:
   pending = _pending(broker_order_id=None)
-  outbox = SimpleNamespace(client_order_id="client-1", delivery_status="QUEUED")
+  outbox = SimpleNamespace(
+    client_order_id="client-1", message_id="message-1", delivery_status="QUEUED",
+  )
   intent = SimpleNamespace(
     strategy_run_id="plan-1",
     owner_type="STRATEGY_RUN",
@@ -163,6 +165,7 @@ async def test_local_cancel_durably_terminalizes_managed_entry_intent() -> None:
     "LOCAL_OUTBOX_CANCEL"
   )
   assert requests[0].request_metadata == intent.intent_metadata
+  assert pending.request_metadata["command_lifecycle_message_id"] == "message-1"
   db.commit.assert_awaited_once()
 
 

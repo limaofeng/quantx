@@ -1361,6 +1361,7 @@ def reduce_opportunity(
   policy: Optional[OpportunityPolicy] = None,
   reference_profile: Optional[OpportunityReferenceProfile] = None,
   candidate_control: Optional[CandidateControl] = None,
+  allow_candidate_creation: bool = True,
 ) -> OpportunityReduction:
   """Reduce one sample into a new serializable state and evaluation.
 
@@ -1498,6 +1499,7 @@ def reduce_opportunity(
     config,
     gates,
     reference_profile,
+    allow_candidate_creation=allow_candidate_creation,
   )
 
 
@@ -1510,6 +1512,7 @@ def _evaluate_state(
   *,
   force_health: Optional[DataHealth] = None,
   force_health_reasons: Sequence[str] = (),
+  allow_candidate_creation: bool = True,
 ) -> OpportunityReduction:
   features, anchors = _extract_features(state.samples, policy)
   profile_issue = _reference_profile_issue(reference_profile, sample.trade_date)
@@ -1789,6 +1792,7 @@ def _evaluate_state(
       reference_profile,
       force_health=DataHealth.WARMING,
       force_health_reasons=reset.health_reasons,
+      allow_candidate_creation=allow_candidate_creation,
     )
 
   if candidate is None and not rearmed_now:
@@ -1800,7 +1804,7 @@ def _evaluate_state(
       sample,
       policy,
     )
-    if candidate_path != OpportunityPath.NONE:
+    if candidate_path != OpportunityPath.NONE and allow_candidate_creation:
       score = (
         pullback_score
         if candidate_path == OpportunityPath.PULLBACK_REBOUND

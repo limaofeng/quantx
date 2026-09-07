@@ -28,6 +28,7 @@ from quantx_domain.trading import (
   TradingRiskChecker,
 )
 from quantx_domain.trading.exit_plan import ExitDecision, ExitEvaluationContext
+from quantx_domain.trading.t_order_policy import TExitOrderPolicy
 from sqlalchemy import select
 
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -38,6 +39,9 @@ from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   AutoExitAuthorizationGuard,
+)
+from quantx_infrastructure.services.exit_plan_execution_owner import (
+  durable_exit_plan_source_binding,
 )
 from quantx_infrastructure.services.trading_service import TradingService
 
@@ -97,17 +101,15 @@ class TradeIntentProcessor:
     plan: AutoExitPlanRecord,
     decision: ExitDecision,
   ) -> dict[str, Any]:
-    run_id = str(plan.strategy_run_id or "")
-    manual_command_id = str(plan.group_id or plan.source_id or plan.plan_id)
-    is_strategy_run = bool(run_id)
-    return {
-      "intent_origin_type": (
-        "STRATEGY_RUN" if is_strategy_run else "MANUAL_COMMAND"
-      ),
-      "manual_command_id": None if is_strategy_run else manual_command_id,
+    source_ref, _environment = TradeIntentProcessor._source_binding(plan)
+    is_manual = source_ref.owner_type is ExecutionOwnerType.MANUAL_COMMAND
+    metadata = {
+      "intent_origin_type": source_ref.owner_type.value,
+      "source_business_id": str(plan.source_id or ""),
+      "manual_command_id": source_ref.owner_id if is_manual else None,
       "manual_action_type": (
         None
-        if is_strategy_run
+        if not is_manual
         else (
           "LIQUIDATE_POSITIONS"
           if str(plan.source_type or "") == "MANUAL_LIQUIDATION"
@@ -121,10 +123,42 @@ class TradeIntentProcessor:
       "exit_reason": decision.reason,
       "exit_metrics": dict(decision.metrics or {}),
       "exit_policy_version": int(plan.config_version),
+      "config_version": int(plan.config_version),
       "group_id": plan.group_id,
       "completion_strategy": plan.completion_strategy,
-      "price_type": "LIMIT",
+      "price_type": "FIX_PRICE",
     }
+    if str(plan.source_type or "").upper() == "T_TRADE_BATCH":
+      order_policy = TExitOrderPolicy()
+      metadata.update(
+        {
+          "t_trade_role": "exit",
+          "t_batch_id": str(plan.source_id or ""),
+          "exit_policy_version": order_policy.version,
+          "t_exit_order_policy_version": order_policy.version,
+          "t_exit_order_ttl_seconds": order_policy.order_ttl_seconds,
+          "t_exit_total_ttl_seconds": order_policy.total_ttl_seconds,
+          "t_exit_max_replace_count": order_policy.max_replace_count,
+          "t_exit_max_slippage_bps": order_policy.max_slippage_bps,
+          "price_type": "FIX_PRICE",
+          "price_reference": "BID",
+          "protected_limit": True,
+          "max_exit_slippage_bps": order_policy.max_slippage_bps,
+        }
+      )
+    return metadata
+
+  @staticmethod
+  def _source_binding(
+    plan: AutoExitPlanRecord,
+  ) -> tuple[ExecutionOwnerRef, ExecutionEnvironment]:
+    binding = durable_exit_plan_source_binding(plan)
+    if binding is None:
+      raise ValueError("EXIT_PLAN_SOURCE_BINDING_INVALID")
+    source_ref, environment = binding
+    if environment.value != str(plan.environment or "").strip().upper():
+      raise ValueError("EXIT_PLAN_SOURCE_ENVIRONMENT_CONFLICT")
+    return source_ref, environment
 
   @staticmethod
   async def reserve_exit_intent(
@@ -197,9 +231,12 @@ class TradeIntentProcessor:
         authorization_code = authorization.code
       else:
         authorization_code = "AUTO_EXIT_NOT_AUTHORIZED"
-    run_id = str(plan.strategy_run_id or "")
-    manual_command_id = str(plan.group_id or plan.source_id or plan.plan_id)
-    is_strategy_run = bool(run_id)
+    source_ref, source_environment = self._source_binding(plan)
+    run_id = (
+      source_ref.owner_id
+      if source_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN
+      else ""
+    )
     metadata = {
       **self._exit_intent_metadata(plan, decision),
       "auto_exit_authorization_code": authorization_code,
@@ -250,11 +287,7 @@ class TradeIntentProcessor:
       origin=(
         ExitPlanIntentOrigin(
           plan_id=str(plan.plan_id),
-          source_execution_ref=(
-            ExecutionOwnerRef.strategy_run(run_id)
-            if is_strategy_run
-            else ExecutionOwnerRef.manual_command(manual_command_id)
-          ),
+          source_execution_ref=source_ref,
         )
       ),
       instrument_code=plan.instrument_code,
@@ -267,6 +300,8 @@ class TradeIntentProcessor:
       metadata=_without_owner_metadata(metadata),
       trace_id=intent_id,
     )
+    if source_environment is not plan_environment:
+      raise ValueError("EXIT_PLAN_SOURCE_ENVIRONMENT_CONFLICT")
     if not self._market_is_ready(market_ready):
       intent.metadata = local_pre_broker_zero_fill_metadata(
         intent.metadata,
@@ -394,7 +429,14 @@ class TradeIntentProcessor:
         }
       if durable_status == "PENDING":
         raise ValueError("EXIT_INTENT_RECONCILIATION_REQUIRED")
-    record_run_id = str(record.strategy_run_id or "")
+    source_ref, source_environment = self._source_binding(plan)
+    if source_environment is not plan_environment:
+      raise ValueError("EXIT_PLAN_SOURCE_ENVIRONMENT_CONFLICT")
+    record_run_id = (
+      source_ref.owner_id
+      if source_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN
+      else ""
+    )
     intent = TradeIntent(
       intent_id=record.id,
       strategy_id=str(record.strategy_id or "") if record_run_id else "",
@@ -403,11 +445,7 @@ class TradeIntentProcessor:
       origin=(
         ExitPlanIntentOrigin(
           plan_id=str(plan.plan_id),
-          source_execution_ref=(
-            ExecutionOwnerRef.strategy_run(record_run_id)
-            if record_run_id
-            else None
-          ),
+          source_execution_ref=source_ref,
         )
       ),
       instrument_code=record.instrument_code,
@@ -449,13 +487,31 @@ class TradeIntentProcessor:
       return self._market_not_ready_result(intent.intent_id)
     plan_environment = ExecutionEnvironment(str(plan.environment or "").upper())
     execution_ref = intent.execution_ref
+    source_ref, source_environment = self._source_binding(plan)
+    origin = intent.origin
     if (
       not isinstance(execution_ref, ExecutionOwnerRef)
       or execution_ref.owner_type is not ExecutionOwnerType.EXIT_PLAN
       or execution_ref.owner_id != str(plan.plan_id)
+      or not isinstance(origin, ExitPlanIntentOrigin)
+      or origin.source_execution_ref != source_ref
+      or source_environment is not plan_environment
     ):
       raise ValueError("退出计划路由缺少匹配的 EXIT_PLAN 执行归属")
     route_metadata = _without_owner_metadata(intent.metadata)
+    if str(plan.source_type or "").upper() == "T_TRADE_BATCH":
+      route_metadata.update(
+        {
+          "t_exit_order_policy_version": "TExitOrderPolicy.v1",
+          "t_order_reference_price": str(
+            context.bid_price or context.current_price
+          ),
+          "t_order_price_tick": str(context.price_tick or 0.01),
+          "t_order_limit_up": context.limit_up or None,
+          "t_order_limit_down": context.limit_down or None,
+          "protected_limit_price": str(limit_price),
+        }
+      )
     service = TradingService(
       account_id=plan.account_id,
       account_type=AccountType.STOCK,

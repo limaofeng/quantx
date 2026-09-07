@@ -24,6 +24,7 @@ from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.account_capacity_service import (
   AccountCapacityService,
+  allocate_old_inventory_claims,
   buy_cash_required,
 )
 from quantx_infrastructure.services.trade_command_service import (
@@ -286,6 +287,78 @@ async def test_positive_t_cannot_buy_more_than_unclaimed_old_inventory(capacity_
     batch_id="t-new",
     t_trade_role="ENTRY",
   )
+
+
+def test_bucket_claims_use_swing_then_unprotected_core_and_never_locked_core():
+  result = allocate_old_inventory_claims(
+    available_by_bucket={"swing": 100, "core": 300, "locked_core": 500},
+    required_claim_qty=250,
+    protected_core_floor=100,
+    allow_core_claim=True,
+  )
+
+  assert result.allocation == {"swing": 100, "core": 150, "locked_core": 0}
+  assert result.unclaimed_by_bucket == {
+    "swing": 0,
+    "core": 50,
+    "locked_core": 0,
+  }
+  assert result.protected_floor == 600
+
+
+def test_bucket_claims_fail_closed_before_protected_or_locked_core_is_used():
+  with pytest.raises(ValueError, match="T_TRADE_BUCKET_CAPACITY_EXCEEDED"):
+    allocate_old_inventory_claims(
+      available_by_bucket={"swing": 100, "core": 300, "locked_core": 500},
+      required_claim_qty=301,
+      protected_core_floor=100,
+      allow_core_claim=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_obligation_watermark_is_stable_and_changes_with_local_order(
+  capacity_db,
+):
+  control = await snapshot(capacity_db, cash=100000, volume=1000)
+  service = AccountCapacityService(capacity_db)
+  first = await service.read(control, instrument_code="600000.SH")
+  second = await service.read(control, instrument_code="600000.SH")
+  assert first.obligation_watermark == second.obligation_watermark
+
+  capacity_db.add(pending("new-risk", volume=100))
+  await capacity_db.commit()
+  changed = await service.read(control, instrument_code="600000.SH")
+  assert changed.obligation_watermark != first.obligation_watermark
+
+
+@pytest.mark.asyncio
+async def test_obligation_watermark_changes_for_other_instrument_batch(
+  capacity_db,
+) -> None:
+  control = await snapshot(capacity_db, cash=100000, volume=1000)
+  service = AccountCapacityService(capacity_db)
+  first = await service.read(control, instrument_code="600000.SH")
+  capacity_db.add(
+    TTradeBatch(
+      batch_id="other-instrument-batch",
+      account_id="account",
+      instrument_code="600001.SH",
+      strategy_run_id="run-other",
+      source_execution_owner_type="STRATEGY_RUN",
+      source_execution_owner_id="run-other",
+      source_execution_environment=ExecutionEnvironment.LIVE.value,
+      environment=ExecutionEnvironment.LIVE.value,
+      entry_filled_volume=100,
+      exit_filled_volume=0,
+      status="ENTRY_FILLED",
+    )
+  )
+  await capacity_db.commit()
+
+  changed = await service.read(control, instrument_code="600000.SH")
+
+  assert changed.obligation_watermark != first.obligation_watermark
 
 
 @pytest.mark.asyncio

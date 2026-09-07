@@ -19,6 +19,23 @@ from quantx_infrastructure.services.trade_intent_processor import (
 )
 
 
+def _manual_plan() -> SimpleNamespace:
+  template = {
+    "plan_id": "plan-1", "account_id": "account-1",
+    "instrument_code": "600000.SH", "source_type": "MANUAL_POSITION",
+    "source_id": "manual-1", "run_id": "",
+  }
+  return SimpleNamespace(
+    **{key: value for key, value in template.items() if key != "run_id"},
+    strategy_run_id=None,
+    environment=ExecutionEnvironment.PAPER.value,
+    source_execution_owner_type="MANUAL_COMMAND",
+    source_execution_owner_id="manual-1",
+    source_execution_environment=ExecutionEnvironment.PAPER.value,
+    plan_state={"template": template},
+  )
+
+
 @pytest.mark.asyncio
 async def test_route_rechecks_market_gate_immediately_before_place_order(
   monkeypatch: pytest.MonkeyPatch,
@@ -57,13 +74,7 @@ async def test_route_rechecks_market_gate_immediately_before_place_order(
   readiness = iter((True, False))
 
   result = await processor._route(
-    plan=SimpleNamespace(
-      plan_id="plan-1",
-      account_id="account-1",
-      instrument_code="600000.SH",
-      strategy_run_id=None,
-      environment=ExecutionEnvironment.PAPER.value,
-    ),
+    plan=_manual_plan(),
     intent=TradeIntent(
       intent_id="intent-1",
       strategy_id="",
@@ -74,7 +85,7 @@ async def test_route_rechecks_market_gate_immediately_before_place_order(
       ),
       origin=ExitPlanIntentOrigin(
         plan_id="plan-1",
-        source_execution_ref=None,
+        source_execution_ref=ExecutionOwnerRef.manual_command("manual-1"),
       ),
       instrument_code="600000.SH",
       direction=TradeIntentDirection.SELL,
@@ -160,13 +171,7 @@ async def test_route_uses_canonical_exit_plan_idempotency_key(
   processor._update_intent = AsyncMock()
 
   result = await processor._route(
-    plan=SimpleNamespace(
-      plan_id="plan-1",
-      account_id="account-1",
-      instrument_code="600000.SH",
-      strategy_run_id=None,
-      environment=ExecutionEnvironment.PAPER.value,
-    ),
+    plan=_manual_plan(),
     intent=TradeIntent(
       intent_id="intent-1",
       strategy_id="",
@@ -183,7 +188,7 @@ async def test_route_uses_canonical_exit_plan_idempotency_key(
       ),
       origin=ExitPlanIntentOrigin(
         plan_id="plan-1",
-        source_execution_ref=None,
+        source_execution_ref=ExecutionOwnerRef.manual_command("manual-1"),
       ),
       metadata={
         "owner_type": "EXIT_PLAN",

@@ -88,6 +88,54 @@ class FakePlanRepository:
     return self.reserving
 
 
+@pytest.mark.asyncio
+async def test_strategy_entry_fill_reuses_caller_transaction_without_commit(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  db = SimpleNamespace(scalar=AsyncMock())
+  repository = SimpleNamespace(find_by_id=AsyncMock(return_value=None))
+  monkeypatch.setattr(
+    service_module,
+    "AutoExitPlanRepository",
+    lambda supplied_db: repository if supplied_db is db else None,
+  )
+  service = AutoExitPlanService()
+  service.persist_strategy_plan_state = AsyncMock(return_value=({"ok": True}, 1))
+  template = ExitPlanTemplate(
+    plan_id="external-plan-1",
+    source_type="T_TRADE_BATCH",
+    source_id="batch-1",
+    account_id="account-a",
+    instrument_code="600000.SH",
+    bucket="swing",
+    run_id="run-1",
+    rules=[
+      ExitRuleSpec(
+        rule_id="external-plan-1:hard-stop",
+        strategy=ExitRuleType.HARD_STOP,
+        parameters={"stop_price": 9},
+      )
+    ],
+  )
+
+  result = await service.register_strategy_entry_fill(
+    strategy_run_id="run-1",
+    exit_plan_template=template.to_dict(),
+    volume=100,
+    price=10,
+    trade_time=datetime(2026, 9, 3, 10),
+    execution_mode="paper",
+    event_business_key="external-entry-1",
+    db=db,
+    commit=False,
+  )
+
+  assert result == ({"ok": True}, 1)
+  service.persist_strategy_plan_state.assert_awaited_once()
+  assert service.persist_strategy_plan_state.await_args.kwargs["db"] is db
+  assert service.persist_strategy_plan_state.await_args.kwargs["commit"] is False
+
+
 def active_record(*, plan_id="existing-plan", volume=200, pending=False):
   plan = ExitPlanBook().register_entry_fill(
     ExitPlanTemplate(
@@ -1120,6 +1168,42 @@ async def test_orphaned_intent_is_released_for_retry_after_timeout():
 
 
 @pytest.mark.asyncio
+async def test_t_attempt_terminal_keeps_exit_plan_pending_until_lifecycle_finalization(monkeypatch):
+  original, record, pending, events = install_monitor_report_fakes(monkeypatch, volume=300)
+  pending.t_trade_role = "EXIT"
+  pending.t_order_original_created_at = datetime(2026, 1, 1)
+  service = AutoExitPlanService()
+  await service.apply_order_event_for_report(
+    client_order_id="client-1", broker_order_id="101", status="CANCELLED",
+    cumulative_filled_volume=100, cumulative_fill_state="VALUE",
+  )
+  await service.apply_execution_for_report(
+    execution_id="fill-1", client_order_id="client-1", volume=100, price=10,
+  )
+  plan = ExitPlan.from_dict(record.plan_state)
+  assert plan.pending_intent_id == original.pending_intent_id
+  assert plan.pending_filled_volume == 100
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+  assert not plan.pending_order_terminal
+  assert events[0]["payload"]["status"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_t_fully_filled_attempt_waits_for_authoritative_lifecycle_close(monkeypatch):
+  original, record, pending, _events = install_monitor_report_fakes(monkeypatch, volume=300)
+  pending.t_trade_role = "EXIT"
+  pending.t_order_original_created_at = datetime(2026, 1, 1)
+  await AutoExitPlanService().apply_execution_for_report(
+    execution_id="fill-all", client_order_id="client-1", volume=300, price=10,
+  )
+  plan = ExitPlan.from_dict(record.plan_state)
+  assert plan.remaining_volume == 0
+  assert plan.pending_intent_id == original.pending_intent_id
+  assert plan.pending_filled_volume == 300
+  assert plan.status == ExitPlanStatus.EXIT_PENDING
+
+
+@pytest.mark.asyncio
 async def test_monitor_order_before_trade_waits_for_terminal_target(monkeypatch):
   original, record, _pending, events = install_monitor_report_fakes(monkeypatch)
   service = AutoExitPlanService()
@@ -1240,7 +1324,7 @@ async def test_monitor_terminal_fill_audit_distinguishes_unknown_from_zero(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("event_kind", ["ORDER", "TRADE"])
-async def test_monitor_report_consumer_rejects_orphan_runtime_plan(
+async def test_public_report_consumer_rejects_invalid_runtime_plan_binding(
   monkeypatch,
   event_kind: str,
 ) -> None:
@@ -1249,7 +1333,7 @@ async def test_monitor_report_consumer_rejects_orphan_runtime_plan(
   before = dict(record.plan_state)
   service = AutoExitPlanService()
 
-  with pytest.raises(RuntimeError, match="Monitor 无权消费"):
+  with pytest.raises(RuntimeError, match="EXIT_PLAN_OWNER_INVALID"):
     if event_kind == "ORDER":
       await service.apply_order_event_for_report(
         client_order_id="client-1",
@@ -1417,7 +1501,7 @@ async def test_stale_market_context_is_persisted_without_exit_submit(
 
 
 @pytest.mark.asyncio
-async def test_monitor_evaluation_rejects_orphan_runtime_plan(monkeypatch) -> None:
+async def test_public_runtime_evaluation_rejects_invalid_plan_binding(monkeypatch) -> None:
   record = active_record(plan_id="orphan-t-evaluate")
   record.source_type = "T_TRADE_BATCH"
   submit = AsyncMock()
@@ -1428,7 +1512,7 @@ async def test_monitor_evaluation_rejects_orphan_runtime_plan(monkeypatch) -> No
   )
   monkeypatch.setattr(AutoExitPlanService, "_submit_decision", submit)
 
-  with pytest.raises(RuntimeError, match="Monitor 无权执行"):
+  with pytest.raises(RuntimeError, match="EXIT_PLAN_OWNER_INVALID"):
     await AutoExitPlanService().evaluate_and_submit(
       plan_id=record.plan_id,
       context=ExitEvaluationContext(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from quantx_application.t_trade_v3 import (
   SignalPolicyChangePlanner,
@@ -101,6 +101,7 @@ class TTradeGlobalMonitorService:
     runtime_manager: Any = None,
     interval_seconds: float = 10.0,
     universe_providers: Optional[InstrumentUniverseProviderRegistry] = None,
+    paper_shadow_supervisor: Any = None,
   ):
     self.interval_seconds = max(2.0, float(interval_seconds or 10.0))
     self.session_service = TTradeService(runtime_manager)
@@ -110,24 +111,28 @@ class TTradeGlobalMonitorService:
     )
     self._task: Optional[asyncio.Task] = None
     self._stopping = asyncio.Event()
+    self.paper_shadow_supervisor = paper_shadow_supervisor
 
   async def start(self) -> None:
     if self._task and not self._task.done():
       return
     self._stopping = asyncio.Event()
+    if self.paper_shadow_supervisor is not None:
+      await self.paper_shadow_supervisor.start()
     self._task = asyncio.create_task(self._run(), name="TTradeGlobalMonitor")
     logger.info("动态持仓做 T 监控器已启动")
 
   async def stop(self) -> None:
     self._stopping.set()
-    if not self._task:
-      return
-    self._task.cancel()
-    try:
-      await self._task
-    except asyncio.CancelledError:
-      pass
-    self._task = None
+    if self._task:
+      self._task.cancel()
+      try:
+        await self._task
+      except asyncio.CancelledError:
+        pass
+      self._task = None
+    if self.paper_shadow_supervisor is not None:
+      await self.paper_shadow_supervisor.stop()
     logger.info("动态持仓做 T 监控器已停止")
 
   async def save_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -683,6 +688,22 @@ class TTradeGlobalMonitorService:
         coordination_blocked = True
         errors.append(f"退出中标的协调失败: {exc}")
 
+    if self.paper_shadow_supervisor is not None:
+      try:
+        await self.paper_shadow_supervisor.reconcile(
+          config=config,
+          universe=universe,
+          legacy_results=self._legacy_shadow_results(sessions),
+        )
+      except Exception as exc:
+        # P3 is an isolated PAPER observer.  Its failure is visible in Engine
+        # logs but cannot mutate or revoke the still-authoritative legacy run.
+        logger.exception(
+          "独立做 T PAPER shadow 协调失败: account=%s error=%s",
+          account_id,
+          exc,
+        )
+
     await self._block_new_entries_if_needed(config, errors)
     try:
       await self._save_reconcile_config(config, errors)
@@ -755,6 +776,21 @@ class TTradeGlobalMonitorService:
       or bool(item.get("pending_exit_intent_id"))
       for item in sessions
     )
+
+  @staticmethod
+  def _legacy_shadow_results(
+    sessions: List[Dict[str, Any]],
+  ) -> Dict[str, Mapping[str, Any]]:
+    results: Dict[str, Mapping[str, Any]] = {}
+    for session in sessions:
+      code = str(session.get("stock_code") or "").strip().upper()
+      raw = session.get("signal_snapshot") or session.get("opportunity")
+      if code and isinstance(raw, Mapping):
+        results[code] = {
+          **dict(raw),
+          "strategy_run_id": str(session.get("run_id") or ""),
+        }
+    return results
 
   def _resolve_universe_snapshot(
     self,

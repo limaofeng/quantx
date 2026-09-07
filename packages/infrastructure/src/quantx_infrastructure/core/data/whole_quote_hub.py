@@ -475,6 +475,10 @@ class WholeQuoteHub:
 
   async def _dispatch(self, data: dict[str, dict[str, Any]]) -> None:
     started = time.monotonic()
+    # Consumers can await while the next delta replaces entries in _latest.
+    # Freeze the snapshot mapping once, retaining immutable per-tick objects.
+    if data is self._latest:
+      data = dict(data)
     lagging_critical_consumer = False
     # Full-market consumers receive the original batch object. Per-symbol payloads
     # are allocated once per affected symbol and shared by all of its consumers.
@@ -578,7 +582,7 @@ class WholeQuoteHub:
       self._tick_consumers_by_code.setdefault(stock_code, {})[handle] = consumer
     placeholder.cancel()
     await asyncio.gather(placeholder, return_exceptions=True)
-    initial = self._latest if stock_code is None else {
+    initial = dict(self._latest) if stock_code is None else {
       stock_code: self._latest[stock_code]
     } if stock_code in self._latest else {}
     if initial and self.is_ready:
@@ -848,7 +852,7 @@ class WholeQuoteHub:
   def _has_recoverable_lag(self) -> bool:
     return any(
       consumer.status is QuoteConsumerStatus.LAGGING
-      and consumer.lag_reason == "queue_overflow"
+      and consumer.lag_reason in {"queue_overflow", "callback_failed"}
       for consumer in self._consumers.values()
     )
 
@@ -1012,7 +1016,7 @@ class WholeQuoteHub:
         for consumer in self._consumers.values()
         if (
           consumer.status is QuoteConsumerStatus.LAGGING
-          and consumer.lag_reason == "queue_overflow"
+          and consumer.lag_reason in {"queue_overflow", "callback_failed"}
         )
       ]
       if not lagging:

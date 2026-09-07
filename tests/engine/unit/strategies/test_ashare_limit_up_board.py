@@ -1,7 +1,6 @@
 """AshareLimitUpBoardStrategy and board-exit rule tests."""
 
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -12,6 +11,7 @@ from quantx_domain.strategies.ashare_limit_up_board import (
 from quantx_domain.strategies.base import (
   OrderStateEvent,
   StrategyCadence,
+  StrategyContext,
   StrategyInput,
   TradeExecutionEvent,
   TradeIntentExecutionMode,
@@ -28,21 +28,9 @@ from quantx_domain.trading.market_rules import MarketDataSnapshot
 pytestmark = pytest.mark.unit
 
 
-@dataclass
-class DummyContext:
-  run_id: str
-  mode: str
-  instruments: list[str]
-  parameters: dict
-  initial_capital: float = 1_000_000
-  backtest_start_time: Optional[datetime] = None
-  backtest_end_time: Optional[datetime] = None
-  current_time: Optional[datetime] = None
-
-
 def make_strategy(parameters=None) -> AshareLimitUpBoardStrategy:
   return AshareLimitUpBoardStrategy(
-    DummyContext(
+    StrategyContext(
       run_id="board-run",
       mode="backtest",
       instruments=["000001.SZ"],

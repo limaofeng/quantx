@@ -21,6 +21,7 @@ from quantx_domain.enums import (
   StrategyCategory,
   StrategyInstrumentScope,
   StrategyInstrumentUniverseMode,
+  StrategyRunMode,
 )
 from quantx_domain.schemas import ParameterProperty, ParameterSchema
 from quantx_domain.state_schema import StateProperty, StateSchema
@@ -33,6 +34,8 @@ from quantx_domain.strategies.base import (
   StrategyCadence,
   StrategyInput,
   StrategyOutput,
+  SymbolRuntimeStatePatch,
+  TAssistantExecutionIntentOrigin,
   TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
@@ -52,6 +55,15 @@ from quantx_domain.trading.exit_plan import (
   ExitSizingPolicy,
   ExitT1Policy,
 )
+from quantx_domain.trading.t_assistant_execution import (
+  TAssistantEntryReadiness,
+  TAssistantExecutionStatus,
+)
+from quantx_domain.trading.t_assistant_market_state import (
+  SymbolMarketStateReducer,
+  TDecisionSnapshot,
+)
+from quantx_domain.trading.t_order_policy import TExitOrderPolicy
 from quantx_domain.trading.t_trade import (
   TickSample,
   TradingCostPolicy,
@@ -168,7 +180,7 @@ class TTradeTimeExitMode:
 class AshareIntradayTAssistantStrategy(StrategyBase):
   """Monitor an account holdings universe in one strategy instance."""
 
-  OWNS_RUNTIME_EXIT_PLAN_BOOK = True
+  OWNS_RUNTIME_EXIT_PLAN_BOOK = False
   USES_T_TRADE_OPPORTUNITY_PROFILE = True
   CATEGORY = StrategyCategory.MEAN_REVERSION
   RISK_LEVEL = "medium"
@@ -185,6 +197,10 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
   ]
   INSTRUMENT_SCOPE = StrategyInstrumentScope.MULTI
   INSTRUMENT_UNIVERSE_MODE = StrategyInstrumentUniverseMode.ACCOUNT_HOLDINGS
+
+  def __init__(self, context):
+    super().__init__(context)
+    self.OWNS_RUNTIME_EXIT_PLAN_BOOK = context.mode == StrategyRunMode.BACKTEST
 
   @property
   def name(self) -> str:
@@ -1161,6 +1177,8 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     )
 
   async def step(self, input: StrategyInput) -> StrategyOutput:
+    if input.cadence == StrategyCadence.SNAPSHOT:
+      return self._step_snapshot(input)
     if input.cadence == StrategyCadence.RECONCILE:
       return self._reconcile_universe(input)
     if input.cadence != StrategyCadence.TICK:
@@ -1269,6 +1287,10 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       external_blockers=external_blockers,
       pending_entry_intent_id=str(state.get("pending_entry_intent_id") or ""),
     )
+    evaluation["market_fence_sequence"] = int(
+      input.market_data_context.source_sequence or 0
+    )
+    evaluation["market_stream_id"] = input.market_data_context.stream_id
     opportunity = self._opportunity_payload(
       reduced_state,
       evaluation=evaluation,
@@ -1332,6 +1354,263 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       reason=reason,
       trace={"signal_snapshot": evaluation},
       append_events=events,
+    )
+
+  def _step_snapshot(self, input: StrategyInput) -> StrategyOutput:
+    """Reduce an independent T execution without touching StrategyRun state."""
+
+    snapshot = input.market_data
+    if not isinstance(snapshot, TDecisionSnapshot):
+      raise TypeError("T-assistant SNAPSHOT input requires TDecisionSnapshot")
+    if input.execution_ref != snapshot.execution_ref:
+      raise ValueError("T-assistant SNAPSHOT owner mismatch")
+
+    policy = self._opportunity_policy()
+    reducer = SymbolMarketStateReducer()
+    patches: list[SymbolRuntimeStatePatch] = []
+    intents: list[TradeIntent] = []
+    trace_results: dict[str, Any] = {}
+    execution_blockers: list[str] = []
+    if snapshot.execution_status is not TAssistantExecutionStatus.RUNNING:
+      execution_blockers.append("T_ASSISTANT_EXECUTION_NOT_RUNNING")
+    if snapshot.entry_readiness is not TAssistantEntryReadiness.READY:
+      execution_blockers.append("T_ASSISTANT_ENTRY_NOT_READY")
+    execution_allows_candidates = not execution_blockers
+    for symbol_snapshot in snapshot.symbols:
+      blockers = [*execution_blockers, *symbol_snapshot.blockers]
+      if not symbol_snapshot.eligible:
+        blockers.append("T_SYMBOL_NOT_ELIGIBLE")
+      if symbol_snapshot.draining:
+        blockers.append("T_SYMBOL_DRAINING")
+      if symbol_snapshot.ignored:
+        blockers.append("T_SYMBOL_IGNORED")
+      reduction = reducer.reduce(
+        symbol_snapshot,
+        policy=policy,
+        allow_candidate_creation=(execution_allows_candidates and not blockers),
+        decision_time_ms=int(snapshot.decision_time.timestamp() * 1000),
+      )
+
+      proposed_for_symbol: list[str] = []
+      if not blockers:
+        for candidate in reduction.opportunities:
+          intent = self._build_snapshot_candidate_intent(
+            input=input,
+            candidate=candidate,
+            policy=policy,
+            instrument_code=symbol_snapshot.instrument_code,
+          )
+          intents.append(intent)
+          proposed_for_symbol.append(intent.intent_id)
+
+      material_events = [dict(item) for item in reduction.material_events]
+      if blockers and reduction.opportunities:
+        material_events.append(
+          {
+            "event_type": "T_OPPORTUNITY_PROPOSAL_BLOCKED",
+            "instrument_code": symbol_snapshot.instrument_code,
+            "candidate_ids": [
+              candidate.candidate_id for candidate in reduction.opportunities
+            ],
+            "reason_codes": list(dict.fromkeys(blockers)),
+          }
+        )
+      evaluations = [item.to_dict() for item in reduction.evaluations]
+      released_candidate = (
+        reduction.opportunities[-1] if reduction.opportunities else None
+      )
+      last_tick = (
+        symbol_snapshot.delta_slice.ticks[-1]
+        if symbol_snapshot.delta_slice.ticks
+        else None
+      )
+      latest_evaluation = evaluations[-1] if evaluations else {}
+      if not latest_evaluation and released_candidate is not None:
+        opportunity_state = reduction.next_state.opportunity_state
+        latest_evaluation = {
+          "data_health": opportunity_state.data_health.value,
+          "pullback": {"phase": opportunity_state.pullback.phase.value},
+          "momentum": {"phase": opportunity_state.momentum.phase.value},
+          "selected_path": released_candidate.path.value,
+          "opportunity_score": released_candidate.score,
+          "candidate_status": "LATCHED",
+          "candidate_id": released_candidate.candidate_id,
+          "candidate_fingerprint": released_candidate.fingerprint,
+          "continuity_generation": (
+            symbol_snapshot.state.opportunity_state.continuity_generation
+          ),
+          "source_time_ms": released_candidate.source_time_ms,
+          "tick_ordinal": released_candidate.tick_ordinal,
+          "market_fence_sequence": (
+            symbol_snapshot.state.deferred_candidate_fence_sequence
+          ),
+          "deferred_release": True,
+        }
+      patch = RuntimeStatePatch(
+        set={
+          "symbol_state": reduction.next_state.to_dict(),
+          "latest_evaluation": latest_evaluation or None,
+          "evaluations": evaluations,
+          "proposal_intent_ids": proposed_for_symbol,
+          "external_blockers": list(dict.fromkeys(blockers)),
+        },
+        append_events=material_events,
+      )
+      patches.append(
+        SymbolRuntimeStatePatch(
+          instrument_code=symbol_snapshot.instrument_code,
+          expected_revision=reduction.previous_revision,
+          patch=patch,
+          material=bool(reduction.material or proposed_for_symbol or material_events),
+        )
+      )
+      trace_results[symbol_snapshot.instrument_code] = {
+        "material": bool(reduction.material or proposed_for_symbol or material_events),
+        "data_health": latest_evaluation.get("data_health"),
+        "pullback_phase": dict(latest_evaluation.get("pullback") or {}).get("phase"),
+        "momentum_phase": dict(latest_evaluation.get("momentum") or {}).get("phase"),
+        "selected_path": latest_evaluation.get("selected_path"),
+        "opportunity_score": latest_evaluation.get("opportunity_score"),
+        "candidate_status": latest_evaluation.get("candidate_status")
+        or ("LATCHED" if released_candidate is not None else None),
+        "candidate_id": latest_evaluation.get("candidate_id")
+        or (released_candidate.candidate_id if released_candidate else None),
+        "candidate_fingerprint": latest_evaluation.get("candidate_fingerprint")
+        or (released_candidate.fingerprint if released_candidate else None),
+        "source_identity": {
+          "continuity_generation": latest_evaluation.get("continuity_generation")
+          or (
+            symbol_snapshot.state.opportunity_state.continuity_generation
+            if released_candidate is not None
+            else None
+          ),
+          "source_time_ms": latest_evaluation.get("source_time_ms")
+          or (
+            released_candidate.source_time_ms
+            if released_candidate is not None
+            else None
+          ),
+          "tick_ordinal": latest_evaluation.get("tick_ordinal")
+          or (
+            released_candidate.tick_ordinal if released_candidate is not None else None
+          ),
+        },
+        "market_fence_sequence": (
+          int(last_tick.market_fence_sequence)
+          if last_tick is not None
+          else symbol_snapshot.state.deferred_candidate_fence_sequence
+        ),
+        "proposal_intent_ids": proposed_for_symbol,
+        "blockers": list(dict.fromkeys(blockers)),
+      }
+
+    return StrategyOutput(
+      trade_intents=sorted(
+        intents,
+        key=lambda item: (item.instrument_code, item.intent_id),
+      ),
+      runtime_state_patch=RuntimeStatePatch(
+        set={
+          "last_snapshot_hash": snapshot.snapshot_hash,
+          "last_snapshot_fence_sequence": snapshot.fence_sequence,
+          "last_market_delta_manifest_hash": snapshot.market_delta_manifest_hash,
+        }
+      ),
+      symbol_state_patches=sorted(
+        patches,
+        key=lambda item: item.instrument_code,
+      ),
+      decision_tags=[
+        "t_assistant_snapshot",
+        "paper_shadow" if snapshot.scorer_mode == "RULE_ONLY" else "scored_shadow",
+      ],
+      trace_payload={
+        "snapshot_hash": snapshot.snapshot_hash,
+        "market_delta_manifest_hash": snapshot.market_delta_manifest_hash,
+        "symbol_results": trace_results,
+      },
+    )
+
+  def _build_snapshot_candidate_intent(
+    self,
+    *,
+    input: StrategyInput,
+    candidate: OpportunityCandidate,
+    policy: OpportunityPolicy,
+    instrument_code: str,
+  ) -> TradeIntent:
+    execution_ref = input.execution_ref
+    if (
+      execution_ref is None
+      or execution_ref.owner_type is not ExecutionOwnerType.T_ASSISTANT_EXECUTION
+    ):
+      raise ValueError("snapshot candidate requires a T-assistant execution owner")
+    target_amount = float(self.get_parameter("target_trade_amount", 10_000.0))
+    if target_amount <= 0:
+      raise ValueError("target_trade_amount must be positive")
+    candidate_identity = f"{execution_ref.owner_id}:{candidate.fingerprint}"
+    batch_id = str(
+      uuid.uuid5(uuid.NAMESPACE_URL, f"quantx:t-assistant:batch:{candidate_identity}")
+    )
+    intent_id = str(
+      uuid.uuid5(uuid.NAMESPACE_URL, f"quantx:t-assistant:intent:{candidate_identity}")
+    )
+    plan_id = f"t-exit-{batch_id}"
+    template = self.build_exit_plan_template(
+      instrument_code=instrument_code,
+      batch_id=batch_id,
+      plan_id=plan_id,
+      policy=self._exit_policy_snapshot(),
+    ).to_dict()
+    template["run_id"] = ""
+    template["metadata"] = {
+      **dict(template.get("metadata") or {}),
+      "source_execution_ref": execution_ref.to_dict(),
+      "candidate_id": candidate.candidate_id,
+      "candidate_fingerprint": candidate.fingerprint,
+      "policy_version": policy.policy_version,
+      "feature_schema_version": policy.feature_schema_version,
+    }
+    return TradeIntent(
+      strategy_id=str(input.strategy_id),
+      instrument_code=instrument_code,
+      direction=TradeIntentDirection.BUY,
+      bucket=SWING_BUCKET,
+      reason=f"T_TRADE_{candidate.path.value}_ENTRY",
+      priority=TradeIntentPriority.NORMAL,
+      target_amount=target_amount,
+      limit_price_hint=candidate.price,
+      execution_mode=TradeIntentExecutionMode.MANUAL_CONFIRM,
+      approval_ttl_ms=policy.candidate_ttl_seconds * 1000,
+      max_price_deviation_bps=float(self.get_parameter("max_price_deviation_pct", 0.3))
+      * 100.0,
+      metadata={
+        "t_trade_role": "entry",
+        "source_execution_ref": execution_ref.to_dict(),
+        "instrument_code": instrument_code,
+        "candidate_id": candidate.candidate_id,
+        "candidate_fingerprint": candidate.fingerprint,
+        "policy_version": policy.policy_version,
+        "feature_schema_version": policy.feature_schema_version,
+        "source_time_ms": candidate.source_time_ms,
+        "tick_ordinal": candidate.tick_ordinal,
+        "opportunity_score": candidate.score,
+        "requested_entry_amount": target_amount,
+        "t_batch_id": batch_id,
+        "exit_plan_id": plan_id,
+        "exit_plan_template": template,
+      },
+      trace_id=input.trace_id,
+      intent_id=intent_id,
+      created_at=input.timestamp,
+      origin=TAssistantExecutionIntentOrigin(
+        execution_id=execution_ref.owner_id,
+        producer_id="ashare-intraday-t-assistant",
+        opportunity_id=candidate.candidate_id,
+        candidate_id=candidate.candidate_id,
+        cycle_id=input.input_id,
+      ),
+      execution_ref=execution_ref,
     )
 
   async def on_order(self, event: OrderStateEvent) -> Optional[RuntimeStatePatch]:
@@ -2983,6 +3262,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     """Describe T-batch protection without owning its runtime lifecycle."""
 
     resolved = self._normalize_exit_policy(dict(policy or self._exit_policy_snapshot()))
+    order_policy = TExitOrderPolicy()
     sizing = ExitSizingPolicy()
     rules = [
       ExitRuleSpec(
@@ -3105,9 +3385,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       t1_policy=ExitT1Policy.ALLOW_SAME_INSTRUMENT_SUBSTITUTION,
       execution=ExitExecutionPolicy(
         price_reference=ExitPriceReference.BID,
-        price_type="MARKET",
-        protected_limit=False,
-        max_slippage_bps=float(self.get_parameter("max_exit_slippage_bps", 30.0)),
+        price_type="FIX_PRICE",
+        protected_limit=True,
+        max_slippage_bps=float(order_policy.max_slippage_bps),
         urgency="PROTECTIVE_EXIT",
         execution_mode="AUTO",
       ),
@@ -3116,7 +3396,13 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "instrument_code": instrument_code,
         "t_batch_id": batch_id,
         "global_monitor_id": str(self.get_parameter("global_monitor_id", "") or ""),
-        "exit_policy_version": int(resolved.get("config_version", 0) or 0),
+        "exit_plan_config_version": int(resolved.get("config_version", 0) or 0),
+        "exit_policy_version": order_policy.version,
+        "t_exit_order_policy_version": order_policy.version,
+        "t_exit_order_ttl_seconds": order_policy.order_ttl_seconds,
+        "t_exit_total_ttl_seconds": order_policy.total_ttl_seconds,
+        "t_exit_max_replace_count": order_policy.max_replace_count,
+        "t_exit_max_slippage_bps": order_policy.max_slippage_bps,
       },
       auto_exit_authorized=bool(self.get_parameter("auto_exit_acknowledged", False)),
     )

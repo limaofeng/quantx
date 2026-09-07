@@ -17,6 +17,7 @@ from quantx_application.t_trade_v3 import (
   ReadD1ReferenceProfile,
   normalize_signal_policy,
 )
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.trading.t_trade_opportunity_engine import (
   OpportunityPolicy,
   OpportunityReferenceProfile,
@@ -196,6 +197,8 @@ async def test_materialization_receives_scope_only_after_cas():
     event={"event_key": "event-1", "type": "T_TRADE_OPPORTUNITY_EVALUATION"},
     account_id="account-1",
     strategy_run_id="run-1",
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    execution_environment=None,
   )
 
 
@@ -248,7 +251,54 @@ async def test_checkpoint_batch_passes_mixed_committed_sources_and_preserves_rec
     events=[dict(request.event) for request in requests],
     account_id="account-1",
     strategy_run_id="run-1",
+    execution_ref=ExecutionOwnerRef.strategy_run("run-1"),
+    execution_environment=None,
   )
+
+
+@pytest.mark.asyncio
+async def test_materialization_carries_t_assistant_owner_without_run_witness():
+  port = AsyncMock()
+  port.materialize_evaluation.return_value = "shadow-row"
+  owner = ExecutionOwnerRef(
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+    "execution-1",
+  )
+
+  result = await MaterializeEvaluationAfterCAS(port).execute(
+    PostCasEvaluationInput(
+      event={"event_key": "shadow-1", "record_kind": "MATERIAL"},
+      account_id="account-1",
+      strategy_run_id=None,
+      execution_ref=owner,
+      execution_environment=ExecutionEnvironment.PAPER,
+      cas_committed=True,
+    )
+  )
+
+  assert result.materialized is True
+  port.materialize_evaluation.assert_awaited_once_with(
+    event={"event_key": "shadow-1", "record_kind": "MATERIAL"},
+    account_id="account-1",
+    strategy_run_id=None,
+    execution_ref=owner,
+    execution_environment=ExecutionEnvironment.PAPER,
+  )
+
+
+def test_post_cas_rejects_execution_id_as_strategy_run_witness():
+  with pytest.raises(ValueError, match="cannot carry strategy_run_id"):
+    PostCasEvaluationInput(
+      event={"event_key": "shadow-1"},
+      account_id="account-1",
+      strategy_run_id="execution-1",
+      execution_ref=ExecutionOwnerRef(
+        ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+        "execution-1",
+      ),
+      execution_environment=ExecutionEnvironment.PAPER,
+      cas_committed=True,
+    )
 
 
 @pytest.mark.asyncio
