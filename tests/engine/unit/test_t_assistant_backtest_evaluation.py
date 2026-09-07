@@ -246,6 +246,9 @@ async def test_failed_frozen_policy_is_saved_without_optimization(tmp_path):
     2,
     1,
     {"base": (1.0, 0.001, 1.0, 0.001)},
+    {"base": "GT"},
+    0.001,
+    1.0,
   )
   directory, report = await evaluate_backtest_comparison(
     request=runtime(request_only=True),
@@ -267,6 +270,9 @@ async def test_failed_frozen_policy_is_saved_without_optimization(tmp_path):
     "minimum_closed_batches": 2,
     "minimum_group_closed_batches": 1,
     "scenario_thresholds": {"base": [1.0, 0.001, 1.0, 0.001]},
+    "return_comparisons": {"base": "GT"},
+    "minimum_minute_coverage": 0.001,
+    "minimum_complete_day_fraction": 1.0,
   }
 
 

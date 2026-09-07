@@ -2,10 +2,13 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, time
 from math import isfinite
 from pathlib import Path
 from uuid import uuid4
 
+from quantx_domain.clock import SHANGHAI
+from quantx_domain.trading.market_session import classify_market_data_session
 from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
 from quantx_infrastructure.services.t_assistant_backtest_store import (
   TAssistantBacktestStore,
@@ -29,8 +32,20 @@ class BacktestAdmissionPolicy:
   # Each scenario owns (minimum incremental return, maximum drawdown,
   # minimum worst-group return, maximum group drawdown); no default thresholds.
   scenario_thresholds: dict[str, tuple[float, float, float, float]]
+  return_comparisons: dict[str, str]
+  minimum_minute_coverage: float
+  minimum_complete_day_fraction: float
 
   def __post_init__(self):
+    if set(self.return_comparisons) != set(self.scenario_thresholds) or any(
+      v not in {"GT", "GTE"} for v in self.return_comparisons.values()
+    ):
+      raise ValueError("BACKTEST_RETURN_COMPARISON_REQUIRED")
+    if any(
+      not isfinite(v) or not 0 < v <= 1
+      for v in (self.minimum_minute_coverage, self.minimum_complete_day_fraction)
+    ):
+      raise ValueError("BACKTEST_DATA_COVERAGE_THRESHOLDS_REQUIRED")
     if not self.version or not self.approval_reference or not self.scenario_thresholds:
       raise ValueError("BACKTEST_APPROVED_POLICY_REQUIRED")
     if any(
@@ -50,6 +65,79 @@ class BacktestAdmissionPolicy:
       for v in self.scenario_thresholds.values()
     ):
       raise ValueError("BACKTEST_METRIC_THRESHOLDS_INVALID")
+
+
+def qualify_backtest_data(request, events, policy):
+  """Report continuous-session minute coverage before any scenario is run.
+
+  Every configured symbol must meet the explicit minute threshold for a day
+  to qualify. Suspended or absent data is not silently removed from the sample.
+  This measures observed coverage, not a proof of exchange-wide Tick completeness.
+  """
+  codes = set(request.runtime_options["initial_positions"])
+  if isinstance(events, FrozenBacktestDataset):
+    days = [
+      datetime.fromisoformat(d).date()
+      for d in events.manifest["material"]["trading_days"]
+    ]
+    source = events.events()
+  else:
+    last = max(e.decision_time.astimezone(SHANGHAI).date() for e in events)
+    days = [
+      d
+      for d in request.runtime_options["trading_days"]
+      if request.start_at.astimezone(SHANGHAI).date() <= d <= last
+    ]
+    source = events
+  if not days:
+    raise ValueError("BACKTEST_QUALIFICATION_CALENDAR_EMPTY")
+  allowed_days = set(days)
+  expected = {
+    minute
+    for minute in range(1440)
+    if classify_market_data_session(
+      datetime.combine(days[0], time(minute // 60, minute % 60, 30), SHANGHAI)
+    ).is_continuous
+  }
+  observed = {}
+  for event in source:
+    at = event.market.timestamp.astimezone(SHANGHAI)
+    code, minute = event.market.instrument_code, at.hour * 60 + at.minute
+    if code not in codes or at.date() not in allowed_days:
+      raise ValueError("BACKTEST_QUALIFICATION_SCOPE_MISMATCH")
+    if minute in expected:
+      observed.setdefault((at.date(), code), set()).add(minute)
+  partitions = [
+    {
+      "day": day.isoformat(),
+      "code": code,
+      "observed_minutes": len(observed.get((day, code), set())),
+      "coverage": len(observed.get((day, code), set())) / len(expected),
+    }
+    for day in days
+    for code in sorted(codes)
+  ]
+  complete = sum(
+    all(
+      p["coverage"] >= policy.minimum_minute_coverage
+      for p in partitions
+      if p["day"] == day.isoformat()
+    )
+    for day in days
+  )
+  reasons = []
+  if complete < policy.minimum_trading_days:
+    reasons.append("INSUFFICIENT_COMPLETE_TRADING_DAYS")
+  if complete / len(days) < policy.minimum_complete_day_fraction:
+    reasons.append("COMPLETE_DAY_FRACTION_BELOW_THRESHOLD")
+  return {
+    "version": "continuous-minute-coverage.v1",
+    "expected_minutes_per_day": len(expected),
+    "expected_days": len(days),
+    "complete_days": complete,
+    "partitions": partitions,
+    "reasons": reasons,
+  }
 
 
 def summarize_backtest(store, runtime):
@@ -139,7 +227,10 @@ def admission_reasons(metrics, *, policy, scenario):
     for g in metrics["groups"].values()
   ):
     reasons.append("INSUFFICIENT_GROUP_SAMPLES")
-  if metrics["incremental_return"] < minimum_return:
+  if metrics["incremental_return"] < minimum_return or (
+    policy.return_comparisons[scenario] == "GT"
+    and metrics["incremental_return"] == minimum_return
+  ):
     reasons.append("INCREMENTAL_RETURN_BELOW_THRESHOLD")
   if metrics["incremental_max_drawdown"] > maximum_drawdown:
     reasons.append("INCREMENTAL_DRAWDOWN_EXCEEDED")
@@ -192,6 +283,21 @@ async def evaluate_backtest_comparison(
     directory / "evaluation.json",
     {"material": frozen, "hash": stable_manifest_hash(frozen)},
   )
+  if policy is not None:
+    quality = qualify_backtest_data(request, events, policy)
+    TAssistantBacktestStore._create(directory / "data-qualification.json", quality)
+    if quality["reasons"]:
+      report = {
+        "cases": {},
+        "failures": [{"reasons": quality["reasons"]}],
+        "strategy_admission": "DATA_BLOCKED",
+        "p6_allowed": False,
+      }
+      TAssistantBacktestStore._create(
+        directory / "report.json",
+        {"material": report, "hash": stable_manifest_hash(report)},
+      )
+      return directory, report
   cases, failures = {}, []
   for index, (scenario, slippage) in enumerate(scenarios.items()):
     candidate = deepcopy(request)
