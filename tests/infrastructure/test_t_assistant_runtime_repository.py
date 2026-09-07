@@ -35,6 +35,7 @@ from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfi
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
   TTradeOpportunityEvaluation,
 )
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.t_assistant_config_repository import (
   TAssistantConfigConflict,
   TAssistantConfigRepository,
@@ -70,6 +71,7 @@ async def sessions():
     TAssistantSymbolStateRecord.__table__,
     TAssistantDecisionCycleRecord.__table__,
     TTradeOpportunityEvaluation.__table__,
+    TradeIntentRecord.__table__,
   ]
   async with engine.begin() as connection:
     await connection.run_sync(
@@ -356,14 +358,7 @@ async def test_cycle_commit_is_atomic_and_evidence_uses_execution_owner(sessions
           },
         ),
         execution_events=(),
-        proposed_intents=(
-          {
-            "intent_id": "shadow-intent-1",
-            "execution_ref": execution.execution_ref.to_dict(),
-            "environment": ExecutionEnvironment.PAPER.value,
-            "instrument_code": "600000.SH",
-          },
-        ),
+        trade_intents=(),
         now=NOW,
       )
 
@@ -376,14 +371,8 @@ async def test_cycle_commit_is_atomic_and_evidence_uses_execution_owner(sessions
     assert (
       await db.scalar(select(func.count(TAssistantSymbolStateRecord.state_id))) == 1
     )
-    assert committed.output_manifest["paper_shadow_intent_proposals"] == [
-      {
-        "intent_id": "shadow-intent-1",
-        "execution_ref": execution.execution_ref.to_dict(),
-        "environment": ExecutionEnvironment.PAPER.value,
-        "instrument_code": "600000.SH",
-      }
-    ]
+    assert committed.output_manifest["accepted_intents"] == []
+
 
 
 @pytest.mark.parametrize("failure", ["event_owner", "proposal_owner", "late_write"])
@@ -439,7 +428,7 @@ async def test_late_material_failure_rolls_back_even_if_outer_caller_catches(
             },
           },),
           execution_events=(event,),
-          proposed_intents=({
+          trade_intents=({
             "execution_ref": {"owner_type": "T_ASSISTANT_EXECUTION", "owner_id": "wrong"},
             "environment": "PAPER", "instrument_code": "600000.SH",
           },) if failure == "proposal_owner" else (),
@@ -534,7 +523,7 @@ async def test_commit_and_renew_recheck_cycle_ttl_and_terminalize(sessions):
         symbol_patches=(),
         opportunity_evidence=(),
         execution_events=(),
-        proposed_intents=(),
+        trade_intents=(),
         now=NOW + timedelta(seconds=16),
       )
     assert committed.status == "ABORTED_STALE"
@@ -622,7 +611,7 @@ async def test_symbol_cas_conflict_terminalizes_cycle_without_partial_material(
         symbol_patches=(patch,),
         opportunity_evidence=(),
         execution_events=(),
-        proposed_intents=(),
+        trade_intents=(),
         now=NOW,
       )
     assert committed.status == "ABORTED_STALE"
@@ -718,7 +707,7 @@ async def test_commit_aborts_when_locked_execution_readiness_drifted(sessions):
         symbol_patches=(),
         opportunity_evidence=(),
         execution_events=(),
-        proposed_intents=(),
+        trade_intents=(),
         now=NOW + timedelta(seconds=1),
       )
     assert committed.status == "ABORTED_STALE"

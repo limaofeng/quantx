@@ -296,7 +296,19 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
   async def create_intents_idempotent(
     self, intent_data: List[Dict[str, Any]]
   ) -> List[TradeIntentRecord]:
-    """Accept a complete strategy output in one transaction, or accept none."""
+    """Standalone transaction adapter for the shared session-bound intake."""
+    records = await self.accept_intents_idempotent(intent_data)
+    await self.db.commit()
+    return records
+
+  async def accept_intents_idempotent(
+    self, intent_data: List[Dict[str, Any]]
+  ) -> List[TradeIntentRecord]:
+    """Flush a whole batch in a savepoint; the caller owns the outer commit.
+
+    A late conflict rolls back the complete batch even if its caller catches
+    the exception and commits unrelated outer transaction work.
+    """
     normalized = [
       self._prepare_create_payload(self._normalize_payload(item))
       for item in intent_data
@@ -304,19 +316,19 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     ids = [str(item.get("id") or "").strip() for item in normalized]
     if any(not value for value in ids) or len(set(ids)) != len(ids):
       raise ValueError("交易意图标识不能为空或重复")
-    records = []
-    for intent_id, payload in zip(ids, normalized, strict=True):
-      existing = await self.find_by_id(intent_id)
-      if existing is not None:
-        self._validate_idempotent_create(existing, payload)
-        records.append(existing)
-      else:
-        records.append(TradeIntentRecord(**payload))
-    self.db.add_all(records)
     try:
-      await self.db.commit()
+      async with self.db.begin_nested():
+        records = []
+        for intent_id, payload in zip(ids, normalized, strict=True):
+          existing = await self.find_by_id(intent_id)
+          if existing is not None:
+            self._validate_idempotent_create(existing, payload)
+            records.append(existing)
+          else:
+            records.append(TradeIntentRecord(**payload))
+        self.db.add_all(records)
+        await self.db.flush()
     except IntegrityError:
-      await self.db.rollback()
       # Only a fully committed exact retry may satisfy this batch. A partial
       # overlap must not make the other intents appear accepted.
       records = []
@@ -351,6 +363,10 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
       "target_position_pct",
       "target_volume",
       "limit_price_hint",
+      "confidence",
+      "trace_id",
+      "allocation_cycle_id",
+      "allocation_version",
     )
     mismatched = [
       field

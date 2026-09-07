@@ -156,6 +156,7 @@ from .strategy_run_state import (
   StrategyRunPosition,
   StrategyRunState,
 )
+from .t_allocation import TAllocationBatchRecord, TAllocationDecisionRecord
 from .t_assistant_execution import (
   TAssistantConfigVersionRecord,
   TAssistantDecisionCycleRecord,
@@ -263,6 +264,8 @@ __all__ = [
   "TTradeRollout",
   "TTradeRolloutEvent",
   "TTradeCandidateOutcome",
+  "TAllocationBatchRecord",
+  "TAllocationDecisionRecord",
   "TAssistantConfigVersionRecord",
   "TAssistantDecisionCycleRecord",
   "TAssistantExecutionEventRecord",

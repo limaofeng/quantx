@@ -18,7 +18,6 @@ from quantx_domain.strategies.base import (
   StrategyContext,
   StrategyInput,
   StrategyOutput,
-  TradeIntent,
 )
 from quantx_domain.trading.t_assistant_execution import (
   TAssistantExecution,
@@ -213,9 +212,7 @@ class TAssistantPaperShadowRuntime:
             symbol_patches=output.symbol_state_patches,
             opportunity_evidence=evidence,
             execution_events=events,
-            proposed_intents=(
-              _intent_proposal(intent) for intent in output.trade_intents
-            ),
+            trade_intents=output.trade_intents,
             now=self._now(),
           )
         except TAssistantCycleConflict as exc:
@@ -487,29 +484,6 @@ def _source_fence_identity(
     return None
   return generation, source_time_ms, tick_ordinal, fence_sequence
 
-
-def _intent_proposal(intent: TradeIntent) -> dict[str, Any]:
-  return {
-    "intent_id": intent.intent_id,
-    "execution_ref": intent.execution_ref.to_dict(),
-    "environment": ExecutionEnvironment.PAPER.value,
-    "strategy_id": intent.strategy_id,
-    "instrument_code": intent.instrument_code,
-    "direction": intent.direction.value,
-    "bucket": intent.bucket,
-    "reason": intent.reason,
-    "priority": intent.priority.value,
-    "intent_type": intent.intent_type.value if intent.intent_type else None,
-    "target_amount": intent.target_amount,
-    "target_position_pct": intent.target_position_pct,
-    "target_volume": intent.target_volume,
-    "limit_price_hint": intent.limit_price_hint,
-    "execution_mode": intent.execution_mode.value,
-    "approval_ttl_ms": intent.approval_ttl_ms,
-    "metadata": dict(intent.metadata),
-    "trace_id": intent.trace_id,
-    "created_at": intent.created_at.isoformat(),
-  }
 
 
 __all__ = [

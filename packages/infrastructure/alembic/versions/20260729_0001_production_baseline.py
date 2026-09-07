@@ -37,6 +37,8 @@ EXPECTED_METADATA_SHA256 = (
 # Models added by revisions after this immutable baseline must not affect its
 # fingerprint or be created early when bootstrapping an empty database.
 POST_BASELINE_TABLES = {
+  "t_allocation_batches",
+  "t_allocation_decisions",
   "account_risk_increase_admission_batches",
   "account_risk_increase_admission_items",
   "account_execution_control_events",
@@ -135,6 +137,10 @@ POST_BASELINE_COLUMNS = {
     "strategy",
   },
   "strategy_trade_intents": {
+    "allocation_cycle_id",
+    "allocation_version",
+    "allocation_decision_id",
+    "allocation_next_eligible_at",
     "account_id",
     "admission_batch_id",
     "admission_input_fingerprint",

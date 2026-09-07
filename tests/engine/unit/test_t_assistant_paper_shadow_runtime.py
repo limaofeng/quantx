@@ -1052,7 +1052,7 @@ async def test_reconcile_boundaries_do_not_reuse_old_windows(sessions, boundary)
     await supervisor.stop()
 
 
-async def test_real_candidate_proposal_stays_inside_shadow_cycle(sessions) -> None:
+async def test_real_candidate_uses_standard_allocation_pending_intake(sessions) -> None:
   policy = OpportunityPolicy()
   config = TTradeGlobalConfig(
     id="config-happy",
@@ -1296,7 +1296,14 @@ async def test_real_candidate_proposal_stays_inside_shadow_cycle(sessions) -> No
   assert runtime.symbol_states(execution_id)["600000.SH"].deferred_candidate is None
   async with sessions() as db:
     cycle = await db.get(TAssistantDecisionCycleRecord, result.cycle_id)
-    assert len(cycle.output_manifest["paper_shadow_intent_proposals"]) == 1
+    assert "paper_shadow_intent_proposals" not in cycle.output_manifest
+    assert len(cycle.output_manifest["accepted_intents"]) == 1
+    accepted = await db.get(TradeIntentRecord, result.output.trade_intents[0].intent_id)
+    assert accepted.status == "ALLOCATION_PENDING"
+    assert accepted.owner_id == execution_id
+    assert accepted.environment == "PAPER"
+    assert accepted.allocation_cycle_id == cycle.cycle_id
+    assert accepted.allocation_version == 0
     evidence = list(
       (
         await db.execute(
@@ -1317,7 +1324,6 @@ async def test_real_candidate_proposal_stays_inside_shadow_cycle(sessions) -> No
       for item in evidence
     )
     for model, column in (
-      (TradeIntentRecord, TradeIntentRecord.id),
       (PendingTradeOrder, PendingTradeOrder.client_order_id),
       (TradeCommandOutbox, TradeCommandOutbox.message_id),
       (OrderCorrelation, OrderCorrelation.id),

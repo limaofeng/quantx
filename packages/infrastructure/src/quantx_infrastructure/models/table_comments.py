@@ -116,6 +116,8 @@ TABLE_COMMENTS: dict[str, str] = {
   "trade_intents": "公共交易意图及执行状态",
   "t_trade_batches": "正向做 T 批次生命周期",
   "t_assistant_config_versions": "做 T 助手不可变配置版本",
+  "t_allocation_batches": "做 T 组合分配尝试与恢复租约",
+  "t_allocation_decisions": "做 T 组合分配不可变逐意图决策",
   "t_assistant_decision_cycles": "做 T 助手可恢复物化决策周期",
   "t_assistant_execution_events": "做 T 助手执行生命周期与影子审计事件",
   "t_assistant_executions": "做 T 助手独立执行身份与生命周期",

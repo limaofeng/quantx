@@ -558,6 +558,45 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   六个新文件与本方案，由专用 Git 子代理提交，不混入其他文件。提交记录由 Git 历史定位
   `feat(t-assistant): add P4 portfolio planning and entry gate contracts`。
 
+### P4 标准受理与数据库约束批次（2026-09-07）
+
+- 上批提交：`d4cfb1b9dc1a4fceaec862819525e3978cdbcd83`，应用层快照/排序/Gate，
+  273 项通过；P4 整体仍为 IN_PROGRESS。
+- `trade_intent_intake.py` 提取唯一标准 serializer，`RuntimeStateManager` 委托该实现。
+  `TradeIntentRepository.accept_intents_idempotent` 在调用者会话内 savepoint/flush，
+  不提交外层事务。原 standalone create adapter 共用同一受理逻辑，仅承担外层 commit。
+- P3 cycle 与 Engine 改为直接传标准 `TradeIntent`，在原 material savepoint 中原子写
+  `ALLOCATION_PENDING` 及 allocation cycle/version；manifest 只保存 accepted intent ID/hash，
+  不再保存第二套 proposal JSON。强校验 PAPER、BUY、owner/origin/cycle、candidate/evidence
+  和 policy/schema，晚失败回滚全部 state/evidence/intents。标准 Float 数值规范化保证数据库
+  round trip 后受理 hash 不漂移，后续 allocation 复用共享 initial material projection。
+- 新增 `t_allocation_batches/t_allocation_decisions` ORM 与 0051：唯一 cycle/attempt、单个
+  PREPARED、完整 claim/terminal 形状、CAP/DELAY 约束、deferred count/rank/intent 整批绑定、
+  append-only history；标准 intent 增加 cycle/version/current decision/next eligible。
+  阻断初始借用 decision、pending 直跳、owner/environment/cycle 串写和受理材料篡改；
+  ALLOW/CAP 按冻结 MANUAL_CONFIRM/AUTO 分别进入 AWAITING_APPROVAL/EXECUTION_READY。
+- 不改变历史 baseline 指纹；仅把新增表/列加入其 post-baseline 排除映射。
+  首次隔离迁移因尚未更新排除映射被 baseline hash gate 拒绝，修复后指纹校验保持原值。
+- 最新真实 PostgreSQL 验证：`QUANTX_RUN_MIGRATION_GATE=true` +
+  `.venv/Scripts/python.exe -m pytest tests/infrastructure/test_p4_postgresql_migration_gate.py
+  -o 'addopts=-ra --import-mode=importlib' -q --tb=short -p no:cacheprovider`：
+  **1 passed**（21.80 秒，句柄 71358 exit=0）；专用测试库随机 schema，完整 baseline→0051，
+  全部事务回滚并断言 schema 不存在。不是业务库迁移，也不是多连接 recovery 验收。
+- 定向组合：`test_t_intent_atomic_intake.py`、`test_t_assistant_runtime_repository.py`、
+  `test_trade_intent_acceptance.py`、`test_runtime_state_manager_v3_recovery.py`、
+  `tests/engine/unit/test_t_assistant_paper_shadow_runtime.py`、`test_alembic_contract.py`，
+  使用仓库 .venv、`-o 'addopts=-ra --import-mode=importlib' -q --tb=short -p no:cacheprovider`：
+  **76 passed**。包含真实候选生成标准 intent、外层回滚、两意图 flush 后晚异常全回滚、
+  精确 retry/冲突和 serializer 数据库 round trip；相关 Python Ruff 通过。
+- 仍未完成：allocation repository/lease/recovery（独立子任务正在实现）、真实 PG 并发重启
+  故障矩阵、权威 portfolio snapshot adapter、公共排序 admission、隔离 PAPER 账户/Broker/
+  成交/ExitPlan 整链及 GraphQL/Web。无业务库写入、服务启停、E2E、真实 QMT 投递。
+  本批不将 P4 task 勾为 DONE，不更新 As-Is 已部署行为；下一批复用上述证据。
+- 本批批准范围为上述标准受理 8 文件、allocation ORM/注册/注释/intent 字段、baseline
+  排除映射、0051 migration、真实 PG gate 测试与本检查点。allocation repository 后续文件
+  不纳入本批。提交由专用 Git 子代理执行，历史主题
+  `feat(t-assistant): persist atomic intent intake and allocation constraints`。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

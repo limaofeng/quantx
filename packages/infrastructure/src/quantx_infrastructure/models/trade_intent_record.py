@@ -25,6 +25,20 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
 
   __tablename__ = "trade_intents"
   __table_args__ = (
+    CheckConstraint(
+      "allocation_version >= 0", name="ck_trade_intent_allocation_version"
+    ),
+    CheckConstraint(
+      "(allocation_cycle_id IS NULL AND allocation_decision_id IS NULL "
+      "AND allocation_next_eligible_at IS NULL AND allocation_version = 0) OR "
+      "(allocation_cycle_id IS NOT NULL AND owner_type = 'T_ASSISTANT_EXECUTION' "
+      "AND environment = 'PAPER' AND direction = 'BUY')",
+      name="ck_trade_intent_allocation_scope",
+    ),
+    CheckConstraint(
+      "status <> 'ALLOCATION_PENDING' OR allocation_cycle_id IS NOT NULL",
+      name="ck_trade_intent_allocation_pending",
+    ),
     UniqueConstraint(
       "environment",
       "owner_type",
@@ -127,6 +141,18 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
   executed_price = Column(Float)  # 实际执行价格
   executed_volume = Column(Integer)  # 实际执行数量
   executed_time = Column(DateTime)  # 执行时间
+  allocation_cycle_id = Column(
+    String(36),
+    ForeignKey("t_assistant_decision_cycles.cycle_id", ondelete="RESTRICT"),
+    nullable=True,
+  )
+  allocation_version = Column(Integer, nullable=False, default=0, server_default="0")
+  allocation_decision_id = Column(
+    String(80),
+    ForeignKey("t_allocation_decisions.decision_id", ondelete="RESTRICT"),
+    nullable=True,
+  )
+  allocation_next_eligible_at = Column(DateTime(timezone=True), nullable=True)
   intent_metadata = Column("metadata", JSON, nullable=False, default=dict)
   notes = Column(Text)  # 备注信息
 

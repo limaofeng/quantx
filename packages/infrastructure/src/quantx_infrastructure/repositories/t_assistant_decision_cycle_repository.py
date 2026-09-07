@@ -19,7 +19,12 @@ from quantx_contracts import (
   ExecutionOwnerRef,
   ExecutionOwnerType,
 )
-from quantx_domain.strategies.base import SymbolRuntimeStatePatch
+from quantx_domain.strategies.base import (
+  SymbolRuntimeStatePatch,
+  TAssistantExecutionIntentOrigin,
+  TradeIntent,
+  TradeIntentDirection,
+)
 from quantx_domain.trading.t_assistant_execution import (
   TAssistantEntryReadiness,
   TAssistantExecutionEvent,
@@ -51,6 +56,10 @@ from quantx_infrastructure.repositories.t_assistant_symbol_state_repository impo
 from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
   TTradeOpportunityEvaluationRepository,
 )
+from quantx_infrastructure.repositories.trade_intent_repository import (
+  TradeIntentRepository,
+)
+from quantx_infrastructure.services.trade_intent_intake import trade_intent_record_data
 
 T_CYCLE_LEASE_CONFLICT = "T_CYCLE_LEASE_CONFLICT"
 T_CYCLE_INPUT_STALE = "T_CYCLE_INPUT_STALE"
@@ -281,13 +290,41 @@ class TAssistantDecisionCycleRepository:
     symbol_patches: Iterable[SymbolRuntimeStatePatch],
     opportunity_evidence: Iterable[Mapping[str, Any]],
     execution_events: Iterable[TAssistantExecutionEvent],
-    proposed_intents: Iterable[Mapping[str, Any]],
+    trade_intents: Iterable[TradeIntent],
     now: datetime,
   ) -> TAssistantDecisionCycleRecord:
+    trade_intents = tuple(trade_intents)
+    symbol_patches = tuple(symbol_patches)
+    opportunity_evidence = tuple(opportunity_evidence)
+    execution_events = tuple(execution_events)
     cycle = await self.get(claim.cycle_id, for_update=True)
     if cycle is None:
       raise TAssistantCycleConflict("T_CYCLE_NOT_FOUND")
     if cycle.status == TDecisionCycleStatus.PROPOSALS_COMMITTED.value:
+      execution = await self.db.get(TAssistantExecutionRecord, cycle.execution_id)
+      if execution is None or cycle.input_manifest_hash != expected_input_manifest_hash:
+        raise TAssistantCycleConflict("T_CYCLE_IDEMPOTENCY_CONFLICT")
+      payloads = self._standard_intent_payloads(
+        cycle=cycle,
+        execution=execution,
+        trade_intents=trade_intents,
+        evidence_rows=opportunity_evidence,
+        allowed_symbols=set(dict(cycle.input_manifest.get("symbols") or {})),
+      )
+      retry_states = [
+        TAssistantSymbolState.from_dict(patch.patch.set["symbol_state"])
+        for patch in symbol_patches
+        if patch.material
+      ]
+      manifest = self._output_manifest(
+        cycle,
+        retry_states,
+        opportunity_evidence,
+        execution_events,
+        payloads,
+      )
+      if stable_manifest_hash(manifest) != cycle.output_manifest_hash:
+        raise TAssistantCycleConflict("T_CYCLE_IDEMPOTENCY_CONFLICT")
       return cycle
     if (
       cycle.status != TDecisionCycleStatus.PREPARED.value
@@ -344,7 +381,7 @@ class TAssistantDecisionCycleRepository:
           allowed_symbols=allowed_symbols,
           opportunity_evidence=opportunity_evidence,
           execution_events=execution_events,
-          proposed_intents=proposed_intents,
+          trade_intents=trade_intents,
           now=now,
         )
     except TAssistantSymbolStateConflict:
@@ -361,7 +398,7 @@ class TAssistantDecisionCycleRepository:
     allowed_symbols: set[str],
     opportunity_evidence: Iterable[Mapping[str, Any]],
     execution_events: Iterable[TAssistantExecutionEvent],
-    proposed_intents: Iterable[Mapping[str, Any]],
+    trade_intents: Iterable[TradeIntent],
     now: datetime,
   ) -> TAssistantDecisionCycleRecord:
     """Commit the entire material unit inside the caller's savepoint.
@@ -371,7 +408,8 @@ class TAssistantDecisionCycleRepository:
     states, evidence, events and commit watermarks before that outer catch.
     """
     await self._symbol_states.apply_material_states(
-      states, expected_revisions=expected_revisions,
+      states,
+      expected_revisions=expected_revisions,
     )
     evidence_rows = tuple(opportunity_evidence)
     for evidence in evidence_rows:
@@ -389,35 +427,24 @@ class TAssistantDecisionCycleRepository:
         raise TAssistantCycleConflict("T_EXECUTION_EVENT_SYMBOL_CONFLICT")
       await self._executions.append_event(event)
 
-    proposals = tuple(dict(item) for item in proposed_intents)
-    for proposal in proposals:
-      execution_ref = proposal.get("execution_ref")
-      instrument_code = str(proposal.get("instrument_code") or "").upper()
-      if (
-        not isinstance(execution_ref, Mapping)
-        or execution_ref.get("owner_type")
-        != ExecutionOwnerType.T_ASSISTANT_EXECUTION.value
-        or execution_ref.get("owner_id") != execution.execution_id
-        or proposal.get("environment") != ExecutionEnvironment.PAPER.value
-        or instrument_code not in allowed_symbols
-      ):
-        raise TAssistantCycleConflict("T_INTENT_PROPOSAL_OWNER_CONFLICT")
-    output_manifest = {
-      "cycle_id": cycle.cycle_id,
-      "symbol_state_manifest": {
-        state.instrument_code: state.material_manifest_hash for state in states
-      },
-      "opportunity_event_keys": [
-        str(item.get("event_key") or "") for item in evidence_rows
-      ],
-      # These are isolated PAPER proposal facts.  No TradeIntentRecord,
-      # approval, pending order, correlation, or Agent outbox is created in P3.
-      "paper_shadow_intent_proposals": list(proposals),
-      "execution_event_keys": [event.event_key for event in events],
-    }
+    intent_payloads = self._standard_intent_payloads(
+      cycle=cycle,
+      execution=execution,
+      trade_intents=trade_intents,
+      evidence_rows=evidence_rows,
+      allowed_symbols=allowed_symbols,
+    )
+    await TradeIntentRepository(self.db).accept_intents_idempotent(intent_payloads)
+    output_manifest = self._output_manifest(
+      cycle,
+      states,
+      evidence_rows,
+      events,
+      intent_payloads,
+    )
     output_hash = stable_manifest_hash(output_manifest)
     cycle.material_symbol_count = len(states)
-    cycle.proposed_intent_count = len(proposals)
+    cycle.proposed_intent_count = len(intent_payloads)
     cycle.output_manifest = output_manifest
     cycle.output_manifest_hash = output_hash
     cycle.status = TDecisionCycleStatus.PROPOSALS_COMMITTED.value
@@ -442,13 +469,107 @@ class TAssistantDecisionCycleRepository:
           "cycle_sequence": int(cycle.cycle_sequence),
           "output_manifest_hash": output_hash,
           "material_symbol_count": len(states),
-          "proposed_intent_count": len(proposals),
+          "proposed_intent_count": len(intent_payloads),
           "paper_shadow_only": True,
         },
       )
     )
     await self.db.flush()
     return cycle
+
+  @staticmethod
+  def _standard_intent_payloads(
+    *,
+    cycle,
+    execution,
+    trade_intents,
+    evidence_rows,
+    allowed_symbols,
+  ) -> list[dict[str, Any]]:
+    """Validate producer scope before the sole standard intent intake."""
+    payloads = []
+    for intent in trade_intents:
+      if not isinstance(intent, TradeIntent):
+        raise TAssistantCycleConflict("T_INTENT_TYPE_INVALID")
+      origin = intent.origin
+      metadata = dict(intent.metadata)
+      if execution.environment != ExecutionEnvironment.PAPER.value or any(
+        metadata.get(key, "PAPER") != "PAPER"
+        for key in ("environment", "execution_environment")
+      ):
+        raise TAssistantCycleConflict("OWNER_ENVIRONMENT_MISMATCH")
+      if (
+        intent.execution_ref
+        != ExecutionOwnerRef(
+          ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+          execution.execution_id,
+        )
+        or not isinstance(origin, TAssistantExecutionIntentOrigin)
+        or origin.execution_ref != intent.execution_ref
+        or origin.cycle_id != cycle.cycle_id
+        or intent.run_id
+        or intent.instrument_code not in allowed_symbols
+        or metadata.get("source_execution_ref") != intent.execution_ref.to_dict()
+        or metadata.get("account_id", execution.account_id) != execution.account_id
+      ):
+        raise TAssistantCycleConflict("T_INTENT_OWNER_CONFLICT")
+      if (
+        intent.direction is not TradeIntentDirection.BUY
+        or metadata.get("t_trade_role") != "entry"
+      ):
+        raise TAssistantCycleConflict("T_INTENT_ENTRY_DIRECTION_INVALID")
+      candidate_id = metadata.get("candidate_id")
+      fingerprint = metadata.get("candidate_fingerprint")
+      if (
+        not candidate_id
+        or not fingerprint
+        or origin.candidate_id != candidate_id
+        or origin.opportunity_id != candidate_id
+        or metadata.get("policy_version") != execution.policy_version
+        or metadata.get("feature_schema_version") != execution.feature_schema_version
+        or not any(
+          evidence.get("instrument_code") == intent.instrument_code
+          and dict(
+            dict(evidence.get("payload") or {}).get("signal_snapshot") or {}
+          ).get("candidate_id")
+          == candidate_id
+          and dict(
+            dict(evidence.get("payload") or {}).get("signal_snapshot") or {}
+          ).get("candidate_fingerprint")
+          == fingerprint
+          for evidence in evidence_rows
+        )
+      ):
+        raise TAssistantCycleConflict("T_INTENT_CANDIDATE_CONFLICT")
+      payload = trade_intent_record_data(
+        intent,
+        status="ALLOCATION_PENDING",
+        environment=ExecutionEnvironment.PAPER,
+      )
+      payload.update(
+        account_id=execution.account_id,
+        allocation_cycle_id=cycle.cycle_id,
+        allocation_version=0,
+      )
+      payloads.append(payload)
+    return payloads
+
+  @staticmethod
+  def _output_manifest(cycle, states, evidence_rows, events, intent_payloads):
+    return {
+      "cycle_id": cycle.cycle_id,
+      "symbol_state_manifest": {
+        state.instrument_code: state.material_manifest_hash for state in states
+      },
+      "opportunity_event_keys": [
+        str(item.get("event_key") or "") for item in evidence_rows
+      ],
+      "accepted_intents": [
+        {"intent_id": payload["id"], "intake_hash": stable_manifest_hash(payload)}
+        for payload in intent_payloads
+      ],
+      "execution_event_keys": [event.event_key for event in events],
+    }
 
   async def abort_stale(
     self,

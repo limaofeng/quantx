@@ -80,19 +80,6 @@ _TERMINAL_TRADE_INTENT_STATUSES = frozenset(
         "SUPPRESSED",
     }
 )
-_TRADE_INTENT_OWNER_METADATA_KEYS = frozenset(
-    {
-        "owner_type",
-        "owner_id",
-        "environment",
-        "execution_environment",
-        "execution_owner_type",
-        "execution_owner_id",
-        "source_execution_owner_type",
-        "source_execution_owner_id",
-        "strategy_run_id",
-    }
-)
 _MANAGER_OWNED_CUSTOM_STATE_KEYS = frozenset(
     {
         APPLIED_CORPORATE_ACTIONS_KEY,
@@ -4412,114 +4399,22 @@ class RuntimeStateManager:
             raise RuntimeError("交易意图数据库会话不可用")
 
     def _trade_intent_record_data(self, intent, *, status: str) -> Dict[str, Any]:
-        raw_metadata = dict(getattr(intent, "metadata", {}) or {})
-        metadata = {
-            key: value
-            for key, value in raw_metadata.items()
-            if str(key).strip().lower() not in _TRADE_INTENT_OWNER_METADATA_KEYS
-        }
-        execution_ref = getattr(intent, "execution_ref", None)
-        if not isinstance(execution_ref, ExecutionOwnerRef):
-            raise ValueError("交易意图必须携带强类型执行归属")
-        owner_type = execution_ref.owner_type.value
-        owner_id = execution_ref.owner_id
-        if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
-            strategy_run_id = owner_id
-        else:
-            strategy_run_id = None
-        origin = getattr(intent, "origin", None)
-        origin_type = _enum_value(
-            getattr(origin, "origin_type", execution_ref.owner_type.value)
+        from quantx_infrastructure.services.trade_intent_intake import (
+            trade_intent_record_data,
         )
-        if execution_ref.owner_type is ExecutionOwnerType.MANUAL_COMMAND:
-            metadata.setdefault(
-                "manual_action_type", getattr(origin, "action_type", "")
-            )
-            metadata.setdefault(
-                "liquidation_group_id",
-                getattr(origin, "liquidation_group_id", None),
-            )
-        elif origin is not None:
-            metadata.setdefault("plan_id", getattr(origin, "plan_id", None))
-        metadata.setdefault("origin_type", origin_type)
-        metadata.setdefault(
-            "execution_mode", _enum_value(getattr(intent, "execution_mode", "AUTO"))
+
+        return trade_intent_record_data(
+            intent, status=status,
+            environment=(ExecutionEnvironment.BACKTEST if self.is_backtest
+                         else self.execution_environment),
         )
-        metadata.setdefault("approval_ttl_ms", getattr(intent, "approval_ttl_ms", None))
-        metadata.setdefault(
-            "max_price_deviation_bps",
-            getattr(intent, "max_price_deviation_bps", None),
-        )
-        created_at = getattr(intent, "created_at", None)
-        if created_at is not None and hasattr(created_at, "isoformat"):
-            metadata.setdefault("intent_created_at", created_at.isoformat())
-        return {
-            "id": str(getattr(intent, "intent_id", "") or ""),
-            "strategy_run_id": strategy_run_id,
-            "owner_type": owner_type,
-            "owner_id": owner_id,
-            "environment": (
-                ExecutionEnvironment.BACKTEST.value
-                if self.is_backtest
-                else self.execution_environment.value
-            ),
-            "idempotency_key": str(
-                raw_metadata.get("idempotency_key")
-                or f"intent:{owner_type}:{owner_id}:{getattr(intent, 'intent_id', '')}"
-            ),
-            "account_id": str(metadata.get("account_id") or "").strip() or None,
-            "strategy_id": str(getattr(intent, "strategy_id", "") or ""),
-            "instrument_code": str(getattr(intent, "instrument_code", "") or ""),
-            "direction": _enum_value(getattr(intent, "direction", "")),
-            "bucket": str(getattr(intent, "bucket", "") or "core"),
-            "reason": str(getattr(intent, "reason", "") or ""),
-            "priority": _enum_value(getattr(intent, "priority", "NORMAL")),
-            "intent_type": _enum_value(getattr(intent, "intent_type", None)),
-            "confidence": float(getattr(intent, "confidence", 1.0) or 0.0),
-            "target_amount": getattr(intent, "target_amount", None),
-            "target_position_pct": getattr(intent, "target_position_pct", None),
-            "target_volume": getattr(intent, "target_volume", None),
-            "limit_price_hint": getattr(intent, "limit_price_hint", None),
-            "trace_id": getattr(intent, "trace_id", None),
-            "status": status,
-            "metadata": metadata,
-            "notes": metadata.get("notes"),
-        }
 
     def _db_trade_intent_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        allowed = {
-            "id",
-            "strategy_run_id",
-            "owner_type",
-            "owner_id",
-            "environment",
-            "idempotency_key",
-            "account_id",
-            "strategy_id",
-            "instrument_code",
-            "direction",
-            "bucket",
-            "reason",
-            "priority",
-            "intent_type",
-            "confidence",
-            "target_amount",
-            "target_position_pct",
-            "target_volume",
-            "limit_price_hint",
-            "trace_id",
-            "risk_decision_id",
-            "order_id",
-            "status",
-            "executed_price",
-            "executed_volume",
-            "executed_time",
-            "metadata",
-            "notes",
-        }
-        payload = {key: data.get(key) for key in allowed if key in data}
-        payload.setdefault("metadata", {})
-        return payload
+        from quantx_infrastructure.services.trade_intent_intake import (
+            db_trade_intent_payload,
+        )
+
+        return db_trade_intent_payload(data)
 
     def apply_trade(self, trade) -> None:
         """按成交回报更新持仓与资金（策略额度）"""
