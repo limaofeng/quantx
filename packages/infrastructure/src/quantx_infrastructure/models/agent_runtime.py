@@ -17,6 +17,7 @@ from sqlalchemy import (
   UniqueConstraint,
   func,
   literal,
+  text,
 )
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
@@ -209,6 +210,13 @@ class PendingTradeOrder(Base, TimestampMixin):
       "batch_id",
       "client_order_id",
     ),
+    UniqueConstraint("t_order_parent_client_id", name="uq_t_order_parent_attempt"),
+    CheckConstraint("t_order_attempt >= 0", name="ck_t_order_attempt_nonnegative"),
+    Index(
+      "uq_t_order_intent_attempt", "intent_id", "t_order_attempt", unique=True,
+      postgresql_where=text("t_trade_role IN ('ENTRY','EXIT')"),
+      sqlite_where=text("t_trade_role IN ('ENTRY','EXIT')"),
+    ),
   )
 
   client_order_id = Column(String(128), primary_key=True)
@@ -236,6 +244,11 @@ class PendingTradeOrder(Base, TimestampMixin):
   batch_id = Column(String(36), nullable=True, index=True)
   bucket = Column(String(32), nullable=False, default="manual")
   t_trade_role = Column(String(16), nullable=True)
+  t_order_attempt = Column(Integer, nullable=False, default=0, server_default="0")
+  t_order_parent_client_id = Column(
+    String(128), ForeignKey("pending_trade_orders.client_order_id"), nullable=True,
+  )
+  t_order_original_created_at = Column(DateTime, nullable=True)
   risk_decision_id = Column(String(128), nullable=True)
   trace_id = Column(String(128), nullable=True)
   substitution_plan = Column(JSON, nullable=True)

@@ -12,6 +12,7 @@ from sqlalchemy import (
   String,
   Text,
   UniqueConstraint,
+  text,
 )
 from sqlalchemy.orm import relationship
 
@@ -48,6 +49,22 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
       "strategy_run_id IS NULL OR (owner_type = 'STRATEGY_RUN' "
       "AND owner_id = strategy_run_id)",
       name="ck_trade_intent_strategy_run_owner",
+    ),
+    CheckConstraint(
+      "(admission_batch_id IS NULL AND admission_rank IS NULL AND "
+      "admission_policy_version IS NULL AND admission_input_fingerprint IS NULL) "
+      "OR (admission_batch_id IS NOT NULL AND admission_rank >= 1 AND "
+      "admission_policy_version IS NOT NULL AND "
+      "admission_input_fingerprint IS NOT NULL)",
+      name="ck_trade_intent_admission_identity",
+    ),
+    Index(
+      "uq_trade_intent_admission_rank",
+      "admission_batch_id",
+      "admission_rank",
+      unique=True,
+      postgresql_where=text("admission_batch_id IS NOT NULL"),
+      sqlite_where=text("admission_batch_id IS NOT NULL"),
     ),
     Index(
       "ix_trade_intent_run_reason_direction_created",
@@ -92,6 +109,17 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
   limit_price_hint = Column(Float, nullable=True)
   trace_id = Column(String(64), nullable=True)
   risk_decision_id = Column(String(64), nullable=True)
+  admission_batch_id = Column(
+    String(36),
+    ForeignKey(
+      "account_risk_increase_admission_batches.admission_batch_id",
+      ondelete="RESTRICT",
+    ),
+    nullable=True,
+  )
+  admission_rank = Column(Integer, nullable=True)
+  admission_policy_version = Column(String(64), nullable=True)
+  admission_input_fingerprint = Column(String(64), nullable=True)
   order_id = Column(String(64), nullable=True)
   status = Column(
     String(20), nullable=False, default="PENDING"
@@ -129,6 +157,10 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
       "limit_price_hint": self.limit_price_hint,
       "trace_id": self.trace_id,
       "risk_decision_id": self.risk_decision_id,
+      "admission_batch_id": self.admission_batch_id,
+      "admission_rank": self.admission_rank,
+      "admission_policy_version": self.admission_policy_version,
+      "admission_input_fingerprint": self.admission_input_fingerprint,
       "order_id": self.order_id,
       "status": self.status,
       "executed_price": self.executed_price,

@@ -1,7 +1,7 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`DONE`（P0、P1 已完成；P2/P3 前置已解除，后续阶段尚未开始）<br>
-> 版本：1.9<br>
+> 状态：`IN_PROGRESS`（P0、P1 已完成；P2/P3 实现与聚焦验证后正在最终审计）<br>
+> 版本：2.2<br>
 > 日期：2026-09-03<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
@@ -157,8 +157,8 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 |---|---|---|---|---|---|
 | P0 | 基线冻结与契约清点 | `DONE` | 文档基线 | 清单、policy、只读审计、405 + 9 审计单测基线齐全 | [P0 冻结基线](多标的做T助手P0冻结基线.md) |
 | P1 | Owner 与协议 1.2 | `DONE` | P0；P1-01..06 均已完成；PAPER legacy 义务已受控收敛；停服、停服态备份、迁移、标准 full/live 恢复、全量快照对账和隔离恢复演练已通过 | 单一 `ExecutionOwnerRef`、单一 protocol 1.2 payload、既有路径等价；未知/冲突 owner 与结果未知均 fail-closed；无双协议 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`；0046/0047 schema gate 通过；owner 空值 `0`、8 个身份不可变触发器通过；最新 1.2 快照 `PROCESSED`、旧失败快照 `SUPERSEDED`；标准 full/live 冷启动 exit=`0`，`liveTrading=ENABLED`，QMT/marketData/Monitor READY、快照约 3 秒，gateway/schema verify 通过 |
-| P2 | 公共 ExitPlan/容量/准入安全地基 | `NOT_STARTED` | `P1 DONE`（前置已解除） | 无第二真源，故障恢复通过 | 待补 |
-| P3 | 独立 T runtime 与精确行情归约 | `NOT_STARTED` | `P1 DONE`（前置已解除） | 无 StrategyRun、新旧规则 shadow 等价 | 待补 |
+| P2 | 公共 ExitPlan/容量/准入安全地基 | `IN_PROGRESS` | `P1 DONE`；P2-01..06 实现与聚焦验证完成，等待最终审计/提交 | 无第二真源，故障恢复通过 | `ExitPlanRuntime`、0048 admission schema、order policy 与聚焦回归 |
+| P3 | 独立 T runtime 与精确行情归约 | `IN_PROGRESS` | `P1 DONE`；实现与首轮聚焦验证完成，最终审计整改中 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 与 P3 首轮聚焦回归 `319 passed`；最终二审 blocker 尚未清零 |
 | P4 | 分配、PAPER 与跨域准入 | `NOT_STARTED` | P2 + P3 | 整批原子、PAPER 闭环、无真实订单 | 待补 |
 | P5 | 共享账户回测 | `NOT_STARTED` | P4 | 无重复资金/未来数据，结果可重放 | 待补 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
@@ -213,17 +213,23 @@ legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=
 
 前置：P1 `DONE`。
 
-- [ ] `TTA-P2-01` 将 PAPER/LIVE ExitPlan 统一交给独立 `ExitPlanRuntime`，source execution 终态
+- [x] `TTA-P2-01` 将 PAPER/LIVE ExitPlan 统一交给独立 `ExitPlanRuntime`，source execution 终态
   不影响原计划恢复。
-- [ ] `TTA-P2-02` 固化 `AccountCapacityService` 老仓认领公式、obligation watermark、账户锁序、
+- [x] `TTA-P2-02` 固化 `AccountCapacityService` 老仓认领公式、obligation watermark、账户锁序、
   bucket priority 和 protected floor；不创建第二套 claim 余额表。
-- [ ] `TTA-P2-03` 建立 `AccountRiskIncreaseAdmissionSequencer` 与 durable admission batch，覆盖
-  做 T、打板、买入计划、普通策略和人工 BUY 的稳定次序。
-- [ ] `TTA-P2-04` 建立版本化 `TEntryOrderPolicy/TExitOrderPolicy` 与结果未知禁止 replace 门。
-- [ ] `TTA-P2-05` 加入 owner、LIVE producer、cycle/allocation、intent/outbox 和 ExitPlan 唯一约束，
-  迁移前先做影子冲突检查。
+- [x] `TTA-P2-03` 建立 `AccountRiskIncreaseAdmissionSequencer` 与 durable admission batch，覆盖
+  做 T、打板、买入计划、普通策略和人工 BUY 的稳定次序；READY 先于账户执行锁持久化，
+  batch/claim 提交可见后才按 rank 进入最终账户锁，Engine 启动与后台扫描恢复 READY/PREPARED。
+- [ ] `TTA-P2-04` 建立版本化 `TEntryOrderPolicy/TExitOrderPolicy` 与结果未知禁止 replace 门；
+  2026-09-06 复核：FIX_PRICE/30 秒命令有效期、工作单超时撤单、同一活动意图有限替换
+  与总窗口恢复已实现并通过聚焦回归，仍待独立链路复审及默认运行基线验收；判定 helper
+  或禁止全部替换不能单独证明该任务完成。
+- [x] `TTA-P2-05` 只为本阶段已经存在的公共 intent/outbox、ExitPlan、admission batch/item
+  加入 owner、身份一致性与唯一约束，迁移前先做影子冲突检查；cycle 表约束归 P3-05，
+  尚未创建的 allocation batch/decision 约束归 P4-03，不提前创建 P4 表。
 - [ ] `TTA-P2-06` 覆盖部分成交、ORDER/TRADE 乱序、迟到成交、撤单失败、未知结果、退出独立恢复
-  与跨域抢锁故障测试。
+  与跨域抢锁故障测试；订单生命周期及外部导入发布失败的代级持久化封禁已补聚焦验证，
+  仍待扩大回归与最终验收。
 
 退出门：现金/库存真源仍唯一；跨域 BUY 顺序确定；退出、容量和命令恢复不依赖做 T runtime。
 
@@ -238,12 +244,16 @@ legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=
 - [ ] `TTA-P3-03` 实现 delta ring/cursor/generation/gap/lag 处理；覆盖时 fail-closed 并 rewarm。
 - [ ] `TTA-P3-04` 实现强类型 `StrategyCadence.SNAPSHOT`、输入 validator、symbol patches 和
   `execution_ref`，移除做 T 对 StrategyRunState callback 的依赖。
-- [ ] `TTA-P3-05` 实现 `decision_key`、唯一 cycle attempt、processing fence/lease、material 原子
-  提交、续接与 `ABORTED_STALE`。
+- [ ] `TTA-P3-05` 实现 `decision_key`、cycle identity/attempt 唯一约束、processing fence/lease、
+  material 原子提交、续接与 `ABORTED_STALE`。
 - [ ] `TTA-P3-06` 在隔离 PAPER namespace 与旧 V3 逐 cycle shadow 对比，禁止 approval/outbox。
 
-退出门：新 runtime 不创建 StrategyRun；决策触发合并不丢 Tick/FSM/candidate 转换；重启不会重复
-提案；规则差异都有明确评审结论。
+退出门：尚未通过最终复审。二审 blocker 的实现整改已覆盖 callback 故障恢复、非 READY
+候选延迟、同 source/fence 规则比较、PREPARED startup recovery、逐标的 sequence、config
+successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL baseline→0050
+隔离升级/触发器负向验证已通过。2026-09-06 复审发现并修复 material 后置校验的半写入问题，
+同 execution 周期同步回退热游标的问题已修复并补齐重启与 generation/universe/config 边界测试；仍须通过最终全量回归、只读复审及默认
+运行基线验收，之后才能将本阶段改为 `DONE`。
 
 ### P4：组合分配、跨域准入与 RULE_ONLY PAPER
 
@@ -251,8 +261,9 @@ legacy 义务已在 P1 gate 中受控收敛；复验 blocker=`0`、P1 readiness=
 
 - [ ] `TTA-P4-01` 实现 point-in-time `TTradingEnvelope/PortfolioTDecisionSnapshot`。
 - [ ] `TTA-P4-02` 标准 TradeIntent 以 `ALLOCATION_PENDING` 受理；不新增 trade proposal 协议。
-- [ ] `TTA-P4-03` 实现 `TAllocationBatch/TAllocationDecision`、稳定排序、CAP、claim/lease、TTL、
-  next eligible、整批提交和 supersede。
+- [ ] `TTA-P4-03` 实现 `TAllocationBatch/TAllocationDecision`、allocation batch/decision 唯一约束、
+  稳定排序、CAP、claim/lease、TTL、next eligible、整批提交和 supersede；这些表与约束是 P4
+  退出门，不由 P2 提前占位。
 - [ ] `TTA-P4-04` 实现 `EntryExecutionGate` 与最新 Tick、binding、spread、TTL 重验。
 - [ ] `TTA-P4-05` 将 ALLOW/CAP 候选按排名接入公共 admission、OrderSizer、Risk 和 Capacity；PAPER
   使用隔离 Broker/事实表，不消耗 LIVE 义务。
@@ -385,10 +396,10 @@ npm run build
 |---|---|---|---|
 | `strategy_run_id` 跨层耦合范围大 | 漏改导致伪 owner 或回报失联 | P0 分层清点；P1-02/P1-06 已将 intent、pending、correlation、outbox、runtime event 和 ExitPlan source 切换为强类型 owner，并以 owner/environment 冲突反向测试守住边界 | `CLOSED`（`TTA-P1-02`, `TTA-P1-06`） |
 | protocol 1.1/1.2 切换存在未知命令 | 重发可能重复下单 | P1-04/P1-05/P1-06 已完成停新命令、未知只 reconcile、唯一 protocol 1.2；最新未知结果为 `0`，无双协议/双 payload | `CLOSED`（`TTA-P1-04..06`） |
-| 决策触发合并误丢 Tick | FSM/candidate 与回测不一致 | reducer 与 trigger 分层、cursor/gap/ring 强测试 | `OPEN` |
-| cycle 与 allocation 恢复身份混淆 | 重复提案或半批 | decision key 与 attempt 分离、durable claim/fence | `OPEN` |
-| 做 T 内部排名不覆盖跨域 BUY | 账户锁赢家由调度偶然性决定 | 公共 risk-increase admission sequencer | `OPEN` |
-| 只看总可卖量破坏底仓 | core/locked_core 被错误置换 | bucket priority、protected floor、事务内审计 | `OPEN` |
+| 决策触发合并误丢 Tick | FSM/candidate 与回测不一致 | reducer 与 trigger 分层；逐标的 accepted sequence、global fence、WARMING 候选延迟及 gap/ring/lag 边界已加入聚焦回归，等待 P3 最终复审 | `OPEN` |
+| cycle 与 allocation 恢复身份混淆 | 重复提案或半批 | decision key 与 attempt 分离、durable claim/fence；P3 startup PREPARED fenced abort 已加入聚焦回归，P4 allocation 尚未开始 | `OPEN` |
+| 做 T 内部排名不覆盖跨域 BUY | 账户锁赢家由调度偶然性决定 | P2 已建立公共 READY 池、稳定 policy 排名、durable batch/claim/fence 和整批 enqueue；直接 LIVE BUY 统一进入 dispatcher | `CLOSED`（`TTA-P2-03`, `TTA-P2-06`） |
+| 只看总可卖量破坏底仓 | core/locked_core 被错误置换 | P2 容量真源固定 swing→core（仅高于 protected floor），永不认领 locked_core；账户级 obligation watermark 在最终事务复验 | `CLOSED`（`TTA-P2-02`） |
 | 收盘未成交被错误假设为闭环 | 隔夜暴露、重复批次 | cutoff、overnight carry、次日原 plan 恢复 | `OPEN` |
 | 模型复杂度提前阻塞安全核心 | 延迟 RULE_ONLY 交付 | P8 后置；SHADOW/ACTIVE 独立门禁 | `OPEN` |
 | 当前 legacy owner/ExitPlan/审批义务阻断 P1 | 猜 owner、误终态化或切换中重复下单 | 通过 PAPER-only、精确数量门、`SERIALIZABLE` 事务和完整 durable chain 重验，2 条审批终态化、1 条孤儿计划取消；P0 blocker 已清零 | `CLOSED`（`TTA-P1-GATE-01`） |
@@ -412,6 +423,34 @@ npm run build
 | 2026-09-03 | `TTA-P1-GATE-05` | `DONE` | 修复标准启动器用完整账户号比较健康接口脱敏账户标识、导致 READY 永不命中的契约错误；新增与 API 一致的纯脱敏函数和错误尾号反向测试，保留服务端完整账户集合校验为精确权威 | ops 契约 `38 passed`、Ruff 与 `git diff --check` 通过；标准 `up -Environment dev -Profile web` 冷启动 exit=`0`，随后 status 显示 full/live、QMT 与 marketData READY，gateway/schema verify 通过 |
 | 2026-09-03 | `TTA-P1-02 / TTA-P1-04..06 / P1` | `DONE` | owner migration 已贯穿 intent、pending、correlation、outbox、runtime event 与 ExitPlan source；Agent 命令/报告、API、Engine、QMT Agent、GraphQL/Web 与客户端已原子切换到唯一 protocol 1.2。Router 当前仅注册 `STRATEGY_RUN`、`EXIT_PLAN`、`MANUAL_COMMAND`，未知/未注册/冲突 owner fail-closed；PLACE_ORDER 固定 10 字段、CANCEL_ORDER 固定 6 字段，均为 `FIX_PRICE` 正数限价（PLACE）；QMT `strategy_name=''`、remark 为 `qx:` 加 client order id 前 20 字符；ACK 仅投递，回报 inbox-first | 0046 owner migration、0047 vendor `order_sysid` widen 正式成功，schema head=`0047`；0046 preflight 的 intents=`2879`、pending=`3`、outbox=`4`、plans=`13`、challenges=`29`，owner 空值=`0`，8 个身份不可变触发器通过；迁移前受控修复 1 条 terminal ExitPlan orphan intent；最新 1.2 snapshots=`PROCESSED`、旧失败=`SUPERSEDED`、unknown result=`0`、无双协议；标准 full/live 冷启动 exit=`0`，`liveTrading=ENABLED`，QMT/marketData/Monitor READY，快照约 3 秒，gateway/schema verify 通过；最终恢复点为 `2026-09-03T09:03:06Z`。commit：`de9782c94ce9ef677b30f5397aa3dce98bdf6bcf` |
 
+| 2026-09-03 | `TTA-P2-01..06 / P2` | `IN_PROGRESS` | PAPER/LIVE 公共 `ExitPlanRuntime`；source terminal independence；account-wide capacity/watermark 与桶级保护；五域 READY admission dispatcher、10s lease/3s renew/30s TTL；READY/PREPARED startup/background recovery；public T ExitPlan 角色/批次贯穿；外部成交导入原子登记；不可漂移 TEntry/TExit v1；0048 shadow preflight/FK/trigger | 最终整改聚焦组合 `207 passed`；StrategyExecutor 生命周期/重启扩大组合 `185 passed`；Alembic/schema 既有 `27 passed`；相关 Ruff 与 `git diff --check` 通过。新 T owner 仍未注册，未开放真实订单；阶段保持 `IN_PROGRESS`，等待最终只读复审与提交。 |
+| 2026-09-03 | `TTA-P3-01..06 / P3` | `IN_PROGRESS` | 独立 config version/execution/event/symbol state/cycle 与 0049；SNAPSHOT 唯一 `StrategyBase.step()` 路径；WholeQuoteHub CRITICAL PAPER shadow supervisor；共享 opportunity/outcome 强类型 owner；fence-cut、wall-clock TTL/lease、提交重验、ABORTED_STALE、重启/replay/同 source-fence 差异事件及完整无订单链负向测试 | 首轮 P3 聚焦回归 `319 passed`；二审整改后 execution/market/application/migration/repository/WholeQuoteHub/shadow/global-monitor/V3/exit 联合回归 `243 passed`、聚焦 Ruff 通过。仍待真实 PostgreSQL 0049 验证、最终全量回归与只读复审；未开放真实订单，阶段保持 `IN_PROGRESS`。 |
+
+| 2026-09-06 | `TTA-P2-05 / TTA-P3-05` 迁移门 | `IN_PROGRESS` | `QUANTX_RUN_MIGRATION_GATE=true` 下运行 `tests/infrastructure/test_p2_p3_postgresql_migration_gate.py`，真实 PostgreSQL 专用测试库随机 schema 全链 baseline→0050：`1 passed`；0048 聚焦单测 `2 passed`、Ruff 通过 | 配置 JSON 回填、账户绑定、append-only、状态版本、LIVE 唯一 producer、cycle 形状、admission 同事务绑定/重排及订单 attempt 约束均已验证；测试事务回滚且确认随机 schema 不存在。此证据不代表开发库已迁移或默认运行基线已验收，P2/P3 阶段保持未完成。 |
+
+| 2026-09-06 | P2/P3 主任务复验 | `IN_PROGRESS` | `pytest tests/domain tests/application -q -m 'not e2e and not real_trading' -p no:cacheprovider`：269 项通过；P3 execution/market/application/repository/migration/PAPER shadow 六文件：54 项通过；`git diff --check` exit=0 | 使用仓库 `.venv`，真实交易门禁关闭。只证明列明范围；P2 外部导入失败后停止链、跨 attempt 撤换/收敛及全量回归仍在处理中，未进行新 T owner 实盘下单验收。 |
+
+| 2026-09-06 | P2 准入历史与审批契约复验 | `IN_PROGRESS` | 最终 0048 与真实 PostgreSQL gate 组合 `3 passed`、Ruff 通过；`tests/api/unit/gqlapi/test_trade_approval_challenge.py`：`20 passed`、Ruff 通过 | PREPARED 历史仍强制当前绑定；终态后解除绑定及新事务准入通过，历史 item 不可改删、终态 batch 不可复活。审批 fixture 切换固定 TExitOrderPolicy.v1，新增 MARKET、无保护限价、配置版本冒充订单策略版本的拒绝测试。全量回归尚未完成。 |
+
+| 2026-09-06 | P3 material cycle 原子边界整改 | `IN_PROGRESS` | 后置 owner 校验故障注入复现半写入；修复后 execution/market/application/repository/migration/PAPER shadow 六文件主任务复跑 `58 passed` | 完整 symbol/evidence/events/proposals/cycle 与 execution 水位在同一 savepoint；非法 event/proposal 和中途写异常回滚，CAS 冲突仍单独持久 ABORTED_STALE。未以聚焦通过替代默认运行基线与全量验收。 |
+| 2026-09-06 | 扩大回归 fixture 契约切换 | `IN_PROGRESS` | 策略测试目录 `178 passed`；`test_account_execution_quarantine_service.py` 主任务复跑 `51 passed`；相关 Ruff 通过 | 三个旧 DummyContext 改用真实 StrategyContext；EXIT_PLAN fixture 不再伪装 StrategyRun 订单身份，生产 owner 约束保持严格。主服务只读 status 全部 STALE，旧在线证据不可复用，后续仍需统一入口恢复验收。 |
+
+| 2026-09-07 | P3 热游标与扩大回归 | `IN_PROGRESS` | P3 六文件主任务复跑 `63 passed`；P3 子任务联合复核 `112 passed`；infrastructure/worker/qmt_agent 排除危险、实盘、E2E 与 integration 标记后 `2050 passed, 1 skipped` | 同代 reconcile 保留 hot cursor/ring，冷启动与窗口变化保守 rewarm；跳过项为显式 PostgreSQL migration gate，已有单独真实库验收，不将 skip 当作完成证据。根测试与默认运行验收仍未结束。 |
+| 2026-09-07 | P2 准入恢复日志 | `IN_PROGRESS` | `tests/engine/test_risk_increase_admission_runtime.py`：`3 passed`；相关 Ruff 通过 | 恢复失败日志仅记录异常类型，不输出账户或原始异常文本；失败账户回滚后仍继续扫描，新增日志脱敏与隔离负测。 |
+
+| 2026-09-07 | 根测试首次完整回归 | `IN_PROGRESS` | `.venv/Scripts/python.exe -m pytest tests/ -q --tb=line -m 'not dangerous and not real_trading and not e2e' -p no:cacheprovider --maxfail=15` 跑至 100%，仅 `tests/research/test_boundaries.py::test_runtime_apps_do_not_depend_on_research_package` 失败 | 失败来自 Worker 子进程命令字符串 `quantx_research.cli`，源码与测试均未在本轮修改，且 HEAD 已含该调用；不修改无关研究流程或把本次运行称为全绿。12 个 skip 为离线 MCP 9 项、Windows 研究环境 2 项、显式 PG gate 1 项。此后 P2 最终整改仍须重新验证。 |
+
+| 2026-09-07 | 迁移前主任务复验 | `IN_PROGRESS` | 显式开启真实 PG gate 后，migration gate/0048/0049/Alembic 契约四文件 `26 passed`；生命周期/回报/准入恢复三文件 `33 passed` | 开发库只读事务复查 0048 四项冲突：invalid intent owner、duplicate outbox client、duplicate owner intent、duplicate exit source 均为 0；开发库仍在 0047，备份未完成前不执行升级。此预检不是迁移成功证据。 |
+
+| 2026-09-07 | P2 BUY 最终整链 | `IN_PROGRESS` | 新增真实 BUY 恢复文件 9 项，结合 lifecycle/report 三文件 `39 passed`；本次候选提交 Python 文件统一 Ruff 通过，导入排序调整后 supervision/command dispatch/owner 三文件 `29 passed` | 实际 challenge/dispatcher/sequencer/enqueue，覆盖零/部分成交、stage/PREPARED 提交后进程丢失与新报价恢复、终态历史重排、总 TTL 收敛、LIVE_AUTO 失权、缺失与错 owner 挑战。只替换外部 Agent/行情/账户环境读，不做物理 QMT 投递。 |
+| 2026-09-07 | 迁移前权威备份 | `IN_PROGRESS` | `ops/quantx.ps1 backup -Environment dev` exit=0；`.runtime/backups/20260906T160222Z/manifest.json`，PostgreSQL 归档 7,074,601,504 字节；QMT pending reports=0、processing commands=0；Monitor 历史包含在内 | 备份登记成功、未导出设备密钥；隔离 restore-verify 已启动但尚未完成，不把备份成功等同于可恢复性或开发库升级成功。 |
+
+| 2026-09-07 | 存量退出义务预检 | `IN_PROGRESS` | 开发库只读事务按 source/environment/status 汇总 `auto_exit_plans` 非 COMPLETED/CANCELLED 行，结果为空 | 此时没有活动退出计划需要在迁移中重写模板；保留所有历史计划与原始事实。该时点预检不替代启动后的独立退出 runtime、owner 和账户事实验收。 |
+
+| 2026-09-07 | 冻结后根回归 | `IN_PROGRESS` | `.venv/Scripts/python.exe -m pytest tests/ -o 'addopts=-ra --import-mode=importlib' -q --tb=line -m 'not dangerous and not real_trading and not e2e' -p no:cacheprovider --junitxml=.codex_screenshots/p2-p3-root-final.xml`：`5240 passed, 1 failed, 12 skipped, 10 deselected, 34 warnings`，410.68 秒 | 唯一失败仍为已确认存在于 HEAD 的研究边界字符串扫描测试，不涉及本次 P2/P3 变更；未放宽该测试或修改无关研究流程。报告保存在忽略目录，不提交。隔离恢复与默认运行验收仍未完成。 |
+
+| 2026-09-07 | 维护窗口准备 | `IN_PROGRESS` | 标准 `up -Environment dev -Component monitor` exit=0，Monitor RUNNING/readiness=ready；随后标准 `down` exit=0，对九个 stale 主服务 PID 均跳过终止，Monitor 仍 RUNNING/ready | 未杀死未跟踪进程，未启动 QMT 或交易服务；隔离 restore-verify 仍在复制阶段，数据库侧无锁阻塞。开发库仍未升级。 |
+
 后续每条 `DONE` 证据应包含 commit、验证命令及结果摘要；若输出过长，链接到仓库内稳定测试报告，
 不粘贴包含账户、设备或券商敏感信息的日志。
 
@@ -421,24 +460,40 @@ npm run build
 
 ## 10. 当前状态与下一动作
 
-当前结论：**P0、P1 均已完成。** P1 原子切换后，唯一在线 Agent 控制协议为 `1.2`；
+当前结论：**P0、P1 已完成；P2/P3 完整备份的隔离迁移验证已通过，本批提交迁移相关文件，不代表 P2/P3 整体完成。** P1 原子切换后，Agent 控制协议为 `1.2`；
 `ExecutionOwnerRef` 已贯穿 intent、pending、correlation、outbox、runtime event 和 ExitPlan
 source，`strategy_run_id` 仅作为 StrategyRun 的可选一致性见证，不能再作为默认 owner fallback。
 当前 Router 仅注册 `STRATEGY_RUN`、`EXIT_PLAN`、`MANUAL_COMMAND`；未知、未注册或 owner/environment
-冲突均 fail-closed，`T_ASSISTANT_EXECUTION`、`ENTRY_PLAN`、`BOARD_ASSISTANT_EXECUTION` 尚未
-成为可产生真实订单的 runtime。P1 运行证据、schema current=`0047`、owner 空值=`0`、快照
+冲突均 fail-closed。P3 的 `T_ASSISTANT_EXECUTION` 已成为隔离 PAPER shadow owner，但仍未
+注册命令 handler；`ENTRY_PLAN`、`BOARD_ASSISTANT_EXECUTION` 也尚未成为可产生真实订单的
+runtime。P1 运行证据、owner 空值=`0`、快照
 收敛和 full/live 冷启动结果见上方 closeout 台账；维护演练中的 1.1/`actualCutover=false`
 是历史记录，不覆盖当前 As-Is。
 
-下一动作进入 P2/P3，二者可并行开发，但都不得把目标能力写成当前事实：
+本批检查点（2026-09-07）：
 
-1. P2：实现公共 `ExitPlanRuntime`、容量/obligation watermark、跨域风险增加准入顺序、版本化
-   Entry/Exit policy 及其故障恢复测试；继续保持唯一账户事实、owner 绑定和退出独立恢复。
-2. P3：实现独立 `TAssistantExecution`、逐 Tick `SymbolMarketStateReducer`、delta ring/gap/
-   rewarm、snapshot cadence、cycle material 与隔离 PAPER shadow；在 P3 完成前不开放新的
-   T owner 真实订单。
-3. P4 仍须等待 P2 与 P3 同时 `DONE`；P1 的 protocol/owner 合同只作为后续阶段的稳定前置，
-   不启动双协议或旧 owner 旁路。
+- 复用已有 5240 项通过的根回归、39 项 BUY/生命周期/回报组合及 26 项迁移定向检查；
+  根回归唯一失败为已确认的研究边界基线问题，不重新开展全阶段审计。
+- 原完整恢复的数据导入成功，随后 schema 升级失败，旧工具已清理现场且未保存可续接 ID。
+  复用 `.runtime/backups/20260906T160222Z`，没有重新备份；新验证 ID 为
+  `fba35e9d6f5d4ca6`，阶段及脱敏日志位于 `.runtime/restore-verifications/<ID>/`。
+  首次句柄 `37358` exit=1，数据已完整导入，0049 因 `opportunity_owner_unproven` 失败并保留现场。
+  修复后使用 `-RestoreVerificationId fba35e9d6f5d4ca6` 续跑（句柄 `40892`、exit=0），
+  没有重复导入或生成备份；最终 `status=passed`、`phase=complete`、`postgresVerified=true`，
+  隔离库已自动清理（`retained=false`）。
+- 只读定位发现 77632 条历史机会评估引用 32 个不存在的运行，0049 owner 预检不能通过。
+  当前未找到对应回测、意图、运行回报、批次、退出计划或性能快照见证；不猜测环境、
+  用户已明确授权删除策略机会诊断。0049 仅清理无候选、无待执行意图且无交易关联的孤立诊断，
+  不构造 owner、不建立归档或兼容层；其余无法证明归属的记录仍 fail-closed。
+  精确预览与实际清理均为 77632 条，原始备份保留可恢复数据；业务库未执行该删除。
+- 完整验收日志：隔离库到 `20260906_0050`，schema `ok=true`，缺表/缺列均为空；
+  QMT journal `integrity=ok`、pending reports=0、processing commands=0；Monitor `valid`。
+  定向 PostgreSQL 负测覆盖候选、待执行意图、交易关联保护与清理幂等性。
+  本批最终四文件定向回归 `26 passed`，候选提交 Python 文件 Ruff 与 `git diff --check` 均通过；
+  只读复查实际业务库仍为 `20260903_0047`，本批没有对它实施迁移。
+- 本批提交范围为迁移、对应 ORM 契约、定向测试和本检查点；其余 P2/P3 运行时与用户既有改动不混入。
+  **不修改开发/实盘库，不启停交易服务，不进入 P4。** 实际数据库迁移及 Windows 运行验收为下一阶段；
+  P2/P3 阶段仍保持 `IN_PROGRESS`，不得提前开放新 T owner 真实订单。
 
 ## 11. 变更记录
 
@@ -454,3 +509,6 @@ source，`strategy_run_id` 仅作为 StrategyRun 的可选一致性见证，不�
 | 1.7 | 2026-09-03 | 完成权威备份的两次全量隔离恢复验证；0045 严格接管 pre-Alembic 三表并原子修正 naive-UTC 时间列，schema gate 改为结构与 revision 双门。恢复至 head、QMT journal 和 Monitor 均通过；实际停服/部署/恢复后全量快照对账仍未执行。 |
 | 1.8 | 2026-09-03 | 完成实际维护窗口的停服态备份、迁移、标准 full/live 恢复、全量快照对账与隔离恢复；修复启动器将完整账户号与健康接口脱敏值比较而永不命中 READY 的契约错误。维护演练门解除，P1 转为 `IN_PROGRESS`；protocol 1.2 仍待 P1-02/P1-04..06 原子实现和真实切换。 |
 | 1.9 | 2026-09-03 | P1 closeout：P1-02/P1-04..06 完成，owner identity 贯穿公共持久化与回报链，唯一 Agent protocol 1.2 已在标准 full/live 基线生效；0046/0047、快照收敛、无未知结果、无双协议与冷启动证据已登记。P2/P3 前置解除，下一步转入 P2/P3。 |
+| 2.0 | 2026-09-03 | P2-01..06 实现与聚焦验证完成：公共 ExitPlanRuntime、账户容量水位、跨域 READY admission、不可漂移 T order v1、0048 迁移前影子检查及故障恢复测试已落地；阶段等待最终审计与提交，不提前开放新 T owner 真实订单。 |
+| 2.1 | 2026-09-03 | 记录 P3 首轮实现与 319 项聚焦回归；最终二审仍发现 callback 恢复、WARMING 候选、同 fence 比较、startup recovery、逐标的 sequence、successor 排空和完整零副作用矩阵等 blocker，因此阶段保持 `IN_PROGRESS`，不提前宣称 closeout。 |
+| 2.2 | 2026-09-03 | 阶段归属纠偏：P2-05 只覆盖当期已存在的公共 intent/outbox、ExitPlan 与 admission 约束；cycle uniques 明确归 P3-05，尚未创建的 allocation batch/decision uniques 明确归 P4-03。这不是省略约束，而是避免 P2 为勾选任务提前创建 P4 表。同时消除 T 退出模板读取任意滑点参数和用 config version 冒充 order-policy version 的遗留，模板、公共路由、精确授权与最终命令门统一绑定 `TExitOrderPolicy.v1`。P2 仍保持 `IN_PROGRESS`。 |

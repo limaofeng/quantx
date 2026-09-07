@@ -37,6 +37,8 @@ EXPECTED_METADATA_SHA256 = (
 # Models added by revisions after this immutable baseline must not affect its
 # fingerprint or be created early when bootstrapping an empty database.
 POST_BASELINE_TABLES = {
+  "account_risk_increase_admission_batches",
+  "account_risk_increase_admission_items",
   "account_execution_control_events",
   "account_execution_controls",
   "account_trading_rollout_events",
@@ -87,6 +89,11 @@ POST_BASELINE_TABLES = {
   "ios_push_registrations",
   "trade_confirmation_challenges",
   "t_trade_instrument_profiles",
+  "t_assistant_config_versions",
+  "t_assistant_decision_cycles",
+  "t_assistant_execution_events",
+  "t_assistant_executions",
+  "t_assistant_symbol_states",
   "t_trade_candidate_outcomes",
   "t_trade_opportunity_evaluations",
   "t_trade_replay_projections",
@@ -129,12 +136,24 @@ POST_BASELINE_COLUMNS = {
   },
   "strategy_trade_intents": {
     "account_id",
+    "admission_batch_id",
+    "admission_input_fingerprint",
+    "admission_policy_version",
+    "admission_rank",
     "environment",
     "idempotency_key",
     "owner_id",
     "owner_type",
   },
+  "t_trade_global_configs": {
+    "active_config_version_id",
+    "desired_environment",
+    "state_version",
+  },
   "pending_trade_orders": {
+    "t_order_attempt",
+    "t_order_parent_client_id",
+    "t_order_original_created_at",
     "owner_id",
     "owner_type",
   },
@@ -260,6 +279,10 @@ def _baseline_metadata() -> MetaData:
       ):
         table.constraints.remove(constraint)
     for column_name in column_names:
+      # Removing a Column/ForeignKeyConstraint does not remove the separate
+      # Table.foreign_keys entries used by SQLAlchemy's DDL dependency sorter.
+      for foreign_key in list(table.c[column_name].foreign_keys):
+        table.foreign_keys.discard(foreign_key)
       table._columns.remove(table.c[column_name])
   for table_key, index_names in POST_BASELINE_INDEXES.items():
     table = metadata.tables[table_key]
@@ -276,6 +299,7 @@ def _baseline_metadata() -> MetaData:
     "trade_command_outbox",
     "strategy_runtime_events",
     "t_trade_batches",
+    "t_trade_global_configs",
   ):
     table = metadata.tables[table_key]
     for constraint in list(table.constraints):

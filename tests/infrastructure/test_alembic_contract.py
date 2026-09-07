@@ -54,6 +54,8 @@ def test_baseline_clone_excludes_schema_owned_by_later_revisions() -> None:
 
   metadata = revision._baseline_metadata()
   assert not (set(metadata.tables) & revision.POST_BASELINE_TABLES)
+  # DDL sorting must not retain foreign keys from pruned future columns.
+  assert {table.name for table in metadata.sorted_tables} == set(metadata.tables)
   # The immutable baseline must retain the pre-0047 vendor-ID width.
   assert metadata.tables["orders"].c.order_sysid.type.length == 10
   assert metadata.tables["trades"].c.order_sysid.type.length == 10
@@ -85,6 +87,16 @@ def test_asyncpg_trigger_ddl_is_split_into_single_commands() -> None:
 
   assert "ON pending_trade_orders;\n      CREATE TRIGGER" not in source
   assert source.count("op.execute(") >= 3
+
+  p2_source = (VERSIONS / "20260903_0048_p2_public_safety_groundwork.py").read_text(
+    encoding="utf-8"
+  )
+  assert "$$ LANGUAGE plpgsql;\n\n      CREATE TRIGGER" not in p2_source
+  assert "quantx_enforce_risk_admission_item_binding" in p2_source
+  assert "DROP TRIGGER IF EXISTS trg_risk_admission_item_binding" in p2_source
+  assert "quantx_enforce_risk_admission_intent_binding" in p2_source
+  assert "CREATE CONSTRAINT TRIGGER trg_risk_admission_intent_binding" in p2_source
+  assert "DEFERRABLE INITIALLY DEFERRED" in p2_source
 
 
 def test_all_relational_tables_have_chinese_comments() -> None:

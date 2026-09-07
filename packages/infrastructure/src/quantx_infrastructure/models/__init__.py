@@ -125,6 +125,10 @@ from .liquidation import (
 from .managed_plan import ManagedPlanConfigRevision, ManagedPlanRecord
 from .order import Order
 from .position import Position
+from .risk_increase_admission import (
+  AccountRiskIncreaseAdmissionBatch,
+  AccountRiskIncreaseAdmissionItem,
+)
 from .sector import Sector
 from .sector_stock import SectorStock
 from .stock_disclosure import (
@@ -151,6 +155,13 @@ from .strategy_run import StrategyRun
 from .strategy_run_state import (
   StrategyRunPosition,
   StrategyRunState,
+)
+from .t_assistant_execution import (
+  TAssistantConfigVersionRecord,
+  TAssistantDecisionCycleRecord,
+  TAssistantExecutionEventRecord,
+  TAssistantExecutionRecord,
+  TAssistantSymbolStateRecord,
 )
 from .t_trade_candidate_outcome import TTradeCandidateOutcome
 from .t_trade_global_config import TTradeGlobalConfig
@@ -186,6 +197,8 @@ __all__ = [
   # 数据库模型
   "Instrument",
   "Position",
+  "AccountRiskIncreaseAdmissionBatch",
+  "AccountRiskIncreaseAdmissionItem",
   "BrokerPositionSnapshot",
   "ClosedPositionCycle",
   "Order",
@@ -250,6 +263,11 @@ __all__ = [
   "TTradeRollout",
   "TTradeRolloutEvent",
   "TTradeCandidateOutcome",
+  "TAssistantConfigVersionRecord",
+  "TAssistantDecisionCycleRecord",
+  "TAssistantExecutionEventRecord",
+  "TAssistantExecutionRecord",
+  "TAssistantSymbolStateRecord",
   "TradeCommandOutbox",
   "Holiday",
   "Sector",

@@ -15,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.sql import func as sql_func
 
 from quantx_infrastructure.database.relational_base import Base
+from quantx_infrastructure.models.execution_owner import register_identity_immutability
 
 T_TRADE_EVALUATION_KIND_MATERIAL = "MATERIAL"
 T_TRADE_EVALUATION_KIND_DIAGNOSTIC = "COALESCED_DIAGNOSTIC"
@@ -49,6 +50,14 @@ class TTradeOpportunityEvaluation(Base):
       "id",
     ),
     Index(
+      "ix_t_trade_evaluation_owner_time",
+      "owner_type",
+      "owner_id",
+      "environment",
+      "evaluated_at",
+      "id",
+    ),
+    Index(
       "ix_t_trade_evaluation_account_candidate_time",
       "account_id",
       "candidate_id",
@@ -58,6 +67,23 @@ class TTradeOpportunityEvaluation(Base):
     CheckConstraint(
       "record_kind IN ('MATERIAL', 'COALESCED_DIAGNOSTIC')",
       name="ck_t_trade_evaluation_record_kind",
+    ),
+    CheckConstraint(
+      "owner_type IN ('STRATEGY_RUN','T_ASSISTANT_EXECUTION')",
+      name="ck_t_trade_evaluation_owner_type",
+    ),
+    CheckConstraint(
+      "length(owner_id) > 0 AND owner_id = trim(owner_id)",
+      name="ck_t_trade_evaluation_owner_id",
+    ),
+    CheckConstraint(
+      "environment IN ('PAPER','LIVE','BACKTEST')",
+      name="ck_t_trade_evaluation_environment",
+    ),
+    CheckConstraint(
+      "strategy_run_id IS NULL OR (owner_type = 'STRATEGY_RUN' "
+      "AND owner_id = strategy_run_id)",
+      name="ck_t_trade_evaluation_strategy_run_owner",
     ),
     CheckConstraint(
       "coalesced_count >= 1",
@@ -84,7 +110,10 @@ class TTradeOpportunityEvaluation(Base):
   id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
   event_key = Column(String(160), nullable=False)
   account_id = Column(String(50), nullable=False)
-  strategy_run_id = Column(String(36), nullable=False)
+  owner_type = Column(String(32), nullable=False)
+  owner_id = Column(String(128), nullable=False)
+  environment = Column(String(16), nullable=False)
+  strategy_run_id = Column(String(36), nullable=True)
   instrument_code = Column(String(20), nullable=False)
   candidate_id = Column(String(128), nullable=True)
   evaluated_at = Column(DateTime, nullable=False)
@@ -99,6 +128,9 @@ class TTradeOpportunityEvaluation(Base):
   payload = Column(JSON, nullable=False, default=dict)
   metrics = Column(JSON, nullable=False, default=dict)
   created_at = Column(DateTime, nullable=False, default=sql_func.now())
+
+
+register_identity_immutability(TTradeOpportunityEvaluation)
 
 
 class TTradeInstrumentProfile(Base):
