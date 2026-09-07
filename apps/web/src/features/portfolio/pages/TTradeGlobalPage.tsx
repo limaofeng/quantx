@@ -141,6 +141,7 @@ import type {
 } from './t-trade-global/TTradePositionsView';
 import type { ReplaySidebarContext } from './t-trade-global/TTradeReplaySidebar';
 import {
+  TAssistantPaperPanel,
   TTradeActivityView,
   TTradeExecutionSettingsPanel,
   TTradeLiveDecisionAudit,
@@ -276,7 +277,7 @@ export function TTradeGlobalPage() {
   const accountId = tradingAccountConfig.defaultAccountId;
   const { refreshSafety } = useTradingSafety();
   const [workspaceMode, setWorkspaceMode] = React.useState<
-    'REALTIME' | 'REPLAY'
+    'REALTIME' | 'REPLAY' | 'PAPER'
   >('REALTIME');
   const [activeReplayView, setActiveReplayView] =
     React.useState<ReplayWorkspaceView>('OVERVIEW');
@@ -2226,7 +2227,7 @@ export function TTradeGlobalPage() {
         className="flex h-full shrink-0 items-stretch"
         aria-label="做 T 工作区"
       >
-        {(['REALTIME', 'REPLAY'] as const).map(mode => {
+        {(['REALTIME', 'REPLAY', 'PAPER'] as const).map(mode => {
           const active = workspaceMode === mode;
           return (
             <button
@@ -2250,7 +2251,11 @@ export function TTradeGlobalPage() {
               ) : (
                 <Radar className="h-3.5 w-3.5" />
               )}
-              {mode === 'REPLAY' ? '回放测试' : '实时监控'}
+              {mode === 'PAPER'
+                ? 'PAPER 执行'
+                : mode === 'REPLAY'
+                  ? '回放测试'
+                  : '实时监控'}
             </button>
           );
         })}
@@ -2335,7 +2340,11 @@ export function TTradeGlobalPage() {
             <WalletCards className="h-3.5 w-3.5" />T 批次退出
           </Button>
         )}
-        {workspaceMode === 'REPLAY' ? (
+        {workspaceMode === 'PAPER' ? (
+          <span className="text-ui-caption text-slate-400">
+            PAPER · 执行事实只读
+          </span>
+        ) : workspaceMode === 'REPLAY' ? (
           <span className="hidden items-center gap-1.5 text-ui-caption font-bold text-cyan-200 sm:inline-flex">
             <ShieldCheck className="h-3.5 w-3.5" />
             隔离回测 · 自动确认测试信号
@@ -3241,13 +3250,17 @@ export function TTradeGlobalPage() {
       <div className="min-h-0 flex-1">
         <TTradePanelBoundary
           name={
-            workspaceMode === 'REPLAY'
-              ? '回放测试'
-              : (tTradeModes.find(mode => mode.id === activeMode)?.label ??
-                '做 T 面板')
+            workspaceMode === 'PAPER'
+              ? 'PAPER 执行'
+              : workspaceMode === 'REPLAY'
+                ? '回放测试'
+                : (tTradeModes.find(mode => mode.id === activeMode)?.label ??
+                  '做 T 面板')
           }
         >
-          {workspaceMode === 'REPLAY' ? (
+          {workspaceMode === 'PAPER' ? (
+            <TAssistantPaperPanel accountId={accountId} />
+          ) : workspaceMode === 'REPLAY' ? (
             <TTradeReplayPanel
               accountId={accountId}
               activeView={activeReplayView}
@@ -3301,25 +3314,29 @@ export function TTradeGlobalPage() {
         minWidth: 260,
         storageScope: 't-trade-studio',
       }}
-      showSidebar
+      showSidebar={workspaceMode !== 'PAPER'}
       statusBarLeft={
         <>
           <span className="inline-flex items-center gap-2">
             <span
               className={cn(
                 'h-1.5 w-1.5 rounded-full',
-                workspaceMode === 'REPLAY'
-                  ? 'bg-cyan-400'
-                  : monitor?.enabled
-                    ? 'bg-emerald-400'
-                    : 'bg-slate-600'
+                workspaceMode === 'PAPER'
+                  ? 'bg-blue-400'
+                  : workspaceMode === 'REPLAY'
+                    ? 'bg-cyan-400'
+                    : monitor?.enabled
+                      ? 'bg-emerald-400'
+                      : 'bg-slate-600'
               )}
             />
-            {workspaceMode === 'REPLAY'
-              ? '历史回放测试模式'
-              : monitor?.enabled
-                ? '全局监控运行中'
-                : '全局监控已停止'}
+            {workspaceMode === 'PAPER'
+              ? 'PAPER 执行 · 只读'
+              : workspaceMode === 'REPLAY'
+                ? '历史回放测试模式'
+                : monitor?.enabled
+                  ? '全局监控运行中'
+                  : '全局监控已停止'}
           </span>
           <span className="text-slate-700">|</span>
           <span className="font-mono">{accountId || '未配置账户'}</span>
@@ -3335,7 +3352,9 @@ export function TTradeGlobalPage() {
         </>
       }
       statusBarRight={
-        workspaceMode === 'REPLAY' ? (
+        workspaceMode === 'PAPER' ? (
+          <span>PAPER Broker · 原始行情时间与本地受理时间分别记录</span>
+        ) : workspaceMode === 'REPLAY' ? (
           <>
             <span>BACKTEST Broker</span>
             <span className="text-slate-700">|</span>

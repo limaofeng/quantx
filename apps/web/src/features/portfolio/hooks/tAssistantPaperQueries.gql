@@ -1,0 +1,41 @@
+query Portfolio_TAssistantPaperExecutions($accountId: String!, $first: Int!, $after: String) {
+    tAssistantPaperExecutions(accountId: $accountId, first: $first, after: $after) {
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+      nodes {
+        executionId environment status entryReadiness entryReadinessReasons entryReadinessAsOf
+        scorerMode configVersionId frozenConfigVersion configSnapshotHash policyVersion featureSchemaVersion
+        createdAt seedPresent seedAsOf seedSnapshotId snapshotAsOf
+      }
+    }
+  }
+
+query Portfolio_TAssistantPaperFacts(
+    $accountId: String!, $executionId: String!, $first: Int!, $after: String,
+    $opportunities: Boolean!, $allocations: Boolean!, $reasons: Boolean!, $orders: Boolean!, $exitPlans: Boolean!
+  ) {
+    tAssistantPaperExecution(accountId: $accountId, executionId: $executionId) {
+      executionId environment status entryReadiness entryReadinessReasons entryReadinessAsOf
+      scorerMode configVersionId frozenConfigVersion configSnapshotHash policyVersion featureSchemaVersion
+      createdAt seedPresent seedAsOf seedSnapshotId snapshotAsOf
+    }
+    tAssistantPaperOpportunities(accountId: $accountId, executionId: $executionId, first: $first, after: $after) @include(if: $opportunities) {
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+      nodes { evidenceId candidateId instrumentCode eventType evaluatedAt createdAt frozenEvidencePresent sourceAt acceptedAt score reasonCodes candidateFingerprint }
+    }
+    tAssistantPaperAllocations(accountId: $accountId, executionId: $executionId, first: $first, after: $after) @include(if: $allocations) {
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+      nodes { allocationBatchId cycleId allocationAttempt status createdAt committedAt expiresAt terminalReason reasonCodes decisionId instrumentCode candidateId rank action requestedAmountCeiling allocatedAmountCap nextEligibleAt }
+    }
+    tAssistantPaperReasons(accountId: $accountId, executionId: $executionId, first: $first, after: $after) @include(if: $reasons) {
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+      nodes { eventId eventType occurredAt sourceType sourceId reasonCode reasonCodes }
+    }
+    tAssistantPaperOrders(accountId: $accountId, executionId: $executionId, first: $first, after: $after) @include(if: $orders) {
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+      nodes { orderId intentId instrumentCode ownerType ownerId side status volume filledVolume limitPrice submittedAt expiresAt sourceAt acceptedAt }
+    }
+    tAssistantPaperExitPlans(accountId: $accountId, executionId: $executionId, first: $first, after: $after) @include(if: $exitPlans) {
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+      nodes { planId instrumentCode status protectedVolume exitedVolume remainingVolume capacityStatus capacityError lastError lastEvaluatedAt }
+    }
+  }

@@ -1,7 +1,8 @@
 # QuantX Engine
 
-> 2026-09-07：公共 ExitPlanRuntime、admission 与独立 PAPER shadow 已在业务库 0050
-> 和清空功能数据后的 Windows full/live 基线上完成启动验收；新 T owner 仍无真实订单 handler。
+> 2026-09-07：业务库已迁移至 0056，Windows full/live 服务已重启。
+> 独立 T owner 支持隔离 PAPER 分配、订单与公共退出；仍无 LIVE 订单 handler。
+> 双标的闭环和故障路径在隔离 PostgreSQL 验证，服务启动不代表实盘交易验收。
 
 `apps/engine` 独占策略管理器、自动退出计划、条件清仓、全局做 T、热缓存和
 Agent 回报收敛。它使用 PostgreSQL advisory lock 保证同数据库只运行一个
@@ -35,10 +36,21 @@ WholeQuoteHub `CRITICAL` consumer。它为每个标的维护独立 accepted sequ
 同时把 Hub 全局 sequence 仅作为 capture fence；callback 失败或队列溢出时 Hub 关闭
 READY，并从权威全量快照重建后重启 consumer。supervisor 从 D-1 profile 真源装载逐标的
 画像，以 `StrategyBase.step(SNAPSHOT)` 运行同一 V3 reducer，再在一个 fenced cycle 事务中
-提交 symbol state、机会证据、PAPER proposal 和与 legacy StrategyRun 精确 source/fence 对比
-事件。启动时残留的 `PREPARED` cycle 只能按有效 lease 续接，否则以精确 claim fence 转为
-`ABORTED_STALE`。该 owner 未注册公共命令 handler，不写 approval、intent、pending、订单、
-成交、authorization 或 Agent outbox；它不是当前 LIVE 入场 producer。
+提交 symbol state、原候选冻结证据、标准 `ALLOCATION_PENDING` TradeIntent 和与 legacy
+StrategyRun 精确 source/fence 对比事件。启动时残留的 `PREPARED` cycle 只能按有效 lease
+续接，否则以精确 claim fence 转为 `ABORTED_STALE`。
+
+`TAssistantPaperEntryRuntime` 使用 point-in-time 组合快照完成 allocation，再按公共 admission
+rank 逐项复核最新 Tick、Sizer、Risk 和 Capacity；分配、准入和订单在同一事务提交。
+原始 TTL 维护单独提交，不依赖新鲜行情，也不被后续派单失败回滚。PAPER 事实由隔离账本和
+真实模拟回报收敛，BUY 成交创建公共 ExitPlan；停止 source 后，退出仍由原 plan owner 继续。
+配置停用先进入 DRAINING，再撤销未下单意图和真实模拟 BUY；未清的 BUY 阻止 STOPPED。
+
+PAPER 账户必须由冻结 `paper_seed` 显式初始化，或恢复同一 ledger 已有的不可变 seed；
+没有 seed、完整盘口或冻结策略证据时显示具体 readiness 原因，不复制 LIVE 资金或库存。
+QUOTE 保留源时间，受理时钟在账户锁后读取；同源时间新批次只更新盘口和 TTL，不重复成交。
+GraphQL 的 `tAssistantPaper*` 查询与 Web “PAPER 执行”页签只读展示执行、冻结候选、分配、
+原因、订单和退出保护。该路径不产生 Agent outbox，也不是当前 LIVE 入场 producer。
 
 Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 前者承载 API 发起的策略、做 T 和清仓控制命令，后者承载 Agent 上报的原始

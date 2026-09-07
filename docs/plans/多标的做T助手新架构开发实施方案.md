@@ -1,11 +1,11 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0—P3 已完成；P4 进行中，尚未通过退出门）<br>
-> 版本：2.3<br>
+> 状态：`IN_PROGRESS`（P0—P4 已完成；P5—P8 尚未开始）<br>
+> 版本：2.4<br>
 > 日期：2026-09-07<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
-> 开发实施进度：4 / 9 个阶段门完成（44.4%）
+> 开发实施进度：5 / 9 个阶段门完成（55.6%）
 
 ## 1. 目的与使用方式
 
@@ -175,7 +175,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P1 | Owner 与协议 1.2 | `DONE` | P0；P1-01..06 均已完成；PAPER legacy 义务已受控收敛；停服、停服态备份、迁移、标准 full/live 恢复、全量快照对账和隔离恢复演练已通过 | 单一 `ExecutionOwnerRef`、单一 protocol 1.2 payload、既有路径等价；未知/冲突 owner 与结果未知均 fail-closed；无双协议 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`；0046/0047 schema gate 通过；owner 空值 `0`、8 个身份不可变触发器通过；最新 1.2 快照 `PROCESSED`、旧失败快照 `SUPERSEDED`；标准 full/live 冷启动 exit=`0`，`liveTrading=ENABLED`，QMT/marketData/Monitor READY、快照约 3 秒，gateway/schema verify 通过 |
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `DONE` | `P1 DONE`；实现、恢复测试与 Windows 运行验收完成 | 无第二真源，故障恢复通过 | 0048/0050 实库与隔离恢复通过；BUY 整链 39 项及根回归，见 §10 |
 | P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
-| P4 | 分配、PAPER 与跨域准入 | `IN_PROGRESS` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 01–05 实现及隔离 PG 整链通过；只读投影已实现，在线 Schema/codegen 与最终 Web 检查待验收，见 §10 |
+| P4 | 分配、PAPER 与跨域准入 | `DONE` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 六项实现、隔离 PG 闭环/故障门及实际 Caddy/Web 契约检查完成，业务库 0056；证据见 §10 |
 | P5 | 共享账户回测 | `NOT_STARTED` | P4 | 无重复资金/未来数据，结果可重放 | 待补 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
 | P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
@@ -283,7 +283,7 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 - [x] `TTA-P4-04` 实现 `EntryExecutionGate` 与最新 Tick、binding、spread、TTL 重验。
 - [x] `TTA-P4-05` 将 ALLOW/CAP 候选按排名接入公共 admission、OrderSizer、Risk 和 Capacity；PAPER
   使用隔离 Broker/事实表，不消耗 LIVE 义务。
-- [ ] `TTA-P4-06` 提供机会、分配、readiness、reason、order/ExitPlan 的 GraphQL/Web 只读投影。
+- [x] `TTA-P4-06` 提供机会、分配、readiness、reason、order/ExitPlan 的 GraphQL/Web 只读投影。
 
 退出门：RULE_ONLY PAPER 多标的闭环可重放；半批、重复 claim、抢锁赢家和环境串写测试全部失败
 关闭；没有真实 QMT 订单。
@@ -924,12 +924,27 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   `.codex_screenshots/p4-final-targeted-python.log`、`p4-rule-only-replay-postgresql.log`、
   `p4-intent-terminal-controls-pg.log`、`p4-gate-terminal-postgresql.log`。
 - GraphQL 7 个授权只读字段、稳定分页及 Web PAPER 页签已实现；API 定向 7 项、组件及工具栏
-  定向 10 项通过，两条查询通过本地 schema 验证，未以本地 schema 代替实际 codegen。
-  Web 首轮全量 865 passed/1 failed（工具栏旧锚点已定向修复），lint 通过；时间格式类型错误
-  已修复。在线 Caddy 仍缺新增 7 字段，codegen/check/build 尚未通过；codegen 禁止部分输出。
-- 只读核对在线业务库仍为 0050、无 PAPER account 表，当前启动配置为 full/live；尚未迁移或
-  重启服务。01–05 的勾选表示代码与隔离验收完成，不表示线上已启用。P4 保持 IN_PROGRESS，
-  06/最终 Web 契约检查、获授权后的默认 Windows 验收及 As-Is 更新仍待完成；不进入 P5–P8。
+  定向 10 项通过。实际 `http://127.0.0.1:8080/graphql` 的 `npm run codegen`、`npm run check`、
+  `npm run lint`、`npm run build` 均通过。codegen 禁止部分输出；PAPER 两条操作在同一实际
+  Schema 下单独生成，随只读页签加载，公共 GraphQL 包与页面均保持既有包体预算。
+  Web 完整 `test:run --maxWorkers=4` 为 `157 files / 866 tests passed`；默认并发曾有一次
+  App appearance 异步加载超时，单项及上述完整低并发复验通过，未修改无关功能。
+  之后仅调整查询生成模块归属，相关 10 项、typecheck/lint/build 再通过；复用其余有效证据。
+  lint 保留既有 `TTradeDecisionAuditTable.tsx` fast-refresh warning，0 errors。
+- 用户明确授权后执行统一 `down → migrate → up -Environment dev -Profile web → status`。
+  迁移前备份为 `.runtime/backups/20260907T135507Z`；0050→0056 成功且 schema check 为 current。
+  full/live 服务已重启，Engine owner audit 与独立 PAPER consumer 启动成功。QMT 启动观测为
+  ready、协议 1.2、单设备/单账户、新鲜快照约 2.5 秒；行情供给显示 unavailable，未据此宣称
+  实盘接单就绪或执行真实交易。本次未清理业务数据，未自动创建 PAPER seed。
+  维护和 Web 证据见 `.codex_screenshots/p4-authorized-*.log`、`p4-graphql-codegen.log`、
+  `p4-web-check.log`、`p4-web-lint.log`、`p4-web-test-run-bounded.log`、`p4-web-build.log`。
+- 核心提交 `4bcb3edf`（双时钟）、`fde76dfc`（候选反馈）、`6eff542a`（运行时闭环）；
+  只读投影与最终退出记录为本检查点所在提交。P4 六项与工程退出门完成，标为 DONE。
+  这不是整个方案或策略收益的最终验收；没有开展 E2E、真实订单或 P5–P8 工作。
+- P5 可复用：`StrategyBase.step`、组合快照/allocator、EntryExecutionGate、公共 admission、
+  OrderSizer/Risk/Capacity、ExitPlan 与回报语义；参考实际双标的 replay 和 0056 负测。
+  PAPER ledger 的 execution scope、双时钟和显式 seed 不可改名冒充 BACKTEST；下一任务仅按
+  P5-A 明确 BACKTEST 端口与共享账户时钟，不自动扩展评估或模型范围。
 
 ## 11. 变更记录
 

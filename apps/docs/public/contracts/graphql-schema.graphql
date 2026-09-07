@@ -915,6 +915,9 @@ scalar Date
 """Date with time (isoformat)"""
 scalar DateTime
 
+"""Decimal (fixed-point)"""
+scalar Decimal
+
 """删除自选股分组输入"""
 input DeleteWatchlistGroupInput {
   """分组ID"""
@@ -5155,6 +5158,13 @@ type Query {
 
   """获取自选股分组列表"""
   watchlistGroups(accountId: String = null): [WatchlistGroup!]!
+  tAssistantPaperExecutions(accountId: String!, first: Int! = 20, after: String = null): TAssistantPaperExecutionTAssistantPaperPage!
+  tAssistantPaperExecution(accountId: String!, executionId: String!): TAssistantPaperExecution
+  tAssistantPaperOpportunities(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperOpportunityTAssistantPaperPage!
+  tAssistantPaperAllocations(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperAllocationTAssistantPaperPage!
+  tAssistantPaperReasons(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperReasonTAssistantPaperPage!
+  tAssistantPaperOrders(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperOrderTAssistantPaperPage!
+  tAssistantPaperExitPlans(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperExitPlanTAssistantPaperPage!
 
   """按精确回测版本读取真实机会事件，不从审计推导信号"""
   tTradeReplaySignalEvaluations(runId: String!, backtestId: String!, filters: TTradeReplaySignalFilterInput = null, first: Int! = 50, after: String = null): TTradeReplaySignalPage!
@@ -7304,6 +7314,131 @@ type Subscription {
 
   """订阅策略运行实例的 K线 数据"""
   strategyKlines(runId: String!, periods: [String!] = null): StrategyKLineData!
+}
+
+type TAssistantPaperAllocation {
+  allocationBatchId: String!
+  cycleId: String!
+  allocationAttempt: Int!
+  status: String!
+  createdAt: DateTime!
+  committedAt: DateTime
+  expiresAt: DateTime!
+  terminalReason: String
+  decisionId: String
+  instrumentCode: String
+  candidateId: String
+  rank: Int
+  action: String
+  reasonCodes: [String!]
+  requestedAmountCeiling: Decimal
+  allocatedAmountCap: Decimal
+  nextEligibleAt: DateTime
+}
+
+type TAssistantPaperAllocationTAssistantPaperPage {
+  nodes: [TAssistantPaperAllocation!]!
+  pageInfo: PageInfo!
+}
+
+type TAssistantPaperExecution {
+  executionId: String!
+  environment: String!
+  status: String!
+  entryReadiness: String!
+  entryReadinessReasons: [String!]!
+  entryReadinessAsOf: DateTime!
+  scorerMode: String!
+  configVersionId: String!
+  frozenConfigVersion: Int!
+  configSnapshotHash: String!
+  policyVersion: String!
+  featureSchemaVersion: Int!
+  createdAt: DateTime!
+  seedPresent: Boolean!
+  seedAsOf: DateTime
+  seedSnapshotId: String
+  snapshotAsOf: DateTime
+}
+
+type TAssistantPaperExecutionTAssistantPaperPage {
+  nodes: [TAssistantPaperExecution!]!
+  pageInfo: PageInfo!
+}
+
+type TAssistantPaperExitPlan {
+  planId: String!
+  instrumentCode: String!
+  status: String!
+  protectedVolume: Int!
+  exitedVolume: Int!
+  remainingVolume: Int!
+  capacityStatus: String!
+  capacityError: String
+  lastError: String
+  lastEvaluatedAt: DateTime
+}
+
+type TAssistantPaperExitPlanTAssistantPaperPage {
+  nodes: [TAssistantPaperExitPlan!]!
+  pageInfo: PageInfo!
+}
+
+type TAssistantPaperOpportunity {
+  evidenceId: String!
+  candidateId: String
+  instrumentCode: String!
+  eventType: String!
+  evaluatedAt: DateTime!
+  createdAt: DateTime!
+  frozenEvidencePresent: Boolean!
+  sourceAt: DateTime
+  acceptedAt: DateTime
+  score: Float
+  reasonCodes: [String!]
+  candidateFingerprint: String
+}
+
+type TAssistantPaperOpportunityTAssistantPaperPage {
+  nodes: [TAssistantPaperOpportunity!]!
+  pageInfo: PageInfo!
+}
+
+type TAssistantPaperOrder {
+  orderId: String!
+  intentId: String!
+  instrumentCode: String!
+  ownerType: String!
+  ownerId: String!
+  side: String!
+  status: String!
+  volume: Int!
+  filledVolume: Int!
+  limitPrice: Decimal!
+  submittedAt: DateTime!
+  expiresAt: DateTime!
+  sourceAt: DateTime
+  acceptedAt: DateTime
+}
+
+type TAssistantPaperOrderTAssistantPaperPage {
+  nodes: [TAssistantPaperOrder!]!
+  pageInfo: PageInfo!
+}
+
+type TAssistantPaperReason {
+  eventId: String!
+  eventType: String!
+  occurredAt: DateTime!
+  sourceType: String
+  sourceId: String
+  reasonCode: String
+  reasonCodes: [String!]
+}
+
+type TAssistantPaperReasonTAssistantPaperPage {
+  nodes: [TAssistantPaperReason!]!
+  pageInfo: PageInfo!
 }
 
 """做 T 买入确认同时覆盖的精确自动退出范围"""

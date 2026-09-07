@@ -67,3 +67,9 @@ export const TTradeReplayFrozenSettings = lazy(() =>
     default: module.TTradeReplayFrozenSettings,
   }))
 );
+
+export const TAssistantPaperPanel = lazy(() =>
+  import('./TAssistantPaperPanel').then(module => ({
+    default: module.TAssistantPaperPanel,
+  }))
+);
