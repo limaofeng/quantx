@@ -1315,7 +1315,11 @@ async def stage_indicator_features(
   from quantx_research.runner import resolve_analysis_window
 
   analysis_start, end = resolve_analysis_window(config)
-  start = analysis_start - timedelta(days=max(400, config.required_lookback * 2))
+  start = analysis_start - timedelta(
+    days=max(
+      400, config.required_lookback * 2, config.universe.minimum_listing_days * 2
+    )
+  )
   requested_source_start = start
   provenance = _source_provenance(source)
   archive_start = (provenance.get("campaign") or {}).get("start_date")

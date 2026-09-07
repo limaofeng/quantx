@@ -4,7 +4,8 @@ param(
   [string]$SourceDirectory,
   [Parameter(Mandatory = $true)]
   [string]$OutputDirectory,
-  [string]$Python = "python",
+  [Parameter(Mandatory = $true)]
+  [string]$Python,
   [string]$LightGBMVersion = "4.7.0",
   [string]$BoostRoot = "",
   [string]$BoostLibraryDir = "",
@@ -91,7 +92,11 @@ try {
   Pop-Location
 }
 
-$wheel = Get-ChildItem -LiteralPath $output -Filter "lightgbm-$LightGBMVersion-*.whl" | Select-Object -First 1
+$wheels = @(Get-ChildItem -LiteralPath $output -Filter "lightgbm-$LightGBMVersion-*.whl")
+if ($wheels.Count -ne 1) {
+  throw "Build output must contain exactly one target wheel; use a clean output directory."
+}
+$wheel = $wheels[0]
 if ($null -eq $wheel) {
   throw "Expected LightGBM $LightGBMVersion wheel was not produced"
 }

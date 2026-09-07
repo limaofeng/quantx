@@ -1,5 +1,27 @@
 name: quantx-worker
 deployments:
+  - name: stock-selection-training-capability
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/stock_selection_training_flow.py:stock_selection_training_capability_flow
+    work_pool:
+      name: quantx-pool
+      work_queue_name: default
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+    schedules:
+      - cron: '* * * * *'
+        timezone: Asia/Shanghai
+  - name: research-preparation-dispatch
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/research_preparation_flow.py:research_preparation_dispatch_flow
+    work_pool:
+      name: quantx-pool
+      work_queue_name: default
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+    schedules:
+      - cron: '* * * * *'
+        timezone: Asia/Shanghai
   - name: market-sync
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:market_universe_request_flow
     work_pool: &quantx_process_pool

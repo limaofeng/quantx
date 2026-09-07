@@ -96,7 +96,9 @@ def test_training_workbench_contract_is_typed_and_web_only() -> None:
   assert training_mutation_policy.audiences == ("web",)
   assert training_mutation_policy.risk == "NON_TRADING_WRITE"
   assert operation_policy("Mutation", "registerStockSelectionModel").risk == "ADMIN"
-  assert operation_policy("Mutation", "deleteExitPlanHistory").risk == "NON_TRADING_WRITE"
+  assert (
+    operation_policy("Mutation", "deleteExitPlanHistory").risk == "NON_TRADING_WRITE"
+  )
 
 
 @pytest.mark.asyncio
@@ -115,6 +117,7 @@ async def test_training_capabilities_query_uses_canonical_repository_method(
         "status": "GPU_AVAILABLE",
         "gpu_status": "GPU_AVAILABLE",
         "fresh": True,
+        "cpu_available": True,
         "updated_at": "2026-09-02T06:00:00+00:00",
         "available_memory_mib": 4096,
         "environment_requirement_hash": "a" * 64,
@@ -286,11 +289,11 @@ def test_old_shadow_run_is_not_reused_after_model_activation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_registration_uses_final_db_run_key_and_sanitizes_projection(tmp_path, monkeypatch) -> None:
+async def test_registration_uses_final_db_run_key_and_sanitizes_projection(
+  tmp_path, monkeypatch
+) -> None:
   run_id = "final-run-20260902"
-  run_key = _stable_run_key(
-    study_id="next-day-selection", version="v1", run_id=run_id
-  )
+  run_key = _stable_run_key(study_id="next-day-selection", version="v1", run_id=run_id)
   (tmp_path / run_id).mkdir()
   row = SimpleNamespace(
     run_id=run_id,
@@ -320,7 +323,11 @@ async def test_registration_uses_final_db_run_key_and_sanitizes_projection(tmp_p
       return None
 
     async def get_run(self, value):
-      return SimpleNamespace(run_kind="DEVELOPMENT", spec_id="development-spec") if value == "development-run" else None
+      return (
+        SimpleNamespace(run_kind="DEVELOPMENT", spec_id="development-spec")
+        if value == "development-run"
+        else None
+      )
 
   class ModelRepository:
     payload = None
@@ -406,11 +413,11 @@ async def test_registration_uses_final_db_run_key_and_sanitizes_projection(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_registration_rejects_development_row_before_loading_artifacts(tmp_path, monkeypatch) -> None:
+async def test_registration_rejects_development_row_before_loading_artifacts(
+  tmp_path, monkeypatch
+) -> None:
   run_id = "development-run-20260902"
-  run_key = _stable_run_key(
-    study_id="next-day-selection", version="v1", run_id=run_id
-  )
+  run_key = _stable_run_key(study_id="next-day-selection", version="v1", run_id=run_id)
   row = SimpleNamespace(
     run_id=run_id,
     run_key=run_key,

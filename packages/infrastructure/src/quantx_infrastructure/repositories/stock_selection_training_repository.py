@@ -425,7 +425,10 @@ class StockSelectionTrainingRepository:
     return [_normalize_row_timestamps(row) for row in result.scalars().all()]
 
   async def get_capability(
-    self, *, now: datetime | None = None, max_age_seconds: int = HEARTBEAT_MAX_AGE_SECONDS
+    self,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: int = HEARTBEAT_MAX_AGE_SECONDS,
   ) -> dict[str, Any]:
     """Read the latest worker capability certificate."""
 
@@ -454,21 +457,25 @@ class StockSelectionTrainingRepository:
     if not _HASH_RE.fullmatch(environment_hash):
       environment_hash = ""
     raw_status = str(
-      details.get("status")
-      or _row_value(heartbeat, "status", "")
+      details.get("status") or _row_value(heartbeat, "status", "")
     ).upper()
     if not fresh:
       status = "CPU_AVAILABLE"
       gpu_status = "GPU_UNAVAILABLE_RUNTIME"
     else:
-      status = raw_status if raw_status in {
-        "CPU_AVAILABLE",
-        "GPU_AVAILABLE",
-        "GPU_UNAVAILABLE_BUILD",
-        "GPU_UNAVAILABLE_RUNTIME",
-        "GPU_INSUFFICIENT_MEMORY",
-        "GPU_UNQUALIFIED",
-      } else "CPU_AVAILABLE"
+      status = (
+        raw_status
+        if raw_status
+        in {
+          "CPU_AVAILABLE",
+          "GPU_AVAILABLE",
+          "GPU_UNAVAILABLE_BUILD",
+          "GPU_UNAVAILABLE_RUNTIME",
+          "GPU_INSUFFICIENT_MEMORY",
+          "GPU_UNQUALIFIED",
+        }
+        else "CPU_AVAILABLE"
+      )
       gpu_status = str(details.get("gpu_status") or status).upper()
       if gpu_status not in {
         "GPU_AVAILABLE",
@@ -485,6 +492,7 @@ class StockSelectionTrainingRepository:
       "available_memory_mib": memory,
       "qualification": dict(_safe_capability_json(qualification) or {}),
       "fresh": fresh,
+      "cpu_available": fresh and details.get("cpu_available") is True,
       "updated_at": updated,
     }
 
@@ -1469,6 +1477,7 @@ class StockSelectionTrainingRepository:
       "metrics": [dict(row.metrics_summary or {}) for row in runs] if not mismatches else [],
       "gates": [dict(row.gate_summary or {}) for row in runs] if not mismatches else [],
     }
+
 
 __all__ = [
   "COMPONENT_NAME",

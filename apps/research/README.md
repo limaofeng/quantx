@@ -139,7 +139,7 @@ uv run --frozen quantx-research certify-next-day-selection-dataset `
 
 .\ops\windows\build-lightgbm-opencl-wheel.ps1 `
   -SourceDirectory F:\src\LightGBM `
-  -OutputDirectory F:\src\LightGBM\dist
+  -OutputDirectory F:\src\LightGBM\dist -Python .venv\Scripts\python.exe
 
 uv run --frozen quantx-research qualify-lightgbm-gpu `
   --dataset-dir .runtime\research-datasets\next-day-selection-v1 `

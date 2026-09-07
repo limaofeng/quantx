@@ -352,7 +352,11 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
     captured.update(values)
 
   monkeypatch.setattr(training, "_source_panel", source_panel)
-  monkeypatch.setattr(dataset_module, "prepare_training_panel", lambda raw, calendar, config: (panel, {"complete": True, "coverage": 1.0}))
+  monkeypatch.setattr(
+    dataset_module,
+    "prepare_training_panel",
+    lambda raw, calendar, config: (panel, {"complete": True, "coverage": 1.0}),
+  )
   config_path = tmp_path / "config.yaml"
   import yaml
 
@@ -378,9 +382,33 @@ def test_dataset_certification_writes_immutable_manifest_and_exact_projection(
   }
   assert manifest["status"] == "CERTIFIED"
   assert manifest["source_reference"] == "certified-v1"
-  assert manifest["training_panel_sha256"] == file_sha256(output / "training-panel.parquet")
+  assert manifest["training_panel_sha256"] == file_sha256(
+    output / "training-panel.parquet"
+  )
   assert tuple(captured) == dataset_module._CERTIFICATION_FIELDS
   assert captured["manifest_sha256"] == manifest["manifest_sha256"]
+  first_bytes = (output / "manifest.json").read_bytes()
+  retried = asyncio.run(
+    dataset_module.certify_next_day_selection_dataset(
+      config_path,
+      dataset_version="certified-v1",
+      output_root=tmp_path / "datasets",
+      repository_certifier=certify,
+    )
+  )
+  assert retried == output
+  assert (output / "manifest.json").read_bytes() == first_bytes
+  panel.loc[0, "label"] = 1.0 - panel.loc[0, "label"]
+  with pytest.raises(ValueError, match="不同证据"):
+    asyncio.run(
+      dataset_module.certify_next_day_selection_dataset(
+        config_path,
+        dataset_version="certified-v1",
+        output_root=tmp_path / "datasets",
+        repository_certifier=certify,
+      )
+    )
+  assert (output / "manifest.json").read_bytes() == first_bytes
 
 
 def test_failed_published_dataset_cleanup_accepts_matching_manifest_with_extras(

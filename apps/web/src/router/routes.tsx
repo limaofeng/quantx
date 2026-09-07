@@ -450,6 +450,15 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'dashboard',
   }),
   route({
+    path: '/settings/data/research',
+    title: '研究训练数据',
+    importer: toDefaultExport(
+      () => import('@/features/system/pages/ResearchDataPreparationPage'),
+      'ResearchDataPreparationPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
     path: '/settings/data/market',
     title: '全市场数据',
     importer: toDefaultExport(

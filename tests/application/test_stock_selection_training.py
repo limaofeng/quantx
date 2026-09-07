@@ -39,6 +39,8 @@ DATASET = {
 class Port:
   def __init__(self, *, capability: dict | None = None) -> None:
     self.capability = capability or {
+      "fresh": True,
+      "cpu_available": True,
       "status": "CPU_AVAILABLE",
       "gpu_status": "GPU_UNAVAILABLE_RUNTIME",
       "environment_requirement_hash": "c" * 64,
@@ -82,8 +84,7 @@ class Port:
   async def create_final_evaluation(self, spec_values, run_values):
     group = spec_values["experiment_group_hash"]
     count = sum(
-      row["run_kind"] == "FINAL_EVALUATION"
-      and row["experiment_group_hash"] == group
+      row["run_kind"] == "FINAL_EVALUATION" and row["experiment_group_hash"] == group
       for row in self.specs.values()
     )
     spec = dict(spec_values)
@@ -115,7 +116,11 @@ class Port:
     return self.runs[run_id]
 
   async def comparison(self, run_ids):
-    return {"comparable": True, "mismatch_fields": [], "runs": [self.runs[item] for item in run_ids]}
+    return {
+      "comparable": True,
+      "mismatch_fields": [],
+      "runs": [self.runs[item] for item in run_ids],
+    }
 
 
 def _request(**overrides):
@@ -206,7 +211,9 @@ async def test_preview_fingerprint_and_gpu_required_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_incomplete_historical_universe_is_shadow_reason_not_submission_blocker() -> None:
+async def test_incomplete_historical_universe_is_shadow_reason_not_submission_blocker() -> (
+  None
+):
   quality = dict(DATASET["quality_summary"])
   quality["coverage"] = {"historical_universe": {"complete": False}}
   dataset = {**DATASET, "quality_summary": quality}

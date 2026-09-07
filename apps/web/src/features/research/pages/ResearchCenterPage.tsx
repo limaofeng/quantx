@@ -428,7 +428,7 @@ export default function ResearchCenterPage() {
             )}
             {missingCertifiedDataset && (
               <ActionItem
-                href="/settings/data"
+                href="/settings/data/research"
                 description="请在数据管理中认证可用于训练的数据集。"
               >
                 没有认证数据集

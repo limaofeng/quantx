@@ -628,12 +628,17 @@ async def _source_panel(
     _reject_links(archive_path)
     if _is_link_like(archive_path):
       raise ValueError("market_data_archive 不允许符号链接或联接点")
+  from quantx_infrastructure.services.trading_time_service import TradingDateHelper
+
+  source_end = await TradingDateHelper().get_next_trading_date(
+    "SH", config.data.date_range[1]
+  )
   study_config = IndicatorStudyConfig.model_validate(
     {
       "study": "indicator-study",
       "version": "v1",
       "indicator_ids": indicator_ids,
-      "date_range": config.data.date_range,
+      "date_range": (config.data.date_range[0], source_end),
       "universe": {
         "instrument_type": "stock",
         "stock_codes": config.data.stock_codes,

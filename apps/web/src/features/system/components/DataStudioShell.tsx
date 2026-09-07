@@ -30,6 +30,7 @@ import {
 import { cn } from '@/utils/cn';
 
 export type DataStudioMode =
+  | 'RESEARCH'
   | 'ANNOUNCEMENTS'
   | 'CALENDAR'
   | 'FINANCIAL'
@@ -56,6 +57,13 @@ interface DataStudioTab extends StudioTab {
 }
 
 const dataResources: DataResourceItem[] = [
+  {
+    description: '训练数据配置、下载与认证',
+    icon: Database,
+    id: 'RESEARCH',
+    label: '研究训练数据',
+    path: '/settings/data/research',
+  },
   {
     description: '门户、全局同步、系统健康',
     icon: Database,

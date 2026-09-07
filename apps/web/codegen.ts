@@ -6,7 +6,10 @@ const graphqlSchemaEndpoint =
   process.env.VITE_GRAPHQL_ENDPOINT ??
   'http://localhost:8080/graphql';
 const graphqlSchemaToken = process.env.CODEGEN_GRAPHQL_TOKEN?.trim();
-const paperDocuments = 'src/features/portfolio/hooks/tAssistantPaperQueries.gql';
+const paperDocuments =
+  'src/features/portfolio/hooks/tAssistantPaperQueries.gql';
+const preparationDocuments =
+  'src/features/system/pages/researchPreparation.gql';
 const scalarTypes = {
   DateTime: 'string',
   Date: 'string',
@@ -35,6 +38,7 @@ const config: CodegenConfig = {
         'src/**/*.gql',
         '!src/generated/**/*',
         `!${paperDocuments}`,
+        `!${preparationDocuments}`,
       ],
       preset: 'client',
       plugins: [],
@@ -44,6 +48,12 @@ const config: CodegenConfig = {
       config: {
         scalars: scalarTypes,
       },
+    },
+    'src/generated/research-preparation/': {
+      documents: [preparationDocuments],
+      preset: 'client',
+      plugins: [],
+      config: { scalars: scalarTypes },
     },
     // Keep this lazy workspace's operation AST out of the shared GraphQL chunk.
     'src/generated/paper/': {

@@ -52,6 +52,10 @@ from ..types.stock_selection_types import (
   StockSelectionTrainingRunPage,
   StockSelectionTrainingRunStatus,
 )
+from .research_preparation_schema import (
+  ResearchPreparationMutation,
+  ResearchPreparationQuery,
+)
 
 
 def _validate_candidate_input(input: StockProbabilityCandidateInput) -> None:
@@ -246,11 +250,15 @@ def _training_folds(value: Any) -> list[StockSelectionTrainingFold]:
 
 
 def _capabilities(value: Any) -> StockSelectionTrainingCapabilities:
-  status = str(_row_value(value, "gpu_status", _row_value(value, "status", "GPU_UNAVAILABLE_RUNTIME"))).upper()
+  status = str(
+    _row_value(
+      value, "gpu_status", _row_value(value, "status", "GPU_UNAVAILABLE_RUNTIME")
+    )
+  ).upper()
   if status not in {item.value for item in StockSelectionTrainingGpuStatus}:
     status = "GPU_UNAVAILABLE_RUNTIME"
   return StockSelectionTrainingCapabilities(
-    cpu_available=True,
+    cpu_available=_row_value(value, "cpu_available", False) is True,
     gpu_status=StockSelectionTrainingGpuStatus(status),
     fresh=bool(_row_value(value, "fresh", False)),
     updated_at=_as_datetime(_row_value(value, "updated_at")),
@@ -376,7 +384,7 @@ async def _training_run_projection(
 
 
 @strawberry.type(description="次日上涨概率候选与模型证据查询")
-class StockSelectionQuery:
+class StockSelectionQuery(ResearchPreparationQuery):
   @strawberry.field(description="列出人工登记的概率模型版本")
   async def stock_selection_models(self) -> list[StockSelectionModel]:
     async with AsyncSessionLocal() as db:
@@ -646,7 +654,7 @@ class StockSelectionQuery:
 
 
 @strawberry.type(description="概率模型人工登记与阶段控制")
-class StockSelectionMutation:
+class StockSelectionMutation(ResearchPreparationMutation):
   @strawberry.mutation(description="从已完成研究运行登记 CANDIDATE 模型")
   async def register_stock_selection_model(
     self,

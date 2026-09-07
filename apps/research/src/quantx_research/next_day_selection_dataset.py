@@ -298,8 +298,12 @@ def _quality_evidence(
   event_dates = pd.to_datetime(panel["event_date"], errors="coerce").dt.normalize()
   target_dates = pd.to_datetime(panel["target_date"], errors="coerce").dt.normalize()
   duplicate_count = int(panel.duplicated(["stock_code", "event_date"]).sum())
-  future_target_count = int((target_dates <= event_dates).fillna(False).sum())
-  invalid_label_count = int(panel["label"].isna().sum()) if "label" in panel else len(panel)
+  future_target_count = int(
+    (target_dates.isna() | event_dates.isna() | (target_dates <= event_dates)).sum()
+  )
+  invalid_label_count = (
+    int((~panel["label"].isin([0.0, 1.0])).sum()) if "label" in panel else len(panel)
+  )
   positive_count = int(panel["label"].eq(1.0).sum()) if "label" in panel else 0
   sample_count = int(len(panel))
   return {
@@ -436,7 +440,10 @@ async def certify_next_day_selection_dataset(
     # Config models are frozen; use a validated copy rather than mutating the
     # source config that contributes to the evidence coordinate.
     data = config.data.model_copy(
-      update={"market_data_archive": Path(market_data_archive), "verified_panel_path": None}
+      update={
+        "market_data_archive": Path(market_data_archive),
+        "verified_panel_path": None,
+      }
     )
     config = config.model_copy(update={"data": data})
 
@@ -456,7 +463,9 @@ async def certify_next_day_selection_dataset(
     raw_panel, calendar, source_quality = await _source_panel(config, source_staging)
     panel, universe_quality = prepare_training_panel(raw_panel, calendar, config)
     _safe_remove_tree(source_staging)
-    if config.data.universe_kind == "CERTIFIED_INDEX" and not universe_quality.get("complete"):
+    if config.data.universe_kind == "CERTIFIED_INDEX" and not universe_quality.get(
+      "complete"
+    ):
       raise ValueError("CERTIFIED_INDEX 必须具备完整 point-in-time universe 证据")
     panel_path = staging / _PANEL_NAME
     panel.to_parquet(panel_path, index=False)
@@ -467,6 +476,8 @@ async def certify_next_day_selection_dataset(
       universe_quality=universe_quality,
       source_quality=source_quality,
     )
+    if not all(quality["leakage_checks"].values()):
+      raise ValueError("认证面板存在重复样本、无效标签或日期顺序错误")
     write_json(staging / _QUALITY_NAME, quality)
     quality_path = staging / _QUALITY_NAME
     manifest = _manifest_without_file_hash(
@@ -480,6 +491,13 @@ async def certify_next_day_selection_dataset(
       data_fingerprint=data_hash,
       quality=quality,
     )
+    # Creation time identifies the first publication, not a retry. Revalidate
+    # existing artifacts before reusing it; never rewrite an existing version.
+    if (directory / _MANIFEST_NAME).is_file():
+      original = load_certified_dataset_manifest(directory)
+      manifest["created_at"] = original["created_at"]
+      manifest.pop("manifest_sha256")
+      manifest["manifest_sha256"] = fingerprint(manifest)
     write_json(staging / _MANIFEST_NAME, manifest)
 
     values = {
@@ -516,7 +534,10 @@ async def certify_next_day_selection_dataset(
           existing_payload = json.loads(existing_manifest.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
           raise ValueError("同版本认证数据集证据不可读取") from exc
-        if not isinstance(existing_payload, dict) or existing_payload.get("manifest_sha256") != manifest["manifest_sha256"]:
+        if (
+          not isinstance(existing_payload, dict)
+          or existing_payload.get("manifest_sha256") != manifest["manifest_sha256"]
+        ):
           raise ValueError("同 dataset_version 已存在不同证据，拒绝覆盖")
         # Verify every immutable file before treating the existing directory
         # as an idempotent retry.  The DB certification is still reasserted.

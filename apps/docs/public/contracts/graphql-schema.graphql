@@ -4174,6 +4174,9 @@ type Mutation {
 
   """注销当前安装并丢弃尚未发送的推送意图"""
   unregisterPushDevice(input: UnregisterPushDeviceInput!): UnregisterPushDeviceResult!
+  saveResearchPreparation(config: JSON!): JSON!
+  startResearchPreparation(kind: ResearchPreparationKind!, config: JSON!, requestKey: String!, datasetVersion: String = null): ResearchPreparationTask!
+  retryResearchPreparation(jobId: String!): ResearchPreparationTask!
 
   """从已完成研究运行登记 CANDIDATE 模型"""
   registerStockSelectionModel(runKey: String!): StockSelectionModel!
@@ -5122,6 +5125,8 @@ type Query {
 
   """获取选股与历史研究共用的版本化指标目录"""
   stockIndicatorCatalog: [StockIndicatorDefinition!]!
+  researchPreparation: ResearchPreparationState!
+  previewResearchDownload(config: JSON!): JSON!
 
   """列出人工登记的概率模型版本"""
   stockSelectionModels: [StockSelectionModel!]!
@@ -5507,6 +5512,33 @@ type ResearchLifecycleTrainingSummary {
   queueReason: String
   errorCode: String
   errorMessage: String
+}
+
+enum ResearchPreparationKind {
+  COVERAGE
+  DOWNLOAD
+  CERTIFY
+  GPU
+}
+
+type ResearchPreparationState {
+  config: JSON!
+  evidenceFiles: [String!]!
+  jobs: [ResearchPreparationTask!]!
+}
+
+type ResearchPreparationTask {
+  jobId: String!
+  kind: ResearchPreparationKind!
+  status: String!
+  phase: String!
+  config: JSON!
+  datasetVersion: String
+  flowRunId: String
+  result: JSON!
+  error: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
 }
 
 """一次离线研究运行的安全统计投影"""

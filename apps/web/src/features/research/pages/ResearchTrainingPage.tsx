@@ -387,7 +387,7 @@ export default function ResearchTrainingPage() {
             )}
             <div className="mt-4 space-y-1 border-t border-white/[0.06] pt-3">
               <Link
-                href="/settings/data"
+                href="/settings/data/research"
                 className="flex h-control-default items-center justify-between rounded-control px-2 text-ui-label font-semibold text-blue-300 outline-none transition-colors hover:bg-blue-500/10 hover:text-blue-200 focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 <span className="inline-flex items-center gap-2">

@@ -131,6 +131,7 @@ from .paper_execution import (
   PaperExecutionOrderRecord,
 )
 from .position import Position
+from .research_preparation import ResearchPreparationJob, ResearchPreparationSettings
 from .risk_increase_admission import (
   AccountRiskIncreaseAdmissionBatch,
   AccountRiskIncreaseAdmissionItem,
@@ -192,6 +193,8 @@ apply_table_comments(Base.metadata)
 
 # 导出所有模型
 __all__ = [
+  "ResearchPreparationJob",
+  "ResearchPreparationSettings",
   # 枚举类型
   "OrderType",
   "OrderStatus",

@@ -5,6 +5,8 @@ from __future__ import annotations
 from sqlalchemy import MetaData
 
 TABLE_COMMENTS: dict[str, str] = {
+  "research_preparation_settings": "研究训练数据准备配置",
+  "research_preparation_jobs": "研究数据覆盖、下载、认证与 GPU 资格任务",
   "account_execution_controls": "账户级实盘执行授权、对账事实与紧急停止状态",
   "account_execution_control_events": "账户级实盘执行控制审计事件",
   "account_risk_increase_admission_batches": "账户级风险增加准入批次与恢复租约",

@@ -1118,6 +1118,16 @@
         "risk": "ADMIN",
         "stability": "web-internal"
       },
+      "retryResearchPreparation": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "web-internal"
+      },
       "revokeAgentDevice": {
         "audiences": [
           "web"
@@ -1171,6 +1181,16 @@
         ],
         "risk": "TRADING_WRITE",
         "stability": "supported"
+      },
+      "saveResearchPreparation": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "web-internal"
       },
       "saveTTradeGlobalMonitor": {
         "audiences": [
@@ -1306,6 +1326,16 @@
         ],
         "risk": "TRADING_WRITE",
         "stability": "supported"
+      },
+      "startResearchPreparation": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "web-internal"
       },
       "startStockSelectionDevelopmentTraining": {
         "audiences": [
@@ -2406,6 +2436,16 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "previewResearchDownload": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
       "previewStockSelectionTraining": {
         "audiences": [
           "web"
@@ -2439,6 +2479,16 @@
         "stability": "supported"
       },
       "researchLifecycleRuns": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "researchPreparation": {
         "audiences": [
           "web"
         ],

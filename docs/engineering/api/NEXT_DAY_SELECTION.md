@@ -50,7 +50,19 @@ gates 证据。缺失证据表示“不可用”，不能转换成零或通过�
 `operations:write`、`WEB_ONLY`、`web-internal`、`NON_TRADING_WRITE`。登记和人工
 阶段切换仍为 `ADMIN`，且不会因训练工作台开放而改变交易权限。
 
-从仓库根目录手工执行唯一流程：先认证黄金面板，再（需要 GPU 时）构建并认证
+数据管理 `/settings/data/research` 提供配置保存、覆盖检查、下载和认证入口。
+`researchPreparation` 返回配置、历史文件引用与持久化任务；
+`previewResearchDownload` 只计算下载范围。`saveResearchPreparation` 不启动任务，
+`startResearchPreparation` 显式提交 COVERAGE/DOWNLOAD/CERTIFY/GPU，
+`retryResearchPreparation` 复用失败任务的原配置与下载计划。权限与训练工作台一致。
+
+`stock-selection-training-capability` 每分钟独立探测实际 CPU/GPU 能力并更新心跳；
+180 秒过期后不能提交训练。`research-preparation-dispatch` 领取数据库准备任务，
+重计算通过独立 Research 子进程完成，API 不执行训练或数据扫描。
+历史文件只从运行端 `QUANTX_RESEARCH_EVIDENCE_ROOT` 选择安全引用，默认
+`.runtime/research-evidence`。GPU 构建证据使用 `QUANTX_LIGHTGBM_BUILD_EVIDENCE`。
+
+从仓库根目录也可手工执行同一认证流程：先认证黄金面板，再（需要 GPU 时）构建并认证
 OpenCL wheel，随后用数据库锁定的三个哈希分别运行 DEVELOPMENT 和
 FINAL_EVALUATION。哈希必须原样来自已接受的请求；Research 不会依据运行路径或
 本地配置重算坐标：
@@ -61,7 +73,7 @@ uv run --frozen quantx-research certify-next-day-selection-dataset `
   --dataset-version next-day-selection-v1
 
 .\ops\windows\build-lightgbm-opencl-wheel.ps1 `
-  -SourceDirectory F:\src\LightGBM -OutputDirectory F:\src\LightGBM\dist
+  -SourceDirectory F:\src\LightGBM -OutputDirectory F:\src\LightGBM\dist -Python .venv\Scripts\python.exe
 
 uv run --frozen quantx-research qualify-lightgbm-gpu `
   --dataset-dir .runtime\research-datasets\next-day-selection-v1 `

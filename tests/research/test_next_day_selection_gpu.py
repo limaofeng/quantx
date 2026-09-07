@@ -113,6 +113,26 @@ def test_probe_classifies_build_and_runtime_failures(monkeypatch) -> None:
   assert gpu.probe_lightgbm_gpu()["status"] == "GPU_UNAVAILABLE_RUNTIME"
 
 
+def test_requirement_hash_invalidates_binary_and_device_changes(monkeypatch, tmp_path):
+  import lightgbm.libpath
+
+  binary = tmp_path / "lib.dll"
+  binary.write_bytes(b"first-build")
+  monkeypatch.setattr(lightgbm.libpath, "_find_lib_path", lambda: [str(binary)])
+  monkeypatch.setattr(
+    gpu, "_run_nvidia_smi", lambda: {"model": "GPU-A", "driver_version": "1"}
+  )
+  monkeypatch.setattr(gpu, "_opencl_devices", lambda: {})
+  first = gpu.gpu_requirement_hash()
+  binary.write_bytes(b"second-build")
+  second = gpu.gpu_requirement_hash()
+  assert first != second
+  monkeypatch.setattr(
+    gpu, "_run_nvidia_smi", lambda: {"model": "GPU-B", "driver_version": "1"}
+  )
+  assert gpu.gpu_requirement_hash() != second
+
+
 def test_probe_requires_complete_matching_qualification(monkeypatch, tmp_path: Path) -> None:
   build_evidence = _build_evidence()
   build_evidence_hash = stable_json_sha256(build_evidence)

@@ -360,13 +360,16 @@ function PreviewResultPanel({
 
 export function StockSelectionTrainingWizard({
   onCreated,
+  initialDatasetVersion,
 }: {
   onCreated: (runId: string) => void;
+  initialDatasetVersion?: string;
 }) {
   const { toast } = useToast();
   const datasetsState = useStockSelectionDatasetVersions();
   const capabilities = useStockSelectionTrainingCapabilities();
   const [step, setStep] = useState(0);
+  const [initialApplied, setInitialApplied] = useState(false);
   const [datasetVersion, setDatasetVersion] = useState('');
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
@@ -522,6 +525,18 @@ export function StockSelectionTrainingWizard({
         : { ...DEFAULT_UNIVERSE }
     );
   };
+  useEffect(() => {
+    if (initialApplied || !initialDatasetVersion) return;
+    const selected = certifiedDatasets.find(
+      item => item.datasetVersion === initialDatasetVersion
+    );
+    if (!selected) return;
+    setDatasetVersion(selected.datasetVersion);
+    setDateStart(selected.dateStart);
+    setDateEnd(selected.dateEnd);
+    setUniverse(universeDraftFromSpec(selected.universeSpec));
+    setInitialApplied(true);
+  }, [initialApplied, initialDatasetVersion, certifiedDatasets]);
   const updateUniverse = (next: UniverseDraft) => {
     invalidatePreview();
     setUniverse(next);

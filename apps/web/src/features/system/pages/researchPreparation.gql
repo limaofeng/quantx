@@ -1,0 +1,51 @@
+query ResearchPreparationPage {
+  researchPreparation {
+    config
+    evidenceFiles
+    jobs {
+      jobId
+      kind
+      status
+      phase
+      config
+      datasetVersion
+      flowRunId
+      result
+      error
+      createdAt
+      updatedAt
+    }
+  }
+}
+
+mutation SaveResearchPreparation($config: JSON!) {
+  saveResearchPreparation(config: $config)
+}
+
+query PreviewResearchDownload($config: JSON!) {
+  previewResearchDownload(config: $config)
+}
+
+mutation StartResearchPreparation(
+  $kind: ResearchPreparationKind!
+  $config: JSON!
+  $requestKey: String!
+  $datasetVersion: String
+) {
+  startResearchPreparation(
+    kind: $kind
+    config: $config
+    requestKey: $requestKey
+    datasetVersion: $datasetVersion
+  ) {
+    jobId
+    status
+  }
+}
+
+mutation RetryResearchPreparation($jobId: String!) {
+  retryResearchPreparation(jobId: $jobId) {
+    jobId
+    status
+  }
+}

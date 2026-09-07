@@ -81,6 +81,8 @@ def _probe_capability() -> dict[str, Any]:
   """Read the Research GPU capability protocol through an isolated process."""
 
   unavailable = {
+    "probe_failed": True,
+    "cpu_available": False,
     "status": "GPU_UNAVAILABLE_RUNTIME",
     "qualification": {
       "status": "GPU_UNAVAILABLE_RUNTIME",
@@ -509,6 +511,7 @@ def _safe_public_details(value: Any) -> dict[str, Any]:
 
 def _probe_details(probe: Any) -> tuple[str, dict[str, Any]]:
   details = _safe_public_details(probe)
+  details["environment_requirement_hash"] = details.get("requirement_hash")
   status = str(details.get("status") or "GPU_UNAVAILABLE_BUILD").upper()
   details.setdefault("status", status)
   raw_qualification = details.get("qualification")
@@ -1185,26 +1188,26 @@ async def stock_selection_training_dispatch_flow(
 ) -> dict[str, Any]:
   logger = get_run_logger()
   timestamp = now or _now()
-  probe = _probe_capability()
+  probe = await asyncio.to_thread(_probe_capability)
   heartbeat_status, heartbeat_details = _probe_details(probe)
+  if probe.get("probe_failed") or probe.get("cpu_available") is not True:
+    return {"status": "QUEUED", "reason": "CPU_TRAINING_UNAVAILABLE"}
   async with AsyncSessionLocal() as db:
     repository = StockSelectionTrainingRepository(db)
-    try:
-      await repository.upsert_capability_heartbeat(
-        status=heartbeat_status,
-        details=heartbeat_details,
-        now=timestamp,
-      )
-    except Exception:
-      logger.exception("更新 stock-selection-training 能力心跳失败")
-    if _full_live_runtime() and await is_critical_trading_window(timestamp, trading_dates=trading_dates):
+    if _full_live_runtime() and await is_critical_trading_window(
+      timestamp, trading_dates=trading_dates
+    ):
       return {
         "status": "QUEUED",
         "reason": "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW",
         "capability": heartbeat_details,
       }
     lost = await recover_lost_training_runs(repository, now=timestamp)
-    flow_id = prefect_flow_run_id or os.environ.get("PREFECT_FLOW_RUN_ID", "") or "stock-selection-training-dispatch"
+    flow_id = (
+      prefect_flow_run_id
+      or os.environ.get("PREFECT_FLOW_RUN_ID", "")
+      or "stock-selection-training-dispatch"
+    )
     run = await repository.claim_next_queued(flow_id, timestamp)
     if run is None:
       return {
@@ -1214,7 +1217,11 @@ async def stock_selection_training_dispatch_flow(
         "capability": heartbeat_details,
       }
     spec = await repository.get_spec(str(run.spec_id))
-    dataset = await repository.get_dataset(str(spec.dataset_version)) if spec is not None else None
+    dataset = (
+      await repository.get_dataset(str(spec.dataset_version))
+      if spec is not None
+      else None
+    )
     if spec is None or dataset is None:
       await repository.fail_run(
         str(run.run_id),
@@ -1222,7 +1229,11 @@ async def stock_selection_training_dispatch_flow(
         error_message="immutable training spec or certified dataset is missing",
         completed_at=timestamp,
       )
-      return {"status": "FAILED", "run_id": str(run.run_id), "error_code": "TRAINING_EVIDENCE_MISSING"}
+      return {
+        "status": "FAILED",
+        "run_id": str(run.run_id),
+        "error_code": "TRAINING_EVIDENCE_MISSING",
+      }
     logger.info("开始隔离次日上涨概率训练: run_id=%s", run.run_id)
     result = await _run_claimed_job(
       repository,
@@ -1235,6 +1246,20 @@ async def stock_selection_training_dispatch_flow(
     result["recovered_run_ids"] = lost
     result["capability"] = heartbeat_details
     return result
+
+
+@flow(name="stock-selection-training-capability", retries=0)
+async def stock_selection_training_capability_flow() -> dict[str, Any]:
+  """Only periodic capability writer; never claims or waits for training."""
+  probe = await asyncio.to_thread(_probe_capability)
+  if probe.get("probe_failed") or not isinstance(probe.get("cpu_available"), bool):
+    raise RuntimeError("Research 能力探测未返回有效结果；保留上次成功心跳")
+  status, details = _probe_details(probe)
+  async with AsyncSessionLocal() as db:
+    await StockSelectionTrainingRepository(db).upsert_capability_heartbeat(
+      status=status, details=details, now=_now()
+    )
+  return details
 
 
 __all__ = [

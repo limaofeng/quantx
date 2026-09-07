@@ -7,6 +7,7 @@ explicit probe/qualification operations.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import math
@@ -172,12 +173,44 @@ def _environment_evidence() -> dict[str, Any]:
   }
 
 
+def cpu_training_available() -> bool:
+  try:
+    from sklearn.linear_model import LogisticRegression
+
+    if lgb is None:
+      return False
+    x = np.arange(80, dtype=float).reshape(40, 2)
+    y = np.tile([0, 1], 20)
+    LogisticRegression(max_iter=20).fit(x, y)
+    model = lgb.LGBMClassifier(
+      n_estimators=1,
+      num_leaves=2,
+      min_child_samples=1,
+      device_type="cpu",
+      n_jobs=1,
+      verbosity=-1,
+    ).fit(x, y)
+    return bool(np.isfinite(model.predict_proba(x)).all())
+  except Exception:
+    return False
+
+
 def gpu_requirement_hash() -> str:
   """Return the stable environment requirement coordinate for GPU evidence."""
 
+  device = _run_nvidia_smi()
+  binary_hash = None
+  if lgb is not None:
+    from lightgbm.libpath import _find_lib_path
+
+    binary_hash = hashlib.sha256(Path(_find_lib_path()[0]).read_bytes()).hexdigest()
   return stable_json_sha256(
     {
       "qualification_version": GPU_QUALIFICATION_VERSION,
+      "binary_sha256": binary_hash,
+      "gpu_model": device.get("model"),
+      "gpu_driver": device.get("driver_version"),
+      "opencl": _opencl_devices(),
       "lightgbm": getattr(lgb, "__version__", None),
       "python": sys.version.split()[0],
       "python_implementation": platform.python_implementation(),
@@ -477,6 +510,7 @@ def probe_lightgbm_gpu(
     }
 
   result: dict[str, Any] = {
+    "cpu_available": cpu_training_available(),
     "status": GpuQualificationStatus.CPU_AVAILABLE.value,
     "environment": environment,
     "qualification_version": GPU_QUALIFICATION_VERSION,
@@ -509,14 +543,18 @@ def probe_lightgbm_gpu(
       memory_fraction = 1.0 - float(gpu["memory_free_mib"]) / max(
         float(gpu["memory_total_mib"]), 1.0
       )
-    elif qualification is not None and qualification.get("peak_memory_fraction") is not None:
+    elif (
+      qualification is not None
+      and qualification.get("peak_memory_fraction") is not None
+    ):
       memory_fraction = float(qualification["peak_memory_fraction"])
     else:
       memory_fraction = None
   except (TypeError, ValueError, ZeroDivisionError):
     memory_fraction = math.inf
   if memory_fraction is not None and (
-    not math.isfinite(memory_fraction) or memory_fraction > DEFAULT_GPU_MAX_MEMORY_FRACTION
+    not math.isfinite(memory_fraction)
+    or memory_fraction > DEFAULT_GPU_MAX_MEMORY_FRACTION
   ):
     status = GpuQualificationStatus.GPU_INSUFFICIENT_MEMORY.value
     result["status"] = status
@@ -612,13 +650,39 @@ def _load_build_evidence(
   ):
     raise ValueError("GPU build evidence 必须对应 Windows LightGBM 4.7.0 GPU wheel")
   wheel = payload.get("wheel")
-  if not isinstance(wheel, str) or not wheel or Path(wheel).name != wheel or "\\" in wheel:
+  if (
+    not isinstance(wheel, str)
+    or not wheel
+    or Path(wheel).name != wheel
+    or "\\" in wheel
+  ):
     raise ValueError("GPU build evidence wheel 必须是单层文件名")
   wheel_hash = payload.get("wheel_sha256")
   if not isinstance(wheel_hash, str) or not _HASH_RE.fullmatch(wheel_hash):
     raise ValueError("GPU build evidence wheel_sha256 必须是小写 SHA-256")
+  if not isinstance(value, Mapping):
+    import zipfile
+
+    from lightgbm.libpath import _find_lib_path
+
+    wheel_path = Path(value).parent / wheel
+    _reject_path_links(wheel_path)
+    if (
+      not wheel_path.is_file()
+      or hashlib.sha256(wheel_path.read_bytes()).hexdigest() != wheel_hash
+    ):
+      raise ValueError("GPU wheel 文件与构建证据哈希不匹配")
+    binary = Path(_find_lib_path()[0])
+    with zipfile.ZipFile(wheel_path) as archive:
+      entries = [
+        name for name in archive.namelist() if name.endswith("/" + binary.name)
+      ]
+      if len(entries) != 1 or archive.read(entries[0]) != binary.read_bytes():
+        raise ValueError("已安装 LightGBM 二进制与资格 wheel 不一致")
   definitions = payload.get("cmake_definitions")
-  if not isinstance(definitions, list) or any(not isinstance(item, str) for item in definitions):
+  if not isinstance(definitions, list) or any(
+    not isinstance(item, str) for item in definitions
+  ):
     raise ValueError("GPU build evidence cmake_definitions 非法")
   if "--config-settings=cmake.define.USE_GPU=ON" not in definitions:
     raise ValueError("GPU build evidence 缺少官方 CMake USE_GPU=ON 配置")

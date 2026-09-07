@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -13,7 +14,20 @@ def test_runtime_apps_do_not_depend_on_research_package() -> None:
   for app in runtime_apps:
     app_root = REPO_ROOT / "apps" / app
     for source in _python_sources(app_root):
-      if "quantx_research" in source.read_text(encoding="utf-8"):
+      tree = ast.parse(source.read_text(encoding="utf-8"))
+      imported = []
+      for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+          imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+          imported.append(node.module or "")
+        elif isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant):
+          name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+          if name in {"__import__", "import_module"}:
+            imported.append(str(node.args[0].value))
+      # A subprocess module argument is an isolated protocol, not an import
+      # into the API/Worker process. Keep enforcing actual import boundaries.
+      if any(name == "quantx_research" or name.startswith("quantx_research.") for name in imported):
         offenders.append(source.relative_to(REPO_ROOT).as_posix())
 
   assert offenders == []

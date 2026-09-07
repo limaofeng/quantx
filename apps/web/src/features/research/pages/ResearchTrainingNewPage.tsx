@@ -1,11 +1,13 @@
 import { ArrowLeft } from 'lucide-react';
-import { Link, useLocation } from 'wouter';
+import { Link, useLocation, useSearch } from 'wouter';
 
 import { StudioPageFrame } from '@/components/ui/studio-layout';
 
 import { StockSelectionTrainingWizard } from '../components';
 
 export default function ResearchTrainingNewPage() {
+  const initialDatasetVersion =
+    new URLSearchParams(useSearch()).get('dataset') ?? undefined;
   const [, navigate] = useLocation();
 
   return (
@@ -39,6 +41,7 @@ export default function ResearchTrainingNewPage() {
           返回模型训练
         </Link>
         <StockSelectionTrainingWizard
+          initialDatasetVersion={initialDatasetVersion}
           onCreated={runId => {
             navigate(`/research/training/runs/${encodeURIComponent(runId)}`);
           }}

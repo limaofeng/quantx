@@ -787,7 +787,9 @@ def _resolve_backend(
 ) -> tuple[str, list[str], list[str]]:
   requested = str(requested or "").upper()
   if requested not in _BACKENDS:
-    raise TrainingApplicationError("requested_backend must be AUTO, CPU, or GPU_REQUIRED")
+    raise TrainingApplicationError(
+      "requested_backend must be AUTO, CPU, or GPU_REQUIRED"
+    )
   snapshot = dict(capability) if isinstance(capability, Mapping) else {}
   warnings: list[str] = []
   fresh = snapshot.get("fresh") is True
@@ -828,7 +830,12 @@ def _resolve_backend(
   reason = str(getattr(decision, "reason", "") or "")
   if requested == "AUTO" and resolved == "CPU" and reason:
     warnings.append("AUTO_RESOLVED_TO_CPU: " + reason)
-  return resolved, list(dict.fromkeys(warnings)), []
+  blockers = []
+  if not fresh:
+    blockers.append("TRAINING_CAPABILITY_MISSING_OR_STALE")
+  if snapshot.get("cpu_available") is not True:
+    blockers.append("CPU_TRAINING_UNAVAILABLE")
+  return resolved, list(dict.fromkeys(warnings)), blockers
 
 
 def _canonical_model_spec(value: Mapping[str, Any]) -> dict[str, Any]:

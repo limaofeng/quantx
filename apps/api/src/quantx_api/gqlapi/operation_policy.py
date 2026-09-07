@@ -210,6 +210,15 @@ _register(
     "tradingCalendar",
   },
 )
+_register(
+  "Query", "market:read", {"researchPreparation", "previewResearchDownload"},
+  audiences=WEB_ONLY, stability="web-internal",
+)
+_register(
+  "Mutation", "operations:write",
+  {"saveResearchPreparation", "startResearchPreparation", "retryResearchPreparation"},
+  audiences=WEB_ONLY, stability="web-internal", risk="NON_TRADING_WRITE",
+)
 for _field in {
   "stockSelectionTrainingCapabilities",
   "stockSelectionDatasetVersions",
