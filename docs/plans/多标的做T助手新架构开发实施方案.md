@@ -699,6 +699,26 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   现有 P3 reference profile 没有主行业及分类时点，不能默认 UNKNOWN 为中性或逐票独立行业；
   BacktestBroker.daily_pnl 恒为零，不能当日损失真源。新 reader 必须显式取得这些证据。
 
+### P4 公共容量与组合事实读取检查点（2026-09-07，整链仍未完成）
+
+- 公共回报收敛批次已提交 `c8832c7b65d5c0115fdc6d68e74fcb294fc16ce7`。
+- 同一个 `AccountCapacityService.read` 已扩展显式 PAPER execution/account scope，
+  不接收 LIVE control，不从 LIVE 余额/库存/投递表回退；保持 execution→PaperAccount→
+  同源事实锁序。已成交资金不重复预留，`paper_pending_buy_cash` 按剩余限价金额和未付
+  累计费用计算；batch/plan/同计划 pending SELL 认领旧仓一次，STOPPED source 仍可退出。
+  未下单 READY/APPROVAL 的 cap 只属于协调规划，未伪造成最终冻结资金。
+- 新 PAPER capacity 与既有 LIVE capacity 主代理复验 **35 passed**（4.57 秒）；
+  `QUANTX_RUN_MIGRATION_GATE=true` 下 `test_paper_scope_postgresql.py -k capacity_after_partial`
+  **1 passed**（27.24 秒，83484 exit=0），真实 PG 上验证部分成交/撤单现金与公共保护认领。
+  相关 Ruff、审计与主代理最终审核通过，批准本容量组件提交。没有业务库或实盘操作。
+- 进行中的下一部分：`PaperPortfolioSnapshotReader` 从冻结配置、PAPER facts 和同一公共
+  Capacity 构造完整 cut。明确行业分类与完整交易日历作为配置内版本化 PIT 证据；按
+  上海交易日以明确上一交易日收盘 mark 重置当日 T 成本账，逐成交计费用与成本释放，
+  不把种子旧仓、历史浮盈或 broker 的固定 daily_pnl=0 当当日 T 盈亏。
+  新 reference/日内估值纯计算已有 **16 项定向测试通过**，reader 尚在实现，未据此验收。
+  最终 ranked dispatcher / 最新 Gate / runtime PAPER route / 多标的重放 / GraphQL-Web
+  仍未完成；P4 保持 IN_PROGRESS。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

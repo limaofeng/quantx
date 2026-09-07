@@ -39,6 +39,9 @@ from tests.infrastructure.test_p4_allocation_postgresql import (
 from tests.infrastructure.test_p4_allocation_postgresql import (
   pytestmark as migration_gate_marker,
 )
+from tests.infrastructure.test_paper_account_capacity import (
+  test_partial_buy_cancel_cash_and_single_public_protection as verify_paper_capacity,
+)
 from tests.infrastructure.test_paper_broker_matching import quote
 from tests.infrastructure.test_paper_execution_ledger import (
   test_partial_fill_restart_history_idempotency_and_bucket_conservation as verify_ledger_restart,
@@ -55,6 +58,12 @@ from tests.infrastructure.test_paper_receipt_convergence import (
 from tests.infrastructure.test_t_allocation_repository import _seed
 
 pytestmark = migration_gate_marker
+
+
+@pytest.mark.asyncio
+async def test_actual_paper_capacity_after_partial_fill_and_cancel():
+  async with _sessions(head="20260907_0053") as sessions:
+    await verify_paper_capacity(sessions)
 
 
 @pytest.mark.asyncio
