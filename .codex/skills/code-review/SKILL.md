@@ -11,6 +11,14 @@ be inferred. Report actionable findings with severity, file/line, trigger and im
 Separate verified defects from suggestions. Do not invent scores or require unrelated
 refactors. A review request alone does not authorize implementation changes.
 
+Review a stable submitted file set or revision. While implementation is in progress,
+review fixed contracts or an explicitly ready subset; do not continuously rescan the
+changing shared tree. Record findings once with their evidence. After fixes, verify the
+reported defects and affected paths; expand only when a new change or finding warrants
+it. Reuse valid test results and distinguish implementation defects from environment
+failures. Stop reviewing when the requested scope has sufficient evidence, rather than
+inventing another audit pass. This does not cap necessary safety verification.
+
 For QuantX, apply the relevant invariants from root AGENTS.md: StrategyBase.step,
 strategy purity, single-instrument binding, conservative missing-data behavior,
 QMT process isolation, durable inbox/outbox and atomic GraphQL contracts. Review

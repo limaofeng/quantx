@@ -64,6 +64,18 @@ substitute another model or write the implementation in the primary agent.
 
 ## Workflow
 
+Work in acceptance batches within the full objective. For each batch, record the file
+set, interfaces, acceptance checks and remaining issues in the existing plan. Implementers
+hand off a stable ready-to-review batch before the primary runs its final audit. Avoid
+having an auditor repeatedly inspect files that another agent is actively changing.
+Follow-up fixes reuse that batch and invalidate only affected evidence. Run combined
+regression once the batch is stable, and repeat only for new changes or failures.
+
+For long-running tests, backups or restores, retain the process handle and log path.
+Prefer waiting for that handle to polling agents or rereading files. Ask for status only
+when it changes the next action; do not create a fresh model turn solely to restate an
+unchanged wait. Resume from the recorded stage and valid evidence, not from discovery.
+
 1. The primary agent discovers and understands the repository, its rules, the
    relevant code, existing changes, and required skills.
 2. The primary agent determines the boundary, design, acceptance criteria, and
