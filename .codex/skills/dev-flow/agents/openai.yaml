@@ -1,7 +1,7 @@
 interface:
   display_name: "Dev Flow"
   short_description: "Primary designs, delegates coding, and verifies results"
-  default_prompt: "Use $dev-flow to design and verify this feature while delegating only bounded implementation work."
+  default_prompt: "Use $dev-flow to deliver this feature in stable acceptance batches, with implementation agents inheriting the primary model and reasoning effort."
 
 policy:
   allow_implicit_invocation: false
