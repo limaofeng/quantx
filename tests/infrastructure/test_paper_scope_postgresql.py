@@ -23,6 +23,7 @@ from quantx_infrastructure.services.paper_broker_matching import (
   PAPER_MATCHING_POLICY_VERSION,
   PaperBrokerMatching,
 )
+from quantx_infrastructure.services.paper_receipt_convergence import _stored_amount
 from quantx_infrastructure.services.t_allocation_serialization import (
   allocation_evidence,
 )
@@ -45,9 +46,40 @@ from tests.infrastructure.test_paper_execution_ledger import (
 from tests.infrastructure.test_paper_execution_ledger import (
   test_sink_failure_rolls_back_orders_event_account_and_public_state as verify_sink_rollback,
 )
+from tests.infrastructure.test_paper_receipt_convergence import (
+  test_public_plan_failure_rolls_back_fill_and_all_projections as verify_public_rollback,
+)
+from tests.infrastructure.test_paper_receipt_convergence import (
+  test_public_plan_sell_receipt_closes_batch_without_pending_mismatch as verify_public_close,
+)
 from tests.infrastructure.test_t_allocation_repository import _seed
 
 pytestmark = migration_gate_marker
+
+
+@pytest.mark.asyncio
+async def test_actual_paper_public_projection_failure_is_atomic():
+  async with _sessions(head="20260907_0053") as sessions:
+    await verify_public_rollback(sessions)
+
+
+@pytest.mark.asyncio
+async def test_actual_paper_public_exit_plan_closure():
+  async with _sessions(head="20260907_0053") as sessions:
+    await verify_public_close(sessions)
+    async with sessions() as db:
+      for amount in ("10.000078125", "0.000000005"):
+        assert _stored_amount(amount) == await db.scalar(
+          text("SELECT CAST(:amount AS NUMERIC(24,8))"), {"amount": amount}
+        )
+      for table in (
+        "orders",
+        "trades",
+        "pending_trade_orders",
+        "trade_command_outbox",
+        "account_execution_controls",
+      ):
+        assert await db.scalar(text(f"SELECT count(*) FROM {table}")) == 0
 
 
 @pytest.mark.asyncio

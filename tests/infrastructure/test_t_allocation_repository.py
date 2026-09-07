@@ -68,7 +68,12 @@ async def sessions(base_sessions):
 
 
 async def _seed(
-  sessions, *, count=1, authorization="MANUAL_CONFIRM", source_age_seconds=0
+  sessions,
+  *,
+  count=1,
+  authorization="MANUAL_CONFIRM",
+  source_age_seconds=0,
+  enrich_intent=None,
 ):
   version_fields = asdict(_version("config-1"))
   version_fields.pop("config_snapshot_hash")
@@ -116,6 +121,8 @@ async def _seed(
           ),
           opportunity_score=90 - index,
         )
+        if enrich_intent is not None:
+          enrich_intent(intent)
         intents.append(intent)
         original = kwargs["opportunity_evidence"][0]
         evidence.append(

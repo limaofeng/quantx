@@ -108,6 +108,11 @@ POST_BASELINE_TABLES = {
   "watchlist_groups",
   "watchlist_group_memberships",
 }
+
+# This optional pre-existing table was never created by this baseline (0003
+# comments it only when present). Application imports may register its model;
+# that must not change the historical schema clone or bootstrap fingerprint.
+OPTIONAL_EXISTING_TABLES = {"divid_factors"}
 POST_BASELINE_COLUMNS = {
   "indicator_snapshots": {
     "boll_near_lower",
@@ -235,7 +240,7 @@ def _baseline_metadata() -> MetaData:
     "order_correlations": "strategy_order_correlations",
   }
   for table in Base.metadata.tables.values():
-    if table.key not in POST_BASELINE_TABLES:
+    if table.key not in POST_BASELINE_TABLES | OPTIONAL_EXISTING_TABLES:
       table.to_metadata(metadata, name=table_names.get(table.key))
 
   # The live model now stores account-wide facts in
@@ -326,8 +331,11 @@ def _baseline_metadata() -> MetaData:
     columns = watchlist_items._columns._collection
     group_entry = next(entry for entry in columns if entry[0] == "group_name")
     columns.remove(group_entry)
-    note_index = next(index for index, entry in enumerate(columns) if entry[0] == "note")
+    note_index = next(
+      index for index, entry in enumerate(columns) if entry[0] == "note"
+    )
     columns.insert(note_index, group_entry)
+
   # Revision 20260813_0010 makes strategy ownership optional for plan-owned
   # intents; the immutable baseline still required a strategy run.
   # The baseline predates the canonical table names and owner/environment
@@ -349,6 +357,7 @@ def _baseline_metadata() -> MetaData:
 
   rename_column("strategy_order_correlations", "environment", "execution_mode")
   rename_column("pending_trade_orders", "environment", "execution_mode")
+
   def move_column(table_key: str, column_name: str, target_index: int) -> None:
     table = metadata.tables[table_key]
     collection = table._columns._collection
@@ -384,7 +393,9 @@ def _baseline_metadata() -> MetaData:
   # historical names/columns in the clone so the locked fingerprint remains
   # a check on the original schema rather than on current ORM naming.
   order_correlations = metadata.tables["strategy_order_correlations"]
-  if not any(index.name == "ix_strategy_order_run_batch" for index in order_correlations.indexes):
+  if not any(
+    index.name == "ix_strategy_order_run_batch" for index in order_correlations.indexes
+  ):
     Index(
       "ix_strategy_order_run_batch",
       order_correlations.c.strategy_run_id,

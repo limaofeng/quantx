@@ -667,6 +667,38 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   ExitPlanBook / CAS，T PAPER 不伪造 StrategyRun、不从 LIVE Position 取数。卖出 receipt
   先应用订单累计成交再应用逐笔成交；后续买入 partial fill 必须保留计划 pending/暂停状态。
 
+### P4 公共 PAPER 回报收敛检查点（2026-09-07，整链仍未完成）
+
+- 上述账本组件已提交 `9760209761bf9f0f1c65c627b36fc2f137c4aee7`。
+- `AutoExitPlanService` 新公共 execution-owner 核心由旧 StrategyRun adapter 和 T PAPER
+  共用；T PAPER 锁序为 execution→PaperAccount→同源 plans，使用同一公共 plan/CAS/event。
+  非 StrategyRun 不制造 run_id，模板与列的 source 三字段由权威 ref/environment 派生并校验。
+- 新 `PaperReceiptConvergence` 在 ledger savepoint 内更新标准 intent、公共 TTradeBatch 与
+  ExitPlan。首笔实际买入成交激活保护，后续成交按 event key 幂等扩充；部分买入撤单仍保留
+  OPEN 暴露；卖出按订单累计 barrier 后逐笔成交收敛，完成时 plan/batch 同步终结。
+  买入原策略 source 停止不终止已有保护。尚未接 Engine 的最终按排名 dispatcher。
+- 修复共享 plan 后续 entry fill 覆盖 pending/暂停/错误状态；成交时间 hash 统一 UTC、
+  交易日按上海时区；sink 和 matcher 使用同一冻结费用政策并拒绝不一致模板；fill 列与
+  receipt 逐项对账，NUMERIC(24,8) 比较使用显式 HALF_UP，不依赖默认 HALF_EVEN。
+- 公共服务导入暴露 baseline 的懒加载 optional `divid_factors` 导致 fingerprint 随导入顺序
+  变化；历史 clone 显式排除原本不由 baseline 创建的该表，原 fingerprint 保持不变。
+  `test_alembic_contract` 增加真实 late-import 回归，未改写历史 schema/hash。
+- 最终组件/旧服务/锁/Engine runtime/domain/matcher 七文件回归 **133 passed**（4.73 秒）；
+  baseline/ledger/标准 allocation helper 回归 **67 passed**（10.79 秒，53045 exit=0）。
+  首次扩大锁测试的 fixture 缺 source 三字段，已补完整契约并复验，生产没有 fallback。
+- `QUANTX_RUN_MIGRATION_GATE=true`，`test_paper_scope_postgresql.py` 的 public 两用例
+  **2 passed**（61.46 秒，54665 exit=0）：真实迁移约束下 BUY/fill→公共 plan→SELL/fill→
+  plan COMPLETED/batch CLOSED，且实际公共 plan 写入后的故障使 ledger/fills/公共投影整笔回滚；
+  LIVE 五张事实/控制表零写入，隔离 schema 已清理。NUMERIC 半值边界修复后的单例
+  最终复验 **1 passed**（26.94 秒，45582 exit=0），直接比较真实 NUMERIC CAST，相关 Ruff
+  全部通过。审计整改已复核，主代理批准本组件批次提交。
+- 以上是组件闭环，不是 RULE_ONLY 多标的完整运行时验收。剩余：权威 PIT portfolio reader
+  与行业来源、日损失和控制来源；最新 EntryGate、最终按 rank 的公共 admission/Capacity/
+  Sizer/Risk、公共 PAPER ExitPlanRuntime 及 TradeIntentProcessor 隔离路由；多标的实际
+  StrategyBase.step 重放与 GraphQL/Web/Caddy codegen 门。P4 六项任务仍未整体勾选。
+  现有 P3 reference profile 没有主行业及分类时点，不能默认 UNKNOWN 为中性或逐票独立行业；
+  BacktestBroker.daily_pnl 恒为零，不能当日损失真源。新 reader 必须显式取得这些证据。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

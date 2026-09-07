@@ -5,16 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
 from sqlalchemy import select
 
 from quantx_infrastructure.models.agent_runtime import AccountExecutionControl
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
+from quantx_infrastructure.models.paper_execution import PaperExecutionAccountRecord
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.strategy_run_state import (
   StrategyRunPosition,
   StrategyRunState,
 )
+from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
+  RESERVING_EXIT_PLAN_STATUSES,
   AutoExitPlanRepository,
 )
 
@@ -119,6 +123,7 @@ async def lock_exit_plan_scope(
   target_plan_id: Optional[str] = None,
   execution_mode: Optional[str] = None,
   strategy_run_id: Optional[str] = None,
+  execution_ref: Optional[ExecutionOwnerRef] = None,
 ) -> LockedExitPlanScope:
   """Lock the holding and every reserving plan in a deterministic order."""
 
@@ -131,6 +136,102 @@ async def lock_exit_plan_scope(
   run_id = strategy_run_id or (
     str(initial.strategy_run_id or "") if initial is not None else ""
   )
+  if (
+    execution_ref is None
+    and initial is not None
+    and initial.source_execution_owner_type == "T_ASSISTANT_EXECUTION"
+  ):
+    execution_ref = ExecutionOwnerRef(
+      "T_ASSISTANT_EXECUTION", initial.source_execution_owner_id
+    )
+  if (
+    execution_ref is not None
+    and initial is not None
+    and (
+      initial.source_execution_owner_type != execution_ref.owner_type.value
+      or initial.source_execution_owner_id != execution_ref.owner_id
+      or initial.source_execution_environment != mode.upper()
+    )
+  ):
+    raise ValueError("退出计划来源执行归属冲突")
+  if (
+    execution_ref is not None
+    and execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION
+  ):
+    if mode != "paper" or run_id:
+      raise ValueError("T exit persistence requires isolated PAPER scope")
+    execution = await db.scalar(
+      select(TAssistantExecutionRecord)
+      .where(TAssistantExecutionRecord.execution_id == execution_ref.owner_id)
+      .with_for_update()
+      .execution_options(populate_existing=True)
+    )
+    paper = await db.scalar(
+      select(PaperExecutionAccountRecord)
+      .where(PaperExecutionAccountRecord.execution_id == execution_ref.owner_id)
+      .with_for_update()
+      .execution_options(populate_existing=True)
+    )
+    if (
+      execution is None
+      or paper is None
+      or execution.environment != "PAPER"
+      or paper.environment != "PAPER"
+      or execution.account_id != account_id
+      or paper.account_id != account_id
+    ):
+      raise ValueError("PAPER exit source/account scope conflict")
+    positions = dict(paper.broker_checkpoint.get("material", {}).get("positions", {}))
+    raw = dict(positions.get(instrument_code) or {})
+    buckets = dict(
+      paper.bucket_checkpoint.get("instruments", {}).get(instrument_code) or {}
+    )
+    total = sum(int(bucket.get("total_volume", 0)) for bucket in buckets.values())
+    if total != int(raw.get("long_volume", 0)):
+      raise ValueError("PAPER exit bucket/position mismatch")
+    position = Position(
+      account_id=account_id,
+      stock_code=instrument_code,
+      volume=total,
+      can_use_volume=sum(
+        int(bucket.get("available_volume", 0)) for bucket in buckets.values()
+      ),
+      avg_price=float(raw.get("long_avg_price", 0)),
+      market_value=float(raw.get("market_value", 0)),
+      last_price=float(raw.get("last_price", 0)),
+      updated_at=paper.snapshot_as_of,
+    )
+    plans = list(
+      (
+        await db.scalars(
+          select(AutoExitPlanRecord)
+          .where(
+            AutoExitPlanRecord.account_id == account_id,
+            AutoExitPlanRecord.instrument_code == instrument_code,
+            AutoExitPlanRecord.environment == "PAPER",
+            AutoExitPlanRecord.source_execution_owner_type == "T_ASSISTANT_EXECUTION",
+            AutoExitPlanRecord.source_execution_owner_id == execution_ref.owner_id,
+            AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES),
+          )
+          .order_by(AutoExitPlanRecord.created_at, AutoExitPlanRecord.plan_id)
+          .with_for_update()
+          .execution_options(populate_existing=True)
+        )
+      ).all()
+    )
+    target = next((plan for plan in plans if plan.plan_id == target_plan_id), None)
+    if target is None and target_plan_id:
+      target = await repo.find_by_id(target_plan_id, for_update=True)
+    if target is not None and (
+      target.account_id != account_id
+      or target.instrument_code != instrument_code
+      or target.source_execution_owner_type != execution_ref.owner_type.value
+      or target.source_execution_owner_id != execution_ref.owner_id
+      or target.environment != "PAPER"
+      or target.strategy_run_id is not None
+    ):
+      raise ValueError("PAPER exit plan scope conflict")
+    return LockedExitPlanScope(position, plans, target)
   if mode == "live":
     # Plan creation/resizing and order enqueue claim the same LIVE inventory.
     # The account gate precedes position/plan locks in every writer.

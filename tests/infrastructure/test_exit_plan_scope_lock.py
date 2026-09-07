@@ -16,6 +16,9 @@ async def test_concurrent_plan_writers_share_account_first_lock_order(
       instrument_code="600000.SH",
       environment="LIVE",
       strategy_run_id="run-a",
+      source_execution_owner_type="STRATEGY_RUN",
+      source_execution_owner_id="run-a",
+      source_execution_environment="LIVE",
     ),
     "plan-b": SimpleNamespace(
       plan_id="plan-b",
@@ -23,6 +26,9 @@ async def test_concurrent_plan_writers_share_account_first_lock_order(
       instrument_code="600000.SH",
       environment="LIVE",
       strategy_run_id="run-b",
+      source_execution_owner_type="STRATEGY_RUN",
+      source_execution_owner_id="run-b",
+      source_execution_environment="LIVE",
     ),
   }
   position = SimpleNamespace(

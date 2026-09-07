@@ -92,7 +92,7 @@ class FakePlanRepository:
 async def test_strategy_entry_fill_reuses_caller_transaction_without_commit(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  db = SimpleNamespace(scalar=AsyncMock())
+  db = SimpleNamespace(scalar=AsyncMock(return_value=None))
   repository = SimpleNamespace(find_by_id=AsyncMock(return_value=None))
   monkeypatch.setattr(
     service_module,
@@ -100,7 +100,8 @@ async def test_strategy_entry_fill_reuses_caller_transaction_without_commit(
     lambda supplied_db: repository if supplied_db is db else None,
   )
   service = AutoExitPlanService()
-  service.persist_strategy_plan_state = AsyncMock(return_value=({"ok": True}, 1))
+  service.persist_execution_plan_state = AsyncMock(return_value=({"ok": True}, 1))
+  monkeypatch.setattr(service_module, "lock_exit_plan_scope", AsyncMock(return_value=service_module.LockedExitPlanScope(None, [])))
   template = ExitPlanTemplate(
     plan_id="external-plan-1",
     source_type="T_TRADE_BATCH",
@@ -131,9 +132,9 @@ async def test_strategy_entry_fill_reuses_caller_transaction_without_commit(
   )
 
   assert result == ({"ok": True}, 1)
-  service.persist_strategy_plan_state.assert_awaited_once()
-  assert service.persist_strategy_plan_state.await_args.kwargs["db"] is db
-  assert service.persist_strategy_plan_state.await_args.kwargs["commit"] is False
+  service.persist_execution_plan_state.assert_awaited_once()
+  assert service.persist_execution_plan_state.await_args.kwargs["db"] is db
+  assert service.persist_execution_plan_state.await_args.kwargs["commit"] is False
 
 
 def active_record(*, plan_id="existing-plan", volume=200, pending=False):

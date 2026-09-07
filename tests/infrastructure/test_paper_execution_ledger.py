@@ -142,8 +142,11 @@ async def setup(
   candidate_ttl_seconds=60,
   allocation_at=NOW,
   admission_at=NOW,
+  enrich_intent=None,
 ):
-  snapshot, candidates = await _seed(sessions, authorization="AUTO")
+  snapshot, candidates = await _seed(
+    sessions, authorization="AUTO", enrich_intent=enrich_intent
+  )
   if allocation_cash is not None:
     snapshot = replace(snapshot, available_cash=Decimal(allocation_cash))
   candidates = tuple(

@@ -7,10 +7,11 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import ROUND_FLOOR, Decimal
 from math import isfinite
 from typing import Any, Callable, Iterable, Mapping, Optional
+from zoneinfo import ZoneInfo
 
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef, ExecutionOwnerType
 from quantx_domain.strategies.ashare_managed_exit_plan import (
@@ -1910,6 +1911,32 @@ class AutoExitPlanService:
     db: Any | None = None,
     commit: bool = True,
   ) -> tuple[dict[str, Any], int]:
+    return await self.persist_execution_plan_state(
+      execution_ref=ExecutionOwnerRef.strategy_run(strategy_run_id),
+      environment=ExecutionEnvironment(self._execution_mode(execution_mode).upper()),
+      plan_state=plan_state, expected_state_version=expected_state_version,
+      evaluated_at=evaluated_at, event_type=event_type, event_business_key=event_business_key,
+      intent=intent, entry_authorization=entry_authorization,
+      revoke_authorization=revoke_authorization, db=db, commit=commit,
+    )
+
+  async def persist_execution_plan_state(
+    self,
+    *,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
+    plan_state: Mapping[str, Any],
+    expected_state_version: Optional[int] = None,
+    evaluated_at: Optional[datetime] = None,
+    event_type: str = "STRATEGY_PLAN_STATE_UPDATED",
+    event_business_key: Optional[str] = None,
+    intent: Any = None,
+    entry_authorization: Optional[Mapping[str, Any]] = None,
+    revoke_authorization: bool = False,
+    db: Any | None = None,
+    commit: bool = True,
+    _event_input_hash: Optional[str] = None,
+  ) -> tuple[dict[str, Any], int]:
     """Persist one runtime-owned plan transition as the canonical aggregate.
 
     The plan table is authoritative for PAPER/LIVE.  A new entry fill creates
@@ -1917,16 +1944,16 @@ class AutoExitPlanService:
     changes clear exact LIVE authorization before the new state is visible.
     """
 
-    normalized_run_id = str(strategy_run_id or "").strip()
-    if not normalized_run_id:
-      raise ValueError("策略运行标识不能为空")
     plan = ExitPlan.from_dict(dict(plan_state or {}))
+    plan.template = self._execution_plan_template(plan.template, execution_ref, environment)
     template = plan.template
-    if str(template.run_id or "") != normalized_run_id:
-      raise ValueError("退出计划不属于当前策略运行")
-    if str(template.source_type or "").upper() not in RUNTIME_EXIT_PLAN_SOURCE_TYPES:
-      raise ValueError("Engine ExitPlanBook 不接受该退出计划来源")
-    normalized_mode = self._execution_mode(execution_mode)
+    normalized_run_id = execution_ref.owner_id if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN else ""
+    normalized_mode = environment.value.lower()
+    input_hash = _event_input_hash or hashlib.sha256(json.dumps(
+      {"execution_ref": execution_ref.to_dict(), "environment": environment.value,
+       "plan_state": plan.to_dict(), "event_type": event_type},
+      sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode()).hexdigest()
     async with _optional_auto_exit_plan_session(db) as db:
       repo = AutoExitPlanRepository(db)
       locked_scope = await lock_exit_plan_scope(
@@ -1936,22 +1963,16 @@ class AutoExitPlanService:
         target_plan_id=plan.plan_id,
         execution_mode=normalized_mode,
         strategy_run_id=normalized_run_id,
+        execution_ref=execution_ref,
       )
       record = locked_scope.plan(plan.plan_id)
-      if record is not None and event_business_key:
-        applied_event = await db.scalar(
-          select(AutoExitPlanEvent.event_id)
-          .where(
-            AutoExitPlanEvent.plan_id == plan.plan_id,
-            AutoExitPlanEvent.business_key == str(event_business_key),
-          )
-          .limit(1)
-        )
+      if event_business_key:
+        applied_event = await db.scalar(select(AutoExitPlanEvent).where(
+          AutoExitPlanEvent.business_key == str(event_business_key)))
         if applied_event is not None:
-          return dict(record.plan_state or {}), max(
-            1,
-            int(record.state_version or 1),
-          )
+          if record is None or applied_event.plan_id != plan.plan_id or applied_event.payload.get("input_hash") != input_hash:
+            raise ValueError("EXIT_PLAN_EVENT_IDEMPOTENCY_CONFLICT")
+          return dict(record.plan_state or {}), max(1, int(record.state_version or 1))
       if record is None:
         durable_plan = ExitPlan.from_dict(plan.to_dict())
         if normalized_mode == "live":
@@ -1968,12 +1989,12 @@ class AutoExitPlanService:
           bucket=durable_plan.template.bucket,
           source_type=durable_plan.template.source_type,
           source_id=durable_plan.template.source_id or durable_plan.plan_id,
-          strategy_run_id=normalized_run_id,
+          strategy_run_id=normalized_run_id or None,
           enabled=durable_plan.status != ExitPlanStatus.PAUSED,
           status=durable_plan.status.value,
           environment=normalized_mode.upper(),
-          source_execution_owner_type=ExecutionOwnerType.STRATEGY_RUN.value,
-          source_execution_owner_id=normalized_run_id,
+          source_execution_owner_type=execution_ref.owner_type.value,
+          source_execution_owner_id=execution_ref.owner_id,
           source_execution_environment=normalized_mode.upper(),
           auto_exit_authorized=False,
           config_version=int(durable_plan.template.config_version),
@@ -1996,7 +2017,8 @@ class AutoExitPlanService:
           plan_id=plan.plan_id,
           event_type="STRATEGY_PLAN_STATE_CREATED",
           payload={
-            "strategy_run_id": normalized_run_id,
+            "strategy_run_id": normalized_run_id or None,
+            "execution_ref": execution_ref.to_dict(), "environment": environment.value, "input_hash": input_hash,
             "state_version": 1,
             "config_version": int(record.config_version or 0),
           },
@@ -2028,11 +2050,12 @@ class AutoExitPlanService:
 
       persisted_state = dict(record.plan_state or {})
       persisted_plan = ExitPlan.from_dict(persisted_state)
-      self._require_strategy_entry_sync_binding(
+      self._require_execution_entry_sync_binding(
         record=record,
         persistent_plan=persisted_plan,
         incoming_plan=plan,
-        strategy_run_id=normalized_run_id,
+        execution_ref=execution_ref,
+        environment=environment,
       )
       current_config_version = int(record.config_version or 0)
       incoming_config_version = int(template.config_version or 0)
@@ -2074,7 +2097,8 @@ class AutoExitPlanService:
             plan_id=plan.plan_id,
             event_type=str(event_type or "STRATEGY_PLAN_STATE_UPDATED").upper(),
             payload={
-              "strategy_run_id": normalized_run_id,
+              "strategy_run_id": normalized_run_id or None,
+            "execution_ref": execution_ref.to_dict(), "environment": environment.value, "input_hash": input_hash,
               "state_version": current_version,
               "config_version": int(record.config_version or 0),
               "state_changed": False,
@@ -2124,7 +2148,8 @@ class AutoExitPlanService:
         plan_id=plan.plan_id,
         event_type=str(event_type or "STRATEGY_PLAN_STATE_UPDATED").upper(),
         payload={
-          "strategy_run_id": normalized_run_id,
+          "strategy_run_id": normalized_run_id or None,
+            "execution_ref": execution_ref.to_dict(), "environment": environment.value, "input_hash": input_hash,
           "state_version": next_version,
           "config_version": int(stored.config_version or 0),
         },
@@ -2162,40 +2187,71 @@ class AutoExitPlanService:
     db: Any | None = None,
     commit: bool = True,
   ) -> tuple[dict[str, Any], int]:
+    return await self.register_execution_entry_fill(
+      execution_ref=ExecutionOwnerRef.strategy_run(strategy_run_id),
+      environment=ExecutionEnvironment(self._execution_mode(execution_mode).upper()),
+      exit_plan_template=exit_plan_template, volume=volume, price=price, trade_time=trade_time,
+      event_business_key=event_business_key, entry_authorization=entry_authorization, db=db, commit=commit,
+    )
+
+  async def register_execution_entry_fill(
+    self,
+    *,
+    execution_ref: ExecutionOwnerRef,
+    environment: ExecutionEnvironment,
+    exit_plan_template: Mapping[str, Any],
+    volume: int,
+    price: float,
+    trade_time: datetime,
+    event_business_key: str,
+    entry_authorization: Optional[Mapping[str, Any]] = None,
+    db: Any | None = None,
+    commit: bool = True,
+  ) -> tuple[dict[str, Any], int]:
     """Create/expand a durable plan without a source-runtime hot book."""
 
-    normalized_run_id = str(strategy_run_id or "").strip()
-    if not normalized_run_id:
-      raise ValueError("策略运行标识不能为空")
-    template = ExitPlanTemplate.from_dict(dict(exit_plan_template or {}))
-    if str(template.run_id or "") != normalized_run_id:
-      raise ValueError("退出计划模板不属于成交来源运行")
-    if int(volume or 0) <= 0 or float(price or 0) <= 0:
+    template = self._execution_plan_template(
+      ExitPlanTemplate.from_dict(dict(exit_plan_template or {})), execution_ref, environment,
+    )
+    if type(volume) is not int or volume <= 0 or not isfinite(float(price)) or float(price) <= 0:
       raise ValueError("退出计划只能由正数真实成交激活")
+    if not event_business_key:
+      raise ValueError("exit entry fill requires stable business key")
+    if not isinstance(trade_time, datetime):
+      raise ValueError("exit entry fill requires a datetime trade_time")
+    # Database adapters expose naive timestamps as UTC.  Hash the instant,
+    # while the domain derives its holding/trade date in the exchange timezone.
+    trade_time_utc = (
+      trade_time.replace(tzinfo=UTC)
+      if trade_time.tzinfo is None
+      else trade_time.astimezone(UTC)
+    )
+    exchange_trade_time = trade_time_utc.astimezone(ZoneInfo("Asia/Shanghai"))
+    input_hash = hashlib.sha256(json.dumps(
+      {"execution_ref": execution_ref.to_dict(), "environment": environment.value,
+       "template": template.to_dict(), "volume": volume, "price": float(price),
+       "trade_time": trade_time_utc.isoformat()}, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode()).hexdigest()
     async with _optional_auto_exit_plan_session(db) as db:
-      existing = await AutoExitPlanRepository(db).find_by_id(template.plan_id)
-      if event_business_key and existing is not None:
-        applied = await db.scalar(
-          select(AutoExitPlanEvent.event_id)
-          .where(
-            AutoExitPlanEvent.plan_id == template.plan_id,
-            AutoExitPlanEvent.business_key == str(event_business_key),
-          )
-          .limit(1)
-        )
-        if applied is not None:
-          return dict(existing.plan_state or {}), max(
-            1,
-            int(existing.state_version or 1),
-          )
+      locked_scope = await lock_exit_plan_scope(
+        db, account_id=template.account_id, instrument_code=template.instrument_code,
+        target_plan_id=template.plan_id, execution_mode=environment.value.lower(),
+        strategy_run_id=execution_ref.owner_id if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN else None,
+        execution_ref=execution_ref,
+      )
+      existing = locked_scope.plan(template.plan_id)
+      applied = await db.scalar(select(AutoExitPlanEvent).where(
+        AutoExitPlanEvent.business_key == str(event_business_key)))
+      if applied is not None:
+        if existing is None or applied.plan_id != template.plan_id or applied.payload.get("input_hash") != input_hash:
+          raise ValueError("EXIT_PLAN_EVENT_IDEMPOTENCY_CONFLICT")
+        return dict(existing.plan_state or {}), max(1, int(existing.state_version or 1))
       if existing is None:
         book = ExitPlanBook()
         expected_state_version = None
       else:
         binding = durable_exit_plan_source_binding(existing)
-        if binding is None or binding[0] != ExecutionOwnerRef.strategy_run(
-          normalized_run_id
-        ):
+        if binding is None or binding != (execution_ref, environment):
           raise ValueError("退出计划来源执行归属冲突")
         persisted = ExitPlan.from_dict(dict(existing.plan_state or {}))
         if persisted.template.to_dict() != template.to_dict():
@@ -2206,19 +2262,20 @@ class AutoExitPlanService:
         template,
         volume=int(volume),
         price=float(price),
-        trade_time=trade_time,
+        trade_time=exchange_trade_time,
       )
-      return await self.persist_strategy_plan_state(
-        strategy_run_id=normalized_run_id,
+      return await self.persist_execution_plan_state(
+        execution_ref=execution_ref,
+        environment=environment,
         plan_state=plan.to_dict(),
-        execution_mode=execution_mode,
         expected_state_version=expected_state_version,
-        evaluated_at=trade_time,
+        evaluated_at=trade_time_utc,
         event_type="STRATEGY_ENTRY_FILL_REGISTERED",
         event_business_key=event_business_key,
         entry_authorization=entry_authorization,
         db=db,
         commit=commit,
+        _event_input_hash=input_hash,
       )
 
   async def record_runtime_evaluation_failure(
@@ -3105,6 +3162,47 @@ class AutoExitPlanService:
     return synced
 
   @staticmethod
+  def _execution_plan_template(template, execution_ref, environment):
+    if not isinstance(execution_ref, ExecutionOwnerRef) or not isinstance(environment, ExecutionEnvironment):
+      raise ValueError("typed exit source and environment required")
+    if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN:
+      if template.run_id != execution_ref.owner_id:
+        raise ValueError("退出计划不属于当前策略运行")
+    elif execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+      if environment is not ExecutionEnvironment.PAPER or template.run_id:
+        raise ValueError("independent T exit requires PAPER and empty run_id")
+      metadata = dict(template.metadata)
+      source_material = {
+        "source_execution_owner_type": execution_ref.owner_type.value,
+        "source_execution_owner_id": execution_ref.owner_id,
+        "source_execution_environment": environment.value,
+      }
+      if (template.source_type != T_TRADE_BATCH_SOURCE or not template.source_id
+          or metadata.get("source_execution_ref") != execution_ref.to_dict()
+          or any(key in metadata and metadata[key] != value for key, value in source_material.items())):
+        raise ValueError("T exit template source binding conflict")
+      template = ExitPlanTemplate.from_dict({**template.to_dict(), "metadata": {
+        **metadata, **source_material,
+      }})
+    else:
+      raise ValueError("unsupported exit source owner")
+    if environment not in {ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE} or str(template.source_type).upper() not in RUNTIME_EXIT_PLAN_SOURCE_TYPES:
+      raise ValueError("Engine ExitPlanBook 不接受该退出计划来源")
+    return template
+
+  @staticmethod
+  def _require_execution_entry_sync_binding(*, record, persistent_plan, incoming_plan, execution_ref, environment):
+    expected_run = execution_ref.owner_id if execution_ref.owner_type is ExecutionOwnerType.STRATEGY_RUN else ""
+    for field in ("plan_id", "account_id", "instrument_code", "bucket", "source_type", "source_id"):
+      values = [str(getattr(value, field) or "") for value in (record, persistent_plan.template, incoming_plan.template)]
+      if not values[0] or len(set(values)) != 1:
+        raise ValueError(f"execution exit-plan {field} binding mismatch")
+    if any(str(value or "") != expected_run for value in (record.strategy_run_id, persistent_plan.template.run_id, incoming_plan.template.run_id)):
+      raise ValueError("execution exit-plan strategy_run_id binding mismatch")
+    if durable_exit_plan_source_binding(record) != (execution_ref, environment):
+      raise ValueError("退出计划来源执行归属冲突")
+
+  @staticmethod
   def _require_strategy_entry_sync_binding(
     *,
     record: AutoExitPlanRecord,
@@ -3112,42 +3210,11 @@ class AutoExitPlanService:
     incoming_plan: ExitPlan,
     strategy_run_id: str,
   ) -> None:
-    persistent = persistent_plan.template
-    incoming = incoming_plan.template
-    bindings = {
-      "plan_id": (record.plan_id, persistent.plan_id, incoming.plan_id),
-      "account_id": (
-        record.account_id,
-        persistent.account_id,
-        incoming.account_id,
-      ),
-      "instrument_code": (
-        record.instrument_code,
-        persistent.instrument_code,
-        incoming.instrument_code,
-      ),
-      "bucket": (record.bucket, persistent.bucket, incoming.bucket),
-      "source_type": (
-        record.source_type,
-        persistent.source_type,
-        incoming.source_type,
-      ),
-      "source_id": (
-        record.source_id,
-        persistent.source_id,
-        incoming.source_id,
-      ),
-      "strategy_run_id": (
-        record.strategy_run_id,
-        persistent.run_id,
-        incoming.run_id,
-        strategy_run_id,
-      ),
-    }
-    for field, values in bindings.items():
-      normalized = [str(value or "").strip() for value in values]
-      if not normalized[0] or any(value != normalized[0] for value in normalized):
-        raise ValueError(f"strategy exit-plan {field} binding mismatch")
+    AutoExitPlanService._require_execution_entry_sync_binding(
+      record=record, persistent_plan=persistent_plan, incoming_plan=incoming_plan,
+      execution_ref=ExecutionOwnerRef.strategy_run(strategy_run_id),
+      environment=ExecutionEnvironment(record.environment),
+    )
 
   @staticmethod
   def _merge_strategy_entry_snapshot(

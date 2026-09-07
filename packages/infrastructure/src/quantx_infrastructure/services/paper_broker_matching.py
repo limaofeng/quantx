@@ -31,10 +31,17 @@ from quantx_domain.brokers.base import (
   PriceType,
   TradeRecord,
 )
+from quantx_domain.trading.exit_plan import TradingCostPolicy
 from quantx_domain.trading.market_rules import MarketDataSnapshot
 from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
 
 PAPER_MATCHING_POLICY_VERSION = "paper-strict-book-v1"
+PAPER_TRADING_COST_POLICY = TradingCostPolicy(
+  commission_rate=0.0003,
+  minimum_commission=5.0,
+  stamp_tax_rate=0.0005,
+  transfer_fee_rate=0.00001,
+)
 _EXCHANGE_ZONE = ZoneInfo("Asia/Shanghai")
 _ACTIVE = {OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.PARTIAL_FILLED}
 _STATE_FIELDS = (
@@ -110,10 +117,10 @@ class _StrictPaperBroker(BacktestBroker):
     super().__init__(
       account_id="paper:" + scope_execution_id,
       initial_capital=cash,
-      commission_rate=0.0003,
-      min_commission=5.0,
-      stamp_tax_rate=0.0005,
-      transfer_fee_rate=0.00001,
+      commission_rate=PAPER_TRADING_COST_POLICY.commission_rate,
+      min_commission=PAPER_TRADING_COST_POLICY.minimum_commission,
+      stamp_tax_rate=PAPER_TRADING_COST_POLICY.stamp_tax_rate,
+      transfer_fee_rate=PAPER_TRADING_COST_POLICY.transfer_fee_rate,
       slippage_rate=0.0001,
       participation_cap_pct=0.05,
       book_depth_participation_pct=0.25,

@@ -71,6 +71,17 @@ def test_baseline_clone_excludes_schema_owned_by_later_revisions() -> None:
     )
 
 
+def test_baseline_fingerprint_ignores_late_loaded_optional_existing_table():
+  from quantx_infrastructure.models.divid_factor import DividFactorTable
+
+  revision = _load_revision(
+    "20260729_0001_production_baseline.py", "baseline_optional_table"
+  )
+  assert DividFactorTable.__table__.name in revision.OPTIONAL_EXISTING_TABLES
+  assert "divid_factors" not in revision._baseline_metadata().tables
+  assert revision.metadata_sha256() == revision.EXPECTED_METADATA_SHA256
+
+
 def test_live_safety_revision_is_additive_and_downgrade_is_refused() -> None:
   revision = _load_revision(
     "20260729_0002_live_safety.py",

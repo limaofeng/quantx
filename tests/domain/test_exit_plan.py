@@ -122,6 +122,35 @@ def test_cost_basis_stays_frozen_when_later_entry_fill_changes_average():
   assert plan.cost_basis.basis_volume == 1000
 
 
+@pytest.mark.parametrize(
+  "status",
+  [ExitPlanStatus.EXIT_PENDING, ExitPlanStatus.PAUSED, ExitPlanStatus.ERROR],
+)
+def test_partial_entry_fill_preserves_exit_lifecycle(status):
+  plan = ExitPlanBook().register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="target",
+        strategy=ExitRuleType.NET_TAKE_PROFIT,
+        parameters={"target_net_profit_pct": 5.0},
+      )
+    ),
+    volume=100,
+    price=10.0,
+  )
+  plan.status = status
+  plan.pending_order_id = "exit-order-1"
+  plan.pending_requested_volume = 50
+
+  plan.register_entry_fill(volume=100, price=12.0)
+
+  assert plan.status == status
+  assert plan.pending_order_id == "exit-order-1"
+  assert plan.pending_requested_volume == 50
+  assert plan.entry_filled_volume == 200
+  assert plan.entry_avg_price == pytest.approx(11.0)
+
+
 def adaptive_context(
   price,
   timestamp,

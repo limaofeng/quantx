@@ -624,7 +624,10 @@ class ExitPlan:
       self.entry_avg_price * previous + float(price) * fill_volume
     ) / total
     self.entry_filled_volume = total
-    self.status = ExitPlanStatus.ACTIVE
+    if self.status == ExitPlanStatus.PENDING_ENTRY:
+      self.status = ExitPlanStatus.ACTIVE
+    elif self.status == ExitPlanStatus.COMPLETED:
+      self.status = ExitPlanStatus.PARTIALLY_EXITED if self.exited_volume else ExitPlanStatus.ACTIVE
     if trade_time:
       trade_date = trade_time.date().isoformat()
       if not self.entry_trade_date:
