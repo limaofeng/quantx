@@ -467,6 +467,12 @@ async def test_supervisor_is_restart_idempotent_and_writes_no_order_chain(
 
   await supervisor.reconcile(config=config, universe=universe)
   async with sessions() as db:
+    current = await db.get(TAssistantDecisionCycleRecord, "prepared-before-restart")
+    assert current.status == "PREPARED"
+  await supervisor.stop()
+  await supervisor.start()
+  await supervisor.reconcile(config=config, universe=universe)
+  async with sessions() as db:
     recovered = await db.get(
       TAssistantDecisionCycleRecord,
       "prepared-before-restart",
@@ -655,7 +661,7 @@ async def test_supervisor_is_restart_idempotent_and_writes_no_order_chain(
     assert disabled_cycle.abort_reason == "T_CYCLE_CONFIG_DISABLED"
 
   await restarted.stop()
-  assert hub.unsubscribed == [hub.handle, hub.handle]
+  assert hub.unsubscribed == [hub.handle, hub.handle, hub.handle]
 
 
 def test_shadow_comparison_joins_nested_legacy_phase_on_exact_source_fence() -> None:
@@ -963,6 +969,32 @@ async def test_same_execution_reconcile_preserves_hot_cursor_with_live_ring(sess
     assert supervisor._bindings[execution_id].accepted_sequences["600000.SH"] == 7
     assert supervisor._runtime.symbol_states(execution_id)["600000.SH"].cursor.accepted_sequence == 7
   finally:
+    await supervisor.stop()
+
+
+async def test_reconcile_waits_for_inflight_quote_cycle(sessions, monkeypatch):
+  config, hub, supervisor, universe, _ = await _reconcile_cursor_probe(sessions)
+  entered, release = asyncio.Event(), asyncio.Event()
+  original = supervisor._runtime.run_cycle
+
+  async def blocked(**kwargs):
+    entered.set()
+    await release.wait()
+    return await original(**kwargs)
+
+  monkeypatch.setattr(supervisor._runtime, "run_cycle", blocked)
+  quote = asyncio.create_task(hub.emit(5))
+  await asyncio.wait_for(entered.wait(), timeout=2)
+  reconcile = asyncio.create_task(supervisor.reconcile(config=config, universe=universe))
+  try:
+    await asyncio.sleep(0)
+    assert not reconcile.done()
+    release.set()
+    await quote
+    await reconcile
+  finally:
+    release.set()
+    await asyncio.gather(quote, reconcile, return_exceptions=True)
     await supervisor.stop()
 
 

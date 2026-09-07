@@ -535,12 +535,49 @@ async def test_snapshot_delivery_does_not_alias_mutable_latest_cache(
       assert await hub._hydrate_from_store()
     # A delta replaces a cache entry before its asynchronous authority check.
     # The queued snapshot must keep its original price and lineage.
-    hub._apply_tick("600000.SH", {"lastPrice": 11.0, "time": 3_000}, None)
+    hub._latest["600000.SH"] = {"lastPrice": 11.0, "time": 3_000}
     await asyncio.sleep(0)
     assert received[0]["600000.SH"]["market_stream_sequence"] == 1
     assert received[0]["600000.SH"]["lastPrice"] == 10.0
   finally:
     await hub.unsubscribe(handle)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hydrate", [False, True])
+async def test_subscribe_during_authority_check_only_sees_validated_cache(hydrate):
+  store = FakeStore()
+  hub = WholeQuoteHub(store=store, trading_time_service=AlwaysClosed())
+  assert await hub._hydrate_from_store()
+  set_authority(store, sequence=2)
+  entered, release = asyncio.Event(), asyncio.Event()
+  original = store.state_with_freshness
+
+  async def blocked():
+    entered.set()
+    await release.wait()
+    return await original()
+
+  store.state_with_freshness = blocked
+  task = asyncio.create_task(
+    hub._hydrate_from_store() if hydrate else hub._apply_payload(
+      batch(2, {"600000.SH": {"lastPrice": 11.0, "time": 3_000}}).to_bytes()
+    )
+  )
+  await entered.wait()
+  received = []
+  handle = await hub.subscribe_batches(received.append)
+  try:
+    await asyncio.sleep(0)
+    assert hub.sequence == 1
+    assert received[0]["600000.SH"]["market_stream_sequence"] == 1
+    assert received[0]["600000.SH"]["lastPrice"] == 10.0
+  finally:
+    release.set()
+    await task
+    await hub.unsubscribe(handle)
+  assert hub.sequence == 2
+  assert hub.latest("600000.SH")["market_stream_sequence"] == 2
 
 
 @pytest.mark.asyncio
@@ -707,7 +744,7 @@ async def test_api_offline_during_decode_cannot_reopen_gate(
     monkeypatch.setattr(asyncio, "to_thread", decode_then_disconnect)
     await hub._apply_payload(delta.to_bytes())
 
-    assert hub.sequence == 2
+    assert hub.sequence == 1
     assert hub.status is WholeQuoteStatus.OFFLINE
     assert store.watermarks[-1]["status"] == WholeQuoteStatus.OFFLINE.value
   finally:

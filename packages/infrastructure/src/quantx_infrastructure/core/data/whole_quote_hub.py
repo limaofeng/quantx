@@ -182,14 +182,7 @@ class WholeQuoteHub:
     state, latest = hydrated
     previous_identity = (self.generation, self.stream_id)
     had_previous_identity = bool(previous_identity[0] and previous_identity[1])
-    self.stream_id = state.stream_id
-    self.generation = int(state.generation or 0)
-    self.sequence = state.sequence
-    self.universe_count = state.universe_count
-    self.universe_hash = state.universe_hash
-    self._last_sequence_progress_monotonic = time.monotonic()
-    self.last_captured_at = state.captured_at
-    self._latest, self._source_times = await self._prepare_snapshot(
+    prepared_latest, prepared_source_times = await self._prepare_snapshot(
       latest,
       state.captured_at,
     )
@@ -207,13 +200,20 @@ class WholeQuoteHub:
         self._source_times = {}
       return False
     self.generation = authoritative_generation
+    self.stream_id = state.stream_id
+    self.sequence = state.sequence
+    self.universe_count = state.universe_count
+    self.universe_hash = state.universe_hash
+    self._last_sequence_progress_monotonic = time.monotonic()
+    self.last_captured_at = state.captured_at
     self._latest = self._decorate_dispatch_data(
-      self._latest,
+      prepared_latest,
       generation=authoritative_generation,
       stream_id=state.stream_id,
       sequence=state.sequence,
       continuity_reset=had_previous_identity,
     )
+    self._source_times = prepared_source_times
     self._last_received_monotonic = received_monotonic
     if self._has_lagging_consumer():
       self._set_status(WholeQuoteStatus.STALE)
@@ -314,19 +314,21 @@ class WholeQuoteHub:
       self.universe_hash = hashlib.sha256(
         "\n".join(batch.universe_codes).encode("utf-8")
       ).hexdigest()
-      self._latest, self._source_times = await self._prepare_snapshot(
+      prepared_latest, prepared_source_times = await self._prepare_snapshot(
         batch.data,
         batch.captured_at,
       )
-      accepted = self._latest
+      accepted = prepared_latest
     else:
       accepted: dict[str, dict[str, Any]] = {}
+      prepared_source_times = dict(self._source_times)
       for code, tick in batch.data.items():
-        if self._apply_tick(code, tick, batch.captured_at):
+        source_time = self._tick_source_time(tick, batch.captured_at)
+        previous = prepared_source_times.get(code)
+        if previous is None or source_time >= previous:
           accepted[code] = tick
-    self.sequence = batch.sequence
-    self._last_sequence_progress_monotonic = time.monotonic()
-    self.last_captured_at = batch.captured_at
+          prepared_source_times[code] = source_time
+      prepared_latest = {**self._latest, **accepted}
     authoritative_generation = await self._validate_authoritative_ready(
       stream_id=batch.stream_id,
       generation=(
@@ -347,6 +349,9 @@ class WholeQuoteHub:
       self.last_apply_ms = (time.monotonic() - apply_started) * 1000
       return
     self.generation = authoritative_generation
+    self.sequence = batch.sequence
+    self._last_sequence_progress_monotonic = time.monotonic()
+    self.last_captured_at = batch.captured_at
     continuity_reset = bool(
       previous_stream_id
       and (
@@ -360,7 +365,7 @@ class WholeQuoteHub:
     decorate_target = (
       accepted
       if previous_status is WholeQuoteStatus.READY
-      else self._latest
+      else prepared_latest
     )
     decorated = self._decorate_dispatch_data(
       decorate_target,
@@ -369,8 +374,10 @@ class WholeQuoteHub:
       sequence=batch.sequence,
       continuity_reset=continuity_reset,
     )
-    for code, tick in decorated.items():
-      self._latest[code] = tick
+    # Publish only validated, lineage-decorated quotes; never expose staged raw
+    # ticks to subscribers while the authority check yields to the event loop.
+    self._latest = {**prepared_latest, **decorated}
+    self._source_times = prepared_source_times
     if previous_status is WholeQuoteStatus.READY:
       accepted = decorated
     self._last_received_monotonic = received_monotonic
@@ -388,20 +395,6 @@ class WholeQuoteHub:
     )
     if dispatch_data and self.is_ready:
       await self._dispatch(dispatch_data)
-
-  def _apply_tick(
-    self,
-    code: str,
-    tick: dict[str, Any],
-    captured_at: datetime | None,
-  ) -> bool:
-    source_time = self._tick_source_time(tick, captured_at)
-    previous = self._source_times.get(code)
-    if previous is not None and source_time < previous:
-      return False
-    self._source_times[code] = source_time
-    self._latest[code] = tick
-    return True
 
   @classmethod
   def _decorate_dispatch_data(

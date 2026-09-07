@@ -125,6 +125,7 @@ class TAssistantPaperShadowSupervisor:
     self._bindings: dict[str, _PaperShadowBinding] = {}
     self._account_execution_ids: dict[str, str] = {}
     self._last_results: dict[str, TAssistantShadowCycleResult] = {}
+    self._lifecycle_lock = asyncio.Lock()
     self._legacy_compare_attempts = int(legacy_compare_attempts)
     self._legacy_compare_retry_seconds = float(legacy_compare_retry_seconds)
 
@@ -163,6 +164,18 @@ class TAssistantPaperShadowSupervisor:
     logger.info("T-assistant PAPER shadow consumer stopped")
 
   async def reconcile(
+    self,
+    *,
+    config: TTradeGlobalConfig,
+    universe: InstrumentUniverseSnapshot,
+    legacy_results: Optional[Mapping[str, Mapping[str, Any]]] = None,
+  ) -> Optional[str]:
+    async with self._lifecycle_lock:
+      return await self._reconcile_locked(
+        config=config, universe=universe, legacy_results=legacy_results,
+      )
+
+  async def _reconcile_locked(
     self,
     *,
     config: TTradeGlobalConfig,
@@ -258,11 +271,12 @@ class TAssistantPaperShadowSupervisor:
         states = await TAssistantSymbolStateRepository(db).load_domains(
           execution.execution_id
         )
-        await self._abort_recoverable_cycles(
-          db,
-          execution_id=execution.execution_id,
-          now=now,
-        )
+        if execution.execution_id not in self._bindings:
+          await self._abort_recoverable_cycles(
+            db,
+            execution_id=execution.execution_id,
+            now=now,
+          )
         profile_repository = TTradeInstrumentProfileRepository(db)
         profile_service = TTradeOpportunityRuntimeService()
         reference_profiles: dict[str, OpportunityReferenceProfile] = {}
@@ -365,6 +379,10 @@ class TAssistantPaperShadowSupervisor:
     return execution.execution_id
 
   async def _on_quote_batch(self, data: dict[str, dict[str, Any]]) -> None:
+    async with self._lifecycle_lock:
+      await self._on_quote_batch_locked(data)
+
+  async def _on_quote_batch_locked(self, data: dict[str, dict[str, Any]]) -> None:
     if not data or not self._bindings:
       return
     now = self._now()
