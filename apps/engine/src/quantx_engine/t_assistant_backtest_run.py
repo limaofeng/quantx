@@ -1,8 +1,10 @@
 """Versioned local shared-account BACKTEST entry point and replay recovery."""
 
+import hashlib
+import sys
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from quantx_domain.trading.t_assistant_execution import (
@@ -15,11 +17,44 @@ from quantx_infrastructure.services.t_assistant_backtest_store import (
   TAssistantBacktestStore,
 )
 
+from quantx_engine.t_assistant_backtest_data import FrozenBacktestDataset
 from quantx_engine.t_assistant_backtest_runtime import (
   TAssistantBacktestRuntime,
   json_value,
 )
 from quantx_engine.t_assistant_backtest_timeline import tick_frames
+
+
+def backtest_code_evidence(*additional_modules):
+  """Bind the actual loaded QuantX implementation files, including dirty edits."""
+  pending = [
+    __name__,
+    TAssistantBacktestRuntime.__module__,
+    TAssistantBacktestStore.__module__,
+    tick_frames.__module__,
+    *additional_modules,
+  ]
+  files = {}
+  while pending:
+    name = pending.pop()
+    if name in files:
+      continue
+    module = sys.modules[name]
+    path = Path(module.__file__)
+    files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    for value in vars(module).values():
+      dependency = getattr(value, "__module__", "")
+      if (
+        isinstance(dependency, str)
+        and dependency.startswith("quantx_")
+        and dependency not in files
+        and dependency in sys.modules
+      ):
+        pending.append(dependency)
+  return {
+    "implementation_files": files,
+    "implementation_hash": stable_manifest_hash(files),
+  }
 
 
 @dataclass(frozen=True)
@@ -73,21 +108,32 @@ async def execute_backtest(
   resume_directory always owns a fresh execution, including identical inputs.
   """
   request = deepcopy(request)
-  ordered = [item for _, frame in tick_frames(events) for item in frame]
-  if not ordered or ordered[0].decision_time < request.start_at:
+  streamed = isinstance(events, FrozenBacktestDataset)
+  if streamed:
+    data = events.input_manifest
+    if set(events.instruments) != set(request.runtime_options["initial_positions"]):
+      raise ValueError("BACKTEST_DATA_UNIVERSE_MISMATCH")
+    first = datetime.fromtimestamp((data["first_ms"] + data["latency_ms"]) / 1000, UTC)
+    ordered = events.events()
+  else:
+    ordered = [item for _, frame in tick_frames(events) for item in frame]
+    if not ordered:
+      raise ValueError("BACKTEST_EMPTY_DATA")
+    first = ordered[0].decision_time
+    data = {
+      "count": len(ordered),
+      "hash": stable_manifest_hash({"ticks": json_value(ordered)}),
+      "start": first.isoformat(),
+      "end": ordered[-1].decision_time.isoformat(),
+    }
+  if first < request.start_at:
     raise ValueError("BACKTEST_DATA_START_INVALID")
   if not code_manifest:
     raise ValueError("BACKTEST_CODE_MANIFEST_REQUIRED")
-  data = {
-    "count": len(ordered),
-    "hash": stable_manifest_hash({"ticks": json_value(ordered)}),
-    "start": ordered[0].decision_time.isoformat(),
-    "end": ordered[-1].decision_time.isoformat(),
-  }
   frozen = {
     "config": json_value(request),
     "data": data,
-    "code": code_manifest,
+    "code": {"declared": code_manifest, **backtest_code_evidence()},
     "broker": json_value(request.runtime_options["broker_parameters"]),
     "timeline": {
       "version": "backtest-tick-timeline.v1",
@@ -106,17 +152,27 @@ async def execute_backtest(
   if store.manifest["material"]["frozen"] != frozen:
     raise ValueError("BACKTEST_RESUME_INPUT_CHANGED")
   # Verify the whole stored chain, even if a caller supplied fewer input frames.
-  prior_frames = list(store.frames())
-  runtime = request.runtime(store.manifest["material"]["execution_id"])
+  prior_frame_count = sum(1 for _ in store.frames())
+  try:
+    runtime = request.runtime(store.manifest["material"]["execution_id"])
+  except Exception as exc:
+    store.record_failure(exc)
+    raise
   previous = store.manifest["hash"]
 
   def commit(index, frame):
     nonlocal previous
     previous = store.commit_frame(index=index, previous=previous, facts=frame)
 
-  await runtime.run(ordered, on_frame=commit, retain_frames=False)
-  if runtime.frame_count < len(prior_frames):
+  try:
+    await runtime.run(ordered, on_frame=commit, retain_frames=False, presorted=streamed)
+  except Exception as exc:
+    store.record_failure(exc)
+    raise
+  if runtime.frame_count < prior_frame_count:
     raise ValueError("BACKTEST_RESUME_TRUNCATED")
+  if frozen["code"] != {"declared": code_manifest, **backtest_code_evidence()}:
+    raise ValueError("BACKTEST_CODE_CHANGED_DURING_RUN")
   economic = {
     "cash": runtime.broker.cash,
     "positions": {c: p.long_volume for c, p in runtime.broker.positions.items()},

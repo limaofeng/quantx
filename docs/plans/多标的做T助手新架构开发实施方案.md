@@ -1,6 +1,6 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程实施中；P6—P8 尚未开始）<br>
+> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程已验证、策略准入待确认；P6—P8 尚未开始）<br>
 > 版本：2.4<br>
 > 日期：2026-09-07<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
@@ -176,7 +176,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `DONE` | `P1 DONE`；实现、恢复测试与 Windows 运行验收完成 | 无第二真源，故障恢复通过 | 0048/0050 实库与隔离恢复通过；BUY 整链 39 项及根回归，见 §10 |
 | P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
 | P4 | 分配、PAPER 与跨域准入 | `DONE` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 六项实现、隔离 PG 闭环/故障门及实际 Caddy/Web 契约检查完成，业务库 0056；证据见 §10 |
-| P5 | 共享账户回测 | `IN_PROGRESS` | P4 | 无重复资金/未来数据，结果可重放 | P5-A/B 工程整链与边界通过；P5-C 准入未确认 |
+| P5 | 共享账户回测 | `IN_PROGRESS` | P4 | 无重复资金/未来数据，结果可重放 | P5-A/B 通过；P5-C 工程准备通过，正式样本与准入门待确认 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
 | P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
 | P8 | 模型 SHADOW/ACTIVE | `NOT_STARTED` | P5；ACTIVE 依赖 P7 | OOS 增量、门禁、人工发布闭环 | 待补 |
@@ -979,6 +979,43 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   复用P5-A公共规则回归；无需数据库/服务/E2E/真实交易。
 - 提交：本检查点所在 `test(t-assistant): verify shared-account backtest boundaries`。
   剩余：P5-C数据获取与评估准备、旧单票假设对照；实际策略准入阈值用户暂不确认，P5/P6门不开放。
+
+### P5-C 工程准备与最终交接（2026-09-07，P5 未 DONE）
+
+- 已完成：历史数据获取接口 `acquire_backtest_dataset` 注入现有 HistoricalMarketDataService
+  与 TradingCalendarService，逐标的/交易日遍历严格分页，冻结原始五档、源身份、日历、
+  成交量口径、延迟、分区hash与源遍历结果。缺字段、重复/乱序、缺涨跌停、源中断保留
+  INCOMPLETE 证据，禁止补造或回放；异常只保留安全错误码，不保存连接细节。
+  存储遍历/字段检查不冒充已确认的统计样本完整性门；完整性阈值仍属正式评估条件。
+- 接口：`FrozenBacktestDataset` 可直接传入 `execute_backtest` / `evaluate_backtest_comparison`，
+  按日流式合并，单票对照使用同一冻结数据的明确子集；普通小样本仍可传 BacktestTick 序列。
+  `BacktestRequest` 显式冻结配置、现金/桶库存、日历、前收盘mark、行业/profile及公共策略参数；
+  每次生成独立BACKTEST execution。参数/数据/代码变化拒绝恢复，实际实现文件hash自动记录。
+- 结果真源：每execution独立本地 `facts.sqlite3`，含 `t_assistant_executions`、
+  `t_assistant_backtest_versions`、帧hash链、结果及失败表，SQLite事务提交已收敛帧；环境CHECK
+  禁止改为LIVE。`result.json`是数据库结果manifest的审阅导出，不是第二套业务账本。
+  恢复重放并核对已提交前缀，源损坏/运行失败保留证据。未修改或连接业务库，未新增业务迁移。
+- 公共必要适配：BacktestBroker 显式五档不利滑点（默认0，PAPER行为保持），价格按最小价位
+  向不利方向取整并遵守委托限价；部分成交后的资金预留只加未付费用，不重复预留最低佣金。
+  现有交易时段分类移至纯公共函数，两端复用；非连续交易时段不撮合，不将午休报价当成交。
+  过期估值记录 ALLOCATION_BLOCKED 并继续行情；未来或损坏证据仍拒绝。
+- 评估准备：预先保存情景、数据、代码、分组和显式策略准入policy，执行RULE_ONLY组合及
+  每票独享全部初始现金的旧假设对照，输出重复现金额、相对不做T的增量收益/回撤、费用、
+  已闭环与期末未闭环数量。单票与日历季度分组使用共同初始组合权益分母，保存按市值计量
+  的增量收益/回撤及闭环PnL/样本数。未确认policy返回NOT_EVALUATED；阈值失败保存FAIL并
+  阻断P6，不调参、不改样本。合成夹具的阈值只用于验证失败分支，绝非用户策略准入授权。
+- 验证：最终回测整链/边界/数据获取/评估准备26项通过（`p5-final-local.log`）；公共Broker
+  与累计费用预留41项通过（`p5-fee-reservation.log`）；新增午休与既有边界14项通过。
+  Ruff通过。复用P5-A的185通过/1既有PG门跳过和费用/Sizer的167项证据，不重复全量回归。
+  所有日志在 `.codex_screenshots/`。中断恢复、数据库环境约束及篡改拒绝均在本地隔离存储验证。
+- 提交：P5-A `d10e99e68`；P5-B `6d171da84`；P5-C工程准备为本检查点所在
+  `feat(t-assistant): prepare frozen portfolio backtest evaluation` 提交。
+- **未通过门**：用户明确“先完成工程，暂不确认策略准入阈值”。未把建议区间、标的、费用、
+  滑点、最坏分组与门槛当作授权；未访问实际业务数据源，也未执行正式历史样本策略评估。
+  TTA-P5-04工程守恒/重放/旧假设对照已验证，正式冻结样本对照与准入仍待P5-C，因此该任务
+  保留未勾选，P5保持IN_PROGRESS，**不得进入P6**。本任务未开展P6–P8、Web界面、E2E或真实交易，
+  未启停交易服务，工作树中其他任务改动保持原样。
+- 成本：总token、缓存/非缓存输入、输出token均无任务级计量，仍记未知，不作估算。
 
 ## 11. 变更记录
 

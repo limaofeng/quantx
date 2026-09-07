@@ -1,0 +1,291 @@
+"""Acquire and freeze historical source pages before shared-account execution.
+
+Callers inject the existing HistoricalMarketDataService and TradingCalendarService
+with their explicitly selected data environment. This module never discovers or
+starts a service, connects to QMT, or writes back to either source.
+"""
+
+from datetime import UTC, date, datetime, time, timedelta
+from math import isfinite
+from pathlib import Path
+from uuid import uuid4
+
+from quantx_domain.clock import SHANGHAI
+from quantx_domain.trading.market_rules import MarketDataSnapshot
+from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+from quantx_domain.trading.t_assistant_market_state import AcceptedTMarketTick
+from quantx_domain.trading.t_trade import normalize_ashare_cumulative_volume
+from quantx_domain.trading.t_trade_opportunity_engine import OpportunitySample
+from quantx_infrastructure.services.t_assistant_backtest_store import (
+  TAssistantBacktestStore,
+)
+
+from quantx_engine.t_assistant_backtest_timeline import BacktestTick
+
+FIELDS = (
+  "stock_code",
+  "source_time_ms",
+  "tick_ordinal",
+  "last_price",
+  "price_tick",
+  "bid_price",
+  "ask_price",
+  "bid_vol",
+  "ask_vol",
+  "amount",
+  "volume",
+  "pvolume",
+  "stock_status",
+  "up_stop_price",
+  "down_stop_price",
+)
+
+
+def _event(row, *, stream_id, sequence, symbol_sequence, latency_ms):
+  if any(
+    len(row[name]) != 5 for name in ("bid_price", "ask_price", "bid_vol", "ask_vol")
+  ):
+    raise ValueError("BACKTEST_FULL_BOOK_REQUIRED")
+  source_time = datetime.fromtimestamp(row["source_time_ms"] / 1000, UTC)
+  decision_time = source_time + timedelta(milliseconds=latency_ms)
+  day = source_time.astimezone(SHANGHAI).date().isoformat()
+  volume = normalize_ashare_cumulative_volume(
+    pvolume=row["pvolume"], volume=row["volume"]
+  ).shares
+  if volume is None:
+    raise ValueError("BACKTEST_SOURCE_VOLUME_REQUIRED")
+  sample = OpportunitySample(
+    row["stock_code"],
+    day,
+    row["source_time_ms"],
+    row["tick_ordinal"],
+    row["last_price"],
+    received_at_ms=int(decision_time.timestamp() * 1000),
+    continuity_generation="1",
+    bid_price=row["bid_price"][0],
+    ask_price=row["ask_price"][0],
+    bid_volume=row["bid_vol"][0],
+    ask_volume=row["ask_vol"][0],
+    cumulative_amount=row["amount"],
+    cumulative_volume=volume,
+    price_tick=row["price_tick"],
+  )
+  market = MarketDataSnapshot(
+    row["stock_code"],
+    source_time,
+    row["last_price"],
+    volume=volume,
+    amount=row["amount"],
+    price_tick=row["price_tick"],
+    limit_up=row["up_stop_price"],
+    limit_down=row["down_stop_price"],
+    suspended=row["stock_status"] == 1,
+    bid_price=row["bid_price"],
+    ask_price=row["ask_price"],
+    bid_vol=row["bid_vol"],
+    ask_vol=row["ask_vol"],
+    source=stream_id,
+  )
+  accepted = AcceptedTMarketTick(
+    stream_id,
+    symbol_sequence,
+    sample.received_at_ms,
+    sample,
+    market_fence_sequence=sequence,
+  )
+  identity = f"{row['stock_code']}:{row['source_time_ms']}:{row['tick_ordinal']}"
+  return BacktestTick(decision_time, sequence, identity, accepted, market)
+
+
+class FrozenBacktestDataset:
+  def __init__(self, directory, instruments=None):
+    self.directory = Path(directory)
+    self.manifest = TAssistantBacktestStore._read(self.directory / "dataset.json")
+    if self.manifest["hash"] != stable_manifest_hash(self.manifest["material"]):
+      raise ValueError("BACKTEST_DATA_MANIFEST_CORRUPT")
+    self.instruments = tuple(
+      sorted(instruments or self.manifest["material"]["instruments"])
+    )
+    if not self.instruments or not set(self.instruments) <= set(
+      self.manifest["material"]["instruments"]
+    ):
+      raise ValueError("BACKTEST_DATA_UNIVERSE_INVALID")
+
+  @property
+  def input_manifest(self):
+    material = self.manifest["material"]
+    if material["status"] != "FROZEN":
+      raise ValueError("BACKTEST_DATA_ACQUISITION_INCOMPLETE")
+    parts = [p for p in material["parts"] if p["code"] in self.instruments]
+    return {
+      "dataset_hash": self.manifest["hash"],
+      "instruments": list(self.instruments),
+      "count": sum(p["count"] for p in parts),
+      "first_ms": min(p["first_ms"] for p in parts),
+      "latency_ms": material["latency_ms"],
+    }
+
+  def subset(self, instruments):
+    return FrozenBacktestDataset(self.directory, instruments)
+
+  def events(self):
+    material = self.manifest["material"]
+    if material["status"] != "FROZEN":
+      raise ValueError("BACKTEST_DATA_ACQUISITION_INCOMPLETE")
+    counts = {code: 0 for code in self.instruments}
+    stream_id = f"backtest-data:{stable_manifest_hash(self.input_manifest)}"
+    sequence = 0
+    for day in material["trading_days"]:
+      rows = []
+      for part in material["parts"]:
+        if part["day"] != day or part["code"] not in self.instruments:
+          continue
+        path = self.directory / part["file"]
+        if path.parent.resolve() != self.directory.resolve():
+          raise ValueError("BACKTEST_DATA_PART_PATH_INVALID")
+        content = TAssistantBacktestStore._read(path)
+        if (
+          stable_manifest_hash(content) != part["hash"]
+          or len(content["rows"]) != part["count"]
+        ):
+          raise ValueError("BACKTEST_DATA_PART_CORRUPT")
+        rows.extend(content["rows"])
+      rows.sort(key=lambda r: (r["source_time_ms"], r["tick_ordinal"], r["stock_code"]))
+      for row in rows:
+        sequence += 1
+        counts[row["stock_code"]] += 1
+        yield _event(
+          row,
+          stream_id=stream_id,
+          sequence=sequence,
+          symbol_sequence=counts[row["stock_code"]],
+          latency_ms=material["latency_ms"],
+        )
+
+
+async def acquire_backtest_dataset(
+  *,
+  history,
+  calendar,
+  source_version: str,
+  instruments: tuple[str, ...],
+  start: date,
+  end: date,
+  root: Path,
+  latency_ms: int,
+):
+  """Persist incomplete acquisition evidence without changing the sample range.
+
+  Source pagination must exhaust its keyset cursor; the existing history service
+  supplies that guarantee. Validation examines raw books; it never forward-fills
+  missing prices, replaces Tick data with bars, or downloads through trading APIs.
+  """
+  if (
+    not source_version
+    or not instruments
+    or len(set(instruments)) != len(instruments)
+    or end < start
+    or type(latency_ms) is not int
+    or latency_ms < 0
+  ):
+    raise ValueError("BACKTEST_DATA_REQUEST_INVALID")
+  directory = Path(root) / str(uuid4())
+  directory.mkdir(parents=True, exist_ok=False)
+  days = await calendar.get_trading_calendar(
+    market="SH", start_date=start, end_date=end
+  )
+  if not days or days != sorted(set(days)) or min(days) < start or max(days) > end:
+    raise ValueError("BACKTEST_CALENDAR_INVALID")
+  parts, failures = [], []
+  for day in days:
+    for symbol_index, code in enumerate(sorted(instruments)):
+      rows, previous = [], None
+      reason = None
+      try:
+        async for page in history.iter_tick_pages(
+          stock_code=code,
+          start_time=datetime.combine(day, time.min, SHANGHAI),
+          end_time=datetime.combine(day, time.max, SHANGHAI),
+        ):
+          for tick in page:
+            row = {key: getattr(tick, key) for key in FIELDS}
+            identity = (row["source_time_ms"], row["tick_ordinal"])
+            if (
+              row["stock_code"] != code
+              or type(identity[0]) is not int
+              or identity[0] <= 0
+              or type(identity[1]) is not int
+              or identity[1] < 0
+              or (previous is not None and identity <= previous)
+              or any(
+                not isfinite(row[k]) or row[k] <= 0
+                for k in ("up_stop_price", "down_stop_price", "price_tick")
+              )
+              or type(row["stock_status"]) is not int
+              or row["stock_status"] not in {-1, 0, 1}
+            ):
+              raise ValueError("BACKTEST_SOURCE_IDENTITY_OR_LIMIT_INVALID")
+            item = _event(
+              row,
+              stream_id="acquisition-validation",
+              sequence=len(rows) + 1,
+              symbol_sequence=len(rows) + 1,
+              latency_ms=latency_ms,
+            )
+            if item.market.timestamp.astimezone(SHANGHAI).date() != day:
+              raise ValueError("BACKTEST_SOURCE_OUTSIDE_REQUEST")
+            rows.append(row)
+            previous = identity
+      except Exception as exc:
+        # Do not publish source exception strings (may contain connection details).
+        detail = str(exc)
+        reason = (
+          detail
+          if detail.startswith("BACKTEST_")
+          and all(c.isupper() or c == "_" for c in detail)
+          else type(exc).__name__
+        )
+      if not rows or reason:
+        failures.append(
+          {
+            "day": day.isoformat(),
+            "code": code,
+            "reason": reason or "EMPTY_SOURCE",
+            "rows_seen": len(rows),
+          }
+        )
+      content = {"rows": rows}
+      filename = f"ticks-{day.isoformat()}-{symbol_index}.json"
+      TAssistantBacktestStore._create(directory / filename, content)
+      times = [r["source_time_ms"] for r in rows]
+      parts.append(
+        {
+          "file": filename,
+          "day": day.isoformat(),
+          "code": code,
+          "count": len(rows),
+          "hash": stable_manifest_hash(content),
+          "first_ms": min(times) if times else None,
+          "last_ms": max(times) if times else None,
+          "source_exhausted": reason is None,
+        }
+      )
+  material = {
+    "schema_version": "backtest-tick-dataset.v1",
+    "source_version": source_version,
+    "instruments": sorted(instruments),
+    "start": start.isoformat(),
+    "end": end.isoformat(),
+    "trading_days": [d.isoformat() for d in days],
+    "latency_ms": latency_ms,
+    "ordering": ["source_time_ms", "tick_ordinal", "instrument_code"],
+    "parts": parts,
+    "failures": failures,
+    "status": "INCOMPLETE" if failures else "FROZEN",
+    "strategy_sample_approval": "NOT_CONFIRMED",
+  }
+  TAssistantBacktestStore._create(
+    directory / "dataset.json",
+    {"material": material, "hash": stable_manifest_hash(material)},
+  )
+  return FrozenBacktestDataset(directory)

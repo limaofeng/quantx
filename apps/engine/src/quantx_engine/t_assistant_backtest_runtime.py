@@ -52,7 +52,6 @@ from quantx_domain.strategies import AshareIntradayTAssistantStrategy
 from quantx_domain.strategies.base import (
   ExitPlanIntentOrigin,
   MarketDataContext,
-  MarketDataSession,
   StrategyCadence,
   StrategyContext,
   StrategyInput,
@@ -65,6 +64,7 @@ from quantx_domain.trading.exit_plan import (
   ExitPlanBook,
   TradingCostPolicy,
 )
+from quantx_domain.trading.market_session import classify_market_data_session
 from quantx_domain.trading.old_inventory_capacity import allocate_old_inventory_claims
 from quantx_domain.trading.order_sizer import OrderSizer
 from quantx_domain.trading.risk_checker import TradingRiskChecker
@@ -121,11 +121,14 @@ class SharedBacktestBroker(BacktestBroker):
   """Deterministic IDs and a strict BACKTEST ownership boundary."""
 
   def __init__(self, execution, **parameters):
+    slippage = parameters.pop("slippage_rate", 0.0)
     super().__init__(
       account_id=execution.account_id,
       strict_book_depth=True,
       no_queue_credit=True,
       defer_new_orders_until_next_quote=True,
+      slippage_rate=0.0,
+      strict_book_slippage_rate=slippage,
       **parameters,
     )
     self.execution = execution
@@ -144,10 +147,15 @@ class SharedBacktestBroker(BacktestBroker):
     if (
       request.environment is not ExecutionEnvironment.BACKTEST
       or not (
-        request.execution_ref == self.execution.execution_ref
+        (
+          request.execution_ref == self.execution.execution_ref
+          and request.order_type is OrderType.BUY
+        )
         or (
           request.execution_ref.owner_type == "EXIT_PLAN"
+          and request.order_type is OrderType.SELL
           and request.execution_ref.owner_id in self.exit_plan_owners
+          and request.metadata.get("exit_plan_id") == request.execution_ref.owner_id
           and request.metadata.get("source_execution_ref")
           == self.execution.execution_ref.to_dict()
         )
@@ -224,6 +232,8 @@ class TAssistantBacktestRuntime:
       stamp_tax_rate=self.broker.stamp_tax_rate,
       transfer_fee_rate=self.broker.transfer_fee_rate,
     )
+    if any(not isfinite(v) or v < 0 for v in self.costs.to_dict().values()):
+      raise ValueError("BACKTEST_COST_POLICY_INVALID")
     if any(
       self.parameters.get(k, getattr(TradingCostPolicy(), k)) != v
       for k, v in self.costs.to_dict().items()
@@ -358,9 +368,9 @@ class TAssistantBacktestRuntime:
       self.seen_orders[order.order_id] = state
       self.audit.append({"type": "ORDER", "value": json_value(order)})
 
-  async def run(self, events, *, on_frame=None, retain_frames=True):
+  async def run(self, events, *, on_frame=None, retain_frames=True, presorted=False):
     self.frame_count = 0
-    for index, (at, frame) in enumerate(tick_frames(events)):
+    for index, (at, frame) in enumerate(tick_frames(events, presorted=presorted)):
       if self.now is not None and at <= self.now:
         raise ValueError("BACKTEST_CLOCK_REGRESSION")
       self.now = at.astimezone(SHANGHAI)
@@ -389,12 +399,18 @@ class TAssistantBacktestRuntime:
           raise ValueError("BACKTEST_FUTURE_PROFILE")
         self.rings[code].accept(item.tick, capture_time_ms=int(at.timestamp() * 1000))
         self.latest[code] = item
+        matching_market = replace(
+          item.market,
+          is_trading=item.market.is_trading
+          and classify_market_data_session(self.now).is_continuous,
+        )
         await self.broker.update_market_data(
-          code, item.market.price, self.now, market_data=item.market
+          code, item.market.price, self.now, market_data=matching_market
         )
         await self._converge()
       for code in sorted({item.market.instrument_code for item in frame}):
-        await self._exit(code)
+        if classify_market_data_session(self.now).is_continuous:
+          await self._exit(code)
         await self._converge()
       if len(self.latest) == len(self.states):
         await self._decision(index)
@@ -404,7 +420,9 @@ class TAssistantBacktestRuntime:
         "time": at.isoformat(),
         "evidence": evidence,
         "audit": self.audit,
-        "states": {c: s.to_dict() for c, s in self.states.items()},
+        "state_hashes": {
+          c: stable_manifest_hash(s.to_dict()) for c, s in self.states.items()
+        },
       }
       if on_frame is not None:
         on_frame(index, facts)
@@ -420,13 +438,7 @@ class TAssistantBacktestRuntime:
       (v.tick for v in self.latest.values()), key=lambda t: t.market_fence_sequence
     )
     cycle_id = f"{self.execution.execution_id}:cycle:{index}"
-    session = (
-      MarketDataSession.CONTINUOUS_AM
-      if time(9, 30) <= self.now.time().replace(tzinfo=None) < time(11, 30)
-      else MarketDataSession.CONTINUOUS_PM
-      if time(13) <= self.now.time().replace(tzinfo=None) < time(14, 57)
-      else MarketDataSession.CLOSED
-    )
+    session = classify_market_data_session(self.now)
     symbols = tuple(
       SymbolDecisionSnapshot(
         code,
@@ -523,7 +535,20 @@ class TAssistantBacktestRuntime:
       )
     if not candidates:
       return
-    portfolio = await self._portfolio(cycle_id)
+    try:
+      portfolio = await self._portfolio(cycle_id)
+    except ValueError as exc:
+      reason = str(exc)
+      if reason not in {"T_VALUATION_MARK_STALE", "T_VALUATION_OPENING_MARK_REQUIRED"}:
+        raise
+      self.audit.append(
+        {"type": "ALLOCATION_BLOCKED", "cycle_id": cycle_id, "reason": reason}
+      )
+      for candidate in candidates:
+        self.controls[candidate.instrument_code] = CandidateControl(
+          suppress_candidate_id=candidate.candidate_id
+        )
+      return
     decisions = allocate_portfolio(
       portfolio, tuple(candidates), allocation_attempt=1, now=self.now
     )
@@ -876,9 +901,11 @@ class TAssistantBacktestRuntime:
   def _conservation(self):
     expected = self.initial_cash
     volumes = dict(self.initial_volumes)
+    cash_flows = {code: 0.0 for code in volumes}
     for fill in self.broker.trades:
       sign = -1 if fill.trade_type is OrderType.BUY else 1
       expected += sign * fill.amount - fill.commission
+      cash_flows[fill.instrument_code] += sign * fill.amount - fill.commission
       volumes[fill.instrument_code] -= sign * fill.volume
     error = self.broker.cash - expected
     if abs(error) > 1e-7 or self.broker.cash < -1e-7:
@@ -895,4 +922,14 @@ class TAssistantBacktestRuntime:
       "volumes": volumes,
       "fees": sum(t.commission for t in self.broker.trades),
       "fill_count": len(self.broker.trades),
+      "incremental_pnl_by_symbol": {
+        c: cash_flows[c] + (p.long_volume - self.initial_volumes[c]) * p.last_price
+        for c, p in self.broker.positions.items()
+      },
+      "equity": self.broker.cash
+      + sum(p.long_volume * p.last_price for p in self.broker.positions.values()),
+      "passive_equity": self.initial_cash
+      + sum(
+        self.initial_volumes[c] * p.last_price for c, p in self.broker.positions.items()
+      ),
     }

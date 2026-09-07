@@ -65,20 +65,37 @@ class BacktestTick:
     )
 
 
-def tick_frames(events):
+def tick_frames(events, *, presorted=False):
   """Coalesce simultaneous quotes before allocation; never reorder duplicates."""
-  ordered = sorted(events, key=lambda event: event.key)
+  ordered = events if presorted else sorted(events, key=lambda event: event.key)
   seen = set()
   sequences = {}
-  for item in ordered:
-    identity = (item.tick.stream_id, item.market.instrument_code, item.source_identity)
-    if identity in seen:
-      raise ValueError("BACKTEST_DUPLICATE_SOURCE")
-    seen.add(identity)
-    code = item.market.instrument_code
-    previous = sequences.get(code, 0)
-    if item.tick.accepted_sequence <= previous:
-      raise ValueError("BACKTEST_NON_MONOTONIC_SOURCE")
-    sequences[code] = item.tick.accepted_sequence
-  for at, grouped in groupby(ordered, key=lambda event: event.decision_time):
+
+  def validated():
+    last_key = None
+    sources = {}
+    for item in ordered:
+      if last_key is not None and item.key < last_key:
+        raise ValueError("BACKTEST_NON_MONOTONIC_TIMELINE")
+      last_key = item.key
+      identity = (
+        item.tick.stream_id,
+        item.market.instrument_code,
+        item.source_identity,
+      )
+      code = item.market.instrument_code
+      source_key = (item.tick.sample.source_time_ms, item.tick.sample.tick_ordinal)
+      if (not presorted and identity in seen) or sources.get(code) == source_key:
+        raise ValueError("BACKTEST_DUPLICATE_SOURCE")
+      if not presorted:
+        seen.add(identity)
+      if item.tick.accepted_sequence <= sequences.get(
+        code, 0
+      ) or source_key < sources.get(code, (-1, -1)):
+        raise ValueError("BACKTEST_NON_MONOTONIC_SOURCE")
+      sources[code] = source_key
+      sequences[code] = item.tick.accepted_sequence
+      yield item
+
+  for at, grouped in groupby(validated(), key=lambda event: event.decision_time):
     yield at, tuple(grouped)

@@ -11161,22 +11161,9 @@ class StrategyExecutor:
 
   @staticmethod
   def _classify_market_data_session(value: datetime) -> MarketDataSession:
-    """Classify source time once in Engine; strategies never consult a clock."""
+    from quantx_domain.trading.market_session import classify_market_data_session
 
-    current = value.time()
-    if current < time(9, 15):
-      return MarketDataSession.PRE_OPEN
-    if current < time(9, 30):
-      return MarketDataSession.OPENING_AUCTION
-    if current <= time(11, 30):
-      return MarketDataSession.CONTINUOUS_AM
-    if current < time(13, 0):
-      return MarketDataSession.LUNCH_BREAK
-    if current < time(14, 57):
-      return MarketDataSession.CONTINUOUS_PM
-    if current <= time(15, 0):
-      return MarketDataSession.CLOSING_AUCTION
-    return MarketDataSession.CLOSED
+    return classify_market_data_session(value)
 
   @staticmethod
   def _coerce_bool(value: Any) -> bool:

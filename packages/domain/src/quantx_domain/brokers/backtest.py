@@ -4,6 +4,7 @@
 
 import logging
 from datetime import date, datetime
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from math import isfinite
 from typing import Any, Dict, List, Optional
 
@@ -42,12 +43,18 @@ class BacktestBroker(BrokerBase):
     strict_book_depth: bool = False,
     no_queue_credit: bool = False,
     defer_new_orders_until_next_quote: bool = False,
+    strict_book_slippage_rate: float = 0.0,
   ):
     super().__init__(account_id, initial_capital)
 
     # 回测参数
     self.commission_rate = commission_rate
     self.slippage_rate = slippage_rate
+    if (
+      not isfinite(strict_book_slippage_rate) or not 0 <= strict_book_slippage_rate < 1
+    ):
+      raise ValueError("strict book slippage must be finite and within [0, 1)")
+    self.strict_book_slippage_rate = strict_book_slippage_rate
     self.min_commission = min_commission
     self.stamp_tax_rate = stamp_tax_rate
     self.transfer_fee_rate = transfer_fee_rate
@@ -430,7 +437,10 @@ class BacktestBroker(BrokerBase):
         continue
       remaining = max(0, int(request.volume) - int(order.filled_volume or 0))
       amount = remaining * max(0.0, float(request.price or 0.0))
-      reserved += amount + self._calculate_costs(amount, request.order_type)["total"]
+      cumulative_fee = self._calculate_costs(
+        order.filled_amount + amount, request.order_type
+      )["total"]
+      reserved += amount + max(0.0, cumulative_fee - order.commission)
     return reserved
 
   def _reserved_pending_sell_volume(self, instrument_code: str) -> int:
@@ -839,6 +849,19 @@ class BacktestBroker(BrokerBase):
       available = max(0, int(level[1] or 0))
       if level_price <= 0 or available <= 0:
         continue
+      if self.strict_book_slippage_rate:
+        tick = Decimal(str(market_data.price_tick))
+        if tick <= 0:
+          raise ValueError("strict book slippage requires a positive price tick")
+        multiplier = Decimal(1) + Decimal(str(self.strict_book_slippage_rate)) * (
+          1 if is_buy else -1
+        )
+        level_price = float(
+          (Decimal(str(level_price)) * multiplier / tick).to_integral_value(
+            rounding=ROUND_CEILING if is_buy else ROUND_FLOOR
+          )
+          * tick
+        )
       if request.price_type == PriceType.MARKET:
         executable = True
       elif is_buy:
