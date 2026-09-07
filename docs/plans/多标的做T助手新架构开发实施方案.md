@@ -718,6 +718,13 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   新 reference/日内估值纯计算已有 **16 项定向测试通过**，reader 尚在实现，未据此验收。
   最终 ranked dispatcher / 最新 Gate / runtime PAPER route / 多标的重放 / GraphQL-Web
   仍未完成；P4 保持 IN_PROGRESS。
+- 公共容量批次已提交 `4bf6638ad5fd70f1c07420bf47750a94d50e83dc`。新增最终账本排名门
+  在 execution/account 锁内验证同 admission 连续 rank、当前 intent 绑定和前置实际委托；
+  前置只有 ROUTED/FILLED 等投影状态而无订单不能放行，仅明确拒绝/过期/取消可跳过。
+  历史 event/order 幂等仍先于新授权检查。主代理新排名/账本/公共回报复验 **41 passed**
+  （9.65 秒，88084 exit=0）；真实 PG 两连接故意令低优先级先取得 execution 锁，仍被排名门
+  拒绝，随后高优先级受理、刷新账户水位后低优先级才可受理：**1 passed**（27.32 秒，
+  24029 exit=0）。相关 Ruff 与最终审核通过，批准排名门组件提交，未称 dispatcher 完成。
 
 ## 11. 变更记录
 

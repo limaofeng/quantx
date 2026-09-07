@@ -684,6 +684,7 @@ class PaperExecutionLedger:
       )
       if not cap.is_finite() or cap != decision.allocated_amount_cap or gross > cap:
         raise ValueError("PAPER_ALLOCATION_CAP_CONFLICT")
+      await self._admission_predecessors(account, intent, admission, item)
     else:
       if draft.metadata.get("allocated_amount_cap") is not None:
         raise ValueError("PAPER_EXIT_ALLOCATION_CAP_FORBIDDEN")
@@ -701,6 +702,93 @@ class PaperExecutionLedger:
       ):
         raise ValueError("PAPER_EXIT_OWNER_CONFLICT")
     return intent
+
+  async def _admission_predecessors(self, account, intent, admission, current_item):
+    """Final rank barrier under the caller's execution/account locks.
+
+    Admission items are immutable. Read their current intents afresh; the
+    execution lock serializes PAPER order acceptance and receipt convergence.
+    A projected status alone never proves that an earlier BUY was accepted.
+    """
+    rank = current_item.admission_rank
+    if type(rank) is not int or rank < 1:
+      raise ValueError("PAPER_ADMISSION_PREDECESSOR_SCOPE_CONFLICT")
+    items = list(
+      (
+        await self.db.scalars(
+          select(AccountRiskIncreaseAdmissionItem)
+          .where(
+            AccountRiskIncreaseAdmissionItem.admission_batch_id
+            == admission.admission_batch_id,
+            AccountRiskIncreaseAdmissionItem.admission_rank <= rank,
+          )
+          .order_by(AccountRiskIncreaseAdmissionItem.admission_rank)
+          .execution_options(populate_existing=True)
+        )
+      ).all()
+    )
+    if (
+      [item.admission_rank for item in items] != list(range(1, rank + 1))
+      or len({item.intent_id for item in items}) != len(items)
+      or items[-1].intent_id != intent.id
+    ):
+      raise ValueError("PAPER_ADMISSION_PREDECESSOR_SCOPE_CONFLICT")
+    ids = [item.intent_id for item in items]
+    predecessors = {
+      row.id: row
+      for row in (
+        await self.db.scalars(
+          select(TradeIntentRecord)
+          .where(TradeIntentRecord.id.in_(ids))
+          .execution_options(populate_existing=True)
+        )
+      ).all()
+    }
+    orders = list(
+      (
+        await self.db.scalars(
+          select(PaperExecutionOrderRecord)
+          .where(
+            PaperExecutionOrderRecord.intent_id.in_(ids[:-1]),
+          )
+          .execution_options(populate_existing=True)
+        )
+      ).all()
+    )
+    for item in items:
+      row = predecessors.get(item.intent_id)
+      if (
+        row is None
+        or item.owner_type != "T_ASSISTANT_EXECUTION"
+        or item.owner_id != account.execution_id
+        or row.owner_type != item.owner_type
+        or row.owner_id != item.owner_id
+        or row.environment != "PAPER"
+        or row.account_id != account.account_id
+        or row.direction != "BUY"
+        or row.admission_batch_id != admission.admission_batch_id
+        or row.admission_rank != item.admission_rank
+        or row.admission_policy_version != admission.policy_version
+        or row.admission_input_fingerprint != admission.input_fingerprint
+      ):
+        raise ValueError("PAPER_ADMISSION_PREDECESSOR_SCOPE_CONFLICT")
+      if row.id == intent.id:
+        continue
+      accepted = [order for order in orders if order.intent_id == row.id]
+      if any(
+        order.execution_id != account.execution_id
+        or order.environment != "PAPER"
+        or order.owner_type != row.owner_type
+        or order.owner_id != row.owner_id
+        or order.side != "BUY"
+        or order.instrument_code != row.instrument_code
+        or order.admission_batch_id != admission.admission_batch_id
+        or order.status not in {status.value for status in OrderStatus}
+        for order in accepted
+      ):
+        raise ValueError("PAPER_ADMISSION_PREDECESSOR_SCOPE_CONFLICT")
+      if not accepted and row.status not in {"REJECTED", "EXPIRED", "CANCELLED"}:
+        raise ValueError("PAPER_ADMISSION_PREDECESSOR_PENDING")
 
   @staticmethod
   def _conserve(ledger, positions):

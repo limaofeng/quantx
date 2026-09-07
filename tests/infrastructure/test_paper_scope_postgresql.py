@@ -1,5 +1,6 @@
 """Real PAPER schema, public admission and ledger-chain isolation checks."""
 
+import asyncio
 from dataclasses import replace
 from datetime import timedelta
 
@@ -42,6 +43,11 @@ from tests.infrastructure.test_p4_allocation_postgresql import (
 from tests.infrastructure.test_paper_account_capacity import (
   test_partial_buy_cancel_cash_and_single_public_protection as verify_paper_capacity,
 )
+from tests.infrastructure.test_paper_admission_rank_gate import (
+  arguments as rank_arguments,
+)
+from tests.infrastructure.test_paper_admission_rank_gate import seed_ranked
+from tests.infrastructure.test_paper_admission_rank_gate import sink as rank_sink
 from tests.infrastructure.test_paper_broker_matching import quote
 from tests.infrastructure.test_paper_execution_ledger import (
   test_partial_fill_restart_history_idempotency_and_bucket_conservation as verify_ledger_restart,
@@ -58,6 +64,42 @@ from tests.infrastructure.test_paper_receipt_convergence import (
 from tests.infrastructure.test_t_allocation_repository import _seed
 
 pytestmark = migration_gate_marker
+
+
+@pytest.mark.asyncio
+async def test_actual_paper_rank_barrier_across_connections():
+  from quantx_infrastructure.services.paper_execution_ledger import PaperExecutionLedger
+
+  async with _sessions(head="20260907_0053") as sessions:
+    scope, lower, higher = await seed_ranked(sessions)
+    async with sessions() as db:
+      low_args = await rank_arguments(db, scope, lower)
+      high_args = await rank_arguments(db, scope, higher)
+    locked = asyncio.Event()
+
+    async def higher_first():
+      async with sessions() as db, db.begin():
+        await db.get(TAssistantExecutionRecord, scope, with_for_update=True)
+        locked.set()
+        with pytest.raises(ValueError, match="PAPER_ADMISSION_PREDECESSOR_PENDING"):
+          await PaperExecutionLedger(db, receipt_sink=rank_sink).place_order(
+            **high_args
+          )
+
+    async def lower_second():
+      await locked.wait()
+      async with sessions() as db, db.begin():
+        await PaperExecutionLedger(db, receipt_sink=rank_sink).place_order(**low_args)
+
+    await asyncio.wait_for(asyncio.gather(higher_first(), lower_second()), timeout=20)
+    async with sessions() as db, db.begin():
+      ledger = PaperExecutionLedger(db, receipt_sink=rank_sink)
+      assert (await ledger.get_snapshot(execution_id=scope))["revision"] == 1
+      assert await db.get(PaperExecutionOrderRecord, high_args["order_id"]) is None
+      with pytest.raises(ValueError, match="PAPER_ACCOUNT_REVISION_CONFLICT"):
+        await ledger.place_order(**high_args)
+      await ledger.place_order(**await rank_arguments(db, scope, higher))
+      assert (await ledger.get_snapshot(execution_id=scope))["revision"] == 2
 
 
 @pytest.mark.asyncio
