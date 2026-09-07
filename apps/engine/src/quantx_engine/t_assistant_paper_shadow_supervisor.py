@@ -1,11 +1,12 @@
-"""Engine supervisor for the isolated P3 T-assistant PAPER shadow."""
+"""Engine supervisor for independent PAPER decisions and execution."""
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from typing import Any, Callable, Mapping, Optional
 
@@ -15,10 +16,14 @@ from quantx_application.t_trade_v3.execution_use_cases import (
 from quantx_contracts import ExecutionOwnerType
 from quantx_domain.clock import SHANGHAI
 from quantx_domain.strategies.base import MarketDataSession
+from quantx_domain.trading.market_rules import MarketDataSnapshot
 from quantx_domain.trading.t_assistant_execution import (
   TAssistantConfigVersion,
   TAssistantEntryAuthorization,
+  TAssistantEntryReadiness,
+  TAssistantEntryReadinessProjection,
   TAssistantExecution,
+  TAssistantExecutionEvent,
   TAssistantExecutionStatus,
   TAssistantRolloutStage,
   TAssistantScorerMode,
@@ -42,9 +47,15 @@ from quantx_infrastructure.core.data.whole_quote_hub import (
 )
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import AsyncSessionLocal
+from quantx_infrastructure.models.t_assistant_execution import (
+  TAssistantExecutionEventRecord,
+)
 from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
   TTradeOpportunityEvaluation,
+)
+from quantx_infrastructure.repositories.t_allocation_repository import (
+  TAllocationConflict,
 )
 from quantx_infrastructure.repositories.t_assistant_config_repository import (
   TAssistantConfigRepository,
@@ -69,10 +80,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .instrument_universe_provider import InstrumentUniverseSnapshot
+from .paper_market_runtime import PaperMarketRuntime, accepted_paper_market
+from .t_assistant_candidate_controls import read_candidate_controls
 from .t_assistant_decision_runtime import (
   TAssistantPaperShadowRuntime,
   TAssistantShadowCycleResult,
 )
+from .t_assistant_paper_drain import drain_paper_entry_work
+from .t_assistant_paper_entry_runtime import (
+  PaperEntryDispatchResult,
+  PaperEntryMarketWitness,
+  TAssistantPaperEntryRuntime,
+)
+from .t_assistant_paper_seed import paper_policy_blockers, prepare_paper_seed
 from .t_trade_decision_snapshot import (
   TDecisionSnapshotBuilder,
   TDecisionSnapshotBuildError,
@@ -81,6 +101,16 @@ from .t_trade_decision_snapshot import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RETRYABLE_ENTRY_INPUT_REASONS = frozenset({
+  "T_VALUATION_MARK_STALE", "T_VALUATION_OPENING_MARK_REQUIRED",
+  "T_VALUATION_CURRENT_MARK_REQUIRED", "PAPER_PORTFOLIO_CURRENT_MARK_REQUIRED",
+  "T_PORTFOLIO_TRADING_DAY_UNAVAILABLE", "T_PORTFOLIO_PREVIOUS_TRADING_DAY_UNAVAILABLE",
+  "T_ALLOCATION_LEASE_CONFLICT", "T_ALLOCATION_LEASE_EXPIRED",
+  "RISK_ADMISSION_LEASE_HELD", "RISK_ADMISSION_LEASE_EXPIRED",
+  "RISK_ADMISSION_TTL_EXPIRED", "RISK_ADMISSION_INPUT_CHANGED",
+  "RISK_ADMISSION_ACCOUNT_SNAPSHOT_CHANGED",
+})
 
 
 @dataclass
@@ -93,14 +123,11 @@ class _PaperShadowBinding:
   parameters: Mapping[str, Any]
   accepted_sequences: dict[str, int]
   continuity_generations: dict[str, str]
+  market_books: dict[str, tuple[AcceptedTMarketTick, int, MarketDataSnapshot]] = field(default_factory=dict)
 
 
 class TAssistantPaperShadowSupervisor:
-  """Own the CRITICAL market consumer and independent PAPER executions.
-
-  There is deliberately no StrategyManager, TradeCommandService, approval,
-  PendingTradeOrder, or outbox dependency in this object graph.
-  """
+  """Own accepted market data, source decisions and isolated PAPER execution."""
 
   def __init__(
     self,
@@ -117,11 +144,14 @@ class TAssistantPaperShadowSupervisor:
     self._quote_hub = quote_hub
     self._session_factory = session_factory
     self._clock = clock
+    self._paper_market = PaperMarketRuntime(session_factory=session_factory, clock=clock)
+    self._entry_runtime = TAssistantPaperEntryRuntime(session_factory=session_factory, clock=clock)
     self._runtime = runtime or TAssistantPaperShadowRuntime(
       session_factory=session_factory,
       clock=clock,
     )
     self._subscription_handle: Optional[str] = None
+    self._entry_recovery_task: Optional[asyncio.Task] = None
     self._bindings: dict[str, _PaperShadowBinding] = {}
     self._account_execution_ids: dict[str, str] = {}
     self._last_results: dict[str, TAssistantShadowCycleResult] = {}
@@ -152,9 +182,19 @@ class TAssistantPaperShadowSupervisor:
       self._on_quote_batch,
       delivery=QuoteDeliveryMode.CRITICAL,
     )
+    self._entry_recovery_task = asyncio.create_task(
+      self._recover_entries(), name="TAssistantPaperEntryRecovery",
+    )
     logger.info("T-assistant PAPER shadow CRITICAL consumer started")
 
   async def stop(self) -> None:
+    if self._entry_recovery_task is not None:
+      self._entry_recovery_task.cancel()
+      try:
+        await self._entry_recovery_task
+      except asyncio.CancelledError:
+        pass
+      self._entry_recovery_task = None
     handle = self._subscription_handle
     self._subscription_handle = None
     if handle is not None:
@@ -162,6 +202,21 @@ class TAssistantPaperShadowSupervisor:
     self._bindings.clear()
     self._account_execution_ids.clear()
     logger.info("T-assistant PAPER shadow consumer stopped")
+
+  async def _recover_entries(self):
+    while True:
+      await asyncio.sleep(1.0)
+      try:
+        await self._recover_entries_once()
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        logger.exception("PAPER entry recovery failed; durable intents remain recoverable")
+
+  async def _recover_entries_once(self):
+    async with self._lifecycle_lock:
+      for binding in tuple(self._bindings.values()):
+        await self._dispatch_entries(binding)
 
   async def reconcile(
     self,
@@ -251,6 +306,13 @@ class TAssistantPaperShadowSupervisor:
         execution = await execution_repository.get_domain(execution_record.execution_id)
         if execution is None:
           raise RuntimeError("T_ASSISTANT_EXECUTION_NOT_FOUND")
+        execution = await self._prepare_entry_readiness(
+          db, execution=execution, payload=version.canonical_payload,
+          required_codes=universe.instruments, now=now,
+          book_codes=set(self._bindings[execution.execution_id].market_books)
+          if execution.execution_id in self._bindings else set(),
+          market_ready=self._quote_hub.is_ready,
+        )
         target_universe_revision = max(
           int(execution.universe_revision),
           int(config.universe_revision or 0),
@@ -314,6 +376,7 @@ class TAssistantPaperShadowSupervisor:
     )
     previous = self._bindings.get(execution.execution_id)
     builder = previous.builder if previous is not None else TDecisionSnapshotBuilder()
+    changed_codes: set[str] = set()
     if previous is None:
       builder.seed_restored_states(states)
       needs_rewarm = set(universe.instruments)
@@ -374,6 +437,10 @@ class TAssistantPaperShadowSupervisor:
         )
         for code in universe.instruments
       },
+      market_books={
+        code: value for code, value in (previous.market_books.items() if previous else ())
+        if code in universe.instruments and code not in changed_codes
+      },
     )
     self._account_execution_ids[config.account_id] = execution.execution_id
     return execution.execution_id
@@ -383,8 +450,17 @@ class TAssistantPaperShadowSupervisor:
       await self._on_quote_batch_locked(data)
 
   async def _on_quote_batch_locked(self, data: dict[str, dict[str, Any]]) -> None:
-    if not data or not self._bindings:
+    if not data:
       return
+    now = self._now()
+    await self._paper_market.on_quote_batch(
+      data,
+      active_instruments={
+        identity: {item.instrument_code for item in binding.universe}
+        for identity, binding in self._bindings.items()
+      },
+      now=now,
+    )
     now = self._now()
     capture_time_ms = int(now.timestamp() * 1000)
     for binding in tuple(self._bindings.values()):
@@ -439,11 +515,25 @@ class TAssistantPaperShadowSupervisor:
         binding.accepted_sequences[code] = next_sequence
         binding.continuity_generations[code] = generation
         binding.needs_rewarm.discard(code)
+        try:
+          _, book = accepted_paper_market(code, raw, now=now)
+        except ValueError:
+          binding.market_books.pop(code, None)
+        else:
+          current = binding.builder.entry_market_witness(code)
+          binding.market_books[code] = (tick, current[1], book)
         accepted_any = True
       if not accepted_any:
         continue
       capture = self._capture(now)
       gate_context = _market_gate_context(now)
+      async with self._session_factory() as db:
+        controls = await read_candidate_controls(
+          db, execution_id=binding.execution.execution_id,
+          account_id=binding.execution.account_id,
+          symbol_states=self._runtime.symbol_states(binding.execution.execution_id),
+          as_of=now,
+        )
       try:
         snapshot = binding.builder.build(
           execution=binding.execution,
@@ -453,6 +543,7 @@ class TAssistantPaperShadowSupervisor:
           decision_time=now,
           trade_date=now.date().isoformat(),
           market_gate_context=gate_context,
+          candidate_controls=controls,
           market_context={
             "session": gate_context.session_code,
             "paper_shadow_only": True,
@@ -476,6 +567,52 @@ class TAssistantPaperShadowSupervisor:
         capture=capture,
         gate_context=gate_context,
       )
+      await self._dispatch_entries(binding)
+
+  async def _dispatch_entries(self, binding):
+    async def witness(code):
+      if not self._quote_hub.is_ready:
+        return None
+      current = binding.builder.entry_market_witness(code)
+      stored = binding.market_books.get(code)
+      if current is None or stored is None:
+        return None
+      tick, ring_generation, last_sequence = current
+      latest = self._quote_hub.latest(code)
+      if (
+        stored[0] != tick or stored[1] != ring_generation or latest is None
+        or latest.get("market_stream_id") != tick.stream_id
+        or str(latest.get("continuity_generation")) != tick.sample.continuity_generation
+        or latest.get("source_time_ms") != tick.sample.source_time_ms
+        or latest.get("tick_ordinal") != tick.sample.tick_ordinal
+        or latest.get("market_stream_sequence") != tick.market_fence_sequence
+      ):
+        return None
+      return PaperEntryMarketWitness(tick, ring_generation, last_sequence, copy.deepcopy(stored[2]))
+
+    try:
+      return await self._entry_runtime.dispatch(
+        execution_id=binding.execution.execution_id, market_witness_provider=witness,
+      )
+    except (ValueError, TAllocationConflict) as exc:
+      reason = str(exc)
+      if reason not in _RETRYABLE_ENTRY_INPUT_REASONS:
+        raise
+      # A missing valuation mark or another valid lease blocks this PAPER lane,
+      # not delivery of accepted market data to all CRITICAL consumers.
+      async with self._session_factory() as db, db.begin():
+        key = f"paper-entry-input-blocked:{reason}"
+        existing = await db.scalar(select(TAssistantExecutionEventRecord).where(
+          TAssistantExecutionEventRecord.execution_id == binding.execution.execution_id,
+          TAssistantExecutionEventRecord.event_key == key,
+        ))
+        if existing is None:
+          await TAssistantExecutionRepository(db).append_event(TAssistantExecutionEvent(
+            execution_id=binding.execution.execution_id, event_key=key,
+            event_type="PAPER_ENTRY_INPUT_BLOCKED", occurred_at=self._now(),
+            payload={"reason_codes": [reason]},
+          ))
+      return PaperEntryDispatchResult("BLOCKED", (reason,))
 
   async def _activate_if_warm(
     self,
@@ -499,6 +636,19 @@ class TAssistantPaperShadowSupervisor:
         repository = TAssistantExecutionRepository(db)
         current = await repository.get_domain(binding.execution.execution_id)
         if current is None or current.status is not TAssistantExecutionStatus.WARMING:
+          return
+        version = self._config_version(await db.get(TTradeGlobalConfig, current.config_id))
+        if version.config_version_id != current.config_version_id:
+          return
+        current = await self._prepare_entry_readiness(
+          db, execution=current, payload=version.canonical_payload,
+          required_codes=eligible, now=now,
+          book_codes=set(binding.market_books), market_ready=capture.ready,
+        )
+        if current.readiness.reasons != ("T_ASSISTANT_MARKET_WARMING",):
+          binding.execution = current
+          return
+        if not capture.ready or any(code not in binding.market_books for code in eligible):
           return
         activated = await TAssistantExecutionLifecycle(repository).activate_ready(
           current,
@@ -533,6 +683,38 @@ class TAssistantPaperShadowSupervisor:
       legacy_results=await self._load_legacy_results(binding, replay),
     )
     self._last_results[activated.execution_id] = result
+
+  @staticmethod
+  async def _prepare_entry_readiness(
+    db, *, execution, payload, required_codes, now, book_codes, market_ready,
+  ):
+    blockers = await prepare_paper_seed(
+      db, execution=execution, config_payload=payload, now=now,
+    )
+    blockers += paper_policy_blockers(payload, now=now, required_codes=required_codes)
+    if not set(required_codes) <= book_codes:
+      blockers += ("PAPER_COMPLETE_BOOK_REQUIRED",)
+    if not market_ready:
+      blockers += ("T_MARKET_STREAM_NOT_READY",)
+    if execution.status is not TAssistantExecutionStatus.WARMING:
+      return execution
+    readiness = TAssistantEntryReadiness.WARMING
+    reasons = blockers or ("T_ASSISTANT_MARKET_WARMING",)
+    if execution.readiness.readiness is readiness and execution.readiness.reasons == reasons:
+      return execution
+    updated = execution.with_readiness(TAssistantEntryReadinessProjection(
+      readiness=readiness, reasons=reasons, as_of=now,
+    ))
+    await TAssistantExecutionRepository(db).save_transition_with_event(
+      updated, expected_state_version=execution.state_version,
+      event=TAssistantExecutionEvent(
+        execution_id=execution.execution_id,
+        event_key=f"paper-entry-readiness:{updated.state_version}",
+        event_type="PAPER_ENTRY_READINESS_CHANGED", occurred_at=now,
+        payload={"readiness": readiness.value, "reason_codes": list(reasons)},
+      ),
+    )
+    return updated
 
   async def _load_legacy_results(
     self,
@@ -686,10 +868,22 @@ class TAssistantPaperShadowSupervisor:
         current,
         target=TAssistantExecutionStatus.DRAINING,
         at=now,
-        has_unsettled_buy_work=False,
+        has_unsettled_buy_work=True,
         event_type="EXECUTION_DRAINING",
         payload={"paper_shadow_only": True, "reason": reason},
       )
+    drained = await drain_paper_entry_work(
+      repository.db, execution_id=execution.execution_id, now=now, reason=reason,
+    )
+    if drained.has_unsettled_buy_work:
+      await lifecycle.transition(
+        current, target=TAssistantExecutionStatus.RECONCILE_REQUIRED, at=now,
+        has_unsettled_buy_work=True, event_type="EXECUTION_RECONCILE_REQUIRED",
+        payload={"reason": reason, "source_buy_work_unsettled": True,
+          "intent_ids": list(drained.unsettled_intent_ids),
+          "order_ids": list(drained.unsettled_order_ids)},
+      )
+      return
     await lifecycle.transition(
       current,
       target=TAssistantExecutionStatus.STOPPED,
@@ -761,7 +955,7 @@ class TAssistantPaperShadowSupervisor:
       "account_id": config.account_id,
       "global_monitor_id": config.id,
       "global_config_version": int(config.config_version or 1),
-      # P3 evaluates proposals only; this does not grant an order capability.
+      # The independent execution owns the isolated PAPER order capability.
       "mode": "paper",
     }
 
@@ -815,6 +1009,7 @@ class TAssistantPaperShadowSupervisor:
         settings.get("entry_execution_gate_policy")
       ),
       "exit_plan_template_policy": _mapping(settings.get("exit_plan_template_policy")),
+      "paper_seed": settings.get("paper_seed"),
       "legacy_settings_snapshot": settings,
     }
     version_number = max(1, int(config.config_version or 1))

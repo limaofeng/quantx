@@ -73,6 +73,10 @@ from quantx_infrastructure.models.entry_plan_authorization import (
   EntryPlanAuthorizationGrant,
 )
 from quantx_infrastructure.models.order import Order
+from quantx_infrastructure.models.paper_execution import (
+  PaperExecutionAccountRecord,
+  PaperExecutionOrderRecord,
+)
 from quantx_infrastructure.models.risk_increase_admission import (
   AccountRiskIncreaseAdmissionBatch,
   AccountRiskIncreaseAdmissionItem,
@@ -179,6 +183,8 @@ async def sessions():
     TTradeGlobalConfig.__table__,
     TAssistantConfigVersionRecord.__table__,
     TAssistantExecutionRecord.__table__,
+    PaperExecutionAccountRecord.__table__,
+    PaperExecutionOrderRecord.__table__,
     TAssistantExecutionEventRecord.__table__,
     TAssistantSymbolStateRecord.__table__,
     TAssistantDecisionCycleRecord.__table__,
@@ -519,6 +525,8 @@ async def test_supervisor_is_restart_idempotent_and_writes_no_order_chain(
     assert await db.scalar(select(func.count(TradeCommandOutbox.message_id))) == 0
     execution = await db.scalar(select(TAssistantExecutionRecord))
     assert execution.environment == "PAPER"
+    assert execution.entry_readiness == "WARMING"
+    assert "PAPER_SEED_REQUIRED" in execution.entry_readiness_reasons
     assert execution.config_snapshot_hash != stable_manifest_hash(
       {"signal_policy": policy.to_dict()}
     )

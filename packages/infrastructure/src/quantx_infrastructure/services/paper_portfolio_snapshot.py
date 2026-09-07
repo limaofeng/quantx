@@ -642,9 +642,22 @@ class PaperPortfolioSnapshotReader:
         total_assets += position["long_volume"] * current_marks[code].price
 
     def evidence(row):
+      # Admission assigns execution credentials, not new economic obligations.
+      # Including these would invalidate the very snapshot that prepared them.
+      credential_fields = (
+        {
+          "admission_batch_id",
+          "admission_rank",
+          "admission_policy_version",
+          "admission_input_fingerprint",
+        }
+        if isinstance(row, TradeIntentRecord)
+        else set()
+      )
       return {
         attribute.key: getattr(row, attribute.key)
         for attribute in row.__mapper__.column_attrs
+        if attribute.key not in credential_fields
       }
 
     refreshed_heads = await rows(

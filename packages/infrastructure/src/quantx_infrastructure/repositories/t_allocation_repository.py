@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from quantx_application.t_trade_v3.portfolio_allocation import (
@@ -20,20 +20,31 @@ from quantx_application.t_trade_v3.portfolio_allocation import (
 )
 from quantx_application.t_trade_v3.portfolio_snapshot import PortfolioTDecisionSnapshot
 from quantx_contracts import ExecutionEnvironment
-from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+from quantx_domain.trading.t_assistant_execution import (
+  TAssistantExecutionEvent,
+  stable_manifest_hash,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from quantx_infrastructure.models.paper_execution import PaperExecutionOrderRecord
 from quantx_infrastructure.models.t_allocation import (
   TAllocationBatchRecord,
   TAllocationDecisionRecord,
 )
 from quantx_infrastructure.models.t_assistant_execution import (
+  TAssistantDecisionCycleRecord,
   TAssistantExecutionRecord,
+)
+from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
+  TTradeOpportunityEvaluation,
 )
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.t_assistant_decision_cycle_repository import (
   TAssistantDecisionCycleRepository,
+)
+from quantx_infrastructure.repositories.t_assistant_execution_repository import (
+  TAssistantExecutionRepository,
 )
 from quantx_infrastructure.services.t_allocation_serialization import (
   allocation_evidence,
@@ -70,6 +81,145 @@ def _manifest_hash(manifest):
 class TAllocationRepository:
   def __init__(self, db: AsyncSession) -> None:
     self.db = db
+
+  async def expire_pending_intents(
+    self, *, execution_id: str, now: datetime
+  ) -> tuple[str, ...]:
+    """Terminalize original producer TTL without manufacturing an allocation cut.
+
+    Flush-only under the public execution lock; caller commits audit and status
+    together. Existing allocation decisions/attempts remain immutable history.
+    """
+    now = allocation_time(now)
+    execution = await self.db.get(
+      TAssistantExecutionRecord,
+      execution_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+    if execution is None or execution.environment != "PAPER":
+      raise ValueError("T_ALLOCATION_EXPIRY_SCOPE_INVALID")
+    intents = list(
+      (
+        await self.db.scalars(
+          select(TradeIntentRecord)
+          .where(
+            TradeIntentRecord.owner_type == "T_ASSISTANT_EXECUTION",
+            TradeIntentRecord.owner_id == execution_id,
+            TradeIntentRecord.environment == "PAPER",
+            TradeIntentRecord.direction == "BUY",
+            TradeIntentRecord.status == "ALLOCATION_PENDING",
+          )
+          .order_by(TradeIntentRecord.id)
+          .with_for_update()
+          .execution_options(populate_existing=True)
+        )
+      ).all()
+    )
+    expired = []
+    for intent in intents:
+      if intent.account_id != execution.account_id or not intent.allocation_cycle_id:
+        raise ValueError("T_ALLOCATION_EXPIRY_SCOPE_INVALID")
+      metadata = intent.intent_metadata
+      try:
+        created = datetime.fromisoformat(metadata["intent_created_at"])
+        source_ms, ttl_ms = metadata["source_time_ms"], metadata["approval_ttl_ms"]
+        if (
+          created.tzinfo is None
+          or type(source_ms) is not int
+          or source_ms < 0
+          or type(ttl_ms) is not int
+          or ttl_ms <= 0
+        ):
+          raise ValueError("invalid producer clock")
+        deadline = min(
+          created.astimezone(UTC), datetime.fromtimestamp(source_ms / 1000, UTC)
+        ) + timedelta(milliseconds=ttl_ms)
+      except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("T_ALLOCATION_INTENT_TTL_INVALID") from exc
+      cycle = await self.db.get(
+        TAssistantDecisionCycleRecord,
+        intent.allocation_cycle_id,
+        populate_existing=True,
+      )
+      if (
+        cycle is None
+        or cycle.execution_id != execution_id
+        or stable_manifest_hash(cycle.output_manifest) != cycle.output_manifest_hash
+      ):
+        raise ValueError("T_ALLOCATION_EXPIRY_SOURCE_INVALID")
+      references = [
+        item
+        for item in cycle.output_manifest["accepted_intents"]
+        if item["intent_id"] == intent.id
+      ]
+      if len(references) != 1:
+        raise ValueError("T_ALLOCATION_EXPIRY_SOURCE_INVALID")
+      reference = references[0]
+      evidence = await self.db.scalar(
+        select(TTradeOpportunityEvaluation).where(
+          TTradeOpportunityEvaluation.event_key == reference["candidate_evidence_key"]
+        )
+      )
+      if (
+        evidence is None
+        or evidence.owner_type != "T_ASSISTANT_EXECUTION"
+        or evidence.owner_id != execution_id
+        or evidence.account_id != execution.account_id
+        or evidence.environment != "PAPER"
+        or evidence.instrument_code != intent.instrument_code
+        or stable_manifest_hash(evidence.payload["candidate_evidence"])
+        != reference["candidate_evidence_hash"]
+      ):
+        raise ValueError("T_ALLOCATION_EXPIRY_SOURCE_INVALID")
+      raw = evidence.payload["candidate_evidence"]["evaluation"]
+      candidate_expiry = raw["candidate_expires_at_ms"]
+      if (
+        type(candidate_expiry) is not int
+        or candidate_expiry < 0
+        or raw["candidate_id"] != metadata["candidate_id"]
+        or raw["candidate_fingerprint"] != metadata["candidate_fingerprint"]
+        or raw["source_time_ms"] != source_ms
+      ):
+        raise ValueError("T_ALLOCATION_EXPIRY_SOURCE_INVALID")
+      deadline = min(deadline, datetime.fromtimestamp(candidate_expiry / 1000, UTC))
+      if now < deadline:
+        continue
+      if now < allocation_time(intent.updated_at) or now < created:
+        raise ValueError("T_ALLOCATION_TERMINAL_TIME_INVALID")
+      if (
+        await self.db.scalar(
+          select(PaperExecutionOrderRecord.order_id)
+          .where(PaperExecutionOrderRecord.intent_id == intent.id)
+          .limit(1)
+        )
+        is not None
+      ):
+        raise ValueError("T_ALLOCATION_EXPIRY_ORDER_EXISTS")
+      intent.status = "EXPIRED"
+      intent.updated_at = now.replace(tzinfo=None)
+      await self.db.flush()
+      await TAssistantExecutionRepository(self.db).append_event(
+        TAssistantExecutionEvent(
+          execution_id,
+          f"intent-expired:{intent.id}",
+          "PAPER_ENTRY_REVIEWED",
+          now,
+          {
+            "intent_id": intent.id,
+            "candidate_id": metadata["candidate_id"],
+            "candidate_fingerprint": metadata["candidate_fingerprint"],
+            "instrument_code": intent.instrument_code,
+            "outcome": "REJECT",
+            "reason_codes": ["PAPER_INTENT_EXPIRED"],
+            "follow_up": "TERMINALIZE_INTENT",
+            "deadline": deadline.isoformat(),
+            "allocation_decision_id": intent.allocation_decision_id,
+          },
+        )
+      )
+      expired.append(intent.id)
+    return tuple(expired)
 
   async def get(self, allocation_batch_id: str) -> TAllocationBatchRecord | None:
     return await self.db.scalar(

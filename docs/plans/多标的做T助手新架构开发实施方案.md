@@ -159,7 +159,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P1 | Owner 与协议 1.2 | `DONE` | P0；P1-01..06 均已完成；PAPER legacy 义务已受控收敛；停服、停服态备份、迁移、标准 full/live 恢复、全量快照对账和隔离恢复演练已通过 | 单一 `ExecutionOwnerRef`、单一 protocol 1.2 payload、既有路径等价；未知/冲突 owner 与结果未知均 fail-closed；无双协议 | [P0 冻结基线](多标的做T助手P0冻结基线.md)；P1-01 `52 passed`；P1-03 `38 passed`；reconciliation `34 passed`；cutover preflight `20 passed`；0046/0047 schema gate 通过；owner 空值 `0`、8 个身份不可变触发器通过；最新 1.2 快照 `PROCESSED`、旧失败快照 `SUPERSEDED`；标准 full/live 冷启动 exit=`0`，`liveTrading=ENABLED`，QMT/marketData/Monitor READY、快照约 3 秒，gateway/schema verify 通过 |
 | P2 | 公共 ExitPlan/容量/准入安全地基 | `DONE` | `P1 DONE`；实现、恢复测试与 Windows 运行验收完成 | 无第二真源，故障恢复通过 | 0048/0050 实库与隔离恢复通过；BUY 整链 39 项及根回归，见 §10 |
 | P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
-| P4 | 分配、PAPER 与跨域准入 | `IN_PROGRESS` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 应用层快照/分配/Gate 首批验证通过；持久化、整链及前端待验收，见 §10 |
+| P4 | 分配、PAPER 与跨域准入 | `IN_PROGRESS` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 01–05 实现及隔离 PG 整链通过；只读投影已实现，在线 Schema/codegen 与最终 Web 检查待验收，见 §10 |
 | P5 | 共享账户回测 | `NOT_STARTED` | P4 | 无重复资金/未来数据，结果可重放 | 待补 |
 | P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
 | P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
@@ -259,13 +259,13 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 
 前置：P2、P3 均 `DONE`。
 
-- [ ] `TTA-P4-01` 实现 point-in-time `TTradingEnvelope/PortfolioTDecisionSnapshot`。
-- [ ] `TTA-P4-02` 标准 TradeIntent 以 `ALLOCATION_PENDING` 受理；不新增 trade proposal 协议。
-- [ ] `TTA-P4-03` 实现 `TAllocationBatch/TAllocationDecision`、allocation batch/decision 唯一约束、
+- [x] `TTA-P4-01` 实现 point-in-time `TTradingEnvelope/PortfolioTDecisionSnapshot`。
+- [x] `TTA-P4-02` 标准 TradeIntent 以 `ALLOCATION_PENDING` 受理；不新增 trade proposal 协议。
+- [x] `TTA-P4-03` 实现 `TAllocationBatch/TAllocationDecision`、allocation batch/decision 唯一约束、
   稳定排序、CAP、claim/lease、TTL、next eligible、整批提交和 supersede；这些表与约束是 P4
   退出门，不由 P2 提前占位。
-- [ ] `TTA-P4-04` 实现 `EntryExecutionGate` 与最新 Tick、binding、spread、TTL 重验。
-- [ ] `TTA-P4-05` 将 ALLOW/CAP 候选按排名接入公共 admission、OrderSizer、Risk 和 Capacity；PAPER
+- [x] `TTA-P4-04` 实现 `EntryExecutionGate` 与最新 Tick、binding、spread、TTL 重验。
+- [x] `TTA-P4-05` 将 ALLOW/CAP 候选按排名接入公共 admission、OrderSizer、Risk 和 Capacity；PAPER
   使用隔离 Broker/事实表，不消耗 LIVE 义务。
 - [ ] `TTA-P4-06` 提供机会、分配、readiness、reason、order/ExitPlan 的 GraphQL/Web 只读投影。
 
@@ -837,6 +837,40 @@ runtime。P1 运行证据、owner 空值=`0`、快照
 - 验证：领域边界与实际 Engine 回馈 `27 passed`（5.43s），相关 Ruff 通过。
   本批是运行时接线的组件边界；P4 仍 `IN_PROGRESS`，完整 supervisor/派单恢复和
   GraphQL/Web 退出门尚未宣告完成。
+
+### P4 排名运行时与完整 PAPER 重放检查点（2026-09-07）
+
+- Engine 将标准候选接入实际组合分配、公共排名 admission、最新 Gate、Sizer/Risk/Capacity、
+  PAPER 账本及公共 ExitPlan 回报链。分配/准入/订单保持一个原子事务；原始 TTL 清理使用
+  独立维护事务，即使后续缺少新鲜估值也保留已确认到期的事实。无 seed 也会清理过期意图。
+- PREPARED admission 恢复原完整集合、claim/lease 和原 rank；纯 admission 凭证不改变
+  经济水位，真实金额/义务变化仍阻断。残批记录稳定 BLOCKED 原因，原批 TTL 后才通过公共
+  expired/supersede 协议继续。0056 同时验证 pending 原始 TTL/撤销、真实订单后续状态和
+  无订单 Gate 终结审计，拒绝伪状态；没有为同事务的合法 ROUTED 而取消完整批次约束。
+- `paper_seed` 是冻结 config payload 中唯一可选的显式初始化材料；一旦提供，必须完整包含
+  `snapshot_id/as_of/cash/non_trading_asset_value/positions/bucket_checkpoint`，positions
+  按 `Position` 的完整字段给出。hash 由该材料计算，未来时点、布尔数量、缺字段、重启改写
+  seed 均拒绝；也可恢复已由同一 ledger 初始化的原账户。缺 seed、完整盘口或冻结策略证据
+  时保留具体 readiness 原因，不自动复制 LIVE 资产或构造默认账户。
+- 停用/替代先持久化 DRAINING，再取消未下单候选及实际 PAPER BUY；部分成交仍保留公共
+  ExitPlan，未知 BUY 保持 RECONCILE_REQUIRED。无 producer 的退出仍消费实际行情并收敛。
+  受理时钟在账户锁后读取；同源时间新批次不重复成交。可预期的缺价/lease 阻断有持久审计，
+  不停止全局 CRITICAL 行情消费者；未知账本损坏继续失败关闭。
+- 验证：30 个相关 Python 文件 `492 passed, 8 skipped`（69.74s），跳过为单独运行的 PG 门；
+  相关 Ruff 通过。实际双标的完整 PG replay `1 passed`（70188，27.86s），经真正
+  Strategy.step → 分配/排名 → 两次部分 BUY 成交 → 原移动止盈 → SELL → 两个批次与计划
+  关闭，最终 4 orders/6 fills，含重启、重复投递、双时钟、现金费用守恒、T+1 和 LIVE/QMT SQL
+  访问拦截。0056 pending TTL/撤销门 `1 passed`（61940）；同事务 Gate 终结及伪状态负测
+  `3 passed`（62915，109.90s）；所有随机 schema 清理确认。日志分别为
+  `.codex_screenshots/p4-final-targeted-python.log`、`p4-rule-only-replay-postgresql.log`、
+  `p4-intent-terminal-controls-pg.log`、`p4-gate-terminal-postgresql.log`。
+- GraphQL 7 个授权只读字段、稳定分页及 Web PAPER 页签已实现；API 定向 7 项、组件及工具栏
+  定向 10 项通过，两条查询通过本地 schema 验证，未以本地 schema 代替实际 codegen。
+  Web 首轮全量 865 passed/1 failed（工具栏旧锚点已定向修复），lint 通过；时间格式类型错误
+  已修复。在线 Caddy 仍缺新增 7 字段，codegen/check/build 尚未通过；codegen 禁止部分输出。
+- 只读核对在线业务库仍为 0050、无 PAPER account 表，当前启动配置为 full/live；尚未迁移或
+  重启服务。01–05 的勾选表示代码与隔离验收完成，不表示线上已启用。P4 保持 IN_PROGRESS，
+  06/最终 Web 契约检查、获授权后的默认 Windows 验收及 As-Is 更新仍待完成；不进入 P5–P8。
 
 ## 11. 变更记录
 

@@ -595,7 +595,7 @@ class AccountCapacityService:
           (p.plan_id, p.status, p.remaining_volume, p.state_version) for p in plans
         ],
         "ready_intents": [
-          (i.id, i.status, i.allocation_version, i.admission_batch_id)
+          (i.id, i.status, i.allocation_version)
           for i in intents
           if i.id != own_intent_id
           and i.status in {"ALLOCATION_PENDING", "AWAITING_APPROVAL", "EXECUTION_READY"}

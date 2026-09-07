@@ -78,8 +78,8 @@ class TAssistantPaperShadowRuntime:
 
   The class intentionally depends only on the P3 cycle repository.  It cannot
   create approvals, PendingTradeOrders, correlations, or TradeCommandOutbox
-  rows.  Standard TradeIntent values are retained as isolated proposal JSON in
-  the cycle output manifest for deterministic comparison and later P4 intake.
+  rows. Standard TradeIntent values are durably accepted with the cycle; its
+  output manifest binds each intent to the original immutable candidate evidence.
   """
 
   def __init__(
