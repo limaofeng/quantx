@@ -1,30 +1,34 @@
 ---
 name: strategy-backtest-rerun
-description: Rerun and verify QuantX strategy backtests from an existing StrategyRun. Use for retrying rerunBacktestVersion, executing tests/engine/integration/strategies/test_backtest_rerun_real.py, changing a backtest window, or summarizing the latest version, trades, and performance snapshot.
+description: Rerun a user-specified QuantX backtest or inspect its saved result in an explicitly selected test database. Never use for live strategy execution.
 ---
 
 # Strategy Backtest Rerun
 
-- Use only for backtests, never live-trading tests.
-- Do not start API, Engine, Worker, or QMT Agent for this workflow.
-- Use `C:\Users\limao\miniconda3\envs\xtquant-demo\python.exe` when available.
-- Confirm `apps/api/.env` points to the intended stores.
+This workflow reruns an existing backtest in a dedicated PostgreSQL test database.
+It does not rerun production records. Require the target run ID and an explicitly
+configured `QUANTX_TEST_DATABASE_URL` with database name `test_*` or `*_test`.
+If the requested run exists only in the live store, report the mismatch; do not
+copy live records or redirect the test to the live database without a separate task.
 
-Run:
+Use the repository Python environment with QuantX packages installed (current Windows:
+`.venv/Scripts/python.exe`). QMT's conda environment is not required. Do not start API,
+Engine, Worker or QMT Agent. A read-only summary request uses `--summary-only`, not a rerun.
 
+From the repository root:
 ```powershell
-& "C:\Users\limao\miniconda3\envs\xtquant-demo\python.exe" `
-  .\.codex\skills\strategy-backtest-rerun\scripts\rerun_backtest.py `
-  --run-id "<strategy-run-id>" `
-  --start "2026-04-14 00:00:00" `
-  --end "2026-05-14 23:59:59"
+.venv/Scripts/python.exe .codex/skills/strategy-backtest-rerun/scripts/rerun_backtest.py --run-id "<UUID>" --dry-run
+.venv/Scripts/python.exe .codex/skills/strategy-backtest-rerun/scripts/rerun_backtest.py --run-id "<UUID>"
 ```
 
-The script runs the opt-in integration test from the repository root, then prints the latest
-backtest version/status, parent status, trades/intents/orders, performance
-metrics, snapshot path, and temporary sample count.
+Use `--start` and `--end` together with ISO timestamps only when changing the requested
+window; otherwise preserve it. Set database credentials privately in the environment,
+never in command arguments, reports or committed files. The helper disables live trading
+and runs pytest and summary in the same interpreter and selected test environment.
 
-Success requires pytest to pass and the latest status to be `COMPLETED`. Treat
-database unavailability as infrastructure state. Inspect interrupted `RUNNING`
-versions before changing any state. Use `--summary-only` to inspect and
-`--dry-run` to preview.
+A rerun request authorizes this specific backtest E2E path and its test-store writes,
+not other E2E tests or real trading. Inspect interrupted RUNNING versions before any
+retry; do not reset state automatically. Success requires the targeted test to pass and
+the latest backtest to be COMPLETED. Report status, version, performance and data gaps.
+Future macOS use requires its own installed Python/test environment under the migration
+plan; it must not silently connect to the Windows live store.

@@ -1,4 +1,4 @@
-"""Run the QuantX real backtest-rerun integration test and print latest status."""
+"""Rerun and summarize one existing backtest in the same isolated test process."""
 
 from __future__ import annotations
 
@@ -6,13 +6,11 @@ import argparse
 import asyncio
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
-DEFAULT_RUN_ID = "632958c3-751f-4862-80ab-b61ca30c0a8a"
-DEFAULT_PYTHON = r"C:\Users\limao\miniconda3\envs\xtquant-demo\python.exe"
 TEST_PATH = "tests/engine/integration/strategies/test_backtest_rerun_real.py"
 
 
@@ -20,37 +18,37 @@ def _repo_root() -> Path:
   return Path(__file__).resolve().parents[4]
 
 
-def _python_executable(value: str | None) -> str:
-  candidate = value or os.environ.get("QUANTX_PYTHON_EXE") or DEFAULT_PYTHON
-  if Path(candidate).exists():
-    return candidate
-  return sys.executable
-
-
 def _json_default(value: Any) -> str:
-  if hasattr(value, "value"):
-    return str(value.value)
-  return str(value)
+  return str(getattr(value, "value", value))
 
 
-def _build_pytest_command(args: argparse.Namespace, python_exe: str) -> list[str]:
-  return [
-    python_exe,
-    "-m",
-    "pytest",
-    TEST_PATH,
-    "-q",
-    "-s",
-    "--quantx-run-e2e",
-    "-p",
-    "no:cacheprovider",
-    "--basetemp",
-    str(args.basetemp),
-  ]
+def _configure_test_environment() -> None:
+  from sqlalchemy.engine import make_url
+
+  raw = os.environ.get("QUANTX_TEST_DATABASE_URL", "").strip()
+  if not raw:
+    raise ValueError(
+      "Set QUANTX_TEST_DATABASE_URL to the intended dedicated test database"
+    )
+  try:
+    url = make_url(raw)
+  except Exception:
+    raise ValueError("Invalid test database URL") from None
+  name = url.database or ""
+  if url.drivername != "postgresql+asyncpg" or not (
+    name.startswith("test_") or name.endswith("_test")
+  ):
+    raise ValueError("Use an asyncpg PostgreSQL database named test_* or *_test")
+  override = os.environ.get("QUANTX_TEST_DATABASE_NAME", "").strip()
+  if override and override != name:
+    raise ValueError("QUANTX_TEST_DATABASE_NAME conflicts with the explicit test URL")
+  os.environ["DATABASE_URL"] = raw
+  os.environ["ENV"] = "testing"
+  os.environ["ENABLE_REAL_TRADING"] = "false"
+  os.environ["QMT_REAL_TRADING_ENABLED"] = "false"
 
 
 async def _query_latest_summary(run_id: str) -> dict[str, Any]:
-  from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
   from quantx_infrastructure.models.strategy_backtest import StrategyBacktest
   from quantx_infrastructure.models.strategy_performance_sample import (
     StrategyPerformanceSample,
@@ -60,8 +58,14 @@ async def _query_latest_summary(run_id: str) -> dict[str, Any]:
     TTradeReplayProjection,
   )
   from sqlalchemy import func, select
+  from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+  from sqlalchemy.pool import NullPool
 
-  async with AsyncSessionLocal() as db:
+  # Pytest closes its event loops; pooled asyncpg connections cannot cross loops.
+  # Open summary connections independently against the same selected database.
+  engine = create_async_engine(os.environ["DATABASE_URL"], poolclass=NullPool)
+  session_factory = async_sessionmaker(engine, expire_on_commit=False)
+  async with session_factory() as db:
     latest_result = await db.execute(
       select(StrategyBacktest)
       .where(StrategyBacktest.strategy_run_id == run_id)
@@ -141,73 +145,99 @@ def _print_summary(summary: dict[str, Any]) -> None:
   print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
 
 
-def main() -> int:
-  parser = argparse.ArgumentParser(
-    description="Run QuantX strategy backtest rerun integration test."
-  )
-  parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
-  parser.add_argument(
-    "--start",
-    default=None,
-    help="Override the latest version start time; omit to preserve its window.",
-  )
-  parser.add_argument(
-    "--end",
-    default=None,
-    help="Override the latest version end time; omit to preserve its window.",
-  )
-  parser.add_argument("--repo", type=Path, default=_repo_root())
-  parser.add_argument("--python", dest="python_exe", default=None)
-  parser.add_argument("--basetemp", type=Path, default=Path(r"C:\tmp\quantx-pytest"))
-  parser.add_argument("--dry-run", action="store_true")
-  parser.add_argument("--summary-only", action="store_true")
-  args = parser.parse_args()
+def main(argv: list[str] | None = None) -> int:
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--run-id", type=UUID, required=True)
+  parser.add_argument("--start", help="ISO start time; supply with --end")
+  parser.add_argument("--end", help="ISO end time; omit both to preserve the window")
+  modes = parser.add_mutually_exclusive_group()
+  modes.add_argument("--dry-run", action="store_true")
+  modes.add_argument("--summary-only", action="store_true")
+  args = parser.parse_args(argv)
+  if bool(args.start) != bool(args.end):
+    parser.error("Supply --start and --end together")
+  if args.summary_only and args.start:
+    parser.error("Summary-only does not accept window changes")
+  if args.start:
+    from datetime import datetime
 
-  repo_root = args.repo.resolve()
-  python_exe = _python_executable(args.python_exe)
-  command = _build_pytest_command(args, python_exe)
-
-  env = os.environ.copy()
-  env["PULLBACK_GRID_RERUN_REAL_RUN_ID"] = args.run_id
-  if args.start is not None:
-    env["PULLBACK_GRID_RERUN_BACKTEST_START_TIME"] = args.start
-  else:
-    env.pop("PULLBACK_GRID_RERUN_BACKTEST_START_TIME", None)
-  if args.end is not None:
-    env["PULLBACK_GRID_RERUN_BACKTEST_END_TIME"] = args.end
-  else:
-    env.pop("PULLBACK_GRID_RERUN_BACKTEST_END_TIME", None)
-
+    try:
+      start, end = (
+        datetime.fromisoformat(v.replace("Z", "+00:00")) for v in (args.start, args.end)
+      )
+      if end < start:
+        raise ValueError()
+    except (ValueError, TypeError):
+      parser.error(
+        "Use valid ISO timestamps with matching timezone conventions and end >= start"
+      )
+  repo_root = _repo_root()
+  run_id = str(args.run_id)
+  pytest_args = [
+    TEST_PATH,
+    "-q",
+    "--quantx-run-e2e",
+    "-p",
+    "no:cacheprovider",
+    "--basetemp",
+    str(repo_root / ".codex_screenshots" / "backtest-rerun" / uuid4().hex),
+  ]
   print(f"Repository root: {repo_root}")
-  print(f"Python: {python_exe}")
-  print(f"Run ID: {args.run_id}")
-  window = (
-    f"{args.start} -> {args.end}"
-    if args.start is not None or args.end is not None
-    else "preserve latest backtest version"
+  print(f"Python: {sys.executable}")
+  print(f"Run ID: {run_id}")
+  print(
+    f"Window: {args.start} -> {args.end}"
+    if args.start
+    else "Window: preserve latest version"
   )
-  print(f"Window: {window}")
-  print("Command:")
-  print(" ".join(f'"{part}"' if " " in part else part for part in command))
-
   if args.dry_run:
+    print("Execution requires QUANTX_TEST_DATABASE_URL; live trading remains disabled.")
+    print("pytest " + " ".join(pytest_args))
     return 0
-
-  return_code = 0
-  if not args.summary_only:
-    completed = subprocess.run(command, cwd=repo_root, env=env, check=False)
-    return_code = completed.returncode
-
-  sys.path.insert(0, str(repo_root))
+  try:
+    _configure_test_environment()
+  except ValueError as exc:
+    print(str(exc), file=sys.stderr)
+    return 2
+  os.environ["PULLBACK_GRID_RERUN_REAL_RUN_ID"] = run_id
+  for key, value in [
+    ("PULLBACK_GRID_RERUN_BACKTEST_START_TIME", args.start),
+    ("PULLBACK_GRID_RERUN_BACKTEST_END_TIME", args.end),
+  ]:
+    if value is None:
+      os.environ.pop(key, None)
+    else:
+      os.environ[key] = value
   old_cwd = Path.cwd()
   os.chdir(repo_root)
   try:
-    summary = asyncio.run(_query_latest_summary(args.run_id))
+    if not args.summary_only:
+      import pytest
+
+      code = int(pytest.main(pytest_args))
+      if code:
+        return code
+    summary = asyncio.run(_query_latest_summary(run_id))
     _print_summary(summary)
+    if summary.get("run_mode") != "backtest":
+      print("Target is missing or is not a backtest run", file=sys.stderr)
+      return 1
+    if (
+      not args.summary_only
+      and _json_default(summary.get("latest_status")).lower() != "completed"
+    ):
+      print("Latest backtest did not complete", file=sys.stderr)
+      return 1
+    return 0
+  except Exception as exc:
+    # Connection exceptions can include credentials; expose only the error class.
+    print(
+      f"Backtest workflow failed ({type(exc).__name__}); inspect sanitized diagnostics",
+      file=sys.stderr,
+    )
+    return 1
   finally:
     os.chdir(old_cwd)
-
-  return return_code
 
 
 if __name__ == "__main__":
