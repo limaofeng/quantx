@@ -8,7 +8,8 @@ version = "0.1.0"
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "lightgbm>=4.5.0,<5",
-  "prefect>=3.6.10",
+  "prefect==3.6.15",
+  "importlib-metadata>=8.7",
   "quantx-application",
   "quantx-infrastructure",
   "quantx-research",
