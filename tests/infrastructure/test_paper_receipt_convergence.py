@@ -105,7 +105,10 @@ async def test_real_entry_fills_create_public_plan_and_replay_without_duplicatio
   for second, expected in ((1, 50), (2, 100)):
     async with sessions() as db, db.begin():
       await PaperExecutionLedger(db, receipt_sink=sink).process_quote(
-        execution_id=execution_id, event_key=f"quote-{second}", quote=quote(second)
+        execution_id=execution_id,
+        event_key=f"quote-{second}",
+        accepted_at=(quote(second)).timestamp,
+        quote=quote(second),
       )
       plan = await db.get(AutoExitPlanRecord, "paper-plan")
       batch = await db.get(TTradeBatch, "paper-batch")
@@ -129,7 +132,10 @@ async def test_real_entry_fills_create_public_plan_and_replay_without_duplicatio
     version = (await db.get(AutoExitPlanRecord, "paper-plan")).state_version
     assert (
       await PaperExecutionLedger(db, receipt_sink=sink).process_quote(
-        execution_id=execution_id, event_key="quote-1", quote=quote(1)
+        execution_id=execution_id,
+        event_key="quote-1",
+        accepted_at=(quote(1)).timestamp,
+        quote=quote(1),
       )
     ).duplicate
     assert await db.scalar(select(func.count()).select_from(AutoExitPlanEvent)) == count
@@ -143,7 +149,10 @@ async def test_partial_entry_cancel_keeps_protection_and_open_batch(sessions):
     ledger = PaperExecutionLedger(db, receipt_sink=sink)
     await ledger.place_order(execution_id=execution_id, **args)
     await ledger.process_quote(
-      execution_id=execution_id, event_key="partial", quote=quote(1)
+      execution_id=execution_id,
+      event_key="partial",
+      accepted_at=(quote(1)).timestamp,
+      quote=quote(1),
     )
     await ledger.cancel(
       execution_id=execution_id,
@@ -173,7 +182,10 @@ async def test_public_plan_failure_rolls_back_fill_and_all_projections(sessions)
   async with sessions() as db, db.begin():
     with pytest.raises(RuntimeError, match="public projection failure"):
       await PaperExecutionLedger(db, receipt_sink=failed).process_quote(
-        execution_id=execution_id, event_key="partial", quote=quote(1)
+        execution_id=execution_id,
+        event_key="partial",
+        accepted_at=(quote(1)).timestamp,
+        quote=quote(1),
       )
   async with sessions() as db:
     assert await db.get(AutoExitPlanRecord, "paper-plan") is None
@@ -223,7 +235,10 @@ async def test_inconsistent_fill_amount_cannot_change_public_protection(sessions
   async with sessions() as db, db.begin():
     with pytest.raises(ValueError, match="PAPER_RECEIPT_FILL_CONFLICT"):
       await PaperExecutionLedger(db, receipt_sink=inconsistent).process_quote(
-        execution_id=execution_id, event_key="partial", quote=quote(1)
+        execution_id=execution_id,
+        event_key="partial",
+        accepted_at=(quote(1)).timestamp,
+        quote=quote(1),
       )
     assert await db.get(AutoExitPlanRecord, "paper-plan") is None
     assert (await db.get(PaperExecutionAccountRecord, execution_id)).revision == 1
@@ -237,7 +252,10 @@ async def test_public_plan_sell_receipt_closes_batch_without_pending_mismatch(se
     ledger = PaperExecutionLedger(db, receipt_sink=sink)
     await ledger.place_order(execution_id=execution_id, **args)
     await ledger.process_quote(
-      execution_id=execution_id, event_key="buy-filled", quote=quote(1, depth=400)
+      execution_id=execution_id,
+      event_key="buy-filled",
+      accepted_at=(quote(1, depth=400)).timestamp,
+      quote=quote(1, depth=400),
     )
     record = await db.get(AutoExitPlanRecord, "paper-plan")
     plan = ExitPlan.from_dict(record.plan_state)
@@ -319,7 +337,10 @@ async def test_public_plan_sell_receipt_closes_batch_without_pending_mismatch(se
     )
   async with sessions() as db, db.begin():
     await PaperExecutionLedger(db, receipt_sink=sink).process_quote(
-      execution_id=execution_id, event_key="sell-filled", quote=quote(3)
+      execution_id=execution_id,
+      event_key="sell-filled",
+      accepted_at=(quote(3)).timestamp,
+      quote=quote(3),
     )
     plan = await db.get(AutoExitPlanRecord, "paper-plan")
     batch = await db.get(TTradeBatch, "paper-batch")

@@ -10,6 +10,7 @@ from datetime import UTC
 from decimal import ROUND_HALF_UP, Decimal
 
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+from quantx_domain.clock import SHANGHAI
 from quantx_domain.trading.exit_plan import ExitPlan, ExitPlanBook, ExitPlanTemplate
 from sqlalchemy import select
 
@@ -111,6 +112,26 @@ class PaperReceiptConvergence:
       raise ValueError("PAPER_RECEIPT_FILL_CONFLICT")
     trades = {trade.trade_id: trade for trade in result.trades}
     for fill in fills:
+      from quantx_infrastructure.services.paper_execution_ledger import (
+        _quote_event_clock,
+        _stored_time,
+      )
+
+      source_at, accepted_at = _quote_event_clock(event)
+      order = await db.get(
+        PaperExecutionOrderRecord, fill.order_id, populate_existing=True
+      )
+      if (
+        order is None
+        or not _stored_time(order.submitted_at)
+        < source_at
+        <= accepted_at
+        < _stored_time(order.expires_at)
+        or _stored_time(fill.occurred_at) != accepted_at
+        or source_at.astimezone(SHANGHAI).date()
+        != accepted_at.astimezone(SHANGHAI).date()
+      ):
+        raise ValueError("PAPER_RECEIPT_FILL_CLOCK_CONFLICT")
       trade = trades[fill.fill_id]
       if (
         fill.order_id != trade.order_id

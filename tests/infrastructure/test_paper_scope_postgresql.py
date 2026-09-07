@@ -70,7 +70,7 @@ pytestmark = migration_gate_marker
 async def test_actual_paper_rank_barrier_across_connections():
   from quantx_infrastructure.services.paper_execution_ledger import PaperExecutionLedger
 
-  async with _sessions(head="20260907_0053") as sessions:
+  async with _sessions(head="20260907_0055") as sessions:
     scope, lower, higher = await seed_ranked(sessions)
     async with sessions() as db:
       low_args = await rank_arguments(db, scope, lower)
@@ -104,19 +104,19 @@ async def test_actual_paper_rank_barrier_across_connections():
 
 @pytest.mark.asyncio
 async def test_actual_paper_capacity_after_partial_fill_and_cancel():
-  async with _sessions(head="20260907_0053") as sessions:
+  async with _sessions(head="20260907_0055") as sessions:
     await verify_paper_capacity(sessions)
 
 
 @pytest.mark.asyncio
 async def test_actual_paper_public_projection_failure_is_atomic():
-  async with _sessions(head="20260907_0053") as sessions:
+  async with _sessions(head="20260907_0055") as sessions:
     await verify_public_rollback(sessions)
 
 
 @pytest.mark.asyncio
 async def test_actual_paper_public_exit_plan_closure():
-  async with _sessions(head="20260907_0053") as sessions:
+  async with _sessions(head="20260907_0055") as sessions:
     await verify_public_close(sessions)
     async with sessions() as db:
       for amount in ("10.000078125", "0.000000005"):
@@ -138,7 +138,7 @@ async def test_actual_paper_receipt_failure_rolls_back_every_fact():
   async def receipt(db, execution_id, result):
     raise AssertionError("setup must not emit receipts")
 
-  async with _sessions(head="20260907_0053") as sessions:
+  async with _sessions(head="20260907_0055") as sessions:
     await verify_sink_rollback(sessions, receipt)
     async with sessions() as db:
       for table in (
@@ -181,7 +181,7 @@ async def test_actual_paper_ledger_partial_fills_restart_and_isolation():
     receipt.seen.append((execution_id, len(result.orders), len(result.trades)))
 
   receipt.seen = []
-  async with _sessions(head="20260907_0053") as sessions:
+  async with _sessions(head="20260907_0055") as sessions:
     await verify_ledger_restart(sessions, receipt)
     async with sessions() as db:
       for table in (
@@ -196,7 +196,7 @@ async def test_actual_paper_ledger_partial_fills_restart_and_isolation():
 
 @pytest.mark.asyncio
 async def test_actual_paper_scope_admission_and_atomic_ledger_chain():
-  async with _sessions(head="20260907_0053") as sessions:
+  async with _sessions(head="20260907_0055") as sessions:
     snapshot, candidates = await _seed(sessions, authorization="AUTO")
     execution_id = snapshot.cut.execution_ref.owner_id
     matcher = PaperBrokerMatching(
@@ -291,9 +291,15 @@ async def test_actual_paper_scope_admission_and_atomic_ledger_chain():
           await db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
     later = NOW + timedelta(seconds=1)
     market = replace(quote(1), timestamp=later)
-    await matcher.process_quote(event_id="paper-quote-1", quote=market)
+    await matcher.process_quote(
+      event_id="paper-quote-1", accepted_at=(market).timestamp, quote=market
+    )
     next_checkpoint = matcher.export_checkpoint()
     next_hash = stable_manifest_hash(next_checkpoint)
+    quote_input = {
+      "quote": allocation_evidence(market),
+      "accepted_at": later.isoformat(),
+    }
     async with sessions() as db, db.begin():
       account = await db.get(
         PaperExecutionAccountRecord, execution_id, with_for_update=True
@@ -306,14 +312,18 @@ async def test_actual_paper_scope_admission_and_atomic_ledger_chain():
           event_key="quote-1",
           event_type="QUOTE",
           revision=1,
-          input_hash=stable_manifest_hash(allocation_evidence(market)),
-          input_payload=allocation_evidence(market),
+          input_hash=stable_manifest_hash(
+            {"event_type": "QUOTE", "input": quote_input}
+          ),
+          input_payload=quote_input,
           result_payload={"order_ids": [], "fill_ids": []},
           resulting_snapshot_hash=next_hash,
           previous_snapshot_hash=initial_hash,
           occurred_at=later,
+          quote_source_at=later,
         )
       )
+      await db.flush()
       account.broker_checkpoint = next_checkpoint
       account.revision, account.snapshot_hash, account.snapshot_as_of = (
         1,
@@ -335,11 +345,17 @@ async def test_actual_paper_scope_admission_and_atomic_ledger_chain():
               event_type="QUOTE",
               revision=2,
               input_hash="c" * 64,
-              input_payload={},
+              input_payload={
+                "quote": allocation_evidence(
+                  replace(market, timestamp=later + timedelta(seconds=1))
+                ),
+                "accepted_at": (later + timedelta(seconds=1)).isoformat(),
+              },
               result_payload={"order_ids": [], "fill_ids": ["missing"]},
               previous_snapshot_hash=next_hash,
               resulting_snapshot_hash="d" * 64,
               occurred_at=later + timedelta(seconds=1),
+              quote_source_at=later + timedelta(seconds=1),
             )
           )
           account.revision, account.snapshot_hash, account.snapshot_as_of = (

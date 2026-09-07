@@ -82,10 +82,17 @@ class CandidateCycleSeed:
   intent_id: str
   now: datetime
   latest_tick: AcceptedTMarketTick
+  intent_ids: tuple[tuple[str, str], ...]
+  latest_ticks: tuple[tuple[str, AcceptedTMarketTick], ...]
 
 
 async def seed_candidate_cycle(
-  sessions, *, deferred=False, extra_tick=True, candidate_at=NOW
+  sessions,
+  *,
+  deferred=False,
+  extra_tick=True,
+  candidate_at=NOW,
+  instrument_codes=("600000.SH",),
 ):
   """Requires frozen_config fixture; invokes the real runtime/strategy, no signal rewrite."""
   values = asdict(allocation_tests._version("config-1"))
@@ -107,6 +114,8 @@ async def seed_candidate_cycle(
       ],
     },
   }
+  if len(instrument_codes) > 1:
+    values["canonical_payload"]["portfolio_policy"]["max_industry_t_amount"] = 20000
   version = TAssistantConfigVersion.create(**values)
   async with sessions() as db, db.begin():
     db.add(
@@ -145,65 +154,77 @@ async def seed_candidate_cycle(
   ]
   if extra_tick:
     shapes.append((25, 99.32, 1150000, 11500))
-  samples = [
-    OpportunitySample(
-      "600000.SH",
-      "2026-09-03",
-      base_ms + seconds * 1000,
-      index + 1,
-      price,
-      continuity_generation="7",
-      received_at_ms=base_ms + seconds * 1000,
-      bid_price=price - (0.03 if index == 5 else 0.01),
-      ask_price=price,
-      bid_volume=1000,
-      ask_volume=1000,
-      cumulative_amount=amount,
-      cumulative_volume=volume,
+  states, rings = {}, {}
+  for symbol_index, code in enumerate(instrument_codes):
+    samples = [
+      OpportunitySample(
+        code,
+        "2026-09-03",
+        base_ms + seconds * 1000,
+        index + 1,
+        price,
+        continuity_generation="7",
+        received_at_ms=base_ms + seconds * 1000,
+        bid_price=price - (0.03 if index == 5 else (0.02 if symbol_index else 0.01)),
+        ask_price=price,
+        bid_volume=1000,
+        ask_volume=1000,
+        cumulative_amount=amount,
+        cumulative_volume=volume,
+      )
+      for index, (seconds, price, amount, volume) in enumerate(shapes)
+    ]
+    opportunity = OpportunityState.initial()
+    for sample in samples[:4]:
+      opportunity = reduce_opportunity(
+        opportunity, sample, policy=policy, reference_profile=profile
+      ).state
+    cursor = SymbolMarketCursor(
+      "stream-1", "7", 1, 4, TMarketSourceIdentity("7", samples[3].source_time_ms, 4)
     )
-    for index, (seconds, price, amount, volume) in enumerate(shapes)
-  ]
-  opportunity = OpportunityState.initial()
-  for sample in samples[:4]:
-    opportunity = reduce_opportunity(
-      opportunity, sample, policy=policy, reference_profile=profile
-    ).state
-  cursor = SymbolMarketCursor(
-    "stream-1", "7", 1, 4, TMarketSourceIdentity("7", samples[3].source_time_ms, 4)
-  )
-  state = TAssistantSymbolState(
-    execution.execution_id,
-    "600000.SH",
-    0,
-    "ACTIVE",
-    cursor,
-    opportunity,
-    policy.policy_version,
-    policy.feature_schema_version,
-  )
-  ring = SymbolMarketDeltaRing("600000.SH")
-  for index, sample in enumerate(samples[4:], 5):
-    ring.accept(
-      AcceptedTMarketTick("stream-1", index, sample.received_at_ms, sample),
-      capture_time_ms=sample.received_at_ms,
+    state = TAssistantSymbolState(
+      execution.execution_id,
+      code,
+      0,
+      "ACTIVE",
+      cursor,
+      opportunity,
+      policy.policy_version,
+      policy.feature_schema_version,
     )
+    ring = SymbolMarketDeltaRing(code)
+    for index, sample in enumerate(samples[4:], 5):
+      ring.accept(
+        AcceptedTMarketTick(
+          "stream-1",
+          index,
+          sample.received_at_ms,
+          sample,
+          market_fence_sequence=(index - 1) * len(instrument_codes) + symbol_index + 1,
+        ),
+        capture_time_ms=sample.received_at_ms,
+      )
+    states[code], rings[code] = state, ring
   now = datetime.fromtimestamp(samples[-1].source_time_ms / 1000, UTC)
   clock = {"now": now}
   runtime = TAssistantPaperShadowRuntime(
     session_factory=sessions, clock=lambda: clock["now"]
   )
 
-  def snapshot(execution, state):
-    symbol = SymbolDecisionSnapshot(
-      "600000.SH",
-      state,
-      ring.slice_after(
-        state.cursor,
-        decision_time_ms=int(clock["now"].timestamp() * 1000),
-        through_accepted_sequence=len(samples),
-      ),
-      OpportunityGateContext(continuous_session=True, session_code="CONTINUOUS_AM"),
-      profile,
+  def snapshot(execution, states):
+    symbols = tuple(
+      SymbolDecisionSnapshot(
+        code,
+        state,
+        rings[code].slice_after(
+          state.cursor,
+          decision_time_ms=int(clock["now"].timestamp() * 1000),
+          through_accepted_sequence=len(samples) * len(instrument_codes),
+        ),
+        OpportunityGateContext(continuous_session=True, session_code="CONTINUOUS_AM"),
+        profile,
+      )
+      for code, state in states.items()
     )
     return TDecisionSnapshot(
       execution.execution_ref,
@@ -211,7 +232,7 @@ async def seed_candidate_cycle(
       "2026-09-03",
       "stream-1",
       "7",
-      len(samples),
+      len(samples) * len(instrument_codes),
       clock["now"],
       execution.universe_revision,
       execution.frozen_config_version,
@@ -221,10 +242,10 @@ async def seed_candidate_cycle(
       execution.status,
       execution.readiness.readiness,
       execution.readiness.as_of,
-      (symbol,),
+      symbols,
     )
 
-  def bind(execution, state):
+  def bind(execution, states):
     runtime.bind_execution(
       execution,
       parameters={
@@ -232,7 +253,7 @@ async def seed_candidate_cycle(
         "signal_policy": policy.to_dict(),
         "target_trade_amount": 10000,
       },
-      symbol_states={"600000.SH": state},
+      symbol_states=states,
     )
 
   def availability(_mapper, _connection, record):
@@ -256,12 +277,14 @@ async def seed_candidate_cycle(
     sessions.class_.sync_session_class, "do_orm_execute", update_availability
   )
   try:
-    bind(execution, state)
+    bind(execution, states)
     detected = await runtime.run_cycle(
-      execution=execution, snapshot=snapshot(execution, state)
+      execution=execution, snapshot=snapshot(execution, states)
     )
     assert detected.committed
-    checkpoint = runtime.symbol_states(execution.execution_id)["600000.SH"].to_dict()
+    checkpoint = runtime.symbol_states(execution.execution_id)[
+      instrument_codes[0]
+    ].to_dict()
     assert checkpoint["material_manifest_hash"] == stable_manifest_hash(
       {
         key: checkpoint[key]
@@ -277,8 +300,8 @@ async def seed_candidate_cycle(
     final = detected
     if deferred:
       assert detected.output.trade_intents == []
-      state = runtime.symbol_states(execution.execution_id)["600000.SH"]
-      assert state.deferred_candidate is not None
+      states = runtime.symbol_states(execution.execution_id)
+      assert all(state.deferred_candidate is not None for state in states.values())
       clock["now"] += timedelta(seconds=1)
       async with sessions() as db, db.begin():
         repository = TAssistantExecutionRepository(db)
@@ -286,19 +309,24 @@ async def seed_candidate_cycle(
         execution = await TAssistantExecutionLifecycle(repository).activate_ready(
           current, at=clock["now"], payload={"test": "deferred"}
         )
-      bind(execution, state)
+      bind(execution, states)
       final = await runtime.run_cycle(
-        execution=execution, snapshot=snapshot(execution, state)
+        execution=execution, snapshot=snapshot(execution, states)
       )
       assert final.committed
-    assert len(final.output.trade_intents) == 1
+    assert len(final.output.trade_intents) == len(instrument_codes)
     return CandidateCycleSeed(
       execution.execution_id,
       final.cycle_id,
       detected.cycle_id,
       final.output.trade_intents[0].intent_id,
       clock["now"],
-      ring.latest_tick,
+      rings[instrument_codes[0]].latest_tick,
+      tuple(
+        (intent.instrument_code, intent.intent_id)
+        for intent in final.output.trade_intents
+      ),
+      tuple((code, ring.latest_tick) for code, ring in rings.items()),
     )
   finally:
     event.remove(TTradeOpportunityEvaluation, "before_insert", availability)
@@ -451,7 +479,10 @@ async def test_actual_candidate_evidence_reaches_allocation_and_final_gate(
       execution_id=source.execution_id, account_id="account-1", **seed
     )
     await ledger.process_quote(
-      execution_id=source.execution_id, event_key="accepted-market", quote=market
+      execution_id=source.execution_id,
+      event_key="accepted-market",
+      quote=market,
+      accepted_at=source.now,
     )
     allocated = await PaperAllocationCoordinator(db).allocate_cycle(
       execution_id=source.execution_id,

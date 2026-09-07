@@ -22,6 +22,10 @@ class PaperExecutionAccountRecord(Base):
   __tablename__ = "paper_execution_accounts"
   __table_args__ = (
     CheckConstraint("environment = 'PAPER'", name="ck_paper_account_environment"),
+    CheckConstraint(
+      "matching_policy_version = 'paper-strict-book-v2'",
+      name="ck_paper_account_matching_policy",
+    ),
     CheckConstraint("revision >= 0", name="ck_paper_account_revision"),
     CheckConstraint(
       "length(seed_snapshot_hash) = 64 AND length(snapshot_hash) = 64 AND length(initial_snapshot_hash) = 64",
@@ -59,6 +63,17 @@ class PaperExecutionEventRecord(Base):
     Index(
       "ix_paper_event_scope_type_time", "execution_id", "event_type", "occurred_at"
     ),
+    Index(
+      "ix_paper_event_scope_quote_source",
+      "execution_id",
+      "event_type",
+      "quote_source_at",
+    ),
+    CheckConstraint(
+      "(event_type = 'QUOTE' AND quote_source_at IS NOT NULL AND quote_source_at <= occurred_at) OR "
+      "(event_type <> 'QUOTE' AND quote_source_at IS NULL)",
+      name="ck_paper_event_quote_clock",
+    ),
     CheckConstraint("environment = 'PAPER'", name="ck_paper_event_environment"),
     CheckConstraint("revision >= 1", name="ck_paper_event_revision"),
     CheckConstraint(
@@ -85,6 +100,11 @@ class PaperExecutionEventRecord(Base):
   resulting_snapshot_hash = Column(String(64), nullable=False)
   previous_snapshot_hash = Column(String(64), nullable=False)
   occurred_at = Column(DateTime(timezone=True), nullable=False)
+  quote_source_at = Column(
+    DateTime(timezone=True),
+    nullable=True,
+    comment="QUOTE 原始行情源时间；occurred_at 为本地受理时间",
+  )
 
 
 class PaperExecutionOrderRecord(Base):

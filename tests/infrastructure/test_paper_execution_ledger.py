@@ -333,6 +333,7 @@ async def test_partial_fill_restart_history_idempotency_and_bucket_conservation(
           else await ledger.process_quote(
             execution_id=execution_id,
             event_key=action,
+            accepted_at=(quote(1 if action == "q1" else 2)).timestamp,
             quote=quote(1 if action == "q1" else 2),
           )
         )
@@ -343,7 +344,10 @@ async def test_partial_fill_restart_history_idempotency_and_bucket_conservation(
       before = len(sink.seen)
       assert (
         await ledger.process_quote(
-          execution_id=execution_id, event_key="q1", quote=quote(1)
+          execution_id=execution_id,
+          event_key="q1",
+          accepted_at=(quote(1)).timestamp,
+          quote=quote(1),
         )
       ).duplicate
       assert (
@@ -352,7 +356,10 @@ async def test_partial_fill_restart_history_idempotency_and_bucket_conservation(
       assert len(sink.seen) == before
       with pytest.raises(ValueError, match="IDEMPOTENCY"):
         await ledger.process_quote(
-          execution_id=execution_id, event_key="q1", quote=quote(1, depth=400)
+          execution_id=execution_id,
+          event_key="q1",
+          accepted_at=(quote(1, depth=400)).timestamp,
+          quote=quote(1, depth=400),
         )
       account = await ledger.get_snapshot(execution_id=execution_id)
       assert account["revision"] == 3
@@ -471,7 +478,10 @@ async def test_expired_ready_credentials_cannot_create_new_order_with_fresh_acco
     async with db.begin():
       ledger = PaperExecutionLedger(db, receipt_sink=sink)
       await ledger.process_quote(
-        execution_id=execution_id, event_key="refresh", quote=quote(seconds)
+        execution_id=execution_id,
+        event_key="refresh",
+        accepted_at=(quote(seconds)).timestamp,
+        quote=quote(seconds),
       )
       snapshot = await ledger.get_snapshot(execution_id=execution_id)
       fresh = replace(
@@ -531,6 +541,7 @@ async def test_submission_before_authority_expiry_can_fill_later_within_order_tt
       receipt = await ledger.process_quote(
         execution_id=execution_id,
         event_key="fill-after-auth-expiry",
+        accepted_at=(quote(31, depth=400)).timestamp,
         quote=quote(31, depth=400),
       )
       assert receipt.result_payload["orders"][0]["status"] == "FILLED"
@@ -559,7 +570,10 @@ async def test_ttl_quote_releases_bucket_reservation_without_fill(sessions, sink
       ledger = PaperExecutionLedger(db, receipt_sink=sink)
       await ledger.place_order(execution_id=execution_id, **args)
       receipt = await ledger.process_quote(
-        execution_id=execution_id, event_key="expired", quote=quote(60)
+        execution_id=execution_id,
+        event_key="expired",
+        accepted_at=(quote(60)).timestamp,
+        quote=quote(60),
       )
       assert receipt.result_payload["fill_ids"] == []
       assert receipt.result_payload["orders"][0]["status"] == "EXPIRED"
@@ -575,7 +589,10 @@ async def test_cancel_and_empty_fill_quote_are_atomic_events(sessions, sink):
       ledger = PaperExecutionLedger(db, receipt_sink=sink)
       await ledger.place_order(execution_id=execution_id, **args)
       empty = await ledger.process_quote(
-        execution_id=execution_id, event_key="no-depth", quote=quote(1, depth=0)
+        execution_id=execution_id,
+        event_key="no-depth",
+        accepted_at=(quote(1, depth=0)).timestamp,
+        quote=quote(1, depth=0),
       )
       assert empty.result_payload["fill_ids"] == []
       cancelled = await ledger.cancel(
@@ -611,7 +628,10 @@ async def test_exit_sell_uses_real_risk_substitution_and_exact_source_owner(
       ledger = PaperExecutionLedger(db, receipt_sink=sink)
       await ledger.place_order(execution_id=execution_id, **buy_args)
       await ledger.process_quote(
-        execution_id=execution_id, event_key="buy-filled", quote=quote(1, depth=400)
+        execution_id=execution_id,
+        event_key="buy-filled",
+        accepted_at=(quote(1, depth=400)).timestamp,
+        quote=quote(1, depth=400),
       )
       plan_id = "paper-exit-plan"
       db.add(
@@ -712,7 +732,10 @@ async def test_exit_sell_uses_real_risk_substitution_and_exact_source_owner(
     async with db.begin():
       ledger = PaperExecutionLedger(db, receipt_sink=sink)
       result = await ledger.process_quote(
-        execution_id=execution_id, event_key="sell-filled", quote=quote(3, depth=400)
+        execution_id=execution_id,
+        event_key="sell-filled",
+        accepted_at=(quote(3, depth=400)).timestamp,
+        quote=quote(3, depth=400),
       )
       assert result.result_payload["orders"][0]["status"] == "FILLED"
       snapshot = await ledger.get_snapshot(execution_id=execution_id)
@@ -722,7 +745,10 @@ async def test_exit_sell_uses_real_risk_substitution_and_exact_source_owner(
       assert buckets["core"]["today_buy_volume"] == 100
       assert buckets["core"]["available_volume"] == 900
       await ledger.process_quote(
-        execution_id=execution_id, event_key="next-day", quote=quote(86400)
+        execution_id=execution_id,
+        event_key="next-day",
+        accepted_at=(quote(86400)).timestamp,
+        quote=quote(86400),
       )
       snapshot = await ledger.get_snapshot(execution_id=execution_id)
       assert (

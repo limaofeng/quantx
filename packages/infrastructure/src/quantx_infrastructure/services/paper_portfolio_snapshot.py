@@ -53,7 +53,10 @@ from quantx_infrastructure.services.account_capacity_service import (
   AccountCapacityService,
   paper_pending_buy_cash,
 )
-from quantx_infrastructure.services.paper_execution_ledger import _stored_time
+from quantx_infrastructure.services.paper_execution_ledger import (
+  _quote_event_clock,
+  _stored_time,
+)
 from quantx_infrastructure.services.t_allocation_serialization import (
   allocation_evidence,
 )
@@ -354,8 +357,9 @@ class PaperPortfolioSnapshotReader:
           PaperExecutionEventRecord.revision == account.revision,
           and_(
             PaperExecutionEventRecord.event_type == "QUOTE",
-            PaperExecutionEventRecord.occurred_at >= close_start,
-            PaperExecutionEventRecord.occurred_at <= close_end,
+            PaperExecutionEventRecord.quote_source_at >= close_start,
+            PaperExecutionEventRecord.quote_source_at <= close_end,
+            PaperExecutionEventRecord.occurred_at <= as_of,
           ),
         ),
       )
@@ -367,6 +371,8 @@ class PaperPortfolioSnapshotReader:
     event_map = {}
     for event in events:
       occurred = _not_future(event.occurred_at, as_of)
+      if event.event_type == "QUOTE":
+        _quote_event_clock(event)
       if (
         event.environment != "PAPER"
         or not 1 <= event.revision <= account.revision

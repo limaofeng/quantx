@@ -65,7 +65,12 @@ async def test_partial_buy_cancel_cash_and_single_public_protection(sessions):
     assert ordered.available_cash == Decimal("100000") - paper_pending_buy_cash(order)
     assert ordered.unclaimed_volume == 900
     assert ordered.obligation_watermark != before.obligation_watermark
-    await ledger.process_quote(execution_id=scope, event_key="partial", quote=quote(1))
+    await ledger.process_quote(
+      execution_id=scope,
+      event_key="partial",
+      accepted_at=(quote(1)).timestamp,
+      quote=quote(1),
+    )
     partial = await capacity(db, scope)
     account = await db.get(PaperExecutionAccountRecord, scope)
     assert partial.unclaimed_volume == 900  # 50 filled + 50 pending, not +plan 50.

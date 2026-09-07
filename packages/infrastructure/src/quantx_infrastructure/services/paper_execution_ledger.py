@@ -61,6 +61,25 @@ def _stored_time(value):
   return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _quote_event_clock(event):
+  """One clock binding for immutable QUOTE evidence read by public services."""
+  try:
+    source = _utc(datetime.fromisoformat(event.input_payload["quote"]["timestamp"]))
+    accepted = _utc(datetime.fromisoformat(event.input_payload["accepted_at"]))
+    occurred = _stored_time(event.occurred_at)
+    if (
+      event.event_type != "QUOTE"
+      or event.quote_source_at is None
+      or _stored_time(event.quote_source_at) != source
+      or source > occurred
+      or accepted != occurred
+    ):
+      raise ValueError("clock mismatch")
+  except (KeyError, TypeError, ValueError, AttributeError) as exc:
+    raise ValueError("PAPER_QUOTE_EVENT_CLOCK_CONFLICT") from exc
+  return source, accepted
+
+
 def _bucket_dump(ledger):
   values = ledger.to_dict()
   values.pop("run_id")
@@ -303,13 +322,25 @@ class PaperExecutionLedger:
     )
 
   async def process_quote(
-    self, *, execution_id: str, event_key: str, quote: MarketDataSnapshot
+    self,
+    *,
+    execution_id: str,
+    event_key: str,
+    quote: MarketDataSnapshot,
+    accepted_at: datetime,
   ):
-    now = _utc(quote.timestamp)
+    now = _utc(accepted_at)
+    if _utc(quote.timestamp) > now:
+      raise ValueError("PAPER_QUOTE_SOURCE_AFTER_ACCEPTANCE")
     quote = copy.deepcopy(quote)
-    quote.timestamp = now
+    quote.timestamp = _utc(quote.timestamp)
     return await self._operate(
-      execution_id, event_key, "QUOTE", {"quote": _json(quote)}, now, quote=quote
+      execution_id,
+      event_key,
+      "QUOTE",
+      {"quote": _json(quote), "accepted_at": now.isoformat()},
+      now,
+      quote=quote,
     )
 
   async def cancel(
@@ -421,7 +452,9 @@ class PaperExecutionLedger:
           order_id=payload["order_id"], request=request, now=now
         )
       elif kind == "QUOTE":
-        result = await matcher.process_quote(event_id=event_id, quote=quote)
+        result = await matcher.process_quote(
+          event_id=event_id, quote=quote, accepted_at=now
+        )
       else:
         result = await matcher.cancel(order_id=payload["order_id"], now=now)
       for trade in result.trades:
@@ -440,6 +473,7 @@ class PaperExecutionLedger:
         "snapshot_hash": fingerprint,
         "orders": _json(result.orders),
         "trades": _json(result.trades),
+        "reason_codes": list(result.reason_codes),
       }
       event = PaperExecutionEventRecord(
         event_id=event_id,
@@ -454,6 +488,7 @@ class PaperExecutionLedger:
         previous_snapshot_hash=account.snapshot_hash,
         resulting_snapshot_hash=fingerprint,
         occurred_at=now,
+        quote_source_at=_utc(quote.timestamp) if kind == "QUOTE" else None,
       )
       self.db.add(event)
       await self.db.flush()

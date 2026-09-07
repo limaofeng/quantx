@@ -35,7 +35,8 @@ from quantx_domain.trading.exit_plan import TradingCostPolicy
 from quantx_domain.trading.market_rules import MarketDataSnapshot
 from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
 
-PAPER_MATCHING_POLICY_VERSION = "paper-strict-book-v1"
+PAPER_MATCHING_POLICY_VERSION = "paper-strict-book-v2"
+PAPER_QUOTE_SAME_SOURCE_NO_NEW_LIQUIDITY = "PAPER_QUOTE_SAME_SOURCE_NO_NEW_LIQUIDITY"
 PAPER_TRADING_COST_POLICY = TradingCostPolicy(
   commission_rate=0.0003,
   minimum_commission=5.0,
@@ -131,6 +132,7 @@ class _StrictPaperBroker(BacktestBroker):
     self.scope_execution_id = scope_execution_id
     self.next_order_id = None
     self.quote_event_id = None
+    self.quote_has_new_liquidity = True
     self.filling_order = None
 
   def generate_order_id(self):
@@ -157,11 +159,17 @@ class _StrictPaperBroker(BacktestBroker):
       self.filling_order = None
 
   async def _process_pending_orders(self, instrument_code, price):
+    if not self.quote_has_new_liquidity:
+      return
     pending = self.pending_orders
     # A different symbol may share a timestamp. Never grant a new order the
     # same timestamp's liquidity, even if an event id happens to differ.
+    source_time = self.market_snapshots[instrument_code].timestamp
     self.pending_orders = [
-      order for order in pending if order.submit_time < self.current_time
+      order
+      for order in pending
+      if order.submit_time < source_time
+      and source_time.date() == self.current_time.date()
     ]
     try:
       await super()._process_pending_orders(instrument_code, price)
@@ -201,6 +209,7 @@ class PaperMatchingResult:
   trades: tuple[TradeRecord, ...]
   account: AccountInfo
   duplicate: bool = False
+  reason_codes: tuple[str, ...] = ()
 
 
 class PaperBrokerMatching:
@@ -316,12 +325,15 @@ class PaperBrokerMatching:
       self._broker.next_order_id = None
 
   async def process_quote(
-    self, *, event_id: str, quote: MarketDataSnapshot
+    self, *, event_id: str, quote: MarketDataSnapshot, accepted_at: datetime
   ) -> PaperMatchingResult:
     _identity(event_id)
     self._validate_quote(quote)
     quote = copy.deepcopy(quote)
     quote.timestamp = _time(quote.timestamp)
+    accepted_at = _time(accepted_at)
+    if quote.timestamp > accepted_at:
+      raise ValueError("PAPER_QUOTE_SOURCE_AFTER_ACCEPTANCE")
     witness = stable_manifest_hash(_json(quote))
     previous_event = next(
       (
@@ -332,36 +344,47 @@ class PaperBrokerMatching:
       None,
     )
     if previous_event is not None:
-      if witness != previous_event["quote_hash"]:
+      if witness != previous_event["quote_hash"] or accepted_at != _time(
+        datetime.fromisoformat(previous_event["accepted_at"])
+      ):
         raise ValueError("PAPER_QUOTE_IDEMPOTENCY_CONFLICT")
       return await self._result(
         {key: _json(value) for key, value in self._broker.orders.items()},
         len(self._broker.trades),
         duplicate=True,
+        reason_codes=tuple(previous_event["reason_codes"]),
       )
     previous_quote = self._broker.market_snapshots.get(quote.instrument_code)
-    if quote.timestamp < self._broker.current_time or (
-      previous_quote is not None and quote.timestamp <= previous_quote.timestamp
+    if accepted_at < self._broker.current_time or (
+      previous_quote is not None and quote.timestamp < previous_quote.timestamp
     ):
       raise ValueError("PAPER_QUOTE_NOT_CAUSAL")
+    same_source = (
+      previous_quote is not None and quote.timestamp == previous_quote.timestamp
+    )
+    reason_codes = (PAPER_QUOTE_SAME_SOURCE_NO_NEW_LIQUIDITY,) if same_source else ()
     before = self.export_checkpoint()
     previous = {key: _json(value) for key, value in self._broker.orders.items()}
     trade_count = len(self._broker.trades)
     try:
       self._broker.quote_event_id = event_id
+      self._broker.quote_has_new_liquidity = not same_source
       await self._broker.update_market_data(
-        quote.instrument_code, quote.price, quote.timestamp, market_data=quote
+        quote.instrument_code, quote.price, accepted_at, market_data=quote
       )
       self._latest_quote_events[quote.instrument_code] = {
         "event_id": event_id,
         "quote_hash": witness,
+        "accepted_at": accepted_at.isoformat(),
+        "reason_codes": list(reason_codes),
       }
-      return await self._result(previous, trade_count)
+      return await self._result(previous, trade_count, reason_codes=reason_codes)
     except Exception:
       self._load(before)
       raise
     finally:
       self._broker.quote_event_id = None
+      self._broker.quote_has_new_liquidity = True
 
   async def cancel(self, *, order_id: str, now: datetime) -> PaperMatchingResult:
     _identity(order_id)
@@ -379,7 +402,9 @@ class PaperBrokerMatching:
       self._load(before)
       raise
 
-  async def _result(self, previous, trade_count, *, duplicate=False, order_id=None):
+  async def _result(
+    self, previous, trade_count, *, duplicate=False, order_id=None, reason_codes=()
+  ):
     orders = tuple(
       copy.deepcopy(order)
       for key, order in self._broker.orders.items()
@@ -390,6 +415,7 @@ class PaperBrokerMatching:
       tuple(copy.deepcopy(self._broker.trades[trade_count:])),
       copy.deepcopy(await self._broker.get_account()),
       duplicate,
+      tuple(reason_codes),
     )
     # Copy the complete step result before discarding terminal/history data.
     self._broker.orders = {
@@ -507,6 +533,11 @@ class PaperBrokerMatching:
         _json(quote)
       ):
         raise ValueError("PAPER_CHECKPOINT_QUOTE_WITNESS_CONFLICT")
+      accepted_at = _time(datetime.fromisoformat(event["accepted_at"]))
+      if event["reason_codes"] not in ([], [PAPER_QUOTE_SAME_SOURCE_NO_NEW_LIQUIDITY]):
+        raise ValueError("PAPER_CHECKPOINT_QUOTE_REASON_CONFLICT")
+      if not quote.timestamp <= accepted_at <= broker.current_time:
+        raise ValueError("PAPER_CHECKPOINT_QUOTE_TIME_CONFLICT")
     broker.orders = {key: _order(value) for key, value in material["orders"].items()}
     for key, order in broker.orders.items():
       self._validate_request(order.request)

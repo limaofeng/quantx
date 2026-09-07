@@ -131,7 +131,10 @@ async def prepared(sessions, *, stopped=False, reserve=True, bucket="swing"):
     ledger = PaperExecutionLedger(db, receipt_sink=sink)
     await ledger.place_order(execution_id=scope, **args)
     await ledger.process_quote(
-      execution_id=scope, event_key="buy-fill", quote=quote(1, depth=400)
+      execution_id=scope,
+      event_key="buy-fill",
+      accepted_at=(quote(1, depth=400)).timestamp,
+      quote=quote(1, depth=400),
     )
     record = await db.get(AutoExitPlanRecord, "paper-plan")
     plan = ExitPlan.from_dict(record.plan_state)
@@ -256,6 +259,7 @@ async def test_public_route_recovers_and_fills_without_live_reads(sessions, stop
       ).process_quote(
         execution_id=scope,
         event_key="sell-fill",
+        accepted_at=(quote(3)).timestamp,
         quote=quote(3),
       )
       assert (await db.get(AutoExitPlanRecord, "paper-plan")).status == "COMPLETED"
@@ -362,6 +366,7 @@ async def test_actual_risk_rejects_non_trading_checkpoint(sessions, market_chang
     ).process_quote(
       execution_id=scope,
       event_key="blocked-market",
+      accepted_at=(replace(quote(2), **market_change)).timestamp,
       quote=replace(quote(2), **market_change),
     )
   assert await route(sessions, decision, at=3) is None
@@ -457,12 +462,12 @@ async def test_postgresql_public_paper_exit_route_recovery_and_rollback(
   from tests.infrastructure.test_p4_allocation_postgresql import _sessions
 
   # Each closure has its own random schema; both install the actual 0054 head.
-  async with _sessions(head="20260907_0054") as pg_sessions:
+  async with _sessions(head="20260907_0055") as pg_sessions:
     monkeypatch.setattr(auto_exit_plan_service, "AsyncSessionLocal", pg_sessions)
     monkeypatch.setattr(trade_intent_processor, "AsyncSessionLocal", pg_sessions)
     await test_public_route_recovers_and_fills_without_live_reads(pg_sessions, True)
   local_sessions["protected_core_volume"] = 900
-  async with _sessions(head="20260907_0054") as pg_sessions:
+  async with _sessions(head="20260907_0055") as pg_sessions:
     monkeypatch.setattr(auto_exit_plan_service, "AsyncSessionLocal", pg_sessions)
     monkeypatch.setattr(trade_intent_processor, "AsyncSessionLocal", pg_sessions)
     await test_sink_failure_rolls_back_order_then_public_release_preserves_protection(

@@ -42,6 +42,7 @@ from quantx_infrastructure.services.exit_plan_scope_lock import (
 from quantx_infrastructure.services.paper_broker_matching import PaperBrokerMatching
 from quantx_infrastructure.services.paper_execution_ledger import (
   PaperExecutionLedger,
+  _quote_event_clock,
   _stored_time,
 )
 
@@ -203,7 +204,8 @@ async def read_paper_exit_market(
     or event.environment != "PAPER"
     or event.event_type != "QUOTE"
     or not 1 <= event.revision <= snapshot["revision"]
-    or _stored_time(event.occurred_at) != market.timestamp
+    or _quote_event_clock(event)[0] != market.timestamp
+    or _stored_time(event.occurred_at) > now
     or quote_material(event.input_payload.get("quote"))
     != quote_material(material["market_snapshots"][instrument_code])
     or event.input_hash

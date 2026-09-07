@@ -293,7 +293,7 @@ async def test_postgresql_coordinator_uses_actual_evidence_reader_and_constraint
 ):
   from tests.infrastructure.test_p4_allocation_postgresql import _sessions
 
-  async with _sessions(head="20260907_0054") as isolated:
+  async with _sessions(head="20260907_0055") as isolated:
     await test_real_strategy_candidate_uses_original_liquidity_on_allocation(
       isolated,
       frozen_config,

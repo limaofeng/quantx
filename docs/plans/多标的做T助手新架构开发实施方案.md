@@ -806,6 +806,25 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   存续经济义务的 Engine 行情 pump、最终 ranked entry dispatcher 及多标的整链仍在推进。
   未完成 GraphQL/Web，P4 保持 IN_PROGRESS，没有业务库/服务启停/真实交易操作。
 
+### P4 PAPER 行情双时钟检查点（2026-09-07）
+
+- `paper-strict-book-v2` 保留原始行情源时间，显式传入受理时间；账户、订单超时与成交事实按
+  受理时间推进，成交只消费下单后、同交易日的新源时间流动性。跨标的延迟行情不重打源时间。
+  同源时间的新批次可更新盘口和 TTL，但返回并持久化
+  `PAPER_QUOTE_SAME_SOURCE_NO_NEW_LIQUIDITY`，不重复成交。UTC/+08 同一时刻重试得到同一事实。
+- 0055 增加 `quote_source_at`、源时间索引、事件/成交双时钟约束和 v2 policy 门。
+  旧 PAPER 账户非空时在任何 DDL 前拒绝升级，不改写 seed、checkpoint 或不可变哈希链；
+  本轮仅在随机隔离 schema 验证，未操作业务库或启停服务。
+- 验证：matcher/双时钟/账本/真实回报定向 `61 passed, 2 skipped`；主代理补验实际策略候选、
+  最终 Gate、分配、估值、公共退出、容量及 seed 边界 `85 passed, 5 skipped`。
+  跳过项为显式 PG 门。PG 双时钟及升级拒绝门 `2 passed`（句柄 55776，3 schema），
+  reader/公共退出/scope 门 `3 passed`（75752，4 schema）；同源整改后定向 PG `1 passed`
+  （58347，2 schema，52.90s），均 exit 0 且隔离 schema 清理完成。日志见
+  `.codex_screenshots/p4-paper-clocks-postgresql.log`、
+  `p4-paper-clocks-integration-postgresql.log`、`p4-paper-same-source-postgresql.log`。
+- P4 保持 `IN_PROGRESS`。运行时 seed/readiness、停用收敛、排名派单恢复与候选反馈正在接线；
+  全链多标的重放和 GraphQL/Web 只读投影仍需最终验收，不将组件验证写为阶段完成。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

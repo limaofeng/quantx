@@ -280,7 +280,10 @@ async def test_real_gate_sizer_risk_and_public_receipt_path(sessions, review_evi
     )
     assert repeated.outcome == "DUPLICATE"
     await PaperExecutionLedger(db, receipt_sink=sink).process_quote(
-      execution_id=scope, event_key="next-quote", quote=quote(2, depth=400)
+      execution_id=scope,
+      event_key="next-quote",
+      quote=quote(2, depth=400),
+      accepted_at=quote(2).timestamp,
     )
     assert (
       await db.get(PaperExecutionOrderRecord, result.order_id)
@@ -436,7 +439,10 @@ async def test_history_recovers_after_stop_expiry_and_new_tick_without_new_event
       now=quote(1).timestamp,
     )
     await PaperExecutionLedger(db, receipt_sink=sink).process_quote(
-      execution_id=scope, event_key="fill", quote=quote(2, depth=400)
+      execution_id=scope,
+      event_key="fill",
+      quote=quote(2, depth=400),
+      accepted_at=quote(2).timestamp,
     )
     repository = TAssistantExecutionRepository(db)
     current = await repository.get_domain(scope)

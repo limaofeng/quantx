@@ -56,20 +56,26 @@ def storage_time(model, field, value):
   os.environ.get("QUANTX_RUN_MIGRATION_GATE") != "true",
   reason="isolated PostgreSQL migration gate",
 )
-@pytest.mark.parametrize("scenario", ["obligations", "allocation_recovery"])
+@pytest.mark.parametrize(
+  "scenario", ["obligations", "allocation_recovery", "delayed_close"]
+)
 async def test_postgresql_portfolio_cut_uses_actual_paper_obligations(
-  frozen_config, scenario
+  frozen_config, scenario, monkeypatch
 ):
   from tests.infrastructure.test_p4_allocation_postgresql import (
     _sessions as migrated_sessions,
   )
 
-  async with migrated_sessions(head="20260907_0054") as sessions:
+  async with migrated_sessions(head="20260907_0055") as sessions:
     if scenario == "obligations":
       await test_actual_pending_partial_daily_pnl_and_watermark(sessions, frozen_config)
-    else:
+    elif scenario == "allocation_recovery":
       await test_unallocated_reader_prepare_restart_claim_commit_keeps_source_cut(
         sessions, frozen_config
+      )
+    else:
+      await test_next_day_t_pnl_requires_actual_close_window(
+        sessions, frozen_config, monkeypatch, 60
       )
     async with sessions() as db:
       from sqlalchemy import text
@@ -77,10 +83,10 @@ async def test_postgresql_portfolio_cut_uses_actual_paper_obligations(
       definition = await db.scalar(
         text(
           "SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() "
-          "AND indexname='ix_paper_event_scope_type_time'"
+          "AND indexname='ix_paper_event_scope_quote_source'"
         )
       )
-      assert "(execution_id, event_type, occurred_at)" in definition
+      assert "(execution_id, event_type, quote_source_at)" in definition
 
 
 def reference_payload():
@@ -273,7 +279,12 @@ async def test_actual_pending_partial_daily_pnl_and_watermark(sessions, frozen_c
     pending = await read(db, scope)
     assert pending.uncovered_buy_amount == Decimal("995.00990000")
     assert pending.active_batch_count == 1
-    await ledger.process_quote(execution_id=scope, event_key="partial", quote=quote(1))
+    await ledger.process_quote(
+      execution_id=scope,
+      event_key="partial",
+      accepted_at=(quote(1)).timestamp,
+      quote=quote(1),
+    )
     partial = await read(db, scope, at=quote(1).timestamp)
     assert partial.uncovered_buy_amount == Decimal("495.00495000")
     assert partial.current_t_exposure == Decimal("500.00495000")
@@ -451,10 +462,16 @@ async def test_non_candidate_t_exposure_still_counts_in_account_and_industry(
   async with sessions() as db, db.begin():
     ledger = PaperExecutionLedger(db, receipt_sink=sink)
     await ledger.place_order(execution_id=scope, **args)
-    await ledger.process_quote(execution_id=scope, event_key="partial", quote=quote(1))
+    await ledger.process_quote(
+      execution_id=scope,
+      event_key="partial",
+      accepted_at=(quote(1)).timestamp,
+      quote=quote(1),
+    )
     await ledger.process_quote(
       execution_id=scope,
       event_key="candidate-B",
+      accepted_at=(replace(quote(1), instrument_code="000001.SZ")).timestamp,
       quote=replace(quote(1), instrument_code="000001.SZ"),
     )
     value = await read(db, scope, at=quote(1).timestamp, codes=("000001.SZ",))
@@ -488,16 +505,23 @@ async def test_next_day_t_pnl_requires_actual_close_window(
     ledger = PaperExecutionLedger(db, receipt_sink=sink)
     await ledger.place_order(execution_id=scope, **args)
     await ledger.process_quote(
-      execution_id=scope, event_key="buy", quote=quote(1, depth=400)
+      execution_id=scope,
+      event_key="buy",
+      accepted_at=(quote(1, depth=400)).timestamp,
+      quote=quote(1, depth=400),
     )
     if closing_second is not None:
       await ledger.process_quote(
-        execution_id=scope, event_key="close", quote=quote(closing_second)
+        execution_id=scope,
+        event_key="close",
+        accepted_at=(quote(closing_second + 10)).timestamp,
+        quote=quote(closing_second),
       )
     next_day = datetime(2026, 9, 4, 1, 30, tzinfo=UTC)
     await ledger.process_quote(
       execution_id=scope,
       event_key="next-day",
+      accepted_at=(quote(int((next_day - start).total_seconds()))).timestamp,
       quote=quote(int((next_day - start).total_seconds())),
     )
     if closing_second == 60:
@@ -578,7 +602,12 @@ async def test_error_plan_blocks_entry_and_no_live_query(sessions, frozen_config
   async with sessions() as db, db.begin():
     ledger = PaperExecutionLedger(db, receipt_sink=sink)
     await ledger.place_order(execution_id=scope, **args)
-    await ledger.process_quote(execution_id=scope, event_key="partial", quote=quote(1))
+    await ledger.process_quote(
+      execution_id=scope,
+      event_key="partial",
+      accepted_at=(quote(1)).timestamp,
+      quote=quote(1),
+    )
     row = await db.get(AutoExitPlanRecord, "paper-plan")
     plan = ExitPlan.from_dict(row.plan_state)
     plan.status = ExitPlanStatus.ERROR
@@ -634,7 +663,12 @@ async def test_future_plan_error_clear_cannot_unblock_old_cut(sessions, frozen_c
   async with sessions() as db, db.begin():
     ledger = PaperExecutionLedger(db, receipt_sink=sink)
     await ledger.place_order(execution_id=scope, **args)
-    await ledger.process_quote(execution_id=scope, event_key="partial", quote=quote(1))
+    await ledger.process_quote(
+      execution_id=scope,
+      event_key="partial",
+      accepted_at=(quote(1)).timestamp,
+      quote=quote(1),
+    )
     row = await db.get(AutoExitPlanRecord, "paper-plan")
     row.status = "ERROR"
     await db.flush()
@@ -694,6 +728,9 @@ async def test_closed_zero_balance_A_does_not_need_mark_or_industry_when_B_is_he
     await ledger.process_quote(
       execution_id=scope,
       event_key="healthy-B",
+      accepted_at=(
+        replace(original_quote(3), instrument_code="000001.SZ", timestamp=cutoff)
+      ).timestamp,
       quote=replace(original_quote(3), instrument_code="000001.SZ", timestamp=cutoff),
     )
     account = await db.get(PaperExecutionAccountRecord, scope)
@@ -801,7 +838,7 @@ async def test_quote_history_growth_does_not_expand_portfolio_event_read(
         return result
       sql = str(statement).lower()
       assert "event_id in" in sql and "revision =" in sql
-      assert "occurred_at >=" in sql and "occurred_at <=" in sql
+      assert "quote_source_at >=" in sql and "quote_source_at <=" in sql
       assert statement._for_update_arg is None
 
       def observed_all():
@@ -814,7 +851,10 @@ async def test_quote_history_growth_does_not_expand_portfolio_event_read(
     monkeypatch.setattr(db, "scalars", observed_scalars)
     for second in range(1, 26):
       await ledger.process_quote(
-        execution_id=scope, event_key=f"tick-{second}", quote=quote(second)
+        execution_id=scope,
+        event_key=f"tick-{second}",
+        accepted_at=(quote(second)).timestamp,
+        quote=quote(second),
       )
       if second in (5, 25):
         snapshot = await read(db, scope, at=quote(second).timestamp)
