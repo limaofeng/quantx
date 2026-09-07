@@ -1898,6 +1898,10 @@ ACTIVE:
 
 ### 15.1 共享账户，而不是每票独立资金
 
+阶段边界：本节描述最终回测能力。P5 仅验收 RULE_ONLY 共享账户回测；下述模型
+Feature Bar/scorer、模型时间版本及校准/OOD/模型增量结果在 P8 接入并验收。
+P5 保持统一事件时间线与公共执行语义，不提前实现模型栈，也不以模型缺失阻断 RULE_ONLY。
+
 多标的做 T 回测必须只有一个 `BacktestPortfolio`：
 
 - 每个回测版本创建独立 `TAssistantExecution(environment=BACKTEST)`，不创建 `StrategyRun`；

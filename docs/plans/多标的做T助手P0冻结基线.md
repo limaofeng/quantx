@@ -393,6 +393,10 @@ ExitPlan、不修改历史成交、不把未成交假设为已退出。收盘策
 
 ## 10. CANARY + MANUAL_CONFIRM → AUTO 退出门
 
+后续实施归属澄清（2026-09-07，不修改本节冻结数值）：本节所需演练和人工灰度
+证据由 P6 完成，P7 复用有效证据并补充 AUTO 等新增路径。本节不定义 P5 回测策略
+准入数值，也不定义 AUTO 运行后的观察期/回撤门；二者须按实施方案在相应批次前另行确认。
+
 `CANARY` 和 `MANUAL_CONFIRM` 是两个正交维度。P0 只冻结从受限的
 `CANARY + MANUAL_CONFIRM` execution 创建一个新的 AUTO successor 的退出门；不得原地把旧
 execution 改成 AUTO，也不因满足数量门槛而跳过 owner、账户或 QMT 门禁。既有 ExitPlan 仍由

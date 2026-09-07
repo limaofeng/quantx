@@ -1,8 +1,8 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
 > 状态：`IN_PROGRESS`（P0—P3 已完成；P4 进行中，尚未通过退出门）<br>
-> 版本：2.2<br>
-> 日期：2026-09-03<br>
+> 版本：2.3<br>
+> 日期：2026-09-07<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
 > 开发实施进度：4 / 9 个阶段门完成（44.4%）
@@ -52,6 +52,22 @@ development_progress = DONE_phase_count / 9
 
 模型阶段不是 RULE_ONLY 上线的前置，但仍计入本方案总阶段数；需要分别展示“规则核心上线状态”
 和“完整方案状态”，避免模型后置让已完成的安全核心看起来未交付。
+
+### 1.3 后续执行批次与成本边界
+
+本方案为 P0–P8 共九阶段，没有 P9。P5–P8 默认单代理、一次一个可验收批次；
+完成该批实现、定向验证、必要文档和提交后结束任务，不自动进入下一批。
+这不是缩减阶段退出门；批次完成与阶段 DONE 分别记录。
+
+每批启动前固定：输入提交/接口、写入范围、退出条件、必要验证、外部环境依赖和不包含项。
+若发现范围外的必需依赖，记录缺口及建议后续批次，不自行吸收新工程；保留已完成证据。
+交接仅保留提交、接口、验证及剩余项，新批次使用新任务，避免反复加载全部实施历史。
+同一检查点更新当前结论，历史细节引用已有提交/日志，不持续追加重复过程报告。
+
+实现、固定数据评估、维护窗口和交易观察分开授权。等待行情、训练或交易日不要求模型
+持续运行；不得通过反复查询和审计代替外部证据。未通过评估只报告结果及原因，不自动调参。
+首个 P5 实现批次记录可取得的主任务总 token、缓存输入、输出和耗时，作为后续预算参考；
+统计不可得时标明未知，不估造数字。预算未约定不等于允许无限扩展范围。
 
 ## 2. 文档关系与权威边界
 
@@ -143,7 +159,7 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 
 ### 3.3 全局后置任务
 
-只有在 P7 完成且 legacy 义务归零后，才允许：
+只有在 P7 的故障、性能及 AUTO 观察门通过且 legacy 义务归零后，才允许执行 P7 收尾：
 
 - 删除旧做 T StrategyRun 专用 scheduler、状态 callback、fallback 和旧 GraphQL 入口；
 - 把 `系统架构设计.md` 的做 T 主路径改写为 TAssistantExecution As-Is；
@@ -282,7 +298,25 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 - [ ] `TTA-P5-03` 加入多标的同时信号、部分成交、T+1 substitution、截止时间与 overnight carry。
 - [ ] `TTA-P5-04` 证明无未来数据、无重复资金、无超老仓、结果 hash 可重放，并对比旧单票假设。
 
-退出门：组合回测结果可审计且守恒；RULE_ONLY 在费用、滑点和最坏分组下达到 P0 冻结的准入门。
+范围：本阶段只交付 RULE_ONLY。复用已实现的公共规则与执行语义，但不得将 PAPER
+execution 改名为 BACKTEST、放宽环境隔离检查或复制一套协调/风控规则。先明确 BACKTEST
+时钟、账户事实、Broker、容量和回报端口；模型 scorer、校准/OOD 及模型增量指标归 P8。
+
+按顺序分批：
+
+| 批次 | 范围与验收 | 不包含 |
+|---|---|---|
+| P5-A | BACKTEST 身份、共享账户/时钟/事实边界；真实公共路径双标的最小买卖闭环、守恒与重放 | 模型、Web 新界面、大规模评估 |
+| P5-B | 部分成交、T+1 substitution、cutoff、overnight、同刻排序及未来数据负测 | 调整策略以提高收益 |
+| P5-C | 冻结数据/费用/滑点和分组后运行评估，保存版本、hash、旧单票对照及准入结论 | 无限调参或因失败更换评估样本 |
+
+退出门分为两部分，均通过才可标 P5 DONE 并解除 P6 前置：
+
+- 工程门：组合结果可审计、守恒、环境隔离、无未来数据且可重放。
+- 策略准入门：按预先冻结的费用、滑点和最坏分组标准出具结论。P0 未给出此门的完整数值，
+  不再将其称为“P0 已冻结”。评估数据范围、费用/滑点情景、收益/回撤指标与阈值、最坏分组
+  定义及最小样本要求须由用户确认并在 P5-C 前记录版本。未确认可完成 P5-A/B，不能完成
+  P5-C 准入或开放 LIVE；评估不通过时保留证据、阻断 P6，不自动进入策略优化。
 
 ### P6：LIVE / CANARY / MANUAL_CONFIRM
 
@@ -296,7 +330,17 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 - [ ] `TTA-P6-06` 完成 P0 冻结数量的闭环与观察期；每轮无重复单、超现金、超老仓、T+1 或 owner
   违规，且所有不执行都有 reason code。
 
-退出门：人工灰度证据满足门槛；旧/新 owner 没有同时产生新 ENTRY；结果未知和隔夜事实均安全。
+按顺序分批：P6-A 完成人工确认后的全链重验、旧 owner 排空/切换和恢复的隔离验证；
+P6-B 提交具体维护窗口与低额度 CANARY 操作方案，获明确授权后执行；P6-C 收集交易观察证据。
+P6-A 不授权业务库切换或真实订单，P6-C 不使用持续代理循环等待交易日。
+
+P0 §10 已要求的 Engine/API/QMT 断连、乱序回报、lease 过期、撤单未确认、收盘和恢复演练，
+由 P6-A 首先完成隔离证据，实际运行边界在获授权窗口验证；不得等待 P7 才完成 P6 必需演练。
+P7 对已有且仍有效的证据直接引用，仅增加其新故障、并发、性能和 AUTO 路径。
+
+退出门：按 P0 §10 保留至少 20 闭环、5 交易日、3 标的及全部额度/安全/追溯门，
+旧/新 owner 无同时新 ENTRY、未知与隔夜事实安全。数量不足继续收集证据，不制造交易凑数；
+观察未结束只记未完成，不让实现任务无限延长。
 
 ### P7：故障注入、稳定性与 LIVE/AUTO
 
@@ -307,10 +351,22 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 - [ ] `TTA-P7-02` 压测逐 Tick reducer、组合触发合并和 model-off 路径；阈值超过时 fail-closed。
 - [ ] `TTA-P7-03` 验证跨域 READY BUY 同时到达、账户水位变化和 batch rollback 的确定顺序。
 - [ ] `TTA-P7-04` 以新 config/successor 显式切换 AUTO；不原地修改 MANUAL_CONFIRM execution。
-- [ ] `TTA-P7-05` 完成 P0 冻结的 AUTO 观察期、回撤/熔断/运营验收，并保留一键阻断新 ENTRY。
+- [ ] `TTA-P7-05` 按另行冻结的 AUTO 观察期、回撤/熔断/运营标准验收，并保留一键阻断新 ENTRY。
+  P0 §10 是人工灰度到 AUTO 的前置门，不是 AUTO 运行后观察标准，不得冒用。
 - [ ] `TTA-P7-06` legacy 做 T 自身 BUY 义务归零后删除专用调度和 fallback；更新 As-Is 文档。
 
-退出门：所有恢复路径无重复订单、无释放后反证穿透、无双 producer；AUTO 可被显式阻断且退出继续。
+按顺序分批：P7-A 固定故障矩阵，注明已有证据和新增场景；P7-B 验证性能、确定顺序和
+AUTO successor/阻断控制；P7-C 在明确授权后切换并收集 AUTO 观察证据；P7-D 在 legacy
+自身 BUY 义务归零并完成对账后清理。不得因一次缺陷无限展开故障组合；新增必需场景须说明
+受影响不变量，既有证据仅在代码或环境变化导致失效时重跑。
+
+P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断阈值、运营指标及失败处置，
+记录版本；这些值当前待确认。未确认不启动 AUTO 真实运行，不以人工灰度数值自动代替。
+隔离实现和测试可先完成，任何未通过门都不得通过删测试或缩短观察期解除。
+
+退出门：所有规定恢复路径无重复订单、无释放后反证穿透、无双 producer；AUTO 可被显式
+阻断且退出继续，已冻结的 AUTO 观察门通过。P7-D 属于阶段收尾，仅在前述门及 legacy
+义务门都满足后执行；全局后置门不应解释为必须先标 P7 DONE 才能完成 P7-D。
 
 ### P8：模型 SHADOW 与 ACTIVE
 
@@ -323,6 +379,13 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 - [ ] `TTA-P8-04` Engine CPU 安全加载并运行 SHADOW；分数不改变 RULE_ONLY 排序，缺失不阻断。
 - [ ] `TTA-P8-05` 只有 OOS 组合增量、校准、OOD、制品和人工发布门均通过才创建 ACTIVE successor。
 - [ ] `TTA-P8-06` ACTIVE 故障阻断新 ENTRY 且不静默降级；ExitPlan、回报和账户安全链不受影响。
+
+按顺序独立验收：P8-A 数据/标签/切分资格与制品基础；P8-B 冻结候选、指标、试验次数和
+停止条件后比较 RULE_ONLY/Logistic/LightGBM；P8-C 安全加载与 SHADOW；P8-D 仅在 P7、
+模型准入和人工发布门均通过后创建 ACTIVE successor。FINAL 仍只进行一次。
+数据不足或 OOS 不达标就记录失败/阻塞，不自动扩大数据工程、追加模型或反复训练。
+模型门的完整阈值和实验预算须在 P8-B 前确认，不以工程实现完成替代研究有效性。
+经用户决定可将 P8 标 DEFERRED；它不阻塞已验收的 RULE_ONLY 核心交付。
 
 退出门：模型只改变合格候选排序，不读账户、不直接定量/下单；ACTIVE 证据和人工授权完整。
 
@@ -372,19 +435,15 @@ successor 排空、D-1 profile 和扩大零副作用矩阵；真实 PostgreSQL b
 | 模型 | 三分类校准、purged OOS、OOD、安全制品、SHADOW/ACTIVE | P8 |
 | 前端契约 | codegen、check、lint、test、build，无 `as any` | schema 变化阶段 |
 
-按改动范围执行，至少包括：
+按影响范围选择验证，不把命令列表解释为每批必跑：
 
-```powershell
-python -m pytest tests/
-python -m pytest tests/api/unit/
-
-$env:CODEGEN_GRAPHQL_ENDPOINT="http://127.0.0.1:8080/graphql"
-npm run codegen
-npm run check
-npm run lint
-npm run test:run
-npm run build
-```
+- Python 先目标测试；涉及 API 时选择相关 API 测试。必要扩大回归才运行 `python -m pytest tests/`；
+  全量已覆盖的 API 子集不再重复运行。既有有效证据可引用，但代码/依赖/环境改变影响结论时重跑。
+- GraphQL/schema/查询变化才触发实际 Caddy codegen 与 Web 的 check、lint、test:run、build 全套；
+  执行命令遵守根 AGENTS.md。提前核对在线 schema 与迁移/重启授权，未获授权时报告阻塞，
+  不重复尝试相同旧 schema，不用本地 schema 替代在线验收。
+- 纯文档变更检查差异、引用和契约一致性，不运行 Python/Web 全量测试。
+- 隔离模拟、真实数据库约束、真实运行观察分别记录，不互相替代。
 
 集成和真实交易测试仍受仓库门禁约束。普通验证不得为了方便启动真实交易；P6/P7 的真实闭环必须
 在 `ENV=testing`、账户白名单、`ENABLE_REAL_TRADING=true` 和
@@ -895,3 +954,5 @@ PAPER shadow 协调与周期处理互斥，遗留 PREPARED 清理仅在首次绑
 | 2.0 | 2026-09-03 | P2-01..06 实现与聚焦验证完成：公共 ExitPlanRuntime、账户容量水位、跨域 READY admission、不可漂移 T order v1、0048 迁移前影子检查及故障恢复测试已落地；阶段等待最终审计与提交，不提前开放新 T owner 真实订单。 |
 | 2.1 | 2026-09-03 | 记录 P3 首轮实现与 319 项聚焦回归；最终二审仍发现 callback 恢复、WARMING 候选、同 fence 比较、startup recovery、逐标的 sequence、successor 排空和完整零副作用矩阵等 blocker，因此阶段保持 `IN_PROGRESS`，不提前宣称 closeout。 |
 | 2.2 | 2026-09-03 | 阶段归属纠偏：P2-05 只覆盖当期已存在的公共 intent/outbox、ExitPlan 与 admission 约束；cycle uniques 明确归 P3-05，尚未创建的 allocation batch/decision uniques 明确归 P4-03。这不是省略约束，而是避免 P2 为勾选任务提前创建 P4 表。同时消除 T 退出模板读取任意滑点参数和用 config version 冒充 order-policy version 的遗留，模板、公共路由、精确授权与最终命令门统一绑定 `TExitOrderPolicy.v1`。P2 仍保持 `IN_PROGRESS`。 |
+
+| 2.3 | 2026-09-07 | 明确 P0–P8 编号、单批执行与成本边界；拆分 P5 工程/策略准入，模型能力后置 P8；解除 P6/P7 演练及清理依赖交叉，标明待确认门槛；按影响范围选择验证。既有阶段状态与实盘授权不变。 |
