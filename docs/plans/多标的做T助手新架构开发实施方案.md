@@ -825,6 +825,19 @@ runtime。P1 运行证据、owner 空值=`0`、快照
 - P4 保持 `IN_PROGRESS`。运行时 seed/readiness、停用收敛、排名派单恢复与候选反馈正在接线；
   全链多标的重放和 GraphQL/Web 只读投影仍需最终验收，不将组件验证写为阶段完成。
 
+### P4 候选反馈输入检查点（2026-09-07）
+
+- 标准 PAPER BUY 意图的完成、拒绝、过期、撤销、已路由和待确认状态，按同一
+  execution/account/candidate fingerprint/source time 读取为 `CandidateControl`。
+  读取强制刷新 ORM 缓存，拒绝未来可用时间、重复候选受理和跨绑定证据。
+- 控制量进入 `SymbolDecisionSnapshot` 与 decision manifest hash，经唯一
+  `StrategyBase.step`/symbol reducer 写回；无新 Tick 时也可终结待释放候选并生成材料审计，
+  重试不重复事件，不在派单器直接改 symbol state。snapshot builder 同时提供内存中
+  最新 Tick、ring generation 和 accepted sequence 的原子只读 witness。
+- 验证：领域边界与实际 Engine 回馈 `27 passed`（5.43s），相关 Ruff 通过。
+  本批是运行时接线的组件边界；P4 仍 `IN_PROGRESS`，完整 supervisor/派单恢复和
+  GraphQL/Web 退出门尚未宣告完成。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

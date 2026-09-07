@@ -25,6 +25,7 @@ from quantx_domain.trading.t_assistant_market_state import (
   TickAcceptanceResult,
 )
 from quantx_domain.trading.t_trade_opportunity_engine import (
+  CandidateControl,
   OpportunityGateContext,
   OpportunityReferenceProfile,
 )
@@ -98,6 +99,16 @@ class TDecisionSnapshotBuilder:
     ring = self._rings.setdefault(code, SymbolMarketDeltaRing(code))
     return ring.accept(tick, capture_time_ms=capture_time_ms)
 
+  def entry_market_witness(
+    self,
+    instrument_code: str,
+  ) -> tuple[AcceptedTMarketTick, int, int] | None:
+    """Capture the latest accepted Tick and its current ring epoch/sequence."""
+    ring = self._rings.get(instrument_code.strip().upper())
+    if ring is None or ring.latest_tick is None:
+      return None
+    return ring.latest_tick, ring.ring_generation, ring.last_sequence
+
   def invalidate_symbols(
     self,
     instrument_codes: Iterable[str],
@@ -127,6 +138,7 @@ class TDecisionSnapshotBuilder:
     trade_date: str,
     market_gate_context: OpportunityGateContext,
     market_context: Optional[Mapping[str, Any]] = None,
+    candidate_controls: Optional[Mapping[str, CandidateControl]] = None,
   ) -> TDecisionSnapshot:
     if decision_time.tzinfo is None:
       raise ValueError("T decision time must be timezone-aware")
@@ -205,6 +217,7 @@ class TDecisionSnapshotBuilder:
           draining=entry.draining,
           ignored=entry.ignored,
           blockers=tuple(dict.fromkeys(blockers)),
+          candidate_control=(candidate_controls or {}).get(code, CandidateControl()),
         )
       )
 

@@ -772,6 +772,7 @@ class SymbolDecisionSnapshot:
   draining: bool = False
   ignored: bool = False
   blockers: tuple[str, ...] = ()
+  candidate_control: CandidateControl = field(default_factory=CandidateControl)
 
   def __post_init__(self) -> None:
     code = str(self.instrument_code or "").strip().upper()
@@ -779,6 +780,8 @@ class SymbolDecisionSnapshot:
       raise ValueError("symbol decision snapshot requires instrument_code")
     if self.state.instrument_code != code or self.delta_slice.instrument_code != code:
       raise ValueError("symbol decision snapshot identity mismatch")
+    if not isinstance(self.candidate_control, CandidateControl):
+      raise TypeError("symbol decision snapshot requires typed candidate control")
     object.__setattr__(self, "instrument_code", code)
     object.__setattr__(
       self,
@@ -956,6 +959,7 @@ class TDecisionSnapshot:
           "draining": item.draining,
           "ignored": item.ignored,
           "blockers": list(item.blockers),
+          "candidate_control": item.candidate_control.to_dict(),
         }
         for item in self.symbols
       },
@@ -999,6 +1003,24 @@ class SymbolMarketStateReducer:
     material_events: list[Mapping[str, Any]] = []
     deferred_candidate = previous.deferred_candidate
     deferred_fence = previous.deferred_candidate_fence_sequence
+    control = snapshot.candidate_control
+    if control.awaiting_approval_candidate_id or control.suppress_candidate_id:
+      if type(decision_time_ms) is not int or decision_time_ms < 0:
+        raise ValueError("T_CANDIDATE_CONTROL_TIME_REQUIRED")
+      controlled = transition_candidate(state, control, source_time_ms=decision_time_ms)
+      if controlled != state:
+        material_events.append({
+          "event_type": "T_OPPORTUNITY_CANDIDATE_CONTROL_APPLIED",
+          "instrument_code": snapshot.instrument_code,
+          "candidate_id": state.candidate.candidate_id,
+          "control": control.to_dict(),
+          "source_time_ms": decision_time_ms,
+        })
+        state = controlled
+      if (deferred_candidate is not None
+          and control.suppress_candidate_id == deferred_candidate.candidate_id):
+        deferred_candidate = None
+        deferred_fence = None
     if allow_candidate_creation and deferred_candidate is not None:
       if (
         decision_time_ms is not None
@@ -1044,7 +1066,7 @@ class SymbolMarketStateReducer:
         gate_context=snapshot.gate_context,
         policy=policy,
         reference_profile=snapshot.reference_profile,
-        candidate_control=CandidateControl(),
+        candidate_control=control,
         # Candidate detection is causal market-state work.  Entry readiness
         # controls release, not whether a transient qualifying Tick is kept.
         allow_candidate_creation=True,
