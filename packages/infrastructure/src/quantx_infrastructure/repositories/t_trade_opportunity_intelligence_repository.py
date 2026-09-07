@@ -1031,7 +1031,7 @@ def _prepare_evaluation(
   )
   normalized_payload = _json_object(payload, "评估载荷")
   normalized_candidate_id = (
-    _evaluation_candidate_id(normalized_payload)
+    _evaluation_candidate_id(normalized_payload, event_type=normalized_event_type)
     if normalized_kind == T_TRADE_EVALUATION_KIND_MATERIAL
     else None
   )
@@ -1200,7 +1200,14 @@ def _evaluation_fingerprint(prepared: Mapping[str, Any]) -> str:
   )
 
 
-def _evaluation_candidate_id(payload: dict[str, Any]) -> str | None:
+def _evaluation_candidate_id(payload: dict[str, Any], *, event_type: str) -> str | None:
+  if event_type == "T_OPPORTUNITY_CANDIDATE_FROZEN":
+    evidence = payload.get("candidate_evidence")
+    candidate = evidence.get("candidate") if isinstance(evidence, dict) else None
+    raw = candidate.get("candidate_id") if isinstance(candidate, dict) else None
+    if not isinstance(raw, str) or not raw or raw != raw.strip() or len(raw) > 128:
+      raise ValueError("T_CANDIDATE_EVIDENCE_ID_REQUIRED")
+    return raw
   raw_snapshot = payload.get("signal_snapshot")
   snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else {}
   normalized = str(snapshot.get("candidate_id") or "").strip()

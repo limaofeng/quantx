@@ -49,6 +49,28 @@ from tests.infrastructure.test_t_assistant_runtime_repository import (
 sessions = _sessions_fixture
 
 
+async def test_candidate_source_retry_rejects_changed_witness(sessions):
+  from copy import deepcopy
+
+  _, scope = await _seed_execution(sessions)
+  async with sessions() as db, db.begin():
+    execution, repository, kwargs = await _prepare(db, scope)
+    await repository.commit_material_cycle(
+      **kwargs, trade_intents=(_intent(execution),)
+    )
+    changed = dict(kwargs)
+    changed["opportunity_evidence"] = deepcopy(kwargs["opportunity_evidence"])
+    changed["opportunity_evidence"][0]["payload"]["candidate_evidence"]["evaluation"][
+      "features"
+    ]["price"] = 1.0
+    with pytest.raises(
+      TAssistantCycleConflict, match="T_INTENT_CANDIDATE_EVIDENCE_CONFLICT"
+    ):
+      await repository.commit_material_cycle(
+        **changed, trade_intents=(_intent(execution),)
+      )
+
+
 @pytest.mark.asyncio
 async def test_initial_intake_material_survives_float_database_round_trip(sessions):
   _, execution_id = await _seed_execution(sessions)
@@ -85,6 +107,7 @@ def _intent(execution, *, intent_id="intent-1", cycle_id="intake-cycle"):
     bucket="swing",
     reason="T_ENTRY",
     target_amount=1000,
+    approval_ttl_ms=60_000,
     created_at=NOW,
     execution_ref=execution.execution_ref,
     origin=TAssistantExecutionIntentOrigin(
@@ -98,11 +121,107 @@ def _intent(execution, *, intent_id="intent-1", cycle_id="intake-cycle"):
       "source_execution_ref": execution.execution_ref.to_dict(),
       "candidate_id": "candidate",
       "candidate_fingerprint": "fingerprint",
+      "source_time_ms": int(NOW.timestamp() * 1000),
+      "tick_ordinal": 1,
+      "opportunity_score": 90.0,
       "policy_version": execution.policy_version,
       "feature_schema_version": execution.feature_schema_version,
       "t_trade_role": "entry",
     },
   )
+
+
+def candidate_evidence_row(execution, intent):
+  """Complete typed witness for repository-boundary fixtures, not a strategy test."""
+  from quantx_domain.trading.t_assistant_market_state import (
+    AcceptedTMarketTick,
+    SymbolMarketCursor,
+    candidate_evidence_key,
+  )
+  from quantx_domain.trading.t_trade_opportunity_engine import (
+    OpportunityCandidate,
+    OpportunityPath,
+    OpportunitySample,
+  )
+
+  metadata = intent.metadata
+  source = metadata["source_time_ms"]
+  price = float(intent.limit_price_hint or 9.9)
+  candidate = OpportunityCandidate(
+    metadata["candidate_id"],
+    metadata["candidate_fingerprint"],
+    "episode",
+    OpportunityPath.PULLBACK_REBOUND,
+    source,
+    source + int(intent.approval_ttl_ms),
+    source,
+    metadata["tick_ordinal"],
+    price,
+    float(metadata["opportunity_score"]),
+    execution.policy_version,
+    execution.feature_schema_version,
+    "profile-v1",
+    1,
+  )
+  tick = AcceptedTMarketTick(
+    "stream-1",
+    1,
+    source,
+    OpportunitySample(
+      intent.instrument_code,
+      "2026-09-03",
+      source,
+      metadata["tick_ordinal"],
+      price,
+      continuity_generation="1",
+      bid_price=price - 0.01,
+      ask_price=price,
+      bid_volume=1000,
+      ask_volume=1000,
+    ),
+  )
+  evaluation = {
+    "instrument_code": intent.instrument_code,
+    "candidate_id": candidate.candidate_id,
+    "candidate_fingerprint": candidate.fingerprint,
+    "candidate_expires_at_ms": candidate.expires_at_ms,
+    "source_time_ms": source,
+    "tick_ordinal": candidate.tick_ordinal,
+    "evaluated_at_ms": source,
+    "opportunity_score": candidate.score,
+    "policy_version": candidate.policy_version,
+    "feature_schema_version": candidate.feature_schema_version,
+    "selected_path": candidate.path.value,
+    "data_health": "READY",
+    "features": {"price": price, "ask_price": price, "price_tick": 0.01},
+    "pullback": {
+      "components": [
+        {"name": "PULLBACK_LIQUIDITY", "weight": 10.0, "contribution": 10.0}
+      ]
+    },
+  }
+  return {
+    "event_key": candidate_evidence_key(execution.execution_id, candidate.fingerprint),
+    "instrument_code": intent.instrument_code,
+    "candidate_id": candidate.candidate_id,
+    "event_type": "T_OPPORTUNITY_CANDIDATE_FROZEN",
+    "evaluated_at": NOW,
+    "payload": {
+      "execution_ref": execution.execution_ref.to_dict(),
+      "environment": "PAPER",
+      "cycle_id": intent.origin.cycle_id,
+      "paper_shadow_only": True,
+      "candidate_evidence": {
+        "candidate": candidate.to_dict(),
+        "evaluation": evaluation,
+        "tick": tick.manifest_item(),
+        "cursor": SymbolMarketCursor(
+          "stream-1", "1", 1, 1, tick.source_identity
+        ).to_dict(),
+      },
+    },
+    "metrics": {"opportunity_score": candidate.score},
+  }
 
 
 async def _prepare(db, execution_id):
@@ -134,23 +253,7 @@ async def _prepare(db, execution_id):
         patch=RuntimeStatePatch(set={"symbol_state": state.to_dict()}),
       ),
     ),
-    opportunity_evidence=(
-      {
-        "event_key": "intake-evidence",
-        "instrument_code": "600000.SH",
-        "evaluated_at": NOW,
-        "payload": {
-          "execution_ref": execution.execution_ref.to_dict(),
-          "environment": "PAPER",
-          "cycle_id": cycle.cycle_id,
-          "paper_shadow_only": True,
-          "signal_snapshot": {
-            "candidate_id": "candidate",
-            "candidate_fingerprint": "fingerprint",
-          },
-        },
-      },
-    ),
+    opportunity_evidence=(candidate_evidence_row(execution, _intent(execution)),),
     execution_events=(),
     now=NOW,
   )

@@ -56,7 +56,10 @@ from tests.infrastructure.test_paper_execution_ledger import (
 )
 from tests.infrastructure.test_t_allocation_repository import _claim, _prepared, _seed
 from tests.infrastructure.test_t_assistant_runtime_repository import _snapshot
-from tests.infrastructure.test_t_intent_atomic_intake import _intent
+from tests.infrastructure.test_t_intent_atomic_intake import (
+  _intent,
+  candidate_evidence_row,
+)
 
 allocation_sessions = _allocation_sessions
 base_sessions = _base_sessions
@@ -129,21 +132,7 @@ async def seed_ranked(sessions):
       trade_intents=(second,),
       now=NOW,
       opportunity_evidence=(
-        {
-          "event_key": "higher-evidence",
-          "instrument_code": code,
-          "evaluated_at": NOW,
-          "payload": {
-            "execution_ref": execution.execution_ref.to_dict(),
-            "environment": "PAPER",
-            "cycle_id": cycle.cycle_id,
-            "paper_shadow_only": True,
-            "signal_snapshot": {
-              "candidate_id": "candidate",
-              "candidate_fingerprint": "fingerprint",
-            },
-          },
-        },
+        candidate_evidence_row(execution, second),
       ),
     )
     second_snapshot = replace(

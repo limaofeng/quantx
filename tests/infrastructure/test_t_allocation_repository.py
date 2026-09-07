@@ -47,7 +47,11 @@ from tests.infrastructure.test_t_assistant_runtime_repository import (
 from tests.infrastructure.test_t_assistant_runtime_repository import (
   sessions as _base_sessions,
 )
-from tests.infrastructure.test_t_intent_atomic_intake import _intent, _prepare
+from tests.infrastructure.test_t_intent_atomic_intake import (
+  _intent,
+  _prepare,
+  candidate_evidence_row,
+)
 
 base_sessions = _base_sessions
 
@@ -124,20 +128,7 @@ async def _seed(
         if enrich_intent is not None:
           enrich_intent(intent)
         intents.append(intent)
-        original = kwargs["opportunity_evidence"][0]
-        evidence.append(
-          {
-            **original,
-            "event_key": f"intake-evidence-{index}",
-            "payload": {
-              **original["payload"],
-              "signal_snapshot": {
-                "candidate_id": identity,
-                "candidate_fingerprint": fingerprint,
-              },
-            },
-          }
-        )
+        evidence.append(candidate_evidence_row(execution, intent))
         candidates.append(
           TAllocationCandidate(
             intent.intent_id,

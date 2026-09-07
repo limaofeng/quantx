@@ -763,6 +763,30 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   跨标的行情 source time 与账户事件可用性时钟分离。停止 BUY source 后的存续退出行情
   接线已在推进，尚需上述时钟契约及最终多标的重放验收。没有业务库、服务启停或实盘操作。
 
+### P4 原候选证据与最终入场检查点（2026-09-07，组件验收）
+
+- 公共卖出 cap 已提交 `c63d77e6a6b458aca346dc82bfc549236c4ad388`。
+  本批修复实际策略同轮早期 Tick latch、后续 Tick 评分改变，以及 WARMING 候选无新 Tick
+  释放时的来源绑定。每个候选唯一保存 `T_OPPORTUNITY_CANDIDATE_FROZEN`，载荷包含
+  candidate/evaluation/tick/cursor；标准 cycle 的 accepted_intents 引用其 key/hash。
+  原 source/evaluation 时点与 TTL 保持不变，展示类 latest_evaluation 不再充当分配证据。
+- `PaperAllocationCoordinator` 从该不可变来源、权威 PAPER snapshot 和公共分配仓储完成
+  prepare/claim/commit；不接收外部排序/数量，不替代公共分配算法。真实 StrategyBase.step
+  两场景均按原流动性进入分配，原末 Tick 信号重写 fixture 已移除。
+- `PaperEntryExecutionReview` 使用同一原候选证据校验冻结 binding，检验最新 accepted Tick
+  与完整盘口，再调用公共 Capacity/Sizer/严格 Risk/隔离 Ledger 及真实 receipt sink。
+  校验实际交易时段、原来源/当前 symbol 可用性、严格整数 witness；规范化 state 后统一 hash。
+  历史受理通过原 ORDER receipt 恢复，停源/过期/新 Tick 不重新授权也不重复下单。
+- 主代理最终审核和 16 文件组合回归 **349 passed、2 skipped**（27.03 秒，11520 exit=0）。
+  两项独立 PG gate：actual deferred 策略→原候选引用→真实组合读取→分配提交
+  **1 passed**（25.54 秒，76582 exit=0）；公共退出真实受理/恢复/成交及故障回滚
+  **1 passed**（55.17 秒，73153 exit=0，两个 schema）。均为 baseline→0054 的随机隔离
+  schema，清理成功，无业务库迁移。相关 Ruff 与原候选/协调器独立审计通过。
+- 批次仅验收候选证据、组合协调器和最终 review 组件。review 的拒绝/延期仍由后续 dispatcher
+  持久审计；`WAIT_PREDECESSOR` 等待前置，`REBUILD_CANDIDATE` 必须撤旧 grant 后全链重建，
+  不能每 Tick 复用旧分配。最终 ranked runtime、显式 PAPER seed/readiness、跨标的 source time
+  与受理时间分离、实际多标的完整重放及 GraphQL/Web 尚未完成，P4 继续 IN_PROGRESS。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，

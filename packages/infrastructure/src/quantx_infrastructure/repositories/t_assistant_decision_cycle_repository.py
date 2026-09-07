@@ -35,6 +35,8 @@ from quantx_domain.trading.t_assistant_execution import (
 from quantx_domain.trading.t_assistant_market_state import (
   TAssistantSymbolState,
   TDecisionSnapshot,
+  candidate_evidence_key,
+  decode_candidate_evidence,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +57,7 @@ from quantx_infrastructure.repositories.t_assistant_symbol_state_repository impo
 )
 from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
   TTradeOpportunityEvaluationRepository,
+  _evaluation_fingerprint,
 )
 from quantx_infrastructure.repositories.trade_intent_repository import (
   TradeIntentRepository,
@@ -322,7 +325,7 @@ class TAssistantDecisionCycleRepository:
       execution = await self.db.get(TAssistantExecutionRecord, cycle.execution_id)
       if execution is None or cycle.input_manifest_hash != expected_input_manifest_hash:
         raise TAssistantCycleConflict("T_CYCLE_IDEMPOTENCY_CONFLICT")
-      payloads = self._standard_intent_payloads(
+      payloads, references = await self._standard_intent_payloads(
         cycle=cycle,
         execution=execution,
         trade_intents=trade_intents,
@@ -340,6 +343,7 @@ class TAssistantDecisionCycleRepository:
         opportunity_evidence,
         execution_events,
         payloads,
+        references,
       )
       if stable_manifest_hash(manifest) != cycle.output_manifest_hash:
         raise TAssistantCycleConflict("T_CYCLE_IDEMPOTENCY_CONFLICT")
@@ -445,7 +449,7 @@ class TAssistantDecisionCycleRepository:
         raise TAssistantCycleConflict("T_EXECUTION_EVENT_SYMBOL_CONFLICT")
       await self._executions.append_event(event)
 
-    intent_payloads = self._standard_intent_payloads(
+    intent_payloads, references = await self._standard_intent_payloads(
       cycle=cycle,
       execution=execution,
       trade_intents=trade_intents,
@@ -459,6 +463,7 @@ class TAssistantDecisionCycleRepository:
       evidence_rows,
       events,
       intent_payloads,
+      references,
     )
     output_hash = stable_manifest_hash(output_manifest)
     cycle.material_symbol_count = len(states)
@@ -495,17 +500,18 @@ class TAssistantDecisionCycleRepository:
     await self.db.flush()
     return cycle
 
-  @staticmethod
-  def _standard_intent_payloads(
+  async def _standard_intent_payloads(
+    self,
     *,
     cycle,
     execution,
     trade_intents,
     evidence_rows,
     allowed_symbols,
-  ) -> list[dict[str, Any]]:
+  ) -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
     """Validate producer scope before the sole standard intent intake."""
     payloads = []
+    references = {}
     for intent in trade_intents:
       if not isinstance(intent, TradeIntent):
         raise TAssistantCycleConflict("T_INTENT_TYPE_INVALID")
@@ -545,20 +551,54 @@ class TAssistantDecisionCycleRepository:
         or origin.opportunity_id != candidate_id
         or metadata.get("policy_version") != execution.policy_version
         or metadata.get("feature_schema_version") != execution.feature_schema_version
-        or not any(
-          evidence.get("instrument_code") == intent.instrument_code
-          and dict(
-            dict(evidence.get("payload") or {}).get("signal_snapshot") or {}
-          ).get("candidate_id")
-          == candidate_id
-          and dict(
-            dict(evidence.get("payload") or {}).get("signal_snapshot") or {}
-          ).get("candidate_fingerprint")
-          == fingerprint
-          for evidence in evidence_rows
-        )
       ):
         raise TAssistantCycleConflict("T_INTENT_CANDIDATE_CONFLICT")
+      key = candidate_evidence_key(execution.execution_id, fingerprint)
+      event = await TTradeOpportunityEvaluationRepository(self.db).get_by_event_key(key)
+      if (
+        event is None
+        or event.event_type != "T_OPPORTUNITY_CANDIDATE_FROZEN"
+        or event.owner_type != "T_ASSISTANT_EXECUTION"
+        or event.owner_id != execution.execution_id
+        or event.environment != "PAPER"
+        or event.account_id != execution.account_id
+        or event.instrument_code != intent.instrument_code
+      ):
+        raise TAssistantCycleConflict("T_INTENT_CANDIDATE_EVIDENCE_REQUIRED")
+      witness = event.payload.get("candidate_evidence")
+      supplied = [row for row in evidence_rows if row.get("event_key") == key]
+      if any(
+        stable_manifest_hash(row["payload"].get("candidate_evidence"))
+        != stable_manifest_hash(witness)
+        for row in supplied
+      ):
+        raise TAssistantCycleConflict("T_INTENT_CANDIDATE_EVIDENCE_CONFLICT")
+      try:
+        candidate, tick, cursor = decode_candidate_evidence(witness)
+      except (TypeError, ValueError) as exc:
+        raise TAssistantCycleConflict("T_INTENT_CANDIDATE_EVIDENCE_INVALID") from exc
+      material = {
+        column.key: getattr(event, column.key)
+        for column in event.__mapper__.column_attrs
+      }
+      if (
+        event.content_fingerprint != _evaluation_fingerprint(material)
+        or candidate.candidate_id != candidate_id
+        or candidate.fingerprint != fingerprint
+        or candidate.policy_version != execution.policy_version
+        or candidate.feature_schema_version != execution.feature_schema_version
+        or metadata.get("source_time_ms") != candidate.source_time_ms
+        or metadata.get("tick_ordinal") != candidate.tick_ordinal
+        or metadata.get("opportunity_score") != candidate.score
+        or tick.instrument_code != intent.instrument_code
+        or cursor.stream_id != cycle.input_manifest["stream_id"]
+        or cursor.continuity_generation != cycle.input_manifest["continuity_generation"]
+      ):
+        raise TAssistantCycleConflict("T_INTENT_CANDIDATE_CONFLICT")
+      references[intent.intent_id] = {
+        "candidate_evidence_key": key,
+        "candidate_evidence_hash": stable_manifest_hash(witness),
+      }
       payload = trade_intent_record_data(
         intent,
         status="ALLOCATION_PENDING",
@@ -570,10 +610,12 @@ class TAssistantDecisionCycleRepository:
         allocation_version=0,
       )
       payloads.append(payload)
-    return payloads
+    return payloads, references
 
   @staticmethod
-  def _output_manifest(cycle, states, evidence_rows, events, intent_payloads):
+  def _output_manifest(
+    cycle, states, evidence_rows, events, intent_payloads, references
+  ):
     return {
       "cycle_id": cycle.cycle_id,
       "symbol_state_manifest": {
@@ -588,6 +630,7 @@ class TAssistantDecisionCycleRepository:
           "intake_hash": stable_manifest_hash(
             trade_intent_material_from_payload(payload)
           ),
+          **references[payload["id"]],
         }
         for payload in intent_payloads
       ],
@@ -776,6 +819,27 @@ class TAssistantDecisionCycleRepository:
     evaluated_at = evidence.get("evaluated_at")
     if not isinstance(evaluated_at, datetime):
       raise TAssistantCycleConflict("T_OPPORTUNITY_EVIDENCE_INVALID")
+    if evidence.get("event_type") == "T_OPPORTUNITY_CANDIDATE_FROZEN":
+      try:
+        candidate, tick, cursor = decode_candidate_evidence(
+          payload["candidate_evidence"]
+        )
+        captured = datetime.fromisoformat(cycle.input_manifest["capture_as_of"])
+      except (KeyError, TypeError, ValueError) as exc:
+        raise TAssistantCycleConflict("T_CANDIDATE_EVIDENCE_INVALID") from exc
+      if (
+        event_key
+        != candidate_evidence_key(execution.execution_id, candidate.fingerprint)
+        or tick.instrument_code != instrument_code
+        or cursor.stream_id != cycle.input_manifest["stream_id"]
+        or cursor.continuity_generation != cycle.input_manifest["continuity_generation"]
+        or tick.market_fence_sequence > cycle.fence_to
+        or max(tick.received_at_ms, tick.sample.source_time_ms)
+        > int(captured.timestamp() * 1000)
+        or candidate.policy_version != execution.policy_version
+        or candidate.feature_schema_version != execution.feature_schema_version
+      ):
+        raise TAssistantCycleConflict("T_CANDIDATE_EVIDENCE_BINDING_CONFLICT")
     return await TTradeOpportunityEvaluationRepository(self.db).append_material(
       event_key=event_key,
       account_id=execution.account_id,

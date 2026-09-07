@@ -298,6 +298,10 @@ class SymbolMarketDeltaRing:
     return self._ring_generation
 
   @property
+  def latest_tick(self) -> Optional[AcceptedTMarketTick]:
+    return self._ticks[-1] if self._ticks else None
+
+  @property
   def last_source_time_ms(self) -> Optional[int]:
     return self._last_identity.source_time_ms if self._last_identity else None
 
@@ -689,6 +693,74 @@ class TAssistantSymbolState:
     )
 
 
+def candidate_evidence_key(execution_id: str, fingerprint: str) -> str:
+  if not execution_id or not fingerprint:
+    raise ValueError("T_CANDIDATE_EVIDENCE_IDENTITY_REQUIRED")
+  return f"tta:candidate:{execution_id}:{fingerprint}"
+
+
+def decode_candidate_evidence(raw: Mapping[str, Any]):
+  """Validate the single immutable candidate-time market/evaluation witness."""
+
+  def integers(mapping, names, minimum=0):
+    for name in names:
+      value = mapping[name]
+      if type(value) is not int or value < minimum:
+        raise ValueError("T_CANDIDATE_EVIDENCE_INTEGER_REQUIRED")
+
+  try:
+    integers(
+      raw["candidate"],
+      ("source_time_ms", "latched_at_ms", "expires_at_ms", "tick_ordinal"),
+    )
+    integers(
+      raw["candidate"],
+      ("feature_schema_version", "reference_profile_schema_version"),
+      1,
+    )
+    integers(raw["tick"], ("accepted_sequence", "market_fence_sequence"), 1)
+    integers(raw["tick"], ("received_at_ms",))
+    integers(raw["tick"]["sample"], ("source_time_ms", "tick_ordinal"))
+    if raw["tick"]["sample"].get("received_at_ms") is not None:
+      integers(raw["tick"]["sample"], ("received_at_ms",))
+    integers(raw["cursor"], ("ring_generation", "accepted_sequence"), 1)
+    integers(raw["cursor"]["source_identity"], ("source_time_ms", "tick_ordinal"))
+    integers(
+      raw["evaluation"],
+      ("source_time_ms", "tick_ordinal", "evaluated_at_ms", "candidate_expires_at_ms"),
+    )
+    integers(raw["evaluation"], ("feature_schema_version",), 1)
+    candidate = OpportunityCandidate.from_dict(raw["candidate"])
+    tick_values = dict(raw["tick"])
+    tick_values["sample"] = OpportunitySample.from_dict(tick_values["sample"])
+    tick = AcceptedTMarketTick(**tick_values)
+    cursor = SymbolMarketCursor.from_dict(raw["cursor"])
+    evaluation = raw["evaluation"]
+    if (
+      cursor.stream_id != tick.stream_id
+      or cursor.accepted_sequence != tick.accepted_sequence
+      or cursor.source_identity != tick.source_identity
+      or cursor.continuity_generation != tick.sample.continuity_generation
+      or candidate.source_time_ms != tick.sample.source_time_ms
+      or candidate.tick_ordinal != tick.sample.tick_ordinal
+      or candidate.price != tick.sample.price
+      or evaluation["instrument_code"] != tick.instrument_code
+      or evaluation["candidate_id"] != candidate.candidate_id
+      or evaluation["candidate_fingerprint"] != candidate.fingerprint
+      or evaluation["candidate_expires_at_ms"] != candidate.expires_at_ms
+      or evaluation["source_time_ms"] != candidate.source_time_ms
+      or evaluation["tick_ordinal"] != candidate.tick_ordinal
+      or evaluation["opportunity_score"] != candidate.score
+      or evaluation["policy_version"] != candidate.policy_version
+      or evaluation["feature_schema_version"] != candidate.feature_schema_version
+      or evaluation["selected_path"] != candidate.path.value
+    ):
+      raise ValueError("T_CANDIDATE_EVIDENCE_BINDING_CONFLICT")
+  except (KeyError, TypeError, ValueError) as exc:
+    raise ValueError("T_CANDIDATE_EVIDENCE_INVALID") from exc
+  return candidate, tick, cursor
+
+
 @dataclass(frozen=True)
 class SymbolDecisionSnapshot:
   instrument_code: str
@@ -1010,6 +1082,20 @@ class SymbolMarketStateReducer:
           },
           "evaluation": reduction.evaluation.to_dict(),
         }
+        if reduction.candidate_created is not None:
+          event["candidate_evidence"] = {
+            "candidate": reduction.candidate_created.to_dict(),
+            "evaluation": reduction.evaluation.to_dict(),
+            "tick": tick.manifest_item(),
+            "cursor": SymbolMarketCursor(
+              tick.stream_id,
+              tick.sample.continuity_generation,
+              delta_slice.next_cursor.ring_generation,
+              tick.accepted_sequence,
+              tick.source_identity,
+            ).to_dict(),
+          }
+          decode_candidate_evidence(event["candidate_evidence"])
         material_events.append(event)
         previous_signature = next_signature
       last_identity = identity
@@ -1035,6 +1121,9 @@ class SymbolMarketStateReducer:
         }
       )
 
+    # Persist and retain the same normalized DTO in memory: optional sample
+    # numbers must not change their JSON representation after a DB round trip.
+    state = OpportunityState.from_dict(state.to_dict())
     manifest = stable_manifest_hash(
       {
         "opportunity_state": state.to_dict(),
@@ -1130,6 +1219,8 @@ def _material_signature(state: OpportunityState) -> str:
 
 
 __all__ = [
+  "candidate_evidence_key",
+  "decode_candidate_evidence",
   "AcceptedTMarketTick",
   "SymbolDecisionSnapshot",
   "SymbolDeltaCoverage",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional
 
@@ -27,6 +27,8 @@ from quantx_domain.trading.t_assistant_execution import (
 from quantx_domain.trading.t_assistant_market_state import (
   TAssistantSymbolState,
   TDecisionSnapshot,
+  candidate_evidence_key,
+  decode_candidate_evidence,
 )
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import AsyncSessionLocal
@@ -381,6 +383,38 @@ class TAssistantPaperShadowRuntime:
         continue
       evaluation = patch.patch.set.get("latest_evaluation")
       events = list(patch.patch.append_events)
+      for material in events:
+        witness = material.get("candidate_evidence")
+        if witness is None:
+          continue
+        candidate, tick, _ = decode_candidate_evidence(witness)
+        if tick.instrument_code != patch.instrument_code:
+          raise ValueError("T_CANDIDATE_EVIDENCE_SYMBOL_CONFLICT")
+        evidence.append(
+          {
+            "event_key": candidate_evidence_key(
+              execution.execution_id, candidate.fingerprint
+            ),
+            "instrument_code": patch.instrument_code,
+            "candidate_id": candidate.candidate_id,
+            "event_type": "T_OPPORTUNITY_CANDIDATE_FROZEN",
+            "evaluated_at": datetime.fromtimestamp(
+              witness["evaluation"]["evaluated_at_ms"] / 1000, tz=UTC
+            ),
+            "payload": {
+              "execution_ref": execution.execution_ref.to_dict(),
+              "environment": "PAPER",
+              "cycle_id": cycle_id,
+              "paper_shadow_only": True,
+              "candidate_evidence": witness,
+            },
+            "metrics": {"opportunity_score": candidate.score},
+          }
+        )
+      events = [
+        {key: value for key, value in item.items() if key != "candidate_evidence"}
+        for item in events
+      ]
       payload = {
         "execution_ref": execution.execution_ref.to_dict(),
         "environment": ExecutionEnvironment.PAPER.value,
@@ -409,9 +443,7 @@ class TAssistantPaperShadowRuntime:
           "evaluated_at": evaluated_at,
           "payload": payload,
           "metrics": {
-            "opportunity_score": dict(evaluation or {}).get(
-              "opportunity_score"
-            )
+            "opportunity_score": dict(evaluation or {}).get("opportunity_score")
           },
         }
       )
@@ -428,9 +460,7 @@ class TAssistantPaperShadowRuntime:
     return tuple(
       TAssistantExecutionEvent(
         execution_id=execution.execution_id,
-        event_key=(
-          f"shadow-comparison:{cycle_id}:{comparison.instrument_code}"
-        ),
+        event_key=(f"shadow-comparison:{cycle_id}:{comparison.instrument_code}"),
         event_type="PAPER_SHADOW_RULE_COMPARISON",
         occurred_at=occurred_at,
         payload={
@@ -483,7 +513,6 @@ def _source_fence_identity(
   if not generation or min(source_time_ms, tick_ordinal, fence_sequence) <= 0:
     return None
   return generation, source_time_ms, tick_ordinal, fence_sequence
-
 
 
 __all__ = [

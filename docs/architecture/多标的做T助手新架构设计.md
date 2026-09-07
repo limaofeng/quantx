@@ -1023,6 +1023,11 @@ obligation watermark 任一变化，必须建立新的 allocation attempt，不�
 
 P4 PAPER 的来源约束：
 
+- 每个标准候选意图通过 cycle 的 `accepted_intents` 引用唯一不可变
+  `T_OPPORTUNITY_CANDIDATE_FROZEN` 证据键及 hash，证据包含产生该候选时的完整
+  candidate、evaluation、accepted Tick 与该 Tick 的 cursor。组合排序使用原始 RULE_ONLY
+  分数和原始流动性分量，不使用同轮后续 Tick 的展示评分；WARMING 候选释放继续引用原
+  证据，不复制为新行情、不刷新原 TTL。最终 Gate 从同一证据取得冻结绑定，再检验最新 Tick。
 - 配置取 execution 绑定的不可变 config version，校验原始 hash 及其在 cut 前已存在。
   `portfolio_policy` 和 `t_trading_envelope_policy` 的上限字段必须完整，不能由缺省值放宽。
   `portfolio_policy.industry_classification` 固化 `version/as_of/effective_from/mappings`，
