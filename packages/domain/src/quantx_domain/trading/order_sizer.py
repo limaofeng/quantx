@@ -45,7 +45,13 @@ class OrderSizer:
     position: Optional[Dict[str, Any]] = None,
     *,
     allocated_amount_cap: Decimal | float | int | None = None,
+    sell_volume_cap: int | None = None,
   ) -> OrderDraft:
+    if sell_volume_cap is not None:
+      if type(sell_volume_cap) is not int or sell_volume_cap < 0:
+        raise ValueError("SELL_VOLUME_CAP_INVALID")
+      if order_type is not OrderType.SELL:
+        raise ValueError("SELL_VOLUME_CAP_REQUIRES_SELL")
     allocation_cap = None
     if allocated_amount_cap is not None:
       if isinstance(allocated_amount_cap, bool) or not isinstance(
@@ -131,7 +137,16 @@ class OrderSizer:
       ):
         raw_target_volume = available
         reason_codes.append("SELL_ALL_AVAILABLE")
-      sized_volume = self.rules.normalize_sell_volume(raw_target_volume, available)
+      target = raw_target_volume
+      if sell_volume_cap is not None:
+        metadata["sell_volume_cap"] = sell_volume_cap
+        metadata["broker_available_volume"] = available
+        target = min(target, sell_volume_cap)
+        if target < raw_target_volume:
+          reason_codes.append("SELL_CAPACITY_CAP")
+      # Only real broker sellability grants the odd-lot full-exit exception.
+      # A protection/claim cap is not frozen inventory and cannot grant it.
+      sized_volume = self.rules.normalize_sell_volume(target, available)
       if sized_volume != raw_target_volume:
         reason_codes.append("SELL_VOLUME_NORMALIZED_OR_CAPPED")
     else:

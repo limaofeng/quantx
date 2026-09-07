@@ -746,6 +746,23 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   与 Sizer/Risk/Capacity 最终事务；补 PAPER ExitPlanRuntime/TradeIntentProcessor 路由及停止
   source 后仍需撮合退出的行情接线，再完成实际 StrategyBase.step 多标的重放与 GraphQL/Web。
 
+### P4 公共卖出数量边界检查点（2026-09-07，运行时仍在接线）
+
+- 权威组合读取批次已提交 `844ccd3b1cc7e442058de8ecf44f644b0956f487`。
+  接入 PAPER 公共退出时发现：把保护后的业务可用量传作券商真实可卖量，会让
+  `normalize_sell_volume` 错把保护 cap 当零股清仓例外。例如真实可卖 1000、保护后仅余
+  50 股时，不应据此产生 50 股订单。
+- 公共 `OrderSizer.draft_intent` 增加独立 `sell_volume_cap`，先限制请求，再使用真实券商
+  可卖量执行原有整手/零股规则；保留原请求，输出 cap 与券商可卖量审计证据。
+  真实可卖 1000/cap50 得到 0，真实可卖 50/cap50 仍可清仓 50，cap150 得到 100。
+- 主代理最终审核及新卖出 cap/既有买入分配 cap 定向验证 **43 passed**（0.75 秒，
+  命令 `pytest tests/domain/test_order_sizer_sell_capacity.py tests/domain/test_t_allocation_order_sizing.py`，
+  使用统一隔离测试参数），相关 Ruff 通过。批准这两个独立域文件与本检查点提交。
+- P4 保持 IN_PROGRESS；公共 PAPER 退出、最终入场 review 与组合协调器尚未整体批准。
+  当前整链整改包括：候选引用其原始不可变评估（覆盖多 Tick 和 deferred release），以及
+  跨标的行情 source time 与账户事件可用性时钟分离。停止 BUY source 后的存续退出行情
+  接线已在推进，尚需上述时钟契约及最终多标的重放验收。没有业务库、服务启停或实盘操作。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，
