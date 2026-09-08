@@ -16,6 +16,7 @@ import { useStudioNavigate } from '@/components/studio-workspace/useStudioNaviga
 import { AccountExecutionHealthStatus } from '@/generated/gql/graphql';
 import { cn } from '@/utils/cn';
 
+import { DeploymentEnvironmentLabel } from './DeploymentEnvironmentLabel';
 import {
   accountExecutionModeLabel,
   accountHealthLabel,
@@ -23,7 +24,6 @@ import {
 } from './presentation';
 import { ageSecondsLabel } from './time';
 import { useTradingSafety } from './trading-safety-context';
-import { DeploymentEnvironmentLabel } from './DeploymentEnvironmentLabel';
 
 function ageLabel(value?: string | null) {
   if (!value) return '无记录';

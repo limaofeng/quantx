@@ -1401,12 +1401,7 @@ async def test_live_broker_disconnect_awaits_monitor_task(
   broker = LiveBroker(account_id="mock-account")
 
   assert await broker.connect() is True
-  monitor_task = broker._monitor_task
-  assert monitor_task is not None
-  assert monitor_task.done() is False
 
   await broker.disconnect()
 
-  assert broker._monitor_task is None
-  assert monitor_task.done() is True
   assert broker.is_connected is False

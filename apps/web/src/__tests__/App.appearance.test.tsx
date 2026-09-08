@@ -141,3 +141,6 @@ describe('App appearance settings integration', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+vi.mock('@/features/trading-safety/DeploymentEnvironmentLabel', () => ({
+  DeploymentEnvironmentLabel: () => null,
+}));
