@@ -15,6 +15,9 @@ const monitorMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/features/system/monitor-api', () => monitorMocks);
+vi.mock('@/features/settings/components/TrainingCapabilityStatus', () => ({
+  TrainingCapabilityStatus: () => <section>CPU / GPU 训练能力心跳</section>,
+}));
 
 function summary(
   qmtStatus: 'healthy' | 'degraded' | 'unavailable' = 'healthy'

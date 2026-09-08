@@ -33,6 +33,7 @@ import {
   statusPriority,
 } from './service-status-presentation';
 import { HistoryStrip, LatencyChart, StatusIcon } from './ServiceStatusVisuals';
+import { TrainingCapabilityStatus } from './TrainingCapabilityStatus';
 
 function detailId(targetId: string) {
   return `service-status-${targetId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
@@ -640,6 +641,8 @@ export function ServiceStatusPanel() {
           </button>
         </div>
       </header>
+
+      <TrainingCapabilityStatus />
 
       {initialLoading ? (
         <section

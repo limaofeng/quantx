@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { useQuery } from 'urql';
 
 import {
@@ -21,11 +21,15 @@ export function useStockSelectionTrainingCapabilities() {
     query: StockSelectionTrainingCapabilitiesDocument,
     requestPolicy: 'cache-and-network',
   });
+  const refreshCapabilities = useCallback(
+    () => refresh({ requestPolicy: 'network-only' }),
+    [refresh]
+  );
   return {
     data: result.data?.stockSelectionTrainingCapabilities ?? null,
     error: result.error,
     fetching: result.fetching,
-    refresh: () => refresh({ requestPolicy: 'network-only' }),
+    refresh: refreshCapabilities,
   };
 }
 

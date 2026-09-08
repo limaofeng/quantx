@@ -468,3 +468,6 @@ describe('single-service history', () => {
     ).not.toBeInTheDocument();
   });
 });
+vi.mock('@/features/settings/components/TrainingCapabilityStatus', () => ({
+  TrainingCapabilityStatus: () => <section>CPU / GPU 训练能力心跳</section>,
+}));
