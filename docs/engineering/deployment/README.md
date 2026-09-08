@@ -11,6 +11,16 @@ Windows 使用 `apps/api/.env.production`，macOS 使用 `.env.development`；
 不回退到另一环境。选定文件覆盖继承的配置值，`ENV` 由启动器确定，不能被文件改写。
 配置样例为 `ops/config/production.env.example` 和 `development.env.example`。
 
+本机数据服务运行在 WSL 时，在生产文件设置 `QUANTX_EXTERNAL_DEPENDENCY_HOST=wsl`。
+启动器解析当前 WSL eth0 地址并用于四个数据端点，保留端口、数据库名和认证信息；
+解析失败即停止启动。Windows 回环端口转发在全市场行情负载下可能延迟过高，不能仅凭
+PING 成功认定行情写入性能合格。此配置不启动或停止 WSL 数据服务。
+
+从旧开发环境切换生产时，配置迁移会撤销开发免密登录创建的会话；原密码登录会话
+不受影响。已完成配置切换的运行端可使用 Conda Python 执行
+`ops/migrate_production_config.py revoke-development-sessions` 补做，操作幂等，随后浏览器
+需重新输入密码登录。关闭免密登录入口本身不会使已签发的刷新会话失效。
+
 Windows 根目录入口：
 
 ```powershell

@@ -79,3 +79,61 @@ def test_selected_environment_is_required(tmp_path):
   spec.loader.exec_module(module)
   with pytest.raises(ValueError, match="required"):
     module.load_environment(tmp_path, "production")
+
+
+def test_production_resolves_wsl_endpoints_without_changing_credentials(
+  tmp_path, monkeypatch
+):
+  root = Path(__file__).resolve().parents[2]
+  spec = importlib.util.spec_from_file_location(
+    "runtime_config", root / "ops/runtime_config.py"
+  )
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  directory = tmp_path / "apps/api"
+  directory.mkdir(parents=True)
+  config = directory / ".env.production"
+  config.write_text(
+    "QUANTX_EXTERNAL_DEPENDENCY_HOST=wsl\nDATABASE_URL=postgresql://user:p%40ss@127.0.0.1:5432/quantx\nREDIS_URL=redis://127.0.0.1:6379/0\nINFLUXDB_HOST=http://127.0.0.1:8181\nPREFECT_API_URL=http://127.0.0.1:4200/api\n"
+  )
+  monkeypatch.setattr(module.sys, "platform", "win32")
+  monkeypatch.setattr(
+    module.subprocess,
+    "run",
+    lambda *a, **k: SimpleNamespace(stdout="2: eth0 inet 172.26.114.93/20"),
+  )
+  values = module.load_environment(tmp_path, "production")
+  assert values["DATABASE_URL"] == "postgresql://user:p%40ss@172.26.114.93:5432/quantx"
+  assert values["REDIS_HOST"] == "172.26.114.93"
+  assert values["PREFECT_API_URL"] == "http://172.26.114.93:4200/api"
+  monkeypatch.setattr(
+    module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="")
+  )
+  with pytest.raises(ValueError, match="unavailable"):
+    module.load_environment(tmp_path, "production")
+
+
+def test_production_migration_revokes_only_development_sessions():
+  import sqlite3
+
+  root = Path(__file__).resolve().parents[2]
+  spec = importlib.util.spec_from_file_location(
+    "migrate_config", root / "ops/migrate_production_config.py"
+  )
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  with sqlite3.connect(":memory:") as db:
+    db.executescript("""
+      CREATE TABLE auth_device_sessions (id TEXT, revoked_at TEXT);
+      CREATE TABLE auth_audit_events (device_session_id TEXT, event_type TEXT, outcome TEXT);
+      INSERT INTO auth_device_sessions VALUES ('dev',NULL),('password',NULL),('failed',NULL);
+      INSERT INTO auth_audit_events VALUES
+        ('dev','DEVELOPMENT_LOGIN','SUCCEEDED'),
+        ('password','LOGIN','SUCCEEDED'),
+        ('failed','DEVELOPMENT_LOGIN','DENIED');
+    """)
+    assert db.execute(module.REVOKE_DEVELOPMENT_SESSIONS_SQL).rowcount == 1
+    assert db.execute(
+      "SELECT id FROM auth_device_sessions WHERE revoked_at IS NOT NULL"
+    ).fetchall() == [("dev",)]
+    assert db.execute(module.REVOKE_DEVELOPMENT_SESSIONS_SQL).rowcount == 0

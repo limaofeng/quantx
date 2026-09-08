@@ -14,6 +14,14 @@ from sqlalchemy.engine import make_url
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (".env", ".env.development", ".env.production", ".env.testing")
+REVOKE_DEVELOPMENT_SESSIONS_SQL = """
+  UPDATE auth_device_sessions AS session SET revoked_at=CURRENT_TIMESTAMP
+  WHERE session.revoked_at IS NULL AND EXISTS (
+    SELECT 1 FROM auth_audit_events AS event
+    WHERE event.device_session_id=session.id
+      AND event.event_type='DEVELOPMENT_LOGIN' AND event.outcome='SUCCEEDED'
+  )
+"""
 
 
 def fingerprints(directory: Path) -> dict:
@@ -66,7 +74,9 @@ def prepare(*, dependency_host: str, enable_live: bool) -> None:
   if dependency_host:
     values["REDIS_HOST"] = dependency_host
   values.pop("QUANTX_DEV_EXTERNAL_DEPENDENCY_HOST", None)
-  values.update(ENV="production", DEBUG="false", GRAPHQL_DEBUG="false", CONDA_ENV_NAME="quantx")
+  values.update(
+    ENV="production", DEBUG="false", GRAPHQL_DEBUG="false", CONDA_ENV_NAME="quantx"
+  )
   if enable_live:
     accounts = set()
     for key in (
@@ -156,21 +166,45 @@ def apply() -> None:
   (directory / ".env").write_text(
     "# Shared non-sensitive defaults only.\n", encoding="utf-8"
   )
+  revoke_development_sessions()
   print(
     "Applied explicit production/testing configuration; originals retained locally."
   )
 
 
+def revoke_development_sessions() -> None:
+  import psycopg2
+  from runtime_config import load_environment
+
+  values = load_environment(ROOT, "production")
+  url = make_url(values["DATABASE_URL"])
+  with psycopg2.connect(
+    host=url.host,
+    port=url.port,
+    dbname=url.database,
+    user=url.username,
+    password=url.password,
+    connect_timeout=10,
+  ) as connection:
+    with connection.cursor() as cursor:
+      cursor.execute(REVOKE_DEVELOPMENT_SESSIONS_SQL)
+      print(f"Revoked development-origin sessions: {cursor.rowcount}")
+
+
 def main() -> None:
   parser = argparse.ArgumentParser()
-  parser.add_argument("command", choices=("prepare", "apply"))
+  parser.add_argument(
+    "command", choices=("prepare", "apply", "revoke-development-sessions")
+  )
   parser.add_argument("--dependency-host", default="")
   parser.add_argument("--enable-live", action="store_true")
   args = parser.parse_args()
   if args.command == "prepare":
     prepare(dependency_host=args.dependency_host, enable_live=args.enable_live)
-  else:
+  elif args.command == "apply":
     apply()
+  else:
+    revoke_development_sessions()
 
 
 if __name__ == "__main__":
