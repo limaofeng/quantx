@@ -35,6 +35,7 @@ from quantx_contracts import (
 )
 
 from .endpoints import masked_account_id
+from .history_timing import record_history_timing
 
 logger = logging.getLogger(__name__)
 
@@ -2346,12 +2347,14 @@ def _iter_market_data_records_unbounded(
         end_time=xtdata_end_time,
         incrementally=False,
       )
+    read_started = time.monotonic()
     values = manager.get_market_data(
       stock_list=list(request.codes),
       period=period,
       start_time=xtdata_start_time,
       end_time=xtdata_end_time,
     )
+    record_history_timing("read_complete", read_started)
     if not isinstance(values, dict):
       raise ValueError("XTData returned a non-object market-data result")
     normalized_values: dict[str, Any] = {}

@@ -10,6 +10,11 @@ from typing import Any, Callable, Iterable
 import pandas as pd
 from xtquant import xtdata
 
+from quantx_qmt_agent.xtdata_history_download import (
+  HistoryDownloadError,
+  download_history,
+)
+
 from .connection_discovery import XTDataEndpoint, discover_xtdata_endpoint
 
 logger = logging.getLogger(__name__)
@@ -197,7 +202,9 @@ class XTDataManager:
   ) -> Any:
     self._require_connection()
     try:
-      return xtdata.download_history_data2(
+      return download_history(
+        xtdata,
+        self._client,
         _codes(stock_list),
         period,
         start_time=start_time,
@@ -207,6 +214,8 @@ class XTDataManager:
       )
     except Exception as exc:
       self._mark_operation_failed("history download", exc)
+      if isinstance(exc, HistoryDownloadError):
+        logger.warning("XTData history download failed: %s", exc)
       raise XTDataUnavailableError(
         f"XTData history download failed: {exc.__class__.__name__}"
       ) from exc

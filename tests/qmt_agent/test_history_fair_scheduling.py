@@ -27,6 +27,10 @@ def _fair_child(connection, kind):
         trace.write(f"{unit['request_id']}:{unit['start_time']}\n")
       time.sleep(0.03)
       if unit.get("fail_short") and unit["request_id"] == "short":
+        if unit["fail_short"] == "native":
+          class XTDataUnavailableError(RuntimeError):
+            pass
+          raise XTDataUnavailableError("sanitized native failure")
         raise ValueError("source failed")
       code = unit["stock_list"][0]
       timestamp = int(unit["start_time"])
@@ -48,7 +52,7 @@ def _fair_child(connection, kind):
   worker.run_historical_market_data_worker(connection, kind)
 
 
-@pytest.mark.parametrize("fail_short", [False, True])
+@pytest.mark.parametrize("fail_short", [False, True, "native"])
 async def test_parent_round_robins_one_real_child_and_isolates_source_failure(
   tmp_path, monkeypatch, fail_short
 ):
@@ -96,6 +100,15 @@ async def test_parent_round_robins_one_real_child_and_isolates_source_failure(
       ),
       timeout=20,
     )
+    if fail_short == "native":
+      assert trace.read_text().splitlines() == ["long:20260803", "short:20260803"]
+      assert all(isinstance(result, Exception) for result in results)
+      assert runtime._historical_worker_process is None
+      # A later request starts a fresh child only after old-process shutdown.
+      recovered = await prepare("recovered", "20260803")
+      assert recovered.record_count == 2
+      assert runtime._historical_worker_process.is_alive()
+      return
     assert trace.read_text().splitlines() == [
       "long:20260803",
       "short:20260803",

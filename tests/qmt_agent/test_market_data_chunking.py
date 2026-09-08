@@ -395,6 +395,25 @@ def test_managed_spool_cleans_only_owned_request_directories(
   assert (root / runtime_module.MARKET_DATA_SPOOL_OWNER_MARKER).exists()
 
 
+def test_managed_spool_scan_tolerates_retired_temporary_marker(tmp_path, monkeypatch):
+  root = _initialize_market_data_spool_root(tmp_path, "device-scan")
+  request = root / "request-scan"
+  request.mkdir()
+  temporary = request / "terminal.json.tmp"
+  temporary.write_bytes(b"marker")
+  (request / "chunk-000000.json.gz").write_bytes(b"data")
+  original_lstat = Path.lstat
+
+  def disappearing_lstat(path):
+    if path == temporary:
+      temporary.unlink()
+      raise FileNotFoundError("marker retired after enumeration")
+    return original_lstat(path)
+
+  monkeypatch.setattr(Path, "lstat", disappearing_lstat)
+  assert _managed_market_data_spool_bytes(root) == 4
+
+
 def test_spool_startup_defers_content_hashing_until_request_recovery(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path,
