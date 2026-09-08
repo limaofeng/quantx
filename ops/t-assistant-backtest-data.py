@@ -24,11 +24,26 @@ sys.path[:0] = [
 ]
 
 
-async def acquire(args):
-  # Process-local controls only. No service configuration is modified.
-  os.environ["ENV"] = "testing"
+def configure_environment(environment: str):
+  from runtime_config import LIVE_KEYS, load_environment
+
+  if environment not in {"development", "testing"}:
+    raise ValueError("BACKTEST_DATA_ENVIRONMENT_INVALID")
+  if sys.platform == "darwin" and environment != "development":
+    raise ValueError("BACKTEST_DATA_MACOS_REQUIRES_DEVELOPMENT")
+  # Validate explicit endpoints before importing clients or opening connections.
+  configured = load_environment(ROOT, environment)
+  configured.update(dict.fromkeys(LIVE_KEYS, "false"))
+  configured["REAL_TRADING_ACCOUNT_ALLOWLIST"] = "[]"
+  configured["QMT_ACCOUNT_WHITELIST"] = ""
+  os.environ.update(configured)
   os.environ["DEBUG"] = "false"
   os.environ["INFLUXDB_MAX_RETRIES"] = "0"
+
+
+async def acquire(args):
+  # Process-local controls only. No service configuration is modified.
+  configure_environment(args.environment)
   logging.disable(logging.CRITICAL)
   from urllib.parse import urlsplit
 
@@ -177,6 +192,10 @@ async def acquire(args):
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument(
+    "--environment", choices=("development", "testing"), default="development",
+    help="Explicit data environment; macOS only permits local development services",
+  )
   parser.add_argument(
     "--instruments", required=True, help="Comma-separated instrument codes"
   )

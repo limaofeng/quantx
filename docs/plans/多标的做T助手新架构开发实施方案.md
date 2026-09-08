@@ -1093,6 +1093,25 @@ runtime。P1 运行证据、owner 空值=`0`、快照
 
 ## 11. 变更记录
 
+### P5 开发环境验收预检（2026-09-09）
+
+- 当前仍为 P5 `IN_PROGRESS`：P0–P4 已完成；工程证据不替代正式样本及策略准入门。
+- 修复取数 CLI 强制 `ENV=testing` 的环境隔离缺口：默认显式加载 development 配置，
+  macOS 仅允许 development，复用运行入口的本地端点与 `_dev` 数据库校验；导入客户端前
+  完成校验并关闭全部实盘开关和账户白名单。Windows 如需测试数据须显式指定
+  `--environment testing`，不提供 production 入口。
+- 在本机独立开发数据服务只读盘点既定 2026-08-01～2026-08-31 的 11 标的：
+  21 交易日、231 分区全部 `EMPTY_SOURCE`，Tick 总数 0，未盘点分区 0。
+  本机结果与此前 Windows 缓存证据分别记录，不据此覆盖历史 722131 条盘点结果。
+- 引用清单：`.runtime/backtests/p5-202608-dev/25742e71e82fdca7411683faad8cc9cbdd691341e6fd88ff4db993d0bbb5e1b9/`；
+  hash 为目录名，状态 `INCOMPLETE`；日志 `.codex_screenshots/p5-dev-data-preflight.log`，
+  CLI exit=2 为数据不完整退出。没有访问生产数据服务、补采、启动服务或执行正式回测。
+- 环境隔离、缓存获取、引用读取与数据资格预检 16 项通过，Ruff 通过；日志
+  `.codex_screenshots/p5-dev-environment-tests.log`。既有公共回测工程证据继续有效。
+- 阻碍已立即告知用户：开发库缺少正式样本；模拟初始账户、费用/滑点、指标及分组阈值、
+  样本和覆盖率要求仍待明确。待开发数据就绪并确认口径后冻结版本、运行评估与旧单票对照；
+  不勾选 TTA-P5-04，不开放 P6。
+
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，
 覆盖 delta/恢复快照校验期间的新订阅；删除直接写入原始 Tick 的旧 helper。
 PAPER shadow 协调与周期处理互斥，遗留 PREPARED 清理仅在首次绑定执行，日常协调不抢占
