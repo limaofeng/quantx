@@ -72,6 +72,7 @@ _FINANCIAL_LOOKBACK_DAYS = 1095
 _ARCHIVE_SNAPSHOT_MAX_AGE_SECONDS = 90.0
 _ARCHIVE_REQUEST_TIMEOUT_SECONDS = 30 * 60
 _MARKET_DATA_INGESTION_RECOVERY_BATCH_SIZE = 20
+_DEFAULT_MARKET_MEMBERSHIP_SECTORS = ["沪深A股", "沪深ETF"]
 
 
 def _validate_divid_factor_replacement_audit(
@@ -445,6 +446,8 @@ async def _ingest_uploaded_request(
       save_period=save_observed,
       verify_persistence=verify_observed,
     )
+  if operation == "sector_instruments":
+    return await ingest_uploaded_market_data_request(store, request_id)
   _, _, records = await load_uploaded_request_records(store, request_id)
   if operation == "divid_factors":
     frames, stock_codes, start_ex_date, end_ex_date = _normalize_divid_factor_records(
@@ -834,7 +837,9 @@ async def market_universe_request_flow(
   return await _request_and_wait(
     {
       "operation": "sector_instruments",
-      "sectors": sectors or ["沪深A股", "沪深ETF", "沪深指数"],
+      "sectors": sectors or _DEFAULT_MARKET_MEMBERSHIP_SECTORS,
+      "destination": "audit_only",
+      "as_of_date": time_utils.today().isoformat(),
     }
   )
 

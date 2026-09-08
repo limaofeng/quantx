@@ -70,6 +70,10 @@ _INSTRUMENT_CODE_PATTERN = re.compile(r"^[A-Z0-9]{1,16}\.(?:SH|SZ|BJ)$")
 _SIGNED_INT64_MIN = -(2**63)
 _SIGNED_INT64_MAX = 2**63 - 1
 
+SECTOR_MEMBERSHIP_AUDIT_SCHEMA_VERSION = 1
+SECTOR_MEMBERSHIP_AUDIT_DESTINATION = "audit_only"
+MAX_SECTOR_MEMBERSHIP_REQUEST_SECTORS = 32
+
 _TICK_REQUIRED_FIELDS = frozenset(HISTORICAL_TICK_TRANSFER_REQUIRED_FIELDS)
 _TICK_OPTIONAL_FIELDS = frozenset(HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS)
 _KLINE_REQUIRED_FIELDS = frozenset(HISTORICAL_KLINE_TRANSFER_REQUIRED_FIELDS)
@@ -138,6 +142,12 @@ class _BarsRequestScope:
   end_exclusive_ms: int
 
 
+@dataclass(frozen=True)
+class _SectorMembershipRequestScope:
+  sectors: tuple[str, ...]
+  as_of_date: date
+
+
 @dataclass
 class _TransferBudget:
   compressed_bytes: int = 0
@@ -147,6 +157,105 @@ class _TransferBudget:
 
 def _validation_error(message: str) -> MarketDataValidationError:
   return MarketDataValidationError(message)
+
+
+def canonical_instrument_codes_sha256(codes: Iterable[str]) -> str:
+  """Hash one canonical, sorted, duplicate-free instrument membership."""
+
+  normalized = sorted(set(codes))
+  return hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
+
+
+def _parse_sector_membership_request(
+  payload: dict[str, Any],
+) -> _SectorMembershipRequestScope:
+  if str(payload.get("operation") or "") != "sector_instruments":
+    raise _validation_error("membership transfer is not a sector_instruments request")
+  if str(payload.get("destination") or "").strip().lower() != (
+    SECTOR_MEMBERSHIP_AUDIT_DESTINATION
+  ):
+    raise _validation_error(
+      "sector_instruments request must use audit_only destination"
+    )
+
+  raw_sectors = payload.get("sectors")
+  if not isinstance(raw_sectors, list) or not raw_sectors:
+    raise _validation_error("sector_instruments request requires sectors")
+  if len(raw_sectors) > MAX_SECTOR_MEMBERSHIP_REQUEST_SECTORS:
+    raise _validation_error("sector_instruments request exceeds sector count limit")
+  if any(not isinstance(value, str) or not value.strip() for value in raw_sectors):
+    raise _validation_error("sector_instruments request contains an invalid sector")
+  sectors = tuple(value.strip() for value in raw_sectors)
+  if any(raw != normalized for raw, normalized in zip(raw_sectors, sectors)):
+    raise _validation_error("sector_instruments request sectors must be canonical")
+  if len(set(sectors)) != len(sectors):
+    raise _validation_error("sector_instruments request contains duplicate sectors")
+
+  raw_as_of_date = payload.get("as_of_date")
+  if not isinstance(raw_as_of_date, str):
+    raise _validation_error("sector_instruments request requires as_of_date")
+  try:
+    as_of_date = date.fromisoformat(raw_as_of_date)
+  except ValueError as exc:
+    raise _validation_error("sector_instruments as_of_date must be YYYY-MM-DD") from exc
+  if raw_as_of_date != as_of_date.isoformat():
+    raise _validation_error("sector_instruments as_of_date must be canonical")
+  return _SectorMembershipRequestScope(
+    sectors=sectors,
+    as_of_date=as_of_date,
+  )
+
+
+def build_sector_membership_audit(
+  records: Iterable[dict[str, Any]],
+  payload: dict[str, Any],
+) -> dict[str, Any]:
+  """Validate and hash one immutable QMT sector membership generation."""
+
+  scope = _parse_sector_membership_request(payload)
+  requested = set(scope.sectors)
+  codes_by_sector = {sector: set() for sector in scope.sectors}
+  record_count = 0
+  for record in records:
+    record_count += 1
+    if not isinstance(record, dict) or set(record) != {"sector", "code"}:
+      raise _validation_error(
+        "sector_instruments record must contain only sector and code"
+      )
+    sector = record.get("sector")
+    code = record.get("code")
+    if not isinstance(sector, str) or sector not in requested:
+      raise _validation_error(f"sector_instruments returned unknown sector: {sector}")
+    if not isinstance(code, str) or code != code.strip().upper():
+      raise _validation_error("sector_instruments code must be canonical")
+    if not _INSTRUMENT_CODE_PATTERN.fullmatch(code):
+      raise _validation_error(f"sector_instruments code is outside scope: {code}")
+    if code in codes_by_sector[sector]:
+      raise _validation_error(
+        f"sector_instruments contains duplicate membership: {sector}/{code}"
+      )
+    codes_by_sector[sector].add(code)
+
+  sector_audits = {
+    sector: {
+      "code_count": len(codes_by_sector[sector]),
+      "code_sha256": canonical_instrument_codes_sha256(codes_by_sector[sector]),
+    }
+    for sector in scope.sectors
+  }
+  all_codes = set().union(*codes_by_sector.values())
+  return {
+    "audit_schema_version": SECTOR_MEMBERSHIP_AUDIT_SCHEMA_VERSION,
+    "operation": "sector_instruments",
+    "destination": SECTOR_MEMBERSHIP_AUDIT_DESTINATION,
+    "as_of_date": scope.as_of_date.isoformat(),
+    "requested_sectors": list(scope.sectors),
+    "records_received": record_count,
+    "records_saved": 0,
+    "sector_audits": sector_audits,
+    "total_code_count": len(all_codes),
+    "total_code_sha256": canonical_instrument_codes_sha256(all_codes),
+  }
 
 
 def _parse_bars_request(payload: dict[str, Any]) -> _BarsRequestScope:
@@ -204,9 +313,7 @@ def _parse_bars_request(payload: dict[str, Any]) -> _BarsRequestScope:
   if end_local < start_local:
     raise _validation_error("bars request end_time precedes start_time")
   groups = tuple(
-    (period, code)
-    for period in normalized_periods
-    for code in sorted(normalized_codes)
+    (period, code) for period in normalized_periods for code in sorted(normalized_codes)
   )
   return _BarsRequestScope(
     codes=tuple(sorted(normalized_codes)),
@@ -248,7 +355,9 @@ def _validate_bar_schema(record: dict[str, Any], *, period: str) -> None:
     if missing:
       raise _validation_error(f"tick record is missing fields: {sorted(missing)}")
     if extra:
-      raise _validation_error(f"tick record contains unsupported fields: {sorted(extra)}")
+      raise _validation_error(
+        f"tick record contains unsupported fields: {sorted(extra)}"
+      )
     for field in (
       "lastPrice",
       "open",
@@ -282,7 +391,9 @@ def _validate_bar_schema(record: dict[str, Any], *, period: str) -> None:
   if missing:
     raise _validation_error(f"kline record is missing fields: {sorted(missing)}")
   if extra:
-    raise _validation_error(f"kline record contains unsupported fields: {sorted(extra)}")
+    raise _validation_error(
+      f"kline record contains unsupported fields: {sorted(extra)}"
+    )
   settlement_fields = {"settelementPrice", "settlementPrice"} & fields
   if not settlement_fields:
     raise _validation_error("kline record is missing settlement price")
@@ -438,11 +549,7 @@ class _BarTransferValidator:
         f"bars transfer is missing required summaries: {list(missing)}"
       )
     empty_codes = sorted(
-      {
-        str(item["code"])
-        for item in self.summaries
-        if int(item["row_count"]) == 0
-      }
+      {str(item["code"]) for item in self.summaries if int(item["row_count"]) == 0}
     )
     return {
       "operation": "bars",
@@ -524,9 +631,9 @@ def preprocess_market_data(
     storage_time = pd.to_datetime(source_time, unit="ms", utc=True).astype(
       "datetime64[ns, UTC]"
     )
-    values["time"] = (
-      storage_time + pd.to_timedelta(ordinal, unit="us")
-    ).dt.tz_convert("Asia/Shanghai")
+    values["time"] = (storage_time + pd.to_timedelta(ordinal, unit="us")).dt.tz_convert(
+      "Asia/Shanghai"
+    )
     values.rename(
       columns={
         "lastPrice": "last_price",
@@ -570,9 +677,7 @@ def preprocess_market_data(
       values[["volume", "amount", "pvolume", "tickvol"]].astype(float).round(2)
     )
     values[["stock_status", "open_int", "transaction_num"]] = (
-      values[["stock_status", "open_int", "transaction_num"]]
-      .fillna(0)
-      .astype(int)
+      values[["stock_status", "open_int", "transaction_num"]].fillna(0).astype(int)
     )
     return values[
       [
@@ -704,7 +809,9 @@ def _read_chunk_bytes(path: Path) -> tuple[bytes, str]:
       body.extend(block)
       digest.update(block)
       if len(body) > MAX_TRANSFER_CHUNK_COMPRESSED_BYTES:
-        raise _validation_error(f"market-data chunk exceeds compressed limit: {path.name}")
+        raise _validation_error(
+          f"market-data chunk exceeds compressed limit: {path.name}"
+        )
   return bytes(body), digest.hexdigest()
 
 
@@ -730,7 +837,9 @@ def _read_transfer_chunk(
   else:
     raw = compressed
   if len(raw) > MAX_TRANSFER_CHUNK_UNCOMPRESSED_BYTES:
-    raise _validation_error(f"market-data chunk exceeds uncompressed limit: {path.name}")
+    raise _validation_error(
+      f"market-data chunk exceeds uncompressed limit: {path.name}"
+    )
   budget.uncompressed_bytes += len(raw)
   if budget.uncompressed_bytes > MAX_TRANSFER_REQUEST_UNCOMPRESSED_BYTES:
     raise _validation_error("market-data request exceeds uncompressed byte limit")
@@ -858,6 +967,16 @@ async def load_uploaded_request_records(
   return request, payload, records
 
 
+async def ingest_uploaded_sector_membership_request(
+  store: MarketDataTransferStore,
+  request_id: str,
+) -> dict[str, Any]:
+  """Certify one sector generation without writing it to a market-data store."""
+
+  _, payload, records = await load_uploaded_request_records(store, request_id)
+  return build_sector_membership_audit(records, payload)
+
+
 def _validate_bar_manifest(
   manifest: list[dict[str, Any]],
   payload: dict[str, Any],
@@ -902,8 +1021,7 @@ async def save_market_data_period(
 
 
 async def _iterate_record_chunks(
-  record_chunks: Iterable[list[dict[str, Any]]]
-  | AsyncIterable[list[dict[str, Any]]],
+  record_chunks: Iterable[list[dict[str, Any]]] | AsyncIterable[list[dict[str, Any]]],
 ) -> AsyncIterable[list[dict[str, Any]]]:
   if isinstance(record_chunks, AsyncIterable):
     async for chunk in record_chunks:
@@ -949,11 +1067,7 @@ async def _uploaded_key_batches(
       keys.append(
         (
           int(record["time"]),
-          (
-            int(record[HISTORICAL_TICK_ORDINAL_FIELD])
-            if group[1] == "tick"
-            else None
-          ),
+          (int(record[HISTORICAL_TICK_ORDINAL_FIELD]) if group[1] == "tick" else None),
         )
       )
       if len(keys) >= MARKET_DATA_WRITE_BATCH_RECORDS:
@@ -970,8 +1084,7 @@ async def _uploaded_key_batches(
 
 
 async def _persist_validated_records(
-  record_chunks: Iterable[list[dict[str, Any]]]
-  | AsyncIterable[list[dict[str, Any]]],
+  record_chunks: Iterable[list[dict[str, Any]]] | AsyncIterable[list[dict[str, Any]]],
   *,
   payload: dict[str, Any],
   expected_audit: dict[str, Any],
@@ -998,15 +1111,9 @@ async def _persist_validated_records(
     for record in batch:
       code = str(record["code"])
       rows_by_code.setdefault(code, []).append(
-        {
-          key: value
-          for key, value in record.items()
-          if key not in {"code", "period"}
-        }
+        {key: value for key, value in record.items() if key not in {"code", "period"}}
       )
-    market_data = {
-      code: pd.DataFrame(rows) for code, rows in rows_by_code.items()
-    }
+    market_data = {code: pd.DataFrame(rows) for code, rows in rows_by_code.items()}
     result = await save_period(period=batch_period, market_data=market_data)
     saved_count = int(result.get("saved_count", 0))
     if result.get("status") != "success" or saved_count != len(batch):
@@ -1049,7 +1156,9 @@ async def _persist_validated_records(
   await flush()
   actual_audit = validator.finish()
   if actual_audit != expected_audit:
-    raise MarketDataValidationError("market-data manifest changed between validation passes")
+    raise MarketDataValidationError(
+      "market-data manifest changed between validation passes"
+    )
   if accepted != int(expected_audit["records_received"]):
     raise RuntimeError(
       "market-data accepted row count mismatch: "
@@ -1134,8 +1243,7 @@ async def ingest_uploaded_bar_request(
   if (
     verification.get("status") != "verified"
     or records_verified != int(audit["records_received"])
-    or int(verification.get("groups_verified", -1))
-    != len(expected_verified_summaries)
+    or int(verification.get("groups_verified", -1)) != len(expected_verified_summaries)
     or verification.get("code_summaries") != expected_verified_summaries
   ):
     raise MarketDataPersistenceVerificationError(
@@ -1165,7 +1273,14 @@ async def ingest_uploaded_market_data_request(
       raise _validation_error("market-data request payload is invalid JSON") from exc
   if not isinstance(payload, dict):
     raise _validation_error("market-data request payload is not an object")
+  operation = str(payload.get("operation") or "bars")
   destination = str(payload.get("destination") or "influxdb").strip().lower()
+  if operation == "sector_instruments":
+    if destination != SECTOR_MEMBERSHIP_AUDIT_DESTINATION:
+      raise _validation_error(
+        "sector_instruments request must use audit_only destination"
+      )
+    return await ingest_uploaded_sector_membership_request(store, request_id)
   if destination == "influxdb":
     return await ingest_uploaded_bar_request(store, request_id)
   raise _validation_error("market-data request destination is unsupported")

@@ -6,6 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 import quantx_worker.prefector.flows.daily_indicator_snapshot_flow as indicator_flow
 import quantx_worker.prefector.flows.daily_market_data_sync_flow as market_flow
+from quantx_infrastructure.services.market_data_transfer_ingestion import (
+  build_sector_membership_audit,
+)
 from sqlalchemy.dialects import postgresql
 
 from tests.worker.market_sync_helpers import completed_transfer
@@ -102,6 +105,161 @@ def test_only_exact_full_snapshot_request_certifies_readiness(
   assert indicator_flow._requests_full_snapshot_scope(sectors, stock_list) is expected
 
 
+def _membership_payload(target: date) -> dict:
+  return {
+    "operation": "sector_instruments",
+    "destination": "audit_only",
+    "as_of_date": target.isoformat(),
+    "sectors": ["沪深A股", "沪深ETF"],
+  }
+
+
+def test_membership_audit_must_exactly_match_each_typed_sector_and_union():
+  target = date(2026, 9, 1)
+  payload = _membership_payload(target)
+  audit = build_sector_membership_audit(
+    [
+      {"sector": "沪深A股", "code": "600000.SH"},
+      {"sector": "沪深ETF", "code": "510300.SH"},
+    ],
+    payload,
+  )
+  codes_by_sector = {
+    "沪深A股": {"600000.SH"},
+    "沪深ETF": {"510300.SH"},
+  }
+
+  assert indicator_flow._membership_audit_matches(
+    payload=payload,
+    audit=audit,
+    target=target,
+    codes_by_sector=codes_by_sector,
+  )
+
+  mismatched = {
+    **audit,
+    "sector_audits": {
+      **audit["sector_audits"],
+      "沪深ETF": {
+        **audit["sector_audits"]["沪深ETF"],
+        "code_count": 2,
+      },
+    },
+  }
+  assert not indicator_flow._membership_audit_matches(
+    payload=payload,
+    audit=mismatched,
+    target=target,
+    codes_by_sector=codes_by_sector,
+  )
+
+
+@pytest.mark.asyncio
+async def test_historical_target_never_reuses_current_sector_relation(monkeypatch):
+  monkeypatch.setattr(
+    indicator_flow.time_utils,
+    "today",
+    lambda: date(2026, 9, 1),
+  )
+  monkeypatch.setattr(
+    indicator_flow,
+    "AsyncSessionLocal",
+    lambda: (_ for _ in ()).throw(AssertionError("current relation was queried")),
+  )
+
+  result = await indicator_flow._certified_default_membership_generations(
+    target_dates=[date(2026, 8, 31)],
+    frozen_instruments=[],
+  )
+
+  assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_current_membership_generation_requires_same_completed_request(
+  monkeypatch,
+):
+  target = date(2026, 9, 1)
+  payload = _membership_payload(target)
+  audit = build_sector_membership_audit(
+    [
+      {"sector": "沪深A股", "code": "600000.SH"},
+      {"sector": "沪深ETF", "code": "510300.SH"},
+      {"sector": "沪深ETF", "code": "560000.SH"},
+    ],
+    payload,
+  )
+
+  class Result:
+    def __init__(self, rows):
+      self.rows = rows
+
+    def mappings(self):
+      return self
+
+    def all(self):
+      return self.rows
+
+  class Session:
+    def __init__(self):
+      self.results = [
+        Result(
+          [
+            {
+              "sector_code": "沪深A股",
+              "instrument_code": "600000.SH",
+              "instrument_type": indicator_flow.InstrumentType.STOCK,
+              "secu_category": None,
+            },
+            {
+              "sector_code": "沪深ETF",
+              "instrument_code": "510300.SH",
+              "instrument_type": indicator_flow.InstrumentType.ETF,
+              "secu_category": None,
+            },
+            {
+              "sector_code": "沪深ETF",
+              "instrument_code": "560000.SH",
+              "instrument_type": indicator_flow.InstrumentType.ETF,
+              "secu_category": 10608640,
+            },
+          ]
+        ),
+        Result(
+          [
+            {
+              "request_id": "membership-request-1",
+              "request_payload": payload,
+              "ingestion_result": audit,
+            }
+          ]
+        ),
+      ]
+
+    async def execute(self, _statement):
+      return self.results.pop(0)
+
+  class SessionContext:
+    async def __aenter__(self):
+      return Session()
+
+    async def __aexit__(self, *_args):
+      return False
+
+  monkeypatch.setattr(indicator_flow.time_utils, "today", lambda: target)
+  monkeypatch.setattr(indicator_flow, "AsyncSessionLocal", SessionContext)
+
+  result = await indicator_flow._certified_default_membership_generations(
+    target_dates=[target],
+    frozen_instruments=[
+      {"code": "600000.SH", "instrument_type": "stock"},
+      {"code": "510300.SH", "instrument_type": "etf"},
+    ],
+  )
+
+  assert result == {target: "membership-request-1"}
+
+
 @pytest.mark.asyncio
 async def test_snapshot_instrument_scope_is_active_on_target_date(monkeypatch):
   class Result:
@@ -157,6 +315,68 @@ async def test_snapshot_instrument_scope_is_active_on_target_date(monkeypatch):
     "(instruments.expire_date IS NULL OR instruments.expire_date >= '2026-07-29')"
     in sql
   )
+  assert "SELECT DISTINCT" in sql
+  assert "JOIN sector_stocks ON sector_stocks.stock_code = instruments.code" in sql
+  assert "JOIN sectors ON sector_stocks.sector_id = sectors.id" in sql
+  assert "sectors.code = '沪深A股'" in sql
+  assert "sectors.code = '沪深ETF'" in sql
+  assert "sectors.classification = 'MKT'" in sql
+  assert "instruments.instrument_type = 'STOCK'" in sql
+  assert "instruments.instrument_type = 'ETF'" in sql
+  assert "instruments.secu_category NOT IN (10608640, 10608720, 10625024)" in sql
+
+
+@pytest.mark.asyncio
+async def test_custom_sector_uses_authoritative_relation_and_requested_types(
+  monkeypatch,
+):
+  class Result:
+    def all(self):
+      return []
+
+  class Session:
+    statement = None
+
+    async def execute(self, statement):
+      self.statement = statement
+      return Result()
+
+  class SessionContext:
+    def __init__(self, session):
+      self.session = session
+
+    async def __aenter__(self):
+      return self.session
+
+    async def __aexit__(self, exc_type, exc, traceback):
+      return False
+
+  session = Session()
+  monkeypatch.setattr(
+    indicator_flow,
+    "AsyncSessionLocal",
+    lambda: SessionContext(session),
+  )
+
+  await indicator_flow.resolve_instruments(
+    ["银行", "TGN-001"],
+    None,
+    allowed_types={indicator_flow.InstrumentType.STOCK},
+  )
+
+  sql = " ".join(
+    str(
+      session.statement.compile(
+        dialect=postgresql.dialect(),
+        compile_kwargs={"literal_binds": True},
+      )
+    ).split()
+  )
+  assert "JOIN sector_stocks ON sector_stocks.stock_code = instruments.code" in sql
+  assert "JOIN sectors ON sector_stocks.sector_id = sectors.id" in sql
+  assert "sectors.name = '银行' OR sectors.code = '银行'" in sql
+  assert "sectors.name = 'TGN-001' OR sectors.code = 'TGN-001'" in sql
+  assert "instruments.instrument_type IN ('STOCK')" in sql
 
 
 @pytest.mark.parametrize(
@@ -255,6 +475,12 @@ async def test_scoped_flow_batches_complete_scope_but_calculates_only_active_cod
   monkeypatch.setattr(
     indicator_flow, "_create_signal_runs", AsyncMock(return_value={target: 1})
   )
+  invalidate_generation = AsyncMock()
+  monkeypatch.setattr(
+    indicator_flow,
+    "_invalidate_snapshot_generation",
+    invalidate_generation,
+  )
   monkeypatch.setattr(indicator_flow, "_finish_signal_run", AsyncMock())
   monkeypatch.setattr(indicator_flow, "DailyIndicatorSnapshotService", SnapshotService)
   monkeypatch.setattr(indicator_flow, "AsyncSessionLocal", SessionContext)
@@ -280,6 +506,12 @@ async def test_scoped_flow_batches_complete_scope_but_calculates_only_active_cod
   assert batch_calls[1]["codes_by_snapshot_date"] == {target: []}
   assert all(call["snapshot_run_ids"] == {target: 1} for call in batch_calls)
   assert all(call["lock_backend_pid"] == 101 for call in batch_calls)
+  invalidate_generation.assert_awaited_once_with(
+    run_ids={target: 1},
+    target_codes={target: ["000001.SZ"]},
+    replace_entire_date=False,
+    locks={},
+  )
   assert result["dates"][0]["total_codes"] == 1
   assert result["dates"][0]["saved"] == 1
   assert result["deleted_old_snapshots"] == 0
@@ -334,6 +566,94 @@ def test_result_counter_mismatch_cannot_be_silently_accepted():
     "快照结果计数不守恒: total=2 processed=1"
   )
   assert indicator_flow._result_conservation_error(result, 1) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace_entire_date", [True, False])
+async def test_generation_invalidation_precedes_batches_and_is_scope_exact(
+  monkeypatch,
+  replace_entire_date,
+):
+  target = date(2026, 9, 1)
+
+  class Session:
+    def __init__(self):
+      self.statement = None
+      self.committed = False
+
+    async def execute(self, statement):
+      self.statement = statement
+
+    async def commit(self):
+      self.committed = True
+
+    async def rollback(self):
+      raise AssertionError("successful invalidation must not roll back")
+
+  session = Session()
+
+  class SessionContext:
+    async def __aenter__(self):
+      return session
+
+    async def __aexit__(self, *_args):
+      return False
+
+  monkeypatch.setattr(indicator_flow, "AsyncSessionLocal", SessionContext)
+  monkeypatch.setattr(
+    indicator_flow,
+    "_snapshot_lock_backend_pid",
+    lambda _locks: 701,
+  )
+  monkeypatch.setattr(indicator_flow, "_assert_snapshot_locks", AsyncMock())
+  publish_guard = AsyncMock()
+  run_owner = AsyncMock()
+  publish_owner = AsyncMock()
+  monkeypatch.setattr(
+    indicator_flow,
+    "acquire_snapshot_publish_guard",
+    publish_guard,
+  )
+  monkeypatch.setattr(indicator_flow, "assert_snapshot_run_owner", run_owner)
+  monkeypatch.setattr(
+    indicator_flow,
+    "assert_snapshot_publish_owner",
+    publish_owner,
+  )
+
+  await indicator_flow._invalidate_snapshot_generation(
+    run_ids={target: 91},
+    target_codes={target: ["600000.SH"]},
+    replace_entire_date=replace_entire_date,
+    locks=object(),
+  )
+
+  sql = " ".join(
+    str(
+      session.statement.compile(
+        dialect=postgresql.dialect(),
+        compile_kwargs={"literal_binds": True},
+      )
+    ).split()
+  )
+  assert "indicator_snapshots.snapshot_date = '2026-09-01'" in sql
+  if replace_entire_date:
+    assert "indicator_snapshots.code IN" not in sql
+  else:
+    assert "indicator_snapshots.code IN ('600000.SH')" in sql
+  assert "calculation_version=NULL" in sql
+  assert session.committed
+  publish_guard.assert_awaited_once_with(
+    session,
+    lock_backend_pid=701,
+    snapshot_dates=[target],
+  )
+  run_owner.assert_awaited_once_with(session, {target: 91})
+  publish_owner.assert_awaited_once_with(
+    session,
+    lock_backend_pid=701,
+    snapshot_dates=[target],
+  )
 
 
 @pytest.mark.asyncio

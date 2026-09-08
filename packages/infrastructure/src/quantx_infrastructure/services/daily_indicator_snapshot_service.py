@@ -14,6 +14,9 @@ from quantx_infrastructure.repositories.indicator_snapshot_repository import (
 )
 from quantx_infrastructure.repositories.kline_repository import KLineRepository
 from quantx_infrastructure.services.snapshot_fencing import SnapshotFenceLost
+from quantx_infrastructure.services.snapshot_inactive_evidence import (
+  load_snapshot_inactive_empty_proofs,
+)
 from quantx_infrastructure.services.snapshot_price_history import (
   load_snapshot_price_history,
 )
@@ -103,6 +106,12 @@ def build_snapshot_record(
   return snap
 
 
+def _bar_is_inactive(bar: pd.Series) -> bool:
+  volume = pd.to_numeric(bar.get("volume"), errors="coerce")
+  suspended = pd.to_numeric(bar.get("suspend_flag", 0), errors="coerce")
+  return (pd.notna(volume) and volume == 0) or (pd.notna(suspended) and suspended == 1)
+
+
 class DailyIndicatorSnapshotService:
   """读取日线、计算指标并写入日级快照。"""
 
@@ -113,6 +122,7 @@ class DailyIndicatorSnapshotService:
     snapshot_repo_cls=IndicatorSnapshotRepository,
     logger_=None,
     price_history_loader=None,
+    inactive_empty_proof_loader=None,
     trading_dates=None,
   ):
     self.kline_repo_factory = kline_repo_factory
@@ -120,6 +130,7 @@ class DailyIndicatorSnapshotService:
     self.snapshot_repo_cls = snapshot_repo_cls
     self.logger = logger_ or logger
     self.price_history_loader = price_history_loader
+    self.inactive_empty_proof_loader = inactive_empty_proof_loader
     self.trading_dates = trading_dates or TradingDateHelper()
 
   def _load_daily_batch(
@@ -352,7 +363,47 @@ class DailyIndicatorSnapshotService:
         frame = frame.dropna(subset=["time"]).sort_values("time")
         frame["_trade_date"] = frame["time"].dt.tz_convert("Asia/Shanghai").dt.date
       except Exception as e:
-        msg = f"{code} K 线格式异常: {e}"
+        frame_errors[code] = f"{code} K 线格式异常: {e}"
+        continue
+      prepared_frames[code] = frame
+
+    inactive_proof_candidates: set[tuple[str, date]] = set()
+    for code, frame in prepared_frames.items():
+      for target in dates:
+        if code not in scope_by_date[target]:
+          continue
+        has_target = bool((frame["_trade_date"] == target).any())
+        if has_target:
+          continue
+        prior = frame.loc[frame["_trade_date"] <= target]
+        if not prior.empty and _bar_is_inactive(prior.iloc[-1]):
+          inactive_proof_candidates.add((code, target))
+
+    inactive_empty_proofs: set[tuple[str, date]] = set()
+    if inactive_proof_candidates:
+      try:
+        if self.inactive_empty_proof_loader is not None:
+          inactive_empty_proofs = await self.inactive_empty_proof_loader(
+            inactive_proof_candidates
+          )
+        else:
+          inactive_empty_proofs = await load_snapshot_inactive_empty_proofs(
+            inactive_proof_candidates,
+            self.db_factory,
+          )
+        inactive_empty_proofs &= inactive_proof_candidates
+      except Exception as e:
+        # Missing proof must stay missing. A proof-store outage cannot promote
+        # a historical inactive row into target-day inactivity.
+        self.logger.warning("日级快照停牌双零行证据不可用，按缺失处理: %s", e)
+
+    records: List[Dict[str, Any]] = []
+    for code in active_codes:
+      code_dates = [target for target in dates if code in scope_by_date[target]]
+      if not code_dates:
+        continue
+      if code in frame_errors:
+        msg = frame_errors[code]
         result["errors"].append(msg)
         for target in code_dates:
           day_result = result["dates"][target.isoformat()]
@@ -377,13 +428,17 @@ class DailyIndicatorSnapshotService:
           day_result["missing_target"] += 1
           continue
         current = target_frame.iloc[-1]
-        volume = pd.to_numeric(current.get("volume"), errors="coerce")
-        suspended = pd.to_numeric(current.get("suspend_flag", 0), errors="coerce")
-        if (pd.notna(volume) and volume == 0) or (
-          pd.notna(suspended) and suspended == 1
-        ):
+        has_target = bool((frame["_trade_date"] == target).any())
+        if _bar_is_inactive(current):
           day_result["skipped"] += 1
-          day_result["inactive_target"] += 1
+          if has_target or (code, target) in inactive_empty_proofs:
+            day_result["inactive_target"] += 1
+          else:
+            day_result["missing_target"] += 1
+          continue
+        if not has_target:
+          day_result["skipped"] += 1
+          day_result["missing_target"] += 1
           continue
         snap = build_snapshot_record(
           code=code,

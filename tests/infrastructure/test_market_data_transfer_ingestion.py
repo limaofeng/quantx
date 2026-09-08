@@ -212,6 +212,117 @@ class ManifestStore:
     return self.manifest
 
 
+def _sector_payload() -> dict:
+  return {
+    "operation": "sector_instruments",
+    "destination": "audit_only",
+    "as_of_date": "2026-09-01",
+    "sectors": ["沪深A股", "沪深ETF"],
+  }
+
+
+@pytest.mark.asyncio
+async def test_sector_membership_ingestion_certifies_each_sector_and_union(
+  tmp_path: Path,
+) -> None:
+  records = [
+    {"sector": "沪深A股", "code": "600000.SH"},
+    {"sector": "沪深A股", "code": "000001.SZ"},
+    {"sector": "沪深ETF", "code": "510300.SH"},
+  ]
+  manifest = [
+    _write_chunk(tmp_path, records[:1], index=0),
+    _write_chunk(tmp_path, records[1:], index=1),
+  ]
+  store = ManifestStore(payload=_sector_payload(), manifest=manifest)
+
+  result = await ingestion.ingest_uploaded_market_data_request(store, "request-1")
+
+  assert result == {
+    "audit_schema_version": 1,
+    "operation": "sector_instruments",
+    "destination": "audit_only",
+    "as_of_date": "2026-09-01",
+    "requested_sectors": ["沪深A股", "沪深ETF"],
+    "records_received": 3,
+    "records_saved": 0,
+    "sector_audits": {
+      "沪深A股": {
+        "code_count": 2,
+        "code_sha256": ingestion.canonical_instrument_codes_sha256(
+          ["000001.SZ", "600000.SH"]
+        ),
+      },
+      "沪深ETF": {
+        "code_count": 1,
+        "code_sha256": ingestion.canonical_instrument_codes_sha256(["510300.SH"]),
+      },
+    },
+    "total_code_count": 3,
+    "total_code_sha256": ingestion.canonical_instrument_codes_sha256(
+      ["000001.SZ", "510300.SH", "600000.SH"]
+    ),
+  }
+
+
+@pytest.mark.parametrize(
+  ("records", "match"),
+  [
+    (
+      [
+        {"sector": "沪深A股", "code": "600000.SH"},
+        {"sector": "沪深A股", "code": "600000.SH"},
+      ],
+      "duplicate membership",
+    ),
+    ([{"sector": "同名自定义板块", "code": "600000.SH"}], "unknown sector"),
+    ([{"sector": "沪深A股", "code": "600000.sh"}], "must be canonical"),
+    ([{"sector": "沪深A股", "code": "600000.HK"}], "outside scope"),
+    (
+      [{"sector": "沪深A股", "code": "600000.SH", "name": "浦发银行"}],
+      "only sector and code",
+    ),
+  ],
+)
+def test_sector_membership_audit_rejects_duplicate_unknown_or_out_of_scope_rows(
+  records: list[dict],
+  match: str,
+) -> None:
+  with pytest.raises(ingestion.MarketDataValidationError, match=match):
+    ingestion.build_sector_membership_audit(records, _sector_payload())
+
+
+@pytest.mark.parametrize(
+  ("payload_update", "match"),
+  [
+    ({"destination": "influxdb"}, "audit_only"),
+    ({"as_of_date": "20260901"}, "must be canonical"),
+    ({"sectors": ["沪深A股", "沪深A股"]}, "duplicate sectors"),
+  ],
+)
+def test_sector_membership_audit_rejects_invalid_immutable_scope(
+  payload_update: dict,
+  match: str,
+) -> None:
+  payload = {**_sector_payload(), **payload_update}
+  with pytest.raises(ingestion.MarketDataValidationError, match=match):
+    ingestion.build_sector_membership_audit([], payload)
+
+
+@pytest.mark.asyncio
+async def test_sector_membership_ingestion_rejects_incomplete_chunk_generation(
+  tmp_path: Path,
+) -> None:
+  manifest = [_write_chunk(tmp_path, [], index=1)]
+  store = ManifestStore(payload=_sector_payload(), manifest=manifest)
+
+  with pytest.raises(
+    ingestion.MarketDataValidationError,
+    match="missing or unordered chunks",
+  ):
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")
+
+
 class AtomicRequestStore:
   def __init__(self) -> None:
     self.status = "UPLOADED"
@@ -303,7 +414,9 @@ def test_tick_preprocessing_preserves_source_key_and_optional_limit_fields() -> 
 
 
 @pytest.mark.asyncio
-async def test_unknown_tick_field_cannot_bypass_strict_ingestion_or_write_partially() -> None:
+async def test_unknown_tick_field_cannot_bypass_strict_ingestion_or_write_partially() -> (
+  None
+):
   row = _tick_row()
   row["pe"] = 18.2
   records = [row, _summary([row])]
@@ -339,7 +452,9 @@ def test_request_scope_uses_inclusive_shanghai_calendar_boundaries() -> None:
     SHANGHAI_DAY_END_EXCLUSIVE_MS,
   ):
     outside = _kline_row(time=outside_time)
-    with pytest.raises(ingestion.MarketDataValidationError, match="outside request window"):
+    with pytest.raises(
+      ingestion.MarketDataValidationError, match="outside request window"
+    ):
       ingestion.validate_bar_records_against_request(
         [outside, _summary([outside], period="1m")],
         _payload(periods=["1m"]),
@@ -380,7 +495,9 @@ def test_summary_cartesian_product_and_legal_empty_series_are_closed() -> None:
 
   ingestion.validate_bar_records_against_request(records, payload)
 
-  with pytest.raises(ingestion.MarketDataValidationError, match="missing required summaries"):
+  with pytest.raises(
+    ingestion.MarketDataValidationError, match="missing required summaries"
+  ):
     ingestion.validate_bar_records_against_request(records[:-1], payload)
 
 
@@ -388,7 +505,9 @@ def test_empty_summary_requires_explicit_no_data_reason() -> None:
   summary = _summary([])
   summary["no_data_reason"] = None
 
-  with pytest.raises(ingestion.MarketDataValidationError, match="invalid historical bar summary"):
+  with pytest.raises(
+    ingestion.MarketDataValidationError, match="invalid historical bar summary"
+  ):
     ingestion.validate_bar_records_against_request([summary], _payload())
 
 
@@ -676,8 +795,7 @@ def test_request_record_total_is_enforced_across_chunks(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   items = [
-    _write_chunk(tmp_path, [{"value": index}], index=index)
-    for index in range(2)
+    _write_chunk(tmp_path, [{"value": index}], index=index) for index in range(2)
   ]
   monkeypatch.setattr(ingestion, "MAX_TRANSFER_REQUEST_RECORDS", 1)
 
@@ -692,7 +810,9 @@ def test_request_uncompressed_total_is_enforced_across_chunks(
   items = [_write_chunk(tmp_path, [], index=index) for index in range(2)]
   monkeypatch.setattr(ingestion, "MAX_TRANSFER_REQUEST_UNCOMPRESSED_BYTES", len(b"[]"))
 
-  with pytest.raises(ingestion.MarketDataValidationError, match="uncompressed byte limit"):
+  with pytest.raises(
+    ingestion.MarketDataValidationError, match="uncompressed byte limit"
+  ):
     list(ingestion._iter_transfer_chunks(items))
 
 
@@ -704,15 +824,16 @@ def test_request_compressed_total_is_enforced_across_chunks(
   first_size = Path(items[0]["storage_reference"]).stat().st_size
   monkeypatch.setattr(ingestion, "MAX_TRANSFER_REQUEST_COMPRESSED_BYTES", first_size)
 
-  with pytest.raises(ingestion.MarketDataValidationError, match="compressed byte limit"):
+  with pytest.raises(
+    ingestion.MarketDataValidationError, match="compressed byte limit"
+  ):
     list(ingestion._iter_transfer_chunks(items))
 
 
 @pytest.mark.asyncio
 async def test_manifest_chunk_count_is_bounded_before_reading_tiny_chunks() -> None:
   manifest = [
-    {"chunk_index": index}
-    for index in range(ingestion.MAX_TRANSFER_REQUEST_CHUNKS + 1)
+    {"chunk_index": index} for index in range(ingestion.MAX_TRANSFER_REQUEST_CHUNKS + 1)
   ]
   store = ManifestStore(payload=_payload(), manifest=manifest)
 
@@ -831,7 +952,9 @@ async def test_validation_failure_is_terminal_but_influx_failure_is_retryable() 
   ids=["query", "mismatch"],
 )
 @pytest.mark.asyncio
-async def test_readback_failures_release_the_claim_for_retry(failure: RuntimeError) -> None:
+async def test_readback_failures_release_the_claim_for_retry(
+  failure: RuntimeError,
+) -> None:
   store = AtomicRequestStore()
 
   async def fail_readback(_store, _request_id):
@@ -989,10 +1112,13 @@ async def test_concurrent_consumers_only_ingest_one_claim() -> None:
   assert ingestion_count == 1
   assert store.claim_count == 1
   assert sum(result is None for result in results) == 1
-  assert sum(
-    isinstance(result, dict) and result.get("status") == "completed"
-    for result in results
-  ) == 1
+  assert (
+    sum(
+      isinstance(result, dict) and result.get("status") == "completed"
+      for result in results
+    )
+    == 1
+  )
 
 
 def test_completed_staging_cleanup_is_bound_to_authoritative_root(
@@ -1074,9 +1200,7 @@ def test_market_data_staging_root_prefers_explicit_runtime_directory(
   monkeypatch.setenv("QUANTX_RUNTIME_DIR", str(runtime_root))
   monkeypatch.setenv("QUANTX_ROOT", str(tmp_path / "ignored-root"))
 
-  assert staging.market_data_staging_root() == (
-    runtime_root.resolve() / "market-data"
-  )
+  assert staging.market_data_staging_root() == (runtime_root.resolve() / "market-data")
 
 
 def test_market_data_storage_reference_is_portable_and_root_bound(
@@ -1094,11 +1218,14 @@ def test_market_data_storage_reference_is_portable_and_root_bound(
   )
 
   assert reference == f"{request_id}/00000000.json.gz"
-  assert staging.safe_market_data_staging_file(
-    root=root,
-    request_id=request_id,
-    storage_reference=reference,
-  ) == candidate.resolve()
+  assert (
+    staging.safe_market_data_staging_file(
+      root=root,
+      request_id=request_id,
+      storage_reference=reference,
+    )
+    == candidate.resolve()
+  )
 
 
 @pytest.mark.asyncio
@@ -1132,6 +1259,4 @@ async def test_uploaded_manifest_resolves_portable_reference_inside_runtime_root
     request_id,
   )
 
-  assert manifest[0]["storage_reference"] == str(
-    request_directory / "00000000.json.gz"
-  )
+  assert manifest[0]["storage_reference"] == str(request_directory / "00000000.json.gz")

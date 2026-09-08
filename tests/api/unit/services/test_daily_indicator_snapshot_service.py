@@ -71,7 +71,7 @@ def daily_frame(last_close: float, end: str = "2026-05-20", periods: int = 40):
   )
 
 
-def make_service(repository):
+def make_service(repository, *, inactive_empty_proof_loader=None):
   async def verified_history(frames):
     return {
       code: frame.sort_values("time").drop_duplicates("time", keep="last")
@@ -82,11 +82,17 @@ def make_service(repository):
     async def get_trading_calendar(self, market, start_date, end_date):
       return list(pd.bdate_range(start_date, end_date).date)
 
+  async def no_inactive_empty_proofs(_candidates):
+    return set()
+
   return DailyIndicatorSnapshotService(
     kline_repo_factory=lambda: repository,
     db_factory=fake_db_factory,
     snapshot_repo_cls=InMemorySnapshotRepo,
     price_history_loader=verified_history,
+    inactive_empty_proof_loader=(
+      inactive_empty_proof_loader or no_inactive_empty_proofs
+    ),
     trading_dates=VerifiedCalendar(),
   )
 
@@ -136,8 +142,13 @@ async def test_inactive_target_is_audited_skip_not_calculation_failure(inactive_
   else:
     inactive["suspend_flag"] = 0
     inactive.loc[inactive.index[-1], "suspend_flag"] = 1
+
+  async def unexpected_proof_lookup(_candidates):
+    raise AssertionError("精确目标日停牌不应查询历史空行证明")
+
   service = make_service(
-    FakeKLineRepository({"000001.SZ": frame, "000002.SZ": inactive})
+    FakeKLineRepository({"000001.SZ": frame, "000002.SZ": inactive}),
+    inactive_empty_proof_loader=unexpected_proof_lookup,
   )
   result = await service.compute_and_save_batch(
     codes=["000001.SZ", "000002.SZ"],
@@ -501,6 +512,75 @@ async def test_missing_target_day_does_not_reuse_previous_close():
   assert result["skipped"] == 1
   assert result["missing_target"] == 1
   assert InMemorySnapshotRepo.rows == {}
+
+
+@pytest.mark.parametrize("inactive_kind", ["no_volume", "suspended"])
+@pytest.mark.asyncio
+async def test_missing_target_with_last_known_inactive_bar_without_proof_stays_missing(
+  inactive_kind,
+):
+  InMemorySnapshotRepo.rows = {}
+  frame = daily_frame(10, end="2026-05-19")
+  if inactive_kind == "no_volume":
+    frame.loc[frame.index[-1], "volume"] = 0
+  else:
+    frame["suspend_flag"] = 0
+    frame.loc[frame.index[-1], "suspend_flag"] = 1
+  service = make_service(FakeKLineRepository({"560650.SH": frame}))
+
+  result = await service.compute_and_save_batch(
+    codes=["560650.SH"],
+    snapshot_date=date(2026, 5, 20),
+    instrument_type_map={"560650.SH": "etf"},
+    name_map={"560650.SH": "停牌 ETF"},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
+  )
+
+  assert result["saved"] == 0
+  assert result["skipped"] == result["missing_target"] == 1
+  assert result["inactive_target"] == 0
+  assert result["failed"] == 0
+  assert InMemorySnapshotRepo.rows == {}
+
+
+@pytest.mark.asyncio
+async def test_missing_targets_require_one_batched_dual_empty_proof_lookup():
+  InMemorySnapshotRepo.rows = {}
+  first = daily_frame(10, end="2026-05-19")
+  first.loc[first.index[-1], "volume"] = 0
+  second = daily_frame(20, end="2026-05-19")
+  second["suspend_flag"] = 0
+  second.loc[second.index[-1], "suspend_flag"] = 1
+  proof_calls = []
+
+  async def load_proofs(candidates):
+    proof_calls.append(set(candidates))
+    return set(candidates)
+
+  service = make_service(
+    FakeKLineRepository({"560650.SH": first, "000001.SZ": second}),
+    inactive_empty_proof_loader=load_proofs,
+  )
+
+  result = await service.compute_and_save_batch(
+    codes=["560650.SH", "000001.SZ"],
+    snapshot_date=date(2026, 5, 20),
+    instrument_type_map={"560650.SH": "etf", "000001.SZ": "stock"},
+    name_map={"560650.SH": "停牌 ETF", "000001.SZ": "停牌股票"},
+    snapshot_run_id=1,
+    lock_backend_pid=101,
+  )
+
+  assert proof_calls == [
+    {
+      ("560650.SH", date(2026, 5, 20)),
+      ("000001.SZ", date(2026, 5, 20)),
+    }
+  ]
+  assert result["saved"] == 0
+  assert result["skipped"] == result["inactive_target"] == 2
+  assert result["missing_target"] == result["failed"] == 0
 
 
 @pytest.mark.asyncio

@@ -47,9 +47,7 @@ def _validate_periods(periods: list[str]) -> list[str]:
   normalized = list(dict.fromkeys(str(item or "").lower() for item in periods))
   invalid = [item for item in normalized if item not in SUPPORTED_PERIODS]
   if invalid:
-    raise ValueError(
-      f"不支持的数据周期: {invalid}; 仅支持 {sorted(SUPPORTED_PERIODS)}"
-    )
+    raise ValueError(f"不支持的数据周期: {invalid}; 仅支持 {sorted(SUPPORTED_PERIODS)}")
   if not normalized:
     raise ValueError("至少选择一个数据周期")
   return normalized

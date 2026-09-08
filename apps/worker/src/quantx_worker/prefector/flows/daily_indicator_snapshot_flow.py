@@ -29,6 +29,11 @@ from quantx_infrastructure.repositories.divid_factor_repository import (
 from quantx_infrastructure.services.daily_indicator_snapshot_service import (
   DailyIndicatorSnapshotService,
 )
+from quantx_infrastructure.services.market_data_transfer_ingestion import (
+  SECTOR_MEMBERSHIP_AUDIT_DESTINATION,
+  SECTOR_MEMBERSHIP_AUDIT_SCHEMA_VERSION,
+  canonical_instrument_codes_sha256,
+)
 from quantx_infrastructure.services.snapshot_fencing import (
   SNAPSHOT_SESSION_LOCK_NAMESPACE,
   SnapshotFenceLost,
@@ -38,7 +43,7 @@ from quantx_infrastructure.services.snapshot_fencing import (
   assert_snapshot_run_owner,
 )
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
-from sqlalchemy import or_, select, text
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 DEFAULT_SNAPSHOT_SECTORS = ["沪深A股", "沪深ETF"]
@@ -51,6 +56,15 @@ _MARKET_SECTOR_TYPES = {
   "沪深ETF": InstrumentType.ETF,
   "沪深指数": InstrumentType.INDEX,
 }
+
+# XTData includes subscription/redemption and agency instruments in the broad
+# ETF sector relation.  They are not exchange-traded ETF quotes and never have
+# a usable daily bar, so they must not enter an indicator snapshot universe.
+_NON_TRADING_ETF_SECURITY_CATEGORIES = (
+  10608640,
+  10608720,
+  10625024,
+)
 
 
 def _chunks(values: list[str], size: int) -> Iterable[list[str]]:
@@ -130,7 +144,7 @@ async def resolve_instruments(
   allowed_types: Optional[set[InstrumentType]] = None,
   active_on: Optional[date] = None,
 ) -> list[dict[str, Any]]:
-  """从 PostgreSQL 解析范围，并按目标日排除明确未上市或已退市标的。"""
+  """从 PostgreSQL 权威板块关系解析范围并过滤非交易证券。"""
   requested_types = allowed_types or {
     InstrumentType.STOCK,
     InstrumentType.ETF,
@@ -162,33 +176,40 @@ async def resolve_instruments(
         dict.fromkeys(str(item or "").strip() for item in (sectors or []))
       )
       scope_conditions = []
-      market_types = {
-        _MARKET_SECTOR_TYPES[name]
-        for name in requested_sectors
-        if name in _MARKET_SECTOR_TYPES
-      } & requested_types
-      if market_types:
-        scope_conditions.append(Instrument.type.in_(market_types))
-
-      relation_sectors = [
-        name for name in requested_sectors if name not in _MARKET_SECTOR_TYPES
-      ]
-      if relation_sectors:
-        related_codes = (
-          select(SectorStock.stock_code)
-          .join(Sector, SectorStock.sector_id == Sector.id)
-          .where(
-            or_(
-              Sector.name.in_(relation_sectors),
-              Sector.code.in_(relation_sectors),
-            )
-          )
+      for sector_name_or_code in requested_sectors:
+        sector_match = or_(
+          Sector.name == sector_name_or_code,
+          Sector.code == sector_name_or_code,
         )
-        scope_conditions.append(Instrument.id.in_(related_codes))
+        market_type = _MARKET_SECTOR_TYPES.get(sector_name_or_code)
+        if market_type is not None:
+          if market_type in requested_types:
+            scope_conditions.append(
+              and_(
+                Sector.code == sector_name_or_code,
+                Sector.classification == "MKT",
+                Instrument.type == market_type,
+              )
+            )
+          continue
+        scope_conditions.append(
+          and_(sector_match, Instrument.type.in_(requested_types))
+        )
 
-      stmt = stmt.where(Instrument.type.in_(requested_types))
-      if scope_conditions:
-        stmt = stmt.where(or_(*scope_conditions))
+      stmt = (
+        stmt.join(SectorStock, SectorStock.stock_code == Instrument.id)
+        .join(Sector, SectorStock.sector_id == Sector.id)
+        .where(or_(*scope_conditions) if scope_conditions else False)
+        .distinct()
+      )
+
+    stmt = stmt.where(
+      or_(
+        Instrument.type != InstrumentType.ETF,
+        Instrument.secu_category.is_(None),
+        Instrument.secu_category.notin_(_NON_TRADING_ETF_SECURITY_CATEGORIES),
+      )
+    )
 
     if active_on is not None:
       stmt = stmt.where(
@@ -416,6 +437,211 @@ def _requests_full_snapshot_scope(
   return requested == set(DEFAULT_SNAPSHOT_SECTORS)
 
 
+def _membership_audit_matches(
+  *,
+  payload: Any,
+  audit: Any,
+  target: date,
+  codes_by_sector: dict[str, set[str]],
+) -> bool:
+  """Recompute every persisted membership count/digest from PostgreSQL."""
+
+  if not isinstance(payload, dict) or not isinstance(audit, dict):
+    return False
+  if payload.get("operation") != "sector_instruments" or (
+    payload.get("destination") != SECTOR_MEMBERSHIP_AUDIT_DESTINATION
+  ):
+    return False
+  if payload.get("as_of_date") != target.isoformat() or (
+    payload.get("sectors") != DEFAULT_SNAPSHOT_SECTORS
+  ):
+    return False
+  if set(audit) != {
+    "audit_schema_version",
+    "operation",
+    "destination",
+    "as_of_date",
+    "requested_sectors",
+    "records_received",
+    "records_saved",
+    "sector_audits",
+    "total_code_count",
+    "total_code_sha256",
+  }:
+    return False
+  if (
+    type(audit.get("audit_schema_version")) is not int
+    or audit.get("audit_schema_version") != SECTOR_MEMBERSHIP_AUDIT_SCHEMA_VERSION
+    or audit.get("operation") != "sector_instruments"
+    or audit.get("destination") != SECTOR_MEMBERSHIP_AUDIT_DESTINATION
+    or audit.get("as_of_date") != target.isoformat()
+    or audit.get("requested_sectors") != DEFAULT_SNAPSHOT_SECTORS
+    or type(audit.get("records_saved")) is not int
+    or audit.get("records_saved") != 0
+  ):
+    return False
+
+  sector_audits = audit.get("sector_audits")
+  if not isinstance(sector_audits, dict) or (
+    set(sector_audits) != set(DEFAULT_SNAPSHOT_SECTORS)
+  ):
+    return False
+  for sector in DEFAULT_SNAPSHOT_SECTORS:
+    item = sector_audits.get(sector)
+    codes = codes_by_sector.get(sector, set())
+    if not isinstance(item, dict) or set(item) != {"code_count", "code_sha256"}:
+      return False
+    if type(item.get("code_count")) is not int or (
+      item.get("code_count") != len(codes)
+    ):
+      return False
+    if item.get("code_sha256") != canonical_instrument_codes_sha256(codes):
+      return False
+
+  all_codes = set().union(
+    *(codes_by_sector[sector] for sector in DEFAULT_SNAPSHOT_SECTORS)
+  )
+  expected_records = sum(
+    len(codes_by_sector[sector]) for sector in DEFAULT_SNAPSHOT_SECTORS
+  )
+  return (
+    type(audit.get("records_received")) is int
+    and audit.get("records_received") == expected_records
+    and type(audit.get("total_code_count")) is int
+    and audit.get("total_code_count") == len(all_codes)
+    and audit.get("total_code_sha256") == canonical_instrument_codes_sha256(all_codes)
+  )
+
+
+async def _certified_default_membership_generations(
+  *,
+  target_dates: list[date],
+  frozen_instruments: list[dict[str, Any]],
+) -> dict[date, str]:
+  """Prove today's frozen A-share/ETF scope against one completed QMT request.
+
+  ``sector_stocks`` is a current-state relation rather than a temporal table.
+  Therefore a historical target can never borrow it as point-in-time evidence,
+  even when an old request happens to carry the same code digest.
+  """
+
+  current_target = time_utils.today()
+  targets = {target for target in target_dates if target == current_target}
+  if not targets:
+    return {}
+
+  frozen_codes_by_sector = {
+    sector: {
+      item["code"]
+      for item in frozen_instruments
+      if item["instrument_type"] == instrument_type.name.lower()
+    }
+    for sector, instrument_type in _MARKET_SECTOR_TYPES.items()
+    if sector in DEFAULT_SNAPSHOT_SECTORS
+  }
+  async with AsyncSessionLocal() as db:
+    relation_rows = (
+      (
+        await db.execute(
+          select(
+            Sector.code.label("sector_code"),
+            Instrument.id.label("instrument_code"),
+            Instrument.type.label("instrument_type"),
+            Instrument.secu_category.label("secu_category"),
+          )
+          .select_from(SectorStock)
+          .join(Sector, Sector.id == SectorStock.sector_id)
+          .join(Instrument, Instrument.id == SectorStock.stock_code)
+          .where(
+            Sector.classification == "MKT",
+            or_(
+              and_(
+                Sector.code == "沪深A股",
+                Instrument.type == InstrumentType.STOCK,
+              ),
+              and_(
+                Sector.code == "沪深ETF",
+                Instrument.type == InstrumentType.ETF,
+              ),
+            ),
+          )
+          .order_by(Sector.code, Instrument.id)
+        )
+      )
+      .mappings()
+      .all()
+    )
+    codes_by_sector = {sector: set() for sector in DEFAULT_SNAPSHOT_SECTORS}
+    eligible_codes_by_sector = {sector: set() for sector in DEFAULT_SNAPSHOT_SECTORS}
+    for row in relation_rows:
+      sector = str(row["sector_code"])
+      code = str(row["instrument_code"])
+      codes_by_sector[sector].add(code)
+      if not (
+        row["instrument_type"] == InstrumentType.ETF
+        and row["secu_category"] in _NON_TRADING_ETF_SECURITY_CATEGORIES
+      ):
+        eligible_codes_by_sector[sector].add(code)
+
+    # A relation change between the earlier frozen read and this proof can
+    # only revoke certification; it can never silently change the batch scope.
+    if eligible_codes_by_sector != frozen_codes_by_sector:
+      return {}
+    if any(not codes_by_sector[sector] for sector in DEFAULT_SNAPSHOT_SECTORS):
+      return {}
+
+    candidate_rows = (
+      (
+        await db.execute(
+          select(
+            MarketDataRequest.request_id,
+            MarketDataRequest.request_payload,
+            MarketDataRequest.ingestion_result,
+          )
+          .where(
+            MarketDataRequest.status == "COMPLETED",
+            MarketDataRequest.request_payload["operation"].as_string()
+            == "sector_instruments",
+            MarketDataRequest.request_payload["destination"].as_string()
+            == SECTOR_MEMBERSHIP_AUDIT_DESTINATION,
+            MarketDataRequest.request_payload["as_of_date"]
+            .as_string()
+            .in_([target.isoformat() for target in targets]),
+          )
+          .order_by(
+            MarketDataRequest.completed_at.desc(),
+            MarketDataRequest.request_id.desc(),
+          )
+          .limit(1000)
+        )
+      )
+      .mappings()
+      .all()
+    )
+
+  certified: dict[date, str] = {}
+  for row in candidate_rows:
+    payload = row["request_payload"]
+    if not isinstance(payload, dict) or (
+      payload.get("sectors") != DEFAULT_SNAPSHOT_SECTORS
+    ):
+      continue
+    try:
+      target = date.fromisoformat(str(payload.get("as_of_date") or ""))
+    except ValueError:
+      continue
+    if target in certified:
+      continue
+    if _membership_audit_matches(
+      payload=payload,
+      audit=row["ingestion_result"],
+      target=target,
+      codes_by_sector=codes_by_sector,
+    ):
+      certified[target] = str(row["request_id"])
+  return certified
+
+
 def _instrument_is_active_on(instrument: dict[str, Any], target: date) -> bool:
   open_date = instrument.get("open_date")
   expire_date = instrument.get("expire_date")
@@ -455,6 +681,14 @@ async def _freeze_snapshot_scope(
   codes = sorted(instruments_by_code)
   ordered_instruments = [instruments_by_code[code] for code in codes]
   requested_full_scope = _requests_full_snapshot_scope(sectors, stock_list)
+  membership_generations = (
+    await _certified_default_membership_generations(
+      target_dates=target_dates,
+      frozen_instruments=ordered_instruments,
+    )
+    if requested_full_scope
+    else {}
+  )
   return {
     "codes": codes,
     "target_codes": target_codes,
@@ -462,9 +696,11 @@ async def _freeze_snapshot_scope(
       target for target in target_dates if not instruments_by_date[target]
     ],
     "full_scope": {
-      target: requested_full_scope and bool(target_codes[target])
+      target: target in membership_generations and bool(target_codes[target])
       for target in target_dates
     },
+    "replace_entire_date": requested_full_scope,
+    "membership_generations": membership_generations,
     "name_map": {item["code"]: item["name"] for item in ordered_instruments},
     "instrument_type_map": {
       item["code"]: item["instrument_type"] for item in ordered_instruments
@@ -557,6 +793,61 @@ async def _create_signal_runs(
       run_ids[target] = run.id
     await _assert_snapshot_locks(locks)
   return run_ids
+
+
+async def _invalidate_snapshot_generation(
+  *,
+  run_ids: dict[date, int],
+  target_codes: dict[date, list[str]],
+  replace_entire_date: bool,
+  locks: Any,
+) -> None:
+  """Revoke the complete generation before the first fallible market read."""
+
+  if not run_ids:
+    return
+  conditions = []
+  for target in sorted(run_ids):
+    if replace_entire_date:
+      conditions.append(IndicatorSnapshot.snapshot_date == target)
+    elif target_codes[target]:
+      conditions.append(
+        and_(
+          IndicatorSnapshot.snapshot_date == target,
+          IndicatorSnapshot.code.in_(target_codes[target]),
+        )
+      )
+  if not conditions:
+    return
+
+  await _assert_snapshot_locks(locks)
+  lock_backend_pid = _snapshot_lock_backend_pid(locks)
+  async with AsyncSessionLocal() as db:
+    try:
+      await acquire_snapshot_publish_guard(
+        db,
+        lock_backend_pid=lock_backend_pid,
+        snapshot_dates=sorted(run_ids),
+      )
+      await assert_snapshot_run_owner(db, run_ids)
+      await db.execute(
+        update(IndicatorSnapshot)
+        .where(
+          IndicatorSnapshot.calculation_version == INDICATOR_VERSION,
+          or_(*conditions),
+        )
+        .values(calculation_version=None)
+      )
+      await assert_snapshot_publish_owner(
+        db,
+        lock_backend_pid=lock_backend_pid,
+        snapshot_dates=sorted(run_ids),
+      )
+      await db.commit()
+    except BaseException:
+      await db.rollback()
+      raise
+  await _assert_snapshot_locks(locks)
 
 
 async def _finish_signal_run(
@@ -668,6 +959,8 @@ async def daily_indicator_snapshot_flow(
   codes = scope["codes"]
   target_codes = scope["target_codes"]
   full_scope = scope["full_scope"]
+  replace_entire_date = scope["replace_entire_date"]
+  membership_generations = scope["membership_generations"]
   name_map = scope["name_map"]
   instrument_type_map = scope["instrument_type_map"]
   float_volume_map = scope["float_volume_map"]
@@ -700,6 +993,12 @@ async def daily_indicator_snapshot_flow(
   try:
     total_codes = {target: len(target_codes[target]) for target in target_dates}
     run_ids = await _create_signal_runs(target_dates, total_codes, locks)
+    await _invalidate_snapshot_generation(
+      run_ids=run_ids,
+      target_codes=target_codes,
+      replace_entire_date=replace_entire_date,
+      locks=locks,
+    )
     service = DailyIndicatorSnapshotService()
     for batch_index, batch in enumerate(_chunks(codes, batch_size), start=1):
       await _assert_snapshot_locks(locks)
@@ -771,6 +1070,7 @@ async def daily_indicator_snapshot_flow(
       report = {
         "snapshot_date": target.isoformat(),
         "status": status,
+        "membership_generation_request_id": membership_generations.get(target),
         "total_codes": total_codes[target],
         **{
           key: target_result[key]

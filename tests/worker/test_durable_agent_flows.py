@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -31,6 +31,11 @@ class _ArchiveSnapshotSession:
 async def test_market_universe_flow_uses_durable_request(monkeypatch) -> None:
   request = AsyncMock(return_value={"status": "completed", "request_id": "request-1"})
   monkeypatch.setattr(durable_agent_flows, "_request_and_wait", request)
+  monkeypatch.setattr(
+    durable_agent_flows.time_utils,
+    "today",
+    lambda: date(2026, 9, 1),
+  )
 
   result = await durable_agent_flows.market_universe_request_flow.fn(
     sectors=["沪深A股"]
@@ -38,8 +43,51 @@ async def test_market_universe_flow_uses_durable_request(monkeypatch) -> None:
 
   assert result["status"] == "completed"
   request.assert_awaited_once_with(
-    {"operation": "sector_instruments", "sectors": ["沪深A股"]}
+    {
+      "operation": "sector_instruments",
+      "sectors": ["沪深A股"],
+      "destination": "audit_only",
+      "as_of_date": "2026-09-01",
+    }
   )
+
+
+@pytest.mark.asyncio
+async def test_sector_membership_upload_uses_audit_only_ingestion(monkeypatch) -> None:
+  store = object()
+  manifest = AsyncMock(
+    return_value=(
+      {},
+      {
+        "operation": "sector_instruments",
+        "destination": "audit_only",
+      },
+      [],
+    )
+  )
+  ingest = AsyncMock(return_value={"operation": "sector_instruments"})
+  records = AsyncMock()
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "load_uploaded_request_manifest",
+    manifest,
+  )
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "ingest_uploaded_market_data_request",
+    ingest,
+  )
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "load_uploaded_request_records",
+    records,
+  )
+
+  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+  assert result == {"operation": "sector_instruments"}
+  ingest.assert_awaited_once_with(store, "request-1")
+  records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -487,7 +535,9 @@ async def test_market_data_wait_crosses_preexisting_failed_retry_chain(
 
 
 @pytest.mark.asyncio
-async def test_recovery_flow_claims_uploaded_and_stale_processing_requests(monkeypatch) -> None:
+async def test_recovery_flow_claims_uploaded_and_stale_processing_requests(
+  monkeypatch,
+) -> None:
   store = SimpleNamespace(
     requeue_expired_market_data_delivery_leases=AsyncMock(
       return_value=["stale-delivered-request"]
@@ -708,9 +758,7 @@ def _convergence_store(*, ready: bool = True):
         }
       ]
     ),
-    available_market_data_device=AsyncMock(
-      return_value="device-1" if ready else None
-    ),
+    available_market_data_device=AsyncMock(return_value="device-1" if ready else None),
     close=AsyncMock(),
   )
 
@@ -786,9 +834,8 @@ async def test_position_archive_universe_requires_a_fresh_complete_snapshot(
 
 @pytest.mark.asyncio
 async def test_position_archive_universe_rejects_stale_snapshot(monkeypatch) -> None:
-  stale = (
-    datetime.now(timezone.utc).replace(tzinfo=None)
-    - timedelta(seconds=durable_agent_flows._ARCHIVE_SNAPSHOT_MAX_AGE_SECONDS + 1)
+  stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+    seconds=durable_agent_flows._ARCHIVE_SNAPSHOT_MAX_AGE_SECONDS + 1
   )
   snapshot = SimpleNamespace(
     account_id="account-1",
