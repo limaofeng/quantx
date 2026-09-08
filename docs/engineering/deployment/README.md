@@ -65,6 +65,13 @@ Windows 使用同一依赖清单，并将 `--python` 指向 Conda 环境中的 `
 `npm install`。开发数据服务使用独立容器与持久卷，配置位于
 `ops/config/compose.development.yaml`，仅绑定本机端口；应用启动器不启停这些服务。
 
+macOS 的 LightGBM 需要 OpenMP 运行库；使用 Homebrew 安装 `caddy libomp`。
+使用 nvm 时先在根目录执行 `nvm use`，采用 `.nvmrc` 指定的 Node 版本。
+首次启动本机 API/Caddy 后，执行
+`CODEGEN_GRAPHQL_ENDPOINT=http://127.0.0.1:8080/graphql npm run codegen`，
+生成当前源码对应的 Web 契约；本地 Web 的 `VITE_DEFAULT_ACCOUNT_ID` 应与
+开发配置中的模拟账户一致（样例为 `paper-local`）。
+
 ```bash
 # 先在终端设置 QUANTX_DEV_POSTGRES_PASSWORD，再独立启动开发数据服务。
 docker compose -f ops/config/compose.development.yaml up -d
