@@ -2407,6 +2407,63 @@ def test_bars_response_rejects_unrequested_code_and_out_of_range_time() -> None:
     _market_data_records(OutOfRangeManager(), payload)
 
 
+@pytest.mark.parametrize("initially_missing", ["omitted", "empty"])
+def test_download_waits_for_empty_series_cache_visibility(monkeypatch, initially_missing):
+  from quantx_qmt_agent import broker as broker_module
+  pauses = []
+  monkeypatch.setattr(broker_module.time, "sleep", pauses.append)
+  frame = pd.DataFrame([{"time": 20250102, "close": 10.0}])
+
+  class Manager:
+    downloads = 0
+    reads = []
+
+    def download_market_data(self, **kwargs):
+      self.downloads += 1
+
+    def get_market_data(self, **kwargs):
+      self.reads.append(kwargs["stock_list"])
+      if len(self.reads) == 1:
+        return {"000001.SZ": frame, **({"000002.SZ": frame.iloc[:0]} if initially_missing == "empty" else {})}
+      return {"000002.SZ": frame}
+
+  manager = Manager()
+  records = _market_data_records(manager, {
+    "operation": "bars", "download": True, "stock_list": ["000001.SZ", "000002.SZ"],
+    "periods": ["1d"], "start_time": "20250102", "end_time": "20250102",
+  })
+  assert manager.downloads == 1
+  assert manager.reads == [["000001.SZ", "000002.SZ"], ["000002.SZ"]]
+  assert pauses == [0.1]
+  assert len(_bar_rows(records)) == 2
+  assert all(summary["row_count"] == 1 for summary in _bar_summaries(records))
+
+
+@pytest.mark.parametrize("download", [False, True])
+def test_cache_visibility_retries_are_bounded_and_preserve_no_data(monkeypatch, download):
+  from quantx_qmt_agent import broker as broker_module
+  pauses = []
+  monkeypatch.setattr(broker_module.time, "sleep", pauses.append)
+
+  class Manager:
+    reads = 0
+    def download_market_data(self, **kwargs):
+      pass
+    def get_market_data(self, **kwargs):
+      self.reads += 1
+      return {}
+
+  manager = Manager()
+  records = _market_data_records(manager, {
+    "operation": "bars", "download": download, "stock_list": ["000001.SZ"],
+    "periods": ["1d"], "start_time": "20250102", "end_time": "20250102",
+  })
+  assert manager.reads == (5 if download else 1)
+  assert pauses == ([0.1, 0.3, 0.6, 1.0] if download else [])
+  assert _bar_rows(records) == []
+  assert _bar_summaries(records)[0]["no_data_reason"] == "XT_DATA_NO_ROWS"
+
+
 def test_tick_history_download_and_read_use_full_single_day_bounds() -> None:
   calls: list[tuple[str, dict]] = []
   auction_time = _normalize_market_timestamp(datetime(2026, 7, 22, 9, 15))

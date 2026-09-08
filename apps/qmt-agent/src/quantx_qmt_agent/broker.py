@@ -2310,6 +2310,49 @@ def _iter_market_data_records(
     yield record
 
 
+def _normalize_history_frames(values: Any, requested_codes: set[str]) -> dict[str, Any]:
+  if not isinstance(values, dict):
+    raise ValueError("XTData returned a non-object market-data result")
+  normalized: dict[str, Any] = {}
+  for code, frame in values.items():
+    normalized_code = str(code).strip().upper()
+    if normalized_code not in requested_codes:
+      raise ValueError(f"XTData returned unrequested instrument: {normalized_code}")
+    if normalized_code in normalized:
+      raise ValueError(f"XTData returned duplicate normalized instrument: {normalized_code}")
+    if frame is not None and not all(
+      hasattr(frame, attribute) for attribute in ("columns", "itertuples", "sort_values")
+    ):
+      raise ValueError(f"XTData returned a non-DataFrame result for {normalized_code}")
+    normalized[normalized_code] = frame
+  return normalized
+
+
+def _read_history_frames(
+  manager: Any, codes: tuple[str, ...], period: str, start: str, end: str, *, downloaded: bool,
+) -> dict[str, Any]:
+  started = time.monotonic()
+  def read(selected: list[str]) -> dict[str, Any]:
+    return _normalize_history_frames(manager.get_market_data(
+      stock_list=selected, period=period, start_time=start, end_time=end,
+    ), set(selected))
+
+  frames = read(list(codes))
+  if downloaded:
+    # Native completion can precede visibility in XTData's local cache. Re-read
+    # only absent/empty series, without downloading again or altering good rows.
+    # Persistent emptiness still produces an explicit no-data summary below.
+    for attempt, delay in enumerate((0.1, 0.3, 0.6, 1.0), start=1):
+      missing = sorted(code for code in codes if frames.get(code) is None or len(frames[code]) == 0)
+      if not missing:
+        break
+      record_history_timing("cache_visibility_retry", started, attempt=attempt, empty_series=len(missing))
+      time.sleep(delay)
+      frames.update(read(missing))
+  record_history_timing("read_complete", started)
+  return frames
+
+
 def _iter_market_data_records_unbounded(
   manager: Any,
   payload: dict[str, Any],
@@ -2335,7 +2378,6 @@ def _iter_market_data_records_unbounded(
     return
 
   request = _validate_bars_request(payload)
-  requested_codes = set(request.codes)
   for period in request.periods:
     lower_bound, upper_bound = _bar_time_bounds(request, period)
     xtdata_start_time, xtdata_end_time = _xtdata_history_time_bounds(request, period)
@@ -2347,26 +2389,10 @@ def _iter_market_data_records_unbounded(
         end_time=xtdata_end_time,
         incrementally=False,
       )
-    read_started = time.monotonic()
-    values = manager.get_market_data(
-      stock_list=list(request.codes),
-      period=period,
-      start_time=xtdata_start_time,
-      end_time=xtdata_end_time,
+    normalized_values = _read_history_frames(
+      manager, request.codes, period, xtdata_start_time, xtdata_end_time,
+      downloaded=bool(payload.get("download")),
     )
-    record_history_timing("read_complete", read_started)
-    if not isinstance(values, dict):
-      raise ValueError("XTData returned a non-object market-data result")
-    normalized_values: dict[str, Any] = {}
-    for code, frame in values.items():
-      normalized_code = str(code).strip().upper()
-      if normalized_code not in requested_codes:
-        raise ValueError(f"XTData returned unrequested instrument: {normalized_code}")
-      if normalized_code in normalized_values:
-        raise ValueError(
-          f"XTData returned duplicate normalized instrument: {normalized_code}"
-        )
-      normalized_values[normalized_code] = frame
 
     for normalized_code in sorted(request.codes):
       frame = normalized_values.get(normalized_code)
