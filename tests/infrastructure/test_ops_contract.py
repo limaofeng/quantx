@@ -643,7 +643,7 @@ function Set-TestHealth {{
         status = "ready"
         readyDevices = 1
         modes = @("live")
-        protocolVersions = @("1.2")
+        protocolVersions = @("1.3")
         accountIds = @($ReportedAccountId)
         latestSnapshotAgeSeconds = 1
         latestReadyHeartbeatAt = $HeartbeatAt
@@ -980,7 +980,7 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert "-ProcessEntry $qmtProcessEntry" in invoke_up
   assert "-LaunchStartedAt $qmtProcessLaunchStartedAt" in invoke_up
   assert '$env:QMT_AGENT_MODE = "data-only"' not in invoke_up
-  assert '$protocols -contains "1.2"' in script
+  assert '$protocols -contains "1.3"' in script
   assert "[int]$qmt.readyDevices -ge 1" in script
 
   assert '$env:PREFECT_HOME = Join-Path $Runtime "prefect"' in script

@@ -1,0 +1,87 @@
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { MarketSyncEvidence } from './MarketSyncEvidence';
+
+vi.mock('@/core/auth', () => ({ getAccessToken: () => 'test-token' }));
+
+const evidence = (status: string, count = 1) => ({
+  counts: [{ coverage_status: 'PENDING', request_status: status, count }],
+  items: [
+    {
+      batch_index: 1,
+      request_id: 'request-1',
+      coverage_status: 'PENDING',
+      request_status: status,
+      records_saved: status === 'COMPLETED' ? '5166' : null,
+      scope: {
+        stock_list: ['601318.SH'],
+        periods: ['tick'],
+        start_time: '20260803',
+        end_time: '20260803',
+      },
+      summary: {},
+    },
+  ],
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+describe('MarketSyncEvidence', () => {
+  it('keeps observing requests after the Flow ends without claiming coverage success', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => evidence('UPLOADED'),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => evidence('COMPLETED'),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    await act(async () => {
+      render(<MarketSyncEvidence runId="run" live={false} />);
+    });
+    expect(screen.getByText(/后台处理中 1/)).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15000);
+    });
+    expect(screen.getByText('已入库')).toBeInTheDocument();
+    expect(screen.getByText('待校验')).toBeInTheDocument();
+    expect(screen.getByText(/覆盖合格 0/)).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('pages evidence instead of downloading the complete run audit', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => evidence('COMPLETED', 75),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await act(async () => {
+      render(<MarketSyncEvidence runId="run" live={false} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('下一页'));
+    });
+    expect(fetchMock.mock.calls[1][0]).toContain('offset=50&limit=50');
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+      'Bearer test-token'
+    );
+  });
+});

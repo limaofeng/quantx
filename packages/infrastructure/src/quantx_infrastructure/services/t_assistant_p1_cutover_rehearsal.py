@@ -1,4 +1,4 @@
-"""Read-only rehearsal for the protocol-1.2 maintenance window.
+"""Read-only rehearsal for the target-protocol maintenance window.
 
 The rehearsal is a bounded preflight. It observes the existing P0 audit,
 captures aggregate inbox facts, and walks a deterministic in-memory state
@@ -880,7 +880,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
   reasons = report.get("reasonCodes")
   reasons_text = ", ".join(str(item) for item in reasons or ()) or "none"
   lines = [
-    "# Protocol 1.2 cutover rehearsal",
+    f"# Protocol {TARGET_PROTOCOL_VERSION} cutover rehearsal",
     "",
     f"- Mode: {report.get('mode', 'REHEARSAL_ONLY')}",
     f"- Ready for cutover: {str(report.get('readyForCutover') is True).lower()}",
@@ -959,7 +959,7 @@ async def _run_cli(args: argparse.Namespace) -> int:
 
 def build_argument_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(
-    description="Read-only protocol-1.2 cutover rehearsal"
+    description=f"Read-only protocol-{TARGET_PROTOCOL_VERSION} cutover rehearsal"
   )
   parser.add_argument("--database-url", default=None)
   parser.add_argument("--format", choices=("json", "markdown"), default="json")

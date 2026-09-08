@@ -29,7 +29,7 @@ def _ready_agent_health(**overrides) -> QmtAgentHealthSnapshot:
     "status": QmtAgentHealthStatus.READY,
     "reason_code": None,
     "agent_version": "0.1.0",
-    "protocol_version": "1.2",
+    "protocol_version": "1.3",
     "mode": QmtAgentMode.LIVE,
     "uptime_seconds": 1234.5,
     "control_connection_status": QmtAgentControlConnectionStatus.CONNECTED,
@@ -437,3 +437,14 @@ def test_terminal_order_status_never_regresses(
   late_status: str,
 ) -> None:
   assert not can_transition_order_status(terminal, late_status)
+
+
+def test_protocol_13_progress_is_bounded_and_rejects_old_envelopes():
+  from quantx_contracts.agent import HeartbeatPayload
+  assert PROTOCOL_VERSION == "1.3"
+  with pytest.raises(ValidationError):
+    AgentEnvelope(message_type=AgentMessageType.HEARTBEAT, payload={}, protocol_version="1.2")
+  with pytest.raises(ValidationError):
+    HeartbeatPayload(device_id="test", agent_version="test", history_progress=[
+      {"request_id": str(i), "stage": "downloading", "total_units": 1} for i in range(5)
+    ])

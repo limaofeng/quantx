@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import quantx_worker.prefector.flows.daily_market_data_sync_flow as flow
 from quantx_worker.prefector.flows.market_data_sync_partitions import (
-  plan_tick_partitions,
   validate_market_partition,
 )
 
@@ -37,14 +36,14 @@ async def test_month_range_is_split_through_public_request_gateway(monkeypatch):
     idempotency_scope="fixture",
     logger=Mock(),
   )
-  assert len(result) == 4
-  assert [(p["stock_list"], p["start_time"], p["end_time"]) for p, _ in calls] == [
-    ([code], day, day)
-    for day in ("20260803", "20260831")
-    for code in ("000001.SZ", "600036.SH")
+  assert result["batch_count"] == 3
+  tick_calls = [p for p, _ in calls if p["periods"] == ["tick"]]
+  assert [(p["stock_list"], p["start_time"], p["end_time"]) for p in tick_calls] == [
+    (["600036.SH", "000001.SZ"], day, day) for day in ("20260803", "20260831")
   ]
-  assert all(k["retry_failed_requests"] is False for _, k in calls)
-  assert len({k["idempotency_scope"] for _, k in calls}) == 4
+  assert [p["periods"] for p, _ in calls] == [["tick"], ["1d"], ["tick"]]
+  assert all(k.get("retry_failed_requests") is False for p, k in calls if p["periods"] == ["tick"])
+  assert len({k["idempotency_scope"] for _, k in calls}) == 3
 
 
 def test_one_empty_period_cannot_be_hidden_by_nonempty_daily_bars():
@@ -67,10 +66,12 @@ def test_one_empty_period_cannot_be_hidden_by_nonempty_daily_bars():
     )
 
 
-def test_calendar_must_not_silently_change_scope():
+async def test_calendar_must_not_silently_change_scope(monkeypatch):
+  monkeypatch.setattr(flow, "TradingDateHelper", lambda: Mock(get_trading_calendar=AsyncMock(return_value=[date(2026,9,1)])))
   with pytest.raises(ValueError, match="交易日历"):
-    plan_tick_partitions(
-      ["000001.SZ"], [date(2026, 9, 1)], "20260801", "20260831", ["tick"]
+    await flow._request_market_data_batches(
+      codes=["000001.SZ"], periods=["tick"], start_time="20260801", end_time="20260831",
+      agent_device_id="", idempotency_scope="calendar", logger=Mock(), lifetimes={},
     )
 
 

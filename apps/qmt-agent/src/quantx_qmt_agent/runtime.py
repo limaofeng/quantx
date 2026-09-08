@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, BinaryIO, Callable, Iterable, Iterator
+from typing import Any, AsyncIterator, BinaryIO, Callable, Generator, Iterable, Iterator
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -59,6 +59,7 @@ from .emergency import EmergencyStopStore
 from .endpoints import configured_tls_context, httpx_verify, websocket_url
 from .health import AGENT_VERSION, AgentHealthState
 from .historical_worker import (
+  HISTORICAL_CHECKPOINT,
   XTDATA_HISTORICAL_WORKER_KIND,
   run_historical_market_data_worker,
 )
@@ -1343,7 +1344,7 @@ def _iter_encoded_market_data_chunks(
   max_total_records: int = MAX_MARKET_DATA_REQUEST_RECORDS,
   max_record_uncompressed_bytes: int = (MAX_MARKET_DATA_RECORD_UNCOMPRESSED_BYTES),
   max_total_uncompressed_bytes: int = MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES,
-) -> Iterator[tuple[bytearray, int]]:
+) -> Iterator[tuple[bytearray | None, int]]:
   """Yield one bounded raw JSON chunk at a time without materializing input."""
   if (
     max_records <= 0
@@ -1360,6 +1361,9 @@ def _iter_encoded_market_data_chunks(
   total_records = 0
 
   for record in records:
+    if record is HISTORICAL_CHECKPOINT:
+      yield None, 0
+      continue
     if record is _MARKET_DATA_CHUNK_BOUNDARY:
       if current_records:
         current.extend(b"]")
@@ -1438,7 +1442,16 @@ def _prepare_market_data_spool_sync(
   )
 
 
-def _prepare_market_data_records_spool_sync(
+def _prepare_market_data_records_spool_sync(records, spool_directory, **kwargs):
+  steps = _prepare_market_data_records_spool_steps(records, spool_directory, **kwargs)
+  while True:
+    try:
+      next(steps)
+    except StopIteration as done:
+      return done.value
+
+
+def _prepare_market_data_records_spool_steps(
   records: Iterable[Any],
   spool_directory: Path,
   *,
@@ -1446,7 +1459,7 @@ def _prepare_market_data_records_spool_sync(
   max_total_compressed_bytes: int,
   on_chunk: Callable[[int, _MarketDataSpoolChunk], None] | None = None,
   reserve_compressed_bytes: Callable[[int], None] | None = None,
-) -> _PreparedMarketData:
+) -> Generator[None, None, _PreparedMarketData]:
   """Stream normalized records into atomically published gzip spool files."""
 
   chunks: list[_MarketDataSpoolChunk] = []
@@ -1454,12 +1467,13 @@ def _prepare_market_data_records_spool_sync(
   compressed_bytes = 0
   record_count_total = 0
   try:
-    for chunk_index, (raw, record_count) in enumerate(
-      _iter_encoded_market_data_chunks(
-        records,
-        max_total_uncompressed_bytes=max_total_uncompressed_bytes,
-      )
+    for raw, record_count in _iter_encoded_market_data_chunks(
+      records, max_total_uncompressed_bytes=max_total_uncompressed_bytes,
     ):
+      if raw is None:
+        yield None
+        continue
+      chunk_index = len(chunks)
       path = spool_directory / f"chunk-{chunk_index:06d}.json.gz"
       temporary = path.with_suffix(f"{path.suffix}.tmp")
       remaining = max_total_compressed_bytes - compressed_bytes
@@ -2562,6 +2576,11 @@ class AgentRuntime:
           self._market_request_loop(socket),
           name="qmt-agent-market-request",
         ),
+        **{
+          f"market-request-{index}": asyncio.create_task(
+            self._market_request_loop(socket), name=f"qmt-agent-market-request-{index}"
+          ) for index in range(1, MAX_CACHED_MARKET_DATA_REQUESTS)
+        },
         "market-control": asyncio.create_task(
           self._market_control_loop(),
           name="qmt-agent-market-control",
@@ -4564,6 +4583,7 @@ class AgentRuntime:
       market_stream_ack_latency_ms=self._market_stream_ack_latency_ms,
       history_workload=self._history_workload,
       history_workload_reason=self._history_workload_reason,
+      history_progress=list(getattr(self, "_history_progress", {}).values()),
     )
     envelope = AgentEnvelope(
       message_type=AgentMessageType.HEARTBEAT,
@@ -4727,6 +4747,10 @@ class AgentRuntime:
         )
         return
       try:
+        if len(self._market_upload_tasks) + len(self._queued_market_data_requests) >= (
+          MAX_CACHED_MARKET_DATA_REQUESTS + MAX_QUEUED_MARKET_DATA_REQUESTS
+        ):
+          raise asyncio.QueueFull
         self._market_requests.put_nowait(envelope)
         self._queued_market_data_requests[request_id] = fingerprint
       except asyncio.QueueFull:
@@ -5229,7 +5253,12 @@ class AgentRuntime:
     for report_message_id, serialized in reports:
       self.journal.add_report(report_message_id, serialized)
 
-  async def _handle_market_data_request(
+  async def _handle_market_data_request(self, envelope: AgentEnvelope) -> None:
+    self._ensure_market_upload_state()
+    async with self._history_request_slots:
+      await self._handle_market_data_request_in_slot(envelope)
+
+  async def _handle_market_data_request_in_slot(
     self,
     envelope: AgentEnvelope,
   ) -> None:
@@ -5334,6 +5363,12 @@ class AgentRuntime:
         ) from exc
       raise
 
+    if not hasattr(self, "_history_uploaded_chunks"):
+      self._history_uploaded_chunks = {}
+    uploaded = self._history_uploaded_chunks.setdefault(request_id, {})
+    uploaded[chunk_index] = chunk.compressed_bytes
+    self._set_history_progress(request_id, uploaded_bytes=sum(uploaded.values()))
+
   async def _upload_provisional_market_data_chunk(
     self,
     client: httpx.AsyncClient,
@@ -5381,6 +5416,9 @@ class AgentRuntime:
           "MARKET_DATA_UPLOAD_CONFLICT"
         ) from exc
       raise
+
+    getattr(self, "_history_progress", {}).pop(request_id, None)
+    getattr(self, "_history_uploaded_chunks", {}).pop(request_id, None)
 
   async def _prepared_market_data_chunks(
     self,
@@ -5515,6 +5553,15 @@ class AgentRuntime:
     task.add_done_callback(self._consume_market_preparation_result)
     return (await asyncio.shield(task)).chunks
 
+  def _set_history_progress(self, request_id: str, **changes: Any) -> None:
+    if not hasattr(self, "_history_progress"):
+      self._history_progress = {}
+    previous = self._history_progress.get(request_id, {
+      "request_id": request_id, "operation": "unknown", "stage": "queued", "completed_units": 0,
+      "total_units": 0, "uploaded_bytes": 0,
+    })
+    self._history_progress[request_id] = {**previous, **changes}
+
   async def _prepare_and_cache_market_data(
     self,
     request_id: str,
@@ -5525,43 +5572,42 @@ class AgentRuntime:
     # a separate spawned XTData client, so this lock serializes only that child
     # and never blocks the parent process's real-time XTData control path.
     prepared: _PreparedMarketData | None = None
+    self._set_history_progress(request_id, stage="queued", operation=str(payload.get("operation") or "bars")[:32])
     try:
-      async with self._market_data_preparation_lock():
-        managed_spool_bytes = await asyncio.to_thread(
-          _managed_market_data_spool_bytes,
-          self._market_spool_root,
+      managed_spool_bytes = await asyncio.to_thread(
+        _managed_market_data_spool_bytes,
+        self._market_spool_root,
+      )
+      remaining_cache_bytes = MAX_MARKET_DATA_UPLOAD_CACHE_BYTES - managed_spool_bytes
+      if remaining_cache_bytes <= 0:
+        raise RuntimeError("market-data upload cache byte limit exceeded")
+      compressed_budget = min(
+        MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES,
+        remaining_cache_bytes,
+      )
+      try:
+        prepared = await self._run_market_data_preparation_daemon(
+          request_id,
+          payload,
+          max_total_uncompressed_bytes=(MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES),
+          max_total_compressed_bytes=compressed_budget,
+          max_spool_bytes=remaining_cache_bytes,
         )
-        remaining_cache_bytes = MAX_MARKET_DATA_UPLOAD_CACHE_BYTES - managed_spool_bytes
-        if remaining_cache_bytes <= 0:
-          raise RuntimeError("market-data upload cache byte limit exceeded")
-        compressed_budget = min(
-          MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES,
-          remaining_cache_bytes,
-        )
-        try:
-          prepared = await self._run_market_data_preparation_daemon(
-            request_id,
-            payload,
-            max_total_uncompressed_bytes=(MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES),
-            max_total_compressed_bytes=compressed_budget,
-            max_spool_bytes=remaining_cache_bytes,
-          )
-        except ValueError as exc:
-          if (
-            "spool disk byte limit" in str(exc)
-            or "spool byte limit" in str(exc)
-          ):
-            raise RuntimeError(
-              "market-data upload cache byte limit exceeded"
-            ) from exc
-          if (
-            compressed_budget == remaining_cache_bytes
-            and remaining_cache_bytes < MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES
-            and "compressed byte limit" in str(exc)
-          ):
-            raise RuntimeError("market-data upload cache byte limit exceeded") from exc
-          raise
-
+      except ValueError as exc:
+        if (
+          "spool disk byte limit" in str(exc)
+          or "spool byte limit" in str(exc)
+        ):
+          raise RuntimeError(
+            "market-data upload cache byte limit exceeded"
+          ) from exc
+        if (
+          compressed_budget == remaining_cache_bytes
+          and remaining_cache_bytes < MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES
+          and "compressed byte limit" in str(exc)
+        ):
+          raise RuntimeError("market-data upload cache byte limit exceeded") from exc
+        raise
       await asyncio.to_thread(
         _write_market_data_spool_manifest,
         prepared,
@@ -5582,6 +5628,7 @@ class AgentRuntime:
       self._market_upload_cache_bytes = next_cache_bytes
       return prepared
     except BaseException:
+      self._history_progress.pop(request_id, None)
       if self._market_upload_cache.get(request_id) is entry:
         self._drop_market_upload_cache_entry(request_id)
       if prepared is not None and prepared.spool_directory.exists():
@@ -5633,14 +5680,25 @@ class AgentRuntime:
         max_total_compressed_bytes=max_total_compressed_bytes,
         max_spool_bytes=max_spool_bytes,
       )
-    return await self._run_market_data_preparation_thread(
-      request_id,
-      payload,
-      max_total_uncompressed_bytes=max_total_uncompressed_bytes,
-      max_total_compressed_bytes=max_total_compressed_bytes,
-    )
+    async with self._market_data_preparation_lock():
+      return await self._run_market_data_preparation_thread(
+        request_id,
+        payload,
+        max_total_uncompressed_bytes=max_total_uncompressed_bytes,
+        max_total_compressed_bytes=max_total_compressed_bytes,
+      )
 
-  async def _run_isolated_market_data_preparation(
+  async def _run_isolated_market_data_preparation(self, request_id, payload, **kwargs):
+    async with self._market_data_preparation_lock():
+      used = await asyncio.to_thread(_managed_market_data_spool_bytes, self._market_spool_root)
+      available = MAX_MARKET_DATA_UPLOAD_CACHE_BYTES - used
+      if available <= 0:
+        raise RuntimeError("market-data upload cache byte limit exceeded")
+      kwargs["max_spool_bytes"] = min(kwargs.get("max_spool_bytes", available), available)
+      kwargs["max_total_compressed_bytes"] = min(kwargs["max_total_compressed_bytes"], available)
+      return await self._run_isolated_market_data_preparation_locked(request_id, payload, **kwargs)
+
+  async def _run_isolated_market_data_preparation_locked(
     self,
     request_id: str,
     payload: dict[str, Any],
@@ -5655,6 +5713,7 @@ class AgentRuntime:
         "MARKET_DATA_PREPARATION_WORKER_UNSUPPORTED"
       )
     await self._wait_for_history_dispatch()
+    self._set_history_progress(request_id, stage="downloading")
     spool_directory = await asyncio.to_thread(
       _reset_market_data_spool_directory,
       self._market_spool_root,
@@ -5725,6 +5784,7 @@ class AgentRuntime:
       raise _IsolatedMarketDataWorkerError(
         "MARKET_DATA_PREPARATION_START_FAILED"
       ) from exc
+    message_type = None
     try:
       while True:
         message = await self._receive_historical_worker_message(
@@ -5753,6 +5813,7 @@ class AgentRuntime:
               "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
             )
           uploaded_chunk_indices.add(chunk_index)
+          self._set_history_progress(request_id, stage="encoding")
           if provisional_uploads_enabled:
             if upload_client is None:
               raise _IsolatedMarketDataWorkerError(
@@ -5785,6 +5846,7 @@ class AgentRuntime:
             raise _IsolatedMarketDataWorkerError(
               "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
             )
+          self._set_history_progress(request_id, stage="downloading", total_units=total_units)
           continue
         if message_type == "checkpoint":
           completed_units = int(message.get("completed_units") or 0)
@@ -5793,10 +5855,24 @@ class AgentRuntime:
             raise _IsolatedMarketDataWorkerError(
               "MARKET_DATA_PREPARATION_PROTOCOL_ERROR"
             )
+          self._set_history_progress(request_id, stage="queued", completed_units=completed_units)
+          lock = self._market_data_preparation_lock()
+          lock.release()
+          try:
+            await lock.acquire()
+          except BaseException:
+            # The enclosing async-with must still own its lock on exit.
+            await asyncio.shield(lock.acquire())
+            raise
+          if self._historical_worker_process is not process or not process.is_alive():
+            raise _IsolatedMarketDataWorkerError("MARKET_DATA_PREPARATION_CRASH")
           await self._wait_for_history_dispatch()
+          self._set_history_progress(request_id, stage="downloading")
+          used = await asyncio.to_thread(_managed_market_data_spool_bytes, self._market_spool_root)
           await asyncio.to_thread(
             connection.send,
-            {"type": "continue", "request_id": request_id},
+            {"type": "continue", "request_id": request_id,
+             "max_spool_bytes": max(0, MAX_MARKET_DATA_UPLOAD_CACHE_BYTES - used)},
           )
           continue
         prepared = _decode_isolated_market_data_result(
@@ -5804,6 +5880,8 @@ class AgentRuntime:
           request_id=request_id,
           spool_directory=spool_directory,
         )
+        progress = self._history_progress.get(request_id, {})
+        self._set_history_progress(request_id, stage="uploading", completed_units=progress.get("total_units", 0))
         if upload_tasks:
           provisional_upload_failed = (
             await observe_uploads(upload_tasks) or provisional_upload_failed
@@ -5866,7 +5944,8 @@ class AgentRuntime:
         task.cancel()
       if upload_tasks:
         await asyncio.gather(*upload_tasks, return_exceptions=True)
-      await self._shutdown_historical_worker(graceful=False)
+      if message_type not in {"ok", "error"} and self._historical_worker_process is process:
+        await self._shutdown_historical_worker(graceful=False)
       await asyncio.to_thread(shutil.rmtree, spool_directory, True)
       raise
     finally:
@@ -6192,7 +6271,9 @@ class AgentRuntime:
     task.exception()
 
   def _ensure_market_upload_state(self) -> None:
-    """Initialize upload state for old harnesses that construct via __new__."""
+    """Initialize upload state for focused harnesses that construct via __new__."""
+    if not hasattr(self, "_history_request_slots"):
+      self._history_request_slots = asyncio.Semaphore(MAX_CACHED_MARKET_DATA_REQUESTS)
     if not hasattr(self, "_stopped"):
       self._stopped = asyncio.Event()
     if not hasattr(self, "_fatal_market_data_error"):
@@ -6422,6 +6503,8 @@ class AgentRuntime:
     cancel: bool = False,
     remove_prepared: bool = True,
   ) -> _MarketUploadCacheEntry | None:
+    getattr(self, "_history_progress", {}).pop(request_id, None)
+    getattr(self, "_history_uploaded_chunks", {}).pop(request_id, None)
     entry = self._market_upload_cache.pop(request_id, None)
     if entry is None:
       return None
@@ -6472,6 +6555,8 @@ class AgentRuntime:
     terminal_status: str,
   ) -> None:
     self._ensure_market_upload_state()
+    getattr(self, "_history_progress", {}).pop(request_id, None)
+    getattr(self, "_history_uploaded_chunks", {}).pop(request_id, None)
     self._streamed_market_uploads.discard(request_id)
     self._provisional_market_uploads.discard(request_id)
     entry = self._market_upload_cache.get(request_id)

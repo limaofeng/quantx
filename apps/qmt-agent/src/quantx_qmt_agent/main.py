@@ -248,7 +248,9 @@ def _run(mode: str) -> None:
 
 def main() -> None:
   args = parse_args()
-  logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+  logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
+                      format="%(asctime)s %(levelname)s %(name)s %(message)s",
+                      datefmt="%Y-%m-%dT%H:%M:%S%z")
   emergency = EmergencyStopStore(state_directory() / "emergency-stop.json")
   if args.command == "enroll":
     _enroll(args.api_url, args.code)

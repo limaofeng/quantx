@@ -1228,7 +1228,7 @@ function Wait-QmtAgentRuntimeReady {
         [string]$qmt.status -eq "ready" -and
         [int]$qmt.readyDevices -ge 1 -and
         $modes -contains "live" -and
-        $protocols -contains "1.2" -and
+        $protocols -contains "1.3" -and
         $accounts -contains $expectedMaskedAccountId -and
         $snapshotAge -le 90 -and
         $null -ne $latestReadyHeartbeatAt -and

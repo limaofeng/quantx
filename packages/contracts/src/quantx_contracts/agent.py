@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-PROTOCOL_VERSION = "1.2"
+PROTOCOL_VERSION = "1.3"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION})
 
 
@@ -378,6 +378,17 @@ class CommandAckPayload(BaseModel):
   reason: str = ""
 
 
+class HistoricalRequestProgress(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  request_id: str = Field(min_length=1, max_length=36)
+  operation: str = Field(default="unknown", max_length=32)
+  stage: Literal["queued", "downloading", "encoding", "uploading", "paused"]
+  completed_units: int = Field(default=0, ge=0)
+  total_units: int = Field(default=0, ge=0)
+  uploaded_bytes: int = Field(default=0, ge=0)
+
+
 class HeartbeatPayload(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
@@ -401,6 +412,7 @@ class HeartbeatPayload(BaseModel):
   market_stream_ack_latency_ms: float = Field(default=0.0, ge=0)
   history_workload: Literal["idle", "running", "paused"] = "idle"
   history_workload_reason: str = Field(default="", max_length=64)
+  history_progress: List[HistoricalRequestProgress] = Field(default_factory=list, max_length=4)
 
 
 class ReportAckPayload(BaseModel):

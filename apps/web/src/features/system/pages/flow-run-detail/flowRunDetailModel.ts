@@ -90,9 +90,9 @@ export function mergeFlowRunLogs(
     merged.push(log);
   });
 
-  return merged.sort(
-    (left, right) => getLogTimestamp(left) - getLogTimestamp(right)
-  );
+  return merged
+    .sort((left, right) => getLogTimestamp(left) - getLogTimestamp(right))
+    .slice(-5000);
 }
 
 export function isFlowRunLogFilter(value: string): value is FlowRunLogFilter {

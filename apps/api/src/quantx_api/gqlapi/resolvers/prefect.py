@@ -233,7 +233,7 @@ class PrefectResolver:
     log_values = await _request(
       "POST",
       "logs/filter",
-      payload={"logs": {"flow_run_id": {"any_": [run_id]}}},
+      payload={"logs": {"flow_run_id": {"any_": [run_id]}}, "limit": 500, "sort": "TIMESTAMP_DESC"},
     )
     flow_run.detailed_logs = [
       LogLine(
@@ -241,7 +241,7 @@ class PrefectResolver:
         level=int(item.get("level", 0)),
         message=str(item.get("message", "")),
       )
-      for item in log_values
+      for item in reversed(log_values)
     ]
     return flow_run
 

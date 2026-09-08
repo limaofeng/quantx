@@ -444,7 +444,7 @@ def _agent(
     updated_at=now - timedelta(seconds=age_seconds),
     details={
       "capabilities": ["live"],
-      "protocolVersion": "1.2",
+      "protocolVersion": "1.3",
       "apiInstanceId": api_instance_id,
       "agentSessionId": "agent-session-1",
       "serverReceivedAt": received_at.isoformat(),
@@ -822,7 +822,7 @@ async def test_account_status_keeps_market_standby_when_trading_is_unavailable(
 
   assert result["agent_status"] == "TRADING_UNAVAILABLE"
   assert result["agent_mode"] == "live"
-  assert result["protocol_version"] == "1.2"
+  assert result["protocol_version"] == "1.3"
   assert result["qmt_launch_reason_code"] == "XTTRADING_UNAVAILABLE"
   assert checks["LIVE_AGENT_READY"]["status"] == "FAILED"
   assert "XTTRADING_UNAVAILABLE" in checks["LIVE_AGENT_READY"]["message"]

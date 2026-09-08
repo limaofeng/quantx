@@ -12,6 +12,10 @@ const mocks = vi.hoisted(() => ({
   useSubscription: vi.fn(),
 }));
 
+vi.mock('../components/MarketSyncEvidence', () => ({
+  MarketSyncEvidence: () => null,
+}));
+
 vi.mock('urql', () => ({
   useQuery: mocks.useQuery,
   useSubscription: mocks.useSubscription,

@@ -384,11 +384,12 @@ async def test_bar_ingestion_uses_direct_durable_persistence(monkeypatch) -> Non
   result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
 
   assert result == {"records_received": 2, "records_saved": 2}
-  ingest.assert_awaited_once_with(
-    store,
-    "request-1",
-    save_period=durable_agent_flows.save_market_data,
-  )
+  ingest.assert_awaited_once()
+  assert ingest.await_args.args == (store, "request-1")
+  save = AsyncMock(return_value={"saved_count": 2})
+  monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
+  assert await ingest.await_args.kwargs["save_period"](period="tick", market_data={}) == {"saved_count": 2}
+  save.assert_awaited_once_with(period="tick", market_data={})
 
 
 @pytest.mark.asyncio

@@ -928,6 +928,9 @@ class RealtimeSubscription:
           if initialized or include_history:
             new_logs.append(log)
 
+        # The resolver returns the newest bounded page. Retain only its keys
+        # rather than accumulating one set entry per log over a multi-day run.
+        seen_logs = {_flow_run_log_key(log) for log in ordered_logs}
         initialized = True
 
         for log in new_logs:

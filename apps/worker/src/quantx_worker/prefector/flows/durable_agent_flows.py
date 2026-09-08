@@ -6,12 +6,14 @@ import asyncio
 import hashlib
 import logging
 import math
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
 import pandas as pd
 from prefect import flow, get_run_logger
+from prefect.exceptions import MissingContextError
 from prefect.runtime import flow_run as flow_run_runtime
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_infrastructure import DurableRuntimeStore
@@ -45,6 +47,11 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 from sqlalchemy import and_, select
+
+from quantx_worker.prefector.flows.market_sync_observation import (
+  observation,
+  report_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -248,8 +255,21 @@ async def _request_and_wait(
   required_capabilities: Optional[list[str]] = None,
   idempotency_scope: str = "",
   retry_failed_requests: bool = True,
+  on_created: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
+  from quantx_infrastructure.config.settings import settings
+
+  if settings.environment == "development":
+    from quantx_infrastructure.services.development_history_import import (
+      request_remote_history,
+    )
+
+    remote = await request_remote_history(payload, timeout_seconds=timeout_seconds)
+    if on_created and remote.get("request_id"):
+      await on_created(remote["request_id"])
+    return {**remote, "status": "completed" if remote.get("status") == "success" else remote.get("status")}
   store = DurableRuntimeStore()
+  request_id = ""
   try:
     request_kwargs: dict[str, Any] = {}
     if agent_device_id:
@@ -259,9 +279,15 @@ async def _request_and_wait(
     if idempotency_scope:
       request_kwargs["idempotency_scope"] = idempotency_scope
     request_id = await store.create_market_data_request(payload, **request_kwargs)
+    if on_created:
+      await on_created(request_id)
     reopen_attempted: set[str] = set()
     retry_hops = 0
-    logger.info(
+    try:
+      request_logger = get_run_logger()
+    except MissingContextError:
+      request_logger = logger
+    request_logger.info(
       "Created market-data request request_id=%s operation=%s codes=%s "
       "periods=%s range=%s..%s",
       request_id,
@@ -277,6 +303,39 @@ async def _request_and_wait(
       if request is None:
         return {"status": "missing", "request_id": request_id}
       status = str(request.get("status") or "MISSING").upper()
+      phase = {
+        "QUEUED": "排队", "DELIVERED": "等待 Agent 进度", "RECEIVING": "上传",
+        "UPLOADED": "等待入库", "PROCESSING": "入库或回读校验",
+        "COMPLETED": "入库完成", "FAILED": "请求失败",
+      }.get(status, status)
+      detail = (
+        f"operation={payload.get('operation', 'bars')} periods={payload.get('periods', [])} "
+        f"range={payload.get('start_time', '')}..{payload.get('end_time', '')} "
+        f"codes={(payload.get('stock_list') or [])[:3]} count={len(payload.get('stock_list') or [])} "
+        f"chunks={request.get('received_chunks')}/{request.get('expected_chunks')}"
+      )
+      heartbeat_at = request.get("history_updated_at")
+      if isinstance(heartbeat_at, datetime):
+        age = (datetime.now(timezone.utc) - heartbeat_at.replace(tzinfo=timezone.utc)).total_seconds()
+        progress = request.get("history_progress") or []
+        if -5 <= age < 30 and request.get("history_session_active") == "true" and status in {"QUEUED", "DELIVERED", "RECEIVING"}:
+          current = next((p for p in progress if p.get("request_id") == request_id), None)
+          if current:
+            phase = {"queued": "共享历史通道排队", "downloading": "下载/读取",
+                     "encoding": "编码", "uploading": "上传", "paused": "健康门暂停"}[current["stage"]]
+            detail += (
+              f" units={current['completed_units']}/{current['total_units']}"
+              f" bytes={current['uploaded_bytes']} heartbeat_age={age:.1f}s"
+            )
+          else:
+            detail += f" history_requests={[(p['request_id'], p.get('operation'), p['stage']) for p in progress]}"
+          if request.get("history_workload") == "paused":
+            detail += f" paused={request.get('history_workload_reason')}"
+        elif age >= 30 or age < -5:
+          detail += f" Agent 进度陈旧或时钟异常 {age:.1f}s，不能确认当前下载状态"
+        elif request.get("history_session_active") != "true":
+          detail += " Agent 会话未就绪，历史进度不可用"
+      report_request(request_id, phase, detail)
       if status == "COMPLETED":
         ingestion_result = request.get("ingestion_result")
         if not isinstance(ingestion_result, dict):
@@ -310,7 +369,12 @@ async def _request_and_wait(
             "request_id": request_id,
             "reason": request.get("processing_error"),
           }
+        old_request_id = request_id
         request_id, retry_hops, _ = recovery
+        if observer := observation.get():
+          observer.requests.pop(old_request_id, None)
+        if on_created:
+          await on_created(request_id)
         continue
       if status in {"UPLOADED", "PROCESSING"}:
         convergence = await claim_ingest_and_finish_market_data_request(
@@ -345,6 +409,8 @@ async def _request_and_wait(
       "reason": "wait attempt expired; durable request remains open",
     }
   finally:
+    if observer := observation.get():
+      observer.requests.pop(request_id, None)
     await store.close()
 
 
@@ -360,10 +426,24 @@ async def _ingest_uploaded_request(
     destination = str(payload.get("destination") or "influxdb").strip().lower()
     if destination != "influxdb":
       return await ingest_uploaded_market_data_request(store, request_id)
+    from quantx_infrastructure.services import (
+      market_data_transfer_ingestion as ingestion,
+    )
+
+    async def save_observed(**kwargs):
+      report_request(request_id, "入库")
+      return await save_market_data(**kwargs)
+
+    async def verify_observed(**kwargs):
+      report_request(request_id, "回读校验")
+      return await ingestion.verify_persisted_bar_summaries(**kwargs)
+
+    report_request(request_id, "传输校验")
     return await ingest_uploaded_bar_request(
       store,
       request_id,
-      save_period=save_market_data,
+      save_period=save_observed,
+      verify_persistence=verify_observed,
     )
   _, _, records = await load_uploaded_request_records(store, request_id)
   if operation == "divid_factors":

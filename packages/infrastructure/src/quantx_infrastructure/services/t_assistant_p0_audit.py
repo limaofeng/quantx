@@ -18,12 +18,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from quantx_contracts import PROTOCOL_VERSION
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 P0_SCHEMA_VERSION = 1
 LEGACY_PROTOCOL_VERSION = "1.1"
-CURRENT_PROTOCOL_VERSION = "1.2"
+CURRENT_PROTOCOL_VERSION = PROTOCOL_VERSION
 TARGET_PROTOCOL_VERSION = CURRENT_PROTOCOL_VERSION
 TARGET_OWNER_TYPES = (
   "STRATEGY_RUN",

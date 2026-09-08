@@ -68,10 +68,9 @@ def _fake_spawn_historical_worker(connection, worker_kind: str) -> None:
           "total_units": 2,
         }
       )
-      assert connection.recv() == {
-        "type": "continue",
-        "request_id": request_id,
-      }
+      control = connection.recv()
+      assert control["type"] == "continue" and control["request_id"] == request_id
+      assert control["max_spool_bytes"] >= 0
       if request_id == "request-timeout":
         time.sleep(60)
       connection.send(
@@ -249,10 +248,7 @@ def test_intraday_request_is_split_by_date_and_instrument_batch() -> None:
 
   assert len(units) == 6
   assert [len(unit["stock_list"]) for unit in units] == [13, 13, 13, 12, 12, 12]
-  assert [
-    (unit["start_time"], unit["end_time"])
-    for unit in units
-  ] == [
+  assert [(unit["start_time"], unit["end_time"]) for unit in units] == [
     ("20260827", "20260827"),
     ("20260828", "20260828"),
     ("20260829", "20260829"),
@@ -315,11 +311,13 @@ def test_windowed_units_reassemble_canonical_series_order(tmp_path) -> None:
       max_record_uncompressed_bytes=100_000,
     )
   )
-  payload_records = [record for record in records if record is not boundary]
+  payload_records = [
+    record
+    for record in records
+    if record is not boundary and record is not historical_worker.HISTORICAL_CHECKPOINT
+  ]
   expected_order = [
-    (code, source_time)
-    for code in codes
-    for source_time in (20260828, 20260829, None)
+    (code, source_time) for code in codes for source_time in (20260828, 20260829, None)
   ]
 
   assert [
@@ -360,9 +358,7 @@ def test_windowed_staging_obeys_request_byte_budget(tmp_path) -> None:
         no_data_reason=None,
       ).model_dump(mode="json")
 
-  connection = _Connection(
-    [{"type": "continue", "request_id": "bounded-staging"}]
-  )
+  connection = _Connection([{"type": "continue", "request_id": "bounded-staging"}])
   with pytest.raises(ValueError, match="uncompressed byte limit"):
     list(
       historical_worker._iter_request_records(

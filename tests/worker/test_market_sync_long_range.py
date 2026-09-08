@@ -50,8 +50,8 @@ async def test_two_months_reach_agent_as_disjoint_budgeted_windows(
     logger=Mock(),
     lifetimes={},
   )
-  assert len(result) == 12
-  assert len({scope for _, scope in calls}) == 12
+  assert result["batch_count"] == (12 if periods == ["1m"] else 14)
+  assert len({scope for _, scope in calls}) == result["batch_count"]
   for start, end in [("20260801", "20260831"), ("20260901", "20260930")]:
     window_codes = [
       code
@@ -158,7 +158,7 @@ async def test_listing_boundaries_exclude_inactive_tick_days(monkeypatch):
       "600000.SH": (None, date(2026, 8, 4)),
     },
   )
-  assert [(p["stock_list"][0], p["start_time"]) for p in calls] == [
+  assert [(code, p["start_time"]) for p in calls for code in p["stock_list"]] == [
     ("600000.SH", "20260803"),
     ("000001.SZ", "20260804"),
     ("600000.SH", "20260804"),
@@ -211,7 +211,7 @@ async def test_tick_empty_and_failed_partitions_do_not_block_later_days(monkeypa
   monkeypatch.setattr(flow, "_request_and_wait", request)
   with pytest.raises(flow.MarketDataSyncIncomplete) as caught:
     await flow._request_market_data_batches(
-      codes=["000001.SZ", "600000.SH"],
+      codes=["000001.SZ", *[f"{i:06d}.SZ" for i in range(2, 11)], "600000.SH"],
       periods=["tick"],
       start_time="20260803",
       end_time="20260805",

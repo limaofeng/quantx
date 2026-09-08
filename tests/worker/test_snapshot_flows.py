@@ -45,38 +45,14 @@ class FakeTradingDates:
 @pytest.fixture(autouse=True)
 def market_sync_calendar(monkeypatch):
   monkeypatch.setattr(market_flow, "TradingDateHelper", FakeTradingDates)
+  monkeypatch.setattr(market_flow, "MARKET_DATA_RETRY_DELAY_SECONDS", 0)
 
 
 def test_daily_market_sync_retries_durable_batches() -> None:
-  assert market_flow.daily_market_data_sync_flow.retries == 2
-  assert market_flow.daily_market_data_sync_flow.retry_delay_seconds == 60
+  assert market_flow.daily_market_data_sync_flow.retries == 0
+  assert market_flow.MARKET_DATA_REQUEST_CONCURRENCY == 2
 
 
-def test_market_request_batch_size_respects_complete_record_budget() -> None:
-  assert (
-    market_flow._market_data_request_batch_size(
-      periods=["1d"],
-      start_time="20260828",
-      end_time="20260828",
-    )
-    == 300
-  )
-  assert (
-    market_flow._market_data_request_batch_size(
-      periods=["tick"],
-      start_time="20260828",
-      end_time="20260828",
-    )
-    == 24
-  )
-  assert (
-    market_flow._market_data_request_batch_size(
-      periods=["1m"],
-      start_time="20260801",
-      end_time="20260831",
-    )
-    == 53
-  )
 
 
 @pytest.mark.asyncio
@@ -680,7 +656,7 @@ async def test_market_sync_splits_universe_at_agent_request_limit(
     1,
   ]
   assert result["transfer"]["request_id"] is None
-  assert result["transfer"]["request_ids"] == ["request-1", "request-2"]
+  assert "request_ids" not in result["transfer"]
   assert result["transfer"]["batch_count"] == 2
   assert result["transfer"]["records_received"] == 301
   assert result["transfer"]["records_saved"] == 301
@@ -736,9 +712,7 @@ async def test_market_sync_keeps_7552_daily_symbols_at_26_durable_batches(
     f"repair-7552:batch:{index:04d}" for index in range(1, 27)
   ]
   assert result["transfer"]["batch_count"] == 26
-  assert result["transfer"]["request_ids"] == [
-    f"request-{index * 300}" for index in range(26)
-  ]
+  assert "batches" not in result["transfer"]
   assert result["transfer"]["records_received"] == 7552
 
 

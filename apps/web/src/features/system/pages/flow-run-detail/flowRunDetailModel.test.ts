@@ -92,3 +92,14 @@ describe('flowRunDetailModel', () => {
     expect(formatFlowRunDuration(1137)).toBe('00:18:57');
   });
 });
+
+it('bounds retained live log history', () => {
+  const logs = Array.from({ length: 6000 }, (_, index) => ({
+    time: new Date(1700000000000 + index).toISOString(),
+    message: String(index),
+    level: 20,
+  }));
+  const result = mergeFlowRunLogs(logs);
+  expect(result).toHaveLength(5000);
+  expect(result[0].message).toBe('1000');
+});

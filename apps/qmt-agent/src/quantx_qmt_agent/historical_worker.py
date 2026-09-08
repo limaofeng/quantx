@@ -34,6 +34,7 @@ from .broker import (
 )
 
 XTDATA_HISTORICAL_WORKER_KIND = "xtdata"
+HISTORICAL_CHECKPOINT = object()
 HISTORICAL_WORK_UNIT_INSTRUMENTS = 20
 HISTORICAL_TICK_WORK_UNIT_INSTRUMENTS = 10
 HISTORICAL_WORK_UNIT_WINDOW_DAYS = {
@@ -72,15 +73,21 @@ class _HistoricalDiskBudget:
 
   max_bytes: int
   retained_bytes: int = 0
+  shared: _HistoricalDiskBudget | None = None
 
   def reserve(self, size: int) -> None:
     next_size = self.retained_bytes + max(0, int(size))
     if next_size > self.max_bytes:
       raise ValueError("market data request exceeds spool disk byte limit")
+    if self.shared is not None:
+      self.shared.reserve(size)
     self.retained_bytes = next_size
 
   def release(self, size: int) -> None:
-    self.retained_bytes = max(0, self.retained_bytes - max(0, int(size)))
+    released = min(self.retained_bytes, max(0, int(size)))
+    self.retained_bytes -= released
+    if self.shared is not None:
+      self.shared.release(released)
 
 
 @dataclass
@@ -101,9 +108,7 @@ class _HistoricalSeriesSpool:
   def append(self, record: dict[str, Any]) -> None:
     source_time = int(record["time"])
     tick_ordinal = (
-      int(record[HISTORICAL_TICK_ORDINAL_FIELD])
-      if self.period == "tick"
-      else None
+      int(record[HISTORICAL_TICK_ORDINAL_FIELD]) if self.period == "tick" else None
     )
     key = historical_bar_key(
       code=self.code,
@@ -137,8 +142,7 @@ class _HistoricalSeriesSpool:
           "historical work units returned unordered or duplicate series keys"
         )
       if source_time == self.max_time and (
-        self.period != "tick"
-        or tick_ordinal != int(self.last_tick_ordinal or 0) + 1
+        self.period != "tick" or tick_ordinal != int(self.last_tick_ordinal or 0) + 1
       ):
         raise ValueError(
           "historical work units returned unordered or duplicate series keys"
@@ -174,9 +178,7 @@ class _HistoricalSeriesSpool:
       min_time=self.min_time,
       max_time=self.max_time,
       key_sha256=self.key_digest.hexdigest(),
-      no_data_reason=(
-        HISTORICAL_BAR_NO_DATA_REASON if self.row_count == 0 else None
-      ),
+      no_data_reason=(HISTORICAL_BAR_NO_DATA_REASON if self.row_count == 0 else None),
     ).model_dump(mode="json")
 
 
@@ -343,19 +345,6 @@ def _set_low_process_priority() -> None:
     )
 
 
-def _await_continue(connection: Any, request_id: str) -> None:
-  control = connection.recv()
-  if not isinstance(control, dict):
-    raise RuntimeError("invalid historical worker control message")
-  if control.get("type") == "shutdown":
-    raise RuntimeError("historical worker stopped while request was active")
-  if (
-    control.get("type") != "continue"
-    or str(control.get("request_id") or "") != request_id
-  ):
-    raise RuntimeError("historical worker checkpoint acknowledgement mismatch")
-
-
 def _iter_request_records(
   broker: QmtDataBroker,
   payload: dict[str, Any],
@@ -389,7 +378,7 @@ def _iter_request_records(
             "total_units": len(units),
           }
         )
-        _await_continue(connection, request_id)
+        yield HISTORICAL_CHECKPOINT
     return
 
   completed_units = 0
@@ -463,7 +452,7 @@ def _iter_request_records(
               "total_units": len(units),
             }
           )
-          _await_continue(connection, request_id)
+          yield HISTORICAL_CHECKPOINT
 
       # The wire contract is period-major, code-major, then time-major. Native
       # calls are window-major for efficiency, so replay the bounded per-code
@@ -493,7 +482,7 @@ def _iter_request_records(
           "total_units": len(units),
         }
       )
-      _await_continue(connection, request_id)
+      yield HISTORICAL_CHECKPOINT
     group_start = group_end
 
 
@@ -501,7 +490,8 @@ def _prepare_request(
   connection: Any,
   broker: QmtDataBroker,
   message: dict[str, Any],
-) -> None:
+  shared_disk_budget: _HistoricalDiskBudget,
+) -> Iterator[None]:
   request_id = str(message.get("request_id") or "")
   payload = message.get("payload")
   spool_directory = str(message.get("spool_directory") or "")
@@ -512,7 +502,7 @@ def _prepare_request(
   from .runtime import (
     _MARKET_DATA_CHUNK_BOUNDARY,
     MAX_MARKET_DATA_RECORD_UNCOMPRESSED_BYTES,
-    _prepare_market_data_records_spool_sync,
+    _prepare_market_data_records_spool_steps,
   )
 
   def publish_chunk(index: int, chunk: Any) -> None:
@@ -531,39 +521,45 @@ def _prepare_request(
     )
 
   disk_budget = _HistoricalDiskBudget(
+    shared=shared_disk_budget,
     max_bytes=int(
       message.get("max_spool_bytes")
       or int(message["max_total_uncompressed_bytes"])
       + int(message["max_total_compressed_bytes"])
     ),
   )
-  prepared = _prepare_market_data_records_spool_sync(
-    _iter_request_records(
-      broker,
-      payload,
-      connection,
-      request_id,
-      _MARKET_DATA_CHUNK_BOUNDARY,
-      Path(spool_directory),
-      max_staging_uncompressed_bytes=int(
-        message["max_total_uncompressed_bytes"]
+  finished_spool = False
+  try:
+    prepared = yield from _prepare_market_data_records_spool_steps(
+      _iter_request_records(
+        broker,
+        payload,
+        connection,
+        request_id,
+        _MARKET_DATA_CHUNK_BOUNDARY,
+        Path(spool_directory),
+        max_staging_uncompressed_bytes=int(message["max_total_uncompressed_bytes"]),
+        max_record_uncompressed_bytes=MAX_MARKET_DATA_RECORD_UNCOMPRESSED_BYTES,
+        disk_budget=disk_budget,
       ),
-      max_record_uncompressed_bytes=MAX_MARKET_DATA_RECORD_UNCOMPRESSED_BYTES,
-      disk_budget=disk_budget,
-    ),
-    Path(spool_directory),
-    max_total_uncompressed_bytes=int(message["max_total_uncompressed_bytes"]),
-    max_total_compressed_bytes=int(message["max_total_compressed_bytes"]),
-    on_chunk=publish_chunk,
-    reserve_compressed_bytes=disk_budget.reserve,
-  )
-  connection.send(
-    {
-      "type": "ok",
-      "request_id": request_id,
-      "manifest": _prepared_manifest(prepared),
-    }
-  )
+      Path(spool_directory),
+      max_total_uncompressed_bytes=int(message["max_total_uncompressed_bytes"]),
+      max_total_compressed_bytes=int(message["max_total_compressed_bytes"]),
+      on_chunk=publish_chunk,
+      reserve_compressed_bytes=disk_budget.reserve,
+    )
+    finished_spool = True
+    connection.send(
+      {
+        "type": "ok",
+        "request_id": request_id,
+        "manifest": _prepared_manifest(prepared),
+      }
+    )
+  finally:
+    if finished_spool:
+      shared_disk_budget.max_bytes -= disk_budget.retained_bytes
+    disk_budget.release(disk_budget.retained_bytes)
 
 
 def run_historical_market_data_worker(
@@ -573,6 +569,8 @@ def run_historical_market_data_worker(
   """Serve serial historical requests until the parent explicitly shuts down."""
 
   broker: QmtDataBroker | None = None
+  active = {}
+  shared_disk_budget = _HistoricalDiskBudget(0)
   try:
     if worker_kind != XTDATA_HISTORICAL_WORKER_KIND:
       raise ValueError("unsupported historical market-data worker kind")
@@ -599,10 +597,33 @@ def run_historical_market_data_worker(
         return
       request_id = str(message.get("request_id") or "")
       try:
-        if message.get("type") != "prepare":
-          raise ValueError("unsupported historical worker message")
-        _prepare_request(connection, broker, message)
+        if message.get("type") == "prepare":
+          if request_id in active or len(active) >= 4:
+            raise ValueError("historical worker request capacity or identity conflict")
+          allowance = int(
+            message.get("max_spool_bytes")
+            or int(message["max_total_uncompressed_bytes"])
+            + int(message["max_total_compressed_bytes"])
+          )
+          shared_disk_budget.max_bytes = allowance + shared_disk_budget.retained_bytes
+          active[request_id] = _prepare_request(
+            connection, broker, message, shared_disk_budget
+          )
+        elif message.get("type") != "continue" or request_id not in active:
+          raise ValueError("unsupported historical worker control message")
+        else:
+          allowance = int(message["max_spool_bytes"])
+          if allowance < 0:
+            raise ValueError("negative historical disk allowance")
+          shared_disk_budget.max_bytes = allowance + shared_disk_budget.retained_bytes
+        try:
+          next(active[request_id])
+        except StopIteration:
+          active.pop(request_id)
       except Exception as exc:
+        failed = active.pop(request_id, None)
+        if failed is not None:
+          failed.close()
         connection.send(
           {
             "type": "error",
@@ -611,6 +632,8 @@ def run_historical_market_data_worker(
           }
         )
   finally:
+    for steps in active.values():
+      steps.close()
     if broker is not None:
       close = getattr(broker.data_manager, "close_connection", None)
       if callable(close):

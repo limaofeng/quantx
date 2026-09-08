@@ -45,6 +45,7 @@ from quantx_api.gqlapi.admission import (
 )
 from quantx_api.gqlapi.performance import graphql_server_timing_header
 from quantx_api.live_runtime_status import live_trading_runtime_status
+from quantx_api.market_sync_api import router as market_sync_router
 from quantx_api.monitoring import get_prometheus_metrics
 from quantx_api.monitoring.metrics import REQUEST_COUNT, REQUEST_DURATION
 from quantx_api.runtime_status import (
@@ -583,6 +584,7 @@ async def error_handler_middleware(request: Request, call_next):
 # 设置认证 REST API 与 GraphQL
 app.include_router(auth_router)
 app.include_router(agent_router)
+app.include_router(market_sync_router)
 setup_graphql(app)
 
 

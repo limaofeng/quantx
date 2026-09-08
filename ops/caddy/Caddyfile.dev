@@ -29,7 +29,7 @@
 			@monitor path /monitor/*
 			reverse_proxy @monitor 127.0.0.1:18083
 
-			@api path /graphql* /auth* /health* /metrics* /ws/agent* /agent/*
+			@api path /graphql* /auth* /health* /metrics* /ws/agent* /agent/* /market-data-sync/*
 			reverse_proxy @api 127.0.0.1:18081
 
 			@docs path /docs/*

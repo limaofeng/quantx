@@ -194,7 +194,7 @@ async def test_protocol_conflicts_and_unknown_facts_are_blockers(
 
   async def fake_audit(_connection: Any) -> dict[str, Any]:
     return _audit_report(
-      current_protocol="1.2",
+      current_protocol="1.3",
       target_protocol="1.1",
     )
 
@@ -209,7 +209,7 @@ async def test_protocol_conflicts_and_unknown_facts_are_blockers(
   assert rehearsal.PROTOCOL_VERSION_UNSUPPORTED in report["reasonCodes"]
   assert rehearsal.INBOX_STATUS_UNKNOWN in report["reasonCodes"]
   assert report["readyForCutover"] is False
-  assert report["observed"]["configuredProtocol"] == "1.2"
+  assert report["observed"]["configuredProtocol"] == "1.3"
   assert report["observed"]["targetContractVersion"] is None
 
 
@@ -323,7 +323,7 @@ def test_report_is_aggregate_deidentified_and_simulation_is_explicit() -> None:
   report = rehearsal._build_report(
     _audit_report(),
     unsettled_inbox_count=0,
-    target_contract_source={"protocol_version": "1.2"},
+    target_contract_source={"protocol_version": "1.3"},
   )
   rendered = json.dumps(report, ensure_ascii=False, sort_keys=True)
   for value in ("account-SECRET", "run-SECRET", "plan-SECRET", "order-SECRET"):
@@ -344,7 +344,7 @@ def test_markdown_and_require_ready_cli_gate() -> None:
   report = rehearsal._build_report(
     _audit_report(ready=False, queued_count=1),
     unsettled_inbox_count=0,
-    target_contract_source={"protocol_version": "1.2"},
+    target_contract_source={"protocol_version": "1.3"},
   )
   markdown = rehearsal.render_markdown(report)
 
@@ -364,7 +364,7 @@ def test_terminal_exit_intent_gate_blocks_cutover_until_repaired() -> None:
       "safeExitIntentIds": ["intent-1"],
       "reasonCodes": [],
     },
-    target_contract_source={"protocol_version": "1.2"},
+    target_contract_source={"protocol_version": "1.3"},
   )
 
   assert report["readyForCutover"] is False
@@ -455,7 +455,7 @@ def test_cli_renders_json_and_markdown_without_real_database(
     ]
   ) == 0
   markdown_output = capsys.readouterr().out
-  assert "Protocol 1.2 cutover rehearsal" in markdown_output
+  assert "Protocol 1.3 cutover rehearsal" in markdown_output
   assert calls[-1]["legacy_schema"] is False
 
 
@@ -463,5 +463,5 @@ def _build_cli_report() -> dict[str, Any]:
   return rehearsal._build_report(
     _audit_report(ready=False, queued_count=1),
     unsettled_inbox_count=0,
-    target_contract_source={"protocol_version": "1.2"},
+    target_contract_source={"protocol_version": "1.3"},
   )

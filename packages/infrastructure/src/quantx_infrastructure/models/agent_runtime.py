@@ -706,3 +706,18 @@ for _identity_model in (
   register_identity_immutability(_identity_model)
 register_identity_immutability(TTradeBatch, fields=SOURCE_EXECUTION_FIELDS)
 del _identity_model
+
+
+class MarketDataSyncPartition(Base):
+  __tablename__ = "market_data_sync_partition"
+  run_id = Column(String(64), primary_key=True)
+  batch_index = Column(Integer, primary_key=True)
+  scope = Column(JSON, nullable=False)
+  request_id = Column(String(36), nullable=False)
+  coverage_status = Column(String(16), nullable=False)
+  summary = Column(JSON, nullable=False)
+  updated_at = Column(DateTime, nullable=False)
+  __table_args__ = (
+    CheckConstraint("coverage_status IN ('PENDING','VERIFIED','INCOMPLETE')",
+                    name="ck_market_sync_coverage_status"),
+  )

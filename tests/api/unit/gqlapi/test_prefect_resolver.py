@@ -5,6 +5,18 @@ import quantx_api.gqlapi.resolvers.prefect as prefect_module
 from quantx_api.gqlapi.resolvers.prefect import PrefectResolver
 
 
+async def test_flow_logs_read_latest_page_so_progress_does_not_freeze(monkeypatch):
+  request = AsyncMock(side_effect=[_flow_run("run"), [], [
+    {"timestamp": "2026-09-08T09:30:00Z", "level":20, "message":"new"},
+    {"timestamp": "2026-09-08T09:29:00Z", "level":20, "message":"old"},
+  ]])
+  monkeypatch.setattr(prefect_module, "_request", request)
+  result = await PrefectResolver.get_flow_run("run")
+  assert request.await_args_list[-1].kwargs["payload"]["sort"] == "TIMESTAMP_DESC"
+  assert request.await_args_list[-1].kwargs["payload"]["limit"] == 500
+  assert [log.message for log in result.detailed_logs] == ["old", "new"]
+
+
 def _singleton_deployment() -> dict:
   return {
     "id": "deployment-1",

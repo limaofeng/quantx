@@ -271,7 +271,7 @@ def test_report_does_not_leak_business_ids() -> None:
     {
       "scope": "P0_LEGACY_T_ASSISTANT",
       "currentProtocol": "1.1",
-      "targetProtocol": "1.2",
+      "targetProtocol": "1.3",
       "readyForP1": True,
       "summary": {"blockerCount": 0, "warningCount": 0, "checkCount": 0},
       "checks": [],
@@ -340,7 +340,7 @@ def test_markdown_and_require_ready_status_are_deterministic() -> None:
   report = {
     "scope": "P0_LEGACY_T_ASSISTANT",
     "currentProtocol": "1.1",
-    "targetProtocol": "1.2",
+    "targetProtocol": "1.3",
     "readyForP1": False,
     "summary": {"blockerCount": 1, "warningCount": 0, "checkCount": 1},
     "checks": [

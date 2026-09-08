@@ -42,6 +42,7 @@ import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/utils/cn';
 
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
+import { MarketSyncEvidence } from '../components/MarketSyncEvidence';
 
 import {
   filterFlowRunLogs,
@@ -1021,20 +1022,30 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
     />
   );
   const logPanel = (
-    <LogPanel
-      filteredLogs={filteredLogs}
-      followingTail={followingTail}
-      levelFilter={levelFilter}
-      live={isLiveRun}
-      logViewportRef={logViewportRef}
-      logs={logs}
-      searchQuery={searchQuery}
-      subscriptionError={subscriptionError}
-      onFollowTail={handleFollowTail}
-      onLevelFilterChange={setLevelFilter}
-      onScroll={handleLogScroll}
-      onSearchChange={setSearchQuery}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      <MarketSyncEvidence key={id} runId={id} live={isLiveRun} />
+      {logs.length >= 5000 && (
+        <p className="px-ui-section text-ui-caption text-slate-500">
+          当前保留最近 5,000 条日志；完整日志保存在 Prefect。
+        </p>
+      )}
+      <div className="min-h-0 flex-1">
+        <LogPanel
+          filteredLogs={filteredLogs}
+          followingTail={followingTail}
+          levelFilter={levelFilter}
+          live={isLiveRun}
+          logViewportRef={logViewportRef}
+          logs={logs}
+          searchQuery={searchQuery}
+          subscriptionError={subscriptionError}
+          onFollowTail={handleFollowTail}
+          onLevelFilterChange={setLevelFilter}
+          onScroll={handleLogScroll}
+          onSearchChange={setSearchQuery}
+        />
+      </div>
+    </div>
   );
 
   return (

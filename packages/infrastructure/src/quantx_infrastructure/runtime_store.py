@@ -382,10 +382,18 @@ class DurableRuntimeStore:
           await connection.execute(
             text(
               """
-            SELECT request_id, request_payload, status, expected_chunks,
-                   received_chunks, processing_error, ingestion_result
-            FROM market_data_request
-            WHERE request_id = :request_id
+            SELECT r.request_id, r.request_payload, r.status, r.expected_chunks,
+                   r.development_only,
+                   r.received_chunks, r.processing_error, r.ingestion_result,
+                   r.created_at, h.updated_at AS history_updated_at,
+                   h.details -> 'historyProgress' AS history_progress,
+                   h.details ->> 'sessionActive' AS history_session_active,
+                   h.details ->> 'historyWorkload' AS history_workload,
+                   h.details ->> 'historyWorkloadReason' AS history_workload_reason
+            FROM market_data_request r
+            LEFT JOIN runtime_component_heartbeats h
+              ON h.component = 'qmt-agent:' || r.device_id
+            WHERE r.request_id = :request_id
             """
             ),
             {"request_id": request_id},

@@ -1066,6 +1066,7 @@ async def _record_heartbeat(
           payload.get("market_stream_ack_latency_ms") or 0.0
         ),
         "historyWorkload": str(payload.get("history_workload") or "idle")[:16],
+        "historyProgress": payload.get("history_progress") or [],
         "historyWorkloadReason": str(
           payload.get("history_workload_reason") or ""
         )[:64],
