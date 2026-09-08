@@ -1,4 +1,4 @@
-"""Read persisted Tick cache into an isolated P5 dataset; never call miniQMT."""
+"""Inspect persisted Tick data; save references by default, snapshots on request."""
 
 from __future__ import annotations
 
@@ -30,12 +30,19 @@ async def acquire(args):
   os.environ["DEBUG"] = "false"
   os.environ["INFLUXDB_MAX_RETRIES"] = "0"
   logging.disable(logging.CRITICAL)
+  from urllib.parse import urlsplit
+
   from quantx_engine.t_assistant_backtest_data import acquire_backtest_dataset
+  from quantx_infrastructure.config.settings import settings
   from quantx_infrastructure.services.historical_market_data_service import (
     HistoricalMarketDataService,
   )
   from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
+  source = urlsplit(settings.influxdb_host)
+  source_version = (
+    f"influxdb:{source.hostname}:{source.port}/{settings.influxdb_database}/ticks"
+  )
   codes = tuple(code.strip().upper() for code in args.instruments.split(","))
   calendar = TradingDateHelper()
   start, end = args.start, args.end
@@ -137,7 +144,7 @@ async def acquire(args):
   dataset = await acquire_backtest_dataset(
     history=HistoricalMarketDataService(),
     calendar=calendar,
-    source_version="quantx-persisted-tick-cache",
+    source_version=source_version,
     instruments=codes,
     start=start,
     end=end,
@@ -145,6 +152,7 @@ async def acquire(args):
     latency_ms=0,
     stop_on_error=True,
     preserve_raw=True,
+    freeze=args.freeze,
     on_partition=lambda part: print(
       json.dumps({"event": "PARTITION", **part}), flush=True
     ),
@@ -175,6 +183,11 @@ def main():
   parser.add_argument("--start", type=date.fromisoformat, required=True)
   parser.add_argument("--end", type=date.fromisoformat, required=True)
   parser.add_argument("--output", type=Path, required=True)
+  parser.add_argument(
+    "--freeze",
+    action="store_true",
+    help="Explicit shared snapshot; default stores only a verified InfluxDB reference",
+  )
   parser.add_argument(
     "--probe", action="store_true", help="Read only first symbol and first trading day"
   )

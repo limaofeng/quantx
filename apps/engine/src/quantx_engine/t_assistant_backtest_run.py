@@ -17,7 +17,7 @@ from quantx_infrastructure.services.t_assistant_backtest_store import (
   TAssistantBacktestStore,
 )
 
-from quantx_engine.t_assistant_backtest_data import FrozenBacktestDataset
+from quantx_engine.t_assistant_backtest_data import BacktestDataset
 from quantx_engine.t_assistant_backtest_runtime import (
   TAssistantBacktestRuntime,
   json_value,
@@ -108,7 +108,7 @@ async def execute_backtest(
   resume_directory always owns a fresh execution, including identical inputs.
   """
   request = deepcopy(request)
-  streamed = isinstance(events, FrozenBacktestDataset)
+  streamed = isinstance(events, BacktestDataset)
   if streamed:
     data = events.input_manifest
     if set(events.instruments) != set(request.runtime_options["initial_positions"]):

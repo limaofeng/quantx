@@ -14,12 +14,13 @@ from quantx_infrastructure.services.t_assistant_backtest_store import (
   TAssistantBacktestStore,
 )
 
-from quantx_engine.t_assistant_backtest_data import FrozenBacktestDataset
+from quantx_engine.t_assistant_backtest_data import BacktestDataset
 from quantx_engine.t_assistant_backtest_run import (
   backtest_code_evidence,
   execute_backtest,
 )
 from quantx_engine.t_assistant_backtest_runtime import json_value
+from quantx_engine.t_assistant_backtest_timeline import iterate_events
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,7 @@ class BacktestAdmissionPolicy:
       raise ValueError("BACKTEST_METRIC_THRESHOLDS_INVALID")
 
 
-def qualify_backtest_data(request, events, policy):
+async def qualify_backtest_data(request, events, policy):
   """Report continuous-session minute coverage before any scenario is run.
 
   Every configured symbol must meet the explicit minute threshold for a day
@@ -75,7 +76,7 @@ def qualify_backtest_data(request, events, policy):
   This measures observed coverage, not a proof of exchange-wide Tick completeness.
   """
   codes = set(request.runtime_options["initial_positions"])
-  if isinstance(events, FrozenBacktestDataset):
+  if isinstance(events, BacktestDataset):
     days = [
       datetime.fromisoformat(d).date()
       for d in events.manifest["material"]["trading_days"]
@@ -100,7 +101,7 @@ def qualify_backtest_data(request, events, policy):
     ).is_continuous
   }
   observed = {}
-  for event in source:
+  async for event in iterate_events(source):
     at = event.market.timestamp.astimezone(SHANGHAI)
     code, minute = event.market.instrument_code, at.hour * 60 + at.minute
     if code not in codes or at.date() not in allowed_days:
@@ -264,7 +265,7 @@ async def evaluate_backtest_comparison(
   if policy and set(policy.scenario_thresholds) != set(scenarios):
     raise ValueError("BACKTEST_POLICY_SCENARIO_MISMATCH")
   request, policy, scenarios = deepcopy(request), deepcopy(policy), deepcopy(scenarios)
-  streamed = isinstance(events, FrozenBacktestDataset)
+  streamed = isinstance(events, BacktestDataset)
   if not streamed:
     events = tuple(events)
   directory = Path(root) / str(uuid4())
@@ -284,7 +285,7 @@ async def evaluate_backtest_comparison(
     {"material": frozen, "hash": stable_manifest_hash(frozen)},
   )
   if policy is not None:
-    quality = qualify_backtest_data(request, events, policy)
+    quality = await qualify_backtest_data(request, events, policy)
     TAssistantBacktestStore._create(directory / "data-qualification.json", quality)
     if quality["reasons"]:
       report = {

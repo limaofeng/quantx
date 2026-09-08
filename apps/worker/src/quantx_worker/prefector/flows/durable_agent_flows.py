@@ -247,6 +247,7 @@ async def _request_and_wait(
   agent_device_id: str = "",
   required_capabilities: Optional[list[str]] = None,
   idempotency_scope: str = "",
+  retry_failed_requests: bool = True,
 ) -> dict[str, Any]:
   store = DurableRuntimeStore()
   try:
@@ -289,6 +290,12 @@ async def _request_and_wait(
           **ingestion_result,
         }
       if status == "FAILED":
+        if not retry_failed_requests:
+          return {
+            "status": "failed",
+            "request_id": request_id,
+            "reason": request.get("processing_error"),
+          }
         recovery = await recover_failed_market_data_request(
           store,
           payload=payload,

@@ -22,6 +22,10 @@ from quantx_worker.prefector.flows.daily_indicator_snapshot_flow import (
   resolve_instruments,
 )
 from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
+from quantx_worker.prefector.flows.market_data_sync_partitions import (
+  plan_tick_partitions,
+  validate_tick_partition,
+)
 from quantx_worker.prefector.flows.stock_probability_inference_flow import (
   stock_probability_inference_flow,
 )
@@ -165,9 +169,13 @@ async def _request_market_data_batch(
       f"{idempotency_scope}:batch:{batch_index:04d}"
     )
   }
+  if "tick" in periods:
+    request_kwargs["retry_failed_requests"] = False
   if agent_device_id:
     request_kwargs["agent_device_id"] = agent_device_id
   transfer = await _request_and_wait(request_payload, **request_kwargs)
+  if "tick" in periods and transfer.get("status") == "completed":
+    validate_tick_partition(transfer, code_batch, periods, start_time, end_time)
   _validate_market_data_transfer(
     transfer,
     batch_index=batch_index,
@@ -188,7 +196,19 @@ async def _request_market_data_batches(
 ) -> list[dict[str, Any]]:
   """Run a bounded rolling pipeline and retain deterministic batch order."""
 
-  total_batches = len(code_batches)
+  partitions = [(codes, start_time, end_time) for codes in code_batches]
+  if "tick" in periods:
+    days = await TradingDateHelper().get_trading_calendar(
+      market="SH", start_date=_parse_date(start_time), end_date=_parse_date(end_time)
+    )
+    partitions = plan_tick_partitions(
+      [code for codes in code_batches for code in codes],
+      days,
+      start_time,
+      end_time,
+      periods,
+    )
+  total_batches = len(partitions)
   results: list[Optional[dict[str, Any]]] = [None] * total_batches
   active: dict[asyncio.Task[tuple[int, dict[str, Any]]], int] = {}
   next_index = 0
@@ -197,12 +217,12 @@ async def _request_market_data_batches(
     batch_index = batch_offset + 1
     task = asyncio.create_task(
       _request_market_data_batch(
-        code_batch=code_batches[batch_offset],
+        code_batch=partitions[batch_offset][0],
         batch_index=batch_index,
         total_batches=total_batches,
         periods=periods,
-        start_time=start_time,
-        end_time=end_time,
+        start_time=partitions[batch_offset][1],
+        end_time=partitions[batch_offset][2],
         agent_device_id=agent_device_id,
         idempotency_scope=idempotency_scope,
       ),
@@ -232,7 +252,7 @@ async def _request_market_data_batches(
           "status=%s received=%s saved=%s",
           batch_offset + 1,
           total_batches,
-          len(code_batches[batch_offset]),
+          len(partitions[batch_offset][0]),
           transfer.get("request_id"),
           transfer.get("status"),
           transfer.get("records_received"),

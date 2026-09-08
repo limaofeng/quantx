@@ -65,37 +65,70 @@ class BacktestTick:
     )
 
 
+class _SequenceValidator:
+  def __init__(self, presorted):
+    self.presorted = presorted
+    self.seen = set()
+    self.sequences = {}
+    self.sources = {}
+    self.last_key = None
+
+  def accept(self, item):
+    if self.last_key is not None and item.key < self.last_key:
+      raise ValueError("BACKTEST_NON_MONOTONIC_TIMELINE")
+    self.last_key = item.key
+    identity = (item.tick.stream_id, item.market.instrument_code, item.source_identity)
+    code = item.market.instrument_code
+    source_key = (item.tick.sample.source_time_ms, item.tick.sample.tick_ordinal)
+    if (not self.presorted and identity in self.seen) or self.sources.get(
+      code
+    ) == source_key:
+      raise ValueError("BACKTEST_DUPLICATE_SOURCE")
+    if not self.presorted:
+      self.seen.add(identity)
+    if item.tick.accepted_sequence <= self.sequences.get(
+      code, 0
+    ) or source_key < self.sources.get(code, (-1, -1)):
+      raise ValueError("BACKTEST_NON_MONOTONIC_SOURCE")
+    self.sources[code] = source_key
+    self.sequences[code] = item.tick.accepted_sequence
+    return item
+
+
 def tick_frames(events, *, presorted=False):
   """Coalesce simultaneous quotes before allocation; never reorder duplicates."""
   ordered = events if presorted else sorted(events, key=lambda event: event.key)
-  seen = set()
-  sequences = {}
-
-  def validated():
-    last_key = None
-    sources = {}
-    for item in ordered:
-      if last_key is not None and item.key < last_key:
-        raise ValueError("BACKTEST_NON_MONOTONIC_TIMELINE")
-      last_key = item.key
-      identity = (
-        item.tick.stream_id,
-        item.market.instrument_code,
-        item.source_identity,
-      )
-      code = item.market.instrument_code
-      source_key = (item.tick.sample.source_time_ms, item.tick.sample.tick_ordinal)
-      if (not presorted and identity in seen) or sources.get(code) == source_key:
-        raise ValueError("BACKTEST_DUPLICATE_SOURCE")
-      if not presorted:
-        seen.add(identity)
-      if item.tick.accepted_sequence <= sequences.get(
-        code, 0
-      ) or source_key < sources.get(code, (-1, -1)):
-        raise ValueError("BACKTEST_NON_MONOTONIC_SOURCE")
-      sources[code] = source_key
-      sequences[code] = item.tick.accepted_sequence
-      yield item
-
-  for at, grouped in groupby(validated(), key=lambda event: event.decision_time):
+  validator = _SequenceValidator(presorted)
+  for at, grouped in groupby(
+    map(validator.accept, ordered), key=lambda event: event.decision_time
+  ):
     yield at, tuple(grouped)
+
+
+async def iterate_events(events):
+  if hasattr(events, "__aiter__"):
+    async for event in events:
+      yield event
+  else:
+    for event in events:
+      yield event
+
+
+async def async_tick_frames(events, *, presorted=False):
+  if not hasattr(events, "__aiter__"):
+    for frame in tick_frames(events, presorted=presorted):
+      yield frame
+    return
+  if not presorted:
+    raise ValueError("BACKTEST_ASYNC_ORDER_REQUIRED")
+  validator = _SequenceValidator(True)
+  frame, at = [], None
+  async for event in events:
+    validator.accept(event)
+    if frame and event.decision_time != at:
+      yield at, tuple(frame)
+      frame = []
+    at = event.decision_time
+    frame.append(event)
+  if frame:
+    yield at, tuple(frame)

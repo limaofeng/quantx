@@ -1,0 +1,123 @@
+"""UI's existing market sync flow uses bounded, audited Tick partitions."""
+
+from datetime import date
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+import quantx_worker.prefector.flows.daily_market_data_sync_flow as flow
+from quantx_worker.prefector.flows.market_data_sync_partitions import (
+  plan_tick_partitions,
+  validate_tick_partition,
+)
+
+
+async def test_month_range_is_split_through_public_request_gateway(monkeypatch):
+  days = [date(2026, 8, 3), date(2026, 8, 31)]
+  monkeypatch.setattr(
+    flow,
+    "TradingDateHelper",
+    lambda: Mock(get_trading_calendar=AsyncMock(return_value=days)),
+  )
+  calls = []
+
+  async def request(payload, **kwargs):
+    calls.append((payload, kwargs))
+    return {
+      "status": "completed",
+      "request_id": f"request-{len(calls)}",
+      "records_received": 10,
+      "records_saved": 10,
+      "code_summaries": [
+        {"code": c, "period": p, "row_count": 5}
+        for c in payload["stock_list"]
+        for p in payload["periods"]
+      ],
+    }
+
+  monkeypatch.setattr(flow, "_request_and_wait", request)
+  result = await flow._request_market_data_batches(
+    code_batches=[["600036.SH", "000001.SZ"]],
+    periods=["tick", "1d"],
+    start_time="20260801",
+    end_time="20260831",
+    agent_device_id="",
+    idempotency_scope="fixture",
+    logger=Mock(),
+  )
+  assert len(result) == 4
+  assert [(p["stock_list"], p["start_time"], p["end_time"]) for p, _ in calls] == [
+    ([code], day, day)
+    for day in ("20260803", "20260831")
+    for code in ("000001.SZ", "600036.SH")
+  ]
+  assert all(k["retry_failed_requests"] is False for _, k in calls)
+  assert len({k["idempotency_scope"] for _, k in calls}) == 4
+
+
+def test_one_empty_period_cannot_be_hidden_by_nonempty_daily_bars():
+  transfer = {
+    "request_id": "gap",
+    "code_summaries": [
+      {"code": "000001.SZ", "period": "tick", "row_count": 0},
+      {"code": "000001.SZ", "period": "1d", "row_count": 1},
+    ],
+  }
+  with pytest.raises(RuntimeError, match="000001.SZ/tick"):
+    validate_tick_partition(
+      transfer, ["000001.SZ"], ["tick", "1d"], "20260803", "20260803"
+    )
+
+
+def test_calendar_must_not_silently_change_scope():
+  with pytest.raises(ValueError, match="交易日历"):
+    plan_tick_partitions(
+      ["000001.SZ"], [date(2026, 9, 1)], "20260801", "20260831", ["tick"]
+    )
+
+
+async def test_failed_tick_request_is_not_reopened(monkeypatch):
+  from quantx_worker.prefector.flows import durable_agent_flows as durable
+
+  store = Mock(
+    create_market_data_request=AsyncMock(return_value="same-request"),
+    market_data_request=AsyncMock(
+      return_value={"status": "FAILED", "processing_error": "unavailable"}
+    ),
+    close=AsyncMock(),
+  )
+  recovery = AsyncMock(side_effect=AssertionError("must not retry"))
+  monkeypatch.setattr(durable, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(durable, "recover_failed_market_data_request", recovery)
+  result = await durable._request_and_wait(
+    {"operation": "bars"}, retry_failed_requests=False
+  )
+  assert result["status"] == "failed"
+  assert result["request_id"] == "same-request"
+  recovery.assert_not_awaited()
+
+
+async def test_empty_tick_gateway_failure_identifies_day_and_symbol(monkeypatch):
+  monkeypatch.setattr(
+    flow,
+    "_request_and_wait",
+    AsyncMock(
+      return_value={
+        "status": "completed",
+        "request_id": "empty-request",
+        "records_received": 0,
+        "records_saved": 0,
+        "code_summaries": [{"code": "000001.SZ", "period": "tick", "row_count": 0}],
+      }
+    ),
+  )
+  with pytest.raises(RuntimeError, match="20260803.*000001.SZ/tick.*empty-request"):
+    await flow._request_market_data_batch(
+      code_batch=["000001.SZ"],
+      batch_index=1,
+      total_batches=1,
+      periods=["tick"],
+      start_time="20260803",
+      end_time="20260803",
+      agent_device_id="",
+      idempotency_scope="fixture",
+    )

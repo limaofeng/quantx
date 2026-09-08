@@ -39,8 +39,8 @@ def test_zero_return_uses_frozen_comparison(comparison, blocked):
   assert ("INCREMENTAL_RETURN_BELOW_THRESHOLD" in reasons) is blocked
 
 
-def test_all_symbols_must_meet_daily_coverage():
-  report = evaluation.qualify_backtest_data(
+async def test_all_symbols_must_meet_daily_coverage():
+  report = await evaluation.qualify_backtest_data(
     runtime(request_only=True),
     [e for e in ticks() if e.market.instrument_code == CODES[0]],
     policy(minute_coverage=0.001),

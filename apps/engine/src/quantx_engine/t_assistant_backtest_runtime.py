@@ -93,7 +93,7 @@ from quantx_infrastructure.services.t_allocation_candidate_projection import (
   candidate_from_evaluation,
 )
 
-from quantx_engine.t_assistant_backtest_timeline import tick_frames
+from quantx_engine.t_assistant_backtest_timeline import async_tick_frames
 
 
 def json_value(value):
@@ -370,7 +370,8 @@ class TAssistantBacktestRuntime:
 
   async def run(self, events, *, on_frame=None, retain_frames=True, presorted=False):
     self.frame_count = 0
-    for index, (at, frame) in enumerate(tick_frames(events, presorted=presorted)):
+    async for at, frame in async_tick_frames(events, presorted=presorted):
+      index = self.frame_count
       if self.now is not None and at <= self.now:
         raise ValueError("BACKTEST_CLOCK_REGRESSION")
       self.now = at.astimezone(SHANGHAI)

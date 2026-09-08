@@ -506,8 +506,9 @@ export function DailyMarketDataSyncPage() {
 
               <div className="mt-4 rounded-lg border border-blue-500/15 bg-blue-500/5 p-3 text-ui-label font-medium leading-relaxed text-blue-700 dark:text-blue-300">
                 <Info className="mr-2 inline h-3.5 w-3.5" />
-                手动运行会提交明确的 start_time /
-                end_time；清空日期时，后端会使用 Prefect 计划时间解析目标日期。
+                行情入库后可供图表与回测共用，无需再导出文件。Tick 按交易日和标的分批获取；
+                历史可用范围取决于行情源，任务失败时请查看日志中的日期和标的。
+                获取完成只代表返回的数据已入库，回测前仍需检查覆盖率和必要字段。
               </div>
             </section>
 

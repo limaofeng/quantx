@@ -1963,6 +1963,14 @@ stable source identity
 时间线规则、Broker 参数、代码版本和结果 manifest。训练用组合评估必须引用明确 backtest
 version；训练 run 只引用结果，不能拥有或修改回测事实。
 
+行情正文默认由 InfluxDB 持有。回测数据 manifest 固定数据源、标的、区间、交易日历、
+逐标的/日分区条数和内容 hash；每次回放按日读取并在消费该日之前校验。源数据补齐、修正或
+删除导致 hash 改变时，原版本回放明确失败，不能把新数据冒充原输入。引用模式不保证源修改后
+仍可恢复旧内容。仅在需要长期离线重放时显式冻结快照；快照分区按内容 hash 存储于同一共享
+objects 目录，多个数据集和 execution 复用，不按每次回测复制行情。数据 manifest v2 原子切换，
+不增加旧归档兼容读取；已有 v1 原始取数证据保留，但不作为 v2 可执行输入。
+
+
 LIVE、PAPER、BACKTEST 都通过同一 `StrategyBase.step(StrategyInput)`，区别只来自冻结的
 `execution_ref/environment`、时钟、Broker 和外部事实适配器。BACKTEST owner 不得进入实盘审批、
 pending、outbox 或 QMT 路由；PAPER 也不得与 LIVE 共用这些记录的唯一键或容量义务。

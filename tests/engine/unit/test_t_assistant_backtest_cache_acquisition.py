@@ -33,18 +33,23 @@ async def test_raw_cache_is_preserved_without_fabricating_limit_prices(tmp_path)
     root=tmp_path,
     latency_ms=0,
     preserve_raw=True,
+    freeze=True,
     stop_on_error=True,
   )
   material = dataset.manifest["material"]
   assert material["status"] == "REFERENCE_REQUIRED"
   assert sum(p["count"] for p in material["parts"]) == 24
   assert not material["failures"] and material["unattempted_partitions"] == 0
-  part = json.loads((dataset.directory / material["parts"][0]["file"]).read_text())
+  part = json.loads(
+    (
+      dataset.directory.parent / "objects" / (material["parts"][0]["hash"] + ".json")
+    ).read_text()
+  )
   assert part["rows"][0]["price_tick"] is None
   assert part["rows"][0]["up_stop_price"] is None
   assert part["rows"][0]["last_close"] == 100.0
   with pytest.raises(ValueError, match="REFERENCE_REQUIRED"):
-    list(dataset.events())
+    [event async for event in dataset.events()]
 
 
 async def test_source_error_stops_without_querying_other_symbols(tmp_path):

@@ -1,4 +1,4 @@
-"""Acquire and freeze historical source pages before shared-account execution.
+"""Pin historical input hashes, optionally sharing immutable snapshot objects.
 
 Callers inject the existing HistoricalMarketDataService and TradingDateHelper
 with their explicitly selected data environment. This module never discovers or
@@ -9,7 +9,6 @@ from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite
 from numbers import Integral, Real
 from pathlib import Path
-from uuid import uuid4
 
 from quantx_domain.clock import SHANGHAI
 from quantx_domain.trading.market_rules import MarketDataSnapshot
@@ -52,6 +51,27 @@ def _archive_value(value):
       return None
     return int(value) if isinstance(value, Integral) else float(value)
   return value
+
+
+def _source_row(tick, preserve_raw):
+  row = {key: getattr(tick, key) for key in FIELDS}
+  if preserve_raw:
+    row = {key: _archive_value(value) for key, value in row.items()}
+    row["last_close"] = _archive_value(getattr(tick, "last_close", None))
+  return row
+
+
+def _publish_shared(path, content):
+  if not path.exists():
+    try:
+      TAssistantBacktestStore._create(path, content)
+      return
+    except FileExistsError:
+      pass  # Another writer published this content-addressed object first.
+  if stable_manifest_hash(TAssistantBacktestStore._read(path)) != stable_manifest_hash(
+    content
+  ):
+    raise ValueError("BACKTEST_SHARED_OBJECT_CORRUPT")
 
 
 def _event(row, *, stream_id, sequence, symbol_sequence, latency_ms):
@@ -110,14 +130,21 @@ def _event(row, *, stream_id, sequence, symbol_sequence, latency_ms):
   return BacktestTick(decision_time, sequence, identity, accepted, market)
 
 
-class FrozenBacktestDataset:
-  def __init__(self, directory, instruments=None):
+class BacktestDataset:
+  def __init__(self, directory, instruments=None, *, history=None):
+    self.history = history
     self.directory = Path(directory)
     self.manifest = TAssistantBacktestStore._read(self.directory / "dataset.json")
     if self.manifest["hash"] != stable_manifest_hash(self.manifest["material"]):
       raise ValueError("BACKTEST_DATA_MANIFEST_CORRUPT")
+    if self.manifest["material"]["schema_version"] != "backtest-tick-dataset.v2":
+      raise ValueError("BACKTEST_DATA_SCHEMA_INVALID")
+    if self.manifest["material"]["storage"] not in {"REFERENCE", "SNAPSHOT"}:
+      raise ValueError("BACKTEST_DATA_STORAGE_INVALID")
     self.instruments = tuple(
-      sorted(instruments or self.manifest["material"]["instruments"])
+      sorted(
+        self.manifest["material"]["instruments"] if instruments is None else instruments
+      )
     )
     if not self.instruments or not set(self.instruments) <= set(
       self.manifest["material"]["instruments"]
@@ -141,9 +168,9 @@ class FrozenBacktestDataset:
     }
 
   def subset(self, instruments):
-    return FrozenBacktestDataset(self.directory, instruments)
+    return BacktestDataset(self.directory, instruments, history=self.history)
 
-  def events(self):
+  async def events(self):
     material = self.manifest["material"]
     if material["status"] == "REFERENCE_REQUIRED":
       raise ValueError("BACKTEST_DATA_REFERENCE_REQUIRED")
@@ -157,15 +184,33 @@ class FrozenBacktestDataset:
       for part in material["parts"]:
         if part["day"] != day or part["code"] not in self.instruments:
           continue
-        path = self.directory / part["file"]
-        if path.parent.resolve() != self.directory.resolve():
-          raise ValueError("BACKTEST_DATA_PART_PATH_INVALID")
-        content = TAssistantBacktestStore._read(path)
+        if material["storage"] == "REFERENCE":
+          if self.history is None:
+            raise ValueError("BACKTEST_HISTORY_READER_REQUIRED")
+          rows_read = []
+          async for page in self.history.iter_tick_pages(
+            stock_code=part["code"],
+            start_time=datetime.combine(date.fromisoformat(day), time.min, SHANGHAI),
+            end_time=datetime.combine(date.fromisoformat(day), time.max, SHANGHAI),
+          ):
+            rows_read.extend(
+              _source_row(tick, material["preserve_raw"]) for tick in page
+            )
+          content = {"rows": rows_read}
+        else:
+          path = self.directory.parent / "objects" / (part["hash"] + ".json")
+          if path.resolve().parent != (self.directory.parent / "objects").resolve():
+            raise ValueError("BACKTEST_DATA_PART_PATH_INVALID")
+          content = TAssistantBacktestStore._read(path)
         if (
           stable_manifest_hash(content) != part["hash"]
           or len(content["rows"]) != part["count"]
         ):
-          raise ValueError("BACKTEST_DATA_PART_CORRUPT")
+          raise ValueError(
+            "BACKTEST_SOURCE_CHANGED"
+            if material["storage"] == "REFERENCE"
+            else "BACKTEST_DATA_PART_CORRUPT"
+          )
         rows.extend(content["rows"])
       rows.sort(key=lambda r: (r["source_time_ms"], r["tick_ordinal"], r["stock_code"]))
       for row in rows:
@@ -196,6 +241,7 @@ async def acquire_backtest_dataset(
   stop_on_error: bool = False,
   on_partition=None,
   preserve_raw: bool = False,
+  freeze: bool = False,
 ):
   """Persist incomplete acquisition evidence without changing the sample range.
 
@@ -212,8 +258,8 @@ async def acquire_backtest_dataset(
     or latency_ms < 0
   ):
     raise ValueError("BACKTEST_DATA_REQUEST_INVALID")
-  directory = Path(root) / str(uuid4())
-  directory.mkdir(parents=True, exist_ok=False)
+  root = Path(root)
+  root.mkdir(parents=True, exist_ok=True)
   days = await calendar.get_trading_calendar(
     market="SH", start_date=start, end_date=end
   )
@@ -221,7 +267,7 @@ async def acquire_backtest_dataset(
     raise ValueError("BACKTEST_CALENDAR_INVALID")
   parts, failures, references = [], [], []
   for day in days:
-    for symbol_index, code in enumerate(sorted(instruments)):
+    for code in sorted(instruments):
       rows, previous = [], None
       missing_references = {}
       reason = None
@@ -232,10 +278,7 @@ async def acquire_backtest_dataset(
           end_time=datetime.combine(day, time.max, SHANGHAI),
         ):
           for tick in page:
-            row = {key: getattr(tick, key) for key in FIELDS}
-            if preserve_raw:
-              row = {key: _archive_value(value) for key, value in row.items()}
-              row["last_close"] = _archive_value(getattr(tick, "last_close", None))
+            row = _source_row(tick, preserve_raw)
             identity = (row["source_time_ms"], row["tick_ordinal"])
             if preserve_raw:
               if (
@@ -314,12 +357,14 @@ async def acquire_backtest_dataset(
           {"day": day.isoformat(), "code": code, "missing_fields": missing_references}
         )
       content = {"rows": rows}
-      filename = f"ticks-{day.isoformat()}-{symbol_index}.json"
-      TAssistantBacktestStore._create(directory / filename, content)
+      content_hash = stable_manifest_hash(content)
+      if freeze:
+        objects = root / "objects"
+        objects.mkdir(exist_ok=True)
+        _publish_shared(objects / (content_hash + ".json"), content)
       times = [r["source_time_ms"] for r in rows]
       parts.append(
         {
-          "file": filename,
           "day": day.isoformat(),
           "code": code,
           "count": len(rows),
@@ -339,7 +384,8 @@ async def acquire_backtest_dataset(
     if reason and stop_on_error:
       break
   material = {
-    "schema_version": "backtest-tick-dataset.v1",
+    "schema_version": "backtest-tick-dataset.v2",
+    "storage": "SNAPSHOT" if freeze else "REFERENCE",
     "source_version": source_version,
     "instruments": sorted(instruments),
     "start": start.isoformat(),
@@ -360,8 +406,10 @@ async def acquire_backtest_dataset(
     "strategy_sample_approval": "NOT_CONFIRMED",
     "unattempted_partitions": len(days) * len(instruments) - len(parts),
   }
-  TAssistantBacktestStore._create(
+  directory = root / stable_manifest_hash(material)
+  directory.mkdir(exist_ok=True)
+  _publish_shared(
     directory / "dataset.json",
     {"material": material, "hash": stable_manifest_hash(material)},
   )
-  return FrozenBacktestDataset(directory)
+  return BacktestDataset(directory, history=history)

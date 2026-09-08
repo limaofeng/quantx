@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from quantx_engine.t_assistant_backtest_data import (
-  FrozenBacktestDataset,
+  BacktestDataset,
   acquire_backtest_dataset,
 )
 from quantx_engine.t_assistant_backtest_evaluation import (
@@ -69,6 +69,7 @@ async def acquire(tmp_path, history):
     end=date(2026, 9, 3),
     root=tmp_path,
     latency_ms=0,
+    freeze=True,
   )
 
 
@@ -77,16 +78,20 @@ async def test_acquisition_to_real_rule_only_shared_runtime(tmp_path):
   dataset = await acquire(tmp_path, history)
   assert len(history.calls) == 2
   assert dataset.manifest["material"]["status"] == "FROZEN"
-  events = list(dataset.events())
+  events = [event async for event in dataset.events()]
   assert len(events) == len(ticks())
   run = runtime()
   await run.run(events)
   assert len(run.broker.orders) == 4
   assert all(p.remaining_volume == 0 for p in run.plans.plans.values())
-  part = dataset.directory / dataset.manifest["material"]["parts"][0]["file"]
+  part = (
+    dataset.directory.parent
+    / "objects"
+    / (dataset.manifest["material"]["parts"][0]["hash"] + ".json")
+  )
   part.write_text(json.dumps({"rows": []}), encoding="utf-8")
   with pytest.raises(ValueError, match="PART_CORRUPT"):
-    list(FrozenBacktestDataset(dataset.directory).events())
+    [event async for event in BacktestDataset(dataset.directory).events()]
 
 
 async def test_missing_depth_retains_failure_and_cannot_replay(tmp_path):
@@ -94,7 +99,7 @@ async def test_missing_depth_retains_failure_and_cannot_replay(tmp_path):
   assert dataset.manifest["material"]["status"] == "INCOMPLETE"
   assert len(dataset.manifest["material"]["failures"]) == 2
   with pytest.raises(ValueError, match="ACQUISITION_INCOMPLETE"):
-    list(dataset.events())
+    [event async for event in dataset.events()]
 
 
 async def test_source_failure_preserves_partial_data_without_connection_details(

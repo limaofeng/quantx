@@ -1066,6 +1066,31 @@ runtime。P1 运行证据、owner 空值=`0`、快照
   阻碍：69个缓存缺口、历史执行参考字段缺失、补采请求未返回；正式回测/准入未运行，P5仍
   IN_PROGRESS、P6阻断。未启停服务、未执行真实交易，其他工作树改动保留。
 
+### P5 数据引用与手动获取交接（2026-09-08）
+
+- 用户要求先改造重复存储并完善程序取数，随后自行在现有 UI 获取数据，完成后再验收 P5。
+  本轮未查询或补采真实行情、未触发下载任务、未启停服务；11标的/2026年8月范围不变。
+- `BacktestDataset` / dataset v2 默认 REFERENCE：仅保存数据源、分区范围、条数、hash、
+  参考字段缺失和完整性证据。按日从 HistoricalMarketDataService 异步分页读取，校验整日所有
+  入选分区后才交给公共回测链路；源变化报 BACKTEST_SOURCE_CHANGED。相同清单复用目录。
+- CLI `ops/t-assistant-backtest-data.py` 默认不导出行情正文；显式 `--freeze` 才保存共享
+  `objects/<content-hash>.json`，重叠数据集与多次 execution 复用同一分区。旧 v1 归档保留作
+  历史证据，不新增兼容读取；引用模式源数据变更后不能恢复旧内容，需重新盘点生成新版本。
+- 现有 `/settings/data/market-data` → daily-market-data-sync → durable Agent 请求 →
+  InfluxDB 路径继续使用。修复长区间 Tick 只拆标的仍超单次记录预算的问题：Tick 按交易日、
+  单标的拆分（同时选择的1d/1m同范围），维持两请求并发及稳定幂等批次。核对每标的/周期
+  入库摘要，空 Tick 不能被非空日线掩盖；错误保留日期、标的和请求ID，失败请求不自动重开。
+- UI 使用“手工代码”填写11标的、2026-08-01～2026-08-31、选择 Tick；仅取行情时关闭
+  日级指标计算（8月31个自然日超过该功能的30天补算限制）。源历史可用范围仍由供应端决定，
+  获取成功只代表返回数据已入库，不证明全天覆盖或历史涨跌停/最小价位等执行参考字段齐全。
+- 验证：数据获取/评估原有17项通过；引用重放、快照复用、公共回测边界与 Worker 扩展回归
+  84项通过；审核修正与新增边界10项通过，UI表单/标的范围7项通过，Ruff/定向ESLint通过。证据见
+  `.codex_screenshots/p5-data-reference-tests.log`、`p5-reference-regression.log`、
+  `p5-data-review-fixes.log`、`p5-data-ui-tests.log`。
+- 提交：本检查点所在 `refactor(backtest): reference persisted data and bound tick acquisition`。
+  P5保持IN_PROGRESS；待用户手动获取后重新盘点缺口、补齐历史执行参考数据并执行正式评估。
+  策略准入阈值仍未确认，P6继续阻断，不把本次工程改造算作策略验收通过。
+
 ## 11. 变更记录
 
 2026-09-07 补丁复盘整改：行情缓存及消费水位仅在来源校验和 lineage 装饰完成后发布，
