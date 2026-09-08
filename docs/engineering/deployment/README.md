@@ -191,6 +191,9 @@ QuantX 管理的进程。
 
 ## 验收
 
+历史补数性能排查与优化交接见
+[2026-09-08 历史补数慢诊断报告](HISTORY_BACKFILL_PERFORMANCE_DIAGNOSIS_20260908.md)。
+
 ```powershell
 .\.runtime\tools\caddy\caddy.exe validate `
   --config .\ops\caddy\Caddyfile.production --adapter caddyfile
