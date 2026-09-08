@@ -799,10 +799,14 @@ class HistoricalMarketDataService:
     """保存单条K线数据"""
     return self.kline_repo.save(kline)
 
-  def bulk_save_klines(self, period: str, klines: pd.DataFrame) -> int:
-    """保存K线数据"""
+  def bulk_save_klines(
+    self, period: str, klines: pd.DataFrame, *, batch_size: int = 5000
+  ) -> int:
+    """保存K线数据；调用方可传入已验证且受字节预算约束的写入批量。"""
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+      raise ValueError("K-line write batch_size must be a positive integer")
     return self.kline_repo.bulk_save(
-      measurement=f"kline_{period}", records=klines, batch_size=5000
+      measurement=f"kline_{period}", records=klines, batch_size=batch_size
     )
 
   def save_tick(self, tick: Tick) -> Tick:

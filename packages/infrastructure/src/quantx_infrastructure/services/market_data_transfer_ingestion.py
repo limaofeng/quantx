@@ -48,6 +48,8 @@ from quantx_infrastructure.services.market_data_staging import (
   safe_market_data_staging_file,
 )
 
+from .market_data_timing import market_data_request_id, market_data_stage
+
 logger = logging.getLogger(__name__)
 
 _MARKET_DATA_REQUEST_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -62,7 +64,9 @@ MAX_TRANSFER_REQUEST_COMPRESSED_BYTES = 256 * 1024 * 1024
 MAX_TRANSFER_REQUEST_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_TRANSFER_REQUEST_RECORDS = 500_000
 MAX_TRANSFER_REQUEST_CODES = 300
-MARKET_DATA_WRITE_BATCH_RECORDS = 2000
+MARKET_DATA_WRITE_BATCH_RECORDS = 10_000
+MARKET_DATA_TICK_WRITE_BATCH_RECORDS = 2000
+MARKET_DATA_READBACK_KEY_BATCH_RECORDS = 2000
 MARKET_DATA_WRITE_BATCH_BYTES = 8 * 1024 * 1024
 MARKET_DATA_CLAIM_RENEW_SECONDS = 60.0
 
@@ -993,13 +997,18 @@ def _save_market_data_period_sync(
   period: str,
   market_data: dict[str, pd.DataFrame],
 ) -> dict[str, Any]:
-  normalized = preprocess_market_data(period, market_data)
+  with market_data_stage("batch_preprocess", period=period):
+    normalized = preprocess_market_data(period, market_data)
   service = HistoricalMarketDataService()
-  accepted = (
-    service.bulk_save_ticks(normalized)
-    if period == "tick"
-    else service.bulk_save_klines(period, normalized)
-  )
+  # Includes the SDK serialization and synchronous database confirmation.
+  with market_data_stage("batch_write_call", period=period, records=len(normalized)):
+    accepted = (
+      service.bulk_save_ticks(normalized)
+      if period == "tick"
+      else service.bulk_save_klines(
+        period, normalized, batch_size=MARKET_DATA_WRITE_BATCH_RECORDS
+      )
+    )
   return {
     "period": period,
     "saved_count": accepted,
@@ -1013,11 +1022,23 @@ async def save_market_data_period(
   period: str,
   market_data: dict[str, pd.DataFrame],
 ) -> dict[str, Any]:
-  return await asyncio.to_thread(
-    _save_market_data_period_sync,
-    period=period,
-    market_data=market_data,
+  task = asyncio.create_task(
+    asyncio.to_thread(
+      _save_market_data_period_sync,
+      period=period,
+      market_data=market_data,
+    )
   )
+  try:
+    return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    # A sent synchronous write has an unknown outcome until the SDK returns.
+    # Join that bounded call before the ingestion claim can be released.
+    try:
+      await asyncio.shield(task)
+    except Exception:
+      pass
+    raise
 
 
 async def _iterate_record_chunks(
@@ -1070,7 +1091,7 @@ async def _uploaded_key_batches(
           (int(record[HISTORICAL_TICK_ORDINAL_FIELD]) if group[1] == "tick" else None),
         )
       )
-      if len(keys) >= MARKET_DATA_WRITE_BATCH_RECORDS:
+      if len(keys) >= MARKET_DATA_READBACK_KEY_BATCH_RECORDS:
         code, period = current_group
         yield ExpectedBarKeyBatch(
           code=code,
@@ -1145,7 +1166,12 @@ async def _persist_validated_records(
         )
       if batch and (
         batch_period != period
-        or len(batch) >= MARKET_DATA_WRITE_BATCH_RECORDS
+        or len(batch)
+        >= (
+          MARKET_DATA_TICK_WRITE_BATCH_RECORDS
+          if period == "tick"
+          else MARKET_DATA_WRITE_BATCH_RECORDS
+        )
         or batch_bytes + encoded_size > MARKET_DATA_WRITE_BATCH_BYTES
       ):
         await flush()
@@ -1205,55 +1231,63 @@ async def ingest_uploaded_bar_request(
   save_period: SaveMarketData = save_market_data_period,
   verify_persistence: VerifyPersistence | None = None,
 ) -> dict[str, Any]:
-  _, payload, manifest = await load_uploaded_request_manifest(store, request_id)
-  audit = await asyncio.to_thread(_validate_bar_manifest, manifest, payload)
+  token = market_data_request_id.set(request_id)
+  try:
+    _, payload, manifest = await load_uploaded_request_manifest(store, request_id)
+    with market_data_stage("manifest_validation"):
+      audit = await asyncio.to_thread(_validate_bar_manifest, manifest, payload)
 
-  async def read_chunks() -> AsyncIterable[list[dict[str, Any]]]:
-    budget = _TransferBudget()
-    for item in manifest:
-      yield await asyncio.to_thread(_read_transfer_chunk, item, budget)
+    async def read_chunks() -> AsyncIterable[list[dict[str, Any]]]:
+      budget = _TransferBudget()
+      for item in manifest:
+        yield await asyncio.to_thread(_read_transfer_chunk, item, budget)
 
-  persisted = await _persist_validated_records(
-    read_chunks(),
-    payload=payload,
-    expected_audit=audit,
-    save_period=save_period,
-  )
-  scope = _parse_bars_request(payload)
-  verifier = verify_persistence or verify_persisted_bar_summaries
-  verification = await verifier(
-    code_summaries=audit["code_summaries"],
-    expected_key_batches=_uploaded_key_batches(manifest),
-    start_ms=scope.start_ms,
-    end_exclusive_ms=scope.end_exclusive_ms,
-  )
-  records_verified = int(verification.get("records_verified", -1))
-  summary_fields = (
-    "code",
-    "period",
-    "row_count",
-    "min_time",
-    "max_time",
-    "key_sha256",
-  )
-  expected_verified_summaries = [
-    {field: summary.get(field) for field in summary_fields}
-    for summary in audit["code_summaries"]
-  ]
-  if (
-    verification.get("status") != "verified"
-    or records_verified != int(audit["records_received"])
-    or int(verification.get("groups_verified", -1)) != len(expected_verified_summaries)
-    or verification.get("code_summaries") != expected_verified_summaries
-  ):
-    raise MarketDataPersistenceVerificationError(
-      "Influx persistence verification did not prove every accepted row"
+    with market_data_stage("persist"):
+      persisted = await _persist_validated_records(
+        read_chunks(),
+        payload=payload,
+        expected_audit=audit,
+        save_period=save_period,
+      )
+    scope = _parse_bars_request(payload)
+    verifier = verify_persistence or verify_persisted_bar_summaries
+    with market_data_stage("readback"):
+      verification = await verifier(
+        code_summaries=audit["code_summaries"],
+        expected_key_batches=_uploaded_key_batches(manifest),
+        start_ms=scope.start_ms,
+        end_exclusive_ms=scope.end_exclusive_ms,
+      )
+    records_verified = int(verification.get("records_verified", -1))
+    summary_fields = (
+      "code",
+      "period",
+      "row_count",
+      "min_time",
+      "max_time",
+      "key_sha256",
     )
-  return {
-    **persisted,
-    "records_verified": records_verified,
-    "persistence_verification": verification,
-  }
+    expected_verified_summaries = [
+      {field: summary.get(field) for field in summary_fields}
+      for summary in audit["code_summaries"]
+    ]
+    if (
+      verification.get("status") != "verified"
+      or records_verified != int(audit["records_received"])
+      or int(verification.get("groups_verified", -1))
+      != len(expected_verified_summaries)
+      or verification.get("code_summaries") != expected_verified_summaries
+    ):
+      raise MarketDataPersistenceVerificationError(
+        "Influx persistence verification did not prove every accepted row"
+      )
+    return {
+      **persisted,
+      "records_verified": records_verified,
+      "persistence_verification": verification,
+    }
+  finally:
+    market_data_request_id.reset(token)
 
 
 async def ingest_uploaded_market_data_request(
@@ -1385,6 +1419,11 @@ async def claim_ingest_and_finish_market_data_request(
       )
     return {"status": "completed", "request_id": request_id, **ingestion}
   except asyncio.CancelledError:
+    # Keep the claim while the bounded read-back worker closes its reader.
+    # Releasing first permits a second ingester to race the cancelled one.
+    if ingestion_task is not None and not ingestion_task.done():
+      ingestion_task.cancel()
+      await asyncio.shield(asyncio.gather(ingestion_task, return_exceptions=True))
     # Cancellation is not evidence that the immutable transfer is invalid.
     try:
       await asyncio.shield(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,11 @@ from quantx_contracts import (
 
 from quantx_infrastructure.database.timeseries import get_timeseries_connection
 
+from .market_data_timing import market_data_stage
+
 MARKET_DATA_READBACK_PAGE_ROWS = 2000
+MARKET_DATA_READBACK_GROUP_CODES = 20
+MARKET_DATA_READBACK_GROUP_KEYS = 10_000
 MARKET_DATA_READBACK_MAX_ATTEMPTS = 4
 MARKET_DATA_READBACK_RETRY_DELAYS_SECONDS = (0.25, 0.75, 1.5)
 
@@ -100,16 +105,15 @@ def _utc_datetime(value: Any) -> datetime:
 
 def _epoch_millis(value: datetime) -> int:
   delta = value - _UTC_EPOCH
-  return (
-    (delta.days * 86_400 + delta.seconds) * 1000
-    + delta.microseconds // 1000
-  )
+  return (delta.days * 86_400 + delta.seconds) * 1000 + delta.microseconds // 1000
 
 
 def _sql_timestamp(value: datetime) -> str:
-  return value.astimezone(timezone.utc).isoformat(
-    timespec="microseconds"
-  ).replace("+00:00", "Z")
+  return (
+    value.astimezone(timezone.utc)
+    .isoformat(timespec="microseconds")
+    .replace("+00:00", "Z")
+  )
 
 
 def _integer(value: Any, *, field: str) -> int:
@@ -169,9 +173,7 @@ def _query_page_sql(
     if period == "tick"
     else "time"
   )
-  after_clause = (
-    f"AND time > '{_sql_timestamp(after)}' " if after is not None else ""
-  )
+  after_clause = f"AND time > '{_sql_timestamp(after)}' " if after is not None else ""
   return (
     f"SELECT {fields} FROM {measurement} "
     "WHERE stock_code = $stock_code AND period = $period "
@@ -208,6 +210,7 @@ def _read_expected_key_batch_once(
   batch: ExpectedBarKeyBatch,
   connection: _InfluxConnection | None,
   page_rows: int,
+  cancelled: threading.Event | None = None,
 ) -> dict[str, int]:
   """Prove uploaded keys are present while tolerating pre-existing points."""
 
@@ -271,12 +274,14 @@ def _read_expected_key_batch_once(
           after=after,
           limit=page_rows,
         )
-        reader = client.query(
-          query=sql,
-          language="sql",
-          mode="reader",
-          query_parameters={"stock_code": code, "period": period},
-        )
+        _check_readback_cancelled(cancelled)
+        with market_data_stage("read_query_open"):
+          reader = client.query(
+            query=sql,
+            language="sql",
+            mode="reader",
+            query_parameters={"stock_code": code, "period": period},
+          )
         if reader is None:
           raise MarketDataPersistenceQueryError(
             f"Influx read-back returned no reader for {code}/{period}"
@@ -291,6 +296,7 @@ def _read_expected_key_batch_once(
               f"{code}/{period}: {sorted(missing_columns)}"
             )
           for arrow_batch in reader:
+            _check_readback_cancelled(cancelled)
             if page_count + arrow_batch.num_rows > page_rows:
               raise MarketDataPersistenceQueryError(
                 f"Influx read-back exceeded its {page_rows}-row page bound"
@@ -396,6 +402,158 @@ def _read_expected_key_batch_once(
   }
 
 
+def _check_readback_cancelled(cancelled: threading.Event | None) -> None:
+  if cancelled is not None and cancelled.is_set():
+    raise MarketDataPersistenceQueryError("market-data read-back was cancelled")
+
+
+async def _await_readback(function: Callable[..., Any], **kwargs: Any) -> Any:
+  cancelled = threading.Event()
+  task = asyncio.create_task(asyncio.to_thread(function, cancelled=cancelled, **kwargs))
+  try:
+    with market_data_stage("read_query_and_validate"):
+      return await asyncio.shield(task)
+  except asyncio.CancelledError:
+    cancelled.set()
+    try:
+      await asyncio.shield(task)
+    except Exception:
+      pass
+    raise
+
+
+def _read_expected_key_group_once(
+  *,
+  batches: Sequence[ExpectedBarKeyBatch],
+  connection: _InfluxConnection | None,
+  page_rows: int,
+  cancelled: threading.Event | None = None,
+) -> dict[str, int]:
+  if not 1 <= page_rows <= MARKET_DATA_READBACK_PAGE_ROWS:
+    raise ValueError("invalid bounded read-back page size")
+  if not 1 <= len(batches) <= MARKET_DATA_READBACK_GROUP_CODES:
+    raise ValueError("invalid bounded read-back group size")
+  if sum(len(batch.keys) for batch in batches) > MARKET_DATA_READBACK_GROUP_KEYS:
+    raise ValueError("read-back group exceeds expected key limit")
+  period = batches[0].period
+  if period == "tick" or period not in _MEASUREMENTS:
+    raise ValueError("grouped read-back requires a supported K-line period")
+  expected: dict[str, list[datetime]] = {}
+  bounds: dict[str, tuple[datetime, datetime]] = {}
+  params: dict[str, str] = {"period": period}
+  predicates = []
+  for index, batch in enumerate(batches):
+    code = str(batch.code)
+    if batch.period != period or code in expected:
+      raise ValueError("read-back group requires unique codes in one period")
+    if not batch.keys or len(batch.keys) > MARKET_DATA_READBACK_PAGE_ROWS:
+      raise ValueError("invalid expected key batch size")
+    values = []
+    for source_time_ms, ordinal in batch.keys:
+      if isinstance(source_time_ms, bool) or not isinstance(source_time_ms, int):
+        raise ValueError("invalid expected key time")
+      value = _storage_time_for_key(
+        period=period, source_time_ms=source_time_ms, tick_ordinal=ordinal
+      )
+      if values and value <= values[-1]:
+        raise ValueError("expected keys are unordered or duplicated")
+      values.append(value)
+    expected[code] = values
+    start, end = values[0], values[-1] + timedelta(microseconds=1)
+    bounds[code] = (start, end)
+    params[f"code_{index}"] = code
+    predicates.append(
+      f"(stock_code = $code_{index} AND time >= '{_sql_timestamp(start)}' AND time < '{_sql_timestamp(end)}')"
+    )
+  resolved = connection or get_timeseries_connection()
+  if resolved is None:
+    raise MarketDataPersistenceQueryError("InfluxDB is unavailable for read-back")
+  indices = dict.fromkeys(expected, 0)
+  after: tuple[str, datetime] | None = None
+  extras = 0
+  try:
+    _check_readback_cancelled(cancelled)
+    with resolved.get_client() as client:
+      while any(indices[code] < len(keys) for code, keys in expected.items()):
+        _check_readback_cancelled(cancelled)
+        cursor = ""
+        if after is not None:
+          params["after_code"] = after[0]
+          cursor = f"AND (stock_code > $after_code OR (stock_code = $after_code AND time > '{_sql_timestamp(after[1])}')) "
+        sql = (
+          f"SELECT stock_code,time FROM {_MEASUREMENTS[period]} WHERE period = $period "
+          f"AND ({' OR '.join(predicates)}) {cursor}ORDER BY stock_code ASC,time ASC LIMIT {page_rows}"
+        )
+        with market_data_stage("read_query_open"):
+          reader = client.query(
+            query=sql, language="sql", mode="reader", query_parameters=dict(params)
+          )
+        if reader is None:
+          raise MarketDataPersistenceQueryError("grouped read-back returned no reader")
+        count = 0
+        try:
+          if not {"stock_code", "time"}.issubset(reader.schema.names):
+            raise MarketDataPersistenceQueryError(
+              "grouped read-back is missing required columns"
+            )
+          for arrow_batch in reader:
+            _check_readback_cancelled(cancelled)
+            if count + arrow_batch.num_rows > page_rows:
+              raise MarketDataPersistenceQueryError(
+                "grouped read-back exceeded page bound"
+              )
+            codes = arrow_batch.column(arrow_batch.schema.get_field_index("stock_code"))
+            times = arrow_batch.column(arrow_batch.schema.get_field_index("time"))
+            for i in range(arrow_batch.num_rows):
+              code = codes[i].as_py()
+              value = _utc_datetime(times[i].as_py())
+              if code not in expected:
+                raise MarketDataPersistenceQueryError(
+                  "grouped read-back returned an unrequested code"
+                )
+              key = (code, value)
+              if after is not None and key <= after:
+                raise MarketDataPersistenceQueryError(
+                  "grouped read-back did not advance"
+                )
+              if not bounds[code][0] <= value < bounds[code][1]:
+                raise MarketDataPersistenceQueryError(
+                  "grouped read-back escaped key bounds"
+                )
+              position = indices[code]
+              if position < len(expected[code]):
+                wanted = expected[code][position]
+                if value > wanted:
+                  raise MarketDataPersistenceMismatchError(
+                    "grouped read-back is missing an uploaded key"
+                  )
+                if value == wanted:
+                  indices[code] += 1
+                else:
+                  extras += 1
+              else:
+                extras += 1
+              after = key
+              count += 1
+        finally:
+          close = getattr(reader, "close", None)
+          if callable(close):
+            close()
+        if count < page_rows:
+          break
+  except MarketDataPersistenceVerificationError:
+    raise
+  except Exception as exc:
+    raise MarketDataPersistenceQueryError(
+      f"grouped read-back query failed: {type(exc).__name__}"
+    ) from exc
+  if any(indices[code] != len(keys) for code, keys in expected.items()):
+    raise MarketDataPersistenceMismatchError(
+      "grouped read-back is missing an uploaded key"
+    )
+  return {"records_verified": sum(indices.values()), "existing_rows_observed": extras}
+
+
 def _read_group_once(
   *,
   expected: dict[str, Any],
@@ -403,6 +561,7 @@ def _read_group_once(
   end_exclusive_ms: int,
   connection: _InfluxConnection | None,
   page_rows: int,
+  cancelled: threading.Event | None = None,
 ) -> dict[str, Any]:
   if page_rows < 1 or page_rows > MARKET_DATA_READBACK_PAGE_ROWS:
     raise ValueError(
@@ -444,12 +603,14 @@ def _read_group_once(
           after=after,
           limit=limit,
         )
-        reader = client.query(
-          query=sql,
-          language="sql",
-          mode="reader",
-          query_parameters={"stock_code": code, "period": period},
-        )
+        _check_readback_cancelled(cancelled)
+        with market_data_stage("read_query_open"):
+          reader = client.query(
+            query=sql,
+            language="sql",
+            mode="reader",
+            query_parameters={"stock_code": code, "period": period},
+          )
         if reader is None:
           raise MarketDataPersistenceQueryError(
             f"Influx read-back returned no reader for {code}/{period}"
@@ -571,9 +732,7 @@ async def verify_persisted_bar_summaries(
 
   if max_attempts < 1:
     raise ValueError("max_attempts must be positive")
-  if len(retry_delays) != max_attempts - 1 or any(
-    delay < 0 for delay in retry_delays
-  ):
+  if len(retry_delays) != max_attempts - 1 or any(delay < 0 for delay in retry_delays):
     raise ValueError("retry_delays must contain one non-negative delay per retry")
   expected_summaries = [_expected_summary(summary) for summary in code_summaries]
   pairs = [(item["code"], item["period"]) for item in expected_summaries]
@@ -581,8 +740,7 @@ async def verify_persisted_bar_summaries(
     raise ValueError("market-data persistence summaries contain duplicate groups")
 
   summary_by_pair = {
-    (str(item["code"]), str(item["period"])): item
-    for item in expected_summaries
+    (str(item["code"]), str(item["period"])): item for item in expected_summaries
   }
   pair_order = {pair: index for index, pair in enumerate(pairs)}
   observed: dict[tuple[str, str], dict[str, Any]] = {
@@ -598,6 +756,42 @@ async def verify_persisted_bar_summaries(
   attempts_by_group: dict[str, int] = {}
   existing_rows_observed = 0
   last_pair_index = -1
+
+  pending: list[ExpectedBarKeyBatch] = []
+
+  async def flush_pending() -> None:
+    nonlocal existing_rows_observed
+    if not pending:
+      return
+    for attempt in range(1, max_attempts + 1):
+      try:
+        if len(pending) == 1:
+          result = await _await_readback(
+            _read_expected_key_batch_once,
+            batch=pending[0],
+            connection=connection,
+            page_rows=page_rows,
+          )
+        else:
+          result = await _await_readback(
+            _read_expected_key_group_once,
+            batches=tuple(pending),
+            connection=connection,
+            page_rows=page_rows,
+          )
+      except MarketDataPersistenceVerificationError:
+        if attempt == max_attempts:
+          raise
+        await sleep(float(retry_delays[attempt - 1]))
+      else:
+        existing_rows_observed += int(result["existing_rows_observed"])
+        for item in pending:
+          group_name = f"{item.code}/{item.period}"
+          attempts_by_group[group_name] = max(
+            attempts_by_group.get(group_name, 0), attempt
+          )
+        pending.clear()
+        return
 
   async for batch in expected_key_batches:
     if not isinstance(batch, ExpectedBarKeyBatch):
@@ -640,30 +834,19 @@ async def verify_persisted_bar_summaries(
       state["max_time"] = source_time_ms
       state["last_storage_time"] = storage_time
 
-    last_error: MarketDataPersistenceVerificationError | None = None
-    for attempt in range(1, max_attempts + 1):
-      try:
-        result = await asyncio.to_thread(
-          _read_expected_key_batch_once,
-          batch=batch,
-          connection=connection,
-          page_rows=page_rows,
-        )
-      except MarketDataPersistenceVerificationError as exc:
-        last_error = exc
-      else:
-        existing_rows_observed += int(result["existing_rows_observed"])
-        group_name = f"{pair[0]}/{pair[1]}"
-        attempts_by_group[group_name] = max(
-          attempt,
-          attempts_by_group.get(group_name, 0),
-        )
-        break
-      if attempt < max_attempts:
-        await sleep(float(retry_delays[attempt - 1]))
-    else:
-      assert last_error is not None
-      raise last_error
+    if pending and (
+      batch.period == "tick"
+      or pending[0].period != batch.period
+      or any(item.code == batch.code for item in pending)
+      or len(pending) >= MARKET_DATA_READBACK_GROUP_CODES
+      or sum(len(item.keys) for item in pending) + len(batch.keys)
+      > MARKET_DATA_READBACK_GROUP_KEYS
+    ):
+      await flush_pending()
+    pending.append(batch)
+    if batch.period == "tick":
+      await flush_pending()
+  await flush_pending()
 
   for expected in expected_summaries:
     pair = (str(expected["code"]), str(expected["period"]))
@@ -688,7 +871,7 @@ async def verify_persisted_bar_summaries(
     last_error = None
     for attempt in range(1, max_attempts + 1):
       try:
-        existing = await asyncio.to_thread(
+        existing = await _await_readback(
           _read_group_once,
           expected=expected,
           start_ms=start_ms,
