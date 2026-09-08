@@ -77,7 +77,7 @@ cp ops/config/development.env.example apps/api/.env.development
 开发 InfluxDB Core 查询按短时间窗口分批，避免其约 72 小时的单次查询范围限制。
 
 ```bash
-ENV=development conda run -n quantx python -m alembic -c packages/infrastructure/alembic.ini upgrade head
+ENV=development conda run -n quantx python -m alembic -c alembic.ini upgrade head
 PREFECT_API_URL=http://127.0.0.1:4200/api conda run -n quantx python -m prefect work-pool create quantx-dev-pool --type process
 ./ops/quantx.sh doctor --environment dev
 ./ops/quantx.sh up --environment dev --profile full --mode paper

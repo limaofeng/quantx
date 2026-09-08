@@ -37,6 +37,10 @@ EXPECTED_METADATA_SHA256 = (
 # Models added by revisions after this immutable baseline must not affect its
 # fingerprint or be created early when bootstrapping an empty database.
 POST_BASELINE_TABLES = {
+  "research_preparation_settings",
+  "research_preparation_jobs",
+  "market_data_sync_partition",
+  "development_data_export",
   "paper_execution_accounts",
   "paper_execution_events",
   "paper_execution_orders",
@@ -129,6 +133,7 @@ POST_BASELINE_COLUMNS = {
     "replaces_device_id",
   },
   "market_data_request": {
+    "development_only",
     "ingestion_result",
     "processing_claim_token",
   },
