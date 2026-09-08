@@ -73,3 +73,43 @@ def test_snapshot_preserves_capture_time_and_gap_forces_resync(monkeypatch):
       with pytest.raises(WebSocketDisconnect):
         socket.receive_bytes()
   assert not api._stream_connection.locked()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_releases_connection_without_waiting_for_market(monkeypatch):
+  class Subscription:
+    async def messages(self):
+      await asyncio.Event().wait()
+      yield b""
+
+    close = AsyncMock()
+
+  subscription = Subscription()
+  monkeypatch.setattr(api, "_stream_connection", asyncio.Lock())
+  monkeypatch.setattr(api, "authorized", lambda _: True)
+  monkeypatch.setattr(
+    api.market_stream_store, "open_subscription", AsyncMock(return_value=subscription)
+  )
+  monkeypatch.setattr(
+    api.market_stream_store,
+    "load_snapshot",
+    AsyncMock(
+      return_value=(
+        SimpleNamespace(
+          stream_id="source", sequence=1, captured_at=datetime.now(timezone.utc)
+        ),
+        {"600000.SH": {"time": 1}},
+      )
+    ),
+  )
+  socket = SimpleNamespace(
+    headers={},
+    accept=AsyncMock(),
+    receive_json=AsyncMock(return_value={"instruments": ["600000.SH"]}),
+    send_bytes=AsyncMock(),
+    receive=AsyncMock(return_value={"type": "websocket.disconnect"}),
+    close=AsyncMock(),
+  )
+  await asyncio.wait_for(api.stream(socket), timeout=1)
+  assert not api._stream_connection.locked()
+  subscription.close.assert_awaited_once()

@@ -249,10 +249,10 @@ async def dispatch_once() -> dict:
                 persisted_partition,
               )
 
-              rows = await persisted_partition(
+              persisted_rows = await persisted_partition(
                 request, source.get("ingestion_result") or {}
               )
-              records = partition_records([rows], request)
+              records = partition_records([persisted_rows], request)
             validate_bar_records_against_request(records, payload)
             chunks = await asyncio.to_thread(publish, records)
             reference = await export_reference(request.instrument, request.trading_date)

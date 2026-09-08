@@ -149,6 +149,7 @@ async def stream(socket: WebSocket) -> None:
   await _stream_connection.acquire()
   subscription = None
   reader = None
+  disconnected = None
   try:
     await socket.accept()
     async with asyncio.timeout(5):
@@ -190,13 +191,27 @@ async def stream(socket: WebSocket) -> None:
     )
     async with asyncio.timeout(5):
       await socket.send_bytes(batch.to_bytes())
+    disconnected = asyncio.create_task(socket.receive())
     sequence = state.sequence
     while True:
-      if reader.done():
-        await reader
-        raise ValueError("Source subscription ended")
-      async with asyncio.timeout(10):
-        payload = await queue.get()
+      next_payload = asyncio.create_task(queue.get())
+      try:
+        done, _ = await asyncio.wait(
+          {next_payload, reader, disconnected},
+          timeout=10,
+          return_when=asyncio.FIRST_COMPLETED,
+        )
+        if disconnected in done:
+          raise WebSocketDisconnect()
+        if reader in done:
+          await reader
+          raise ValueError("Source subscription ended")
+        if next_payload not in done:
+          raise TimeoutError()
+        payload = next_payload.result()
+      finally:
+        next_payload.cancel()
+        await asyncio.gather(next_payload, return_exceptions=True)
       queued_bytes -= len(payload)
       source = MarketStreamBatch.from_bytes(payload)
       if source.stream_id != state.stream_id:
@@ -216,6 +231,9 @@ async def stream(socket: WebSocket) -> None:
         code=1013, reason="Market stream unavailable; reconnect and resync"
       )
   finally:
+    if disconnected:
+      disconnected.cancel()
+      await asyncio.gather(disconnected, return_exceptions=True)
     if reader:
       reader.cancel()
       await asyncio.gather(reader, return_exceptions=True)

@@ -24,13 +24,17 @@ foreach ($argumentValue in $ToolArguments) {
 }
 
 $previousWslEnv = $env:WSLENV
+$previousConnectTimeout = $env:PGCONNECT_TIMEOUT
 try {
+  $env:PGCONNECT_TIMEOUT = "10"
   $wslVariables = @(
     "PGPASSWORD",
+    "PGCONNECT_TIMEOUT",
     @($previousWslEnv -split ":" | Where-Object { $_ })
   ) | Select-Object -Unique
   $env:WSLENV = $wslVariables -join ":"
   & wsl.exe $Tool @translated
 } finally {
   $env:WSLENV = $previousWslEnv
+  $env:PGCONNECT_TIMEOUT = $previousConnectTimeout
 }
