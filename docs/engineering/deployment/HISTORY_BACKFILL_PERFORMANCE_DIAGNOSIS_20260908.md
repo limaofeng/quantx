@@ -667,6 +667,9 @@ CPU 峰值 115.49%、内存峰值 8.53%/16 GiB；完整复测后另外检查健�
 cache_visibility_retry，可能与非空占位行被过滤有关；未保留原始 XTData 帧，根因尚不能确认。
 这是 QMT 源读取路径需要单独定位的现存风险，本次未修改 Agent，也不声称重试已修复该风险。
 
+新任务交接见 [QMT 历史分钟线偶发缺数问题记录](../qmt-agent/HISTORY_SOURCE_MISSING_BARS_HANDOFF_20260908.md)，
+包含请求 ID、证据、待验证假设及后续验收条件。
+
 完整验收证据：`.runtime/history-concurrent-stage-production-batch1.json`、
 `history-concurrent-stage-production-batch2.json`、`history-concurrent-stage-production-redownload_code.json`、
 `history-concurrent-stage-production-pipe1.json`，对应 `history-concurrent-stage-summary-*.json` 保存阶段分解；
