@@ -20,7 +20,7 @@
 			@docs_root path /docs
 			redir @docs_root /docs/ 308
 
-			@market_gateway path /ws/agent/market
+			@market_gateway path /ws/agent/market /market-data/*
 			reverse_proxy @market_gateway 127.0.0.1:18082
 
 			@private_observation path /monitor/internal/* /internal/monitor/*
@@ -29,7 +29,7 @@
 			@monitor path /monitor/*
 			reverse_proxy @monitor 127.0.0.1:18083
 
-			@api path /graphql* /auth* /health* /metrics* /ws/agent* /agent/* /market-data-sync/*
+			@api path /runtime/environment /graphql* /auth* /health* /metrics* /ws/agent* /agent/* /market-data-sync/*
 			reverse_proxy @api 127.0.0.1:18081
 
 			@docs path /docs/*

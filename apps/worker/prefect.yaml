@@ -1,5 +1,16 @@
 name: quantx-worker
 deployments:
+  - name: development-data-export
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/development_data_export_flow.py:development_data_export_flow
+    work_pool:
+      name: quantx-pool
+      work_queue_name: default
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+    schedules:
+      - cron: '* * * * *'
+        timezone: Asia/Shanghai
   - name: stock-selection-training-capability
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/stock_selection_training_flow.py:stock_selection_training_capability_flow
     work_pool:

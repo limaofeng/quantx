@@ -22,7 +22,8 @@ def main() -> None:
   if not pool:
     raise SystemExit("PREFECT_WORKER_POOL must not be empty")
   worker_name = os.environ.get("PREFECT_WORKER_NAME", "").strip()
-  prefect_file = Path(__file__).resolve().parents[2] / "prefect.yaml"
+  filename = "prefect.development.yaml" if os.environ.get("ENV") == "development" else "prefect.yaml"
+  prefect_file = Path(__file__).resolve().parents[2] / filename
   exists = (
     run(
       [sys.executable, "-m", "prefect", "work-pool", "inspect", pool],

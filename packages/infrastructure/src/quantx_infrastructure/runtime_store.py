@@ -196,6 +196,7 @@ class DurableRuntimeStore:
     device_id: Optional[str] = None,
     required_capabilities: Optional[list[str]] = None,
     idempotency_scope: str = "",
+    development_only: bool = False,
   ) -> str:
     encoded = json.dumps(
       payload,
@@ -315,13 +316,13 @@ class DurableRuntimeStore:
               (
                 request_id, device_id, idempotency_key, request_payload,
                 status, expected_chunks, received_chunks, completed_at,
-                created_at, updated_at
+                created_at, updated_at, development_only
               )
             VALUES
               (
                 :request_id, :device_id, :idempotency_key,
                 CAST(:request_payload AS JSON), 'QUEUED', NULL, 0, NULL,
-                :created_at, :updated_at
+                :created_at, :updated_at, :development_only
               )
             ON CONFLICT (idempotency_key)
             DO NOTHING
@@ -333,6 +334,7 @@ class DurableRuntimeStore:
             "device_id": selected_device_id,
             "idempotency_key": idempotency_key,
             "request_payload": encoded,
+            "development_only": development_only,
             "created_at": _utcnow(),
             "updated_at": _utcnow(),
           },

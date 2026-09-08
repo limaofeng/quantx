@@ -662,6 +662,7 @@ class MarketDataRequest(Base, TimestampMixin):
   )
   idempotency_key = Column(String(128), nullable=False)
   request_payload = Column(JSON, nullable=False)
+  development_only = Column(Boolean, nullable=False, default=False, server_default=text("false"))
   status = Column(String(24), nullable=False, default="QUEUED")
   expected_chunks = Column(Integer, nullable=True)
   received_chunks = Column(Integer, nullable=False, default=0)
@@ -669,6 +670,19 @@ class MarketDataRequest(Base, TimestampMixin):
   processing_error = Column(Text, nullable=True)
   processing_claim_token = Column(String(36), nullable=True)
   ingestion_result = Column(JSON, nullable=True)
+
+
+class DevelopmentDataExport(Base):
+  __tablename__ = "development_data_export"
+  __table_args__ = (Index("ix_development_data_export_queue", "state", "updated_at"),)
+  id = Column(String(64), primary_key=True)
+  request = Column(JSON, nullable=False)
+  state = Column(String(32), nullable=False)
+  source_request_id = Column(String(36))
+  manifest = Column(JSON)
+  error = Column(String(128))
+  updated_at = Column(DateTime(timezone=True), nullable=False)
+  expires_at = Column(DateTime(timezone=True))
 
 
 class MarketDataTransfer(Base):

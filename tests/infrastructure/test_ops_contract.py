@@ -158,18 +158,19 @@ def test_caddy_is_the_only_public_http_entrypoint() -> None:
   assert "admin 127.0.0.1:2019" in development
 
 
-def test_only_windows_dev_deployment_surface_remains() -> None:
+def test_windows_production_and_macos_development_surface() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
   command_contract = script.split(")[string]$Command", 1)[0]
   tools = json.loads((OPS / "tools.lock.json").read_text(encoding="utf-8"))
 
-  assert '[ValidateSet("dev")]' in script
+  assert '[ValidateSet("dev", "production")]' in script
+  assert (OPS / 'quantx.sh').is_file()
+  assert (OPS / 'caddy/Caddyfile.production').is_file()
   for command in ("install", "uninstall", "rollback", "agent-mode"):
     assert f'"{command}"' not in command_contract
   for path in (
     OPS / "build-release.ps1",
     OPS / "caddy" / "Caddyfile.prod",
-    OPS / "config" / "production.env.example",
     OPS / "quantx",
     OPS / "quantx.py",
     OPS / "quantx-agent.ps1",
@@ -188,7 +189,8 @@ def test_dev_runtime_defaults_to_full_profile() -> None:
   assert "function Resolve-WorkerPython" in script
   assert "function Assert-WorkerRuntime" in script
   assert '"QUANTX_AI_RUNTIME_PYTHON_EXE"' in script
-  assert 'Join-Path $Root ".venv\\Scripts\\python.exe"' in script
+  assert 'else { "quantx" }' in script
+  assert '.venv' not in script
   assert "-Executable $aiRuntimePython" in script
   assert "Invoke-PrefectPreparation -Python $workerPython" in script
   assert "-Executable $workerPython" in script
@@ -232,6 +234,9 @@ $profiles = [ordered]@{{
 }}
 
 function Reset-TestAccountEnvironment {{
+  $env:ENABLE_REAL_TRADING = "true"
+  $env:QMT_REAL_TRADING_ENABLED = "true"
+  $env:T_TRADE_LIVE_ENABLED = "true"
   $env:QMT_ACCOUNT_WHITELIST = ""
   $env:REAL_TRADING_ACCOUNT_ALLOWLIST = ""
   $env:AUTH_BOOTSTRAP_ACCOUNT_IDS = ""
@@ -847,8 +852,6 @@ def test_dev_components_keep_caddy_recovery_and_monitor_lifecycle_separate() -> 
   for component in (
     "api",
     "engine",
-    "web",
-    "docs",
     "worker",
     "qmt-agent",
   ):
@@ -886,7 +889,7 @@ def test_dev_caddy_start_and_readiness_are_shared_and_state_is_atomic() -> None:
   assert "Initialize-CaddyEnvironment" in start
   assert '-Name "caddy"' in start
   assert '"run",' in start
-  assert r'"ops\caddy\Caddyfile.dev"' in start
+  assert r'"ops\caddy\Caddyfile.$Environment"' in start
   assert '"--adapter", "caddyfile"' in start
   assert "Start-DevCaddy -Executable $caddy" in ordinary_up
   assert "Wait-DevCaddyReady" in ordinary_up
@@ -928,7 +931,8 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert "ConfirmLive" not in dev_mode
   assert "$env:QMT_ACCOUNT_WHITELIST = if" in script
   assert "$env:REAL_TRADING_ACCOUNT_ALLOWLIST = ConvertTo-Json" in script
-  assert '$env:ENV = "testing"' in script
+  assert '$env:ENV = "production"' in script
+  assert '$env:ENV = "testing"' not in script
   assert "$env:ENV = $serverEnvironment" in script
   assert '$DefaultPrefectApiUrl = "http://192.168.5.6:30420/api"' in script
   assert '$DefaultPrefectWorkerPool = "quantx-pool"' in script
@@ -946,8 +950,8 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
     0
   ]
   assert "function Enable-DevServerTrading" not in script
-  assert '$env:ENABLE_REAL_TRADING = "true"' in script
-  assert '$env:T_TRADE_LIVE_ENABLED = "true"' in script
+  assert '$env:ENABLE_REAL_TRADING -ne "true"' in script
+  assert 'if (-not $env:T_TRADE_LIVE_ENABLED)' in script
   assert "Resolve-DevLaunchProfile" in invoke_up
   assert "-ModeExplicitlySpecified $script:ModeWasExplicitlySpecified" in invoke_up
   assert "-RequestedMode $Mode" in invoke_up
@@ -1085,6 +1089,7 @@ def test_qmt_runtime_defaults_to_original_xtquant_conda_environment(
   qmt_python = profile / "miniconda3" / "envs" / "xtquant-demo" / "python.exe"
   shared_python = tmp_path / "workspace-python.exe"
   qmt_python.parent.mkdir(parents=True)
+  (qmt_python.parent / "conda-meta").mkdir()
   qmt_python.touch()
   shared_python.touch()
 
@@ -1118,20 +1123,14 @@ Resolve-Python -Qmt
   assert Path(result.stdout.strip()).resolve() == qmt_python.resolve()
 
 
-def test_environment_precedence_keeps_process_values_and_later_files_win() -> None:
+def test_environment_configuration_uses_the_shared_validated_loader() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  importer = script.split(
-    "function Import-QuantXEnvironment",
-    1,
-  )[1].split("function Read-State", 1)[0]
-
-  assert '$environmentName = "development"' in importer
-  assert '"development"' in importer
-  assert importer.index(r'apps\api\.env"') < importer.index(
-    r"apps\api\.env.$environmentName"
-  )
-  assert "$processOverrides.Contains($name)" in importer
-  assert ".env.production" not in importer
+  importer = script.split("function Import-QuantXEnvironment", 1)[1].split("function Set-DevExternalDependencyHost", 1)[0]
+  assert '"ops\\runtime_config.py"' in importer
+  assert '$environmentName --json' in importer
+  assert 'ConvertFrom-Json' in importer
+  assert '$LASTEXITCODE -ne 0' in importer
+  assert 'SetEnvironmentVariable' in importer
 
 
 def test_process_state_reader_flattens_json_arrays_before_pid_checks() -> None:
@@ -1184,8 +1183,10 @@ def test_web_ci_uses_the_root_workspace_lockfile() -> None:
   assert "apps/web/package-lock.json" not in ci
   assert "apps/web/package-lock.json" not in checks
   assert "root package-lock.json" in checks
-  assert r"node_modules\vite\bin\vite.js" in runtime
-  assert r"node_modules\vitepress\bin\vitepress.js" in runtime
+  development = (OPS / "macos_runtime.py").read_text(encoding="utf-8")
+  assert "node_modules/vite/bin/vite.js" in development
+  assert "node_modules/vitepress/bin/vitepress.js" in development
+  assert r"apps\web\dist\index.html" in runtime
   assert r"apps\web\node_modules\vite\bin\vite.js" not in runtime
 
 
@@ -1271,7 +1272,7 @@ def test_monitor_has_an_independent_dev_state_file() -> None:
     1,
   )[0]
 
-  assert '$MonitorStateFile = Join-Path $MonitorRuntime "dev-process.json"' in script
+  assert '$MonitorStateFile = Join-Path $MonitorRuntime "$Environment-process.json"' in script
   assert "Start-Process" in monitor_up
   assert '"quantx_monitor.main"' in monitor_up
   assert "Write-MonitorState -Entry $entry" in monitor_up
@@ -1279,7 +1280,7 @@ def test_monitor_has_an_independent_dev_state_file() -> None:
   assert "[IO.File]::Replace(" in monitor_state
   assert "[IO.File]::Move($temporary, $MonitorStateFile)" in monitor_state
   assert "[IO.File]::Move($temporary, $MonitorStateFile, $true)" not in monitor_state
-  for port in ("8080", "$ApiPort", "$MarketGatewayPort", "5250", "5251"):
+  for port in ("8080", "$ApiPort", "$MarketGatewayPort"):
     assert (
       port
       in ordinary_up.split("Assert-PortsAvailable -Ports @(", 1)[1].split(

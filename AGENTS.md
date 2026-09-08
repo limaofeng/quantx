@@ -19,19 +19,21 @@
 
 ## 运行与进程边界
 
-- 当前开发和实盘运行端均为 Windows；macOS 迁移尚未启用，不提前实现双启动器。QMT/XTData/XTTrading、券商运行时和设备密钥始终留在 Windows；平台依赖隔离在适配/运维层。未来迁移须另行明确服务和数据隔离，不让 Mac 测试默认访问实盘或启动第二个 Engine。
+- Python 虚拟环境统一使用 Conda，不创建或使用 `.venv`、`venv`、virtualenv。API、Engine、Worker、Research、Monitor 与验证工具使用独立的 `quantx` Conda 环境；QMT Agent 使用 `xtquant-demo`，不得把研究依赖安装进券商环境。脚本通过明确的 Conda 环境或该环境的 Python 绝对路径运行；依赖同步工具也必须显式指向 Conda Python，不能隐式创建 `.venv`。
+
+- Windows 为 production 实盘环境，macOS 为 dev 开发环境。QMT/XTData/XTTrading、券商运行时和设备密钥只在 Windows；macOS 使用独立本地数据服务、paper 执行和只读远程行情接口，不连接生产数据库、Redis、Prefect，也不启动生产 Engine 或 QMT Agent。
 - 根目录统一入口：
   ```powershell
-  .\ops\quantx.ps1 up -Environment dev -Profile web
+  .\ops\quantx.ps1 up -Environment production -Profile full
   .\ops\quantx.ps1 status
   .\ops\quantx.ps1 logs
   .\ops\quantx.ps1 down
   ```
-  实盘重启顺序 down → up → status；只支持 dev，不传 production。普通 up 不传 Mode，必须 full/live；仅明确禁用实盘时用 -Mode data-only。Monitor 通过 -Component monitor 独立管理。
+  实盘重启顺序 down → up → status；Windows 默认 production/full/live，实盘开关必须在生产配置中显式启用。macOS 使用 ops/quantx.sh，默认 dev/full/paper，禁止 live。两端可使用 data-only。Monitor 独立管理；数据服务由运维单独管理。
 - 唯一账户来自显式 -AccountId 或本机唯一配置。QMT 预检失败须在 API/Engine 启动前关闭服务端及 Agent 实盘门、清空账户允许列表、跳过 QMT 子进程；其他服务继续，显示 DEGRADED / QMT BLOCKED / liveTrading=DISABLED。可用持久化行情回测，不伪装 ready；修复 QMT 后整体重启，不静默切 data-only。
-- 实盘验收：full、live、唯一账户、liveTrading=ENABLED、QMT ready、quantx_contracts.agent.PROTOCOL_VERSION 对应协议、新鲜快照 <90 秒。项目仅在 ENV=testing 的 Dev 实盘门禁下运行。
+- 实盘验收：full、live、唯一账户、liveTrading=ENABLED、QMT ready、quantx_contracts.agent.PROTOCOL_VERSION 对应协议、新鲜快照 <90 秒。日常实盘使用 ENV=production；ENV=testing 仅用于单独授权的真实交易测试，普通测试关闭实盘。
 - Caddy 唯一公开入口：本机 http://127.0.0.1:8080，局域网 http://192.168.5.6:8080；内部 API 18081、Vite 5250、VitePress 5251。远程开发使用运行端 Caddy 地址，127.0.0.1 只指执行命令的机器。
-- PostgreSQL/InfluxDB/Redis/Prefect Server 是外部服务，只检查不自动启停。Prefect API 取 PREFECT_API_URL，默认 http://192.168.5.6:30420/api，pool=quantx-pool。data-only 复用开发数据服务。
+- PostgreSQL/InfluxDB/Redis/Prefect Server 是外部服务，只检查不自动启停。Prefect API 取 PREFECT_API_URL，默认 http://192.168.5.6:30420/api，pool=quantx-pool。生产 data-only 使用生产数据服务；macOS 开发使用本机独立 PostgreSQL、Redis、InfluxDB 和 Prefect，数据库命名以 _dev 结尾。
 - 不独立启动 QMT Agent，不恢复 API 子进程管理、WinSW、Kubernetes 或 release 安装/回滚。
 - API 仅负责 HTTP/GraphQL、数据库、Agent 会话和订阅桥接；Engine 独占策略管理、条件清仓、全局做 T、热缓存、回报收敛，并以 PostgreSQL 租约保证单实例；Worker 独立连接 Prefect，API 重启不得停止它。
 - domain 不依赖数据库、文件、网络、FastAPI、Prefect、QMT；QMT Agent 只依赖 contracts，不导入服务端 ORM/Repository/策略；API/Engine/Worker 禁止导入 miniqmt/xtquant。Redis 仅唤醒/广播，业务表和数据库消息箱是真源。
@@ -46,7 +48,7 @@
 
 ## 验证与提交
 
-- 先受影响单测，必要时扩大；根目录 python -m pytest tests/，API 范围为 tests/api/unit/ 或 tests/api/integration/。普通 pytest 由 tests/conftest.py 使用专用测试库并关闭实盘门，可自主修复本次引起的失败；集成测试先确认外部状态影响。
+- 先受影响单测，必要时扩大；根目录 conda run -n quantx python -m pytest tests/，API 范围为 tests/api/unit/ 或 tests/api/integration/。普通 pytest 由 tests/conftest.py 使用专用测试库并关闭实盘门，可自主修复本次引起的失败；集成测试先确认外部状态影响。
 - 默认禁止 E2E/真实交易；真实交易需明确授权且同时满足 ENV=testing、ENABLE_REAL_TRADING=true、账户白名单、QMT_REAL_TRADING_ENABLED=true。普通测试授权不扩展到真实交易。
 - 恢复/迁移失败先看脱敏日志和定向测试；仅恢复现场不可用或备份改变时重导整库，小规模测试不替代完整恢复验收。
 - Web 保留标准/紧凑密度，遵守 docs/engineering/web/UI_UX_DESIGN_SYSTEM.md。GraphQL/schema/查询变化须使用 quantx-graphql-codegen 技能，实际 Caddy 端点验证：

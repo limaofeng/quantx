@@ -23,6 +23,7 @@ import {
 } from './presentation';
 import { ageSecondsLabel } from './time';
 import { useTradingSafety } from './trading-safety-context';
+import { DeploymentEnvironmentLabel } from './DeploymentEnvironmentLabel';
 
 function ageLabel(value?: string | null) {
   if (!value) return '无记录';
@@ -97,6 +98,7 @@ export function TradingSafetyBar({
         variant="workspace"
         left={
           <>
+            <DeploymentEnvironmentLabel />
             {canIncreaseRisk ? (
               <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-400" />
             ) : isKilled ? (

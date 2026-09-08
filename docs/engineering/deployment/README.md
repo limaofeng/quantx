@@ -1,123 +1,155 @@
-# Windows Dev 运行与运维
+# Windows 生产与 macOS 开发
 
-QuantX 是个人单账户项目，生产/实盘运行端为 Windows，当前开发环境也为 Windows。
-当前启动器只实现 `dev` 配置；生产运行端不代表支持 `-Environment production`。
-后续计划迁移开发环境到 macOS，届时单独确定服务拓扑、测试数据隔离与启动流程；
-QMT 和券商运行时仍留在 Windows。当前不提供 macOS 启动器、WinSW、Kubernetes
-或 release 安装路径。跨机器访问使用实际运行端的 Caddy 地址，不能将远端地址
-替换成开发机的 localhost。平台边界以根 `AGENTS.md` 为准。
+Windows 独占 QMT/XTData/XTTrading，使用 `production/full/live`；macOS 使用
+`dev/full/paper` 和本机独立数据服务。两端通过只读行情接口连接，不共享账户、数据库、
+Redis、Prefect 工作池或设备密钥。不得把 QMT Agent 同时登记到两个环境。
 
-## 唯一启动入口
+## 环境配置与启动
 
-从仓库根目录运行：
+Windows 使用 `apps/api/.env.production`，macOS 使用 `.env.development`；
+`.env` 只放公共非敏感默认值。启动前必须显式配置四个数据服务地址，缺项即失败，
+不回退到另一环境。选定文件覆盖继承的配置值，`ENV` 由启动器确定，不能被文件改写。
+配置样例为 `ops/config/production.env.example` 和 `development.env.example`。
 
-```powershell
-.\ops\quantx.ps1 up -Environment dev -Profile web
-.\ops\quantx.ps1 status
-.\ops\quantx.ps1 logs
-.\ops\quantx.ps1 down
-```
-
-普通 `up` 会解析为 `full/live`，启动 Caddy、API、Market Gateway、Engine、
-Vite、VitePress、Prefect Worker，并在 QMT 登记和运行时预检通过后启动同机
-QMT Agent。只有明确需要关闭实盘连接时才使用：
-
-Prefect Worker 及其隔离启动的 Research 子进程固定使用仓库 `.venv`；启动前会
-校验 `prefect`、`quantx_worker` 和 `quantx_research` 均可导入。QMT Agent 继续使用
-包含券商依赖的 `xtquant-demo` 环境，Worker/Research 不使用该环境，以免研究/GPU
-依赖污染券商运行时；`.venv` 缺失或依赖不完整时先在仓库根目录执行 `uv sync`。
+Windows 根目录入口：
 
 ```powershell
-.\ops\quantx.ps1 up -Environment dev -Profile web -Mode data-only
+.\ops\quantx.ps1 up -Environment production -Profile full -Mode live
+.\ops\quantx.ps1 status -Environment production
+.\ops\quantx.ps1 logs -Environment production
+.\ops\quantx.ps1 down -Environment production
 ```
 
-Market Gateway 先启动，启动器仅等待其 `/health/live` 后继续启动 API 和 Agent。
-网关 `/health/ready` 需要当前 QMT 行情连接与完整供给快照，不得在 Agent 启动前
-用它阻塞启动顺序。最终 full readiness 仍检查供给、Engine 消费和 QMT 状态。
+`live` 要求生产文件显式启用服务端和 Agent 双开关、唯一账户白名单；保留原有
+对账、协议、新鲜快照与执行权限检查。预检失败保持 full/live 请求并显示
+DEGRADED / QMT BLOCKED / liveTrading=DISABLED，不得静默切为 data-only。
+明确关闭实盘时可传 `-Mode data-only`。Windows 拒绝 `up -Environment dev`；
+旧 dev 状态仅用于迁移前停止已有进程。
 
-Monitor 保持独立生命周期：
+Web 和 Docs 在更新窗口提前构建到 `apps/web/dist`、`apps/docs/dist`；生产启动
+只检查产物，不运行 Vite/VitePress。Caddy 是唯一公开入口，本机 127.0.0.1:8080、
+局域网 192.168.5.6:8080；API 18081、Market Gateway 18082、Monitor 18083
+仅绑定回环地址。生产默认只允许本机及 192.168.5.0/24。
 
-```powershell
-.\ops\quantx.ps1 up -Environment dev -Component monitor
-.\ops\quantx.ps1 status -Environment dev -Component monitor
-.\ops\quantx.ps1 logs -Environment dev -Component monitor
-.\ops\quantx.ps1 down -Environment dev -Component monitor
+Monitor 仍通过 `-Component monitor` 独立管理。新增可选的“跨环境行情与补数”
+探针，监测导出失败及开发端行情连接；不把开发故障变成生产交易授权来源。
+QMT Agent 继续使用 xtquant-demo，服务端和 Worker 使用各自已配置的 Python 环境。
+
+## macOS 本地开发
+
+Python 环境统一使用 Conda，API/Engine/Worker/Research/Monitor 共用独立的
+`quantx` 环境，QMT 继续使用 `xtquant-demo`；不得创建或使用项目 `.venv`。
+
+```bash
+conda create -n quantx python=3.13 pip setuptools wheel
+conda activate quantx
+mkdir -p .runtime
+uv export --frozen --format requirements-txt --no-hashes --output-file .runtime/conda-requirements.txt
+uv pip install --python "$CONDA_PREFIX/bin/python" --no-build-isolation -r .runtime/conda-requirements.txt
 ```
 
-`ops/quantx.ps1` 只接受 `-Environment dev`，不提供 install、uninstall、rollback
-或 agent-mode 命令。不得绕过统一入口单独启动 QMT Agent，以免重复会话争用。
-Windows 需要 Node 20；若 nvm 的 PATH 在非交互 Shell 中不可见，可在
-`apps/api/.env.development` 设置 `QUANTX_NODE_EXE` 为对应 `node.exe` 的绝对路径。
+Windows 使用同一依赖清单，并将 `--python` 指向 Conda 环境中的 `python.exe`。
+`uv export` 只生成锁定依赖清单；安装必须显式指定 Conda Python，不能使用默认 `uv sync`。
 
-## 地址与端口
+先安装项目所需 Python、Node 20、uv 和 Caddy，创建 `quantx` Conda 环境、按下述命令安装锁定依赖，并执行根目录
+`npm install`。开发数据服务使用独立容器与持久卷，配置位于
+`ops/config/compose.development.yaml`，仅绑定本机端口；应用启动器不启停这些服务。
 
-Caddy 是唯一公开入口，监听 `0.0.0.0:8080`：
-
-- Windows 本机：`http://127.0.0.1:8080`
-- 局域网客户端、iOS、Web codegen：`http://192.168.5.6:8080`
-- GraphQL HTTP：`http://192.168.5.6:8080/graphql`
-- GraphQL WebSocket：`ws://192.168.5.6:8080/graphql`
-- QMT Agent 登记根地址：`http://192.168.5.6:8080`
-
-内部端口只绑定 `127.0.0.1`：API `18081`、Market Gateway `18082`、Monitor
-`18083`、Vite `5250`、VitePress `5251`。QMT Agent 只读健康端点使用
-`0.0.0.0:18084`。
-
-本地 Dev 使用 HTTP/WS，不启用 TLS。首次访问时只需允许 Caddy 通过 Windows
-专用网络防火墙，不需要安装私有 CA。
-
-## 外部依赖
-
-PostgreSQL、Redis、InfluxDB 和 Prefect Server 由外部环境提供，启动器只检查，
-不负责安装或启停。Prefect API 默认是 `http://192.168.5.6:30420/api`，Worker
-pool 为 `quantx-pool`。
-
-若这些依赖运行在同机 WSL，Windows 通过 portproxy 暴露 `30081`、`30420`、
-`30179` 和 `32432`。WSL NAT 地址变化时，用管理员 PowerShell 幂等安装同步任务：
-
-```powershell
-.\ops\windows\sync-wsl-portproxy.ps1 install
-.\ops\windows\sync-wsl-portproxy.ps1 status
+```bash
+# 先在终端设置 QUANTX_DEV_POSTGRES_PASSWORD，再独立启动开发数据服务。
+docker compose -f ops/config/compose.development.yaml up -d
+cp ops/config/development.env.example apps/api/.env.development
 ```
 
-`QuantX-WSL-PortProxy` 仅维护上述四个端口，每五分钟解析一次 WSL `eth0`；不会
-重置其他 portproxy，也不会修改 Windows 防火墙规则。
+填写本机 PostgreSQL 密码、InfluxDB token、独立应用认证配置，以及 Windows
+专用行情 token。开发 PostgreSQL 与 InfluxDB 数据库名必须以 `_dev` 结尾。
+按 InfluxDB 官方初始化流程创建 token 和 quantx_dev 数据库；不要使用生产 token。
+开发 InfluxDB Core 查询按短时间窗口分批，避免其约 72 小时的单次查询范围限制。
 
-`.env` 只从 `apps/api/.env` 和 `apps/api/.env.development` 读取。主服务地址应为：
-
-```dotenv
-PUBLIC_URL=http://192.168.5.6:8080
-QUANTX_AGENT_API_URL=http://192.168.5.6:8080
+```bash
+ENV=development conda run -n quantx python -m alembic -c packages/infrastructure/alembic.ini upgrade head
+PREFECT_API_URL=http://127.0.0.1:4200/api conda run -n quantx python -m prefect work-pool create quantx-dev-pool --type process
+./ops/quantx.sh doctor --environment dev
+./ops/quantx.sh up --environment dev --profile full --mode paper
+./ops/quantx.sh status --environment dev
+./ops/quantx.sh logs --environment dev
+./ops/quantx.sh down --environment dev
 ```
 
-具体变量名以 `apps/api/.env.example` 为准；券商凭据和设备密钥不得提交。
+前端开发配置采用 `VITE_APP_ENV=development`；生产构建采用 `production`。
+通过既有认证引导和 paper 配置明确初始化本地模拟账户及冻结 `paper_seed`；
+缺少 seed 时保持 PAPER_SEED_REQUIRED，不复制生产资金、持仓或券商账户快照。
+Monitor 可用 `./ops/quantx.sh up --component monitor` 单独启动。
 
-## Dev 实盘安全
+## 实时行情与历史补数
 
-Dev 实盘使用 `ENV=testing`，并仍需 `ENABLE_REAL_TRADING=true`、
-`QMT_REAL_TRADING_ENABLED=true`、唯一账户白名单、Agent READY、新鲜快照和对账
-就绪。启动预检失败时保持 `full/live` 请求，但关闭服务端实盘能力门并以
-`DEGRADED / BLOCKED` 启动非 QMT 服务，不得伪装成 `data-only` 或 `ready`。
+生产 `QUANTX_MARKET_DATA_TOKEN` 至少 32 个随机字符，仅授权下述行情接口。
+macOS 配置 `QUANTX_MARKET_DATA_URL=http://192.168.5.6:8080` 和
+`QUANTX_MARKET_DATA_INSTRUMENTS`（逗号分隔）。当前只开放生产已供给的标的，
+开发端不会修改 QMT 订阅。WebSocket 首帧为选择标的的快照，后续为增量；
+源时间不变，缺口和慢消费导致断开重同步。开发接收后写本机行情链路。
 
-QMT Agent 的 token 只用于建立新连接；后台刷新不会主动拆除健康连接。PostgreSQL
-或 Redis 短暂抖动时，API 在原会话内背压并重试，只有真实的认证失效、会话替换、
-传输中断或超过行情新鲜度预算才触发重连与重同步。
+| 接口 | 用途 |
+| --- | --- |
+| `WS /market-data/v1/stream` | 首条客户端 JSON 为 instruments 数组；服务端发送现有行情二进制协议 |
+| `POST /market-data/v1/history` | 提交 instrument、period、trading_date、adjustment=none，返回任务 id |
+| `GET /market-data/v1/history/{id}` | 查询状态、实际覆盖和不可变分片清单 |
+| `GET /market-data/v1/history/{id}/chunks/{sha256}` | 下载该任务授权的压缩 JSON 分片 |
+| `POST /market-data/v1/history/{id}/retry` | 明确重试失败任务；普通轮询不自动反复下载失败源 |
+| `GET /market-data/v1/calendar/{year}` | 已存交易日历，缺失时返回不可用 |
+| `GET /market-data/v1/reference/{code}?as_of=YYYY-MM-DD` | 标的基础资料及有覆盖证据的复权因子 |
 
-本机 Agent 健康以启动器记录的本次 QMT 启动边界和服务端 heartbeat `updated_at`
-为准。Agent 自报时间与服务端处理时间的差值只用于诊断，不会因队列或数据库短暂
-积压产生 5 秒硬阻断；API/Agent 会话 ID 仅保护连接替换、命令发送、行情租约和报告
-归属。断线、旧启动心跳、重复 live Agent、快照过期或未完成对账仍保持硬阻断。
+公共数据接口都要求 `Authorization: Bearer <行情 token>`。它不能用于 Agent
+登记、交易或账户接口。响应不含服务器文件路径或设备凭据。
+
+```bash
+./ops/quantx.sh history --instruments 600000.SH --period 1m --start 2026-09-01 --end 2026-09-07
+```
+
+已有且通过持久化校验的历史数据随时导出；缺口只在北京时间交易日 16:00 至
+次日 08:30 或非交易日派发。日历缺失或 Agent 不健康时不派发。开发请求按单标的、
+单日、单周期拆分，Agent 既有串行派发优先处理生产请求。盘中提交的缺口持续排队。
+
+生产 Worker 的 development-data-export 与开发 Worker 的 development-data-import
+每分钟执行一次；macOS 离线不删除生产任务。分片保留七天，过期后从已有持久化数据
+重建；若覆盖证明或源身份不匹配，返回 INCOMPLETE，不伪装成完整数据。
+开发端检查 SHA256、协议、范围与行数，幂等导入后再次回读验证；已下载分片可复用。
+没有可靠无数据证明的空区间仍视为数据不足。
+
+参考数据仅导出明确的证券、日历和因子字段。复权覆盖沿用原有 schema-v2 证据，
+研究读取时再次与本机当前因子逐行核验；财务数据继续使用既有独立研究来源。
+回测清单记录初始化时的导入分区版本；实时行情＋paper 成交不等同券商集成验收。
+
+## 首次生产切换与验收
+
+先完成 Windows 代码检查、静态构建和隔离恢复验证，再安排维护窗口。
+macOS 验收由开发机单独执行，见 [macOS 验收清单](MACOS_DEV_ACCEPTANCE.md)，不阻塞 Windows 验收。
+现有 dev 实盘实例必须先使用 `down -Environment dev` 停止，Monitor 同样单独停止。
+`ops/migrate_production_config.py prepare --dependency-host 127.0.0.1 --enable-live`
+根据当前 Windows 配置准备生产配置和隔离测试配置，生成独立行情凭证，不打印密钥。
+只有已经核对端口转发的本机 WSL 服务才使用上述回环地址。准备阶段不更改生效配置；
+停止旧服务及 Monitor 后执行 `ops/migrate_production_config.py apply`。应用前验证源文件
+指纹并保留全部原配置。不得在旧 Worker 仍运行时更改其环境配置。
+
+生产更新只使用固定运行目录和已验证版本。环境迁移完成后重新检查双实盘开关、
+唯一账户与数据端点，再运行生产 migrate、up、status；不启动第二套 Engine/Agent。
+确认 QMT ready、对账就绪、新鲜快照 <90 秒、liveTrading=ENABLED、静态页面和
+远程行情正常。普通测试不发送真实订单。首版不包含开机自启或自动重启整套实盘。
+
+外部服务初始化参考：[InfluxDB 3 Core](https://docs.influxdata.com/influxdb3/core/get-started/setup/)、
+[InfluxDB 查询范围](https://docs.influxdata.com/influxdb3/core/get-started/query/)、
+[Prefect Server](https://docs.prefect.io/v3/get-started/quickstart)。
 
 ## 备份、迁移与检查
 
-备份、隔离恢复验证和数据库前向迁移仍属于 Dev 数据维护：
+备份、隔离恢复验证和数据库前向迁移仍属于 生产数据维护：
 
 ```powershell
-.\ops\quantx.ps1 backup -Environment dev
-.\ops\quantx.ps1 restore-verify -Environment dev -BackupPath <目录>
-.\ops\quantx.ps1 migrate -Environment dev
-.\ops\quantx.ps1 doctor -Environment dev
-.\ops\quantx.ps1 verify -Environment dev
+.\ops\quantx.ps1 backup -Environment production
+.\ops\quantx.ps1 restore-verify -Environment production -BackupPath <目录>
+.\ops\quantx.ps1 migrate -Environment production
+.\ops\quantx.ps1 doctor -Environment production
+.\ops\quantx.ps1 verify -Environment production
 ```
 
 `restore-verify` 启动时输出验证 ID；阶段状态与脱敏日志持续写入
@@ -128,7 +160,7 @@ QMT Agent 的 token 只用于建立新连接；后台刷新不会主动拆除健
 数据导入完整、但 schema 检查/升级失败时，保留该隔离数据库供修复后重试：
 
 ```powershell
-.\ops\quantx.ps1 restore-verify -Environment dev -BackupPath <原目录> -RestoreVerificationId <ID>
+.\ops\quantx.ps1 restore-verify -Environment production -BackupPath <原目录> -RestoreVerificationId <ID>
 ```
 
 重试要求备份路径、manifest 指纹和数据库服务器一致，并重新校验备份文件校验和。
@@ -151,9 +183,9 @@ QuantX 管理的进程。
 
 ```powershell
 .\.runtime\tools\caddy\caddy.exe validate `
-  --config .\ops\caddy\Caddyfile.dev --adapter caddyfile
+  --config .\ops\caddy\Caddyfile.production --adapter caddyfile
 python -m pytest tests/infrastructure/test_ops_contract.py
 ```
 
-完整 Dev 实盘验收还应确认 `status` 显示 `profile=full`、`agentMode=live`、
+完整生产实盘验收还应确认 `status` 显示 `profile=full`、`agentMode=live`、
 唯一账户、`liveTrading=ENABLED`，且 QMT Agent、对账和行情流稳定为 `ready`。

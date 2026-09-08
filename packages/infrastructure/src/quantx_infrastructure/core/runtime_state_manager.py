@@ -4533,6 +4533,7 @@ class RuntimeStateManager:
         backtest_id: str,
         *,
         backtest_version: Optional[int] = None,
+        market_data_versions: Optional[list[Dict[str, Any]]] = None,
     ) -> None:
         """设置为回测模式，初始化文件存储"""
         from quantx_infrastructure.core.backtest_result_storage import (
@@ -4545,6 +4546,7 @@ class RuntimeStateManager:
             backtest_id=backtest_id,
             strategy_run_id=self.run_id,
             version=backtest_version,
+            market_data_versions=market_data_versions or [],
         )
         self._log_file_path = self._backtest_storage.get_log_file_path()
         self.logger.info(

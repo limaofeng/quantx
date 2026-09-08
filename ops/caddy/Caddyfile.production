@@ -1,0 +1,63 @@
+{
+	admin 127.0.0.1:2019
+	auto_https disable_redirects
+}
+
+(tls_disabled) {
+}
+
+(tls_internal) {
+	tls internal
+}
+
+{$QUANTX_CADDY_SITE_ADDRESS:http://:8080} {
+	bind {$QUANTX_CADDY_BIND:0.0.0.0}
+	import {$QUANTX_CADDY_TLS_SNIPPET:tls_disabled}
+
+	@trusted remote_ip {$QUANTX_CADDY_TRUSTED_IPS:127.0.0.1/32 192.168.5.0/24}
+	handle @trusted {
+		route {
+			@docs_root path /docs
+			redir @docs_root /docs/ 308
+
+			@market_gateway path /ws/agent/market /market-data/*
+			reverse_proxy @market_gateway 127.0.0.1:18082
+
+			@private_observation path /monitor/internal/* /internal/monitor/*
+			respond @private_observation "Not Found" 404
+
+			@monitor path /monitor/*
+			reverse_proxy @monitor 127.0.0.1:18083
+
+			@api path /runtime/environment /graphql* /auth* /health* /metrics* /ws/agent* /agent/* /market-data-sync/*
+			reverse_proxy @api 127.0.0.1:18081
+
+			handle_path /docs/* {
+				root * {$QUANTX_ROOT}/apps/docs/dist
+				try_files {path} {path}.html {path}/index.html
+				file_server
+			}
+
+			# Only the Web frontend reaches this handler. Keep API responses and
+			# streaming connections outside static-resource compression.
+			encode {
+				gzip 1
+				minimum_length 1024
+				match {
+					header Content-Type text/html*
+					header Content-Type text/javascript*
+					header Content-Type application/javascript*
+					header Content-Type text/css*
+					header Content-Type application/json*
+					header Content-Type image/svg+xml*
+				}
+			}
+
+			root * {$QUANTX_ROOT}/apps/web/dist
+			try_files {path} /index.html
+			file_server
+		}
+	}
+
+	respond "Forbidden" 403
+}

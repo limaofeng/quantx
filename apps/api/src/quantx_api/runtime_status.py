@@ -526,7 +526,7 @@ async def component_status() -> dict[str, dict[str, Any]]:
       "offlineWorkers": prefect.get("offlineWorkers", 0),
       "workers": prefect.get("workers", []),
     },
-    "qmtAgent": heartbeats["qmt-agent"],
+    "qmtAgent": {"status": "disabled", "reason": "DEVELOPMENT_NO_QMT"} if settings.environment == "development" else heartbeats["qmt-agent"],
     "aiRuntime": ai_runtime,
     "marketData": market_gateway,
     "prefect": prefect,
@@ -540,6 +540,15 @@ async def market_data_runtime_status() -> dict[str, Any]:
 
 def required_components() -> tuple[str, ...]:
   profile = getattr(settings, "runtime_profile", "web").lower()
+  if settings.environment == "development":
+    import os
+
+    required = ("api", "database", "engine")
+    if profile == "full":
+      required += ("prefect", "worker")
+    if os.environ.get("QUANTX_MARKET_DATA_URL"):
+      required += ("marketData",)
+    return required
   if profile == "full":
     return (
       "api",

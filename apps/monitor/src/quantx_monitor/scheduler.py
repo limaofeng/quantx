@@ -11,7 +11,7 @@ from typing import TypeVar
 import httpx
 
 from .config import MonitorSettings
-from .models import ProbeResult, utc_now
+from .models import MonitorStatus, ProbeResult, utc_now
 from .probes import (
   AccountSafetyProbe,
   HttpProbe,
@@ -108,6 +108,13 @@ class MonitorScheduler:
         prefect_url += "/api"
       http_probes = [
         HttpProbe(
+          "development-data",
+          f"{self.settings.market_gateway_url.rstrip('/')}/internal/development-data/health",
+          timeout_seconds=self.settings.http_timeout_seconds,
+          evaluator=json_status("healthy"),
+          enabled=self.settings.market_data_enabled,
+        ),
+        HttpProbe(
           "influxdb",
           f"{self.settings.influxdb_host.rstrip('/')}/health",
           timeout_seconds=self.settings.http_timeout_seconds,
@@ -157,7 +164,12 @@ class MonitorScheduler:
         self.settings.qmt_agent_health_url,
         self.settings.http_timeout_seconds,
       )
-      direct.append(lambda: qmt_agent_probe.run(self._client))
+      async def qmt_action():
+        if self.settings.environment == "development":
+          return ProbeResult("qmt-agent", utc_now(), MonitorStatus.DISABLED)
+        return await qmt_agent_probe.run(self._client)
+
+      direct.append(qmt_action)
 
       async def guarded(action: Callable[[], Awaitable[TProbe]]) -> TProbe:
         async with semaphore:
@@ -183,7 +195,7 @@ class MonitorScheduler:
       qmt_semantic = next(
         result for result in derived_results if result.target_id == "qmt-agent"
       )
-      qmt_result = combine_qmt_agent_probe(qmt_direct, qmt_semantic)
+      qmt_result = qmt_direct if self.settings.environment == "development" else combine_qmt_agent_probe(qmt_direct, qmt_semantic)
       results = [
         *(result for result in direct_results if result.target_id != "qmt-agent"),
         *(result for result in derived_results if result.target_id != "qmt-agent"),

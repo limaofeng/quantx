@@ -48,6 +48,7 @@ class BacktestResultStorage:
     strategy_run_id: Optional[str] = None
     version: Optional[int] = None
     audit_mode: Optional[str] = None
+    market_data_versions: List[Dict[str, Any]] = field(default_factory=list)
 
     # 内存缓冲区
     _trade_intents: List[Dict[str, Any]] = field(default_factory=list, repr=False)
@@ -464,6 +465,7 @@ class BacktestResultStorage:
             "version": self.version,
             "created_at": time_utils.now().isoformat(),
             "audit_mode": self.audit_mode,
+            "market_data_versions": self.market_data_versions,
             "compaction_policy": BACKTEST_AUDIT_COMPACTION_POLICY,
             "opportunity_evaluations": self._opportunity_archive,
             "artifacts": {

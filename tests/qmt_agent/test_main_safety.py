@@ -55,8 +55,8 @@ def test_paper_mode_requires_an_explicit_account_whitelist() -> None:
 @pytest.mark.parametrize(
   ("environment", "enable_real", "enable_qmt", "expected"),
   [
-    ("development", "true", "true", "ENV=testing"),
-    ("production", "true", "true", "ENV=testing"),
+    ("development", "true", "true", "ENV=production or testing"),
+    ("production", "", "true", "ENABLE_REAL_TRADING=true"),
     ("testing", "", "true", "ENABLE_REAL_TRADING=true"),
     ("testing", "true", "", "QMT_REAL_TRADING_ENABLED=true"),
   ],

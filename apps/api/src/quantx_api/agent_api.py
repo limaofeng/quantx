@@ -2641,13 +2641,23 @@ async def _next_market_data_request(
     )
     if active_request_id is not None:
       return None
+    from quantx_infrastructure.services.development_history_window import (
+      history_window_open,
+    )
+
+    development_allowed = (
+      session_state.current
+      and heartbeat.status == "READY"
+      and await history_window_open()
+    )
     result = await db.execute(
       select(MarketDataRequest)
       .where(
         MarketDataRequest.device_id == device_id,
         MarketDataRequest.status == "QUEUED",
+        or_(MarketDataRequest.development_only.is_(False), development_allowed),
       )
-      .order_by(MarketDataRequest.created_at)
+      .order_by(MarketDataRequest.development_only, MarketDataRequest.created_at)
       .limit(1)
       .with_for_update(skip_locked=True)
     )

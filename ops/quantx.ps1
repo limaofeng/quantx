@@ -15,8 +15,8 @@ param(
   )]
   [string]$Command = "status",
 
-  [ValidateSet("dev")]
-  [string]$Environment = "dev",
+  [ValidateSet("dev", "production")]
+  [string]$Environment = "production",
 
   [ValidateSet("web", "full")]
   [string]$Profile = "full",
@@ -87,11 +87,11 @@ $ScriptRoot = Join-Path $Root "ops"
 $Runtime = Join-Path $Root ".runtime"
 $StateDirectory = Join-Path $Runtime "state"
 $LogDirectory = Join-Path $Runtime "logs"
-$StateFile = Join-Path $StateDirectory "dev-processes.json"
+$StateFile = Join-Path $StateDirectory "$Environment-processes.json"
 $ToolsDirectory = Join-Path $Runtime "tools"
 $BackupDirectory = Join-Path $Runtime "backups"
 $MonitorRuntime = Join-Path $Runtime "monitor"
-$MonitorStateFile = Join-Path $MonitorRuntime "dev-process.json"
+$MonitorStateFile = Join-Path $MonitorRuntime "$Environment-process.json"
 $MonitorPort = 18083
 $DefaultPrefectApiUrl = "http://192.168.5.6:30420/api"
 $DefaultPrefectWorkerPool = "quantx-pool"
@@ -126,6 +126,19 @@ function Ensure-RuntimeDirectories {
 function Resolve-Python {
   param([switch]$Qmt)
 
+  function Resolve-CondaExecutable {
+    param([string]$Executable)
+    $resolvedPath = [IO.Path]::GetFullPath($Executable)
+    $prefixPath = Split-Path -Parent $resolvedPath
+    if (-not (Test-Path -LiteralPath (Join-Path $prefixPath "conda-meta") -PathType Container)) {
+      throw "Python must belong to a Conda environment."
+    }
+    if (-not $Qmt -and (Split-Path -Leaf $prefixPath) -eq $DefaultQmtCondaEnvironment) {
+      throw "Server and research processes must use the quantx Conda environment, not the QMT environment."
+    }
+    return $resolvedPath
+  }
+
   $configured = if ($Qmt) {
     [Environment]::GetEnvironmentVariable("QUANTX_QMT_PYTHON_EXE")
   } else {
@@ -136,12 +149,12 @@ function Resolve-Python {
     if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
       throw "Configured Python executable does not exist: $resolved"
     }
-    return $resolved
+    return Resolve-CondaExecutable -Executable $resolved
   }
   $condaEnvironment = if ($Qmt) {
     $DefaultQmtCondaEnvironment
   } else {
-    [Environment]::GetEnvironmentVariable("CONDA_ENV_NAME")
+    if ($env:CONDA_ENV_NAME) { $env:CONDA_ENV_NAME } else { "quantx" }
   }
   if ($condaEnvironment) {
     $environmentCandidates = @()
@@ -168,7 +181,7 @@ function Resolve-Python {
     }
     foreach ($candidate in $environmentCandidates) {
       if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-        return [System.IO.Path]::GetFullPath($candidate)
+        return Resolve-CondaExecutable -Executable $candidate
       }
     }
 
@@ -198,7 +211,7 @@ function Resolve-Python {
           }
           $candidate = Join-Path $environmentPath "python.exe"
           if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return [System.IO.Path]::GetFullPath($candidate)
+            return Resolve-CondaExecutable -Executable $candidate
           }
         }
       } catch {
@@ -218,40 +231,28 @@ function Resolve-Python {
       "Set $explicitInterpreter to an explicit interpreter."
     )
   }
-  $python = Get-Command python -ErrorAction SilentlyContinue
-  if (-not $python) {
-    throw "Python was not found. Set QUANTX_PYTHON_EXE."
-  }
-  return $python.Source
+  throw "An explicit Conda environment is required."
 }
 
 function Resolve-AiRuntimePython {
-  $configured = [Environment]::GetEnvironmentVariable(
-    "QUANTX_AI_RUNTIME_PYTHON_EXE"
-  )
+  $configured = [Environment]::GetEnvironmentVariable("QUANTX_AI_RUNTIME_PYTHON_EXE")
   if ($configured) {
-    $resolved = [System.IO.Path]::GetFullPath($configured)
-    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
-      throw "Configured AI Runtime Python executable does not exist: $resolved"
+    $resolved = [IO.Path]::GetFullPath($configured)
+    $prefixPath = Split-Path -Parent $resolved
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $prefixPath "conda-meta") -PathType Container)) {
+      throw "AI Runtime requires a Conda Python interpreter."
+    }
+    if ((Split-Path -Leaf $prefixPath) -eq $DefaultQmtCondaEnvironment) {
+      throw "AI Runtime must not use the QMT environment."
     }
     return $resolved
-  }
-  $workspacePython = Join-Path $Root ".venv\Scripts\python.exe"
-  if (Test-Path -LiteralPath $workspacePython -PathType Leaf) {
-    return [System.IO.Path]::GetFullPath($workspacePython)
   }
   return Resolve-Python
 }
 
 function Resolve-WorkerPython {
-  $workspacePython = Join-Path $Root ".venv\Scripts\python.exe"
-  if (-not (Test-Path -LiteralPath $workspacePython -PathType Leaf)) {
-    throw (
-      "The Prefect Worker requires the workspace Python environment. " +
-      "Run uv sync before starting the full profile."
-    )
-  }
-  return [System.IO.Path]::GetFullPath($workspacePython)
+  return Resolve-Python
 }
 
 function Assert-WorkerRuntime {
@@ -261,7 +262,7 @@ function Assert-WorkerRuntime {
   if ($LASTEXITCODE -ne 0) {
     throw (
       "The workspace Python environment is missing Worker or Research " +
-      "dependencies. Run uv sync before starting the full profile."
+      "dependencies. Install the locked dependencies into the quantx Conda environment before startup."
     )
   }
 }
@@ -419,39 +420,14 @@ function Assert-QmtAgentEnrollment {
 }
 
 function Import-QuantXEnvironment {
-  $processOverrides = [Collections.Generic.HashSet[string]]::new(
-    [StringComparer]::OrdinalIgnoreCase
-  )
-  foreach ($existingName in (
-    [Environment]::GetEnvironmentVariables("Process").Keys
-  )) {
-    $null = $processOverrides.Add([string]$existingName)
+  $environmentName = if ($Environment -eq "production") { "production" } else { "development" }
+  $configurationPython = Resolve-WorkerPython
+  $rawConfiguration = & $configurationPython (Join-Path $Root "ops\runtime_config.py") $environmentName --json
+  if ($LASTEXITCODE -ne 0) { throw "Explicit environment configuration failed validation." }
+  $configuration = ($rawConfiguration -join "`n") | ConvertFrom-Json
+  foreach ($property in $configuration.PSObject.Properties) {
+    [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
   }
-  $environmentName = "development"
-  $configurationRoot = $Root
-  $files = @(
-    (Join-Path $configurationRoot "apps\api\.env"),
-    (Join-Path $configurationRoot "apps\api\.env.$environmentName")
-  )
-  foreach ($file in $files) {
-    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-      continue
-    }
-    foreach ($line in Get-Content -LiteralPath $file) {
-      $value = $line.Trim()
-      if (-not $value -or $value.StartsWith("#") -or -not $value.Contains("=")) {
-        continue
-      }
-      $name, $setting = $value.Split("=", 2)
-      $name = $name.Trim()
-      if (-not $name -or $processOverrides.Contains($name)) {
-        continue
-      }
-      $setting = $setting.Trim().Trim('"').Trim("'")
-      [Environment]::SetEnvironmentVariable($name, $setting, "Process")
-    }
-  }
-  Set-DevExternalDependencyHost
 }
 
 function Set-DevExternalDependencyHost {
@@ -1087,7 +1063,7 @@ function Start-DevCaddy {
     -Executable $Executable `
     -Arguments @(
       "run",
-      "--config", (Join-Path $Root "ops\caddy\Caddyfile.dev"),
+      "--config", (Join-Path $Root "ops\caddy\Caddyfile.$Environment"),
       "--adapter", "caddyfile"
     ) `
     -WorkingDirectory $Root
@@ -1259,6 +1235,10 @@ function Invoke-CaddyRecovery {
 
   Import-QuantXEnvironment
   Initialize-PythonEnvironment
+  if ($Command -eq "up") {
+    & (Resolve-Python) (Join-Path $Root "ops\runtime_config.py") $env:ENV
+    if ($LASTEXITCODE -ne 0) { throw "Environment isolation validation failed." }
+  }
   $existing = @(Read-State)
   $runtimeConfiguration = Get-DevRuntimeConfiguration -Entries $existing
   $qmtLaunchBlocked = $runtimeConfiguration.qmtLaunchState -eq "BLOCKED"
@@ -1267,8 +1247,6 @@ function Invoke-CaddyRecovery {
     "market-gateway",
     "ai-runtime",
     "engine",
-    "web",
-    "docs",
     "worker"
   )
   if (-not $qmtLaunchBlocked) {
@@ -1320,7 +1298,7 @@ function Invoke-CaddyRecovery {
   }
 
   Initialize-PrefectEnvironment
-  $env:ENV = "development"
+  $env:ENV = if ($Environment -eq "production") { "production" } else { "development" }
   $env:RUNTIME_PROFILE = $Profile
   $env:PREFECT_ENABLED = "true"
   $env:PYTHONPATH = Get-WorkspacePythonPath
@@ -1344,7 +1322,7 @@ function Invoke-CaddyRecovery {
     Wait-DevCaddyReady -RequireRuntimeReadiness (-not $qmtLaunchBlocked)
     Write-State -Processes $script:ManagedProcesses
     Write-Host (
-      "Recovered managed Caddy for QuantX dev/$Profile at " +
+      "Recovered managed Caddy for QuantX $Environment/$Profile at " +
       ((Get-DevGatewayUrls) -join ", ")
     ) -ForegroundColor Cyan
   } catch {
@@ -1516,9 +1494,10 @@ function Set-DevTradingModeEnvironment {
   }
 
   if ($agentMode -eq "live") {
-    $env:ENABLE_REAL_TRADING = "true"
-    $env:QMT_REAL_TRADING_ENABLED = "true"
-    $env:T_TRADE_LIVE_ENABLED = "true"
+    if ($env:ENABLE_REAL_TRADING -ne "true" -or $env:QMT_REAL_TRADING_ENABLED -ne "true") {
+      throw "Production live requires explicit server and Agent real-trading switches."
+    }
+    if (-not $env:T_TRADE_LIVE_ENABLED) { $env:T_TRADE_LIVE_ENABLED = "false" }
     $env:REAL_TRADING_ACCOUNT_ALLOWLIST = ConvertTo-Json `
       -InputObject @($account) `
       -Compress
@@ -1582,8 +1561,8 @@ function Resolve-DevTradingAccountId {
 }
 
 function Invoke-Up {
-  if ($Environment -ne "dev") {
-    throw "quantx only supports the dev environment."
+  if ($Environment -ne "production") {
+    throw "Windows up requires production. Use ops/quantx.sh for macOS development."
   }
   if ($Component) {
     if ($Component -eq "monitor") {
@@ -1610,6 +1589,8 @@ function Invoke-Up {
   }
   $Profile = $resolvedProfile
   Initialize-PythonEnvironment
+  & (Resolve-Python) (Join-Path $Root "ops\runtime_config.py") $env:ENV
+  if ($LASTEXITCODE -ne 0) { throw "Environment isolation validation failed." }
   $existing = @(Read-State)
   $live = @($existing | Where-Object { Get-TrackedProcess -Entry $_ })
   if ($live.Count -gt 0) {
@@ -1619,14 +1600,11 @@ function Invoke-Up {
   Assert-PortsAvailable -Ports @(
     8080,
     $ApiPort,
-    $MarketGatewayPort,
-    5250,
-    5251
+    $MarketGatewayPort
   )
   $python = Resolve-Python
   $aiRuntimePython = Resolve-AiRuntimePython
   $workerPython = $null
-  $node = Resolve-Node
   $qmtPython = $null
   $agentMode = Set-DevTradingModeEnvironment
   $qmtAgentLaunchAllowed = $false
@@ -1697,22 +1675,13 @@ function Invoke-Up {
   if (-not (Test-Path -LiteralPath $caddy -PathType Leaf)) {
     throw "Caddy is missing. Run: .\ops\quantx.ps1 bootstrap"
   }
-  $vite = Join-Path $Root "node_modules\vite\bin\vite.js"
-  if (-not (Test-Path -LiteralPath $vite -PathType Leaf)) {
-    throw "Frontend dependencies are missing. Run npm install at the repository root."
-  }
-  $vitePress = Join-Path $Root "node_modules\vitepress\bin\vitepress.js"
-  $generateDocs = Join-Path `
-    $Root `
-    "apps\docs\scripts\generate-graphql-reference.mjs"
-  if (
-    -not (Test-Path -LiteralPath $vitePress -PathType Leaf) -or
-    -not (Test-Path -LiteralPath $generateDocs -PathType Leaf)
-  ) {
-    throw "Documentation dependencies are missing. Run npm install at the repository root."
+  foreach ($artifact in @("apps\web\dist\index.html", "apps\docs\dist\index.html")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $artifact) -PathType Leaf)) {
+      throw "Production artifact missing: $artifact. Build before startup."
+    }
   }
 
-  $env:ENV = "development"
+  $env:ENV = if ($Environment -eq "production") { "production" } else { "development" }
   $env:RUNTIME_PROFILE = $Profile
   $env:PREFECT_ENABLED = if ($Profile -eq "full") { "true" } else { "false" }
   $env:PYTHONPATH = Get-WorkspacePythonPath
@@ -1775,30 +1744,6 @@ function Invoke-Up {
       -WorkingDirectory $Root `
       -DatabaseProcessRole "ai-runtime"
 
-    Start-ManagedProcess `
-      -Name "web" `
-      -Executable $node `
-      -Arguments @($vite, "--host", "127.0.0.1", "--port", "5250") `
-      -WorkingDirectory (Join-Path $Root "apps\web")
-    Wait-PortReady -Name "Vite" -Port 5250
-
-    & $node $generateDocs
-    if ($LASTEXITCODE -ne 0) {
-      throw "GraphQL documentation reference generation failed."
-    }
-    Start-ManagedProcess `
-      -Name "docs" `
-      -Executable $node `
-      -Arguments @(
-        $vitePress,
-        "dev",
-        "--host", "127.0.0.1",
-        "--port", "5251",
-        "--strictPort"
-      ) `
-      -WorkingDirectory (Join-Path $Root "apps\docs")
-    Wait-PortReady -Name "VitePress" -Port 5251
-
     if ($Profile -eq "full") {
       Wait-HttpReady `
         -Name "External Prefect Server" `
@@ -1822,9 +1767,7 @@ function Invoke-Up {
         try {
           $env:PYTHONPATH = Get-QmtAgentPythonPath
           if ($agentMode -eq "live") {
-            # Keep API/Engine in development while satisfying the QMT Agent's
-            # explicit real-trading environment gate for this child process.
-            $env:ENV = "testing"
+            $env:ENV = "production"
           }
           $qmtProcessLaunchStartedAt = [datetime]::UtcNow
           Start-ManagedProcess `
@@ -1869,7 +1812,7 @@ function Invoke-Up {
     }
     $modeLabel = if ($Profile -eq "full") { " ($agentMode)" } else { "" }
     Write-Host (
-      "QuantX dev/$Profile$modeLabel is available at " +
+      "QuantX $Environment/$Profile$modeLabel is available at " +
       ((Get-DevGatewayUrls) -join ", ")
     ) -ForegroundColor Cyan
   } catch {
@@ -1907,7 +1850,7 @@ function Invoke-MonitorUp {
   $python = Resolve-Python
   $stdout = Join-Path $LogDirectory "monitor.stdout.log"
   $stderr = Join-Path $LogDirectory "monitor.stderr.log"
-  $env:ENV = "development"
+  $env:ENV = if ($Environment -eq "production") { "production" } else { "development" }
   $env:PYTHONPATH = Get-WorkspacePythonPath
   $env:MONITOR_DATABASE_PATH = Join-Path $MonitorRuntime "quantx-monitor.sqlite3"
   $process = Start-Process `
@@ -2061,7 +2004,7 @@ function Invoke-Status {
       ) -f @(
         $runtimeConfiguration.profile,
         $runtimeConfiguration.agentMode,
-        $runtimeConfiguration.configuredAccount,
+        ([int][bool]$runtimeConfiguration.configuredAccount),
         $liveTradingLabel
       )
     )
@@ -2080,9 +2023,7 @@ function Invoke-Status {
     8080,
     $ApiPort,
     $MarketGatewayPort,
-    $MonitorPort,
-    5250,
-    5251
+    $MonitorPort
   )) {
     $owner = Get-PortOwner -Port $port
     if ($owner) {
@@ -2286,7 +2227,7 @@ function Register-DevBackupMaintenance {
     }
     $arguments = (
       '-NoProfile -ExecutionPolicy Bypass -File "{0}" backup ' +
-      '-Environment dev'
+      '-Environment production'
     ) -f $PSCommandPath
     $action = New-ScheduledTaskAction `
       -Execute $powerShell `
@@ -2298,20 +2239,30 @@ function Register-DevBackupMaintenance {
       -MultipleInstances IgnoreNew `
       -ExecutionTimeLimit (New-TimeSpan -Hours 2)
     Register-ScheduledTask `
-      -TaskName "QuantX-Dev-Daily-Backup" `
+      -TaskName "QuantX-Production-Daily-Backup" `
       -Action $action `
       -Trigger $trigger `
       -Settings $settings `
       -RunLevel Limited `
       -Force |
       Out-Null
+    $legacyTask = Get-ScheduledTask -TaskName "QuantX-Dev-Daily-Backup" -ErrorAction SilentlyContinue
+    if ($legacyTask) {
+      $ownedLegacy = @($legacyTask.Actions | Where-Object {
+        [string]$_.Arguments -like "*$PSCommandPath*" -and
+        [string]$_.Arguments -like "*-Environment dev*"
+      })
+      if ($ownedLegacy.Count -gt 0) {
+        Unregister-ScheduledTask -TaskName "QuantX-Dev-Daily-Backup" -Confirm:$false
+      }
+    }
     Write-Host (
-      "QuantX dev daily backup task is registered for 16:30."
+      "QuantX production daily backup task is registered for 16:30."
     ) -ForegroundColor Green
     return $true
   } catch {
     Write-Warning (
-      "Failed to register QuantX-Dev-Daily-Backup: " +
+      "Failed to register QuantX production daily backup maintenance: " +
       $_.Exception.Message
     )
     return $false

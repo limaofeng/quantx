@@ -1,0 +1,33 @@
+name: quantx-development
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: quantx_dev
+      POSTGRES_PASSWORD: ${QUANTX_DEV_POSTGRES_PASSWORD:?Set a local development password}
+      POSTGRES_DB: quantx_dev
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: ["redis:/data"]
+  influxdb:
+    image: influxdb:3-core
+    command: ["influxdb3", "serve", "--node-id", "quantx-dev", "--object-store", "file", "--data-dir", "/var/lib/influxdb3/data"]
+    ports: ["127.0.0.1:8181:8181"]
+    volumes: ["influxdb:/var/lib/influxdb3"]
+  prefect:
+    image: prefecthq/prefect:3-python3.12
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    environment:
+      PREFECT_HOME: /var/lib/prefect
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+    ports: ["127.0.0.1:4200:4200"]
+    volumes: ["prefect:/var/lib/prefect"]
+volumes:
+  postgres:
+  redis:
+  influxdb:
+  prefect:

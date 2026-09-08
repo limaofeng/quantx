@@ -83,6 +83,12 @@ class LiveBroker(BrokerBase):
 
   async def connect(self) -> bool:
     """连接到真实交易系统"""
+    from quantx_contracts.runtime_environment import live_runtime_allowed
+
+    from quantx_infrastructure.config.settings import settings
+
+    if not live_runtime_allowed(settings.environment):
+      return False
     try:
       from quantx_infrastructure.services.trading_service import TradingService
 

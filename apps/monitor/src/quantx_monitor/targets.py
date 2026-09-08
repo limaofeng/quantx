@@ -14,6 +14,7 @@ TARGETS: tuple[TargetDefinition, ...] = (
   TargetDefinition("api-public", "API 公共链路", TargetGroup.RUNTIME),
   TargetDefinition("api-process", "API 进程", TargetGroup.RUNTIME),
   TargetDefinition("market-gateway", "行情服务", TargetGroup.RUNTIME),
+  TargetDefinition("development-data", "跨环境行情与补数", TargetGroup.RUNTIME, optional=True),
   TargetDefinition(
     "engine",
     "策略引擎",

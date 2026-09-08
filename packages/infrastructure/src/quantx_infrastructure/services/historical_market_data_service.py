@@ -557,6 +557,8 @@ class HistoricalMarketDataService:
     order_by = "time DESC" if order == "desc" else "time ASC"
 
     if period in self._BASE_PERIODS:
+      from quantx_infrastructure.config.settings import settings
+
       klines = await asyncio.to_thread(
         self.kline_repo.find_all,
         measurement=f"kline_{period}",
@@ -566,7 +568,7 @@ class HistoricalMarketDataService:
         limit=limit,
         order_by=order_by,
         as_frame=False,
-        use_chunking=period != "1d",
+        use_chunking=period != "1d" or settings.environment == "development",
       )
       return await self._apply_dividend_adjustment_async(
         klines, stock_code, dividend_type

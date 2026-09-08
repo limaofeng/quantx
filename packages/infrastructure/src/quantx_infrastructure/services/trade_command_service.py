@@ -836,6 +836,10 @@ class TradeCommandService:
   ) -> AccountExecutionControl:
     """Validate non-locking gates before a BUY enters durable admission."""
 
+    from quantx_contracts.runtime_environment import live_runtime_allowed
+
+    if not live_runtime_allowed(settings.environment):
+      raise AgentUnavailableError("当前平台或应用环境禁止真实交易")
     if not settings.enable_real_trading:
       raise AgentUnavailableError("服务端真实交易总开关未启用")
     if account_id not in set(settings.real_trading_account_allowlist or []):
@@ -903,6 +907,10 @@ class TradeCommandService:
     authoritative reconciliation snapshot and a ready live device.
     """
 
+    from quantx_contracts.runtime_environment import live_runtime_allowed
+
+    if not live_runtime_allowed(settings.environment):
+      raise AgentUnavailableError("当前平台或应用环境禁止真实交易")
     if not settings.enable_real_trading:
       raise AgentUnavailableError("服务端真实交易总开关未启用")
     if account_id not in set(settings.real_trading_account_allowlist or []):

@@ -4,14 +4,14 @@
 只建立出站 HTTP(S)/WS(S)；同一 Agent 进程另提供固定只读健康监听，不导入服务端
 ORM、Repository 或策略实现。
 
-QMT Agent 是 Windows Dev 主机上的独立进程，由统一 `ops/quantx.ps1` 启停。
+QMT Agent 是 Windows 生产主机上的独立进程，由统一 `ops/quantx.ps1` 启停。
 它只从登记的服务根地址派生 token、控制 WebSocket、行情
 WebSocket 和历史上传地址。登记地址必须是无凭据、无路径、无查询参数的 `http://`
 或 `https://` 根地址。Agent 严格保留登记 scheme 和 authority：HTTP 派生 HTTP/WS，
 HTTPS 派生 HTTPS/WSS；任何重定向、系统代理、自动换址或跨 scheme 回退均被禁止，
 HTTPS 证书失败不会降级为 HTTP。
 
-当前个人 Dev 环境固定登记 `http://192.168.5.6:8080`，并只在受控私有局域网
+当前个人生产环境固定登记 `http://192.168.5.6:8080`，并只在受控私有局域网
 使用 HTTP/WS。Agent 仍设置 `trust_env=false` 和 `proxy=None`，不接受重定向、
 系统代理或自动换址。
 
@@ -22,7 +22,7 @@ Agent venv，也不使用服务端 Python 兜底。统一启动器优先采用�
 
 设备密钥保存在 Windows Credential Manager，服务端只保存哈希；QMT 配置、
 SQLite journal 和历史上传 spool 也只留在 Windows。运行模式为 `data-only`、
-`paper` 或 `live`。`live` 只允许在 `ENV=testing`，且同时
+`paper` 或 `live`。日常 `live` 使用 `ENV=production`（单独授权的真实交易测试可使用 `ENV=testing`），且同时
 显式设置 `ENABLE_REAL_TRADING=true`、`QMT_REAL_TRADING_ENABLED=true` 和唯一
 账户 `QMT_ACCOUNT_WHITELIST` 时启动。服务端账户白名单、账户增仓授权、完整快照、
 对账和策略授权仍会阻断不合规命令；`T_TRADE_LIVE_ENABLED` 只控制做 T 助手，

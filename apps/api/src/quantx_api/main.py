@@ -615,6 +615,17 @@ async def request_dev_shutdown(request: Request):
   return {"status": "shutdown_requested"}
 
 
+@app.get("/runtime/environment")
+async def deployment_environment() -> dict[str, str]:
+  import os
+
+  return {
+    "environment": settings.environment,
+    "mode": os.environ.get("QMT_AGENT_MODE", "data-only"),
+    "marketSource": "remote" if os.environ.get("QUANTX_MARKET_DATA_URL") else "qmt" if settings.environment == "production" else "replay",
+  }
+
+
 @app.get("/health/live")
 async def health_live():
   return {"status": "alive", "component": "api"}

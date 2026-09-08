@@ -4,6 +4,7 @@
 """
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -401,6 +402,20 @@ class Settings(BaseSettings):
 
   def __init__(self, **data):
     super().__init__(**data)
+    if sys.platform == "darwin" and self.environment == "production":
+      raise ValueError("Production services are restricted to Windows")
+
+    if self.environment == "development":
+      self.enable_real_trading = False
+      self.real_trading_account_allowlist = []
+      if sys.platform == "darwin":
+        from urllib.parse import urlsplit
+
+        for endpoint in (self.database_url, self.redis_url, self.influxdb_host, self.prefect_api_url):
+          if urlsplit(endpoint).hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("macOS development requires local data services")
+        if not urlsplit(self.database_url).path.endswith("_dev") or not self.influxdb_database.endswith("_dev"):
+          raise ValueError("macOS development requires explicitly named _dev databases")
 
     # 处理CORS_ORIGINS字符串转列表
     if isinstance(self.cors_origins, str):

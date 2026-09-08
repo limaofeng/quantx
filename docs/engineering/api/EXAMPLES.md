@@ -3,7 +3,7 @@
 ## 统一启动
 
 ```powershell
-.\ops\quantx.ps1 up -Environment dev -Profile web
+.\ops\quantx.ps1 up -Environment production -Profile full
 Invoke-RestMethod http://127.0.0.1:8080/health/components
 .\ops\quantx.ps1 down
 ```

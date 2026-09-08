@@ -58,6 +58,11 @@ async def recover_failed_market_data_request(
   }
   if device_id is not None:
     create_kwargs["device_id"] = device_id
+  source_request = await store.market_data_request(request_id)
+  if source_request is None:
+    return None
+  if source_request.get("development_only"):
+    create_kwargs["development_only"] = True
   replacement_id = await store.create_market_data_request(
     payload,
     **create_kwargs,
@@ -299,6 +304,14 @@ async def request_agent_market_data(
   retry_failed_requests: bool = True,
 ) -> dict[str, Any]:
   """Request, ingest, and terminally converge one idempotent XTData transfer."""
+  from quantx_infrastructure.config.settings import settings
+
+  if settings.environment == "development":
+    from quantx_infrastructure.services.development_history_import import (
+      request_remote_history,
+    )
+
+    return await request_remote_history(payload, timeout_seconds=timeout_seconds)
   store = DurableRuntimeStore()
   try:
     create_kwargs: dict[str, Any] = {}

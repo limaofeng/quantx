@@ -18,8 +18,14 @@ const envSchema = z.object({
   VITE_APP_TITLE: z.string().default('QuantX'),
   VITE_APP_VERSION: z.string().default('1.0.0'),
   VITE_APP_ENV: z
-    .enum(['development', 'dev', 'staging', 'prod'])
-    .default('development'),
+    .enum(['development', 'production', 'testing'])
+    .default(
+      import.meta.env.PROD
+        ? 'production'
+        : import.meta.env.MODE === 'test'
+          ? 'testing'
+          : 'development'
+    ),
   VITE_DEFAULT_ACCOUNT_ID: z.string().trim().default(''),
   VITE_AUTH_DEVELOPMENT_AUTO_LOGIN: z
     .string()
@@ -105,10 +111,8 @@ export const isProduction = env.NODE_ENV === 'production';
 export const isTest = env.NODE_ENV === 'test';
 
 // 应用环境判断
-export const isDevEnv =
-  env.VITE_APP_ENV === 'development' || env.VITE_APP_ENV === 'dev';
-export const isStagingEnv = env.VITE_APP_ENV === 'staging';
-export const isProdEnv = env.VITE_APP_ENV === 'prod';
+export const isDevEnv = env.VITE_APP_ENV === 'development';
+export const isProdEnv = env.VITE_APP_ENV === 'production';
 
 export const authConfig = {
   developmentAutoLogin: isDevelopment && env.VITE_AUTH_DEVELOPMENT_AUTO_LOGIN,
@@ -199,11 +203,9 @@ export function getEnvSpecificConfig<T>(configs: {
   default: T;
 }): T {
   switch (env.VITE_APP_ENV) {
-    case 'dev':
+    case 'development':
       return configs.development || configs.default;
-    case 'staging':
-      return configs.staging || configs.default;
-    case 'prod':
+    case 'production':
       return configs.production || configs.default;
     default:
       return configs.default;

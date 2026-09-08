@@ -159,12 +159,15 @@ class InfrastructureResearchDataSource:
     if end_at < start_at:
       raise ValueError("日线查询结束时间不能早于开始时间")
 
+    from quantx_infrastructure.config.settings import settings
+
     repository = self._get_kline_repository()
+    chunk_days = 2 if settings.environment == "development" else _INFLUX_TIME_CHUNK_DAYS
     parts: dict[str, list[pd.DataFrame]] = {}
     for window_start, window_end in _time_windows(
       start_at,
       end_at,
-      days=_INFLUX_TIME_CHUNK_DAYS,
+      days=chunk_days,
     ):
       for batch in _batches(codes, batch_size):
         result = await asyncio.to_thread(
@@ -389,6 +392,14 @@ class InfrastructureResearchDataSource:
         }
       )
 
+    from quantx_infrastructure.config.settings import settings
+
+    if settings.environment == "development":
+      from quantx_infrastructure.services.data_exchange_reference import (
+        imported_factor_evidence,
+      )
+
+      parsed_evidence.extend(await imported_factor_evidence(session, codes))
     if not parsed_evidence:
       return pd.DataFrame(invalid_evidence, dtype=object)
     evidence_codes = sorted({item.stock_code for item, _, _ in parsed_evidence})

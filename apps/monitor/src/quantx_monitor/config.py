@@ -12,13 +12,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 def _environment_files() -> tuple[str, ...]:
   configured = os.environ.get("QUANTX_ENV_FILE", "").strip()
-  candidates = [configured] if configured else []
-  candidates.extend([".env.development", ".env"])
+  environment = os.environ.get("ENV", "development")
+  candidates = [".env", f".env.{environment}"]
+  if configured:
+    candidates.append(configured)
   return tuple(value for value in candidates if value)
 
 
 class MonitorSettings(BaseSettings):
   """Small, explicit settings surface for known QuantX targets."""
+  market_data_enabled: bool = Field(default=False, validation_alias="QUANTX_MARKET_DATA_ENABLED")
+  environment: str = Field(default="development", validation_alias="ENV")
 
   host: str = Field(default="127.0.0.1", validation_alias="MONITOR_HOST")
   port: int = Field(default=18083, validation_alias="MONITOR_PORT")

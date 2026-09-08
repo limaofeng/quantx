@@ -3534,9 +3534,19 @@ class StrategyExecutor:
       if runtime.context.mode == StrategyRunMode.BACKTEST:
         # 回测模式：配置为文件存储
         if runtime.context.backtest_id:
+          from quantx_infrastructure.services.data_exchange import (
+            backtest_data_versions,
+          )
+
+          versions = await backtest_data_versions(
+            list(runtime.context.instruments or []),
+            runtime.context.backtest_start_time or time_utils.now(),
+            runtime.context.backtest_end_time or time_utils.now(),
+          )
           runtime.state_manager.set_backtest_mode(
             runtime.context.backtest_id,
             backtest_version=runtime.context.backtest_version,
+            market_data_versions=versions,
           )
 
       # 附加日志广播 Handler，并把每个运行实例绑定到独立日志文件。

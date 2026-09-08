@@ -20,7 +20,7 @@ packages/
   application/  用例、端口接口与状态推进
   infrastructure/
                 ORM、Repository、数据库适配与持久化消息箱
-ops/            Windows Dev Caddy 与统一运维脚本
+ops/            Windows 生产、macOS 开发与统一运维脚本
 tests/          按架构边界组织的 Python 测试
 ```
 
@@ -29,7 +29,7 @@ tests/          按架构边界组织的 Python 测试
 Windows 本机从仓库根目录使用唯一入口：
 
 ```powershell
-.\ops\quantx.ps1 up -Environment dev -Profile web
+.\ops\quantx.ps1 up -Environment production -Profile full
 .\ops\quantx.ps1 status
 .\ops\quantx.ps1 logs
 .\ops\quantx.ps1 down
@@ -60,8 +60,8 @@ PostgreSQL、InfluxDB 和 Redis 是外部持久化服务；脚本只检查它们
 安装、启动或停止它们。端口冲突时，`up` 只报告占用者，绝不会终止未受
 QuantX 状态文件跟踪的进程。
 
-项目不再维护 production、WinSW、Kubernetes、release 安装或 macOS 运行路径；
-个人使用只通过当前 Windows 工作区的 `dev` 启动器运行。
+Windows 使用 production 实盘环境；macOS 使用 dev 开发环境和独立本地数据服务。
+部署与跨环境行情接口见 docs/engineering/deployment/README.md；不使用 WinSW 或 Kubernetes。
 
 ## 验证
 

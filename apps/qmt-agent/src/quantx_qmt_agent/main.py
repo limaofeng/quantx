@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import httpx
+from quantx_contracts.runtime_environment import live_runtime_allowed
 
 from .broker import LiveBroker, QmtDataBroker
 from .credentials import DeviceCredentialStore, state_directory
@@ -117,8 +118,8 @@ def _require_safe_run_mode(mode: str, allowed_accounts: set[str]) -> None:
     raise SystemExit("live mode requires exactly one QMT account")
 
   environment = os.environ.get("ENV", "").strip().lower()
-  if environment != "testing":
-    raise SystemExit("live mode requires ENV=testing")
+  if not live_runtime_allowed(environment):
+    raise SystemExit("live mode requires Windows and ENV=production or testing")
   if os.environ.get("ENABLE_REAL_TRADING", "").strip().lower() != "true":
     raise SystemExit("live mode requires ENABLE_REAL_TRADING=true")
   if os.environ.get("QMT_REAL_TRADING_ENABLED", "").strip().lower() != "true":
