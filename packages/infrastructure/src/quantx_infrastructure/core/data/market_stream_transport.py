@@ -1011,6 +1011,31 @@ class MarketStreamStore:
       return after, ticks
     return None
 
+  async def load_selected_snapshot(
+    self, codes: frozenset[str]
+  ) -> tuple[MarketStreamState, dict[str, dict]] | None:
+    """Read a bounded subscriber snapshot and watermark at one Redis instant."""
+    if not codes or len(codes) > 500:
+      raise ValueError("Invalid market snapshot selection")
+    ordered = sorted(codes)
+    redis = await self.redis()
+    raw_state, raw_ticks = await redis.eval(
+      "return {redis.call('GET', KEYS[1]), redis.call('HMGET', KEYS[2], unpack(ARGV))}",
+      2,
+      self.keyspace.state_key,
+      self.keyspace.latest_key,
+      *ordered,
+    )
+    state = MarketStreamState.from_bytes(raw_state)
+    if state is None or state.status != "READY" or state.commit_phase != "IDLE":
+      return None
+    ticks = {
+      code: orjson.loads(value)
+      for code, value in zip(ordered, raw_ticks, strict=True)
+      if value is not None
+    }
+    return state, ticks
+
   async def cleanup_legacy_whole_controls(self) -> int:
     redis = await self.redis()
     controls = await redis.hgetall(LEGACY_ACTIVE_SUBSCRIPTIONS_KEY)

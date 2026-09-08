@@ -54,7 +54,7 @@ def test_snapshot_preserves_capture_time_and_gap_forces_resync(monkeypatch):
   )
   monkeypatch.setattr(
     api.market_stream_store,
-    "load_snapshot",
+    "load_selected_snapshot",
     AsyncMock(
       return_value=(
         SimpleNamespace(stream_id="source", sequence=3, captured_at=captured),
@@ -92,7 +92,7 @@ async def test_disconnect_releases_connection_without_waiting_for_market(monkeyp
   )
   monkeypatch.setattr(
     api.market_stream_store,
-    "load_snapshot",
+    "load_selected_snapshot",
     AsyncMock(
       return_value=(
         SimpleNamespace(

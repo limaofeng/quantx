@@ -174,7 +174,7 @@ async def stream(socket: WebSocket) -> None:
         queue.put_nowait(payload)
 
     reader = asyncio.create_task(collect())
-    snapshot = await market_stream_store.load_snapshot()
+    snapshot = await market_stream_store.load_selected_snapshot(selected)
     if snapshot is None:
       raise ValueError("Source snapshot unavailable")
     state, ticks = snapshot

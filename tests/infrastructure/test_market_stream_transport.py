@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_contracts import MarketBatchKind, MarketStreamBatch
@@ -14,6 +16,41 @@ from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamState,
   MarketStreamStore,
 )
+
+
+@pytest.mark.asyncio
+async def test_selected_snapshot_uses_one_read_and_preserves_missing_symbols():
+  state = MarketStreamState(
+    stream_id="source", sequence=7, status="READY", instrument_count=2
+  )
+  redis = SimpleNamespace(
+    eval=AsyncMock(return_value=[state.to_bytes(), [b'{"time":1}', None]])
+  )
+  store = MarketStreamStore()
+  store.redis = AsyncMock(return_value=redis)
+  actual, ticks = await store.load_selected_snapshot(
+    frozenset({"600001.SH", "600000.SH"})
+  )
+  assert actual.sequence == 7
+  assert ticks == {"600000.SH": {"time": 1}}
+  redis.eval.assert_awaited_once()
+  assert redis.eval.call_args.args[-2:] == ("600000.SH", "600001.SH")
+
+
+@pytest.mark.asyncio
+async def test_selected_snapshot_rejects_unready_source_and_unbounded_selection():
+  state = MarketStreamState(
+    stream_id="source", sequence=1, status="SYNCING", instrument_count=1
+  )
+  store = MarketStreamStore()
+  store.redis = AsyncMock(
+    return_value=SimpleNamespace(
+      eval=AsyncMock(return_value=[state.to_bytes(), [b"{}"]])
+    )
+  )
+  assert await store.load_selected_snapshot(frozenset({"600000.SH"})) is None
+  with pytest.raises(ValueError):
+    await store.load_selected_snapshot(frozenset(str(i) for i in range(501)))
 
 
 class FakePipeline:
