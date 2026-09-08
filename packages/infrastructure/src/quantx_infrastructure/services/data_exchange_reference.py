@@ -59,6 +59,31 @@ def encode(value):
   return getattr(value, "value", value)
 
 
+def reference_factor_coverage(proof, values, *, code: str, day: date) -> dict:
+  if proof is None:
+    return {"status": "UNVERIFIED", "reason": "AUDIT_MISSING"}
+  parsed = parse_divid_factor_evidence(**dict(proof)) or ()
+  evidence = next((item for item in parsed if item.stock_code == code), None)
+  if evidence is None:
+    return {"status": "UNVERIFIED", "reason": "AUDIT_INVALID"}
+  if evidence.end_date < day:
+    return {
+      "status": "UNVERIFIED",
+      "reason": "COVERAGE_END_BEFORE_AS_OF",
+      "audited_end_date": evidence.end_date.isoformat(),
+    }
+  if not current_rows_match_evidence(evidence, values):
+    return {"status": "UNVERIFIED", "reason": "CURRENT_ROWS_MISMATCH"}
+  return {
+    "status": "VERIFIED",
+    "start_date": evidence.start_date.strftime("%Y%m%d"),
+    "end_date": evidence.end_date.strftime("%Y%m%d"),
+    "evidence": {key: encode(value) for key, value in asdict(evidence).items()},
+    "expected_chunks": proof["expected_chunks"],
+    "received_chunks": proof["received_chunks"],
+  }
+
+
 async def export_reference(code: str, day: date) -> dict:
   async with AsyncSessionLocal() as db:
     instrument = await db.get(Instrument, code)
@@ -99,8 +124,8 @@ async def export_reference(code: str, day: date) -> dict:
         AND request_payload->>'operation'='divid_factors'
         AND (request_payload->'stock_list')::jsonb @> CAST(:codes AS jsonb)
         AND ingestion_result->'replacement_audit' IS NOT NULL
-        AND request_payload->>'end_time' >= :day
-      ORDER BY completed_at DESC LIMIT 1
+      ORDER BY (request_payload->>'end_time' >= :day) DESC NULLS LAST,
+               completed_at DESC LIMIT 1
     """),
           {"codes": json.dumps([code]), "day": day.strftime("%Y%m%d")},
         )
@@ -108,20 +133,12 @@ async def export_reference(code: str, day: date) -> dict:
       .mappings()
       .one_or_none()
     )
-    evidence = None
-    if proof:
-      parsed = parse_divid_factor_evidence(**dict(proof)) or ()
-      values = [
-        tuple(getattr(item, field) for field in FACTOR_FIELDS) for item in factors
-      ]
-      evidence = next(
-        (
-          item
-          for item in parsed
-          if item.stock_code == code and current_rows_match_evidence(item, values)
-        ),
-        None,
-      )
+    coverage = reference_factor_coverage(
+      proof,
+      [tuple(getattr(item, field) for field in FACTOR_FIELDS) for item in factors],
+      code=code,
+      day=day,
+    )
     return {
       "as_of": day.isoformat(),
       "instrument": {
@@ -139,16 +156,7 @@ async def export_reference(code: str, day: date) -> dict:
       "factors": [
         {key: encode(getattr(item, key)) for key in FACTOR_FIELDS} for item in factors
       ],
-      "factor_coverage": {
-        "status": "VERIFIED",
-        "start_date": evidence.start_date.strftime("%Y%m%d"),
-        "end_date": evidence.end_date.strftime("%Y%m%d"),
-        "evidence": {key: encode(value) for key, value in asdict(evidence).items()},
-        "expected_chunks": proof["expected_chunks"],
-        "received_chunks": proof["received_chunks"],
-      }
-      if evidence
-      else {"status": "UNVERIFIED"},
+      "factor_coverage": coverage,
     }
 
 
