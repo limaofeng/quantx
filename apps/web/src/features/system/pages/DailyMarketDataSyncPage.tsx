@@ -1,3 +1,4 @@
+import { format, startOfDay } from 'date-fns';
 import {
   ArrowLeft,
   AlertTriangle,
@@ -13,11 +14,12 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
+import type { DateRange } from 'react-day-picker';
 import { useQuery } from 'urql';
 import { useLocation } from 'wouter';
 
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { DateRangePicker } from '@/components/ui/date-range-picker';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { GetHoldingsQuery } from '@/features/portfolio/hooks/usePortfolio';
@@ -41,12 +43,6 @@ const periodOptions = [
 
 type PeriodValue = (typeof periodOptions)[number]['value'];
 type TargetMode = 'holdings' | 'sectors' | 'stocks';
-
-function todayInputValue() {
-  const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-  return local.toISOString().slice(0, 10);
-}
 
 function toCompactDate(value: string) {
   return value ? value.replace(/-/g, '') : '';
@@ -101,8 +97,12 @@ export function DailyMarketDataSyncPage() {
   const [selectedSectors, setSelectedSectors] =
     useState<string[]>(sectorOptions);
   const [stockText, setStockText] = useState('000001.SZ\n600000.SH');
-  const [startDate, setStartDate] = useState(todayInputValue());
-  const [endDate, setEndDate] = useState(todayInputValue());
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
+    const today = startOfDay(new Date());
+    return { from: today, to: today };
+  });
+  const startDate = dateRange?.from ? format(dateRange.from, 'yyyy-MM-dd') : '';
+  const endDate = dateRange?.to ? format(dateRange.to, 'yyyy-MM-dd') : '';
   const [periods, setPeriods] = useState<PeriodValue[]>(['1d', '1m']);
   const [skipDownload, setSkipDownload] = useState(false);
   const [computeDailySignals, setComputeDailySignals] = useState(true);
@@ -441,38 +441,20 @@ export function DailyMarketDataSyncPage() {
                 </h2>
               </div>
 
-              <div className="mt-4 grid grid-cols-1 gap-ui-section md:grid-cols-2">
-                <div>
-                  <label
-                    htmlFor="market-sync-start"
-                    className="text-ui-caption font-black uppercase tracking-[0.2em] text-slate-500"
-                  >
-                    Start Date
-                  </label>
-                  <Input
-                    id="market-sync-start"
-                    type="date"
-                    value={startDate}
-                    onChange={event => setStartDate(event.target.value)}
-                    className="mt-2 h-9 border-slate-200/70 bg-slate-50/70 text-ui-label font-bold dark:border-white/10 dark:bg-white/[0.03]"
-                  />
-                </div>
-                <div>
-                  <label
-                    htmlFor="market-sync-end"
-                    className="text-ui-caption font-black uppercase tracking-[0.2em] text-slate-500"
-                  >
-                    End Date
-                  </label>
-                  <Input
-                    id="market-sync-end"
-                    type="date"
-                    value={endDate}
-                    onChange={event => setEndDate(event.target.value)}
-                    className="mt-2 h-9 border-slate-200/70 bg-slate-50/70 text-ui-label font-bold dark:border-white/10 dark:bg-white/[0.03]"
-                  />
-                </div>
-              </div>
+              <fieldset className="mt-4 min-w-0">
+                <legend className="text-ui-label font-medium text-muted-foreground">
+                  同步日期区间
+                </legend>
+                <DateRangePicker
+                  value={dateRange}
+                  onChange={setDateRange}
+                  className="mt-2"
+                  buttonClassName="h-control-default bg-background font-mono"
+                />
+                <p className="mt-2 text-ui-caption text-muted-foreground">
+                  选择开始和结束日期，或输入 YYYY-MM-DD；包含起止当日。
+                </p>
+              </fieldset>
 
               <div className="mt-4 flex flex-wrap gap-2">
                 {periodOptions.map(option => {
@@ -506,7 +488,8 @@ export function DailyMarketDataSyncPage() {
 
               <div className="mt-4 rounded-lg border border-blue-500/15 bg-blue-500/5 p-3 text-ui-label font-medium leading-relaxed text-blue-700 dark:text-blue-300">
                 <Info className="mr-2 inline h-3.5 w-3.5" />
-                行情入库后可供图表与回测共用，无需再导出文件。Tick 按交易日和标的分批获取；
+                行情入库后可供图表与回测共用，无需再导出文件。Tick
+                按交易日和标的分批获取；
                 历史可用范围取决于行情源，任务失败时请查看日志中的日期和标的。
                 获取完成只代表返回的数据已入库，回测前仍需检查覆盖率和必要字段。
               </div>
