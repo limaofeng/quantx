@@ -24,6 +24,7 @@ from .market_data_timing import market_data_stage
 MARKET_DATA_READBACK_PAGE_ROWS = 2000
 MARKET_DATA_READBACK_GROUP_CODES = 20
 MARKET_DATA_READBACK_GROUP_KEYS = 10_000
+MARKET_DATA_READBACK_CONCURRENCY = 2
 MARKET_DATA_READBACK_MAX_ATTEMPTS = 4
 MARKET_DATA_READBACK_RETRY_DELAYS_SECONDS = (0.25, 0.75, 1.5)
 
@@ -759,23 +760,23 @@ async def verify_persisted_bar_summaries(
 
   pending: list[ExpectedBarKeyBatch] = []
 
-  async def flush_pending() -> None:
+  async def verify_group(group: tuple[ExpectedBarKeyBatch, ...]) -> None:
     nonlocal existing_rows_observed
-    if not pending:
+    if not group:
       return
     for attempt in range(1, max_attempts + 1):
       try:
-        if len(pending) == 1:
+        if len(group) == 1:
           result = await _await_readback(
             _read_expected_key_batch_once,
-            batch=pending[0],
+            batch=group[0],
             connection=connection,
             page_rows=page_rows,
           )
         else:
           result = await _await_readback(
             _read_expected_key_group_once,
-            batches=tuple(pending),
+            batches=tuple(group),
             connection=connection,
             page_rows=page_rows,
           )
@@ -785,68 +786,106 @@ async def verify_persisted_bar_summaries(
         await sleep(float(retry_delays[attempt - 1]))
       else:
         existing_rows_observed += int(result["existing_rows_observed"])
-        for item in pending:
+        for item in group:
           group_name = f"{item.code}/{item.period}"
           attempts_by_group[group_name] = max(
             attempts_by_group.get(group_name, 0), attempt
           )
-        pending.clear()
         return
 
-  async for batch in expected_key_batches:
-    if not isinstance(batch, ExpectedBarKeyBatch):
-      raise ValueError("market-data persistence verifier received an invalid key batch")
-    pair = (str(batch.code), str(batch.period))
-    expected_summary = summary_by_pair.get(pair)
-    if expected_summary is None:
-      raise ValueError(
-        f"market-data persistence key batch has no summary: {pair[0]}/{pair[1]}"
-      )
-    current_pair_index = pair_order[pair]
-    if current_pair_index < last_pair_index:
-      raise ValueError("market-data persistence key batches are out of group order")
-    last_pair_index = current_pair_index
-    state = observed[pair]
-    for source_time_ms, tick_ordinal in batch.keys:
-      storage_time = _storage_time_for_key(
-        period=pair[1],
-        source_time_ms=source_time_ms,
-        tick_ordinal=tick_ordinal,
-      )
-      if not start_ms <= source_time_ms < end_exclusive_ms:
-        raise ValueError("market-data persistence key is outside the request window")
-      previous_storage_time = state["last_storage_time"]
-      if previous_storage_time is not None and storage_time <= previous_storage_time:
-        raise ValueError("market-data persistence keys are unordered or duplicated")
-      key = historical_bar_key(
-        code=pair[0],
-        period=pair[1],
-        time_ms=source_time_ms,
-        tick_ordinal=tick_ordinal,
-      )
-      if state["row_count"]:
-        state["key_digest"].update(b"\n")
-      state["key_digest"].update(key.encode("utf-8"))
-      state["row_count"] += 1
-      state["min_time"] = (
-        source_time_ms if state["min_time"] is None else state["min_time"]
-      )
-      state["max_time"] = source_time_ms
-      state["last_storage_time"] = storage_time
+  active: set[asyncio.Task[None]] = set()
 
-    if pending and (
-      batch.period == "tick"
-      or pending[0].period != batch.period
-      or any(item.code == batch.code for item in pending)
-      or len(pending) >= MARKET_DATA_READBACK_GROUP_CODES
-      or sum(len(item.keys) for item in pending) + len(batch.keys)
-      > MARKET_DATA_READBACK_GROUP_KEYS
-    ):
-      await flush_pending()
-    pending.append(batch)
-    if batch.period == "tick":
-      await flush_pending()
-  await flush_pending()
+  async def drain_one() -> None:
+    if not active:
+      return
+    done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+    for task in done:
+      # Keep failed tasks owned until finally retrieves and joins every worker.
+      task.result()
+      active.remove(task)
+
+  async def flush_pending() -> None:
+    if not pending:
+      return
+    group = tuple(pending)
+    pending.clear()
+    if group[0].period == "tick":
+      # Tick ordinal verification keeps its existing serial execution.
+      while active:
+        await drain_one()
+      await verify_group(group)
+      return
+    while len(active) >= MARKET_DATA_READBACK_CONCURRENCY:
+      await drain_one()
+    active.add(asyncio.create_task(verify_group(group)))
+
+  try:
+    async for batch in expected_key_batches:
+      if not isinstance(batch, ExpectedBarKeyBatch):
+        raise ValueError(
+          "market-data persistence verifier received an invalid key batch"
+        )
+      pair = (str(batch.code), str(batch.period))
+      expected_summary = summary_by_pair.get(pair)
+      if expected_summary is None:
+        raise ValueError(
+          f"market-data persistence key batch has no summary: {pair[0]}/{pair[1]}"
+        )
+      current_pair_index = pair_order[pair]
+      if current_pair_index < last_pair_index:
+        raise ValueError("market-data persistence key batches are out of group order")
+      last_pair_index = current_pair_index
+      state = observed[pair]
+      for source_time_ms, tick_ordinal in batch.keys:
+        storage_time = _storage_time_for_key(
+          period=pair[1],
+          source_time_ms=source_time_ms,
+          tick_ordinal=tick_ordinal,
+        )
+        if not start_ms <= source_time_ms < end_exclusive_ms:
+          raise ValueError("market-data persistence key is outside the request window")
+        previous_storage_time = state["last_storage_time"]
+        if previous_storage_time is not None and storage_time <= previous_storage_time:
+          raise ValueError("market-data persistence keys are unordered or duplicated")
+        key = historical_bar_key(
+          code=pair[0],
+          period=pair[1],
+          time_ms=source_time_ms,
+          tick_ordinal=tick_ordinal,
+        )
+        if state["row_count"]:
+          state["key_digest"].update(b"\n")
+        state["key_digest"].update(key.encode("utf-8"))
+        state["row_count"] += 1
+        state["min_time"] = (
+          source_time_ms if state["min_time"] is None else state["min_time"]
+        )
+        state["max_time"] = source_time_ms
+        state["last_storage_time"] = storage_time
+
+      if pending and (
+        batch.period == "tick"
+        or pending[0].period != batch.period
+        or any(item.code == batch.code for item in pending)
+        or len(pending) >= MARKET_DATA_READBACK_GROUP_CODES
+        or sum(len(item.keys) for item in pending) + len(batch.keys)
+        > MARKET_DATA_READBACK_GROUP_KEYS
+      ):
+        await flush_pending()
+      pending.append(batch)
+      if batch.period == "tick":
+        await flush_pending()
+    await flush_pending()
+    while active:
+      await drain_one()
+  finally:
+    # An invalid source, exhausted retry or caller cancellation must not leave
+    # readers running after the request releases its ingestion claim.
+    for task in active:
+      if not task.done():
+        task.cancel()
+    if active:
+      await asyncio.shield(asyncio.gather(*active, return_exceptions=True))
 
   for expected in expected_summaries:
     pair = (str(expected["code"]), str(expected["period"]))
