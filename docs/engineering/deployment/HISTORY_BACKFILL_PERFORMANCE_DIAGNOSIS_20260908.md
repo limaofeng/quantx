@@ -667,8 +667,18 @@ CPU 峰值 115.49%、内存峰值 8.53%/16 GiB；完整复测后另外检查健�
 cache_visibility_retry，可能与非空占位行被过滤有关；未保留原始 XTData 帧，根因尚不能确认。
 这是 QMT 源读取路径需要单独定位的现存风险，本次未修改 Agent，也不声称重试已修复该风险。
 
-新任务交接见 [QMT 历史分钟线偶发缺数问题记录](../qmt-agent/HISTORY_SOURCE_MISSING_BARS_HANDOFF_20260908.md)，
-包含请求 ID、证据、待验证假设及后续验收条件。
+**2026-09-09 结案更新：** 后续任务 `01a081b4-1b38-7ee1-99cf-f7238793a327` 已完成，
+修复提交 `ecd3ba5f7`。生产确认了“非空但全为占位行的帧绕过缓存重试”的缺陷；修复将其纳入
+原有总等待 2 秒的有界缓存重读，不重复原生下载。`xtquant-demo` 环境 504 项测试通过，
+生产单标的两次各 241 条、完整批次三次各 72,300 条，接收/保存/回读及基准摘要全部一致。
+其中 `300319.SZ` 和 `300342.SZ` 各一次实际触发占位帧，均等待 0.1 秒重读后恢复 241 条。
+本节后文的“未确认/未修复”描述为当时验收状态，现已由上述修复关闭该已复现缺陷；
+不表示所有类型的上游缺数都已解决。
+
+完整批次请求为 `fda31a41-9a28-413b-a6e7-6069ef849376`、
+`f5c4e931-2363-4bab-ba3b-1d80a140458c`、`27a1b715-80ad-4643-a69b-214830c04480`。
+证据保留于 `.runtime/history-placeholder-b4d06118-a43c-4790-93b3-1a513bfb8800/`，含结果、
+摘要及提取的 Agent 时序。独立任务交接文件已按用户要求删除，其历史内容可在修复提交中查阅。
 
 完整验收证据：`.runtime/history-concurrent-stage-production-batch1.json`、
 `history-concurrent-stage-production-batch2.json`、`history-concurrent-stage-production-redownload_code.json`、
