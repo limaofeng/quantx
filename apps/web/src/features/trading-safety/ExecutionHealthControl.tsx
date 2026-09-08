@@ -394,7 +394,7 @@ function SellDetails({ details }: { details: SellExecutionHealthDetails }) {
   );
 }
 
-type ExecutionHealthPanelProps =
+type ExecutionHealthPanelProps = (
   | {
       details: BuyExecutionHealthDetails;
       onRefresh?: () => void | Promise<void>;
@@ -404,10 +404,98 @@ type ExecutionHealthPanelProps =
       details: SellExecutionHealthDetails;
       onRefresh?: () => void | Promise<void>;
       scope: 'SELL';
-    };
+    }
+) & {
+  presentation?: 'sheet' | 'sidebar';
+};
+
+function ExecutionHealthHeader({
+  accountId,
+  capabilityTone,
+  checkedAt,
+  executionLabel,
+  headerTone,
+  healthLabel,
+  presentation,
+}: {
+  accountId?: string | null;
+  capabilityTone: HealthTone;
+  checkedAt?: string | null;
+  executionLabel: string;
+  headerTone: HealthTone;
+  healthLabel: string;
+  presentation: 'sheet' | 'sidebar';
+}) {
+  const content = (
+    <>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          {presentation === 'sheet' ? (
+            <>
+              <SheetTitle className="text-ui-title font-black text-slate-100">
+                执行健康
+              </SheetTitle>
+              <SheetDescription className="mt-1 font-mono text-ui-micro text-slate-600">
+                {accountId || '未配置账户'}
+              </SheetDescription>
+            </>
+          ) : (
+            <>
+              <div className="text-ui-micro font-black uppercase tracking-[0.2em] text-blue-300">
+                Sell execution
+              </div>
+              <h1 className="mt-1 text-ui-title font-black text-slate-100">
+                执行健康
+              </h1>
+              <p className="mt-1 truncate font-mono text-ui-micro text-slate-600">
+                {accountId || '未配置账户'}
+              </p>
+            </>
+          )}
+        </div>
+        <span className="shrink-0 font-mono text-ui-micro text-slate-600">
+          检查于 {formatCheckedAt(checkedAt)}
+        </span>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <div
+          className={cn(
+            'rounded-md border px-2.5 py-2 text-ui-caption font-black',
+            toneClasses[headerTone]
+          )}
+        >
+          {headerTone === 'emerald' ? (
+            <ShieldCheck className="mr-1.5 inline h-3.5 w-3.5" />
+          ) : (
+            <ShieldAlert className="mr-1.5 inline h-3.5 w-3.5" />
+          )}
+          {healthLabel}
+        </div>
+        <div
+          className={cn(
+            'rounded-md border px-2.5 py-2 text-ui-caption font-black',
+            toneClasses[capabilityTone]
+          )}
+        >
+          交易权限：{executionLabel}
+        </div>
+      </div>
+    </>
+  );
+
+  return presentation === 'sheet' ? (
+    <SheetHeader className="shrink-0 border-b border-white/[0.06] px-ui-section py-3.5 pr-12 text-left">
+      {content}
+    </SheetHeader>
+  ) : (
+    <header className="shrink-0 border-b border-white/[0.06] px-ui-section py-3.5">
+      {content}
+    </header>
+  );
+}
 
 function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
-  const { onRefresh, scope } = props;
+  const { onRefresh, presentation = 'sheet', scope } = props;
   const navigate = useStudioNavigate();
   const {
     accountId,
@@ -471,44 +559,15 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
 
   return (
     <>
-      <SheetHeader className="shrink-0 border-b border-white/[0.06] px-ui-section py-3.5 pr-12 text-left">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <SheetTitle className="text-ui-title font-black text-slate-100">
-              执行健康
-            </SheetTitle>
-            <SheetDescription className="mt-1 font-mono text-ui-micro text-slate-600">
-              {accountId || '未配置账户'}
-            </SheetDescription>
-          </div>
-          <span className="font-mono text-ui-micro text-slate-600">
-            检查于 {formatCheckedAt(safety?.checkedAt)}
-          </span>
-        </div>
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <div
-            className={cn(
-              'rounded-md border px-2.5 py-2 text-ui-caption font-black',
-              toneClasses[headerTone]
-            )}
-          >
-            {headerTone === 'emerald' ? (
-              <ShieldCheck className="mr-1.5 inline h-3.5 w-3.5" />
-            ) : (
-              <ShieldAlert className="mr-1.5 inline h-3.5 w-3.5" />
-            )}
-            {healthLabel}
-          </div>
-          <div
-            className={cn(
-              'rounded-md border px-2.5 py-2 text-ui-caption font-black',
-              toneClasses[capabilityTone]
-            )}
-          >
-            交易权限：{executionLabel}
-          </div>
-        </div>
-      </SheetHeader>
+      <ExecutionHealthHeader
+        accountId={accountId}
+        capabilityTone={capabilityTone}
+        checkedAt={safety?.checkedAt}
+        executionLabel={executionLabel}
+        headerTone={headerTone}
+        healthLabel={healthLabel}
+        presentation={presentation}
+      />
 
       <div
         aria-live="polite"
@@ -772,5 +831,32 @@ export function ExecutionHealthControl(props: ExecutionHealthControlProps) {
         ) : null}
       </SheetContent>
     </Sheet>
+  );
+}
+
+export function ExecutionHealthSidebar(props: ExecutionHealthControlProps) {
+  return (
+    <aside
+      className={cn(
+        'studio-workspace-surface flex h-full min-h-0 flex-col text-slate-200',
+        props.className
+      )}
+    >
+      {props.scope === 'BUY' ? (
+        <ExecutionHealthPanel
+          details={props.details}
+          onRefresh={props.onRefresh}
+          presentation="sidebar"
+          scope="BUY"
+        />
+      ) : (
+        <ExecutionHealthPanel
+          details={props.details}
+          onRefresh={props.onRefresh}
+          presentation="sidebar"
+          scope="SELL"
+        />
+      )}
+    </aside>
   );
 }
