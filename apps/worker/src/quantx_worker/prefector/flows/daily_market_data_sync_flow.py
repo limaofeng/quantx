@@ -324,10 +324,11 @@ async def daily_market_data_sync_flow(
   if not codes:
     raise RuntimeError("PostgreSQL 中没有匹配的行情标的")
   logger.info(
-    "行情同步参数: codes=%s sectors=%s periods=%s range=%s..%s "
+    "行情同步参数: target=%s codes=%s sectors=%s periods=%s range=%s..%s "
     "skip_download=%s compute_daily_signals=%s",
+    "stock_list" if stock_list else "sectors",
     len(codes),
-    sectors or DEFAULT_MARKET_SECTORS,
+    [] if stock_list else (sectors or DEFAULT_MARKET_SECTORS),
     normalized_periods,
     resolved_start,
     resolved_end,
