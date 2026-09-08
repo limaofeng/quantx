@@ -350,6 +350,30 @@ QMT 和行情均 ready，检查时快照约 7 秒。外部数据服务未启停�
 不推断停牌或完整覆盖；非下载请求保持一次读取。新增 `cache_visibility_retry` 计时事件。
 
 定向测试 170 项通过，覆盖迟到缓存、空/缺失返回、仅重读缺失标的、有限重试和持续缺数；
-证据 `.runtime/history-cache-visibility-tests.log`。此修复加载后的完整样本复验待更新。
+证据 `.runtime/history-cache-visibility-tests.log`。加载 `1076318a7` 后完整样本复验
+`716f110a-def6-4840-badb-d106dc63250a` **通过**：端到端 144.55 秒，原生准备/上传约
+77 秒，72300 条接收/保存/回读一致，300 组摘要与原始样本完全一致，无空标的。
+这是完整数据口径的复验，不把与 16 时样本的缓存状态、排队和系统负载差异算成纯优化倍数。
 原始实测文件为 `.runtime/history-production-{unit,batch1,cache_code}.json`，
+复验文件 `.runtime/history-production-batch2.json`、`.runtime/history-cache-runtime-timing.log`；
 采样证据 `.runtime/history-event-profile.{txt,log}`。这些都是本机忽略目录中的证据。
+
+## 11. 有界派发与入库重叠
+
+完成阶段一整批数据复验后，进一步分离派发占用与持久化占用：
+
+- `DELIVERED/RECEIVING` 继续独占原生派发。`UPLOADED` 表示冻结的完整 manifest：
+  流式路径先收到历史子进程完成消息，再等待所有 PUT 后发送 `/complete`；非流式和恢复路径
+  先取得完整不可变 spool，上传时携带总片数。没有仅凭“收到最后一片未知总量的数据”释放占用。
+- 在现有设备行锁内统一检查四种未完成状态，最多保留 **2 个请求**，其中最多一个仍在下载/上传。
+  已有一个请求入库时允许下一次下载；两个都待入库时停止派发，完成或失败释放名额。
+- 单请求原有限额继续有效：压缩 256 MiB、解压 512 MiB；两个未完成请求分别有 512 MiB/
+  1 GiB 的总上界。API staging 全局 1 GiB 和空闲磁盘至少 512 MiB、Agent spool 512 MiB
+  仍在写入时检查，没有取消校验或改成无界缓存。
+- 冻结 manifest、重复完成、失败及断线恢复规则不变；源请求仍须入库回读后才 COMPLETED，
+  开发导出仍须独立完成才能 READY。严格生产优先、开发窗口和交易健康门禁不变。
+
+验证：API 派发、上传及控制路径 **79 项通过**；其中 8 项使用专用测试数据库中的独立
+PostgreSQL schema（结束后删除该 schema），证明设备行锁下六个并发派发者只产生一个新派发、
+积压为二时停发、终态释放，以及开发窗口和生产优先保持。其余上传测试覆盖冻结清单、重复上传、
+重连和字节/磁盘上限。证据 `.runtime/history-pipeline-tests.log`。生产双批次重叠验收待更新。

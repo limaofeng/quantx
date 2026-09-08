@@ -206,9 +206,15 @@ _MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset({"QUEUED", "DELIVERED", "RECEIV
 _MARKET_DATA_FROZEN_MANIFEST_STATUSES = frozenset(
   {"UPLOADED", "PROCESSING", "COMPLETED"}
 )
-_MARKET_DATA_ACTIVE_DISPATCH_STATUSES = frozenset(
+_MARKET_DATA_INFLIGHT_STATUSES = frozenset(
   {"DELIVERED", "RECEIVING", "UPLOADED", "PROCESSING"}
 )
+_MARKET_DATA_NATIVE_DISPATCH_STATUSES = frozenset({"DELIVERED", "RECEIVING"})
+# UPLOADED is a frozen manifest: the Agent has completed native preparation.
+# One next download may overlap ingestion. Two retained requests bound decoded
+# data to 2 * 512 MiB and compressed data to 2 * 256 MiB, with existing global
+# staging/free-disk and Agent spool quotas still enforced at every write.
+MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE = 2
 MARKET_DATA_RECONNECT_STALE_SECONDS = 5 * 60
 _MARKET_DATA_AGENT_BUSY_REASON = "MARKET_DATA_AGENT_BUSY"
 _market_data_staging_lock = asyncio.Lock()
@@ -2631,15 +2637,20 @@ async def _next_market_data_request(
       or session_state.agent_session_id != control_session.agent_session_id
     ):
       return None
-    active_request_id = await db.scalar(
-      select(MarketDataRequest.request_id)
-      .where(
-        MarketDataRequest.device_id == device_id,
-        MarketDataRequest.status.in_(_MARKET_DATA_ACTIVE_DISPATCH_STATUSES),
-      )
-      .limit(1)
+    inflight_statuses = list(
+      (await db.scalars(
+        select(MarketDataRequest.status)
+        .where(
+          MarketDataRequest.device_id == device_id,
+          MarketDataRequest.status.in_(_MARKET_DATA_INFLIGHT_STATUSES),
+        )
+        .limit(MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE)
+      )).all()
     )
-    if active_request_id is not None:
+    if (
+      any(status in _MARKET_DATA_NATIVE_DISPATCH_STATUSES for status in inflight_statuses)
+      or len(inflight_statuses) >= MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE
+    ):
       return None
     from quantx_infrastructure.services.development_history_window import (
       history_window_open,
