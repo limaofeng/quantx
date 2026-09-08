@@ -7,8 +7,10 @@ import pytest
 import quantx_worker.prefector.flows.daily_market_data_sync_flow as flow
 from quantx_worker.prefector.flows.market_data_sync_partitions import (
   plan_tick_partitions,
-  validate_tick_partition,
+  validate_market_partition,
 )
+
+from tests.worker.market_sync_helpers import completed_transfer
 
 
 async def test_month_range_is_split_through_public_request_gateway(monkeypatch):
@@ -22,21 +24,12 @@ async def test_month_range_is_split_through_public_request_gateway(monkeypatch):
 
   async def request(payload, **kwargs):
     calls.append((payload, kwargs))
-    return {
-      "status": "completed",
-      "request_id": f"request-{len(calls)}",
-      "records_received": 10,
-      "records_saved": 10,
-      "code_summaries": [
-        {"code": c, "period": p, "row_count": 5}
-        for c in payload["stock_list"]
-        for p in payload["periods"]
-      ],
-    }
+    return completed_transfer(payload, f"request-{len(calls)}")
 
   monkeypatch.setattr(flow, "_request_and_wait", request)
   result = await flow._request_market_data_batches(
-    code_batches=[["600036.SH", "000001.SZ"]],
+    codes=["600036.SH", "000001.SZ"],
+    lifetimes={},
     periods=["tick", "1d"],
     start_time="20260801",
     end_time="20260831",
@@ -63,8 +56,14 @@ def test_one_empty_period_cannot_be_hidden_by_nonempty_daily_bars():
     ],
   }
   with pytest.raises(RuntimeError, match="000001.SZ/tick"):
-    validate_tick_partition(
-      transfer, ["000001.SZ"], ["tick", "1d"], "20260803", "20260803"
+    validate_market_partition(
+      transfer,
+      ["000001.SZ"],
+      ["tick", "1d"],
+      "20260803",
+      "20260803",
+      trading_days=[date(2026, 8, 3)],
+      lifetimes={},
     )
 
 
@@ -120,4 +119,6 @@ async def test_empty_tick_gateway_failure_identifies_day_and_symbol(monkeypatch)
       end_time="20260803",
       agent_device_id="",
       idempotency_scope="fixture",
+      trading_days=[date(2026, 8, 3)],
+      lifetimes={},
     )

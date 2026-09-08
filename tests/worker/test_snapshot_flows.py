@@ -8,8 +8,13 @@ import quantx_worker.prefector.flows.daily_indicator_snapshot_flow as indicator_
 import quantx_worker.prefector.flows.daily_market_data_sync_flow as market_flow
 from sqlalchemy.dialects import postgresql
 
+from tests.worker.market_sync_helpers import completed_transfer
+
 
 class FakeLogger:
+  def warning(self, *args, **kwargs):
+    return None
+
   def info(self, *args, **kwargs):
     return None
 
@@ -35,6 +40,11 @@ class FakeTradingDates:
         result.append(current)
       current = date.fromordinal(current.toordinal() + 1)
     return result
+
+
+@pytest.fixture(autouse=True)
+def market_sync_calendar(monkeypatch):
+  monkeypatch.setattr(market_flow, "TradingDateHelper", FakeTradingDates)
 
 
 def test_daily_market_sync_retries_durable_batches() -> None:
@@ -604,12 +614,7 @@ async def test_market_sync_resolves_sectors_and_uses_durable_transfer(
     ]
   )
   request = AsyncMock(
-    return_value={
-      "status": "completed",
-      "request_id": "request-1",
-      "records_received": 1,
-      "records_saved": 1,
-    }
+    side_effect=lambda payload, **kwargs: completed_transfer(payload, "request-1")
   )
   monkeypatch.setattr(
     market_flow,
@@ -651,20 +656,9 @@ async def test_market_sync_splits_universe_at_agent_request_limit(
     for index in range(301)
   ]
   request = AsyncMock(
-    side_effect=[
-      {
-        "status": "completed",
-        "request_id": "request-1",
-        "records_received": 300,
-        "records_saved": 300,
-      },
-      {
-        "status": "completed",
-        "request_id": "request-2",
-        "records_received": 1,
-        "records_saved": 1,
-      },
-    ]
+    side_effect=lambda payload, **kwargs: completed_transfer(
+      payload, "request-1" if len(payload["stock_list"]) == 300 else "request-2"
+    )
   )
   monkeypatch.setattr(
     market_flow,
@@ -719,12 +713,7 @@ async def test_market_sync_keeps_7552_daily_symbols_at_26_durable_batches(
       await asyncio.sleep(0.004 if offset == 0 else 0.001)
     finally:
       active -= 1
-    return {
-      "status": "completed",
-      "request_id": f"request-{offset}",
-      "records_received": len(payload["stock_list"]),
-      "records_saved": len(payload["stock_list"]),
-    }
+    return completed_transfer(payload, f"request-{offset}")
 
   monkeypatch.setattr(
     market_flow,
@@ -781,58 +770,44 @@ def test_market_sync_idempotency_scope_is_retry_stable_and_run_scoped(
 
 
 @pytest.mark.asyncio
-async def test_market_sync_cancels_inflight_batch_after_first_failure(
-  monkeypatch,
-) -> None:
-  instruments = [
-    {
-      "code": f"{index:06d}.SZ",
-      "name": "",
-      "instrument_type": "stock",
-      "float_volume": None,
-    }
-    for index in range(601)
-  ]
-  started: list[int] = []
-  cancelled = asyncio.Event()
-  never_finish = asyncio.Event()
+async def test_market_sync_drains_remaining_batches_after_failure(monkeypatch):
+  instruments = [{"code": f"{index:06d}.SZ"} for index in range(601)]
+  started = []
+  second_finished = asyncio.Event()
 
   async def request(payload, **kwargs):
-    del kwargs
-    offset = int(str(payload["stock_list"][0]).split(".")[0])
+    offset = int(payload["stock_list"][0].split(".")[0])
     started.append(offset)
+    if offset == 0:
+      await second_finished.wait()
+      return {"status": "failed", "request_id": "request-failed", "reason": "injected"}
     if offset == 300:
-      await asyncio.sleep(0)
-      return {
-        "status": "failed",
-        "request_id": "request-failed",
-        "reason": "injected",
-      }
-    try:
-      await never_finish.wait()
-    except asyncio.CancelledError:
-      cancelled.set()
-      raise
-    raise AssertionError("unreachable")
+      second_finished.set()
+    return completed_transfer(payload, f"request-{offset}")
 
   monkeypatch.setattr(
-    market_flow,
-    "resolve_instruments",
-    AsyncMock(return_value=instruments),
+    market_flow, "resolve_instruments", AsyncMock(return_value=instruments)
   )
   monkeypatch.setattr(market_flow, "_request_and_wait", request)
   monkeypatch.setattr(market_flow, "get_run_logger", FakeLogger)
+  indicator = AsyncMock()
+  monkeypatch.setattr(market_flow, "daily_indicator_snapshot_flow", indicator)
 
-  with pytest.raises(RuntimeError, match="request-failed"):
+  with pytest.raises(
+    market_flow.MarketDataSyncIncomplete, match="request-failed"
+  ) as caught:
     await market_flow.daily_market_data_sync_flow.fn(
       start_time="20260828",
       end_time="20260828",
       periods=["1d"],
+      compute_daily_signals=True,
       idempotency_scope="failure-campaign",
     )
-
-  assert started == [0, 300]
-  assert cancelled.is_set()
+  assert sorted(started) == [0, 300, 600]
+  assert caught.value.total_batches == 3
+  assert len(caught.value.failures) == 1
+  assert caught.value.failures[0]["stock_list"] == [f"{i:06d}.SZ" for i in range(300)]
+  indicator.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -874,12 +849,7 @@ async def test_market_sync_propagates_agent_timeout(monkeypatch):
 @pytest.mark.asyncio
 async def test_market_sync_binds_explicit_live_agent(monkeypatch):
   request = AsyncMock(
-    return_value={
-      "status": "completed",
-      "request_id": "request-bound",
-      "records_received": 1,
-      "records_saved": 1,
-    }
+    side_effect=lambda payload, **kwargs: completed_transfer(payload, "request-bound")
   )
   monkeypatch.setattr(
     market_flow,
