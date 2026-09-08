@@ -128,7 +128,10 @@ describe('TTradeReplaySidebar', () => {
     expect(onSelectRun).toHaveBeenCalledWith(historyItem.runId);
 
     fireEvent.contextMenu(replayRecord, { clientX: 320, clientY: 160 });
-    fireEvent.click(screen.getByRole('menuitem', { name: '删除记录' }));
+    const deleteItem = screen.getByRole('menuitem', { name: '删除记录' });
+    expect(deleteItem).toHaveClass('text-slate-300', 'hover:bg-white/5');
+    expect(deleteItem).not.toHaveClass('text-rose-300');
+    fireEvent.click(deleteItem);
     expect(onDelete).toHaveBeenCalledWith(historyItem);
   });
 

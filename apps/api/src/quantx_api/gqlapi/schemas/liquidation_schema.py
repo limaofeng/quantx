@@ -942,6 +942,20 @@ class LiquidationMutation:
       account_id=authorized_account_id(info, owner),
     )
 
+  @strawberry.mutation(
+    description="从历史列表删除已结束的卖出记录，保留计划、委托、成交及审计数据"
+  )
+  async def delete_exit_plan_history(
+    self,
+    info: strawberry.types.Info,
+    plan_id: str,
+  ) -> MessageResponse:
+    owner = await LiquidationResolver.exit_plan_account_id(plan_id)
+    return await LiquidationResolver.delete_exit_plan_history(
+      plan_id=plan_id,
+      account_id=authorized_account_id(info, owner),
+    )
+
   @strawberry.mutation(description="立即评估一个退出计划")
   async def evaluate_exit_plan_now(
     self,

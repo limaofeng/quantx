@@ -298,6 +298,12 @@ _register(
 _register(
   "Mutation",
   "orders:write",
+  {"deleteExitPlanHistory"},
+  risk="NON_TRADING_WRITE",
+)
+_register(
+  "Mutation",
+  "orders:write",
   {
     "cancelConditionalLiquidationOrder",
     "cancelExitPlan",

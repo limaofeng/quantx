@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Mapping, Optional
+from uuid import uuid4
 
 from quantx_domain.trading.exit_plan import ExitPlan, ExitPlanStatus
 from sqlalchemy import desc, select, update
@@ -24,6 +25,8 @@ RESERVING_EXIT_PLAN_STATUSES = (
   "ERROR",
 )
 TERMINAL_PLAN_STATUSES = ("COMPLETED", "CANCELLED")
+HISTORY_DELETED_EVENT = "PLAN_HISTORY_DELETED"
+_HISTORY_DELETED_KEY_PREFIX = "plan-history-deleted:"
 
 _ADAPTIVE_RULE_ID_SUFFIX = "adaptive-volume-price"
 
@@ -203,8 +206,22 @@ class AutoExitPlanRepository:
     source_type: Optional[str] = None,
     strategy_run_id: Optional[str] = None,
     limit: int = 200,
+    exclude_deleted_history: bool = False,
   ) -> list[AutoExitPlanRecord]:
     stmt = select(AutoExitPlanRecord)
+    if exclude_deleted_history:
+      deleted_history = (
+        select(AutoExitPlanEvent.event_id)
+        .where(
+          AutoExitPlanEvent.business_key
+          == _HISTORY_DELETED_KEY_PREFIX + AutoExitPlanRecord.plan_id,
+          AutoExitPlanEvent.event_type == HISTORY_DELETED_EVENT,
+        )
+        .exists()
+      )
+      stmt = stmt.where(
+        AutoExitPlanRecord.status.notin_(TERMINAL_PLAN_STATUSES) | ~deleted_history
+      )
     if account_id:
       stmt = stmt.where(AutoExitPlanRecord.account_id == account_id)
     if instrument_code:
@@ -219,6 +236,42 @@ class AutoExitPlanRepository:
       max(1, min(int(limit or 200), 500))
     )
     return list((await self.db.execute(stmt)).scalars().all())
+
+  async def delete_history(self, *, plan_id: str, account_id: str) -> None:
+    """Remove a terminal plan from user history without erasing trading facts.
+
+    The durable event is both the visibility tombstone and its audit trail.
+    Engine lookups deliberately continue to load the original plan.
+    """
+    record = await self.find_by_id(plan_id, for_update=True)
+    if record is None or record.account_id != account_id:
+      raise ValueError("卖出记录不存在或无权访问")
+    state = dict(record.plan_state or {})
+    if (
+      record.status not in TERMINAL_PLAN_STATUSES
+      or state.get("status") not in TERMINAL_PLAN_STATUSES
+      or record.pending_client_order_id
+      or state.get("pending_order_id")
+    ):
+      raise ValueError("仅可删除已完成或已取消且无待成交委托的卖出记录")
+    business_key = f"{_HISTORY_DELETED_KEY_PREFIX}{plan_id}"
+    existing = await self.db.scalar(
+      select(AutoExitPlanEvent.event_id).where(
+        AutoExitPlanEvent.business_key == business_key
+      )
+    )
+    if existing is None:
+      self.db.add(
+        AutoExitPlanEvent(
+          event_id=str(uuid4()),
+          business_key=business_key,
+          plan_id=plan_id,
+          event_type=HISTORY_DELETED_EVENT,
+          payload={"reason": "USER_DELETED", "status": record.status},
+          created_at=time_utils.now().replace(tzinfo=None),
+        )
+      )
+    await self.db.commit()
 
   async def find_reserving(
     self,

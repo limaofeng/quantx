@@ -888,6 +888,15 @@ export const CancelExitPlanMutation = gql(`
   }
 `);
 
+export const DeleteExitPlanHistoryMutation = gql(`
+  mutation DeleteExitPlanHistory($planId: String!) {
+    deleteExitPlanHistory(planId: $planId) {
+      success
+      message
+    }
+  }
+`);
+
 export const EvaluateExitPlanNowMutation = gql(`
   mutation EvaluateExitPlanNow($planId: String!) {
     evaluateExitPlanNow(planId: $planId) {

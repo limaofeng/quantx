@@ -9,11 +9,13 @@ import {
   Plus,
   RefreshCw,
   ShieldAlert,
+  Trash2,
   XCircle,
 } from 'lucide-react';
 import * as React from 'react';
 import { useMutation, useQuery, useSubscription } from 'urql';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -43,6 +45,7 @@ import {
   ConfirmExitPlanAuthorizationMutation,
   ConfirmExitIntentMutation,
   CreateManualExitPlanMutation,
+  DeleteExitPlanHistoryMutation,
   EvaluateExitPlanNowMutation,
   ExitPlanCapabilitiesQuery,
   ExitPlanCostBasisCandidatesQuery,
@@ -124,6 +127,7 @@ const activeStatuses = new Set([
   'PAUSED',
   'PENDING_ENTRY',
 ]);
+const terminalStatuses = new Set(['COMPLETED', 'CANCELLED']);
 
 const sourceLabels: Record<string, string> = {
   LIMIT_UP_BOARD: '打板卖出计划',
@@ -1841,9 +1845,66 @@ export function PositionLiquidationPanel({
 
 export function SellHistoryPanel({ accountId }: { accountId: string }) {
   const plans = useExitPlans(accountId);
-  const allPlans = plans.data?.exitPlans ?? [];
+  const { confirm } = useAppDialog();
+  const { toast } = useToast();
+  const [, deleteHistory] = useMutation(DeleteExitPlanHistoryMutation);
+  const [deletedPlanIds, setDeletedPlanIds] = React.useState<Set<string>>(
+    () => new Set()
+  );
+  const [deleting, setDeleting] = React.useState(false);
+  const deletionPendingRef = React.useRef(false);
+  const historyScrollRef = React.useRef<HTMLElement>(null);
+  const menuTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const { closeMenu, menu, openAtPointer, setMenu } = useStudioMenu<string>();
+  const allPlans = (plans.data?.exitPlans ?? []).filter(
+    plan =>
+      !terminalStatuses.has(plan.status) || !deletedPlanIds.has(plan.planId)
+  );
   const [selectedPlanId, setSelectedPlanId] = React.useState('');
-  const activePlanId = selectedPlanId || allPlans[0]?.planId || '';
+  const activePlanId = allPlans.some(plan => plan.planId === selectedPlanId)
+    ? selectedPlanId
+    : allPlans[0]?.planId || '';
+  const menuPlan = allPlans.find(plan => plan.planId === menu?.payload);
+  const canDelete = (plan: ExitPlan) =>
+    terminalStatuses.has(plan.status) && !plan.pendingClientOrderId;
+
+  React.useEffect(() => closeMenu(), [accountId, closeMenu]);
+
+  async function deletePlan(plan: ExitPlan) {
+    if (!canDelete(plan) || deletionPendingRef.current) return;
+    deletionPendingRef.current = true;
+    setDeleting(true);
+    try {
+      const confirmed = await confirm({
+        title: `删除 ${plan.instrumentCode} 的卖出记录？`,
+        description: `将从历史列表移除这条${statusLabels[plan.status]}记录（${formatDateTime(plan.updatedAt)}）。底层计划、委托、成交及审计数据仍保留，不会撤单或发起交易。`,
+        confirmText: '删除记录',
+        cancelText: '取消',
+      });
+      if (!confirmed) return;
+      const result = await deleteHistory({ planId: plan.planId });
+      const response = result.data?.deleteExitPlanHistory;
+      if (result.error || !response?.success) {
+        throw new Error(
+          result.error?.message || response?.message || '请稍后重试'
+        );
+      }
+      setDeletedPlanIds(previous => new Set([...previous, plan.planId]));
+      setSelectedPlanId(previous => (previous === plan.planId ? '' : previous));
+      plans.refetch({ requestPolicy: 'network-only' });
+      toast({ title: '卖出记录已删除', description: response.message });
+    } catch (error) {
+      toast({
+        title: '删除卖出记录失败',
+        description: error instanceof Error ? error.message : '请稍后重试',
+        variant: 'destructive',
+      });
+    } finally {
+      deletionPendingRef.current = false;
+      setDeleting(false);
+    }
+  }
+
   const [events] = useQuery({
     query: ExitPlanEventsQuery,
     variables: { limit: 200, planId: activePlanId },
@@ -1853,7 +1914,10 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
 
   return (
     <div className="grid min-h-0 flex-1 gap-3 overflow-hidden p-3 xl:grid-cols-[360px_minmax(0,1fr)]">
-      <section className="min-h-0 overflow-y-auto rounded-md border border-white/8 bg-[#0b1120]/70 custom-scrollbar">
+      <section
+        ref={historyScrollRef}
+        className="min-h-0 overflow-y-auto rounded-md border border-white/8 bg-[#0b1120]/70 custom-scrollbar"
+      >
         <div className="sticky top-0 flex items-center gap-2 border-b border-white/5 bg-[#0b1120] p-3 text-ui-label font-black text-slate-200">
           <History className="h-4 w-4 text-market-down" />
           卖出计划
@@ -1862,11 +1926,33 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
           {allPlans.map(plan => (
             <button
               className={cn(
-                'w-full px-3 py-3 text-left hover:bg-white/[0.03] focus:outline-none focus:ring-1 focus:ring-inset focus:ring-primary/40',
-                activePlanId === plan.planId && 'bg-white/[0.05]'
+                'w-full px-3 py-3 text-left hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+                activePlanId === plan.planId && 'bg-blue-500/10'
               )}
               key={plan.planId}
+              aria-pressed={activePlanId === plan.planId}
               onClick={() => setSelectedPlanId(plan.planId)}
+              onContextMenu={event => {
+                menuTriggerRef.current = event.currentTarget;
+                event.currentTarget.focus();
+                setSelectedPlanId(plan.planId);
+                openAtPointer(event, plan.planId);
+              }}
+              onKeyDown={event => {
+                if (
+                  event.key !== 'ContextMenu' &&
+                  !(event.shiftKey && event.key === 'F10')
+                )
+                  return;
+                event.preventDefault();
+                menuTriggerRef.current = event.currentTarget;
+                setSelectedPlanId(plan.planId);
+                const rect = event.currentTarget.getBoundingClientRect();
+                setMenu({
+                  anchor: { kind: 'point', x: rect.left, y: rect.bottom },
+                  payload: plan.planId,
+                });
+              }}
               type="button"
             >
               <div className="flex items-center justify-between gap-2">
@@ -1888,6 +1974,11 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
               </div>
             </button>
           ))}
+          {allPlans.length === 0 && (
+            <div className="py-ui-empty text-center text-ui-label text-slate-500">
+              {plans.fetching ? '加载卖出记录…' : '暂无卖出记录'}
+            </div>
+          )}
         </div>
       </section>
       <section className="min-h-0 overflow-y-auto rounded-md border border-white/8 bg-[#0b1120]/70 p-3 custom-scrollbar">
@@ -1898,7 +1989,11 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
           规则触发、计划变更、委托状态和真实成交均以持久化事件展示。
         </p>
         <div className="mt-4 grid gap-2">
-          {events.fetching && !events.data ? (
+          {!activePlanId ? (
+            <div className="py-ui-empty text-center text-ui-label text-slate-500">
+              选择卖出记录查看时间线
+            </div>
+          ) : events.fetching && !events.data ? (
             <div className="flex justify-center py-ui-empty text-slate-500">
               <Loader2 className="h-4 w-4 animate-spin" />
             </div>
@@ -1934,6 +2029,26 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
           )}
         </div>
       </section>
+      <StudioMenu
+        ariaLabel="卖出记录菜单"
+        closeOnScrollRef={historyScrollRef}
+        returnFocusRef={menuTriggerRef}
+        menu={menu}
+        onClose={closeMenu}
+        width={176}
+        items={[
+          {
+            id: 'delete',
+            icon: <Trash2 size={14} />,
+            label: '删除记录',
+            disabled: !menuPlan || !canDelete(menuPlan) || deleting,
+            shortcut: menuPlan && !canDelete(menuPlan) ? '不可删除' : undefined,
+            onSelect: () => {
+              if (menuPlan) void deletePlan(menuPlan);
+            },
+          },
+        ]}
+      />
     </div>
   );
 }

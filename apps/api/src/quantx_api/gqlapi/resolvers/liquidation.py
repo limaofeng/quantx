@@ -557,6 +557,7 @@ class LiquidationResolver:
         statuses=[str(item).upper() for item in statuses or []] or None,
         source_type=str(source_type or "").upper() or None,
         limit=limit,
+        exclude_deleted_history=True,
       )
       return [ExitPlanView.from_model(record) for record in records]
     return []
@@ -961,6 +962,20 @@ class LiquidationResolver:
     if record is None:
       raise RuntimeError("退出计划不存在")
     return ExitPlanView.from_model(record)
+
+  @staticmethod
+  async def delete_exit_plan_history(
+    *, plan_id: str, account_id: str
+  ) -> MessageResponse:
+    async for db in get_async_db():
+      await AutoExitPlanRepository(db).delete_history(
+        plan_id=plan_id, account_id=account_id
+      )
+      return MessageResponse(
+        success=True,
+        message="卖出记录已从历史列表删除，委托、成交及审计数据仍保留",
+      )
+    raise RuntimeError("暂时无法删除卖出记录，请稍后重试")
 
   @staticmethod
   async def evaluate_exit_plan_now(

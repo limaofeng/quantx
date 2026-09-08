@@ -22,13 +22,13 @@ API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部�
 
 ## 健康检查
 
-| 路径 | 语义 |
-| --- | --- |
-| `/health/live` | 只证明 API 事件循环可响应 |
-| `/health/ready` | 按 `web/full` profile 检查必要组件 |
-| `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、行情和 AI Runtime 分项状态 |
-| `/health/runtime/market-data` | 网关供给健康与水位的校验投影；不包含 Engine 消费或账户交易健康 |
-| `/health` | `/health/ready` 的兼容别名 |
+| 路径                          | 语义                                                                    |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| `/health/live`                | 只证明 API 事件循环可响应                                               |
+| `/health/ready`               | 按 `web/full` profile 检查必要组件                                      |
+| `/health/components`          | API、数据库、Engine、Prefect、Worker、Agent、行情和 AI Runtime 分项状态 |
+| `/health/runtime/market-data` | 网关供给健康与水位的校验投影；不包含 Engine 消费或账户交易健康          |
+| `/health`                     | `/health/ready` 的兼容别名                                              |
 
 `full` profile 中，Prefect Worker、QMT Agent 连接和行情 capability 也必须
 ready。QMT Agent 的组件健康表示进程与会话在线；账户对账、kill switch 和
@@ -79,11 +79,11 @@ AI Runtime 在组件健康中仅返回脱敏状态、心跳年龄和已应用配
 
 Web 的 `/settings/status/:targetId/history` 复用以下只读接口：
 
-| 接口 | 参数 | 返回与用途 |
-| --- | --- | --- |
-| `GET /monitor/api/v1/summary` | `window=24h` | 当前状态及明确标注的近 24 小时可用率、覆盖率和延迟分位数；支持顶部指标切换 |
-| `GET /monitor/api/v1/targets/{targetId}/history` | `range=24h\|7d\|30d\|90d\|1y` | 时间桶状态与 P50/P95 曲线；按范围聚合，不伪造无延迟采样组件的延迟 |
-| `GET /monitor/api/v1/incidents` | 同上 `range`，可选 `targetId`、`page`、`pageSize`，成对可选 `asOf` / `maxIncidentId` | `{range, page, pageSize, total, asOf, maxIncidentId, incidents}`，服务端分页读取完整范围内的事故 |
+| 接口                                             | 参数                                                                                 | 返回与用途                                                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `GET /monitor/api/v1/summary`                    | `window=24h`                                                                         | 当前状态及明确标注的近 24 小时可用率、覆盖率和延迟分位数；支持顶部指标切换                       |
+| `GET /monitor/api/v1/targets/{targetId}/history` | `range=24h\|7d\|30d\|90d\|1y`                                                        | 时间桶状态与 P50/P95 曲线；按范围聚合，不伪造无延迟采样组件的延迟                                |
+| `GET /monitor/api/v1/incidents`                  | 同上 `range`，可选 `targetId`、`page`、`pageSize`，成对可选 `asOf` / `maxIncidentId` | `{range, page, pageSize, total, asOf, maxIncidentId, incidents}`，服务端分页读取完整范围内的事故 |
 
 事故按 `opened_at DESC, id DESC` 稳定排序；匹配条件是开始时间不晚于查询截止，
 且尚未恢复或恢复时间不早于范围起点，因此不会漏掉跨越范围边界的长事故。
@@ -290,6 +290,13 @@ mutation 仍需 `ADMIN`。训练查询的 operation policy 为 `market:read` +
 `previewLiquidation`、`confirmLiquidation`。清仓必须先预览固定持仓、可卖量、冲突和
 执行模式，再用 `challengeId + confirmationToken` 二次确认；旧
 `liquidatePositions` 不再属于公开 schema。
+
+`deleteExitPlanHistory(planId)` 使用 `orders:write` 非交易写权限，仅允许
+`COMPLETED` / `CANCELLED` 且无待成交委托的计划。删除通过幂等的
+`PLAN_HISTORY_DELETED` 事件从 `exitPlans` 历史列表移除记录（过滤发生在分页前），
+不删除底层计划、委托、成交、回放引用或审计事件，不改变 Engine 的计划状态和
+按 ID / 策略运行读取。若计划重新进入非终态，列表仍必须展示，不能因历史删除
+掩盖执行中计划。`exitPlan` 与 `exitPlanEvents` 继续支持按 ID 审计读取。
 
 `createManualExitPlan.costBasis` 必填。成交委托模式只提交委托 ID，Engine 会
 重新读取账户、股票、方向、成交数量与成交均价并冻结成本快照；手工模式提交的

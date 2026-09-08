@@ -699,7 +699,6 @@ function ReplayHistorySection({ context }: { context: ReplaySidebarContext }) {
           { id: 'replay-record-actions', type: 'separator' },
           {
             id: 'delete',
-            danger: true,
             disabled: !deleteSelectionAllowed || context.deletingHistory,
             icon: context.deletingHistory ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />

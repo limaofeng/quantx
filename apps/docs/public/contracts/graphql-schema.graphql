@@ -3923,6 +3923,9 @@ type Mutation {
   """取消并释放退出计划保护数量"""
   cancelExitPlan(planId: String!, configVersion: Int!, reason: String! = "USER_CANCELLED"): ExitPlanView!
 
+  """从历史列表删除已结束的卖出记录，保留计划、委托、成交及审计数据"""
+  deleteExitPlanHistory(planId: String!): MessageResponse!
+
   """立即评估一个退出计划"""
   evaluateExitPlanNow(planId: String!): ExitPlanView!
 
