@@ -544,10 +544,43 @@ Influx 保留带删除时间后缀的条目等待后台硬删除，不能声称�
   对应日志及 `.runtime/history-formal-unit-tests.log` 保存验证输出。
 - 退出门：主样本中位耗时降低至少 50%，其余受支持样本不退化超过 10%；数据和故障语义
   必须通过，生产健康不满足时暂停加压。门槛通过前不修改正式业务实现。
-- 待接入：Windows 的 `mac2017` SSH 别名当前不可达，已请求可管理 Home 集群的 macOS
-  连接信息。这只阻断生产数据库上线，不阻断隔离验证和应用重构。
-- 生产尚未切换或重启。接入后先核实 Home/quant/influxdb3-core 的 Deployment、卷和备份，
-  等待在途历史任务排空（最多 10 分钟），按统一入口停止应用；副本降至 0 并确认旧进程退出后，
-  仅修改 WAL 参数，再恢复单副本并核验数据。禁止同一数据卷滚动启动两个写入进程。
-  随后启动 production/full/live，验证 QMT ready、新鲜快照 <90 秒及两批各 72,300 条完整回读。
-  未完成该生产验收前，不将隔离性能数字标记为生产效果。
+- 管理入口已接通：用户提供的 `limaofeng@192.168.5.12` 为 macOS，使用
+  `/usr/local/bin/kubectl --context=我的` 管理 Home/quant/influxdb3-core。已核实原 Deployment
+  UID、节点 k8s-mypc、镜像 3.11.0-core 和生产 hostPath，未切换本机默认 context。
+- 生产切换已执行：确认历史任务仅有 COMPLETED/FAILED 后按统一入口停止应用，将副本降至 0，
+  等待旧 Pod 删除。独立备份 Pod 只读挂载源卷，冷复制 5.2 GiB、38,849 个文件，逐文件 SHA-256
+  校验通过。备份保留于节点 `/root/data/quantx/influxdb3/backups/history-wal-20260908`，含校验清单。
+  Deployment 原始及切换后配置保留在本机忽略目录，不提交其中的环境变量和凭据。
+- Deployment spec 经比较仅增加 `--wal-flush-interval=100ms`，恢复单副本；新 Pod
+  `influxdb3-core-7667b56c58-t766f` ready，WAL 安全检查无零字节文件。应用启动前只读核验原有
+  300 标的、72,300 条数据的行数、首尾时间与键摘要全部匹配，未进行双实例滚动写入。
+- 应用按统一入口恢复 production/full/live，唯一账户、liveTrading=ENABLED、协议 1.3、
+  QMT/行情 ready，最终状态检查快照约 14.9 秒。
+
+### 13.1 生产验收结果
+
+两批均为同一组 300 标的、2026-09-08 分钟线。每批接收、保存、回读均为 72,300 条，
+300 组摘要与既有基准完全一致，无空标的；数据库请求状态新增两条 COMPLETED，FAILED 数未增加。
+
+| 指标 | 上一轮 | 本轮 |
+| --- | ---: | ---: |
+| 最后上传块到账至请求完成：第一批 | 59.968 秒 | 12.076 秒 |
+| 最后上传块到账至请求完成：第二批 | 60.959 秒 | 12.056 秒 |
+| 两批整体完成 | 216.192 秒 | 175.940 秒 |
+| 下载与前批后处理重叠 | 约 59.8 秒 | 11.756 秒 |
+| 原生下载串行 / 缓存可见性重试 | 是 / 0 | 是 / 0 |
+
+上传后的完成延迟降低约 80%，整体降低约 18.6%。该延迟包含上传收敛、调度、校验、入库、
+回读和终态持久化，不应标注为纯数据库耗时；验收调用进程未开启 INFO 阶段日志，因此不据此
+虚构生产的预处理/HTTP/回读子项秒数。原生下载时延也会变化，两轮整体耗时不是严格同负载实验。
+重叠时长变小是前批后处理提前结束，与原生下载继续保持串行及完整回读一致。
+
+本轮 14 次资源采样中 QMT 始终 ready，快照最大 30.4 秒；Influx CPU 采样峰值 9.13%
+（单核百分比）、内存峰值为 16 GiB 限额的 7.74%。间隔采样可能漏过瞬时峰值，不代表满负载容量。
+冷备份临时 Pod 已删除，节点备份及其校验清单保留。
+
+验收证据均在本机忽略目录：`history-wal-production-pipe1.json`、`history-wal-production-pipe2.json`、
+`history-wal-pipeline-evidence.json`、`history-wal-recovery-read.log`、`history-wal-live-resources.jsonl`、
+`history-wal-cold-backup-verification.log` 和 `history-deploy-final-status.log`。
+如需撤销 WAL 设置，应再次排空和停止应用、将数据库缩至零并确认退出，移除本次新增的
+`--wal-flush-interval=100ms`，恢复单副本并核验数据后启动应用；仅参数回退无需还原整个数据卷。
