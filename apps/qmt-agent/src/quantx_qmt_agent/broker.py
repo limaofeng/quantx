@@ -2324,31 +2324,65 @@ def _normalize_history_frames(values: Any, requested_codes: set[str]) -> dict[st
       hasattr(frame, attribute) for attribute in ("columns", "itertuples", "sort_values")
     ):
       raise ValueError(f"XTData returned a non-DataFrame result for {normalized_code}")
+    if frame is not None and len(frame) > MAX_MARKET_DATA_FRAME_RECORDS:
+      raise ValueError("single market data frame exceeds record limit")
     normalized[normalized_code] = frame
   return normalized
+
+
+def _history_frame_has_usable_rows(frame: Any, period: str) -> bool:
+  if frame is None or len(frame) == 0:
+    return False
+  if period == "tick":
+    return True
+  columns = tuple(frame.columns)
+  # Match the projection predicate exactly. Malformed rows must reach validation,
+  # not disappear into a no-data retry. Stop at the first non-placeholder row.
+  return any(
+    not _is_empty_historical_kline_row(
+      dict(zip(columns, values, strict=True)), period=period,
+    )
+    for values in frame.itertuples(index=False, name=None)
+  )
 
 
 def _read_history_frames(
   manager: Any, codes: tuple[str, ...], period: str, start: str, end: str, *, downloaded: bool,
 ) -> dict[str, Any]:
   started = time.monotonic()
+  missing: set[str] = set()
+
   def read(selected: list[str]) -> dict[str, Any]:
-    return _normalize_history_frames(manager.get_market_data(
+    values = _normalize_history_frames(manager.get_market_data(
       stock_list=selected, period=period, start_time=start, end_time=end,
     ), set(selected))
+    for code in selected:
+      frame = values.get(code)
+      if _history_frame_has_usable_rows(frame, period):
+        missing.discard(code)
+      else:
+        missing.add(code)
+        raw_rows = 0 if frame is None else len(frame)
+        record_history_timing(
+          "cache_no_usable_rows", started, code=code, period=period,
+          raw_rows=raw_rows, usable_rows=0, filtered_rows=raw_rows,
+        )
+    return values
 
   frames = read(list(codes))
   if downloaded:
     # Native completion can precede visibility in XTData's local cache. Re-read
-    # only absent/empty series, without downloading again or altering good rows.
+    # absent, empty or all-placeholder series without altering usable frames.
     # Persistent emptiness still produces an explicit no-data summary below.
     for attempt, delay in enumerate((0.1, 0.3, 0.6, 1.0), start=1):
-      missing = sorted(code for code in codes if frames.get(code) is None or len(frames[code]) == 0)
       if not missing:
         break
       record_history_timing("cache_visibility_retry", started, attempt=attempt, empty_series=len(missing))
       time.sleep(delay)
-      frames.update(read(missing))
+      # A later omitted result supersedes its earlier placeholder frame too.
+      selected = sorted(missing)
+      refreshed = read(selected)
+      frames.update({code: refreshed.get(code) for code in selected})
   record_history_timing("read_complete", started)
   return frames
 
@@ -2395,6 +2429,7 @@ def _iter_market_data_records_unbounded(
     )
 
     for normalized_code in sorted(request.codes):
+      projection_started = time.monotonic()
       frame = normalized_values.get(normalized_code)
       if frame is None:
         yield HistoricalBarSummary(
@@ -2461,6 +2496,16 @@ def _iter_market_data_records_unbounded(
             f"{normalized_code}/{period}/{record['time']}"
           )
         records.append(record)
+
+      record_history_timing(
+        "frame_projected", projection_started, code=normalized_code, period=period,
+        raw_rows=len(normalized), usable_rows=len(records),
+        filtered_rows=len(normalized) - len(records),
+        raw_min_time=min(normalized_times) if normalized_times else None,
+        raw_max_time=max(normalized_times) if normalized_times else None,
+        min_time=int(records[0]["time"]) if records else None,
+        max_time=int(records[-1]["time"]) if records else None,
+      )
 
       if period == "tick":
         group_start = 0

@@ -2407,7 +2407,7 @@ def test_bars_response_rejects_unrequested_code_and_out_of_range_time() -> None:
     _market_data_records(OutOfRangeManager(), payload)
 
 
-@pytest.mark.parametrize("initially_missing", ["omitted", "empty"])
+@pytest.mark.parametrize("initially_missing", ["omitted", "empty", "placeholder"])
 def test_download_waits_for_empty_series_cache_visibility(monkeypatch, initially_missing):
   from quantx_qmt_agent import broker as broker_module
   pauses = []
@@ -2424,7 +2424,15 @@ def test_download_waits_for_empty_series_cache_visibility(monkeypatch, initially
     def get_market_data(self, **kwargs):
       self.reads.append(kwargs["stock_list"])
       if len(self.reads) == 1:
-        return {"000001.SZ": frame, **({"000002.SZ": frame.iloc[:0]} if initially_missing == "empty" else {})}
+        missing = {}
+        if initially_missing == "empty":
+          missing["000002.SZ"] = frame.iloc[:0]
+        elif initially_missing == "placeholder":
+          missing["000002.SZ"] = pd.DataFrame([{
+            "time": 20250102, "open": float("nan"), "high": float("nan"),
+            "low": float("nan"), "close": float("nan"), "volume": 0, "amount": 0,
+          }])
+        return {"000001.SZ": frame, **missing}
       return {"000002.SZ": frame}
 
   manager = Manager()
@@ -2462,6 +2470,75 @@ def test_cache_visibility_retries_are_bounded_and_preserve_no_data(monkeypatch, 
   assert pauses == ([0.1, 0.3, 0.6, 1.0] if download else [])
   assert _bar_rows(records) == []
   assert _bar_summaries(records)[0]["no_data_reason"] == "XT_DATA_NO_ROWS"
+
+
+@pytest.mark.parametrize("download", [False, True])
+@pytest.mark.parametrize("eventually_omitted", [False, True])
+def test_placeholder_cache_retries_preserve_no_data_and_log_evidence(
+  monkeypatch, caplog, download, eventually_omitted,
+):
+  pauses = []
+  monkeypatch.setattr(broker_module.time, "sleep", pauses.append)
+  caplog.set_level("INFO", logger="quantx_qmt_agent.history_timing")
+
+  class Manager:
+    reads = 0
+    downloads = 0
+
+    def download_market_data(self, **kwargs):
+      self.downloads += 1
+
+    def get_market_data(self, **kwargs):
+      self.reads += 1
+      if eventually_omitted and self.reads > 1:
+        return {}
+      return {"000002.SZ": pd.DataFrame([{
+        "time": 20250102, "open": float("nan"), "high": float("nan"),
+        "low": float("nan"), "close": float("nan"), "volume": 0, "amount": 0,
+      }])}
+
+  manager = Manager()
+  records = _market_data_records(manager, {
+    "operation": "bars", "download": download, "stock_list": ["000002.SZ"],
+    "periods": ["1d"], "start_time": "20250102", "end_time": "20250102",
+  })
+  assert manager.downloads == int(download)
+  assert manager.reads == (5 if download else 1)
+  assert pauses == ([0.1, 0.3, 0.6, 1.0] if download else [])
+  assert _bar_rows(records) == []
+  assert _bar_summaries(records)[0]["no_data_reason"] == "XT_DATA_NO_ROWS"
+  assert "stage=cache_no_usable_rows" in caplog.text
+  assert "'raw_rows': 1, 'usable_rows': 0, 'filtered_rows': 1" in caplog.text
+
+
+def test_mixed_placeholder_frame_keeps_valid_rows_without_retry(monkeypatch):
+  pauses = []
+  monkeypatch.setattr(broker_module.time, "sleep", pauses.append)
+
+  class Manager:
+    reads = 0
+
+    def download_market_data(self, **kwargs):
+      pass
+
+    def get_market_data(self, **kwargs):
+      self.reads += 1
+      return {"000002.SZ": pd.DataFrame([
+        {"time": 20250102, "open": float("nan"), "high": float("nan"),
+         "low": float("nan"), "close": float("nan"), "volume": 0, "amount": 0},
+        {"time": 20250103, "open": 10., "high": 10., "low": 10., "close": 10.,
+         "volume": 100, "amount": 1000},
+      ])}
+
+  manager = Manager()
+  records = _market_data_records(manager, {
+    "operation": "bars", "download": True, "stock_list": ["000002.SZ"],
+    "periods": ["1d"], "start_time": "20250102", "end_time": "20250103",
+  })
+  assert manager.reads == 1
+  assert pauses == []
+  assert len(_bar_rows(records)) == 1
+  assert _bar_summaries(records)[0]["row_count"] == 1
 
 
 def test_tick_history_download_and_read_use_full_single_day_bounds() -> None:
