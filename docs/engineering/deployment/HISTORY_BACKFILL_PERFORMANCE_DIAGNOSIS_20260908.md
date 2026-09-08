@@ -644,4 +644,30 @@ QMT 始终 ready、快照最大 27.6 秒；正式接口对照健康检查快照�
 
 证据：`.runtime/history-read-concurrency-60.json`、`history-read-concurrency-300.json`、
 `history-read-concurrency-300-formal.json`、`history-concurrent-live-resources.jsonl`、
-`history-concurrent-final-tests.log`。应用部署和完整上传链路验收随后执行，不变更数据库参数。
+`history-concurrent-final-tests.log`。
+
+应用已按 down → up → status 重启上线 `772638932`，WAL 仍为 100 ms。最终 full/live、唯一账户、
+liveTrading=ENABLED、协议 1.3、QMT/行情 ready，快照约 12.2 秒。完整上传验收结果如下：
+
+| 样本 | 接收/保存/回读 | 与既有摘要一致 | 回读 | 上传后总处理 |
+| --- | ---: | --- | ---: | ---: |
+| batch1 | 72,300 | 是 | 4.115 秒 | 9.154 秒 |
+| batch2 | 72,059 | 否，300319.SZ 源上报空 | 4.490 秒 | 不纳入有效性能对照 |
+| pipe1 完整复测 | 72,300 | 是 | 4.332 秒 | 9.967 秒 |
+
+两个通过样本仍各有 45 次分页查询、300 组键摘要，完整回读从上一轮 6.664–8.263 秒降至
+4.115–4.332 秒，上传后处理从 12.167–13.761 秒降至 9.154–9.967 秒。并发子任务的累计计时可能
+大于阶段墙钟时间，不能把各任务耗时直接相加作为总耗时。原生下载波动明显，本轮不以端到端
+总时长推算回读优化收益。最初两次验收的 15 次资源采样 QMT 始终 ready，快照最大 27.9 秒，
+CPU 峰值 115.49%、内存峰值 8.53%/16 GiB；完整复测后另外检查健康通过。
+
+**保留的上游缺数风险：** batch2 的上传、保存、回读均为 72,059 条，表明回读没有漏掉本次已上传
+的键，但无法替源端补出未上传的 241 条。该次不是合格的完整性验收，未掩盖或改写其记录。
+`300319.SZ` 定向重下载恢复 241 条且摘要匹配，之后完整 300 标的复测通过。异常日志未出现
+cache_visibility_retry，可能与非空占位行被过滤有关；未保留原始 XTData 帧，根因尚不能确认。
+这是 QMT 源读取路径需要单独定位的现存风险，本次未修改 Agent，也不声称重试已修复该风险。
+
+完整验收证据：`.runtime/history-concurrent-stage-production-batch1.json`、
+`history-concurrent-stage-production-batch2.json`、`history-concurrent-stage-production-redownload_code.json`、
+`history-concurrent-stage-production-pipe1.json`，对应 `history-concurrent-stage-summary-*.json` 保存阶段分解；
+`history-concurrent-acceptance-resources.jsonl`、`history-concurrent-final-status.log` 保存资源及最终状态。
