@@ -55,7 +55,7 @@ describe('DateRangePicker', () => {
     expect(onChange).not.toHaveBeenCalled();
     expect(screen.getByLabelText('结束日期')).toHaveValue('2026-09-10');
     await user.click(screen.getByLabelText('结束日期'));
-    await user.click(screen.getByRole('button', { name: '清空', exact: true }));
+    await user.click(screen.getByRole('button', { name: '清空' }));
     expect(onChange).toHaveBeenCalledWith(undefined);
     expect(screen.getByLabelText('开始日期')).toHaveValue('');
     expect(screen.getByLabelText('结束日期')).toHaveValue('');
