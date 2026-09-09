@@ -32,9 +32,17 @@ class DatabasePoolProfile:
 
 
 _DATABASE_POOL_PROFILES = {
-  "api": DatabasePoolProfile("api", pool_size=8, max_overflow=4, statement_timeout_ms=15_000),
+  "api": DatabasePoolProfile(
+    "api", pool_size=8, max_overflow=4, statement_timeout_ms=15_000
+  ),
   "market-gateway": DatabasePoolProfile(
     "market-gateway", pool_size=1, max_overflow=1, statement_timeout_ms=15_000
+  ),
+  "market-data-api": DatabasePoolProfile(
+    "market-data-api", pool_size=2, max_overflow=1, statement_timeout_ms=15_000
+  ),
+  "market-data-worker": DatabasePoolProfile(
+    "market-data-worker", pool_size=3, max_overflow=1
   ),
   # The Engine singleton lease is detached as a dedicated physical connection,
   # so all pooled capacity remains available to business workloads.
@@ -59,6 +67,7 @@ def database_pool_profile(
     max_overflow=max_overflow if max_overflow is not None else base.max_overflow,
     statement_timeout_ms=base.statement_timeout_ms,
   )
+
 
 # This service is PostgreSQL-only. Production validation also rejects SQLite
 # before any process starts.

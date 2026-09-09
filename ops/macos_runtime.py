@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import psutil
-from runtime_config import load_environment
+from runtime_config import load_environment, validate_market_data_services
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / ".runtime" / "development"
@@ -148,6 +148,23 @@ def main() -> None:
     parser.error("Install Node and Caddy before startup")
   commands = [
     (
+      "market-data-api",
+      [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "quantx_market_data.api:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18085",
+        "--workers",
+        "1",
+      ],
+      ROOT,
+    ),
+    ("market-data-worker", [sys.executable, "-m", "quantx_market_data.worker"], ROOT),
+    (
       "market-gateway",
       [
         sys.executable,
@@ -219,11 +236,13 @@ def main() -> None:
   ]
   if args.profile == "full":
     env["PREFECT_WORKER_POOL"] = "quantx-dev-pool"
-    commands.insert(3, ("worker", [sys.executable, "-m", "quantx_worker.main"], ROOT))
+    commands.insert(5, ("worker", [sys.executable, "-m", "quantx_worker.main"], ROOT))
   if args.component == "monitor":
     env["MONITOR_DATABASE_PATH"] = str(RUNTIME / "monitor.sqlite3")
     commands = [("monitor", [sys.executable, "-m", "quantx_monitor.main"], ROOT)]
-  ports = (18083,) if args.component else (18081, 18082, 5250, 5251, 8080)
+  if not args.component:
+    validate_market_data_services(env)
+  ports = (18083,) if args.component else (18081, 18082, 18085, 5250, 5251, 8080)
   for port in ports:
     with socket.socket() as probe:
       probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -235,7 +254,7 @@ def main() -> None:
         process = subprocess.Popen(
           command,
           cwd=directory,
-          env=env,
+          env={**env, "DATABASE_PROCESS_ROLE": name},
           stdout=log,
           stderr=log,
           start_new_session=True,
@@ -249,17 +268,25 @@ def main() -> None:
       )
       save(entries)
       health = {
+        "market-data-api": "http://127.0.0.1:18085/health/ready",
+        "market-data-worker": "http://127.0.0.1:18085/health/worker",
         "market-gateway": "http://127.0.0.1:18082/health/live",
         "api": "http://127.0.0.1:18081/health/live",
         "caddy": "http://127.0.0.1:8080/health/live",
         "monitor": "http://127.0.0.1:18083/monitor/health/ready",
       }.get(name)
       if health:
+        headers = (
+          {"Authorization": "Bearer " + env["QUANTX_MARKET_DATA_INTERNAL_TOKEN"]}
+          if name in {"market-data-api", "market-data-worker"}
+          else {}
+        )
+        request = urllib.request.Request(health, headers=headers)
         for attempt in range(60):
           if process.poll() is not None:
             raise RuntimeError(f"{name} exited during startup")
           try:
-            with urllib.request.urlopen(health, timeout=1) as response:
+            with urllib.request.urlopen(request, timeout=1) as response:
               if response.status == 200:
                 break
           except OSError:

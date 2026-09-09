@@ -51,6 +51,29 @@ async def test_unclaimed_api_cannot_complete_a_frozen_upload(workers):
   assert (await worker_store.market_data_request("request-1"))["status"] == "UPLOADED"
 
 
+async def test_worker_health_requires_authentication_and_fresh_lease(workers):
+  (store, _), _ = workers
+  app = create_app(store=store, token="test-token")
+  async with app.router.lifespan_context(app):
+    async with AsyncClient(
+      transport=ASGITransport(app), base_url="http://test"
+    ) as client:
+      assert (await client.get("/health/worker")).status_code == 401
+      headers = {"Authorization": "Bearer test-token"}
+      assert (await client.get("/health/ready", headers=headers)).status_code == 200
+      assert (await client.get("/health/worker", headers=headers)).status_code == 503
+      assert await store.acquire()
+      result = await client.get("/health/worker", headers=headers)
+      assert result.status_code == 200
+      assert result.json() == {
+        "status": "ready",
+        "capability": "worker-lease",
+        "epoch": store.epoch,
+      }
+      await store.release()
+      assert (await client.get("/health/worker", headers=headers)).status_code == 503
+
+
 @pytest.fixture
 async def workers(durable_store):  # noqa: F811 - imported pytest fixture
   original, clock = durable_store

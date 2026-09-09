@@ -65,10 +65,14 @@ def _qmt_runtime_cutoff(max_age_seconds: float) -> datetime | None:
 class DurableRuntimeStore:
   ingestion_owner_epoch: int | None = None
 
-  def __init__(self, database_url: Optional[str] = None) -> None:
+  def __init__(
+    self, database_url: Optional[str] = None, *, pool_size=5, max_overflow=10
+  ) -> None:
     self.engine: AsyncEngine = create_async_engine(
       database_url or resolve_database_url(),
       pool_pre_ping=True,
+      pool_size=pool_size,
+      max_overflow=max_overflow,
     )
 
   async def close(self) -> None:

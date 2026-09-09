@@ -15,6 +15,14 @@ DEPENDENCIES = ("DATABASE_URL", "REDIS_URL", "INFLUXDB_HOST", "PREFECT_API_URL")
 LIVE_KEYS = ("ENABLE_REAL_TRADING", "QMT_REAL_TRADING_ENABLED", "T_TRADE_LIVE_ENABLED")
 
 
+def validate_market_data_services(values: dict[str, str]) -> None:
+  token = values.get("QUANTX_MARKET_DATA_INTERNAL_TOKEN", "")
+  if len(token) < 32 or "CHANGE_ME" in token:
+    raise ValueError(
+      "QUANTX_MARKET_DATA_INTERNAL_TOKEN must be explicitly configured (at least 32 characters)"
+    )
+
+
 def load_environment(root: Path, environment: str) -> dict[str, str]:
   if environment not in {"development", "production", "testing"}:
     raise ValueError("Unsupported deployment environment")
@@ -29,6 +37,7 @@ def load_environment(root: Path, environment: str) -> dict[str, str]:
     "INFLUXDB_TOKEN",
     "REDIS_PASSWORD",
     "QMT_AGENT_MODE",
+    "QUANTX_MARKET_DATA_INTERNAL_TOKEN",
   }
   if forbidden.intersection(shared):
     raise ValueError("Move environment-specific settings out of shared .env")
@@ -91,6 +100,8 @@ if __name__ == "__main__":
   import sys
 
   values = load_environment(Path(__file__).resolve().parents[1], sys.argv[1])
+  if "--market-data" in sys.argv:
+    validate_market_data_services(values)
   if "--json" in sys.argv:
     print(json.dumps(values))
   else:

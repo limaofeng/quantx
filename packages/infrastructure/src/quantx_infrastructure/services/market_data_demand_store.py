@@ -15,7 +15,7 @@ class MarketDataDemandCapacity(RuntimeError):
 
 class MarketDataDemandStore(DurableRuntimeStore):
   def __init__(self, database_url=None):
-    super().__init__(database_url)
+    super().__init__(database_url, pool_size=4, max_overflow=0)
     from quantx_infrastructure.config.settings import settings
 
     self.demand_source_kind = (

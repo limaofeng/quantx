@@ -33,7 +33,9 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
   @asynccontextmanager
   async def lifespan(app):
     resolved_token = token or os.environ.get("QUANTX_MARKET_DATA_INTERNAL_TOKEN", "")
-    if not resolved_token:
+    if not resolved_token or (
+      token is None and (len(resolved_token) < 32 or "CHANGE_ME" in resolved_token)
+    ):
       raise RuntimeError("Market Data API requires an internal service token")
     app.state.token = resolved_token
     app.state.store = store if store is not None else MarketDataDemandStore()
@@ -77,6 +79,22 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     except Exception:
       raise HTTPException(503, "MARKET_DATA_STORAGE_UNAVAILABLE") from None
     return {"status": "ready", "capability": "request-storage"}
+
+  @app.get("/health/worker", dependencies=[Depends(authorize)])
+  async def worker_health():
+    try:
+      async with app.state.store.engine.connect() as connection:
+        epoch = await connection.scalar(
+          text("""
+          SELECT epoch FROM market_data_worker_lease
+          WHERE id=1 AND expires_at > clock_timestamp()
+        """)
+        )
+    except SQLAlchemyError:
+      raise HTTPException(503, "MARKET_DATA_STORAGE_UNAVAILABLE") from None
+    if epoch is None:
+      raise HTTPException(503, "MARKET_DATA_WORKER_UNAVAILABLE")
+    return {"status": "ready", "capability": "worker-lease", "epoch": epoch}
 
   @app.post(
     "/market-data/internal/v1/demands",

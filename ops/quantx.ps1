@@ -98,6 +98,7 @@ $DefaultPrefectWorkerPool = "quantx-pool"
 $DefaultQmtCondaEnvironment = "xtquant-demo"
 $ApiPort = 18081
 $MarketGatewayPort = 18082
+$MarketDataApiPort = 18085
 $AgentWebSocketPingTimeoutSeconds = 960
 $QmtAgentStartupReadyTimeoutSeconds = 60
 $script:RuntimeProfile = ""
@@ -286,6 +287,7 @@ function Resolve-Node {
 function Get-WorkspacePythonPath {
   $entries = @(
     (Join-Path $Root "apps\api\src"),
+    (Join-Path $Root "apps\market-data\src"),
     (Join-Path $Root "apps\ai-runtime\src"),
     (Join-Path $Root "apps\engine\src"),
     (Join-Path $Root "apps\monitor\src"),
@@ -912,13 +914,14 @@ function Wait-HttpReady {
   param(
     [string]$Name,
     [string]$Url,
-    [int]$TimeoutSeconds = 60
+    [int]$TimeoutSeconds = 60,
+    [hashtable]$Headers = @{}
   )
 
   $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
   do {
     try {
-      $response = Invoke-WebRequest -Uri $Url -TimeoutSec 3 -UseBasicParsing
+      $response = Invoke-WebRequest -Uri $Url -TimeoutSec 3 -UseBasicParsing -Headers $Headers
       if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
         return
       }
@@ -1245,6 +1248,8 @@ function Invoke-CaddyRecovery {
   $requiredNames = @(
     "api",
     "market-gateway",
+    "market-data-api",
+    "market-data-worker",
     "ai-runtime",
     "engine",
     "worker"
@@ -1589,7 +1594,7 @@ function Invoke-Up {
   }
   $Profile = $resolvedProfile
   Initialize-PythonEnvironment
-  & (Resolve-Python) (Join-Path $Root "ops\runtime_config.py") $env:ENV
+  & (Resolve-Python) (Join-Path $Root "ops\runtime_config.py") $env:ENV --market-data
   if ($LASTEXITCODE -ne 0) { throw "Environment isolation validation failed." }
   $existing = @(Read-State)
   $live = @($existing | Where-Object { Get-TrackedProcess -Entry $_ })
@@ -1600,7 +1605,8 @@ function Invoke-Up {
   Assert-PortsAvailable -Ports @(
     8080,
     $ApiPort,
-    $MarketGatewayPort
+    $MarketGatewayPort,
+    $MarketDataApiPort
   )
   $python = Resolve-Python
   $aiRuntimePython = Resolve-AiRuntimePython
@@ -1691,6 +1697,30 @@ function Invoke-Up {
   $qmtProcessEntry = $null
   $qmtProcessLaunchStartedAt = $null
   try {
+    $marketDataHeaders = @{ Authorization = "Bearer $env:QUANTX_MARKET_DATA_INTERNAL_TOKEN" }
+    Start-ManagedProcess `
+      -Name "market-data-api" `
+      -Executable $python `
+      -Arguments @(
+        $processSupervisor, "--name", "market-data-api", "--state-dir", $StateDirectory, "--",
+        $python, "-m", "uvicorn", "quantx_market_data.api:app",
+        "--host", "127.0.0.1", "--port", [string]$MarketDataApiPort, "--workers", "1"
+      ) `
+      -WorkingDirectory $Root `
+      -DatabaseProcessRole "market-data-api"
+    Wait-HttpReady -Name "Market Data API" `
+      -Url "http://127.0.0.1:$MarketDataApiPort/health/ready" -Headers $marketDataHeaders
+    Start-ManagedProcess `
+      -Name "market-data-worker" `
+      -Executable $python `
+      -Arguments @(
+        $processSupervisor, "--name", "market-data-worker", "--state-dir", $StateDirectory, "--",
+        $python, "-m", "quantx_market_data.worker"
+      ) `
+      -WorkingDirectory $Root `
+      -DatabaseProcessRole "market-data-worker"
+    Wait-HttpReady -Name "Market Data Worker" `
+      -Url "http://127.0.0.1:$MarketDataApiPort/health/worker" -Headers $marketDataHeaders
     Start-ManagedProcess `
       -Name "market-gateway" `
       -Executable $python `
@@ -2023,6 +2053,7 @@ function Invoke-Status {
     8080,
     $ApiPort,
     $MarketGatewayPort,
+    $MarketDataApiPort,
     $MonitorPort
   )) {
     $owner = Get-PortOwner -Port $port
