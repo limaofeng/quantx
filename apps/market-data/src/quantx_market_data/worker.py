@@ -32,15 +32,8 @@ async def sweep(store, *, ingest=None) -> int:
     request = await store.market_data_request(request_id)
     if request is None:
       continue
-    # Inline reference replies move with the dedicated Agent history session.
-    # Until then, leave unsupported operations for that coordinated migration.
-    if request["request_payload"].get("operation", "bars") not in {
-      "bars",
-      "sector_instruments",
-      "divid_factors",
-      "financial_data",
-    }:
-      continue
+    # Discovery applies supported-operation filtering before its LIMIT. Do not
+    # keep a second category list here that can silently discard admitted work.
     result = await claim_ingest_and_finish_market_data_request(
       store,
       request_id,

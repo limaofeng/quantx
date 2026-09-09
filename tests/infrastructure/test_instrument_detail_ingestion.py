@@ -315,3 +315,37 @@ async def test_uploaded_missing_data_exposes_safe_reason_without_completion(
       assert response.status_code == 200
       assert response.json()["reason_code"] == "DATA_UNAVAILABLE"
       assert response.json()["records_verified"] is None
+
+
+async def test_worker_sweep_processes_discovered_instrument_snapshot(
+  snapshots, monkeypatch
+):
+  from unittest.mock import AsyncMock
+
+  from quantx_market_data.worker import sweep
+
+  store, _, _ = snapshots
+  monkeypatch.setattr(
+    store,
+    "requeue_expired_market_data_delivery_leases",
+    AsyncMock(return_value=0),
+    raising=False,
+  )
+  monkeypatch.setattr(
+    store, "plan_history_demand", AsyncMock(return_value=False), raising=False
+  )
+  monkeypatch.setattr(
+    store, "recoverable_market_data_request_ids", AsyncMock(return_value=["request-1"])
+  )
+  assert await sweep(store) == 1
+  request = await store.market_data_request("request-1")
+  assert request["status"] == "COMPLETED"
+  assert request["ingestion_progress"]["phase"] == "VERIFIED"
+  assert request["ingestion_result"]["records_verified"] == 2
+  async with store.engine.connect() as connection:
+    assert (
+      await connection.scalar(
+        text("SELECT count(*) FROM market_data_instrument_snapshot")
+      )
+      == 2
+    )
