@@ -34,6 +34,7 @@ CONTENT_MAX_SECONDS = 60
 
 @dataclass
 class ContentBudget:
+  storage_version: str | None = None
   deadline: float = field(
     default_factory=lambda: time.monotonic() + CONTENT_MAX_SECONDS
   )
@@ -104,7 +105,15 @@ def _query_batches(connection, query, code, period, budget):
         query=query,
         language="sql",
         mode="reader",
-        query_parameters={"stock_code": code, "period": period},
+        query_parameters={
+          "stock_code": code,
+          "period": period,
+          **(
+            {"storage_version": budget.storage_version}
+            if budget.storage_version
+            else {}
+          ),
+        },
         timeout=budget.remaining(),
       )
       if reader is None:
@@ -146,6 +155,8 @@ def _read_batch_once(connection, expected, budget, source_hash, persisted_hash):
     raise ValueError("invalid content verification batch")
   code, period = rows[0]["stock_code"], rows[0]["period"]
   measurement = {"tick": "ticks", "1m": "kline_1m", "1d": "kline_1d"}[period]
+  if budget.storage_version:
+    measurement += "_versions"
   columns = [
     name for name in expected.columns if any(_present(row[name]) for row in rows)
   ]
@@ -175,9 +186,10 @@ def _read_batch_once(connection, expected, budget, source_hash, persisted_hash):
     budget.pages += 1
     cursor = f" AND time > '{after.isoformat()}'" if after is not None else ""
     query = (
-      f"SELECT {','.join(columns)} FROM {measurement} "
+      f"SELECT {','.join(columns)}{',storage_version' if budget.storage_version else ''} FROM {measurement} "
       "WHERE stock_code=$stock_code AND period=$period "
-      f"AND time >= '{start.isoformat()}' AND time <= '{end.isoformat()}'{cursor} "
+      + ("AND storage_version=$storage_version " if budget.storage_version else "")
+      + f"AND time >= '{start.isoformat()}' AND time <= '{end.isoformat()}'{cursor} "
       f"ORDER BY time ASC LIMIT {CONTENT_PAGE_ROWS}"
     )
     page_rows = page_bytes = 0
@@ -202,6 +214,8 @@ def _read_batch_once(connection, expected, budget, source_hash, persisted_hash):
           if (
             row.get("stock_code") != code
             or row.get("period") != period
+            or budget.storage_version is not None
+            and row.get("storage_version") != budget.storage_version
             or not start <= stamp <= end
             or after is not None
             and stamp <= after
@@ -227,8 +241,15 @@ def _read_batch_once(connection, expected, budget, source_hash, persisted_hash):
   return len(rows), fields_verified, source_hash, persisted_hash
 
 
-async def verify_persisted_bar_content(expected_batches, *, connection=None):
-  budget = ContentBudget()
+async def verify_persisted_bar_content(
+  expected_batches, *, connection=None, storage_version=None
+):
+  if storage_version is not None and (
+    not isinstance(storage_version, str)
+    or re.fullmatch(r"[0-9a-f]{64}", storage_version) is None
+  ):
+    raise ValueError("invalid storage version")
+  budget = ContentBudget(storage_version=storage_version)
   source_hash, persisted_hash = hashlib.sha256(), hashlib.sha256()
   count = fields_verified = 0
   async for expected in expected_batches:
