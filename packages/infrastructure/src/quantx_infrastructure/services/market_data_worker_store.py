@@ -16,6 +16,11 @@ from quantx_infrastructure.services.market_data_demand_store import (
 
 
 class MarketDataWorkerStore(MarketDataDemandStore):
+  async def consume_collection_receipts(self) -> int:
+    from .market_data_collection_receipt_store import CollectionReceiptStore
+
+    return await CollectionReceiptStore(self.engine).consume(self)
+
   async def plan_history_demand(self) -> bool:
     """Link one queued demand atomically under the current worker lease."""
     async with self.engine.begin() as connection:

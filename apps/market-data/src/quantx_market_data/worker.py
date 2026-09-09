@@ -81,6 +81,13 @@ async def run(store, stop: asyncio.Event) -> None:
       await sweep(store)
       await _pause(stop, 1)
 
+  async def receipts():
+    # Native start grants are short-lived; a long Influx readback must not
+    # prevent the independent receipt consumer from confirming START.
+    while not stop.is_set():
+      await store.consume_collection_receipts()
+      await _pause(stop, 0.25)
+
   from quantx_infrastructure.services.market_data_staging_cleanup import (
     run_market_data_staging_sweeper,
   )
@@ -89,6 +96,7 @@ async def run(store, stop: asyncio.Event) -> None:
     asyncio.create_task(run_market_data_staging_sweeper(stop, owner=store)),
     asyncio.create_task(renew()),
     asyncio.create_task(consume()),
+    asyncio.create_task(receipts()),
     asyncio.create_task(stop.wait()),
   ]
   try:

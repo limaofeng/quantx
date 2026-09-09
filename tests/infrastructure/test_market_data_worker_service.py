@@ -312,6 +312,9 @@ async def test_worker_joins_active_ingestion_before_releasing_lease(monkeypatch)
       finished.set()
 
   class Lease:
+    async def consume_collection_receipts(self):
+      return 0
+
     async def acquire(self):
       return True
 

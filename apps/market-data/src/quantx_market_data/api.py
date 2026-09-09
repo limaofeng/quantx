@@ -57,6 +57,9 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
   from .agent_upload import agent_router
 
   app.include_router(agent_router)
+  from .collection_receipts import router as collection_receipts_router
+
+  app.include_router(collection_receipts_router)
   from .development_history import router as development_history_router
 
   app.include_router(development_history_router)

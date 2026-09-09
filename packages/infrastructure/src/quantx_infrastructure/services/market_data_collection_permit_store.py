@@ -367,7 +367,9 @@ class CollectionPermitStore:
         unit=CollectionUnit.from_payload(row["request_id"], index, units[index]),
       )
 
-  async def acknowledge(self, *, permit_id: str, device_id: str, event: str) -> bool:
+  async def acknowledge(
+    self, *, permit_id: str, device_id: str, event: str, completion=None
+  ) -> bool:
     """Apply an authenticated native start/completion fact under the live owner.
 
     Duplicate facts are harmless. FINISH may refer to a previous owner's STARTED
@@ -377,60 +379,78 @@ class CollectionPermitStore:
       raise ValueError("unknown collection event")
     async with self.worker.engine.begin() as connection:
       await self._lock(connection)
-      row = (
-        (
-          await connection.execute(
-            text("""
-        SELECT permit_payload,state FROM market_data_collection_permit WHERE permit_id=:id FOR UPDATE
-      """),
-            {"id": str(UUID(permit_id))},
-          )
-        )
-        .mappings()
-        .one_or_none()
+      return await self.apply_receipt(
+        connection,
+        permit_id=permit_id,
+        device_id=device_id,
+        event=event,
+        completion=completion,
       )
-      if row is None:
-        raise ValueError("unknown collection permit")
-      grant = CollectionPermit.model_validate(row["permit_payload"])
-      if grant.device_id != UUID(device_id):
-        raise ValueError("collection device mismatch")
-      if (event == "START" and row["state"] in {"STARTED", "FINISHED"}) or (
-        event == "FINISH" and row["state"] == "FINISHED"
-      ):
-        await self.worker._guard_ingestion_owner(connection)
-        return False
-      if event == "START":
-        now = (await connection.execute(text("SELECT clock_timestamp()"))).scalar_one()
-        grant.validate_start(
-          device_id=device_id, unit=grant.unit, now=now, minimum_epoch=self.worker.epoch
-        )
-        if row["state"] != "ISSUED":
-          raise ValueError("collection permit cannot start")
-        sql = "UPDATE market_data_collection_permit SET state='STARTED',started_at=clock_timestamp() WHERE permit_id=:id"
-      else:
-        if row["state"] != "STARTED":
-          raise ValueError("collection permit has not started")
-        sql = "UPDATE market_data_collection_permit SET state='FINISHED',finished_at=clock_timestamp() WHERE permit_id=:id"
-        advanced = (
-          await connection.execute(
-            text("""
-          UPDATE market_data_collection_plan SET next_unit_index=next_unit_index+1
-          WHERE request_id=:request AND next_unit_index=:index AND next_unit_index<unit_count
-          RETURNING next_unit_index
-        """),
-            {"request": str(grant.unit.request_id), "index": grant.unit.unit_index},
-          )
-        ).scalar_one_or_none()
-        if advanced is None:
-          raise ValueError("collection plan and completion facts disagree")
+
+  async def apply_receipt(
+    self, connection, *, permit_id: str, device_id: str, event: str, completion=None
+  ) -> bool:
+    """Apply a fact inside the caller's fenced receipt transaction."""
+    if event not in {"START", "FINISH"}:
+      raise ValueError("unknown collection event")
+    row = (
+      (
         await connection.execute(
           text("""
-          UPDATE market_data_collection_schedule SET production_streak=
-            CASE WHEN (SELECT development_only FROM market_data_collection_permit WHERE permit_id=:id)
-              THEN 0 ELSE LEAST(4,production_streak+1) END WHERE id=1
-        """),
-          {"id": str(grant.permit_id)},
+      SELECT permit_payload,state FROM market_data_collection_permit WHERE permit_id=:id FOR UPDATE
+    """),
+          {"id": str(UUID(permit_id))},
         )
-      await connection.execute(text(sql), {"id": str(grant.permit_id)})
+      )
+      .mappings()
+      .one_or_none()
+    )
+    if row is None:
+      raise ValueError("unknown collection permit")
+    grant = CollectionPermit.model_validate(row["permit_payload"])
+    if grant.device_id != UUID(device_id):
+      raise ValueError("collection device mismatch")
+    if event == "FINISH" and (completion is None or completion.unit != grant.unit):
+      raise ValueError("collection completion evidence does not match the permit")
+    if event == "START" and completion is not None:
+      raise ValueError("collection START cannot carry completion evidence")
+    if (event == "START" and row["state"] in {"STARTED", "FINISHED"}) or (
+      event == "FINISH" and row["state"] == "FINISHED"
+    ):
       await self.worker._guard_ingestion_owner(connection)
-      return True
+      return False
+    if event == "START":
+      now = (await connection.execute(text("SELECT clock_timestamp()"))).scalar_one()
+      grant.validate_start(
+        device_id=device_id, unit=grant.unit, now=now, minimum_epoch=self.worker.epoch
+      )
+      if row["state"] != "ISSUED":
+        raise ValueError("collection permit cannot start")
+      sql = "UPDATE market_data_collection_permit SET state='STARTED',started_at=clock_timestamp() WHERE permit_id=:id"
+    else:
+      if row["state"] != "STARTED":
+        raise ValueError("collection permit has not started")
+      sql = "UPDATE market_data_collection_permit SET state='FINISHED',finished_at=clock_timestamp() WHERE permit_id=:id"
+      advanced = (
+        await connection.execute(
+          text("""
+        UPDATE market_data_collection_plan SET next_unit_index=next_unit_index+1
+        WHERE request_id=:request AND next_unit_index=:index AND next_unit_index<unit_count
+        RETURNING next_unit_index
+      """),
+          {"request": str(grant.unit.request_id), "index": grant.unit.unit_index},
+        )
+      ).scalar_one_or_none()
+      if advanced is None:
+        raise ValueError("collection plan and completion facts disagree")
+      await connection.execute(
+        text("""
+        UPDATE market_data_collection_schedule SET production_streak=
+          CASE WHEN (SELECT development_only FROM market_data_collection_permit WHERE permit_id=:id)
+            THEN 0 ELSE LEAST(4,production_streak+1) END WHERE id=1
+      """),
+        {"id": str(grant.permit_id)},
+      )
+    await connection.execute(text(sql), {"id": str(grant.permit_id)})
+    await self.worker._guard_ingestion_owner(connection)
+    return True

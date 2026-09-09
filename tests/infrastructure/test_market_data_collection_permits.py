@@ -13,6 +13,7 @@ from quantx_contracts.collection_permit import (
   CollectionUnit,
   plan_historical_work_units,
 )
+from quantx_contracts.collection_receipt import CollectionCompletion
 from quantx_infrastructure.services.market_data_collection_permit_store import (
   CollectionPermitStore,
 )
@@ -95,6 +96,11 @@ async def ack(store, grant, event, device=None):
     permit_id=str(grant.permit_id),
     device_id=device or str(grant.device_id),
     event=event,
+    completion=CollectionCompletion(
+      unit=grant.unit, sha256="a" * 64, byte_count=100, record_count=0
+    )
+    if event == "FINISH"
+    else None,
   )
 
 
