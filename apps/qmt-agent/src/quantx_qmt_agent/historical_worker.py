@@ -15,7 +15,7 @@ import logging
 import multiprocessing
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -280,7 +280,7 @@ def _timed_unit_records(broker: QmtDataBroker, unit: dict[str, Any], request_id:
 
 
 def _iter_request_records(
-  broker: QmtDataBroker,
+  broker: QmtDataBroker | None,
   payload: dict[str, Any],
   connection: Any,
   request_id: str,
@@ -290,7 +290,13 @@ def _iter_request_records(
   max_staging_uncompressed_bytes: int,
   max_record_uncompressed_bytes: int,
   disk_budget: _HistoricalDiskBudget | None = None,
+  read_unit: Callable[[dict[str, Any], int], Iterator[dict[str, Any]]] | None = None,
 ) -> Iterator[Any]:
+  if read_unit is None:
+    if broker is None:
+      raise ValueError("historical request requires a unit reader")
+    def read_unit(unit, index):
+      return _timed_unit_records(broker, unit, request_id, index)
   units = historical_work_units(payload)
   connection.send(
     {
@@ -301,7 +307,7 @@ def _iter_request_records(
   )
   if str(payload.get("operation") or "bars") != "bars":
     for index, unit in enumerate(units, start=1):
-      yield from _timed_unit_records(broker, unit, request_id, index)
+      yield from read_unit(unit, index)
       if index < len(units):
         yield chunk_boundary
         connection.send(
@@ -353,7 +359,7 @@ def _iter_request_records(
       for unit_index in range(group_start, group_end):
         unit = units[unit_index]
         summaries: set[str] = set()
-        for raw_record in _timed_unit_records(broker, unit, request_id, unit_index + 1):
+        for raw_record in read_unit(unit, unit_index + 1):
           if not isinstance(raw_record, dict):
             raise ValueError("XTData worker returned a non-object record")
           if "record_type" in raw_record:

@@ -61,8 +61,10 @@ from .health import AGENT_VERSION, AgentHealthState
 from .historical_worker import (
   HISTORICAL_CHECKPOINT,
   XTDATA_HISTORICAL_WORKER_KIND,
+  _HistoricalDiskBudget,
   run_historical_market_data_worker,
 )
+from .history_assembly import history_request_records
 from .history_jobs import retained_history_bytes
 from .history_timing import record_history_timing
 from .journal import LocalJournal
@@ -922,6 +924,7 @@ def _write_market_data_spool_manifest(
   *,
   request_id: str,
   fingerprint: str,
+  reserve_bytes: Callable[[int], None] | None = None,
 ) -> None:
   resolved_spool = prepared.spool_directory.resolve()
   expected_spool = _market_data_spool_request_directory(
@@ -959,8 +962,11 @@ def _write_market_data_spool_manifest(
   }
   manifest = resolved_spool / MARKET_DATA_SPOOL_MANIFEST
   temporary = resolved_spool / f"{MARKET_DATA_SPOOL_MANIFEST}.tmp"
+  encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+  if reserve_bytes is not None:
+    reserve_bytes(len(encoded.encode("utf-8")))
   with temporary.open("w", encoding="utf-8", newline="\n") as output:
-    json.dump(payload, output, sort_keys=True, separators=(",", ":"))
+    output.write(encoded)
     output.flush()
     os.fsync(output.fileno())
   temporary.replace(manifest)
@@ -5988,6 +5994,48 @@ class AgentRuntime:
       if self._history_workload != "idle":
         self._history_workload = "idle"
         self._history_workload_reason = ""
+
+  def _prepare_history_job_sync(self, job, artifacts):
+    """Build/recover upload bytes without entering a broker or recapturing data."""
+    if not self._historical_worker_lock.locked():
+      raise RuntimeError("history assembly requires the shared preparation lock")
+    if job.request.completed_units != job.request.unit_count:
+      raise ValueError("history assembly requires server-confirmed completed units")
+    request_id = str(job.request.request_id)
+    fingerprint = _market_data_payload_fingerprint(job.request.payload)
+    directory = _market_data_spool_request_directory(self._market_spool_root, request_id)
+    if directory.exists():
+      try:
+        return _read_market_data_spool_manifest(
+          directory, expected_request_id=request_id, expected_fingerprint=fingerprint,
+        )[0]
+      except FileNotFoundError:
+        pass  # An interrupted assembly is disposable; native results are separate.
+    directory = _reset_market_data_spool_directory(self._market_spool_root, request_id)
+    remaining = MAX_MARKET_DATA_UPLOAD_CACHE_BYTES - _managed_market_data_spool_bytes(self._market_spool_root)
+    budget = _HistoricalDiskBudget(max_bytes=remaining)
+    records = history_request_records(
+      job, device_id=self.configuration.device_id, journal=self.journal,
+      artifacts=artifacts, staging_directory=directory,
+      chunk_boundary=_MARKET_DATA_CHUNK_BOUNDARY,
+      max_uncompressed_bytes=MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES,
+      max_record_bytes=MAX_MARKET_DATA_RECORD_UNCOMPRESSED_BYTES,
+      disk_budget=budget,
+    )
+    try:
+      prepared = _prepare_market_data_records_spool_sync(
+        records, directory,
+        max_total_uncompressed_bytes=MAX_MARKET_DATA_REQUEST_UNCOMPRESSED_BYTES,
+        max_total_compressed_bytes=MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES,
+        reserve_compressed_bytes=budget.reserve,
+      )
+      _write_market_data_spool_manifest(
+        prepared, request_id=request_id, fingerprint=fingerprint,
+        reserve_bytes=budget.reserve,
+      )
+      return prepared
+    finally:
+      records.close()
 
   def _collect_history_unit_sync(self, permit, payload):
     """Executor-thread iterator; preserve child isolation and the shared native lock."""
