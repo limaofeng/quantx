@@ -114,3 +114,105 @@ def test_archive_failure_does_not_publish_partial_directory(tmp_path, monkeypatc
     package.package_code(tmp_path, "HEAD", tmp_path / "release")
   assert not (tmp_path / "release").exists()
   assert not list(tmp_path.iterdir())
+
+
+def make_bundle(tmp_path):
+  source = tmp_path / "source.tar"
+  archive(source)
+  bundle = tmp_path / "bundle"
+  bundle.mkdir()
+  package._write_bundle(source, bundle, "a" * 40)
+  return bundle
+
+
+def manifest_digest(bundle):
+  return hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
+
+
+def test_unpack_verified_tree_and_refuse_replacement(tmp_path):
+  bundle = make_bundle(tmp_path)
+  output = tmp_path / "code"
+  manifest = package.unpack_code(bundle, manifest_digest(bundle), output)
+  files = {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()}
+  assert files == {f["path"] for f in manifest["files"]}
+  for item in manifest["files"]:
+    assert (
+      hashlib.sha256((output / item["path"]).read_bytes()).hexdigest() == item["sha256"]
+    )
+  (output / "uv.lock").write_text("existing installation")
+  with pytest.raises(FileExistsError):
+    package.unpack_code(bundle, manifest_digest(bundle), output)
+  assert (output / "uv.lock").read_text() == "existing installation"
+
+
+@pytest.mark.parametrize(
+  "name", ["apps/TRAINER/extra.py", "apps/trainer/pyproject.toml/extra.py"]
+)
+def test_unpack_rejects_directory_collisions(tmp_path, name):
+  bundle = make_bundle(tmp_path)
+  manifest = json.loads((bundle / "manifest.json").read_text())
+  manifest["files"].append({**manifest["files"][0], "path": name})
+  (bundle / "manifest.json").write_text(json.dumps(manifest))
+  with pytest.raises(ValueError, match="SOURCE_PATH_COLLISION"):
+    package.unpack_code(bundle, manifest_digest(bundle), tmp_path / "code")
+  assert not (tmp_path / "code").exists()
+
+
+@pytest.mark.parametrize(
+  "fault",
+  [
+    "manifest",
+    "archive",
+    "file_hash",
+    "file_size",
+    "path",
+    "lock",
+    "duplicate",
+    "link",
+    "extra",
+  ],
+)
+def test_unpack_rejects_corruption_without_partial_output(tmp_path, fault):
+  bundle = make_bundle(tmp_path)
+  manifest = json.loads((bundle / "manifest.json").read_text())
+  expected = manifest_digest(bundle)
+  if fault == "manifest":
+    manifest["git_commit"] = "b" * 40
+  elif fault == "archive":
+    with (bundle / "code.zip").open("ab") as target:
+      target.write(b"altered")
+  elif fault == "file_hash":
+    manifest["files"][0]["sha256"] = "b" * 64
+  elif fault == "file_size":
+    manifest["files"][0]["size"] += 1
+  elif fault == "path":
+    manifest["files"][0]["path"] = "../escape"
+  elif fault == "lock":
+    manifest["lock_sha256"] = "b" * 64
+  else:
+    # Recompute outer hashes so metadata and exact inventory checks are exercised.
+    with zipfile.ZipFile(bundle / "code.zip") as source:
+      content = [(info, source.read(info)) for info in source.infolist()]
+    with zipfile.ZipFile(bundle / "code.zip", "w") as target:
+      for index, (info, data) in enumerate(content):
+        if fault == "link" and index == 0:
+          info.external_attr = 0o120777 << 16
+        target.writestr(info, data)
+      if fault == "extra":
+        target.writestr("extra.py", b"unlisted")
+      if fault == "duplicate":
+        with pytest.warns(UserWarning, match="Duplicate name"):
+          target.writestr(*content[0])
+    manifest["archive"]["sha256"] = hashlib.sha256(
+      (bundle / "code.zip").read_bytes()
+    ).hexdigest()
+    manifest["archive"]["size"] = (bundle / "code.zip").stat().st_size
+  (bundle / "manifest.json").write_text(json.dumps(manifest))
+  if fault != "manifest":
+    expected = manifest_digest(bundle)
+  with pytest.raises(ValueError):
+    package.unpack_code(bundle, expected, tmp_path / "code")
+  assert not (tmp_path / "code").exists()
+  assert not (tmp_path / "escape").exists()
+  assert not list(tmp_path.glob(".trainer-unpack-*"))
+  assert not list(tmp_path.glob("*.package-lock"))

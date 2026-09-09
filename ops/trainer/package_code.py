@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -157,15 +158,131 @@ def package_code(repository: Path, revision: str, output: Path) -> dict:
     lock.unlink()
 
 
+def unpack_code(bundle: Path, manifest_sha256: str, output: Path) -> dict:
+  """Verify a separately trusted manifest digest before publishing a new tree."""
+  if not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256):
+    raise ValueError("INVALID_MANIFEST_DIGEST")
+  with (bundle / "manifest.json").open("rb") as source:
+    raw = source.read(8 * 1024 * 1024 + 1)
+  if len(raw) > 8 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != manifest_sha256:
+    raise ValueError("MANIFEST_DIGEST_MISMATCH")
+  manifest = json.loads(raw)
+  if (
+    type(manifest.get("schema_version")) is not int
+    or manifest["schema_version"] != 1
+    or manifest.get("kind") != "trainer-code"
+    or manifest.get("source_paths") != list(SOURCE_PATHS)
+    or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", manifest.get("git_commit", ""))
+  ):
+    raise ValueError("INVALID_CODE_MANIFEST")
+  records = {}
+  folded = set()
+  for item in manifest["files"]:
+    name = _portable_path(item["path"])
+    if (
+      name.casefold() in folded
+      or name.split("/")[0] not in SOURCE_PATHS
+      or type(item["size"]) is not int
+      or item["size"] < 0
+      or type(item["mode"]) is not int
+      or item["mode"] not in (0o644, 0o755)
+      or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+    ):
+      raise ValueError("INVALID_FILE_RECORD")
+    folded.add(name.casefold())
+    records[name] = item
+  if not set(REQUIRED_FILES) <= records.keys():
+    raise ValueError("SOURCE_REQUIRED_FILE_MISSING")
+  # A file cannot also be a directory, including on case-insensitive Windows.
+  spellings = {name.casefold(): name for name in records}
+  for name in records:
+    for parent in PurePosixPath(name).parents:
+      key = str(parent).casefold()
+      if key in folded or spellings.setdefault(key, str(parent)) != str(parent):
+        raise ValueError("SOURCE_PATH_COLLISION")
+  if manifest["lock_sha256"] != records["uv.lock"]["sha256"]:
+    raise ValueError("LOCK_DIGEST_MISMATCH")
+  archive = manifest["archive"]
+  if archive["path"] != "code.zip" or type(archive["size"]) is not int:
+    raise ValueError("INVALID_ARCHIVE_RECORD")
+  output = output.absolute()
+  output.parent.mkdir(parents=True, exist_ok=True)
+  lock = output.with_name(output.name + ".package-lock")
+  with lock.open("x"):
+    pass
+  try:
+    if output.exists() or output.is_symlink():
+      raise FileExistsError(output)
+    with tempfile.TemporaryDirectory(
+      prefix=".trainer-unpack-", dir=output.parent
+    ) as tmp:
+      staging = Path(tmp) / "code"
+      staging.mkdir()
+      # Hash and read the same open file; never trust ZIP extraction paths.
+      with (bundle / "code.zip").open("rb") as source:
+        if (
+          os.fstat(source.fileno()).st_size != archive["size"]
+          or hashlib.file_digest(source, "sha256").hexdigest() != archive["sha256"]
+        ):
+          raise ValueError("ARCHIVE_DIGEST_MISMATCH")
+        source.seek(0)
+        with zipfile.ZipFile(source) as zipped:
+          infos = zipped.infolist()
+          if (
+            len(infos) != len(records)
+            or {info.filename for info in infos} != records.keys()
+          ):
+            raise ValueError("ARCHIVE_INVENTORY_MISMATCH")
+          for info in infos:
+            record = records[info.filename]
+            if (
+              info.file_size != record["size"]
+              or info.create_system != 3
+              or info.external_attr >> 16 != stat.S_IFREG | record["mode"]
+              or info.flag_bits & 1
+            ):
+              raise ValueError("ARCHIVE_FILE_METADATA_MISMATCH")
+            target = staging / info.filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256()
+            size = 0
+            with zipped.open(info) as content, target.open("xb") as destination:
+              while chunk := content.read(1024 * 1024):
+                size += len(chunk)
+                if size > record["size"]:
+                  raise ValueError("ARCHIVE_FILE_SIZE_MISMATCH")
+                digest.update(chunk)
+                destination.write(chunk)
+            if size != record["size"] or digest.hexdigest() != record["sha256"]:
+              raise ValueError("ARCHIVE_FILE_DIGEST_MISMATCH")
+            target.chmod(record["mode"])
+      if output.exists() or output.is_symlink():
+        raise FileExistsError(output)
+      os.rename(staging, output)
+    return manifest
+  finally:
+    lock.unlink()
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
     "--repository", type=Path, default=Path(__file__).resolve().parents[2]
   )
-  parser.add_argument("--revision", required=True)
+  action = parser.add_mutually_exclusive_group(required=True)
+  action.add_argument("--revision")
+  action.add_argument("--bundle", type=Path)
+  parser.add_argument("--manifest-sha256")
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
-  manifest = package_code(args.repository, args.revision, args.output)
+  if args.bundle:
+    if not args.manifest_sha256:
+      parser.error("--bundle requires --manifest-sha256 from the packaging host")
+    manifest = unpack_code(args.bundle, args.manifest_sha256, args.output)
+  else:
+    if args.manifest_sha256:
+      parser.error("--manifest-sha256 requires --bundle")
+    manifest = package_code(args.repository, args.revision, args.output)
   print(
     json.dumps({"git_commit": manifest["git_commit"], "archive": manifest["archive"]})
   )
