@@ -11,7 +11,7 @@ import logging
 import math
 import re
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -36,8 +36,15 @@ from quantx_contracts import (
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.timeseries_connection import NonRetryableWriteError
 from quantx_infrastructure.database.timeseries_operations import single_write_attempt
+from quantx_infrastructure.models.kline import KLine
+from quantx_infrastructure.models.tick import Tick
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
+)
+from quantx_infrastructure.services.market_data_content_verification import (
+  CONTENT_BATCH_BYTES,
+  CONTENT_BATCH_ROWS,
+  verify_persisted_bar_content,
 )
 from quantx_infrastructure.services.market_data_ingestion_progress import (
   IngestionProgress,
@@ -769,6 +776,18 @@ def _reject_json_constant(value: str) -> None:
   raise _validation_error(f"market-data JSON contains non-finite value: {value}")
 
 
+def normalize_market_data_storage(
+  period: str, market_data: dict[str, pd.DataFrame]
+) -> pd.DataFrame:
+  """Use the writer's rounding and model converters for both writes and proofs."""
+  values = preprocess_market_data(period, market_data)
+  for field in fields(Tick if period == "tick" else KLine):
+    converter = field.metadata.get("converter")
+    if converter is not None and field.name in values:
+      values = converter.convert_to_database_column(values, field.name)
+  return values
+
+
 def _encoded_record_size(record: dict[str, Any]) -> int:
   try:
     return len(
@@ -1042,7 +1061,7 @@ def _save_market_data_period_sync(
   market_data: dict[str, pd.DataFrame],
 ) -> dict[str, Any]:
   with market_data_stage("batch_preprocess", period=period):
-    normalized = preprocess_market_data(period, market_data)
+    normalized = normalize_market_data_storage(period, market_data)
   service = HistoricalMarketDataService()
   # Includes the SDK serialization and synchronous database confirmation.
   with (
@@ -1295,6 +1314,45 @@ async def persist_bar_records(
   )
 
 
+async def _uploaded_content_batches(manifest):
+  budget = _TransferBudget()
+  group, records, size = None, [], 0
+
+  def normalized(values, key):
+    period, code, _day = key
+    return normalize_market_data_storage(
+      period,
+      {
+        code: pd.DataFrame(
+          [
+            {k: v for k, v in row.items() if k not in {"code", "period"}}
+            for row in values
+          ]
+        ),
+      },
+    )
+
+  for item in manifest:
+    chunk = await asyncio.to_thread(_read_transfer_chunk, item, budget)
+    for record in chunk:
+      if "record_type" in record:
+        continue
+      key = (record["period"], record["code"], record["time"] // 86_400_000)
+      record_bytes = _encoded_record_size(record)
+      if records and (
+        group != key
+        or len(records) >= CONTENT_BATCH_ROWS
+        or size + record_bytes > CONTENT_BATCH_BYTES
+      ):
+        yield await asyncio.to_thread(normalized, records, group)
+        records, size = [], 0
+      group = key
+      records.append(record)
+      size += record_bytes
+  if records:
+    yield await asyncio.to_thread(normalized, records, group)
+
+
 async def _verify_uploaded_bar_coverage(
   manifest,
   payload,
@@ -1346,9 +1404,25 @@ async def _verify_uploaded_bar_coverage(
     raise MarketDataPersistenceVerificationError(
       "Influx persistence verification did not prove every accepted row"
     )
+  content = await verify_persisted_bar_content(_uploaded_content_batches(manifest))
+  if (
+    type(content.get("schema_version")) is not int
+    or content["schema_version"] != 1
+    or type(content.get("records_verified")) is not int
+    or content["records_verified"] != records_verified
+    or type(content.get("fields_verified")) is not int
+    or content["fields_verified"] < (1 if records_verified else 0)
+    or not isinstance(content.get("source_sha256"), str)
+    or re.fullmatch(r"[0-9a-f]{64}", content["source_sha256"]) is None
+    or content.get("source_sha256") != content.get("persisted_sha256")
+  ):
+    raise MarketDataPersistenceVerificationError(
+      "Influx content verification is incomplete"
+    )
   return {
     "records_verified": records_verified,
     "persistence_verification": verification,
+    "content_verification": content,
   }
 
 
@@ -1358,7 +1432,7 @@ async def verify_uploaded_bar_request(
   *,
   verify_persistence: VerifyPersistence | None = None,
 ) -> dict[str, Any]:
-  """Recheck immutable input and current key coverage without writes or cached proofs."""
+  """Recheck immutable input, key coverage and owned fields without cached proofs."""
   token = market_data_request_id.set(request_id)
   try:
     _, payload, manifest = await load_uploaded_request_manifest(store, request_id)

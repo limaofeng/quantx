@@ -27,6 +27,12 @@ SHANGHAI_DAY_END_EXCLUSIVE_MS = SHANGHAI_DAY_START_MS + 24 * 60 * 60 * 1000
 
 @pytest.fixture(autouse=True)
 def _stub_persistence_readback(monkeypatch: pytest.MonkeyPatch) -> None:
+  from tests.infrastructure.test_market_data_content_verification import (
+    stub_content_verifier,
+  )
+
+  monkeypatch.setattr(ingestion, "verify_persisted_bar_content", stub_content_verifier)
+
   async def verify(
     *,
     code_summaries,

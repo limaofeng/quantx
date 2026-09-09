@@ -20,6 +20,11 @@ async def test_recheck_reads_again_without_writes_or_old_readback_checkpoint(
     payload=_payload(), manifest=[_write_chunk(tmp_path, [row, _summary([row])])]
   )
   calls = 0
+  from tests.infrastructure.test_market_data_content_verification import (
+    stub_content_verifier,
+  )
+
+  monkeypatch.setattr(ingestion, "verify_persisted_bar_content", stub_content_verifier)
 
   def write(**kwargs):
     pytest.fail("readonly recovery wrote market data")

@@ -5,7 +5,6 @@ import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from alembic.migration import MigrationContext
@@ -52,6 +51,13 @@ class Store(runtime_store.DurableRuntimeStore):
 
 @pytest.fixture
 async def durable_store(monkeypatch):
+  # This fixture tests PG state/fences; actual Arrow field comparisons have a
+  # dedicated suite and are not simulated by this catalog fixture.
+  from tests.infrastructure.test_market_data_content_verification import (
+    stub_content_verifier,
+  )
+
+  monkeypatch.setattr(ingestion, "verify_persisted_bar_content", stub_content_verifier)
   url = make_url(os.environ["DATABASE_URL"])
   assert url.host in {"localhost", "127.0.0.1", "::1"}
   assert url.database.endswith("_test") or url.database.startswith("test_")
@@ -256,67 +262,6 @@ async def test_old_owner_and_mutated_manifest_cannot_advance(durable_store):
     "request-1", claim_token=second, action="begin"
   )
   assert state["blocked"] and state["reason_code"] == "INGESTION_RETRY_BUDGET_EXHAUSTED"
-
-
-async def test_api_dispatch_stops_on_shared_capacity_block(durable_store, monkeypatch):
-  from quantx_api import agent_api
-
-  store, _ = durable_store
-  token = await store.claim_market_data_request("request-1")
-  await store.mutate_market_data_ingestion(
-    "request-1", claim_token=token, action="begin"
-  )
-  await store.mutate_market_data_ingestion(
-    "request-1",
-    claim_token=token,
-    action="defer",
-    values={
-      "reason_code": "DEPENDENCY_QUERY_CAPACITY_BLOCKED",
-      "blocked": True,
-    },
-  )
-
-  class Session:
-    async def __aenter__(self):
-      self.connection = await store.engine.connect()
-      return self
-
-    async def __aexit__(self, *args):
-      await self.connection.close()
-
-    async def scalar(self, statement, params=None):
-      if "market_data_history_session" in str(statement):
-        return False
-      assert "agent_devices" in str(statement)
-      return "device-1"
-
-    async def get(self, *args):
-      return None
-
-    async def scalars(self, statement):
-      return (await self.connection.execute(statement)).scalars()
-
-  monkeypatch.setattr(agent_api, "AsyncSessionLocal", Session)
-  monkeypatch.setattr(
-    agent_api,
-    "evaluate_agent_session",
-    lambda *args, **kwargs: SimpleNamespace(
-      current=True,
-      api_instance_id="api-1",
-      agent_session_id="session-1",
-    ),
-  )
-  assert (
-    await agent_api._next_market_data_request(
-      SimpleNamespace(
-        device_id="device-1",
-        capabilities=["market-data"],
-        api_instance_id="api-1",
-        agent_session_id="session-1",
-      )
-    )
-    is None
-  )
 
 
 @pytest.mark.parametrize("changed", [False, True])

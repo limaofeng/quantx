@@ -19,6 +19,11 @@ from quantx_infrastructure.services import market_data_transfer_ingestion as ing
 
 @pytest.fixture(autouse=True)
 def _stub_persistence_readback(monkeypatch):
+  from tests.infrastructure.test_market_data_content_verification import (
+    stub_content_verifier,
+  )
+
+  monkeypatch.setattr(ingestion, "verify_persisted_bar_content", stub_content_verifier)
   bar_ingester = ingestion.ingest_uploaded_bar_request
 
   async def ingest_bars(store, request_id, **kwargs):
