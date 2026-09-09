@@ -133,6 +133,54 @@ class HostPolicy:
     return None
 
 
+  def capacity_reason(self, available: int, free: int) -> str | None:
+    if any(type(value) is not int or value < 0 for value in (available, free)):
+      return "HOST_RESOURCE_STATE_UNKNOWN"
+    if available < self.minimum_available_memory_mib * MIB:
+      return "HOST_MEMORY_RESERVE"
+    if free < self.minimum_free_disk_mib * MIB:
+      return "HOST_DISK_RESERVE"
+    return None
+
+
+def host_resource_status(root: Path, *, now: datetime | None = None) -> dict:
+  """Read global capacity only; never claim a lock or initialize CPU/GPU compute."""
+  observed = now if now is not None else datetime.now(SHANGHAI)
+  result = {
+    "status": "UNKNOWN",
+    "reason": "HOST_RESOURCE_STATE_UNKNOWN",
+    "observed_at": observed.isoformat(),
+    "host_lock": "NOT_INSPECTED",
+    "task_budgets": "NOT_INSPECTED",
+  }
+  try:
+    policy = HostPolicy.load(root)
+    result["limits"] = {
+      "cpu_threads": policy.cpu_threads,
+      "max_rss_mib": policy.max_rss_mib,
+      "minimum_available_memory_mib": policy.minimum_available_memory_mib,
+      "minimum_free_disk_mib": policy.minimum_free_disk_mib,
+      "gpu_max_memory_fraction": policy.gpu_max_memory_fraction,
+    }
+    reason = policy.window_reason(observed)
+    if reason is None:
+      available = psutil.virtual_memory().available
+      free = min(shutil.disk_usage(disk).free for disk in policy.disk_roots)
+      reason = policy.capacity_reason(available, free)
+      if reason != "HOST_RESOURCE_STATE_UNKNOWN":
+        result["available_memory_mib"] = available // MIB
+        result["minimum_disk_free_mib"] = free // MIB
+    result.update(
+      status="UNKNOWN" if reason in {"HOST_CLOCK_UNKNOWN", "HOST_RESOURCE_STATE_UNKNOWN"} else ("BLOCKED" if reason else "PASS"),
+      reason=reason,
+    )
+  except HostAdmissionDenied:
+    result["reason"] = "HOST_POLICY_MISSING_OR_INVALID"
+  except Exception:
+    pass
+  return result
+
+
 class HostResourceGuard:
   def __init__(
     self,
@@ -234,10 +282,9 @@ class HostResourceGuard:
             return "TASK_CPU_BUDGET"
       else:
         self._cpu_sample = sampled, cpu_seconds
-      if available < self.policy.minimum_available_memory_mib * MIB:
-        return "HOST_MEMORY_RESERVE"
-      if free < self.policy.minimum_free_disk_mib * MIB:
-        return "HOST_DISK_RESERVE"
+      capacity_reason = self.policy.capacity_reason(available, free)
+      if capacity_reason:
+        return capacity_reason
       if rss > self.policy.max_rss_mib * MIB:
         return "TASK_MEMORY_BUDGET"
     except (OSError, psutil.Error):

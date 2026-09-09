@@ -95,16 +95,23 @@ def test_status_cli_reports_drain_without_claiming_execution_exit(tmp_path, monk
   from types import SimpleNamespace
   from unittest.mock import Mock
 
+  from quantx_infrastructure import training_host_guard
   from quantx_trainer import main, preflight
   from quantx_trainer.admission import set_admission
+
+  monkeypatch.setattr(training_host_guard, "host_resource_status", lambda root: {"status": "PASS", "reason": None})
 
   config = SimpleNamespace(state_root=tmp_path, validate_runtime=Mock())
   monkeypatch.setattr(main.TrainerConfig, "load", lambda path: config)
   monkeypatch.setattr(preflight, "preflight", Mock(side_effect=AssertionError("offline query")))
   assert main.main(["status", "--config", "unused.toml"]) == 0
   value = json.loads(capsys.readouterr().out)
-  assert value == {"service": "OFFLINE", "execution_state": "NOT_INSPECTED", "admission": "OPEN"}
+  assert value == {"service": "OFFLINE", "execution_state": "NOT_INSPECTED", "admission": "OPEN", "host_resources": {"status": "PASS", "reason": None}}
   assert not (tmp_path / "control").exists()
+  monkeypatch.setattr(training_host_guard, "host_resource_status", lambda root: {"status": "UNKNOWN", "reason": "HOST_POLICY_MISSING_OR_INVALID"})
+  assert main.main(["status", "--config", "unused.toml"]) == 3
+  assert json.loads(capsys.readouterr().out)["host_resources"]["status"] == "UNKNOWN"
+  monkeypatch.setattr(training_host_guard, "host_resource_status", lambda root: {"status": "PASS", "reason": None})
   set_admission(tmp_path / "control", draining=True)
   assert main.main(["status", "--config", "unused.toml"]) == 0
   value = json.loads(capsys.readouterr().out)

@@ -363,3 +363,50 @@ except HostAdmissionDenied:
   record = json.loads((root / "owner.json").read_text())
   assert record["status"] == ("RELEASED" if cooperative else "STOP_REQUESTED")
   assert record["reason"] == "HOST_GPU_MEMORY_BUDGET"
+
+
+@pytest.mark.parametrize("available,free,status,reason", [
+  (2**20, 2**20, "PASS", None),
+  (2**20 - 1, 2**20, "BLOCKED", "HOST_MEMORY_RESERVE"),
+  (2**20, 2**20 - 1, "BLOCKED", "HOST_DISK_RESERVE"),
+  (-1, 2**20, "UNKNOWN", "HOST_RESOURCE_STATE_UNKNOWN"),
+])
+def test_readonly_host_snapshot_uses_execution_capacity_policy(root, monkeypatch, available, free, status, reason):
+  before = {p.name: p.read_bytes() for p in root.iterdir()}
+  monkeypatch.setattr(module.psutil, "virtual_memory", lambda: SimpleNamespace(available=available))
+  monkeypatch.setattr(module.shutil, "disk_usage", lambda path: SimpleNamespace(free=free))
+  monkeypatch.setattr(module.psutil, "Process", lambda: pytest.fail("must not sample query process"))
+  value = module.host_resource_status(root, now=evening())
+  assert value["status"] == status
+  assert value["reason"] == reason
+  assert value["host_lock"] == value["task_budgets"] == "NOT_INSPECTED"
+  assert value["limits"]["cpu_threads"] == 64
+  assert str(root) not in json.dumps(value)
+  assert before == {p.name: p.read_bytes() for p in root.iterdir()}
+
+
+def test_host_snapshot_never_probes_resources_during_protected_window(root, monkeypatch):
+  monkeypatch.setattr(module.psutil, "virtual_memory", lambda: pytest.fail("window should reject first"))
+  value = module.host_resource_status(root, now=datetime(2026, 9, 9, 10, tzinfo=SHANGHAI))
+  assert value["status"] == "BLOCKED"
+  assert value["reason"] == "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"
+
+
+def test_host_snapshot_missing_policy_is_unknown_without_creating_files(tmp_path):
+  value = module.host_resource_status(tmp_path / "missing", now=evening())
+  assert value["status"] == "UNKNOWN"
+  assert value["reason"] == "HOST_POLICY_MISSING_OR_INVALID"
+  assert not list(tmp_path.iterdir())
+
+
+def test_host_snapshot_read_failure_is_unknown_and_redacted(root, monkeypatch):
+  monkeypatch.setattr(module.psutil, "virtual_memory", lambda: SimpleNamespace(available=2**20))
+
+  def unavailable(path):
+    raise OSError("private /host/path password=secret")
+
+  monkeypatch.setattr(module.shutil, "disk_usage", unavailable)
+  value = module.host_resource_status(root, now=evening())
+  assert value["status"] == "UNKNOWN"
+  assert value["reason"] == "HOST_RESOURCE_STATE_UNKNOWN"
+  assert "private" not in json.dumps(value)

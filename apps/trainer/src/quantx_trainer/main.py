@@ -103,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
 
   if args.command == "status":
     from quantx_infrastructure.training_bundle_store import BundleTransferError
+    from quantx_infrastructure.training_host_guard import (
+      host_guard_root,
+      host_resource_status,
+    )
 
     from quantx_trainer.admission import admission_status
     from quantx_trainer.service_status import service_status
@@ -112,8 +116,12 @@ def main(argv: list[str] | None = None) -> int:
       result["admission"] = admission_status(config.state_root / "control")["admission"]
     except (OSError, ValueError, BundleTransferError):
       result["admission"] = "UNKNOWN"
+    try:
+      result["host_resources"] = host_resource_status(host_guard_root())
+    except Exception:
+      result["host_resources"] = {"status": "UNKNOWN", "reason": "HOST_RESOURCE_STATE_UNKNOWN"}
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["service"] in {"ALIVE", "OFFLINE"} and result["admission"] != "UNKNOWN" else 3
+    return 0 if result["service"] in {"ALIVE", "OFFLINE"} and result["admission"] != "UNKNOWN" and result["host_resources"]["status"] != "UNKNOWN" else 3
 
   if args.command == "serve":
     from quantx_trainer.service import serve
