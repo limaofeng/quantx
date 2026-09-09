@@ -12,7 +12,7 @@ import math
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from quantx_contracts.training_bundle import TrainingBundle
 from sqlalchemy import func, or_, select
@@ -1171,6 +1171,8 @@ class StockSelectionTrainingRepository:
     self,
     prefect_flow_run_id: str,
     now: datetime | None = None,
+    *,
+    prepare_execution: Callable[[str, str], None] | None = None,
   ) -> StockSelectionTrainingRun | None:
     owner = str(prefect_flow_run_id or "").strip()
     if not owner or len(owner) > 128:
@@ -1203,6 +1205,14 @@ class StockSelectionTrainingRepository:
     row = result.scalar_one_or_none()
     if row is None:
       return None
+    if prepare_execution is not None:
+      try:
+        # Persist local recovery evidence while the queued row is locked and
+        # before any RUNNING state can become visible to another dispatcher.
+        prepare_execution(str(row.run_id), owner)
+      except BaseException:
+        await self.db.rollback()
+        raise
     row.status = "RUNNING"
     row.phase = "PREFLIGHT"
     row.started_at = current

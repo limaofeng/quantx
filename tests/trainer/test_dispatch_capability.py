@@ -53,6 +53,7 @@ async def test_dispatch_uses_certificate_without_gpu_probe(monkeypatch, blocked)
   else:
     assert result["status"] == "SUCCEEDED"
     assert execute.await_args.kwargs["capability"] == certificate
+    assert repo.claim_next_queued.await_args.kwargs["prepare_execution"] is training._prepare_execution
 
 
 def test_host_admission_missing_policy_stays_queued(monkeypatch, tmp_path):

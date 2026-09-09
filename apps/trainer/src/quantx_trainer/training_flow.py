@@ -679,6 +679,13 @@ def _input_preparation_paths(directory: Path, owner: str) -> tuple[Path, Path]:
   return directory / f"input-{key}.json", directory / f"input-{key}.request.json"
 
 
+def _prepare_execution(run_id: str, owner: str) -> None:
+  directory = _control_directory(run_id)
+  preparation, request = _input_preparation_paths(directory, owner)
+  _write_json(request, {"run_id": run_id, "owner": owner})
+  begin_execution(preparation, run_id=run_id, owner=owner, request=request)
+
+
 async def recover_lost_training_runs(repository: Any, *, now: datetime | None = None) -> list[str]:
   """Converge only stopped supervisor/Research identities; unknown evidence stays pending."""
 
@@ -758,9 +765,6 @@ async def _run_claimed_job(
   child_started = False
   try:
     control_directory = _control_directory(run_id)
-    preparation, preparation_request = _input_preparation_paths(control_directory, execution_owner)
-    _write_json(preparation_request, {"run_id": run_id, "owner": execution_owner})
-    begin_execution(preparation, run_id=run_id, owner=execution_owner, request=preparation_request)
     try:
       files = await load_dataset(
         current_config(), repository, dataset, run_id=run_id, owner=execution_owner,
@@ -992,7 +996,9 @@ async def stock_selection_training_dispatch_flow(
       or os.environ.get("PREFECT_FLOW_RUN_ID", "")
       or str(uuid.uuid4())
     )
-    run = await repository.claim_next_queued(flow_id, timestamp)
+    run = await repository.claim_next_queued(
+      flow_id, timestamp, prepare_execution=_prepare_execution,
+    )
     if run is None:
       return {
         "status": "IDLE",

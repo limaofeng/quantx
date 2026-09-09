@@ -140,6 +140,55 @@ async def test_execution_capability_requires_fresh_certificate(age):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [None, "disk", "ack"])
+async def test_claim_persists_input_evidence_before_running_commit(session_factory, tmp_path, monkeypatch, fail):
+  from quantx_infrastructure.training_process_evidence import inspect_input_preparation
+  from quantx_trainer import training_flow as flow
+
+  monkeypatch.setattr(flow, "control_root", lambda: tmp_path)
+  async with session_factory() as db:
+    repo = StockSelectionTrainingRepository(db)
+    await repo.certify_dataset(DATASET)
+    spec = await repo.create_spec(spec_values())
+    await repo.create_run(run_values(spec.spec_id, "claim-run", "claim-idem"))
+    original_commit = db.commit
+
+    async def commit():
+      record, request = flow._input_preparation_paths(tmp_path / "claim-run", "owner")
+      assert inspect_input_preparation(record, run_id="claim-run", owner="owner", request=request) == "LIVE"
+      await original_commit()
+      if fail == "ack":
+        raise ConnectionError("commit acknowledgement lost")
+
+    monkeypatch.setattr(db, "commit", commit)
+
+    def prepare(run_id, owner):
+      if fail == "disk":
+        raise OSError("disk unavailable")
+      flow._prepare_execution(run_id, owner)
+
+    if fail == "disk":
+      with pytest.raises(OSError):
+        await repo.claim_next_queued("owner", prepare_execution=prepare)
+      row = await repo.get_run("claim-run")
+      assert row.status == "QUEUED"
+      assert row.prefect_flow_run_id is None
+    elif fail == "ack":
+      with pytest.raises(ConnectionError):
+        await repo.claim_next_queued("owner", prepare_execution=prepare)
+      async with session_factory() as observer:
+        row = await StockSelectionTrainingRepository(observer).get_run("claim-run")
+        assert row.status == "RUNNING"
+        assert row.prefect_flow_run_id == "owner"
+      record, request = flow._input_preparation_paths(tmp_path / "claim-run", "owner")
+      assert inspect_input_preparation(record, run_id="claim-run", owner="owner", request=request) == "LIVE"
+    else:
+      row = await repo.claim_next_queued("owner", prepare_execution=prepare)
+      assert row.status == "RUNNING"
+      assert row.prefect_flow_run_id == "owner"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_input_requeue_is_owner_fenced_and_preserves_cancellation(session_factory, cancel):
   async with session_factory() as db:
