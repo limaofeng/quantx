@@ -12,7 +12,19 @@ describe('accountActivityStatus', () => {
         fetching: true,
         hasSnapshot: false,
       })
-    ).toBeUndefined();
+    ).toEqual({ detail: '待确认', label: 'UNKNOWN', tone: 'checking' });
+  });
+
+  it('keeps the same unknown badge after a failed initial request and during retries', () => {
+    const input = {
+      canIncreaseRisk: false,
+      canReduceRisk: false,
+      executionMode: 'OBSERVE_ONLY',
+      hasSnapshot: false,
+    };
+    expect(accountActivityStatus({ ...input, fetching: false })).toEqual(
+      accountActivityStatus({ ...input, fetching: true })
+    );
   });
 
   it('retains the authoritative execution state during a background refresh', () => {

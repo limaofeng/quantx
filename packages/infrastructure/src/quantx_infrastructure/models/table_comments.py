@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import MetaData
 
 TABLE_COMMENTS: dict[str, str] = {
+  "history_download_settings": "全局历史补采允许时段配置",
   "development_data_export": "跨环境只读历史行情导出任务与开发导入凭证",
   "market_data_sync_partition": "历史行情同步分区覆盖审计",
   "research_preparation_settings": "研究训练数据准备配置",

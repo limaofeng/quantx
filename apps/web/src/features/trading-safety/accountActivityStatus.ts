@@ -1,7 +1,7 @@
 export interface AccountActivityStatus {
-  detail: '仅减' | '实盘' | '观察';
-  label: 'BLOCK' | 'READY' | 'REDUCE';
-  tone: 'blocked' | 'ready' | 'reduce-only';
+  detail: '仅减' | '实盘' | '观察' | '待确认';
+  label: 'BLOCK' | 'READY' | 'REDUCE' | 'UNKNOWN';
+  tone: 'blocked' | 'ready' | 'reduce-only' | 'checking';
 }
 
 interface AccountActivityStatusInput {
@@ -16,12 +16,12 @@ export function accountActivityStatus({
   canIncreaseRisk,
   canReduceRisk,
   executionMode,
-  fetching,
   hasSnapshot,
-}: AccountActivityStatusInput): AccountActivityStatus | undefined {
-  // Network activity is not an execution state. Hide the badge until the first
-  // authoritative snapshot arrives, then retain that state during refreshes.
-  if (fetching && !hasSnapshot) return undefined;
+}: AccountActivityStatusInput): AccountActivityStatus {
+  // Missing evidence is unknown, including while retrying a failed request.
+  // Keep the badge mounted so polling never makes the activity rail flicker.
+  if (!hasSnapshot)
+    return { detail: '待确认', label: 'UNKNOWN', tone: 'checking' };
 
   return {
     detail:
@@ -31,10 +31,6 @@ export function accountActivityStatus({
           ? '仅减'
           : '观察',
     label: canIncreaseRisk ? 'READY' : canReduceRisk ? 'REDUCE' : 'BLOCK',
-    tone: canIncreaseRisk
-      ? 'ready'
-      : canReduceRisk
-        ? 'reduce-only'
-        : 'blocked',
+    tone: canIncreaseRisk ? 'ready' : canReduceRisk ? 'reduce-only' : 'blocked',
   };
 }

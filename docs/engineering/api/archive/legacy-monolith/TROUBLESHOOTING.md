@@ -786,8 +786,8 @@ def verify_token(token):
 # 检查证书有效期
 openssl x509 -in /etc/ssl/certs/quantx.crt -text -noout | grep -A2 "Validity"
 
-# 检查证书链
-openssl s_client -connect api.quantx.com:443 -verify_return_error
+# 仅对已配置 TLS 的实际 Caddy 主机检查证书链；默认本机 HTTP 入口不适用
+openssl s_client -connect "${CADDY_TLS_HOST}:443" -servername "${CADDY_TLS_HOST}" -verify_return_error
 ```
 
 **解决方案**：

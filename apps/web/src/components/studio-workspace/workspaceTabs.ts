@@ -121,6 +121,7 @@ export function getStudioWorkspaceTabId(rawPath: string) {
       '/settings/trading-safety',
       '/settings/qmt',
       '/settings/ai-runtime',
+      '/settings/market-data',
       '/settings/agents',
     ].includes(normalizedPath)
   ) {
@@ -156,6 +157,7 @@ function getTabIcon(pathname: string): LucideIcon {
       '/settings/trading-safety',
       '/settings/qmt',
       '/settings/ai-runtime',
+      '/settings/market-data',
       '/settings/agents',
     ].includes(pathname)
   ) {
@@ -181,6 +183,7 @@ function getTabTitle(pathname: string, search = '') {
       '/settings/trading-safety',
       '/settings/qmt',
       '/settings/ai-runtime',
+      '/settings/market-data',
       '/settings/agents',
     ].includes(pathname)
   ) {

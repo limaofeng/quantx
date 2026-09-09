@@ -198,7 +198,6 @@ export function printEnvInfo(): void {
 // 获取环境特定的配置
 export function getEnvSpecificConfig<T>(configs: {
   development?: T;
-  staging?: T;
   production?: T;
   default: T;
 }): T {

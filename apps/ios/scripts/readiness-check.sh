@@ -172,21 +172,16 @@ else
 fi
 
 DEBUG_CONFIG="$IOS_ROOT/Config/Debug.xcconfig"
-STAGING_CONFIG="$IOS_ROOT/Config/Staging.xcconfig"
 RELEASE_CONFIG="$IOS_ROOT/Config/Release.xcconfig"
 EFFECTIVE_CONFIG_READY=0
-STAGING_ACCOUNT_ENABLED=NO
-STAGING_AUTH_BASE_URL=
-STAGING_TEAM=
+RELEASE_ACCOUNT_ENABLED=NO
+RELEASE_AUTH_BASE_URL=
+RELEASE_TEAM=
 
 if command -v xcodebuild >/dev/null 2>&1 && [ -d "$IOS_ROOT/QuantX.xcodeproj" ] && \
   DEBUG_SETTINGS=$(
     xcodebuild -project "$IOS_ROOT/QuantX.xcodeproj" -scheme QuantX \
       -configuration Debug -showBuildSettings 2>/dev/null
-  ) && \
-  STAGING_SETTINGS=$(
-    xcodebuild -project "$IOS_ROOT/QuantX.xcodeproj" -scheme QuantX \
-      -configuration Staging -showBuildSettings 2>/dev/null
   ) && \
   RELEASE_SETTINGS=$(
     xcodebuild -project "$IOS_ROOT/QuantX.xcodeproj" -scheme QuantX \
@@ -195,14 +190,11 @@ if command -v xcodebuild >/dev/null 2>&1 && [ -d "$IOS_ROOT/QuantX.xcodeproj" ] 
 then
   EFFECTIVE_CONFIG_READY=1
   DEBUG_ACCOUNT_ENABLED=$(setting_value "$DEBUG_SETTINGS" QUANTX_ACCOUNT_DATA_ENABLED)
-  STAGING_ACCOUNT_ENABLED=$(setting_value "$STAGING_SETTINGS" QUANTX_ACCOUNT_DATA_ENABLED)
-  STAGING_HTTP_URL=$(setting_value "$STAGING_SETTINGS" QUANTX_GRAPHQL_HTTP_URL)
-  STAGING_WS_URL=$(setting_value "$STAGING_SETTINGS" QUANTX_GRAPHQL_WEBSOCKET_URL)
-  STAGING_AUTH_BASE_URL=$(setting_value "$STAGING_SETTINGS" QUANTX_AUTH_BASE_URL)
+  RELEASE_ACCOUNT_ENABLED=$(setting_value "$RELEASE_SETTINGS" QUANTX_ACCOUNT_DATA_ENABLED)
   RELEASE_HTTP_URL=$(setting_value "$RELEASE_SETTINGS" QUANTX_GRAPHQL_HTTP_URL)
   RELEASE_WS_URL=$(setting_value "$RELEASE_SETTINGS" QUANTX_GRAPHQL_WEBSOCKET_URL)
   RELEASE_AUTH_BASE_URL=$(setting_value "$RELEASE_SETTINGS" QUANTX_AUTH_BASE_URL)
-  STAGING_TEAM=$(setting_value "$STAGING_SETTINGS" DEVELOPMENT_TEAM)
+  RELEASE_TEAM=$(setting_value "$RELEASE_SETTINGS" DEVELOPMENT_TEAM)
 
   if [ "$DEBUG_ACCOUNT_ENABLED" = YES ]; then
     pass "Debug 有效构建设置已启用真实账户数据"
@@ -210,24 +202,6 @@ then
     block "Debug 有效构建设置未启用真实账户数据"
     ACCOUNT_READY=0
   fi
-
-  case "$STAGING_HTTP_URL $STAGING_WS_URL $STAGING_AUTH_BASE_URL" in
-    *".invalid"* | *"replace-with"* | "  ")
-      block "Staging 有效构建设置仍使用占位地址"
-      TESTFLIGHT_READY=0
-      ;;
-    *)
-      case "$STAGING_HTTP_URL|$STAGING_WS_URL|$STAGING_AUTH_BASE_URL" in
-        https://*\|wss://*\|https://*)
-          pass "Staging 有效构建设置使用 HTTPS/WSS 非占位地址"
-          ;;
-        *)
-          block "Staging 有效构建设置未全部使用 HTTPS/WSS"
-          TESTFLIGHT_READY=0
-          ;;
-      esac
-      ;;
-  esac
 
   case "$RELEASE_HTTP_URL $RELEASE_WS_URL $RELEASE_AUTH_BASE_URL" in
     *".invalid"* | *"replace-with"* | "  ")
@@ -252,7 +226,6 @@ else
 fi
 
 if grep -q 'DEBUG_HTTP_ALLOWED = 1' "$DEBUG_CONFIG" && \
-  grep -q 'DEBUG_HTTP_ALLOWED = 0' "$STAGING_CONFIG" && \
   grep -q 'DEBUG_HTTP_ALLOWED = 0' "$RELEASE_CONFIG"
 then
   pass "明文 ATS 例外仅限 Debug"
@@ -261,12 +234,11 @@ else
   TESTFLIGHT_READY=0
 fi
 
-if grep -q 'QUANTX_ACCOUNT_DATA_ENABLED = NO' "$STAGING_CONFIG" && \
-  grep -q 'QUANTX_ACCOUNT_DATA_ENABLED = NO' "$RELEASE_CONFIG"
+if grep -q 'QUANTX_ACCOUNT_DATA_ENABLED = NO' "$RELEASE_CONFIG"
 then
-  pass "Staging/Release 账户数据默认关闭"
+  pass "Release 账户数据默认关闭"
 else
-  block "Staging/Release 账户数据未默认关闭"
+  block "Release 账户数据未默认关闭"
   TESTFLIGHT_READY=0
 fi
 
@@ -449,26 +421,26 @@ else
   TESTFLIGHT_READY=0
 fi
 
-case "$STAGING_TEAM" in
+case "$RELEASE_TEAM" in
   "" | *REPLACE* | *YOUR_TEAM*)
-    warn "Staging 有效构建设置尚未配置 Development Team"
+    warn "Release 有效构建设置尚未配置 Development Team"
     TESTFLIGHT_READY=0
     ;;
   *)
-    pass "Staging 有效构建设置已配置 Development Team"
+    pass "Release 有效构建设置已配置 Development Team"
     ;;
 esac
 
-if [ "$EFFECTIVE_CONFIG_READY" -eq 1 ] && [ "$STAGING_ACCOUNT_ENABLED" = YES ]; then
-  if [ "$STAGING_AUTH_BASE_URL" = "$BACKEND_BASE_URL" ]; then
-    pass "Staging 账户连接已指向本次验证的后端"
+if [ "$EFFECTIVE_CONFIG_READY" -eq 1 ] && [ "$RELEASE_ACCOUNT_ENABLED" = YES ]; then
+  if [ "$RELEASE_AUTH_BASE_URL" = "$BACKEND_BASE_URL" ]; then
+    pass "Release 账户连接已指向本次验证的后端"
   else
-    block "Staging 认证地址与本次验证后端不一致"
+    block "Release 认证地址与本次验证后端不一致"
     ACCOUNT_READY=0
     TESTFLIGHT_READY=0
   fi
 else
-  warn "Staging 账户数据开关尚未启用"
+  warn "Release 账户数据开关尚未启用"
   ACCOUNT_READY=0
   TESTFLIGHT_READY=0
 fi

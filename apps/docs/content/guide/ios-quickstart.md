@@ -14,7 +14,7 @@ QuantX 原生 iOS 是个人 A 股量化移动控制中心，面向本人单一�
 | 语言 | Swift 6 |
 | 最低系统 | iOS 17 |
 | GraphQL | Apollo iOS 2.x，仓库锁定版本为准 |
-| 传输 | Staging/Release 仅允许 HTTPS/WSS |
+| 传输 | Release 仅允许 HTTPS/WSS |
 | 网络 | TestFlight 经 VPN/私网，不直接暴露 Windows 8080 到公网 |
 | 账户 | 会话唯一解析的单一主账户 |
 

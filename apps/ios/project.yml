@@ -10,7 +10,6 @@ options:
 
 configs:
   Debug: debug
-  Staging: release
   Release: release
 
 packages:
@@ -41,7 +40,6 @@ targets:
         product: ApolloWebSocket
     configFiles:
       Debug: Config/Debug.xcconfig
-      Staging: Config/Staging.xcconfig
       Release: Config/Release.xcconfig
     settings:
       base:

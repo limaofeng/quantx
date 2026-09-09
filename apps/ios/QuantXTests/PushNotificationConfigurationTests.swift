@@ -14,21 +14,16 @@ final class PushNotificationConfigurationTests: XCTestCase {
       .production
     )
     XCTAssertNil(configuration(environment: "debug"))
-    XCTAssertNil(configuration(environment: "staging"))
     XCTAssertNil(configuration(environment: "development"))
     XCTAssertNil(configuration(environment: ""))
   }
 
-  func testBuildConfigurationsPinDebugToSandboxAndOthersToProduction() throws {
+  func testBuildConfigurationsPinDebugToSandboxAndReleaseToProduction() throws {
     let iosRoot = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
       .deletingLastPathComponent()
     let debug = try String(
       contentsOf: iosRoot.appendingPathComponent("Config/Debug.xcconfig"),
-      encoding: .utf8
-    )
-    let staging = try String(
-      contentsOf: iosRoot.appendingPathComponent("Config/Staging.xcconfig"),
       encoding: .utf8
     )
     let release = try String(
@@ -46,8 +41,6 @@ final class PushNotificationConfigurationTests: XCTestCase {
 
     XCTAssertTrue(debug.contains("QUANTX_APNS_API_ENVIRONMENT = SANDBOX"))
     XCTAssertTrue(debug.contains("QUANTX_APNS_ENTITLEMENT_ENVIRONMENT = development"))
-    XCTAssertTrue(staging.contains("QUANTX_APNS_API_ENVIRONMENT = PRODUCTION"))
-    XCTAssertTrue(staging.contains("QUANTX_APNS_ENTITLEMENT_ENVIRONMENT = production"))
     XCTAssertTrue(release.contains("QUANTX_APNS_API_ENVIRONMENT = PRODUCTION"))
     XCTAssertTrue(release.contains("QUANTX_APNS_ENTITLEMENT_ENVIRONMENT = production"))
     XCTAssertTrue(info.contains("<key>QuantXAPNsEnvironment</key>"))

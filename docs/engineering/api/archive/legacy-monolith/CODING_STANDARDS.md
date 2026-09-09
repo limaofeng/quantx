@@ -155,7 +155,7 @@ class marketDataService:  # 应该使用 PascalCase
 # ✅ 正确的常量命名
 DEFAULT_TIMEOUT = 30
 MAX_RETRY_COUNT = 3
-API_BASE_URL = "https://api.quantx.com"
+API_BASE_URL = "http://127.0.0.1:8080"
 TRADING_HOURS = {
     "open": "09:30",
     "close": "15:00"
