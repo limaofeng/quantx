@@ -1111,7 +1111,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   提交 100 股，source/batch 引用及原确认 ID 保留；派生后撤销设备会话会等待人工确认，
   不调用下单端口。**2 项测试及 Ruff 通过**，证据
   `.codex_screenshots/p6-live-exit-submission-final.log`。TradingService 的账户读取与下单
-  IO 为替身，尚需验证该端口之后的持久化 outbox、券商回报和原计划成交收敛；不计实盘闭环。
+  IO 为替身。随后延伸至真实 TradingService/TradeCommandService 与隔离 SQLite outbox，
+  修复意图审计字段误入命令 metadata 白名单、退出下单漏传 bucket 两处接线阻断。
+  次日卖出 100 股持久化为原 EXIT_PLAN 的 Pending/Correlation/Outbox，保留 swing 与原批次，
+  精确重试只有一条命令；设备会话撤销或最终容量不足不产生 outbox，原计划退出义务保留。
+  **6 项跨日用例及 9 项 TradingService 回归通过**，相关 Ruff 通过；证据
+  `.codex_screenshots/p6-live-exit-outbox-final.log`、`p6-live-exit-routing-regression.log`。
+  平台/设备和账户容量读取仍使用隔离替身，尚需券商回报和原计划成交收敛；不计实盘闭环。
+  iOS 按用户要求暂停，已有改动保留；继续后端与 macOS 可完成的验证。
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

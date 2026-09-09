@@ -137,6 +137,16 @@ class TradingService:
         "bucket",
         "t_trade_role",
         "trace_id",
+        # Exit intent provenance and evaluation details remain in the linked
+        # TradeIntentRecord. They are not command evidence or routing fields.
+        "intent_origin_type",
+        "source_business_id",
+        "manual_command_id",
+        "manual_action_type",
+        "exit_rule_type",
+        "exit_metrics",
+        "group_id",
+        "completion_strategy",
       }
     }
     async with AsyncSessionLocal() as db:

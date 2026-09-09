@@ -679,6 +679,7 @@ class TradeIntentProcessor:
       idempotency_key=f"strategy-exit:{plan.plan_id}:{intent.intent_id}",
       execution_context={
         **route_metadata,
+        "bucket": intent.bucket,
         "trace_id": intent.intent_id,
         "intent_id": intent.intent_id,
         "risk_decision_id": risk.risk_decision_id,
