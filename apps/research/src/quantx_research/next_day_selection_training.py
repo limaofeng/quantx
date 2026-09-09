@@ -593,6 +593,36 @@ def prepare_training_panel(
   return panel, universe_quality
 
 
+def certification_study_config(config: NextDaySelectionConfig, source_end) -> IndicatorStudyConfig:
+  indicator_ids = tuple(
+    sorted(
+      {
+        indicator_id
+        for definition in SELECTION_FACTOR_DEFINITIONS
+        for indicator_id in definition.source_indicators
+      }
+    )
+  )
+  return IndicatorStudyConfig.model_validate(
+    {
+      "study": "indicator-study",
+      "version": "v1",
+      "indicator_ids": indicator_ids,
+      "date_range": (config.data.date_range[0], source_end),
+      "universe": {
+        "instrument_type": "stock",
+        "stock_codes": config.data.stock_codes,
+        "benchmark_code": config.data.benchmark_code,
+        "exclude_st": False,
+        "include_industries": [],
+        "exclude_industries": [],
+        "minimum_listing_days": config.data.minimum_listing_days,
+      },
+      "runtime": config.runtime.model_dump(mode="json"),
+    }
+  )
+
+
 async def _source_panel(
   config: NextDaySelectionConfig,
   staging: Path,
@@ -624,15 +654,6 @@ async def _source_panel(
       calendar,
       {"kind": "verified-panel"},
     )
-  indicator_ids = tuple(
-    sorted(
-      {
-        indicator_id
-        for definition in SELECTION_FACTOR_DEFINITIONS
-        for indicator_id in definition.source_indicators
-      }
-    )
-  )
   if config.data.market_data_archive is not None:
     archive_path = Path(config.data.market_data_archive)
     _reject_links(archive_path)
@@ -645,24 +666,7 @@ async def _source_panel(
   source_end = await calendar.get_next_trading_date(
     "SH", config.data.date_range[1]
   )
-  study_config = IndicatorStudyConfig.model_validate(
-    {
-      "study": "indicator-study",
-      "version": "v1",
-      "indicator_ids": indicator_ids,
-      "date_range": (config.data.date_range[0], source_end),
-      "universe": {
-        "instrument_type": "stock",
-        "stock_codes": config.data.stock_codes,
-        "benchmark_code": config.data.benchmark_code,
-        "exclude_st": False,
-        "include_industries": [],
-        "exclude_industries": [],
-        "minimum_listing_days": config.data.minimum_listing_days,
-      },
-      "runtime": config.runtime.model_dump(mode="json"),
-    }
-  )
+  study_config = certification_study_config(config, source_end)
   monitor = RuntimeMemoryMonitor(
     reserve_gib=config.runtime.minimum_available_memory_gib,
     sample_interval_seconds=config.runtime.memory_sample_interval_seconds,

@@ -1305,6 +1305,13 @@ async def build_indicator_partitions(
   return finish_indicator_partitions(features, config, directory, monitor)
 
 
+def indicator_source_start(config: IndicatorStudyConfig, analysis_start):
+  """Shared warmup bound for direct reads and frozen input exports."""
+  return analysis_start - timedelta(
+    days=max(400, config.required_lookback * 2, config.universe.minimum_listing_days * 2)
+  )
+
+
 async def stage_indicator_features(
   source: ResearchDataSource,
   config: IndicatorStudyConfig,
@@ -1315,11 +1322,7 @@ async def stage_indicator_features(
   from quantx_research.runner import resolve_analysis_window
 
   analysis_start, end = resolve_analysis_window(config)
-  start = analysis_start - timedelta(
-    days=max(
-      400, config.required_lookback * 2, config.universe.minimum_listing_days * 2
-    )
-  )
+  start = indicator_source_start(config, analysis_start)
   requested_source_start = start
   provenance = _source_provenance(source)
   archive_start = (provenance.get("campaign") or {}).get("start_date")
