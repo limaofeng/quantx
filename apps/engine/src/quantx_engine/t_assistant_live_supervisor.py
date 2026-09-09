@@ -35,8 +35,10 @@ from quantx_infrastructure.services.t_trade_opportunity_runtime_service import (
 )
 from sqlalchemy import select
 
+from .instrument_universe_provider import InstrumentUniverseSnapshot
 from .t_assistant_candidate_controls import read_candidate_controls
 from .t_assistant_decision_runtime import TAssistantLiveDecisionRuntime
+from .t_assistant_live_admission import canary_instrument_codes
 from .t_assistant_live_drain import drain_live_entry_work
 from .t_assistant_paper_shadow_supervisor import _accepted_tick, _market_gate_context
 from .t_trade_decision_snapshot import (
@@ -226,6 +228,13 @@ class TAssistantLiveSupervisor:
             for item in fields(TAssistantConfigVersion)
           }
         )
+        if frozen.rollout_stage.value == "CANARY":
+          allowed = set(canary_instrument_codes(frozen.canonical_payload))
+          universe = InstrumentUniverseSnapshot.create(
+            mode=universe.mode,
+            instruments=[code for code in universe.instruments if code in allowed],
+            metadata=universe.metadata,
+          )
         settings = frozen.canonical_payload.get("legacy_settings_snapshot")
         if not isinstance(settings, dict):
           raise ValueError("T_ASSISTANT_LIVE_FROZEN_PARAMETERS_REQUIRED")

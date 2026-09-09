@@ -83,7 +83,7 @@ async def test_head_change_after_prepare_cannot_commit_live_intents(
   original = TAssistantLiveDecisionRuntime._lock_live_source
   calls = 0
 
-  async def switch(self, db, execution):
+  async def switch(self, db, execution, **kwargs):
     nonlocal calls
     calls += 1
     if calls == 2:
@@ -97,7 +97,7 @@ async def test_head_change_after_prepare_cannot_commit_live_intents(
           head.strategy_run_id = "legacy-run"
         else:
           head.active_config_version_id = None
-    return await original(self, db, execution)
+    return await original(self, db, execution, **kwargs)
 
   monkeypatch.setattr(TAssistantLiveDecisionRuntime, "_lock_live_source", switch)
   with pytest.raises(TAssistantCycleConflict, match="LIVE_SOURCE_CHANGED"):
@@ -114,3 +114,28 @@ async def test_live_recovery_rejects_paper_before_reading_or_aborting_a_cycle():
     await TAssistantLiveDecisionRuntime().recover_cycle(
       execution=_execution(), snapshot=None, cycle_id="paper-cycle"
     )
+
+
+async def test_canary_internal_snapshot_cannot_expand_the_frozen_universe(
+  sessions, frozen_config, monkeypatch
+):
+  from types import SimpleNamespace
+
+  original = TAssistantLiveDecisionRuntime._lock_live_source
+
+  async def expand(self, db, execution, *, snapshot=None):
+    if snapshot is not None:
+      snapshot = SimpleNamespace(
+        symbols=[*snapshot.symbols, SimpleNamespace(instrument_code="000001.SZ")]
+      )
+    return await original(self, db, execution, snapshot=snapshot)
+
+  monkeypatch.setattr(TAssistantLiveDecisionRuntime, "_lock_live_source", expand)
+  from quantx_infrastructure.repositories.t_assistant_decision_cycle_repository import (
+    TAssistantCycleConflict,
+  )
+
+  with pytest.raises(TAssistantCycleConflict, match="CANARY_SCOPE_CONFLICT"):
+    await seed_candidate_cycle(sessions, environment="LIVE")
+  async with sessions() as db:
+    assert not list((await db.scalars(select(TradeIntentRecord))).all())

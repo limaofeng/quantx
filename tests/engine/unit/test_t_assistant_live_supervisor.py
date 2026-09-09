@@ -53,16 +53,62 @@ async def seed(sessions):
   paper = TAssistantPaperShadowSupervisor(
     quote_hub=FakeWholeQuoteHub(), session_factory=sessions, clock=lambda: NOW
   )
-  key = await paper.reconcile(config=config, universe=UNIVERSE)
+  source = await paper.reconcile(config=config, universe=UNIVERSE)
+  from dataclasses import asdict
+
+  from quantx_domain.trading.t_assistant_execution import (
+    TAssistantConfigVersion,
+    TAssistantExecutionEvent,
+  )
+  from quantx_engine.t_assistant_live_admission import prepare_live_canary_execution
+  from quantx_infrastructure.repositories.t_assistant_config_repository import (
+    TAssistantConfigRepository,
+  )
+  from quantx_infrastructure.repositories.t_assistant_execution_repository import (
+    TAssistantExecutionRepository,
+  )
+
+  values = asdict(paper._config_version(config))
+  values.pop("config_snapshot_hash")
+  values.update(config_version_id="live-version", version=2)
+  values["canonical_payload"]["universe_policy"]["allowed_stock_codes"] = ["600000.SH"]
+  values["canonical_payload"]["legacy_settings_snapshot"]["entry_authorization"] = (
+    "MANUAL_CONFIRM"
+  )
+  values["canonical_payload"]["portfolio_policy"]["max_total_t_amount"] = "5000"
+  version = TAssistantConfigVersion.create(**values)
   async with sessions() as db, db.begin():
     head = await db.get(TTradeGlobalConfig, config.id)
-    head.desired_environment = "LIVE"
-    head.mode = "live"
+    await TAssistantConfigRepository(db).append_version(version)
+    await TAssistantExecutionRepository(db).append_event(
+      TAssistantExecutionEvent(
+        source,
+        "approval",
+        "LIVE_CANARY_RELEASE_APPROVED",
+        NOW,
+        dict(
+          account_id=config.account_id,
+          config_version_id=version.config_version_id,
+          config_snapshot_hash=version.config_snapshot_hash,
+          p5_outcome="PASSED",
+          p5_evidence_hash="a" * 64,
+          actor_id="synthetic-operator",
+          allowed_stock_codes=["600000.SH"],
+          max_total_t_amount="5000",
+          window_start=NOW.isoformat(),
+          window_end=(NOW + timedelta(minutes=1)).isoformat(),
+        ),
+      )
+    )
+    key = await prepare_live_canary_execution(
+      db,
+      source_execution_id=source,
+      config_version_id=version.config_version_id,
+      approval_event_key="approval",
+      expected_head_version=head.state_version,
+      now=NOW,
+    )
     head.settings = {"target_trade_amount": 9999}
-    row = await db.get(TAssistantExecutionRecord, key)
-    row.environment = "LIVE"
-    row.entry_readiness = "WARMING"
-    row.entry_readiness_reasons = ["T_ASSISTANT_MARKET_WARMING"]
   return key
 
 
@@ -170,3 +216,19 @@ async def test_stale_config_observation_cannot_drain_a_newer_head(sessions):
   async with sessions() as db:
     source = await db.get(TAssistantExecutionRecord, key)
     assert source.status == "WARMING"
+
+
+async def test_canary_binds_only_the_explicitly_approved_instruments(sessions):
+  key = await seed(sessions)
+  universe = InstrumentUniverseSnapshot.create(
+    mode="ACCOUNT_HOLDINGS",
+    instruments=["600000.SH", "000001.SZ"],
+    metadata={"600000.SH": {"eligible": True}, "000001.SZ": {"eligible": True}},
+  )
+  supervisor = TAssistantLiveSupervisor(
+    quote_hub=FakeWholeQuoteHub(), session_factory=sessions, clock=lambda: NOW
+  )
+  await supervisor.reconcile(execution_id=key, universe=universe, legacy_active=False)
+  assert [entry.instrument_code for entry in supervisor._bindings[key].universe] == [
+    "600000.SH"
+  ]

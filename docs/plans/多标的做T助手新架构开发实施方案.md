@@ -653,7 +653,19 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   联合 LIVE/PAPER 决策及监控回归 **62 项通过**；移除绑定的内存清理与排空 **17 项通过**，
   聚焦 Ruff 通过。证据 `.codex_screenshots/p6-live-supervisor.xml` 与
   `p6-live-supervisor-drain.log`。仅隔离工程验证，未重启生产或创建 LIVE source。
-- 剩余开发顺序：LIVE 首次准入、预热完成后的 READY 激活及恢复、
+- 首次 LIVE CANARY 准备服务已实现：要求原 PAPER source 的
+  `LIVE_CANARY_RELEASE_APPROVED` 审批，精确绑定配置 hash、P5 PASSED 证据 hash、actor、
+  维护窗口、有限标的和总金额；检查 head CAS、无 legacy 指针及无既有 LIVE source。
+  原子更新 head 并创建 MANUAL_CONFIRM/CANARY/RULE_ONLY/WARMING 执行，保存审批 hash，
+  不自动 READY，不改原订单 owner。重试可越过已结束窗口返回原结果，但必须保持原授权身份；
+  末尾审计失败连同 head 更新整体回滚。此服务尚未注册公开审批/发布命令。
+- CANARY 冻结配置显式要求 `universe_policy.allowed_stock_codes`，与审批名单一致且不得
+  同时列入 ignored_stock_codes；订阅层过滤、决策 prepare/commit 再校验范围。
+  supervisor 测试改为通过真实首次准入服务创建 LIVE source，保留合成审批与隔离数据库。
+  准入、supervisor、决策和候选证据 **33 项通过**；重试补强及 PAPER 回归 **27 项通过**
+  （含新增 1 项），聚焦 Ruff 通过。证据 `.codex_screenshots/p6-live-canary-admission.xml`
+  及 `p6-live-admission-final.log`。未运行正式 P5 评估，未伪造真实审批或创建业务库 LIVE source。
+- 剩余开发顺序：LIVE 公开准入审批、预热完成后的 READY 激活及恢复、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

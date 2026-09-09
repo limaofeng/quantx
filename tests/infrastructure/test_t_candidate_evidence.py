@@ -120,6 +120,11 @@ async def seed_candidate_cycle(
   }
   if len(instrument_codes) > 1:
     values["canonical_payload"]["portfolio_policy"]["max_industry_t_amount"] = 20000
+  if environment == "LIVE":
+    values["canonical_payload"]["universe_policy"] = {
+      "allowed_stock_codes": list(instrument_codes),
+      "ignored_stock_codes": [],
+    }
   version = TAssistantConfigVersion.create(**values)
   async with sessions() as db, db.begin():
     db.add(

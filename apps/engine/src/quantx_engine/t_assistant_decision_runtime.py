@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional
@@ -20,6 +20,7 @@ from quantx_domain.strategies.base import (
   StrategyOutput,
 )
 from quantx_domain.trading.t_assistant_execution import (
+  TAssistantConfigVersion,
   TAssistantExecution,
   TAssistantExecutionEvent,
   stable_manifest_hash,
@@ -32,7 +33,10 @@ from quantx_domain.trading.t_assistant_market_state import (
 )
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import AsyncSessionLocal
-from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
+from quantx_infrastructure.models.t_assistant_execution import (
+  TAssistantConfigVersionRecord,
+  TAssistantExecutionRecord,
+)
 from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.repositories.t_assistant_decision_cycle_repository import (
   TAssistantCycleConflict,
@@ -111,7 +115,7 @@ class _TAssistantDecisionRuntime:
     ):
       raise ValueError("T_ASSISTANT_LIVE_RULE_ONLY_REQUIRED")
 
-  async def _lock_live_source(self, db, execution):
+  async def _lock_live_source(self, db, execution, *, snapshot=None):
     if self._environment is not ExecutionEnvironment.LIVE:
       return
     head = await db.get(
@@ -146,6 +150,24 @@ class _TAssistantDecisionRuntime:
       or record.status not in {"WARMING", "RUNNING"}
     ):
       raise TAssistantCycleConflict("T_ASSISTANT_LIVE_SOURCE_CHANGED")
+    if snapshot is not None and execution.rollout_stage.value == "CANARY":
+      from .t_assistant_live_admission import canary_instrument_codes
+
+      version = await db.get(TAssistantConfigVersionRecord, execution.config_version_id)
+      if (
+        version is None
+        or version.config_snapshot_hash != execution.config_snapshot_hash
+      ):
+        raise TAssistantCycleConflict("T_ASSISTANT_LIVE_CONFIG_REQUIRED")
+      frozen = TAssistantConfigVersion(
+        **{
+          item.name: getattr(version, item.name)
+          for item in fields(TAssistantConfigVersion)
+        }
+      )
+      allowed = set(canary_instrument_codes(frozen.canonical_payload))
+      if not {symbol.instrument_code for symbol in snapshot.symbols} <= allowed:
+        raise TAssistantCycleConflict("T_ASSISTANT_LIVE_CANARY_SCOPE_CONFLICT")
 
   def bind_execution(
     self,
@@ -224,7 +246,7 @@ class _TAssistantDecisionRuntime:
     )
     async with self._session_factory() as db:
       async with db.begin():
-        await self._lock_live_source(db, execution)
+        await self._lock_live_source(db, execution, snapshot=snapshot)
         repository = TAssistantDecisionCycleRepository(db)
         cycle = await repository.prepare_material_cycle(
           snapshot=snapshot,
@@ -243,7 +265,7 @@ class _TAssistantDecisionRuntime:
       claim_conflict: Optional[TAssistantCycleConflict] = None
       committed_cycle = None
       async with db.begin():
-        await self._lock_live_source(db, execution)
+        await self._lock_live_source(db, execution, snapshot=snapshot)
         repository = TAssistantDecisionCycleRepository(db)
         try:
           claim = await repository.claim(
