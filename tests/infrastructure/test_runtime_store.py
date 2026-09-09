@@ -135,6 +135,9 @@ class _BoundDeviceResult:
   def one_or_none(self):
     return self.mapping
 
+  def __iter__(self):
+    return iter([self.mapping] if self.mapping is not None else [])
+
 
 class _BoundDeviceConnection:
   def __init__(self, capabilities=None) -> None:
@@ -245,7 +248,7 @@ async def test_concurrent_idempotent_market_data_requests_converge_atomically() 
 
 
 @pytest.mark.asyncio
-async def test_market_device_query_uses_local_server_heartbeat() -> None:
+async def test_market_device_query_uses_dedicated_history_session() -> None:
   connection = _AvailabilityConnection([])
   store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _ConnectEngine(connection)
@@ -253,8 +256,8 @@ async def test_market_device_query_uses_local_server_heartbeat() -> None:
   assert await store.available_market_data_device() is None
   sql = connection.calls[0][0]
   assert "JOIN runtime_component_heartbeats AS api" not in sql
-  assert "heartbeat.details ->> 'sessionActive' = 'true'" in sql
-  assert "heartbeat.updated_at >= :cutoff" in sql
+  assert "JOIN market_data_history_session AS history" in sql
+  assert "history.heartbeat_at >= :cutoff" in sql
 
 
 @pytest.mark.asyncio
@@ -297,8 +300,8 @@ async def test_available_market_data_device_accepts_fresh_data_only_agent() -> N
 
   assert await store.available_market_data_device() == "device-data-only"
   assert len(connection.calls) == 1
-  assert "runtime_component_heartbeats" in connection.calls[0][0]
-  assert "XTDATA_UNAVAILABLE" not in connection.calls[0][1]["connected_statuses"]
+  assert "runtime_component_heartbeats" not in connection.calls[0][0]
+  assert "history.expires_at > clock_timestamp()" in connection.calls[0][0]
 
 
 @pytest.mark.asyncio

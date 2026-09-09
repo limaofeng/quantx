@@ -295,7 +295,12 @@ class CollectionPermitStore:
       await self.worker._guard_ingestion_owner(connection)
 
   async def issue_next(
-    self, *, device_id: str, collection_allowed: bool, development_allowed: bool
+    self,
+    *,
+    device_id: str,
+    collection_allowed: bool,
+    development_allowed: bool,
+    history_session_id: str | None = None,
   ) -> CollectionPermit | None:
     """Select and issue atomically, using trusted session/QoS/window eligibility.
 
@@ -307,6 +312,21 @@ class CollectionPermitStore:
     device_id = str(UUID(device_id))
     async with self.worker.engine.begin() as connection:
       await self._lock(connection)
+      if history_session_id is not None:
+        session = await connection.scalar(
+          text("""
+          SELECT s.session_id FROM market_data_history_session s
+          JOIN agent_devices d ON d.id=s.device_id AND d.user_id=s.user_id
+          WHERE s.session_id=:session AND s.device_id=:device
+            AND s.expires_at > clock_timestamp() AND d.revoked_at IS NULL
+            AND s.heartbeat->>'xtdata_ready'='true'
+            AND s.heartbeat->>'qos_reason' IS NULL
+          FOR SHARE OF s,d
+        """),
+          {"session": history_session_id, "device": device_id},
+        )
+        if session is None:
+          return None
       blocked = (
         await connection.execute(
           text("""

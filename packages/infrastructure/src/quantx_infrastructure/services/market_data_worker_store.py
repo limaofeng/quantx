@@ -16,6 +16,11 @@ from quantx_infrastructure.services.market_data_demand_store import (
 
 
 class MarketDataWorkerStore(MarketDataDemandStore):
+  async def dispatch_history_collection(self):
+    from .market_data_collection_dispatch import dispatch_history_collection
+
+    return await dispatch_history_collection(self)
+
   async def consume_collection_receipts(self) -> int:
     from .market_data_collection_receipt_store import CollectionReceiptStore
 

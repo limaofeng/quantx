@@ -39,6 +39,7 @@ async def database(monkeypatch, *, window_open=False):
   try:
     async with engine.begin() as conn:
       await conn.execute(text(f"CREATE SCHEMA {schema}"))
+      await conn.execute(text("CREATE TABLE market_data_history_session (device_id VARCHAR(36), expires_at TIMESTAMPTZ)"))
       await conn.execute(
         text(
           "CREATE TABLE agent_devices (id VARCHAR(36) PRIMARY KEY, revoked_at TIMESTAMP)"
@@ -55,7 +56,7 @@ async def database(monkeypatch, *, window_open=False):
         request_payload JSON, development_only BOOLEAN NOT NULL DEFAULT FALSE,
         status VARCHAR(24), expected_chunks INTEGER, received_chunks INTEGER,
         completed_at TIMESTAMP, processing_error TEXT, processing_claim_token VARCHAR(36),
-        ingestion_result JSON, created_at TIMESTAMP, updated_at TIMESTAMP)""")
+        ingestion_result JSON, ingestion_progress JSONB, processing_worker_epoch BIGINT, created_at TIMESTAMP, updated_at TIMESTAMP)""")
       )
       now = agent_api.utcnow()
       details = json.dumps(
@@ -122,6 +123,21 @@ async def seed(sessions, status, *, development=False, age=0):
     )
     await db.commit()
   return identity
+
+
+async def test_dedicated_history_session_prevents_legacy_dispatch(monkeypatch):
+  async with database(monkeypatch) as (sessions, control):
+    request_id = await seed(sessions, "QUEUED")
+    async with sessions() as db:
+      await db.execute(text("""
+        INSERT INTO market_data_history_session(device_id,expires_at)
+        VALUES (:device,clock_timestamp()+INTERVAL '15 seconds')
+      """), {"device": DEVICE})
+      await db.commit()
+    assert await agent_api._next_market_data_request(control) is None
+    async with sessions() as db:
+      request = await db.get(MarketDataRequest, request_id)
+      assert request.status == "QUEUED"
 
 
 @pytest.mark.parametrize(

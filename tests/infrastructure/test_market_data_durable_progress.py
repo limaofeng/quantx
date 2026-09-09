@@ -284,7 +284,9 @@ async def test_api_dispatch_stops_on_shared_capacity_block(durable_store, monkey
     async def __aexit__(self, *args):
       await self.connection.close()
 
-    async def scalar(self, statement):
+    async def scalar(self, statement, params=None):
+      if "market_data_history_session" in str(statement):
+        return False
       assert "agent_devices" in str(statement)
       return "device-1"
 

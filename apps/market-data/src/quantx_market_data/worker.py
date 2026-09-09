@@ -88,6 +88,11 @@ async def run(store, stop: asyncio.Event) -> None:
       await store.consume_collection_receipts()
       await _pause(stop, 0.25)
 
+  async def dispatch():
+    while not stop.is_set():
+      await store.dispatch_history_collection()
+      await _pause(stop, 1)
+
   from quantx_infrastructure.services.market_data_staging_cleanup import (
     run_market_data_staging_sweeper,
   )
@@ -97,6 +102,7 @@ async def run(store, stop: asyncio.Event) -> None:
     asyncio.create_task(renew()),
     asyncio.create_task(consume()),
     asyncio.create_task(receipts()),
+    asyncio.create_task(dispatch()),
     asyncio.create_task(stop.wait()),
   ]
   try:

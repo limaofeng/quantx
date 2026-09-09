@@ -232,6 +232,7 @@ async def test_receipt_consumer_runs_while_ingestion_waits(monkeypatch):
     acquire=AsyncMock(return_value=True),
     release=AsyncMock(),
     consume_collection_receipts=consume,
+    dispatch_history_collection=AsyncMock(return_value=None),
   )
   monkeypatch.setattr(worker, "sweep", sweep)
   task = asyncio.create_task(worker.run(store, stop))

@@ -54,6 +54,7 @@ async def _market_data_database():
     poolclass=StaticPool,
   )
   async with engine.begin() as connection:
+    await connection.execute(text("CREATE TABLE market_data_history_session (device_id VARCHAR(36), expires_at DATETIME)"))
     await connection.execute(
       text(
         """

@@ -120,51 +120,16 @@ class DurableRuntimeStore:
   ) -> Optional[str]:
     """Return one fresh connected Agent that can serve historical data.
 
-    Registered devices are not sufficient here: a durable request assigned to
-    an offline device would remain QUEUED until the caller times out.  Historical
-    replay uses this read-only probe before it optionally queues a supplement.
-    Trading readiness is deliberately not required; data-only and
-    trading-unavailable Agents may still provide XTData history.
+    Use the dedicated history connection's authenticated capabilities and
+    server heartbeat, while preserving the managed QMT launch boundary.
+    Trading control registration and account readiness are not source authority.
     """
 
     cutoff = _qmt_runtime_cutoff(max_age_seconds)
     if cutoff is None:
       return None
-    connected_statuses = (
-      "READY",
-      "RECONCILING",
-      "RECONCILE_REQUIRED",
-      "TRADING_UNAVAILABLE",
-      "EMERGENCY_STOP",
-    )
     async with self.engine.connect() as connection:
-      rows = (
-        await connection.execute(
-          text(
-            """
-            SELECT
-              device.id,
-              device.capabilities
-            FROM agent_devices AS device
-            JOIN runtime_component_heartbeats AS heartbeat
-              ON heartbeat.component = 'qmt-agent:' || device.id
-            WHERE device.revoked_at IS NULL
-              AND device.last_seen_at >= :cutoff
-              AND heartbeat.details ->> 'sessionActive' = 'true'
-              AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
-              AND heartbeat.updated_at >= :cutoff
-              AND UPPER(heartbeat.status) IN :connected_statuses
-            ORDER BY
-              heartbeat.updated_at DESC,
-              device.last_seen_at DESC
-            """
-          ).bindparams(bindparam("connected_statuses", expanding=True)),
-          {
-            "cutoff": cutoff,
-            "connected_statuses": connected_statuses,
-          },
-        )
-      ).mappings()
+      rows = await self._history_source_rows(connection, cutoff=cutoff)
       for row in rows:
         capabilities = row["capabilities"]
         if isinstance(capabilities, str):
@@ -174,6 +139,27 @@ class DurableRuntimeStore:
         }:
           return str(row["id"])
     return None
+
+  async def _history_source_rows(self, connection, *, cutoff, device_id=None):
+    if cutoff is None:
+      return []
+    return (
+      await connection.execute(
+        text("""
+      SELECT device.id,history.capabilities
+      FROM agent_devices AS device
+      JOIN market_data_history_session AS history
+        ON history.device_id=device.id AND history.user_id=device.user_id
+      WHERE device.revoked_at IS NULL
+        AND history.expires_at > clock_timestamp()
+        AND history.token_expires_at > clock_timestamp()
+        AND history.heartbeat_at >= :cutoff
+        AND (CAST(:device_id AS TEXT) IS NULL OR device.id=:device_id)
+      ORDER BY history.heartbeat_at DESC,device.id
+    """),
+        {"cutoff": cutoff.replace(tzinfo=timezone.utc), "device_id": device_id},
+      )
+    ).mappings()
 
   async def blocked_market_data_ingestion(
     self,
@@ -254,63 +240,9 @@ class DurableRuntimeStore:
       ).scalar_one_or_none()
       if existing:
         return str(existing)
-      if runtime_cutoff is None:
-        rows = []
-      elif device_id:
-        selected = (
-          (
-            await connection.execute(
-              text(
-                """
-              SELECT device.id, device.capabilities
-              FROM agent_devices AS device
-              JOIN runtime_component_heartbeats AS heartbeat
-                ON heartbeat.component = 'qmt-agent:' || device.id
-              WHERE device.id = :device_id
-                AND device.revoked_at IS NULL
-                AND heartbeat.details ->> 'sessionActive' = 'true'
-                AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
-                AND heartbeat.updated_at >= :cutoff
-                AND UPPER(heartbeat.status) IN (
-                  'READY', 'RECONCILING', 'RECONCILE_REQUIRED',
-                  'TRADING_UNAVAILABLE', 'EMERGENCY_STOP'
-                )
-              """
-              ),
-              {
-                "device_id": device_id,
-                "cutoff": runtime_cutoff,
-              },
-            )
-          )
-          .mappings()
-          .one_or_none()
-        )
-        rows = [selected] if selected is not None else []
-      else:
-        rows = (
-          await connection.execute(
-            text(
-              """
-              SELECT device.id, device.capabilities
-              FROM agent_devices AS device
-              JOIN runtime_component_heartbeats AS heartbeat
-                ON heartbeat.component = 'qmt-agent:' || device.id
-              WHERE device.revoked_at IS NULL
-                AND heartbeat.details ->> 'sessionActive' = 'true'
-                AND COALESCE(heartbeat.details ->> 'agentSessionId', '') <> ''
-                AND heartbeat.updated_at >= :cutoff
-                AND UPPER(heartbeat.status) IN (
-                  'READY', 'RECONCILING', 'RECONCILE_REQUIRED',
-                  'TRADING_UNAVAILABLE', 'EMERGENCY_STOP'
-                )
-              ORDER BY
-                heartbeat.updated_at DESC
-              """
-            ),
-            {"cutoff": runtime_cutoff},
-          )
-        ).mappings()
+      rows = await self._history_source_rows(
+        connection, cutoff=runtime_cutoff, device_id=device_id
+      )
       required = {"market-data"}
       required.update(
         str(item).strip() for item in required_capabilities or [] if str(item).strip()

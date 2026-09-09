@@ -60,6 +60,9 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
   from .collection_receipts import router as collection_receipts_router
 
   app.include_router(collection_receipts_router)
+  from .history_session import router as history_session_router
+
+  app.include_router(history_session_router)
   from .development_history import router as development_history_router
 
   app.include_router(development_history_router)

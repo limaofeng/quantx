@@ -20,7 +20,7 @@
 			@docs_root path /docs
 			redir @docs_root /docs/ 308
 
-			@market_data_internal path /market-data/internal/v1/* /agent/market-data/* /market-data/v1/history /market-data/v1/history/* /market-data/v1/reference/* /market-data/v1/calendar/*
+			@market_data_internal path /ws/agent/history /market-data/internal/v1/* /agent/market-data/* /market-data/v1/history /market-data/v1/history/* /market-data/v1/reference/* /market-data/v1/calendar/*
 			reverse_proxy @market_data_internal 127.0.0.1:18085
 
 			@market_gateway path /ws/agent/market /market-data/v1/stream

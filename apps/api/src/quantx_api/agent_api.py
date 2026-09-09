@@ -84,7 +84,7 @@ from quantx_infrastructure.services.trade_intent_processor import (
   LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE,
 )
 from redis.exceptions import RedisError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
@@ -2286,6 +2286,14 @@ async def _next_market_data_request(
       .with_for_update()
     )
     if device is None:
+      return None
+    if await db.scalar(
+      text("""
+      SELECT EXISTS(SELECT 1 FROM market_data_history_session
+        WHERE device_id=:device AND expires_at > CURRENT_TIMESTAMP)
+      """),
+      {"device": device_id},
+    ):
       return None
     heartbeat = await db.get(
       RuntimeComponentHeartbeat,

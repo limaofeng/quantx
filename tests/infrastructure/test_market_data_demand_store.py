@@ -40,26 +40,27 @@ async def prepare_source(store, monkeypatch):
     )
     await connection.execute(
       text("""
-      CREATE TEMP TABLE agent_devices(id varchar(36), capabilities json, revoked_at timestamp)
+      CREATE TEMP TABLE agent_devices(id varchar(36), user_id varchar(36), capabilities json, revoked_at timestamp)
     """)
     )
     await connection.execute(
       text("""
-      CREATE TEMP TABLE runtime_component_heartbeats(
-        component text,details json,updated_at timestamp,status text
+      CREATE TEMP TABLE market_data_history_session(
+        device_id text,user_id text,capabilities json,heartbeat_at timestamptz,
+        expires_at timestamptz,token_expires_at timestamptz
       )
     """)
     )
     await connection.execute(
       text("""
-      INSERT INTO agent_devices VALUES ('device-1','["market-data"]',NULL)
+      INSERT INTO agent_devices VALUES ('device-1','history-user','["market-data"]',NULL)
     """)
     )
     await connection.execute(
       text("""
-      INSERT INTO runtime_component_heartbeats VALUES (
-        'qmt-agent:device-1','{"sessionActive": true,"agentSessionId":"session-1"}',
-        '2026-09-09 12:00:00','READY'
+      INSERT INTO market_data_history_session VALUES (
+        'device-1','history-user','["market-data"]','2026-09-09 12:00:00+00',
+        clock_timestamp()+INTERVAL '1 hour',clock_timestamp()+INTERVAL '1 hour'
       )
     """)
     )
