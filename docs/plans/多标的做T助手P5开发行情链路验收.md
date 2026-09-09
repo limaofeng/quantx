@@ -70,3 +70,25 @@ SHA256、范围、行数验证使用现有正式导入实现。皖能电力额�
 - `p5-remote-reference-check.log`：生产原始分片字段核查。
 
 本次仅更新验收记录，不修改运行代码，不运行 E2E 或真实交易。P5 保持 IN_PROGRESS。
+
+## 新缺口探针（2026-09-09 08:39–08:40）
+
+用户要求优先验证新缺口触发 QMT 补采，历史涨跌停价问题已交生产侧处理，本批不展开该问题。
+
+- 单一探针：`600036.SH / tick / 2026-08-31 / adjustment=none`。
+- 分区 ID：`6a631eb256bf43eb0f38ab4e5afdbcda415aa6a4984226f1ff1a5b58cc6bfb4f`。
+- 08:39:36，生产 history 状态查询为 HTTP 404，证明该分区尚无导出任务；这不等于证明
+  生产缓存没有数据。通过开发端正式 `import_partition` 提交一次，返回 QUEUED。
+- 08:40:29，同一分区 HTTP 200、WAITING_SOURCE、error=null，无 manifest；本地 QUEUED。
+  确认生产导出 Worker 已推进任务，尚未取得分片或入库结果。
+- 生产日历 HTTP 200，9 月 9 日不是休市日；代码限制交易日新补采在 16:00 至次日 08:30
+  派发。当前处于关闭窗口，没有绕过门禁、调用失败重试或重复提交。
+- 状态接口在 manifest 生成前不暴露 source_request_id、QMT 投递/上传状态或等待原因。
+  因而不能用 WAITING_SOURCE 或 manifest 缺失断言 Agent 已接单、未接单或发生故障。
+  当前阻碍为派发窗口与观察能力限制，未发现接口报错。
+- 后续沿同一分区在窗口开放后检查 READY/INCOMPLETE，并核对新源请求的创建时间、
+  development-export 幂等范围、Agent 上传与开发 LOCAL_VERIFIED；若只是复用旧源，
+  仍不能将新补采分支标为通过。该请求为持久化队列任务，窗口开放后可由正常 Worker 继续。
+  本轮未配置 Codex 定时复查，不重复创建请求。
+- 证据：`.codex_screenshots/p5-new-gap-submit.log`、`p5-new-gap-status.log`。
+  新补采分支当前为“入队及 Worker 消费通过，QMT 补采/上传/开发入库待验证”。
