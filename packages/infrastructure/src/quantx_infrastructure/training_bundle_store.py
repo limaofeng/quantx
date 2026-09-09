@@ -6,6 +6,7 @@ bundle contract. Partial transfers retain diagnostics and can resume by file.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
@@ -113,21 +114,158 @@ class SFTPBundleReader:
     validate_object_key(key)
     target = self.root / key
     try:
-      current = PurePosixPath("/")
-      for component in target.parts[1:]:
-        current /= component
-        mode = self.client.lstat(str(current)).st_mode
-        if stat.S_ISLNK(mode):
-          raise BundleTransferError("BUNDLE_LINK_FORBIDDEN")
-        if current != target and not stat.S_ISDIR(mode):
-          raise BundleTransferError("BUNDLE_REMOTE_DIRECTORY_INVALID")
-        if current == target and not stat.S_ISREG(mode):
-          raise BundleTransferError("BUNDLE_SPECIAL_FILE_FORBIDDEN")
+      self._check_path(target, file=True)
       return self.client.open(str(target), "rb")
     except BundleTransferError:
       raise
     except Exception:
       raise BundleTransferError("BUNDLE_OBJECT_UNAVAILABLE") from None
+
+  def _check_path(self, target: PurePosixPath, *, file: bool) -> None:
+    current = PurePosixPath("/")
+    for component in target.parts[1:]:
+      current /= component
+      mode = self.client.lstat(str(current)).st_mode
+      if stat.S_ISLNK(mode):
+        raise BundleTransferError("BUNDLE_LINK_FORBIDDEN")
+      expected_file = current == target and file
+      if not (stat.S_ISREG(mode) if expected_file else stat.S_ISDIR(mode)):
+        raise BundleTransferError("BUNDLE_REMOTE_OBJECT_TYPE_INVALID")
+
+
+class SFTPBundlePublisher(SFTPBundleReader):
+  """Publish complete local artifacts; retry transport without repeating work.
+
+  Publication uses OpenSSH's posix-rename extension for staged files and the
+  standard non-overwriting rename for the final directory. The caller must
+  serialize publication of a given bundle and keep local artifacts until the
+  returned identifier has been durably registered by the application.
+  """
+
+  def _exists(self, path: PurePosixPath) -> bool:
+    try:
+      self.client.lstat(str(path))
+      return True
+    except OSError as exc:
+      if exc.errno == errno.ENOENT:
+        return False
+      raise
+
+  def _mkdir(self, path: PurePosixPath) -> None:
+    # The configured store is provisioned separately; never create its parents.
+    relative = path.relative_to(self.root)
+    self._check_path(self.root, file=False)
+    current = self.root
+    for component in relative.parts:
+      current /= component
+      if not self._exists(current):
+        self.client.mkdir(str(current))
+      self._check_path(current, file=False)
+
+  def _matches(self, path: PurePosixPath, entry: BundleFile) -> bool:
+    if not self._exists(path):
+      return False
+    self._check_path(path, file=True)
+    if self.client.lstat(str(path)).st_size != entry.size:
+      return False
+    digest = hashlib.sha256()
+    count = 0
+    with self.client.open(str(path), "rb") as stream:
+      while block := stream.read(CHUNK_BYTES):
+        count += len(block)
+        if count > entry.size:
+          return False
+        digest.update(block)
+    return count == entry.size and digest.hexdigest() == entry.sha256
+
+  def _verify_published(self, directory: PurePosixPath, bundle: TrainingBundle) -> None:
+    self._check_path(directory, file=False)
+    expected_files = {entry.path for entry in bundle.files}
+    expected_dirs = {
+      str(parent)
+      for entry in bundle.files
+      for parent in PurePosixPath(entry.path).parents
+      if str(parent) != "."
+    }
+    pending = [directory]
+    found = set()
+    seen = set()
+    while pending:
+      parent = pending.pop()
+      for child in self.client.listdir_attr(str(parent)):
+        # Compare before touching the reported path; filenames are server input.
+        if (
+          "/" in child.filename
+          or "\\" in child.filename
+          or child.filename in {".", ".."}
+        ):
+          raise BundleTransferError("BUNDLE_REMOTE_INVENTORY_MISMATCH")
+        path = parent / child.filename
+        name = str(path.relative_to(directory))
+        if name in seen:
+          raise BundleTransferError("BUNDLE_REMOTE_INVENTORY_MISMATCH")
+        seen.add(name)
+        if name in expected_dirs:
+          self._check_path(path, file=False)
+          pending.append(path)
+        elif name in expected_files:
+          self._check_path(path, file=True)
+          found.add(name)
+        else:
+          raise BundleTransferError("BUNDLE_REMOTE_INVENTORY_MISMATCH")
+    if found != expected_files or not all(
+      self._matches(directory / entry.path, entry) for entry in bundle.files
+    ):
+      raise BundleTransferError("BUNDLE_REMOTE_INTEGRITY_MISMATCH")
+
+  def publish(self, directory: Path, bundle: TrainingBundle) -> str:
+    complete = self.root / bundle.bundle_id
+    staging = self.root / (bundle.bundle_id + ".partial")
+    try:
+      verify_bundle(directory, bundle)
+      self._check_path(self.root, file=False)
+      if self._exists(complete):
+        self._verify_published(complete, bundle)
+        return bundle.bundle_id
+      self._mkdir(staging)
+      for entry in bundle.files:
+        target = staging / entry.path
+        if self._matches(target, entry):
+          continue
+        self._mkdir(target.parent)
+        temporary = target.with_name("." + target.name + ".transfer")
+        if self._exists(temporary):
+          self._check_path(temporary, file=True)
+          self.client.remove(str(temporary))
+        source = directory / entry.path
+        reject_links(source)
+        digest = hashlib.sha256()
+        count = 0
+        with (
+          source.open("rb") as incoming,
+          self.client.open(str(temporary), "wx") as output,
+        ):
+          while block := incoming.read(CHUNK_BYTES):
+            count += len(block)
+            if count > entry.size:
+              raise BundleTransferError("BUNDLE_LOCAL_SOURCE_CHANGED")
+            output.write(block)
+            digest.update(block)
+          output.flush()
+        if count != entry.size or digest.hexdigest() != entry.sha256:
+          raise BundleTransferError("BUNDLE_LOCAL_SOURCE_CHANGED")
+        # Read the bytes back before acknowledging upload, not just SFTP success.
+        if not self._matches(temporary, entry):
+          raise BundleTransferError("BUNDLE_REMOTE_INTEGRITY_MISMATCH")
+        self.client.posix_rename(str(temporary), str(target))
+      self._verify_published(staging, bundle)
+      self.client.rename(str(staging), str(complete))
+      self._verify_published(complete, bundle)
+      return bundle.bundle_id
+    except BundleTransferError:
+      raise
+    except Exception:
+      raise BundleTransferError("BUNDLE_PUBLISH_INTERRUPTED") from None
 
 
 def materialize_bundle(
@@ -168,11 +306,13 @@ def materialize_bundle(
       reject_links(temporary)
       if temporary.exists() and not temporary.is_file():
         raise BundleTransferError("BUNDLE_SPECIAL_FILE_FORBIDDEN")
+      if temporary.exists():
+        temporary.unlink()
       digest = hashlib.sha256()
       count = 0
       with (
         source.open(f"{bundle.bundle_id}/{entry.path}") as incoming,
-        temporary.open("wb") as output,
+        temporary.open("xb") as output,
       ):
         while block := incoming.read(CHUNK_BYTES):
           count += len(block)
