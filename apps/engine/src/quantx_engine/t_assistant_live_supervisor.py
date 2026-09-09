@@ -68,6 +68,7 @@ class _Binding:
   generations: dict = field(default_factory=dict)
   rewarm: set = field(default_factory=set)
   readiness_checked_at: datetime | None = None
+  ready_market_identity: tuple[str, str] | None = None
 
 
 class TAssistantLiveSupervisor:
@@ -223,7 +224,11 @@ class TAssistantLiveSupervisor:
         self.last_results.pop(execution_id, None)
         raise ValueError("T_ASSISTANT_LIVE_LEGACY_PRODUCER_ACTIVE")
       now = self.clock()
-      if previous is None:
+      if previous is None or (previous.execution.readiness.readiness.value == "READY" and (
+        not self.hub.is_ready or previous.ready_market_identity != (
+          self.hub.stream_id, str(self.hub.generation)
+        )
+      )):
         # Commit revocation before profile/config reconstruction can fail or await I/O.
         async with self.sessions() as db, db.begin():
           execution = await TAssistantExecutionRepository(db).get_domain(execution_id)
@@ -334,6 +339,7 @@ class TAssistantLiveSupervisor:
           code: previous.generations.get(code, "") if previous else ""
           for code in universe.instruments
         },
+        ready_market_identity=previous.ready_market_identity if previous and not changed else None,
         rewarm=(changed | (previous.rewarm if previous else set()))
         & set(universe.instruments),
       )
@@ -431,6 +437,7 @@ class TAssistantLiveSupervisor:
           validate_before_activation=validate_market,
         )
       binding.execution = activated
+      binding.ready_market_identity = (capture.stream_id, capture.continuity_generation)
     except ValueError as exc:
       reason = (
         str(exc)
@@ -441,11 +448,17 @@ class TAssistantLiveSupervisor:
 
   async def _on_quotes(self, data):
     async with self._lock:
-      if not data or not self.hub.is_ready:
-        return
       now = self.clock()
       if now.tzinfo is None:
         raise ValueError("T_ASSISTANT_LIVE_AWARE_CLOCK_REQUIRED")
+      identity = (self.hub.stream_id, str(self.hub.generation))
+      for binding in self._bindings.values():
+        if binding.execution.readiness.readiness.value == "READY" and (
+          not self.hub.is_ready or binding.ready_market_identity != identity
+        ):
+          await self._warming_reason(binding, "LIVE_READY_MARKET_CHANGED", now)
+      if not data or not self.hub.is_ready:
+        return
       received_ms = int(now.timestamp() * 1000)
       capture = TMarketCapture(
         stream_id=self.hub.stream_id,
@@ -465,6 +478,8 @@ class TAssistantLiveSupervisor:
           reset = bool(raw.get("market_stream_reset")) or bool(
             binding.generations.get(code) and binding.generations[code] != generation
           )
+          if reset and binding.execution.readiness.readiness.value == "READY":
+            await self._warming_reason(binding, "LIVE_READY_MARKET_CHANGED", now)
           sequence = 1 if reset else binding.sequences.get(code, 0) + 1
           tick = _accepted_tick(
             code,

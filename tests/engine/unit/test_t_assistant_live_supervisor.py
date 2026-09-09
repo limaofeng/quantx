@@ -263,3 +263,40 @@ async def test_cold_running_binding_revokes_durable_ready(sessions, monkeypatch,
     assert row.entry_readiness == "DEGRADED"
     assert row.entry_readiness_reasons == ["LIVE_READY_RECOVERY_REQUIRED"]
     assert await db.scalar(select(func.count(TradeCommandOutbox.message_id))) == 0
+
+
+@pytest.mark.parametrize("change", ["generation", "stream", "not_ready", "reconcile"])
+async def test_running_market_identity_change_revokes_ready_without_symbol_tick(sessions, change):
+  from quantx_infrastructure.repositories.t_assistant_execution_repository import (
+    TAssistantExecutionRepository,
+  )
+
+  key = await seed(sessions)
+  hub = FakeWholeQuoteHub()
+  supervisor = TAssistantLiveSupervisor(quote_hub=hub, session_factory=sessions, clock=lambda: NOW)
+  await supervisor.reconcile(execution_id=key, universe=UNIVERSE, legacy_active=False)
+  async with sessions() as db, db.begin():
+    row = await db.get(TAssistantExecutionRecord, key)
+    row.status = "RUNNING"
+    row.started_at = NOW
+    row.entry_readiness = "READY"
+    row.entry_readiness_reasons = []
+    row.state_version += 1
+    await db.flush()
+    supervisor._bindings[key].execution = await TAssistantExecutionRepository(db).get_domain(key)
+  supervisor._bindings[key].ready_market_identity = (hub.stream_id, str(hub.generation))
+  if change == "not_ready":
+    hub.is_ready = False
+  elif change == "stream":
+    hub.stream_id = "new-stream"
+  else:
+    hub.generation += 1
+  if change == "reconcile":
+    await supervisor.reconcile(execution_id=key, universe=UNIVERSE, legacy_active=False)
+  else:
+    await supervisor._on_quotes({})
+  async with sessions() as db:
+    row = await db.get(TAssistantExecutionRecord, key)
+    assert row.status == "RUNNING" and row.entry_readiness == "DEGRADED"
+    assert row.entry_readiness_reasons
+    assert await db.scalar(select(func.count(TradeCommandOutbox.message_id))) == 0

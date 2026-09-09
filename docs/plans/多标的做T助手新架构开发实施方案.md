@@ -780,7 +780,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   51 项相关回归通过，新增重建失败负例后 supervisor 9 项通过（合计覆盖 52 项）；Ruff 通过。
   开发库备份归档已校验，0073 迁移成功；首次表名错误事务回滚后修复，不影响业务记录。
   证据 `.codex_screenshots/p6-running-*`。未重启生产或启用新 LIVE 入场 handler。
-- 剩余开发顺序：持续行情代切换时 RUNNING 就绪撤销、
+- 持续行情切换门禁已补：READY 绑定激活时的 stream/generation；全局行情失效、
+  流/代切换及显式 Tick reset 均先持久化 DEGRADED，不等待本标的新 Tick；普通 reconcile
+  保留热窗口和已核验身份，发生变化才撤销。31 项 supervisor/readiness 联合测试及 Ruff
+  通过，含空批次下代切换、换流、不可用和 reconcile 发现变化；无券商命令副作用。
+  证据 `.codex_screenshots/p6-live-market-recovery.log`。
+- 剩余开发顺序：
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
