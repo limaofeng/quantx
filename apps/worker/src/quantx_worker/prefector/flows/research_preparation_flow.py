@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from quantx_infrastructure.training_bundle_store import publication_lock
 from quantx_infrastructure.training_process_evidence import (
   begin_execution,
   inspect_execution,
+  inspect_input_preparation,
   local_exit_recorded,
   record_exit,
   record_spawn,
@@ -39,6 +41,10 @@ from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
   daily_market_data_sync_flow,
 )
 from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
+from quantx_worker.prefector.flows.preparation_input_evidence import (
+  input_attempt,
+  input_paths,
+)
 
 
 class PreparationAdmissionDenied(RuntimeError):
@@ -254,6 +260,13 @@ async def recover_certification_exports():
         continue
       with publication_lock(directory):
         request, evidence = certification_execution_paths(directory, job.flow_run_id)
+        if not os.path.lexists(evidence):
+          input_record, input_request = input_paths(directory, job.flow_run_id)
+          if inspect_input_preparation(input_record, run_id=job.job_id, owner=job.flow_run_id, request=input_request) == "EXITED":
+            async with AsyncSessionLocal() as db:
+              await ResearchPreparationRepository(db).requeue_worker_inputs(job.job_id, expected_flow_run_id=job.flow_run_id)
+            recovered.append(job.job_id)
+          continue
         identity = dict(run_id=job.job_id, owner=job.flow_run_id, request=request)
         if inspect_execution(evidence, **identity) != "EXITED" and not local_exit_recorded(evidence, **identity):
           continue
@@ -304,9 +317,14 @@ async def research_preparation_dispatch_flow():
   await recover_certification_exports()
   if _full_live_runtime() and await is_critical_trading_window():
     return {"status": "QUEUED", "reason": "TRADING_CRITICAL_WINDOW"}
+  with input_attempt(root() / ".runtime/research-preparation", logging.getLogger(__name__)) as prepare:
+    return await _dispatch_worker(prepare)
+
+
+async def _dispatch_worker(prepare):
   async with AsyncSessionLocal() as db:
     job = await ResearchPreparationRepository(db).claim(
-      str(uuid.uuid4()), kinds=("COVERAGE", "DOWNLOAD", "CERTIFY"), executor="WORKER",
+      str(uuid.uuid4()), kinds=("COVERAGE", "DOWNLOAD", "CERTIFY"), executor="WORKER", prepare_execution=prepare,
     )
     if job is None:
       return {"status": "IDLE"}

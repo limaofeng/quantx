@@ -194,3 +194,37 @@ async def test_certification_handoff_is_owner_fenced_immutable_and_executor_rout
     await repo.requeue_trainer_inputs(job_id, expected_flow_run_id="trainer-final")
     assert await repo.claim("worker", kinds=("CERTIFY",), executor="WORKER") is None
   await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_preclaim_disk_failure_rolls_back_and_next_attempt_is_recoverable(tmp_path, monkeypatch):
+  from types import SimpleNamespace
+
+  from quantx_worker.prefector.flows import preparation_input_evidence as evidence
+
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(lambda c: ResearchPreparationJob.__table__.create(c))
+  session = async_sessionmaker(engine, expire_on_commit=False)
+  async with session() as db:
+    repo = ResearchPreparationRepository(db)
+    config = {**CONFIG, "st_file": "st.csv", "industry_file": "industry.csv", "delisting_file": "delisting.csv"}
+    job = await repo.submit(kind="CERTIFY", config=config, request_key="d" * 32, dataset_version="cert-v2")
+    job_id = job.job_id
+    logger = SimpleNamespace(warning=lambda *args: pytest.fail("completion evidence missing"))
+    with monkeypatch.context() as patch:
+      patch.setattr(evidence, "begin_execution", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk unavailable")))
+      with evidence.input_attempt(tmp_path, logger) as prepare:
+        with pytest.raises(OSError):
+          await repo.claim("failed-owner", kinds=("CERTIFY",), executor="WORKER", prepare_execution=prepare)
+    saved = await db.get(ResearchPreparationJob, job_id)
+    assert saved.status == "QUEUED" and saved.flow_run_id is None
+    with evidence.input_attempt(tmp_path, logger) as prepare:
+      await repo.claim("next-owner", kinds=("CERTIFY",), executor="WORKER", prepare_execution=prepare)
+    with pytest.raises(ValueError, match="归属"):
+      await repo.requeue_worker_inputs(job_id, expected_flow_run_id="failed-owner")
+    await repo.requeue_worker_inputs(job_id, expected_flow_run_id="next-owner")
+    assert await repo.claim("trainer", kinds=("CERTIFY",), executor="TRAINER") is None
+    claimed = await repo.claim("recovered-owner", kinds=("CERTIFY",), executor="WORKER")
+    assert claimed.job_id == job_id
+  await engine.dispose()

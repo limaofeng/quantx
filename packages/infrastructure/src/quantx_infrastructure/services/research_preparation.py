@@ -307,6 +307,13 @@ class ResearchPreparationRepository:
 
   async def requeue_worker_admission(self, job_id, *, expected_flow_run_id):
     """Only a stopped Worker certification export may retry host admission."""
+    await self._requeue_worker(job_id, expected_flow_run_id=expected_flow_run_id, phase="等待导出主机资源")
+
+  async def requeue_worker_inputs(self, job_id, *, expected_flow_run_id):
+    """Only after input work is proven stopped and no compute record exists."""
+    await self._requeue_worker(job_id, expected_flow_run_id=expected_flow_run_id, phase="恢复导出准备")
+
+  async def _requeue_worker(self, job_id, *, expected_flow_run_id, phase):
     if not expected_flow_run_id:
       raise ValueError("准备任务执行归属无效")
     result = await self.db.execute(
@@ -314,7 +321,7 @@ class ResearchPreparationRepository:
         Job.job_id == job_id, Job.kind == "CERTIFY", Job.status == "RUNNING",
         Job.flow_run_id == expected_flow_run_id,
         Job.request["certification_input"]["manifest_sha256"].as_string().is_(None),
-      ).values(status="QUEUED", phase="等待导出主机资源", flow_run_id=None,
+      ).values(status="QUEUED", phase=phase, flow_run_id=None,
                error=None, updated_at=now())
     )
     if result.rowcount != 1:
