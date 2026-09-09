@@ -1,6 +1,42 @@
 """Bounded shutdown of an asyncio subprocess without abandoning its waiter."""
 
 import asyncio
+import subprocess
+
+
+async def stop_popen_process(process, *, grace_seconds=5.0, kill_seconds=5.0) -> bool:
+  """Join synchronous Popen shutdown even if the awaiting task is cancelled.
+
+  A returned exit code from poll/wait is required; errors and exhausted waits
+  never prove exit. As with stop_async_process, the caller propagates cancellation.
+  """
+  def stop():
+    try:
+      if process.poll() is not None:
+        return True
+      try:
+        process.terminate()
+      except ProcessLookupError:
+        pass
+      try:
+        return process.wait(timeout=grace_seconds) is not None
+      except subprocess.TimeoutExpired:
+        pass
+      try:
+        process.kill()
+      except ProcessLookupError:
+        pass
+      return process.wait(timeout=kill_seconds) is not None
+    except (OSError, subprocess.TimeoutExpired):
+      return False
+
+  task = asyncio.create_task(asyncio.to_thread(stop))
+  while not task.done():
+    try:
+      await asyncio.shield(task)
+    except asyncio.CancelledError:
+      continue
+  return task.result()
 
 
 async def stop_async_process(process, *, grace_seconds=5.0, kill_seconds=5.0) -> bool:

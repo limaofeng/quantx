@@ -103,8 +103,10 @@ async def test_stubborn_child_is_killed_after_bounded_grace():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("disconnect", [False, True])
+@pytest.mark.parametrize("stop_unknown", [False, True])
+@pytest.mark.parametrize("registration_unknown", [False, True])
 async def test_silent_research_gets_bounded_heartbeats_and_stops_on_disconnect(
-  monkeypatch, tmp_path, disconnect
+  monkeypatch, tmp_path, disconnect, stop_unknown, registration_unknown
 ):
   class Process:
     alive = True
@@ -113,9 +115,14 @@ async def test_silent_research_gets_bounded_heartbeats_and_stops_on_disconnect(
       return None if self.alive else -15
 
     def terminate(self):
-      self.alive = False
+      self.alive = stop_unknown
+
+    def kill(self):
+      pass
 
     def wait(self, timeout):
+      if stop_unknown:
+        raise subprocess.TimeoutExpired("research", timeout)
       return -15
 
   process = Process()
@@ -125,7 +132,7 @@ async def test_silent_research_gets_bounded_heartbeats_and_stops_on_disconnect(
     heartbeat_execution=AsyncMock(
       return_value=current, side_effect=ConnectionError("control plane unavailable") if disconnect else None
     ),
-    fail_run=AsyncMock(),
+    fail_run=AsyncMock(side_effect=ConnectionError("registration unavailable") if registration_unknown else None),
     complete_run=AsyncMock(),
   )
   ticks = iter([0, 0, 9, 10, 10])
@@ -140,9 +147,14 @@ async def test_silent_research_gets_bounded_heartbeats_and_stops_on_disconnect(
     SimpleNamespace(run_id="run-1", run_kind="DEVELOPMENT", prefect_flow_run_id="executor"),
     object(), object(), poll_interval_seconds=0.01,
   )
-  assert not process.alive
+  assert process.alive == stop_unknown
   assert (tmp_path / "process.json").is_file()
-  assert result["status"] == ("FAILED" if disconnect else "OWNERSHIP_LOST")
+  assert result["status"] == (("RUNNING" if stop_unknown or registration_unknown else "FAILED") if disconnect else "OWNERSHIP_LOST")
+  if stop_unknown:
+    assert result["reason"] == "TRAINER_PROCESS_STOP_UNCONFIRMED"
+    repository.fail_run.assert_not_called()
+  elif disconnect and registration_unknown:
+    assert result["reason"] == "TRAINER_FAILURE_REGISTRATION_PENDING"
   assert repository.heartbeat_execution.await_count == (1 if disconnect else 2)
   for call in repository.heartbeat_execution.call_args_list:
     assert call.kwargs == {"expected_flow_run_id": "executor"}

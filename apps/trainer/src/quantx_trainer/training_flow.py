@@ -589,23 +589,17 @@ def _process_alive(process: Any) -> bool:
     return False
 
 
-async def _stop_research_process(process: Any, *, grace_seconds: float = 5) -> None:
-  def stop() -> None:
-    if not _process_alive(process):
-      return
-    try:
-      process.terminate()
-    except ProcessLookupError:
-      if process.poll() is not None:
-        return
-      raise
-    try:
-      process.wait(timeout=grace_seconds)
-    except subprocess.TimeoutExpired:
-      process.kill()
-      process.wait(timeout=grace_seconds)
+class ResearchStopUnconfirmed(RuntimeError):
+  pass
 
-  await asyncio.to_thread(stop)
+
+async def _stop_research_process(process: Any, *, grace_seconds: float = 5) -> None:
+  from quantx_infrastructure.async_process_stop import stop_popen_process
+
+  if not await stop_popen_process(
+    process, grace_seconds=grace_seconds, kill_seconds=grace_seconds,
+  ):
+    raise ResearchStopUnconfirmed("TRAINER_PROCESS_STOP_UNCONFIRMED")
 
 
 def _redact_sensitive_text(value: Any) -> str:
@@ -949,18 +943,21 @@ async def _run_claimed_job(
     )
     return {"run_id": run_id, "status": "FAILED", "error_code": error_code}
   except TrainingStateConflict:
-    if process is not None and _process_alive(process):
-      await _stop_research_process(process)
+    if process is not None:
+      try:
+        await _stop_research_process(process)
+      except ResearchStopUnconfirmed:
+        return {"run_id": run_id, "status": "OWNERSHIP_LOST", "reason": "TRAINER_PROCESS_STOP_UNCONFIRMED"}
     return {"run_id": run_id, "status": "OWNERSHIP_LOST"}
-  except asyncio.CancelledError:
+  except asyncio.CancelledError as cancellation:
     try:
-      if process is not None and _process_alive(process):
+      if process is not None:
         await _stop_research_process(process)
     finally:
-      raise
+      raise cancellation
   except Exception as exc:
     try:
-      if process is not None and _process_alive(process):
+      if process is not None:
         await _stop_research_process(process)
       await repository.fail_run(
         run_id,
@@ -974,8 +971,10 @@ async def _run_claimed_job(
         ),
         completed_at=_now(),
       )
+    except ResearchStopUnconfirmed:
+      return {"run_id": run_id, "status": "RUNNING", "reason": "TRAINER_PROCESS_STOP_UNCONFIRMED"}
     except Exception:
-      pass
+      return {"run_id": run_id, "status": "RUNNING", "reason": "TRAINER_FAILURE_REGISTRATION_PENDING"}
     return {
       "run_id": run_id,
       "status": "FAILED",
