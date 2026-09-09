@@ -92,6 +92,7 @@ def test_down_waits_for_zero_members_and_marks_database_unreconciled(
     yield job
 
   (tmp_path / "service").mkdir()
+  (tmp_path / "config").write_text("fixture")
   monkeypatch.setattr(windows, "open_service_job", opened)
   monkeypatch.setattr(launcher, "service_status", lambda *args: {"service": "OFFLINE"})
   monkeypatch.setattr(launcher.time, "sleep", lambda seconds: None)
@@ -104,6 +105,11 @@ def test_down_waits_for_zero_members_and_marks_database_unreconciled(
     "database_state": "NOT_RECONCILED",
   }
   assert job.terminate.call_count == int(forced)
+  receipt = json.loads(
+    (tmp_path / "service" / f"group-exit-{'a' * 32}.json").read_text()
+  )
+  assert receipt["active_processes"] == 0
+  assert receipt["forced"] is forced
 
 
 def test_nonzero_job_after_forced_timeout_remains_pending(tmp_path, monkeypatch):
@@ -148,10 +154,15 @@ child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], 
 (root / 'ready.tmp').replace(root / 'ready')
 time.sleep(60)
 """
-  process = subprocess.Popen([
-    sys.executable, "-c", script, str(tmp_path),
-    str(Path(__file__).resolve().parents[2] / "apps/trainer/src"),
-  ])
+  process = subprocess.Popen(
+    [
+      sys.executable,
+      "-c",
+      script,
+      str(tmp_path),
+      str(Path(__file__).resolve().parents[2] / "apps/trainer/src"),
+    ]
+  )
   try:
     deadline = time.monotonic() + 10
     while not (tmp_path / "ready").exists() and time.monotonic() < deadline:

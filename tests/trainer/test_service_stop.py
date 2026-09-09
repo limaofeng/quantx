@@ -45,7 +45,7 @@ def test_down_closes_admission_and_preserves_unconfirmed_stop(
   result = launcher.stop_service(config, config_path, stop_seconds=0)
   assert result["service"] == "STOP_PENDING"
   assert admission_status(tmp_path / "control")["admission"] == "DRAINING"
-  assert stop_requested(root, instance) == (state == "ALIVE")
+  assert stop_requested(root, instance) == (state in {"ALIVE", "STALE"})
 
 
 def test_service_joins_worker_cleanup_after_stop_request(tmp_path, monkeypatch):

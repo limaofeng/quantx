@@ -75,6 +75,10 @@ def service_status(state_root: Path, config_path: Path) -> dict[str, str]:
       return {**result, "service": "OFFLINE"}
     try:
       with publication_lock(root):
+        from quantx_trainer.service_exit import confirmed_group_exit
+
+        if confirmed_group_exit(state_root, config_path):
+          return {"service": "OFFLINE", "execution_state": "GROUP_EXITED", "database_state": "NOT_RECONCILED"}
         return {**result, "service": "OFFLINE"}
     except OSError as exc:
       if exc.errno not in {errno.EAGAIN, errno.EACCES}:
@@ -102,11 +106,9 @@ def service_status(state_root: Path, config_path: Path) -> dict[str, str]:
     ) != os.path.normcase(value["executable"]):
       return result
     age = time.time() - value["updated_at"]
-    if not 0 <= age <= 30:
-      return {**result, "service": "STALE"}
     return {
       **result,
-      "service": "ALIVE",
+      "service": "ALIVE" if 0 <= age <= 30 else "STALE",
       "phase": value["phase"],
       "instance_id": value["instance_id"],
     }

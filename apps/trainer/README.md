@@ -228,7 +228,7 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 
 服务运行时可在另一终端执行 `python -m quantx_trainer.main status --config <同一配置绝对路径>`。查询不连接开发控制面，返回 `ALIVE`、`OFFLINE`、`STALE` 或 `UNKNOWN`。只有单实例锁占用、主机/PID/创建时间/解释器/配置哈希匹配且本地心跳不超过 30 秒，才报告 `ALIVE`；证据每 10 秒刷新。`phase` 区分预检、部署注册、进入 Worker 循环和退出阶段；不代表控制面或 GPU 健康。`OFFLINE` 表示查询时服务锁可获取，残留状态文件不会让服务显示在线。
 
-所有服务状态均携带 `execution_state=NOT_INSPECTED`，不能用作计算排空或升级许可。`UNKNOWN` / `STALE` 的命令退出码为 3；明确的本地在线/离线状态退出码为 0。
+没有适用组退出证明的服务状态携带 `execution_state=NOT_INSPECTED`，不能用作计算排空或升级许可。`UNKNOWN` / `STALE` 的命令退出码为 3；明确的本地在线/离线状态退出码为 0。
 
 
 使用 `python -m quantx_trainer.main logs --config <同一配置绝对路径> --lines 100` 离线读取服务生命周期事件，行数范围为 1–1000。文件位于 `state_root/service/events.jsonl`，每个文件最多 1 MiB，保留三个轮转备份。事件仅包含时间、实例标识和固定阶段/失败代码，不收集配置、异常原文或任意输出；心跳刷新不重复写阶段事件。读取拒绝链接和非预期字段，损坏时返回稳定错误，不输出损坏原文。
@@ -247,7 +247,7 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 
 ### 协作停止
 
-执行 `python -m quantx_trainer.main down --config <配置绝对路径>`，先持久化关闭新领取，再向已验证的服务实例写入停止请求。服务每秒检查请求，进入 STOPPING，取消并等待 Worker 清理；旧实例请求不会影响新实例。`down` 先等待最多 30 秒协作退出；macOS 确认服务锁释放返回 OFFLINE，Windows 按下述 Job 核验继续确认。无法确认时返回 STOP_PENDING 和退出码 3。配置不匹配、陈旧或未知身份不会用于发送停止请求，也不会按猜测的 PID 终止进程。
+执行 `python -m quantx_trainer.main down --config <配置绝对路径>`，先持久化关闭新领取，再向已验证的服务实例写入停止请求。服务每秒检查请求，进入 STOPPING，取消并等待 Worker 清理；旧实例请求不会影响新实例。`down` 先等待最多 30 秒协作退出；macOS 确认服务锁释放返回 OFFLINE，Windows 按下述 Job 核验继续确认。无法确认时返回 STOP_PENDING 和退出码 3。配置不匹配或未知身份不会用于发送停止请求；心跳陈旧但进程身份已核验的实例仍可进入停止流程，也不会按猜测的 PID 终止进程。
 
 此命令保留排空标记，后续启动仍需显式 resume 才恢复领取。返回结果的 `execution_state=NOT_INSPECTED` 表示尚未证明所有计算后代退出和数据库状态收敛；不能直接作为升级许可。Windows 超时强制终止与 Job 计数确认已接入，运行端实测和数据库状态收敛仍待完成。
 
@@ -268,3 +268,6 @@ macOS 对应入口为 `./ops/quantx.sh status --component trainer --trainer-pyth
 Windows `serve` 使用绑定实例标识的全局命名 Job，命名冲突拒绝启动，不打开并修改既有 Job。Windows `down` 在发送停止请求前打开该 Job，通过同一进程句柄核对创建时间和 Job 归属。协作宽限期后终止已核验的 Job，再等待最多 5 秒；仅活动进程数归零且服务锁释放时返回 `execution_state=GROUP_EXITED`，同时保留 `database_state=NOT_RECONCILED`。Job 不存在、身份/归属不明、查询/终止失败或计数未归零都保持待确认；不会把 API 接受终止当作退出证明。
 
 命名与计数语义依据 [CreateJobObjectW](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-createjobobjectw) 和 [Job 基本统计](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information)。真实 Windows 身份核验、组终止和计数归零测试位于 `tests/trainer/test_windows_service_job.py`，当前 macOS 未执行；不能据本地替身测试宣称运行端退出验收完成。
+
+
+Windows 确认 Job 活动数归零后，在关闭控制句柄前原子保存 `service/group-exit-<实例>.json`，绑定实例、主机、配置哈希、观察时间和是否强制终止。后续离线 status 可读取同一实例的证明并返回 GROUP_EXITED；旧实例、配置变化、损坏记录或非零活动数不会被使用，已有证明不可覆盖。该证明仍不意味着数据库运行状态已收敛或可以升级代码。

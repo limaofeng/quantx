@@ -36,7 +36,7 @@ def stop_service(config, config_path: Path, *, stop_seconds=30.0):
     pending = {"service": "STOP_PENDING", "execution_state": "NOT_INSPECTED"}
     if status["service"] == "OFFLINE":
       return status if _previous_state(root) == "EXITED" else pending
-    if status["service"] != "ALIVE":
+    if status["service"] not in {"ALIVE", "STALE"}:
       return pending
     instance = status["instance_id"]
     if sys.platform == "win32":
@@ -55,6 +55,7 @@ def stop_service(config, config_path: Path, *, stop_seconds=30.0):
 
 
 def _stop_windows_service(config, config_path, instance, grace_seconds):
+  from quantx_trainer.service_exit import record_group_exit
   from quantx_trainer.service_stop import request_stop
   from quantx_trainer.windows_service_job import open_service_job
 
@@ -67,6 +68,7 @@ def _stop_windows_service(config, config_path, instance, grace_seconds):
       active = job.active_processes()
       status = service_status(config.state_root, config_path)
       if active == 0 and status["service"] == "OFFLINE":
+        record_group_exit(config.state_root, config_path, instance, forced=forced)
         return {
           "service": "OFFLINE",
           "execution_state": "GROUP_EXITED",
