@@ -181,18 +181,19 @@ async def _run_preparation_process(config, job, payload, check):
   from quantx_trainer.contained_process import research_command
 
   try:
-    process = await asyncio.create_subprocess_exec(
-      *research_command("quantx_research.preparation_job"),
-      str(request),
-      env=config.research_environment(os.environ),
-      stdout=subprocess.DEVNULL,
-      stderr=subprocess.DEVNULL,
-      creationflags=(
-        subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS
+    with (directory / "stdout.log").open("xb") as stdout, (directory / "stderr.log").open("xb") as stderr:
+      process = await asyncio.create_subprocess_exec(
+        *research_command("quantx_research.preparation_job"),
+        str(request),
+        env=config.research_environment(os.environ),
+        stdout=stdout,
+        stderr=stderr,
+        creationflags=(
+          subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS
+        )
+        if sys.platform == "win32"
+        else 0,
       )
-      if sys.platform == "win32"
-      else 0,
-    )
   except BaseException:
     # An interrupted asynchronous spawn may have created a child without
     # returning its handle. Preserve STARTING and never make it retryable.

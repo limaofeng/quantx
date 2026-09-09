@@ -1,5 +1,6 @@
 """Offline, bounded and redacted access to one training execution's logs."""
 
+import hashlib
 import os
 import re
 import stat
@@ -30,6 +31,28 @@ def read_run_logs(state_root: Path, run_id: str, *, lines: int = 100) -> list[di
   if not 1 <= lines <= 1000:
     raise ValueError("RUN_LOG_LINES_INVALID")
   root = state_root / "control" / run_id
+  return _read_logs(root, {"run_id": run_id}, lines=lines)
+
+
+def read_preparation_logs(
+  state_root: Path, job_id: str, owner: str, *, lines: int = 100
+) -> list[dict]:
+  if not all(
+    re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value)
+    for value in (job_id, owner)
+  ):
+    raise ValueError("PREPARATION_LOG_ID_INVALID")
+  if not 1 <= lines <= 1000:
+    raise ValueError("RUN_LOG_LINES_INVALID")
+  attempt = hashlib.sha256(owner.encode()).hexdigest()
+  return _read_logs(
+    state_root / "preparation" / job_id / attempt,
+    {"job_id": job_id, "owner": owner},
+    lines=lines,
+  )
+
+
+def _read_logs(root: Path, identity: dict[str, str], *, lines: int) -> list[dict]:
   reject_links(root)
   if not root.is_dir():
     raise ValueError("RUN_LOG_NOT_FOUND")
@@ -57,7 +80,7 @@ def read_run_logs(state_root: Path, run_id: str, *, lines: int = 100) -> list[di
       raw = raw.partition(b"\n")[2]
     messages = raw.decode("utf-8", errors="replace").splitlines()[-lines:]
     result.extend(
-      {"run_id": run_id, "stream": name, "message": redact_text(message)}
+      {**identity, "stream": name, "message": redact_text(message)}
       for message in messages
     )
   return result

@@ -162,7 +162,7 @@ async def test_real_host_denial_exit_is_recorded_before_requeue(monkeypatch, tmp
   create = asyncio.create_subprocess_exec
 
   async def spawn(*args, **kwargs):
-    return await create(sys.executable, "-c", "raise SystemExit(75)", **kwargs)
+    return await create(sys.executable, "-c", "import sys; print('GPU preparation'); print('token=private', file=sys.stderr); raise SystemExit(75)", **kwargs)
 
   monkeypatch.setattr(flow.asyncio, "create_subprocess_exec", spawn)
   config = SimpleNamespace(state_root=tmp_path, research_environment=lambda ambient: {})
@@ -174,6 +174,12 @@ async def test_real_host_denial_exit_is_recorded_before_requeue(monkeypatch, tmp
   )
   assert evidence["state"] == "EXITED"
   assert evidence["returncode"] == 75
+  from quantx_trainer.run_log import read_preparation_logs
+
+  rows = read_preparation_logs(tmp_path, "job", "owner")
+  assert {item["stream"] for item in rows} == {"stdout", "stderr"}
+  assert rows[0]["message"] == "GPU preparation"
+  assert rows[1]["message"] == "token=[REDACTED]"
 
 
 @pytest.mark.asyncio

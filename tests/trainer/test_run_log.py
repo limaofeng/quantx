@@ -1,3 +1,4 @@
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -69,3 +70,37 @@ def test_run_logs_cli_stays_offline_and_reports_safe_error(
   assert main.main(["logs", "--config", "unused", "--run-id", "../private"]) == 3
   output = capsys.readouterr()
   assert output.out == "" and "private" not in output.err
+
+
+def test_preparation_logs_select_exact_attempt(tmp_path, monkeypatch, capsys):
+  for owner in ("first", "second"):
+    root = tmp_path / "preparation" / "job" / hashlib.sha256(owner.encode()).hexdigest()
+    root.mkdir(parents=True)
+    (root / "stdout.log").write_text(owner + "\n")
+  rows = run_log.read_preparation_logs(tmp_path, "job", "first")
+  assert rows == [
+    {"job_id": "job", "owner": "first", "stream": "stdout", "message": "first"}
+  ]
+  config = SimpleNamespace(state_root=tmp_path, validate_runtime=Mock())
+  monkeypatch.setattr(main.TrainerConfig, "load", lambda path: config)
+  assert (
+    main.main(["logs", "--config", "unused", "--job-id", "job", "--owner", "second"])
+    == 0
+  )
+  assert json.loads(capsys.readouterr().out)["message"] == "second"
+  with pytest.raises(ValueError, match="NOT_FOUND"):
+    run_log.read_preparation_logs(tmp_path, "job", "missing")
+
+
+@pytest.mark.parametrize(
+  "args",
+  [
+    ["--job-id", "job"],
+    ["--owner", "owner"],
+    ["--job-id", "job", "--owner", "owner", "--run-id", "run"],
+  ],
+)
+def test_preparation_query_requires_unambiguous_identity(args):
+  with pytest.raises(SystemExit) as stopped:
+    main.main(["logs", "--config", "unused", *args])
+  assert stopped.value.code == 2

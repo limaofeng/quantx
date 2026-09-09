@@ -29,10 +29,17 @@ def main(argv: list[str] | None = None) -> int:
   )
   parser.add_argument("--config", type=Path, required=True)
   parser.add_argument("--run-id")
+  parser.add_argument("--job-id")
   parser.add_argument("--owner")
   parser.add_argument("--dataset-version")
   parser.add_argument("--lines", type=int, default=100)
   args = parser.parse_args(argv)
+  if args.job_id and args.command != "logs":
+    parser.error("--job-id is only supported by logs")
+  if args.command == "logs" and (
+    bool(args.job_id) != bool(args.owner) or (args.job_id and args.run_id)
+  ):
+    parser.error("preparation logs require --job-id and --owner, without --run-id")
   if args.command == "logs" and not 1 <= args.lines <= 1000:
     parser.error("logs --lines must be 1..1000 (per stream with --run-id)")
   if args.command == "publish-result" and (not args.run_id or not args.owner):
@@ -72,14 +79,20 @@ def main(argv: list[str] | None = None) -> int:
   if args.command == "logs":
     from quantx_infrastructure.training_bundle_store import BundleTransferError
 
-    from quantx_trainer.run_log import read_run_logs
+    from quantx_trainer.run_log import read_preparation_logs, read_run_logs
     from quantx_trainer.service_log import read_events
 
     try:
       events = (
-        read_run_logs(config.state_root, args.run_id, lines=args.lines)
-        if args.run_id
-        else read_events(config.state_root, lines=args.lines)
+        read_preparation_logs(
+          config.state_root, args.job_id, args.owner, lines=args.lines
+        )
+        if args.job_id
+        else (
+          read_run_logs(config.state_root, args.run_id, lines=args.lines)
+          if args.run_id
+          else read_events(config.state_root, lines=args.lines)
+        )
       )
       for event in events:
         print(json.dumps(event, sort_keys=True))

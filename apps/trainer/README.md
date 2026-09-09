@@ -248,7 +248,7 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 
 使用 `python -m quantx_trainer.main logs --config <同一配置绝对路径> --lines 100` 离线读取服务生命周期事件，行数范围为 1–1000。文件位于 `state_root/service/events.jsonl`，每个文件最多 1 MiB，保留三个轮转备份。事件仅包含时间、实例标识和固定阶段/失败代码，不收集配置、异常原文或任意输出；心跳刷新不重复写阶段事件。读取拒绝链接和非预期字段，损坏时返回稳定错误，不输出损坏原文。
 
-追加 `--run-id <训练运行标识>` 可离线读取 `state_root/control/<run-id>` 的 stdout/stderr。每个流最多读取尾部 128 KiB、返回 `--lines` 行，按流分别输出带 run_id、stream、message 的 JSON；不推断两个流的时间顺序。路径与凭据按共用规则脱敏，截断读取丢弃首条残行；路径穿越、链接、非普通文件和读取错误被拒绝。此入口查询训练任务日志，准备任务的独立尝试目录尚未接入同一查询。
+追加 `--run-id <训练运行标识>` 可离线读取 `state_root/control/<run-id>` 的 stdout/stderr。每个流最多读取尾部 128 KiB、返回 `--lines` 行，按流分别输出带 run_id、stream、message 的 JSON；不推断两个流的时间顺序。路径与凭据按共用规则脱敏，截断读取丢弃首条残行；路径穿越、链接、非普通文件和读取错误被拒绝。准备任务使用 `--job-id <任务标识> --owner <执行归属>`，不能同时传入 `--run-id`。Trainer 将准备子进程 stdout/stderr 保存至该归属的独立尝试目录，查询按归属哈希定位并复用相同限额及脱敏规则；输出包含 job_id 和 owner，不混合不同重试。历史已丢弃的准备输出无法补回。
 
 该入口查询服务生命周期日志；逐次计算的 stdout/stderr 仍位于对应运行控制目录，尚未统一到此查询入口。完整退出验收仍在实施中。
 
