@@ -1301,7 +1301,13 @@ async def ingest_uploaded_bar_request(
         start_ms=scope.start_ms,
         end_exclusive_ms=scope.end_exclusive_ms,
         **(
-          {"max_attempts": 1, "retry_delays": (), "progress": progress}
+          # Reserve the other service query slot for the local historical API.
+          {
+            "max_attempts": 1,
+            "retry_delays": (),
+            "progress": progress,
+            "concurrency": 1,
+          }
           if progress is not None
           else {}
         ),

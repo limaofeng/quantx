@@ -88,6 +88,24 @@ async def test_retry_only_failed_group_and_count_success_once(monkeypatch):
   assert result["attempts_by_group"] == {"A0/1m": 2, "A1/1m": 2, "A2/1m": 1, "A3/1m": 1}
 
 
+async def test_worker_reserves_a_query_slot_for_the_local_api(monkeypatch):
+  monkeypatch.setattr(v, "MARKET_DATA_READBACK_GROUP_CODES", 2)
+  active = peak = 0
+
+  async def read(_function, **kwargs):
+    nonlocal active, peak
+    active += 1
+    peak = max(peak, active)
+    await asyncio.sleep(0)
+    active -= 1
+    return {"records_verified": 4, "existing_rows_observed": 0}
+
+  monkeypatch.setattr(v, "_await_readback", read)
+  result = await verify([batch(f"A{i}") for i in range(6)], concurrency=1)
+  assert result["records_verified"] == 12
+  assert peak == 1
+
+
 @pytest.mark.parametrize("reason", ["cancel", "source", "query"])
 async def test_all_workers_join_before_failure_returns(monkeypatch, reason):
   monkeypatch.setattr(v, "MARKET_DATA_READBACK_GROUP_CODES", 2)

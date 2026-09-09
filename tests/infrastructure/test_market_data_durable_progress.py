@@ -115,6 +115,7 @@ async def test_restart_resumes_write_blocks_then_only_readback(
 
   async def verify(**kwargs):
     assert kwargs["max_attempts"] == 1 and kwargs["retry_delays"] == ()
+    assert kwargs["concurrency"] == 1
     batches = [batch async for batch in kwargs["expected_key_batches"]]
     reads.append(sum(len(batch.keys) for batch in batches))
     if len(reads) == 1:

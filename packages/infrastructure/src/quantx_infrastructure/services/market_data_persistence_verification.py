@@ -1013,6 +1013,7 @@ async def verify_persisted_bar_summaries(
   page_rows: int = MARKET_DATA_READBACK_PAGE_ROWS,
   sleep: Sleep = asyncio.sleep,
   progress: ReadbackProgress | None = None,
+  concurrency: int = MARKET_DATA_READBACK_CONCURRENCY,
 ) -> dict[str, Any]:
   """Prove every uploaded key exists after merge through uncached reads.
 
@@ -1024,6 +1025,12 @@ async def verify_persisted_bar_summaries(
 
   if max_attempts < 1:
     raise ValueError("max_attempts must be positive")
+  if (
+    isinstance(concurrency, bool)
+    or not isinstance(concurrency, int)
+    or not 1 <= concurrency <= MARKET_DATA_READBACK_CONCURRENCY
+  ):
+    raise ValueError("read-back concurrency is outside the service budget")
   if len(retry_delays) != max_attempts - 1 or any(delay < 0 for delay in retry_delays):
     raise ValueError("retry_delays must contain one non-negative delay per retry")
   expected_summaries = [_expected_summary(summary) for summary in code_summaries]
@@ -1124,7 +1131,7 @@ async def verify_persisted_bar_summaries(
         await drain_one()
       await verify_group(group)
       return
-    while len(active) >= MARKET_DATA_READBACK_CONCURRENCY:
+    while len(active) >= concurrency:
       await drain_one()
     active.add(asyncio.create_task(verify_group(group)))
 
