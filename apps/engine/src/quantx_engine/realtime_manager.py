@@ -20,6 +20,7 @@ import math
 from datetime import datetime, time, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
+from quantx_contracts.market_data_service import HistoryRead
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.data.unified_subscription_manager import (
   unified_subscription_manager,
@@ -32,6 +33,9 @@ from quantx_infrastructure.models.tick import Tick
 from quantx_infrastructure.services.divid_factor_service import DividFactorService
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
+)
+from quantx_infrastructure.services.local_market_data_client import (
+  LocalMarketDataClient,
 )
 from quantx_infrastructure.services.trading_time_service import TradingTimeService
 
@@ -380,6 +384,18 @@ class RealTimeDataManager:
       or 13 * 60 <= minutes <= 15 * 60
     )
 
+  async def _read_previous_daily_klines(self, stock_code, previous_trading_date):
+    client = LocalMarketDataClient()
+    try:
+      page = await client.read_history(HistoryRead(
+        instrument=stock_code, period="1d", trading_date=previous_trading_date, page_size=2,
+      ))
+      if len(page.records) > 1:
+        raise ValueError("previous daily close partition contains multiple rows")
+      return [KLine(**row) for row in page.records]
+    finally:
+      await client.close()
+
   async def _get_previous_daily_close(
     self, stock_code: str, tick_time: datetime
   ) -> Optional[float]:
@@ -394,17 +410,7 @@ class RealTimeDataManager:
       previous_trading_date = await self.trading_time_service.get_previous_trading_day(
         market, tick_date
       )
-      start_time = datetime.combine(previous_trading_date, time.min)
-      end_time = start_time + timedelta(days=1)
-      klines = await self.historical_market_data_service.get_kline_data(
-        stock_code=stock_code,
-        period="1d",
-        start_time=start_time,
-        end_time=end_time,
-        limit=None,
-        order="asc",
-        dividend_type="none",
-      )
+      klines = await self._read_previous_daily_klines(stock_code, previous_trading_date)
     except Exception as exc:
       logger.warning("查询昨日收盘日K失败: %s, %s", stock_code, exc)
       self.previous_daily_close_cache[cache_key] = {"close": None}

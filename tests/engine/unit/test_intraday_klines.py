@@ -747,14 +747,13 @@ async def test_tick_pre_close_uses_native_when_database_previous_close_missing(
   manager.divid_factor_service = FakeDividFactorService()
 
   class FakeHistoricalMarketDataService:
-    async def get_kline_data(self, **kwargs):
-      assert kwargs["stock_code"] == stock_code
-      assert kwargs["period"] == "1d"
-      assert kwargs["start_time"].date() == date(2026, 6, 3)
+    async def __call__(self, query_stock_code, previous_trading_date):
+      assert query_stock_code == stock_code
+      assert previous_trading_date == date(2026, 6, 3)
       return []
 
   monkeypatch.setattr(
-    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+    manager, "_read_previous_daily_klines", FakeHistoricalMarketDataService()
   )
 
   tick = _tick(
@@ -785,14 +784,13 @@ async def test_tick_pre_close_caches_native_fallback_and_logs_once(
   calls = {"count": 0}
 
   class FakeHistoricalMarketDataService:
-    async def get_kline_data(self, **kwargs):
+    async def __call__(self, query_stock_code, previous_trading_date):
       calls["count"] += 1
-      assert kwargs["stock_code"] == stock_code
-      assert kwargs["period"] == "1d"
+      assert query_stock_code == stock_code
       return []
 
   monkeypatch.setattr(
-    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+    manager, "_read_previous_daily_klines", FakeHistoricalMarketDataService()
   )
 
   first_tick = _tick(
@@ -839,10 +837,9 @@ async def test_tick_pre_close_uses_database_previous_daily_close(monkeypatch):
   manager.divid_factor_service = FakeDividFactorService()
 
   class FakeHistoricalMarketDataService:
-    async def get_kline_data(self, **kwargs):
-      assert kwargs["stock_code"] == stock_code
-      assert kwargs["period"] == "1d"
-      assert kwargs["start_time"].date() == date(2026, 6, 3)
+    async def __call__(self, query_stock_code, previous_trading_date):
+      assert query_stock_code == stock_code
+      assert previous_trading_date == date(2026, 6, 3)
       return [
         KLine(
           stock_code=stock_code,
@@ -877,7 +874,7 @@ async def test_tick_pre_close_uses_database_previous_daily_close(monkeypatch):
       ]
 
   monkeypatch.setattr(
-    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+    manager, "_read_previous_daily_klines", FakeHistoricalMarketDataService()
   )
 
   tick = _tick(
@@ -908,10 +905,9 @@ async def test_tick_pre_close_uses_database_yesterday_close_not_today_pre_close(
   )
 
   class FakeHistoricalMarketDataService:
-    async def get_kline_data(self, **kwargs):
-      assert kwargs["stock_code"] == stock_code
-      assert kwargs["period"] == "1d"
-      assert kwargs["start_time"].date() == date(2026, 6, 4)
+    async def __call__(self, query_stock_code, previous_trading_date):
+      assert query_stock_code == stock_code
+      assert previous_trading_date == date(2026, 6, 4)
       return [
         KLine(
           stock_code=stock_code,
@@ -946,7 +942,7 @@ async def test_tick_pre_close_uses_database_yesterday_close_not_today_pre_close(
       ]
 
   monkeypatch.setattr(
-    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+    manager, "_read_previous_daily_klines", FakeHistoricalMarketDataService()
   )
 
   tick = _tick(
@@ -973,10 +969,9 @@ async def test_tick_pre_close_does_not_use_stale_older_daily_close(monkeypatch):
   manager.divid_factor_service = FakeDividFactorService()
 
   class FakeHistoricalMarketDataService:
-    async def get_kline_data(self, **kwargs):
-      assert kwargs["stock_code"] == stock_code
-      assert kwargs["period"] == "1d"
-      assert kwargs["start_time"].date() == date(2026, 6, 4)
+    async def __call__(self, query_stock_code, previous_trading_date):
+      assert query_stock_code == stock_code
+      assert previous_trading_date == date(2026, 6, 4)
       return [
         KLine(
           stock_code=stock_code,
@@ -996,7 +991,7 @@ async def test_tick_pre_close_does_not_use_stale_older_daily_close(monkeypatch):
       ]
 
   monkeypatch.setattr(
-    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+    manager, "_read_previous_daily_klines", FakeHistoricalMarketDataService()
   )
 
   tick = _tick(

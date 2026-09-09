@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import datetime
 
 import httpx
 from quantx_contracts.history_collection_api import (
@@ -10,6 +11,7 @@ from quantx_contracts.history_collection_api import (
   HistoryCollectionResult,
   HistoryCollectionSubmission,
 )
+from quantx_contracts.market_data_service import HistoryPage, HistoryRead
 
 
 class LocalMarketDataClient:
@@ -69,3 +71,31 @@ class LocalMarketDataClient:
 
   async def close(self):
     await self.client.aclose()
+
+  async def read_history(self, request: HistoryRead) -> HistoryPage:
+    value = await self._json(
+      "GET",
+      "/market-data/internal/v1/history",
+      params=request.model_dump(mode="json", exclude_none=True),
+    )
+    page = HistoryPage.model_validate(value)
+    if len(page.records) > request.page_size or page.exhausted != (not page.records):
+      raise ValueError("local history page count mismatch")
+    start, end = request.bounds()
+    previous = request.after
+    for row in page.records:
+      stamp = datetime.fromisoformat(str(row.get("time")).replace("Z", "+00:00"))
+      if (
+        stamp.tzinfo is None
+        or not start <= stamp < end
+        or previous is not None
+        and stamp <= previous
+        or row.get("stock_code") != request.instrument
+        or row.get("period") != request.period
+      ):
+        raise ValueError("local history page scope mismatch")
+      previous = stamp
+      row["time"] = stamp
+    if page.next_after != (previous if page.records else None):
+      raise ValueError("local history page cursor mismatch")
+    return page

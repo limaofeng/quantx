@@ -159,3 +159,73 @@ async def test_result_endpoint_rejects_oversized_audit(store):
       )
       assert response.status_code == 503
       assert response.json()["detail"] == "HISTORY_RESULT_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("invalid", [None, "code", "day", "cursor"])
+async def test_history_page_is_bound_to_partition_and_cursor(invalid):
+  from datetime import date
+
+  from quantx_contracts.market_data_service import HistoryRead
+
+  stamp = "2026-06-02T16:00:00Z"
+  row = {"stock_code": "000001.SZ", "period": "1d", "time": stamp, "close": 12.98}
+  if invalid == "code":
+    row["stock_code"] = "600000.SH"
+  if invalid == "day":
+    row["time"] = "2026-06-03T16:00:00Z"
+  body = {
+    "records": [row],
+    "next_after": "2026-06-02T16:01:00Z" if invalid == "cursor" else row["time"],
+    "exhausted": False,
+  }
+
+  def handler(request):
+    assert request.url.params["trading_date"] == "2026-06-03"
+    assert request.url.params["page_size"] == "2"
+    return httpx.Response(200, json=body)
+
+  client = LocalMarketDataClient(
+    transport=httpx.MockTransport(handler), token="internal"
+  )
+  query = HistoryRead(
+    instrument="000001.SZ", period="1d", trading_date=date(2026, 6, 3), page_size=2
+  )
+  try:
+    if invalid:
+      with pytest.raises(ValueError):
+        await client.read_history(query)
+    else:
+      page = await client.read_history(query)
+      assert page.records[0]["time"] == page.next_after
+  finally:
+    await client.close()
+
+
+async def test_engine_previous_daily_read_uses_local_api(store, monkeypatch):
+  from datetime import date, datetime, timezone
+
+  from quantx_contracts.market_data_service import HistoryPage
+  from quantx_engine import realtime_manager as module
+
+  stamp = datetime(2026, 6, 2, 16, tzinfo=timezone.utc)
+  reader = SimpleNamespace(
+    read=AsyncMock(
+      return_value=HistoryPage(
+        records=[
+          {"stock_code": "000001.SZ", "period": "1d", "time": stamp, "close": 12.98}
+        ],
+        next_after=stamp,
+        exhausted=False,
+      )
+    )
+  )
+  app = create_app(store=store, token="internal", reader=reader)
+  async with app.router.lifespan_context(app):
+    client = LocalMarketDataClient(transport=httpx.ASGITransport(app), token="internal")
+    monkeypatch.setattr(module, "LocalMarketDataClient", lambda: client)
+    manager = module.RealTimeDataManager.__new__(module.RealTimeDataManager)
+    values = await manager._read_previous_daily_klines("000001.SZ", date(2026, 6, 3))
+    assert values[0].close == 12.98 and values[0].time == stamp
+    assert client.client.is_closed
+    query = reader.read.call_args.args[0]
+    assert query.period == "1d" and query.trading_date == date(2026, 6, 3)
