@@ -8,10 +8,16 @@ business-table reads, task claiming, deployment registration or capability write
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
 
 from quantx_trainer.config import TrainerConfig
+from quantx_trainer.runtime_permissions import (
+  RuntimePermissionsError,
+  check_runtime_permissions,
+)
 
 
 class TrainerPreflightError(RuntimeError):
@@ -201,6 +207,12 @@ async def check_prefect(config: TrainerConfig) -> None:
 
 
 async def preflight(config: TrainerConfig) -> dict[str, str]:
+  try:
+    await asyncio.to_thread(
+      check_runtime_permissions, config.code_root, Path(sys.prefix)
+    )
+  except RuntimePermissionsError as exc:
+    raise TrainerPreflightError(str(exc)) from None
   # Do not contact Prefect if database identity or privilege isolation is wrong.
   await check_database(config)
   await check_prefect(config)

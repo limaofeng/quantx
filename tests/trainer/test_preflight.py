@@ -15,7 +15,9 @@ from quantx_trainer.preflight import (
 
 
 @pytest.fixture
-def config(tmp_path):
+def config(tmp_path, monkeypatch):
+  # Control-plane unit tests do not inspect the test interpreter ACLs.
+  monkeypatch.setattr(module, "check_runtime_permissions", lambda *args: None)
   return TrainerConfig(
     environment="development",
     code_root=tmp_path / "code",

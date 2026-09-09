@@ -65,13 +65,17 @@ conda run -n quantx-train quantx-trainer-config-check --config D:\QuantXTraining
 
 子进程环境采用系统必需变量白名单，显式设置开发目标及关闭实盘门，不继承券商参数、设备密钥、生产环境文件或 Python 搜索路径。后续进程启动必须使用完整的该环境映射，不能与父进程环境再次合并。
 
-## 控制面只读预检
+## 运行权限与控制面只读预检
 
 ```powershell
 conda run -n quantx-train quantx-trainer preflight --config D:\QuantXTraining\trainer.toml
 ```
 
-先执行相同的本地校验，再用配置中指定的角色连接开发 PostgreSQL，以只读事务查询系统目录。实际数据库、登录角色必须匹配配置；拒绝超级用户、数据库所有者、建库/建角色/复制/RLS 绕过、角色成员身份、数据库 CREATE/TEMP、schema CREATE、可执行的业务 SECURITY DEFINER 函数、序列和其他数据库 CONNECT 权限。
+先执行相同的本地校验。Windows 随后按当前进程 token 检查代码目录和实际 Conda 前缀内全部文件/目录的有效 ACL，并检查直至卷根的父目录。禁止写入、删除、修改 ACL/所有者及父目录替换权限，拒绝符号链接/junction 和可绕过保护的危险 token 权限（包括当前禁用但可启用的权限）；任何读取失败均拒绝。此检查只读，不修改账户或 ACL，不创建测试文件；macOS 开发不执行 Windows ACL 检查。离线日志、状态和停止请求仍可使用，停止后的数据库恢复仍需完整预检。
+
+部署账户需在启动前完成代码与依赖保护；状态目录单独授予运行身份写权限，祖先目录不能允许替换代码/环境。Conda 硬链接共享同一文件 ACL，部署时须确认与包缓存及其他环境的关系，不能盲目修改权限。预检仅观察当前身份和当时的 ACL，不阻止部署管理员随后改动，也不能替代排空后升级或完整运行端冻结验收。
+
+本地权限检查通过后，再用配置中指定的角色连接开发 PostgreSQL，以只读事务查询系统目录。实际数据库、登录角色必须匹配配置；拒绝超级用户、数据库所有者、建库/建角色/复制/RLS 绕过、角色成员身份、数据库 CREATE/TEMP、schema CREATE、可执行的业务 SECURITY DEFINER 函数、序列和其他数据库 CONNECT 权限。
 
 训练角色的有效表权限必须精确为下表，且不具有所有权或授权转授能力。列级授权也参与检查，其他业务表（含交易与模型发布表）不能有读写权限：
 
