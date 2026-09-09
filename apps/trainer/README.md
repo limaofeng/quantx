@@ -175,4 +175,4 @@ conda run -n quantx-train python -m quantx_trainer.main publish-dataset --config
 
 命令重新核验认证证据，发布并读回 bundle 后，才登记不可替换的 `source_bundle`。迁移 `20260910_0074` 与开发角色的数据集 UPDATE 权限必须先由运维应用；本地尚未部署。旧数据集缺失传输清单时不可训练，需要先完成发布。准备流程自动发布与持久化交接仍待接入。
 
-调度领取后按清单从受限 SFTP 拉取至 `state_root/dataset-cache/<bundle_id>`，逐文件校验后原子完成，再核对认证清单与数据库投影，成功后才启动 Research。磁盘保留空间来自主机策略；下载和核验共享运行归属/取消/心跳监督，部分文件可供后续重试复用。最终评估按父运行的 `artifact_bundle` 自动下载至 `state_root/parent-cache/<bundle_id>`，校验数据库 manifest 哈希、父运行身份和 Research 内部文件清单后传给计算子进程。Research 以认证清单和开发锁核验父制品，不再要求目录名等于 run_id。输入准备阶段进程突然退出后的自动恢复与跨机器验收尚未完成。
+调度领取后按清单从受限 SFTP 拉取至 `state_root/dataset-cache/<bundle_id>`，逐文件校验后原子完成，再核对认证清单与数据库投影，成功后才启动 Research。磁盘保留空间来自主机策略；下载和核验共享运行归属/取消/心跳监督，部分文件可供后续重试复用。最终评估按父运行的 `artifact_bundle` 自动下载至 `state_root/parent-cache/<bundle_id>`，校验数据库 manifest 哈希、父运行身份和 Research 内部文件清单后传给计算子进程。Research 以认证清单和开发锁核验父制品，不再要求目录名等于 run_id。输入阶段建立按执行归属隔离的监督者/请求记录，后续调度只有在监督者确定退出、没有任何计算进程记录、数据库仍为原归属 PREFLIGHT 且尚无进度时才重新排队；已有取消请求则收敛为 CANCELLED。新领取复用完整/部分缓存并保留旧诊断证据。领取提交至证据落盘之间的间隙、常驻监督进程内异常的自动恢复与跨机器验收尚未完成。

@@ -39,6 +39,7 @@ from quantx_infrastructure.training_host_guard import (
 from quantx_infrastructure.training_process_evidence import (
   begin_execution,
   inspect_execution,
+  inspect_input_preparation,
   record_exit,
   record_spawn,
 )
@@ -673,6 +674,11 @@ def _stable_research_run_key(result: Mapping[str, Any]) -> str | None:
   return hashlib.sha256(f"{study_id}\0{version}\0{research_id}".encode("utf-8")).hexdigest()
 
 
+def _input_preparation_paths(directory: Path, owner: str) -> tuple[Path, Path]:
+  key = hashlib.sha256(owner.encode("utf-8")).hexdigest()
+  return directory / f"input-{key}.json", directory / f"input-{key}.request.json"
+
+
 async def recover_lost_training_runs(repository: Any, *, now: datetime | None = None) -> list[str]:
   """Converge only stopped supervisor/Research identities; unknown evidence stays pending."""
 
@@ -690,6 +696,21 @@ async def recover_lost_training_runs(repository: Any, *, now: datetime | None = 
       continue
     directory = control_root() / run_id
     owner = str(_value(row, "prefect_flow_run_id", "") or "")
+    preparation, preparation_request = _input_preparation_paths(directory, owner)
+    # A compute STARTING record includes the ambiguous spawn gap and always
+    # prevents input-only recovery, even if the process dictionary is empty.
+    if not os.path.lexists(directory / "process.json") and preparation.exists():
+      input_state = await asyncio.to_thread(
+        inspect_input_preparation, preparation, run_id=run_id, owner=owner,
+        request=preparation_request,
+      )
+      if input_state == "EXITED":
+        try:
+          await repository.requeue_stopped_input_preparation(run_id, expected_flow_run_id=owner)
+          lost.append(run_id)
+        except TrainingStateConflict:
+          pass
+      continue
     state = await asyncio.to_thread(
       inspect_execution, directory / "process.json",
       run_id=run_id, owner=owner, request=directory / "request.json",
@@ -737,6 +758,9 @@ async def _run_claimed_job(
   child_started = False
   try:
     control_directory = _control_directory(run_id)
+    preparation, preparation_request = _input_preparation_paths(control_directory, execution_owner)
+    _write_json(preparation_request, {"run_id": run_id, "owner": execution_owner})
+    begin_execution(preparation, run_id=run_id, owner=execution_owner, request=preparation_request)
     try:
       files = await load_dataset(
         current_config(), repository, dataset, run_id=run_id, owner=execution_owner,

@@ -38,6 +38,29 @@ def supervisor_gone(monkeypatch, path):
   monkeypatch.setattr(evidence.psutil, "Process", inspect)
 
 
+def test_input_preparation_tracks_real_supervisor_lifetime(tmp_path):
+  request = tmp_path / "input.request.json"
+  request.write_text("{}")
+  path = tmp_path / "input.json"
+  code = "from pathlib import Path; import sys,time; from quantx_infrastructure.training_process_evidence import begin_execution; begin_execution(Path(sys.argv[1]),run_id='run',owner='owner',request=Path(sys.argv[2])); print('ready',flush=True); time.sleep(30)"
+  process = subprocess.Popen([sys.executable, "-c", code, str(path), str(request)], stdout=subprocess.PIPE, text=True)
+  try:
+    assert process.stdout.readline().strip() == "ready"
+    args = dict(run_id="run", owner="owner", request=request)
+    assert evidence.inspect_input_preparation(path, **args) == "LIVE"
+    process.terminate()
+    process.wait(timeout=5)
+    assert evidence.inspect_input_preparation(path, **args) == "EXITED"
+    # The same record cannot justify restarting a possibly spawned child.
+    assert evidence.inspect_execution(path, **args) == "UNKNOWN"
+    request.write_text("changed")
+    assert evidence.inspect_input_preparation(path, **args) == "UNKNOWN"
+  finally:
+    if process.poll() is None:
+      process.terminate()
+    process.wait(timeout=5)
+
+
 def test_live_orphan_is_not_lost_after_supervisor_restart(execution, monkeypatch):
   path, args, process = execution
   supervisor_gone(monkeypatch, path)

@@ -1375,6 +1375,28 @@ class StockSelectionTrainingRepository:
     await self.db.refresh(row)
     return _normalize_row_timestamps(row)
 
+  async def requeue_stopped_input_preparation(
+    self, run_id: str, *, expected_flow_run_id: str,
+  ) -> StockSelectionTrainingRun:
+    """Resume an input-only attempt after its supervisor is proven stopped."""
+    row = await self._locked_run(run_id)
+    if row is None:
+      raise TrainingNotFound("training run does not exist")
+    self._assert_execution_owner(row, expected_flow_run_id)
+    if (row.status != "RUNNING" or row.artifact_bundle is not None
+        or row.phase != "PREFLIGHT" or row.completed_units != 0):
+      raise TrainingStateConflict("input preparation no longer owns a running job")
+    if row.cancel_requested_at is not None:
+      return await self.mark_cancelled(run_id, expected_flow_run_id=expected_flow_run_id)
+    row.status = "QUEUED"
+    row.phase = "PREFLIGHT"
+    row.prefect_flow_run_id = None
+    row.execution_heartbeat_at = None
+    row.started_at = None
+    row.state_version += 1
+    await self.db.commit()
+    return row
+
   async def record_artifact_bundle(
     self, run_id: str, *, expected_flow_run_id: str, bundle: TrainingBundle,
   ) -> StockSelectionTrainingRun:

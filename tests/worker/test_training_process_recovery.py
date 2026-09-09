@@ -11,6 +11,26 @@ def training_configuration(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("state,compute", [("LIVE", False), ("UNKNOWN", False), ("EXITED", False), ("EXITED", True)])
+async def test_input_recovery_requires_stopped_supervisor_and_no_spawn_evidence(monkeypatch, tmp_path, state, compute):
+  directory = tmp_path / "run-1"
+  directory.mkdir()
+  preparation, request = flow._input_preparation_paths(directory, "owner")
+  preparation.write_text("evidence")
+  if compute:
+    (directory / "process.json").write_text("ambiguous spawn")
+  repo = SimpleNamespace(list_runs=AsyncMock(return_value=[SimpleNamespace(run_id="run-1", prefect_flow_run_id="owner")]),
+                         requeue_stopped_input_preparation=AsyncMock(), fail_run=AsyncMock())
+  monkeypatch.setattr(flow, "control_root", lambda: tmp_path)
+  monkeypatch.setattr(flow, "inspect_input_preparation", lambda *args, **kwargs: state)
+  monkeypatch.setattr(flow, "inspect_execution", lambda *args, **kwargs: "UNKNOWN")
+  recovered = await flow.recover_lost_training_runs(repo)
+  assert recovered == (["run-1"] if state == "EXITED" and not compute else [])
+  assert repo.requeue_stopped_input_preparation.await_count == len(recovered)
+  repo.fail_run.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_empty_process_dictionary_does_not_prove_running_job_was_lost(
   monkeypatch, tmp_path
 ):

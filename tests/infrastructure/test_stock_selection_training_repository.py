@@ -140,6 +140,31 @@ async def test_execution_capability_requires_fresh_certificate(age):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_input_requeue_is_owner_fenced_and_preserves_cancellation(session_factory, cancel):
+  async with session_factory() as db:
+    repo = StockSelectionTrainingRepository(db)
+    await repo.certify_dataset(DATASET)
+    spec = await repo.create_spec(spec_values())
+    await repo.create_run(run_values(spec.spec_id, "input-run", "input-idem"))
+    row = await repo.claim_next_queued("old-owner")
+    with pytest.raises(TrainingStateConflict):
+      await repo.requeue_stopped_input_preparation(row.run_id, expected_flow_run_id="wrong-owner")
+    if cancel:
+      row = await repo.request_cancel(row.run_id, expected_state_version=row.state_version, idempotency_key="input-cancel")
+    recovered = await repo.requeue_stopped_input_preparation(row.run_id, expected_flow_run_id="old-owner")
+    assert recovered.status == ("CANCELLED" if cancel else "QUEUED")
+    if not cancel:
+      assert recovered.prefect_flow_run_id is None
+      assert recovered.execution_heartbeat_at is None
+      claimed = await repo.claim_next_queued("new-owner")
+      assert claimed.run_id == "input-run"
+      assert claimed.prefect_flow_run_id == "new-owner"
+      with pytest.raises(TrainingStateConflict):
+        await repo.requeue_stopped_input_preparation("input-run", expected_flow_run_id="old-owner")
+
+
+@pytest.mark.asyncio
 async def test_dataset_bundle_registration_is_immutable(session_factory):
   bundle = TrainingBundle(schema_version=1, kind="DATASET", source_id="dataset-v1", files=[
     BundleFile(path=name, size=1, sha256="a" * 64)

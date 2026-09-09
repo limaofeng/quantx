@@ -177,6 +177,19 @@ def inspect_execution(
     return "UNKNOWN"
 
 
+def inspect_input_preparation(
+  path: Path, *, run_id: str, owner: str, request: Path,
+) -> ProcessState:
+  """Inspect a supervisor-only stage; caller must exclude any compute record."""
+  try:
+    value = _read(path, run_id, owner, request)
+    if value["state"] != "STARTING" or not isinstance(value.get("supervisor"), dict):
+      return "UNKNOWN"
+    return _identity_state(value["supervisor"])
+  except Exception:
+    return "UNKNOWN"
+
+
 def local_success_recorded(path: Path, *, run_id: str, owner: str, request: Path) -> bool:
   """Current supervisor may publish its recorded, successfully exited child."""
   try:
