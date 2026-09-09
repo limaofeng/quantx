@@ -1025,8 +1025,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   证据 `.codex_screenshots/p6-legacy-consumer-recovery.log`；这是实际消费者代码配 SQLite、
   合成时钟和内存端点的验证，不是完整 Engine 进程或生产并发验收。
   同时 API 清单准备→确认→排空回归 **4 项通过**，证据 `p6-legacy-consumer-api-regression.log`。
-  下一步补锁定后按 challenge ID 找回原命令的只读入口，再完成原生界面和排空后终结/
-  解除旧绑定整链；客户端仍保持未知阻断，不开放新源准入。
+  锁定后只读恢复已贯通 API→Apollo→原生 Store：保留 challenge ID 而不保留令牌，
+  按原用户/设备、签名和精确命令引用查询未消费/过期/已消费状态；找回命令后仍读取审计
+  才显示完成。未消费但未过期不解除未知阻断，仅服务端证明未消费且已过期才允许重新准备。
+  首次消费现于拿齐锁后重新采样服务端时间，拒绝沿用等待锁前的旧时刻消费已过期凭据。
+  **6 项 API、27 项原生模拟器测试通过**，含引用错绑、设备变化、旧时刻与锁定后恢复；
+  证据 `p6-legacy-readonly-recovery-final.log`、`p6-legacy-recovery-ios-tests.log`。
+  实际 Caddy 生成 Web/iOS 契约，check/lint/build 及 Web **895 项通过**；额外契约回归
+  8 passed/1 failed 仍为既有 historyDownloadSettings 描述缺失。证据统一位于
+  `.codex_screenshots/p6-legacy-recovery-*`，未执行真实维护或交易。
+  下一步完成原生可操作界面和排空后终结/解除旧绑定整链；不开放新源准入。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

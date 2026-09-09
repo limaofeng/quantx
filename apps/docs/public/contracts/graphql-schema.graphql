@@ -5231,6 +5231,9 @@ type Query {
   """当前独立 LIVE 做 T 执行的人工确认队列"""
   tAssistantLiveApprovalQueue(accountId: String!): TAssistantLiveApprovalQueue!
 
+  """原设备锁定后按确认 ID 找回处理状态，不返回或重新签发令牌"""
+  tAssistantLegacyConfirmationStatus(challengeId: String!): TAssistantLegacyConfirmationStatus!
+
   """读取维护命令及持久化审计；入队不代表排空完成"""
   tAssistantLegacyMaintenanceOperation(accountId: String!, commandId: String!): TAssistantLegacyMaintenanceOperation!
 
@@ -7409,6 +7412,13 @@ type Subscription {
 
   """订阅策略运行实例的 K线 数据"""
   strategyKlines(runId: String!, periods: [String!] = null): StrategyKLineData!
+}
+
+type TAssistantLegacyConfirmationStatus {
+  challengeId: String!
+  request: JSON!
+  status: String!
+  engineCommandId: String
 }
 
 type TAssistantLegacyDrainPreview {

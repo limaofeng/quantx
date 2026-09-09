@@ -153,6 +153,7 @@
 		7B2ED07D526CFC32B9A88B9E /* OperationResult.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF139BA35828514CE1323AD8 /* OperationResult.graphql.swift */; };
 		7B68005C0D0F3AFA4C74F51F /* Assistants.graphql in Resources */ = {isa = PBXBuildFile; fileRef = 466E2605EC4F5AF6F7DD4ED1 /* Assistants.graphql */; };
 		7C310090169545FE11A54D86 /* WatchlistGroup.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93DBF604206CD2EEAA7ABB01 /* WatchlistGroup.graphql.swift */; };
+		7C90F291245BAABC85833080 /* IOSTAssistantLegacyConfirmationStatusQuery.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 959E2EEA0F4EF8A84ACAA178 /* IOSTAssistantLegacyConfirmationStatusQuery.graphql.swift */; };
 		7C98647E42A1EC078CD66E4F /* IOSPauseTTradeEntriesMutation.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 066F63EAFCC59B562F281079 /* IOSPauseTTradeEntriesMutation.graphql.swift */; };
 		7DC2042FBD0C81D05D081FC5 /* TAssistantRelease.graphql in Resources */ = {isa = PBXBuildFile; fileRef = 2B73CE2454F64AF8B5F864E9 /* TAssistantRelease.graphql */; };
 		7E2C9E78D8BD4150A49F3B46 /* MarketRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9481A5996F081D8D2A72CAD1 /* MarketRepository.swift */; };
@@ -171,6 +172,7 @@
 		87A549A23C7317E3A3C05EC8 /* ManualTradingStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3467A839A8C2E8AA3A7EA8D6 /* ManualTradingStoreTests.swift */; };
 		87EDDA39283A96634BB0D90B /* ManualOrderRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FC787147D65FAE39733DED /* ManualOrderRepository.swift */; };
 		887AA59AD48CA6D4A984B00C /* Instrument.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96FF17B42355A5C9143CBBD1 /* Instrument.graphql.swift */; };
+		88B3CF9B19B6F4DE865BB71A /* TAssistantLegacyConfirmationStatus.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = B365F34C8CED26F23202179E /* TAssistantLegacyConfirmationStatus.graphql.swift */; };
 		890FAAB3CF3971B2614C8FEC /* IOSConfirmExitPlanAuthorizationMutation.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D20B3017BD275A7BD25A04A /* IOSConfirmExitPlanAuthorizationMutation.graphql.swift */; };
 		89CF49E03A235E232C0EB577 /* StrategyModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C33576B4C9448633F332BA77 /* StrategyModels.swift */; };
 		8AC1DF055A97A6CF31EC0A66 /* NotificationRouteType.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54DF8E58F6DF50219AF74DFF /* NotificationRouteType.graphql.swift */; };
@@ -549,6 +551,7 @@
 		93F71924CC8F5CA2F97F4FCE /* PushCategory.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCategory.graphql.swift; sourceTree = "<group>"; };
 		94409C8050FBEB0BD21B3493 /* TTradeSignalDataHealth.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TTradeSignalDataHealth.graphql.swift; sourceTree = "<group>"; };
 		9481A5996F081D8D2A72CAD1 /* MarketRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarketRepository.swift; sourceTree = "<group>"; };
+		959E2EEA0F4EF8A84ACAA178 /* IOSTAssistantLegacyConfirmationStatusQuery.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSTAssistantLegacyConfirmationStatusQuery.graphql.swift; sourceTree = "<group>"; };
 		95EEF89F84E9F8748483909F /* ManualOrderModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualOrderModels.swift; sourceTree = "<group>"; };
 		9624BBC7D38466AD3F6DBA62 /* IOSAccountControlSafetyQuery.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSAccountControlSafetyQuery.graphql.swift; sourceTree = "<group>"; };
 		96FF17B42355A5C9143CBBD1 /* Instrument.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instrument.graphql.swift; sourceTree = "<group>"; };
@@ -586,6 +589,7 @@
 		B1AA703B622DF3EC7967FD01 /* SessionTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTokens.swift; sourceTree = "<group>"; };
 		B26F22F2D8BC7D118281AE37 /* DataFreshnessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataFreshnessView.swift; sourceTree = "<group>"; };
 		B29D74CE7E77C36B8DAB5FA4 /* StrategyControlPreviewResult.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrategyControlPreviewResult.graphql.swift; sourceTree = "<group>"; };
+		B365F34C8CED26F23202179E /* TAssistantLegacyConfirmationStatus.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TAssistantLegacyConfirmationStatus.graphql.swift; sourceTree = "<group>"; };
 		B407AA91635C841A6761465A /* IOSMarketQuoteUpdatesSubscription.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSMarketQuoteUpdatesSubscription.graphql.swift; sourceTree = "<group>"; };
 		B4C65B7299817F891C0FD0B9 /* StrategyControlPreview.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrategyControlPreview.graphql.swift; sourceTree = "<group>"; };
 		B4CC52006E925F5BCD11B18B /* PageInfo.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageInfo.graphql.swift; sourceTree = "<group>"; };
@@ -943,6 +947,7 @@
 				6AD60B705740655E8C902F56 /* IOSPositionsQuery.graphql.swift */,
 				5F27112FC5650F387AFCE23C /* IOSStrategyInstanceMobileParametersQuery.graphql.swift */,
 				7ED1D88EA788E2312194ED71 /* IOSStrategyInstancesQuery.graphql.swift */,
+				959E2EEA0F4EF8A84ACAA178 /* IOSTAssistantLegacyConfirmationStatusQuery.graphql.swift */,
 				834724841D331A47B9A01478 /* IOSTAssistantLegacyMaintenanceOperationQuery.graphql.swift */,
 				571412A464CD5884542B4981 /* IOSTAssistantLiveReleaseOperationsQuery.graphql.swift */,
 				6114ED911FEBD98B253BC3EC /* IOSTAssistantLiveReleaseStatusQuery.graphql.swift */,
@@ -1312,6 +1317,7 @@
 				38C7540848144344AFB92C8E /* StrategyInstanceMobileParameters.graphql.swift */,
 				973219C7B7B492ED22D5C3B5 /* StrategyMobileParameter.graphql.swift */,
 				48F0AC33BE2478A2AA704E50 /* Subscription.graphql.swift */,
+				B365F34C8CED26F23202179E /* TAssistantLegacyConfirmationStatus.graphql.swift */,
 				D01C6BEBBD8330FCE977CCA2 /* TAssistantLegacyDrainPreview.graphql.swift */,
 				BEB9F6FA90BB8C36C77796AA /* TAssistantLegacyMaintenanceOperation.graphql.swift */,
 				1A484C76C1E5D6D3F4E72035 /* TAssistantLegacyMaintenanceResult.graphql.swift */,
@@ -1624,6 +1630,7 @@
 				B6B3EDB6E99E713832821C5F /* IOSSaveWatchlistItemMutation.graphql.swift in Sources */,
 				A6542E1C449BE890BE400BD9 /* IOSStrategyInstanceMobileParametersQuery.graphql.swift in Sources */,
 				93B7A44CE781C4AB4661776C /* IOSStrategyInstancesQuery.graphql.swift in Sources */,
+				7C90F291245BAABC85833080 /* IOSTAssistantLegacyConfirmationStatusQuery.graphql.swift in Sources */,
 				9A3511DF171A617BADEC833A /* IOSTAssistantLegacyMaintenanceOperationQuery.graphql.swift in Sources */,
 				1C1EE7527AA7E22C89548C59 /* IOSTAssistantLiveReleaseOperationsQuery.graphql.swift in Sources */,
 				196F19CE920E48D6B6332C0E /* IOSTAssistantLiveReleaseStatusQuery.graphql.swift in Sources */,
@@ -1740,6 +1747,7 @@
 				F267F88460DF8BA6F1A6FB7F /* StrategyRunStatus.graphql.swift in Sources */,
 				4DFE8CA95047CD0953519C5D /* StrategyWorkspace.swift in Sources */,
 				B382BCDF9652E103F2846689 /* Subscription.graphql.swift in Sources */,
+				88B3CF9B19B6F4DE865BB71A /* TAssistantLegacyConfirmationStatus.graphql.swift in Sources */,
 				CF9702FF6E6D1E4174A0DBB4 /* TAssistantLegacyDrainPreview.graphql.swift in Sources */,
 				AA1D251923C97912437BB41D /* TAssistantLegacyDrainRequest.graphql.swift in Sources */,
 				2F53875DDCFAAAC3110DCFD3 /* TAssistantLegacyInventoryRequest.graphql.swift in Sources */,

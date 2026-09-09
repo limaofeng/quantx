@@ -407,6 +407,46 @@ final class TTradeControlStoreTests: XCTestCase {
     XCTAssertNil(harness.store.legacyScope)
   }
 
+  func testLegacyUnknownConfirmationCanRecoverAfterLocalLockWithoutToken() async throws {
+    let legacy = LegacyMaintenanceSpy()
+    let harness = await makeHarness(legacyRepository: legacy)
+    try await harness.store.prepareLegacyInventory(legacy.scope)
+    try await harness.store.refreshLegacyStatus()
+    try await harness.store.previewLegacyDrain(windowStart: legacy.now.addingTimeInterval(-1), windowEnd: legacy.now.addingTimeInterval(120))
+    let identity = harness.store.legacyChallengeID
+    legacy.failConfirm = true
+    do { try await harness.store.confirmLegacyDrain(); XCTFail("expected timeout") } catch {}
+    harness.store.invalidateChallengeContext()
+    XCTAssertNil(harness.store.legacyTicket)
+    XCTAssertEqual(harness.store.legacyChallengeID, identity)
+    try await harness.store.recoverLegacyConfirmation()
+    XCTAssertEqual(harness.store.legacyCommandID, legacy.commandID)
+    XCTAssertNil(harness.store.successMessage)
+    try await harness.store.refreshLegacyStatus()
+    XCTAssertEqual(harness.store.legacyStatus?.status, .succeeded)
+    XCTAssertEqual(legacy.confirmations.count, 1)
+  }
+
+  func testLegacyUnknownConfirmationRequiresAuthoritativeUnconsumedExpiryToRestart() async throws {
+    let legacy = LegacyMaintenanceSpy()
+    let harness = await makeHarness(legacyRepository: legacy)
+    try await harness.store.prepareLegacyInventory(legacy.scope)
+    try await harness.store.refreshLegacyStatus()
+    try await harness.store.previewLegacyDrain(windowStart: legacy.now.addingTimeInterval(-1), windowEnd: legacy.now.addingTimeInterval(120))
+    legacy.failConfirm = true
+    do { try await harness.store.confirmLegacyDrain(); XCTFail("expected timeout") } catch {}
+    harness.store.invalidateChallengeContext()
+    legacy.recoveryPhase = .awaitingConfirmation
+    try await harness.store.recoverLegacyConfirmation()
+    XCTAssertThrowsError(try harness.store.discardLegacyReview())
+    legacy.recoveryPhase = .expired
+    try await harness.store.recoverLegacyConfirmation()
+    XCTAssertFalse(harness.store.legacyConfirmationAttempted)
+    XCTAssertNil(harness.store.legacyTicket)
+    XCTAssertNil(harness.store.legacyChallengeID)
+    XCTAssertNoThrow(try harness.store.discardLegacyReview())
+  }
+
   private func makeHarness(
     repository: TTradeControlRepositorySpy? = nil,
     releaseRepository: TAssistantReleaseSpy? = nil,
@@ -763,6 +803,11 @@ private final class LegacyMaintenanceSpy: TAssistantLegacyMaintenanceLoading {
   var preparations: [UUID] = []
   var confirmations: [TAssistantLegacyDrainTicket] = []
   var onConfirm: (() -> Void)?
+  var recoveryPhase: TAssistantLegacyConfirmationRecovery.Phase = .pending
+
+  func recover(challengeID: String, inventory: TAssistantLegacyInventory, context: TTradeControlRepositoryContext) async throws -> TAssistantLegacyConfirmationRecovery {
+    .init(phase: recoveryPhase, commandID: [.awaitingConfirmation, .expired].contains(recoveryPhase) ? nil : commandID)
+  }
 
   func prepare(_ scope: TAssistantLegacyScope, requestID: UUID, context: TTradeControlRepositoryContext) async throws -> String {
     preparations.append(requestID)

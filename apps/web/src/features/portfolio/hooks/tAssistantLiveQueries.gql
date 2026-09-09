@@ -193,3 +193,12 @@ query Portfolio_TAssistantLegacyMaintenanceOperation(
     evidence
   }
 }
+
+query Portfolio_TAssistantLegacyConfirmationStatus($challengeId: String!) {
+  tAssistantLegacyConfirmationStatus(challengeId: $challengeId) {
+    challengeId
+    status
+    engineCommandId
+    request
+  }
+}

@@ -2,7 +2,7 @@
 
 import re
 import secrets
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from quantx_application.t_trade_v3.portfolio_reference import aware_time
@@ -152,6 +152,14 @@ async def consume_drain_confirmation(
     populate_existing=True,
   )
   request = normalize_drain_request(challenge.payload)
+  if request["account_id"] != challenge.account_id:
+    raise ValueError("LEGACY_T_DRAIN_CONFIRMATION_SCOPE_CONFLICT")
+  if challenge.consumed_at is None:
+    await _lock_inventory(db, request, current.user_id)
+    # A request may have waited for locks since the resolver sampled its clock.
+    # Once a recovery read proves expiry, that waiting request must not consume
+    # the credential using its earlier timestamp.
+    now = max(now, datetime.now(UTC))
   validate_persistent_trade_challenge(
     challenge=challenge,
     principal=current,
@@ -161,8 +169,6 @@ async def consume_drain_confirmation(
     payload=request,
     allow_consumed=True,
   )
-  if request["account_id"] != challenge.account_id:
-    raise ValueError("LEGACY_T_DRAIN_CONFIRMATION_SCOPE_CONFLICT")
   if challenge.consumed_at is not None:
     identity = (
       (challenge.result_reference or {}).get("engine_command", {}).get("message_id")
@@ -176,7 +182,6 @@ async def consume_drain_confirmation(
     ):
       raise ValueError("LEGACY_T_DRAIN_COMMAND_REFERENCE_CONFLICT")
     return identity
-  await _lock_inventory(db, request, current.user_id)
   if not aware_time(request["window_start"]) <= now < aware_time(request["window_end"]):
     raise ValueError("LEGACY_T_DRAIN_OUTSIDE_MAINTENANCE_WINDOW")
   identity = str(uuid4())
@@ -351,4 +356,80 @@ async def read_legacy_maintenance_operation(db, *, principal, account_id, comman
     "command_id": command_id,
     "status": status,
     "evidence": evidence if status == "SUCCEEDED" else None,
+  }
+
+
+async def read_legacy_confirmation_status(db, *, principal, challenge_id, now):
+  """Recover an operation after local credential loss without reissuing authority."""
+  from .trade_approval import _aware_shanghai
+
+  if not db.in_transaction():
+    raise ValueError("LEGACY_T_DRAIN_TRANSACTION_REQUIRED")
+  now = aware_time(now).astimezone(UTC)
+  challenge = await db.get(TradeConfirmationChallenge, challenge_id)
+  if challenge is None:
+    raise ValueError("LEGACY_T_DRAIN_CHALLENGE_REQUIRED")
+  account_id = challenge.account_id
+  _require_native_control_principal(principal, account_id)
+  current = await TTradeControlChallengeService._lock_current_principal(
+    db, principal, account_id
+  )
+  challenge = await db.get(
+    TradeConfirmationChallenge,
+    challenge_id,
+    with_for_update=True,
+    populate_existing=True,
+  )
+  if (
+    challenge is None
+    or challenge.action != ACTION
+    or challenge.account_id != account_id
+    or challenge.user_id != current.user_id
+    or challenge.device_session_id != current.device_session_id
+    or any((challenge.owner_type, challenge.owner_id, challenge.environment))
+    or not secrets.compare_digest(
+      str(challenge.payload_fingerprint or ""),
+      signed_payload_fingerprint(challenge.payload),
+    )
+    or _aware_shanghai(challenge.created_at) > now
+  ):
+    raise ValueError("LEGACY_T_MAINTENANCE_SCOPE_CONFLICT")
+  request = normalize_drain_request(challenge.payload)
+  if request["account_id"] != account_id:
+    raise ValueError("LEGACY_T_MAINTENANCE_SCOPE_CONFLICT")
+  if challenge.consumed_at is None:
+    return {
+      "challenge_id": challenge_id,
+      "request": request,
+      "engine_command_id": None,
+      "status": "EXPIRED"
+      if _aware_shanghai(challenge.expires_at) <= now
+      else "AWAITING_CONFIRMATION",
+    }
+  identity = (
+    (challenge.result_reference or {}).get("engine_command", {}).get("message_id")
+  )
+  if not identity:
+    raise ValueError("LEGACY_T_DRAIN_COMMAND_REFERENCE_CONFLICT")
+  command = await db.get(EngineCommandOutbox, identity)
+  if (
+    command is None
+    or command.command_type != COMMAND
+    or command.payload != {"challenge_id": challenge_id}
+    or not _aware_shanghai(challenge.created_at)
+    <= _aware_shanghai(challenge.consumed_at)
+    < _aware_shanghai(challenge.expires_at)
+    or _aware_shanghai(challenge.consumed_at) > now
+  ):
+    raise ValueError("LEGACY_T_DRAIN_COMMAND_REFERENCE_CONFLICT")
+  operation = await read_legacy_maintenance_operation(
+    db, principal=principal, account_id=account_id, command_id=identity
+  )
+  if operation["status"] == "NOT_FOUND":
+    raise ValueError("LEGACY_T_DRAIN_COMMAND_REFERENCE_CONFLICT")
+  return {
+    "challenge_id": challenge_id,
+    "request": request,
+    "engine_command_id": identity,
+    "status": operation["status"],
   }

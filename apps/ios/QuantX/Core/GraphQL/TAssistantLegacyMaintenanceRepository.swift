@@ -97,6 +97,10 @@ struct TAssistantLegacyOperation: Equatable, Sendable {
 
 @MainActor
 protocol TAssistantLegacyMaintenanceLoading {
+  func recover(
+    challengeID: String, inventory: TAssistantLegacyInventory,
+    context: TTradeControlRepositoryContext
+  ) async throws -> TAssistantLegacyConfirmationRecovery
   func prepare(
     _ scope: TAssistantLegacyScope, requestID: UUID, context: TTradeControlRepositoryContext
   ) async throws -> String
@@ -219,5 +223,60 @@ final class TAssistantLegacyMaintenanceRepository: TAssistantLegacyMaintenanceLo
       UUID(uuidString: commandID) != nil
     else { throw TTradeControlError.unavailable("排空结果未明确，请保留原确认请求") }
     return commandID
+  }
+}
+
+struct TAssistantLegacyConfirmationRecovery: Equatable, Sendable {
+  enum Phase: String, Sendable {
+    case awaitingConfirmation = "AWAITING_CONFIRMATION"
+    case expired = "EXPIRED"
+    case pending = "PENDING"
+    case processing = "PROCESSING"
+    case failed = "FAILED"
+    case succeeded = "SUCCEEDED"
+  }
+  let phase: Phase
+  let commandID: String?
+}
+
+extension TAssistantLegacyMaintenanceRepository {
+  func recover(
+    challengeID: String, inventory: TAssistantLegacyInventory,
+    context: TTradeControlRepositoryContext
+  ) async throws -> TAssistantLegacyConfirmationRecovery {
+    try inventory.scope.validate(context)
+    guard UUID(uuidString: challengeID) != nil else {
+      throw TTradeControlError.invalidRequest("确认编号无效")
+    }
+    let response = try await client.fetch(
+      query: QuantXAPI.IOSTAssistantLegacyConfirmationStatusQuery(challengeId: challengeID),
+      cachePolicy: .networkOnly, requestConfiguration: noCache)
+    try ApolloReadOnlyResponseValidator.validate(response.errors)
+    guard let result = response.data?.tAssistantLegacyConfirmationStatus,
+      result.challengeId == challengeID,
+      let phase = TAssistantLegacyConfirmationRecovery.Phase(rawValue: result.status)
+    else { throw TTradeControlError.invalidResponse }
+    let request = try TAssistantLegacyInventory.object(result.request)
+    var expected = inventory.scope.fields
+    expected["inventory_operation_id"] = .string(inventory.operationID)
+    expected["expected_inventory_hash"] = .string(inventory.hash)
+    guard Set(request.keys) == Set(expected.keys).union(["window_start", "window_end"]),
+      expected.allSatisfy({ request[$0.key] == $0.value }),
+      case .string(let start) = request["window_start"],
+      case .string(let end) = request["window_end"]
+    else {
+      throw TTradeControlError.contextChanged
+    }
+    let startDate = try ReadOnlyModelValidator.requireDate(start, field: "legacy.windowStart")
+    let endDate = try ReadOnlyModelValidator.requireDate(end, field: "legacy.windowEnd")
+    guard startDate < endDate else { throw TTradeControlError.invalidResponse }
+    if [.awaitingConfirmation, .expired].contains(phase) {
+      guard result.engineCommandId == nil else { throw TTradeControlError.invalidResponse }
+    } else {
+      guard let identity = result.engineCommandId, UUID(uuidString: identity) != nil else {
+        throw TTradeControlError.invalidResponse
+      }
+    }
+    return .init(phase: phase, commandID: result.engineCommandId)
   }
 }

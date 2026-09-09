@@ -81,6 +81,7 @@ extension QuantXAPI {
       "StrategyInstanceMobileParameters": QuantXAPI.Objects.StrategyInstanceMobileParameters,
       "StrategyMobileParameter": QuantXAPI.Objects.StrategyMobileParameter,
       "Subscription": QuantXAPI.Objects.Subscription,
+      "TAssistantLegacyConfirmationStatus": QuantXAPI.Objects.TAssistantLegacyConfirmationStatus,
       "TAssistantLegacyDrainPreview": QuantXAPI.Objects.TAssistantLegacyDrainPreview,
       "TAssistantLegacyMaintenanceOperation": QuantXAPI.Objects.TAssistantLegacyMaintenanceOperation,
       "TAssistantLegacyMaintenanceResult": QuantXAPI.Objects.TAssistantLegacyMaintenanceResult,

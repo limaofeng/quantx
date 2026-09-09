@@ -51,3 +51,12 @@ query IOSTAssistantLegacyMaintenanceOperation(
     evidence
   }
 }
+
+query IOSTAssistantLegacyConfirmationStatus($challengeId: String!) {
+  tAssistantLegacyConfirmationStatus(challengeId: $challengeId) {
+    challengeId
+    status
+    engineCommandId
+    request
+  }
+}

@@ -24,7 +24,7 @@ from tests.engine.unit.test_t_assistant_legacy_drain import seed_legacy_drain
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", [None, "token", "head", "device"])
+@pytest.mark.parametrize("damage", [None, "token", "head", "device", "stale_clock"])
 async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
   engine, sessions, now, digest = await seed_legacy_drain(monkeypatch)
   try:
@@ -129,12 +129,42 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
       row = await db.get(TradeConfirmationChallenge, issued["challenge_id"])
       assert issued["confirmation_token"] not in str(row.payload)
       assert row.token_digest != issued["confirmation_token"]
+      pending = await api.read_legacy_confirmation_status(
+        db,
+        principal=principal,
+        challenge_id=issued["challenge_id"],
+        now=now,
+      )
+      assert (
+        pending["status"] == "AWAITING_CONFIRMATION"
+        and pending["engine_command_id"] is None
+      )
+      expired = await api.read_legacy_confirmation_status(
+        db,
+        principal=principal,
+        challenge_id=issued["challenge_id"],
+        now=now + timedelta(minutes=2),
+      )
+      assert expired["status"] == "EXPIRED" and row.consumed_at is None
+      assert issued["confirmation_token"] not in str(expired)
     if damage == "head":
       async with sessions() as db, db.begin():
         (await db.get(TTradeGlobalConfig, "head")).state_version += 1
+    if damage == "stale_clock":
+      monkeypatch.setattr(
+        api, "datetime", SimpleNamespace(now=lambda _: now + timedelta(minutes=2))
+      )
     if damage == "device":
       principal = replace(principal, device_session_id="other-device")
       lock.return_value = principal
+      async with sessions() as db, db.begin():
+        with pytest.raises(ValueError, match="SCOPE_CONFLICT"):
+          await api.read_legacy_confirmation_status(
+            db,
+            principal=principal,
+            challenge_id=issued["challenge_id"],
+            now=now,
+          )
 
     async def consume():
       async with sessions() as db, db.begin():
@@ -161,6 +191,27 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
       return
     identity = await consume()
     assert await consume() == identity
+    async with sessions() as db, db.begin():
+      recovered = await api.read_legacy_confirmation_status(
+        db,
+        principal=principal,
+        challenge_id=issued["challenge_id"],
+        now=now + timedelta(minutes=2),
+      )
+      assert (
+        recovered["engine_command_id"] == identity and recovered["status"] == "PENDING"
+      )
+      challenge = await db.get(TradeConfirmationChallenge, issued["challenge_id"])
+      challenge.result_reference = {"engine_command": {"message_id": preparation_id}}
+      await db.flush()
+      with pytest.raises(ValueError, match="REFERENCE_CONFLICT"):
+        await api.read_legacy_confirmation_status(
+          db,
+          principal=principal,
+          challenge_id=issued["challenge_id"],
+          now=now + timedelta(minutes=2),
+        )
+      challenge.result_reference = {"engine_command": {"message_id": identity}}
     monkeypatch.setattr(command_processor, "AsyncSessionLocal", sessions)
     monkeypatch.setattr(
       command_processor,
@@ -192,6 +243,16 @@ async def test_api_confirmation_dispatch_and_replay(monkeypatch, damage):
       )
       assert status["status"] == "SUCCEEDED"
       assert status["evidence"]["cancelled_intent_ids"] == ["unsubmitted"]
+      recovered = await api.read_legacy_confirmation_status(
+        db,
+        principal=principal,
+        challenge_id=issued["challenge_id"],
+        now=now + timedelta(minutes=2),
+      )
+      assert (
+        recovered["status"] == "SUCCEEDED"
+        and recovered["engine_command_id"] == identity
+      )
     assert await consume() == identity
     async with sessions() as db:
       head = await db.get(TTradeGlobalConfig, "head")

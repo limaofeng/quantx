@@ -574,6 +574,11 @@ _legacy_operation_key = ("Query", normalize_field_name("tAssistantLegacyMaintena
 _POLICIES[_legacy_operation_key] = replace(
   _POLICIES[_legacy_operation_key], required_permissions=("t-trade:control", "trade:approve")
 )
+_register("Query", "t-trade:control", {"tAssistantLegacyConfirmationStatus"}, audiences=("native",))
+_legacy_confirmation_key = ("Query", normalize_field_name("tAssistantLegacyConfirmationStatus"))
+_POLICIES[_legacy_confirmation_key] = replace(
+  _POLICIES[_legacy_confirmation_key], required_permissions=("t-trade:control", "trade:approve")
+)
 
 _TRADE_APPROVAL_FIELDS = {
   "prepareTAssistantLegacyInventory",

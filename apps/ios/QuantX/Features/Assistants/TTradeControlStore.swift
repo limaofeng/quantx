@@ -33,6 +33,7 @@ final class TTradeControlStore: ObservableObject {
   @Published private(set) var legacyPreparationID: UUID?
   @Published private(set) var legacyInventory: TAssistantLegacyInventory?
   @Published private(set) var legacyTicket: TAssistantLegacyDrainTicket?
+  @Published private(set) var legacyChallengeID: String?
   @Published private(set) var legacyCommandID: String?
   @Published private(set) var legacyStatus: TAssistantLegacyOperation?
   @Published private(set) var legacyConfirmationAttempted = false
@@ -614,6 +615,7 @@ final class TTradeControlStore: ObservableObject {
     legacyOperationGeneration = UUID()
     legacyScope = nil
     legacyPreparationID = nil
+    legacyChallengeID = nil
     legacyInventory = nil
     legacyTicket = nil
     legacyCommandID = nil
@@ -811,6 +813,7 @@ extension TTradeControlStore {
     }
     legacyScope = nil
     legacyPreparationID = nil
+    legacyChallengeID = nil
     legacyInventory = nil
     legacyTicket = nil
     legacyStatus = nil
@@ -915,6 +918,7 @@ extension TTradeControlStore {
       try ticket.validate(legacyCurrentContext())
       guard current == ticket.context, ticket.inventory == inventory else { throw TTradeControlError.contextChanged }
       legacyTicket = ticket
+      legacyChallengeID = ticket.challengeID
     } catch { throw fail(error) }
   }
 
@@ -949,6 +953,44 @@ extension TTradeControlStore {
       legacyCommandID = identity
       legacyTicket = nil
       legacyStatus = nil
+    } catch { throw fail(error) }
+  }
+}
+
+extension TTradeControlStore {
+  func recoverLegacyConfirmation() async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard let identity = legacyChallengeID, let inventory = legacyInventory,
+      let repository = binding?.legacyRepository else { throw fail(TTradeControlError.contextChanged) }
+    let generation = legacyOperationGeneration
+    operationInProgress = true
+    clearMessages()
+    defer { if generation == legacyOperationGeneration { operationInProgress = false } }
+    do {
+      let current = try legacyCurrentContext()
+      let recovered = try await repository.recover(challengeID: identity, inventory: inventory, context: current)
+      guard current == (try legacyCurrentContext()), legacyChallengeID == identity, legacyInventory == inventory else {
+        throw TTradeControlError.contextChanged
+      }
+      switch recovered.phase {
+      case .awaitingConfirmation:
+        guard recovered.commandID == nil, legacyCommandID == nil else { throw TTradeControlError.invalidResponse }
+        errorMessage = "原确认尚未消费；投递结果不明确时请等待过期后再次核对"
+      case .expired:
+        guard recovered.commandID == nil, legacyCommandID == nil else { throw TTradeControlError.invalidResponse }
+        legacyConfirmationAttempted = false
+        legacyTicket = nil
+        legacyChallengeID = nil
+        legacyStatus = nil
+        errorMessage = "原确认未消费且已过期，可以重新复核"
+      default:
+        guard let commandID = recovered.commandID, UUID(uuidString: commandID) != nil,
+          legacyCommandID == nil || legacyCommandID == commandID else { throw TTradeControlError.invalidResponse }
+        legacyCommandID = commandID
+        legacyConfirmationAttempted = true
+        legacyTicket = nil
+        legacyStatus = nil
+      }
     } catch { throw fail(error) }
   }
 }

@@ -12,6 +12,7 @@ from ..t_assistant_legacy_drain_confirmation import (
   consume_drain_confirmation,
   enqueue_legacy_inventory,
   issue_drain_confirmation,
+  read_legacy_confirmation_status,
   read_legacy_maintenance_operation,
 )
 from ..trade_approval import TradeApprovalChallengeError
@@ -57,6 +58,14 @@ class TAssistantLegacyMaintenanceOperation:
   evidence: JSON | None = None
 
 
+@strawberry.type
+class TAssistantLegacyConfirmationStatus:
+  challenge_id: str
+  request: JSON
+  status: str
+  engine_command_id: str | None = None
+
+
 def _failed(exc):
   if isinstance(exc, TradeApprovalChallengeError):
     return TAssistantLegacyMaintenanceResult(
@@ -71,6 +80,19 @@ def _failed(exc):
 
 @strawberry.type
 class TAssistantLegacyQuery:
+  @strawberry.field(
+    description="原设备锁定后按确认 ID 找回处理状态，不返回或重新签发令牌"
+  )
+  async def t_assistant_legacy_confirmation_status(
+    self, info: strawberry.types.Info, challenge_id: str
+  ) -> TAssistantLegacyConfirmationStatus:
+    principal = principal_from_context(info.context)
+    async with AsyncSessionLocal() as db, db.begin():
+      result = await read_legacy_confirmation_status(
+        db, principal=principal, challenge_id=challenge_id, now=datetime.now(UTC)
+      )
+    return TAssistantLegacyConfirmationStatus(**result)
+
   @strawberry.field(description="读取维护命令及持久化审计；入队不代表排空完成")
   async def t_assistant_legacy_maintenance_operation(
     self, info: strawberry.types.Info, account_id: str, command_id: str

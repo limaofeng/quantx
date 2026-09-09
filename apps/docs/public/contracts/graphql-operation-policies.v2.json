@@ -3045,6 +3045,17 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "tAssistantLegacyConfirmationStatus": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "tAssistantLegacyMaintenanceOperation": {
         "audiences": [
           "native"

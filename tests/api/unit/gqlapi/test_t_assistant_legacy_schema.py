@@ -62,11 +62,28 @@ async def test_public_maintenance_contract(monkeypatch):
     not result.errors and not result.data["confirmTAssistantLegacyDrain"]["success"]
   )
   assert "private" not in str(result.data)
+  recover = AsyncMock(
+    return_value={
+      "challenge_id": "challenge",
+      "status": "EXPIRED",
+      "engine_command_id": None,
+      "request": {"account_id": "account-1"},
+    }
+  )
+  monkeypatch.setattr(legacy, "read_legacy_confirmation_status", recover)
+  result = await SCHEMA.execute(
+    'query {tAssistantLegacyConfirmationStatus(challengeId:"challenge"){challengeId status engineCommandId request}}',
+    context_value={"principal": principal},
+  )
+  assert not result.errors
+  assert result.data["tAssistantLegacyConfirmationStatus"]["status"] == "EXPIRED"
+  assert recover.call_args.kwargs["principal"] == principal
   for name in (
     "prepareTAssistantLegacyInventory",
     "previewTAssistantLegacyDrain",
     "confirmTAssistantLegacyDrain",
     "tAssistantLegacyMaintenanceOperation",
+    "tAssistantLegacyConfirmationStatus",
   ):
     policy = operation_policy(
       "Query" if name.startswith("tAssistant") else "Mutation", name
