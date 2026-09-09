@@ -137,8 +137,20 @@ class CollectionExecution:
     try:
       records = iter(collect())
       try:
+        completed = self.journal.collection_request_record_count(
+          self.device_id, str(permit.unit.request_id)
+        )
+
+        def bounded_records():
+          count = completed
+          for record in records:
+            if count >= self.artifacts.max_records:
+              raise NativeUnitFailure("COLLECTION_RESULT_INVALID")
+            count += 1
+            yield record
+
         artifact = self.artifacts.seal(
-          permit.unit, records, reserve=self.reserve, release=self.release
+          permit.unit, bounded_records(), reserve=self.reserve, release=self.release
         )
       finally:
         close = getattr(records, "close", None)

@@ -935,3 +935,78 @@ async def test_native_failure_classification_survives_journal_and_abort(
   assert failure.reason_code == reason
   runner.stop_native.assert_called_once()
   runner.abort.assert_awaited_once_with(permit, failure)
+
+
+async def test_unit_splitting_cannot_reset_original_request_record_budget(execution):
+  runner, first = execution
+  collect = Mock(return_value=iter([{"value": i} for i in range(7)]))
+  await runner.execute(
+    first,
+    server_state="ISSUED",
+    unit_payload=PAYLOAD,
+    start=AsyncMock(),
+    finish=AsyncMock(),
+    collect=collect,
+  )
+  second = first.model_copy(
+    update={
+      "permit_id": uuid4(),
+      "unit": CollectionUnit.from_payload(str(first.unit.request_id), 1, PAYLOAD),
+    }
+  )
+  observed, closed = [], []
+
+  def oversized():
+    try:
+      for i in range(100):
+        observed.append(i)
+        yield {"value": i}
+    finally:
+      assert runner.native_lock.locked()
+      closed.append(True)
+
+  finish = AsyncMock()
+  with pytest.raises(CollectionFailed) as caught:
+    await runner.execute(
+      second,
+      server_state="ISSUED",
+      unit_payload=PAYLOAD,
+      start=AsyncMock(),
+      finish=finish,
+      collect=oversized,
+    )
+  assert caught.value.reason_code == "COLLECTION_RESULT_INVALID"
+  assert len(observed) == 4 and closed == [True]
+  finish.assert_not_awaited()
+  assert (
+    runner.journal.collection_request_record_count(
+      runner.device_id, str(first.unit.request_id)
+    )
+    == 7
+  )
+  # An explicit new authorization after the accepted failure retains the same
+  # remaining allowance; it does not erase the seven original durable records.
+  retry = second.model_copy(update={"permit_id": uuid4()})
+  await runner.execute(
+    retry,
+    server_state="ISSUED",
+    unit_payload=PAYLOAD,
+    start=AsyncMock(),
+    finish=finish,
+    collect=lambda: iter([{"value": i} for i in range(3)]),
+  )
+  assert (
+    runner.journal.collection_request_record_count(
+      runner.device_id, str(first.unit.request_id)
+    )
+    == 10
+  )
+  assert (
+    runner.journal.collection_request_record_count(runner.device_id, str(uuid4())) == 0
+  )
+  assert (
+    runner.journal.collection_request_record_count(
+      str(uuid4()), str(first.unit.request_id)
+    )
+    == 0
+  )

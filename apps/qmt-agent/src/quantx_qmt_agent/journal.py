@@ -517,6 +517,16 @@ class LocalJournal:
       self._refresh_size_cache()
     return existing is None
 
+  def collection_request_record_count(self, device_id: str, request_id: str) -> int:
+    """Count completed unit records against the original request's one budget."""
+    with self.lock:
+      row = self.connection.execute(
+        "SELECT COALESCE(SUM(a.record_count),0) FROM history_collection_artifacts a "
+        "JOIN history_collection_receipts r ON r.permit_id=a.permit_id "
+        "WHERE r.device_id=? AND r.request_id=?", (device_id, request_id),
+      ).fetchone()
+      return int(row[0])
+
   def load_collection_artifact(
     self, *, device_id: str, unit: CollectionUnit, artifacts
   ):
