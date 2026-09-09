@@ -340,9 +340,78 @@ final class TTradeControlStoreTests: XCTestCase {
     XCTAssertEqual(account.confirmCount, 0)
   }
 
+  func testLegacyPreparationAndExpiredUncertainConfirmationReuseOriginalIdentity() async throws {
+    let legacy = LegacyMaintenanceSpy()
+    var now = legacy.now
+    let harness = await makeHarness(legacyRepository: legacy, legacyNow: { now })
+    legacy.failPrepare = true
+    do { try await harness.store.prepareLegacyInventory(legacy.scope); XCTFail("expected timeout") } catch {}
+    let preparationID = try XCTUnwrap(harness.store.legacyPreparationID)
+    try await harness.store.prepareLegacyInventory(legacy.scope)
+    XCTAssertEqual(legacy.preparations, [preparationID, preparationID])
+    try await harness.store.refreshLegacyStatus()
+    try await harness.store.previewLegacyDrain(windowStart: now.addingTimeInterval(-1), windowEnd: now.addingTimeInterval(120))
+    let ticket = try XCTUnwrap(harness.store.legacyTicket)
+    legacy.failConfirm = true
+    do { try await harness.store.confirmLegacyDrain(); XCTFail("expected timeout") } catch {}
+    XCTAssertTrue(harness.store.legacyConfirmationAttempted)
+    XCTAssertEqual(harness.store.legacyTicket, ticket)
+    XCTAssertThrowsError(try harness.store.discardLegacyReview())
+    do { try await harness.store.refreshLegacyStatus(); XCTFail("must not substitute preparation status") } catch {}
+    now = now.addingTimeInterval(70)
+    try await harness.store.confirmLegacyDrain()
+    XCTAssertEqual(legacy.confirmations, [ticket, ticket])
+    XCTAssertEqual(harness.authentication.reasons.count, 2)
+    XCTAssertNil(harness.store.successMessage)
+    XCTAssertNil(harness.store.legacyTicket)
+    try await harness.store.refreshLegacyStatus()
+    XCTAssertEqual(harness.store.legacyStatus?.status, .succeeded)
+    XCTAssertNotNil(harness.store.successMessage)
+  }
+
+  func testLegacyUnconfirmedReviewCanBeReplacedWithoutSendingDrain() async throws {
+    let legacy = LegacyMaintenanceSpy()
+    let harness = await makeHarness(legacyRepository: legacy)
+    try await harness.store.prepareLegacyInventory(legacy.scope)
+    let original = harness.store.legacyPreparationID
+    try harness.store.discardLegacyReview()
+    XCTAssertNil(harness.store.legacyScope)
+    try await harness.store.prepareLegacyInventory(legacy.scope)
+    XCTAssertNotEqual(harness.store.legacyPreparationID, original)
+    XCTAssertTrue(legacy.confirmations.isEmpty)
+  }
+
+  func testLegacyLocalLockDuringBiometricsPreventsSubmission() async throws {
+    let legacy = LegacyMaintenanceSpy()
+    let harness = await makeHarness(legacyRepository: legacy)
+    try await harness.store.prepareLegacyInventory(legacy.scope)
+    try await harness.store.refreshLegacyStatus()
+    try await harness.store.previewLegacyDrain(windowStart: legacy.now.addingTimeInterval(-1), windowEnd: legacy.now.addingTimeInterval(120))
+    harness.authentication.authorizationHandler = { harness.store.invalidateChallengeContext() }
+    do { try await harness.store.confirmLegacyDrain(); XCTFail("expected context rejection") } catch {}
+    XCTAssertTrue(legacy.confirmations.isEmpty)
+    XCTAssertNil(harness.store.legacyTicket)
+    XCTAssertFalse(harness.store.legacyConfirmationAttempted)
+  }
+
+  func testLegacySessionChangeWhileResponseArrivesCannotRepopulateState() async throws {
+    let legacy = LegacyMaintenanceSpy()
+    let harness = await makeHarness(legacyRepository: legacy)
+    try await harness.store.prepareLegacyInventory(legacy.scope)
+    try await harness.store.refreshLegacyStatus()
+    try await harness.store.previewLegacyDrain(windowStart: legacy.now.addingTimeInterval(-1), windowEnd: legacy.now.addingTimeInterval(120))
+    legacy.onConfirm = { harness.store.clearSession() }
+    do { try await harness.store.confirmLegacyDrain(); XCTFail("expected context rejection") } catch {}
+    XCTAssertNil(harness.store.legacyCommandID)
+    XCTAssertNil(harness.store.legacyTicket)
+    XCTAssertNil(harness.store.legacyScope)
+  }
+
   private func makeHarness(
     repository: TTradeControlRepositorySpy? = nil,
     releaseRepository: TAssistantReleaseSpy? = nil,
+    legacyRepository: LegacyMaintenanceSpy? = nil,
+    legacyNow: @escaping @MainActor () -> Date = { Date() },
     accountRepository: AccountControlSpy? = nil,
     authentication: TTradeControlAuthenticationSpy = TTradeControlAuthenticationSpy(),
     scopes: Set<String> = ["strategy:read", "t-trade:control", "trade:approve"]
@@ -354,14 +423,14 @@ final class TTradeControlStoreTests: XCTestCase {
   ) {
     let repository = repository ?? TTradeControlRepositorySpy(snapshots: [makeSnapshot()])
     let runtime = TTradeControlRuntimeSpy()
-    let store = TTradeControlStore(localAuthentication: authentication)
+    let store = TTradeControlStore(localAuthentication: authentication, legacyNow: legacyNow)
     store.configure(
       contextProvider: { runtime.context },
       refreshSession: { try await runtime.refresh() },
       refreshAssistantProjection: { runtime.projectionRefreshCount += 1 }
     )
     store.activate(identity: identity(scopes: scopes), repository: repository,
-      releaseRepository: releaseRepository, accountRepository: accountRepository)
+      releaseRepository: releaseRepository, legacyRepository: legacyRepository, accountRepository: accountRepository)
     await store.refresh()
     return (store, repository, runtime, authentication)
   }
@@ -681,5 +750,51 @@ private final class AccountControlSpy: AccountExecutionControlLoading {
     async throws -> String {
     confirmCount += 1
     return "账户操作已应用"
+  }
+}
+
+@MainActor
+private final class LegacyMaintenanceSpy: TAssistantLegacyMaintenanceLoading {
+  let now = Date()
+  let scope = TAssistantLegacyScope(accountID: "ACCOUNT-1", configID: "head", runID: "legacy", headVersion: 1)
+  let commandID = UUID().uuidString.lowercased()
+  var failPrepare = false
+  var failConfirm = false
+  var preparations: [UUID] = []
+  var confirmations: [TAssistantLegacyDrainTicket] = []
+  var onConfirm: (() -> Void)?
+
+  func prepare(_ scope: TAssistantLegacyScope, requestID: UUID, context: TTradeControlRepositoryContext) async throws -> String {
+    preparations.append(requestID)
+    if failPrepare { failPrepare = false; throw URLError(.timedOut) }
+    return requestID.uuidString.lowercased()
+  }
+  func operation(_ identity: String, context: TTradeControlRepositoryContext) async throws -> TAssistantLegacyOperation {
+    var manifest: [String: GraphQLJSON] = ["schema": .string("legacy-t-obligations.v1"),
+      "account_id": .string(scope.accountID), "config_id": .string(scope.configID),
+      "run_id": .string(scope.runID), "head_version": .integer(scope.headVersion)]
+    for key in ["intents", "pending", "correlations", "commands", "runtime_events", "batches", "exit_plans", "retained_client_order_ids", "unsubmitted_intent_ids_for_review"] {
+      manifest[key] = .array([])
+    }
+    var evidence: GraphQLJSON = .init(object: ["manifest": .init(object: manifest),
+      "manifest_hash": .string(String(repeating: "a", count: 64)), "inventory_operation_id": .string("legacy-inventory:\(identity)")])
+    if identity == commandID {
+      let inventory = confirmations[0].inventory
+      var request = scope.fields
+      request.removeValue(forKey: "account_id")
+      request["inventory_operation_id"] = .string(inventory.operationID)
+      request["inventory_hash"] = .string(inventory.hash)
+      evidence = .init(object: ["run_id": .string(scope.runID), "request": .init(object: request)])
+    }
+    return .init(commandID: identity, status: .succeeded, evidence: evidence)
+  }
+  func preview(_ inventory: TAssistantLegacyInventory, windowStart: Date, windowEnd: Date, context: TTradeControlRepositoryContext) async throws -> TAssistantLegacyDrainTicket {
+    .init(challengeID: UUID().uuidString.lowercased(), token: "original-secret", expiresAt: now.addingTimeInterval(60), inventory: inventory, windowStart: windowStart, windowEnd: windowEnd, context: context)
+  }
+  func confirm(_ ticket: TAssistantLegacyDrainTicket, context: TTradeControlRepositoryContext) async throws -> String {
+    confirmations.append(ticket)
+    onConfirm?()
+    if failConfirm { failConfirm = false; throw URLError(.timedOut) }
+    return commandID
   }
 }

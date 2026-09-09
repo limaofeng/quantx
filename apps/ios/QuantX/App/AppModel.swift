@@ -1686,6 +1686,8 @@ final class AppModel: ObservableObject {
         : nil,
       releaseRepository: grantedScopes.contains("t-trade:control")
         ? TAssistantReleaseRepository(client: newApolloSession.client) : nil,
+      legacyRepository: grantedScopes.contains("t-trade:control")
+        ? TAssistantLegacyMaintenanceRepository(client: newApolloSession.client) : nil,
       accountRepository: grantedScopes.contains("account-execution:control")
         ? AccountExecutionControlRepository(client: newApolloSession.client) : nil
     )

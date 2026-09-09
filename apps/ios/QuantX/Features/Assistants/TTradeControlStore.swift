@@ -20,6 +20,7 @@ final class TTradeControlStore: ObservableObject {
     let identity: SessionIdentity
     let repository: (any TTradeControlLoading)?
     let releaseRepository: (any TAssistantReleaseLoading)?
+    let legacyRepository: (any TAssistantLegacyMaintenanceLoading)?
     let accountRepository: (any AccountExecutionControlLoading)?
   }
 
@@ -28,6 +29,15 @@ final class TTradeControlStore: ObservableObject {
   typealias RefreshAssistantProjection = @MainActor () async -> Void
 
   @Published private(set) var accountControlTicket: NativeAccountControlTicket?
+  @Published private(set) var legacyScope: TAssistantLegacyScope?
+  @Published private(set) var legacyPreparationID: UUID?
+  @Published private(set) var legacyInventory: TAssistantLegacyInventory?
+  @Published private(set) var legacyTicket: TAssistantLegacyDrainTicket?
+  @Published private(set) var legacyCommandID: String?
+  @Published private(set) var legacyStatus: TAssistantLegacyOperation?
+  @Published private(set) var legacyConfirmationAttempted = false
+  private var legacyContext: TTradeControlRepositoryContext?
+  private var legacyOperationGeneration = UUID()
   @Published private(set) var recentReleaseOperations: [TAssistantReleaseOperation] = []
   @Published private(set) var releaseReference: TAssistantReleaseReference?
   @Published private(set) var releaseTicket: TAssistantReleaseTicket?
@@ -43,6 +53,7 @@ final class TTradeControlStore: ObservableObject {
 
   private var releaseConfirmationAttempted = false
   private let localAuthentication: any LocalAuthenticationProviding
+  private let legacyNow: @MainActor () -> Date
   private var binding: SessionBinding?
   private var contextProvider: ContextProvider?
   private var refreshSession: RefreshSession?
@@ -50,8 +61,9 @@ final class TTradeControlStore: ObservableObject {
   private var sessionContextID = UUID()
   private var stateRequestID = UUID()
 
-  init(localAuthentication: any LocalAuthenticationProviding) {
+  init(localAuthentication: any LocalAuthenticationProviding, legacyNow: @escaping @MainActor () -> Date = { Date() }) {
     self.localAuthentication = localAuthentication
+    self.legacyNow = legacyNow
   }
 
   func configure(
@@ -68,13 +80,14 @@ final class TTradeControlStore: ObservableObject {
     identity: SessionIdentity,
     repository: (any TTradeControlLoading)?,
     releaseRepository: (any TAssistantReleaseLoading)? = nil,
+    legacyRepository: (any TAssistantLegacyMaintenanceLoading)? = nil,
     accountRepository: (any AccountExecutionControlLoading)? = nil
   ) {
     if binding?.identity != identity {
       sessionContextID = UUID()
       resetTransientState(resetReadState: true)
     }
-    binding = SessionBinding(identity: identity, repository: repository, releaseRepository: releaseRepository, accountRepository: accountRepository)
+    binding = SessionBinding(identity: identity, repository: repository, releaseRepository: releaseRepository, legacyRepository: legacyRepository, accountRepository: accountRepository)
   }
 
   func clearSession() {
@@ -85,6 +98,7 @@ final class TTradeControlStore: ObservableObject {
 
   func invalidateChallengeContext() {
     sessionContextID = UUID()
+    legacyTicket = nil
     accountControlTicket = nil
     recentReleaseOperations = []
     releaseTicket = nil
@@ -597,6 +611,15 @@ final class TTradeControlStore: ObservableObject {
 
   private func resetTransientState(resetReadState: Bool) {
     stateRequestID = UUID()
+    legacyOperationGeneration = UUID()
+    legacyScope = nil
+    legacyPreparationID = nil
+    legacyInventory = nil
+    legacyTicket = nil
+    legacyCommandID = nil
+    legacyStatus = nil
+    legacyContext = nil
+    legacyConfirmationAttempted = false
     accountControlTicket = nil
     recentReleaseOperations = []
     releaseTicket = nil
@@ -775,6 +798,157 @@ extension TTradeControlStore {
       accountControlTicket = nil
       successMessage = message
       await refreshTruth()
+    } catch { throw fail(error) }
+  }
+}
+
+extension TTradeControlStore {
+  private static let legacyScopes: Set<String> = ["t-trade:control", "trade:approve"]
+
+  func discardLegacyReview() throws {
+    guard !operationInProgress, !legacyConfirmationAttempted else {
+      throw fail(TTradeControlError.unavailable("请先恢复原确认结果，不能重新准备排空"))
+    }
+    legacyScope = nil
+    legacyPreparationID = nil
+    legacyInventory = nil
+    legacyTicket = nil
+    legacyStatus = nil
+    legacyContext = nil
+    clearMessages()
+  }
+
+  private func legacyCurrentContext() throws -> TTradeControlRepositoryContext {
+    let current = try repositoryContext(requiredScopes: Self.legacyScopes)
+    if let original = legacyContext {
+      guard original.userID == current.userID, original.deviceSessionID == current.deviceSessionID,
+        original.activeAccountID == current.activeAccountID,
+        original.authorizedAccountIDs == current.authorizedAccountIDs else {
+        throw TTradeControlError.contextChanged
+      }
+    }
+    return current
+  }
+
+  func prepareLegacyInventory(_ scope: TAssistantLegacyScope) async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard !legacyConfirmationAttempted, legacyScope == nil || legacyScope == scope,
+      let repository = binding?.legacyRepository else { throw fail(TTradeControlError.contextChanged) }
+    let operationGeneration = legacyOperationGeneration
+    operationInProgress = true
+    defer {
+      if legacyOperationGeneration == operationGeneration { operationInProgress = false }
+    }
+    do {
+      let current = try legacyCurrentContext()
+      try scope.validate(current)
+      let identity = legacyPreparationID ?? UUID()
+      legacyScope = scope
+      legacyPreparationID = identity
+      legacyContext = current
+      legacyTicket = nil
+      let returned = try await repository.prepare(scope, requestID: identity, context: current)
+      guard current == (try legacyCurrentContext()), legacyPreparationID == identity,
+        returned == identity.uuidString.lowercased() else { throw TTradeControlError.contextChanged }
+      errorMessage = nil
+      successMessage = nil
+    } catch { throw fail(error) }
+  }
+
+  func refreshLegacyStatus() async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard !legacyConfirmationAttempted || legacyCommandID != nil else {
+      throw fail(TTradeControlError.unavailable("原确认投递结果未明确，请重试原确认；锁定后需恢复原确认操作"))
+    }
+    guard let repository = binding?.legacyRepository, let scope = legacyScope,
+      let commandID = legacyCommandID ?? legacyPreparationID?.uuidString.lowercased() else {
+      throw fail(TTradeControlError.contextChanged)
+    }
+    let operationGeneration = legacyOperationGeneration
+    operationInProgress = true
+    defer {
+      if legacyOperationGeneration == operationGeneration { operationInProgress = false }
+    }
+    do {
+      let current = try legacyCurrentContext()
+      let status = try await repository.operation(commandID, context: current)
+      guard current == (try legacyCurrentContext()), status.commandID == commandID,
+        commandID == (legacyCommandID ?? legacyPreparationID?.uuidString.lowercased()) else {
+        throw TTradeControlError.contextChanged
+      }
+      if status.status == .succeeded {
+        guard let evidence = status.evidence else { throw TTradeControlError.invalidResponse }
+        if legacyCommandID == nil {
+          legacyInventory = try .validated(evidence, scope: scope, commandID: commandID)
+        } else {
+          guard let inventory = legacyInventory else { throw TTradeControlError.contextChanged }
+          let details = try TAssistantLegacyInventory.object(evidence)
+          var expected = scope.fields
+          expected.removeValue(forKey: "account_id")
+          expected["inventory_operation_id"] = .string(inventory.operationID)
+          expected["inventory_hash"] = .string(inventory.hash)
+          guard details["run_id"] == .string(scope.runID), details["request"] == GraphQLJSON(object: expected) else {
+            throw TTradeControlError.invalidResponse
+          }
+          successMessage = "已停止旧执行的新买入，原订单和退出义务继续处理"
+        }
+      }
+      legacyStatus = status
+      errorMessage = nil
+    } catch { throw fail(error) }
+  }
+
+  func previewLegacyDrain(windowStart: Date, windowEnd: Date) async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard !legacyConfirmationAttempted, let inventory = legacyInventory,
+      let repository = binding?.legacyRepository else { throw fail(TTradeControlError.contextChanged) }
+    let operationGeneration = legacyOperationGeneration
+    operationInProgress = true
+    legacyTicket = nil
+    clearMessages()
+    defer {
+      if legacyOperationGeneration == operationGeneration { operationInProgress = false }
+    }
+    do {
+      let current = try legacyCurrentContext()
+      let ticket = try await repository.preview(inventory, windowStart: windowStart, windowEnd: windowEnd, context: current)
+      try ticket.validate(legacyCurrentContext())
+      guard current == ticket.context, ticket.inventory == inventory else { throw TTradeControlError.contextChanged }
+      legacyTicket = ticket
+    } catch { throw fail(error) }
+  }
+
+  func confirmLegacyDrain() async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard let ticket = legacyTicket, legacyCommandID == nil,
+      let repository = binding?.legacyRepository else { throw fail(TTradeControlError.contextChanged) }
+    let operationGeneration = legacyOperationGeneration
+    operationInProgress = true
+    clearMessages()
+    defer {
+      if legacyOperationGeneration == operationGeneration { operationInProgress = false }
+    }
+    do {
+      try ticket.validate(legacyCurrentContext())
+      try await refreshAndValidateSession(expectedContextID: ticket.context.sessionContextID, requiredScopes: Self.legacyScopes)
+      if !legacyConfirmationAttempted {
+        guard ticket.expiresAt > legacyNow(), ticket.windowStart <= legacyNow(), legacyNow() < ticket.windowEnd else {
+          throw TTradeControlError.challengeExpired
+        }
+      }
+      try await localAuthentication.authorizeTrade(reason: "确认停止旧做 T 新买入：账户 \(TTradeControlPrivacy.maskedAccount(ticket.inventory.scope.accountID))")
+      let current = try legacyCurrentContext()
+      try ticket.validate(current)
+      guard legacyTicket == ticket, legacyConfirmationAttempted || (ticket.expiresAt > legacyNow() && ticket.windowStart <= legacyNow() && legacyNow() < ticket.windowEnd) else {
+        throw TTradeControlError.contextChanged
+      }
+      legacyConfirmationAttempted = true
+      let identity = try await repository.confirm(ticket, context: current)
+      try ticket.validate(legacyCurrentContext())
+      guard legacyTicket == ticket, UUID(uuidString: identity) != nil else { throw TTradeControlError.contextChanged }
+      legacyCommandID = identity
+      legacyTicket = nil
+      legacyStatus = nil
     } catch { throw fail(error) }
   }
 }

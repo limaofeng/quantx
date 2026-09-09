@@ -1012,7 +1012,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   同轮实际端点 Web codegen/check/lint/build 通过；全量 Web 894 passed/1 failed，
   服务状态历史图失败文件单独复验 13 passed，证据
   `.codex_screenshots/p6-legacy-native-web-{test-run,service-recheck}.log`。
-  尚需原生控制页状态/生物确认/结果恢复与可操作界面、排空后终结/解除旧绑定整链；不开放新源准入。
+  原生 Store 已注入维护 Repository，接入共享操作锁、准备 UUID 重试、清单读取、短时预览、
+  生物确认前后会话/窗口复核和原凭据过期后的不明确结果重试。账户/设备变更清理状态，
+  锁定清除令牌，迟到响应不恢复旧状态；只在审计内容匹配后显示排空完成。未消费复核可
+  主动重新准备，不明确的确认禁止丢弃后另起请求。**22 项 Store 模拟器测试通过**，证据
+  `.codex_screenshots/p6-legacy-native-store-final.log`；尚未接入可操作界面。
+  恢复接线发现两项剩余：锁定后须按 challenge ID 找回原命令的只读入口；Engine 当前
+  dispatch 异常会被 consumer 直接置 FAILED，提交后内存失效异常尚需自动重投。此前重试
+  证据是直接再次 dispatch，不能替代真实 consumer 恢复验收；客户端保持未知阻断。
+  下一步补恢复入口/消费者重投，再完成原生界面和排空后终结/解除旧绑定整链；不开放新源准入。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
