@@ -14,6 +14,7 @@ from quantx_infrastructure.services import development_history_import as importe
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from tests.infrastructure.test_development_download_budget import install_budget_schema
 from tests.infrastructure.test_market_data_durable_progress import (
   durable_store,  # noqa: F401
 )
@@ -132,7 +133,7 @@ async def test_download_failure_pins_version_and_restart_rejects_change(
     await connection.execute(
       text("""
       CREATE TEMP TABLE development_data_export (
-        id text PRIMARY KEY, request json, manifest json, updated_at timestamptz
+        id varchar(64) PRIMARY KEY, request json, manifest json, updated_at timestamptz, error text
       )
     """)
     )
@@ -142,6 +143,8 @@ async def test_download_failure_pins_version_and_restart_rejects_change(
     """),
       {"id": identity, "request": REQUEST.model_dump_json()},
     )
+
+  await install_budget_schema(store.engine)
 
   async def submit(request):
     return identity

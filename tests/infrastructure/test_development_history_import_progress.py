@@ -9,7 +9,7 @@ from quantx_infrastructure.services import development_history_import as importe
 from quantx_infrastructure.services.holiday_service import HolidayService
 
 
-@pytest.mark.parametrize("first_status", ["INCOMPLETE", "WAITING_SOURCE"])
+@pytest.mark.parametrize("first_status", ["INCOMPLETE", "WAITING_SOURCE", "BLOCKED"])
 async def test_range_submits_later_partitions_and_reports_failures(monkeypatch, first_status):
   calls = []
 
@@ -32,7 +32,7 @@ async def test_range_submits_later_partitions_and_reports_failures(monkeypatch, 
   assert len(calls) == 2
   assert result["expected_partitions"] == 2
   assert result["verified_partitions"] == 1
-  assert result["status"] == ("failed" if first_status == "INCOMPLETE" else "timeout")
+  assert result["status"] == ("failed" if first_status in {"INCOMPLETE", "BLOCKED"} else "timeout")
   assert result["partitions"][0]["id"] == "first-id"
   assert result["partitions"][0]["reason"] == "SOURCE_COVERAGE_MISSING"
   assert result["partitions"][0]["trading_date"] == "2026-08-10"

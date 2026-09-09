@@ -23,8 +23,13 @@ from quantx_infrastructure.services.data_exchange import (
 )
 from quantx_infrastructure.services.data_exchange_reference import import_reference
 from quantx_infrastructure.services.development_delivery_manifest import (
+  MAX_DELIVERY_METADATA_BYTES,
   pin_delivery_manifest,
   read_delivery_metadata,
+)
+from quantx_infrastructure.services.development_download_budget import (
+  DeliveryDownloadBudgetExhausted,
+  DevelopmentDownloadBudget,
 )
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
   MAX_TRANSFER_CHUNK_COMPRESSED_BYTES,
@@ -65,6 +70,12 @@ async def import_partition(request: HistoryPartitionRequest) -> dict:
       return {"status": "IMPORT_IN_PROGRESS"}
     try:
       return await _import_partition_owned(request)
+    except DeliveryDownloadBudgetExhausted as exc:
+      return {
+        "id": exc.delivery_id,
+        "status": "BLOCKED",
+        "reason": "DELIVERY_DOWNLOAD_BUDGET_EXHAUSTED",
+      }
     finally:
       await db.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
 
@@ -76,19 +87,22 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
   local = await get_export(identity)
   if local["state"] == "LOCAL_VERIFIED":
     return local["manifest"]
+  budget = DevelopmentDownloadBudget(AsyncSessionLocal, identity)
   base = os.environ["QUANTX_MARKET_DATA_URL"].rstrip("/")
   headers = {"Authorization": f"Bearer {os.environ['QUANTX_MARKET_DATA_TOKEN']}"}
   async with httpx.AsyncClient(
     base_url=base, headers=headers, timeout=30, trust_env=False
   ) as client:
-    response = await read_delivery_metadata(
-      client, "POST", "/market-data/v1/history", json=request.model_dump(mode="json")
-    )
+    async with budget.attempt(MAX_DELIVERY_METADATA_BYTES):
+      response = await read_delivery_metadata(
+        client, "POST", "/market-data/v1/history", json=request.model_dump(mode="json")
+      )
     if response["id"] != identity:
       raise ValueError("Remote request identity mismatch")
-    remote = await read_delivery_metadata(
-      client, "GET", f"/market-data/v1/history/{identity}"
-    )
+    async with budget.attempt(MAX_DELIVERY_METADATA_BYTES):
+      remote = await read_delivery_metadata(
+        client, "GET", f"/market-data/v1/history/{identity}"
+      )
     if remote.get("id") != identity:
       raise ValueError("Remote request identity mismatch")
     if remote["state"] != "READY":
@@ -116,9 +130,12 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
       temporary = path.with_suffix(f".{identity}.{uuid4().hex}.part")
       hasher, size = hashlib.sha256(), 0
       try:
-        async with client.stream(
-          "GET", f"/market-data/v1/history/{identity}/chunks/{digest}"
-        ) as download:
+        async with (
+          budget.attempt(item["compressed_bytes"]),
+          client.stream(
+            "GET", f"/market-data/v1/history/{identity}/chunks/{digest}"
+          ) as download,
+        ):
           download.raise_for_status()
           with temporary.open("wb") as target:
             async for block in download.aiter_bytes(chunk_size=65536):
@@ -306,7 +323,7 @@ async def request_remote_history(
       }
       if "local_verification" in result:
         receipts[key] = result
-      elif result.get("status") != "INCOMPLETE":
+      elif result.get("status") not in {"INCOMPLETE", "BLOCKED"}:
         pending = True
     # Finish submitting this bounded range even when one source partition failed.
     # Report every gap; never silently truncate the requested universe.
@@ -315,10 +332,12 @@ async def request_remote_history(
       "verified_partitions": len(receipts),
       "partitions": list(partition_status.values()),
     }
-    if any(p["status"] == "INCOMPLETE" for p in partition_status.values()):
+    if any(p["status"] in {"INCOMPLETE", "BLOCKED"} for p in partition_status.values()):
       return {
         "status": "failed",
-        "reason": "DEVELOPMENT_SOURCE_INCOMPLETE",
+        "reason": "DEVELOPMENT_SOURCE_INCOMPLETE"
+        if any(p["status"] == "INCOMPLETE" for p in partition_status.values())
+        else "DELIVERY_DOWNLOAD_BUDGET_EXHAUSTED",
         "request_id": identity,
         **progress,
       }
