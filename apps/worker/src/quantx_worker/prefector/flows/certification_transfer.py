@@ -12,7 +12,6 @@ from quantx_infrastructure.services.research_preparation import (
   root,
 )
 from quantx_infrastructure.training_bundle_store import (
-  publication_lock,
   reject_links,
   verify_bundle,
 )
@@ -27,7 +26,8 @@ def export_transfer_config():
   return TransferConfig.load(Path(path), state_root=root() / ".runtime/research-preparation")
 
 
-async def publish_certification_input(job, directory, result, transfer):
+async def publish_certification_input(job, directory, result, transfer, *, check=None):
+  """Caller holds the job publication lock across export and handoff."""
   reference = CertificationInputReference.model_validate(result["certification_input"])
   if (result.get("ready") is not True or result.get("dataset_version") != job.request["dataset_version"]
       or reference.bundle.source_id != job.request["dataset_version"]):
@@ -36,17 +36,24 @@ async def publish_certification_input(job, directory, result, transfer):
 
   def upload():
     reject_links(directory)
-    with publication_lock(directory):
-      inputs = directory / "certification-inputs"
-      verify_bundle(inputs, reference.bundle, cancel=cancel)
-      with open_store(transfer, cancel=cancel) as store:
-        if store.publish(reference.bundle, inputs) != reference.bundle.bundle_id:
-          raise ValueError("Certification input remote identity mismatch")
+    inputs = directory / "certification-inputs"
+    verify_bundle(inputs, reference.bundle, cancel=cancel)
+    with open_store(transfer, cancel=cancel) as store:
+      if store.publish(reference.bundle, inputs) != reference.bundle.bundle_id:
+        raise ValueError("Certification input remote identity mismatch")
     return reference
 
+  if check is not None:
+    await check()
   task = asyncio.create_task(asyncio.to_thread(upload))
   try:
-    return await asyncio.shield(task)
+    if check is None:
+      return await asyncio.shield(task)
+    while not task.done():
+      done, _ = await asyncio.wait({task}, timeout=10)
+      if not done:
+        await check()
+    return task.result()
   except BaseException:
     cancel.set()
     while not task.done():

@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_trainer import training_flow as training
@@ -128,7 +129,7 @@ async def test_dispatch_waits_for_work_to_stop_before_making_retry_available(mon
     assert values["expected_flow_run_id"] == "owner"
 
   monkeypatch.setattr(preparation, "AsyncSessionLocal", session)
-  monkeypatch.setattr(preparation, "ResearchPreparationRepository", lambda db: SimpleNamespace(claim=claim))
+  monkeypatch.setattr(preparation, "ResearchPreparationRepository", lambda db: SimpleNamespace(claim=claim, running_jobs=AsyncMock(return_value=[])))
   monkeypatch.setattr(preparation, "_full_live_runtime", lambda: False)
   monkeypatch.setattr(preparation, "root", lambda: tmp_path)
   monkeypatch.setattr(preparation, "perform", work)
@@ -183,4 +184,43 @@ async def test_interrupted_spawn_cannot_make_export_retryable(tmp_path, monkeypa
 
   monkeypatch.setattr(preparation.asyncio, "create_subprocess_exec", AsyncMock(side_effect=asyncio.CancelledError))
   with pytest.raises(preparation.PreparationProcessUnconfirmed, match="SPAWN_UNCONFIRMED"):
-    await preparation.run_research(SimpleNamespace(kind="CERTIFY", request={}), tmp_path)
+    await preparation.run_research(SimpleNamespace(kind="CERTIFY", job_id="job", flow_run_id="owner", request={}), tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 75])
+async def test_certification_export_records_real_child_identity_and_exit(tmp_path, monkeypatch, exit_code):
+  import asyncio
+  import json
+  import sys
+  from types import SimpleNamespace
+
+  from quantx_infrastructure.training_process_evidence import local_exit_recorded
+  from quantx_worker.prefector.flows import research_preparation_flow as preparation
+
+  create = asyncio.create_subprocess_exec
+
+  async def spawn(*args, **kwargs):
+    script = "import pathlib,sys; pathlib.Path(sys.argv[1]).with_name('result.json').write_text('{\"ready\":true}'); raise SystemExit(int(sys.argv[2]))"
+    return await create(sys.executable, "-c", script, args[-1], str(exit_code), **kwargs)
+
+  monkeypatch.setattr(preparation.asyncio, "create_subprocess_exec", spawn)
+  job = SimpleNamespace(kind="CERTIFY", job_id="job", flow_run_id="owner", request={"dataset_version": "version"})
+  if exit_code:
+    with pytest.raises(RuntimeError):
+      await preparation.run_research(job, tmp_path)
+  else:
+    assert await preparation.run_research(job, tmp_path) == {"ready": True}
+  request, evidence = preparation.certification_execution_paths(tmp_path, "owner")
+  record = json.loads(evidence.read_text())
+  assert record["state"] == "EXITED" and record["returncode"] == exit_code
+  assert local_exit_recorded(evidence, run_id="job", owner="owner", request=request)
+  assert json.loads(request.read_text())["dataset_version"] == "version"
+  old = request.read_bytes()
+  saved_result = (tmp_path / "result.json").read_bytes()
+  with pytest.raises(FileExistsError):
+    await preparation.run_research(job, tmp_path)
+  assert (tmp_path / "result.json").read_bytes() == saved_result
+  next_request, next_evidence = preparation.certification_execution_paths(tmp_path, "another-owner")
+  assert next_request != request and next_evidence != evidence
+  assert request.read_bytes() == old

@@ -1,14 +1,16 @@
 """Durable preparation dispatcher; research runs isolated from Worker imports."""
 
 import asyncio
+import hashlib
 import json
+import os
 import subprocess
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from prefect import flow
-from prefect.runtime import flow_run
 from quantx_infrastructure.async_process_stop import stop_async_process
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.services.research_preparation import (
@@ -19,6 +21,14 @@ from quantx_infrastructure.services.research_preparation import (
 from quantx_infrastructure.services.research_preparation_window import (
   _full_live_runtime,
   is_critical_trading_window,
+)
+from quantx_infrastructure.training_bundle_store import publication_lock
+from quantx_infrastructure.training_process_evidence import (
+  begin_execution,
+  inspect_execution,
+  local_exit_recorded,
+  record_exit,
+  record_spawn,
 )
 
 from quantx_worker.prefector.flows.certification_transfer import (
@@ -40,14 +50,33 @@ async def update_job(job_id, *, expected_flow_run_id, **values):
     await ResearchPreparationRepository(db).progress(job_id, expected_flow_run_id=expected_flow_run_id, **values)
 
 
+def certification_execution_paths(directory: Path, owner: str):
+  if not owner:
+    raise ValueError("Certification execution requires an owner")
+  suffix = hashlib.sha256(owner.encode()).hexdigest()
+  return directory / f"request-{suffix}.json", directory / f"process-{suffix}.json"
+
+
 async def run_research(job, directory: Path):
-  request = directory / "request.json"
+  certification = job.kind == "CERTIFY"
+  request, evidence = (
+    certification_execution_paths(directory, job.flow_run_id)
+    if certification else (directory / "request.json", None)
+  )
   result_file = directory / "result.json"
   reject_links(request)
   reject_links(result_file)
+  if certification and (os.path.lexists(request) or os.path.lexists(evidence)):
+    raise FileExistsError("Certification attempt evidence already exists")
   if result_file.exists():
     result_file.unlink()
-  request.write_text(json.dumps({"kind": job.kind, **job.request}), encoding="utf-8")
+  with request.open("x" if certification else "w", encoding="utf-8") as stream:
+    json.dump({"kind": job.kind, **job.request}, stream)
+    stream.flush()
+    os.fsync(stream.fileno())
+  if certification:
+    identity = dict(run_id=job.job_id, owner=job.flow_run_id, request=request)
+    begin_execution(evidence, **identity)
   try:
     process = await asyncio.create_subprocess_exec(
       sys.executable,
@@ -61,6 +90,8 @@ async def run_research(job, directory: Path):
   except BaseException:
     raise PreparationProcessUnconfirmed("PREPARATION_PROCESS_SPAWN_UNCONFIRMED") from None
   try:
+    if certification:
+      record_spawn(evidence, process=SimpleNamespace(pid=process.pid, poll=lambda: process.returncode), **identity)
     await process.wait()
     if process.returncode != 0 or not result_file.is_file():
       raise RuntimeError("Research 子进程未完成，请检查运行端依赖")
@@ -75,6 +106,8 @@ async def run_research(job, directory: Path):
       stopped = False
     if not stopped:
       raise PreparationProcessUnconfirmed("PREPARATION_PROCESS_STOP_UNCONFIRMED")
+    if certification:
+      record_exit(evidence, returncode=process.returncode, **identity)
 
 
 async def keep_alive(job_id, owner):
@@ -84,6 +117,13 @@ async def keep_alive(job_id, owner):
 
 
 async def perform(job, directory):
+  if job.kind == "CERTIFY":
+    with publication_lock(directory):
+      return await _perform(job, directory)
+  return await _perform(job, directory)
+
+
+async def _perform(job, directory):
   if job.kind == "GPU":
     raise ValueError("GPU preparation belongs to Trainer")
   transfer = export_transfer_config() if job.kind == "CERTIFY" else None
@@ -192,13 +232,59 @@ def public_result(result):
   }
 
 
+async def recover_certification_exports():
+  async with AsyncSessionLocal() as db:
+    jobs = await ResearchPreparationRepository(db).running_jobs(kinds=("CERTIFY",))
+    for job in jobs:
+      db.expunge(job)
+  recovered = []
+  for job in jobs:
+    if job.request.get("certification_input"):
+      continue  # Trainer owns the subsequent phase.
+    directory = root() / ".runtime/research-preparation" / job.job_id
+    try:
+      reject_links(directory)
+      if not directory.is_dir():
+        continue
+      with publication_lock(directory):
+        request, evidence = certification_execution_paths(directory, job.flow_run_id)
+        identity = dict(run_id=job.job_id, owner=job.flow_run_id, request=request)
+        if inspect_execution(evidence, **identity) != "EXITED" and not local_exit_recorded(evidence, **identity):
+          continue
+        process = json.loads(evidence.read_text(encoding="utf-8"))
+        if process.get("state") != "EXITED" or type(process.get("returncode")) is not int or process["returncode"] != 0:
+          continue
+        executed = json.loads(request.read_text(encoding="utf-8"))
+        if executed != {"kind": job.kind, **job.request}:
+          continue
+        result_file = directory / "result.json"
+        reject_links(result_file)
+        if result_file.stat().st_size > 8 * 1024 * 1024:
+          continue
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+        if not isinstance(result, dict) or result.get("ready") is not True:
+          continue
+
+        async def check():
+          await update_job(job.job_id, expected_flow_run_id=job.flow_run_id)
+
+        reference = await publish_certification_input(job, directory, result, export_transfer_config(), check=check)
+        async with AsyncSessionLocal() as db:
+          await ResearchPreparationRepository(db).handoff_certification(job.job_id, expected_flow_run_id=job.flow_run_id, reference=reference)
+        recovered.append(job.job_id)
+    except Exception:
+      continue  # Unknown exit, disconnected control/store, or an active publisher.
+  return recovered
+
+
 @flow(name="research-preparation-dispatch", retries=0)
 async def research_preparation_dispatch_flow():
+  await recover_certification_exports()
   if _full_live_runtime() and await is_critical_trading_window():
     return {"status": "QUEUED", "reason": "TRADING_CRITICAL_WINDOW"}
   async with AsyncSessionLocal() as db:
     job = await ResearchPreparationRepository(db).claim(
-      str(flow_run.id or uuid.uuid4()), kinds=("COVERAGE", "DOWNLOAD", "CERTIFY"), executor="WORKER",
+      str(uuid.uuid4()), kinds=("COVERAGE", "DOWNLOAD", "CERTIFY"), executor="WORKER",
     )
     if job is None:
       return {"status": "IDLE"}
