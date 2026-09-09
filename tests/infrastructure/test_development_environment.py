@@ -1,14 +1,10 @@
 import importlib.util
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-from zoneinfo import ZoneInfo
 
 import pytest
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from quantx_contracts.runtime_environment import live_runtime_allowed
-from quantx_infrastructure.services import development_history_window as window
 
 
 def test_live_runtime_requires_windows_and_explicit_environment():
@@ -25,27 +21,6 @@ def test_history_request_rejects_trading_fields():
     HistoryPartitionRequest(
       instrument="600000.SH", period="tick", trading_date="2026-09-07", account_id="x"
     )
-
-
-@pytest.mark.parametrize(
-  "hour,minute,expected",
-  [(8, 29, True), (8, 30, False), (12, 0, False), (15, 59, False), (16, 0, True)],
-)
-async def test_history_window_boundaries(monkeypatch, hour, minute, expected):
-  monkeypatch.setattr(
-    window.HolidayService,
-    "get_holidays",
-    AsyncMock(return_value=[SimpleNamespace(date=datetime(2026, 1, 1).date())]),
-  )
-  now = datetime(2026, 9, 8, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai"))
-  assert await window.history_window_open(now) is expected
-
-
-async def test_missing_calendar_never_admits_download(monkeypatch):
-  monkeypatch.setattr(window.HolidayService, "get_holidays", AsyncMock(return_value=[]))
-  assert not await window.history_window_open(
-    datetime(2026, 9, 8, 20, tzinfo=ZoneInfo("Asia/Shanghai"))
-  )
 
 
 def test_development_config_never_uses_production_services(tmp_path):

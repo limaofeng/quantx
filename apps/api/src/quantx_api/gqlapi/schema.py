@@ -45,6 +45,10 @@ from .schemas import (
   WorkflowMutation,
   WorkflowQuery,
 )
+from .schemas.history_download_settings_schema import (
+  HistoryDownloadSettingsMutation,
+  HistoryDownloadSettingsQuery,
+)
 from .security import AuthorizationExtension
 
 
@@ -84,6 +88,7 @@ from .security import AuthorizationExtension
 """
 )
 class Query(
+  HistoryDownloadSettingsQuery,
   AiAssistantQuery,
   AgentQuery,
   AnnouncementQuery,
@@ -133,6 +138,7 @@ class Query(
 """
 )
 class Mutation(
+  HistoryDownloadSettingsMutation,
   AiAssistantMutation,
   AgentMutation,
   AnnouncementMutation,

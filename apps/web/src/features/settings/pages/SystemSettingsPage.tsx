@@ -23,11 +23,13 @@ import { cn } from '@/utils/cn';
 
 import { AiRuntimeSettingsPanel } from '../components/AiRuntimeSettingsPanel';
 import { AppearanceSettingsPanel } from '../components/AppearanceSettingsPanel';
+import { HistoryDownloadSettingsPanel } from '../components/HistoryDownloadSettingsPanel';
 import { ServiceStatusHistoryPanel } from '../components/ServiceStatusHistoryPanel';
 import { ServiceStatusPanel } from '../components/ServiceStatusPanel';
 import { TradingSafetySettingsPanel } from '../components/TradingSafetySettingsPanel';
 
 type SettingsSection =
+  | 'market-data'
   | 'overview'
   | 'appearance'
   | 'status'
@@ -42,6 +44,13 @@ const navigation: Array<{
   href: string;
   icon: LucideIcon;
 }> = [
+  {
+    id: 'market-data',
+    label: '行情数据',
+    description: '历史补采与允许时段',
+    href: '/settings/market-data',
+    icon: Database,
+  },
   {
     id: 'overview',
     label: '系统概览',
@@ -87,6 +96,7 @@ const navigation: Array<{
 ];
 
 function activeSection(path: string): SettingsSection {
+  if (path.startsWith('/settings/market-data')) return 'market-data';
   if (path.startsWith('/settings/appearance')) return 'appearance';
   if (path.startsWith('/settings/status')) return 'status';
   if (path.startsWith('/settings/trading-safety')) return 'trading-safety';
@@ -277,6 +287,7 @@ export function SystemSettingsPage() {
       <main className="min-h-0 flex-1 overflow-hidden">
         <StudioPageFrame>
           {section === 'overview' && <SettingsOverview onNavigate={navigate} />}
+          {section === 'market-data' && <HistoryDownloadSettingsPanel />}
           {section === 'appearance' && <AppearanceSettingsPanel />}
           {section === 'status' &&
             (historyParams ? (

@@ -423,6 +423,15 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'dashboard',
   }),
   route({
+    path: '/settings/market-data',
+    title: '行情数据',
+    importer: toDefaultExport(
+      () => import('@/features/settings/pages/SystemSettingsPage'),
+      'SystemSettingsPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
     path: '/settings/ai-runtime',
     title: '系统设置',
     importer: toDefaultExport(
@@ -629,6 +638,7 @@ export function isNavigationItemActive(
       '/settings/appearance',
       '/settings/qmt',
       '/settings/ai-runtime',
+      '/settings/market-data',
       '/settings/agents',
     ].includes(normalizedPathname);
   }

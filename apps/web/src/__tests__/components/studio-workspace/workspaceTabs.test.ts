@@ -8,6 +8,13 @@ import {
 } from '@/components/studio-workspace';
 
 describe('studio workspace tabs', () => {
+  it('keeps history settings in the settings workspace', () => {
+    expect(buildStudioWorkspaceTab('/settings/market-data')).toMatchObject({
+      id: 'settings',
+      name: '系统设置',
+      path: '/settings/market-data',
+    });
+  });
   it('keeps service history, metric switches and pagination in the status tab', () => {
     for (const path of [
       '/settings/status',

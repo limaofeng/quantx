@@ -87,6 +87,7 @@ from .first_board_promotion import (
   LimitUpResearchArtifact,
   LimitUpResearchJob,
 )
+from .history_download_settings import HistoryDownloadSettingsRecord
 from .holidays import Holiday
 from .indicator_snapshot import IndicatorSnapshot
 
@@ -256,6 +257,7 @@ __all__ = [
   "AiAssistantToolCall",
   "AiRuntimeSettingsAudit",
   "AiRuntimeSettingsRecord",
+  "HistoryDownloadSettingsRecord",
   "AgentDevice",
   "AccountExecutionControl",
   "AccountExecutionControlEvent",

@@ -237,6 +237,7 @@ _register(
   {
     "qmtAgentConnection",
     "aiRuntimeSettings",
+    "historyDownloadSettings",
     "flowRun",
     "flowRuns",
     "getDeploymentById",
@@ -532,7 +533,7 @@ _register(
 _register(
   "Mutation",
   "system-config:write",
-  {"updateAiRuntimeSettings"},
+  {"updateAiRuntimeSettings", "updateHistoryDownloadSettings"},
   audiences=WEB_ONLY,
   stability="web-internal",
   risk="ADMIN",
