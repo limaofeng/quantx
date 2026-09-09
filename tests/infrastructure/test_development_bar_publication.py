@@ -46,7 +46,11 @@ from tests.worker.test_development_data_export import bar
 
 @pytest.fixture
 async def prepared(references, workers, tmp_path, monkeypatch, request):
-  start_write = getattr(request, "param", True)
+  options = getattr(request, "param", True)
+  start_write = (
+    options.get("start_write", True) if isinstance(options, dict) else options
+  )
+  period = options.get("period", "1m") if isinstance(options, dict) else "1m"
   first, second = workers[0]
   await install_budget_schema(first.engine)
   path = (
@@ -70,9 +74,12 @@ async def prepared(references, workers, tmp_path, monkeypatch, request):
     await db.run_sync(upgrade)
   monkeypatch.setenv("QUANTX_DATA_EXPORT_ROOT", str(tmp_path))
   request = HistoryPartitionRequest(
-    instrument="600000.SH", period="1m", trading_date="2026-09-07"
+    instrument="600000.SH", period=period, trading_date="2026-09-07"
   )
-  chunks, ref = publish(partition_records([[bar()]], request)), reference()
+  source_row = {**bar(), "period": period}
+  if period == "1d":
+    source_row["time"] -= (9 * 60 + 31) * 60 * 1000
+  chunks, ref = publish(partition_records([[source_row]], request)), reference()
   manifest = {
     "version": 1,
     "payload": request.agent_payload(),

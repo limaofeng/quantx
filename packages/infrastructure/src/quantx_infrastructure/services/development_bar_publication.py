@@ -250,22 +250,27 @@ async def check_delivery_bar_publication(db, delivery_id, version, proof, *, own
   return row["manifest"]
 
 
+_VISIBLE_VERSION_QUERY = """
+    SELECT v.* FROM development_data_bar_version v
+    JOIN development_data_export e ON e.id=v.delivery_id
+    JOIN development_data_ingestion i ON i.delivery_id=v.delivery_id
+    WHERE e.state='LOCAL_VERIFIED' AND i.progress->>'phase'='VERIFIED'
+      AND v.proof IS NOT NULL AND v.source_version=e.manifest->>'data_version'
+      AND e.request->>'instrument'=v.stock_code AND e.request->>'period'=v.period
+      AND e.request->>'trading_date'=to_char(v.trading_date,'YYYY-MM-DD')
+      AND CAST(e.manifest->'local_verification'->'immutable_storage' AS JSONB)=v.proof
+"""
+
+
 async def resolve_published_bar_version(db, request: HistoryPartitionRequest):
   """Only the exact version in a committed local receipt is eligible for reads."""
   row = (
     (
       await db.execute(
-        text("""
-    SELECT v.* FROM development_data_bar_version v
-    JOIN development_data_export e ON e.id=v.delivery_id
-    JOIN development_data_ingestion i ON i.delivery_id=v.delivery_id
-    WHERE v.stock_code=:code AND v.period=:period AND v.trading_date=:day
-      AND e.state='LOCAL_VERIFIED' AND i.progress->>'phase'='VERIFIED'
-      AND v.proof IS NOT NULL AND v.source_version=e.manifest->>'data_version'
-      AND e.request->>'instrument'=v.stock_code AND e.request->>'period'=v.period
-      AND e.request->>'trading_date'=to_char(v.trading_date,'YYYY-MM-DD')
-      AND CAST(e.manifest->'local_verification'->'immutable_storage' AS JSONB)=v.proof
-  """),
+        text(
+          _VISIBLE_VERSION_QUERY
+          + " AND v.stock_code=:code AND v.period=:period AND v.trading_date=:day"
+        ),
         {
           "code": request.instrument,
           "period": request.period,
@@ -277,3 +282,35 @@ async def resolve_published_bar_version(db, request: HistoryPartitionRequest):
     .one_or_none()
   )
   return dict(row) if row else None
+
+
+async def resolve_published_daily_versions(db, request):
+  from zoneinfo import ZoneInfo
+
+  from quantx_contracts.daily_snapshot_read import DailySnapshotRead
+
+  request = DailySnapshotRead.model_validate(request)
+  start = request.start.astimezone(ZoneInfo("Asia/Shanghai")).date()
+  end = request.end.astimezone(ZoneInfo("Asia/Shanghai")).date()
+  limit = len(request.instruments) * 62
+  rows = (
+    (
+      await db.execute(
+        text(
+          _VISIBLE_VERSION_QUERY
+          + """
+    AND v.stock_code = ANY(:codes) AND v.period='1d' AND v.trading_date BETWEEN :start AND :end
+    ORDER BY v.stock_code,v.trading_date LIMIT :limit
+  """
+        ),
+        {"codes": request.instruments, "start": start, "end": end, "limit": limit + 1},
+      )
+    )
+    .mappings()
+    .all()
+  )
+  if len(rows) > limit:
+    raise ValueError("published daily version lookup exceeded its row budget")
+  return {
+    (row["stock_code"], row["trading_date"]): row["storage_version"] for row in rows
+  }

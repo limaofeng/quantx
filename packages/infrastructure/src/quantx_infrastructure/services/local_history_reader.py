@@ -69,6 +69,22 @@ class LocalHistoryReader:
       lambda value: read_latest_daily(self.connection, value), request
     )
 
+  async def read_latest_published_daily(self, request, *, session_factory):
+    from .development_bar_publication import resolve_published_daily_versions
+    from .local_daily_snapshot_reader import read_latest_daily
+
+    if self._slot.locked():
+      raise HistoryReadBusy("local history query capacity exhausted")
+    async with self._slot:
+      async with asyncio.timeout(3), session_factory() as db:
+        versions = await resolve_published_daily_versions(db, request)
+      return await self._read_thread(
+        lambda value: read_latest_daily(
+          self.connection, value, published_versions=versions
+        ),
+        request,
+      )
+
   async def _run_read(self, read, request):
     if self._slot.locked():
       raise HistoryReadBusy("local history query capacity exhausted")
@@ -190,4 +206,20 @@ class LocalHistoryReader:
       records=records,
       next_after=previous if records else None,
       exhausted=not records,
+    )
+
+
+class PublishedHistoryReader(LocalHistoryReader):
+  """The development API adapter reads only receipt-selected versions."""
+
+  def __init__(self, session_factory, connection=None):
+    super().__init__(connection)
+    self.session_factory = session_factory
+
+  async def read(self, request):
+    return await self.read_published(request, session_factory=self.session_factory)
+
+  async def read_latest_daily(self, request):
+    return await self.read_latest_published_daily(
+      request, session_factory=self.session_factory
     )
