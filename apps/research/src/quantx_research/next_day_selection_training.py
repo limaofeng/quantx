@@ -50,6 +50,7 @@ from sklearn.linear_model import LogisticRegression
 from quantx_research.artifacts import (
   artifact_index,
   file_sha256,
+  git_state,
   runtime_metadata,
   write_json,
   write_yaml,
@@ -1379,6 +1380,7 @@ def _validate_parent_lock(
   if not isinstance(artifact_hashes, dict) or not artifact_hashes:
     raise ValueError("父级锁定缺少完整 artifact_hashes")
   required_artifacts = {
+    "source-evidence.json",
     "resolved-config.yaml",
     "factor-schema.json",
     "preprocessing.json",
@@ -1574,6 +1576,29 @@ def _gate_projection(
   return gates, conclusion
 
 
+def _training_source_evidence() -> dict[str, Any]:
+  state = git_state(REPO_ROOT)
+  packaged = "code_manifest_sha256" in state
+  if packaged and state.get("dirty") is not False:
+    raise ValueError("TRAINER_SOURCE_CHANGED")
+  # Git diagnostics may contain host paths. Persist only bounded identity fields.
+  return {
+    "schema_version": 1,
+    "source": "trainer-package" if packaged else "git",
+    "commit": state.get("commit"),
+    "dirty": state.get("dirty"),
+    "status_fingerprint": state.get("status_fingerprint"),
+    "code_manifest_sha256": state.get("code_manifest_sha256"),
+  }
+
+
+def _validate_parent_source(parent_dir: Path, current: Mapping[str, Any]) -> None:
+  parent = _load_json(parent_dir / "source-evidence.json")
+  if current["source"] == "trainer-package" or parent.get("source") == "trainer-package":
+    if parent != current:
+      raise ValueError("TRAINER_PARENT_SOURCE_MISMATCH")
+
+
 async def execute_next_day_selection_run(
   *,
   run_kind: RunKind | str,
@@ -1737,6 +1762,8 @@ async def execute_next_day_selection_run(
     monitor.__enter__()
     monitor_started = True
     checkpoint(TrainingPhase.PREFLIGHT, 0, 1, "核验训练 spec 与认证数据集")
+    source_evidence = _training_source_evidence()
+    write_json(run_dir / "source-evidence.json", source_evidence)
     config = _config_from_spec(spec_payload)
     panel, dataset_manifest = _load_certified_panel(dataset_directory)
     panel = _project_certified_panel(panel, dataset_manifest, config)
@@ -2051,6 +2078,7 @@ async def execute_next_day_selection_run(
       dataset_manifest_hash=dataset_manifest["manifest_sha256"],
       panel_hash=panel_hash,
     )
+    _validate_parent_source(parent_dir, source_evidence)
     parent_metrics_hash = artifact_hashes["metrics.json"]
     parent_runtime = _load_json(parent_dir / "model-runtime.json")
     parent_preprocessor = _load_json(parent_dir / "preprocessing.json")

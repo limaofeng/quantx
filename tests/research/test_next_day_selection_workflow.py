@@ -153,6 +153,8 @@ class _FakeModel:
 
 @pytest.mark.parametrize("relocate_parent", [False, True])
 def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: Path, relocate_parent) -> None:
+  source_state = {"commit": "d" * 40, "dirty": False, "status_fingerprint": "e" * 64, "code_manifest_sha256": "f" * 64}
+  monkeypatch.setattr(training, "git_state", lambda root: dict(source_state))
   allocate = training.tempfile.mkdtemp
 
   def scratch_directory(*args, **kwargs):
@@ -182,6 +184,9 @@ def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: 
   development = asyncio.run(training.execute_next_day_selection_run(run_kind="DEVELOPMENT", spec={**spec, "run_kind": "DEVELOPMENT"}, dataset_directory=dataset, output_root=tmp_path / "runs", run_id="development"))
   development_manifest = json.loads((development / "manifest.json").read_text(encoding="utf-8"))
   assert development_manifest["status"] == "SUCCEEDED"
+  assert "source-evidence.json" in {entry["path"] for entry in development_manifest["artifacts"]}
+  source = json.loads((development / "source-evidence.json").read_text())
+  assert source["code_manifest_sha256"] == "f" * 64
   for entry in development_manifest["artifacts"]:
     artifact = development / entry["path"]
     assert artifact.is_file(), entry["path"]
@@ -226,6 +231,14 @@ def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: 
     final_manifest["conclusion"] != "BLOCKED"
     and final_manifest["gates"]["access_evidence_valid"]
   )
+
+  source_state["commit"] = "0" * 40
+  monkeypatch.setattr(training, "_load_parent_family", lambda *args, **kwargs: pytest.fail("model loaded across source versions"))
+  with pytest.raises(ValueError, match="TRAINER_PARENT_SOURCE_MISMATCH"):
+    asyncio.run(training.execute_next_day_selection_run(run_kind="FINAL_EVALUATION", spec=final_spec, dataset_directory=dataset, output_root=tmp_path / "runs", run_id="different-source", parent_run_directory=development, frozen_test_access_count=1))
+  mismatch = json.loads((tmp_path / "runs" / "different-source" / "manifest.json").read_text())
+  assert mismatch["status"] == "FAILED"
+  assert mismatch["registerable"] is False
 
   with pytest.raises(RunCancelled):
     asyncio.run(training.execute_next_day_selection_run(run_kind="DEVELOPMENT", spec={**spec, "run_kind": "DEVELOPMENT"}, dataset_directory=dataset, output_root=tmp_path / "runs", run_id="cancelled", cancel_callback=lambda: True))
@@ -537,3 +550,33 @@ def test_job_error_sanitizer_redacts_windows_unc_and_unix_paths() -> None:
   assert "Workspace" not in message
   assert "server" not in message
   assert "/var/" not in message
+
+
+@pytest.mark.parametrize("invalid", ["dirty", "broken"])
+def test_packaged_source_failure_precedes_dataset_read(tmp_path, monkeypatch, invalid):
+  def state(root):
+    if invalid == "broken":
+      raise ValueError("TRAINER_SOURCE_EVIDENCE_INVALID")
+    return {"code_manifest_sha256": "f" * 64, "dirty": True}
+
+  monkeypatch.setattr(training, "git_state", state)
+  monkeypatch.setattr(training, "_load_certified_panel", lambda *args: pytest.fail("dataset read before source validation"))
+  with pytest.raises(ValueError, match="TRAINER_SOURCE"):
+    asyncio.run(training.execute_next_day_selection_run(run_kind="DEVELOPMENT", spec=_spec(tmp_path), dataset_directory=tmp_path / "missing", output_root=tmp_path / "runs", run_id="source-rejected"))
+  manifest = json.loads((tmp_path / "runs" / "source-rejected" / "manifest.json").read_text())
+  assert manifest["status"] == "FAILED"
+  assert manifest["registerable"] is False
+
+
+def test_parent_source_requires_same_package(tmp_path):
+  source = {"schema_version": 1, "source": "trainer-package", "commit": "a" * 40, "dirty": False, "status_fingerprint": "b" * 64, "code_manifest_sha256": "c" * 64}
+  write_json(tmp_path / "source-evidence.json", source)
+  training._validate_parent_source(tmp_path, source)
+  for key, value in [("commit", "d" * 40), ("code_manifest_sha256", "e" * 64), ("source", "git")]:
+    with pytest.raises(ValueError, match="TRAINER_PARENT_SOURCE_MISMATCH"):
+      training._validate_parent_source(tmp_path, {**source, key: value})
+
+
+def test_training_source_omits_git_diagnostic_paths(monkeypatch):
+  monkeypatch.setattr(training, "git_state", lambda root: {"commit": None, "dirty": None, "warning": "private /host/path credential"})
+  assert "private" not in json.dumps(training._training_source_evidence())

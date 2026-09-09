@@ -37,6 +37,8 @@ capability，再通过 `previewStockSelectionTraining(input)` 固化一次预检
 一致，结论为 `SHADOW_ELIGIBLE` 或 `ACTIVE_ELIGIBLE` 并标记 `registerable`，才可
 通过 `registerStockSelectionModel(runKey)` 进入人工 registry。DB 中的 `run_key` 是
 登记真源；运行目录必须是 `.runtime/research-runs/<run_id>` 的安全子目录。
+Trainer 训练结果包含 `source-evidence.json`，并纳入结果清单与 DEVELOPMENT 锁定哈希。FINAL_EVALUATION 要求父锁包含该文件；当任一侧使用 Trainer 部署包时，双方源码提交及清单证据必须一致。部署包改动或证据损坏会使训练失败；普通 Git 开发目录的状态记录仅用于审计，不代表运行环境冻结。
+
 登记还要求 DEVELOPMENT 父运行已成功，manifest 的 `parent_run_id` 与 metrics 的
 `parent_development.run_id` 均匹配数据库关联；父运行失败、未结束或关联不一致时拒绝登记。
 制品加载器校验并保留 `parent_development` 的运行标识、`metrics_sha256` 和

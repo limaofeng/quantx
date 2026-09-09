@@ -134,6 +134,7 @@ def git_state(repo_root: Path) -> dict[str, Any]:
       text=True,
       encoding="utf-8",
       errors="replace",
+      timeout=10,
     )
     return result.stdout.strip()
 
@@ -145,7 +146,7 @@ def git_state(repo_root: Path) -> dict[str, Any]:
       "dirty": bool(status),
       "status_fingerprint": fingerprint(status.splitlines()),
     }
-  except (OSError, subprocess.CalledProcessError) as exc:
+  except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
     return {
       "commit": None,
       "dirty": None,
