@@ -88,7 +88,7 @@ signing_key = _signing_key
 @pytest.mark.parametrize(
   "review_evidence", [allocation.NOW.replace(hour=1)], indirect=True
 )
-@pytest.mark.parametrize("fault", [None, "disabled", "approval"])
+@pytest.mark.parametrize("fault", [None, "disabled", "approval", "device_lost"])
 async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
   sessions, review_evidence, monkeypatch, fault
 ):
@@ -270,7 +270,7 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       now=confirmed,
       fresh_review=adapter(db),
     )
-    if fault:
+    if fault in {"disabled", "approval"}:
       with pytest.raises(
         ValueError,
         match=(
@@ -286,3 +286,91 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
 
     assert await db.scalar(select(func.count()).select_from(PendingTradeOrder)) == 0
     assert await db.scalar(select(func.count()).select_from(TradeCommandOutbox)) == 0
+
+  if fault in {"disabled", "approval"}:
+    return
+
+  # Continue through the real account sequencer and final command service.
+  # Only the platform/device boundary and wall clock are supplied by the test.
+  from datetime import datetime
+  from unittest.mock import AsyncMock
+
+  from quantx_contracts import runtime_environment
+  from quantx_infrastructure.models.agent_runtime import TTradeBatch
+  from quantx_infrastructure.models.risk_increase_admission import (
+    AccountRiskIncreaseAdmissionBatch,
+  )
+  from quantx_infrastructure.services import (
+    account_risk_increase_admission as admission_module,
+  )
+  from quantx_infrastructure.services import (
+    trade_command_service as command_module,
+  )
+
+  class FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+      return confirmed.astimezone(tz) if tz else confirmed.replace(tzinfo=None)
+
+  monkeypatch.setattr(command_module, "datetime", FixedDateTime)
+  monkeypatch.setattr(command_module.time_utils, "now", lambda: confirmed)
+  for module in (command_module, admission_module):
+    monkeypatch.setattr(module, "utcnow", lambda: confirmed.replace(tzinfo=None))
+  monkeypatch.setattr(
+    runtime_environment, "live_runtime_allowed", lambda environment: True
+  )
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(
+    command_module.settings, "real_trading_account_allowlist", ["account-1"]
+  )
+  async with sessions() as db:
+    service = command_module.TradeCommandService(db, live_entry_review=adapter(db))
+    service._device_for = AsyncMock(
+      return_value=SimpleNamespace(id="synthetic", user_id="user-1")
+    )
+    service._require_live_market_stream_ready = AsyncMock()
+    if fault == "device_lost":
+      service._device_for.side_effect = [
+        SimpleNamespace(id="synthetic", user_id="user-1"),
+        command_module.AgentUnavailableError("SYNTHETIC_DEVICE_LOST"),
+      ]
+    call = service.dispatch_ready_risk_increase_orders(
+      account_id="account-1", processing_owner="isolated-test"
+    )
+    if fault == "device_lost":
+      with pytest.raises(
+        command_module.AgentUnavailableError, match="SYNTHETIC_DEVICE_LOST"
+      ):
+        await call
+      for model in (
+        PendingTradeOrder,
+        OrderCorrelation,
+        TradeCommandOutbox,
+        TTradeBatch,
+      ):
+        assert await db.scalar(select(func.count()).select_from(model)) == 0
+      intent = await db.get(TradeIntentRecord, "intent-0", populate_existing=True)
+      assert intent.status == "EXECUTION_READY"
+      assert "risk_increase_order_request" in intent.intent_metadata
+      return
+    queued = await call
+    assert set(queued) == {"intent-0"}
+    pending = await db.get(PendingTradeOrder, queued["intent-0"].client_order_id)
+    outbox = await db.get(TradeCommandOutbox, queued["intent-0"].message_id)
+    batch = await db.scalar(select(TTradeBatch))
+    admission = await db.scalar(select(AccountRiskIncreaseAdmissionBatch))
+    intent = await db.get(TradeIntentRecord, "intent-0", populate_existing=True)
+    assert intent.status == "EXECUTION_PENDING"
+    assert admission.status == "COMMITTED"
+    assert (
+      batch.source_execution_owner_type == pending.owner_type == "T_ASSISTANT_EXECUTION"
+    )
+    assert pending.owner_id == "live-fixture" and pending.volume == 100
+    assert pending.strategy_run_id is batch.strategy_run_id is None
+    assert outbox.delivery_status == "QUEUED"
+    assert (
+      await service.dispatch_ready_risk_increase_orders(
+        account_id="account-1", processing_owner="replay"
+      )
+    ) == {}
+    assert await db.scalar(select(func.count()).select_from(PendingTradeOrder)) == 1

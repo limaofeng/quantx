@@ -184,6 +184,16 @@ class LiveEntryExecutionReview:
       return LiveEntryReviewResult(
         "REJECT", tuple(draft.size_reason_codes) + ("LIVE_REVIEW_ZERO_SIZE",)
       )
+    from quantx_infrastructure.services.live_position_attribution import (
+      LivePositionAttributionService,
+    )
+
+    attribution = await LivePositionAttributionService(self.db).read(
+      account_id=intent.account_id,
+      as_of=now,
+      max_age_seconds=90,
+    )
+    bucket_inventory = attribution.projection.instruments[intent.instrument_code]
     request = OrderRequest(
       instrument_code=intent.instrument_code,
       order_type=OrderType.BUY,
@@ -193,6 +203,12 @@ class LiveEntryExecutionReview:
       execution_ref=domain_intent.execution_ref,
       environment=ExecutionEnvironment.LIVE,
       metadata={
+        "t_trading_envelope": {
+          "observed_position_projection": bucket_inventory,
+          "protected_old_position_floor": envelope.protected_old_position_floor,
+          "allow_core_claim": True,
+          "attribution_evidence_hash": attribution.evidence_hash,
+        },
         "bucket": intent.bucket,
         "intent_id": intent.id,
         "portfolio_input_fingerprint": portfolio.portfolio_input_fingerprint,

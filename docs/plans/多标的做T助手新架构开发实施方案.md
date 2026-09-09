@@ -839,11 +839,19 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   当前 T 入场审查/确认授权，核对命令用户与授权设备用户。新批次的 source owner 指向
   T 执行，strategy_run_id/strategy_order_id 保持空。实际 SQLite 持久化与拒绝零写入测试
   通过；公共命令与隔离确认链联合 45 项通过，证据
-  `.codex_screenshots/p6-live-command-owner-regression.log`。最终持久化测试显式替换设备、
-  admission、容量及审查边界，仍需把此前真实服务组合接入同一 admission→outbox 测试。
+  `.codex_screenshots/p6-live-command-owner-regression.log`。前序最终持久化单测显式替换设备、
+  admission、容量及审查边界；现已补充以下真实服务组合证据。
   原命令单测显式模拟受支持平台，生产平台禁令未改动；没有真实设备或业务库操作。
+- 隔离 admission→outbox 已贯通真实服务：修复 claim 提交后 identity-map 命中未开启事务、
+  暂存元数据包含公共入口禁止身份字段、最终容量缺少桶级证据三处组合缺口。暂存仅投影
+  所需审计/费用/退出模板；最终容量从最新审查的真实归因读取桶级可用量，保留保护仓与
+  T+1 约束。真实 sequencer 完成 PREPARED/claim/COMMITTED，意图转 EXECUTION_PENDING，
+  重放不重复下单；末次设备路由失败时订单/关联/批次/outbox 全无写入，READY 请求保留。
+  58 项受影响回归通过，证据 `.codex_screenshots/p6-live-admission-regression.log`。
+  此组合使用合成初始候选、已消费 challenge、账户与行情，并替换时钟、平台及设备边界；
+  不替换 Gate、审查、账户容量、确认、分配、admission 或命令持久化。未发送券商命令。
 - 剩余开发顺序：
-  补齐 LIVE 隔离 admission/最终命令与回报链→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 隔离回报链与命令重试→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

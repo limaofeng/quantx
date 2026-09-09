@@ -226,6 +226,8 @@ _REQUEST_METADATA_ALLOWLIST = frozenset(
     "payload_fingerprint",
     "quote_timestamp",
     "quote_fingerprint",
+    "live_entry_review_event_key",
+    "portfolio_input_fingerprint",
     "reference_price",
     "requested_volume",
     "final_volume",
@@ -2512,6 +2514,16 @@ class TradeCommandService:
       intent_metadata = dict(getattr(intent, "intent_metadata", None) or {})
       envelope = intent_metadata.get("t_trading_envelope")
       envelope = dict(envelope) if isinstance(envelope, Mapping) else {}
+      if intent is not None and intent.owner_type == "T_ASSISTANT_EXECUTION":
+        from quantx_infrastructure.services.live_entry_dispatch_review import (
+          revalidate_live_entry_dispatch,
+        )
+
+        reviewed = await revalidate_live_entry_dispatch(
+          self.db, intent=intent, volume=volume, limit_price=limit_price,
+          now=datetime.now(timezone.utc), fresh_review=self.live_entry_review,
+        )
+        envelope = dict(reviewed.request.metadata.get("t_trading_envelope") or {})
       bucket_inventory = envelope.get("observed_position_projection")
       bucket_inventory = (
         dict(bucket_inventory) if isinstance(bucket_inventory, Mapping) else None
@@ -4177,6 +4189,11 @@ class TradeCommandService:
     obligation_watermark: str,
   ) -> list[QueuedTradeCommand]:
     """Atomically enqueue one ranked LIVE BUY batch under its fence token."""
+
+    # The committed claim may still be in the identity map; db.get() alone
+    # does not necessarily autobegin the transaction needed by source locks.
+    if not self.db.in_transaction():
+      await self.db.begin()
 
     batch_identity = await self.db.get(
       AccountRiskIncreaseAdmissionBatch,

@@ -139,8 +139,21 @@ async def stage_live_entry_request(
         limit_price=Decimal(str(result.request.price)),
         volume=result.request.volume,
         request_metadata={
-          **metadata,
-          **result.request.metadata,
+          **{
+            key: metadata[key]
+            for key in (
+              "exit_plan_template",
+              "commission_rate",
+              "minimum_commission",
+              "min_commission",
+              "stamp_tax_rate",
+              "transfer_fee_rate",
+            )
+            if key in metadata
+          },
+          "portfolio_input_fingerprint": result.request.metadata[
+            "portfolio_input_fingerprint"
+          ],
           "live_entry_review_event_key": event_key,
           "t_entry_order_policy_version": TEntryOrderPolicy().version,
           "t_order_reference_price": str(market_data.price),
