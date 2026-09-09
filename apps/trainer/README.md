@@ -3,9 +3,9 @@
 独立开发训练服务正在实施，完整范围见
 [实施方案](../../docs/plans/独立训练服务架构与实施方案.md)。
 
-训练调度、能力心跳及正常/恢复制品回传已迁入本包。运行端启停、准备任务交接和 Windows/GPU 验收仍未完成，不能将预检或本地测试通过视为服务 ready。
+训练调度、能力心跳及正常/恢复制品回传已迁入本包。独立启停、准备任务交接和停止恢复已有实现；Windows/GPU 与跨机器验收仍未完成，不能将预检或本地测试通过视为服务 ready。
 
-数据认证已拆分为 Research 生成不可变文件、监督端核验并登记两步。公共目录校验与认证字段投影位于 `quantx_infrastructure.training_dataset_store`；当前准备任务仍由 Worker 监督，后续 Trainer 复用同一验证边界。数据库登记失败保留生成文件，文件校验失败则拒绝登记。准备任务的进度、心跳和终态写入必须匹配领取时的 flow_run_id；心跳超时仅表示未知，不能自动释放任务供重试。Worker 的失败收敛等待本次工作停止；直接准备子进程先终止并等待 5 秒，再强制结束并等待 5 秒。退出未确认则保持 RUNNING，不开放重试；Windows 后代进程仍需独立约束与验收。准备进程持久化退出证据与 Trainer 领取交接仍待实现。
+Worker 负责行情补数和冻结输入导出，发布回读后按原执行归属交接；Trainer 领取已交接认证任务及 GPU 准备任务，监督 Research 计算、核验和登记。公共目录校验与认证字段投影位于 `quantx_infrastructure.training_dataset_store`。进度、心跳和终态必须匹配领取时的 flow_run_id；两端保留输入尝试和计算进程身份、退出证据，心跳超时不代表进程停止。退出未确认保持 RUNNING，不开放重试；成功结果发布失败可恢复而不重算。Windows 子进程包含、组退出证明和数据库恢复已有实现，原生运行端验收仍待完成。
 
 ## 固定提交代码包
 
@@ -27,7 +27,7 @@ Windows 独立训练代码目录中执行：
 
 将 Conda 路径替换为本机值。此入口在加载业务环境或创建主链运行目录之前分流，仅创建该 Conda 安装下的 `envs\quantx-train`，使用 conda-forge 的 Python 3.13 和 pip，不继承默认安装包，不更新既有 `quantx` 或券商环境。已存在的完整环境只校验身份；半成品、错误 Python 版本及目录链接均拒绝，不自动覆盖。
 
-该步骤只准备独立解释器，项目依赖同步、GPU 构建资格和 Trainer 常驻服务仍需后续部署。`up/down/status/logs -Component trainer` 尚未实现；生产 `full` 生命周期不包含此环境。
+该步骤只准备独立解释器，完整依赖、GPU 构建资格和常驻服务仍需部署验收。`up/down/status/logs -Component trainer` 已接入独立入口，必须显式传入 Trainer 配置和解释器；生产 `full` 生命周期不包含此环境。具体命令及状态语义见下文生命周期章节。
 
 GPU 构建探针同样在微型拟合前检查显存并使用准入线程预算。资格测试遇到主机门禁拒绝立即中止，CLI 和准备入口保留保护退出码 `75`，不把它转换为普通拟合失败后继续下一轮试验。
 
@@ -174,7 +174,7 @@ Trainer 调度器使用同一约束：每次独立调用使用独立标识，发
 
 ## 调度配置与运行边界
 
-`apps/trainer/prefect.yaml` 定义训练、能力心跳和 GPU 准备三项部署，仅使用 `quantx-train-pool`，参数 `config_path` 从显式 `QUANTX_TRAINER_CONFIG` 渲染。代码已从 Worker 删除这两项入口与清单；已存在的远端 Prefect 部署需要在运行端排空后单独处理，本地文件变化不会自动删除它们。独立 Worker 生命周期入口尚未实现，当前清单尚未部署验收。
+`apps/trainer/prefect.yaml` 定义训练、能力心跳和准备任务三项部署，仅使用 `quantx-train-pool`，参数 `config_path` 从显式 `QUANTX_TRAINER_CONFIG` 渲染。准备入口处理已交接认证和 GPU 资格；相关调度代码已迁出通用 Worker，serve 注册独立部署并启动专用 ProcessWorker。已存在的远端旧部署仍需排空后处理，本地文件变化不会自动删除它们；运行端部署和切换尚未验收。
 
 每次 flow 进入 `training_session` 时验证实际 Conda 前缀、代码目录与控制面权限；数据库引擎只使用该配置中的开发 URL。运行配置保存在任务上下文中，不改写父进程环境。计算子进程通过 `research_environment` 取得文件根目录与最小系统环境，移除数据库、Prefect 和 ambient SSH 凭据；管理进程的 `child_environment` 则保留显式开发控制面目标。
 
