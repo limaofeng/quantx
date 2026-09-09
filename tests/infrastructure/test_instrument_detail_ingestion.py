@@ -288,3 +288,30 @@ async def test_empty_snapshot_migration_can_be_removed(snapshots):
       )
       is None
     )
+
+
+@pytest.mark.parametrize("rows", [ROWS[:1], [{"code": "000001.SZ"}, ROWS[1]]])
+async def test_uploaded_missing_data_exposes_safe_reason_without_completion(
+  snapshots, tmp_path, rows
+):
+  store, _, _ = snapshots
+  store.manifest = [_write_chunk(tmp_path, rows)]
+  result = await ingestion.claim_ingest_and_finish_market_data_request(
+    store, "request-1"
+  )
+  assert result["status"] == "failed"
+  request = await store.market_data_request("request-1")
+  assert request["status"] == "FAILED" and request["ingestion_result"] is None
+  assert json.loads(request["processing_error"]) == {"reason_code": "DATA_UNAVAILABLE"}
+  app = create_app(store=store, token="internal", reader=object())
+  async with app.router.lifespan_context(app):
+    async with AsyncClient(
+      transport=ASGITransport(app), base_url="http://test"
+    ) as client:
+      response = await client.get(
+        "/market-data/internal/v1/requests/request-1",
+        headers={"Authorization": "Bearer internal"},
+      )
+      assert response.status_code == 200
+      assert response.json()["reason_code"] == "DATA_UNAVAILABLE"
+      assert response.json()["records_verified"] is None

@@ -190,7 +190,7 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
       raise HTTPException(404, "HISTORY_REQUEST_NOT_FOUND")
     progress = value.get("ingestion_progress") or {}
     reason_code = progress.get("reason_code")
-    if value["status"] == "FAILED" and not progress:
+    if value["status"] == "FAILED":
       try:
         failure = json.loads(value.get("processing_error") or "null")
         code = failure["reason_code"]
@@ -198,6 +198,7 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
           "XTDATA_UNAVAILABLE",
           "COLLECTION_RESULT_INVALID",
           "COLLECTION_NATIVE_FAILED",
+          "DATA_UNAVAILABLE",
         }:
           reason_code = code
       except (ValueError, TypeError, KeyError):

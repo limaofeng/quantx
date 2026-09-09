@@ -213,12 +213,15 @@ async def test_uncertain_child_startup_cannot_become_abort():
   runtime._shutdown_historical_worker_sync.assert_not_called()
 
 
-@pytest.mark.parametrize("kind", ["dependency", "invalid", "native"])
+@pytest.mark.parametrize("kind", ["dependency", "invalid", "native", "unavailable"])
 @pytest.mark.parametrize("after", [0, 150])
 def test_unit_error_keeps_identity_and_classification_without_provider_text(
   monkeypatch, kind, after
 ):
-  from quantx_qmt_agent.market_data_errors import XTDataUnavailableError
+  from quantx_qmt_agent.market_data_errors import (
+    HistoricalDataUnavailableError,
+    XTDataUnavailableError,
+  )
   from quantx_qmt_agent.native_unit_ipc import NativeUnitFailure
 
   parent, child = multiprocessing.Pipe()
@@ -226,6 +229,7 @@ def test_unit_error_keeps_identity_and_classification_without_provider_text(
     "dependency": (XTDataUnavailableError, "XTDATA_UNAVAILABLE"),
     "invalid": (ValueError, "COLLECTION_RESULT_INVALID"),
     "native": (RuntimeError, "COLLECTION_NATIVE_FAILED"),
+    "unavailable": (HistoricalDataUnavailableError, "DATA_UNAVAILABLE"),
   }[kind]
   closed, calls = [], []
 

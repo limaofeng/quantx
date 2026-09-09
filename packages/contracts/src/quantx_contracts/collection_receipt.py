@@ -21,7 +21,10 @@ class CollectionAbort(BaseModel):
   unit: CollectionUnit
   native_exit: Literal["CONFIRMED_STOPPED"]
   reason_code: Literal[
-    "COLLECTION_NATIVE_FAILED", "COLLECTION_RESULT_INVALID", "XTDATA_UNAVAILABLE"
+    "COLLECTION_NATIVE_FAILED",
+    "COLLECTION_RESULT_INVALID",
+    "XTDATA_UNAVAILABLE",
+    "DATA_UNAVAILABLE",
   ]
 
 

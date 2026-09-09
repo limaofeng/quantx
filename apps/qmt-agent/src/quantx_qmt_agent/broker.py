@@ -2448,12 +2448,18 @@ def _iter_market_data_records_unbounded(
 
     codes = instrument_detail_codes(payload)
     values = manager.get_instrument_detail_list(codes, iscomplete=True)
-    if not isinstance(values, dict) or set(values) != set(codes):
-      raise ValueError("instrument_details requested records unavailable")
+    from .market_data_errors import HistoricalDataUnavailableError
+
+    if not isinstance(values, dict) or set(values) - set(codes):
+      raise ValueError("instrument_details source scope mismatch")
+    if set(values) != set(codes):
+      raise HistoricalDataUnavailableError("instrument_details requested records unavailable")
     for code in codes:
       fields = _as_dict(values[code])
       if "code" in fields and fields["code"] != code:
         raise ValueError("instrument_details source code mismatch")
+      if not fields.keys() - {"code"}:
+        raise HistoricalDataUnavailableError("instrument_details source fields unavailable")
       record = {**fields, "code": code}
       instrument_detail_json(record)
       yield record

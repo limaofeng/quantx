@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from .market_data_ingestion_progress import evidence_hash
 from .market_data_transfer_ingestion import (
+  MarketDataUnavailableError,
   MarketDataValidationError,
   _iter_transfer_chunks,
   load_uploaded_request_manifest,
@@ -37,6 +38,10 @@ async def ingest_instrument_details(store, request_id, *, progress):
         code = record.get("code")
         if not isinstance(code, str) or code not in requested or code in by_code:
           raise MarketDataValidationError("instrument_details record scope mismatch")
+        if not record.keys() - {"code"}:
+          raise MarketDataUnavailableError(
+            "instrument_details source fields unavailable"
+          )
         try:
           encoded = instrument_detail_json(record)
         except ValueError as exc:
@@ -51,7 +56,7 @@ async def ingest_instrument_details(store, request_id, *, progress):
 
   by_code = await asyncio.to_thread(validate_records)
   if set(by_code) != set(codes):
-    raise MarketDataValidationError("instrument_details requested records unavailable")
+    raise MarketDataUnavailableError("instrument_details requested records unavailable")
   digest = evidence_hash(
     {
       "payload": payload,

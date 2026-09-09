@@ -20,7 +20,7 @@ from quantx_contracts.collection_permit import (
 )
 
 from .broker import MAX_MARKET_DATA_RECORDS, validate_market_data_request
-from .market_data_errors import XTDataUnavailableError
+from .market_data_errors import HistoricalDataUnavailableError, XTDataUnavailableError
 
 MAX_UNIT_BATCH_BYTES = 1024 * 1024
 MAX_UNIT_BATCH_RECORDS = 128
@@ -36,6 +36,7 @@ class NativeUnitFailure(RuntimeError):
       "XTDATA_UNAVAILABLE",
       "COLLECTION_RESULT_INVALID",
       "COLLECTION_NATIVE_FAILED",
+      "DATA_UNAVAILABLE",
     }:
       raise ValueError("unknown native unit failure reason")
     self.reason_code = reason_code
@@ -133,6 +134,8 @@ def serve_native_unit(connection, broker, message) -> None:
     reason = (
       "XTDATA_UNAVAILABLE"
       if isinstance(exc, XTDataUnavailableError)
+      else "DATA_UNAVAILABLE"
+      if isinstance(exc, HistoricalDataUnavailableError)
       else "COLLECTION_RESULT_INVALID"
       if isinstance(exc, (ValueError, TypeError, OverflowError))
       else "COLLECTION_NATIVE_FAILED"

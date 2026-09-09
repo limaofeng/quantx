@@ -914,7 +914,7 @@ async def test_retirement_preserves_pending_failure_and_compacts_confirmed_attem
     )
 
 
-@pytest.mark.parametrize("reason", ["XTDATA_UNAVAILABLE", "COLLECTION_RESULT_INVALID"])
+@pytest.mark.parametrize("reason", ["XTDATA_UNAVAILABLE", "COLLECTION_RESULT_INVALID", "DATA_UNAVAILABLE"])
 async def test_native_failure_classification_survives_journal_and_abort(
   execution, reason
 ):

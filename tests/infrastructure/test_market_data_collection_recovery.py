@@ -344,7 +344,7 @@ async def test_requeue_failure_rolls_back_recovery_audit(recoverable):
   ).scalar_one() == "FAILED"
 
 
-@pytest.mark.parametrize("reason", ["XTDATA_UNAVAILABLE", "COLLECTION_RESULT_INVALID"])
+@pytest.mark.parametrize("reason", ["XTDATA_UNAVAILABLE", "COLLECTION_RESULT_INVALID", "DATA_UNAVAILABLE"])
 async def test_dependency_pause_survives_owner_change_and_requires_explicit_resume(
   recoverable, receipts, reason  # noqa: F811
 ):

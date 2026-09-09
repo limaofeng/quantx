@@ -98,6 +98,10 @@ class MarketDataValidationError(RuntimeError):
   """The immutable request or transfer cannot ever pass validation."""
 
 
+class MarketDataUnavailableError(MarketDataValidationError):
+  """The frozen source result cannot satisfy all requested data."""
+
+
 class MarketDataTransferStore(ProgressStore, Protocol):
   async def market_data_request(self, request_id: str) -> dict[str, Any] | None: ...
 
@@ -1550,7 +1554,11 @@ async def claim_ingest_and_finish_market_data_request(
       )
     raise
   except (MarketDataValidationError, IngestionEvidenceConflict) as exc:
-    reason = f"{exc.__class__.__name__}: {exc}"
+    reason = (
+      json.dumps({"reason_code": "DATA_UNAVAILABLE"})
+      if isinstance(exc, MarketDataUnavailableError)
+      else f"{exc.__class__.__name__}: {exc}"
+    )
     try:
       await store.finish_market_data_request(
         request_id,
