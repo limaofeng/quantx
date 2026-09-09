@@ -54,11 +54,11 @@ class VersionStorage:
   def query(self, **kwargs):
     self.queries.append(kwargs)
     sql, params = kwargs["query"], kwargs["query_parameters"]
-    assert "AND storage_version=$storage_version" in sql
+    assert re.search(r"storage_version\s*=\s*\$storage_version", sql)
     table = re.search(r"FROM (\w+)", sql)[1]
     assert table.endswith("_versions")
     start = datetime.fromisoformat(re.search(r"time >= '([^']+)'", sql)[1])
-    end = datetime.fromisoformat(re.search(r"time <= '([^']+)'", sql)[1])
+    end = datetime.fromisoformat(re.search(r"time <=? '([^']+)'", sql)[1])
     cursor = re.search(r"time > '([^']+)'", sql)
     after = (
       datetime.fromisoformat(cursor[1])

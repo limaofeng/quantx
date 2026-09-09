@@ -112,10 +112,23 @@ def _write_frame(connection, version, frame):
     )
 
 
-async def write_immutable_bar_version(version, *, connection):
+async def write_immutable_bar_version(version, *, connection, progress=None):
   manifest = await _revalidate(version)
   count = 0
+  block = 0
   async for frame in _uploaded_content_batches(manifest):
+    digest = evidence_hash(
+      {
+        "storage_version": version.storage_version,
+        "first": frame["time"].iloc[0].isoformat(),
+        "last": frame["time"].iloc[-1].isoformat(),
+        "rows": len(frame),
+      }
+    )
+    if progress is not None and await progress.confirmed(block, digest, len(frame)):
+      count += len(frame)
+      block += 1
+      continue
     task = asyncio.create_task(
       asyncio.to_thread(_write_frame, connection, version, frame)
     )
@@ -124,7 +137,10 @@ async def write_immutable_bar_version(version, *, connection):
     except asyncio.CancelledError:
       await _settle_task(task)
       raise
+    if progress is not None:
+      await progress.confirm(block, digest, len(frame))
     count += len(frame)
+    block += 1
   if count != version.records:
     raise ValueError("immutable storage write count changed")
   return count

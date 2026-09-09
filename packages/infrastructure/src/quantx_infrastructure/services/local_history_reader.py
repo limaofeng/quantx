@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -35,6 +36,32 @@ class LocalHistoryReader:
   async def read(self, request: HistoryRead) -> HistoryPage:
     return await self._run_read(self._read, request)
 
+  async def read_published(
+    self, request: HistoryRead, *, session_factory
+  ) -> HistoryPage:
+    from quantx_contracts.data_exchange import HistoryPartitionRequest
+
+    from .development_bar_publication import resolve_published_bar_version
+
+    if self._slot.locked():
+      raise HistoryReadBusy("local history query capacity exhausted")
+    async with self._slot:
+      async with asyncio.timeout(3), session_factory() as db:
+        version = await resolve_published_bar_version(
+          db,
+          HistoryPartitionRequest(
+            instrument=request.instrument,
+            period=request.period,
+            trading_date=request.trading_date,
+          ),
+        )
+      if version is None:
+        raise HistoryReadInvalid("HISTORY_STORAGE_VERSION_UNAVAILABLE")
+      return await self._read_thread(
+        lambda value: self._read(value, storage_version=version["storage_version"]),
+        request,
+      )
+
   async def read_latest_daily(self, request):
     from .local_daily_snapshot_reader import read_latest_daily
 
@@ -46,23 +73,31 @@ class LocalHistoryReader:
     if self._slot.locked():
       raise HistoryReadBusy("local history query capacity exhausted")
     async with self._slot:
-      task = asyncio.create_task(asyncio.to_thread(read, request))
-      try:
-        return await asyncio.shield(task)
-      except asyncio.CancelledError:
-        # Releasing the slot while Flight still runs would bypass the budget.
-        while not task.done():
-          try:
-            await asyncio.shield(task)
-          except asyncio.CancelledError:
-            continue
-          except Exception:
-            break
-        if not task.cancelled():
-          task.exception()
-        raise
+      return await self._read_thread(read, request)
 
-  def _read(self, request: HistoryRead) -> HistoryPage:
+  async def _read_thread(self, read, request):
+    task = asyncio.create_task(asyncio.to_thread(read, request))
+    try:
+      return await asyncio.shield(task)
+    except asyncio.CancelledError:
+      # Releasing the slot while Flight still runs would bypass the budget.
+      while not task.done():
+        try:
+          await asyncio.shield(task)
+        except asyncio.CancelledError:
+          continue
+        except Exception:
+          break
+      if not task.cancelled():
+        task.exception()
+      raise
+
+  def _read(self, request: HistoryRead, *, storage_version=None) -> HistoryPage:
+    if storage_version is not None and (
+      not isinstance(storage_version, str)
+      or re.fullmatch(r"[0-9a-f]{64}", storage_version) is None
+    ):
+      raise HistoryReadInvalid("invalid published storage version")
     deadline = time.monotonic() + 10
 
     def remaining():
@@ -82,6 +117,11 @@ class LocalHistoryReader:
       cursor = request.after.astimezone(timezone.utc).isoformat(timespec="microseconds")
       conditions.append(f"time > '{cursor}'")
     measurement = {"tick": "ticks", "1m": "kline_1m", "1d": "kline_1d"}[request.period]
+    parameters = {"stock_code": request.instrument, "period": request.period}
+    if storage_version is not None:
+      measurement += "_versions"
+      conditions.append("storage_version = $storage_version")
+      parameters["storage_version"] = storage_version
     sql = (
       f"SELECT * FROM {measurement} WHERE {' AND '.join(conditions)} "
       f"ORDER BY time ASC LIMIT {request.page_size}"
@@ -95,7 +135,7 @@ class LocalHistoryReader:
         query=sql,
         language="sql",
         mode="reader",
-        query_parameters={"stock_code": request.instrument, "period": request.period},
+        query_parameters=parameters,
         timeout=remaining(),
       )
       if reader is None:
@@ -124,6 +164,8 @@ class LocalHistoryReader:
               or (previous is not None and stamp <= previous)
               or row.get("stock_code") != request.instrument
               or row.get("period") != request.period
+              or storage_version is not None
+              and row.get("storage_version") != storage_version
             ):
               raise HistoryReadInvalid("history page is unordered or outside scope")
             row["time"] = stamp

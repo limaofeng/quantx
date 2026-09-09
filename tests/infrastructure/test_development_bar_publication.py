@@ -45,7 +45,8 @@ from tests.worker.test_development_data_export import bar
 
 
 @pytest.fixture
-async def prepared(references, workers, tmp_path, monkeypatch):
+async def prepared(references, workers, tmp_path, monkeypatch, request):
+  start_write = getattr(request, "param", True)
   first, second = workers[0]
   await install_budget_schema(first.engine)
   path = (
@@ -94,8 +95,9 @@ async def prepared(references, workers, tmp_path, monkeypatch):
     )
   factory = async_sessionmaker(first.engine)
   progress = await DevelopmentIngestionStore(factory, "delivery", owner=first).begin()
-  await progress.apply("manifest", sha256="a" * 64)
-  await progress.apply("advance", phase="WRITE")
+  if start_write:
+    await progress.apply("manifest", sha256="a" * 64)
+    await progress.apply("advance", phase="WRITE")
   version = await prepare_immutable_bar_version(ImportedTransfer(manifest), "delivery")
   return SimpleNamespace(
     first=first,
