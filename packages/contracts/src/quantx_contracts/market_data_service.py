@@ -51,6 +51,19 @@ class HistoryDemandStatus(HistoryDemandAccepted):
   observed_at: AwareDatetime
 
 
+class HistoryDemandResult(HistoryDemandAccepted):
+  """Published local delivery proof; no source files or mutable progress fields."""
+
+  model_config = ConfigDict(extra="forbid")
+  partition: HistoryDemand
+  delivery_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+  source_version: str = Field(pattern=r"^[0-9a-f]{64}$")
+  storage_version: str = Field(pattern=r"^[0-9a-f]{64}$")
+  content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+  records_verified: int = Field(strict=True, gt=0)
+  verified_at: AwareDatetime
+
+
 class HistoryRead(HistoryDemand):
   """One local partition, ascending storage-time keyset; no implicit backfill."""
 

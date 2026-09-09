@@ -26,7 +26,7 @@ async def test_range_submits_later_partitions_and_reports_failures(
         "status": first_status,
         "reason": "SOURCE_COVERAGE_MISSING",
       }
-    return {"local_verification": {"records_verified": 3}}
+    return {"status": "LOCAL_VERIFIED", "delivery_result": {"records_verified": 3}}
 
   monkeypatch.setattr(HolidayService, "get_holidays", holidays)
   monkeypatch.setattr(importer, "request_partition_delivery", partition)
@@ -72,3 +72,51 @@ async def test_cli_preserves_partition_progress(monkeypatch, capsys, status, exi
     == exit_code
   )
   assert json.loads(capsys.readouterr().out) == expected
+
+
+async def test_range_aggregates_each_published_partition_once(monkeypatch):
+  from unittest.mock import AsyncMock
+
+  calls = []
+
+  async def partition(request):
+    calls.append(request)
+    return {
+      "id": str(len(calls)),
+      "status": "LOCAL_VERIFIED",
+      "delivery_result": {
+        "records_verified": len(calls),
+        "source_version": str(len(calls)) * 64,
+      },
+    }
+
+  monkeypatch.setattr(
+    HolidayService,
+    "get_holidays",
+    AsyncMock(return_value=[SimpleNamespace(date=date(2026, 1, 1))]),
+  )
+  monkeypatch.setattr(importer, "request_partition_delivery", partition)
+  result = await importer.request_remote_history(
+    {
+      "operation": "bars",
+      "stock_list": ["000001.SZ", "600036.SH"],
+      "periods": ["tick"],
+      "start_time": "20260810",
+      "end_time": "20260811",
+    },
+    timeout_seconds=0,
+  )
+  assert (
+    len(calls) == result["expected_partitions"] == result["verified_partitions"] == 4
+  )
+  assert (
+    result["records_received"]
+    == result["records_saved"]
+    == result["records_verified"]
+    == 10
+  )
+  assert result["code_summaries"] == [
+    {"code": "000001.SZ", "period": "tick", "row_count": 4},
+    {"code": "600036.SH", "period": "tick", "row_count": 6},
+  ]
+  assert len(result["partition_proofs"]) == 4

@@ -1,10 +1,12 @@
 """Offline demand catalog; submission never selects an Agent or makes HTTP calls."""
 
+import asyncio
 import hashlib
 import json
 
-from quantx_contracts.market_data_service import HistoryDemand
+from quantx_contracts.market_data_service import HistoryDemand, HistoryDemandResult
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from quantx_infrastructure.runtime_store import DurableRuntimeStore
 
@@ -14,6 +16,53 @@ class MarketDataDemandCapacity(RuntimeError):
 
 
 class MarketDataDemandStore(DurableRuntimeStore):
+  async def history_demand_result(self, demand_id: str):
+    from quantx_contracts.data_exchange import HistoryPartitionRequest
+
+    from .development_bar_publication import resolve_published_bar_version
+
+    async with asyncio.timeout(3), async_sessionmaker(self.engine)() as db:
+      demand = (
+        (
+          await db.execute(
+            text(
+              "SELECT partition,delivery_id FROM market_data_demand WHERE demand_id=:id AND source_kind='REMOTE'"
+            ),
+            {"id": demand_id},
+          )
+        )
+        .mappings()
+        .one_or_none()
+      )
+      if demand is None or demand["delivery_id"] is None:
+        return None
+      version = await resolve_published_bar_version(
+        db, HistoryPartitionRequest.model_validate(demand["partition"])
+      )
+      if version is None or version["delivery_id"] != demand["delivery_id"]:
+        return None
+      expected = {
+        "records_verified": version["records"],
+        "storage_version": version["storage_version"],
+        "source_sha256": version["content_sha256"],
+        "persisted_sha256": version["content_sha256"],
+        "code": version["stock_code"],
+        "period": version["period"],
+        "trading_date": version["trading_date"].isoformat(),
+      }
+      if any(version["proof"].get(key) != value for key, value in expected.items()):
+        raise ValueError("Published delivery proof differs from its directory")
+      return HistoryDemandResult(
+        demand_id=demand_id,
+        partition=demand["partition"],
+        delivery_id=version["delivery_id"],
+        source_version=version["source_version"],
+        storage_version=version["storage_version"],
+        content_sha256=version["content_sha256"],
+        records_verified=version["records"],
+        verified_at=version["verified_at"],
+      )
+
   def __init__(self, database_url=None):
     super().__init__(database_url, pool_size=4, max_overflow=0)
     from quantx_infrastructure.config.settings import settings

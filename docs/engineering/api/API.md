@@ -158,6 +158,25 @@ WebSocket。
 Agent 独立缓存和续期历史凭证，交易会话换 token 不影响在途上传。历史任务派发目前
 仍通过原控制会话，专用历史 WS 与采集许可尚待迁移；不得据此声称已消除全部业务 API 依赖。
 
+开发环境的历史分区通过本机 Caddy 提交和查询：
+
+```text
+POST /market-data/internal/v1/demands
+GET  /market-data/internal/v1/demands/{demand_id}
+GET  /market-data/internal/v1/demands/{demand_id}/result
+```
+
+三个端点使用内部服务 Bearer token。`result` 返回 `HistoryDemandResult`：原需求和交付
+ID、分区、源版本、存储版本、内容 SHA256、验证行数及验证时间。仅 REMOTE 需求关联的
+LOCAL_VERIFIED 交付、VERIFIED 阶段和相符的发布证明可返回结果；尚不可用返回 404，
+证明不一致或数据库不可用返回 503。该接口有 3 秒查询期限，不读取分片或重新扫描 Influx，
+不返回 manifest、参考数据或本地文件路径。
+
+开发范围请求以 `partition_proofs` 保留逐分区的结果证据，汇总 `records_received`、
+`records_saved`、`records_verified` 与源 `data_versions`。`code_summaries` 在该范围结果
+中仅包含标的、周期、行数；它不是 Agent 传输协议的 `bar_summary`，不构造无法由分区
+摘要合并得到的整段键哈希。Agent 上传协议保持原有完整键摘要约束。
+
 GraphQL 使用单一 `qmtAgentConnection` 视图返回当前 Agent、五段连接链路、
 行情流与本地 journal 的非敏感指标，以及折叠的历史登记。Web 通过
 `createAgentEnrollment` 发起安全交接，使用 `cancelAgentHandover` 取消；

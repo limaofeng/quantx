@@ -315,28 +315,32 @@ async def request_partition_delivery(request: HistoryPartitionRequest) -> dict:
 
   client = LocalMarketDataClient()
   demand = HistoryDemand.model_validate(request.model_dump())
+  result = None
   try:
     identity = await client.submit_history_demand(demand)
     status = await client.history_demand(identity, expected_partition=demand)
+    if status is not None and status.delivery_status == "LOCAL_VERIFIED":
+      result = await client.history_demand_result(identity, expected_partition=demand)
   finally:
     await client.close()
   if status is None:
     raise ValueError("Submitted history demand disappeared")
-  if status.delivery_status == "LOCAL_VERIFIED":
-    # The legacy aggregate result builder still reads frozen source evidence.
-    # This is a readonly bridge; it never rechecks, repairs, or drives ingestion.
-    receipt = await get_export(status.delivery_id)
-    if receipt and receipt["state"] == "LOCAL_VERIFIED":
-      return receipt["manifest"]
+  if result is not None:
+    if result.delivery_id != status.delivery_id:
+      raise ValueError("Local history delivery identity changed")
     return {
-      "id": status.delivery_id,
-      "status": "WAITING_LOCAL_PROOF",
-      "reason": "LOCAL_DELIVERY_PROOF_UNAVAILABLE",
+      "id": result.delivery_id,
+      "status": "LOCAL_VERIFIED",
+      "delivery_result": result.model_dump(mode="json"),
     }
   return {
     "id": status.delivery_id or identity,
-    "status": status.delivery_status or "WAITING_SOURCE",
-    "reason": status.reason_code,
+    "status": "WAITING_LOCAL_PROOF"
+    if status.delivery_status == "LOCAL_VERIFIED"
+    else status.delivery_status or "WAITING_SOURCE",
+    "reason": "LOCAL_DELIVERY_PROOF_UNAVAILABLE"
+    if status.delivery_status == "LOCAL_VERIFIED"
+    else status.reason_code,
   }
 
 
@@ -377,12 +381,8 @@ async def request_remote_history(
   """Adapt existing historical callers while keeping QMT requests off the Mac."""
   from datetime import datetime
 
-  from quantx_contracts import HistoricalBarSummary, historical_bar_key
-
   from quantx_infrastructure.services.holiday_service import HolidayService
   from quantx_infrastructure.services.market_data_transfer_ingestion import (
-    _BarTransferValidator,
-    _iter_transfer_chunks,
     _parse_bars_request,
   )
 
@@ -479,13 +479,13 @@ async def request_remote_history(
           HistoryPartitionRequest(instrument=code, period=period, trading_date=day)
         )
     day += timedelta(days=1)
-  receipts = {}
+  results = {}
   partition_status = {}
   while True:
     pending = False
     for request in partitions:
       key = (request.period, request.instrument, request.trading_date)
-      if key in receipts:
+      if key in results:
         continue
       result = await request_partition_delivery(request)
       partition_status[key] = {
@@ -493,18 +493,18 @@ async def request_remote_history(
         "id": result.get("id"),
         "reason": result.get("reason"),
         "status": "LOCAL_VERIFIED"
-        if "local_verification" in result
+        if "delivery_result" in result
         else result.get("status"),
       }
-      if "local_verification" in result:
-        receipts[key] = result
+      if "delivery_result" in result:
+        results[key] = result["delivery_result"]
       elif result.get("status") not in {"INCOMPLETE", "BLOCKED"}:
         pending = True
     # Finish submitting this bounded range even when one source partition failed.
     # Report every gap; never silently truncate the requested universe.
     progress = {
       "expected_partitions": len(partitions),
-      "verified_partitions": len(receipts),
+      "verified_partitions": len(results),
       "partitions": list(partition_status.values()),
     }
     if any(p["status"] in {"INCOMPLETE", "BLOCKED"} for p in partition_status.values()):
@@ -528,58 +528,36 @@ async def request_remote_history(
         **progress,
       }
     await asyncio.sleep(5)
-  validator = _BarTransferValidator(scope)
-  coverage, versions = [], []
+  summaries = []
   for period, code in scope.groups:
-    count, first, last, digest = 0, None, None, hashlib.sha256()
-    for key, receipt in sorted(receipts.items()):
-      if key[:2] != (period, code):
-        continue
-      files = await ImportedTransfer(receipt).market_data_transfers(identity)
-      for chunk in _iter_transfer_chunks(files):
-        for record in chunk:
-          if "record_type" in record:
-            continue
-          validator.consume(record)
-          if count:
-            digest.update(b"\n")
-          digest.update(
-            historical_bar_key(
-              code=code,
-              period=period,
-              time_ms=record["time"],
-              tick_ordinal=record.get("tick_ordinal"),
-            ).encode()
-          )
-          first = record["time"] if first is None else first
-          last, count = record["time"], count + 1
-      coverage.extend(receipt["local_verification"].get("day_coverage", []))
-      versions.append(receipt["data_version"])
+    count = sum(
+      result["records_verified"]
+      for key, result in results.items()
+      if key[:2] == (period, code)
+    )
     if count == 0:
       return {
         "status": "failed",
         "reason": "DEVELOPMENT_SOURCE_EMPTY",
         "request_id": identity,
       }
-    validator.consume(
-      HistoricalBarSummary(
-        code=code,
-        period=period,
-        row_count=count,
-        min_time=first,
-        max_time=last,
-        key_sha256=digest.hexdigest(),
-        no_data_reason=None,
-      ).model_dump(mode="json")
-    )
-  audit = validator.finish()
+    summaries.append({"code": code, "period": period, "row_count": count})
+  records = sum(result["records_verified"] for result in results.values())
   return {
-    **audit,
+    "operation": "bars",
     "status": "success",
     "request_id": identity,
-    "day_coverage": coverage,
-    "records_verified": audit["records_received"],
-    "data_versions": sorted(set(versions)),
+    "requested_codes": list(scope.codes),
+    "requested_periods": list(scope.periods),
+    "start_time": scope.start_text,
+    "end_time": scope.end_text,
+    "empty_codes": [],
+    "code_summaries": summaries,
+    "records_received": records,
+    "records_saved": records,
+    "records_verified": records,
+    "data_versions": sorted({result["source_version"] for result in results.values()}),
+    "partition_proofs": list(results.values()),
     **progress,
   }
 

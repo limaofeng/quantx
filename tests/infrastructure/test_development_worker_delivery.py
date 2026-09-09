@@ -189,6 +189,7 @@ async def test_range_partition_submits_and_queries_without_executing(
         reason_code="LOCAL_READBACK_UNAVAILABLE",
       )
     ),
+    history_demand_result=AsyncMock(return_value=None),
     close=AsyncMock(),
   )
   monkeypatch.setattr(local_market_data_client, "LocalMarketDataClient", lambda: client)

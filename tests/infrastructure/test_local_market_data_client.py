@@ -12,6 +12,42 @@ from quantx_infrastructure.services.local_market_data_client import (
 from quantx_market_data.api import create_app
 
 
+@pytest.mark.parametrize("change", ["id", "partition", "count", "hash", "path"])
+async def test_delivery_proof_client_rejects_wrong_identity_or_contract(change):
+  from quantx_contracts.market_data_service import HistoryDemand
+
+  demand = HistoryDemand(instrument="600000.SH", period="1d", trading_date="2026-09-07")
+  body = {
+    "demand_id": "a" * 64,
+    "delivery_id": "b" * 64,
+    "partition": demand.model_dump(mode="json"),
+    "source_version": "c" * 64,
+    "storage_version": "d" * 64,
+    "content_sha256": "e" * 64,
+    "records_verified": 1,
+    "verified_at": "2026-09-07T12:00:00+00:00",
+  }
+  if change == "id":
+    body["demand_id"] = "f" * 64
+  elif change == "partition":
+    body["partition"]["trading_date"] = "2026-09-08"
+  elif change == "count":
+    body["records_verified"] = True
+  elif change == "hash":
+    body["storage_version"] = "invalid"
+  else:
+    body["storage_reference"] = "/unexpected/local/path"
+  client = LocalMarketDataClient(
+    transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body)),
+    token="internal",
+  )
+  try:
+    with pytest.raises(ValueError):
+      await client.history_demand_result("a" * 64, expected_partition=demand)
+  finally:
+    await client.close()
+
+
 @pytest.fixture
 def store():
   identity = str(uuid4())

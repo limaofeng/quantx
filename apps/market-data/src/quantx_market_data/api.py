@@ -26,6 +26,7 @@ from quantx_contracts.instrument_details import (
 from quantx_contracts.market_data_service import (
   HistoryDemand,
   HistoryDemandAccepted,
+  HistoryDemandResult,
   HistoryDemandStatus,
   HistoryPage,
   HistoryRead,
@@ -181,6 +182,20 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
       raise HTTPException(503, "MARKET_DATA_STORAGE_UNAVAILABLE") from None
     if value is None:
       raise HTTPException(404, "HISTORY_DEMAND_NOT_FOUND")
+    return value
+
+  @app.get(
+    "/market-data/internal/v1/demands/{demand_id}/result",
+    response_model=HistoryDemandResult,
+    dependencies=[Depends(authorize)],
+  )
+  async def demand_result(demand_id: str):
+    try:
+      value = await app.state.store.history_demand_result(demand_id)
+    except (SQLAlchemyError, ValueError, TimeoutError):
+      raise HTTPException(503, "HISTORY_DEMAND_RESULT_UNAVAILABLE") from None
+    if value is None:
+      raise HTTPException(404, "HISTORY_DEMAND_RESULT_UNAVAILABLE")
     return value
 
   @app.post(
