@@ -221,6 +221,30 @@ class DividFactorService:
 
     raise RuntimeError("数据库会话不可用")
 
+  async def verify_persisted_divid_factors(
+    self,
+    factors_map: Dict[str, pd.DataFrame],
+    *,
+    stock_codes: List[str],
+    start_ex_date: str,
+    end_ex_date: str,
+    audit: dict[str, Any],
+  ) -> None:
+    if self.db_session is None:
+      raise RuntimeError("divid factor recovery requires a bound transaction")
+    factors = [
+      factor
+      for code, frame in factors_map.items()
+      for factor in self._normalize_factors(code, frame)
+    ]
+    await DividFactorRepository(self.db_session).verify_replaced_range(
+      factors,
+      stock_codes=stock_codes,
+      start_ex_date=start_ex_date,
+      end_ex_date=end_ex_date,
+      audit=audit,
+    )
+
   async def get_divid_factors(
     self,
     stock_code: str,

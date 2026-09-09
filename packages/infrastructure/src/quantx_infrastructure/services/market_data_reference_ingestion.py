@@ -463,7 +463,25 @@ async def ingest_uploaded_reference_request(store, request_id, *, progress=None)
   if progress.state["phase"] == "VALIDATE":
     await progress.apply("advance", phase="WRITE")
   if progress.state["phase"] == "READBACK":
-    if payload["operation"] == "financial_data":
+    if payload["operation"] == "divid_factors":
+      frames, codes, start, end = _normalize_divid_factor_records(records, payload)
+      audit = progress.state["write_result"].get("replacement_audit", {})
+      _validate_divid_factor_replacement_audit(
+        audit,
+        records_received=len(records),
+        stock_codes=codes,
+        start_ex_date=start,
+        end_ex_date=end,
+      )
+      async with store.engine.begin() as connection:
+        await DividFactorService(db_session=connection).verify_persisted_divid_factors(
+          frames,
+          stock_codes=codes,
+          start_ex_date=start,
+          end_ex_date=end,
+          audit=audit,
+        )
+    elif payload["operation"] == "financial_data":
       frames, _ = _normalize_financial_records(records, payload)
       proofs = (
         progress.state["write_result"]

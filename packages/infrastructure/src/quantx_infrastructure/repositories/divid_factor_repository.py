@@ -421,6 +421,70 @@ class DividFactorRepository:
       "end_ex_date": end_ex_date,
     }
 
+  async def verify_replaced_range(
+    self,
+    factors: List[DividFactor],
+    *,
+    stock_codes: List[str],
+    start_ex_date: str,
+    end_ex_date: str,
+    audit: dict[str, Any],
+  ) -> None:
+    """Recheck a committed replacement against its original upload, without writes.
+
+    Include the entire requested window, including codes with no source rows,
+    so extra/duplicate rows cannot hide behind an exact-key lookup. The caller
+    validates the audit schema/scope and owns the transaction holding this lock.
+    """
+    columns = (
+      "stock_code",
+      "time",
+      "ex_date",
+      "interest",
+      "stock_bonus",
+      "stock_gift",
+      "allot_num",
+      "allot_price",
+      "gugai",
+      "dr",
+    )
+    expected = [tuple(getattr(factor, name) for name in columns) for factor in factors]
+    if divid_factor_rows_sha256(expected) != audit["source_sha256"]:
+      raise RuntimeError("divid factor recovery source digest mismatch")
+    by_code = {code: [] for code in stock_codes}
+    for row in expected:
+      by_code[row[0]].append(row)
+    for code, rows in by_code.items():
+      proof = audit["code_audits"][code]
+      if len(rows) != proof["record_count"] or (
+        divid_factor_rows_sha256(rows) != proof["source_sha256"]
+      ):
+        raise RuntimeError("divid factor recovery per-code source mismatch")
+
+    # Every factor writer already takes this transaction lock. Keep all bounded
+    # reads on one stable version, including empty ranges (row locks cannot
+    # protect missing rows). No commit, rewrite or snapshot invalidation here.
+    await self._acquire_write_lock()
+    for offset in range(0, len(stock_codes), 64):
+      codes = stock_codes[offset : offset + 64]
+      source_rows = [row for code in codes for row in by_code[code]]
+      actual = (
+        await self.db.execute(
+          select(*(getattr(DividFactorTable, name) for name in columns))
+          .where(
+            DividFactorTable.stock_code.in_(codes),
+            DividFactorTable.ex_date >= start_ex_date,
+            DividFactorTable.ex_date <= end_ex_date,
+          )
+          .order_by(DividFactorTable.stock_code, DividFactorTable.ex_date)
+          .limit(len(source_rows) + 1)
+        )
+      ).all()
+      if canonical_divid_factor_rows(actual) != canonical_divid_factor_rows(
+        source_rows
+      ):
+        raise RuntimeError("divid factor recovery persisted content mismatch")
+
   async def find_by_stock_code(
     self,
     stock_code: str,
