@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from quantx_infrastructure.database.relational_base import Base
@@ -387,7 +387,7 @@ async def test_cancel_queued_and_running_runs_do_not_publish_artifacts(session_f
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["update_progress", "complete_run", "fail_run", "mark_cancelled"])
+@pytest.mark.parametrize("operation", ["update_progress", "complete_run", "fail_run", "mark_cancelled", "heartbeat_execution"])
 async def test_old_executor_cannot_write_after_persisted_ownership_changes(session_factory, operation):
   from sqlalchemy import update
 
@@ -408,6 +408,7 @@ async def test_old_executor_cannot_write_after_persisted_ownership_changes(sessi
       "complete_run": dict(run_key="result", artifact_manifest_sha256="a" * 64),
       "fail_run": dict(error_code="STALE_FAILURE", error_message="old executor"),
       "mark_cancelled": {},
+      "heartbeat_execution": {},
     }
     with pytest.raises(TrainingStateConflict, match="ownership lost"):
       await getattr(repository, operation)("owned-run", expected_flow_run_id="old-executor", **payloads[operation])
@@ -415,6 +416,37 @@ async def test_old_executor_cannot_write_after_persisted_ownership_changes(sessi
     assert current.prefect_flow_run_id == "new-executor"
     assert current.status == "RUNNING"
     assert current.artifact_manifest_sha256 is None
+
+
+@pytest.mark.asyncio
+async def test_execution_heartbeat_is_persisted_without_changing_cancel_version(session_factory):
+  now = datetime(2026, 9, 9, 1, 0, tzinfo=timezone.utc)
+  async with session_factory() as db:
+    repository = StockSelectionTrainingRepository(db)
+    await repository.certify_dataset(DATASET)
+    spec = await repository.create_spec(spec_values())
+    await repository.create_run(run_values(spec.spec_id, "heartbeat-run", "heartbeat-key"))
+    row = await repository.claim_next_queued("executor", now)
+    version = row.state_version
+    assert row.execution_heartbeat_at == now
+    await repository.heartbeat_execution(
+      row.run_id, expected_flow_run_id="executor", now=now + timedelta(seconds=10)
+    )
+    # A wall-clock adjustment cannot move persisted liveness backwards.
+    await repository.heartbeat_execution(
+      row.run_id, expected_flow_run_id="executor", now=now - timedelta(seconds=10)
+    )
+    async with session_factory() as observer:
+      stored = await StockSelectionTrainingRepository(observer).get_run(row.run_id)
+      assert stored.execution_heartbeat_at == now + timedelta(seconds=10)
+      assert stored.state_version == version
+    cancelled = await repository.request_cancel(
+      row.run_id, expected_state_version=version, idempotency_key="cancel-heartbeat"
+    )
+    assert cancelled.cancel_requested_at is not None
+    await repository.mark_cancelled(row.run_id, expected_flow_run_id="executor")
+    with pytest.raises(TrainingStateConflict, match="no longer running"):
+      await repository.heartbeat_execution(row.run_id, expected_flow_run_id="executor")
 
 
 @pytest.mark.asyncio

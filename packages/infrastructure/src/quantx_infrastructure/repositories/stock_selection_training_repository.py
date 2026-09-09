@@ -128,6 +128,7 @@ def _normalize_row_timestamps(row: Any) -> Any:
     "created_at",
     "requested_at",
     "started_at",
+    "execution_heartbeat_at",
     "completed_at",
     "cancel_requested_at",
     "updated_at",
@@ -1161,6 +1162,7 @@ class StockSelectionTrainingRepository:
     row.phase = "PREFLIGHT"
     row.started_at = current
     row.prefect_flow_run_id = owner
+    row.execution_heartbeat_at = current
     row.state_version += 1
     try:
       await self.db.commit()
@@ -1169,6 +1171,27 @@ class StockSelectionTrainingRepository:
       # two workers race between the RUNNING read and QUEUED claim.
       await self.db.rollback()
       return None
+    await self.db.refresh(row)
+    return _normalize_row_timestamps(row)
+
+  async def heartbeat_execution(
+    self,
+    run_id: str,
+    *,
+    expected_flow_run_id: str,
+    now: datetime | None = None,
+  ) -> StockSelectionTrainingRun:
+    """Persist owner liveness without invalidating a user's cancellation version."""
+    current = _as_utc(now or _utcnow(), "now")
+    row = await self._locked_run(run_id)
+    if row is None:
+      raise TrainingNotFound("training run does not exist")
+    self._assert_execution_owner(row, expected_flow_run_id)
+    if row.status != "RUNNING":
+      raise TrainingStateConflict("training execution is no longer running")
+    previous = _as_utc(row.execution_heartbeat_at, "execution_heartbeat_at")
+    row.execution_heartbeat_at = max(previous, current) if previous else current
+    await self.db.commit()
     await self.db.refresh(row)
     return _normalize_row_timestamps(row)
 

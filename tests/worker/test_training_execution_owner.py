@@ -78,3 +78,51 @@ async def test_stubborn_child_is_killed_after_bounded_grace():
 
   await flow._stop_research_process(Process())
   assert calls == ["terminate", "wait", "kill", "wait"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disconnect", [False, True])
+async def test_silent_research_gets_bounded_heartbeats_and_stops_on_disconnect(
+  monkeypatch, tmp_path, disconnect
+):
+  class Process:
+    alive = True
+
+    def poll(self):
+      return None if self.alive else -15
+
+    def terminate(self):
+      self.alive = False
+
+    def wait(self, timeout):
+      return -15
+
+  process = Process()
+  current = SimpleNamespace(status="RUNNING", prefect_flow_run_id="executor")
+  repository = SimpleNamespace(
+    get_run=AsyncMock(side_effect=[current, current, current, SimpleNamespace(status="CANCELLED")]),
+    heartbeat_execution=AsyncMock(
+      return_value=current, side_effect=ConnectionError("control plane unavailable") if disconnect else None
+    ),
+    fail_run=AsyncMock(),
+    complete_run=AsyncMock(),
+  )
+  ticks = iter([0, 0, 9, 10, 10])
+  monkeypatch.setattr(flow, "monotonic", lambda: next(ticks))
+  monkeypatch.setattr(flow, "_control_directory", lambda run_id: tmp_path.resolve())
+  monkeypatch.setattr(flow, "resolve_dataset_directory", lambda dataset: {})
+  monkeypatch.setattr(flow, "build_training_request", lambda *args, **kwargs: {})
+  monkeypatch.setattr(flow, "_spawn_process", lambda *args: process)
+  monkeypatch.setattr(flow, "record_spawn", lambda *args, **kwargs: None)
+  result = await flow._run_claimed_job(
+    repository,
+    SimpleNamespace(run_id="run-1", run_kind="DEVELOPMENT", prefect_flow_run_id="executor"),
+    object(), object(), poll_interval_seconds=0.01,
+  )
+  assert not process.alive
+  assert (tmp_path / "process.json").is_file()
+  assert result["status"] == ("FAILED" if disconnect else "OWNERSHIP_LOST")
+  assert repository.heartbeat_execution.await_count == (1 if disconnect else 2)
+  for call in repository.heartbeat_execution.call_args_list:
+    assert call.kwargs == {"expected_flow_run_id": "executor"}
+  repository.complete_run.assert_not_called()

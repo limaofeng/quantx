@@ -13,6 +13,7 @@ import sys
 import uuid
 from datetime import date, datetime, time, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
@@ -1094,6 +1095,7 @@ async def _run_claimed_job(
     _processes[run_id] = process
     last_progress: tuple[Any, ...] | None = None
     cancel_sent = False
+    next_heartbeat = 0.0
     while _process_alive(process):
       current = await repository.get_run(run_id)
       if (
@@ -1101,6 +1103,11 @@ async def _run_claimed_job(
         or _value(current, "prefect_flow_run_id") != execution_owner
       ):
         raise TrainingStateConflict("training execution ownership lost")
+      if monotonic() >= next_heartbeat:
+        current = await repository.heartbeat_execution(
+          run_id, expected_flow_run_id=execution_owner,
+        )
+        next_heartbeat = monotonic() + 10.0
       if _value(current, "cancel_requested_at") is not None and not cancel_sent:
         _write_cancel_request(cancel_path)
         cancel_sent = True

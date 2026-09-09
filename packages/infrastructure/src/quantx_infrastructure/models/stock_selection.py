@@ -506,6 +506,7 @@ class StockSelectionTrainingRun(Base):
   completed_units = Column(Integer, nullable=False, default=0)
   total_units = Column(Integer, nullable=False, default=0)
   prefect_flow_run_id = Column(String(128), nullable=True)
+  execution_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
   requested_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
   started_at = Column(DateTime(timezone=True), nullable=True)
   completed_at = Column(DateTime(timezone=True), nullable=True)
