@@ -172,6 +172,7 @@ class TrainerConfig:
         "QUANTX_ROOT": str(self.code_root),
         "QUANTX_RESEARCH_DATASETS_ROOT": str(self.state_root / "datasets"),
         "QUANTX_RESEARCH_RUNS_ROOT": str(self.state_root / "runs"),
+        "QUANTX_LIGHTGBM_GPU_QUALIFICATION": str(self.state_root / "gpu" / "qualification.json"),
         "PYTHONNOUSERSITE": "1",
         "PYTHONUTF8": "1",
       }

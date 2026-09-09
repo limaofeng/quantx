@@ -69,12 +69,14 @@ def test_training_deployments_have_only_the_isolated_pool_and_required_configura
     "deployments"
   ]
   names = {entry["name"] for entry in trainer}
-  assert len(names) == 2 and not names.intersection(entry["name"] for entry in worker)
+  assert len(names) == 3 and not names.intersection(entry["name"] for entry in worker)
   for entry in trainer:
     assert entry["work_pool"]["name"] == "quantx-train-pool"
     module, function = entry["entrypoint"].split(":")
     assert (root / module).is_file()
-    parameter = inspect.signature(getattr(training_flow, function).fn).parameters[
+    from quantx_trainer import preparation_flow
+    owner = preparation_flow if function == "trainer_gpu_preparation_flow" else training_flow
+    parameter = inspect.signature(getattr(owner, function).fn).parameters[
       "config_path"
     ]
     assert parameter.default is inspect.Parameter.empty

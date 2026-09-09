@@ -115,15 +115,24 @@ def result_bundle(
   return bundle
 
 
-async def _supervised_io(operation, repository, run_id: str, owner: str, cancel):
+async def _supervised_io(
+  operation, repository, run_id: str, owner: str, cancel, *, check=None
+):
   """Keep control-plane supervision active until the local/network worker exits."""
-  await _publication_heartbeat(repository, run_id, owner)
+
+  async def heartbeat():
+    if check is not None:
+      await check()
+    else:
+      await _publication_heartbeat(repository, run_id, owner)
+
+  await heartbeat()
   task = asyncio.create_task(asyncio.to_thread(operation))
   try:
     while not task.done():
       done, _ = await asyncio.wait({task}, timeout=PUBLICATION_HEARTBEAT_SECONDS)
       if not done:
-        await _publication_heartbeat(repository, run_id, owner)
+        await heartbeat()
     return task.result()
   except BaseException:
     cancel.set()

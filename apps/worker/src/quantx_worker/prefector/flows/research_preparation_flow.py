@@ -25,7 +25,6 @@ from quantx_infrastructure.services.research_preparation_window import (
 )
 from quantx_infrastructure.training_dataset_store import (
   certification_values,
-  resolve_dataset_directory,
 )
 
 from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
@@ -85,11 +84,7 @@ async def keep_alive(job_id, owner):
 
 async def perform(job, directory):
   if job.kind == "GPU":
-    async with AsyncSessionLocal() as db:
-      dataset = await StockSelectionTrainingRepository(db).get_dataset(
-        job.request["dataset_version"]
-      )
-      await asyncio.to_thread(resolve_dataset_directory, dataset)
+    raise ValueError("GPU preparation belongs to Trainer")
   await update_job(
     job.job_id, expected_flow_run_id=job.flow_run_id,
     phase={
@@ -203,7 +198,7 @@ async def research_preparation_dispatch_flow():
     return {"status": "QUEUED", "reason": "TRADING_CRITICAL_WINDOW"}
   async with AsyncSessionLocal() as db:
     job = await ResearchPreparationRepository(db).claim(
-      str(flow_run.id or uuid.uuid4())
+      str(flow_run.id or uuid.uuid4()), kinds=("COVERAGE", "DOWNLOAD", "CERTIFY"),
     )
     if job is None:
       return {"status": "IDLE"}

@@ -80,12 +80,12 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     assert first.job_id == duplicate.job_id
     await repo.save({**CONFIG, "date_end": "2025-08-01"})
     assert first.request["config"]["date_end"] == "2025-07-29"
-    job = await repo.claim("flow-1")
+    job = await repo.claim("flow-1", kinds=("DOWNLOAD",))
     assert job.job_id == first.job_id
     # Age alone must not permit a second execution while the original lives.
     job.updated_at -= timedelta(days=1)
     await db.commit()
-    assert await repo.claim("flow-2") is None
+    assert await repo.claim("flow-2", kinds=("DOWNLOAD",)) is None
     with pytest.raises(ValueError, match="归属"):
       await repo.progress(job.job_id, expected_flow_run_id="stale-owner", status="FAILED")
     await db.refresh(job)
@@ -95,11 +95,16 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
   async with session() as db:
     repo = ResearchPreparationRepository(db)
     assert (await repo.config())["date_end"] == "2025-08-01"
-    claimed = await repo.claim("flow-3")
+    claimed = await repo.claim("flow-3", kinds=("DOWNLOAD",))
     assert claimed.request == first.request
     with pytest.raises(ValueError, match="归属"):
       await repo.progress(claimed.job_id, expected_flow_run_id="flow-1", status="SUCCEEDED")
     await db.refresh(claimed)
     assert claimed.status == "RUNNING"
     await repo.progress(claimed.job_id, expected_flow_run_id="flow-3", status="SUCCEEDED")
+    gpu = await repo.submit(kind="GPU", config=await repo.config(), request_key="gpu-request-key-1234", dataset_version="dataset-v1")
+    assert await repo.claim("worker", kinds=("COVERAGE", "DOWNLOAD", "CERTIFY")) is None
+    assigned = await repo.claim("trainer", kinds=("GPU",))
+    assert assigned.job_id == gpu.job_id
+    assert assigned.flow_run_id == "trainer"
   await engine.dispose()

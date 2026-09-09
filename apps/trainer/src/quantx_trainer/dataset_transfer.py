@@ -89,7 +89,7 @@ async def publish_dataset(config, repository, *, dataset_version):
   }
 
 
-async def load_dataset(config, repository, dataset, *, run_id, owner):
+async def load_dataset(config, repository, dataset, *, run_id, owner, check=None):
   bundle = TrainingBundle.model_validate(_value(dataset, "source_bundle"))
   if bundle.kind != "DATASET" or bundle.source_id != _value(dataset, "dataset_version"):
     raise ValueError("DATASET_BUNDLE_IDENTITY_MISMATCH")
@@ -107,6 +107,7 @@ async def load_dataset(config, repository, dataset, *, run_id, owner):
     owner=owner,
     cache_name="dataset-cache",
     validate=validate,
+    check=check,
   )
 
 
@@ -156,7 +157,15 @@ async def load_parent_result(config, repository, parent, *, run_id, owner):
 
 
 async def _load_bundle(
-  config, repository, bundle, *, run_id, owner, cache_name, validate
+  config,
+  repository,
+  bundle,
+  *,
+  run_id,
+  owner,
+  cache_name,
+  validate,
+  check=None,
 ):
   policy = HostPolicy.load(host_guard_root())
   transfer = TransferConfig.load(config.transfer_config, state_root=config.state_root)
@@ -177,4 +186,4 @@ async def _load_bundle(
   reject_links(lock)
   lock.mkdir(parents=True, exist_ok=True)
   with publication_lock(lock):
-    return await _supervised_io(fetch, repository, run_id, owner, cancel)
+    return await _supervised_io(fetch, repository, run_id, owner, cancel, check=check)

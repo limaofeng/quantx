@@ -159,7 +159,7 @@ Trainer 调度器使用同一约束：每次独立调用使用独立标识，发
 
 ## 调度配置与运行边界
 
-`apps/trainer/prefect.yaml` 定义训练与能力心跳两项部署，仅使用 `quantx-train-pool`，参数 `config_path` 从显式 `QUANTX_TRAINER_CONFIG` 渲染。代码已从 Worker 删除这两项入口与清单；已存在的远端 Prefect 部署需要在运行端排空后单独处理，本地文件变化不会自动删除它们。独立 Worker 生命周期入口尚未实现，当前清单尚未部署验收。
+`apps/trainer/prefect.yaml` 定义训练、能力心跳和 GPU 准备三项部署，仅使用 `quantx-train-pool`，参数 `config_path` 从显式 `QUANTX_TRAINER_CONFIG` 渲染。代码已从 Worker 删除这两项入口与清单；已存在的远端 Prefect 部署需要在运行端排空后单独处理，本地文件变化不会自动删除它们。独立 Worker 生命周期入口尚未实现，当前清单尚未部署验收。
 
 每次 flow 进入 `training_session` 时验证实际 Conda 前缀、代码目录与控制面权限；数据库引擎只使用该配置中的开发 URL。运行配置保存在任务上下文中，不改写父进程环境。计算子进程通过 `research_environment` 取得文件根目录与最小系统环境，移除数据库、Prefect 和 ambient SSH 凭据；管理进程的 `child_environment` 则保留显式开发控制面目标。
 
@@ -176,3 +176,9 @@ conda run -n quantx-train python -m quantx_trainer.main publish-dataset --config
 命令重新核验认证证据，发布并读回 bundle 后，才登记不可替换的 `source_bundle`。迁移 `20260910_0074` 与开发角色的数据集 UPDATE 权限必须先由运维应用；本地尚未部署。旧数据集缺失传输清单时不可训练，需要先完成发布。准备流程自动发布与持久化交接仍待接入。
 
 调度领取后按清单从受限 SFTP 拉取至 `state_root/dataset-cache/<bundle_id>`，逐文件校验后原子完成，再核对认证清单与数据库投影，成功后才启动 Research。磁盘保留空间来自主机策略；下载和核验共享运行归属/取消/心跳监督，部分文件可供后续重试复用。最终评估按父运行的 `artifact_bundle` 自动下载至 `state_root/parent-cache/<bundle_id>`，校验数据库 manifest 哈希、父运行身份和 Research 内部文件清单后传给计算子进程。Research 以认证清单和开发锁核验父制品，不再要求目录名等于 run_id。输入阶段建立按执行归属隔离的监督者/请求记录，后续调度只有在监督者确定退出、没有任何计算进程记录、数据库仍为原归属 PREFLIGHT 且尚无进度时才重新排队；已有取消请求则收敛为 CANCELLED。新领取复用完整/部分缓存并保留旧诊断证据。领取事务持有队列行锁时先落盘输入监督者证据，再提交 RUNNING；写入失败回滚，提交确认丢失仍保留证据。常驻进程中，本次尝试退出会在所有输入 I/O 结束后由原监督者写入结束标记；后续调度可恢复领取确认丢失、元数据断联、输入异常及取消所遗留的任务，不必等待整个进程退出。已有计算记录仍排除输入重排；结束标记无法写入则保留待核验。跨机器与进程级有界终止验收尚未完成。
+
+### GPU 资格准备
+
+`trainer-gpu-preparation` 仅领取 GPU 类型准备任务，使用同一显式运行配置与 `quantx-train-pool`。Worker 仅领取 COVERAGE、DOWNLOAD、CERTIFY；构建认证的导出交接尚未完成。Trainer 从已登记 bundle 拉取数据集，GPU wheel 证据固定为 `state_root/gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl`，资格结果写入 `state_root/gpu/qualification.json`，能力探测读取同一路径。Research 子进程仅接收文件路径和隔离环境，不接收数据库/Prefect 凭据。
+
+准备监督端每 10 秒核对归属并写心跳，保存请求及计算进程身份，退出未确认保持 RUNNING。异步启动返回句柄前被打断时保留 STARTING，不开放重试。GPU 准备崩溃恢复、主机资源门争用时的重新排队、运行端部署与真实 GPU 资格验收仍待完成。

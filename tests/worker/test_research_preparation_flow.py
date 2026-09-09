@@ -103,7 +103,8 @@ async def test_dispatch_waits_for_work_to_stop_before_making_retry_available(mon
   async def session():
     yield SimpleNamespace(expunge=lambda row: None)
 
-  async def claim(owner):
+  async def claim(owner, *, kinds):
+    assert "GPU" not in kinds
     return job
 
   async def work(*args):

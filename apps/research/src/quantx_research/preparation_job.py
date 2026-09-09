@@ -263,23 +263,22 @@ async def execute(request, directory):
     return await coverage(config)
   if kind == "GPU":
     from quantx_research import next_day_selection_gpu as gpu
-    from quantx_research.next_day_selection_dataset import resolve_dataset_directory
     from quantx_research.next_day_selection_gpu import qualify_lightgbm_gpu
 
-    build = Path(
-      os.environ.get("QUANTX_LIGHTGBM_BUILD_EVIDENCE")
-      or (
-        root()
-        / ".runtime/research-gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl"
-      )
-    )
+    build = Path(request["build_evidence"])
+    dataset = Path(request["dataset_directory"])
+    output = Path(request["qualification_output"])
+    for local_path in (build, dataset, output):
+      if not local_path.is_absolute():
+        raise ValueError("Trainer GPU input paths must be absolute")
+      reject_links(local_path)
     if not build.is_file():
       return {
         "ready": False,
-        "error": "缺少官方 GPU wheel；请按 GPU 部署文档下载，或配置 QUANTX_LIGHTGBM_BUILD_EVIDENCE",
+        "error": "Trainer 隔离状态目录缺少官方 GPU wheel，请按 GPU 部署文档安装证据文件",
       }
     result = qualify_lightgbm_gpu(
-      resolve_dataset_directory(request["dataset_version"]), build_evidence=build
+      dataset, build_evidence=build, output=output,
     )
     checks = []
     for label, key in [

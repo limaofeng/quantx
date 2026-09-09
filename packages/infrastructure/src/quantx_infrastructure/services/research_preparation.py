@@ -185,7 +185,7 @@ class ResearchPreparationRepository:
       kind=kind,
       request=request,
       status="QUEUED",
-      phase="等待 Worker",
+      phase="等待 Trainer" if kind == "GPU" else "等待 Worker",
       result={},
       created_at=now(),
       updated_at=now(),
@@ -206,7 +206,10 @@ class ResearchPreparationRepository:
     await self.db.refresh(row)
     return row
 
-  async def claim(self, flow_run_id):
+  async def claim(self, flow_run_id, *, kinds):
+    kinds = tuple(kinds)
+    if not kinds or set(kinds) - {"COVERAGE", "DOWNLOAD", "CERTIFY", "GPU"}:
+      raise ValueError("准备任务领取范围无效")
     flow_run_id = str(flow_run_id or "").strip()
     if not flow_run_id or len(flow_run_id) > 64:
       raise ValueError("准备任务领取必须提供有效执行归属")
@@ -220,7 +223,7 @@ class ResearchPreparationRepository:
       return None
     row = await self.db.scalar(
       select(Job)
-      .where(Job.status == "QUEUED")
+      .where(Job.status == "QUEUED", Job.kind.in_(kinds))
       .order_by(Job.created_at)
       .with_for_update(skip_locked=True)
       .limit(1)
