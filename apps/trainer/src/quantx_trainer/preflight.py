@@ -7,6 +7,7 @@ business-table reads, task claiming, deployment registration or capability write
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
 
@@ -203,6 +204,13 @@ async def preflight(config: TrainerConfig) -> dict[str, str]:
   # Do not contact Prefect if database identity or privilege isolation is wrong.
   await check_database(config)
   await check_prefect(config)
+  from quantx_trainer.transfer import TransferConfig, check_store
+
+  try:
+    transfer = TransferConfig.load(config.transfer_config, state_root=config.state_root)
+    await asyncio.to_thread(check_store, transfer)
+  except Exception:
+    raise TrainerPreflightError("TRAINER_STORE_UNAVAILABLE") from None
   return {
     "status": "PREFLIGHT_PASSED",
     "environment": "development",

@@ -43,6 +43,7 @@ class TrainerConfig:
   prefect_api_url: str = field(repr=False)
   prefect_pool: str
   prefect_pool_id: str
+  transfer_config: Path = field(repr=False)
 
   @classmethod
   def load(cls, filename: Path) -> TrainerConfig:
@@ -72,7 +73,7 @@ class TrainerConfig:
       raise TrainerConfigurationError(
         "Trainer requires an explicit Prefect pool UUID"
       ) from None
-    for name in ("code_root", "production_root", "state_root"):
+    for name in ("code_root", "production_root", "state_root", "transfer_config"):
       values[name] = _path(values[name], name)
     config = cls(**values)
     config._validate_targets()
@@ -87,6 +88,10 @@ class TrainerConfig:
     if _overlaps(self.state_root, self.code_root):
       raise TrainerConfigurationError(
         "Trainer state and code directories must be separate"
+      )
+    if self.state_root not in self.transfer_config.parents:
+      raise TrainerConfigurationError(
+        "Trainer transfer configuration must be inside its state directory"
       )
     try:
       database = urlsplit(self.database_url)

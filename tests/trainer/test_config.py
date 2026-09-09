@@ -16,6 +16,7 @@ def deployment(tmp_path):
     "prefect_api_url": "http://dev-host:4200/api",
     "prefect_pool": "quantx-train-pool",
     "prefect_pool_id": "084451cb-a87f-4f06-9eb2-cae3db39804d",
+    "transfer_config": str(tmp_path / "training-state" / "transfer.toml"),
   }
 
 

@@ -30,6 +30,7 @@ database_url = "postgresql+asyncpg://trainer:REPLACE_ME@DEV_HOST:5432/quantx_dev
 prefect_api_url = "http://DEV_HOST:4200/api"
 prefect_pool = "quantx-train-pool"
 prefect_pool_id = "084451cb-a87f-4f06-9eb2-cae3db39804d"
+transfer_config = 'D:\QuantXTraining\state\transfer.toml'
 ```
 
 示例路径、端点及 Pool UUID 需替换为实际部署值。Pool UUID 来自显式创建的开发专用 Process Pool，不能沿用示例值或生产 Pool。生产目录必须如实配置；数据库名后缀与 URL 校验不能代替远端身份和研究表权限预检。
@@ -64,7 +65,28 @@ conda run -n quantx-train quantx-trainer preflight --config D:\QuantXTraining\tr
 
 部署时需审查 PUBLIC 默认权限及现有授权；单独为 Trainer 执行 GRANT 不能抵消已有 PUBLIC 权限。预检不自动创建角色、修改权限或启动外部服务。
 
-数据库预检成功后，才对配置的 Prefect 发起 GET，验证专用 Pool 名称、UUID、Process 类型及未暂停状态；不会跟随重定向或继承 HTTP 代理。成功输出 `PREFLIGHT_PASSED`，拒绝退出码为 `2`，仅输出稳定错误码。此命令不领取任务、不注册部署、不写心跳，也不证明数据传输或 GPU 可用。
+数据库预检成功后，才对配置的 Prefect 发起 GET，验证专用 Pool 名称、UUID、Process 类型及未暂停状态；不会跟随重定向或继承 HTTP 代理。随后验证 SFTP 身份与两个远端根目录的可读元数据。成功输出 `PREFLIGHT_PASSED`，拒绝退出码为 `2`，仅输出稳定错误码。此命令不领取任务、不注册部署、不写心跳或探测写权限，也不证明完整跨机器传输或 GPU 可用。
+
+## SFTP 身份与存储配置
+
+`transfer_config` 必须位于独立状态目录内，内容如下（替换为实际部署值）：
+
+```toml
+host = "dev-store.example.invalid"
+port = 22
+username = "quantx_trainer"
+private_key = 'D:\QuantXTraining\state\identity\store_key'
+known_hosts = 'D:\QuantXTraining\state\identity\known_hosts'
+datasets_root = "/datasets"
+artifacts_root = "/artifacts"
+timeout_seconds = 10
+```
+
+密钥和 known_hosts 必须是状态目录内的普通文件，不接受符号链接、junction 或硬链接。部署时为服务身份设置私钥文件 ACL，并从可信通道核对服务端主机密钥后写入指定 known_hosts；非标准 SSH 端口使用 `[host]:port` 条目。不会自动接受或更新主机密钥，也不使用 SSH agent、默认私钥、相邻 OpenSSH 证书、密码或交互式口令回退。
+
+服务端使用独立受限 SFTP 账号，只开放指定数据和制品目录，允许暂存、读回、删除临时文件和原子 rename。Trainer 既读取冻结数据，也需回传其构建认证的数据集；`DATASET` 发布到数据根目录，`RESULT`/`RELEASE` 发布到制品根目录，已完成 bundle 不覆盖。账号的文件系统隔离、禁止 shell/转发及权限配置属于部署验收，客户端预检不能证明这些服务端限制已生效。两个远端根目录必须独立且不嵌套。
+
+`quantx_trainer.transfer.open_store` 连接现有 bundle 适配器，提供 `fetch` 和 `publish`；会话退出或失败均关闭连接。连接、认证、SFTP 子系统握手和文件 I/O 有显式超时。协议行为以 [Paramiko SSHClient 文档](https://docs.paramiko.org/en/stable/api/client.html) 及锁定依赖的实现为依据；额外的握手截止时间覆盖其 SFTP 建链前未应用通道读写超时的窗口。
 
 ## 主机高资源门禁
 
@@ -111,10 +133,10 @@ SFTP 适配器接收已验证主机身份的 SFTPClient，由部署层管理受�
 
 `SFTPBundlePublisher.publish` 先验证本地制品，再上传到远端 `<bundle_id>.partial`。每个文件使用独占创建的临时文件，写完读回校验后通过 OpenSSH `posix-rename` 扩展落位；清单完全匹配后使用不覆盖已有目录的 rename 完成发布，并再次验证可读性。服务端不支持所需原子操作或任何校验失败时保留本地制品并报告失败。重试复用已验证文件；最终 rename 的确认丢失时，下次先验证完整目录，不重复上传。
 
-调用方必须串行化同一制品发布，仅在 `publish` 返回后登记引用，且数据库登记成功前保留本地产物。此模块不修改任务成功状态或模型发布状态。当前完成了清单、接收、发布及协议模拟往返测试；SSH 身份配置、真实服务器原子语义、数据库登记及调度接入仍待实施和跨机器验收。
+调用方必须串行化同一制品发布，仅在 `publish` 返回后登记引用，且数据库登记成功前保留本地产物。此模块不修改任务成功状态或模型发布状态。当前完成了清单、接收、发布、显式身份会话及本地真实 SSH/SFTP 协议往返测试；受限服务器部署、跨机器原子语义、数据库登记及调度接入仍待实施和验收。
 
 ## 执行归属
 
 训练仓储复用已有 `prefect_flow_run_id` 记录领取归属，拒绝空值和截断标识。进度、成功、失败、取消收敛都必须传入领取时冻结的 `expected_flow_run_id`；仓储在行锁内刷新数据库状态并校验归属，旧执行者不能用会话缓存或终态幂等分支绕过校验。轮询也刷新状态，以观察外部取消。
 
-切换前的 Worker 调度器已使用同一约束：每次独立调用使用独立标识，发现归属或运行状态变化后，停止自己的子进程并返回 `OWNERSHIP_LOST`，不改写该任务的新状态。正常停止超过 5 秒后强制终止，再有界等待退出。该约束尚不构成完整恢复：持久化进程身份、心跳、孤儿进程核对、结果回传恢复及 Trainer 调度迁移仍需完成。
+切换前的 Worker 调度器已使用同一约束：每次独立调用使用独立标识，发现归属或运行状态变化后，停止自己的子进程并返回 `OWNERSHIP_LOST`，不改写该任务的新状态。正常停止超过 5 秒后强制终止，再有界等待退出。执行心跳独立于进度每 10 秒持久化，不改变用户取消所依据的状态版本。恢复核对持久化的监督者和 Research 进程身份，证据未知时保留待核验。孤儿后代核对、结果回传恢复及 Trainer 调度迁移仍需完成。

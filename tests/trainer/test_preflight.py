@@ -25,6 +25,7 @@ def config(tmp_path):
     prefect_api_url="http://localhost:4200/api",
     prefect_pool="quantx-train-pool",
     prefect_pool_id="084451cb-a87f-4f06-9eb2-cae3db39804d",
+    transfer_config=tmp_path / "state" / "transfer.toml",
   )
 
 
@@ -156,6 +157,16 @@ async def test_failed_database_check_never_contacts_prefect(config, monkeypatch)
   with pytest.raises(TrainerPreflightError):
     await module.preflight(config)
   prefect.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_store_identity_blocks_otherwise_valid_control_plane(
+  config, monkeypatch
+):
+  monkeypatch.setattr(module, "check_database", AsyncMock())
+  monkeypatch.setattr(module, "check_prefect", AsyncMock())
+  with pytest.raises(TrainerPreflightError, match="^TRAINER_STORE_UNAVAILABLE$"):
+    await module.preflight(config)
 
 
 @pytest.mark.asyncio
