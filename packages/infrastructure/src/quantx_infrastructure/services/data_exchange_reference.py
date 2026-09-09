@@ -7,6 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.database.connection import AsyncSessionLocal
 from quantx_infrastructure.models.divid_factor import DividFactor, DividFactorTable
@@ -160,7 +161,51 @@ async def export_reference(code: str, day: date) -> dict:
     }
 
 
-async def import_reference(reference: dict, *, code: str) -> None:
+async def import_reference(reference: dict, *, code: str) -> dict:
+  async with AsyncSessionLocal() as db:
+    result = await import_reference_in_transaction(
+      await db.connection(), reference, code=code
+    )
+    await db.commit()
+    return result
+
+
+async def import_reference_in_transaction(
+  connection, reference: dict, *, code: str, owner=None
+) -> dict:
+  """Keep repository commits, reference evidence and caller receipt atomic."""
+  if not connection.in_transaction():
+    raise ValueError("reference import requires an outer transaction")
+  if owner is not None:
+    await owner._guard_ingestion_owner(connection, lock=False)
+  async with AsyncSession(bind=connection, join_transaction_mode="rollback_only") as db:
+    result = await _import_reference_session(db, reference, code=code)
+  if owner is not None:
+    await owner._guard_ingestion_owner(connection)
+  return result
+
+
+async def _import_reference_session(db, reference: dict, *, code: str) -> dict:
+  as_of = date.fromisoformat(reference["as_of"])
+  holidays = reference["holidays"]
+  if not isinstance(holidays, list) or len(holidays) > 366:
+    raise ValueError("Invalid calendar budget")
+  calendar = []
+  for holiday in holidays:
+    if (
+      set(holiday) != {"market", "year", "date", "description"}
+      or holiday["market"] != "SH"
+      or type(holiday["year"]) is not int
+      or holiday["year"] != as_of.year
+    ):
+      raise ValueError("Invalid calendar record")
+    day = date.fromisoformat(holiday["date"])
+    if day.year != as_of.year:
+      raise ValueError("Invalid calendar date")
+    calendar.append({**holiday, "date": day})
+  if len({item["date"] for item in calendar}) != len(calendar):
+    raise ValueError("Duplicate calendar date")
+  calendar.sort(key=lambda item: item["date"])
   instrument = dict(reference["instrument"])
   if set(instrument) != set(INSTRUMENT_FIELDS) or instrument["id"] != code:
     raise ValueError("Invalid reference instrument")
@@ -202,80 +247,114 @@ async def import_reference(reference: dict, *, code: str) -> None:
     ]
     if evidence.stock_code != code or not current_rows_match_evidence(evidence, values):
       raise ValueError("Imported reference evidence does not match factor rows")
-  async with AsyncSessionLocal() as db:
-    await db.merge(Instrument(**instrument))
-    for holiday in reference["holidays"]:
-      if (
-        set(holiday) != {"market", "year", "date", "description"}
-        or holiday["market"] != "SH"
-      ):
-        raise ValueError("Invalid calendar record")
-      day = date.fromisoformat(holiday["date"])
-      found = await db.scalar(
-        select(Holiday).where(Holiday.market == "SH", Holiday.date == day)
+  await db.merge(Instrument(**instrument))
+  for holiday in calendar:
+    day = holiday["date"]
+    found = await db.scalar(
+      select(Holiday).where(Holiday.market == "SH", Holiday.date == day)
+    )
+    if found is None:
+      db.add(Holiday(**holiday))
+  factors = []
+  for raw in reference["factors"]:
+    if set(raw) != set(FACTOR_FIELDS) or raw["stock_code"] != code:
+      raise ValueError("Invalid reference factor")
+    factors.append(
+      DividFactor(
+        **{
+          **raw,
+          "time": datetime.fromisoformat(raw["time"]),
+          **{field: Decimal(raw[field]) for field in FACTOR_FIELDS[3:]},
+        }
       )
-      if found is None:
-        db.add(Holiday(**{**holiday, "date": day}))
-    factors = []
-    for raw in reference["factors"]:
-      if set(raw) != set(FACTOR_FIELDS) or raw["stock_code"] != code:
-        raise ValueError("Invalid reference factor")
-      factors.append(
-        DividFactor(
-          **{
-            **raw,
-            "time": datetime.fromisoformat(raw["time"]),
-            **{field: Decimal(raw[field]) for field in FACTOR_FIELDS[3:]},
-          }
+    )
+  # Available rows are not proof of an empty or authoritative replacement range.
+  proof = reference.get("factor_coverage", {})
+  factor_audit = None
+  if proof.get("status") == "VERIFIED":
+    factor_audit = await DividFactorRepository(db).replace_range(
+      [
+        factor
+        for factor in factors
+        if proof["start_date"] <= factor.ex_date <= proof["end_date"]
+      ],
+      stock_codes=[code],
+      start_ex_date=proof["start_date"],
+      end_ex_date=proof["end_date"],
+    )
+  elif factors:
+    factor_audit = await DividFactorRepository(db).replace_range(
+      factors,
+      stock_codes=[code],
+      start_ex_date=min(factor.ex_date for factor in factors),
+      end_ex_date=max(factor.ex_date for factor in factors),
+    )
+  await db.flush()
+  actual_instrument = (
+    (
+      await db.execute(
+        select(
+          *(getattr(Instrument, key).label(key) for key in INSTRUMENT_FIELDS)
+        ).where(Instrument.id == code)
+      )
+    )
+    .mappings()
+    .one()
+  )
+  if dict(actual_instrument) != instrument:
+    raise ValueError("Imported instrument readback mismatch")
+  if calendar:
+    actual_calendar = (
+      (
+        await db.execute(
+          select(Holiday.market, Holiday.year, Holiday.date, Holiday.description)
+          .where(
+            Holiday.market == "SH",
+            Holiday.date.in_([item["date"] for item in calendar]),
+          )
+          .order_by(Holiday.date)
+          .limit(len(calendar) + 1)
         )
       )
-    # Available rows are not proof of an empty or authoritative replacement range.
-    proof = reference.get("factor_coverage", {})
-    if proof.get("status") == "VERIFIED":
-      await DividFactorRepository(db).replace_range(
-        [
-          factor
-          for factor in factors
-          if proof["start_date"] <= factor.ex_date <= proof["end_date"]
-        ],
-        stock_codes=[code],
-        start_ex_date=proof["start_date"],
-        end_ex_date=proof["end_date"],
-      )
-    elif factors:
-      await DividFactorRepository(db).replace_range(
-        factors,
-        stock_codes=[code],
-        start_ex_date=min(factor.ex_date for factor in factors),
-        end_ex_date=max(factor.ex_date for factor in factors),
-      )
-    await db.commit()
+      .mappings()
+      .all()
+    )
+    if [dict(item) for item in actual_calendar] != calendar:
+      raise ValueError("Imported calendar readback mismatch")
   if proof.get("status") == "VERIFIED":
     encoded = json.dumps(reference, sort_keys=True)
     version = hashlib.sha256(encoded.encode()).hexdigest()
     identity = hashlib.sha256(
       f"reference:{code}:{proof['evidence']['request_id']}".encode()
     ).hexdigest()
-    async with AsyncSessionLocal() as db:
-      await db.execute(
-        text("""
-        INSERT INTO development_data_export(id,request,state,manifest,updated_at)
-        VALUES (:id,CAST(:request AS JSON),'REFERENCE_VERIFIED',CAST(:manifest AS JSON),CURRENT_TIMESTAMP)
-        ON CONFLICT(id) DO UPDATE SET manifest=EXCLUDED.manifest,updated_at=CURRENT_TIMESTAMP
-      """),
-        {
-          "id": identity,
-          "request": json.dumps(
-            {
-              "operation": "reference",
-              "instrument": code,
-              "trading_date": reference["as_of"],
-            }
-          ),
-          "manifest": json.dumps({"reference": reference, "data_version": version}),
-        },
-      )
-      await db.commit()
+    await db.execute(
+      text("""
+      INSERT INTO development_data_export(id,request,state,manifest,updated_at)
+      VALUES (:id,CAST(:request AS JSON),'REFERENCE_VERIFIED',CAST(:manifest AS JSON),CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET manifest=EXCLUDED.manifest,updated_at=CURRENT_TIMESTAMP
+    """),
+      {
+        "id": identity,
+        "request": json.dumps(
+          {
+            "operation": "reference",
+            "instrument": code,
+            "trading_date": reference["as_of"],
+          }
+        ),
+        "manifest": json.dumps({"reference": reference, "data_version": version}),
+      },
+    )
+    await db.flush()
+  return {
+    "reference_sha256": hashlib.sha256(
+      json.dumps(reference, sort_keys=True, allow_nan=False).encode()
+    ).hexdigest(),
+    "instrument_records_verified": 1,
+    "calendar_records_verified": len(calendar),
+    "factor_replacement": factor_audit,
+    "factor_coverage_status": proof.get("status", "UNVERIFIED"),
+  }
 
 
 async def imported_factor_evidence(session, codes: set[str]) -> list[tuple]:

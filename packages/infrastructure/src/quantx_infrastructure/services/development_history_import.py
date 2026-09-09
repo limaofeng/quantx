@@ -21,7 +21,10 @@ from quantx_infrastructure.services.data_exchange import (
   get_export,
   submit,
 )
-from quantx_infrastructure.services.data_exchange_reference import import_reference
+from quantx_infrastructure.services.data_exchange_reference import (
+  import_reference,
+  import_reference_in_transaction,
+)
 from quantx_infrastructure.services.development_delivery_manifest import (
   MAX_DELIVERY_METADATA_BYTES,
   pin_delivery_manifest,
@@ -172,9 +175,14 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
       finally:
         temporary.unlink(missing_ok=True)
     audit = await ingest_uploaded_bar_request(ImportedTransfer(manifest), identity)
-    await import_reference(manifest["reference"], code=request.instrument)
-    receipt = {**manifest, "local_verification": audit}
     async with AsyncSessionLocal() as db:
+      reference_audit = await import_reference_in_transaction(
+        await db.connection(), manifest["reference"], code=request.instrument
+      )
+      receipt = {
+        **manifest,
+        "local_verification": {**audit, "reference_verification": reference_audit},
+      }
       await db.execute(
         text("""
         UPDATE development_data_export SET state='LOCAL_VERIFIED',manifest=CAST(:manifest AS JSON),
