@@ -67,6 +67,13 @@ class LocalJournal:
         );
         CREATE INDEX IF NOT EXISTS ix_history_collection_unit
           ON history_collection_receipts(device_id, request_id, unit_index);
+        CREATE TABLE IF NOT EXISTS history_collection_artifacts (
+          unit_id TEXT PRIMARY KEY,
+          permit_id TEXT NOT NULL,
+          artifact_sha256 TEXT NOT NULL,
+          byte_count INTEGER NOT NULL CHECK(byte_count > 0),
+          record_count INTEGER NOT NULL CHECK(record_count >= 0)
+        );
         CREATE TABLE IF NOT EXISTS journal_metadata (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
@@ -224,6 +231,65 @@ class LocalJournal:
     with self.lock:
       self._refresh_size_cache()
     return existing is None
+
+  def record_collection_artifact(self, *, permit_id: str, artifacts, artifact) -> bool:
+    """Bind verified bytes to a received permit, without claiming upload success."""
+    verified = artifacts.inspect(artifact.unit, expected_sha256=artifact.sha256)
+    if verified != artifact:
+      raise ValueError("collection artifact metadata mismatch")
+    with self.lock, self.connection:
+      self.connection.execute("BEGIN IMMEDIATE")
+      receipt = self.connection.execute(
+        "SELECT unit_id FROM history_collection_receipts WHERE permit_id=?",
+        (permit_id,),
+      ).fetchone()
+      if receipt is None or receipt["unit_id"] != artifact.unit.unit_id:
+        raise ValueError("collection artifact has no matching permit receipt")
+      existing = self.connection.execute(
+        "SELECT artifact_sha256,byte_count,record_count FROM history_collection_artifacts WHERE unit_id=?",
+        (artifact.unit.unit_id,),
+      ).fetchone()
+      if existing is not None and (
+        existing["artifact_sha256"] != artifact.sha256
+        or existing["byte_count"] != artifact.byte_count
+        or existing["record_count"] != artifact.record_count
+      ):
+        raise ValueError("collection artifact conflicts with recorded completion")
+      self.connection.execute(
+        "INSERT INTO history_collection_artifacts(unit_id,permit_id,artifact_sha256,byte_count,record_count) "
+        "VALUES (?,?,?,?,?) ON CONFLICT(unit_id) DO NOTHING",
+        (
+          artifact.unit.unit_id,
+          permit_id,
+          artifact.sha256,
+          artifact.byte_count,
+          artifact.record_count,
+        ),
+      )
+    with self.lock:
+      self._refresh_size_cache()
+    return existing is None
+
+  def load_collection_artifact(
+    self, *, device_id: str, unit: CollectionUnit, artifacts
+  ):
+    """Return only reverified native bytes, never infer completion from a receipt."""
+    with self.lock:
+      record = self.connection.execute(
+        "SELECT a.artifact_sha256,a.byte_count,a.record_count FROM history_collection_artifacts a "
+        "JOIN history_collection_receipts r ON r.permit_id=a.permit_id "
+        "WHERE a.unit_id=? AND r.device_id=?",
+        (unit.unit_id, device_id),
+      ).fetchone()
+    if record is None:
+      return None
+    artifact = artifacts.inspect(unit, expected_sha256=record["artifact_sha256"])
+    if (
+      artifact.byte_count != record["byte_count"]
+      or artifact.record_count != record["record_count"]
+    ):
+      raise ValueError("collection artifact metadata differs from journal")
+    return artifact
 
   def _backfill_structured_columns(self) -> None:
     command_rows = self.connection.execute(
