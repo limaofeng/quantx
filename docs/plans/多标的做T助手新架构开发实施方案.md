@@ -908,8 +908,20 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `p6-live-replacement-staging-regression.log`（其中风险组合初次失败已由 cut/final 日志验证修复）。
   已验证实际确认→暂存→重新前审及实际风险→暂存→当前持仓复核，两组分别替换风险或确认
   边界；仍未组成无替换的实际 admission/Engine 续单链，未产生新券商委托。
+- LIVE 续单 Engine 接线及部分成交准入整链已通过：生命周期循环在委托锁之前取得发布头/
+  来源锁，停止来源仍可撤销已有工作单；独立 T 终态父单进入专用 review/staging，再由现有
+  账户准入运行时处理。Adapter 使用监督器当前 ring/盘口见证，发送前按 staged parent 分流，
+  校验行情流、双时钟、原订单/分配期限，续单不重新构造候选 Gate；提交前再次验证见证。
+  实际隔离组合：确认/分配→200 股首单→100 股成交入账与退出授权→余量权威撤单→完整
+  合成账户快照→Engine 暂存→共享 sequencer/最终命令边界→100 股替单 QUEUED。两次
+  Pending/Correlation/Outbox 保持同 intent/batch/trace 和原 UTC 起点，重放不增单；替单最终
+  设备检查失败仅保留首单与 READY 续单请求，成交仍为 100。
+  62 项受影响测试通过，证据 `.codex_screenshots/p6-live-replacement-engine-regression.log`。
+  Python/隔离 SQLite 默认时钟统一到合成测试时间；仅替换行情、时钟、平台和设备边界，
+  不替换确认、分配、组合、风控、暂存、admission 或命令/回报持久化。未投递真实券商命令，
+  未验证 PostgreSQL 并发锁序；新替单成交回报及零成交撤单的完整组合仍待补齐。
 - 剩余开发顺序：
-  补齐 LIVE 续单 Engine 行情见证/准入调度/整链与持仓快照收敛与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 零成交续单/多 attempt 回报最终收敛与持仓快照收敛与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

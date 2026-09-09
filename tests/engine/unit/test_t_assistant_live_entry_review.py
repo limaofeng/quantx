@@ -7,6 +7,7 @@ import pytest
 from quantx_application.t_trade_v3.entry_execution_gate import EntryExecutionGate
 from quantx_contracts import ExecutionEnvironment
 from quantx_engine import t_assistant_live_entry_review as adapter_module
+from quantx_infrastructure.models.agent_runtime import PendingTradeOrder
 from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.t_allocation_repository import (
@@ -51,9 +52,10 @@ sessions = _sessions
 review_evidence = _review_evidence
 
 
+@pytest.mark.parametrize("path", ["initial", "replacement"])
 @pytest.mark.parametrize("fault", [None, "missing", "generation", "expired", "clock"])
 async def test_engine_review_uses_live_gate_and_checks_witness_after_await(
-  sessions, review_evidence, monkeypatch, fault
+  sessions, review_evidence, monkeypatch, fault, path
 ):
   at = allocation.NOW
   snapshot, candidates = await allocation._seed(
@@ -68,6 +70,45 @@ async def test_engine_review_uses_live_gate_and_checks_witness_after_await(
     intent.status = "EXECUTION_READY"
     source = await db.get(TAssistantExecutionRecord, intent.owner_id)
     gate, market = await input_for(db, intent.owner_id, intent.id)
+    if path == "replacement":
+      await db.run_sync(
+        lambda session: PendingTradeOrder.__table__.create(
+          session.connection(), checkfirst=True
+        )
+      )
+      intent.intent_metadata = {
+        **intent.intent_metadata,
+        "risk_increase_order_request": {"t_order_parent_client_id": "parent"},
+      }
+      db.add(
+        PendingTradeOrder(
+          client_order_id="parent",
+          user_id="fixture",
+          account_id=intent.account_id,
+          owner_type="T_ASSISTANT_EXECUTION",
+          owner_id=intent.owner_id,
+          environment="LIVE",
+          instrument_code=intent.instrument_code,
+          side="BUY",
+          order_type="FIX_PRICE",
+          volume=200,
+          limit_price="9.9",
+          status="CANCELLED",
+          t_trade_role="ENTRY",
+          intent_id=intent.id,
+          t_order_original_created_at=market.timestamp - timedelta(seconds=31),
+        )
+      )
+      await db.flush()
+      monkeypatch.setattr(
+        adapter_module,
+        "build_entry_gate",
+        AsyncMock(
+          side_effect=AssertionError(
+            "replacement must not create another candidate Gate"
+          )
+        ),
+      )
     current = market.timestamp
     changed = False
 
@@ -87,10 +128,14 @@ async def test_engine_review_uses_live_gate_and_checks_witness_after_await(
     async def review(**kwargs):
       nonlocal current, changed
       # Actual Gate and domain execution binding, not a fabricated ALLOW input.
-      evaluated = EntryExecutionGate.evaluate_live(
-        kwargs["gate_input"], execution=_execution_from_record(source)
-      )
-      assert evaluated.decision.value == "ALLOW", evaluated.reason_codes
+      if path == "initial":
+        evaluated = EntryExecutionGate.evaluate_live(
+          kwargs["gate_input"], execution=_execution_from_record(source)
+        )
+        assert evaluated.decision.value == "ALLOW", evaluated.reason_codes
+      else:
+        assert kwargs["client_order_id"] == "parent"
+        assert kwargs["market_data"] == market
       if fault == "generation":
         changed = True
       elif fault == "expired":
@@ -98,7 +143,13 @@ async def test_engine_review_uses_live_gate_and_checks_witness_after_await(
       return LiveEntryReviewResult("REVIEWED", ())
 
     reviewer = AsyncMock(side_effect=review)
-    monkeypatch.setattr(adapter_module.LiveEntryExecutionReview, "review", reviewer)
+    monkeypatch.setattr(
+      adapter_module.LiveEntryExecutionReview
+      if path == "initial"
+      else adapter_module.LiveEntryReplacementExecutionReview,
+      "review",
+      reviewer,
+    )
     adapter = adapter_module.LiveEntryReviewAdapter(
       db, witness_provider=provider, market_mark_reader=None, clock=lambda: current
     )

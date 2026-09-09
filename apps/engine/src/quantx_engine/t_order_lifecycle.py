@@ -6,6 +6,7 @@ import asyncio
 import logging
 from datetime import datetime, time, timezone
 from decimal import Decimal
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
@@ -118,7 +119,10 @@ async def run_t_order_lifecycle(stopped: asyncio.Event) -> None:
       try:
         async with t_trade_account_coordination_lock(str(account_id)):
           async with AsyncSessionLocal() as db:
-            await advance_order(db, str(client), now=utcnow())
+            validate_market = await advance_order(db, str(client), now=utcnow())
+            await db.flush()
+            if validate_market is not None:
+              validate_market()
             await db.commit()
       except Exception as exc:
         # One disconnected or quarantined owner must not starve other cancels.
@@ -136,9 +140,45 @@ async def run_t_order_lifecycle(stopped: asyncio.Event) -> None:
       pass
 
 
-async def advance_order(db, client_order_id: str, *, now: datetime) -> None:
+async def _stage_independent_entry_replacement(db, pending, *, now):
+  from quantx_infrastructure.services.live_entry_replacement_staging import (
+    stage_live_entry_replacement,
+  )
+
+  from .t_trade_runtime import t_assistant_live_supervisor
+
+  adapter = t_assistant_live_supervisor.entry_review_adapter(db)
+  try:
+    inputs = await adapter.prepare_replacement(
+      execution_id=pending.owner_id, intent_id=pending.intent_id,
+      client_order_id=pending.client_order_id, now=to_naive_utc(now).replace(tzinfo=timezone.utc),
+    )
+    await stage_live_entry_replacement(
+      db, client_order_id=pending.client_order_id, market_data=inputs.market_data,
+      market_mark_reader=adapter.market_mark_reader, now=inputs.now,
+      validate_market=inputs.validate_market,
+    )
+  except (TypeError, ValueError) as exc:
+    raise AgentUnavailableError(str(exc)) from exc
+  return inputs.validate_market
+
+
+async def advance_order(db, client_order_id: str, *, now: datetime) -> Callable[[], None] | None:
   from .report_processor import finalize_t_order_lifecycle
 
+  # Publication/source fences precede order/account locks, including cancel-only
+  # work for stopped sources. Readiness is checked only when increasing risk.
+  probe = await db.get(PendingTradeOrder, client_order_id)
+  if probe is not None and probe.owner_type == "T_ASSISTANT_EXECUTION" and probe.t_trade_role == "ENTRY":
+    from quantx_infrastructure.models.t_assistant_execution import (
+      TAssistantExecutionRecord,
+    )
+    from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
+
+    source = await db.get(TAssistantExecutionRecord, probe.owner_id)
+    if source is not None:
+      await db.get(TTradeGlobalConfig, source.config_id, with_for_update=True, populate_existing=True)
+      await db.get(TAssistantExecutionRecord, source.execution_id, with_for_update=True, populate_existing=True)
   await expire_order(db, client_order_id, now=now)
   pending = await db.get(PendingTradeOrder, client_order_id, with_for_update=True)
   if pending is None or not t_order_lifecycle_pending(pending):
@@ -159,6 +199,8 @@ async def advance_order(db, client_order_id: str, *, now: datetime) -> None:
     return
   if str(pending.status).upper() in _WORKING:
     return
+  if pending.owner_type == "T_ASSISTANT_EXECUTION" and pending.t_trade_role == "ENTRY":
+    return await _stage_independent_entry_replacement(db, pending, now=now)
   scanner = intraday_volume_scanner
   if not scanner.hub.is_ready or not await scanner.hub.is_trading_session():
     pending.status_reason = "T_ORDER_MARKET_NOT_READY"

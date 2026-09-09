@@ -235,3 +235,36 @@ async def test_terminal_entry_at_cutoff_finalizes_without_market_or_replace(monk
   monkeypatch.setattr(report_processor, "finalize_t_order_lifecycle", finalize)
   await runtime.advance_order(db, "client-0", now=datetime(2026, 9, 4, 6, 50))
   finalize.assert_awaited_once_with(db, pending)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("working", [False, True])
+async def test_independent_entry_lifecycle_locks_source_before_orders_and_uses_its_reviewer(monkeypatch, working):
+  from quantx_infrastructure.models.t_assistant_execution import (
+    TAssistantExecutionRecord,
+  )
+  from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
+
+  pending = order(owner_type="T_ASSISTANT_EXECUTION", owner_id="source", t_trade_role="ENTRY",
+                  side="BUY", status="ACCEPTED" if working else "CANCELLED")
+  source = SimpleNamespace(execution_id="source", config_id="config", status="STOPPED" if working else "RUNNING")
+  calls = []
+  async def get(model, identity, **kwargs):
+    calls.append((model, bool(kwargs.get("with_for_update"))))
+    return source if model is TAssistantExecutionRecord else SimpleNamespace() if model is TTradeGlobalConfig else pending
+  db = SimpleNamespace(get=get, scalar=AsyncMock(return_value=None))
+  cancel = AsyncMock()
+  stage = AsyncMock(return_value=lambda: None)
+  monkeypatch.setattr(commands.TradeCommandService, "enqueue_cancel", cancel)
+  monkeypatch.setattr(runtime, "_stage_independent_entry_replacement", stage)
+  result = await runtime.advance_order(db, pending.client_order_id, now=pending.created_at + timedelta(seconds=31))
+  locks = [model for model, locked in calls if locked]
+  assert locks[:3] == [TTradeGlobalConfig, TAssistantExecutionRecord, PendingTradeOrder]
+  if working:
+    cancel.assert_awaited_once()
+    stage.assert_not_awaited()
+    assert pending.status == "CANCEL_REQUESTED" and result is None
+  else:
+    cancel.assert_not_awaited()
+    stage.assert_awaited_once()
+    assert callable(result)
