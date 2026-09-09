@@ -52,6 +52,23 @@ async def install_budget_schema(engine):
       schedule_migration.upgrade()
 
     await connection.run_sync(upgrade_schedule)
+    progress_path = path.with_name("20260910_0080_development_ingestion_progress.py")
+    progress_spec = importlib.util.spec_from_file_location(
+      "delivery_ingestion_migration", progress_path
+    )
+    progress_migration = importlib.util.module_from_spec(progress_spec)
+    progress_spec.loader.exec_module(progress_migration)
+
+    def upgrade_progress(sync_connection):
+      operations = Operations(MigrationContext.configure(sync_connection))
+      progress_migration.op = SimpleNamespace(
+        create_table=lambda *args, **kwargs: operations.create_table(
+          *args, prefixes=["TEMPORARY"], **kwargs
+        )
+      )
+      progress_migration.upgrade()
+
+    await connection.run_sync(upgrade_progress)
   return migration
 
 

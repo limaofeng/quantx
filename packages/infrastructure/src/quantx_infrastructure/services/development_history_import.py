@@ -11,11 +11,13 @@ from datetime import date, timedelta
 from uuid import uuid4
 
 import httpx
+from quantx_application.market_data.ingestion import IngestionEvidenceConflict
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from quantx_infrastructure.database.connection import AsyncSessionLocal
+from quantx_infrastructure.database.timeseries_connection import NonRetryableWriteError
 from quantx_infrastructure.services.data_exchange import (
   content_path,
   export_root,
@@ -37,6 +39,9 @@ from quantx_infrastructure.services.development_download_budget import (
   DeliveryDownloadBudgetExhausted,
   DeliveryRemoteUnavailable,
   DevelopmentDownloadBudget,
+)
+from quantx_infrastructure.services.development_ingestion_progress import (
+  DevelopmentIngestionStore,
 )
 from quantx_infrastructure.services.market_data_persistence_verification import (
   MarketDataPersistenceBlockedError,
@@ -113,10 +118,27 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
   if schedule["reason_code"]:
     return {"id": identity, "status": "BLOCKED", "reason": schedule["reason_code"]}
   if not schedule["due"]:
-    waiting = "WAITING_LOCAL_PROOF" if local["state"] == "WAITING_LOCAL_PROOF" else "WAITING_SOURCE"
+    waiting = (
+      "WAITING_LOCAL_PROOF"
+      if local["state"] == "WAITING_LOCAL_PROOF"
+      else "WAITING_SOURCE"
+    )
     return {"id": identity, "status": waiting, "reason": schedule["wait_reason"]}
   if local["state"] in {"LOCAL_VERIFIED", "WAITING_LOCAL_PROOF"}:
     return await _recheck_local_partition(identity, request, local["manifest"], budget)
+  ingestion_store = DevelopmentIngestionStore(AsyncSessionLocal, identity)
+  resumed = await ingestion_store.status()
+  if resumed is not None:
+    state = resumed["progress"]
+    if state["blocked"] or not resumed["due"]:
+      return {
+        "id": identity,
+        "status": "BLOCKED" if state["blocked"] else "WAITING_LOCAL_INGESTION",
+        "reason": state["reason_code"],
+      }
+    return await _ingest_local_partition(
+      identity, request, local["manifest"], ingestion_store
+    )
   base = os.environ["QUANTX_MARKET_DATA_URL"].rstrip("/")
   headers = {"Authorization": f"Bearer {os.environ['QUANTX_MARKET_DATA_TOKEN']}"}
   async with httpx.AsyncClient(
@@ -125,7 +147,10 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
     if not schedule["remote_submitted"]:
       async with budget.attempt(MAX_DELIVERY_METADATA_BYTES):
         response = await read_delivery_metadata(
-          client, "POST", "/market-data/v1/history", json=request.model_dump(mode="json")
+          client,
+          "POST",
+          "/market-data/v1/history",
+          json=request.model_dump(mode="json"),
         )
       if response["id"] != identity:
         raise ValueError("Remote request identity mismatch")
@@ -188,24 +213,81 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
         temporary.replace(path)
       finally:
         temporary.unlink(missing_ok=True)
-    audit = await ingest_uploaded_bar_request(ImportedTransfer(manifest), identity)
+    return await _ingest_local_partition(identity, request, manifest, ingestion_store)
+
+
+async def _ingest_local_partition(identity, request, manifest, ingestion_store):
+  progress = await ingestion_store.begin()
+  if progress.state["blocked"]:
+    return {
+      "id": identity,
+      "status": "BLOCKED",
+      "reason": progress.state["reason_code"],
+    }
+  try:
+    validate_delivery_manifest(manifest, request)
+    audit = await ingest_uploaded_bar_request(
+      ImportedTransfer(manifest), identity, progress=progress
+    )
     async with AsyncSessionLocal() as db:
       reference_audit = await import_reference_in_transaction(
-        await db.connection(), manifest["reference"], code=request.instrument
+        await db.connection(),
+        manifest["reference"],
+        code=request.instrument,
+        owner=ingestion_store.owner,
       )
       receipt = {
         **manifest,
         "local_verification": {**audit, "reference_verification": reference_audit},
       }
+      await ingestion_store.mutate_in_transaction(
+        db,
+        identity,
+        claim_token=progress.claim_token,
+        action="advance",
+        values={"phase": "VERIFIED"},
+      )
       await db.execute(
         text("""
-        UPDATE development_data_export SET state='LOCAL_VERIFIED',manifest=CAST(:manifest AS JSON),
+        UPDATE development_data_export SET state='LOCAL_VERIFIED',error=NULL,manifest=CAST(:manifest AS JSON),
         updated_at=CURRENT_TIMESTAMP WHERE id=:id
       """),
         {"id": identity, "manifest": json.dumps(receipt, default=str)},
       )
       await db.commit()
     return receipt
+
+  except Exception as exc:
+    permanent = isinstance(
+      exc,
+      (
+        MarketDataPersistenceBlockedError,
+        NonRetryableWriteError,
+        MarketDataValidationError,
+        IngestionEvidenceConflict,
+        ValueError,
+        FileNotFoundError,
+      ),
+    )
+    reason = (
+      exc.reason_code
+      if isinstance(exc, MarketDataPersistenceBlockedError)
+      else "DEPENDENCY_WRITE_CAPACITY_BLOCKED"
+      if isinstance(exc, NonRetryableWriteError)
+      else "LOCAL_DELIVERY_PROOF_INVALID"
+      if permanent
+      else "PERSISTED_DATA_NOT_VISIBLE"
+      if isinstance(exc, MarketDataPersistenceMismatchError)
+      else "LOCAL_READBACK_UNAVAILABLE"
+      if progress.state["phase"] == "READBACK"
+      else "LOCAL_WRITE_UNAVAILABLE"
+    )
+    state = await progress.apply("defer", reason_code=reason, blocked=permanent)
+    return {
+      "id": identity,
+      "status": "BLOCKED" if state["blocked"] else "WAITING_LOCAL_INGESTION",
+      "reason": reason,
+    }
 
 
 async def _recheck_local_partition(identity, request, receipt, budget):
@@ -217,42 +299,58 @@ async def _recheck_local_partition(identity, request, receipt, budget):
     current = await verify_uploaded_bar_request(ImportedTransfer(manifest), identity)
     async with AsyncSessionLocal() as db:
       await verify_imported_reference(
-        await db.connection(), manifest["reference"],
+        await db.connection(),
+        manifest["reference"],
         receipt.get("local_verification", {}).get("reference_verification"),
         code=request.instrument,
       )
-      result = {**receipt, "local_verification": {**receipt["local_verification"], **current}}
-      await db.execute(text("""
+      result = {
+        **receipt,
+        "local_verification": {**receipt["local_verification"], **current},
+      }
+      await db.execute(
+        text("""
         UPDATE development_data_export SET state='LOCAL_VERIFIED',error=NULL,
           manifest=CAST(:manifest AS JSON),updated_at=clock_timestamp() WHERE id=:id
-      """), {"id": identity, "manifest": json.dumps(result, default=str)})
-      await db.execute(text("""
+      """),
+        {"id": identity, "manifest": json.dumps(result, default=str)},
+      )
+      await db.execute(
+        text("""
         UPDATE development_data_download_budget SET wait_reason=NULL,transient_failures=0,
           next_probe_at=clock_timestamp(),updated_at=clock_timestamp() WHERE delivery_id=:id
-      """), {"id": identity})
+      """),
+        {"id": identity},
+      )
       await db.commit()
     return result
   except MarketDataPersistenceBlockedError as exc:
     state, reason = "BLOCKED", exc.reason_code
   except (MarketDataPersistenceQueryError, SQLAlchemyError):
     state, reason = "WAITING_LOCAL_PROOF", "LOCAL_READBACK_UNAVAILABLE"
-  except (ValueError, MarketDataValidationError, MarketDataPersistenceMismatchError,
-          MarketDataPersistenceVerificationError, FileNotFoundError):
+  except (
+    ValueError,
+    MarketDataValidationError,
+    MarketDataPersistenceMismatchError,
+    MarketDataPersistenceVerificationError,
+    FileNotFoundError,
+  ):
     state, reason = "BLOCKED", "LOCAL_DELIVERY_PROOF_INVALID"
   async with AsyncSessionLocal() as db:
-    await db.execute(text("""
+    await db.execute(
+      text("""
       UPDATE development_data_export SET state=:state,error=:reason,
         updated_at=clock_timestamp() WHERE id=:id
-    """), {"id": identity, "state": state, "reason": reason})
+    """),
+      {"id": identity, "state": state, "reason": reason},
+    )
     await db.commit()
   if state == "WAITING_LOCAL_PROOF":
     await budget.schedule("local_failed")
   return {"id": identity, "status": state, "reason": reason}
 
 
-async def run_range(
-  instruments: list[str], period: str, start: date, end: date
-) -> int:
+async def run_range(instruments: list[str], period: str, start: date, end: date) -> int:
   if end < start:
     raise ValueError("Invalid date range")
   result = await request_remote_history(
@@ -276,9 +374,11 @@ def main() -> None:
   parser.add_argument("--start", type=date.fromisoformat, required=True)
   parser.add_argument("--end", type=date.fromisoformat, required=True)
   args = parser.parse_args()
-  raise SystemExit(asyncio.run(
-    run_range(args.instruments.split(","), args.period, args.start, args.end)
-  ))
+  raise SystemExit(
+    asyncio.run(
+      run_range(args.instruments.split(","), args.period, args.start, args.end)
+    )
+  )
 
 
 async def request_remote_history(
@@ -403,7 +503,8 @@ async def request_remote_history(
         "id": result.get("id"),
         "reason": result.get("reason"),
         "status": "LOCAL_VERIFIED"
-        if "local_verification" in result else result.get("status"),
+        if "local_verification" in result
+        else result.get("status"),
       }
       if "local_verification" in result:
         receipts[key] = result
@@ -421,7 +522,9 @@ async def request_remote_history(
         "status": "failed",
         "reason": "DEVELOPMENT_SOURCE_INCOMPLETE"
         if any(p["status"] == "INCOMPLETE" for p in partition_status.values())
-        else next(p["reason"] for p in partition_status.values() if p["status"] == "BLOCKED"),
+        else next(
+          p["reason"] for p in partition_status.values() if p["status"] == "BLOCKED"
+        ),
         "request_id": identity,
         **progress,
       }

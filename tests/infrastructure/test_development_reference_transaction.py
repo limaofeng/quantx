@@ -340,12 +340,21 @@ async def test_importer_publishes_reference_and_local_receipt_in_one_transaction
     "AsyncClient",
     lambda **kwargs: client(**kwargs, transport=transport),
   )
+
   # Bar persistence has its own verification suite. This test exercises the
   # real importer after that boundary through reference storage and receipt SQL.
+  async def ingest(_transfer, _identity, *, progress):
+    await progress.apply("manifest", sha256="a" * 64)
+    await progress.apply("advance", phase="WRITE")
+    await progress.apply(
+      "advance", phase="READBACK", write_result={"records_verified": 1}
+    )
+    return {"records_verified": 1}
+
   monkeypatch.setattr(
     importer,
     "ingest_uploaded_bar_request",
-    AsyncMock(return_value={"records_verified": 1}),
+    AsyncMock(side_effect=ingest),
   )
 
   def reject_receipt(connection, cursor, statement, parameters, context, executemany):
@@ -355,8 +364,9 @@ async def test_importer_publishes_reference_and_local_receipt_in_one_transaction
   event.listen(store.engine.sync_engine, "before_cursor_execute", reject_receipt)
   try:
     if fail_receipt:
-      with pytest.raises(RuntimeError, match="receipt rejected"):
-        await importer._import_partition_owned(request)
+      pending = await importer._import_partition_owned(request)
+      assert pending["status"] == "WAITING_LOCAL_INGESTION"
+      assert pending["reason"] == "LOCAL_READBACK_UNAVAILABLE"
     else:
       receipt = await importer._import_partition_owned(request)
       assert (
@@ -368,7 +378,9 @@ async def test_importer_publishes_reference_and_local_receipt_in_one_transaction
   finally:
     event.remove(store.engine.sync_engine, "before_cursor_execute", reject_receipt)
   local = await catalog.get_export(identity)
-  assert local["state"] == ("QUEUED" if fail_receipt else "LOCAL_VERIFIED")
+  assert local["state"] == (
+    "WAITING_LOCAL_INGESTION" if fail_receipt else "LOCAL_VERIFIED"
+  )
   async with store.engine.connect() as connection:
     assert await connection.scalar(text("SELECT count(*) FROM instruments")) == (
       0 if fail_receipt else 1
