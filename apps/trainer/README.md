@@ -277,7 +277,7 @@ Windows 使用独立解释器与配置；`up` 可替换为 `down`、`status`、`
 .\ops\quantx.ps1 up -Component trainer -Environment dev -TrainerPython C:\Users\limao\miniconda3\envs\quantx-train\python.exe -TrainerConfig C:\Users\limao\QuantXTraining\state\trainer.toml
 ```
 
-路径须替换为本机实际独立环境与配置的绝对路径。`logs` 可指定 `-Tail 1..1000`。bootstrap 仍使用原来的 `-CondaExecutable`；运行命令不创建或安装环境。Trainer 不接受生产环境、交易模式或账户参数，普通生产 up/down 不代管 Trainer。
+路径须替换为本机实际独立环境与配置的绝对路径。`logs` 可指定 `-Tail 1..1000`；训练日志追加 `-TrainerRunId <run-id>`，准备日志追加 `-TrainerJobId <job-id> -TrainerOwner <执行归属>`。macOS 对应参数为 `--trainer-run-id` 或成对的 `--trainer-job-id` / `--trainer-owner`，保留显式 `--trainer-config` / `--trainer-python`。筛选参数仅用于 `logs`，训练与准备标识不能混用。bootstrap 仍使用原来的 `-CondaExecutable`；运行命令不创建或安装环境。Trainer 不接受生产环境、交易模式或账户参数，普通生产 up/down 不代管 Trainer。
 
 macOS 对应入口为 `./ops/quantx.sh status --component trainer --trainer-python /实际路径/quantx-train/bin/python --trainer-config /实际路径/trainer.toml`，日志行数使用 `--tail`。路由在普通服务状态目录和进程管理之前返回；两端均使用 Python `-I` 隔离搜索路径，应用再次校验真实 Conda、代码根目录和开发配置身份。
 

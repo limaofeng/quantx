@@ -31,6 +31,10 @@ param(
 
   [string]$TrainerPython = "",
 
+  [string]$TrainerRunId = "",
+  [string]$TrainerJobId = "",
+  [string]$TrainerOwner = "",
+
   [ValidateRange(1, 5000)]
   [int]$Tail = 100,
 
@@ -3038,6 +3042,12 @@ function Invoke-Verify {
 }
 
 if ($Component -eq "trainer") {
+  if (($TrainerRunId -or $TrainerJobId -or $TrainerOwner) -and $Command -ne "logs") {
+    throw "Trainer log selectors require logs."
+  }
+  if (([bool]$TrainerJobId -ne [bool]$TrainerOwner) -or ($TrainerRunId -and $TrainerJobId)) {
+    throw "Trainer preparation logs require -TrainerJobId and -TrainerOwner, without -TrainerRunId."
+  }
   if ($Environment -ne "dev") {
     throw "Trainer requires explicit -Environment dev."
   }
@@ -3066,10 +3076,12 @@ if ($Component -eq "trainer") {
   $trainerCommand = if ($Command -eq "doctor") { "preflight" } else { $Command }
   $trainerArguments = @("-I", "-m", "quantx_trainer.main", $trainerCommand, "--config", $TrainerConfig)
   if ($Command -eq "logs") { $trainerArguments += @("--lines", [string]$Tail) }
+  if ($TrainerRunId) { $trainerArguments += @("--run-id", $TrainerRunId) }
+  if ($TrainerJobId) { $trainerArguments += @("--job-id", $TrainerJobId, "--owner", $TrainerOwner) }
   & $TrainerPython @trainerArguments
   exit $LASTEXITCODE
 }
-if ($TrainerConfig -or $TrainerPython -or $Command -in @("drain", "resume")) {
+if ($TrainerConfig -or $TrainerPython -or $TrainerRunId -or $TrainerJobId -or $TrainerOwner -or $Command -in @("drain", "resume")) {
   throw "Trainer parameters and drain/resume require -Component trainer."
 }
 if ($CondaExecutable) {

@@ -62,12 +62,20 @@ def main() -> None:
   parser.add_argument("--component", choices=("monitor", "trainer"))
   parser.add_argument("--trainer-config", type=Path)
   parser.add_argument("--trainer-python", type=Path)
+  parser.add_argument("--trainer-run-id")
+  parser.add_argument("--trainer-job-id")
+  parser.add_argument("--trainer-owner")
   parser.add_argument("--tail", type=int, default=100)
   parser.add_argument("--instruments")
   parser.add_argument("--period", choices=("tick", "1m", "1d"))
   parser.add_argument("--start")
   parser.add_argument("--end")
   args = parser.parse_args()
+  if any((args.trainer_run_id, args.trainer_job_id, args.trainer_owner)):
+    if args.component != "trainer" or args.command != "logs":
+      parser.error("Trainer log selectors require logs --component trainer")
+    if bool(args.trainer_job_id) != bool(args.trainer_owner) or (args.trainer_job_id and args.trainer_run_id):
+      parser.error("Trainer preparation logs require --trainer-job-id and --trainer-owner, without --trainer-run-id")
   if sys.platform != "darwin":
     parser.error("This launcher is only for macOS development")
   if not (Path(sys.prefix) / "conda-meta").is_dir():
@@ -87,6 +95,10 @@ def main() -> None:
                  "--config", str(args.trainer_config)]
     if command == "logs":
       arguments.extend(["--lines", str(args.tail)])
+    if args.trainer_run_id:
+      arguments.extend(["--run-id", args.trainer_run_id])
+    if args.trainer_job_id:
+      arguments.extend(["--job-id", args.trainer_job_id, "--owner", args.trainer_owner])
     raise SystemExit(subprocess.call(arguments))
   if args.trainer_config or args.trainer_python or args.command in {"drain", "resume"}:
     parser.error("Trainer parameters and drain/resume require --component trainer")
