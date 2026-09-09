@@ -350,8 +350,9 @@ class StrategyOrderCancelRequest:
 class TradeCommandService:
   MANUAL_RECONCILIATION_MAX_AGE_SECONDS = 90
 
-  def __init__(self, db: AsyncSession) -> None:
+  def __init__(self, db: AsyncSession, *, live_entry_review=None) -> None:
     self.db = db
+    self.live_entry_review = live_entry_review
 
   @staticmethod
   def _require_execution_identity(
@@ -3850,11 +3851,18 @@ class TradeCommandService:
   ) -> AgentDevice:
     """Revalidate T's own consumed confirmation or LIVE_AUTO rollout authority."""
     if intent.owner_type == "T_ASSISTANT_EXECUTION":
+      from quantx_infrastructure.services.live_entry_dispatch_review import (
+        revalidate_live_entry_dispatch,
+      )
       from quantx_infrastructure.services.t_live_entry_authorization import (
         authorize_live_entry,
       )
 
       try:
+        await revalidate_live_entry_dispatch(
+          self.db, intent=intent, volume=volume, limit_price=limit_price,
+          now=datetime.now(timezone.utc), fresh_review=self.live_entry_review,
+        )
         actor_id = await authorize_live_entry(
           self.db, intent=intent, account_id=account_id,
           instrument_code=instrument_code, volume=volume, limit_price=limit_price,

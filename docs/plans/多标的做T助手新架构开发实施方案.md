@@ -829,6 +829,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   48 项相关回归通过、Ruff 通过；5 项暂存测试替换审查器，真实验证事务/审计/请求解析/
   订单策略，未冒充无替身整链。证据 `.codex_screenshots/p6-live-{request-staging,staging-regression}.log`。
   尚未注册 Engine 入口：先补出队前最新行情/审查证据复核、旧请求失效处理，再接账户队列。
+- 出队审查门已接入新 T 的 `_t_entry_device` 公共最终授权入口：审计事件必须匹配完整
+  待下单请求、当前 allocation 指针、审查输入哈希和原 Gate/行情有效期；随后必须执行
+  显式注入的最新审查，复核身份、审批人、价格、合法买入类型与足够数量。默认未注入时
+  返回 LIVE_ENTRY_FRESH_REVIEW_REQUIRED，不获取设备、不发送命令。
+  57 项相关回归通过、Ruff 通过；出队 9 项使用持久化暂存证据与最新审查替身，包含实际
+  TradeCommandService 入口及无回调时设备零调用验证。证据 `.codex_screenshots/p6-live-dispatch-{review,regression}.log`。
+  下一步仍需 Engine 新鲜行情/Gate 回调接线、账户批次与执行锁顺序统一、过期请求回收，
+  再注册 LIVE 请求生成/账户调度并完成无替身隔离整链。
 - 剩余开发顺序：
   人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
