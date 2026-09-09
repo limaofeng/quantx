@@ -116,3 +116,50 @@ def test_full_disk_does_not_publish_request(tmp_path):
     jobs.retain(request, reserve=Mock(side_effect=OSError("full")), release=Mock())
   assert not list(tmp_path.rglob("request.json"))
   assert retained_history_bytes(tmp_path, max_bytes=100000) == 0
+
+
+def test_discovery_restores_original_plan_without_completion_cursor(job):
+  jobs, retained, _, _ = job
+  assert jobs.request_ids() == (retained.request.request_id,)
+  loaded = HistoryJobs(jobs.root, device_id=jobs.device_id).load(
+    retained.request.request_id
+  )
+  assert loaded.units == retained.units
+  assert loaded.request.completed_units == 0
+  assert loaded.request.payload == retained.request.payload
+
+
+def test_load_rejects_changed_manifest_or_different_device(job):
+  jobs, retained, _, _ = job
+  with pytest.raises(ValueError, match="identity mismatch"):
+    HistoryJobs(jobs.root, device_id=str(uuid4())).load(retained.request.request_id)
+  path = retained.directory / "request.json"
+  path.write_bytes(path.read_bytes().replace(b"000001.SZ", b"600000.SH"))
+  with pytest.raises(ValueError, match="identity mismatch"):
+    jobs.load(retained.request.request_id)
+
+
+def test_frozen_upload_acceptance_survives_restart_and_does_not_delete_units(job):
+  from quantx_contracts.history_upload import HistoryUploadSnapshot
+
+  jobs, retained, _, _ = job
+  snapshot = HistoryUploadSnapshot(
+    request_id=retained.request.request_id,
+    status="UPLOADED",
+    total_chunks=1,
+    chunks=[{"index": 0, "sha256": "0" * 64, "record_count": 1, "byte_count": 10}],
+  )
+  assert jobs.upload_acceptance(retained) is None
+  reserve, release = Mock(), Mock()
+  jobs.record_upload_acceptance(retained, snapshot, reserve=reserve, release=release)
+  reopened = HistoryJobs(jobs.root, device_id=jobs.device_id)
+  loaded = reopened.load(retained.request.request_id)
+  assert reopened.upload_acceptance(loaded) == snapshot
+  reopened.record_upload_acceptance(
+    loaded,
+    snapshot.model_copy(update={"status": "COMPLETED"}),
+    reserve=reserve,
+    release=release,
+  )
+  reserve.assert_called_once()
+  assert retained.artifacts_directory.is_dir()

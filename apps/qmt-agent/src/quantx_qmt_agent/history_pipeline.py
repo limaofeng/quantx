@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 from quantx_contracts.history_session import (
   HistoryGrant,
   HistoryRequest,
@@ -33,6 +34,7 @@ class HistoryPipeline:
       runtime._market_spool_root, device_id=runtime.configuration.device_id
     )
     self.active = {}
+    self._recovery_cursor = None
     self.receipts = HistoryReceiptClient(
       runtime._market_data_upload_client(),
       api_url=runtime.configuration.api_url,
@@ -47,6 +49,55 @@ class HistoryPipeline:
   def _retain(self, message):
     budget = self._budget()
     return self.jobs.retain(message, reserve=budget.reserve, release=budget.release)
+
+  def _record_acceptance(self, job, snapshot):
+    budget = self._budget()
+    self.jobs.record_upload_acceptance(
+      job, snapshot, reserve=budget.reserve, release=budget.release
+    )
+
+  async def recover_retained_uploads(self):
+    """Reconcile at most two retained jobs, including those absent from WS delivery."""
+    identifiers = await join_history_thread(self.jobs.request_ids)
+    eligible = [value for value in identifiers if value not in self.active]
+    if self._recovery_cursor is not None:
+      eligible = [value for value in eligible if value > self._recovery_cursor] + [
+        value for value in eligible if value <= self._recovery_cursor
+      ]
+    results = {}
+    for request_id in eligible[:2]:
+      self._recovery_cursor = request_id
+      try:
+        async with self.runtime._historical_worker_lock:
+          if request_id in self.active:
+            continue
+          job = await join_history_thread(self.jobs.load, request_id)
+          accepted = await join_history_thread(self.jobs.upload_acceptance, job)
+        if accepted is not None:
+          results[str(request_id)] = "UPLOAD_ACCEPTED"
+          continue
+        snapshot = await self._upload_snapshot(str(request_id))
+        if not snapshot.frozen:
+          results[str(request_id)] = "WAITING_HISTORY_SESSION"
+          continue
+        async with self.runtime._historical_worker_lock:
+          if request_id in self.active:
+            continue
+          prepared = await join_history_thread(
+            self.runtime._read_retained_history_upload, job
+          )
+          self._matching_chunks(snapshot, prepared)
+          await join_history_thread(self._record_acceptance, job, snapshot)
+        results[str(request_id)] = "UPLOAD_ACCEPTED"
+      except httpx.HTTPStatusError as exc:
+        if exc.response.status_code not in {404, 409}:
+          raise
+        results[str(request_id)] = "HISTORY_RECOVERY_BLOCKED"
+      except (ValueError, KeyError, TypeError, OSError, RuntimeError):
+        # One missing/corrupt original job does not prevent another from being
+        # reconciled. Retain all bytes; these reasons never authorize collection.
+        results[str(request_id)] = "HISTORY_RECOVERY_BLOCKED"
+    return results
 
   def _artifacts(self, job):
     from .runtime import (
@@ -137,6 +188,8 @@ class HistoryPipeline:
       snapshot = await self._upload_snapshot(request_id)
       matched = self._matching_chunks(snapshot, prepared)
       if snapshot.frozen:
+        async with runtime._historical_worker_lock:
+          await join_history_thread(self._record_acceptance, job, snapshot)
         return
       for index, chunk in enumerate(prepared.chunks):
         if index in matched:
@@ -153,6 +206,8 @@ class HistoryPipeline:
       self._matching_chunks(snapshot, prepared)
       if not snapshot.frozen:
         raise ValueError("history upload has not frozen its manifest")
+      async with runtime._historical_worker_lock:
+        await join_history_thread(self._record_acceptance, job, snapshot)
       return
     if not isinstance(message, HistoryGrant):
       raise ValueError("unsupported history pipeline message")

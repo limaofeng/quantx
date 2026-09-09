@@ -148,7 +148,14 @@ async def test_retained_request_to_native_file_and_http_upload(
       if lose_complete:
         with pytest.raises(httpx.ReadError, match="lost complete"):
           await runtime._handle_history_work(completed)
-      await runtime._handle_history_work(completed)
+        from quantx_qmt_agent.history_pipeline import HistoryPipeline
+
+        runtime._history_pipeline = HistoryPipeline(runtime)
+        assert await runtime._history_pipeline.recover_retained_uploads() == {
+          str(request.request_id): "UPLOAD_ACCEPTED"
+        }
+      else:
+        await runtime._handle_history_work(completed)
       assert events.count("NATIVE") == 1
       assert events.count("START") == 1
       assert events.count("PUT") == 1

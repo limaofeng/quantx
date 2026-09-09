@@ -2059,6 +2059,9 @@ class AgentRuntime:
       self._run_after_broker_ready(self._whole_market_stream_supervisor),
       name="whole-market-stream-supervisor",
     )
+    history_recovery = asyncio.create_task(
+      self._history_recovery_supervisor(), name="history-upload-recovery",
+    )
     try:
       delay = 1
       while not self._stopped.is_set():
@@ -2099,12 +2102,14 @@ class AgentRuntime:
         cache_sweeper,
         capture_supervisor,
         market_stream_supervisor,
+        history_recovery,
       ):
         task.cancel()
       await asyncio.gather(
         cache_sweeper,
         capture_supervisor,
         market_stream_supervisor,
+        history_recovery,
         return_exceptions=True,
       )
       await self._shutdown_whole_market_capture()
@@ -6007,6 +6012,34 @@ class AgentRuntime:
     if not hasattr(self, "_history_pipeline"):
       self._history_pipeline = HistoryPipeline(self)
     await self._history_pipeline.handle(message)
+
+  async def _history_recovery_supervisor(self):
+    from .history_pipeline import HistoryPipeline
+
+    delay = 1
+    while not self._stopped.is_set():
+      try:
+        if not hasattr(self, "_history_pipeline"):
+          self._history_pipeline = HistoryPipeline(self)
+        self._history_recovery_results = await self._history_pipeline.recover_retained_uploads()
+        delay = 5
+      except asyncio.CancelledError:
+        raise
+      except Exception as exc:
+        logger.warning("History upload recovery deferred: error=%s", exc.__class__.__name__)
+        delay = min(30, delay * 2)
+      try:
+        await asyncio.wait_for(self._stopped.wait(), timeout=delay)
+      except asyncio.TimeoutError:
+        pass
+
+  def _read_retained_history_upload(self, job):
+    request_id = str(job.request.request_id)
+    return _read_market_data_spool_manifest(
+      _market_data_spool_request_directory(self._market_spool_root, request_id),
+      expected_request_id=request_id,
+      expected_fingerprint=_market_data_payload_fingerprint(job.request.payload),
+    )[0]
 
   def _prepare_history_job_sync(self, job, artifacts):
     """Build/recover upload bytes without entering a broker or recapturing data."""
