@@ -184,6 +184,7 @@ _ROUTABLE_EXIT_PLAN_STATUSES = frozenset(
 _REGISTERED_RUNTIME_OWNER_TYPES = frozenset(
   {
     ExecutionOwnerType.STRATEGY_RUN.value,
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION.value,
     ExecutionOwnerType.EXIT_PLAN.value,
     ExecutionOwnerType.MANUAL_COMMAND.value,
   }
@@ -3043,8 +3044,14 @@ class TradeCommandService:
       and normalized_side != {"ENTRY": "BUY", "EXIT": "SELL"}[normalized_role]
     ):
       raise AgentUnavailableError("TRADE_INTENT_SCOPE_MISMATCH:做T角色与委托方向不一致")
+    if owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value and (
+      normalized_role != "ENTRY" or normalized_side != "BUY"
+      or canonical_environment is not ExecutionEnvironment.LIVE or not batch_id or not intent_id
+    ):
+      raise AgentUnavailableError("T_ENTRY_COMMAND_SCOPE_INVALID")
     if batch_id and not (
       owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+      or (owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value and normalized_role == "ENTRY")
       or (
         owner_type == ExecutionOwnerType.EXIT_PLAN.value
         and normalized_role == "EXIT"
@@ -3393,11 +3400,20 @@ class TradeCommandService:
           prior_t_order.t_order_original_created_at.replace(tzinfo=timezone.utc).isoformat()
         )
         immutable_metadata["t_order_replace_count"] = prior_t_order.t_order_attempt + 1
-    device = await self._device_for(
-      user_id=user_id,
-      account_id=account_id,
-      execution_mode=normalized_mode,
-    )
+    if owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value:
+      device = await self._t_entry_device(
+        intent=accepted_intent, account_id=account_id,
+        instrument_code=normalized_instrument, volume=volume,
+        limit_price=normalized_limit_price,
+      )
+      if device.user_id != user_id:
+        raise AgentUnavailableError("T_ENTRY_COMMAND_ACTOR_MISMATCH")
+    else:
+      device = await self._device_for(
+        user_id=user_id,
+        account_id=account_id,
+        execution_mode=normalized_mode,
+      )
     if normalized_mode == "live" and not risk_reducing:
       await self._require_live_market_stream_ready(device)
     now = utcnow()
@@ -3488,7 +3504,7 @@ class TradeCommandService:
     if batch_id:
       batch = await self.db.get(TTradeBatch, batch_id)
       if batch is None:
-        if normalized_role != "ENTRY" or owner_type != "STRATEGY_RUN":
+        if normalized_role != "ENTRY" or owner_type not in {"STRATEGY_RUN", "T_ASSISTANT_EXECUTION"}:
           raise AgentUnavailableError(
             "TRADE_INTENT_SCOPE_MISMATCH:公共退出计划缺少持久化做T批次"
           )
@@ -3497,7 +3513,7 @@ class TradeCommandService:
           batch_id=batch_id,
           account_id=account_id,
           instrument_code=normalized_instrument,
-          strategy_run_id=owner_id,
+          strategy_run_id=projected_strategy_run_id,
           source_execution_owner_type=owner_type,
           source_execution_owner_id=owner_id,
           source_execution_environment=canonical_environment_value,
@@ -4345,8 +4361,14 @@ class TradeCommandService:
     normalized_instrument = str(instrument_code or "").strip().upper()
     normalized_order_type = self._wire_price_type(order_type)
     normalized_role = str(t_trade_role or "").strip().upper()
+    if owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value and (
+      normalized_role != "ENTRY" or normalized_side != "BUY"
+      or canonical_environment is not ExecutionEnvironment.LIVE or not batch_id or not intent_id
+    ):
+      raise AgentUnavailableError("T_ENTRY_COMMAND_SCOPE_INVALID")
     if batch_id and not (
       owner_type == ExecutionOwnerType.STRATEGY_RUN.value
+      or (owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value and normalized_role == "ENTRY")
       or (
         owner_type == ExecutionOwnerType.EXIT_PLAN.value
         and normalized_role == "EXIT"

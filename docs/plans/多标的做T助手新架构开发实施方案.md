@@ -834,6 +834,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `.codex_screenshots/p6-live-isolated-confirmation-regression.log`。候选材料、已消费设备
   challenge、账户快照与行情为合成输入，服务实现未替换；尚未覆盖设备确认 API、
   真实行情到候选生成、账户 admission 到 outbox 的完整组合，不等同无替身券商整链。
+- 公共最终命令接线修复：注册 T_ASSISTANT_EXECUTION，仅接收 LIVE BUY ENTRY 且要求
+  intent/batch；两个公开入口移除旧 STRATEGY_RUN-only 批次限制。最终写入前强制调用
+  当前 T 入场审查/确认授权，核对命令用户与授权设备用户。新批次的 source owner 指向
+  T 执行，strategy_run_id/strategy_order_id 保持空。实际 SQLite 持久化与拒绝零写入测试
+  通过；公共命令与隔离确认链联合 45 项通过，证据
+  `.codex_screenshots/p6-live-command-owner-regression.log`。最终持久化测试显式替换设备、
+  admission、容量及审查边界，仍需把此前真实服务组合接入同一 admission→outbox 测试。
+  原命令单测显式模拟受支持平台，生产平台禁令未改动；没有真实设备或业务库操作。
 - 剩余开发顺序：
   补齐 LIVE 隔离 admission/最终命令与回报链→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

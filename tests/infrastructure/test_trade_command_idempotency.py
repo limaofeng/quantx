@@ -39,6 +39,15 @@ TABLES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def supported_runtime_for_isolated_command_tests(monkeypatch):
+  # These tests supply isolated databases/devices and exercise gates AFTER the
+  # platform boundary. No process configuration or actual broker is enabled.
+  from quantx_contracts import runtime_environment
+
+  monkeypatch.setattr(runtime_environment, "live_runtime_allowed", lambda environment: True)
+
+
 def _ready_control(**overrides):
   values = {
     "authorization_state": "ENABLED",
@@ -826,7 +835,6 @@ async def test_data_only_agent_cannot_receive_trade_commands() -> None:
 @pytest.mark.parametrize(
   "owner_type",
   [
-    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
     ExecutionOwnerType.ENTRY_PLAN,
     ExecutionOwnerType.BOARD_ASSISTANT_EXECUTION,
   ],
@@ -1192,3 +1200,76 @@ async def test_paper_command_never_routes_to_live_only_agent() -> None:
         idempotency_key="manual-paper-key",
       )
   await engine.dispose()
+
+
+@pytest.mark.parametrize("fault", [None, "review", "actor"])
+async def test_new_t_owner_persists_batch_only_after_final_authorization(fault):
+  """Actual public persistence; external gates are explicit test seams."""
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(lambda db: Base.metadata.create_all(db, tables=TABLES))
+  async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+    db.add(TradeIntentRecord(
+      id="intent-new-t", owner_type="T_ASSISTANT_EXECUTION", owner_id="new-t",
+      environment="LIVE", idempotency_key="intent-new-t", status="EXECUTION_READY",
+      account_id="account-1", instrument_code="600000.SH", direction="BUY", bucket="swing",
+      intent_metadata={"t_trade_role": "ENTRY", "t_batch_id": "batch-new-t"},
+    ))
+    await db.commit()
+    service = TradeCommandService(db)
+    service._require_account_capacity = AsyncMock(return_value={})
+    service._require_risk_increase_admission = AsyncMock()
+    service._require_t_order_new_policy = lambda **kwargs: {}
+    service._require_live_market_stream_ready = AsyncMock()
+    service._t_entry_device = AsyncMock(return_value=SimpleNamespace(id="synthetic", user_id="wrong" if fault == "actor" else "user-1"))
+    if fault == "review":
+      service._t_entry_device.side_effect = AgentUnavailableError("LIVE_ENTRY_FRESH_REVIEW_REQUIRED")
+    call = service.enqueue_order(
+      user_id="user-1", account_id="account-1", instrument_code="600000.SH",
+      side="BUY", order_type="FIX_PRICE", limit_price=Decimal("9.9"), volume=100,
+      execution_ref=ExecutionOwnerRef("T_ASSISTANT_EXECUTION", "new-t"),
+      environment=ExecutionEnvironment.LIVE, idempotency_key="new-t-order",
+      intent_id="intent-new-t", batch_id="batch-new-t", bucket="swing", t_trade_role="ENTRY",
+      _locked_live_control=SimpleNamespace(account_id="account-1"),
+      _admission_batch_id="admission", _admission_rank=1, _admission_fence_token="fence",
+    )
+    if fault:
+      with pytest.raises(AgentUnavailableError, match="LIVE_ENTRY_FRESH_REVIEW_REQUIRED|T_ENTRY_COMMAND_ACTOR_MISMATCH"):
+        await call
+      await db.rollback()
+      for model in (PendingTradeOrder, OrderCorrelation, TradeCommandOutbox, TTradeBatch):
+        assert await db.scalar(select(func.count()).select_from(model)) == 0
+    else:
+      queued = await call
+      pending = await db.get(PendingTradeOrder, queued.client_order_id)
+      correlation = await db.scalar(select(OrderCorrelation))
+      batch = await db.get(TTradeBatch, "batch-new-t")
+      outbox = await db.get(TradeCommandOutbox, queued.message_id)
+      assert pending.owner_type == correlation.owner_type == batch.source_execution_owner_type == "T_ASSISTANT_EXECUTION"
+      assert pending.owner_id == correlation.owner_id == batch.source_execution_owner_id == "new-t"
+      assert pending.strategy_run_id is correlation.strategy_run_id is batch.strategy_run_id is None
+      assert pending.strategy_order_id is correlation.strategy_order_id is None
+      assert batch.status == "ENTRY_QUEUED" and outbox.delivery_status == "QUEUED"
+    service._t_entry_device.assert_awaited_once()
+  await engine.dispose()
+
+
+@pytest.mark.parametrize("entrypoint", ["enqueue_order", "enqueue_order_for_account"])
+@pytest.mark.parametrize("damage", ["paper", "exit", "no_intent", "no_batch"])
+async def test_new_t_command_rejects_unsupported_scope_before_database(entrypoint, damage):
+  service = TradeCommandService(SimpleNamespace())
+  args = dict(account_id="account", instrument_code="600000.SH", side="BUY", order_type="FIX_PRICE", limit_price=Decimal("10"), volume=100,
+    execution_ref=ExecutionOwnerRef("T_ASSISTANT_EXECUTION", "new-t"), environment=ExecutionEnvironment.LIVE,
+    idempotency_key="scope", intent_id="intent", batch_id="batch", t_trade_role="ENTRY")
+  if entrypoint == "enqueue_order":
+    args["user_id"] = "user"
+  if damage == "paper":
+    args["environment"] = ExecutionEnvironment.PAPER
+  elif damage == "exit":
+    args.update(side="SELL", t_trade_role="EXIT")
+  elif damage == "no_intent":
+    args["intent_id"] = ""
+  else:
+    args["batch_id"] = ""
+  with pytest.raises(AgentUnavailableError, match="T_ENTRY_COMMAND_SCOPE_INVALID"):
+    await getattr(service, entrypoint)(**args)
