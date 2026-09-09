@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 
 import httpx
+from quantx_contracts.divid_factor_read import DividFactorRead, DividFactorWindow
 from quantx_contracts.history_collection_api import (
   MAX_HISTORY_RESULT_BYTES,
   HistoryCollectionAccepted,
@@ -99,3 +100,14 @@ class LocalMarketDataClient:
     if page.next_after != (previous if page.records else None):
       raise ValueError("local history page cursor mismatch")
     return page
+
+  async def read_divid_factors(self, request: DividFactorRead) -> DividFactorWindow:
+    value = await self._json(
+      "GET",
+      "/market-data/internal/v1/reference/divid-factors",
+      params=request.model_dump(mode="json"),
+    )
+    window = DividFactorWindow.model_validate(value)
+    if window.request != request:
+      raise ValueError("local factor response scope mismatch")
+    return window

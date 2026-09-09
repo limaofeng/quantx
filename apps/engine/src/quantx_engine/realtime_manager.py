@@ -17,9 +17,10 @@
 import asyncio
 import logging
 import math
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
+from quantx_contracts.divid_factor_read import DividFactorRead
 from quantx_contracts.market_data_service import HistoryRead
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.data.unified_subscription_manager import (
@@ -30,7 +31,6 @@ from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.market_depth import MarketDepth
 from quantx_infrastructure.models.realtime_price import RealTimePrice
 from quantx_infrastructure.models.tick import Tick
-from quantx_infrastructure.services.divid_factor_service import DividFactorService
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
 )
@@ -84,7 +84,6 @@ class RealTimeDataManager:
       ),
     )
     self.historical_market_data_service = HistoricalMarketDataService()
-    self.divid_factor_service = DividFactorService()
     self.trading_time_service = TradingTimeService()
     self._started_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -444,6 +443,20 @@ class RealTimeDataManager:
     self.previous_daily_close_cache[cache_key] = {"close": previous_close}
     return previous_close
 
+  async def _read_divid_factor_window(self, stock_code, start_date, end_date):
+    client = LocalMarketDataClient()
+    try:
+      result = await client.read_divid_factors(
+        DividFactorRead(
+          instrument=stock_code,
+          start_date=start_date,
+          end_date=end_date,
+        )
+      )
+      return result.records
+    finally:
+      await client.close()
+
   async def _front_adjust_previous_daily_close(
     self,
     stock_code: str,
@@ -453,13 +466,10 @@ class RealTimeDataManager:
   ) -> float:
     try:
       factors = await asyncio.wait_for(
-        self.divid_factor_service.get_divid_factors(
-          stock_code=stock_code,
-          start_time=datetime.combine(
-            previous_trading_date + timedelta(days=1), time.min
-          ),
-          end_time=datetime.combine(tick_date, time.max),
-          limit=None,
+        self._read_divid_factor_window(
+          stock_code,
+          previous_trading_date + timedelta(days=1),
+          tick_date,
         ),
         timeout=1.0,
       )

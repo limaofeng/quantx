@@ -11,6 +11,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
 from fastapi.responses import Response
+from quantx_contracts.divid_factor_read import DividFactorRead, DividFactorWindow
 from quantx_contracts.history_collection_api import (
   MAX_HISTORY_RESULT_BYTES,
   HistoryCollectionAccepted,
@@ -28,6 +29,9 @@ from quantx_contracts.market_data_service import (
   HistoryPage,
   HistoryRead,
   ResumeHistory,
+)
+from quantx_infrastructure.services.local_divid_factor_reader import (
+  LocalDividFactorReader,
 )
 from quantx_infrastructure.services.local_history_reader import (
   HistoryReadBusy,
@@ -52,6 +56,9 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     app.state.token = resolved_token
     app.state.store = store if store is not None else MarketDataDemandStore()
     app.state.reader = reader if reader is not None else LocalHistoryReader()
+    app.state.factor_reader = LocalDividFactorReader(
+      getattr(app.state.store, "engine", None)
+    )
     try:
       yield
     finally:
@@ -122,6 +129,19 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     if epoch is None:
       raise HTTPException(503, "MARKET_DATA_WORKER_UNAVAILABLE")
     return {"status": "ready", "capability": "worker-lease", "epoch": epoch}
+
+  @app.get(
+    "/market-data/internal/v1/reference/divid-factors",
+    response_model=DividFactorWindow,
+    dependencies=[Depends(authorize)],
+  )
+  async def factor_window(request: Annotated[DividFactorRead, Query()]):
+    try:
+      return await app.state.factor_reader.read(request)
+    except HistoryReadBusy:
+      raise HTTPException(429, "FACTOR_READ_CAPACITY") from None
+    except (ValueError, TimeoutError, SQLAlchemyError):
+      raise HTTPException(503, "FACTOR_READ_UNAVAILABLE") from None
 
   @app.post(
     "/market-data/internal/v1/demands",

@@ -104,6 +104,9 @@ class FakeDividFactorService:
   async def get_divid_factors(self, **kwargs):
     return self.factors
 
+  async def __call__(self, stock_code, start_date, end_date):
+    return self.factors
+
 
 @pytest.mark.asyncio
 async def test_realtime_manager_start_is_idempotent_for_same_loop():
@@ -744,7 +747,7 @@ async def test_tick_pre_close_uses_native_when_database_previous_close_missing(
   manager = RealTimeDataManager()
   manager.previous_daily_close_cache = {}
   manager.trading_time_service = FakeTradingTimeService()
-  manager.divid_factor_service = FakeDividFactorService()
+  manager._read_divid_factor_window = FakeDividFactorService()
 
   class FakeHistoricalMarketDataService:
     async def __call__(self, query_stock_code, previous_trading_date):
@@ -780,7 +783,7 @@ async def test_tick_pre_close_caches_native_fallback_and_logs_once(
   manager = RealTimeDataManager()
   manager.previous_daily_close_cache = {}
   manager.trading_time_service = FakeTradingTimeService()
-  manager.divid_factor_service = FakeDividFactorService()
+  manager._read_divid_factor_window = FakeDividFactorService()
   calls = {"count": 0}
 
   class FakeHistoricalMarketDataService:
@@ -834,7 +837,7 @@ async def test_tick_pre_close_uses_database_previous_daily_close(monkeypatch):
   manager = RealTimeDataManager()
   manager.previous_daily_close_cache = {}
   manager.trading_time_service = FakeTradingTimeService()
-  manager.divid_factor_service = FakeDividFactorService()
+  manager._read_divid_factor_window = FakeDividFactorService()
 
   class FakeHistoricalMarketDataService:
     async def __call__(self, query_stock_code, previous_trading_date):
@@ -900,7 +903,7 @@ async def test_tick_pre_close_uses_database_yesterday_close_not_today_pre_close(
   manager = RealTimeDataManager()
   manager.previous_daily_close_cache = {}
   manager.trading_time_service = FakeTradingTimeService()
-  manager.divid_factor_service = FakeDividFactorService(
+  manager._read_divid_factor_window = FakeDividFactorService(
     [SimpleNamespace(time=datetime(2026, 6, 5), dr=1.047894)]
   )
 
@@ -966,7 +969,7 @@ async def test_tick_pre_close_does_not_use_stale_older_daily_close(monkeypatch):
   manager = RealTimeDataManager()
   manager.previous_daily_close_cache = {}
   manager.trading_time_service = FakeTradingTimeService()
-  manager.divid_factor_service = FakeDividFactorService()
+  manager._read_divid_factor_window = FakeDividFactorService()
 
   class FakeHistoricalMarketDataService:
     async def __call__(self, query_stock_code, previous_trading_date):
