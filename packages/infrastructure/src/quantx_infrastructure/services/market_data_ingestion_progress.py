@@ -49,3 +49,11 @@ class IngestionProgress:
 
   async def confirm(self, block: int, digest: str, rows: int) -> None:
     await self.apply("checkpoint", block=block, sha256=digest, rows=rows)
+
+  async def readback_result(self, digest: str) -> dict[str, int] | None:
+    await self.apply("readback_check", sha256=digest)
+    item = self.state["checkpoints"].get("readback:" + digest)
+    return item["result"] if item else None
+
+  async def confirm_readback(self, digest: str, result: dict[str, int]) -> None:
+    await self.apply("readback_checkpoint", sha256=digest, result=result)

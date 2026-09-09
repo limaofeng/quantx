@@ -467,6 +467,7 @@ async def test_claim_market_data_request_uses_precomputed_stale_cutoff(
     "claim_token": "claim-token-1",
     "updated_at": now,
     "stale_before": now - timedelta(minutes=5),
+    "worker_epoch": None,
   }
 
 
@@ -505,6 +506,8 @@ async def test_recoverable_market_data_requests_include_uploaded_and_stale_proce
     "stale_before": now - timedelta(minutes=5),
     "now": now,
     "limit": 2,
+    "worker_epoch": None,
+    "operations": None,
   }
 
 

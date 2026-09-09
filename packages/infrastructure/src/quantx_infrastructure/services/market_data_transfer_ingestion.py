@@ -1300,7 +1300,11 @@ async def ingest_uploaded_bar_request(
         expected_key_batches=_uploaded_key_batches(manifest),
         start_ms=scope.start_ms,
         end_exclusive_ms=scope.end_exclusive_ms,
-        **({"max_attempts": 1, "retry_delays": ()} if progress is not None else {}),
+        **(
+          {"max_attempts": 1, "retry_delays": (), "progress": progress}
+          if progress is not None
+          else {}
+        ),
       )
     records_verified = int(verification.get("records_verified", -1))
     summary_fields = (

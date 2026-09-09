@@ -22,6 +22,7 @@ members = [
     "quantx-domain",
     "quantx-engine",
     "quantx-infrastructure",
+    "quantx-market-data",
     "quantx-monitor",
     "quantx-qmt-agent",
     "quantx-research",
@@ -3122,6 +3123,27 @@ requires-dist = [
 ]
 
 [[package]]
+name = "quantx-market-data"
+version = "0.1.0"
+source = { editable = "apps/market-data" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "quantx-application" },
+    { name = "quantx-contracts" },
+    { name = "quantx-infrastructure" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "quantx-application", editable = "packages/application" },
+    { name = "quantx-contracts", editable = "packages/contracts" },
+    { name = "quantx-infrastructure", editable = "packages/infrastructure" },
+    { name = "uvicorn", specifier = ">=0.30" },
+]
+
+[[package]]
 name = "quantx-monitor"
 version = "0.1.0"
 source = { editable = "apps/monitor" }
@@ -3234,6 +3256,7 @@ dependencies = [
     { name = "quantx-ai-runtime" },
     { name = "quantx-api" },
     { name = "quantx-engine" },
+    { name = "quantx-market-data" },
     { name = "quantx-monitor" },
     { name = "quantx-research" },
     { name = "quantx-worker" },
@@ -3263,6 +3286,7 @@ requires-dist = [
     { name = "quantx-ai-runtime", editable = "apps/ai-runtime" },
     { name = "quantx-api", editable = "apps/api" },
     { name = "quantx-engine", editable = "apps/engine" },
+    { name = "quantx-market-data", editable = "apps/market-data" },
     { name = "quantx-monitor", editable = "apps/monitor" },
     { name = "quantx-qmt-agent", marker = "extra == 'qmt-agent'", editable = "apps/qmt-agent" },
     { name = "quantx-research", editable = "apps/research" },

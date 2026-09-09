@@ -94,6 +94,18 @@ def transition(
     if action == "checkpoint" and checkpoint is None:
       state["checkpoints"][block] = {**evidence, "attempt": state["attempt"]}
       state["last_progress_at"] = now.isoformat()
+  elif action in {"readback_check", "readback_checkpoint"}:
+    if state["phase"] != "READBACK" or not state["manifest_hash"]:
+      raise ValueError("read-back checkpoint requires a frozen read-back phase")
+    key = "readback:" + values["sha256"]
+    if action == "readback_checkpoint":
+      result = values["result"]
+      existing = state["checkpoints"].get(key)
+      if existing is not None and existing["result"] != result:
+        raise IngestionEvidenceConflict("READBACK_PROOF_CHANGED")
+      if existing is None:
+        state["checkpoints"][key] = {"result": result, "attempt": state["attempt"]}
+        state["last_progress_at"] = now.isoformat()
   elif action == "defer":
     state["reason_code"] = values["reason_code"]
     state["diagnostic"] = values.get("diagnostic", {})

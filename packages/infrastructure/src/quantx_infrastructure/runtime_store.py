@@ -58,6 +58,8 @@ def _qmt_runtime_cutoff(max_age_seconds: float) -> datetime | None:
 
 
 class DurableRuntimeStore:
+  ingestion_owner_epoch: int | None = None
+
   def __init__(self, database_url: Optional[str] = None) -> None:
     self.engine: AsyncEngine = create_async_engine(
       database_url or resolve_database_url(),
@@ -66,6 +68,9 @@ class DurableRuntimeStore:
 
   async def close(self) -> None:
     await self.engine.dispose()
+
+  async def _guard_ingestion_owner(self, connection) -> None:
+    """Owner fence hook; standalone workers require their process lease here."""
 
   async def heartbeat(
     self,
@@ -622,6 +627,7 @@ class DurableRuntimeStore:
     self,
     *,
     limit: int = 20,
+    operations: tuple[str, ...] | None = None,
   ) -> list[str]:
     """Return immutable uploads and expired ingestion leases for Worker recovery.
 
@@ -640,9 +646,13 @@ class DurableRuntimeStore:
             SELECT request_id
             FROM market_data_request
             WHERE (status = 'UPLOADED'
-               OR (status = 'PROCESSING' AND updated_at < :stale_before))
+               OR (status = 'PROCESSING' AND (updated_at < :stale_before OR
+                   (processing_worker_epoch IS NOT NULL AND
+                    processing_worker_epoch <> CAST(:worker_epoch AS BIGINT)))))
               AND (ingestion_progress ->> 'next_retry_at' IS NULL OR
                    CAST(ingestion_progress ->> 'next_retry_at' AS timestamp) <= :now)
+              AND (CAST(:operations AS TEXT[]) IS NULL OR
+                   COALESCE(request_payload ->> 'operation', 'bars') = ANY(CAST(:operations AS TEXT[])))
             ORDER BY updated_at ASC, created_at ASC
             LIMIT :limit
             """
@@ -650,7 +660,9 @@ class DurableRuntimeStore:
           {
             "stale_before": stale_before,
             "now": _utcnow(),
+            "worker_epoch": self.ingestion_owner_epoch,
             "limit": bounded_limit,
+            "operations": list(operations) if operations is not None else None,
           },
         )
       ).scalars()
@@ -737,6 +749,7 @@ class DurableRuntimeStore:
       else None
     )
     async with self.engine.begin() as connection:
+      await self._guard_ingestion_owner(connection)
       updated_status = (
         await connection.execute(
           text(
@@ -917,6 +930,7 @@ class DurableRuntimeStore:
     stale_before = updated_at - timedelta(minutes=5)
     claim_token = str(uuid.uuid4())
     async with self.engine.begin() as connection:
+      await self._guard_ingestion_owner(connection)
       value = (
         await connection.execute(
           text(
@@ -925,6 +939,7 @@ class DurableRuntimeStore:
             SET status = 'PROCESSING',
                 processing_error = NULL,
                 processing_claim_token = :claim_token,
+                processing_worker_epoch = CAST(:worker_epoch AS BIGINT),
                 updated_at = :updated_at
             WHERE request_id = :request_id
               AND (ingestion_progress ->> 'next_retry_at' IS NULL OR
@@ -933,7 +948,9 @@ class DurableRuntimeStore:
                 status = 'UPLOADED'
                 OR (
                   status = 'PROCESSING'
-                  AND updated_at < :stale_before
+                  AND (updated_at < :stale_before OR
+                       (processing_worker_epoch IS NOT NULL AND
+                        processing_worker_epoch <> CAST(:worker_epoch AS BIGINT)))
                 )
               )
             RETURNING processing_claim_token
@@ -942,6 +959,7 @@ class DurableRuntimeStore:
           {
             "request_id": request_id,
             "claim_token": claim_token,
+            "worker_epoch": self.ingestion_owner_epoch,
             "updated_at": updated_at,
             "stale_before": stale_before,
           },
@@ -960,6 +978,7 @@ class DurableRuntimeStore:
     """Apply one progress transition only while this ingestion lease is valid."""
     now = _utcnow()
     async with self.engine.begin() as connection:
+      await self._guard_ingestion_owner(connection)
       row = (
         (
           await connection.execute(
@@ -1054,6 +1073,7 @@ class DurableRuntimeStore:
     if not normalized_claim_token:
       raise ValueError("market-data claim_token is required")
     async with self.engine.begin() as connection:
+      await self._guard_ingestion_owner(connection)
       value = (
         await connection.execute(
           text(
@@ -1090,6 +1110,7 @@ class DurableRuntimeStore:
     if not normalized_claim_token:
       raise ValueError("market-data claim_token is required")
     async with self.engine.begin() as connection:
+      await self._guard_ingestion_owner(connection)
       value = (
         await connection.execute(
           text(

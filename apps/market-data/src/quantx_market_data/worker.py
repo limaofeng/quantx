@@ -1,0 +1,122 @@
+"""Long-lived ingestion worker. PostgreSQL is the source of work and ownership."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal
+import uuid
+
+from quantx_infrastructure.database.timeseries import (
+  init_timeseries,
+  shutdown_timeseries,
+)
+from quantx_infrastructure.services.market_data_transfer_ingestion import (
+  claim_ingest_and_finish_market_data_request,
+)
+from quantx_infrastructure.services.market_data_worker_store import (
+  MarketDataWorkerStore,
+)
+
+logger = logging.getLogger(__name__)
+
+
+async def sweep(store, *, ingest=None) -> int:
+  """Bound each discovery pass and process immutable uploads without Prefect."""
+  count = 0
+  for request_id in await store.recoverable_market_data_request_ids(limit=20):
+    request = await store.market_data_request(request_id)
+    if request is None:
+      continue
+    # Reference ingestion moves in the coordinated writer migration; do not
+    # terminally reject an existing reference task merely because it is pending.
+    if request["request_payload"].get("operation", "bars") not in {
+      "bars",
+      "sector_instruments",
+    }:
+      continue
+    result = await claim_ingest_and_finish_market_data_request(
+      store,
+      request_id,
+      **({"ingest_request": ingest} if ingest is not None else {}),
+    )
+    if result is not None:
+      count += 1
+  return count
+
+
+async def _pause(stop: asyncio.Event, seconds: float) -> None:
+  try:
+    await asyncio.wait_for(stop.wait(), seconds)
+  except TimeoutError:
+    pass
+
+
+async def run(store, stop: asyncio.Event) -> None:
+  acquired = False
+  while not stop.is_set():
+    if await asyncio.wait_for(store.acquire(), 5):
+      acquired = True
+      break
+    await _pause(stop, 2)
+  if stop.is_set():
+    if acquired:
+      await asyncio.wait_for(store.release(), 5)
+    return
+
+  async def renew():
+    while not stop.is_set():
+      await _pause(stop, 5)
+      if not stop.is_set() and not await asyncio.wait_for(store.renew(), 3):
+        raise RuntimeError("market-data worker lease was lost")
+
+  async def consume():
+    while not stop.is_set():
+      await sweep(store)
+      await _pause(stop, 1)
+
+  tasks = [
+    asyncio.create_task(renew()),
+    asyncio.create_task(consume()),
+    asyncio.create_task(stop.wait()),
+  ]
+  try:
+    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in done:
+      task.result()
+  finally:
+    for task in tasks:
+      task.cancel()
+    # In-flight synchronous writes/readers join before ownership is released.
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.wait_for(store.release(), 5)
+
+
+async def _main() -> None:
+  stop = asyncio.Event()
+  loop = asyncio.get_running_loop()
+  for signum in (signal.SIGINT, signal.SIGTERM):
+    try:
+      loop.add_signal_handler(signum, stop.set)
+    except NotImplementedError:
+      signal.signal(signum, lambda *_: loop.call_soon_threadsafe(stop.set))
+  store = MarketDataWorkerStore(owner_id=str(uuid.uuid4()))
+  try:
+    init_timeseries()
+    await run(store, stop)
+  finally:
+    await store.close()
+    shutdown_timeseries()
+
+
+def main() -> None:
+  logging.basicConfig(level=logging.INFO)
+  try:
+    asyncio.run(_main())
+  except Exception as exc:
+    logger.error("Market Data Worker stopped: %s", type(exc).__name__)
+    raise SystemExit(1) from None
+
+
+if __name__ == "__main__":
+  main()

@@ -674,6 +674,7 @@ class MarketDataRequest(Base, TimestampMixin):
   completed_at = Column(DateTime, nullable=True)
   processing_error = Column(Text, nullable=True)
   processing_claim_token = Column(String(36), nullable=True)
+  processing_worker_epoch = Column(BigInteger, nullable=True)
   ingestion_result = Column(JSON, nullable=True)
   ingestion_progress = Column(JSONB, nullable=True)
 

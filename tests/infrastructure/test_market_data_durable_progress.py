@@ -63,6 +63,7 @@ async def durable_store(monkeypatch):
       CREATE TEMP TABLE market_data_request (
         request_id varchar(36) PRIMARY KEY, status varchar(24),
         processing_claim_token varchar(36), processing_error text, device_id varchar(36),
+        processing_worker_epoch bigint,
         ingestion_result json, request_payload json,
         created_at timestamp, updated_at timestamp, completed_at timestamp,
         expected_chunks integer, received_chunks integer

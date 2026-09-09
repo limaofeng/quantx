@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import threading
 import time
@@ -149,6 +150,22 @@ class _InfluxClientContext(Protocol):
 
 class _InfluxConnection(Protocol):
   def get_client(self, *, timeout: float | None = None) -> _InfluxClientContext: ...
+
+
+class ReadbackProgress(Protocol):
+  async def readback_result(self, digest: str) -> dict[str, int] | None: ...
+
+  async def confirm_readback(self, digest: str, result: dict[str, int]) -> None: ...
+
+
+def _proof_key(value: Any) -> str:
+  return hashlib.sha256(
+    json.dumps(
+      {"verification": "uploaded_key_subset_v2", "scope": value},
+      sort_keys=True,
+      separators=(",", ":"),
+    ).encode()
+  ).hexdigest()
 
 
 Sleep = Callable[[float], Awaitable[None]]
@@ -995,6 +1012,7 @@ async def verify_persisted_bar_summaries(
   retry_delays: Sequence[float] = MARKET_DATA_READBACK_RETRY_DELAYS_SECONDS,
   page_rows: int = MARKET_DATA_READBACK_PAGE_ROWS,
   sleep: Sleep = asyncio.sleep,
+  progress: ReadbackProgress | None = None,
 ) -> dict[str, Any]:
   """Prove every uploaded key exists after merge through uncached reads.
 
@@ -1037,6 +1055,17 @@ async def verify_persisted_bar_summaries(
     nonlocal existing_rows_observed
     if not group:
       return
+    digest = _proof_key([(item.code, item.period, item.keys) for item in group])
+    previous = await progress.readback_result(digest) if progress is not None else None
+    if previous is not None:
+      if previous["records_verified"] != sum(len(item.keys) for item in group):
+        raise MarketDataPersistenceMismatchError(
+          "read-back checkpoint key count mismatch"
+        )
+      existing_rows_observed += previous["existing_rows_observed"]
+      for item in group:
+        attempts_by_group[f"{item.code}/{item.period}"] = 0
+      return
     budget = ReadbackBudget()
     for attempt in range(1, max_attempts + 1):
       try:
@@ -1063,6 +1092,8 @@ async def verify_persisted_bar_summaries(
           raise
         await sleep(float(retry_delays[attempt - 1]))
       else:
+        if progress is not None:
+          await progress.confirm_readback(digest, result)
         existing_rows_observed += int(result["existing_rows_observed"])
         for item in group:
           group_name = f"{item.code}/{item.period}"
@@ -1185,6 +1216,12 @@ async def verify_persisted_bar_summaries(
     if int(expected["row_count"]) != 0:
       continue
 
+    digest = _proof_key({"empty": expected, "start": start_ms, "end": end_exclusive_ms})
+    previous = await progress.readback_result(digest) if progress is not None else None
+    if previous is not None:
+      existing_rows_observed += previous["existing_rows_observed"]
+      attempts_by_group[f"{pair[0]}/{pair[1]}"] = 0
+      continue
     last_error = None
     budget = ReadbackBudget()
     for attempt in range(1, max_attempts + 1):
@@ -1203,6 +1240,14 @@ async def verify_persisted_bar_summaries(
       except MarketDataPersistenceVerificationError as exc:
         last_error = exc
       else:
+        if progress is not None:
+          await progress.confirm_readback(
+            digest,
+            {
+              "records_verified": 0,
+              "existing_rows_observed": int(existing["row_count"]),
+            },
+          )
         existing_rows_observed += int(existing["row_count"])
         attempts_by_group[f"{pair[0]}/{pair[1]}"] = attempt
         break
