@@ -9,8 +9,8 @@
   身份入队。没有对 INCOMPLETE 调用 retry，没有绕过新 QMT 补采的时段门。
 - 提交脚本 `.runtime/p5-august-fill.py` 已结束，exit=0。每分区请求 ID 与初次结果见
   `.codex_screenshots/p5-august-fill.jsonl`。这里的 exit=0 表示全部尝试提交，不代表补齐。
-- 11:00:12 只读快照：生产 READY 35、WAITING_SOURCE 26、QUEUED 168、INCOMPLETE 2；
-  开发 LOCAL_VERIFIED 24、QUEUED 205、INCOMPLETE 2。后台生产导出/开发导入继续处理。
+- 11:03:01 只读快照：生产 READY 72、WAITING_SOURCE 48、QUEUED 109、INCOMPLETE 2；
+  开发 LOCAL_VERIFIED 29、QUEUED 200、INCOMPLETE 2。后台生产导出/开发导入继续处理。
 - 完整 231 个分区及状态见 `.codex_screenshots/p5-august-status.json`，汇总见
   `p5-august-status-summary.log`。`.runtime/p5-august-status.py` 只读复查，不重发任务。
 
@@ -26,7 +26,7 @@
 类型，绝不返回原始路径、凭证或任意异常文本。12 项测试、Ruff 通过；日志
 `.codex_screenshots/p5-export-reason-tests.log`。
 
-该修复尚未部署生产，不能恢复已有两条记录被抹掉的原因。生产侧应按上述分区 ID 查询关联
+修复提交 `60cec99a` 尚未部署生产，不能恢复已有两条记录被抹掉的原因。生产侧应按上述分区 ID 查询关联
 source_request_id 与定向日志，确认根因；不能根据泛化 ValueError 宣称已找到或修复数据缺口。
 本机未访问生产数据库、Prefect 或 Agent 私有接口，也未重启生产。
 
@@ -39,6 +39,10 @@ source_request_id 与定向日志，确认根因；不能根据泛化 ValueError
 - 现有因果画像生成器目标为 20 个完整交易日、最低 10 日。已请求用户决定：补 7 月 Tick
   生成截至 7 月 31 日画像，还是以 8 月前段预热并缩短正式样本。未擅自补新月份、生成
   夹具画像或用未来数据代替历史。行业时点资料、初始估值和策略配置仍需按正式输入核对。
+
+用户后续已选择“8 月前段预热、后段评估”，不补 7 月。按现有画像最低 10 日提出
+8 月 3～14 日预热、8 月 17～31 日评估；具体划分及调整后的评估门槛已更新草案，待确认。
+此前整月 20 个评估日门槛作废；仍不使用未来数据构建画像。
 
 下一步沿现有任务检查真实补数结果，处理具体错误；待设计答复后准备画像与冻结配置，
 最后执行正式资格预检和组合/旧单票对照。当前不标 P5 DONE，不开放实际 P6。
