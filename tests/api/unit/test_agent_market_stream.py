@@ -17,17 +17,17 @@ from quantx_market_data import agent_stream as agent_api
 from starlette.websockets import WebSocketState
 
 
-def _market_lease(device_id: str = "device-1") -> agent_api.MarketSessionLease:
-  return agent_api.MarketSessionLease(
+def _market_session(device_id: str = "device-1") -> agent_api.MarketStreamSession:
+  return agent_api.MarketStreamSession(
     device_id=device_id,
-    api_instance_id="api-instance-1",
-    agent_session_id="agent-session-1",
+    user_id="user",
+    stream_id="stream-1",
   )
 
 
 def _authenticated_session() -> SimpleNamespace:
   return SimpleNamespace(
-    device=SimpleNamespace(id="device-1"),
+    device=SimpleNamespace(id="device-1", user_id="user"),
     expires_at=utcnow() + timedelta(minutes=5),
   )
 
@@ -51,7 +51,6 @@ class FakeWebSocket:
         "device_id": "device-1",
         "access_token": "token",
         "capabilities": ["market-data", "data-only"],
-        "agent_session_id": "agent-session-1",
       },
     ).model_dump_json()
 
@@ -136,100 +135,6 @@ class HangingAckWebSocket(FakeWebSocket):
 
 
 @pytest.mark.asyncio
-async def test_market_auth_waits_for_control_registration(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  calls = 0
-
-  async def market_lease(device_id: str):
-    nonlocal calls
-    assert device_id == "device-1"
-    calls += 1
-    return _market_lease(device_id) if calls >= 3 else None
-
-  monkeypatch.setattr(
-    agent_api.market_lease_reader,
-    "market_lease",
-    market_lease,
-  )
-  monkeypatch.setattr(
-    agent_api,
-    "MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS",
-    0.1,
-  )
-  monkeypatch.setattr(
-    agent_api,
-    "MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS",
-    0.001,
-  )
-
-  await agent_api._wait_for_active_market_device("device-1")
-
-  assert calls == 3
-
-
-@pytest.mark.asyncio
-async def test_market_auth_rejects_device_that_never_becomes_active(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  calls = 0
-
-  async def market_lease(device_id: str):
-    nonlocal calls
-    assert device_id == "standby-device"
-    calls += 1
-    return None
-
-  async def market_lease_diagnostic(device_id: str):
-    assert device_id == "standby-device"
-    return {
-      "reasonCode": "MARKET_LEASE_NOT_PUBLISHED",
-      "redisLeasePresent": False,
-    }
-
-  class UnavailableHeartbeatSession:
-    async def __aenter__(self):
-      raise ConnectionError("diagnostic database unavailable")
-
-    async def __aexit__(self, *_args):
-      return False
-
-  monkeypatch.setattr(
-    agent_api.market_lease_reader,
-    "market_lease",
-    market_lease,
-  )
-  monkeypatch.setattr(
-    agent_api.market_lease_reader,
-    "market_lease_diagnostic",
-    market_lease_diagnostic,
-  )
-  monkeypatch.setattr(
-    agent_api,
-    "AsyncSessionLocal",
-    UnavailableHeartbeatSession,
-  )
-  monkeypatch.setattr(
-    agent_api,
-    "MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS",
-    0.08,
-  )
-  monkeypatch.setattr(
-    agent_api,
-    "MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS",
-    0.01,
-  )
-
-  with pytest.raises(agent_api.AuthError) as error:
-    await agent_api._wait_for_active_market_device("standby-device")
-
-  assert error.value.code == "MARKET_LEASE_NOT_PUBLISHED"
-  assert error.value.message == "当前设备尚未取得活动行情租约"
-  assert error.value.retryable is True
-  assert calls >= 2
-
-
-@pytest.mark.asyncio
 async def test_market_auth_accepts_valid_device_token_without_control_token_coupling(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,9 +152,6 @@ async def test_market_auth_accepts_valid_device_token_without_control_token_coup
   async def authenticate(_envelope):
     return _authenticated_session()
 
-  async def market_lease(device_id: str):
-    return _market_lease(device_id)
-
   device_checked = asyncio.Event()
 
   async def ensure_device_active(*_args, **_kwargs):
@@ -257,11 +159,6 @@ async def test_market_auth_accepts_valid_device_token_without_control_token_coup
     raise agent_api.AuthError("UNAUTHENTICATED", "controlled stop")
 
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
-  monkeypatch.setattr(
-    agent_api.market_lease_reader,
-    "market_lease",
-    market_lease,
-  )
   monkeypatch.setattr(
     agent_api,
     "_ensure_device_active",
@@ -279,7 +176,7 @@ async def test_market_auth_accepts_valid_device_token_without_control_token_coup
 
 
 @pytest.mark.asyncio
-async def test_market_auth_rejects_another_control_session_id(
+async def test_market_auth_rejects_control_session_field(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   batch = MarketStreamBatch(
@@ -303,14 +200,10 @@ async def test_market_auth_rejects_another_control_session_id(
   async def authenticate(_envelope):
     return _authenticated_session()
 
-  async def market_lease(device_id: str):
-    return _market_lease(device_id)
-
   async def unexpected_device_check(*_args, **_kwargs):
     raise AssertionError("session mismatch must fail before device validation")
 
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
-  monkeypatch.setattr(agent_api.market_lease_reader, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "_ensure_device_active", unexpected_device_check)
 
   await agent_api.agent_market_websocket(websocket)
@@ -340,21 +233,15 @@ async def test_redis_failure_sends_resync_without_ack(
   async def authenticate(_envelope):
     return _authenticated_session()
 
-  async def market_lease(device_id):
-    return _market_lease(device_id)
-
-  async def ensure_device_active(_device_id, *, lease=None):
-    assert lease == _market_lease(_device_id)
+  async def ensure_device_active(_device_id, *, session=None):
+    assert session.device_id == _device_id
+    assert session.user_id == "user"
+    assert session.stream_id == agent_api.active_market_stream_id()
     return None
 
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
-  monkeypatch.setattr(
-    agent_api.market_lease_reader,
-    "market_lease",
-    market_lease,
-  )
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(agent_api, "MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS", 0.05)
   monkeypatch.setattr(
@@ -409,20 +296,14 @@ async def test_redis_black_hole_times_out_and_releases_single_connection(
   async def authenticate(_envelope):
     return _authenticated_session()
 
-  async def market_lease(device_id):
-    return _market_lease(device_id)
-
-  async def ensure_device_active(_device_id, *, lease=None):
-    assert lease == _market_lease(_device_id)
+  async def ensure_device_active(_device_id, *, session=None):
+    assert session.device_id == _device_id
+    assert session.user_id == "user"
+    assert session.stream_id == agent_api.active_market_stream_id()
     return None
 
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
-  monkeypatch.setattr(
-    agent_api.market_lease_reader,
-    "market_lease",
-    market_lease,
-  )
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(agent_api, "_market_connections", registry)
   monkeypatch.setattr(
@@ -476,11 +357,10 @@ async def test_hanging_ack_send_times_out_and_releases_connection(
   async def authenticate(_envelope):
     return _authenticated_session()
 
-  async def market_lease(device_id):
-    return _market_lease(device_id)
-
-  async def ensure_device_active(_device_id, *, lease=None):
-    assert lease == _market_lease(_device_id)
+  async def ensure_device_active(_device_id, *, session=None):
+    assert session.device_id == _device_id
+    assert session.user_id == "user"
+    assert session.stream_id == agent_api.active_market_stream_id()
     return None
 
   original_receive = websocket.receive
@@ -492,11 +372,6 @@ async def test_hanging_ack_send_times_out_and_releases_connection(
   websocket.receive = receive
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
-  monkeypatch.setattr(
-    agent_api.market_lease_reader,
-    "market_lease",
-    market_lease,
-  )
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(agent_api, "_market_connections", registry)
   monkeypatch.setattr(
@@ -818,7 +693,7 @@ async def test_slow_single_symbol_publish_does_not_block_binary_ack(
       device_id="device-1",
       commit_state=agent_api._MarketCommitState(),
       store=Store(),
-      market_lease=_market_lease(),
+      market_session=_market_session(),
       validate_device=ensure_device_active,
     )
   )

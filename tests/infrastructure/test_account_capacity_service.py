@@ -110,7 +110,7 @@ async def snapshot(db, *, cash=10000, volume=1000, orders=None):
         message_id="snapshot",
         device_id="device",
         message_type="delta_report",
-        protocol_version="1.3",
+        protocol_version="1.4",
         raw_payload_hash=digest,
         business_idempotency_key="snapshot",
         payload=payload,

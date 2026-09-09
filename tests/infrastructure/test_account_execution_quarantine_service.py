@@ -467,7 +467,7 @@ async def _store_full_snapshot(db, payload: dict, *, received_at: datetime) -> N
       message_id=f"snapshot-inbox-{snapshot_id}",
       device_id=DEVICE_ID,
       message_type="delta_report",
-      protocol_version="1.3",
+      protocol_version="1.4",
       raw_payload_hash=snapshot_hash,
       business_idempotency_key=f"snapshot:{snapshot_id}",
       payload=payload,

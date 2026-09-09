@@ -86,7 +86,7 @@ Tick 请求由 231 个降至 42 个。指标补算仍限制 30 天，长区间�
 完整分区证据写入 `market_data_sync_partition`。
 
 Flow 从规划、请求等待到重试/指标阶段都有独立的 15 秒心跳，输出整体计数、在途
-请求阶段和等待时长。Agent 通过协议 1.3 心跳的 `history_progress` 上报最多 4 个
+请求阶段和等待时长。Agent 通过协议 1.4 心跳的 `history_progress` 上报最多 4 个
 请求的阶段、工作单元和已确认上传字节；QoS 原因和进度新鲜度分开显示。普通
 `_request_and_wait` 创建日志使用 Prefect run logger。入库/回读阶段由 Worker 明确
 标记；Agent 本地日志带时间戳。
@@ -106,7 +106,7 @@ spool 状态，释放 FIFO 准备锁，让其他请求执行一个工作单元�
 日志历史读取最新 500 条，前端最多保留最近 5,000 条，避免长期订阅持续累积。
 
 上线须先应用 `20260908_0058_market_sync_audit` 迁移，并统一发布 API、Worker、
-Web、QMT Agent 和 Caddy 路由；协议 1.3 不接受旧 1.2 Agent。实盘整体重启仍遵守
+Web、QMT Agent 和 Caddy 路由；协议 1.4 不接受旧 1.3 Agent。实盘整体重启仍遵守
 根目录运维入口及完整门禁，不独立启动第二个 Agent/历史调用者。
 
 长区间请求数量、内存和日志的量化背景见

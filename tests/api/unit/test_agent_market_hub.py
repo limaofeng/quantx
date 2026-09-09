@@ -1,13 +1,11 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import pytest
-from quantx_api import agent_api, agent_hub
+from quantx_api import agent_hub
 from quantx_contracts import AgentMessageType
 from quantx_infrastructure.services.market_lease_reader import MarketSessionLease
-from quantx_market_data import agent_stream
 
 
 class FakeRedis:
@@ -113,140 +111,6 @@ async def test_hub_replays_active_subscriptions_to_one_market_agent(
     AgentMessageType.MARKET_SUBSCRIBE,
   ]
   assert await hub.is_market_device("device-2")
-
-
-@pytest.mark.asyncio
-async def test_market_event_only_publishes_from_assigned_agent(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  published = []
-
-  async def is_market_session(lease):
-    return lease.device_id == "device-1"
-
-  async def publish(channel, payload):
-    published.append((channel, payload))
-    return 1
-
-  async def ensure_device_active(_device_id, *, lease=None):
-    assert lease is not None
-
-  monkeypatch.setattr(
-    agent_stream.market_lease_reader,
-    "is_market_session",
-    is_market_session,
-  )
-  monkeypatch.setattr(agent_stream, "_ensure_device_active", ensure_device_active)
-  monkeypatch.setattr(agent_api.redis_pubsub, "publish", publish)
-
-  active_session = agent_hub.AgentControlSession(
-    device_id="device-1",
-    capabilities={"market-data"},
-    authorized_account_ids=frozenset({"account-1"}),
-    queue=asyncio.Queue(),
-    api_instance_id="api-1",
-    agent_session_id="session-1",
-    server_connected_at=datetime.now(timezone.utc),
-    remote_address_summary="10.0.0.*",
-    revoked=asyncio.Event(),
-  )
-  await agent_stream._publish_market_event(
-    active_session,
-    {
-      "kind": "quote",
-      "stock_code": "600000.SH",
-      "period": "1m",
-      "data": {"600000.SH": [{"close": 10.5}]},
-    },
-  )
-  assert published == [
-    (
-      "market-data:600000.SH:1m",
-      {"600000.SH": [{"close": 10.5}]},
-    )
-  ]
-
-  with pytest.raises(Exception, match="活动行情 Agent"):
-    await agent_stream._publish_market_event(
-      agent_hub.AgentControlSession(
-        device_id="device-2",
-        capabilities={"market-data"},
-        authorized_account_ids=frozenset({"account-1"}),
-        queue=asyncio.Queue(),
-        api_instance_id="api-1",
-        agent_session_id="session-2",
-        server_connected_at=datetime.now(timezone.utc),
-        remote_address_summary="10.0.0.*",
-        revoked=asyncio.Event(),
-      ),
-      {
-        "kind": "whole",
-        "data": {},
-      },
-    )
-
-  with pytest.raises(ValueError, match="只允许单标的 K 线"):
-    await agent_stream._publish_market_event(
-      active_session,
-      {"kind": "whole", "data": {}},
-    )
-
-
-@pytest.mark.asyncio
-async def test_market_stream_revalidation_uses_cross_process_lease(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  checked: list[str] = []
-  now = agent_api.utcnow()
-  api_heartbeat = SimpleNamespace(
-    instance_id="api-instance-1",
-    status="READY",
-    updated_at=now,
-  )
-  lease = MarketSessionLease(
-    device_id="device-1",
-    api_instance_id="api-instance-1",
-    agent_session_id="agent-session-1",
-  )
-
-  async def market_lease(device_id: str):
-    checked.append(device_id)
-    return lease if device_id == "device-1" else None
-
-  async def is_market_session(value) -> bool:
-    return value == lease
-
-  class Session:
-    async def __aenter__(self):
-      return self
-
-    async def __aexit__(self, *_args):
-      return False
-
-    async def get(self, model, _key):
-      if model is agent_api.AgentDevice:
-        return SimpleNamespace(revoked_at=None)
-      return api_heartbeat
-
-  monkeypatch.setattr(
-    agent_stream.market_lease_reader,
-    "market_lease",
-    market_lease,
-  )
-  monkeypatch.setattr(
-    agent_stream.market_lease_reader,
-    "is_market_session",
-    is_market_session,
-  )
-  monkeypatch.setattr(agent_stream, "AsyncSessionLocal", Session)
-
-  await agent_stream._ensure_device_active("device-1")
-  with pytest.raises(Exception, match="行情租约已失效或被替换"):
-    await agent_stream._ensure_device_active("device-2")
-  api_heartbeat.instance_id = "api-instance-2"
-  await agent_stream._ensure_device_active("device-1")
-
-  assert checked == ["device-1", "device-2", "device-1"]
 
 
 @pytest.mark.asyncio

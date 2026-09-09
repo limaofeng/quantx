@@ -82,7 +82,7 @@ class QmtAgentHealthSnapshot(_QmtAgentHealthBase):
   status: QmtAgentHealthStatus
   reason_code: QmtAgentHealthReason | None
   agent_version: str = Field(min_length=1, max_length=32)
-  protocol_version: Literal["1.3"] = "1.3"
+  protocol_version: Literal["1.4"] = "1.4"
   mode: QmtAgentMode
   uptime_seconds: float = Field(ge=0)
   control_connection_status: QmtAgentControlConnectionStatus

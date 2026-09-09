@@ -46,7 +46,7 @@ def _account_safety() -> dict:
     "agent_status": "READY",
     "ready_live_agent_count": 1,
     "agent_mode": "live",
-    "protocol_version": "1.3",
+    "protocol_version": "1.4",
     "reconcile_status": "READY",
     "execution_window_active": True,
     "controlled_window_snapshot_id": "snapshot-1",

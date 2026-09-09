@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -43,15 +42,9 @@ from quantx_infrastructure.database.redis_pubsub import (
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
-  RuntimeComponentHeartbeat,
 )
 from quantx_infrastructure.services.agent_session_guard import (
-  QMT_CONTROL_SESSION_REPLACED,
   QMT_DEVICE_REVOKED,
-)
-from quantx_infrastructure.services.market_lease_reader import (
-  MarketSessionLease,
-  market_lease_reader,
 )
 from redis.exceptions import RedisError
 from sqlalchemy.exc import DBAPIError
@@ -149,12 +142,6 @@ MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS = 2.0
 
 
 MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS = 2.0
-
-
-MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
-
-
-MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS = 0.025
 
 
 MARKET_STREAM_EVENT_QUEUE_CAPACITY = 512
@@ -376,18 +363,17 @@ class _MarketCommitBuffer:
     self._queue.task_done()
 
 
+@dataclass(frozen=True)
+class MarketStreamSession:
+  device_id: str
+  user_id: str
+  stream_id: str
+
+
 async def _publish_market_event(
-  control_session: MarketSessionLease,
-  payload: dict[str, Any],
+  session: MarketStreamSession, payload: dict[str, Any]
 ) -> None:
-  lease = MarketSessionLease(
-    device_id=control_session.device_id,
-    api_instance_id=control_session.api_instance_id,
-    agent_session_id=control_session.agent_session_id,
-  )
-  if not await market_lease_reader.is_market_session(lease):
-    raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
-  await _ensure_device_active(control_session.device_id, lease=lease)
+  await _ensure_device_active(session.device_id, session=session)
   kind = str(payload.get("kind") or "")
   stock_code = str(payload.get("stock_code") or "")
   period = str(payload.get("period") or "tick")
@@ -404,24 +390,22 @@ async def _publish_market_event(
 async def _ensure_device_active(
   device_id: str,
   *,
-  lease: MarketSessionLease | None = None,
+  session: MarketStreamSession | None = None,
 ) -> None:
-  """Validate the Redis market lease and durable device authorization."""
-
-  active_lease = lease or await market_lease_reader.market_lease(device_id)
-  active = bool(
-    active_lease is not None
-    and await market_lease_reader.is_market_session(active_lease)
-  )
-  if not active or active_lease is None:
-    raise AuthError(
-      QMT_CONTROL_SESSION_REPLACED,
-      "Agent 行情租约已失效或被替换",
-    )
+  """Revalidate the owning Gateway connection and current durable identity."""
+  if (
+    session is None
+    or session.device_id != device_id
+    or not session.stream_id
+    or _market_connections.active_stream_id != session.stream_id
+  ):
+    raise AuthError("MARKET_SESSION_REPLACED", "Agent 行情连接已失效或被替换")
   async with AsyncSessionLocal() as db:
     device = await db.get(AgentDevice, device_id)
-  if device is None or device.revoked_at is not None:
-    raise AuthError(QMT_DEVICE_REVOKED, "Agent 设备已撤销")
+  if (
+    device is None or device.revoked_at is not None or device.user_id != session.user_id
+  ):
+    raise AuthError(QMT_DEVICE_REVOKED, "Agent 设备已撤销或身份已改变")
 
 
 async def _send_market_text(websocket: WebSocket, payload: str) -> None:
@@ -450,76 +434,6 @@ async def _send_market_text(websocket: WebSocket, payload: str) -> None:
     if disconnected():
       raise WebSocketDisconnect(code=1006) from exc
     raise
-
-
-async def _wait_for_active_market_device(
-  device_id: str,
-) -> MarketSessionLease:
-  """Bridge the short race between control and market WebSocket startup."""
-  deadline = time.monotonic() + MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS
-  while True:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-      await _reject_unavailable_market_lease(device_id)
-    try:
-      lease = await asyncio.wait_for(
-        market_lease_reader.market_lease(device_id),
-        timeout=remaining,
-      )
-    except asyncio.TimeoutError as exc:
-      try:
-        await _reject_unavailable_market_lease(device_id)
-      except AuthError as auth_error:
-        raise auth_error from exc
-    if lease is not None:
-      return lease
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-      await _reject_unavailable_market_lease(device_id)
-    await asyncio.sleep(min(MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS, remaining))
-
-
-async def _reject_unavailable_market_lease(device_id: str) -> None:
-  diagnostic = await market_lease_reader.market_lease_diagnostic(device_id)
-  try:
-    async with AsyncSessionLocal() as db:
-      agent_heartbeat = await db.get(
-        RuntimeComponentHeartbeat,
-        f"qmt-agent:{device_id}",
-      )
-      engine_heartbeat = await db.get(RuntimeComponentHeartbeat, "engine")
-    agent_details = dict(agent_heartbeat.details or {}) if agent_heartbeat else {}
-    engine_details = dict(engine_heartbeat.details or {}) if engine_heartbeat else {}
-    diagnostic.update(
-      {
-        "agentHeartbeatStatus": str(
-          getattr(agent_heartbeat, "status", "OFFLINE") or "OFFLINE"
-        ).upper(),
-        "agentHeartbeatReasonCode": str(agent_details.get("reasonCode") or ""),
-        "engineHeartbeatStatus": str(
-          getattr(engine_heartbeat, "status", "OFFLINE") or "OFFLINE"
-        ).upper(),
-        "engineHeartbeatReasonCode": str(engine_details.get("reasonCode") or ""),
-      }
-    )
-  except Exception as exc:
-    diagnostic["heartbeatDiagnosticError"] = exc.__class__.__name__
-  reason_code = str(diagnostic.get("reasonCode") or "MARKET_LEASE_UNAVAILABLE")
-  logger.warning(
-    "Agent market lease unavailable: diagnostics=%s",
-    json.dumps(
-      diagnostic,
-      ensure_ascii=False,
-      separators=(",", ":"),
-      sort_keys=True,
-    ),
-  )
-  raise AuthError(
-    reason_code,
-    "当前设备尚未取得活动行情租约",
-    status_code=403,
-    retryable=True,
-  )
 
 
 async def _request_market_resync(
@@ -778,7 +692,7 @@ async def _commit_market_batches(
 
 
 async def _process_market_stream_events(
-  market_lease: MarketSessionLease,
+  market_session: MarketStreamSession,
   market_events: _MarketEventIngressBuffer,
 ) -> None:
   """Publish lossy single-symbol events without delaying binary receive/ACK."""
@@ -788,7 +702,7 @@ async def _process_market_stream_events(
     try:
       try:
         await asyncio.wait_for(
-          _publish_market_event(market_lease, item.envelope.payload),
+          _publish_market_event(market_session, item.envelope.payload),
           timeout=MARKET_STREAM_EVENT_PROCESSING_TIMEOUT_SECONDS,
         )
       except _TRANSIENT_DEPENDENCY_ERRORS as exc:
@@ -802,7 +716,7 @@ async def _process_market_stream_events(
         logger.warning(
           "Single-instrument market event dropped without stream reconnect: "
           "device_id=%s error=%s",
-          market_lease.device_id,
+          market_session.device_id,
           exc.__class__.__name__,
         )
     finally:
@@ -816,12 +730,12 @@ async def _run_market_commit_pipeline(
   device_id: str,
   commit_state: _MarketCommitState,
   store: MarketStreamStore | None = None,
-  market_lease: MarketSessionLease | None = None,
+  market_session: MarketStreamSession | None = None,
   protocol_version: str = PROTOCOL_VERSION,
   validate_device: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
   buffer = _MarketCommitBuffer()
-  market_events = _MarketEventIngressBuffer() if market_lease is not None else None
+  market_events = _MarketEventIngressBuffer() if market_session is not None else None
   receiver = asyncio.create_task(
     _receive_market_batches(
       websocket,
@@ -847,12 +761,12 @@ async def _run_market_commit_pipeline(
   event_processor = (
     asyncio.create_task(
       _process_market_stream_events(
-        market_lease,
+        market_session,
         market_events,
       ),
       name=f"market-event-processor:{stream_id}",
     )
-    if market_lease is not None and market_events is not None
+    if market_session is not None and market_events is not None
     else None
   )
   tasks = [receiver, committer]
@@ -886,19 +800,13 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
     capabilities = _normalized_agent_capabilities(first.payload.get("capabilities", []))
     if "market-data" not in capabilities:
       raise AuthError("FORBIDDEN", "Agent 未声明 market-data 能力")
-    market_lease = await _wait_for_active_market_device(device.id)
-    requested_control_session_id = str(
-      first.payload.get("agent_session_id") or ""
-    ).strip()
-    if (
-      not requested_control_session_id
-      or requested_control_session_id != market_lease.agent_session_id
-    ):
-      raise AuthError("UNAUTHENTICATED", "行情连接与当前控制会话不匹配")
-    await _ensure_device_active(device.id, lease=market_lease)
+    if "agent_session_id" in first.payload:
+      raise AuthError("UNAUTHENTICATED", "行情认证不接受控制会话字段")
     connection_id = await _market_connections.register() or ""
     if not connection_id:
       raise AuthError("CONFLICT", "已存在活动行情连接")
+    market_session = MarketStreamSession(device.id, device.user_id, connection_id)
+    await _ensure_device_active(device.id, session=market_session)
     MARKET_STREAM_CONNECTIONS.set(1)
 
     await _send_market_text(
@@ -936,11 +844,11 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
       stream_id=stream_id,
       device_id=device.id,
       commit_state=commit_state,
-      market_lease=market_lease,
+      market_session=market_session,
       protocol_version=first.protocol_version,
       validate_device=lambda checked_device_id: _ensure_device_active(
         checked_device_id,
-        lease=market_lease,
+        session=market_session,
       ),
     )
   except WebSocketDisconnect:

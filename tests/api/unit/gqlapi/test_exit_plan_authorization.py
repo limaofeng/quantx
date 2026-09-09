@@ -364,7 +364,7 @@ async def authorization_database(monkeypatch, request):
             "sessionActive": True,
             "marketStreamStatus": "READY",
             "capabilities": ["live"],
-            "protocolVersion": "1.3",
+            "protocolVersion": "1.4",
           },
           updated_at=observed_at,
         ),
@@ -388,7 +388,7 @@ async def authorization_database(monkeypatch, request):
     control.last_snapshot_hash = digest
     db.add(AgentReportInbox(
       message_id="snapshot-1", device_id="agent-1", message_type="delta_report",
-      protocol_version="1.3", raw_payload_hash=digest, business_idempotency_key="snapshot-1",
+      protocol_version="1.4", raw_payload_hash=digest, business_idempotency_key="snapshot-1",
       payload=payload, received_at=observed_at, processing_status="PROCESSED",
     ))
     await db.commit()
@@ -977,7 +977,7 @@ async def test_exact_authorization_is_device_bound_audited_and_idempotent(
   assert preview.plan_binding["protected_volume"] == 300
   assert preview.plan_binding["remaining_volume"] == 300
   assert preview.safety_subject["position"]["t1_unavailable_volume"] == 100
-  assert preview.readiness["protocol_version"] == "1.3"
+  assert preview.readiness["protocol_version"] == "1.4"
   assert preview.authorization_expires_at > preview.challenge_expires_at
 
   async with authorization_database() as db:

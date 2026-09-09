@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-PROTOCOL_VERSION = "1.3"
+PROTOCOL_VERSION = "1.4"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION})
 
 

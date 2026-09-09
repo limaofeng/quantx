@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from quantx_contracts import (
+  MARKET_STREAM_MARKETS,
   AgentEnvelope,
   AgentMessageType,
   MarketBatchKind,
@@ -157,8 +158,6 @@ def _stream_runtime(*, max_ready_callbacks: int) -> AgentRuntime:
   runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
   runtime._access_token_ready = asyncio.Event()
   runtime._control_agent_session_id = "agent-session-1"
-  runtime._control_hub_registered_once = asyncio.Event()
-  runtime._control_hub_registered_once.set()
   runtime._whole_market_encode_executor = ThreadPoolExecutor(max_workers=1)
   runtime._market_stream_ready_since_monotonic = 0.0
   return runtime
@@ -461,8 +460,6 @@ async def test_ready_barrier_carries_sync_delta_before_ready_and_does_not_repeat
   runtime._access_token = "token-1"
   runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
   runtime._access_token_ready = asyncio.Event()
-  runtime._control_hub_registered_once = asyncio.Event()
-  runtime._control_hub_registered_once.set()
   runtime._whole_market_encode_executor = ThreadPoolExecutor(max_workers=1)
   runtime._market_stream_ready_since_monotonic = 0.0
   socket = Socket()
@@ -1036,26 +1033,6 @@ async def test_snapshot_never_calls_point_query_fallback(
 
   assert set(snapshot) == set(codes)
   assert runtime.broker.calls == 0
-
-
-@pytest.mark.asyncio
-async def test_market_stream_waits_for_first_control_hub_registration() -> None:
-  runtime = AgentRuntime.__new__(AgentRuntime)
-  runtime._ensure_whole_market_state()
-
-  waiter = asyncio.create_task(runtime._wait_for_initial_control_hub_registration())
-  await asyncio.sleep(0)
-  assert not waiter.done()
-
-  runtime._control_hub_registered_once.set()
-  await asyncio.wait_for(waiter, timeout=0.1)
-
-  # The gate is intentionally sticky: later control reconnects do not cancel
-  # or re-gate the independently owned market stream.
-  await asyncio.wait_for(
-    runtime._wait_for_initial_control_hub_registration(),
-    timeout=0.1,
-  )
 
 
 @pytest.mark.asyncio
@@ -2064,3 +2041,48 @@ async def test_market_connection_registry_rejects_second_connection() -> None:
 
   await registry.unregister(first)
   assert await registry.register()
+
+
+@pytest.mark.asyncio
+async def test_market_stream_connects_without_control_registration(monkeypatch):
+  runtime = _stream_runtime(max_ready_callbacks=8)
+  runtime._control_session_authenticated = False
+  runtime._control_agent_session_id = ""
+
+  def connect(*args, **kwargs):
+    raise RuntimeError("market socket reached independently")
+
+  monkeypatch.setattr(runtime_module, "_connect_websocket", connect)
+  try:
+    with pytest.raises(RuntimeError, match="market socket reached independently"):
+      await asyncio.wait_for(runtime._run_whole_market_stream(), timeout=0.2)
+  finally:
+    runtime._whole_market_encode_executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_market_handshake_does_not_send_control_session_identity():
+  runtime = _stream_runtime(max_ready_callbacks=8)
+  sent = []
+  replies = [
+    AgentEnvelope(
+      message_type=AgentMessageType.AUTH_RESULT, payload={"accepted": True}
+    ).model_dump_json(),
+    MarketStreamControl(
+      type=MarketControlType.START, stream_id="stream", markets=MARKET_STREAM_MARKETS
+    ).model_dump_json(),
+  ]
+
+  class Socket:
+    async def send(self, value):
+      sent.append(AgentEnvelope.model_validate_json(value))
+
+    async def recv(self):
+      return replies.pop(0)
+
+  try:
+    await runtime._perform_market_stream_handshake(Socket(), access_token="valid-token")
+    assert "agent_session_id" not in sent[0].payload
+    assert sent[0].payload["access_token"] == "valid-token"
+  finally:
+    runtime._whole_market_encode_executor.shutdown(wait=True)

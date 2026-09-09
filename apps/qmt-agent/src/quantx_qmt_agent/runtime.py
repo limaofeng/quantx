@@ -1877,10 +1877,6 @@ class AgentRuntime:
     self._access_token_expires_at = datetime.now(timezone.utc)
     self._access_token_ready = asyncio.Event()
     self._control_agent_session_id = ""
-    # Sticky process-lifetime gate. The market socket must not race ahead of
-    # the first successful control-hub registration, but later control socket
-    # reconnects must never tear down an already READY market stream.
-    self._control_hub_registered_once = asyncio.Event()
     self._session_loop: asyncio.AbstractEventLoop | None = None
     self._market_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10_000)
     self._market_event_drops = 0
@@ -2541,7 +2537,6 @@ class AgentRuntime:
       self._control_socket_writer = _PriorityControlSocketWriter(socket)
       self._control_session_authenticated = True
       self._health_state().set_control_connected(True)
-      self._control_hub_registered_once.set()
 
       self._session_loop = asyncio.get_running_loop()
       self._market_requests = asyncio.Queue(maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS)
@@ -3715,10 +3710,6 @@ class AgentRuntime:
         continue
       await self._access_token_ready.wait()
 
-  async def _wait_for_initial_control_hub_registration(self) -> None:
-    self._ensure_whole_market_state()
-    await self._control_hub_registered_once.wait()
-
   async def _whole_market_stream_supervisor(self) -> None:
     delay = 1.0
     while True:
@@ -3776,7 +3767,6 @@ class AgentRuntime:
         "access_token": access_token,
         "agent_version": AGENT_VERSION,
         "capabilities": self._advertised_capabilities(),
-        "agent_session_id": getattr(self, "_control_agent_session_id", ""),
       },
     )
     await asyncio.wait_for(
@@ -3811,7 +3801,6 @@ class AgentRuntime:
   async def _run_whole_market_stream(self) -> None:
     self._ensure_whole_market_state()
     await self._wait_for_fresh_access_token()
-    await self._wait_for_initial_control_hub_registration()
     market_access_token = self._access_token
     self._set_market_stream_status("SYNCING")
     self._market_stream_sequence = 0
@@ -6486,8 +6475,6 @@ class AgentRuntime:
       self._whole_market_native_reset = asyncio.Event()
     if not hasattr(self, "_access_token_ready"):
       self._access_token_ready = asyncio.Event()
-    if not hasattr(self, "_control_hub_registered_once"):
-      self._control_hub_registered_once = asyncio.Event()
     if not hasattr(self, "_access_token"):
       self._access_token = ""
     if not hasattr(self, "_access_token_expires_at"):

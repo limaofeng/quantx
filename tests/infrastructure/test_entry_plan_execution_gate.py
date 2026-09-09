@@ -946,7 +946,7 @@ async def test_second_gate_rechecks_authoritative_plan_snapshot_and_position(
   )
   heartbeat = SimpleNamespace(
     status="READY",
-    details={"capabilities": ["live"], "protocolVersion": "1.3"},
+    details={"capabilities": ["live"], "protocolVersion": "1.4"},
   )
 
   class Result:
