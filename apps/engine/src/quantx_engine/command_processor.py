@@ -236,6 +236,14 @@ async def _dispatch(
   command_id: Optional[str] = None,
 ) -> dict[str, Any]:
   run_id = str(payload.get("run_id") or "")
+  if command_type == "T_ASSISTANT_PREPARE_LIVE_AUTO_SUCCESSOR":
+    from .t_assistant_live_successor import dispatch_live_auto_successor
+
+    async with AsyncSessionLocal() as db, db.begin():
+      execution_id = await dispatch_live_auto_successor(
+        db, payload=payload, now=utcnow().replace(tzinfo=UTC)
+      )
+    return {"success": True, "execution_id": execution_id}
   if command_type == "T_ASSISTANT_CONFIRM_LIVE_RELEASE":
     import os
 

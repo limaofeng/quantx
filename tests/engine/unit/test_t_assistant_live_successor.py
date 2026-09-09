@@ -161,3 +161,94 @@ async def test_late_failure_rolls_back_head_drain_and_successor_even_when_caught
     assert (
       await db.scalar(select(func.count()).select_from(TAssistantExecutionRecord)) == 1
     )
+
+
+@pytest.mark.parametrize(
+  "damage", [None, "account", "hash", "approval", "injected", "head"]
+)
+async def test_durable_successor_command_binds_existing_approval(
+  sessions, monkeypatch, damage
+):
+  from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+  from quantx_engine import command_processor as processor
+  from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
+  from quantx_infrastructure.models.t_assistant_execution import (
+    TAssistantExecutionEventRecord,
+  )
+
+  async with sessions.kw["bind"].begin() as connection:
+    await connection.run_sync(lambda sync: EngineCommandOutbox.__table__.create(sync))
+  async with sessions() as db, db.begin():
+    approval = await db.scalar(
+      select(TAssistantExecutionEventRecord).where(
+        TAssistantExecutionEventRecord.execution_id == "live-1",
+        TAssistantExecutionEventRecord.event_key == "release-1",
+      )
+    )
+    payload = dict(
+      account_id="account-1",
+      predecessor_id="live-1",
+      config_version_id="config-version-2",
+      approval_event_key="release-1",
+      approval_hash=stable_manifest_hash(approval.payload),
+      expected_head_version=1,
+    )
+    if damage == "account":
+      payload["account_id"] = "other"
+    elif damage == "hash":
+      payload["approval_hash"] = "0" * 64
+    elif damage == "approval":
+      payload["approval_event_key"] = "missing"
+    elif damage == "injected":
+      payload["p6_outcome"] = "PASSED"
+    elif damage == "head":
+      payload["expected_head_version"] = True
+    db.add(
+      EngineCommandOutbox(
+        message_id="successor-command",
+        idempotency_key="successor-command",
+        command_type="T_ASSISTANT_PREPARE_LIVE_AUTO_SUCCESSOR",
+        aggregate_id="live-1",
+        payload=payload,
+        processing_status="PENDING",
+        available_at=NOW,
+      )
+    )
+  monkeypatch.setattr(processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(
+    processor, "utcnow", lambda: (NOW + timedelta(seconds=2)).replace(tzinfo=None)
+  )
+  message_id, kind, claimed_payload = await processor._claim_next()
+  if damage:
+    with pytest.raises(ValueError):
+      await processor._dispatch(kind, claimed_payload, command_id=message_id)
+    await processor._complete(message_id, error="rejected synthetic release")
+    async with sessions() as db:
+      assert (await db.get(TAssistantExecutionRecord, "live-1")).status == "RUNNING"
+      assert (
+        await db.get(TTradeGlobalConfig, "config-1")
+      ).active_config_version_id == "config-version-1"
+      assert (
+        await db.scalar(select(func.count()).select_from(TAssistantExecutionRecord))
+        == 1
+      )
+      assert (
+        await db.get(EngineCommandOutbox, message_id)
+      ).processing_status == "FAILED"
+  else:
+    result = await processor._dispatch(kind, claimed_payload, command_id=message_id)
+    # Replay after execution committed but before the command completion write.
+    assert (
+      await processor._dispatch(kind, claimed_payload, command_id=message_id) == result
+    )
+    await processor._complete(message_id, result=result)
+    assert await processor._claim_next() is None
+    async with sessions() as db:
+      assert (await db.get(EngineCommandOutbox, message_id)).result == result
+      successor = await db.get(TAssistantExecutionRecord, result["execution_id"])
+      assert successor.status == "WARMING" and successor.entry_authorization == "AUTO"
+      assert (await db.get(TAssistantExecutionRecord, "live-1")).status == "DRAINING"
+      assert (
+        await db.scalar(select(func.count()).select_from(TAssistantExecutionRecord))
+        == 2
+      )

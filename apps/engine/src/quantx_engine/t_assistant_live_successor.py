@@ -1,6 +1,6 @@
 """Atomic, explicitly approved RULE_ONLY successor preparation.
 
-This service is not registered as a public command. The release control plane
+The internal Engine command consumes existing approval evidence. The release control plane
 must first persist an exact AUTO_RELEASE_APPROVED execution event after P6's
 real observation gate and operator approval. Tests use isolated synthetic facts.
 No successor is made RUNNING here and no broker/ExitPlan ownership is changed.
@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from quantx_domain.trading.t_assistant_execution import (
   TAssistantConfigVersion,
   TAssistantExecutionEvent,
+  stable_manifest_hash,
 )
 from quantx_infrastructure.models.t_assistant_execution import (
   TAssistantConfigVersionRecord,
@@ -34,6 +35,51 @@ def _hash(value):
     isinstance(value, str)
     and len(value) == 64
     and all(c in "0123456789abcdef" for c in value)
+  )
+
+
+async def dispatch_live_auto_successor(db, *, payload, now):
+  """Bind a durable command to one immutable release approval and account."""
+  required = {
+    "account_id",
+    "predecessor_id",
+    "config_version_id",
+    "approval_event_key",
+    "approval_hash",
+    "expected_head_version",
+  }
+  if (
+    not db.in_transaction()
+    or not isinstance(payload, dict)
+    or set(payload) != required
+    or any(
+      not isinstance(payload[key], str) or not payload[key].strip()
+      for key in required - {"expected_head_version"}
+    )
+    or not _hash(payload["approval_hash"])
+  ):
+    raise ValueError("T_SUCCESSOR_COMMAND_INVALID")
+  predecessor = await db.get(TAssistantExecutionRecord, payload["predecessor_id"])
+  if predecessor is None or predecessor.account_id != payload["account_id"]:
+    raise ValueError("T_SUCCESSOR_COMMAND_ACCOUNT_CONFLICT")
+  approval = await db.scalar(
+    select(TAssistantExecutionEventRecord).where(
+      TAssistantExecutionEventRecord.execution_id == payload["predecessor_id"],
+      TAssistantExecutionEventRecord.event_key == payload["approval_event_key"],
+    )
+  )
+  if (
+    approval is None
+    or stable_manifest_hash(approval.payload) != payload["approval_hash"]
+  ):
+    raise ValueError("T_SUCCESSOR_COMMAND_APPROVAL_CONFLICT")
+  return await prepare_live_auto_successor(
+    db,
+    predecessor_id=payload["predecessor_id"],
+    config_version_id=payload["config_version_id"],
+    approval_event_key=payload["approval_event_key"],
+    expected_head_version=payload["expected_head_version"],
+    now=now,
   )
 
 

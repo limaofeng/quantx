@@ -592,7 +592,7 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   微型合成拟合仅为数值一致性单测，不是冻结草案中的正式实验；尚无研究结果或发布资格。
 - P7 AUTO successor 准备服务已实现 head CAS、精确配置/审批绑定、旧源排空、新源 WARMING
   与同事务审计；重试及末尾异常整体回滚已有隔离验证。旧 pending/outbox 不迁移 owner。
-  服务未注册公开命令；审批事件使用合成夹具，真实 P6 准入审计及人工发布入口仍待接入。
+  审批事件使用合成夹具，真实 P6 准入审计及人工发布入口仍待接入；内部消息箱接线见后续检查点。
 - P7/P8 基础与 LIVE 排空联合 **69 项通过**，Conda `quantx`、聚焦 Ruff 通过；
   JUnit `.codex_screenshots/p7-p8-foundation.xml`。测试全部为隔离工程证据，无 QMT 实盘，
   不代表 P6/P7/P8 阶段退出门通过。P8 基础提交 `8eece5a6`。
@@ -948,6 +948,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   `.codex_screenshots/p6-live-position-regression.log`、
   `.codex_screenshots/p6-position-service-regression.log`。初始确认基线仍为合成种子，未覆盖
   设备网络 ingress/inbox worker、真实行情/券商或 PostgreSQL 并发；不代替实盘验收。
+- AUTO successor 内部消息箱接线已完成：`T_ASSISTANT_PREPARE_LIVE_AUTO_SUCCESSOR` 严格接收
+  account/predecessor/config、approval event/hash 与 head version，不能通过命令补写 PASSED
+  或 actor。Engine 复核已有不可变审批后调用实际原子准备服务，旧源 DRAINING、新源 WARMING，
+  不直接启动 AUTO。隔离数据库验证实际领取/dispatch/完成回写，以及准备已提交而完成回写
+  尚未发生时的重放；账户漂移、审批丢失/哈希变化、额外字段、非法 head version 均拒绝且
+  不改变旧源或发布头。30 项 successor/CANARY 测试通过，证据
+  `.codex_screenshots/p7-successor-command.log`。这不是公开人工发布入口或正式 P6 审批。
+  legacy 当前仅由 global monitor 调用 entry authority 失效并阻断新源，尚无持久化 DRAINING
+  义务清单，不能据此清除 head.strategy_run_id 或判定切换完成。
 - 剩余开发顺序：
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
