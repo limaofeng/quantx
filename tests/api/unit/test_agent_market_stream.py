@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from quantx_api import agent_api
 from quantx_contracts import (
   AgentEnvelope,
   AgentMessageType,
@@ -13,6 +12,8 @@ from quantx_contracts import (
   MarketStreamBatch,
   MarketStreamControl,
 )
+from quantx_infrastructure.auth.tokens import utcnow
+from quantx_market_data import agent_stream as agent_api
 from starlette.websockets import WebSocketState
 
 
@@ -27,7 +28,7 @@ def _market_lease(device_id: str = "device-1") -> agent_api.MarketSessionLease:
 def _authenticated_session() -> SimpleNamespace:
   return SimpleNamespace(
     device=SimpleNamespace(id="device-1"),
-    expires_at=agent_api.utcnow() + timedelta(minutes=5),
+    expires_at=utcnow() + timedelta(minutes=5),
   )
 
 
@@ -147,7 +148,7 @@ async def test_market_auth_waits_for_control_registration(
     return _market_lease(device_id) if calls >= 3 else None
 
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_api.market_lease_reader,
     "market_lease",
     market_lease,
   )
@@ -194,12 +195,12 @@ async def test_market_auth_rejects_device_that_never_becomes_active(
       return False
 
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_api.market_lease_reader,
     "market_lease",
     market_lease,
   )
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_api.market_lease_reader,
     "market_lease_diagnostic",
     market_lease_diagnostic,
   )
@@ -257,7 +258,7 @@ async def test_market_auth_accepts_valid_device_token_without_control_token_coup
 
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_api.market_lease_reader,
     "market_lease",
     market_lease,
   )
@@ -309,7 +310,7 @@ async def test_market_auth_rejects_another_control_session_id(
     raise AssertionError("session mismatch must fail before device validation")
 
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
+  monkeypatch.setattr(agent_api.market_lease_reader, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "_ensure_device_active", unexpected_device_check)
 
   await agent_api.agent_market_websocket(websocket)
@@ -350,7 +351,7 @@ async def test_redis_failure_sends_resync_without_ack(
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_api.market_lease_reader,
     "market_lease",
     market_lease,
   )
@@ -418,7 +419,7 @@ async def test_redis_black_hole_times_out_and_releases_single_connection(
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_api.market_lease_reader,
     "market_lease",
     market_lease,
   )
@@ -492,7 +493,7 @@ async def test_hanging_ack_send_times_out_and_releases_connection(
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_api.market_lease_reader,
     "market_lease",
     market_lease,
   )

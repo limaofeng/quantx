@@ -2054,7 +2054,7 @@ async def test_control_reconnect_does_not_restart_process_market_stream() -> Non
 
 @pytest.mark.asyncio
 async def test_market_connection_registry_rejects_second_connection() -> None:
-  from quantx_api.agent_api import _MarketConnectionRegistry
+  from quantx_market_data.agent_stream import _MarketConnectionRegistry
 
   registry = _MarketConnectionRegistry()
   first = await registry.register()

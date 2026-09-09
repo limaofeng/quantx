@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from quantx_api import agent_api
 from quantx_contracts import (
   AgentEnvelope,
   AgentMessageType,
@@ -14,12 +13,14 @@ from quantx_contracts import (
   MarketStreamControl,
   validate_market_stream_capture_time,
 )
+from quantx_infrastructure.auth.tokens import utcnow
 from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamFreshnessLease,
   MarketStreamState,
   _batch_source_times,
 )
 from quantx_infrastructure.core.data.whole_quote_hub import WholeQuoteHub
+from quantx_market_data import agent_stream as agent_api
 from quantx_qmt_agent import runtime as runtime_module
 from quantx_qmt_agent.broker import _LocalMarketStreamer
 from quantx_qmt_agent.runtime import AgentRuntime
@@ -38,7 +39,7 @@ def _market_lease(device_id: str = "device-1") -> agent_api.MarketSessionLease:
 def _authenticated_session() -> SimpleNamespace:
   return SimpleNamespace(
     device=SimpleNamespace(id="device-1"),
-    expires_at=agent_api.utcnow() + timedelta(minutes=5),
+    expires_at=utcnow() + timedelta(minutes=5),
   )
 
 
@@ -398,7 +399,7 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
+  monkeypatch.setattr(agent_api.market_lease_reader, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(
     agent_api,
@@ -500,7 +501,7 @@ async def test_delayed_sequence_two_ack_keeps_engine_closed_until_sequence_three
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
+  monkeypatch.setattr(agent_api.market_lease_reader, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(
     agent_api,
@@ -634,7 +635,7 @@ async def test_sequence_three_commit_failure_never_makes_store_ready(
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
+  monkeypatch.setattr(agent_api.market_lease_reader, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(
     agent_api,
@@ -688,7 +689,7 @@ async def test_untrusted_websocket_tick_without_source_time_fails_closed(
   original_registry = agent_api._market_connections
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
-  monkeypatch.setattr(agent_api.agent_connection_hub, "market_lease", market_lease)
+  monkeypatch.setattr(agent_api.market_lease_reader, "market_lease", market_lease)
   monkeypatch.setattr(agent_api, "market_stream_store", store)
   monkeypatch.setattr(
     agent_api,
@@ -757,7 +758,7 @@ async def test_disconnect_before_sequence_three_never_makes_store_ready(
   monkeypatch.setattr(agent_api, "_authenticate", authenticate)
   monkeypatch.setattr(agent_api, "_ensure_device_active", active)
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_api.market_lease_reader,
     "market_lease",
     market_lease,
   )

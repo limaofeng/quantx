@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 from quantx_api import agent_api, agent_hub
 from quantx_contracts import AgentMessageType
+from quantx_infrastructure.services.market_lease_reader import MarketSessionLease
+from quantx_market_data import agent_stream
 
 
 class FakeRedis:
@@ -130,11 +132,11 @@ async def test_market_event_only_publishes_from_assigned_agent(
     assert lease is not None
 
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_stream.market_lease_reader,
     "is_market_session",
     is_market_session,
   )
-  monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
+  monkeypatch.setattr(agent_stream, "_ensure_device_active", ensure_device_active)
   monkeypatch.setattr(agent_api.redis_pubsub, "publish", publish)
 
   active_session = agent_hub.AgentControlSession(
@@ -148,7 +150,7 @@ async def test_market_event_only_publishes_from_assigned_agent(
     remote_address_summary="10.0.0.*",
     revoked=asyncio.Event(),
   )
-  await agent_api._publish_market_event(
+  await agent_stream._publish_market_event(
     active_session,
     {
       "kind": "quote",
@@ -165,7 +167,7 @@ async def test_market_event_only_publishes_from_assigned_agent(
   ]
 
   with pytest.raises(Exception, match="活动行情 Agent"):
-    await agent_api._publish_market_event(
+    await agent_stream._publish_market_event(
       agent_hub.AgentControlSession(
         device_id="device-2",
         capabilities={"market-data"},
@@ -184,7 +186,7 @@ async def test_market_event_only_publishes_from_assigned_agent(
     )
 
   with pytest.raises(ValueError, match="只允许单标的 K 线"):
-    await agent_api._publish_market_event(
+    await agent_stream._publish_market_event(
       active_session,
       {"kind": "whole", "data": {}},
     )
@@ -201,7 +203,7 @@ async def test_market_stream_revalidation_uses_cross_process_lease(
     status="READY",
     updated_at=now,
   )
-  lease = agent_api.MarketSessionLease(
+  lease = MarketSessionLease(
     device_id="device-1",
     api_instance_id="api-instance-1",
     agent_session_id="agent-session-1",
@@ -227,22 +229,22 @@ async def test_market_stream_revalidation_uses_cross_process_lease(
       return api_heartbeat
 
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_stream.market_lease_reader,
     "market_lease",
     market_lease,
   )
   monkeypatch.setattr(
-    agent_api.agent_connection_hub,
+    agent_stream.market_lease_reader,
     "is_market_session",
     is_market_session,
   )
-  monkeypatch.setattr(agent_api, "AsyncSessionLocal", Session)
+  monkeypatch.setattr(agent_stream, "AsyncSessionLocal", Session)
 
-  await agent_api._ensure_device_active("device-1")
+  await agent_stream._ensure_device_active("device-1")
   with pytest.raises(Exception, match="行情租约已失效或被替换"):
-    await agent_api._ensure_device_active("device-2")
+    await agent_stream._ensure_device_active("device-2")
   api_heartbeat.instance_id = "api-instance-2"
-  await agent_api._ensure_device_active("device-1")
+  await agent_stream._ensure_device_active("device-1")
 
   assert checked == ["device-1", "device-2", "device-1"]
 
@@ -324,7 +326,7 @@ async def test_duplicate_device_connection_replaces_exact_session_generation(
     "device-1",
     agent_session_id=first.agent_session_id,
   )
-  assert await hub.market_lease("device-1") == agent_hub.MarketSessionLease(
+  assert await hub.market_lease("device-1") == MarketSessionLease(
     device_id="device-1",
     api_instance_id="api-instance-1",
     agent_session_id=replacement.agent_session_id,

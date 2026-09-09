@@ -31,12 +31,6 @@ import redis.asyncio as aioredis
 import uvicorn
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from quantx_api.agent_api import (
-  MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS,
-  _MarketCommitState,
-  _request_market_resync,
-  _run_market_commit_pipeline,
-)
 from quantx_contracts import (
   MARKET_STREAM_MARKETS,
   MARKET_STREAM_SUBPROTOCOL,
@@ -51,6 +45,12 @@ from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamKeyspace,
   MarketStreamState,
   MarketStreamStore,
+)
+from quantx_market_data.agent_stream import (
+  MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS,
+  _MarketCommitState,
+  _request_market_resync,
+  _run_market_commit_pipeline,
 )
 
 ROOT = Path(__file__).resolve().parents[1]

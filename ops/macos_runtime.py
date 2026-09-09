@@ -170,7 +170,7 @@ def main() -> None:
         sys.executable,
         "-m",
         "uvicorn",
-        "quantx_api.market_gateway:app",
+        "quantx_market_data.gateway:app",
         "--host",
         "127.0.0.1",
         "--port",

@@ -3130,6 +3130,7 @@ source = { editable = "apps/market-data" }
 dependencies = [
     { name = "aiofiles" },
     { name = "fastapi" },
+    { name = "prometheus-client" },
     { name = "quantx-application" },
     { name = "quantx-contracts" },
     { name = "quantx-infrastructure" },
@@ -3140,6 +3141,7 @@ dependencies = [
 requires-dist = [
     { name = "aiofiles" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "prometheus-client" },
     { name = "quantx-application", editable = "packages/application" },
     { name = "quantx-contracts", editable = "packages/contracts" },
     { name = "quantx-infrastructure", editable = "packages/infrastructure" },

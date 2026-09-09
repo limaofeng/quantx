@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
-from quantx_api import agent_api, market_gateway, runtime_status
+from quantx_api import runtime_status
 from quantx_contracts.market_health import MarketGatewayHealth, MarketHealthReason
 from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamFreshnessLease,
@@ -15,6 +15,8 @@ from quantx_infrastructure.services.market_stream_readiness import (
   MarketStreamReadinessStatus,
   classify_authoritative_market_stream_readiness,
 )
+from quantx_market_data import agent_stream as agent_api
+from quantx_market_data import gateway as market_gateway
 
 
 @pytest.fixture

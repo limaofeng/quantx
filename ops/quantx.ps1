@@ -1732,7 +1732,7 @@ function Invoke-Up {
         "--state-dir", $StateDirectory,
         "--",
         $python,
-        "-m", "uvicorn", "quantx_api.market_gateway:app",
+        "-m", "uvicorn", "quantx_market_data.gateway:app",
         "--host", "127.0.0.1",
         "--port", [string]$MarketGatewayPort,
         "--ws-max-size", "67108864",

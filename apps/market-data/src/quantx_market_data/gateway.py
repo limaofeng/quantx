@@ -21,8 +21,8 @@ from quantx_infrastructure.core.data.market_stream_transport import (
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.services.trading_time_service import TradingTimeService
 
-from quantx_api.agent_api import active_market_stream_id, market_agent_router
-from quantx_api.development_market_api import router as development_market_router
+from .agent_stream import active_market_stream_id, market_agent_router
+from .development_stream import router as development_market_router
 
 _trading_time = TradingTimeService()
 
@@ -30,7 +30,9 @@ _trading_time = TradingTimeService()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
   bridge = None
-  if os.environ.get("ENV") == "development" and os.environ.get("QUANTX_MARKET_DATA_URL"):
+  if os.environ.get("ENV") == "development" and os.environ.get(
+    "QUANTX_MARKET_DATA_URL"
+  ):
     from quantx_infrastructure.services.development_market_bridge import run_bridge
 
     bridge = asyncio.create_task(run_bridge())
@@ -72,10 +74,16 @@ async def health_ready() -> JSONResponse:
 async def market_supply_health() -> MarketGatewayHealth:
   """Read bounded upstream facts; never ask Engine or account readiness."""
   stream_id = active_market_stream_id()
-  remote_development = os.environ.get("ENV") == "development" and bool(os.environ.get("QUANTX_MARKET_DATA_URL"))
+  remote_development = os.environ.get("ENV") == "development" and bool(
+    os.environ.get("QUANTX_MARKET_DATA_URL")
+  )
   if remote_development:
     remote_state = await market_stream_store.state()
-    stream_id = remote_state.stream_id if remote_state and remote_state.status != "OFFLINE" else ""
+    stream_id = (
+      remote_state.stream_id
+      if remote_state and remote_state.status != "OFFLINE"
+      else ""
+    )
   values = {
     "component": "market-gateway",
     "protocol": "quantx.market.v2",
@@ -153,11 +161,27 @@ async def development_data_health(request: Request) -> JSONResponse:
   from sqlalchemy import text
 
   async with AsyncSessionLocal() as db:
-    counts = dict((await db.execute(text("SELECT state,count(*) FROM development_data_export GROUP BY state"))).all())
+    counts = dict(
+      (
+        await db.execute(
+          text("SELECT state,count(*) FROM development_data_export GROUP BY state")
+        )
+      ).all()
+    )
   healthy = not counts.get("INCOMPLETE", 0)
-  if os.environ.get("ENV") == "development" and os.environ.get("QUANTX_MARKET_DATA_URL"):
+  if os.environ.get("ENV") == "development" and os.environ.get(
+    "QUANTX_MARKET_DATA_URL"
+  ):
     state, lease = await market_stream_store.state_with_freshness()
-    healthy = healthy and bool(state and state.status == "READY" and lease and lease.stream_id == state.stream_id and lease.sequence == state.sequence)
-  return JSONResponse(status_code=200 if healthy else 503,
+    healthy = healthy and bool(
+      state
+      and state.status == "READY"
+      and lease
+      and lease.stream_id == state.stream_id
+      and lease.sequence == state.sequence
+    )
+  return JSONResponse(
+    status_code=200 if healthy else 503,
     content={"status": "healthy" if healthy else "degraded", "partitions": counts},
-    headers={"Cache-Control": "no-store"})
+    headers={"Cache-Control": "no-store"},
+  )

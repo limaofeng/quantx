@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from quantx_api import development_market_api as api
-from quantx_api.development_market_api import authorized, router
 from quantx_contracts import MarketBatchKind, MarketStreamBatch
+from quantx_market_data import development_stream as api
+from quantx_market_data.development_access import authorized
+from quantx_market_data.development_history import router as history_router
+from quantx_market_data.development_stream import router
 from starlette.websockets import WebSocketDisconnect
 
 
@@ -27,6 +29,7 @@ def test_history_requires_credential_without_touching_storage(monkeypatch):
   monkeypatch.setenv("QUANTX_MARKET_DATA_TOKEN", "a" * 32)
   app = FastAPI()
   app.include_router(router)
+  app.include_router(history_router)
   with TestClient(app) as client:
     assert client.get("/market-data/v1/history/unknown").status_code == 403
 
@@ -64,6 +67,7 @@ def test_snapshot_preserves_capture_time_and_gap_forces_resync(monkeypatch):
   )
   app = FastAPI()
   app.include_router(router)
+  app.include_router(history_router)
   with TestClient(app) as client:
     with client.websocket_connect("/market-data/v1/stream") as socket:
       socket.send_json({"instruments": ["600000.SH"]})

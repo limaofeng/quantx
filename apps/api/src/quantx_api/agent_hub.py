@@ -21,11 +21,14 @@ from quantx_infrastructure.services.agent_session_guard import (
   QMT_CONTROL_SESSION_REPLACED,
   QMT_DEVICE_REVOKED,
 )
+from quantx_infrastructure.services.market_lease_reader import (
+  MARKET_DEVICE_LEASE_KEY,
+  MarketLeaseReader,
+)
 
 from quantx_api.api_runtime import API_INSTANCE_ID, API_STARTED_AT
 
 logger = logging.getLogger(__name__)
-MARKET_DEVICE_LEASE_KEY = "agent:market-device:v2"
 MARKET_DEVICE_LEASE_TTL_SECONDS = 30
 MARKET_DEVICE_LEASE_REFRESH_SECONDS = 10
 _MARKET_LEASE_UPDATE_SCRIPT = """
@@ -61,13 +64,6 @@ return 1
 """
 
 
-@dataclass(frozen=True)
-class MarketSessionLease:
-  device_id: str
-  api_instance_id: str
-  agent_session_id: str
-
-
 @dataclass
 class AgentControlSession:
   device_id: str
@@ -100,7 +96,7 @@ class AgentControlHealthSnapshot:
   dependency_reason: str
 
 
-class AgentConnectionHub:
+class AgentConnectionHub(MarketLeaseReader):
   def __init__(
     self,
     *,
@@ -372,27 +368,6 @@ class AgentConnectionHub:
       await self._publish_market_lease(selected)
       return True
 
-  async def market_lease(self, device_id: str) -> MarketSessionLease | None:
-    redis = await redis_pubsub.get_redis()
-    raw = await redis.get(MARKET_DEVICE_LEASE_KEY)
-    if not raw:
-      return None
-    try:
-      lease = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-      return None
-    parsed = MarketSessionLease(
-      device_id=str(lease.get("device_id") or ""),
-      api_instance_id=str(lease.get("api_instance_id") or ""),
-      agent_session_id=str(lease.get("agent_session_id") or ""),
-    )
-    if (
-      parsed.device_id != device_id
-      or not parsed.api_instance_id
-      or not parsed.agent_session_id
-    ):
-      return None
-    return parsed
 
   async def market_lease_diagnostic(self, device_id: str) -> dict[str, Any]:
     """Explain why one control session has or has not received the lease."""
@@ -455,9 +430,6 @@ class AgentConnectionHub:
   async def is_market_device(self, device_id: str) -> bool:
     return await self.market_lease(device_id) is not None
 
-  async def is_market_session(self, lease: MarketSessionLease) -> bool:
-    current = await self.market_lease(lease.device_id)
-    return current == lease
 
   async def refresh_market_device(
     self,
