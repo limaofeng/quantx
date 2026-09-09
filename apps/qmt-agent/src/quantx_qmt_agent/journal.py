@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from quantx_contracts.collection_permit import CollectionPermit, CollectionUnit
+from quantx_contracts.history_upload import HistoryUploadSnapshot
 
 
 def payload_hash(payload: dict[str, Any]) -> str:
@@ -78,6 +79,14 @@ class LocalJournal:
           unit_id TEXT PRIMARY KEY,
           permit_id TEXT NOT NULL UNIQUE,
           started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS history_upload_retirements (
+          device_id TEXT NOT NULL,
+          request_id TEXT NOT NULL,
+          request_sha256 TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          retired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(device_id,request_id)
         );
         CREATE TABLE IF NOT EXISTS journal_metadata (
           key TEXT PRIMARY KEY,
@@ -173,6 +182,47 @@ class LocalJournal:
     self._load_count_cache()
     self._size_bytes = self._read_size_bytes()
 
+  def history_upload_retired(self, device_id: str, request_id: str) -> bool:
+    with self.lock:
+      return self.connection.execute(
+        "SELECT 1 FROM history_upload_retirements WHERE device_id=? AND request_id=?",
+        (device_id, request_id),
+      ).fetchone() is not None
+
+  def retire_history_upload(self, *, device_id: str, request_sha256: str, snapshot, now=None):
+    snapshot = HistoryUploadSnapshot.model_validate(snapshot.model_dump(mode="json"))
+    current = now or datetime.now(timezone.utc)
+    if snapshot.verified_at is None or current - snapshot.verified_at < timedelta(hours=24):
+      raise ValueError("history retirement requires verified ingestion and retention")
+    encoded = json.dumps(snapshot.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    with self.lock, self.connection:
+      self.connection.execute("BEGIN IMMEDIATE")
+      existing = self.connection.execute(
+        "SELECT request_sha256,evidence_json FROM history_upload_retirements WHERE device_id=? AND request_id=?",
+        (device_id, str(snapshot.request_id)),
+      ).fetchone()
+      if existing is not None:
+        if existing["request_sha256"] != request_sha256 or existing["evidence_json"] != encoded:
+          raise ValueError("history retirement evidence conflict")
+        return
+      self.connection.execute(
+        "INSERT INTO history_upload_retirements(device_id,request_id,request_sha256,evidence_json) VALUES (?,?,?,?)",
+        (device_id, str(snapshot.request_id), request_sha256, encoded),
+      )
+      scope = (device_id, str(snapshot.request_id))
+      # Keep one compact retirement proof instead of an unbounded set of native
+      # receipts in the trading journal. The tombstone still forbids recollection.
+      self.connection.execute(
+        "DELETE FROM history_collection_executions WHERE permit_id IN "
+        "(SELECT permit_id FROM history_collection_receipts WHERE device_id=? AND request_id=?)", scope,
+      )
+      self.connection.execute(
+        "DELETE FROM history_collection_artifacts WHERE permit_id IN "
+        "(SELECT permit_id FROM history_collection_receipts WHERE device_id=? AND request_id=?)", scope,
+      )
+      self.connection.execute("DELETE FROM history_collection_receipts WHERE device_id=? AND request_id=?", scope)
+    self._refresh_size_cache()
+
   def accept_collection_permit(
     self,
     permit: CollectionPermit,
@@ -194,6 +244,8 @@ class LocalJournal:
     with self.lock, self.connection:
       # Serialize read/check/write across journal connections as well as threads.
       self.connection.execute("BEGIN IMMEDIATE")
+      if self.history_upload_retired(device, str(unit.request_id)):
+        raise ValueError("history request has been retired")
       epoch_row = self.connection.execute(
         "SELECT value FROM journal_metadata WHERE key=?", (epoch_key,)
       ).fetchone()
@@ -278,6 +330,8 @@ class LocalJournal:
     """
     with self.lock, self.connection:
       self.connection.execute("BEGIN IMMEDIATE")
+      if self.history_upload_retired(device_id, str(permit.unit.request_id)):
+        raise ValueError("history request has been retired")
       row = self.connection.execute(
         "SELECT permit_sha256 FROM history_collection_receipts WHERE permit_id=?",
         (str(permit.permit_id),),

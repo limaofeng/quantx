@@ -144,6 +144,7 @@ def test_frozen_upload_acceptance_survives_restart_and_does_not_delete_units(job
 
   jobs, retained, _, _ = job
   snapshot = HistoryUploadSnapshot(
+    verified_at=None,
     request_id=retained.request.request_id,
     status="UPLOADED",
     total_chunks=1,

@@ -81,6 +81,10 @@ class CollectionExecution:
       raise ValueError("unexpected collection permit state")
     # The same process-wide native lock must be shared by every history caller.
     async with self.native_lock:
+      if self.journal.history_upload_retired(
+        self.device_id, str(permit.unit.request_id)
+      ):
+        raise ValueError("history request has been retired")
       if server_state == "STARTED" and not self.journal.collection_permit_received(
         permit
       ):

@@ -3,7 +3,7 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 class HistoryUploadAcknowledgement(BaseModel):
@@ -30,6 +30,7 @@ class HistoryUploadChunk(BaseModel):
 class HistoryUploadSnapshot(BaseModel):
   model_config = ConfigDict(extra="forbid", frozen=True)
   request_id: UUID
+  verified_at: AwareDatetime | None
   status: Literal[
     "QUEUED",
     "DELIVERED",
@@ -51,6 +52,8 @@ class HistoryUploadSnapshot(BaseModel):
 
   @model_validator(mode="after")
   def consistent_manifest(self):
+    if self.verified_at is not None and self.status != "COMPLETED":
+      raise ValueError("history verification requires completed ingestion")
     indices = [chunk.index for chunk in self.chunks]
     if indices != sorted(set(indices)):
       raise ValueError("history upload chunk indices are not unique and ordered")

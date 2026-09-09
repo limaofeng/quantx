@@ -158,3 +158,59 @@ async def test_upload_snapshot_is_scoped_read_only_and_excludes_storage_paths(
     with pytest.raises(HTTPException) as rejected:
       await api.get_market_data_upload(UUID(REQUEST_ID), request)
     assert rejected.value.status_code == 404
+
+
+async def test_verification_requires_durable_phase_and_no_native_permit(
+  tmp_path, monkeypatch
+):
+  from datetime import timedelta
+  from types import SimpleNamespace
+  from uuid import UUID
+
+  from sqlalchemy import text
+
+  async with _market_data_database() as (engine, sessions):
+    async with engine.begin() as connection:
+      await connection.execute(
+        text("CREATE TABLE market_data_collection_permit (request_id TEXT, state TEXT)")
+      )
+    _configure_api(monkeypatch, sessions, tmp_path)
+    await _seed_dispatch_request(
+      sessions,
+      request_id=REQUEST_ID,
+      status="DELIVERED",
+      now=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    await _upload(b"compressed-test-bytes", total_chunks=1)
+    request = SimpleNamespace(headers={"authorization": "Bearer agent-token"})
+    async with sessions() as db:
+      row = await db.get(MarketDataRequest, REQUEST_ID)
+      row.status = "COMPLETED"
+      row.completed_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        hours=25
+      )
+      row.ingestion_result = {}
+      row.ingestion_progress = {"phase": "WRITE"}
+      await db.commit()
+    assert (
+      await api.get_market_data_upload(UUID(REQUEST_ID), request)
+    ).verified_at is None
+    async with sessions() as db:
+      row = await db.get(MarketDataRequest, REQUEST_ID)
+      row.ingestion_progress = {"phase": "VERIFIED"}
+      await db.execute(
+        text("INSERT INTO market_data_collection_permit VALUES (:request, 'STARTED')"),
+        {"request": REQUEST_ID},
+      )
+      await db.commit()
+    assert (
+      await api.get_market_data_upload(UUID(REQUEST_ID), request)
+    ).verified_at is None
+    async with sessions() as db:
+      await db.execute(
+        text("UPDATE market_data_collection_permit SET state='FINISHED'")
+      )
+      await db.commit()
+    snapshot = await api.get_market_data_upload(UUID(REQUEST_ID), request)
+    assert snapshot.verified_at is not None
+    assert snapshot.verified_at.tzinfo is not None

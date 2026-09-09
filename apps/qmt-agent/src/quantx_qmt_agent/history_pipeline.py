@@ -7,6 +7,7 @@ blocking disk/native operation is joined before cancelling its owning handler.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from quantx_contracts.history_session import (
@@ -47,6 +48,10 @@ class HistoryPipeline:
     )
 
   def _retain(self, message):
+    if self.runtime.journal.history_upload_retired(
+      self.runtime.configuration.device_id, str(message.request_id)
+    ):
+      raise ValueError("history request has been retired")
     budget = self._budget()
     return self.jobs.retain(message, reserve=budget.reserve, release=budget.release)
 
@@ -71,11 +76,22 @@ class HistoryPipeline:
         async with self.runtime._historical_worker_lock:
           if request_id in self.active:
             continue
+          if str(request_id) in getattr(
+            self.runtime, "_market_upload_tasks", {}
+          ) or str(request_id) in getattr(self.runtime, "_market_upload_cache", {}):
+            continue
+          if await join_history_thread(
+            self.runtime.journal.history_upload_retired,
+            self.runtime.configuration.device_id,
+            str(request_id),
+          ):
+            await join_history_thread(
+              self.runtime._remove_retired_history_files, request_id
+            )
+            results[str(request_id)] = "RETIRED"
+            continue
           job = await join_history_thread(self.jobs.load, request_id)
           accepted = await join_history_thread(self.jobs.upload_acceptance, job)
-        if accepted is not None:
-          results[str(request_id)] = "UPLOAD_ACCEPTED"
-          continue
         snapshot = await self._upload_snapshot(str(request_id))
         if not snapshot.frozen:
           results[str(request_id)] = "WAITING_HISTORY_SESSION"
@@ -83,11 +99,25 @@ class HistoryPipeline:
         async with self.runtime._historical_worker_lock:
           if request_id in self.active:
             continue
-          prepared = await join_history_thread(
-            self.runtime._read_retained_history_upload, job
-          )
-          self._matching_chunks(snapshot, prepared)
-          await join_history_thread(self._record_acceptance, job, snapshot)
+          if accepted is None:
+            prepared = await join_history_thread(
+              self.runtime._read_retained_history_upload, job
+            )
+            self._matching_chunks(snapshot, prepared)
+            await join_history_thread(self._record_acceptance, job, snapshot)
+          elif (
+            accepted.chunks != snapshot.chunks
+            or accepted.total_chunks != snapshot.total_chunks
+          ):
+            raise ValueError("history accepted manifest changed before retirement")
+          if snapshot.verified_at is not None and datetime.now(
+            timezone.utc
+          ) - snapshot.verified_at >= timedelta(hours=24):
+            await join_history_thread(
+              self.runtime._retire_history_job_sync, job, snapshot
+            )
+            results[str(request_id)] = "RETIRED"
+            continue
         results[str(request_id)] = "UPLOAD_ACCEPTED"
       except httpx.HTTPStatusError as exc:
         if exc.response.status_code not in {404, 409}:

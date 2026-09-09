@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from quantx_contracts.history_upload import HistoryUploadChunk, HistoryUploadSnapshot
@@ -33,7 +34,7 @@ from quantx_infrastructure.services.market_data_capacity import (
 from quantx_infrastructure.services.market_data_capacity import (
   staging_usage_bytes as _market_data_staging_usage_bytes,
 )
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 logger = logging.getLogger(__name__)
 agent_router = APIRouter(tags=["qmt-history-upload"])
@@ -255,7 +256,27 @@ async def get_market_data_upload(request_id: uuid.UUID, request: Request):
       .scalars()
       .all()
     )
+    verified_at = None
+    if (
+      row.status == "COMPLETED"
+      and row.completed_at is not None
+      and isinstance(row.ingestion_progress, dict)
+      and row.ingestion_progress.get("phase") == "VERIFIED"
+      and isinstance(row.ingestion_result, dict)
+    ):
+      native_pending = await db.scalar(
+        text("""
+        SELECT EXISTS(SELECT 1 FROM market_data_collection_permit
+          WHERE request_id=:request_id AND state IN ('ISSUED','STARTED'))
+      """),
+        {"request_id": str(request_id)},
+      )
+      if not native_pending:
+        verified_at = row.completed_at
+        if verified_at.tzinfo is None:
+          verified_at = verified_at.replace(tzinfo=timezone.utc)
     return HistoryUploadSnapshot(
+      verified_at=verified_at,
       request_id=request_id,
       status=row.status,
       total_chunks=row.expected_chunks,

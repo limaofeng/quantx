@@ -73,6 +73,7 @@ async def test_retained_request_to_native_file_and_http_upload(
           "status": "UPLOADED" if frozen else "RECEIVING",
           "total_chunks": len(uploaded) if frozen else None,
           "chunks": uploaded,
+          "verified_at": None,
         },
       )
     if message.url.path.endswith("/receipts"):
@@ -194,6 +195,7 @@ def test_upload_snapshot_cannot_skip_different_local_bytes():
   from quantx_qmt_agent.history_pipeline import HistoryPipeline
 
   snapshot = HistoryUploadSnapshot(
+    verified_at=None,
     request_id=uuid4(),
     status="RECEIVING",
     total_chunks=None,

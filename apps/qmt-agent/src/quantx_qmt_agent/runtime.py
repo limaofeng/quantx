@@ -6041,6 +6041,21 @@ class AgentRuntime:
       expected_fingerprint=_market_data_payload_fingerprint(job.request.payload),
     )[0]
 
+  def _retire_history_job_sync(self, job, snapshot):
+    from .journal import payload_hash
+
+    self.journal.retire_history_upload(
+      device_id=self.configuration.device_id,
+      request_sha256=payload_hash({"request_id": str(job.request.request_id), "payload": job.request.payload}),
+      snapshot=snapshot,
+    )
+    self._remove_retired_history_files(job.request.request_id)
+
+  def _remove_retired_history_files(self, request_id):
+    from .history_retirement import remove_retired_history_files
+
+    remove_retired_history_files(self, request_id)
+
   def _prepare_history_job_sync(self, job, artifacts):
     """Build/recover upload bytes without entering a broker or recapturing data."""
     if not self._historical_worker_lock.locked():
