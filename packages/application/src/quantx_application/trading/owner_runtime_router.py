@@ -33,6 +33,7 @@ OWNER_ENVIRONMENT_CONFLICT = "OWNER_ENVIRONMENT_CONFLICT"
 _REGISTERABLE_RUNTIME_OWNER_TYPES = frozenset(
   {
     ExecutionOwnerType.STRATEGY_RUN,
+    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
     ExecutionOwnerType.EXIT_PLAN,
     ExecutionOwnerType.MANUAL_COMMAND,
   }

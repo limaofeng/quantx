@@ -374,3 +374,57 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
       )
     ) == {}
     assert await db.scalar(select(func.count()).select_from(PendingTradeOrder)) == 1
+
+  from quantx_contracts.agent import PROTOCOL_VERSION
+  from quantx_engine import report_processor
+  from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
+
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(
+    report_processor, "utcnow", lambda: confirmed.replace(tzinfo=None)
+  )
+  report = AgentReportInbox(
+    message_id="synthetic-fill",
+    device_id="synthetic",
+    message_type="execution_report",
+    protocol_version=PROTOCOL_VERSION,
+    raw_payload_hash="f" * 64,
+    business_idempotency_key="synthetic-fill",
+    payload={
+      "client_order_id": pending.client_order_id,
+      "account_id": "account-1",
+      "stock_code": "600000.SH",
+      "order_id": "broker-1",
+      "traded_id": "fill-1",
+      "traded_volume": 100,
+      "traded_price": 9.9,
+      "traded_time": confirmed.isoformat(),
+    },
+  )
+  await report_processor._stage_runtime_events(report)
+  async with sessions() as db:
+    event = await db.scalar(select(StrategyRuntimeEvent))
+    assert event is not None
+    intent = await db.get(TradeIntentRecord, "intent-0")
+    assert intent.executed_volume == 100
+    source = await db.get(TAssistantExecutionRecord, "live-fixture")
+    source.status = "STOPPED"
+    source.completed_at = confirmed
+    source.entry_readiness = "BLOCKED"
+    await db.commit()
+  await report_processor._apply_runtime_event(event)
+  await report_processor._apply_runtime_event(event)
+  async with sessions() as db:
+    plans = list(await db.scalars(select(AutoExitPlanRecord)))
+    assert len(plans) == 1
+    assert plans[0].plan_state["entry_filled_volume"] == 100
+    assert plans[0].source_execution_owner_id == "live-fixture"
+
+  event.payload = {
+    **event.payload,
+    "report": {**event.payload["report"], "stock_code": "000001.SZ"},
+  }
+  with pytest.raises(
+    report_processor.OwnerRuntimeRoutingError, match="OWNER_TARGET_CONFLICT"
+  ):
+    await report_processor._apply_runtime_event(event)

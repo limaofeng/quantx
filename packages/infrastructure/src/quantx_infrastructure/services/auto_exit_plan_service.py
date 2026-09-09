@@ -3169,8 +3169,8 @@ class AutoExitPlanService:
       if template.run_id != execution_ref.owner_id:
         raise ValueError("退出计划不属于当前策略运行")
     elif execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
-      if environment is not ExecutionEnvironment.PAPER or template.run_id:
-        raise ValueError("independent T exit requires PAPER and empty run_id")
+      if environment not in {ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE} or template.run_id:
+        raise ValueError("independent T exit requires PAPER/LIVE and empty run_id")
       metadata = dict(template.metadata)
       source_material = {
         "source_execution_owner_type": execution_ref.owner_type.value,

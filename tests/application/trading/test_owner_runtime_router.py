@@ -124,7 +124,6 @@ def test_registry_rejects_invalid_and_duplicate_handlers():
 @pytest.mark.parametrize(
   "owner_type",
   (
-    ExecutionOwnerType.T_ASSISTANT_EXECUTION,
     ExecutionOwnerType.ENTRY_PLAN,
     ExecutionOwnerType.BOARD_ASSISTANT_EXECUTION,
   ),

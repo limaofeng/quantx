@@ -850,8 +850,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   58 项受影响回归通过，证据 `.codex_screenshots/p6-live-admission-regression.log`。
   此组合使用合成初始候选、已消费 challenge、账户与行情，并替换时钟、平台及设备边界；
   不替换 Gate、审查、账户容量、确认、分配、admission 或命令持久化。未发送券商命令。
+- LIVE 回报处理器已注册：应用 registry 与 Engine 均接入独立 T handler，以持久化
+  Pending/Correlation/intent/batch 归属为准，仅接收 LIVE ENTRY 回报，不以来源 RUNNING
+  作为已有成交的处理条件。TRADE 调用公共退出计划登记，稳定成交键去重，附带已消费
+  确认上下文供退出授权推导；公共独立 T 退出模板支持 PAPER/LIVE 且保持 run_id 为空。
+  隔离链扩展到真实 runtime-event staging→意图/批次投影→handler→退出计划：停止来源
+  可处理已有成交，两次应用数量仍为 100，错误标的回报拒绝。40 项相关回归通过，证据
+  `.codex_screenshots/p6-live-receipt-regression.log`。仍使用合成回报直接调用 staging，
+  未覆盖 ingress/inbox drain、成交表入账及后续新快照；不据此宣称自动退出授权已生效。
 - 剩余开发顺序：
-  补齐 LIVE 隔离回报链与命令重试→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 回报入账/退出授权与命令重试→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

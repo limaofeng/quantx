@@ -5195,6 +5195,86 @@ class _ExitPlanRuntimeHandler:
     # idempotency boundary for this owner route.
 
 
+class _TAssistantRuntimeHandler:
+  """Converge owned broker fills even after the source has stopped."""
+
+  def __init__(self, db):
+    self._db = db
+
+  async def resolve(self, execution_ref):
+    from quantx_infrastructure.models.t_assistant_execution import (
+      TAssistantExecutionRecord,
+    )
+
+    source = await self._db.get(TAssistantExecutionRecord, execution_ref.owner_id)
+    if source is None:
+      return None
+    if source.environment != "LIVE":
+      raise OwnerRuntimeRoutingError(OWNER_ENVIRONMENT_CONFLICT)
+    return OwnerRuntimeTarget(execution_ref, ExecutionEnvironment.LIVE)
+
+  async def apply(self, target, event):
+    from quantx_domain.trading.exit_plan import ExitPlanTemplate
+    from quantx_infrastructure.models.t_assistant_execution import (
+      TAssistantExecutionEventRecord,
+      TAssistantExecutionRecord,
+    )
+
+    pending, correlation = await _exact_runtime_order_binding(self._db, target=target, event=event)
+    source = await self._db.get(TAssistantExecutionRecord, target.execution_ref.owner_id)
+    intent = await self._db.get(TradeIntentRecord, correlation.intent_id)
+    batch = await self._db.get(TTradeBatch, correlation.batch_id)
+    owner = (target.execution_ref.owner_type.value, target.execution_ref.owner_id, "LIVE")
+    if (
+      source is None or source.account_id != pending.account_id or intent is None or batch is None
+      or pending.side != "BUY" or pending.t_trade_role != "ENTRY"
+      or correlation.t_trade_role != "ENTRY" or correlation.batch_id != pending.batch_id
+      or _durable_owner_triple(batch) != owner or batch.account_id != pending.account_id
+      or batch.instrument_code != pending.instrument_code or batch.entry_intent_id != intent.id
+      or any(row.strategy_run_id for row in (pending, correlation, batch, intent))
+    ):
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    report = _runtime_event_report(event)
+    reported_side = str(report.get("side") or report.get("order_type") or "").upper()
+    if reported_side and reported_side not in {"BUY", "23", "ORDER_BUY"}:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    if event.event_kind is OwnerRuntimeEventKind.ORDER:
+      if not _normalized_order_status(report.get("effective_order_status") or report.get("status") or report.get("order_status")):
+        raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+      return
+    if event.event_kind is not OwnerRuntimeEventKind.TRADE:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT)
+    metadata = dict(intent.intent_metadata or {})
+    try:
+      template = ExitPlanTemplate.from_dict(metadata["exit_plan_template"])
+      volume = report.get("traded_volume", report.get("volume"))
+      price = float(report.get("traded_price", report.get("price")))
+      traded_at = _strict_t_trade_report_time(report.get("traded_time") or report.get("trade_time"))
+      trade_id = str(report.get("execution_id") or report.get("traded_id") or report.get("trade_id") or "").strip()
+      if (type(volume) is not int or volume <= 0 or not trade_id or traded_at is None
+        or template.source_type != "T_TRADE_BATCH" or template.source_id != batch.batch_id
+        or template.account_id != pending.account_id or template.instrument_code != pending.instrument_code
+        or template.bucket != pending.bucket or template.run_id
+        or int(intent.executed_volume or 0) < volume):
+        raise ValueError("invalid entry fill")
+    except (KeyError, TypeError, ValueError) as exc:
+      raise OwnerRuntimeRoutingError(OWNER_TARGET_CONFLICT) from exc
+    confirmation = await self._db.scalar(select(TAssistantExecutionEventRecord).where(
+      TAssistantExecutionEventRecord.execution_id == source.execution_id,
+      TAssistantExecutionEventRecord.event_key == f"live-entry-confirmed:{intent.id}",
+    ))
+    context = None
+    if confirmation is not None and confirmation.event_type == "LIVE_ENTRY_CONFIRMED":
+      context = {"entry_intent_id": intent.id, "challenge_id": confirmation.payload.get("challenge_id"),
+        "cumulative_filled_volume": int(intent.executed_volume or 0)}
+    await AutoExitPlanService().register_execution_entry_fill(
+      execution_ref=target.execution_ref, environment=target.environment,
+      exit_plan_template=template.to_dict(), volume=volume, price=price, trade_time=traded_at,
+      event_business_key=f"t-live-fill:{pending.account_id}:{pending.client_order_id}:{trade_id}",
+      entry_authorization=context, db=self._db, commit=False,
+    )
+
+
 class _ManualCommandRuntimeHandler:
   """Consume manual-command report events after pending reconciliation."""
 
@@ -5568,6 +5648,7 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
       ExecutionOwnerType.STRATEGY_RUN,
       _StrategyRunRuntimeHandler(strategy_manager.executor, db),
     )
+    registry.register(ExecutionOwnerType.T_ASSISTANT_EXECUTION, _TAssistantRuntimeHandler(db))
     registry.register(
       ExecutionOwnerType.EXIT_PLAN,
       _ExitPlanRuntimeHandler(db),
