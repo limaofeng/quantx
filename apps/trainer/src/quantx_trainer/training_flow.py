@@ -1078,9 +1078,13 @@ async def stock_selection_training_capability_flow(config_path: str) -> dict[str
     await StockSelectionTrainingRepository(db).upsert_capability_heartbeat(
       status=status, details=details, now=observed
     )
+    from quantx_infrastructure.training_activity import read_training_activity
+
     from quantx_trainer.backend_status import write_backend_status
 
-    write_backend_status(current_config().state_root, Path(config_path), details, observed_at=observed.timestamp(), expected_config_sha256=config_digest)
+    activity = await read_training_activity(db)
+
+    write_backend_status(current_config().state_root, Path(config_path), details, activity, observed_at=observed.timestamp(), expected_config_sha256=config_digest)
     return details
 
 

@@ -10,8 +10,14 @@ from quantx_worker.prefector.flows import research_preparation_flow as preparati
 
 @pytest.mark.asyncio
 async def test_capability_flow_never_claims_jobs_and_does_not_refresh_failed_probe(
-  monkeypatch,
+  monkeypatch, tmp_path,
 ):
+  from quantx_infrastructure import training_activity
+
+  config = tmp_path / "config.toml"
+  config.write_text("fixture")
+  monkeypatch.setattr(training, "current_config", lambda: SimpleNamespace(state_root=tmp_path))
+  monkeypatch.setattr(training_activity, "read_training_activity", AsyncMock(return_value={"tasks": [], "truncated": False}))
   written = []
 
   @asynccontextmanager
@@ -32,13 +38,15 @@ async def test_capability_flow_never_claims_jobs_and_does_not_refresh_failed_pro
     "_probe_capability",
     lambda: {"cpu_available": True, "status": "GPU_UNAVAILABLE_BUILD"},
   )
-  await training.stock_selection_training_capability_flow.fn(config_path="test.toml")
+  await training.stock_selection_training_capability_flow.fn(config_path=str(config))
   assert len(written) == 1
   assert written[0]["details"]["cpu_available"] is True
+  snapshot = (tmp_path / "observations/backend.json").read_bytes()
   monkeypatch.setattr(training, "_probe_capability", lambda: {"probe_failed": True})
   with pytest.raises(RuntimeError):
-    await training.stock_selection_training_capability_flow.fn(config_path="test.toml")
+    await training.stock_selection_training_capability_flow.fn(config_path=str(config))
   assert len(written) == 1
+  assert (tmp_path / "observations/backend.json").read_bytes() == snapshot
 
 
 @pytest.mark.asyncio

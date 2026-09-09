@@ -113,7 +113,15 @@ def main(argv: list[str] | None = None) -> int:
     from quantx_trainer.service_status import service_status
 
     result = service_status(config.state_root, args.config)
-    result["backend"] = read_backend_status(config.state_root, args.config)
+    backend = read_backend_status(config.state_root, args.config)
+    activity = backend.pop("activity", None)
+    result["backend"] = backend
+    result["activity"] = {
+      key: value for key, value in backend.items() if key in {"state", "observed_at"}
+    }
+    if activity is not None:
+      result["activity"].update(activity)
+      result["activity"]["execution_state"] = "NOT_INSPECTED"
     try:
       result["admission"] = admission_status(config.state_root / "control")["admission"]
     except (OSError, ValueError, BundleTransferError):

@@ -1,4 +1,4 @@
-"""Offline display of the last successfully persisted capability heartbeat."""
+"""Offline display of persisted capability and bounded control-plane activity."""
 
 import hashlib
 import json
@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 
 from quantx_infrastructure.training_bundle_store import reject_links
+
+from quantx_trainer.run_log import redact_text
 
 STATUSES = {
   "CPU_AVAILABLE",
@@ -45,10 +47,60 @@ def _projection(details):
   }
 
 
+def _activity_projection(value):
+  if (
+    not isinstance(value, dict)
+    or type(value.get("truncated")) is not bool
+    or not isinstance(value.get("tasks"), list)
+    or len(value["tasks"]) > 50
+  ):
+    raise ValueError("TRAINER_ACTIVITY_EVIDENCE_INVALID")
+  tasks = []
+  seen = set()
+  for row in value["tasks"]:
+    category, kind = row["type"], row["kind"]
+    allowed = {
+      "TRAINING": {"DEVELOPMENT", "FINAL_EVALUATION"},
+      "PREPARATION": {"GPU", "CERTIFY"},
+    }
+    if (
+      category not in allowed
+      or kind not in allowed[category]
+      or row["status"] not in {"RUNNING", "QUEUED"}
+    ):
+      raise ValueError("TRAINER_ACTIVITY_EVIDENCE_INVALID")
+    if (
+      not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", row["id"])
+      or not isinstance(row["phase"], str)
+      or len(row["phase"]) > 512
+    ):
+      raise ValueError("TRAINER_ACTIVITY_EVIDENCE_INVALID")
+    key = category, row["id"]
+    if key in seen:
+      raise ValueError("TRAINER_ACTIVITY_EVIDENCE_INVALID")
+    seen.add(key)
+    for field in ("completed_units", "total_units"):
+      number = row[field]
+      if category == "TRAINING" and (
+        type(number) is not int or not 0 <= number <= 10**9
+      ):
+        raise ValueError("TRAINER_ACTIVITY_EVIDENCE_INVALID")
+      if category == "PREPARATION" and number is not None:
+        raise ValueError("TRAINER_ACTIVITY_EVIDENCE_INVALID")
+    task = {
+      key: row[key]
+      for key in ("type", "id", "kind", "status", "completed_units", "total_units")
+    }
+    task["phase"] = redact_text(row["phase"])[:64]
+    tasks.append(task)
+  return {"tasks": tasks, "truncated": value["truncated"]}
+
+
 def write_backend_status(
   state_root: Path,
   config_path: Path,
   details,
+  activity,
   *,
   observed_at: float,
   expected_config_sha256: str,
@@ -63,6 +115,7 @@ def write_backend_status(
     "observed_at": observed_at,
     "config_sha256": expected_config_sha256,
     "capability": _projection(details),
+    "activity": _activity_projection(activity),
   }
   root = state_root / "observations"
   reject_links(root)
@@ -86,7 +139,7 @@ def read_backend_status(state_root: Path, config_path: Path, *, now=None):
   try:
     reject_links(path)
     info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 8192:
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
       return unknown
     with path.open("rb") as stream:
       opened = os.fstat(stream.fileno())
@@ -96,8 +149,8 @@ def read_backend_status(state_root: Path, config_path: Path, *, now=None):
         1,
       ):
         return unknown
-      raw = stream.read(8193)
-    if len(raw) > 8192:
+      raw = stream.read(65537)
+    if len(raw) > 65536:
       return unknown
     value = json.loads(raw)
     observed = value["observed_at"]
@@ -110,11 +163,17 @@ def read_backend_status(state_root: Path, config_path: Path, *, now=None):
     ):
       return unknown
     capability = _projection(value["capability"])
+    activity = _activity_projection(value["activity"])
     age = (time.time() if now is None else now) - observed
     if not math.isfinite(age) or age < 0:
       return unknown
     if age > MAX_AGE_SECONDS:
       return {"state": "STALE", "observed_at": observed}
-    return {"state": "FRESH", "observed_at": observed, "capability": capability}
+    return {
+      "state": "FRESH",
+      "observed_at": observed,
+      "capability": capability,
+      "activity": activity,
+    }
   except Exception:
     return unknown

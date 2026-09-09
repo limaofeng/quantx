@@ -20,6 +20,7 @@ def test_backend_snapshot_is_bounded_fresh_and_config_bound(tmp_path):
       "environment_requirement_hash": "a" * 64,
       "password": "secret",
     },
+    activity={"tasks": [], "truncated": False},
     observed_at=100,
     expected_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
   )
@@ -48,6 +49,7 @@ def test_backend_snapshot_never_exposes_uncertain_evidence(tmp_path, fault):
     tmp_path,
     config,
     {"status": "CPU_AVAILABLE", "cpu_available": True},
+    activity={"tasks": [], "truncated": False},
     observed_at=100,
     expected_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
   )
@@ -55,7 +57,7 @@ def test_backend_snapshot_never_exposes_uncertain_evidence(tmp_path, fault):
   if fault == "json":
     path.write_text("private invalid content")
   elif fault == "oversize":
-    path.write_text("x" * 8193)
+    path.write_text("x" * 65537)
   elif fault == "status":
     value = json.loads(path.read_text())
     value["capability"]["status"] = "/private/path"
@@ -74,7 +76,14 @@ def test_backend_snapshot_never_exposes_uncertain_evidence(tmp_path, fault):
 async def test_capability_snapshot_only_follows_successful_database_write(
   tmp_path, monkeypatch, failed_commit
 ):
+  from quantx_infrastructure import training_activity
   from quantx_trainer import training_flow as module
+
+  monkeypatch.setattr(
+    training_activity,
+    "read_training_activity",
+    AsyncMock(return_value={"tasks": [], "truncated": False}),
+  )
 
   config = tmp_path / "config.toml"
   config.write_text("fixture")
@@ -123,7 +132,45 @@ def test_config_change_cannot_relabel_prior_observation(tmp_path):
       tmp_path,
       config,
       {"status": "CPU_AVAILABLE", "cpu_available": True},
+      activity={"tasks": [], "truncated": False},
       observed_at=100,
       expected_config_sha256=digest,
     )
   assert not (tmp_path / "observations").exists()
+
+
+def test_activity_free_text_is_redacted_and_progress_not_coerced(tmp_path):
+  config = tmp_path / "config.toml"
+  config.write_text("fixture")
+  row = {
+    "type": "PREPARATION",
+    "id": "prepare-1",
+    "kind": "GPU",
+    "status": "RUNNING",
+    "phase": "检查 /private/file password=secret",
+    "completed_units": None,
+    "total_units": None,
+  }
+  options = {
+    "observed_at": 100,
+    "expected_config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+  }
+  write_backend_status(
+    tmp_path,
+    config,
+    {"status": "CPU_AVAILABLE", "cpu_available": True},
+    {"tasks": [row], "truncated": False},
+    **options,
+  )
+  value = read_backend_status(tmp_path, config, now=110)
+  assert value["state"] == "FRESH"
+  assert "private" not in json.dumps(value) and "secret" not in json.dumps(value)
+  row.update(type="TRAINING", kind="DEVELOPMENT", completed_units=True, total_units=10)
+  with pytest.raises(ValueError, match="TRAINER_ACTIVITY_EVIDENCE_INVALID"):
+    write_backend_status(
+      tmp_path,
+      config,
+      {"status": "CPU_AVAILABLE", "cpu_available": True},
+      {"tasks": [row], "truncated": False},
+      **options,
+    )
