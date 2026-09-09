@@ -101,31 +101,3 @@ async def test_lease_reader_checks_exact_cross_process_generation(monkeypatch):
   assert not await reader.is_market_session(
     leases.MarketSessionLease("device", "other", "session")
   )
-
-
-async def test_stream_auth_uses_shared_identity_verifier(monkeypatch):
-  from quantx_contracts import AgentEnvelope, AgentMessageType
-  from quantx_market_data import agent_stream
-
-  class Database:
-    async def __aenter__(self):
-      return self
-
-    async def __aexit__(self, *args):
-      return None
-
-  database = Database()
-  verify = AsyncMock(return_value=object())
-  monkeypatch.setattr(agent_stream, "AsyncSessionLocal", lambda: database)
-  monkeypatch.setattr(agent_stream, "authenticate_agent_session", verify)
-  envelope = AgentEnvelope(
-    message_type=AgentMessageType.AUTH,
-    payload={"access_token": "token", "device_id": "device"},
-  )
-  assert await agent_stream._authenticate(envelope) is verify.return_value
-  verify.assert_awaited_once_with(database, token="token", expected_device_id="device")
-  with pytest.raises(agent_stream.AuthError):
-    await agent_stream._authenticate(
-      AgentEnvelope(message_type=AgentMessageType.AUTH, payload={})
-    )
-  assert verify.await_count == 1

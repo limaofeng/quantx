@@ -32,6 +32,7 @@ from quantx_contracts import (
 )
 from quantx_infrastructure.auth.agent_access import authenticate_agent_session
 from quantx_infrastructure.auth.errors import AuthError
+from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.data.market_stream_transport import (
   MarketStreamStore,
   market_stream_store,
@@ -120,6 +121,7 @@ async def _authenticate(envelope: AgentEnvelope):
   async with AsyncSessionLocal() as db:
     return await authenticate_agent_session(
       db,
+      settings,
       token=token,
       expected_device_id=device_id,
     )
