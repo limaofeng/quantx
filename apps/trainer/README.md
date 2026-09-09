@@ -29,6 +29,10 @@ Windows 独立训练代码目录中执行：
 
 该步骤只准备独立解释器，完整依赖、GPU 构建资格和常驻服务仍需部署验收。`up/down/status/logs -Component trainer` 已接入独立入口，必须显式传入 Trainer 配置和解释器；生产 `full` 生命周期不包含此环境。具体命令及状态语义见下文生命周期章节。
 
+外部依赖安装使用已核对摘要的导出清单，以及显式 `quantx-train` Python 的 `-I -m pip install --require-hashes --no-deps --no-build-isolation --only-binary=:all: --no-binary=jsonpath -r <requirements.txt>`。当前锁定的 `jsonpath==0.82.2` 仅提供源码包，仍须校验清单中的源码哈希；先安装带独立哈希清单的固定构建工具（Windows 已验证 setuptools 80.9.0、wheel 0.45.1），不让构建隔离隐式下载工具。六个工作区包 contracts/domain/application/infrastructure/research/trainer 从同一已核验代码目录使用 `--no-index --no-deps --no-build-isolation -e <包路径>` 安装，随后执行 `pip check` 并复核源码证据。
+
+安装子进程清除继承的 PIP/PYTHON/UV 参数覆盖，设置 `PIP_CONFIG_FILE` 为系统空设备，并将 PATH 限定为该 Conda 环境、其 Scripts/Library/bin 和 Windows 系统目录；不修改系统 PATH。Windows 曾因已有 NVM 路径无法解析而安装失败，精简安装进程 PATH 后通过。经 SSH 安装时保持会话并保存日志和退出结果；单独 `Start-Process` 的子进程可能随 SSH 会话结束退出，不能凭启动 PID 宣称安装仍在运行，也不能仅因连接中断就重启安装。
+
 GPU 构建探针同样在微型拟合前检查显存并使用准入线程预算。资格测试遇到主机门禁拒绝立即中止，CLI 和准备入口保留保护退出码 `75`，不把它转换为普通拟合失败后继续下一轮试验。
 
 ## 开发侧结果导入
