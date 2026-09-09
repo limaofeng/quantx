@@ -38,3 +38,12 @@ query IOSTAssistantLiveReleaseStatus($challengeId: String!) {
     reasonCode
   }
 }
+
+query IOSTAssistantLiveReleaseOperations($accountId: String!, $limit: Int!) {
+  tAssistantLiveReleaseOperations(accountId: $accountId, limit: $limit) {
+    challengeId
+    accountId
+    configVersionId
+    createdAt
+  }
+}

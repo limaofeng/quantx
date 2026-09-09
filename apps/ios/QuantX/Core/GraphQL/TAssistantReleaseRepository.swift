@@ -58,6 +58,13 @@ struct TAssistantReleaseReference: Equatable, Sendable {
     accountID = ticket.context.activeAccountID
   }
 
+  init(challengeID: String, context: TTradeControlRepositoryContext) {
+    self.challengeID = challengeID
+    userID = context.userID
+    deviceSessionID = context.deviceSessionID
+    accountID = context.activeAccountID
+  }
+
   func validate(context: TTradeControlRepositoryContext) throws {
     guard context.userID == userID, context.deviceSessionID == deviceSessionID,
       context.activeAccountID == accountID, context.authorizedAccountIDs == [accountID],
@@ -65,6 +72,13 @@ struct TAssistantReleaseReference: Equatable, Sendable {
       UUID(uuidString: challengeID) != nil
     else { throw TTradeControlError.contextChanged }
   }
+}
+
+struct TAssistantReleaseOperation: Equatable, Identifiable, Sendable {
+  let reference: TAssistantReleaseReference
+  let configVersionID: String
+  let createdAt: Date
+  var id: String { reference.challengeID }
 }
 
 struct TAssistantReleaseStatus: Equatable, Sendable {
@@ -111,6 +125,8 @@ struct TAssistantReleaseStatus: Equatable, Sendable {
 
 @MainActor
 protocol TAssistantReleaseLoading: AnyObject {
+  func recentOperations(context: TTradeControlRepositoryContext) async throws
+    -> [TAssistantReleaseOperation]
   func preview(_ draft: TAssistantReleaseDraft, context: TTradeControlRepositoryContext)
     async throws -> TAssistantReleaseTicket
   func confirm(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
@@ -125,6 +141,33 @@ final class TAssistantReleaseRepository: TAssistantReleaseLoading {
   private let noCache = RequestConfiguration(writeResultsToCache: false)
 
   init(client: ApolloClient) { self.client = client }
+
+  func recentOperations(context: TTradeControlRepositoryContext) async throws
+    -> [TAssistantReleaseOperation]
+  {
+    guard !context.userID.isEmpty, !context.deviceSessionID.isEmpty,
+      !context.activeAccountID.isEmpty, context.authorizedAccountIDs == [context.activeAccountID]
+    else { throw TTradeControlError.contextChanged }
+    let response = try await client.fetch(
+      query: QuantXAPI.IOSTAssistantLiveReleaseOperationsQuery(
+        accountId: context.activeAccountID, limit: 20),
+      cachePolicy: .networkOnly, requestConfiguration: noCache)
+    try ApolloReadOnlyResponseValidator.validate(response.errors)
+    guard let values = response.data?.tAssistantLiveReleaseOperations else {
+      throw TTradeControlError.invalidResponse
+    }
+    return try values.map { value in
+      guard value.accountId == context.activeAccountID, !value.configVersionId.isEmpty else {
+        throw TTradeControlError.contextChanged
+      }
+      let reference = TAssistantReleaseReference(challengeID: value.challengeId, context: context)
+      try reference.validate(context: context)
+      return TAssistantReleaseOperation(
+        reference: reference, configVersionID: value.configVersionId,
+        createdAt: try ReadOnlyModelValidator.requireDate(
+          value.createdAt, field: "release.createdAt"))
+    }
+  }
 
   func preview(_ draft: TAssistantReleaseDraft, context: TTradeControlRepositoryContext)
     async throws -> TAssistantReleaseTicket

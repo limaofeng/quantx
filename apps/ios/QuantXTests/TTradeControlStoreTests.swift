@@ -264,6 +264,19 @@ final class TTradeControlStoreTests: XCTestCase {
     XCTAssertNil(harness.store.releaseReference)
   }
 
+  func testNewStoreDiscoversAndRecoversWithoutCredentialOrBiometrics() async throws {
+    let release = TAssistantReleaseSpy()
+    let harness = await makeHarness(releaseRepository: release)
+    XCTAssertNil(harness.store.releaseReference)
+    try await harness.store.loadReleaseOperations()
+    let operation = try XCTUnwrap(harness.store.recentReleaseOperations.first)
+    try await harness.store.recoverReleaseOperation(operation)
+    XCTAssertNil(harness.store.releaseTicket)
+    XCTAssertEqual(harness.store.releaseStatus?.phase, .pending)
+    XCTAssertEqual(release.confirmCount, 0)
+    XCTAssertTrue(harness.authentication.reasons.isEmpty)
+  }
+
   func testReleaseStatusRejectsUnprovenSuccessAndUnknownPhase() {
     for phase in ["SUCCEEDED", "NEW_PHASE"] {
       XCTAssertThrowsError(try TAssistantReleaseStatus.validated(challengeID: "challenge",
@@ -569,6 +582,12 @@ private final class TAssistantReleaseSpy: TAssistantReleaseLoading {
     evaluationID: UUID().uuidString.lowercased(), reportHash: String(repeating: "b", count: 64),
     policyHash: String(repeating: "c", count: 64), windowStart: Date(),
     windowEnd: Date().addingTimeInterval(600))
+
+  func recentOperations(context: TTradeControlRepositoryContext) async throws -> [TAssistantReleaseOperation] {
+    [TAssistantReleaseOperation(reference: TAssistantReleaseReference(
+      challengeID: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa", context: context),
+      configVersionID: "target", createdAt: Date())]
+  }
 
   func preview(_ draft: TAssistantReleaseDraft, context: TTradeControlRepositoryContext)
     async throws -> TAssistantReleaseTicket {

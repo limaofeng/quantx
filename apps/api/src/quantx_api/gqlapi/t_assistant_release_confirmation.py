@@ -339,3 +339,47 @@ async def read_release_status(db, *, principal, challenge_id, now):
     "execution_id": execution.execution_id,
     "execution_status": execution.status,
   }
+
+
+async def list_release_operations(db, *, principal, account_id, limit=20):
+  """Recent device-owned references; confirmation credentials never leave this read path."""
+  from hmac import compare_digest
+
+  from sqlalchemy import select
+
+  _require_native_control_principal(principal, account_id)
+  current = await TTradeControlChallengeService._lock_current_principal(
+    db, principal, account_id
+  )
+  if type(limit) is not int or not 1 <= limit <= 50:
+    raise ValueError("LIVE_RELEASE_HISTORY_LIMIT_INVALID")
+  rows = await db.scalars(
+    select(TradeConfirmationChallenge)
+    .where(
+      TradeConfirmationChallenge.action == ACTION,
+      TradeConfirmationChallenge.account_id == account_id,
+      TradeConfirmationChallenge.user_id == current.user_id,
+      TradeConfirmationChallenge.device_session_id == current.device_session_id,
+    )
+    .order_by(
+      TradeConfirmationChallenge.created_at.desc(),
+      TradeConfirmationChallenge.id.desc(),
+    )
+    .limit(limit)
+  )
+  result = []
+  for row in rows:
+    request = normalize_release_request(row.payload)
+    if request["account_id"] != account_id or not compare_digest(
+      row.payload_fingerprint, signed_payload_fingerprint(request)
+    ):
+      raise ValueError("LIVE_RELEASE_HISTORY_EVIDENCE_CONFLICT")
+    result.append(
+      {
+        "challenge_id": row.id,
+        "account_id": account_id,
+        "config_version_id": request["config_version_id"],
+        "created_at": time_utils.to_shanghai(row.created_at, keep_tz=True),
+      }
+    )
+  return result

@@ -122,3 +122,12 @@ query Portfolio_TAssistantLiveReleaseStatus($challengeId: String!) {
     reasonCode
   }
 }
+
+query TAssistantLiveReleaseOperations($accountId: String!, $limit: Int!) {
+  tAssistantLiveReleaseOperations(accountId: $accountId, limit: $limit) {
+    challengeId
+    accountId
+    configVersionId
+    createdAt
+  }
+}

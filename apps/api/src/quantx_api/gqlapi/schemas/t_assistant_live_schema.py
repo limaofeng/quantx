@@ -19,6 +19,7 @@ from ..security import authorized_account_id, principal_from_context
 from ..t_assistant_release_confirmation import (
   consume_release_confirmation,
   issue_release_confirmation,
+  list_release_operations,
   read_release_status,
 )
 from ..trade_approval import (
@@ -74,6 +75,14 @@ class TAssistantReleaseResult:
 
 
 @strawberry.type
+class TAssistantReleaseOperation:
+  challenge_id: str
+  account_id: str
+  config_version_id: str
+  created_at: datetime
+
+
+@strawberry.type
 class TAssistantReleaseStatus:
   challenge_id: str
   status: str
@@ -108,6 +117,18 @@ class TAssistantLiveApprovalQueue:
 
 @strawberry.type
 class TAssistantLiveQuery:
+  @strawberry.field(description="当前原生设备最近的发布操作，不返回确认凭据")
+  async def t_assistant_live_release_operations(
+    self, info: strawberry.types.Info, account_id: str, limit: int = 20
+  ) -> list[TAssistantReleaseOperation]:
+    principal = principal_from_context(info.context)
+    async with AsyncSessionLocal() as db, db.begin():
+      values = await list_release_operations(
+        db, principal=principal, account_id=account_id, limit=limit
+      )
+    return [TAssistantReleaseOperation(**value) for value in values]
+
+
   @strawberry.field(
     description="读取原用户和设备的发布结果；成功必须具备持久化执行与审批证据"
   )

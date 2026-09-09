@@ -756,7 +756,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   控制页已接已有预览的证据核对/生物确认和发布状态卡片。只读引用与确认 token 分离，
   锁定清除 token，原设备解锁后可查询同一操作；换设备/退出清除引用。新增恢复单测后
   22 项通过，界面构建通过，证据 `p6-release-native-recovery-{test,build}.log`。
-  尚需可选发布目标/证据来源入口；当前引用只保留内存，进程重启后的服务端操作发现仍待补。
+  已增加服务端当前设备最近操作查询（默认 20、最大 50），仅公开无凭据引用；原生控制页可
+  选择原操作恢复状态查询，进程重启不依赖内存 token。后端 20 项、iOS 23 项测试通过，
+  覆盖原设备隔离、签名篡改、带时区时间及新 Store 恢复；真实 Caddy 新类型检查通过。
+  本地开发库备份 `p6-history-pre-migration.dump`（4964383 字节、目录校验通过），
+  为恢复共享工作区的行情 Worker，完成既有 0070–0072 增量迁移，dev/full/paper 已恢复。
+  Web codegen/check/lint/test:run/build 全通过（895 测试），证据为
+  `.codex_screenshots/p6-release-history-*`。尚需可选发布目标/证据来源入口。
 - 剩余开发顺序：发布目标/证据来源与 LIVE 发布界面、原生账户动作接口适配、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

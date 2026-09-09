@@ -5213,6 +5213,9 @@ type Query {
   tAssistantPaperOrders(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperOrderTAssistantPaperPage!
   tAssistantPaperExitPlans(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperExitPlanTAssistantPaperPage!
 
+  """当前原生设备最近的发布操作，不返回确认凭据"""
+  tAssistantLiveReleaseOperations(accountId: String!, limit: Int! = 20): [TAssistantReleaseOperation!]!
+
   """读取原用户和设备的发布结果；成功必须具备持久化执行与审批证据"""
   tAssistantLiveReleaseStatus(challengeId: String!): TAssistantReleaseStatus!
 
@@ -7540,6 +7543,13 @@ type TAssistantPaperReason {
 type TAssistantPaperReasonTAssistantPaperPage {
   nodes: [TAssistantPaperReason!]!
   pageInfo: PageInfo!
+}
+
+type TAssistantReleaseOperation {
+  challengeId: String!
+  accountId: String!
+  configVersionId: String!
+  createdAt: DateTime!
 }
 
 type TAssistantReleasePreview {

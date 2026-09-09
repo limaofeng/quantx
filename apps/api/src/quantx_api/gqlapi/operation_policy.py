@@ -556,6 +556,12 @@ _POLICIES[_release_status_key] = replace(
   _POLICIES[_release_status_key], required_permissions=("t-trade:control", "trade:approve")
 )
 
+_register("Query", "t-trade:control", {"tAssistantLiveReleaseOperations"}, audiences=("native",))
+_release_operations_key = ("Query", normalize_field_name("tAssistantLiveReleaseOperations"))
+_POLICIES[_release_operations_key] = replace(
+  _POLICIES[_release_operations_key], required_permissions=("t-trade:control", "trade:approve")
+)
+
 _TRADE_APPROVAL_FIELDS = {
   "previewTAssistantLiveRelease",
   "confirmTAssistantLiveRelease",

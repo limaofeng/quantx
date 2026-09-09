@@ -3024,6 +3024,17 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "tAssistantLiveReleaseOperations": {
+        "audiences": [
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "tAssistantLiveReleaseStatus": {
         "audiences": [
           "native"

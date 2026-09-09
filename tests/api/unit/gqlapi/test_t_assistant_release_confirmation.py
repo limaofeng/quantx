@@ -249,3 +249,29 @@ async def test_release_status_uses_authoritative_scope(sessions, context, state)
       )
       assert status["execution_id"] is None
       assert "private" not in str(status)
+
+
+async def test_recent_release_operations_are_device_scoped_and_credential_free(sessions, context):
+  principal, issued, lock = context
+  async with sessions() as db, db.begin():
+    rows = await api.list_release_operations(db, principal=principal, account_id="account-1")
+    assert len(rows) == 1
+    assert rows[0]["challenge_id"] == issued["challenge_id"]
+    assert set(rows[0]) == {"challenge_id", "account_id", "config_version_id", "created_at"}
+    assert rows[0]["created_at"].tzinfo is not None
+  other = replace(principal, device_session_id="other-device")
+  lock.return_value = other
+  async with sessions() as db, db.begin():
+    assert await api.list_release_operations(db, principal=other, account_id="account-1") == []
+
+
+async def test_recent_release_operations_reject_invalid_limit_and_tampered_payload(sessions, context):
+  principal, issued, _ = context
+  async with sessions() as db, db.begin():
+    with pytest.raises(ValueError, match="LIMIT_INVALID"):
+      await api.list_release_operations(db, principal=principal, account_id="account-1", limit=51)
+    row = await db.get(TradeConfirmationChallenge, issued["challenge_id"])
+    row.payload_fingerprint = "0" * 64
+    await db.flush()
+    with pytest.raises(ValueError, match="HISTORY_EVIDENCE_CONFLICT"):
+      await api.list_release_operations(db, principal=principal, account_id="account-1")

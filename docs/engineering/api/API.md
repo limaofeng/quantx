@@ -333,3 +333,8 @@ SUCCEEDED 表示发布命令完成，不表示预热完成或已经允许入场�
 Engine 使用显式 `T_ASSISTANT_EVALUATION_ROOT/<evaluationId>`，重新核验 P5 文件、事实链、
 指标和目标交易策略后创建 WARMING 执行。该根目录须在部署端配置且只放已审核的评估产物。
 预览本身不代表 P5 通过；服务不启用实盘开关，预热、账户与 Agent 就绪仍需后续检查。
+
+原生客户端可通过 `tAssistantLiveReleaseOperations(accountId, limit)` 找回当前用户、账户、
+设备最近的发布操作（默认 20 条，最多 50 条，按创建时间倒序）。输出仅包含挑战 ID、账户、
+目标配置 ID 和带时区的创建时间，不返回 token、完整挑战 payload 或凭据摘要。
+该接口复验当前会话和每条请求的签名；恢复后仍须调用状态查询核验原命令结果，不能再次确认。

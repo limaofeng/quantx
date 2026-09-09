@@ -26,6 +26,7 @@ final class TTradeControlStore: ObservableObject {
   typealias RefreshSession = @MainActor () async throws -> Void
   typealias RefreshAssistantProjection = @MainActor () async -> Void
 
+  @Published private(set) var recentReleaseOperations: [TAssistantReleaseOperation] = []
   @Published private(set) var releaseReference: TAssistantReleaseReference?
   @Published private(set) var releaseTicket: TAssistantReleaseTicket?
   @Published private(set) var releaseStatus: TAssistantReleaseStatus?
@@ -81,6 +82,7 @@ final class TTradeControlStore: ObservableObject {
 
   func invalidateChallengeContext() {
     sessionContextID = UUID()
+    recentReleaseOperations = []
     releaseTicket = nil
     releaseStatus = nil
     pendingControl = nil
@@ -591,6 +593,7 @@ final class TTradeControlStore: ObservableObject {
 
   private func resetTransientState(resetReadState: Bool) {
     stateRequestID = UUID()
+    recentReleaseOperations = []
     releaseTicket = nil
     releaseReference = nil
     releaseConfirmationAttempted = false
@@ -608,6 +611,36 @@ final class TTradeControlStore: ObservableObject {
 
 
 extension TTradeControlStore {
+  func loadReleaseOperations() async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    operationInProgress = true
+    defer { operationInProgress = false }
+    do {
+      let context = try repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"])
+      guard let repository = binding?.releaseRepository else { throw TTradeControlError.contextChanged }
+      let operations = try await repository.recentOperations(context: context)
+      guard context == (try repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"])) else {
+        throw TTradeControlError.contextChanged
+      }
+      recentReleaseOperations = operations
+      errorMessage = nil
+    } catch { throw fail(error) }
+  }
+
+  func recoverReleaseOperation(_ operation: TAssistantReleaseOperation) async throws {
+    guard !operationInProgress, recentReleaseOperations.contains(operation) else {
+      throw fail(TTradeControlError.contextChanged)
+    }
+    let context = try repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"])
+    try operation.reference.validate(context: context)
+    releaseTicket = nil
+    releaseReference = operation.reference
+    releaseCommandID = nil
+    releaseStatus = nil
+    releaseConfirmationAttempted = true
+    try await refreshReleaseStatus()
+  }
+
   func previewRelease(_ draft: TAssistantReleaseDraft) async throws {
     guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
     guard !releaseConfirmationAttempted
@@ -619,6 +652,7 @@ extension TTradeControlStore {
       throw fail(TTradeControlError.unavailable("发布服务尚未连接"))
     }
     operationInProgress = true
+    recentReleaseOperations = []
     releaseTicket = nil
     releaseReference = nil
     releaseConfirmationAttempted = false

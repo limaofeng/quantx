@@ -24,6 +24,21 @@ struct TTradeControlView: View {
           status: .attention
         )
       }
+      Button("恢复最近发布操作") {
+        Task { try? await store.loadReleaseOperations() }
+      }
+      .disabled(store.operationInProgress)
+      ForEach(store.recentReleaseOperations) { operation in
+        Button {
+          Task { try? await store.recoverReleaseOperation(operation) }
+        } label: {
+          VStack(alignment: .leading) {
+            Text("配置 \(operation.configVersionID)")
+            Text(operation.createdAt.formatted()).font(.caption)
+          }
+        }
+        .disabled(store.operationInProgress)
+      }
       if store.releaseReference != nil { releaseOperationCard }
       stateContent
     }

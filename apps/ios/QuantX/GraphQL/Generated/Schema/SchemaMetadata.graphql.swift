@@ -77,6 +77,7 @@ extension QuantXAPI {
       "StrategyInstanceMobileParameters": QuantXAPI.Objects.StrategyInstanceMobileParameters,
       "StrategyMobileParameter": QuantXAPI.Objects.StrategyMobileParameter,
       "Subscription": QuantXAPI.Objects.Subscription,
+      "TAssistantReleaseOperation": QuantXAPI.Objects.TAssistantReleaseOperation,
       "TAssistantReleasePreview": QuantXAPI.Objects.TAssistantReleasePreview,
       "TAssistantReleaseResult": QuantXAPI.Objects.TAssistantReleaseResult,
       "TAssistantReleaseStatus": QuantXAPI.Objects.TAssistantReleaseStatus,

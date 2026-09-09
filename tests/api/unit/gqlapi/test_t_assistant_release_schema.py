@@ -101,3 +101,19 @@ async def test_graphql_release_status(sessions, context, monkeypatch):
   policy = operation_policy("Query", "tAssistantLiveReleaseStatus")
   assert policy.required_permissions == ("t-trade:control", "trade:approve")
   assert policy.audiences == ("native",)
+
+
+async def test_graphql_release_operations(sessions, context, monkeypatch):
+  principal, issued, _ = context
+  monkeypatch.setattr(live, "AsyncSessionLocal", sessions)
+  result = await SCHEMA.execute(
+    'query {tAssistantLiveReleaseOperations(accountId:"account-1",limit:20){challengeId accountId configVersionId createdAt}}',
+    context_value={"principal": principal},
+  )
+  assert not result.errors
+  rows = result.data["tAssistantLiveReleaseOperations"]
+  assert rows[0]["challengeId"] == issued["challenge_id"]
+  assert rows[0]["createdAt"].endswith("+08:00")
+  policy = operation_policy("Query", "tAssistantLiveReleaseOperations")
+  assert policy.required_permissions == ("t-trade:control", "trade:approve")
+  assert policy.audiences == ("native",)
