@@ -40,6 +40,12 @@ READY，并从权威全量快照重建后重启 consumer。supervisor 从 D-1 pr
 StrategyRun 精确 source/fence 对比事件。启动时残留的 `PREPARED` cycle 只能按有效 lease
 续接，否则以精确 claim fence 转为 `ABORTED_STALE`。
 
+P6 隔离开发提供 `T_ASSISTANT_DRAIN_ENTRY` Engine 命令（`execution_id`、非空 `reason`）：
+同一事务锁定配置/源执行，将新 T LIVE 源置 DRAINING，并审计终结没有订单事实的待入场意图。
+已有 pending/correlation/outbox 或成交投影保留原 owner，命令不撤单、不改 ExitPlan，不授予
+STOPPED 或 successor READY。scope、时间或命令关联异常使整帧回滚并报错。
+该命令尚未接 Web，不能用于 legacy StrategyRun；新 T LIVE 入场 handler 仍未开放。
+
 `TAssistantPaperEntryRuntime` 使用 point-in-time 组合快照完成 allocation，再按公共 admission
 rank 逐项复核最新 Tick、Sizer、Risk 和 Capacity；分配、准入和订单在同一事务提交。
 原始 TTL 维护单独提交，不依赖新鲜行情，也不被后续派单失败回滚。PAPER 事实由隔离账本和

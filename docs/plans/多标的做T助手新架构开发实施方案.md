@@ -1,8 +1,8 @@
 # QuantX 多标的做 T 助手新架构开发实施方案
 
-> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程已验证、策略准入待确认；P6—P8 尚未开始）<br>
-> 版本：2.4<br>
-> 日期：2026-09-07<br>
+> 状态：`IN_PROGRESS`（P0—P4 已完成；P5 工程已验证、策略准入待确认；P6 隔离开发进行中；P7/P8 待接续）<br>
+> 版本：2.5<br>
+> 日期：2026-09-09<br>
 > 目标设计：[多标的做 T 助手新架构设计 v2.2](../architecture/多标的做T助手新架构设计.md)<br>
 > 当前基线：[系统架构设计（As-Is）](../architecture/系统架构设计.md)<br>
 > 开发实施进度：5 / 9 个阶段门完成（55.6%）
@@ -55,13 +55,15 @@ development_progress = DONE_phase_count / 9
 
 ### 1.3 后续执行批次与成本边界
 
-本方案为 P0–P8 共九阶段，没有 P9。P5–P8 默认单代理、一次一个可验收批次；
-完成该批实现、定向验证、必要文档和提交后结束任务，不自动进入下一批。
-这不是缩减阶段退出门；批次完成与阶段 DONE 分别记录。
+本方案为 P0–P8 共九阶段，没有 P9。2026-09-09 用户授权 P6–P8 连续开发：默认单代理，
+按依赖顺序完成实现、定向验证、必要文档和提交，不在开发批次边界自动结束任务。
+各组件先通过最小整链及必要边界测试，稳定后统一工程集成、回归和审核，复用有效证据。
+开发完成与阶段 DONE 分别记录；P5/P6/P7 的前置门约束实际运行准入，不阻止后续隔离开发。
+P5 本身的正式评估与准入要求不变。
 
 每批启动前固定：输入提交/接口、写入范围、退出条件、必要验证、外部环境依赖和不包含项。
-若发现范围外的必需依赖，记录缺口及建议后续批次，不自行吸收新工程；保留已完成证据。
-交接仅保留提交、接口、验证及剩余项，新批次使用新任务，避免反复加载全部实施历史。
+若发现连续开发范围内的必需接线缺口，在当前检查点补入并完成；范围外新工程记录缺口，
+不自行扩大目标。交接仅保留提交、接口、验证及剩余项，不要求每批另开任务。
 同一检查点更新当前结论，历史细节引用已有提交/日志，不持续追加重复过程报告。
 
 实现、固定数据评估、维护窗口和交易观察分开授权。等待行情、训练或交易日不要求模型
@@ -177,9 +179,18 @@ P2 与 P3 可以在 P1 完成后独立开发，但 P4 必须同时依赖二者�
 | P3 | 独立 T runtime 与精确行情归约 | `DONE` | `P1 DONE`；独立 PAPER shadow 实现与验证完成 | 无 StrategyRun、逐 Tick 因果归约、隔离 PAPER shadow 且无订单链写入 | 0049 实库与隔离恢复通过；最终 63/112 项及快照修复 38 项，见 §10 |
 | P4 | 分配、PAPER 与跨域准入 | `DONE` | P2 + P3 已核对 | 整批原子、PAPER 闭环、无真实订单 | 六项实现、隔离 PG 闭环/故障门及实际 Caddy/Web 契约检查完成，业务库 0056；证据见 §10 |
 | P5 | 共享账户回测 | `IN_PROGRESS` | P4 | 无重复资金/未来数据，结果可重放 | P5-A/B 通过；P5-C 工程准备通过，正式样本与准入门待确认 |
-| P6 | LIVE 人工确认灰度 | `NOT_STARTED` | P5 | 唯一 producer、规定闭环、无安全违规 | 待补 |
+| P6 | LIVE 人工确认灰度 | `IN_PROGRESS` | LIVE 运行依赖 P5；隔离开发已授权 | 唯一 producer、规定闭环、无安全违规 | 源执行排空与订单身份约束基础；见 §10 连续开发检查点 |
 | P7 | AUTO 与稳定性 | `NOT_STARTED` | P6 | 故障注入、恢复、收盘与并发门通过 | 待补 |
 | P8 | 模型 SHADOW/ACTIVE | `NOT_STARTED` | P5；ACTIVE 依赖 P7 | OOS 增量、门禁、人工发布闭环 | 待补 |
+
+### 4.1 P6–P8 连续开发顺序
+
+| 顺序 | 开发范围 | 工程退出条件 | 上线保留项 |
+|---|---|---|---|
+| 1 | P6 源执行排空、订单 owner 约束、LIVE 确认与公共分配/准入/命令链 | 隔离最小买卖闭环；确认过期/重复、额度变化、排空恢复与原 owner 保留 | P5 准入、维护窗口、CANARY 与交易观察 |
+| 2 | P7 故障恢复、并发/性能、AUTO successor 与阻断 | 复用 P6 证据，补足新故障矩阵及 successor 原子失败测试 | AUTO 观察门、legacy 义务归零后清理 |
+| 3 | P8 数据/标签/切分、制品、CPU 加载、SHADOW/ACTIVE 门 | 无未来数据、安全制品和故障行为；工程夹具与正式研究结果区分 | 冻结模型指标/预算、正式 OOS 评估、人工发布 |
+| 4 | 统一工程验收 | 按最终受影响范围集成、回归、审核；有效证据不重复运行 | 阶段 DONE 仍逐门判定 |
 
 ## 5. 分阶段任务清单
 
@@ -332,6 +343,7 @@ P5 行情数据验收口径（2026-09-09 用户确认，覆盖下方历史检查
 ### P6：LIVE / CANARY / MANUAL_CONFIRM
 
 前置：P5 `DONE`；实盘能力门、唯一 QMT Agent、protocol 1.2 和完整账户快照均 READY。
+以上为实际 LIVE 运行前置；P6-A 隔离开发与验证可在 P5 准入等待期间推进。
 
 - [ ] `TTA-P6-01` 在维护窗口停止旧做 T 新 ENTRY，将 legacy owner 置 DRAINING 并冻结义务清单。
 - [ ] `TTA-P6-02` 结果未知旧命令仍由原 owner reconcile；旧 ExitPlan 保持 plan owner/source ref。
@@ -356,6 +368,7 @@ P7 对已有且仍有效的证据直接引用，仅增加其新故障、并发�
 ### P7：故障注入、稳定性与 LIVE/AUTO
 
 前置：P6 `DONE`。
+此门约束 AUTO 实际运行；P7-A/B 的隔离开发、故障与性能测试可提前完成。
 
 - [ ] `TTA-P7-01` 故障注入 Engine/API/QMT 断连、进程重启、lease 过期、DB 冲突、Redis 丢唤醒、
   delta gap、乱序/迟到回报和 successor 失败。
@@ -382,6 +395,7 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
 ### P8：模型 SHADOW 与 ACTIVE
 
 前置：SHADOW 依赖 P5 和稳定 PAPER 数据；ACTIVE 依赖 P7。
+数据/标签、制品、加载和模式控制的隔离开发可提前；不以夹具结果替代模型研究准入。
 
 - [ ] `TTA-P8-01` 冻结完整 1 分钟 Feature Bar、capability manifest、三分类 first-touch label、
   observation anchors、purged walk-forward 和 worst-group 指标。
@@ -529,6 +543,26 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
 仍按审计要求保留。当前基线以本行 closeout 证据及下文“当前状态与下一动作”为准。
 
 ## 10. 当前状态与下一动作
+
+### P6–P8 连续开发检查点（2026-09-09）
+
+- 授权：单代理连续开发，统一工程验收；实际 LIVE/AUTO/ACTIVE 门保持顺序。P8 候选沿用
+  RULE_ONLY、Logistic、LightGBM，用户同意先整理指标/预算建议，后续确认。
+- 已完成基础：Engine `T_ASSISTANT_DRAIN_ENTRY` 通过同一事务阻断新 T LIVE 源、终结没有
+  订单事实的意图；pending/correlation/outbox、成交投影及原 owner 保留，ExitPlan 不改动。
+  故障回滚、重启重试、scope/时间异常与 RECONCILE_REQUIRED 保持阻断已覆盖。
+- 0060 补齐 pending/correlation 的 T owner 身份形状：必须有 intent，不能伪造 StrategyRun
+  或 strategy order。保留旧 owner 约束，无数据重写。业务库尚未应用此迁移。
+- 验证：Conda `quantx` 下 live-drain、exit/entry command dispatch、execution owner persistence
+  四文件 **72 项通过**，JUnit `.codex_screenshots/p6-live-drain-unit.xml`；
+  `QUANTX_RUN_MIGRATION_GATE=true` 下 `test_t_assistant_order_identity_migration.py`
+  **1 项通过**，真实 PostgreSQL 随机 schema、旧约束→0060、合法/非法 owner 形状、事务
+  回滚及 schema 删除确认。此证据不替代完整迁移链、生产并发或实盘验收。
+- 剩余开发顺序：LIVE 分配意图 schema/事务守卫→独立 T 设备确认绑定→LIVE 组合事实读取、
+  分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor→P7 新故障/性能→P8。
+  当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
+- 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
+  本检查点的当前结论，不重复追加整轮报告。没有业务库切换、服务启停、E2E 或真实订单。
 
 交接基线（P3 收尾时）：**P0—P3 已完成；P2/P3 代码、隔离迁移、实际业务库 0050 和清空功能数据后的 Windows 运行验收已完成。当批止于 P3。当前 P4 进展见本节末检查点。** P1 原子切换后，Agent 控制协议为 `1.2`；
 `ExecutionOwnerRef` 已贯穿 intent、pending、correlation、outbox、runtime event 和 ExitPlan

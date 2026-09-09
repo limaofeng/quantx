@@ -28,14 +28,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base
 
 
-def _load_execution_owner_revision() -> ModuleType:
+def _load_execution_owner_revision(filename="20260903_0046_execution_owner_persistence.py") -> ModuleType:
   path = (
     Path(__file__).resolve().parents[2]
     / "packages"
     / "infrastructure"
     / "alembic"
     / "versions"
-    / "20260903_0046_execution_owner_persistence.py"
+    / filename
   )
   spec = importlib.util.spec_from_file_location(
     "quantx_test_execution_owner_revision",
@@ -92,10 +92,12 @@ def test_public_fact_models_use_authoritative_names_and_no_owner_defaults() -> N
 
 
 def test_pending_and_correlation_identity_constraints_match_migration() -> None:
-  revision = _load_execution_owner_revision()
+  revision = _load_execution_owner_revision("20260909_0060_t_assistant_order_identity.py")
   expected = (
     "(owner_type = 'STRATEGY_RUN' AND intent_id IS NOT NULL "
     "AND strategy_order_id IS NOT NULL) OR "
+    "(owner_type = 'T_ASSISTANT_EXECUTION' AND intent_id IS NOT NULL "
+    "AND strategy_run_id IS NULL AND strategy_order_id IS NULL) OR "
     "(owner_type = 'EXIT_PLAN' AND intent_id IS NOT NULL "
     "AND strategy_order_id IS NULL) OR "
     "(owner_type = 'MANUAL_COMMAND' AND intent_id IS NULL "
@@ -119,7 +121,7 @@ def test_pending_and_correlation_identity_constraints_match_migration() -> None:
       if constraint.name == constraint_name
     )
     assert str(model_constraint.sqltext) == expected
-    assert dict(revision._CHECKS[table_name])[constraint_name] == expected
+    assert revision.ORDER_IDENTITY_CHECK == expected
 
 
 def _identity_constraint_row(
@@ -180,6 +182,8 @@ def _identity_constraint_row(
     ("EXIT_PLAN", "plan-1", None, "intent-1", True),
     ("EXIT_PLAN", "plan-1", "strategy-order-1", "intent-1", False),
     ("T_ASSISTANT_EXECUTION", "t-assistant-1", "strategy-order-1", "intent-1", False),
+    ("T_ASSISTANT_EXECUTION", "t-assistant-1", None, "intent-1", True),
+    ("T_ASSISTANT_EXECUTION", "t-assistant-1", None, None, False),
     ("ENTRY_PLAN", "entry-plan-1", "strategy-order-1", "intent-1", False),
     ("BOARD_ASSISTANT_EXECUTION", "board-assistant-1", "strategy-order-1", "intent-1", False),
   ),
