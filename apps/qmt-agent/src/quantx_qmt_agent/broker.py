@@ -35,6 +35,7 @@ from quantx_contracts import (
 )
 
 from .endpoints import masked_account_id
+from .history_timing import record_history_timing
 
 logger = logging.getLogger(__name__)
 
@@ -2309,6 +2310,122 @@ def _iter_market_data_records(
     yield record
 
 
+def _normalize_history_frames(values: Any, requested_codes: set[str]) -> dict[str, Any]:
+  if not isinstance(values, dict):
+    raise ValueError("XTData returned a non-object market-data result")
+  normalized: dict[str, Any] = {}
+  for code, frame in values.items():
+    normalized_code = str(code).strip().upper()
+    if normalized_code not in requested_codes:
+      raise ValueError(f"XTData returned unrequested instrument: {normalized_code}")
+    if normalized_code in normalized:
+      raise ValueError(f"XTData returned duplicate normalized instrument: {normalized_code}")
+    if frame is not None and not all(
+      hasattr(frame, attribute) for attribute in ("columns", "itertuples", "sort_values")
+    ):
+      raise ValueError(f"XTData returned a non-DataFrame result for {normalized_code}")
+    if frame is not None and len(frame) > MAX_MARKET_DATA_FRAME_RECORDS:
+      raise ValueError("single market data frame exceeds record limit")
+    normalized[normalized_code] = frame
+  return normalized
+
+
+def _history_frame_has_usable_rows(frame: Any, period: str) -> bool:
+  if frame is None or len(frame) == 0:
+    return False
+  if period == "tick":
+    return True
+  columns = tuple(frame.columns)
+  # Match the projection predicate exactly. Malformed rows must reach validation,
+  # not disappear into a no-data retry. Stop at the first non-placeholder row.
+  return any(
+    not _is_empty_historical_kline_row(
+      dict(zip(columns, values, strict=True)), period=period,
+    )
+    for values in frame.itertuples(index=False, name=None)
+  )
+
+
+def _read_history_frames(
+  manager: Any, codes: tuple[str, ...], period: str, start: str, end: str, *, downloaded: bool,
+) -> dict[str, Any]:
+  started = time.monotonic()
+  missing: set[str] = set()
+
+  def read(selected: list[str]) -> dict[str, Any]:
+    values = _normalize_history_frames(manager.get_market_data(
+      stock_list=selected, period=period, start_time=start, end_time=end,
+    ), set(selected))
+    for code in selected:
+      frame = values.get(code)
+      if _history_frame_has_usable_rows(frame, period):
+        missing.discard(code)
+      else:
+        missing.add(code)
+        raw_rows = 0 if frame is None else len(frame)
+        record_history_timing(
+          "cache_no_usable_rows", started, code=code, period=period,
+          raw_rows=raw_rows, usable_rows=0, filtered_rows=raw_rows,
+        )
+    return values
+
+  frames = read(list(codes))
+  if downloaded:
+    # Native completion can precede visibility in XTData's local cache. Re-read
+    # absent, empty or all-placeholder series without altering usable frames.
+    # Persistent emptiness still produces an explicit no-data summary below.
+    for attempt, delay in enumerate((0.1, 0.3, 0.6, 1.0), start=1):
+      if not missing:
+        break
+      record_history_timing("cache_visibility_retry", started, attempt=attempt, empty_series=len(missing))
+      time.sleep(delay)
+      # A later omitted result supersedes its earlier placeholder frame too.
+      selected = sorted(missing)
+      refreshed = read(selected)
+      frames.update({code: refreshed.get(code) for code in selected})
+  record_history_timing("read_complete", started)
+  return frames
+
+
+def _daily_price_limits(
+  manager: Any, code: str, source_time_ms: int
+) -> dict[str, float]:
+  """Use current contract details only for a demonstrably current daily bar."""
+  today = datetime.now(SHANGHAI_TIMEZONE).date()
+  bar_day = datetime.fromtimestamp(source_time_ms / 1000, SHANGHAI_TIMEZONE).date()
+  if bar_day != today:
+    return {}
+  try:
+    tick = manager.get_full_tick([code]).get(code) or {}
+    tick_day = datetime.fromtimestamp(
+      float(tick.get("time", 0)) / 1000, SHANGHAI_TIMEZONE
+    ).date()
+    if tick_day != today:
+      return {}
+    detail = manager.get_instrument_detail(code, iscomplete=True) or {}
+    if datetime.now(SHANGHAI_TIMEZONE).date() != today:
+      return {}
+    result = {}
+    for target, source in (
+      ("upperLimit", "UpStopPrice"),
+      ("lowerLimit", "DownStopPrice"),
+    ):
+      value = detail.get(source)
+      if (
+        isinstance(value, Real)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 < value < 1e10
+      ):
+        result[target] = float(value)
+    return result
+  except Exception as exc:
+    logger.warning(
+      "Daily price reference unavailable: code=%s error=%s", code, type(exc).__name__
+    )
+    return {}
+
+
 def _iter_market_data_records_unbounded(
   manager: Any,
   payload: dict[str, Any],
@@ -2334,7 +2451,6 @@ def _iter_market_data_records_unbounded(
     return
 
   request = _validate_bars_request(payload)
-  requested_codes = set(request.codes)
   for period in request.periods:
     lower_bound, upper_bound = _bar_time_bounds(request, period)
     xtdata_start_time, xtdata_end_time = _xtdata_history_time_bounds(request, period)
@@ -2346,26 +2462,13 @@ def _iter_market_data_records_unbounded(
         end_time=xtdata_end_time,
         incrementally=False,
       )
-    values = manager.get_market_data(
-      stock_list=list(request.codes),
-      period=period,
-      start_time=xtdata_start_time,
-      end_time=xtdata_end_time,
+    normalized_values = _read_history_frames(
+      manager, request.codes, period, xtdata_start_time, xtdata_end_time,
+      downloaded=bool(payload.get("download")),
     )
-    if not isinstance(values, dict):
-      raise ValueError("XTData returned a non-object market-data result")
-    normalized_values: dict[str, Any] = {}
-    for code, frame in values.items():
-      normalized_code = str(code).strip().upper()
-      if normalized_code not in requested_codes:
-        raise ValueError(f"XTData returned unrequested instrument: {normalized_code}")
-      if normalized_code in normalized_values:
-        raise ValueError(
-          f"XTData returned duplicate normalized instrument: {normalized_code}"
-        )
-      normalized_values[normalized_code] = frame
 
     for normalized_code in sorted(request.codes):
+      projection_started = time.monotonic()
       frame = normalized_values.get(normalized_code)
       if frame is None:
         yield HistoricalBarSummary(
@@ -2426,12 +2529,24 @@ def _iter_market_data_records_unbounded(
           period=period,
           source_time_ms=int(row[_NORMALIZED_MARKET_TIME_COLUMN]),
         )
+        if period == "1d":
+          record.update(_daily_price_limits(manager, normalized_code, record["time"]))
         if record["time"] < lower_bound or record["time"] > upper_bound:
           raise ValueError(
             "XTData returned bar time outside requested range: "
             f"{normalized_code}/{period}/{record['time']}"
           )
         records.append(record)
+
+      record_history_timing(
+        "frame_projected", projection_started, code=normalized_code, period=period,
+        raw_rows=len(normalized), usable_rows=len(records),
+        filtered_rows=len(normalized) - len(records),
+        raw_min_time=min(normalized_times) if normalized_times else None,
+        raw_max_time=max(normalized_times) if normalized_times else None,
+        min_time=int(records[0]["time"]) if records else None,
+        max_time=int(records[-1]["time"]) if records else None,
+      )
 
       if period == "tick":
         group_start = 0

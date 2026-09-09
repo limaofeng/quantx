@@ -252,9 +252,13 @@ def test_xtdata_manager_preserves_explicit_intraday_history_bounds(
     "xtdata",
     SimpleNamespace(
       connect=lambda **_kwargs: Client(),
-      download_history_data2=download_history_data2,
       get_market_data_ex=get_market_data_ex,
     ),
+  )
+  monkeypatch.setattr(
+    module, "download_history",
+    lambda sdk, client, codes, requested_period, **kwargs:
+      download_history_data2(codes, requested_period, **kwargs),
   )
   manager = module.XTDataManager()
 

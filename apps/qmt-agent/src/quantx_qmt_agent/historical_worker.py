@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import multiprocessing
 import os
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -32,6 +34,7 @@ from .broker import (
   QmtDataBroker,
   validate_market_data_request,
 )
+from .history_timing import history_unit, record_history_timing
 
 XTDATA_HISTORICAL_WORKER_KIND = "xtdata"
 HISTORICAL_CHECKPOINT = object()
@@ -345,6 +348,17 @@ def _set_low_process_priority() -> None:
     )
 
 
+def _timed_unit_records(broker: QmtDataBroker, unit: dict[str, Any], request_id: str, index: int):
+  token = history_unit.set((request_id, index))
+  started = time.monotonic()
+  record_history_timing("unit_start", started)
+  try:
+    yield from broker.iter_market_data(unit)
+    record_history_timing("unit_records_complete", started)
+  finally:
+    history_unit.reset(token)
+
+
 def _iter_request_records(
   broker: QmtDataBroker,
   payload: dict[str, Any],
@@ -367,7 +381,7 @@ def _iter_request_records(
   )
   if str(payload.get("operation") or "bars") != "bars":
     for index, unit in enumerate(units, start=1):
-      yield from broker.iter_market_data(unit)
+      yield from _timed_unit_records(broker, unit, request_id, index)
       if index < len(units):
         yield chunk_boundary
         connection.send(
@@ -419,7 +433,7 @@ def _iter_request_records(
       for unit_index in range(group_start, group_end):
         unit = units[unit_index]
         summaries: set[str] = set()
-        for raw_record in broker.iter_market_data(unit):
+        for raw_record in _timed_unit_records(broker, unit, request_id, unit_index + 1):
           if not isinstance(raw_record, dict):
             raise ValueError("XTData worker returned a non-object record")
           if "record_type" in raw_record:
@@ -568,6 +582,7 @@ def run_historical_market_data_worker(
 ) -> None:
   """Serve serial historical requests until the parent explicitly shuts down."""
 
+  logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
   broker: QmtDataBroker | None = None
   active = {}
   shared_disk_budget = _HistoricalDiskBudget(0)
@@ -617,7 +632,11 @@ def run_historical_market_data_worker(
             raise ValueError("negative historical disk allowance")
           shared_disk_budget.max_bytes = allowance + shared_disk_budget.retained_bytes
         try:
-          next(active[request_id])
+          token = history_unit.set((request_id, 0))
+          try:
+            next(active[request_id])
+          finally:
+            history_unit.reset(token)
         except StopIteration:
           active.pop(request_id)
       except Exception as exc:

@@ -94,10 +94,11 @@ def _spawned_acceptance_worker(connection, worker_kind: str) -> None:
               "total_units": len(units),
             }
           )
-          assert connection.recv() == {
-            "type": "continue",
-            "request_id": request_id,
-          }
+          continuation = connection.recv()
+          assert set(continuation) == {"type", "request_id", "max_spool_bytes"}
+          assert continuation["type"] == "continue"
+          assert continuation["request_id"] == request_id
+          assert continuation["max_spool_bytes"] >= 0
       connection.send(
         {
           "type": "ok",

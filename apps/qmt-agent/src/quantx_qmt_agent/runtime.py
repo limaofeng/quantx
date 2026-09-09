@@ -63,6 +63,7 @@ from .historical_worker import (
   XTDATA_HISTORICAL_WORKER_KIND,
   run_historical_market_data_worker,
 )
+from .history_timing import record_history_timing
 from .journal import LocalJournal
 from .whole_market_capture import (
   MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
@@ -1293,10 +1294,16 @@ def _managed_market_data_spool_bytes(root: Path) -> int:
     if not safe_child.is_dir():
       continue
     for path in safe_child.rglob("*"):
-      if path.is_symlink():
+      try:
+        metadata = path.lstat()
+      except FileNotFoundError:
+        # Upload completion can replace a terminal marker or retire a spool
+        # after enumeration. Inspect each surviving entry only once.
+        continue
+      if stat.S_ISLNK(metadata.st_mode):
         raise RuntimeError("market-data spool contains a symbolic link")
-      if path.is_file():
-        total += path.stat().st_size
+      if stat.S_ISREG(metadata.st_mode):
+        total += metadata.st_size
         if total > MAX_MARKET_DATA_UPLOAD_CACHE_BYTES:
           raise RuntimeError("market-data upload cache byte limit exceeded")
   return total
@@ -1359,6 +1366,8 @@ def _iter_encoded_market_data_chunks(
   current_records = 0
   total_size = 0
   total_records = 0
+  encoding_started = time.monotonic()
+  json_encode_seconds = 0.0
 
   for record in records:
     if record is HISTORICAL_CHECKPOINT:
@@ -1378,6 +1387,7 @@ def _iter_encoded_market_data_chunks(
     if total_records > max_total_records:
       raise ValueError("market data request exceeds record count limit")
     try:
+      record_started = time.monotonic()
       encoded = json.dumps(
         record,
         ensure_ascii=False,
@@ -1386,6 +1396,7 @@ def _iter_encoded_market_data_chunks(
         default=str,
         allow_nan=False,
       ).encode("utf-8")
+      json_encode_seconds += time.monotonic() - record_started
     except ValueError as exc:
       raise ValueError("market data record contains a non-finite JSON number") from exc
     if len(encoded) > max_record_uncompressed_bytes:
@@ -1416,6 +1427,10 @@ def _iter_encoded_market_data_chunks(
   total_size += len(current)
   if total_size > max_total_uncompressed_bytes:
     raise ValueError("market data request exceeds uncompressed byte limit")
+  record_history_timing(
+    "encode_complete", encoding_started,
+    json_encode_ms=json_encode_seconds * 1000, records=total_records,
+  )
   yield current, current_records
 
 
@@ -1474,6 +1489,7 @@ def _prepare_market_data_records_spool_steps(
         yield None
         continue
       chunk_index = len(chunks)
+      compression_started = time.monotonic()
       path = spool_directory / f"chunk-{chunk_index:06d}.json.gz"
       temporary = path.with_suffix(f"{path.suffix}.tmp")
       remaining = max_total_compressed_bytes - compressed_bytes
@@ -1495,6 +1511,7 @@ def _prepare_market_data_records_spool_steps(
         file_handle.flush()
         os.fsync(file_handle.fileno())
       temporary.replace(path)
+      record_history_timing("compress_fsync_complete", compression_started, chunk_index=chunk_index)
       chunk = _MarketDataSpoolChunk(
         path=path,
         record_count=record_count,
@@ -5334,26 +5351,36 @@ class AgentRuntime:
   ) -> None:
     self._ensure_market_upload_state()
     async with self._history_upload_slots:
-      response = await client.put(
-        (
-          f"{self.configuration.api_url}/agent/market-data/"
-          f"{request_id}/chunks/{chunk_index}"
-        ),
-        content=_stream_spool_chunk(
-          chunk.path,
-          limiter=self._history_upload_limiter,
-          executor=self._history_upload_io_executor,
-        ),
-        headers={
-          "Authorization": f"Bearer {self._access_token}",
-          "Content-Type": "application/json",
-          "Content-Encoding": "gzip",
-          "Content-Length": str(chunk.compressed_bytes),
-          "X-Content-SHA256": chunk.digest,
-          "X-Record-Count": str(chunk.record_count),
-          "X-Total-Chunks": str(total_chunks),
-        },
-      )
+      upload_started = time.monotonic()
+      response_received = False
+      try:
+        response = await client.put(
+          (
+            f"{self.configuration.api_url}/agent/market-data/"
+            f"{request_id}/chunks/{chunk_index}"
+          ),
+          content=_stream_spool_chunk(
+            chunk.path,
+            limiter=self._history_upload_limiter,
+            executor=self._history_upload_io_executor,
+          ),
+          headers={
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+            "Content-Length": str(chunk.compressed_bytes),
+            "X-Content-SHA256": chunk.digest,
+            "X-Record-Count": str(chunk.record_count),
+            "X-Total-Chunks": str(total_chunks),
+          },
+        )
+        response_received = True
+      finally:
+        logger.info(
+          "history_timing request_id=%s chunk_index=%s stage=upload_end elapsed_ms=%.3f response_received=%s bytes=%s",
+          request_id, chunk_index, (time.monotonic() - upload_started) * 1000,
+          response_received, chunk.compressed_bytes,
+        )
     try:
       response.raise_for_status()
     except httpx.HTTPStatusError as exc:
@@ -5944,7 +5971,14 @@ class AgentRuntime:
         task.cancel()
       if upload_tasks:
         await asyncio.gather(*upload_tasks, return_exceptions=True)
-      if message_type not in {"ok", "error"} and self._historical_worker_process is process:
+      # An SDK error/timeout cannot prove native cancellation has completed.
+      # Confirm process exit before this client can perform another unit.
+      native_failure = (
+        message_type == "error"
+        and isinstance(message.get("error"), dict)
+        and message["error"].get("reason") == "XTDATA_UNAVAILABLE"
+      )
+      if (message_type not in {"ok", "error"} or native_failure) and self._historical_worker_process is process:
         await self._shutdown_historical_worker(graceful=False)
       await asyncio.to_thread(shutil.rmtree, spool_directory, True)
       raise

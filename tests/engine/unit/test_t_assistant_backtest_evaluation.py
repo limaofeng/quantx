@@ -29,6 +29,13 @@ class History:
     self.broken = broken
     self.calls = []
 
+  async def get_kline_data(self, **kwargs):
+    return [
+      SimpleNamespace(
+        time=kwargs["start_time"], up_stop_price=110.0, down_stop_price=90.0
+      )
+    ]
+
   async def iter_tick_pages(self, **kwargs):
     self.calls.append(kwargs)
     rows = []

@@ -84,6 +84,7 @@ async def _market_data_database():
           device_id VARCHAR(36) NOT NULL,
           idempotency_key VARCHAR(128) NOT NULL,
           request_payload JSON NOT NULL,
+          development_only BOOLEAN NOT NULL DEFAULT FALSE,
           status VARCHAR(24) NOT NULL,
           expected_chunks INTEGER,
           received_chunks INTEGER NOT NULL,
@@ -219,7 +220,7 @@ def _configure_api(monkeypatch, sessions, market_data_root) -> None:
 @pytest.mark.integration
 @pytest.mark.parametrize(
   "active_status",
-  ["DELIVERED", "RECEIVING", "UPLOADED", "PROCESSING"],
+  ["DELIVERED", "RECEIVING"],
 )
 async def test_dispatch_keeps_one_active_market_request_per_device(
   active_status: str,

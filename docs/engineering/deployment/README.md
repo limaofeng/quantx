@@ -135,6 +135,17 @@ macOS 配置 `QUANTX_MARKET_DATA_URL=http://192.168.5.6:8080` 和
 
 参考数据仅导出明确的证券、日历和因子字段。复权覆盖沿用原有 schema-v2 证据，
 研究读取时再次与本机当前因子逐行核验；财务数据继续使用既有独立研究来源。
+参考接口的 `factor_coverage.status=UNVERIFIED` 同时返回 `reason`：
+`AUDIT_MISSING` 表示无候选审计，`AUDIT_INVALID` 表示审计未通过 schema-v2 校验，
+`COVERAGE_END_BEFORE_AS_OF` 表示证明结束日期不足（附 `audited_end_date`），
+`CURRENT_ROWS_MISMATCH` 表示当前因子与审计不一致。日期不足时尚未核验当前行，
+不能据此断言数据一致。历史行情导出完成不代表因子证明也已更新。
+Windows 生产维护应通过现有 `divid_factor_sync_flow` 为所需标的刷新证明，
+显式指定 `stock_list`、`start_time` 和 `end_time`；起点应覆盖 Mac 研究所需历史，
+终点至少覆盖其 `as_of`。当前接口返回单条证明，不能只补短区间后假定可拼接。
+同步完成后检查分片、schema-v2 审计与当前因子，并从实际 Caddy 参考接口验证
+`VERIFIED`，再由 Mac 重试导入。推进验收日期前须重新检查证明截止日期；此接口
+本身不会派发生产因子同步，也不能通过手工延长审计日期代替真实同步。
 回测清单记录初始化时的导入分区版本；实时行情＋paper 成交不等同券商集成验收。
 
 ## 首次生产切换与验收
@@ -197,6 +208,9 @@ schema 验证成功后临时 PostgreSQL 库会清理；后续 journal/Monitor �
 QuantX 管理的进程。
 
 ## 验收
+
+历史补数性能排查与优化交接见
+[2026-09-08 历史补数慢诊断报告](HISTORY_BACKFILL_PERFORMANCE_DIAGNOSIS_20260908.md)。
 
 ```powershell
 .\.runtime\tools\caddy\caddy.exe validate `

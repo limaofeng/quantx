@@ -141,8 +141,6 @@ HISTORICAL_TICK_TRANSFER_REQUIRED_FIELDS = (
 )
 HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS = (
   "priceTick",
-  "upperLimit",
-  "lowerLimit",
 )
 HISTORICAL_TICK_TRANSFER_FIELDS = (
   *HISTORICAL_TICK_TRANSFER_REQUIRED_FIELDS,
@@ -184,6 +182,8 @@ def historical_bar_transfer_fields(period: str) -> tuple[str, ...]:
 
   if period == "tick":
     return HISTORICAL_TICK_TRANSFER_FIELDS
+  if period == "1d":
+    return (*HISTORICAL_KLINE_TRANSFER_FIELDS, "upperLimit", "lowerLimit")
   if period in {"1m", "1d"}:
     return HISTORICAL_KLINE_TRANSFER_FIELDS
   raise ValueError(f"unsupported historical bar period: {period}")

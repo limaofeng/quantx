@@ -7,6 +7,9 @@ from quantx_infrastructure.repositories.divid_factor_repository import (
   divid_factor_codes_sha256,
   divid_factor_rows_sha256,
 )
+from quantx_infrastructure.services.data_exchange_reference import (
+  reference_factor_coverage,
+)
 from quantx_infrastructure.services.divid_factor_evidence import (
   DividFactorEvidence,
   current_rows_match_evidence,
@@ -82,6 +85,35 @@ def _factor_row(
     Decimal("0"),
     Decimal("0"),
     Decimal(dr),
+  )
+
+
+def test_reference_factor_coverage_distinguishes_stale_invalid_and_changed_rows():
+  code = "600000.SH"
+  rows = [_factor_row(code, "20250115")]
+  proof = {
+    "request_id": "reference-audit",
+    "request_payload": _factor_payload([code]),
+    "status": "COMPLETED",
+    "expected_chunks": 1,
+    "received_chunks": 1,
+    "completed_at": datetime(2025, 2, 1),
+    "ingestion_result": _factor_ingestion([code], rows),
+  }
+  def coverage(value=proof, current=rows, day=date(2025, 1, 31)):
+    return reference_factor_coverage(value, current, code=code, day=day)
+
+  assert coverage()["status"] == "VERIFIED"
+  assert coverage(day=date(2025, 2, 1)) == {
+    "status": "UNVERIFIED",
+    "reason": "COVERAGE_END_BEFORE_AS_OF",
+    "audited_end_date": "2025-01-31",
+  }
+  assert coverage(None)["reason"] == "AUDIT_MISSING"
+  assert coverage({**proof, "received_chunks": 0})["reason"] == "AUDIT_INVALID"
+  assert coverage(current=[])["reason"] == "CURRENT_ROWS_MISMATCH"
+  assert coverage(current=[_factor_row(code, "20250115", dr="2")])["reason"] == (
+    "CURRENT_ROWS_MISMATCH"
   )
 
 

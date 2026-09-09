@@ -37,8 +37,6 @@ FIELDS = (
   "volume",
   "pvolume",
   "stock_status",
-  "up_stop_price",
-  "down_stop_price",
 )
 
 
@@ -59,6 +57,24 @@ def _source_row(tick, preserve_raw):
     row = {key: _archive_value(value) for key, value in row.items()}
     row["last_close"] = _archive_value(getattr(tick, "last_close", None))
   return row
+
+
+async def _daily_limits(history, code, day):
+  daily = await history.get_kline_data(
+    stock_code=code,
+    period="1d",
+    start_time=datetime.combine(day, time.min, SHANGHAI),
+    end_time=datetime.combine(day, time.max, SHANGHAI),
+    limit=2,
+  )
+  if len(daily) > 1 or any(
+    bar.time.astimezone(SHANGHAI).date() != day for bar in daily
+  ):
+    raise ValueError("BACKTEST_DAILY_REFERENCE_INVALID")
+  return {
+    key: _archive_value(getattr(daily[0], key, None)) if daily else None
+    for key in ("up_stop_price", "down_stop_price")
+  }
 
 
 def _publish_shared(path, content):
@@ -188,13 +204,16 @@ class BacktestDataset:
           if self.history is None:
             raise ValueError("BACKTEST_HISTORY_READER_REQUIRED")
           rows_read = []
+          limits = await _daily_limits(
+            self.history, part["code"], date.fromisoformat(day)
+          )
           async for page in self.history.iter_tick_pages(
             stock_code=part["code"],
             start_time=datetime.combine(date.fromisoformat(day), time.min, SHANGHAI),
             end_time=datetime.combine(date.fromisoformat(day), time.max, SHANGHAI),
           ):
             rows_read.extend(
-              _source_row(tick, material["preserve_raw"]) for tick in page
+              {**_source_row(tick, material["preserve_raw"]), **limits} for tick in page
             )
           content = {"rows": rows_read}
         else:
@@ -272,6 +291,7 @@ async def acquire_backtest_dataset(
       missing_references = {}
       reason = None
       try:
+        limits = await _daily_limits(history, code, day)
         async for page in history.iter_tick_pages(
           stock_code=code,
           start_time=datetime.combine(day, time.min, SHANGHAI),
@@ -279,6 +299,7 @@ async def acquire_backtest_dataset(
         ):
           for tick in page:
             row = _source_row(tick, preserve_raw)
+            row.update(limits)
             identity = (row["source_time_ms"], row["tick_ordinal"])
             if preserve_raw:
               if (
