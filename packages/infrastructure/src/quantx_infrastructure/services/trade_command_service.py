@@ -3683,6 +3683,7 @@ class TradeCommandService:
     request_metadata: Mapping[str, Any],
     manual_live: bool = False,
     t_order_parent_client_id: str = "",
+    commit: bool = True,
   ) -> str:
     """Persist one complete READY request before entering the account queue."""
 
@@ -3786,7 +3787,10 @@ class TradeCommandService:
     metadata["risk_increase_order_request"] = durable_request
     intent.intent_metadata = metadata
     intent.status = "EXECUTION_READY"
-    await self.db.commit()
+    if commit:
+      await self.db.commit()
+    else:
+      await self.db.flush()
     return str(intent.id)
 
   @staticmethod

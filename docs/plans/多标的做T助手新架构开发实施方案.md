@@ -822,6 +822,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   审批边界为替身，分别由共享审查/确认测试覆盖，不视为完整券商或无替身整链验收。
   证据 `.codex_screenshots/p6-live-{review-capacity,entry-review,review-regression}.log`。
   下一步：审查结果持久化、请求生成/账户队列调度及行情变化前置撤销，并补无替身隔离整链。
+- LIVE 审查暂存组件已实现：公共请求暂存支持 caller-commit，在同一 savepoint 写完整
+  risk-increase-order-request.v1 与 LIVE_ENTRY_REVIEWED 审计，提交前同步行情校验失败
+  或审计写入失败均整体回滚。请求使用 FIX_PRICE，携带 TEntryOrderPolicy.v1 与市场价格
+  边界；公共解析器和最终订单策略校验可读取。相同审查可重放，容量指纹改变禁止覆写旧请求。
+  48 项相关回归通过、Ruff 通过；5 项暂存测试替换审查器，真实验证事务/审计/请求解析/
+  订单策略，未冒充无替身整链。证据 `.codex_screenshots/p6-live-{request-staging,staging-regression}.log`。
+  尚未注册 Engine 入口：先补出队前最新行情/审查证据复核、旧请求失效处理，再接账户队列。
 - 剩余开发顺序：
   人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
