@@ -232,3 +232,34 @@ async def test_canary_binds_only_the_explicitly_approved_instruments(sessions):
   assert [entry.instrument_code for entry in supervisor._bindings[key].universe] == [
     "600000.SH"
   ]
+
+
+@pytest.mark.parametrize("fail_profile", [False, True])
+async def test_cold_running_binding_revokes_durable_ready(sessions, monkeypatch, fail_profile):
+  key = await seed(sessions)
+  async with sessions() as db, db.begin():
+    row = await db.get(TAssistantExecutionRecord, key)
+    row.status = "RUNNING"
+    row.started_at = NOW
+    row.entry_readiness = "READY"
+    row.entry_readiness_reasons = []
+  supervisor = TAssistantLiveSupervisor(
+    quote_hub=FakeWholeQuoteHub(), session_factory=sessions, clock=lambda: NOW + timedelta(seconds=1)
+  )
+  if fail_profile:
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+      "quantx_engine.t_assistant_live_supervisor.TTradeOpportunityRuntimeService.load_reference_profile",
+      AsyncMock(side_effect=ValueError("PROFILE_UNAVAILABLE")),
+    )
+    with pytest.raises(ValueError, match="PROFILE_UNAVAILABLE"):
+      await supervisor.reconcile(execution_id=key, universe=UNIVERSE, legacy_active=False)
+    assert key not in supervisor._bindings
+  else:
+    await supervisor.reconcile(execution_id=key, universe=UNIVERSE, legacy_active=False)
+  async with sessions() as db:
+    row = await db.get(TAssistantExecutionRecord, key)
+    assert row.status == "RUNNING"
+    assert row.entry_readiness == "DEGRADED"
+    assert row.entry_readiness_reasons == ["LIVE_READY_RECOVERY_REQUIRED"]
+    assert await db.scalar(select(func.count(TradeCommandOutbox.message_id))) == 0

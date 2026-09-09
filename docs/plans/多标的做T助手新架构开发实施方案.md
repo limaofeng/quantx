@@ -773,7 +773,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   两项入口独立于做 T 控制状态面板；27 项原生定向测试、界面构建和实际 Caddy 契约生成通过，
   Web check/lint/test:run/build 通过。证据 `.codex_screenshots/p6-account-control-*`。
   本次仅开发与模拟器验证，未调用真实账户控制 mutation。
-- 剩余开发顺序：RUNNING 恢复入场门禁、
+- RUNNING 冷恢复门禁已实现：域模型/数据库允许 RUNNING+DEGRADED，保持执行身份和
+  started_at；冷绑定先在锁事务提交入场撤销，再重建配置/资料，后续失败不恢复旧 READY。
+  恢复需原窗口内首次 READY 事件、原审批链、新鲜已提交周期、行情预热、同一账户 cut
+  和唯一实盘 Agent 重新通过；不要求重启仍处于最初维护窗口。
+  51 项相关回归通过，新增重建失败负例后 supervisor 9 项通过（合计覆盖 52 项）；Ruff 通过。
+  开发库备份归档已校验，0073 迁移成功；首次表名错误事务回滚后修复，不影响业务记录。
+  证据 `.codex_screenshots/p6-running-*`。未重启生产或启用新 LIVE 入场 handler。
+- 剩余开发顺序：持续行情代切换时 RUNNING 就绪撤销、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

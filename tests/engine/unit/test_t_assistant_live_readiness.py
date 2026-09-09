@@ -312,3 +312,34 @@ async def test_supervisor_rolls_back_when_market_changes_during_valuation(
     assert current.status.value == "WARMING"
     assert current.started_at is None
     assert current.readiness.reasons == ("LIVE_READY_MARKET_CHANGED",)
+
+
+async def test_running_recovery_rechecks_health_after_original_window(sessions, prepared):
+  from quantx_domain.trading.t_assistant_execution import (
+    TAssistantEntryReadinessProjection,
+  )
+
+  async with sessions() as db, db.begin():
+    original = await activate(db, prepared)
+    degraded = original.with_readiness(TAssistantEntryReadinessProjection(
+      "DEGRADED", ("LIVE_READY_RECOVERY_REQUIRED",), AT
+    ))
+    # Simulate the durable restart gate without changing execution identity/start time.
+    row = await db.get(TAssistantExecutionRecord, original.execution_id)
+    row.entry_readiness = "DEGRADED"
+    row.entry_readiness_reasons = ["LIVE_READY_RECOVERY_REQUIRED"]
+    row.state_version = degraded.state_version
+  later = AT + timedelta(minutes=2)
+  async with sessions() as db, db.begin():
+    cycle = await db.get(TAssistantDecisionCycleRecord, "cycle")
+    cycle.committed_at = later
+  changes = dict(now=later, health_observed_at=later,
+    market_capture=TMarketCapture("stream", "7", 10, later, True, ()))
+  async with sessions() as db, db.begin():
+    with pytest.raises(activation.LiveReadinessBlocked, match="ACCOUNT_OR_AGENT"):
+      await activate(db, prepared, **changes, health={**prepared[1], "agent_mode": "paper"})
+  async with sessions() as db, db.begin():
+    restored = await activate(db, prepared, **changes)
+    assert restored.execution_id == original.execution_id
+    assert restored.started_at == original.started_at
+    assert restored.readiness.readiness.value == "READY"

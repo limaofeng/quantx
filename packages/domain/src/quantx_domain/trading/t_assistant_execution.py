@@ -346,8 +346,11 @@ class TAssistantExecution:
       raise ValueError("committed cycle sequence cannot exceed assigned sequence")
     if self.status is TAssistantExecutionStatus.RUNNING and self.started_at is None:
       raise ValueError("RUNNING T-assistant execution requires started_at")
+    if self.status is TAssistantExecutionStatus.RUNNING and self.readiness.readiness not in {
+      TAssistantEntryReadiness.READY, TAssistantEntryReadiness.DEGRADED,
+    }:
+      raise ValueError("T_ASSISTANT_EXECUTION_READINESS_MISMATCH")
     expected_readiness = {
-      TAssistantExecutionStatus.RUNNING: TAssistantEntryReadiness.READY,
       TAssistantExecutionStatus.DRAINING: TAssistantEntryReadiness.DRAINING,
       TAssistantExecutionStatus.RECONCILE_REQUIRED: (
         TAssistantEntryReadiness.RECONCILE_REQUIRED
@@ -443,8 +446,11 @@ class TAssistantExecution:
     return replace(self, readiness=projection, state_version=self.state_version + 1)
 
   def activate_ready(self, *, at: datetime) -> "TAssistantExecution":
-    if self.status is not TAssistantExecutionStatus.WARMING:
-      raise ValueError("only WARMING T-assistant execution can become ready")
+    if self.status is not TAssistantExecutionStatus.WARMING and not (
+      self.status is TAssistantExecutionStatus.RUNNING
+      and self.readiness.readiness is TAssistantEntryReadiness.DEGRADED
+    ):
+      raise ValueError("only WARMING or degraded RUNNING execution can become ready")
     if at.tzinfo is None:
       raise ValueError("T-assistant readiness time must be timezone-aware")
     return replace(

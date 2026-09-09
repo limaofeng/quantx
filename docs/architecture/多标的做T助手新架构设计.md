@@ -435,7 +435,7 @@ pending/outbox 的候选和意图按稳定原因终结；已经创建 durable pe
 
 `status` 表达 execution 的持久生命周期，`entry_readiness` 是由行情健康、账户快照、
 实盘能力门、模型 binding、未决 reconcile 和时段规则计算的运行投影；UI 和运维不得把
-`RUNNING` 直接展示为“可下单”。readiness 变化必须有稳定原因和 `as_of`，但不反向篡改历史
+`RUNNING` 直接展示为“可下单”。冷恢复时允许 `RUNNING + DEGRADED`：保留原执行身份和退出义务，先持久化撤销入场就绪；重新核验审批、行情与账户事实后才回到 `READY`。readiness 变化必须有稳定原因和 `as_of`，但不反向篡改历史
 生命周期事实。
 
 `environment`、`entry_authorization`、`rollout_stage` 和模型 `scorer_mode` 是四条独立轴：只有

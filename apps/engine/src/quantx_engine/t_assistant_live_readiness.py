@@ -96,7 +96,10 @@ async def activate_live_canary_ready(
     )
     repository = TAssistantExecutionRepository(db)
     execution = await repository.get_domain(execution_id)
-    _require(row.status == "WARMING", "LIVE_READY_WARMING_REQUIRED")
+    _require(
+      row.status == "WARMING" or (row.status == "RUNNING" and row.entry_readiness == "DEGRADED"),
+      "LIVE_READY_WARMING_REQUIRED",
+    )
     prepared = await db.scalar(
       select(TAssistantExecutionEventRecord).where(
         TAssistantExecutionEventRecord.execution_id == execution_id,
@@ -130,12 +133,26 @@ async def activate_live_canary_ready(
         TAssistantExecutionEventRecord.event_key == material["approval_event_key"],
       )
     )
-    _require(
-      aware_time(approval.payload["window_start"])
-      <= now
-      < aware_time(approval.payload["window_end"]),
-      "LIVE_READY_OUTSIDE_MAINTENANCE_WINDOW",
-    )
+    if row.status == "WARMING":
+      _require(
+        aware_time(approval.payload["window_start"]) <= now < aware_time(approval.payload["window_end"]),
+        "LIVE_READY_OUTSIDE_MAINTENANCE_WINDOW",
+      )
+    else:
+      initial_ready = await db.scalar(
+        select(TAssistantExecutionEventRecord).where(
+          TAssistantExecutionEventRecord.execution_id == execution_id,
+          TAssistantExecutionEventRecord.event_type == "EXECUTION_ENTRY_READY",
+        ).order_by(TAssistantExecutionEventRecord.occurred_at).limit(1)
+      )
+      _require(
+        initial_ready is not None
+        and initial_ready.payload.get("admission_event_key") == prepared.event_key
+        and aware_time(approval.payload["window_start"]) <= _stored(initial_ready.occurred_at)
+        < aware_time(approval.payload["window_end"])
+        and _stored(initial_ready.occurred_at) <= now,
+        "LIVE_READY_INITIAL_ACTIVATION_REQUIRED",
+      )
     cycle = await db.get(
       TAssistantDecisionCycleRecord,
       cycle_id,

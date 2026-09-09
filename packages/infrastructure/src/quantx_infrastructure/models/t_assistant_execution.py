@@ -137,7 +137,7 @@ class TAssistantExecutionRecord(Base, TimestampMixin):
       name="ck_t_assistant_execution_terminal_shape",
     ),
     CheckConstraint(
-      "(status = 'RUNNING' AND entry_readiness = 'READY') OR "
+      "(status = 'RUNNING' AND entry_readiness IN ('READY','DEGRADED')) OR "
       "(status = 'DRAINING' AND entry_readiness = 'DRAINING') OR "
       "(status = 'RECONCILE_REQUIRED' AND "
       "entry_readiness = 'RECONCILE_REQUIRED') OR "

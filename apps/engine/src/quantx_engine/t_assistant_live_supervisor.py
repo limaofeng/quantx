@@ -223,6 +223,14 @@ class TAssistantLiveSupervisor:
         self.last_results.pop(execution_id, None)
         raise ValueError("T_ASSISTANT_LIVE_LEGACY_PRODUCER_ACTIVE")
       now = self.clock()
+      if previous is None:
+        # Commit revocation before profile/config reconstruction can fail or await I/O.
+        async with self.sessions() as db, db.begin():
+          execution = await TAssistantExecutionRepository(db).get_domain(execution_id)
+          if execution is None:
+            raise ValueError("T_ASSISTANT_LIVE_EXECUTION_REQUIRED")
+          await self.runtime._lock_live_source(db, execution)
+          await self._block_readiness(db, execution, "LIVE_READY_RECOVERY_REQUIRED", now)
       async with self.sessions() as db, db.begin():
         execution = await TAssistantExecutionRepository(db).get_domain(execution_id)
         if execution is None:
@@ -329,6 +337,8 @@ class TAssistantLiveSupervisor:
         rewarm=(changed | (previous.rewarm if previous else set()))
         & set(universe.instruments),
       )
+      if previous is not None and changed:
+        await self._warming_reason(self._bindings[execution_id], "LIVE_READY_RECOVERY_REQUIRED", now)
       return execution_id
 
   async def _warming_reason(self, binding, reason, now):
@@ -336,31 +346,31 @@ class TAssistantLiveSupervisor:
       repository = TAssistantExecutionRepository(db)
       execution = await repository.get_domain(binding.execution.execution_id)
       await self.runtime._lock_live_source(db, execution)
-      if execution.status.value != "WARMING" or execution.readiness.reasons == (
-        reason,
-      ):
-        binding.execution = execution
-        return
-      updated = execution.with_readiness(
-        TAssistantEntryReadinessProjection("WARMING", (reason,), now)
+      binding.execution = await self._block_readiness(db, execution, reason, now)
+
+  async def _block_readiness(self, db, execution, reason, now):
+    if execution.status.value not in {"WARMING", "RUNNING"} or execution.readiness.reasons == (reason,):
+      return execution
+    updated = execution.with_readiness(
+      TAssistantEntryReadinessProjection(
+        "DEGRADED" if execution.status.value == "RUNNING" else "WARMING", (reason,), now
       )
-      await repository.save_transition_with_event(
-        updated,
-        expected_state_version=execution.state_version,
-        event=TAssistantExecutionEvent(
-          execution.execution_id,
-          f"live-readiness:{updated.state_version}",
-          "LIVE_ENTRY_READINESS_BLOCKED",
-          now,
-          {"reason_codes": [reason]},
-        ),
-      )
-      binding.execution = updated
+    )
+    await TAssistantExecutionRepository(db).save_transition_with_event(
+      updated, expected_state_version=execution.state_version,
+      event=TAssistantExecutionEvent(
+        execution.execution_id, f"live-readiness:{updated.state_version}",
+        "LIVE_ENTRY_READINESS_BLOCKED", now, {"reason_codes": [reason]},
+      ),
+    )
+    return updated
 
   async def _try_activate(self, binding, cycle_id, capture):
     execution = binding.execution
     if (
-      execution.status.value != "WARMING"
+      (execution.status.value != "WARMING" and not (
+        execution.status.value == "RUNNING" and execution.readiness.readiness.value == "DEGRADED"
+      ))
       or execution.entry_authorization.value != "MANUAL_CONFIRM"
     ):
       return
