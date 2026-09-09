@@ -184,14 +184,14 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
   )
   async def resume(request_id: str, body: ResumeHistory):
     try:
-      progress = await app.state.store.resume_blocked_market_data_request(
+      progress = await app.state.store.resume_market_data_request(
         request_id, reason=body.reason
       )
     except RuntimeError:
       raise HTTPException(409, "HISTORY_REQUEST_NOT_RESUMABLE") from None
     return {
       "request_id": request_id,
-      "status": "UPLOADED",
+      "status": progress["status"],
       "attempt": progress["attempt"],
     }
 

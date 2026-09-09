@@ -1015,18 +1015,22 @@ class DurableRuntimeStore:
         _connection=connection,
       )
 
-  async def resume_blocked_market_data_request(
+  async def resume_market_data_request(
     self, request_id: str, *, reason: str
   ) -> dict[str, Any]:
-    """Explicit recovery preserves the frozen manifest, checkpoints and attempt history."""
+    """Explicit recovery preserves source identity and the original attempt evidence."""
+    reason = str(reason).strip()
+    if not 1 <= len(reason) <= 256:
+      raise ValueError("market-data recovery requires a bounded reason")
     now = _utcnow()
     async with self.engine.begin() as connection:
       row = (
         (
           await connection.execute(
             text("""
-        SELECT ingestion_progress FROM market_data_request
-        WHERE request_id = :id AND status = 'BLOCKED' FOR UPDATE
+        SELECT status,ingestion_progress,ingestion_result,processing_error,
+          device_id,expected_chunks,received_chunks FROM market_data_request
+        WHERE request_id = :id AND status IN ('BLOCKED','FAILED') FOR UPDATE
       """),
             {"id": request_id},
           )
@@ -1034,6 +1038,10 @@ class DurableRuntimeStore:
         .mappings()
         .one_or_none()
       )
+      if row is not None and row["status"] == "FAILED":
+        from .services.market_data_collection_recovery import resume_collection
+
+        return await resume_collection(connection, request_id, row, reason=reason)
       if row is None or not row["ingestion_progress"]:
         raise RuntimeError("market-data request is not blocked with ingestion evidence")
       progress = ingestion_transition(
@@ -1047,7 +1055,7 @@ class DurableRuntimeStore:
       """),
         {"id": request_id, "progress": json.dumps(progress), "now": now},
       )
-      return progress
+      return {**progress, "status": "UPLOADED"}
 
   async def renew_market_data_request_claim(
     self,

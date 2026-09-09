@@ -198,7 +198,7 @@ async def test_capacity_blocks_until_explicit_resume(durable_store):
   assert result["status"] == "blocked"
   assert await store.recoverable_market_data_request_ids() == []
   assert await store.claim_market_data_request("request-1") is None
-  state = await store.resume_blocked_market_data_request(
+  state = await store.resume_market_data_request(
     "request-1", reason="verified failed range after repair"
   )
   assert state["attempt"] == 2 and state["executions"] == 0
