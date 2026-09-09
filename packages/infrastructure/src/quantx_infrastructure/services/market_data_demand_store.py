@@ -63,7 +63,9 @@ class MarketDataDemandStore(DurableRuntimeStore):
         (
           await connection.execute(
             text("""
-        SELECT d.*, r.status AS source_status, e.state AS delivery_status,
+        SELECT d.*, r.status AS source_status,
+               r.ingestion_progress->>'phase' AS source_phase,
+               e.state AS delivery_status,
                clock_timestamp() AS observed_at
         FROM market_data_demand d
         LEFT JOIN market_data_request r ON r.request_id=d.source_request_id

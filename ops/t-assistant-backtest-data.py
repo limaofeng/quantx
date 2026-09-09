@@ -41,6 +41,57 @@ def configure_environment(environment: str):
   os.environ["INFLUXDB_MAX_RETRIES"] = "0"
 
 
+async def supplement_partition(code, day, wait_seconds):
+  """Submit once to local demand storage; only wait, never retry execution."""
+  from quantx_contracts.market_data_service import HistoryDemand
+  from quantx_infrastructure.services.local_market_data_client import (
+    LocalMarketDataClient,
+  )
+
+  demand = HistoryDemand(instrument=code, period="tick", trading_date=day)
+  client = LocalMarketDataClient()
+  try:
+    identity = await client.submit_history_demand(demand)
+    print(
+      json.dumps({"event": "SUPPLEMENT_ACCEPTED", "demand_id": identity}), flush=True
+    )
+    result = {"status": "pending", "demand_id": identity}
+    try:
+      async with asyncio.timeout(wait_seconds):
+        while True:
+          state = await client.history_demand(identity, expected_partition=demand)
+          if state is None:
+            raise ValueError("BACKTEST_HISTORY_DEMAND_MISSING")
+          result.update(
+            source_request_id=state.source_request_id,
+            delivery_id=state.delivery_id,
+            source_status=state.source_status,
+            source_phase=state.source_phase,
+            delivery_status=state.delivery_status,
+            demand_reason=state.reason_code,
+            reason=state.reason_code,
+          )
+          if (
+            state.source_kind == "AGENT"
+            and state.source_request_id is not None
+            and state.source_status == "COMPLETED"
+            and state.source_phase == "VERIFIED"
+          ) or (
+            state.source_kind == "REMOTE"
+            and state.delivery_id is not None
+            and state.delivery_status == "LOCAL_VERIFIED"
+          ):
+            return {**result, "status": "success"}
+          terminal = {"FAILED", "CANCELLED", "INCOMPLETE"}
+          if state.source_status in terminal or state.delivery_status in terminal:
+            return {**result, "status": "failed"}
+          await asyncio.sleep(2)
+    except TimeoutError:
+      return {**result, "reason": "HISTORY_WAIT_TIMEOUT"}
+  finally:
+    await client.close()
+
+
 async def acquire(args):
   # Process-local controls only. No service configuration is modified.
   configure_environment(args.environment)
@@ -73,10 +124,6 @@ async def acquire(args):
     from datetime import datetime, time
 
     from quantx_domain.clock import SHANGHAI
-    from quantx_infrastructure.runtime_store import DurableRuntimeStore
-    from quantx_infrastructure.services.market_data_request_service import (
-      request_agent_market_data,
-    )
 
     pages = LocalHistoricalTickReader().iter_tick_pages(
       stock_code=codes[0],
@@ -89,19 +136,6 @@ async def acquire(args):
     finally:
       await pages.aclose()
     if not cached:
-      store = DurableRuntimeStore()
-      try:
-        available = bool(await store.available_market_data_device())
-      finally:
-        await store.close()
-      if not available:
-        print(
-          json.dumps(
-            {"event": "SUPPLEMENT_SKIPPED", "reason": "market_data_agent_unavailable"}
-          ),
-          flush=True,
-        )
-        return 2
       print(
         json.dumps(
           {
@@ -113,32 +147,8 @@ async def acquire(args):
         ),
         flush=True,
       )
-      result = await request_agent_market_data(
-        payload={
-          "operation": "bars",
-          "download": True,
-          "stock_list": list(codes),
-          "start_time": start.strftime("%Y%m%d"),
-          "end_time": end.strftime("%Y%m%d"),
-          "periods": ["tick"],
-        },
-        timeout_seconds=args.wait_seconds,
-        idempotency_scope="p5-tick-cache-probe-v1",
-        retry_failed_requests=False,
-      )
-      print(
-        json.dumps(
-          {
-            "event": "SUPPLEMENT_RESULT",
-            "status": result.get("status"),
-            "request_id": result.get("request_id"),
-            "point_count": result.get("point_count"),
-            "reason": result.get("reason"),
-          },
-          ensure_ascii=True,
-        ),
-        flush=True,
-      )
+      result = await supplement_partition(codes[0], start, args.wait_seconds)
+      print(json.dumps({"event": "SUPPLEMENT_RESULT", **result}), flush=True)
       if result.get("status") != "success":
         return 2
   print(
@@ -191,7 +201,9 @@ async def acquire(args):
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
-    "--environment", choices=("development", "testing"), default="development",
+    "--environment",
+    choices=("development", "testing"),
+    default="development",
     help="Explicit data environment; macOS only permits local development services",
   )
   parser.add_argument(
@@ -203,7 +215,7 @@ def main():
   parser.add_argument(
     "--freeze",
     action="store_true",
-    help="Explicit shared snapshot; default stores only a verified InfluxDB reference",
+    help="Explicit shared snapshot; default stores only a verified local history reference",
   )
   parser.add_argument(
     "--probe", action="store_true", help="Read only first symbol and first trading day"
@@ -217,7 +229,7 @@ def main():
     "--wait-seconds",
     type=int,
     default=60,
-    help="Wait on the same idempotent request, at most 600 seconds",
+    help="Wait on the same durable demand, at most 600 seconds",
   )
   args = parser.parse_args()
   if not 1 <= args.wait_seconds <= 600:

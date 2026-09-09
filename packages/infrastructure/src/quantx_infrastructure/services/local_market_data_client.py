@@ -13,7 +13,13 @@ from quantx_contracts.history_collection_api import (
   HistoryCollectionResult,
   HistoryCollectionSubmission,
 )
-from quantx_contracts.market_data_service import HistoryPage, HistoryRead
+from quantx_contracts.market_data_service import (
+  HistoryDemand,
+  HistoryDemandAccepted,
+  HistoryDemandStatus,
+  HistoryPage,
+  HistoryRead,
+)
 
 
 class LocalMarketDataClient:
@@ -73,6 +79,24 @@ class LocalMarketDataClient:
 
   async def close(self):
     await self.client.aclose()
+
+  async def submit_history_demand(self, demand: HistoryDemand) -> str:
+    value = await self._json(
+      "POST",
+      "/market-data/internal/v1/demands",
+      json=demand.model_dump(mode="json"),
+    )
+    return HistoryDemandAccepted.model_validate(value).demand_id
+
+  async def history_demand(self, demand_id: str, *, expected_partition: HistoryDemand):
+    identity = HistoryDemandAccepted(demand_id=demand_id).demand_id
+    value = await self._json("GET", "/market-data/internal/v1/demands/" + identity)
+    if value is None:
+      return None
+    result = HistoryDemandStatus.model_validate(value)
+    if result.demand_id != identity or result.partition != expected_partition:
+      raise ValueError("local history demand identity mismatch")
+    return result
 
   async def read_history(self, request: HistoryRead) -> HistoryPage:
     value = await self._json(

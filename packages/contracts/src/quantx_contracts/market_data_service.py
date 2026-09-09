@@ -42,6 +42,7 @@ class HistoryDemandStatus(HistoryDemandAccepted):
   source_request_id: str | None
   delivery_id: str | None
   source_status: str | None
+  source_phase: str | None
   delivery_status: str | None
   reason_code: str | None
   next_probe_at: AwareDatetime | None
