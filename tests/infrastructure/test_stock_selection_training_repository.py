@@ -309,6 +309,7 @@ async def test_claim_progress_terminal_and_optimistic_lock(session_factory) -> N
     with pytest.raises(TrainingStateConflict):
       await repository.update_progress(
         claimed.run_id,
+        expected_flow_run_id="prefect-1",
         phase="DATASET_BUILD",
         completed_units=1,
         total_units=2,
@@ -316,6 +317,7 @@ async def test_claim_progress_terminal_and_optimistic_lock(session_factory) -> N
       )
     progressed = await repository.update_progress(
       claimed.run_id,
+      expected_flow_run_id="prefect-1",
       phase="DATASET_BUILD",
       completed_units=1,
       total_units=2,
@@ -324,12 +326,14 @@ async def test_claim_progress_terminal_and_optimistic_lock(session_factory) -> N
     with pytest.raises(TrainingRepositoryError, match="backwards"):
       await repository.update_progress(
         claimed.run_id,
+        expected_flow_run_id="prefect-1",
         phase="PREFLIGHT",
         completed_units=0,
         total_units=2,
       )
     completed = await repository.complete_run(
       claimed.run_id,
+      expected_flow_run_id="prefect-1",
       run_key="research-1",
       artifact_manifest_sha256="1" * 64,
       expected_state_version=progressed.state_version,
@@ -337,6 +341,7 @@ async def test_claim_progress_terminal_and_optimistic_lock(session_factory) -> N
     assert completed.status == "SUCCEEDED"
     assert await repository.complete_run(
       claimed.run_id,
+      expected_flow_run_id="prefect-1",
       run_key="research-1",
       artifact_manifest_sha256="1" * 64,
     ) == completed
@@ -370,11 +375,67 @@ async def test_cancel_queued_and_running_runs_do_not_publish_artifacts(session_f
         expected_state_version=requested.state_version,
         idempotency_key="cancel-r-different",
       )
-    terminal = await repository.mark_cancelled(running.run_id)
+    terminal = await repository.mark_cancelled(running.run_id, expected_flow_run_id="prefect")
     assert terminal.status == "CANCELLED"
     with pytest.raises(TrainingRepositoryError):
       await repository.complete_run(
         running.run_id,
+        expected_flow_run_id="prefect",
         run_key="should-not-publish",
         artifact_manifest_sha256="2" * 64,
       )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["update_progress", "complete_run", "fail_run", "mark_cancelled"])
+async def test_old_executor_cannot_write_after_persisted_ownership_changes(session_factory, operation):
+  from sqlalchemy import update
+
+  async with session_factory() as db:
+    repository = StockSelectionTrainingRepository(db)
+    await repository.certify_dataset(DATASET)
+    spec = await repository.create_spec(spec_values())
+    await repository.create_run(run_values(spec.spec_id, "owned-run", "owned-key"))
+    cached = await repository.claim_next_queued("old-executor")
+    assert cached.prefect_flow_run_id == "old-executor"
+    async with session_factory() as second:
+      await second.execute(update(StockSelectionTrainingRun).where(
+        StockSelectionTrainingRun.run_id == "owned-run"
+      ).values(prefect_flow_run_id="new-executor", state_version=cached.state_version + 1))
+      await second.commit()
+    payloads = {
+      "update_progress": dict(phase="DATASET_BUILD", completed_units=1, total_units=2),
+      "complete_run": dict(run_key="result", artifact_manifest_sha256="a" * 64),
+      "fail_run": dict(error_code="STALE_FAILURE", error_message="old executor"),
+      "mark_cancelled": {},
+    }
+    with pytest.raises(TrainingStateConflict, match="ownership lost"):
+      await getattr(repository, operation)("owned-run", expected_flow_run_id="old-executor", **payloads[operation])
+    current = await repository.get_run("owned-run")
+    assert current.prefect_flow_run_id == "new-executor"
+    assert current.status == "RUNNING"
+    assert current.artifact_manifest_sha256 is None
+
+
+@pytest.mark.asyncio
+async def test_poll_refreshes_external_cancellation_instead_of_session_cache(session_factory):
+  async with session_factory() as db:
+    repository = StockSelectionTrainingRepository(db)
+    await repository.certify_dataset(DATASET)
+    spec = await repository.create_spec(spec_values())
+    await repository.create_run(run_values(spec.spec_id, "cancel-observed", "cancel-key"))
+    cached = await repository.claim_next_queued("executor")
+    assert cached.cancel_requested_at is None
+    async with session_factory() as second:
+      await StockSelectionTrainingRepository(second).request_cancel(
+        "cancel-observed", idempotency_key="cancel", expected_state_version=cached.state_version
+      )
+    assert (await repository.get_run("cancel-observed")).cancel_requested_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", ["", "   ", "x" * 129])
+async def test_claim_rejects_missing_or_truncated_execution_identity(session_factory, identity):
+  async with session_factory() as db:
+    with pytest.raises(TrainingRepositoryError, match="execution identity"):
+      await StockSelectionTrainingRepository(db).claim_next_queued(identity)

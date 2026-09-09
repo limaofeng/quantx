@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -19,6 +20,7 @@ from prefect import flow, get_run_logger
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.repositories.stock_selection_training_repository import (
   StockSelectionTrainingRepository,
+  TrainingStateConflict,
 )
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
@@ -886,6 +888,25 @@ def _process_alive(process: Any) -> bool:
     return False
 
 
+async def _stop_research_process(process: Any, *, grace_seconds: float = 5) -> None:
+  def stop() -> None:
+    if not _process_alive(process):
+      return
+    try:
+      process.terminate()
+    except ProcessLookupError:
+      if process.poll() is not None:
+        return
+      raise
+    try:
+      process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+      process.kill()
+      process.wait(timeout=grace_seconds)
+
+  await asyncio.to_thread(stop)
+
+
 def _redact_sensitive_text(value: Any) -> str:
   """Remove credentials and complete absolute paths from worker text."""
 
@@ -971,6 +992,7 @@ async def recover_lost_training_runs(repository: Any, *, now: datetime | None = 
     try:
       await repository.fail_run(
         run_id,
+        expected_flow_run_id=str(_value(row, "prefect_flow_run_id", "") or ""),
         error_code="WORKER_PROCESS_LOST",
         error_message="worker process no longer exists after restart",
         environment_evidence=_value(row, "environment_evidence", {}) or {},
@@ -994,6 +1016,7 @@ async def _run_claimed_job(
   poll_interval_seconds: float = 0.25,
 ) -> dict[str, Any]:
   run_id = str(_value(run, "run_id", ""))
+  execution_owner = str(_value(run, "prefect_flow_run_id", "") or "")
   control_directory: Path | None = None
   process: Any | None = None
   child_started = False
@@ -1054,6 +1077,11 @@ async def _run_claimed_job(
     cancel_sent = False
     while _process_alive(process):
       current = await repository.get_run(run_id)
+      if (
+        _value(current, "status") != "RUNNING"
+        or _value(current, "prefect_flow_run_id") != execution_owner
+      ):
+        raise TrainingStateConflict("training execution ownership lost")
       if _value(current, "cancel_requested_at") is not None and not cancel_sent:
         _write_cancel_request(cancel_path)
         cancel_sent = True
@@ -1067,6 +1095,7 @@ async def _run_claimed_job(
           if marker != last_progress:
             await repository.update_progress(
               run_id,
+              expected_flow_run_id=execution_owner,
               phase=phase,
               completed_units=completed,
               total_units=total,
@@ -1090,6 +1119,7 @@ async def _run_claimed_job(
     if cancelled:
       await repository.mark_cancelled(
         run_id,
+        expected_flow_run_id=execution_owner,
         completed_at=_now(),
         error_code="CANCELLED_BY_USER",
         error_message="training cancellation requested",
@@ -1111,6 +1141,7 @@ async def _run_claimed_job(
         gates = result.get("gate_summary") or {}
         await repository.complete_run(
           run_id,
+          expected_flow_run_id=execution_owner,
           run_key=stable_key,
           artifact_manifest_sha256=manifest,
           environment_evidence=environment,
@@ -1124,6 +1155,7 @@ async def _run_claimed_job(
       error_code = str(result.get("error_code") or "RESEARCH_PROCESS_FAILED")[:64]
     await repository.fail_run(
       run_id,
+      expected_flow_run_id=execution_owner,
       error_code=error_code,
       error_message=_redact_sensitive_text(
         str(result.get("error_message") or _tail_logs(control_directory))
@@ -1134,18 +1166,23 @@ async def _run_claimed_job(
       completed_at=_now(),
     )
     return {"run_id": run_id, "status": "FAILED", "error_code": error_code}
+  except TrainingStateConflict:
+    if process is not None and _process_alive(process):
+      await _stop_research_process(process)
+    return {"run_id": run_id, "status": "OWNERSHIP_LOST"}
   except asyncio.CancelledError:
     try:
       if process is not None and _process_alive(process):
-        process.terminate()
+        await _stop_research_process(process)
     finally:
       raise
   except Exception as exc:
     try:
       if process is not None and _process_alive(process):
-        process.terminate()
+        await _stop_research_process(process)
       await repository.fail_run(
         run_id,
+        expected_flow_run_id=execution_owner,
         error_code="WORKER_DISPATCH_FAILED" if child_started else "TRAINING_EVIDENCE_INVALID",
         error_message=_redact_sensitive_text(
           (
@@ -1206,7 +1243,7 @@ async def stock_selection_training_dispatch_flow(
     flow_id = (
       prefect_flow_run_id
       or os.environ.get("PREFECT_FLOW_RUN_ID", "")
-      or "stock-selection-training-dispatch"
+      or str(uuid.uuid4())
     )
     run = await repository.claim_next_queued(flow_id, timestamp)
     if run is None:
@@ -1225,6 +1262,7 @@ async def stock_selection_training_dispatch_flow(
     if spec is None or dataset is None:
       await repository.fail_run(
         str(run.run_id),
+        expected_flow_run_id=flow_id,
         error_code="TRAINING_EVIDENCE_MISSING",
         error_message="immutable training spec or certified dataset is missing",
         completed_at=timestamp,

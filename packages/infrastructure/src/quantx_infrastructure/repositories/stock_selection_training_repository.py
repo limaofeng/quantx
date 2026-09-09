@@ -773,7 +773,7 @@ class StockSelectionTrainingRepository:
 
   async def get_run(self, run_id: str) -> StockSelectionTrainingRun | None:
     return _normalize_row_timestamps(
-      await self.db.get(StockSelectionTrainingRun, str(run_id))
+      await self.db.get(StockSelectionTrainingRun, str(run_id), populate_existing=True)
     )
 
   async def get_run_by_run_key(self, run_key: str) -> StockSelectionTrainingRun | None:
@@ -1126,6 +1126,9 @@ class StockSelectionTrainingRepository:
     prefect_flow_run_id: str,
     now: datetime | None = None,
   ) -> StockSelectionTrainingRun | None:
+    owner = str(prefect_flow_run_id or "").strip()
+    if not owner or len(owner) > 128:
+      raise TrainingRepositoryError("claim requires a non-empty execution identity of at most 128 characters")
     current = _as_utc(now or _utcnow(), "now")
     running = list(
       (
@@ -1157,7 +1160,7 @@ class StockSelectionTrainingRepository:
     row.status = "RUNNING"
     row.phase = "PREFLIGHT"
     row.started_at = current
-    row.prefect_flow_run_id = str(prefect_flow_run_id or "")[:128] or None
+    row.prefect_flow_run_id = owner
     row.state_version += 1
     try:
       await self.db.commit()
@@ -1173,6 +1176,7 @@ class StockSelectionTrainingRepository:
     self,
     run_id: str,
     *,
+    expected_flow_run_id: str,
     phase: str,
     completed_units: int,
     total_units: int | None = None,
@@ -1183,6 +1187,7 @@ class StockSelectionTrainingRepository:
     row = await self._locked_run(run_id)
     if row is None:
       raise TrainingNotFound("training run does not exist")
+    self._assert_execution_owner(row, expected_flow_run_id)
     if row.status != "RUNNING":
       raise TrainingRepositoryError("only RUNNING runs accept progress")
     self._assert_version(row, expected_state_version)
@@ -1269,6 +1274,7 @@ class StockSelectionTrainingRepository:
     self,
     run_id: str,
     *,
+    expected_flow_run_id: str,
     completed_at: datetime | None = None,
     error_code: str | None = "CANCELLED_BY_USER",
     error_message: str | None = None,
@@ -1277,6 +1283,7 @@ class StockSelectionTrainingRepository:
     row = await self._locked_run(run_id)
     if row is None:
       raise TrainingNotFound("training run does not exist")
+    self._assert_execution_owner(row, expected_flow_run_id)
     timestamp = _as_utc(completed_at or _utcnow(), "completed_at")
     if row.status == "CANCELLED":
       if (
@@ -1304,6 +1311,7 @@ class StockSelectionTrainingRepository:
     self,
     run_id: str,
     *,
+    expected_flow_run_id: str,
     run_key: str,
     artifact_manifest_sha256: str,
     environment_evidence: Mapping[str, Any] | None = None,
@@ -1328,6 +1336,7 @@ class StockSelectionTrainingRepository:
     row = await self._locked_run(run_id)
     if row is None:
       raise TrainingNotFound("training run does not exist")
+    self._assert_execution_owner(row, expected_flow_run_id)
     if row.status == "SUCCEEDED":
       facts = (
         row.run_key == stable_key,
@@ -1341,6 +1350,8 @@ class StockSelectionTrainingRepository:
       raise TrainingRepositoryError("successful terminal fact conflicts")
     if row.status in {"FAILED", "CANCELLED"}:
       raise TrainingRepositoryError("failed or cancelled training run cannot succeed")
+    if row.status != "RUNNING":
+      raise TrainingRepositoryError("only RUNNING runs can succeed")
     if row.cancel_requested_at is not None:
       raise TrainingRepositoryError("cancelled training run cannot succeed")
     self._assert_version(row, expected_state_version)
@@ -1366,6 +1377,7 @@ class StockSelectionTrainingRepository:
     self,
     run_id: str,
     *,
+    expected_flow_run_id: str,
     error_code: str,
     error_message: str,
     environment_evidence: Mapping[str, Any] | None = None,
@@ -1388,6 +1400,7 @@ class StockSelectionTrainingRepository:
     row = await self._locked_run(run_id)
     if row is None:
       raise TrainingNotFound("training run does not exist")
+    self._assert_execution_owner(row, expected_flow_run_id)
     if row.status == "FAILED":
       facts = (
         row.error_code == code,
@@ -1422,8 +1435,14 @@ class StockSelectionTrainingRepository:
       select(StockSelectionTrainingRun)
       .where(StockSelectionTrainingRun.run_id == str(run_id))
       .with_for_update()
+      .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
+
+  @staticmethod
+  def _assert_execution_owner(row: StockSelectionTrainingRun, expected: str) -> None:
+    if not expected or row.prefect_flow_run_id != expected:
+      raise TrainingStateConflict("training execution ownership lost")
 
   @staticmethod
   def _assert_version(row: StockSelectionTrainingRun, expected: int | None) -> None:
