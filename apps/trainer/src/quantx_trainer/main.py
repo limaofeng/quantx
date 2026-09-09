@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
       "resume",
       "admission-status",
       "serve",
+      "status",
     ],
   )
   parser.add_argument("--config", type=Path, required=True)
@@ -40,6 +41,13 @@ def main(argv: list[str] | None = None) -> int:
   except TrainerConfigurationError as exc:
     print(f"Trainer configuration rejected: {exc}", file=sys.stderr)
     return 2
+
+  if args.command == "status":
+    from quantx_trainer.service_status import service_status
+
+    result = service_status(config.state_root, args.config)
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["service"] in {"ALIVE", "OFFLINE"} else 3
 
   if args.command == "serve":
     from quantx_trainer.service import serve

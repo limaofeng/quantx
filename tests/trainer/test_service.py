@@ -41,8 +41,9 @@ def test_serve_isolates_environment_holds_lease_and_preserves_drain(
     if failure == "preflight":
       raise RuntimeError("preflight rejected")
 
-  async def run(actual, path):
+  async def run(actual, path, report):
     events.append("worker")
+    report("WORKER_LOOP")
     assert actual is config and path == config_path
     assert Path.cwd() == config.code_root
     assert os.environ["PREFECT_API_URL"] == config.prefect_api_url

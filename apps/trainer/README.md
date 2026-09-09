@@ -224,3 +224,8 @@ python -m quantx_trainer.main serve --config C:\Users\limao\QuantXTraining\state
 `serve` 获取 `state_root/service` 的操作系统单实例锁，隔离环境变量和 Prefect 本地配置目录，执行全部预检，再登记 `trainer-preparation`、`stock-selection-training-dispatch`、`stock-selection-training-capability` 三个每分钟部署。登记全部成功才启动专用 ProcessWorker；不存在 Pool 时不自动创建。部署仅保存显式配置文件路径与工作目录，不保存数据库连接信息。服务允许三个流程并行，实际计算仍由各流程的领取与主机资源门禁控制。
 
 Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serve` 保留已有排空标记；预检/登记/运行失败退出，单实例锁随进程退出释放。它是前台运行入口，尚不替代计划要求的后台 up/down/status/logs、完整排空和停止验收。当前仅完成本地 SDK 部署契约与故障测试，未启动远端 Worker。
+
+
+服务运行时可在另一终端执行 `python -m quantx_trainer.main status --config <同一配置绝对路径>`。查询不连接开发控制面，返回 `ALIVE`、`OFFLINE`、`STALE` 或 `UNKNOWN`。只有单实例锁占用、主机/PID/创建时间/解释器/配置哈希匹配且本地心跳不超过 30 秒，才报告 `ALIVE`；证据每 10 秒刷新。`phase` 区分预检、部署注册、进入 Worker 循环和退出阶段；不代表控制面或 GPU 健康。`OFFLINE` 表示查询时服务锁可获取，残留状态文件不会让服务显示在线。
+
+所有服务状态均携带 `execution_state=NOT_INSPECTED`，不能用作计算排空或升级许可。`UNKNOWN` / `STALE` 的命令退出码为 3；明确的本地在线/离线状态退出码为 0。
