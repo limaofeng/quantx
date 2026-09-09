@@ -36,6 +36,7 @@ db = portfolio_tests.db
   "fault,reason",
   [
     (None, None),
+    ("staged", None),
     ("expiry", None),
     ("claimed", "T_NO_REPLACEABLE_OLD_POSITION"),
     ("disabled", "T_ACCOUNT_ENTRY_DISABLED"),
@@ -80,6 +81,12 @@ async def test_replacement_keeps_existing_exposure_and_reads_current_risk(
       if fault == "unobserved"
       else [dict(account_id="account", order_id=101)],
     )
+    parent = await db.get(PendingTradeOrder, "client")
+    parent.t_order_original_created_at = proof.original_created_at.replace(tzinfo=None)
+    parent.created_at = proof.original_created_at.replace(tzinfo=None)
+    parent.order_type = "FIX_PRICE"
+    parent.updated_at = NOW
+    flag_modified(parent, "updated_at")
     db.add(
       TTradeBatch(
         batch_id="batch",
@@ -257,5 +264,42 @@ async def test_replacement_keeps_existing_exposure_and_reads_current_risk(
         assert result.portfolio_input_fingerprint
         authority.assert_awaited_once()
         assert authority.call_args.kwargs["volume"] == 100
-    assert intent.status == "PARTIAL_FILLED"
+    if fault == "staged":
+      from quantx_infrastructure.services.live_entry_dispatch_review import (
+        revalidate_live_entry_dispatch,
+      )
+      from quantx_infrastructure.services.live_entry_replacement_staging import (
+        stage_live_entry_replacement,
+      )
+
+      staged = await stage_live_entry_replacement(
+        db,
+        client_order_id="client",
+        market_data=market,
+        market_mark_reader=Marks(),
+        now=NOW,
+        validate_market=lambda: None,
+      )
+      assert staged.status == "STAGED"
+
+      async def fresh_review(**kwargs):
+        return await review_module.LiveEntryReplacementExecutionReview(db).review(
+          client_order_id="client",
+          market_data=market,
+          market_mark_reader=Marks(),
+          now=kwargs["now"],
+        )
+
+      again = await revalidate_live_entry_dispatch(
+        db,
+        intent=intent,
+        volume=100,
+        limit_price=Decimal("10.03"),
+        now=NOW,
+        fresh_review=fresh_review,
+      )
+      assert again.outcome == "REVIEWED" and again.request.volume == 100
+    assert intent.status == (
+      "EXECUTION_READY" if fault == "staged" else "PARTIAL_FILLED"
+    )
     assert intent.executed_volume == 100

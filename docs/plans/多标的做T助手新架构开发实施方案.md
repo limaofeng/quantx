@@ -896,8 +896,20 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   68 项受影响回归通过，证据 `.codex_screenshots/p6-live-replacement-risk.log`。
   风险组合测试替换确认预审/最终授权边界，实际验证 SQLite 持仓、组合、归因、数量和风控；
   原确认预审另有真实确认/分配测试，尚未将两组与暂存/admission/Engine 合为完整续单链。
+- LIVE 续单证据暂存与公共发送前校验已接入：在 savepoint 内原子记录独立审查事件、原请求
+  和新的 READY 请求，继承 intent/owner/batch/trace/parent，清除已完成的前次 admission 投影。
+  同父单刷新保留旧审查事件；行情见证或审计写入失败回滚。共享队列可解码续单请求，发送前
+  严格核验事件/父单/累计成交/分配/价格/数量/期限并调用新的实时复核，禁止串入首次入场结果。
+  只有具有该审查事件的 READY 续单能重新通过原确认前审；portfolio 对零成交续单仅免除本
+  意图的重复分配预留，其他义务保持。最终 outbox 期限额外裁剪到审查请求有效期。
+  修复暂存中间 autoflush 消费显式时钟、后续更新落到数据库当前时点的问题。
+  最终 42 项续单组件/组合验证通过，另有 80 项既有入场/持仓/命令/生命周期回归通过，证据
+  `.codex_screenshots/p6-live-replacement-staging-final.log`、
+  `p6-live-replacement-staging-regression.log`（其中风险组合初次失败已由 cut/final 日志验证修复）。
+  已验证实际确认→暂存→重新前审及实际风险→暂存→当前持仓复核，两组分别替换风险或确认
+  边界；仍未组成无替换的实际 admission/Engine 续单链，未产生新券商委托。
 - 剩余开发顺序：
-  补齐 LIVE 续单证据暂存/准入/Engine 接线与持仓快照收敛与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 续单 Engine 行情见证/准入调度/整链与持仓快照收敛与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

@@ -227,6 +227,8 @@ _REQUEST_METADATA_ALLOWLIST = frozenset(
     "quote_timestamp",
     "quote_fingerprint",
     "live_entry_review_event_key",
+    "live_entry_replacement_review_event_key",
+    "order_expire_at_ms",
     "portfolio_input_fingerprint",
     "reference_price",
     "requested_volume",
@@ -3442,6 +3444,11 @@ class TradeCommandService:
     if _t_order_parent_client_id:
       policy = TEntryOrderPolicy() if normalized_role == "ENTRY" else TExitOrderPolicy()
       expires_at = min(expires_at, prior_t_order.t_order_original_created_at + timedelta(seconds=policy.total_ttl_seconds))
+    if owner_type == ExecutionOwnerType.T_ASSISTANT_EXECUTION.value and _t_order_parent_client_id:
+      expiry_ms = immutable_metadata.get("order_expire_at_ms")
+      if type(expiry_ms) is not int or expiry_ms <= int(now.replace(tzinfo=timezone.utc).timestamp() * 1000):
+        raise AgentUnavailableError("LIVE_REPLACEMENT_STAGED_REVIEW_EXPIRED")
+      expires_at = min(expires_at, datetime.fromtimestamp(expiry_ms / 1000, timezone.utc).replace(tzinfo=None))
     wire_expires_at = expires_at.replace(tzinfo=timezone.utc)
     payload = TradeCommandPayload(
       command_kind="PLACE_ORDER",

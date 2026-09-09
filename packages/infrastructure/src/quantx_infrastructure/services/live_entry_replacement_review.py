@@ -173,6 +173,24 @@ async def review_live_entry_replacement(
     or result.remaining_volume <= 0
   ):
     raise ValueError("T_ENTRY_REPLACEMENT_FILL_PROJECTION_CONFLICT")
+  allowed_statuses = {"EXECUTION_PENDING", "PARTIAL_FILLED"}
+  if intent.status == "EXECUTION_READY":
+    from quantx_infrastructure.services.live_entry_replacement_staging import (
+      validate_staged_live_entry_replacement,
+    )
+
+    staged = (intent.intent_metadata or {}).get("risk_increase_order_request") or {}
+    await validate_staged_live_entry_replacement(
+      db,
+      intent=intent,
+      volume=staged.get("volume"),
+      limit_price=Decimal(str(staged.get("limit_price"))),
+      now=now,
+      require_fresh=False,
+    )
+    if staged.get("t_order_parent_client_id") != client_order_id:
+      raise ValueError("T_ENTRY_REPLACEMENT_SCOPE_INVALID")
+    allowed_statuses.add("EXECUTION_READY")
   actor = await _authorize_live_entry(
     db,
     intent=intent,
@@ -181,7 +199,7 @@ async def review_live_entry_replacement(
     volume=result.remaining_volume,
     limit_price=result.limit_price,
     now=now,
-    allowed_statuses={"EXECUTION_PENDING", "PARTIAL_FILLED"},
+    allowed_statuses=allowed_statuses,
   )
   if actor != pending.user_id:
     raise ValueError("T_ENTRY_REPLACEMENT_ACTOR_CONFLICT")

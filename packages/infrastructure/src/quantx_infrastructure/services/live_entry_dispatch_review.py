@@ -25,6 +25,14 @@ async def validate_staged_live_entry(db, *, intent, volume, limit_price, now):
   request = dict(intent.intent_metadata or {}).get("risk_increase_order_request")
   if not isinstance(request, dict):
     raise ValueError("LIVE_ENTRY_STAGED_REQUEST_REQUIRED")
+  if request.get("t_order_parent_client_id"):
+    from quantx_infrastructure.services.live_entry_replacement_staging import (
+      validate_staged_live_entry_replacement,
+    )
+
+    return await validate_staged_live_entry_replacement(
+      db, intent=intent, volume=volume, limit_price=limit_price, now=now
+    )
   key = dict(request.get("request_metadata") or {}).get("live_entry_review_event_key")
   event = await db.scalar(
     select(TAssistantExecutionEventRecord).where(
@@ -109,4 +117,12 @@ async def revalidate_live_entry_dispatch(
     or result.risk.final_volume < volume
   ):
     raise ValueError("LIVE_ENTRY_FRESH_REVIEW_REJECTED")
+  if request.get("t_order_parent_client_id"):
+    proof = getattr(result, "preflight", None)
+    if (
+      proof is None
+      or proof.parent_client_order_id != request["t_order_parent_client_id"]
+      or proof.intent_id != intent.id
+    ):
+      raise ValueError("LIVE_REPLACEMENT_FRESH_REVIEW_SCOPE_INVALID")
   return result

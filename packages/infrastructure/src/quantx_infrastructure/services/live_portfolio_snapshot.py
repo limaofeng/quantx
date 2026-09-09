@@ -75,6 +75,7 @@ class LivePortfolioSnapshotReader:
     market_mark_reader,
     account_max_age_seconds,
     review_intent_id: str | None = None,
+    replacement_parent_client_order_id: str | None = None,
   ):
     as_of = aware_time(as_of).astimezone(UTC)
     codes = tuple(sorted(set(instrument_codes)))
@@ -218,6 +219,47 @@ class LivePortfolioSnapshotReader:
       if row.owner_type == "T_ASSISTANT_EXECUTION"
       or row.intent_metadata.get("t_batch_id")
     ]
+    replacement_intent_id = None
+    if replacement_parent_client_order_id is not None:
+      if review_intent_id is not None:
+        raise ValueError("LIVE_PORTFOLIO_REVIEW_SCOPE_CONFLICT")
+      parent = next(
+        (
+          row
+          for row in orders
+          if row.client_order_id == replacement_parent_client_order_id
+        ),
+        None,
+      )
+      if (
+        parent is None
+        or parent.owner_type != "T_ASSISTANT_EXECUTION"
+        or parent.owner_id != execution_id
+        or parent.instrument_code not in codes
+      ):
+        raise ValueError("LIVE_PORTFOLIO_REPLACEMENT_SCOPE_INVALID")
+      staged_intent = next((row for row in intents if row.id == parent.intent_id), None)
+      if staged_intent is not None:
+        from quantx_infrastructure.services.live_entry_replacement_staging import (
+          validate_staged_live_entry_replacement,
+        )
+
+        staged = staged_intent.intent_metadata.get("risk_increase_order_request") or {}
+        if (
+          staged_intent.status != "EXECUTION_READY"
+          or staged_intent.allocation_cycle_id != cycle_id
+          or staged.get("t_order_parent_client_id") != parent.client_order_id
+        ):
+          raise ValueError("LIVE_PORTFOLIO_REPLACEMENT_SCOPE_INVALID")
+        await validate_staged_live_entry_replacement(
+          self.db,
+          intent=staged_intent,
+          volume=staged.get("volume"),
+          limit_price=Decimal(str(staged.get("limit_price"))),
+          now=as_of,
+          require_fresh=False,
+        )
+        replacement_intent_id = staged_intent.id
     review_intent = None
     if review_intent_id is not None:
       review_intent = next((row for row in intents if row.id == review_intent_id), None)
@@ -368,7 +410,7 @@ class LivePortfolioSnapshotReader:
         raise ValueError("LIVE_PORTFOLIO_READY_BATCH_REQUIRED")
       # A final review spends its existing allocation; it is not a second entry.
       # Preserve the exact decision in the cut, but reserve only other intents.
-      if intent.id != review_intent_id:
+      if intent.id not in {review_intent_id, replacement_intent_id}:
         pending[intent.instrument_code] += money(decision.allocated_amount_cap)
         active_ids.add(batch_id)
       allocation_material.append(
@@ -399,6 +441,7 @@ class LivePortfolioSnapshotReader:
         capacities={code: cap.obligation_watermark for code, cap in capacities.items()},
         allocations=allocation_material,
         review_intent_id=review_intent_id,
+        replacement_parent_client_order_id=replacement_parent_client_order_id,
         controls=dict(
           head_version=head.state_version,
           execution_version=execution.state_version,

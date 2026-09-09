@@ -125,6 +125,7 @@ class LiveEntryReplacementExecutionReview:
       as_of=now,
       market_mark_reader=BoundMarks(),
       account_max_age_seconds=90,
+      replacement_parent_client_order_id=client_order_id,
     )
     envelope = portfolio.envelopes[0]
     position = envelope.observed_position_projection
@@ -282,7 +283,7 @@ class LiveEntryReplacementExecutionReview:
       volume=request.volume,
       limit_price=proof.limit_price,
       now=now,
-      allowed_statuses={"EXECUTION_PENDING", "PARTIAL_FILLED"},
+      allowed_statuses={"EXECUTION_PENDING", "PARTIAL_FILLED", "EXECUTION_READY"},
     )
     if actor != proof.user_id:
       raise ValueError("T_ENTRY_REPLACEMENT_ACTOR_CONFLICT")

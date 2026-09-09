@@ -43,6 +43,7 @@ signing_key = confirmation.signing_key
   "fault,reason",
   [
     (None, None),
+    ("staged", None),
     ("zero_fill", None),
     ("unknown", "ORDER_RESULT_UNKNOWN"),
     ("missing_trade", "ORDER_CANCEL_UNCONFIRMED"),
@@ -262,4 +263,72 @@ async def test_replacement_preflight_preserves_original_authority(
           now=reviewed_at,
         )
     assert (intent.status, intent.allocation_version, intent.intent_metadata) == before
+    if fault == "staged":
+      from unittest.mock import AsyncMock
+
+      from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+      from quantx_domain.brokers.base import OrderRequest, PriceType
+      from quantx_domain.brokers.base import OrderType as BrokerOrderType
+      from quantx_domain.trading.market_rules import MarketDataSnapshot
+      from quantx_domain.trading.risk_checker import OrderRiskDecision
+      from quantx_infrastructure.services import (
+        live_entry_replacement_staging as staging,
+      )
+      from quantx_infrastructure.services.live_entry_replacement_execution_review import (
+        LiveEntryReplacementReviewResult,
+      )
+
+      request = OrderRequest(
+        instrument_code=intent.instrument_code,
+        order_type=BrokerOrderType.BUY,
+        price_type=PriceType.LIMIT,
+        volume=result.remaining_volume,
+        price=float(result.limit_price),
+        execution_ref=ExecutionOwnerRef("T_ASSISTANT_EXECUTION", intent.owner_id),
+        environment=ExecutionEnvironment.LIVE,
+        metadata={"order_expire_at_ms": int(result.expires_at.timestamp() * 1000)},
+      )
+      reviewed = LiveEntryReplacementReviewResult(
+        "REVIEWED",
+        (),
+        "user-1",
+        request,
+        None,
+        OrderRiskDecision.allow(request),
+        result,
+        "a" * 64,
+      )
+      monkeypatch.setattr(
+        staging.LiveEntryReplacementExecutionReview,
+        "review",
+        AsyncMock(return_value=reviewed),
+      )
+      assert (
+        await staging.stage_live_entry_replacement(
+          db,
+          client_order_id="parent",
+          market_data=MarketDataSnapshot(
+            intent.instrument_code,
+            timestamp=reviewed_at,
+            price=9.88,
+            ask_price=[9.88],
+            limit_up=11,
+            limit_down=9,
+          ),
+          market_mark_reader=None,
+          now=reviewed_at,
+          validate_market=lambda: None,
+        )
+      ).status == "STAGED"
+      assert intent.status == "EXECUTION_READY"
+      again = await review_live_entry_replacement(
+        db,
+        client_order_id="parent",
+        now=reviewed_at,
+        reference_price=Decimal("9.88"),
+        price_tick=Decimal("0.01"),
+        limit_up=Decimal("11"),
+        limit_down=Decimal("9"),
+      )
+      assert again == result
     assert await db.scalar(select(func.count()).select_from(PendingTradeOrder)) == 1
