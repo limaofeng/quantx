@@ -3,7 +3,7 @@
 独立开发训练服务正在实施，完整范围见
 [实施方案](../../docs/plans/独立训练服务架构与实施方案.md)。
 
-目前提供本地配置校验和开发控制面只读预检。尚未迁移 Worker 调度、启用训练部署或完成 Windows/GPU 验收，不能将预检通过视为服务 ready。
+目前提供本地配置校验、开发控制面只读预检及已退出执行的制品恢复回传入口。尚未迁移 Worker 调度、启用训练部署或完成 Windows/GPU 验收，不能将预检通过视为服务 ready。
 
 ## Conda 环境安装
 
@@ -136,6 +136,20 @@ SFTP 适配器接收已验证主机身份的 SFTPClient，由部署层管理受�
 调用方必须串行化同一制品发布，仅在 `publish` 返回后登记引用，且数据库登记成功前保留本地产物。此模块不修改任务成功状态或模型发布状态。当前完成了清单、接收、发布、显式身份会话及本地真实 SSH/SFTP 协议往返测试；受限服务器部署、跨机器原子语义、数据库登记及调度接入仍待实施和验收。
 
 ## 执行归属
+
+### 制品恢复回传
+
+在执行迁移 `20260910_0070`、完成隔离配置与受限存储部署后，Trainer 状态目录中已完成的 Research 结果可通过以下入口恢复回传：
+
+```powershell
+conda run -n quantx-train quantx-trainer publish-result --config D:\QuantXTraining\trainer.toml --run-id RUN_ID --owner ORIGINAL_FLOW_RUN_ID
+```
+
+运行归属取数据库原始 `prefect_flow_run_id`。入口使用 `state/runs/<run_id>` 的完整结果，以及 `state/control/<run_id>` 的 `request.json` 和 `process.json`；先完成本地与远端预检，并要求持久化证据确认原监督者及 Research 均已退出。每个 run 的 OS 文件锁排除并发回传。目录布局尚待正常 Trainer 调度接入，当前 Worker 的旧控制目录不会被隐式搜索或迁移。
+
+回传前核对 Research 成功状态、冻结 spec 哈希、必需模型与元数据、全部文件清单和内容哈希；将 bundle 及原归属原子冻结为 `publication.json`。完成 SFTP 发布和读回后，仓储在归属约束下登记 `artifact_bundle`，再收敛成功。上传、登记或提交确认中断时保留全部本地文件，重复命令复用相同清单及远端完整 bundle；确认成功前不会删除本地产物。退出码 `3` 表示尚未完成，错误信息不包含连接凭据。该入口操作开发训练结果，生产模型的人工评估、导入与发布仍由独立链路处理。
+
+已登记清单不可替换，成功 manifest 哈希必须与其中的 `manifest.json` 一致；领取归属变化或取消会阻止登记和成功写入。当前恢复入口尚未接入常驻调度，旧 Worker 成功路径也尚未切换为远端制品门禁。
 
 训练仓储复用已有 `prefect_flow_run_id` 记录领取归属，拒绝空值和截断标识。进度、成功、失败、取消收敛都必须传入领取时冻结的 `expected_flow_run_id`；仓储在行锁内刷新数据库状态并校验归属，旧执行者不能用会话缓存或终态幂等分支绕过校验。轮询也刷新状态，以观察外部取消。
 

@@ -30,6 +30,9 @@ from quantx_infrastructure.training_process_evidence import (
   record_exit,
   record_spawn,
 )
+from quantx_infrastructure.training_result import (
+  safe_public_details as _safe_public_details,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 CRITICAL_WINDOW_START = time(9, 15)
@@ -479,43 +482,6 @@ def _value(item: Any, name: str, default: Any = None) -> Any:
   if isinstance(item, Mapping):
     return item.get(name, default)
   return getattr(item, name, default)
-
-
-def _safe_public_details(value: Any) -> dict[str, Any]:
-  if hasattr(value, "to_dict"):
-    value = value.to_dict()
-  if not isinstance(value, Mapping):
-    value = {"status": str(value)}
-  blocked = {
-    "path",
-    "root",
-    "directory",
-    "panel_path",
-    "manifest_path",
-    "instance_id",
-    "device_serial",
-    "password",
-    "secret",
-    "token",
-    "credential",
-    "api_key",
-  }
-
-  def scrub(item: Any, key: str = "") -> Any:
-    if key.lower() in blocked:
-      return None
-    if isinstance(item, Mapping):
-      return {
-        str(name): scrub(child, str(name))
-        for name, child in item.items()
-        if str(name).lower() not in blocked
-      }
-    if isinstance(item, (list, tuple, set)):
-      return [scrub(child, key) for child in item]
-    return item
-
-  result = scrub(value)
-  return result if isinstance(result, dict) else {"status": str(result)}
 
 
 def _probe_details(probe: Any) -> tuple[str, dict[str, Any]]:

@@ -152,6 +152,15 @@ class _FakeModel:
 
 
 def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: Path) -> None:
+  allocate = training.tempfile.mkdtemp
+
+  def scratch_directory(*args, **kwargs):
+    directory = allocate(*args, **kwargs)
+    if str(kwargs.get("prefix", "")).startswith("next-day-selection-"):
+      (Path(directory) / "ephemeral.bin").write_bytes(b"temporary training input")
+    return directory
+
+  monkeypatch.setattr(training.tempfile, "mkdtemp", scratch_directory)
   dataset = _dataset(tmp_path)
   spec = _spec(tmp_path)
   monkeypatch.setattr(training, "_family_grid", lambda config, family: [{"C": 0.1}] if family == "LOGISTIC" else [{"num_leaves": 15, "reg_lambda": 1.0}])
@@ -172,6 +181,14 @@ def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: 
   development = asyncio.run(training.execute_next_day_selection_run(run_kind="DEVELOPMENT", spec={**spec, "run_kind": "DEVELOPMENT"}, dataset_directory=dataset, output_root=tmp_path / "runs", run_id="development"))
   development_manifest = json.loads((development / "manifest.json").read_text(encoding="utf-8"))
   assert development_manifest["status"] == "SUCCEEDED"
+  for entry in development_manifest["artifacts"]:
+    artifact = development / entry["path"]
+    assert artifact.is_file(), entry["path"]
+    assert file_sha256(artifact) == entry["sha256"]
+  assert not list((tmp_path / "runs").rglob("ephemeral.bin"))
+  from quantx_trainer.publication import result_bundle
+
+  assert result_bundle(development, run_id="development", run_kind="DEVELOPMENT").kind == "RESULT"
   assert development_manifest["run_kind"] == "DEVELOPMENT"
   assert development_manifest["spec_hash"] == "a" * 64
   assert development_manifest["coordinate_hash"] == "b" * 64
@@ -189,6 +206,7 @@ def test_certified_development_final_workflow_and_cancel(monkeypatch, tmp_path: 
   final_spec = {**spec, "run_kind": "FINAL_EVALUATION", "parent_run_directory": str(development)}
   final = asyncio.run(training.execute_next_day_selection_run(run_kind="FINAL_EVALUATION", spec=final_spec, dataset_directory=dataset, output_root=tmp_path / "runs", run_id="final", parent_run_directory=development, frozen_test_access_count=1))
   final_metrics = json.loads((final / "metrics.json").read_text(encoding="utf-8"))
+  assert result_bundle(final, run_id="final", run_kind="FINAL_EVALUATION").kind == "RESULT"
   assert "frozen_test" in final_metrics
   assert final_metrics["validation"] == json.loads(
     (development / "metrics.json").read_text(encoding="utf-8")

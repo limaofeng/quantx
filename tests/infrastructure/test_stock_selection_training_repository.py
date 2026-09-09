@@ -4,6 +4,7 @@ import asyncio
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+from quantx_contracts.training_bundle import BundleFile, TrainingBundle
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
 from quantx_infrastructure.models.stock_selection import (
@@ -387,7 +388,7 @@ async def test_cancel_queued_and_running_runs_do_not_publish_artifacts(session_f
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["update_progress", "complete_run", "fail_run", "mark_cancelled", "heartbeat_execution"])
+@pytest.mark.parametrize("operation", ["update_progress", "complete_run", "fail_run", "mark_cancelled", "heartbeat_execution", "record_artifact_bundle"])
 async def test_old_executor_cannot_write_after_persisted_ownership_changes(session_factory, operation):
   from sqlalchemy import update
 
@@ -409,6 +410,7 @@ async def test_old_executor_cannot_write_after_persisted_ownership_changes(sessi
       "fail_run": dict(error_code="STALE_FAILURE", error_message="old executor"),
       "mark_cancelled": {},
       "heartbeat_execution": {},
+      "record_artifact_bundle": {"bundle": TrainingBundle(schema_version=1, kind="RESULT", source_id="owned-run", files=[BundleFile(path="manifest.json", size=10, sha256="a" * 64)])},
     }
     with pytest.raises(TrainingStateConflict, match="ownership lost"):
       await getattr(repository, operation)("owned-run", expected_flow_run_id="old-executor", **payloads[operation])
@@ -447,6 +449,29 @@ async def test_execution_heartbeat_is_persisted_without_changing_cancel_version(
     await repository.mark_cancelled(row.run_id, expected_flow_run_id="executor")
     with pytest.raises(TrainingStateConflict, match="no longer running"):
       await repository.heartbeat_execution(row.run_id, expected_flow_run_id="executor")
+
+
+@pytest.mark.asyncio
+async def test_published_bundle_is_immutable_and_fences_success_manifest(session_factory):
+  async with session_factory() as db:
+    repository = StockSelectionTrainingRepository(db)
+    await repository.certify_dataset(DATASET)
+    spec = await repository.create_spec(spec_values())
+    await repository.create_run(run_values(spec.spec_id, "published-run", "published-key"))
+    row = await repository.claim_next_queued("executor")
+    bundle = TrainingBundle(schema_version=1, kind="RESULT", source_id=row.run_id, files=[BundleFile(path="manifest.json", size=10, sha256="a" * 64)])
+    with pytest.raises(TrainingStateConflict):
+      await repository.record_artifact_bundle(row.run_id, expected_flow_run_id="stale", bundle=bundle)
+    await repository.record_artifact_bundle(row.run_id, expected_flow_run_id="executor", bundle=bundle)
+    changed = bundle.model_copy(update={"files": (BundleFile(path="manifest.json", size=10, sha256="b" * 64),)})
+    with pytest.raises(TrainingStateConflict, match="inventory conflicts"):
+      await repository.record_artifact_bundle(row.run_id, expected_flow_run_id="executor", bundle=changed)
+    with pytest.raises(TrainingStateConflict, match="manifest differs"):
+      await repository.complete_run(row.run_id, expected_flow_run_id="executor", run_key="result", artifact_manifest_sha256="b" * 64)
+    await repository.complete_run(row.run_id, expected_flow_run_id="executor", run_key="result", artifact_manifest_sha256="a" * 64)
+    await repository.record_artifact_bundle(row.run_id, expected_flow_run_id="executor", bundle=bundle)
+    assert row.status == "SUCCEEDED"
+    assert TrainingBundle.model_validate(row.artifact_bundle).bundle_id == bundle.bundle_id
 
 
 @pytest.mark.asyncio

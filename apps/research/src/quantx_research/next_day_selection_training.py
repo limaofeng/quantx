@@ -1613,7 +1613,8 @@ async def execute_next_day_selection_run(
     "label_version": LABEL_VERSION,
   }
   write_json(run_dir / "manifest.json", manifest)
-  staging = Path(tempfile.mkdtemp(prefix="next-day-selection-", dir=run_dir))
+  # Scratch files are removed on exit and must never enter the immutable result inventory.
+  staging = Path(tempfile.mkdtemp(prefix=f"next-day-selection-{safe_id}-", dir=root))
   runtime_payload = spec_payload.get("runtime")
   configured_reserve = (
     runtime_payload.get("minimum_available_memory_gib")

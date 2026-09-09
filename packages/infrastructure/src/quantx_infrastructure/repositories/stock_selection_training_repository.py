@@ -14,6 +14,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
+from quantx_contracts.training_bundle import TrainingBundle
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1330,6 +1331,33 @@ class StockSelectionTrainingRepository:
     await self.db.refresh(row)
     return _normalize_row_timestamps(row)
 
+  async def record_artifact_bundle(
+    self, run_id: str, *, expected_flow_run_id: str, bundle: TrainingBundle,
+  ) -> StockSelectionTrainingRun:
+    """Record a read-back-verified remote inventory under the execution fence."""
+    bundle = TrainingBundle.model_validate(bundle.model_dump(mode="json"))
+    if bundle.kind != "RESULT" or bundle.source_id != run_id:
+      raise TrainingRepositoryError("artifact bundle does not identify this training result")
+    if not any(entry.path == "manifest.json" for entry in bundle.files):
+      raise TrainingRepositoryError("artifact bundle has no result manifest")
+    payload = bundle.model_dump(mode="json")
+    row = await self._locked_run(run_id)
+    if row is None:
+      raise TrainingNotFound("training run does not exist")
+    self._assert_execution_owner(row, expected_flow_run_id)
+    if row.artifact_bundle is not None:
+      previous = TrainingBundle.model_validate(row.artifact_bundle)
+      if previous.bundle_id != bundle.bundle_id:
+        raise TrainingStateConflict("published training artifact inventory conflicts")
+      if row.status in {"RUNNING", "SUCCEEDED"} and row.cancel_requested_at is None:
+        return _normalize_row_timestamps(row)
+    if row.status != "RUNNING" or row.cancel_requested_at is not None:
+      raise TrainingStateConflict("training publication no longer owns an active run")
+    row.artifact_bundle = payload
+    await self.db.commit()
+    await self.db.refresh(row)
+    return _normalize_row_timestamps(row)
+
   async def complete_run(
     self,
     run_id: str,
@@ -1360,6 +1388,10 @@ class StockSelectionTrainingRepository:
     if row is None:
       raise TrainingNotFound("training run does not exist")
     self._assert_execution_owner(row, expected_flow_run_id)
+    if row.artifact_bundle is not None:
+      bundle = TrainingBundle.model_validate(row.artifact_bundle)
+      if not any(entry.path == "manifest.json" and entry.sha256 == manifest for entry in bundle.files):
+        raise TrainingStateConflict("success manifest differs from published artifact bundle")
     if row.status == "SUCCEEDED":
       facts = (
         row.run_key == stable_key,

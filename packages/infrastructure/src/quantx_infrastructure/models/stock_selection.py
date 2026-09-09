@@ -513,6 +513,7 @@ class StockSelectionTrainingRun(Base):
   cancel_requested_at = Column(DateTime(timezone=True), nullable=True)
   cancel_idempotency_key = Column(String(160), nullable=True)
   artifact_manifest_sha256 = Column(String(64), nullable=True)
+  artifact_bundle = Column(JSON, nullable=True)
   environment_evidence = Column(JSON, nullable=False, default=dict)
   metrics_summary = Column(JSON, nullable=False, default=dict)
   gate_summary = Column(JSON, nullable=False, default=dict)
