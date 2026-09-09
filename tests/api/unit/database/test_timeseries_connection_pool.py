@@ -100,3 +100,23 @@ def test_connection_context_discards_client_after_operation_error():
     assert len(created) == 2
   finally:
     connection.close()
+
+
+def test_caller_deadline_bounds_pool_wait():
+  connection = TimeSeriesConnection(
+    host="http://localhost:8181",
+    token="token",
+    database="quantx",
+    max_connections=1,
+    pool_acquire_timeout=10,
+  )
+  connection._pool._create_client = FakeClient
+  try:
+    with connection.get_client():
+      started = time.monotonic()
+      with pytest.raises(ConnectionError, match="等待空闲连接超时"):
+        with connection.get_client(timeout=0.01):
+          pytest.fail("occupied pool returned a second client")
+      assert time.monotonic() - started < 1
+  finally:
+    connection.close()

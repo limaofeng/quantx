@@ -55,7 +55,7 @@ class Connection:
     self.readers = []
 
   @contextmanager
-  def get_client(self):
+  def get_client(self, *, timeout=None):
     yield self
 
   def query(self, **kwargs):
@@ -189,6 +189,8 @@ async def test_cancel_closes_reader_and_prevents_next_page():
   )
   assert await asyncio.to_thread(entered.wait, 2)
   task.cancel()
+  # Let the event loop deliver cancellation before releasing the query thread.
+  await asyncio.sleep(0)
   release.set()
   with pytest.raises(asyncio.CancelledError):
     await task

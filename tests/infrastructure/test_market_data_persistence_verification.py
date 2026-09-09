@@ -134,7 +134,7 @@ class FakeConnection:
     self.acquisitions = 0
 
   @contextmanager
-  def get_client(self):
+  def get_client(self, *, timeout=None):
     self.acquisitions += 1
     yield self.client
 

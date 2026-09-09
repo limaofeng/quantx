@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import threading
+import time
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
@@ -27,6 +29,9 @@ MARKET_DATA_READBACK_GROUP_KEYS = 10_000
 MARKET_DATA_READBACK_CONCURRENCY = 2
 MARKET_DATA_READBACK_MAX_ATTEMPTS = 4
 MARKET_DATA_READBACK_RETRY_DELAYS_SECONDS = (0.25, 0.75, 1.5)
+MARKET_DATA_READBACK_MAX_SPLIT_NODES = 32
+MARKET_DATA_READBACK_MAX_SPLIT_DEPTH = 8
+MARKET_DATA_READBACK_TIMEOUT_SECONDS = 60.0
 
 _MEASUREMENTS = {
   "tick": "ticks",
@@ -48,6 +53,79 @@ class MarketDataPersistenceMismatchError(MarketDataPersistenceVerificationError)
   """An uploaded key is missing or a persisted key is structurally invalid."""
 
 
+class MarketDataPersistenceCapacityError(MarketDataPersistenceQueryError):
+  """The query exceeds the storage scan limit and may be subdivided."""
+
+  def __init__(self, diagnostic: dict[str, Any]):
+    super().__init__("market-data read-back exceeded the storage scan limit")
+    self.diagnostic = diagnostic
+
+
+class MarketDataPersistenceBlockedError(MarketDataPersistenceQueryError):
+  """Repeating the same read-back cannot make progress within its budget."""
+
+  def __init__(self, reason_code: str, diagnostic: dict[str, Any] | None = None):
+    super().__init__(reason_code)
+    self.reason_code = reason_code
+    self.diagnostic = diagnostic or {}
+
+
+@dataclass
+class ReadbackBudget:
+  """One group's budget, shared by its pages, split children and retries."""
+
+  deadline: float = field(
+    default_factory=lambda: time.monotonic() + MARKET_DATA_READBACK_TIMEOUT_SECONDS
+  )
+  nodes: int = 0
+  capacity_diagnostic: dict[str, Any] | None = None
+  first_capacity_diagnostic: dict[str, Any] | None = None
+
+  def remaining(self) -> float:
+    remaining = self.deadline - time.monotonic()
+    if remaining <= 0:
+      self.block()
+    return remaining
+
+  def block(self) -> None:
+    raise MarketDataPersistenceBlockedError(
+      "DEPENDENCY_QUERY_CAPACITY_BLOCKED"
+      if self.capacity_diagnostic is not None
+      else "READBACK_BUDGET_EXHAUSTED",
+      {**self.capacity_diagnostic, "first_failure": self.first_capacity_diagnostic}
+      if self.capacity_diagnostic is not None
+      else None,
+    ) from None
+
+  def enter(self, depth: int) -> None:
+    self.remaining()
+    if (
+      depth > MARKET_DATA_READBACK_MAX_SPLIT_DEPTH
+      or self.nodes >= MARKET_DATA_READBACK_MAX_SPLIT_NODES
+    ):
+      self.block()
+    self.nodes += 1
+
+
+def _query_failure(
+  exc: Exception,
+  sql: str,
+  **context: Any,
+) -> MarketDataPersistenceQueryError:
+  # Inspect provider text locally; never propagate credentials or raw error chains.
+  if re.search(
+    r"scan\s+\d+\s+Parquet files.*exceeding.*file limit", str(exc), re.I | re.S
+  ):
+    return MarketDataPersistenceCapacityError(
+      {
+        **context,
+        "query_sha256": hashlib.sha256(sql.encode()).hexdigest(),
+        "error_code": "QUERY_SCAN_LIMIT",
+      }
+    )
+  return MarketDataPersistenceQueryError("Influx read-back query failed")
+
+
 class _InfluxClient(Protocol):
   def query(
     self,
@@ -66,7 +144,7 @@ class _InfluxClientContext(Protocol):
 
 
 class _InfluxConnection(Protocol):
-  def get_client(self) -> _InfluxClientContext: ...
+  def get_client(self, *, timeout: float | None = None) -> _InfluxClientContext: ...
 
 
 Sleep = Callable[[float], Awaitable[None]]
@@ -212,6 +290,7 @@ def _read_expected_key_batch_once(
   connection: _InfluxConnection | None,
   page_rows: int,
   cancelled: threading.Event | None = None,
+  budget: ReadbackBudget | None = None,
 ) -> dict[str, int]:
   """Prove uploaded keys are present while tolerating pre-existing points."""
 
@@ -265,8 +344,10 @@ def _read_expected_key_batch_once(
   expected_index = 0
   existing_rows_observed = 0
 
+  budget = budget or ReadbackBudget()
+  sql = ""
   try:
-    with resolved_connection.get_client() as client:
+    with resolved_connection.get_client(timeout=budget.remaining()) as client:
       while expected_index < len(expected):
         sql = _query_page_sql(
           period=period,
@@ -282,6 +363,7 @@ def _read_expected_key_batch_once(
             language="sql",
             mode="reader",
             query_parameters={"stock_code": code, "period": period},
+            timeout=budget.remaining(),
           )
         if reader is None:
           raise MarketDataPersistenceQueryError(
@@ -298,6 +380,7 @@ def _read_expected_key_batch_once(
             )
           for arrow_batch in reader:
             _check_readback_cancelled(cancelled)
+            budget.remaining()
             if page_count + arrow_batch.num_rows > page_rows:
               raise MarketDataPersistenceQueryError(
                 f"Influx read-back exceeded its {page_rows}-row page bound"
@@ -383,10 +466,14 @@ def _read_expected_key_batch_once(
   except MarketDataPersistenceVerificationError:
     raise
   except Exception as exc:
-    raise MarketDataPersistenceQueryError(
-      f"Influx read-back query failed for {code}/{period}: {exc}"
-    ) from exc
+    raise _query_failure(
+      exc,
+      sql,
+      page_after=after.isoformat() if after else None,
+      page_rows=page_rows,
+    ) from None
 
+  budget.remaining()
   if expected_index != len(expected):
     missing_storage_time, missing_source_time_ms, missing_ordinal = expected[
       expected_index
@@ -429,6 +516,7 @@ def _read_expected_key_group_once(
   connection: _InfluxConnection | None,
   page_rows: int,
   cancelled: threading.Event | None = None,
+  budget: ReadbackBudget | None = None,
 ) -> dict[str, int]:
   if not 1 <= page_rows <= MARKET_DATA_READBACK_PAGE_ROWS:
     raise ValueError("invalid bounded read-back page size")
@@ -472,9 +560,11 @@ def _read_expected_key_group_once(
   indices = dict.fromkeys(expected, 0)
   after: tuple[str, datetime] | None = None
   extras = 0
+  budget = budget or ReadbackBudget()
+  sql = ""
   try:
     _check_readback_cancelled(cancelled)
-    with resolved.get_client() as client:
+    with resolved.get_client(timeout=budget.remaining()) as client:
       while any(indices[code] < len(keys) for code, keys in expected.items()):
         _check_readback_cancelled(cancelled)
         cursor = ""
@@ -483,11 +573,17 @@ def _read_expected_key_group_once(
           cursor = f"AND (stock_code > $after_code OR (stock_code = $after_code AND time > '{_sql_timestamp(after[1])}')) "
         sql = (
           f"SELECT stock_code,time FROM {_MEASUREMENTS[period]} WHERE period = $period "
+          f"AND time >= '{_sql_timestamp(min(v[0] for v in bounds.values()))}' "
+          f"AND time < '{_sql_timestamp(max(v[1] for v in bounds.values()))}' "
           f"AND ({' OR '.join(predicates)}) {cursor}ORDER BY stock_code ASC,time ASC LIMIT {page_rows}"
         )
         with market_data_stage("read_query_open"):
           reader = client.query(
-            query=sql, language="sql", mode="reader", query_parameters=dict(params)
+            query=sql,
+            language="sql",
+            mode="reader",
+            query_parameters=dict(params),
+            timeout=budget.remaining(),
           )
         if reader is None:
           raise MarketDataPersistenceQueryError("grouped read-back returned no reader")
@@ -499,6 +595,7 @@ def _read_expected_key_group_once(
             )
           for arrow_batch in reader:
             _check_readback_cancelled(cancelled)
+            budget.remaining()
             if count + arrow_batch.num_rows > page_rows:
               raise MarketDataPersistenceQueryError(
                 "grouped read-back exceeded page bound"
@@ -545,14 +642,120 @@ def _read_expected_key_group_once(
   except MarketDataPersistenceVerificationError:
     raise
   except Exception as exc:
-    raise MarketDataPersistenceQueryError(
-      f"grouped read-back query failed: {type(exc).__name__}"
-    ) from exc
+    raise _query_failure(
+      exc,
+      sql,
+      page_after=[after[0], after[1].isoformat()] if after else None,
+      page_rows=page_rows,
+    ) from None
+  budget.remaining()
   if any(indices[code] != len(keys) for code, keys in expected.items()):
     raise MarketDataPersistenceMismatchError(
       "grouped read-back is missing an uploaded key"
     )
   return {"records_verified": sum(indices.values()), "existing_rows_observed": extras}
+
+
+def _split_expected_keys(
+  batches: Sequence[ExpectedBarKeyBatch],
+) -> tuple[tuple[ExpectedBarKeyBatch, ...], tuple[ExpectedBarKeyBatch, ...]] | None:
+  times = [
+    _storage_time_for_key(period=b.period, source_time_ms=t, tick_ordinal=o)
+    for b in batches
+    for t, o in b.keys
+  ]
+  start, end = min(times), max(times)
+  if start == end:
+    if len(batches) == 1:
+      return None
+    middle = len(batches) // 2
+    return tuple(batches[:middle]), tuple(batches[middle:])
+  middle_time = start + (end - start) // 2
+  children: list[list[ExpectedBarKeyBatch]] = [[], []]
+  for batch in batches:
+    keys: list[list[tuple[int, int | None]]] = [[], []]
+    for key in batch.keys:
+      value = _storage_time_for_key(
+        period=batch.period, source_time_ms=key[0], tick_ordinal=key[1]
+      )
+      keys[int(value > middle_time)].append(key)
+    for index, values in enumerate(keys):
+      if values:
+        children[index].append(
+          ExpectedBarKeyBatch(batch.code, batch.period, tuple(values))
+        )
+  return tuple(children[0]), tuple(children[1])
+
+
+def _read_expected_keys_bounded(
+  *,
+  batches: Sequence[ExpectedBarKeyBatch],
+  connection: _InfluxConnection | None,
+  page_rows: int,
+  cancelled: threading.Event | None = None,
+  budget: ReadbackBudget,
+  depth: int = 0,
+) -> dict[str, int]:
+  _check_readback_cancelled(cancelled)
+  budget.enter(depth)
+  try:
+    if len(batches) == 1:
+      return _read_expected_key_batch_once(
+        batch=batches[0],
+        connection=connection,
+        page_rows=page_rows,
+        cancelled=cancelled,
+        budget=budget,
+      )
+    return _read_expected_key_group_once(
+      batches=batches,
+      connection=connection,
+      page_rows=page_rows,
+      cancelled=cancelled,
+      budget=budget,
+    )
+  except MarketDataPersistenceCapacityError as exc:
+    budget.capacity_diagnostic = {
+      **exc.diagnostic,
+      "depth": depth,
+      "nodes": budget.nodes,
+      "ranges": [
+        {
+          "code": b.code,
+          "period": b.period,
+          "first_key": b.keys[0],
+          "last_key": b.keys[-1],
+          "keys": len(b.keys),
+        }
+        for b in batches
+      ],
+    }
+    if budget.first_capacity_diagnostic is None:
+      budget.first_capacity_diagnostic = budget.capacity_diagnostic
+    children = _split_expected_keys(batches)
+    if children is None:
+      budget.block()
+    total = {"records_verified": 0, "existing_rows_observed": 0}
+    for child in children:
+      result = _read_expected_keys_bounded(
+        batches=child,
+        connection=connection,
+        page_rows=page_rows,
+        cancelled=cancelled,
+        budget=budget,
+        depth=depth + 1,
+      )
+      for name in total:
+        total[name] += result[name]
+    return total
+
+
+def _read_expected_key_batch_bounded(
+  *,
+  batch: ExpectedBarKeyBatch,
+  **kwargs: Any,
+) -> dict[str, int]:
+  return _read_expected_keys_bounded(batches=(batch,), **kwargs)
 
 
 def _read_group_once(
@@ -563,6 +766,7 @@ def _read_group_once(
   connection: _InfluxConnection | None,
   page_rows: int,
   cancelled: threading.Event | None = None,
+  budget: ReadbackBudget | None = None,
 ) -> dict[str, Any]:
   if page_rows < 1 or page_rows > MARKET_DATA_READBACK_PAGE_ROWS:
     raise ValueError(
@@ -593,8 +797,10 @@ def _read_group_once(
   max_time: int | None = None
   after: datetime | None = None
 
+  budget = budget or ReadbackBudget()
+  sql = ""
   try:
-    with resolved_connection.get_client() as client:
+    with resolved_connection.get_client(timeout=budget.remaining()) as client:
       while row_count < maximum_rows:
         limit = min(page_rows, maximum_rows - row_count)
         sql = _query_page_sql(
@@ -611,6 +817,7 @@ def _read_group_once(
             language="sql",
             mode="reader",
             query_parameters={"stock_code": code, "period": period},
+            timeout=budget.remaining(),
           )
         if reader is None:
           raise MarketDataPersistenceQueryError(
@@ -626,6 +833,8 @@ def _read_group_once(
               f"{code}/{period}: {sorted(missing_columns)}"
             )
           for batch in reader:
+            _check_readback_cancelled(cancelled)
+            budget.remaining()
             if page_count + batch.num_rows > limit:
               raise MarketDataPersistenceQueryError(
                 f"Influx read-back exceeded its {limit}-row page bound"
@@ -697,10 +906,14 @@ def _read_group_once(
   except MarketDataPersistenceVerificationError:
     raise
   except Exception as exc:
-    raise MarketDataPersistenceQueryError(
-      f"Influx read-back query failed for {code}/{period}: {exc}"
-    ) from exc
+    raise _query_failure(
+      exc,
+      sql,
+      page_after=after.isoformat() if after else None,
+      page_rows=page_rows,
+    ) from None
 
+  budget.remaining()
   return {
     "code": code,
     "period": period,
@@ -709,6 +922,62 @@ def _read_group_once(
     "max_time": max_time,
     "key_sha256": digest.hexdigest(),
   }
+
+
+def _read_empty_group_bounded(
+  *,
+  expected: dict[str, Any],
+  start_ms: int,
+  end_exclusive_ms: int,
+  connection: _InfluxConnection | None,
+  page_rows: int,
+  budget: ReadbackBudget,
+  cancelled: threading.Event | None = None,
+  depth: int = 0,
+) -> dict[str, Any]:
+  _check_readback_cancelled(cancelled)
+  budget.enter(depth)
+  try:
+    return _read_group_once(
+      expected=expected,
+      start_ms=start_ms,
+      end_exclusive_ms=end_exclusive_ms,
+      connection=connection,
+      page_rows=page_rows,
+      budget=budget,
+      cancelled=cancelled,
+    )
+  except MarketDataPersistenceCapacityError as exc:
+    budget.capacity_diagnostic = {
+      **exc.diagnostic,
+      "code": expected["code"],
+      "period": expected["period"],
+      "start_ms": start_ms,
+      "end_exclusive_ms": end_exclusive_ms,
+      "depth": depth,
+      "nodes": budget.nodes,
+    }
+    if budget.first_capacity_diagnostic is None:
+      budget.first_capacity_diagnostic = budget.capacity_diagnostic
+    if end_exclusive_ms - start_ms <= 1:
+      budget.block()
+    middle = (start_ms + end_exclusive_ms) // 2
+    for start, end in ((start_ms, middle), (middle, end_exclusive_ms)):
+      result = _read_empty_group_bounded(
+        expected=expected,
+        start_ms=start,
+        end_exclusive_ms=end,
+        connection=connection,
+        page_rows=page_rows,
+        budget=budget,
+        cancelled=cancelled,
+        depth=depth + 1,
+      )
+      # This path only samples pre-existing data for an empty source summary.
+      # Finding a row ends the sample, exactly as the unsplit one-row query does.
+      if result["row_count"]:
+        return result
+    return result
 
 
 async def verify_persisted_bar_summaries(
@@ -764,22 +1033,27 @@ async def verify_persisted_bar_summaries(
     nonlocal existing_rows_observed
     if not group:
       return
+    budget = ReadbackBudget()
     for attempt in range(1, max_attempts + 1):
       try:
         if len(group) == 1:
           result = await _await_readback(
-            _read_expected_key_batch_once,
+            _read_expected_key_batch_bounded,
             batch=group[0],
             connection=connection,
             page_rows=page_rows,
+            budget=budget,
           )
         else:
           result = await _await_readback(
-            _read_expected_key_group_once,
+            _read_expected_keys_bounded,
             batches=tuple(group),
             connection=connection,
             page_rows=page_rows,
+            budget=budget,
           )
+      except MarketDataPersistenceBlockedError:
+        raise
       except MarketDataPersistenceVerificationError:
         if attempt == max_attempts:
           raise
@@ -908,16 +1182,20 @@ async def verify_persisted_bar_summaries(
       continue
 
     last_error = None
+    budget = ReadbackBudget()
     for attempt in range(1, max_attempts + 1):
       try:
         existing = await _await_readback(
-          _read_group_once,
+          _read_empty_group_bounded,
           expected=expected,
           start_ms=start_ms,
           end_exclusive_ms=end_exclusive_ms,
           connection=connection,
           page_rows=page_rows,
+          budget=budget,
         )
+      except MarketDataPersistenceBlockedError:
+        raise
       except MarketDataPersistenceVerificationError as exc:
         last_error = exc
       else:

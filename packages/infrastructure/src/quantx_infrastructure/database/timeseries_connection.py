@@ -83,9 +83,7 @@ def is_fatal_wal_error(error: object) -> bool:
     if current.__context__ is not None:
       pending.append(current.__context__)
     pending.extend(
-      argument
-      for argument in current.args
-      if isinstance(argument, BaseException)
+      argument for argument in current.args if isinstance(argument, BaseException)
     )
   return False
 
@@ -160,11 +158,18 @@ class ConnectionPool:
       if _INFLUXDB_IMPORT_ERROR is None and _InfluxDBClient3 is not None:
         _INFLUXDB_IMPORT_ERROR = None
 
-  def get_client(self):
+  def get_client(self, *, timeout: float | None = None):
     """从连接池获取客户端"""
     deadline = None
     if self.pool_acquire_timeout is not None and self.pool_acquire_timeout >= 0:
       deadline = time.monotonic() + self.pool_acquire_timeout
+    if timeout is not None:
+      requested_deadline = time.monotonic() + max(0, timeout)
+      deadline = (
+        min(deadline, requested_deadline)
+        if deadline is not None
+        else requested_deadline
+      )
 
     with self._pool_available:
       while True:
@@ -292,11 +297,11 @@ class TimeSeriesConnection:
     self.close()
 
   @contextmanager
-  def get_client(self):
+  def get_client(self, *, timeout: float | None = None):
     """获取客户端的上下文管理器"""
     client = None
     try:
-      client = self._pool.get_client()
+      client = self._pool.get_client(timeout=timeout)
       yield client
     except BaseException:
       if client:
