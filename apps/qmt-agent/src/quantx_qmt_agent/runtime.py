@@ -2062,6 +2062,9 @@ class AgentRuntime:
     history_recovery = asyncio.create_task(
       self._history_recovery_supervisor(), name="history-upload-recovery",
     )
+    history_collection = asyncio.create_task(
+      self._history_collection_supervisor(), name="history-collection-supervisor",
+    )
     try:
       delay = 1
       while not self._stopped.is_set():
@@ -2083,9 +2086,8 @@ class AgentRuntime:
             delay,
             authenticated=session_was_authenticated,
           )
-          # A disconnected control socket immediately pauses new historical
-          # native units. Preserve the prior value only long enough to choose
-          # the reconnect backoff for the session that just ended.
+          # Control reconnect changes trading transport state; the independent
+          # history supervisor remains alive and applies current resource guards.
           self._control_session_authenticated = False
           logger.warning(
             "QMT Agent disconnected: error=%s close_code=%s close_reason=%s",
@@ -2103,6 +2105,7 @@ class AgentRuntime:
         capture_supervisor,
         market_stream_supervisor,
         history_recovery,
+        history_collection,
       ):
         task.cancel()
       await asyncio.gather(
@@ -2110,6 +2113,7 @@ class AgentRuntime:
         capture_supervisor,
         market_stream_supervisor,
         history_recovery,
+        history_collection,
         return_exceptions=True,
       )
       await self._shutdown_whole_market_capture()
@@ -2608,15 +2612,6 @@ class AgentRuntime:
           self._emergency_stop_refresh_loop(),
           name="qmt-agent-emergency-refresh",
         ),
-        "market-request": asyncio.create_task(
-          self._market_request_loop(socket),
-          name="qmt-agent-market-request",
-        ),
-        **{
-          f"market-request-{index}": asyncio.create_task(
-            self._market_request_loop(socket), name=f"qmt-agent-market-request-{index}"
-          ) for index in range(1, MAX_CACHED_MARKET_DATA_REQUESTS)
-        },
         "market-control": asyncio.create_task(
           self._market_control_loop(),
           name="qmt-agent-market-control",
@@ -4735,68 +4730,7 @@ class AgentRuntime:
         raise RuntimeError("trade command queue is full") from exc
       return
     if envelope.message_type is AgentMessageType.MARKET_DATA_REQUEST:
-      self._ensure_market_upload_state()
-      if self._fatal_market_data_error is not None:
-        if socket is not None:
-          await socket.close(
-            code=1011,
-            reason="Agent requires restart",
-          )
-        raise self._fatal_market_data_error
-      # XTData requests may take tens of seconds. Keep the WebSocket receive
-      # loop draining report acknowledgements and protocol pongs while one
-      # dedicated worker performs requests serially.
-      request_id = str(envelope.payload.get("request_id") or "")
-      fingerprint = _market_data_payload_fingerprint(envelope.payload)
-      active_upload = self._market_upload_tasks.get(request_id)
-      existing_fingerprint = (
-        active_upload.fingerprint
-        if active_upload is not None
-        else self._queued_market_data_requests.get(request_id)
-      )
-      if existing_fingerprint is not None:
-        if existing_fingerprint != fingerprint:
-          error = RuntimeError("同一 market-data request_id 的重投参数不一致")
-          logger.warning(
-            "Rejected conflicting QMT market-data redelivery: request_id=%s",
-            request_id,
-          )
-          try:
-            await self._report_market_data_failure(request_id, error)
-          except Exception as report_exc:
-            logger.warning(
-              "Could not report conflicting QMT market-data redelivery: "
-              "request_id=%s error=%s",
-              request_id,
-              report_exc.__class__.__name__,
-            )
-          return
-        logger.info(
-          "QMT market-data redelivery joined queued or active upload: request_id=%s",
-          request_id,
-        )
-        return
-      try:
-        if len(self._market_upload_tasks) + len(self._queued_market_data_requests) >= (
-          MAX_CACHED_MARKET_DATA_REQUESTS + MAX_QUEUED_MARKET_DATA_REQUESTS
-        ):
-          raise asyncio.QueueFull
-        self._market_requests.put_nowait(envelope)
-        self._queued_market_data_requests[request_id] = fingerprint
-      except asyncio.QueueFull:
-        logger.warning(
-          "QMT market-data request queue is full: request_id=%s",
-          request_id,
-        )
-        try:
-          await self._report_market_data_busy(request_id)
-        except Exception as report_exc:
-          logger.warning(
-            "Could not report QMT market-data backpressure: request_id=%s error=%s",
-            request_id,
-            report_exc.__class__.__name__,
-          )
-      return
+      raise ValueError("historical collection requires the dedicated history session")
     if envelope.message_type in {
       AgentMessageType.MARKET_RESET,
       AgentMessageType.MARKET_SUBSCRIBE,
@@ -6886,86 +6820,6 @@ class AgentRuntime:
       await asyncio.gather(*tasks, return_exceptions=True)
     self._market_upload_tasks.clear()
 
-  async def _market_request_loop(self, socket) -> None:
-    if getattr(self, "broker", None) is None and getattr(
-      self,
-      "_broker_factory",
-      None,
-    ) is not None:
-      await self._broker_ready.wait()
-    while True:
-      envelope = await self._market_requests.get()
-      request_id = str(envelope.payload.get("request_id") or "")
-      self._queued_market_data_requests.pop(request_id, None)
-      upload_task: asyncio.Task[None] | None = None
-      try:
-        try:
-          while True:
-            upload_task = self._market_upload_task(envelope)
-            try:
-              await asyncio.shield(upload_task)
-            except _MarketDataSpoolCleanupPending:
-              self._history_workload = "paused"
-              self._history_workload_reason = "SPOOL_CLEANUP_PENDING"
-              logger.warning(
-                "Historical market-data request paused for spool cleanup: "
-                "request_id=%s",
-                request_id,
-              )
-              await asyncio.sleep(HISTORY_QOS_CHECK_SECONDS)
-              continue
-            break
-        except asyncio.CancelledError:
-          if upload_task is not None and not upload_task.done():
-            logger.info(
-              "QMT market-data session detached; upload continues: request_id=%s",
-              request_id,
-            )
-          raise
-        except _FatalMarketDataPreparationError:
-          await socket.close(code=1011, reason="market data request failed")
-          return
-        except Exception as exc:
-          if not _is_deterministic_market_data_request_error(exc):
-            logger.warning(
-              "QMT market-data upload will resume after session reconnect: "
-              "request_id=%s error=%s",
-              request_id,
-              exc.__class__.__name__,
-            )
-            await socket.close(
-              code=1012,
-              reason="market data upload retry",
-            )
-            return
-          logger.warning(
-            "QMT market data request rejected: request_id=%s error=%s",
-            request_id,
-            _market_data_failure_reason(exc),
-          )
-          try:
-            await self._report_market_data_failure(request_id, exc)
-          except Exception as report_exc:
-            logger.warning(
-              "Could not report QMT market data failure: request_id=%s error=%s",
-              request_id,
-              report_exc.__class__.__name__,
-            )
-          else:
-            await self._retire_terminal_market_upload(
-              request_id,
-              fingerprint=_market_data_payload_fingerprint(envelope.payload),
-              terminal_status="FAILED",
-            )
-          continue
-
-        # The 90-second server freshness window may expire while XTData holds
-        # the GIL. Refresh it before this serial worker starts another request.
-        # Keep the checkpoint outside upload failure classification: a socket
-        # send failure must never terminally fail an already uploaded request.
-        await self._heartbeat_checkpoint(socket, status="READY")
-      finally:
-        self._market_requests.task_done()
 
   async def _report_market_data_failure(
     self,

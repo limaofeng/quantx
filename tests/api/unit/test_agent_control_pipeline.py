@@ -202,8 +202,7 @@ async def test_database_pollers_do_not_block_report_reception(
     return None
 
   async def hanging_market_request(*_args, **_kwargs):
-    await release_pollers.wait()
-    return None
+    pytest.fail("business control pipeline must not dispatch historical collection")
 
   async def process_message(session, envelope, **_kwargs):
     assert session.device_id == "device-1"
@@ -225,7 +224,7 @@ async def test_database_pollers_do_not_block_report_reception(
     return None
 
   monkeypatch.setattr(agent_api, "_next_command", hanging_command)
-  monkeypatch.setattr(agent_api, "_next_market_data_request", hanging_market_request)
+  monkeypatch.setattr(agent_api, "_next_market_data_request", hanging_market_request, raising=False)
   monkeypatch.setattr(agent_api, "_process_message", process_message)
   monkeypatch.setattr(
     agent_api.agent_connection_hub,

@@ -1,6 +1,4 @@
-import asyncio
 import hashlib
-import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -234,158 +232,8 @@ def _configure_api(monkeypatch, sessions, market_data_root) -> None:
   monkeypatch.setattr(upload_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 0)
 
 
-@pytest.mark.asyncio
-@pytest.mark.integration
-@pytest.mark.parametrize(
-  "active_status",
-  ["DELIVERED", "RECEIVING"],
-)
-async def test_dispatch_keeps_one_active_market_request_per_device(
-  active_status: str,
-  monkeypatch,
-) -> None:
-  active_request_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  queued_request_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-  now = datetime(2026, 8, 24, 8, 0, 0)
-  async with _market_data_database() as (_, sessions):
-    monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
-    async with sessions() as db:
-      session_now = agent_api.utcnow()
-      await db.execute(
-        text("INSERT INTO agent_devices (id) VALUES (:id)"),
-        {"id": DEVICE_ID},
-      )
-      await db.execute(
-        text(
-          """
-          INSERT INTO runtime_component_heartbeats
-            (component, instance_id, status, details, updated_at)
-          VALUES
-            ('api', 'api-instance-1', 'READY', :api_details, :updated_at),
-            (:agent_component, :device_id, 'READY', :agent_details, :updated_at)
-          """
-        ),
-        {
-          "api_details": '{"apiInstanceId":"api-instance-1"}',
-          "agent_component": f"qmt-agent:{DEVICE_ID}",
-          "device_id": DEVICE_ID,
-          "agent_details": json.dumps(
-            {
-              "apiInstanceId": "api-instance-1",
-              "agentSessionId": "agent-session-1",
-              "serverReceivedAt": session_now.isoformat(),
-              "agentSentAt": session_now.isoformat(),
-              "sessionActive": True,
-            }
-          ),
-          "updated_at": session_now,
-        },
-      )
-      await db.commit()
-    control_session = agent_api.AgentControlSession(
-      device_id=DEVICE_ID,
-      capabilities={"market-data"},
-      authorized_account_ids=frozenset(),
-      queue=asyncio.Queue(),
-      api_instance_id="api-instance-1",
-      agent_session_id="agent-session-1",
-      server_connected_at=session_now,
-      remote_address_summary="10.0.0.*",
-      revoked=asyncio.Event(),
-    )
-    await _seed_dispatch_request(
-      sessions,
-      request_id=active_request_id,
-      status=active_status,
-      now=now,
-    )
-    await _seed_dispatch_request(
-      sessions,
-      request_id=queued_request_id,
-      status="QUEUED",
-      now=now + timedelta(seconds=1),
-    )
-
-    assert await agent_api._next_market_data_request(control_session) is None
-    async with sessions() as db:
-      queued = await db.get(MarketDataRequest, queued_request_id)
-      active = await db.get(MarketDataRequest, active_request_id)
-      assert queued is not None and queued.status == "QUEUED"
-      assert active is not None
-      active.status = "FAILED"
-      active.completed_at = now
-      await db.commit()
-
-    dispatched = await agent_api._next_market_data_request(control_session)
-    assert dispatched is not None
-    assert dispatched.message_id == queued_request_id
-    async with sessions() as db:
-      queued = await db.get(MarketDataRequest, queued_request_id)
-    assert queued is not None and queued.status == "DELIVERED"
 
 
-@pytest.mark.asyncio
-@pytest.mark.integration
-async def test_reconnect_requeues_only_expired_delivery_leases(monkeypatch) -> None:
-  stale_delivered = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-  fresh_receiving = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
-  future_receiving = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-  uploaded = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-  processing = "ffffffff-ffff-4fff-8fff-ffffffffffff"
-  now = datetime(2026, 8, 24, 8, 0, 0)
-  async with _market_data_database() as (_, sessions):
-    monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
-    await _seed_dispatch_request(
-      sessions,
-      request_id=stale_delivered,
-      status="DELIVERED",
-      now=now - timedelta(seconds=agent_api.MARKET_DATA_RECONNECT_STALE_SECONDS + 1),
-    )
-    await _seed_dispatch_request(
-      sessions,
-      request_id=fresh_receiving,
-      status="RECEIVING",
-      now=now - timedelta(seconds=1),
-    )
-    await _seed_dispatch_request(
-      sessions,
-      request_id=future_receiving,
-      status="RECEIVING",
-      now=now + timedelta(hours=8),
-    )
-    await _seed_dispatch_request(
-      sessions,
-      request_id=uploaded,
-      status="UPLOADED",
-      now=now - timedelta(days=1),
-    )
-    await _seed_dispatch_request(
-      sessions,
-      request_id=processing,
-      status="PROCESSING",
-      now=now - timedelta(days=1),
-    )
-
-    await agent_api._requeue_incomplete_market_requests(DEVICE_ID, now=now)
-
-    async with sessions() as db:
-      statuses = {
-        request_id: (await db.get(MarketDataRequest, request_id)).status
-        for request_id in (
-          stale_delivered,
-          fresh_receiving,
-          future_receiving,
-          uploaded,
-          processing,
-        )
-      }
-    assert statuses == {
-      stale_delivered: "QUEUED",
-      fresh_receiving: "RECEIVING",
-      future_receiving: "QUEUED",
-      uploaded: "UPLOADED",
-      processing: "PROCESSING",
-    }
 
 
 @pytest.mark.asyncio
@@ -592,7 +440,6 @@ async def test_total_chunks_conflict_fails_request_without_losing_audit_chunks(
 
     assert error.value.status_code == 409
     assert error.value.detail == "行情批次总数与首次上传不一致"
-    await agent_api._requeue_incomplete_market_requests(DEVICE_ID)
     with pytest.raises(HTTPException) as retry_error:
       await _upload(b"new chunk", chunk_index=1)
 
@@ -767,7 +614,6 @@ async def test_failed_request_rejects_upload_and_cannot_be_completed(
 
     assert duplicate_error.value.status_code == 409
     assert new_chunk_error.value.status_code == 409
-    await agent_api._requeue_incomplete_market_requests(DEVICE_ID)
     async with sessions() as db:
       request = await db.get(MarketDataRequest, REQUEST_ID)
       transfer_count = await db.scalar(

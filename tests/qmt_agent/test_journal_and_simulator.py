@@ -1,4 +1,3 @@
-import asyncio
 import json
 import threading
 from types import SimpleNamespace
@@ -163,93 +162,6 @@ def test_retiring_full_snapshots_preserves_incremental_reports(tmp_path) -> None
   assert [item.message_id for item in pending] == [incremental.message_id]
 
 
-@pytest.mark.asyncio
-async def test_market_request_does_not_block_report_ack_processing(
-  monkeypatch,
-  tmp_path,
-) -> None:
-  journal = LocalJournal(tmp_path / "journal.sqlite3")
-  runtime = AgentRuntime(
-    configuration=DeviceConfiguration(
-      api_url="http://127.0.0.1:8080",
-      device_id="device-1",
-    ),
-    device_secret="unused",
-    mode="data-only",
-    allowed_accounts=set(),
-    broker=SimulatorBroker(set(), data_only=True),
-    journal=journal,
-    market_spool_base_directory=tmp_path,
-  )
-  report = AgentEnvelope(
-    message_type=AgentMessageType.DELTA_REPORT,
-    payload={"is_complete": True},
-  )
-  journal.add_report(report.message_id, report.model_dump_json())
-  request_started = asyncio.Event()
-  release_request = asyncio.Event()
-
-  async def slow_market_request(envelope) -> None:
-    del envelope
-    request_started.set()
-    await release_request.wait()
-
-  monkeypatch.setattr(
-    runtime,
-    "_handle_market_data_request",
-    slow_market_request,
-  )
-
-  class Socket:
-    def __init__(self) -> None:
-      self.sent: list[str] = []
-      self.closed: list[tuple[int, str]] = []
-
-    async def send(self, serialized: str) -> None:
-      self.sent.append(serialized)
-
-    async def close(self, *, code: int, reason: str) -> None:
-      self.closed.append((code, reason))
-
-  socket = Socket()
-  worker = asyncio.create_task(runtime._market_request_loop(socket))
-  ack_writer = asyncio.create_task(runtime._report_ack_loop(socket))
-  market_request = AgentEnvelope(
-    message_type=AgentMessageType.MARKET_DATA_REQUEST,
-    payload={"request_id": "request-1"},
-  )
-  await runtime._handle_message(None, market_request.model_dump_json())
-  await asyncio.wait_for(request_started.wait(), timeout=1)
-
-  report_ack = AgentEnvelope(
-    message_type=AgentMessageType.REPORT_ACK,
-    payload={
-      "report_message_id": report.message_id,
-      "accepted": True,
-    },
-  )
-  await asyncio.wait_for(
-    runtime._handle_message(None, report_ack.model_dump_json()),
-    timeout=1,
-  )
-  await asyncio.wait_for(runtime._report_ack_requests.join(), timeout=1)
-
-  assert journal.pending_reports() == []
-  release_request.set()
-  await asyncio.wait_for(runtime._market_requests.join(), timeout=1)
-  sent_envelopes = [
-    AgentEnvelope.model_validate_json(serialized)
-    for serialized in socket.sent
-  ]
-  assert any(
-    envelope.message_type is AgentMessageType.HEARTBEAT
-    and envelope.payload["status"] == "READY"
-    for envelope in sent_envelopes
-  )
-  assert socket.closed == []
-  worker.cancel()
-  ack_writer.cancel()
-  await asyncio.gather(worker, ack_writer, return_exceptions=True)
 
 
 @pytest.mark.asyncio

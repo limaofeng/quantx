@@ -43,7 +43,6 @@ from quantx_infrastructure.database.relational_connection import AsyncSessionLoc
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   AgentReportInbox,
-  MarketDataRequest,
   OrderCorrelation,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
@@ -84,7 +83,7 @@ from quantx_infrastructure.services.trade_intent_processor import (
   LOCAL_OUTBOX_EXPIRED_ZERO_FILL_SOURCE,
 )
 from redis.exceptions import RedisError
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
@@ -133,16 +132,6 @@ AGENT_CONTROL_CPU_OFFLOAD_CHARS = 64 * 1024
 AGENT_CONTROL_CPU_OFFLOAD_BYTES = 256 * 1024
 AGENT_CONTROL_CPU_WORKERS = 2
 
-_MARKET_DATA_INFLIGHT_STATUSES = frozenset(
-  {"DELIVERED", "RECEIVING", "UPLOADED", "PROCESSING"}
-)
-_MARKET_DATA_NATIVE_DISPATCH_STATUSES = frozenset({"DELIVERED", "RECEIVING"})
-# UPLOADED is a frozen manifest: the Agent has completed native preparation.
-# One next download may overlap ingestion. Two retained requests bound decoded
-# data to 2 * 512 MiB and compressed data to 2 * 256 MiB, with existing global
-# staging/free-disk and Agent spool quotas still enforced at every write.
-MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE = 2
-MARKET_DATA_RECONNECT_STALE_SECONDS = 5 * 60
 _agent_control_cpu_executor = ThreadPoolExecutor(
   max_workers=AGENT_CONTROL_CPU_WORKERS,
   thread_name_prefix="agent-control-cpu",
@@ -2263,151 +2252,8 @@ async def _next_command(
     )
 
 
-async def _next_market_data_request(
-  control_session: AgentControlSession,
-  *,
-  protocol_version: str = PROTOCOL_VERSION,
-) -> Optional[AgentEnvelope]:
-  device_id = control_session.device_id
-  if "market-data" not in {
-    str(capability).strip().lower() for capability in control_session.capabilities
-  }:
-    return None
-  async with AsyncSessionLocal() as db:
-    # Lock the device row before inspecting or dispatching requests. Locking only
-    # a QUEUED row lets two concurrent websocket loops each observe no active
-    # delivery and dispatch separate rows for the same serial QMT worker.
-    device = await db.scalar(
-      select(AgentDevice.id)
-      .where(
-        AgentDevice.id == device_id,
-        AgentDevice.revoked_at.is_(None),
-      )
-      .with_for_update()
-    )
-    if device is None:
-      return None
-    if await db.scalar(
-      text("""
-      SELECT EXISTS(SELECT 1 FROM market_data_history_session
-        WHERE device_id=:device AND expires_at > CURRENT_TIMESTAMP)
-      """),
-      {"device": device_id},
-    ):
-      return None
-    heartbeat = await db.get(
-      RuntimeComponentHeartbeat,
-      f"qmt-agent:{device_id}",
-    )
-    session_state = evaluate_agent_session(
-      heartbeat,
-      now=utcnow(),
-      acceptable_statuses={
-        "READY",
-        "RECONCILING",
-        "RECONCILE_REQUIRED",
-        "TRADING_UNAVAILABLE",
-        "EMERGENCY_STOP",
-      },
-    )
-    if (
-      not session_state.current
-      or session_state.api_instance_id != control_session.api_instance_id
-      or session_state.agent_session_id != control_session.agent_session_id
-    ):
-      return None
-    inflight_statuses = list(
-      (await db.scalars(
-        select(MarketDataRequest.status)
-        .where(
-          or_(
-            and_(MarketDataRequest.device_id == device_id,
-                 MarketDataRequest.status.in_(_MARKET_DATA_INFLIGHT_STATUSES)),
-            and_(MarketDataRequest.status == "BLOCKED",
-                 MarketDataRequest.ingestion_progress["reason_code"].astext.in_((
-                   "DEPENDENCY_QUERY_CAPACITY_BLOCKED", "DEPENDENCY_AUTH_BLOCKED",
-                   "DEPENDENCY_WRITE_CAPACITY_BLOCKED",
-                   "DEPENDENCY_READBACK_UNAVAILABLE", "DEPENDENCY_WRITE_UNAVAILABLE",
-                 ))),
-          ),
-        )
-        .limit(MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE)
-      )).all()
-    )
-    if (
-      any(status in _MARKET_DATA_NATIVE_DISPATCH_STATUSES for status in inflight_statuses)
-      or "BLOCKED" in inflight_statuses
-      or len(inflight_statuses) >= MAX_MARKET_DATA_INFLIGHT_REQUESTS_PER_DEVICE
-    ):
-      return None
-    from quantx_infrastructure.services.development_history_window import (
-      history_window_open,
-    )
-
-    development_allowed = (
-      session_state.current
-      and heartbeat.status == "READY"
-      and await history_window_open()
-    )
-    result = await db.execute(
-      select(MarketDataRequest)
-      .where(
-        MarketDataRequest.device_id == device_id,
-        MarketDataRequest.status == "QUEUED",
-        or_(MarketDataRequest.development_only.is_(False), development_allowed),
-      )
-      .order_by(MarketDataRequest.development_only, MarketDataRequest.created_at)
-      .limit(1)
-      .with_for_update(skip_locked=True)
-    )
-    request = result.scalar_one_or_none()
-    if request is None:
-      return None
-    request.status = "DELIVERED"
-    request.updated_at = utcnow()
-    await db.commit()
-    return AgentEnvelope(
-      protocol_version=protocol_version,
-      message_id=request.request_id,
-      message_type=AgentMessageType.MARKET_DATA_REQUEST,
-      payload={
-        **request.request_payload,
-        "request_id": request.request_id,
-        "upload_path": f"/agent/market-data/{request.request_id}/chunks",
-      },
-    )
 
 
-async def _requeue_incomplete_market_requests(
-  device_id: str,
-  *,
-  now: datetime | None = None,
-) -> None:
-  """Recover only expired delivery leases after an Agent reconnect.
-
-  ``updated_at`` advances on dispatch and every accepted upload chunk. A fresh
-  DELIVERED/RECEIVING request is therefore an active upload lease, not reconnect
-  debris. UPLOADED and PROCESSING belong to durable ingestion and are never
-  eligible for websocket redispatch.
-  """
-
-  reference_time = now or utcnow()
-  stale_before = reference_time - timedelta(seconds=MARKET_DATA_RECONNECT_STALE_SECONDS)
-  future_after = reference_time + timedelta(seconds=MARKET_DATA_RECONNECT_STALE_SECONDS)
-  async with AsyncSessionLocal() as db:
-    await db.execute(
-      update(MarketDataRequest)
-      .where(
-        MarketDataRequest.device_id == device_id,
-        MarketDataRequest.status.in_(("DELIVERED", "RECEIVING")),
-        or_(
-          MarketDataRequest.updated_at < stale_before,
-          MarketDataRequest.updated_at > future_after,
-        ),
-      )
-      .values(status="QUEUED", updated_at=reference_time)
-    )
-    await db.commit()
 
 
 async def _process_message(
@@ -3047,42 +2893,6 @@ async def _poll_agent_trade_commands(
     await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
 
 
-async def _poll_agent_market_requests(
-  *,
-  control_session: AgentControlSession,
-  protocol_version: str,
-  outbound: _AgentOutboundBuffer,
-  database_state: _AgentDatabaseState,
-) -> None:
-  device_id = control_session.device_id
-  while True:
-    if not database_state.ready.is_set():
-      await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
-      continue
-    try:
-      request = await asyncio.wait_for(
-        _next_market_data_request(
-          control_session,
-          protocol_version=protocol_version,
-        ),
-        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
-      )
-    except _TRANSIENT_DEPENDENCY_ERRORS:
-      database_state.mark_failure()
-      AGENT_CONTROL_EVENTS.labels(
-        event="timeout",
-        reason="market_request_poll",
-      ).inc()
-      logger.warning("Agent market-request poll timed out: device_id=%s", device_id)
-    else:
-      if request is not None:
-        await _enqueue_agent_outbound(
-          device_id,
-          outbound,
-          request,
-          deduplicate=True,
-        )
-    await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
 
 
 async def _relay_agent_hub_controls(
@@ -3297,15 +3107,6 @@ async def _run_agent_control_pipeline(
       for index in range(AGENT_CONTROL_TRADE_VALIDATION_NORMAL_WORKERS)
     ),
     asyncio.create_task(
-      _poll_agent_market_requests(
-        control_session=control_session,
-        protocol_version=protocol_version,
-        outbound=outbound,
-        database_state=database_state,
-      ),
-      name=f"agent-market-request-poller:{device_id}",
-    ),
-    asyncio.create_task(
       _relay_agent_hub_controls(
         control_session=control_session,
         protocol_version=protocol_version,
@@ -3395,7 +3196,6 @@ async def agent_websocket(websocket: WebSocket) -> None:
       sent_at=first.sent_at,
       establish=True,
     )
-    await _requeue_incomplete_market_requests(device.id)
     await websocket.send_text(
       _auth_result(
         accepted=True,

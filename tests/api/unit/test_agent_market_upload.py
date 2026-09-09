@@ -1,9 +1,7 @@
 import hashlib
-from datetime import datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
-from quantx_api import agent_api
 from quantx_market_data.agent_upload import _matches_sha256_digest, _read_limited_body
 
 
@@ -69,33 +67,3 @@ def test_market_body_sha256_uses_constant_time_comparison() -> None:
   assert _matches_sha256_digest(digest, digest.upper()) is True
   assert _matches_sha256_digest(digest, "0" * 64) is False
   assert _matches_sha256_digest(digest, "") is False
-
-
-@pytest.mark.asyncio
-async def test_requeue_uses_expired_delivery_lease_to_preserve_active_uploads(
-  monkeypatch,
-) -> None:
-  session = _RequeueSession()
-  monkeypatch.setattr(agent_api, "AsyncSessionLocal", lambda: session)
-  now = datetime(2026, 8, 24, 8, 0, 0)
-
-  await agent_api._requeue_incomplete_market_requests("device-1", now=now)
-
-  sql = str(session.statement)
-  parameters = session.statement.compile().params
-  assert sql.startswith("UPDATE market_data_request")
-  assert "market_data_request.device_id =" in sql
-  assert "market_data_request.status IN" in sql
-  assert "market_data_request.updated_at <" in sql
-  assert "market_data_request.updated_at >" in sql
-  assert "QUEUED" in parameters.values()
-  assert "device-1" in parameters.values()
-  assert ["DELIVERED", "RECEIVING"] in parameters.values()
-  assert now in parameters.values()
-  assert (
-    now - timedelta(seconds=agent_api.MARKET_DATA_RECONNECT_STALE_SECONDS)
-  ) in parameters.values()
-  assert (
-    now + timedelta(seconds=agent_api.MARKET_DATA_RECONNECT_STALE_SECONDS)
-  ) in parameters.values()
-  assert session.committed is True
