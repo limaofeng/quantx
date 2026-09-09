@@ -1,4 +1,4 @@
-"""Independent PAPER-only T-assistant decision runtime for P3 shadowing."""
+"""Environment-bound T-assistant decisions using the shared StrategyBase.step path."""
 
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ from quantx_domain.trading.t_assistant_market_state import (
 )
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import AsyncSessionLocal
+from quantx_infrastructure.models.t_assistant_execution import TAssistantExecutionRecord
+from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.repositories.t_assistant_decision_cycle_repository import (
   TAssistantCycleConflict,
   TAssistantDecisionCycleRepository,
@@ -73,10 +75,10 @@ class TAssistantShadowCycleResult:
   comparisons: tuple[TAssistantShadowComparison, ...]
 
 
-class TAssistantPaperShadowRuntime:
+class _TAssistantDecisionRuntime:
   """Run StrategyBase.step(SNAPSHOT) without any execution-side write path.
 
-  The class intentionally depends only on the P3 cycle repository.  It cannot
+  LIVE commits additionally fence the current configuration head. It cannot
   create approvals, PendingTradeOrders, correlations, or TradeCommandOutbox
   rows. Standard TradeIntent values are durably accepted with the cycle; its
   output manifest binds each intent to the original immutable candidate evidence.
@@ -86,15 +88,64 @@ class TAssistantPaperShadowRuntime:
     self,
     *,
     session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
-    processing_owner: str = "t-assistant-paper-shadow",
+    processing_owner: Optional[str] = None,
     clock: Callable[[], datetime] = time_utils.now_aware,
   ) -> None:
     self._session_factory = session_factory
-    self._processing_owner = processing_owner
+    self._processing_owner = processing_owner or (
+      "t-assistant-paper-shadow"
+      if self._environment is ExecutionEnvironment.PAPER
+      else "t-assistant-live-decision"
+    )
     self._clock = clock
     self._strategies: dict[str, AshareIntradayTAssistantStrategy] = {}
     self._parameters: dict[str, dict[str, Any]] = {}
     self._symbol_states: dict[str, dict[str, TAssistantSymbolState]] = {}
+
+  def _validate_environment(self, execution):
+    if execution.environment is not self._environment:
+      raise ValueError(f"T-assistant runtime accepts {self._environment.value} only")
+    if (
+      self._environment is ExecutionEnvironment.LIVE
+      and execution.scorer_mode.value != "RULE_ONLY"
+    ):
+      raise ValueError("T_ASSISTANT_LIVE_RULE_ONLY_REQUIRED")
+
+  async def _lock_live_source(self, db, execution):
+    if self._environment is not ExecutionEnvironment.LIVE:
+      return
+    head = await db.get(
+      TTradeGlobalConfig,
+      execution.config_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+    record = await db.get(
+      TAssistantExecutionRecord,
+      execution.execution_id,
+      with_for_update=True,
+      populate_existing=True,
+    )
+    if (
+      head is None
+      or record is None
+      or not head.enabled
+      or head.desired_environment != "LIVE"
+      or head.strategy_run_id
+      or head.account_id != execution.account_id
+      or head.active_config_version_id != execution.config_version_id
+      or head.config_version != execution.frozen_config_version
+      or record.account_id != execution.account_id
+      or record.config_id != execution.config_id
+      or record.environment != "LIVE"
+      or record.config_version_id != execution.config_version_id
+      or record.config_snapshot_hash != execution.config_snapshot_hash
+      or record.entry_authorization != execution.entry_authorization.value
+      or record.rollout_stage != execution.rollout_stage.value
+      or record.scorer_mode != "RULE_ONLY"
+      or record.status not in {"WARMING", "RUNNING"}
+    ):
+      raise TAssistantCycleConflict("T_ASSISTANT_LIVE_SOURCE_CHANGED")
 
   def bind_execution(
     self,
@@ -103,14 +154,13 @@ class TAssistantPaperShadowRuntime:
     parameters: Mapping[str, Any],
     symbol_states: Optional[Mapping[str, TAssistantSymbolState]] = None,
   ) -> None:
-    if execution.environment is not ExecutionEnvironment.PAPER:
-      raise ValueError("P3 T-assistant shadow runtime accepts PAPER only")
+    self._validate_environment(execution)
     context = StrategyContext(
-      mode=StrategyRunMode.PAPER,
+      mode=StrategyRunMode(self._environment.value.lower()),
       instruments=sorted((symbol_states or {}).keys()),
       parameters=dict(parameters),
       execution_ref=execution.execution_ref,
-      environment=ExecutionEnvironment.PAPER,
+      environment=self._environment,
     )
     strategy = AshareIntradayTAssistantStrategy(context)
     self._strategies[execution.execution_id] = strategy
@@ -128,8 +178,7 @@ class TAssistantPaperShadowRuntime:
     legacy_results: Optional[Mapping[str, Mapping[str, Any]]] = None,
     _cycle_id: Optional[str] = None,
   ) -> TAssistantShadowCycleResult:
-    if execution.environment is not ExecutionEnvironment.PAPER:
-      raise ValueError("P3 T-assistant shadow cycle must stay in PAPER")
+    self._validate_environment(execution)
     if snapshot.execution_ref != execution.execution_ref:
       raise ValueError("T-assistant shadow snapshot owner mismatch")
     strategy = self._strategies.get(execution.execution_id)
@@ -163,12 +212,14 @@ class TAssistantPaperShadowRuntime:
         execution_ref=execution.execution_ref,
       )
     )
-    comparisons = self._compare(
-      output=output,
-      legacy_results=legacy_results or {},
+    comparisons = (
+      self._compare(output=output, legacy_results=legacy_results or {})
+      if self._environment is ExecutionEnvironment.PAPER
+      else ()
     )
     async with self._session_factory() as db:
       async with db.begin():
+        await self._lock_live_source(db, execution)
         repository = TAssistantDecisionCycleRepository(db)
         cycle = await repository.prepare_material_cycle(
           snapshot=snapshot,
@@ -187,6 +238,7 @@ class TAssistantPaperShadowRuntime:
       claim_conflict: Optional[TAssistantCycleConflict] = None
       committed_cycle = None
       async with db.begin():
+        await self._lock_live_source(db, execution)
         repository = TAssistantDecisionCycleRepository(db)
         try:
           claim = await repository.claim(
@@ -250,12 +302,17 @@ class TAssistantPaperShadowRuntime:
   ) -> TAssistantShadowCycleResult:
     """Resume only when the caller supplies the exact original snapshot."""
 
+    self._validate_environment(execution)
+    if snapshot.execution_ref != execution.execution_ref:
+      raise TAssistantCycleConflict("T_CYCLE_RECOVERY_OWNER_CONFLICT")
     async with self._session_factory() as db:
       async with db.begin():
         repository = TAssistantDecisionCycleRepository(db)
         cycle = await repository.get(cycle_id)
       if cycle is None:
         raise TAssistantCycleConflict("T_CYCLE_NOT_FOUND")
+      if cycle.execution_id != execution.execution_id:
+        raise TAssistantCycleConflict("T_CYCLE_RECOVERY_OWNER_CONFLICT")
       if cycle.snapshot_hash != snapshot.snapshot_hash:
         conflict: Optional[TAssistantCycleConflict] = None
         async with db.begin():
@@ -403,9 +460,9 @@ class TAssistantPaperShadowRuntime:
             ),
             "payload": {
               "execution_ref": execution.execution_ref.to_dict(),
-              "environment": "PAPER",
+              "environment": execution.environment.value,
               "cycle_id": cycle_id,
-              "paper_shadow_only": True,
+              "paper_shadow_only": execution.environment is ExecutionEnvironment.PAPER,
               "candidate_evidence": witness,
             },
             "metrics": {"opportunity_score": candidate.score},
@@ -417,12 +474,12 @@ class TAssistantPaperShadowRuntime:
       ]
       payload = {
         "execution_ref": execution.execution_ref.to_dict(),
-        "environment": ExecutionEnvironment.PAPER.value,
+        "environment": execution.environment.value,
         "cycle_id": cycle_id,
         "signal_snapshot": evaluation,
         "material_events": events,
         "shadow_comparison": comparison_by_symbol.get(patch.instrument_code),
-        "paper_shadow_only": True,
+        "paper_shadow_only": execution.environment is ExecutionEnvironment.PAPER,
       }
       event_hash = stable_manifest_hash(payload)
       evidence.append(
@@ -521,3 +578,15 @@ __all__ = [
   "TAssistantShadowComparison",
   "TAssistantShadowCycleResult",
 ]
+
+
+class TAssistantPaperShadowRuntime(_TAssistantDecisionRuntime):
+  """PAPER-only decisions plus legacy comparison evidence."""
+
+  _environment = ExecutionEnvironment.PAPER
+
+
+class TAssistantLiveDecisionRuntime(_TAssistantDecisionRuntime):
+  """LIVE RULE_ONLY proposals; never creates broker commands or approvals."""
+
+  _environment = ExecutionEnvironment.LIVE

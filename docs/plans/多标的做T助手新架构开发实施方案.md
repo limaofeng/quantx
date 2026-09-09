@@ -636,6 +636,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   历史读取期间 stream/generation 改变即阻断，同源后续行情不修改已冻结价格。
   行情、真实组合读取和成交估值联合 **43 项通过**，聚焦 Ruff 通过；
   JUnit `.codex_screenshots/p6-live-market-marks.xml`。未运行外部行情下载或实盘进程。
+- LIVE 决策执行器已复用共享 StrategyBase.step 与周期 prepare/claim/commit，保持独立
+  LIVE/RULE_ONLY 环境绑定；候选证据及标准意图按 LIVE 落库，不写 PAPER 对照事件。
+  prepare 与 commit 分别按 head→execution 加锁，复核当前配置、环境和 legacy producer
+  指针，配置关闭/切换不得产生旧源候选。恢复入口先检查环境及 owner，再读取或终结周期。
+  真实候选、延迟释放、并发头变化与 PAPER 回归联合 **26 项通过**；恢复补强后相关
+  **22 项通过**（含新增 1 项），聚焦 Ruff 通过。证据 `.codex_screenshots/p6-live-decision.xml`
+  及 `p6-live-decision-recovery.log`。尚未注册 LIVE 行情 supervisor 或真实入场命令 handler。
 - 剩余开发顺序：LIVE supervisor 接线、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

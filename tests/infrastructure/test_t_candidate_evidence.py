@@ -29,7 +29,10 @@ from quantx_domain.trading.t_trade_opportunity_engine import (
   OpportunityState,
   reduce_opportunity,
 )
-from quantx_engine.t_assistant_decision_runtime import TAssistantPaperShadowRuntime
+from quantx_engine.t_assistant_decision_runtime import (
+  TAssistantLiveDecisionRuntime,
+  TAssistantPaperShadowRuntime,
+)
 from quantx_infrastructure.models.t_assistant_execution import (
   TAssistantDecisionCycleRecord,
   TAssistantSymbolStateRecord,
@@ -93,6 +96,7 @@ async def seed_candidate_cycle(
   extra_tick=True,
   candidate_at=NOW,
   instrument_codes=("600000.SH",),
+  environment="PAPER",
 ):
   """Requires frozen_config fixture; invokes the real runtime/strategy, no signal rewrite."""
   values = asdict(allocation_tests._version("config-1"))
@@ -128,6 +132,13 @@ async def seed_candidate_cycle(
     row = await repository.ensure_paper_shadow(
       account_id="account-1", version=version, now=candidate_at
     )
+    row.environment = environment
+    if environment == "LIVE":
+      head = await db.get(TTradeGlobalConfig, "config-1")
+      head.desired_environment = "LIVE"
+      head.active_config_version_id = version.config_version_id
+      head.config_version = version.version
+    await db.flush()
     execution = await repository.get_domain(row.execution_id)
     if not deferred:
       execution = await TAssistantExecutionLifecycle(repository).activate_ready(
@@ -207,9 +218,12 @@ async def seed_candidate_cycle(
     states[code], rings[code] = state, ring
   now = datetime.fromtimestamp(samples[-1].source_time_ms / 1000, UTC)
   clock = {"now": now}
-  runtime = TAssistantPaperShadowRuntime(
-    session_factory=sessions, clock=lambda: clock["now"]
+  runtime_class = (
+    TAssistantLiveDecisionRuntime
+    if environment == "LIVE"
+    else TAssistantPaperShadowRuntime
   )
+  runtime = runtime_class(session_factory=sessions, clock=lambda: clock["now"])
 
   def snapshot(execution, states):
     symbols = tuple(
