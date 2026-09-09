@@ -65,11 +65,39 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
       migration.upgrade()
 
     await connection.run_sync(upgrade)
+    await connection.execute(
+      text("""
+      CREATE TEMP TABLE development_data_export (
+        id varchar(64) PRIMARY KEY, request json NOT NULL, state varchar(32) NOT NULL,
+        updated_at timestamptz NOT NULL, expires_at timestamptz
+      )
+    """)
+    )
+    path = (
+      Path(__file__).resolve().parents[2]
+      / "packages/infrastructure/alembic/versions/20260909_0066_market_data_demand.py"
+    )
+    spec = importlib.util.spec_from_file_location("demand_migration", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    def upgrade_demand(sync_connection):
+      operations = Operations(MigrationContext.configure(sync_connection))
+      migration.op = SimpleNamespace(
+        create_table=lambda *args, **kwargs: operations.create_table(
+          *args, prefixes=["TEMPORARY"], **kwargs
+        ),
+        create_index=operations.create_index,
+      )
+      migration.upgrade()
+
+    await connection.run_sync(upgrade_demand)
   result = []
   for owner in ("owner-a", "owner-b"):
     store = object.__new__(WorkerStore)
     store.engine, store.manifest = original.engine, []
     store.owner_id, store.epoch = owner, None
+    store.demand_source_kind = "AGENT"
     result.append(store)
   yield result, clock
 
@@ -278,9 +306,7 @@ async def test_reference_backlog_does_not_hide_supported_work(workers):
 
 
 async def test_api_submission_validates_scope_and_only_persists_demand():
-  store = SimpleNamespace(
-    create_market_data_request=AsyncMock(return_value="request-1")
-  )
+  store = SimpleNamespace(submit_history_demand=AsyncMock(return_value="d" * 64))
   app = create_app(store=store, token="test-token")
   async with app.router.lifespan_context(app):
     async with AsyncClient(
@@ -289,26 +315,17 @@ async def test_api_submission_validates_scope_and_only_persists_demand():
       headers={"Authorization": "Bearer test-token"},
     ) as client:
       response = await client.post(
-        "/market-data/internal/v1/requests",
+        "/market-data/internal/v1/demands",
         json={
           "instrument": "600000.SH",
           "period": "tick",
           "trading_date": "2026-09-01",
         },
       )
-      assert response.status_code == 202 and response.json() == {
-        "request_id": "request-1"
-      }
-      assert store.create_market_data_request.await_args.args[0] == {
-        "operation": "bars",
-        "download": True,
-        "stock_list": ["600000.SH"],
-        "periods": ["tick"],
-        "start_time": "20260901",
-        "end_time": "20260901",
-      }
+      assert response.status_code == 202 and response.json() == {"demand_id": "d" * 64}
+      assert store.submit_history_demand.await_args.args[0].instrument == "600000.SH"
       response = await client.post(
-        "/market-data/internal/v1/requests",
+        "/market-data/internal/v1/demands",
         json={
           "instrument": "600000.SH",
           "period": "tick",
@@ -317,4 +334,4 @@ async def test_api_submission_validates_scope_and_only_persists_demand():
         },
       )
       assert response.status_code == 422
-      store.create_market_data_request.assert_awaited_once()
+      store.submit_history_demand.assert_awaited_once()

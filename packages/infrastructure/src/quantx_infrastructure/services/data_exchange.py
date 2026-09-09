@@ -32,34 +32,44 @@ def content_path(digest: str) -> Path:
   return path
 
 
+class ExportQueueCapacity(ValueError):
+  pass
+
+
 async def submit(request: HistoryPartitionRequest) -> str:
+  async with AsyncSessionLocal() as db:
+    identity = await submit_in_transaction(request, db)
+    await db.commit()
+  return identity
+
+
+async def submit_in_transaction(request: HistoryPartitionRequest, db) -> str:
+  """Publish a catalog row inside the caller's fenced transaction."""
   encoded = json.dumps(request.model_dump(mode="json"), sort_keys=True)
   identity = hashlib.sha256(("daily-limits-v2:" + encoded).encode()).hexdigest()
-  async with AsyncSessionLocal() as db:
-    await db.execute(text("SELECT pg_advisory_xact_lock(817234592)"))
-    existing = await db.scalar(
-      text("SELECT id FROM development_data_export WHERE id=:id"), {"id": identity}
-    )
-    if existing is None:
-      pending = await db.scalar(
-        text(
-          "SELECT count(*) FROM development_data_export WHERE state IN ('QUEUED','WAITING_SOURCE')"
-        )
+  await db.execute(text("SELECT pg_advisory_xact_lock(817234592)"))
+  existing = await db.scalar(
+    text("SELECT id FROM development_data_export WHERE id=:id"), {"id": identity}
+  )
+  if existing is None:
+    pending = await db.scalar(
+      text(
+        "SELECT count(*) FROM development_data_export WHERE state IN ('QUEUED','WAITING_SOURCE')"
       )
-      if pending >= 5000:
-        raise ValueError("History request queue capacity reached")
-    await db.execute(
-      text("""
-      INSERT INTO development_data_export(id,request,state,updated_at)
-      VALUES (:id,CAST(:request AS JSON),'QUEUED',CURRENT_TIMESTAMP)
-      ON CONFLICT(id) DO UPDATE SET state = CASE
-        WHEN development_data_export.expires_at < CURRENT_TIMESTAMP
-          OR development_data_export.state='EXPIRED' THEN 'QUEUED'
-        ELSE development_data_export.state END
-    """),
-      {"id": identity, "request": encoded},
     )
-    await db.commit()
+    if pending >= 5000:
+      raise ExportQueueCapacity("History request queue capacity reached")
+  await db.execute(
+    text("""
+    INSERT INTO development_data_export(id,request,state,updated_at)
+    VALUES (:id,CAST(:request AS JSON),'QUEUED',CURRENT_TIMESTAMP)
+    ON CONFLICT(id) DO UPDATE SET state = CASE
+      WHEN development_data_export.expires_at < CURRENT_TIMESTAMP
+        OR development_data_export.state='EXPIRED' THEN 'QUEUED'
+      ELSE development_data_export.state END
+  """),
+    {"id": identity, "request": encoded},
+  )
   return identity
 
 

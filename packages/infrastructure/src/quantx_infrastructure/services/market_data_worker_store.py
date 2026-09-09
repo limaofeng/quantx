@@ -1,11 +1,78 @@
 """PostgreSQL lease and transactional fences for the historical data worker."""
 
+from quantx_contracts import PROTOCOL_VERSION
+from quantx_contracts.data_exchange import HistoryPartitionRequest
+from quantx_contracts.market_data_service import HistoryDemand
 from sqlalchemy import text
 
-from quantx_infrastructure.runtime_store import DurableRuntimeStore
+from quantx_infrastructure.runtime_store import MarketDataSourceUnavailable
+from quantx_infrastructure.services.data_exchange import (
+  ExportQueueCapacity,
+  submit_in_transaction,
+)
+from quantx_infrastructure.services.market_data_demand_store import (
+  MarketDataDemandStore,
+)
 
 
-class MarketDataWorkerStore(DurableRuntimeStore):
+class MarketDataWorkerStore(MarketDataDemandStore):
+  async def plan_history_demand(self) -> bool:
+    """Link one queued demand atomically under the current worker lease."""
+    async with self.engine.begin() as connection:
+      await self._guard_ingestion_owner(connection)
+      row = (
+        (
+          await connection.execute(
+            text("""
+        SELECT demand_id,partition,source_kind FROM market_data_demand
+        WHERE source_request_id IS NULL AND delivery_id IS NULL
+          AND next_probe_at <= clock_timestamp() AND source_kind=:kind
+        ORDER BY next_probe_at,created_at,demand_id LIMIT 1 FOR UPDATE SKIP LOCKED
+      """),
+            {"kind": self.demand_source_kind},
+          )
+        )
+        .mappings()
+        .one_or_none()
+      )
+      if row is None:
+        return False
+      demand = HistoryDemand.model_validate(row["partition"])
+      source_id = delivery_id = reason = None
+      try:
+        if row["source_kind"] == "REMOTE":
+          delivery_id = await submit_in_transaction(
+            HistoryPartitionRequest.model_validate(row["partition"]), connection
+          )
+        else:
+          source_id = await self.create_market_data_request(
+            demand.agent_payload(),
+            idempotency_scope=f"history-demand-source-v1:{PROTOCOL_VERSION}:{row['demand_id']}",
+            _connection=connection,
+          )
+      except MarketDataSourceUnavailable:
+        reason = "HISTORY_SOURCE_OFFLINE"
+      except ExportQueueCapacity:
+        reason = "HISTORY_DELIVERY_CAPACITY"
+      await self._guard_ingestion_owner(connection)
+      await connection.execute(
+        text("""
+        UPDATE market_data_demand SET source_request_id=CAST(:source AS TEXT),delivery_id=CAST(:delivery AS TEXT),
+          reason_code=:reason,next_probe_at=clock_timestamp() + INTERVAL '30 seconds',
+          last_progress_at=CASE
+            WHEN CAST(:source AS TEXT) IS NOT NULL OR CAST(:delivery AS TEXT) IS NOT NULL THEN clock_timestamp()
+            ELSE last_progress_at END
+        WHERE demand_id=:id
+      """),
+        {
+          "source": source_id,
+          "delivery": delivery_id,
+          "reason": reason,
+          "id": row["demand_id"],
+        },
+      )
+      return True
+
   async def recoverable_market_data_request_ids(
     self, *, limit=20, operations=("bars", "sector_instruments")
   ):

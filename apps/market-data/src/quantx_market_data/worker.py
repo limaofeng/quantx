@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 async def sweep(store, *, ingest=None) -> int:
   """Bound each discovery pass and process immutable uploads without Prefect."""
   count = 0
+  for _ in range(20):
+    if not await store.plan_history_demand():
+      break
   for request_id in await store.recoverable_market_data_request_ids(limit=20):
     request = await store.market_data_request(request_id)
     if request is None:

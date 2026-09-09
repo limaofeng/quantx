@@ -9,19 +9,24 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from quantx_contracts import PROTOCOL_VERSION
 from quantx_contracts.market_data_service import (
   HistoryDemand,
+  HistoryDemandAccepted,
+  HistoryDemandStatus,
   HistoryPage,
   HistoryRead,
   ResumeHistory,
 )
-from quantx_infrastructure.runtime_store import DurableRuntimeStore
 from quantx_infrastructure.services.local_history_reader import (
   HistoryReadBusy,
   LocalHistoryReader,
 )
+from quantx_infrastructure.services.market_data_demand_store import (
+  MarketDataDemandCapacity,
+  MarketDataDemandStore,
+)
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 
 def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
@@ -31,7 +36,7 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     if not resolved_token:
       raise RuntimeError("Market Data API requires an internal service token")
     app.state.token = resolved_token
-    app.state.store = store if store is not None else DurableRuntimeStore()
+    app.state.store = store if store is not None else MarketDataDemandStore()
     app.state.reader = reader if reader is not None else LocalHistoryReader()
     try:
       yield
@@ -66,24 +71,41 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
         await connection.execute(
           text("SELECT epoch FROM market_data_worker_lease LIMIT 0")
         )
+        await connection.execute(
+          text("SELECT demand_id FROM market_data_demand LIMIT 0")
+        )
     except Exception:
       raise HTTPException(503, "MARKET_DATA_STORAGE_UNAVAILABLE") from None
     return {"status": "ready", "capability": "request-storage"}
 
   @app.post(
-    "/market-data/internal/v1/requests",
+    "/market-data/internal/v1/demands",
     status_code=202,
+    response_model=HistoryDemandAccepted,
     dependencies=[Depends(authorize)],
   )
   async def submit(demand: HistoryDemand):
     try:
-      identity = await app.state.store.create_market_data_request(
-        demand.agent_payload(),
-        idempotency_scope=f"market-data-demand-v1:{PROTOCOL_VERSION}:none",
-      )
-    except RuntimeError:
-      raise HTTPException(503, "HISTORY_SOURCE_UNAVAILABLE") from None
-    return {"request_id": identity}
+      identity = await app.state.store.submit_history_demand(demand)
+    except MarketDataDemandCapacity:
+      raise HTTPException(429, "HISTORY_DEMAND_CAPACITY") from None
+    except SQLAlchemyError:
+      raise HTTPException(503, "MARKET_DATA_STORAGE_UNAVAILABLE") from None
+    return {"demand_id": identity}
+
+  @app.get(
+    "/market-data/internal/v1/demands/{demand_id}",
+    response_model=HistoryDemandStatus,
+    dependencies=[Depends(authorize)],
+  )
+  async def demand_status(demand_id: str):
+    try:
+      value = await app.state.store.history_demand(demand_id)
+    except SQLAlchemyError:
+      raise HTTPException(503, "MARKET_DATA_STORAGE_UNAVAILABLE") from None
+    if value is None:
+      raise HTTPException(404, "HISTORY_DEMAND_NOT_FOUND")
+    return value
 
   @app.get(
     "/market-data/internal/v1/history",

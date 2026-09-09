@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import uuid
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -19,6 +20,10 @@ from quantx_infrastructure.services.qmt_launch_guard import (
   qmt_agent_launch_started_at,
   qmt_agent_launch_state,
 )
+
+
+class MarketDataSourceUnavailable(RuntimeError):
+  """No eligible online source; dependency probing must not create attempts."""
 
 
 def resolve_database_url() -> str:
@@ -209,6 +214,7 @@ class DurableRuntimeStore:
     required_capabilities: Optional[list[str]] = None,
     idempotency_scope: str = "",
     development_only: bool = False,
+    _connection=None,
   ) -> str:
     encoded = json.dumps(
       payload,
@@ -224,7 +230,11 @@ class DurableRuntimeStore:
     )
     idempotency_key = hashlib.sha256(idempotency_material.encode("utf-8")).hexdigest()
     runtime_cutoff = _qmt_runtime_cutoff(90)
-    async with self.engine.begin() as connection:
+    transaction = (
+      nullcontext(_connection) if _connection is not None else self.engine.begin()
+    )
+    async with transaction as connection:
+      await self._guard_ingestion_owner(connection)
       existing = (
         await connection.execute(
           text(
@@ -312,11 +322,11 @@ class DurableRuntimeStore:
       if not selected_device_id:
         requirement = ", ".join(sorted(required))
         if device_id:
-          raise RuntimeError(
+          raise MarketDataSourceUnavailable(
             "Requested QMT Agent is unavailable or lacks required "
             f"capabilities: {requirement}"
           )
-        raise RuntimeError(
+        raise MarketDataSourceUnavailable(
           f"No registered QMT Agent is available with capabilities: {requirement}"
         )
       request_id = str(uuid.uuid4())

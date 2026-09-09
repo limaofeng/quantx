@@ -31,6 +31,25 @@ class ResumeHistory(BaseModel):
   reason: str = Field(min_length=1, max_length=256, pattern=r"\S")
 
 
+class HistoryDemandAccepted(BaseModel):
+  demand_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class HistoryDemandStatus(HistoryDemandAccepted):
+  partition: HistoryDemand
+  source_kind: Literal["AGENT", "REMOTE"]
+  state: Literal["WAITING_SOURCE", "LINKED"]
+  source_request_id: str | None
+  delivery_id: str | None
+  source_status: str | None
+  delivery_status: str | None
+  reason_code: str | None
+  next_probe_at: AwareDatetime | None
+  created_at: AwareDatetime
+  last_progress_at: AwareDatetime
+  observed_at: AwareDatetime
+
+
 class HistoryRead(HistoryDemand):
   """One local partition, ascending storage-time keyset; no implicit backfill."""
 
