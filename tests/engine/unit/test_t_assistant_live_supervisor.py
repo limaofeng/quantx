@@ -302,7 +302,8 @@ async def test_running_market_identity_change_revokes_ready_without_symbol_tick(
     assert await db.scalar(select(func.count(TradeCommandOutbox.message_id))) == 0
 
 
-async def test_committed_ready_cycle_dispatches_allocation_and_market_failure_revokes(sessions):
+@pytest.mark.parametrize("failure", ["LIVE_ALLOCATION_MARKET_CHANGED", "LIVE_ENTRY_MARKET_WITNESS_CHANGED", "LIVE_ENTRY_LATEST_MARKET_EXPIRED", None])
+async def test_committed_ready_cycle_dispatches_allocation_and_market_failure_revokes(sessions, failure):
   from types import SimpleNamespace
   from unittest.mock import AsyncMock
 
@@ -326,14 +327,31 @@ async def test_committed_ready_cycle_dispatches_allocation_and_market_failure_re
   supervisor._bindings[key].rewarm.clear()
   supervisor.runtime.run_cycle = AsyncMock(return_value=SimpleNamespace(committed=True, cycle_id="cycle"))
   supervisor._try_activate = AsyncMock()
-  dispatch = AsyncMock(side_effect=ValueError("LIVE_ALLOCATION_MARKET_CHANGED"))
-  supervisor.allocation_runtime.dispatch = dispatch
-  with pytest.raises(ValueError, match="MARKET_CHANGED"):
+  calls = []
+
+  async def allocate(**kwargs):
+    calls.append("allocation")
+    if failure == "LIVE_ALLOCATION_MARKET_CHANGED":
+      raise ValueError(failure)
+
+  async def entry(**kwargs):
+    calls.append("entry")
+    if failure:
+      raise ValueError(failure)
+
+  supervisor.allocation_runtime.dispatch = AsyncMock(side_effect=allocate)
+  supervisor.entry_runtime.dispatch = AsyncMock(side_effect=entry)
+  if failure:
+    with pytest.raises(ValueError, match=failure):
+      await hub.emit(1)
+  else:
     await hub.emit(1)
-  dispatch.assert_awaited_once()
-  assert dispatch.await_args.kwargs["execution_id"] == key
-  assert key not in supervisor._bindings
+  assert calls == (["allocation"] if failure == "LIVE_ALLOCATION_MARKET_CHANGED" else ["allocation", "entry"])
+  assert supervisor.allocation_runtime.dispatch.await_args.kwargs["execution_id"] == key
+  if "entry" in calls:
+    assert supervisor.entry_runtime.dispatch.await_args.kwargs["execution_id"] == key
+  assert (key not in supervisor._bindings) == bool(failure)
   async with sessions() as db:
     row = await db.get(TAssistantExecutionRecord, key)
-    assert row.entry_readiness == "DEGRADED"
+    assert row.entry_readiness == ("DEGRADED" if failure else "READY")
   await supervisor.stop()

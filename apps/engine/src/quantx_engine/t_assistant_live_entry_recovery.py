@@ -88,22 +88,9 @@ async def recover_live_entry_work(db, *, execution_id, now):
         .execution_options(populate_existing=True)
       )
     )
-    # An orphaned outbox is ambiguous even if no Pending row remains.
-    clients, outbox_clients = set(), set()
-    for model in (PendingTradeOrder, OrderCorrelation, TradeCommandOutbox):
-      records = await db.scalars(
-        select(model).where(
-          model.owner_type == "T_ASSISTANT_EXECUTION", model.owner_id == execution_id
-        )
-      )
-      for row in records:
-        if row.account_id != source.account_id or row.environment != "LIVE":
-          raise ValueError("LIVE_ENTRY_RECOVERY_ORDER_SCOPE_INVALID")
-        (outbox_clients if model is TradeCommandOutbox else clients).add(
-          row.client_order_id
-        )
-    if outbox_clients - clients:
-      raise ValueError("LIVE_ENTRY_RECOVERY_ORPHAN_OUTBOX")
+    await assert_live_entry_order_bindings(
+      db, execution_id=execution_id, account_id=source.account_id
+    )
     expired, cancelled, retained = [], [], []
     for intent in intents:
       if intent.account_id != source.account_id:
@@ -251,3 +238,24 @@ async def recover_account_live_entries(db, *, account_id, now):
   return tuple(
     [await recover_live_entry_work(db, execution_id=owner, now=now) for owner in owners]
   )
+
+
+async def assert_live_entry_order_bindings(db, *, execution_id, account_id):
+  """An ambiguous durable order prevents any local retirement of its source."""
+  clients, outbox_clients = set(), set()
+  for model in (PendingTradeOrder, OrderCorrelation, TradeCommandOutbox):
+    records = await db.scalars(
+      select(model).where(
+        model.owner_type == "T_ASSISTANT_EXECUTION", model.owner_id == execution_id
+      )
+    )
+    for row in records:
+      if model is not TradeCommandOutbox and not row.intent_id:
+        raise ValueError("LIVE_ENTRY_RECOVERY_ORDER_INTENT_MISSING")
+      if row.account_id != account_id or row.environment != "LIVE":
+        raise ValueError("LIVE_ENTRY_RECOVERY_ORDER_SCOPE_INVALID")
+      (outbox_clients if model is TradeCommandOutbox else clients).add(
+        row.client_order_id
+      )
+  if outbox_clients - clients:
+    raise ValueError("LIVE_ENTRY_RECOVERY_ORPHAN_OUTBOX")

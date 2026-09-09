@@ -58,6 +58,7 @@ from .t_assistant_live_entry_review import (
   LiveEntryMarketWitness,
   LiveEntryReviewAdapter,
 )
+from .t_assistant_live_entry_runtime import TAssistantLiveEntryRuntime
 from .t_assistant_live_readiness import activate_live_canary_ready
 from .t_assistant_paper_shadow_supervisor import _accepted_tick, _market_gate_context
 from .t_trade_decision_snapshot import (
@@ -100,6 +101,7 @@ class TAssistantLiveSupervisor:
       session_factory=session_factory, clock=clock
     )
     self.allocation_runtime = TAssistantLiveAllocationRuntime(session_factory=session_factory, clock=clock)
+    self.entry_runtime = TAssistantLiveEntryRuntime(session_factory=session_factory, clock=clock, review_adapter_factory=self.entry_review_adapter)
     self.readiness_provider = readiness_provider
     self.market_marks = LiveTMarketMarkReader(quote_hub)
     self._lock = asyncio.Lock()
@@ -581,9 +583,10 @@ class TAssistantLiveSupervisor:
                 execution_id=key, market_mark_reader=self.market_marks,
                 validate_market=validate_allocation_market,
               )
+              await self.entry_runtime.dispatch(execution_id=key, validate_market=validate_allocation_market)
         except Exception as exc:
           try:
-            if isinstance(exc, ValueError) and str(exc) == "LIVE_ALLOCATION_MARKET_CHANGED":
+            if isinstance(exc, ValueError) and str(exc) in {"LIVE_ALLOCATION_MARKET_CHANGED", "LIVE_ENTRY_MARKET_WITNESS_CHANGED", "LIVE_ENTRY_LATEST_MARKET_EXPIRED"}:
               await self._warming_reason(binding, "LIVE_READY_MARKET_CHANGED", self.clock())
           finally:
             self._unbind(key)

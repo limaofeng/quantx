@@ -803,6 +803,11 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   确认后重新分配与最终授权、审查审计/公共请求原子暂存均已实现。自身未下单分配可在
   最终容量审查中排除，其他意图/订单仍计入；原 TTL、审批交易材料与退出保护继续绑定。
   暂存与行情复核同事务，失败整体回滚；固定价格请求携带 TEntryOrderPolicy.v1。
+- LIVE 请求生成已注册到分配提交后：仅当前 MANUAL_CONFIRM/RULE_ONLY 且 RUNNING/READY
+  执行处理尚未暂存的意图，调用真实审查与公共暂存服务；重复调度无副作用。缺失当前盘口
+  取消候选并记录重建原因，REJECT/DELAY/过期审查收敛到对应终态。已有订单身份保留，
+  孤立 outbox 或缺失订单意图身份阻断处理；批次提交前统一复核行情，失败整体回滚。
+  行情换代或过期会撤销 supervisor READY。
 - 出队与 Engine 当前状态：公共入口核对完整暂存事件/请求/分配/行情时效，必须调用最新
   审查；配置头→执行→账户锁顺序已统一。账户恢复 dispatcher 已注入同 session 的实际
   LIVE supervisor adapter；原始五档与 accepted ring 的流/代/序号/fence 在审查前后校验，
@@ -813,14 +818,19 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   变更过的 intake 阻止回收；过期租约批次在同事务失效，审计失败回滚。回收先提交再重读
   账户队列。候选控制改为显式 PAPER/LIVE，含 EXECUTION_PENDING 与终态抑制，真实 LIVE
   reducer 验证一次消费且不伪造新 Tick。
+- 请求生成接线验证：60 项 runtime/supervisor/recovery/adapter/staging/dispatch 回归通过，
+  覆盖暂存幂等、终态与审计、已有订单保留、末次行情复核回滚和分配→请求生成顺序。
+  SQLite 显式 BEGIN 保证外层回滚测试有效；证据
+  `.codex_screenshots/p6-live-entry-dispatch-regression.log`。审查结果使用显式测试替身，
+  此证据不替代无替身完整入场链路。
 - 最近验证：73 项相关回归通过；补充后候选控制 35 项、回收 11 项通过，Ruff 通过。
   证据 `.codex_screenshots/p6-live-{recovery-regression,recovery-final,controls-final}.log`；
   前序组件证据保留 `p6-live-{adapter-wiring,source-locks,dispatch-regression,staging-regression,
   review-regression}.log`。隔离测试覆盖真实 Gate/reducer、容量与事务；部分审查/调度使用
   替身，锁顺序测试不等同 PostgreSQL 并发演练。没有无替身券商整链或统一验收结论。
 - 剩余开发顺序：
-  注册 LIVE 请求生成/审查结果收敛并验证隔离完整链路→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
-  当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
+  验证已接线 LIVE 入场的隔离完整链路→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。
   排空基础提交 `6ec95815`；模型草案 `9062cd8f`；退出授权基础与
