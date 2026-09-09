@@ -68,12 +68,20 @@ def finalizer_db(*, missing_fill=False, unapplied=False):
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_finalizer_aggregates_attempts_and_stages_single_terminal():
+@pytest.mark.parametrize("owner_type", ["STRATEGY_RUN", "T_ASSISTANT_EXECUTION"])
+async def test_lifecycle_finalizer_aggregates_attempts_and_stages_single_terminal(owner_type):
   db, attempts, intent, added = finalizer_db()
+  for row in [intent, *attempts, *db.correlations]:
+    row.owner_type = owner_type
+  if owner_type == "T_ASSISTANT_EXECUTION":
+    for correlation in db.correlations:
+      correlation.strategy_order_id = None
   assert await reports.finalize_t_order_lifecycle(db, attempts[-1]) is True
   assert intent.status == "FILLED"
   assert all(row.request_metadata["t_order_lifecycle_finished"] for row in attempts)
   assert len(added) == 1
+  assert added[0].owner_type == owner_type
+  assert added[0].strategy_run_id == ("run-1" if owner_type == "STRATEGY_RUN" else None)
   report = added[0].payload["report"]
   assert report["traded_volume"] == 300
   assert report["order_volume"] == 300
@@ -84,8 +92,14 @@ async def test_lifecycle_finalizer_aggregates_attempts_and_stages_single_termina
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_fill,unapplied", [(True, False), (False, True)])
-async def test_lifecycle_finalizer_does_not_release_unconverged_attempt(missing_fill, unapplied):
+@pytest.mark.parametrize("owner_type", ["STRATEGY_RUN", "T_ASSISTANT_EXECUTION"])
+async def test_lifecycle_finalizer_does_not_release_unconverged_attempt(missing_fill, unapplied, owner_type):
   db, attempts, intent, added = finalizer_db(missing_fill=missing_fill, unapplied=unapplied)
+  for row in [intent, *attempts, *db.correlations]:
+    row.owner_type = owner_type
+  if owner_type == "T_ASSISTANT_EXECUTION":
+    for correlation in db.correlations:
+      correlation.strategy_order_id = None
   assert await reports.finalize_t_order_lifecycle(db, attempts[-1]) is False
   assert added == []
   assert intent.status == "PARTIAL_FILLED"

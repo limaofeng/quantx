@@ -524,6 +524,47 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
     ]
     assert plans[0].auto_exit_authorization_challenge_id == "challenge-1"
 
+  terminal_payload = {
+    **order_payload,
+    "order_status": 56,
+    "traded_volume": 100,
+    "traded_price": 9.9,
+    "source_sequence": 3,
+  }
+  terminal_report = AgentReportInbox(
+    message_id="synthetic-order-terminal",
+    device_id="synthetic",
+    message_type="order_report",
+    protocol_version=PROTOCOL_VERSION,
+    raw_payload_hash="e" * 64,
+    business_idempotency_key="synthetic-order-terminal",
+    payload=terminal_payload,
+  )
+  await report_processor._process(terminal_report)
+  await report_processor._stage_runtime_events(terminal_report)
+  await report_processor._drain_runtime_events()
+  async with sessions() as db, db.begin():
+    last = await db.get(PendingTradeOrder, pending.client_order_id)
+    assert await report_processor.finalize_t_order_lifecycle(db, last)
+    assert not await report_processor.finalize_t_order_lifecycle(db, last)
+  await report_processor._drain_runtime_events()
+  async with sessions() as db:
+    last = await db.get(PendingTradeOrder, pending.client_order_id)
+    intent = await db.get(TradeIntentRecord, "intent-0")
+    assert last.request_metadata["t_order_lifecycle_finished"] is True
+    assert intent.status == "FILLED" and intent.executed_volume == 100
+    finals = list(
+      await db.scalars(
+        select(StrategyRuntimeEvent).where(
+          StrategyRuntimeEvent.business_key == "t-order-lifecycle:intent-0",
+        )
+      )
+    )
+    assert len(finals) == 1 and finals[0].application_status == "APPLIED"
+    assert (
+      finals[0].owner_type == "T_ASSISTANT_EXECUTION"
+      and finals[0].strategy_run_id is None
+    )
   event.payload = {
     **event.payload,
     "report": {**event.payload["report"], "stock_code": "000001.SZ"},

@@ -4129,9 +4129,9 @@ async def _project_trade_intent_event(
 async def finalize_t_order_lifecycle(db, pending: PendingTradeOrder) -> bool:
   """Close one original T intent only after all attempts have durable proof.
 
-  The caller holds the account coordinator and commits this transaction. A
-  StrategyRun receives one durable aggregate terminal notification; broker
-  attempt reports themselves remain immutable, separate evidence.
+  The caller holds the account coordinator and commits this transaction.
+  Entry source owners receive one durable aggregate terminal notification;
+  broker attempt reports remain immutable, separate evidence.
   """
   if not t_order_lifecycle_pending(pending):
     return False
@@ -4284,7 +4284,7 @@ async def finalize_t_order_lifecycle(db, pending: PendingTradeOrder) -> bool:
       plan_id=owner_id, event_type="ORDER_LIFECYCLE_FINALIZED",
       payload={"intent_id": pending.intent_id, "status": status, "filled_volume": total},
     )
-  elif owner_type == ExecutionOwnerType.STRATEGY_RUN.value:
+  elif owner_type in {ExecutionOwnerType.STRATEGY_RUN.value, ExecutionOwnerType.T_ASSISTANT_EXECUTION.value}:
     business_key = f"t-order-lifecycle:{pending.intent_id}"
     report = {
       "effective_order_status": status,
@@ -4295,7 +4295,8 @@ async def finalize_t_order_lifecycle(db, pending: PendingTradeOrder) -> bool:
     db.add(StrategyRuntimeEvent(
       event_id=str(uuid.uuid4()), business_key=business_key,
       owner_type=owner_type, owner_id=owner_id, environment=environment,
-      strategy_run_id=owner_id, client_order_id=pending.client_order_id,
+      strategy_run_id=owner_id if owner_type == ExecutionOwnerType.STRATEGY_RUN.value else None,
+      client_order_id=pending.client_order_id,
       broker_order_id=pending.broker_order_id, event_type="ORDER",
       payload=_event_payload(last_correlation, report, business_key=business_key),
       application_status="PENDING", application_attempts=0, created_at=utcnow(),

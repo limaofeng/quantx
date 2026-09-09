@@ -873,8 +873,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   34 项组合/增量报告/订单服务回归通过，证据
   `.codex_screenshots/p6-live-report-persistence-regression.log`。账户持仓更新仍为显式合成
   投影，未覆盖设备网络 ingress、inbox worker claim/finish 或真实 QMT 投递。
+- 新 T owner 已接入订单生命周期终结：完整验证所有 attempt 的委托/成交与已应用回报后，
+  产生一个 T owner 终结事件，strategy_run_id 为空；重复终结无新增事件。实际隔离链包含
+  终态 ORDER 入账/staging/drain→终结器→最终事件 APPLIED，意图 FILLED 且成交量保持 100。
+  新旧 owner 的缺成交/未消费回报阻断用例、owner 回归共 32 项通过，证据
+  `.codex_screenshots/p6-live-lifecycle-regression.log`。续单本身尚未接通：旧分支依赖
+  StrategyRun，新 T 需要专用的当前风险/审批与原生命周期剩余量审查，不能只放宽 owner。
 - 剩余开发顺序：
-  补齐 LIVE 命令重试与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 续单审查/准入与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。
