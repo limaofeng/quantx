@@ -548,6 +548,8 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
 
 - 授权：单代理连续开发，统一工程验收；实际 LIVE/AUTO/ACTIVE 门保持顺序。P8 候选沿用
   RULE_ONLY、Logistic、LightGBM，用户同意先整理指标/预算建议，后续确认。
+  已整理[模型评估冻结草案](多标的做T助手P8模型评估冻结草案.md)：数据与切分、6 组参数、
+  最多 19 次基础拟合/校准、一次 FINAL、组合增量/校准/OOD/性能建议均为待确认，尚未运行。
 - 已完成基础：Engine `T_ASSISTANT_DRAIN_ENTRY` 通过同一事务阻断新 T LIVE 源、终结没有
   订单事实的意图；pending/correlation/outbox、成交投影及原 owner 保留，ExitPlan 不改动。
   故障回滚、重启重试、scope/时间异常与 RECONCILE_REQUIRED 保持阻断已覆盖。
