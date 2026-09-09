@@ -9,6 +9,72 @@ import pytest
 from quantx_trainer import preparation_flow as flow
 
 
+@pytest.fixture(autouse=True)
+def logger(monkeypatch):
+  monkeypatch.setattr(
+    flow,
+    "get_run_logger",
+    lambda: SimpleNamespace(
+      warning=lambda *args: pytest.fail("input evidence not persisted")
+    ),
+  )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["claim", "input", "cancel", "compute"])
+async def test_gpu_input_attempt_recovers_without_restarting_supervisor(
+  monkeypatch, tmp_path, fault
+):
+  from quantx_trainer import training_flow
+
+  config = SimpleNamespace(state_root=tmp_path)
+  job = SimpleNamespace(job_id="job", request={"dataset_version": "dataset"})
+  repo = SimpleNamespace(
+    running_jobs=AsyncMock(return_value=[]),
+    progress=AsyncMock(side_effect=ConnectionError("control unavailable")),
+    requeue_gpu_inputs=AsyncMock(),
+  )
+
+  @asynccontextmanager
+  async def session(path):
+    yield object()
+
+  async def claim(owner, *, kinds, prepare_execution):
+    job.flow_run_id = owner
+    prepare_execution(job.job_id, owner)
+    if fault == "claim":
+      raise ConnectionError("commit acknowledgement lost")
+    return job
+
+  async def load(*args, **kwargs):
+    if fault == "compute":
+      directory = flow.attempt_directory(config, job)
+      (directory / "process.json").write_text("unknown spawn")
+    if fault == "cancel":
+      raise asyncio.CancelledError
+    raise ConnectionError("input interrupted")
+
+  repo.claim = claim
+  monkeypatch.setattr(flow, "training_session", session)
+  monkeypatch.setattr(flow, "current_config", lambda: config)
+  monkeypatch.setattr(training_flow, "control_root", lambda: tmp_path / "control")
+  monkeypatch.setattr(flow, "_host_admission_reason", lambda: None)
+  monkeypatch.setattr(flow, "ResearchPreparationRepository", lambda db: repo)
+  monkeypatch.setattr(
+    flow,
+    "StockSelectionTrainingRepository",
+    lambda db: SimpleNamespace(get_dataset=AsyncMock(return_value=object())),
+  )
+  monkeypatch.setattr(flow, "load_dataset", load)
+  with pytest.raises(asyncio.CancelledError if fault == "cancel" else ConnectionError):
+    await flow.trainer_gpu_preparation_flow.fn(config_path="test")
+  repo.running_jobs.return_value = [job]
+  assert await flow.recover_gpu_results(config, repo) == (
+    [] if fault == "compute" else ["job"]
+  )
+  assert repo.requeue_gpu_inputs.await_count == int(fault != "compute")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
   "outcome", ["ready", "blocked", "unconfirmed", "registration", "admission"]
@@ -102,7 +168,9 @@ async def test_real_host_denial_exit_is_recorded_before_requeue(monkeypatch, tmp
   job = SimpleNamespace(job_id="job", flow_run_id="owner", request={})
   with pytest.raises(flow.GPUAdmissionDenied):
     await flow.run_gpu_job(config, job, {"directory": tmp_path / "cache"}, AsyncMock())
-  evidence = json.loads((flow.attempt_directory(config, job) / "process.json").read_text())
+  evidence = json.loads(
+    (flow.attempt_directory(config, job) / "process.json").read_text()
+  )
   assert evidence["state"] == "EXITED"
   assert evidence["returncode"] == 75
 

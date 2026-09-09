@@ -118,4 +118,16 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     assert reassigned.flow_run_id == "new-trainer"
     with pytest.raises(ValueError, match="归属"):
       await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="trainer")
+    await repo.requeue_gpu_inputs(gpu_id, expected_flow_run_id="new-trainer")
+
+    def unavailable(job_id, owner):
+      raise OSError("input evidence unavailable")
+
+    with pytest.raises(OSError):
+      await repo.claim("input-owner", kinds=("GPU",), prepare_execution=unavailable)
+    assert await repo.running_jobs(kinds=("GPU",)) == []
+    prepared = []
+    next_run = await repo.claim("input-owner", kinds=("GPU",), prepare_execution=lambda job_id, owner: prepared.append((job_id, owner)))
+    assert next_run.job_id == gpu_id
+    assert prepared == [(gpu_id, "input-owner")]
   await engine.dispose()

@@ -212,7 +212,7 @@ class ResearchPreparationRepository:
     await self.db.refresh(row)
     return row
 
-  async def claim(self, flow_run_id, *, kinds):
+  async def claim(self, flow_run_id, *, kinds, prepare_execution=None):
     kinds = tuple(kinds)
     if not kinds or set(kinds) - {"COVERAGE", "DOWNLOAD", "CERTIFY", "GPU"}:
       raise ValueError("准备任务领取范围无效")
@@ -235,6 +235,12 @@ class ResearchPreparationRepository:
       .limit(1)
     )
     if row:
+      if prepare_execution is not None:
+        try:
+          prepare_execution(row.job_id, flow_run_id)
+        except BaseException:
+          await self.db.rollback()
+          raise
       row.status, row.phase, row.flow_run_id, row.updated_at = (
         "RUNNING",
         "准备执行",
@@ -248,12 +254,19 @@ class ResearchPreparationRepository:
 
   async def requeue_gpu_admission(self, job_id, *, expected_flow_run_id):
     """Requeue only after the supervisor verifies a host-admission exit."""
+    await self._requeue_gpu(job_id, expected_flow_run_id=expected_flow_run_id, phase="等待主机资源")
+
+  async def requeue_gpu_inputs(self, job_id, *, expected_flow_run_id):
+    """Requeue only after input-only execution is proven stopped."""
+    await self._requeue_gpu(job_id, expected_flow_run_id=expected_flow_run_id, phase="恢复输入准备")
+
+  async def _requeue_gpu(self, job_id, *, expected_flow_run_id, phase):
     if not expected_flow_run_id:
       raise ValueError("准备任务执行归属无效")
     result = await self.db.execute(
       update(Job).where(Job.job_id == job_id, Job.kind == "GPU", Job.status == "RUNNING",
                         Job.flow_run_id == expected_flow_run_id)
-      .values(status="QUEUED", phase="等待主机资源", flow_run_id=None,
+      .values(status="QUEUED", phase=phase, flow_run_id=None,
               error=None, updated_at=now())
     )
     if result.rowcount != 1:
