@@ -202,8 +202,59 @@ final class TTradeControlStoreTests: XCTestCase {
     XCTAssertTrue(harness.authentication.reasons.isEmpty)
   }
 
+  func testReleaseRequiresBiometricsAndSeparatesQueuedFromSuccess() async throws {
+    let release = TAssistantReleaseSpy()
+    let harness = await makeHarness(releaseRepository: release)
+    try await harness.store.previewRelease(release.draft)
+    XCTAssertTrue(harness.authentication.reasons.isEmpty)
+    try await harness.store.confirmRelease()
+    XCTAssertEqual(harness.authentication.reasons.count, 1)
+    XCTAssertEqual(harness.store.releaseCommandID, "command-1")
+    XCTAssertNil(harness.store.releaseStatus)
+    try await harness.store.refreshReleaseStatus()
+    XCTAssertEqual(harness.store.releaseStatus?.phase, .pending)
+    XCTAssertNil(harness.store.successMessage)
+  }
+
+  func testReleaseLostConfirmationCanQueryOriginalChallenge() async throws {
+    let release = TAssistantReleaseSpy()
+    release.loseConfirmation = true
+    let harness = await makeHarness(releaseRepository: release)
+    try await harness.store.previewRelease(release.draft)
+    do { try await harness.store.confirmRelease(); XCTFail("expected transport failure") }
+    catch {}
+    XCTAssertNotNil(harness.store.releaseTicket)
+    do { try await harness.store.previewRelease(release.draft); XCTFail("must retain original") }
+    catch {}
+    try await harness.store.refreshReleaseStatus()
+    XCTAssertEqual(harness.store.releaseCommandID, "command-1")
+    XCTAssertEqual(release.confirmCount, 1)
+  }
+
+  func testReleaseCannotConfirmAfterLockOrDeviceChange() async throws {
+    let release = TAssistantReleaseSpy()
+    let harness = await makeHarness(releaseRepository: release)
+    try await harness.store.previewRelease(release.draft)
+    harness.runtime.localSessionLocked = true
+    do { try await harness.store.confirmRelease(); XCTFail("locked") } catch {}
+    XCTAssertEqual(release.confirmCount, 0)
+    XCTAssertTrue(harness.authentication.reasons.isEmpty)
+    harness.store.activate(identity: identity(deviceSessionID: "other"),
+      repository: harness.repository, releaseRepository: release)
+    XCTAssertNil(harness.store.releaseTicket)
+  }
+
+  func testReleaseStatusRejectsUnprovenSuccessAndUnknownPhase() {
+    for phase in ["SUCCEEDED", "NEW_PHASE"] {
+      XCTAssertThrowsError(try TAssistantReleaseStatus.validated(challengeID: "challenge",
+        phase: phase, commandID: "command", executionID: nil, executionStatus: nil,
+        reasonCode: nil, expectedChallengeID: "challenge"))
+    }
+  }
+
   private func makeHarness(
     repository: TTradeControlRepositorySpy? = nil,
+    releaseRepository: TAssistantReleaseSpy? = nil,
     authentication: TTradeControlAuthenticationSpy = TTradeControlAuthenticationSpy(),
     scopes: Set<String> = ["strategy:read", "t-trade:control", "trade:approve"]
   ) async -> (
@@ -220,7 +271,8 @@ final class TTradeControlStoreTests: XCTestCase {
       refreshSession: { try await runtime.refresh() },
       refreshAssistantProjection: { runtime.projectionRefreshCount += 1 }
     )
-    store.activate(identity: identity(scopes: scopes), repository: repository)
+    store.activate(identity: identity(scopes: scopes), repository: repository,
+      releaseRepository: releaseRepository)
     await store.refresh()
     return (store, repository, runtime, authentication)
   }
@@ -484,5 +536,36 @@ private final class TTradeControlRuntimeSpy {
   func refresh() async throws {
     refreshCount += 1
     try await refreshHandler?()
+  }
+}
+
+
+@MainActor
+private final class TAssistantReleaseSpy: TAssistantReleaseLoading {
+  var confirmCount = 0
+  var loseConfirmation = false
+  let draft = TAssistantReleaseDraft(accountID: "ACCOUNT-1", sourceExecutionID: "paper",
+    configVersionID: "target", configHash: String(repeating: "a", count: 64), headVersion: 1,
+    evaluationID: UUID().uuidString.lowercased(), reportHash: String(repeating: "b", count: 64),
+    policyHash: String(repeating: "c", count: 64), windowStart: Date(),
+    windowEnd: Date().addingTimeInterval(600))
+
+  func preview(_ draft: TAssistantReleaseDraft, context: TTradeControlRepositoryContext)
+    async throws -> TAssistantReleaseTicket {
+    try draft.validate(context: context)
+    return TAssistantReleaseTicket(challengeID: UUID().uuidString.lowercased(),
+      confirmationToken: "secret", expiresAt: Date().addingTimeInterval(60), draft: draft, context: context)
+  }
+  func confirm(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+    async throws -> String {
+    confirmCount += 1
+    if loseConfirmation { throw URLError(.networkConnectionLost) }
+    return "command-1"
+  }
+  func status(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+    async throws -> TAssistantReleaseStatus {
+    try TAssistantReleaseStatus.validated(challengeID: ticket.challengeID, phase: "PENDING",
+      commandID: "command-1", executionID: nil, executionStatus: nil, reasonCode: nil,
+      expectedChallengeID: ticket.challengeID)
   }
 }

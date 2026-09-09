@@ -1,0 +1,183 @@
+import Apollo
+import Foundation
+
+struct TAssistantReleaseDraft: Equatable, Sendable {
+  let accountID: String
+  let sourceExecutionID: String
+  let configVersionID: String
+  let configHash: String
+  let headVersion: Int
+  let evaluationID: String
+  let reportHash: String
+  let policyHash: String
+  let windowStart: Date
+  let windowEnd: Date
+
+  func validate(context: TTradeControlRepositoryContext) throws {
+    guard !context.userID.isEmpty, !context.deviceSessionID.isEmpty,
+      context.activeAccountID == accountID,
+      context.authorizedAccountIDs == [accountID], !accountID.isEmpty,
+      !sourceExecutionID.isEmpty, !configVersionID.isEmpty,
+      headVersion > 0, Int32(exactly: headVersion) != nil,
+      UUID(uuidString: evaluationID)?.uuidString.lowercased() == evaluationID,
+      [configHash, reportHash, policyHash].allSatisfy({
+        $0.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+      }),
+      windowStart.timeIntervalSince1970.isFinite,
+      windowEnd.timeIntervalSince1970.isFinite,
+      windowEnd > windowStart
+    else { throw TTradeControlError.contextChanged }
+  }
+}
+
+// The credential remains in memory and is never included in a persisted status record.
+struct TAssistantReleaseTicket: Equatable, Sendable {
+  let challengeID: String
+  let confirmationToken: String
+  let expiresAt: Date
+  let draft: TAssistantReleaseDraft
+  let context: TTradeControlRepositoryContext
+
+  func validate(context: TTradeControlRepositoryContext) throws {
+    try draft.validate(context: context)
+    guard self.context == context else { throw TTradeControlError.contextChanged }
+  }
+}
+
+struct TAssistantReleaseStatus: Equatable, Sendable {
+  enum Phase: String, Sendable {
+    case awaitingConfirmation = "AWAITING_CONFIRMATION"
+    case expired = "EXPIRED"
+    case pending = "PENDING"
+    case processing = "PROCESSING"
+    case failed = "FAILED"
+    case succeeded = "SUCCEEDED"
+    case unknown = "UNKNOWN"
+  }
+  let challengeID: String
+  let phase: Phase
+  let commandID: String?
+  let executionID: String?
+  let executionStatus: String?
+  let reasonCode: String?
+
+  static func validated(
+    challengeID: String, phase: String, commandID: String?, executionID: String?,
+    executionStatus: String?, reasonCode: String?, expectedChallengeID: String
+  ) throws -> Self {
+    guard challengeID == expectedChallengeID, let phase = Phase(rawValue: phase),
+      [commandID, executionID, executionStatus, reasonCode].allSatisfy({
+        $0 == nil || !($0?.isEmpty ?? true)
+      })
+    else { throw TTradeControlError.invalidResponse }
+    if [.pending, .processing, .failed, .succeeded].contains(phase), commandID == nil {
+      throw TTradeControlError.invalidResponse
+    }
+    if phase == .succeeded {
+      guard executionID != nil, executionStatus != nil, reasonCode == nil else {
+        throw TTradeControlError.invalidResponse
+      }
+    } else if executionID != nil || executionStatus != nil {
+      throw TTradeControlError.invalidResponse
+    }
+    return Self(
+      challengeID: challengeID, phase: phase, commandID: commandID,
+      executionID: executionID, executionStatus: executionStatus, reasonCode: reasonCode)
+  }
+}
+
+@MainActor
+protocol TAssistantReleaseLoading: AnyObject {
+  func preview(_ draft: TAssistantReleaseDraft, context: TTradeControlRepositoryContext)
+    async throws -> TAssistantReleaseTicket
+  func confirm(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+    async throws -> String
+  func status(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+    async throws -> TAssistantReleaseStatus
+}
+
+@MainActor
+final class TAssistantReleaseRepository: TAssistantReleaseLoading {
+  private let client: ApolloClient
+  private let noCache = RequestConfiguration(writeResultsToCache: false)
+
+  init(client: ApolloClient) { self.client = client }
+
+  func preview(_ draft: TAssistantReleaseDraft, context: TTradeControlRepositoryContext)
+    async throws -> TAssistantReleaseTicket
+  {
+    try draft.validate(context: context)
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let response = try await client.perform(
+      mutation: QuantXAPI.IOSPreviewTAssistantLiveReleaseMutation(
+        request:
+          QuantXAPI.TAssistantReleaseRequest(
+            accountId: draft.accountID,
+            sourceExecutionId: draft.sourceExecutionID, configVersionId: draft.configVersionID,
+            expectedConfigHash: draft.configHash, expectedHeadVersion: Int32(draft.headVersion),
+            evaluationId: draft.evaluationID, expectedReportHash: draft.reportHash,
+            expectedPolicyHash: draft.policyHash,
+            windowStart: formatter.string(from: draft.windowStart),
+            windowEnd: formatter.string(from: draft.windowEnd))), requestConfiguration: noCache)
+    try ApolloReadOnlyResponseValidator.validate(response.errors)
+    guard let result = response.data?.previewTAssistantLiveRelease,
+      result.success, let preview = result.preview
+    else {
+      throw TTradeControlError.unavailable("发布预览未通过，请核对审核证据和当前配置")
+    }
+    let start = try ReadOnlyModelValidator.requireDate(
+      preview.windowStart, field: "release.windowStart")
+    let end = try ReadOnlyModelValidator.requireDate(preview.windowEnd, field: "release.windowEnd")
+    let expires = try ReadOnlyModelValidator.requireDate(
+      preview.expiresAt, field: "release.expiresAt")
+    guard preview.accountId == draft.accountID,
+      preview.sourceExecutionId == draft.sourceExecutionID,
+      preview.configVersionId == draft.configVersionID,
+      preview.configSnapshotHash == draft.configHash,
+      preview.reportHash == draft.reportHash, preview.policyHash == draft.policyHash,
+      abs(start.timeIntervalSince(draft.windowStart)) < 0.001,
+      abs(end.timeIntervalSince(draft.windowEnd)) < 0.001,
+      UUID(uuidString: preview.challengeId) != nil, !preview.confirmationToken.isEmpty,
+      expires > Date(), expires <= end, expires <= Date().addingTimeInterval(61)
+    else { throw TTradeControlError.contextChanged }
+    return TAssistantReleaseTicket(
+      challengeID: preview.challengeId,
+      confirmationToken: preview.confirmationToken, expiresAt: expires, draft: draft,
+      context: context)
+  }
+
+  func confirm(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+    async throws -> String
+  {
+    try ticket.validate(context: context)
+    guard ticket.expiresAt > Date() else { throw TTradeControlError.challengeExpired }
+    let response = try await client.perform(
+      mutation: QuantXAPI.IOSConfirmTAssistantLiveReleaseMutation(
+        challengeId: ticket.challengeID,
+        confirmationToken: ticket.confirmationToken), requestConfiguration: noCache)
+    try ApolloReadOnlyResponseValidator.validate(response.errors)
+    guard let result = response.data?.confirmTAssistantLiveRelease, result.success,
+      result.code == "RELEASE_QUEUED", let commandID = result.engineCommandId, !commandID.isEmpty
+    else { throw TTradeControlError.unavailable("发布确认未返回有效命令，请查询原操作状态") }
+    return commandID
+  }
+
+  func status(_ ticket: TAssistantReleaseTicket, context: TTradeControlRepositoryContext)
+    async throws -> TAssistantReleaseStatus
+  {
+    try ticket.validate(context: context)
+    let response = try await client.fetch(
+      query: QuantXAPI.IOSTAssistantLiveReleaseStatusQuery(challengeId: ticket.challengeID),
+      cachePolicy: .networkOnly, requestConfiguration: noCache)
+    try ApolloReadOnlyResponseValidator.validate(response.errors)
+    guard let value = response.data?.tAssistantLiveReleaseStatus else {
+      throw TTradeControlError.invalidResponse
+    }
+    return try TAssistantReleaseStatus.validated(
+      challengeID: value.challengeId,
+      phase: value.status, commandID: value.engineCommandId, executionID: value.executionId,
+      executionStatus: value.executionStatus, reasonCode: value.reasonCode,
+      expectedChallengeID: ticket.challengeID)
+  }
+}

@@ -19,12 +19,16 @@ final class TTradeControlStore: ObservableObject {
   private struct SessionBinding {
     let identity: SessionIdentity
     let repository: (any TTradeControlLoading)?
+    let releaseRepository: (any TAssistantReleaseLoading)?
   }
 
   typealias ContextProvider = @MainActor () -> TTradeControlRuntimeContext
   typealias RefreshSession = @MainActor () async throws -> Void
   typealias RefreshAssistantProjection = @MainActor () async -> Void
 
+  @Published private(set) var releaseTicket: TAssistantReleaseTicket?
+  @Published private(set) var releaseStatus: TAssistantReleaseStatus?
+  @Published private(set) var releaseCommandID: String?
   @Published private(set) var state: TTradeControlState = .idle
   @Published private(set) var refreshInProgress = false
   @Published private(set) var operationInProgress = false
@@ -33,6 +37,7 @@ final class TTradeControlStore: ObservableObject {
   @Published private(set) var successMessage: String?
   @Published private(set) var errorMessage: String?
 
+  private var releaseConfirmationAttempted = false
   private let localAuthentication: any LocalAuthenticationProviding
   private var binding: SessionBinding?
   private var contextProvider: ContextProvider?
@@ -57,13 +62,14 @@ final class TTradeControlStore: ObservableObject {
 
   func activate(
     identity: SessionIdentity,
-    repository: (any TTradeControlLoading)?
+    repository: (any TTradeControlLoading)?,
+    releaseRepository: (any TAssistantReleaseLoading)? = nil
   ) {
     if binding?.identity != identity {
       sessionContextID = UUID()
       resetTransientState(resetReadState: true)
     }
-    binding = SessionBinding(identity: identity, repository: repository)
+    binding = SessionBinding(identity: identity, repository: repository, releaseRepository: releaseRepository)
   }
 
   func clearSession() {
@@ -74,6 +80,10 @@ final class TTradeControlStore: ObservableObject {
 
   func invalidateChallengeContext() {
     sessionContextID = UUID()
+    releaseTicket = nil
+    releaseConfirmationAttempted = false
+    releaseStatus = nil
+    releaseCommandID = nil
     pendingControl = nil
     requestedAction = nil
   }
@@ -582,6 +592,10 @@ final class TTradeControlStore: ObservableObject {
 
   private func resetTransientState(resetReadState: Bool) {
     stateRequestID = UUID()
+    releaseTicket = nil
+    releaseConfirmationAttempted = false
+    releaseStatus = nil
+    releaseCommandID = nil
     if resetReadState { state = .idle }
     refreshInProgress = false
     operationInProgress = false
@@ -589,5 +603,82 @@ final class TTradeControlStore: ObservableObject {
     pendingControl = nil
     successMessage = nil
     errorMessage = nil
+  }
+}
+
+
+extension TTradeControlStore {
+  func previewRelease(_ draft: TAssistantReleaseDraft) async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard !releaseConfirmationAttempted
+      || [.expired, .failed, .succeeded].contains(releaseStatus?.phase) else {
+      throw fail(TTradeControlError.unavailable("请先查询原发布操作的处理结果"))
+    }
+    let context = try repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"])
+    guard let repository = binding?.releaseRepository else {
+      throw fail(TTradeControlError.unavailable("发布服务尚未连接"))
+    }
+    operationInProgress = true
+    releaseTicket = nil
+    releaseConfirmationAttempted = false
+    releaseStatus = nil
+    releaseCommandID = nil
+    clearMessages()
+    defer { operationInProgress = false }
+    do {
+      let ticket = try await repository.preview(draft, context: context)
+      try ticket.validate(context: repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"]))
+      releaseTicket = ticket
+    } catch { throw fail(error) }
+  }
+
+  func confirmRelease() async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard let ticket = releaseTicket, releaseCommandID == nil else {
+      throw fail(TTradeControlError.contextChanged)
+    }
+    operationInProgress = true
+    clearMessages()
+    defer { operationInProgress = false }
+    do {
+      let context = try repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"])
+      try ticket.validate(context: context)
+      guard ticket.expiresAt > Date() else { throw TTradeControlError.challengeExpired }
+      try await localAuthentication.authorizeTrade(reason:
+        "确认发布做 T 灰度：账户 \(TTradeControlPrivacy.maskedAccount(ticket.draft.accountID))")
+      let current = try repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"])
+      try ticket.validate(context: current)
+      guard releaseTicket == ticket, ticket.expiresAt > Date(),
+        let repository = binding?.releaseRepository else { throw TTradeControlError.contextChanged }
+      releaseConfirmationAttempted = true
+      let commandID = try await repository.confirm(ticket, context: current)
+      try ticket.validate(context: repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"]))
+      releaseCommandID = commandID
+      successMessage = "发布命令已入队，请查询处理状态"
+    } catch { throw fail(error) }
+  }
+
+  func refreshReleaseStatus() async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    guard let ticket = releaseTicket, let repository = binding?.releaseRepository else {
+      throw fail(TTradeControlError.contextChanged)
+    }
+    operationInProgress = true
+    defer { operationInProgress = false }
+    do {
+      let context = try repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"])
+      try ticket.validate(context: context)
+      let status = try await repository.status(ticket, context: context)
+      try ticket.validate(context: repositoryContext(requiredScopes: ["t-trade:control", "trade:approve"]))
+      guard releaseTicket == ticket,
+        releaseCommandID == nil || releaseCommandID == status.commandID else {
+        throw TTradeControlError.contextChanged
+      }
+      releaseStatus = status
+      releaseCommandID = status.commandID
+      errorMessage = nil
+      successMessage = status.phase == .succeeded
+        ? "发布命令已完成，执行状态：\(status.executionStatus ?? "")" : nil
+    } catch { throw fail(error) }
   }
 }

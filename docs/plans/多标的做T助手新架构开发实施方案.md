@@ -748,7 +748,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   iOS 模拟器构建及 TTradeControlRepositoryTests/TTradeControlStoreTests 定向单测通过。
   证据 `.codex_screenshots/p6-status-*`、`p6-release-status-graphql.log`。
   原生发布界面及账户动作新接口仍待接入；未进行业务发布或实盘操作。
-- 剩余开发顺序：LIVE 发布界面、原生账户动作接口适配、RUNNING 恢复入场门禁、
+- 原生发布客户端与会话 Store 已接线：预览精确核对账户、配置、证据摘要和窗口；
+  确认前后复验设备上下文并要求独立生物确认。入队与发布完成分别展示；确认响应丢失时
+  保留原挑战供状态查询，未有终态前禁止新预览覆盖。锁定/换设备清除确认凭据。
+  iOS 构建和 21 项控制流程单测通过，含响应丢失、锁定/设备变化和不完整成功拒绝。
+  证据 `.codex_screenshots/p6-release-native-{build,test-final}.log`。
+  尚未连接界面；界面前需提供可选发布目标/证据来源，以及无凭据的跨锁定操作恢复入口。
+- 剩余开发顺序：发布目标/证据来源与 LIVE 发布界面、原生账户动作接口适配、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
