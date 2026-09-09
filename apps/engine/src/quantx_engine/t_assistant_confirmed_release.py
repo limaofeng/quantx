@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import UUID
 
 from quantx_application.t_trade_v3.portfolio_reference import aware_time
+from quantx_domain.clock import SHANGHAI
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
 from quantx_infrastructure.models.trade_confirmation_challenge import (
   TradeConfirmationChallenge,
@@ -18,7 +19,9 @@ RELEASE_COMMAND = "T_ASSISTANT_CONFIRM_LIVE_RELEASE"
 
 
 def _utc(value):
-  return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+  return (value.replace(tzinfo=SHANGHAI) if value.tzinfo is None else value).astimezone(
+    UTC
+  )
 
 
 async def execute_confirmed_release(

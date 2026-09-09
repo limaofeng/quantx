@@ -723,6 +723,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   7 项隔离测试通过，含原命令重投、未消费/过期挑战、篡改命令、注入 actor、目录越界、
   维护窗口未开始时审批回滚；Ruff 通过，证据 `.codex_screenshots/p6-confirmed-release.xml`。
   API 侧挑战签发/消费尚待接入，当前测试挑战为合成记录；环境未配置评估根目录时拒绝命令。
+- API 发布确认服务已完成签发/消费：复用原生唯一账户、trade:approve/t-trade:control
+  权限和实时会话复验；60 秒 HMAC 凭据绑定完整请求，数据库不保存原始 token。
+  消费时重查配置头，消费状态与 outbox 同事务；重试只返回原命令，配置变化/失权/过期不入队。
+  Engine 按挑战表的上海本地时间语义读取，修复跨进程八小时时差。
+  API→outbox→Engine→WARMING 合成整链及联合负例 15 项通过，配置变化/回滚补强后 API
+  定向 10 项通过，Ruff 通过；证据 `p6-api-release-confirmation.xml`、`p6-api-release-final.xml`
+  均位于 `.codex_screenshots/`。测试替换会话查库结果；公开 GraphQL 与客户端契约尚未接入。
 - 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
