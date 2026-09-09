@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import unquote, urlsplit
+from uuid import UUID
 
 TRAINING_POOL = "quantx-train-pool"
 
@@ -41,6 +42,7 @@ class TrainerConfig:
   database_url: str = field(repr=False)
   prefect_api_url: str = field(repr=False)
   prefect_pool: str
+  prefect_pool_id: str
 
   @classmethod
   def load(cls, filename: Path) -> TrainerConfig:
@@ -63,6 +65,13 @@ class TrainerConfig:
       raise TrainerConfigurationError("Trainer requires environment=development")
     if values["prefect_pool"] != TRAINING_POOL:
       raise TrainerConfigurationError("Trainer requires its dedicated training pool")
+    try:
+      if str(UUID(values["prefect_pool_id"])) != values["prefect_pool_id"]:
+        raise ValueError
+    except ValueError:
+      raise TrainerConfigurationError(
+        "Trainer requires an explicit Prefect pool UUID"
+      ) from None
     for name in ("code_root", "production_root", "state_root"):
       values[name] = _path(values[name], name)
     config = cls(**values)

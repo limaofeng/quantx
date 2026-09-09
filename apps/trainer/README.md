@@ -3,7 +3,7 @@
 独立开发训练服务正在实施，完整范围见
 [实施方案](../../docs/plans/独立训练服务架构与实施方案.md)。
 
-目前提供无网络副作用的本地配置预检。尚未迁移 Worker 调度、启用训练部署或完成 Windows/GPU 验收，不能将配置预检通过视为服务 ready。
+目前提供本地配置校验和开发控制面只读预检。尚未迁移 Worker 调度、启用训练部署或完成 Windows/GPU 验收，不能将预检通过视为服务 ready。
 
 ## 独立配置
 
@@ -17,9 +17,10 @@ state_root = 'D:\QuantXTraining\state'
 database_url = "postgresql+asyncpg://trainer:REPLACE_ME@DEV_HOST:5432/quantx_dev"
 prefect_api_url = "http://DEV_HOST:4200/api"
 prefect_pool = "quantx-train-pool"
+prefect_pool_id = "084451cb-a87f-4f06-9eb2-cae3db39804d"
 ```
 
-示例路径和端点需替换为本机实际部署值。生产目录必须如实配置；数据库名后缀与 URL 校验不能证明服务身份或最小权限，调度接入前仍须验证远端身份和研究表权限。
+示例路径、端点及 Pool UUID 需替换为实际部署值。Pool UUID 来自显式创建的开发专用 Process Pool，不能沿用示例值或生产 Pool。生产目录必须如实配置；数据库名后缀与 URL 校验不能代替远端身份和研究表权限预检。
 
 在独立 `quantx-train` Conda 环境安装此包后运行：
 
@@ -30,6 +31,28 @@ conda run -n quantx-train quantx-trainer-config-check --config D:\QuantXTraining
 该命令验证配置字段、开发目标、代码/状态/生产目录隔离、实际运行解释器及代码目录；不会建立连接、创建 Pool、安装依赖或启动服务。应用通过校验后才能接入后续的权限预检和调度。
 
 子进程环境采用系统必需变量白名单，显式设置开发目标及关闭实盘门，不继承券商参数、设备密钥、生产环境文件或 Python 搜索路径。后续进程启动必须使用完整的该环境映射，不能与父进程环境再次合并。
+
+## 控制面只读预检
+
+```powershell
+conda run -n quantx-train quantx-trainer preflight --config D:\QuantXTraining\trainer.toml
+```
+
+先执行相同的本地校验，再用配置中指定的角色连接开发 PostgreSQL，以只读事务查询系统目录。实际数据库、登录角色必须匹配配置；拒绝超级用户、数据库所有者、建库/建角色/复制/RLS 绕过、角色成员身份、数据库 CREATE/TEMP、schema CREATE、可执行的业务 SECURITY DEFINER 函数、序列和其他数据库 CONNECT 权限。
+
+训练角色的有效表权限必须精确为下表，且不具有所有权或授权转授能力。列级授权也参与检查，其他业务表（含交易与模型发布表）不能有读写权限：
+
+| public 表 | 权限 |
+| --- | --- |
+| stock_selection_dataset_versions | SELECT, INSERT |
+| stock_selection_training_specs | SELECT |
+| stock_selection_training_runs | SELECT, UPDATE |
+| research_preparation_jobs | SELECT, UPDATE |
+| runtime_component_heartbeats | SELECT, INSERT, UPDATE |
+
+部署时需审查 PUBLIC 默认权限及现有授权；单独为 Trainer 执行 GRANT 不能抵消已有 PUBLIC 权限。预检不自动创建角色、修改权限或启动外部服务。
+
+数据库预检成功后，才对配置的 Prefect 发起 GET，验证专用 Pool 名称、UUID、Process 类型及未暂停状态；不会跟随重定向或继承 HTTP 代理。成功输出 `PREFLIGHT_PASSED`，拒绝退出码为 `2`，仅输出稳定错误码。此命令不领取任务、不注册部署、不写心跳，也不证明数据传输或 GPU 可用。
 
 ## 主机高资源门禁
 

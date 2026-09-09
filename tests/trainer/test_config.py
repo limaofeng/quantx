@@ -15,6 +15,7 @@ def deployment(tmp_path):
     "database_url": "postgresql+asyncpg://trainer:private@dev-host:5432/quantx_dev",
     "prefect_api_url": "http://dev-host:4200/api",
     "prefect_pool": "quantx-train-pool",
+    "prefect_pool_id": "084451cb-a87f-4f06-9eb2-cae3db39804d",
   }
 
 
@@ -50,6 +51,7 @@ def test_no_missing_field_defaults(tmp_path, deployment, missing):
     ("environment", "dev"),
     ("prefect_pool", "quantx-pool"),
     ("prefect_pool", "quantx-dev-pool"),
+    ("prefect_pool_id", "not-an-id"),
     ("database_url", "postgresql+asyncpg://u:private@host:5432/quantx"),
     ("database_url", "postgresql+asyncpg://u:private@host:5432/quantx_dev?host=prod"),
     ("database_url", "postgresql+asyncpg://u:private@host:bad/quantx_dev"),
