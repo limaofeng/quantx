@@ -289,6 +289,7 @@ async def acquire_backtest_dataset(
     for code in sorted(instruments):
       rows, previous = [], None
       missing_references = {}
+      limits = {"up_stop_price": None, "down_stop_price": None}
       reason = None
       try:
         limits = await _daily_limits(history, code, day)
@@ -320,7 +321,7 @@ async def acquire_backtest_dataset(
                 continue
               missing = [
                 key
-                for key in ("price_tick", "up_stop_price", "down_stop_price")
+                for key in ("price_tick",)
                 if row[key] is None or row[key] <= 0
               ]
               for key in missing:
@@ -398,6 +399,7 @@ async def acquire_backtest_dataset(
           "last_ms": max(times) if times else None,
           "source_exhausted": reason is None,
           "missing_reference_fields": missing_references,
+          "daily_price_limits": limits,
         }
       )
       if on_partition is not None:
@@ -411,6 +413,7 @@ async def acquire_backtest_dataset(
   material = {
     "schema_version": "backtest-tick-dataset.v2",
     "price_limit_policy": "CHECK_WHEN_AVAILABLE.v1",
+    "price_limit_source": "DAILY_KLINE",
     "storage": "SNAPSHOT" if freeze else "REFERENCE",
     "source_version": source_version,
     "instruments": sorted(instruments),

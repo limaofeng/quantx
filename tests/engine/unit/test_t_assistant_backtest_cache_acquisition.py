@@ -81,8 +81,9 @@ async def test_source_error_stops_without_querying_other_symbols(tmp_path):
 
 
 @pytest.mark.parametrize("preserve_raw", [True, False])
+@pytest.mark.parametrize("daily_present", [True, False])
 async def test_backtest_replays_without_daily_limits_and_never_uses_tick_limits(
-  tmp_path, preserve_raw
+  tmp_path, preserve_raw, daily_present
 ):
   from quantx_engine.t_assistant_backtest_run import execute_backtest
 
@@ -90,7 +91,12 @@ async def test_backtest_replays_without_daily_limits_and_never_uses_tick_limits(
 
   class NoDailyReference(History):
     async def get_kline_data(self, **kwargs):
-      return []
+      if not daily_present:
+        return []
+      bars = await super().get_kline_data(**kwargs)
+      for bar in bars:
+        bar.up_stop_price = bar.down_stop_price = None
+      return bars
 
   dataset = await acquire_backtest_dataset(
     history=NoDailyReference(),
@@ -104,6 +110,13 @@ async def test_backtest_replays_without_daily_limits_and_never_uses_tick_limits(
     preserve_raw=preserve_raw,
   )
   assert dataset.manifest["material"]["status"] == "FROZEN"
+  assert dataset.manifest["material"]["price_limit_source"] == "DAILY_KLINE"
+  assert not dataset.manifest["material"]["reference_requirements"]
+  for part in dataset.manifest["material"]["parts"]:
+    assert not part["missing_reference_fields"]
+    assert part["daily_price_limits"] == {
+      "up_stop_price": None, "down_stop_price": None,
+    }
   events = [event async for event in dataset.events()]
   assert events and all(
     event.market.limit_up is None and event.market.limit_down is None
