@@ -1,0 +1,53 @@
+query IOSAccountControlSafety($accountId: String!) {
+  accountExecutionSafety(accountId: $accountId) {
+    accountId
+    stateVersion
+    snapshotId
+  }
+}
+
+mutation IOSPreviewAccountControl($input: AccountExecutionControlPreviewInput!) {
+  previewAccountExecutionControl(input: $input) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      tokenIssued
+      accountId
+      action
+      stateVersion
+      snapshotId
+      reason
+      challengeExpiresAt
+      challengeStatus
+      operationStatus
+      safety {
+        accountId
+        stateVersion
+        summary
+        blockedReasons
+        killSwitch
+        executionWindowActive
+      }
+    }
+  }
+}
+
+mutation IOSConfirmAccountControl($input: AccountExecutionControlConfirmationInput!) {
+  confirmAccountExecutionControl(input: $input) {
+    success
+    code
+    message
+    challengeId
+    action
+    operationStatus
+    safety {
+      accountId
+      stateVersion
+      killSwitch
+      executionWindowActive
+    }
+  }
+}

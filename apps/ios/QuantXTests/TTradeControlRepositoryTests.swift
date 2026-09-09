@@ -123,6 +123,23 @@ final class TTradeControlRepositoryTests: XCTestCase {
     XCTAssertEqual(snapshot.accountID, "ACCOUNT-1")
   }
 
+  func testAccountAppliedResultRequiresExactIdentityAndAuthoritativeSafety() throws {
+    let ticket = NativeAccountControlTicket(id: "challenge", token: "secret", context: context,
+      action: .killSwitch, stateVersion: 100, snapshotID: "", reason: "停止",
+      expiresAt: Date().addingTimeInterval(60), summary: "", blockedReasons: [])
+    func validate(account: String? = nil, status: String = "APPLIED", killed: Bool = true, version: Int = 101) throws {
+      try AccountExecutionControlRepository.validateApplied(ticket: ticket, challengeID: ticket.id,
+        action: ticket.action.rawValue, code: "KILL_SWITCH_APPLIED", status: status,
+        accountID: account ?? context.activeAccountID, stateVersion: version,
+        killSwitch: killed, windowActive: false)
+    }
+    try validate()
+    XCTAssertThrowsError(try validate(account: "other"))
+    XCTAssertThrowsError(try validate(status: "DISPATCHING"))
+    XCTAssertThrowsError(try validate(killed: false))
+    XCTAssertThrowsError(try validate(version: 99))
+  }
+
   private var context: TTradeControlRepositoryContext {
     TTradeControlRepositoryContext(
       userID: "user-1",

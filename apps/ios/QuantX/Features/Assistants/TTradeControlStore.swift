@@ -20,12 +20,14 @@ final class TTradeControlStore: ObservableObject {
     let identity: SessionIdentity
     let repository: (any TTradeControlLoading)?
     let releaseRepository: (any TAssistantReleaseLoading)?
+    let accountRepository: (any AccountExecutionControlLoading)?
   }
 
   typealias ContextProvider = @MainActor () -> TTradeControlRuntimeContext
   typealias RefreshSession = @MainActor () async throws -> Void
   typealias RefreshAssistantProjection = @MainActor () async -> Void
 
+  @Published private(set) var accountControlTicket: NativeAccountControlTicket?
   @Published private(set) var recentReleaseOperations: [TAssistantReleaseOperation] = []
   @Published private(set) var releaseReference: TAssistantReleaseReference?
   @Published private(set) var releaseTicket: TAssistantReleaseTicket?
@@ -65,13 +67,14 @@ final class TTradeControlStore: ObservableObject {
   func activate(
     identity: SessionIdentity,
     repository: (any TTradeControlLoading)?,
-    releaseRepository: (any TAssistantReleaseLoading)? = nil
+    releaseRepository: (any TAssistantReleaseLoading)? = nil,
+    accountRepository: (any AccountExecutionControlLoading)? = nil
   ) {
     if binding?.identity != identity {
       sessionContextID = UUID()
       resetTransientState(resetReadState: true)
     }
-    binding = SessionBinding(identity: identity, repository: repository, releaseRepository: releaseRepository)
+    binding = SessionBinding(identity: identity, repository: repository, releaseRepository: releaseRepository, accountRepository: accountRepository)
   }
 
   func clearSession() {
@@ -82,6 +85,7 @@ final class TTradeControlStore: ObservableObject {
 
   func invalidateChallengeContext() {
     sessionContextID = UUID()
+    accountControlTicket = nil
     recentReleaseOperations = []
     releaseTicket = nil
     releaseStatus = nil
@@ -593,6 +597,7 @@ final class TTradeControlStore: ObservableObject {
 
   private func resetTransientState(resetReadState: Bool) {
     stateRequestID = UUID()
+    accountControlTicket = nil
     recentReleaseOperations = []
     releaseTicket = nil
     releaseReference = nil
@@ -652,6 +657,7 @@ extension TTradeControlStore {
       throw fail(TTradeControlError.unavailable("发布服务尚未连接"))
     }
     operationInProgress = true
+    accountControlTicket = nil
     recentReleaseOperations = []
     releaseTicket = nil
     releaseReference = nil
@@ -715,6 +721,60 @@ extension TTradeControlStore {
       errorMessage = nil
       successMessage = status.phase == .succeeded
         ? "发布命令已完成，执行状态：\(status.executionStatus ?? "")" : nil
+    } catch { throw fail(error) }
+  }
+}
+
+
+extension TTradeControlStore {
+  var accountControlUnavailableReason: String? {
+    baseUnavailableReason(requiredScopes: ["strategy:read", "account-execution:control", "trade:approve"],
+      requiresBiometrics: true) ?? (binding?.accountRepository == nil ? "账户控制服务尚未连接" : nil)
+  }
+
+  func dismissAccountControl() {
+    if !operationInProgress { accountControlTicket = nil }
+  }
+
+  func previewAccountControl(_ action: NativeAccountControlAction, reason: String) async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    if let unavailable = accountControlUnavailableReason {
+      throw fail(TTradeControlError.unavailable(unavailable))
+    }
+    operationInProgress = true
+    accountControlTicket = nil
+    clearMessages()
+    defer { operationInProgress = false }
+    do {
+      let context = try repositoryContext(requiredScopes: ["strategy:read", "account-execution:control", "trade:approve"])
+      guard let repository = binding?.accountRepository else { throw TTradeControlError.contextChanged }
+      let ticket = try await repository.preview(action: action, reason: reason, context: context)
+      guard context == (try repositoryContext(requiredScopes: ["strategy:read", "account-execution:control", "trade:approve"])),
+        ticket.context == context else { throw TTradeControlError.contextChanged }
+      accountControlTicket = ticket
+    } catch { throw fail(error) }
+  }
+
+  func confirmAccountControl(_ ticket: NativeAccountControlTicket) async throws {
+    guard !operationInProgress else { throw fail(TTradeControlError.alreadyInProgress) }
+    operationInProgress = true
+    clearMessages()
+    defer { operationInProgress = false }
+    do {
+      let context = try repositoryContext(requiredScopes: ["account-execution:control", "trade:approve"])
+      guard accountControlTicket == ticket, ticket.context == context else { throw TTradeControlError.contextChanged }
+      guard ticket.expiresAt > Date() else { throw TTradeControlError.challengeExpired }
+      try await localAuthentication.authorizeTrade(reason: ticket.action.title)
+      let current = try repositoryContext(requiredScopes: ["account-execution:control", "trade:approve"])
+      guard current == context, accountControlTicket == ticket, ticket.expiresAt > Date(),
+        let repository = binding?.accountRepository else { throw TTradeControlError.contextChanged }
+      let message = try await repository.confirm(ticket, context: current)
+      guard current == (try repositoryContext(requiredScopes: ["account-execution:control", "trade:approve"])) else {
+        throw TTradeControlError.contextChanged
+      }
+      accountControlTicket = nil
+      successMessage = message
+      await refreshTruth()
     } catch { throw fail(error) }
   }
 }

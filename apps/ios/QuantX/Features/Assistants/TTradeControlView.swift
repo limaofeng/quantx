@@ -48,7 +48,30 @@ struct TTradeControlView: View {
         .disabled(store.operationInProgress)
       }
       if store.releaseReference != nil { releaseOperationCard }
+      accountControlActions
       stateContent
+    }
+    .sheet(item: Binding(get: { store.accountControlTicket }, set: { value in
+      if value == nil { store.dismissAccountControl() }
+    })) { ticket in
+      NavigationStack {
+        Form {
+          Section(ticket.action.title) {
+            Text("主账户 \(TTradeControlPrivacy.maskedAccount(ticket.context.activeAccountID))")
+            Text(ticket.summary)
+            if !ticket.reason.isEmpty { Text("处置原因：\(ticket.reason)") }
+            ForEach(Array(ticket.blockedReasons.enumerated()), id: \.offset) { _, reason in Text(reason) }
+            Text("确认有效期至 \(ticket.expiresAt.formatted())").font(.caption)
+          }
+          Section {
+            Button("生物确认") { Task { try? await store.confirmAccountControl(ticket) } }
+              .disabled(store.operationInProgress || ticket.expiresAt <= Date())
+            if let error = store.errorMessage { Text(error).foregroundStyle(QuantXTheme.critical) }
+          }
+        }
+        .navigationTitle("核对账户控制")
+        .toolbar { Button("关闭") { store.dismissAccountControl() }.disabled(store.operationInProgress) }
+      }
     }
     .fileImporter(isPresented: $importsReleaseRequest, allowedContentTypes: [.json]) { result in
       Task {
@@ -375,8 +398,7 @@ struct TTradeControlView: View {
       )
 
       ForEach([
-        TTradeSafetyAction.beginControlledWindow,
-        .activateCanary,
+        TTradeSafetyAction.activateCanary,
         .activateLive,
       ]) { action in
         actionCard(action, snapshot: snapshot)
@@ -404,6 +426,22 @@ struct TTradeControlView: View {
         }
       }
 
+
+    }
+  }
+
+  private var accountControlActions: some View {
+    VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
+      QuantXCard {
+        VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
+          Text("账户执行窗口").font(.headline)
+          Text("核对最新账户快照，再建立受控实盘窗口。")
+          Button("核对账户窗口") { requestPreview(.beginControlledWindow) }
+            .buttonStyle(.bordered)
+            .disabled(store.operationInProgress || store.accountControlUnavailableReason != nil)
+          if let reason = store.accountControlUnavailableReason { unavailableCaption(reason) }
+        }
+      }
       QuantXCard {
         VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
           Label("紧急熔断", systemImage: "exclamationmark.octagon.fill")
@@ -428,10 +466,10 @@ struct TTradeControlView: View {
           .disabled(
             store.operationInProgress
               || killReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-              || store.controlUnavailableReason(for: .killSwitch) != nil
+              || controlUnavailableReason(for: .killSwitch) != nil
           )
           .accessibilityHint("打开服务端熔断预览；不会直接触发熔断")
-          if let reason = store.controlUnavailableReason(for: .killSwitch) {
+          if let reason = controlUnavailableReason(for: .killSwitch) {
             unavailableCaption(reason)
           }
         }
@@ -464,10 +502,10 @@ struct TTradeControlView: View {
         .frame(minHeight: 44)
         .disabled(
           store.operationInProgress
-            || store.controlUnavailableReason(for: action) != nil
+            || controlUnavailableReason(for: action) != nil
         )
         .accessibilityHint("请求服务端预览；预览成功后才可进行生物确认")
-        if let reason = store.controlUnavailableReason(for: action) {
+        if let reason = controlUnavailableReason(for: action) {
           unavailableCaption(reason)
         }
       }
@@ -486,9 +524,20 @@ struct TTradeControlView: View {
     }
   }
 
+  private func controlUnavailableReason(for action: TTradeSafetyAction) -> String? {
+    switch action {
+    case .beginControlledWindow, .killSwitch: store.accountControlUnavailableReason
+    case .activateCanary, .activateLive: store.controlUnavailableReason(for: action)
+    }
+  }
+
   private func requestPreview(_ action: TTradeSafetyAction, reason: String = "") {
     Task {
-      try? await store.preview(action: action, reason: reason)
+      switch action {
+      case .beginControlledWindow: try? await store.previewAccountControl(.beginControlledWindow, reason: reason)
+      case .killSwitch: try? await store.previewAccountControl(.killSwitch, reason: reason)
+      case .activateCanary, .activateLive: try? await store.preview(action: action, reason: reason)
+      }
     }
   }
 

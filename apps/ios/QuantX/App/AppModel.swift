@@ -1685,7 +1685,9 @@ final class AppModel: ObservableObject {
         ? tTradeControlLoaderFactory(newApolloSession)
         : nil,
       releaseRepository: grantedScopes.contains("t-trade:control")
-        ? TAssistantReleaseRepository(client: newApolloSession.client) : nil
+        ? TAssistantReleaseRepository(client: newApolloSession.client) : nil,
+      accountRepository: grantedScopes.contains("account-execution:control")
+        ? AccountExecutionControlRepository(client: newApolloSession.client) : nil
     )
     manualTradingStore.activate(
       identity: ManualTradingStore.SessionIdentity(

@@ -310,9 +310,40 @@ final class TTradeControlStoreTests: XCTestCase {
     }
   }
 
+  func testAccountControlUsesOwnVersionAndBiometricConfirmation() async throws {
+    let account = AccountControlSpy()
+    let harness = await makeHarness(accountRepository: account,
+      scopes: ["strategy:read", "account-execution:control", "trade:approve"])
+    for action in [NativeAccountControlAction.beginControlledWindow, .killSwitch] {
+      try await harness.store.previewAccountControl(action, reason: "人工处置")
+      let ticket = try XCTUnwrap(harness.store.accountControlTicket)
+      XCTAssertEqual(ticket.stateVersion, 100)
+      try await harness.store.confirmAccountControl(ticket)
+      XCTAssertNil(harness.store.accountControlTicket)
+    }
+    XCTAssertEqual(account.confirmCount, 2)
+    XCTAssertEqual(harness.authentication.reasons.count, 2)
+    XCTAssertTrue(harness.repository.confirmCalls.isEmpty)
+  }
+
+  func testAccountControlRequiresAccountPermissionAndRechecksAfterBiometrics() async throws {
+    let denied = await makeHarness(accountRepository: AccountControlSpy())
+    do { try await denied.store.previewAccountControl(.killSwitch, reason: "停止"); XCTFail("scope") } catch {}
+    XCTAssertTrue(denied.authentication.reasons.isEmpty)
+    let account = AccountControlSpy()
+    let harness = await makeHarness(accountRepository: account,
+      scopes: ["strategy:read", "account-execution:control", "trade:approve"])
+    try await harness.store.previewAccountControl(.killSwitch, reason: "停止")
+    let ticket = try XCTUnwrap(harness.store.accountControlTicket)
+    harness.authentication.authorizationHandler = { harness.runtime.localSessionLocked = true }
+    do { try await harness.store.confirmAccountControl(ticket); XCTFail("locked during biometrics") } catch {}
+    XCTAssertEqual(account.confirmCount, 0)
+  }
+
   private func makeHarness(
     repository: TTradeControlRepositorySpy? = nil,
     releaseRepository: TAssistantReleaseSpy? = nil,
+    accountRepository: AccountControlSpy? = nil,
     authentication: TTradeControlAuthenticationSpy = TTradeControlAuthenticationSpy(),
     scopes: Set<String> = ["strategy:read", "t-trade:control", "trade:approve"]
   ) async -> (
@@ -330,7 +361,7 @@ final class TTradeControlStoreTests: XCTestCase {
       refreshAssistantProjection: { runtime.projectionRefreshCount += 1 }
     )
     store.activate(identity: identity(scopes: scopes), repository: repository,
-      releaseRepository: releaseRepository)
+      releaseRepository: releaseRepository, accountRepository: accountRepository)
     await store.refresh()
     return (store, repository, runtime, authentication)
   }
@@ -566,11 +597,13 @@ private final class TTradeControlRepositorySpy: TTradeControlLoading {
 private final class TTradeControlAuthenticationSpy: LocalAuthenticationProviding {
   var tradeAuthorizationAvailable = true
   private(set) var reasons: [String] = []
+  var authorizationHandler: (() -> Void)?
 
   func unlock(reason: String) async throws {}
 
   func authorizeTrade(reason: String) async throws {
     reasons.append(reason)
+    authorizationHandler?()
   }
 }
 
@@ -631,5 +664,22 @@ private final class TAssistantReleaseSpy: TAssistantReleaseLoading {
     try TAssistantReleaseStatus.validated(challengeID: reference.challengeID, phase: "PENDING",
       commandID: "command-1", executionID: nil, executionStatus: nil, reasonCode: nil,
       expectedChallengeID: reference.challengeID)
+  }
+}
+
+
+@MainActor
+private final class AccountControlSpy: AccountExecutionControlLoading {
+  var confirmCount = 0
+  func preview(action: NativeAccountControlAction, reason: String, context: TTradeControlRepositoryContext)
+    async throws -> NativeAccountControlTicket {
+    NativeAccountControlTicket(id: UUID().uuidString, token: "secret", context: context,
+      action: action, stateVersion: 100, snapshotID: action == .killSwitch ? "" : "account-snapshot",
+      reason: reason, expiresAt: Date().addingTimeInterval(60), summary: "账户控制", blockedReasons: [])
+  }
+  func confirm(_ ticket: NativeAccountControlTicket, context: TTradeControlRepositoryContext)
+    async throws -> String {
+    confirmCount += 1
+    return "账户操作已应用"
   }
 }

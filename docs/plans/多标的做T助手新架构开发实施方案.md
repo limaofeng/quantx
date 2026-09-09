@@ -767,7 +767,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   头并重验完整 P5 证据，生成无凭据文件，不写审批/命令；原生导入后调用真实预览和生物确认。
   5 项生成器负例/零写入测试、24 项原生控制测试及编译通过，CLI --help/Ruff 通过；
   证据 `.codex_screenshots/p6-release-request-*`。当前 CLI 仅开发入口，未生成正式准入文件。
-- 剩余开发顺序：原生账户动作接口适配、RUNNING 恢复入场门禁、
+- 原生账户控制已接回 BEGIN_CONTROLLED_WINDOW/KILL_SWITCH：使用账户级安全状态版本与
+  preview/confirm 接口、account-execution:control/trade:approve 权限及独立生物确认；
+  熔断不提交快照参数，不把 DISPATCHING 视为生效。结果核对原挑战、账户、动作及安全状态。
+  两项入口独立于做 T 控制状态面板；27 项原生定向测试、界面构建和实际 Caddy 契约生成通过，
+  Web check/lint/test:run/build 通过。证据 `.codex_screenshots/p6-account-control-*`。
+  本次仅开发与模拟器验证，未调用真实账户控制 mutation。
+- 剩余开发顺序：RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

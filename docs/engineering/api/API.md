@@ -357,3 +357,9 @@ conda run -n quantx python ops/prepare_t_assistant_release.py \
 原生控制页使用“导入发布请求”选择该文件（最多 16 KiB）；导入后获取服务端预览，
 核对配置、证据和窗口，再单独进行生物确认。文件不是发布凭据，篡改、过期或配置头变化
 仍由服务端拒绝；Engine 在消费确认时再次核验正式证据。该 CLI 当前仅提供开发环境入口。
+
+原生做 T 控制页的“账户执行窗口”和“紧急熔断”调用账户级
+`accountExecutionSafety` → `previewAccountExecutionControl` → `confirmAccountExecutionControl`。
+账户动作绑定 `stateVersion`，独立于做 T 灰度 `policyVersion`；建立窗口绑定最新快照，
+熔断只提交处置原因。需要 `strategy:read`、`account-execution:control`、`trade:approve`，
+且确认前后均检查原设备会话。仅 APPLIED 且账户安全结果符合动作时展示已生效。

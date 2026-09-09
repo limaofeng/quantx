@@ -29,6 +29,10 @@ extension QuantXAPI {
 
     private static let objectTypeMap: [String: ApolloAPI.Object] = [
       "Account": QuantXAPI.Objects.Account,
+      "AccountExecutionControlConfirmationResult": QuantXAPI.Objects.AccountExecutionControlConfirmationResult,
+      "AccountExecutionControlPreview": QuantXAPI.Objects.AccountExecutionControlPreview,
+      "AccountExecutionControlPreviewResult": QuantXAPI.Objects.AccountExecutionControlPreviewResult,
+      "AccountExecutionSafety": QuantXAPI.Objects.AccountExecutionSafety,
       "CancelOrderResult": QuantXAPI.Objects.CancelOrderResult,
       "ExecutionOwnerRef": QuantXAPI.Objects.ExecutionOwnerRef,
       "ExitPlanAuthorizationConfirmationResult": QuantXAPI.Objects.ExitPlanAuthorizationConfirmationResult,
