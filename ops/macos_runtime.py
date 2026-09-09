@@ -54,12 +54,15 @@ def main() -> None:
   global STATE
   parser = argparse.ArgumentParser()
   parser.add_argument(
-    "command", choices=("up", "down", "status", "logs", "doctor", "history")
+    "command", choices=("up", "down", "status", "logs", "doctor", "history", "drain", "resume")
   )
   parser.add_argument("--environment", choices=("dev",), default="dev")
   parser.add_argument("--profile", choices=("full", "web"), default="full")
   parser.add_argument("--mode", choices=("paper", "data-only"), default="paper")
-  parser.add_argument("--component", choices=("monitor",))
+  parser.add_argument("--component", choices=("monitor", "trainer"))
+  parser.add_argument("--trainer-config", type=Path)
+  parser.add_argument("--trainer-python", type=Path)
+  parser.add_argument("--tail", type=int, default=100)
   parser.add_argument("--instruments")
   parser.add_argument("--period", choices=("tick", "1m", "1d"))
   parser.add_argument("--start")
@@ -69,6 +72,24 @@ def main() -> None:
     parser.error("This launcher is only for macOS development")
   if not (Path(sys.prefix) / "conda-meta").is_dir():
     parser.error("Activate the quantx Conda environment; venv is not supported")
+  if args.component == "trainer":
+    if any(value == "--mode" or value.startswith("--mode=") for value in sys.argv[1:]):
+      parser.error("Trainer does not accept trading mode parameters")
+    if args.command == "history":
+      parser.error("Trainer does not support history collection")
+    if any(path is None or not path.is_absolute() or not path.is_file()
+           for path in (args.trainer_config, args.trainer_python)):
+      parser.error("Trainer requires existing absolute --trainer-config and --trainer-python paths")
+    if not 1 <= args.tail <= 1000:
+      parser.error("Trainer --tail must be 1..1000")
+    command = "preflight" if args.command == "doctor" else args.command
+    arguments = [str(args.trainer_python), "-I", "-m", "quantx_trainer.main", command,
+                 "--config", str(args.trainer_config)]
+    if command == "logs":
+      arguments.extend(["--lines", str(args.tail)])
+    raise SystemExit(subprocess.call(arguments))
+  if args.trainer_config or args.trainer_python or args.command in {"drain", "resume"}:
+    parser.error("Trainer parameters and drain/resume require --component trainer")
   RUNTIME.mkdir(parents=True, exist_ok=True)
   if args.component:
     STATE = RUNTIME / "monitor.json"

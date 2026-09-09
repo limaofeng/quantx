@@ -11,7 +11,9 @@ param(
     "backup",
     "restore-verify",
     "migrate",
-    "verify"
+    "verify",
+    "drain",
+    "resume"
   )]
   [string]$Command = "status",
 
@@ -24,6 +26,10 @@ param(
   [string]$Component = "",
 
   [string]$CondaExecutable = "",
+
+  [string]$TrainerConfig = "",
+
+  [string]$TrainerPython = "",
 
   [ValidateRange(1, 5000)]
   [int]$Tail = 100,
@@ -3032,14 +3038,39 @@ function Invoke-Verify {
 }
 
 if ($Component -eq "trainer") {
-  if ($Command -ne "bootstrap" -or $Environment -ne "dev") {
-    throw "Trainer currently supports bootstrap only, with explicit -Environment dev."
+  if ($Environment -ne "dev") {
+    throw "Trainer requires explicit -Environment dev."
   }
-  if (-not $CondaExecutable) {
-    throw "Trainer bootstrap requires -CondaExecutable."
+  if ($PSBoundParameters.ContainsKey("Mode") -or $AccountId) {
+    throw "Trainer does not accept trading mode or broker account parameters."
   }
-  & (Join-Path $ScriptRoot "trainer\bootstrap.ps1") -CondaExecutable $CondaExecutable
-  return
+  if ($Command -eq "bootstrap") {
+    if (-not $CondaExecutable -or $TrainerConfig -or $TrainerPython) {
+      throw "Trainer bootstrap requires only -CondaExecutable."
+    }
+    & (Join-Path $ScriptRoot "trainer\bootstrap.ps1") -CondaExecutable $CondaExecutable
+    return
+  }
+  if ($Command -notin @("up", "down", "status", "logs", "doctor", "drain", "resume") -or $CondaExecutable) {
+    throw "Unsupported Trainer operation."
+  }
+  foreach ($value in @($TrainerConfig, $TrainerPython)) {
+    if (-not $value -or -not [IO.Path]::IsPathRooted($value) -or
+        -not (Test-Path -LiteralPath $value -PathType Leaf)) {
+      throw "Trainer requires existing absolute -TrainerConfig and -TrainerPython paths."
+    }
+  }
+  if ($Command -eq "logs" -and $Tail -gt 1000) {
+    throw "Trainer logs supports -Tail 1..1000."
+  }
+  $trainerCommand = if ($Command -eq "doctor") { "preflight" } else { $Command }
+  $trainerArguments = @("-I", "-m", "quantx_trainer.main", $trainerCommand, "--config", $TrainerConfig)
+  if ($Command -eq "logs") { $trainerArguments += @("--lines", [string]$Tail) }
+  & $TrainerPython @trainerArguments
+  exit $LASTEXITCODE
+}
+if ($TrainerConfig -or $TrainerPython -or $Command -in @("drain", "resume")) {
+  throw "Trainer parameters and drain/resume require -Component trainer."
 }
 if ($CondaExecutable) {
   throw "-CondaExecutable is only supported by Trainer bootstrap."

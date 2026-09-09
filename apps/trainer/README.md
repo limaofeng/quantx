@@ -205,7 +205,7 @@ python -m quantx_trainer.main resume --config C:\Users\limao\QuantXTraining\stat
 
 这些命令仅操作本地状态，不要求数据库、Prefect 或 SFTP 在线。`drain` 设置持久化标记，训练、认证及 GPU 准备的领取事务在写执行证据前检查标记；被拒绝的事务保持排队。标记操作与领取前回调由同一操作系统文件锁串行化，锁占用时拒绝新领取，命令返回失败可重试。已通过回调的领取可能在 `drain` 返回后完成提交，作为已有任务继续执行；结果恢复仍可发布和收敛。
 
-`admission-status` 仅返回 `OPEN` / `DRAINING` 和 `execution_state=NOT_INSPECTED`，不证明任务或进程已退出，不能单凭它升级代码或依赖。完整排空核验、独立启停、进程树有界退出仍在实施中。`resume` 显式删除排空标记，恢复新领取。
+`admission-status` 仅返回 `OPEN` / `DRAINING` 和 `execution_state=NOT_INSPECTED`，不证明任务或进程已退出，不能单凭它升级代码或依赖。完整排空核验和进程树有界退出仍在实施中。`resume` 显式删除排空标记，恢复新领取。
 
 
 Windows 的 Research CLI 与准备计算现在经 `quantx_trainer.contained_process` 启动，在导入 Research 前将当前计算进程加入 Job Object。该 Job 仅启用 `KILL_ON_JOB_CLOSE`，不允许后代脱离；唯一句柄不可继承并保留至进程退出。创建、设置限制或加入失败均拒绝计算；保留计算进程原 PID、父进程和退出码，已有进程证据不变。机制依据 [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)。macOS 保持直接计算入口。
@@ -223,7 +223,7 @@ python -m quantx_trainer.main serve --config C:\Users\limao\QuantXTraining\state
 
 `serve` 获取 `state_root/service` 的操作系统单实例锁，隔离环境变量和 Prefect 本地配置目录，执行全部预检，再登记 `trainer-preparation`、`stock-selection-training-dispatch`、`stock-selection-training-capability` 三个每分钟部署。登记全部成功才启动专用 ProcessWorker；不存在 Pool 时不自动创建。部署仅保存显式配置文件路径与工作目录，不保存数据库连接信息。服务允许三个流程并行，实际计算仍由各流程的领取与主机资源门禁控制。
 
-Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serve` 保留已有排空标记；预检/登记/运行失败退出，单实例锁随进程退出释放。它是前台运行入口，尚不替代计划要求的后台 up/down/status/logs、完整排空和停止验收。当前仅完成本地 SDK 部署契约与故障测试，未启动远端 Worker。
+Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serve` 保留已有排空标记；预检/登记/运行失败退出，单实例锁随进程退出释放。它是前台运行入口；后台 up/down/status/logs 已另行接入，完整排空和停止验收仍需完成。当前仅完成本地 SDK 部署契约与故障测试，未启动远端 Worker。
 
 
 服务运行时可在另一终端执行 `python -m quantx_trainer.main status --config <同一配置绝对路径>`。查询不连接开发控制面，返回 `ALIVE`、`OFFLINE`、`STALE` 或 `UNKNOWN`。只有单实例锁占用、主机/PID/创建时间/解释器/配置哈希匹配且本地心跳不超过 30 秒，才报告 `ALIVE`；证据每 10 秒刷新。`phase` 区分预检、部署注册、进入 Worker 循环和退出阶段；不代表控制面或 GPU 健康。`OFFLINE` 表示查询时服务锁可获取，残留状态文件不会让服务显示在线。
@@ -233,7 +233,7 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 
 使用 `python -m quantx_trainer.main logs --config <同一配置绝对路径> --lines 100` 离线读取服务生命周期事件，行数范围为 1–1000。文件位于 `state_root/service/events.jsonl`，每个文件最多 1 MiB，保留三个轮转备份。事件仅包含时间、实例标识和固定阶段/失败代码，不收集配置、异常原文或任意输出；心跳刷新不重复写阶段事件。读取拒绝链接和非预期字段，损坏时返回稳定错误，不输出损坏原文。
 
-该入口查询服务生命周期日志；逐次计算的 stdout/stderr 仍位于对应运行控制目录，尚未统一到此查询入口。后台 up/down 与完整退出验收仍在实施中。
+该入口查询服务生命周期日志；逐次计算的 stdout/stderr 仍位于对应运行控制目录，尚未统一到此查询入口。完整退出验收仍在实施中。
 
 
 ### 后台启动
@@ -242,11 +242,24 @@ Windows 服务进程在加载 Worker 前加入退出清理的 Job Object。`serv
 
 启动前保存请求哈希和 STARTING 证据，启动后记录子进程身份。`up` 最多观察 10 秒；`ALIVE` 仅表示本地服务身份与心跳已确认，仍应检查阶段和控制面能力。超时返回 `START_PENDING`、退出码 3，保留原进程。再次调用先检查服务和上次启动证据；未知启动不会重复创建进程，只有确认旧尝试退出后才允许新的启动。已在线的服务直接返回当前状态，排空标记不会被清除。`state_root/service-launches` 保存逐次启动证据。
 
-当前 `up` 尚未接入根运维脚本，独立 `down` 和 Windows 完整停止/后代退出验收仍需完成。
+`up` 与协作式 `down` 已接入根运维脚本，Windows 完整停止/后代退出验收仍需完成。
 
 
 ### 协作停止
 
 执行 `python -m quantx_trainer.main down --config <配置绝对路径>`，先持久化关闭新领取，再向已验证的服务实例写入停止请求。服务每秒检查请求，进入 STOPPING，取消并等待 Worker 清理；旧实例请求不会影响新实例。`down` 最多等待 30 秒，确认服务锁释放返回 OFFLINE，否则返回 STOP_PENDING 和退出码 3。配置不匹配、陈旧或未知身份不会用于发送停止请求，也不会按猜测的 PID 终止进程。
 
-此命令保留排空标记，后续启动仍需显式 resume 才恢复领取。返回结果的 `execution_state=NOT_INSPECTED` 表示尚未证明所有计算后代退出和数据库状态收敛；不能直接作为升级许可。超时强制终止、Windows 完整后代退出确认以及根运维脚本接入仍待完成。
+此命令保留排空标记，后续启动仍需显式 resume 才恢复领取。返回结果的 `execution_state=NOT_INSPECTED` 表示尚未证明所有计算后代退出和数据库状态收敛；不能直接作为升级许可。超时强制终止和 Windows 完整后代退出确认仍待完成。
+
+
+### 根运维入口
+
+Windows 使用独立解释器与配置；`up` 可替换为 `down`、`status`、`logs`、`doctor`、`drain` 或 `resume`，其中 `doctor` 执行 Trainer preflight：
+
+```powershell
+.\ops\quantx.ps1 up -Component trainer -Environment dev -TrainerPython C:\Users\limao\miniconda3\envs\quantx-train\python.exe -TrainerConfig C:\Users\limao\QuantXTraining\state\trainer.toml
+```
+
+路径须替换为本机实际独立环境与配置的绝对路径。`logs` 可指定 `-Tail 1..1000`。bootstrap 仍使用原来的 `-CondaExecutable`；运行命令不创建或安装环境。Trainer 不接受生产环境、交易模式或账户参数，普通生产 up/down 不代管 Trainer。
+
+macOS 对应入口为 `./ops/quantx.sh status --component trainer --trainer-python /实际路径/quantx-train/bin/python --trainer-config /实际路径/trainer.toml`，日志行数使用 `--tail`。路由在普通服务状态目录和进程管理之前返回；两端均使用 Python `-I` 隔离搜索路径，应用再次校验真实 Conda、代码根目录和开发配置身份。

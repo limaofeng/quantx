@@ -99,6 +99,10 @@ Monitor 仍通过 `-Component monitor` 独立管理。新增可选的“跨环�
 探针，监测导出失败及开发端行情连接；不把开发故障变成生产交易授权来源。
 QMT Agent 继续使用 xtquant-demo，服务端和 Worker 使用各自已配置的 Python 环境。
 
+## 独立 Trainer
+
+Trainer 使用专用 `quantx-train` 环境和显式开发配置，运行命令为 `ops/quantx.ps1 <命令> -Component trainer -Environment dev -TrainerPython <独立 Python 绝对路径> -TrainerConfig <配置绝对路径>`。支持 up/down/status/logs/doctor/drain/resume，logs 的 `-Tail` 为 1–1000；普通服务启停不代管 Trainer。macOS 使用 `ops/quantx.sh` 的对应 `--component trainer`、`--trainer-python`、`--trainer-config` 参数。具体配置与尚未完成的运行端验收见 [Trainer 说明](../../../apps/trainer/README.md)。
+
 ## macOS 本地开发
 
 Python 环境统一使用 Conda，API/Engine/Worker/Research/Monitor 共用独立的
