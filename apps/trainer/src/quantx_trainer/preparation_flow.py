@@ -237,9 +237,14 @@ async def trainer_preparation_flow(config_path: str):
     if reason:
       return {"status": "QUEUED", "reason": reason}
     with _input_attempt(get_run_logger()) as prepare:
-      job = await repository.claim(
-        str(uuid.uuid4()), kinds=("GPU", "CERTIFY"), executor="TRAINER", prepare_execution=prepare
-      )
+      from quantx_trainer.admission import TrainerAdmissionClosed
+
+      try:
+        job = await repository.claim(
+          str(uuid.uuid4()), kinds=("GPU", "CERTIFY"), executor="TRAINER", prepare_execution=prepare
+        )
+      except TrainerAdmissionClosed as exc:
+        return {"status": "QUEUED", "reason": str(exc)}
       if job is None:
         return {"status": "IDLE", "recovered_job_ids": recovered}
       job_id, owner = job.job_id, job.flow_run_id

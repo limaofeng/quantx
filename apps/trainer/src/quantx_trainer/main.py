@@ -12,7 +12,15 @@ from quantx_trainer.config import TrainerConfig, TrainerConfigurationError
 def main(argv: list[str] | None = None) -> int:
   parser = argparse.ArgumentParser(prog="quantx-trainer")
   parser.add_argument(
-    "command", choices=["preflight", "publish-result", "publish-dataset"]
+    "command",
+    choices=[
+      "preflight",
+      "publish-result",
+      "publish-dataset",
+      "drain",
+      "resume",
+      "admission-status",
+    ],
   )
   parser.add_argument("--config", type=Path, required=True)
   parser.add_argument("--run-id")
@@ -31,6 +39,24 @@ def main(argv: list[str] | None = None) -> int:
   except TrainerConfigurationError as exc:
     print(f"Trainer configuration rejected: {exc}", file=sys.stderr)
     return 2
+
+  if args.command in {"drain", "resume", "admission-status"}:
+    from quantx_infrastructure.training_bundle_store import BundleTransferError
+
+    from quantx_trainer.admission import admission_status, set_admission
+
+    try:
+      root = config.state_root / "control"
+      result = (
+        admission_status(root)
+        if args.command == "admission-status"
+        else set_admission(root, draining=args.command == "drain")
+      )
+    except (OSError, ValueError, BundleTransferError):
+      print("Trainer admission control unavailable", file=sys.stderr)
+      return 3
+    print(json.dumps(result, sort_keys=True))
+    return 0
 
   from quantx_trainer.preflight import TrainerPreflightError, preflight
 

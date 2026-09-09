@@ -191,3 +191,18 @@ Worker 为每次领取生成独立执行归属，将认证请求与进程记录�
 Worker 认证导出在确认退出码 75 后重新排队，并保留既有输入；其他明确非零退出或布尔 `ready=false` 会记录失败，正常执行与恢复保持一致。重新排队必须仍为原归属的未交接认证任务。非布尔结果、未知退出或原请求不匹配不会用于恢复写入。
 
 Worker 领取前会在行锁内写入输入监督者证据，写盘失败回滚领取；尝试结束并等待工作退出后，原监督者写入结束标记。只有当前归属未交接认证任务、无任何计算记录、输入监督者已退出或尝试结束已确认，才可恢复输入阶段并重新领取。该机制覆盖领取确认丢失及启动前中断；任何计算记录（包括损坏/不完整记录）都会阻止输入重排。
+
+
+### 停止新领取与恢复领取
+
+在独立 `quantx-train` 环境使用同一显式配置执行：
+
+```powershell
+python -m quantx_trainer.main drain --config C:\Users\limao\QuantXTraining\state\trainer.toml
+python -m quantx_trainer.main admission-status --config C:\Users\limao\QuantXTraining\state\trainer.toml
+python -m quantx_trainer.main resume --config C:\Users\limao\QuantXTraining\state\trainer.toml
+```
+
+这些命令仅操作本地状态，不要求数据库、Prefect 或 SFTP 在线。`drain` 设置持久化标记，训练、认证及 GPU 准备的领取事务在写执行证据前检查标记；被拒绝的事务保持排队。标记操作与领取前回调由同一操作系统文件锁串行化，锁占用时拒绝新领取，命令返回失败可重试。已通过回调的领取可能在 `drain` 返回后完成提交，作为已有任务继续执行；结果恢复仍可发布和收敛。
+
+`admission-status` 仅返回 `OPEN` / `DRAINING` 和 `execution_state=NOT_INSPECTED`，不证明任务或进程已退出，不能单凭它升级代码或依赖。完整排空核验、独立启停、进程树有界退出仍在实施中。`resume` 显式删除排空标记，恢复新领取。

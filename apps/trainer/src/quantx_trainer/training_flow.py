@@ -693,8 +693,11 @@ def _input_attempt(logger):
   prepared = []
 
   def prepare(run_id, owner):
-    _prepare_execution(run_id, owner)
-    prepared.append((run_id, owner))
+    from quantx_trainer.admission import claim_admission
+
+    with claim_admission(control_root()):
+      _prepare_execution(run_id, owner)
+      prepared.append((run_id, owner))
 
   try:
     yield prepare
@@ -1018,9 +1021,14 @@ async def stock_selection_training_dispatch_flow(
       or str(uuid.uuid4())
     )
     with _input_attempt(logger) as prepare:
-      run = await repository.claim_next_queued(
-        flow_id, timestamp, prepare_execution=prepare,
-      )
+      from quantx_trainer.admission import TrainerAdmissionClosed
+
+      try:
+        run = await repository.claim_next_queued(
+          flow_id, timestamp, prepare_execution=prepare,
+        )
+      except TrainerAdmissionClosed as exc:
+        return {"status": "QUEUED", "reason": str(exc)}
       if run is None:
         return {
           "status": "IDLE",

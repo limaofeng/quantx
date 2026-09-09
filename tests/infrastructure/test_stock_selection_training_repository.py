@@ -619,3 +619,31 @@ async def test_claim_rejects_missing_or_truncated_execution_identity(session_fac
   async with session_factory() as db:
     with pytest.raises(TrainingRepositoryError, match="execution identity"):
       await StockSelectionTrainingRepository(db).claim_next_queued(identity)
+
+
+@pytest.mark.asyncio
+async def test_drain_rolls_back_training_claim(session_factory, tmp_path, monkeypatch):
+  from unittest.mock import Mock
+
+  from quantx_trainer import training_flow as flow
+  from quantx_trainer.admission import TrainerAdmissionClosed, set_admission
+
+  monkeypatch.setattr(flow, "control_root", lambda: tmp_path)
+  async with session_factory() as db:
+    repo = StockSelectionTrainingRepository(db)
+    await repo.certify_dataset(DATASET)
+    spec = await repo.create_spec(spec_values())
+    await repo.create_run(run_values(spec.spec_id, "drain-run", "drain-idem"))
+    set_admission(tmp_path, draining=True)
+    with flow._input_attempt(Mock()) as prepare:
+      with pytest.raises(TrainerAdmissionClosed):
+        await repo.claim_next_queued("owner", prepare_execution=prepare)
+    row = await repo.get_run("drain-run")
+    assert row.status == "QUEUED"
+    assert row.prefect_flow_run_id is None
+    assert not (tmp_path / "drain-run").exists()
+    set_admission(tmp_path, draining=False)
+    with flow._input_attempt(Mock()) as prepare:
+      row = await repo.claim_next_queued("owner", prepare_execution=prepare)
+    assert row.status == "RUNNING"
+    assert row.prefect_flow_run_id == "owner"
