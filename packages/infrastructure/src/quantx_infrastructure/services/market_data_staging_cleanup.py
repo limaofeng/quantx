@@ -50,7 +50,9 @@ async def _joined_thread(function, *args):
   try:
     return await asyncio.shield(task)
   except asyncio.CancelledError:
-    await asyncio.gather(task, return_exceptions=True)
+    from .market_data_transfer_ingestion import _settle_task
+
+    await _settle_task(task)
     raise
 
 

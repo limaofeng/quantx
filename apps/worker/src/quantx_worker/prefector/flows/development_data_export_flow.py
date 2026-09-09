@@ -6,6 +6,7 @@ import asyncio
 import gzip
 import hashlib
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -26,6 +27,12 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
   validate_bar_records_against_request,
 )
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
+
+
+class ExportCleanupDeferred(RuntimeError):
+  """Unresolved evidence prevents retirement, without preventing publication."""
 
 
 def partition_records(chunks, request: HistoryPartitionRequest) -> list[dict]:
@@ -225,7 +232,11 @@ async def dispatch_once() -> dict:
       if not locked:
         return {"status": "busy"}
       try:
-        await cleanup_expired(store)
+        try:
+          await cleanup_expired(connection)
+        except ExportCleanupDeferred as exc:
+          await connection.rollback()
+          logger.warning("Export cleanup deferred: %s", exc)
         rows = (
           (
             await connection.execute(
@@ -379,38 +390,92 @@ async def set_failed(store, identity: str, reason: str) -> None:
     )
 
 
-async def cleanup_expired(store) -> None:
-  async with store.engine.begin() as connection:
+MAX_CLEANUP_REFERENCES = 100_000
+MAX_CLEANUP_DELETIONS = 1000
+
+
+async def cleanup_expired(connection) -> None:
+  # The same session lock serializes export publication and file retirement.
+  # In particular, publish() must not reuse an old orphan between our reference
+  # snapshot and unlink. Never clean through an unrelated pooled connection.
+  held = await connection.scalar(
+    text("""
+    SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted
+      AND pid=pg_backend_pid() AND classid=0 AND objid=817234591 AND objsubid=1)
+  """)
+  )
+  if not held:
+    raise RuntimeError("export cleanup requires the live publication lock")
+  async with asyncio.timeout(3):
     await connection.execute(
       text("""
       UPDATE development_data_export SET state='EXPIRED'
-      WHERE state='READY' AND expires_at < CURRENT_TIMESTAMP
+      WHERE id IN (SELECT id FROM development_data_export
+        WHERE state='READY' AND expires_at < CURRENT_TIMESTAMP
+        ORDER BY expires_at,id LIMIT 1000)
     """)
     )
-    manifests = (
+    # Expiry revokes downloading. It does not authorize deleting evidence still
+    # referenced by the catalog (including blocked imports and published versions).
+    malformed = await connection.scalar(
+      text("""
+      SELECT EXISTS(SELECT 1 FROM development_data_export
+        WHERE manifest IS NOT NULL AND CASE
+          WHEN state='REFERENCE_VERIFIED' AND request->>'operation'='reference'
+            AND NOT (manifest::jsonb ? 'chunks') THEN false
+          WHEN jsonb_typeof(manifest::jsonb->'chunks')='array'
+            THEN jsonb_array_length(manifest::jsonb->'chunks')=0
+          ELSE true END)
+    """)
+    )
+    if malformed:
+      raise ExportCleanupDeferred(
+        "export cleanup cannot resolve malformed manifest references"
+      )
+    retained = set(
       (
         await connection.execute(
           text("""
-      SELECT manifest FROM development_data_export
-      WHERE expires_at >= CURRENT_TIMESTAMP AND manifest IS NOT NULL
-    """)
+      SELECT DISTINCT chunk->>'checksum_sha256'
+      FROM development_data_export e,
+        LATERAL jsonb_array_elements(e.manifest::jsonb->'chunks') AS chunk
+      WHERE e.manifest IS NOT NULL LIMIT :limit
+    """),
+          {"limit": MAX_CLEANUP_REFERENCES + 1},
         )
       )
       .scalars()
       .all()
     )
-  retained = {
-    item["checksum_sha256"]
-    for manifest in manifests
-    for item in manifest.get("chunks", [])
-  }
+    if len(retained) > MAX_CLEANUP_REFERENCES or any(
+      not isinstance(digest, str)
+      or len(digest) != 64
+      or any(char not in "0123456789abcdef" for char in digest)
+      for digest in retained
+    ):
+      raise ExportCleanupDeferred(
+        "export cleanup reference budget or checksum is invalid"
+      )
+    await connection.commit()
   cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).timestamp()
-  for path in export_root().glob("*.json.gz"):
-    digest = path.name.removesuffix(".json.gz")
-    if digest in retained or path.is_symlink() or path.stat().st_mtime >= cutoff:
+  root = export_root()
+  removed = 0
+  for path in root.iterdir() if root.exists() else ():
+    if not path.name.endswith(".json.gz") or path.is_symlink() or not path.is_file():
       continue
-    if path == content_path(digest) and path.resolve().parent == export_root():
+    digest = path.name.removesuffix(".json.gz")
+    if (
+      len(digest) != 64
+      or any(char not in "0123456789abcdef" for char in digest)
+      or digest in retained
+      or path.stat().st_mtime >= cutoff
+    ):
+      continue
+    if path == content_path(digest) and path.resolve().parent == root:
       path.unlink()
+      removed += 1
+      if removed >= MAX_CLEANUP_DELETIONS:
+        break
 
 
 @flow(name="development-data-export", log_prints=False)

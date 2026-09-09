@@ -99,6 +99,11 @@ async def test_cleanup_cancellation_joins_file_operation():
     task.cancel()
     await asyncio.sleep(0)
     assert not task.done()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
   finally:
     release.set()
   with pytest.raises(asyncio.CancelledError):

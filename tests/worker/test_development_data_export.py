@@ -184,7 +184,10 @@ def test_safe_export_error_preserves_known_codes(reason):
   assert safe_export_error(ValueError("private connection detail")) == "ValueError"
 
 
-async def test_unverified_source_keeps_its_identity_without_replacement(monkeypatch):
+@pytest.mark.parametrize("cleanup_deferred", [False, True])
+async def test_unverified_source_keeps_its_identity_without_replacement(
+  monkeypatch, cleanup_deferred
+):
   from contextlib import asynccontextmanager
   from types import SimpleNamespace
   from unittest.mock import AsyncMock
@@ -202,6 +205,9 @@ async def test_unverified_source_keeps_its_identity_without_replacement(monkeypa
   )
 
   class Connection:
+    async def rollback(self):
+      pass
+
     async def scalar(self, *args):
       return True
 
@@ -229,7 +235,15 @@ async def test_unverified_source_keeps_its_identity_without_replacement(monkeypa
   )
   monkeypatch.setenv("ENV", "production")
   monkeypatch.setattr(flow, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(flow, "cleanup_expired", AsyncMock())
+  monkeypatch.setattr(
+    flow,
+    "cleanup_expired",
+    AsyncMock(
+      side_effect=flow.ExportCleanupDeferred("unresolved evidence")
+      if cleanup_deferred
+      else None
+    ),
+  )
   monkeypatch.setattr(flow, "history_window_open", AsyncMock(return_value=True))
   monkeypatch.setattr(
     flow, "load_uploaded_request_manifest", AsyncMock(return_value=({}, {}, []))
