@@ -13,6 +13,7 @@ from quantx_engine.t_assistant_backtest_data import (
 from quantx_engine.t_assistant_backtest_evaluation import (
   BacktestAdmissionPolicy,
   evaluate_backtest_comparison,
+  read_backtest_evaluation_evidence,
 )
 
 from tests.engine.unit.test_t_assistant_backtest_runtime import CODES, runtime, ticks
@@ -131,13 +132,17 @@ async def test_source_failure_preserves_partial_data_without_connection_details(
 
 async def test_counterfactual_cash_and_unconfirmed_policy(tmp_path):
   dataset = await acquire(tmp_path / "data", History())
-  _, report = await evaluate_backtest_comparison(
+  directory, report = await evaluate_backtest_comparison(
     request=runtime(request_only=True),
     events=dataset,
     scenarios={"zero": 0.0, "stress": 0.0005},
     code_manifest={"synthetic": "v1"},
     root=tmp_path / "evaluation",
   )
+  exported = json.loads((directory / "report.json").read_text())
+  assert read_backtest_evaluation_evidence(
+    directory, expected_report_hash=exported["hash"]
+  )["report"] == exported
   assert report["strategy_admission"] == "NOT_EVALUATED"
   assert report["p6_allowed"] is False
   assert report["cases"]["zero"]["duplicated_cash"] == 25000

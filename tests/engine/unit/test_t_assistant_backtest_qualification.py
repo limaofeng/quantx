@@ -54,7 +54,9 @@ async def test_acquisition_coverage_matches_formal_qualification(tmp_path):
   from tests.engine.unit.test_t_assistant_backtest_evaluation import History, acquire
 
   dataset = await acquire(tmp_path, History())
-  report = await evaluation.qualify_backtest_data(runtime(request_only=True), dataset, policy())
+  report = await evaluation.qualify_backtest_data(
+    runtime(request_only=True), dataset, policy()
+  )
   material = dataset.manifest["material"]
   assert material["coverage_metric"] == report["version"]
   for part, qualified in zip(material["parts"], report["partitions"], strict=True):
@@ -85,3 +87,46 @@ async def test_sparse_day_saves_blocker_without_running_scenarios(
   quality = json.loads((directory / "data-qualification.json").read_text())
   assert quality["complete_days"] == 0
   assert all(p["observed_minutes"] == 1 for p in quality["partitions"])
+
+
+@pytest.mark.parametrize("damage", [None, "input", "quality", "expected", "scope"])
+async def test_report_links_frozen_inputs_and_qualification(tmp_path, damage):
+  directory, _ = await evaluation.evaluate_backtest_comparison(
+    request=runtime(request_only=True),
+    events=ticks(),
+    scenarios={"base": 0.0},
+    code_manifest={"fixture": "v1"},
+    root=tmp_path,
+    policy=policy(),
+  )
+  report_path = directory / "report.json"
+  report = json.loads(report_path.read_text())
+  expected = report["hash"]
+  if damage in {"input", "quality"}:
+    path = directory / (
+      "evaluation.json" if damage == "input" else "data-qualification.json"
+    )
+    value = json.loads(path.read_text())
+    if damage == "input":
+      value["material"]["scenarios"] = {"other": 0.01}
+      value["hash"] = evaluation.stable_manifest_hash(value["material"])
+    else:
+      value["complete_days"] = 999
+    path.write_text(json.dumps(value))
+  elif damage == "expected":
+    expected = "0" * 64
+  elif damage == "scope":
+    report["material"]["evidence"]["evaluation_hash"] = "1" * 64
+    report["hash"] = expected = evaluation.stable_manifest_hash(report["material"])
+    report_path.write_text(json.dumps(report))
+  if damage:
+    with pytest.raises(ValueError, match="BACKTEST_EVALUATION_"):
+      evaluation.read_backtest_evaluation_evidence(
+        directory, expected_report_hash=expected
+      )
+  else:
+    result = evaluation.read_backtest_evaluation_evidence(
+      directory, expected_report_hash=expected
+    )
+    assert result["report"]["material"]["strategy_admission"] == "DATA_BLOCKED"
+    assert result["report"]["material"]["evidence"]["admission_policy_hash"]

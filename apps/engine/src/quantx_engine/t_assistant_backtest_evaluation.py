@@ -284,11 +284,20 @@ async def evaluate_backtest_comparison(
     directory / "evaluation.json",
     {"material": frozen, "hash": stable_manifest_hash(frozen)},
   )
+  evidence = {
+    "evaluation_hash": stable_manifest_hash(frozen),
+    "admission_policy_hash": stable_manifest_hash(frozen["policy"])
+    if policy is not None
+    else None,
+    "data_qualification_hash": None,
+  }
   if policy is not None:
     quality = await qualify_backtest_data(request, events, policy)
     TAssistantBacktestStore._create(directory / "data-qualification.json", quality)
+    evidence["data_qualification_hash"] = stable_manifest_hash(quality)
     if quality["reasons"]:
       report = {
+        "evidence": evidence,
         "cases": {},
         "failures": [{"reasons": quality["reasons"]}],
         "strategy_admission": "DATA_BLOCKED",
@@ -357,6 +366,7 @@ async def evaluate_backtest_comparison(
     # Preserve each completed scenario even if a later source or execution fails.
     TAssistantBacktestStore._create(directory / f"case-{index}.json", cases[scenario])
   report = {
+    "evidence": evidence,
     "cases": cases,
     "failures": failures,
     "strategy_admission": "NOT_EVALUATED"
@@ -371,3 +381,50 @@ async def evaluate_backtest_comparison(
     {"material": report, "hash": stable_manifest_hash(report)},
   )
   return directory, report
+
+
+def read_backtest_evaluation_evidence(directory, *, expected_report_hash):
+  """Check artifact linkage only; this does not authorize a release or trust metrics.
+
+  The expected report hash must come from the review record, not the uploaded
+  artifact. Runtime facts and the operator's approved policy still need review.
+  """
+  directory = Path(directory)
+  read = TAssistantBacktestStore._read
+  evaluation = read(directory / "evaluation.json")
+  report = read(directory / "report.json")
+  if (
+    report["hash"] != expected_report_hash
+    or stable_manifest_hash(report["material"]) != report["hash"]
+    or stable_manifest_hash(evaluation["material"]) != evaluation["hash"]
+  ):
+    raise ValueError("BACKTEST_EVALUATION_HASH_CONFLICT")
+  material = report["material"]
+  evidence = material.get("evidence", {})
+  frozen = evaluation["material"]
+  if evidence.get("evaluation_hash") != evaluation["hash"]:
+    raise ValueError("BACKTEST_EVALUATION_REPORT_SCOPE_CONFLICT")
+  if frozen["policy"] is None:
+    if (
+      evidence.get("admission_policy_hash") is not None
+      or evidence.get("data_qualification_hash") is not None
+      or material["strategy_admission"] != "NOT_EVALUATED"
+      or material["p6_allowed"] is not False
+    ):
+      raise ValueError("BACKTEST_EVALUATION_UNCONFIRMED_POLICY")
+  else:
+    quality = read(directory / "data-qualification.json")
+    if evidence.get("admission_policy_hash") != stable_manifest_hash(
+      frozen["policy"]
+    ) or evidence.get("data_qualification_hash") != stable_manifest_hash(quality):
+      raise ValueError("BACKTEST_EVALUATION_QUALIFICATION_CONFLICT")
+    if quality["reasons"] and (
+      material["strategy_admission"] != "DATA_BLOCKED"
+      or material["p6_allowed"] is not False
+      or material["cases"]
+    ):
+      raise ValueError("BACKTEST_EVALUATION_DATA_BLOCKED")
+  if material["strategy_admission"] != "DATA_BLOCKED":
+    if set(material["cases"]) != set(frozen["scenarios"]):
+      raise ValueError("BACKTEST_EVALUATION_SCENARIOS_CONFLICT")
+  return {"evaluation": evaluation, "report": report}

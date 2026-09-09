@@ -679,6 +679,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   重投复用原执行，失败不改变 PAPER 配置头，不创建 LIVE source。
   准入/READY/排空联合 46 项通过，证据 `.codex_screenshots/p6-live-release-command.xml`。
   尚未暴露 API 发布入口或实现正式 P5 证据审批写入；此命令只消费已有审批。
+- P5 报告新增冻结 evaluation、准入 policy、数据 qualification 的哈希关联；读取入口
+  要求外部提供预期报告 hash，校验报告/输入各自完整性及跨文件身份，拒绝换入另一份输入、
+  修改覆盖结果或给无 policy 的结果声明准入。所有结果（含 DATA_BLOCKED）保留关联。
+  此入口只验证文件关联，不把自声明 hash 当作授权，不替代运行事实与正式阈值审批。
+  评估/覆盖 21 项测试通过，无 policy 的实际合成比较读取补验 1 项通过，Ruff 通过。
+  证据 `.codex_screenshots/p6-evaluation-evidence.xml`、`p6-evaluation-unconfirmed.log`。
 - 剩余开发顺序：LIVE 公开准入审批、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
