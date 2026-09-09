@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from quantx_worker.prefector.flows import development_data_export_flow as exporter
+from quantx_infrastructure.services import development_history_export as exporter
 from sqlalchemy import text
 
 from tests.infrastructure.test_market_data_durable_progress import (

@@ -53,11 +53,14 @@ class DeliveryExecutionOwner:
 
 
 async def run_delivery_execution(
-  request, session_factory, execute, *, worker_owner=None
+  request, session_factory, execute, *, worker_owner=None, lock_key=None
 ):
   """The callback and sent writes settle before this function releases its lock."""
-  digest = hashlib.sha256(request.model_dump_json().encode()).digest()
-  key = int.from_bytes(digest[:8], "big", signed=True)
+  if lock_key is None:
+    digest = hashlib.sha256(request.model_dump_json().encode()).digest()
+    key = int.from_bytes(digest[:8], "big", signed=True)
+  else:
+    key = lock_key
   async with session_factory() as db:
     acquired, owner, operation, monitor = None, None, None, None
     try:

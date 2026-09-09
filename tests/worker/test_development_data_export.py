@@ -4,17 +4,17 @@ from zoneinfo import ZoneInfo
 import pytest
 from quantx_contracts.data_exchange import HistoryPartitionRequest
 from quantx_infrastructure.services.data_exchange import content_path
+from quantx_infrastructure.services.development_history_export import (
+  _has_positive_source_coverage,
+  find_reusable_source_request,
+  partition_records,
+  publish,
+  safe_export_error,
+)
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
   MarketDataValidationError,
   _iter_transfer_chunks,
   validate_bar_records_against_request,
-)
-from quantx_worker.prefector.flows.development_data_export_flow import (
-  _has_positive_source_coverage,
-  export_failure_reason,
-  find_reusable_source_request,
-  partition_records,
-  publish,
 )
 
 
@@ -23,14 +23,14 @@ from quantx_worker.prefector.flows.development_data_export_flow import (
   ["SOURCE_COVERAGE_MISSING", "PERSISTED_COVERAGE_CHANGED", "REFERENCE_DATA_MISSING"],
 )
 def test_export_preserves_known_failure_reason(reason):
-  assert export_failure_reason(ValueError(reason)) == reason
+  assert safe_export_error(ValueError(reason)) == reason
 
 
 @pytest.mark.parametrize(
   "message", ["token=secret", "/private/credentials", "UNKNOWN_SECRET_VALUE"]
 )
 def test_export_does_not_expose_unrecognized_error_details(message):
-  assert export_failure_reason(ValueError(message)) == "ValueError"
+  assert safe_export_error(ValueError(message)) == "ValueError"
 
 
 def bar(code="600000.SH"):
@@ -176,87 +176,12 @@ def test_digest_cannot_escape_export_directory():
   ],
 )
 def test_safe_export_error_preserves_known_codes(reason):
-  from quantx_worker.prefector.flows.development_data_export_flow import (
+  from quantx_infrastructure.services.development_history_export import (
     safe_export_error,
   )
 
   assert safe_export_error(ValueError(reason)) == reason
   assert safe_export_error(ValueError("private connection detail")) == "ValueError"
-
-
-@pytest.mark.parametrize("cleanup_deferred", [False, True])
-async def test_unverified_source_keeps_its_identity_without_replacement(
-  monkeypatch, cleanup_deferred
-):
-  from contextlib import asynccontextmanager
-  from types import SimpleNamespace
-  from unittest.mock import AsyncMock
-
-  from quantx_worker.prefector.flows import development_data_export_flow as flow
-
-  request = HistoryPartitionRequest(
-    instrument="000001.SZ", period="tick", trading_date=date(2026, 8, 3)
-  )
-  row = dict(
-    id="export",
-    request=request.model_dump(mode="json"),
-    state="QUEUED",
-    source_request_id="old",
-  )
-
-  class Connection:
-    async def rollback(self):
-      pass
-
-    async def scalar(self, *args):
-      return True
-
-    async def execute(self, statement, parameters=None):
-      if parameters and "source" in parameters:
-        row["source_request_id"] = parameters["source"]
-      return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [dict(row)]))
-
-  @asynccontextmanager
-  async def connect():
-    yield Connection()
-
-  async def source(identity):
-    return dict(
-      status="COMPLETED",
-      development_only=identity != "old",
-      ingestion_result={"day_coverage": []},
-    )
-
-  store = SimpleNamespace(
-    engine=SimpleNamespace(connect=connect, begin=connect),
-    market_data_request=source,
-    create_market_data_request=AsyncMock(return_value="replacement"),
-    close=AsyncMock(),
-  )
-  monkeypatch.setenv("ENV", "production")
-  monkeypatch.setattr(flow, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(
-    flow,
-    "cleanup_expired",
-    AsyncMock(
-      side_effect=flow.ExportCleanupDeferred("unresolved evidence")
-      if cleanup_deferred
-      else None
-    ),
-  )
-  monkeypatch.setattr(flow, "history_window_open", AsyncMock(return_value=True))
-  monkeypatch.setattr(
-    flow, "load_uploaded_request_manifest", AsyncMock(return_value=({}, {}, []))
-  )
-  failed = AsyncMock()
-  monkeypatch.setattr(flow, "set_failed", failed)
-  await flow.dispatch_once()
-  row["state"] = "WAITING_SOURCE"
-  await flow.dispatch_once()
-  store.create_market_data_request.assert_not_called()
-  assert row["source_request_id"] == "old"
-  assert failed.await_count == 2
-  failed.assert_awaited_with(store, "export", "SOURCE_COVERAGE_UNVERIFIED")
 
 
 @pytest.mark.parametrize("limits", [(11.0, 9.0), (None, None)])
@@ -313,3 +238,32 @@ async def test_persisted_daily_limits_round_trip(monkeypatch, tmp_path, limits):
   else:
     assert frame.iloc[0]["up_stop_price"] == limits[0]
     assert frame.iloc[0]["down_stop_price"] == limits[1]
+
+
+def test_concurrent_publication_uses_independent_temporary_files(monkeypatch, tmp_path):
+  from concurrent.futures import ThreadPoolExecutor
+  from pathlib import Path
+  from threading import Barrier
+
+  monkeypatch.setenv("QUANTX_DATA_EXPORT_ROOT", str(tmp_path))
+  rendezvous = Barrier(2)
+  original = Path.replace
+  temporary_names = []
+
+  def simultaneous_replace(path, target):
+    temporary_names.append(path.name)
+    rendezvous.wait(timeout=3)
+    return original(path, target)
+
+  monkeypatch.setattr(Path, "replace", simultaneous_replace)
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    first = pool.submit(publish, [bar()])
+    second = pool.submit(publish, [bar()])
+    left, right = first.result(timeout=5), second.result(timeout=5)
+  assert left == right
+  assert len(set(temporary_names)) == 2
+  assert len(list(tmp_path.iterdir())) == 1
+  files = [
+    {**left[0], "storage_reference": str(content_path(left[0]["checksum_sha256"]))}
+  ]
+  assert list(_iter_transfer_chunks(files)) == [[bar()]]

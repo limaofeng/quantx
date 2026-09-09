@@ -123,6 +123,13 @@ async def run(store, stop: asyncio.Event) -> None:
       await advance_development_delivery(store)
       await _pause(stop, 1)
 
+  async def exports():
+    from quantx_infrastructure.services.development_history_export import dispatch_once
+
+    while not stop.is_set():
+      await dispatch_once(store)
+      await _pause(stop, 1)
+
   from quantx_infrastructure.services.market_data_staging_cleanup import (
     run_market_data_staging_sweeper,
   )
@@ -137,6 +144,8 @@ async def run(store, stop: asyncio.Event) -> None:
   ]
   if getattr(store, "demand_source_kind", None) == "REMOTE":
     tasks.append(asyncio.create_task(development()))
+  elif getattr(store, "demand_source_kind", None) == "AGENT":
+    tasks.append(asyncio.create_task(exports()))
   try:
     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     for task in done:

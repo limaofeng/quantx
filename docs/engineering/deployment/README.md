@@ -217,13 +217,14 @@ conda run --no-capture-output -n quantx python ops/t-assistant-backtest-data.py 
 不取消已派发请求。配置读取失败时禁止新补采。Agent 健康门和生产请求优先级保持不变。
 开发请求按单标的、单日、单周期拆分，窗口外的缺口继续排队。
 
-生产 Prefect Worker 的 development-data-export 每分钟执行一次；开发导入由独立
-Data Worker 的开发循环推进，CLI/历史 Flow 通过本机 Data API 提交并查询需求。
+生产导出和开发导入均由独立 Data Worker 的对应循环推进，每轮最多一个行情分区；
+CLI/历史 Flow 通过本机 Data API 提交并查询需求。生产导出使用独立发布锁并校验
+Worker 租约，源请求创建与交付关联同事务提交，取消时等文件操作结束再释放锁。
 上线本批前应用迁移至 `20260910_0083`，并停止、移除旧 Prefect deployment
-`development-data-import`，确认旧执行已经退出，再启动新 Data Worker；删除代码中的
-日程不会自动删除 Prefect Server 上已注册的 deployment。此处是切换步骤，尚未执行。
-macOS 离线不删除生产任务。分片保留七天，过期后从已有持久化数据
-重建；若覆盖证明或源身份不匹配，返回 INCOMPLETE，不伪装成完整数据。
+`development-data-import`、`development-data-export`，确认旧执行已经退出，再启动新
+Data Worker；删除代码中的日程不会自动删除 Prefect Server 上已注册的 deployment。此处是切换步骤，尚未执行。
+macOS 离线不删除生产任务。下载资格保留七天；目录仍引用的原分片继续保留。
+过期后的新交付从已有持久化数据重建；若覆盖证明或源身份不匹配，返回 INCOMPLETE，不伪装成完整数据。
 开发端检查 SHA256、协议、范围与行数，幂等导入后再次回读验证；已下载分片可复用。
 开发 Worker 不重复扫描 LOCAL_VERIFIED、BLOCKED 或 INCOMPLETE；恢复只处理到期分区。
 完成后只读复核最多保留 4 次累计尝试，每次在 IO 前持久化预留，取消、重启或成功均不

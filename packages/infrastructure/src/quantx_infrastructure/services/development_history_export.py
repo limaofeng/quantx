@@ -8,13 +8,18 @@ import hashlib
 import json
 import logging
 import os
+import time
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from prefect import flow
 from quantx_contracts import HistoricalBarSummary, historical_bar_key
 from quantx_contracts.data_exchange import HistoryPartitionRequest
-from quantx_infrastructure.runtime_store import DurableRuntimeStore
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from quantx_infrastructure.runtime_store import MarketDataSourceUnavailable
 from quantx_infrastructure.services.data_exchange import content_path, export_root
 from quantx_infrastructure.services.data_exchange_reference import export_reference
 from quantx_infrastructure.services.development_history_window import (
@@ -26,7 +31,9 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
   load_uploaded_request_manifest,
   validate_bar_records_against_request,
 )
-from sqlalchemy import text
+
+from .development_delivery_execution import run_delivery_execution
+from .market_data_staging_cleanup import _joined_thread
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +118,12 @@ def publish(records: list[dict]) -> list[dict]:
       used += len(body)
       if used > 4 * 1024**3:
         raise ValueError("EXPORT_DISK_BUDGET_EXCEEDED")
-      temporary = target.with_suffix(".tmp")
-      temporary.write_bytes(body)
-      temporary.replace(target)
+      temporary = target.with_name(f".{digest}.{uuid.uuid4().hex}.tmp")
+      try:
+        temporary.write_bytes(body)
+        temporary.replace(target)
+      finally:
+        temporary.unlink(missing_ok=True)
     elif hashlib.sha256(target.read_bytes()).hexdigest() != digest:
       raise ValueError("EXPORT_CHECKSUM_MISMATCH")
     manifest.append(
@@ -222,140 +232,166 @@ def _has_positive_source_coverage(
   return False
 
 
-async def dispatch_once() -> dict:
-  if os.environ.get("ENV") != "production":
-    return {"status": "disabled"}
-  store = DurableRuntimeStore()
-  try:
-    async with store.engine.connect() as connection:
-      locked = await connection.scalar(text("SELECT pg_try_advisory_lock(817234591)"))
-      if not locked:
-        return {"status": "busy"}
-      try:
-        try:
-          await cleanup_expired(connection)
-        except ExportCleanupDeferred as exc:
-          await connection.rollback()
-          logger.warning("Export cleanup deferred: %s", exc)
-        rows = (
-          (
-            await connection.execute(
-              text("""
-          SELECT id, request, state, source_request_id FROM development_data_export
-          WHERE state IN ('QUEUED','WAITING_SOURCE')
-          ORDER BY CASE WHEN state='QUEUED' THEN 0 ELSE 1 END, updated_at LIMIT 20
-        """)
-            )
-          )
-          .mappings()
-          .all()
-        )
-        for row in rows:
-          async with store.engine.begin() as update:
-            await update.execute(
-              text(
-                "UPDATE development_data_export SET state='WAITING_SOURCE',updated_at=CURRENT_TIMESTAMP WHERE id=:id"
-              ),
-              {"id": row["id"]},
-            )
-          request = HistoryPartitionRequest.model_validate(row["request"])
-          payload = request.agent_payload()
-          source_id = row["source_request_id"]
-          if not source_id:
-            source_id = await find_reusable_source_request(connection, request, payload)
-          if not source_id:
-            if not await history_window_open():
-              continue
-            try:
-              source_id = await store.create_market_data_request(
-                payload,
-                idempotency_scope=f"development-export:{row['id']}",
-                development_only=True,
-              )
-            except RuntimeError:
-              continue
-          async with store.engine.begin() as update:
-            await update.execute(
-              text("""
-              UPDATE development_data_export SET source_request_id=:source,
-              state='WAITING_SOURCE',updated_at=CURRENT_TIMESTAMP WHERE id=:id
-            """),
-              {"id": row["id"], "source": source_id},
-            )
-          source = await store.market_data_request(source_id)
-          if (
-            source
-            and source["status"] == "COMPLETED"
-            and source.get("development_only") is False
-            and row.get("source_request_id")
-            and row.get("state") in {"QUEUED", "WAITING_SOURCE"}
-            and not _has_positive_source_coverage(source, request)
-          ):
-            await set_failed(store, row["id"], "SOURCE_COVERAGE_UNVERIFIED")
-            continue
-          if source["status"] != "COMPLETED":
-            if source["status"] == "FAILED":
-              await set_failed(store, row["id"], "SOURCE_REQUEST_FAILED")
-            continue
-          try:
-            from quantx_infrastructure.services.data_exchange_archive import (
-              persisted_partition,
-            )
+@asynccontextmanager
+async def _transaction(store, owner):
+  async with asyncio.timeout(5), store.engine.begin() as connection:
+    await owner._guard_ingestion_owner(connection)
+    yield connection
+    await owner._guard_ingestion_owner(connection)
 
-            if request.period == "1d":
-              # Stored daily references survive later historical re-downloads.
-              persisted_rows = await persisted_partition(
-                request, source.get("ingestion_result") or {}
-              )
-              records = partition_records([persisted_rows], request)
-            else:
-              try:
-                _, _, files = await load_uploaded_request_manifest(store, source_id)
-                records = await asyncio.to_thread(
-                  partition_records, _iter_transfer_chunks(files), request
-                )
-                validate_bar_records_against_request(records, payload)
-              except (FileNotFoundError, MarketDataValidationError):
-                persisted_rows = await persisted_partition(
-                  request, source.get("ingestion_result") or {}
-                )
-                records = partition_records([persisted_rows], request)
-            validate_bar_records_against_request(records, payload)
-            chunks = await asyncio.to_thread(publish, records)
-            reference = await export_reference(request.instrument, request.trading_date)
-            manifest = {
-              "version": 1,
-              "payload": payload,
-              "chunks": chunks,
-              "reference": reference,
-              "source_request_id": source_id,
-              "data_version": hashlib.sha256(
-                json.dumps(
-                  {"chunks": chunks, "reference": reference}, sort_keys=True
-                ).encode()
-              ).hexdigest(),
-              "coverage": "SOURCE_VERIFIED",
-              "rows": len(records) - 1,
-            }
-            async with store.engine.begin() as update:
-              await update.execute(
-                text("""
-                UPDATE development_data_export SET state='READY',manifest=CAST(:manifest AS JSON),
-                error=NULL,updated_at=CURRENT_TIMESTAMP,expires_at=:expires WHERE id=:id
-              """),
-                {
-                  "id": row["id"],
-                  "manifest": json.dumps(manifest),
-                  "expires": datetime.now(timezone.utc) + timedelta(days=7),
-                },
-              )
-          except (ValueError, OSError, MarketDataValidationError) as exc:
-            await set_failed(store, row["id"], safe_export_error(exc))
-        return {"status": "processed", "partitions": len(rows)}
-      finally:
-        await connection.execute(text("SELECT pg_advisory_unlock(817234591)"))
-  finally:
-    await store.close()
+
+async def dispatch_once(store) -> dict:
+  if os.environ.get("ENV") != "production" or store.demand_source_kind != "AGENT":
+    return {"status": "disabled"}
+  return await run_delivery_execution(
+    None,
+    async_sessionmaker(store.engine),
+    lambda owner: _dispatch_owned(store, owner),
+    worker_owner=store,
+    lock_key=817234591,
+  )
+
+
+async def _dispatch_owned(store, owner) -> dict:
+  if time.monotonic() >= getattr(store, "_next_export_cleanup", 0):
+    async with store.engine.connect() as connection:
+      try:
+        await cleanup_expired(connection, owner=owner)
+      except ExportCleanupDeferred as exc:
+        await connection.rollback()
+        logger.warning("Export cleanup deferred: %s", exc)
+    store._next_export_cleanup = time.monotonic() + 300
+
+  async with _transaction(store, owner) as connection:
+    row = (
+      (
+        await connection.execute(
+          text("""
+      SELECT id,request,state,source_request_id FROM development_data_export
+      WHERE state IN ('QUEUED','WAITING_SOURCE')
+      ORDER BY updated_at,id LIMIT 1 FOR UPDATE SKIP LOCKED
+    """)
+        )
+      )
+      .mappings()
+      .one_or_none()
+    )
+    if row is None:
+      return {"status": "idle", "partitions": 0}
+    row = dict(row)
+    await connection.execute(
+      text("""
+      UPDATE development_data_export SET state='WAITING_SOURCE',updated_at=clock_timestamp()
+      WHERE id=:id
+    """),
+      {"id": row["id"]},
+    )
+    try:
+      request = HistoryPartitionRequest.model_validate(row["request"])
+    except ValueError:
+      await connection.execute(
+        text("""
+        UPDATE development_data_export SET state='INCOMPLETE',error='EXPORT_REQUEST_INVALID'
+        WHERE id=:id
+      """),
+        {"id": row["id"]},
+      )
+      return {"status": "incomplete", "partitions": 1}
+    payload = request.agent_payload()
+    source_id = row["source_request_id"]
+    if not source_id:
+      source_id = await find_reusable_source_request(connection, request, payload)
+    if not source_id:
+      if not await history_window_open():
+        return {"status": "waiting", "partitions": 1}
+      try:
+        source_id = await store.create_market_data_request(
+          payload,
+          idempotency_scope=f"development-export:{row['id']}",
+          development_only=True,
+          _connection=connection,
+        )
+      except MarketDataSourceUnavailable:
+        return {"status": "waiting", "partitions": 1}
+    await connection.execute(
+      text("""
+      UPDATE development_data_export SET source_request_id=:source WHERE id=:id
+    """),
+      {"id": row["id"], "source": source_id},
+    )
+
+  source = await store.market_data_request(source_id)
+  if source is None:
+    await set_failed(store, owner, row["id"], "SOURCE_REQUEST_MISSING")
+    return {"status": "incomplete", "partitions": 1}
+  if (
+    source["status"] == "COMPLETED"
+    and source.get("development_only") is False
+    and not _has_positive_source_coverage(source, request)
+  ):
+    await set_failed(store, owner, row["id"], "SOURCE_COVERAGE_UNVERIFIED")
+    return {"status": "incomplete", "partitions": 1}
+  if source["status"] != "COMPLETED":
+    if source["status"] == "FAILED":
+      await set_failed(store, owner, row["id"], "SOURCE_REQUEST_FAILED")
+    return {"status": "waiting", "partitions": 1}
+  try:
+    from .data_exchange_archive import persisted_partition
+
+    if request.period == "1d":
+      persisted_rows = await persisted_partition(
+        request, source.get("ingestion_result") or {}
+      )
+      records = await _joined_thread(partition_records, [persisted_rows], request)
+    else:
+      try:
+        _, _, files = await load_uploaded_request_manifest(store, source_id)
+        records = await _joined_thread(
+          partition_records, _iter_transfer_chunks(files), request
+        )
+        await _joined_thread(validate_bar_records_against_request, records, payload)
+      except (FileNotFoundError, MarketDataValidationError):
+        persisted_rows = await persisted_partition(
+          request, source.get("ingestion_result") or {}
+        )
+        records = await _joined_thread(partition_records, [persisted_rows], request)
+    await _joined_thread(validate_bar_records_against_request, records, payload)
+    async with _transaction(store, owner):
+      pass
+    chunks = await _joined_thread(publish, records)
+    reference = await export_reference(request.instrument, request.trading_date)
+    manifest = {
+      "version": 1,
+      "payload": payload,
+      "chunks": chunks,
+      "reference": reference,
+      "source_request_id": source_id,
+      "data_version": hashlib.sha256(
+        json.dumps({"chunks": chunks, "reference": reference}, sort_keys=True).encode()
+      ).hexdigest(),
+      "coverage": "SOURCE_VERIFIED",
+      "rows": len(records) - 1,
+    }
+    async with _transaction(store, owner) as update:
+      result = await update.execute(
+        text("""
+        UPDATE development_data_export SET state='READY',manifest=CAST(:manifest AS JSON),
+          error=NULL,updated_at=clock_timestamp(),expires_at=:expires
+        WHERE id=:id AND state='WAITING_SOURCE' AND source_request_id=:source
+      """),
+        {
+          "id": row["id"],
+          "source": source_id,
+          "manifest": json.dumps(manifest),
+          "expires": datetime.now(timezone.utc) + timedelta(days=7),
+        },
+      )
+      if result.rowcount != 1:
+        raise RuntimeError("EXPORT_PUBLICATION_CONFLICT")
+  except (ValueError, OSError, MarketDataValidationError) as exc:
+    await set_failed(store, owner, row["id"], safe_export_error(exc))
+    return {"status": "incomplete", "partitions": 1}
+  return {"status": "processed", "partitions": 1}
 
 
 def safe_export_error(exc: Exception) -> str:
@@ -374,17 +410,12 @@ def safe_export_error(exc: Exception) -> str:
   return str(exc) if str(exc) in known else type(exc).__name__
 
 
-def export_failure_reason(error: Exception) -> str:
-  """Backward-compatible name for the safe export error sanitizer."""
-  return safe_export_error(error)
-
-
-async def set_failed(store, identity: str, reason: str) -> None:
-  async with store.engine.begin() as connection:
+async def set_failed(store, owner, identity: str, reason: str) -> None:
+  async with _transaction(store, owner) as connection:
     await connection.execute(
       text("""
       UPDATE development_data_export SET state='INCOMPLETE',error=:reason,
-      updated_at=CURRENT_TIMESTAMP WHERE id=:id
+      updated_at=CURRENT_TIMESTAMP WHERE id=:id AND state IN ('QUEUED','WAITING_SOURCE')
     """),
       {"id": identity, "reason": reason},
     )
@@ -394,18 +425,21 @@ MAX_CLEANUP_REFERENCES = 100_000
 MAX_CLEANUP_DELETIONS = 1000
 
 
-async def cleanup_expired(connection) -> None:
+async def cleanup_expired(connection, *, owner=None) -> None:
   # The same session lock serializes export publication and file retirement.
   # In particular, publish() must not reuse an old orphan between our reference
   # snapshot and unlink. Never clean through an unrelated pooled connection.
-  held = await connection.scalar(
-    text("""
-    SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted
-      AND pid=pg_backend_pid() AND classid=0 AND objid=817234591 AND objsubid=1)
-  """)
-  )
-  if not held:
-    raise RuntimeError("export cleanup requires the live publication lock")
+  if owner is not None:
+    await owner._guard_ingestion_owner(connection)
+  else:
+    held = await connection.scalar(
+      text("""
+      SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted
+        AND pid=pg_backend_pid() AND classid=0 AND objid=817234591 AND objsubid=1)
+    """)
+    )
+    if not held:
+      raise RuntimeError("export cleanup requires the live publication lock")
   async with asyncio.timeout(3):
     await connection.execute(
       text("""
@@ -456,7 +490,13 @@ async def cleanup_expired(connection) -> None:
       raise ExportCleanupDeferred(
         "export cleanup reference budget or checksum is invalid"
       )
+    if owner is not None:
+      await owner._guard_ingestion_owner(connection)
     await connection.commit()
+  await _joined_thread(_delete_unreferenced, retained)
+
+
+def _delete_unreferenced(retained):
   cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).timestamp()
   root = export_root()
   removed = 0
@@ -476,8 +516,3 @@ async def cleanup_expired(connection) -> None:
       removed += 1
       if removed >= MAX_CLEANUP_DELETIONS:
         break
-
-
-@flow(name="development-data-export", log_prints=False)
-async def development_data_export_flow() -> dict:
-  return await dispatch_once()

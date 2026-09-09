@@ -106,7 +106,7 @@ async def test_metadata_limit_applies_to_decoded_stream(monkeypatch):
 
 
 def test_current_export_producer_satisfies_manifest_contract(monkeypatch, tmp_path):
-  from quantx_worker.prefector.flows.development_data_export_flow import (
+  from quantx_infrastructure.services.development_history_export import (
     partition_records,
     publish,
   )
