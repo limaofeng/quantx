@@ -647,3 +647,42 @@ async def test_drain_rolls_back_training_claim(session_factory, tmp_path, monkey
       row = await repo.claim_next_queued("owner", prepare_execution=prepare)
     assert row.status == "RUNNING"
     assert row.prefect_flow_run_id == "owner"
+
+
+@pytest.mark.asyncio
+async def test_stopped_service_reconciliation_requeues_confirmed_input_attempt(session_factory, tmp_path, monkeypatch):
+  from contextlib import asynccontextmanager
+  from unittest.mock import Mock
+
+  from quantx_trainer import service_reconciliation as reconciliation
+  from quantx_trainer import training_flow as flow
+
+  from tests.trainer.test_service_reconciliation import evidence
+
+  config, path = evidence(tmp_path, monkeypatch)
+  monkeypatch.setattr(flow, "current_config", lambda: config)
+  preparation = SimpleNamespace(running_jobs=AsyncMock(return_value=[]))
+  monkeypatch.setattr(reconciliation, "ResearchPreparationRepository", lambda db: preparation)
+  async with session_factory() as db:
+    repo = StockSelectionTrainingRepository(db)
+    await repo.certify_dataset(DATASET)
+    spec = await repo.create_spec(spec_values())
+    await repo.create_run(run_values(spec.spec_id, "reconcile-run", "reconcile-idem"))
+    # Claim before draining, then finish the joined input attempt without compute.
+    from quantx_trainer.admission import set_admission
+    set_admission(tmp_path / "control", draining=False)
+    with flow._input_attempt(Mock()) as prepare:
+      await repo.claim_next_queued("owner", prepare_execution=prepare)
+    set_admission(tmp_path / "control", draining=True)
+
+    @asynccontextmanager
+    async def session(config_path):
+      yield db
+
+    monkeypatch.setattr(reconciliation, "training_session", session)
+    result = await reconciliation.reconcile_stopped_service(path)
+    assert result["database_state"] == "RECONCILED"
+    assert result["recovered_run_ids"] == ["reconcile-run"]
+    row = await repo.get_run("reconcile-run")
+    assert row.status == "QUEUED"
+    assert row.prefect_flow_run_id is None

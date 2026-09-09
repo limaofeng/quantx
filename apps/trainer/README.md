@@ -271,3 +271,8 @@ Windows `serve` 使用绑定实例标识的全局命名 Job，命名冲突拒绝
 
 
 Windows 确认 Job 活动数归零后，在关闭控制句柄前原子保存 `service/group-exit-<实例>.json`，绑定实例、主机、配置哈希、观察时间和是否强制终止。后续离线 status 可读取同一实例的证明并返回 GROUP_EXITED；旧实例、配置变化、损坏记录或非零活动数不会被使用，已有证明不可覆盖。该证明仍不意味着数据库运行状态已收敛或可以升级代码。
+
+
+Windows `down` 获得适用的 GROUP_EXITED 证明后，会在领取保持关闭且生命周期锁可获取时，使用显式开发配置执行已有训练/准备恢复逻辑；这可能重试已完成制品的发布，不重新计算。恢复仍逐条核验进程证据及执行归属，未知执行不会被批量标记失败。命令返回 recovered/pending 运行与准备任务标识；还有 Trainer 的 RUNNING 任务或控制面不可用时，返回 `database_state=PENDING` 和退出码 3，可在控制面恢复后再次 down 重试。Worker 尚未交接的认证导出不计入 Trainer 待处理集合。
+
+`RECONCILED` 只说明这次开发数据库查询未发现剩余 Trainer RUNNING 任务；离线 status 仍只展示持久化组退出证明，不缓存数据库结论，也不自动恢复领取或授权升级。

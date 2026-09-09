@@ -58,7 +58,13 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
       print("Trainer lifecycle pending: SERVICE_OPERATION_UNCONFIRMED", file=sys.stderr)
       return 3
+    if args.command == "down" and result.get("execution_state") == "GROUP_EXITED":
+      from quantx_trainer.service_reconciliation import reconcile_stopped_service
+
+      result.update(asyncio.run(reconcile_stopped_service(args.config)))
     print(json.dumps(result, sort_keys=True))
+    if result.get("database_state") == "PENDING":
+      return 3
     return (
       0 if result["service"] == ("ALIVE" if args.command == "up" else "OFFLINE") else 3
     )
