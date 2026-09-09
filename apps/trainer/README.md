@@ -31,6 +31,12 @@ Windows 独立训练代码目录中执行：
 
 GPU 构建探针同样在微型拟合前检查显存并使用准入线程预算。资格测试遇到主机门禁拒绝立即中止，CLI 和准备入口保留保护退出码 `75`，不把它转换为普通拟合失败后继续下一轮试验。
 
+## 开发侧结果导入
+
+`apps/worker/prefect.development.yaml` 的 `research-result-import` 每分钟在 `quantx-dev-pool` 执行，只接受 development 配置。它分页读取数据库中的成功结果及 bundle 引用，通过已有 `QUANTX_RESEARCH_TRANSFER_CONFIG` 读取制品存储，完整核验后发布到 API 按 run_id 读取的目录。Worker 与 API 必须配置同一 `QUANTX_RESEARCH_RUNS_ROOT`；省略时两者均使用代码根目录下 `.runtime/research-runs`。缓存和锁位于 `.runtime/research-result-import`，磁盘保留量取主机策略。
+
+单条失败返回 pending 标识并在后续调度重试；不修改训练结果、不重算、不登记或激活模型。已经导入的文件再次完整校验而不连接 SSH；损坏目录拒绝覆盖。取消会通知文件/网络线程并等待其退出。此调度只加入开发 Worker 清单，仍须运行端部署与跨机器验收。
+
 ## 独立配置
 
 使用本机私有 TOML 文件显式提供全部字段，不读取 API `.env`，不提交凭据：

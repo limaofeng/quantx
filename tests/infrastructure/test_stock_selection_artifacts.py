@@ -333,7 +333,9 @@ def _refresh_manifest_hash(directory: Path, relative: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_validated_final_artifact_registration_requires_explicit_promotion(tmp_path):
+async def test_validated_final_artifact_registration_requires_explicit_promotion(tmp_path, monkeypatch):
+  import shutil
+  from contextlib import contextmanager
   from datetime import datetime, timezone
   from types import SimpleNamespace
   from unittest.mock import AsyncMock
@@ -365,6 +367,26 @@ async def test_validated_final_artifact_registration_requires_explicit_promotion
     status="SUCCEEDED", spec_id="final-spec", parent_run_id="development-run",
     artifact_manifest_sha256=file_sha256(manifest_path),
   )
+  from quantx_contracts.training_bundle import TrainingBundle
+  from quantx_infrastructure.training_bundle_store import DirectoryBundleReader
+  from quantx_worker.prefector.flows import research_result_import_flow as importer
+
+  bundle = TrainingBundle(schema_version=1, kind="RESULT", source_id=row.run_id, files=tuple(
+    {"path": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)}
+    for path in directory.iterdir()
+  ))
+  row.artifact_bundle = bundle.model_dump(mode="json")
+  remote = tmp_path / "bundle-store" / bundle.bundle_id
+  shutil.copytree(directory, remote)
+  shutil.rmtree(directory)
+
+  @contextmanager
+  def store(*args, **kwargs):
+    yield SimpleNamespace(artifacts=DirectoryBundleReader(remote.parent))
+
+  monkeypatch.setattr(importer, "open_store", store)
+  api_root = tmp_path / "api-runs"
+  directory = await importer._import_one(row, object(), api_root, tmp_path / "import-cache", 0)
   final_spec = SimpleNamespace(run_kind="FINAL_EVALUATION", spec_hash="a" * 64,
                                coordinate_hash="b" * 64, requested_backend="CPU", resolved_backend="CPU")
   parent_spec = SimpleNamespace(run_kind="DEVELOPMENT", coordinate_hash="b" * 64)
@@ -380,7 +402,7 @@ async def test_validated_final_artifact_registration_requires_explicit_promotion
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     async with sessions() as db:
       repository = StockSelectionRepository(db)
-      service = StockSelectionModelService(repository, training, runs_root=tmp_path)
+      service = StockSelectionModelService(repository, training, runs_root=api_root)
       # Actual strict artifact loader and actual database writes; no model activation.
       model = await service.register(run_key)
       assert model.stage == "CANDIDATE"
