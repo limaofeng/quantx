@@ -1189,3 +1189,39 @@ async def test_reconcile_records_duplicate_entry_authority_invalidation_failure(
   )
   errors = service._save_reconcile_config.await_args.args[1]
   assert any("关闭重复实例 run-duplicate 新入场失败" in error for error in errors)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_ids", [[], ["legacy-orphan"]])
+async def test_independent_live_lineage_never_recreates_or_adopts_legacy_run(legacy_ids):
+  live = SimpleNamespace(owns_config=AsyncMock(return_value=True), reconcile_config=AsyncMock(), unbind_account=AsyncMock())
+  service = TTradeGlobalMonitorService(live_supervisor=live)
+  current = config(run_id=None)
+  service._load_config = AsyncMock(return_value=current)
+  service.position_service.read_validated_snapshot_and_positions = AsyncMock(return_value=(agent_snapshot(), [position("600000.SH")]))
+  service.session_service.list_active_account_run_ids = AsyncMock(return_value=legacy_ids)
+  service.session_service.block_account_strategy_entries = AsyncMock()
+  service.session_service.start_account_strategy = AsyncMock()
+  service.session_service.stop_account_strategy = AsyncMock()
+  service._record_reconcile_result = AsyncMock()
+  service.get_monitor = AsyncMock(return_value={})
+  await service.reconcile_account("account-1")
+  service.session_service.start_account_strategy.assert_not_awaited()
+  service.session_service.stop_account_strategy.assert_not_awaited()
+  assert current.strategy_run_id is None
+  assert live.reconcile_config.await_args.kwargs["legacy_active"] is bool(legacy_ids)
+  if legacy_ids:
+    service.session_service.block_account_strategy_entries.assert_awaited_once_with("legacy-orphan", reason="T_ASSISTANT_INDEPENDENT_LIVE_OWNER")
+
+
+@pytest.mark.asyncio
+async def test_independent_live_unknown_account_cut_unbinds_market_producer():
+  live = SimpleNamespace(owns_config=AsyncMock(return_value=True), unbind_account=AsyncMock())
+  service = TTradeGlobalMonitorService(live_supervisor=live)
+  service._load_config = AsyncMock(return_value=config(run_id=None))
+  service.position_service.read_validated_snapshot_and_positions = AsyncMock(side_effect=ValueError("stale"))
+  service._block_new_entries_if_needed = AsyncMock()
+  service._record_reconcile_result = AsyncMock()
+  service.get_monitor = AsyncMock(return_value={})
+  await service.reconcile_account("account-1")
+  live.unbind_account.assert_awaited_once_with("account-1")

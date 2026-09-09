@@ -167,6 +167,11 @@ class _TAssistantDecisionRuntime:
     self._parameters[execution.execution_id] = dict(parameters)
     self._symbol_states[execution.execution_id] = dict(symbol_states or {})
 
+  def unbind_execution(self, execution_id: str) -> None:
+    self._strategies.pop(execution_id, None)
+    self._parameters.pop(execution_id, None)
+    self._symbol_states.pop(execution_id, None)
+
   def symbol_states(self, execution_id: str) -> dict[str, TAssistantSymbolState]:
     return dict(self._symbol_states.get(execution_id, {}))
 

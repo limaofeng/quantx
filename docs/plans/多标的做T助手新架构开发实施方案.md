@@ -642,8 +642,18 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   指针，配置关闭/切换不得产生旧源候选。恢复入口先检查环境及 owner，再读取或终结周期。
   真实候选、延迟释放、并发头变化与 PAPER 回归联合 **26 项通过**；恢复补强后相关
   **22 项通过**（含新增 1 项），聚焦 Ruff 通过。证据 `.codex_screenshots/p6-live-decision.xml`
-  及 `p6-live-decision-recovery.log`。尚未注册 LIVE 行情 supervisor 或真实入场命令 handler。
-- 剩余开发顺序：LIVE supervisor 接线、
+  及 `p6-live-decision-recovery.log`。LIVE 行情 supervisor 接线见下项，真实入场命令 handler 尚未注册。
+- LIVE supervisor 已注册 Engine 监控生命周期，使用 WholeQuoteHub 的 CRITICAL 批量订阅，
+  只绑定已存在的独立 LIVE source；按冻结参数与历史参考 profile 构造共享决策快照。
+  重启重新预热，日常协调保留 hot cursor/ring；配置、universe 或 durable state 变化
+  使相应标的重新预热。订阅和绑定失败不会创建实盘执行或订单。
+- 监控协调器按持久化独立 LIVE lineage 分流，禁止恢复/新建 legacy producer；已有 legacy
+  仅撤销新入场并继续原退出。账户快照失效撤销 LIVE 绑定；停用、旧配置及多余源复用排空服务，
+  不迁移 pending/correlation/ExitPlan 归属。排空前再次锁定配置头，拒绝过期的配置观察。
+  联合 LIVE/PAPER 决策及监控回归 **62 项通过**；移除绑定的内存清理与排空 **17 项通过**，
+  聚焦 Ruff 通过。证据 `.codex_screenshots/p6-live-supervisor.xml` 与
+  `p6-live-supervisor-drain.log`。仅隔离工程验证，未重启生产或创建 LIVE source。
+- 剩余开发顺序：LIVE 首次准入、预热完成后的 READY 激活及恢复、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

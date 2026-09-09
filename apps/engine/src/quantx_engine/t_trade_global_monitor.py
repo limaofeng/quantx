@@ -102,6 +102,7 @@ class TTradeGlobalMonitorService:
     interval_seconds: float = 10.0,
     universe_providers: Optional[InstrumentUniverseProviderRegistry] = None,
     paper_shadow_supervisor: Any = None,
+    live_supervisor: Any = None,
   ):
     self.interval_seconds = max(2.0, float(interval_seconds or 10.0))
     self.session_service = TTradeService(runtime_manager)
@@ -112,6 +113,7 @@ class TTradeGlobalMonitorService:
     self._task: Optional[asyncio.Task] = None
     self._stopping = asyncio.Event()
     self.paper_shadow_supervisor = paper_shadow_supervisor
+    self.live_supervisor = live_supervisor
 
   async def start(self) -> None:
     if self._task and not self._task.done():
@@ -119,6 +121,8 @@ class TTradeGlobalMonitorService:
     self._stopping = asyncio.Event()
     if self.paper_shadow_supervisor is not None:
       await self.paper_shadow_supervisor.start()
+    if self.live_supervisor is not None:
+      await self.live_supervisor.start()
     self._task = asyncio.create_task(self._run(), name="TTradeGlobalMonitor")
     logger.info("动态持仓做 T 监控器已启动")
 
@@ -133,6 +137,8 @@ class TTradeGlobalMonitorService:
       self._task = None
     if self.paper_shadow_supervisor is not None:
       await self.paper_shadow_supervisor.stop()
+    if self.live_supervisor is not None:
+      await self.live_supervisor.stop()
     logger.info("动态持仓做 T 监控器已停止")
 
   async def save_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -459,6 +465,7 @@ class TTradeGlobalMonitorService:
     if config is None:
       return await self.get_monitor(account_id)
     errors: List[str] = []
+    independent_live = bool(self.live_supervisor is not None and await self.live_supervisor.owns_config(config.id))
     try:
       _, positions = await self.position_service.read_validated_snapshot_and_positions(
         account_id
@@ -466,7 +473,27 @@ class TTradeGlobalMonitorService:
     except Exception as exc:
       error = f"持仓快照读取失败: {exc}"
       errors = [error]
+      if independent_live:
+        await self.live_supervisor.unbind_account(account_id)
       await self._block_new_entries_if_needed(config, errors)
+      await self._record_reconcile_result(config.id, errors)
+      return await self.get_monitor(account_id)
+
+    if independent_live:
+      try:
+        legacy_ids = set(await self.session_service.list_active_account_run_ids(account_id))
+        if config.strategy_run_id:
+          legacy_ids.add(config.strategy_run_id)
+        for run_id in sorted(legacy_ids):
+          await self.session_service.block_account_strategy_entries(run_id, reason="T_ASSISTANT_INDEPENDENT_LIVE_OWNER")
+        if legacy_ids:
+          errors.append("独立 LIVE 等待 legacy 入场源排空；原有退出继续处理")
+        universe = self._resolve_universe_snapshot(config, positions, [])
+        await self.live_supervisor.reconcile_config(config=config, universe=universe, legacy_active=bool(legacy_ids))
+      except Exception as exc:
+        await self.live_supervisor.unbind_account(account_id)
+        errors.append(f"独立 LIVE 协调失败: {type(exc).__name__}")
+        logger.exception("Independent LIVE reconciliation failed: account=%s", account_id)
       await self._record_reconcile_result(config.id, errors)
       return await self.get_monitor(account_id)
 
