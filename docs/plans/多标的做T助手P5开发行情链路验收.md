@@ -1,5 +1,8 @@
 # P5 开发行情链路验收（2026-09-09）
 
+> 最新口径：已合并 `efecd8903`，验收采用文末“日 K 参考值方案合并验收”。下文原先要求
+> 核查历史 Tick 涨跌停字段的内容仅保留为历史证据，不再作为生产修复要求。
+
 结论：开发端经生产 Caddy 行情专用接口取得历史分片、校验、导入本机独立数据服务并回读的链路通过。
 本次测试范围为两个单标的/单交易日分区，不代表全部 231 分区或 P5 策略准入通过。
 
@@ -92,3 +95,24 @@ SHA256、范围、行数验证使用现有正式导入实现。皖能电力额�
   本轮未配置 Codex 定时复查，不重复创建请求。
 - 证据：`.codex_screenshots/p5-new-gap-submit.log`、`p5-new-gap-status.log`。
   新补采分支当前为“入队及 Worker 消费通过，QMT 补采/上传/开发入库待验证”。
+
+## 日 K 参考值方案合并验收（2026-09-09 09:47 起）
+
+- 经用户授权以 `e9500d9f` 合并远程 main，包含 `efecd8903`；保留本地改动，无冲突。
+- 新口径：只使用 MiniQMT；当日采集的日 K 可补充当日合约涨跌停价，历史未采集则为空；
+  历史 Tick 不再传输、入库或导出这些字段。P5 按标的与交易日关联日 K，实时风控行为不变。
+- 合并后 224 项相关测试全部通过，覆盖开发环境隔离、日 K 关联及变化拒绝、引用重放、
+  缺资料门、Agent 当日/跨日保护、传输入库与导出；定向 Ruff 通过。
+- 实际以 daily-limits-v2 身份请求皖能电力 2026-08-03 的 1d 与 tick：两者生产 READY，
+  本地 LOCAL_VERIFIED；分别回读验证 1 条日 K、4597 条 Tick。原始 Tick 分片不含
+  upperLimit/lowerLimit。日 K 两参考值为 null，符合历史未采集不补造规则。
+- 新日 K 分区：`0292a7d20346249ce69c1e48141a0fefc84ad2ad4caf0f30a9ec0094cbad9897`；
+  新 Tick 分区：`a494fac6f0d4bbe6d9a4365ceda7c71d34d79d04e103708e87ed120192ef13d7`。
+- P5 入口独立回读 4597 条，关联日 K 后仍有 4503 条连续时段记录缺执行参考值，
+  状态 REFERENCE_REQUIRED。此为已接受的数据能力边界，不再要求生产修补历史 Tick。
+  正式评估仍须具备已采集日 K 参考值的样本和用户确认的准入标准，不自动改换 8 月区间。
+- 09:47:40 复查招商银行旧补采分区，仍 WAITING_SOURCE、error=null，未取得 manifest；
+  新 QMT 补采尚受交易日 16:00 派发门限制。没有重发旧探针，不能宣称补采分支通过。
+- 证据：`.codex_screenshots/p5-daily-limits-merged-tests.log`、`p5-daily-limits-ruff.log`、
+  `p5-daily-limits-live-final.log`、`p5-daily-limits-readback.log`、`p5-new-gap-after-merge.log`。
+  本批未修改生产服务或执行真实交易；新契约的开发导入整链验收通过，P5 整阶段仍未 DONE。
