@@ -6,7 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "quantx-trainer"
 version = "0.1.0"
 requires-python = ">=3.11,<3.14"
-dependencies = ["quantx-application", "quantx-infrastructure"]
+dependencies = [
+  "prefect==3.6.15",
+  "quantx-application",
+  "quantx-infrastructure",
+  "quantx-research",
+]
 
 [project.scripts]
 quantx-trainer = "quantx_trainer.main:main"

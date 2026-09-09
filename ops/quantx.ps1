@@ -23,6 +23,8 @@ param(
 
   [string]$Component = "",
 
+  [string]$CondaExecutable = "",
+
   [ValidateRange(1, 5000)]
   [int]$Tail = 100,
 
@@ -3029,6 +3031,19 @@ function Invoke-Verify {
   Write-Host "Gateway and schema verification passed." -ForegroundColor Green
 }
 
+if ($Component -eq "trainer") {
+  if ($Command -ne "bootstrap" -or $Environment -ne "dev") {
+    throw "Trainer currently supports bootstrap only, with explicit -Environment dev."
+  }
+  if (-not $CondaExecutable) {
+    throw "Trainer bootstrap requires -CondaExecutable."
+  }
+  & (Join-Path $ScriptRoot "trainer\bootstrap.ps1") -CondaExecutable $CondaExecutable
+  return
+}
+if ($CondaExecutable) {
+  throw "-CondaExecutable is only supported by Trainer bootstrap."
+}
 Ensure-RuntimeDirectories
 if ($Component -and $Command -notin @("up", "down", "status", "logs")) {
   throw "-Component is only supported by up, down, status, and logs."

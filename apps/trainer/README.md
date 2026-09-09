@@ -5,6 +5,18 @@
 
 目前提供本地配置校验和开发控制面只读预检。尚未迁移 Worker 调度、启用训练部署或完成 Windows/GPU 验收，不能将预检通过视为服务 ready。
 
+## Conda 环境安装
+
+Windows 独立训练代码目录中执行：
+
+```powershell
+.\ops\quantx.ps1 bootstrap -Environment dev -Component trainer -CondaExecutable C:\Users\limao\miniconda3\Scripts\conda.exe
+```
+
+将 Conda 路径替换为本机值。此入口在加载业务环境或创建主链运行目录之前分流，仅创建该 Conda 安装下的 `envs\quantx-train`，使用 conda-forge 的 Python 3.13 和 pip，不继承默认安装包，不更新既有 `quantx` 或券商环境。已存在的完整环境只校验身份；半成品、错误 Python 版本及目录链接均拒绝，不自动覆盖。
+
+该步骤只准备独立解释器，项目依赖同步、GPU 构建资格和 Trainer 常驻服务仍需后续部署。`up/down/status/logs -Component trainer` 尚未实现；生产 `full` 生命周期不包含此环境。
+
 ## 独立配置
 
 使用本机私有 TOML 文件显式提供全部字段，不读取 API `.env`，不提交凭据：
