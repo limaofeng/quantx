@@ -207,3 +207,30 @@ async def certify_frozen_inputs(
       source=source,
       calendar=source,
     )
+
+
+def certification_input_reference(directory, *, dataset_version, manifest_sha256):
+  """Build a portable transfer inventory only from fully verified input files."""
+  from quantx_contracts.research_preparation import CertificationInputReference
+  from quantx_contracts.training_bundle import BundleFile, TrainingBundle
+
+  _, _, manifest = load_certification_inputs(
+    directory, dataset_version=dataset_version, manifest_sha256=manifest_sha256
+  )
+  files = [BundleFile(path=name, **entry) for name, entry in manifest["files"].items()]
+  files.append(
+    BundleFile(
+      path="manifest.json",
+      size=(Path(directory) / "manifest.json").stat().st_size,
+      sha256=manifest_sha256,
+    )
+  )
+  return CertificationInputReference(
+    bundle=TrainingBundle(
+      schema_version=1,
+      kind="CERTIFICATION_INPUT",
+      source_id=dataset_version,
+      files=files,
+    ),
+    manifest_sha256=manifest_sha256,
+  )

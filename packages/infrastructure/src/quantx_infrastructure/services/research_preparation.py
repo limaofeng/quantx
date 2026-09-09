@@ -9,8 +9,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
-from quantx_contracts.research_preparation import ResearchPreparationConfig
-from sqlalchemy import select, text, update
+from quantx_contracts.research_preparation import (
+  CertificationInputReference,
+  ResearchPreparationConfig,
+)
+from sqlalchemy import or_, select, text, update
 
 from quantx_infrastructure.models.research_preparation import (
   ResearchPreparationJob as Job,
@@ -212,10 +215,13 @@ class ResearchPreparationRepository:
     await self.db.refresh(row)
     return row
 
-  async def claim(self, flow_run_id, *, kinds, prepare_execution=None):
+  async def claim(self, flow_run_id, *, kinds, executor, prepare_execution=None):
     kinds = tuple(kinds)
-    if not kinds or set(kinds) - {"COVERAGE", "DOWNLOAD", "CERTIFY", "GPU"}:
-      raise ValueError("准备任务领取范围无效")
+    allowed = {"WORKER": {"COVERAGE", "DOWNLOAD", "CERTIFY"}, "TRAINER": {"CERTIFY", "GPU"}}
+    if executor not in allowed or not kinds or set(kinds) - allowed[executor]:
+      raise ValueError("准备任务领取范围或执行端无效")
+    input_hash = Job.request["certification_input"]["manifest_sha256"].as_string()
+    certification_scope = input_hash.is_not(None) if executor == "TRAINER" else input_hash.is_(None)
     flow_run_id = str(flow_run_id or "").strip()
     if not flow_run_id or len(flow_run_id) > 64:
       raise ValueError("准备任务领取必须提供有效执行归属")
@@ -229,7 +235,8 @@ class ResearchPreparationRepository:
       return None
     row = await self.db.scalar(
       select(Job)
-      .where(Job.status == "QUEUED", Job.kind.in_(kinds))
+      .where(Job.status == "QUEUED", Job.kind.in_(kinds),
+             or_(Job.kind != "CERTIFY", certification_scope))
       .order_by(Job.created_at)
       .with_for_update(skip_locked=True)
       .limit(1)
@@ -251,6 +258,36 @@ class ResearchPreparationRepository:
     if row:
       await self.db.refresh(row)
     return row
+
+  async def handoff_certification(self, job_id, *, expected_flow_run_id, reference):
+    """Called only after immutable input publication and remote readback succeed."""
+    if not expected_flow_run_id:
+      raise ValueError("准备任务执行归属无效")
+    reference = CertificationInputReference.model_validate(reference)
+    payload = reference.model_dump(mode="json")
+    payload["bundle"] = json.loads(reference.bundle.canonical_bytes())
+    await self.lock()
+    row = await self.db.scalar(
+      select(Job).where(Job.job_id == job_id).with_for_update()
+      .execution_options(populate_existing=True)
+    )
+    if row is None or row.kind != "CERTIFY" or reference.bundle.source_id != row.request.get("dataset_version"):
+      await self.db.rollback()
+      raise ValueError("认证输入与准备任务不匹配")
+    existing = row.request.get("certification_input")
+    if existing is not None:
+      if existing == payload and row.request.get("export_flow_run_id") == expected_flow_run_id:
+        await self.db.commit()
+        return
+      await self.db.rollback()
+      raise ValueError("认证输入交接不可替换")
+    if row.status != "RUNNING" or row.flow_run_id != expected_flow_run_id:
+      await self.db.rollback()
+      raise ValueError("准备任务执行归属已变化或任务已结束")
+    row.request = {**row.request, "certification_input": payload, "export_flow_run_id": expected_flow_run_id}
+    row.status, row.phase, row.flow_run_id = "QUEUED", "等待 Trainer 认证", None
+    row.error, row.updated_at = None, now()
+    await self.db.commit()
 
   async def requeue_gpu_admission(self, job_id, *, expected_flow_run_id):
     """Requeue only after the supervisor verifies a host-admission exit."""
@@ -279,9 +316,15 @@ class ResearchPreparationRepository:
       raise ValueError("准备任务更新参数或执行归属无效")
     if "status" in values and values["status"] not in {"RUNNING", "SUCCEEDED", "FAILED"}:
       raise ValueError("准备任务执行者不能重新排队")
+    if "request" in values and {"certification_input", "export_flow_run_id"}.intersection(values["request"]):
+      raise ValueError("认证输入只能通过原子交接登记")
+    request_scope = (
+      Job.request["certification_input"]["manifest_sha256"].as_string().is_(None)
+      if "request" in values else True
+    )
     result = await self.db.execute(
       update(Job)
-      .where(Job.job_id == job_id, Job.status == "RUNNING", Job.flow_run_id == expected_flow_run_id)
+      .where(Job.job_id == job_id, Job.status == "RUNNING", Job.flow_run_id == expected_flow_run_id, request_scope)
       .values(updated_at=now(), **values)
     )
     if result.rowcount != 1:

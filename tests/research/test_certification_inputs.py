@@ -140,3 +140,29 @@ async def test_missing_history_never_publishes_export(tmp_path):
     )
   source.load_daily_bars.assert_not_awaited()
   assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_certification_reference_roundtrips_through_bundle_cache(tmp_path):
+  from quantx_infrastructure.training_bundle_store import (
+    DirectoryBundleReader,
+    materialize_bundle,
+  )
+
+  directory, digest, _ = await exported(tmp_path)
+  reference = inputs_module.certification_input_reference(
+    directory, dataset_version="frozen-v1", manifest_sha256=digest
+  )
+  store = tmp_path / "store"
+  store.mkdir()
+  shutil.copytree(directory, store / reference.bundle.bundle_id)
+  shutil.rmtree(directory)
+  cached = materialize_bundle(
+    DirectoryBundleReader(store), reference.bundle, tmp_path / "cache", reserve_bytes=0
+  )
+  loaded, _, _ = load_certification_inputs(
+    cached,
+    dataset_version=reference.bundle.source_id,
+    manifest_sha256=reference.manifest_sha256,
+  )
+  assert loaded.data.historical_st_membership_path.parent == cached

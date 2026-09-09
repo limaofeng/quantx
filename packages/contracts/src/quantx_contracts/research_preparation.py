@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .training_bundle import TrainingBundle
+
 
 class ResearchPreparationConfig(BaseModel):
   model_config = ConfigDict(extra="forbid", frozen=True)
@@ -39,3 +41,23 @@ class ResearchPreparationConfig(BaseModel):
 
 
 PreparationKind = Literal["COVERAGE", "DOWNLOAD", "CERTIFY", "GPU"]
+
+
+class CertificationInputReference(BaseModel):
+  """Immutable transfer identity; paths always belong to the bundle inventory."""
+
+  model_config = ConfigDict(extra="forbid", frozen=True)
+  bundle: TrainingBundle
+  manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+  @model_validator(mode="after")
+  def validate_input_bundle(self):
+    if self.bundle.kind != "CERTIFICATION_INPUT":
+      raise ValueError("certification requires a certification-input bundle")
+    files = {entry.path: entry for entry in self.bundle.files}
+    manifest = files.get("manifest.json")
+    if manifest is None or manifest.sha256 != self.manifest_sha256:
+      raise ValueError("certification manifest must match the bundle inventory")
+    if not {"config.json", "source/manifest.json"}.issubset(files):
+      raise ValueError("certification input bundle is missing required files")
+    return self

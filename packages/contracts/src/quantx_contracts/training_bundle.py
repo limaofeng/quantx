@@ -40,7 +40,7 @@ class BundleFile(BaseModel):
 class TrainingBundle(BaseModel):
   model_config = ConfigDict(extra="forbid", frozen=True)
   schema_version: Literal[1]
-  kind: Literal["DATASET", "RESULT", "RELEASE"]
+  kind: Literal["DATASET", "RESULT", "RELEASE", "CERTIFICATION_INPUT"]
   source_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
   files: tuple[BundleFile, ...] = Field(min_length=1, max_length=10000)
 

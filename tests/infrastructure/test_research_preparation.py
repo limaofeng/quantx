@@ -80,12 +80,12 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     assert first.job_id == duplicate.job_id
     await repo.save({**CONFIG, "date_end": "2025-08-01"})
     assert first.request["config"]["date_end"] == "2025-07-29"
-    job = await repo.claim("flow-1", kinds=("DOWNLOAD",))
+    job = await repo.claim("flow-1", kinds=("DOWNLOAD",), executor="WORKER")
     assert job.job_id == first.job_id
     # Age alone must not permit a second execution while the original lives.
     job.updated_at -= timedelta(days=1)
     await db.commit()
-    assert await repo.claim("flow-2", kinds=("DOWNLOAD",)) is None
+    assert await repo.claim("flow-2", kinds=("DOWNLOAD",), executor="WORKER") is None
     with pytest.raises(ValueError, match="归属"):
       await repo.progress(job.job_id, expected_flow_run_id="stale-owner", status="FAILED")
     await db.refresh(job)
@@ -95,7 +95,7 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
   async with session() as db:
     repo = ResearchPreparationRepository(db)
     assert (await repo.config())["date_end"] == "2025-08-01"
-    claimed = await repo.claim("flow-3", kinds=("DOWNLOAD",))
+    claimed = await repo.claim("flow-3", kinds=("DOWNLOAD",), executor="WORKER")
     assert claimed.request == first.request
     with pytest.raises(ValueError, match="归属"):
       await repo.progress(claimed.job_id, expected_flow_run_id="flow-1", status="SUCCEEDED")
@@ -103,8 +103,8 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     assert claimed.status == "RUNNING"
     await repo.progress(claimed.job_id, expected_flow_run_id="flow-3", status="SUCCEEDED")
     gpu = await repo.submit(kind="GPU", config=await repo.config(), request_key="gpu-request-key-1234", dataset_version="dataset-v1")
-    assert await repo.claim("worker", kinds=("COVERAGE", "DOWNLOAD", "CERTIFY")) is None
-    assigned = await repo.claim("trainer", kinds=("GPU",))
+    assert await repo.claim("worker", kinds=("COVERAGE", "DOWNLOAD", "CERTIFY"), executor="WORKER") is None
+    assigned = await repo.claim("trainer", kinds=("GPU",), executor="TRAINER")
     assert assigned.job_id == gpu.job_id
     assert assigned.flow_run_id == "trainer"
     assert [row.job_id for row in await repo.running_jobs(kinds=("GPU",))] == [gpu.job_id]
@@ -113,7 +113,7 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     with pytest.raises(ValueError, match="归属"):
       await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="old-owner")
     await repo.requeue_gpu_admission(gpu_id, expected_flow_run_id="trainer")
-    reassigned = await repo.claim("new-trainer", kinds=("GPU",))
+    reassigned = await repo.claim("new-trainer", kinds=("GPU",), executor="TRAINER")
     assert reassigned.job_id == gpu_id
     assert reassigned.flow_run_id == "new-trainer"
     with pytest.raises(ValueError, match="归属"):
@@ -124,10 +124,58 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
       raise OSError("input evidence unavailable")
 
     with pytest.raises(OSError):
-      await repo.claim("input-owner", kinds=("GPU",), prepare_execution=unavailable)
+      await repo.claim("input-owner", kinds=("GPU",), executor="TRAINER", prepare_execution=unavailable)
     assert await repo.running_jobs(kinds=("GPU",)) == []
     prepared = []
-    next_run = await repo.claim("input-owner", kinds=("GPU",), prepare_execution=lambda job_id, owner: prepared.append((job_id, owner)))
+    next_run = await repo.claim("input-owner", kinds=("GPU",), executor="TRAINER", prepare_execution=lambda job_id, owner: prepared.append((job_id, owner)))
     assert next_run.job_id == gpu_id
     assert prepared == [(gpu_id, "input-owner")]
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_certification_handoff_is_owner_fenced_immutable_and_executor_routed():
+  from quantx_contracts.research_preparation import CertificationInputReference
+  from quantx_contracts.training_bundle import BundleFile, TrainingBundle
+
+  reference = CertificationInputReference(
+    bundle=TrainingBundle(schema_version=1, kind="CERTIFICATION_INPUT", source_id="cert-v1", files=[
+      BundleFile(path=name, size=1, sha256="a" * 64)
+      for name in ["manifest.json", "config.json", "source/manifest.json"]
+    ]), manifest_sha256="a" * 64,
+  )
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(lambda c: ResearchPreparationJob.__table__.create(c))
+  session = async_sessionmaker(engine, expire_on_commit=False)
+  async with session() as db:
+    repo = ResearchPreparationRepository(db)
+    config = {**CONFIG, "st_file": "st.csv", "industry_file": "industry.csv", "delisting_file": "delisting.csv"}
+    job = await repo.submit(kind="CERTIFY", config=config, request_key="c" * 32, dataset_version="cert-v1")
+    job_id = job.job_id
+    assert await repo.claim("trainer", kinds=("CERTIFY",), executor="TRAINER") is None
+    job = await repo.claim("export-owner", kinds=("CERTIFY",), executor="WORKER")
+    with pytest.raises(ValueError, match="归属"):
+      await repo.handoff_certification(job_id, expected_flow_run_id="other", reference=reference)
+    await repo.handoff_certification(job_id, expected_flow_run_id="export-owner", reference=reference)
+    # Commit acknowledgement loss: identical retry is harmless and does not
+    # overwrite the subsequent Trainer owner.
+    await repo.handoff_certification(job_id, expected_flow_run_id="export-owner", reference=reference.model_copy(update={"bundle": reference.bundle.model_copy(update={"files": tuple(reversed(reference.bundle.files))})}))
+    assert await repo.claim("worker", kinds=("CERTIFY",), executor="WORKER") is None
+    assigned = await repo.claim("trainer-owner", kinds=("CERTIFY",), executor="TRAINER")
+    assert assigned.job_id == job_id
+    await repo.handoff_certification(job_id, expected_flow_run_id="export-owner", reference=reference)
+    await db.refresh(assigned)
+    assert assigned.status == "RUNNING" and assigned.flow_run_id == "trainer-owner"
+    with pytest.raises(ValueError, match="归属"):
+      await repo.progress(job_id, expected_flow_run_id="export-owner", status="SUCCEEDED")
+    with pytest.raises(ValueError, match="归属"):
+      await repo.progress(job_id, expected_flow_run_id="trainer-owner", request={"dataset_version": "cert-v1"})
+    with pytest.raises(ValueError, match="不可替换"):
+      await repo.handoff_certification(job_id, expected_flow_run_id="trainer-owner", reference=reference)
+    await repo.progress(job_id, expected_flow_run_id="trainer-owner", status="FAILED")
+    await repo.retry(job_id)
+    assert await repo.claim("worker", kinds=("CERTIFY",), executor="WORKER") is None
+    retried = await repo.claim("trainer-retry", kinds=("CERTIFY",), executor="TRAINER")
+    assert CertificationInputReference.model_validate(retried.request["certification_input"]).bundle.bundle_id == reference.bundle.bundle_id
   await engine.dispose()

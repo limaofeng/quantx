@@ -39,7 +39,7 @@ async def test_gpu_input_attempt_recovers_without_restarting_supervisor(
   async def session(path):
     yield object()
 
-  async def claim(owner, *, kinds, prepare_execution):
+  async def claim(owner, *, kinds, executor, prepare_execution):
     job.flow_run_id = owner
     prepare_execution(job.job_id, owner)
     if fault == "claim":

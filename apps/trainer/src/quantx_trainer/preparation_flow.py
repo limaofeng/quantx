@@ -209,7 +209,7 @@ async def trainer_gpu_preparation_flow(config_path: str):
       return {"status": "QUEUED", "reason": reason}
     with _input_attempt(get_run_logger()) as prepare:
       job = await repository.claim(
-        str(uuid.uuid4()), kinds=("GPU",), prepare_execution=prepare
+        str(uuid.uuid4()), kinds=("GPU",), executor="TRAINER", prepare_execution=prepare
       )
       if job is None:
         return {"status": "IDLE", "recovered_job_ids": recovered}

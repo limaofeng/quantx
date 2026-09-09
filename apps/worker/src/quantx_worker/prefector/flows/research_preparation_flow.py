@@ -198,7 +198,7 @@ async def research_preparation_dispatch_flow():
     return {"status": "QUEUED", "reason": "TRADING_CRITICAL_WINDOW"}
   async with AsyncSessionLocal() as db:
     job = await ResearchPreparationRepository(db).claim(
-      str(flow_run.id or uuid.uuid4()), kinds=("COVERAGE", "DOWNLOAD", "CERTIFY"),
+      str(flow_run.id or uuid.uuid4()), kinds=("COVERAGE", "DOWNLOAD", "CERTIFY"), executor="WORKER",
     )
     if job is None:
       return {"status": "IDLE"}
