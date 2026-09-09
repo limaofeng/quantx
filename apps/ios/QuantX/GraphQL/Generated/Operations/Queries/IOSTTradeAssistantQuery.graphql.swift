@@ -9,7 +9,7 @@ extension QuantXAPI {
     static let operationName: String = "IOSTTradeAssistant"
     static let operationDocument: ApolloAPI.OperationDocument = .init(
       definition: .init(
-        #"query IOSTTradeAssistant($accountId: String!) { tTradeGlobalMonitor(accountId: $accountId) { __typename accountId enabled mode holdingCount eligibleCount ignoredCount monitoredCount pendingSignalCount activeBatchCount drainingCount lastReconciledAt lastError updatedAt positionSnapshotSource positionSnapshotReportedAt positionSnapshotReceivedAt positionSnapshotComplete positionSnapshotError rolloutStage engineStatus agentStatus reconcileStatus killSwitch canApprove canActivateLive blockedReasons projectionGeneratedAt readiness { __typename accountId ready stage engineStatus agentStatus agentDeviceId reconcileStatus killSwitch policyVersion canApprove canActivateLive blockedReasons checkedAt checks { __typename code passed message } } holdings { __typename stockCode instrumentName volume availableVolume ignored eligible status reason session { __typename runId runStatus status mode activeVolume lastPrice lastNetProfitPct peakNetProfitPct trailingFloorPct completedCycles pendingEntryIntentId pendingExitIntentId entryOrderStatus exitOrderStatus entryFilledVolume entryAvgPrice exitFilledVolume exitAvgPrice profitArmed lastExitReason canCancel errorMessage signalSnapshot { __typename instrumentCode evaluatedAt sourceAt dataHealth dominantPhase opportunityScore candidateThreshold features { __typename price pullbackPct reboundPct } topBlockers { __typename code label detail } candidateId candidateFingerprint candidateStatus candidateExpiresAt pendingEntryIntentId signalVersion candidateStateVersion stateSchemaVersion featureSchemaVersion policyVersion configVersion } } } } tTradeBatchesPage(accountId: $accountId, filter: {scope: CURRENT}, first: 20) { __typename items { __typename batchId accountId stockCode status targetVolume entryFilledVolume entryAvgPrice exitFilledVolume exitAvgPrice activeVolume lastPrice lastNetProfitPct peakNetProfitPct trailingFloorPct exitReason exceptionReason createdAt updatedAt } pageInfo { __typename hasNextPage endCursor } } }"#
+        #"query IOSTTradeAssistant($accountId: String!) { tTradeGlobalMonitor(accountId: $accountId) { __typename accountId enabled mode holdingCount eligibleCount ignoredCount monitoredCount pendingSignalCount activeBatchCount drainingCount lastReconciledAt lastError updatedAt positionSnapshotSource positionSnapshotReportedAt positionSnapshotReceivedAt positionSnapshotComplete positionSnapshotError rolloutStage engineStatus agentStatus reconcileStatus killSwitch canApprove canActivateLive blockedReasons projectionGeneratedAt readiness { __typename accountId ready stage engineStatus agentStatus agentDeviceId reconcileStatus killSwitch policyVersion canApprove canActivateLive blockedReasons checkedAt checks { __typename code passed message } } holdings { __typename stockCode instrumentName volume availableVolume ignored eligible status reason session { __typename runId runStatus status mode activeVolume lastPrice lastNetProfitPct peakNetProfitPct trailingFloorPct completedCycles pendingEntryIntentId pendingExitIntentId entryOrderStatus exitOrderStatus entryFilledVolume entryAvgPrice exitFilledVolume exitAvgPrice profitArmed lastExitReason canCancel errorMessage signalSnapshot { __typename instrumentCode evaluatedAt sourceAt dataHealth dominantPhase opportunityScore candidateThreshold features { __typename price pullbackPct reboundPct } topBlockers { __typename code label detail } candidateId candidateFingerprint candidateStatus candidateExpiresAt pendingEntryIntentId signalVersion candidateStateVersion stateSchemaVersion featureSchemaVersion policyVersion configVersion } } } } tTradeBatchesPage(accountId: $accountId, filter: { scope: CURRENT }, first: 20) { __typename items { __typename batchId accountId stockCode status targetVolume entryFilledVolume entryAvgPrice exitFilledVolume exitAvgPrice activeVolume lastPrice lastNetProfitPct peakNetProfitPct trailingFloorPct exitReason exceptionReason createdAt updatedAt } pageInfo { __typename hasNextPage endCursor } } }"#
       ))
 
     public var accountId: String
@@ -285,11 +285,11 @@ extension QuantXAPI {
                 .field("candidateThreshold", Double.self),
                 .field("features", Features.self),
                 .field("topBlockers", [TopBlocker].self),
-                .field("candidateId", String?.self),
+                .field("candidateId", QuantXAPI.ID?.self),
                 .field("candidateFingerprint", String?.self),
                 .field("candidateStatus", GraphQLEnum<QuantXAPI.TTradeCandidateStatus>.self),
                 .field("candidateExpiresAt", QuantXAPI.DateTime?.self),
-                .field("pendingEntryIntentId", String?.self),
+                .field("pendingEntryIntentId", QuantXAPI.ID?.self),
                 .field("signalVersion", Int.self),
                 .field("candidateStateVersion", Int.self),
                 .field("stateSchemaVersion", String.self),
@@ -310,11 +310,11 @@ extension QuantXAPI {
               var candidateThreshold: Double { __data["candidateThreshold"] }
               var features: Features { __data["features"] }
               var topBlockers: [TopBlocker] { __data["topBlockers"] }
-              var candidateId: String? { __data["candidateId"] }
+              var candidateId: QuantXAPI.ID? { __data["candidateId"] }
               var candidateFingerprint: String? { __data["candidateFingerprint"] }
               var candidateStatus: GraphQLEnum<QuantXAPI.TTradeCandidateStatus> { __data["candidateStatus"] }
               var candidateExpiresAt: QuantXAPI.DateTime? { __data["candidateExpiresAt"] }
-              var pendingEntryIntentId: String? { __data["pendingEntryIntentId"] }
+              var pendingEntryIntentId: QuantXAPI.ID? { __data["pendingEntryIntentId"] }
               var signalVersion: Int { __data["signalVersion"] }
               var candidateStateVersion: Int { __data["candidateStateVersion"] }
               var stateSchemaVersion: String { __data["stateSchemaVersion"] }
@@ -404,7 +404,7 @@ extension QuantXAPI {
             .field("exitFilledVolume", Int.self),
             .field("exitAvgPrice", Double.self),
             .field("activeVolume", Int.self),
-            .field("lastPrice", Double.self),
+            .field("lastPrice", Double?.self),
             .field("lastNetProfitPct", Double.self),
             .field("peakNetProfitPct", Double.self),
             .field("trailingFloorPct", Double?.self),
@@ -427,7 +427,7 @@ extension QuantXAPI {
           var exitFilledVolume: Int { __data["exitFilledVolume"] }
           var exitAvgPrice: Double { __data["exitAvgPrice"] }
           var activeVolume: Int { __data["activeVolume"] }
-          var lastPrice: Double { __data["lastPrice"] }
+          var lastPrice: Double? { __data["lastPrice"] }
           var lastNetProfitPct: Double { __data["lastNetProfitPct"] }
           var peakNetProfitPct: Double { __data["peakNetProfitPct"] }
           var trailingFloorPct: Double? { __data["trailingFloorPct"] }
@@ -456,7 +456,6 @@ extension QuantXAPI {
           var endCursor: String? { __data["endCursor"] }
         }
       }
-
     }
   }
 

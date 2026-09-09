@@ -111,3 +111,14 @@ mutation Portfolio_ConfirmTAssistantLiveRelease($challengeId: String!, $confirma
     engineCommandId
   }
 }
+
+query Portfolio_TAssistantLiveReleaseStatus($challengeId: String!) {
+  tAssistantLiveReleaseStatus(challengeId: $challengeId) {
+    challengeId
+    status
+    engineCommandId
+    executionId
+    executionStatus
+    reasonCode
+  }
+}

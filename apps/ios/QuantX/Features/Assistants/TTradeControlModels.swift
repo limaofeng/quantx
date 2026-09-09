@@ -53,12 +53,12 @@ enum TTradeSafetyAction: String, CaseIterable, Equatable, Hashable, Identifiable
     }
   }
 
-  var graphQLValue: QuantXAPI.TTradeControlAction {
+  var graphQLValue: QuantXAPI.TTradeControlAction? {
     switch self {
-    case .beginControlledWindow: .beginControlledWindow
+    case .beginControlledWindow: nil
     case .activateCanary: .activateCanary
     case .activateLive: .activateLive
-    case .killSwitch: .killSwitch
+    case .killSwitch: nil
     }
   }
 }

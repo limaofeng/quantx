@@ -324,7 +324,11 @@ confirmationToken)` 仅面向原生设备会话，要求唯一账户、`t-trade:
 `trade:approve`，签发及消费时均复验会话。预览绑定原 PAPER execution、目标配置 hash、
 已审核 P5 报告/policy hash、评估 UUID、配置头版本及维护窗口；不接受文件路径或审核人参数。
 凭据有效期最多 60 秒。确认与 Engine outbox 入队同事务，重复确认返回原命令 ID。
-`RELEASE_QUEUED` 仅表示入队，须读取该 Engine 命令结果确认发布状态。
+`RELEASE_QUEUED` 仅表示入队。原设备通过 `tAssistantLiveReleaseStatus(challengeId)`
+读取 AWAITING_CONFIRMATION、EXPIRED、PENDING、PROCESSING、FAILED 或 SUCCEEDED。
+查询重新校验会话及挑战归属；SUCCEEDED 必须匹配持久化审批、目标执行与创建事件，
+同时返回 executionId/executionStatus。证据冲突返回 UNKNOWN，失败只返回脱敏 reasonCode。
+SUCCEEDED 表示发布命令完成，不表示预热完成或已经允许入场。
 
 Engine 使用显式 `T_ASSISTANT_EVALUATION_ROOT/<evaluationId>`，重新核验 P5 文件、事实链、
 指标和目标交易策略后创建 WARMING 执行。该根目录须在部署端配置且只放已审核的评估产物。

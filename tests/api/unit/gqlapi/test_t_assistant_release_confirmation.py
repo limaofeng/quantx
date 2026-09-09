@@ -75,6 +75,11 @@ async def test_api_confirmation_to_engine_release_and_retry(
 ):
   principal, issued, lock = context
   async with sessions() as db, db.begin():
+    status = await api.read_release_status(
+      db, principal=principal, challenge_id=issued["challenge_id"], now=NOW
+    )
+    assert status["status"] == "AWAITING_CONFIRMATION"
+  async with sessions() as db, db.begin():
     identity = await api.consume_release_confirmation(
       db,
       principal=principal,
@@ -95,6 +100,27 @@ async def test_api_confirmation_to_engine_release_and_retry(
   )
   assert result["success"]
   async with sessions() as db, db.begin():
+    status = await api.read_release_status(
+      db,
+      principal=principal,
+      challenge_id=issued["challenge_id"],
+      now=NOW + timedelta(seconds=3),
+    )
+    assert status["status"] == "PENDING"
+    command = await db.get(EngineCommandOutbox, identity)
+    command.processing_status = "SUCCEEDED"
+    command.result = result
+  async with sessions() as db, db.begin():
+    status = await api.read_release_status(
+      db,
+      principal=principal,
+      challenge_id=issued["challenge_id"],
+      now=NOW + timedelta(seconds=3),
+    )
+    assert status["status"] == "SUCCEEDED"
+    assert status["execution_id"] == result["execution_id"]
+    assert status["execution_status"] == "WARMING"
+  async with sessions() as db, db.begin():
     assert (
       await api.consume_release_confirmation(
         db,
@@ -106,7 +132,7 @@ async def test_api_confirmation_to_engine_release_and_retry(
       == identity
     )
     assert len(list((await db.scalars(select(EngineCommandOutbox))).all())) == 1
-  assert lock.await_count == 3
+  assert lock.await_count == 6
 
 
 @pytest.mark.parametrize(
@@ -179,3 +205,47 @@ async def test_outbox_failure_rolls_back_challenge_consumption(
     assert (
       await db.get(TradeConfirmationChallenge, issued["challenge_id"])
     ).consumed_at is None
+
+
+@pytest.mark.parametrize(
+  "state", ["EXPIRED", "FAILED", "FALSE_SUCCESS", "WRONG_COMMAND", "OTHER_DEVICE"]
+)
+async def test_release_status_uses_authoritative_scope(sessions, context, state):
+  principal, issued, lock = context
+  now = NOW + timedelta(seconds=60 if state == "EXPIRED" else 1)
+  async with sessions() as db, db.begin():
+    if state != "EXPIRED":
+      identity = await api.consume_release_confirmation(
+        db,
+        principal=principal,
+        challenge_id=issued["challenge_id"],
+        confirmation_token=issued["confirmation_token"],
+        now=now,
+      )
+      command = await db.get(EngineCommandOutbox, identity)
+      if state == "FAILED":
+        command.processing_status = "FAILED"
+        command.processing_error = "private connection detail"
+      elif state == "FALSE_SUCCESS":
+        command.processing_status = "SUCCEEDED"
+        command.result = {"success": True, "execution_id": "not-an-execution"}
+      elif state == "WRONG_COMMAND":
+        command.aggregate_id = "another-source"
+      elif state == "OTHER_DEVICE":
+        principal = replace(principal, device_session_id="another-device")
+        lock.return_value = principal
+      await db.flush()
+    if state == "OTHER_DEVICE":
+      with pytest.raises(ValueError, match="SCOPE_CONFLICT"):
+        await api.read_release_status(
+          db, principal=principal, challenge_id=issued["challenge_id"], now=now
+        )
+    else:
+      status = await api.read_release_status(
+        db, principal=principal, challenge_id=issued["challenge_id"], now=now
+      )
+      assert status["status"] == (
+        state if state in {"EXPIRED", "FAILED"} else "UNKNOWN"
+      )
+      assert status["execution_id"] is None
+      assert "private" not in str(status)

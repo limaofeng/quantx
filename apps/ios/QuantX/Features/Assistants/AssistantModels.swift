@@ -159,8 +159,8 @@ struct TTradeBatchItem: Equatable, Hashable, Identifiable, Sendable {
   let exitFilledVolume: Int
   let exitAveragePrice: Double
   let activeVolume: Int
-  let lastPrice: Double
-  let lastNetProfitPercent: Double
+  let lastPrice: Double?
+  let lastNetProfitPercent: Double?
   let peakNetProfitPercent: Double
   let trailingFloorPercent: Double?
   let exitReason: String?

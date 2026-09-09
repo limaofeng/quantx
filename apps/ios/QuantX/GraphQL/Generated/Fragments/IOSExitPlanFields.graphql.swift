@@ -106,7 +106,7 @@ extension QuantXAPI {
     var createdAt: QuantXAPI.DateTime? { __data["createdAt"] }
     var updatedAt: QuantXAPI.DateTime? { __data["updatedAt"] }
 
-    /// IOSExitPlanFields.ExecutionOwner
+    /// ExecutionOwner
     nonisolated struct ExecutionOwner: QuantXAPI.SelectionSet {
       let __data: DataDict
       init(_dataDict: DataDict) { __data = _dataDict }
@@ -125,7 +125,7 @@ extension QuantXAPI {
       var ownerId: String { __data["ownerId"] }
     }
 
-    /// IOSExitPlanFields.SourceExecutionOwner
+    /// SourceExecutionOwner
     nonisolated struct SourceExecutionOwner: QuantXAPI.SelectionSet {
       let __data: DataDict
       init(_dataDict: DataDict) { __data = _dataDict }

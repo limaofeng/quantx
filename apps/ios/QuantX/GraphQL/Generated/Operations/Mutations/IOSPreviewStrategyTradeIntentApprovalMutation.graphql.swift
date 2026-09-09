@@ -9,7 +9,7 @@ extension QuantXAPI {
     static let operationName: String = "IOSPreviewStrategyTradeIntentApproval"
     static let operationDocument: ApolloAPI.OperationDocument = .init(
       definition: .init(
-        #"mutation IOSPreviewStrategyTradeIntentApproval($runId: String!, $intentId: String!) { previewStrategyTradeIntentApproval(runId: $runId, intentId: $intentId) { __typename success code message preview { __typename challengeId confirmationToken action accountId runId intentId instrumentCode side bucket reason targetVolume referencePrice estimatedAmount signalExpiresAt challengeExpiresAt warnings } } }"#
+        #"mutation IOSPreviewStrategyTradeIntentApproval($runId: String!, $intentId: String!) { previewStrategyTradeIntentApproval(runId: $runId, intentId: $intentId) { __typename success code message preview { __typename challengeId confirmationToken action accountId executionOwner { __typename ownerType ownerId } intentId instrumentCode side bucket reason targetVolume referencePrice estimatedAmount signalExpiresAt challengeExpiresAt warnings } } }"#
       ))
 
     public var runId: String
@@ -79,7 +79,7 @@ extension QuantXAPI {
             .field("confirmationToken", String.self),
             .field("action", String.self),
             .field("accountId", String.self),
-            .field("runId", String.self),
+            .field("executionOwner", ExecutionOwner.self),
             .field("intentId", String.self),
             .field("instrumentCode", String.self),
             .field("side", String.self),
@@ -100,7 +100,7 @@ extension QuantXAPI {
           var confirmationToken: String { __data["confirmationToken"] }
           var action: String { __data["action"] }
           var accountId: String { __data["accountId"] }
-          var runId: String { __data["runId"] }
+          var executionOwner: ExecutionOwner { __data["executionOwner"] }
           var intentId: String { __data["intentId"] }
           var instrumentCode: String { __data["instrumentCode"] }
           var side: String { __data["side"] }
@@ -112,6 +112,25 @@ extension QuantXAPI {
           var signalExpiresAt: QuantXAPI.DateTime? { __data["signalExpiresAt"] }
           var challengeExpiresAt: QuantXAPI.DateTime { __data["challengeExpiresAt"] }
           var warnings: [String] { __data["warnings"] }
+
+          /// PreviewStrategyTradeIntentApproval.Preview.ExecutionOwner
+          nonisolated struct ExecutionOwner: QuantXAPI.SelectionSet {
+            let __data: DataDict
+            init(_dataDict: DataDict) { __data = _dataDict }
+
+            static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.ExecutionOwnerRef }
+            static var __selections: [ApolloAPI.Selection] { [
+              .field("__typename", String.self),
+              .field("ownerType", GraphQLEnum<QuantXAPI.ExecutionOwnerType>.self),
+              .field("ownerId", String.self),
+            ] }
+            static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
+              IOSPreviewStrategyTradeIntentApprovalMutation.Data.PreviewStrategyTradeIntentApproval.Preview.ExecutionOwner.self
+            ] }
+
+            var ownerType: GraphQLEnum<QuantXAPI.ExecutionOwnerType> { __data["ownerType"] }
+            var ownerId: String { __data["ownerId"] }
+          }
         }
       }
     }

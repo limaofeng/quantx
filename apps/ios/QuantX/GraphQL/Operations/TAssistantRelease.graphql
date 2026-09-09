@@ -1,0 +1,40 @@
+mutation IOSPreviewTAssistantLiveRelease($request: TAssistantReleaseRequest!) {
+  previewTAssistantLiveRelease(request: $request) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      expiresAt
+      accountId
+      sourceExecutionId
+      configVersionId
+      configSnapshotHash
+      reportHash
+      policyHash
+      windowStart
+      windowEnd
+    }
+  }
+}
+
+mutation IOSConfirmTAssistantLiveRelease($challengeId: String!, $confirmationToken: String!) {
+  confirmTAssistantLiveRelease(challengeId: $challengeId, confirmationToken: $confirmationToken) {
+    success
+    code
+    message
+    engineCommandId
+  }
+}
+
+query IOSTAssistantLiveReleaseStatus($challengeId: String!) {
+  tAssistantLiveReleaseStatus(challengeId: $challengeId) {
+    challengeId
+    status
+    engineCommandId
+    executionId
+    executionStatus
+    reasonCode
+  }
+}

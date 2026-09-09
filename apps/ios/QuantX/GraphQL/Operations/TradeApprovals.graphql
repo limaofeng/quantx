@@ -8,7 +8,10 @@ mutation IOSPreviewTTradeEntryApproval($runId: String!, $intentId: String!) {
       confirmationToken
       action
       accountId
-      runId
+      executionOwner {
+        ownerType
+        ownerId
+      }
       intentId
       instrumentCode
       side
@@ -56,7 +59,10 @@ mutation IOSPreviewStrategyTradeIntentApproval(
       confirmationToken
       action
       accountId
-      runId
+      executionOwner {
+        ownerType
+        ownerId
+      }
       intentId
       instrumentCode
       side

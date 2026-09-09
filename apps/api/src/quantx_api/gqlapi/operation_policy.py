@@ -550,6 +550,12 @@ _register(
   risk="TRADING_WRITE",
 )
 
+_register("Query", "t-trade:control", {"tAssistantLiveReleaseStatus"}, audiences=("native",))
+_release_status_key = ("Query", normalize_field_name("tAssistantLiveReleaseStatus"))
+_POLICIES[_release_status_key] = replace(
+  _POLICIES[_release_status_key], required_permissions=("t-trade:control", "trade:approve")
+)
+
 _TRADE_APPROVAL_FIELDS = {
   "previewTAssistantLiveRelease",
   "confirmTAssistantLiveRelease",

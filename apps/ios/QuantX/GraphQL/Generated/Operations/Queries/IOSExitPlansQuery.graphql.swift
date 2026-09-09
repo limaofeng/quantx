@@ -98,50 +98,16 @@ extension QuantXAPI {
         var createdAt: QuantXAPI.DateTime? { __data["createdAt"] }
         var updatedAt: QuantXAPI.DateTime? { __data["updatedAt"] }
 
-        /// ExitPlan.ExecutionOwner
-        nonisolated struct ExecutionOwner: QuantXAPI.SelectionSet {
-          let __data: DataDict
-          init(_dataDict: DataDict) { __data = _dataDict }
-
-          static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.ExecutionOwnerRef }
-          static var __selections: [ApolloAPI.Selection] { [
-            .field("__typename", String.self),
-            .field("ownerType", GraphQLEnum<QuantXAPI.ExecutionOwnerType>.self),
-            .field("ownerId", String.self),
-          ] }
-          static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
-            IOSExitPlansQuery.Data.ExitPlan.ExecutionOwner.self
-          ] }
-
-          var ownerType: GraphQLEnum<QuantXAPI.ExecutionOwnerType> { __data["ownerType"] }
-          var ownerId: String { __data["ownerId"] }
-        }
-
-        /// ExitPlan.SourceExecutionOwner
-        nonisolated struct SourceExecutionOwner: QuantXAPI.SelectionSet {
-          let __data: DataDict
-          init(_dataDict: DataDict) { __data = _dataDict }
-
-          static var __parentType: any ApolloAPI.ParentType { QuantXAPI.Objects.ExecutionOwnerRef }
-          static var __selections: [ApolloAPI.Selection] { [
-            .field("__typename", String.self),
-            .field("ownerType", GraphQLEnum<QuantXAPI.ExecutionOwnerType>.self),
-            .field("ownerId", String.self),
-          ] }
-          static var __fulfilledFragments: [any ApolloAPI.SelectionSet.Type] { [
-            IOSExitPlansQuery.Data.ExitPlan.SourceExecutionOwner.self
-          ] }
-
-          var ownerType: GraphQLEnum<QuantXAPI.ExecutionOwnerType> { __data["ownerType"] }
-          var ownerId: String { __data["ownerId"] }
-        }
-
         struct Fragments: FragmentContainer {
           let __data: DataDict
           init(_dataDict: DataDict) { __data = _dataDict }
 
           var iOSExitPlanFields: IOSExitPlanFields { _toFragment() }
         }
+
+        typealias ExecutionOwner = IOSExitPlanFields.ExecutionOwner
+
+        typealias SourceExecutionOwner = IOSExitPlanFields.SourceExecutionOwner
       }
 
       /// ExitPlanCapabilities

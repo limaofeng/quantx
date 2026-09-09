@@ -209,3 +209,133 @@ async def consume_release_confirmation(
   challenge.result_reference = {"engine_command": {"message_id": identity}}
   await db.flush()
   return identity
+
+
+async def read_release_status(db, *, principal, challenge_id, now):
+  """Read only this device's operation; success requires durable release evidence."""
+  from hmac import compare_digest
+
+  from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+  from quantx_infrastructure.models.t_assistant_execution import (
+    TAssistantExecutionEventRecord,
+  )
+  from sqlalchemy import select
+
+  challenge = await db.get(TradeConfirmationChallenge, challenge_id)
+  if challenge is None:
+    raise ValueError("LIVE_RELEASE_CHALLENGE_REQUIRED")
+  _require_native_control_principal(principal, challenge.account_id)
+  current = await TTradeControlChallengeService._lock_current_principal(
+    db, principal, challenge.account_id
+  )
+  if (
+    challenge.action != ACTION
+    or challenge.user_id != current.user_id
+    or challenge.device_session_id != current.device_session_id
+  ):
+    raise ValueError("LIVE_RELEASE_CONFIRMATION_SCOPE_CONFLICT")
+  request = normalize_release_request(challenge.payload)
+  if request["account_id"] != challenge.account_id or not compare_digest(
+    challenge.payload_fingerprint, signed_payload_fingerprint(request)
+  ):
+    raise ValueError("LIVE_RELEASE_CONFIRMATION_SCOPE_CONFLICT")
+  status = {
+    "challenge_id": challenge_id,
+    "status": "AWAITING_CONFIRMATION",
+    "engine_command_id": None,
+    "execution_id": None,
+    "execution_status": None,
+    "reason_code": None,
+  }
+  if challenge.consumed_at is None:
+    if time_utils.to_shanghai(now) >= time_utils.to_shanghai(challenge.expires_at):
+      status["status"] = "EXPIRED"
+    return status
+  identity = (
+    (challenge.result_reference or {}).get("engine_command", {}).get("message_id")
+  )
+  command = await db.get(EngineCommandOutbox, identity) if identity else None
+  if (
+    command is None
+    or command.command_type != COMMAND
+    or command.aggregate_id != request["source_execution_id"]
+    or command.payload != {"challenge_id": challenge_id}
+  ):
+    return {
+      **status,
+      "status": "UNKNOWN",
+      "reason_code": "LIVE_RELEASE_COMMAND_REFERENCE_CONFLICT",
+    }
+  status["engine_command_id"] = identity
+  if command.processing_status in {"PENDING", "PROCESSING"}:
+    return {**status, "status": command.processing_status}
+  if command.processing_status == "FAILED":
+    error = command.processing_error or ""
+    return {
+      **status,
+      "status": "FAILED",
+      "reason_code": error
+      if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", error)
+      else "LIVE_RELEASE_EXECUTION_FAILED",
+    }
+  result = command.result if isinstance(command.result, dict) else {}
+  execution = (
+    await db.get(TAssistantExecutionRecord, result.get("execution_id"))
+    if isinstance(result.get("execution_id"), str) and result["execution_id"]
+    else None
+  )
+  approval_key = f"live-release:{challenge_id}"
+  approval = await db.scalar(
+    select(TAssistantExecutionEventRecord).where(
+      TAssistantExecutionEventRecord.execution_id == request["source_execution_id"],
+      TAssistantExecutionEventRecord.event_key == approval_key,
+    )
+  )
+  if (
+    command.processing_status != "SUCCEEDED"
+    or result.get("success") is not True
+    or execution is None
+    or approval is None
+    or execution.environment != "LIVE"
+    or execution.account_id != challenge.account_id
+    or execution.config_version_id != request["config_version_id"]
+    or execution.config_snapshot_hash != request["expected_config_hash"]
+    or execution.entry_authorization != "MANUAL_CONFIRM"
+    or execution.rollout_stage != "CANARY"
+    or execution.scorer_mode != "RULE_ONLY"
+    or result.get("approval_event_key") != approval_key
+    or approval.event_type != "LIVE_CANARY_RELEASE_APPROVED"
+    or approval.payload.get("actor_id") != current.user_id
+    or approval.payload.get("p5_evidence_hash") != request["expected_report_hash"]
+    or stable_manifest_hash(approval.payload) != result.get("approval_hash")
+  ):
+    return {
+      **status,
+      "status": "UNKNOWN",
+      "reason_code": "LIVE_RELEASE_RESULT_EVIDENCE_CONFLICT",
+    }
+  prepared = await db.scalar(
+    select(TAssistantExecutionEventRecord).where(
+      TAssistantExecutionEventRecord.execution_id == execution.execution_id,
+      TAssistantExecutionEventRecord.event_key
+      == f"live-canary-prepared:{execution.execution_id}",
+    )
+  )
+  if (
+    prepared is None
+    or prepared.event_type != "LIVE_CANARY_EXECUTION_PREPARED"
+    or prepared.payload.get("source_execution_id") != request["source_execution_id"]
+    or prepared.payload.get("approval_event_key") != approval_key
+    or prepared.payload.get("approval_hash") != result.get("approval_hash")
+  ):
+    return {
+      **status,
+      "status": "UNKNOWN",
+      "reason_code": "LIVE_RELEASE_RESULT_EVIDENCE_CONFLICT",
+    }
+  return {
+    **status,
+    "status": "SUCCEEDED",
+    "execution_id": execution.execution_id,
+    "execution_status": execution.status,
+  }

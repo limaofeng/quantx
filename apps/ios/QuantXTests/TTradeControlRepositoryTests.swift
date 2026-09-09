@@ -5,6 +5,13 @@ import XCTest
 
 @MainActor
 final class TTradeControlRepositoryTests: XCTestCase {
+  func testAccountActionsCannotUseTTradeEndpoint() {
+    XCTAssertNil(TTradeSafetyAction.beginControlledWindow.graphQLValue)
+    XCTAssertNil(TTradeSafetyAction.killSwitch.graphQLValue)
+    XCTAssertEqual(TTradeSafetyAction.activateCanary.graphQLValue, .activateCanary)
+    XCTAssertEqual(TTradeSafetyAction.activateLive.graphQLValue, .activateLive)
+  }
+
   func testPreviewMapperAcceptsOnlyExactKnownBoundContext() throws {
     let now = Date(timeIntervalSince1970: 1_786_752_000)
     let request = makeRequest(action: .activateCanary)

@@ -740,7 +740,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   0059→0069 迁移完成；0063 对已存在 history settings 做精确结构接管，3 项测试及实际迁移通过，
   独立提交 `18db38c7`。本机忽略文件补内部随机 token，标准 dev/full/paper 服务已恢复。
   未接发布结果查询/操作界面，未创建业务审批或启用实盘，发布服务仍需正式评估根目录配置。
-- 剩余开发顺序：LIVE 发布结果查询与界面、RUNNING 恢复入场门禁、
+- 发布结果查询已完成：限定原用户/原设备并复验会话，命令成功须核对审批 hash、目标执行
+  及创建事件，冲突返回 UNKNOWN；失败原因脱敏。相关 Python 17 项、Ruff 通过。
+  本地 Caddy 新类型检查与 Web codegen/check/lint/test:run/build 通过（895 测试）。
+  iOS 新增发布预览/确认/状态操作并同步公开 SDL；审批归属改用 executionOwner，
+  缺失估值显示“暂无估值”，旧账户动作禁止发送到已移除的做 T 枚举接口。
+  iOS 模拟器构建及 TTradeControlRepositoryTests/TTradeControlStoreTests 定向单测通过。
+  证据 `.codex_screenshots/p6-status-*`、`p6-release-status-graphql.log`。
+  原生发布界面及账户动作新接口仍待接入；未进行业务发布或实盘操作。
+- 剩余开发顺序：LIVE 发布界面、原生账户动作接口适配、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

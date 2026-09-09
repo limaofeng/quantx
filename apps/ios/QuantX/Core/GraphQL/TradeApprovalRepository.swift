@@ -71,12 +71,15 @@ final class TradeApprovalRepository: TradeApprovalLoading {
     guard result.success, let value = result.preview else {
       throw rejected(code: result.code, message: result.message)
     }
+    guard value.executionOwner.ownerType == .strategyRun else {
+      throw TradeApprovalRepositoryError.contextMismatch
+    }
     return try mapPreview(
       challengeID: value.challengeId,
       confirmationToken: value.confirmationToken,
       action: value.action,
       accountID: value.accountId,
-      runID: value.runId,
+      runID: value.executionOwner.ownerId,
       intentID: value.intentId,
       instrumentCode: value.instrumentCode,
       side: value.side,
@@ -153,12 +156,15 @@ final class TradeApprovalRepository: TradeApprovalLoading {
     guard result.success, let value = result.preview else {
       throw rejected(code: result.code, message: result.message)
     }
+    guard value.executionOwner.ownerType == .strategyRun else {
+      throw TradeApprovalRepositoryError.contextMismatch
+    }
     return try mapPreview(
       challengeID: value.challengeId,
       confirmationToken: value.confirmationToken,
       action: value.action,
       accountID: value.accountId,
-      runID: value.runId,
+      runID: value.executionOwner.ownerId,
       intentID: value.intentId,
       instrumentCode: value.instrumentCode,
       side: value.side,

@@ -5213,6 +5213,9 @@ type Query {
   tAssistantPaperOrders(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperOrderTAssistantPaperPage!
   tAssistantPaperExitPlans(accountId: String!, executionId: String!, first: Int! = 20, after: String = null): TAssistantPaperExitPlanTAssistantPaperPage!
 
+  """读取原用户和设备的发布结果；成功必须具备持久化执行与审批证据"""
+  tAssistantLiveReleaseStatus(challengeId: String!): TAssistantReleaseStatus!
+
   """当前独立 LIVE 做 T 执行的人工确认队列"""
   tAssistantLiveApprovalQueue(accountId: String!): TAssistantLiveApprovalQueue!
 
@@ -7572,6 +7575,15 @@ type TAssistantReleaseResult {
   message: String!
   preview: TAssistantReleasePreview
   engineCommandId: String
+}
+
+type TAssistantReleaseStatus {
+  challengeId: String!
+  status: String!
+  engineCommandId: String
+  executionId: String
+  executionStatus: String
+  reasonCode: String
 }
 
 """做 T 买入确认同时覆盖的精确自动退出范围"""

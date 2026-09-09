@@ -277,10 +277,10 @@ struct TTradeAssistantView: View {
               labeledValue("活跃", "\(batch.activeVolume.formatted()) 股")
             }
             HStack(spacing: 14) {
-              labeledValue("现价", PortfolioFormatters.decimal(batch.lastPrice))
+              labeledValue("现价", batch.lastPrice.map { PortfolioFormatters.decimal($0) } ?? "暂无估值")
               labeledValue(
                 "净收益",
-                PortfolioFormatters.signedPercentage(batch.lastNetProfitPercent)
+                batch.lastNetProfitPercent.map { PortfolioFormatters.signedPercentage($0) } ?? "暂无估值"
               )
               labeledValue("退出成交", "\(batch.exitFilledVolume.formatted()) 股")
             }

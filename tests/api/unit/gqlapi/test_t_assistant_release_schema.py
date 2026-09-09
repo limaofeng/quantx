@@ -85,3 +85,19 @@ async def test_graphql_preview_confirm_and_policy(
     policy = operation_policy("Mutation", name)
     assert policy.required_permissions == ("t-trade:control", "trade:approve")
     assert policy.audiences == ("native",)
+
+
+async def test_graphql_release_status(sessions, context, monkeypatch):
+  principal, issued, _ = context
+  monkeypatch.setattr(live, "AsyncSessionLocal", sessions)
+  result = await SCHEMA.execute(
+    "query($id:String!){tAssistantLiveReleaseStatus(challengeId:$id){challengeId status executionId}}",
+    variable_values={"id": issued["challenge_id"]},
+    context_value={"principal": principal},
+  )
+  assert not result.errors
+  assert result.data["tAssistantLiveReleaseStatus"]["status"] == "EXPIRED"
+  assert result.data["tAssistantLiveReleaseStatus"]["executionId"] is None
+  policy = operation_policy("Query", "tAssistantLiveReleaseStatus")
+  assert policy.required_permissions == ("t-trade:control", "trade:approve")
+  assert policy.audiences == ("native",)

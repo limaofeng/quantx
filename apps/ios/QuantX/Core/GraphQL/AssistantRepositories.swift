@@ -64,10 +64,8 @@ final class TTradeAssistantRepository: TTradeAssistantLoading {
           [
             item.entryAvgPrice,
             item.exitAvgPrice,
-            item.lastPrice,
-            item.lastNetProfitPct,
             item.peakNetProfitPct,
-          ] + [item.trailingFloorPct].compactMap { $0 },
+          ] + [item.lastPrice, item.lastNetProfitPct, item.trailingFloorPct].compactMap { $0 },
           field: "tTrade.batch.price"
         )
         return TTradeBatchItem(

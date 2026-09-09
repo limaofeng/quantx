@@ -187,7 +187,7 @@ struct DashboardView: View {
         )
       }
       let pendingSignals = snapshot.signals.filter {
-        ["PENDING", "AWAITING_APPROVAL", "WAITING_APPROVAL"].contains($0.status.uppercased())
+        $0.candidateStatus == .awaitingApproval
       }
       if !pendingSignals.isEmpty {
         actions.append(

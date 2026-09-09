@@ -4,8 +4,8 @@
 import ApolloAPI
 
 extension QuantXAPI.Objects {
-  nonisolated static let WatchlistGroup = ApolloAPI.Object(
-    typename: "WatchlistGroup",
+  nonisolated static let TAssistantReleaseStatus = ApolloAPI.Object(
+    typename: "TAssistantReleaseStatus",
     implementedInterfaces: [],
     keyFields: nil
   )

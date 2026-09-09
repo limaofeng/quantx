@@ -130,11 +130,14 @@ final class TTradeControlRepository: TTradeControlLoading {
   ) async throws -> TTradeControlPreviewTicket {
     do {
       try Self.validate(request, context: context)
+      guard let action = request.action.graphQLValue else {
+        throw TTradeControlError.unavailable("此动作已迁移至账户安全控制接口，当前做 T 控制入口不可用")
+      }
       let response = try await client.perform(
         mutation: QuantXAPI.IOSPreviewTTradeControlMutation(
           input: QuantXAPI.TTradeControlPreviewInput(
             accountId: request.accountID,
-            action: .init(request.action.graphQLValue),
+            action: .init(action),
             policyVersion: Int32(request.policyVersion),
             idempotencyKey: request.idempotencyKeyValue,
             snapshotId: request.snapshotID,

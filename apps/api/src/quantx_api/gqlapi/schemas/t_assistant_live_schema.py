@@ -19,6 +19,7 @@ from ..security import authorized_account_id, principal_from_context
 from ..t_assistant_release_confirmation import (
   consume_release_confirmation,
   issue_release_confirmation,
+  read_release_status,
 )
 from ..trade_approval import (
   T_TRADE_ENTRY_APPROVAL,
@@ -73,6 +74,16 @@ class TAssistantReleaseResult:
 
 
 @strawberry.type
+class TAssistantReleaseStatus:
+  challenge_id: str
+  status: str
+  engine_command_id: str | None = None
+  execution_id: str | None = None
+  execution_status: str | None = None
+  reason_code: str | None = None
+
+
+@strawberry.type
 class TAssistantLiveEntry:
   intent_id: str
   instrument_code: str
@@ -97,6 +108,26 @@ class TAssistantLiveApprovalQueue:
 
 @strawberry.type
 class TAssistantLiveQuery:
+  @strawberry.field(
+    description="读取原用户和设备的发布结果；成功必须具备持久化执行与审批证据"
+  )
+  async def t_assistant_live_release_status(
+    self, info: strawberry.types.Info, challenge_id: str
+  ) -> TAssistantReleaseStatus:
+    principal = principal_from_context(info.context)
+    try:
+      async with AsyncSessionLocal() as db, db.begin():
+        value = await read_release_status(
+          db, principal=principal, challenge_id=challenge_id, now=datetime.now(UTC)
+        )
+      return TAssistantReleaseStatus(**value)
+    except ValueError:
+      return TAssistantReleaseStatus(
+        challenge_id=challenge_id,
+        status="UNKNOWN",
+        reason_code="LIVE_RELEASE_STATUS_UNAVAILABLE",
+      )
+
   @strawberry.field(description="当前独立 LIVE 做 T 执行的人工确认队列")
   async def t_assistant_live_approval_queue(
     self, info: strawberry.types.Info, account_id: str
