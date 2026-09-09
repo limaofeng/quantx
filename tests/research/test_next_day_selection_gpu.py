@@ -16,6 +16,7 @@ from quantx_domain.stock_selection_training import (
   resolve_backend,
   stable_json_sha256,
 )
+from quantx_infrastructure.training_host_guard import HostAdmissionDenied
 from quantx_research.artifacts import file_sha256, fingerprint, write_json
 from quantx_research.next_day_selection_training import _data_fingerprint
 
@@ -161,6 +162,60 @@ def test_probe_classifies_build_and_runtime_failures(monkeypatch) -> None:
   monkeypatch.setattr(gpu, "lgb", object())
   monkeypatch.setattr(gpu, "_gpu_build_probe", lambda: (False, "OpenCL GPU 运行时探针失败"))
   assert gpu.probe_lightgbm_gpu()["status"] == "GPU_UNAVAILABLE_RUNTIME"
+
+
+def test_gpu_probe_admission_precedes_model_initialization(monkeypatch):
+  calls = []
+
+  def blocked():
+    calls.append("admission")
+    raise HostAdmissionDenied("HOST_GPU_MEMORY_BUDGET")
+
+  def model(**kwargs):
+    pytest.fail("blocked probe must not initialize LightGBM")
+
+  monkeypatch.setattr(gpu, "_monitor_host_gpu_memory", blocked)
+  monkeypatch.setattr(gpu, "lgb", SimpleNamespace(LGBMClassifier=model))
+  with pytest.raises(HostAdmissionDenied, match="HOST_GPU_MEMORY_BUDGET"):
+    gpu._gpu_build_probe()
+  assert calls == ["admission"]
+
+
+def test_gpu_probe_uses_admitted_thread_budget(monkeypatch):
+  calls = []
+  monkeypatch.setattr(gpu, "_monitor_host_gpu_memory", lambda: calls.append("admission"))
+  monkeypatch.setattr(gpu, "training_cpu_threads", lambda: 2)
+
+  class Model:
+    def __init__(self, **kwargs):
+      assert calls == ["admission"]
+      assert kwargs["n_jobs"] == 2
+      assert kwargs["device_type"] == "gpu"
+
+    def fit(self, x, y):
+      calls.append("fit")
+
+  monkeypatch.setattr(gpu, "lgb", SimpleNamespace(LGBMClassifier=Model))
+  assert gpu._gpu_build_probe() == (True, None)
+  assert calls == ["admission", "fit"]
+
+
+@pytest.mark.parametrize("blocked_backend", ["cpu", "gpu"])
+def test_qualification_stops_immediately_on_admission_denial(tmp_path, blocked_backend):
+  dataset = _certified_dataset(tmp_path)
+  output = tmp_path / "qualification.json"
+  calls = []
+
+  def trial(panel, *, device_type, gpu_use_dp):
+    calls.append(device_type)
+    if device_type == blocked_backend:
+      raise HostAdmissionDenied("HOST_GPU_MEMORY_STATE_UNKNOWN")
+    return {}
+
+  with pytest.raises(HostAdmissionDenied, match="HOST_GPU_MEMORY_STATE_UNKNOWN"):
+    gpu.qualify_lightgbm_gpu(dataset, output, trial_runner=trial)
+  assert calls == (["cpu"] if blocked_backend == "cpu" else ["cpu", "gpu"])
+  assert not output.exists()
 
 
 def test_requirement_hash_invalidates_binary_and_device_changes(monkeypatch, tmp_path):

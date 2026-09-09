@@ -31,6 +31,7 @@ from quantx_domain.stock_selection_training import (
   stable_json_sha256,
 )
 from quantx_infrastructure.training_host_guard import (
+  HostAdmissionDenied,
   monitor_training_gpu_memory,
   training_cpu_threads,
 )
@@ -258,6 +259,7 @@ def _gpu_build_probe() -> tuple[bool, str | None]:
 
   if lgb is None:
     return False, "LightGBM Python wheel unavailable"
+  _monitor_host_gpu_memory()
   x = np.asarray([[0.0], [1.0], [0.2], [0.8]], dtype=np.float32)
   y = np.asarray([0, 1, 0, 1], dtype=np.int32)
   try:
@@ -267,10 +269,13 @@ def _gpu_build_probe() -> tuple[bool, str | None]:
       num_leaves=3,
       max_bin=63,
       device_type="gpu",
+      n_jobs=training_cpu_threads(),
       verbosity=-1,
     )
     model.fit(x, y)
     return True, None
+  except HostAdmissionDenied:
+    raise
   except Exception as exc:  # LightGBM exposes build/runtime errors as text.
     message = str(exc)
     lowered = message.lower()
@@ -994,6 +999,8 @@ def qualify_lightgbm_gpu(
   def run_trial(device_type: str, gpu_use_dp: bool) -> dict[str, Any]:
     try:
       value = runner(panel, device_type=device_type, gpu_use_dp=gpu_use_dp)
+    except HostAdmissionDenied:
+      raise
     except Exception as exc:
       return {
         "error_type": type(exc).__name__,

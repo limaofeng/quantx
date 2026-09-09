@@ -22,6 +22,7 @@ from quantx_infrastructure.services.research_preparation import (
   root,
 )
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
+from quantx_infrastructure.training_host_guard import HostAdmissionDenied
 
 from quantx_research.data.factor_coverage import build_dividend_factor_coverage_report
 from quantx_research.data.source import InfrastructureResearchDataSource
@@ -481,6 +482,8 @@ def _execute_main():
     result = asyncio.run(
       execute(json.loads(path.read_text(encoding="utf-8")), directory)
     )
+  except HostAdmissionDenied:
+    raise
   except Exception as exc:
     # Never propagate database DSNs or host paths from dependency exceptions.
     result = {

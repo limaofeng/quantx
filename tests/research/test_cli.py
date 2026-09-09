@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,44 @@ from quantx_research.cli import (
   _summarize_validation_for_console,
   build_parser,
 )
+
+
+def test_gpu_probe_runtime_admission_denial_keeps_protection_exit_code(monkeypatch, capsys):
+  from quantx_research import cli, next_day_selection_gpu
+
+  monkeypatch.setattr(cli, "high_resource_guard", nullcontext)
+
+  def blocked():
+    raise cli.HostAdmissionDenied("HOST_GPU_MEMORY_BUDGET")
+
+  monkeypatch.setattr(next_day_selection_gpu, "probe_lightgbm_gpu", blocked)
+  assert cli.main(["probe-lightgbm-gpu", "--json"]) == 75
+  captured = capsys.readouterr()
+  assert captured.out == ""
+  assert "HOST_GPU_MEMORY_BUDGET" in captured.err
+  assert "研究运行失败" not in captured.err
+
+
+def test_preparation_runtime_admission_denial_keeps_protection_exit_code(tmp_path, monkeypatch):
+  from types import SimpleNamespace
+
+  from quantx_infrastructure import training_host_guard
+  from quantx_research import preparation_job
+
+  request = tmp_path / "request.json"
+  request.write_text("{}")
+  monkeypatch.setattr(preparation_job.sys, "argv", ["preparation", str(request)])
+  monkeypatch.setattr(training_host_guard, "high_resource_guard", nullcontext)
+  monkeypatch.setattr(preparation_job.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None))
+
+  async def blocked(*args):
+    raise training_host_guard.HostAdmissionDenied("HOST_GPU_MEMORY_STATE_UNKNOWN")
+
+  monkeypatch.setattr(preparation_job, "execute", blocked)
+  with pytest.raises(SystemExit) as stopped:
+    preparation_job.main()
+  assert stopped.value.code == 75
+  assert list(tmp_path.iterdir()) == [request]
 
 
 def test_validation_console_summary_does_not_mutate_full_factor_evidence() -> None:

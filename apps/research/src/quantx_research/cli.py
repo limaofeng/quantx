@@ -263,6 +263,8 @@ def _dispatch(args: argparse.Namespace) -> int:
       from quantx_research.next_day_selection_job import main as run_job
 
       return int(run_job(["--request-file", str(args.request_file)]))
+  except HostAdmissionDenied:
+    raise
   except ResearchResourceError as exc:
     if exc.run_dir is not None:
       print(f"研究因资源保护停止，诊断产物: {exc.run_dir}", file=sys.stderr)
