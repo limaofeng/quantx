@@ -1080,6 +1080,11 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   inbox 的错误成功。命令分发现在复核已有 cut 的当前义务，不依赖内存清理触发复核。
   **40 项定向测试与 Ruff 通过**，证据 `.codex_screenshots/p6-completion-restart-final.log`；
   实际消费恢复、同命令延后重试、审计不重写与原退出计划保留已验证，回报收敛仍为合成边界。
+  继续以真实业务键验证已终结旧源的运行时事件 staging/drain：重复 ORDER/TRADE 不新增
+  事件、不重复投影意图；新成交保留原 owner 并保持 PENDING，当前义务复核被 runtime
+  backlog 阻断，原 cut 与 ExitPlan 不变，无重建运行时。**3 项测试与 Ruff 通过**，证据
+  `.codex_screenshots/p6-late-receipts-first.log`；SQLite 隔离验证覆盖实际事件入库/消费代码，
+  不包括券商 inbox 传输、公共订单/成交投影或完整进程验收。
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
