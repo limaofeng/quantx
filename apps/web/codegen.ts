@@ -8,6 +8,8 @@ const graphqlSchemaEndpoint =
 const graphqlSchemaToken = process.env.CODEGEN_GRAPHQL_TOKEN?.trim();
 const paperDocuments =
   'src/features/portfolio/hooks/tAssistantPaperQueries.gql';
+const liveAssistantDocuments =
+  'src/features/portfolio/hooks/tAssistantLiveQueries.gql';
 const preparationDocuments =
   'src/features/system/pages/researchPreparation.gql';
 const scalarTypes = {
@@ -38,6 +40,7 @@ const config: CodegenConfig = {
         'src/**/*.gql',
         '!src/generated/**/*',
         `!${paperDocuments}`,
+        `!${liveAssistantDocuments}`,
         `!${preparationDocuments}`,
       ],
       preset: 'client',
@@ -48,6 +51,12 @@ const config: CodegenConfig = {
       config: {
         scalars: scalarTypes,
       },
+    },
+    'src/generated/t-assistant-live/': {
+      documents: [liveAssistantDocuments],
+      preset: 'client',
+      plugins: [],
+      config: { scalars: scalarTypes },
     },
     'src/generated/research-preparation/': {
       documents: [preparationDocuments],

@@ -29,11 +29,11 @@ function readToolbarSource() {
 }
 
 describe('TTradeGlobalPage toolbar color contract', () => {
-  it('uses blue interaction classes for 实时监控 and PAPER while preserving replay cyan', () => {
+  it('uses blue interaction classes for 实时监控 and PAPER/LIVE while preserving replay cyan', () => {
     const toolbar = readToolbarSource();
     const workspaceModes = sourceSection(
       toolbar,
-      "{(['REALTIME', 'REPLAY', 'PAPER'] as const).map(mode => {",
+      "{(['REALTIME', 'REPLAY', 'PAPER', 'LIVE_ASSISTANT'] as const).map(",
       "{workspaceMode === 'REALTIME' && ("
     );
 
@@ -48,6 +48,7 @@ describe('TTradeGlobalPage toolbar color contract', () => {
     );
     expect(workspaceModes).toContain("mode === 'PAPER'");
     expect(workspaceModes).toContain("'PAPER 执行'");
+    expect(workspaceModes).toContain("'LIVE 人工确认'");
   });
 
   it('uses blue interaction classes for every realtime subview button', () => {

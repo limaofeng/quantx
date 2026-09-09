@@ -612,16 +612,27 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
 - `LivePortfolioSnapshotReader` 已串联归因、估值、公共容量及未提交分配义务；冻结配置、
   周期、快照（严格小于 90 秒）、账户控制、时间和行业证据缺失均阻断，保护底仓与已接受
   订单现金不重复扣减。市场适配器仍需提供明确 current/prior-close marks；尚未接入 LIVE
-  supervisor、公开基线审批或人工确认界面，不据此开放真实 ENTRY。
+  supervisor 或公开基线审批；人工确认界面见下项，不据此开放真实 ENTRY。
 - 上述新组件初轮 **43 项通过**；联合 PAPER、容量、确认、估值及 envelope 回归
   **154 项通过、3 项显式 PostgreSQL 门跳过**，JUnit
   `.codex_screenshots/p6-live-portfolio-regression.xml`。时间门补强及新增负测另作受影响复验。
   未新增数据库表/迁移，复用已有 append-only 事件；当前迁移冲突仍须单独解决。
-- 剩余开发顺序：确认界面/GraphQL 入口、LIVE 组合事实供应端与 supervisor 接线、
+- 独立 LIVE 人工确认已接入 GraphQL 与 Web 工作区：查询仅当前账户、当前配置的 LIVE
+  owner；预览/消费同时检查做 T 控制、退出保护控制及确认权限，复用设备绑定的 challenge。
+  重试保留原 token，持久化命令结果未明确时禁止创建下一次确认；确认成功仅显示待重新分配，
+  不冒充下单或成交。页面核对同一 owner、意图和自动退出保护，切换账户清除预览。
+- 确认/API/权限联合 **41 项通过**，新增异常与空队列 **3 项通过**；新页面 **6 项通过**。
+  Web 全集首轮 **894 项通过、1 项旧工具栏定位断言失败**；同步第四个工作区后该文件
+  **3 项定向复验通过**。本机 Caddy 实际契约 codegen、根 check/lint/build 与包预算通过；
+  lint 保留一个无关的既有 Fast Refresh warning。开发机缺失的 ESLint 原生依赖已本地补齐。
+  已通过统一入口重载 macOS dev/full/paper，未开启实盘或访问生产数据服务。
+  证据：`.codex_screenshots/p6-live-confirmation.xml`、`p6-live-graphql-tests.log`、
+  `p6-live-panel-tests.log`、`p6-live-toolbar-tests.log` 及同目录 codegen/check/lint/build 日志。
+- 剩余开发顺序：LIVE 组合事实供应端与 supervisor 接线、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
-  本检查点的当前结论，不重复追加整轮报告。没有业务库切换、服务启停、E2E 或真实订单。
+  本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。
   排空基础提交 `6ec95815`；模型草案 `9062cd8f`；退出授权基础与
   `feat(trading): bind T execution confirmations to exit protection` 同提交。
 

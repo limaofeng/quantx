@@ -1,0 +1,83 @@
+query Portfolio_TAssistantLiveApprovalQueue($accountId: String!) {
+  tAssistantLiveApprovalQueue(accountId: $accountId) {
+    executionId
+    status
+    entryAuthorization
+    entryReadiness
+    reasonCodes
+    truncated
+    entries {
+      intentId
+      instrumentCode
+      status
+      requestedAmount
+      reason
+      expiresAt
+      canPreview
+      confirmationStatus
+    }
+  }
+}
+mutation Portfolio_PreviewTAssistantLiveEntry(
+  $accountId: String!
+  $executionId: String!
+  $intentId: String!
+) {
+  previewTAssistantLiveEntry(
+    accountId: $accountId
+    executionId: $executionId
+    intentId: $intentId
+  ) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      accountId
+      intentId
+      instrumentCode
+      side
+      bucket
+      reason
+      targetVolume
+      referencePrice
+      estimatedAmount
+      signalExpiresAt
+      challengeExpiresAt
+      warnings
+      executionOwner {
+        ownerType
+        ownerId
+      }
+      environment
+      tTradeAutoExitAuthorization {
+        planId
+        maxProtectedVolume
+        rules
+        t1Policy
+        executionPolicy
+        executionSemantics
+        authorizationExpiresAt
+      }
+    }
+  }
+}
+mutation Portfolio_ConfirmTAssistantLiveEntry(
+  $accountId: String!
+  $executionId: String!
+  $intentId: String!
+  $confirmationToken: String!
+) {
+  confirmTAssistantLiveEntry(
+    accountId: $accountId
+    executionId: $executionId
+    intentId: $intentId
+    confirmationToken: $confirmationToken
+  ) {
+    success
+    code
+    message
+    challengeId
+  }
+}

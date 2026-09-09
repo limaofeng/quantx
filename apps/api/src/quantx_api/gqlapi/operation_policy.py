@@ -134,6 +134,7 @@ _register(
     "strategyRuns",
     "pendingEntryIntents",
     "tAssistantPaperExecutions",
+    "tAssistantLiveApprovalQueue",
     "tAssistantPaperExecution",
     "tAssistantPaperOpportunities",
     "tAssistantPaperAllocations",
@@ -425,9 +426,11 @@ _register(
     "cancelTTradeOrder",
     "confirmTTradeControl",
     "confirmTTradeEntryApproval",
+    "confirmTAssistantLiveEntry",
     "pauseTTradeEntries",
     "previewTTradeControl",
     "previewTTradeEntryApproval",
+    "previewTAssistantLiveEntry",
     "previewTTradeSignalPolicy",
     "reconcileTTradeGlobalMonitor",
     "rejectTTradeEntry",
@@ -553,6 +556,7 @@ _TRADE_APPROVAL_FIELDS = {
   "confirmStrategyTradeIntentApproval",
   "confirmTTradeControl",
   "confirmTTradeEntryApproval",
+  "confirmTAssistantLiveEntry",
   "previewExitIntent",
   "previewAccountExecutionControl",
   "previewEntryIntent",
@@ -560,6 +564,7 @@ _TRADE_APPROVAL_FIELDS = {
   "previewStrategyTradeIntentApproval",
   "previewTTradeControl",
   "previewTTradeEntryApproval",
+  "previewTAssistantLiveEntry",
   "triggerEntryPlanManualRule",
 }
 for _field in _TRADE_APPROVAL_FIELDS:
@@ -574,7 +579,12 @@ for _field in _TRADE_APPROVAL_FIELDS:
 # preview and consume therefore require the liquidation authority before a
 # challenge can be issued or consumed, while retaining trade:approve as the
 # final explicit approval scope.
-for _field in {"previewTTradeEntryApproval", "confirmTTradeEntryApproval"}:
+for _field in {
+  "previewTTradeEntryApproval",
+  "confirmTTradeEntryApproval",
+  "previewTAssistantLiveEntry",
+  "confirmTAssistantLiveEntry",
+}:
   _key = ("Mutation", normalize_field_name(_field))
   _policy = _POLICIES[_key]
   _permissions = tuple(_policy.required_permissions)

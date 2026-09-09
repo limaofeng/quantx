@@ -142,6 +142,7 @@ import type {
 import type { ReplaySidebarContext } from './t-trade-global/TTradeReplaySidebar';
 import {
   TAssistantPaperPanel,
+  TAssistantLivePanel,
   TTradeActivityView,
   TTradeExecutionSettingsPanel,
   TTradeLiveDecisionAudit,
@@ -277,7 +278,7 @@ export function TTradeGlobalPage() {
   const accountId = tradingAccountConfig.defaultAccountId;
   const { refreshSafety } = useTradingSafety();
   const [workspaceMode, setWorkspaceMode] = React.useState<
-    'REALTIME' | 'REPLAY' | 'PAPER'
+    'REALTIME' | 'REPLAY' | 'PAPER' | 'LIVE_ASSISTANT'
   >('REALTIME');
   const [activeReplayView, setActiveReplayView] =
     React.useState<ReplayWorkspaceView>('OVERVIEW');
@@ -2227,38 +2228,42 @@ export function TTradeGlobalPage() {
         className="flex h-full shrink-0 items-stretch"
         aria-label="做 T 工作区"
       >
-        {(['REALTIME', 'REPLAY', 'PAPER'] as const).map(mode => {
-          const active = workspaceMode === mode;
-          return (
-            <button
-              key={mode}
-              type="button"
-              onClick={() => {
-                setWorkspaceMode(mode);
-                if (mode === 'REPLAY') setActiveReplayView('OVERVIEW');
-              }}
-              className={cn(
-                'relative flex h-full shrink-0 cursor-pointer items-center gap-1.5 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
-                active
-                  ? mode === 'REPLAY'
-                    ? 'text-cyan-200 after:bg-cyan-400 focus-visible:ring-cyan-400/60'
-                    : 'text-blue-200 after:bg-blue-400 focus-visible:ring-blue-400/70'
-                  : 'text-slate-600 hover:text-slate-200'
-              )}
-            >
-              {mode === 'REPLAY' ? (
-                <FlaskConical className="h-3.5 w-3.5" />
-              ) : (
-                <Radar className="h-3.5 w-3.5" />
-              )}
-              {mode === 'PAPER'
-                ? 'PAPER 执行'
-                : mode === 'REPLAY'
-                  ? '回放测试'
-                  : '实时监控'}
-            </button>
-          );
-        })}
+        {(['REALTIME', 'REPLAY', 'PAPER', 'LIVE_ASSISTANT'] as const).map(
+          mode => {
+            const active = workspaceMode === mode;
+            return (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => {
+                  setWorkspaceMode(mode);
+                  if (mode === 'REPLAY') setActiveReplayView('OVERVIEW');
+                }}
+                className={cn(
+                  'relative flex h-full shrink-0 cursor-pointer items-center gap-1.5 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                  active
+                    ? mode === 'REPLAY'
+                      ? 'text-cyan-200 after:bg-cyan-400 focus-visible:ring-cyan-400/60'
+                      : 'text-blue-200 after:bg-blue-400 focus-visible:ring-blue-400/70'
+                    : 'text-slate-600 hover:text-slate-200'
+                )}
+              >
+                {mode === 'REPLAY' ? (
+                  <FlaskConical className="h-3.5 w-3.5" />
+                ) : (
+                  <Radar className="h-3.5 w-3.5" />
+                )}
+                {mode === 'LIVE_ASSISTANT'
+                  ? 'LIVE 人工确认'
+                  : mode === 'PAPER'
+                    ? 'PAPER 执行'
+                    : mode === 'REPLAY'
+                      ? '回放测试'
+                      : '实时监控'}
+              </button>
+            );
+          }
+        )}
         {workspaceMode === 'REALTIME' && (
           <>
             <span className="mx-2 my-3 w-px bg-white/[0.08]" />
@@ -2340,7 +2345,11 @@ export function TTradeGlobalPage() {
             <WalletCards className="h-3.5 w-3.5" />T 批次退出
           </Button>
         )}
-        {workspaceMode === 'PAPER' ? (
+        {workspaceMode === 'LIVE_ASSISTANT' ? (
+          <span className="text-ui-caption text-slate-400">
+            LIVE · 设备确认后重新分配
+          </span>
+        ) : workspaceMode === 'PAPER' ? (
           <span className="text-ui-caption text-slate-400">
             PAPER · 执行事实只读
           </span>
@@ -3250,15 +3259,19 @@ export function TTradeGlobalPage() {
       <div className="min-h-0 flex-1">
         <TTradePanelBoundary
           name={
-            workspaceMode === 'PAPER'
-              ? 'PAPER 执行'
-              : workspaceMode === 'REPLAY'
-                ? '回放测试'
-                : (tTradeModes.find(mode => mode.id === activeMode)?.label ??
-                  '做 T 面板')
+            workspaceMode === 'LIVE_ASSISTANT'
+              ? 'LIVE 人工确认'
+              : workspaceMode === 'PAPER'
+                ? 'PAPER 执行'
+                : workspaceMode === 'REPLAY'
+                  ? '回放测试'
+                  : (tTradeModes.find(mode => mode.id === activeMode)?.label ??
+                    '做 T 面板')
           }
         >
-          {workspaceMode === 'PAPER' ? (
+          {workspaceMode === 'LIVE_ASSISTANT' ? (
+            <TAssistantLivePanel accountId={accountId} />
+          ) : workspaceMode === 'PAPER' ? (
             <TAssistantPaperPanel accountId={accountId} />
           ) : workspaceMode === 'REPLAY' ? (
             <TTradeReplayPanel
@@ -3314,7 +3327,7 @@ export function TTradeGlobalPage() {
         minWidth: 260,
         storageScope: 't-trade-studio',
       }}
-      showSidebar={workspaceMode !== 'PAPER'}
+      showSidebar={workspaceMode === 'REALTIME' || workspaceMode === 'REPLAY'}
       statusBarLeft={
         <>
           <span className="inline-flex items-center gap-2">
@@ -3330,13 +3343,15 @@ export function TTradeGlobalPage() {
                       : 'bg-slate-600'
               )}
             />
-            {workspaceMode === 'PAPER'
-              ? 'PAPER 执行 · 只读'
-              : workspaceMode === 'REPLAY'
-                ? '历史回放测试模式'
-                : monitor?.enabled
-                  ? '全局监控运行中'
-                  : '全局监控已停止'}
+            {workspaceMode === 'LIVE_ASSISTANT'
+              ? 'LIVE 人工确认'
+              : workspaceMode === 'PAPER'
+                ? 'PAPER 执行 · 只读'
+                : workspaceMode === 'REPLAY'
+                  ? '历史回放测试模式'
+                  : monitor?.enabled
+                    ? '全局监控运行中'
+                    : '全局监控已停止'}
           </span>
           <span className="text-slate-700">|</span>
           <span className="font-mono">{accountId || '未配置账户'}</span>
@@ -3352,7 +3367,9 @@ export function TTradeGlobalPage() {
         </>
       }
       statusBarRight={
-        workspaceMode === 'PAPER' ? (
+        workspaceMode === 'LIVE_ASSISTANT' ? (
+          <span>确认提交后等待 Engine 重新分配与风控</span>
+        ) : workspaceMode === 'PAPER' ? (
           <span>PAPER Broker · 原始行情时间与本地受理时间分别记录</span>
         ) : workspaceMode === 'REPLAY' ? (
           <>

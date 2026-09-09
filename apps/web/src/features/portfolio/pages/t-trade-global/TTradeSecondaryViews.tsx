@@ -73,3 +73,9 @@ export const TAssistantPaperPanel = lazy(() =>
     default: module.TAssistantPaperPanel,
   }))
 );
+
+export const TAssistantLivePanel = lazy(() =>
+  import('./TAssistantLivePanel').then(module => ({
+    default: module.TAssistantLivePanel,
+  }))
+);
