@@ -1046,7 +1046,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   策略不受该标记影响。**68 项定向回归及 Ruff 通过**，证据
   `.codex_screenshots/p6-legacy-no-recreation-final.log`；SQLite 持久事实与实际 monitor/
   公共分发代码验证，会话/持仓端点为合成边界，不代表生产并发验收。
-  下一步推进服务端排空后终结/解除旧绑定整链；
+  旧 owner 券商订单收敛证据读取组件已实现：同一事务锁定 pending/correlation、intent、
+  outbox、runtime event、委托和成交；要求精确 owner/账户/标的/方向、券商终态、成交数量和
+  成交 ID 逐笔一致且回报已 APPLIED，ACK 或本地终态不能单独证明完成。零成交须有显式
+  数量，迟到成交与旧 RECONCILED_ZERO_FILL 冲突保持阻断。**17 项定向测试及 Ruff 通过**，
+  证据 `.codex_screenshots/p6-legacy-settlement-final.log`；真实 ORM 配合合成回报，仅为
+  逐笔证据，不是账户义务归零证明。组件不写订单、batch、ExitPlan 或执行状态。
+  下一步将其接入完整义务核验（含未投递命令、账户快照与 inbox）及终结/解除旧绑定事务；
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
