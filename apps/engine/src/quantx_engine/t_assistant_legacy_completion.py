@@ -55,6 +55,7 @@ async def complete_legacy_t_drain(
   expected_head_version: int,
   actor_id: str,
   now: datetime,
+  revalidate_completed: bool = False,
 ):
   """Caller owns authorization, SERIALIZABLE commit/retry and post-commit memory cleanup.
 
@@ -104,7 +105,10 @@ async def complete_legacy_t_drain(
         or details.get("evidence_hash") != stable_manifest_hash(evidence)
       ):
         raise ValueError("LEGACY_T_COMPLETION_REPLAY_CONFLICT")
-      return details
+      if not revalidate_completed:
+        return details
+    elif revalidate_completed:
+      raise ValueError("LEGACY_T_COMPLETION_COMMITTED_CUT_REQUIRED")
     run = await db.get(
       StrategyRun, run_id, with_for_update=True, populate_existing=True
     )
@@ -112,14 +116,27 @@ async def complete_legacy_t_drain(
     marker = await db.get(TTradeRolloutEvent, legacy_t_drain_event_id(run_id))
     material = dict(marker.details or {}) if marker else {}
     if (
-      head.strategy_run_id != run_id
+      (
+        head.strategy_run_id != run_id
+        if existing is None
+        else head.strategy_run_id is not None
+      )
       or head.mode != "live"
-      or head.state_version != expected_head_version
+      or (
+        head.state_version != expected_head_version
+        if existing is None
+        else head.state_version < expected_head_version + 1
+      )
       or run is None
       or strategy is None
       or strategy.class_name != T_TRADE_STRATEGY_CLASS_NAME
       or run.mode != StrategyRunMode.LIVE
-      or run.status not in {StrategyRunStatus.RUNNING, StrategyRunStatus.PAUSED}
+      or run.status
+      not in (
+        {StrategyRunStatus.RUNNING, StrategyRunStatus.PAUSED}
+        if existing is None
+        else {StrategyRunStatus.STOPPED}
+      )
       or dict(run.parameters or {}).get("account_id") != head.account_id
       or marker is None
       or marker.event_type != LEGACY_T_DRAIN_EVENT
@@ -345,6 +362,8 @@ async def complete_legacy_t_drain(
       retained_batch_ids=[row.batch_id for row in batches],
       retained_exit_plan_ids=[row.plan_id for row in plans],
     )
+    if existing is not None:
+      return dict(existing.details)
     details = dict(
       request=request, evidence=evidence, evidence_hash=stable_manifest_hash(evidence)
     )
@@ -370,3 +389,63 @@ async def complete_legacy_t_drain(
     )
     await db.flush()
     return details
+
+
+async def dispatch_legacy_completion(db, *, command_id, payload, now):
+  """Internal outbox command linked to the exact successful device-confirmed drain."""
+  from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
+  from quantx_infrastructure.models.trade_confirmation_challenge import (
+    TradeConfirmationChallenge,
+  )
+
+  from .t_assistant_confirmed_legacy_drain import execute_confirmed_legacy_drain
+
+  if (
+    not command_id
+    or set(payload) != {"drain_command_id", "expected_head_version"}
+    or not isinstance(payload["drain_command_id"], str)
+    or not payload["drain_command_id"]
+    or type(payload["expected_head_version"]) is not int
+    or payload["expected_head_version"] < 1
+  ):
+    raise ValueError("LEGACY_T_COMPLETION_COMMAND_INVALID")
+  command = await db.get(EngineCommandOutbox, command_id)
+  original = await db.get(EngineCommandOutbox, payload["drain_command_id"])
+  if (
+    command is None
+    or command.command_type != "T_ASSISTANT_COMPLETE_LEGACY_DRAIN"
+    or command.payload != payload
+    or command.processing_status != "PROCESSING"
+    or original is None
+    or original.command_type != "T_ASSISTANT_CONFIRM_LEGACY_DRAIN"
+    or original.processing_status != "SUCCEEDED"
+    or set(original.payload or {}) != {"challenge_id"}
+    or command.aggregate_id != original.aggregate_id
+  ):
+    raise ValueError("LEGACY_T_COMPLETION_ORIGINAL_COMMAND_REQUIRED")
+  challenge = await db.get(TradeConfirmationChallenge, original.payload["challenge_id"])
+  if (
+    challenge is None
+    or not original.aggregate_id
+    or await db.get(TTradeRolloutEvent, legacy_t_drain_event_id(original.aggregate_id))
+    is None
+  ):
+    raise ValueError("LEGACY_T_COMPLETION_ORIGINAL_DRAIN_REQUIRED")
+  # Reuse signature, actor, consumed time and exact command-reference validation.
+  # Its original committed marker makes this an audit replay, never a new drain.
+  drained = await execute_confirmed_legacy_drain(
+    db,
+    challenge_id=challenge.id,
+    command_id=original.message_id,
+    account_id=challenge.account_id,
+    now=now,
+  )
+  result = await complete_legacy_t_drain(
+    db,
+    config_id=drained["request"]["config_id"],
+    run_id=drained["run_id"],
+    expected_head_version=payload["expected_head_version"],
+    actor_id=challenge.user_id,
+    now=now,
+  )
+  return {"run_id": drained["run_id"], "account_id": challenge.account_id, **result}

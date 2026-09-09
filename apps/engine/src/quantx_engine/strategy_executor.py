@@ -5182,6 +5182,52 @@ class StrategyExecutor:
         )
       runtime.status = ExecutionStatus.ERROR
 
+  async def retire_completed_legacy_run(self, run_id: str, *, account_id: str) -> bool:
+    """Release a committed old T runtime without cancelling its downstream plans.
+
+    Ordinary LIVE force-stop remains forbidden at the manager boundary. This
+    path requires the durable completion audit and a fresh full obligation
+    recheck after acquiring the runtime's lifecycle operation slot.
+    """
+    from quantx_infrastructure.core.assistant_strategy_policy import (
+      T_TRADE_STRATEGY_CLASS_NAME,
+    )
+
+    runtime = self.runs.get(run_id)
+    if runtime is None:
+      return True
+    if (
+      runtime.context.mode != StrategyRunMode.LIVE
+      or runtime.strategy_class.__name__ != T_TRADE_STRATEGY_CLASS_NAME
+      or not self._uses_t_trade_opportunity_runtime(runtime)
+      or str(runtime.context.parameters.get("account_id") or "") != account_id
+    ):
+      return False
+
+    async def retire():
+      from quantx_infrastructure.models.agent_runtime import TTradeRolloutEvent
+
+      from .t_assistant_legacy_completion import complete_legacy_t_drain
+
+      async with AsyncSessionLocal() as db, db.begin():
+        await db.connection(execution_options={"isolation_level": "SERIALIZABLE"})
+        audit = await db.get(TTradeRolloutEvent, f"legacy-t-completed:{run_id}")
+        request = dict((audit.details or {}).get("request") or {}) if audit else {}
+        if audit is None or audit.account_id != account_id or request.get("run_id") != run_id:
+          raise ValueError("LEGACY_T_COMPLETION_COMMITTED_CUT_REQUIRED")
+        await complete_legacy_t_drain(
+          db, **request, actor_id=audit.actor_user_id,
+          now=datetime.now(timezone.utc), revalidate_completed=True,
+        )
+      runtime.legacy_t_draining = True
+      self._clear_t_trade_intent_emission_snapshot(runtime)
+      # The exact old strategy on_stop is a no-op and LiveBroker.disconnect
+      # only releases its local connection flag. Do not call manager stop or
+      # any strategy-order cancellation API, and do not rewrite run/plan owners.
+      return await self._stop_runtime(run_id, force=True)
+
+    return await self._run_lifecycle_operation(runtime, "retire-legacy", retire)
+
   async def stop(self, run_id: str, *, force: bool = False) -> bool:
     if run_id not in self.runs:
       return False

@@ -1058,8 +1058,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   **62 项定向测试及 Ruff 通过**，证据 `.codex_screenshots/p6-legacy-completion-verified.log`；
   SQLite、真实 ORM/API 本地终态代码配合合成券商回报与事件应用，不代表 PostgreSQL 并发
   或完整 Engine 进程验收。内部事务尚未接入公开 mutation 或自动调度。
-  下一步接入 Engine 命令消费、SERIALIZABLE 重试和提交后的内存清理，再验证整链；
-  不开放新源准入，不执行业务维护 mutation。
+  Engine 内部终结命令消费与提交后运行时清理已接入：绑定原成功排空命令、签名确认与
+  持久化排空标记；SERIALIZABLE 冲突、死锁、未决义务及清理失败重排原命令，不提前
+  标记成功。清理获得运行时生命周期操作槽后重新验证已提交审计及当前义务，复用实际
+  资源释放路径，保留原订单、batch 和活动 ExitPlan，不调用撤单或改写归属。
+  **82 项定向测试及 Ruff 通过**，证据
+  `.codex_screenshots/p6-legacy-completion-consumer-final.log`；覆盖实际消费循环、回滚、
+  幂等重试、来源拒绝及清理前新义务阻断。SQLite 与模拟资源端口不能替代 PostgreSQL
+  并发、完整 Engine 进程或实盘验收。下一步接入服务端终结命令生产与状态查询，补齐
+  重启和迟到回报整链验证；公开维护入口尚未开放，不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

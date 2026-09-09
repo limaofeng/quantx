@@ -40,6 +40,7 @@ from quantx_infrastructure.services.t_trade_service import (
   TTradeService,
 )
 from sqlalchemy import select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from quantx_engine.strategy_manager import strategy_manager
@@ -67,6 +68,10 @@ class LegacyDrainRuntimeInvalidationPending(RuntimeError):
     super().__init__("LEGACY_T_DRAIN_RUNTIME_INVALIDATION_PENDING")
 
 
+class LegacyCompletionRetry(RuntimeError):
+  """Retry the same completion command; never fabricate a second cutover."""
+
+
 async def _wait_for_database_retry(
   stopped: asyncio.Event,
   *,
@@ -88,13 +93,16 @@ async def _complete_with_database_retry(
   result: Optional[dict[str, Any]] = None,
   error: Optional[str] = None,
   retry_legacy_drain: bool = False,
+  retry_legacy_completion: Optional[str] = None,
 ) -> bool:
   """Persist terminal/deferred command state despite database pool contention."""
 
   delay = _DATABASE_CONTENTION_RETRY_SECONDS
   while not stopped.is_set():
     try:
-      if retry_legacy_drain:
+      if retry_legacy_completion:
+        await _reschedule_legacy_drain(message_id, completion_reason=retry_legacy_completion)
+      elif retry_legacy_drain:
         await _reschedule_legacy_drain(message_id)
       else:
         await _complete(message_id, result=result, error=error)
@@ -293,6 +301,53 @@ async def _dispatch(
         # Only this post-commit phase is retryable. Invalid credentials, changed
         # obligations or expired first-use windows remain terminal failures.
         raise LegacyDrainRuntimeInvalidationPending() from exc
+    return result
+  if command_type == "T_ASSISTANT_COMPLETE_LEGACY_DRAIN":
+    from quantx_infrastructure.models.trade_confirmation_challenge import (
+      TradeConfirmationChallenge,
+    )
+
+    from .t_assistant_legacy_completion import dispatch_legacy_completion
+
+    if not isinstance(payload.get("drain_command_id"), str):
+      raise ValueError("LEGACY_T_COMPLETION_COMMAND_INVALID")
+    try:
+      async with AsyncSessionLocal() as db:
+        original = await db.get(EngineCommandOutbox, payload["drain_command_id"])
+        challenge_id = (original.payload or {}).get("challenge_id") if original else None
+        challenge = await db.get(TradeConfirmationChallenge, challenge_id) if challenge_id else None
+        if challenge is None:
+          raise ValueError("LEGACY_T_COMPLETION_ORIGINAL_COMMAND_REQUIRED")
+        account_id = challenge.account_id
+    except SQLAlchemyTimeoutError as exc:
+      raise LegacyCompletionRetry("LEGACY_T_COMPLETION_TRANSACTION_RETRY") from exc
+    async with t_trade_account_coordination_lock(account_id):
+      try:
+        async with AsyncSessionLocal() as db, db.begin():
+          await db.connection(execution_options={"isolation_level": "SERIALIZABLE"})
+          result = await dispatch_legacy_completion(
+            db, command_id=command_id, payload=payload, now=utcnow().replace(tzinfo=UTC),
+          )
+      except SQLAlchemyTimeoutError as exc:
+        raise LegacyCompletionRetry("LEGACY_T_COMPLETION_TRANSACTION_RETRY") from exc
+      except DBAPIError as exc:
+        if (getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)) in {"40001", "40P01"}:
+          raise LegacyCompletionRetry("LEGACY_T_COMPLETION_TRANSACTION_RETRY") from exc
+        raise
+      except ValueError as exc:
+        if str(exc) in {
+          "LEGACY_T_COMPLETION_ACCOUNT_PROOF_REQUIRED", "LEGACY_T_COMPLETION_INBOX_BACKLOG",
+          "LEGACY_T_COMPLETION_INTENT_UNSETTLED", "LEGACY_T_SETTLEMENT_RUNTIME_BACKLOG",
+          "LEGACY_T_SETTLEMENT_ORDER_NOT_TERMINAL", "LEGACY_T_SETTLEMENT_RECEIPTS_INCOMPLETE",
+          "LEGACY_T_SETTLEMENT_COMMAND_UNRESOLVED",
+        }:
+          raise LegacyCompletionRetry("LEGACY_T_COMPLETION_OBLIGATIONS_PENDING") from exc
+        raise
+      try:
+        if not await strategy_manager.executor.retire_completed_legacy_run(result["run_id"], account_id=account_id):
+          raise RuntimeError("runtime retirement incomplete")
+      except Exception as exc:
+        raise LegacyCompletionRetry("LEGACY_T_COMPLETION_RUNTIME_CLEANUP_PENDING") from exc
     return result
   if command_type == "T_ASSISTANT_PREPARE_LIVE_AUTO_SUCCESSOR":
     from .t_assistant_live_successor import dispatch_live_auto_successor
@@ -718,19 +773,24 @@ async def _claim_next() -> Optional[tuple[str, str, dict[str, Any]]]:
     return command.message_id, command.command_type, dict(command.payload or {})
 
 
-async def _reschedule_legacy_drain(message_id: str) -> None:
+async def _reschedule_legacy_drain(message_id: str, *, completion_reason: Optional[str] = None) -> None:
+  if completion_reason is not None and completion_reason not in {
+    "LEGACY_T_COMPLETION_TRANSACTION_RETRY", "LEGACY_T_COMPLETION_OBLIGATIONS_PENDING",
+    "LEGACY_T_COMPLETION_RUNTIME_CLEANUP_PENDING",
+  }:
+    raise ValueError("LEGACY_T_COMPLETION_RETRY_REASON_INVALID")
   async with AsyncSessionLocal() as db, db.begin():
     command = await db.get(EngineCommandOutbox, message_id, with_for_update=True)
     if (
       command is None
-      or command.command_type != "T_ASSISTANT_CONFIRM_LEGACY_DRAIN"
+      or command.command_type != ("T_ASSISTANT_COMPLETE_LEGACY_DRAIN" if completion_reason else "T_ASSISTANT_CONFIRM_LEGACY_DRAIN")
       or command.processing_status != "PROCESSING"
     ):
       raise ValueError("LEGACY_T_DRAIN_RETRY_COMMAND_CONFLICT")
     attempts = max(1, int(command.processing_attempts or 0))
     delay = min(30, 2 ** min(attempts - 1, 5))
     command.processing_status = "PENDING"
-    command.processing_error = "LEGACY_T_DRAIN_RUNTIME_INVALIDATION_PENDING"
+    command.processing_error = completion_reason or "LEGACY_T_DRAIN_RUNTIME_INVALIDATION_PENDING"
     command.available_at = utcnow() + timedelta(seconds=delay)
     command.processed_at = None
     command.result = None
@@ -803,6 +863,8 @@ async def run_command_consumer(stopped: asyncio.Event) -> None:
       result = await _dispatch(command_type, payload, command_id=message_id)
     except LegacyDrainRuntimeInvalidationPending:
       await _complete_with_database_retry(stopped, message_id, retry_legacy_drain=True)
+    except LegacyCompletionRetry as exc:
+      await _complete_with_database_retry(stopped, message_id, retry_legacy_completion=str(exc))
     except Exception as exc:
       await _complete_with_database_retry(stopped, message_id, error=str(exc))
     else:
