@@ -36,11 +36,11 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.models.enums import InstrumentType
 from quantx_infrastructure.models.instrument import Instrument
 from quantx_infrastructure.repositories.kline_repository import KLineRepository
+from quantx_infrastructure.services.market_data_request_waiter import (
+  wait_for_market_data_ingestion,
+)
 from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
   MARKET_DATA_REQUEST_BATCH_SIZE,
-)
-from quantx_worker.prefector.flows.durable_agent_flows import (
-  reprocess_uploaded_market_data_request,
 )
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -1602,7 +1602,7 @@ async def _retry_failed_ingestion_job(
       _refresh_summary(state)
       _atomic_write_json(state_path, state)
 
-    reprocessed = await reprocess_uploaded_market_data_request(request_id)
+    reprocessed = await wait_for_market_data_ingestion(request_id)
     await _assert_campaign_lock(campaign_lock)
     if (
       reprocessed.get("status") != "completed"

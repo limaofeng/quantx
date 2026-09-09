@@ -8,6 +8,12 @@ import pytest
 from quantx_infrastructure import runtime_store
 
 
+class SQLTestStore(runtime_store.DurableRuntimeStore):
+  async def _guard_ingestion_owner(self, connection, *, lock=True):
+    # SQL-shape tests supply a query-only connection, not a process lease.
+    pass
+
+
 class _ScalarResult:
   def __init__(self, value: str = "request-1") -> None:
     self.value = value
@@ -192,7 +198,7 @@ class _ConcurrentBoundDeviceConnection(_BoundDeviceConnection):
 @pytest.mark.asyncio
 async def test_market_data_request_binds_an_explicit_capable_device() -> None:
   connection = _BoundDeviceConnection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   request_id = await store.create_market_data_request(
@@ -218,7 +224,7 @@ async def test_market_data_request_binds_an_explicit_capable_device() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_idempotent_market_data_requests_converge_atomically() -> None:
   connection = _ConcurrentBoundDeviceConnection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
   payload = {"operation": "bars", "stock_list": ["600000.SH"]}
 
@@ -241,7 +247,7 @@ async def test_concurrent_idempotent_market_data_requests_converge_atomically() 
 @pytest.mark.asyncio
 async def test_market_device_query_uses_local_server_heartbeat() -> None:
   connection = _AvailabilityConnection([])
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _ConnectEngine(connection)
 
   assert await store.available_market_data_device() is None
@@ -257,7 +263,7 @@ async def test_market_device_query_skips_blocked_windows_launch(
 ) -> None:
   monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
   monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_RUNTIME_UNAVAILABLE")
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _UnexpectedConnectEngine()
 
   assert await store.available_market_data_device() is None
@@ -269,7 +275,7 @@ async def test_market_device_query_requires_valid_windows_launch_boundary(
 ) -> None:
   monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
   monkeypatch.setenv("QMT_AGENT_LAUNCH_STARTED_AT", "invalid")
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _UnexpectedConnectEngine()
 
   assert await store.available_market_data_device() is None
@@ -286,7 +292,7 @@ async def test_available_market_data_device_accepts_fresh_data_only_agent() -> N
       }
     ]
   )
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _ConnectEngine(connection)
 
   assert await store.available_market_data_device() == "device-data-only"
@@ -301,7 +307,7 @@ async def test_market_data_request_scopes_repair_attempt_without_changing_payloa
   None
 ):
   connection = _BoundDeviceConnection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
   payload = {"operation": "bars", "stock_list": ["000001.SH"]}
   scope = "core-index-intraday-repair:v1:2026-08-17:attempt-1"
@@ -359,7 +365,7 @@ async def test_completed_tick_coverage_query_requires_dual_empty_proof_and_rejec
       yield self.connection
 
   connection = CoverageConnection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = CoverageEngine(connection)
 
   result = await store.completed_tick_day_coverage(
@@ -433,7 +439,7 @@ async def test_completed_tick_coverage_query_requires_dual_empty_proof_and_rejec
 @pytest.mark.asyncio
 async def test_market_data_request_requires_financial_protocol_capability() -> None:
   connection = _BoundDeviceConnection(["market-data", "data-only"])
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   with pytest.raises(RuntimeError, match="financial-data-v1"):
@@ -452,7 +458,7 @@ async def test_claim_market_data_request_uses_precomputed_stale_cutoff(
   monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
   monkeypatch.setattr(runtime_store.uuid, "uuid4", lambda: "claim-token-1")
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   claimed = await store.claim_market_data_request("request-1")
@@ -493,7 +499,7 @@ async def test_recoverable_market_data_requests_include_uploaded_and_stale_proce
       return Result()
 
   connection = Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _ConnectEngine(connection)
 
   recovered = await store.recoverable_market_data_request_ids(limit=2)
@@ -533,7 +539,7 @@ async def test_expired_delivery_leases_are_requeued_with_a_bounded_row_lock(
       return Result()
 
   connection = Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   requeued = await store.requeue_expired_market_data_delivery_leases(limit=2)
@@ -555,7 +561,7 @@ async def test_stale_market_data_takeover_rotates_claim_token(monkeypatch) -> No
   tokens = iter(("claim-token-1", "claim-token-2"))
   monkeypatch.setattr(runtime_store.uuid, "uuid4", lambda: next(tokens))
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   first = await store.claim_market_data_request("request-1")
@@ -574,7 +580,7 @@ async def test_market_data_processing_claim_can_be_renewed_and_released(
   now = datetime(2026, 8, 21, 8, 6, 11)
   monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   assert (
@@ -619,7 +625,7 @@ async def test_finish_market_data_request_writes_unambiguous_terminal_state(
   now = datetime(2026, 7, 29, 8, 7, 17)
   monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   await store.finish_market_data_request(
@@ -649,7 +655,7 @@ async def test_completed_market_data_request_persists_its_ingestion_audit(
   now = datetime(2026, 8, 21, 8, 7, 17)
   monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
   connection = _Connection()
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
   audit = {
     "records_received": 2,
@@ -673,7 +679,7 @@ async def test_completed_market_data_request_persists_its_ingestion_audit(
 @pytest.mark.asyncio
 async def test_stale_market_data_claim_cannot_renew_release_or_finish() -> None:
   renew_connection = _SequenceConnection([None])
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(renew_connection)
 
   assert (
@@ -715,7 +721,7 @@ async def test_stale_market_data_claim_cannot_renew_release_or_finish() -> None:
 @pytest.mark.asyncio
 async def test_finish_market_data_request_reports_terminal_state_conflict() -> None:
   connection = _SequenceConnection([None, "FAILED"])
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   with pytest.raises(
@@ -736,7 +742,7 @@ async def test_finish_market_data_request_reports_terminal_state_conflict() -> N
 @pytest.mark.asyncio
 async def test_finish_market_data_request_rejects_missing_request() -> None:
   connection = _SequenceConnection([None, None])
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   with pytest.raises(RuntimeError, match="disappeared before terminal"):
@@ -764,7 +770,7 @@ async def test_reopen_failed_market_data_request_returns_atomic_evidence(
       "manifest_records": 825,
     }
   )
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   evidence = await store.reopen_failed_market_data_request("request-1")
@@ -795,7 +801,7 @@ async def test_reopen_failed_market_data_request_returns_atomic_evidence(
 @pytest.mark.asyncio
 async def test_reopen_failed_market_data_request_fails_closed() -> None:
   connection = _MappingConnection(None)
-  store = runtime_store.DurableRuntimeStore.__new__(runtime_store.DurableRuntimeStore)
+  store = SQLTestStore.__new__(SQLTestStore)
   store.engine = _Engine(connection)
 
   with pytest.raises(RuntimeError, match="not safely reopenable"):

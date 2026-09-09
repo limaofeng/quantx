@@ -15,11 +15,19 @@ from quantx_contracts import (
 )
 from quantx_infrastructure.services import market_data_reference_ingestion as reference
 from quantx_infrastructure.services import market_data_transfer_ingestion as ingestion
-from quantx_worker.prefector.flows import durable_agent_flows
 
 
 @pytest.fixture(autouse=True)
 def _stub_persistence_readback(monkeypatch):
+  bar_ingester = ingestion.ingest_uploaded_bar_request
+
+  async def ingest_bars(store, request_id, **kwargs):
+    return await bar_ingester(
+      store, request_id, save_period=ingestion.save_market_data_period, **kwargs
+    )
+
+  monkeypatch.setattr(ingestion, "ingest_uploaded_bar_request", ingest_bars)
+
   async def verify(
     *,
     code_summaries,
@@ -193,12 +201,12 @@ async def test_uploaded_bars_are_validated_and_saved(tmp_path, monkeypatch):
     }
 
   monkeypatch.setattr(
-    durable_agent_flows,
-    "save_market_data",
+    ingestion,
+    "save_market_data_period",
     fake_save_market_data,
   )
 
-  result = await durable_agent_flows._ingest_uploaded_request(
+  result = await ingestion.ingest_uploaded_market_data_request(
     store,
     "request-1",
   )
@@ -233,10 +241,10 @@ async def test_missing_requested_code_summary_is_rejected_before_any_write(
     manifest=[_transfer(tmp_path, records)],
   )
   save = AsyncMock()
-  monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
+  monkeypatch.setattr(ingestion, "save_market_data_period", save)
 
   with pytest.raises(RuntimeError, match="missing required summaries"):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
   save.assert_not_awaited()
 
@@ -252,9 +260,9 @@ async def test_explicit_empty_series_is_completed_and_auditable(
     manifest=[_transfer(tmp_path, records)],
   )
   save = AsyncMock()
-  monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
+  monkeypatch.setattr(ingestion, "save_market_data_period", save)
 
-  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+  result = await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
   assert result["records_received"] == 0
   assert result["records_saved"] == 0
@@ -298,12 +306,12 @@ async def test_same_millisecond_ticks_are_preserved_across_chunks(
     return {"saved_count": len(captured["frame"]), "status": "success"}
 
   monkeypatch.setattr(
-    durable_agent_flows,
-    "save_market_data",
+    ingestion,
+    "save_market_data_period",
     fake_save_market_data,
   )
 
-  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+  result = await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
   assert result["records_received"] == 2
   assert result["records_saved"] == 2
@@ -332,7 +340,7 @@ async def test_duplicate_tick_composite_key_across_chunks_fails(tmp_path):
   )
 
   with pytest.raises(RuntimeError, match="unordered or duplicated|not contiguous"):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
 
 @pytest.mark.parametrize(
@@ -366,7 +374,7 @@ async def test_invalid_tick_ordinal_contract_fails(tmp_path, ordinals, match):
   )
 
   with pytest.raises(RuntimeError, match=match):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
 
 @pytest.mark.asyncio
@@ -378,7 +386,7 @@ async def test_non_tick_duplicate_time_fails(tmp_path):
   )
 
   with pytest.raises(RuntimeError, match="unordered or duplicated"):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
 
 @pytest.mark.parametrize(
@@ -397,7 +405,7 @@ async def test_non_tick_internal_tick_field_fails(tmp_path, reserved_field):
   )
 
   with pytest.raises(RuntimeError, match="tick_ordinal|storage-only field"):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
 
 @pytest.mark.asyncio
@@ -410,7 +418,7 @@ async def test_uploaded_chunk_checksum_mismatch_fails(tmp_path):
   )
 
   with pytest.raises(RuntimeError, match="checksum mismatch"):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
 
 @pytest.mark.parametrize(
@@ -445,10 +453,10 @@ async def test_uploaded_bars_outside_request_scope_are_not_saved(
     manifest=[_transfer(tmp_path, [record])],
   )
   save = AsyncMock()
-  monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
+  monkeypatch.setattr(ingestion, "save_market_data_period", save)
 
   with pytest.raises(RuntimeError, match=match):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
   save.assert_not_awaited()
 
@@ -518,7 +526,7 @@ async def test_uploaded_financial_rows_are_validated_saved_and_rebuilt(
     FakeFinancialService,
   )
 
-  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+  result = await ingestion.ingest_uploaded_market_data_request(store, "request-1")
 
   assert captured["688552.SH"]["Income"].iloc[0]["m_timetag"] == "20260331"
   assert result["records_saved"] == 1
@@ -552,4 +560,4 @@ async def test_uploaded_financial_rows_require_per_code_summary(tmp_path):
   )
 
   with pytest.raises(RuntimeError, match="summaries missing"):
-    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+    await ingestion.ingest_uploaded_market_data_request(store, "request-1")

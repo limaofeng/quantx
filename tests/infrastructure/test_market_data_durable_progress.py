@@ -29,6 +29,10 @@ from tests.infrastructure.test_market_data_transfer_ingestion import (
 
 
 class Store(runtime_store.DurableRuntimeStore):
+  async def _guard_ingestion_owner(self, connection, *, lock=True):
+    # Request-state fixture; WorkerStore tests override this with the real PG lease.
+    pass
+
   async def market_data_request(self, request_id):
     async with self.engine.connect() as connection:
       return dict(

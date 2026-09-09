@@ -75,7 +75,7 @@ class DurableRuntimeStore:
     await self.engine.dispose()
 
   async def _guard_ingestion_owner(self, connection, *, lock=True) -> None:
-    """Owner fence hook; standalone workers require their process lease here."""
+    raise RuntimeError("market-data ingestion requires the independent Data Worker")
 
   async def heartbeat(
     self,
@@ -234,7 +234,8 @@ class DurableRuntimeStore:
       nullcontext(_connection) if _connection is not None else self.engine.begin()
     )
     async with transaction as connection:
-      await self._guard_ingestion_owner(connection)
+      if _connection is not None:
+        await self._guard_ingestion_owner(connection)
       existing = (
         await connection.execute(
           text(
@@ -698,6 +699,7 @@ class DurableRuntimeStore:
     stale_before = requeued_at - timedelta(minutes=5)
     future_after = requeued_at + timedelta(minutes=5)
     async with self.engine.begin() as connection:
+      await self._guard_ingestion_owner(connection)
       values = (
         await connection.execute(
           text(
@@ -759,7 +761,8 @@ class DurableRuntimeStore:
       else None
     )
     async with self.engine.begin() as connection:
-      await self._guard_ingestion_owner(connection)
+      if normalized_claim_token is not None:
+        await self._guard_ingestion_owner(connection)
       updated_status = (
         await connection.execute(
           text(
@@ -782,7 +785,7 @@ class DurableRuntimeStore:
                AND (
                  (
                    CAST(:claim_token AS TEXT) IS NULL
-                   AND status <> 'PROCESSING'
+                   AND status NOT IN ('PROCESSING', 'UPLOADED', 'BLOCKED')
                  )
                  OR (
                    status = 'PROCESSING'

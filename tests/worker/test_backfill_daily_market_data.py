@@ -1124,7 +1124,7 @@ def test_explicit_failed_ingestion_retry_records_proof_before_reopen(
   )
   monkeypatch.setattr(
     module,
-    "reprocess_uploaded_market_data_request",
+    "wait_for_market_data_ingestion",
     reprocess,
   )
 
@@ -1235,7 +1235,7 @@ def test_failed_ingestion_retry_resumes_verification_after_request_completed(
   reprocess = AsyncMock()
   monkeypatch.setattr(
     module,
-    "reprocess_uploaded_market_data_request",
+    "wait_for_market_data_ingestion",
     reprocess,
   )
 

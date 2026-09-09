@@ -18,12 +18,17 @@ from quantx_worker.prefector.flows.development_data_export_flow import (
 )
 
 
-@pytest.mark.parametrize("reason", ["SOURCE_COVERAGE_MISSING", "PERSISTED_COVERAGE_CHANGED", "REFERENCE_DATA_MISSING"])
+@pytest.mark.parametrize(
+  "reason",
+  ["SOURCE_COVERAGE_MISSING", "PERSISTED_COVERAGE_CHANGED", "REFERENCE_DATA_MISSING"],
+)
 def test_export_preserves_known_failure_reason(reason):
   assert export_failure_reason(ValueError(reason)) == reason
 
 
-@pytest.mark.parametrize("message", ["token=secret", "/private/credentials", "UNKNOWN_SECRET_VALUE"])
+@pytest.mark.parametrize(
+  "message", ["token=secret", "/private/credentials", "UNKNOWN_SECRET_VALUE"]
+)
 def test_export_does_not_expose_unrecognized_error_details(message):
   assert export_failure_reason(ValueError(message)) == "ValueError"
 
@@ -102,9 +107,7 @@ async def test_reusable_source_requires_positive_target_day_coverage():
 
   connection = Connection()
   assert (
-    await find_reusable_source_request(
-      connection, request, request.agent_payload()
-    )
+    await find_reusable_source_request(connection, request, request.agent_payload())
     is None
   )
 
@@ -163,10 +166,15 @@ def test_digest_cannot_escape_export_directory():
     content_path("../credentials")
 
 
-@pytest.mark.parametrize("reason", [
-  "SOURCE_COVERAGE_MISSING", "PERSISTED_COVERAGE_UNPROVEN",
-  "PERSISTED_COVERAGE_CHANGED", "HISTORICAL_SOURCE_IDENTITY_MISSING",
-])
+@pytest.mark.parametrize(
+  "reason",
+  [
+    "SOURCE_COVERAGE_MISSING",
+    "PERSISTED_COVERAGE_UNPROVEN",
+    "PERSISTED_COVERAGE_CHANGED",
+    "HISTORICAL_SOURCE_IDENTITY_MISSING",
+  ],
+)
 def test_safe_export_error_preserves_known_codes(reason):
   from quantx_worker.prefector.flows.development_data_export_flow import (
     safe_export_error,
@@ -176,7 +184,7 @@ def test_safe_export_error_preserves_known_codes(reason):
   assert safe_export_error(ValueError("private connection detail")) == "ValueError"
 
 
-async def test_empty_replacement_does_not_create_another_request(monkeypatch):
+async def test_unverified_source_keeps_its_identity_without_replacement(monkeypatch):
   from contextlib import asynccontextmanager
   from types import SimpleNamespace
   from unittest.mock import AsyncMock
@@ -186,8 +194,12 @@ async def test_empty_replacement_does_not_create_another_request(monkeypatch):
   request = HistoryPartitionRequest(
     instrument="000001.SZ", period="tick", trading_date=date(2026, 8, 3)
   )
-  row = dict(id="export", request=request.model_dump(mode="json"),
-             state="QUEUED", source_request_id="old")
+  row = dict(
+    id="export",
+    request=request.model_dump(mode="json"),
+    state="QUEUED",
+    source_request_id="old",
+  )
 
   class Connection:
     async def scalar(self, *args):
@@ -203,8 +215,11 @@ async def test_empty_replacement_does_not_create_another_request(monkeypatch):
     yield Connection()
 
   async def source(identity):
-    return dict(status="COMPLETED", development_only=identity != "old",
-                ingestion_result={"day_coverage": []})
+    return dict(
+      status="COMPLETED",
+      development_only=identity != "old",
+      ingestion_result={"day_coverage": []},
+    )
 
   store = SimpleNamespace(
     engine=SimpleNamespace(connect=connect, begin=connect),
@@ -216,16 +231,18 @@ async def test_empty_replacement_does_not_create_another_request(monkeypatch):
   monkeypatch.setattr(flow, "DurableRuntimeStore", lambda: store)
   monkeypatch.setattr(flow, "cleanup_expired", AsyncMock())
   monkeypatch.setattr(flow, "history_window_open", AsyncMock(return_value=True))
-  monkeypatch.setattr(flow, "load_uploaded_request_manifest", AsyncMock(return_value=({}, {}, [])))
+  monkeypatch.setattr(
+    flow, "load_uploaded_request_manifest", AsyncMock(return_value=({}, {}, []))
+  )
   failed = AsyncMock()
   monkeypatch.setattr(flow, "set_failed", failed)
   await flow.dispatch_once()
   row["state"] = "WAITING_SOURCE"
   await flow.dispatch_once()
-  store.create_market_data_request.assert_awaited_once_with(
-    request.agent_payload(), idempotency_scope="development-retry:old", development_only=True
-  )
-  failed.assert_awaited_once_with(store, "export", "SOURCE_COVERAGE_MISSING")
+  store.create_market_data_request.assert_not_called()
+  assert row["source_request_id"] == "old"
+  assert failed.await_count == 2
+  failed.assert_awaited_with(store, "export", "SOURCE_COVERAGE_UNVERIFIED")
 
 
 @pytest.mark.parametrize("limits", [(11.0, 9.0), (None, None)])

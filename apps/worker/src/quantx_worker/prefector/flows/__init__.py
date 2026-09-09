@@ -23,7 +23,6 @@ _EXPORTS = {
   "market_universe_request_flow": "durable_agent_flows",
   "stock_probability_inference_flow": "stock_probability_inference_flow",
   "stock_selection_training_dispatch_flow": "stock_selection_training_flow",
-  "recover_market_data_ingestion_flow": "durable_agent_flows",
   "t_trade_instrument_profile_flow": "t_trade_instrument_profile_flow",
 }
 

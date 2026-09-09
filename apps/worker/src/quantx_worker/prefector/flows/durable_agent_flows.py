@@ -26,15 +26,6 @@ from quantx_infrastructure.services.market_data_reference_ingestion import (
   _FINANCIAL_RECORD_FORMAT,
   _FINANCIAL_TABLES,
 )
-from quantx_infrastructure.services.market_data_transfer_ingestion import (
-  claim_ingest_and_finish_market_data_request,
-  ingest_uploaded_bar_request,
-  ingest_uploaded_market_data_request,
-  load_uploaded_request_manifest,
-)
-from quantx_infrastructure.services.market_data_transfer_ingestion import (
-  save_market_data_period as save_market_data,
-)
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 from sqlalchemy import and_, select
@@ -290,19 +281,6 @@ async def _request_and_wait(
           "request_id": request_id,
           "reason": request.get("processing_error"),
         }
-      if status in {"UPLOADED", "PROCESSING"}:
-        convergence = await claim_ingest_and_finish_market_data_request(
-          store,
-          request_id,
-          ingest_request=_ingest_uploaded_request,
-        )
-        if convergence is not None:
-          if convergence.get("status") == "completed":
-            return convergence
-          if convergence.get("status") == "failed":
-            continue
-          await asyncio.sleep(5)
-          continue
       await asyncio.sleep(2)
     # A caller deadline is not evidence that Agent preparation/upload failed.
     # Leave the durable request open so the Prefect retry observes the same
@@ -325,129 +303,6 @@ async def _request_and_wait(
   finally:
     if observer := observation.get():
       observer.requests.pop(request_id, None)
-    await store.close()
-
-
-async def _ingest_uploaded_request(
-  store: DurableRuntimeStore,
-  request_id: str,
-  *,
-  progress=None,
-) -> dict[str, Any]:
-  _, payload, _ = await load_uploaded_request_manifest(store, request_id)
-  operation = str(payload.get("operation") or "bars")
-  if operation == "bars":
-    destination = str(payload.get("destination") or "influxdb").strip().lower()
-    if destination != "influxdb":
-      return await ingest_uploaded_market_data_request(
-        store, request_id, progress=progress
-      )
-    from quantx_infrastructure.services import (
-      market_data_transfer_ingestion as ingestion,
-    )
-
-    async def save_observed(**kwargs):
-      report_request(request_id, "入库")
-      return await save_market_data(**kwargs)
-
-    async def verify_observed(**kwargs):
-      report_request(request_id, "回读校验")
-      return await ingestion.verify_persisted_bar_summaries(**kwargs)
-
-    report_request(request_id, "传输校验")
-    return await ingest_uploaded_bar_request(
-      store,
-      request_id,
-      save_period=save_observed,
-      verify_persistence=verify_observed,
-      progress=progress,
-    )
-  return await ingest_uploaded_market_data_request(store, request_id, progress=progress)
-
-
-async def reprocess_uploaded_market_data_request(
-  request_id: str,
-) -> dict[str, Any]:
-  """Claim and re-ingest one explicitly reopened uploaded request.
-
-  Reopening a terminal request is intentionally kept outside this helper.
-  Callers must first prove the failed transfer is complete and invoke
-  ``DurableRuntimeStore.reopen_failed_market_data_request``.  This function
-  only accepts the resulting ``UPLOADED`` state (or its stale interrupted
-  ``PROCESSING`` claim) and always reconverges a claimed request to a
-  terminal state.
-  """
-  normalized_request_id = str(request_id or "").strip()
-  if not normalized_request_id:
-    raise ValueError("market-data request_id is required for reprocessing")
-
-  store = DurableRuntimeStore()
-  try:
-    status = await store.market_data_request_status(normalized_request_id)
-    if status not in {"UPLOADED", "PROCESSING"}:
-      raise RuntimeError(
-        "market-data request is not explicitly reopened for reprocessing: "
-        f"request_id={normalized_request_id} status={status}"
-      )
-    convergence = await claim_ingest_and_finish_market_data_request(
-      store,
-      normalized_request_id,
-      ingest_request=_ingest_uploaded_request,
-    )
-    if convergence is None:
-      raise RuntimeError(
-        "market-data request could not be claimed for reprocessing: "
-        f"request_id={normalized_request_id}"
-      )
-    if convergence.get("status") != "completed":
-      raise RuntimeError(
-        "market-data request reprocessing did not complete: "
-        f"request_id={normalized_request_id} "
-        f"status={convergence.get('status')} reason={convergence.get('reason')}"
-      )
-    return convergence
-  finally:
-    await store.close()
-
-
-@flow(name="QMT Agent 行情摄取恢复")
-async def recover_market_data_ingestion_flow(
-  limit: int = _MARKET_DATA_INGESTION_RECOVERY_BATCH_SIZE,
-) -> dict[str, Any]:
-  """Recover expired delivery leases and durably converge immutable uploads."""
-
-  if isinstance(limit, bool) or int(limit) < 1:
-    raise ValueError("market-data recovery limit must be positive")
-  store = DurableRuntimeStore()
-  try:
-    requeued_delivery_request_ids = (
-      await store.requeue_expired_market_data_delivery_leases(limit=int(limit))
-    )
-    request_ids = await store.recoverable_market_data_request_ids(limit=int(limit))
-    completed_request_ids: list[str] = []
-    retryable_request_ids: list[str] = []
-    unclaimed_request_ids: list[str] = []
-    for request_id in request_ids:
-      convergence = await claim_ingest_and_finish_market_data_request(
-        store,
-        request_id,
-        ingest_request=_ingest_uploaded_request,
-      )
-      if convergence is None:
-        unclaimed_request_ids.append(request_id)
-      elif convergence.get("status") == "completed":
-        completed_request_ids.append(request_id)
-      else:
-        retryable_request_ids.append(request_id)
-    return {
-      "status": "completed",
-      "requeued_delivery_request_ids": requeued_delivery_request_ids,
-      "scanned": len(request_ids),
-      "completed_request_ids": completed_request_ids,
-      "retryable_request_ids": retryable_request_ids,
-      "unclaimed_request_ids": unclaimed_request_ids,
-    }
-  finally:
     await store.close()
 
 

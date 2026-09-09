@@ -1,5 +1,6 @@
 import asyncio
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -277,7 +278,7 @@ async def test_optional_agent_queue_returns_without_waiting_for_transfer(
 
 
 @pytest.mark.asyncio
-async def test_same_optional_gap_is_reused_and_ingested_on_next_replay(
+async def test_same_optional_gap_is_reused_without_ingestion_on_next_replay(
   monkeypatch,
 ) -> None:
   class FakeStore:
@@ -298,20 +299,7 @@ async def test_same_optional_gap_is_reused_and_ingested_on_next_replay(
       return {"status": "QUEUED" if self.read_count == 1 else "UPLOADED"}
 
   store = FakeStore()
-  ingestion = AsyncMock(
-    return_value={
-      "status": "completed",
-      "request_id": "request-1",
-      "records_received": 10,
-      "records_saved": 10,
-    }
-  )
   monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
-  monkeypatch.setattr(
-    market_data_request_service,
-    "claim_ingest_and_finish_market_data_request",
-    ingestion,
-  )
   request = {
     "stock_list": ["600887.SH"],
     "start_time": "20260803",
@@ -323,8 +311,7 @@ async def test_same_optional_gap_is_reused_and_ingested_on_next_replay(
   second = await market_data_request_service.queue_market_data_sync(**request)
 
   assert first["status"] == "queued"
-  assert second["status"] == "success"
-  assert second["records_saved"] == 10
+  assert second["status"] == "queued"
   assert [
     call.kwargs["idempotency_scope"] for call in store.create.await_args_list
   ] == [
@@ -334,56 +321,23 @@ async def test_same_optional_gap_is_reused_and_ingested_on_next_replay(
   assert {call.args[0]["stock_list"][0] for call in store.create.await_args_list} == {
     "600887.SH"
   }
-  ingestion.assert_awaited_once_with(store, "request-1")
 
 
 @pytest.mark.asyncio
-async def test_agent_request_ingests_uploaded_transfer_before_returning(
-  monkeypatch,
-) -> None:
-  class FakeStore:
-    async def create_market_data_request(self, payload):
-      assert payload == {"operation": "bars"}
-      return "request-1"
-
-    async def market_data_request(self, request_id):
-      assert request_id == "request-1"
-      return {"status": "UPLOADED"}
-
-    async def close(self):
-      return None
-
-  store = FakeStore()
-  converge = AsyncMock(
-    return_value={
-      "status": "completed",
-      "request_id": "request-1",
-      "operation": "bars",
-      "records_received": 2,
-      "records_saved": 2,
-    }
+async def test_agent_request_leaves_uploaded_transfer_to_worker(monkeypatch):
+  store = SimpleNamespace(
+    create_market_data_request=AsyncMock(return_value="request-1"),
+    market_data_request=AsyncMock(return_value={"status": "UPLOADED"}),
+    claim_market_data_request=AsyncMock(
+      side_effect=AssertionError("caller cannot ingest")
+    ),
+    close=AsyncMock(),
   )
-  monkeypatch.setattr(
-    market_data_request_service,
-    "DurableRuntimeStore",
-    lambda: store,
-  )
-  monkeypatch.setattr(
-    market_data_request_service,
-    "claim_ingest_and_finish_market_data_request",
-    converge,
-  )
-
+  monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
   result = await market_data_request_service.request_agent_market_data(
     payload={"operation": "bars"},
-    timeout_seconds=1,
+    timeout_seconds=0.01,
   )
-
-  converge.assert_awaited_once_with(store, "request-1")
-  assert result == {
-    "status": "success",
-    "request_id": "request-1",
-    "operation": "bars",
-    "records_received": 2,
-    "records_saved": 2,
-  }
+  assert result["status"] == "timeout"
+  store.market_data_request.assert_awaited_once()
+  store.claim_market_data_request.assert_not_called()

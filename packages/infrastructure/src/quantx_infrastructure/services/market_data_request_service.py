@@ -7,9 +7,6 @@ from datetime import date, datetime
 from typing import Any
 
 from quantx_infrastructure.runtime_store import DurableRuntimeStore
-from quantx_infrastructure.services.market_data_transfer_ingestion import (
-  claim_ingest_and_finish_market_data_request,
-)
 
 # v2 separates replay supplements from completed v1 transfers created before
 # the corrected QMT intraday download boundary was deployed.
@@ -179,33 +176,6 @@ async def queue_agent_market_data(
           "request_id": request_id,
           "reason": request.get("processing_error"),
         }
-      if status in {"UPLOADED", "PROCESSING"}:
-        ingestion = await claim_ingest_and_finish_market_data_request(
-          store,
-          request_id,
-        )
-        if ingestion is None:
-          return {
-            "status": "queued",
-            "request_id": request_id,
-            "device_id": device_id,
-          }
-        if ingestion.get("status") == "completed":
-          return {
-            **ingestion,
-            "status": "success",
-            "device_id": device_id,
-          }
-        if ingestion.get("status") in {"retryable", "unclaimed"}:
-          return {
-            **ingestion,
-            "status": "queued",
-            "device_id": device_id,
-          }
-        return {
-          **ingestion,
-          "device_id": device_id,
-        }
       return {
         "status": "queued",
         "request_id": request_id,
@@ -265,21 +235,6 @@ async def request_agent_market_data(
           "request_id": request_id,
           "reason": request.get("processing_error"),
         }
-      if status in {"UPLOADED", "PROCESSING"}:
-        ingestion = await claim_ingest_and_finish_market_data_request(
-          store,
-          request_id,
-        )
-        if ingestion is not None:
-          if ingestion["status"] == "completed":
-            return {
-              **ingestion,
-              "status": "success",
-            }
-          if ingestion["status"] == "retryable":
-            await asyncio.sleep(1)
-            continue
-          return ingestion
       await asyncio.sleep(1)
     return {
       "status": "timeout",

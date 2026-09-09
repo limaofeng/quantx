@@ -10,6 +10,7 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from httpx import ASGITransport, AsyncClient
+from quantx_infrastructure.runtime_store import DurableRuntimeStore
 from quantx_infrastructure.services import (
   market_data_persistence_verification as verification,
 )
@@ -37,6 +38,17 @@ from tests.infrastructure.test_market_data_transfer_ingestion import (
 
 class WorkerStore(MarketDataWorkerStore, Store):
   pass
+
+
+async def test_unclaimed_api_cannot_complete_a_frozen_upload(workers):
+  (worker_store, _), _ = workers
+  api_store = object.__new__(DurableRuntimeStore)
+  api_store.engine = worker_store.engine
+  with pytest.raises(RuntimeError):
+    await api_store.finish_market_data_request(
+      "request-1", status="COMPLETED", ingestion_result={"records_saved": 1}
+    )
+  assert (await worker_store.market_data_request("request-1"))["status"] == "UPLOADED"
 
 
 @pytest.fixture

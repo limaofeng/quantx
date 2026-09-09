@@ -22,30 +22,10 @@ from quantx_infrastructure.services.development_history_window import (
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
   MarketDataValidationError,
   _iter_transfer_chunks,
-  claim_ingest_and_finish_market_data_request,
   load_uploaded_request_manifest,
   validate_bar_records_against_request,
 )
 from sqlalchemy import text
-
-
-def export_failure_reason(error: Exception) -> str:
-  """Expose only known diagnostic codes, never raw paths or credentials."""
-  reason = str(error)
-  if reason in {
-    "SOURCE_COVERAGE_MISSING",
-    "EXPORT_TRANSFER_BUDGET_EXCEEDED",
-    "EXPORT_DISK_BUDGET_EXCEEDED",
-    "EXPORT_CHECKSUM_MISMATCH",
-    "EXPORT_RECORD_BUDGET_EXCEEDED",
-    "PERSISTED_COVERAGE_UNPROVEN",
-    "PERSISTED_COVERAGE_CHANGED",
-    "HISTORICAL_SOURCE_IDENTITY_MISSING",
-    "REFERENCE_DATA_MISSING",
-    "REFERENCE_DATA_BUDGET_EXCEEDED",
-  }:
-    return reason
-  return type(error).__name__
 
 
 def partition_records(chunks, request: HistoryPartitionRequest) -> list[dict]:
@@ -271,9 +251,7 @@ async def dispatch_once() -> dict:
           payload = request.agent_payload()
           source_id = row["source_request_id"]
           if not source_id:
-            source_id = await find_reusable_source_request(
-              connection, request, payload
-            )
+            source_id = await find_reusable_source_request(connection, request, payload)
           if not source_id:
             if not await history_window_open():
               continue
@@ -302,44 +280,8 @@ async def dispatch_once() -> dict:
             and row.get("state") in {"QUEUED", "WAITING_SOURCE"}
             and not _has_positive_source_coverage(source, request)
           ):
-            if not await history_window_open():
-              continue
-            try:
-              replacement = await store.create_market_data_request(
-                payload,
-                idempotency_scope=f"development-retry:{source_id}",
-                development_only=True,
-              )
-            except RuntimeError:
-              continue
-            async with store.engine.begin() as update:
-              await update.execute(
-                text(
-                  "UPDATE development_data_export "
-                  "SET source_request_id=:source WHERE id=:id"
-                ),
-                {"source": replacement, "id": row["id"]},
-              )
+            await set_failed(store, row["id"], "SOURCE_COVERAGE_UNVERIFIED")
             continue
-          if source["status"] == "FAILED" and await history_window_open():
-            # An explicit resubmission creates one new, still low-priority attempt.
-            if row.get("source_request_id") and row.get("state") == "QUEUED":
-              replacement = await store.create_market_data_request(
-                payload,
-                idempotency_scope=f"development-retry:{source_id}",
-                development_only=True,
-              )
-              async with store.engine.begin() as update:
-                await update.execute(
-                  text(
-                    "UPDATE development_data_export SET source_request_id=:source WHERE id=:id"
-                  ),
-                  {"source": replacement, "id": row["id"]},
-                )
-              continue
-          if source["status"] in {"UPLOADED", "PROCESSING"}:
-            await claim_ingest_and_finish_market_data_request(store, source_id)
-            source = await store.market_data_request(source_id)
           if source["status"] != "COMPLETED":
             if source["status"] == "FAILED":
               await set_failed(store, row["id"], "SOURCE_REQUEST_FAILED")
