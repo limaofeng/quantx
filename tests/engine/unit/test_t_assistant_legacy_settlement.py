@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from quantx_engine.report_processor import _event_payload
-from quantx_engine.t_assistant_legacy_settlement import read_legacy_broker_settlement
+from quantx_engine.t_assistant_legacy_settlement import read_legacy_order_settlement
 from quantx_infrastructure.models.agent_runtime import (
   OrderCorrelation,
   PendingTradeOrder,
@@ -14,6 +14,8 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.models.enums import OrderPriceType, OrderStatus, OrderType
 from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.trade import Trade
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from sqlalchemy import select
 
 from tests.engine.test_entry_plan_broker_zero_fill_reconciliation import (
   _database,
@@ -118,7 +120,7 @@ async def test_settlement_proves_zero_partial_and_full_fill(monkeypatch, volume)
   engine, sessions, now = await seed_settlement(monkeypatch, volume)
   try:
     async with sessions() as db, db.begin():
-      result = await read_legacy_broker_settlement(
+      result = await read_legacy_order_settlement(
         db,
         account_id="account-1",
         run_id="plan-1",
@@ -143,7 +145,7 @@ async def test_zero_fill_still_requires_explicit_terminal_quantity(monkeypatch):
       report.pop("traded_volume")
       event.payload = {**event.payload, "report": report}
     async with sessions() as db, db.begin():
-      result = await read_legacy_broker_settlement(
+      result = await read_legacy_order_settlement(
         db,
         account_id="account-1",
         run_id="plan-1",
@@ -215,7 +217,7 @@ async def test_settlement_rejects_local_status_or_incomplete_receipts(
           now + timedelta(seconds=1)
         ).replace(tzinfo=None)
     async with sessions() as db, db.begin():
-      result = await read_legacy_broker_settlement(
+      result = await read_legacy_order_settlement(
         db,
         account_id="account-1",
         run_id="plan-1",
@@ -225,5 +227,217 @@ async def test_settlement_rejects_local_status_or_incomplete_receipts(
       assert result.blocker == f"LEGACY_T_SETTLEMENT_{blocker}"
       assert result.filled_volume is None
       assert not db.new and not db.dirty and not db.deleted
+  finally:
+    await engine.dispose()
+
+
+async def seed_local_terminal(monkeypatch, kind):
+  from quantx_api.agent_api import _transition_place_order_command
+  from quantx_infrastructure.services.trade_command_service import TradeCommandService
+
+  engine, sessions = await _database(monkeypatch)
+  await _seed_managed_order(
+    sessions,
+    terminal_status="QUEUED",
+    snapshot=_snapshot_report(terminal_status="CANCELLED", snapshot_id="local"),
+  )
+  now = datetime.now(UTC) + timedelta(seconds=5)
+  stamp = now.replace(tzinfo=None) - timedelta(seconds=1)
+  async with sessions() as db, db.begin():
+    pending = await db.get(PendingTradeOrder, "client-1")
+    pending.broker_order_id = None
+    pending.last_source_sequence = 0
+    pending.last_source_event_at = None
+    (await db.get(OrderCorrelation, "correlation-1")).broker_order_id = None
+    command = TradeCommandOutbox(
+      message_id="local-command",
+      client_order_id="client-1",
+      idempotency_key="local-command",
+      device_id="device-1",
+      account_id="account-1",
+      owner_type="STRATEGY_RUN",
+      owner_id="plan-1",
+      environment="LIVE",
+      delivery_status="QUEUED",
+      attempts=0,
+      payload=dict(
+        command_kind="PLACE_ORDER",
+        client_order_id="client-1",
+        account_id="account-1",
+        execution_mode="live",
+        instrument_code="605499.SH",
+        side="BUY",
+        volume=100,
+      ),
+      expires_at=stamp - timedelta(seconds=1),
+    )
+    db.add(command)
+    await db.flush()
+    if kind == "expired":
+      await _transition_place_order_command(
+        db,
+        command=command,
+        requested_status="EXPIRED",
+        reason="command_expired_before_delivery",
+        now=stamp,
+        pre_execution_proven=True,
+      )
+  if kind == "cancelled":
+    async with sessions() as db:
+      result = await TradeCommandService(db).request_strategy_buy_cancellations(
+        strategy_run_id="plan-1",
+        reason="maintenance",
+      )
+      assert len(result) == 1 and result[0].local_terminal
+  return engine, sessions, now
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["expired", "cancelled"])
+async def test_actual_local_terminal_flow_requires_receipt_application(
+  monkeypatch, kind
+):
+  engine, sessions, now = await seed_local_terminal(monkeypatch, kind)
+  try:
+    async with sessions() as db, db.begin():
+      if kind == "expired":
+        result = await read_legacy_order_settlement(
+          db,
+          account_id="account-1",
+          run_id="plan-1",
+          client_order_id="client-1",
+          now=now,
+        )
+        assert result.blocker == "LEGACY_T_SETTLEMENT_RUNTIME_BACKLOG"
+        # Application itself is a synthetic boundary; expiry/cancel above use
+        # their actual service code, but this is not a running Engine or QMT.
+        events = list(await db.scalars(select(StrategyRuntimeEvent)))
+        assert len(events) == 1
+        events[0].application_status = "APPLIED"
+        events[0].applied_at = now.replace(tzinfo=None)
+    async with sessions() as db, db.begin():
+      result = await read_legacy_order_settlement(
+        db,
+        account_id="account-1",
+        run_id="plan-1",
+        client_order_id="client-1",
+        now=now,
+      )
+      assert result.blocker is None
+      assert result.filled_volume == 0
+      assert result.evidence_kind == "LOCAL_UNDELIVERED_COMMAND"
+      assert not db.new and not db.dirty and not db.deleted
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "damage,blocker",
+  [
+    ("delivered", "LOCAL_PRE_DELIVERY_PROOF_REQUIRED"),
+    ("ack", "LOCAL_PRE_DELIVERY_PROOF_REQUIRED"),
+    ("attempt", "LOCAL_PRE_DELIVERY_PROOF_REQUIRED"),
+    ("source_event", "LOCAL_PRE_DELIVERY_PROOF_REQUIRED"),
+    ("fill", "LOCAL_PRE_DELIVERY_PROOF_REQUIRED"),
+    ("command_ref", "LOCAL_RECEIPT_CONFLICT"),
+    ("no_event", "LOCAL_EXPIRY_PROOF_REQUIRED"),
+    ("early_expiry", "LOCAL_EXPIRY_NOT_REACHED"),
+    ("payload", "LOCAL_COMMAND_BINDING_CONFLICT"),
+  ],
+)
+async def test_unknown_local_outcome_remains_an_obligation(
+  monkeypatch, damage, blocker
+):
+  engine, sessions, now = await seed_local_terminal(monkeypatch, "expired")
+  try:
+    async with sessions() as db, db.begin():
+      event = await db.scalar(select(StrategyRuntimeEvent))
+      event.application_status = "APPLIED"
+      event.applied_at = now.replace(tzinfo=None)
+      command = await db.get(TradeCommandOutbox, "local-command")
+      if damage == "delivered":
+        command.delivered_at = now.replace(tzinfo=None)
+      elif damage == "ack":
+        command.acknowledged_at = now.replace(tzinfo=None)
+      elif damage == "attempt":
+        command.attempts = 1
+      elif damage == "source_event":
+        (await db.get(PendingTradeOrder, "client-1")).last_source_sequence = 1
+      elif damage == "fill":
+        (await db.get(TradeIntentRecord, "intent-1")).executed_volume = 1
+      elif damage == "command_ref":
+        event.payload = {
+          **event.payload,
+          "metadata": {**event.payload["metadata"], "command_message_id": "other"},
+        }
+      elif damage == "no_event":
+        await db.delete(event)
+      elif damage == "early_expiry":
+        command.expires_at = (now + timedelta(seconds=1)).replace(tzinfo=None)
+      elif damage == "payload":
+        command.payload = {**command.payload, "command_kind": "CANCEL_ORDER"}
+    async with sessions() as db, db.begin():
+      result = await read_legacy_order_settlement(
+        db,
+        account_id="account-1",
+        run_id="plan-1",
+        client_order_id="client-1",
+        now=now,
+      )
+      assert result.blocker == f"LEGACY_T_SETTLEMENT_{blocker}"
+      assert result.filled_volume is None
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_parent", [False, True])
+async def test_unsent_replacement_does_not_erase_prior_attempt_fills(
+  monkeypatch, wrong_parent
+):
+  engine, sessions, now = await seed_local_terminal(monkeypatch, "expired")
+  try:
+    async with sessions() as db, db.begin():
+      pending = await db.get(PendingTradeOrder, "client-1")
+      original = (now - timedelta(seconds=20)).replace(tzinfo=None)
+      values = {
+        column.name: getattr(pending, column.name)
+        for column in PendingTradeOrder.__table__.columns
+      }
+      values.update(
+        client_order_id="prior-client",
+        strategy_order_id="prior-order",
+        broker_order_id="9001",
+        status="CANCELLED",
+        t_order_original_created_at=original,
+        instrument_code="other" if wrong_parent else pending.instrument_code,
+      )
+      db.add(PendingTradeOrder(**values))
+      await db.flush()
+      pending.t_order_attempt = 1
+      pending.t_order_parent_client_id = "prior-client"
+      pending.t_order_original_created_at = original
+      intent = await db.get(TradeIntentRecord, "intent-1")
+      intent.executed_volume = 40
+      intent.executed_price = 10
+      intent.executed_time = original
+      event = await db.scalar(select(StrategyRuntimeEvent))
+      event.application_status = "APPLIED"
+      event.applied_at = now.replace(tzinfo=None)
+    async with sessions() as db, db.begin():
+      result = await read_legacy_order_settlement(
+        db,
+        account_id="account-1",
+        run_id="plan-1",
+        client_order_id="client-1",
+        now=now,
+      )
+      if wrong_parent:
+        assert result.blocker == "LEGACY_T_SETTLEMENT_PARENT_CONFLICT"
+      else:
+        assert result.blocker is None and result.filled_volume == 0
+      assert (await db.get(TradeIntentRecord, "intent-1")).executed_volume == 40
+      assert (await db.get(PendingTradeOrder, "prior-client")).broker_order_id == "9001"
   finally:
     await engine.dispose()

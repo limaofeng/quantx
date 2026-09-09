@@ -1052,7 +1052,13 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   数量，迟到成交与旧 RECONCILED_ZERO_FILL 冲突保持阻断。**17 项定向测试及 Ruff 通过**，
   证据 `.codex_screenshots/p6-legacy-settlement-final.log`；真实 ORM 配合合成回报，仅为
   逐笔证据，不是账户义务归零证明。组件不写订单、batch、ExitPlan 或执行状态。
-  下一步将其接入完整义务核验（含未投递命令、账户快照与 inbox）及终结/解除旧绑定事务；
+  逐笔读取已合并未投递本地终态：要求精确 PLACE_ORDER 绑定、领取次数为 0、无 delivery/ack、
+  无券商序列或成交证据；过期须到达真实期限且原命令生成的事件已 APPLIED，本地撤单核对
+  既有服务记录。续单只证明当前 attempt 为 0，复核原 parent 绑定并保留前笔成交，不把共享
+  intent 的历史成交抹掉。**30 项测试及 Ruff 通过**，证据
+  `.codex_screenshots/p6-legacy-local-settlement-final.log`；实际 API 过期与公共本地撤单流程
+  配 SQLite，事件应用及续单事实为合成边界，未连接设备或发送订单。
+  下一步将逐笔结果接入完整义务核验（含账户快照与 inbox）及终结/解除旧绑定事务；
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
