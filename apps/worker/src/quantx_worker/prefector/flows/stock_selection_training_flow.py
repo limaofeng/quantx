@@ -23,6 +23,12 @@ from quantx_infrastructure.repositories.stock_selection_training_repository impo
   TrainingStateConflict,
 )
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
+from quantx_infrastructure.training_process_evidence import (
+  begin_execution,
+  inspect_execution,
+  record_exit,
+  record_spawn,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 CRITICAL_WINDOW_START = time(9, 15)
@@ -977,7 +983,7 @@ def _stable_research_run_key(result: Mapping[str, Any]) -> str | None:
 
 
 async def recover_lost_training_runs(repository: Any, *, now: datetime | None = None) -> list[str]:
-  """Mark DB RUNNING rows whose local child process cannot be proven alive."""
+  """Converge only stopped supervisor/Research identities; unknown evidence stays pending."""
 
   try:
     rows = await repository.list_runs(status="RUNNING")
@@ -989,12 +995,22 @@ async def recover_lost_training_runs(repository: Any, *, now: datetime | None = 
     process = _processes.get(run_id)
     if process is not None and _process_alive(process):
       continue
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", run_id):
+      continue
+    directory = control_root() / run_id
+    owner = str(_value(row, "prefect_flow_run_id", "") or "")
+    state = await asyncio.to_thread(
+      inspect_execution, directory / "process.json",
+      run_id=run_id, owner=owner, request=directory / "request.json",
+    )
+    if state != "EXITED":
+      continue
     try:
       await repository.fail_run(
         run_id,
         expected_flow_run_id=str(_value(row, "prefect_flow_run_id", "") or ""),
         error_code="WORKER_PROCESS_LOST",
-        error_message="worker process no longer exists after restart",
+        error_message="recorded research process has exited; execution evidence retained",
         environment_evidence=_value(row, "environment_evidence", {}) or {},
         metrics_summary=_value(row, "metrics_summary", {}) or {},
         gate_summary=_value(row, "gate_summary", {}) or {},
@@ -1070,8 +1086,11 @@ async def _run_claimed_job(
     progress_path = control_directory / "progress.json"
     cancel_path = control_directory / "cancel.request"
     _write_json(request_path, request)
+    evidence_path = control_directory / "process.json"
+    begin_execution(evidence_path, run_id=run_id, owner=execution_owner, request=request_path)
     process = _spawn_process(request_path, control_directory)
     child_started = True
+    record_spawn(evidence_path, run_id=run_id, owner=execution_owner, request=request_path, process=process)
     _processes[run_id] = process
     last_progress: tuple[Any, ...] | None = None
     cancel_sent = False
@@ -1103,6 +1122,7 @@ async def _run_claimed_job(
             last_progress = marker
       await asyncio.sleep(max(0.01, float(poll_interval_seconds)))
     returncode = process.poll()
+    record_exit(evidence_path, run_id=run_id, owner=execution_owner, request=request_path, returncode=returncode)
     current = await repository.get_run(run_id)
     result = _result_payload(
       control_directory,

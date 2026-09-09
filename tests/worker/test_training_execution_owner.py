@@ -39,6 +39,7 @@ async def test_lost_owner_stops_child_without_converging_someone_elses_run(
   monkeypatch.setattr(flow, "resolve_dataset_directory", lambda dataset: {})
   monkeypatch.setattr(flow, "build_training_request", lambda *args, **kwargs: {})
   monkeypatch.setattr(flow, "_spawn_process", lambda *args: process)
+  monkeypatch.setattr(flow, "record_spawn", lambda *args, **kwargs: None)
   result = await flow._run_claimed_job(
     repository,
     SimpleNamespace(
