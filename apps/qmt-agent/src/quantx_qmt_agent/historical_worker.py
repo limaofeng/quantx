@@ -17,7 +17,6 @@ import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +27,7 @@ from quantx_contracts import (
   HistoricalBarSummary,
   historical_bar_key,
 )
+from quantx_contracts.collection_permit import plan_historical_work_units
 
 from .broker import (
   HistoricalMarketDataFieldError,
@@ -38,13 +38,7 @@ from .history_timing import history_unit, record_history_timing
 
 XTDATA_HISTORICAL_WORKER_KIND = "xtdata"
 HISTORICAL_CHECKPOINT = object()
-HISTORICAL_WORK_UNIT_INSTRUMENTS = 20
-HISTORICAL_TICK_WORK_UNIT_INSTRUMENTS = 10
-HISTORICAL_WORK_UNIT_WINDOW_DAYS = {
-  "tick": 1,
-  "1m": 1,
-  "1d": 31,
-}
+
 
 
 @dataclass
@@ -219,85 +213,10 @@ def _serialized_worker_error(error: Exception) -> dict[str, Any]:
   }
 
 
-def _chunks(values: list[str], size: int) -> Iterator[list[str]]:
-  if not values:
-    return
-  group_count = (len(values) + size - 1) // size
-  group_size, larger_groups = divmod(len(values), group_count)
-  offset = 0
-  for index in range(group_count):
-    width = group_size + (1 if index < larger_groups else 0)
-    yield values[offset : offset + width]
-    offset += width
-
-
-def _date_windows(
-  start_text: str,
-  end_text: str,
-  *,
-  max_days: int,
-) -> Iterator[tuple[str, str]]:
-  start = datetime.strptime(start_text, "%Y%m%d").date()
-  end = datetime.strptime(end_text, "%Y%m%d").date()
-  cursor = start
-  while cursor <= end:
-    window_end = min(end, cursor + timedelta(days=max_days - 1))
-    yield cursor.strftime("%Y%m%d"), window_end.strftime("%Y%m%d")
-    cursor = window_end + timedelta(days=1)
-
-
-def historical_work_units(
-  payload: dict[str, Any],
-  *,
-  instrument_batch_size: int | None = None,
-) -> tuple[dict[str, Any], ...]:
-  """Plan bounded, preemptible native calls for one validated request."""
-
-  if instrument_batch_size is not None and not 10 <= instrument_batch_size <= 30:
-    raise ValueError("historical work-unit size must be between 10 and 30")
-  operation = str(payload.get("operation") or "bars")
+def historical_work_units(payload: dict[str, Any], *, instrument_batch_size: int | None = None) -> tuple[dict[str, Any], ...]:
+  # Validate the whole immutable request budget before splitting it.
   validate_market_data_request(payload)
-  raw_codes = payload.get("stock_list")
-  codes = list(raw_codes) if isinstance(raw_codes, list) else []
-  if not codes:
-    return (dict(payload),)
-
-  units: list[dict[str, Any]] = []
-  if operation == "bars":
-    raw_periods = payload.get("periods") or ["1d"]
-    periods = list(raw_periods) if isinstance(raw_periods, list) else []
-    if not periods:
-      return (dict(payload),)
-    # Broker output is period-major and instrument-sorted. Matching that order
-    # keeps the complete request manifest deterministic across retries.
-    ordered_codes = sorted(codes)
-    for period in periods:
-      batch_size = instrument_batch_size or (
-        HISTORICAL_TICK_WORK_UNIT_INSTRUMENTS
-        if period == "tick"
-        else HISTORICAL_WORK_UNIT_INSTRUMENTS
-      )
-      for code_batch in _chunks(ordered_codes, batch_size):
-        for start_text, end_text in _date_windows(
-          str(payload["start_time"]),
-          str(payload["end_time"]),
-          max_days=HISTORICAL_WORK_UNIT_WINDOW_DAYS[period],
-        ):
-          units.append(
-            {
-              **payload,
-              "stock_list": code_batch,
-              "periods": [period],
-              "start_time": start_text,
-              "end_time": end_text,
-            }
-          )
-    return tuple(units)
-
-  batch_size = instrument_batch_size or HISTORICAL_WORK_UNIT_INSTRUMENTS
-  for code_batch in _chunks(sorted(codes), batch_size):
-    units.append({**payload, "stock_list": code_batch})
-  return tuple(units)
+  return plan_historical_work_units(payload, instrument_batch_size=instrument_batch_size)
 
 
 def _prepared_manifest(prepared: Any) -> dict[str, Any]:

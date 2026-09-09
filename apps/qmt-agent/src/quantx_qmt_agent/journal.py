@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from quantx_contracts.collection_permit import CollectionPermit, CollectionUnit
+
 
 def payload_hash(payload: dict[str, Any]) -> str:
   encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -54,6 +56,17 @@ class LocalJournal:
           sequence_id INTEGER,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS history_collection_receipts (
+          device_id TEXT NOT NULL,
+          request_id TEXT NOT NULL,
+          unit_index INTEGER NOT NULL,
+          unit_id TEXT NOT NULL,
+          permit_id TEXT PRIMARY KEY,
+          permit_sha256 TEXT NOT NULL,
+          owner_epoch INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS ix_history_collection_unit
+          ON history_collection_receipts(device_id, request_id, unit_index);
         CREATE TABLE IF NOT EXISTS journal_metadata (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
@@ -147,6 +160,70 @@ class LocalJournal:
     self._load_correlation_cache()
     self._load_count_cache()
     self._size_bytes = self._read_size_bytes()
+
+  def accept_collection_permit(
+    self,
+    permit: CollectionPermit,
+    *,
+    device_id: str,
+    unit: CollectionUnit,
+    now: datetime | None = None,
+  ) -> bool:
+    """Persist a start authorization before native work; False means a replay.
+
+    Receipt is not completion evidence. A replay must join/recover the existing
+    request/spool state, never infer that its native work or upload is complete.
+    """
+    # Validate caller scope and time before touching even the epoch watermark.
+    permit.validate_start(device_id=device_id, unit=unit, now=now)
+    device = str(permit.device_id)
+    epoch_key = "history_owner_epoch:" + device
+    permit_digest = payload_hash(permit.model_dump(mode="json"))
+    with self.lock, self.connection:
+      # Serialize read/check/write across journal connections as well as threads.
+      self.connection.execute("BEGIN IMMEDIATE")
+      epoch_row = self.connection.execute(
+        "SELECT value FROM journal_metadata WHERE key=?", (epoch_key,)
+      ).fetchone()
+      minimum_epoch = int(epoch_row["value"]) if epoch_row is not None else 0
+      permit.validate_start(
+        device_id=device, unit=unit, now=now, minimum_epoch=minimum_epoch
+      )
+      receipt = self.connection.execute(
+        "SELECT permit_sha256 FROM history_collection_receipts WHERE permit_id=?",
+        (str(permit.permit_id),),
+      ).fetchone()
+      if receipt is not None and receipt["permit_sha256"] != permit_digest:
+        raise ValueError("collection permit ID conflicts with recorded authorization")
+      existing = self.connection.execute(
+        "SELECT unit_id, permit_id FROM history_collection_receipts "
+        "WHERE device_id=? AND request_id=? AND unit_index=? LIMIT 1",
+        (device, str(unit.request_id), unit.unit_index),
+      ).fetchone()
+      if existing is not None and existing["unit_id"] != unit.unit_id:
+        raise ValueError("collection permit conflicts with the recorded unit")
+      self.connection.execute(
+        "INSERT INTO journal_metadata(key,value) VALUES (?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (epoch_key, str(permit.owner_epoch)),
+      )
+      self.connection.execute(
+        "INSERT INTO history_collection_receipts "
+        "(device_id,request_id,unit_index,unit_id,permit_id,permit_sha256,owner_epoch) VALUES (?,?,?,?,?,?,?) "
+        "ON CONFLICT(permit_id) DO NOTHING",
+        (
+          device,
+          str(unit.request_id),
+          unit.unit_index,
+          unit.unit_id,
+          str(permit.permit_id),
+          permit_digest,
+          permit.owner_epoch,
+        ),
+      )
+    with self.lock:
+      self._refresh_size_cache()
+    return existing is None
 
   def _backfill_structured_columns(self) -> None:
     command_rows = self.connection.execute(
