@@ -72,7 +72,7 @@ async def durable_store(monkeypatch):
     )
     path = (
       Path(__file__).resolve().parents[2]
-      / "packages/infrastructure/alembic/versions/20260909_0061_market_data_ingestion_progress.py"
+      / "packages/infrastructure/alembic/versions/20260909_0064_market_data_ingestion_progress.py"
     )
     spec = importlib.util.spec_from_file_location("progress_migration", path)
     migration = importlib.util.module_from_spec(spec)

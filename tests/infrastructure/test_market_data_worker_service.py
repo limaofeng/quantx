@@ -48,7 +48,7 @@ async def workers(durable_store):  # noqa: F811 - imported pytest fixture
     )
     path = (
       Path(__file__).resolve().parents[2]
-      / "packages/infrastructure/alembic/versions/20260909_0062_market_data_worker_lease.py"
+      / "packages/infrastructure/alembic/versions/20260909_0065_market_data_worker_lease.py"
     )
     spec = importlib.util.spec_from_file_location("worker_migration", path)
     migration = importlib.util.module_from_spec(spec)
