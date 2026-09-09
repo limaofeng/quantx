@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from quantx_domain.strategies.base import (
   BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
@@ -1341,9 +1342,13 @@ class TestStrategyManager:
     StrategyManager._instance = None
 
   @pytest.mark.asyncio
+  @pytest.mark.parametrize(
+    "stop", [None, "failure", "cancel", "transport", "integrity"]
+  )
   async def test_t_trade_replay_materializes_and_freezes_each_daily_d1_profile(
     self,
     monkeypatch,
+    stop,
   ):
     StrategyManager._instance = None
     manager = StrategyManager()
@@ -1359,8 +1364,21 @@ class TestStrategyManager:
       "quantx_engine.strategy_manager.TradingDateHelper",
       lambda: calendar,
     )
-    pages = object()
-    service = SimpleNamespace(iter_tick_pages=lambda **_kwargs: pages)
+    page_calls = []
+    closed = []
+
+    async def tick_pages(**kwargs):
+      page_calls.append(kwargs)
+      try:
+        yield [object()]
+      finally:
+        closed.append(kwargs["start_time"])
+
+    service = SimpleNamespace(iter_tick_pages=tick_pages)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.LocalHistoricalTickReader",
+      lambda: service,
+    )
     profile_builder = SimpleNamespace(
       build_and_save_profiles_from_pages=AsyncMock(
         return_value={
@@ -1380,6 +1398,26 @@ class TestStrategyManager:
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.TTradeInstrumentProfileService",
       lambda: profile_builder,
+    )
+
+    async def build_from_local_pages(**kwargs):
+      async for _ in kwargs["pages"]:
+        if stop == "failure":
+          raise ValueError("profile validation rejected")
+        if stop == "cancel":
+          raise asyncio.CancelledError()
+        if stop == "transport":
+          raise httpx.ConnectError("local history service unavailable")
+        if stop == "integrity":
+          from quantx_infrastructure.services.historical_market_data_service import (
+            HistoricalTickPaginationError,
+          )
+
+          raise HistoricalTickPaginationError("source identity mismatch")
+      return profile_builder.build_and_save_profiles_from_pages.return_value
+
+    profile_builder.build_and_save_profiles_from_pages.side_effect = (
+      build_from_local_pages
     )
 
     class FakeSession:
@@ -1405,12 +1443,28 @@ class TestStrategyManager:
     phase = AsyncMock()
     monkeypatch.setattr(manager, "_set_t_trade_replay_phase", phase)
 
-    await manager._prepare_t_trade_replay_profiles(
+    prepare = manager._prepare_t_trade_replay_profiles(
       runtime,
-      service=service,
       replay_start_time=datetime(2026, 8, 3, 9, 30),
       replay_end_time=datetime(2026, 8, 4, 15, 0),
     )
+    if stop:
+      with pytest.raises(
+        asyncio.CancelledError if stop == "cancel" else RuntimeError
+      ) as error:
+        await prepare
+      assert len(page_calls) == len(closed) == 1
+      assert "t_trade_replay_profile_manifest" not in runtime.context.parameters
+      run_repository.update_run.assert_not_awaited()
+      if stop in {"transport", "integrity"}:
+        assert str(error.value).startswith("HISTORY_READ_FAILED:")
+        assert (
+          phase.await_args.kwargs["data_preparation"]["issues"][0]["code"]
+          == "REFERENCE_PROFILE_HISTORY_READ_FAILED"
+        )
+      StrategyManager._instance = None
+      return
+    await prepare
 
     manifest = runtime.context.parameters["t_trade_replay_profile_manifest"]
     assert manifest["schema_version"] == 1
@@ -1431,6 +1485,9 @@ class TestStrategyManager:
       },
     }
     assert profile_builder.build_and_save_profiles_from_pages.await_count == 1
+    assert page_calls[0]["start_time"] == datetime(2026, 6, 2, 9, 30)
+    assert page_calls[-1]["end_time"] == datetime(2026, 8, 3, 15, 0)
+    assert len(closed) == len(page_calls)
     run_repository.update_run.assert_awaited_once()
     assert (
       phase.await_args_list[-1].kwargs["data_preparation"]["profile_completed"] == 2

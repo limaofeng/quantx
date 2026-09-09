@@ -21,9 +21,11 @@ import math
 import os
 import select
 import uuid
+from contextlib import aclosing
 from datetime import date, datetime, time, timedelta
 from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Type
 
+import httpx
 from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
 from quantx_domain.strategies.base import (
   BACKTEST_TICK_QUALITY_STRICT_DAILY_SESSION_COVERAGE,
@@ -74,9 +76,13 @@ from quantx_infrastructure.services.exit_plan_replay_projection_service import (
 )
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
+  HistoricalTickPaginationError,
 )
 from quantx_infrastructure.services.limit_up_board_replay_projection_service import (
   limit_up_board_replay_projection_service,
+)
+from quantx_infrastructure.services.local_historical_tick_reader import (
+  LocalHistoricalTickReader,
 )
 from quantx_infrastructure.services.market_data_request_service import (
   build_sync_lock_key,
@@ -1353,7 +1359,6 @@ class StrategyManager:
       if is_t_trade_replay:
         await self._prepare_t_trade_replay_profiles(
           runtime,
-          service=service,
           replay_start_time=replay_start_time,
           replay_end_time=end_time,
         )
@@ -1438,7 +1443,6 @@ class StrategyManager:
       if is_t_trade_replay:
         await self._prepare_t_trade_replay_profiles(
           runtime,
-          service=service,
           replay_start_time=replay_start_time,
           replay_end_time=end_time,
         )
@@ -1551,7 +1555,6 @@ class StrategyManager:
     self,
     runtime: StrategyRuntime,
     *,
-    service: HistoricalMarketDataService,
     replay_start_time: datetime,
     replay_end_time: datetime,
   ) -> None:
@@ -1577,6 +1580,7 @@ class StrategyManager:
     issues: List[Dict[str, Any]] = []
     manifest_entries: Dict[str, Dict[str, Any]] = {}
     profile_service = TTradeInstrumentProfileService()
+    tick_reader = LocalHistoricalTickReader()
     profile_requirements: List[tuple[date, datetime]] = []
     for trade_date in trading_dates:
       previous_trade_date = await helper.trading_time_service.get_previous_trading_day(
@@ -1618,7 +1622,7 @@ class StrategyManager:
       )
       try:
         pages = self._iter_t_trade_profile_tick_pages(
-          service=service,
+          service=tick_reader,
           stock_code=instrument,
           start_time=history_start,
           end_time=last_as_of,
@@ -1626,7 +1630,7 @@ class StrategyManager:
           max_pages=T_TRADE_PROFILE_MAX_PAGES,
           max_source_ticks=T_TRADE_PROFILE_MAX_SOURCE_TICKS,
         )
-        async with AsyncSessionLocal() as db:
+        async with aclosing(pages), AsyncSessionLocal() as db:
           rows_by_as_of = await profile_service.build_and_save_profiles_from_pages(
             instrument_code=instrument,
             pages=pages,
@@ -1640,8 +1644,15 @@ class StrategyManager:
             max_source_ticks=T_TRADE_PROFILE_MAX_SOURCE_TICKS,
           )
       except Exception as exc:
+        read_failed = isinstance(
+          exc, (httpx.HTTPError, HistoricalTickPaginationError)
+        )
         issue = {
-          "code": "REFERENCE_PROFILE_HISTORY_INSUFFICIENT",
+          "code": (
+            "REFERENCE_PROFILE_HISTORY_READ_FAILED"
+            if read_failed
+            else "REFERENCE_PROFILE_HISTORY_INSUFFICIENT"
+          ),
           "instrument_code": instrument,
           "trade_date": first_trade_date.isoformat(),
           "detail": str(exc)[:1000],
@@ -1669,11 +1680,12 @@ class StrategyManager:
             "issues": issues[:20],
           },
         )
-        raise RuntimeError(
-          "DATA_INSUFFICIENT: "
-          f"{instrument} 缺少可批量构建逐日 D-1 画像的完整历史: "
-          f"{str(exc)[:1000]}"
-        ) from exc
+        reason = (
+          f"HISTORY_READ_FAILED: {instrument} 历史读取失败，未生成逐日 D-1 画像"
+          if read_failed
+          else f"DATA_INSUFFICIENT: {instrument} 缺少可批量构建逐日 D-1 画像的完整历史"
+        )
+        raise RuntimeError(f"{reason}: {str(exc)[:1000]}") from exc
 
       for trade_date, as_of in profile_requirements:
         row = rows_by_as_of[time_utils.to_shanghai(as_of).isoformat()]
@@ -1725,7 +1737,7 @@ class StrategyManager:
   @staticmethod
   async def _iter_t_trade_profile_tick_pages(
     *,
-    service: HistoricalMarketDataService,
+    service: LocalHistoricalTickReader,
     stock_code: str,
     start_time: datetime,
     end_time: datetime,
@@ -1754,15 +1766,18 @@ class StrategyManager:
       )
       chunk_start = max(start_time, datetime.combine(current_date, time.min))
       chunk_end = min(end_time, datetime.combine(chunk_last_date, time.max))
-      async for page in service.iter_tick_pages(
-        stock_code=stock_code,
-        start_time=chunk_start,
-        end_time=chunk_end,
-        page_size=page_size,
-        max_pages=max_pages,
-        max_source_ticks=max_source_ticks,
-      ):
-        yield page
+      async with aclosing(
+        service.iter_tick_pages(
+          stock_code=stock_code,
+          start_time=chunk_start,
+          end_time=chunk_end,
+          page_size=page_size,
+          max_pages=max_pages,
+          max_source_ticks=max_source_ticks,
+        )
+      ) as pages:
+        async for page in pages:
+          yield page
       current_date = chunk_last_date + timedelta(days=1)
 
   async def _queue_missing_backtest_data_supplement(

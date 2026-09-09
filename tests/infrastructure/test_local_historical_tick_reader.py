@@ -36,10 +36,18 @@ async def collect(pages):
   return [page async for page in pages]
 
 
-async def test_profile_reader_http_roundtrip_keeps_short_pages_and_depth(monkeypatch):
+@pytest.mark.parametrize("consumer", ["worker", "engine"])
+async def test_profile_reader_http_roundtrip_keeps_short_pages_and_depth(
+  monkeypatch, consumer
+):
   from quantx_worker.prefector.flows.t_trade_instrument_profile_flow import (
     _iter_profile_tick_pages,
   )
+
+  if consumer == "engine":
+    from quantx_engine.strategy_manager import StrategyManager
+
+    _iter_profile_tick_pages = StrategyManager._iter_t_trade_profile_tick_pages
 
   connection = Connection(
     [[tick(0) | {"ask1": 10.1, "ask2": 10.2, "bid1": 10.0}], [tick(1)], []]
@@ -156,7 +164,7 @@ async def test_bad_http_content_is_integrity_failure_not_insufficient_history(
   assert client.client.is_closed
 
 
-@pytest.mark.parametrize("profile_wrapper", [False, True])
+@pytest.mark.parametrize("profile_wrapper", [None, "worker", "engine"])
 async def test_consumer_close_releases_http_client(monkeypatch, profile_wrapper):
   connection = Connection([[tick(0), tick(1)]])
   app = create_app(
@@ -170,6 +178,11 @@ async def test_consumer_close_releases_http_client(monkeypatch, profile_wrapper)
       from quantx_worker.prefector.flows.t_trade_instrument_profile_flow import (
         _iter_profile_tick_pages,
       )
+
+      if profile_wrapper == "engine":
+        from quantx_engine.strategy_manager import StrategyManager
+
+        _iter_profile_tick_pages = StrategyManager._iter_t_trade_profile_tick_pages
 
       pages = _iter_profile_tick_pages(
         service=module.LocalHistoricalTickReader(),
