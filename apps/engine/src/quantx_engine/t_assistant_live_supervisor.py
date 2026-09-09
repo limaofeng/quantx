@@ -1,10 +1,12 @@
 """Ordered LIVE market consumer for explicitly existing independent executions."""
 
 import asyncio
+import copy
 import re
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 
+from quantx_contracts import ExecutionEnvironment
 from quantx_domain.clock import SHANGHAI
 from quantx_domain.trading.t_assistant_execution import (
   TAssistantConfigVersion,
@@ -45,12 +47,17 @@ from quantx_infrastructure.services.t_trade_opportunity_runtime_service import (
 )
 from sqlalchemy import select
 
+from .accepted_order_market import accepted_order_market
 from .instrument_universe_provider import InstrumentUniverseSnapshot
 from .t_assistant_candidate_controls import read_candidate_controls
 from .t_assistant_decision_runtime import TAssistantLiveDecisionRuntime
 from .t_assistant_live_admission import canary_instrument_codes
 from .t_assistant_live_allocation_runtime import TAssistantLiveAllocationRuntime
 from .t_assistant_live_drain import drain_live_entry_work
+from .t_assistant_live_entry_review import (
+  LiveEntryMarketWitness,
+  LiveEntryReviewAdapter,
+)
 from .t_assistant_live_readiness import activate_live_canary_ready
 from .t_assistant_paper_shadow_supervisor import _accepted_tick, _market_gate_context
 from .t_trade_decision_snapshot import (
@@ -348,6 +355,43 @@ class TAssistantLiveSupervisor:
       if previous is not None and changed:
         await self._warming_reason(self._bindings[execution_id], "LIVE_READY_RECOVERY_REQUIRED", now)
       return execution_id
+
+  def entry_review_adapter(self, db):
+    return LiveEntryReviewAdapter(db, witness_provider=self.entry_market_witness,
+      market_mark_reader=self.market_marks, clock=self.clock)
+
+  async def entry_market_witness(self, execution_id, code):
+    # No await/lock: snapshot the ring and hub together on the Engine event loop.
+    binding = self._bindings.get(execution_id)
+    if binding is None or not self.hub.is_ready:
+      return None
+    current = binding.builder.entry_market_witness(code)
+    raw = self.hub.latest(code)
+    if current is None or raw is None:
+      return None
+    tick, ring_generation, last_sequence = current
+
+    def validate():
+      latest = self.hub.latest(code)
+      if (self._bindings.get(execution_id) is not binding or not self.hub.is_ready
+        or binding.ready_market_identity != (self.hub.stream_id, str(self.hub.generation))
+        or self.hub.stream_id != tick.stream_id
+        or str(self.hub.generation) != tick.sample.continuity_generation
+        or binding.builder.entry_market_witness(code) != current
+        or latest is None
+        or latest.get("market_stream_id") != tick.stream_id
+        or str(latest.get("continuity_generation")) != tick.sample.continuity_generation
+        or latest.get("source_time_ms") != tick.sample.source_time_ms
+        or latest.get("tick_ordinal") != tick.sample.tick_ordinal
+        or latest.get("market_stream_sequence") != tick.market_fence_sequence):
+        raise ValueError("LIVE_ENTRY_MARKET_WITNESS_CHANGED")
+
+    try:
+      validate()
+      _, book = accepted_order_market(code, copy.deepcopy(raw), now=self.clock(), environment=ExecutionEnvironment.LIVE)
+    except (ValueError, TypeError):
+      return None
+    return LiveEntryMarketWitness(tick, ring_generation, last_sequence, book, validate)
 
   async def _warming_reason(self, binding, reason, now):
     async with self.sessions() as db, db.begin():

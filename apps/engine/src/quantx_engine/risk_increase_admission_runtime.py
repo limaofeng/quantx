@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 class RiskIncreaseAdmissionRuntime:
   """Recover READY/PREPARED admission work independently of producers."""
 
-  def __init__(self, *, interval_seconds: float = ADMISSION_RENEW_INTERVAL_SECONDS):
+  def __init__(self, *, interval_seconds: float = ADMISSION_RENEW_INTERVAL_SECONDS, live_entry_review_factory=None):
+    self.live_entry_review_factory = live_entry_review_factory
     self.interval_seconds = float(interval_seconds)
     self.instance_id = str(uuid.uuid4())
     self._task: Optional[asyncio.Task] = None
@@ -115,9 +116,11 @@ class RiskIncreaseAdmissionRuntime:
       dispatched = 0
       for account_id in account_ids:
         try:
-          result = await TradeCommandService(
-            db
-          ).dispatch_ready_risk_increase_orders(
+          kwargs = (
+            {"live_entry_review": self.live_entry_review_factory(db)}
+            if self.live_entry_review_factory is not None else {}
+          )
+          result = await TradeCommandService(db, **kwargs).dispatch_ready_risk_increase_orders(
             account_id=account_id,
             processing_owner=f"engine-admission:{self.instance_id}",
           )
@@ -133,7 +136,14 @@ class RiskIncreaseAdmissionRuntime:
       return {"accounts": len(account_ids), "dispatched": dispatched}
 
 
-risk_increase_admission_runtime = RiskIncreaseAdmissionRuntime()
+def _live_entry_review(db):
+  # Resolve the Engine-owned monitor only when its recovery dispatcher runs.
+  from .t_trade_runtime import t_assistant_live_supervisor
+
+  return t_assistant_live_supervisor.entry_review_adapter(db)
+
+
+risk_increase_admission_runtime = RiskIncreaseAdmissionRuntime(live_entry_review_factory=_live_entry_review)
 
 __all__ = [
   "RiskIncreaseAdmissionRuntime",

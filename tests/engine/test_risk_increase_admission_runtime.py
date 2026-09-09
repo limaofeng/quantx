@@ -127,3 +127,23 @@ async def test_start_runs_recovery_barrier_before_background_loop() -> None:
     assert runtime.is_running is True
   finally:
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_recovery_injects_fresh_review_bound_to_its_own_session(monkeypatch):
+  session = _Session()
+  review = object()
+  provided = []
+  def factory(db):
+    assert db is session
+    return review
+  class CommandService:
+    def __init__(self, db, *, live_entry_review):
+      assert db is session
+      provided.append(live_entry_review)
+    async def dispatch_ready_risk_increase_orders(self, **kwargs):
+      return {}
+  monkeypatch.setattr(runtime_module, "AsyncSessionLocal", lambda: _SessionContext(session))
+  monkeypatch.setattr(runtime_module, "TradeCommandService", CommandService)
+  result = await RiskIncreaseAdmissionRuntime(live_entry_review_factory=factory).recover_once()
+  assert provided == [review] * result["accounts"] and provided

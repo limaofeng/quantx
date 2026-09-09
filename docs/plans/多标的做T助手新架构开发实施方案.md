@@ -843,6 +843,14 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   锁测试检查真实公共方法发出的锁请求顺序，数据库取数为替身，尚无 PostgreSQL 并发死锁
   演练结论。证据 `.codex_screenshots/p6-live-source-locks.log`。
   下一步转入 Engine Gate/witness 构造回调、过期请求回收及实际调度接线。
+- Engine 最新审查回调已接线：PAPER/LIVE 共用持久化 Gate 构造与原始五档投影；LIVE
+  supervisor 原子读取 accepted ring 与 hub 最新盘口并核对流/代/源时间/序号/fence，
+  不等待 supervisor 锁，返回独立盘口副本及同步复核函数。审查返回后再次检查 ring、绑定
+  与行情时效。账户恢复 dispatcher 按同一 DB session 注入实际 supervisor adapter。
+  41 项 Engine 回归与 Ruff 通过，含真实 Gate 构造及 LIVE 域检查、审查中换代/过期、持有
+  supervisor 锁时仍能取得证据、盘口缺失、解除绑定和 dispatcher 会话注入；终端审查在
+  adapter 测试中为替身，未替代无替身整链验收。证据 `.codex_screenshots/p6-live-adapter-wiring.log`。
+  下一步：旧请求/过期 READY 回收、审查结果状态收敛，随后注册 LIVE 请求生成并做隔离整链。
 - 剩余开发顺序：
   人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。

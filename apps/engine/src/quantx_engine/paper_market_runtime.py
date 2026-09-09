@@ -1,19 +1,14 @@
 """Feed accepted books to isolated PAPER facts, including stopped producers."""
 
 import logging
-import math
-from datetime import UTC, datetime
-from types import SimpleNamespace
 
-from quantx_domain.trading.market_rules import MarketDataSnapshot
-from quantx_domain.trading.t_assistant_execution import stable_manifest_hash
+from quantx_contracts import ExecutionEnvironment
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.paper_execution import (
   PaperExecutionAccountRecord,
   PaperExecutionEventRecord,
   PaperExecutionOrderRecord,
 )
-from quantx_infrastructure.services.paper_broker_matching import PaperBrokerMatching
 from quantx_infrastructure.services.paper_execution_ledger import (
   PaperExecutionLedger,
   _stored_time,
@@ -23,76 +18,16 @@ from quantx_infrastructure.services.paper_receipt_convergence import (
 )
 from sqlalchemy import select
 
+from quantx_engine.accepted_order_market import accepted_order_market
+
 logger = logging.getLogger(__name__)
 _ACTIVE_ORDERS = ("PENDING", "SUBMITTED", "PARTIAL_FILLED")
 
 
 def accepted_paper_market(instrument_code, raw, *, now):
-  """Project the original hub book without inventing depth or price limits."""
-
-  def required(*names):
-    values = [raw[name] for name in names if name in raw and raw[name] is not None]
-    if not values or any(value != values[0] for value in values):
-      raise ValueError("PAPER_MARKET_FIELD_REQUIRED_OR_CONFLICTING")
-    return values[0]
-
-  def number(*names, positive=False):
-    value = required(*names)
-    if (
-      type(value) not in (int, float)
-      or not math.isfinite(value)
-      or value < 0
-      or (positive and value == 0)
-    ):
-      raise ValueError("PAPER_MARKET_NUMBER_INVALID")
-    return value
-
-  stream, generation = required("market_stream_id"), required("continuity_generation")
-  source = required("source_time_ms")
-  ordinal = required("tick_ordinal")
-  fence = required("market_stream_sequence")
-  if (
-    not isinstance(stream, str)
-    or not stream
-    or any(
-      type(value) is not int or value <= 0
-      for value in (generation, source, ordinal, fence)
-    )
-  ):
-    raise ValueError("PAPER_MARKET_LINEAGE_REQUIRED")
-  timestamp = datetime.fromtimestamp(source / 1000, tz=UTC)
-  if now.tzinfo is None or timestamp > now:
-    raise ValueError("PAPER_MARKET_TIME_INVALID")
-  tick = SimpleNamespace(
-    code=instrument_code,
-    time=timestamp,
-    last_price=number("lastPrice", "last_price", positive=True),
-    price_tick=number("priceTick", "PriceTick", "price_tick", positive=True),
-    up_stop_price=number(
-      "upperLimit", "upStopPrice", "UpStopPrice", "up_stop_price", positive=True
-    ),
-    down_stop_price=number(
-      "lowerLimit", "downStopPrice", "DownStopPrice", "down_stop_price", positive=True
-    ),
-    stock_status=number("stockStatus", "stock_status"),
-    volume=number("volume"),
-    amount=number("amount"),
-    bid_price=required("bidPrice", "bid_price"),
-    ask_price=required("askPrice", "ask_price"),
-    bid_vol=required("bidVol", "bid_vol"),
-    ask_vol=required("askVol", "ask_vol"),
+  return accepted_order_market(
+    instrument_code, raw, now=now, environment=ExecutionEnvironment.PAPER
   )
-  market = MarketDataSnapshot.from_tick(tick)
-  market.source = "PAPER_ACCEPTED_WHOLE_QUOTE"
-  PaperBrokerMatching._validate_quote(market)
-  identity = {
-    "stream_id": stream,
-    "generation": generation,
-    "source_time_ms": source,
-    "tick_ordinal": ordinal,
-    "instrument_code": instrument_code,
-  }
-  return "hub:" + stable_manifest_hash(identity), market
 
 
 class PaperMarketRuntime:
