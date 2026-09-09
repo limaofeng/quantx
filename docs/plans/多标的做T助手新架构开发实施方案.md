@@ -611,7 +611,7 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   部分成交不重复收费，撤换单独立计费。费用标记 `RULE_ESTIMATE`，不冒充实际交割费用。
 - `LivePortfolioSnapshotReader` 已串联归因、估值、公共容量及未提交分配义务；冻结配置、
   周期、快照（严格小于 90 秒）、账户控制、时间和行业证据缺失均阻断，保护底仓与已接受
-  订单现金不重复扣减。市场适配器仍需提供明确 current/prior-close marks；尚未接入 LIVE
+  订单现金不重复扣减。当前/前收盘估值已接行情供应器；尚未接入 LIVE
   supervisor 或公开基线审批；人工确认界面见下项，不据此开放真实 ENTRY。
 - 上述新组件初轮 **43 项通过**；联合 PAPER、容量、确认、估值及 envelope 回归
   **154 项通过、3 项显式 PostgreSQL 门跳过**，JUnit
@@ -628,7 +628,15 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   已通过统一入口重载 macOS dev/full/paper，未开启实盘或访问生产数据服务。
   证据：`.codex_screenshots/p6-live-confirmation.xml`、`p6-live-graphql-tests.log`、
   `p6-live-panel-tests.log`、`p6-live-toolbar-tests.log` 及同目录 codegen/check/lint/build 日志。
-- 剩余开发顺序：LIVE 组合事实供应端与 supervisor 接线、
+- LIVE 行情估值供应器已接入组合读取：当前价格冻结 WholeQuoteHub 同一 stream/generation/
+  sequence 切面，校验源时间与采集时间；前收盘由冻结日历确定交易日，再读取持久化 Tick
+  的 15:00 至最多 5 秒窗口。逐项验证 source_time_ms、ordinal、存储时间、价格及排序，
+  每标的最多 1000 条，达到上限拒绝截断结果；历史读取不阻塞 Engine 事件循环。
+  缺失前收盘保持缺失，由实际隔夜批次决定是否阻断；不使用 lastClose 或账户快照价格替代。
+  历史读取期间 stream/generation 改变即阻断，同源后续行情不修改已冻结价格。
+  行情、真实组合读取和成交估值联合 **43 项通过**，聚焦 Ruff 通过；
+  JUnit `.codex_screenshots/p6-live-market-marks.xml`。未运行外部行情下载或实盘进程。
+- 剩余开发顺序：LIVE supervisor 接线、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

@@ -129,6 +129,15 @@ async def read(db, **changes):
     account_max_age_seconds=90,
   )
   args.update(changes)
+  current, opening = args.pop("current_marks"), args.pop("opening_marks")
+
+  class Marks:
+    async def read(self, **kwargs):
+      from types import SimpleNamespace
+
+      return SimpleNamespace(as_of=kwargs["as_of"], current=current, opening=opening)
+
+  args.setdefault("market_mark_reader", Marks())
   async with db.begin():
     return await LivePortfolioSnapshotReader(db).read(**args)
 
@@ -284,3 +293,17 @@ async def test_future_control_state_is_not_used_for_an_earlier_cut(db):
     control.updated_at = NOW + timedelta(seconds=1)
   with pytest.raises(ValueError, match="FUTURE_CONTROL"):
     await read(db)
+
+
+async def test_live_market_reader_supplies_the_real_portfolio_cut(db):
+  from quantx_infrastructure.services.live_t_market_marks import LiveTMarketMarkReader
+
+  from tests.infrastructure.test_live_t_market_marks import History, hub_at
+
+  history = History()
+  reader = LiveTMarketMarkReader(hub_at(NOW), tick_repository=history)
+  result = await read(db, market_mark_reader=reader)
+  assert result.planning_amount_cap > 0
+  assert result.cut.execution_ref.owner_id == "new-source"
+  assert result.entry_blockers == ()
+  assert history.calls == []  # No filled T batch means no invented overnight mark.

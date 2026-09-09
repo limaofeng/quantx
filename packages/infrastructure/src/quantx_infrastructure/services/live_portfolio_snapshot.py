@@ -71,8 +71,7 @@ class LivePortfolioSnapshotReader:
     cycle_id,
     instrument_codes,
     as_of,
-    current_marks,
-    opening_marks,
+    market_mark_reader,
     account_max_age_seconds,
   ):
     as_of = aware_time(as_of).astimezone(UTC)
@@ -241,6 +240,23 @@ class LivePortfolioSnapshotReader:
     reference = TPortfolioReference.from_config(
       config.canonical_payload, as_of=as_of, required_codes=economic_codes
     )
+    marks = await market_mark_reader.read(
+      as_of=as_of,
+      previous_trading_day=reference.previous_trading_day(as_of),
+      current_codes=set(codes)
+      | {
+        batch.instrument_code
+        for batch in batches
+        if batch.entry_filled_volume > batch.exit_filled_volume
+      },
+      opening_codes={
+        batch.instrument_code for batch in batches if batch.entry_filled_volume
+      },
+      max_age_seconds=reference.mark_max_age_seconds,
+    )
+    if aware_time(marks.as_of) != as_of:
+      raise ValueError("LIVE_PORTFOLIO_MARK_CUT_CONFLICT")
+    current_marks, opening_marks = marks.current, marks.opening
     for code in codes:
       mark = current_marks.get(code)
       if mark is None or mark.instrument_code != code:
