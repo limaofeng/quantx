@@ -441,3 +441,72 @@ async def test_unsent_replacement_does_not_erase_prior_attempt_fills(
       assert (await db.get(PendingTradeOrder, "prior-client")).broker_order_id == "9001"
   finally:
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_command", [False, True])
+async def test_current_broker_proof_supersedes_exact_historical_local_zero(
+  monkeypatch, wrong_command
+):
+  from types import SimpleNamespace
+
+  from quantx_api.agent_api import _stage_command_runtime_event
+
+  engine, sessions, now = await seed_settlement(monkeypatch, 40)
+  try:
+    async with sessions() as db, db.begin():
+      pending = await db.get(PendingTradeOrder, "client-1")
+      correlation = await db.get(OrderCorrelation, "correlation-1")
+      command = await db.get(TradeCommandOutbox, "command-1")
+      # Feed the real local-event builder a historical pre-broker view. Current
+      # durable broker facts remain unchanged; the receipt timing is synthetic.
+      prior_pending = SimpleNamespace(
+        **{
+          column.name: getattr(pending, column.name)
+          for column in PendingTradeOrder.__table__.columns
+        }
+      )
+      prior_correlation = SimpleNamespace(
+        **{
+          column.name: getattr(correlation, column.name)
+          for column in OrderCorrelation.__table__.columns
+        }
+      )
+      prior_pending.broker_order_id = prior_correlation.broker_order_id = None
+      prior_pending.status = "EXPIRED"
+      assert await _stage_command_runtime_event(
+        db,
+        command=command,
+        pending=prior_pending,
+        correlation=prior_correlation,
+        status="RECONCILED_ZERO_FILL",
+        reason="command_expired_before_delivery",
+        now=(now - timedelta(seconds=3)).replace(tzinfo=None),
+      )
+      event = await db.scalar(
+        select(StrategyRuntimeEvent).where(
+          StrategyRuntimeEvent.business_key.like("order:client-1::%")
+        )
+      )
+      event.application_status = "APPLIED"
+      event.applied_at = (now - timedelta(seconds=2)).replace(tzinfo=None)
+      if wrong_command:
+        event.payload = {
+          **event.payload,
+          "metadata": {**event.payload["metadata"], "command_message_id": "unrelated"},
+        }
+    async with sessions() as db, db.begin():
+      result = await read_legacy_order_settlement(
+        db,
+        account_id="account-1",
+        run_id="plan-1",
+        client_order_id="client-1",
+        now=now,
+      )
+      if wrong_command:
+        assert result.blocker == "LEGACY_T_SETTLEMENT_RECEIPT_CONFLICT"
+      else:
+        assert result.blocker is None and result.filled_volume == 40
+        assert len(result.runtime_event_ids) == 3
+  finally:
+    await engine.dispose()

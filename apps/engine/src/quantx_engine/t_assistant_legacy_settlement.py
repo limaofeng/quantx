@@ -235,6 +235,11 @@ async def read_legacy_order_settlement(
   received = {}
   durable_trades = {row.id: row.volume for row in trades}
   for event in events:
+    # A fully applied local terminal can predate contradictory broker evidence.
+    # Keep it in the audit, but never use it as the current broker terminal proof.
+    # The actual broker order and every TRADE still must converge below.
+    if _is_prior_local_zero(event, pending, {row.message_id for row in commands}):
+      continue
     if str(event.broker_order_id or "") != broker_id:
       return blocked("LEGACY_T_SETTLEMENT_RECEIPT_CONFLICT")
     report = event.payload.get("report") if isinstance(event.payload, dict) else None
@@ -275,6 +280,33 @@ async def read_legacy_order_settlement(
     volume,
     tuple(event.event_id for event in events),
     "BROKER_RECEIPTS",
+  )
+
+
+def _is_prior_local_zero(event, pending, command_ids):
+  payload = event.payload if isinstance(event.payload, dict) else {}
+  report, metadata = payload.get("report"), payload.get("metadata")
+  if not isinstance(report, dict) or not isinstance(metadata, dict):
+    return False
+  status = report.get("order_status")
+  return bool(
+    event.event_type == "ORDER"
+    and not event.broker_order_id
+    and not report.get("order_id")
+    and not report.get("broker_order_id")
+    and status in {"EXPIRED", "REJECTED", "CANCELLED", "RECONCILED_ZERO_FILL"}
+    and metadata.get("command_lifecycle_status") in {"EXPIRED", "REJECTED", "CANCELLED"}
+    and metadata.get("command_message_id") in command_ids
+    and metadata.get("intent_id") == pending.intent_id
+    and metadata.get("runtime_event_key") == event.business_key
+    and event.business_key == f"order:{pending.client_order_id}::{status}:0"
+    and report.get("client_order_id") == pending.client_order_id
+    and report.get("account_id") == pending.account_id
+    and report.get("stock_code") == pending.instrument_code
+    and report.get("side") == pending.side
+    and report.get("order_volume") == pending.volume
+    and type(report.get("traded_volume")) is int
+    and report["traded_volume"] == 0
   )
 
 

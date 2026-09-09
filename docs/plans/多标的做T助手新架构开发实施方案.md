@@ -1046,19 +1046,19 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   策略不受该标记影响。**68 项定向回归及 Ruff 通过**，证据
   `.codex_screenshots/p6-legacy-no-recreation-final.log`；SQLite 持久事实与实际 monitor/
   公共分发代码验证，会话/持仓端点为合成边界，不代表生产并发验收。
-  旧 owner 券商订单收敛证据读取组件已实现：同一事务锁定 pending/correlation、intent、
-  outbox、runtime event、委托和成交；要求精确 owner/账户/标的/方向、券商终态、成交数量和
-  成交 ID 逐笔一致且回报已 APPLIED，ACK 或本地终态不能单独证明完成。零成交须有显式
-  数量，迟到成交与旧 RECONCILED_ZERO_FILL 冲突保持阻断。**17 项定向测试及 Ruff 通过**，
-  证据 `.codex_screenshots/p6-legacy-settlement-final.log`；真实 ORM 配合合成回报，仅为
-  逐笔证据，不是账户义务归零证明。组件不写订单、batch、ExitPlan 或执行状态。
-  逐笔读取已合并未投递本地终态：要求精确 PLACE_ORDER 绑定、领取次数为 0、无 delivery/ack、
-  无券商序列或成交证据；过期须到达真实期限且原命令生成的事件已 APPLIED，本地撤单核对
-  既有服务记录。续单只证明当前 attempt 为 0，复核原 parent 绑定并保留前笔成交，不把共享
-  intent 的历史成交抹掉。**30 项测试及 Ruff 通过**，证据
-  `.codex_screenshots/p6-legacy-local-settlement-final.log`；实际 API 过期与公共本地撤单流程
-  配 SQLite，事件应用及续单事实为合成边界，未连接设备或发送订单。
-  下一步将逐笔结果接入完整义务核验（含账户快照与 inbox）及终结/解除旧绑定事务；
+  旧执行终结内部事务已实现：强制 SERIALIZABLE，按 head→run→账户控制→义务事实复核；
+  要求原排空标记与 actor/版本匹配、排空后的完整权威快照不足 90 秒、inbox 无积压，逐笔
+  核对原 owner/账户/标的/方向、券商终态、成交 ID/数量与 APPLIED 回报，并按 intent 汇总。
+  未投递本地终态须无领取/delivery/ack、券商序列或成交证据；过期事件须应用完成，续单
+  检查 parent 且只证明当前 attempt，不抹掉前笔成交。ACK、孤儿命令/回报、未决意图和
+  损坏/过期快照均不能单独释放旧绑定；撤单命令必须指向已证明收敛的原券商订单。
+  终结审计及其证据哈希、run STOPPED 和 head 解绑同事务提交，失败全回滚；重复请求
+  返回原 cut，不重放修改。订单、batch、活动 ExitPlan 及其 owner/source 引用保留。
+  历史本地零成交记录在精确原命令绑定且当前券商证据完整时只保留审计，不冒充当前终态。
+  **62 项定向测试及 Ruff 通过**，证据 `.codex_screenshots/p6-legacy-completion-verified.log`；
+  SQLite、真实 ORM/API 本地终态代码配合合成券商回报与事件应用，不代表 PostgreSQL 并发
+  或完整 Engine 进程验收。内部事务尚未接入公开 mutation 或自动调度。
+  下一步接入 Engine 命令消费、SERIALIZABLE 重试和提交后的内存清理，再验证整链；
   不开放新源准入，不执行业务维护 mutation。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
