@@ -17,11 +17,13 @@ from quantx_infrastructure.repositories.t_allocation_repository import (
 )
 from quantx_infrastructure.services.paper_allocation_coordinator import (
   PaperAllocationCoordinator,
-  candidate_from_evaluation,
 )
 from quantx_infrastructure.services.paper_execution_ledger import PaperExecutionLedger
 from quantx_infrastructure.services.paper_receipt_convergence import (
   PaperReceiptConvergence,
+)
+from quantx_infrastructure.services.t_allocation_candidate_projection import (
+  candidate_from_evaluation,
 )
 from sqlalchemy import event, func, select
 

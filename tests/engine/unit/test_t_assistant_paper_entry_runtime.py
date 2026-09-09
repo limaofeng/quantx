@@ -365,11 +365,11 @@ async def test_real_prepared_allocation_restart_and_fenced_lease(
     TAllocationConflict,
     TAllocationRepository,
   )
-  from quantx_infrastructure.services.paper_allocation_coordinator import (
-    candidate_from_evaluation,
-  )
   from quantx_infrastructure.services.paper_portfolio_snapshot import (
     PaperPortfolioSnapshotReader,
+  )
+  from quantx_infrastructure.services.t_allocation_candidate_projection import (
+    candidate_from_evaluation,
   )
 
   source, witnesses = await seeded(sessions)

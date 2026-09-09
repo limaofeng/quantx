@@ -785,8 +785,16 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   保留热窗口和已核验身份，发生变化才撤销。31 项 supervisor/readiness 联合测试及 Ruff
   通过，含空批次下代切换、换流、不可用和 reconcile 发现变化；无券商命令副作用。
   证据 `.codex_screenshots/p6-live-market-recovery.log`。
+- LIVE 分配协调器已接入：PAPER/LIVE 共用已提交周期、候选证据指纹、原 TTL 与持久化
+  分配流程；LIVE 先锁 head/execution 并要求 RUNNING+READY，读取 LivePortfolioSnapshotReader
+  与显式行情 marks，账户证据最大龄 90 秒。ALLOW 仍转 AWAITING_APPROVAL，不直接写订单。
+  PAPER 分配 13 项通过（1 项显式 PostgreSQL gate 未运行），LIVE 协调 2 项通过（固定账户 cut
+  替换读取器），实际 LIVE reader 10 项及 PAPER 入场/恢复 19 项通过；Ruff 通过。
+  扩大回归修复准入凭据写入触发 ORM updated_at 导致经济水位变化的问题，保留原经济事实时间，
+  批次保留准入时间；11 项账户准入测试通过，独立提交 `49bc8e4b`。
+  证据 `.codex_screenshots/p6-{live-allocation,allocation-*}*`。协调器尚未注册 Engine 调度。
 - 剩余开发顺序：
-  分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  LIVE 分配调度/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。
