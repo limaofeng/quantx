@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TradingSafetySettingsPanel } from '@/features/settings/components/TradingSafetySettingsPanel';
 
 const mocks = vi.hoisted(() => ({
+  queryError: undefined as { message: string } | undefined,
+  missingSafety: false,
   confirmControl: vi.fn(),
   previewControl: vi.fn(),
   refreshSafety: vi.fn(),
@@ -74,13 +76,28 @@ vi.mock('@/features/trading-safety', () => ({
   useTradingSafety: () => ({
     accountId: '300000013250',
     fetching: false,
+    error: mocks.queryError,
     refreshSafety: mocks.refreshSafety,
-    safety: mocks.safety,
+    safety: mocks.missingSafety ? null : mocks.safety,
   }),
 }));
 
 describe('TradingSafetySettingsPanel', () => {
+  it('shows a failed initial safety request with a working retry instead of loading forever', () => {
+    mocks.queryError = { message: '[Network] Failed to fetch' };
+    mocks.missingSafety = true;
+    render(<TradingSafetySettingsPanel />);
+    expect(screen.getByRole('alert')).toHaveTextContent('无法取得账户准入判定');
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to fetch');
+    expect(screen.queryByText('正在取得账户准入判定…')).not.toBeInTheDocument();
+    expect(screen.queryByText('账户安全状态加载中')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /刷新/ }));
+    expect(mocks.refreshSafety).toHaveBeenCalledOnce();
+  });
+
   beforeEach(() => {
+    mocks.queryError = undefined;
+    mocks.missingSafety = false;
     vi.clearAllMocks();
     mocks.useMutation.mockImplementation((document: string) =>
       document === 'preview-account-execution-control'

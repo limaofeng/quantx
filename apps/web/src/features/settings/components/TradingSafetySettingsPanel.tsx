@@ -65,8 +65,7 @@ const quarantineBlockedReasonLabels: Record<string, string> = {
   LATEST_FULL_SNAPSHOT_REQUIRED: '等待最新完整账户快照',
   LATEST_FULL_SNAPSHOT_EVIDENCE_UNAVAILABLE: '最新完整快照证据不可用',
   SNAPSHOT_NOT_NEWER_THAN_QUARANTINE: '快照必须严格晚于隔离事实',
-  SNAPSHOT_SEQUENCE_NOT_NEWER_THAN_QUARANTINE:
-    '快照序号必须严格晚于隔离事实',
+  SNAPSHOT_SEQUENCE_NOT_NEWER_THAN_QUARANTINE: '快照序号必须严格晚于隔离事实',
 };
 
 function useNow() {
@@ -80,7 +79,8 @@ function useNow() {
 
 export function TradingSafetySettingsPanel() {
   const now = useNow();
-  const { accountId, fetching, refreshSafety, safety } = useTradingSafety();
+  const { accountId, fetching, error, refreshSafety, safety } =
+    useTradingSafety();
   const [, previewControl] = useMutation(
     PreviewAccountExecutionControlMutation
   );
@@ -215,7 +215,10 @@ export function TradingSafetySettingsPanel() {
 
       <section className="grid gap-3 md:grid-cols-4">
         {[
-          ['授权状态', safety?.authorizationState || 'LOADING'],
+          [
+            '授权状态',
+            safety?.authorizationState || (error ? 'UNKNOWN' : 'LOADING'),
+          ],
           ['执行模式', safety?.executionMode || 'OBSERVE_ONLY'],
           ['对账状态', safety?.reconcileStatus || 'UNKNOWN'],
           ['状态版本', String(safety?.stateVersion ?? '—')],
@@ -241,7 +244,9 @@ export function TradingSafetySettingsPanel() {
           )}
           <div className="min-w-0 flex-1">
             <h2 className="text-ui-body font-medium text-slate-100">
-              {safety?.summary || '账户安全状态加载中'}
+              {error
+                ? '账户安全状态查询失败'
+                : safety?.summary || '账户安全状态加载中'}
             </h2>
             <p className="mt-1 text-ui-label leading-5 text-slate-500">
               账户 {accountId} · 快照 {safety?.snapshotId || '无'} · 实盘窗口
@@ -479,7 +484,17 @@ export function TradingSafetySettingsPanel() {
           </div>
         </div>
         {gateView === 'current' ? (
-          <AccountExecutionGateCurrentView now={now} safety={safety} />
+          error ? (
+            <div
+              role="alert"
+              className="mt-4 rounded-lg border border-destructive/30 bg-card p-ui-section text-ui-label text-destructive"
+            >
+              无法取得账户准入判定：{error.message}
+              。请检查服务连接后点击页面顶部“刷新”重试；当前不允许交易操作。
+            </div>
+          ) : (
+            <AccountExecutionGateCurrentView now={now} safety={safety} />
+          )
         ) : (
           <AccountExecutionSafetyHistoryView
             fetching={historyResult.fetching}

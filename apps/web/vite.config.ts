@@ -13,6 +13,15 @@ export default defineConfig(({ mode }) => {
     'http://127.0.0.1:8080';
 
   return {
+    // Production is served by Caddy; legacy local .env files must never send
+    // authenticated GraphQL requests to a different host.
+    define:
+      mode === 'production'
+        ? {
+            'import.meta.env.VITE_GRAPHQL_HTTP_URL': JSON.stringify('/graphql'),
+            'import.meta.env.VITE_GRAPHQL_WS_URL': JSON.stringify(''),
+          }
+        : {},
     plugins: [
       react({
         // Generated documents contain no JSX or gql calls. Let esbuild handle
