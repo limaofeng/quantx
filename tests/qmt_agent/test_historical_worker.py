@@ -801,3 +801,10 @@ async def test_unterminated_worker_blocks_replacement_and_trips_agent_fatal(
   assert runtime._historical_worker_kind == "xtdata"
   assert runtime._fatal_market_data_event.is_set()
   assert runtime._stopped.is_set()
+
+
+@pytest.fixture(autouse=True)
+def independent_history_credential(monkeypatch):
+  async def history_token(self):
+    return "history-token"
+  monkeypatch.setattr(runtime_module.AgentRuntime, "_history_access_token", history_token)

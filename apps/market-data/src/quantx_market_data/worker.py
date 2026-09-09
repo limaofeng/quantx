@@ -81,7 +81,12 @@ async def run(store, stop: asyncio.Event) -> None:
       await sweep(store)
       await _pause(stop, 1)
 
+  from quantx_infrastructure.services.market_data_staging_cleanup import (
+    run_market_data_staging_sweeper,
+  )
+
   tasks = [
+    asyncio.create_task(run_market_data_staging_sweeper(stop, owner=store)),
     asyncio.create_task(renew()),
     asyncio.create_task(consume()),
     asyncio.create_task(stop.wait()),
@@ -112,6 +117,9 @@ async def _main() -> None:
     await run(store, stop)
   finally:
     await store.close()
+    from quantx_infrastructure.database.relational_connection import close_database
+
+    await close_database()
     shutdown_timeseries()
 
 

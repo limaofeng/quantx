@@ -3128,6 +3128,7 @@ name = "quantx-market-data"
 version = "0.1.0"
 source = { editable = "apps/market-data" }
 dependencies = [
+    { name = "aiofiles" },
     { name = "fastapi" },
     { name = "quantx-application" },
     { name = "quantx-contracts" },
@@ -3137,6 +3138,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiofiles" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "quantx-application", editable = "packages/application" },
     { name = "quantx-contracts", editable = "packages/contracts" },

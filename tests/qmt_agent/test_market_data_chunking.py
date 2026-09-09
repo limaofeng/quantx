@@ -773,10 +773,10 @@ async def test_partial_upload_survives_session_cancel_and_joins_redelivery(
     hashlib.sha256(body).hexdigest() == digest for _, body, digest, _ in attempts
   )
   assert [authorization for *_, authorization in attempts[:6]] == [
-    "Bearer session-token-1"
+    "Bearer history-token"
   ] * 6
   assert [authorization for *_, authorization in attempts[6:]] == [
-    "Bearer session-token-2"
+    "Bearer history-token"
   ] * 4
   assert runtime.broker.calls == 1
   assert runtime._market_upload_tasks == {}
@@ -907,7 +907,7 @@ async def test_upload_shutdown_awaits_task_before_spool_cleanup(
 
     async def put(self, _url, *, content, headers):
       await _read_http_content(content)
-      assert headers["Authorization"] == "Bearer token"
+      assert headers["Authorization"] == "Bearer history-token"
       upload_started.set()
       await hold_upload.wait()
       raise AssertionError("cancelled upload unexpectedly resumed")
@@ -3829,3 +3829,10 @@ def test_current_daily_transfer_includes_contract_limits():
   ingestion.validate_bar_records_against_request(records, payload)
   assert _bar_rows(records)[0]["upperLimit"] == 11.0
   assert _bar_rows(records)[0]["lowerLimit"] == 9.0
+
+
+@pytest.fixture(autouse=True)
+def independent_history_credential(monkeypatch):
+  async def history_token(self):
+    return "history-token"
+  monkeypatch.setattr(runtime_module.AgentRuntime, "_history_access_token", history_token)

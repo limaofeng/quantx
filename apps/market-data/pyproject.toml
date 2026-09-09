@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "quantx-market-data"
 version = "0.1.0"
 requires-python = ">=3.11,<3.14"
-dependencies = ["fastapi>=0.115", "uvicorn>=0.30", "quantx-application", "quantx-contracts", "quantx-infrastructure"]
+dependencies = ["aiofiles", "fastapi>=0.115", "uvicorn>=0.30", "quantx-application", "quantx-contracts", "quantx-infrastructure"]
 
 [project.scripts]
 quantx-market-data-worker = "quantx_market_data.worker:main"

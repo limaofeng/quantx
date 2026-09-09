@@ -2213,7 +2213,7 @@ class AgentRuntime:
             )
           )
 
-  async def _issue_token(self) -> tuple[str, datetime]:
+  async def _issue_token(self, *, history: bool = False) -> tuple[str, datetime]:
     async with httpx.AsyncClient(
       timeout=10.0,
       follow_redirects=False,
@@ -2221,7 +2221,7 @@ class AgentRuntime:
       verify=httpx_verify(self.configuration.api_url),
     ) as client:
       response = await client.post(
-        f"{self.configuration.api_url}/auth/agent/token",
+        f"{self.configuration.api_url}/auth/agent/{'history-token' if history else 'token'}",
         json={
           "deviceId": self.configuration.device_id,
           "deviceSecret": self.device_secret,
@@ -2240,6 +2240,17 @@ class AgentRuntime:
     )
     expires_at = _parse_expiry(expires_value)
     return token, expires_at
+
+  async def _history_access_token(self) -> str:
+    if not hasattr(self, "_history_token_lock"):
+      self._history_token_lock = asyncio.Lock()
+      self._history_token = ""
+      self._history_token_expiry = datetime.now(timezone.utc)
+    async with self._history_token_lock:
+      if self._history_token_expiry <= datetime.now(timezone.utc) + timedelta(seconds=30):
+        token, expiry = await self._issue_token(history=True)
+        self._history_token, self._history_token_expiry = token, expiry
+      return self._history_token
 
   def _install_access_token(self, token: str, expires_at: datetime) -> None:
     self._access_token = token
@@ -5365,7 +5376,7 @@ class AgentRuntime:
             executor=self._history_upload_io_executor,
           ),
           headers={
-            "Authorization": f"Bearer {self._access_token}",
+            "Authorization": f"Bearer {await self._history_access_token()}",
             "Content-Type": "application/json",
             "Content-Encoding": "gzip",
             "Content-Length": str(chunk.compressed_bytes),
@@ -5430,7 +5441,7 @@ class AgentRuntime:
       response = await client.post(
         f"{self.configuration.api_url}/agent/market-data/{request_id}/complete",
         headers={
-          "Authorization": f"Bearer {self._access_token}",
+          "Authorization": f"Bearer {await self._history_access_token()}",
           "X-Total-Chunks": str(total_chunks),
         },
         timeout=10.0,
@@ -6774,7 +6785,7 @@ class AgentRuntime:
     ) as client:
       response = await client.post(
         (f"{self.configuration.api_url}/agent/market-data/{request_id}/fail"),
-        headers={"Authorization": f"Bearer {self._access_token}"},
+        headers={"Authorization": f"Bearer {await self._history_access_token()}"},
         json={"reason": reason},
       )
       response.raise_for_status()
@@ -6790,7 +6801,7 @@ class AgentRuntime:
     ) as client:
       response = await client.post(
         (f"{self.configuration.api_url}/agent/market-data/{request_id}/fail"),
-        headers={"Authorization": f"Bearer {self._access_token}"},
+        headers={"Authorization": f"Bearer {await self._history_access_token()}"},
         json={"reason": "MARKET_DATA_AGENT_BUSY"},
       )
       response.raise_for_status()

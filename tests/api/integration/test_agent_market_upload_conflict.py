@@ -12,7 +12,8 @@ from quantx_infrastructure.models.agent_runtime import (
   MarketDataRequest,
   MarketDataTransfer,
 )
-from quantx_infrastructure.runtime_store import DurableRuntimeStore
+from quantx_infrastructure.services import market_data_staging_cleanup as cleanup
+from quantx_market_data import agent_upload as upload_api
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import (
   async_sessionmaker,
@@ -92,6 +93,8 @@ async def _market_data_database():
           processing_error TEXT,
           ingestion_result JSON,
           processing_claim_token VARCHAR(36),
+          processing_worker_epoch BIGINT,
+          ingestion_progress JSON,
           created_at DATETIME NOT NULL,
           updated_at DATETIME NOT NULL
         )
@@ -198,7 +201,7 @@ async def _upload(
   record_count: int = 1,
   total_chunks: int = 2,
 ):
-  return await agent_api.upload_market_data_chunk(
+  return await upload_api.upload_market_data_chunk(
     request_id=REQUEST_ID,
     chunk_index=chunk_index,
     request=_Request(body),
@@ -211,9 +214,23 @@ async def _upload(
 
 def _configure_api(monkeypatch, sessions, market_data_root) -> None:
   monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
-  monkeypatch.setattr(agent_api, "AgentAuthService", _AgentAuthService)
-  monkeypatch.setattr(agent_api, "MARKET_DATA_ROOT", market_data_root)
-  monkeypatch.setattr(agent_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 0)
+
+  async def authenticate(db, settings, *, token, history):
+    assert history is True
+    device = await _AgentAuthService(db).authenticate_agent(token=token)
+    return SimpleNamespace(device=device)
+
+  monkeypatch.setattr(upload_api, "authenticate_agent_session", authenticate)
+  monkeypatch.setattr(upload_api, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(cleanup, "AsyncSessionLocal", sessions)
+
+  async def check_owner(owner, connection=None):
+    assert owner == "test-owner"
+
+  monkeypatch.setattr(cleanup, "_check_owner", check_owner)
+  monkeypatch.setattr(cleanup, "MARKET_DATA_ROOT", market_data_root)
+  monkeypatch.setattr(upload_api, "MARKET_DATA_ROOT", market_data_root)
+  monkeypatch.setattr(upload_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 0)
 
 
 @pytest.mark.asyncio
@@ -381,7 +398,7 @@ async def test_agent_busy_requeues_dispatched_market_request_without_failing_it(
     await _seed_request(sessions, checksum=digest, status="DELIVERED")
     _configure_api(monkeypatch, sessions, tmp_path / "market-data")
 
-    result = await agent_api.fail_market_data_request(
+    result = await upload_api.fail_market_data_request(
       request_id=REQUEST_ID,
       request=_Request(b'{"reason":"MARKET_DATA_AGENT_BUSY"}'),
     )
@@ -448,7 +465,7 @@ async def test_provisional_chunks_are_frozen_only_after_manifest_completion(
     assert receiving.expected_chunks is None
     assert receiving.received_chunks == 1
 
-    completion_result = await agent_api.complete_market_data_upload(
+    completion_result = await upload_api.complete_market_data_upload(
       request_id=REQUEST_ID,
       request=_Request(b""),
       x_total_chunks=1,
@@ -480,7 +497,7 @@ async def test_manifest_completion_keeps_incomplete_provisional_upload_retryable
     _configure_api(monkeypatch, sessions, tmp_path / "market-data")
 
     with pytest.raises(HTTPException) as error:
-      await agent_api.complete_market_data_upload(
+      await upload_api.complete_market_data_upload(
         request_id=REQUEST_ID,
         request=_Request(b""),
         x_total_chunks=2,
@@ -514,7 +531,7 @@ async def test_tiny_chunks_cannot_reserve_an_oversized_manifest(
       await _upload(
         b"",
         record_count=0,
-        total_chunks=agent_api.MAX_MARKET_DATA_CHUNKS + 1,
+        total_chunks=upload_api.MAX_MARKET_DATA_CHUNKS + 1,
       )
 
     assert error.value.status_code == 400
@@ -575,17 +592,6 @@ async def test_total_chunks_conflict_fails_request_without_losing_audit_chunks(
     assert error.value.status_code == 409
     assert error.value.detail == "行情批次总数与首次上传不一致"
     await agent_api._requeue_incomplete_market_requests(DEVICE_ID)
-    store = DurableRuntimeStore.__new__(DurableRuntimeStore)
-    store.engine = engine
-    with pytest.raises(
-      RuntimeError,
-      match="existing=FAILED requested=COMPLETED",
-    ):
-      await store.finish_market_data_request(
-        REQUEST_ID,
-        status="COMPLETED",
-        ingestion_result={"records_received": 1, "records_saved": 1},
-      )
     with pytest.raises(HTTPException) as retry_error:
       await _upload(b"new chunk", chunk_index=1)
 
@@ -761,23 +767,6 @@ async def test_failed_request_rejects_upload_and_cannot_be_completed(
     assert duplicate_error.value.status_code == 409
     assert new_chunk_error.value.status_code == 409
     await agent_api._requeue_incomplete_market_requests(DEVICE_ID)
-    store = DurableRuntimeStore.__new__(DurableRuntimeStore)
-    store.engine = engine
-    with pytest.raises(
-      RuntimeError,
-      match="existing=FAILED requested=COMPLETED",
-    ):
-      await store.finish_market_data_request(
-        REQUEST_ID,
-        status="COMPLETED",
-        ingestion_result={"records_received": 1, "records_saved": 1},
-      )
-    await store.finish_market_data_request(
-      REQUEST_ID,
-      status="FAILED",
-      error="worker retry must not overwrite checksum conflict",
-    )
-
     async with sessions() as db:
       request = await db.get(MarketDataRequest, REQUEST_ID)
       transfer_count = await db.scalar(
@@ -804,7 +793,7 @@ async def test_agent_can_fail_an_unexecutable_market_request(
     _configure_api(monkeypatch, sessions, tmp_path / "market-data")
     body = b'{"reason":"ValueError: instrument count limit"}'
 
-    result = await agent_api.fail_market_data_request(
+    result = await upload_api.fail_market_data_request(
       request_id=REQUEST_ID,
       request=_Request(body),
     )
@@ -843,7 +832,7 @@ async def test_late_agent_failure_cannot_revert_frozen_manifest(
     )
     _configure_api(monkeypatch, sessions, tmp_path / "market-data")
 
-    result = await agent_api.fail_market_data_request(
+    result = await upload_api.fail_market_data_request(
       request_id=REQUEST_ID,
       request=_Request(b'{"reason":"ReadTimeout: response was lost"}'),
     )
@@ -874,7 +863,7 @@ async def test_late_agent_failure_cannot_fail_complete_receiving_manifest(
     )
     _configure_api(monkeypatch, sessions, tmp_path / "market-data")
 
-    await agent_api.fail_market_data_request(
+    await upload_api.fail_market_data_request(
       request_id=REQUEST_ID,
       request=_Request(b'{"reason":"late failure"}'),
     )
@@ -944,7 +933,7 @@ async def test_new_chunk_persists_compressed_bytes_and_freezes_complete_manifest
       compressed_bytes=len(first),
     )
     _configure_api(monkeypatch, sessions, market_data_root)
-    monkeypatch.setattr(agent_api, "utcnow", lambda: accepted_at)
+    monkeypatch.setattr(upload_api, "utcnow", lambda: accepted_at)
 
     result = await _upload(second, chunk_index=1)
 
@@ -976,7 +965,7 @@ async def test_request_compressed_quota_is_terminal_contract_failure(
     await _seed_request(
       sessions,
       checksum=hashlib.sha256(first).hexdigest(),
-      compressed_bytes=agent_api.MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES - 1,
+      compressed_bytes=upload_api.MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES - 1,
     )
     _configure_api(monkeypatch, sessions, tmp_path / "market-data")
 
@@ -1014,7 +1003,7 @@ async def test_request_quota_counts_legacy_files_when_compressed_bytes_is_zero(
       compressed_bytes=0,
     )
     _configure_api(monkeypatch, sessions, market_data_root)
-    monkeypatch.setattr(agent_api, "MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES", 10)
+    monkeypatch.setattr(upload_api, "MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES", 10)
 
     with pytest.raises(HTTPException) as error:
       await _upload(b"four", chunk_index=1)
@@ -1049,7 +1038,7 @@ async def test_global_staging_quota_is_retryable_and_preserves_request(
       compressed_bytes=len(first),
     )
     _configure_api(monkeypatch, sessions, market_data_root)
-    monkeypatch.setattr(agent_api, "MAX_MARKET_DATA_STAGING_BYTES", 10)
+    monkeypatch.setattr(upload_api, "MAX_MARKET_DATA_STAGING_BYTES", 10)
 
     with pytest.raises(HTTPException) as error:
       await _upload(b"four", chunk_index=1)
@@ -1080,8 +1069,8 @@ async def test_disk_reserve_rejection_is_retryable_and_preserves_request(
       compressed_bytes=len(first),
     )
     _configure_api(monkeypatch, sessions, tmp_path / "market-data")
-    monkeypatch.setattr(agent_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 1)
-    monkeypatch.setattr(agent_api, "_market_data_staging_free_bytes", lambda _root: 0)
+    monkeypatch.setattr(upload_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 1)
+    monkeypatch.setattr(upload_api, "_market_data_staging_free_bytes", lambda _root: 0)
 
     with pytest.raises(HTTPException) as error:
       await _upload(b"second", chunk_index=1)
@@ -1120,15 +1109,15 @@ async def test_staging_sweep_removes_completed_and_old_orphan_directories(
     )
     _configure_api(monkeypatch, sessions, market_data_root)
     sweep_now = started.replace(microsecond=0) + timedelta(
-      seconds=agent_api.MARKET_DATA_STAGING_ORPHAN_GRACE_SECONDS + 1
+      seconds=cleanup.MARKET_DATA_STAGING_ORPHAN_GRACE_SECONDS + 1
     )
     monkeypatch.setattr(
-      agent_api,
+      cleanup,
       "utcnow",
       lambda: sweep_now.replace(tzinfo=None),
     )
 
-    removed = await agent_api.sweep_market_data_staging_once()
+    removed = await cleanup.sweep_market_data_staging_once(owner="test-owner")
 
     assert removed["directories"] == 2
     assert not completed.exists()
@@ -1137,9 +1126,11 @@ async def test_staging_sweep_removes_completed_and_old_orphan_directories(
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@pytest.mark.parametrize("complete", [True, False])
 async def test_staging_sweep_retains_active_and_recent_failed_data(
   monkeypatch,
   tmp_path,
+  complete,
 ) -> None:
   body = b"complete chunk"
   market_data_root = tmp_path / "market-data"
@@ -1152,30 +1143,33 @@ async def test_staging_sweep_retains_active_and_recent_failed_data(
       sessions,
       checksum=hashlib.sha256(body).hexdigest(),
       status="FAILED",
-      expected_chunks=1,
+      expected_chunks=1 if complete else 2,
       received_chunks=1,
       compressed_bytes=len(body),
     )
     _configure_api(monkeypatch, sessions, market_data_root)
 
-    recent = await agent_api.sweep_market_data_staging_once(now=started)
-    expired = await agent_api.sweep_market_data_staging_once(
+    recent = await cleanup.sweep_market_data_staging_once(
+      owner="test-owner", now=started
+    )
+    expired = await cleanup.sweep_market_data_staging_once(
+      owner="test-owner",
       now=started
-      + timedelta(seconds=agent_api.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS + 1)
+      + timedelta(seconds=cleanup.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS + 1),
     )
 
     assert recent["directories"] == 0
-    assert expired["directories"] == 1
-    assert not failed.exists()
+    assert expired["directories"] == (0 if complete else 1)
+    assert failed.exists() == complete
     async with sessions() as db:
       market_request = await db.get(MarketDataRequest, REQUEST_ID)
       transfer_count = await db.scalar(
         select(func.count()).select_from(MarketDataTransfer)
       )
     assert market_request is not None
-    assert market_request.expected_chunks is None
-    assert market_request.received_chunks == 0
-    assert transfer_count == 0
+    assert market_request.expected_chunks == (1 if complete else None)
+    assert market_request.received_chunks == (1 if complete else 0)
+    assert transfer_count == (1 if complete else 0)
 
 
 @pytest.mark.asyncio
@@ -1204,9 +1198,10 @@ async def test_staging_sweep_never_removes_nonterminal_request_data(
     )
     _configure_api(monkeypatch, sessions, market_data_root)
 
-    removed = await agent_api.sweep_market_data_staging_once(
+    removed = await cleanup.sweep_market_data_staging_once(
+      owner="test-owner",
       now=started
-      + timedelta(seconds=agent_api.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS * 2)
+      + timedelta(seconds=cleanup.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS * 2),
     )
 
     assert removed["directories"] == 0

@@ -145,11 +145,18 @@ POST   /auth/agent/history-token
 DELETE /auth/agent/devices/{device_id}
 WS     /ws/agent
 PUT    /agent/market-data/{request_id}/chunks/{chunk_index}
+POST   /agent/market-data/{request_id}/complete
+POST   /agent/market-data/{request_id}/fail
 ```
 
 登记码一次性且十分钟过期；服务端只保存登记码和设备密钥的摘要。设备密钥
 由 Agent 写入 Windows Credential Manager，换取短期 JWT 后主动建立
 WebSocket。
+
+历史上传、manifest 完成和失败通知由 Data API 18085 承接，使用
+`/auth/agent/history-token` 签发的 `agent:history` 令牌；交易控制令牌不能用于这些端点。
+Agent 独立缓存和续期历史凭证，交易会话换 token 不影响在途上传。历史任务派发目前
+仍通过原控制会话，专用历史 WS 与采集许可尚待迁移；不得据此声称已消除全部业务 API 依赖。
 
 GraphQL 使用单一 `qmtAgentConnection` 视图返回当前 Agent、五段连接链路、
 行情流与本地 journal 的非敏感指标，以及折叠的历史登记。Web 通过

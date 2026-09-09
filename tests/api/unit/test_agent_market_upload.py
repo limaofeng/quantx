@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import pytest
 from fastapi import HTTPException
 from quantx_api import agent_api
-from quantx_api.agent_api import _matches_sha256_digest, _read_limited_body
+from quantx_market_data.agent_upload import _matches_sha256_digest, _read_limited_body
 
 
 class FakeRequest:

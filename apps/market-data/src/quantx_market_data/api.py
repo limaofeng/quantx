@@ -45,12 +45,18 @@ def create_app(*, store=None, token: str | None = None, reader=None) -> FastAPI:
     finally:
       if store is None:
         await app.state.store.close()
+        from quantx_infrastructure.database.relational_connection import close_database
+
+        await close_database()
       if reader is None:
         from quantx_infrastructure.database.timeseries import shutdown_timeseries
 
         shutdown_timeseries()
 
   app = FastAPI(title="QuantX Market Data", lifespan=lifespan)
+  from .agent_upload import agent_router
+
+  app.include_router(agent_router)
 
   async def authorize(authorization: str = Header(default="")):
     expected = "Bearer " + app.state.token

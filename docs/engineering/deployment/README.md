@@ -48,8 +48,10 @@ Web 和 Docs 在更新窗口提前构建到 `apps/web/dist`、`apps/docs/dist`�
 `QUANTX_MARKET_DATA_INTERNAL_TOKEN`，不能放入共享 `.env`，也不能复用公共行情 token。
 启动器使用 Bearer 认证检查 18085 的 `/health/ready`（仓储结构）与 `/health/worker`
 （未过期的 Worker 租约）；租约就绪不代表行情覆盖证明或全部依赖已就绪。
-Caddy 将 `/market-data/internal/v1/*` 转发至 18085；其余公共行情及 Agent 路径暂由
-Gateway 承接，仍待后续迁移。上线前须先完成数据库迁移与协调切换清单，不能仅更新
+Caddy 将 `/market-data/internal/v1/*` 和 `/agent/market-data/*` 转发至 18085；
+其余公共行情接口由 Gateway 承接，交易 Agent 控制仍在业务 API。历史上传要求新版
+Agent 使用独立历史令牌，不能只切路由而保留旧 Agent。暂存清理由 Data Worker 执行，
+完整上传但摄取失败的 manifest 保留供原任务恢复。上线前须先完成数据库迁移与协调切换清单，不能仅更新
 旧进程。当前仅验证启动装配、路由和探针，实际常驻启动及 Windows 停止流程尚待验收。
 
 Monitor 仍通过 `-Component monitor` 独立管理。新增可选的“跨环境行情与补数”
