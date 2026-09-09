@@ -58,7 +58,13 @@ def _reject_constant(value):
   raise ValueError("non-finite result metadata")
 
 
-def result_bundle(directory: Path, *, run_id: str, run_kind: str) -> TrainingBundle:
+def result_bundle(
+  directory: Path,
+  *,
+  run_id: str,
+  run_kind: str,
+  cancel: threading.Event | None = None,
+) -> TrainingBundle:
   """Validate the Research inventory, including the final manifest itself."""
   manifest_path = directory / "manifest.json"
   manifest = read_object(manifest_path)
@@ -105,8 +111,33 @@ def result_bundle(directory: Path, *, run_id: str, run_kind: str) -> TrainingBun
   bundle = TrainingBundle(
     schema_version=1, kind="RESULT", source_id=run_id, files=entries
   )
-  verify_bundle(directory, bundle)
+  verify_bundle(directory, bundle, cancel=cancel)
   return bundle
+
+
+async def _supervised_io(operation, repository, run_id: str, owner: str, cancel):
+  """Keep control-plane supervision active until the local/network worker exits."""
+  await _publication_heartbeat(repository, run_id, owner)
+  task = asyncio.create_task(asyncio.to_thread(operation))
+  try:
+    while not task.done():
+      done, _ = await asyncio.wait({task}, timeout=PUBLICATION_HEARTBEAT_SECONDS)
+      if not done:
+        await _publication_heartbeat(repository, run_id, owner)
+    return task.result()
+  except BaseException:
+    cancel.set()
+    # Hold the publication lock until the actual worker has stopped.
+    while not task.done():
+      try:
+        await asyncio.shield(task)
+      except asyncio.CancelledError:
+        continue
+      except Exception:
+        break
+    with suppress(Exception, asyncio.CancelledError):
+      task.result()
+    raise
 
 
 @contextmanager
@@ -194,8 +225,15 @@ async def _publish_result(
       ready = state is True if local_supervisor else state == "EXITED"
       if not ready:
         raise PublicationError("PUBLICATION_EXECUTION_NOT_STOPPED")
-      bundle = await asyncio.to_thread(
-        result_bundle, directory, run_id=run_id, run_kind=row.run_kind
+      cancel = threading.Event()
+      bundle = await _supervised_io(
+        lambda: result_bundle(
+          directory, run_id=run_id, run_kind=row.run_kind, cancel=cancel
+        ),
+        repository,
+        run_id,
+        owner,
+        cancel,
       )
       manifest = read_object(directory / "manifest.json")
       spec = await repository.get_spec(row.spec_id)
@@ -211,34 +249,12 @@ async def _publish_result(
         config.transfer_config, state_root=config.state_root
       )
 
-      cancel = threading.Event()
-
       def upload():
         with open_store(transfer, cancel=cancel) as store:
           if store.publish(bundle, directory) != bundle.bundle_id:
             raise PublicationError("PUBLICATION_REMOTE_IDENTITY_MISMATCH")
 
-      await _publication_heartbeat(repository, run_id, owner)
-      task = asyncio.create_task(asyncio.to_thread(upload))
-      try:
-        while not task.done():
-          done, _ = await asyncio.wait({task}, timeout=PUBLICATION_HEARTBEAT_SECONDS)
-          if not done:
-            await _publication_heartbeat(repository, run_id, owner)
-        task.result()
-      except BaseException:
-        cancel.set()
-        # Keep the publication lock until the network writer is actually done.
-        while not task.done():
-          try:
-            await asyncio.shield(task)
-          except asyncio.CancelledError:
-            continue
-          except Exception:
-            break
-        with suppress(Exception, asyncio.CancelledError):
-          task.result()
-        raise
+      await _supervised_io(upload, repository, run_id, owner, cancel)
       await repository.record_artifact_bundle(
         run_id, expected_flow_run_id=owner, bundle=bundle
       )

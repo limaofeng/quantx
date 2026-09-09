@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import stat
+import threading
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Protocol
 
@@ -43,31 +44,51 @@ def reject_links(path: Path) -> None:
     raise BundleTransferError("BUNDLE_HARDLINK_FORBIDDEN")
 
 
-def verify_file(path: Path, entry: BundleFile) -> bool:
+def _check_cancel(cancel: threading.Event | None) -> None:
+  if cancel is not None and cancel.is_set():
+    raise BundleTransferError("BUNDLE_CANCELLED")
+
+
+def verify_file(
+  path: Path,
+  entry: BundleFile,
+  *,
+  cancel: threading.Event | None = None,
+) -> bool:
+  _check_cancel(cancel)
   reject_links(path)
   if not path.is_file() or path.stat().st_size != entry.size:
     return False
   digest = hashlib.sha256()
   with path.open("rb") as stream:
     while block := stream.read(CHUNK_BYTES):
+      _check_cancel(cancel)
       digest.update(block)
+  _check_cancel(cancel)
   return digest.hexdigest() == entry.sha256
 
 
-def verify_bundle(directory: Path, bundle: TrainingBundle) -> Path:
+def verify_bundle(
+  directory: Path,
+  bundle: TrainingBundle,
+  *,
+  cancel: threading.Event | None = None,
+) -> Path:
+  _check_cancel(cancel)
   reject_links(directory)
   if not directory.is_dir():
     raise BundleTransferError("BUNDLE_INCOMPLETE")
   expected = {entry.path for entry in bundle.files}
   actual = set()
   for path in directory.rglob("*"):
+    _check_cancel(cancel)
     reject_links(path)
     if path.is_file():
       actual.add(path.relative_to(directory).as_posix())
     elif not path.is_dir():
       raise BundleTransferError("BUNDLE_SPECIAL_FILE_FORBIDDEN")
   if actual != expected or not all(
-    verify_file(directory / entry.path, entry) for entry in bundle.files
+    verify_file(directory / entry.path, entry, cancel=cancel) for entry in bundle.files
   ):
     raise BundleTransferError("BUNDLE_INTEGRITY_MISMATCH")
   return directory
@@ -218,17 +239,24 @@ class SFTPBundlePublisher(SFTPBundleReader):
     ):
       raise BundleTransferError("BUNDLE_REMOTE_INTEGRITY_MISMATCH")
 
-  def publish(self, directory: Path, bundle: TrainingBundle) -> str:
+  def publish(
+    self,
+    directory: Path,
+    bundle: TrainingBundle,
+    *,
+    cancel: threading.Event | None = None,
+  ) -> str:
     complete = self.root / bundle.bundle_id
     staging = self.root / (bundle.bundle_id + ".partial")
     try:
-      verify_bundle(directory, bundle)
+      verify_bundle(directory, bundle, cancel=cancel)
       self._check_path(self.root, file=False)
       if self._exists(complete):
         self._verify_published(complete, bundle)
         return bundle.bundle_id
       self._mkdir(staging)
       for entry in bundle.files:
+        _check_cancel(cancel)
         target = staging / entry.path
         if self._matches(target, entry):
           continue
@@ -246,6 +274,7 @@ class SFTPBundlePublisher(SFTPBundleReader):
           self.client.open(str(temporary), "wx") as output,
         ):
           while block := incoming.read(CHUNK_BYTES):
+            _check_cancel(cancel)
             count += len(block)
             if count > entry.size:
               raise BundleTransferError("BUNDLE_LOCAL_SOURCE_CHANGED")

@@ -93,6 +93,7 @@ class TransferConfig:
 class TrainingStore:
   datasets: SFTPBundlePublisher = field(repr=False)
   artifacts: SFTPBundlePublisher = field(repr=False)
+  cancel: threading.Event | None = field(default=None, repr=False)
 
   def fetch(
     self, bundle: TrainingBundle, cache_root: Path, *, minimum_free_bytes: int
@@ -104,7 +105,7 @@ class TrainingStore:
 
   def publish(self, bundle: TrainingBundle, directory: Path) -> str:
     publisher = self.datasets if bundle.kind == "DATASET" else self.artifacts
-    return publisher.publish(directory, bundle)
+    return publisher.publish(directory, bundle, cancel=self.cancel)
 
 
 @contextmanager
@@ -157,7 +158,7 @@ def open_store(config: TransferConfig, *, cancel: threading.Event | None = None)
     ]
     for reader in readers:
       reader._check_path(reader.root, file=False)
-    yield TrainingStore(*readers)
+    yield TrainingStore(*readers, cancel=cancel)
   except BundleTransferError:
     raise
   except Exception:

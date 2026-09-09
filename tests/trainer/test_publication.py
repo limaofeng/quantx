@@ -113,10 +113,12 @@ async def test_publication_retry_keeps_frozen_evidence_and_does_not_retrain(
       None,
     ]
   else:
+
     async def commit_with_lost_ack(*args, **kwargs):
       if result.row.status == "RUNNING":
         result.row.status = "SUCCEEDED"
         raise ConnectionError("private endpoint")
+
     result.repository.complete_run.side_effect = commit_with_lost_ack
   with pytest.raises(
     publication.PublicationError, match="^PUBLICATION_RETRY_REQUIRED$"
@@ -133,7 +135,7 @@ async def test_publication_retry_keeps_frozen_evidence_and_does_not_retrain(
   assert (result.control / "publication.json").read_bytes() == frozen
   assert len(result.uploads) == 2 and len(set(result.uploads)) == 1
   if failure_at == "completion":
-    assert result.repository.heartbeat_execution.await_count == 1
+    assert result.repository.heartbeat_execution.await_count == 2
   assert (
     result.repository.complete_run.call_args.kwargs["expected_flow_run_id"] == "owner"
   )
@@ -172,6 +174,114 @@ def test_concurrent_publication_is_excluded_by_os_lock(result):
         pytest.fail("second publisher acquired the lock")
   with publication.publication_lock(result.control):
     pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["disconnect", "cancel", "owner", "task_cancel"])
+async def test_local_hashing_stops_before_upload_when_control_is_lost(
+  result, monkeypatch, failure
+):
+  from quantx_infrastructure import training_bundle_store as bundles
+
+  monkeypatch.setattr(publication, "PUBLICATION_HEARTBEAT_SECONDS", 0.01)
+  hashing = threading.Event()
+  exited = threading.Event()
+  original = bundles.verify_file
+
+  def slow_hash(path, entry, *, cancel=None):
+    assert cancel is not None
+    hashing.set()
+    try:
+      assert cancel.wait(3)
+      return original(path, entry, cancel=cancel)
+    finally:
+      exited.set()
+
+  async def heartbeat(*args, **kwargs):
+    if hashing.is_set():
+      if failure == "disconnect":
+        raise ConnectionError("private endpoint")
+      if failure == "cancel":
+        result.row.cancel_requested_at = "requested"
+      if failure == "owner":
+        result.row.prefect_flow_run_id = "new-owner"
+    return result.row
+
+  monkeypatch.setattr(bundles, "verify_file", slow_hash)
+  result.repository.heartbeat_execution.side_effect = heartbeat
+  task = asyncio.create_task(
+    publication.publish_result(
+      result.config, result.repository, run_id="run-1", owner="owner"
+    )
+  )
+  async with asyncio.timeout(3):
+    if failure == "task_cancel":
+      assert await asyncio.to_thread(hashing.wait, 2)
+      task.cancel()
+      expected = asyncio.CancelledError
+    else:
+      expected = publication.PublicationError
+    with pytest.raises(expected):
+      await task
+  assert exited.is_set()
+  assert result.uploads == []
+  assert not (result.control / "publication.json").exists()
+  result.repository.record_artifact_bundle.assert_not_called()
+  result.repository.complete_run.assert_not_called()
+  assert (result.directory / "model.txt").is_file()
+  with publication.publication_lock(result.control):
+    pass
+
+
+def test_large_file_hash_checks_cancellation_between_chunks(tmp_path, monkeypatch):
+  from quantx_contracts.training_bundle import BundleFile
+  from quantx_infrastructure import training_bundle_store as bundles
+
+  path = tmp_path / "model.bin"
+  payload = b"x" * (bundles.CHUNK_BYTES * 3)
+  path.write_bytes(payload)
+  entry = BundleFile(
+    path=path.name, size=len(payload), sha256=hashlib.sha256(payload).hexdigest()
+  )
+  cancel = threading.Event()
+  actual = hashlib.sha256()
+  updates = []
+
+  def update(block):
+    updates.append(len(block))
+    actual.update(block)
+    cancel.set()
+
+  monkeypatch.setattr(
+    bundles.hashlib,
+    "sha256",
+    lambda: SimpleNamespace(update=update, hexdigest=actual.hexdigest),
+  )
+  with pytest.raises(bundles.BundleTransferError, match="BUNDLE_CANCELLED"):
+    bundles.verify_file(path, entry, cancel=cancel)
+  assert updates == [bundles.CHUNK_BYTES]
+
+
+def test_store_passes_cancellation_into_upload_source_verification(result):
+  from pathlib import PurePosixPath
+
+  from quantx_infrastructure.training_bundle_store import (
+    BundleTransferError,
+    SFTPBundlePublisher,
+  )
+  from quantx_trainer.transfer import TrainingStore
+
+  bundle = publication.result_bundle(
+    result.directory, run_id="run-1", run_kind="DEVELOPMENT"
+  )
+  publisher = SFTPBundlePublisher.__new__(SFTPBundlePublisher)
+  publisher.root = PurePosixPath("/artifacts")
+  cancel = threading.Event()
+  cancel.set()
+  # No SSH client: verification must abort before any remote operation.
+  store = TrainingStore(publisher, publisher, cancel=cancel)
+  with pytest.raises(BundleTransferError, match="BUNDLE_CANCELLED"):
+    store.publish(bundle, result.directory)
 
 
 def test_publication_command_runs_preflight_before_any_registration(
