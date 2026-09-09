@@ -963,16 +963,24 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   只有当前内容仍一致才返回原哈希；头漂移、未来事实、委托状态或退出剩余量变化拒绝复用。
   终态外观和孤立 outbox 仍保留为义务，孤立消息箱存在时不列出可失效候选，不改 owner/
   ExitPlan/source ref，不判定义务归零。6 项隔离验证与 Ruff 通过，证据
-  `.codex_screenshots/p6-legacy-inventory.log`。当前仅冻结复核材料，永久 ENTRY 阻断、
-  真实旧 run 身份校验、排空命令及重启恢复仍需接线；未执行真实维护切换。
+  `.codex_screenshots/p6-legacy-inventory.log`。该组件仅冻结复核材料，不单独提供入场阻断或
+  出清证明；后续 guard/原子排空进展见下项，未执行真实维护切换。
 - 剩余开发顺序：
   legacy 排空标记消费端已接入：LIVE 旧运行启动/入场 authority 失效时读取持久化 rollout
   标记，标的池重新发布也保留 `LEGACY_T_ENTRY_DRAINING`；读取冲突先清除旧发射资格。
   公共下单在原幂等结果恢复之后、创建新 BUY 之前锁定同一配置头并复核标记，省略 ENTRY
   role 也不能绕过。公共 EXIT_PLAN 不命中此门。69 项隔离 guard、标的池和下单/退出回归
   通过，证据 `.codex_screenshots/p6-legacy-drain-dispatch-regression.log`；启动验证为实际
-  数据库读取加新内存对象的组件测试，未启动券商。标记目前使用合成夹具，原子写入/旧 run
-  身份验证/命令调度仍待接入，尚不代表旧源排空已完成。
+  数据库读取加新内存对象的组件测试，未启动券商。初步标记使用合成夹具，原子写入进展如下，
+  尚不代表旧源义务归零。
+  原子排空服务已实现：真实 Strategy/StrategyRun 表复核旧做 T 类、LIVE、账户及运行状态，
+  重算并比对已复核 inventory hash，再将未路由且无任何成交线索的意图置 CANCELLED；
+  DRAINING 审计、意图失效与 head version 推进同事务，保留 head.strategy_run_id、原订单
+  owner 和 generic run 回报处理状态。重复已提交请求返回原结果，参数漂移拒绝；审计末尾
+  失败整体回滚，普通策略、已停止来源、错误哈希及变化清单均拒绝。18 项 inventory/guard/
+  原子排空组件验证通过，Ruff 通过，证据 `.codex_screenshots/p6-legacy-atomic-drain-regression.log`。
+  测试使用 SQLite 中 Strategy ARRAY 的独立 JSON 映射副本，未修改生产模型或验证 PG 并发。
+  尚需维护授权与命令调度、活跃内存失效、排空后终结/解除旧绑定的整链；不开放新源准入。
   legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

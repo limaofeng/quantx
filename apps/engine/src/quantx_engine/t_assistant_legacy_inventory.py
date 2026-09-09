@@ -125,6 +125,8 @@ async def freeze_legacy_t_obligation_inventory(
         and row.id not in linked_intents
         and not row.order_id
         and not row.executed_volume
+        and not row.executed_price
+        and row.executed_time is None
         and row.status
         in {
           "ALLOCATION_PENDING",
