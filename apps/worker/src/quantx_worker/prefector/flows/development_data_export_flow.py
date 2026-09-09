@@ -161,6 +161,80 @@ def publish(records: list[dict]) -> list[dict]:
   return manifest
 
 
+_REUSABLE_SOURCE_REQUEST_SQL = """
+  SELECT request_id FROM market_data_request
+  WHERE status='COMPLETED' AND request_payload->>'operation'='bars'
+    AND (request_payload->'stock_list')::jsonb @> CAST(:codes AS jsonb)
+    AND (request_payload->'periods')::jsonb @> CAST(:periods AS jsonb)
+    AND request_payload->>'start_time' <= :day
+    AND request_payload->>'end_time' >= :day
+    AND ingestion_result->'persistence_verification'->>'status'='verified'
+    AND EXISTS (
+      SELECT 1
+      FROM json_array_elements(
+        COALESCE(ingestion_result->'day_coverage', '[]'::json)
+      ) AS day_coverage(value)
+      WHERE day_coverage.value->>'instrument_code' = :instrument
+        AND LOWER(COALESCE(day_coverage.value->>'period', '')) = :period
+        AND REPLACE(day_coverage.value->>'trading_date', '-', '') = :day
+        AND day_coverage.value->>'point_count' ~ '^[1-9][0-9]*$'
+    )
+  ORDER BY completed_at DESC LIMIT 1
+"""
+
+
+async def find_reusable_source_request(
+  connection, request: HistoryPartitionRequest, payload: dict
+) -> str | None:
+  """Find a completed source that proves positive coverage for this partition."""
+
+  return await connection.scalar(
+    text(_REUSABLE_SOURCE_REQUEST_SQL),
+    {
+      "codes": json.dumps([request.instrument]),
+      "periods": json.dumps([request.period]),
+      "day": payload["start_time"],
+      "instrument": request.instrument,
+      "period": request.period.lower(),
+    },
+  )
+
+
+def _has_positive_source_coverage(
+  source: dict, request: HistoryPartitionRequest
+) -> bool:
+  ingestion = source.get("ingestion_result")
+  if isinstance(ingestion, str):
+    try:
+      ingestion = json.loads(ingestion)
+    except (TypeError, json.JSONDecodeError):
+      return False
+  if not isinstance(ingestion, dict):
+    return False
+  target_day = request.trading_date.strftime("%Y%m%d")
+  for item in ingestion.get("day_coverage") or []:
+    if not isinstance(item, dict):
+      continue
+    if (
+      item.get("instrument_code") != request.instrument
+      or str(item.get("period") or "").lower() != request.period
+      or str(item.get("trading_date") or "").replace("-", "") != target_day
+    ):
+      continue
+    point_count = item.get("point_count")
+    if isinstance(point_count, int) and not isinstance(point_count, bool):
+      if point_count > 0:
+        return True
+    elif (
+      isinstance(point_count, str)
+      and point_count.isascii()
+      and point_count.isdigit()
+      and not point_count.startswith("0")
+    ):
+      return True
+  return False
+
+
 async def dispatch_once() -> dict:
   if os.environ.get("ENV") != "production":
     return {"status": "disabled"}
@@ -197,22 +271,8 @@ async def dispatch_once() -> dict:
           payload = request.agent_payload()
           source_id = row["source_request_id"]
           if not source_id:
-            source_id = await connection.scalar(
-              text("""
-              SELECT request_id FROM market_data_request
-              WHERE status='COMPLETED' AND request_payload->>'operation'='bars'
-                AND (request_payload->'stock_list')::jsonb @> CAST(:codes AS jsonb)
-                AND (request_payload->'periods')::jsonb @> CAST(:periods AS jsonb)
-                AND request_payload->>'start_time' <= :day
-                AND request_payload->>'end_time' >= :day
-                AND ingestion_result->'persistence_verification'->>'status'='verified'
-              ORDER BY completed_at DESC LIMIT 1
-            """),
-              {
-                "codes": json.dumps([request.instrument]),
-                "periods": json.dumps([request.period]),
-                "day": payload["start_time"],
-              },
+            source_id = await find_reusable_source_request(
+              connection, request, payload
             )
           if not source_id:
             if not await history_window_open():
@@ -234,6 +294,33 @@ async def dispatch_once() -> dict:
               {"id": row["id"], "source": source_id},
             )
           source = await store.market_data_request(source_id)
+          if (
+            source
+            and source["status"] == "COMPLETED"
+            and source.get("development_only") is False
+            and row.get("source_request_id")
+            and row.get("state") in {"QUEUED", "WAITING_SOURCE"}
+            and not _has_positive_source_coverage(source, request)
+          ):
+            if not await history_window_open():
+              continue
+            try:
+              replacement = await store.create_market_data_request(
+                payload,
+                idempotency_scope=f"development-retry:{source_id}",
+                development_only=True,
+              )
+            except RuntimeError:
+              continue
+            async with store.engine.begin() as update:
+              await update.execute(
+                text(
+                  "UPDATE development_data_export "
+                  "SET source_request_id=:source WHERE id=:id"
+                ),
+                {"source": replacement, "id": row["id"]},
+              )
+            continue
           if source["status"] == "FAILED" and await history_window_open():
             # An explicit resubmission creates one new, still low-priority attempt.
             if row.get("source_request_id") and row.get("state") == "QUEUED":
@@ -310,12 +397,33 @@ async def dispatch_once() -> dict:
                 },
               )
           except (ValueError, OSError, MarketDataValidationError) as exc:
-            await set_failed(store, row["id"], export_failure_reason(exc))
+            await set_failed(store, row["id"], safe_export_error(exc))
         return {"status": "processed", "partitions": len(rows)}
       finally:
         await connection.execute(text("SELECT pg_advisory_unlock(817234591)"))
   finally:
     await store.close()
+
+
+def safe_export_error(exc: Exception) -> str:
+  known = {
+    "SOURCE_COVERAGE_MISSING",
+    "PERSISTED_COVERAGE_UNPROVEN",
+    "PERSISTED_COVERAGE_CHANGED",
+    "HISTORICAL_SOURCE_IDENTITY_MISSING",
+    "EXPORT_TRANSFER_BUDGET_EXCEEDED",
+    "EXPORT_DISK_BUDGET_EXCEEDED",
+    "EXPORT_CHECKSUM_MISMATCH",
+    "EXPORT_RECORD_BUDGET_EXCEEDED",
+    "REFERENCE_DATA_MISSING",
+    "REFERENCE_DATA_BUDGET_EXCEEDED",
+  }
+  return str(exc) if str(exc) in known else type(exc).__name__
+
+
+def export_failure_reason(error: Exception) -> str:
+  """Backward-compatible name for the safe export error sanitizer."""
+  return safe_export_error(error)
 
 
 async def set_failed(store, identity: str, reason: str) -> None:

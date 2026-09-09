@@ -234,7 +234,7 @@ def test_capability_probe_uses_the_installed_research_cli_protocol(monkeypatch) 
       "gates_passed": True,
       "evidence_sha256": "a" * 64,
     },
-    "qualification_version": "next-day-selection-gpu-v1",
+    "qualification_version": "next-day-selection-gpu-v2",
     "requirement_hash": "b" * 64,
     "available_memory_mib": 4096.0,
   }

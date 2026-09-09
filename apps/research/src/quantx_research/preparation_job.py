@@ -266,11 +266,14 @@ async def execute(request, directory):
     from quantx_research.next_day_selection_dataset import resolve_dataset_directory
     from quantx_research.next_day_selection_gpu import qualify_lightgbm_gpu
 
-    build = os.environ.get("QUANTX_LIGHTGBM_BUILD_EVIDENCE")
-    if not build:
+    build = Path(os.environ.get("QUANTX_LIGHTGBM_BUILD_EVIDENCE") or (
+      root()
+      / ".runtime/research-gpu/official-wheel/lightgbm-4.6.0-py3-none-win_amd64.whl"
+    ))
+    if not build.is_file():
       return {
         "ready": False,
-        "error": "缺少 GPU 构建证据；请在运行端配置 QUANTX_LIGHTGBM_BUILD_EVIDENCE",
+        "error": "缺少官方 GPU wheel；请按 GPU 部署文档下载，或配置 QUANTX_LIGHTGBM_BUILD_EVIDENCE",
       }
     result = qualify_lightgbm_gpu(
       resolve_dataset_directory(request["dataset_version"]), build_evidence=build

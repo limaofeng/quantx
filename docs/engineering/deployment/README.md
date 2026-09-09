@@ -1,5 +1,7 @@
 # Windows 生产与 macOS 开发
 
+GPU 训练依赖修复与验收见 [Windows LightGBM GPU 训练](LIGHTGBM_GPU.md)。
+
 Windows 独占 QMT/XTData/XTTrading，使用 `production/full/live`；macOS 使用
 `dev/full/paper` 和本机独立数据服务。两端通过只读行情接口连接，不共享账户、数据库、
 Redis、Prefect 工作池或设备密钥。不得把 QMT Agent 同时登记到两个环境。
