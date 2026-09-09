@@ -762,8 +762,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   本地开发库备份 `p6-history-pre-migration.dump`（4964383 字节、目录校验通过），
   为恢复共享工作区的行情 Worker，完成既有 0070–0072 增量迁移，dev/full/paper 已恢复。
   Web codegen/check/lint/test:run/build 全通过（895 测试），证据为
-  `.codex_screenshots/p6-release-history-*`。尚需可选发布目标/证据来源入口。
-- 剩余开发顺序：发布目标/证据来源与 LIVE 发布界面、原生账户动作接口适配、RUNNING 恢复入场门禁、
+  `.codex_screenshots/p6-release-history-*`。
+  发布目标/证据入口采用版本化请求文件：开发 CLI 从显式目标与已审核摘要读取当前 PAPER
+  头并重验完整 P5 证据，生成无凭据文件，不写审批/命令；原生导入后调用真实预览和生物确认。
+  5 项生成器负例/零写入测试、24 项原生控制测试及编译通过，CLI --help/Ruff 通过；
+  证据 `.codex_screenshots/p6-release-request-*`。当前 CLI 仅开发入口，未生成正式准入文件。
+- 剩余开发顺序：原生账户动作接口适配、RUNNING 恢复入场门禁、
   分配/准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新

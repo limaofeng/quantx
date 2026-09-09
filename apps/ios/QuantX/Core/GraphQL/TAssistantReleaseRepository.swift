@@ -1,7 +1,7 @@
 import Apollo
 import Foundation
 
-struct TAssistantReleaseDraft: Equatable, Sendable {
+struct TAssistantReleaseDraft: Equatable, Sendable, Decodable {
   let accountID: String
   let sourceExecutionID: String
   let configVersionID: String
@@ -12,6 +12,38 @@ struct TAssistantReleaseDraft: Equatable, Sendable {
   let policyHash: String
   let windowStart: Date
   let windowEnd: Date
+
+  enum CodingKeys: String, CodingKey {
+    case accountID = "accountId"
+    case sourceExecutionID = "sourceExecutionId"
+    case configVersionID = "configVersionId"
+    case configHash = "expectedConfigHash"
+    case headVersion = "expectedHeadVersion"
+    case evaluationID = "evaluationId"
+    case reportHash = "expectedReportHash"
+    case policyHash = "expectedPolicyHash"
+    case windowStart, windowEnd
+  }
+
+  static func decodeReleaseDocument(_ data: Data) throws -> Self {
+    guard data.count <= 16_384,
+      let document = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+      Set(document.keys) == ["schema", "request"],
+      document["schema"] as? String == "quantx.t-assistant-release-request.v1",
+      let request = document["request"] as? [String: Any],
+      Set(request.keys) == [
+        "accountId", "sourceExecutionId", "configVersionId", "expectedConfigHash",
+        "expectedHeadVersion", "evaluationId", "expectedReportHash", "expectedPolicyHash",
+        "windowStart", "windowEnd",
+      ]
+    else { throw TTradeControlError.invalidRequest("发布请求文件格式无效") }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .custom { decoder in
+      let value = try decoder.singleValueContainer().decode(String.self)
+      return try ReadOnlyModelValidator.requireDate(value, field: "release.window")
+    }
+    return try decoder.decode(Self.self, from: JSONSerialization.data(withJSONObject: request))
+  }
 
   func validate(context: TTradeControlRepositoryContext) throws {
     guard !context.userID.isEmpty, !context.deviceSessionID.isEmpty,

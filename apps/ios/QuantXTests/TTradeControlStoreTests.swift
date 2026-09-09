@@ -277,6 +277,31 @@ final class TTradeControlStoreTests: XCTestCase {
     XCTAssertTrue(harness.authentication.reasons.isEmpty)
   }
 
+  func testReleaseDocumentRequiresExactVersionKeysAndTypedBudget() throws {
+    let request: [String: Any] = [
+      "accountId": "ACCOUNT-1", "sourceExecutionId": "paper", "configVersionId": "target",
+      "expectedConfigHash": String(repeating: "a", count: 64), "expectedHeadVersion": 1,
+      "evaluationId": "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      "expectedReportHash": String(repeating: "b", count: 64),
+      "expectedPolicyHash": String(repeating: "c", count: 64),
+      "windowStart": "2026-09-10T09:00:00+08:00", "windowEnd": "2026-09-10T10:00:00+08:00",
+    ]
+    func data(_ value: [String: Any], schema: String = "quantx.t-assistant-release-request.v1") throws -> Data {
+      try JSONSerialization.data(withJSONObject: ["schema": schema, "request": value])
+    }
+    let draft = try TAssistantReleaseDraft.decodeReleaseDocument(data(request))
+    XCTAssertEqual(draft.headVersion, 1)
+    XCTAssertEqual(draft.windowEnd.timeIntervalSince(draft.windowStart), 3600)
+    XCTAssertThrowsError(try TAssistantReleaseDraft.decodeReleaseDocument(data(request, schema: "unknown")))
+    var changed = request
+    changed["actorId"] = "forged"
+    XCTAssertThrowsError(try TAssistantReleaseDraft.decodeReleaseDocument(data(changed)))
+    changed = request
+    changed["expectedHeadVersion"] = true
+    XCTAssertThrowsError(try TAssistantReleaseDraft.decodeReleaseDocument(data(changed)))
+    XCTAssertThrowsError(try TAssistantReleaseDraft.decodeReleaseDocument(Data(repeating: 32, count: 16_385)))
+  }
+
   func testReleaseStatusRejectsUnprovenSuccessAndUnknownPhase() {
     for phase in ["SUCCEEDED", "NEW_PHASE"] {
       XCTAssertThrowsError(try TAssistantReleaseStatus.validated(challengeID: "challenge",

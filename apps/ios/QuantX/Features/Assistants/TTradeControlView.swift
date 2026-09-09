@@ -1,9 +1,12 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TTradeControlView: View {
   @ObservedObject var store: TTradeControlStore
   let assistantSnapshot: TTradeAssistantSnapshot
 
+  @State private var importsReleaseRequest = false
+  @State private var releaseImportError: String?
   @State private var killReason = ""
   @State private var pauseReason = "移动端主动暂停新入场"
   @State private var showsPauseConfirmation = false
@@ -24,6 +27,11 @@ struct TTradeControlView: View {
           status: .attention
         )
       }
+      Button("导入发布请求") { importsReleaseRequest = true }
+        .disabled(store.operationInProgress)
+      if let releaseImportError {
+        Text(releaseImportError).font(.caption).foregroundStyle(QuantXTheme.critical)
+      }
       Button("恢复最近发布操作") {
         Task { try? await store.loadReleaseOperations() }
       }
@@ -41,6 +49,25 @@ struct TTradeControlView: View {
       }
       if store.releaseReference != nil { releaseOperationCard }
       stateContent
+    }
+    .fileImporter(isPresented: $importsReleaseRequest, allowedContentTypes: [.json]) { result in
+      Task {
+        do {
+          let url = try result.get()
+          let data = try await Task.detached {
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            return try handle.read(upToCount: 16_385) ?? Data()
+          }.value
+          let draft = try TAssistantReleaseDraft.decodeReleaseDocument(data)
+          releaseImportError = nil
+          try await store.previewRelease(draft)
+        } catch {
+          releaseImportError = "无法导入发布请求，请核对文件、账户和服务端审核状态"
+        }
+      }
     }
     .task {
       if case .idle = store.state { await store.refresh() }

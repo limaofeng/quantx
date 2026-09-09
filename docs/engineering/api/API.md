@@ -338,3 +338,22 @@ Engine 使用显式 `T_ASSISTANT_EVALUATION_ROOT/<evaluationId>`，重新核验 
 设备最近的发布操作（默认 20 条，最多 50 条，按创建时间倒序）。输出仅包含挑战 ID、账户、
 目标配置 ID 和带时区的创建时间，不返回 token、完整挑战 payload 或凭据摘要。
 该接口复验当前会话和每条请求的签名；恢复后仍须调用状态查询核验原命令结果，不能再次确认。
+
+开发环境可生成便于原生导入的发布请求文件：
+
+```sh
+conda run -n quantx python ops/prepare_t_assistant_release.py \
+  --environment development --account-id '<账户ID>' \
+  --source-execution-id '<当前PAPER执行ID>' --config-version-id '<目标配置版本ID>' \
+  --expected-config-hash '<已核对配置摘要>' \
+  --expected-report-hash '<已审核P5报告摘要>' --expected-policy-hash '<已审核准入规则摘要>' \
+  --evidence-directory '<评估UUID目录>' \
+  --window-start '<带时区ISO时间>' --window-end '<带时区ISO时间>' \
+  --output '<新文件路径.json>'
+```
+
+工具只读取本地开发配置/数据库并重新核验证据，文件已存在时拒绝覆盖；不写审批和命令。
+格式为 `quantx.t-assistant-release-request.v1`，只包含公开发布请求的十项参数。
+原生控制页使用“导入发布请求”选择该文件（最多 16 KiB）；导入后获取服务端预览，
+核对配置、证据和窗口，再单独进行生物确认。文件不是发布凭据，篡改、过期或配置头变化
+仍由服务端拒绝；Engine 在消费确认时再次核验正式证据。该 CLI 当前仅提供开发环境入口。
