@@ -30,7 +30,10 @@ from quantx_domain.stock_selection_training import (
   GpuQualificationStatus,
   stable_json_sha256,
 )
-from quantx_infrastructure.training_host_guard import training_cpu_threads
+from quantx_infrastructure.training_host_guard import (
+  monitor_training_gpu_memory,
+  training_cpu_threads,
+)
 
 from quantx_research.artifacts import write_json
 
@@ -811,6 +814,8 @@ def _memory_fraction(*snapshots: Mapping[str, Any]) -> float | None:
     try:
       total = float(snapshot.get("memory_total_mib"))
       free = float(snapshot.get("memory_free_mib"))
+      if total <= 0 or not 0 <= free <= total:
+        continue
       fraction = 1.0 - free / total
     except (AttributeError, TypeError, ValueError, ZeroDivisionError):
       continue
@@ -819,10 +824,15 @@ def _memory_fraction(*snapshots: Mapping[str, Any]) -> float | None:
   return max(fractions) if fractions else None
 
 
+def _monitor_host_gpu_memory() -> None:
+  monitor_training_gpu_memory(lambda: _memory_fraction(_run_nvidia_smi()))
+
+
 def _start_memory_sampler(
   *, interval_seconds: float = 0.15
 ) -> tuple[threading.Event, threading.Thread, list[float]]:
   """Sample GPU usage during the complete fit/predict/reload window."""
+  _monitor_host_gpu_memory()
 
   stop = threading.Event()
   samples: list[float] = []

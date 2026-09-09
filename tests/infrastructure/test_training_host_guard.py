@@ -23,6 +23,7 @@ def root(tmp_path):
 max_rss_mib = 65536
 minimum_available_memory_mib = 1
 minimum_free_disk_mib = 1
+gpu_max_memory_fraction = 0.8
 sample_seconds = 1
 stop_grace_seconds = 1
 disk_roots = [{json.dumps(str(root))}]
@@ -74,6 +75,10 @@ def test_no_naive_clock_or_unconfigured_window(root):
     "",
     "cpu_threads = 0",
     "cpu_threads = true",
+    "gpu_max_memory_fraction = 0",
+    "gpu_max_memory_fraction = true",
+    "gpu_max_memory_fraction = 1.1",
+    "gpu_max_memory_fraction = nan",
     "sample_seconds = 11",
     "stop_grace_seconds = 61",
     "disk_roots = []",
@@ -132,6 +137,46 @@ def test_thread_budget_does_not_accept_inherited_owner_or_ambient_override(monke
     raising=False,
   )
   assert module.training_cpu_threads() == 1
+
+
+@pytest.mark.parametrize(
+  "fraction", [None, float("nan"), float("inf"), -0.1, 1.1, True]
+)
+def test_gpu_unknown_readings_fail_closed(root, fraction):
+  guard = HostResourceGuard(root, now=evening)
+  with pytest.raises(HostAdmissionDenied, match="HOST_GPU_MEMORY_STATE_UNKNOWN"):
+    guard.monitor_gpu_memory(lambda: fraction)
+
+
+def test_gpu_budget_checked_before_compute_and_during_execution(root):
+  guard = HostResourceGuard(root, now=evening)
+  fraction = 0.8
+  guard.monitor_gpu_memory(lambda: fraction)
+  assert guard.resource_reason() is None
+  fraction = 0.81
+  assert guard.resource_reason() == "HOST_GPU_MEMORY_BUDGET"
+  with pytest.raises(HostAdmissionDenied, match="HOST_GPU_MEMORY_BUDGET"):
+    guard.monitor_gpu_memory(lambda: fraction)
+
+
+def test_gpu_reader_exception_is_redacted(root):
+  guard = HostResourceGuard(root, now=evening)
+
+  def read():
+    raise RuntimeError("private device details")
+
+  with pytest.raises(HostAdmissionDenied, match="^HOST_GPU_MEMORY_STATE_UNKNOWN$"):
+    guard.monitor_gpu_memory(read)
+
+
+def test_gpu_monitor_registered_only_for_current_admitted_process(root, monkeypatch):
+  guard = HostResourceGuard(root, now=evening)
+  monkeypatch.setattr(module._active, "guard", guard, raising=False)
+  module.monitor_training_gpu_memory(lambda: 0.1)
+  assert guard._gpu_reason() is None
+  guard.process = SimpleNamespace(pid=-1)
+  module.monitor_training_gpu_memory(lambda: 0.9)
+  assert guard._gpu_reason() is None
 
 
 def test_cpu_budget_uses_measured_process_consumption(root, monkeypatch):
@@ -298,3 +343,23 @@ except HostAdmissionDenied:
   record = json.loads((root / "owner.json").read_text())
   assert record["status"] == ("RELEASED" if cooperative else "STOP_REQUESTED")
   assert record["reason"] == "TRADING_OR_POST_CLOSE_CRITICAL_WINDOW"
+
+
+@pytest.mark.parametrize("cooperative", [True, False])
+def test_running_process_stops_when_gpu_budget_is_exceeded(root, cooperative):
+  body = """import time
+started = time.monotonic()
+now = lambda: datetime(2026, 9, 9, 20, tzinfo=SHANGHAI)
+try:
+  with HostResourceGuard(root, now=now) as guard:
+    guard.monitor_gpu_memory(lambda: 0.1 if time.monotonic() - started < 0.2 else 0.9)
+    while True:
+      time.sleep(SLEEP_SECONDS)
+except HostAdmissionDenied:
+  print("stopped")
+""".replace("SLEEP_SECONDS", "0.02" if cooperative else "30")
+  result = invoke_child(root, body)
+  assert result.returncode == (0 if cooperative else 75), result.stderr
+  record = json.loads((root / "owner.json").read_text())
+  assert record["status"] == ("RELEASED" if cooperative else "STOP_REQUESTED")
+  assert record["reason"] == "HOST_GPU_MEMORY_BUDGET"

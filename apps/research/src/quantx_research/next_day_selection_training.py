@@ -111,6 +111,9 @@ class _GpuRuntimeSampler:
     self._snapshots: list[dict[str, Any]] = []
 
   def start(self) -> None:
+    from quantx_research.next_day_selection_gpu import _monitor_host_gpu_memory
+
+    _monitor_host_gpu_memory()
     self._sample()
     self._thread = threading.Thread(
       target=self._sample_loop,

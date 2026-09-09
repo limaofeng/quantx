@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 from quantx_domain.selection_factors import selection_feature_columns
 from quantx_domain.stock_selection_training import ResolvedBackend
 from quantx_infrastructure import training_host_guard as guard
@@ -51,3 +52,25 @@ def test_actual_cpu_fit_uses_admitted_threads_without_gpu_probe(monkeypatch):
   assert fitted.model.booster_.params["device_type"] == "cpu"
   assert fitted.model.n_jobs == 2
   assert np.isfinite(training._predict(fitted, panel.iloc[60:])[2]).all()
+
+
+@pytest.mark.parametrize("kind", ["training", "qualification"])
+def test_gpu_samplers_attach_live_memory_reader(monkeypatch, kind):
+  readings = {"memory_total_mib": 1000, "memory_free_mib": 600}
+  monkeypatch.setattr(gpu, "_run_nvidia_smi", lambda: dict(readings))
+  callbacks = []
+  monkeypatch.setattr(gpu, "monitor_training_gpu_memory", callbacks.append)
+  if kind == "training":
+    sampler = training._start_gpu_runtime_sampler(0.1)
+    sampler.close()
+  else:
+    stop, thread, _ = gpu._start_memory_sampler(interval_seconds=0.1)
+    stop.set()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+  assert len(callbacks) == 1
+  assert callbacks[0]() == pytest.approx(0.4)
+  readings["memory_free_mib"] = 100
+  assert callbacks[0]() == pytest.approx(0.9)
+  readings.clear()
+  assert callbacks[0]() is None

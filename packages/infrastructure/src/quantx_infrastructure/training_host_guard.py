@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import _thread
 import json
+import math
 import os
 import shutil
 import sys
@@ -64,6 +65,7 @@ class HostPolicy:
   max_rss_mib: int
   minimum_available_memory_mib: int
   minimum_free_disk_mib: int
+  gpu_max_memory_fraction: float
   sample_seconds: int
   stop_grace_seconds: int
 
@@ -76,9 +78,12 @@ class HostPolicy:
       names = set(cls.__dataclass_fields__)
       if set(data) != names:
         raise ValueError
-      for name in names - {"windows", "disk_roots"}:
+      for name in names - {"windows", "disk_roots", "gpu_max_memory_fraction"}:
         if type(data[name]) is not int or data[name] <= 0:
           raise ValueError
+      fraction = data["gpu_max_memory_fraction"]
+      if type(fraction) not in (int, float) or not 0 < fraction <= 1:
+        raise ValueError
       if data["sample_seconds"] > 10 or data["stop_grace_seconds"] > 60:
         raise ValueError
       if not isinstance(data["windows"], list) or not data["windows"]:
@@ -145,6 +150,31 @@ class HostResourceGuard:
     self.monitor: threading.Thread | None = None
     self._old_environment: dict[str, str | None] = {}
     self._cpu_sample: tuple[float, float] | None = None
+    self._gpu_memory_reader: Callable[[], float | None] | None = None
+
+  def monitor_gpu_memory(self, reader: Callable[[], float | None]) -> None:
+    self._gpu_memory_reader = reader
+    reason = self._gpu_reason()
+    if reason:
+      self.reason = reason
+      raise HostAdmissionDenied(reason)
+
+  def _gpu_reason(self) -> str | None:
+    if self._gpu_memory_reader is None:
+      return None
+    try:
+      fraction = self._gpu_memory_reader()
+      if (
+        type(fraction) not in (int, float)
+        or not math.isfinite(fraction)
+        or not 0 <= fraction <= 1
+      ):
+        return "HOST_GPU_MEMORY_STATE_UNKNOWN"
+      if fraction > self.policy.gpu_max_memory_fraction:
+        return "HOST_GPU_MEMORY_BUDGET"
+    except Exception:
+      return "HOST_GPU_MEMORY_STATE_UNKNOWN"
+    return None
 
   def _record(self, status: str) -> None:
     target = self.root / "owner.json"
@@ -212,7 +242,7 @@ class HostResourceGuard:
         return "TASK_MEMORY_BUDGET"
     except (OSError, psutil.Error):
       return "HOST_RESOURCE_STATE_UNKNOWN"
-    return None
+    return self._gpu_reason()
 
   def __enter__(self) -> HostResourceGuard:
     try:
@@ -334,6 +364,13 @@ def training_cpu_threads() -> int:
   if guard is not None and guard.process.pid == os.getpid():
     return guard.policy.cpu_threads
   return 1
+
+
+def monitor_training_gpu_memory(reader: Callable[[], float | None]) -> None:
+  """Attach GPU-only sampling to the current admitted CLI computation."""
+  guard = getattr(_active, "guard", None)
+  if guard is not None and guard.process.pid == os.getpid():
+    guard.monitor_gpu_memory(reader)
 
 
 @contextmanager
