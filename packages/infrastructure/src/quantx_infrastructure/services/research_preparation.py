@@ -207,17 +207,11 @@ class ResearchPreparationRepository:
     return row
 
   async def claim(self, flow_run_id):
+    flow_run_id = str(flow_run_id or "").strip()
+    if not flow_run_id or len(flow_run_id) > 64:
+      raise ValueError("准备任务领取必须提供有效执行归属")
     await self.lock()
-    await self.db.execute(
-      update(Job)
-      .where(Job.status == "RUNNING", Job.updated_at < now() - timedelta(minutes=5))
-      .values(
-        status="FAILED",
-        phase="执行中断",
-        error="Worker 心跳中断；可重试，已完成下载分块会复用",
-        updated_at=now(),
-      )
-    )
+    # A stale heartbeat does not prove that a process or download has stopped.
     active = await self.db.scalar(
       select(Job.job_id).where(Job.status == "RUNNING").limit(1)
     )
@@ -243,10 +237,17 @@ class ResearchPreparationRepository:
       await self.db.refresh(row)
     return row
 
-  async def progress(self, job_id, **values):
-    await self.db.execute(
+  async def progress(self, job_id, *, expected_flow_run_id, **values):
+    if not expected_flow_run_id or set(values) - {"status", "phase", "error", "result", "request"}:
+      raise ValueError("准备任务更新参数或执行归属无效")
+    if "status" in values and values["status"] not in {"RUNNING", "SUCCEEDED", "FAILED"}:
+      raise ValueError("准备任务执行者不能重新排队")
+    result = await self.db.execute(
       update(Job)
-      .where(Job.job_id == job_id, Job.status == "RUNNING")
+      .where(Job.job_id == job_id, Job.status == "RUNNING", Job.flow_run_id == expected_flow_run_id)
       .values(updated_at=now(), **values)
     )
+    if result.rowcount != 1:
+      await self.db.rollback()
+      raise ValueError("准备任务执行归属已变化或任务已结束")
     await self.db.commit()

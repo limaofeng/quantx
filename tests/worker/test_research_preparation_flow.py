@@ -45,7 +45,7 @@ async def test_download_reuses_scope_and_rechecks_without_certification(
   monkeypatch, tmp_path
 ):
   calls, updates = [], []
-  job = SimpleNamespace(job_id="fixed-job", kind="DOWNLOAD", request={})
+  job = SimpleNamespace(job_id="fixed-job", flow_run_id="owner", kind="DOWNLOAD", request={})
 
   async def research(job, directory):
     calls.append("check")
@@ -93,6 +93,47 @@ async def test_download_reuses_scope_and_rechecks_without_certification(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_waits_for_work_to_stop_before_making_retry_available(monkeypatch, tmp_path):
+  stopped = asyncio.Event()
+  running = asyncio.Event()
+  job = SimpleNamespace(job_id="job", flow_run_id="owner")
+
+  @asynccontextmanager
+  async def session():
+    yield SimpleNamespace(expunge=lambda row: None)
+
+  async def claim(owner):
+    return job
+
+  async def work(*args):
+    running.set()
+    try:
+      await asyncio.Event().wait()
+    finally:
+      await asyncio.sleep(0)
+      stopped.set()
+
+  async def heartbeat(*args):
+    await running.wait()
+    raise ConnectionError("heartbeat lost")
+
+  async def update(job_id, **values):
+    assert stopped.is_set()
+    assert values["status"] == "FAILED"
+    assert values["expected_flow_run_id"] == "owner"
+
+  monkeypatch.setattr(preparation, "AsyncSessionLocal", session)
+  monkeypatch.setattr(preparation, "ResearchPreparationRepository", lambda db: SimpleNamespace(claim=claim))
+  monkeypatch.setattr(preparation, "_full_live_runtime", lambda: False)
+  monkeypatch.setattr(preparation, "root", lambda: tmp_path)
+  monkeypatch.setattr(preparation, "perform", work)
+  monkeypatch.setattr(preparation, "keep_alive", heartbeat)
+  monkeypatch.setattr(preparation, "update_job", update)
+  await preparation.research_preparation_dispatch_flow.fn()
+  assert stopped.is_set()
+
+
+@pytest.mark.asyncio
 async def test_keep_alive_does_not_depend_on_training_progress(monkeypatch):
   ticks = []
 
@@ -107,5 +148,5 @@ async def test_keep_alive_does_not_depend_on_training_progress(monkeypatch):
   monkeypatch.setattr(preparation.asyncio, "sleep", sleep)
   monkeypatch.setattr(preparation, "update_job", update)
   with pytest.raises(asyncio.CancelledError):
-    await preparation.keep_alive("job")
+    await preparation.keep_alive("job", "owner")
   assert len(ticks) == 10

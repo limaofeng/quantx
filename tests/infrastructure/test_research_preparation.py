@@ -82,12 +82,24 @@ async def test_config_and_jobs_are_durable_idempotent_and_retryable():
     assert first.request["config"]["date_end"] == "2025-07-29"
     job = await repo.claim("flow-1")
     assert job.job_id == first.job_id
+    # Age alone must not permit a second execution while the original lives.
+    job.updated_at -= timedelta(days=1)
+    await db.commit()
     assert await repo.claim("flow-2") is None
-    await repo.progress(job.job_id, status="FAILED", error="test")
+    with pytest.raises(ValueError, match="归属"):
+      await repo.progress(job.job_id, expected_flow_run_id="stale-owner", status="FAILED")
+    await db.refresh(job)
+    await repo.progress(job.job_id, expected_flow_run_id="flow-1", status="FAILED", error="test")
     await db.refresh(job)
     assert (await repo.retry(job.job_id)).status == "QUEUED"
   async with session() as db:
     repo = ResearchPreparationRepository(db)
     assert (await repo.config())["date_end"] == "2025-08-01"
-    assert (await repo.claim("flow-3")).request == first.request
+    claimed = await repo.claim("flow-3")
+    assert claimed.request == first.request
+    with pytest.raises(ValueError, match="归属"):
+      await repo.progress(claimed.job_id, expected_flow_run_id="flow-1", status="SUCCEEDED")
+    await db.refresh(claimed)
+    assert claimed.status == "RUNNING"
+    await repo.progress(claimed.job_id, expected_flow_run_id="flow-3", status="SUCCEEDED")
   await engine.dispose()

@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from prefect import flow
@@ -32,9 +33,9 @@ from quantx_worker.prefector.flows.daily_market_data_sync_flow import (
 from quantx_worker.prefector.flows.durable_agent_flows import _request_and_wait
 
 
-async def update_job(job_id, **values):
+async def update_job(job_id, *, expected_flow_run_id, **values):
   async with AsyncSessionLocal() as db:
-    await ResearchPreparationRepository(db).progress(job_id, **values)
+    await ResearchPreparationRepository(db).progress(job_id, expected_flow_run_id=expected_flow_run_id, **values)
 
 
 async def run_research(job, directory: Path):
@@ -68,10 +69,10 @@ async def run_research(job, directory: Path):
       await process.wait()
 
 
-async def keep_alive(job_id):
+async def keep_alive(job_id, owner):
   while True:
     await asyncio.sleep(20)
-    await update_job(job_id)
+    await update_job(job_id, expected_flow_run_id=owner)
 
 
 async def perform(job, directory):
@@ -82,7 +83,7 @@ async def perform(job, directory):
       )
       await asyncio.to_thread(resolve_dataset_directory, dataset)
   await update_job(
-    job.job_id,
+    job.job_id, expected_flow_run_id=job.flow_run_id,
     phase={
       "COVERAGE": "检查覆盖",
       "DOWNLOAD": "检查下载范围",
@@ -100,7 +101,7 @@ async def perform(job, directory):
     result = await run_research(job, directory)
   if result.get("error"):
     await update_job(
-      job.job_id,
+      job.job_id, expected_flow_run_id=job.flow_run_id,
       status="FAILED",
       phase="执行失败",
       error=result["error"],
@@ -121,7 +122,7 @@ async def perform(job, directory):
       "download_codes": result["stock_codes"],
     }
     await update_job(
-      job.job_id,
+      job.job_id, expected_flow_run_id=job.flow_run_id,
       phase="下载与持久化",
       result=public_result(result),
       request=job.request,
@@ -129,7 +130,7 @@ async def perform(job, directory):
     transfer = await daily_market_data_sync_flow(
       **params, idempotency_scope=f"research-preparation-{job.job_id}"
     )
-    await update_job(job.job_id, phase="同步复权依赖")
+    await update_job(job.job_id, expected_flow_run_id=job.flow_run_id, phase="同步复权依赖")
     codes = result["stock_codes"]
     for offset in range(0, len(codes), 100):
       await _request_and_wait(
@@ -148,11 +149,11 @@ async def perform(job, directory):
       for key in ("status", "stock_count", "start_time", "end_time")
     }
     # Refresh coverage after persistence; gaps remain visible without auto-certifying.
-    await update_job(job.job_id, phase="下载后复查")
+    await update_job(job.job_id, expected_flow_run_id=job.flow_run_id, phase="下载后复查")
     refreshed = await run_research(job, directory)
     if refreshed.get("error"):
       await update_job(
-        job.job_id,
+        job.job_id, expected_flow_run_id=job.flow_run_id,
         status="FAILED",
         phase="复查失败",
         error=refreshed["error"],
@@ -172,7 +173,7 @@ async def perform(job, directory):
     async with AsyncSessionLocal() as db:
       await StockSelectionTrainingRepository(db).certify_dataset(values)
   await update_job(
-    job.job_id,
+    job.job_id, expected_flow_run_id=job.flow_run_id,
     status="FAILED" if failed else "SUCCEEDED",
     phase="检查未通过" if failed else "完成",
     result=public_result(result),
@@ -194,7 +195,7 @@ async def research_preparation_dispatch_flow():
     return {"status": "QUEUED", "reason": "TRADING_CRITICAL_WINDOW"}
   async with AsyncSessionLocal() as db:
     job = await ResearchPreparationRepository(db).claim(
-      str(flow_run.id or "research-preparation-dispatch")
+      str(flow_run.id or uuid.uuid4())
     )
     if job is None:
       return {"status": "IDLE"}
@@ -205,32 +206,28 @@ async def research_preparation_dispatch_flow():
     directory.mkdir(parents=True, exist_ok=True)
   except (ValueError, OSError):
     await update_job(
-      job.job_id,
+      job.job_id, expected_flow_run_id=job.flow_run_id,
       status="FAILED",
       phase="目录检查失败",
       error="准备任务目录不安全或不可写，请检查运行端目录配置",
     )
     return {"job_id": job.job_id}
-  heartbeat = asyncio.create_task(keep_alive(job.job_id))
+  heartbeat = asyncio.create_task(keep_alive(job.job_id, job.flow_run_id))
   work = asyncio.create_task(perform(job, directory))
+  failure = None
   try:
     done, _ = await asyncio.wait({heartbeat, work}, return_when=asyncio.FIRST_COMPLETED)
     for task in done:
       task.result()
   except asyncio.CancelledError:
-    await update_job(
-      job.job_id, status="FAILED", phase="执行中断", error="Worker 已停止，可重试此任务"
-    )
+    failure = {"phase": "执行中断", "error": "Worker 已停止，可重试此任务"}
     raise
   except Exception:
-    await update_job(
-      job.job_id,
-      status="FAILED",
-      phase="执行失败",
-      error="执行或心跳失败，请检查运行端依赖、数据源和 Prefect 任务状态",
-    )
+    failure = {"phase": "执行失败", "error": "执行或心跳失败，请检查运行端依赖、数据源和 Prefect 任务状态"}
   finally:
     work.cancel()
     heartbeat.cancel()
     await asyncio.gather(work, heartbeat, return_exceptions=True)
+    if failure:
+      await update_job(job.job_id, expected_flow_run_id=job.flow_run_id, status="FAILED", **failure)
   return {"job_id": job.job_id}

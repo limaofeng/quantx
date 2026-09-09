@@ -57,7 +57,7 @@ async def test_supervisor_registers_only_verified_certification_and_keeps_files(
   monkeypatch.setattr(preparation, "certification_values", lambda **kwargs: certification_values(root=root, **kwargs))
   if fault == "file":
     (root / "dataset-v1" / "training-panel.parquet").write_bytes(b"tampered")
-  job = SimpleNamespace(job_id="job-1", kind="CERTIFY", request={"dataset_version": "dataset-v1"})
+  job = SimpleNamespace(job_id="job-1", flow_run_id="owner", kind="CERTIFY", request={"dataset_version": "dataset-v1"})
   if fault:
     with pytest.raises((RuntimeError, ValueError)):
       await preparation.perform(job, root)
