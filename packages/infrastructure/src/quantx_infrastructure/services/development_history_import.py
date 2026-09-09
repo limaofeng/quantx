@@ -95,7 +95,7 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
             {"id": identity},
           )
           await db.commit()
-      return {"status": remote["state"], "id": identity}
+      return {"status": remote["state"], "id": identity, "reason": remote.get("error")}
     manifest = remote["manifest"]
     if manifest["payload"] != request.agent_payload():
       raise ValueError("Remote request scope mismatch")
@@ -152,7 +152,7 @@ async def _import_partition_owned(request: HistoryPartitionRequest) -> dict:
 
 async def run_range(
   instruments: list[str], period: str, start: date, end: date
-) -> None:
+) -> int:
   if end < start:
     raise ValueError("Invalid date range")
   result = await request_remote_history(
@@ -165,12 +165,8 @@ async def run_range(
     },
     timeout_seconds=0,
   )
-  print(
-    json.dumps(
-      {key: result.get(key) for key in ("status", "request_id", "reason")},
-      ensure_ascii=False,
-    )
-  )
+  print(json.dumps(result, ensure_ascii=False, default=str))
+  return 2 if result.get("status") == "failed" else 0
 
 
 def main() -> None:
@@ -180,7 +176,9 @@ def main() -> None:
   parser.add_argument("--start", type=date.fromisoformat, required=True)
   parser.add_argument("--end", type=date.fromisoformat, required=True)
   args = parser.parse_args()
-  asyncio.run(run_range(args.instruments.split(","), args.period, args.start, args.end))
+  raise SystemExit(asyncio.run(
+    run_range(args.instruments.split(","), args.period, args.start, args.end)
+  ))
 
 
 async def request_remote_history(
@@ -292,6 +290,7 @@ async def request_remote_history(
         )
     day += timedelta(days=1)
   receipts = {}
+  partition_status = {}
   while True:
     pending = False
     for request in partitions:
@@ -299,16 +298,31 @@ async def request_remote_history(
       if key in receipts:
         continue
       result = await import_partition(request)
+      partition_status[key] = {
+        **request.model_dump(mode="json"),
+        "id": result.get("id"),
+        "reason": result.get("reason"),
+        "status": "LOCAL_VERIFIED"
+        if "local_verification" in result else result.get("status"),
+      }
       if "local_verification" in result:
         receipts[key] = result
-      elif result.get("status") == "INCOMPLETE":
-        return {
-          "status": "failed",
-          "reason": "DEVELOPMENT_SOURCE_INCOMPLETE",
-          "request_id": identity,
-        }
-      else:
+      elif result.get("status") != "INCOMPLETE":
         pending = True
+    # Finish submitting this bounded range even when one source partition failed.
+    # Report every gap; never silently truncate the requested universe.
+    progress = {
+      "expected_partitions": len(partitions),
+      "verified_partitions": len(receipts),
+      "partitions": list(partition_status.values()),
+    }
+    if any(p["status"] == "INCOMPLETE" for p in partition_status.values()):
+      return {
+        "status": "failed",
+        "reason": "DEVELOPMENT_SOURCE_INCOMPLETE",
+        "request_id": identity,
+        **progress,
+      }
     if not pending:
       break
     if asyncio.get_running_loop().time() >= deadline:
@@ -316,6 +330,7 @@ async def request_remote_history(
         "status": "timeout",
         "reason": "DEVELOPMENT_HISTORY_PENDING",
         "request_id": identity,
+        **progress,
       }
     await asyncio.sleep(5)
   validator = _BarTransferValidator(scope)
@@ -370,6 +385,7 @@ async def request_remote_history(
     "day_coverage": coverage,
     "records_verified": audit["records_received"],
     "data_versions": sorted(set(versions)),
+    **progress,
   }
 
 

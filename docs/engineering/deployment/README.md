@@ -123,6 +123,27 @@ macOS 配置 `QUANTX_MARKET_DATA_URL=http://192.168.5.6:8080` 和
 ./ops/quantx.sh history --instruments 600000.SH --period 1m --start 2026-09-01 --end 2026-09-07
 ```
 
+该标准入口也供开发回测补数使用。结果包含 `expected_partitions`、
+`verified_partitions` 及逐分区状态、任务 ID、原因。单个 `INCOMPLETE` 不会阻止
+其余分区提交；存在失败时退出码为 2。异步等待结果不表示数据已完整，
+`LOCAL_VERIFIED` 才表示该分区已导入并回读校验。失败源不会自动重试。
+
+Tick 补数后，用标准回测数据准备入口检查本机持久化结果：
+
+```bash
+conda run --no-capture-output -n quantx python ops/t-assistant-backtest-data.py \
+  --environment development --instruments 600000.SH \
+  --start 2026-09-01 --end 2026-09-07 --output .runtime/backtests/data-check
+```
+
+检查包含分页耗尽、源身份、时间顺序、盘口字段和逐分区缺口；生成的 manifest
+还记录 `continuous-minute-coverage.v1` 连续竞价分钟覆盖及原始 `stock_status_counts`。
+分钟覆盖沿用回测准入的交易时段定义（当前每日 237 分钟），同分钟多条 Tick
+只计一次；100% 分钟覆盖不等于证明交易所每条 Tick 都已取得。
+空分区没有可靠无数据证明时仍为 `INCOMPLETE`。历史日 K 涨跌停价允许为空，
+不计为 Tick 数据缺失。未知整数证券状态保留在数据中，回测不得据此授权交易；
+数据归档成功与策略准入通过是两个独立结论。
+
 已有且通过持久化校验的历史数据随时导出；缺口只在北京时间交易日 16:00 至
 次日 08:30 或非交易日派发。日历缺失或 Agent 不健康时不派发。开发请求按单标的、
 单日、单周期拆分，Agent 既有串行派发优先处理生产请求。盘中提交的缺口持续排队。

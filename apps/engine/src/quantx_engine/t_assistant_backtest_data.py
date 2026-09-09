@@ -128,7 +128,10 @@ def _event(row, *, stream_id, sequence, symbol_sequence, latency_ms):
     price_tick=row["price_tick"],
     limit_up=row["up_stop_price"],
     limit_down=row["down_stop_price"],
-    suspended=row["stock_status"] == 1,
+    # Preserve the existing normalized states and documented XTData statuses.
+    # Unknown raw enums are valid archive facts, but cannot authorize trading.
+    is_trading=row["stock_status"] in {-1, 0, 13},
+    suspended=row["stock_status"] in {1, 16, 17, 20},
     bid_price=row["bid_price"],
     ask_price=row["ask_price"],
     bid_vol=row["bid_vol"],
@@ -285,9 +288,17 @@ async def acquire_backtest_dataset(
   if not days or days != sorted(set(days)) or min(days) < start or max(days) > end:
     raise ValueError("BACKTEST_CALENDAR_INVALID")
   parts, failures, references = [], [], []
+  expected_minutes = {
+    minute for minute in range(1440)
+    if classify_market_data_session(
+      datetime.combine(days[0], time(minute // 60, minute % 60, 30), SHANGHAI)
+    ).is_continuous
+  }
   for day in days:
     for code in sorted(instruments):
       rows, previous = [], None
+      observed_minutes = set()
+      stock_status_counts = {}
       missing_references = {}
       limits = {"up_stop_price": None, "down_stop_price": None}
       reason = None
@@ -301,6 +312,8 @@ async def acquire_backtest_dataset(
           for tick in page:
             row = _source_row(tick, preserve_raw)
             row.update(limits)
+            status_key = str(row["stock_status"])
+            stock_status_counts[status_key] = stock_status_counts.get(status_key, 0) + 1
             identity = (row["source_time_ms"], row["tick_ordinal"])
             if preserve_raw:
               if (
@@ -346,7 +359,6 @@ async def acquire_backtest_dataset(
                 for k in ("up_stop_price", "down_stop_price")
               )
               or type(row["stock_status"]) is not int
-              or row["stock_status"] not in {-1, 0, 1}
             ):
               raise ValueError("BACKTEST_SOURCE_IDENTITY_OR_LIMIT_INVALID")
             item = _event(
@@ -358,6 +370,10 @@ async def acquire_backtest_dataset(
             )
             if item.market.timestamp.astimezone(SHANGHAI).date() != day:
               raise ValueError("BACKTEST_SOURCE_OUTSIDE_REQUEST")
+            at = item.market.timestamp.astimezone(SHANGHAI)
+            minute = at.hour * 60 + at.minute
+            if minute in expected_minutes:
+              observed_minutes.add(minute)
             rows.append(row)
             previous = identity
       except Exception as exc:
@@ -400,6 +416,12 @@ async def acquire_backtest_dataset(
           "source_exhausted": reason is None,
           "missing_reference_fields": missing_references,
           "daily_price_limits": limits,
+          "stock_status_counts": stock_status_counts,
+          "continuous_minute_coverage": {
+            "expected_minutes": len(expected_minutes),
+            "observed_minutes": len(observed_minutes),
+            "ratio": len(observed_minutes) / len(expected_minutes),
+          },
         }
       )
       if on_partition is not None:
@@ -414,6 +436,7 @@ async def acquire_backtest_dataset(
     "schema_version": "backtest-tick-dataset.v2",
     "price_limit_policy": "CHECK_WHEN_AVAILABLE.v1",
     "price_limit_source": "DAILY_KLINE",
+    "coverage_metric": "continuous-minute-coverage.v1",
     "storage": "SNAPSHOT" if freeze else "REFERENCE",
     "source_version": source_version,
     "instruments": sorted(instruments),

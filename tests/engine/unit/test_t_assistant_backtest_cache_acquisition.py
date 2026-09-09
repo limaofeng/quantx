@@ -24,6 +24,28 @@ class HistoricalCache(History):
       yield page
 
 
+@pytest.mark.parametrize("status,trading,suspended", [(3, False, False), (13, True, False), (17, False, True)])
+async def test_raw_tick_status_is_archived_without_assuming_it_is_daily_suspend_flag(
+  tmp_path, status, trading, suspended
+):
+  class RawStatusHistory(History):
+    async def iter_tick_pages(self, **kwargs):
+      async for page in super().iter_tick_pages(**kwargs):
+        for tick in page:
+          tick.stock_status = status
+        yield page
+
+  dataset = await acquire_backtest_dataset(
+    history=RawStatusHistory(), calendar=Calendar(), source_version="raw-status",
+    instruments=CODES, start=date(2026, 9, 3), end=date(2026, 9, 3), root=tmp_path,
+    latency_ms=0, preserve_raw=True,
+  )
+  assert dataset.manifest["material"]["status"] == "FROZEN"
+  assert all(p["stock_status_counts"] == {str(status): 12} for p in dataset.manifest["material"]["parts"])
+  events = [event async for event in dataset.events()]
+  assert events and all(e.market.is_trading is trading and e.market.suspended is suspended for e in events)
+
+
 async def test_raw_cache_is_preserved_without_fabricating_limit_prices(tmp_path):
   history = HistoricalCache()
   dataset = await acquire_backtest_dataset(
