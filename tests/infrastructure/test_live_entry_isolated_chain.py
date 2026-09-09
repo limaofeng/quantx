@@ -706,17 +706,118 @@ async def test_confirm_reallocate_stage_and_fresh_dispatch_review(
         )
         == {}
       )
-    return
+    confirmed += timedelta(seconds=1)
+    second_order = {
+      **order_payload,
+      "client_order_id": second.client_order_id,
+      "order_id": 102,
+      "order_sysid": "system-102",
+      "order_volume": 100,
+      "price": float(second.limit_price),
+      "order_time": int(confirmed.timestamp()),
+      "source_sequence": 4,
+      "source_event_at": confirmed.isoformat(),
+    }
+    await report_processor._process_order_report(second_order)
+    second_fill = AgentReportInbox(
+      message_id="synthetic-fill-2",
+      client_order_id=second.client_order_id,
+      device_id="synthetic",
+      message_type="execution_report",
+      protocol_version=PROTOCOL_VERSION,
+      business_idempotency_key="synthetic-fill-2",
+      received_at=confirmed.replace(tzinfo=None),
+      payload={
+        **report.payload,
+        "client_order_id": second.client_order_id,
+        "order_id": "102",
+        "traded_id": "fill-2",
+        "traded_price": float(second.limit_price),
+        "traded_time": int(confirmed.timestamp()),
+        "source_sequence": 5,
+        "source_event_at": confirmed.isoformat(),
+      },
+    )
+    second_fill.raw_payload_hash = hashlib.sha256(
+      json.dumps(second_fill.payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    async with sessions() as db, db.begin():
+      db.add(second_fill)
+      holding = await db.get(Position, "post-fill-position")
+      holding.volume = 1200
+      holding.market_value = 1200 * float(second.limit_price)
+    for _ in range(2):
+      await report_processor._process(second_fill)
+      await report_processor._stage_runtime_events(second_fill)
+      await report_processor._drain_runtime_events()
+    async with sessions() as db:
+      intent = await db.get(TradeIntentRecord, "intent-0")
+      plan = await db.scalar(select(AutoExitPlanRecord))
+      assert intent.executed_volume == 200
+      assert plan.plan_state["entry_filled_volume"] == 200
+      assert plan.auto_exit_authorized
+      assert await db.scalar(select(func.count()).select_from(Trade)) == 2
+      assert await db.scalar(select(func.count()).select_from(AutoExitPlanRecord)) == 1
+      # A derived authorization flag may change; producer configuration may not.
+      from quantx_contracts import ExecutionEnvironment, ExecutionOwnerRef
+      from quantx_infrastructure.repositories.auto_exit_plan_repository import (
+        AutoExitPlanConcurrencyError,
+      )
+
+      changed_template = deepcopy(intent.intent_metadata["exit_plan_template"])
+      changed_template["config_version"] += 1
+      with pytest.raises(AutoExitPlanConcurrencyError, match="模板已变化"):
+        await (
+          auto_exit_plan_service.AutoExitPlanService().register_execution_entry_fill(
+            execution_ref=ExecutionOwnerRef("T_ASSISTANT_EXECUTION", "live-fixture"),
+            environment=ExecutionEnvironment.LIVE,
+            exit_plan_template=changed_template,
+            volume=1,
+            price=float(second.limit_price),
+            trade_time=confirmed,
+            event_business_key="changed-template-must-not-append",
+            db=db,
+            commit=False,
+          )
+        )
+      assert plan.plan_state["entry_filled_volume"] == 200
+    second_terminal = AgentReportInbox(
+      message_id="synthetic-order-terminal-2",
+      device_id="synthetic",
+      message_type="order_report",
+      protocol_version=PROTOCOL_VERSION,
+      raw_payload_hash="d" * 64,
+      business_idempotency_key="synthetic-order-terminal-2",
+      payload={
+        **second_order,
+        "order_status": 56,
+        "traded_volume": 100,
+        "traded_price": float(second.limit_price),
+        "source_sequence": 6,
+      },
+    )
+    await report_processor._process(second_terminal)
+    await report_processor._stage_runtime_events(second_terminal)
+    await report_processor._drain_runtime_events()
+    async with sessions() as db, db.begin():
+      assert (
+        await t_order_lifecycle.advance_order(
+          db, second.client_order_id, now=confirmed.replace(tzinfo=None)
+        )
+        is None
+      )
+    pending = second
   async with sessions() as db, db.begin():
     last = await db.get(PendingTradeOrder, pending.client_order_id)
-    assert await report_processor.finalize_t_order_lifecycle(db, last)
+    if not replacing:
+      assert await report_processor.finalize_t_order_lifecycle(db, last)
     assert not await report_processor.finalize_t_order_lifecycle(db, last)
   await report_processor._drain_runtime_events()
   async with sessions() as db:
     last = await db.get(PendingTradeOrder, pending.client_order_id)
     intent = await db.get(TradeIntentRecord, "intent-0")
     assert last.request_metadata["t_order_lifecycle_finished"] is True
-    assert intent.status == "FILLED" and intent.executed_volume == 100
+    assert intent.status == "FILLED" and intent.executed_volume == initial_volume
     finals = list(
       await db.scalars(
         select(StrategyRuntimeEvent).where(

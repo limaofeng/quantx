@@ -920,8 +920,17 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   Python/隔离 SQLite 默认时钟统一到合成测试时间；仅替换行情、时钟、平台和设备边界，
   不替换确认、分配、组合、风控、暂存、admission 或命令/回报持久化。未投递真实券商命令，
   未验证 PostgreSQL 并发锁序；新替单成交回报及零成交撤单的完整组合仍待补齐。
+- 两次委托的实际回报与最终收敛已扩展：首单成交 100、替单成交 100，真实 Order/Trade 入账、
+  runtime staging/drain 将同一退出计划扩展至 200 并重新派生授权；重复替单成交不重复计量。
+  替单权威终态后由 Engine 生命周期循环终结原 intent，最终事件仅一条且 APPLIED，意图
+  FILLED/200。修复 LIVE 成交追加把派生的 auto_exit_authorized 投影误当成模板配置变更的
+  问题；仅比较时排除该字段，金额/规则/配置版本等仍严格一致，授权仍由公共持久化清除并
+  按实际新数量重新派生。实际配置版本变化明确拒绝，PAPER 比较语义不变。
+  30 项组合/退出计划持久化/生命周期回归通过，证据
+  `.codex_screenshots/p6-live-replacement-final-reports.log`。持仓行和完整账户快照仍为合成边界，
+  未覆盖设备网络 ingress/inbox worker 或真实券商执行；零成交撤单续单尚待实际整链验证。
 - 剩余开发顺序：
-  补齐 LIVE 零成交续单/多 attempt 回报最终收敛与持仓快照收敛与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  补齐 LIVE 零成交续单与实际持仓快照收敛与持仓快照收敛→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   已接线的入场组件仍需完整链路验证，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

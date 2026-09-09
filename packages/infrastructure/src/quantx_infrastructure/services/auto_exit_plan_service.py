@@ -2254,7 +2254,16 @@ class AutoExitPlanService:
         if binding is None or binding != (execution_ref, environment):
           raise ValueError("退出计划来源执行归属冲突")
         persisted = ExitPlan.from_dict(dict(existing.plan_state or {}))
-        if persisted.template.to_dict() != template.to_dict():
+        persisted_template = persisted.template.to_dict()
+        incoming_template = template.to_dict()
+        if environment is ExecutionEnvironment.LIVE:
+          # This flag is a projection of durable grant state, not producer
+          # configuration. A later fill still carries its original template.
+          # persist_execution_plan_state revokes/re-derives the exact grant when
+          # protected quantity changes; an incoming flag never grants authority.
+          persisted_template.pop("auto_exit_authorized", None)
+          incoming_template.pop("auto_exit_authorized", None)
+        if persisted_template != incoming_template:
           raise AutoExitPlanConcurrencyError("退出计划模板已变化，必须重新装载")
         book = ExitPlanBook([persisted])
         expected_state_version = max(1, int(existing.state_version or 1))
