@@ -26,6 +26,12 @@ Redis、Prefect 工作池或设备密钥。不得把 QMT Agent 同时登记到�
 ssh -o BatchMode=yes -o ConnectTimeout=10 limao@192.168.5.6
 ```
 
+若 SSH agent 报签名通信失败，本地已授权密钥可用时可显式绕过 agent；2026-09-10 已验证以下方式连接和传输成功，不需修改 SSH 全局配置或复制私钥：
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=10 -o IdentityAgent=none -o IdentitiesOnly=yes -i ~/.ssh/id_rsa limao@192.168.5.6
+```
+
 在远端 PowerShell 执行：
 
 ```powershell
