@@ -799,60 +799,27 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   33 项联合测试通过，补充 supervisor 异常门后 14 项通过；分配测试使用固定账户 cut，
   不冒充券商整链验收。证据 `.codex_screenshots/p6-live-allocation-{dispatch,supervisor}-test.log`。
   当前仍止于 AWAITING_APPROVAL，未创建真实订单。
-- 新 T 身份的最终人工授权已接入公共命令服务与账户准入二次校验：锁定 head/execution，
-  核验 RUNNING+READY、当前配置、已消费确认、确认后 COMMITTED 分配、原决策有效期及数量/
-  价格/分配金额边界。审批指纹排除后写入的传输请求，仍绑定交易材料；交易材料改变会拒绝。
-  36 项定向确认/准入测试通过；扩大命令测试有 12 项被 macOS 禁止实盘的平台门提前拦截，
-  未进入改动路径。证据 `.codex_screenshots/p6-final-entry-{focused,regression}.log`。
-  尚未补齐 LIVE Gate/Sizer 与请求生成调度，因此不宣称下单整链完成。
-- PAPER/LIVE 共用持久化候选 Gate 审查已提取，PAPER 调用切换并保留完整 receipt 链。
-  新增显式 LIVE Gate 入口，绑定 RUNNING+READY、MANUAL_CONFIRM、RULE_ONLY 与配置版本/
-  哈希/策略/特征版本及就绪时间；原默认入口仍只处理 PAPER。共享审查锁定 cycle/symbol，
-  校验候选证据、原始 intake、行情连续性、冻结策略和 TTL，ALLOW 不构成下单授权。
-  150 项 Gate/PAPER 审查/运行回归通过；补充 LIVE 降级与配置错配负例后审查 24 项通过，
-  Ruff 通过。证据 `.codex_screenshots/p6-shared-entry-gate{,-final}.log`。
-  下一步：LIVE 最终容量读取需区分自身分配额度与其他待入场义务，再接 Sizer/风控/请求生成。
-- LIVE 最终容量与审查组件已实现：显式 review_intent_id 仅排除当前执行/周期的未下单 READY
-  意图分配；确认中、错版本、已成交、已进入 Pending/Correlation 均不能排除。其他分配及
-  订单义务仍计入账户、行业与批次占用，审查用途进入快照指纹，不改变普通分配读取语义。
-  LiveEntryExecutionReview 串联共享 Gate、原 Tick 五档市场见证、当前账户/行业/批次数/
-  老仓上限、真实 OrderSizer/TradingRiskChecker 和最终人工授权，返回 REVIEWED 请求及
-  数量/风控证据；仍未写 Pending/Outbox，也未注册 LIVE 请求生成调度。
-  75 项相关回归通过，Ruff 通过；其中审查 7 项使用实际 LIVE reader/Sizer/风控，Gate 和
-  审批边界为替身，分别由共享审查/确认测试覆盖，不视为完整券商或无替身整链验收。
-  证据 `.codex_screenshots/p6-live-{review-capacity,entry-review,review-regression}.log`。
-  下一步：审查结果持久化、请求生成/账户队列调度及行情变化前置撤销，并补无替身隔离整链。
-- LIVE 审查暂存组件已实现：公共请求暂存支持 caller-commit，在同一 savepoint 写完整
-  risk-increase-order-request.v1 与 LIVE_ENTRY_REVIEWED 审计，提交前同步行情校验失败
-  或审计写入失败均整体回滚。请求使用 FIX_PRICE，携带 TEntryOrderPolicy.v1 与市场价格
-  边界；公共解析器和最终订单策略校验可读取。相同审查可重放，容量指纹改变禁止覆写旧请求。
-  48 项相关回归通过、Ruff 通过；5 项暂存测试替换审查器，真实验证事务/审计/请求解析/
-  订单策略，未冒充无替身整链。证据 `.codex_screenshots/p6-live-{request-staging,staging-regression}.log`。
-  尚未注册 Engine 入口：先补出队前最新行情/审查证据复核、旧请求失效处理，再接账户队列。
-- 出队审查门已接入新 T 的 `_t_entry_device` 公共最终授权入口：审计事件必须匹配完整
-  待下单请求、当前 allocation 指针、审查输入哈希和原 Gate/行情有效期；随后必须执行
-  显式注入的最新审查，复核身份、审批人、价格、合法买入类型与足够数量。默认未注入时
-  返回 LIVE_ENTRY_FRESH_REVIEW_REQUIRED，不获取设备、不发送命令。
-  57 项相关回归通过、Ruff 通过；出队 9 项使用持久化暂存证据与最新审查替身，包含实际
-  TradeCommandService 入口及无回调时设备零调用验证。证据 `.codex_screenshots/p6-live-dispatch-{review,regression}.log`。
-  下一步仍需 Engine 新鲜行情/Gate 回调接线、账户批次与执行锁顺序统一、过期请求回收，
-  再注册 LIVE 请求生成/账户调度并完成无替身隔离整链。
-- 公共账户批次发送入口已先锁定新 T 来源：配置头排序加锁→执行排序加锁→账户授权锁，
-  避免最新审查在持有账户锁后首次等待执行锁。重复来源去重，错账户/降级/非当前配置在
-  账户授权前拒绝；其他 owner 不访问 T 表。26 项锁顺序/出队/准入回归与 Ruff 通过。
-  锁测试检查真实公共方法发出的锁请求顺序，数据库取数为替身，尚无 PostgreSQL 并发死锁
-  演练结论。证据 `.codex_screenshots/p6-live-source-locks.log`。
-  下一步转入 Engine Gate/witness 构造回调、过期请求回收及实际调度接线。
-- Engine 最新审查回调已接线：PAPER/LIVE 共用持久化 Gate 构造与原始五档投影；LIVE
-  supervisor 原子读取 accepted ring 与 hub 最新盘口并核对流/代/源时间/序号/fence，
-  不等待 supervisor 锁，返回独立盘口副本及同步复核函数。审查返回后再次检查 ring、绑定
-  与行情时效。账户恢复 dispatcher 按同一 DB session 注入实际 supervisor adapter。
-  41 项 Engine 回归与 Ruff 通过，含真实 Gate 构造及 LIVE 域检查、审查中换代/过期、持有
-  supervisor 锁时仍能取得证据、盘口缺失、解除绑定和 dispatcher 会话注入；终端审查在
-  adapter 测试中为替身，未替代无替身整链验收。证据 `.codex_screenshots/p6-live-adapter-wiring.log`。
-  下一步：旧请求/过期 READY 回收、审查结果状态收敛，随后注册 LIVE 请求生成并做隔离整链。
+- LIVE 入场组件当前状态：持久化候选/Gate、当前账户与行业容量、OrderSizer/风控、
+  确认后重新分配与最终授权、审查审计/公共请求原子暂存均已实现。自身未下单分配可在
+  最终容量审查中排除，其他意图/订单仍计入；原 TTL、审批交易材料与退出保护继续绑定。
+  暂存与行情复核同事务，失败整体回滚；固定价格请求携带 TEntryOrderPolicy.v1。
+- 出队与 Engine 当前状态：公共入口核对完整暂存事件/请求/分配/行情时效，必须调用最新
+  审查；配置头→执行→账户锁顺序已统一。账户恢复 dispatcher 已注入同 session 的实际
+  LIVE supervisor adapter；原始五档与 accepted ring 的流/代/序号/fence 在审查前后校验，
+  不等待 supervisor 锁。缺失盘口、重启/解绑/行情换代均不取得有效审查授权。
+- 回收与状态收敛已接入后台扫描：ALLOCATION_PENDING/AWAITING_APPROVAL/READY 原 TTL
+  到期终结为 EXPIRED；已暂存但盘口审查过期时 CANCELLED，保留原请求与分配审计历史。
+  活动准入租约、COMMITTED 批次和 Pending/Correlation/成交身份保留，孤立 outbox 或
+  变更过的 intake 阻止回收；过期租约批次在同事务失效，审计失败回滚。回收先提交再重读
+  账户队列。候选控制改为显式 PAPER/LIVE，含 EXECUTION_PENDING 与终态抑制，真实 LIVE
+  reducer 验证一次消费且不伪造新 Tick。
+- 最近验证：73 项相关回归通过；补充后候选控制 35 项、回收 11 项通过，Ruff 通过。
+  证据 `.codex_screenshots/p6-live-{recovery-regression,recovery-final,controls-final}.log`；
+  前序组件证据保留 `p6-live-{adapter-wiring,source-locks,dispatch-regression,staging-regression,
+  review-regression}.log`。隔离测试覆盖真实 Gate/reducer、容量与事务；部分审查/调度使用
+  替身，锁顺序测试不等同 PostgreSQL 并发演练。没有无替身券商整链或统一验收结论。
 - 剩余开发顺序：
-  人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
+  注册 LIVE 请求生成/审查结果收敛并验证隔离完整链路→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
 - 提交定位：本检查点与 `feat(engine): add isolated live T entry drain` 同提交；后续只更新
   本检查点的当前结论，不重复追加整轮报告。没有业务库切换、E2E 或真实订单。

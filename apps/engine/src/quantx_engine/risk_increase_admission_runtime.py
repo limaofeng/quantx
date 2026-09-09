@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 class RiskIncreaseAdmissionRuntime:
   """Recover READY/PREPARED admission work independently of producers."""
 
-  def __init__(self, *, interval_seconds: float = ADMISSION_RENEW_INTERVAL_SECONDS, live_entry_review_factory=None):
+  def __init__(self, *, interval_seconds: float = ADMISSION_RENEW_INTERVAL_SECONDS, live_entry_review_factory=None, live_entry_recovery=None):
+    self.live_entry_recovery = live_entry_recovery
     self.live_entry_review_factory = live_entry_review_factory
     self.interval_seconds = float(interval_seconds)
     self.instance_id = str(uuid.uuid4())
@@ -90,7 +91,10 @@ class RiskIncreaseAdmissionRuntime:
             .where(
               TradeIntentRecord.environment == ExecutionEnvironment.LIVE.value,
               TradeIntentRecord.direction == "BUY",
-              TradeIntentRecord.status == "EXECUTION_READY",
+              (TradeIntentRecord.status == "EXECUTION_READY") | (
+                (TradeIntentRecord.owner_type == "T_ASSISTANT_EXECUTION")
+                & TradeIntentRecord.status.in_(["ALLOCATION_PENDING", "AWAITING_APPROVAL"])
+              ),
             )
             .distinct()
           )
@@ -116,6 +120,9 @@ class RiskIncreaseAdmissionRuntime:
       dispatched = 0
       for account_id in account_ids:
         try:
+          if self.live_entry_recovery is not None:
+            await self.live_entry_recovery(db, account_id=account_id)
+            await db.commit()
           kwargs = (
             {"live_entry_review": self.live_entry_review_factory(db)}
             if self.live_entry_review_factory is not None else {}
@@ -143,7 +150,17 @@ def _live_entry_review(db):
   return t_assistant_live_supervisor.entry_review_adapter(db)
 
 
-risk_increase_admission_runtime = RiskIncreaseAdmissionRuntime(live_entry_review_factory=_live_entry_review)
+async def _recover_live_entries(db, *, account_id):
+  from quantx_infrastructure.core.utils.time_utils import now_aware
+
+  from .t_assistant_live_entry_recovery import recover_account_live_entries
+
+  return await recover_account_live_entries(db, account_id=account_id, now=now_aware())
+
+
+risk_increase_admission_runtime = RiskIncreaseAdmissionRuntime(
+  live_entry_review_factory=_live_entry_review, live_entry_recovery=_recover_live_entries,
+)
 
 __all__ = [
   "RiskIncreaseAdmissionRuntime",

@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import timedelta
 
 import pytest
+from quantx_contracts import ExecutionEnvironment
 from quantx_domain.trading.t_assistant_market_state import (
   SymbolDecisionSnapshot,
   SymbolMarketDeltaRing,
@@ -15,7 +16,10 @@ from quantx_domain.trading.t_trade_opportunity_engine import (
   OpportunityPolicy,
 )
 from quantx_engine.t_assistant_candidate_controls import read_candidate_controls
-from quantx_engine.t_assistant_decision_runtime import TAssistantPaperShadowRuntime
+from quantx_engine.t_assistant_decision_runtime import (
+  TAssistantLiveDecisionRuntime,
+  TAssistantPaperShadowRuntime,
+)
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
   TTradeOpportunityEvaluation,
 )
@@ -38,8 +42,12 @@ sessions = candidate_tests.sessions
 frozen_config = candidate_tests.frozen_config
 
 
-async def source(sessions, status="ALLOCATION_PENDING"):
-  seed = await candidate_tests.seed_candidate_cycle(sessions, extra_tick=True)
+async def source(
+  sessions, status="ALLOCATION_PENDING", environment=ExecutionEnvironment.PAPER
+):
+  seed = await candidate_tests.seed_candidate_cycle(
+    sessions, extra_tick=True, environment=environment.value
+  )
   async with sessions() as db, db.begin():
     row = await db.get(TradeIntentRecord, seed.intent_id)
     row.status = status
@@ -58,6 +66,7 @@ async def controls(db, seed, states, **changes):
     **{
       "execution_id": seed.execution_id,
       "account_id": "account-1",
+      "environment": ExecutionEnvironment.PAPER,
       "symbol_states": states,
       "as_of": seed.now + timedelta(milliseconds=1),
       **changes,
@@ -69,6 +78,7 @@ async def controls(db, seed, states, **changes):
   "status,kind",
   [
     ("CANCELLED", "suppress_candidate_id"),
+    ("EXECUTION_PENDING", "suppress_candidate_id"),
     ("ROUTED", "suppress_candidate_id"),
     ("FILLED", "suppress_candidate_id"),
     ("AWAITING_APPROVAL", "awaiting_approval_candidate_id"),
@@ -76,12 +86,15 @@ async def controls(db, seed, states, **changes):
     ("EXECUTION_READY", None),
   ],
 )
+@pytest.mark.parametrize(
+  "environment", [ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE]
+)
 async def test_standard_intent_lifecycle_projects_exact_candidate_control(
-  sessions, frozen_config, status, kind
+  sessions, frozen_config, status, kind, environment
 ):
-  seed, _, states = await source(sessions, status)
+  seed, _, states = await source(sessions, status, environment)
   async with sessions() as db:
-    result = await controls(db, seed, states)
+    result = await controls(db, seed, states, environment=environment)
     if kind:
       assert (
         getattr(result["600000.SH"], kind)
@@ -225,22 +238,31 @@ def snapshot(seed, execution, states, current_controls, now):
   "status,expected",
   [
     ("CANCELLED", "SUPPRESSED"),
+    ("EXECUTION_PENDING", "SUPPRESSED"),
     ("ROUTED", "SUPPRESSED"),
     ("FILLED", "SUPPRESSED"),
     ("AWAITING_APPROVAL", "AWAITING_APPROVAL"),
   ],
 )
+@pytest.mark.parametrize(
+  "environment", [ExecutionEnvironment.PAPER, ExecutionEnvironment.LIVE]
+)
 async def test_control_enters_snapshot_hash_and_real_strategy_step_once_without_tick(
-  sessions, frozen_config, status, expected
+  sessions, frozen_config, status, expected, environment
 ):
-  seed, execution, states = await source(sessions, status)
+  seed, execution, states = await source(sessions, status, environment)
   now = seed.now + timedelta(milliseconds=1)
   async with sessions() as db:
-    current = await controls(db, seed, states)
+    current = await controls(db, seed, states, environment=environment)
   baseline = snapshot(seed, execution, states, {}, now)
   controlled = snapshot(seed, execution, states, current, now)
   assert controlled.snapshot_hash != baseline.snapshot_hash
-  runtime = TAssistantPaperShadowRuntime(session_factory=sessions, clock=lambda: now)
+  runtime_class = (
+    TAssistantLiveDecisionRuntime
+    if environment is ExecutionEnvironment.LIVE
+    else TAssistantPaperShadowRuntime
+  )
+  runtime = runtime_class(session_factory=sessions, clock=lambda: now)
   runtime.bind_execution(
     execution,
     parameters={

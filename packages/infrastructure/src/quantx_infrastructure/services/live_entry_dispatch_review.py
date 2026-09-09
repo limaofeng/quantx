@@ -17,9 +17,7 @@ from quantx_infrastructure.services.live_entry_execution_review import (
 from quantx_infrastructure.services.t_allocation_serialization import allocation_time
 
 
-async def revalidate_live_entry_dispatch(
-  db, *, intent, volume, limit_price, now, fresh_review
-):
+async def validate_staged_live_entry(db, *, intent, volume, limit_price, now):
   if not db.in_transaction():
     raise ValueError("LIVE_ENTRY_DISPATCH_TRANSACTION_REQUIRED")
   if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
@@ -67,17 +65,26 @@ async def revalidate_live_entry_dispatch(
     max_age = gate["policy"]["quote_max_age_ms"]
     expiry = min(gate["intent_expires_at_ms"], gate["candidate"]["expires_at_ms"])
     current_ms = int(now.timestamp() * 1000)
-    valid = (
-      all(type(value) is int for value in (*clocks, max_age, expiry))
-      and max_age > 0
-      and max(clocks) <= current_ms < expiry
-      and current_ms - min(clocks) <= max_age
-      and allocation_time(event.occurred_at) <= now
-    )
-  except (KeyError, TypeError, ValueError):
-    valid = False
-  if not valid:
-    raise ValueError("LIVE_ENTRY_STAGED_REVIEW_EXPIRED_OR_INVALID")
+    if (
+      not all(type(value) is int for value in (*clocks, max_age, expiry))
+      or max_age <= 0
+    ):
+      raise ValueError("invalid review clocks")
+  except (KeyError, TypeError, ValueError) as exc:
+    raise ValueError("LIVE_ENTRY_STAGED_REVIEW_INVALID") from exc
+  if max(clocks) > current_ms or allocation_time(event.occurred_at) > now:
+    raise ValueError("LIVE_ENTRY_STAGED_REVIEW_FUTURE")
+  if current_ms >= expiry or current_ms - min(clocks) > max_age:
+    raise ValueError("LIVE_ENTRY_STAGED_REVIEW_EXPIRED")
+  return request
+
+
+async def revalidate_live_entry_dispatch(
+  db, *, intent, volume, limit_price, now, fresh_review
+):
+  request = await validate_staged_live_entry(
+    db, intent=intent, volume=volume, limit_price=limit_price, now=now
+  )
   if fresh_review is None:
     raise ValueError("LIVE_ENTRY_FRESH_REVIEW_REQUIRED")
   result = await fresh_review(

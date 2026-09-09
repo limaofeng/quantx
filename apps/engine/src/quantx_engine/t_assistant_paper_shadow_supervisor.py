@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping, Optional
 from quantx_application.t_trade_v3.execution_use_cases import (
   TAssistantExecutionLifecycle,
 )
-from quantx_contracts import ExecutionOwnerType
+from quantx_contracts import ExecutionEnvironment, ExecutionOwnerType
 from quantx_domain.clock import SHANGHAI
 from quantx_domain.strategies.base import MarketDataSession
 from quantx_domain.trading.market_rules import MarketDataSnapshot
@@ -529,7 +529,7 @@ class TAssistantPaperShadowSupervisor:
       gate_context = _market_gate_context(now)
       async with self._session_factory() as db:
         controls = await read_candidate_controls(
-          db, execution_id=binding.execution.execution_id,
+          db, environment=ExecutionEnvironment.PAPER, execution_id=binding.execution.execution_id,
           account_id=binding.execution.account_id,
           symbol_states=self._runtime.symbol_states(binding.execution.execution_id),
           as_of=now,

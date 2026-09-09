@@ -547,6 +547,7 @@ class TAssistantLiveSupervisor:
         async with self.sessions() as db:
           controls = await read_candidate_controls(
             db,
+            environment=ExecutionEnvironment.LIVE,
             execution_id=key,
             account_id=binding.execution.account_id,
             symbol_states=self.runtime.symbol_states(key),

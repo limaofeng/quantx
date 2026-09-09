@@ -2,19 +2,33 @@
 
 from datetime import UTC
 
+from quantx_contracts import ExecutionEnvironment
 from quantx_domain.trading.t_trade_opportunity_engine import CandidateControl
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.t_allocation_serialization import allocation_time
 from sqlalchemy import select
 
 _SUPPRESS = frozenset(
-  {"ROUTED", "PARTIAL_FILLED", "FILLED", "REJECTED", "EXPIRED", "CANCELLED"}
+  {
+    "EXECUTION_PENDING",
+    "ROUTED",
+    "PARTIAL_FILLED",
+    "FILLED",
+    "REJECTED",
+    "EXPIRED",
+    "CANCELLED",
+  }
 )
 
 
 async def read_candidate_controls(
-  db, *, execution_id, account_id, symbol_states, as_of
+  db, *, execution_id, account_id, environment, symbol_states, as_of
 ):
+  if not isinstance(environment, ExecutionEnvironment) or environment not in {
+    ExecutionEnvironment.PAPER,
+    ExecutionEnvironment.LIVE,
+  }:
+    raise ValueError("T_CANDIDATE_CONTROL_ENVIRONMENT_REQUIRED")
   if as_of.tzinfo is None or as_of.utcoffset() is None:
     raise ValueError("T_CANDIDATE_CONTROL_AWARE_TIME_REQUIRED")
   as_of = as_of.astimezone(UTC)
@@ -33,7 +47,7 @@ async def read_candidate_controls(
           TradeIntentRecord.owner_type == "T_ASSISTANT_EXECUTION",
           TradeIntentRecord.owner_id == execution_id,
           TradeIntentRecord.account_id == account_id,
-          TradeIntentRecord.environment == "PAPER",
+          TradeIntentRecord.environment == environment.value,
           TradeIntentRecord.direction == "BUY",
           TradeIntentRecord.instrument_code.in_(candidates),
           TradeIntentRecord.intent_metadata["candidate_id"]
