@@ -16,6 +16,10 @@ def intent_subject_payload(
   # identity is always taken from durable columns and supplied explicitly by
   # the caller; metadata is excluded from owner resolution.
   metadata.pop("mobile_trade_approval_challenge_v1", None)
+  if record.owner_type == "T_ASSISTANT_EXECUTION":
+    # Final transport staging follows confirmation. Economic fields above and
+    # all producer metadata remain bound; the final command validates its scope.
+    metadata.pop("risk_increase_order_request", None)
   return {
     "id": record.id,
     "run_id": record.strategy_run_id,

@@ -392,8 +392,11 @@ async def test_api_preview_outbox_engine_and_reallocation(sessions, monkeypatch)
 
   snapshot, candidates = await seed_confirmable(sessions)
   async with sessions.kw["bind"].begin() as connection:
-    await connection.run_sync(lambda sync: Base.metadata.create_all(
-      sync, tables=[EngineCommandOutbox.__table__]))
+    await connection.run_sync(
+      lambda sync: Base.metadata.create_all(
+        sync, tables=[EngineCommandOutbox.__table__]
+      )
+    )
   async with sessions() as db, db.begin():
     old = await db.get(TradeConfirmationChallenge, "challenge-1")
     await db.delete(old)
@@ -407,16 +410,32 @@ async def test_api_preview_outbox_engine_and_reallocation(sessions, monkeypatch)
   monkeypatch.setattr(api.time_utils, "now", lambda: to_shanghai(CONFIRMED))
   monkeypatch.setattr(processor, "AsyncSessionLocal", sessions)
   monkeypatch.setattr(processor, "utcnow", lambda: CONFIRMED.replace(tzinfo=None))
-  args = dict(principal=_principal(device_session_id="session-1", authorized_account_ids=("account-1",)),
-    action=api.T_TRADE_ENTRY_APPROVAL, account_id="account-1", intent_id="intent-0",
-    execution_ref=ExecutionOwnerRef(ExecutionOwnerType.T_ASSISTANT_EXECUTION, "live-fixture"),
-    environment=ExecutionEnvironment.LIVE)
+  args = dict(
+    principal=_principal(
+      device_session_id="session-1", authorized_account_ids=("account-1",)
+    ),
+    action=api.T_TRADE_ENTRY_APPROVAL,
+    account_id="account-1",
+    intent_id="intent-0",
+    execution_ref=ExecutionOwnerRef(
+      ExecutionOwnerType.T_ASSISTANT_EXECUTION, "live-fixture"
+    ),
+    environment=ExecutionEnvironment.LIVE,
+  )
   preview = await api.TradeApprovalChallengeService.issue(**args)
-  command = dict(command_type="T_ASSISTANT_APPROVE_ENTRY", command_aggregate_id="live-fixture",
+  command = dict(
+    command_type="T_ASSISTANT_APPROVE_ENTRY",
+    command_aggregate_id="live-fixture",
     command_idempotency_key_factory=lambda challenge_id: f"t-confirm:{challenge_id}",
-    command_payload={"execution_id": "live-fixture", "intent_id": "intent-0", "account_id": "account-1"})
-  consumed = await api.TradeApprovalChallengeService.consume(**args,
-    confirmation_token=preview.confirmation_token, **command)
+    command_payload={
+      "execution_id": "live-fixture",
+      "intent_id": "intent-0",
+      "account_id": "account-1",
+    },
+  )
+  consumed = await api.TradeApprovalChallengeService.consume(
+    **args, confirmation_token=preview.confirmation_token, **command
+  )
   assert consumed == preview.challenge_id
   async with sessions() as db:
     commands = (await db.scalars(select(EngineCommandOutbox))).all()
@@ -432,6 +451,106 @@ async def test_api_preview_outbox_engine_and_reallocation(sessions, monkeypatch)
     claim = await _claim(repo, batch, newer, candidates, now=CONFIRMED)
     await repo.commit(claim=claim, snapshot=newer, candidates=candidates, now=CONFIRMED)
     assert (await db.get(TradeIntentRecord, "intent-0")).status == "EXECUTION_READY"
-  replay = await api.TradeApprovalChallengeService.consume(**args,
-    confirmation_token=preview.confirmation_token, **command)
+  replay = await api.TradeApprovalChallengeService.consume(
+    **args, confirmation_token=preview.confirmation_token, **command
+  )
   assert replay == consumed
+
+
+@pytest.mark.parametrize(
+  "fault",
+  [
+    None,
+    "readiness",
+    "head",
+    "allocation",
+    "expiry",
+    "confirmation",
+    "amount",
+    "price",
+    "material",
+    "staged",
+  ],
+)
+async def test_final_live_entry_authorization(sessions, fault):
+  from quantx_infrastructure.services.t_live_entry_authorization import (
+    authorize_live_entry,
+  )
+
+  snapshot, candidates = await seed_confirmable(sessions)
+  async with sessions() as db, db.begin():
+    await confirm(db)
+    repo = TAllocationRepository(db)
+    newer = fresh(snapshot)
+    candidates = tuple(replace(c, intent_version=1) for c in candidates)
+    batch = await _prepared(repo, newer, candidates, now=CONFIRMED)
+    claim = await _claim(repo, batch, newer, candidates, now=CONFIRMED)
+    await repo.commit(claim=claim, snapshot=newer, candidates=candidates, now=CONFIRMED)
+    row = await db.get(TradeIntentRecord, "intent-0")
+    now, volume, price = CONFIRMED, 10, Decimal("9.9")
+    if fault == "readiness":
+      source = await db.get(TAssistantExecutionRecord, row.owner_id)
+      source.entry_readiness = "DEGRADED"
+    elif fault == "head":
+      head = await db.get(TTradeGlobalConfig, "config-1")
+      head.enabled = False
+    elif fault == "allocation":
+      row.allocation_version += 1
+    elif fault == "expiry":
+      now += timedelta(hours=1)
+    elif fault == "confirmation":
+      challenge = await db.get(TradeConfirmationChallenge, "challenge-1")
+      challenge.payload_fingerprint = "0" * 64
+    elif fault == "amount":
+      volume = 100
+    elif fault == "price":
+      price = Decimal("NaN")
+    elif fault == "material":
+      row.target_amount += 1
+    elif fault == "staged":
+      row.intent_metadata = {
+        **row.intent_metadata,
+        "risk_increase_order_request": {"version": "risk-increase-order-request.v1"},
+      }
+    await db.flush()
+    call = authorize_live_entry(
+      db,
+      intent=row,
+      account_id="account-1",
+      instrument_code=row.instrument_code,
+      volume=volume,
+      limit_price=price,
+      now=now,
+    )
+    if fault not in {None, "staged"}:
+      with pytest.raises(ValueError, match="T_ENTRY_"):
+        await call
+    else:
+      assert await call == "user-1"
+
+
+async def test_new_t_owner_revalidated_inside_account_admission(monkeypatch):
+  from unittest.mock import AsyncMock
+
+  from quantx_contracts import ExecutionOwnerRef, ExecutionOwnerType
+  from quantx_infrastructure.services.trade_command_service import TradeCommandService
+
+  service = object.__new__(TradeCommandService)
+  device = AsyncMock(return_value=SimpleNamespace(user_id="user-1"))
+  monkeypatch.setattr(service, "_t_entry_device", device)
+  intent = SimpleNamespace(intent_metadata={"t_trade_role": "entry"})
+  await service._revalidate_ready_order_request(
+    intent=intent,
+    request={
+      "execution_ref": ExecutionOwnerRef(
+        owner_type=ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+        owner_id="execution-1",
+      ),
+      "account_id": "account-1",
+      "instrument_code": "600000.SH",
+      "volume": 100,
+      "limit_price": "9.9",
+      "user_id": "user-1",
+    },
+  )
+  device.assert_awaited_once()

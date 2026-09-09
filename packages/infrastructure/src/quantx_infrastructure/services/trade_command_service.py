@@ -3845,6 +3845,22 @@ class TradeCommandService:
     instrument_code: str, volume: int, limit_price: Decimal,
   ) -> AgentDevice:
     """Revalidate T's own consumed confirmation or LIVE_AUTO rollout authority."""
+    if intent.owner_type == "T_ASSISTANT_EXECUTION":
+      from quantx_infrastructure.services.t_live_entry_authorization import (
+        authorize_live_entry,
+      )
+
+      try:
+        actor_id = await authorize_live_entry(
+          self.db, intent=intent, account_id=account_id,
+          instrument_code=instrument_code, volume=volume, limit_price=limit_price,
+          now=datetime.now(timezone.utc),
+        )
+      except (TypeError, ValueError) as exc:
+        raise AgentUnavailableError(str(exc)) from exc
+      return await self._device_for(
+        user_id=actor_id, account_id=account_id, execution_mode="live",
+      )
     metadata = dict(intent.intent_metadata or {})
     if (
       intent.owner_type != "STRATEGY_RUN" or intent.environment != "LIVE"
@@ -3938,7 +3954,9 @@ class TradeCommandService:
     execution_ref = request.get("execution_ref")
     if (
       not isinstance(execution_ref, ExecutionOwnerRef)
-      or execution_ref.owner_type is not ExecutionOwnerType.STRATEGY_RUN
+      or execution_ref.owner_type not in {
+        ExecutionOwnerType.STRATEGY_RUN, ExecutionOwnerType.T_ASSISTANT_EXECUTION,
+      }
     ):
       return
     metadata = dict(request.get("request_metadata") or {})
@@ -3952,6 +3970,8 @@ class TradeCommandService:
       if str(device.user_id or "") != str(request.get("user_id") or ""):
         raise AgentUnavailableError("RISK_ADMISSION_ENTRY_DEVICE_CHANGED")
       return
+    if execution_ref.owner_type is ExecutionOwnerType.T_ASSISTANT_EXECUTION:
+      raise AgentUnavailableError("T_ENTRY_AUTHORIZATION_SCOPE_INVALID")
     execution_mode = str(metadata.get("execution_mode") or "").upper()
     if not str(metadata.get("entry_plan_id") or ""):
       return

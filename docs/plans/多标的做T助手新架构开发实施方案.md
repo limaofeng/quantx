@@ -799,6 +799,12 @@ P7-C 前须由用户确认 AUTO 观察交易日/闭环数量、回撤与熔断�
   33 项联合测试通过，补充 supervisor 异常门后 14 项通过；分配测试使用固定账户 cut，
   不冒充券商整链验收。证据 `.codex_screenshots/p6-live-allocation-{dispatch,supervisor}-test.log`。
   当前仍止于 AWAITING_APPROVAL，未创建真实订单。
+- 新 T 身份的最终人工授权已接入公共命令服务与账户准入二次校验：锁定 head/execution，
+  核验 RUNNING+READY、当前配置、已消费确认、确认后 COMMITTED 分配、原决策有效期及数量/
+  价格/分配金额边界。审批指纹排除后写入的传输请求，仍绑定交易材料；交易材料改变会拒绝。
+  36 项定向确认/准入测试通过；扩大命令测试有 12 项被 macOS 禁止实盘的平台门提前拦截，
+  未进入改动路径。证据 `.codex_screenshots/p6-final-entry-{focused,regression}.log`。
+  尚未补齐 LIVE Gate/Sizer 与请求生成调度，因此不宣称下单整链完成。
 - 剩余开发顺序：
   人工确认后账户准入/Gate/Sizer/命令与回报接线→legacy 切换及 successor 发布接线→P7 新故障/性能→P8 数据持久化、registry 与运行接线。
   当前仍无新 T LIVE 入场 handler，P6-01..06 不据此勾选，P7/P8 工程尚未完成。
